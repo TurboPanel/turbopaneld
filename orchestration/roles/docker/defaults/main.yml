@@ -1,0 +1,3 @@
+# OS user the daemon runs as. This user is added to the docker group so the
+# daemon process can talk to the Docker socket without sudo.
+docker_user: turbopanel

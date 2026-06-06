@@ -1,0 +1,61 @@
+---
+# Entry point for the docker role.
+#
+# Fast-path: if the docker binary exists and the service is active, skip
+# everything. Two local checks, no network, no package manager.
+#
+# Full path: assert arch/distro are supported, resolve repo labels, then
+# dispatch to the OS-specific task file.
+#
+# Adding support for a new OS family:
+#   - Add the distribution name to _docker_distro_map in vars/main.yml
+#   - Create tasks/<distro_family>.yml with the install tasks
+#   - Add a matching include_tasks entry in the install block below
+
+- name: Check Docker binary
+  ansible.builtin.stat:
+    path: /usr/bin/docker
+  register: _docker_bin
+
+- name: Check Docker service state
+  ansible.builtin.command: systemctl is-active docker
+  register: _docker_svc
+  changed_when: false
+  failed_when: false
+
+- name: Set _docker_ready fact
+  ansible.builtin.set_fact:
+    _docker_ready: "{{ _docker_bin.stat.exists and _docker_svc.stdout == 'active' }}"
+
+- name: Docker already installed and running
+  ansible.builtin.debug:
+    msg: "Docker is already installed and running — skipping installation"
+  when: _docker_ready | bool
+
+- name: Install Docker
+  when: not _docker_ready | bool
+  block:
+    - name: Assert supported CPU architecture
+      ansible.builtin.assert:
+        that:
+          - ansible_architecture in _docker_arch_map
+        fail_msg: >-
+          Unsupported CPU architecture '{{ ansible_architecture }}'.
+          TurboPanel supports: {{ _docker_arch_map.keys() | list | join(', ') }}.
+
+    - name: Assert supported Linux distribution
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution in _docker_distro_map
+        fail_msg: >-
+          Unsupported distribution '{{ ansible_distribution }}'.
+          TurboPanel supports: {{ _docker_distro_map.keys() | list | join(', ') }}.
+
+    - name: Resolve Docker repo arch and distro labels
+      ansible.builtin.set_fact:
+        _docker_arch: "{{ _docker_arch_map[ansible_architecture] }}"
+        _docker_distro: "{{ _docker_distro_map[ansible_distribution] }}"
+
+    - name: Install Docker (Debian / Raspbian)
+      ansible.builtin.include_tasks: debian.yml
+      when: ansible_distribution in ['Debian', 'Raspbian']

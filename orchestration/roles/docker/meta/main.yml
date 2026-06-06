@@ -1,0 +1,14 @@
+galaxy_info:
+  role_name: docker
+  author: turbopanel
+  description: >
+    Install Docker CE from the official Docker apt repository, start the
+    service, and add the turbopanel user to the docker group.
+  min_ansible_version: "2.18"
+  platforms:
+    - name: Debian
+      versions:
+        - trixie
+    - name: Raspbian
+      versions:
+        - trixie
