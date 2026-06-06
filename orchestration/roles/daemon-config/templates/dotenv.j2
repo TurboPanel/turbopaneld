@@ -1,0 +1,7 @@
+TURBOPANEL_INSTANCE_URL={{ turbopanel_instance_url }}
+{% if turbopanel_instance_ca | length > 0 %}
+TURBOPANEL_INSTANCE_CA={{ turbopanel_instance_ca }}
+{% endif %}
+{% if turbopanel_tls_insecure | bool %}
+TURBOPANEL_TLS_INSECURE=1
+{% endif %}

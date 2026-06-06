@@ -3,6 +3,7 @@ import {
   ANSIBLE_CFG,
   ANSIBLE_PLAYBOOK_BIN,
   DOCKER_PLAYBOOK,
+  SOCKET_DIRS_PLAYBOOK,
   LOCALHOST_PLAYBOOK,
   ORCHESTRATION_DIR,
   PYTHON_VERSION,
@@ -77,6 +78,26 @@ export async function runLocalhostTest(): Promise<void> {
     },
   )
   console.log('[orchestration] localhost smoke-test passed')
+}
+
+/**
+ * Create /run/turbopanel for TurboPanel Unix domain sockets and persist it
+ * across reboots via systemd-tmpfiles.
+ *
+ * Requires passwordless sudo for the running user (the turbopanel user has
+ * this configured in the base image).
+ */
+export async function runSocketDirsSetup(): Promise<void> {
+  console.log('[orchestration] running socket-dirs-setup playbook')
+  await runOrThrow(
+    ANSIBLE_PLAYBOOK_BIN,
+    ['-i', 'localhost,', '-c', 'local', SOCKET_DIRS_PLAYBOOK],
+    {
+      cwd: ORCHESTRATION_DIR,
+      env: { ANSIBLE_CONFIG: ANSIBLE_CFG },
+    },
+  )
+  console.log('[orchestration] socket-dirs-setup complete')
 }
 
 /**

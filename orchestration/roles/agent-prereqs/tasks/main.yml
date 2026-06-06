@@ -1,0 +1,11 @@
+---
+- name: Install agent prerequisites
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - git
+      - screen
+      - tar
+    state: present
+    update_cache: true

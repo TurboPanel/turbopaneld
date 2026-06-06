@@ -1,4 +1,4 @@
-import { ensureAnsible, runDockerSetup, runLocalhostTest } from './ansible.ts'
+import { ensureAnsible, runDockerSetup, runLocalhostTest, runSocketDirsSetup } from './ansible.ts'
 import { ensurePython } from './python.ts'
 import { ensureUv } from './uv.ts'
 
@@ -6,7 +6,8 @@ import { ensureUv } from './uv.ts'
  * Bootstrap the orchestration runtime on daemon startup.
  *
  * Sequentially: install uv -> install Python -> create the ansible venv ->
- * smoke test -> install Docker and join the docker group. Each step is
+ * smoke test -> create runtime socket dirs -> install Docker and join the
+ * docker group. Each step is
  * idempotent, so this is cheap on restart.
  *
  * Failures are logged loudly but do NOT crash the daemon: a transient network
@@ -20,6 +21,7 @@ export async function initOrchestration(): Promise<boolean> {
     await ensurePython()
     await ensureAnsible()
     await runLocalhostTest()
+    await runSocketDirsSetup()
     await runDockerSetup()
     const elapsed = ((performance.now() - started) / 1000).toFixed(1)
     console.log(`[orchestration] runtime ready in ${elapsed}s`)

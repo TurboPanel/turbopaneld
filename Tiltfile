@@ -1,3 +1,3 @@
-load("tilt/daemon.tiltfile", "run_daemon_mode")
+load("tilt/agent.tiltfile", "run_agent_mode")
 
-run_daemon_mode()
+run_agent_mode()

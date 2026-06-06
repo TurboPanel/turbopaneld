@@ -1,0 +1,45 @@
+---
+- name: Ensure turbopanel group
+  ansible.builtin.group:
+    name: "{{ turbopanel_group }}"
+    gid: "{{ turbopanel_gid }}"
+    state: present
+    system: true
+
+- name: Ensure turbopanel user
+  ansible.builtin.user:
+    name: "{{ turbopanel_user }}"
+    uid: "{{ turbopanel_uid }}"
+    group: "{{ turbopanel_group }}"
+    home: "{{ turbopanel_install_root }}"
+    shell: /bin/bash
+    system: true
+    create_home: false
+
+- name: Ensure install root directory
+  ansible.builtin.file:
+    path: "{{ turbopanel_install_root }}"
+    state: directory
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
+- name: Ensure platform and runtimes directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+  loop:
+    - "{{ turbopanel_install_root }}/platform"
+    - "{{ turbopanel_runtimes_dir }}"
+
+- name: Grant passwordless sudo for orchestration
+  ansible.builtin.copy:
+    dest: /etc/sudoers.d/turbopanel
+    content: "{{ turbopanel_user }} ALL=(ALL) NOPASSWD:ALL\n"
+    owner: root
+    group: root
+    mode: "0440"
+    validate: "visudo -cf %s"

@@ -48,6 +48,11 @@ export const DOCKER_PLAYBOOK = join(
   'playbooks',
   'docker-setup.yml',
 )
+export const SOCKET_DIRS_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  'playbooks',
+  'socket-dirs-setup.yml',
+)
 
 export interface UvTarget {
   /** uv release target triple, e.g. `aarch64-unknown-linux-gnu`. */
@@ -95,3 +100,62 @@ export function resolveUvTarget(
 export function uvDownloadUrl(asset: string, version = UV_VERSION): string {
   return `https://github.com/astral-sh/uv/releases/download/${version}/${asset}`
 }
+
+/**
+ * Root for vendored, versioned third-party runtimes shared across the host
+ * (cloudflared, and room for more). Override with `TURBOPANEL_RUNTIMES_DIR`.
+ */
+export const RUNTIMES_DIR = Deno.env.get('TURBOPANEL_RUNTIMES_DIR')?.trim() ||
+  '/opt/turbopanel/runtimes'
+
+/** Pinned cloudflared release. */
+export const CLOUDFLARED_VERSION = '2026.5.2'
+
+export function cloudflaredDir(version = CLOUDFLARED_VERSION): string {
+  return join(RUNTIMES_DIR, 'cloudflared', version)
+}
+
+export function cloudflaredBin(version = CLOUDFLARED_VERSION): string {
+  return join(cloudflaredDir(version), 'cloudflared')
+}
+
+/** Stable `current` symlink pointing at the active cloudflared version dir. */
+export const CLOUDFLARED_CURRENT_DIR = join(
+  RUNTIMES_DIR,
+  'cloudflared',
+  'current',
+)
+
+/**
+ * Map the current architecture to the matching cloudflared release asset.
+ * cloudflared publishes raw Linux binaries (not tarballs).
+ */
+export function resolveCloudflaredAsset(
+  arch: typeof Deno.build.arch = Deno.build.arch,
+): string {
+  switch (arch) {
+    case 'aarch64':
+      return 'cloudflared-linux-arm64'
+    case 'x86_64':
+      return 'cloudflared-linux-amd64'
+    default:
+      throw new Error(
+        `Unsupported CPU architecture for cloudflared: "${arch}". ` +
+          'Only "aarch64" and "x86_64" are supported.',
+      )
+  }
+}
+
+export function cloudflaredDownloadUrl(
+  asset: string,
+  version = CLOUDFLARED_VERSION,
+): string {
+  return `https://github.com/cloudflare/cloudflared/releases/download/${version}/${asset}`
+}
+
+/**
+ * Directory of per-tunnel token files. Each `*.token` file holds one Cloudflare
+ * tunnel token; the file's basename is the tunnel's name. Drop in more files to
+ * run more tunnels side by side.
+ */
+export const TUNNELS_DIR = join(DAEMON_ROOT, 'cloudflared', 'tunnels')

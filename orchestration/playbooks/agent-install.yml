@@ -1,0 +1,54 @@
+---
+# Provision a TurboPanel agent node (daemon checkout, runtimes, config, launch).
+#
+# Invoked by install.sh after scripts/bootstrap-orchestration.sh has placed
+# ansible-playbook in orchestration/runtime/venv/. Every role is idempotent.
+- name: TurboPanel agent node install
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    turbopanel_install_root: /opt/turbopanel
+    turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/runtimes"
+    turbopanel_daemon_dir: "{{ turbopanel_install_root }}/platform/daemon"
+    turbopanel_user: turbopanel
+    turbopanel_group: turbopanel
+    turbopanel_uid: 9999
+    turbopanel_gid: 9999
+    turbopanel_screen_name: turbopanel
+    turbopanel_repo_url: https://github.com/turbopanel/turbopanel-daemon
+    turbopanel_branch: trunk
+    turbopanel_tunnel_token: ""
+    turbopanel_instance_ca: ""
+    turbopanel_tls_insecure: false
+    turbopanel_start: true
+
+  pre_tasks:
+    - name: Require instance URL
+      ansible.builtin.assert:
+        that:
+          - turbopanel_instance_url is defined
+          - turbopanel_instance_url | length > 0
+        fail_msg: >-
+          turbopanel_instance_url is required (pass --instance-url to install.sh).
+
+  roles:
+    - role: agent-prereqs
+    - role: turbopanel-user
+    - role: daemon-repo
+    - role: deno-runtime
+    - role: tilt
+    - role: daemon-config
+    - role: daemon-launch
+      when: turbopanel_start | bool
+
+  post_tasks:
+    - name: Ensure turbopanel owns the install tree
+      ansible.builtin.file:
+        path: "{{ turbopanel_install_root }}"
+        state: directory
+        owner: "{{ turbopanel_user }}"
+        group: "{{ turbopanel_group }}"
+        recurse: true

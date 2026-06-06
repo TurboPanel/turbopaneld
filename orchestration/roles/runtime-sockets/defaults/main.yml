@@ -1,0 +1,5 @@
+---
+runtime_socket_dir: /run/turbopanel
+runtime_socket_owner: turbopanel
+runtime_socket_group: turbopanel
+runtime_socket_mode: "0750"

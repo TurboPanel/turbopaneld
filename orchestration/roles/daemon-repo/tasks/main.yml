@@ -1,0 +1,13 @@
+---
+- name: Clone or update daemon repository
+  ansible.builtin.git:
+    repo: "{{ turbopanel_repo_url }}"
+    dest: "{{ turbopanel_daemon_dir }}"
+    version: "{{ turbopanel_branch }}"
+    update: true
+    force: true
+  register: _daemon_repo
+
+- name: Report daemon repository revision
+  ansible.builtin.debug:
+    msg: "daemon checkout at {{ _daemon_repo.after | default('unchanged') }}"

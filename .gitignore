@@ -1,2 +1,4 @@
 node_modules/
 orchestration/runtime/
+.env
+cloudflared/tunnels/*.token

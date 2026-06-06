@@ -1,0 +1,26 @@
+---
+- name: Write daemon environment file
+  ansible.builtin.template:
+    src: dotenv.j2
+    dest: "{{ turbopanel_daemon_dir }}/.env"
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+
+- name: Ensure Cloudflare tunnel token directory
+  ansible.builtin.file:
+    path: "{{ turbopanel_daemon_dir }}/cloudflared/tunnels"
+    state: directory
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
+- name: Store Cloudflare tunnel token
+  ansible.builtin.copy:
+    dest: "{{ turbopanel_daemon_dir }}/cloudflared/tunnels/default.token"
+    content: "{{ turbopanel_tunnel_token }}\n"
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0600"
+  when: turbopanel_tunnel_token | length > 0
+  no_log: true
