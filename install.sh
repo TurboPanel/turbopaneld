@@ -32,6 +32,15 @@ PLATFORM_CA_PATH="$INSTALL_ROOT/certs/platform-ca.pem"
 log() { printf '\033[1;36m[install]\033[0m %s\n' "$*"; }
 err() { printf '\033[1;31m[install]\033[0m %s\n' "$*" >&2; }
 
+# #region agent log
+DEBUG_LOG="$INSTALL_ROOT/install-debug-9bf570.log"
+debug_log() {
+  local hypothesis_id="$1" location="$2" message="$3" data="$4"
+  printf '{"sessionId":"9bf570","hypothesisId":"%s","location":"%s","message":"%s","data":%s,"timestamp":%s}\n' \
+    "$hypothesis_id" "$location" "$message" "$data" "$(date +%s000)" >> "$DEBUG_LOG" 2>/dev/null || true
+}
+# #endregion
+
 usage() {
   cat <<'EOF'
 Usage: install.sh --instance-url <URL> [options]
@@ -110,11 +119,20 @@ apt-get update -y
 apt-get install -y curl git tar ca-certificates
 
 git_as_repo_owner() {
+  # #region agent log
+  local repo_owner repo_group
+  repo_owner="$(stat -c '%U' "$DAEMON_DIR" 2>/dev/null || echo unknown)"
+  repo_group="$(stat -c '%G' "$DAEMON_DIR" 2>/dev/null || echo unknown)"
   if id "$SERVICE_USER" &>/dev/null; then
+    debug_log "A" "install.sh:git_as_repo_owner" "git as service user" \
+      "{\"runAs\":\"$SERVICE_USER\",\"repoOwner\":\"$repo_owner\",\"repoGroup\":\"$repo_group\",\"cmd\":\"$*\"}"
     sudo -u "$SERVICE_USER" git -C "$DAEMON_DIR" "$@"
   else
+    debug_log "A" "install.sh:git_as_repo_owner" "git as root with safe.directory" \
+      "{\"runAs\":\"root\",\"repoOwner\":\"$repo_owner\",\"repoGroup\":\"$repo_group\",\"cmd\":\"$*\"}"
     git -C "$DAEMON_DIR" -c "safe.directory=$DAEMON_DIR" "$@"
   fi
+  # #endregion
 }
 
 ensure_repo() {
@@ -163,6 +181,12 @@ trap 'rm -f "$VARS_FILE"' EXIT
     printf 'turbopanel_instance_ca: "%s"\n' "$INSTANCE_CA"
   fi
 } > "$VARS_FILE"
+
+# #region agent log
+repo_owner="$(stat -c '%U' "$DAEMON_DIR" 2>/dev/null || echo unknown)"
+debug_log "B" "install.sh:pre-ansible" "handing off to ansible daemon-repo" \
+  "{\"repoOwner\":\"$repo_owner\",\"ansibleUser\":\"root\",\"playbook\":\"agent-install.yml\"}"
+# #endregion
 
 log "running agent-install playbook"
 ANSIBLE_CONFIG="$ANSIBLE_CFG" "$ANSIBLE_PLAYBOOK" \

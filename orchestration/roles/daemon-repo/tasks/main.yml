@@ -1,4 +1,29 @@
 ---
+- name: Inspect daemon repository ownership
+  ansible.builtin.stat:
+    path: "{{ turbopanel_daemon_dir }}"
+  register: _daemon_dir
+
+- name: Record daemon repository ownership for debug
+  ansible.builtin.shell: |
+    set -euo pipefail
+    owner="$(stat -c '%U' '{{ turbopanel_daemon_dir }}' 2>/dev/null || echo unknown)"
+    group="$(stat -c '%G' '{{ turbopanel_daemon_dir }}' 2>/dev/null || echo unknown)"
+    printf '{"sessionId":"9bf570","hypothesisId":"B","location":"daemon-repo:pre-git","message":"ansible git module context","data":{"repoOwner":"%s","repoGroup":"%s","ansibleUser":"root","dest":"%s"},"timestamp":%s}\n' \
+      "$owner" "$group" '{{ turbopanel_daemon_dir }}' "$(date +%s000)" \
+      >> /opt/turbopanel/install-debug-9bf570.log
+  changed_when: false
+  when: _daemon_dir.stat.exists
+
+- name: Ensure daemon checkout is owned by service user
+  ansible.builtin.file:
+    path: "{{ turbopanel_daemon_dir }}"
+    state: directory
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    recurse: true
+  when: _daemon_dir.stat.exists
+
 - name: Clone or update daemon repository
   ansible.builtin.git:
     repo: "{{ turbopanel_repo_url }}"
@@ -6,8 +31,15 @@
     version: "{{ turbopanel_branch }}"
     update: true
     force: true
+  become_user: "{{ turbopanel_user }}"
   register: _daemon_repo
 
-- name: Report daemon repository revision
+- name: Record daemon repository revision
   ansible.builtin.debug:
     msg: "daemon checkout at {{ _daemon_repo.after | default('unchanged') }}"
+
+- name: Record successful daemon repository update for debug
+  ansible.builtin.shell: |
+    printf '{"sessionId":"9bf570","hypothesisId":"C","location":"daemon-repo:post-git","message":"ansible git succeeded","data":{"after":"{{ _daemon_repo.after | default("unchanged") }}","runAs":"{{ turbopanel_user }}"},"timestamp":%s}\n' \
+      "$(date +%s000)" >> /opt/turbopanel/install-debug-9bf570.log
+  changed_when: false
