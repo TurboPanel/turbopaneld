@@ -1,16 +1,10 @@
 ---
-# Entry point for the docker role.
+# TurboPanel wrapper around geerlingguy.docker (Ansible Galaxy).
 #
 # Fast-path: if the docker binary exists and the service is active, skip
-# everything. Two local checks, no network, no package manager.
-#
-# Full path: assert arch/distro are supported, resolve repo labels, then
-# dispatch to the OS-specific task file.
-#
-# Adding support for a new OS family:
-#   - Add the distribution name to _docker_distro_map in vars/main.yml
-#   - Create tasks/<distro_family>.yml with the install tasks
-#   - Add a matching include_tasks entry in the install block below
+# everything. Otherwise delegate to the Galaxy role, which handles Debian
+# Trixie/Raspbian repo setup (deb822), package install, service start, and
+# docker group membership.
 
 - name: Check Docker binary
   ansible.builtin.stat:
@@ -51,11 +45,10 @@
           Unsupported distribution '{{ ansible_distribution }}'.
           TurboPanel supports: {{ _docker_distro_map.keys() | list | join(', ') }}.
 
-    - name: Resolve Docker repo arch and distro labels
-      ansible.builtin.set_fact:
-        _docker_arch: "{{ _docker_arch_map[ansible_architecture] }}"
-        _docker_distro: "{{ _docker_distro_map[ansible_distribution] }}"
-
-    - name: Install Docker (Debian / Raspbian)
-      ansible.builtin.include_tasks: debian.yml
-      when: ansible_distribution in ['Debian', 'Raspbian']
+    - name: Install Docker via geerlingguy.docker Galaxy role
+      ansible.builtin.include_role:
+        name: geerlingguy.docker
+      vars:
+        docker_users:
+          - "{{ docker_user }}"
+        docker_install_compose_plugin: true

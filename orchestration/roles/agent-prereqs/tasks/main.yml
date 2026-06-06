@@ -5,6 +5,9 @@
       - ca-certificates
       - curl
       - git
+      - gnupg
+      - iptables
+      - python3-debian
       - screen
       - tar
       - unzip

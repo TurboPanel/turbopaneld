@@ -1,27 +1,43 @@
 ---
-- name: Check for existing TurboPanel screen session
-  ansible.builtin.shell: |
-    set -euo pipefail
-    screen -ls | grep -q '\.{{ turbopanel_screen_name }}[[:space:]]' && echo yes || echo no
-  register: _screen_session
-  changed_when: false
-  failed_when: false
-  become_user: "{{ turbopanel_user }}"
+- name: Ensure daemon log directory exists
+  ansible.builtin.file:
+    path: /var/log/turbopanel/daemon
+    state: directory
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
 
-- name: Start daemon via Tilt in screen session
-  when: _screen_session.stdout != 'yes'
-  ansible.builtin.shell: |
-    set -euo pipefail
-    cd '{{ turbopanel_daemon_dir }}'
-    screen -dmS '{{ turbopanel_screen_name }}' tilt up --stream
-  environment:
-    TURBOPANEL_DENO: /usr/local/bin/deno
-    TURBOPANEL_TLS_INSECURE: "{{ '1' if (turbopanel_tls_insecure | bool) else '' }}"
-  become_user: "{{ turbopanel_user }}"
+- name: Install daemon systemd unit
+  ansible.builtin.template:
+    src: turbopanel-daemon.service.j2
+    dest: "/etc/systemd/system/{{ turbopanel_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart turbopanel daemon
 
-- name: Report existing screen session
-  ansible.builtin.debug:
-    msg: >-
-      screen session '{{ turbopanel_screen_name }}' already running — leaving it
-      untouched (idempotent re-run)
-  when: _screen_session.stdout == 'yes'
+- name: Install daemon logrotate policy
+  ansible.builtin.copy:
+    dest: /etc/logrotate.d/turbopanel-daemon
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      /var/log/turbopanel/daemon/*.log {
+        daily
+        rotate 7
+        compress
+        delaycompress
+        missingok
+        notifempty
+        copytruncate
+      }
+
+- name: Ensure daemon service desired state
+  ansible.builtin.systemd:
+    name: "{{ turbopanel_service_name }}"
+    daemon_reload: true
+    enabled: "{{ turbopanel_start | bool }}"
+    state: "{{ 'started' if (turbopanel_start | bool) else 'stopped' }}"

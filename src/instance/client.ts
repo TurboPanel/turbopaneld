@@ -9,7 +9,13 @@ import {
 import { collectServerAddresses } from '../server-addresses.ts'
 
 type DaemonMessage =
-  | { type: 'hello'; from: 'instance' | 'daemon'; at: string }
+  | {
+    type: 'hello'
+    from: 'instance' | 'daemon'
+    at: string
+    hostname?: string
+    nodeId?: string
+  }
   | { type: 'ping'; id: string; at: string }
   | { type: 'pong'; id: string; at: string }
   | { type: 'echo'; payload: unknown; at: string }
@@ -41,6 +47,16 @@ export interface InstanceClientOptions {
   httpClient?: Deno.HttpClient
   reconnectDelayMs?: number
   onMessage?: (message: DaemonMessage) => void
+}
+
+async function readNodeId(): Promise<string | undefined> {
+  try {
+    const id = await Deno.readTextFile('/etc/machine-id')
+    const trimmed = id.trim()
+    return trimmed.length > 0 ? trimmed : undefined
+  } catch {
+    return undefined
+  }
 }
 
 function parseMessage(raw: string): DaemonMessage | null {
@@ -198,6 +214,8 @@ export class InstanceClient {
     const hello: DaemonMessage = {
       type: 'hello',
       from: 'daemon',
+      hostname: Deno.hostname(),
+      nodeId: await readNodeId(),
       at: new Date().toISOString(),
     }
     ws.send(JSON.stringify(hello))
@@ -229,7 +247,13 @@ export class InstanceClient {
   #handleMessage(message: DaemonMessage, ws: WebSocket): void {
     switch (message.type) {
       case 'hello':
-        console.log('[instance] hello from', message.from, 'at', message.at)
+        console.log(
+          '[instance] hello from',
+          message.from,
+          message.hostname ?? '(no hostname)',
+          'at',
+          message.at,
+        )
         break
       case 'ping':
         ws.send(JSON.stringify(

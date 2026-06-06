@@ -13,6 +13,8 @@ RUNTIME="$ORCHESTRATION/runtime"
 BIN="$RUNTIME/bin"
 VENV="$RUNTIME/venv"
 REQUIREMENTS="$ORCHESTRATION/requirements.txt"
+GALAXY_REQUIREMENTS="$ORCHESTRATION/requirements.yml"
+ROLES_DIR="$ORCHESTRATION/roles"
 
 UV_VERSION="0.11.19"
 PYTHON_VERSION="3.12"
@@ -113,7 +115,19 @@ ensure_ansible() {
   log "ansible installed at $VENV/bin/ansible-playbook"
 }
 
+ensure_galaxy_roles() {
+  if ! ansible_playbook_works; then
+    err "ansible-galaxy requires a working ansible-playbook install"
+    exit 1
+  fi
+
+  log "installing galaxy roles from $GALAXY_REQUIREMENTS"
+  "$VENV/bin/ansible-galaxy" role install -r "$GALAXY_REQUIREMENTS" -p "$ROLES_DIR"
+  log "galaxy roles ready"
+}
+
 mkdir -p "$RUNTIME"
 ensure_uv
 ensure_python
 ensure_ansible
+ensure_galaxy_roles

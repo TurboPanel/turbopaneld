@@ -1,0 +1,6 @@
+---
+# Ansible Galaxy roles installed into orchestration/roles/ during bootstrap.
+# Pinned versions keep installs reproducible across agent nodes.
+roles:
+  - name: geerlingguy.docker
+    version: "8.0.0"

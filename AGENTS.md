@@ -1,0 +1,59 @@
+# AGENTS.md
+
+Agent-node daemon: connects to a TurboPanel **instance** over WSS, runs local orchestration (Ansible, Docker, Cloudflare tunnels), and self-updates to match the instance's `trunk` commit.
+
+## Documentation discipline
+
+**Keep this file current.** When you learn something durable about agent nodes — install prerequisites, orchestration playbooks, connectivity, slim-Debian gotchas — add or update a note here alongside code changes. Future agents read `AGENTS.md` first.
+
+- Prefer extending an existing section over orphan bullets.
+- Record **why** when non-obvious (missing packages, ordering constraints, idempotency traps).
+- Cross-link the instance repo (`../turbopanel/AGENTS.md`) for Caddy, `/ws`, and platform CA details.
+- Do not record secrets, tokens, or machine-specific credentials.
+- Remove or correct notes that prove wrong.
+
+`README.md` is for humans installing nodes; `AGENTS.md` is for agents maintaining the daemon.
+
+## Instance connectivity
+
+Two modes in `src/instance/paths.ts`:
+
+| Mode | When | Target |
+|---|---|---|
+| `url` | `TURBOPANEL_INSTANCE_URL` set (installed agents) | `https://<host>:<port>` / `wss://…/ws` through Caddy |
+| `socket` | No URL (co-located dev on the instance host) | `unix:///run/turbopanel/turbopanel.sock` |
+
+On connect the daemon sends a `hello` with `hostname` (`Deno.hostname()`) and `nodeId` (`/etc/machine-id`). The instance uses these (and `X-Real-IP` from Caddy) to dedupe reconnects.
+
+Install flow: `install.sh` → `scripts/bootstrap-orchestration.sh` (uv, Python, ansible, **Galaxy roles**) → `orchestration/playbooks/agent-install.yml`. Docker is installed in that playbook and again at daemon startup via `initOrchestration()` in `src/orchestration/setup.ts`.
+
+Daemon runtime is managed by systemd (`turbopanel-daemon.service`) and runs `deno run --watch ... --env-file=.env main.ts` so self-updates still trigger automatic relaunches. `install.sh` and `agent-install.yml` both reconcile the unit (install/reload/enable/start or stop for `--no-start`) on every run.
+
+## Orchestration
+
+- Playbooks: `orchestration/playbooks/`
+- Galaxy roles: `orchestration/requirements.yml` (pinned, installed into `orchestration/roles/`, gitignored)
+- Docker: thin `roles/docker` wrapper around **`geerlingguy.docker`** (Debian Trixie/Raspbian)
+- Bootstrap also runs on every daemon start (idempotent; failures are logged, daemon keeps running)
+- Logs are written to both journald and `/var/log/turbopanel/daemon/{daemon.log,daemon.err.log}` (with logrotate at `/etc/logrotate.d/turbopanel-daemon`)
+
+### Slim Debian prerequisites
+
+Minimal Debian images often lack packages full installs have. Agent bootstrap and `roles/agent-prereqs` must include anything Ansible/Docker need before playbooks run:
+
+| Package | Why |
+|---|---|
+| `unzip` | Deno install script |
+| `gnupg` | Legacy apt paths; still useful on slim hosts |
+| `python3-debian` | `deb822_repository` in `geerlingguy.docker` |
+| `iptables` | Docker networking |
+
+## Layout
+
+- `main.ts` — entry; orchestration bootstrap, tunnels, instance client
+- `install.sh` — root bootstrap + `agent-install` playbook
+- `src/instance/client.ts` — WSS client, command/address handlers
+- `src/orchestration/` — uv/Python/ansible bootstrap, playbook runners
+- `orchestration/roles/daemon-launch/templates/turbopanel-daemon.service.j2` — systemd unit template
+- `tilt/agent.tiltfile` — standalone agent dev (`deno run --watch`)
+- `tilt/daemon.tiltfile` — co-located instance dev (Unix socket mode)

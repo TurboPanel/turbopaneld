@@ -1,0 +1,18 @@
+[Unit]
+Description=TurboPanel agent daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ turbopanel_user }}
+Group={{ turbopanel_group }}
+WorkingDirectory={{ turbopanel_daemon_dir }}
+ExecStart=/usr/local/bin/deno run --watch --allow-net --allow-sys=networkInterfaces --allow-read --allow-write --allow-run --allow-env --env-file=.env main.ts
+Restart=always
+RestartSec=2
+StandardOutput=append:/var/log/turbopanel/daemon/daemon.log
+StandardError=append:/var/log/turbopanel/daemon/daemon.err.log
+
+[Install]
+WantedBy=multi-user.target

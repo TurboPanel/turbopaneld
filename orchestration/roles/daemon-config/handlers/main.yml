@@ -1,12 +1,10 @@
 ---
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
 - name: Restart turbopanel daemon
-  ansible.builtin.shell: |
-    set -euo pipefail
-    screen -S '{{ turbopanel_screen_name }}' -X quit >/dev/null 2>&1 || true
-    sleep 1
-    cd '{{ turbopanel_daemon_dir }}'
-    screen -dmS '{{ turbopanel_screen_name }}' tilt up --stream
-  environment:
-    TURBOPANEL_DENO: /usr/local/bin/deno
-    TURBOPANEL_TLS_INSECURE: "{{ '1' if (turbopanel_tls_insecure | bool) else '' }}"
-  become_user: "{{ turbopanel_user }}"
+  ansible.builtin.systemd:
+    name: "{{ turbopanel_service_name }}"
+    state: restarted
+  when: turbopanel_start | bool

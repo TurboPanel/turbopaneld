@@ -6,8 +6,8 @@ import { DAEMON_ROOT } from './orchestration/paths.ts'
  * The instance reports the canonical commit (its own daemon checkout HEAD) over
  * the `/ws` connection and via `GET /api/daemon/version`. When ours differs we
  * fast-forward to `origin/<trunk>`. Because the daemon runs under
- * `deno run --watch`, changed files trigger an automatic relaunch -- no explicit
- * restart is needed here.
+ * `deno run --watch` (under systemd), changed files trigger an automatic
+ * relaunch -- no explicit restart is needed here.
  */
 
 const TRUNK_BRANCH = Deno.env.get('TURBOPANEL_TRUNK_BRANCH')?.trim() || 'trunk'
@@ -60,7 +60,7 @@ export async function syncToTrunk(): Promise<boolean> {
   const commit = await getLocalCommit()
   console.log(
     `[updater] checkout now at ${commit ? short(commit) : 'unknown'}; ` +
-      'Tilt --watch will relaunch the daemon',
+      'Deno --watch will relaunch the daemon',
   )
   return true
 }

@@ -54,21 +54,22 @@ The installer bootstraps Ansible, then runs `orchestration/playbooks/agent-insta
 
 - Creates service user `turbopanel:turbopanel` (UID/GID 9999)
 - Clones this repo to `/opt/turbopanel/platform/daemon` on branch `trunk`
-- Installs Deno and Tilt under `/opt/turbopanel/runtimes/`
+- Installs Deno under `/opt/turbopanel/runtimes/`
 - Writes `/opt/turbopanel/platform/daemon/.env` with `TURBOPANEL_INSTANCE_URL` and `TURBOPANEL_INSTANCE_CA` when using a self-hosted HTTPS instance
-- Starts the daemon via `tilt up` in a detached `screen` session
+- Installs and manages `turbopanel-daemon.service` (systemd)
 
 ## Managing the node
 
 ```bash
-# Attach to the running Tilt session (Ctrl-A D to detach)
-sudo -u turbopanel screen -r turbopanel
+# Service status / start / stop / restart
+sudo systemctl status turbopanel-daemon
+sudo systemctl start turbopanel-daemon
+sudo systemctl stop turbopanel-daemon
+sudo systemctl restart turbopanel-daemon
 
-# Stop the daemon
-sudo -u turbopanel screen -S turbopanel -X quit
-
-# Start manually (e.g. after --no-start)
-sudo -u turbopanel bash -lc 'cd /opt/turbopanel/platform/daemon && tilt up --stream'
+# Live logs (journald + file logs)
+sudo journalctl -u turbopanel-daemon -f
+sudo tail -f /var/log/turbopanel/daemon/daemon.log
 ```
 
 ## Configuration
@@ -99,4 +100,4 @@ sudo ANSIBLE_CONFIG=/opt/turbopanel/platform/daemon/orchestration/ansible.cfg \
 
 On a host that also runs the instance (co-located dev), the daemon connects over the local Unix socket. See `tilt/daemon.tiltfile`, loaded from the instance repo's Tiltfile.
 
-On a standalone agent node, `tilt up` uses `tilt/agent.tiltfile` and reads `.env` for `TURBOPANEL_INSTANCE_URL`.
+On a standalone agent node, systemd runs `deno run --watch ... --env-file=.env main.ts`. The `--watch` flag preserves auto-relaunch when the updater fast-forwards the daemon checkout.

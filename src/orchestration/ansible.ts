@@ -3,12 +3,15 @@ import {
   ANSIBLE_CFG,
   ANSIBLE_PLAYBOOK_BIN,
   DOCKER_PLAYBOOK,
+  GALAXY_REQUIREMENTS_FILE,
+  GALAXY_ROLES_DIR,
   SOCKET_DIRS_PLAYBOOK,
   LOCALHOST_PLAYBOOK,
   ORCHESTRATION_DIR,
   PYTHON_VERSION,
   REQUIREMENTS_FILE,
   UV_BIN,
+  VENV_BIN_DIR,
   VENV_DIR,
 } from './paths.ts'
 
@@ -53,6 +56,27 @@ export async function ensureAnsible(): Promise<void> {
     throw new Error('ansible install verification failed: ansible-playbook not runnable')
   }
   console.log('[orchestration] ansible installed')
+}
+
+/**
+ * Install pinned Ansible Galaxy roles into `orchestration/roles/`.
+ *
+ * Idempotent: `ansible-galaxy` skips roles that are already present at the
+ * requested version. Runs on every bootstrap so new agents pick up role
+ * updates without recreating the ansible venv.
+ */
+export async function ensureGalaxyRoles(): Promise<void> {
+  if (!(await ansiblePlaybookWorks())) {
+    throw new Error('ansible-galaxy requires a working ansible-playbook install')
+  }
+
+  console.log(`[orchestration] installing galaxy roles from ${GALAXY_REQUIREMENTS_FILE}`)
+  await runOrThrow(
+    `${VENV_BIN_DIR}/ansible-galaxy`,
+    ['role', 'install', '-r', GALAXY_REQUIREMENTS_FILE, '-p', GALAXY_ROLES_DIR],
+    { stream: true },
+  )
+  console.log('[orchestration] galaxy roles ready')
 }
 
 async function ansiblePlaybookWorks(): Promise<boolean> {

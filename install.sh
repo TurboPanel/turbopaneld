@@ -19,7 +19,7 @@ INSTALL_ROOT="/opt/turbopanel"
 DAEMON_DIR="$INSTALL_ROOT/platform/daemon"
 SERVICE_USER="turbopanel"
 SERVICE_GROUP="turbopanel"
-SCREEN_NAME="turbopanel"
+SERVICE_NAME="turbopanel-daemon"
 
 BRANCH="trunk"
 INSTANCE_URL=""
@@ -46,7 +46,7 @@ Options:
   --insecure-tls           Skip TLS verification when dialing the instance
   --branch <NAME>          Branch to track (default: trunk)
   --repo-url <URL>         Override the daemon repo URL
-  --no-start               Set everything up but don't launch tilt
+  --no-start               Set everything up but don't start the service
   -h, --help               Show this help
 EOF
 }
@@ -104,10 +104,10 @@ fi
 
 # --- Bootstrap (before ansible exists) --------------------------------------
 # Only the minimum needed to fetch the repo and run bootstrap-orchestration.sh.
-log "installing bootstrap packages (curl, git, tar, unzip)"
+log "installing bootstrap packages (curl, git, tar, unzip, gnupg, iptables, python3-debian)"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y curl git tar ca-certificates unzip
+apt-get install -y curl git tar ca-certificates unzip gnupg iptables python3-debian
 
 git_as_repo_owner() {
   if id "$SERVICE_USER" &>/dev/null; then
@@ -185,10 +185,13 @@ ANSIBLE_CONFIG="$ANSIBLE_CFG" "$ANSIBLE_PLAYBOOK" \
   "$PLAYBOOK"
 
 if [ "$START" = "1" ]; then
-  log "restarting daemon to apply configuration"
-  sudo -u "$SERVICE_USER" screen -S "$SCREEN_NAME" -X quit >/dev/null 2>&1 || true
-  sleep 1
-  sudo -u "$SERVICE_USER" bash -lc "cd '$DAEMON_DIR' && screen -dmS '$SCREEN_NAME' tilt up --stream"
+  log "ensuring $SERVICE_NAME service is enabled and running"
+  systemctl daemon-reload
+  systemctl enable --now "$SERVICE_NAME"
+else
+  log "ensuring $SERVICE_NAME service is installed but stopped"
+  systemctl daemon-reload
+  systemctl disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
 fi
 
 cat <<EOF
@@ -202,13 +205,15 @@ TurboPanel daemon installed.
   tunnels      : $DAEMON_DIR/cloudflared/tunnels/*.token
 
 Manage it:
-  sudo -u $SERVICE_USER screen -r $SCREEN_NAME      # attach (Ctrl-A D to detach)
-  sudo -u $SERVICE_USER screen -S $SCREEN_NAME -X quit   # stop
+  sudo systemctl status $SERVICE_NAME
+  sudo systemctl restart $SERVICE_NAME
+  sudo journalctl -u $SERVICE_NAME -f
+  sudo tail -f /var/log/turbopanel/daemon/daemon.log
 
 Re-run this installer to upgrade or reconcile configuration.
 
 Start manually (if launched with --no-start):
-  sudo -u $SERVICE_USER bash -lc 'cd $DAEMON_DIR && tilt up --stream'
+  sudo systemctl enable --now $SERVICE_NAME
 
 Add another Cloudflare tunnel later: drop a <name>.token file in
   $DAEMON_DIR/cloudflared/tunnels/

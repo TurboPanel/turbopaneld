@@ -17,7 +17,7 @@
     turbopanel_group: turbopanel
     turbopanel_uid: 9999
     turbopanel_gid: 9999
-    turbopanel_screen_name: turbopanel
+    turbopanel_service_name: turbopanel-daemon
     turbopanel_repo_url: https://github.com/turbopanel/turbopanel-daemon
     turbopanel_branch: trunk
     turbopanel_tunnel_token: ""
@@ -37,12 +37,11 @@
   roles:
     - role: agent-prereqs
     - role: turbopanel-user
+    - role: docker
     - role: daemon-repo
     - role: deno-runtime
-    - role: tilt
     - role: daemon-config
     - role: daemon-launch
-      when: turbopanel_start | bool
 
   post_tasks:
     - name: Ensure turbopanel owns the install tree
