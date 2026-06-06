@@ -109,13 +109,21 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y curl git tar ca-certificates
 
+git_as_repo_owner() {
+  if id "$SERVICE_USER" &>/dev/null; then
+    sudo -u "$SERVICE_USER" git -C "$DAEMON_DIR" "$@"
+  else
+    git -C "$DAEMON_DIR" -c "safe.directory=$DAEMON_DIR" "$@"
+  fi
+}
+
 ensure_repo() {
   if [ -d "$DAEMON_DIR/.git" ]; then
     log "updating existing checkout at $DAEMON_DIR"
-    git -C "$DAEMON_DIR" remote set-url origin "$REPO_URL"
-    git -C "$DAEMON_DIR" fetch origin "$BRANCH"
-    git -C "$DAEMON_DIR" checkout "$BRANCH"
-    git -C "$DAEMON_DIR" reset --hard "origin/$BRANCH"
+    git_as_repo_owner remote set-url origin "$REPO_URL"
+    git_as_repo_owner fetch origin "$BRANCH"
+    git_as_repo_owner checkout "$BRANCH"
+    git_as_repo_owner reset --hard "origin/$BRANCH"
   else
     log "cloning $REPO_URL ($BRANCH) into $DAEMON_DIR"
     mkdir -p "$(dirname "$DAEMON_DIR")"
