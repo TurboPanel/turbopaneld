@@ -36,6 +36,7 @@ err() { printf '\033[1;31m[install]\033[0m %s\n' "$*" >&2; }
 DEBUG_LOG="$INSTALL_ROOT/install-debug-9bf570.log"
 debug_log() {
   local hypothesis_id="$1" location="$2" message="$3" data="$4"
+  mkdir -p "$INSTALL_ROOT" 2>/dev/null || true
   printf '{"sessionId":"9bf570","hypothesisId":"%s","location":"%s","message":"%s","data":%s,"timestamp":%s}\n' \
     "$hypothesis_id" "$location" "$message" "$data" "$(date +%s000)" >> "$DEBUG_LOG" 2>/dev/null || true
 }
@@ -135,9 +136,26 @@ git_as_repo_owner() {
   # #endregion
 }
 
+fix_repo_ownership() {
+  if [ ! -d "$DAEMON_DIR/.git" ] || ! id "$SERVICE_USER" &>/dev/null; then
+    return 0
+  fi
+  local owner
+  owner="$(stat -c '%U' "$DAEMON_DIR" 2>/dev/null || echo unknown)"
+  if [ "$owner" = "$SERVICE_USER" ]; then
+    return 0
+  fi
+  # #region agent log
+  debug_log "D" "install.sh:fix_repo_ownership" "chown checkout before git" \
+    "{\"fromOwner\":\"$owner\",\"toOwner\":\"$SERVICE_USER\"}"
+  # #endregion
+  chown -R "$SERVICE_USER:$SERVICE_GROUP" "$DAEMON_DIR"
+}
+
 ensure_repo() {
   if [ -d "$DAEMON_DIR/.git" ]; then
     log "updating existing checkout at $DAEMON_DIR"
+    fix_repo_ownership
     git_as_repo_owner remote set-url origin "$REPO_URL"
     git_as_repo_owner fetch origin "$BRANCH"
     git_as_repo_owner checkout "$BRANCH"
