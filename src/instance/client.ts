@@ -6,6 +6,7 @@ import {
   instanceWebSocketUrl,
   resolveInstanceConfig,
 } from './paths.ts'
+import { collectServerAddresses } from '../server-addresses.ts'
 
 type DaemonMessage =
   | { type: 'hello'; from: 'instance' | 'daemon'; at: string }
@@ -20,6 +21,18 @@ type DaemonMessage =
     exitCode: number
     stdout: string
     stderr: string
+    at: string
+  }
+  | { type: 'addresses-request'; id: string; at: string }
+  | {
+    type: 'addresses-result'
+    id: string
+    addresses: {
+      privateIpv4: string[]
+      privateIpv6: string[]
+      publicIpv4: string[]
+      publicIpv6: string[]
+    }
     at: string
   }
 
@@ -246,6 +259,37 @@ export class InstanceClient {
       case 'command':
         void this.#runCommand(message, ws)
         break
+      case 'addresses-request':
+        void this.#collectAddresses(message, ws)
+        break
+    }
+  }
+
+  async #collectAddresses(
+    message: Extract<DaemonMessage, { type: 'addresses-request' }>,
+    ws: WebSocket,
+  ): Promise<void> {
+    let addresses: Extract<DaemonMessage, { type: 'addresses-result' }>['addresses']
+    try {
+      addresses = collectServerAddresses()
+    } catch (err) {
+      addresses = {
+        privateIpv4: [],
+        privateIpv6: [],
+        publicIpv4: [],
+        publicIpv6: [],
+      }
+    }
+
+    const result: DaemonMessage = {
+      type: 'addresses-result',
+      id: message.id,
+      addresses,
+      at: new Date().toISOString(),
+    }
+
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(result))
     }
   }
 

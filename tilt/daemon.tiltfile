@@ -19,7 +19,7 @@ def run_daemon_mode(daemon_dir = "."):
     local_resource(
         name = "daemon",
         labels = ["Daemon"],
-        serve_cmd = deno_bin() + " run --watch --allow-net --allow-read=" + daemon_read + " --allow-write --allow-run --allow-env main.ts",
+        serve_cmd = deno_bin() + " run --watch --allow-net --allow-sys=networkInterfaces --allow-read=" + daemon_read + " --allow-write --allow-run --allow-env main.ts",
         serve_dir = daemon_dir,
         serve_env = daemon_env,
         resource_deps = ["turbopanel (deno)"],
@@ -28,6 +28,7 @@ def run_daemon_mode(daemon_dir = "."):
             daemon_dir + "/main.ts",
             daemon_dir + "/deno.json",
             daemon_dir + "/src/instance/client.ts",
+            daemon_dir + "/src/server-addresses.ts",
             daemon_dir + "/src/instance/paths.ts",
             daemon_dir + "/src/tunnels.ts",
             daemon_dir + "/src/orchestration/cloudflared.ts",
