@@ -7,5 +7,6 @@
       - git
       - screen
       - tar
+      - unzip
     state: present
     update_cache: true
