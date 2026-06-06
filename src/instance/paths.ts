@@ -90,7 +90,7 @@ export function describeInstance(config: InstanceConfig): string {
 }
 
 export interface InstanceHttpClientOptions {
-  /** Path to a PEM CA certificate to trust (for self-signed internal hosts). */
+  /** Path to the platform CA PEM to trust (self-hosted instances). */
   caCertPath?: string
 }
 
@@ -98,8 +98,7 @@ export interface InstanceHttpClientOptions {
  * Build the HTTP client used for both REST and the WebSocket upgrade.
  *
  * - socket mode: a Unix-transport client (host in the URL is ignored).
- * - url mode with a CA: a client trusting the supplied PEM (for self-signed
- *   certs on internal hosts).
+ * - url mode with a CA: a client trusting the platform CA PEM (self-hosted).
  * - url mode without a CA: `undefined`, so the platform default fetch/WebSocket
  *   is used (valid public certs).
  *

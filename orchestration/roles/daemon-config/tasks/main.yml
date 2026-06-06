@@ -1,4 +1,23 @@
 ---
+- name: Ensure platform CA directory
+  when: turbopanel_instance_ca | length > 0
+  ansible.builtin.file:
+    path: "{{ turbopanel_instance_ca | dirname }}"
+    state: directory
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
+- name: Restrict platform CA permissions
+  when: turbopanel_instance_ca | length > 0
+  ansible.builtin.file:
+    path: "{{ turbopanel_instance_ca }}"
+    state: file
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+  notify: Restart turbopanel daemon
+
 - name: Write daemon environment file
   ansible.builtin.template:
     src: dotenv.j2
@@ -6,6 +25,7 @@
     owner: "{{ turbopanel_user }}"
     group: "{{ turbopanel_group }}"
     mode: "0640"
+  notify: Restart turbopanel daemon
 
 - name: Ensure Cloudflare tunnel token directory
   ansible.builtin.file:

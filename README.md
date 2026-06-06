@@ -14,19 +14,21 @@ curl -fsSL https://raw.githubusercontent.com/turbopanel/turbopanel-daemon/trunk/
 
 Replace `<instance-host>` and `<port>` with wherever your instance is reachable from this node (LAN hostname, public hostname, tunnel endpoint, etc.).
 
+For self-hosted instances over HTTPS, the installer automatically downloads the platform CA from `/api/instance/ca` (one `curl -k` bootstrap) and restarts the daemon when configuration changes. Re-run the same command any time to upgrade or reconcile a node.
+
 ### Options
 
 | Flag | Description |
 |------|-------------|
 | `--instance-url <URL>` | **Required.** Base URL of the instance (`https://…` or `http://…`). |
 | `--tunnel-token <TOKEN>` | Cloudflare tunnel token. Stored at `cloudflared/tunnels/default.token` and run by the daemon. |
-| `--instance-ca <PATH>` | PEM CA certificate to trust when the instance uses a self-signed TLS cert. |
+| `--instance-ca <PATH>` | PEM platform CA to trust (skips the automatic `/api/instance/ca` fetch). |
 | `--insecure-tls` | Skip TLS verification when dialing the instance (dev only). |
 | `--branch <NAME>` | Git branch to track (default: `trunk`). |
 | `--repo-url <URL>` | Override the daemon git remote. |
 | `--no-start` | Provision everything but do not launch Tilt. |
 
-Example with a tunnel token and a self-signed instance cert:
+Example with a tunnel token and an explicit platform CA path:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/turbopanel/turbopanel-daemon/trunk/install.sh \
@@ -36,7 +38,15 @@ curl -fsSL https://raw.githubusercontent.com/turbopanel/turbopanel-daemon/trunk/
       --instance-ca /path/to/instance-ca.pem
 ```
 
-Re-running the installer is safe — every Ansible role is idempotent.
+LAN example (same command — CA fetch is automatic):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/turbopanel/turbopanel-daemon/trunk/install.sh \
+  | sudo bash -s -- \
+      --instance-url https://turbopanel.lan:8443
+```
+
+Re-running the installer is safe — every Ansible role is idempotent and the daemon restarts when `.env` changes.
 
 ## What gets installed
 
@@ -45,7 +55,7 @@ The installer bootstraps Ansible, then runs `orchestration/playbooks/agent-insta
 - Creates service user `turbopanel:turbopanel` (UID/GID 9999)
 - Clones this repo to `/opt/turbopanel/platform/daemon` on branch `trunk`
 - Installs Deno and Tilt under `/opt/turbopanel/runtimes/`
-- Writes `/opt/turbopanel/platform/daemon/.env` with `TURBOPANEL_INSTANCE_URL`
+- Writes `/opt/turbopanel/platform/daemon/.env` with `TURBOPANEL_INSTANCE_URL` and `TURBOPANEL_INSTANCE_CA` when using a self-hosted HTTPS instance
 - Starts the daemon via `tilt up` in a detached `screen` session
 
 ## Managing the node
@@ -68,7 +78,7 @@ Runtime config lives in `/opt/turbopanel/platform/daemon/.env`:
 | Variable | Purpose |
 |----------|---------|
 | `TURBOPANEL_INSTANCE_URL` | Instance base URL (set by installer). |
-| `TURBOPANEL_INSTANCE_CA` | PEM CA for self-signed instance TLS. |
+| `TURBOPANEL_INSTANCE_CA` | Platform CA PEM (trust anchor for the instance server cert). |
 | `TURBOPANEL_TLS_INSECURE` | Set to `1` to skip TLS verification. |
 
 Cloudflare tunnel tokens go in `cloudflared/tunnels/<name>.token` — one file per tunnel. Drop in more files to run multiple tunnels side by side.

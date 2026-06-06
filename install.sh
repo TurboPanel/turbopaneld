@@ -27,6 +27,7 @@ TUNNEL_TOKEN=""
 INSTANCE_CA=""
 INSECURE_TLS=""
 START=1
+PLATFORM_CA_PATH="$INSTALL_ROOT/certs/platform-ca.pem"
 
 log() { printf '\033[1;36m[install]\033[0m %s\n' "$*"; }
 err() { printf '\033[1;31m[install]\033[0m %s\n' "$*" >&2; }
@@ -41,7 +42,7 @@ Required:
 
 Options:
   --tunnel-token <TOKEN>   Cloudflare tunnel token to run on this node
-  --instance-ca <PATH>     PEM CA cert to trust (self-signed internal hosts)
+  --instance-ca <PATH>     PEM platform CA to trust (skips auto-fetch)
   --insecure-tls           Skip TLS verification when dialing the instance
   --branch <NAME>          Branch to track (default: trunk)
   --repo-url <URL>         Override the daemon repo URL
@@ -58,6 +59,7 @@ while [ $# -gt 0 ]; do
     --tunnel-token=*) TUNNEL_TOKEN="${1#*=}"; shift;;
     --instance-ca) INSTANCE_CA="${2:-}"; shift 2;;
     --instance-ca=*) INSTANCE_CA="${1#*=}"; shift;;
+    --fetch-instance-ca) log "note: --fetch-instance-ca is default for https; flag is optional"; shift;;
     --insecure-tls) INSECURE_TLS=1; shift;;
     --branch) BRANCH="${2:-}"; shift 2;;
     --branch=*) BRANCH="${1#*=}"; shift;;
@@ -78,6 +80,26 @@ fi
 if [ "$(id -u)" != "0" ]; then
   err "must run as root (use sudo)"
   exit 1
+fi
+
+fetch_platform_ca() {
+  mkdir -p "$INSTALL_ROOT/certs"
+  log "fetching platform CA from $INSTANCE_URL/api/instance/ca"
+  if curl -fsSk "$INSTANCE_URL/api/instance/ca" -o "$PLATFORM_CA_PATH"; then
+    INSTANCE_CA="$PLATFORM_CA_PATH"
+    log "platform CA saved to $INSTANCE_CA"
+  else
+    rm -f "$PLATFORM_CA_PATH"
+    log "platform CA endpoint unavailable; using system certificate trust"
+  fi
+}
+
+# Self-hosted instances publish their platform CA at /api/instance/ca. Fetch it
+# automatically for https installs unless the caller supplied a CA or opted out
+# of verification.
+if [ -z "$INSTANCE_CA" ] && [ -z "$INSECURE_TLS" ] &&
+  [[ "$INSTANCE_URL" == https://* ]]; then
+  fetch_platform_ca
 fi
 
 # --- Bootstrap (before ansible exists) --------------------------------------
@@ -140,6 +162,13 @@ ANSIBLE_CONFIG="$ANSIBLE_CFG" "$ANSIBLE_PLAYBOOK" \
   -c local \
   -e "@$VARS_FILE" \
   "$PLAYBOOK"
+
+if [ "$START" = "1" ]; then
+  log "restarting daemon to apply configuration"
+  sudo -u "$SERVICE_USER" screen -S "$SCREEN_NAME" -X quit >/dev/null 2>&1 || true
+  sleep 1
+  sudo -u "$SERVICE_USER" bash -lc "cd '$DAEMON_DIR' && screen -dmS '$SCREEN_NAME' tilt up --stream"
+fi
 
 cat <<EOF
 
