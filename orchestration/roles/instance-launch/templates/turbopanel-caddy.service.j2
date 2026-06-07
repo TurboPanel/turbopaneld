@@ -15,7 +15,6 @@ Environment=CADDY_PORT={{ caddy_port }}
 Environment=TURBOPANEL_SOCKET_DIAL=run/turbopanel/turbopanel.sock
 Environment=TURBOPANEL_UI_MODE={{ turbopanel_ui_mode }}
 Environment=EXPO_PORT={{ expo_port }}
-Environment=DRIZZLE_STUDIO_PORT={{ drizzle_studio_port }}
 Environment=TURBOPANEL_UI_ROOT={{ turbopanel_ui_dir }}/dist
 ExecStart={{ turbopanel_runtimes_dir }}/caddy/current/caddy run --config {{ turbopanel_instance_dir }}/Caddyfile --adapter caddyfile
 Restart=always

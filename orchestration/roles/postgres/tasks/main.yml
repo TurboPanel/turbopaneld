@@ -109,6 +109,14 @@
   failed_when: false
   when: _postgres_container_exists | bool
 
+- name: Check whether postgres container publishes TCP
+  ansible.builtin.command:
+    cmd: docker port {{ postgres_container_name }} 5432/tcp
+  register: _pg_tcp_port
+  changed_when: false
+  failed_when: false
+  when: _postgres_container_exists | bool
+
 - name: Remove postgres container with legacy or broken configuration
   ansible.builtin.command:
     cmd: docker rm -f {{ postgres_container_name }}
@@ -118,11 +126,21 @@
   register: _pg_removed
   changed_when: _pg_removed.rc == 0
 
+- name: Remove postgres container when TCP exposure does not match config
+  ansible.builtin.command:
+    cmd: docker rm -f {{ postgres_container_name }}
+  when:
+    - _postgres_container_exists | bool
+    - _pg_removed is not changed
+    - (postgres_expose_port | bool and (_pg_tcp_port.rc | default(1) != 0)) or ((not postgres_expose_port | bool) and (_pg_tcp_port.rc | default(1) == 0))
+  register: _pg_removed_tcp
+  changed_when: _pg_removed_tcp.rc == 0
+
 - name: Refresh postgres container facts after removal
   ansible.builtin.set_fact:
     _postgres_container_exists: false
     _postgres_running: false
-  when: _pg_removed is changed
+  when: _pg_removed is changed or _pg_removed_tcp is changed
 
 - name: Build docker run argument list
   ansible.builtin.set_fact:
