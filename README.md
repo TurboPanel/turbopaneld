@@ -26,7 +26,7 @@ For self-hosted instances over HTTPS, the installer automatically downloads the 
 | `--insecure-tls` | Skip TLS verification when dialing the instance (dev only). |
 | `--branch <NAME>` | Git branch to track (default: `trunk`). |
 | `--repo-url <URL>` | Override the daemon git remote. |
-| `--no-start` | Provision everything but do not launch Tilt. |
+| `--no-start` | Provision everything but do not start `turbopanel-daemon.service`. |
 
 Example with a tunnel token and an explicit platform CA path:
 
@@ -98,6 +98,4 @@ sudo ANSIBLE_CONFIG=/opt/turbopanel/platform/daemon/orchestration/ansible.cfg \
 
 ## Local development
 
-On a host that also runs the instance (co-located dev), the daemon connects over the local Unix socket. See `tilt/daemon.tiltfile`, loaded from the instance repo's Tiltfile.
-
-On a standalone agent node, systemd runs `deno run --watch ... --env-file=.env main.ts`. The `--watch` flag preserves auto-relaunch when the updater fast-forwards the daemon checkout.
+**Agent nodes and co-located dev** both run the daemon under **`turbopanel-daemon.service`** (systemd), not Tilt. On a host that also runs the instance, install the unit with `scripts/install-daemon-systemd.sh` after `turbopanel-instance.service` is up. The daemon dials the instance over the Unix socket when `TURBOPANEL_INSTANCE_URL` is unset in `.env`, or over the network when the installer set a URL.

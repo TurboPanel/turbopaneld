@@ -1,4 +1,21 @@
 ---
+- name: Stop legacy Tilt daemon launcher when present
+  ansible.builtin.shell: |
+    set -euo pipefail
+    if command -v tilt >/dev/null 2>&1; then
+      cd "{{ turbopanel_daemon_dir }}"
+      tilt down >/dev/null 2>&1 || true
+    fi
+  args:
+    executable: /bin/bash
+  become: true
+  become_user: "{{ turbopanel_user }}"
+  environment:
+    HOME: "{{ turbopanel_install_root }}"
+    PATH: "/usr/local/bin:{{ turbopanel_install_root }}/runtimes/deno/current:{{ ansible_env.PATH }}"
+  changed_when: false
+  failed_when: false
+
 - name: Install daemon systemd unit
   ansible.builtin.template:
     src: turbopanel-daemon.service.j2

@@ -1,2 +1,4 @@
 ---
 turbopanel_after_instance_service: false
+turbopanel_install_root: /opt/turbopanel
+turbopanel_daemon_dir: "{{ turbopanel_install_root }}/platform/daemon"
