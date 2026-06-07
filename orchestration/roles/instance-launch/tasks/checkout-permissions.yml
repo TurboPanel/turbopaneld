@@ -1,0 +1,22 @@
+---
+# Co-located dev: turbopanel (9999) owns checkouts for editing; instance (9998,
+# group turbopanel) runs services and reads via group. Re-apply after any git op
+# that might have used the wrong user (never chmod 640 the deploy key — SSH needs 0600).
+- name: Install dev checkout ownership normalizer
+  ansible.builtin.copy:
+    src: "{{ turbopanel_daemon_dir }}/scripts/normalize-dev-checkout.sh"
+    dest: /usr/local/bin/turbopanel-normalize-dev-checkout
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Normalize instance checkout ownership
+  ansible.builtin.command:
+    cmd: /usr/local/bin/turbopanel-normalize-dev-checkout {{ turbopanel_instance_dir }}
+  changed_when: false
+
+- name: Normalize UI checkout ownership
+  when: turbopanel_ui_mode == 'dev'
+  ansible.builtin.command:
+    cmd: /usr/local/bin/turbopanel-normalize-dev-checkout {{ turbopanel_ui_dir }}
+  changed_when: false

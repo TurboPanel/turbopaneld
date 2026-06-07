@@ -5,6 +5,7 @@
 # the sudo rights the daemon user holds.
 instance_user: instance
 instance_uid: 9998
+turbopanel_user: turbopanel
 turbopanel_group: turbopanel
 turbopanel_install_root: /opt/turbopanel
 turbopanel_instance_dir: "{{ turbopanel_install_root }}/platform/turbopanel"

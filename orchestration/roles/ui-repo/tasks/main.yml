@@ -12,7 +12,7 @@
     repo: "{{ ui_repo_url }}"
     dest: "{{ turbopanel_ui_dir }}"
     version: "{{ ui_branch }}"
-  become_user: "{{ instance_user }}"
+  become_user: "{{ turbopanel_user }}"
 
 - name: Check UI dependencies
   ansible.builtin.stat:
@@ -26,7 +26,7 @@
   ansible.builtin.command:
     cmd: pnpm install --frozen-lockfile
     chdir: "{{ turbopanel_ui_dir }}"
-  become_user: "{{ instance_user }}"
+  become_user: "{{ turbopanel_user }}"
   environment:
-    HOME: "{{ turbopanel_ui_dir }}"
+    HOME: "{{ turbopanel_install_root }}"
     PATH: "/usr/local/bin:{{ turbopanel_runtimes_dir }}/node/current/bin:/usr/bin:/bin"

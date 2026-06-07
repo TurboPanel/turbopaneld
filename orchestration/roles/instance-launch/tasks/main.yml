@@ -66,7 +66,7 @@
   failed_when: false
 
 # The instance user runs `git` during upgrades but repos are owned by
-# instance:turbopanel or turbopanel:turbopanel — mark them safe (Git 2.35+).
+# turbopanel:turbopanel — mark them safe (Git 2.35+).
 - name: Mark platform repos as safe git directories for turbopanel user
   ansible.builtin.git_config:
     name: safe.directory
@@ -117,3 +117,6 @@
 
 - name: Install instance upgrade sudoers
   ansible.builtin.import_tasks: upgrade-sudoers.yml
+
+- name: Reconcile dev checkout ownership (9999 develops, 9998 runs)
+  ansible.builtin.import_tasks: checkout-permissions.yml

@@ -14,7 +14,7 @@
     repo: "{{ instance_repo_url }}"
     dest: "{{ turbopanel_instance_dir }}"
     version: "{{ instance_branch }}"
-  become_user: "{{ instance_user }}"
+  become_user: "{{ turbopanel_user }}"
 
 - name: Report instance checkout state
   ansible.builtin.debug:

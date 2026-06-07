@@ -10,10 +10,10 @@
     system: true
     create_home: false
 
-- name: Ensure instance checkout directory owned by instance:turbopanel
+- name: Ensure instance checkout directory owned by turbopanel:turbopanel (group-writable)
   ansible.builtin.file:
     path: "{{ turbopanel_instance_dir }}"
     state: directory
-    owner: "{{ instance_user }}"
+    owner: "{{ turbopanel_user }}"
     group: "{{ turbopanel_group }}"
-    mode: "2750"
+    mode: "2770"

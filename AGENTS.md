@@ -14,7 +14,9 @@ TurboPanel is named for speed; keep the daemon fast.
 ## Users & privileges
 
 - **`turbopanel`** (UID/GID **9999**): the daemon user; has passwordless sudo; owns `/opt/turbopanel`.
-- **`instance`** (UID **9998**): runs the instance/Caddy/UI in group `turbopanel`, **no own group, no sudo** (created by the `instance-user` role).
+- **`turbopanel`** (UID/GID **9999**): the daemon user; has passwordless sudo; owns the install tree and **all git** on co-located dev hosts.
+- **`instance`** (UID **9998**): runs the instance/Caddy/UI in group `turbopanel`, **no own group, no sudo** (created by the `instance-user` role). Reads checkouts via group; does not own source files.
+- Co-located dev checkouts are **`2770 turbopanel:turbopanel`** (`instance-user` role). Clones and `pnpm install` run as **9999**; systemd services run as **9998**. `scripts/normalize-dev-checkout.sh` (also `/usr/local/bin/turbopanel-normalize-dev-checkout`) re-homes any stray `instance`-owned source files after git; it skips instance `$HOME` dirs `.cache`, `.config`, `.local`. Upgrade System calls it automatically after each `git reset`.
 - `/run/turbopanel` is `2770 turbopanel:turbopanel` (setgid) so `instance` can bind the socket; see `../turbopanel/AGENTS.md`.
 
 ## Documentation discipline
