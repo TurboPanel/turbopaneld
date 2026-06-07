@@ -7,6 +7,7 @@ import {
   GALAXY_ROLES_DIR,
   SOCKET_DIRS_PLAYBOOK,
   DAEMON_LOGS_PLAYBOOK,
+  DAEMON_SYSTEMD_PLAYBOOK,
   LOCALHOST_PLAYBOOK,
   ORCHESTRATION_DIR,
   PYTHON_VERSION,
@@ -143,6 +144,46 @@ export async function runDaemonLogsSetup(): Promise<void> {
     },
   )
   console.log('[orchestration] daemon-logs-setup complete')
+}
+
+async function coLocatedInstanceServiceEnabled(): Promise<boolean> {
+  try {
+    const result = await run('systemctl', ['is-enabled', 'turbopanel-instance'], {
+      stream: false,
+    })
+    return result.success
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Install or reconcile turbopanel-daemon.service (systemd). On co-located dev
+ * hosts with turbopanel-instance.service, the unit is ordered after the
+ * instance stack.
+ */
+export async function runDaemonSystemdSetup(): Promise<void> {
+  const afterInstance = await coLocatedInstanceServiceEnabled()
+  console.log(
+    `[orchestration] running daemon-systemd-setup playbook (after_instance=${afterInstance})`,
+  )
+  await runOrThrow(
+    ANSIBLE_PLAYBOOK_BIN,
+    [
+      '-i',
+      'localhost,',
+      '-c',
+      'local',
+      '-e',
+      `turbopanel_after_instance_service=${afterInstance}`,
+      DAEMON_SYSTEMD_PLAYBOOK,
+    ],
+    {
+      cwd: ORCHESTRATION_DIR,
+      env: { ANSIBLE_CONFIG: ANSIBLE_CFG },
+    },
+  )
+  console.log('[orchestration] daemon-systemd-setup complete')
 }
 
 /**

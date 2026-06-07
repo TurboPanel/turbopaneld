@@ -22,6 +22,17 @@
     cmd: systemd-tmpfiles --create
   changed_when: true
 
+- name: Ensure daemon log files exist for systemd append
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: touch
+    owner: "{{ daemon_log_owner }}"
+    group: "{{ daemon_log_group }}"
+    mode: "0640"
+  loop:
+    - "{{ daemon_log_dir }}/daemon.log"
+    - "{{ daemon_log_dir }}/daemon.err.log"
+
 - name: Install daemon logrotate policy
   ansible.builtin.template:
     src: turbopanel-daemon-logrotate.j2

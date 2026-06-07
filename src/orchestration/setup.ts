@@ -5,6 +5,7 @@ import {
   runLocalhostTest,
   runSocketDirsSetup,
   runDaemonLogsSetup,
+  runDaemonSystemdSetup,
 } from './ansible.ts'
 import { ensurePython } from './python.ts'
 import { ensureUv } from './uv.ts'
@@ -31,6 +32,7 @@ export async function initOrchestration(): Promise<boolean> {
     ['runLocalhostTest', runLocalhostTest],
     ['runSocketDirsSetup', runSocketDirsSetup],
     ['runDaemonLogsSetup', runDaemonLogsSetup],
+    ['runDaemonSystemdSetup', runDaemonSystemdSetup],
     ['runDockerSetup', runDockerSetup],
   ] as const
   try {

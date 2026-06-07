@@ -60,6 +60,11 @@ export const DAEMON_LOGS_PLAYBOOK = join(
   'playbooks',
   'daemon-logs-setup.yml',
 )
+export const DAEMON_SYSTEMD_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  'playbooks',
+  'daemon-systemd-setup.yml',
+)
 
 export interface UvTarget {
   /** uv release target triple, e.g. `aarch64-unknown-linux-gnu`. */
