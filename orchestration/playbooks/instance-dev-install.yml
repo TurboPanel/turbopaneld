@@ -28,6 +28,7 @@
     instance_branch: trunk
     ui_branch: trunk
     turbopanel_ui_mode: dev
+    postgres_expose_port: true
     instance_start: true
 
   roles:

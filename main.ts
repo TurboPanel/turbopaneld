@@ -1,12 +1,25 @@
+import { DockerClient, DockerMonitor } from './src/docker/index.ts'
 import { connectInstance } from './src/instance/client.ts'
 import { initOrchestration } from './src/orchestration/setup.ts'
 import { startTunnels } from './src/tunnels.ts'
 
 console.log('Hello from turbopanel-daemon')
 
-await initOrchestration()
+const orchestrationReady = await initOrchestration()
 
 const abort = new AbortController()
+
+let dockerClient: DockerClient | undefined
+if (orchestrationReady) {
+  dockerClient = new DockerClient()
+  if (!(await dockerClient.ping())) {
+    console.warn(
+      '[docker] Docker socket not reachable yet — monitor will retry on each poll',
+    )
+  }
+  const dockerMonitor = new DockerMonitor(dockerClient)
+  dockerMonitor.start(abort.signal)
+}
 
 // Start any configured Cloudflare tunnels (downloads cloudflared on demand).
 await startTunnels(abort.signal)
@@ -19,6 +32,7 @@ const instance = await connectInstance({})
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   Deno.addSignalListener(signal, () => {
     instance.stop()
+    dockerClient?.close()
     abort.abort()
   })
 }

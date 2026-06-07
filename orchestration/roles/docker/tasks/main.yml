@@ -2,9 +2,15 @@
 # TurboPanel wrapper around geerlingguy.docker (Ansible Galaxy).
 #
 # Fast-path: if the docker binary exists and the service is active, skip
-# everything. Otherwise delegate to the Galaxy role, which handles Debian
-# Trixie/Raspbian repo setup (deb822), package install, service start, and
-# docker group membership.
+# install. Group membership for docker_user always runs (co-located hosts often
+# already have Docker). Otherwise include geerlingguy.docker after validation.
+
+- name: Assert rootless Docker is not requested
+  ansible.builtin.assert:
+    that: not docker_rootless | bool
+    fail_msg: >-
+      Rootless Docker support is planned but not yet implemented.
+      Set docker_rootless: false until the feature is built.
 
 - name: Check Docker binary
   ansible.builtin.stat:
@@ -49,6 +55,12 @@
       ansible.builtin.include_role:
         name: geerlingguy.docker
       vars:
-        docker_users:
-          - "{{ docker_user }}"
+        docker_repo_url: "{{ _docker_repo_url[ansible_distribution] }}"
         docker_install_compose_plugin: true
+
+- name: Add daemon user to docker group
+  ansible.builtin.user:
+    name: "{{ docker_user }}"
+    groups: docker
+    append: true
+  when: docker_add_turbopanel_user | bool

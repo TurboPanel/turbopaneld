@@ -1,0 +1,17 @@
+galaxy_info:
+  role_name: postgres
+  author: turbopanel
+  description: >
+    Run PostgreSQL 18 in Docker with persistent data, a Unix socket bind-mount,
+    and connection metadata under /etc/turbopanel/postgres/.
+  min_ansible_version: "2.18"
+  platforms:
+    - name: Debian
+      versions:
+        - trixie
+    - name: Raspbian
+      versions:
+        - trixie
+
+dependencies:
+  - role: docker

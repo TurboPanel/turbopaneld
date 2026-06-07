@@ -2,6 +2,7 @@ import {
   ensureAnsible,
   ensureGalaxyRoles,
   runDockerSetup,
+  runPostgresSetup,
   runInstanceDevInstall,
   runLocalhostTest,
   runSocketDirsSetup,
@@ -45,6 +46,7 @@ export async function initOrchestration(): Promise<boolean> {
     ['runSocketDirsSetup', runSocketDirsSetup],
     ['runDaemonLogsSetup', runDaemonLogsSetup],
     ['runDockerSetup', runDockerSetup],
+    ['runPostgresSetup', runPostgresSetup],
     ...(shouldInstallDevInstance()
       ? [['runInstanceDevInstall', runInstanceDevInstall] as const]
       : []),

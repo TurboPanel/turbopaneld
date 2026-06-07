@@ -50,6 +50,11 @@ export const DOCKER_PLAYBOOK = join(
   'playbooks',
   'docker-setup.yml',
 )
+export const POSTGRES_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  'playbooks',
+  'postgres-setup.yml',
+)
 export const SOCKET_DIRS_PLAYBOOK = join(
   ORCHESTRATION_DIR,
   'playbooks',

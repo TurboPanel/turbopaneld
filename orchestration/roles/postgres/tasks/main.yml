@@ -1,0 +1,115 @@
+# /etc/turbopanel/
+#   postgres/
+#     config.json   — connection metadata (socket path, port, user, db)
+#     .pgpass       — generated password, mode 0600, owner root
+# /var/run/turbopanel/postgres — canonical Unix socket directory (postgres_socket_dir)
+
+- name: Ensure postgres config directory exists
+  ansible.builtin.file:
+    path: "{{ turbopanel_config_dir }}/postgres"
+    state: directory
+    owner: root
+    group: turbopanel
+    mode: "0750"
+
+- name: Generate postgres password (idempotent)
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      f='{{ turbopanel_config_dir }}/postgres/.pgpass'
+      if [ ! -s "$f" ]; then
+        openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 32 > "$f"
+        chmod 0600 "$f"
+        chown root:root "$f"
+        echo created
+      fi
+    executable: /bin/bash
+  register: _pgpass_gen
+  changed_when: "'created' in _pgpass_gen.stdout"
+
+- name: Read postgres password
+  ansible.builtin.slurp:
+    src: "{{ turbopanel_config_dir }}/postgres/.pgpass"
+  register: _pgpass_raw
+
+- name: Set postgres password fact
+  ansible.builtin.set_fact:
+    _postgres_password: "{{ _pgpass_raw.content | b64decode | trim }}"
+
+- name: Write postgres config.json (idempotent)
+  ansible.builtin.template:
+    src: postgres-config.json.j2
+    dest: "{{ turbopanel_config_dir }}/postgres/config.json"
+    owner: root
+    group: turbopanel
+    mode: "0640"
+    force: false
+
+- name: Ensure postgres data and socket directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: turbopanel
+    mode: "0750"
+  loop:
+    - "{{ postgres_data_dir }}"
+    - "{{ postgres_socket_dir }}"
+
+- name: Check postgres container state
+  ansible.builtin.command:
+    cmd: docker inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' {{ postgres_container_name }}
+  register: _pg_running
+  changed_when: false
+  failed_when: false
+
+- name: Set postgres container state facts
+  ansible.builtin.set_fact:
+    _postgres_container_exists: "{{ _pg_running.rc == 0 }}"
+    _postgres_running: "{{ _pg_running.rc == 0 and _pg_running.stdout | trim == 'true' }}"
+
+- name: Build docker run argument list
+  ansible.builtin.set_fact:
+    _docker_run_args: "{{ _docker_run_base + (_docker_run_port if postgres_expose_port | bool else []) + [postgres_image] }}"
+  vars:
+    _docker_run_base:
+      - "--name"
+      - "{{ postgres_container_name }}"
+      - "--restart"
+      - "unless-stopped"
+      - "-d"
+      - "-v"
+      - "{{ postgres_data_dir }}:/var/lib/postgresql/data"
+      - "-v"
+      - "{{ postgres_socket_dir }}:/var/run/postgresql"
+      - "-e"
+      - "POSTGRES_USER={{ postgres_user }}"
+      - "-e"
+      - "POSTGRES_DB={{ postgres_db }}"
+      - "-e"
+      - "POSTGRES_PASSWORD={{ _postgres_password }}"
+    _docker_run_port:
+      - "-p"
+      - "127.0.0.1:{{ postgres_port }}:5432"
+
+- name: Start existing stopped postgres container
+  ansible.builtin.command:
+    cmd: docker start {{ postgres_container_name }}
+  when:
+    - _postgres_container_exists | bool
+    - not _postgres_running | bool
+
+- name: Create and start postgres container
+  ansible.builtin.command:
+    cmd: docker run {{ _docker_run_args | join(' ') }}
+  when: not _postgres_container_exists | bool
+  no_log: true
+
+- name: Wait for postgres to be ready
+  ansible.builtin.command:
+    cmd: docker exec {{ postgres_container_name }} pg_isready -U {{ postgres_user }}
+  register: _pg_ready
+  until: _pg_ready.rc == 0
+  retries: 15
+  delay: 2
+  changed_when: false

@@ -18,3 +18,9 @@ expo_port: 8081
 # "static" serves the exported web build from {{ turbopanel_ui_dir }}/dist.
 turbopanel_ui_mode: dev
 instance_start: true
+postgres_socket_dir: /var/run/turbopanel/postgres
+postgres_port: 5432
+postgres_expose_port: false
+postgres_user: turbopanel
+postgres_db: turbopanel
+turbopanel_config_dir: /etc/turbopanel

@@ -11,3 +11,9 @@ _docker_arch_map:
 _docker_distro_map:
   Debian: debian
   Raspbian: raspbian
+
+# Official Docker apt repository base URL per ansible_distribution. Ubuntu and
+# other distros can be added here when support is extended.
+_docker_repo_url:
+  Debian: https://download.docker.com/linux/debian
+  Raspbian: https://download.docker.com/linux/raspbian
