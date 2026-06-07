@@ -159,6 +159,7 @@ export class InstanceClient {
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err)
         console.warn('[instance] websocket connect failed:', errMsg)
+        this.#closeActiveSocket()
         // #region agent log
         fetch('http://localhost:7686/ingest/1326dc58-69fc-4780-871a-d504ad5cb2c6', {
           method: 'POST',
@@ -168,7 +169,7 @@ export class InstanceClient {
           },
           body: JSON.stringify({
             sessionId: '9bf570',
-            runId: 'pre-fix',
+            runId: 'post-fix',
             hypothesisId: 'H1',
             location: 'client.ts:runConnectLoop',
             message: 'connectOnce failed',
@@ -191,8 +192,23 @@ export class InstanceClient {
       : new WebSocket(url)
   }
 
+  #closeActiveSocket(): void {
+    const ws = this.#ws
+    if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+      return
+    }
+    try {
+      ws.close()
+    } catch {
+      // Socket may already be gone.
+    }
+    if (this.#ws === ws) this.#ws = undefined
+  }
+
   async #connectOnce(): Promise<void> {
     await this.fetchHealth()
+
+    this.#closeActiveSocket()
 
     const ws = this.#newWebSocket()
     this.#ws = ws
@@ -235,6 +251,24 @@ export class InstanceClient {
       at: new Date().toISOString(),
     }
     ws.send(JSON.stringify(hello))
+    // #region agent log
+    fetch('http://localhost:7686/ingest/1326dc58-69fc-4780-871a-d504ad5cb2c6', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Debug-Session-Id': '9bf570',
+      },
+      body: JSON.stringify({
+        sessionId: '9bf570',
+        runId: 'post-fix',
+        hypothesisId: 'H1',
+        location: 'client.ts:connectOnce',
+        message: 'hello sent',
+        data: { hostname: hello.hostname, target: this.target },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {})
+    // #endregion
 
     ws.onmessage = (event) => {
       const raw = typeof event.data === 'string'

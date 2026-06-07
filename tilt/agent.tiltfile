@@ -44,7 +44,7 @@ def run_agent_mode():
     local_resource(
         name = "daemon",
         labels = ["Daemon"],
-        serve_cmd = deno + " run --watch --allow-net --allow-sys=networkInterfaces --allow-read --allow-write --allow-run --allow-env --env-file=.env" + tls_flag + " main.ts",
+        serve_cmd = deno + " run --watch --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env --env-file=.env" + tls_flag + " main.ts",
         trigger_mode = TRIGGER_MODE_AUTO,
         deps = [
             "main.ts",

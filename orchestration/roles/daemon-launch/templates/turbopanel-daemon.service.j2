@@ -8,7 +8,7 @@ Type=simple
 User={{ turbopanel_user }}
 Group={{ turbopanel_group }}
 WorkingDirectory={{ turbopanel_daemon_dir }}
-ExecStart=/usr/local/bin/deno run --watch --allow-net --allow-sys=networkInterfaces --allow-read --allow-write --allow-run --allow-env --env-file=.env main.ts
+ExecStart=/usr/local/bin/deno run --watch --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env --env-file=.env main.ts
 Restart=always
 RestartSec=2
 StandardOutput=append:/var/log/turbopanel/daemon/daemon.log
