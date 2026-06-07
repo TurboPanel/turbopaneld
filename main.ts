@@ -38,7 +38,7 @@ const abort = new AbortController()
 await startTunnels(abort.signal)
 
 // The daemon never self-updates. Updates are driven explicitly by an operator
-// through the admin "Upgrade System" button or the dev-sync push; all installs
+// through the developer "Upgrade System" button or the dev-sync push; all installs
 // and updates run via Ansible (the daemon is the constant that owns them).
 const instance = await connectInstance({})
 

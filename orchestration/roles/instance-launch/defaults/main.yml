@@ -1,5 +1,8 @@
 ---
 turbopanel_install_root: /opt/turbopanel
+turbopanel_user: turbopanel
+turbopanel_ssh_dir: "{{ turbopanel_install_root }}/.ssh"
+turbopanel_github_key: "{{ turbopanel_ssh_dir }}/github_ed25519"
 turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/runtimes"
 turbopanel_daemon_dir: "{{ turbopanel_install_root }}/platform/daemon"
 turbopanel_instance_dir: "{{ turbopanel_install_root }}/platform/turbopanel"

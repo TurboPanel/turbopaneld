@@ -8,7 +8,7 @@ TurboPanel is named for speed; keep the daemon fast.
 
 - **Cache runtimes & deps.** Deno/Node/Caddy/cloudflared live under `/opt/turbopanel/runtimes/<tool>/current`; roles install only when the pinned version is missing.
 - **Idempotent bootstrap.** `initOrchestration()` and every role short-circuit when already satisfied, so restarts are cheap and work offline.
-- **No background polling.** The 60s version poll and self-update were removed; updates come via the admin upgrade button or a `dev-sync` push.
+- **No background polling.** The 60s version poll and self-update were removed; updates come via the developer upgrade button or a `dev-sync` push.
 - **Don't clobber dev work.** `instance-repo`/`ui-repo` clone only when missing and never force-reset a live working tree.
 
 ## Users & privileges
@@ -42,7 +42,7 @@ On connect the daemon sends a `hello` with `hostname` (`Deno.hostname()`) and `n
 
 Install flow: official installer (separate CDN repo) → `scripts/bootstrap-orchestration.sh` (uv, Python, ansible, **Galaxy roles**) → `orchestration/playbooks/agent-install.yml`. Docker is installed in that playbook and again at daemon startup via `initOrchestration()` in `src/orchestration/setup.ts`.
 
-Daemon runtime is managed by systemd (`turbopanel-daemon.service`): `flock` enforces a single process, `deno run` without `--watch`, and the official installer / `agent-install.yml` reconcile the unit on every run. **No self-update** — `updater.ts` was removed. A `dev-sync` push (see below) is the fast dev path; the admin upgrade button is the operator path.
+Daemon runtime is managed by systemd (`turbopanel-daemon.service`): `flock` enforces a single process, `deno run` without `--watch`, and the official installer / `agent-install.yml` reconcile the unit on every run. **No self-update** — `updater.ts` was removed. A `dev-sync` push (see below) is the fast dev path; the developer upgrade button is the operator path.
 
 ## Ansible owns all installs (incl. co-located dev instance)
 

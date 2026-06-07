@@ -33,6 +33,54 @@
     - Reload systemd for instance units
     - Restart turbopanel ui
 
+# Upgrades run `git fetch` as the instance user over SSH. Share the turbopanel
+# user's deploy key (group-readable) and known_hosts so fetch works without sudo.
+- name: Check turbopanel GitHub deploy key
+  ansible.builtin.stat:
+    path: "{{ turbopanel_github_key }}"
+  register: _github_key
+
+- name: Allow instance user to traverse turbopanel .ssh directory
+  when: _github_key.stat.exists
+  ansible.builtin.file:
+    path: "{{ turbopanel_ssh_dir }}"
+    state: directory
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
+- name: Allow instance user to use turbopanel GitHub deploy key
+  when: _github_key.stat.exists
+  ansible.builtin.file:
+    path: "{{ turbopanel_github_key }}"
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+
+- name: Allow instance user to read turbopanel SSH known_hosts
+  ansible.builtin.file:
+    path: "{{ turbopanel_ssh_dir }}/known_hosts"
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+  failed_when: false
+
+# The instance user runs `git` during upgrades but repos are owned by
+# instance:turbopanel or turbopanel:turbopanel — mark them safe (Git 2.35+).
+- name: Mark platform repos as safe git directories for instance user
+  ansible.builtin.git_config:
+    name: safe.directory
+    scope: global
+    value: "{{ item }}"
+    add_mode: add
+  become_user: "{{ instance_user }}"
+  environment:
+    HOME: "{{ turbopanel_instance_dir }}"
+  loop:
+    - "{{ turbopanel_instance_dir }}"
+    - "{{ turbopanel_daemon_dir }}"
+    - "{{ turbopanel_ui_dir }}"
+
 - name: Ensure instance service desired state
   ansible.builtin.systemd:
     name: "{{ instance_service_name }}"

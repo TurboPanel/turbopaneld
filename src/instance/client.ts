@@ -140,7 +140,7 @@ export class InstanceClient {
     { connections: { id: string; connectedAt: string }[] }
   > {
     const response = await fetch(
-      instanceUrl(this.#config, '/api/admin/v1/daemon/connections'),
+      instanceUrl(this.#config, '/api/developer/v1/daemon/connections'),
       this.#fetchInit(),
     )
     if (!response.ok) {
@@ -301,7 +301,7 @@ export class InstanceClient {
         break
       case 'version':
         // Informational only. The daemon never self-updates; updates are
-        // operator-driven via the admin upgrade button / dev-sync push.
+        // operator-driven via the developer upgrade button / dev-sync push.
         break
       case 'echo':
         console.log('[instance] echo from instance:', message.payload)
@@ -422,7 +422,7 @@ export class InstanceClient {
    * Run a shell command requested by the instance and stream the result back.
    *
    * TEMPORARY: this executes arbitrary shell commands with the daemon's full
-   * privileges and has no auth. It exists only for the dev/test admin panel.
+   * privileges and has no auth. It exists only for the dev-only developer panel.
    */
   async #runCommand(
     message: Extract<DaemonMessage, { type: 'command' }>,

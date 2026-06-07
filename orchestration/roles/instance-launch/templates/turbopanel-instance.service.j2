@@ -10,7 +10,10 @@ Group={{ turbopanel_group }}
 WorkingDirectory={{ turbopanel_instance_dir }}
 Environment=HOME={{ turbopanel_instance_dir }}
 Environment=PATH={{ turbopanel_runtimes_dir }}/deno/current:{{ turbopanel_runtimes_dir }}/caddy/current:/usr/local/bin:/usr/bin:/bin
+Environment=GIT_SSH_COMMAND=ssh -i {{ turbopanel_github_key }} -o IdentitiesOnly=yes -o UserKnownHostsFile={{ turbopanel_ssh_dir }}/known_hosts -o StrictHostKeyChecking=yes
 Environment=TURBOPANEL_INSTANCE_SERVICE={{ instance_service_name }}
+# Gates the dev-only developer surface (dev != static). See ../turbopanel src/dev-mode.ts.
+Environment=TURBOPANEL_UI_MODE={{ turbopanel_ui_mode }}
 ExecStart={{ turbopanel_runtimes_dir }}/deno/current/deno run --allow-env --allow-sys=networkInterfaces --allow-read=/run/turbopanel,{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }} --allow-write=/run/turbopanel --allow-run=git,systemctl src/deno.ts
 Restart=always
 RestartSec=2
