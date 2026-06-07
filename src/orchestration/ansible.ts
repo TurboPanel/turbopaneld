@@ -240,18 +240,17 @@ export async function runDockerSetup(): Promise<void> {
  * Run PostgreSQL 18 in Docker with persistent data and connection metadata
  * under /etc/turbopanel/postgres/.
  *
- * In dev mode (`TURBOPANEL_DEV=1`) the container port is bound to localhost so
- * host tools can reach Postgres over TCP. Production keeps the port internal.
+ * The instance connects over a host-visible Unix socket bind-mount
+ * (`/var/run/turbopanel/postgres`). Set playbook var `postgres_expose_port=true`
+ * only when host tools need TCP on 127.0.0.1:5432.
  *
  * Requires Docker (run after {@link runDockerSetup}) and passwordless sudo.
  */
 export async function runPostgresSetup(): Promise<void> {
   console.log('[orchestration] running postgres-setup playbook')
-  const extraVars =
-    Deno.env.get('TURBOPANEL_DEV') === '1' ? ['-e', 'postgres_expose_port=true'] : []
   await runOrThrow(
     ANSIBLE_PLAYBOOK_BIN,
-    ['-i', 'localhost,', '-c', 'local', ...extraVars, POSTGRES_PLAYBOOK],
+    ['-i', 'localhost,', '-c', 'local', POSTGRES_PLAYBOOK],
     {
       cwd: ORCHESTRATION_DIR,
       env: { ANSIBLE_CONFIG: ANSIBLE_CFG },

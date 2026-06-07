@@ -1,7 +1,8 @@
 [Unit]
 Description=TurboPanel instance
-After=network-online.target
+After=network-online.target docker.service
 Wants=network-online.target
+Requires=docker.service
 
 [Service]
 Type=simple
@@ -25,7 +26,7 @@ Environment=TURBOPANEL_PG_HOST=127.0.0.1
 {% else %}
 Environment=TURBOPANEL_PG_SOCKET={{ postgres_socket_dir }}/.s.PGSQL.{{ postgres_port }}
 {% endif %}
-ExecStart={{ turbopanel_runtimes_dir }}/deno/current/deno run --allow-env --allow-sys=networkInterfaces --allow-read=/run/turbopanel,{{ postgres_socket_dir }},{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }}{% if postgres_expose_port | bool %} --allow-net=127.0.0.1:{{ postgres_port }}{% endif %} --allow-write=/run/turbopanel --allow-run=git,systemctl,tar,sudo src/deno.ts
+ExecStart={{ turbopanel_runtimes_dir }}/deno/current/deno run --allow-env --allow-sys=networkInterfaces --allow-read=/run/turbopanel,{{ postgres_socket_dir }},{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }} --allow-write=/run/turbopanel,{{ postgres_socket_dir }}{% if postgres_expose_port | bool %} --allow-net=127.0.0.1:{{ postgres_port }}{% endif %} --allow-run=git,systemctl,tar,sudo src/deno.ts
 Restart=always
 RestartSec=2
 # Deno.serve waits for active WS connections to drain on SIGTERM which can hang

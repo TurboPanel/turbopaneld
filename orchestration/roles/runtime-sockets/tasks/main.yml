@@ -6,6 +6,7 @@
     content: |
       # Managed by TurboPanel daemon orchestration (runtime-sockets role).
       d {{ runtime_socket_dir }} {{ runtime_socket_mode }} {{ runtime_socket_owner }} {{ runtime_socket_group }} -
+      d {{ runtime_socket_dir }}/postgres 2770 999 {{ runtime_socket_group }} -
 
 - name: Apply tmpfiles.d configuration
   ansible.builtin.command:

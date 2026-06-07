@@ -59,6 +59,7 @@ The daemon bootstraps uv/Python/ansible, then runs playbooks. Roles (in `orchest
 | `instance-repo` / `ui-repo` | clone-if-missing checkouts (never force-reset), `pnpm install` |
 | `instance-certs` | platform CA + leaf via the instance cert script |
 | `instance-launch` | `turbopanel-instance` / `turbopanel-caddy` / `turbopanel-ui` units (run as `instance:turbopanel`) |
+| `postgres` | PostgreSQL 18 in Docker; data under `/var/lib/turbopanel/postgres`, Unix socket at `/var/run/turbopanel/postgres` |
 | `docker` / `daemon-repo` / `daemon-config` / `daemon-logs` / `daemon-launch` | agent-node provisioning |
 
 - Co-located **dev** install: `orchestration/playbooks/instance-dev-install.yml`, run by `initOrchestration()` when co-located (socket mode) **and** `TURBOPANEL_DEV_INSTANCE=1`. `develop.sh` in `../turbopanel` sets the flag and installs the daemon unit, which then installs the rest.
@@ -69,7 +70,7 @@ The daemon bootstraps uv/Python/ansible, then runs playbooks. Roles (in `orchest
 - Playbooks: `orchestration/playbooks/`
 - Galaxy roles: `orchestration/requirements.yml` (pinned, installed into `orchestration/roles/`, gitignored)
 - Docker: thin `roles/docker` wrapper around **`geerlingguy.docker`** (Debian Trixie/Raspbian). Skips install when Docker is already running but **always** adds `turbopanel` to the `docker` group (needed on co-located dev hosts where Docker predates the daemon).
-- Bootstrap also runs on every daemon start (idempotent; failures are logged, daemon keeps running)
+- Bootstrap also runs on every daemon start (idempotent; failures are logged, daemon keeps running). After Docker, `postgres-setup.yml` starts `turbopanel-postgres` (`postgres:18`) with the data volume at `/var/lib/turbopanel/postgres` → `/var/lib/postgresql` (PG 18+ layout) and the socket dir bind-mounted to `/var/run/turbopanel/postgres`.
 - Logs are written to both journald and `/var/log/turbopanel/daemon/{daemon.log,daemon.err.log}` when running under systemd (`StandardOutput`/`StandardError` in the unit template). Logrotate policy lives at `/etc/logrotate.d/turbopanel-daemon` (daily, 14 rotations, compress). The log directory is recreated on boot via `/etc/tmpfiles.d/turbopanel-daemon-logs.conf`. The `daemon-logs` role provisions all of this; the official installer runs it via `daemon-launch`, and `initOrchestration()` re-runs `daemon-logs-setup.yml` on every daemon start so existing agents pick it up without a full reinstall.
 
 ### Runtime (systemd only)

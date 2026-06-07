@@ -45,16 +45,38 @@
     mode: "0640"
     force: false
 
-- name: Ensure postgres data and socket directories exist
+# Official postgres image runs as UID/GID 999; bind mounts must be writable there.
+- name: Ensure postgres data directory exists
   ansible.builtin.file:
-    path: "{{ item }}"
+    path: "{{ postgres_data_dir }}"
     state: directory
-    owner: root
+    owner: "{{ postgres_container_uid }}"
+    group: "{{ postgres_container_gid }}"
+    mode: "0700"
+
+- name: Ensure postgres socket directory exists
+  ansible.builtin.file:
+    path: "{{ postgres_socket_dir }}"
+    state: directory
+    owner: "{{ postgres_container_uid }}"
     group: turbopanel
-    mode: "0750"
-  loop:
-    - "{{ postgres_data_dir }}"
-    - "{{ postgres_socket_dir }}"
+    mode: "2770"
+
+- name: Stat legacy pre-PG-18 data subdirectory
+  ansible.builtin.stat:
+    path: "{{ postgres_data_dir }}/data"
+  register: _legacy_pg_data
+
+- name: Stat PG 18 data directory
+  ansible.builtin.stat:
+    path: "{{ postgres_data_dir }}/18/docker/PG_VERSION"
+  register: _pg18_data
+
+- name: Remove legacy pre-PG-18 data subdirectory
+  ansible.builtin.file:
+    path: "{{ postgres_data_dir }}/data"
+    state: absent
+  when: _legacy_pg_data.stat.exists and not _pg18_data.stat.exists
 
 - name: Check postgres container state
   ansible.builtin.command:
@@ -68,6 +90,40 @@
     _postgres_container_exists: "{{ _pg_running.rc == 0 }}"
     _postgres_running: "{{ _pg_running.rc == 0 and _pg_running.stdout | trim == 'true' }}"
 
+- name: Check postgres container uses PG 18+ volume layout
+  ansible.builtin.command:
+    cmd: >-
+      docker inspect --format
+      '{{ '{{' }}range .Mounts{{ '}}' }}{{ '{{' }}if eq .Destination "/var/lib/postgresql"{{ '}}' }}{{ '{{' }}.Destination{{ '}}' }}{{ '{{' }}end{{ '}}' }}{{ '{{' }}end{{ '}}' }}'
+      {{ postgres_container_name }}
+  register: _pg_mount
+  changed_when: false
+  failed_when: false
+  when: _postgres_container_exists | bool
+
+- name: Check postgres container health
+  ansible.builtin.command:
+    cmd: docker inspect --format '{{ '{{' }}.State.Status{{ '}}' }}' {{ postgres_container_name }}
+  register: _pg_status
+  changed_when: false
+  failed_when: false
+  when: _postgres_container_exists | bool
+
+- name: Remove postgres container with legacy or broken configuration
+  ansible.builtin.command:
+    cmd: docker rm -f {{ postgres_container_name }}
+  when:
+    - _postgres_container_exists | bool
+    - (_pg_mount.stdout | default('') | trim != '/var/lib/postgresql') or (_pg_status.stdout | default('') | trim in ['restarting', 'exited', 'dead'])
+  register: _pg_removed
+  changed_when: _pg_removed.rc == 0
+
+- name: Refresh postgres container facts after removal
+  ansible.builtin.set_fact:
+    _postgres_container_exists: false
+    _postgres_running: false
+  when: _pg_removed is changed
+
 - name: Build docker run argument list
   ansible.builtin.set_fact:
     _docker_run_args: "{{ _docker_run_base + (_docker_run_port if postgres_expose_port | bool else []) + [postgres_image] }}"
@@ -79,7 +135,7 @@
       - "unless-stopped"
       - "-d"
       - "-v"
-      - "{{ postgres_data_dir }}:/var/lib/postgresql/data"
+      - "{{ postgres_data_dir }}:/var/lib/postgresql"
       - "-v"
       - "{{ postgres_socket_dir }}:/var/run/postgresql"
       - "-e"
