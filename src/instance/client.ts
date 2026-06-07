@@ -157,10 +157,26 @@ export class InstanceClient {
       try {
         await this.#connectOnce()
       } catch (err) {
-        console.warn(
-          '[instance] websocket connect failed:',
-          err instanceof Error ? err.message : err,
-        )
+        const errMsg = err instanceof Error ? err.message : String(err)
+        console.warn('[instance] websocket connect failed:', errMsg)
+        // #region agent log
+        fetch('http://localhost:7686/ingest/1326dc58-69fc-4780-871a-d504ad5cb2c6', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Debug-Session-Id': '9bf570',
+          },
+          body: JSON.stringify({
+            sessionId: '9bf570',
+            runId: 'pre-fix',
+            hypothesisId: 'H1',
+            location: 'client.ts:runConnectLoop',
+            message: 'connectOnce failed',
+            data: { errMsg, target: this.target, wsOpen: this.#ws?.readyState },
+            timestamp: Date.now(),
+          }),
+        }).catch(() => {})
+        // #endregion
       }
 
       if (this.#stopped) break
