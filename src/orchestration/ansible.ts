@@ -240,9 +240,8 @@ export async function runDockerSetup(): Promise<void> {
  * Run PostgreSQL 18 in Docker with persistent data and connection metadata
  * under /etc/turbopanel/postgres/.
  *
- * Co-located dev (`instance-dev-install.yml`) sets `postgres_expose_port=true`
- * (TCP `127.0.0.1:5432` for drizzle-kit). Production uses Unix socket only
- * (`/var/run/turbopanel/postgres`).
+ * Co-located dev uses `instance-dev-install.yml` (postgres with Unix socket always
+ * available). This playbook is for agent-only hosts that also need socket-only Postgres.
  *
  * Requires Docker (run after {@link runDockerSetup}) and passwordless sudo.
  */

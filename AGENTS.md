@@ -40,7 +40,7 @@ Two modes in `src/instance/paths.ts`:
 | `url` | `TURBOPANEL_INSTANCE_URL` set (installed agents) | `https://<host>:<port>` / `wss://…/ws/daemon/v1` through Caddy |
 | `socket` | No URL (co-located dev on the instance host) | `unix:///run/turbopanel/turbopanel.sock` |
 
-On connect the daemon sends a `hello` with `hostname` (`Deno.hostname()`) and `nodeId` (`/etc/machine-id`). The instance uses these (and `X-Real-IP` from Caddy) to dedupe reconnects. The daemon dials the versioned WS path **`/ws/daemon/v1`** and reads `GET /api/daemon/v1/version` / `GET /api/daemon/v1/instance/ca`.
+On connect the daemon sends a `hello` with `hostname`, optional persisted `serverId` (`/etc/turbopanel/daemon/server.id`), and `machineId` (`/etc/machine-id`) for first-time registration. The instance resolves a canonical **`servers.id`** (uuidv7), replies with `serverId` in `hello`, and dedupes reconnects by `serverId` / `X-Real-IP` / `hostname`. The daemon dials **`/ws/daemon/v1`** and reads `GET /api/daemon/v1/version` / `GET /api/daemon/v1/instance/ca`.
 
 Install flow: official installer (separate CDN repo) → `scripts/bootstrap-orchestration.sh` (uv, Python, ansible, **Galaxy roles**) → `orchestration/playbooks/agent-install.yml`. Docker is installed in that playbook and again at daemon startup via `initOrchestration()` in `src/orchestration/setup.ts`.
 
@@ -62,7 +62,7 @@ The daemon bootstraps uv/Python/ansible, then runs playbooks. Roles (in `orchest
 | `postgres` | PostgreSQL 18 in Docker; data under `/var/lib/turbopanel/postgres`, Unix socket at `/var/run/turbopanel/postgres` |
 | `docker` / `daemon-repo` / `daemon-config` / `daemon-logs` / `daemon-launch` | agent-node provisioning |
 
-- Co-located **dev** install: `orchestration/playbooks/instance-dev-install.yml`, run by `initOrchestration()` when co-located (socket mode) **and** `TURBOPANEL_DEV_INSTANCE=1`. `develop.sh` in `../turbopanel` sets the flag and installs the daemon unit, which then installs the rest.
+- Co-located **dev** install: `orchestration/playbooks/instance-dev-install.yml`, run by `initOrchestration()` when co-located (socket mode) **and** `TURBOPANEL_DEV_INSTANCE=1`. `develop.sh` in `../turbopanel` sets the flag and installs the daemon unit, which then installs the rest. Dev bootstrap **skips** `postgres-setup.yml` and lets `instance-dev-install` own Postgres. The Docker container always publishes a Unix socket; the instance and drizzle-kit connect via `TURBOPANEL_PG_SOCKET` (TCP port exposure is optional via `postgres_expose_port`, off in dev).
 - Production prebuilt instance/UI artifacts and static UI hosting are **out of scope** (seams/comments only).
 
 ## Orchestration

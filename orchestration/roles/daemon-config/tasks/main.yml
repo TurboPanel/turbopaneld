@@ -1,4 +1,12 @@
 ---
+- name: Ensure daemon state directory
+  ansible.builtin.file:
+    path: /etc/turbopanel/daemon
+    state: directory
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
 - name: Ensure platform CA directory
   when: turbopanel_instance_ca | length > 0
   ansible.builtin.file:

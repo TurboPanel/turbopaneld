@@ -29,8 +29,8 @@
     ui_branch: trunk
     turbopanel_ui_mode: dev
     instance_start: true
-    # Dev: TCP on 127.0.0.1:5432 (drizzle-kit/node-postgres). Prod keeps Unix socket only.
-    postgres_expose_port: true
+    # Unix socket is always available; instance and drizzle-kit connect via socket.
+    postgres_expose_port: false
 
   roles:
     - role: runtime-sockets

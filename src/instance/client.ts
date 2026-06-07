@@ -17,7 +17,8 @@ type DaemonMessage =
     from: 'instance' | 'daemon'
     at: string
     hostname?: string
-    nodeId?: string
+    serverId?: string
+    machineId?: string
   }
   | { type: 'ping'; id: string; at: string }
   | { type: 'pong'; id: string; at: string }
@@ -64,13 +65,36 @@ export interface InstanceClientOptions {
   onMessage?: (message: DaemonMessage) => void
 }
 
-async function readNodeId(): Promise<string | undefined> {
+const SERVER_ID_PATH = '/etc/turbopanel/daemon/server.id'
+
+async function readMachineId(): Promise<string | undefined> {
   try {
     const id = await Deno.readTextFile('/etc/machine-id')
     const trimmed = id.trim()
     return trimmed.length > 0 ? trimmed : undefined
   } catch {
     return undefined
+  }
+}
+
+async function readServerId(): Promise<string | undefined> {
+  try {
+    const id = await Deno.readTextFile(SERVER_ID_PATH)
+    const trimmed = id.trim()
+    return trimmed.length > 0 ? trimmed : undefined
+  } catch {
+    return undefined
+  }
+}
+
+async function writeServerId(serverId: string): Promise<void> {
+  const trimmed = serverId.trim()
+  if (!trimmed) return
+  try {
+    await Deno.mkdir('/etc/turbopanel/daemon', { recursive: true })
+    await Deno.writeTextFile(SERVER_ID_PATH, `${trimmed}\n`)
+  } catch (err) {
+    console.warn('[instance] failed to persist server id:', err)
   }
 }
 
@@ -251,7 +275,8 @@ export class InstanceClient {
       type: 'hello',
       from: 'daemon',
       hostname: Deno.hostname(),
-      nodeId: await readNodeId(),
+      serverId: await readServerId(),
+      machineId: await readMachineId(),
       at: new Date().toISOString(),
     }
     ws.send(JSON.stringify(hello))
@@ -283,10 +308,13 @@ export class InstanceClient {
   #handleMessage(message: DaemonMessage, ws: WebSocket): void {
     switch (message.type) {
       case 'hello':
+        if (message.from === 'instance' && message.serverId) {
+          void writeServerId(message.serverId)
+        }
         console.log(
           '[instance] hello from',
           message.from,
-          message.hostname ?? '(no hostname)',
+          message.hostname ?? message.serverId ?? '(no identity)',
           'at',
           message.at,
         )

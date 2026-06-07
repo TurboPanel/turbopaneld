@@ -37,6 +37,7 @@ function shouldInstallDevInstance(): boolean {
 export async function initOrchestration(): Promise<boolean> {
   const started = performance.now()
   console.log('[orchestration] bootstrapping runtime')
+  const devInstance = shouldInstallDevInstance()
   const steps = [
     ['ensureUv', ensureUv],
     ['ensurePython', ensurePython],
@@ -46,8 +47,10 @@ export async function initOrchestration(): Promise<boolean> {
     ['runSocketDirsSetup', runSocketDirsSetup],
     ['runDaemonLogsSetup', runDaemonLogsSetup],
     ['runDockerSetup', runDockerSetup],
-    ['runPostgresSetup', runPostgresSetup],
-    ...(shouldInstallDevInstance()
+    // Co-located dev installs postgres via instance-dev-install (Unix socket
+    // always available). Running postgres-setup first races the dev playbook.
+    ...(!devInstance ? [['runPostgresSetup', runPostgresSetup] as const] : []),
+    ...(devInstance
       ? [['runInstanceDevInstall', runInstanceDevInstall] as const]
       : []),
   ] as const
