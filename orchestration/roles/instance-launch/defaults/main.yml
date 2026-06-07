@@ -14,6 +14,7 @@ caddy_service_name: turbopanel-caddy
 ui_service_name: turbopanel-ui
 caddy_port: 8443
 expo_port: 8081
+drizzle_studio_port: 4983
 # "dev" proxies Caddy to the Expo dev server (turbopanel-ui.service);
 # "static" serves the exported web build from {{ turbopanel_ui_dir }}/dist.
 turbopanel_ui_mode: dev
