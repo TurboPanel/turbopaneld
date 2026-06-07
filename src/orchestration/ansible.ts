@@ -8,6 +8,7 @@ import {
   SOCKET_DIRS_PLAYBOOK,
   DAEMON_LOGS_PLAYBOOK,
   DAEMON_SYSTEMD_PLAYBOOK,
+  INSTANCE_DEV_INSTALL_PLAYBOOK,
   LOCALHOST_PLAYBOOK,
   ORCHESTRATION_DIR,
   PYTHON_VERSION,
@@ -184,6 +185,30 @@ export async function runDaemonSystemdSetup(): Promise<void> {
     },
   )
   console.log('[orchestration] daemon-systemd-setup complete')
+}
+
+/**
+ * Install the co-located self-hosted instance + UI + Caddy in development mode.
+ *
+ * Runs the instance-dev-install playbook, which creates the `instance` user,
+ * vendors Node/Caddy, ensures the instance/UI checkouts and dependencies, mints
+ * the platform certs, and installs the instance/caddy/ui systemd units. The
+ * daemon is the always-installed party that owns these installs/updates.
+ *
+ * Idempotent and safe to re-run; never force-resets a dev working tree.
+ * Requires passwordless sudo (the turbopanel user has this).
+ */
+export async function runInstanceDevInstall(): Promise<void> {
+  console.log('[orchestration] running instance-dev-install playbook')
+  await runOrThrow(
+    ANSIBLE_PLAYBOOK_BIN,
+    ['-i', 'localhost,', '-c', 'local', INSTANCE_DEV_INSTALL_PLAYBOOK],
+    {
+      cwd: ORCHESTRATION_DIR,
+      env: { ANSIBLE_CONFIG: ANSIBLE_CFG },
+    },
+  )
+  console.log('[orchestration] instance-dev-install complete')
 }
 
 /**

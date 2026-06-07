@@ -1,0 +1,19 @@
+[Unit]
+Description=TurboPanel UI (Expo web dev server)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ instance_user }}
+Group={{ turbopanel_group }}
+WorkingDirectory={{ turbopanel_ui_dir }}
+Environment=HOME={{ turbopanel_ui_dir }}
+Environment=PATH=/usr/local/bin:{{ turbopanel_runtimes_dir }}/node/current/bin:/usr/bin:/bin
+Environment=CI=1
+ExecStart=/usr/local/bin/pnpm exec expo start --web --port {{ expo_port }}
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,5 @@
+---
+turbopanel_runtimes_dir: /opt/turbopanel/runtimes
+# Node is needed for the instance's cert generation script and to build/run the
+# Expo UI in development. Pinned for reproducible, fast installs.
+node_version: "22.14.0"

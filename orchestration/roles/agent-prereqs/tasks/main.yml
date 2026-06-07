@@ -8,8 +8,8 @@
       - gnupg
       - iptables
       - python3-debian
-      - screen
       - tar
       - unzip
+      - xz-utils
     state: present
     update_cache: true

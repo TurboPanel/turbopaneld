@@ -1,0 +1,19 @@
+[Unit]
+Description=TurboPanel instance
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ instance_user }}
+Group={{ turbopanel_group }}
+WorkingDirectory={{ turbopanel_instance_dir }}
+Environment=HOME={{ turbopanel_instance_dir }}
+Environment=PATH={{ turbopanel_runtimes_dir }}/deno/current:{{ turbopanel_runtimes_dir }}/caddy/current:/usr/local/bin:/usr/bin:/bin
+Environment=TURBOPANEL_INSTANCE_SERVICE={{ instance_service_name }}
+ExecStart={{ turbopanel_runtimes_dir }}/deno/current/deno run --allow-env --allow-sys=networkInterfaces --allow-read=/run/turbopanel,{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }} --allow-write=/run/turbopanel --allow-run=git,systemctl src/deno.ts
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

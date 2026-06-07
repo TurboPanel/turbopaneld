@@ -78,7 +78,7 @@ export function instanceUrl(config: InstanceConfig, path: string): string {
 
 export function instanceWebSocketUrl(
   config: InstanceConfig,
-  path = '/ws',
+  path = '/ws/daemon/v1',
 ): string {
   const base = config.kind === 'url' ? config.wsBaseUrl : INSTANCE_WS_ORIGIN
   return joinPath(base, path)
@@ -103,8 +103,8 @@ export interface InstanceHttpClientOptions {
  *   is used (valid public certs).
  *
  * To skip certificate validation entirely (not recommended), run Deno with
- * `--unsafely-ignore-certificate-errors`; the agent Tiltfile adds that flag when
- * `TURBOPANEL_TLS_INSECURE=1`.
+ * `--unsafely-ignore-certificate-errors` (the daemon systemd unit can add that
+ * flag when `TURBOPANEL_TLS_INSECURE=1`).
  */
 export async function createInstanceHttpClient(
   config: InstanceConfig,

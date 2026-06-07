@@ -1,0 +1,23 @@
+---
+# Co-located dev hosts already have the instance checkout as the live working
+# tree, so we clone only when it is missing and never force-reset it (that would
+# clobber uncommitted developer work). Production artifact deploys are handled
+# separately and are out of scope here.
+- name: Check instance checkout
+  ansible.builtin.stat:
+    path: "{{ turbopanel_instance_dir }}/.git"
+  register: _instance_git
+
+- name: Clone instance repository when missing
+  when: not _instance_git.stat.exists
+  ansible.builtin.git:
+    repo: "{{ instance_repo_url }}"
+    dest: "{{ turbopanel_instance_dir }}"
+    version: "{{ instance_branch }}"
+  become_user: "{{ instance_user }}"
+
+- name: Report instance checkout state
+  ansible.builtin.debug:
+    msg: >-
+      instance checkout {{ 'present (left untouched)' if _instance_git.stat.exists
+      else 'cloned from ' + instance_repo_url }}

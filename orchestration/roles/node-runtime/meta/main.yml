@@ -1,0 +1,17 @@
+---
+galaxy_info:
+  author: turbopanel
+  description: >-
+    Install a pinned Node.js runtime (and pnpm via corepack) into the shared
+    runtimes directory for the cert tooling and Expo UI.
+  license: MIT
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Debian
+      versions:
+        - all
+    - name: Raspbian
+      versions:
+        - all
+
+dependencies: []

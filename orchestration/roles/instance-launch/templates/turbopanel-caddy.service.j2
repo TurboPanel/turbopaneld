@@ -1,0 +1,24 @@
+[Unit]
+Description=TurboPanel Caddy reverse proxy
+After=network-online.target {{ instance_service_name }}.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ instance_user }}
+Group={{ turbopanel_group }}
+WorkingDirectory={{ turbopanel_instance_dir }}
+Environment=HOME={{ turbopanel_instance_dir }}
+Environment=XDG_DATA_HOME={{ turbopanel_instance_dir }}/.local/share
+Environment=XDG_CONFIG_HOME={{ turbopanel_instance_dir }}/.config
+Environment=CADDY_PORT={{ caddy_port }}
+Environment=TURBOPANEL_SOCKET_DIAL=run/turbopanel/turbopanel.sock
+Environment=TURBOPANEL_UI_MODE={{ turbopanel_ui_mode }}
+Environment=EXPO_PORT={{ expo_port }}
+Environment=TURBOPANEL_UI_ROOT={{ turbopanel_ui_dir }}/dist
+ExecStart={{ turbopanel_runtimes_dir }}/caddy/current/caddy run --config {{ turbopanel_instance_dir }}/Caddyfile --adapter caddyfile
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

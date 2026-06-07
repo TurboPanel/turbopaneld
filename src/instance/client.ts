@@ -7,6 +7,9 @@ import {
   resolveInstanceConfig,
 } from './paths.ts'
 import { collectServerAddresses } from '../server-addresses.ts'
+import { applyDevSyncTarball, type DevSyncState, newDevSyncState } from '../dev-sync-apply.ts'
+import { writeInstanceTunnelToken } from '../tunnels.ts'
+import { decodeBase64 } from 'jsr:@std/encoding@1/base64'
 
 type DaemonMessage =
   | {
@@ -41,6 +44,18 @@ type DaemonMessage =
     }
     at: string
   }
+  | {
+    type: 'dev-sync-begin'
+    id: string
+    totalChunks: number
+    totalBytes: number
+    at: string
+  }
+  | { type: 'dev-sync-chunk'; id: string; index: number; data: string; at: string }
+  | { type: 'dev-sync-end'; id: string; at: string }
+  | { type: 'dev-sync-result'; id: string; ok: boolean; error?: string; at: string }
+  | { type: 'tunnel-token'; id: string; token: string; at: string }
+  | { type: 'tunnel-token-result'; id: string; ok: boolean; error?: string; at: string }
 
 export interface InstanceClientOptions {
   config?: InstanceConfig
@@ -76,6 +91,7 @@ export class InstanceClient {
   #ws: WebSocket | undefined
   #stopped = false
   #connectLoop: Promise<void> | undefined
+  #devSync = new Map<string, DevSyncState>()
 
   constructor(options: InstanceClientOptions = {}) {
     this.#config = options.config ?? resolveInstanceConfig()
@@ -111,7 +127,7 @@ export class InstanceClient {
 
   async fetchVersion(): Promise<{ commit: string; branch: string }> {
     const response = await fetch(
-      instanceUrl(this.#config, '/api/daemon/version'),
+      instanceUrl(this.#config, '/api/daemon/v1/version'),
       this.#fetchInit(),
     )
     if (!response.ok) {
@@ -124,7 +140,7 @@ export class InstanceClient {
     { connections: { id: string; connectedAt: string }[] }
   > {
     const response = await fetch(
-      instanceUrl(this.#config, '/api/daemon/connections'),
+      instanceUrl(this.#config, '/api/admin/v1/daemon/connections'),
       this.#fetchInit(),
     )
     if (!response.ok) {
@@ -170,7 +186,7 @@ export class InstanceClient {
   }
 
   #newWebSocket(): WebSocket {
-    const url = instanceWebSocketUrl(this.#config, '/ws')
+    const url = instanceWebSocketUrl(this.#config, '/ws/daemon/v1')
     return this.#httpClient
       ? new WebSocket(url, { client: this.#httpClient })
       : new WebSocket(url)
@@ -284,7 +300,8 @@ export class InstanceClient {
         console.log('[instance] pong', message.id)
         break
       case 'version':
-        // Handled by the updater via the onMessage hook.
+        // Informational only. The daemon never self-updates; updates are
+        // operator-driven via the admin upgrade button / dev-sync push.
         break
       case 'echo':
         console.log('[instance] echo from instance:', message.payload)
@@ -302,7 +319,75 @@ export class InstanceClient {
       case 'addresses-request':
         void this.#collectAddresses(message, ws)
         break
+      case 'dev-sync-begin':
+        this.#devSync.set(message.id, newDevSyncState(message.totalChunks))
+        break
+      case 'dev-sync-chunk': {
+        const state = this.#devSync.get(message.id)
+        if (state) state.chunks[message.index] = message.data
+        break
+      }
+      case 'dev-sync-end':
+        void this.#applyDevSync(message.id, ws)
+        break
+      case 'tunnel-token':
+        void this.#applyTunnelToken(message, ws)
+        break
     }
+  }
+
+  async #applyDevSync(id: string, ws: WebSocket): Promise<void> {
+    const state = this.#devSync.get(id)
+    this.#devSync.delete(id)
+    let ok = false
+    let error: string | undefined
+    try {
+      if (!state) throw new Error('no dev-sync in progress for this id')
+      const base64 = state.chunks.join('')
+      const bytes = decodeBase64(base64)
+      await applyDevSyncTarball(bytes)
+      ok = true
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err)
+      console.error('[dev-sync] failed:', error)
+    }
+
+    const result: DaemonMessage = {
+      type: 'dev-sync-result',
+      id,
+      ok,
+      error,
+      at: new Date().toISOString(),
+    }
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result))
+
+    // Restart only after acking success, so the instance sees the result before
+    // this process is replaced by the freshly-synced build.
+    if (ok) await restartDaemonService()
+  }
+
+  async #applyTunnelToken(
+    message: Extract<DaemonMessage, { type: 'tunnel-token' }>,
+    ws: WebSocket,
+  ): Promise<void> {
+    let ok = false
+    let error: string | undefined
+    try {
+      await writeInstanceTunnelToken(message.token)
+      ok = true
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err)
+      console.error('[tunnel-token] failed:', error)
+    }
+
+    const result: DaemonMessage = {
+      type: 'tunnel-token-result',
+      id: message.id,
+      ok,
+      error,
+      at: new Date().toISOString(),
+    }
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result))
   }
 
   async #collectAddresses(
@@ -379,6 +464,32 @@ export class InstanceClient {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** Ask systemd to restart this daemon (used after a dev-sync swap). */
+async function restartDaemonService(): Promise<void> {
+  const unit = Deno.env.get('TURBOPANEL_SERVICE_NAME')?.trim() ||
+    'turbopanel-daemon'
+  try {
+    const result = await new Deno.Command('systemctl', {
+      args: ['restart', unit],
+      stdin: 'null',
+      stdout: 'piped',
+      stderr: 'piped',
+    }).output()
+    if (!result.success) {
+      console.warn(
+        `[dev-sync] systemctl restart ${unit} failed: ${
+          new TextDecoder().decode(result.stderr).trim() || 'unknown error'
+        }`,
+      )
+    }
+  } catch (err) {
+    console.warn(
+      '[dev-sync] restart failed:',
+      err instanceof Error ? err.message : err,
+    )
+  }
 }
 
 export async function connectInstance(

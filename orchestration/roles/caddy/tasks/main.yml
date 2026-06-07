@@ -1,0 +1,35 @@
+---
+- name: Resolve Caddy release architecture
+  ansible.builtin.set_fact:
+    caddy_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
+
+- name: Check vendored Caddy binary
+  ansible.builtin.stat:
+    path: "{{ turbopanel_runtimes_dir }}/caddy/current/caddy"
+  register: _caddy_current
+
+- name: Install Caddy into runtimes directory
+  when: not _caddy_current.stat.exists
+  ansible.builtin.shell: |
+    set -euo pipefail
+    CADDY_VER="{{ caddy_version }}"
+    CADDY_NUM="${CADDY_VER#v}"
+    CADDY_ARCH="{{ caddy_arch }}"
+    TMP="$(mktemp -d)"
+    ASSET="caddy_${CADDY_NUM}_linux_${CADDY_ARCH}.tar.gz"
+    curl -fsSL -o "$TMP/$ASSET" \
+      "https://github.com/caddyserver/caddy/releases/download/${CADDY_VER}/${ASSET}"
+    tar -xzf "$TMP/$ASSET" -C "$TMP" caddy
+    install -d "{{ turbopanel_runtimes_dir }}/caddy/versions/${CADDY_VER}"
+    install -m 0755 "$TMP/caddy" "{{ turbopanel_runtimes_dir }}/caddy/versions/${CADDY_VER}/caddy"
+    ln -sfn "versions/${CADDY_VER}" "{{ turbopanel_runtimes_dir }}/caddy/current"
+    rm -rf "$TMP"
+  args:
+    creates: "{{ turbopanel_runtimes_dir }}/caddy/current/caddy"
+
+- name: Link caddy into /usr/local/bin
+  ansible.builtin.file:
+    src: "{{ turbopanel_runtimes_dir }}/caddy/current/caddy"
+    dest: /usr/local/bin/caddy
+    state: link
+    force: true

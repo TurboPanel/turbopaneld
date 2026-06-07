@@ -1,0 +1,24 @@
+---
+- name: Reload systemd for instance units
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Restart turbopanel instance
+  ansible.builtin.systemd:
+    name: "{{ instance_service_name }}"
+    state: restarted
+  when: instance_start | bool
+
+- name: Restart turbopanel caddy
+  ansible.builtin.systemd:
+    name: "{{ caddy_service_name }}"
+    state: restarted
+  when: instance_start | bool
+
+- name: Restart turbopanel ui
+  ansible.builtin.systemd:
+    name: "{{ ui_service_name }}"
+    state: restarted
+  when:
+    - instance_start | bool
+    - turbopanel_ui_mode == 'dev'

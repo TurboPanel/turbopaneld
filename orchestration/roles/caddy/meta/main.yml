@@ -1,0 +1,17 @@
+---
+galaxy_info:
+  author: turbopanel
+  description: >-
+    Install a pinned Caddy binary into the shared runtimes directory to
+    terminate TLS and reverse-proxy the self-hosted instance.
+  license: MIT
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Debian
+      versions:
+        - all
+    - name: Raspbian
+      versions:
+        - all
+
+dependencies: []

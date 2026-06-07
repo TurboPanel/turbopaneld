@@ -1,0 +1,32 @@
+---
+# Like instance-repo: clone only when missing so a live dev working tree is
+# never force-reset. Static production builds are out of scope.
+- name: Check UI checkout
+  ansible.builtin.stat:
+    path: "{{ turbopanel_ui_dir }}/.git"
+  register: _ui_git
+
+- name: Clone UI repository when missing
+  when: not _ui_git.stat.exists
+  ansible.builtin.git:
+    repo: "{{ ui_repo_url }}"
+    dest: "{{ turbopanel_ui_dir }}"
+    version: "{{ ui_branch }}"
+  become_user: "{{ instance_user }}"
+
+- name: Check UI dependencies
+  ansible.builtin.stat:
+    path: "{{ turbopanel_ui_dir }}/node_modules"
+  register: _ui_modules
+
+# Speed: only run the slow install when node_modules is absent. Developers
+# re-run `pnpm install` manually after changing dependencies.
+- name: Install UI dependencies
+  when: not _ui_modules.stat.exists
+  ansible.builtin.command:
+    cmd: pnpm install --frozen-lockfile
+    chdir: "{{ turbopanel_ui_dir }}"
+  become_user: "{{ instance_user }}"
+  environment:
+    HOME: "{{ turbopanel_ui_dir }}"
+    PATH: "/usr/local/bin:{{ turbopanel_runtimes_dir }}/node/current/bin:/usr/bin:/bin"

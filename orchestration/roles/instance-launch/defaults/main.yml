@@ -1,0 +1,17 @@
+---
+turbopanel_install_root: /opt/turbopanel
+turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/runtimes"
+turbopanel_daemon_dir: "{{ turbopanel_install_root }}/platform/daemon"
+turbopanel_instance_dir: "{{ turbopanel_install_root }}/platform/turbopanel"
+turbopanel_ui_dir: "{{ turbopanel_install_root }}/platform/ui"
+instance_user: instance
+turbopanel_group: turbopanel
+instance_service_name: turbopanel-instance
+caddy_service_name: turbopanel-caddy
+ui_service_name: turbopanel-ui
+caddy_port: 8443
+expo_port: 8081
+# "dev" proxies Caddy to the Expo dev server (turbopanel-ui.service);
+# "static" serves the exported web build from {{ turbopanel_ui_dir }}/dist.
+turbopanel_ui_mode: dev
+instance_start: true

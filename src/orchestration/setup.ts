@@ -2,12 +2,25 @@ import {
   ensureAnsible,
   ensureGalaxyRoles,
   runDockerSetup,
+  runInstanceDevInstall,
   runLocalhostTest,
   runSocketDirsSetup,
   runDaemonLogsSetup,
 } from './ansible.ts'
 import { ensurePython } from './python.ts'
 import { ensureUv } from './uv.ts'
+import { resolveInstanceConfig } from '../instance/paths.ts'
+
+/**
+ * True when this daemon should also install the co-located self-hosted
+ * instance + UI in development mode: it must be co-located (Unix-socket mode,
+ * no `TURBOPANEL_INSTANCE_URL`) and `TURBOPANEL_DEV_INSTANCE` must be truthy.
+ */
+function shouldInstallDevInstance(): boolean {
+  const flag = Deno.env.get('TURBOPANEL_DEV_INSTANCE')?.trim().toLowerCase()
+  const enabled = flag === '1' || flag === 'true' || flag === 'yes'
+  return enabled && resolveInstanceConfig().kind === 'socket'
+}
 
 /**
  * Bootstrap the orchestration runtime on daemon startup.
@@ -32,6 +45,9 @@ export async function initOrchestration(): Promise<boolean> {
     ['runSocketDirsSetup', runSocketDirsSetup],
     ['runDaemonLogsSetup', runDaemonLogsSetup],
     ['runDockerSetup', runDockerSetup],
+    ...(shouldInstallDevInstance()
+      ? [['runInstanceDevInstall', runInstanceDevInstall] as const]
+      : []),
   ] as const
   try {
     for (const [, step] of steps) {

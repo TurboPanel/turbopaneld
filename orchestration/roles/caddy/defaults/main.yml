@@ -1,0 +1,4 @@
+---
+turbopanel_runtimes_dir: /opt/turbopanel/runtimes
+# Pinned to match scripts/download-caddy.mjs in the instance repo.
+caddy_version: "v2.10.2"

@@ -1,12 +1,15 @@
 ---
 # Install turbopanel-daemon.service for co-located dev or agent nodes.
 # Co-located hosts set turbopanel_after_instance_service so the daemon starts
-# after the instance Tilt stack (turbopanel-instance.service).
+# after the instance stack (turbopanel-instance.service).
+#
+# Self-sufficient for fresh co-located dev hosts: ensures prerequisites and the
+# turbopanel user/group before installing the unit. All roles are idempotent.
 - name: Install TurboPanel daemon systemd unit
   hosts: localhost
   connection: local
   become: true
-  gather_facts: false
+  gather_facts: true
 
   vars:
     turbopanel_install_root: /opt/turbopanel
@@ -14,11 +17,15 @@
     turbopanel_daemon_dir: "{{ turbopanel_install_root }}/platform/daemon"
     turbopanel_user: turbopanel
     turbopanel_group: turbopanel
+    turbopanel_uid: 9999
+    turbopanel_gid: 9999
     turbopanel_service_name: turbopanel-daemon
     turbopanel_start: true
     turbopanel_after_instance_service: false
 
   roles:
+    - role: agent-prereqs
+    - role: turbopanel-user
     - role: deno-runtime
     - role: daemon-logs
     - role: daemon-launch

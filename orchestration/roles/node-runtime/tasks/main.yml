@@ -1,0 +1,47 @@
+---
+- name: Resolve Node release architecture
+  ansible.builtin.set_fact:
+    node_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'x64' }}"
+
+- name: Check vendored Node binary
+  ansible.builtin.stat:
+    path: "{{ turbopanel_runtimes_dir }}/node/current/bin/node"
+  register: _node_current
+
+- name: Install Node into runtimes directory
+  when: not _node_current.stat.exists
+  ansible.builtin.shell: |
+    set -euo pipefail
+    NODE_VER="v{{ node_version }}"
+    NODE_ARCH="{{ node_arch }}"
+    NODE_DIR="node-${NODE_VER}-linux-${NODE_ARCH}"
+    NODE_TMP="{{ turbopanel_runtimes_dir }}/node/.install"
+    rm -rf "$NODE_TMP"
+    mkdir -p "$NODE_TMP"
+    curl -fsSL -o "$NODE_TMP/${NODE_DIR}.tar.xz" \
+      "https://nodejs.org/dist/${NODE_VER}/${NODE_DIR}.tar.xz"
+    tar -xJf "$NODE_TMP/${NODE_DIR}.tar.xz" -C "$NODE_TMP"
+    install -d "{{ turbopanel_runtimes_dir }}/node/${NODE_VER}"
+    cp -a "$NODE_TMP/${NODE_DIR}/." "{{ turbopanel_runtimes_dir }}/node/${NODE_VER}/"
+    rm -rf "$NODE_TMP"
+    ln -sfn "{{ turbopanel_runtimes_dir }}/node/${NODE_VER}" "{{ turbopanel_runtimes_dir }}/node/current"
+  args:
+    creates: "{{ turbopanel_runtimes_dir }}/node/current/bin/node"
+
+- name: Enable pnpm via corepack
+  ansible.builtin.command:
+    cmd: "{{ turbopanel_runtimes_dir }}/node/current/bin/corepack enable pnpm"
+    creates: "{{ turbopanel_runtimes_dir }}/node/current/bin/pnpm"
+
+- name: Link Node toolchain into /usr/local/bin
+  ansible.builtin.file:
+    src: "{{ turbopanel_runtimes_dir }}/node/current/bin/{{ item }}"
+    dest: "/usr/local/bin/{{ item }}"
+    state: link
+    force: true
+  loop:
+    - node
+    - npm
+    - npx
+    - corepack
+    - pnpm

@@ -4,7 +4,7 @@
     path: "{{ turbopanel_daemon_dir }}/scripts/ensure-single-daemon.sh"
     mode: "0755"
 
-- name: Stop legacy Tilt daemon launcher when present
+- name: Run one-time legacy cleanup (Tilt + obsolete dev units)
   ansible.builtin.command:
     cmd: "{{ turbopanel_daemon_dir }}/scripts/ensure-single-daemon.sh"
   environment:

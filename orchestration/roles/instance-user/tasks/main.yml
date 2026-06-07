@@ -1,0 +1,19 @@
+---
+# Requires the turbopanel group to already exist (turbopanel-user role).
+- name: Ensure instance user (member of turbopanel group, no own group)
+  ansible.builtin.user:
+    name: "{{ instance_user }}"
+    uid: "{{ instance_uid }}"
+    group: "{{ turbopanel_group }}"
+    home: "{{ turbopanel_instance_dir }}"
+    shell: /usr/sbin/nologin
+    system: true
+    create_home: false
+
+- name: Ensure instance checkout directory owned by instance:turbopanel
+  ansible.builtin.file:
+    path: "{{ turbopanel_instance_dir }}"
+    state: directory
+    owner: "{{ instance_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "2750"

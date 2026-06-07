@@ -1,0 +1,7 @@
+---
+turbopanel_install_root: /opt/turbopanel
+turbopanel_instance_dir: "{{ turbopanel_install_root }}/platform/turbopanel"
+instance_user: instance
+turbopanel_group: turbopanel
+instance_repo_url: https://github.com/turbopanel/turbopanel
+instance_branch: trunk

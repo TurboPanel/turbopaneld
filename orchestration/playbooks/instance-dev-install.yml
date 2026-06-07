@@ -1,0 +1,41 @@
+---
+# Install the co-located self-hosted instance + UI + Caddy in DEVELOPMENT mode.
+#
+# Run by the always-installed daemon (which owns all installs/updates) when it
+# is co-located and TURBOPANEL_DEV_INSTANCE=1. The daemon's own bootstrap has
+# already created the turbopanel user/group and the /run/turbopanel socket dir.
+#
+# Every role is idempotent and never force-resets an existing dev working tree.
+# Production artifact builds (static UI, prebuilt instance) are out of scope.
+- name: TurboPanel co-located dev instance install
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    turbopanel_install_root: /opt/turbopanel
+    turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/runtimes"
+    turbopanel_platform_dir: "{{ turbopanel_install_root }}/platform"
+    turbopanel_daemon_dir: "{{ turbopanel_platform_dir }}/daemon"
+    turbopanel_instance_dir: "{{ turbopanel_platform_dir }}/turbopanel"
+    turbopanel_ui_dir: "{{ turbopanel_platform_dir }}/ui"
+    turbopanel_group: turbopanel
+    instance_user: instance
+    instance_uid: 9998
+    instance_repo_url: https://github.com/turbopanel/turbopanel
+    ui_repo_url: https://github.com/turbopanel/turbopanel-ui
+    instance_branch: trunk
+    ui_branch: trunk
+    turbopanel_ui_mode: dev
+    instance_start: true
+
+  roles:
+    - role: runtime-sockets
+    - role: instance-user
+    - role: node-runtime
+    - role: caddy
+    - role: instance-repo
+    - role: ui-repo
+    - role: instance-certs
+    - role: instance-launch

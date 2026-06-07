@@ -100,4 +100,4 @@ sudo ANSIBLE_CONFIG=/opt/turbopanel/platform/daemon/orchestration/ansible.cfg \
 
 ## Local development
 
-**Agent nodes and co-located dev** both run the daemon under **`turbopanel-daemon.service`** (systemd), not Tilt. On a host that also runs the instance, install the unit with `scripts/install-daemon-systemd.sh` after `turbopanel-instance.service` is up. The daemon dials the instance over the Unix socket when `TURBOPANEL_INSTANCE_URL` is unset in `.env`, or over the network when the installer set a URL.
+**Agent nodes and co-located dev** both run the daemon under **`turbopanel-daemon.service`** (systemd). On a host that also runs the instance, install the unit with `scripts/install-daemon-systemd.sh` after `turbopanel-instance.service` is up. The daemon dials the instance over the Unix socket when `TURBOPANEL_INSTANCE_URL` is unset in `.env`, or over the network when the installer set a URL.

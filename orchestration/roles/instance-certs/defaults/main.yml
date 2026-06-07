@@ -1,0 +1,5 @@
+---
+turbopanel_install_root: /opt/turbopanel
+turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/runtimes"
+turbopanel_instance_dir: "{{ turbopanel_install_root }}/platform/turbopanel"
+instance_user: instance

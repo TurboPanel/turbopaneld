@@ -2,4 +2,7 @@
 runtime_socket_dir: /run/turbopanel
 runtime_socket_owner: turbopanel
 runtime_socket_group: turbopanel
-runtime_socket_mode: "0750"
+# Group-writable + setgid (2770): the daemon (turbopanel) and the in-group
+# `instance` user both need to create/bind sockets here; setgid keeps new
+# socket files in the turbopanel group so the other party can connect.
+runtime_socket_mode: "2770"

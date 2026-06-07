@@ -8,7 +8,7 @@ export const PYTHON_VERSION = '3.12'
  *
  * This module lives at `<root>/src/orchestration/paths.ts`, so the root is three
  * directories up. Resolving from `import.meta` keeps things correct regardless of
- * the process working directory (Tilt runs the daemon from its own `serve_dir`).
+ * the process working directory.
  */
 export const DAEMON_ROOT = (() => {
   const here = dirname(fromFileUrl(import.meta.url))
@@ -64,6 +64,11 @@ export const DAEMON_SYSTEMD_PLAYBOOK = join(
   ORCHESTRATION_DIR,
   'playbooks',
   'daemon-systemd-setup.yml',
+)
+export const INSTANCE_DEV_INSTALL_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  'playbooks',
+  'instance-dev-install.yml',
 )
 
 export interface UvTarget {

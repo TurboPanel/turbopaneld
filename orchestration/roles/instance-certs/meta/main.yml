@@ -1,0 +1,17 @@
+---
+galaxy_info:
+  author: turbopanel
+  description: >-
+    Generate the TurboPanel platform CA and server leaf certificate for the
+    self-hosted instance using the instance repo's cert script.
+  license: MIT
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Debian
+      versions:
+        - all
+    - name: Raspbian
+      versions:
+        - all
+
+dependencies: []
