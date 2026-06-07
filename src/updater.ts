@@ -5,9 +5,8 @@ import { DAEMON_ROOT } from './orchestration/paths.ts'
  *
  * The instance reports the canonical commit (its own daemon checkout HEAD) over
  * the `/ws` connection and via `GET /api/daemon/version`. When ours differs we
- * fast-forward to `origin/<trunk>`. Because the daemon runs under
- * `deno run --watch` (under systemd), changed files trigger an automatic
- * relaunch -- no explicit restart is needed here.
+ * fast-forward to `origin/<trunk>` and ask systemd to restart the service
+ * (the unit runs `deno run` without `--watch` under an flock lock).
  */
 
 const TRUNK_BRANCH = Deno.env.get('TURBOPANEL_TRUNK_BRANCH')?.trim() || 'trunk'
@@ -59,11 +58,25 @@ export async function syncToTrunk(): Promise<boolean> {
 
   const commit = await getLocalCommit()
   console.log(
-    `[updater] checkout now at ${commit ? short(commit) : 'unknown'}; ` +
-      'Deno --watch will relaunch the daemon',
+    `[updater] checkout now at ${commit ? short(commit) : 'unknown'}; restarting service`,
   )
+  await restartDaemonService()
   return true
 }
+
+async function restartDaemonService(): Promise<void> {
+  const unit = Deno.env.get('TURBOPANEL_SERVICE_NAME')?.trim() ||
+    'turbopanel-daemon'
+  const result = await new Deno.Command('systemctl', {
+    args: ['restart', unit],
+    stdin: 'null',
+    stdout: 'piped',
+    stderr: 'piped',
+  }).output()
+  if (!result.success) {
+    const err = new TextDecoder().decode(result.stderr).trim()
+    console.warn(`[updater] systemctl restart ${unit} failed: ${err || 'unknown error'}`)
+  }
 
 /**
  * Compare the instance's expected commit against our checkout and update on

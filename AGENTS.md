@@ -27,7 +27,7 @@ On connect the daemon sends a `hello` with `hostname` (`Deno.hostname()`) and `n
 
 Install flow: `install.sh` → `scripts/bootstrap-orchestration.sh` (uv, Python, ansible, **Galaxy roles**) → `orchestration/playbooks/agent-install.yml`. Docker is installed in that playbook and again at daemon startup via `initOrchestration()` in `src/orchestration/setup.ts`.
 
-Daemon runtime is managed by systemd (`turbopanel-daemon.service`) and runs `deno run --watch ... --env-file=.env main.ts` so self-updates still trigger automatic relaunches. `install.sh` and `agent-install.yml` both reconcile the unit (install/reload/enable/start or stop for `--no-start`) on every run.
+Daemon runtime is managed by systemd (`turbopanel-daemon.service`): `flock` enforces a single process, `deno run` without `--watch`, and `install.sh` / `agent-install.yml` reconcile the unit on every run. Self-updates run `git reset` then `systemctl restart turbopanel-daemon`.
 
 ## Orchestration
 

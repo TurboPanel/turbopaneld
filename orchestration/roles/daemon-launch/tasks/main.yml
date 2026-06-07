@@ -1,18 +1,15 @@
 ---
+- name: Ensure single-daemon helper is executable
+  ansible.builtin.file:
+    path: "{{ turbopanel_daemon_dir }}/scripts/ensure-single-daemon.sh"
+    mode: "0755"
+
 - name: Stop legacy Tilt daemon launcher when present
-  ansible.builtin.shell: |
-    set -euo pipefail
-    if command -v tilt >/dev/null 2>&1; then
-      cd "{{ turbopanel_daemon_dir }}"
-      tilt down >/dev/null 2>&1 || true
-    fi
-  args:
-    executable: /bin/bash
-  become: true
-  become_user: "{{ turbopanel_user }}"
+  ansible.builtin.command:
+    cmd: "{{ turbopanel_daemon_dir }}/scripts/ensure-single-daemon.sh"
   environment:
-    HOME: "{{ turbopanel_install_root }}"
-    PATH: "/usr/local/bin:{{ turbopanel_install_root }}/runtimes/deno/current:{{ ansible_env.PATH }}"
+    TURBOPANEL_DAEMON_DIR: "{{ turbopanel_daemon_dir }}"
+    TURBOPANEL_INSTALL_ROOT: "{{ turbopanel_install_root }}"
   changed_when: false
   failed_when: false
 
