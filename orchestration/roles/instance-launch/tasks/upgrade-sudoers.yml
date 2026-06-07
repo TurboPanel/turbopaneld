@@ -1,0 +1,10 @@
+---
+- name: Allow instance user to restart instance services for upgrades
+  ansible.builtin.copy:
+    dest: /etc/sudoers.d/turbopanel-instance-upgrade
+    content: |
+      {{ instance_user }} ALL=(root) NOPASSWD: /usr/bin/systemctl restart {{ instance_service_name }}, /usr/bin/systemctl restart {{ caddy_service_name }}, /usr/bin/systemctl restart {{ ui_service_name }}
+    owner: root
+    group: root
+    mode: "0440"
+    validate: "visudo -cf %s"

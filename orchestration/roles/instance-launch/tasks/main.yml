@@ -100,3 +100,6 @@
     name: "{{ ui_service_name }}"
     enabled: "{{ instance_start | bool }}"
     state: "{{ 'started' if (instance_start | bool) else 'stopped' }}"
+
+- name: Install instance upgrade sudoers
+  ansible.builtin.import_tasks: upgrade-sudoers.yml
