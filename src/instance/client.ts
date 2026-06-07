@@ -208,7 +208,11 @@ export class InstanceClient {
   async #connectOnce(): Promise<void> {
     await this.fetchHealth()
 
-    this.#closeActiveSocket()
+    // Do not close the active socket here: by the time #connectOnce() is called
+    // from #runConnectLoop(), the previous socket has already closed naturally
+    // (the loop awaits #connectOnce() which blocks until the 'close' event).
+    // Calling #closeActiveSocket() here would kill a healthy connection on every
+    // reconnect cycle, producing a perpetual ~2-second disconnect/reconnect storm.
 
     const ws = this.#newWebSocket()
     this.#ws = ws

@@ -13,10 +13,10 @@ export function newDevSyncState(totalChunks: number): DevSyncState {
 /**
  * Unpack a gzipped tarball of a daemon build over the current checkout.
  *
- * The instance excludes .git, orchestration/runtime, orchestration/roles,
+ * The instance excludes .git, .env, orchestration/runtime, orchestration/roles,
  * cloudflared/tunnels, and node_modules, so a sync swaps source without
- * clobbering the local ansible runtime or tunnel tokens. Requires the daemon's
- * broad `--allow-run` / `--allow-write`.
+ * clobbering the host-specific instance URL config, ansible runtime, or tunnel
+ * tokens. Requires the daemon's broad `--allow-run` / `--allow-write`.
  */
 export async function applyDevSyncTarball(bytes: Uint8Array): Promise<void> {
   const tmp = await Deno.makeTempFile({ suffix: '.tgz' })
