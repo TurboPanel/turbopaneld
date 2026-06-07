@@ -1,0 +1,24 @@
+---
+# Install turbopanel-daemon.service for co-located dev or agent nodes.
+# Co-located hosts set turbopanel_after_instance_service so the daemon starts
+# after the instance Tilt stack (turbopanel-instance.service).
+- name: Install TurboPanel daemon systemd unit
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: false
+
+  vars:
+    turbopanel_install_root: /opt/turbopanel
+    turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/runtimes"
+    turbopanel_daemon_dir: "{{ turbopanel_install_root }}/platform/daemon"
+    turbopanel_user: turbopanel
+    turbopanel_group: turbopanel
+    turbopanel_service_name: turbopanel-daemon
+    turbopanel_start: true
+    turbopanel_after_instance_service: false
+
+  roles:
+    - role: deno-runtime
+    - role: daemon-logs
+    - role: daemon-launch

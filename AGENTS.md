@@ -56,4 +56,5 @@ Minimal Debian images often lack packages full installs have. Agent bootstrap an
 - `src/orchestration/` — uv/Python/ansible bootstrap, playbook runners
 - `orchestration/roles/daemon-launch/templates/turbopanel-daemon.service.j2` — systemd unit template
 - `tilt/agent.tiltfile` — standalone agent dev (`deno run --watch`)
-- `tilt/daemon.tiltfile` — co-located instance dev (Unix socket mode)
+- `scripts/install-daemon-systemd.sh` — install `turbopanel-daemon.service` on co-located dev or agent nodes (not Tilt). On hosts with `turbopanel-instance.service`, the unit is ordered after the instance stack.
+- `tilt/daemon.tiltfile` — legacy Tilt launcher; co-located dev uses systemd instead (see `install-daemon-systemd.sh`).

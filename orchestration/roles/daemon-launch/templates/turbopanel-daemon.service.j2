@@ -1,7 +1,8 @@
 [Unit]
 Description=TurboPanel agent daemon
-After=network-online.target
-Wants=network-online.target
+After=network-online.target{% if turbopanel_after_instance_service | bool %} turbopanel-instance.service{% endif %}
+
+Wants=network-online.target{% if turbopanel_after_instance_service | bool %} turbopanel-instance.service{% endif %}
 
 [Service]
 Type=simple
