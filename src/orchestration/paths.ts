@@ -55,6 +55,11 @@ export const SOCKET_DIRS_PLAYBOOK = join(
   'playbooks',
   'socket-dirs-setup.yml',
 )
+export const DAEMON_LOGS_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  'playbooks',
+  'daemon-logs-setup.yml',
+)
 
 export interface UvTarget {
   /** uv release target triple, e.g. `aarch64-unknown-linux-gnu`. */

@@ -6,6 +6,7 @@ import {
   GALAXY_REQUIREMENTS_FILE,
   GALAXY_ROLES_DIR,
   SOCKET_DIRS_PLAYBOOK,
+  DAEMON_LOGS_PLAYBOOK,
   LOCALHOST_PLAYBOOK,
   ORCHESTRATION_DIR,
   PYTHON_VERSION,
@@ -122,6 +123,26 @@ export async function runSocketDirsSetup(): Promise<void> {
     },
   )
   console.log('[orchestration] socket-dirs-setup complete')
+}
+
+/**
+ * Create /var/log/turbopanel/daemon, persist it across reboots via
+ * systemd-tmpfiles, and install logrotate for daemon.log / daemon.err.log.
+ *
+ * Requires passwordless sudo for the running user (the turbopanel user has
+ * this configured in the base image).
+ */
+export async function runDaemonLogsSetup(): Promise<void> {
+  console.log('[orchestration] running daemon-logs-setup playbook')
+  await runOrThrow(
+    ANSIBLE_PLAYBOOK_BIN,
+    ['-i', 'localhost,', '-c', 'local', DAEMON_LOGS_PLAYBOOK],
+    {
+      cwd: ORCHESTRATION_DIR,
+      env: { ANSIBLE_CONFIG: ANSIBLE_CFG },
+    },
+  )
+  console.log('[orchestration] daemon-logs-setup complete')
 }
 
 /**

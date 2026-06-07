@@ -1,0 +1,31 @@
+---
+- name: Ensure daemon log directory exists
+  ansible.builtin.file:
+    path: "{{ daemon_log_dir }}"
+    state: directory
+    owner: "{{ daemon_log_owner }}"
+    group: "{{ daemon_log_group }}"
+    mode: "{{ daemon_log_dir_mode }}"
+
+- name: Install tmpfiles.d entry for daemon logs
+  ansible.builtin.copy:
+    dest: /etc/tmpfiles.d/turbopanel-daemon-logs.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by TurboPanel daemon orchestration (daemon-logs role).
+      d {{ daemon_log_dir }} {{ daemon_log_dir_mode }} {{ daemon_log_owner }} {{ daemon_log_group }} -
+
+- name: Apply tmpfiles.d configuration for daemon logs
+  ansible.builtin.command:
+    cmd: systemd-tmpfiles --create
+  changed_when: true
+
+- name: Install daemon logrotate policy
+  ansible.builtin.template:
+    src: turbopanel-daemon-logrotate.j2
+    dest: /etc/logrotate.d/turbopanel-daemon
+    owner: root
+    group: root
+    mode: "0644"

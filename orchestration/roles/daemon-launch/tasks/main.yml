@@ -1,12 +1,4 @@
 ---
-- name: Ensure daemon log directory exists
-  ansible.builtin.file:
-    path: /var/log/turbopanel/daemon
-    state: directory
-    owner: "{{ turbopanel_user }}"
-    group: "{{ turbopanel_group }}"
-    mode: "0750"
-
 - name: Install daemon systemd unit
   ansible.builtin.template:
     src: turbopanel-daemon.service.j2
@@ -17,23 +9,6 @@
   notify:
     - Reload systemd
     - Restart turbopanel daemon
-
-- name: Install daemon logrotate policy
-  ansible.builtin.copy:
-    dest: /etc/logrotate.d/turbopanel-daemon
-    owner: root
-    group: root
-    mode: "0644"
-    content: |
-      /var/log/turbopanel/daemon/*.log {
-        daily
-        rotate 7
-        compress
-        delaycompress
-        missingok
-        notifempty
-        copytruncate
-      }
 
 - name: Ensure daemon service desired state
   ansible.builtin.systemd:
