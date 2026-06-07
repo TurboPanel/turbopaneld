@@ -6,8 +6,10 @@ Agent node daemon for TurboPanel. Connects back to an instance over HTTPS/WSS, r
 
 Run on a fresh Debian or Raspbian host (arm64 or amd64). The only required argument is the full URL of the instance you want this node to connect to — scheme, host, and port, with no defaults baked in.
 
+`install.sh` was removed from this repo. Use the **official CDN-hosted installer** published from [turbopanel/turbopanel-cdn](https://github.com/turbopanel/turbopanel-cdn):
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/turbopanel/turbopanel-daemon/trunk/install.sh \
+curl -fsSL https://raw.githubusercontent.com/turbopanel/turbopanel-cdn/trunk/install.sh \
   | sudo bash -s -- \
       --instance-url https://<instance-host>:<port>
 ```
@@ -31,7 +33,7 @@ For self-hosted instances over HTTPS, the installer automatically downloads the 
 Example with a tunnel token and an explicit platform CA path:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/turbopanel/turbopanel-daemon/trunk/install.sh \
+curl -fsSL https://raw.githubusercontent.com/turbopanel/turbopanel-cdn/trunk/install.sh \
   | sudo bash -s -- \
       --instance-url https://<instance-host>:<port> \
       --tunnel-token <CLOUDFLARED_TOKEN> \
@@ -41,7 +43,7 @@ curl -fsSL https://raw.githubusercontent.com/turbopanel/turbopanel-daemon/trunk/
 LAN example (same command — CA fetch is automatic):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/turbopanel/turbopanel-daemon/trunk/install.sh \
+curl -fsSL https://raw.githubusercontent.com/turbopanel/turbopanel-cdn/trunk/install.sh \
   | sudo bash -s -- \
       --instance-url https://turbopanel.lan:8443
 ```

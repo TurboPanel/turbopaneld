@@ -77,6 +77,7 @@ async function restartDaemonService(): Promise<void> {
     const err = new TextDecoder().decode(result.stderr).trim()
     console.warn(`[updater] systemctl restart ${unit} failed: ${err || 'unknown error'}`)
   }
+}
 
 /**
  * Compare the instance's expected commit against our checkout and update on

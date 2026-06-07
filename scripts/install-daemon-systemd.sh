@@ -13,7 +13,7 @@ PLAYBOOK="$DAEMON_DIR/orchestration/playbooks/daemon-systemd-setup.yml"
 
 if [ ! -x "$ANSIBLE_PLAYBOOK" ]; then
   echo "ansible-playbook not found at $ANSIBLE_PLAYBOOK" >&2
-  echo "run install.sh or scripts/bootstrap-orchestration.sh first" >&2
+  echo "run the official CDN-hosted installer or scripts/bootstrap-orchestration.sh first" >&2
   exit 1
 fi
 

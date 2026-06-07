@@ -25,9 +25,9 @@ Two modes in `src/instance/paths.ts`:
 
 On connect the daemon sends a `hello` with `hostname` (`Deno.hostname()`) and `nodeId` (`/etc/machine-id`). The instance uses these (and `X-Real-IP` from Caddy) to dedupe reconnects.
 
-Install flow: `install.sh` → `scripts/bootstrap-orchestration.sh` (uv, Python, ansible, **Galaxy roles**) → `orchestration/playbooks/agent-install.yml`. Docker is installed in that playbook and again at daemon startup via `initOrchestration()` in `src/orchestration/setup.ts`.
+Install flow: official installer (separate CDN repo) → `scripts/bootstrap-orchestration.sh` (uv, Python, ansible, **Galaxy roles**) → `orchestration/playbooks/agent-install.yml`. Docker is installed in that playbook and again at daemon startup via `initOrchestration()` in `src/orchestration/setup.ts`.
 
-Daemon runtime is managed by systemd (`turbopanel-daemon.service`): `flock` enforces a single process, `deno run` without `--watch`, and `install.sh` / `agent-install.yml` reconcile the unit on every run. Self-updates run `git reset` then `systemctl restart turbopanel-daemon`.
+Daemon runtime is managed by systemd (`turbopanel-daemon.service`): `flock` enforces a single process, `deno run` without `--watch`, and the official installer / `agent-install.yml` reconcile the unit on every run. Self-updates run `git reset` then `systemctl restart turbopanel-daemon`.
 
 ## Orchestration
 
@@ -35,11 +35,11 @@ Daemon runtime is managed by systemd (`turbopanel-daemon.service`): `flock` enfo
 - Galaxy roles: `orchestration/requirements.yml` (pinned, installed into `orchestration/roles/`, gitignored)
 - Docker: thin `roles/docker` wrapper around **`geerlingguy.docker`** (Debian Trixie/Raspbian)
 - Bootstrap also runs on every daemon start (idempotent; failures are logged, daemon keeps running)
-- Logs are written to both journald and `/var/log/turbopanel/daemon/{daemon.log,daemon.err.log}` when running under systemd (`StandardOutput`/`StandardError` in the unit template). Logrotate policy lives at `/etc/logrotate.d/turbopanel-daemon` (daily, 14 rotations, compress). The log directory is recreated on boot via `/etc/tmpfiles.d/turbopanel-daemon-logs.conf`. The `daemon-logs` role provisions all of this; `install.sh` runs it via `daemon-launch`, and `initOrchestration()` re-runs `daemon-logs-setup.yml` on every daemon start so existing agents pick it up without a full reinstall.
+- Logs are written to both journald and `/var/log/turbopanel/daemon/{daemon.log,daemon.err.log}` when running under systemd (`StandardOutput`/`StandardError` in the unit template). Logrotate policy lives at `/etc/logrotate.d/turbopanel-daemon` (daily, 14 rotations, compress). The log directory is recreated on boot via `/etc/tmpfiles.d/turbopanel-daemon-logs.conf`. The `daemon-logs` role provisions all of this; the official installer runs it via `daemon-launch`, and `initOrchestration()` re-runs `daemon-logs-setup.yml` on every daemon start so existing agents pick it up without a full reinstall.
 
 ### Runtime (systemd only)
 
-Agent nodes and co-located dev hosts run **`turbopanel-daemon.service`** — there is no Tilt entrypoint in this repo. `install.sh` / `agent-install.yml` install the unit; co-located instance hosts use `scripts/install-daemon-systemd.sh`. The `daemon-launch` role runs `tilt down` if Tilt was previously used, so a leftover Tilt process cannot fight systemd over `/ws`.
+Agent nodes and co-located dev hosts run **`turbopanel-daemon.service`** — there is no Tilt entrypoint in this repo. The official installer / `agent-install.yml` install the unit; co-located instance hosts use `scripts/install-daemon-systemd.sh`. The `daemon-launch` role runs `tilt down` if Tilt was previously used, so a leftover Tilt process cannot fight systemd over `/ws`.
 
 ### Slim Debian prerequisites
 
@@ -55,7 +55,7 @@ Minimal Debian images often lack packages full installs have. Agent bootstrap an
 ## Layout
 
 - `main.ts` — entry; orchestration bootstrap, tunnels, instance client
-- `install.sh` — root bootstrap + `agent-install` playbook
+- `install.sh` has been removed — the official node installer lives in [turbopanel/turbopanel-cdn](https://github.com/turbopanel/turbopanel-cdn) (see `README.md` for the curl workflow)
 - `src/instance/client.ts` — WSS client, command/address handlers
 - `src/orchestration/` — uv/Python/ansible bootstrap, playbook runners
 - `orchestration/roles/daemon-launch/templates/turbopanel-daemon.service.j2` — systemd unit template
