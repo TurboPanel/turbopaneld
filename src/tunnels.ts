@@ -1,4 +1,4 @@
-import { join } from 'jsr:@std/path@1'
+import { join } from '@std/path'
 import { ensureCloudflared } from './orchestration/cloudflared.ts'
 import { TUNNELS_DIR } from './orchestration/paths.ts'
 

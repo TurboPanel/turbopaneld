@@ -1,4 +1,4 @@
-import { type ContainerSummary, DockerClient } from './client.ts'
+import type { ContainerSummary, DockerClient } from './client.ts'
 
 export class DockerMonitor {
   #client: DockerClient

@@ -9,7 +9,7 @@ import {
 import { collectServerAddresses } from '../server-addresses.ts'
 import { applyDevSyncTarball, type DevSyncState, newDevSyncState } from '../dev-sync-apply.ts'
 import { writeInstanceTunnelToken } from '../tunnels.ts'
-import { decodeBase64 } from 'jsr:@std/encoding@1/base64'
+import { decodeBase64 } from '@std/encoding/base64'
 
 type DaemonMessage =
   | {
@@ -422,14 +422,14 @@ export class InstanceClient {
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result))
   }
 
-  async #collectAddresses(
+  #collectAddresses(
     message: Extract<DaemonMessage, { type: 'addresses-request' }>,
     ws: WebSocket,
-  ): Promise<void> {
+  ): void {
     let addresses: Extract<DaemonMessage, { type: 'addresses-result' }>['addresses']
     try {
       addresses = collectServerAddresses()
-    } catch (err) {
+    } catch (_err) {
       addresses = {
         privateIpv4: [],
         privateIpv6: [],

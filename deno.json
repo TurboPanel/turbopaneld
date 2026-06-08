@@ -2,6 +2,11 @@
   "name": "turbopanel-daemon",
   "version": "0.1.0",
   "exports": "./main.ts",
+  "imports": {
+    "@std/encoding/base64": "jsr:@std/encoding@1/base64",
+    "@std/encoding/hex": "jsr:@std/encoding@1/hex",
+    "@std/path": "jsr:@std/path@1"
+  },
   "tasks": {
     "start": "deno run --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env main.ts",
     "dev": "deno run --watch --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env main.ts"

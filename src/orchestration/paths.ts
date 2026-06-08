@@ -1,4 +1,4 @@
-import { dirname, fromFileUrl, join } from 'jsr:@std/path@1'
+import { dirname, fromFileUrl, join } from '@std/path'
 
 export const UV_VERSION = '0.11.19'
 export const PYTHON_VERSION = '3.12'

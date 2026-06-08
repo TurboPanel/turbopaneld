@@ -1,5 +1,5 @@
-import { encodeHex } from 'jsr:@std/encoding@1/hex'
-import { join } from 'jsr:@std/path@1'
+import { encodeHex } from '@std/encoding/hex'
+import { join } from '@std/path'
 import { run } from './exec.ts'
 import {
   RUNTIME_BIN_DIR,
