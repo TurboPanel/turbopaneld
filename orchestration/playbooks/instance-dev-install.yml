@@ -36,6 +36,8 @@
     - role: runtime-sockets
     - role: postgres
     - role: instance-user
+    # GTK/NSS/GBM stack for @react-native/debugger-shell (Debian only).
+    - role: instance-dev-prereqs
     - role: node-runtime
     - role: caddy
     - role: instance-repo

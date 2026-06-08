@@ -1,0 +1,17 @@
+---
+galaxy_info:
+  author: turbopanel
+  description: >-
+    Debian packages required for co-located dev UI tooling (React Native
+    devtools shared libraries). Dev-only; not installed on production agents.
+  license: MIT
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Debian
+      versions:
+        - all
+    - name: Raspbian
+      versions:
+        - all
+
+dependencies: []

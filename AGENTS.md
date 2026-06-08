@@ -15,7 +15,7 @@ TurboPanel is named for speed; keep the daemon fast.
 
 - **`turbopanel`** (UID/GID **9999**): the daemon user; has passwordless sudo; owns `/opt/turbopanel`.
 - **`turbopanel`** (UID/GID **9999**): the daemon user; has passwordless sudo; owns the install tree and **all git** on co-located dev hosts.
-- **`instance`** (UID **9998**): runs the instance/Caddy/UI in group `turbopanel`, **no own group, no sudo** (created by the `instance-user` role). Reads checkouts via group; does not own source files.
+- **`instance`** (UID **9998**): runs the instance/Caddy/UI in group `turbopanel`, **no own group, no broad sudo** (created by the `instance-user` role). Reads checkouts via group; does not own source files. Scoped passwordless sudo via `/etc/sudoers.d/turbopanel-instance-upgrade` (`instance-launch` `upgrade-sudoers.yml`): restart instance/caddy/ui units, `git` as `turbopanel`, normalize script, and **`/usr/bin/pamtester login root authenticate`** (root sign-in from the instance process).
 - Co-located dev checkouts are **`2770 turbopanel:turbopanel`** (`instance-user` role). Clones and `pnpm install` run as **9999**; systemd services run as **9998**. `scripts/normalize-dev-checkout.sh` (also `/usr/local/bin/turbopanel-normalize-dev-checkout`) re-homes any stray `instance`-owned source files after git; it skips instance `$HOME` dirs `.cache`, `.config`, `.local`. Upgrade System calls it automatically after each `git reset`.
 - `/run/turbopanel` is `2770 turbopanel:turbopanel` (setgid) so `instance` can bind the socket; see `../turbopanel/AGENTS.md`.
 
@@ -56,6 +56,7 @@ The daemon bootstraps uv/Python/ansible, then runs playbooks. Roles (in `orchest
 | `turbopanel-user` / `instance-user` | the 9999 / 9998 users |
 | `runtime-sockets` | `/run/turbopanel` as `2770` setgid |
 | `deno-runtime` / `node-runtime` / `caddy` | vendored runtimes under `runtimes/<tool>/current` |
+| `instance-dev-prereqs` | dev-only apt libs for React Native devtools (GTK/NSS/GBM stack; probes `*t64` renames on Debian 13+) |
 | `instance-repo` / `ui-repo` | clone-if-missing checkouts (never force-reset), `pnpm install` |
 | `instance-certs` | platform CA + leaf via the instance cert script |
 | `instance-launch` | `turbopanel-instance` / `turbopanel-caddy` / `turbopanel-ui` units (run as `instance:turbopanel`) |
@@ -96,6 +97,8 @@ Minimal Debian images often lack packages full installs have. Agent bootstrap an
 | `python3-debian` | `deb822_repository` in `geerlingguy.docker` |
 | `iptables` | Docker networking |
 
+Co-located dev (`instance-dev-prereqs` role, not `agent-prereqs`) installs the Chromium/GTK runtime stack (`libatk*`, `libnss3`, `libgbm1`, `libgtk-3-0`, …) so `@react-native/debugger-shell` passes its `--version` prep check. Debian 13+ `*t64` renames are probed at install time. A headless server may still log DISPLAY warnings when opening the GUI debugger; that is separate from the shared-library install.
+
 ## Layout
 
 - `main.ts` — entry; orchestration bootstrap, tunnels, instance client (no self-update)
@@ -105,6 +108,6 @@ Minimal Debian images often lack packages full installs have. Agent bootstrap an
 - `src/tunnels.ts` — cloudflared supervisor + `writeInstanceTunnelToken`
 - `src/orchestration/` — uv/Python/ansible bootstrap, playbook runners (incl. `runInstanceDevInstall`)
 - `orchestration/playbooks/instance-dev-install.yml` — co-located dev instance/UI/Caddy install
-- `orchestration/roles/{instance-user,node-runtime,caddy,instance-repo,ui-repo,instance-certs,instance-launch}` — instance-side install roles
+- `orchestration/roles/{instance-user,instance-dev-prereqs,node-runtime,caddy,instance-repo,ui-repo,instance-certs,instance-launch}` — instance-side install roles
 - `orchestration/roles/daemon-launch/templates/turbopanel-daemon.service.j2` — daemon systemd unit template
 - `scripts/install-daemon-systemd.sh` — install `turbopanel-daemon.service` on co-located dev (after `turbopanel-instance.service`)

@@ -4,14 +4,19 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=forking
 User={{ instance_user }}
 Group={{ turbopanel_group }}
 WorkingDirectory={{ turbopanel_ui_dir }}
 Environment=HOME={{ turbopanel_ui_dir }}
 Environment=PATH=/usr/local/bin:{{ turbopanel_runtimes_dir }}/node/current/bin:/usr/bin:/bin
-Environment=CI=1
-ExecStart=/usr/local/bin/pnpm exec expo start --web --port {{ expo_port }}
+Environment=BROWSER=none
+Environment=COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+# Do not set CI=1 — Expo/Metro disable Fast Refresh (hot=false) in CI mode.
+ExecStart=/usr/bin/tmux new-session -d -s expo-ui {{ turbopanel_runtimes_dir }}/node/current/bin/pnpm exec expo start --web --port {{ expo_port }}
+ExecStop=/usr/bin/tmux kill-session -t expo-ui
+KillMode=process
+RemainAfterExit=yes
 Restart=always
 RestartSec=3
 
