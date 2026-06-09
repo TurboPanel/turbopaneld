@@ -14,7 +14,7 @@ GROUP="${TURBOPANEL_GROUP:-turbopanel}"
 # Top-level checkout: setgid so new files stay in the turbopanel group.
 install -d -m 2770 -o "$OWNER" -g "$GROUP" "$CHECKOUT"
 
-# Instance $HOME/runtime paths (systemd sets HOME to the checkout on co-located dev).
+# Runtime dirs inside the checkout (.local / .config are gitignored; owned by instance).
 declare -A SKIP=(
   [".cache"]=1
   [".config"]=1

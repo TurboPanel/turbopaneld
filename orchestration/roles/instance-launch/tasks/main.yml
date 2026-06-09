@@ -1,4 +1,7 @@
 ---
+- name: Ensure shared platform runtime directories
+  ansible.builtin.import_tasks: platform-runtime-dirs.yml
+
 - name: Install instance systemd unit
   ansible.builtin.template:
     src: turbopanel-instance.service.j2

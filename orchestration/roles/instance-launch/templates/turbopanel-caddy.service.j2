@@ -8,9 +8,10 @@ Type=simple
 User={{ instance_user }}
 Group={{ turbopanel_group }}
 WorkingDirectory={{ turbopanel_instance_dir }}
-Environment=HOME={{ turbopanel_instance_dir }}
-Environment=XDG_DATA_HOME={{ turbopanel_instance_dir }}/.local/share
-Environment=XDG_CONFIG_HOME={{ turbopanel_instance_dir }}/.config
+Environment=HOME={{ turbopanel_caddy_runtime_dir }}
+Environment=XDG_DATA_HOME={{ turbopanel_caddy_runtime_dir }}/share
+Environment=XDG_STATE_HOME={{ turbopanel_caddy_runtime_dir }}/state
+Environment=XDG_CONFIG_HOME={{ turbopanel_caddy_config_dir }}
 Environment=CADDY_PORT={{ caddy_port }}
 Environment=TURBOPANEL_SOCKET_DIAL=run/turbopanel/turbopanel.sock
 Environment=TURBOPANEL_UI_MODE={{ turbopanel_ui_mode }}

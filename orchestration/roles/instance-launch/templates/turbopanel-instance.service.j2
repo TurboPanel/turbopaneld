@@ -9,7 +9,10 @@ Type=simple
 User={{ instance_user }}
 Group={{ turbopanel_group }}
 WorkingDirectory={{ turbopanel_instance_dir }}
-Environment=HOME={{ turbopanel_instance_dir }}
+Environment=HOME={{ turbopanel_instance_runtime_dir }}
+Environment=XDG_DATA_HOME={{ turbopanel_instance_runtime_dir }}/share
+Environment=XDG_STATE_HOME={{ turbopanel_instance_runtime_dir }}/state
+Environment=XDG_CONFIG_HOME={{ turbopanel_instance_config_dir }}
 Environment=PATH={{ turbopanel_runtimes_dir }}/node/current/bin:{{ turbopanel_runtimes_dir }}/deno/current:{{ turbopanel_runtimes_dir }}/caddy/current:/usr/local/bin:/usr/bin:/bin
 Environment="GIT_SSH_COMMAND=ssh -i {{ turbopanel_github_key }} -o IdentitiesOnly=yes -o UserKnownHostsFile={{ turbopanel_ssh_dir }}/known_hosts -o StrictHostKeyChecking=yes"
 Environment=TURBOPANEL_INSTANCE_SERVICE={{ instance_service_name }}
@@ -23,7 +26,7 @@ Environment=TURBOPANEL_PG_PORT={{ postgres_port }}
 Environment=TURBOPANEL_PG_PASSWORD={{ lookup('ansible.builtin.file', turbopanel_config_dir + '/postgres/.pgpass') | trim }}
 {% endif %}
 Environment=TURBOPANEL_PG_SOCKET={{ postgres_socket_dir }}/.s.PGSQL.{{ postgres_port }}
-ExecStart={{ turbopanel_runtimes_dir }}/deno/current/deno run --allow-env --allow-sys=networkInterfaces --allow-read=/run/turbopanel,{{ postgres_socket_dir }},{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }} --allow-write=/run/turbopanel,{{ postgres_socket_dir }} --allow-net=127.0.0.1:{{ drizzle_studio_port | default(4983) }} --allow-run=git,systemctl,tar,sudo,/usr/bin/sudo,/bin/sh,mkfifo,/usr/bin/mkfifo,pamtester,/usr/bin/pamtester,{{ turbopanel_runtimes_dir }}/node/current/bin/node,tmux src/deno.ts
+ExecStart={{ turbopanel_runtimes_dir }}/deno/current/deno run --allow-env --allow-sys=networkInterfaces --allow-read=/run/turbopanel,{{ postgres_socket_dir }},{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }},{{ turbopanel_instance_runtime_dir }} --allow-write=/run/turbopanel,{{ postgres_socket_dir }},{{ turbopanel_instance_runtime_dir }} --allow-net=127.0.0.1:{{ drizzle_studio_port | default(4983) }} --allow-run=git,systemctl,tar,sudo,/usr/bin/sudo,/bin/sh,mkfifo,/usr/bin/mkfifo,pamtester,/usr/bin/pamtester,{{ turbopanel_runtimes_dir }}/node/current/bin/node,tmux src/deno.ts
 Restart=always
 RestartSec=2
 # Deno.serve waits for active WS connections to drain on SIGTERM which can hang

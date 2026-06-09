@@ -16,7 +16,7 @@ TurboPanel is named for speed; keep the daemon fast.
 - **`turbopanel`** (UID/GID **9999**): the daemon user; has passwordless sudo; owns `/opt/turbopanel`.
 - **`turbopanel`** (UID/GID **9999**): the daemon user; has passwordless sudo; owns the install tree and **all git** on co-located dev hosts.
 - **`instance`** (UID **9998**): runs the instance/Caddy/UI in group `turbopanel`, **no own group, no broad sudo** (created by the `instance-user` role). Reads checkouts via group; does not own source files. Scoped passwordless sudo via `/etc/sudoers.d/turbopanel-instance-upgrade` (`instance-launch` `upgrade-sudoers.yml`): restart instance/caddy/ui units, `git` as `turbopanel`, normalize script, and **`/usr/bin/pamtester login root authenticate`** (root sign-in from the instance process).
-- Co-located dev checkouts are **`2770 turbopanel:turbopanel`** (`instance-user` role). Clones and `pnpm install` run as **9999**; systemd services run as **9998**. `scripts/normalize-dev-checkout.sh` (also `/usr/local/bin/turbopanel-normalize-dev-checkout`) re-homes any stray `instance`-owned source files after git; it skips instance `$HOME` dirs `.cache`, `.config`, `.local`. Upgrade System calls it automatically after each `git reset`.
+- Co-located dev checkouts are **`2770 turbopanel:turbopanel`** (`instance-user` role). Clones and `pnpm install` run as **9999**; systemd services run as **9998**. Per-service runtime state for the instance user lives in **gitignored** checkout dirs: **`turbopanel/.local`** (instance + Caddy), **`ui/.local`** (Expo), plus matching **`.config`** trees. The **daemon** (`9999`) keeps its own state under **`/opt/turbopanel`** (passwd `HOME`). The normalizer skips checkout `.cache`/`.config`/`.local` so instance-owned runtime files are not reclaimed to `turbopanel`.
 - `/run/turbopanel` is `2770 turbopanel:turbopanel` (setgid) so `instance` can bind the socket; see `../turbopanel/AGENTS.md`.
 
 ## Documentation discipline
@@ -59,7 +59,7 @@ The daemon bootstraps uv/Python/ansible, then runs playbooks. Roles (in `orchest
 | `instance-dev-prereqs` | dev-only apt libs for React Native devtools (GTK/NSS/GBM stack; probes `*t64` renames on Debian 13+) |
 | `instance-repo` / `ui-repo` | clone-if-missing checkouts (never force-reset), `pnpm install` |
 | `instance-certs` | platform CA + leaf via the instance cert script |
-| `instance-launch` | `turbopanel-instance` / `turbopanel-caddy` / `turbopanel-ui` units (run as `instance:turbopanel`) |
+| `instance-launch` | `turbopanel-instance` / `turbopanel-caddy` / `turbopanel-ui` units (run as `instance:turbopanel`). **`turbopanel-ui` must invoke `node_modules/.bin/expo` directly** — `pnpm exec expo` runs an implicit install that prompts to purge `node_modules` (installed by `turbopanel` with a different `HOME`), which blocks Expo and yields Caddy 502s on restart. |
 | `postgres` | PostgreSQL 18 in Docker; data under `/var/lib/turbopanel/postgres`, Unix socket at `/var/run/turbopanel/postgres` |
 | `docker` / `daemon-repo` / `daemon-config` / `daemon-logs` / `daemon-launch` | agent-node provisioning |
 
