@@ -15,7 +15,7 @@ TurboPanel is named for speed; keep the daemon fast.
 
 - **`turbopanel`** (UID/GID **9999**): the daemon user; has passwordless sudo; owns `/opt/turbopanel`.
 - **`turbopanel`** (UID/GID **9999**): the daemon user; has passwordless sudo; owns the install tree and **all git** on co-located dev hosts.
-- **`instance`** (UID **9998**): runs the instance/Caddy/UI in group `turbopanel`, **no own group, no broad sudo** (created by the `instance-user` role). Reads checkouts via group; does not own source files. Scoped passwordless sudo via `/etc/sudoers.d/turbopanel-instance-upgrade` (`instance-launch` `upgrade-sudoers.yml`): restart instance/caddy/ui units, `git` as `turbopanel`, normalize script, and **`/usr/bin/pamtester login root authenticate`** (root sign-in from the instance process).
+- **`instance`** (UID **9998**): runs the instance/Caddy/UI in group `turbopanel`, **no own group, no broad sudo** (created by the `instance-user` role). Reads checkouts via group; does not own source files. Scoped passwordless sudo via `/etc/sudoers.d/turbopanel-instance-upgrade` (`instance-launch` `upgrade-sudoers.yml`): restart instance/caddy/ui units, `git` as `turbopanel`, normalize script, and **`/usr/bin/pamtester login * authenticate`** (host install gate — root or sudo users via PAM from the instance process).
 - Co-located dev checkouts are **`2770 turbopanel:turbopanel`** (`instance-user` role). Clones and `pnpm install` run as **9999**; systemd services run as **9998**. Per-service runtime state for the instance user lives in **gitignored** checkout dirs: **`turbopanel/.local`** (instance + Caddy), **`ui/.local`** (Expo), plus matching **`.config`** trees. The **daemon** (`9999`) keeps its own state under **`/opt/turbopanel`** (passwd `HOME`). The normalizer skips checkout `.cache`/`.config`/`.local` when reclaiming source files to `turbopanel`; use `--prepare-reset` before Upgrade System `git reset` and `--ensure-runtime-dirs` after.
 - `/run/turbopanel` is `2770 turbopanel:turbopanel` (setgid) so `instance` can bind the socket; see `../turbopanel/AGENTS.md`.
 
@@ -76,7 +76,7 @@ The daemon bootstraps uv/Python/ansible, then runs playbooks. Roles (in `orchest
 
 ### Runtime (systemd only)
 
-Agent nodes and co-located dev hosts run **`turbopanel-daemon.service`** — there is no Tilt entrypoint in this repo. The official installer / `agent-install.yml` install the unit; co-located instance hosts use `scripts/install-daemon-systemd.sh` (which also ensures the user, prereqs, and Deno so a fresh dev host is self-sufficient). `scripts/ensure-single-daemon.sh` (ExecStartPre) is a one-time legacy cleanup: it stops any leftover Tilt and removes obsolete pre-systemd dev units, then guards the flock lock.
+Agent nodes and co-located dev hosts run **`turbopanel-daemon.service`** — there is no Tilt entrypoint in this repo. The official installer / `agent-install.yml` install the unit; co-located instance hosts use `scripts/install-daemon-systemd.sh` (which also ensures the user, prereqs, and Deno so a fresh dev host is self-sufficient). `scripts/ensure-single-daemon.sh` (ExecStartPre) ensures `/run/turbopanel` exists with correct permissions and clears any stale `daemon.lock` left by an unclean shutdown.
 
 ### Dev sync & instance tunnel (WS messages)
 

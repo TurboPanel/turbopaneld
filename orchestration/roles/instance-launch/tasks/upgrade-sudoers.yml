@@ -6,7 +6,7 @@
       {{ instance_user }} ALL=(root) NOPASSWD: /usr/bin/systemctl restart {{ instance_service_name }}, /usr/bin/systemctl restart {{ caddy_service_name }}, /usr/bin/systemctl restart {{ ui_service_name }}
       {{ instance_user }} ALL=({{ turbopanel_user }}) NOPASSWD: /usr/bin/git
       {{ instance_user }} ALL=(root) NOPASSWD: /usr/local/bin/turbopanel-normalize-dev-checkout
-      {{ instance_user }} ALL=(root) NOPASSWD: /usr/bin/pamtester login root authenticate
+      {{ instance_user }} ALL=(root) NOPASSWD: /usr/bin/pamtester login * authenticate
     owner: root
     group: root
     mode: "0440"

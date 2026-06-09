@@ -4,12 +4,9 @@
     path: "{{ turbopanel_daemon_dir }}/scripts/ensure-single-daemon.sh"
     mode: "0755"
 
-- name: Run one-time legacy cleanup (Tilt + obsolete dev units)
+- name: Ensure runtime socket dir and clear stale daemon lock
   ansible.builtin.command:
     cmd: "{{ turbopanel_daemon_dir }}/scripts/ensure-single-daemon.sh"
-  environment:
-    TURBOPANEL_DAEMON_DIR: "{{ turbopanel_daemon_dir }}"
-    TURBOPANEL_INSTALL_ROOT: "{{ turbopanel_install_root }}"
   changed_when: false
   failed_when: false
 
