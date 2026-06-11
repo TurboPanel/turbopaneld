@@ -18,5 +18,11 @@
         "jsr:@std/internal"
       ]
     }
+  },
+  "workspace": {
+    "dependencies": [
+      "jsr:@std/encoding@1",
+      "jsr:@std/path@1"
+    ]
   }
 }

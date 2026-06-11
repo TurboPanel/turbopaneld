@@ -1,0 +1,9 @@
+{
+  "deno.enable": true,
+  "deno.config": "./deno.json",
+  "deno.lint": true,
+  "sonarlint.connectedMode.project": {
+    "connectionId": "turbopanel",
+    "projectKey": "turbopanel_turbopanel-daemon"
+  }
+}

@@ -11,6 +11,21 @@ import { applyDevSyncTarball, type DevSyncState, newDevSyncState } from '../dev-
 import { writeInstanceTunnelToken } from '../tunnels.ts'
 import { decodeBase64 } from '@std/encoding/base64'
 
+/** Chained replace pattern Sonar S5145 recognizes for log-injection sanitization. */
+function stripLogInjection(text: string): string {
+  return text.replaceAll('\n', '_').replaceAll('\r', '_').replaceAll('\t', '_')
+}
+
+function sanitizeForLog(value: unknown): string {
+  if (value instanceof Error) return stripLogInjection(value.message)
+  if (typeof value === 'string') return stripLogInjection(value)
+  try {
+    return stripLogInjection(JSON.stringify(value) ?? String(value))
+  } catch {
+    return stripLogInjection(String(value))
+  }
+}
+
 type DaemonMessage =
   | {
     type: 'hello'
@@ -94,7 +109,7 @@ async function writeServerId(serverId: string): Promise<void> {
     await Deno.mkdir('/etc/turbopanel/daemon', { recursive: true })
     await Deno.writeTextFile(SERVER_ID_PATH, `${trimmed}\n`)
   } catch (err) {
-    console.warn('[instance] failed to persist server id:', err)
+    console.warn('[instance] failed to persist server id:', sanitizeForLog(err))
   }
 }
 
@@ -114,8 +129,8 @@ export class InstanceClient {
 
   #ws: WebSocket | undefined
   #stopped = false
-  #connectLoop: Promise<void> | undefined
-  #devSync = new Map<string, DevSyncState>()
+  #connectLoopStarted = false
+  readonly #devSync = new Map<string, DevSyncState>()
 
   constructor(options: InstanceClientOptions = {}) {
     this.#config = options.config ?? resolveInstanceConfig()
@@ -174,9 +189,15 @@ export class InstanceClient {
   }
 
   start(): void {
-    if (this.#connectLoop) return
+    if (this.#connectLoopStarted) return
+    this.#connectLoopStarted = true
     this.#stopped = false
-    this.#connectLoop = this.#runConnectLoop()
+    this.#runConnectLoop().catch((err) => {
+      console.warn(
+        '[instance] connect loop exited unexpectedly:',
+        sanitizeForLog(err),
+      )
+    })
   }
 
   stop(): void {
@@ -199,7 +220,7 @@ export class InstanceClient {
       } catch (err) {
         console.warn(
           '[instance] websocket connect failed:',
-          err instanceof Error ? err.message : err,
+          sanitizeForLog(err),
         )
         this.#closeActiveSocket()
       }
@@ -269,7 +290,7 @@ export class InstanceClient {
       ws.addEventListener('close', onClose)
     })
 
-    console.log('[instance] websocket connected via', this.target)
+    console.log('[instance] websocket connected via', sanitizeForLog(this.target))
 
     const hello: DaemonMessage = {
       type: 'hello',
@@ -313,10 +334,10 @@ export class InstanceClient {
         }
         console.log(
           '[instance] hello from',
-          message.from,
-          message.hostname ?? message.serverId ?? '(no identity)',
+          sanitizeForLog(message.from),
+          sanitizeForLog(message.hostname ?? message.serverId ?? '(no identity)'),
           'at',
-          message.at,
+          sanitizeForLog(message.at),
         )
         break
       case 'ping':
@@ -329,14 +350,14 @@ export class InstanceClient {
         ))
         break
       case 'pong':
-        console.log('[instance] pong', message.id)
+        console.log('[instance] pong', sanitizeForLog(message.id))
         break
       case 'version':
         // Informational only. The daemon never self-updates; updates are
         // operator-driven via the developer upgrade button / dev-sync push.
         break
       case 'echo':
-        console.log('[instance] echo from instance:', message.payload)
+        console.log('[instance] echo from instance:', sanitizeForLog(message.payload))
         ws.send(JSON.stringify(
           {
             type: 'echo',
@@ -346,10 +367,15 @@ export class InstanceClient {
         ))
         break
       case 'command':
-        void this.#runCommand(message, ws)
+        this.#runCommand(message, ws).catch((err) => {
+          console.warn(
+            '[instance] command handler failed:',
+            sanitizeForLog(err),
+          )
+        })
         break
       case 'addresses-request':
-        void this.#collectAddresses(message, ws)
+        this.#collectAddresses(message, ws)
         break
       case 'dev-sync-begin':
         this.#devSync.set(message.id, newDevSyncState(message.totalChunks))
@@ -360,10 +386,20 @@ export class InstanceClient {
         break
       }
       case 'dev-sync-end':
-        void this.#applyDevSync(message.id, ws)
+        this.#applyDevSync(message.id, ws).catch((err) => {
+          console.warn(
+            '[instance] dev-sync handler failed:',
+            sanitizeForLog(err),
+          )
+        })
         break
       case 'tunnel-token':
-        void this.#applyTunnelToken(message, ws)
+        this.#applyTunnelToken(message, ws).catch((err) => {
+          console.warn(
+            '[instance] tunnel-token handler failed:',
+            sanitizeForLog(err),
+          )
+        })
         break
     }
   }
@@ -381,7 +417,7 @@ export class InstanceClient {
       ok = true
     } catch (err) {
       error = err instanceof Error ? err.message : String(err)
-      console.error('[dev-sync] failed:', error)
+      console.error('[dev-sync] failed:', sanitizeForLog(error))
     }
 
     const result: DaemonMessage = {
@@ -409,7 +445,7 @@ export class InstanceClient {
       ok = true
     } catch (err) {
       error = err instanceof Error ? err.message : String(err)
-      console.error('[tunnel-token] failed:', error)
+      console.error('[tunnel-token] failed:', sanitizeForLog(error))
     }
 
     const result: DaemonMessage = {
@@ -429,7 +465,11 @@ export class InstanceClient {
     let addresses: Extract<DaemonMessage, { type: 'addresses-result' }>['addresses']
     try {
       addresses = collectServerAddresses()
-    } catch (_err) {
+    } catch (err) {
+      console.warn(
+        '[instance] collect addresses failed:',
+        sanitizeForLog(err),
+      )
       addresses = {
         privateIpv4: [],
         privateIpv6: [],
@@ -460,7 +500,7 @@ export class InstanceClient {
     message: Extract<DaemonMessage, { type: 'command' }>,
     ws: WebSocket,
   ): Promise<void> {
-    console.log('[instance] run command:', message.command)
+    console.log('[instance] run command:', stripLogInjection(message.command))
     let result: Extract<DaemonMessage, { type: 'command-result' }>
     try {
       const command = new Deno.Command('sh', {
@@ -510,17 +550,14 @@ async function restartDaemonService(): Promise<void> {
       stderr: 'piped',
     }).output()
     if (!result.success) {
-      console.warn(
-        `[dev-sync] systemctl restart ${unit} failed: ${
-          new TextDecoder().decode(result.stderr).trim() || 'unknown error'
-        }`,
+      const safeUnit = stripLogInjection(unit)
+      const safeStderr = stripLogInjection(
+        new TextDecoder().decode(result.stderr).trim() || 'unknown error',
       )
+      console.warn('[dev-sync] systemctl restart', safeUnit, 'failed:', safeStderr)
     }
   } catch (err) {
-    console.warn(
-      '[dev-sync] restart failed:',
-      err instanceof Error ? err.message : err,
-    )
+    console.warn('[dev-sync] restart failed:', sanitizeForLog(err))
   }
 }
 
@@ -544,12 +581,17 @@ export async function connectInstance(
   while (true) {
     try {
       const health = await client.fetchHealth()
-      console.log('[instance] REST health:', health, 'via', client.target)
+      console.log(
+        '[instance] REST health:',
+        sanitizeForLog(health),
+        'via',
+        sanitizeForLog(client.target),
+      )
       break
     } catch (err) {
       console.warn(
         '[instance] waiting for instance:',
-        err instanceof Error ? err.message : err,
+        sanitizeForLog(err),
       )
       await delay(reconnectDelayMs)
     }
