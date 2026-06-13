@@ -13,6 +13,15 @@ import { ensureUv } from './uv.ts'
 import { resolveInstanceConfig } from '../instance/paths.ts'
 
 /**
+ * True when Tilt/local dev already manages the instance stack and the daemon
+ * should only connect (no Ansible bootstrap on startup).
+ */
+function shouldSkipOrchestration(): boolean {
+  const flag = Deno.env.get('TURBOPANEL_SKIP_ORCHESTRATION')?.trim().toLowerCase()
+  return flag === '1' || flag === 'true' || flag === 'yes'
+}
+
+/**
  * True when this daemon should also install the co-located self-hosted
  * instance + UI in development mode: it must be co-located (Unix-socket mode,
  * no `TURBOPANEL_INSTANCE_URL`) and `TURBOPANEL_DEV_INSTANCE` must be truthy.
@@ -35,6 +44,11 @@ function shouldInstallDevInstance(): boolean {
  * problem shouldn't take the whole service down. Returns `true` on success.
  */
 export async function initOrchestration(): Promise<boolean> {
+  if (shouldSkipOrchestration()) {
+    console.log('[orchestration] skipped (TURBOPANEL_SKIP_ORCHESTRATION)')
+    return false
+  }
+
   const started = performance.now()
   console.log('[orchestration] bootstrapping runtime')
   const devInstance = shouldInstallDevInstance()

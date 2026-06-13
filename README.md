@@ -16,7 +16,7 @@ curl -fsSL https://raw.githubusercontent.com/turbopanel/turbopanel-cdn/trunk/ins
 
 Replace `<instance-host>` and `<port>` with wherever your instance is reachable from this node (LAN hostname, public hostname, tunnel endpoint, etc.).
 
-For self-hosted instances over HTTPS, the installer automatically downloads the platform CA from `/api/instance/ca` (one `curl -k` bootstrap) and restarts the daemon when configuration changes. Re-run the same command any time to upgrade or reconcile a node.
+For self-hosted instances over HTTPS, the installer automatically downloads the platform CA from `GET /api/daemon/v1/instance/ca` (one `curl -k` bootstrap) and restarts the daemon when configuration changes. Re-run the same command any time to upgrade or reconcile a node.
 
 ### Options
 
@@ -24,7 +24,7 @@ For self-hosted instances over HTTPS, the installer automatically downloads the 
 |------|-------------|
 | `--instance-url <URL>` | **Required.** Base URL of the instance (`https://…` or `http://…`). |
 | `--tunnel-token <TOKEN>` | Cloudflare tunnel token. Stored at `cloudflared/tunnels/default.token` and run by the daemon. |
-| `--instance-ca <PATH>` | PEM platform CA to trust (skips the automatic `/api/instance/ca` fetch). |
+| `--instance-ca <PATH>` | PEM platform CA to trust (skips the automatic `/api/daemon/v1/instance/ca` fetch). |
 | `--insecure-tls` | Skip TLS verification when dialing the instance (dev only). |
 | `--branch <NAME>` | Git branch to track (default: `trunk`). |
 | `--repo-url <URL>` | Override the daemon git remote. |

@@ -2,7 +2,7 @@
 export const DEFAULT_SOCKET_DIR = '/run/turbopanel'
 
 /** Unix socket filename for the TurboPanel instance. */
-export const INSTANCE_SOCKET = 'turbopanel.sock'
+export const INSTANCE_SOCKET = 'instance.sock'
 
 /**
  * How the daemon reaches the instance.

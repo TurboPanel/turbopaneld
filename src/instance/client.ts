@@ -80,7 +80,34 @@ export interface InstanceClientOptions {
   onMessage?: (message: DaemonMessage) => void
 }
 
-const SERVER_ID_PATH = '/etc/turbopanel/daemon/server.id'
+const SERVER_ID_FILE = 'server.id'
+const DEFAULT_SERVER_ID_DIR = '/etc/turbopanel/platform/daemon'
+
+function isTruthyFlag(value: string | undefined): boolean {
+  const normalized = value?.trim().toLowerCase()
+  return normalized === '1' || normalized === 'true' || normalized === 'yes'
+}
+
+function stripTrailingSlash(path: string): string {
+  return path.replace(/\/+$/, '')
+}
+
+function resolveServerIdDir(
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+): string {
+  const override = env.TURBOPANEL_DAEMON_STATE_DIR?.trim()
+  if (override) return stripTrailingSlash(override)
+
+  if (isTruthyFlag(env.TURBOPANEL_SKIP_ORCHESTRATION)) {
+    return stripTrailingSlash(Deno.cwd())
+  }
+
+  return DEFAULT_SERVER_ID_DIR
+}
+
+function resolveServerIdPath(): string {
+  return `${resolveServerIdDir()}/${SERVER_ID_FILE}`
+}
 
 async function readMachineId(): Promise<string | undefined> {
   try {
@@ -94,7 +121,7 @@ async function readMachineId(): Promise<string | undefined> {
 
 async function readServerId(): Promise<string | undefined> {
   try {
-    const id = await Deno.readTextFile(SERVER_ID_PATH)
+    const id = await Deno.readTextFile(resolveServerIdPath())
     const trimmed = id.trim()
     return trimmed.length > 0 ? trimmed : undefined
   } catch {
@@ -106,8 +133,9 @@ async function writeServerId(serverId: string): Promise<void> {
   const trimmed = serverId.trim()
   if (!trimmed) return
   try {
-    await Deno.mkdir('/etc/turbopanel/daemon', { recursive: true })
-    await Deno.writeTextFile(SERVER_ID_PATH, `${trimmed}\n`)
+    const dir = resolveServerIdDir()
+    await Deno.mkdir(dir, { recursive: true })
+    await Deno.writeTextFile(`${dir}/${SERVER_ID_FILE}`, `${trimmed}\n`)
   } catch (err) {
     console.warn('[instance] failed to persist server id:', sanitizeForLog(err))
   }

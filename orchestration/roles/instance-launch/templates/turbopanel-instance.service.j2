@@ -26,7 +26,7 @@ Environment=TURBOPANEL_PG_PORT={{ postgres_port }}
 Environment=TURBOPANEL_PG_PASSWORD={{ lookup('ansible.builtin.file', turbopanel_config_dir + '/postgres/.pgpass') | trim }}
 {% endif %}
 Environment=TURBOPANEL_PG_SOCKET={{ postgres_socket_dir }}/.s.PGSQL.{{ postgres_port }}
-ExecStart={{ turbopanel_runtimes_dir }}/deno/current/deno run --allow-env --allow-sys=networkInterfaces --allow-read=/run/turbopanel,{{ postgres_socket_dir }},{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }},{{ turbopanel_instance_runtime_dir }} --allow-write=/run/turbopanel,{{ postgres_socket_dir }},{{ turbopanel_instance_runtime_dir }} --allow-net=127.0.0.1:{{ drizzle_studio_port | default(4983) }} --allow-run=git,systemctl,tar,sudo,/usr/bin/sudo,/bin/sh,mkfifo,/usr/bin/mkfifo,pamtester,/usr/bin/pamtester,{{ turbopanel_runtimes_dir }}/node/current/bin/node,tmux src/deno.ts
+ExecStart={{ turbopanel_runtimes_dir }}/deno/current/deno run --allow-env --allow-sys=networkInterfaces --allow-read=/run/turbopanel,{{ postgres_socket_dir }},{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }},{{ turbopanel_instance_runtime_dir }} --allow-write=/run/turbopanel,{{ postgres_socket_dir }},{{ turbopanel_instance_runtime_dir }} --allow-net=127.0.0.1:{{ drizzle_studio_port | default(4983) }} --allow-run=git,systemctl,tar,sudo,/usr/bin/sudo,/bin/sh,mkfifo,/usr/bin/mkfifo,pamtester,/usr/bin/pamtester,{{ turbopanel_runtimes_dir }}/node/current/bin/node src/deno.ts
 Restart=always
 RestartSec=2
 # Deno.serve waits for active WS connections to drain on SIGTERM which can hang

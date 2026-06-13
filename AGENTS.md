@@ -38,9 +38,9 @@ Two modes in `src/instance/paths.ts`:
 | Mode | When | Target |
 |---|---|---|
 | `url` | `TURBOPANEL_INSTANCE_URL` set (installed agents) | `https://<host>:<port>` / `wss://…/ws/daemon/v1` through Caddy |
-| `socket` | No URL (co-located dev on the instance host) | `unix:///run/turbopanel/turbopanel.sock` |
+| `socket` | No URL (co-located dev on the instance host) | `unix:///run/turbopanel/instance.sock` (Tilt dev: `dev/.run/turbopanel/instance.sock`) |
 
-On connect the daemon sends a `hello` with `hostname`, optional persisted `serverId` (`/etc/turbopanel/daemon/server.id`), and `machineId` (`/etc/machine-id`) for first-time registration. The instance resolves a canonical **`servers.id`** (uuidv7), replies with `serverId` in `hello`, and dedupes reconnects by `serverId` / `X-Real-IP` / `hostname`. The daemon dials **`/ws/daemon/v1`** and reads `GET /api/daemon/v1/version` / `GET /api/daemon/v1/instance/ca`.
+On connect the daemon sends a `hello` with `hostname`, optional persisted `serverId`, and `machineId` (`/etc/machine-id`) for first-time registration. Managed installs store the server id at `/etc/turbopanel/platform/daemon/server.id` (`TURBOPANEL_DAEMON_STATE_DIR` overrides the directory); local Tilt dev (`TURBOPANEL_SKIP_ORCHESTRATION=1`) stores it as `./server.id` in the daemon checkout so the restricted dev permissions can write it. The instance resolves a canonical **`servers.id`** (uuidv7), replies with `serverId` in `hello`, and dedupes reconnects by `serverId` / `X-Real-IP` / `hostname`. The daemon dials **`/ws/daemon/v1`** and reads `GET /api/daemon/v1/version` / `GET /api/daemon/v1/instance/ca`.
 
 Install flow: official installer (separate CDN repo) → `scripts/bootstrap-orchestration.sh` (uv, Python, ansible, **Galaxy roles**) → `orchestration/playbooks/agent-install.yml`. Docker is installed in that playbook and again at daemon startup via `initOrchestration()` in `src/orchestration/setup.ts`.
 
@@ -63,7 +63,7 @@ The daemon bootstraps uv/Python/ansible, then runs playbooks. Roles (in `orchest
 | `postgres` | PostgreSQL 18 in Docker; data under `/var/lib/turbopanel/postgres`, Unix socket at `/var/run/turbopanel/postgres` |
 | `docker` / `daemon-repo` / `daemon-config` / `daemon-logs` / `daemon-launch` | agent-node provisioning |
 
-- Co-located **dev** install: `orchestration/playbooks/instance-dev-install.yml`, run by `initOrchestration()` when co-located (socket mode) **and** `TURBOPANEL_DEV_INSTANCE=1`. `develop.sh` in `../turbopanel` sets the flag and installs the daemon unit, which then installs the rest. Dev bootstrap **skips** `postgres-setup.yml` and lets `instance-dev-install` own Postgres. The Docker container always publishes a Unix socket; the instance and drizzle-kit connect via `TURBOPANEL_PG_SOCKET` (TCP port exposure is optional via `postgres_expose_port`, off in dev).
+- Co-located **dev** install: `orchestration/playbooks/instance-dev-install.yml`, run by `initOrchestration()` when co-located (socket mode) **and** `TURBOPANEL_DEV_INSTANCE=1`. `develop.sh` in `../turbopanel` sets the flag and installs the daemon unit, which then installs the rest. **Local Tilt dev** (`../dev/Tiltfile`) runs the daemon via `scripts/daemon-serve.sh` with `TURBOPANEL_SKIP_ORCHESTRATION=1` instead — Tilt already manages instance/Caddy/Postgres; Workers mode sets `TURBOPANEL_INSTANCE_URL` to Caddy HTTPS, Deno mode dials the dev socket dir. Dev bootstrap **skips** `postgres-setup.yml` and lets `instance-dev-install` own Postgres. The Docker container always publishes a Unix socket; the instance and drizzle-kit connect via `TURBOPANEL_PG_SOCKET` (TCP port exposure is optional via `postgres_expose_port`, off in dev).
 - Production prebuilt instance/UI artifacts and static UI hosting are **out of scope** (seams/comments only).
 
 ## Orchestration
@@ -74,9 +74,9 @@ The daemon bootstraps uv/Python/ansible, then runs playbooks. Roles (in `orchest
 - Bootstrap also runs on every daemon start (idempotent; failures are logged, daemon keeps running). After Docker, `postgres-setup.yml` starts `turbopanel-postgres` (`postgres:18`) with the data volume at `/var/lib/turbopanel/postgres` → `/var/lib/postgresql` (PG 18+ layout) and the socket dir bind-mounted to `/var/run/turbopanel/postgres`.
 - Logs are written to both journald and `/var/log/turbopanel/daemon/{daemon.log,daemon.err.log}` when running under systemd (`StandardOutput`/`StandardError` in the unit template). Logrotate policy lives at `/etc/logrotate.d/turbopanel-daemon` (daily, 14 rotations, compress). The log directory is recreated on boot via `/etc/tmpfiles.d/turbopanel-daemon-logs.conf`. The `daemon-logs` role provisions all of this; the official installer runs it via `daemon-launch`, and `initOrchestration()` re-runs `daemon-logs-setup.yml` on every daemon start so existing agents pick it up without a full reinstall.
 
-### Runtime (systemd only)
+### Runtime (systemd + Tilt)
 
-Agent nodes and co-located dev hosts run **`turbopanel-daemon.service`** — there is no Tilt entrypoint in this repo. The official installer / `agent-install.yml` install the unit; co-located instance hosts use `scripts/install-daemon-systemd.sh` (which also ensures the user, prereqs, and Deno so a fresh dev host is self-sufficient). `scripts/ensure-single-daemon.sh` (ExecStartPre) ensures `/run/turbopanel` exists with correct permissions and clears any stale `daemon.lock` left by an unclean shutdown.
+Agent nodes and co-located dev hosts run **`turbopanel-daemon.service`** (systemd). The official installer / `agent-install.yml` install the unit; co-located instance hosts use `scripts/install-daemon-systemd.sh` (which also ensures the user, prereqs, and Deno so a fresh dev host is self-sufficient). **Local Tilt dev** runs the same process from `../dev/scripts/daemon-serve.sh` (Tilt `daemon` resource) with `TURBOPANEL_SKIP_ORCHESTRATION=1` so Ansible bootstrap is skipped. `scripts/ensure-single-daemon.sh` (ExecStartPre) ensures `/run/turbopanel` exists with correct permissions and clears any stale `daemon.lock` left by an unclean shutdown.
 
 ### Dev sync & instance tunnel (WS messages)
 

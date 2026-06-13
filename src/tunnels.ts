@@ -17,6 +17,8 @@ interface TunnelConfig {
   token: string
 }
 
+const CLOUDFLARE_TUNNELS_ENABLED = false
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
@@ -123,6 +125,11 @@ async function launchTunnels(): Promise<void> {
  * installed.
  */
 export async function startTunnels(signal: AbortSignal): Promise<void> {
+  if (!CLOUDFLARE_TUNNELS_ENABLED) {
+    console.log('[tunnels] Cloudflare tunnels disabled; skipping')
+    return
+  }
+
   parentSignal = signal
   await launchTunnels()
 }
@@ -134,6 +141,11 @@ export async function startTunnels(signal: AbortSignal): Promise<void> {
  * An empty token removes the tunnel.
  */
 export async function writeInstanceTunnelToken(token: string): Promise<void> {
+  if (!CLOUDFLARE_TUNNELS_ENABLED) {
+    console.log('[tunnels] Cloudflare tunnels disabled; ignoring tunnel token')
+    return
+  }
+
   const trimmed = token.trim()
   await Deno.mkdir(TUNNELS_DIR, { recursive: true })
   const path = join(TUNNELS_DIR, `${INSTANCE_TUNNEL_NAME}.token`)

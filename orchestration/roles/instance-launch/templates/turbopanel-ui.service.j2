@@ -4,7 +4,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=forking
+Type=simple
 User={{ instance_user }}
 Group={{ turbopanel_group }}
 WorkingDirectory={{ turbopanel_ui_dir }}
@@ -19,10 +19,7 @@ Environment=COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 # Use the linked expo binary directly — `pnpm exec` runs an implicit install that
 # prompts to purge node_modules when HOME differs from the turbopanel-user install.
 # Runtime state (Expo, pnpm XDG dirs) lives under {{ turbopanel_ui_runtime_dir }} (gitignored).
-ExecStart=/usr/bin/tmux new-session -d -s expo-ui {{ turbopanel_ui_dir }}/node_modules/.bin/expo start --web --port {{ expo_port }}
-ExecStop=/usr/bin/tmux kill-session -t expo-ui
-KillMode=process
-RemainAfterExit=yes
+ExecStart={{ turbopanel_ui_dir }}/node_modules/.bin/expo start --web --port {{ expo_port }}
 Restart=always
 RestartSec=3
 

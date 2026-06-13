@@ -1,7 +1,7 @@
 ---
 - name: Ensure daemon state directory
   ansible.builtin.file:
-    path: /etc/turbopanel/daemon
+    path: "{{ turbopanel_daemon_state_dir | default('/etc/turbopanel/platform/daemon') }}"
     state: directory
     owner: "{{ turbopanel_user }}"
     group: "{{ turbopanel_group }}"

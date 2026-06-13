@@ -10,7 +10,6 @@
       - pamtester
       - python3-debian
       - tar
-      - tmux
       - unzip
       - xz-utils
     state: present
