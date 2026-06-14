@@ -7,7 +7,9 @@
   ansible.builtin.systemd:
     name: "{{ instance_service_name }}"
     state: restarted
-  when: instance_start | bool
+  when:
+    - instance_start | bool
+    - (turbopanel_instance_runtime | default('deno')) != 'workers'
 
 - name: Restart turbopanel caddy
   ansible.builtin.systemd:

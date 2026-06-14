@@ -151,12 +151,16 @@
     - "{{ turbopanel_ui_dir }}"
   when: item not in (_git_safe_instance_dirs.stdout_lines | default([]))
 
+- name: Resolve instance unit desired state
+  ansible.builtin.set_fact:
+    instance_unit_enabled: "{{ instance_start | bool and (turbopanel_instance_runtime | default('deno')) != 'workers' }}"
+
 - name: Ensure instance service desired state
   ansible.builtin.systemd:
     name: "{{ instance_service_name }}"
     daemon_reload: true
-    enabled: "{{ instance_start | bool }}"
-    state: "{{ 'started' if (instance_start | bool) else 'stopped' }}"
+    enabled: "{{ instance_unit_enabled | bool }}"
+    state: "{{ 'started' if (instance_unit_enabled | bool) else 'stopped' }}"
 
 - name: Ensure Caddy service desired state
   ansible.builtin.systemd:

@@ -8,6 +8,12 @@
         groups: "{{ turbopanel_group }}"
         append: true
 
+    - name: Add dev user to docker group (co-located dev)
+      ansible.builtin.user:
+        name: "{{ turbopanel_dev_user }}"
+        groups: docker
+        append: true
+
     - name: Set setgid on platform checkouts
       ansible.builtin.file:
         path: "{{ item }}"

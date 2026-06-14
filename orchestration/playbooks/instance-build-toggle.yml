@@ -17,6 +17,7 @@
     turbopanel_group: turbopanel
     turbopanel_user: turbopanel
     instance_user: instance
+    turbopanel_instance_runtime: deno
     instance_start: true
     force_build: false
     force_compile: false

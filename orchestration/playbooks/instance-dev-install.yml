@@ -28,9 +28,11 @@
     instance_branch: trunk
     ui_branch: trunk
     turbopanel_ui_artifact_url: ""
+    turbopanel_instance_runtime: deno
+    # Caddy/UI/mailer follow instance_start; the instance unit also checks runtime.
     instance_start: true
-    # Unix socket is always available; instance and drizzle-kit connect via socket.
-    postgres_expose_port: false
+    # Unix socket is always available; expose TCP when Workers runtime needs wrangler Hyperdrive.
+    postgres_expose_port: "{{ turbopanel_instance_runtime == 'workers' }}"
     rabbitmq_amqp_port: 5672
     rabbitmq_mgmt_port: 15672
     rabbitmq_expose_mgmt_port: true

@@ -229,6 +229,8 @@ export async function runInstanceDevInstall(): Promise<void> {
   const uiMode = Deno.env.get('TURBOPANEL_UI_MODE') === 'static' ? 'static' : 'dev'
   const instanceRunMode =
     Deno.env.get('TURBOPANEL_INSTANCE_RUN_MODE') === 'compiled' ? 'compiled' : 'source'
+  const instanceRuntime =
+    Deno.env.get('TURBOPANEL_INSTANCE_RUNTIME') === 'workers' ? 'workers' : 'deno'
 
   const args = ['-i', 'localhost,', '-c', 'local']
   if (devUser) args.push('-e', `turbopanel_dev_user=${devUser}`)
@@ -236,6 +238,10 @@ export async function runInstanceDevInstall(): Promise<void> {
   if (devGid) args.push('-e', `turbopanel_dev_gid=${devGid}`)
   args.push('-e', `turbopanel_ui_mode=${uiMode}`)
   args.push('-e', `turbopanel_instance_run_mode=${instanceRunMode}`)
+  args.push('-e', `turbopanel_instance_runtime=${instanceRuntime}`)
+  if (instanceRuntime === 'workers') {
+    args.push('-e', 'postgres_expose_port=true')
+  }
   args.push(INSTANCE_DEV_INSTALL_PLAYBOOK)
 
   console.log('[orchestration] running instance-dev-install playbook')
@@ -257,6 +263,9 @@ export async function runBuildToggle(opts: {
   instanceRunMode: 'source' | 'compiled'
   forceBuild?: boolean
 }): Promise<void> {
+  const instanceRuntime =
+    Deno.env.get('TURBOPANEL_INSTANCE_RUNTIME') === 'workers' ? 'workers' : 'deno'
+
   const args = [
     '-i',
     'localhost,',
@@ -266,6 +275,8 @@ export async function runBuildToggle(opts: {
     `turbopanel_ui_mode=${opts.uiMode}`,
     '-e',
     `turbopanel_instance_run_mode=${opts.instanceRunMode}`,
+    '-e',
+    `turbopanel_instance_runtime=${instanceRuntime}`,
     '-e',
     `force_build=${opts.forceBuild ?? false}`,
     '-e',
@@ -285,7 +296,7 @@ export async function runBuildToggle(opts: {
 
 /**
  * Install Docker from the official Docker apt repository and ensure the
- * turbopanel user is in the docker group.
+ * turbopanel user (and co-located dev user when set) is in the docker group.
  *
  * Targets Debian 13 Trixie and Raspbian Trixie (the daemon's only supported
  * platforms). The playbook is fully idempotent — re-running after Docker is
@@ -295,15 +306,16 @@ export async function runBuildToggle(opts: {
  * this configured in the base image).
  */
 export async function runDockerSetup(): Promise<void> {
+  const devUser = Deno.env.get('TURBOPANEL_DEV_USER')
+  const args = ['-i', 'localhost,', '-c', 'local']
+  if (devUser) args.push('-e', `turbopanel_dev_user=${devUser}`)
+  args.push(DOCKER_PLAYBOOK)
+
   console.log('[orchestration] running docker-setup playbook')
-  await runOrThrow(
-    ANSIBLE_PLAYBOOK_BIN,
-    ['-i', 'localhost,', '-c', 'local', DOCKER_PLAYBOOK],
-    {
-      cwd: ORCHESTRATION_DIR,
-      env: { ANSIBLE_CONFIG: ANSIBLE_CFG },
-    },
-  )
+  await runOrThrow(ANSIBLE_PLAYBOOK_BIN, args, {
+    cwd: ORCHESTRATION_DIR,
+    env: { ANSIBLE_CONFIG: ANSIBLE_CFG },
+  })
   console.log('[orchestration] docker-setup complete')
 }
 

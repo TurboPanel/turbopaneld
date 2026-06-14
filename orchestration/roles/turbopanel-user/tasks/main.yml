@@ -12,7 +12,7 @@
     uid: "{{ turbopanel_uid }}"
     group: "{{ turbopanel_group }}"
     home: "{{ turbopanel_install_root }}"
-    shell: /bin/bash
+    shell: /usr/sbin/nologin
     system: true
     create_home: false
 

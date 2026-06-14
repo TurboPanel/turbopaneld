@@ -9,3 +9,6 @@ docker_rootless: false
 # When true, docker_user is added to the docker group. Must be false when
 # docker_rootless is true — rootless Docker does not use the docker group.
 docker_add_turbopanel_user: true
+
+# Co-located dev: human developer invoking ./console (passed as extra-var).
+turbopanel_dev_user: ""
