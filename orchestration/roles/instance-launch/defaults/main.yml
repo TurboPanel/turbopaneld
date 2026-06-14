@@ -28,6 +28,9 @@ drizzle_studio_port: 4983
 # "dev" proxies Caddy to the Expo dev server (turbopanel-ui.service);
 # "static" serves the exported web build from {{ turbopanel_ui_dir }}/dist.
 turbopanel_ui_mode: dev
+# "source" runs deno run src/deno.ts; "compiled" exec's dist/turbopanel-instance.
+turbopanel_instance_run_mode: source
+turbopanel_instance_binary: "{{ turbopanel_instance_dir }}/dist/turbopanel-instance"
 instance_start: true
 postgres_socket_dir: /var/run/turbopanel/postgres
 postgres_port: 5432
@@ -35,3 +38,9 @@ postgres_expose_port: false
 postgres_user: turbopanel
 postgres_db: turbopanel
 turbopanel_config_dir: /etc/turbopanel
+rabbitmq_amqp_port: 5672
+rabbitmq_vhost: /
+rabbitmq_user: turbopanel
+redis_socket_path: /run/turbopanel/redis.sock
+mailer_service_name: turbopanel-mailer
+turbopanel_dev_user: ""

@@ -1,0 +1,10 @@
+- name: TurboPanel RabbitMQ setup
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+  vars:
+    turbopanel_config_dir: /etc/turbopanel
+  roles:
+    - role: docker
+    - role: rabbitmq

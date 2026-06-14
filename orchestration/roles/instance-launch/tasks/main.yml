@@ -36,6 +36,17 @@
     - Reload systemd for instance units
     - Restart turbopanel ui
 
+- name: Install mailer systemd unit
+  ansible.builtin.template:
+    src: turbopanel-mailer.service.j2
+    dest: "/etc/systemd/system/{{ mailer_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd for instance units
+    - Restart turbopanel mailer
+
 # Upgrades run `sudo -u turbopanel git` from the instance (see upgrade-sudoers.yml).
 # The deploy key must stay mode 0600 — SSH rejects group-readable private keys.
 - name: Check turbopanel GitHub deploy key
@@ -115,6 +126,21 @@
   when: turbopanel_ui_mode == 'dev'
   ansible.builtin.systemd:
     name: "{{ ui_service_name }}"
+    enabled: "{{ instance_start | bool }}"
+    state: "{{ 'started' if (instance_start | bool) else 'stopped' }}"
+
+- name: Stop and disable UI service when not in dev mode
+  when: turbopanel_ui_mode != 'dev'
+  ansible.builtin.systemd:
+    name: "{{ ui_service_name }}"
+    state: stopped
+    enabled: false
+  failed_when: false
+
+- name: Ensure mailer service desired state
+  ansible.builtin.systemd:
+    name: "{{ mailer_service_name }}"
+    daemon_reload: true
     enabled: "{{ instance_start | bool }}"
     state: "{{ 'started' if (instance_start | bool) else 'stopped' }}"
 

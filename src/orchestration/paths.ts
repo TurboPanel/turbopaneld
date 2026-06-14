@@ -39,6 +39,7 @@ export const ANSIBLE_PLAYBOOK_BIN = join(VENV_BIN_DIR, 'ansible-playbook')
 export const REQUIREMENTS_FILE = join(ORCHESTRATION_DIR, 'requirements.txt')
 export const GALAXY_REQUIREMENTS_FILE = join(ORCHESTRATION_DIR, 'requirements.yml')
 export const GALAXY_ROLES_DIR = join(ORCHESTRATION_DIR, 'roles')
+export const GALAXY_COLLECTIONS_DIR = join(ORCHESTRATION_DIR, 'collections')
 export const ANSIBLE_CFG = join(ORCHESTRATION_DIR, 'ansible.cfg')
 export const LOCALHOST_PLAYBOOK = join(
   ORCHESTRATION_DIR,
@@ -54,6 +55,16 @@ export const POSTGRES_PLAYBOOK = join(
   ORCHESTRATION_DIR,
   'playbooks',
   'postgres-setup.yml',
+)
+export const REDIS_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  'playbooks',
+  'redis-setup.yml',
+)
+export const RABBITMQ_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  'playbooks',
+  'rabbitmq-setup.yml',
 )
 export const SOCKET_DIRS_PLAYBOOK = join(
   ORCHESTRATION_DIR,
@@ -74,6 +85,11 @@ export const INSTANCE_DEV_INSTALL_PLAYBOOK = join(
   ORCHESTRATION_DIR,
   'playbooks',
   'instance-dev-install.yml',
+)
+export const BUILD_TOGGLE_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  'playbooks',
+  'instance-build-toggle.yml',
 )
 
 export interface UvTarget {

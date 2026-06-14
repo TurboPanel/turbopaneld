@@ -15,6 +15,7 @@ VENV="$RUNTIME/venv"
 REQUIREMENTS="$ORCHESTRATION/requirements.txt"
 GALAXY_REQUIREMENTS="$ORCHESTRATION/requirements.yml"
 ROLES_DIR="$ORCHESTRATION/roles"
+COLLECTIONS_DIR="$ORCHESTRATION/collections"
 
 UV_VERSION="0.11.19"
 PYTHON_VERSION="3.12"
@@ -124,6 +125,10 @@ ensure_galaxy_roles() {
   log "installing galaxy roles from $GALAXY_REQUIREMENTS"
   "$VENV/bin/ansible-galaxy" role install -r "$GALAXY_REQUIREMENTS" -p "$ROLES_DIR"
   log "galaxy roles ready"
+
+  log "installing galaxy collections from $GALAXY_REQUIREMENTS"
+  "$VENV/bin/ansible-galaxy" collection install -r "$GALAXY_REQUIREMENTS" -p "$COLLECTIONS_DIR"
+  log "galaxy collections ready"
 }
 
 mkdir -p "$RUNTIME"

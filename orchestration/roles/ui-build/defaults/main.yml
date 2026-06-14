@@ -1,0 +1,13 @@
+---
+turbopanel_install_root: /opt/turbopanel
+turbopanel_user: turbopanel
+turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/runtimes"
+turbopanel_platform_dir: "{{ turbopanel_install_root }}/platform"
+turbopanel_ui_dir: "{{ turbopanel_platform_dir }}/ui"
+turbopanel_ui_runtime_dir: "{{ turbopanel_ui_dir }}/.local"
+instance_user: instance
+turbopanel_group: turbopanel
+turbopanel_ui_mode: dev
+turbopanel_ui_dist_dir: "{{ turbopanel_ui_dir }}/dist"
+turbopanel_ui_artifact_url: ""
+force_build: false

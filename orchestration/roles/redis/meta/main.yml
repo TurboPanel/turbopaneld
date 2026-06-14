@@ -1,0 +1,17 @@
+---
+galaxy_info:
+  author: turbopanel
+  description: >-
+    Build and install a pinned Redis binary into the shared runtimes directory;
+    dedicated redis system user; Unix socket only (port 0, no TCP listener).
+  license: MIT
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Debian
+      versions:
+        - all
+    - name: Raspbian
+      versions:
+        - all
+
+dependencies: []

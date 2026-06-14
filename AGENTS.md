@@ -13,10 +13,11 @@ TurboPanel is named for speed; keep the daemon fast.
 
 ## Users & privileges
 
-- **`turbopanel`** (UID/GID **9999**): the daemon user; has passwordless sudo; owns `/opt/turbopanel`.
-- **`turbopanel`** (UID/GID **9999**): the daemon user; has passwordless sudo; owns the install tree and **all git** on co-located dev hosts.
+- **`turbopanel`** (UID/GID **9999**): the daemon user; has passwordless sudo; owns `/opt/turbopanel` and is the **git identity** on co-located dev hosts (not necessarily the human developer).
+- **Developer** (whoever invokes `./console`): identity captured as `TURBOPANEL_DEV_USER` / `TURBOPANEL_DEV_UID` / `TURBOPANEL_DEV_GID` in the daemon `.env` (never hardcoded). The `dev-permissions` role adds this user to the `turbopanel` group as a supplementary group so they can edit source files via group ACL write.
 - **`instance`** (UID **9998**): runs the instance/Caddy/UI in group `turbopanel`, **no own group, no broad sudo** (created by the `instance-user` role). Reads checkouts via group; does not own source files. Scoped passwordless sudo via `/etc/sudoers.d/turbopanel-instance-upgrade` (`instance-launch` `upgrade-sudoers.yml`): restart instance/caddy/ui units, `git` as `turbopanel`, normalize script, and **`/usr/bin/pamtester login * authenticate`** (host install gate — root or sudo users via PAM from the instance process).
-- Co-located dev checkouts are **`2770 turbopanel:turbopanel`** (`instance-user` role). Clones and `pnpm install` run as **9999**; systemd services run as **9998**. Per-service runtime state for the instance user lives in **gitignored** checkout dirs: **`turbopanel/.local`** (instance + Caddy), **`ui/.local`** (Expo), plus matching **`.config`** trees. The **daemon** (`9999`) keeps its own state under **`/opt/turbopanel`** (passwd `HOME`). The normalizer skips checkout `.cache`/`.config`/`.local` when reclaiming source files to `turbopanel`; use `--prepare-reset` before Upgrade System `git reset` and `--ensure-runtime-dirs` after.
+- **`redis`** (UID **9997**): runs `turbopanel-redis.service` in group `turbopanel` (created by the `redis` role; self-sufficient — does not require `instance-user` to run first).
+- Co-located dev checkouts (`daemon`, `turbopanel`, `ui`) are **`2770 turbopanel:turbopanel`** with default ACL **`g:turbopanel:rwx`** so files created by git, pnpm, or the editor remain group-writable. **Why default ACLs?** setgid propagates group ownership of new files but not the write bit — without a default ACL, files created by `turbopanel` (e.g. after `git pull`) are `640` and the dev user cannot write them. `dist`/release dirs are owned by `instance` and excluded from the dev-editable ACL. Clones and `pnpm install` run as **9999**; systemd services run as **9998**. Per-service runtime state for the instance user lives in **gitignored** checkout dirs: **`turbopanel/.local`** (instance + Caddy), **`ui/.local`** (Expo), plus matching **`.config`** trees. The **daemon** (`9999`) keeps its own state under **`/opt/turbopanel`** (passwd `HOME`). The normalizer skips checkout `.cache`/`.config`/`.local` when reclaiming source files to `turbopanel` and re-applies default ACLs on the source tree; use `--prepare-reset` before Upgrade System `git reset` and `--ensure-runtime-dirs` after.
 - `/run/turbopanel` is `2770 turbopanel:turbopanel` (setgid) so `instance` can bind the socket; see `../turbopanel/AGENTS.md`.
 
 ## Documentation discipline
@@ -52,31 +53,53 @@ The daemon bootstraps uv/Python/ansible, then runs playbooks. Roles (in `orchest
 
 | Role | Purpose |
 |---|---|
-| `agent-prereqs` | apt prerequisites (incl. `xz-utils` for Node, `tar`, `unzip`) |
+| `agent-prereqs` | apt prerequisites (incl. `acl` for `setfacl`, `xz-utils` for Node, `tar`, `unzip`) |
 | `turbopanel-user` / `instance-user` | the 9999 / 9998 users |
 | `runtime-sockets` | `/run/turbopanel` as `2770` setgid |
 | `deno-runtime` / `node-runtime` / `caddy` | vendored runtimes under `runtimes/<tool>/current` |
+| `redis` | Native Redis binary under `runtimes/redis/current`; dedicated **`redis`** system user (UID 9997, group `turbopanel`); Unix socket at `/run/turbopanel/redis.sock` (mode 0660, group `turbopanel`); **`port 0`** in `redis.conf` (socket-only, no TCP listener) |
+| `rabbitmq` | RabbitMQ `4-management` in Docker; generated password in `/etc/turbopanel/rabbitmq/.rabbitmq_pass`; AMQP on `127.0.0.1:5672`; management UI on `127.0.0.1:15672`; **`turbopanel-rabbitmq.service`** wraps the container for systemd ordering |
 | `instance-dev-prereqs` | dev-only apt libs for React Native devtools (GTK/NSS/GBM stack; probes `*t64` renames on Debian 13+) |
 | `instance-repo` / `ui-repo` | clone-if-missing checkouts (never force-reset), `pnpm install` |
+| `instance-build` | Compiles `src/deno.ts` → `dist/turbopanel-instance` single binary (when `turbopanel_instance_run_mode=compiled`); no-op in `source` mode |
+| `ui-build` | Runs `pnpm export` → `ui/dist` (dev) or downloads CDN artifact (prod) when `turbopanel_ui_mode=static`; no-op in `dev` mode |
 | `instance-certs` | platform CA + leaf via the instance cert script |
-| `instance-launch` | `turbopanel-instance` / `turbopanel-caddy` / `turbopanel-ui` units (run as `instance:turbopanel`). **`turbopanel-ui` must invoke `node_modules/.bin/expo` directly** — `pnpm exec expo` runs an implicit install that prompts to purge `node_modules` (installed by `turbopanel` with a different `HOME`), which blocks Expo and yields Caddy 502s on restart. |
+| `instance-launch` | `turbopanel-instance` / `turbopanel-caddy` / `turbopanel-ui` / `turbopanel-mailer` units (run as `instance:turbopanel`). **`turbopanel-ui` must invoke `node_modules/.bin/expo` directly** — `pnpm exec expo` runs an implicit install that prompts to purge `node_modules` (installed by `turbopanel` with a different `HOME`), which blocks Expo and yields Caddy 502s on restart. |
+| `dev-permissions` | add invoking dev user to `turbopanel` group; apply setgid + default ACLs on checkouts (no-op on agent nodes) |
 | `postgres` | PostgreSQL 18 in Docker; data under `/var/lib/turbopanel/postgres`, Unix socket at `/var/run/turbopanel/postgres` |
 | `docker` / `daemon-repo` / `daemon-config` / `daemon-logs` / `daemon-launch` | agent-node provisioning |
 
 - Co-located **dev** install: `orchestration/playbooks/instance-dev-install.yml`, run by `initOrchestration()` when co-located (socket mode) **and** `TURBOPANEL_DEV_INSTANCE=1`. `develop.sh` in `../turbopanel` sets the flag and installs the daemon unit, which then installs the rest. **Local Tilt dev** (`../dev/Tiltfile`) runs the daemon via `scripts/daemon-serve.sh` with `TURBOPANEL_SKIP_ORCHESTRATION=1` instead — Tilt already manages instance/Caddy/Postgres; Workers mode sets `TURBOPANEL_INSTANCE_URL` to Caddy HTTPS, Deno mode dials the dev socket dir. Dev bootstrap **skips** `postgres-setup.yml` and lets `instance-dev-install` own Postgres. The Docker container always publishes a Unix socket; the instance and drizzle-kit connect via `TURBOPANEL_PG_SOCKET` (TCP port exposure is optional via `postgres_expose_port`, off in dev).
-- Production prebuilt instance/UI artifacts and static UI hosting are **out of scope** (seams/comments only).
+
+### Build modes
+
+| Variable | Values | Effect |
+|---|---|---|
+| `turbopanel_instance_run_mode` | `source` (default) \| `compiled` | `source`: `deno run src/deno.ts` via systemd; `compiled`: single binary at `dist/turbopanel-instance` |
+| `turbopanel_ui_mode` | `dev` (default) \| `static` | `dev`: Expo dev server via `turbopanel-ui.service`; `static`: Caddy serves `ui/dist`, `turbopanel-ui.service` stopped |
+| `turbopanel_ui_artifact_url` | empty (default) \| CDN URL | empty: local `pnpm export`; non-empty: download tarball from CDN (production seam) |
+
+Toggle via the dev console **Switch to production build** / **Switch to dev build** — persists `TURBOPANEL_UI_MODE` and `TURBOPANEL_INSTANCE_RUN_MODE` to the daemon `.env`, then re-runs `instance-build-toggle.yml` (roles: `ui-build` → `instance-build` → `instance-launch`).
 
 ## Orchestration
 
 - Playbooks: `orchestration/playbooks/`
 - Galaxy roles: `orchestration/requirements.yml` (pinned, installed into `orchestration/roles/`, gitignored)
 - Docker: thin `roles/docker` wrapper around **`geerlingguy.docker`** (Debian Trixie/Raspbian). Skips install when Docker is already running but **always** adds `turbopanel` to the `docker` group (needed on co-located dev hosts where Docker predates the daemon).
-- Bootstrap also runs on every daemon start (idempotent; failures are logged, daemon keeps running). After Docker, `postgres-setup.yml` starts `turbopanel-postgres` (`postgres:18`) with the data volume at `/var/lib/turbopanel/postgres` → `/var/lib/postgresql` (PG 18+ layout) and the socket dir bind-mounted to `/var/run/turbopanel/postgres`.
+- Bootstrap also runs on every daemon start (idempotent; failures are logged, daemon keeps running). After Docker, `redis-setup.yml` and `rabbitmq-setup.yml` provision Redis (native binary + Unix socket) and RabbitMQ (`rabbitmq:4-management` Docker container). `postgres-setup.yml` starts `turbopanel-postgres` (`postgres:18`) with the data volume at `/var/lib/turbopanel/postgres` → `/var/lib/postgresql` (PG 18+ layout) and the socket dir bind-mounted to `/var/run/turbopanel/postgres`.
 - Logs are written to both journald and `/var/log/turbopanel/daemon/{daemon.log,daemon.err.log}` when running under systemd (`StandardOutput`/`StandardError` in the unit template). Logrotate policy lives at `/etc/logrotate.d/turbopanel-daemon` (daily, 14 rotations, compress). The log directory is recreated on boot via `/etc/tmpfiles.d/turbopanel-daemon-logs.conf`. The `daemon-logs` role provisions all of this; the official installer runs it via `daemon-launch`, and `initOrchestration()` re-runs `daemon-logs-setup.yml` on every daemon start so existing agents pick it up without a full reinstall.
 
 ### Runtime (systemd + Tilt)
 
 Agent nodes and co-located dev hosts run **`turbopanel-daemon.service`** (systemd). The official installer / `agent-install.yml` install the unit; co-located instance hosts use `scripts/install-daemon-systemd.sh` (which also ensures the user, prereqs, and Deno so a fresh dev host is self-sufficient). **Local Tilt dev** runs the same process from `../dev/scripts/daemon-serve.sh` (Tilt `daemon` resource) with `TURBOPANEL_SKIP_ORCHESTRATION=1` so Ansible bootstrap is skipped. `scripts/ensure-single-daemon.sh` (ExecStartPre) ensures `/run/turbopanel` exists with correct permissions and clears any stale `daemon.lock` left by an unclean shutdown.
+
+### Services
+
+| Unit / container | Purpose | Ordering |
+|---|---|---|
+| `turbopanel-redis.service` | Redis Unix socket at `/run/turbopanel/redis.sock` (runs as **`redis:turbopanel`**) | After `network.target` |
+| `turbopanel-rabbitmq.service` | RabbitMQ Docker container (AMQP + management UI on loopback) | After `docker.service` |
+| `turbopanel-mailer.service` | RabbitMQ email consumer → SMTP | After `turbopanel-instance` and `turbopanel-rabbitmq` |
 
 ### Dev sync & instance tunnel (WS messages)
 
@@ -96,6 +119,9 @@ Minimal Debian images often lack packages full installs have. Agent bootstrap an
 | `gnupg` | Legacy apt paths; still useful on slim hosts |
 | `python3-debian` | `deb822_repository` in `geerlingguy.docker` |
 | `iptables` | Docker networking |
+| `build-essential` | Redis compile (`make`, `gcc`) |
+| `libssl-dev` | Redis TLS/OpenSSL headers at compile time |
+| `pkg-config` | Redis build dependency resolution |
 
 Co-located dev (`instance-dev-prereqs` role, not `agent-prereqs`) installs the Chromium/GTK runtime stack (`libatk*`, `libnss3`, `libgbm1`, `libgtk-3-0`, …) so `@react-native/debugger-shell` passes its `--version` prep check. Debian 13+ `*t64` renames are probed at install time. A headless server may still log DISPLAY warnings when opening the GUI debugger; that is separate from the shared-library install.
 

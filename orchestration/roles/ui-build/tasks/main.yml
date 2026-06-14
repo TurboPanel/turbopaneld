@@ -1,0 +1,55 @@
+---
+- name: Check UI static export
+  when: turbopanel_ui_mode == 'static'
+  ansible.builtin.stat:
+    path: "{{ turbopanel_ui_dist_dir }}/index.html"
+  register: _ui_dist_index
+
+- name: Check if UI sources are newer than static export
+  when:
+    - turbopanel_ui_mode == 'static'
+    - not (force_build | bool)
+    - _ui_dist_index.stat.exists
+  ansible.builtin.shell: |
+    set -euo pipefail
+    cd "{{ turbopanel_ui_dir }}"
+    find src app.json babel.config.cjs tsconfig.json -newer dist/index.html -print -quit 2>/dev/null || true
+  register: _ui_stale_check
+  changed_when: false
+
+- name: Build UI static export locally
+  when:
+    - turbopanel_ui_mode == 'static'
+    - turbopanel_ui_artifact_url | length == 0
+    - force_build | bool or not _ui_dist_index.stat.exists or (_ui_stale_check.stdout | default('') | trim | length > 0)
+  ansible.builtin.command:
+    cmd: pnpm export
+    chdir: "{{ turbopanel_ui_dir }}"
+  become_user: "{{ turbopanel_user }}"
+  environment:
+    HOME: "{{ turbopanel_ui_runtime_dir }}"
+    PATH: "/usr/local/bin:{{ turbopanel_runtimes_dir }}/node/current/bin:/usr/bin:/bin"
+
+- name: Download UI static export from CDN
+  when:
+    - turbopanel_ui_mode == 'static'
+    - turbopanel_ui_artifact_url | length > 0
+    - force_build | bool or not _ui_dist_index.stat.exists or (_ui_stale_check.stdout | default('') | trim | length > 0)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    TMP="$(mktemp -d)"
+    curl -fsSL -o "$TMP/ui.tar.gz" "{{ turbopanel_ui_artifact_url }}"
+    rm -rf "{{ turbopanel_ui_dist_dir }}"
+    mkdir -p "{{ turbopanel_ui_dist_dir }}"
+    tar -xzf "$TMP/ui.tar.gz" -C "{{ turbopanel_ui_dist_dir }}"
+    rm -rf "$TMP"
+
+- name: Ensure UI dist directory ownership
+  when: turbopanel_ui_mode == 'static'
+  ansible.builtin.file:
+    path: "{{ turbopanel_ui_dist_dir }}"
+    state: directory
+    owner: "{{ instance_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "2770"
+    recurse: true

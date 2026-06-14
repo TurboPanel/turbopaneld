@@ -1,0 +1,9 @@
+redis_version: "8.0.2"
+turbopanel_runtimes_dir: /opt/turbopanel/runtimes
+redis_socket_dir: /run/turbopanel
+redis_socket_name: redis.sock
+redis_socket_path: "{{ redis_socket_dir }}/{{ redis_socket_name }}"
+redis_service_name: turbopanel-redis
+redis_user: redis
+redis_uid: 9997
+turbopanel_group: turbopanel

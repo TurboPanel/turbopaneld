@@ -6,3 +6,4 @@ runtime_socket_group: turbopanel
 # `instance` user both need to create/bind sockets here; setgid keeps new
 # socket files in the turbopanel group so the other party can connect.
 runtime_socket_mode: "2770"
+turbopanel_dev_user: ""

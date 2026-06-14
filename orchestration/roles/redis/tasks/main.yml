@@ -1,0 +1,86 @@
+---
+# Self-sufficient: does not depend on instance-user (Redis runs before instance on fresh hosts).
+- name: Ensure turbopanel group exists
+  ansible.builtin.group:
+    name: "{{ turbopanel_group }}"
+    state: present
+    system: true
+
+- name: Ensure Redis service user (member of turbopanel group)
+  ansible.builtin.user:
+    name: "{{ redis_user }}"
+    uid: "{{ redis_uid }}"
+    group: "{{ turbopanel_group }}"
+    shell: /usr/sbin/nologin
+    system: true
+    create_home: false
+
+- name: Resolve Redis build architecture
+  ansible.builtin.set_fact:
+    redis_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
+
+- name: Check vendored Redis binary
+  ansible.builtin.stat:
+    path: "{{ turbopanel_runtimes_dir }}/redis/current/bin/redis-server"
+  register: _redis_current
+
+- name: Install Redis into runtimes directory
+  when: not _redis_current.stat.exists
+  ansible.builtin.shell: |
+    set -euo pipefail
+    REDIS_VER="{{ redis_version }}"
+    TMP="$(mktemp -d)"
+    curl -fsSL -o "$TMP/redis-${REDIS_VER}.tar.gz" \
+      "https://download.redis.io/releases/redis-${REDIS_VER}.tar.gz"
+    tar -xzf "$TMP/redis-${REDIS_VER}.tar.gz" -C "$TMP"
+    make -C "$TMP/redis-${REDIS_VER}"
+    make -C "$TMP/redis-${REDIS_VER}" PREFIX="{{ turbopanel_runtimes_dir }}/redis/versions/${REDIS_VER}" install
+    ln -sfn "versions/${REDIS_VER}" "{{ turbopanel_runtimes_dir }}/redis/current"
+    rm -rf "$TMP"
+  args:
+    creates: "{{ turbopanel_runtimes_dir }}/redis/current/bin/redis-server"
+
+- name: Link redis-server into /usr/local/bin
+  ansible.builtin.file:
+    src: "{{ turbopanel_runtimes_dir }}/redis/current/bin/redis-server"
+    dest: /usr/local/bin/redis-server
+    state: link
+    force: true
+
+- name: Link redis-cli into /usr/local/bin
+  ansible.builtin.file:
+    src: "{{ turbopanel_runtimes_dir }}/redis/current/bin/redis-cli"
+    dest: /usr/local/bin/redis-cli
+    state: link
+    force: true
+
+- name: Ensure redis config directory exists
+  ansible.builtin.file:
+    path: /etc/turbopanel/redis
+    state: directory
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
+- name: Write redis.conf
+  ansible.builtin.template:
+    src: redis.conf.j2
+    dest: /etc/turbopanel/redis/redis.conf
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+
+- name: Install Redis systemd unit
+  ansible.builtin.template:
+    src: turbopanel-redis.service.j2
+    dest: "/etc/systemd/system/{{ redis_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Ensure Redis service desired state
+  ansible.builtin.systemd:
+    name: "{{ redis_service_name }}"
+    daemon_reload: true
+    enabled: true
+    state: started

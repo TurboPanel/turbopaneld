@@ -7,8 +7,36 @@
       # Managed by TurboPanel daemon orchestration (runtime-sockets role).
       d {{ runtime_socket_dir }} {{ runtime_socket_mode }} {{ runtime_socket_owner }} {{ runtime_socket_group }} -
       d {{ runtime_socket_dir }}/postgres 2770 999 {{ runtime_socket_group }} -
+  register: runtime_sockets_tmpfiles
 
-- name: Apply tmpfiles.d configuration
+- name: Check runtime socket directory exists
+  ansible.builtin.stat:
+    path: "{{ runtime_socket_dir }}"
+  register: runtime_socket_dir_stat
+
+- name: Apply tmpfiles.d configuration when needed
   ansible.builtin.command:
     cmd: systemd-tmpfiles --create
-  changed_when: true
+  changed_when: >-
+    runtime_sockets_tmpfiles.changed | default(false) or
+    not runtime_socket_dir_stat.stat.exists | default(false)
+
+- name: Configure dev user access on runtime socket directory
+  when: turbopanel_dev_user | length > 0
+  block:
+    - name: Apply dev user access ACL on runtime socket directory
+      ansible.posix.acl:
+        path: "{{ runtime_socket_dir }}"
+        entity: "{{ turbopanel_dev_user }}"
+        etype: user
+        permissions: rwx
+        state: present
+
+    - name: Apply default dev user ACL on runtime socket directory
+      ansible.posix.acl:
+        path: "{{ runtime_socket_dir }}"
+        entity: "{{ turbopanel_dev_user }}"
+        etype: user
+        permissions: rwx
+        state: present
+        default: true

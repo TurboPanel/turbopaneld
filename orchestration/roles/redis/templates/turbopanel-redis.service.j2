@@ -1,0 +1,14 @@
+[Unit]
+Description=TurboPanel Redis
+After=network.target
+
+[Service]
+Type=simple
+User={{ redis_user }}
+Group={{ turbopanel_group }}
+ExecStart={{ turbopanel_runtimes_dir }}/redis/current/bin/redis-server /etc/turbopanel/redis/redis.conf
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,136 @@
+---
+- name: Configure co-located dev checkout permissions
+  when: turbopanel_dev_user | length > 0
+  block:
+    - name: Add dev user to turbopanel group (supplementary)
+      ansible.builtin.user:
+        name: "{{ turbopanel_dev_user }}"
+        groups: "{{ turbopanel_group }}"
+        append: true
+
+    - name: Set setgid on platform checkouts
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ turbopanel_user }}"
+        group: "{{ turbopanel_group }}"
+        mode: "2770"
+      loop:
+        - "{{ turbopanel_daemon_dir }}"
+        - "{{ turbopanel_instance_dir }}"
+        - "{{ turbopanel_ui_dir }}"
+
+    - name: Apply group access ACL on checkouts
+      ansible.posix.acl:
+        path: "{{ item }}"
+        entity: "{{ turbopanel_group }}"
+        etype: group
+        permissions: rwx
+        state: present
+        recursive: true
+      loop:
+        - "{{ turbopanel_daemon_dir }}"
+        - "{{ turbopanel_instance_dir }}"
+        - "{{ turbopanel_ui_dir }}"
+
+    - name: Apply default group ACL on checkouts
+      ansible.posix.acl:
+        path: "{{ item }}"
+        entity: "{{ turbopanel_group }}"
+        etype: group
+        permissions: rwx
+        state: present
+        default: true
+        recursive: true
+      loop:
+        - "{{ turbopanel_daemon_dir }}"
+        - "{{ turbopanel_instance_dir }}"
+        - "{{ turbopanel_ui_dir }}"
+
+    - name: Apply dev user access ACL on checkouts
+      ansible.posix.acl:
+        path: "{{ item }}"
+        entity: "{{ turbopanel_dev_user }}"
+        etype: user
+        permissions: rwx
+        state: present
+        recursive: true
+      loop:
+        - "{{ turbopanel_daemon_dir }}"
+        - "{{ turbopanel_instance_dir }}"
+        - "{{ turbopanel_ui_dir }}"
+
+    - name: Apply default dev user ACL on checkouts
+      ansible.posix.acl:
+        path: "{{ item }}"
+        entity: "{{ turbopanel_dev_user }}"
+        etype: user
+        permissions: rwx
+        state: present
+        default: true
+        recursive: true
+      loop:
+        - "{{ turbopanel_daemon_dir }}"
+        - "{{ turbopanel_instance_dir }}"
+        - "{{ turbopanel_ui_dir }}"
+
+    - name: Stat dev checkout normalizer
+      ansible.builtin.stat:
+        path: /usr/local/bin/turbopanel-normalize-dev-checkout
+      register: dev_checkout_normalizer
+
+    - name: Reclaim legacy dev-owned daemon checkout files
+      ansible.builtin.command:
+        cmd: /usr/local/bin/turbopanel-normalize-dev-checkout {{ turbopanel_daemon_dir }}
+      environment:
+        TURBOPANEL_DEV_USER: "{{ turbopanel_dev_user }}"
+      changed_when: false
+      when: dev_checkout_normalizer.stat.exists | default(false)
+
+    - name: Stat instance dist directory
+      ansible.builtin.stat:
+        path: "{{ turbopanel_instance_dir }}/dist"
+      register: instance_dist_stat
+
+    - name: Remove dev-editable access ACL from instance dist
+      when: instance_dist_stat.stat.isdir | default(false)
+      ansible.posix.acl:
+        path: "{{ turbopanel_instance_dir }}/dist"
+        entity: "{{ turbopanel_group }}"
+        etype: group
+        state: absent
+        recursive: true
+
+    - name: Remove dev-editable default ACL from instance dist
+      when: instance_dist_stat.stat.isdir | default(false)
+      ansible.posix.acl:
+        path: "{{ turbopanel_instance_dir }}/dist"
+        entity: "{{ turbopanel_group }}"
+        etype: group
+        state: absent
+        default: true
+        recursive: true
+
+    - name: Stat UI dist directory
+      ansible.builtin.stat:
+        path: "{{ turbopanel_ui_dir }}/dist"
+      register: ui_dist_stat
+
+    - name: Remove dev-editable access ACL from UI dist
+      when: ui_dist_stat.stat.isdir | default(false)
+      ansible.posix.acl:
+        path: "{{ turbopanel_ui_dir }}/dist"
+        entity: "{{ turbopanel_group }}"
+        etype: group
+        state: absent
+        recursive: true
+
+    - name: Remove dev-editable default ACL from UI dist
+      when: ui_dist_stat.stat.isdir | default(false)
+      ansible.posix.acl:
+        path: "{{ turbopanel_ui_dir }}/dist"
+        entity: "{{ turbopanel_group }}"
+        etype: group
+        state: absent
+        default: true
+        recursive: true

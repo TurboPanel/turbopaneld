@@ -22,3 +22,9 @@
   when:
     - instance_start | bool
     - turbopanel_ui_mode == 'dev'
+
+- name: Restart turbopanel mailer
+  ansible.builtin.systemd:
+    name: "{{ mailer_service_name }}"
+    state: restarted
+  when: instance_start | bool

@@ -1,0 +1,18 @@
+---
+galaxy_info:
+  role_name: rabbitmq
+  author: turbopanel
+  description: >
+    Run RabbitMQ 4 with management plugin in Docker; generated password and
+    connection metadata under /etc/turbopanel/rabbitmq/.
+  min_ansible_version: "2.18"
+  platforms:
+    - name: Debian
+      versions:
+        - trixie
+    - name: Raspbian
+      versions:
+        - trixie
+
+dependencies:
+  - role: docker

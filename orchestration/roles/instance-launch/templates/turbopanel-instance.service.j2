@@ -26,7 +26,19 @@ Environment=TURBOPANEL_PG_PORT={{ postgres_port }}
 Environment=TURBOPANEL_PG_PASSWORD={{ lookup('ansible.builtin.file', turbopanel_config_dir + '/postgres/.pgpass') | trim }}
 {% endif %}
 Environment=TURBOPANEL_PG_SOCKET={{ postgres_socket_dir }}/.s.PGSQL.{{ postgres_port }}
-ExecStart={{ turbopanel_runtimes_dir }}/deno/current/deno run --allow-env --allow-sys=networkInterfaces --allow-read=/run/turbopanel,{{ postgres_socket_dir }},{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }},{{ turbopanel_instance_runtime_dir }} --allow-write=/run/turbopanel,{{ postgres_socket_dir }},{{ turbopanel_instance_runtime_dir }} --allow-net=127.0.0.1:{{ drizzle_studio_port | default(4983) }} --allow-run=git,systemctl,tar,sudo,/usr/bin/sudo,/bin/sh,mkfifo,/usr/bin/mkfifo,pamtester,/usr/bin/pamtester,{{ turbopanel_runtimes_dir }}/node/current/bin/node src/deno.ts
+{% if lookup('ansible.builtin.file', turbopanel_config_dir + '/rabbitmq/.rabbitmq_pass', errors='ignore') %}
+Environment=TURBOPANEL_AMQP_URL=amqp://{{ rabbitmq_user }}:{{ lookup('ansible.builtin.file', turbopanel_config_dir + '/rabbitmq/.rabbitmq_pass') | trim }}@127.0.0.1:{{ rabbitmq_amqp_port }}{{ rabbitmq_vhost }}
+{% endif %}
+Environment=TURBOPANEL_REDIS_SOCKET={{ redis_socket_path }}
+{% if turbopanel_dev_user | length > 0 %}
+Environment=TURBOPANEL_DEV_USER={{ turbopanel_dev_user }}
+{% endif %}
+# turbopanel_instance_run_mode: "source" (deno run) | "compiled" (single binary)
+{% if turbopanel_instance_run_mode == 'compiled' %}
+ExecStart={{ turbopanel_instance_binary }}
+{% else %}
+ExecStart={{ turbopanel_runtimes_dir }}/deno/current/deno run --allow-env --allow-sys=networkInterfaces --allow-read=/run/turbopanel,{{ postgres_socket_dir }},{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }},{{ turbopanel_instance_runtime_dir }} --allow-write=/run/turbopanel,{{ postgres_socket_dir }},{{ turbopanel_instance_runtime_dir }} --allow-net=127.0.0.1:{{ drizzle_studio_port | default(4983) }},127.0.0.1:{{ rabbitmq_amqp_port }} --allow-run=git,systemctl,tar,sudo,/usr/bin/sudo,/bin/sh,mkfifo,/usr/bin/mkfifo,pamtester,/usr/bin/pamtester,setfacl,/usr/bin/setfacl,{{ turbopanel_runtimes_dir }}/node/current/bin/node src/deno.ts
+{% endif %}
 Restart=always
 RestartSec=2
 # Deno.serve waits for active WS connections to drain on SIGTERM which can hang

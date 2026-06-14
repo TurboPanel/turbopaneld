@@ -4,12 +4,16 @@ import {
   ANSIBLE_PLAYBOOK_BIN,
   DOCKER_PLAYBOOK,
   POSTGRES_PLAYBOOK,
+  REDIS_PLAYBOOK,
+  RABBITMQ_PLAYBOOK,
+  GALAXY_COLLECTIONS_DIR,
   GALAXY_REQUIREMENTS_FILE,
   GALAXY_ROLES_DIR,
   SOCKET_DIRS_PLAYBOOK,
   DAEMON_LOGS_PLAYBOOK,
   DAEMON_SYSTEMD_PLAYBOOK,
   INSTANCE_DEV_INSTALL_PLAYBOOK,
+  BUILD_TOGGLE_PLAYBOOK,
   LOCALHOST_PLAYBOOK,
   ORCHESTRATION_DIR,
   PYTHON_VERSION,
@@ -63,24 +67,42 @@ export async function ensureAnsible(): Promise<void> {
 }
 
 /**
- * Install pinned Ansible Galaxy roles into `orchestration/roles/`.
+ * Install pinned Ansible Galaxy roles and collections.
  *
- * Idempotent: `ansible-galaxy` skips roles that are already present at the
- * requested version. Runs on every bootstrap so new agents pick up role
- * updates without recreating the ansible venv.
+ * Roles land in `orchestration/roles/`; collections in `orchestration/collections/`.
+ * Idempotent: `ansible-galaxy` skips dependencies already present at the requested
+ * version. Runs on every bootstrap so new agents pick up updates without
+ * recreating the ansible venv.
  */
 export async function ensureGalaxyRoles(): Promise<void> {
   if (!(await ansiblePlaybookWorks())) {
     throw new Error('ansible-galaxy requires a working ansible-playbook install')
   }
 
+  const galaxyBin = `${VENV_BIN_DIR}/ansible-galaxy`
+
   console.log(`[orchestration] installing galaxy roles from ${GALAXY_REQUIREMENTS_FILE}`)
   await runOrThrow(
-    `${VENV_BIN_DIR}/ansible-galaxy`,
+    galaxyBin,
     ['role', 'install', '-r', GALAXY_REQUIREMENTS_FILE, '-p', GALAXY_ROLES_DIR],
     { stream: true },
   )
   console.log('[orchestration] galaxy roles ready')
+
+  console.log(`[orchestration] installing galaxy collections from ${GALAXY_REQUIREMENTS_FILE}`)
+  await runOrThrow(
+    galaxyBin,
+    [
+      'collection',
+      'install',
+      '-r',
+      GALAXY_REQUIREMENTS_FILE,
+      '-p',
+      GALAXY_COLLECTIONS_DIR,
+    ],
+    { stream: true },
+  )
+  console.log('[orchestration] galaxy collections ready')
 }
 
 async function ansiblePlaybookWorks(): Promise<boolean> {
@@ -189,27 +211,76 @@ export async function runDaemonSystemdSetup(): Promise<void> {
 }
 
 /**
- * Install the co-located self-hosted instance + UI + Caddy in development mode.
+ * Install or reconcile the co-located self-hosted instance + UI + Caddy.
  *
  * Runs the instance-dev-install playbook, which creates the `instance` user,
  * vendors Node/Caddy, ensures the instance/UI checkouts and dependencies, mints
- * the platform certs, and installs the instance/caddy/ui systemd units. The
- * daemon is the always-installed party that owns these installs/updates.
+ * the platform certs, and installs the instance/caddy/ui systemd units. UI and
+ * instance run modes are read from the daemon environment so reconciles honor
+ * the persisted dev/production toggle.
  *
  * Idempotent and safe to re-run; never force-resets a dev working tree.
  * Requires passwordless sudo (the turbopanel user has this).
  */
 export async function runInstanceDevInstall(): Promise<void> {
+  const devUser = Deno.env.get('TURBOPANEL_DEV_USER')
+  const devUid = Deno.env.get('TURBOPANEL_DEV_UID')
+  const devGid = Deno.env.get('TURBOPANEL_DEV_GID')
+  const uiMode = Deno.env.get('TURBOPANEL_UI_MODE') === 'static' ? 'static' : 'dev'
+  const instanceRunMode =
+    Deno.env.get('TURBOPANEL_INSTANCE_RUN_MODE') === 'compiled' ? 'compiled' : 'source'
+
+  const args = ['-i', 'localhost,', '-c', 'local']
+  if (devUser) args.push('-e', `turbopanel_dev_user=${devUser}`)
+  if (devUid) args.push('-e', `turbopanel_dev_uid=${devUid}`)
+  if (devGid) args.push('-e', `turbopanel_dev_gid=${devGid}`)
+  args.push('-e', `turbopanel_ui_mode=${uiMode}`)
+  args.push('-e', `turbopanel_instance_run_mode=${instanceRunMode}`)
+  args.push(INSTANCE_DEV_INSTALL_PLAYBOOK)
+
   console.log('[orchestration] running instance-dev-install playbook')
-  await runOrThrow(
-    ANSIBLE_PLAYBOOK_BIN,
-    ['-i', 'localhost,', '-c', 'local', INSTANCE_DEV_INSTALL_PLAYBOOK],
-    {
-      cwd: ORCHESTRATION_DIR,
-      env: { ANSIBLE_CONFIG: ANSIBLE_CFG },
-    },
-  )
+  await runOrThrow(ANSIBLE_PLAYBOOK_BIN, args, {
+    cwd: ORCHESTRATION_DIR,
+    env: { ANSIBLE_CONFIG: ANSIBLE_CFG },
+  })
   console.log('[orchestration] instance-dev-install complete')
+}
+
+/**
+ * Switch UI and instance run modes (dev/source ↔ static/compiled).
+ *
+ * Builds static UI export and/or compiles the instance binary when needed,
+ * then re-templates and restarts affected systemd units via instance-launch.
+ */
+export async function runBuildToggle(opts: {
+  uiMode: 'dev' | 'static'
+  instanceRunMode: 'source' | 'compiled'
+  forceBuild?: boolean
+}): Promise<void> {
+  const args = [
+    '-i',
+    'localhost,',
+    '-c',
+    'local',
+    '-e',
+    `turbopanel_ui_mode=${opts.uiMode}`,
+    '-e',
+    `turbopanel_instance_run_mode=${opts.instanceRunMode}`,
+    '-e',
+    `force_build=${opts.forceBuild ?? false}`,
+    '-e',
+    `force_compile=${opts.forceBuild ?? false}`,
+    BUILD_TOGGLE_PLAYBOOK,
+  ]
+
+  console.log(
+    `[orchestration] running instance-build-toggle playbook (ui=${opts.uiMode}, instance=${opts.instanceRunMode})`,
+  )
+  await runOrThrow(ANSIBLE_PLAYBOOK_BIN, args, {
+    cwd: ORCHESTRATION_DIR,
+    env: { ANSIBLE_CONFIG: ANSIBLE_CFG },
+  })
+  console.log('[orchestration] instance-build-toggle complete')
 }
 
 /**
@@ -256,4 +327,42 @@ export async function runPostgresSetup(): Promise<void> {
     },
   )
   console.log('[orchestration] postgres-setup complete')
+}
+
+/**
+ * Build and install Redis from source under runtimes/redis/current with a Unix
+ * socket at /run/turbopanel/redis.sock.
+ *
+ * Requires build prerequisites from agent-prereqs and passwordless sudo.
+ */
+export async function runRedisSetup(): Promise<void> {
+  console.log('[orchestration] running redis-setup playbook')
+  await runOrThrow(
+    ANSIBLE_PLAYBOOK_BIN,
+    ['-i', 'localhost,', '-c', 'local', REDIS_PLAYBOOK],
+    {
+      cwd: ORCHESTRATION_DIR,
+      env: { ANSIBLE_CONFIG: ANSIBLE_CFG },
+    },
+  )
+  console.log('[orchestration] redis-setup complete')
+}
+
+/**
+ * Run RabbitMQ 4 with management plugin in Docker; connection metadata under
+ * /etc/turbopanel/rabbitmq/.
+ *
+ * Requires Docker (run after {@link runDockerSetup}) and passwordless sudo.
+ */
+export async function runRabbitmqSetup(): Promise<void> {
+  console.log('[orchestration] running rabbitmq-setup playbook')
+  await runOrThrow(
+    ANSIBLE_PLAYBOOK_BIN,
+    ['-i', 'localhost,', '-c', 'local', RABBITMQ_PLAYBOOK],
+    {
+      cwd: ORCHESTRATION_DIR,
+      env: { ANSIBLE_CONFIG: ANSIBLE_CFG },
+    },
+  )
+  console.log('[orchestration] rabbitmq-setup complete')
 }

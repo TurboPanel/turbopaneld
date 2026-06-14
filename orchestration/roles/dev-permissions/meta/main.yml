@@ -1,0 +1,18 @@
+---
+galaxy_info:
+  author: turbopanel
+  description: >-
+    Add the invoking dev user to the turbopanel group and apply setgid +
+    default ACLs on platform checkouts. No-op on agent nodes when
+    turbopanel_dev_user is unset.
+  license: MIT
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Debian
+      versions:
+        - all
+    - name: Raspbian
+      versions:
+        - all
+
+dependencies: []

@@ -1,0 +1,167 @@
+# /etc/turbopanel/
+#   rabbitmq/
+#     config.json   — connection metadata (host, port, user, vhost, amqp_url)
+#     .rabbitmq_pass — generated password, mode 0600, owner root
+
+- name: Ensure rabbitmq config directory exists
+  ansible.builtin.file:
+    path: "{{ turbopanel_config_dir }}/rabbitmq"
+    state: directory
+    owner: root
+    group: turbopanel
+    mode: "0750"
+
+- name: Generate rabbitmq password (idempotent)
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      f='{{ turbopanel_config_dir }}/rabbitmq/.rabbitmq_pass'
+      if [ ! -s "$f" ]; then
+        openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 32 > "$f"
+        chmod 0600 "$f"
+        chown root:root "$f"
+        echo created
+      fi
+    executable: /bin/bash
+  register: _rmqpass_gen
+  changed_when: "'created' in _rmqpass_gen.stdout"
+
+- name: Read rabbitmq password
+  ansible.builtin.slurp:
+    src: "{{ turbopanel_config_dir }}/rabbitmq/.rabbitmq_pass"
+  register: _rmqpass_raw
+
+- name: Set rabbitmq password fact
+  ansible.builtin.set_fact:
+    _rabbitmq_password: "{{ _rmqpass_raw.content | b64decode | trim }}"
+
+- name: Write rabbitmq config.json (idempotent)
+  ansible.builtin.template:
+    src: rabbitmq-config.json.j2
+    dest: "{{ turbopanel_config_dir }}/rabbitmq/config.json"
+    owner: root
+    group: turbopanel
+    mode: "0640"
+    force: false
+
+- name: Ensure rabbitmq data directory exists
+  ansible.builtin.file:
+    path: "{{ rabbitmq_data_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Check rabbitmq container state
+  ansible.builtin.command:
+    cmd: docker inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' {{ rabbitmq_container_name }}
+  register: _rmq_running
+  changed_when: false
+  failed_when: false
+
+- name: Set rabbitmq container state facts
+  ansible.builtin.set_fact:
+    _rabbitmq_container_exists: "{{ _rmq_running.rc == 0 }}"
+    _rabbitmq_running: "{{ _rmq_running.rc == 0 and _rmq_running.stdout | trim == 'true' }}"
+
+- name: Check rabbitmq container health
+  ansible.builtin.command:
+    cmd: docker inspect --format '{{ '{{' }}.State.Status{{ '}}' }}' {{ rabbitmq_container_name }}
+  register: _rmq_status
+  changed_when: false
+  failed_when: false
+  when: _rabbitmq_container_exists | bool
+
+- name: Check whether rabbitmq container publishes management port
+  ansible.builtin.command:
+    cmd: docker port {{ rabbitmq_container_name }} 15672/tcp
+  register: _rmq_mgmt_port
+  changed_when: false
+  failed_when: false
+  when: _rabbitmq_container_exists | bool
+
+- name: Remove rabbitmq container when unhealthy
+  ansible.builtin.command:
+    cmd: docker rm -f {{ rabbitmq_container_name }}
+  when:
+    - _rabbitmq_container_exists | bool
+    - _rmq_status.stdout | default('') | trim in ['restarting', 'exited', 'dead']
+  register: _rmq_removed
+  changed_when: _rmq_removed.rc == 0
+
+- name: Remove rabbitmq container when management port exposure does not match config
+  ansible.builtin.command:
+    cmd: docker rm -f {{ rabbitmq_container_name }}
+  when:
+    - _rabbitmq_container_exists | bool
+    - _rmq_removed is not changed
+    - (rabbitmq_expose_mgmt_port | bool and (_rmq_mgmt_port.rc | default(1) != 0)) or ((not rabbitmq_expose_mgmt_port | bool) and (_rmq_mgmt_port.rc | default(1) == 0))
+  register: _rmq_removed_mgmt
+  changed_when: _rmq_removed_mgmt.rc == 0
+
+- name: Refresh rabbitmq container facts after removal
+  ansible.builtin.set_fact:
+    _rabbitmq_container_exists: false
+    _rabbitmq_running: false
+  when: _rmq_removed is changed or _rmq_removed_mgmt is changed
+
+- name: Build docker run argument list
+  ansible.builtin.set_fact:
+    _docker_run_args: "{{ _docker_run_base + (_docker_run_mgmt if rabbitmq_expose_mgmt_port | bool else []) + [rabbitmq_image] }}"
+  vars:
+    _docker_run_base:
+      - "--name"
+      - "{{ rabbitmq_container_name }}"
+      - "--restart"
+      - "unless-stopped"
+      - "-d"
+      - "-v"
+      - "{{ rabbitmq_data_dir }}:/var/lib/rabbitmq"
+      - "-e"
+      - "RABBITMQ_DEFAULT_USER={{ rabbitmq_user }}"
+      - "-e"
+      - "RABBITMQ_DEFAULT_PASS={{ _rabbitmq_password }}"
+      - "-e"
+      - "RABBITMQ_DEFAULT_VHOST={{ rabbitmq_vhost }}"
+      - "-p"
+      - "127.0.0.1:{{ rabbitmq_amqp_port }}:5672"
+    _docker_run_mgmt:
+      - "-p"
+      - "127.0.0.1:{{ rabbitmq_mgmt_port }}:15672"
+
+- name: Start existing stopped rabbitmq container
+  ansible.builtin.command:
+    cmd: docker start {{ rabbitmq_container_name }}
+  when:
+    - _rabbitmq_container_exists | bool
+    - not _rabbitmq_running | bool
+
+- name: Create and start rabbitmq container
+  ansible.builtin.command:
+    cmd: docker run {{ _docker_run_args | join(' ') }}
+  when: not _rabbitmq_container_exists | bool
+  no_log: true
+
+- name: Wait for rabbitmq to be ready
+  ansible.builtin.command:
+    cmd: docker exec {{ rabbitmq_container_name }} rabbitmq-diagnostics -q ping
+  register: _rmq_ready
+  until: _rmq_ready.rc == 0
+  retries: 30
+  delay: 2
+  changed_when: false
+
+- name: Install RabbitMQ systemd unit
+  ansible.builtin.template:
+    src: turbopanel-rabbitmq.service.j2
+    dest: "/etc/systemd/system/{{ rabbitmq_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Ensure RabbitMQ systemd unit desired state
+  ansible.builtin.systemd:
+    name: "{{ rabbitmq_service_name }}"
+    daemon_reload: true
+    enabled: true
+    state: started

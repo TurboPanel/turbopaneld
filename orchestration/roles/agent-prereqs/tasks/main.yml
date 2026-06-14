@@ -2,12 +2,16 @@
 - name: Install agent prerequisites
   ansible.builtin.apt:
     name:
+      - acl
+      - build-essential
       - ca-certificates
       - curl
       - git
       - gnupg
       - iptables
+      - libssl-dev
       - pamtester
+      - pkg-config
       - python3-debian
       - tar
       - unzip

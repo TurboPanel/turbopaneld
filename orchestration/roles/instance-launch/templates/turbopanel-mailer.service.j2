@@ -1,0 +1,25 @@
+[Unit]
+Description=TurboPanel mailer
+After=turbopanel-instance.service turbopanel-rabbitmq.service
+Requires=turbopanel-rabbitmq.service
+
+[Service]
+Type=simple
+User={{ instance_user }}
+Group={{ turbopanel_group }}
+WorkingDirectory={{ turbopanel_instance_dir }}
+Environment=HOME={{ turbopanel_instance_runtime_dir }}
+{% if lookup('ansible.builtin.file', turbopanel_config_dir + '/rabbitmq/.rabbitmq_pass', errors='ignore') %}
+Environment=TURBOPANEL_AMQP_URL=amqp://{{ rabbitmq_user }}:{{ lookup('ansible.builtin.file', turbopanel_config_dir + '/rabbitmq/.rabbitmq_pass') | trim }}@127.0.0.1:{{ rabbitmq_amqp_port }}{{ rabbitmq_vhost }}
+{% endif %}
+Environment=TURBOPANEL_MAILER_RATE_LIMIT_PER_MINUTE=60
+ExecStart={{ turbopanel_runtimes_dir }}/deno/current/deno run \
+  --allow-env \
+  --allow-net=127.0.0.1:{{ rabbitmq_amqp_port }},127.0.0.1:{{ drizzle_studio_port | default(4983) }} \
+  --allow-read={{ turbopanel_instance_dir }},{{ turbopanel_instance_runtime_dir }} \
+  mailer/main.ts
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

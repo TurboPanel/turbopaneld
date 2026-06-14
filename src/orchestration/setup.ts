@@ -2,6 +2,8 @@ import {
   ensureAnsible,
   ensureGalaxyRoles,
   runDockerSetup,
+  runRedisSetup,
+  runRabbitmqSetup,
   runPostgresSetup,
   runInstanceDevInstall,
   runLocalhostTest,
@@ -61,6 +63,8 @@ export async function initOrchestration(): Promise<boolean> {
     ['runSocketDirsSetup', runSocketDirsSetup],
     ['runDaemonLogsSetup', runDaemonLogsSetup],
     ['runDockerSetup', runDockerSetup],
+    ['runRedisSetup', runRedisSetup],
+    ['runRabbitmqSetup', runRabbitmqSetup],
     // Co-located dev installs postgres via instance-dev-install (Unix socket
     // always available). Running postgres-setup first races the dev playbook.
     ...(!devInstance ? [['runPostgresSetup', runPostgresSetup] as const] : []),
