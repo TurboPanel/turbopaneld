@@ -39,6 +39,14 @@
     turbopanel_dev_uid: ""
     turbopanel_dev_gid: ""
 
+  pre_tasks:
+    - name: Install ACL tooling for co-located dev permissions
+      ansible.builtin.apt:
+        name: acl
+        state: present
+        update_cache: true
+      when: turbopanel_dev_user | length > 0
+
   roles:
     - role: runtime-sockets
     - role: postgres
@@ -48,11 +56,13 @@
     # GTK/NSS/GBM stack for @react-native/debugger-shell (Debian only).
     - role: instance-dev-prereqs
     - role: node-runtime
+    - role: deno-runtime
     - role: caddy
+    # Before turbopanel runs git/pnpm in platform checkouts (often pre-seeded by dev).
+    - role: dev-permissions
     - role: instance-repo
     - role: ui-repo
     - role: ui-build
     - role: instance-build
     - role: instance-certs
     - role: instance-launch
-    - role: dev-permissions

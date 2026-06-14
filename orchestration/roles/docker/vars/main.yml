@@ -12,8 +12,9 @@ _docker_distro_map:
   Debian: debian
   Raspbian: raspbian
 
-# Official Docker apt repository base URL per ansible_distribution. Ubuntu and
-# other distros can be added here when support is extended.
+# Base URL passed to geerlingguy.docker as docker_repo_url. The Galaxy role
+# appends /{{ ansible_distribution | lower }} for apt uris and gpg — do not
+# include the distro segment here (…/linux/debian/debian/gpg 404s).
 _docker_repo_url:
-  Debian: https://download.docker.com/linux/debian
-  Raspbian: https://download.docker.com/linux/raspbian
+  Debian: https://download.docker.com/linux
+  Raspbian: https://download.docker.com/linux

@@ -62,22 +62,6 @@
     group: turbopanel
     mode: "2770"
 
-- name: Stat legacy pre-PG-18 data subdirectory
-  ansible.builtin.stat:
-    path: "{{ postgres_data_dir }}/data"
-  register: _legacy_pg_data
-
-- name: Stat PG 18 data directory
-  ansible.builtin.stat:
-    path: "{{ postgres_data_dir }}/18/docker/PG_VERSION"
-  register: _pg18_data
-
-- name: Remove legacy pre-PG-18 data subdirectory
-  ansible.builtin.file:
-    path: "{{ postgres_data_dir }}/data"
-    state: absent
-  when: _legacy_pg_data.stat.exists and not _pg18_data.stat.exists
-
 - name: Check postgres container state
   ansible.builtin.command:
     cmd: docker inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' {{ postgres_container_name }}
@@ -117,7 +101,7 @@
   failed_when: false
   when: _postgres_container_exists | bool
 
-- name: Remove postgres container with legacy or broken configuration
+- name: Remove postgres container with broken configuration
   ansible.builtin.command:
     cmd: docker rm -f {{ postgres_container_name }}
   when:

@@ -74,18 +74,22 @@
         - "{{ turbopanel_instance_dir }}"
         - "{{ turbopanel_ui_dir }}"
 
-    - name: Stat dev checkout normalizer
+    - name: Stat checkout normalizer script
       ansible.builtin.stat:
-        path: /usr/local/bin/turbopanel-normalize-dev-checkout
-      register: dev_checkout_normalizer
+        path: "{{ turbopanel_daemon_dir }}/scripts/normalize-dev-checkout.sh"
+      register: checkout_normalizer_script
 
-    - name: Reclaim legacy dev-owned daemon checkout files
+    - name: Reclaim dev-owned checkout files for turbopanel
       ansible.builtin.command:
-        cmd: /usr/local/bin/turbopanel-normalize-dev-checkout {{ turbopanel_daemon_dir }}
+        cmd: "{{ turbopanel_daemon_dir }}/scripts/normalize-dev-checkout.sh {{ item }}"
       environment:
         TURBOPANEL_DEV_USER: "{{ turbopanel_dev_user }}"
+      loop:
+        - "{{ turbopanel_daemon_dir }}"
+        - "{{ turbopanel_instance_dir }}"
+        - "{{ turbopanel_ui_dir }}"
       changed_when: false
-      when: dev_checkout_normalizer.stat.exists | default(false)
+      when: checkout_normalizer_script.stat.exists | default(false)
 
     - name: Stat instance dist directory
       ansible.builtin.stat:

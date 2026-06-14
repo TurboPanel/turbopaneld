@@ -2,7 +2,6 @@
 - name: Install agent prerequisites
   ansible.builtin.apt:
     name:
-      - acl
       - build-essential
       - ca-certificates
       - curl

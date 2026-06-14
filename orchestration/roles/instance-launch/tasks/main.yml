@@ -2,6 +2,32 @@
 - name: Ensure shared platform runtime directories
   ansible.builtin.import_tasks: platform-runtime-dirs.yml
 
+- name: Read postgres password for systemd units
+  ansible.builtin.slurp:
+    src: "{{ turbopanel_config_dir }}/postgres/.pgpass"
+  register: _launch_pgpass
+  failed_when: false
+
+- name: Set postgres password for systemd units
+  ansible.builtin.set_fact:
+    turbopanel_pg_password: "{{ _launch_pgpass.content | b64decode | trim }}"
+  when:
+    - _launch_pgpass.content is defined
+    - (_launch_pgpass.content | b64decode | trim | length) > 0
+
+- name: Read RabbitMQ password for systemd units
+  ansible.builtin.slurp:
+    src: "{{ turbopanel_config_dir }}/rabbitmq/.rabbitmq_pass"
+  register: _launch_rabbitmq_pass
+  failed_when: false
+
+- name: Set RabbitMQ URL for systemd units
+  ansible.builtin.set_fact:
+    turbopanel_amqp_url: "amqp://{{ rabbitmq_user }}:{{ _launch_rabbitmq_pass.content | b64decode | trim }}@127.0.0.1:{{ rabbitmq_amqp_port }}{{ rabbitmq_vhost }}"
+  when:
+    - _launch_rabbitmq_pass.content is defined
+    - (_launch_rabbitmq_pass.content | b64decode | trim | length) > 0
+
 - name: Install instance systemd unit
   ansible.builtin.template:
     src: turbopanel-instance.service.j2
@@ -81,12 +107,19 @@
 
 # The instance user runs `git` during upgrades but repos are owned by
 # turbopanel:turbopanel — mark them safe (Git 2.35+).
+- name: Read existing safe.directory entries for turbopanel user
+  ansible.builtin.command:
+    argv: [git, config, --global, --get-all, safe.directory]
+  become_user: "{{ turbopanel_user }}"
+  environment:
+    HOME: "{{ turbopanel_install_root }}"
+  register: _git_safe_tp_dirs
+  changed_when: false
+  failed_when: false
+
 - name: Mark platform repos as safe git directories for turbopanel user
-  ansible.builtin.git_config:
-    name: safe.directory
-    scope: global
-    value: "{{ item }}"
-    add_mode: add
+  ansible.builtin.command:
+    argv: [git, config, --global, --add, safe.directory, "{{ item }}"]
   become_user: "{{ turbopanel_user }}"
   environment:
     HOME: "{{ turbopanel_install_root }}"
@@ -94,13 +127,21 @@
     - "{{ turbopanel_instance_dir }}"
     - "{{ turbopanel_daemon_dir }}"
     - "{{ turbopanel_ui_dir }}"
+  when: item not in (_git_safe_tp_dirs.stdout_lines | default([]))
+
+- name: Read existing safe.directory entries for instance user
+  ansible.builtin.command:
+    argv: [git, config, --global, --get-all, safe.directory]
+  become_user: "{{ instance_user }}"
+  environment:
+    HOME: "{{ turbopanel_instance_dir }}"
+  register: _git_safe_instance_dirs
+  changed_when: false
+  failed_when: false
 
 - name: Mark platform repos as safe git directories for instance user
-  ansible.builtin.git_config:
-    name: safe.directory
-    scope: global
-    value: "{{ item }}"
-    add_mode: add
+  ansible.builtin.command:
+    argv: [git, config, --global, --add, safe.directory, "{{ item }}"]
   become_user: "{{ instance_user }}"
   environment:
     HOME: "{{ turbopanel_instance_dir }}"
@@ -108,6 +149,7 @@
     - "{{ turbopanel_instance_dir }}"
     - "{{ turbopanel_daemon_dir }}"
     - "{{ turbopanel_ui_dir }}"
+  when: item not in (_git_safe_instance_dirs.stdout_lines | default([]))
 
 - name: Ensure instance service desired state
   ansible.builtin.systemd:

@@ -21,3 +21,21 @@
     msg: >-
       instance checkout {{ 'present (left untouched)' if _instance_git.stat.exists
       else 'cloned from ' + instance_repo_url }}
+
+- name: Check instance dependencies
+  ansible.builtin.stat:
+    path: "{{ turbopanel_instance_dir }}/node_modules"
+  register: _instance_modules
+
+# Speed: only run the slow install when node_modules is absent. Developers
+# re-run `pnpm install` manually after changing dependencies.
+- name: Install instance dependencies
+  when: not _instance_modules.stat.exists
+  ansible.builtin.command:
+    argv: [pnpm, install, --frozen-lockfile]
+    chdir: "{{ turbopanel_instance_dir }}"
+  become_user: "{{ turbopanel_user }}"
+  environment:
+    HOME: "{{ turbopanel_install_root }}"
+    PATH: "/usr/local/bin:{{ turbopanel_runtimes_dir }}/node/current/bin:/usr/bin:/bin"
+

@@ -1,7 +1,7 @@
 import { dirname, fromFileUrl, join } from '@std/path'
 
 export const UV_VERSION = '0.11.19'
-export const PYTHON_VERSION = '3.12'
+export const PYTHON_VERSION = '3.14'
 
 /**
  * Absolute path to the daemon repository root.

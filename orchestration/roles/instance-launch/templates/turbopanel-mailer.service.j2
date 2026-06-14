@@ -9,8 +9,8 @@ User={{ instance_user }}
 Group={{ turbopanel_group }}
 WorkingDirectory={{ turbopanel_instance_dir }}
 Environment=HOME={{ turbopanel_instance_runtime_dir }}
-{% if lookup('ansible.builtin.file', turbopanel_config_dir + '/rabbitmq/.rabbitmq_pass', errors='ignore') %}
-Environment=TURBOPANEL_AMQP_URL=amqp://{{ rabbitmq_user }}:{{ lookup('ansible.builtin.file', turbopanel_config_dir + '/rabbitmq/.rabbitmq_pass') | trim }}@127.0.0.1:{{ rabbitmq_amqp_port }}{{ rabbitmq_vhost }}
+{% if turbopanel_amqp_url is defined %}
+Environment=TURBOPANEL_AMQP_URL={{ turbopanel_amqp_url }}
 {% endif %}
 Environment=TURBOPANEL_MAILER_RATE_LIMIT_PER_MINUTE=60
 ExecStart={{ turbopanel_runtimes_dir }}/deno/current/deno run \

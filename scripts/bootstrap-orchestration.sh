@@ -18,7 +18,7 @@ ROLES_DIR="$ORCHESTRATION/roles"
 COLLECTIONS_DIR="$ORCHESTRATION/collections"
 
 UV_VERSION="0.11.19"
-PYTHON_VERSION="3.12"
+PYTHON_VERSION="3.14"
 
 log() { printf '\033[1;36m[bootstrap]\033[0m %s\n' "$*"; }
 err() { printf '\033[1;31m[bootstrap]\033[0m %s\n' "$*" >&2; }

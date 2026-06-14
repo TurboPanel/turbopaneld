@@ -13,6 +13,7 @@ Environment=HOME={{ turbopanel_instance_runtime_dir }}
 Environment=XDG_DATA_HOME={{ turbopanel_instance_runtime_dir }}/share
 Environment=XDG_STATE_HOME={{ turbopanel_instance_runtime_dir }}/state
 Environment=XDG_CONFIG_HOME={{ turbopanel_instance_config_dir }}
+Environment=TURBOPANEL_NODE={{ turbopanel_runtimes_dir }}/node/current/bin/node
 Environment=PATH={{ turbopanel_runtimes_dir }}/node/current/bin:{{ turbopanel_runtimes_dir }}/deno/current:{{ turbopanel_runtimes_dir }}/caddy/current:/usr/local/bin:/usr/bin:/bin
 Environment="GIT_SSH_COMMAND=ssh -i {{ turbopanel_github_key }} -o IdentitiesOnly=yes -o UserKnownHostsFile={{ turbopanel_ssh_dir }}/known_hosts -o StrictHostKeyChecking=yes"
 Environment=TURBOPANEL_INSTANCE_SERVICE={{ instance_service_name }}
@@ -22,12 +23,12 @@ Environment=TURBOPANEL_UI_MODE={{ turbopanel_ui_mode }}
 Environment=TURBOPANEL_PG_USER={{ postgres_user }}
 Environment=TURBOPANEL_PG_DB={{ postgres_db }}
 Environment=TURBOPANEL_PG_PORT={{ postgres_port }}
-{% if lookup('ansible.builtin.file', turbopanel_config_dir + '/postgres/.pgpass', errors='ignore') %}
-Environment=TURBOPANEL_PG_PASSWORD={{ lookup('ansible.builtin.file', turbopanel_config_dir + '/postgres/.pgpass') | trim }}
+{% if turbopanel_pg_password is defined %}
+Environment=TURBOPANEL_PG_PASSWORD={{ turbopanel_pg_password }}
 {% endif %}
 Environment=TURBOPANEL_PG_SOCKET={{ postgres_socket_dir }}/.s.PGSQL.{{ postgres_port }}
-{% if lookup('ansible.builtin.file', turbopanel_config_dir + '/rabbitmq/.rabbitmq_pass', errors='ignore') %}
-Environment=TURBOPANEL_AMQP_URL=amqp://{{ rabbitmq_user }}:{{ lookup('ansible.builtin.file', turbopanel_config_dir + '/rabbitmq/.rabbitmq_pass') | trim }}@127.0.0.1:{{ rabbitmq_amqp_port }}{{ rabbitmq_vhost }}
+{% if turbopanel_amqp_url is defined %}
+Environment=TURBOPANEL_AMQP_URL={{ turbopanel_amqp_url }}
 {% endif %}
 Environment=TURBOPANEL_REDIS_SOCKET={{ redis_socket_path }}
 {% if turbopanel_dev_user | length > 0 %}
@@ -37,7 +38,7 @@ Environment=TURBOPANEL_DEV_USER={{ turbopanel_dev_user }}
 {% if turbopanel_instance_run_mode == 'compiled' %}
 ExecStart={{ turbopanel_instance_binary }}
 {% else %}
-ExecStart={{ turbopanel_runtimes_dir }}/deno/current/deno run --allow-env --allow-sys=networkInterfaces --allow-read=/run/turbopanel,{{ postgres_socket_dir }},{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }},{{ turbopanel_instance_runtime_dir }} --allow-write=/run/turbopanel,{{ postgres_socket_dir }},{{ turbopanel_instance_runtime_dir }} --allow-net=127.0.0.1:{{ drizzle_studio_port | default(4983) }},127.0.0.1:{{ rabbitmq_amqp_port }} --allow-run=git,systemctl,tar,sudo,/usr/bin/sudo,/bin/sh,mkfifo,/usr/bin/mkfifo,pamtester,/usr/bin/pamtester,setfacl,/usr/bin/setfacl,{{ turbopanel_runtimes_dir }}/node/current/bin/node src/deno.ts
+ExecStart={{ turbopanel_runtimes_dir }}/deno/current/deno run --allow-env --allow-sys=networkInterfaces --allow-read=/run/turbopanel,{{ postgres_socket_dir }},{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_runtimes_dir }}/node --allow-write=/run/turbopanel,{{ postgres_socket_dir }},{{ turbopanel_instance_runtime_dir }} --allow-net=127.0.0.1:{{ drizzle_studio_port | default(4983) }},127.0.0.1:{{ rabbitmq_amqp_port }} --allow-run=git,systemctl,tar,sudo,/usr/bin/sudo,/bin/sh,mkfifo,/usr/bin/mkfifo,pamtester,/usr/bin/pamtester,setfacl,/usr/bin/setfacl,{{ turbopanel_runtimes_dir }}/node/current/bin/node src/deno.ts
 {% endif %}
 Restart=always
 RestartSec=2

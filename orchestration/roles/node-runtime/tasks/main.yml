@@ -30,8 +30,13 @@
 
 - name: Enable pnpm via corepack
   ansible.builtin.command:
-    cmd: "{{ turbopanel_runtimes_dir }}/node/current/bin/corepack enable pnpm"
+    argv:
+      - "{{ turbopanel_runtimes_dir }}/node/current/bin/corepack"
+      - enable
+      - pnpm
     creates: "{{ turbopanel_runtimes_dir }}/node/current/bin/pnpm"
+  environment:
+    PATH: "{{ turbopanel_runtimes_dir }}/node/current/bin:{{ ansible_env.PATH | default('/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin') }}"
 
 - name: Link Node toolchain into /usr/local/bin
   ansible.builtin.file:
