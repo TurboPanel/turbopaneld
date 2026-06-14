@@ -69,7 +69,7 @@ export async function ensureAnsible(): Promise<void> {
 /**
  * Install pinned Ansible Galaxy roles and collections.
  *
- * Roles land in `orchestration/roles/`; collections in `orchestration/collections/`.
+ * Roles land in `orchestration/roles/`; collections in `orchestration/runtime/galaxy-collections/`.
  * Idempotent: `ansible-galaxy` skips dependencies already present at the requested
  * version. Runs on every bootstrap so new agents pick up updates without
  * recreating the ansible venv.

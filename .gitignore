@@ -1,7 +1,6 @@
 node_modules/
 orchestration/runtime/
 orchestration/roles/geerlingguy.docker/
-orchestration/collections/
 .env
 server.id
 cloudflared/tunnels/*.token

@@ -39,7 +39,7 @@ export const ANSIBLE_PLAYBOOK_BIN = join(VENV_BIN_DIR, 'ansible-playbook')
 export const REQUIREMENTS_FILE = join(ORCHESTRATION_DIR, 'requirements.txt')
 export const GALAXY_REQUIREMENTS_FILE = join(ORCHESTRATION_DIR, 'requirements.yml')
 export const GALAXY_ROLES_DIR = join(ORCHESTRATION_DIR, 'roles')
-export const GALAXY_COLLECTIONS_DIR = join(ORCHESTRATION_DIR, 'collections')
+export const GALAXY_COLLECTIONS_DIR = join(ORCHESTRATION_DIR, 'runtime', 'galaxy-collections')
 export const ANSIBLE_CFG = join(ORCHESTRATION_DIR, 'ansible.cfg')
 export const LOCALHOST_PLAYBOOK = join(
   ORCHESTRATION_DIR,
