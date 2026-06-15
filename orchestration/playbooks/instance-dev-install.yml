@@ -18,12 +18,12 @@
     turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/runtimes"
     turbopanel_platform_dir: "{{ turbopanel_install_root }}/platform"
     turbopanel_daemon_dir: "{{ turbopanel_platform_dir }}/daemon"
-    turbopanel_instance_dir: "{{ turbopanel_platform_dir }}/turbopanel"
+    turbopanel_instance_dir: "{{ turbopanel_platform_dir }}/instance"
     turbopanel_ui_dir: "{{ turbopanel_platform_dir }}/ui"
     turbopanel_group: turbopanel
     instance_user: instance
     instance_uid: 9998
-    instance_repo_url: https://github.com/turbopanel/turbopanel
+    instance_repo_url: https://github.com/turbopanel/instance
     ui_repo_url: https://github.com/turbopanel/turbopanel-ui
     instance_branch: trunk
     ui_branch: trunk

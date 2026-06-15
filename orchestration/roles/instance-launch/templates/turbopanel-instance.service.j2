@@ -18,15 +18,11 @@ Environment=PATH={{ turbopanel_runtimes_dir }}/node/current/bin:{{ turbopanel_ru
 Environment="GIT_SSH_COMMAND=ssh -i {{ turbopanel_github_key }} -o IdentitiesOnly=yes -o UserKnownHostsFile={{ turbopanel_ssh_dir }}/known_hosts -o StrictHostKeyChecking=yes"
 Environment=TURBOPANEL_INSTANCE_SERVICE={{ instance_service_name }}
 Environment=TURBOPANEL_UI_SERVICE={{ ui_service_name }}
-# Gates the dev-only developer surface (dev != static). See ../turbopanel src/dev-mode.ts.
+# Gates the dev-only developer surface (dev != static). See ../instance src/dev-mode.ts.
 Environment=TURBOPANEL_UI_MODE={{ turbopanel_ui_mode }}
-Environment=TURBOPANEL_PG_USER={{ postgres_user }}
-Environment=TURBOPANEL_PG_DB={{ postgres_db }}
-Environment=TURBOPANEL_PG_PORT={{ postgres_port }}
 {% if turbopanel_pg_password is defined %}
-Environment=TURBOPANEL_PG_PASSWORD={{ turbopanel_pg_password }}
+Environment=TURBOPANEL_DATABASE_URL=postgresql://{{ postgres_user }}:{{ turbopanel_pg_password }}@/{{ postgres_db }}?host={{ postgres_socket_dir }}
 {% endif %}
-Environment=TURBOPANEL_PG_SOCKET={{ postgres_socket_dir }}/.s.PGSQL.{{ postgres_port }}
 {% if turbopanel_amqp_url is defined %}
 Environment=TURBOPANEL_AMQP_URL={{ turbopanel_amqp_url }}
 {% endif %}

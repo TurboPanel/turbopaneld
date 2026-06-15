@@ -3,7 +3,7 @@ turbopanel_install_root: /opt/turbopanel
 turbopanel_user: turbopanel
 turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/runtimes"
 turbopanel_platform_dir: "{{ turbopanel_install_root }}/platform"
-turbopanel_instance_dir: "{{ turbopanel_platform_dir }}/turbopanel"
+turbopanel_instance_dir: "{{ turbopanel_platform_dir }}/instance"
 instance_user: instance
 turbopanel_group: turbopanel
 turbopanel_instance_run_mode: source

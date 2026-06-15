@@ -8,4 +8,4 @@ instance_uid: 9998
 turbopanel_user: turbopanel
 turbopanel_group: turbopanel
 turbopanel_install_root: /opt/turbopanel
-turbopanel_instance_dir: "{{ turbopanel_install_root }}/platform/turbopanel"
+turbopanel_instance_dir: "{{ turbopanel_install_root }}/platform/instance"

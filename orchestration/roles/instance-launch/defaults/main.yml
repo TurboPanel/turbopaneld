@@ -12,7 +12,7 @@ turbopanel_instance_config_dir: "{{ turbopanel_instance_dir }}/.config"
 turbopanel_caddy_config_dir: "{{ turbopanel_instance_dir }}/.config"
 turbopanel_ui_config_dir: "{{ turbopanel_ui_dir }}/.config"
 turbopanel_daemon_dir: "{{ turbopanel_platform_dir }}/daemon"
-turbopanel_instance_dir: "{{ turbopanel_platform_dir }}/turbopanel"
+turbopanel_instance_dir: "{{ turbopanel_platform_dir }}/instance"
 turbopanel_ui_dir: "{{ turbopanel_platform_dir }}/ui"
 instance_user: instance
 turbopanel_group: turbopanel

@@ -12,7 +12,7 @@
     turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/runtimes"
     turbopanel_platform_dir: "{{ turbopanel_install_root }}/platform"
     turbopanel_daemon_dir: "{{ turbopanel_platform_dir }}/daemon"
-    turbopanel_instance_dir: "{{ turbopanel_platform_dir }}/turbopanel"
+    turbopanel_instance_dir: "{{ turbopanel_platform_dir }}/instance"
     turbopanel_ui_dir: "{{ turbopanel_platform_dir }}/ui"
     turbopanel_group: turbopanel
     turbopanel_user: turbopanel
@@ -25,4 +25,5 @@
   roles:
     - role: ui-build
     - role: instance-build
+    - role: instance-certs
     - role: instance-launch

@@ -6,4 +6,6 @@
   become: true
   gather_facts: true
   roles:
+    # Caddy requires ./certs/self-signed.{crt,key}; idempotent and cheap.
+    - role: instance-certs
     - role: instance-launch
