@@ -37,7 +37,7 @@ postgres_port: 5432
 postgres_expose_port: false
 postgres_user: turbopanel
 postgres_db: turbopanel
-turbopanel_config_dir: /etc/turbopanel
+instance_log_dir: /var/log/turbopanel/instance
 rabbitmq_amqp_port: 5672
 rabbitmq_vhost: /
 rabbitmq_user: turbopanel

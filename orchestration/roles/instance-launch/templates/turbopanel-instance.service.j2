@@ -31,6 +31,8 @@ Environment=TURBOPANEL_REDIS_SOCKET={{ redis_socket_path }}
 Environment=TURBOPANEL_DEV_USER={{ turbopanel_dev_user }}
 {% endif %}
 # turbopanel_instance_run_mode: "source" (deno run) | "compiled" (single binary)
+StandardOutput=append:{{ instance_log_dir }}/instance.log
+StandardError=append:{{ instance_log_dir }}/instance.err.log
 {% if turbopanel_instance_runtime | default('deno') == 'workers' %}
 Environment=WRANGLER_SEND_METRICS=false
 Environment=CI=1
