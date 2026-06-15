@@ -6,5 +6,5 @@
   vars:
     turbopanel_runtimes_dir: /opt/turbopanel/runtimes
   roles:
-    - role: agent-prereqs
+    - role: daemon-prereqs
     - role: redis

@@ -1,5 +1,5 @@
 ---
-- name: Install agent prerequisites
+- name: Install daemon prerequisites
   ansible.builtin.apt:
     name:
       - build-essential

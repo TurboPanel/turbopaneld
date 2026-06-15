@@ -71,7 +71,7 @@ export async function ensureAnsible(): Promise<void> {
  *
  * Roles land in `orchestration/roles/`; collections in `orchestration/runtime/galaxy-collections/`.
  * Idempotent: `ansible-galaxy` skips dependencies already present at the requested
- * version. Runs on every bootstrap so new agents pick up updates without
+ * version. Runs on every bootstrap so new daemons pick up updates without
  * recreating the ansible venv.
  */
 export async function ensureGalaxyRoles(): Promise<void> {
@@ -324,7 +324,7 @@ export async function runDockerSetup(): Promise<void> {
  * under /etc/turbopanel/postgres/.
  *
  * Co-located dev uses `instance-dev-install.yml` (postgres with Unix socket always
- * available). This playbook is for agent-only hosts that also need socket-only Postgres.
+ * available). This playbook is for daemon-only hosts that also need socket-only Postgres.
  *
  * Requires Docker (run after {@link runDockerSetup}) and passwordless sudo.
  */
@@ -345,7 +345,7 @@ export async function runPostgresSetup(): Promise<void> {
  * Build and install Redis from source under runtimes/redis/current with a Unix
  * socket at /run/turbopanel/redis.sock.
  *
- * Requires build prerequisites from agent-prereqs and passwordless sudo.
+ * Requires build prerequisites from daemon-prereqs and passwordless sudo.
  */
 export async function runRedisSetup(): Promise<void> {
   console.log('[orchestration] running redis-setup playbook')

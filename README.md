@@ -1,6 +1,6 @@
 # turbopanel-daemon
 
-Agent node daemon for TurboPanel. Connects back to an instance over HTTPS/WSS, runs local orchestration (Ansible, Docker, Cloudflare tunnels), and keeps its checkout in sync with the instance's `trunk` commit.
+Remote daemon for TurboPanel-managed servers. Connects back to an instance over HTTPS/WSS, runs local orchestration (Ansible, Docker, Cloudflare tunnels), and does **not** self-update — operators reconcile nodes by re-running the installer or pushing a dev-sync build.
 
 ## Install a testing node
 
@@ -52,7 +52,7 @@ Re-running the installer is safe — every Ansible role is idempotent and the da
 
 ## What gets installed
 
-The installer bootstraps Ansible, then runs `orchestration/playbooks/agent-install.yml`, which:
+The installer bootstraps Ansible, then runs `orchestration/playbooks/daemon-install.yml`, which:
 
 - Creates service user `turbopanel:turbopanel` (UID/GID 9999)
 - Clones this repo to `/opt/turbopanel/platform/daemon` on branch `trunk`
@@ -95,9 +95,13 @@ sudo ANSIBLE_CONFIG=/opt/turbopanel/platform/daemon/orchestration/ansible.cfg \
   /opt/turbopanel/platform/daemon/orchestration/runtime/venv/bin/ansible-playbook \
   -i localhost, -c local \
   -e 'turbopanel_instance_url=https://<instance-host>:<port>' \
-  /opt/turbopanel/platform/daemon/orchestration/playbooks/agent-install.yml
+  /opt/turbopanel/platform/daemon/orchestration/playbooks/daemon-install.yml
 ```
 
 ## Local development
 
-**Agent nodes and co-located dev** both run the daemon under **`turbopanel-daemon.service`** (systemd). On a host that also runs the instance, install the unit with `scripts/install-daemon-systemd.sh` after `turbopanel-instance.service` is up. The daemon dials the instance over the Unix socket when `TURBOPANEL_INSTANCE_URL` is unset in `.env`, or over the network when the installer set a URL.
+**Managed server daemons and co-located dev** both run the daemon under **`turbopanel-daemon.service`** (systemd). On a host that also runs the instance, install the unit with `scripts/install-daemon-systemd.sh` after `turbopanel-instance.service` is up. The daemon dials the instance over the Unix socket when `TURBOPANEL_INSTANCE_URL` is unset in `.env`, or over the network when the installer set a URL.
+
+## Version endpoint
+
+`GET /api/daemon/v1/version` on the instance returns the co-located daemon checkout commit for informational and upgrade-support use. Connected daemons do not poll it or auto-sync their checkout — updates are operator-driven (re-run the installer, **Upgrade System**, or **Sync Dev Build** in the dev console).

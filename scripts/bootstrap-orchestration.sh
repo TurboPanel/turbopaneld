@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Bootstrap the orchestration runtime (uv -> Python -> ansible) before the main
-# agent-install playbook can run. Idempotent: safe to re-run.
+# daemon-install playbook can run. Idempotent: safe to re-run.
 #
 # Mirrors src/orchestration/{uv,python,ansible}.ts so install.sh does not need
 # Deno to get Ansible on the host.

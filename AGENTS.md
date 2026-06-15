@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Agent-node daemon: the **constant** installed on every TurboPanel-managed host. It connects to a TurboPanel **instance** over WSS and runs local orchestration (Ansible, Docker, Cloudflare tunnels). It is the only party that installs/updates everything else via Ansible — including, in co-located dev, the instance + UI + Caddy. It **does not self-update**; updates are operator-driven.
+Managed-server daemon: the **constant** installed on every TurboPanel-managed host. It connects to a TurboPanel **instance** over WSS and runs local orchestration (Ansible, Docker, Cloudflare tunnels). It is the only party that installs/updates everything else via Ansible — including, in co-located dev, the instance + UI + Caddy. It **does not self-update**; updates are operator-driven.
 
 ## Speed doctrine (turbo)
 
@@ -18,12 +18,12 @@ TurboPanel is named for speed; keep the daemon fast.
 - **`instance`** (UID **9998**): runs the instance/Caddy/UI in group `turbopanel`, **no own group, no broad sudo** (created by the `instance-user` role). Reads checkouts via group; does not own source files. Scoped passwordless sudo via `/etc/sudoers.d/turbopanel-instance-upgrade` (`instance-launch` `upgrade-sudoers.yml`): restart instance/caddy/ui units, `git` as `turbopanel`, normalize script, and **`/usr/bin/pamtester login * authenticate`** (host install gate — root or sudo users via PAM from the instance process).
 - **`redis`** (UID **9997**): runs `turbopanel-redis.service` in group `turbopanel` (created by the `redis` role; self-sufficient — does not require `instance-user` to run first).
 - Co-located dev checkouts (`daemon`, `turbopanel`, `ui`) are **`2770 turbopanel:turbopanel`** with default ACL **`g:turbopanel:rwx`** so files created by git, pnpm, or the editor remain group-writable. **Why default ACLs?** setgid propagates group ownership of new files but not the write bit — without a default ACL, files created by `turbopanel` (e.g. after `git pull`) are `640` and the dev user cannot write them. `dist`/release dirs are owned by `instance` and excluded from the dev-editable ACL. Clones and `pnpm install` run as **9999**; systemd services run as **9998**. Per-service runtime state for the instance user lives in **gitignored** checkout dirs: **`turbopanel/.local`** (instance + Caddy), **`ui/.local`** (Expo), plus matching **`.config`** trees. The **daemon** (`9999`) keeps its own state under **`/opt/turbopanel`** (passwd `HOME`). The normalizer skips checkout `.cache`/`.config`/`.local` when reclaiming source files to `turbopanel` and re-applies default ACLs on the source tree; use `--prepare-reset` before Upgrade System `git reset` and `--ensure-runtime-dirs` after.
-- **`acl` / `setfacl` is dev-only.** Production agent nodes never install the `acl` package and never apply ACLs — production hosts should not natively enable ACL management. Co-located dev installs the package in `instance-dev-install.yml` `pre_tasks` (gated on `turbopanel_dev_user`) before `runtime-sockets` and `dev-permissions` apply ACLs. The turbopanel-dev console helpers (`tp_apply_dev_host_acls`, `tp_fix_deno_runtime_access`) fall back to `chmod` when `setfacl` is absent until the daemon installs `acl`.
+- **`acl` / `setfacl` is dev-only.** Production managed servers never install the `acl` package and never apply ACLs — production hosts should not natively enable ACL management. Co-located dev installs the package in `instance-dev-install.yml` `pre_tasks` (gated on `turbopanel_dev_user`) before `runtime-sockets` and `dev-permissions` apply ACLs. The turbopanel-dev console helpers (`tp_apply_dev_host_acls`, `tp_fix_deno_runtime_access`) fall back to `chmod` when `setfacl` is absent until the daemon installs `acl`.
 - `/run/turbopanel` is `2770 turbopanel:turbopanel` (setgid) so `instance` can bind the socket; see `../turbopanel/AGENTS.md`.
 
 ## Documentation discipline
 
-**Keep this file current.** When you learn something durable about agent nodes — install prerequisites, orchestration playbooks, connectivity, slim-Debian gotchas — add or update a note here alongside code changes. Future agents read `AGENTS.md` first.
+**Keep this file current.** When you learn something durable about managed server daemons — install prerequisites, orchestration playbooks, connectivity, slim-Debian gotchas — add or update a note here alongside code changes. Future agents read `AGENTS.md` first.
 
 - Prefer extending an existing section over orphan bullets.
 - Record **why** when non-obvious (missing packages, ordering constraints, idempotency traps).
@@ -39,14 +39,14 @@ Two modes in `src/instance/paths.ts`:
 
 | Mode | When | Target |
 |---|---|---|
-| `url` | `TURBOPANEL_INSTANCE_URL` set (installed agents) | `https://<host>:<port>` / `wss://…/ws/daemon/v1` through Caddy |
+| `url` | `TURBOPANEL_INSTANCE_URL` set (remote managed servers) | `https://<host>:<port>` / `wss://…/ws/daemon/v1` through Caddy |
 | `socket` | No URL (co-located dev on the instance host) | `unix:///run/turbopanel/instance.sock` (Tilt dev: `dev/.run/turbopanel/instance.sock`) |
 
-On connect the daemon sends a `hello` with `hostname`, optional persisted `serverId`, and `machineId` (`/etc/machine-id`) for first-time registration. Managed installs store the server id at `/etc/turbopanel/platform/daemon/server.id` (`TURBOPANEL_DAEMON_STATE_DIR` overrides the directory); local Tilt dev (`TURBOPANEL_SKIP_ORCHESTRATION=1`) stores it as `./server.id` in the daemon checkout so the restricted dev permissions can write it. The instance resolves a canonical **`servers.id`** (uuidv7), replies with `serverId` in `hello`, and dedupes reconnects by `serverId` / `X-Real-IP` / `hostname`. The daemon dials **`/ws/daemon/v1`** and reads `GET /api/daemon/v1/version` / `GET /api/daemon/v1/instance/ca`.
+On connect the daemon sends a `hello` with `hostname`, optional persisted `serverId`, and `machineId` (`/etc/machine-id`) for first-time registration. Managed installs store the server id at `/etc/turbopanel/platform/daemon/server.id` (`TURBOPANEL_DAEMON_STATE_DIR` overrides the directory); local Tilt dev (`TURBOPANEL_SKIP_ORCHESTRATION=1`) stores it as `./server.id` in the daemon checkout so the restricted dev permissions can write it. The instance resolves a canonical **`servers.id`** (uuidv7), replies with `serverId` in `hello`, and dedupes reconnects by `serverId` / `X-Real-IP` / `hostname`. The daemon dials **`/ws/daemon/v1`** and may read `GET /api/daemon/v1/version` (informational only) and `GET /api/daemon/v1/instance/ca`.
 
-Install flow: official installer (separate CDN repo) → `scripts/bootstrap-orchestration.sh` (uv, Python, ansible, **Galaxy roles**) → `orchestration/playbooks/agent-install.yml`. Docker is installed in that playbook and again at daemon startup via `initOrchestration()` in `src/orchestration/setup.ts`.
+Install flow: official installer (separate CDN repo) → `scripts/bootstrap-orchestration.sh` (uv, Python, ansible, **Galaxy roles**) → `orchestration/playbooks/daemon-install.yml`. Docker is installed in that playbook and again at daemon startup via `initOrchestration()` in `src/orchestration/setup.ts`.
 
-Daemon runtime is managed by systemd (`turbopanel-daemon.service`): `flock` enforces a single process, `deno run` without `--watch`, and the official installer / `agent-install.yml` reconcile the unit on every run. **No self-update** — `updater.ts` was removed. A `dev-sync` push (see below) is the fast dev path; the developer upgrade button is the operator path.
+Daemon runtime is managed by systemd (`turbopanel-daemon.service`): `flock` enforces a single process, `deno run` without `--watch`, and the official installer / `daemon-install.yml` reconcile the unit on every run. **No self-update** — `updater.ts` was removed. A `dev-sync` push (see below) is the fast dev path; the developer upgrade button is the operator path.
 
 ## Ansible owns all installs (incl. co-located dev instance)
 
@@ -54,7 +54,7 @@ The daemon bootstraps uv/Python/ansible, then runs playbooks. Roles (in `orchest
 
 | Role | Purpose |
 |---|---|
-| `agent-prereqs` | apt prerequisites (`xz-utils` for Node, `tar`, `unzip`, `pamtester`, Redis build deps) |
+| `daemon-prereqs` | apt prerequisites (`xz-utils` for Node, `tar`, `unzip`, `pamtester`, Redis build deps) |
 | `turbopanel-user` / `instance-user` | the 9999 / 9998 users |
 | `runtime-sockets` | `/run/turbopanel` as `2770` setgid |
 | `deno-runtime` / `node-runtime` / `caddy` | vendored runtimes under `runtimes/<tool>/current` |
@@ -66,11 +66,11 @@ The daemon bootstraps uv/Python/ansible, then runs playbooks. Roles (in `orchest
 | `ui-build` | Runs `pnpm export` → `ui/dist` (dev) or downloads CDN artifact (prod) when `turbopanel_ui_mode=static`; no-op in `dev` mode |
 | `instance-certs` | platform CA + leaf via the instance cert script |
 | `instance-launch` | `turbopanel-instance` / `turbopanel-caddy` / `turbopanel-ui` / `turbopanel-mailer` units (run as `instance:turbopanel`). **`turbopanel-ui` must invoke `node_modules/.bin/expo` directly** — `pnpm exec expo` runs an implicit install that prompts to purge `node_modules` (installed by `turbopanel` with a different `HOME`), which blocks Expo and yields Caddy 502s on restart. |
-| `dev-permissions` | add invoking dev user to `turbopanel` group; apply setgid + default ACLs on checkouts (no-op on agent nodes) |
+| `dev-permissions` | add invoking dev user to `turbopanel` group; apply setgid + default ACLs on checkouts (no-op on managed servers without dev user) |
 | `postgres` | PostgreSQL 18 in Docker; data under `/var/lib/turbopanel/postgres`, Unix socket at `/var/run/turbopanel/postgres` |
-| `docker` / `daemon-repo` / `daemon-config` / `daemon-logs` / `daemon-launch` | agent-node provisioning |
+| `docker` / `daemon-repo` / `daemon-config` / `daemon-logs` / `daemon-launch` | managed-server daemon provisioning |
 
-- Co-located **dev** install: `orchestration/playbooks/instance-dev-install.yml`, run by `initOrchestration()` when co-located (socket mode) **and** `TURBOPANEL_DEV_INSTANCE=1`. `develop.sh` in `../turbopanel` sets the flag and installs the daemon unit, which then installs the rest. **Local Tilt dev** (`../dev/Tiltfile`) runs the daemon via `scripts/daemon-serve.sh` with `TURBOPANEL_SKIP_ORCHESTRATION=1` instead — Tilt already manages instance/Caddy/Postgres; Workers mode sets `TURBOPANEL_INSTANCE_URL` to Caddy HTTPS, Deno mode dials the dev socket dir. Dev bootstrap **skips** `postgres-setup.yml` and lets `instance-dev-install` own Postgres. The Docker container always publishes a Unix socket; the instance and drizzle-kit connect via `TURBOPANEL_PG_SOCKET` (TCP port exposure is optional via `postgres_expose_port`, off in dev).
+- Co-located **dev** install: `orchestration/playbooks/instance-dev-install.yml`, run by `initOrchestration()` when co-located (socket mode) **and** `TURBOPANEL_DEV_INSTANCE=1`. The [turbopanel-dev](https://github.com/turbopanel/turbopanel-dev) console (`./console` → **Start dev stack**) writes developer identity into the daemon `.env`, bootstraps orchestration, and installs `turbopanel-daemon.service`, which then installs the rest via Ansible. **Local Tilt dev** (`../dev/Tiltfile`) runs the daemon via `scripts/daemon-serve.sh` with `TURBOPANEL_SKIP_ORCHESTRATION=1` instead — Tilt already manages instance/Caddy/Postgres; Workers mode sets `TURBOPANEL_INSTANCE_URL` to Caddy HTTPS, Deno mode dials the dev socket dir. Dev bootstrap **skips** `postgres-setup.yml` and lets `instance-dev-install` own Postgres. The Docker container always publishes a Unix socket; the instance and drizzle-kit connect via `TURBOPANEL_PG_SOCKET` (TCP port exposure is optional via `postgres_expose_port`, off in dev).
 
 ### Build modes
 
@@ -88,11 +88,11 @@ Toggle via the dev console **Switch to production build** / **Switch to dev buil
 - Galaxy roles: `orchestration/requirements.yml` (pinned, installed into `orchestration/roles/`, gitignored)
 - Docker: thin `roles/docker` wrapper around **`geerlingguy.docker`** (Debian Trixie/Raspbian). Skips install when Docker is already running but **always** adds `turbopanel` to the `docker` group (needed on co-located dev hosts where Docker predates the daemon).
 - Bootstrap also runs on every daemon start (idempotent; failures are logged, daemon keeps running). After Docker, `redis-setup.yml` and `rabbitmq-setup.yml` provision Redis (native binary + Unix socket) and RabbitMQ (`rabbitmq:4-management` Docker container). `postgres-setup.yml` starts `turbopanel-db` (`postgres:18`) with the data volume at `/var/lib/turbopanel/postgres` → `/var/lib/postgresql` (PG 18+ layout) and the socket dir bind-mounted to `/var/run/turbopanel/postgres`.
-- Logs are written to both journald and `/var/log/turbopanel/daemon/{daemon.log,daemon.err.log}` when running under systemd (`StandardOutput`/`StandardError` in the unit template). Logrotate policy lives at `/etc/logrotate.d/turbopanel-daemon` (daily, 14 rotations, compress). The log directory is recreated on boot via `/etc/tmpfiles.d/turbopanel-daemon-logs.conf`. The `daemon-logs` role provisions all of this; the official installer runs it via `daemon-launch`, and `initOrchestration()` re-runs `daemon-logs-setup.yml` on every daemon start so existing agents pick it up without a full reinstall.
+- Logs are written to both journald and `/var/log/turbopanel/daemon/{daemon.log,daemon.err.log}` when running under systemd (`StandardOutput`/`StandardError` in the unit template). Logrotate policy lives at `/etc/logrotate.d/turbopanel-daemon` (daily, 14 rotations, compress). The log directory is recreated on boot via `/etc/tmpfiles.d/turbopanel-daemon-logs.conf`. The `daemon-logs` role provisions all of this; the official installer runs it via `daemon-launch`, and `initOrchestration()` re-runs `daemon-logs-setup.yml` on every daemon start so existing daemons pick it up without a full reinstall.
 
 ### Runtime (systemd + Tilt)
 
-Agent nodes and co-located dev hosts run **`turbopanel-daemon.service`** (systemd). The official installer / `agent-install.yml` install the unit; co-located instance hosts use `scripts/install-daemon-systemd.sh` (which also ensures the user, prereqs, and Deno so a fresh dev host is self-sufficient). **Local Tilt dev** runs the same process from `../dev/scripts/daemon-serve.sh` (Tilt `daemon` resource) with `TURBOPANEL_SKIP_ORCHESTRATION=1` so Ansible bootstrap is skipped. `scripts/ensure-single-daemon.sh` (ExecStartPre) ensures `/run/turbopanel` exists with correct permissions and clears any stale `daemon.lock` left by an unclean shutdown.
+Managed server daemons and co-located dev hosts run **`turbopanel-daemon.service`** (systemd). The official installer / `daemon-install.yml` install the unit; co-located instance hosts use `scripts/install-daemon-systemd.sh` (which also ensures the user, prereqs, and Deno so a fresh dev host is self-sufficient). **Local Tilt dev** runs the same process from `../dev/scripts/daemon-serve.sh` (Tilt `daemon` resource) with `TURBOPANEL_SKIP_ORCHESTRATION=1` so Ansible bootstrap is skipped. `scripts/ensure-single-daemon.sh` (ExecStartPre) ensures `/run/turbopanel` exists with correct permissions and clears any stale `daemon.lock` left by an unclean shutdown.
 
 ### Services
 
@@ -110,7 +110,7 @@ Agent nodes and co-located dev hosts run **`turbopanel-daemon.service`** (system
 
 ### Slim Debian prerequisites
 
-Minimal Debian images often lack packages full installs have. Agent bootstrap and `roles/agent-prereqs` must include anything Ansible/Docker need before playbooks run:
+Minimal Debian images often lack packages full installs have. Daemon bootstrap and `roles/daemon-prereqs` must include anything Ansible/Docker need before playbooks run:
 
 | Package | Why |
 |---|---|
@@ -124,7 +124,7 @@ Minimal Debian images often lack packages full installs have. Agent bootstrap an
 | `libssl-dev` | Redis TLS/OpenSSL headers at compile time |
 | `pkg-config` | Redis build dependency resolution |
 
-Co-located dev (`instance-dev-prereqs` role, not `agent-prereqs`) installs the Chromium/GTK runtime stack (`libatk*`, `libnss3`, `libgbm1`, `libgtk-3-0`, …) so `@react-native/debugger-shell` passes its `--version` prep check. Debian 13+ `*t64` renames are probed at install time. A headless server may still log DISPLAY warnings when opening the GUI debugger; that is separate from the shared-library install.
+Co-located dev (`instance-dev-prereqs` role, not `daemon-prereqs`) installs the Chromium/GTK runtime stack (`libatk*`, `libnss3`, `libgbm1`, `libgtk-3-0`, …) so `@react-native/debugger-shell` passes its `--version` prep check. Debian 13+ `*t64` renames are probed at install time. A headless server may still log DISPLAY warnings when opening the GUI debugger; that is separate from the shared-library install.
 
 ## Layout
 

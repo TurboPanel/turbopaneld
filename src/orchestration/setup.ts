@@ -29,7 +29,7 @@ function shouldSkipOrchestration(): boolean {
  *
  * Deno runtime dials the local Unix socket (no `TURBOPANEL_INSTANCE_URL`).
  * Workers runtime still runs on the same host but the daemon connects over
- * HTTPS like a remote agent — `TURBOPANEL_INSTANCE_URL` is set and
+ * HTTPS like a remote daemon — `TURBOPANEL_INSTANCE_URL` is set and
  * `TURBOPANEL_INSTANCE_RUNTIME=workers` marks co-located Workers dev.
  */
 function shouldInstallDevInstance(): boolean {

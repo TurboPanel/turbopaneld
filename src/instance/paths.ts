@@ -8,7 +8,7 @@ export const INSTANCE_SOCKET = 'instance.sock'
  * How the daemon reaches the instance.
  *
  * - `socket`: co-located dev / same-host, dial the instance Unix socket.
- * - `url`: remote agent node, dial the instance over the network (https/wss),
+ * - `url`: remote managed server, dial the instance over the network (https/wss),
  *   typically through Caddy and a Cloudflare tunnel.
  */
 export type InstanceConfig =

@@ -1,9 +1,9 @@
 ---
-# Provision a TurboPanel agent node (daemon checkout, runtimes, config, launch).
+# Provision a TurboPanel managed server (daemon checkout, runtimes, config, launch).
 #
 # Invoked by install.sh after scripts/bootstrap-orchestration.sh has placed
 # ansible-playbook in orchestration/runtime/venv/. Every role is idempotent.
-- name: TurboPanel agent node install
+- name: TurboPanel daemon install
   hosts: localhost
   connection: local
   become: true
@@ -35,7 +35,7 @@
           turbopanel_instance_url is required (pass --instance-url to install.sh).
 
   roles:
-    - role: agent-prereqs
+    - role: daemon-prereqs
     - role: turbopanel-user
     - role: docker
     - role: daemon-repo
