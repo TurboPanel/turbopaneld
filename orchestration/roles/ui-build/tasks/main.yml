@@ -29,6 +29,7 @@
   environment:
     HOME: "{{ turbopanel_ui_runtime_dir }}"
     PATH: "/usr/local/bin:{{ turbopanel_runtimes_dir }}/node/current/bin:/usr/bin:/bin"
+  register: _ui_local_build
 
 - name: Download UI static export from CDN
   when:
@@ -43,6 +44,14 @@
     mkdir -p "{{ turbopanel_ui_dist_dir }}"
     tar -xzf "$TMP/ui.tar.gz" -C "{{ turbopanel_ui_dist_dir }}"
     rm -rf "$TMP"
+  register: _ui_cdn_build
+
+- name: Record checkout normalize needed after UI build
+  ansible.builtin.set_fact:
+    force_checkout_normalize: true
+  when: >-
+    (_ui_local_build is defined and _ui_local_build is changed) or
+    (_ui_cdn_build is defined and _ui_cdn_build is changed)
 
 - name: Ensure UI dist directory ownership
   when: turbopanel_ui_mode == 'static'

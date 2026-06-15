@@ -46,6 +46,11 @@ export const LOCALHOST_PLAYBOOK = join(
   'playbooks',
   'localhost-test.yml',
 )
+export const DAEMON_CONVERGE_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  'playbooks',
+  'daemon-converge.yml',
+)
 export const DOCKER_PLAYBOOK = join(
   ORCHESTRATION_DIR,
   'playbooks',

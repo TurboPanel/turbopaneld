@@ -1,5 +1,43 @@
 ---
 # Requires the turbopanel group to already exist (turbopanel-user role).
+- name: Check whether instance user already exists
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ instance_user }}"
+  register: _instance_user_getent
+  failed_when: false
+
+- name: Detect existing instance user account
+  ansible.builtin.set_fact:
+    _instance_user_exists: >-
+      {{
+        _instance_user_getent.ansible_facts.getent_passwd is defined
+        and _instance_user_getent.ansible_facts.getent_passwd[instance_user] is defined
+      }}
+
+- name: Stop instance stack units before user account changes
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+  loop:
+    - "{{ mailer_service_name }}"
+    - "{{ ui_service_name }}"
+    - "{{ caddy_service_name }}"
+    - "{{ instance_service_name }}"
+  when: _instance_user_exists | bool
+  failed_when: false
+
+- name: Wait for instance user processes to exit after stopping instance stack
+  ansible.builtin.command:
+    cmd: "pgrep -u {{ instance_user }}"
+  register: _instance_user_pgrep
+  until: _instance_user_pgrep.rc == 1
+  retries: 15
+  delay: 1
+  changed_when: false
+  failed_when: false
+  when: _instance_user_exists | bool
+
 - name: Ensure instance user (member of turbopanel group, no own group)
   ansible.builtin.user:
     name: "{{ instance_user }}"

@@ -11,11 +11,6 @@
 - name: Install React Native devtools runtime libraries (Debian)
   when: ansible_os_family == 'Debian'
   block:
-    - name: Refresh apt cache for dev prereq resolution
-      ansible.builtin.apt:
-        update_cache: true
-        cache_valid_time: 3600
-
     - name: Probe t64 renames for dev prereq packages
       ansible.builtin.command:
         cmd: apt-cache show {{ item }}t64

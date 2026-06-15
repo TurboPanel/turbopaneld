@@ -13,6 +13,12 @@
     dest: "{{ turbopanel_ui_dir }}"
     version: "{{ ui_branch }}"
   become_user: "{{ turbopanel_user }}"
+  register: _ui_clone
+
+- name: Record checkout normalize needed after UI clone
+  ansible.builtin.set_fact:
+    force_checkout_normalize: true
+  when: _ui_clone is defined and _ui_clone is changed
 
 - name: Check UI dependencies
   ansible.builtin.stat:
@@ -30,3 +36,9 @@
   environment:
     HOME: "{{ turbopanel_install_root }}"
     PATH: "/usr/local/bin:{{ turbopanel_runtimes_dir }}/node/current/bin:/usr/bin:/bin"
+  register: _ui_pnpm_install
+
+- name: Record checkout normalize needed after UI pnpm install
+  ansible.builtin.set_fact:
+    force_checkout_normalize: true
+  when: _ui_pnpm_install is defined and _ui_pnpm_install is changed

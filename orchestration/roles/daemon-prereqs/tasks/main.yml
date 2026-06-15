@@ -16,4 +16,3 @@
       - unzip
       - xz-utils
     state: present
-    update_cache: true

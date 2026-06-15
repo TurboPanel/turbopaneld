@@ -2,12 +2,13 @@
 # Install the co-located self-hosted instance + UI + Caddy.
 # UI/instance run modes come from role defaults or extra-vars (daemon .env).
 #
-# Run by the always-installed daemon (which owns all installs/updates) when it
-# is co-located and TURBOPANEL_DEV_INSTANCE=1. The daemon's own bootstrap has
-# already created the turbopanel user/group and the /run/turbopanel socket dir.
+# Single convergence playbook for co-located dev: gathers facts once and runs
+# shared infrastructure roles without overlapping docker/redis/rabbitmq/postgres
+# playbook invocations.
 #
+# Run by the always-installed daemon when co-located and TURBOPANEL_DEV_INSTANCE=1.
 # Every role is idempotent and never force-resets an existing dev working tree.
-- name: TurboPanel co-located dev instance install
+- name: TurboPanel co-located dev instance converge
   hosts: localhost
   connection: local
   become: true
@@ -40,17 +41,26 @@
     turbopanel_dev_user: ""
     turbopanel_dev_uid: ""
     turbopanel_dev_gid: ""
+    force_checkout_normalize: false
 
   pre_tasks:
+    - name: Refresh apt cache once per converge (Debian)
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+      when: ansible_os_family == 'Debian'
+
     - name: Install ACL tooling for co-located dev permissions
       ansible.builtin.apt:
         name: acl
         state: present
-        update_cache: true
       when: turbopanel_dev_user | length > 0
 
   roles:
     - role: runtime-sockets
+    - role: daemon-logs
+    - role: daemon-prereqs
+    - role: docker
     - role: postgres
     - role: redis
     - role: rabbitmq

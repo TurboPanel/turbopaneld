@@ -62,51 +62,40 @@
     group: turbopanel
     mode: "2770"
 
-- name: Check postgres container state
+- name: Inspect postgres container
   ansible.builtin.command:
-    cmd: docker inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' {{ postgres_container_name }}
-  register: _pg_running
+    argv: [docker, inspect, "{{ postgres_container_name }}"]
+  register: _pg_inspect_cmd
   changed_when: false
   failed_when: false
+
+- name: Parse postgres container inspection
+  ansible.builtin.set_fact:
+    _pg_container: "{{ (_pg_inspect_cmd.stdout | from_json)[0] }}"
+  when: _pg_inspect_cmd.rc == 0
 
 - name: Set postgres container state facts
   ansible.builtin.set_fact:
-    _postgres_container_exists: "{{ _pg_running.rc == 0 }}"
-    _postgres_running: "{{ _pg_running.rc == 0 and _pg_running.stdout | trim == 'true' }}"
+    _postgres_container_exists: true
+    _postgres_running: "{{ _pg_container.State.Running | default(false) }}"
+    _pg_status: "{{ _pg_container.State.Status | default('') }}"
+    _pg_mount_ok: >-
+      {{ _pg_container.Mounts | default([]) | selectattr('Destination', 'equalto', '/var/lib/postgresql') | list | length > 0 }}
+    _pg_tcp_exposed: "{{ _pg_container.HostConfig.PortBindings['5432/tcp'] is defined }}"
+  when: _pg_inspect_cmd.rc == 0
 
-- name: Check postgres container uses PG 18+ volume layout
-  ansible.builtin.command:
-    cmd: >-
-      docker inspect --format
-      '{{ '{{' }}range .Mounts{{ '}}' }}{{ '{{' }}if eq .Destination "/var/lib/postgresql"{{ '}}' }}{{ '{{' }}.Destination{{ '}}' }}{{ '{{' }}end{{ '}}' }}{{ '{{' }}end{{ '}}' }}'
-      {{ postgres_container_name }}
-  register: _pg_mount
-  changed_when: false
-  failed_when: false
-  when: _postgres_container_exists | bool
-
-- name: Check postgres container health
-  ansible.builtin.command:
-    cmd: docker inspect --format '{{ '{{' }}.State.Status{{ '}}' }}' {{ postgres_container_name }}
-  register: _pg_status
-  changed_when: false
-  failed_when: false
-  when: _postgres_container_exists | bool
-
-- name: Check whether postgres container publishes TCP
-  ansible.builtin.command:
-    cmd: docker port {{ postgres_container_name }} 5432/tcp
-  register: _pg_tcp_port
-  changed_when: false
-  failed_when: false
-  when: _postgres_container_exists | bool
+- name: Set postgres container missing facts
+  ansible.builtin.set_fact:
+    _postgres_container_exists: false
+    _postgres_running: false
+  when: _pg_inspect_cmd.rc != 0
 
 - name: Remove postgres container with broken configuration
   ansible.builtin.command:
     cmd: docker rm -f {{ postgres_container_name }}
   when:
     - _postgres_container_exists | bool
-    - (_pg_mount.stdout | default('') | trim != '/var/lib/postgresql') or (_pg_status.stdout | default('') | trim in ['restarting', 'exited', 'dead'])
+    - (not _pg_mount_ok | bool) or (_pg_status | trim in ['restarting', 'exited', 'dead'])
   register: _pg_removed
   changed_when: _pg_removed.rc == 0
 
@@ -116,7 +105,7 @@
   when:
     - _postgres_container_exists | bool
     - _pg_removed is not changed
-    - (postgres_expose_port | bool and (_pg_tcp_port.rc | default(1) != 0)) or ((not postgres_expose_port | bool) and (_pg_tcp_port.rc | default(1) == 0))
+    - (postgres_expose_port | bool and (not _pg_tcp_exposed | bool)) or ((not postgres_expose_port | bool) and (_pg_tcp_exposed | bool))
   register: _pg_removed_tcp
   changed_when: _pg_removed_tcp.rc == 0
 

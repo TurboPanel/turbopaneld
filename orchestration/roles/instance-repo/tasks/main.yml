@@ -15,6 +15,12 @@
     dest: "{{ turbopanel_instance_dir }}"
     version: "{{ instance_branch }}"
   become_user: "{{ turbopanel_user }}"
+  register: _instance_clone
+
+- name: Record checkout normalize needed after instance clone
+  ansible.builtin.set_fact:
+    force_checkout_normalize: true
+  when: _instance_clone is defined and _instance_clone is changed
 
 - name: Report instance checkout state
   ansible.builtin.debug:
@@ -38,4 +44,10 @@
   environment:
     HOME: "{{ turbopanel_install_root }}"
     PATH: "/usr/local/bin:{{ turbopanel_runtimes_dir }}/node/current/bin:/usr/bin:/bin"
+  register: _instance_pnpm_install
+
+- name: Record checkout normalize needed after instance pnpm install
+  ansible.builtin.set_fact:
+    force_checkout_normalize: true
+  when: _instance_pnpm_install is defined and _instance_pnpm_install is changed
 

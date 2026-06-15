@@ -52,40 +52,38 @@
     group: root
     mode: "0755"
 
-- name: Check rabbitmq container state
+- name: Inspect rabbitmq container
   ansible.builtin.command:
-    cmd: docker inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' {{ rabbitmq_container_name }}
-  register: _rmq_running
+    argv: [docker, inspect, "{{ rabbitmq_container_name }}"]
+  register: _rmq_inspect_cmd
   changed_when: false
   failed_when: false
+
+- name: Parse rabbitmq container inspection
+  ansible.builtin.set_fact:
+    _rmq_container: "{{ (_rmq_inspect_cmd.stdout | from_json)[0] }}"
+  when: _rmq_inspect_cmd.rc == 0
 
 - name: Set rabbitmq container state facts
   ansible.builtin.set_fact:
-    _rabbitmq_container_exists: "{{ _rmq_running.rc == 0 }}"
-    _rabbitmq_running: "{{ _rmq_running.rc == 0 and _rmq_running.stdout | trim == 'true' }}"
+    _rabbitmq_container_exists: true
+    _rabbitmq_running: "{{ _rmq_container.State.Running | default(false) }}"
+    _rmq_status: "{{ _rmq_container.State.Status | default('') }}"
+    _rmq_mgmt_exposed: "{{ _rmq_container.HostConfig.PortBindings['15672/tcp'] is defined }}"
+  when: _rmq_inspect_cmd.rc == 0
 
-- name: Check rabbitmq container health
-  ansible.builtin.command:
-    cmd: docker inspect --format '{{ '{{' }}.State.Status{{ '}}' }}' {{ rabbitmq_container_name }}
-  register: _rmq_status
-  changed_when: false
-  failed_when: false
-  when: _rabbitmq_container_exists | bool
-
-- name: Check whether rabbitmq container publishes management port
-  ansible.builtin.command:
-    cmd: docker port {{ rabbitmq_container_name }} 15672/tcp
-  register: _rmq_mgmt_port
-  changed_when: false
-  failed_when: false
-  when: _rabbitmq_container_exists | bool
+- name: Set rabbitmq container missing facts
+  ansible.builtin.set_fact:
+    _rabbitmq_container_exists: false
+    _rabbitmq_running: false
+  when: _rmq_inspect_cmd.rc != 0
 
 - name: Remove rabbitmq container when unhealthy
   ansible.builtin.command:
     cmd: docker rm -f {{ rabbitmq_container_name }}
   when:
     - _rabbitmq_container_exists | bool
-    - _rmq_status.stdout | default('') | trim in ['restarting', 'exited', 'dead']
+    - _rmq_status | trim in ['restarting', 'exited', 'dead']
   register: _rmq_removed
   changed_when: _rmq_removed.rc == 0
 
@@ -95,7 +93,7 @@
   when:
     - _rabbitmq_container_exists | bool
     - _rmq_removed is not changed
-    - (rabbitmq_expose_mgmt_port | bool and (_rmq_mgmt_port.rc | default(1) != 0)) or ((not rabbitmq_expose_mgmt_port | bool) and (_rmq_mgmt_port.rc | default(1) == 0))
+    - (rabbitmq_expose_mgmt_port | bool and (not _rmq_mgmt_exposed | bool)) or ((not rabbitmq_expose_mgmt_port | bool) and (_rmq_mgmt_exposed | bool))
   register: _rmq_removed_mgmt
   changed_when: _rmq_removed_mgmt.rc == 0
 

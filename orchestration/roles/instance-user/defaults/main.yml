@@ -9,3 +9,7 @@ turbopanel_user: turbopanel
 turbopanel_group: turbopanel
 turbopanel_install_root: /opt/turbopanel
 turbopanel_instance_dir: "{{ turbopanel_install_root }}/platform/instance"
+instance_service_name: turbopanel-instance
+caddy_service_name: turbopanel-caddy
+ui_service_name: turbopanel-ui
+mailer_service_name: turbopanel-mailer

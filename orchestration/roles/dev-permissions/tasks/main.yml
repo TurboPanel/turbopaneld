@@ -2,6 +2,32 @@
 - name: Configure co-located dev checkout permissions
   when: turbopanel_dev_user | length > 0
   block:
+    - name: Read dev permissions identity stamp
+      ansible.builtin.slurp:
+        path: /etc/turbopanel/dev-permissions-identity.stamp
+      register: _dev_identity_stamp_raw
+      failed_when: false
+
+    - name: Set dev identity stamp facts
+      ansible.builtin.set_fact:
+        _dev_identity_stamp_expected: "{{ turbopanel_dev_user }}:{{ turbopanel_dev_uid }}:{{ turbopanel_dev_gid }}"
+        _dev_identity_stamp_current: >-
+          {{ (_dev_identity_stamp_raw.content | b64decode | trim)
+             if (_dev_identity_stamp_raw.content is defined) else '' }}
+
+    - name: Set dev identity changed flag
+      ansible.builtin.set_fact:
+        _dev_identity_changed: "{{ _dev_identity_stamp_current != _dev_identity_stamp_expected }}"
+
+    - name: Write dev permissions identity stamp
+      ansible.builtin.copy:
+        content: "{{ _dev_identity_stamp_expected }}"
+        dest: /etc/turbopanel/dev-permissions-identity.stamp
+        owner: root
+        group: root
+        mode: "0644"
+      when: _dev_identity_changed | bool
+
     - name: Add dev user to turbopanel group (supplementary)
       ansible.builtin.user:
         name: "{{ turbopanel_dev_user }}"
@@ -26,20 +52,19 @@
         - "{{ turbopanel_instance_dir }}"
         - "{{ turbopanel_ui_dir }}"
 
-    - name: Apply group access ACL on checkouts
+    - name: Apply group access ACL on checkout roots
       ansible.posix.acl:
         path: "{{ item }}"
         entity: "{{ turbopanel_group }}"
         etype: group
         permissions: rwx
         state: present
-        recursive: true
       loop:
         - "{{ turbopanel_daemon_dir }}"
         - "{{ turbopanel_instance_dir }}"
         - "{{ turbopanel_ui_dir }}"
 
-    - name: Apply default group ACL on checkouts
+    - name: Apply default group ACL on checkout roots
       ansible.posix.acl:
         path: "{{ item }}"
         entity: "{{ turbopanel_group }}"
@@ -47,26 +72,24 @@
         permissions: rwx
         state: present
         default: true
-        recursive: true
       loop:
         - "{{ turbopanel_daemon_dir }}"
         - "{{ turbopanel_instance_dir }}"
         - "{{ turbopanel_ui_dir }}"
 
-    - name: Apply dev user access ACL on checkouts
+    - name: Apply dev user access ACL on checkout roots
       ansible.posix.acl:
         path: "{{ item }}"
         entity: "{{ turbopanel_dev_user }}"
         etype: user
         permissions: rwx
         state: present
-        recursive: true
       loop:
         - "{{ turbopanel_daemon_dir }}"
         - "{{ turbopanel_instance_dir }}"
         - "{{ turbopanel_ui_dir }}"
 
-    - name: Apply default dev user ACL on checkouts
+    - name: Apply default dev user ACL on checkout roots
       ansible.posix.acl:
         path: "{{ item }}"
         entity: "{{ turbopanel_dev_user }}"
@@ -74,7 +97,6 @@
         permissions: rwx
         state: present
         default: true
-        recursive: true
       loop:
         - "{{ turbopanel_daemon_dir }}"
         - "{{ turbopanel_instance_dir }}"
@@ -87,9 +109,13 @@
 
     - name: Reclaim dev-owned checkout files for turbopanel
       ansible.builtin.command:
-        cmd: "{{ turbopanel_daemon_dir }}/scripts/normalize-dev-checkout.sh {{ item }}"
+        cmd: >-
+          {{ turbopanel_daemon_dir }}/scripts/normalize-dev-checkout.sh {{ item }}
+          {{ '--force' if (_dev_identity_changed | bool) else '--check-stamp' }}
       environment:
         TURBOPANEL_DEV_USER: "{{ turbopanel_dev_user }}"
+        TURBOPANEL_DEV_UID: "{{ turbopanel_dev_uid }}"
+        TURBOPANEL_DEV_GID: "{{ turbopanel_dev_gid }}"
       loop:
         - "{{ turbopanel_daemon_dir }}"
         - "{{ turbopanel_instance_dir }}"

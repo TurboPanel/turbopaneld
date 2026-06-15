@@ -1,0 +1,35 @@
+---
+# Single convergence playbook for daemon-only hosts (no co-located dev instance).
+# Gathers facts once and runs shared infrastructure roles without overlapping
+# docker/redis/rabbitmq/postgres playbook invocations.
+- name: TurboPanel daemon converge
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    turbopanel_install_root: /opt/turbopanel
+    turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/runtimes"
+    turbopanel_config_dir: /etc/turbopanel
+    turbopanel_dev_user: ""
+    postgres_expose_port: false
+    rabbitmq_amqp_port: 5672
+    rabbitmq_mgmt_port: 15672
+    rabbitmq_expose_mgmt_port: true
+
+  pre_tasks:
+    - name: Refresh apt cache once per converge (Debian)
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+      when: ansible_os_family == 'Debian'
+
+  roles:
+    - role: runtime-sockets
+    - role: daemon-logs
+    - role: daemon-prereqs
+    - role: docker
+    - role: redis
+    - role: rabbitmq
+    - role: postgres

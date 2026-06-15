@@ -18,6 +18,7 @@ REQUIREMENTS="$ORCHESTRATION/requirements.txt"
 GALAXY_REQUIREMENTS="$ORCHESTRATION/requirements.yml"
 ROLES_DIR="$ORCHESTRATION/roles"
 COLLECTIONS_DIR="$RUNTIME/galaxy-collections"
+BOOTSTRAP_STAMP="$RUNTIME/bootstrap.stamp"
 
 UV_VERSION="0.11.19"
 PYTHON_VERSION="3.14"
@@ -40,6 +41,20 @@ installed_uv_version() {
     return 0
   fi
   "$BIN/uv" --version 2>/dev/null | awk '{print $2}'
+}
+
+compute_bootstrap_stamp() {
+  sha256sum <<EOF | awk '{print $1}'
+${UV_VERSION}
+${PYTHON_VERSION}
+$(cat "$REQUIREMENTS")
+$(cat "$GALAXY_REQUIREMENTS")
+EOF
+}
+
+galaxy_content_present() {
+  [ -d "$ROLES_DIR/geerlingguy.docker" ] && \
+    [ -d "$COLLECTIONS_DIR/ansible_collections/ansible/posix" ]
 }
 
 ensure_uv() {
@@ -124,6 +139,14 @@ ensure_galaxy_roles() {
     exit 1
   fi
 
+  local stamp stored
+  stamp="$(compute_bootstrap_stamp)"
+  stored="$(cat "$BOOTSTRAP_STAMP" 2>/dev/null || true)"
+  if [ "$stored" = "$stamp" ] && galaxy_content_present; then
+    log "galaxy content up to date, skipping install"
+    return 0
+  fi
+
   log "installing galaxy roles from $GALAXY_REQUIREMENTS"
   "$VENV/bin/ansible-galaxy" role install -r "$GALAXY_REQUIREMENTS" -p "$ROLES_DIR"
   log "galaxy roles ready"
@@ -133,8 +156,13 @@ ensure_galaxy_roles() {
   log "galaxy collections ready"
 }
 
+write_bootstrap_stamp() {
+  compute_bootstrap_stamp >"$BOOTSTRAP_STAMP"
+}
+
 mkdir -p "$RUNTIME"
 ensure_uv
 ensure_python
 ensure_ansible
 ensure_galaxy_roles
+write_bootstrap_stamp
