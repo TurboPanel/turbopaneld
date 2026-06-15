@@ -52,14 +52,6 @@
     group: root
     mode: "0755"
 
-- name: Remove legacy rabbitmq container name
-  ansible.builtin.command:
-    cmd: docker rm -f turbopanel-rabbitmq
-  register: _rmq_legacy_removed
-  changed_when: _rmq_legacy_removed.rc == 0
-  failed_when: false
-  when: rabbitmq_container_name != 'turbopanel-rabbitmq'
-
 - name: Check rabbitmq container state
   ansible.builtin.command:
     cmd: docker inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' {{ rabbitmq_container_name }}

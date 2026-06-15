@@ -1,6 +1,7 @@
 galaxy_info:
   role_name: docker
   author: turbopanel
+  license: AGPL-3.0
   description: >
     Install Docker CE via the geerlingguy.docker Galaxy role (official Docker
     apt repository, deb822 repo format), start the service, and add the

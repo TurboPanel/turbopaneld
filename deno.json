@@ -1,6 +1,7 @@
 {
   "name": "turbopanel-daemon",
   "version": "0.1.0",
+  "license": "AGPL-3.0-or-later",
   "exports": "./main.ts",
   "imports": {
     "@std/encoding/base64": "jsr:@std/encoding@1/base64",

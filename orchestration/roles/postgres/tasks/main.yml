@@ -62,14 +62,6 @@
     group: turbopanel
     mode: "2770"
 
-- name: Remove legacy postgres container name
-  ansible.builtin.command:
-    cmd: docker rm -f turbopanel-postgres
-  register: _pg_legacy_removed
-  changed_when: _pg_legacy_removed.rc == 0
-  failed_when: false
-  when: postgres_container_name != 'turbopanel-postgres'
-
 - name: Check postgres container state
   ansible.builtin.command:
     cmd: docker inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' {{ postgres_container_name }}

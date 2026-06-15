@@ -1,6 +1,7 @@
 galaxy_info:
   role_name: postgres
   author: turbopanel
+  license: AGPL-3.0
   description: >
     Run PostgreSQL 18 in Docker with persistent data, a Unix socket bind-mount,
     and connection metadata under /etc/turbopanel/postgres/.

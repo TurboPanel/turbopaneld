@@ -4,7 +4,7 @@ galaxy_info:
   description: >-
     Debian packages required for co-located dev UI tooling (React Native
     devtools shared libraries). Dev-only; not installed on production managed servers.
-  license: MIT
+  license: AGPL-3.0
   min_ansible_version: "2.14"
   platforms:
     - name: Debian

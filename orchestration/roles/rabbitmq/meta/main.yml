@@ -2,6 +2,7 @@
 galaxy_info:
   role_name: rabbitmq
   author: turbopanel
+  license: AGPL-3.0
   description: >
     Run RabbitMQ 4 with management plugin in Docker; generated password and
     connection metadata under /etc/turbopanel/rabbitmq/.

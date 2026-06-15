@@ -102,6 +102,16 @@ Managed server daemons and co-located dev hosts run **`turbopanel-daemon.service
 | `turbopanel-rabbitmq.service` | RabbitMQ Docker container (AMQP + management UI on loopback) | After `docker.service` |
 | `turbopanel-mailer.service` | RabbitMQ email consumer → SMTP | After `turbopanel-instance` and `turbopanel-rabbitmq` |
 
+### Legacy Docker container names (one-time cleanup)
+
+Older dev installs used container names **`turbopanel-postgres`** and **`turbopanel-rabbitmq`**. Current roles use **`turbopanel-db`** and **`turbopanel-q`**. If a host still has the old containers after upgrade, remove them manually before re-converging:
+
+```bash
+docker rm -f turbopanel-postgres turbopanel-rabbitmq
+```
+
+Then re-run the daemon playbook or restart the dev stack so the roles recreate **`turbopanel-db`** / **`turbopanel-q`**.
+
 ### Dev sync & instance tunnel (WS messages)
 
 - **Dev sync**: the instance streams a tarball of `../daemon` as `dev-sync-begin`/`dev-sync-chunk`/`dev-sync-end`; the daemon (`src/dev-sync-apply.ts`) unpacks over its checkout (excluding `.git`, `orchestration/runtime`, `orchestration/roles`, `cloudflared/tunnels`, `node_modules`), runs `deno cache`, replies `dev-sync-result`, then `systemctl restart`s.

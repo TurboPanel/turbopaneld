@@ -4,7 +4,7 @@ galaxy_info:
   description: >-
     Build and install a pinned Redis binary into the shared runtimes directory;
     dedicated redis system user; Unix socket only (port 0, no TCP listener).
-  license: MIT
+  license: AGPL-3.0
   min_ansible_version: "2.14"
   platforms:
     - name: Debian

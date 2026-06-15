@@ -4,7 +4,7 @@ galaxy_info:
   description: >-
     Compile the self-hosted instance into a single binary when
     turbopanel_instance_run_mode is compiled.
-  license: MIT
+  license: AGPL-3.0
   min_ansible_version: "2.14"
   platforms:
     - name: Debian
