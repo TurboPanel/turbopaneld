@@ -3,3 +3,8 @@ turbopanel_dev_user: ""
 turbopanel_dev_uid: ""
 turbopanel_dev_gid: ""
 turbopanel_user: turbopanel
+turbopanel_install_root: /opt/turbopanel
+turbopanel_platform_dir: "{{ turbopanel_install_root }}/platform"
+turbopanel_daemon_dir: "{{ turbopanel_platform_dir }}/daemon"
+turbopanel_instance_dir: "{{ turbopanel_platform_dir }}/instance"
+turbopanel_ui_dir: "{{ turbopanel_platform_dir }}/ui"

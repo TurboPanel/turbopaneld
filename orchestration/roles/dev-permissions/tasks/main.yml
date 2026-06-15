@@ -97,6 +97,25 @@
       changed_when: false
       when: checkout_normalizer_script.stat.exists | default(false)
 
+    # Dev runs git from the IDE; checkouts are owned by turbopanel:turbopanel (Git 2.35+).
+    - name: Read existing safe.directory entries for dev user
+      ansible.builtin.command:
+        argv: [git, config, --global, --get-all, safe.directory]
+      become_user: "{{ turbopanel_dev_user }}"
+      register: _git_safe_dev_dirs
+      changed_when: false
+      failed_when: false
+
+    - name: Mark platform repos as safe git directories for dev user
+      ansible.builtin.command:
+        argv: [git, config, --global, --add, safe.directory, "{{ item }}"]
+      become_user: "{{ turbopanel_dev_user }}"
+      loop:
+        - "{{ turbopanel_daemon_dir }}"
+        - "{{ turbopanel_instance_dir }}"
+        - "{{ turbopanel_ui_dir }}"
+      when: item not in (_git_safe_dev_dirs.stdout_lines | default([]))
+
     - name: Stat instance dist directory
       ansible.builtin.stat:
         path: "{{ turbopanel_instance_dir }}/dist"
