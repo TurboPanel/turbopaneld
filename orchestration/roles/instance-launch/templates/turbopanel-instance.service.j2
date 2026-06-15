@@ -35,7 +35,12 @@ Environment=TURBOPANEL_REDIS_SOCKET={{ redis_socket_path }}
 Environment=TURBOPANEL_DEV_USER={{ turbopanel_dev_user }}
 {% endif %}
 # turbopanel_instance_run_mode: "source" (deno run) | "compiled" (single binary)
-{% if turbopanel_instance_run_mode == 'compiled' %}
+{% if turbopanel_instance_runtime | default('deno') == 'workers' %}
+Environment=WRANGLER_SEND_METRICS=false
+Environment=CI=1
+Environment=NO_COLOR=1
+ExecStart={{ turbopanel_instance_dir }}/node_modules/.bin/wrangler dev --port {{ wrangler_dev_port }} --ip 127.0.0.1
+{% elif turbopanel_instance_run_mode == 'compiled' %}
 ExecStart={{ turbopanel_instance_binary }}
 {% else %}
 ExecStart={{ turbopanel_runtimes_dir }}/deno/current/deno run --allow-env --allow-sys=networkInterfaces --allow-read=/run/turbopanel,{{ postgres_socket_dir }},{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_runtimes_dir }}/node --allow-write=/run/turbopanel,{{ postgres_socket_dir }},{{ turbopanel_instance_runtime_dir }} --allow-net=127.0.0.1:{{ drizzle_studio_port | default(4983) }},127.0.0.1:{{ rabbitmq_amqp_port }} --allow-run=git,systemctl,tar,sudo,/usr/bin/sudo,/bin/sh,mkfifo,/usr/bin/mkfifo,pamtester,/usr/bin/pamtester,setfacl,/usr/bin/setfacl,{{ turbopanel_runtimes_dir }}/node/current/bin/node src/deno.ts

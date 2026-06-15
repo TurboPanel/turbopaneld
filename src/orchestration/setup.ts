@@ -25,13 +25,19 @@ function shouldSkipOrchestration(): boolean {
 
 /**
  * True when this daemon should also install the co-located self-hosted
- * instance + UI in development mode: it must be co-located (Unix-socket mode,
- * no `TURBOPANEL_INSTANCE_URL`) and `TURBOPANEL_DEV_INSTANCE` must be truthy.
+ * instance + UI in development mode.
+ *
+ * Deno runtime dials the local Unix socket (no `TURBOPANEL_INSTANCE_URL`).
+ * Workers runtime still runs on the same host but the daemon connects over
+ * HTTPS like a remote agent — `TURBOPANEL_INSTANCE_URL` is set and
+ * `TURBOPANEL_INSTANCE_RUNTIME=workers` marks co-located Workers dev.
  */
 function shouldInstallDevInstance(): boolean {
   const flag = Deno.env.get('TURBOPANEL_DEV_INSTANCE')?.trim().toLowerCase()
   const enabled = flag === '1' || flag === 'true' || flag === 'yes'
-  return enabled && resolveInstanceConfig().kind === 'socket'
+  if (!enabled) return false
+  if (resolveInstanceConfig().kind === 'socket') return true
+  return Deno.env.get('TURBOPANEL_INSTANCE_RUNTIME')?.trim() === 'workers'
 }
 
 /**

@@ -153,7 +153,74 @@
 
 - name: Resolve instance unit desired state
   ansible.builtin.set_fact:
-    instance_unit_enabled: "{{ instance_start | bool and (turbopanel_instance_runtime | default('deno')) != 'workers' }}"
+    instance_unit_enabled: "{{ instance_start | bool }}"
+
+- name: Ensure instance config directory exists
+  ansible.builtin.file:
+    path: "{{ turbopanel_config_dir }}/instance"
+    state: directory
+    owner: root
+    group: turbopanel
+    mode: "0750"
+
+- name: Ensure Workers wrangler secret exists
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      f='{{ turbopanel_config_dir }}/instance/.wrangler_secret'
+      if [ ! -s "$f" ]; then
+        {{ turbopanel_runtimes_dir }}/node/current/bin/node \
+          {{ turbopanel_instance_dir }}/scripts/generate-secret.mjs > "$f"
+        chmod 0600 "$f"
+        chown root:root "$f"
+        echo created
+      fi
+    executable: /bin/bash
+  register: _wrangler_secret_gen
+  changed_when: "'created' in _wrangler_secret_gen.stdout"
+  when: (turbopanel_instance_runtime | default('deno')) == 'workers'
+
+- name: Read Workers wrangler secret
+  ansible.builtin.slurp:
+    src: "{{ turbopanel_config_dir }}/instance/.wrangler_secret"
+  register: _wrangler_secret_raw
+  when: (turbopanel_instance_runtime | default('deno')) == 'workers'
+
+- name: Set Workers wrangler secret fact
+  ansible.builtin.set_fact:
+    turbopanel_wrangler_secret: "{{ _wrangler_secret_raw.content | b64decode | trim }}"
+  when:
+    - (turbopanel_instance_runtime | default('deno')) == 'workers'
+    - _wrangler_secret_raw.content is defined
+
+- name: Install Workers wrangler .env
+  ansible.builtin.template:
+    src: instance-workers.env.j2
+    dest: "{{ turbopanel_instance_dir }}/.env"
+    owner: "{{ instance_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+  when:
+    - (turbopanel_instance_runtime | default('deno')) == 'workers'
+    - turbopanel_pg_password is defined
+    - turbopanel_wrangler_secret is defined
+  notify:
+    - Reload systemd for instance units
+    - Restart turbopanel instance
+
+- name: Install Workers wrangler .dev.vars
+  ansible.builtin.template:
+    src: instance-workers.dev-vars.j2
+    dest: "{{ turbopanel_instance_dir }}/.dev.vars"
+    owner: "{{ instance_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+  when:
+    - (turbopanel_instance_runtime | default('deno')) == 'workers'
+    - turbopanel_wrangler_secret is defined
+  notify:
+    - Reload systemd for instance units
+    - Restart turbopanel instance
 
 - name: Ensure instance service desired state
   ansible.builtin.systemd:

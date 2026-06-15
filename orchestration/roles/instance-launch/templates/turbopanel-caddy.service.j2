@@ -14,6 +14,8 @@ Environment=XDG_STATE_HOME={{ turbopanel_caddy_runtime_dir }}/state
 Environment=XDG_CONFIG_HOME={{ turbopanel_caddy_config_dir }}
 Environment=CADDY_PORT={{ caddy_port }}
 Environment=TURBOPANEL_SOCKET_DIAL=run/turbopanel/instance.sock
+Environment=TURBOPANEL_INSTANCE_RUNTIME={{ turbopanel_instance_runtime | default('deno') }}
+Environment=WRANGLER_DEV_PORT={{ wrangler_dev_port | default(18787) }}
 Environment=TURBOPANEL_UI_MODE={{ turbopanel_ui_mode }}
 Environment=EXPO_PORT={{ expo_port }}
 Environment=TURBOPANEL_UI_ROOT={{ turbopanel_ui_dir }}/dist

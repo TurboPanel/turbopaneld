@@ -30,6 +30,7 @@ turbopanel_instance_run_mode: source
 turbopanel_instance_binary: "{{ turbopanel_instance_dir }}/dist/turbopanel-instance"
 # "deno" runs turbopanel-instance via systemd; "workers" expects manual wrangler dev.
 turbopanel_instance_runtime: deno
+wrangler_dev_port: 18787
 instance_start: true
 postgres_socket_dir: /var/run/turbopanel/postgres
 postgres_port: 5432

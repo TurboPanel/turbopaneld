@@ -1,5 +1,5 @@
 rabbitmq_image: rabbitmq:4-management
-rabbitmq_container_name: turbopanel-rabbitmq
+rabbitmq_container_name: turbopanel-q
 rabbitmq_amqp_port: 5672
 rabbitmq_mgmt_port: 15672
 rabbitmq_expose_amqp_port: false

@@ -59,7 +59,7 @@ The daemon bootstraps uv/Python/ansible, then runs playbooks. Roles (in `orchest
 | `runtime-sockets` | `/run/turbopanel` as `2770` setgid |
 | `deno-runtime` / `node-runtime` / `caddy` | vendored runtimes under `runtimes/<tool>/current` |
 | `redis` | Native Redis binary under `runtimes/redis/current`; dedicated **`redis`** system user (UID 9997, group `turbopanel`); Unix socket at `/run/turbopanel/redis.sock` (mode 0660, group `turbopanel`); **`port 0`** in `redis.conf` (socket-only, no TCP listener) |
-| `rabbitmq` | RabbitMQ `4-management` in Docker; generated password in `/etc/turbopanel/rabbitmq/.rabbitmq_pass`; AMQP on `127.0.0.1:5672`; management UI on `127.0.0.1:15672`; **`turbopanel-rabbitmq.service`** wraps the container for systemd ordering |
+| `rabbitmq` | RabbitMQ `4-management` in Docker container **`turbopanel-q`**; generated password in `/etc/turbopanel/rabbitmq/.rabbitmq_pass`; AMQP on `127.0.0.1:5672`; management UI on `127.0.0.1:15672`; **`turbopanel-rabbitmq.service`** wraps the container for systemd ordering |
 | `instance-dev-prereqs` | dev-only apt libs for React Native devtools (GTK/NSS/GBM stack; probes `*t64` renames on Debian 13+) |
 | `instance-repo` / `ui-repo` | clone-if-missing checkouts (never force-reset), `pnpm install` |
 | `instance-build` | Compiles `src/deno.ts` → `dist/turbopanel-instance` single binary (when `turbopanel_instance_run_mode=compiled`); no-op in `source` mode |
@@ -87,7 +87,7 @@ Toggle via the dev console **Switch to production build** / **Switch to dev buil
 - Playbooks: `orchestration/playbooks/`
 - Galaxy roles: `orchestration/requirements.yml` (pinned, installed into `orchestration/roles/`, gitignored)
 - Docker: thin `roles/docker` wrapper around **`geerlingguy.docker`** (Debian Trixie/Raspbian). Skips install when Docker is already running but **always** adds `turbopanel` to the `docker` group (needed on co-located dev hosts where Docker predates the daemon).
-- Bootstrap also runs on every daemon start (idempotent; failures are logged, daemon keeps running). After Docker, `redis-setup.yml` and `rabbitmq-setup.yml` provision Redis (native binary + Unix socket) and RabbitMQ (`rabbitmq:4-management` Docker container). `postgres-setup.yml` starts `turbopanel-postgres` (`postgres:18`) with the data volume at `/var/lib/turbopanel/postgres` → `/var/lib/postgresql` (PG 18+ layout) and the socket dir bind-mounted to `/var/run/turbopanel/postgres`.
+- Bootstrap also runs on every daemon start (idempotent; failures are logged, daemon keeps running). After Docker, `redis-setup.yml` and `rabbitmq-setup.yml` provision Redis (native binary + Unix socket) and RabbitMQ (`rabbitmq:4-management` Docker container). `postgres-setup.yml` starts `turbopanel-db` (`postgres:18`) with the data volume at `/var/lib/turbopanel/postgres` → `/var/lib/postgresql` (PG 18+ layout) and the socket dir bind-mounted to `/var/run/turbopanel/postgres`.
 - Logs are written to both journald and `/var/log/turbopanel/daemon/{daemon.log,daemon.err.log}` when running under systemd (`StandardOutput`/`StandardError` in the unit template). Logrotate policy lives at `/etc/logrotate.d/turbopanel-daemon` (daily, 14 rotations, compress). The log directory is recreated on boot via `/etc/tmpfiles.d/turbopanel-daemon-logs.conf`. The `daemon-logs` role provisions all of this; the official installer runs it via `daemon-launch`, and `initOrchestration()` re-runs `daemon-logs-setup.yml` on every daemon start so existing agents pick it up without a full reinstall.
 
 ### Runtime (systemd + Tilt)

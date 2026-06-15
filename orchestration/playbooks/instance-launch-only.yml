@@ -1,0 +1,9 @@
+---
+# Re-template and restart instance/Caddy/UI/mailer units after runtime or build toggles.
+- name: TurboPanel instance launch refresh
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+  roles:
+    - role: instance-launch
