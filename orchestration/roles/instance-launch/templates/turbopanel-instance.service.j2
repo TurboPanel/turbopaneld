@@ -37,7 +37,8 @@ StandardError=append:{{ instance_log_dir }}/instance.err.log
 Environment=WRANGLER_SEND_METRICS=false
 Environment=CI=1
 Environment=NO_COLOR=1
-ExecStart={{ turbopanel_instance_dir }}/node_modules/.bin/wrangler dev --port {{ wrangler_dev_port }} --ip 127.0.0.1
+Environment=WRANGLER_DEV_PORT={{ wrangler_dev_port }}
+ExecStart={{ turbopanel_instance_dir }}/scripts/workers-serve.sh
 {% elif turbopanel_instance_run_mode == 'compiled' %}
 ExecStart={{ turbopanel_instance_binary }}
 {% else %}

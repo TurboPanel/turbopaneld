@@ -1,4 +1,5 @@
 ---
+turbopanel_config_dir: /etc/turbopanel
 turbopanel_install_root: /opt/turbopanel
 turbopanel_user: turbopanel
 turbopanel_ssh_dir: "{{ turbopanel_install_root }}/.ssh"
