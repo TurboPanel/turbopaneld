@@ -10,6 +10,7 @@ import { collectServerAddresses } from '../server-addresses.ts'
 import { applyDevSyncTarball, type DevSyncState, newDevSyncState } from '../dev-sync-apply.ts'
 import { writeInstanceTunnelToken } from '../tunnels.ts'
 import { decodeBase64 } from '@std/encoding/base64'
+import { join } from '@std/path'
 
 /** Chained replace pattern Sonar S5145 recognizes for log-injection sanitization. */
 function stripLogInjection(text: string): string {
@@ -34,6 +35,8 @@ type DaemonMessage =
     hostname?: string
     serverId?: string
     machineId?: string
+    licenseId?: string
+    licenseToken?: string
   }
   | { type: 'ping'; id: string; at: string }
   | { type: 'pong'; id: string; at: string }
@@ -72,6 +75,8 @@ type DaemonMessage =
   | { type: 'dev-sync-result'; id: string; ok: boolean; error?: string; at: string }
   | { type: 'tunnel-token'; id: string; token: string; at: string }
   | { type: 'tunnel-token-result'; id: string; ok: boolean; error?: string; at: string }
+  | { type: 'update'; id: string; updateUrl: string; at: string }
+  | { type: 'update-result'; id: string; ok: boolean; error?: string; at: string }
 
 export interface InstanceClientOptions {
   config?: InstanceConfig
@@ -82,6 +87,7 @@ export interface InstanceClientOptions {
 
 const SERVER_ID_FILE = 'server.id'
 const DEFAULT_SERVER_ID_DIR = '/etc/turbopanel/platform/daemon'
+const DEFAULT_DAEMON_DIR = '/opt/turbopanel/platform/daemon'
 
 function isTruthyFlag(value: string | undefined): boolean {
   const normalized = value?.trim().toLowerCase()
@@ -103,6 +109,14 @@ function resolveServerIdDir(
   }
 
   return DEFAULT_SERVER_ID_DIR
+}
+
+function resolveDaemonDir(
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+): string {
+  const override = env.TURBOPANEL_DAEMON_DIR?.trim()
+  if (override) return stripTrailingSlash(override)
+  return DEFAULT_DAEMON_DIR
 }
 
 function resolveServerIdPath(): string {
@@ -127,6 +141,28 @@ async function readServerId(): Promise<string | undefined> {
   } catch {
     return undefined
   }
+}
+
+async function readLicenseCredentials(): Promise<
+  { licenseId?: string; licenseToken?: string }
+> {
+  const dir = resolveServerIdDir()
+
+  let licenseId: string
+  let licenseToken: string
+  try {
+    licenseId = (await Deno.readTextFile(`${dir}/license.id`)).trim()
+    licenseToken = (await Deno.readTextFile(`${dir}/license.token`)).trim()
+  } catch {
+    // Missing or unreadable license files — omit credentials from hello.
+    return {}
+  }
+
+  if (licenseId.length === 0 || licenseToken.length === 0) {
+    return {}
+  }
+
+  return { licenseId, licenseToken }
 }
 
 async function writeServerId(serverId: string): Promise<void> {
@@ -320,12 +356,18 @@ export class InstanceClient {
 
     console.log('[instance] websocket connected via', sanitizeForLog(this.target))
 
+    const [serverId, machineId, licenseCredentials] = await Promise.all([
+      readServerId(),
+      readMachineId(),
+      readLicenseCredentials(),
+    ])
     const hello: DaemonMessage = {
       type: 'hello',
       from: 'daemon',
       hostname: Deno.hostname(),
-      serverId: await readServerId(),
-      machineId: await readMachineId(),
+      serverId,
+      machineId,
+      ...licenseCredentials,
       at: new Date().toISOString(),
     }
     ws.send(JSON.stringify(hello))
@@ -429,6 +471,11 @@ export class InstanceClient {
           )
         })
         break
+      case 'update':
+        this.#applyUpdate(message, ws).catch((err) => {
+          console.warn('[instance] update handler failed:', sanitizeForLog(err))
+        })
+        break
     }
   }
 
@@ -484,6 +531,47 @@ export class InstanceClient {
       at: new Date().toISOString(),
     }
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result))
+  }
+
+  async #applyUpdate(
+    message: Extract<DaemonMessage, { type: 'update' }>,
+    ws: WebSocket,
+  ): Promise<void> {
+    let ok = false
+    let error: string | undefined
+    try {
+      const updateScript = join(resolveDaemonDir(), 'update.sh')
+      const command = new Deno.Command('sh', {
+        args: [updateScript],
+        env: {
+          ...Deno.env.toObject(),
+          TURBOPANEL_UPDATE_URL: message.updateUrl,
+        },
+        stdout: 'piped',
+        stderr: 'piped',
+      })
+      const out = await command.output()
+      if (!out.success) {
+        throw new Error(new TextDecoder().decode(out.stderr).trim())
+      }
+      ok = true
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err)
+      console.error('[update] failed:', sanitizeForLog(error))
+    }
+
+    const result: DaemonMessage = {
+      type: 'update-result',
+      id: message.id,
+      ok,
+      error,
+      at: new Date().toISOString(),
+    }
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result))
+
+    // Restart only after acking success, so the instance sees the result before
+    // this process is replaced by the updated binary.
+    if (ok) await restartDaemonService()
   }
 
   #collectAddresses(

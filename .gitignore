@@ -4,3 +4,4 @@ orchestration/roles/geerlingguy.docker/
 .env
 server.id
 cloudflared/tunnels/*.token
+dist/

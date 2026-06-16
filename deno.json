@@ -10,7 +10,8 @@
   },
   "tasks": {
     "start": "deno run --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env main.ts",
-    "dev": "deno run --watch --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env main.ts"
+    "dev": "deno run --watch --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env main.ts",
+    "compile": "deno compile --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env -o dist/turbopanel-daemon main.ts"
   },
   "compilerOptions": {
     "lib": ["deno.window", "deno.unstable"]

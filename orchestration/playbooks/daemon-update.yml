@@ -1,0 +1,20 @@
+---
+# Build (or force-rebuild) the daemon binary on the local host.
+# Invoked by the turbopanel-dev console "Build Daemon Binary" action.
+- name: TurboPanel daemon binary build
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    turbopanel_install_root: /opt/turbopanel
+    turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/runtimes"
+    turbopanel_platform_dir: "{{ turbopanel_install_root }}/platform"
+    turbopanel_daemon_dir: "{{ turbopanel_platform_dir }}/daemon"
+    turbopanel_group: turbopanel
+    turbopanel_user: turbopanel
+    force_compile: true
+
+  roles:
+    - role: daemon-build
