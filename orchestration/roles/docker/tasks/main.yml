@@ -64,12 +64,3 @@
     groups: docker
     append: true
   when: docker_add_turbopanel_user | bool
-
-- name: Add dev user to docker group (co-located dev)
-  ansible.builtin.user:
-    name: "{{ turbopanel_dev_user }}"
-    groups: docker
-    append: true
-  when:
-    - turbopanel_dev_user | default('') | length > 0
-    - docker_add_turbopanel_user | bool

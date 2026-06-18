@@ -34,6 +34,9 @@
   loop:
     - "{{ turbopanel_install_root }}/platform"
     - "{{ turbopanel_runtimes_dir }}"
+    - "{{ turbopanel_runtimes_dir }}/uv"
+    - "{{ turbopanel_runtimes_dir }}/python"
+    - "{{ turbopanel_runtimes_dir }}/ansible"
 
 - name: Grant passwordless sudo for orchestration
   ansible.builtin.copy:

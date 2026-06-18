@@ -5,11 +5,11 @@
 
 - name: Check vendored Node binary
   ansible.builtin.stat:
-    path: "{{ turbopanel_runtimes_dir }}/node/current/bin/node"
-  register: _node_current
+    path: "{{ turbopanel_runtimes_dir }}/node/{{ node_version }}/bin/node"
+  register: _node_pinned
 
 - name: Install Node into runtimes directory
-  when: not _node_current.stat.exists
+  when: not _node_pinned.stat.exists
   ansible.builtin.shell: |
     set -euo pipefail
     NODE_VER="v{{ node_version }}"
@@ -21,12 +21,18 @@
     curl -fsSL -o "$NODE_TMP/${NODE_DIR}.tar.xz" \
       "https://nodejs.org/dist/${NODE_VER}/${NODE_DIR}.tar.xz"
     tar -xJf "$NODE_TMP/${NODE_DIR}.tar.xz" -C "$NODE_TMP"
-    install -d "{{ turbopanel_runtimes_dir }}/node/${NODE_VER}"
-    cp -a "$NODE_TMP/${NODE_DIR}/." "{{ turbopanel_runtimes_dir }}/node/${NODE_VER}/"
+    install -d "{{ turbopanel_runtimes_dir }}/node/{{ node_version }}"
+    cp -a "$NODE_TMP/${NODE_DIR}/." "{{ turbopanel_runtimes_dir }}/node/{{ node_version }}/"
     rm -rf "$NODE_TMP"
-    ln -sfn "{{ turbopanel_runtimes_dir }}/node/${NODE_VER}" "{{ turbopanel_runtimes_dir }}/node/current"
   args:
-    creates: "{{ turbopanel_runtimes_dir }}/node/current/bin/node"
+    creates: "{{ turbopanel_runtimes_dir }}/node/{{ node_version }}/bin/node"
+
+- name: Point Node current symlink at pinned version
+  ansible.builtin.file:
+    src: "{{ turbopanel_runtimes_dir }}/node/{{ node_version }}"
+    dest: "{{ turbopanel_runtimes_dir }}/node/current"
+    state: link
+    force: true
 
 - name: Enable pnpm via corepack
   ansible.builtin.command:
@@ -37,16 +43,3 @@
     creates: "{{ turbopanel_runtimes_dir }}/node/current/bin/pnpm"
   environment:
     PATH: "{{ turbopanel_runtimes_dir }}/node/current/bin:{{ ansible_env.PATH | default('/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin') }}"
-
-- name: Link Node toolchain into /usr/local/bin
-  ansible.builtin.file:
-    src: "{{ turbopanel_runtimes_dir }}/node/current/bin/{{ item }}"
-    dest: "/usr/local/bin/{{ item }}"
-    state: link
-    force: true
-  loop:
-    - node
-    - npm
-    - npx
-    - corepack
-    - pnpm

@@ -2,6 +2,7 @@ import { dirname, fromFileUrl, join } from '@std/path'
 
 export const UV_VERSION = '0.11.19'
 export const PYTHON_VERSION = '3.14'
+export const ANSIBLE_CORE_VERSION = '2.18'
 
 /**
  * Absolute path to the daemon repository root.
@@ -18,29 +19,61 @@ export const DAEMON_ROOT = (() => {
 /** Checked-in orchestration source assets (playbooks, ansible.cfg, requirements). */
 export const ORCHESTRATION_DIR = join(DAEMON_ROOT, 'orchestration')
 
-/** Gitignored directory holding the installed runtime (uv binary, python, venv, cache). */
-export const RUNTIME_DIR = join(ORCHESTRATION_DIR, 'runtime')
+/**
+ * Root for vendored, versioned third-party runtimes shared across the host
+ * (uv/python/ansible, cloudflared, and room for more). Override with
+ * `TURBOPANEL_RUNTIMES_DIR`.
+ */
+export const RUNTIMES_DIR = Deno.env.get('TURBOPANEL_RUNTIMES_DIR')?.trim() ||
+  '/opt/turbopanel/runtimes'
 
-export const RUNTIME_BIN_DIR = join(RUNTIME_DIR, 'bin')
+/** Versioned directory where uv binaries are installed. */
+export const UV_INSTALL_DIR = join(RUNTIMES_DIR, 'uv', UV_VERSION)
+export const RUNTIME_BIN_DIR = UV_INSTALL_DIR
 export const UV_BIN = join(RUNTIME_BIN_DIR, 'uv')
 export const UVX_BIN = join(RUNTIME_BIN_DIR, 'uvx')
 
-/** `UV_PYTHON_INSTALL_DIR` target: keeps managed pythons inside the runtime. */
-export const PYTHON_INSTALL_DIR = join(RUNTIME_DIR, 'python')
+/** Stable `current` symlink pointing at the active uv version dir. */
+export const UV_CURRENT_DIR = join(RUNTIMES_DIR, 'uv', 'current')
 
-/** `UV_CACHE_DIR` target: keeps uv's download/build cache inside the runtime. */
-export const CACHE_DIR = join(RUNTIME_DIR, 'cache')
+/** `UV_PYTHON_INSTALL_DIR` target: keeps managed pythons under runtimes. */
+export const PYTHON_INSTALL_DIR = join(RUNTIMES_DIR, 'python')
+
+/** `UV_CACHE_DIR` target: keeps uv's download/build cache under runtimes. */
+export const CACHE_DIR = join(RUNTIMES_DIR, 'uv', 'cache')
 
 /** The ansible virtualenv created by `uv venv`. */
-export const VENV_DIR = join(RUNTIME_DIR, 'venv')
+export const ANSIBLE_INSTALL_DIR = join(RUNTIMES_DIR, 'ansible', ANSIBLE_CORE_VERSION)
+export const VENV_DIR = ANSIBLE_INSTALL_DIR
 export const VENV_BIN_DIR = join(VENV_DIR, 'bin')
 export const ANSIBLE_PLAYBOOK_BIN = join(VENV_BIN_DIR, 'ansible-playbook')
+
+/** Stable `current` symlink pointing at the active ansible venv dir. */
+export const ANSIBLE_CURRENT_DIR = join(RUNTIMES_DIR, 'ansible', 'current')
 
 export const REQUIREMENTS_FILE = join(ORCHESTRATION_DIR, 'requirements.txt')
 export const GALAXY_REQUIREMENTS_FILE = join(ORCHESTRATION_DIR, 'requirements.yml')
 export const GALAXY_ROLES_DIR = join(ORCHESTRATION_DIR, 'roles')
-export const GALAXY_COLLECTIONS_DIR = join(ORCHESTRATION_DIR, 'runtime', 'galaxy-collections')
+export const GALAXY_COLLECTIONS_DIR = join(RUNTIMES_DIR, 'ansible', 'galaxy-collections')
+export const ANSIBLE_LOCAL_TMP = join(CACHE_DIR, 'ansible-tmp')
 export const ANSIBLE_CFG = join(ORCHESTRATION_DIR, 'ansible.cfg')
+
+/** Ansible env vars that honor `TURBOPANEL_RUNTIMES_DIR` at playbook invocation time. */
+export function ansibleEnv(): Record<string, string> {
+  return {
+    ANSIBLE_CONFIG: ANSIBLE_CFG,
+    ANSIBLE_LOCAL_TEMP: ANSIBLE_LOCAL_TMP,
+    ANSIBLE_COLLECTIONS_PATH: GALAXY_COLLECTIONS_DIR,
+  }
+}
+
+/** Ansible env for fire-and-forget playbook runs (human prose on stdout). */
+export function ansibleEnvHumanStdout(): Record<string, string> {
+  return {
+    ...ansibleEnv(),
+    ANSIBLE_STDOUT_CALLBACK: 'default',
+  }
+}
 export const LOCALHOST_PLAYBOOK = join(
   ORCHESTRATION_DIR,
   'playbooks',
@@ -143,13 +176,6 @@ export function resolveUvTarget(
 export function uvDownloadUrl(asset: string, version = UV_VERSION): string {
   return `https://github.com/astral-sh/uv/releases/download/${version}/${asset}`
 }
-
-/**
- * Root for vendored, versioned third-party runtimes shared across the host
- * (cloudflared, and room for more). Override with `TURBOPANEL_RUNTIMES_DIR`.
- */
-export const RUNTIMES_DIR = Deno.env.get('TURBOPANEL_RUNTIMES_DIR')?.trim() ||
-  '/opt/turbopanel/runtimes'
 
 /** Pinned cloudflared release. */
 export const CLOUDFLARED_VERSION = '2026.5.2'

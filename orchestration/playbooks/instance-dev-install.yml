@@ -75,6 +75,7 @@
     - role: caddy
     # Before turbopanel runs git/pnpm in platform checkouts (often pre-seeded by dev).
     - role: dev-permissions
+    - role: dev-host-access
     - role: instance-repo
     - role: ui-repo
     - role: website-repo

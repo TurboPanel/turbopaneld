@@ -5,12 +5,12 @@ import {
   GALAXY_REQUIREMENTS_FILE,
   GALAXY_ROLES_DIR,
   REQUIREMENTS_FILE,
-  RUNTIME_DIR,
+  RUNTIMES_DIR,
   UV_VERSION,
   PYTHON_VERSION,
 } from './paths.ts'
 
-export const BOOTSTRAP_STAMP_FILE = join(RUNTIME_DIR, 'bootstrap.stamp')
+export const BOOTSTRAP_STAMP_FILE = join(RUNTIMES_DIR, 'ansible', 'bootstrap.stamp')
 
 async function fileExists(path: string): Promise<boolean> {
   try {
@@ -44,7 +44,7 @@ export async function readBootstrapStamp(): Promise<string | null> {
 }
 
 export async function writeBootstrapStamp(stamp: string): Promise<void> {
-  await Deno.mkdir(RUNTIME_DIR, { recursive: true })
+  await Deno.mkdir(join(RUNTIMES_DIR, 'ansible'), { recursive: true })
   await Deno.writeTextFile(BOOTSTRAP_STAMP_FILE, `${stamp}\n`)
 }
 

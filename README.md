@@ -88,11 +88,20 @@ Cloudflare tunnel tokens go in `cloudflared/tunnels/<name>.token` — one file p
 
 ## Re-provision with Ansible
 
-After the initial install, you can reconcile state without re-running the curl bootstrap:
+After the initial install, you can reconcile state without re-running the curl bootstrap. If the shared orchestration runtime is missing, bootstrap it first — `scripts/bootstrap-orchestration.ts` installs uv, Python, and Ansible into the shared `/opt/turbopanel/runtimes/` tree (replaces the former `bootstrap-orchestration.sh`); from the daemon checkout run the vendored Deno task (no global `deno` on PATH required):
+
+```bash
+cd /opt/turbopanel/platform/daemon
+/opt/turbopanel/runtimes/deno/current/deno task bootstrap-orchestration
+```
+
+Then run the install playbook:
 
 ```bash
 sudo ANSIBLE_CONFIG=/opt/turbopanel/platform/daemon/orchestration/ansible.cfg \
-  /opt/turbopanel/platform/daemon/orchestration/runtime/venv/bin/ansible-playbook \
+  ANSIBLE_LOCAL_TEMP=/opt/turbopanel/runtimes/uv/cache/ansible-tmp \
+  ANSIBLE_COLLECTIONS_PATH=/opt/turbopanel/runtimes/ansible/galaxy-collections \
+  /opt/turbopanel/runtimes/ansible/current/bin/ansible-playbook \
   -i localhost, -c local \
   -e 'turbopanel_instance_url=https://<instance-host>:<port>' \
   /opt/turbopanel/platform/daemon/orchestration/playbooks/daemon-install.yml

@@ -11,7 +11,7 @@ Group={{ turbopanel_group }}
 WorkingDirectory={{ turbopanel_daemon_dir }}
 Environment=TURBOPANEL_SERVICE_NAME={{ turbopanel_service_name }}
 ExecStartPre={{ turbopanel_daemon_dir }}/scripts/ensure-single-daemon.sh
-ExecStart=/usr/bin/flock -n /run/turbopanel/daemon.lock /usr/local/bin/deno run --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env --env-file=.env main.ts
+ExecStart=/usr/bin/flock -n /run/turbopanel/daemon.lock {{ turbopanel_runtimes_dir }}/deno/current/deno run --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env --env-file=.env main.ts
 Restart=on-failure
 RestartSec=5
 StandardOutput=append:/var/log/turbopanel/daemon/daemon.log

@@ -1,8 +1,8 @@
 ---
 # Provision a TurboPanel managed server (daemon checkout, runtimes, config, launch).
 #
-# Invoked by install.sh after scripts/bootstrap-orchestration.sh has placed
-# ansible-playbook in orchestration/runtime/venv/. Every role is idempotent.
+# Invoked by the CDN installer after scripts/bootstrap-orchestration.ts has placed
+# ansible-playbook in /opt/turbopanel/runtimes/ansible/current/. Every role is idempotent.
 - name: TurboPanel daemon install
   hosts: localhost
   connection: local

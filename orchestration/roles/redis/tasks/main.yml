@@ -21,11 +21,11 @@
 
 - name: Check vendored Redis binary
   ansible.builtin.stat:
-    path: "{{ turbopanel_runtimes_dir }}/redis/current/bin/redis-server"
-  register: _redis_current
+    path: "{{ turbopanel_runtimes_dir }}/redis/{{ redis_version }}/bin/redis-server"
+  register: _redis_pinned
 
 - name: Install Redis into runtimes directory
-  when: not _redis_current.stat.exists
+  when: not _redis_pinned.stat.exists
   ansible.builtin.shell: |
     set -euo pipefail
     REDIS_VER="{{ redis_version }}"
@@ -34,23 +34,15 @@
       "https://download.redis.io/releases/redis-${REDIS_VER}.tar.gz"
     tar -xzf "$TMP/redis-${REDIS_VER}.tar.gz" -C "$TMP"
     make -C "$TMP/redis-${REDIS_VER}"
-    make -C "$TMP/redis-${REDIS_VER}" PREFIX="{{ turbopanel_runtimes_dir }}/redis/versions/${REDIS_VER}" install
-    ln -sfn "versions/${REDIS_VER}" "{{ turbopanel_runtimes_dir }}/redis/current"
+    make -C "$TMP/redis-${REDIS_VER}" PREFIX="{{ turbopanel_runtimes_dir }}/redis/${REDIS_VER}" install
     rm -rf "$TMP"
   args:
-    creates: "{{ turbopanel_runtimes_dir }}/redis/current/bin/redis-server"
+    creates: "{{ turbopanel_runtimes_dir }}/redis/{{ redis_version }}/bin/redis-server"
 
-- name: Link redis-server into /usr/local/bin
+- name: Point Redis current symlink at pinned version
   ansible.builtin.file:
-    src: "{{ turbopanel_runtimes_dir }}/redis/current/bin/redis-server"
-    dest: /usr/local/bin/redis-server
-    state: link
-    force: true
-
-- name: Link redis-cli into /usr/local/bin
-  ansible.builtin.file:
-    src: "{{ turbopanel_runtimes_dir }}/redis/current/bin/redis-cli"
-    dest: /usr/local/bin/redis-cli
+    src: "{{ turbopanel_runtimes_dir }}/redis/{{ redis_version }}"
+    dest: "{{ turbopanel_runtimes_dir }}/redis/current"
     state: link
     force: true
 

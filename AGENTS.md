@@ -6,7 +6,7 @@ Managed-server daemon: the **constant** installed on every TurboPanel-managed ho
 
 TurboPanel is named for speed; keep the daemon fast.
 
-- **Cache runtimes & deps.** Deno/Node/Caddy/cloudflared live under `/opt/turbopanel/runtimes/<tool>/current`; roles install only when the pinned version is missing.
+- **Cache runtimes & deps.** Deno/Node/Caddy/cloudflared are installed under `/opt/turbopanel/runtimes/<tool>/<version>/` with a `current` symlink; roles install only when the pinned version is missing.
 - **Idempotent bootstrap.** `initOrchestration()` and every role short-circuit when already satisfied, so restarts are cheap and work offline.
 - **No background polling.** The 60s version poll and self-update were removed; updates come via the developer upgrade button or a `dev-sync` push.
 - **Don't clobber dev work.** `instance-repo`/`ui-repo` clone only when missing and never force-reset a live working tree.
@@ -44,7 +44,7 @@ Two modes in `src/instance/paths.ts`:
 
 On connect the daemon sends a `hello` with `hostname`, optional persisted `serverId`, and `machineId` (`/etc/machine-id`) for first-time registration. Managed installs store the server id at `/etc/turbopanel/platform/daemon/server.id` (`TURBOPANEL_DAEMON_STATE_DIR` overrides the directory); local Tilt dev (`TURBOPANEL_SKIP_ORCHESTRATION=1`) stores it as `./server.id` in the daemon checkout so the restricted dev permissions can write it. The instance resolves a canonical **`servers.id`** (uuidv7), replies with `serverId` in `hello`, and dedupes reconnects by `serverId` / `X-Real-IP` / `hostname`. The daemon dials **`/ws/daemon/v1`** and may read `GET /api/daemon/v1/version` (informational only) and `GET /api/daemon/v1/instance/ca`.
 
-Install flow: official installer (separate CDN repo) → `scripts/bootstrap-orchestration.sh` (uv, Python, ansible, **Galaxy roles**) → `orchestration/playbooks/daemon-install.yml`. Docker is installed in that playbook and again at daemon startup via `initOrchestration()` in `src/orchestration/setup.ts`.
+Install flow: official installer (separate CDN repo) → `scripts/bootstrap-orchestration.ts` (Deno entry — `ensureUv` → `ensurePython` → `bootstrapOrchestrationRuntime`; installs uv, Python, and Ansible into the **shared** `/opt/turbopanel/runtimes/{uv,python,ansible}` tree) → `orchestration/playbooks/daemon-install.yml`. Docker is installed in that playbook and again at daemon startup via `initOrchestration()` in `src/orchestration/setup.ts`.
 
 Daemon runtime is managed by systemd (`turbopanel-daemon.service`): `flock` enforces a single process, `deno run` without `--watch`, and the official installer / `daemon-install.yml` reconcile the unit on every run. **No self-update** — `updater.ts` was removed. A `dev-sync` push (see below) is the fast dev path; the developer upgrade button is the operator path.
 
@@ -57,7 +57,7 @@ The daemon bootstraps uv/Python/ansible, then runs playbooks. Roles (in `orchest
 | `daemon-prereqs` | apt prerequisites (`xz-utils` for Node, `tar`, `unzip`, `pamtester`, Redis build deps) |
 | `turbopanel-user` / `instance-user` | the 9999 / 9998 users |
 | `runtime-sockets` | `/run/turbopanel` as `2770` setgid |
-| `deno-runtime` / `node-runtime` / `caddy` | vendored runtimes under `runtimes/<tool>/current` |
+| `deno-runtime` / `node-runtime` / `caddy` | vendored runtimes under `runtimes/<tool>/<version>/` + `current` symlink; **no `/usr/local/bin` links** — all consumers resolve via `runtimes/<tool>/current` |
 | `redis` | Native Redis binary under `runtimes/redis/current`; dedicated **`redis`** system user (UID 9997, group `turbopanel`); Unix socket at `/run/turbopanel/redis.sock` (mode 0660, group `turbopanel`); **`port 0`** in `redis.conf` (socket-only, no TCP listener) |
 | `rabbitmq` | RabbitMQ `4-management` in Docker container **`turbopanel-q`**; generated password in `/etc/turbopanel/rabbitmq/.rabbitmq_pass`; AMQP on `127.0.0.1:5672`; management UI on `127.0.0.1:15672`; **`turbopanel-rabbitmq.service`** wraps the container for systemd ordering |
 | `instance-dev-prereqs` | dev-only apt libs for React Native devtools (GTK/NSS/GBM stack; probes `*t64` renames on Debian 13+) |
@@ -67,6 +67,7 @@ The daemon bootstraps uv/Python/ansible, then runs playbooks. Roles (in `orchest
 | `instance-certs` | platform CA + leaf via the instance cert script |
 | `instance-launch` | `turbopanel-instance` / `turbopanel-caddy` / `turbopanel-ui` / `turbopanel-mailer` units (run as `instance:turbopanel`). Workers co-located dev also installs `turbopanel-website.service` (Next.js docs on port **19820**). Injects `TURBOPANEL_DATABASE_URL` into the instance unit (Unix-socket URL for Deno; TCP URL in `instance-workers.env` for Workers). **`turbopanel-ui` must invoke `node_modules/.bin/expo` directly** — `pnpm exec expo` runs an implicit install that prompts to purge `node_modules` (installed by `turbopanel` with a different `HOME`), which blocks Expo and yields Caddy 502s on restart. |
 | `dev-permissions` | add invoking dev user to `turbopanel` group; apply setgid + default ACLs on checkouts (no-op on managed servers without dev user) |
+| `dev-host-access` | Installs `/etc/sudoers.d/turbopanel-dev-console` (NOPASSWD rules for the dev user, Deno path `runtimes/deno/*/deno`); applies ACLs on the shared runtimes dir; wired into `instance-dev-install.yml` after `dev-permissions`. Supersedes the removed `dev-host-access.sh` console script. |
 | `postgres` | PostgreSQL 18 in Docker; data under `/var/lib/turbopanel/postgres`, Unix socket at `/var/run/turbopanel/postgres` |
 | `docker` / `daemon-repo` / `daemon-config` / `daemon-logs` / `daemon-launch` | managed-server daemon provisioning |
 
@@ -87,7 +88,9 @@ Toggle via the dev console **Switch to production build** / **Switch to dev buil
 - Playbooks: `orchestration/playbooks/`
 - Galaxy roles: `orchestration/requirements.yml` (pinned, installed into `orchestration/roles/`, gitignored)
 - Docker: thin `roles/docker` wrapper around **`geerlingguy.docker`** (Debian Trixie/Raspbian). Skips install when Docker is already running but **always** adds `turbopanel` to the `docker` group (needed on co-located dev hosts where Docker predates the daemon).
-- Bootstrap also runs on every daemon start (idempotent; failures are logged, daemon keeps running). `initOrchestration()` runs one convergence playbook per mode: `daemon-converge.yml` (daemon-only) or `instance-dev-install.yml` (co-located dev), gathering facts once and running shared roles without overlapping docker/redis/rabbitmq/postgres invocations. Bootstrap stamps (`orchestration/runtime/bootstrap.stamp`) skip redundant Galaxy installs and the localhost smoke test when pinned requirements are unchanged.
+- Bootstrap also runs on every daemon start (idempotent; failures are logged, daemon keeps running). `initOrchestration()` runs one convergence playbook per mode: `daemon-converge.yml` (daemon-only) or `instance-dev-install.yml` (co-located dev), gathering facts once and running shared roles without overlapping docker/redis/rabbitmq/postgres invocations. Bootstrap stamps (under `/opt/turbopanel/runtimes/ansible/bootstrap.stamp`) skip redundant Galaxy installs and the localhost smoke test when pinned requirements are unchanged.
+- **Shared orchestration runtime.** uv, Python, and Ansible are installed into `/opt/turbopanel/runtimes/{uv/<ver>/,python/,ansible/<ver>/}` with `current` symlinks — **not** inside the daemon checkout. The `orchestration/runtime/` directory no longer exists; `bootstrap-orchestration.sh` has been replaced by `scripts/bootstrap-orchestration.ts`. The Deno orchestration functions (`ensureUv`, `ensurePython`, `ensureAnsible`, `ensureGalaxyRoles` in `src/orchestration/`) are the single canonical installer for all three tools.
+- **Structured Ansible output (`src/orchestration/ansible-events.ts`).** Daemon playbook runners in `src/orchestration/ansible.ts` go through `runLocalPlaybook(playbook, extraArgs, onEvent?)`, which calls `runPlaybookStreaming(ansiblePlaybookBin, args, { cwd, env, onEvent })` when `onEvent` is supplied; otherwise they use human-oriented stdout logging. `runPlaybookStreaming` spawns `ansible-playbook` with a JSONL stdout callback and emits typed events (`play-start`, `task-start`, `task-ok|changed|failed|skipped`, `recap`, `error`). The event types are exported from a stable path so the console can dynamically import the wrapper. A doc comment in the module marks the **API/WS streaming seam** where events will later be forwarded to the control surface.
 - Logs are written to both journald and `/var/log/turbopanel/daemon/{daemon.log,daemon.err.log}` when running under systemd (`StandardOutput`/`StandardError` in the unit template). Logrotate policy lives at `/etc/logrotate.d/turbopanel-daemon` (daily, 14 rotations, compress). The log directory is recreated on boot via `/etc/tmpfiles.d/turbopanel-daemon-logs.conf`. The `daemon-logs` role provisions all of this; the official installer runs it via `daemon-launch`, and `initOrchestration()` re-runs `daemon-logs-setup.yml` on every daemon start so existing daemons pick it up without a full reinstall.
 
 ### Runtime (systemd + Tilt)
@@ -114,7 +117,7 @@ Then re-run the daemon playbook or restart the dev stack so the roles recreate *
 
 ### Dev sync & instance tunnel (WS messages)
 
-- **Dev sync**: the instance streams a tarball of `../daemon` as `dev-sync-begin`/`dev-sync-chunk`/`dev-sync-end`; the daemon (`src/dev-sync-apply.ts`) unpacks over its checkout (excluding `.git`, `orchestration/runtime`, `orchestration/roles`, `cloudflared/tunnels`, `node_modules`), runs `deno cache`, replies `dev-sync-result`, then `systemctl restart`s.
+- **Dev sync**: the instance streams a tarball of `../daemon` as `dev-sync-begin`/`dev-sync-chunk`/`dev-sync-end`; the daemon (`src/dev-sync-apply.ts`) unpacks over its checkout (excluding `.git`, `orchestration/roles`, `cloudflared/tunnels`, `node_modules`), runs `deno cache`, replies `dev-sync-result`, then `systemctl restart`s.
 - **Instance tunnel**: a `tunnel-token` message makes the co-located daemon write `cloudflared/tunnels/instance.token` and (re)launch the supervisor in `src/tunnels.ts` (`writeInstanceTunnelToken`), exposing the instance to external nodes.
 - Both reply with a result message the instance correlates by id.
 
@@ -148,3 +151,4 @@ Co-located dev (`instance-dev-prereqs` role, not `daemon-prereqs`) installs the 
 - `orchestration/roles/{instance-user,instance-dev-prereqs,node-runtime,caddy,instance-repo,ui-repo,instance-certs,instance-launch}` — instance-side install roles
 - `orchestration/roles/daemon-launch/templates/turbopanel-daemon.service.j2` — daemon systemd unit template
 - `scripts/install-daemon-systemd.sh` — install `turbopanel-daemon.service` on co-located dev (after `turbopanel-instance.service`)
+- `scripts/bootstrap-orchestration.ts` — thin Deno entry that runs `ensureUv` → `ensurePython` → `bootstrapOrchestrationRuntime`; used by the console and the CDN installer in place of the removed `bootstrap-orchestration.sh`.

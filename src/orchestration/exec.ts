@@ -73,6 +73,75 @@ export async function run(
   }
 }
 
+export interface RunStreamingOptions {
+  /** Working directory for the command. */
+  cwd?: string
+  /** Extra environment variables, merged on top of the runtime env. */
+  env?: Record<string, string>
+  /** Invoked for each complete stdout line (without trailing newline). */
+  onStdoutLine?: (line: string) => void
+}
+
+export interface RunStreamingResult {
+  code: number
+  success: boolean
+}
+
+/**
+ * Run a command while reading stdout line-by-line.
+ *
+ * Stderr is inherited so warnings and errors still stream to journald unchanged.
+ */
+export async function runStreamingLines(
+  cmd: string,
+  args: string[],
+  options: RunStreamingOptions = {},
+): Promise<RunStreamingResult> {
+  const { cwd, env, onStdoutLine } = options
+
+  const command = new Deno.Command(cmd, {
+    args,
+    cwd,
+    env: runtimeEnv(env),
+    stdout: 'piped',
+    stderr: 'inherit',
+  })
+
+  const child = command.spawn()
+  const stdout = child.stdout
+
+  if (stdout && onStdoutLine) {
+    const decoder = new TextDecoder()
+    let buffer = ''
+    const reader = stdout.getReader()
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+
+        let newlineIndex = buffer.indexOf('\n')
+        while (newlineIndex !== -1) {
+          const line = buffer.slice(0, newlineIndex)
+          buffer = buffer.slice(newlineIndex + 1)
+          if (line.length > 0) onStdoutLine(line)
+          newlineIndex = buffer.indexOf('\n')
+        }
+      }
+
+      if (buffer.length > 0) onStdoutLine(buffer)
+    } finally {
+      reader.releaseLock()
+    }
+  } else if (stdout) {
+    await stdout.cancel()
+  }
+
+  const status = await child.status
+  return { code: status.code, success: status.success }
+}
+
 /** Run a command and throw a descriptive error if it exits non-zero. */
 export async function runOrThrow(
   cmd: string,

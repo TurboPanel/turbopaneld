@@ -13,9 +13,9 @@ export function newDevSyncState(totalChunks: number): DevSyncState {
 /**
  * Unpack a gzipped tarball of a daemon build over the current checkout.
  *
- * The instance excludes .git, .env, orchestration/runtime, orchestration/roles,
+ * The instance excludes .git, .env, orchestration/roles,
  * cloudflared/tunnels, and node_modules, so a sync swaps source without
- * clobbering the host-specific instance URL config, ansible runtime, or tunnel
+ * clobbering the host-specific instance URL config or tunnel
  * tokens. Requires the daemon's broad `--allow-run` / `--allow-write`.
  */
 export async function applyDevSyncTarball(bytes: Uint8Array): Promise<void> {

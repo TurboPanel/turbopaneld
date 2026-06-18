@@ -5,31 +5,30 @@
 
 - name: Check vendored Caddy binary
   ansible.builtin.stat:
-    path: "{{ turbopanel_runtimes_dir }}/caddy/current/caddy"
-  register: _caddy_current
+    path: "{{ turbopanel_runtimes_dir }}/caddy/{{ caddy_version }}/caddy"
+  register: _caddy_pinned
 
 - name: Install Caddy into runtimes directory
-  when: not _caddy_current.stat.exists
+  when: not _caddy_pinned.stat.exists
   ansible.builtin.shell: |
     set -euo pipefail
     CADDY_VER="{{ caddy_version }}"
-    CADDY_NUM="${CADDY_VER#v}"
+    CADDY_TAG="{{ caddy_release_tag }}"
     CADDY_ARCH="{{ caddy_arch }}"
     TMP="$(mktemp -d)"
-    ASSET="caddy_${CADDY_NUM}_linux_${CADDY_ARCH}.tar.gz"
+    ASSET="caddy_${CADDY_VER}_linux_${CADDY_ARCH}.tar.gz"
     curl -fsSL -o "$TMP/$ASSET" \
-      "https://github.com/caddyserver/caddy/releases/download/${CADDY_VER}/${ASSET}"
+      "https://github.com/caddyserver/caddy/releases/download/${CADDY_TAG}/${ASSET}"
     tar -xzf "$TMP/$ASSET" -C "$TMP" caddy
-    install -d "{{ turbopanel_runtimes_dir }}/caddy/versions/${CADDY_VER}"
-    install -m 0755 "$TMP/caddy" "{{ turbopanel_runtimes_dir }}/caddy/versions/${CADDY_VER}/caddy"
-    ln -sfn "versions/${CADDY_VER}" "{{ turbopanel_runtimes_dir }}/caddy/current"
+    install -d "{{ turbopanel_runtimes_dir }}/caddy/${CADDY_VER}"
+    install -m 0755 "$TMP/caddy" "{{ turbopanel_runtimes_dir }}/caddy/${CADDY_VER}/caddy"
     rm -rf "$TMP"
   args:
-    creates: "{{ turbopanel_runtimes_dir }}/caddy/current/caddy"
+    creates: "{{ turbopanel_runtimes_dir }}/caddy/{{ caddy_version }}/caddy"
 
-- name: Link caddy into /usr/local/bin
+- name: Point Caddy current symlink at pinned version
   ansible.builtin.file:
-    src: "{{ turbopanel_runtimes_dir }}/caddy/current/caddy"
-    dest: /usr/local/bin/caddy
+    src: "{{ turbopanel_runtimes_dir }}/caddy/{{ caddy_version }}"
+    dest: "{{ turbopanel_runtimes_dir }}/caddy/current"
     state: link
     force: true

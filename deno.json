@@ -2,7 +2,10 @@
   "name": "turbopanel-daemon",
   "version": "0.1.0",
   "license": "AGPL-3.0-or-later",
-  "exports": "./main.ts",
+  "exports": {
+    ".": "./main.ts",
+    "./orchestration/ansible-events": "./src/orchestration/ansible-events.ts"
+  },
   "imports": {
     "@std/encoding/base64": "jsr:@std/encoding@1/base64",
     "@std/encoding/hex": "jsr:@std/encoding@1/hex",
@@ -11,6 +14,7 @@
   "tasks": {
     "start": "deno run --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env main.ts",
     "dev": "deno run --watch --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env main.ts",
+    "bootstrap-orchestration": "deno run --allow-net --allow-read --allow-write --allow-run --allow-env scripts/bootstrap-orchestration.ts",
     "compile": "deno compile --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env -o dist/turbopanel-daemon main.ts"
   },
   "compilerOptions": {

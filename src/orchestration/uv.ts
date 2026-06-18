@@ -3,8 +3,10 @@ import { join } from '@std/path'
 import { run } from './exec.ts'
 import {
   RUNTIME_BIN_DIR,
+  RUNTIMES_DIR,
   resolveUvTarget,
   UV_BIN,
+  UV_CURRENT_DIR,
   UV_VERSION,
   UVX_BIN,
   uvDownloadUrl,
@@ -35,8 +37,28 @@ async function installedUvVersion(): Promise<string | null> {
 }
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', bytes)
+  const copy = new Uint8Array(bytes.length)
+  copy.set(bytes)
+  const digest = await crypto.subtle.digest('SHA-256', copy)
   return encodeHex(new Uint8Array(digest))
+}
+
+/** Point the stable `current` symlink at the active uv version directory. */
+async function repointUvCurrent(): Promise<void> {
+  try {
+    await Deno.remove(UV_CURRENT_DIR)
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) {
+      console.warn('[orchestration] could not replace uv current symlink:', err)
+      return
+    }
+  }
+  try {
+    await Deno.mkdir(join(RUNTIMES_DIR, 'uv'), { recursive: true })
+    await Deno.symlink(RUNTIME_BIN_DIR, UV_CURRENT_DIR, { type: 'dir' })
+  } catch (err) {
+    console.warn('[orchestration] could not create uv current symlink:', err)
+  }
 }
 
 /**
@@ -50,6 +72,7 @@ export async function ensureUv(): Promise<void> {
   const current = await installedUvVersion()
   if (current === UV_VERSION) {
     console.log(`[orchestration] uv ${UV_VERSION} already installed`)
+    await repointUvCurrent()
     return
   }
   if (current) {
@@ -84,6 +107,7 @@ export async function ensureUv(): Promise<void> {
       `uv install verification failed: expected ${UV_VERSION}, got ${version ?? 'none'}`,
     )
   }
+  await repointUvCurrent()
   console.log(`[orchestration] uv ${UV_VERSION} installed at ${UV_BIN}`)
 }
 
