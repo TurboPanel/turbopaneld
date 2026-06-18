@@ -15,6 +15,17 @@
         and _instance_user_getent.ansible_facts.getent_passwd[instance_user] is defined
       }}
 
+- name: Detect instance user uid mismatch
+  ansible.builtin.set_fact:
+    _instance_user_uid_mismatch: >-
+      {{
+        _instance_user_exists | bool
+        and (
+          _instance_user_getent.ansible_facts.getent_passwd[instance_user][1] | int
+          != instance_uid | int
+        )
+      }}
+
 - name: Stop instance stack units before user account changes
   ansible.builtin.systemd:
     name: "{{ item }}"
@@ -24,7 +35,7 @@
     - "{{ ui_service_name }}"
     - "{{ caddy_service_name }}"
     - "{{ instance_service_name }}"
-  when: _instance_user_exists | bool
+  when: _instance_user_uid_mismatch | bool
   failed_when: false
 
 - name: Wait for instance user processes to exit after stopping instance stack
@@ -36,7 +47,7 @@
   delay: 1
   changed_when: false
   failed_when: false
-  when: _instance_user_exists | bool
+  when: _instance_user_uid_mismatch | bool
 
 - name: Ensure instance user (member of turbopanel group, no own group)
   ansible.builtin.user:

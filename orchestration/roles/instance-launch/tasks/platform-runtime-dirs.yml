@@ -8,13 +8,27 @@
     owner: "{{ instance_user }}"
     group: "{{ turbopanel_group }}"
     mode: "2770"
-  loop:
-    - "{{ turbopanel_instance_runtime_dir }}"
-    - "{{ turbopanel_instance_runtime_dir }}/share"
-    - "{{ turbopanel_instance_runtime_dir }}/state"
-    - "{{ turbopanel_ui_runtime_dir }}"
-    - "{{ turbopanel_ui_runtime_dir }}/share"
-    - "{{ turbopanel_ui_runtime_dir }}/state"
-    - "{{ turbopanel_instance_config_dir }}"
-    - "{{ turbopanel_caddy_config_dir }}"
-    - "{{ turbopanel_ui_config_dir }}"
+  loop: >-
+    {{
+      [
+        turbopanel_instance_runtime_dir,
+        turbopanel_instance_runtime_dir + '/share',
+        turbopanel_instance_runtime_dir + '/state',
+        turbopanel_ui_runtime_dir,
+        turbopanel_ui_runtime_dir + '/share',
+        turbopanel_ui_runtime_dir + '/state',
+        turbopanel_instance_config_dir,
+        turbopanel_caddy_config_dir,
+        turbopanel_ui_config_dir,
+      ]
+      + (
+        [
+          turbopanel_website_runtime_dir,
+          turbopanel_website_runtime_dir + '/share',
+          turbopanel_website_runtime_dir + '/state',
+          turbopanel_website_config_dir,
+        ]
+        if (turbopanel_instance_runtime | default('deno')) == 'workers'
+        else []
+      )
+    }}

@@ -48,3 +48,16 @@
     TURBOPANEL_DEV_UID: "{{ turbopanel_dev_uid | default('') }}"
     TURBOPANEL_DEV_GID: "{{ turbopanel_dev_gid | default('') }}"
   changed_when: false
+
+- name: Normalize website checkout ownership
+  when: (turbopanel_instance_runtime | default('deno')) == 'workers'
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/turbopanel-normalize-dev-checkout
+      - "{{ turbopanel_website_dir }}"
+      - "{{ '--force' if (force_checkout_normalize | default(false) | bool) else '--check-stamp' }}"
+  environment:
+    TURBOPANEL_DEV_USER: "{{ turbopanel_dev_user | default('') }}"
+    TURBOPANEL_DEV_UID: "{{ turbopanel_dev_uid | default('') }}"
+    TURBOPANEL_DEV_GID: "{{ turbopanel_dev_gid | default('') }}"
+  changed_when: false

@@ -23,6 +23,14 @@
     - instance_start | bool
     - turbopanel_ui_mode == 'dev'
 
+- name: Restart turbopanel website
+  ansible.builtin.systemd:
+    name: "{{ website_service_name }}"
+    state: restarted
+  when:
+    - instance_start | bool
+    - (turbopanel_instance_runtime | default('deno')) == 'workers'
+
 - name: Restart turbopanel mailer
   ansible.builtin.systemd:
     name: "{{ mailer_service_name }}"

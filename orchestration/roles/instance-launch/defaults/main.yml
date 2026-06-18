@@ -9,12 +9,18 @@ turbopanel_platform_dir: "{{ turbopanel_install_root }}/platform"
 turbopanel_instance_runtime_dir: "{{ turbopanel_instance_dir }}/.local"
 turbopanel_caddy_runtime_dir: "{{ turbopanel_instance_dir }}/.local"
 turbopanel_ui_runtime_dir: "{{ turbopanel_ui_dir }}/.local"
+turbopanel_website_runtime_dir: "{{ turbopanel_website_dir }}/.local"
 turbopanel_instance_config_dir: "{{ turbopanel_instance_dir }}/.config"
 turbopanel_caddy_config_dir: "{{ turbopanel_instance_dir }}/.config"
 turbopanel_ui_config_dir: "{{ turbopanel_ui_dir }}/.config"
+turbopanel_website_config_dir: "{{ turbopanel_website_dir }}/.config"
 turbopanel_daemon_dir: "{{ turbopanel_platform_dir }}/daemon"
 turbopanel_instance_dir: "{{ turbopanel_platform_dir }}/instance"
 turbopanel_ui_dir: "{{ turbopanel_platform_dir }}/ui"
+turbopanel_website_dir: "{{ turbopanel_platform_dir }}/website"
+website_service_name: turbopanel-website
+website_port: 19820
+website_cors_origins: "http://localhost:{{ website_port }},http://127.0.0.1:{{ website_port }}"
 instance_user: instance
 turbopanel_group: turbopanel
 instance_service_name: turbopanel-instance

@@ -25,12 +25,36 @@
     path: "{{ turbopanel_ui_dir }}/node_modules"
   register: _ui_modules
 
-# Speed: only run the slow install when node_modules is absent. Developers
-# re-run `pnpm install` manually after changing dependencies.
-- name: Install UI dependencies
-  when: not _ui_modules.stat.exists
+- name: Check UI expo bin link
+  ansible.builtin.stat:
+    path: "{{ turbopanel_ui_dir }}/node_modules/expo/bin/cli"
+  register: _ui_expo_bin
+
+- name: Probe UI babel preset resolution
   ansible.builtin.command:
-    cmd: pnpm install --frozen-lockfile
+    cmd: "{{ turbopanel_runtimes_dir }}/node/current/bin/node -e \"require('babel-preset-expo')\""
+    chdir: "{{ turbopanel_ui_dir }}"
+  become_user: "{{ turbopanel_user }}"
+  environment:
+    HOME: "{{ turbopanel_install_root }}"
+    PATH: "/usr/local/bin:{{ turbopanel_runtimes_dir }}/node/current/bin:/usr/bin:/bin"
+  register: _ui_babel_probe
+  changed_when: false
+  failed_when: false
+
+# Speed: skip install when node_modules, expo cli, and babel preset resolve. Re-run
+# when any check fails (partial pnpm install can leave broken hoists).
+# Co-located dev allows lockfile drift (package.json ahead of pnpm-lock.yaml);
+# managed/static installs keep --frozen-lockfile for reproducibility.
+- name: Install UI dependencies
+  when: >-
+    not _ui_modules.stat.exists
+    or not _ui_expo_bin.stat.exists
+    or (_ui_babel_probe.rc | default(1)) != 0
+  ansible.builtin.command:
+    cmd: >-
+      pnpm install
+      {{ '' if (turbopanel_dev_user | default('') | length > 0) else '--frozen-lockfile' }}
     chdir: "{{ turbopanel_ui_dir }}"
   become_user: "{{ turbopanel_user }}"
   environment:

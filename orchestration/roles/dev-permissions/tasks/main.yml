@@ -19,6 +19,14 @@
       ansible.builtin.set_fact:
         _dev_identity_changed: "{{ _dev_identity_stamp_current != _dev_identity_stamp_expected }}"
 
+    - name: Resolve dev permission checkout paths
+      ansible.builtin.set_fact:
+        _dev_checkout_paths: >-
+          {{
+            [turbopanel_daemon_dir, turbopanel_instance_dir, turbopanel_ui_dir]
+            + ([turbopanel_website_dir] if (turbopanel_instance_runtime | default('deno') == 'workers') else [])
+          }}
+
     - name: Write dev permissions identity stamp
       ansible.builtin.copy:
         content: "{{ _dev_identity_stamp_expected }}"
@@ -47,10 +55,7 @@
         owner: "{{ turbopanel_user }}"
         group: "{{ turbopanel_group }}"
         mode: "2770"
-      loop:
-        - "{{ turbopanel_daemon_dir }}"
-        - "{{ turbopanel_instance_dir }}"
-        - "{{ turbopanel_ui_dir }}"
+      loop: "{{ _dev_checkout_paths }}"
 
     - name: Apply group access ACL on checkout roots
       ansible.posix.acl:
@@ -59,10 +64,7 @@
         etype: group
         permissions: rwx
         state: present
-      loop:
-        - "{{ turbopanel_daemon_dir }}"
-        - "{{ turbopanel_instance_dir }}"
-        - "{{ turbopanel_ui_dir }}"
+      loop: "{{ _dev_checkout_paths }}"
 
     - name: Apply default group ACL on checkout roots
       ansible.posix.acl:
@@ -72,10 +74,7 @@
         permissions: rwx
         state: present
         default: true
-      loop:
-        - "{{ turbopanel_daemon_dir }}"
-        - "{{ turbopanel_instance_dir }}"
-        - "{{ turbopanel_ui_dir }}"
+      loop: "{{ _dev_checkout_paths }}"
 
     - name: Apply dev user access ACL on checkout roots
       ansible.posix.acl:
@@ -84,10 +83,7 @@
         etype: user
         permissions: rwx
         state: present
-      loop:
-        - "{{ turbopanel_daemon_dir }}"
-        - "{{ turbopanel_instance_dir }}"
-        - "{{ turbopanel_ui_dir }}"
+      loop: "{{ _dev_checkout_paths }}"
 
     - name: Apply default dev user ACL on checkout roots
       ansible.posix.acl:
@@ -97,10 +93,7 @@
         permissions: rwx
         state: present
         default: true
-      loop:
-        - "{{ turbopanel_daemon_dir }}"
-        - "{{ turbopanel_instance_dir }}"
-        - "{{ turbopanel_ui_dir }}"
+      loop: "{{ _dev_checkout_paths }}"
 
     - name: Stat checkout normalizer script
       ansible.builtin.stat:
@@ -116,10 +109,7 @@
         TURBOPANEL_DEV_USER: "{{ turbopanel_dev_user }}"
         TURBOPANEL_DEV_UID: "{{ turbopanel_dev_uid }}"
         TURBOPANEL_DEV_GID: "{{ turbopanel_dev_gid }}"
-      loop:
-        - "{{ turbopanel_daemon_dir }}"
-        - "{{ turbopanel_instance_dir }}"
-        - "{{ turbopanel_ui_dir }}"
+      loop: "{{ _dev_checkout_paths }}"
       changed_when: false
       when: checkout_normalizer_script.stat.exists | default(false)
 
@@ -136,10 +126,7 @@
       ansible.builtin.command:
         argv: [git, config, --global, --add, safe.directory, "{{ item }}"]
       become_user: "{{ turbopanel_dev_user }}"
-      loop:
-        - "{{ turbopanel_daemon_dir }}"
-        - "{{ turbopanel_instance_dir }}"
-        - "{{ turbopanel_ui_dir }}"
+      loop: "{{ _dev_checkout_paths }}"
       when: item not in (_git_safe_dev_dirs.stdout_lines | default([]))
 
     - name: Stat instance dist directory

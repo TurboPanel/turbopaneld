@@ -16,10 +16,10 @@ Environment=PATH=/usr/local/bin:{{ turbopanel_runtimes_dir }}/node/current/bin:/
 Environment=BROWSER=none
 Environment=COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 # Do not set CI=1 — Expo/Metro disable Fast Refresh (hot=false) in CI mode.
-# Use the linked expo binary directly — `pnpm exec` runs an implicit install that
-# prompts to purge node_modules when HOME differs from the turbopanel-user install.
+# Invoke expo/bin/cli via node — pnpm may leave node_modules/.bin unlinked after a
+# partial install, and `pnpm exec` prompts to purge node_modules when HOME differs.
 # Runtime state (Expo, pnpm XDG dirs) lives under {{ turbopanel_ui_runtime_dir }} (gitignored).
-ExecStart={{ turbopanel_ui_dir }}/node_modules/.bin/expo start --web --port {{ expo_port }}
+ExecStart={{ turbopanel_runtimes_dir }}/node/current/bin/node {{ turbopanel_ui_dir }}/node_modules/expo/bin/cli start --web --port {{ expo_port }}
 Restart=always
 RestartSec=3
 

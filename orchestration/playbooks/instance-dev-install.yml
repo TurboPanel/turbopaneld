@@ -21,13 +21,16 @@
     turbopanel_daemon_dir: "{{ turbopanel_platform_dir }}/daemon"
     turbopanel_instance_dir: "{{ turbopanel_platform_dir }}/instance"
     turbopanel_ui_dir: "{{ turbopanel_platform_dir }}/ui"
+    turbopanel_website_dir: "{{ turbopanel_platform_dir }}/website"
     turbopanel_group: turbopanel
     instance_user: instance
     instance_uid: 9998
     instance_repo_url: https://github.com/turbopanel/instance
     ui_repo_url: https://github.com/turbopanel/turbopanel-ui
+    website_repo_url: https://github.com/turbopanel/turbopanel-website
     instance_branch: trunk
     ui_branch: trunk
+    website_branch: trunk
     turbopanel_ui_artifact_url: ""
     turbopanel_instance_runtime: deno
     # Caddy/UI/mailer follow instance_start; the instance unit also checks runtime.
@@ -74,7 +77,34 @@
     - role: dev-permissions
     - role: instance-repo
     - role: ui-repo
+    - role: website-repo
+      when: turbopanel_instance_runtime == 'workers'
     - role: ui-build
     - role: instance-build
     - role: instance-certs
     - role: instance-launch
+
+  post_tasks:
+    # If converge aborts after instance-user stops the stack (uid migration) or
+    # any later failure, bring enabled units back up instead of leaving a partial stack.
+    - name: Resolve dev stack unit list
+      ansible.builtin.set_fact:
+        _dev_stack_units:
+          - turbopanel-instance
+          - turbopanel-caddy
+          - turbopanel-ui
+          - turbopanel-mailer
+
+    - name: Include website unit in Workers dev stack
+      when: turbopanel_instance_runtime == 'workers'
+      ansible.builtin.set_fact:
+        _dev_stack_units: "{{ _dev_stack_units + ['turbopanel-website'] }}"
+
+    - name: Ensure dev stack services are running after converge
+      when: instance_start | default(true) | bool
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop: "{{ _dev_stack_units }}"
+      failed_when: false

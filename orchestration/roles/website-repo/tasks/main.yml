@@ -1,0 +1,50 @@
+---
+# Like ui-repo: clone only when missing so a live dev working tree is never force-reset.
+- name: Check website checkout
+  ansible.builtin.stat:
+    path: "{{ turbopanel_website_dir }}/.git"
+  register: _website_git
+
+- name: Clone website repository when missing
+  when: not _website_git.stat.exists
+  ansible.builtin.git:
+    repo: "{{ website_repo_url }}"
+    dest: "{{ turbopanel_website_dir }}"
+    version: "{{ website_branch }}"
+  become_user: "{{ turbopanel_user }}"
+  register: _website_clone
+
+- name: Record checkout normalize needed after website clone
+  ansible.builtin.set_fact:
+    force_checkout_normalize: true
+  when: _website_clone is defined and _website_clone is changed
+
+- name: Check website dependencies
+  ansible.builtin.stat:
+    path: "{{ turbopanel_website_dir }}/node_modules"
+  register: _website_modules
+
+- name: Check website next binary
+  ansible.builtin.stat:
+    path: "{{ turbopanel_website_dir }}/node_modules/next/dist/bin/next"
+  register: _website_next_bin
+
+- name: Install website dependencies
+  when: >-
+    not _website_modules.stat.exists
+    or not _website_next_bin.stat.exists
+  ansible.builtin.command:
+    cmd: >-
+      pnpm install
+      {{ '' if (turbopanel_dev_user | default('') | length > 0) else '--frozen-lockfile' }}
+    chdir: "{{ turbopanel_website_dir }}"
+  become_user: "{{ turbopanel_user }}"
+  environment:
+    HOME: "{{ turbopanel_install_root }}"
+    PATH: "/usr/local/bin:{{ turbopanel_runtimes_dir }}/node/current/bin:/usr/bin:/bin"
+  register: _website_pnpm_install
+
+- name: Record checkout normalize needed after website pnpm install
+  ansible.builtin.set_fact:
+    force_checkout_normalize: true
+  when: _website_pnpm_install is defined and _website_pnpm_install is changed
