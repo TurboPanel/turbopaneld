@@ -23,6 +23,9 @@
     turbopanel_ui_dir: "{{ turbopanel_platform_dir }}/ui"
     turbopanel_website_dir: "{{ turbopanel_platform_dir }}/website"
     turbopanel_group: turbopanel
+    turbopanel_user: turbopanel
+    turbopanel_uid: 9999
+    turbopanel_gid: 9999
     instance_user: instance
     instance_uid: 9998
     instance_repo_url: https://github.com/turbopanel/instance
@@ -60,6 +63,7 @@
       when: turbopanel_dev_user | length > 0
 
   roles:
+    - role: turbopanel-user
     - role: runtime-sockets
     - role: daemon-logs
     - role: daemon-prereqs
