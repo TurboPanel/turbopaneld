@@ -101,6 +101,27 @@ function devInstanceExtraArgs(): string[] {
 }
 
 async function runInstanceDevInstall(): Promise<void> {
+  // #region agent log
+  fetch("http://localhost:7882/ingest/09b3950f-5d3f-4c91-a3cf-e073cbcbe3cb", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Debug-Session-Id": "8aec57",
+    },
+    body: JSON.stringify({
+      sessionId: "8aec57",
+      runId: "pre-fix",
+      hypothesisId: "B",
+      location: "run-orchestration-action.ts:runInstanceDevInstall",
+      message: "starting instance-dev-install",
+      data: {
+        extraArgs: devInstanceExtraArgs(),
+        websiteRepoUrl: SSH_REPO_URLS.website,
+      },
+      timestamp: Date.now(),
+    }),
+  }).catch(() => {});
+  // #endregion
   const eventsMod = await import(DAEMON_ANSIBLE_EVENTS_PATH) as {
     runPlaybookStreaming: (
       ansiblePlaybookBin: string,
