@@ -6,6 +6,42 @@
     path: "{{ turbopanel_ui_dir }}/.git"
   register: _ui_git
 
+- name: Check UI checkout directory
+  ansible.builtin.stat:
+    path: "{{ turbopanel_ui_dir }}"
+  register: _ui_dir
+
+- name: List non-placeholder UI checkout entries when not a git repository
+  when:
+    - not _ui_git.stat.exists
+    - _ui_dir.stat.isdir | default(false)
+  ansible.builtin.find:
+    paths: "{{ turbopanel_ui_dir }}"
+    file_type: any
+    hidden: true
+    depth: 1
+    excludes: .turbopanel-checkout-stamp
+  register: _ui_real_entries
+
+- name: Remove UI checkout placeholder before clone
+  when:
+    - not _ui_git.stat.exists
+    - _ui_dir.stat.isdir | default(false)
+    - _ui_real_entries.matched == 0
+  ansible.builtin.file:
+    path: "{{ turbopanel_ui_dir }}"
+    state: absent
+
+- name: Fail when UI checkout exists without git metadata
+  when:
+    - not _ui_git.stat.exists
+    - _ui_dir.stat.isdir | default(false)
+    - _ui_real_entries.matched > 0
+  ansible.builtin.fail:
+    msg: >-
+      {{ turbopanel_ui_dir }} exists but is not a git checkout.
+      Move or remove it manually, then re-run the dev stack.
+
 - name: Clone UI repository when missing
   when: not _ui_git.stat.exists
   ansible.builtin.git:
@@ -42,10 +78,6 @@
   changed_when: false
   failed_when: false
 
-# Speed: skip install when node_modules, expo cli, and babel preset resolve. Re-run
-# when any check fails (partial pnpm install can leave broken hoists).
-# Co-located dev allows lockfile drift (package.json ahead of pnpm-lock.yaml);
-# managed/static installs keep --frozen-lockfile for reproducibility.
 - name: Install UI dependencies
   when: >-
     not _ui_modules.stat.exists

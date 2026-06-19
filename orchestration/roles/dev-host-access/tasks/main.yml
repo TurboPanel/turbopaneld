@@ -36,6 +36,23 @@
         state: present
         default: true
 
+    - name: Apply dev user ACL on platform dir
+      ansible.posix.acl:
+        path: "{{ turbopanel_platform_dir }}"
+        entity: "{{ turbopanel_dev_user }}"
+        etype: user
+        permissions: rwx
+        state: present
+
+    - name: Apply default dev user ACL on platform dir
+      ansible.posix.acl:
+        path: "{{ turbopanel_platform_dir }}"
+        entity: "{{ turbopanel_dev_user }}"
+        etype: user
+        permissions: rwx
+        state: present
+        default: true
+
     - name: Apply dev user traversal ACL on runtimes dir
       ansible.posix.acl:
         path: "{{ turbopanel_runtimes_dir }}"

@@ -21,11 +21,11 @@
 
     - name: Resolve dev permission checkout paths
       ansible.builtin.set_fact:
-        _dev_checkout_paths: >-
-          {{
-            [turbopanel_daemon_dir, turbopanel_instance_dir, turbopanel_ui_dir]
-            + ([turbopanel_website_dir] if (turbopanel_instance_runtime | default('deno') == 'workers') else [])
-          }}
+        _dev_checkout_paths:
+          - "{{ turbopanel_daemon_dir }}"
+          - "{{ turbopanel_instance_dir }}"
+          - "{{ turbopanel_ui_dir }}"
+          - "{{ turbopanel_website_dir }}"
 
     - name: Write dev permissions identity stamp
       ansible.builtin.copy:

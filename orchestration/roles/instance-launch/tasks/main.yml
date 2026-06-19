@@ -66,7 +66,6 @@
     - Restart turbopanel ui
 
 - name: Install website (Next.js) systemd unit
-  when: (turbopanel_instance_runtime | default('deno')) == 'workers'
   ansible.builtin.template:
     src: turbopanel-website.service.j2
     dest: "/etc/systemd/system/{{ website_service_name }}.service"
@@ -145,7 +144,6 @@
     - "{{ turbopanel_website_dir }}"
   when:
     - item not in (_git_safe_tp_dirs.stdout_lines | default([]))
-    - (turbopanel_instance_runtime | default('deno')) == 'workers' or item != turbopanel_website_dir
 
 - name: Read existing safe.directory entries for instance user
   ansible.builtin.command:
@@ -170,7 +168,6 @@
     - "{{ turbopanel_website_dir }}"
   when:
     - item not in (_git_safe_instance_dirs.stdout_lines | default([]))
-    - (turbopanel_instance_runtime | default('deno')) == 'workers' or item != turbopanel_website_dir
 
 - name: Resolve instance unit desired state
   ansible.builtin.set_fact:
@@ -264,19 +261,10 @@
     state: "{{ 'started' if (instance_start | bool) else 'stopped' }}"
 
 - name: Ensure website service desired state
-  when: (turbopanel_instance_runtime | default('deno')) == 'workers'
   ansible.builtin.systemd:
     name: "{{ website_service_name }}"
     enabled: "{{ instance_start | bool }}"
     state: "{{ 'started' if (instance_start | bool) else 'stopped' }}"
-
-- name: Stop and disable website service when not in Workers runtime
-  when: (turbopanel_instance_runtime | default('deno')) != 'workers'
-  ansible.builtin.systemd:
-    name: "{{ website_service_name }}"
-    state: stopped
-    enabled: false
-  failed_when: false
 
 - name: Stop and disable UI service when not in dev mode
   when: turbopanel_ui_mode != 'dev'

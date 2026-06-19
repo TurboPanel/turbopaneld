@@ -83,7 +83,6 @@
     - role: instance-repo
     - role: ui-repo
     - role: website-repo
-      when: turbopanel_instance_runtime == 'workers'
     - role: ui-build
     - role: instance-build
     - role: instance-certs
@@ -98,12 +97,8 @@
           - turbopanel-instance
           - turbopanel-caddy
           - turbopanel-ui
+          - turbopanel-website
           - turbopanel-mailer
-
-    - name: Include website unit in Workers dev stack
-      when: turbopanel_instance_runtime == 'workers'
-      ansible.builtin.set_fact:
-        _dev_stack_units: "{{ _dev_stack_units + ['turbopanel-website'] }}"
 
     - name: Ensure dev stack services are running after converge
       when: instance_start | default(true) | bool

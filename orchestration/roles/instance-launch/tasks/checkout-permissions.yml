@@ -50,7 +50,6 @@
   changed_when: false
 
 - name: Normalize website checkout ownership
-  when: (turbopanel_instance_runtime | default('deno')) == 'workers'
   ansible.builtin.command:
     argv:
       - /usr/local/bin/turbopanel-normalize-dev-checkout
