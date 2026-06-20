@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Reconcile co-located dev checkout ownership after git fetch/reset/pull.
 #
-# turbopanel (UID 9999) is the daemon user and git identity; instance (UID 9998,
+# turbopanel (UID 9999) is the daemon user and git identity; turbopaneli (UID 9998,
 # group turbopanel) runs systemd services and reads the tree via group perms.
 # The human developer (whoever invoked ./console) edits via group ACL write.
-# Git must never run as instance — it would create root-owned-by-9998 files that
+# Git must never run as turbopaneli — it would create root-owned-by-9998 files that
 # turbopanel cannot reclaim without the normalizer.
 set -euo pipefail
 
@@ -17,17 +17,17 @@ CHECKOUT="${1:?checkout path required}"
 MODE="${2:-normalize}"
 OWNER="${TURBOPANEL_USER:-turbopanel}"
 GROUP="${TURBOPANEL_GROUP:-turbopanel}"
-INSTANCE="${INSTANCE_USER:-instance}"
+INSTANCE="${INSTANCE_USER:-turbopaneli}"
 DEV_USER="${TURBOPANEL_DEV_USER:-}"
 DEV_UID="${TURBOPANEL_DEV_UID:-}"
 DEV_GID="${TURBOPANEL_DEV_GID:-}"
 STAMP_FILE="${CHECKOUT}/.turbopanel-checkout-stamp"
 
-RUNTIME_DIRS=(.config .local .cache)
-# Release artifacts stay instance-owned and outside the dev-editable ACL set.
+RUNTIME_DIRS=(.config .local .cache .expo)
+# Release artifacts stay turbopaneli-owned and outside the dev-editable ACL set.
 ARTIFACT_DIRS=(dist)
 # Generated trees excluded from ownership scans and recursive ACL work.
-# .next / .open-next: Next.js dev + OpenNext build caches (website service runs as instance).
+# .next / .open-next: Next.js dev + OpenNext build caches (website service runs as turbopaneli).
 PRUNE_NAMES=(node_modules .git .pnpm-store .next .open-next)
 
 HAS_SETFACL=false

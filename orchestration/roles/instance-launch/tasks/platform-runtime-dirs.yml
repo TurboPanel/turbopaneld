@@ -20,6 +20,7 @@
         turbopanel_instance_config_dir,
         turbopanel_caddy_config_dir,
         turbopanel_ui_config_dir,
+        turbopanel_ui_dir + '/.expo',
         turbopanel_website_runtime_dir,
         turbopanel_website_runtime_dir + '/share',
         turbopanel_website_runtime_dir + '/state',

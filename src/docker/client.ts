@@ -48,6 +48,7 @@ export interface ContainerInspect {
 
 export class DockerClient {
   #httpClient: Deno.HttpClient
+  #closed = false
 
   constructor(socketPath?: string) {
     const path = socketPath ?? resolveDockerSocket()
@@ -103,7 +104,17 @@ export class DockerClient {
   }
 
   close(): void {
-    this.#httpClient.close()
+    if (this.#closed) {
+      return
+    }
+    this.#closed = true
+    try {
+      this.#httpClient.close()
+    } catch (error) {
+      if (!(error instanceof Deno.errors.BadResource)) {
+        throw error
+      }
+    }
   }
 
   #fetch(path: string, init: RequestInit = {}): Promise<Response> {

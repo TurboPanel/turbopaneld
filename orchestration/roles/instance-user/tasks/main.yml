@@ -1,5 +1,56 @@
 ---
 # Requires the turbopanel group to already exist (turbopanel-user role).
+- name: Look up legacy instance service user
+  ansible.builtin.command:
+    argv: [getent, passwd, "{{ instance_legacy_user }}"]
+  register: _instance_legacy_user
+  changed_when: false
+  failed_when: false
+
+- name: Look up target instance service user
+  ansible.builtin.command:
+    argv: [getent, passwd, "{{ instance_user }}"]
+  register: _instance_target_user
+  changed_when: false
+  failed_when: false
+
+- name: Detect legacy instance user rename needed
+  ansible.builtin.set_fact:
+    _instance_rename_needed: >-
+      {{
+        _instance_legacy_user.rc == 0
+        and _instance_target_user.rc != 0
+      }}
+
+- name: Stop instance stack units before renaming legacy instance user
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+  loop:
+    - "{{ mailer_service_name }}"
+    - "{{ website_service_name }}"
+    - "{{ ui_service_name }}"
+    - "{{ caddy_service_name }}"
+    - "{{ instance_service_name }}"
+  when: _instance_rename_needed | bool
+  failed_when: false
+
+- name: Wait for legacy instance user processes to exit before rename
+  ansible.builtin.command:
+    argv: [pgrep, -u, "{{ instance_legacy_user }}"]
+  register: _instance_legacy_pgrep
+  until: _instance_legacy_pgrep.rc == 1
+  retries: 15
+  delay: 1
+  changed_when: false
+  failed_when: false
+  when: _instance_rename_needed | bool
+
+- name: Rename legacy instance service user to turbopaneli
+  ansible.builtin.command:
+    argv: [usermod, -l, "{{ instance_user }}", "{{ instance_legacy_user }}"]
+  when: _instance_rename_needed | bool
+
 - name: Check whether instance user already exists
   ansible.builtin.getent:
     database: passwd
@@ -32,6 +83,7 @@
     state: stopped
   loop:
     - "{{ mailer_service_name }}"
+    - "{{ website_service_name }}"
     - "{{ ui_service_name }}"
     - "{{ caddy_service_name }}"
     - "{{ instance_service_name }}"

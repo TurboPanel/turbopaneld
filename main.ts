@@ -41,8 +41,14 @@ if (shouldConnectToInstance()) {
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   Deno.addSignalListener(signal, () => {
+    logInfo('daemon', 'shutting down')
     instance.stop()
-    dockerClient?.close()
+    try {
+      dockerClient?.close()
+    } catch {
+      // HttpClient may already be closed during systemd restart.
+    }
+    dockerClient = undefined
     abort.abort()
   })
 }

@@ -1,0 +1,31 @@
+---
+# Expo writes project-local state under ui/.expo (types, devices.json, dev cache).
+# normalize-dev-checkout skips .expo, but existing installs may still have
+# turbopanel-owned caches from before that exclusion.
+- name: Check UI Expo project cache
+  ansible.builtin.stat:
+    path: "{{ turbopanel_ui_dir }}/.expo"
+  register: _ui_expo_cache
+
+- name: Reclaim UI Expo project cache for instance user
+  when: _ui_expo_cache.stat.exists | default(false)
+  ansible.builtin.command:
+    argv:
+      - chown
+      - -R
+      - "{{ instance_user }}:{{ turbopanel_group }}"
+      - "{{ turbopanel_ui_dir }}/.expo"
+  changed_when: false
+
+- name: Reclaim UI Expo env stub for instance user
+  ansible.builtin.stat:
+    path: "{{ turbopanel_ui_dir }}/expo-env.d.ts"
+  register: _ui_expo_env_stub
+
+- name: Fix UI Expo env stub ownership
+  when: _ui_expo_env_stub.stat.exists | default(false)
+  ansible.builtin.file:
+    path: "{{ turbopanel_ui_dir }}/expo-env.d.ts"
+    owner: "{{ instance_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0660"

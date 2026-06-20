@@ -1,9 +1,10 @@
 ---
-# The self-hosted instance runs as a dedicated, low-privilege user with primary
-# group turbopaneli and supplementary membership in turbopanel. This lets it
-# read/write the shared /run/turbopanel socket dir (group turbopanel) without
+# The self-hosted instance stack runs as a dedicated, low-privilege user with
+# primary group turbopaneli and supplementary membership in turbopanel. This lets
+# it read/write the shared /run/turbopanel socket dir (group turbopanel) without
 # the sudo rights the daemon user holds.
-instance_user: instance
+instance_user: turbopaneli
+instance_legacy_user: instance
 instance_uid: 9998
 instance_primary_group: turbopaneli
 instance_primary_gid: 9998
@@ -14,4 +15,5 @@ turbopanel_instance_dir: "{{ turbopanel_install_root }}/platform/instance"
 instance_service_name: turbopanel-instance
 caddy_service_name: turbopanel-caddy
 ui_service_name: turbopanel-ui
+website_service_name: turbopanel-website
 mailer_service_name: turbopanel-mailer

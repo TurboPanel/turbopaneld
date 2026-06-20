@@ -22,7 +22,7 @@ turbopanel_website_dir: "{{ turbopanel_platform_dir }}/website"
 website_service_name: turbopanel-website
 website_port: 19820
 website_cors_origins: "http://localhost:{{ website_port }},http://127.0.0.1:{{ website_port }}"
-instance_user: instance
+instance_user: turbopaneli
 turbopanel_group: turbopanel
 instance_service_name: turbopanel-instance
 caddy_service_name: turbopanel-caddy

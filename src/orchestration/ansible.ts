@@ -9,6 +9,11 @@ import {
   readBootstrapStamp,
   writeBootstrapStamp,
 } from './bootstrap-stamp.ts'
+import {
+  computeDevConvergeStamp,
+  shouldSkipDevConverge,
+  writeDevConvergeStamp,
+} from './converge-stamp.ts'
 import { join } from '@std/path'
 import { logInfo, logWarn } from '../logger.ts'
 import {
@@ -288,9 +293,19 @@ export async function runDaemonSystemdSetup(onEvent?: AnsibleEventHandler): Prom
  * Convergence playbook for the co-located self-hosted instance + UI + Caddy.
  */
 export async function runInstanceDevInstall(onEvent?: AnsibleEventHandler): Promise<void> {
+  const instanceEnabled = await coLocatedInstanceServiceEnabled()
+  if (await shouldSkipDevConverge(instanceEnabled)) {
+    logInfo(
+      'orchestration',
+      'dev converge inputs unchanged and instance stack already installed; skipping instance-dev-install',
+    )
+    return
+  }
+
   const args = devInstanceExtraArgs()
   logInfo('orchestration', 'running instance-dev-install converge playbook')
   await runLocalPlaybook(INSTANCE_DEV_INSTALL_PLAYBOOK, args, onEvent)
+  await writeDevConvergeStamp(await computeDevConvergeStamp())
   logInfo('orchestration', 'instance-dev-install complete')
 }
 
