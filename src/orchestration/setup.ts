@@ -34,6 +34,23 @@ function shouldInstallDevInstance(): boolean {
 }
 
 /**
+ * Co-located dev host (Unix socket) before the developer opts in via the
+ * console. Orchestration bootstrap runs, but no converge playbook yet.
+ */
+function isPreOptInCoLocatedDev(): boolean {
+  if (shouldInstallDevInstance()) return false
+  return resolveInstanceConfig().kind === 'socket'
+}
+
+/**
+ * True daemon-only managed servers (remote URL dial). These still auto-converge
+ * on startup outside the dev-console deferred-start install path.
+ */
+function shouldRunDaemonConverge(): boolean {
+  return resolveInstanceConfig().kind === 'url'
+}
+
+/**
  * Bootstrap the orchestration runtime on daemon startup.
  *
  * Installs uv/Python/ansible once, then runs a single convergence playbook
@@ -51,14 +68,21 @@ export async function initOrchestration(): Promise<boolean> {
   const started = performance.now()
   console.log('[orchestration] bootstrapping runtime')
   const devInstance = shouldInstallDevInstance()
-  const steps = [
+  const preOptInDev = isPreOptInCoLocatedDev()
+  const steps: Array<[string, () => Promise<void>]> = [
     ['ensureUv', ensureUv],
     ['ensurePython', ensurePython],
     ['bootstrapOrchestrationRuntime', bootstrapOrchestrationRuntime],
-    ...(devInstance
-      ? [['runInstanceDevInstall', runInstanceDevInstall] as const]
-      : [['runDaemonConverge', runDaemonConverge] as const]),
-  ] as const
+  ]
+  if (devInstance) {
+    steps.push(['runInstanceDevInstall', runInstanceDevInstall])
+  } else if (shouldRunDaemonConverge()) {
+    steps.push(['runDaemonConverge', runDaemonConverge])
+  } else if (preOptInDev) {
+    console.log(
+      '[orchestration] co-located dev host awaiting opt-in (TURBOPANEL_DEV_INSTANCE); skipping converge',
+    )
+  }
   try {
     for (const [, step] of steps) {
       await step()
