@@ -1,6 +1,6 @@
 TURBOPANEL_INSTANCE_URL={{ turbopanel_instance_url }}
 TURBOPANEL_TRUNK_BRANCH={{ turbopanel_branch }}
-TURBOPANEL_DAEMON_STATE_DIR={{ turbopanel_daemon_state_dir | default('/etc/turbopanel/platform/daemon') }}
+TURBOPANEL_DAEMON_STATE_DIR={{ turbopanel_daemon_state_dir | default('/opt/turbopanel/platform/daemon/state') }}
 {% if turbopanel_instance_ca | length > 0 %}
 TURBOPANEL_INSTANCE_CA={{ turbopanel_instance_ca }}
 {% endif %}

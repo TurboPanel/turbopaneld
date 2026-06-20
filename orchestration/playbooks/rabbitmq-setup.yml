@@ -4,7 +4,7 @@
   become: true
   gather_facts: true
   vars:
-    turbopanel_config_dir: /etc/turbopanel
+    turbopanel_config_dir: /opt/turbopanel/platform/config
   roles:
     - role: docker
     - role: rabbitmq

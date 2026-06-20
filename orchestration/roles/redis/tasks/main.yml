@@ -1,19 +1,61 @@
 ---
 # Self-sufficient: does not depend on instance-user (Redis runs before instance on fresh hosts).
+- name: Look up legacy Redis primary group
+  ansible.builtin.command:
+    argv: [getent, group, "{{ redis_legacy_group }}"]
+  register: _redis_legacy_group
+  changed_when: false
+  failed_when: false
+
+- name: Look up target Redis primary group
+  ansible.builtin.command:
+    argv: [getent, group, "{{ redis_primary_group }}"]
+  register: _redis_target_group
+  changed_when: false
+  failed_when: false
+
+- name: Rename legacy Redis primary group to turbopanelc
+  ansible.builtin.command:
+    argv: [groupmod, -n, "{{ redis_primary_group }}", "{{ redis_legacy_group }}"]
+  when:
+    - _redis_legacy_group.rc == 0
+    - _redis_target_group.rc != 0
+
+- name: Look up legacy Redis service user
+  ansible.builtin.command:
+    argv: [getent, passwd, "{{ redis_legacy_user }}"]
+  register: _redis_legacy_user
+  changed_when: false
+  failed_when: false
+
+- name: Look up target Redis service user
+  ansible.builtin.command:
+    argv: [getent, passwd, "{{ redis_user }}"]
+  register: _redis_target_user
+  changed_when: false
+  failed_when: false
+
+- name: Rename legacy Redis service user to turbopanelc
+  ansible.builtin.command:
+    argv: [usermod, -l, "{{ redis_user }}", "{{ redis_legacy_user }}"]
+  when:
+    - _redis_legacy_user.rc == 0
+    - _redis_target_user.rc != 0
+
 - name: Ensure turbopanel group exists
   ansible.builtin.group:
     name: "{{ turbopanel_group }}"
     state: present
     system: true
 
-- name: Ensure turbopanelr primary group for redis user
+- name: Ensure turbopanelc primary group for redis user
   ansible.builtin.group:
     name: "{{ redis_primary_group }}"
     gid: "{{ redis_primary_gid }}"
     state: present
     system: true
 
-- name: Ensure Redis service user (primary group turbopanelr, supplementary turbopanel)
+- name: Ensure Redis service user (primary group turbopanelc, supplementary turbopanel)
   ansible.builtin.user:
     name: "{{ redis_user }}"
     uid: "{{ redis_uid }}"
@@ -57,7 +99,7 @@
 
 - name: Ensure redis config directory exists
   ansible.builtin.file:
-    path: /etc/turbopanel/redis
+    path: "{{ turbopanel_config_dir }}/redis"
     state: directory
     owner: root
     group: "{{ turbopanel_group }}"
@@ -66,7 +108,7 @@
 - name: Write redis.conf
   ansible.builtin.template:
     src: redis.conf.j2
-    dest: /etc/turbopanel/redis/redis.conf
+    dest: "{{ turbopanel_config_dir }}/redis/redis.conf"
     owner: root
     group: "{{ turbopanel_group }}"
     mode: "0640"

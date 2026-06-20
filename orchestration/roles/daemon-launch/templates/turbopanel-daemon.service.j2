@@ -14,8 +14,8 @@ ExecStartPre={{ turbopanel_daemon_dir }}/scripts/ensure-single-daemon.sh
 ExecStart=/usr/bin/flock -n /run/turbopanel/daemon.lock /usr/local/bin/deno run --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env --env-file=.env main.ts
 Restart=on-failure
 RestartSec=5
-StandardOutput=append:/var/log/turbopanel/daemon/daemon.log
-StandardError=append:/var/log/turbopanel/daemon/daemon.err.log
+StandardOutput=append:{{ turbopanel_daemon_dir }}/logs/daemon.log
+StandardError=append:{{ turbopanel_daemon_dir }}/logs/daemon.err.log
 
 [Install]
 WantedBy=multi-user.target

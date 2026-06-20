@@ -86,7 +86,7 @@ export interface InstanceClientOptions {
 }
 
 const SERVER_ID_FILE = 'server.id'
-const DEFAULT_SERVER_ID_DIR = '/etc/turbopanel/platform/daemon'
+const DEFAULT_SERVER_ID_DIR = '/opt/turbopanel/platform/daemon/state'
 const DEFAULT_DAEMON_DIR = '/opt/turbopanel/platform/daemon'
 
 function isTruthyFlag(value: string | undefined): boolean {

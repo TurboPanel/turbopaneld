@@ -71,7 +71,7 @@ sudo systemctl restart turbopanel-daemon
 
 # Live logs (journald + file logs)
 sudo journalctl -u turbopanel-daemon -f
-sudo tail -f /var/log/turbopanel/daemon/daemon.log
+tail -f /opt/turbopanel/platform/daemon/logs/daemon.log
 ```
 
 ## Configuration

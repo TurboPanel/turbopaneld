@@ -34,6 +34,12 @@
     - _launch_rabbitmq_pass.content is defined
     - (_launch_rabbitmq_pass.content | b64decode | trim | length) > 0
 
+- name: Resolve daemon state directory shared with instance service
+  ansible.builtin.set_fact:
+    turbopanel_instance_daemon_state_dir: >-
+      {{ turbopanel_daemon_dir if (turbopanel_dev_user | default('') | length > 0)
+      else (turbopanel_daemon_state_dir | default(turbopanel_daemon_dir ~ '/state')) }}
+
 - name: Install instance systemd unit
   ansible.builtin.template:
     src: turbopanel-instance.service.j2

@@ -5,6 +5,8 @@ orchestration/roles/geerlingguy.docker/
 server.id
 cloudflared/tunnels/*.token
 dist/
+logs/
+state/
 
 # co-located dev host stamp (normalize-dev-checkout.sh)
 .turbopanel-checkout-stamp

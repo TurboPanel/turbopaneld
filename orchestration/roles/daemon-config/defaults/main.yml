@@ -1,0 +1,4 @@
+---
+turbopanel_config_dir: /opt/turbopanel/platform/config
+turbopanel_daemon_state_dir: "{{ turbopanel_daemon_dir }}/state"
+turbopanel_daemon_license_staging_dir: "{{ turbopanel_config_dir }}/daemon-license-staging"

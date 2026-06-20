@@ -4,7 +4,7 @@
   block:
     - name: Read dev permissions identity stamp
       ansible.builtin.slurp:
-        path: /etc/turbopanel/dev-permissions-identity.stamp
+        path: /opt/turbopanel/platform/config/dev-permissions-identity.stamp
       register: _dev_identity_stamp_raw
       failed_when: false
 
@@ -30,7 +30,7 @@
     - name: Write dev permissions identity stamp
       ansible.builtin.copy:
         content: "{{ _dev_identity_stamp_expected }}"
-        dest: /etc/turbopanel/dev-permissions-identity.stamp
+        dest: /opt/turbopanel/platform/config/dev-permissions-identity.stamp
         owner: root
         group: root
         mode: "0644"

@@ -1,4 +1,4 @@
-# /etc/turbopanel/
+# /opt/turbopanel/platform/config/
 #   postgres/
 #     config.json   — connection metadata (socket path, port, user, db)
 #     .pgpass       — generated password, mode 0600, owner root
@@ -60,11 +60,59 @@
   changed_when: false
   failed_when: false
 
-- name: Ensure turbopanel-db Docker volume exists
+- name: Ensure turbopaneldb Docker volume exists
   ansible.builtin.command:
     argv: [docker, volume, create, "{{ postgres_volume_name }}"]
   register: _pg_volume_create
   changed_when: false
+
+- name: Inspect legacy postgres Docker volume
+  ansible.builtin.command:
+    argv: [docker, volume, inspect, "{{ postgres_legacy_volume_name }}"]
+  register: _pg_legacy_vol_inspect
+  changed_when: false
+  failed_when: false
+
+- name: Remove legacy postgres containers before volume migration
+  ansible.builtin.shell: |
+    set -euo pipefail
+    changed=0
+    for name in {{ postgres_legacy_container_names | join(' ') }}; do
+      if docker inspect "$name" >/dev/null 2>&1; then
+        docker rm -f "$name"
+        changed=1
+      fi
+    done
+    if [ "$changed" -eq 1 ]; then echo changed; fi
+  args:
+    executable: /bin/bash
+  register: _pg_legacy_containers_removed
+  changed_when: "'changed' in _pg_legacy_containers_removed.stdout"
+  when: _pg_legacy_vol_inspect.rc == 0
+
+- name: Check whether new postgres Docker volume is empty
+  ansible.builtin.command:
+    cmd: >-
+      docker run --rm -v {{ postgres_volume_name }}:/data alpine
+      sh -c 'test -z "$(ls -A /data 2>/dev/null)"'
+  register: _pg_new_vol_empty
+  changed_when: false
+  failed_when: false
+  when: _pg_legacy_vol_inspect.rc == 0
+
+- name: Migrate legacy postgres Docker volume data
+  ansible.builtin.command:
+    cmd: >-
+      docker run --rm
+      -v {{ postgres_legacy_volume_name }}:/from:ro
+      -v {{ postgres_volume_name }}:/to
+      alpine sh -c 'cp -a /from/. /to/'
+  when:
+    - _pg_legacy_vol_inspect.rc == 0
+    - _pg_new_vol_empty is not skipped
+    - _pg_new_vol_empty.rc == 0
+  register: _pg_vol_migrated
+  changed_when: _pg_vol_migrated.rc == 0
 
 - name: Inspect postgres container
   ansible.builtin.command:
@@ -120,6 +168,11 @@
     _postgres_running: false
   when: _pg_removed is changed or _pg_removed_tcp is changed
 
+- name: Pre-own postgres Docker volume data directory
+  ansible.builtin.command:
+    cmd: docker run --rm -v {{ postgres_volume_name }}:/data --user root alpine chown -R 9996:9996 /data
+  when: not _postgres_container_exists | bool
+
 - name: Build docker run argument list
   ansible.builtin.set_fact:
     _docker_run_args: "{{ _docker_run_base + (_docker_run_port if postgres_expose_port | bool else []) + [postgres_image] }}"
@@ -130,6 +183,8 @@
       - "--restart"
       - "unless-stopped"
       - "-d"
+      - "--user"
+      - "{{ postgres_container_uid }}:{{ postgres_container_gid }}"
       - "-v"
       - "{{ postgres_volume_name }}:/var/lib/postgresql"
       - "--network"

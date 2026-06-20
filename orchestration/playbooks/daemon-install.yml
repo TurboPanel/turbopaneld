@@ -13,6 +13,8 @@
     turbopanel_install_root: /opt/turbopanel
     turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/runtimes"
     turbopanel_daemon_dir: "{{ turbopanel_install_root }}/platform/daemon"
+    turbopanel_config_dir: "{{ turbopanel_install_root }}/platform/config"
+    turbopanel_daemon_state_dir: "{{ turbopanel_install_root }}/platform/daemon/state"
     turbopanel_user: turbopanel
     turbopanel_group: turbopanel
     turbopanel_uid: 9999

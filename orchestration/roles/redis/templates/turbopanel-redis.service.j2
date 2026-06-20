@@ -6,7 +6,7 @@ After=network.target
 Type=simple
 User={{ redis_user }}
 Group={{ turbopanel_group }}
-ExecStart={{ turbopanel_runtimes_dir }}/redis/current/bin/redis-server /etc/turbopanel/redis/redis.conf
+ExecStart={{ turbopanel_runtimes_dir }}/redis/current/bin/redis-server {{ turbopanel_config_dir }}/redis/redis.conf
 Restart=always
 RestartSec=2
 

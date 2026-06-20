@@ -7,7 +7,7 @@ Requires=docker.service
 Type=oneshot
 RemainAfterExit=yes
 ExecStartPre=-/usr/bin/docker network create {{ turbopanel_docker_network }}
-ExecStart=/etc/turbopanel/rabbitmq/wrapper-start.sh
+ExecStart={{ turbopanel_config_dir }}/rabbitmq/wrapper-start.sh
 ExecStop=/usr/bin/docker stop -t 10 {{ rabbitmq_container_name }}
 
 [Install]

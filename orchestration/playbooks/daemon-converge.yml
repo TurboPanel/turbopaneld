@@ -11,7 +11,7 @@
   vars:
     turbopanel_install_root: /opt/turbopanel
     turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/runtimes"
-    turbopanel_config_dir: /etc/turbopanel
+    turbopanel_config_dir: /opt/turbopanel/platform/config
     turbopanel_dev_user: ""
     postgres_expose_port: false
     rabbitmq_amqp_port: 5672

@@ -33,6 +33,7 @@
     mode: "0750"
   loop:
     - "{{ turbopanel_install_root }}/platform"
+    - "{{ turbopanel_install_root }}/platform/config"
     - "{{ turbopanel_runtimes_dir }}"
     - "{{ turbopanel_runtimes_dir }}/uv"
     - "{{ turbopanel_runtimes_dir }}/python"

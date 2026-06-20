@@ -1,11 +1,42 @@
 ---
+- name: Check for staged license credentials
+  ansible.builtin.stat:
+    path: "{{ turbopanel_daemon_license_staging_dir }}/license.id"
+  register: _staged_license_id
+
 - name: Ensure daemon state directory
   ansible.builtin.file:
-    path: "{{ turbopanel_daemon_state_dir | default('/etc/turbopanel/platform/daemon') }}"
+    path: "{{ turbopanel_daemon_state_dir | default('/opt/turbopanel/platform/daemon/state') }}"
     state: directory
     owner: "{{ turbopanel_user }}"
     group: "{{ turbopanel_group }}"
     mode: "0750"
+
+- name: Install staged license credentials into daemon state directory
+  when: _staged_license_id.stat.exists
+  block:
+    - name: Copy staged license.id into daemon state directory
+      ansible.builtin.copy:
+        src: "{{ turbopanel_daemon_license_staging_dir }}/license.id"
+        dest: "{{ turbopanel_daemon_state_dir | default('/opt/turbopanel/platform/daemon/state') }}/license.id"
+        remote_src: true
+        owner: "{{ turbopanel_user }}"
+        group: "{{ turbopanel_group }}"
+        mode: "0640"
+
+    - name: Copy staged license.token into daemon state directory
+      ansible.builtin.copy:
+        src: "{{ turbopanel_daemon_license_staging_dir }}/license.token"
+        dest: "{{ turbopanel_daemon_state_dir | default('/opt/turbopanel/platform/daemon/state') }}/license.token"
+        remote_src: true
+        owner: "{{ turbopanel_user }}"
+        group: "{{ turbopanel_group }}"
+        mode: "0640"
+
+    - name: Remove staged license credentials
+      ansible.builtin.file:
+        path: "{{ turbopanel_daemon_license_staging_dir }}"
+        state: absent
 
 - name: Ensure platform CA directory
   when: turbopanel_instance_ca | length > 0

@@ -1,6 +1,5 @@
 ---
-daemon_log_dir: /var/log/turbopanel/daemon
+daemon_log_dir: /opt/turbopanel/platform/daemon/logs
 daemon_log_owner: turbopanel
 daemon_log_group: turbopanel
 daemon_log_dir_mode: "0750"
-daemon_logrotate_rotate: 14

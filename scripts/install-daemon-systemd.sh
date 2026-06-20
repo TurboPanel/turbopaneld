@@ -43,5 +43,5 @@ systemctl enable --now turbopanel-daemon
 
 echo "turbopanel-daemon service installed and started"
 echo "status: sudo systemctl status turbopanel-daemon"
-echo "logs:   sudo tail -f /var/log/turbopanel/daemon/daemon.log"
+echo "logs:   tail -f /opt/turbopanel/platform/daemon/logs/daemon.log"
 echo "        sudo journalctl -u turbopanel-daemon -f"

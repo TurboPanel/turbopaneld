@@ -4,8 +4,11 @@ redis_socket_dir: /run/turbopanel
 redis_socket_name: redis.sock
 redis_socket_path: "{{ redis_socket_dir }}/{{ redis_socket_name }}"
 redis_service_name: turbopanel-redis
-redis_user: redis
+redis_legacy_group: turbopanelr
+redis_legacy_user: redis
+redis_user: turbopanelc
 redis_uid: 9997
-redis_primary_group: turbopanelr
+redis_primary_group: turbopanelc
 redis_primary_gid: 9997
 turbopanel_group: turbopanel
+turbopanel_config_dir: /opt/turbopanel/platform/config
