@@ -5,7 +5,7 @@ galaxy_info:
   description: >
     Install Docker CE via the geerlingguy.docker Galaxy role (official Docker
     apt repository, deb822 repo format), start the service, and add the
-    turbopanel user to the docker group.
+    turbopanel and co-located dev users to the docker group.
   min_ansible_version: "2.18"
   platforms:
     - name: Debian

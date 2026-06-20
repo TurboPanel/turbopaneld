@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --config=/opt/turbopanel/platform/daemon/deno.json --allow-read --allow-run --allow-env --allow-write --allow-net
+#!/usr/bin/env -S deno run --config=/opt/turbopanel/platform/daemon/deno.json --allow-read --allow-run --allow-env --allow-write
 /**
  * Runs daemon orchestration playbooks as turbopanel (invoked via sudo from the console).
  * Emits Ansible JSONL events on stdout — one JSON object per line.
@@ -7,6 +7,8 @@
  * run so the turbopanel user can execute it without reading the developer checkout.
  */
 const TURBOPANEL_ROOT = "/opt/turbopanel";
+/** Run playbooks outside daemon checkout so git as turbopanel does not walk into dev-owned .git */
+const ANSIBLE_PLAYBOOK_CWD = TURBOPANEL_ROOT;
 const TURBOPANEL_PLATFORM = `${TURBOPANEL_ROOT}/platform`;
 const RUNTIMES_DIR = `${TURBOPANEL_ROOT}/runtimes`;
 const ANSIBLE_PLAYBOOK_BIN =
@@ -48,6 +50,7 @@ function applyDaemonEnvToProcess(): void {
 }
 
 applyDaemonEnvToProcess();
+
 
 function ansiblePlaybookEnv(): Record<string, string> {
   return {
@@ -116,7 +119,7 @@ async function runInstanceDevInstall(): Promise<void> {
     ANSIBLE_PLAYBOOK_BIN,
     ["-i", "localhost,", "-c", "local", ...devInstanceExtraArgs(), INSTANCE_DEV_INSTALL_PLAYBOOK],
     {
-      cwd: DAEMON_ORCHESTRATION_DIR,
+      cwd: ANSIBLE_PLAYBOOK_CWD,
       env: ansiblePlaybookEnv(),
       onEvent: emitEvent,
     },
@@ -168,7 +171,7 @@ async function runPlaybook(): Promise<void> {
     ANSIBLE_PLAYBOOK_BIN,
     ["-i", "localhost,", "-c", "local", ...extraArgs, playbook],
     {
-      cwd: DAEMON_ORCHESTRATION_DIR,
+      cwd: ANSIBLE_PLAYBOOK_CWD,
       env: ansiblePlaybookEnv(),
       onEvent: emitEvent,
     },

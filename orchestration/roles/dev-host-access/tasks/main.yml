@@ -18,6 +18,7 @@
           {{ turbopanel_dev_user }} ALL=(root) NOPASSWD: /usr/bin/mkdir, /bin/mkdir
           {{ turbopanel_dev_user }} ALL=(root) NOPASSWD: /usr/local/bin/deno
           {{ turbopanel_dev_user }} ALL=(root) NOPASSWD: /usr/bin/systemctl, /bin/systemctl
+          {{ turbopanel_dev_user }} ALL=(root) NOPASSWD: /usr/bin/journalctl
 
     - name: Apply dev user traversal ACL on install root
       ansible.posix.acl:

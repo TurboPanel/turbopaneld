@@ -80,7 +80,7 @@ async function runLocalPlaybook(
 
   if (onEvent) {
     await runPlaybookStreaming(ANSIBLE_PLAYBOOK_BIN, args, {
-      cwd: ORCHESTRATION_DIR,
+      cwd: ANSIBLE_PLAYBOOK_CWD,
       env: ansibleEnv(),
       onEvent,
     })
@@ -88,7 +88,7 @@ async function runLocalPlaybook(
   }
 
   await runOrThrow(ANSIBLE_PLAYBOOK_BIN, args, {
-    cwd: ORCHESTRATION_DIR,
+    cwd: ANSIBLE_PLAYBOOK_CWD,
     env: ansibleEnvHumanStdout(),
   })
 }

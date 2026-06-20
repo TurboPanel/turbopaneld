@@ -114,6 +114,14 @@
       when: checkout_normalizer_script.stat.exists | default(false)
 
     # Dev runs git from the IDE; checkouts are owned by turbopanel:turbopanel (Git 2.35+).
+    - name: Ensure turbopanel owns daemon git metadata for Ansible clones
+      ansible.builtin.file:
+        path: "{{ turbopanel_daemon_dir }}/.git"
+        state: directory
+        owner: "{{ turbopanel_user }}"
+        group: "{{ turbopanel_group }}"
+        recurse: true
+
     - name: Read existing safe.directory entries for dev user
       ansible.builtin.command:
         argv: [git, config, --global, --get-all, safe.directory]

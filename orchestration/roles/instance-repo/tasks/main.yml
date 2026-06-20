@@ -54,6 +54,8 @@
     dest: "{{ turbopanel_instance_dir }}"
     version: "{{ instance_branch }}"
   become_user: "{{ turbopanel_user }}"
+  environment:
+    HOME: "{{ turbopanel_install_root }}"
   register: _instance_clone
 
 - name: Record checkout normalize needed after instance clone

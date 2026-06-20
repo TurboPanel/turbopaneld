@@ -49,6 +49,8 @@
     dest: "{{ turbopanel_ui_dir }}"
     version: "{{ ui_branch }}"
   become_user: "{{ turbopanel_user }}"
+  environment:
+    HOME: "{{ turbopanel_install_root }}"
   register: _ui_clone
 
 - name: Record checkout normalize needed after UI clone
