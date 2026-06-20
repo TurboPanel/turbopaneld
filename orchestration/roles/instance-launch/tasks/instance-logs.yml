@@ -17,3 +17,5 @@
   loop:
     - "{{ instance_log_dir }}/instance.log"
     - "{{ instance_log_dir }}/instance.err.log"
+    - "{{ instance_log_dir }}/dbstudio.log"
+    - "{{ instance_log_dir }}/dbstudio.err.log"

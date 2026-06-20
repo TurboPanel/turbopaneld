@@ -60,6 +60,7 @@ The daemon bootstraps uv/Python/ansible, then runs playbooks. Roles (in `orchest
 | `deno-runtime` / `node-runtime` / `caddy` | vendored runtimes under `runtimes/<tool>/<version>/` + `current` symlink; **no `/usr/local/bin` links** — all consumers resolve via `runtimes/<tool>/current` |
 | `redis` | Native Redis binary under `runtimes/redis/current`; dedicated **`turbopanelc`** system user (UID 9997, primary group **`turbopanelc`** GID 9997, supplementary **`turbopanel`**); Unix socket at `/run/turbopanel/redis.sock` (mode 0660, group `turbopanel`); **`port 0`** in `redis.conf` (socket-only, no TCP listener) |
 | `rabbitmq` | RabbitMQ `4-management` in Docker container **`turbopanelq`**; data in named volume **`turbopanelq`**; attached to Docker network **`turbopanel`**; generated password in `/opt/turbopanel/platform/config/rabbitmq/.rabbitmq_pass`; AMQP on `127.0.0.1:5672`; management UI on `127.0.0.1:15672`; **`turbopanel-rabbitmq.service`** wraps the container for systemd ordering |
+| `mailpit` | Dev-only Mailpit in Docker container **`turbopanelmailpit`** on network **`turbopanel`**; web UI on `127.0.0.1:19826`, SMTP on `127.0.0.1:19825`; **`turbopanel-mailpit.service`** wraps the container (co-located dev converge only — not routed through Caddy) |
 | `instance-dev-prereqs` | dev-only apt libs for React Native devtools (GTK/NSS/GBM stack; probes `*t64` renames on Debian 13+) |
 | `instance-repo` / `ui-repo` / `website-repo` | clone-if-missing checkouts (never force-reset), `pnpm install` (`website-repo` runs in Workers co-located dev only) |
 | `instance-build` | Compiles `src/deno.ts` → `dist/turbopanel-instance` single binary (when `turbopanel_instance_run_mode=compiled`); no-op in `source` mode |
@@ -103,6 +104,7 @@ Managed server daemons and co-located dev hosts run **`turbopanel-daemon.service
 |---|---|---|
 | `turbopanel-redis.service` | Redis Unix socket at `/run/turbopanel/redis.sock` (runs as **`turbopanelc:turbopanel`**) | After `network.target` |
 | `turbopanel-rabbitmq.service` | RabbitMQ Docker container (AMQP + management UI on loopback) | After `docker.service` |
+| `turbopanel-mailpit.service` | Mailpit Docker container (dev email UI + SMTP on loopback) | After `docker.service` |
 | `turbopanel-mailer.service` | RabbitMQ email consumer → SMTP | After `turbopanel-instance` and `turbopanel-rabbitmq` |
 
 ### Legacy Docker container and volume names (one-time cleanup)

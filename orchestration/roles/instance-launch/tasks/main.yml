@@ -59,6 +59,25 @@
     - Reload systemd for instance units
     - Restart turbopanel instance
 
+- name: Ensure Drizzle Studio serve script is executable
+  when: turbopanel_ui_mode == 'dev'
+  ansible.builtin.file:
+    path: "{{ turbopanel_instance_dir }}/scripts/drizzle-studio-serve.sh"
+    mode: "0755"
+  failed_when: false
+
+- name: Install Drizzle Studio systemd unit
+  when: turbopanel_ui_mode == 'dev'
+  ansible.builtin.template:
+    src: turbopanel-dbstudio.service.j2
+    dest: "/etc/systemd/system/{{ dbstudio_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd for instance units
+    - Restart turbopanel dbstudio
+
 - name: Install Caddy systemd unit
   ansible.builtin.template:
     src: turbopanel-caddy.service.j2
@@ -263,6 +282,22 @@
     daemon_reload: true
     enabled: "{{ instance_unit_enabled | bool }}"
     state: "{{ 'started' if (instance_unit_enabled | bool) else 'stopped' }}"
+
+- name: Ensure Drizzle Studio service desired state
+  when: turbopanel_ui_mode == 'dev'
+  ansible.builtin.systemd:
+    name: "{{ dbstudio_service_name }}"
+    daemon_reload: true
+    enabled: "{{ instance_unit_enabled | bool }}"
+    state: "{{ 'started' if (instance_unit_enabled | bool) else 'stopped' }}"
+
+- name: Stop and disable Drizzle Studio when not in dev UI mode
+  when: turbopanel_ui_mode != 'dev'
+  ansible.builtin.systemd:
+    name: "{{ dbstudio_service_name }}"
+    state: stopped
+    enabled: false
+  failed_when: false
 
 - name: Ensure Caddy service desired state
   ansible.builtin.systemd:

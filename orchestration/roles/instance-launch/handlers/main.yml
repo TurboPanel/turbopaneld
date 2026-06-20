@@ -36,3 +36,11 @@
     name: "{{ mailer_service_name }}"
     state: restarted
   when: instance_start | bool
+
+- name: Restart turbopanel dbstudio
+  ansible.builtin.systemd:
+    name: "{{ dbstudio_service_name }}"
+    state: restarted
+  when:
+    - instance_start | bool
+    - turbopanel_ui_mode == 'dev'
