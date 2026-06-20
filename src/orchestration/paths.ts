@@ -27,6 +27,12 @@ export const ORCHESTRATION_DIR = join(DAEMON_ROOT, 'orchestration')
 export const RUNTIMES_DIR = Deno.env.get('TURBOPANEL_RUNTIMES_DIR')?.trim() ||
   '/opt/turbopanel/runtimes'
 
+/**
+ * Working directory for ansible-playbook invocations.
+ * Outside the daemon checkout so git/ansible does not walk dev-owned `.git`.
+ */
+export const ANSIBLE_PLAYBOOK_CWD = dirname(RUNTIMES_DIR)
+
 /** Versioned directory where uv binaries are installed. */
 export const UV_INSTALL_DIR = join(RUNTIMES_DIR, 'uv', UV_VERSION)
 export const RUNTIME_BIN_DIR = UV_INSTALL_DIR
