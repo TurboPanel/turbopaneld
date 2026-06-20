@@ -16,7 +16,7 @@ Environment=TURBOPANEL_AMQP_URL={{ turbopanel_amqp_url }}
 Environment=TURBOPANEL_DATABASE_URL=postgresql://{{ postgres_user }}:{{ turbopanel_pg_password }}@/{{ postgres_db }}?host={{ postgres_socket_dir }}
 {% endif %}
 Environment=TURBOPANEL_MAILER_RATE_LIMIT_PER_MINUTE=60
-ExecStart={{ turbopanel_runtimes_dir }}/deno/current/deno run \
+ExecStart=/usr/local/bin/deno run \
   --allow-env \
   --allow-net=127.0.0.1:{{ rabbitmq_amqp_port }},127.0.0.1:{{ drizzle_studio_port | default(4983) }} \
   --allow-read={{ turbopanel_instance_dir }},{{ turbopanel_instance_runtime_dir }}{% if turbopanel_pg_password is defined %},{{ postgres_socket_dir }}{% endif %} \

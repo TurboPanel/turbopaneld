@@ -31,12 +31,12 @@
     - turbopanel_instance_run_mode == 'compiled'
     - force_compile | bool or not _instance_binary.stat.exists or (_instance_stale_check.stdout | default('') | trim | length > 0)
   ansible.builtin.command:
-    cmd: "{{ turbopanel_runtimes_dir }}/deno/current/deno task compile"
+    cmd: "/usr/local/bin/deno task compile"
     chdir: "{{ turbopanel_instance_dir }}"
   become_user: "{{ turbopanel_user }}"
   environment:
     HOME: "{{ turbopanel_install_root }}"
-    PATH: "/usr/local/bin:{{ turbopanel_runtimes_dir }}/deno/current:{{ turbopanel_runtimes_dir }}/node/current/bin:/usr/bin:/bin"
+    PATH: "/usr/local/bin:/usr/bin:/bin"
   notify: Restart turbopanel instance
   register: _instance_compile
 

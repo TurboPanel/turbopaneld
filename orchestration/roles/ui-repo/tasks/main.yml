@@ -68,12 +68,12 @@
 
 - name: Probe UI babel preset resolution
   ansible.builtin.command:
-    cmd: "{{ turbopanel_runtimes_dir }}/node/current/bin/node -e \"require('babel-preset-expo')\""
+    cmd: "/usr/local/bin/node -e \"require('babel-preset-expo')\""
     chdir: "{{ turbopanel_ui_dir }}"
   become_user: "{{ turbopanel_user }}"
   environment:
     HOME: "{{ turbopanel_install_root }}"
-    PATH: "/usr/local/bin:{{ turbopanel_runtimes_dir }}/node/current/bin:/usr/bin:/bin"
+    PATH: "/usr/local/bin:/usr/bin:/bin"
   register: _ui_babel_probe
   changed_when: false
   failed_when: false
@@ -91,7 +91,7 @@
   become_user: "{{ turbopanel_user }}"
   environment:
     HOME: "{{ turbopanel_install_root }}"
-    PATH: "/usr/local/bin:{{ turbopanel_runtimes_dir }}/node/current/bin:/usr/bin:/bin"
+    PATH: "/usr/local/bin:/usr/bin:/bin"
   register: _ui_pnpm_install
 
 - name: Record checkout normalize needed after UI pnpm install

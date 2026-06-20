@@ -16,7 +16,7 @@
           {{ turbopanel_dev_user }} ALL=(root) NOPASSWD: /usr/sbin/usermod
           {{ turbopanel_dev_user }} ALL=(root) NOPASSWD: /usr/bin/tee, /usr/bin/cp, /usr/bin/cat, /usr/bin/test
           {{ turbopanel_dev_user }} ALL=(root) NOPASSWD: /usr/bin/mkdir, /bin/mkdir
-          {{ turbopanel_dev_user }} ALL=(root) NOPASSWD: {{ turbopanel_runtimes_dir }}/deno/{{ deno_version }}/deno
+          {{ turbopanel_dev_user }} ALL=(root) NOPASSWD: /usr/local/bin/deno
           {{ turbopanel_dev_user }} ALL=(root) NOPASSWD: /usr/bin/systemctl, /bin/systemctl
 
     - name: Apply dev user traversal ACL on install root
@@ -69,59 +69,6 @@
         permissions: rx
         state: present
         default: true
-
-    - name: Apply dev user traversal ACL on deno runtime dir
-      ansible.posix.acl:
-        path: "{{ turbopanel_runtimes_dir }}/deno"
-        entity: "{{ turbopanel_dev_user }}"
-        etype: user
-        permissions: rx
-        state: present
-
-    - name: Apply default dev user traversal ACL on deno runtime dir
-      ansible.posix.acl:
-        path: "{{ turbopanel_runtimes_dir }}/deno"
-        entity: "{{ turbopanel_dev_user }}"
-        etype: user
-        permissions: rx
-        state: present
-        default: true
-
-    - name: Apply dev user traversal ACL on versioned deno dir
-      ansible.posix.acl:
-        path: "{{ turbopanel_runtimes_dir }}/deno/{{ deno_version }}"
-        entity: "{{ turbopanel_dev_user }}"
-        etype: user
-        permissions: rx
-        state: present
-
-    - name: Apply default dev user traversal ACL on versioned deno dir
-      ansible.posix.acl:
-        path: "{{ turbopanel_runtimes_dir }}/deno/{{ deno_version }}"
-        entity: "{{ turbopanel_dev_user }}"
-        etype: user
-        permissions: rx
-        state: present
-        default: true
-
-    - name: Apply dev user traversal ACL on deno current symlink
-      ansible.posix.acl:
-        path: "{{ turbopanel_runtimes_dir }}/deno/current"
-        entity: "{{ turbopanel_dev_user }}"
-        etype: user
-        permissions: rx
-        state: present
-      failed_when: false
-
-    - name: Apply default dev user traversal ACL on deno current symlink
-      ansible.posix.acl:
-        path: "{{ turbopanel_runtimes_dir }}/deno/current"
-        entity: "{{ turbopanel_dev_user }}"
-        etype: user
-        permissions: rx
-        state: present
-        default: true
-      failed_when: false
 
     - name: Apply dev user ACL on runtime socket dir
       ansible.posix.acl:

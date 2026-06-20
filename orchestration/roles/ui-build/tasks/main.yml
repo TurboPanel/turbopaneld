@@ -28,7 +28,7 @@
   become_user: "{{ turbopanel_user }}"
   environment:
     HOME: "{{ turbopanel_ui_runtime_dir }}"
-    PATH: "/usr/local/bin:{{ turbopanel_runtimes_dir }}/node/current/bin:/usr/bin:/bin"
+    PATH: "/usr/local/bin:/usr/bin:/bin"
   register: _ui_local_build
 
 - name: Download UI static export from CDN

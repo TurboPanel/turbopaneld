@@ -9,7 +9,7 @@
   become_user: "{{ instance_user }}"
   environment:
     HOME: "{{ turbopanel_instance_dir }}"
-    PATH: "/usr/local/bin:{{ turbopanel_runtimes_dir }}/node/current/bin:/usr/bin:/bin"
+    PATH: "/usr/local/bin:/usr/bin:/bin"
   changed_when: false
 
 # Caddy runs as `instance` (group turbopanel) and must read the server leaf key.

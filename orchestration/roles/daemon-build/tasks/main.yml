@@ -26,12 +26,12 @@
 - name: Compile daemon binary
   when: force_compile | bool or not _daemon_binary.stat.exists or (_daemon_stale_check.stdout | default('') | trim | length > 0)
   ansible.builtin.command:
-    cmd: "{{ turbopanel_runtimes_dir }}/deno/current/deno task compile"
+    cmd: "/usr/local/bin/deno task compile"
     chdir: "{{ turbopanel_daemon_dir }}"
   become_user: "{{ turbopanel_user }}"
   environment:
     HOME: "{{ turbopanel_install_root }}"
-    PATH: "/usr/local/bin:{{ turbopanel_runtimes_dir }}/deno/current:/usr/bin:/bin"
+    PATH: "/usr/local/bin:/usr/bin:/bin"
   register: _daemon_compile
 
 - name: Set compiled daemon binary ownership

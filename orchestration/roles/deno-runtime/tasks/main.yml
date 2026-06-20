@@ -1,26 +1,18 @@
 ---
-- name: Check vendored Deno binary
+- name: Check system Deno binary
   ansible.builtin.stat:
-    path: "{{ turbopanel_runtimes_dir }}/deno/{{ deno_version }}/deno"
-  register: _deno_pinned
+    path: /usr/local/bin/deno
+  register: _deno_system
 
-- name: Install Deno into runtimes directory
-  when: not _deno_pinned.stat.exists
+- name: Install Deno to /usr/local/bin/deno
+  when: not _deno_system.stat.exists
   ansible.builtin.shell: |
     set -euo pipefail
     DENO_TMP="{{ turbopanel_runtimes_dir }}/deno/.install"
     rm -rf "$DENO_TMP"
     mkdir -p "$DENO_TMP"
     curl -fsSL https://deno.land/install.sh | DENO_INSTALL="$DENO_TMP" sh -s "v{{ deno_version }}" -- -y --no-modify-path
-    install -d -m 0755 "{{ turbopanel_runtimes_dir }}/deno/{{ deno_version }}"
-    mv "$DENO_TMP/bin/deno" "{{ turbopanel_runtimes_dir }}/deno/{{ deno_version }}/deno"
+    install -m 0755 "$DENO_TMP/bin/deno" /usr/local/bin/deno
     rm -rf "$DENO_TMP"
   args:
-    creates: "{{ turbopanel_runtimes_dir }}/deno/{{ deno_version }}/deno"
-
-- name: Point Deno current symlink at pinned version
-  ansible.builtin.file:
-    src: "{{ turbopanel_runtimes_dir }}/deno/{{ deno_version }}"
-    dest: "{{ turbopanel_runtimes_dir }}/deno/current"
-    state: link
-    force: true
+    creates: /usr/local/bin/deno

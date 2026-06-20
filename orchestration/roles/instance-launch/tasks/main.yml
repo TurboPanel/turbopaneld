@@ -187,7 +187,7 @@
       set -euo pipefail
       f='{{ turbopanel_config_dir }}/instance/.wrangler_secret'
       if [ ! -s "$f" ]; then
-        {{ turbopanel_runtimes_dir }}/node/current/bin/node \
+        /usr/local/bin/node \
           {{ turbopanel_instance_dir }}/scripts/generate-secret.mjs > "$f"
         chmod 0600 "$f"
         chown root:root "$f"
