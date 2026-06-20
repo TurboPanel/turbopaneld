@@ -1,4 +1,5 @@
 import { DAEMON_ROOT } from './orchestration/paths.ts'
+import { logWarn } from './logger.ts'
 
 /** Accumulator for an in-flight dev-sync transfer (base64 chunks by index). */
 export interface DevSyncState {
@@ -41,8 +42,9 @@ export async function applyDevSyncTarball(bytes: Uint8Array): Promise<void> {
     })
     const cacheOut = await cache.output()
     if (!cacheOut.success) {
-      console.warn(
-        '[dev-sync] deno cache warning:',
+      logWarn(
+        'dev-sync',
+        'deno cache warning:',
         new TextDecoder().decode(cacheOut.stderr).trim(),
       )
     }

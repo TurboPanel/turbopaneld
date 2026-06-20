@@ -1,6 +1,7 @@
 import { encodeHex } from '@std/encoding/hex'
 import { join } from '@std/path'
 import { run } from './exec.ts'
+import { logInfo, logWarn } from '../logger.ts'
 import {
   RUNTIME_BIN_DIR,
   RUNTIMES_DIR,
@@ -49,7 +50,7 @@ async function repointUvCurrent(): Promise<void> {
     await Deno.remove(UV_CURRENT_DIR)
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) {
-      console.warn('[orchestration] could not replace uv current symlink:', err)
+      logWarn('orchestration', 'could not replace uv current symlink:', err)
       return
     }
   }
@@ -57,7 +58,7 @@ async function repointUvCurrent(): Promise<void> {
     await Deno.mkdir(join(RUNTIMES_DIR, 'uv'), { recursive: true })
     await Deno.symlink(RUNTIME_BIN_DIR, UV_CURRENT_DIR, { type: 'dir' })
   } catch (err) {
-    console.warn('[orchestration] could not create uv current symlink:', err)
+    logWarn('orchestration', 'could not create uv current symlink:', err)
   }
 }
 
@@ -71,19 +72,20 @@ async function repointUvCurrent(): Promise<void> {
 export async function ensureUv(): Promise<void> {
   const current = await installedUvVersion()
   if (current === UV_VERSION) {
-    console.log(`[orchestration] uv ${UV_VERSION} already installed`)
+    logInfo('orchestration', `uv ${UV_VERSION} already installed`)
     await repointUvCurrent()
     return
   }
   if (current) {
-    console.log(
-      `[orchestration] uv ${current} found, replacing with pinned ${UV_VERSION}`,
+    logInfo(
+      'orchestration',
+      `uv ${current} found, replacing with pinned ${UV_VERSION}`,
     )
   }
 
   const { asset } = resolveUvTarget()
   const url = uvDownloadUrl(asset)
-  console.log(`[orchestration] downloading uv ${UV_VERSION} from ${url}`)
+  logInfo('orchestration', `downloading uv ${UV_VERSION} from ${url}`)
 
   const [archiveBytes, expectedSha] = await Promise.all([
     fetchBytes(url),
@@ -96,7 +98,7 @@ export async function ensureUv(): Promise<void> {
       `uv archive checksum mismatch.\n  expected: ${expectedSha}\n  actual:   ${actualSha}`,
     )
   }
-  console.log('[orchestration] uv archive checksum verified')
+  logInfo('orchestration', 'uv archive checksum verified')
 
   await Deno.mkdir(RUNTIME_BIN_DIR, { recursive: true })
   await extractUv(archiveBytes, asset)
@@ -108,7 +110,7 @@ export async function ensureUv(): Promise<void> {
     )
   }
   await repointUvCurrent()
-  console.log(`[orchestration] uv ${UV_VERSION} installed at ${UV_BIN}`)
+  logInfo('orchestration', `uv ${UV_VERSION} installed at ${UV_BIN}`)
 }
 
 async function fetchBytes(url: string): Promise<Uint8Array> {

@@ -6,6 +6,7 @@ import {
 import { ensurePython } from './python.ts'
 import { ensureUv } from './uv.ts'
 import { resolveInstanceConfig } from '../instance/paths.ts'
+import { logError, logInfo } from '../logger.ts'
 
 /**
  * True when Tilt/local dev already manages the instance stack and the daemon
@@ -78,12 +79,12 @@ function shouldRunDaemonConverge(): boolean {
  */
 export async function initOrchestration(): Promise<boolean> {
   if (shouldSkipOrchestration()) {
-    console.log('[orchestration] skipped (TURBOPANEL_SKIP_ORCHESTRATION)')
+    logInfo('orchestration', 'skipped (TURBOPANEL_SKIP_ORCHESTRATION)')
     return false
   }
 
   const started = performance.now()
-  console.log('[orchestration] bootstrapping runtime')
+  logInfo('orchestration', 'bootstrapping runtime')
   const devInstance = shouldInstallDevInstance()
   const preOptInDev = isPreOptInCoLocatedDev()
   const steps: Array<[string, () => Promise<void>]> = [
@@ -96,21 +97,19 @@ export async function initOrchestration(): Promise<boolean> {
   } else if (shouldRunDaemonConverge()) {
     steps.push(['runDaemonConverge', runDaemonConverge])
   } else if (preOptInDev) {
-    console.log(
-      '[orchestration] co-located dev host awaiting opt-in (TURBOPANEL_DEV_INSTANCE); skipping converge',
-    )
+    logInfo('orchestration', 'co-located dev host awaiting opt-in (TURBOPANEL_DEV_INSTANCE); skipping converge')
   }
   try {
     for (const [, step] of steps) {
       await step()
     }
     const elapsed = ((performance.now() - started) / 1000).toFixed(1)
-    console.log(`[orchestration] runtime ready in ${elapsed}s`)
+    logInfo('orchestration', `runtime ready in ${elapsed}s`)
     return true
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    console.error('[orchestration] bootstrap failed:', message)
-    console.error('[orchestration] daemon will continue running without a verified runtime')
+    logError('orchestration', 'bootstrap failed:', message)
+    logError('orchestration', 'daemon will continue running without a verified runtime')
     return false
   }
 }

@@ -1,5 +1,6 @@
 import { DockerClient, DockerMonitor } from './src/docker/index.ts'
 import { connectInstance } from './src/instance/client.ts'
+import { logInfo, logWarn } from './src/logger.ts'
 import {
   initOrchestration,
   shouldConnectToInstance,
@@ -7,7 +8,7 @@ import {
 } from './src/orchestration/setup.ts'
 import { startTunnels } from './src/tunnels.ts'
 
-console.log('Hello from turbopanel-daemon')
+logInfo('daemon', 'Hello from turbopanel-daemon')
 
 const orchestrationReady = await initOrchestration()
 
@@ -17,9 +18,7 @@ let dockerClient: DockerClient | undefined
 if (orchestrationReady && shouldEnableDockerIntegration()) {
   dockerClient = new DockerClient()
   if (!(await dockerClient.ping())) {
-    console.warn(
-      '[docker] Docker socket not reachable yet — monitor will retry on each poll',
-    )
+    logWarn('docker', 'Docker socket not reachable yet — monitor will retry on each poll')
   }
   const dockerMonitor = new DockerMonitor(dockerClient)
   dockerMonitor.start(abort.signal)
@@ -37,9 +36,7 @@ let instance: { stop(): void } = instanceHandle
 if (shouldConnectToInstance()) {
   instance = await connectInstance({})
 } else {
-  console.log(
-    '[instance] connection deferred until development environment opt-in (TURBOPANEL_DEV_INSTANCE)',
-  )
+  logInfo('instance', 'connection deferred until development environment opt-in (TURBOPANEL_DEV_INSTANCE)')
 }
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {

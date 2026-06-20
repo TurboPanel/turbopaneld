@@ -9,6 +9,7 @@ import {
 import { collectServerAddresses } from '../server-addresses.ts'
 import { applyDevSyncTarball, type DevSyncState, newDevSyncState } from '../dev-sync-apply.ts'
 import { writeInstanceTunnelToken } from '../tunnels.ts'
+import { logError, logInfo, logWarn } from '../logger.ts'
 import { decodeBase64 } from '@std/encoding/base64'
 import { join } from '@std/path'
 
@@ -173,7 +174,7 @@ async function writeServerId(serverId: string): Promise<void> {
     await Deno.mkdir(dir, { recursive: true })
     await Deno.writeTextFile(`${dir}/${SERVER_ID_FILE}`, `${trimmed}\n`)
   } catch (err) {
-    console.warn('[instance] failed to persist server id:', sanitizeForLog(err))
+    logWarn('instance', 'failed to persist server id:', sanitizeForLog(err))
   }
 }
 
@@ -257,8 +258,9 @@ export class InstanceClient {
     this.#connectLoopStarted = true
     this.#stopped = false
     this.#runConnectLoop().catch((err) => {
-      console.warn(
-        '[instance] connect loop exited unexpectedly:',
+      logWarn(
+        'instance',
+        'connect loop exited unexpectedly:',
         sanitizeForLog(err),
       )
     })
@@ -282,8 +284,9 @@ export class InstanceClient {
       try {
         await this.#connectOnce()
       } catch (err) {
-        console.warn(
-          '[instance] websocket connect failed:',
+        logWarn(
+          'instance',
+          'websocket connect failed:',
           sanitizeForLog(err),
         )
         this.#closeActiveSocket()
@@ -354,7 +357,7 @@ export class InstanceClient {
       ws.addEventListener('close', onClose)
     })
 
-    console.log('[instance] websocket connected via', sanitizeForLog(this.target))
+    logInfo('instance', 'websocket connected via', sanitizeForLog(this.target))
 
     const [serverId, machineId, licenseCredentials] = await Promise.all([
       readServerId(),
@@ -378,7 +381,7 @@ export class InstanceClient {
         : String(event.data)
       const message = parseMessage(raw)
       if (!message) {
-        console.warn('[instance] ignored non-JSON websocket message')
+        logWarn('instance', 'ignored non-JSON websocket message')
         return
       }
 
@@ -387,7 +390,7 @@ export class InstanceClient {
     }
 
     ws.onclose = () => {
-      console.log('[instance] websocket closed')
+      logInfo('instance', 'websocket closed')
       if (this.#ws === ws) this.#ws = undefined
     }
 
@@ -402,8 +405,9 @@ export class InstanceClient {
         if (message.from === 'instance' && message.serverId) {
           void writeServerId(message.serverId)
         }
-        console.log(
-          '[instance] hello from',
+        logInfo(
+          'instance',
+          'hello from',
           sanitizeForLog(message.from),
           sanitizeForLog(message.hostname ?? message.serverId ?? '(no identity)'),
           'at',
@@ -420,14 +424,14 @@ export class InstanceClient {
         ))
         break
       case 'pong':
-        console.log('[instance] pong', sanitizeForLog(message.id))
+        logInfo('instance', 'pong', sanitizeForLog(message.id))
         break
       case 'version':
         // Informational only. The daemon never self-updates; updates are
         // operator-driven via the developer upgrade button / dev-sync push.
         break
       case 'echo':
-        console.log('[instance] echo from instance:', sanitizeForLog(message.payload))
+        logInfo('instance', 'echo from instance:', sanitizeForLog(message.payload))
         ws.send(JSON.stringify(
           {
             type: 'echo',
@@ -438,8 +442,9 @@ export class InstanceClient {
         break
       case 'command':
         this.#runCommand(message, ws).catch((err) => {
-          console.warn(
-            '[instance] command handler failed:',
+          logWarn(
+            'instance',
+            'command handler failed:',
             sanitizeForLog(err),
           )
         })
@@ -457,23 +462,25 @@ export class InstanceClient {
       }
       case 'dev-sync-end':
         this.#applyDevSync(message.id, ws).catch((err) => {
-          console.warn(
-            '[instance] dev-sync handler failed:',
+          logWarn(
+            'instance',
+            'dev-sync handler failed:',
             sanitizeForLog(err),
           )
         })
         break
       case 'tunnel-token':
         this.#applyTunnelToken(message, ws).catch((err) => {
-          console.warn(
-            '[instance] tunnel-token handler failed:',
+          logWarn(
+            'instance',
+            'tunnel-token handler failed:',
             sanitizeForLog(err),
           )
         })
         break
       case 'update':
         this.#applyUpdate(message, ws).catch((err) => {
-          console.warn('[instance] update handler failed:', sanitizeForLog(err))
+          logWarn('instance', 'update handler failed:', sanitizeForLog(err))
         })
         break
     }
@@ -492,7 +499,7 @@ export class InstanceClient {
       ok = true
     } catch (err) {
       error = err instanceof Error ? err.message : String(err)
-      console.error('[dev-sync] failed:', sanitizeForLog(error))
+      logError('dev-sync', 'failed:', sanitizeForLog(error))
     }
 
     const result: DaemonMessage = {
@@ -520,7 +527,7 @@ export class InstanceClient {
       ok = true
     } catch (err) {
       error = err instanceof Error ? err.message : String(err)
-      console.error('[tunnel-token] failed:', sanitizeForLog(error))
+      logError('tunnel-token', 'failed:', sanitizeForLog(error))
     }
 
     const result: DaemonMessage = {
@@ -557,7 +564,7 @@ export class InstanceClient {
       ok = true
     } catch (err) {
       error = err instanceof Error ? err.message : String(err)
-      console.error('[update] failed:', sanitizeForLog(error))
+      logError('update', 'failed:', sanitizeForLog(error))
     }
 
     const result: DaemonMessage = {
@@ -582,8 +589,9 @@ export class InstanceClient {
     try {
       addresses = collectServerAddresses()
     } catch (err) {
-      console.warn(
-        '[instance] collect addresses failed:',
+      logWarn(
+        'instance',
+        'collect addresses failed:',
         sanitizeForLog(err),
       )
       addresses = {
@@ -616,7 +624,7 @@ export class InstanceClient {
     message: Extract<DaemonMessage, { type: 'command' }>,
     ws: WebSocket,
   ): Promise<void> {
-    console.log('[instance] run command:', stripLogInjection(message.command))
+    logInfo('instance', 'run command:', stripLogInjection(message.command))
     let result: Extract<DaemonMessage, { type: 'command-result' }>
     try {
       const command = new Deno.Command('sh', {
@@ -670,10 +678,10 @@ async function restartDaemonService(): Promise<void> {
       const safeStderr = stripLogInjection(
         new TextDecoder().decode(result.stderr).trim() || 'unknown error',
       )
-      console.warn('[dev-sync] systemctl restart', safeUnit, 'failed:', safeStderr)
+      logWarn('dev-sync', 'systemctl restart', safeUnit, 'failed:', safeStderr)
     }
   } catch (err) {
-    console.warn('[dev-sync] restart failed:', sanitizeForLog(err))
+    logWarn('dev-sync', 'restart failed:', sanitizeForLog(err))
   }
 }
 
@@ -698,8 +706,9 @@ export async function connectInstance(
   while (true) {
     try {
       const health = await client.fetchHealth()
-      console.log(
-        '[instance] REST health:',
+      logInfo(
+        'instance',
+        'REST health:',
         sanitizeForLog(health),
         'via',
         sanitizeForLog(client.target),
@@ -707,8 +716,9 @@ export async function connectInstance(
       break
     } catch {
       if (!waitingLogged) {
-        console.log(
-          '[instance] waiting for instance to become available via',
+        logInfo(
+          'instance',
+          'waiting for instance to become available via',
           sanitizeForLog(client.target),
         )
         waitingLogged = true

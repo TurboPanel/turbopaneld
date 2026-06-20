@@ -1,4 +1,5 @@
 import type { ContainerSummary, DockerClient } from './client.ts'
+import { logInfo, logWarn } from '../logger.ts'
 
 export class DockerMonitor {
   #client: DockerClient
@@ -28,12 +29,14 @@ export class DockerMonitor {
             return `${name}=${c.State}`
           })
           .join(', ')
-        console.log(
-          `[docker-monitor] ${this.#containers.length} containers: ${summary}`,
+        logInfo(
+          'docker-monitor',
+          `${this.#containers.length} containers: ${summary}`,
         )
       } catch (err) {
-        console.warn(
-          '[docker-monitor] poll failed:',
+        logWarn(
+          'docker-monitor',
+          'poll failed:',
           err instanceof Error ? err.message : err,
         )
       }

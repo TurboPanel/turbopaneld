@@ -6,6 +6,7 @@ import {
   cloudflaredDownloadUrl,
   resolveCloudflaredAsset,
 } from './paths.ts'
+import { logError, logInfo, logWarn } from '../logger.ts'
 
 async function fileExists(path: string): Promise<boolean> {
   try {
@@ -55,14 +56,14 @@ async function repointCurrent(version = CLOUDFLARED_VERSION): Promise<void> {
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) {
       // A non-symlink (e.g. real dir) is unexpected; leave it and continue.
-      console.warn('[cloudflared] could not replace current symlink:', err)
+      logWarn('cloudflared', 'could not replace current symlink:', err)
       return
     }
   }
   try {
     await Deno.symlink(cloudflaredDir(version), CLOUDFLARED_CURRENT_DIR)
   } catch (err) {
-    console.warn('[cloudflared] could not create current symlink:', err)
+    logWarn('cloudflared', 'could not create current symlink:', err)
   }
 }
 
@@ -80,14 +81,14 @@ export async function ensureCloudflared(): Promise<string> {
 
   const current = await installedCloudflaredVersion(bin)
   if (current === CLOUDFLARED_VERSION) {
-    console.log(`[cloudflared] ${CLOUDFLARED_VERSION} already installed`)
+    logInfo('cloudflared', `${CLOUDFLARED_VERSION} already installed`)
     await repointCurrent()
     return bin
   }
 
   const asset = resolveCloudflaredAsset()
   const url = cloudflaredDownloadUrl(asset)
-  console.log(`[cloudflared] downloading ${CLOUDFLARED_VERSION} from ${url}`)
+  logInfo('cloudflared', `downloading ${CLOUDFLARED_VERSION} from ${url}`)
   const bytes = await fetchBytes(url)
 
   await Deno.mkdir(cloudflaredDir(), { recursive: true })
@@ -104,6 +105,6 @@ export async function ensureCloudflared(): Promise<string> {
   }
 
   await repointCurrent()
-  console.log(`[cloudflared] ${CLOUDFLARED_VERSION} installed at ${bin}`)
+  logInfo('cloudflared', `${CLOUDFLARED_VERSION} installed at ${bin}`)
   return bin
 }

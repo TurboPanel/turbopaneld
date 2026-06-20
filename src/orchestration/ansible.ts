@@ -10,6 +10,7 @@ import {
   writeBootstrapStamp,
 } from './bootstrap-stamp.ts'
 import { join } from '@std/path'
+import { logInfo, logWarn } from '../logger.ts'
 import {
   ansibleEnv,
   ansibleEnvHumanStdout,
@@ -61,14 +62,14 @@ async function repointAnsibleCurrent(): Promise<void> {
     await Deno.remove(ANSIBLE_CURRENT_DIR)
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) {
-      console.warn('[orchestration] could not replace ansible current symlink:', err)
+      logWarn('orchestration', 'could not replace ansible current symlink:', err)
       return
     }
   }
   try {
     await Deno.symlink(ANSIBLE_INSTALL_DIR, ANSIBLE_CURRENT_DIR, { type: 'dir' })
   } catch (err) {
-    console.warn('[orchestration] could not create ansible current symlink:', err)
+    logWarn('orchestration', 'could not create ansible current symlink:', err)
   }
 }
 
@@ -127,15 +128,15 @@ function devInstanceExtraArgs(): string[] {
  */
 export async function ensureAnsible(): Promise<void> {
   if (await ansiblePlaybookWorks()) {
-    console.log('[orchestration] ansible already installed, skipping setup')
+    logInfo('orchestration', 'ansible already installed, skipping setup')
     await repointAnsibleCurrent()
     return
   }
 
-  console.log(`[orchestration] creating venv at ${VENV_DIR}`)
+  logInfo('orchestration', `creating venv at ${VENV_DIR}`)
   await runOrThrow(UV_BIN, ['venv', '--python', PYTHON_VERSION, VENV_DIR])
 
-  console.log(`[orchestration] installing packages from ${REQUIREMENTS_FILE}`)
+  logInfo('orchestration', `installing packages from ${REQUIREMENTS_FILE}`)
   await runOrThrow(UV_BIN, [
     'pip',
     'install',
@@ -149,7 +150,7 @@ export async function ensureAnsible(): Promise<void> {
     throw new Error('ansible install verification failed: ansible-playbook not runnable')
   }
   await repointAnsibleCurrent()
-  console.log('[orchestration] ansible installed')
+  logInfo('orchestration', 'ansible installed')
 }
 
 /**
@@ -166,21 +167,21 @@ export async function ensureGalaxyRoles(): Promise<void> {
   const stamp = await computeBootstrapStamp()
   const storedStamp = await readBootstrapStamp()
   if (storedStamp === stamp && await galaxyContentPresent()) {
-    console.log('[orchestration] galaxy content up to date, skipping install')
+    logInfo('orchestration', 'galaxy content up to date, skipping install')
     return
   }
 
   const galaxyBin = join(VENV_BIN_DIR, 'ansible-galaxy')
 
-  console.log(`[orchestration] installing galaxy roles from ${GALAXY_REQUIREMENTS_FILE}`)
+  logInfo('orchestration', `installing galaxy roles from ${GALAXY_REQUIREMENTS_FILE}`)
   await runOrThrow(
     galaxyBin,
     ['role', 'install', '-r', GALAXY_REQUIREMENTS_FILE, '-p', GALAXY_ROLES_DIR],
     { stream: true },
   )
-  console.log('[orchestration] galaxy roles ready')
+  logInfo('orchestration', 'galaxy roles ready')
 
-  console.log(`[orchestration] installing galaxy collections from ${GALAXY_REQUIREMENTS_FILE}`)
+  logInfo('orchestration', `installing galaxy collections from ${GALAXY_REQUIREMENTS_FILE}`)
   await runOrThrow(
     galaxyBin,
     [
@@ -193,16 +194,16 @@ export async function ensureGalaxyRoles(): Promise<void> {
     ],
     { stream: true },
   )
-  console.log('[orchestration] galaxy collections ready')
+  logInfo('orchestration', 'galaxy collections ready')
 }
 
 /**
  * Run the localhost smoke-test playbook to confirm the runtime is operational.
  */
 export async function runLocalhostTest(onEvent?: AnsibleEventHandler): Promise<void> {
-  console.log('[orchestration] running localhost smoke-test playbook')
+  logInfo('orchestration', 'running localhost smoke-test playbook')
   await runLocalPlaybook(LOCALHOST_PLAYBOOK, [], onEvent)
-  console.log('[orchestration] localhost smoke-test passed')
+  logInfo('orchestration', 'localhost smoke-test passed')
 }
 
 /**
@@ -210,9 +211,9 @@ export async function runLocalhostTest(onEvent?: AnsibleEventHandler): Promise<v
  */
 export async function runDaemonConverge(onEvent?: AnsibleEventHandler): Promise<void> {
   const args = devInstanceExtraArgs()
-  console.log('[orchestration] running daemon-converge playbook')
+  logInfo('orchestration', 'running daemon-converge playbook')
   await runLocalPlaybook(DAEMON_CONVERGE_PLAYBOOK, args, onEvent)
-  console.log('[orchestration] daemon-converge complete')
+  logInfo('orchestration', 'daemon-converge complete')
 }
 
 /**
@@ -220,9 +221,9 @@ export async function runDaemonConverge(onEvent?: AnsibleEventHandler): Promise<
  * across reboots via systemd-tmpfiles.
  */
 export async function runSocketDirsSetup(onEvent?: AnsibleEventHandler): Promise<void> {
-  console.log('[orchestration] running socket-dirs-setup playbook')
+  logInfo('orchestration', 'running socket-dirs-setup playbook')
   await runLocalPlaybook(SOCKET_DIRS_PLAYBOOK, [], onEvent)
-  console.log('[orchestration] socket-dirs-setup complete')
+  logInfo('orchestration', 'socket-dirs-setup complete')
 }
 
 /**
@@ -230,9 +231,9 @@ export async function runSocketDirsSetup(onEvent?: AnsibleEventHandler): Promise
  * systemd-tmpfiles, and install logrotate for daemon.log / daemon.err.log.
  */
 export async function runDaemonLogsSetup(onEvent?: AnsibleEventHandler): Promise<void> {
-  console.log('[orchestration] running daemon-logs-setup playbook')
+  logInfo('orchestration', 'running daemon-logs-setup playbook')
   await runLocalPlaybook(DAEMON_LOGS_PLAYBOOK, [], onEvent)
-  console.log('[orchestration] daemon-logs-setup complete')
+  logInfo('orchestration', 'daemon-logs-setup complete')
 }
 
 async function coLocatedInstanceServiceEnabled(): Promise<boolean> {
@@ -253,8 +254,9 @@ async function coLocatedInstanceServiceEnabled(): Promise<boolean> {
  */
 export async function runDaemonSystemdSetup(onEvent?: AnsibleEventHandler): Promise<void> {
   const afterInstance = await coLocatedInstanceServiceEnabled()
-  console.log(
-    `[orchestration] running daemon-systemd-setup playbook (after_instance=${afterInstance})`,
+  logInfo(
+    'orchestration',
+    `running daemon-systemd-setup playbook (after_instance=${afterInstance})`,
   )
   const args = [
     '-i',
@@ -279,7 +281,7 @@ export async function runDaemonSystemdSetup(onEvent?: AnsibleEventHandler): Prom
       env: ansibleEnvHumanStdout(),
     })
   }
-  console.log('[orchestration] daemon-systemd-setup complete')
+  logInfo('orchestration', 'daemon-systemd-setup complete')
 }
 
 /**
@@ -287,9 +289,9 @@ export async function runDaemonSystemdSetup(onEvent?: AnsibleEventHandler): Prom
  */
 export async function runInstanceDevInstall(onEvent?: AnsibleEventHandler): Promise<void> {
   const args = devInstanceExtraArgs()
-  console.log('[orchestration] running instance-dev-install converge playbook')
+  logInfo('orchestration', 'running instance-dev-install converge playbook')
   await runLocalPlaybook(INSTANCE_DEV_INSTALL_PLAYBOOK, args, onEvent)
-  console.log('[orchestration] instance-dev-install complete')
+  logInfo('orchestration', 'instance-dev-install complete')
 }
 
 /**
@@ -319,39 +321,40 @@ export async function runBuildToggle(
     `force_compile=${opts.forceBuild ?? false}`,
   ]
 
-  console.log(
-    `[orchestration] running instance-build-toggle playbook (ui=${opts.uiMode}, instance=${opts.instanceRunMode})`,
+  logInfo(
+    'orchestration',
+    `running instance-build-toggle playbook (ui=${opts.uiMode}, instance=${opts.instanceRunMode})`,
   )
   await runLocalPlaybook(BUILD_TOGGLE_PLAYBOOK, args, onEvent)
-  console.log('[orchestration] instance-build-toggle complete')
+  logInfo('orchestration', 'instance-build-toggle complete')
 }
 
 /** Install Docker and ensure turbopanel/dev users are in the docker group. */
 export async function runDockerSetup(onEvent?: AnsibleEventHandler): Promise<void> {
-  console.log('[orchestration] running docker-setup playbook')
+  logInfo('orchestration', 'running docker-setup playbook')
   await runLocalPlaybook(DOCKER_PLAYBOOK, devInstanceExtraArgs(), onEvent)
-  console.log('[orchestration] docker-setup complete')
+  logInfo('orchestration', 'docker-setup complete')
 }
 
 /** Run PostgreSQL 18 in Docker (daemon-only hosts). */
 export async function runPostgresSetup(onEvent?: AnsibleEventHandler): Promise<void> {
-  console.log('[orchestration] running postgres-setup playbook')
+  logInfo('orchestration', 'running postgres-setup playbook')
   await runLocalPlaybook(POSTGRES_PLAYBOOK, [], onEvent)
-  console.log('[orchestration] postgres-setup complete')
+  logInfo('orchestration', 'postgres-setup complete')
 }
 
 /** Build and install Redis under runtimes/redis/current. */
 export async function runRedisSetup(onEvent?: AnsibleEventHandler): Promise<void> {
-  console.log('[orchestration] running redis-setup playbook')
+  logInfo('orchestration', 'running redis-setup playbook')
   await runLocalPlaybook(REDIS_PLAYBOOK, [], onEvent)
-  console.log('[orchestration] redis-setup complete')
+  logInfo('orchestration', 'redis-setup complete')
 }
 
 /** Run RabbitMQ 4 with management plugin in Docker. */
 export async function runRabbitmqSetup(onEvent?: AnsibleEventHandler): Promise<void> {
-  console.log('[orchestration] running rabbitmq-setup playbook')
+  logInfo('orchestration', 'running rabbitmq-setup playbook')
   await runLocalPlaybook(RABBITMQ_PLAYBOOK, [], onEvent)
-  console.log('[orchestration] rabbitmq-setup complete')
+  logInfo('orchestration', 'rabbitmq-setup complete')
 }
 
 /**
@@ -374,7 +377,7 @@ export async function bootstrapOrchestrationRuntime(): Promise<void> {
   if (bootstrapInputsChanged || ansibleReinstalled) {
     await runLocalhostTest()
   } else {
-    console.log('[orchestration] bootstrap inputs unchanged, skipping localhost smoke-test')
+    logInfo('orchestration', 'bootstrap inputs unchanged, skipping localhost smoke-test')
   }
 
   await writeBootstrapStamp(stamp)

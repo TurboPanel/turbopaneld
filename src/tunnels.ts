@@ -1,6 +1,7 @@
 import { join } from '@std/path'
 import { ensureCloudflared } from './orchestration/cloudflared.ts'
 import { TUNNELS_DIR } from './orchestration/paths.ts'
+import { logError, logInfo, logWarn } from './logger.ts'
 
 /**
  * Cloudflare tunnel supervisor.
@@ -31,7 +32,7 @@ async function readTunnelConfigs(): Promise<TunnelConfig[]> {
       const token = (await Deno.readTextFile(join(TUNNELS_DIR, entry.name)))
         .trim()
       if (!token) {
-        console.warn(`[tunnels] ${entry.name} is empty; skipping`)
+        logWarn('tunnels', `${entry.name} is empty; skipping`)
         continue
       }
       configs.push({ name: entry.name.replace(/\.token$/, ''), token })
@@ -49,7 +50,7 @@ function superviseTunnel(
 ): void {
   void (async () => {
     while (!signal.aborted) {
-      console.log(`[tunnels] starting tunnel "${config.name}"`)
+      logInfo('tunnels', `starting tunnel "${config.name}"`)
       const command = new Deno.Command(bin, {
         args: ['--no-autoupdate', 'tunnel', 'run', '--token', config.token],
         stdout: 'inherit',
@@ -70,8 +71,9 @@ function superviseTunnel(
       signal.removeEventListener('abort', onAbort)
 
       if (signal.aborted) break
-      console.warn(
-        `[tunnels] tunnel "${config.name}" exited (code ${status.code}); restarting in 5s`,
+      logWarn(
+        'tunnels',
+        `tunnel "${config.name}" exited (code ${status.code}); restarting in 5s`,
       )
       await delay(5_000)
     }
@@ -97,7 +99,7 @@ async function launchTunnels(): Promise<void> {
 
   const configs = await readTunnelConfigs()
   if (configs.length === 0) {
-    console.log(`[tunnels] no tunnel tokens in ${TUNNELS_DIR}; skipping`)
+    logInfo('tunnels', `no tunnel tokens in ${TUNNELS_DIR}; skipping`)
     return
   }
 
@@ -105,14 +107,15 @@ async function launchTunnels(): Promise<void> {
   try {
     bin = await ensureCloudflared()
   } catch (err) {
-    console.error(
-      '[tunnels] cloudflared install failed; tunnels disabled:',
+    logError(
+      'tunnels',
+      'cloudflared install failed; tunnels disabled:',
       err instanceof Error ? err.message : err,
     )
     return
   }
 
-  console.log(`[tunnels] supervising ${configs.length} tunnel(s)`)
+  logInfo('tunnels', `supervising ${configs.length} tunnel(s)`)
   for (const config of configs) {
     superviseTunnel(bin, config, ac.signal)
   }
@@ -126,7 +129,7 @@ async function launchTunnels(): Promise<void> {
  */
 export async function startTunnels(signal: AbortSignal): Promise<void> {
   if (!CLOUDFLARE_TUNNELS_ENABLED) {
-    console.log('[tunnels] Cloudflare tunnels disabled; skipping')
+    logInfo('tunnels', 'Cloudflare tunnels disabled; skipping')
     return
   }
 
@@ -142,7 +145,7 @@ export async function startTunnels(signal: AbortSignal): Promise<void> {
  */
 export async function writeInstanceTunnelToken(token: string): Promise<void> {
   if (!CLOUDFLARE_TUNNELS_ENABLED) {
-    console.log('[tunnels] Cloudflare tunnels disabled; ignoring tunnel token')
+    logInfo('tunnels', 'Cloudflare tunnels disabled; ignoring tunnel token')
     return
   }
 
@@ -152,11 +155,11 @@ export async function writeInstanceTunnelToken(token: string): Promise<void> {
 
   if (!trimmed) {
     await Deno.remove(path).catch(() => {})
-    console.log('[tunnels] instance tunnel token cleared')
+    logInfo('tunnels', 'instance tunnel token cleared')
   } else {
     await Deno.writeTextFile(path, `${trimmed}\n`)
     await Deno.chmod(path, 0o600).catch(() => {})
-    console.log('[tunnels] instance tunnel token updated')
+    logInfo('tunnels', 'instance tunnel token updated')
   }
 
   await launchTunnels()
