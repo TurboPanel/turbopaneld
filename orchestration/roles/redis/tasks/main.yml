@@ -121,6 +121,15 @@
     group: root
     mode: "0644"
 
+- name: Enable memory overcommit for Redis (background save / replication)
+  ansible.posix.sysctl:
+    name: vm.overcommit_memory
+    value: "1"
+    state: present
+    sysctl_set: true
+    reload: true
+    sysctl_file: /etc/sysctl.d/99-turbopanel-redis.conf
+
 - name: Ensure Redis service desired state
   ansible.builtin.systemd:
     name: "{{ redis_service_name }}"
