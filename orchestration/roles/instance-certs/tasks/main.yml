@@ -2,6 +2,14 @@
 # Generates the platform CA + server leaf via the instance repo's node script.
 # The script is self-idempotent: it regenerates the leaf only when interface
 # addresses or SANs change, so running it on every converge is cheap.
+- name: Ensure instance certs directory exists for cert generation
+  ansible.builtin.file:
+    path: "{{ turbopanel_instance_dir }}/certs"
+    state: directory
+    owner: "{{ instance_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
 - name: Generate platform CA and server certificate
   ansible.builtin.command:
     cmd: node scripts/generate-self-signed-cert.mjs
