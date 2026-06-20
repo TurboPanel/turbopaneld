@@ -25,9 +25,17 @@ if systemctl is-enabled turbopanel-instance >/dev/null 2>&1; then
   AFTER_INSTANCE=true
 fi
 
+START_DAEMON=true
+if [ "${TURBOPANEL_SKIP_DAEMON_START:-}" = "1" ]; then
+  START_DAEMON=false
+fi
+
 VARS_FILE="$(mktemp)"
 trap 'rm -f "$VARS_FILE"' EXIT
-printf 'turbopanel_after_instance_service: %s\n' "$([ "$AFTER_INSTANCE" = true ] && echo true || echo false)" > "$VARS_FILE"
+{
+  printf 'turbopanel_after_instance_service: %s\n' "$([ "$AFTER_INSTANCE" = true ] && echo true || echo false)"
+  printf 'turbopanel_start: %s\n' "$([ "$START_DAEMON" = true ] && echo true || echo false)"
+} > "$VARS_FILE"
 
 ANSIBLE_CONFIG="$ANSIBLE_CFG" \
 ANSIBLE_LOCAL_TEMP="$ANSIBLE_LOCAL_TMP" \
@@ -39,9 +47,13 @@ ANSIBLE_COLLECTIONS_PATH="$ANSIBLE_COLLECTIONS_PATH" \
   "$PLAYBOOK"
 
 systemctl daemon-reload
-systemctl enable --now turbopanel-daemon
 
-echo "turbopanel-daemon service installed and started"
+if [ "$START_DAEMON" = true ]; then
+  systemctl enable --now turbopanel-daemon
+  echo "turbopanel-daemon service installed and started"
+else
+  echo "turbopanel-daemon service installed (start deferred)"
+fi
 echo "status: sudo systemctl status turbopanel-daemon"
 echo "logs:   tail -f /opt/turbopanel/platform/daemon/logs/daemon.log"
 echo "        sudo journalctl -u turbopanel-daemon -f"
