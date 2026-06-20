@@ -52,7 +52,7 @@ rabbitmq_vhost: /
 rabbitmq_user: turbopanel
 redis_socket_path: /run/turbopanel/redis.sock
 mailer_service_name: turbopanel-mailer
-mailpit_web_port: 19826
-mailpit_smtp_port: 19825
+mailpit_web_port: 8025
+mailpit_smtp_port: 1025
 dbstudio_service_name: turbopanel-dbstudio
 turbopanel_dev_user: ""
