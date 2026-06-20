@@ -3,6 +3,8 @@ orchestration/runtime/
 orchestration/roles/geerlingguy.docker/
 .env
 server.id
+license.id
+license.token
 cloudflared/tunnels/*.token
 dist/
 logs/
