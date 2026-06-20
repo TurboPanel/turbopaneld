@@ -8,6 +8,10 @@
 - name: Ensure instance file logs for developer console
   ansible.builtin.import_tasks: instance-logs.yml
 
+- name: Ensure UI file logs for developer console
+  when: turbopanel_ui_mode == 'dev'
+  ansible.builtin.import_tasks: ui-logs.yml
+
 - name: Read postgres password for systemd units
   ansible.builtin.slurp:
     src: "{{ turbopanel_config_dir }}/postgres/.pgpass"

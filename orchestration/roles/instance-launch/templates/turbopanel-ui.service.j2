@@ -19,6 +19,8 @@ Environment=COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 # Invoke expo/bin/cli via node — pnpm may leave node_modules/.bin unlinked after a
 # partial install, and `pnpm exec` prompts to purge node_modules when HOME differs.
 # Runtime state (Expo, pnpm XDG dirs) lives under {{ turbopanel_ui_runtime_dir }} (gitignored).
+StandardOutput=append:{{ ui_log_dir }}/ui.log
+StandardError=append:{{ ui_log_dir }}/ui.err.log
 ExecStart=/usr/local/bin/node {{ turbopanel_ui_dir }}/node_modules/expo/bin/cli start --web --port {{ expo_port }}
 Restart=always
 RestartSec=3
