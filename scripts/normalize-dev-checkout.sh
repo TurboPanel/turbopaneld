@@ -28,7 +28,8 @@ RUNTIME_DIRS=(.config .local .cache .expo)
 ARTIFACT_DIRS=(dist)
 # Generated trees excluded from ownership scans and recursive ACL work.
 # .next / .open-next: Next.js dev + OpenNext build caches (website service runs as turbopaneli).
-PRUNE_NAMES=(node_modules .git .pnpm-store .next .open-next)
+# .source: Fumadocs generated source cache (written by turbopaneli at Next.js startup).
+PRUNE_NAMES=(node_modules .git .pnpm-store .next .open-next .source)
 
 HAS_SETFACL=false
 if command -v setfacl >/dev/null 2>&1; then

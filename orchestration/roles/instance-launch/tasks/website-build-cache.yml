@@ -2,6 +2,11 @@
 # Next.js dev (turbopanel-website.service) writes Turbopack output under .next as instance.
 # normalize-dev-checkout skips .next, but existing installs may still have turbopanel-owned
 # caches from before that exclusion — Turbopack then fails with EPERM on write.
+#
+# Pre-creating .next and .source here (as root via Ansible) ensures turbopaneli can write
+# on first start even before checkout-permissions.yml normalizes website/ ACLs. Without
+# this, a fresh git clone leaves website/ at 755 with no ACLs and the service crashes once
+# with EACCES before RestartSec=3 brings it back up.
 - name: Check website Next.js build cache
   ansible.builtin.stat:
     path: "{{ turbopanel_website_dir }}/.next"
@@ -16,3 +21,19 @@
       - "{{ instance_user }}:{{ turbopanel_group }}"
       - "{{ turbopanel_website_dir }}/.next"
   changed_when: false
+
+- name: Ensure website Next.js build cache directory exists for instance user
+  ansible.builtin.file:
+    path: "{{ turbopanel_website_dir }}/.next"
+    state: directory
+    owner: "{{ instance_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "2770"
+
+- name: Ensure website Fumadocs source cache directory exists for instance user
+  ansible.builtin.file:
+    path: "{{ turbopanel_website_dir }}/.source"
+    state: directory
+    owner: "{{ instance_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "2770"
