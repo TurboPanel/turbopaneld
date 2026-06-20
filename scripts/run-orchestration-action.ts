@@ -31,6 +31,8 @@ const DAEMON_ANSIBLE_EVENTS_PATH =
   `${TURBOPANEL_PLATFORM}/daemon/src/orchestration/ansible-events.ts`;
 const DAEMON_ANSIBLE_PATH =
   `${TURBOPANEL_PLATFORM}/daemon/src/orchestration/ansible.ts`;
+const DAEMON_CONVERGE_STAMP_PATH =
+  `${TURBOPANEL_PLATFORM}/daemon/src/orchestration/converge-stamp.ts`;
 const DAEMON_ORCHESTRATION_DIR =
   `${TURBOPANEL_PLATFORM}/daemon/orchestration`;
 
@@ -124,6 +126,15 @@ async function runInstanceDevInstall(): Promise<void> {
       onEvent: emitEvent,
     },
   );
+
+  // Write the dev-converge stamp so the daemon skips a redundant re-run on the
+  // next restart. Without this, the daemon's shouldSkipDevConverge() finds no stamp
+  // and re-runs the entire instance-dev-install playbook a second time.
+  const stampMod = await import(DAEMON_CONVERGE_STAMP_PATH) as {
+    computeDevConvergeStamp: () => Promise<string>;
+    writeDevConvergeStamp: (stamp: string) => Promise<void>;
+  };
+  await stampMod.writeDevConvergeStamp(await stampMod.computeDevConvergeStamp());
 }
 
 async function runBuildToggle(): Promise<void> {
