@@ -9,7 +9,7 @@ import {
 import { collectServerAddresses } from '../server-addresses.ts'
 import { applyDevSyncTarball, type DevSyncState, newDevSyncState } from '../dev-sync-apply.ts'
 import { writeInstanceTunnelToken } from '../tunnels.ts'
-import { logError, logInfo, logWarn } from '../logger.ts'
+import { logDebug, logError, logInfo, logWarn } from '../logger.ts'
 import { decodeBase64 } from '@std/encoding/base64'
 import { join } from '@std/path'
 
@@ -82,9 +82,14 @@ type DaemonMessage =
 export interface InstanceClientOptions {
   config?: InstanceConfig
   httpClient?: Deno.HttpClient
+  /** Initial reconnect delay; doubles on failure up to {@link DEFAULT_MAX_BACKOFF_MS}. */
   reconnectDelayMs?: number
   onMessage?: (message: DaemonMessage) => void
 }
+
+const DEFAULT_INITIAL_BACKOFF_MS = 2_000
+const DEFAULT_MAX_BACKOFF_MS = 30_000
+const BACKOFF_MULTIPLIER = 2
 
 const SERVER_ID_FILE = 'server.id'
 const DEFAULT_SERVER_ID_DIR = '/opt/turbopanel/platform/daemon/state'
@@ -189,18 +194,23 @@ function parseMessage(raw: string): DaemonMessage | null {
 export class InstanceClient {
   readonly #config: InstanceConfig
   readonly #httpClient: Deno.HttpClient | undefined
-  readonly #reconnectDelayMs: number
+  readonly #initialBackoffMs: number
+  readonly #maxBackoffMs: number
   readonly #onMessage?: (message: DaemonMessage) => void
 
   #ws: WebSocket | undefined
   #stopped = false
   #connectLoopStarted = false
+  #backoffMs: number
+  #hadStableSession = false
   readonly #devSync = new Map<string, DevSyncState>()
 
   constructor(options: InstanceClientOptions = {}) {
     this.#config = options.config ?? resolveInstanceConfig()
     this.#httpClient = options.httpClient
-    this.#reconnectDelayMs = options.reconnectDelayMs ?? 2_000
+    this.#initialBackoffMs = options.reconnectDelayMs ?? DEFAULT_INITIAL_BACKOFF_MS
+    this.#maxBackoffMs = DEFAULT_MAX_BACKOFF_MS
+    this.#backoffMs = this.#initialBackoffMs
     this.#onMessage = options.onMessage
   }
 
@@ -227,6 +237,66 @@ export class InstanceClient {
       throw new Error(`health check failed: HTTP ${response.status}`)
     }
     return await response.json()
+  }
+
+  async fetchDaemonReadiness(): Promise<
+    { ok: boolean; ready: boolean; needsInstall?: boolean }
+  > {
+    const response = await fetch(
+      instanceUrl(this.#config, '/api/daemon/v1/readiness'),
+      this.#fetchInit(),
+    )
+
+    let body: {
+      ok?: boolean
+      ready?: boolean
+      needsInstall?: boolean
+      error?: string
+    }
+    try {
+      body = await response.json()
+    } catch {
+      throw new Error(`daemon readiness check failed: HTTP ${response.status}`)
+    }
+
+    if (!response.ok) {
+      if (body.ready === false) {
+        return {
+          ok: body.ok ?? true,
+          ready: false,
+          needsInstall: body.needsInstall,
+        }
+      }
+      throw new Error(
+        body.error ?? `daemon readiness check failed: HTTP ${response.status}`,
+      )
+    }
+
+    return { ok: body.ok ?? true, ready: body.ready === true }
+  }
+
+  #isColocatedSocketMode(): boolean {
+    return isColocatedSocketMode(this.#config)
+  }
+
+  async #waitForConnectPreconditions(): Promise<void> {
+    if (this.#isColocatedSocketMode()) {
+      const readiness = await this.fetchDaemonReadiness()
+      if (!readiness.ready) {
+        throw new Error('instance install incomplete')
+      }
+      return
+    }
+
+    await this.fetchHealth()
+  }
+
+  #resetBackoff(): void {
+    this.#backoffMs = this.#initialBackoffMs
+  }
+
+  #increaseBackoff(): void {
+    this.#backoffMs = nextBackoffMs(this.#backoffMs, this.#maxBackoffMs)
   }
 
   async fetchVersion(): Promise<{ commit: string; branch: string }> {
@@ -284,16 +354,25 @@ export class InstanceClient {
       try {
         await this.#connectOnce()
       } catch (err) {
-        logWarn(
+        const logConnectFailure = this.#hadStableSession ? logWarn : logDebug
+        logConnectFailure(
           'instance',
           'websocket connect failed:',
           sanitizeForLog(err),
         )
         this.#closeActiveSocket()
+        this.#increaseBackoff()
       }
 
       if (this.#stopped) break
-      await delay(this.#reconnectDelayMs)
+      logDebug(
+        'instance',
+        'reconnect scheduled in',
+        this.#backoffMs,
+        'ms via',
+        sanitizeForLog(this.target),
+      )
+      await delay(this.#backoffMs)
     }
   }
 
@@ -318,7 +397,7 @@ export class InstanceClient {
   }
 
   async #connectOnce(): Promise<void> {
-    await this.fetchHealth()
+    await this.#waitForConnectPreconditions()
 
     // Do not close the active socket here: by the time #connectOnce() is called
     // from #runConnectLoop(), the previous socket has already closed naturally
@@ -328,6 +407,7 @@ export class InstanceClient {
 
     const ws = this.#newWebSocket()
     this.#ws = ws
+    let sessionRegistered = false
 
     await new Promise<void>((resolve, reject) => {
       const fail = (err: unknown) => {
@@ -357,7 +437,7 @@ export class InstanceClient {
       ws.addEventListener('close', onClose)
     })
 
-    logInfo('instance', 'websocket connected via', sanitizeForLog(this.target))
+    logDebug('instance', 'websocket connected via', sanitizeForLog(this.target))
 
     const [serverId, machineId, licenseCredentials] = await Promise.all([
       readServerId(),
@@ -385,18 +465,43 @@ export class InstanceClient {
         return
       }
 
+      if (
+        message.type === 'hello' &&
+        message.from === 'instance' &&
+        !sessionRegistered
+      ) {
+        sessionRegistered = true
+        this.#hadStableSession = true
+        this.#resetBackoff()
+        logInfo(
+          'instance',
+          'registered with instance as',
+          sanitizeForLog(message.hostname ?? message.serverId ?? '(no identity)'),
+        )
+      }
+
       this.#onMessage?.(message)
       this.#handleMessage(message, ws)
     }
 
     ws.onclose = () => {
-      logInfo('instance', 'websocket closed')
+      if (sessionRegistered) {
+        logInfo('instance', 'websocket closed after registration')
+      } else {
+        logDebug('instance', 'websocket closed before registration')
+      }
       if (this.#ws === ws) this.#ws = undefined
     }
 
     await new Promise<void>((resolve) => {
       ws.addEventListener('close', () => resolve(), { once: true })
     })
+
+    if (sessionRegistered) {
+      this.#resetBackoff()
+    } else {
+      this.#increaseBackoff()
+    }
   }
 
   #handleMessage(message: DaemonMessage, ws: WebSocket): void {
@@ -405,14 +510,6 @@ export class InstanceClient {
         if (message.from === 'instance' && message.serverId) {
           void writeServerId(message.serverId)
         }
-        logInfo(
-          'instance',
-          'hello from',
-          sanitizeForLog(message.from),
-          sanitizeForLog(message.hostname ?? message.serverId ?? '(no identity)'),
-          'at',
-          sanitizeForLog(message.at),
-        )
         break
       case 'ping':
         ws.send(JSON.stringify(
@@ -424,14 +521,14 @@ export class InstanceClient {
         ))
         break
       case 'pong':
-        logInfo('instance', 'pong', sanitizeForLog(message.id))
+        logDebug('instance', 'pong', sanitizeForLog(message.id))
         break
       case 'version':
         // Informational only. The daemon never self-updates; updates are
         // operator-driven via the developer upgrade button / dev-sync push.
         break
       case 'echo':
-        logInfo('instance', 'echo from instance:', sanitizeForLog(message.payload))
+        logDebug('instance', 'echo from instance:', sanitizeForLog(message.payload))
         ws.send(JSON.stringify(
           {
             type: 'echo',
@@ -662,6 +759,14 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+function nextBackoffMs(current: number, max: number): number {
+  return Math.min(current * BACKOFF_MULTIPLIER, max)
+}
+
+function isColocatedSocketMode(config: InstanceConfig): boolean {
+  return config.kind === 'socket'
+}
+
 /** Ask systemd to restart this daemon (used after a dev-sync swap). */
 async function restartDaemonService(): Promise<void> {
   const unit = Deno.env.get('TURBOPANEL_SERVICE_NAME')?.trim() ||
@@ -688,7 +793,7 @@ async function restartDaemonService(): Promise<void> {
 export async function connectInstance(
   options: InstanceClientOptions = {},
 ): Promise<InstanceClient> {
-  const reconnectDelayMs = options.reconnectDelayMs ?? 2_000
+  const initialBackoffMs = options.reconnectDelayMs ?? DEFAULT_INITIAL_BACKOFF_MS
   const config = options.config ?? resolveInstanceConfig()
   const httpClient = options.httpClient ??
     await createInstanceHttpClient(config, {
@@ -699,31 +804,54 @@ export async function connectInstance(
     ...options,
     config,
     httpClient,
-    reconnectDelayMs,
+    reconnectDelayMs: initialBackoffMs,
   })
 
+  const socketMode = isColocatedSocketMode(config)
   let waitingLogged = false
+  let readyLogged = false
+  let backoffMs = initialBackoffMs
+
   while (true) {
     try {
-      const health = await client.fetchHealth()
-      logInfo(
-        'instance',
-        'REST health:',
-        sanitizeForLog(health),
-        'via',
-        sanitizeForLog(client.target),
-      )
+      if (socketMode) {
+        const readiness = await client.fetchDaemonReadiness()
+        if (!readiness.ready) {
+          throw new Error('instance install incomplete')
+        }
+        if (!readyLogged) {
+          logInfo(
+            'instance',
+            'instance ready for daemon registration via',
+            sanitizeForLog(client.target),
+          )
+          readyLogged = true
+        }
+      } else {
+        await client.fetchHealth()
+        if (!readyLogged) {
+          logInfo(
+            'instance',
+            'instance available via',
+            sanitizeForLog(client.target),
+          )
+          readyLogged = true
+        }
+      }
       break
     } catch {
       if (!waitingLogged) {
         logInfo(
           'instance',
-          'waiting for instance to become available via',
+          socketMode
+            ? 'waiting for instance install to complete via'
+            : 'waiting for instance to become available via',
           sanitizeForLog(client.target),
         )
         waitingLogged = true
       }
-      await delay(reconnectDelayMs)
+      await delay(backoffMs)
+      backoffMs = nextBackoffMs(backoffMs, DEFAULT_MAX_BACKOFF_MS)
     }
   }
 
