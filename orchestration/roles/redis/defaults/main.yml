@@ -6,4 +6,6 @@ redis_socket_path: "{{ redis_socket_dir }}/{{ redis_socket_name }}"
 redis_service_name: turbopanel-redis
 redis_user: redis
 redis_uid: 9997
+redis_primary_group: turbopanelr
+redis_primary_gid: 9997
 turbopanel_group: turbopanel

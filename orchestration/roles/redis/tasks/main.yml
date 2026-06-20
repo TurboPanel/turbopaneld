@@ -6,11 +6,20 @@
     state: present
     system: true
 
-- name: Ensure Redis service user (member of turbopanel group)
+- name: Ensure turbopanelr primary group for redis user
+  ansible.builtin.group:
+    name: "{{ redis_primary_group }}"
+    gid: "{{ redis_primary_gid }}"
+    state: present
+    system: true
+
+- name: Ensure Redis service user (primary group turbopanelr, supplementary turbopanel)
   ansible.builtin.user:
     name: "{{ redis_user }}"
     uid: "{{ redis_uid }}"
-    group: "{{ turbopanel_group }}"
+    group: "{{ redis_primary_group }}"
+    groups: "{{ turbopanel_group }}"
+    append: true
     shell: /usr/sbin/nologin
     system: true
     create_home: false

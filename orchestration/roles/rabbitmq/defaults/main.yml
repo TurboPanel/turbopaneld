@@ -4,7 +4,8 @@ rabbitmq_amqp_port: 5672
 rabbitmq_mgmt_port: 15672
 rabbitmq_expose_amqp_port: false
 rabbitmq_expose_mgmt_port: true
-rabbitmq_data_dir: /var/lib/turbopanel/rabbitmq
+rabbitmq_volume_name: turbopanel-q
+turbopanel_docker_network: turbopanel
 rabbitmq_user: turbopanel
 rabbitmq_vhost: /
 turbopanel_config_dir: /etc/turbopanel

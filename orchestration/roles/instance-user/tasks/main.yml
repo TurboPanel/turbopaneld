@@ -49,11 +49,20 @@
   failed_when: false
   when: _instance_user_uid_mismatch | bool
 
-- name: Ensure instance user (member of turbopanel group, no own group)
+- name: Ensure turbopaneli primary group for instance user
+  ansible.builtin.group:
+    name: "{{ instance_primary_group }}"
+    gid: "{{ instance_primary_gid }}"
+    state: present
+    system: true
+
+- name: Ensure instance user (primary group turbopaneli, supplementary turbopanel)
   ansible.builtin.user:
     name: "{{ instance_user }}"
     uid: "{{ instance_uid }}"
-    group: "{{ turbopanel_group }}"
+    group: "{{ instance_primary_group }}"
+    groups: "{{ turbopanel_group }}"
+    append: true
     home: "{{ turbopanel_instance_dir }}"
     shell: /usr/sbin/nologin
     system: true

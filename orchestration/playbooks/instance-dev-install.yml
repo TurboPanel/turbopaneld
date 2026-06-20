@@ -94,6 +94,7 @@
     - name: Resolve dev stack unit list
       ansible.builtin.set_fact:
         _dev_stack_units:
+          - turbopanel-postgres
           - turbopanel-instance
           - turbopanel-caddy
           - turbopanel-ui

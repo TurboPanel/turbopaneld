@@ -1,5 +1,5 @@
 [Unit]
-Description=TurboPanel RabbitMQ
+Description=TurboPanel PostgreSQL
 After=docker.service
 Requires=docker.service
 
@@ -7,8 +7,8 @@ Requires=docker.service
 Type=oneshot
 RemainAfterExit=yes
 ExecStartPre=-/usr/bin/docker network create {{ turbopanel_docker_network }}
-ExecStart=/etc/turbopanel/rabbitmq/wrapper-start.sh
-ExecStop=/usr/bin/docker stop -t 10 {{ rabbitmq_container_name }}
+ExecStart=/etc/turbopanel/postgres/wrapper-start.sh
+ExecStop=/usr/bin/docker stop -t 10 {{ postgres_container_name }}
 
 [Install]
 WantedBy=multi-user.target

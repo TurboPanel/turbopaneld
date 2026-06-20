@@ -27,7 +27,8 @@ RUNTIME_DIRS=(.config .local .cache)
 # Release artifacts stay instance-owned and outside the dev-editable ACL set.
 ARTIFACT_DIRS=(dist)
 # Generated trees excluded from ownership scans and recursive ACL work.
-PRUNE_NAMES=(node_modules .git .pnpm-store)
+# .next / .open-next: Next.js dev + OpenNext build caches (website service runs as instance).
+PRUNE_NAMES=(node_modules .git .pnpm-store .next .open-next)
 
 HAS_SETFACL=false
 if command -v setfacl >/dev/null 2>&1; then

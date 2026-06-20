@@ -44,13 +44,18 @@
     mode: "0640"
     force: false
 
-- name: Ensure rabbitmq data directory exists
-  ansible.builtin.file:
-    path: "{{ rabbitmq_data_dir }}"
-    state: directory
-    owner: root
-    group: root
-    mode: "0755"
+- name: Ensure turbopanel Docker network exists
+  ansible.builtin.command:
+    argv: [docker, network, create, --driver, bridge, "{{ turbopanel_docker_network }}"]
+  register: _rmq_network_create
+  changed_when: false
+  failed_when: false
+
+- name: Ensure turbopanel-q Docker volume exists
+  ansible.builtin.command:
+    argv: [docker, volume, create, "{{ rabbitmq_volume_name }}"]
+  register: _rmq_volume_create
+  changed_when: false
 
 - name: Inspect rabbitmq container
   ansible.builtin.command:
@@ -69,6 +74,9 @@
     _rabbitmq_container_exists: true
     _rabbitmq_running: "{{ _rmq_container.State.Running | default(false) }}"
     _rmq_status: "{{ _rmq_container.State.Status | default('') }}"
+    _rmq_volume_ok: >-
+      {{ _rmq_container.Mounts | default([]) | selectattr('Type', 'equalto', 'volume') | selectattr('Name', 'equalto', rabbitmq_volume_name) | list | length > 0 }}
+    _rmq_network_ok: "{{ turbopanel_docker_network in (_rmq_container.NetworkSettings.Networks | default({})) }}"
     _rmq_mgmt_exposed: "{{ _rmq_container.HostConfig.PortBindings['15672/tcp'] is defined }}"
   when: _rmq_inspect_cmd.rc == 0
 
@@ -83,7 +91,7 @@
     cmd: docker rm -f {{ rabbitmq_container_name }}
   when:
     - _rabbitmq_container_exists | bool
-    - _rmq_status | trim in ['restarting', 'exited', 'dead']
+    - (not _rmq_volume_ok | bool) or (not _rmq_network_ok | bool) or (_rmq_status | trim in ['restarting', 'exited', 'dead'])
   register: _rmq_removed
   changed_when: _rmq_removed.rc == 0
 
@@ -114,7 +122,9 @@
       - "unless-stopped"
       - "-d"
       - "-v"
-      - "{{ rabbitmq_data_dir }}:/var/lib/rabbitmq"
+      - "{{ rabbitmq_volume_name }}:/var/lib/rabbitmq"
+      - "--network"
+      - "{{ turbopanel_docker_network }}"
       - "-e"
       - "RABBITMQ_DEFAULT_USER={{ rabbitmq_user }}"
       - "-e"
@@ -127,26 +137,23 @@
       - "-p"
       - "127.0.0.1:{{ rabbitmq_mgmt_port }}:15672"
 
-- name: Start existing stopped rabbitmq container
-  ansible.builtin.command:
-    cmd: docker start {{ rabbitmq_container_name }}
-  when:
-    - _rabbitmq_container_exists | bool
-    - not _rabbitmq_running | bool
-
 - name: Create and start rabbitmq container
   ansible.builtin.command:
     cmd: docker run {{ _docker_run_args | join(' ') }}
   when: not _rabbitmq_container_exists | bool
   no_log: true
 
-- name: Wait for rabbitmq to be ready
+- name: Install rabbitmq wrapper start script
+  ansible.builtin.template:
+    src: rabbitmq-wrapper-start.sh.j2
+    dest: "{{ turbopanel_config_dir }}/rabbitmq/wrapper-start.sh"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Ensure rabbitmq container is running and ready
   ansible.builtin.command:
-    cmd: docker exec {{ rabbitmq_container_name }} rabbitmq-diagnostics -q ping
-  register: _rmq_ready
-  until: _rmq_ready.rc == 0
-  retries: 30
-  delay: 2
+    cmd: "{{ turbopanel_config_dir }}/rabbitmq/wrapper-start.sh"
   changed_when: false
 
 - name: Install RabbitMQ systemd unit

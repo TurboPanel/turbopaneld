@@ -45,15 +45,6 @@
     mode: "0640"
     force: false
 
-# Official postgres image runs as UID/GID 999; bind mounts must be writable there.
-- name: Ensure postgres data directory exists
-  ansible.builtin.file:
-    path: "{{ postgres_data_dir }}"
-    state: directory
-    owner: "{{ postgres_container_uid }}"
-    group: "{{ postgres_container_gid }}"
-    mode: "0700"
-
 - name: Ensure postgres socket directory exists
   ansible.builtin.file:
     path: "{{ postgres_socket_dir }}"
@@ -61,6 +52,19 @@
     owner: "{{ postgres_container_uid }}"
     group: turbopanel
     mode: "2770"
+
+- name: Ensure turbopanel Docker network exists
+  ansible.builtin.command:
+    argv: [docker, network, create, --driver, bridge, "{{ turbopanel_docker_network }}"]
+  register: _pg_network_create
+  changed_when: false
+  failed_when: false
+
+- name: Ensure turbopanel-db Docker volume exists
+  ansible.builtin.command:
+    argv: [docker, volume, create, "{{ postgres_volume_name }}"]
+  register: _pg_volume_create
+  changed_when: false
 
 - name: Inspect postgres container
   ansible.builtin.command:
@@ -80,7 +84,8 @@
     _postgres_running: "{{ _pg_container.State.Running | default(false) }}"
     _pg_status: "{{ _pg_container.State.Status | default('') }}"
     _pg_mount_ok: >-
-      {{ _pg_container.Mounts | default([]) | selectattr('Destination', 'equalto', '/var/lib/postgresql') | list | length > 0 }}
+      {{ _pg_container.Mounts | default([]) | selectattr('Type', 'equalto', 'volume') | selectattr('Name', 'equalto', postgres_volume_name) | list | length > 0 }}
+    _pg_network_ok: "{{ turbopanel_docker_network in (_pg_container.NetworkSettings.Networks | default({})) }}"
     _pg_tcp_exposed: "{{ _pg_container.HostConfig.PortBindings['5432/tcp'] is defined }}"
   when: _pg_inspect_cmd.rc == 0
 
@@ -95,7 +100,7 @@
     cmd: docker rm -f {{ postgres_container_name }}
   when:
     - _postgres_container_exists | bool
-    - (not _pg_mount_ok | bool) or (_pg_status | trim in ['restarting', 'exited', 'dead'])
+    - (not _pg_mount_ok | bool) or (not _pg_network_ok | bool) or (_pg_status | trim in ['restarting', 'exited', 'dead'])
   register: _pg_removed
   changed_when: _pg_removed.rc == 0
 
@@ -126,7 +131,9 @@
       - "unless-stopped"
       - "-d"
       - "-v"
-      - "{{ postgres_data_dir }}:/var/lib/postgresql"
+      - "{{ postgres_volume_name }}:/var/lib/postgresql"
+      - "--network"
+      - "{{ turbopanel_docker_network }}"
       - "-v"
       - "{{ postgres_socket_dir }}:/var/run/postgresql"
       - "-e"
@@ -139,24 +146,36 @@
       - "-p"
       - "127.0.0.1:{{ postgres_port }}:5432"
 
-- name: Start existing stopped postgres container
-  ansible.builtin.command:
-    cmd: docker start {{ postgres_container_name }}
-  when:
-    - _postgres_container_exists | bool
-    - not _postgres_running | bool
-
 - name: Create and start postgres container
   ansible.builtin.command:
     cmd: docker run {{ _docker_run_args | join(' ') }}
   when: not _postgres_container_exists | bool
   no_log: true
 
-- name: Wait for postgres to be ready
+- name: Install postgres wrapper start script
+  ansible.builtin.template:
+    src: postgres-wrapper-start.sh.j2
+    dest: "{{ turbopanel_config_dir }}/postgres/wrapper-start.sh"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Ensure postgres container is running and ready
   ansible.builtin.command:
-    cmd: docker exec {{ postgres_container_name }} pg_isready -U {{ postgres_user }}
-  register: _pg_ready
-  until: _pg_ready.rc == 0
-  retries: 15
-  delay: 2
+    cmd: "{{ turbopanel_config_dir }}/postgres/wrapper-start.sh"
   changed_when: false
+
+- name: Install PostgreSQL systemd unit
+  ansible.builtin.template:
+    src: turbopanel-postgres.service.j2
+    dest: "/etc/systemd/system/{{ postgres_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Ensure PostgreSQL systemd unit desired state
+  ansible.builtin.systemd:
+    name: "{{ postgres_service_name }}"
+    daemon_reload: true
+    enabled: true
+    state: started
