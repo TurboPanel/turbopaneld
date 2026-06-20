@@ -9,6 +9,7 @@ import { PYTHON_VERSION, UV_BIN } from './paths.ts'
  */
 export async function ensurePython(): Promise<void> {
   console.log(`[orchestration] ensuring Python ${PYTHON_VERSION} is installed`)
-  await runOrThrow(UV_BIN, ['python', 'install', PYTHON_VERSION])
+  // Capture uv output — informational "already installed" lines belong in stdout, not err.log.
+  await runOrThrow(UV_BIN, ['python', 'install', PYTHON_VERSION], { stream: false })
   console.log(`[orchestration] Python ${PYTHON_VERSION} ready`)
 }

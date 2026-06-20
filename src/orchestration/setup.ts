@@ -37,9 +37,26 @@ function shouldInstallDevInstance(): boolean {
  * Co-located dev host (Unix socket) before the developer opts in via the
  * console. Orchestration bootstrap runs, but no converge playbook yet.
  */
-function isPreOptInCoLocatedDev(): boolean {
+export function isPreOptInCoLocatedDev(): boolean {
   if (shouldInstallDevInstance()) return false
   return resolveInstanceConfig().kind === 'socket'
+}
+
+/** Dial the instance only when this host is meant to reach it yet. */
+export function shouldConnectToInstance(): boolean {
+  if (shouldSkipOrchestration()) return true
+  return !isPreOptInCoLocatedDev()
+}
+
+/**
+ * Whether the daemon should connect to Docker (managed servers and opted-in dev).
+ * Pre-opt-in co-located dev runs on Deno only and waits for opt-in first.
+ */
+export function shouldEnableDockerIntegration(): boolean {
+  if (shouldSkipOrchestration()) return false
+  if (shouldInstallDevInstance()) return true
+  if (shouldRunDaemonConverge()) return true
+  return false
 }
 
 /**

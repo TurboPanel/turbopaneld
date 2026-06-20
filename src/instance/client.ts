@@ -694,6 +694,7 @@ export async function connectInstance(
     reconnectDelayMs,
   })
 
+  let waitingLogged = false
   while (true) {
     try {
       const health = await client.fetchHealth()
@@ -704,11 +705,14 @@ export async function connectInstance(
         sanitizeForLog(client.target),
       )
       break
-    } catch (err) {
-      console.warn(
-        '[instance] waiting for instance:',
-        sanitizeForLog(err),
-      )
+    } catch {
+      if (!waitingLogged) {
+        console.log(
+          '[instance] waiting for instance to become available via',
+          sanitizeForLog(client.target),
+        )
+        waitingLogged = true
+      }
       await delay(reconnectDelayMs)
     }
   }

@@ -1,6 +1,10 @@
 import { DockerClient, DockerMonitor } from './src/docker/index.ts'
 import { connectInstance } from './src/instance/client.ts'
-import { initOrchestration } from './src/orchestration/setup.ts'
+import {
+  initOrchestration,
+  shouldConnectToInstance,
+  shouldEnableDockerIntegration,
+} from './src/orchestration/setup.ts'
 import { startTunnels } from './src/tunnels.ts'
 
 console.log('Hello from turbopanel-daemon')
@@ -10,7 +14,7 @@ const orchestrationReady = await initOrchestration()
 const abort = new AbortController()
 
 let dockerClient: DockerClient | undefined
-if (orchestrationReady) {
+if (orchestrationReady && shouldEnableDockerIntegration()) {
   dockerClient = new DockerClient()
   if (!(await dockerClient.ping())) {
     console.warn(
@@ -27,7 +31,16 @@ await startTunnels(abort.signal)
 // The daemon never self-updates. Updates are driven explicitly by an operator
 // through the developer "Upgrade System" button or the dev-sync push; all installs
 // and updates run via Ansible (the daemon is the constant that owns them).
-const instance = await connectInstance({})
+const instanceHandle = { stop() {} }
+let instance: { stop(): void } = instanceHandle
+
+if (shouldConnectToInstance()) {
+  instance = await connectInstance({})
+} else {
+  console.log(
+    '[instance] connection deferred until development environment opt-in (TURBOPANEL_DEV_INSTANCE)',
+  )
+}
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   Deno.addSignalListener(signal, () => {
