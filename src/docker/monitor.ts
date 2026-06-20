@@ -1,5 +1,5 @@
 import type { ContainerSummary, DockerClient } from './client.ts'
-import { logInfo, logWarn } from '../logger.ts'
+import { logWarn } from '../logger.ts'
 
 export class DockerMonitor {
   #client: DockerClient
@@ -23,16 +23,6 @@ export class DockerMonitor {
     while (!signal.aborted) {
       try {
         this.#containers = await this.#client.listContainers(true)
-        const summary = this.#containers
-          .map((c) => {
-            const name = c.Names[0]?.replace(/^\//, '') ?? c.Id.slice(0, 12)
-            return `${name}=${c.State}`
-          })
-          .join(', ')
-        logInfo(
-          'docker-monitor',
-          `${this.#containers.length} containers: ${summary}`,
-        )
       } catch (err) {
         logWarn(
           'docker-monitor',

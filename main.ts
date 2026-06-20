@@ -8,11 +8,12 @@ import {
 } from './src/orchestration/setup.ts'
 import { startTunnels } from './src/tunnels.ts'
 
-logInfo('daemon', 'Hello from turbopanel-daemon')
+logInfo('daemon', 'starting up')
 
 const orchestrationReady = await initOrchestration()
 
 const abort = new AbortController()
+let shuttingDown = false
 
 let dockerClient: DockerClient | undefined
 if (orchestrationReady && shouldEnableDockerIntegration()) {
@@ -41,6 +42,8 @@ if (shouldConnectToInstance()) {
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   Deno.addSignalListener(signal, () => {
+    if (shuttingDown) return
+    shuttingDown = true
     logInfo('daemon', 'shutting down')
     instance.stop()
     try {
@@ -56,3 +59,6 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
 await new Promise<void>((resolve) => {
   abort.signal.addEventListener('abort', () => resolve())
 })
+
+logInfo('daemon', 'shut down')
+Deno.exit(0)
