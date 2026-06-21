@@ -19,9 +19,11 @@ Environment=WRANGLER_DEV_PORT={{ wrangler_dev_port | default(18787) }}
 Environment=TURBOPANEL_UI_MODE={{ turbopanel_ui_mode }}
 Environment=EXPO_PORT={{ expo_port }}
 Environment=TURBOPANEL_UI_ROOT={{ turbopanel_ui_dir }}/dist
+Environment=GOMAXPROCS=1
 ExecStart={{ turbopanel_runtimes_dir }}/caddy/current/caddy run --config {{ turbopanel_instance_dir }}/Caddyfile --adapter caddyfile
 Restart=always
 RestartSec=2
+CPUQuota=100%
 
 [Install]
 WantedBy=multi-user.target
