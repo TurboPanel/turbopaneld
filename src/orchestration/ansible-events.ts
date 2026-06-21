@@ -1,3 +1,4 @@
+import { logDebug, logError, logInfo } from '../logger.ts'
 import { runStreamingLines } from './exec.ts'
 
 /** ISO-8601 timestamp emitted by ansible.posix.jsonl. */
@@ -114,16 +115,78 @@ export function parseAnsibleJsonlLine(line: string): AnsibleEvent | null {
   }
 }
 
+function formatStats(stats: AnsiblePlaybookStats): string {
+  let ok = 0
+  let changed = 0
+  let failed = 0
+  let unreachable = 0
+
+  for (const hostStats of Object.values(stats)) {
+    ok += hostStats.ok ?? 0
+    changed += hostStats.changed ?? 0
+    failed += hostStats.failed ?? 0
+    unreachable += hostStats.unreachable ?? 0
+  }
+
+  return `ok=${ok} changed=${changed} failed=${failed} unreachable=${unreachable}`
+}
+
+/** Map a parsed ansible.posix.jsonl event to structured daemon log lines. */
+export function logAnsibleEvent(event: AnsibleEvent): void {
+  switch (event._event) {
+    case 'v2_playbook_on_play_start': {
+      const playEvent = event as AnsiblePlayStartEvent
+      logInfo('ansible', '[play] ' + playEvent.play.name)
+      break
+    }
+    case 'v2_playbook_on_task_start': {
+      const taskEvent = event as AnsibleTaskStartEvent
+      logDebug('ansible', '[task] ' + taskEvent.task.name)
+      break
+    }
+    case 'v2_runner_on_ok': {
+      const okEvent = event as AnsibleTaskResultEvent
+      const anyChanged = Object.values(okEvent.hosts).some((host) => host.changed === true)
+      if (anyChanged) {
+        logInfo('ansible', '[changed] ' + okEvent.task.name)
+      } else {
+        logDebug('ansible', '[ok] ' + okEvent.task.name)
+      }
+      break
+    }
+    case 'v2_runner_on_skipped': {
+      const skippedEvent = event as AnsibleTaskResultEvent
+      logDebug('ansible', '[skipped] ' + skippedEvent.task.name)
+      break
+    }
+    case 'v2_runner_on_failed':
+    case 'v2_runner_on_unreachable': {
+      const failedEvent = event as AnsibleTaskResultEvent
+      const firstHost = Object.values(failedEvent.hosts)[0]
+      const firstMsg = firstHost?.msg ?? 'unknown error'
+      logError('ansible', '[failed] ' + failedEvent.task.name + ': ' + firstMsg)
+      break
+    }
+    case 'v2_playbook_on_stats': {
+      const statsEvent = event as AnsiblePlayStatsEvent
+      logInfo('ansible', '[recap] ' + formatStats(statsEvent.stats))
+      break
+    }
+  }
+}
+
 export interface PlaybookStreamingOptions {
   cwd?: string
   env?: Record<string, string>
-  onEvent: AnsibleEventHandler
+  onEvent?: AnsibleEventHandler
 }
 
 /**
  * Run ansible-playbook with stdout parsed as JSONL task events.
  *
- * Stderr remains inherited so human-oriented Ansible warnings still reach journald.
+ * Parsed events are logged via `logAnsibleEvent()`; unparseable stdout lines and all
+ * stderr lines are still routed through the structured logger under the `ansible`
+ * component.
  */
 export async function runPlaybookStreaming(
   ansiblePlaybookBin: string,
@@ -135,7 +198,15 @@ export async function runPlaybookStreaming(
     env: options.env,
     onStdoutLine: (line) => {
       const event = parseAnsibleJsonlLine(line)
-      if (event) options.onEvent(event)
+      if (event) {
+        logAnsibleEvent(event)
+        if (options.onEvent) options.onEvent(event)
+      } else if (line.trim().length > 0) {
+        logInfo('ansible', line)
+      }
+    },
+    onStderrLine: (line) => {
+      if (line.trim().length > 0) logInfo('ansible', line)
     },
   })
 

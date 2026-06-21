@@ -1,3 +1,4 @@
+import { log } from '../logger.ts'
 import {
   CACHE_DIR,
   PYTHON_INSTALL_DIR,
@@ -80,6 +81,19 @@ export interface RunStreamingOptions {
   env?: Record<string, string>
   /** Invoked for each complete stdout line (without trailing newline). */
   onStdoutLine?: (line: string) => void
+  /** Invoked for each complete stderr line (without trailing newline). */
+  onStderrLine?: (line: string) => void
+}
+
+export interface RunLoggedOptions {
+  /** Working directory for the command. */
+  cwd?: string
+  /** Extra environment variables, merged on top of the runtime env. */
+  env?: Record<string, string>
+  level: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR'
+  component: string
+  /** Stderr log level; defaults to `level` when omitted. */
+  stderrLevel?: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR'
 }
 
 export interface RunStreamingResult {
@@ -87,59 +101,97 @@ export interface RunStreamingResult {
   success: boolean
 }
 
+async function readStreamLines(
+  stream: ReadableStream<Uint8Array>,
+  onLine: (line: string) => void,
+): Promise<void> {
+  const decoder = new TextDecoder()
+  let buffer = ''
+  const reader = stream.getReader()
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+
+      let newlineIndex = buffer.indexOf('\n')
+      while (newlineIndex !== -1) {
+        const line = buffer.slice(0, newlineIndex)
+        buffer = buffer.slice(newlineIndex + 1)
+        if (line.length > 0) onLine(line)
+        newlineIndex = buffer.indexOf('\n')
+      }
+    }
+
+    if (buffer.length > 0) onLine(buffer)
+  } finally {
+    reader.releaseLock()
+  }
+}
+
 /**
  * Run a command while reading stdout line-by-line.
  *
- * Stderr is inherited so warnings and errors still stream to journald unchanged.
+ * Stderr is inherited unless `onStderrLine` is provided, in which case stderr is
+ * also piped and delivered line-by-line to the callback.
  */
 export async function runStreamingLines(
   cmd: string,
   args: string[],
   options: RunStreamingOptions = {},
 ): Promise<RunStreamingResult> {
-  const { cwd, env, onStdoutLine } = options
+  const { cwd, env, onStdoutLine, onStderrLine } = options
 
   const command = new Deno.Command(cmd, {
     args,
     cwd,
     env: runtimeEnv(env),
     stdout: 'piped',
-    stderr: 'inherit',
+    stderr: onStderrLine ? 'piped' : 'inherit',
   })
 
   const child = command.spawn()
-  const stdout = child.stdout
+  const reads: Promise<void>[] = []
 
-  if (stdout && onStdoutLine) {
-    const decoder = new TextDecoder()
-    let buffer = ''
-    const reader = stdout.getReader()
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-
-        let newlineIndex = buffer.indexOf('\n')
-        while (newlineIndex !== -1) {
-          const line = buffer.slice(0, newlineIndex)
-          buffer = buffer.slice(newlineIndex + 1)
-          if (line.length > 0) onStdoutLine(line)
-          newlineIndex = buffer.indexOf('\n')
-        }
-      }
-
-      if (buffer.length > 0) onStdoutLine(buffer)
-    } finally {
-      reader.releaseLock()
-    }
-  } else if (stdout) {
-    await stdout.cancel()
+  if (child.stdout && onStdoutLine) {
+    reads.push(readStreamLines(child.stdout, onStdoutLine))
+  } else if (child.stdout) {
+    reads.push(child.stdout.cancel())
   }
+
+  if (child.stderr && onStderrLine) {
+    reads.push(readStreamLines(child.stderr, onStderrLine))
+  }
+
+  await Promise.all(reads)
 
   const status = await child.status
   return { code: status.code, success: status.success }
+}
+
+/** Run a command and route each stdout/stderr line through the structured logger. */
+export async function runLogged(
+  cmd: string,
+  args: string[],
+  options: RunLoggedOptions,
+): Promise<RunStreamingResult> {
+  const { cwd, env, level, component, stderrLevel = level } = options
+
+  const result = await runStreamingLines(cmd, args, {
+    cwd,
+    env,
+    onStdoutLine: (line) => log(level, component, line),
+    onStderrLine: (line) => log(stderrLevel, component, line),
+  })
+
+  if (!result.success) {
+    throw new Error(
+      `Command failed (exit ${result.code}): ${cmd} ${args.join(' ')}`,
+    )
+  }
+
+  return result
 }
 
 /** Run a command and throw a descriptive error if it exits non-zero. */

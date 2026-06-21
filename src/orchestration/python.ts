@@ -1,4 +1,4 @@
-import { runOrThrow } from './exec.ts'
+import { runLogged } from './exec.ts'
 import { logInfo } from '../logger.ts'
 import { PYTHON_VERSION, UV_BIN } from './paths.ts'
 
@@ -11,6 +11,9 @@ import { PYTHON_VERSION, UV_BIN } from './paths.ts'
 export async function ensurePython(): Promise<void> {
   logInfo('orchestration', `ensuring Python ${PYTHON_VERSION} is installed`)
   // Capture uv output — informational "already installed" lines belong in stdout, not err.log.
-  await runOrThrow(UV_BIN, ['python', 'install', PYTHON_VERSION], { stream: false })
+  await runLogged(UV_BIN, ['python', 'install', PYTHON_VERSION], {
+    level: 'DEBUG',
+    component: 'python',
+  })
   logInfo('orchestration', `Python ${PYTHON_VERSION} ready`)
 }

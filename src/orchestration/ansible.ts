@@ -1,4 +1,4 @@
-import { run, runOrThrow } from './exec.ts'
+import { run, runLogged, runOrThrow } from './exec.ts'
 import {
   type AnsibleEventHandler,
   runPlaybookStreaming,
@@ -18,7 +18,6 @@ import { join } from '@std/path'
 import { logInfo, logWarn } from '../logger.ts'
 import {
   ansibleEnv,
-  ansibleEnvHumanStdout,
   ANSIBLE_CURRENT_DIR,
   ANSIBLE_INSTALL_DIR,
   ANSIBLE_PLAYBOOK_BIN,
@@ -85,18 +84,10 @@ async function runLocalPlaybook(
 ): Promise<void> {
   const args = ['-i', 'localhost,', '-c', 'local', ...extraArgs, playbook]
 
-  if (onEvent) {
-    await runPlaybookStreaming(ANSIBLE_PLAYBOOK_BIN, args, {
-      cwd: ANSIBLE_PLAYBOOK_CWD,
-      env: ansibleEnv(),
-      onEvent,
-    })
-    return
-  }
-
-  await runOrThrow(ANSIBLE_PLAYBOOK_BIN, args, {
+  await runPlaybookStreaming(ANSIBLE_PLAYBOOK_BIN, args, {
     cwd: ANSIBLE_PLAYBOOK_CWD,
-    env: ansibleEnvHumanStdout(),
+    env: ansibleEnv(),
+    onEvent,
   })
 }
 
@@ -179,15 +170,15 @@ export async function ensureGalaxyRoles(): Promise<void> {
   const galaxyBin = join(VENV_BIN_DIR, 'ansible-galaxy')
 
   logInfo('orchestration', `installing galaxy roles from ${GALAXY_REQUIREMENTS_FILE}`)
-  await runOrThrow(
+  await runLogged(
     galaxyBin,
     ['role', 'install', '-r', GALAXY_REQUIREMENTS_FILE, '-p', GALAXY_ROLES_DIR],
-    { stream: true },
+    { level: 'INFO', component: 'ansible-galaxy' },
   )
   logInfo('orchestration', 'galaxy roles ready')
 
   logInfo('orchestration', `installing galaxy collections from ${GALAXY_REQUIREMENTS_FILE}`)
-  await runOrThrow(
+  await runLogged(
     galaxyBin,
     [
       'collection',
@@ -197,7 +188,7 @@ export async function ensureGalaxyRoles(): Promise<void> {
       '-p',
       GALAXY_COLLECTIONS_DIR,
     ],
-    { stream: true },
+    { level: 'INFO', component: 'ansible-galaxy' },
   )
   logInfo('orchestration', 'galaxy collections ready')
 }
@@ -274,18 +265,11 @@ export async function runDaemonSystemdSetup(onEvent?: AnsibleEventHandler): Prom
   ]
   const cwd = ORCHESTRATION_DIR
 
-  if (onEvent) {
-    await runPlaybookStreaming(ANSIBLE_PLAYBOOK_BIN, args, {
-      cwd,
-      env: ansibleEnv(),
-      onEvent,
-    })
-  } else {
-    await runOrThrow(ANSIBLE_PLAYBOOK_BIN, args, {
-      cwd,
-      env: ansibleEnvHumanStdout(),
-    })
-  }
+  await runPlaybookStreaming(ANSIBLE_PLAYBOOK_BIN, args, {
+    cwd,
+    env: ansibleEnv(),
+    onEvent,
+  })
   logInfo('orchestration', 'daemon-systemd-setup complete')
 }
 

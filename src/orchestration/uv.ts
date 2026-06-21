@@ -1,6 +1,6 @@
 import { encodeHex } from '@std/encoding/hex'
 import { join } from '@std/path'
-import { run } from './exec.ts'
+import { run, runLogged } from './exec.ts'
 import { logInfo, logWarn } from '../logger.ts'
 import {
   RUNTIME_BIN_DIR,
@@ -150,12 +150,10 @@ async function extractUv(archiveBytes: Uint8Array, asset: string): Promise<void>
     const archivePath = join(tmpDir, asset)
     await Deno.writeFile(archivePath, archiveBytes)
 
-    const result = await run('tar', ['-xzf', archivePath, '-C', tmpDir], {
-      stream: false,
+    await runLogged('tar', ['-xzf', archivePath, '-C', tmpDir], {
+      level: 'DEBUG',
+      component: 'uv',
     })
-    if (!result.success) {
-      throw new Error(`Failed to extract uv archive: ${result.stderr.trim()}`)
-    }
 
     // Tarball name is "uv-<triple>.tar.gz"; the inner dir is "uv-<triple>".
     const innerDir = join(tmpDir, asset.replace(/\.tar\.gz$/, ''))

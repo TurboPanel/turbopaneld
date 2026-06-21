@@ -73,13 +73,6 @@ export function ansibleEnv(): Record<string, string> {
   }
 }
 
-/** Ansible env for fire-and-forget playbook runs (human prose on stdout). */
-export function ansibleEnvHumanStdout(): Record<string, string> {
-  return {
-    ...ansibleEnv(),
-    ANSIBLE_STDOUT_CALLBACK: 'default',
-  }
-}
 export const LOCALHOST_PLAYBOOK = join(
   ORCHESTRATION_DIR,
   'playbooks',
