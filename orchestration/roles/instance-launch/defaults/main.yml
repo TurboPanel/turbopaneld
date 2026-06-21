@@ -47,6 +47,7 @@ postgres_user: turbopanel
 postgres_db: turbopanel
 instance_log_dir: "{{ turbopanel_instance_dir }}/logs"
 ui_log_dir: "{{ turbopanel_ui_dir }}/logs"
+website_log_dir: "{{ turbopanel_website_dir }}/logs"
 rabbitmq_amqp_port: 5672
 rabbitmq_vhost: /
 rabbitmq_user: turbopanel

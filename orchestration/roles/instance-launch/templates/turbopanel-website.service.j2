@@ -22,8 +22,8 @@ Environment=COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 ExecStart=/usr/local/bin/node {{ turbopanel_website_dir }}/node_modules/next/dist/bin/next dev --port {{ website_port }}
 Restart=always
 RestartSec=3
-StandardOutput=journal
-StandardError=journal
+StandardOutput=append:{{ website_log_dir }}/website.log
+StandardError=append:{{ website_log_dir }}/website.err.log
 
 [Install]
 WantedBy=multi-user.target
