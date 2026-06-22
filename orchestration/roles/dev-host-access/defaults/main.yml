@@ -1,7 +1,0 @@
----
-turbopanel_dev_user: ""
-turbopanel_dev_uid: ""
-turbopanel_dev_gid: ""
-turbopanel_install_root: /opt/turbopanel
-turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/runtimes"
-deno_version: "2.8.3"

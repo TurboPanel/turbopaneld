@@ -1,42 +1,17 @@
 import { encodeHex } from '@std/encoding/hex'
 import { join, relative } from '@std/path'
 import {
-  GALAXY_ROLES_DIR,
-  INSTANCE_DEV_INSTALL_PLAYBOOK,
-  RUNTIMES_DIR,
-} from './paths.ts'
+  type DevOrchestrationLayout,
+  resolveDevConvergeRoleDir,
+  resolveDevOrchestrationLayout,
+} from './dev-orchestration.ts'
+import { RUNTIMES_DIR } from './paths.ts'
 
 export const DEV_CONVERGE_STAMP_FILE = join(
   RUNTIMES_DIR,
   'ansible',
   'dev-converge.stamp',
 )
-
-/** Roles invoked by orchestration/playbooks/instance-dev-install.yml (order preserved for stability). */
-const INSTANCE_DEV_INSTALL_ROLES = [
-  'turbopanel-user',
-  'runtime-sockets',
-  'daemon-logs',
-  'daemon-prereqs',
-  'docker',
-  'postgres',
-  'redis',
-  'rabbitmq',
-  'instance-user',
-  'instance-dev-prereqs',
-  'node-runtime',
-  'deno-runtime',
-  'caddy',
-  'dev-permissions',
-  'dev-host-access',
-  'instance-repo',
-  'ui-repo',
-  'website-repo',
-  'ui-build',
-  'instance-build',
-  'instance-certs',
-  'instance-launch',
-] as const
 
 function forceConvergeRequested(): boolean {
   const flag = Deno.env.get('TURBOPANEL_FORCE_CONVERGE')?.trim().toLowerCase()
@@ -58,8 +33,11 @@ async function digestText(material: string): Promise<string> {
   return encodeHex(new Uint8Array(digest))
 }
 
-async function collectRoleYamlMaterial(roleName: string): Promise<string[]> {
-  const roleDir = join(GALAXY_ROLES_DIR, roleName)
+async function collectRoleYamlMaterial(
+  layout: DevOrchestrationLayout,
+  roleName: string,
+): Promise<string[]> {
+  const roleDir = resolveDevConvergeRoleDir(layout, roleName)
   const collected: string[] = []
 
   async function walk(dir: string): Promise<void> {
@@ -117,16 +95,22 @@ export function devConvergeEnvMaterial(): string {
 
 /**
  * Fingerprint of the co-located dev converge playbook, its role task/template
- * trees, and dev-only extra-vars. Used to skip redundant full converges on
- * daemon restart when nothing material changed.
+ * trees, and dev-only extra-vars. Uses the same dev orchestration root as
+ * `runInstanceDevInstall()` (staged turbopanel-dev tree + daemon shared roles).
  */
 export async function computeDevConvergeStamp(): Promise<string> {
-  const playbook = await Deno.readTextFile(INSTANCE_DEV_INSTALL_PLAYBOOK)
+  const layout = await resolveDevOrchestrationLayout()
+  const playbook = await Deno.readTextFile(layout.playbookPath)
   const roleChunks: string[] = []
-  for (const roleName of INSTANCE_DEV_INSTALL_ROLES) {
-    roleChunks.push(...await collectRoleYamlMaterial(roleName))
+  for (const roleName of layout.manifest.roles) {
+    roleChunks.push(...await collectRoleYamlMaterial(layout, roleName))
   }
-  const material = [playbook, devConvergeEnvMaterial(), ...roleChunks].join('\n---\n')
+  const material = [
+    layout.root,
+    playbook,
+    devConvergeEnvMaterial(),
+    ...roleChunks,
+  ].join('\n---\n')
   return await digestText(material)
 }
 

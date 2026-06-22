@@ -17,6 +17,10 @@ import {
 import { join } from '@std/path'
 import { logInfo, logWarn } from '../logger.ts'
 import {
+  devOrchestrationAnsibleEnv,
+  requireDevOrchestrationLayout,
+} from './dev-orchestration.ts'
+import {
   ansibleEnv,
   ANSIBLE_CURRENT_DIR,
   ANSIBLE_INSTALL_DIR,
@@ -30,7 +34,6 @@ import {
   GALAXY_COLLECTIONS_DIR,
   GALAXY_REQUIREMENTS_FILE,
   GALAXY_ROLES_DIR,
-  INSTANCE_DEV_INSTALL_PLAYBOOK,
   LOCALHOST_PLAYBOOK,
   ORCHESTRATION_DIR,
   POSTGRES_PLAYBOOK,
@@ -81,12 +84,13 @@ async function runLocalPlaybook(
   playbook: string,
   extraArgs: string[] = [],
   onEvent?: AnsibleEventHandler,
+  env: Record<string, string> = ansibleEnv(),
 ): Promise<void> {
   const args = ['-i', 'localhost,', '-c', 'local', ...extraArgs, playbook]
 
   await runPlaybookStreaming(ANSIBLE_PLAYBOOK_BIN, args, {
     cwd: ANSIBLE_PLAYBOOK_CWD,
-    env: ansibleEnv(),
+    env,
     onEvent,
   })
 }
@@ -286,9 +290,18 @@ export async function runInstanceDevInstall(onEvent?: AnsibleEventHandler): Prom
     return
   }
 
+  const layout = await requireDevOrchestrationLayout()
   const args = devInstanceExtraArgs()
-  logInfo('orchestration', 'running instance-dev-install converge playbook')
-  await runLocalPlaybook(INSTANCE_DEV_INSTALL_PLAYBOOK, args, onEvent)
+  logInfo(
+    'orchestration',
+    `running instance-dev-install converge playbook (${layout.playbookPath})`,
+  )
+  await runLocalPlaybook(
+    layout.playbookPath,
+    args,
+    onEvent,
+    devOrchestrationAnsibleEnv(layout),
+  )
   await writeDevConvergeStamp(await computeDevConvergeStamp())
   logInfo('orchestration', 'instance-dev-install complete')
 }

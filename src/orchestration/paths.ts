@@ -118,11 +118,6 @@ export const DAEMON_SYSTEMD_PLAYBOOK = join(
   'playbooks',
   'daemon-systemd-setup.yml',
 )
-export const INSTANCE_DEV_INSTALL_PLAYBOOK = join(
-  ORCHESTRATION_DIR,
-  'playbooks',
-  'instance-dev-install.yml',
-)
 export const BUILD_TOGGLE_PLAYBOOK = join(
   ORCHESTRATION_DIR,
   'playbooks',

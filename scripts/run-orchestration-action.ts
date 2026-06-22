@@ -3,8 +3,8 @@
  * Runs daemon orchestration playbooks as turbopanel (invoked via sudo from the console).
  * Emits Ansible JSONL events on stdout — one JSON object per line.
  *
- * Installed to /opt/turbopanel/platform/daemon/scripts/ before each orchestration
- * run so the turbopanel user can execute it without reading the developer checkout.
+ * Co-located dev converge resolves playbooks from the staged turbopanel-dev
+ * orchestration tree; daemon-only playbooks continue to use the daemon checkout.
  */
 const TURBOPANEL_ROOT = "/opt/turbopanel";
 /** Run playbooks outside daemon checkout so git as turbopanel does not walk into dev-owned .git */
@@ -13,12 +13,7 @@ const TURBOPANEL_PLATFORM = `${TURBOPANEL_ROOT}/platform`;
 const RUNTIMES_DIR = `${TURBOPANEL_ROOT}/runtimes`;
 const ANSIBLE_PLAYBOOK_BIN =
   `${RUNTIMES_DIR}/ansible/current/bin/ansible-playbook`;
-const ANSIBLE_LOCAL_TMP = `${RUNTIMES_DIR}/uv/cache/ansible-tmp`;
-const ANSIBLE_COLLECTIONS_PATH = `${RUNTIMES_DIR}/ansible/galaxy-collections`;
 const DAEMON_ENV_PATH = `${TURBOPANEL_PLATFORM}/daemon/.env`;
-
-const INSTANCE_DEV_INSTALL_PLAYBOOK =
-  `${TURBOPANEL_PLATFORM}/daemon/orchestration/playbooks/instance-dev-install.yml`;
 
 const SSH_REPO_URLS = {
   instance: "git@github.com:turbopanel/turbopanel.git",
@@ -33,6 +28,8 @@ const DAEMON_ANSIBLE_PATH =
   `${TURBOPANEL_PLATFORM}/daemon/src/orchestration/ansible.ts`;
 const DAEMON_CONVERGE_STAMP_PATH =
   `${TURBOPANEL_PLATFORM}/daemon/src/orchestration/converge-stamp.ts`;
+const DAEMON_DEV_ORCHESTRATION_PATH =
+  `${TURBOPANEL_PLATFORM}/daemon/src/orchestration/dev-orchestration.ts`;
 const DAEMON_ORCHESTRATION_DIR =
   `${TURBOPANEL_PLATFORM}/daemon/orchestration`;
 
@@ -53,12 +50,11 @@ function applyDaemonEnvToProcess(): void {
 
 applyDaemonEnvToProcess();
 
-
-function ansiblePlaybookEnv(): Record<string, string> {
+function daemonAnsibleEnv(): Record<string, string> {
   return {
     ANSIBLE_CONFIG: `${DAEMON_ORCHESTRATION_DIR}/ansible.cfg`,
-    ANSIBLE_LOCAL_TEMP: ANSIBLE_LOCAL_TMP,
-    ANSIBLE_COLLECTIONS_PATH: ANSIBLE_COLLECTIONS_PATH,
+    ANSIBLE_LOCAL_TEMP: `${RUNTIMES_DIR}/uv/cache/ansible-tmp`,
+    ANSIBLE_COLLECTIONS_PATH: `${RUNTIMES_DIR}/ansible/galaxy-collections`,
   };
 }
 
@@ -106,6 +102,27 @@ function devInstanceExtraArgs(): string[] {
 }
 
 async function runInstanceDevInstall(): Promise<void> {
+  const devMod = await import(DAEMON_DEV_ORCHESTRATION_PATH) as {
+    requireDevOrchestrationLayout: () => Promise<{
+      playbookPath: string;
+      ansibleCfgPath: string;
+      root: string;
+      devRolesDir: string;
+      daemonRolesDir: string;
+      manifest: {
+        playbook: string;
+        roles: string[];
+        devRoles: string[];
+      };
+    }>;
+    devOrchestrationAnsibleEnv: (
+      layout: {
+        ansibleCfgPath: string;
+      },
+    ) => Record<string, string>;
+  };
+  const layout = await devMod.requireDevOrchestrationLayout();
+
   const eventsMod = await import(DAEMON_ANSIBLE_EVENTS_PATH) as {
     runPlaybookStreaming: (
       ansiblePlaybookBin: string,
@@ -119,17 +136,14 @@ async function runInstanceDevInstall(): Promise<void> {
   };
   await eventsMod.runPlaybookStreaming(
     ANSIBLE_PLAYBOOK_BIN,
-    ["-i", "localhost,", "-c", "local", ...devInstanceExtraArgs(), INSTANCE_DEV_INSTALL_PLAYBOOK],
+    ["-i", "localhost,", "-c", "local", ...devInstanceExtraArgs(), layout.playbookPath],
     {
       cwd: ANSIBLE_PLAYBOOK_CWD,
-      env: ansiblePlaybookEnv(),
+      env: devMod.devOrchestrationAnsibleEnv(layout),
       onEvent: emitEvent,
     },
   );
 
-  // Write the dev-converge stamp so the daemon skips a redundant re-run on the
-  // next restart. Without this, the daemon's shouldSkipDevConverge() finds no stamp
-  // and re-runs the entire instance-dev-install playbook a second time.
   const stampMod = await import(DAEMON_CONVERGE_STAMP_PATH) as {
     computeDevConvergeStamp: () => Promise<string>;
     writeDevConvergeStamp: (stamp: string) => Promise<void>;
@@ -183,7 +197,7 @@ async function runPlaybook(): Promise<void> {
     ["-i", "localhost,", "-c", "local", ...extraArgs, playbook],
     {
       cwd: ANSIBLE_PLAYBOOK_CWD,
-      env: ansiblePlaybookEnv(),
+      env: daemonAnsibleEnv(),
       onEvent: emitEvent,
     },
   );
