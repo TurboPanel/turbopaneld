@@ -4,10 +4,6 @@ postgres_service_name: turbopanel-postgres
 # PG 18+ images store data under $PGDATA (/var/lib/postgresql/18/docker); mount the parent.
 # Data lives in a named Docker volume (postgres_volume_name), not a host bind-mount.
 postgres_volume_name: turbopaneldb
-postgres_legacy_volume_name: turbopanel-db
-postgres_legacy_container_names:
-  - turbopanel-postgres
-  - turbopanel-db
 turbopanel_docker_network: turbopanel
 postgres_socket_dir: /var/run/turbopanel/postgres
 postgres_port: 5432

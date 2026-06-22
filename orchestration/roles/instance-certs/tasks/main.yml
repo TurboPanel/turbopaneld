@@ -20,15 +20,5 @@
     PATH: "/usr/local/bin:/usr/bin:/bin"
   changed_when: false
 
-# Caddy runs as `instance` (group turbopanel) and must read the server leaf key.
-# Legacy certs may be owner-only (0600 turbopanel); normalize to group-readable.
-- name: Ensure instance can read TLS private keys
-  ansible.builtin.file:
-    path: "{{ turbopanel_instance_dir }}/certs/{{ item }}"
-    state: file
-    owner: "{{ instance_user }}"
-    group: "{{ turbopanel_group }}"
-    mode: "0640"
-  loop:
-    - self-signed.key
-    - ca.key
+# Caddy runs as turbopaneli (group turbopanel) and must read the server leaf key.
+# generate-self-signed-cert.mjs sets group-readable key modes (0640) on write.

@@ -44,6 +44,15 @@
     mode: "0640"
     force: false
 
+- name: Write rabbitmq broker config
+  ansible.builtin.template:
+    src: rabbitmq.conf.j2
+    dest: "{{ turbopanel_config_dir }}/rabbitmq/rabbitmq.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  register: _rmq_conf_written
+
 - name: Ensure turbopanel Docker network exists
   ansible.builtin.command:
     argv: [docker, network, create, --driver, bridge, "{{ turbopanel_docker_network }}"]
@@ -56,54 +65,6 @@
     argv: [docker, volume, create, "{{ rabbitmq_volume_name }}"]
   register: _rmq_volume_create
   changed_when: false
-
-- name: Inspect legacy rabbitmq Docker volume
-  ansible.builtin.command:
-    argv: [docker, volume, inspect, "{{ rabbitmq_legacy_volume_name }}"]
-  register: _rmq_legacy_vol_inspect
-  changed_when: false
-  failed_when: false
-
-- name: Remove legacy rabbitmq containers before volume migration
-  ansible.builtin.shell: |
-    set -euo pipefail
-    changed=0
-    for name in {{ rabbitmq_legacy_container_names | join(' ') }}; do
-      if docker inspect "$name" >/dev/null 2>&1; then
-        docker rm -f "$name"
-        changed=1
-      fi
-    done
-    if [ "$changed" -eq 1 ]; then echo changed; fi
-  args:
-    executable: /bin/bash
-  register: _rmq_legacy_containers_removed
-  changed_when: "'changed' in _rmq_legacy_containers_removed.stdout"
-  when: _rmq_legacy_vol_inspect.rc == 0
-
-- name: Check whether new rabbitmq Docker volume is empty
-  ansible.builtin.command:
-    cmd: >-
-      docker run --rm -v {{ rabbitmq_volume_name }}:/data alpine
-      sh -c 'test -z "$(ls -A /data 2>/dev/null)"'
-  register: _rmq_new_vol_empty
-  changed_when: false
-  failed_when: false
-  when: _rmq_legacy_vol_inspect.rc == 0
-
-- name: Migrate legacy rabbitmq Docker volume data
-  ansible.builtin.command:
-    cmd: >-
-      docker run --rm
-      -v {{ rabbitmq_legacy_volume_name }}:/from:ro
-      -v {{ rabbitmq_volume_name }}:/to
-      alpine sh -c 'cp -a /from/. /to/'
-  when:
-    - _rmq_legacy_vol_inspect.rc == 0
-    - _rmq_new_vol_empty is not skipped
-    - _rmq_new_vol_empty.rc == 0
-  register: _rmq_vol_migrated
-  changed_when: _rmq_vol_migrated.rc == 0
 
 - name: Inspect rabbitmq container
   ansible.builtin.command:
@@ -126,6 +87,8 @@
       {{ _rmq_container.Mounts | default([]) | selectattr('Type', 'equalto', 'volume') | selectattr('Name', 'equalto', rabbitmq_volume_name) | list | length > 0 }}
     _rmq_network_ok: "{{ turbopanel_docker_network in (_rmq_container.NetworkSettings.Networks | default({})) }}"
     _rmq_mgmt_exposed: "{{ _rmq_container.HostConfig.PortBindings['15672/tcp'] is defined }}"
+    _rmq_conf_mounted: >-
+      {{ _rmq_container.Mounts | default([]) | selectattr('Destination', 'equalto', '/etc/rabbitmq/rabbitmq.conf') | list | length > 0 }}
   when: _rmq_inspect_cmd.rc == 0
 
 - name: Set rabbitmq container missing facts
@@ -139,7 +102,7 @@
     cmd: docker rm -f {{ rabbitmq_container_name }}
   when:
     - _rabbitmq_container_exists | bool
-    - (not _rmq_volume_ok | bool) or (not _rmq_network_ok | bool) or (_rmq_status | trim in ['restarting', 'exited', 'dead'])
+    - (not _rmq_volume_ok | bool) or (not _rmq_network_ok | bool) or (not _rmq_conf_mounted | bool) or (_rmq_status | trim in ['restarting', 'exited', 'dead'])
   register: _rmq_removed
   changed_when: _rmq_removed.rc == 0
 
@@ -178,6 +141,8 @@
       - "{{ rabbitmq_container_uid }}:{{ rabbitmq_container_gid }}"
       - "-v"
       - "{{ rabbitmq_volume_name }}:/var/lib/rabbitmq"
+      - "-v"
+      - "{{ turbopanel_config_dir }}/rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro"
       - "--network"
       - "{{ turbopanel_docker_network }}"
       - "-e"
@@ -197,6 +162,17 @@
     cmd: docker run {{ _docker_run_args | join(' ') }}
   when: not _rabbitmq_container_exists | bool
   no_log: true
+
+- name: Restart rabbitmq container when broker config changed
+  ansible.builtin.command:
+    cmd: docker restart {{ rabbitmq_container_name }}
+  when:
+    - _rabbitmq_container_exists | bool
+    - _rmq_conf_written is changed
+    - _rmq_removed is not changed
+    - _rmq_removed_mgmt is not changed
+  register: _rmq_conf_restart
+  changed_when: _rmq_conf_restart.rc == 0
 
 - name: Install rabbitmq wrapper start script
   ansible.builtin.template:

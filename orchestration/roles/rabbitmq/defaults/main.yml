@@ -5,10 +5,6 @@ rabbitmq_mgmt_port: 15672
 rabbitmq_expose_amqp_port: false
 rabbitmq_expose_mgmt_port: true
 rabbitmq_volume_name: turbopanelq
-rabbitmq_legacy_volume_name: turbopanel-q
-rabbitmq_legacy_container_names:
-  - turbopanel-rabbitmq
-  - turbopanel-q
 turbopanel_docker_network: turbopanel
 rabbitmq_user: turbopanel
 rabbitmq_vhost: /

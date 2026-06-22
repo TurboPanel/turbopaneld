@@ -2,13 +2,6 @@
 - name: Ensure shared platform runtime directories
   ansible.builtin.import_tasks: platform-runtime-dirs.yml
 
-- name: Ensure website Next.js build cache ownership
-  ansible.builtin.import_tasks: website-build-cache.yml
-
-- name: Ensure UI Expo project cache ownership
-  when: turbopanel_ui_mode == 'dev'
-  ansible.builtin.import_tasks: ui-expo-cache.yml
-
 - name: Ensure instance file logs for developer console
   ansible.builtin.import_tasks: instance-logs.yml
 

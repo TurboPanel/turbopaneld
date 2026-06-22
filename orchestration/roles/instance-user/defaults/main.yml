@@ -4,7 +4,6 @@
 # it read/write the shared /run/turbopanel socket dir (group turbopanel) without
 # the sudo rights the daemon user holds.
 instance_user: turbopaneli
-instance_legacy_user: instance
 instance_uid: 9998
 instance_primary_group: turbopaneli
 instance_primary_gid: 9998
