@@ -8,6 +8,7 @@
   },
   "imports": {
     "@std/encoding/base64": "jsr:@std/encoding@1/base64",
+    "@std/encoding/base64url": "jsr:@std/encoding@1/base64url",
     "@std/encoding/hex": "jsr:@std/encoding@1/hex",
     "@std/path": "jsr:@std/path@1"
   },

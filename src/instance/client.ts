@@ -10,6 +10,15 @@ import { collectServerAddresses } from '../server-addresses.ts'
 import { applyDevSyncTarball, type DevSyncState, newDevSyncState } from '../dev-sync-apply.ts'
 import { writeInstanceTunnelToken } from '../tunnels.ts'
 import { logDebug, logError, logInfo, logWarn } from '../logger.ts'
+import {
+  type DaemonKeyFile,
+  loadDaemonKeyFile,
+} from '../crypto/keys.ts'
+import {
+  DaemonApiClient,
+} from './api-client.ts'
+import { DaemonTokenManager } from './token-manager.ts'
+import { enrollDaemon } from './enroll.ts'
 import { decodeBase64 } from '@std/encoding/base64'
 import { join } from '@std/path'
 
@@ -29,16 +38,6 @@ function sanitizeForLog(value: unknown): string {
 }
 
 type DaemonMessage =
-  | {
-    type: 'hello'
-    from: 'instance' | 'daemon'
-    at: string
-    hostname?: string
-    serverId?: string
-    machineId?: string
-    licenseId?: string
-    licenseToken?: string
-  }
   | { type: 'ping'; id: string; at: string }
   | { type: 'pong'; id: string; at: string }
   | { type: 'echo'; payload: unknown; at: string }
@@ -92,6 +91,8 @@ const DEFAULT_MAX_BACKOFF_MS = 30_000
 const BACKOFF_MULTIPLIER = 2
 
 const SERVER_ID_FILE = 'server.id'
+const SERVER_KEY_FILE = 'server-key.json'
+const KEY_ID_FILE = 'server-key-id'
 const DEFAULT_SERVER_ID_DIR = '/opt/turbopanel/platform/daemon/state'
 const DEFAULT_DAEMON_DIR = '/opt/turbopanel/platform/daemon'
 
@@ -129,6 +130,10 @@ function resolveServerIdPath(): string {
   return `${resolveServerIdDir()}/${SERVER_ID_FILE}`
 }
 
+export function resolveServerKeyPath(): string {
+  return `${resolveServerIdDir()}/${SERVER_KEY_FILE}`
+}
+
 async function readMachineId(): Promise<string | undefined> {
   try {
     const id = await Deno.readTextFile('/etc/machine-id')
@@ -149,6 +154,36 @@ async function readServerId(): Promise<string | undefined> {
   }
 }
 
+async function readDaemonKeyFile(): Promise<DaemonKeyFile | null> {
+  try {
+    return await loadDaemonKeyFile(resolveServerKeyPath())
+  } catch {
+    return null
+  }
+}
+
+async function readKeyId(): Promise<string | undefined> {
+  try {
+    const keyId = await Deno.readTextFile(`${resolveServerIdDir()}/${KEY_ID_FILE}`)
+    const trimmed = keyId.trim()
+    return trimmed.length > 0 ? trimmed : undefined
+  } catch {
+    return undefined
+  }
+}
+
+async function writeKeyId(keyId: string): Promise<void> {
+  const trimmed = keyId.trim()
+  if (!trimmed) return
+  try {
+    const dir = resolveServerIdDir()
+    await Deno.mkdir(dir, { recursive: true })
+    await Deno.writeTextFile(`${dir}/${KEY_ID_FILE}`, `${trimmed}\n`)
+  } catch (err) {
+    logWarn('instance', 'failed to persist key id:', sanitizeForLog(err))
+  }
+}
+
 async function readLicenseCredentials(): Promise<
   { licenseId?: string; licenseToken?: string }
 > {
@@ -160,7 +195,7 @@ async function readLicenseCredentials(): Promise<
     licenseId = (await Deno.readTextFile(`${dir}/license.id`)).trim()
     licenseToken = (await Deno.readTextFile(`${dir}/license.token`)).trim()
   } catch {
-    // Missing or unreadable license files — omit credentials from hello.
+    // Missing or unreadable license files.
     return {}
   }
 
@@ -169,18 +204,6 @@ async function readLicenseCredentials(): Promise<
   }
 
   return { licenseId, licenseToken }
-}
-
-async function writeServerId(serverId: string): Promise<void> {
-  const trimmed = serverId.trim()
-  if (!trimmed) return
-  try {
-    const dir = resolveServerIdDir()
-    await Deno.mkdir(dir, { recursive: true })
-    await Deno.writeTextFile(`${dir}/${SERVER_ID_FILE}`, `${trimmed}\n`)
-  } catch (err) {
-    logWarn('instance', 'failed to persist server id:', sanitizeForLog(err))
-  }
 }
 
 function parseMessage(raw: string): DaemonMessage | null {
@@ -204,6 +227,11 @@ export class InstanceClient {
   #backoffMs: number
   #hadStableSession = false
   readonly #devSync = new Map<string, DevSyncState>()
+  #tokenManager: DaemonTokenManager | undefined
+  #apiClient: DaemonApiClient | undefined
+  #tokenServerId: string | undefined
+  #tokenKeyId: string | undefined
+  #forceEnrollPending = false
 
   constructor(options: InstanceClientOptions = {}) {
     this.#config = options.config ?? resolveInstanceConfig()
@@ -327,6 +355,7 @@ export class InstanceClient {
     if (this.#connectLoopStarted) return
     this.#connectLoopStarted = true
     this.#stopped = false
+    this.#forceEnrollPending = isTruthyFlag(Deno.env.get('TURBOPANEL_FORCE_ENROLL'))
     this.#runConnectLoop().catch((err) => {
       logWarn(
         'instance',
@@ -338,6 +367,7 @@ export class InstanceClient {
 
   stop(): void {
     this.#stopped = true
+    this.#tokenManager?.stop()
     this.#ws?.close()
     this.#ws = undefined
   }
@@ -376,11 +406,22 @@ export class InstanceClient {
     }
   }
 
-  #newWebSocket(): WebSocket {
+  #newWebSocket(jwt: string): WebSocket {
     const url = instanceWebSocketUrl(this.#config, '/ws/daemon/v1')
-    return this.#httpClient
-      ? new WebSocket(url, { client: this.#httpClient })
-      : new WebSocket(url)
+    const options = this.#httpClient
+      ? { headers: { Authorization: `Bearer ${jwt}` }, client: this.#httpClient }
+      : { headers: { Authorization: `Bearer ${jwt}` } }
+
+    try {
+      // Daemon WS auth requires Authorization header at upgrade time.
+      return new WebSocket(url, options)
+    } catch (error) {
+      throw new Error(
+        `websocket runtime does not support Authorization headers: ${
+          sanitizeForLog(error)
+        }`,
+      )
+    }
   }
 
   #closeActiveSocket(): void {
@@ -405,9 +446,86 @@ export class InstanceClient {
     // Calling #closeActiveSocket() here would kill a healthy connection on every
     // reconnect cycle, producing a perpetual ~2-second disconnect/reconnect storm.
 
-    const ws = this.#newWebSocket()
+    const stateDir = resolveServerIdDir()
+    const [loadedKeyFile, loadedServerId, loadedKeyId, machineId] = await Promise.all([
+      readDaemonKeyFile(),
+      readServerId(),
+      readKeyId(),
+      readMachineId(),
+    ])
+    const hostname = Deno.hostname()
+
+    let keyFile = loadedKeyFile
+    let serverId = loadedServerId
+    let keyId = loadedKeyId
+    const needsEnrollment = this.#forceEnrollPending || keyFile === null || !serverId || !keyId
+    if (needsEnrollment) {
+      const licenseCredentials = await readLicenseCredentials()
+      if (!licenseCredentials.licenseId || !licenseCredentials.licenseToken) {
+        throw new Error('missing license credentials for enrollment')
+      }
+
+      const enrollClient = this.#apiClient ?? new DaemonApiClient({
+        config: this.#config,
+        httpClient: this.#httpClient,
+        getToken: async () => {
+          throw new Error('token unavailable before enrollment')
+        },
+      })
+      const enrollment = await enrollDaemon({
+        apiClient: enrollClient,
+        machineId,
+        hostname,
+        licenseId: licenseCredentials.licenseId,
+        licenseToken: licenseCredentials.licenseToken,
+        stateDir,
+      })
+      keyFile = enrollment.keyFile
+      serverId = enrollment.serverId
+      keyId = enrollment.keyId
+      this.#forceEnrollPending = false
+      logInfo('instance', 'enrolled with instance as', sanitizeForLog(serverId))
+    }
+
+    if (keyFile === null || !serverId || !keyId) {
+      throw new Error('daemon identity incomplete after enrollment/auth bootstrap')
+    }
+
+    if (
+      !this.#tokenManager ||
+      !this.#apiClient ||
+      this.#tokenServerId !== serverId ||
+      this.#tokenKeyId !== keyId
+    ) {
+      let tokenManagerRef: DaemonTokenManager | undefined
+      const apiClient = new DaemonApiClient({
+        config: this.#config,
+        httpClient: this.#httpClient,
+        getToken: async (options) => {
+          if (!tokenManagerRef) throw new Error('token manager not initialized')
+          return await tokenManagerRef.getToken(options)
+        },
+      })
+      const tokenManager = new DaemonTokenManager({
+        keyFile,
+        serverId,
+        keyId,
+        machineId,
+        hostname,
+        apiClient,
+      })
+      tokenManagerRef = tokenManager
+      this.#tokenManager = tokenManager
+      this.#apiClient = apiClient
+      this.#tokenServerId = serverId
+      this.#tokenKeyId = keyId
+    }
+
+    const jwt = await this.#tokenManager.getToken()
+    const ws = this.#newWebSocket(jwt)
     this.#ws = ws
     let sessionRegistered = false
+    let heartbeatTimer: ReturnType<typeof setInterval> | undefined
 
     await new Promise<void>((resolve, reject) => {
       const fail = (err: unknown) => {
@@ -439,21 +557,16 @@ export class InstanceClient {
 
     logDebug('instance', 'websocket connected via', sanitizeForLog(this.target))
 
-    const [serverId, machineId, licenseCredentials] = await Promise.all([
-      readServerId(),
-      readMachineId(),
-      readLicenseCredentials(),
-    ])
-    const hello: DaemonMessage = {
-      type: 'hello',
-      from: 'daemon',
-      hostname: Deno.hostname(),
-      serverId,
-      machineId,
-      ...licenseCredentials,
-      at: new Date().toISOString(),
+    sessionRegistered = true
+    this.#hadStableSession = true
+    this.#resetBackoff()
+    if (this.#apiClient) {
+      heartbeatTimer = setInterval(() => {
+        void this.#apiClient?.heartbeat({ serverId, hostname }).catch((err) => {
+          logWarn('instance', 'heartbeat failed:', sanitizeForLog(err))
+        })
+      }, 30_000)
     }
-    ws.send(JSON.stringify(hello))
 
     ws.onmessage = (event) => {
       const raw = typeof event.data === 'string'
@@ -465,26 +578,14 @@ export class InstanceClient {
         return
       }
 
-      if (
-        message.type === 'hello' &&
-        message.from === 'instance' &&
-        !sessionRegistered
-      ) {
-        sessionRegistered = true
-        this.#hadStableSession = true
-        this.#resetBackoff()
-        logInfo(
-          'instance',
-          'registered with instance as',
-          sanitizeForLog(message.hostname ?? message.serverId ?? '(no identity)'),
-        )
-      }
-
       this.#onMessage?.(message)
       this.#handleMessage(message, ws)
     }
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
+      if (event.code === 4401) {
+        logWarn('instance', 'authentication rejected')
+      }
       if (sessionRegistered) {
         logInfo('instance', 'websocket closed after registration')
       } else {
@@ -493,9 +594,15 @@ export class InstanceClient {
       if (this.#ws === ws) this.#ws = undefined
     }
 
-    await new Promise<void>((resolve) => {
-      ws.addEventListener('close', () => resolve(), { once: true })
+    const closeEvent = await new Promise<CloseEvent>((resolve) => {
+      ws.addEventListener('close', (event) => resolve(event as CloseEvent), { once: true })
     })
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer)
+    }
+    if (closeEvent.code === 4401) {
+      await this.#tokenManager?.refresh()
+    }
 
     if (sessionRegistered) {
       this.#resetBackoff()
@@ -506,11 +613,6 @@ export class InstanceClient {
 
   #handleMessage(message: DaemonMessage, ws: WebSocket): void {
     switch (message.type) {
-      case 'hello':
-        if (message.from === 'instance' && message.serverId) {
-          void writeServerId(message.serverId)
-        }
-        break
       case 'ping':
         ws.send(JSON.stringify(
           {
@@ -860,3 +962,4 @@ export async function connectInstance(
 }
 
 export type { DaemonMessage }
+export { readKeyId, writeKeyId }
