@@ -38,6 +38,8 @@ export function runtimeEnv(extra?: Record<string, string>): Record<string, strin
   return {
     PATH: path,
     UV_PYTHON_INSTALL_DIR: PYTHON_INSTALL_DIR,
+    // Managed Python lives under runtimes; skip ~/.local/bin shims (avoids PATH warning).
+    UV_PYTHON_INSTALL_BIN: '0',
     UV_CACHE_DIR: CACHE_DIR,
     // Never touch shell profiles / global state; the runtime is self-contained.
     UV_NO_MODIFY_PATH: '1',
