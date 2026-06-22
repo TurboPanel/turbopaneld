@@ -48,8 +48,8 @@ Managed installs store the server id at `/opt/turbopanel/platform/daemon/state/s
 
 daemons authenticate with an Ed25519 keypair (WebCrypto, not SSH) using an HTTP-first flow before opening the daemon WebSocket:
 
-- **Enrollment (first run or `TURBOPANEL_FORCE_ENROLL=1`)**: `POST /api/daemon/v1/auth/challenge` (no credentials) then `POST /api/daemon/v1/enroll` (license + signed proof-of-possession). The daemon persists `server-key.json` (0600), `server.id`, and `server-key-id` under `TURBOPANEL_DAEMON_STATE_DIR`. The license token is never sent again after enrollment.
-- **Auth/session (normal connects)**: `POST /api/daemon/v1/auth/challenge` with `{ serverId, keyId }`, sign `buildAuthPayload`, then `POST /api/daemon/v1/auth/session` for a 15-minute JWT.
+- **Enrollment (first run or `TURBOPANEL_FORCE_ENROLL=1`)**: `POST /api/daemon/v1/auth/challenge` (no credentials) then `POST /api/daemon/v1/enroll` (license + signed proof-of-possession). The daemon persists `server-key.json` (0600), `server.id`, and `server-key-id` (stores `server.daemonKeyId` returned by enrollment) under `TURBOPANEL_DAEMON_STATE_DIR`. The license token is never sent again after enrollment.
+- **Auth/session (normal connects)**: `POST /api/daemon/v1/auth/challenge` with `{ serverId, keyId }`, sign `buildAuthPayload`, then `POST /api/daemon/v1/auth/session` for a 15-minute JWT. The instance verifies the Ed25519 signature against the daemon public key stored on the server row.
 - **WS upgrade**: daemon opens `/ws/daemon/v1` with `Authorization: Bearer <token>` (no post-upgrade handshake messages).
 
 **Daemon Cell:** connection state, presence, snapshots, outbox, request records, challenges, and event buffers are owned by the instance-side **Daemon Cell** — not by in-process Maps. On self-hosted Deno the cell backend is Redis (Unix socket `/run/turbopanel/redis.sock`, provisioned by the `redis` Ansible role). On Cloudflare Workers it is a per-server SQLite-backed Durable Object. The daemon client (`src/instance/client.ts`) is unaffected — it still dials `/ws/daemon/v1` with `Authorization: Bearer <token>` and reconnects on `4401`.
@@ -57,6 +57,7 @@ daemons authenticate with an Ed25519 keypair (WebCrypto, not SSH) using an HTTP-
 - **Heartbeat**: after a successful WS connection, the daemon calls `POST /api/daemon/v1/heartbeat` every 30 seconds with `{ serverId, hostname }`. The call is fire-and-forget; failures are logged as warnings and do not interrupt the WS session.
 - **Token lifecycle**: `DaemonTokenManager` stores JWTs in memory only and refreshes lazily when less than 60 seconds remain (or immediately after a `4401` close).
 - **Token manager retry**: `DaemonTokenManager` retries a failed refresh once after a 2-second delay before throwing. Concurrent `getToken()` calls share a single in-flight refresh promise.
+- **No daemon session table**: JWT is stateless. `jti` is for logging/correlation only and is not stored.
 
 Canonical payload formats:
 
@@ -64,7 +65,7 @@ Canonical payload formats:
 - `turbopanel-daemon-auth-v1` (7 lines): `challengeId`, `nonce`, `serverId`, `keyId`, `machineId`, `hostname`.
 - `buildCanonicalPayload` is deprecated and aliases `buildAuthPayload`.
 
-Key rotation is supported: the old key signs a rotation request containing the new public key and its fingerprint; the instance verifies and stores the new key row; the old key may then be revoked. The co-located socket path uses the same auth model — there is no unauthenticated bypass. Never log the license token or private key material.
+The co-located socket path uses the same auth model — there is no unauthenticated bypass. Never log the license token or private key material.
 
 Install flow: official installer (separate CDN repo) → `scripts/bootstrap-orchestration.ts` (Deno entry — `ensureUv` → `ensurePython` → `bootstrapOrchestrationRuntime`; installs uv, Python, and Ansible into the **shared** `/opt/turbopanel/runtimes/{uv,python,ansible}` tree) → `orchestration/playbooks/daemon-install.yml`. Docker is installed in that playbook and again at daemon startup via `initOrchestration()` in `src/orchestration/setup.ts`.
 
@@ -161,7 +162,7 @@ Co-located dev (`instance-dev-prereqs` role, not `daemon-prereqs`) installs the 
 - `src/instance/api-client.ts` — HTTP API client for daemon auth/enroll/session endpoints
 - `src/instance/token-manager.ts` — in-memory daemon JWT manager with lazy refresh
 - `src/instance/enroll.ts` — enrollment flow (`auth/challenge` → keypair/sign → `enroll` → persist identity)
-- `src/crypto/keys.ts` — Ed25519 keypair generation, fingerprinting, canonical payload, sign/verify, key file load/save, `rotateToNewKeypair`
+- `src/crypto/keys.ts` — Ed25519 keypair generation, fingerprinting, canonical payload, sign/verify, key file load/save
 - `src/dev-sync-apply.ts` — unpack + cache a synced daemon build
 - `src/tunnels.ts` — cloudflared supervisor + `writeInstanceTunnelToken`
 - `src/orchestration/` — uv/Python/ansible bootstrap, playbook runners (incl. `runInstanceDevInstall`)

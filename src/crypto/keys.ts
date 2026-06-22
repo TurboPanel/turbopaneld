@@ -48,15 +48,6 @@ export async function generateDaemonKeypair(): Promise<DaemonKeyFile> {
   };
 }
 
-// caller signs/sends rotation with the old private key and only persists
-// this returned key file after the instance confirms the new key id.
-export async function rotateToNewKeypair(
-  oldKeyFile: DaemonKeyFile,
-): Promise<DaemonKeyFile> {
-  void oldKeyFile;
-  return await generateDaemonKeypair();
-}
-
 export async function computePublicKeyFingerprint(
   publicJwk: JsonWebKey,
 ): Promise<string> {
