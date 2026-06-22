@@ -192,9 +192,11 @@ async function runPlaybook(): Promise<void> {
     ) => Promise<void>;
   };
   const playbook = `${DAEMON_ORCHESTRATION_DIR}/playbooks/${playbookRelative}`;
+  // Co-located dev playbooks need dev user + runtime context from the daemon .env;
+  // CLI extra-vars passed after dev defaults win on duplicate keys.
   await eventsMod.runPlaybookStreaming(
     ANSIBLE_PLAYBOOK_BIN,
-    ["-i", "localhost,", "-c", "local", ...extraArgs, playbook],
+    ["-i", "localhost,", "-c", "local", ...devInstanceExtraArgs(), ...extraArgs, playbook],
     {
       cwd: ANSIBLE_PLAYBOOK_CWD,
       env: daemonAnsibleEnv(),
