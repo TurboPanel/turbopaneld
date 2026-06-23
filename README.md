@@ -68,8 +68,8 @@ The installer bootstraps Ansible, then runs
 `orchestration/playbooks/daemon-install.yml`, which:
 
 - Creates service user `turbopanel:turbopanel` (UID/GID 9999)
-- Clones this repo to `/opt/turbopanel/platform/daemon` on branch `trunk`
-- Installs Deno to `/usr/local/bin/deno`
+- Downloads release artifacts to `/opt/turbopanel/platform/daemon` (compiled
+  `turbopaneld` binary, orchestration tree, compiled bootstrap orchestration)
 - Writes `/opt/turbopanel/platform/daemon/.env` with `TURBOPANEL_INSTANCE_URL`
   and `TURBOPANEL_INSTANCE_CA` when using a self-hosted HTTPS instance
 - Installs and manages `turbopanel-daemon.service` (systemd)
@@ -105,13 +105,13 @@ tunnel. Drop in more files to run multiple tunnels side by side.
 
 After the initial install, you can reconcile state without re-running the curl
 bootstrap. If the shared orchestration runtime is missing, bootstrap it first —
-`scripts/bootstrap-orchestration.ts` installs uv, Python, and Ansible into the
-shared `/opt/turbopanel/runtimes/` tree (replaces the former
-`bootstrap-orchestration.sh`); from the daemon checkout run:
+`dist/turbopanel-bootstrap-orchestration` (or `deno task compile:bootstrap` on a
+dev checkout) installs uv, Python, and Ansible into the shared
+`/opt/turbopanel/runtimes/` tree; from the daemon checkout run:
 
 ```bash
 cd /opt/turbopanel/platform/daemon
-/usr/local/bin/deno task bootstrap-orchestration
+./dist/turbopanel-bootstrap-orchestration
 ```
 
 Then run the install playbook:

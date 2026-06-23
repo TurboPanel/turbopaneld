@@ -5,7 +5,7 @@
 # Artifacts written to dist/:
 #   turbopaneld-linux-{amd64,arm64}.tar.zst     — released daemon binary only
 #   turbopanel-orchestration.tar.zst            — orchestration/ tree for Ansible
-#   turbopanel-bootstrap.tar.zst                — Deno bootstrap sources (not git)
+#   turbopanel-bootstrap-linux-{amd64,arm64}.tar.zst — compiled orchestration bootstrap
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -57,18 +57,25 @@ package_orchestration() {
 	write_tarball "$_out_name" "$_staging" orchestration
 }
 
-package_bootstrap() {
+package_bootstrap_arch() {
+	_arch="$1"
+	_src_name="$(tp_bootstrap_linux_arch_binary_name "$_arch")"
+	_src="$DIST/$_src_name"
+	_member_name="$(tp_bootstrap_binary_name)"
+	if [ ! -s "$_src" ]; then
+		echo "package-daemon-release.sh: missing $_src (run deno task compile:all)" >&2
+		exit 1
+	fi
+
 	_staging="$(mktemp -d)"
-	mkdir -p "$_staging/scripts" "$_staging/src"
-	cp "$ROOT/scripts/bootstrap-orchestration.ts" "$_staging/scripts/"
-	cp -a "$ROOT/src/orchestration" "$_staging/src/"
-	cp "$ROOT/src/logger.ts" "$_staging/src/"
-	cp "$ROOT/deno.json" "$_staging/"
-	_out_name="$(tp_bootstrap_release_filename "$VERSION")"
-	write_tarball "$_out_name" "$_staging" scripts src deno.json
+	_out_name="$(tp_bootstrap_release_filename "$_arch" "$VERSION")"
+
+	install -m 0755 "$_src" "$_staging/$_member_name"
+	write_tarball "$_out_name" "$_staging" "$_member_name"
 }
 
 package_arch amd64
 package_arch arm64
 package_orchestration
-package_bootstrap
+package_bootstrap_arch amd64
+package_bootstrap_arch arm64

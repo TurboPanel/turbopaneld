@@ -92,12 +92,27 @@ tp_orchestration_release_filename() {
 	fi
 }
 
+tp_bootstrap_binary_name() {
+	printf 'turbopanel-bootstrap-orchestration'
+}
+
+tp_bootstrap_linux_arch_binary_name() {
+	_arch="$1"
+	printf 'turbopanel-bootstrap-orchestration-linux-%s' "$_arch"
+}
+
+tp_bootstrap_dist_binary_path() {
+	_daemon_dir="${1:-/opt/turbopanel/platform/daemon}"
+	printf '%s/dist/turbopanel-bootstrap-orchestration' "$_daemon_dir"
+}
+
 tp_bootstrap_release_filename() {
-	_version="${1:-}"
+	_arch="$1"
+	_version="${2:-}"
 	if [ -n "$_version" ]; then
-		printf 'turbopanel-bootstrap-%s.tar.zst' "$_version"
+		printf 'turbopanel-bootstrap-%s-linux-%s.tar.zst' "$_version" "$_arch"
 	else
-		printf 'turbopanel-bootstrap.tar.zst'
+		printf 'turbopanel-bootstrap-linux-%s.tar.zst' "$_arch"
 	fi
 }
 
@@ -159,13 +174,22 @@ tp_fetch_bootstrap_release() {
 	_base_url="$1"
 	_dest_dir="$2"
 	_version="${3:-${TURBOPANEL_DAEMON_RELEASE_VERSION:-}}"
+	_arch="$(tp_daemon_linux_arch)" || return 1
+	_member_name="$(tp_bootstrap_binary_name)"
 
 	if [ -n "$_version" ]; then
-		if tp_fetch_named_release "$_base_url" "$_dest_dir" "$(tp_bootstrap_release_filename "$_version")"; then
+		if tp_fetch_named_release "$_base_url" "$_dest_dir" "$(tp_bootstrap_release_filename "$_arch" "$_version")"; then
 			return 0
 		fi
 	fi
-	tp_fetch_named_release "$_base_url" "$_dest_dir" "$(tp_bootstrap_release_filename)"
+	if ! tp_fetch_named_release "$_base_url" "$_dest_dir" "$(tp_bootstrap_release_filename "$_arch")"; then
+		return 1
+	fi
+	if [ ! -f "$_dest_dir/$_member_name" ]; then
+		echo "tp_fetch_bootstrap_release: archive missing $_member_name member" >&2
+		return 1
+	fi
+	return 0
 }
 
 tp_install_daemon_release() {

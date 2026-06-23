@@ -4,7 +4,7 @@
 # Downloads release artifacts only (no git clone):
 #   turbopaneld-linux-*.tar.zst  → dist/turbopaneld
 #   turbopanel-orchestration.tar.zst → orchestration/ (Ansible)
-#   turbopanel-bootstrap.tar.zst → scripts/ + src/ (one-shot orchestration bootstrap)
+#   turbopanel-bootstrap-linux-*.tar.zst → dist/turbopanel-bootstrap-orchestration
 #
 # The running daemon then provisions everything else (instance, Docker on demand, …)
 # via Ansible. Run as root or as a sudo-group user (self-escalates when sudo exists).
@@ -56,12 +56,17 @@ tp_orchestration_release_filename() {
 	fi
 }
 
+tp_bootstrap_binary_name() {
+	printf 'turbopanel-bootstrap-orchestration'
+}
+
 tp_bootstrap_release_filename() {
-	_version="${1:-}"
+	_arch="$1"
+	_version="${2:-}"
 	if [ -n "$_version" ]; then
-		printf 'turbopanel-bootstrap-%s.tar.zst' "$_version"
+		printf 'turbopanel-bootstrap-%s-linux-%s.tar.zst' "$_version" "$_arch"
 	else
-		printf 'turbopanel-bootstrap.tar.zst'
+		printf 'turbopanel-bootstrap-linux-%s.tar.zst' "$_arch"
 	fi
 }
 
@@ -221,7 +226,7 @@ DAEMON_DIR="$INSTALL_ROOT/platform/daemon"
 CONFIG_DIR="$INSTALL_ROOT/platform/config"
 RUNTIMES_DIR="$INSTALL_ROOT/runtimes"
 CA_PATH="$CONFIG_DIR/instance-ca.pem"
-DENO_VERSION="2.8.3"
+BOOTSTRAP_BINARY="$DAEMON_DIR/dist/turbopanel-bootstrap-orchestration"
 
 if [ "$INSECURE_TLS" = true ]; then
 	export TURBOPANEL_RELEASE_TLS_INSECURE=1
@@ -236,15 +241,6 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq sudo curl ca-certificates xz-utils zstd tar unzip gnupg python3-debian
 
-if [ ! -x /usr/local/bin/deno ]; then
-	DENO_TMP="$RUNTIMES_DIR/deno/.install"
-	rm -rf "$DENO_TMP"
-	mkdir -p "$DENO_TMP"
-	curl -fsSL https://deno.land/install.sh | DENO_INSTALL="$DENO_TMP" sh -s "v$DENO_VERSION" -- -y --no-modify-path
-	install -m 0755 "$DENO_TMP/bin/deno" /usr/local/bin/deno
-	rm -rf "$DENO_TMP"
-fi
-
 mkdir -p "$CONFIG_DIR"
 if [ -n "$INSTANCE_CA" ]; then
 	install -m 0640 "$INSTANCE_CA" "$CA_PATH"
@@ -253,16 +249,27 @@ elif [ "$INSECURE_TLS" = false ]; then
 	chmod 0640 "$CA_PATH"
 fi
 
-echo "run.sh: downloading bootstrap support bundle"
+echo "run.sh: downloading bootstrap orchestration binary"
 # #region agent log
 tp_agent_log "B" "run.sh:bootstrap" "fetch_bootstrap" "{\"urlBase\":\"$BINARY_URL\"}"
 # #endregion
-if ! tp_fetch_versioned_release "$BINARY_URL" "$DAEMON_DIR" \
-	"$(tp_bootstrap_release_filename "${TURBOPANEL_DAEMON_RELEASE_VERSION:-}")" \
-	"$(tp_bootstrap_release_filename)"; then
-	echo "run.sh: failed to download bootstrap bundle from $BINARY_URL" >&2
+_bootstrap_staging="$(mktemp -d)"
+_arch="$(tp_daemon_linux_arch)" || exit 1
+if ! tp_fetch_versioned_release "$BINARY_URL" "$_bootstrap_staging" \
+	"$(tp_bootstrap_release_filename "$_arch" "${TURBOPANEL_DAEMON_RELEASE_VERSION:-}")" \
+	"$(tp_bootstrap_release_filename "$_arch")"; then
+	echo "run.sh: failed to download bootstrap binary from $BINARY_URL" >&2
+	rm -rf "$_bootstrap_staging"
 	exit 1
 fi
+if [ ! -f "$_bootstrap_staging/$(tp_bootstrap_binary_name)" ]; then
+	echo "run.sh: bootstrap archive missing $(tp_bootstrap_binary_name) member" >&2
+	rm -rf "$_bootstrap_staging"
+	exit 1
+fi
+mkdir -p "$DAEMON_DIR/dist"
+install -m 0755 "$_bootstrap_staging/$(tp_bootstrap_binary_name)" "$BOOTSTRAP_BINARY"
+rm -rf "$_bootstrap_staging"
 
 echo "run.sh: downloading released daemon binary"
 # #region agent log
@@ -301,8 +308,7 @@ export TURBOPANEL_DAEMON_ROOT="$DAEMON_DIR"
 # #region agent log
 tp_agent_log "A" "run.sh:main" "artifact_install_start" "{\"binaryUrl\":\"$BINARY_URL\",\"daemonDir\":\"$DAEMON_DIR\",\"noGitClone\":true}"
 # #endregion
-/usr/local/bin/deno run --allow-net --allow-read --allow-write --allow-run --allow-env \
-	"$DAEMON_DIR/scripts/bootstrap-orchestration.ts"
+"$BOOTSTRAP_BINARY"
 
 ANSIBLE_PLAYBOOK="$RUNTIMES_DIR/ansible/current/bin/ansible-playbook"
 if [ ! -x "$ANSIBLE_PLAYBOOK" ]; then

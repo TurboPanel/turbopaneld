@@ -28,6 +28,5 @@
   roles:
     - role: daemon-prereqs
     - role: turbopanel-user
-    - role: deno-runtime
     - role: daemon-logs
     - role: daemon-launch

@@ -19,7 +19,10 @@
     "compile": "deno compile --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env -o dist/turbopaneld main.ts",
     "compile:linux-amd64": "deno compile --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env --target x86_64-unknown-linux-gnu -o dist/turbopaneld-linux-amd64 main.ts",
     "compile:linux-arm64": "deno compile --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env --target aarch64-unknown-linux-gnu -o dist/turbopaneld-linux-arm64 main.ts",
-    "compile:all": "deno task compile:linux-amd64 && deno task compile:linux-arm64 && deno task package:release",
+    "compile:bootstrap": "deno compile --allow-net --allow-read --allow-write --allow-run --allow-env -o dist/turbopanel-bootstrap-orchestration scripts/bootstrap-orchestration.ts",
+    "compile:bootstrap:linux-amd64": "deno compile --allow-net --allow-read --allow-write --allow-run --allow-env --target x86_64-unknown-linux-gnu -o dist/turbopanel-bootstrap-orchestration-linux-amd64 scripts/bootstrap-orchestration.ts",
+    "compile:bootstrap:linux-arm64": "deno compile --allow-net --allow-read --allow-write --allow-run --allow-env --target aarch64-unknown-linux-gnu -o dist/turbopanel-bootstrap-orchestration-linux-arm64 scripts/bootstrap-orchestration.ts",
+    "compile:all": "deno task compile:bootstrap:linux-amd64 && deno task compile:bootstrap:linux-arm64 && deno task compile:linux-amd64 && deno task compile:linux-arm64 && deno task package:release",
     "package:release": "sh scripts/package-daemon-release.sh",
     "release:package": "deno task compile:all && deno task package:release"
   },
