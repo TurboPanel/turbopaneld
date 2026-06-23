@@ -20,8 +20,7 @@ Environment=TURBOPANEL_UI_MODE={{ turbopanel_ui_mode }}
 Environment=EXPO_PORT={{ expo_port }}
 Environment=TURBOPANEL_UI_ROOT={{ turbopanel_ui_dir }}/dist
 Environment=TURBOPANEL_DOWNLOADS_ROOT={{ turbopanel_downloads_root }}
-{% if turbopanel_dev_user | length > 0 %}
-Environment=TURBOPANEL_DEV_INSTALL_HOST={{ turbopanel_dev_install_host }}
+{% if turbopanel_ui_mode == 'dev' %}
 Environment=TURBOPANEL_DAEMON_REPO={{ turbopanel_daemon_dir }}
 {% endif %}
 Environment=GOMAXPROCS=1

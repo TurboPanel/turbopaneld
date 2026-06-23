@@ -1,7 +1,6 @@
 #!/bin/sh
-# Dev bootstrap entrypoint served at https://trbp.nl/run.sh (co-located dev Caddy vhost).
-# Stages the license, optionally points the CDN installer at a local binary tree, and
-# runs the official daemon install.sh with --instance-url.
+# Dev bootstrap entrypoint served at https://<dev-host>/run.sh alongside /install.sh.
+# Stages the license, then runs install.sh from the same host (--host).
 set -eu
 
 LICENSE=""
@@ -60,13 +59,19 @@ mkdir -p "$STAGING_DIR"
 printf '%s' "$LICENSE_ID" > "$STAGING_DIR/license.id"
 printf '%s' "$LICENSE_TOKEN" > "$STAGING_DIR/license.token"
 
-INSTALLER_URL="${TURBOPANEL_CDN_URL:-https://cdn.turbopanel.app/daemon/install.sh}"
-
 if [ -n "$BINARY_URL" ]; then
 	export TURBOPANEL_DAEMON_BINARY_URL="$BINARY_URL"
 fi
-if [ -n "$HOST_URL" ]; then
-	curl -fsSL "$INSTALLER_URL" | sh -s -- --instance-url "$HOST_URL"
+
+if [ -z "$HOST_URL" ]; then
+	echo "run.sh: --host is required" >&2
+	exit 1
+fi
+
+INSTALLER_URL="${HOST_URL%/}/install.sh"
+
+if [ -n "${TURBOPANEL_TLS_INSECURE:-}" ]; then
+	curl -fsSL "$INSTALLER_URL" | sh -s -- --instance-url "$HOST_URL" --insecure-tls
 else
-	curl -fsSL "$INSTALLER_URL" | sh
+	curl -fsSL "$INSTALLER_URL" | sh -s -- --instance-url "$HOST_URL"
 fi
