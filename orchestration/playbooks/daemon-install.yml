@@ -20,14 +20,12 @@
     turbopanel_uid: 9999
     turbopanel_gid: 9999
     turbopanel_service_name: turbopanel-daemon
-    turbopanel_repo_url: https://github.com/turbopanel/turbopanel-daemon
-    turbopanel_branch: trunk
     turbopanel_tunnel_token: ""
     turbopanel_instance_ca: ""
     turbopanel_tls_insecure: false
     turbopanel_start: true
     turbopanel_daemon_run_mode: binary
-    turbopanel_daemon_binary: "{{ turbopanel_runtimes_dir }}/daemon/current/turbopaneld"
+    turbopanel_daemon_binary: "{{ turbopanel_daemon_dir }}/dist/turbopaneld"
 
   pre_tasks:
     - name: Require instance URL
@@ -36,7 +34,7 @@
           - turbopanel_instance_url is defined
           - turbopanel_instance_url | length > 0
         fail_msg: >-
-          turbopanel_instance_url is required (pass --instance-url to install.sh).
+          turbopanel_instance_url is required (pass --host to run.sh).
 
   # Docker is intentionally NOT installed here. A managed node may only ever run
   # native web services (apache/nginx/openlitespeed) and never need a container
@@ -45,7 +43,7 @@
   roles:
     - role: daemon-prereqs
     - role: turbopanel-user
-    - role: daemon-repo
+    - role: daemon-layout
     - role: daemon-config
     - role: daemon-launch
 

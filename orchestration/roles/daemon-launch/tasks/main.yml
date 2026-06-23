@@ -1,12 +1,12 @@
 ---
 - name: Ensure single-daemon helper is executable
   ansible.builtin.file:
-    path: "{{ turbopanel_daemon_dir }}/scripts/ensure-single-daemon.sh"
+    path: "{{ turbopanel_daemon_dir }}/orchestration/scripts/ensure-single-daemon.sh"
     mode: "0755"
 
 - name: Ensure runtime socket dir and clear stale daemon lock
   ansible.builtin.command:
-    cmd: "{{ turbopanel_daemon_dir }}/scripts/ensure-single-daemon.sh"
+    cmd: "{{ turbopanel_daemon_dir }}/orchestration/scripts/ensure-single-daemon.sh"
   changed_when: false
   failed_when: false
 

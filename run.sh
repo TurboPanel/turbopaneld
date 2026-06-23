@@ -1,16 +1,13 @@
 #!/bin/sh
-# TurboPanel daemon bootstrap — the single entrypoint served at
-# https://<host>/run.sh (co-located dev: alongside /downloads/daemon).
+# TurboPanel daemon bootstrap — single entrypoint served at https://<host>/run.sh.
 #
-# It does ONLY enough to get the daemon running: install prereqs + Deno, clone
-# the daemon checkout, drop in the released binary, bootstrap the orchestration
-# runtime, and run daemon-install.yml. Everything else (instance, Caddy, UI,
-# Docker on demand, …) is provisioned afterwards by the daemon itself via
-# Ansible. There is no second install script.
+# Downloads release artifacts only (no git clone):
+#   turbopaneld-linux-*.tar.zst  → dist/turbopaneld
+#   turbopanel-orchestration.tar.zst → orchestration/ (Ansible)
+#   turbopanel-bootstrap.tar.zst → scripts/ + src/ (one-shot orchestration bootstrap)
 #
-# Run as root or as a sudo-group user (self-escalates with sudo when installed).
-# Privilege helpers are inlined — curl | sh has no stable path to source from
-# (see scripts/lib/install-privileges.sh; keep in sync).
+# The running daemon then provisions everything else (instance, Docker on demand, …)
+# via Ansible. Run as root or as a sudo-group user (self-escalates when sudo exists).
 
 tp_is_root() { [ "$(id -u)" = "0" ]; }
 tp_user_in_sudo_group() {
@@ -32,6 +29,126 @@ tp_install_privilege_denied() {
 	exit 1
 }
 
+tp_daemon_linux_arch() {
+	case "$(uname -m)" in
+		x86_64 | amd64) echo amd64 ;;
+		aarch64 | arm64) echo arm64 ;;
+		*) echo "run.sh: unsupported machine $(uname -m)" >&2; return 1 ;;
+	esac
+}
+
+tp_daemon_release_filename() {
+	_arch="$1"
+	_version="${2:-}"
+	if [ -n "$_version" ]; then
+		printf 'turbopaneld-%s-linux-%s.tar.zst' "$_version" "$_arch"
+	else
+		printf 'turbopaneld-linux-%s.tar.zst' "$_arch"
+	fi
+}
+
+tp_orchestration_release_filename() {
+	_version="${1:-}"
+	if [ -n "$_version" ]; then
+		printf 'turbopanel-orchestration-%s.tar.zst' "$_version"
+	else
+		printf 'turbopanel-orchestration.tar.zst'
+	fi
+}
+
+tp_bootstrap_release_filename() {
+	_version="${1:-}"
+	if [ -n "$_version" ]; then
+		printf 'turbopanel-bootstrap-%s.tar.zst' "$_version"
+	else
+		printf 'turbopanel-bootstrap.tar.zst'
+	fi
+}
+
+tp_extract_release_archive() {
+	_archive="$1"
+	_dest_dir="$2"
+	mkdir -p "$_dest_dir"
+	if ! zstd -d -q -c "$_archive" | tar -x -C "$_dest_dir"; then
+		echo "run.sh: failed to extract $_archive" >&2
+		return 1
+	fi
+	return 0
+}
+
+tp_fetch_named_release() {
+	_base_url="$1"
+	_dest_dir="$2"
+	_filename="$3"
+	_tmp="$(mktemp)"
+	_curl="curl -fsSL"
+	[ "${TURBOPANEL_RELEASE_TLS_INSECURE:-}" = 1 ] && _curl="curl -fsSLk"
+	_url="${_base_url%/}/$_filename"
+	if ! $_curl "$_url" -o "$_tmp"; then
+		rm -f "$_tmp"
+		echo "run.sh: failed to download $_url" >&2
+		return 1
+	fi
+	if ! tp_extract_release_archive "$_tmp" "$_dest_dir"; then
+		rm -f "$_tmp"
+		return 1
+	fi
+	rm -f "$_tmp"
+	return 0
+}
+
+tp_fetch_versioned_release() {
+	_base_url="$1"
+	_dest_dir="$2"
+	_versioned_name="$3"
+	_unversioned_name="$4"
+	_version="${TURBOPANEL_DAEMON_RELEASE_VERSION:-}"
+	if [ -n "$_version" ]; then
+		if tp_fetch_named_release "$_base_url" "$_dest_dir" "$_versioned_name"; then
+			return 0
+		fi
+	fi
+	tp_fetch_named_release "$_base_url" "$_dest_dir" "$_unversioned_name"
+}
+
+tp_install_daemon_binary() {
+	_base_url="$1"
+	_daemon_dir="$2"
+	_arch="$(tp_daemon_linux_arch)" || return 1
+	_staging="$(mktemp -d)"
+	_version="${TURBOPANEL_DAEMON_RELEASE_VERSION:-}"
+	_dist="$_daemon_dir/dist/turbopaneld"
+
+	if ! tp_fetch_versioned_release "$_base_url" "$_staging" \
+		"$(tp_daemon_release_filename "$_arch" "$_version")" \
+		"$(tp_daemon_release_filename "$_arch")"; then
+		rm -rf "$_staging"
+		return 1
+	fi
+	if [ ! -f "$_staging/turbopaneld" ]; then
+		echo "run.sh: release archive missing turbopaneld member" >&2
+		rm -rf "$_staging"
+		return 1
+	fi
+	mkdir -p "$(dirname "$_dist")"
+	install -m 0755 "$_staging/turbopaneld" "$_dist"
+	rm -rf "$_staging"
+	return 0
+}
+
+# #region agent log
+tp_agent_log() {
+	_hypothesisId="$1"
+	_location="$2"
+	_message="$3"
+	_data="$4"
+	_ts="$(($(date +%s) * 1000))"
+	_log="${TURBOPANEL_DEBUG_LOG:-/opt/turbopanel/platform/config/daemon-install-debug-a4fea3.ndjson}"
+	_line="{\"sessionId\":\"a4fea3\",\"hypothesisId\":\"$_hypothesisId\",\"location\":\"$_location\",\"message\":\"$_message\",\"data\":$_data,\"timestamp\":$_ts}"
+	printf '%s\n' "$_line" >> "$_log" 2>/dev/null || true
+}
+# #endregion
+
 set -eu
 
 LICENSE=""
@@ -39,8 +156,6 @@ HOST_URL=""
 BINARY_URL=""
 INSTANCE_CA=""
 TUNNEL_TOKEN=""
-BRANCH="trunk"
-REPO_URL="https://github.com/turbopanel/turbopanel-daemon"
 INSECURE_TLS=false
 NO_START=false
 
@@ -61,12 +176,6 @@ while [ $# -gt 0 ]; do
 		--tunnel-token)
 			[ $# -ge 2 ] || { echo "run.sh: --tunnel-token requires an argument" >&2; exit 1; }
 			TUNNEL_TOKEN="$2"; shift 2 ;;
-		--branch)
-			[ $# -ge 2 ] || { echo "run.sh: --branch requires an argument" >&2; exit 1; }
-			BRANCH="$2"; shift 2 ;;
-		--repo-url)
-			[ $# -ge 2 ] || { echo "run.sh: --repo-url requires an argument" >&2; exit 1; }
-			REPO_URL="$2"; shift 2 ;;
 		--insecure-tls)
 			INSECURE_TLS=true; shift ;;
 		--no-start)
@@ -76,12 +185,12 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
-if [ -z "$LICENSE" ]; then
-	echo "run.sh: --license is required (id:token)" >&2
+if [ -z "$LICENSE" ] || [ -z "$HOST_URL" ]; then
+	echo "run.sh: --license and --host are required" >&2
 	exit 1
 fi
-if [ -z "$HOST_URL" ]; then
-	echo "run.sh: --host is required" >&2
+if [ -z "$BINARY_URL" ]; then
+	echo "run.sh: --binary-url is required" >&2
 	exit 1
 fi
 
@@ -92,22 +201,17 @@ if [ -z "$LICENSE_ID" ] || [ -z "$LICENSE_TOKEN" ]; then
 	exit 1
 fi
 
-# Re-exec under sudo when invoked by a sudo-capable non-root user, forwarding
-# every flag we received.
 if ! tp_is_root; then
 	if tp_user_in_sudo_group && tp_sudo_installed; then
-		set -- --license "$LICENSE" --host "$HOST_URL"
-		[ -n "$BINARY_URL" ] && set -- "$@" --binary-url "$BINARY_URL"
+		set -- --license "$LICENSE" --host "$HOST_URL" --binary-url "$BINARY_URL"
 		[ -n "$INSTANCE_CA" ] && set -- "$@" --instance-ca "$INSTANCE_CA"
 		[ -n "$TUNNEL_TOKEN" ] && set -- "$@" --tunnel-token "$TUNNEL_TOKEN"
-		[ "$BRANCH" != "trunk" ] && set -- "$@" --branch "$BRANCH"
-		[ "$REPO_URL" != "https://github.com/turbopanel/turbopanel-daemon" ] && set -- "$@" --repo-url "$REPO_URL"
 		[ "$INSECURE_TLS" = true ] && set -- "$@" --insecure-tls
 		[ "$NO_START" = true ] && set -- "$@" --no-start
-		CURL="curl -fsSL"
-		[ "$INSECURE_TLS" = true ] && CURL="$CURL -k"
+		_curl="curl -fsSL"
+		[ "$INSECURE_TLS" = true ] && _curl="curl -fsSLk"
 		# shellcheck disable=SC2086
-		exec $CURL "${HOST_URL%/}/run.sh" | sudo sh -s -- "$@"
+		exec $_curl "${HOST_URL%/}/run.sh" | sudo sh -s -- "$@"
 	fi
 	tp_install_privilege_denied
 fi
@@ -119,23 +223,18 @@ RUNTIMES_DIR="$INSTALL_ROOT/runtimes"
 CA_PATH="$CONFIG_DIR/instance-ca.pem"
 DENO_VERSION="2.8.3"
 
-# Stage the license for the daemon-config Ansible role to pick up.
+if [ "$INSECURE_TLS" = true ]; then
+	export TURBOPANEL_RELEASE_TLS_INSECURE=1
+fi
+
 STAGING_DIR="$CONFIG_DIR/daemon-license-staging"
-mkdir -p "$STAGING_DIR"
+mkdir -p "$STAGING_DIR" "$DAEMON_DIR/dist"
 printf '%s' "$LICENSE_ID" > "$STAGING_DIR/license.id"
 printf '%s' "$LICENSE_TOKEN" > "$STAGING_DIR/license.token"
 
-if [ -n "$BINARY_URL" ]; then
-	export TURBOPANEL_DAEMON_BINARY_URL="$BINARY_URL"
-fi
-if [ -z "${TURBOPANEL_DAEMON_BINARY_URL:-}" ]; then
-	echo "run.sh: --binary-url is required (released daemon binary location)" >&2
-	exit 1
-fi
-
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq sudo git curl ca-certificates xz-utils zstd tar unzip gnupg python3-debian
+apt-get install -y -qq sudo curl ca-certificates xz-utils zstd tar unzip gnupg python3-debian
 
 if [ ! -x /usr/local/bin/deno ]; then
 	DENO_TMP="$RUNTIMES_DIR/deno/.install"
@@ -154,25 +253,56 @@ elif [ "$INSECURE_TLS" = false ]; then
 	chmod 0640 "$CA_PATH"
 fi
 
-if [ ! -d "$DAEMON_DIR/.git" ]; then
-	mkdir -p "$(dirname "$DAEMON_DIR")"
-	git clone --branch "$BRANCH" "$REPO_URL" "$DAEMON_DIR"
-fi
-
-cd "$DAEMON_DIR"
-
-# shellcheck source=scripts/lib/release-artifacts.sh
-. "$DAEMON_DIR/scripts/lib/release-artifacts.sh"
-if [ "$INSECURE_TLS" = true ]; then
-	export TURBOPANEL_RELEASE_TLS_INSECURE=1
-fi
-if ! tp_install_daemon_release "$TURBOPANEL_DAEMON_BINARY_URL" "$RUNTIMES_DIR"; then
-	echo "run.sh: failed to download daemon release from $TURBOPANEL_DAEMON_BINARY_URL" >&2
+echo "run.sh: downloading bootstrap support bundle"
+# #region agent log
+tp_agent_log "B" "run.sh:bootstrap" "fetch_bootstrap" "{\"urlBase\":\"$BINARY_URL\"}"
+# #endregion
+if ! tp_fetch_versioned_release "$BINARY_URL" "$DAEMON_DIR" \
+	"$(tp_bootstrap_release_filename "${TURBOPANEL_DAEMON_RELEASE_VERSION:-}")" \
+	"$(tp_bootstrap_release_filename)"; then
+	echo "run.sh: failed to download bootstrap bundle from $BINARY_URL" >&2
 	exit 1
 fi
 
+echo "run.sh: downloading released daemon binary"
+# #region agent log
+tp_agent_log "C" "run.sh:binary" "fetch_binary" "{\"dest\":\"$DAEMON_DIR/dist/turbopaneld\"}"
+# #endregion
+if ! tp_install_daemon_binary "$BINARY_URL" "$DAEMON_DIR"; then
+	echo "run.sh: failed to download daemon binary from $BINARY_URL" >&2
+	exit 1
+fi
+
+echo "run.sh: downloading orchestration tree"
+# #region agent log
+tp_agent_log "D" "run.sh:orchestration" "fetch_orchestration" "{\"playbook\":\"$DAEMON_DIR/orchestration/playbooks/daemon-install.yml\"}"
+# #endregion
+if ! tp_fetch_versioned_release "$BINARY_URL" "$DAEMON_DIR" \
+	"$(tp_orchestration_release_filename "${TURBOPANEL_DAEMON_RELEASE_VERSION:-}")" \
+	"$(tp_orchestration_release_filename)"; then
+	echo "run.sh: failed to download orchestration bundle from $BINARY_URL" >&2
+	exit 1
+fi
+
+if [ ! -f "$DAEMON_DIR/orchestration/ansible.cfg" ]; then
+	echo "run.sh: orchestration bundle did not provide orchestration/ansible.cfg" >&2
+	exit 1
+fi
+
+# #region agent log
+_uses_daemon_layout="false"
+if grep -q 'daemon-layout' "$DAEMON_DIR/orchestration/playbooks/daemon-install.yml" 2>/dev/null; then
+	_uses_daemon_layout="true"
+fi
+tp_agent_log "E" "run.sh:layout" "playbook_layout_check" "{\"usesDaemonLayout\":$_uses_daemon_layout,\"binaryPath\":\"$DAEMON_DIR/dist/turbopaneld\",\"binaryExists\":$([ -x "$DAEMON_DIR/dist/turbopaneld" ] && echo true || echo false)}"
+# #endregion
+
+export TURBOPANEL_DAEMON_ROOT="$DAEMON_DIR"
+# #region agent log
+tp_agent_log "A" "run.sh:main" "artifact_install_start" "{\"binaryUrl\":\"$BINARY_URL\",\"daemonDir\":\"$DAEMON_DIR\",\"noGitClone\":true}"
+# #endregion
 /usr/local/bin/deno run --allow-net --allow-read --allow-write --allow-run --allow-env \
-	scripts/bootstrap-orchestration.ts
+	"$DAEMON_DIR/scripts/bootstrap-orchestration.ts"
 
 ANSIBLE_PLAYBOOK="$RUNTIMES_DIR/ansible/current/bin/ansible-playbook"
 if [ ! -x "$ANSIBLE_PLAYBOOK" ]; then
@@ -184,8 +314,6 @@ VARS_FILE="$(mktemp)"
 trap 'rm -f "$VARS_FILE"' EXIT
 {
 	printf 'turbopanel_instance_url: %s\n' "$HOST_URL"
-	printf 'turbopanel_branch: %s\n' "$BRANCH"
-	printf 'turbopanel_repo_url: %s\n' "$REPO_URL"
 	printf 'turbopanel_start: %s\n' "$([ "$NO_START" = true ] && echo false || echo true)"
 	if [ -f "$CA_PATH" ]; then
 		printf 'turbopanel_instance_ca: %s\n' "$CA_PATH"
@@ -202,10 +330,6 @@ export ANSIBLE_CONFIG="$DAEMON_DIR/orchestration/ansible.cfg"
 export ANSIBLE_LOCAL_TEMP="$RUNTIMES_DIR/uv/cache/ansible-tmp"
 export ANSIBLE_COLLECTIONS_PATH="$RUNTIMES_DIR/ansible/galaxy-collections"
 
-# When a human is watching (stdout is a TTY), show Ansible's readable play
-# recap instead of the machine JSONL configured in ansible.cfg (the daemon's
-# own converge path keeps JSONL for structured streaming). Trim fact dumps and
-# skipped-task noise so the install is easy to follow.
 if [ -t 1 ]; then
 	export ANSIBLE_STDOUT_CALLBACK=default
 	export ANSIBLE_LOAD_CALLBACK_PLUGINS=true

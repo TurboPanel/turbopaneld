@@ -12,6 +12,8 @@ export const ANSIBLE_CORE_VERSION = "2.18";
  * the process working directory.
  */
 export const DAEMON_ROOT = (() => {
+  const override = Deno.env.get("TURBOPANEL_DAEMON_ROOT")?.trim();
+  if (override) return override;
   const here = dirname(fromFileUrl(import.meta.url));
   return join(here, "..", "..");
 })();

@@ -1,7 +1,11 @@
 #!/bin/sh
-# Package cross-arch daemon binaries as zstd-compressed tarballs for dev downloads
-# and GitHub releases. Requires dist/turbopaneld-linux-{amd64,arm64} from
-# deno task compile:all. Installed servers receive turbopaneld at the tar root.
+# Package cross-arch daemon binaries and install support tarballs for dev downloads
+# and GitHub releases.
+#
+# Artifacts written to dist/:
+#   turbopaneld-linux-{amd64,arm64}.tar.zst     — released daemon binary only
+#   turbopanel-orchestration.tar.zst            — orchestration/ tree for Ansible
+#   turbopanel-bootstrap.tar.zst                — Deno bootstrap sources (not git)
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -18,6 +22,18 @@ VERSION="${TURBOPANEL_RELEASE_VERSION:-}"
 BINARY_NAME="$(tp_daemon_binary_name)"
 mkdir -p "$DIST"
 
+write_tarball() {
+	_out_name="$1"
+	_staging="$2"
+	shift 2
+	_out="$DIST/$_out_name"
+	rm -f "$_out"
+	tar -I 'zstd -19 -T0' -cf "$_out" -C "$_staging" "$@"
+	chmod g+w "$_out" 2>/dev/null || true
+	rm -rf "$_staging"
+	echo "package-daemon-release.sh: wrote $_out"
+}
+
 package_arch() {
 	_arch="$1"
 	_src_name="$(tp_daemon_linux_arch_binary_name "$_arch")"
@@ -29,17 +45,30 @@ package_arch() {
 
 	_staging="$(mktemp -d)"
 	_out_name="$(tp_daemon_release_filename "$_arch" "$VERSION")"
-	_out="$DIST/$_out_name"
 
 	install -m 0755 "$_src" "$_staging/$BINARY_NAME"
-	# Replace prior artifacts even when owned by another group member (644 files
-	# in the setgid dist/ dir are not group-writable; unlink via the directory).
-	rm -f "$_out"
-	tar -I 'zstd -19 -T0' -cf "$_out" -C "$_staging" "$BINARY_NAME"
-	chmod g+w "$_out" 2>/dev/null || true
-	rm -rf "$_staging"
-	echo "package-daemon-release.sh: wrote $_out"
+	write_tarball "$_out_name" "$_staging" "$BINARY_NAME"
+}
+
+package_orchestration() {
+	_staging="$(mktemp -d)"
+	cp -a "$ROOT/orchestration" "$_staging/orchestration"
+	_out_name="$(tp_orchestration_release_filename "$VERSION")"
+	write_tarball "$_out_name" "$_staging" orchestration
+}
+
+package_bootstrap() {
+	_staging="$(mktemp -d)"
+	mkdir -p "$_staging/scripts" "$_staging/src"
+	cp "$ROOT/scripts/bootstrap-orchestration.ts" "$_staging/scripts/"
+	cp -a "$ROOT/src/orchestration" "$_staging/src/"
+	cp "$ROOT/src/logger.ts" "$_staging/src/"
+	cp "$ROOT/deno.json" "$_staging/"
+	_out_name="$(tp_bootstrap_release_filename "$VERSION")"
+	write_tarball "$_out_name" "$_staging" scripts src deno.json
 }
 
 package_arch amd64
 package_arch arm64
+package_orchestration
+package_bootstrap

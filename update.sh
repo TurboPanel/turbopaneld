@@ -4,6 +4,7 @@ set -eu
 DAEMON_DIR="$(cd "$(dirname "$0")" && pwd)"
 RUNTIMES_DIR="/opt/turbopanel/runtimes"
 TMP_BINARY="/tmp/turbopaneld-new"
+RUNTIME_BINARY="$DAEMON_DIR/dist/turbopaneld"
 
 # Step 1 — Resolve update URL
 if [ -z "${TURBOPANEL_UPDATE_URL:-}" ]; then
@@ -14,10 +15,8 @@ fi
 # shellcheck source=scripts/lib/release-artifacts.sh
 . "$DAEMON_DIR/scripts/lib/release-artifacts.sh"
 
-RUNTIME_BINARY="$(tp_daemon_runtime_binary_path "$RUNTIMES_DIR")"
-
 # Step 2 — Download release (zstd tar preferred, raw binary fallback)
-if tp_install_daemon_release "$TURBOPANEL_UPDATE_URL" "$RUNTIMES_DIR"; then
+if tp_install_daemon_release "$TURBOPANEL_UPDATE_URL" "$DAEMON_DIR"; then
 	:
 elif curl -fsSL "${TURBOPANEL_UPDATE_URL%/}/turbopaneld" -o "$TMP_BINARY"; then
 	if [ ! -s "$TMP_BINARY" ]; then
@@ -40,20 +39,8 @@ if ! sudo chown turbopanel:turbopanel "$RUNTIME_BINARY"; then
 	exit 1
 fi
 
-# Step 4 — Refresh orchestration directory
-_whoami="$(id -un)"
-if [ "$_whoami" = "turbopanel" ]; then
-	_git="git"
-else
-	_git="sudo -u turbopanel git"
-fi
-
-if ! $_git -C "$DAEMON_DIR" fetch origin trunk; then
-	echo "update.sh: failed to fetch origin trunk" >&2
-	exit 1
-fi
-
-if ! $_git -C "$DAEMON_DIR" checkout origin/trunk -- orchestration/; then
-	echo "update.sh: failed to refresh orchestration/ from origin/trunk" >&2
+# Step 3 — Refresh orchestration directory from release artifact (no git)
+if ! tp_fetch_orchestration_release "$TURBOPANEL_UPDATE_URL" "$DAEMON_DIR"; then
+	echo "update.sh: failed to refresh orchestration/ from $TURBOPANEL_UPDATE_URL" >&2
 	exit 1
 fi

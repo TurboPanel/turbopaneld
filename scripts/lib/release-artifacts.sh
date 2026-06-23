@@ -72,25 +72,116 @@ tp_extract_daemon_release() {
 	return 0
 }
 
+tp_daemon_dist_binary_path() {
+	_daemon_dir="${1:-/opt/turbopanel/platform/daemon}"
+	printf '%s/dist/turbopaneld' "$_daemon_dir"
+}
+
 tp_daemon_runtime_binary_path() {
 	_runtimes_dir="${1:-/opt/turbopanel/runtimes}"
-	printf '%s/daemon/current/turbopaneld' "$_runtimes_dir"
+	_install_root="$(dirname "$_runtimes_dir")"
+	tp_daemon_dist_binary_path "$_install_root/platform/daemon"
+}
+
+tp_orchestration_release_filename() {
+	_version="${1:-}"
+	if [ -n "$_version" ]; then
+		printf 'turbopanel-orchestration-%s.tar.zst' "$_version"
+	else
+		printf 'turbopanel-orchestration.tar.zst'
+	fi
+}
+
+tp_bootstrap_release_filename() {
+	_version="${1:-}"
+	if [ -n "$_version" ]; then
+		printf 'turbopanel-bootstrap-%s.tar.zst' "$_version"
+	else
+		printf 'turbopanel-bootstrap.tar.zst'
+	fi
+}
+
+tp_extract_release_archive() {
+	_archive="$1"
+	_dest_dir="$2"
+	if ! command -v zstd >/dev/null 2>&1; then
+		echo "tp_extract_release_archive: zstd is required" >&2
+		return 1
+	fi
+	mkdir -p "$_dest_dir"
+	if ! zstd -d -q -c "$_archive" | tar -x -C "$_dest_dir"; then
+		echo "tp_extract_release_archive: failed to extract $_archive" >&2
+		return 1
+	fi
+	return 0
+}
+
+tp_fetch_named_release() {
+	_base_url="$1"
+	_dest_dir="$2"
+	_filename="$3"
+
+	_tmp="$(mktemp)"
+	_curl_tls=""
+	if [ "${TURBOPANEL_RELEASE_TLS_INSECURE:-}" = 1 ]; then
+		_curl_tls="-k"
+	fi
+
+	_url="${_base_url%/}/$_filename"
+	if ! curl -fsSL $_curl_tls "$_url" -o "$_tmp"; then
+		rm -f "$_tmp"
+		echo "tp_fetch_named_release: failed to download $_url" >&2
+		return 1
+	fi
+
+	if ! tp_extract_release_archive "$_tmp" "$_dest_dir"; then
+		rm -f "$_tmp"
+		return 1
+	fi
+	rm -f "$_tmp"
+	return 0
+}
+
+tp_fetch_orchestration_release() {
+	_base_url="$1"
+	_dest_dir="$2"
+	_version="${3:-${TURBOPANEL_DAEMON_RELEASE_VERSION:-}}"
+
+	if [ -n "$_version" ]; then
+		if tp_fetch_named_release "$_base_url" "$_dest_dir" "$(tp_orchestration_release_filename "$_version")"; then
+			return 0
+		fi
+	fi
+	tp_fetch_named_release "$_base_url" "$_dest_dir" "$(tp_orchestration_release_filename)"
+}
+
+tp_fetch_bootstrap_release() {
+	_base_url="$1"
+	_dest_dir="$2"
+	_version="${3:-${TURBOPANEL_DAEMON_RELEASE_VERSION:-}}"
+
+	if [ -n "$_version" ]; then
+		if tp_fetch_named_release "$_base_url" "$_dest_dir" "$(tp_bootstrap_release_filename "$_version")"; then
+			return 0
+		fi
+	fi
+	tp_fetch_named_release "$_base_url" "$_dest_dir" "$(tp_bootstrap_release_filename)"
 }
 
 tp_install_daemon_release() {
 	_base_url="$1"
-	_runtimes_dir="$2"
+	_daemon_dir="$2"
 	_version="${3:-${TURBOPANEL_DAEMON_RELEASE_VERSION:-}}"
 	_staging="$(mktemp -d)"
-	_runtime_binary="$(tp_daemon_runtime_binary_path "$_runtimes_dir")"
+	_dist_binary="$(tp_daemon_dist_binary_path "$_daemon_dir")"
 
 	if ! tp_fetch_daemon_release "$_base_url" "$_staging" "$_version"; then
 		rm -rf "$_staging"
 		return 1
 	fi
 
-	mkdir -p "$(dirname "$_runtime_binary")"
-	install -m 0755 "$_staging/$(tp_daemon_binary_name)" "$_runtime_binary"
+	mkdir -p "$(dirname "$_dist_binary")"
+	install -m 0755 "$_staging/$(tp_daemon_binary_name)" "$_dist_binary"
 	rm -rf "$_staging"
 	return 0
 }
