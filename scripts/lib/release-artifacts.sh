@@ -1,11 +1,14 @@
 # Shared TurboPanel daemon release artifact naming and fetch/extract helpers.
 # POSIX sh — source from install.sh, update.sh, and package-daemon-release.sh.
 #
-# Compiled cross-arch binaries (intermediate, in dist/):
+# Compiled cross-arch binaries (staging under dist/.build/ during release:package):
 #   turbopaneld-linux-amd64
 #   turbopaneld-linux-arm64
+#   turbopanel-bootstrap-orchestration-linux-amd64
+#   turbopanel-bootstrap-orchestration-linux-arm64
+#   orchestration.tar.zst
 #
-# zstd-compressed tar release artifacts (dist/ or GitHub release):
+# zstd-compressed tar release artifacts (dist/ after package:release):
 #   turbopaneld-linux-amd64.tar.zst
 #   turbopaneld-linux-arm64.tar.zst
 #

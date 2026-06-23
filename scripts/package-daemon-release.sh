@@ -1,11 +1,8 @@
 #!/bin/sh
 # Package cross-arch daemon release tarballs for dev downloads and GitHub releases.
 #
-# Release artifacts written to dist/ (compile intermediates removed after packaging):
-#   turbopaneld-linux-{amd64,arm64}.tar.zst
-#     turbopaneld
-#     turbopanel-bootstrap-orchestration
-#     orchestration.tar.zst
+# Only *.tar.zst release artifacts remain in dist/ when finished.
+# Cross-arch compile outputs live in dist/.build/ during the run and are removed.
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -18,11 +15,12 @@ if ! command -v zstd >/dev/null 2>&1; then
 fi
 
 DIST="$ROOT/dist"
+BUILD="$DIST/.build"
 VERSION="${TURBOPANEL_RELEASE_VERSION:-}"
 DAEMON_NAME="$(tp_daemon_binary_name)"
 BOOTSTRAP_NAME="$(tp_bootstrap_binary_name)"
 ORCHESTRATION_BUNDLE="$(tp_orchestration_bundle_name)"
-mkdir -p "$DIST"
+mkdir -p "$BUILD"
 
 write_tarball() {
 	_out_name="$1"
@@ -37,20 +35,21 @@ write_tarball() {
 }
 
 build_orchestration_bundle() {
-	if [ -s "$DIST/$ORCHESTRATION_BUNDLE" ]; then
+	_bundle="$BUILD/$ORCHESTRATION_BUNDLE"
+	if [ -s "$_bundle" ]; then
 		return 0
 	fi
 	_staging="$(mktemp -d)"
 	cp -a "$ROOT/orchestration" "$_staging/orchestration"
-	tar -I 'zstd -19 -T0' -cf "$DIST/$ORCHESTRATION_BUNDLE" -C "$_staging" orchestration
+	tar -I 'zstd -19 -T0' -cf "$_bundle" -C "$_staging" orchestration
 	rm -rf "$_staging"
-	echo "package-daemon-release.sh: wrote $DIST/$ORCHESTRATION_BUNDLE"
+	echo "package-daemon-release.sh: staged $_bundle"
 }
 
 package_arch() {
 	_arch="$1"
-	_daemon_src="$DIST/$(tp_daemon_linux_arch_binary_name "$_arch")"
-	_bootstrap_src="$DIST/$(tp_bootstrap_linux_arch_binary_name "$_arch")"
+	_daemon_src="$BUILD/$(tp_daemon_linux_arch_binary_name "$_arch")"
+	_bootstrap_src="$BUILD/$(tp_bootstrap_linux_arch_binary_name "$_arch")"
 	if [ ! -s "$_daemon_src" ]; then
 		echo "package-daemon-release.sh: missing $_daemon_src (run deno task compile:all)" >&2
 		exit 1
@@ -67,11 +66,19 @@ package_arch() {
 
 	install -m 0755 "$_daemon_src" "$_staging/$DAEMON_NAME"
 	install -m 0755 "$_bootstrap_src" "$_staging/$BOOTSTRAP_NAME"
-	install -m 0644 "$DIST/$ORCHESTRATION_BUNDLE" "$_staging/$ORCHESTRATION_BUNDLE"
+	install -m 0644 "$BUILD/$ORCHESTRATION_BUNDLE" "$_staging/$ORCHESTRATION_BUNDLE"
 	write_tarball "$_out_name" "$_staging" "$DAEMON_NAME" "$BOOTSTRAP_NAME" "$ORCHESTRATION_BUNDLE"
-	rm -f "$_daemon_src" "$_bootstrap_src"
 }
 
 package_arch amd64
 package_arch arm64
-rm -f "$DIST/$ORCHESTRATION_BUNDLE"
+
+# Release dir: final zst tarballs only.
+rm -rf "$BUILD"
+for _entry in "$DIST"/*; do
+	[ -e "$_entry" ] || continue
+	case "$_entry" in
+		*.tar.zst) ;;
+		*) rm -rf "$_entry" ;;
+	esac
+done
