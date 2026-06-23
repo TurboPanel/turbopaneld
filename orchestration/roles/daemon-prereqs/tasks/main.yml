@@ -15,4 +15,5 @@
       - tar
       - unzip
       - xz-utils
+      - zstd
     state: present

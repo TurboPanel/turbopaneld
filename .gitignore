@@ -9,8 +9,9 @@ license.id
 license.token
 cloudflared/tunnels/*.token
 dist/
-dist/turbopanel-daemon-linux-amd64
-dist/turbopanel-daemon-linux-arm64
+dist/turbopaneld-linux-amd64
+dist/turbopaneld-linux-arm64
+turbopaneld
 logs/
 state/
 

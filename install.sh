@@ -88,7 +88,7 @@ DENO_VERSION="2.8.3"
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq git curl ca-certificates xz-utils tar unzip gnupg python3-debian iptables build-essential libssl-dev pkg-config
+apt-get install -y -qq git curl ca-certificates xz-utils zstd tar unzip gnupg python3-debian iptables build-essential libssl-dev pkg-config
 
 if [ ! -x /usr/local/bin/deno ]; then
 	DENO_TMP="$RUNTIMES_DIR/deno/.install"
@@ -113,6 +113,19 @@ if [ ! -d "$DAEMON_DIR/.git" ]; then
 fi
 
 cd "$DAEMON_DIR"
+
+if [ -n "${TURBOPANEL_DAEMON_BINARY_URL:-}" ]; then
+	# shellcheck source=scripts/lib/release-artifacts.sh
+	. "$DAEMON_DIR/scripts/lib/release-artifacts.sh"
+	if [ "$INSECURE_TLS" = true ]; then
+		export TURBOPANEL_RELEASE_TLS_INSECURE=1
+	fi
+	if ! tp_fetch_daemon_release "$TURBOPANEL_DAEMON_BINARY_URL" "$DAEMON_DIR"; then
+		echo "install.sh: failed to download daemon release from $TURBOPANEL_DAEMON_BINARY_URL" >&2
+		exit 1
+	fi
+fi
+
 /usr/local/bin/deno run --allow-net --allow-read --allow-write --allow-run --allow-env \
 	scripts/bootstrap-orchestration.ts
 

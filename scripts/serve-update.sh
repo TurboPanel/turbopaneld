@@ -2,7 +2,7 @@
 set -eu
 
 DAEMON_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-DAEMON_BINARY="$DAEMON_DIR/dist/turbopanel-daemon"
+DAEMON_BINARY="$DAEMON_DIR/dist/turbopaneld"
 CADDY_BIN="/opt/turbopanel/runtimes/caddy/current/caddy"
 
 if [ ! -s "$DAEMON_BINARY" ]; then
@@ -35,7 +35,7 @@ http://:8444 {
 		root * $DAEMON_DIR
 		file_server
 	}
-	handle /turbopanel-daemon {
+	handle /turbopaneld {
 		root * $DAEMON_DIR/dist
 		header Content-Type application/octet-stream
 		file_server

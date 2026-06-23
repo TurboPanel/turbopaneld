@@ -308,6 +308,35 @@ unclean shutdown.
   external nodes.
 - Both reply with a result message the instance correlates by id.
 
+### Release artifacts (zstd tar)
+
+Cross-arch daemon binaries ship as **zstd-compressed tar** (`.tar.zst`) — small
+on the wire, native on Debian via the `zstd` package (`daemon-prereqs` and
+`install.sh` apt).
+
+| Task | Purpose |
+| ---- | ------- |
+| `deno task compile:all` | `dist/turbopaneld-linux-{amd64,arm64}` |
+| `deno task release:package` | compile + `scripts/package-daemon-release.sh` |
+
+Each archive contains a single `turbopaneld` member at the tar root (installed
+as `./turbopaneld` in the daemon checkout). Co-located dev serves unversioned
+names from `/downloads/daemon/`:
+
+- `turbopaneld-linux-amd64.tar.zst`
+- `turbopaneld-linux-arm64.tar.zst`
+
+Versioned GitHub release assets (set `TURBOPANEL_RELEASE_VERSION` when
+packaging, or `TURBOPANEL_DAEMON_RELEASE_VERSION` when downloading):
+
+- `turbopaneld-<version>-linux-amd64.tar.zst`
+- `turbopaneld-<version>-linux-arm64.tar.zst`
+
+Naming and fetch/extract helpers live in
+`scripts/lib/release-artifacts.sh` (used by `install.sh`, `update.sh`, and the
+packager). `run.sh` exports `TURBOPANEL_DAEMON_BINARY_URL`; `install.sh` downloads and extracts `turbopaneld` into the daemon checkout
+before Ansible when set.
+
 ### Slim Debian prerequisites
 
 Minimal Debian images often lack packages full installs have. Daemon bootstrap
@@ -319,6 +348,7 @@ playbooks run:
 | `unzip`           | Deno install script                          |
 | `xz-utils`        | Node tarball extraction (`tar -J`)           |
 | `tar`             | dev-sync archive + runtime extraction        |
+| `zstd`            | daemon release `.tar.zst` download/extract   |
 | `gnupg`           | Legacy apt paths; still useful on slim hosts |
 | `python3-debian`  | `deb822_repository` in `geerlingguy.docker`  |
 | `iptables`        | Docker networking                            |
@@ -361,6 +391,8 @@ shared-library install.
   — instance-side install roles
 - `orchestration/roles/daemon-launch/templates/turbopanel-daemon.service.j2` —
   daemon systemd unit template
+- `scripts/package-daemon-release.sh` — zstd tar release packager;
+  `scripts/lib/release-artifacts.sh` — shared naming + fetch helpers
 - `scripts/install-daemon-systemd.sh` — install `turbopanel-daemon.service` on
   co-located dev (after `turbopanel-instance.service`)
 - `scripts/bootstrap-orchestration.ts` — thin Deno entry that runs `ensureUv` →

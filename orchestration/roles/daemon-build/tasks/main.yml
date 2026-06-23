@@ -9,7 +9,7 @@
 
 - name: Check compiled daemon binary
   ansible.builtin.stat:
-    path: "{{ turbopanel_daemon_dist_dir }}/turbopanel-daemon"
+    path: "{{ turbopanel_daemon_dist_dir }}/turbopaneld"
   register: _daemon_binary
 
 - name: Check if daemon sources are newer than compiled binary
@@ -19,7 +19,7 @@
   ansible.builtin.shell: |
     set -eu
     cd "{{ turbopanel_daemon_dir }}"
-    find src main.ts deno.json deno.lock -newer dist/turbopanel-daemon -print -quit 2>/dev/null || true
+    find src main.ts deno.json deno.lock -newer dist/turbopaneld -print -quit 2>/dev/null || true
   register: _daemon_stale_check
   changed_when: false
 
@@ -36,7 +36,7 @@
 
 - name: Set compiled daemon binary ownership
   ansible.builtin.file:
-    path: "{{ turbopanel_daemon_dist_dir }}/turbopanel-daemon"
+    path: "{{ turbopanel_daemon_dist_dir }}/turbopaneld"
     owner: "{{ turbopanel_user }}"
     group: "{{ turbopanel_group }}"
     mode: "0755"
