@@ -4,19 +4,65 @@ export const UV_VERSION = "0.11.19";
 export const PYTHON_VERSION = "3.14";
 export const ANSIBLE_CORE_VERSION = "2.18";
 
+/** Default managed install layout when running a compiled release binary. */
+export const DEFAULT_DAEMON_ROOT = "/opt/turbopanel/platform/daemon";
+
+function pathExists(path: string): boolean {
+  try {
+    Deno.statSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function hasOrchestrationTree(root: string): boolean {
+  return pathExists(join(root, "orchestration", "ansible.cfg"));
+}
+
+function isCompiledStubRoot(root: string): boolean {
+  return root.includes("deno-compile") ||
+    (root.startsWith("/tmp/") && !hasOrchestrationTree(root));
+}
+
+function readEnv(name: string): string | undefined {
+  try {
+    return Deno.env.get(name) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
- * Absolute path to the daemon repository root.
+ * Absolute path to the daemon install root.
  *
- * This module lives at `<root>/src/orchestration/paths.ts`, so the root is three
- * directories up. Resolving from `import.meta` keeps things correct regardless of
- * the process working directory.
+ * Compiled `turbopaneld` resolves `import.meta.url` under a temporary
+ * `deno-compile-*` directory — never use that as the install root. Prefer
+ * `TURBOPANEL_DAEMON_ROOT`, then cwd (systemd WorkingDirectory), then a tree
+ * with `orchestration/ansible.cfg`, then the default managed install path.
  */
-export const DAEMON_ROOT = (() => {
-  const override = Deno.env.get("TURBOPANEL_DAEMON_ROOT")?.trim();
+export function resolveDaemonRoot(
+  env: Record<string, string | undefined> = {},
+): string {
+  const override = env.TURBOPANEL_DAEMON_ROOT?.trim();
   if (override) return override;
-  const here = dirname(fromFileUrl(import.meta.url));
-  return join(here, "..", "..");
-})();
+
+  const fromMeta = join(dirname(fromFileUrl(import.meta.url)), "..", "..");
+  if (hasOrchestrationTree(fromMeta)) return fromMeta;
+
+  const cwd = Deno.cwd();
+  if (hasOrchestrationTree(cwd)) return cwd;
+
+  if (hasOrchestrationTree(DEFAULT_DAEMON_ROOT)) return DEFAULT_DAEMON_ROOT;
+
+  if (isCompiledStubRoot(fromMeta)) return DEFAULT_DAEMON_ROOT;
+
+  return fromMeta;
+}
+
+export const DAEMON_ROOT = resolveDaemonRoot({
+  TURBOPANEL_DAEMON_ROOT: readEnv("TURBOPANEL_DAEMON_ROOT"),
+});
 
 /** Checked-in orchestration source assets (playbooks, ansible.cfg, requirements). */
 export const ORCHESTRATION_DIR = join(DAEMON_ROOT, "orchestration");

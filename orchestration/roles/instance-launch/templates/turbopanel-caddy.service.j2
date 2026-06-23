@@ -19,7 +19,6 @@ Environment=WRANGLER_DEV_PORT={{ wrangler_dev_port | default(18787) }}
 Environment=TURBOPANEL_UI_MODE={{ turbopanel_ui_mode }}
 Environment=EXPO_PORT={{ expo_port }}
 Environment=TURBOPANEL_UI_ROOT={{ turbopanel_ui_dir }}/dist
-Environment=TURBOPANEL_DOWNLOADS_ROOT={{ turbopanel_downloads_root }}
 {% if turbopanel_ui_mode == 'dev' %}
 Environment=TURBOPANEL_DAEMON_REPO={{ turbopanel_daemon_dir }}
 {% endif %}

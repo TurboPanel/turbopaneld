@@ -53,8 +53,9 @@ package_arch arm64
 rm -rf "$BUILD"
 for _entry in "$DIST"/*; do
 	[ -e "$_entry" ] || continue
-	case "$_entry" in
-		turbopaneld-linux-*.tar.zst) ;;
+	_base="$(basename "$_entry")"
+	case "$_base" in
+		turbopaneld-linux-*.tar.zst | turbopaneld-*-linux-*.tar.zst) ;;
 		*) rm -rf "$_entry" ;;
 	esac
 done

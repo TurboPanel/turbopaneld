@@ -224,9 +224,16 @@ apt-get install -y -qq sudo curl ca-certificates xz-utils zstd tar unzip gnupg p
 mkdir -p "$CONFIG_DIR"
 if [ -n "$INSTANCE_CA" ]; then
 	install -m 0640 "$INSTANCE_CA" "$CA_PATH"
-elif [ "$INSECURE_TLS" = false ]; then
-	curl -fsSLk "${HOST_URL%/}/api/daemon/v1/instance/ca" > "$CA_PATH"
-	chmod 0640 "$CA_PATH"
+else
+	_curl_ca="curl -fsSL"
+	[ "$INSECURE_TLS" = true ] && _curl_ca="curl -fsSLk"
+	# shellcheck disable=SC2086
+	if $_curl_ca "${HOST_URL%/}/api/daemon/v1/instance/ca" > "$CA_PATH"; then
+		chmod 0640 "$CA_PATH"
+	else
+		rm -f "$CA_PATH"
+		echo "run.sh: warning: could not download instance CA from ${HOST_URL%/}" >&2
+	fi
 fi
 
 echo "run.sh: downloading released daemon binaries"

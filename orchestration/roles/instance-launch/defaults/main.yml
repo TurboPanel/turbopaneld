@@ -15,7 +15,6 @@ turbopanel_caddy_config_dir: "{{ turbopanel_instance_dir }}/.config"
 turbopanel_ui_config_dir: "{{ turbopanel_ui_dir }}/.config"
 turbopanel_website_config_dir: "{{ turbopanel_website_dir }}/.config"
 turbopanel_daemon_dir: "{{ turbopanel_platform_dir }}/daemon"
-turbopanel_downloads_root: "{{ turbopanel_daemon_dir }}/dist"
 turbopanel_daemon_state_dir: "{{ turbopanel_daemon_dir }}/state"
 turbopanel_instance_dir: "{{ turbopanel_platform_dir }}/instance"
 turbopanel_ui_dir: "{{ turbopanel_platform_dir }}/ui"
@@ -58,6 +57,6 @@ mailpit_web_port: 8025
 mailpit_smtp_port: 1025
 dbstudio_service_name: turbopanel-dbstudio
 turbopanel_dev_user: ""
-# Co-located dev: Caddy host matcher for daemon run.sh + binary downloads (see instance/caddy/dev-install.caddy).
+# Co-located dev: Caddy serves /downloads/daemon from {{ turbopanel_daemon_dir }}/dist when UI_MODE=dev.
 turbopanel_dev_install_host: trbp.nl
 turbopanel_tls_extra_sans: "{{ turbopanel_dev_install_host if (turbopanel_dev_user | default('') | length > 0) else '' }}"
