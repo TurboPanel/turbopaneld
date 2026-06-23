@@ -6,7 +6,7 @@
   ansible.builtin.file:
     path: "{{ turbopanel_instance_dir }}/certs"
     state: directory
-    owner: "{{ instance_user }}"
+    owner: "{{ instance_certs_owner }}"
     group: "{{ turbopanel_group }}"
     mode: "0750"
 
@@ -16,7 +16,7 @@
     chdir: "{{ turbopanel_instance_dir }}"
   # Co-located dev stores CA material as turbopanel (git/Ansible identity); turbopaneli
   # cannot chmod turbopanel-owned keys when the script normalizes permissions.
-  become_user: "{{ turbopanel_user if (turbopanel_dev_user | default('') | length > 0) else instance_user }}"
+  become_user: "{{ instance_certs_owner }}"
   environment:
     HOME: "{{ turbopanel_install_root if (turbopanel_dev_user | default('') | length > 0) else turbopanel_instance_dir }}"
     PATH: "/usr/local/bin:/usr/bin:/bin"
