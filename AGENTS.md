@@ -316,8 +316,8 @@ on the wire, native on Debian via the `zstd` package (`daemon-prereqs` and
 
 | Task | Purpose |
 | ---- | ------- |
-| `deno task compile:all` | `dist/turbopaneld-linux-{amd64,arm64}` |
-| `deno task release:package` | compile + `scripts/package-daemon-release.sh` |
+| `deno task compile:all` | `dist/turbopaneld-linux-{amd64,arm64}` + `.tar.zst` packages |
+| `deno task release:package` | same as `compile:all` (compile + zstd tar) |
 
 Each archive contains a single `turbopaneld` member at the tar root (installed
 as `./turbopaneld` in the daemon checkout). Co-located dev serves unversioned
