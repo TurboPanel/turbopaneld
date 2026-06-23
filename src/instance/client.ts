@@ -117,6 +117,8 @@ export interface InstanceClientOptions {
 const DEFAULT_INITIAL_BACKOFF_MS = 2_000;
 const DEFAULT_MAX_BACKOFF_MS = 30_000;
 const BACKOFF_MULTIPLIER = 2;
+/** Co-located install wait: poll readiness on a fixed cadence before first connect. */
+const INSTALL_READINESS_POLL_MS = 5_000;
 
 const SERVER_ID_FILE = "server.id";
 const SERVER_KEY_FILE = "server-key.json";
@@ -1004,26 +1006,31 @@ export async function connectInstance(
   });
 
   const socketMode = isColocatedSocketMode(config);
-  let waitingLogged = false;
-  let readyLogged = false;
-  let backoffMs = initialBackoffMs;
 
-  while (true) {
-    try {
-      if (socketMode) {
+  if (socketMode) {
+    while (true) {
+      try {
         const readiness = await client.fetchDaemonReadiness();
-        if (!readiness.ready) {
-          throw new Error("instance install incomplete");
-        }
-        if (!readyLogged) {
+        if (readiness.ready) {
           logInfo(
             "instance",
             "instance ready for daemon registration via",
             sanitizeForLog(client.target),
           );
-          readyLogged = true;
+          break;
         }
-      } else {
+      } catch {
+        // Instance not reachable yet — keep polling silently.
+      }
+      await delay(INSTALL_READINESS_POLL_MS);
+    }
+  } else {
+    let waitingLogged = false;
+    let readyLogged = false;
+    let backoffMs = initialBackoffMs;
+
+    while (true) {
+      try {
         await client.fetchHealth();
         if (!readyLogged) {
           logInfo(
@@ -1033,21 +1040,19 @@ export async function connectInstance(
           );
           readyLogged = true;
         }
+        break;
+      } catch {
+        if (!waitingLogged) {
+          logInfo(
+            "instance",
+            "waiting for instance to become available via",
+            sanitizeForLog(client.target),
+          );
+          waitingLogged = true;
+        }
+        await delay(backoffMs);
+        backoffMs = nextBackoffMs(backoffMs, DEFAULT_MAX_BACKOFF_MS);
       }
-      break;
-    } catch {
-      if (!waitingLogged) {
-        logInfo(
-          "instance",
-          socketMode
-            ? "waiting for instance install to complete via"
-            : "waiting for instance to become available via",
-          sanitizeForLog(client.target),
-        );
-        waitingLogged = true;
-      }
-      await delay(backoffMs);
-      backoffMs = nextBackoffMs(backoffMs, DEFAULT_MAX_BACKOFF_MS);
     }
   }
 
