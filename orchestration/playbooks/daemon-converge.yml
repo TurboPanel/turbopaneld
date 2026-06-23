@@ -13,10 +13,6 @@
     turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/runtimes"
     turbopanel_config_dir: /opt/turbopanel/platform/config
     turbopanel_dev_user: ""
-    postgres_expose_port: false
-    rabbitmq_amqp_port: 5672
-    rabbitmq_mgmt_port: 15672
-    rabbitmq_expose_mgmt_port: true
 
   pre_tasks:
     - name: Refresh apt cache once per converge (Debian)
@@ -30,6 +26,3 @@
     - role: daemon-logs
     - role: daemon-prereqs
     - role: docker
-    - role: redis
-    - role: rabbitmq
-    - role: postgres

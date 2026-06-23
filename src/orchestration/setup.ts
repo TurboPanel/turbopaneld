@@ -72,8 +72,11 @@ function shouldRunDaemonConverge(): boolean {
 /**
  * Bootstrap the orchestration runtime on daemon startup.
  *
- * Installs uv/Python/ansible once, then runs a single convergence playbook
- * (daemon-only or co-located dev). Each step is idempotent so restarts are cheap.
+ * Installs uv/Python/ansible once, then runs a single convergence playbook:
+ * `daemon-converge.yml` on managed-node daemons (docker only — no control-plane
+ * redis/rabbitmq/postgres), or the co-located dev playbook when
+ * `TURBOPANEL_DEV_INSTANCE=1` (full instance stack including those services).
+ * Each step is idempotent so restarts are cheap.
  *
  * Failures are logged loudly but do NOT crash the daemon: a transient network
  * problem shouldn't take the whole service down. Returns `true` on success.

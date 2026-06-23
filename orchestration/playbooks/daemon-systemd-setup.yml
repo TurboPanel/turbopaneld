@@ -22,6 +22,8 @@
     turbopanel_service_name: turbopanel-daemon
     turbopanel_start: true
     turbopanel_after_instance_service: false
+    turbopanel_daemon_run_mode: source
+    turbopanel_daemon_binary: "{{ turbopanel_runtimes_dir }}/daemon/current/turbopaneld"
 
   roles:
     - role: daemon-prereqs

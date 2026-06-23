@@ -2,7 +2,7 @@
 set -eu
 
 DAEMON_DIR="$(cd "$(dirname "$0")" && pwd)"
-DAEMON_BINARY="$DAEMON_DIR/turbopaneld"
+RUNTIMES_DIR="/opt/turbopanel/runtimes"
 TMP_BINARY="/tmp/turbopaneld-new"
 
 # Step 1 — Resolve update URL
@@ -14,8 +14,10 @@ fi
 # shellcheck source=scripts/lib/release-artifacts.sh
 . "$DAEMON_DIR/scripts/lib/release-artifacts.sh"
 
+RUNTIME_BINARY="$(tp_daemon_runtime_binary_path "$RUNTIMES_DIR")"
+
 # Step 2 — Download release (zstd tar preferred, raw binary fallback)
-if tp_fetch_daemon_release "$TURBOPANEL_UPDATE_URL" "$DAEMON_DIR"; then
+if tp_install_daemon_release "$TURBOPANEL_UPDATE_URL" "$RUNTIMES_DIR"; then
 	:
 elif curl -fsSL "${TURBOPANEL_UPDATE_URL%/}/turbopaneld" -o "$TMP_BINARY"; then
 	if [ ! -s "$TMP_BINARY" ]; then
@@ -23,8 +25,9 @@ elif curl -fsSL "${TURBOPANEL_UPDATE_URL%/}/turbopaneld" -o "$TMP_BINARY"; then
 		exit 1
 	fi
 	chmod 0755 "$TMP_BINARY"
-	if ! mv "$TMP_BINARY" "$DAEMON_BINARY"; then
-		echo "update.sh: failed to install binary at $DAEMON_BINARY" >&2
+	mkdir -p "$(dirname "$RUNTIME_BINARY")"
+	if ! mv "$TMP_BINARY" "$RUNTIME_BINARY"; then
+		echo "update.sh: failed to install binary at $RUNTIME_BINARY" >&2
 		exit 1
 	fi
 else
@@ -32,8 +35,8 @@ else
 	exit 1
 fi
 
-if ! sudo chown turbopanel:turbopanel "$DAEMON_BINARY"; then
-	echo "update.sh: failed to set ownership on $DAEMON_BINARY" >&2
+if ! sudo chown turbopanel:turbopanel "$RUNTIME_BINARY"; then
+	echo "update.sh: failed to set ownership on $RUNTIME_BINARY" >&2
 	exit 1
 fi
 

@@ -32,7 +32,11 @@ package_arch() {
 	_out="$DIST/$_out_name"
 
 	install -m 0755 "$_src" "$_staging/$BINARY_NAME"
+	# Replace prior artifacts even when owned by another group member (644 files
+	# in the setgid dist/ dir are not group-writable; unlink via the directory).
+	rm -f "$_out"
 	tar -I 'zstd -19 -T0' -cf "$_out" -C "$_staging" "$BINARY_NAME"
+	chmod g+w "$_out" 2>/dev/null || true
 	rm -rf "$_staging"
 	echo "package-daemon-release.sh: wrote $_out"
 }

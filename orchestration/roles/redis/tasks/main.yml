@@ -33,6 +33,15 @@
     path: "{{ turbopanel_runtimes_dir }}/redis/{{ redis_version }}/bin/redis-server"
   register: _redis_pinned
 
+- name: Install Redis build dependencies
+  when: not _redis_pinned.stat.exists
+  ansible.builtin.apt:
+    name:
+      - build-essential
+      - libssl-dev
+      - pkg-config
+    state: present
+
 - name: Install Redis into runtimes directory
   when: not _redis_pinned.stat.exists
   ansible.builtin.shell: |

@@ -72,6 +72,29 @@ tp_extract_daemon_release() {
 	return 0
 }
 
+tp_daemon_runtime_binary_path() {
+	_runtimes_dir="${1:-/opt/turbopanel/runtimes}"
+	printf '%s/daemon/current/turbopaneld' "$_runtimes_dir"
+}
+
+tp_install_daemon_release() {
+	_base_url="$1"
+	_runtimes_dir="$2"
+	_version="${3:-${TURBOPANEL_DAEMON_RELEASE_VERSION:-}}"
+	_staging="$(mktemp -d)"
+	_runtime_binary="$(tp_daemon_runtime_binary_path "$_runtimes_dir")"
+
+	if ! tp_fetch_daemon_release "$_base_url" "$_staging" "$_version"; then
+		rm -rf "$_staging"
+		return 1
+	fi
+
+	mkdir -p "$(dirname "$_runtime_binary")"
+	install -m 0755 "$_staging/$(tp_daemon_binary_name)" "$_runtime_binary"
+	rm -rf "$_staging"
+	return 0
+}
+
 tp_fetch_daemon_release() {
 	_base_url="$1"
 	_dest_dir="$2"

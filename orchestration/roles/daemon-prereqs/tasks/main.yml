@@ -2,15 +2,12 @@
 - name: Install daemon prerequisites
   ansible.builtin.apt:
     name:
-      - build-essential
       - ca-certificates
       - curl
       - git
       - gnupg
       - iptables
-      - libssl-dev
       - pamtester
-      - pkg-config
       - python3-debian
       - tar
       - unzip

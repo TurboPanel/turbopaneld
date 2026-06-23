@@ -2,7 +2,29 @@
 # TurboPanel managed-node installer. Co-located dev serves this at /install.sh
 # (same host as /run.sh and /downloads/daemon). Production nodes should use the
 # turbopanel-cdn publish when available.
+# Run as root or as a sudo-group user (self-escalates with sudo when installed).
 set -eu
+
+tp_is_root() { [ "$(id -u)" = "0" ]; }
+tp_user_in_sudo_group() {
+	_groups="$(id -nG 2>/dev/null)" || return 1
+	for _g in $_groups; do
+		case "$_g" in
+		sudo | wheel | admin) return 0 ;;
+		esac
+	done
+	return 1
+}
+tp_sudo_installed() { command -v sudo >/dev/null 2>&1; }
+tp_install_privilege_denied() {
+	_script="$1"
+	if tp_user_in_sudo_group; then
+		echo "$_script: run as root (su -); sudo is not installed yet — the daemon installer will install it" >&2
+	else
+		echo "$_script: must run as root or as a user in the sudo group" >&2
+	fi
+	exit 1
+}
 
 INSTANCE_URL=""
 INSTANCE_CA=""
@@ -11,9 +33,18 @@ BRANCH="trunk"
 REPO_URL="https://github.com/turbopanel/turbopanel-daemon"
 INSECURE_TLS=false
 NO_START=false
+LICENSE=""
 
 while [ $# -gt 0 ]; do
 	case "$1" in
+		--license)
+			if [ $# -lt 2 ]; then
+				echo "install.sh: --license requires an argument" >&2
+				exit 1
+			fi
+			LICENSE="$2"
+			shift 2
+			;;
 		--instance-url)
 			if [ $# -lt 2 ]; then
 				echo "install.sh: --instance-url requires an argument" >&2
@@ -74,9 +105,52 @@ if [ -z "$INSTANCE_URL" ]; then
 	exit 1
 fi
 
-if [ "$(id -u)" != "0" ]; then
-	echo "install.sh: must run as root (use sudo)" >&2
-	exit 1
+INSTALLER_SELF_URL="${TURBOPANEL_INSTALL_SCRIPT_URL:-${INSTANCE_URL%/}/install.sh}"
+if ! tp_is_root; then
+	if tp_user_in_sudo_group && tp_sudo_installed; then
+		set -- --instance-url "$INSTANCE_URL"
+		if [ -n "$LICENSE" ]; then
+			set -- "$@" --license "$LICENSE"
+		fi
+		if [ -n "$INSTANCE_CA" ]; then
+			set -- "$@" --instance-ca "$INSTANCE_CA"
+		fi
+		if [ -n "$TUNNEL_TOKEN" ]; then
+			set -- "$@" --tunnel-token "$TUNNEL_TOKEN"
+		fi
+		if [ "$BRANCH" != "trunk" ]; then
+			set -- "$@" --branch "$BRANCH"
+		fi
+		if [ "$REPO_URL" != "https://github.com/turbopanel/turbopanel-daemon" ]; then
+			set -- "$@" --repo-url "$REPO_URL"
+		fi
+		if [ "$INSECURE_TLS" = true ]; then
+			set -- "$@" --insecure-tls
+		fi
+		if [ "$NO_START" = true ]; then
+			set -- "$@" --no-start
+		fi
+		CURL="curl -fsSL"
+		if [ "$INSECURE_TLS" = true ]; then
+			CURL="$CURL -k"
+		fi
+		# shellcheck disable=SC2086
+		exec $CURL "$INSTALLER_SELF_URL" | sudo sh -s -- "$@"
+	fi
+	tp_install_privilege_denied install.sh
+fi
+
+if [ -n "$LICENSE" ]; then
+	LICENSE_ID="$(echo "$LICENSE" | cut -d: -f1)"
+	LICENSE_TOKEN="$(echo "$LICENSE" | cut -d: -f2-)"
+	if [ -z "$LICENSE_ID" ] || [ -z "$LICENSE_TOKEN" ]; then
+		echo "install.sh: invalid --license format; expected id:token" >&2
+		exit 1
+	fi
+	STAGING_DIR="/opt/turbopanel/platform/config/daemon-license-staging"
+	mkdir -p "$STAGING_DIR"
+	printf '%s' "$LICENSE_ID" > "$STAGING_DIR/license.id"
+	printf '%s' "$LICENSE_TOKEN" > "$STAGING_DIR/license.token"
 fi
 
 INSTALL_ROOT="/opt/turbopanel"
@@ -88,7 +162,12 @@ DENO_VERSION="2.8.3"
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq git curl ca-certificates xz-utils zstd tar unzip gnupg python3-debian iptables build-essential libssl-dev pkg-config
+apt-get install -y -qq sudo git curl ca-certificates xz-utils zstd tar unzip gnupg python3-debian iptables
+
+if [ -z "${TURBOPANEL_DAEMON_BINARY_URL:-}" ]; then
+	echo "install.sh: TURBOPANEL_DAEMON_BINARY_URL is required (pass --binary-url via run.sh)" >&2
+	exit 1
+fi
 
 if [ ! -x /usr/local/bin/deno ]; then
 	DENO_TMP="$RUNTIMES_DIR/deno/.install"
@@ -114,16 +193,14 @@ fi
 
 cd "$DAEMON_DIR"
 
-if [ -n "${TURBOPANEL_DAEMON_BINARY_URL:-}" ]; then
-	# shellcheck source=scripts/lib/release-artifacts.sh
-	. "$DAEMON_DIR/scripts/lib/release-artifacts.sh"
-	if [ "$INSECURE_TLS" = true ]; then
-		export TURBOPANEL_RELEASE_TLS_INSECURE=1
-	fi
-	if ! tp_fetch_daemon_release "$TURBOPANEL_DAEMON_BINARY_URL" "$DAEMON_DIR"; then
-		echo "install.sh: failed to download daemon release from $TURBOPANEL_DAEMON_BINARY_URL" >&2
-		exit 1
-	fi
+# shellcheck source=scripts/lib/release-artifacts.sh
+. "$DAEMON_DIR/scripts/lib/release-artifacts.sh"
+if [ "$INSECURE_TLS" = true ]; then
+	export TURBOPANEL_RELEASE_TLS_INSECURE=1
+fi
+if ! tp_install_daemon_release "$TURBOPANEL_DAEMON_BINARY_URL" "$RUNTIMES_DIR"; then
+	echo "install.sh: failed to download daemon release from $TURBOPANEL_DAEMON_BINARY_URL" >&2
+	exit 1
 fi
 
 /usr/local/bin/deno run --allow-net --allow-read --allow-write --allow-run --allow-env \
