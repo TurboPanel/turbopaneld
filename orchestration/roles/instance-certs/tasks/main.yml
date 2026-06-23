@@ -20,6 +20,7 @@
   environment:
     HOME: "{{ turbopanel_install_root if (turbopanel_dev_user | default('') | length > 0) else turbopanel_instance_dir }}"
     PATH: "/usr/local/bin:/usr/bin:/bin"
+    TURBOPANEL_TLS_EXTRA_SANS: "{{ turbopanel_tls_extra_sans | default('', true) }}"
   changed_when: false
 
 # Caddy runs as turbopaneli (group turbopanel) and must read the server leaf key.

@@ -31,6 +31,7 @@ Environment=TURBOPANEL_AMQP_URL={{ turbopanel_amqp_url }}
 Environment=TURBOPANEL_REDIS_SOCKET={{ redis_socket_path }}
 {% if turbopanel_dev_user | length > 0 %}
 Environment=TURBOPANEL_DEV_USER={{ turbopanel_dev_user }}
+Environment=TURBOPANEL_DEV_INSTALL_HOST={{ turbopanel_dev_install_host }}
 {% endif %}
 Environment=TURBOPANEL_DAEMON_STATE_DIR={{ turbopanel_instance_daemon_state_dir }}
 # turbopanel_instance_run_mode: "source" (deno run) | "compiled" (single binary)
@@ -45,7 +46,7 @@ ExecStart={{ turbopanel_instance_dir }}/scripts/workers-serve.sh
 {% elif turbopanel_instance_run_mode == 'compiled' %}
 ExecStart={{ turbopanel_instance_binary }}
 {% else %}
-ExecStart=/usr/local/bin/deno run --allow-env --allow-sys=networkInterfaces,hostname --allow-read=/run/turbopanel,{{ postgres_socket_dir }},{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }},{{ turbopanel_instance_runtime_dir }} --allow-write=/run/turbopanel,{{ postgres_socket_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_instance_daemon_state_dir }} --allow-net=127.0.0.1:{{ drizzle_studio_port | default(4983) }},127.0.0.1:{{ rabbitmq_amqp_port }} --allow-run=git,systemctl,tar,sudo,/usr/bin/sudo,/bin/sh,mkfifo,/usr/bin/mkfifo,pamtester,/usr/bin/pamtester,setfacl,/usr/bin/setfacl,/usr/local/bin/node src/deno.ts
+ExecStart=/usr/local/bin/deno run --allow-env --allow-sys=networkInterfaces,hostname --allow-read=/run/turbopanel,{{ postgres_socket_dir }},{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }},{{ turbopanel_instance_runtime_dir }} --allow-write=/run/turbopanel,{{ postgres_socket_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_instance_daemon_state_dir }} --allow-net=127.0.0.1:{{ drizzle_studio_port | default(4983) }},127.0.0.1:{{ rabbitmq_amqp_port }} --allow-run=git,systemctl,tar,sudo,/usr/bin/sudo,/bin/sh,mkfifo,/usr/bin/mkfifo,pamtester,/usr/bin/pamtester,setfacl,/usr/bin/setfacl,/usr/local/bin/node,{{ turbopanel_runtimes_dir }}/deno/current/deno src/deno.ts
 {% endif %}
 Restart=always
 RestartSec=2
