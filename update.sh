@@ -39,8 +39,4 @@ if ! sudo chown turbopanel:turbopanel "$RUNTIME_BINARY"; then
 	exit 1
 fi
 
-# Step 3 — Refresh orchestration directory from release artifact (no git)
-if ! tp_fetch_orchestration_release "$TURBOPANEL_UPDATE_URL" "$DAEMON_DIR"; then
-	echo "update.sh: failed to refresh orchestration/ from $TURBOPANEL_UPDATE_URL" >&2
-	exit 1
-fi
+echo "update.sh: restart turbopanel-daemon to apply bundled orchestration updates"

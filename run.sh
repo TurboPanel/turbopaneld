@@ -2,9 +2,7 @@
 # TurboPanel daemon bootstrap — single entrypoint served at https://<host>/run.sh.
 #
 # Downloads release artifacts only (no git clone):
-#   turbopaneld-linux-*.tar.zst  → dist/turbopaneld
-#   turbopanel-orchestration.tar.zst → orchestration/ (Ansible)
-#   turbopanel-bootstrap-linux-*.tar.zst → dist/turbopanel-bootstrap-orchestration
+#   turbopaneld-linux-*.tar.zst  → dist/ (binaries + orchestration.tar.zst bundle)
 #
 # The running daemon then provisions everything else (instance, Docker on demand, …)
 # via Ansible. Run as root or as a sudo-group user (self-escalates when sudo exists).
@@ -37,6 +35,10 @@ tp_daemon_linux_arch() {
 	esac
 }
 
+tp_daemon_binary_name() {
+	printf 'turbopaneld'
+}
+
 tp_daemon_release_filename() {
 	_arch="$1"
 	_version="${2:-}"
@@ -47,27 +49,12 @@ tp_daemon_release_filename() {
 	fi
 }
 
-tp_orchestration_release_filename() {
-	_version="${1:-}"
-	if [ -n "$_version" ]; then
-		printf 'turbopanel-orchestration-%s.tar.zst' "$_version"
-	else
-		printf 'turbopanel-orchestration.tar.zst'
-	fi
+tp_orchestration_bundle_name() {
+	printf 'orchestration.tar.zst'
 }
 
 tp_bootstrap_binary_name() {
 	printf 'turbopanel-bootstrap-orchestration'
-}
-
-tp_bootstrap_release_filename() {
-	_arch="$1"
-	_version="${2:-}"
-	if [ -n "$_version" ]; then
-		printf 'turbopanel-bootstrap-%s-linux-%s.tar.zst' "$_version" "$_arch"
-	else
-		printf 'turbopanel-bootstrap-linux-%s.tar.zst' "$_arch"
-	fi
 }
 
 tp_extract_release_archive() {
@@ -122,7 +109,10 @@ tp_install_daemon_binary() {
 	_arch="$(tp_daemon_linux_arch)" || return 1
 	_staging="$(mktemp -d)"
 	_version="${TURBOPANEL_DAEMON_RELEASE_VERSION:-}"
-	_dist="$_daemon_dir/dist/turbopaneld"
+	_dist_dir="$_daemon_dir/dist"
+	_daemon_name="$(tp_daemon_binary_name)"
+	_bootstrap_name="$(tp_bootstrap_binary_name)"
+	_orchestration_bundle="$(tp_orchestration_bundle_name)"
 
 	if ! tp_fetch_versioned_release "$_base_url" "$_staging" \
 		"$(tp_daemon_release_filename "$_arch" "$_version")" \
@@ -130,13 +120,25 @@ tp_install_daemon_binary() {
 		rm -rf "$_staging"
 		return 1
 	fi
-	if [ ! -f "$_staging/turbopaneld" ]; then
-		echo "run.sh: release archive missing turbopaneld member" >&2
+	if [ ! -f "$_staging/$_daemon_name" ]; then
+		echo "run.sh: release archive missing $_daemon_name member" >&2
 		rm -rf "$_staging"
 		return 1
 	fi
-	mkdir -p "$(dirname "$_dist")"
-	install -m 0755 "$_staging/turbopaneld" "$_dist"
+	if [ ! -f "$_staging/$_bootstrap_name" ]; then
+		echo "run.sh: release archive missing $_bootstrap_name member" >&2
+		rm -rf "$_staging"
+		return 1
+	fi
+	if [ ! -f "$_staging/$_orchestration_bundle" ]; then
+		echo "run.sh: release archive missing $_orchestration_bundle member" >&2
+		rm -rf "$_staging"
+		return 1
+	fi
+	mkdir -p "$_dist_dir"
+	install -m 0755 "$_staging/$_daemon_name" "$_dist_dir/$_daemon_name"
+	install -m 0755 "$_staging/$_bootstrap_name" "$_dist_dir/$_bootstrap_name"
+	install -m 0644 "$_staging/$_orchestration_bundle" "$_dist_dir/$_orchestration_bundle"
 	rm -rf "$_staging"
 	return 0
 }
@@ -249,66 +251,25 @@ elif [ "$INSECURE_TLS" = false ]; then
 	chmod 0640 "$CA_PATH"
 fi
 
-echo "run.sh: downloading bootstrap orchestration binary"
+echo "run.sh: downloading released daemon binaries"
 # #region agent log
-tp_agent_log "B" "run.sh:bootstrap" "fetch_bootstrap" "{\"urlBase\":\"$BINARY_URL\"}"
-# #endregion
-_bootstrap_staging="$(mktemp -d)"
-_arch="$(tp_daemon_linux_arch)" || exit 1
-if ! tp_fetch_versioned_release "$BINARY_URL" "$_bootstrap_staging" \
-	"$(tp_bootstrap_release_filename "$_arch" "${TURBOPANEL_DAEMON_RELEASE_VERSION:-}")" \
-	"$(tp_bootstrap_release_filename "$_arch")"; then
-	echo "run.sh: failed to download bootstrap binary from $BINARY_URL" >&2
-	rm -rf "$_bootstrap_staging"
-	exit 1
-fi
-if [ ! -f "$_bootstrap_staging/$(tp_bootstrap_binary_name)" ]; then
-	echo "run.sh: bootstrap archive missing $(tp_bootstrap_binary_name) member" >&2
-	rm -rf "$_bootstrap_staging"
-	exit 1
-fi
-mkdir -p "$DAEMON_DIR/dist"
-install -m 0755 "$_bootstrap_staging/$(tp_bootstrap_binary_name)" "$BOOTSTRAP_BINARY"
-rm -rf "$_bootstrap_staging"
-
-echo "run.sh: downloading released daemon binary"
-# #region agent log
-tp_agent_log "C" "run.sh:binary" "fetch_binary" "{\"dest\":\"$DAEMON_DIR/dist/turbopaneld\"}"
+tp_agent_log "C" "run.sh:binary" "fetch_binary" "{\"dest\":\"$DAEMON_DIR/dist\"}"
 # #endregion
 if ! tp_install_daemon_binary "$BINARY_URL" "$DAEMON_DIR"; then
-	echo "run.sh: failed to download daemon binary from $BINARY_URL" >&2
+	echo "run.sh: failed to download daemon release from $BINARY_URL" >&2
 	exit 1
 fi
-
-echo "run.sh: downloading orchestration tree"
-# #region agent log
-tp_agent_log "D" "run.sh:orchestration" "fetch_orchestration" "{\"playbook\":\"$DAEMON_DIR/orchestration/playbooks/daemon-install.yml\"}"
-# #endregion
-if ! tp_fetch_versioned_release "$BINARY_URL" "$DAEMON_DIR" \
-	"$(tp_orchestration_release_filename "${TURBOPANEL_DAEMON_RELEASE_VERSION:-}")" \
-	"$(tp_orchestration_release_filename)"; then
-	echo "run.sh: failed to download orchestration bundle from $BINARY_URL" >&2
-	exit 1
-fi
-
-if [ ! -f "$DAEMON_DIR/orchestration/ansible.cfg" ]; then
-	echo "run.sh: orchestration bundle did not provide orchestration/ansible.cfg" >&2
-	exit 1
-fi
-
-# #region agent log
-_uses_daemon_layout="false"
-if grep -q 'daemon-layout' "$DAEMON_DIR/orchestration/playbooks/daemon-install.yml" 2>/dev/null; then
-	_uses_daemon_layout="true"
-fi
-tp_agent_log "E" "run.sh:layout" "playbook_layout_check" "{\"usesDaemonLayout\":$_uses_daemon_layout,\"binaryPath\":\"$DAEMON_DIR/dist/turbopaneld\",\"binaryExists\":$([ -x "$DAEMON_DIR/dist/turbopaneld" ] && echo true || echo false)}"
-# #endregion
 
 export TURBOPANEL_DAEMON_ROOT="$DAEMON_DIR"
 # #region agent log
 tp_agent_log "A" "run.sh:main" "artifact_install_start" "{\"binaryUrl\":\"$BINARY_URL\",\"daemonDir\":\"$DAEMON_DIR\",\"noGitClone\":true}"
 # #endregion
 "$BOOTSTRAP_BINARY"
+
+if [ ! -f "$DAEMON_DIR/orchestration/ansible.cfg" ]; then
+	echo "run.sh: bootstrap did not materialize orchestration/ansible.cfg" >&2
+	exit 1
+fi
 
 ANSIBLE_PLAYBOOK="$RUNTIMES_DIR/ansible/current/bin/ansible-playbook"
 if [ ! -x "$ANSIBLE_PLAYBOOK" ]; then

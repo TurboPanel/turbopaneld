@@ -320,15 +320,20 @@ on the wire, native on Debian via the `zstd` package (`daemon-prereqs` and
 
 | Task | Purpose |
 | ---- | ------- |
-| `deno task compile:all` | `dist/turbopaneld-linux-{amd64,arm64}` + `.tar.zst` packages |
-| `deno task release:package` | same as `compile:all` (compile + zstd tar) |
+| `deno task compile:all` | cross-arch compile + zstd tar release artifacts in `dist/` |
+| `deno task release:package` | same as `compile:all` |
 
-Each archive contains a single `turbopaneld` member at the tar root (installed
-as `./turbopaneld` in the daemon checkout). Co-located dev serves unversioned
-names from `/downloads/daemon/`:
+Release artifacts in `dist/` (compile intermediates are removed after packaging):
+
+- `turbopaneld-linux-amd64.tar.zst` — `turbopaneld`, `turbopanel-bootstrap-orchestration`, `orchestration.tar.zst`
+- `turbopaneld-linux-arm64.tar.zst` — same
+
+Co-located dev serves unversioned names from `/downloads/daemon/` (or `daemon/dist/`):
 
 - `turbopaneld-linux-amd64.tar.zst`
 - `turbopaneld-linux-arm64.tar.zst`
+
+The bootstrap binary and daemon extract `orchestration/` from `dist/orchestration.tar.zst` on first run (see `src/orchestration/bundle-extract.ts`).
 
 Versioned GitHub release assets (set `TURBOPANEL_RELEASE_VERSION` when
 packaging, or `TURBOPANEL_DAEMON_RELEASE_VERSION` when downloading):

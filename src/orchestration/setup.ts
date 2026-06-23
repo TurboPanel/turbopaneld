@@ -3,6 +3,7 @@ import {
   runDaemonConverge,
   runInstanceDevInstall,
 } from "./ansible.ts";
+import { ensureOrchestrationTree } from "./bundle-extract.ts";
 import { ensurePython } from "./python.ts";
 import { ensureUv } from "./uv.ts";
 import { resolveInstanceConfig } from "../instance/paths.ts";
@@ -93,6 +94,7 @@ export async function initOrchestration(): Promise<boolean> {
   const devInstance = shouldInstallDevInstance();
   const preOptInDev = isPreOptInCoLocatedDev();
   const steps: Array<[string, () => Promise<void>]> = [
+    ["ensureOrchestrationTree", ensureOrchestrationTree],
     ["ensureUv", ensureUv],
     ["ensurePython", ensurePython],
     ["bootstrapOrchestrationRuntime", bootstrapOrchestrationRuntime],

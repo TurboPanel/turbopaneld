@@ -9,8 +9,10 @@
 #   turbopaneld-linux-amd64.tar.zst
 #   turbopaneld-linux-arm64.tar.zst
 #
-# Tar member at archive root (installed server name):
-#   turbopaneld          — run as ./turbopaneld from the daemon checkout root
+# Each daemon tar contains at archive root:
+#   turbopaneld
+#   turbopanel-bootstrap-orchestration
+#   orchestration.tar.zst
 #
 # Versioned GitHub release assets (set TURBOPANEL_RELEASE_VERSION when packaging
 # or TURBOPANEL_DAEMON_RELEASE_VERSION when downloading):
@@ -83,13 +85,8 @@ tp_daemon_runtime_binary_path() {
 	tp_daemon_dist_binary_path "$_install_root/platform/daemon"
 }
 
-tp_orchestration_release_filename() {
-	_version="${1:-}"
-	if [ -n "$_version" ]; then
-		printf 'turbopanel-orchestration-%s.tar.zst' "$_version"
-	else
-		printf 'turbopanel-orchestration.tar.zst'
-	fi
+tp_orchestration_bundle_name() {
+	printf 'orchestration.tar.zst'
 }
 
 tp_bootstrap_binary_name() {
@@ -104,16 +101,6 @@ tp_bootstrap_linux_arch_binary_name() {
 tp_bootstrap_dist_binary_path() {
 	_daemon_dir="${1:-/opt/turbopanel/platform/daemon}"
 	printf '%s/dist/turbopanel-bootstrap-orchestration' "$_daemon_dir"
-}
-
-tp_bootstrap_release_filename() {
-	_arch="$1"
-	_version="${2:-}"
-	if [ -n "$_version" ]; then
-		printf 'turbopanel-bootstrap-%s-linux-%s.tar.zst' "$_version" "$_arch"
-	else
-		printf 'turbopanel-bootstrap-linux-%s.tar.zst' "$_arch"
-	fi
 }
 
 tp_extract_release_archive() {
@@ -157,55 +144,29 @@ tp_fetch_named_release() {
 	return 0
 }
 
-tp_fetch_orchestration_release() {
-	_base_url="$1"
-	_dest_dir="$2"
-	_version="${3:-${TURBOPANEL_DAEMON_RELEASE_VERSION:-}}"
-
-	if [ -n "$_version" ]; then
-		if tp_fetch_named_release "$_base_url" "$_dest_dir" "$(tp_orchestration_release_filename "$_version")"; then
-			return 0
-		fi
-	fi
-	tp_fetch_named_release "$_base_url" "$_dest_dir" "$(tp_orchestration_release_filename)"
-}
-
-tp_fetch_bootstrap_release() {
-	_base_url="$1"
-	_dest_dir="$2"
-	_version="${3:-${TURBOPANEL_DAEMON_RELEASE_VERSION:-}}"
-	_arch="$(tp_daemon_linux_arch)" || return 1
-	_member_name="$(tp_bootstrap_binary_name)"
-
-	if [ -n "$_version" ]; then
-		if tp_fetch_named_release "$_base_url" "$_dest_dir" "$(tp_bootstrap_release_filename "$_arch" "$_version")"; then
-			return 0
-		fi
-	fi
-	if ! tp_fetch_named_release "$_base_url" "$_dest_dir" "$(tp_bootstrap_release_filename "$_arch")"; then
-		return 1
-	fi
-	if [ ! -f "$_dest_dir/$_member_name" ]; then
-		echo "tp_fetch_bootstrap_release: archive missing $_member_name member" >&2
-		return 1
-	fi
-	return 0
-}
-
 tp_install_daemon_release() {
 	_base_url="$1"
 	_daemon_dir="$2"
 	_version="${3:-${TURBOPANEL_DAEMON_RELEASE_VERSION:-}}"
 	_staging="$(mktemp -d)"
-	_dist_binary="$(tp_daemon_dist_binary_path "$_daemon_dir")"
+	_dist_dir="$(dirname "$(tp_daemon_dist_binary_path "$_daemon_dir")")"
+	_daemon_name="$(tp_daemon_binary_name)"
+	_bootstrap_name="$(tp_bootstrap_binary_name)"
+	_orchestration_bundle="$(tp_orchestration_bundle_name)"
 
 	if ! tp_fetch_daemon_release "$_base_url" "$_staging" "$_version"; then
 		rm -rf "$_staging"
 		return 1
 	fi
 
-	mkdir -p "$(dirname "$_dist_binary")"
-	install -m 0755 "$_staging/$(tp_daemon_binary_name)" "$_dist_binary"
+	mkdir -p "$_dist_dir"
+	install -m 0755 "$_staging/$_daemon_name" "$(tp_daemon_dist_binary_path "$_daemon_dir")"
+	if [ -f "$_staging/$_bootstrap_name" ]; then
+		install -m 0755 "$_staging/$_bootstrap_name" "$(tp_bootstrap_dist_binary_path "$_daemon_dir")"
+	fi
+	if [ -f "$_staging/$_orchestration_bundle" ]; then
+		install -m 0644 "$_staging/$_orchestration_bundle" "$_dist_dir/$_orchestration_bundle"
+	fi
 	rm -rf "$_staging"
 	return 0
 }
