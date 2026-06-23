@@ -21,8 +21,10 @@
         cache_valid_time: 3600
       when: ansible_os_family == 'Debian'
 
+  # Docker is installed on demand (when a container workload is assigned), not as
+  # part of routine daemon convergence — nodes that only run native web services
+  # never pull a container runtime.
   roles:
     - role: runtime-sockets
     - role: daemon-logs
     - role: daemon-prereqs
-    - role: docker

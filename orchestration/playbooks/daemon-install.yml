@@ -38,10 +38,13 @@
         fail_msg: >-
           turbopanel_instance_url is required (pass --instance-url to install.sh).
 
+  # Docker is intentionally NOT installed here. A managed node may only ever run
+  # native web services (apache/nginx/openlitespeed) and never need a container
+  # runtime. The docker role is installed on demand once a node is assigned a
+  # container workload.
   roles:
     - role: daemon-prereqs
     - role: turbopanel-user
-    - role: docker
     - role: daemon-repo
     - role: daemon-config
     - role: daemon-launch

@@ -35,6 +35,13 @@
 - name: Install Docker
   when: not _docker_ready | bool
   block:
+    - name: Ensure Docker networking prerequisites (iptables)
+      ansible.builtin.apt:
+        name:
+          - iptables
+        state: present
+      when: ansible_os_family == 'Debian'
+
     - name: Assert supported CPU architecture
       ansible.builtin.assert:
         that:

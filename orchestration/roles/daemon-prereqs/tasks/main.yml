@@ -6,7 +6,6 @@
       - curl
       - git
       - gnupg
-      - iptables
       - pamtester
       - python3-debian
       - tar

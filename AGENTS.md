@@ -158,9 +158,11 @@ Install flow: official installer (separate CDN repo) →
 `scripts/bootstrap-orchestration.ts` (Deno entry — `ensureUv` → `ensurePython` →
 `bootstrapOrchestrationRuntime`; installs uv, Python, and Ansible into the
 **shared** `/opt/turbopanel/runtimes/{uv,python,ansible}` tree) →
-`orchestration/playbooks/daemon-install.yml`. Docker is installed in that
-playbook and again at daemon startup via `initOrchestration()` in
-`src/orchestration/setup.ts`.
+`orchestration/playbooks/daemon-install.yml`. **Docker is NOT installed at base
+install or routine converge** — a managed node may only ever run native web
+services (apache/nginx/openlitespeed) and never need a container runtime. The
+`docker` role (which also installs its own `iptables` networking prereq) is run
+on demand once a node is assigned a container workload.
 
 Daemon runtime is managed by systemd (`turbopanel-daemon.service`): `flock`
 enforces a single process, `deno run` without `--watch`, and the official
@@ -333,9 +335,13 @@ packaging, or `TURBOPANEL_DAEMON_RELEASE_VERSION` when downloading):
 - `turbopaneld-<version>-linux-arm64.tar.zst`
 
 Naming and fetch/extract helpers live in
-`scripts/lib/release-artifacts.sh` (used by `install.sh`, `update.sh`, and the
-packager). `run.sh` exports `TURBOPANEL_DAEMON_BINARY_URL`; `install.sh` downloads and extracts `turbopaneld` into the daemon checkout
-before Ansible when set.
+`scripts/lib/release-artifacts.sh` (used by `run.sh`, `update.sh`, the CDN
+`install.sh`, and the packager). The dev bootstrap **`run.sh`** is the single
+entrypoint: it exports `TURBOPANEL_DAEMON_BINARY_URL` (`--binary-url`), downloads
+and extracts `turbopaneld` into the daemon runtimes tree, then runs
+`daemon-install.yml`. There is no separate `install.sh` in this repo — the
+daemon provisions everything else (instance/Caddy/UI/Docker-on-demand) via
+Ansible after it starts.
 
 ### Slim Debian prerequisites
 
@@ -351,7 +357,7 @@ playbooks run:
 | `zstd`            | daemon release `.tar.zst` download/extract   |
 | `gnupg`           | Legacy apt paths; still useful on slim hosts |
 | `python3-debian`  | `deb822_repository` in `geerlingguy.docker`  |
-| `iptables`        | Docker networking                            |
+| `iptables`        | Docker networking — installed by the `docker` role on demand, NOT `daemon-prereqs` |
 | `build-essential` | Redis compile (`make`, `gcc`)                |
 | `libssl-dev`      | Redis TLS/OpenSSL headers at compile time    |
 | `pkg-config`      | Redis build dependency resolution            |
@@ -367,7 +373,11 @@ shared-library install.
 
 - `main.ts` — entry; orchestration bootstrap, tunnels, instance client (no
   self-update)
-- `install.sh` has been removed — the official node installer lives in
+- `run.sh` — the single dev bootstrap entrypoint (served at `/run.sh` by Caddy
+  in co-located dev): installs prereqs + Deno, clones the checkout, drops in the
+  released `turbopaneld`, bootstraps orchestration, and runs `daemon-install.yml`.
+  No companion `install.sh` — the daemon does the rest via Ansible. The official
+  production node installer lives in
   [turbopanel/turbopanel-cdn](https://github.com/turbopanel/turbopanel-cdn) (see
   `README.md` for the curl workflow)
 - `src/instance/client.ts` — WSS client; HTTP-first enrollment/session

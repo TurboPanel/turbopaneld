@@ -1,6 +1,6 @@
 # POSIX privilege helpers for TurboPanel daemon install scripts.
-# Piped entrypoints (run.sh, install.sh, daemon-install.sh) duplicate this logic
-# inline because curl | sh has no checkout path to source from.
+# Piped entrypoints (run.sh, the instance daemon-install.sh shim) duplicate this
+# logic inline because curl | sh has no checkout path to source from.
 
 tp_is_root() {
 	[ "$(id -u)" = "0" ]
