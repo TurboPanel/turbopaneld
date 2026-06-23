@@ -150,3 +150,24 @@ export async function shouldSkipDevConverge(
   const current = await computeDevConvergeStamp();
   return stored === current;
 }
+
+/** Human-readable reason the dev converge playbook will or will not run. */
+export async function describeDevConvergeDecision(
+  instanceServiceEnabled: boolean,
+): Promise<string> {
+  if (forceConvergeRequested()) {
+    return "TURBOPANEL_FORCE_CONVERGE is set";
+  }
+  if (!instanceServiceEnabled) {
+    return "turbopanel-instance.service is not enabled";
+  }
+  const stored = await readDevConvergeStamp();
+  if (!stored) {
+    return "no dev converge stamp (first converge or stamp missing)";
+  }
+  const current = await computeDevConvergeStamp();
+  if (stored === current) {
+    return "dev converge stamp matches (orchestration inputs unchanged)";
+  }
+  return "dev converge stamp mismatch (orchestration, roles, or dev env changed)";
+}

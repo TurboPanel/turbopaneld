@@ -119,6 +119,11 @@ const DEFAULT_MAX_BACKOFF_MS = 30_000;
 const BACKOFF_MULTIPLIER = 2;
 /** Co-located install wait: poll readiness on a fixed cadence before first connect. */
 const INSTALL_READINESS_POLL_MS = 5_000;
+/** Instance pings every 15s — close stale sockets so reconnect runs after instance restart. */
+const INSTANCE_PING_MS = 15_000;
+const INSTANCE_STALE_MS = 45_000;
+/** After a prior session, wait for the instance to come back after systemd restart. */
+const INSTANCE_RESTART_WAIT_MS = 120_000;
 
 const SERVER_ID_FILE = "server.id";
 const SERVER_KEY_FILE = "server-key.json";
@@ -346,11 +351,20 @@ export class InstanceClient {
 
   async #waitForConnectPreconditions(): Promise<void> {
     if (this.#isColocatedSocketMode()) {
-      const readiness = await this.fetchDaemonReadiness();
-      if (!readiness.ready) {
-        throw new Error("instance install incomplete");
+      const maxWaitMs = this.#hadStableSession ? INSTANCE_RESTART_WAIT_MS : 0;
+      const started = Date.now();
+      while (true) {
+        try {
+          const readiness = await this.fetchDaemonReadiness();
+          if (readiness.ready) return;
+        } catch {
+          // Instance unreachable during restart — keep polling when recovering.
+        }
+        if (maxWaitMs === 0 || Date.now() - started >= maxWaitMs) {
+          throw new Error("instance install incomplete");
+        }
+        await delay(INSTALL_READINESS_POLL_MS);
       }
-      return;
     }
 
     await this.fetchHealth();
@@ -627,7 +641,23 @@ export class InstanceClient {
     this.#resetBackoff();
     this.#monitorSession?.attach(ws);
 
+    let lastInboundAt = Date.now();
+    const staleTimer = setInterval(() => {
+      if (Date.now() - lastInboundAt > INSTANCE_STALE_MS) {
+        logWarn(
+          "instance",
+          "no websocket traffic from instance; closing to reconnect",
+        );
+        try {
+          ws.close();
+        } catch {
+          // Socket may already be gone.
+        }
+      }
+    }, INSTANCE_PING_MS);
+
     ws.onmessage = (event) => {
+      lastInboundAt = Date.now();
       const raw = typeof event.data === "string"
         ? event.data
         : String(event.data);
@@ -649,6 +679,7 @@ export class InstanceClient {
     };
 
     ws.onclose = (event) => {
+      clearInterval(staleTimer);
       if (event.code === 4401) {
         logWarn("instance", "authentication rejected");
       }
@@ -667,6 +698,7 @@ export class InstanceClient {
         once: true,
       });
     });
+    clearInterval(staleTimer);
     if (closeEvent.code === 4401) {
       await this.#tokenManager?.refresh();
     }

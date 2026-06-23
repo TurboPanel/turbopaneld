@@ -11,6 +11,7 @@ import {
 } from './bootstrap-stamp.ts'
 import {
   computeDevConvergeStamp,
+  describeDevConvergeDecision,
   shouldSkipDevConverge,
   writeDevConvergeStamp,
 } from './converge-stamp.ts'
@@ -282,10 +283,11 @@ export async function runDaemonSystemdSetup(onEvent?: AnsibleEventHandler): Prom
  */
 export async function runInstanceDevInstall(onEvent?: AnsibleEventHandler): Promise<void> {
   const instanceEnabled = await coLocatedInstanceServiceEnabled()
+  const convergeReason = await describeDevConvergeDecision(instanceEnabled)
   if (await shouldSkipDevConverge(instanceEnabled)) {
     logInfo(
       'orchestration',
-      'dev converge inputs unchanged and instance stack already installed; skipping instance-dev-install',
+      `skipping instance-dev-install: ${convergeReason}`,
     )
     return
   }
@@ -294,7 +296,7 @@ export async function runInstanceDevInstall(onEvent?: AnsibleEventHandler): Prom
   const args = devInstanceExtraArgs()
   logInfo(
     'orchestration',
-    `running instance-dev-install converge playbook (${layout.playbookPath})`,
+    `running instance-dev-install converge playbook (${layout.playbookPath}): ${convergeReason}`,
   )
   await runLocalPlaybook(
     layout.playbookPath,
