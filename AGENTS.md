@@ -155,8 +155,7 @@ The co-located socket path uses the same auth model — there is no
 unauthenticated bypass. Never log the license token or private key material.
 
 Install flow: official installer (separate CDN repo) →
-`scripts/bootstrap-orchestration.ts` (compiled to `dist/turbopanel-bootstrap-orchestration`
-for production installs — `ensureUv` → `ensurePython` →
+`turbopaneld bootstrap-orchestration` (`ensureUv` → `ensurePython` →
 `bootstrapOrchestrationRuntime`; installs uv, Python, and Ansible into the
 **shared** `/opt/turbopanel/runtimes/{uv,python,ansible}` tree) →
 `orchestration/playbooks/daemon-install.yml`. **Docker is NOT installed at base
@@ -252,8 +251,8 @@ the daemon `.env`, then re-runs `instance-build-toggle.yml` (roles: `ui-build` �
   `/opt/turbopanel/runtimes/{uv/<ver>/,python/,ansible/<ver>/}` with `current`
   symlinks — **not** inside the daemon checkout. The `orchestration/runtime/`
   directory no longer exists; `bootstrap-orchestration.sh` has been replaced by
-  `scripts/bootstrap-orchestration.ts` (compiled to `dist/turbopanel-bootstrap-orchestration`
-  in release artifacts). The Deno orchestration functions
+  `turbopaneld bootstrap-orchestration` (shared logic in `src/orchestration/bootstrap-once.ts`;
+  dev checkout may still use `scripts/bootstrap-orchestration.ts` via Deno). The Deno orchestration functions
   (`ensureUv`, `ensurePython`, `ensureAnsible`, `ensureGalaxyRoles` in
   `src/orchestration/`) are the single canonical installer for all three tools.
 - **Structured Ansible output (`src/orchestration/ansible-events.ts`).** Daemon
@@ -325,7 +324,7 @@ on the wire, native on Debian via the `zstd` package (`daemon-prereqs` and
 
 Release artifacts in `dist/` (compile intermediates are removed after packaging):
 
-- `turbopaneld-linux-amd64.tar.zst` — `turbopaneld`, `turbopanel-bootstrap-orchestration`, `orchestration.tar.zst`
+- `turbopaneld-linux-amd64.tar.zst` — `turbopaneld` only (orchestration embedded at compile time)
 - `turbopaneld-linux-arm64.tar.zst` — same
 
 Co-located dev serves unversioned names from `/downloads/daemon/` (or `daemon/dist/`):
@@ -333,7 +332,7 @@ Co-located dev serves unversioned names from `/downloads/daemon/` (or `daemon/di
 - `turbopaneld-linux-amd64.tar.zst`
 - `turbopaneld-linux-arm64.tar.zst`
 
-The bootstrap binary and daemon extract `orchestration/` from `dist/orchestration.tar.zst` on first run (see `src/orchestration/bundle-extract.ts`).
+`turbopaneld bootstrap-orchestration` materializes `orchestration/` from the bundle embedded in the binary at compile time (see `embedded-orchestration.ts` + `src/orchestration/bundle-extract.ts`; build via `deno task bundle:orchestration`).
 
 Versioned GitHub release assets (set `TURBOPANEL_RELEASE_VERSION` when
 packaging, or `TURBOPANEL_DAEMON_RELEASE_VERSION` when downloading):
@@ -412,7 +411,4 @@ shared-library install.
   `scripts/lib/release-artifacts.sh` — shared naming + fetch helpers
 - `scripts/install-daemon-systemd.sh` — install `turbopanel-daemon.service` on
   co-located dev (after `turbopanel-instance.service`)
-- `scripts/bootstrap-orchestration.ts` — thin entry compiled to
-  `dist/turbopanel-bootstrap-orchestration`; runs `ensureUv` →
-  `ensurePython` → `bootstrapOrchestrationRuntime`; used by `run.sh` and the
-  dev console (host Deno fallback when the compiled binary is absent).
+- `scripts/bootstrap-orchestration.ts` — dev/Tilt entry; runs `runBootstrapOrchestration()` from `src/orchestration/bootstrap-once.ts`. Production installs invoke the same logic via `turbopaneld bootstrap-orchestration`.

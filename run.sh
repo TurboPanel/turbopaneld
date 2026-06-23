@@ -2,7 +2,7 @@
 # TurboPanel daemon bootstrap — single entrypoint served at https://<host>/run.sh.
 #
 # Downloads release artifacts only (no git clone):
-#   turbopaneld-linux-*.tar.zst  → dist/ (binaries + orchestration.tar.zst bundle)
+#   turbopaneld-linux-*.tar.zst  → dist/turbopaneld (orchestration embedded in the binary)
 #
 # The running daemon then provisions everything else (instance, Docker on demand, …)
 # via Ansible. Run as root or as a sudo-group user (self-escalates when sudo exists).
@@ -47,14 +47,6 @@ tp_daemon_release_filename() {
 	else
 		printf 'turbopaneld-linux-%s.tar.zst' "$_arch"
 	fi
-}
-
-tp_orchestration_bundle_name() {
-	printf 'orchestration.tar.zst'
-}
-
-tp_bootstrap_binary_name() {
-	printf 'turbopanel-bootstrap-orchestration'
 }
 
 tp_extract_release_archive() {
@@ -111,8 +103,6 @@ tp_install_daemon_binary() {
 	_version="${TURBOPANEL_DAEMON_RELEASE_VERSION:-}"
 	_dist_dir="$_daemon_dir/dist"
 	_daemon_name="$(tp_daemon_binary_name)"
-	_bootstrap_name="$(tp_bootstrap_binary_name)"
-	_orchestration_bundle="$(tp_orchestration_bundle_name)"
 
 	if ! tp_fetch_versioned_release "$_base_url" "$_staging" \
 		"$(tp_daemon_release_filename "$_arch" "$_version")" \
@@ -125,20 +115,8 @@ tp_install_daemon_binary() {
 		rm -rf "$_staging"
 		return 1
 	fi
-	if [ ! -f "$_staging/$_bootstrap_name" ]; then
-		echo "run.sh: release archive missing $_bootstrap_name member" >&2
-		rm -rf "$_staging"
-		return 1
-	fi
-	if [ ! -f "$_staging/$_orchestration_bundle" ]; then
-		echo "run.sh: release archive missing $_orchestration_bundle member" >&2
-		rm -rf "$_staging"
-		return 1
-	fi
 	mkdir -p "$_dist_dir"
 	install -m 0755 "$_staging/$_daemon_name" "$_dist_dir/$_daemon_name"
-	install -m 0755 "$_staging/$_bootstrap_name" "$_dist_dir/$_bootstrap_name"
-	install -m 0644 "$_staging/$_orchestration_bundle" "$_dist_dir/$_orchestration_bundle"
 	rm -rf "$_staging"
 	return 0
 }
@@ -228,7 +206,7 @@ DAEMON_DIR="$INSTALL_ROOT/platform/daemon"
 CONFIG_DIR="$INSTALL_ROOT/platform/config"
 RUNTIMES_DIR="$INSTALL_ROOT/runtimes"
 CA_PATH="$CONFIG_DIR/instance-ca.pem"
-BOOTSTRAP_BINARY="$DAEMON_DIR/dist/turbopanel-bootstrap-orchestration"
+DAEMON_BINARY="$DAEMON_DIR/dist/turbopaneld"
 
 if [ "$INSECURE_TLS" = true ]; then
 	export TURBOPANEL_RELEASE_TLS_INSECURE=1
@@ -264,7 +242,7 @@ export TURBOPANEL_DAEMON_ROOT="$DAEMON_DIR"
 # #region agent log
 tp_agent_log "A" "run.sh:main" "artifact_install_start" "{\"binaryUrl\":\"$BINARY_URL\",\"daemonDir\":\"$DAEMON_DIR\",\"noGitClone\":true}"
 # #endregion
-"$BOOTSTRAP_BINARY"
+"$DAEMON_BINARY" bootstrap-orchestration
 
 if [ ! -f "$DAEMON_DIR/orchestration/ansible.cfg" ]; then
 	echo "run.sh: bootstrap did not materialize orchestration/ansible.cfg" >&2

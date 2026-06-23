@@ -4,18 +4,13 @@
 # Compiled cross-arch binaries (staging under dist/.build/ during release:package):
 #   turbopaneld-linux-amd64
 #   turbopaneld-linux-arm64
-#   turbopanel-bootstrap-orchestration-linux-amd64
-#   turbopanel-bootstrap-orchestration-linux-arm64
-#   orchestration.tar.zst
 #
 # zstd-compressed tar release artifacts (dist/ after package:release):
 #   turbopaneld-linux-amd64.tar.zst
 #   turbopaneld-linux-arm64.tar.zst
 #
-# Each daemon tar contains at archive root:
-#   turbopaneld
-#   turbopanel-bootstrap-orchestration
-#   orchestration.tar.zst
+# Each daemon tar contains a single member: turbopaneld (orchestration is embedded
+# in the binary at compile time via deno compile --include orchestration).
 #
 # Versioned GitHub release assets (set TURBOPANEL_RELEASE_VERSION when packaging
 # or TURBOPANEL_DAEMON_RELEASE_VERSION when downloading):
@@ -88,24 +83,6 @@ tp_daemon_runtime_binary_path() {
 	tp_daemon_dist_binary_path "$_install_root/platform/daemon"
 }
 
-tp_orchestration_bundle_name() {
-	printf 'orchestration.tar.zst'
-}
-
-tp_bootstrap_binary_name() {
-	printf 'turbopanel-bootstrap-orchestration'
-}
-
-tp_bootstrap_linux_arch_binary_name() {
-	_arch="$1"
-	printf 'turbopanel-bootstrap-orchestration-linux-%s' "$_arch"
-}
-
-tp_bootstrap_dist_binary_path() {
-	_daemon_dir="${1:-/opt/turbopanel/platform/daemon}"
-	printf '%s/dist/turbopanel-bootstrap-orchestration' "$_daemon_dir"
-}
-
 tp_extract_release_archive() {
 	_archive="$1"
 	_dest_dir="$2"
@@ -152,24 +129,14 @@ tp_install_daemon_release() {
 	_daemon_dir="$2"
 	_version="${3:-${TURBOPANEL_DAEMON_RELEASE_VERSION:-}}"
 	_staging="$(mktemp -d)"
-	_dist_dir="$(dirname "$(tp_daemon_dist_binary_path "$_daemon_dir")")"
-	_daemon_name="$(tp_daemon_binary_name)"
-	_bootstrap_name="$(tp_bootstrap_binary_name)"
-	_orchestration_bundle="$(tp_orchestration_bundle_name)"
 
 	if ! tp_fetch_daemon_release "$_base_url" "$_staging" "$_version"; then
 		rm -rf "$_staging"
 		return 1
 	fi
 
-	mkdir -p "$_dist_dir"
-	install -m 0755 "$_staging/$_daemon_name" "$(tp_daemon_dist_binary_path "$_daemon_dir")"
-	if [ -f "$_staging/$_bootstrap_name" ]; then
-		install -m 0755 "$_staging/$_bootstrap_name" "$(tp_bootstrap_dist_binary_path "$_daemon_dir")"
-	fi
-	if [ -f "$_staging/$_orchestration_bundle" ]; then
-		install -m 0644 "$_staging/$_orchestration_bundle" "$_dist_dir/$_orchestration_bundle"
-	fi
+	mkdir -p "$(dirname "$(tp_daemon_dist_binary_path "$_daemon_dir")")"
+	install -m 0755 "$_staging/$(tp_daemon_binary_name)" "$(tp_daemon_dist_binary_path "$_daemon_dir")"
 	rm -rf "$_staging"
 	return 0
 }

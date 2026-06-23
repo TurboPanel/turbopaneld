@@ -11,7 +11,7 @@ PLAYBOOK="$DAEMON_DIR/orchestration/playbooks/daemon-update.yml"
 
 if [ ! -x "$ANSIBLE_PLAYBOOK" ]; then
 	echo "ansible-playbook not found at $ANSIBLE_PLAYBOOK" >&2
-	echo "run-daemon-update.sh: run the compiled bootstrap binary or scripts/bootstrap-orchestration.ts first" >&2
+	echo "run-daemon-update.sh: run turbopaneld bootstrap-orchestration or scripts/bootstrap-orchestration.ts first" >&2
 	exit 1
 fi
 

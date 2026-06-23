@@ -105,13 +105,13 @@ tunnel. Drop in more files to run multiple tunnels side by side.
 
 After the initial install, you can reconcile state without re-running the curl
 bootstrap. If the shared orchestration runtime is missing, bootstrap it first —
-`dist/turbopanel-bootstrap-orchestration` (or `deno task compile:bootstrap` on a
-dev checkout) installs uv, Python, and Ansible into the shared
+`./dist/turbopaneld bootstrap-orchestration` (or `deno task bootstrap-orchestration`
+on a dev checkout) installs uv, Python, and Ansible into the shared
 `/opt/turbopanel/runtimes/` tree; from the daemon checkout run:
 
 ```bash
 cd /opt/turbopanel/platform/daemon
-./dist/turbopanel-bootstrap-orchestration
+./dist/turbopaneld bootstrap-orchestration
 ```
 
 Then run the install playbook:

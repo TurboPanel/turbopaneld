@@ -1,74 +1,15 @@
-import { DockerClient, DockerMonitor } from "./src/docker/index.ts";
-import { connectInstance } from "./src/instance/client.ts";
-import { logInfo, logWarn } from "./src/logger.ts";
-import { createSentinel, type SentinelOptions } from "./src/monitor/index.ts";
-import {
-  initOrchestration,
-  shouldConnectToInstance,
-  shouldEnableDockerIntegration,
-} from "./src/orchestration/setup.ts";
-import { startTunnels } from "./src/tunnels.ts";
+import "./embedded-orchestration.ts";
+import { runBootstrapOrchestration } from "./src/orchestration/bootstrap-once.ts";
 
-logInfo("daemon", "starting up");
-
-const orchestrationReady = await initOrchestration();
-
-const abort = new AbortController();
-let shuttingDown = false;
-
-let dockerClient: DockerClient | undefined;
-const sentinelOptions: SentinelOptions = {};
-if (orchestrationReady && shouldEnableDockerIntegration()) {
-  dockerClient = new DockerClient();
-  if (!(await dockerClient.ping())) {
-    logWarn(
-      "docker",
-      "Docker socket not reachable yet — monitor will retry on each poll",
-    );
+if (Deno.args[0] === "bootstrap-orchestration") {
+  try {
+    await runBootstrapOrchestration();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[bootstrap] ${message}`);
+    Deno.exit(1);
   }
-  sentinelOptions.dockerMonitor = new DockerMonitor(dockerClient);
-}
-const sentinel = createSentinel(sentinelOptions);
-sentinel.start(abort.signal);
-
-// Start any configured Cloudflare tunnels (downloads cloudflared on demand).
-await startTunnels(abort.signal);
-
-// The daemon never self-updates. Updates are driven explicitly by an operator
-// through the developer "Upgrade System" button or the dev-sync push; all installs
-// and updates run via Ansible (the daemon is the constant that owns them).
-const instanceHandle = { stop() {} };
-let instance: { stop(): void } = instanceHandle;
-
-if (shouldConnectToInstance()) {
-  instance = await connectInstance({ monitor: sentinel });
-} else {
-  logInfo(
-    "instance",
-    "connection deferred until development environment opt-in (TURBOPANEL_DEV_INSTANCE)",
-  );
+  Deno.exit(0);
 }
 
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  Deno.addSignalListener(signal, () => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    logInfo("daemon", "shutting down");
-    instance.stop();
-    sentinel.stop();
-    try {
-      dockerClient?.close();
-    } catch {
-      // HttpClient may already be closed during systemd restart.
-    }
-    dockerClient = undefined;
-    abort.abort();
-  });
-}
-
-await new Promise<void>((resolve) => {
-  abort.signal.addEventListener("abort", () => resolve());
-});
-
-logInfo("daemon", "shut down");
-Deno.exit(0);
+await import("./src/daemon-run.ts");
