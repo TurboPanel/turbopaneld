@@ -54,7 +54,7 @@ daemons authenticate with an Ed25519 keypair (WebCrypto, not SSH) using an HTTP-
 
 **Daemon Cell:** connection state, presence, snapshots, outbox, request records, challenges, and event buffers are owned by the instance-side **Daemon Cell** — not by in-process Maps. On self-hosted Deno the cell backend is Redis (Unix socket `/run/turbopanel/redis.sock`, provisioned by the `redis` Ansible role). On Cloudflare Workers it is a per-server SQLite-backed Durable Object. The daemon client (`src/instance/client.ts`) is unaffected — it still dials `/ws/daemon/v1` with `Authorization: Bearer <token>` and reconnects on `4401`.
 
-- **Heartbeat**: after a successful WS connection, the daemon calls `POST /api/daemon/v1/heartbeat` every 30 seconds with `{ serverId, hostname }`. The call is fire-and-forget; failures are logged as warnings and do not interrupt the WS session.
+- **Heartbeat**: after a successful WS connection, the daemon calls `POST /api/daemon/v1/heartbeat` every 30 seconds with `{ serverId, hostname }`. The call is fire-and-forget; failures are logged as warnings and do not interrupt the WS session. On the instance side, heartbeat renews the cell lease and write-through updates `server.last_seen_at`.
 - **Token lifecycle**: `DaemonTokenManager` stores JWTs in memory only and refreshes lazily when less than 60 seconds remain (or immediately after a `4401` close).
 - **Token manager retry**: `DaemonTokenManager` retries a failed refresh once after a 2-second delay before throwing. Concurrent `getToken()` calls share a single in-flight refresh promise.
 - **No daemon session table**: JWT is stateless. `jti` is for logging/correlation only and is not stored.
