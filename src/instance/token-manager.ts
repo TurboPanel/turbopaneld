@@ -1,5 +1,9 @@
 import { decodeBase64Url } from "@std/encoding/base64url";
-import { buildAuthPayload, type DaemonKeyFile, signChallenge } from "../crypto/keys.ts";
+import {
+  buildAuthPayload,
+  type DaemonKeyFile,
+  signChallenge,
+} from "../crypto/keys.ts";
 import type { DaemonApiClient } from "./api-client.ts";
 
 export interface TokenManagerOptions {
@@ -86,7 +90,10 @@ export class DaemonTokenManager {
       hostname: this.#options.hostname,
     });
 
-    const signature = await signChallenge(this.#options.keyFile.privateJwk, payload);
+    const signature = await signChallenge(
+      this.#options.keyFile.privateJwk,
+      payload,
+    );
     const session = await this.#options.apiClient.createSession({
       serverId: this.#options.serverId,
       keyId: this.#options.keyId,

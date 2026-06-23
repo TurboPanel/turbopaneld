@@ -151,7 +151,9 @@ export async function verifyChallenge(
   }
 }
 
-export async function loadDaemonKeyFile(path: string): Promise<DaemonKeyFile | null> {
+export async function loadDaemonKeyFile(
+  path: string,
+): Promise<DaemonKeyFile | null> {
   try {
     const content = await Deno.readTextFile(path);
     const parsed = JSON.parse(content);

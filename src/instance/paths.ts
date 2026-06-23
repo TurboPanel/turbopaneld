@@ -1,8 +1,8 @@
 /** Canonical runtime socket directory ( /var/run symlinks to /run on Linux ). */
-export const DEFAULT_SOCKET_DIR = '/run/turbopanel'
+export const DEFAULT_SOCKET_DIR = "/run/turbopanel";
 
 /** Unix socket filename for the TurboPanel instance. */
-export const INSTANCE_SOCKET = 'instance.sock'
+export const INSTANCE_SOCKET = "instance.sock";
 
 /**
  * How the daemon reaches the instance.
@@ -12,8 +12,8 @@ export const INSTANCE_SOCKET = 'instance.sock'
  *   typically through Caddy and a Cloudflare tunnel.
  */
 export type InstanceConfig =
-  | { kind: 'socket'; socketPath: string }
-  | { kind: 'url'; baseUrl: string; wsBaseUrl: string }
+  | { kind: "socket"; socketPath: string }
+  | { kind: "url"; baseUrl: string; wsBaseUrl: string };
 
 /**
  * Absolute path to the instance Unix socket.
@@ -24,21 +24,21 @@ export type InstanceConfig =
 export function resolveInstanceSocket(
   env: Record<string, string | undefined> = Deno.env.toObject(),
 ): string {
-  const override = env.TURBOPANEL_SOCKET?.trim()
-  if (override) return override
+  const override = env.TURBOPANEL_SOCKET?.trim();
+  if (override) return override;
 
-  const dir = env.TURBOPANEL_SOCKET_DIR?.trim() || DEFAULT_SOCKET_DIR
-  return `${dir.replace(/\/$/, '')}/${INSTANCE_SOCKET}`
+  const dir = env.TURBOPANEL_SOCKET_DIR?.trim() || DEFAULT_SOCKET_DIR;
+  return `${dir.replace(/\/$/, "")}/${INSTANCE_SOCKET}`;
 }
 
 function httpToWs(url: string): string {
-  if (url.startsWith('https://')) {
-    return `wss://${url.slice('https://'.length)}`
+  if (url.startsWith("https://")) {
+    return `wss://${url.slice("https://".length)}`;
   }
-  if (url.startsWith('http://')) return `ws://${url.slice('http://'.length)}`
+  if (url.startsWith("http://")) return `ws://${url.slice("http://".length)}`;
   throw new Error(
     `TURBOPANEL_INSTANCE_URL must start with http:// or https:// (got "${url}")`,
-  )
+  );
 }
 
 /**
@@ -52,46 +52,46 @@ function httpToWs(url: string): string {
 export function resolveInstanceConfig(
   env: Record<string, string | undefined> = Deno.env.toObject(),
 ): InstanceConfig {
-  const url = env.TURBOPANEL_INSTANCE_URL?.trim()
+  const url = env.TURBOPANEL_INSTANCE_URL?.trim();
   if (url) {
-    const baseUrl = url.replace(/\/+$/, '')
-    return { kind: 'url', baseUrl, wsBaseUrl: httpToWs(baseUrl) }
+    const baseUrl = url.replace(/\/+$/, "");
+    return { kind: "url", baseUrl, wsBaseUrl: httpToWs(baseUrl) };
   }
-  return { kind: 'socket', socketPath: resolveInstanceSocket(env) }
+  return { kind: "socket", socketPath: resolveInstanceSocket(env) };
 }
 
 /** Base URL used with the Unix-socket HTTP client (host is ignored). */
-export const INSTANCE_HTTP_ORIGIN = 'http://instance'
+export const INSTANCE_HTTP_ORIGIN = "http://instance";
 
 /** Base URL used with the Unix-socket WebSocket (host is ignored). */
-export const INSTANCE_WS_ORIGIN = 'ws://instance'
+export const INSTANCE_WS_ORIGIN = "ws://instance";
 
 function joinPath(base: string, path: string): string {
-  const normalized = path.startsWith('/') ? path : `/${path}`
-  return `${base}${normalized}`
+  const normalized = path.startsWith("/") ? path : `/${path}`;
+  return `${base}${normalized}`;
 }
 
 export function instanceUrl(config: InstanceConfig, path: string): string {
-  const base = config.kind === 'url' ? config.baseUrl : INSTANCE_HTTP_ORIGIN
-  return joinPath(base, path)
+  const base = config.kind === "url" ? config.baseUrl : INSTANCE_HTTP_ORIGIN;
+  return joinPath(base, path);
 }
 
 export function instanceWebSocketUrl(
   config: InstanceConfig,
-  path = '/ws/daemon/v1',
+  path = "/ws/daemon/v1",
 ): string {
-  const base = config.kind === 'url' ? config.wsBaseUrl : INSTANCE_WS_ORIGIN
-  return joinPath(base, path)
+  const base = config.kind === "url" ? config.wsBaseUrl : INSTANCE_WS_ORIGIN;
+  return joinPath(base, path);
 }
 
 /** Human-readable description of the instance target for logs. */
 export function describeInstance(config: InstanceConfig): string {
-  return config.kind === 'url' ? config.baseUrl : `unix://${config.socketPath}`
+  return config.kind === "url" ? config.baseUrl : `unix://${config.socketPath}`;
 }
 
 export interface InstanceHttpClientOptions {
   /** Path to the platform CA PEM to trust (self-hosted instances). */
-  caCertPath?: string
+  caCertPath?: string;
 }
 
 /**
@@ -110,16 +110,16 @@ export async function createInstanceHttpClient(
   config: InstanceConfig,
   options: InstanceHttpClientOptions = {},
 ): Promise<Deno.HttpClient | undefined> {
-  if (config.kind === 'socket') {
+  if (config.kind === "socket") {
     return Deno.createHttpClient({
-      proxy: { transport: 'unix', path: config.socketPath },
-    })
+      proxy: { transport: "unix", path: config.socketPath },
+    });
   }
 
   if (options.caCertPath) {
-    const cert = await Deno.readTextFile(options.caCertPath)
-    return Deno.createHttpClient({ caCerts: [cert] })
+    const cert = await Deno.readTextFile(options.caCertPath);
+    return Deno.createHttpClient({ caCerts: [cert] });
   }
 
-  return undefined
+  return undefined;
 }

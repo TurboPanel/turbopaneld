@@ -2,6 +2,10 @@ import { encodeBase64Url } from '@std/encoding/base64url'
 import { type DaemonApiClient, DaemonApiError } from './api-client.ts'
 import { InstanceClient } from './client.ts'
 import { enrollDaemon } from './enroll.ts'
+import { MonitorSession } from './monitor-session.ts'
+import { createMonitorDeltaTracker } from '../monitor/delta.ts'
+import type { MonitorSource } from '../monitor/source.ts'
+import { MONITOR_PROTOCOL_VERSION } from '../monitor/protocol.ts'
 import { DaemonTokenManager } from './token-manager.ts'
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -619,3 +623,209 @@ function makeJwt(exp: number): string {
   const payload = encodeBase64Url(new TextEncoder().encode(JSON.stringify({ exp })))
   return `${header}.${payload}.signature`
 }
+
+function createTestMonitorSource(): MonitorSource {
+  const tracker = createMonitorDeltaTracker()
+  tracker.seedTracked([])
+  return {
+    buildSync: async () => tracker.buildSync({}, []),
+    buildHeartbeat: async () => tracker.buildHeartbeat({}, []),
+    onTransition: () => () => {},
+    handleAck: (acceptedSequence) => tracker.applyAck(acceptedSequence),
+    registerPendingDelivery: (sequence, resourcesAfter) =>
+      tracker.registerPendingDelivery(sequence, resourcesAfter),
+    confirmDelivery: (sequence, resourcesAfter) =>
+      tracker.confirmDelivery(sequence, resourcesAfter),
+  }
+}
+
+function parseSentMonitorFrames(
+  frames: string[],
+): Array<Record<string, unknown>> {
+  return frames.map((frame) => JSON.parse(frame) as Record<string, unknown>)
+}
+
+Deno.test({
+  name: 'MonitorSession fallback leaves delivery unconfirmed when resyncNeeded',
+  fn: async () => {
+    const tracker = createMonitorDeltaTracker()
+    tracker.seedTracked([])
+    const source: MonitorSource = {
+      buildSync: async () => tracker.buildSync({}, []),
+      buildHeartbeat: async () => tracker.buildHeartbeat({}, []),
+      onTransition: () => () => {},
+      handleAck: (acceptedSequence) => tracker.applyAck(acceptedSequence),
+      registerPendingDelivery: (sequence, resourcesAfter) =>
+        tracker.registerPendingDelivery(sequence, resourcesAfter),
+      confirmDelivery: (sequence, resourcesAfter) =>
+        tracker.confirmDelivery(sequence, resourcesAfter),
+    }
+    let heartbeatCalls = 0
+    const session = new MonitorSession({
+      source,
+      serverId: 'srv-monitor',
+      hostname: 'host-monitor',
+      apiClient: {
+        heartbeat: async () => {
+          heartbeatCalls += 1
+          return { acceptedSequence: 0, resyncNeeded: true }
+        },
+      } as unknown as DaemonApiClient,
+    })
+    session.startFallback()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    assertEquals(heartbeatCalls, 2)
+    assertEquals(session.ackedSequence, 0)
+    session.stopFallback()
+  },
+})
+
+Deno.test({
+  name: 'MonitorSession fallback sends monitor.sync when heartbeat returns resyncNeeded',
+  fn: async () => {
+    const tracker = createMonitorDeltaTracker()
+    tracker.seedTracked([])
+    let heartbeatCalls = 0
+    const source: MonitorSource = {
+      buildSync: async () => tracker.buildSync({}, []),
+      buildHeartbeat: async () => tracker.buildHeartbeat({}, []),
+      onTransition: () => () => {},
+      handleAck: (acceptedSequence) => tracker.applyAck(acceptedSequence),
+      registerPendingDelivery: (sequence, resourcesAfter) =>
+        tracker.registerPendingDelivery(sequence, resourcesAfter),
+      confirmDelivery: (sequence, resourcesAfter) =>
+        tracker.confirmDelivery(sequence, resourcesAfter),
+    }
+    const session = new MonitorSession({
+      source,
+      serverId: 'srv-monitor',
+      hostname: 'host-monitor',
+      apiClient: {
+        heartbeat: async (params: { monitor?: { type?: string } }) => {
+          heartbeatCalls += 1
+          if (params.monitor?.type === 'monitor.sync') {
+            return { acceptedSequence: 1, resyncNeeded: false }
+          }
+          return { acceptedSequence: 0, resyncNeeded: true }
+        },
+      } as unknown as DaemonApiClient,
+    })
+    session.startFallback()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    assertEquals(heartbeatCalls, 2)
+    assertEquals(session.ackedSequence, 1)
+    session.stopFallback()
+  },
+})
+
+Deno.test({
+  name: 'host-only sentinel reports empty resources with host summary',
+  fn: async () => {
+    const { createSentinel } = await import('../monitor/sentinel.ts')
+    const sentinel = createSentinel({})
+    const bundle = await sentinel.buildSync()
+    assertEquals(bundle.payload.resources?.length ?? 0, 0)
+    assertExists(bundle.payload.instance)
+  },
+})
+
+Deno.test({
+  name: 'InstanceClient with host-only monitor sends monitor.sync over websocket',
+  permissions: { env: true, read: true, write: true, sys: ['hostname'] },
+  fn: async () => {
+    const tempDir = await Deno.makeTempDir()
+    const originalFetch = globalThis.fetch
+    const originalWebSocket = globalThis.WebSocket
+    const originalStateDir = Deno.env.get('TURBOPANEL_DAEMON_STATE_DIR')
+    const originalForceEnroll = Deno.env.get('TURBOPANEL_FORCE_ENROLL')
+    const sockets: MockWebSocket[] = []
+
+    class TrackingWebSocket extends MockWebSocket {
+      constructor(url: string, options?: unknown) {
+        super(url, options)
+        sockets.push(this)
+      }
+    }
+
+    Object.defineProperty(globalThis, 'WebSocket', {
+      configurable: true,
+      writable: true,
+      value: TrackingWebSocket,
+    })
+
+    const authToken = makeJwt(Math.floor(Date.now() / 1000) + 900)
+    Object.defineProperty(globalThis, 'fetch', {
+      configurable: true,
+      writable: true,
+      value: async (input: RequestInfo | URL) => {
+        const url = String(input)
+        if (url.endsWith('/api/health')) {
+          return new Response(JSON.stringify({ ok: true }), { status: 200 })
+        }
+        if (url.endsWith('/api/daemon/v1/auth/challenge')) {
+          return new Response(JSON.stringify({
+            challengeId: 'enroll-challenge',
+            nonce: 'enroll-nonce',
+            at: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          }), { status: 200 })
+        }
+        if (url.endsWith('/api/daemon/v1/enroll')) {
+          return new Response(JSON.stringify({ serverId: 'srv-1', keyId: 'kid-1' }), {
+            status: 200,
+          })
+        }
+        if (url.endsWith('/api/daemon/v1/auth/session')) {
+          return new Response(JSON.stringify({
+            token: authToken,
+            expiresAt: new Date(Date.now() + 900_000).toISOString(),
+          }), { status: 200 })
+        }
+        return new Response(JSON.stringify({ error: 'not found' }), { status: 404 })
+      },
+    })
+
+    Deno.env.set('TURBOPANEL_DAEMON_STATE_DIR', tempDir)
+    Deno.env.set('TURBOPANEL_FORCE_ENROLL', '1')
+    await Deno.writeTextFile(`${tempDir}/license.id`, 'license-123\n')
+    await Deno.writeTextFile(`${tempDir}/license.token`, 'token-abc\n')
+
+    const { createSentinel } = await import('../monitor/sentinel.ts')
+    const monitor = createSentinel({})
+
+    const client = new InstanceClient({
+      config: { kind: 'url', baseUrl: 'https://instance.test', wsBaseUrl: 'wss://instance.test' },
+      reconnectDelayMs: 30_000,
+      monitor,
+    })
+
+    try {
+      client.start()
+      const socket = await waitFor('monitor websocket', () => sockets.at(0))
+      socket.open()
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      const sync = parseSentMonitorFrames(socket.sentFrames).find((frame) =>
+        frame.type === 'monitor.sync'
+      )
+      assertExists(sync)
+      assertEquals(sync.protocolVersion, MONITOR_PROTOCOL_VERSION)
+      assertEquals((sync.resources as unknown[] | undefined)?.length ?? 0, 0)
+      socket.close(1000, 'done')
+    } finally {
+      client.stop()
+      Object.defineProperty(globalThis, 'fetch', {
+        configurable: true,
+        writable: true,
+        value: originalFetch,
+      })
+      Object.defineProperty(globalThis, 'WebSocket', {
+        configurable: true,
+        writable: true,
+        value: originalWebSocket,
+      })
+      setOptionalEnv('TURBOPANEL_DAEMON_STATE_DIR', originalStateDir)
+      setOptionalEnv('TURBOPANEL_FORCE_ENROLL', originalForceEnroll)
+      await Deno.remove(tempDir, { recursive: true })
+    }
+  },
+})

@@ -1,64 +1,74 @@
-import { DockerClient, DockerMonitor } from './src/docker/index.ts'
-import { connectInstance } from './src/instance/client.ts'
-import { logInfo, logWarn } from './src/logger.ts'
+import { DockerClient, DockerMonitor } from "./src/docker/index.ts";
+import { connectInstance } from "./src/instance/client.ts";
+import { logInfo, logWarn } from "./src/logger.ts";
+import { createSentinel, type SentinelOptions } from "./src/monitor/index.ts";
 import {
   initOrchestration,
   shouldConnectToInstance,
   shouldEnableDockerIntegration,
-} from './src/orchestration/setup.ts'
-import { startTunnels } from './src/tunnels.ts'
+} from "./src/orchestration/setup.ts";
+import { startTunnels } from "./src/tunnels.ts";
 
-logInfo('daemon', 'starting up')
+logInfo("daemon", "starting up");
 
-const orchestrationReady = await initOrchestration()
+const orchestrationReady = await initOrchestration();
 
-const abort = new AbortController()
-let shuttingDown = false
+const abort = new AbortController();
+let shuttingDown = false;
 
-let dockerClient: DockerClient | undefined
+let dockerClient: DockerClient | undefined;
+const sentinelOptions: SentinelOptions = {};
 if (orchestrationReady && shouldEnableDockerIntegration()) {
-  dockerClient = new DockerClient()
+  dockerClient = new DockerClient();
   if (!(await dockerClient.ping())) {
-    logWarn('docker', 'Docker socket not reachable yet — monitor will retry on each poll')
+    logWarn(
+      "docker",
+      "Docker socket not reachable yet — monitor will retry on each poll",
+    );
   }
-  const dockerMonitor = new DockerMonitor(dockerClient)
-  dockerMonitor.start(abort.signal)
+  sentinelOptions.dockerMonitor = new DockerMonitor(dockerClient);
 }
+const sentinel = createSentinel(sentinelOptions);
+sentinel.start(abort.signal);
 
 // Start any configured Cloudflare tunnels (downloads cloudflared on demand).
-await startTunnels(abort.signal)
+await startTunnels(abort.signal);
 
 // The daemon never self-updates. Updates are driven explicitly by an operator
 // through the developer "Upgrade System" button or the dev-sync push; all installs
 // and updates run via Ansible (the daemon is the constant that owns them).
-const instanceHandle = { stop() {} }
-let instance: { stop(): void } = instanceHandle
+const instanceHandle = { stop() {} };
+let instance: { stop(): void } = instanceHandle;
 
 if (shouldConnectToInstance()) {
-  instance = await connectInstance({})
+  instance = await connectInstance({ monitor: sentinel });
 } else {
-  logInfo('instance', 'connection deferred until development environment opt-in (TURBOPANEL_DEV_INSTANCE)')
+  logInfo(
+    "instance",
+    "connection deferred until development environment opt-in (TURBOPANEL_DEV_INSTANCE)",
+  );
 }
 
-for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
   Deno.addSignalListener(signal, () => {
-    if (shuttingDown) return
-    shuttingDown = true
-    logInfo('daemon', 'shutting down')
-    instance.stop()
+    if (shuttingDown) return;
+    shuttingDown = true;
+    logInfo("daemon", "shutting down");
+    instance.stop();
+    sentinel.stop();
     try {
-      dockerClient?.close()
+      dockerClient?.close();
     } catch {
       // HttpClient may already be closed during systemd restart.
     }
-    dockerClient = undefined
-    abort.abort()
-  })
+    dockerClient = undefined;
+    abort.abort();
+  });
 }
 
 await new Promise<void>((resolve) => {
-  abort.signal.addEventListener('abort', () => resolve())
-})
+  abort.signal.addEventListener("abort", () => resolve());
+});
 
-logInfo('daemon', 'shut down')
-Deno.exit(0)
+logInfo("daemon", "shut down");
+Deno.exit(0);

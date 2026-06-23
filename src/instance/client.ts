@@ -5,286 +5,321 @@ import {
   instanceUrl,
   instanceWebSocketUrl,
   resolveInstanceConfig,
-} from './paths.ts'
-import { collectServerAddresses } from '../server-addresses.ts'
-import { applyDevSyncTarball, type DevSyncState, newDevSyncState } from '../dev-sync-apply.ts'
-import { writeInstanceTunnelToken } from '../tunnels.ts'
-import { logDebug, logError, logInfo, logWarn } from '../logger.ts'
+} from "./paths.ts";
+import { collectServerAddresses } from "../server-addresses.ts";
 import {
-  type DaemonKeyFile,
-  loadDaemonKeyFile,
-} from '../crypto/keys.ts'
-import {
-  DaemonApiClient,
-} from './api-client.ts'
-import { DaemonTokenManager } from './token-manager.ts'
-import { enrollDaemon } from './enroll.ts'
-import { decodeBase64 } from '@std/encoding/base64'
-import { join } from '@std/path'
+  applyDevSyncTarball,
+  type DevSyncState,
+  newDevSyncState,
+} from "../dev-sync-apply.ts";
+import { writeInstanceTunnelToken } from "../tunnels.ts";
+import { logDebug, logError, logInfo, logWarn } from "../logger.ts";
+import { type DaemonKeyFile, loadDaemonKeyFile } from "../crypto/keys.ts";
+import { DaemonApiClient } from "./api-client.ts";
+import { DaemonTokenManager } from "./token-manager.ts";
+import { enrollDaemon } from "./enroll.ts";
+import { decodeBase64 } from "@std/encoding/base64";
+import { join } from "@std/path";
+import type { MonitorSource } from "../monitor/source.ts";
+import { parseMonitorMessage } from "../monitor/protocol.ts";
+import { MonitorSession } from "./monitor-session.ts";
 
 /** Chained replace pattern Sonar S5145 recognizes for log-injection sanitization. */
 function stripLogInjection(text: string): string {
-  return text.replaceAll('\n', '_').replaceAll('\r', '_').replaceAll('\t', '_')
+  return text.replaceAll("\n", "_").replaceAll("\r", "_").replaceAll("\t", "_");
 }
 
 function sanitizeForLog(value: unknown): string {
-  if (value instanceof Error) return stripLogInjection(value.message)
-  if (typeof value === 'string') return stripLogInjection(value)
+  if (value instanceof Error) return stripLogInjection(value.message);
+  if (typeof value === "string") return stripLogInjection(value);
   try {
-    return stripLogInjection(JSON.stringify(value) ?? String(value))
+    return stripLogInjection(JSON.stringify(value) ?? String(value));
   } catch {
-    return stripLogInjection(String(value))
+    return stripLogInjection(String(value));
   }
 }
 
 type DaemonMessage =
-  | { type: 'ping'; id: string; at: string }
-  | { type: 'pong'; id: string; at: string }
-  | { type: 'echo'; payload: unknown; at: string }
-  | { type: 'version'; commit: string; branch: string; at: string }
-  | { type: 'command'; id: string; command: string; at: string }
+  | { type: "ping"; id: string; at: string }
+  | { type: "pong"; id: string; at: string }
+  | { type: "echo"; payload: unknown; at: string }
+  | { type: "version"; commit: string; branch: string; at: string }
+  | { type: "command"; id: string; command: string; at: string }
   | {
-    type: 'command-result'
-    id: string
-    exitCode: number
-    stdout: string
-    stderr: string
-    at: string
+    type: "command-result";
+    id: string;
+    exitCode: number;
+    stdout: string;
+    stderr: string;
+    at: string;
   }
-  | { type: 'addresses-request'; id: string; at: string }
+  | { type: "addresses-request"; id: string; at: string }
   | {
-    type: 'addresses-result'
-    id: string
+    type: "addresses-result";
+    id: string;
     addresses: {
-      privateIpv4: string[]
-      privateIpv6: string[]
-      publicIpv4: string[]
-      publicIpv6: string[]
-    }
-    at: string
+      privateIpv4: string[];
+      privateIpv6: string[];
+      publicIpv4: string[];
+      publicIpv6: string[];
+    };
+    at: string;
   }
   | {
-    type: 'dev-sync-begin'
-    id: string
-    totalChunks: number
-    totalBytes: number
-    at: string
+    type: "dev-sync-begin";
+    id: string;
+    totalChunks: number;
+    totalBytes: number;
+    at: string;
   }
-  | { type: 'dev-sync-chunk'; id: string; index: number; data: string; at: string }
-  | { type: 'dev-sync-end'; id: string; at: string }
-  | { type: 'dev-sync-result'; id: string; ok: boolean; error?: string; at: string }
-  | { type: 'tunnel-token'; id: string; token: string; at: string }
-  | { type: 'tunnel-token-result'; id: string; ok: boolean; error?: string; at: string }
-  | { type: 'update'; id: string; updateUrl: string; at: string }
-  | { type: 'update-result'; id: string; ok: boolean; error?: string; at: string }
+  | {
+    type: "dev-sync-chunk";
+    id: string;
+    index: number;
+    data: string;
+    at: string;
+  }
+  | { type: "dev-sync-end"; id: string; at: string }
+  | {
+    type: "dev-sync-result";
+    id: string;
+    ok: boolean;
+    error?: string;
+    at: string;
+  }
+  | { type: "tunnel-token"; id: string; token: string; at: string }
+  | {
+    type: "tunnel-token-result";
+    id: string;
+    ok: boolean;
+    error?: string;
+    at: string;
+  }
+  | { type: "update"; id: string; updateUrl: string; at: string }
+  | {
+    type: "update-result";
+    id: string;
+    ok: boolean;
+    error?: string;
+    at: string;
+  };
 
 export interface InstanceClientOptions {
-  config?: InstanceConfig
-  httpClient?: Deno.HttpClient
+  config?: InstanceConfig;
+  httpClient?: Deno.HttpClient;
   /** Initial reconnect delay; doubles on failure up to {@link DEFAULT_MAX_BACKOFF_MS}. */
-  reconnectDelayMs?: number
-  onMessage?: (message: DaemonMessage) => void
+  reconnectDelayMs?: number;
+  onMessage?: (message: DaemonMessage) => void;
+  /** Phase-2 monitor source (Sentinel); drives WS monitor.* traffic when connected. */
+  monitor?: MonitorSource;
 }
 
-const DEFAULT_INITIAL_BACKOFF_MS = 2_000
-const DEFAULT_MAX_BACKOFF_MS = 30_000
-const BACKOFF_MULTIPLIER = 2
+const DEFAULT_INITIAL_BACKOFF_MS = 2_000;
+const DEFAULT_MAX_BACKOFF_MS = 30_000;
+const BACKOFF_MULTIPLIER = 2;
 
-const SERVER_ID_FILE = 'server.id'
-const SERVER_KEY_FILE = 'server-key.json'
-const KEY_ID_FILE = 'server-key-id'
-const DEFAULT_SERVER_ID_DIR = '/opt/turbopanel/platform/daemon/state'
-const DEFAULT_DAEMON_DIR = '/opt/turbopanel/platform/daemon'
+const SERVER_ID_FILE = "server.id";
+const SERVER_KEY_FILE = "server-key.json";
+const KEY_ID_FILE = "server-key-id";
+const DEFAULT_SERVER_ID_DIR = "/opt/turbopanel/platform/daemon/state";
+const DEFAULT_DAEMON_DIR = "/opt/turbopanel/platform/daemon";
 
 function isTruthyFlag(value: string | undefined): boolean {
-  const normalized = value?.trim().toLowerCase()
-  return normalized === '1' || normalized === 'true' || normalized === 'yes'
+  const normalized = value?.trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes";
 }
 
 function stripTrailingSlash(path: string): string {
-  return path.replace(/\/+$/, '')
+  return path.replace(/\/+$/, "");
 }
 
 function resolveServerIdDir(
   env: Record<string, string | undefined> = Deno.env.toObject(),
 ): string {
-  const override = env.TURBOPANEL_DAEMON_STATE_DIR?.trim()
-  if (override) return stripTrailingSlash(override)
+  const override = env.TURBOPANEL_DAEMON_STATE_DIR?.trim();
+  if (override) return stripTrailingSlash(override);
 
   if (isTruthyFlag(env.TURBOPANEL_SKIP_ORCHESTRATION)) {
-    return stripTrailingSlash(Deno.cwd())
+    return stripTrailingSlash(Deno.cwd());
   }
 
-  return DEFAULT_SERVER_ID_DIR
+  return DEFAULT_SERVER_ID_DIR;
 }
 
 function resolveDaemonDir(
   env: Record<string, string | undefined> = Deno.env.toObject(),
 ): string {
-  const override = env.TURBOPANEL_DAEMON_DIR?.trim()
-  if (override) return stripTrailingSlash(override)
-  return DEFAULT_DAEMON_DIR
+  const override = env.TURBOPANEL_DAEMON_DIR?.trim();
+  if (override) return stripTrailingSlash(override);
+  return DEFAULT_DAEMON_DIR;
 }
 
 function resolveServerIdPath(): string {
-  return `${resolveServerIdDir()}/${SERVER_ID_FILE}`
+  return `${resolveServerIdDir()}/${SERVER_ID_FILE}`;
 }
 
 export function resolveServerKeyPath(): string {
-  return `${resolveServerIdDir()}/${SERVER_KEY_FILE}`
+  return `${resolveServerIdDir()}/${SERVER_KEY_FILE}`;
 }
 
 async function readMachineId(): Promise<string | undefined> {
   try {
-    const id = await Deno.readTextFile('/etc/machine-id')
-    const trimmed = id.trim()
-    return trimmed.length > 0 ? trimmed : undefined
+    const id = await Deno.readTextFile("/etc/machine-id");
+    const trimmed = id.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
   } catch {
-    return undefined
+    return undefined;
   }
 }
 
 async function readServerId(): Promise<string | undefined> {
   try {
-    const id = await Deno.readTextFile(resolveServerIdPath())
-    const trimmed = id.trim()
-    return trimmed.length > 0 ? trimmed : undefined
+    const id = await Deno.readTextFile(resolveServerIdPath());
+    const trimmed = id.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
   } catch {
-    return undefined
+    return undefined;
   }
 }
 
 async function readDaemonKeyFile(): Promise<DaemonKeyFile | null> {
   try {
-    return await loadDaemonKeyFile(resolveServerKeyPath())
+    return await loadDaemonKeyFile(resolveServerKeyPath());
   } catch {
-    return null
+    return null;
   }
 }
 
 async function readKeyId(): Promise<string | undefined> {
   try {
-    const keyId = await Deno.readTextFile(`${resolveServerIdDir()}/${KEY_ID_FILE}`)
-    const trimmed = keyId.trim()
-    return trimmed.length > 0 ? trimmed : undefined
+    const keyId = await Deno.readTextFile(
+      `${resolveServerIdDir()}/${KEY_ID_FILE}`,
+    );
+    const trimmed = keyId.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
   } catch {
-    return undefined
+    return undefined;
   }
 }
 
 async function writeKeyId(keyId: string): Promise<void> {
-  const trimmed = keyId.trim()
-  if (!trimmed) return
+  const trimmed = keyId.trim();
+  if (!trimmed) return;
   try {
-    const dir = resolveServerIdDir()
-    await Deno.mkdir(dir, { recursive: true })
-    await Deno.writeTextFile(`${dir}/${KEY_ID_FILE}`, `${trimmed}\n`)
+    const dir = resolveServerIdDir();
+    await Deno.mkdir(dir, { recursive: true });
+    await Deno.writeTextFile(`${dir}/${KEY_ID_FILE}`, `${trimmed}\n`);
   } catch (err) {
-    logWarn('instance', 'failed to persist key id:', sanitizeForLog(err))
+    logWarn("instance", "failed to persist key id:", sanitizeForLog(err));
   }
 }
 
 async function readLicenseCredentials(): Promise<
   { licenseId?: string; licenseToken?: string }
 > {
-  const dir = resolveServerIdDir()
+  const dir = resolveServerIdDir();
 
-  let licenseId: string
-  let licenseToken: string
+  let licenseId: string;
+  let licenseToken: string;
   try {
-    licenseId = (await Deno.readTextFile(`${dir}/license.id`)).trim()
-    licenseToken = (await Deno.readTextFile(`${dir}/license.token`)).trim()
+    licenseId = (await Deno.readTextFile(`${dir}/license.id`)).trim();
+    licenseToken = (await Deno.readTextFile(`${dir}/license.token`)).trim();
   } catch {
     // Missing or unreadable license files.
-    return {}
+    return {};
   }
 
   if (licenseId.length === 0 || licenseToken.length === 0) {
-    return {}
+    return {};
   }
 
-  return { licenseId, licenseToken }
+  return { licenseId, licenseToken };
 }
 
 function parseMessage(raw: string): DaemonMessage | null {
   try {
-    return JSON.parse(raw) as DaemonMessage
+    return JSON.parse(raw) as DaemonMessage;
   } catch {
-    return null
+    return null;
   }
 }
 
 export class InstanceClient {
-  readonly #config: InstanceConfig
-  readonly #httpClient: Deno.HttpClient | undefined
-  readonly #initialBackoffMs: number
-  readonly #maxBackoffMs: number
-  readonly #onMessage?: (message: DaemonMessage) => void
+  readonly #config: InstanceConfig;
+  readonly #httpClient: Deno.HttpClient | undefined;
+  readonly #initialBackoffMs: number;
+  readonly #maxBackoffMs: number;
+  readonly #onMessage?: (message: DaemonMessage) => void;
+  readonly #monitor?: MonitorSource;
 
-  #ws: WebSocket | undefined
-  #stopped = false
-  #connectLoopStarted = false
-  #backoffMs: number
-  #hadStableSession = false
-  readonly #devSync = new Map<string, DevSyncState>()
-  #tokenManager: DaemonTokenManager | undefined
-  #apiClient: DaemonApiClient | undefined
-  #tokenServerId: string | undefined
-  #tokenKeyId: string | undefined
-  #forceEnrollPending = false
+  #ws: WebSocket | undefined;
+  #stopped = false;
+  #connectLoopStarted = false;
+  #backoffMs: number;
+  #hadStableSession = false;
+  readonly #devSync = new Map<string, DevSyncState>();
+  #tokenManager: DaemonTokenManager | undefined;
+  #apiClient: DaemonApiClient | undefined;
+  #tokenServerId: string | undefined;
+  #tokenKeyId: string | undefined;
+  #forceEnrollPending = false;
+  #monitorSession: MonitorSession | undefined;
+  #monitorHostname: string | undefined;
 
   constructor(options: InstanceClientOptions = {}) {
-    this.#config = options.config ?? resolveInstanceConfig()
-    this.#httpClient = options.httpClient
-    this.#initialBackoffMs = options.reconnectDelayMs ?? DEFAULT_INITIAL_BACKOFF_MS
-    this.#maxBackoffMs = DEFAULT_MAX_BACKOFF_MS
-    this.#backoffMs = this.#initialBackoffMs
-    this.#onMessage = options.onMessage
+    this.#config = options.config ?? resolveInstanceConfig();
+    this.#httpClient = options.httpClient;
+    this.#initialBackoffMs = options.reconnectDelayMs ??
+      DEFAULT_INITIAL_BACKOFF_MS;
+    this.#maxBackoffMs = DEFAULT_MAX_BACKOFF_MS;
+    this.#backoffMs = this.#initialBackoffMs;
+    this.#onMessage = options.onMessage;
+    this.#monitor = options.monitor;
   }
 
   get config(): InstanceConfig {
-    return this.#config
+    return this.#config;
   }
 
   get target(): string {
-    return describeInstance(this.#config)
+    return describeInstance(this.#config);
   }
 
   #fetchInit(
     init: RequestInit = {},
   ): RequestInit & { client?: Deno.HttpClient } {
-    return this.#httpClient ? { ...init, client: this.#httpClient } : init
+    return this.#httpClient ? { ...init, client: this.#httpClient } : init;
   }
 
   async fetchHealth(): Promise<{ ok: boolean }> {
     const response = await fetch(
-      instanceUrl(this.#config, '/api/health'),
+      instanceUrl(this.#config, "/api/health"),
       this.#fetchInit(),
-    )
+    );
     if (!response.ok) {
-      throw new Error(`health check failed: HTTP ${response.status}`)
+      throw new Error(`health check failed: HTTP ${response.status}`);
     }
-    return await response.json()
+    return await response.json();
   }
 
   async fetchDaemonReadiness(): Promise<
     { ok: boolean; ready: boolean; needsInstall?: boolean }
   > {
     const response = await fetch(
-      instanceUrl(this.#config, '/api/daemon/v1/readiness'),
+      instanceUrl(this.#config, "/api/daemon/v1/readiness"),
       this.#fetchInit(),
-    )
+    );
 
     let body: {
-      ok?: boolean
-      ready?: boolean
-      needsInstall?: boolean
-      error?: string
-    }
+      ok?: boolean;
+      ready?: boolean;
+      needsInstall?: boolean;
+      error?: string;
+    };
     try {
-      body = await response.json()
+      body = await response.json();
     } catch {
-      throw new Error(`daemon readiness check failed: HTTP ${response.status}`)
+      throw new Error(`daemon readiness check failed: HTTP ${response.status}`);
     }
 
     if (!response.ok) {
@@ -293,152 +328,165 @@ export class InstanceClient {
           ok: body.ok ?? true,
           ready: false,
           needsInstall: body.needsInstall,
-        }
+        };
       }
       throw new Error(
         body.error ?? `daemon readiness check failed: HTTP ${response.status}`,
-      )
+      );
     }
 
-    return { ok: body.ok ?? true, ready: body.ready === true }
+    return { ok: body.ok ?? true, ready: body.ready === true };
   }
 
   #isColocatedSocketMode(): boolean {
-    return isColocatedSocketMode(this.#config)
+    return isColocatedSocketMode(this.#config);
   }
 
   async #waitForConnectPreconditions(): Promise<void> {
     if (this.#isColocatedSocketMode()) {
-      const readiness = await this.fetchDaemonReadiness()
+      const readiness = await this.fetchDaemonReadiness();
       if (!readiness.ready) {
-        throw new Error('instance install incomplete')
+        throw new Error("instance install incomplete");
       }
-      return
+      return;
     }
 
-    await this.fetchHealth()
+    await this.fetchHealth();
   }
 
   #resetBackoff(): void {
-    this.#backoffMs = this.#initialBackoffMs
+    this.#backoffMs = this.#initialBackoffMs;
   }
 
   #increaseBackoff(): void {
-    this.#backoffMs = nextBackoffMs(this.#backoffMs, this.#maxBackoffMs)
+    this.#backoffMs = nextBackoffMs(this.#backoffMs, this.#maxBackoffMs);
   }
 
   async fetchVersion(): Promise<{ commit: string; branch: string }> {
     const response = await fetch(
-      instanceUrl(this.#config, '/api/daemon/v1/version'),
+      instanceUrl(this.#config, "/api/daemon/v1/version"),
       this.#fetchInit(),
-    )
+    );
     if (!response.ok) {
-      throw new Error(`version fetch failed: HTTP ${response.status}`)
+      throw new Error(`version fetch failed: HTTP ${response.status}`);
     }
-    return await response.json()
+    return await response.json();
   }
 
   async fetchConnections(): Promise<
     { connections: { id: string; connectedAt: string }[] }
   > {
     const response = await fetch(
-      instanceUrl(this.#config, '/api/developer/v1/daemon/connections'),
+      instanceUrl(this.#config, "/api/developer/v1/daemon/connections"),
       this.#fetchInit(),
-    )
+    );
     if (!response.ok) {
-      throw new Error(`connections fetch failed: HTTP ${response.status}`)
+      throw new Error(`connections fetch failed: HTTP ${response.status}`);
     }
-    return await response.json()
+    return await response.json();
   }
 
   start(): void {
-    if (this.#connectLoopStarted) return
-    this.#connectLoopStarted = true
-    this.#stopped = false
-    this.#forceEnrollPending = isTruthyFlag(Deno.env.get('TURBOPANEL_FORCE_ENROLL'))
+    if (this.#connectLoopStarted) return;
+    this.#connectLoopStarted = true;
+    this.#stopped = false;
+    this.#forceEnrollPending = isTruthyFlag(
+      Deno.env.get("TURBOPANEL_FORCE_ENROLL"),
+    );
     this.#runConnectLoop().catch((err) => {
       logWarn(
-        'instance',
-        'connect loop exited unexpectedly:',
+        "instance",
+        "connect loop exited unexpectedly:",
         sanitizeForLog(err),
-      )
-    })
+      );
+    });
   }
 
   stop(): void {
-    this.#stopped = true
-    this.#tokenManager?.stop()
-    this.#ws?.close()
-    this.#ws = undefined
+    this.#stopped = true;
+    this.#monitorSession?.stopFallback();
+    this.#monitorSession?.detach();
+    this.#monitorSession = undefined;
+    this.#tokenManager?.stop();
+    this.#ws?.close();
+    this.#ws = undefined;
   }
 
   send(message: DaemonMessage): void {
     if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) {
-      throw new Error('instance websocket is not connected')
+      throw new Error("instance websocket is not connected");
     }
-    this.#ws.send(JSON.stringify(message))
+    this.#ws.send(JSON.stringify(message));
   }
 
   async #runConnectLoop(): Promise<void> {
     while (!this.#stopped) {
       try {
-        await this.#connectOnce()
+        await this.#connectOnce();
       } catch (err) {
-        const logConnectFailure = this.#hadStableSession ? logWarn : logDebug
+        const logConnectFailure = this.#hadStableSession ? logWarn : logDebug;
         logConnectFailure(
-          'instance',
-          'websocket connect failed:',
+          "instance",
+          "websocket connect failed:",
           sanitizeForLog(err),
-        )
-        this.#closeActiveSocket()
-        this.#increaseBackoff()
+        );
+        this.#closeActiveSocket();
+        this.#monitorSession?.detach();
+        this.#monitorSession?.startFallback();
+        this.#increaseBackoff();
       }
 
-      if (this.#stopped) break
+      if (this.#stopped) break;
       logDebug(
-        'instance',
-        'reconnect scheduled in',
+        "instance",
+        "reconnect scheduled in",
         this.#backoffMs,
-        'ms via',
+        "ms via",
         sanitizeForLog(this.target),
-      )
-      await delay(this.#backoffMs)
+      );
+      await delay(this.#backoffMs);
     }
   }
 
   #newWebSocket(jwt: string): WebSocket {
-    const url = instanceWebSocketUrl(this.#config, '/ws/daemon/v1')
+    const url = instanceWebSocketUrl(this.#config, "/ws/daemon/v1");
     const options = this.#httpClient
-      ? { headers: { Authorization: `Bearer ${jwt}` }, client: this.#httpClient }
-      : { headers: { Authorization: `Bearer ${jwt}` } }
+      ? {
+        headers: { Authorization: `Bearer ${jwt}` },
+        client: this.#httpClient,
+      }
+      : { headers: { Authorization: `Bearer ${jwt}` } };
 
     try {
       // Daemon WS auth requires Authorization header at upgrade time.
-      return new WebSocket(url, options)
+      return new WebSocket(url, options);
     } catch (error) {
       throw new Error(
         `websocket runtime does not support Authorization headers: ${
           sanitizeForLog(error)
         }`,
-      )
+      );
     }
   }
 
   #closeActiveSocket(): void {
-    const ws = this.#ws
-    if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
-      return
+    const ws = this.#ws;
+    if (
+      !ws || ws.readyState === WebSocket.CLOSED ||
+      ws.readyState === WebSocket.CLOSING
+    ) {
+      return;
     }
     try {
-      ws.close()
+      ws.close();
     } catch {
       // Socket may already be gone.
     }
-    if (this.#ws === ws) this.#ws = undefined
+    if (this.#ws === ws) this.#ws = undefined;
   }
 
   async #connectOnce(): Promise<void> {
-    await this.#waitForConnectPreconditions()
+    await this.#waitForConnectPreconditions();
 
     // Do not close the active socket here: by the time #connectOnce() is called
     // from #runConnectLoop(), the previous socket has already closed naturally
@@ -446,32 +494,34 @@ export class InstanceClient {
     // Calling #closeActiveSocket() here would kill a healthy connection on every
     // reconnect cycle, producing a perpetual ~2-second disconnect/reconnect storm.
 
-    const stateDir = resolveServerIdDir()
-    const [loadedKeyFile, loadedServerId, loadedKeyId, machineId] = await Promise.all([
-      readDaemonKeyFile(),
-      readServerId(),
-      readKeyId(),
-      readMachineId(),
-    ])
-    const hostname = Deno.hostname()
+    const stateDir = resolveServerIdDir();
+    const [loadedKeyFile, loadedServerId, loadedKeyId, machineId] =
+      await Promise.all([
+        readDaemonKeyFile(),
+        readServerId(),
+        readKeyId(),
+        readMachineId(),
+      ]);
+    const hostname = Deno.hostname();
 
-    let keyFile = loadedKeyFile
-    let serverId = loadedServerId
-    let keyId = loadedKeyId
-    const needsEnrollment = this.#forceEnrollPending || keyFile === null || !serverId || !keyId
+    let keyFile = loadedKeyFile;
+    let serverId = loadedServerId;
+    let keyId = loadedKeyId;
+    const needsEnrollment = this.#forceEnrollPending || keyFile === null ||
+      !serverId || !keyId;
     if (needsEnrollment) {
-      const licenseCredentials = await readLicenseCredentials()
+      const licenseCredentials = await readLicenseCredentials();
       if (!licenseCredentials.licenseId || !licenseCredentials.licenseToken) {
-        throw new Error('missing license credentials for enrollment')
+        throw new Error("missing license credentials for enrollment");
       }
 
       const enrollClient = this.#apiClient ?? new DaemonApiClient({
         config: this.#config,
         httpClient: this.#httpClient,
         getToken: async () => {
-          throw new Error('token unavailable before enrollment')
+          throw new Error("token unavailable before enrollment");
         },
-      })
+      });
       const enrollment = await enrollDaemon({
         apiClient: enrollClient,
         machineId,
@@ -479,16 +529,22 @@ export class InstanceClient {
         licenseId: licenseCredentials.licenseId,
         licenseToken: licenseCredentials.licenseToken,
         stateDir,
-      })
-      keyFile = enrollment.keyFile
-      serverId = enrollment.serverId
-      keyId = enrollment.keyId
-      this.#forceEnrollPending = false
-      logInfo('instance', 'enrolled with instance as', sanitizeForLog(serverId))
+      });
+      keyFile = enrollment.keyFile;
+      serverId = enrollment.serverId;
+      keyId = enrollment.keyId;
+      this.#forceEnrollPending = false;
+      logInfo(
+        "instance",
+        "enrolled with instance as",
+        sanitizeForLog(serverId),
+      );
     }
 
     if (keyFile === null || !serverId || !keyId) {
-      throw new Error('daemon identity incomplete after enrollment/auth bootstrap')
+      throw new Error(
+        "daemon identity incomplete after enrollment/auth bootstrap",
+      );
     }
 
     if (
@@ -497,15 +553,17 @@ export class InstanceClient {
       this.#tokenServerId !== serverId ||
       this.#tokenKeyId !== keyId
     ) {
-      let tokenManagerRef: DaemonTokenManager | undefined
+      let tokenManagerRef: DaemonTokenManager | undefined;
       const apiClient = new DaemonApiClient({
         config: this.#config,
         httpClient: this.#httpClient,
         getToken: async (options) => {
-          if (!tokenManagerRef) throw new Error('token manager not initialized')
-          return await tokenManagerRef.getToken(options)
+          if (!tokenManagerRef) {
+            throw new Error("token manager not initialized");
+          }
+          return await tokenManagerRef.getToken(options);
         },
-      })
+      });
       const tokenManager = new DaemonTokenManager({
         keyFile,
         serverId,
@@ -513,303 +571,338 @@ export class InstanceClient {
         machineId,
         hostname,
         apiClient,
-      })
-      tokenManagerRef = tokenManager
-      this.#tokenManager = tokenManager
-      this.#apiClient = apiClient
-      this.#tokenServerId = serverId
-      this.#tokenKeyId = keyId
+      });
+      tokenManagerRef = tokenManager;
+      this.#tokenManager = tokenManager;
+      this.#apiClient = apiClient;
+      this.#tokenServerId = serverId;
+      this.#tokenKeyId = keyId;
     }
 
-    const jwt = await this.#tokenManager.getToken()
-    const ws = this.#newWebSocket(jwt)
-    this.#ws = ws
-    let sessionRegistered = false
-    let heartbeatTimer: ReturnType<typeof setInterval> | undefined
+    const jwt = await this.#tokenManager.getToken();
+    const ws = this.#newWebSocket(jwt);
+    this.#ws = ws;
+    let sessionRegistered = false;
+    this.#monitorHostname = hostname;
+    this.#ensureMonitorSession(serverId, hostname);
 
     await new Promise<void>((resolve, reject) => {
       const fail = (err: unknown) => {
-        cleanup()
-        reject(err instanceof Error ? err : new Error(String(err)))
-      }
+        cleanup();
+        reject(err instanceof Error ? err : new Error(String(err)));
+      };
 
       const cleanup = () => {
-        ws.removeEventListener('open', onOpen)
-        ws.removeEventListener('error', onError)
-        ws.removeEventListener('close', onClose)
-      }
+        ws.removeEventListener("open", onOpen);
+        ws.removeEventListener("error", onError);
+        ws.removeEventListener("close", onClose);
+      };
 
       const onOpen = () => {
-        cleanup()
-        resolve()
-      }
+        cleanup();
+        resolve();
+      };
       const onError = (event: Event) => {
-        fail((event as ErrorEvent).message ?? 'websocket error')
-      }
+        fail((event as ErrorEvent).message ?? "websocket error");
+      };
       const onClose = () => {
-        fail('websocket closed before open')
-      }
+        fail("websocket closed before open");
+      };
 
-      ws.addEventListener('open', onOpen)
-      ws.addEventListener('error', onError)
-      ws.addEventListener('close', onClose)
-    })
+      ws.addEventListener("open", onOpen);
+      ws.addEventListener("error", onError);
+      ws.addEventListener("close", onClose);
+    });
 
-    logDebug('instance', 'websocket connected via', sanitizeForLog(this.target))
+    logDebug(
+      "instance",
+      "websocket connected via",
+      sanitizeForLog(this.target),
+    );
 
-    sessionRegistered = true
-    this.#hadStableSession = true
-    this.#resetBackoff()
-    if (this.#apiClient) {
-      heartbeatTimer = setInterval(() => {
-        void this.#apiClient?.heartbeat({ serverId, hostname }).catch((err) => {
-          logWarn('instance', 'heartbeat failed:', sanitizeForLog(err))
-        })
-      }, 30_000)
-    }
+    sessionRegistered = true;
+    this.#hadStableSession = true;
+    this.#resetBackoff();
+    this.#monitorSession?.attach(ws);
 
     ws.onmessage = (event) => {
-      const raw = typeof event.data === 'string'
+      const raw = typeof event.data === "string"
         ? event.data
-        : String(event.data)
-      const message = parseMessage(raw)
-      if (!message) {
-        logWarn('instance', 'ignored non-JSON websocket message')
-        return
+        : String(event.data);
+
+      const monitorMessage = parseMonitorMessage(raw);
+      if (monitorMessage?.type === "monitor.ack") {
+        this.#monitorSession?.handleAck(monitorMessage);
+        return;
       }
 
-      this.#onMessage?.(message)
-      this.#handleMessage(message, ws)
-    }
+      const message = parseMessage(raw);
+      if (!message) {
+        logWarn("instance", "ignored non-JSON websocket message");
+        return;
+      }
+
+      this.#onMessage?.(message);
+      this.#handleMessage(message, ws);
+    };
 
     ws.onclose = (event) => {
       if (event.code === 4401) {
-        logWarn('instance', 'authentication rejected')
+        logWarn("instance", "authentication rejected");
       }
       if (sessionRegistered) {
-        logInfo('instance', 'websocket closed after registration')
+        logInfo("instance", "websocket closed after registration");
       } else {
-        logDebug('instance', 'websocket closed before registration')
+        logDebug("instance", "websocket closed before registration");
       }
-      if (this.#ws === ws) this.#ws = undefined
-    }
+      if (this.#ws === ws) this.#ws = undefined;
+      this.#monitorSession?.detach();
+      this.#monitorSession?.startFallback();
+    };
 
     const closeEvent = await new Promise<CloseEvent>((resolve) => {
-      ws.addEventListener('close', (event) => resolve(event as CloseEvent), { once: true })
-    })
-    if (heartbeatTimer) {
-      clearInterval(heartbeatTimer)
-    }
+      ws.addEventListener("close", (event) => resolve(event as CloseEvent), {
+        once: true,
+      });
+    });
     if (closeEvent.code === 4401) {
-      await this.#tokenManager?.refresh()
+      await this.#tokenManager?.refresh();
     }
 
     if (sessionRegistered) {
-      this.#resetBackoff()
+      this.#resetBackoff();
     } else {
-      this.#increaseBackoff()
+      this.#increaseBackoff();
     }
+  }
+
+  #ensureMonitorSession(serverId: string, hostname: string): void {
+    if (!this.#monitor) return;
+
+    if (
+      this.#monitorSession &&
+      this.#tokenServerId === serverId &&
+      this.#monitorHostname === hostname
+    ) {
+      return;
+    }
+
+    this.#monitorSession?.stopFallback();
+    this.#monitorSession?.detach();
+    this.#monitorSession = new MonitorSession({
+      source: this.#monitor,
+      serverId,
+      hostname,
+      apiClient: this.#apiClient,
+    });
   }
 
   #handleMessage(message: DaemonMessage, ws: WebSocket): void {
     switch (message.type) {
-      case 'ping':
+      case "ping":
         ws.send(JSON.stringify(
           {
-            type: 'pong',
+            type: "pong",
             id: message.id,
             at: new Date().toISOString(),
           } satisfies DaemonMessage,
-        ))
-        break
-      case 'pong':
-        logDebug('instance', 'pong', sanitizeForLog(message.id))
-        break
-      case 'version':
+        ));
+        break;
+      case "pong":
+        logDebug("instance", "pong", sanitizeForLog(message.id));
+        break;
+      case "version":
         // Informational only. The daemon never self-updates; updates are
         // operator-driven via the developer upgrade button / dev-sync push.
-        break
-      case 'echo':
-        logDebug('instance', 'echo from instance:', sanitizeForLog(message.payload))
+        break;
+      case "echo":
+        logDebug(
+          "instance",
+          "echo from instance:",
+          sanitizeForLog(message.payload),
+        );
         ws.send(JSON.stringify(
           {
-            type: 'echo',
-            payload: { received: message.payload, from: 'daemon' },
+            type: "echo",
+            payload: { received: message.payload, from: "daemon" },
             at: new Date().toISOString(),
           } satisfies DaemonMessage,
-        ))
-        break
-      case 'command':
+        ));
+        break;
+      case "command":
         this.#runCommand(message, ws).catch((err) => {
           logWarn(
-            'instance',
-            'command handler failed:',
+            "instance",
+            "command handler failed:",
             sanitizeForLog(err),
-          )
-        })
-        break
-      case 'addresses-request':
-        this.#collectAddresses(message, ws)
-        break
-      case 'dev-sync-begin':
-        this.#devSync.set(message.id, newDevSyncState(message.totalChunks))
-        break
-      case 'dev-sync-chunk': {
-        const state = this.#devSync.get(message.id)
-        if (state) state.chunks[message.index] = message.data
-        break
+          );
+        });
+        break;
+      case "addresses-request":
+        this.#collectAddresses(message, ws);
+        break;
+      case "dev-sync-begin":
+        this.#devSync.set(message.id, newDevSyncState(message.totalChunks));
+        break;
+      case "dev-sync-chunk": {
+        const state = this.#devSync.get(message.id);
+        if (state) state.chunks[message.index] = message.data;
+        break;
       }
-      case 'dev-sync-end':
+      case "dev-sync-end":
         this.#applyDevSync(message.id, ws).catch((err) => {
           logWarn(
-            'instance',
-            'dev-sync handler failed:',
+            "instance",
+            "dev-sync handler failed:",
             sanitizeForLog(err),
-          )
-        })
-        break
-      case 'tunnel-token':
+          );
+        });
+        break;
+      case "tunnel-token":
         this.#applyTunnelToken(message, ws).catch((err) => {
           logWarn(
-            'instance',
-            'tunnel-token handler failed:',
+            "instance",
+            "tunnel-token handler failed:",
             sanitizeForLog(err),
-          )
-        })
-        break
-      case 'update':
+          );
+        });
+        break;
+      case "update":
         this.#applyUpdate(message, ws).catch((err) => {
-          logWarn('instance', 'update handler failed:', sanitizeForLog(err))
-        })
-        break
+          logWarn("instance", "update handler failed:", sanitizeForLog(err));
+        });
+        break;
     }
   }
 
   async #applyDevSync(id: string, ws: WebSocket): Promise<void> {
-    const state = this.#devSync.get(id)
-    this.#devSync.delete(id)
-    let ok = false
-    let error: string | undefined
+    const state = this.#devSync.get(id);
+    this.#devSync.delete(id);
+    let ok = false;
+    let error: string | undefined;
     try {
-      if (!state) throw new Error('no dev-sync in progress for this id')
-      const base64 = state.chunks.join('')
-      const bytes = decodeBase64(base64)
-      await applyDevSyncTarball(bytes)
-      ok = true
+      if (!state) throw new Error("no dev-sync in progress for this id");
+      const base64 = state.chunks.join("");
+      const bytes = decodeBase64(base64);
+      await applyDevSyncTarball(bytes);
+      ok = true;
     } catch (err) {
-      error = err instanceof Error ? err.message : String(err)
-      logError('dev-sync', 'failed:', sanitizeForLog(error))
+      error = err instanceof Error ? err.message : String(err);
+      logError("dev-sync", "failed:", sanitizeForLog(error));
     }
 
     const result: DaemonMessage = {
-      type: 'dev-sync-result',
+      type: "dev-sync-result",
       id,
       ok,
       error,
       at: new Date().toISOString(),
-    }
-    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result))
+    };
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result));
 
     // Restart only after acking success, so the instance sees the result before
     // this process is replaced by the freshly-synced build.
-    if (ok) await restartDaemonService()
+    if (ok) await restartDaemonService();
   }
 
   async #applyTunnelToken(
-    message: Extract<DaemonMessage, { type: 'tunnel-token' }>,
+    message: Extract<DaemonMessage, { type: "tunnel-token" }>,
     ws: WebSocket,
   ): Promise<void> {
-    let ok = false
-    let error: string | undefined
+    let ok = false;
+    let error: string | undefined;
     try {
-      await writeInstanceTunnelToken(message.token)
-      ok = true
+      await writeInstanceTunnelToken(message.token);
+      ok = true;
     } catch (err) {
-      error = err instanceof Error ? err.message : String(err)
-      logError('tunnel-token', 'failed:', sanitizeForLog(error))
+      error = err instanceof Error ? err.message : String(err);
+      logError("tunnel-token", "failed:", sanitizeForLog(error));
     }
 
     const result: DaemonMessage = {
-      type: 'tunnel-token-result',
+      type: "tunnel-token-result",
       id: message.id,
       ok,
       error,
       at: new Date().toISOString(),
-    }
-    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result))
+    };
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result));
   }
 
   async #applyUpdate(
-    message: Extract<DaemonMessage, { type: 'update' }>,
+    message: Extract<DaemonMessage, { type: "update" }>,
     ws: WebSocket,
   ): Promise<void> {
-    let ok = false
-    let error: string | undefined
+    let ok = false;
+    let error: string | undefined;
     try {
-      const updateScript = join(resolveDaemonDir(), 'update.sh')
-      const command = new Deno.Command('sh', {
+      const updateScript = join(resolveDaemonDir(), "update.sh");
+      const command = new Deno.Command("sh", {
         args: [updateScript],
         env: {
           ...Deno.env.toObject(),
           TURBOPANEL_UPDATE_URL: message.updateUrl,
         },
-        stdout: 'piped',
-        stderr: 'piped',
-      })
-      const out = await command.output()
+        stdout: "piped",
+        stderr: "piped",
+      });
+      const out = await command.output();
       if (!out.success) {
-        throw new Error(new TextDecoder().decode(out.stderr).trim())
+        throw new Error(new TextDecoder().decode(out.stderr).trim());
       }
-      ok = true
+      ok = true;
     } catch (err) {
-      error = err instanceof Error ? err.message : String(err)
-      logError('update', 'failed:', sanitizeForLog(error))
+      error = err instanceof Error ? err.message : String(err);
+      logError("update", "failed:", sanitizeForLog(error));
     }
 
     const result: DaemonMessage = {
-      type: 'update-result',
+      type: "update-result",
       id: message.id,
       ok,
       error,
       at: new Date().toISOString(),
-    }
-    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result))
+    };
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result));
 
     // Restart only after acking success, so the instance sees the result before
     // this process is replaced by the updated binary.
-    if (ok) await restartDaemonService()
+    if (ok) await restartDaemonService();
   }
 
   #collectAddresses(
-    message: Extract<DaemonMessage, { type: 'addresses-request' }>,
+    message: Extract<DaemonMessage, { type: "addresses-request" }>,
     ws: WebSocket,
   ): void {
-    let addresses: Extract<DaemonMessage, { type: 'addresses-result' }>['addresses']
+    let addresses: Extract<
+      DaemonMessage,
+      { type: "addresses-result" }
+    >["addresses"];
     try {
-      addresses = collectServerAddresses()
+      addresses = collectServerAddresses();
     } catch (err) {
       logWarn(
-        'instance',
-        'collect addresses failed:',
+        "instance",
+        "collect addresses failed:",
         sanitizeForLog(err),
-      )
+      );
       addresses = {
         privateIpv4: [],
         privateIpv6: [],
         publicIpv4: [],
         publicIpv6: [],
-      }
+      };
     }
 
     const result: DaemonMessage = {
-      type: 'addresses-result',
+      type: "addresses-result",
       id: message.id,
       addresses,
       at: new Date().toISOString(),
-    }
+    };
 
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(result))
+      ws.send(JSON.stringify(result));
     }
   }
 
@@ -820,146 +913,147 @@ export class InstanceClient {
    * privileges and has no auth. It exists only for the dev-only developer panel.
    */
   async #runCommand(
-    message: Extract<DaemonMessage, { type: 'command' }>,
+    message: Extract<DaemonMessage, { type: "command" }>,
     ws: WebSocket,
   ): Promise<void> {
-    logInfo('instance', 'run command:', stripLogInjection(message.command))
-    let result: Extract<DaemonMessage, { type: 'command-result' }>
+    logInfo("instance", "run command:", stripLogInjection(message.command));
+    let result: Extract<DaemonMessage, { type: "command-result" }>;
     try {
-      const command = new Deno.Command('sh', {
-        args: ['-c', message.command],
-        stdout: 'piped',
-        stderr: 'piped',
-      })
-      const { code, stdout, stderr } = await command.output()
+      const command = new Deno.Command("sh", {
+        args: ["-c", message.command],
+        stdout: "piped",
+        stderr: "piped",
+      });
+      const { code, stdout, stderr } = await command.output();
       result = {
-        type: 'command-result',
+        type: "command-result",
         id: message.id,
         exitCode: code,
         stdout: new TextDecoder().decode(stdout),
         stderr: new TextDecoder().decode(stderr),
         at: new Date().toISOString(),
-      }
+      };
     } catch (err) {
       result = {
-        type: 'command-result',
+        type: "command-result",
         id: message.id,
         exitCode: -1,
-        stdout: '',
+        stdout: "",
         stderr: err instanceof Error ? err.message : String(err),
         at: new Date().toISOString(),
-      }
+      };
     }
 
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(result))
+      ws.send(JSON.stringify(result));
     }
   }
 }
 
 function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function nextBackoffMs(current: number, max: number): number {
-  return Math.min(current * BACKOFF_MULTIPLIER, max)
+  return Math.min(current * BACKOFF_MULTIPLIER, max);
 }
 
 function isColocatedSocketMode(config: InstanceConfig): boolean {
-  return config.kind === 'socket'
+  return config.kind === "socket";
 }
 
 /** Ask systemd to restart this daemon (used after a dev-sync swap). */
 async function restartDaemonService(): Promise<void> {
-  const unit = Deno.env.get('TURBOPANEL_SERVICE_NAME')?.trim() ||
-    'turbopanel-daemon'
+  const unit = Deno.env.get("TURBOPANEL_SERVICE_NAME")?.trim() ||
+    "turbopanel-daemon";
   try {
-    const result = await new Deno.Command('systemctl', {
-      args: ['restart', unit],
-      stdin: 'null',
-      stdout: 'piped',
-      stderr: 'piped',
-    }).output()
+    const result = await new Deno.Command("systemctl", {
+      args: ["restart", unit],
+      stdin: "null",
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
     if (!result.success) {
-      const safeUnit = stripLogInjection(unit)
+      const safeUnit = stripLogInjection(unit);
       const safeStderr = stripLogInjection(
-        new TextDecoder().decode(result.stderr).trim() || 'unknown error',
-      )
-      logWarn('dev-sync', 'systemctl restart', safeUnit, 'failed:', safeStderr)
+        new TextDecoder().decode(result.stderr).trim() || "unknown error",
+      );
+      logWarn("dev-sync", "systemctl restart", safeUnit, "failed:", safeStderr);
     }
   } catch (err) {
-    logWarn('dev-sync', 'restart failed:', sanitizeForLog(err))
+    logWarn("dev-sync", "restart failed:", sanitizeForLog(err));
   }
 }
 
 export async function connectInstance(
   options: InstanceClientOptions = {},
 ): Promise<InstanceClient> {
-  const initialBackoffMs = options.reconnectDelayMs ?? DEFAULT_INITIAL_BACKOFF_MS
-  const config = options.config ?? resolveInstanceConfig()
+  const initialBackoffMs = options.reconnectDelayMs ??
+    DEFAULT_INITIAL_BACKOFF_MS;
+  const config = options.config ?? resolveInstanceConfig();
   const httpClient = options.httpClient ??
     await createInstanceHttpClient(config, {
-      caCertPath: Deno.env.get('TURBOPANEL_INSTANCE_CA')?.trim() || undefined,
-    })
+      caCertPath: Deno.env.get("TURBOPANEL_INSTANCE_CA")?.trim() || undefined,
+    });
 
   const client = new InstanceClient({
     ...options,
     config,
     httpClient,
     reconnectDelayMs: initialBackoffMs,
-  })
+  });
 
-  const socketMode = isColocatedSocketMode(config)
-  let waitingLogged = false
-  let readyLogged = false
-  let backoffMs = initialBackoffMs
+  const socketMode = isColocatedSocketMode(config);
+  let waitingLogged = false;
+  let readyLogged = false;
+  let backoffMs = initialBackoffMs;
 
   while (true) {
     try {
       if (socketMode) {
-        const readiness = await client.fetchDaemonReadiness()
+        const readiness = await client.fetchDaemonReadiness();
         if (!readiness.ready) {
-          throw new Error('instance install incomplete')
+          throw new Error("instance install incomplete");
         }
         if (!readyLogged) {
           logInfo(
-            'instance',
-            'instance ready for daemon registration via',
+            "instance",
+            "instance ready for daemon registration via",
             sanitizeForLog(client.target),
-          )
-          readyLogged = true
+          );
+          readyLogged = true;
         }
       } else {
-        await client.fetchHealth()
+        await client.fetchHealth();
         if (!readyLogged) {
           logInfo(
-            'instance',
-            'instance available via',
+            "instance",
+            "instance available via",
             sanitizeForLog(client.target),
-          )
-          readyLogged = true
+          );
+          readyLogged = true;
         }
       }
-      break
+      break;
     } catch {
       if (!waitingLogged) {
         logInfo(
-          'instance',
+          "instance",
           socketMode
-            ? 'waiting for instance install to complete via'
-            : 'waiting for instance to become available via',
+            ? "waiting for instance install to complete via"
+            : "waiting for instance to become available via",
           sanitizeForLog(client.target),
-        )
-        waitingLogged = true
+        );
+        waitingLogged = true;
       }
-      await delay(backoffMs)
-      backoffMs = nextBackoffMs(backoffMs, DEFAULT_MAX_BACKOFF_MS)
+      await delay(backoffMs);
+      backoffMs = nextBackoffMs(backoffMs, DEFAULT_MAX_BACKOFF_MS);
     }
   }
 
-  client.start()
-  return client
+  client.start();
+  return client;
 }
 
-export type { DaemonMessage }
-export { readKeyId, writeKeyId }
+export type { DaemonMessage };
+export { readKeyId, writeKeyId };

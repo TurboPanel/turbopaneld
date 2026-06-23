@@ -1,0 +1,226 @@
+import type {
+  ContainerInspect,
+  ContainerSummary,
+  DockerEvent,
+} from "../docker/client.ts";
+import type {
+  MonitorResourceState,
+  MonitorResourceStatus,
+} from "./protocol.ts";
+
+/** optional turbopanel docker label keys for project/service mapping. */
+export const TURBOPANEL_LABEL_KEYS = {
+  project: "com.turbopanel.project",
+  service: "com.turbopanel.service",
+} as const;
+
+export type NormalizeContainerInput = {
+  inspect?: ContainerInspect;
+  summary?: ContainerSummary;
+  event?: DockerEvent;
+};
+
+function shortContainerId(id: string): string {
+  return id.replace(/^\/+/, "").slice(0, 12);
+}
+
+function stripLeadingSlash(name: string): string {
+  return name.startsWith("/") ? name.slice(1) : name;
+}
+
+function resolveContainerName(
+  input: NormalizeContainerInput,
+): string | undefined {
+  if (input.inspect?.Name) {
+    return stripLeadingSlash(input.inspect.Name);
+  }
+  const names = input.summary?.Names;
+  if (names && names.length > 0) {
+    return stripLeadingSlash(names[0]);
+  }
+  return undefined;
+}
+
+function resolveLabels(
+  input: NormalizeContainerInput,
+): Record<string, string> | undefined {
+  const fromInspect = input.inspect?.Config?.Labels;
+  if (fromInspect && Object.keys(fromInspect).length > 0) return fromInspect;
+  const fromSummary = input.summary?.Labels;
+  if (fromSummary && Object.keys(fromSummary).length > 0) return fromSummary;
+  return undefined;
+}
+
+function mapHealthStatus(status: string): MonitorResourceStatus | undefined {
+  switch (status.toLowerCase()) {
+    case "healthy":
+      return "healthy";
+    case "unhealthy":
+      return "unhealthy";
+    case "starting":
+      return "starting";
+    default:
+      return undefined;
+  }
+}
+
+function mapDockerStateStatus(
+  status: string,
+  exitCode?: number,
+): MonitorResourceStatus {
+  switch (status.toLowerCase()) {
+    case "running":
+      return "healthy";
+    case "restarting":
+    case "created":
+      return "starting";
+    case "paused":
+      return "degraded";
+    case "exited":
+      return exitCode === 0 ? "stopped" : "failed";
+    case "dead":
+      return "failed";
+    default:
+      return "unknown";
+  }
+}
+
+function deriveStatusFromEventAction(
+  action: string,
+): MonitorResourceStatus | undefined {
+  const healthMatch = action.match(/^health_status:\s*(.+)$/i);
+  if (healthMatch) {
+    return mapHealthStatus(healthMatch[1].trim());
+  }
+  return undefined;
+}
+
+export function deriveContainerStatus(
+  input: NormalizeContainerInput,
+): MonitorResourceStatus {
+  if (input.event?.Action) {
+    const fromEvent = deriveStatusFromEventAction(input.event.Action);
+    if (fromEvent) return fromEvent;
+  }
+
+  const healthStatus = input.inspect?.State?.Health?.Status;
+  if (healthStatus) {
+    const mapped = mapHealthStatus(healthStatus);
+    if (mapped) return mapped;
+  }
+
+  const dockerStatus = input.inspect?.State?.Status ?? input.summary?.State;
+  if (dockerStatus) {
+    return mapDockerStateStatus(
+      dockerStatus,
+      input.inspect?.State?.ExitCode,
+    );
+  }
+
+  return "unknown";
+}
+
+function formatPorts(input: NormalizeContainerInput): string[] | undefined {
+  const networkPorts = input.inspect?.NetworkSettings?.Ports;
+  if (networkPorts) {
+    const formatted: string[] = [];
+    for (const [privatePort, bindings] of Object.entries(networkPorts)) {
+      if (!bindings || bindings.length === 0) continue;
+      for (const binding of bindings) {
+        const host = binding.HostIp && binding.HostIp !== "0.0.0.0"
+          ? binding.HostIp
+          : "0.0.0.0";
+        const hostPort = binding.HostPort ?? "?";
+        formatted.push(`${host}:${hostPort}->${privatePort}`);
+      }
+    }
+    if (formatted.length > 0) return formatted;
+  }
+
+  const summaryPorts = input.summary?.Ports;
+  if (summaryPorts && summaryPorts.length > 0) {
+    return summaryPorts.map((port) => {
+      const host = port.IP && port.IP !== "0.0.0.0" ? port.IP : "0.0.0.0";
+      const publicPort = port.PublicPort ?? "?";
+      return `${host}:${publicPort}->${port.PrivatePort}/${port.Type}`;
+    });
+  }
+
+  return undefined;
+}
+
+function resolveImage(input: NormalizeContainerInput): string | undefined {
+  return input.inspect?.Config?.Image ??
+    input.inspect?.Image ??
+    input.summary?.Image;
+}
+
+const DOCKER_ZERO_TIME = "0001-01-01T00:00:00Z";
+
+function isMeaningfulDockerTimestamp(
+  value: string | undefined,
+): value is string {
+  return value !== undefined && value !== "" && value !== DOCKER_ZERO_TIME;
+}
+
+/** derive updatedAt from docker/event timestamps so normalization stays stable across passes. */
+function resolveUpdatedAt(input: NormalizeContainerInput): string | undefined {
+  if (input.event?.time !== undefined) {
+    return new Date(input.event.time * 1000).toISOString();
+  }
+
+  const state = input.inspect?.State;
+  if (isMeaningfulDockerTimestamp(state?.FinishedAt)) {
+    return state.FinishedAt;
+  }
+  if (isMeaningfulDockerTimestamp(state?.StartedAt)) {
+    return state.StartedAt;
+  }
+
+  return undefined;
+}
+
+export function normalizeContainer(
+  input: NormalizeContainerInput,
+): MonitorResourceState {
+  const fullId =
+    (input.inspect?.Id ?? input.summary?.Id ?? input.event?.Actor?.ID ?? "")
+      .replace(/^\/+/, "");
+  const labels = resolveLabels(input);
+  const status = deriveContainerStatus(input);
+  const healthStatus = input.inspect?.State?.Health?.Status;
+
+  const state: MonitorResourceState = {
+    resourceKey: `container:${shortContainerId(fullId)}`,
+    kind: "container",
+    status,
+    containerId: fullId,
+  };
+
+  const updatedAt = resolveUpdatedAt(input);
+  if (updatedAt) state.updatedAt = updatedAt;
+
+  const name = resolveContainerName(input);
+  if (name) state.name = name;
+
+  const image = resolveImage(input);
+  if (image) state.image = image;
+
+  if (healthStatus) state.healthStatus = healthStatus;
+
+  const restartCount = input.inspect?.RestartCount;
+  if (restartCount !== undefined) state.restartCount = restartCount;
+
+  const ports = formatPorts(input);
+  if (ports) state.ports = ports;
+
+  if (labels) {
+    state.labels = labels;
+    const projectId = labels[TURBOPANEL_LABEL_KEYS.project];
+    const serviceId = labels[TURBOPANEL_LABEL_KEYS.service];
+    if (projectId) state.projectId = projectId;
+    if (serviceId) state.serviceId = serviceId;
+  }
+
+  return state;
+}

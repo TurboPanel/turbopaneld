@@ -2,19 +2,20 @@ import {
   bootstrapOrchestrationRuntime,
   runDaemonConverge,
   runInstanceDevInstall,
-} from './ansible.ts'
-import { ensurePython } from './python.ts'
-import { ensureUv } from './uv.ts'
-import { resolveInstanceConfig } from '../instance/paths.ts'
-import { logError, logInfo } from '../logger.ts'
+} from "./ansible.ts";
+import { ensurePython } from "./python.ts";
+import { ensureUv } from "./uv.ts";
+import { resolveInstanceConfig } from "../instance/paths.ts";
+import { logError, logInfo } from "../logger.ts";
 
 /**
  * True when Tilt/local dev already manages the instance stack and the daemon
  * should only connect (no Ansible bootstrap on startup).
  */
 function shouldSkipOrchestration(): boolean {
-  const flag = Deno.env.get('TURBOPANEL_SKIP_ORCHESTRATION')?.trim().toLowerCase()
-  return flag === '1' || flag === 'true' || flag === 'yes'
+  const flag = Deno.env.get("TURBOPANEL_SKIP_ORCHESTRATION")?.trim()
+    .toLowerCase();
+  return flag === "1" || flag === "true" || flag === "yes";
 }
 
 /**
@@ -27,11 +28,11 @@ function shouldSkipOrchestration(): boolean {
  * `TURBOPANEL_INSTANCE_RUNTIME=workers` marks co-located Workers dev.
  */
 function shouldInstallDevInstance(): boolean {
-  const flag = Deno.env.get('TURBOPANEL_DEV_INSTANCE')?.trim().toLowerCase()
-  const enabled = flag === '1' || flag === 'true' || flag === 'yes'
-  if (!enabled) return false
-  if (resolveInstanceConfig().kind === 'socket') return true
-  return Deno.env.get('TURBOPANEL_INSTANCE_RUNTIME')?.trim() === 'workers'
+  const flag = Deno.env.get("TURBOPANEL_DEV_INSTANCE")?.trim().toLowerCase();
+  const enabled = flag === "1" || flag === "true" || flag === "yes";
+  if (!enabled) return false;
+  if (resolveInstanceConfig().kind === "socket") return true;
+  return Deno.env.get("TURBOPANEL_INSTANCE_RUNTIME")?.trim() === "workers";
 }
 
 /**
@@ -39,14 +40,14 @@ function shouldInstallDevInstance(): boolean {
  * console. Orchestration bootstrap runs, but no converge playbook yet.
  */
 export function isPreOptInCoLocatedDev(): boolean {
-  if (shouldInstallDevInstance()) return false
-  return resolveInstanceConfig().kind === 'socket'
+  if (shouldInstallDevInstance()) return false;
+  return resolveInstanceConfig().kind === "socket";
 }
 
 /** Dial the instance only when this host is meant to reach it yet. */
 export function shouldConnectToInstance(): boolean {
-  if (shouldSkipOrchestration()) return true
-  return !isPreOptInCoLocatedDev()
+  if (shouldSkipOrchestration()) return true;
+  return !isPreOptInCoLocatedDev();
 }
 
 /**
@@ -54,10 +55,10 @@ export function shouldConnectToInstance(): boolean {
  * Pre-opt-in co-located dev runs on Deno only and waits for opt-in first.
  */
 export function shouldEnableDockerIntegration(): boolean {
-  if (shouldSkipOrchestration()) return false
-  if (shouldInstallDevInstance()) return true
-  if (shouldRunDaemonConverge()) return true
-  return false
+  if (shouldSkipOrchestration()) return false;
+  if (shouldInstallDevInstance()) return true;
+  if (shouldRunDaemonConverge()) return true;
+  return false;
 }
 
 /**
@@ -65,7 +66,7 @@ export function shouldEnableDockerIntegration(): boolean {
  * on startup outside the dev-console deferred-start install path.
  */
 function shouldRunDaemonConverge(): boolean {
-  return resolveInstanceConfig().kind === 'url'
+  return resolveInstanceConfig().kind === "url";
 }
 
 /**
@@ -79,37 +80,43 @@ function shouldRunDaemonConverge(): boolean {
  */
 export async function initOrchestration(): Promise<boolean> {
   if (shouldSkipOrchestration()) {
-    logInfo('orchestration', 'skipped (TURBOPANEL_SKIP_ORCHESTRATION)')
-    return false
+    logInfo("orchestration", "skipped (TURBOPANEL_SKIP_ORCHESTRATION)");
+    return false;
   }
 
-  const started = performance.now()
-  logInfo('orchestration', 'bootstrapping runtime')
-  const devInstance = shouldInstallDevInstance()
-  const preOptInDev = isPreOptInCoLocatedDev()
+  const started = performance.now();
+  logInfo("orchestration", "bootstrapping runtime");
+  const devInstance = shouldInstallDevInstance();
+  const preOptInDev = isPreOptInCoLocatedDev();
   const steps: Array<[string, () => Promise<void>]> = [
-    ['ensureUv', ensureUv],
-    ['ensurePython', ensurePython],
-    ['bootstrapOrchestrationRuntime', bootstrapOrchestrationRuntime],
-  ]
+    ["ensureUv", ensureUv],
+    ["ensurePython", ensurePython],
+    ["bootstrapOrchestrationRuntime", bootstrapOrchestrationRuntime],
+  ];
   if (devInstance) {
-    steps.push(['runInstanceDevInstall', runInstanceDevInstall])
+    steps.push(["runInstanceDevInstall", runInstanceDevInstall]);
   } else if (shouldRunDaemonConverge()) {
-    steps.push(['runDaemonConverge', runDaemonConverge])
+    steps.push(["runDaemonConverge", runDaemonConverge]);
   } else if (preOptInDev) {
-    logInfo('orchestration', 'co-located dev host awaiting opt-in (TURBOPANEL_DEV_INSTANCE); skipping converge')
+    logInfo(
+      "orchestration",
+      "co-located dev host awaiting opt-in (TURBOPANEL_DEV_INSTANCE); skipping converge",
+    );
   }
   try {
     for (const [, step] of steps) {
-      await step()
+      await step();
     }
-    const elapsed = ((performance.now() - started) / 1000).toFixed(1)
-    logInfo('orchestration', `runtime ready in ${elapsed}s`)
-    return true
+    const elapsed = ((performance.now() - started) / 1000).toFixed(1);
+    logInfo("orchestration", `runtime ready in ${elapsed}s`);
+    return true;
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    logError('orchestration', 'bootstrap failed:', message)
-    logError('orchestration', 'daemon will continue running without a verified runtime')
-    return false
+    const message = err instanceof Error ? err.message : String(err);
+    logError("orchestration", "bootstrap failed:", message);
+    logError(
+      "orchestration",
+      "daemon will continue running without a verified runtime",
+    );
+    return false;
   }
 }

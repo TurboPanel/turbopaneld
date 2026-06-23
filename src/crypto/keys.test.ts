@@ -94,7 +94,9 @@ Deno.test("buildCanonicalPayload aliases buildAuthPayload", () => {
     payload !==
       "turbopanel-daemon-auth-v1\ncid\nnonce\nsid\nkid\nmid\nhost"
   ) {
-    throw new Error("canonical payload alias did not match expected auth shape");
+    throw new Error(
+      "canonical payload alias did not match expected auth shape",
+    );
   }
 });
 

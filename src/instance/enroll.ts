@@ -2,8 +2,8 @@ import { join } from "@std/path";
 import {
   buildEnrollmentPayload,
   computePublicKeyFingerprint,
-  generateDaemonKeypair,
   type DaemonKeyFile,
+  generateDaemonKeypair,
   saveDaemonKeyFile,
   signChallenge,
 } from "../crypto/keys.ts";
@@ -23,7 +23,9 @@ export async function enrollDaemon(params: {
 }): Promise<{ keyFile: DaemonKeyFile; serverId: string; keyId: string }> {
   const challenge = await params.apiClient.getEnrollmentChallenge();
   const enrollmentKeyFile = await generateDaemonKeypair();
-  const fingerprint = await computePublicKeyFingerprint(enrollmentKeyFile.publicJwk);
+  const fingerprint = await computePublicKeyFingerprint(
+    enrollmentKeyFile.publicJwk,
+  );
   const payload = buildEnrollmentPayload({
     challengeId: challenge.challengeId,
     nonce: challenge.nonce,
@@ -44,9 +46,18 @@ export async function enrollDaemon(params: {
   });
 
   await Deno.mkdir(params.stateDir, { recursive: true });
-  await saveDaemonKeyFile(join(params.stateDir, SERVER_KEY_FILE), enrollmentKeyFile);
-  await Deno.writeTextFile(join(params.stateDir, SERVER_ID_FILE), `${enrollment.serverId}\n`);
-  await Deno.writeTextFile(join(params.stateDir, KEY_ID_FILE), `${enrollment.keyId}\n`);
+  await saveDaemonKeyFile(
+    join(params.stateDir, SERVER_KEY_FILE),
+    enrollmentKeyFile,
+  );
+  await Deno.writeTextFile(
+    join(params.stateDir, SERVER_ID_FILE),
+    `${enrollment.serverId}\n`,
+  );
+  await Deno.writeTextFile(
+    join(params.stateDir, KEY_ID_FILE),
+    `${enrollment.keyId}\n`,
+  );
 
   return {
     keyFile: enrollmentKeyFile,

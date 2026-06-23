@@ -1,83 +1,83 @@
-import { logDebug, logError, logInfo } from '../logger.ts'
-import { runStreamingLines } from './exec.ts'
+import { logDebug, logError, logInfo } from "../logger.ts";
+import { runStreamingLines } from "./exec.ts";
 
 /** ISO-8601 timestamp emitted by ansible.posix.jsonl. */
-export type AnsibleEventTimestamp = string
+export type AnsibleEventTimestamp = string;
 
 export interface AnsibleDuration {
-  start: string
-  end?: string
+  start: string;
+  end?: string;
 }
 
 export interface AnsiblePlayInfo {
-  name: string
-  id: string
-  path: string
-  duration: AnsibleDuration
+  name: string;
+  id: string;
+  path: string;
+  duration: AnsibleDuration;
 }
 
 export interface AnsibleTaskInfo {
-  name: string
-  id: string
-  path: string
-  duration: AnsibleDuration
+  name: string;
+  id: string;
+  path: string;
+  duration: AnsibleDuration;
 }
 
 /** Per-host task result payload (shape varies by module). */
 export type AnsibleHostResult = Record<string, unknown> & {
-  action?: string
-  changed?: boolean
-  failed?: boolean
-  skipped?: boolean
-  unreachable?: boolean
-  msg?: string
-}
+  action?: string;
+  changed?: boolean;
+  failed?: boolean;
+  skipped?: boolean;
+  unreachable?: boolean;
+  msg?: string;
+};
 
 export interface AnsiblePlaybookStats {
-  [host: string]: Record<string, number>
+  [host: string]: Record<string, number>;
 }
 
 /** Base fields present on every JSONL line from ansible.posix.jsonl. */
 export interface AnsibleEventBase {
-  _event: string
-  _timestamp: AnsibleEventTimestamp
+  _event: string;
+  _timestamp: AnsibleEventTimestamp;
 }
 
 export interface AnsiblePlayStartEvent extends AnsibleEventBase {
-  _event: 'v2_playbook_on_play_start'
-  play: AnsiblePlayInfo
-  tasks: unknown[]
+  _event: "v2_playbook_on_play_start";
+  play: AnsiblePlayInfo;
+  tasks: unknown[];
 }
 
 export interface AnsibleTaskStartEvent extends AnsibleEventBase {
   _event:
-    | 'v2_playbook_on_task_start'
-    | 'v2_playbook_on_handler_task_start'
-    | 'v2_runner_on_start'
-  task: AnsibleTaskInfo
-  hosts: Record<string, AnsibleHostResult>
+    | "v2_playbook_on_task_start"
+    | "v2_playbook_on_handler_task_start"
+    | "v2_runner_on_start";
+  task: AnsibleTaskInfo;
+  hosts: Record<string, AnsibleHostResult>;
 }
 
 export interface AnsibleTaskResultEvent extends AnsibleEventBase {
   _event:
-    | 'v2_runner_on_ok'
-    | 'v2_runner_on_failed'
-    | 'v2_runner_on_unreachable'
-    | 'v2_runner_on_skipped'
-  task: AnsibleTaskInfo
-  hosts: Record<string, AnsibleHostResult>
+    | "v2_runner_on_ok"
+    | "v2_runner_on_failed"
+    | "v2_runner_on_unreachable"
+    | "v2_runner_on_skipped";
+  task: AnsibleTaskInfo;
+  hosts: Record<string, AnsibleHostResult>;
 }
 
 export interface AnsiblePlayStatsEvent extends AnsibleEventBase {
-  _event: 'v2_playbook_on_stats'
-  stats: AnsiblePlaybookStats
-  custom_stats: Record<string, unknown>
-  global_custom_stats: Record<string, unknown>
+  _event: "v2_playbook_on_stats";
+  stats: AnsiblePlaybookStats;
+  custom_stats: Record<string, unknown>;
+  global_custom_stats: Record<string, unknown>;
 }
 
 /** Forward-compatible fallback for callback events not yet modeled. */
 export interface AnsibleUnknownEvent extends AnsibleEventBase {
-  [key: string]: unknown
+  [key: string]: unknown;
 }
 
 /**
@@ -93,92 +93,99 @@ export type AnsibleEvent =
   | AnsibleTaskStartEvent
   | AnsibleTaskResultEvent
   | AnsiblePlayStatsEvent
-  | AnsibleUnknownEvent
+  | AnsibleUnknownEvent;
 
-export type AnsibleEventHandler = (event: AnsibleEvent) => void
+export type AnsibleEventHandler = (event: AnsibleEvent) => void;
 
 /** Parse one JSONL stdout line from ansible.posix.jsonl; returns null for blank/non-JSON lines. */
 export function parseAnsibleJsonlLine(line: string): AnsibleEvent | null {
-  const trimmed = line.trim()
-  if (!trimmed) return null
+  const trimmed = line.trim();
+  if (!trimmed) return null;
 
   try {
-    const parsed: unknown = JSON.parse(trimmed)
-    if (typeof parsed !== 'object' || parsed === null) return null
-    const record = parsed as Record<string, unknown>
-    if (typeof record._event !== 'string' || typeof record._timestamp !== 'string') {
-      return null
+    const parsed: unknown = JSON.parse(trimmed);
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const record = parsed as Record<string, unknown>;
+    if (
+      typeof record._event !== "string" || typeof record._timestamp !== "string"
+    ) {
+      return null;
     }
-    return record as AnsibleEvent
+    return record as AnsibleEvent;
   } catch {
-    return null
+    return null;
   }
 }
 
 function formatStats(stats: AnsiblePlaybookStats): string {
-  let ok = 0
-  let changed = 0
-  let failed = 0
-  let unreachable = 0
+  let ok = 0;
+  let changed = 0;
+  let failed = 0;
+  let unreachable = 0;
 
   for (const hostStats of Object.values(stats)) {
-    ok += hostStats.ok ?? 0
-    changed += hostStats.changed ?? 0
-    failed += hostStats.failed ?? 0
-    unreachable += hostStats.unreachable ?? 0
+    ok += hostStats.ok ?? 0;
+    changed += hostStats.changed ?? 0;
+    failed += hostStats.failed ?? 0;
+    unreachable += hostStats.unreachable ?? 0;
   }
 
-  return `ok=${ok} changed=${changed} failed=${failed} unreachable=${unreachable}`
+  return `ok=${ok} changed=${changed} failed=${failed} unreachable=${unreachable}`;
 }
 
 /** Map a parsed ansible.posix.jsonl event to structured daemon log lines. */
 export function logAnsibleEvent(event: AnsibleEvent): void {
   switch (event._event) {
-    case 'v2_playbook_on_play_start': {
-      const playEvent = event as AnsiblePlayStartEvent
-      logInfo('ansible', '[play] ' + playEvent.play.name)
-      break
+    case "v2_playbook_on_play_start": {
+      const playEvent = event as AnsiblePlayStartEvent;
+      logInfo("ansible", "[play] " + playEvent.play.name);
+      break;
     }
-    case 'v2_playbook_on_task_start': {
-      const taskEvent = event as AnsibleTaskStartEvent
-      logDebug('ansible', '[task] ' + taskEvent.task.name)
-      break
+    case "v2_playbook_on_task_start": {
+      const taskEvent = event as AnsibleTaskStartEvent;
+      logDebug("ansible", "[task] " + taskEvent.task.name);
+      break;
     }
-    case 'v2_runner_on_ok': {
-      const okEvent = event as AnsibleTaskResultEvent
-      const anyChanged = Object.values(okEvent.hosts).some((host) => host.changed === true)
+    case "v2_runner_on_ok": {
+      const okEvent = event as AnsibleTaskResultEvent;
+      const anyChanged = Object.values(okEvent.hosts).some((host) =>
+        host.changed === true
+      );
       if (anyChanged) {
-        logInfo('ansible', '[changed] ' + okEvent.task.name)
+        logInfo("ansible", "[changed] " + okEvent.task.name);
       } else {
-        logDebug('ansible', '[ok] ' + okEvent.task.name)
+        logDebug("ansible", "[ok] " + okEvent.task.name);
       }
-      break
+      break;
     }
-    case 'v2_runner_on_skipped': {
-      const skippedEvent = event as AnsibleTaskResultEvent
-      logDebug('ansible', '[skipped] ' + skippedEvent.task.name)
-      break
+    case "v2_runner_on_skipped": {
+      const skippedEvent = event as AnsibleTaskResultEvent;
+      logDebug("ansible", "[skipped] " + skippedEvent.task.name);
+      break;
     }
-    case 'v2_runner_on_failed':
-    case 'v2_runner_on_unreachable': {
-      const failedEvent = event as AnsibleTaskResultEvent
-      const firstHost = Object.values(failedEvent.hosts)[0]
-      const firstMsg = firstHost?.msg ?? 'unknown error'
-      logError('ansible', '[failed] ' + failedEvent.task.name + ': ' + firstMsg)
-      break
+    case "v2_runner_on_failed":
+    case "v2_runner_on_unreachable": {
+      const failedEvent = event as AnsibleTaskResultEvent;
+      const firstHost = Object.values(failedEvent.hosts)[0];
+      const firstMsg = firstHost?.msg ?? "unknown error";
+      logError(
+        "ansible",
+        "[failed] " + failedEvent.task.name + ": " + firstMsg,
+      );
+      break;
     }
-    case 'v2_playbook_on_stats': {
-      const statsEvent = event as AnsiblePlayStatsEvent
-      logInfo('ansible', '[recap] ' + formatStats(statsEvent.stats))
-      break
+    case "v2_playbook_on_stats": {
+      const statsEvent = event as AnsiblePlayStatsEvent;
+      logInfo("ansible", "[recap] " + formatStats(statsEvent.stats));
+      break;
     }
   }
 }
 
 export interface PlaybookStreamingOptions {
-  cwd?: string
-  env?: Record<string, string>
-  onEvent?: AnsibleEventHandler
+  cwd?: string;
+  env?: Record<string, string>;
+  onEvent?: AnsibleEventHandler;
 }
 
 /**
@@ -197,22 +204,24 @@ export async function runPlaybookStreaming(
     cwd: options.cwd,
     env: options.env,
     onStdoutLine: (line) => {
-      const event = parseAnsibleJsonlLine(line)
+      const event = parseAnsibleJsonlLine(line);
       if (event) {
-        logAnsibleEvent(event)
-        if (options.onEvent) options.onEvent(event)
+        logAnsibleEvent(event);
+        if (options.onEvent) options.onEvent(event);
       } else if (line.trim().length > 0) {
-        logInfo('ansible', line)
+        logInfo("ansible", line);
       }
     },
     onStderrLine: (line) => {
-      if (line.trim().length > 0) logInfo('ansible', line)
+      if (line.trim().length > 0) logInfo("ansible", line);
     },
-  })
+  });
 
   if (!result.success) {
     throw new Error(
-      `ansible-playbook failed (exit ${result.code}): ${ansiblePlaybookBin} ${args.join(' ')}`,
-    )
+      `ansible-playbook failed (exit ${result.code}): ${ansiblePlaybookBin} ${
+        args.join(" ")
+      }`,
+    );
   }
 }

@@ -1,6 +1,6 @@
-import { runLogged } from './exec.ts'
-import { logInfo } from '../logger.ts'
-import { PYTHON_VERSION, UV_BIN } from './paths.ts'
+import { runLogged } from "./exec.ts";
+import { logInfo } from "../logger.ts";
+import { PYTHON_VERSION, UV_BIN } from "./paths.ts";
 
 /**
  * Ensure the pinned Python version is installed into the runtime.
@@ -10,11 +10,11 @@ import { PYTHON_VERSION, UV_BIN } from './paths.ts'
  * resolves managed installs directly.
  */
 export async function ensurePython(): Promise<void> {
-  logInfo('orchestration', `ensuring Python ${PYTHON_VERSION} is installed`)
+  logInfo("orchestration", `ensuring Python ${PYTHON_VERSION} is installed`);
   // Capture uv output — informational "already installed" lines belong in stdout, not err.log.
-  await runLogged(UV_BIN, ['python', 'install', '--no-bin', PYTHON_VERSION], {
-    level: 'DEBUG',
-    component: 'python',
-  })
-  logInfo('orchestration', `Python ${PYTHON_VERSION} ready`)
+  await runLogged(UV_BIN, ["python", "install", "--no-bin", PYTHON_VERSION], {
+    level: "DEBUG",
+    component: "python",
+  });
+  logInfo("orchestration", `Python ${PYTHON_VERSION} ready`);
 }

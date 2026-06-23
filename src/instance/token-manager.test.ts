@@ -6,7 +6,9 @@ function makeJwt(exp: number): string {
   const header = encodeBase64Url(
     new TextEncoder().encode(JSON.stringify({ alg: "HS256", typ: "JWT" })),
   );
-  const payload = encodeBase64Url(new TextEncoder().encode(JSON.stringify({ exp })));
+  const payload = encodeBase64Url(
+    new TextEncoder().encode(JSON.stringify({ exp })),
+  );
   return `${header}.${payload}.signature`;
 }
 
@@ -63,7 +65,12 @@ Deno.test("Refreshes when less than 60 s remain", async () => {
   const apiClient = {
     getAuthChallenge: async () => {
       challengeCalls += 1;
-      return { challengeId: `c-${challengeCalls}`, nonce: `n-${challengeCalls}`, at: "", expiresAt: "" };
+      return {
+        challengeId: `c-${challengeCalls}`,
+        nonce: `n-${challengeCalls}`,
+        at: "",
+        expiresAt: "",
+      };
     },
     createSession: async () => {
       sessionCalls += 1;

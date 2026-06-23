@@ -1,5 +1,7 @@
+import { logWarn } from "../logger.ts";
+
 /** Base URL used with the Unix-socket HTTP client (host is ignored). */
-export const DOCKER_HTTP_ORIGIN = 'http://docker'
+export const DOCKER_HTTP_ORIGIN = "http://docker";
 
 /**
  * Absolute path to the Docker Engine Unix socket.
@@ -10,118 +12,223 @@ export const DOCKER_HTTP_ORIGIN = 'http://docker'
 export function resolveDockerSocket(
   env: Record<string, string | undefined> = Deno.env.toObject(),
 ): string {
-  const override = env.TURBOPANEL_DOCKER_SOCKET?.trim()
-  if (override) return override
+  const override = env.TURBOPANEL_DOCKER_SOCKET?.trim();
+  if (override) return override;
 
   // TODO(rootless): when docker_rootless is enabled, resolve /run/user/<uid>/docker.sock here
-  return '/var/run/docker.sock'
+  return "/var/run/docker.sock";
 }
 
 export interface ContainerSummary {
-  Id: string
-  Names: string[]
-  Image: string
-  State: string
-  Status: string
+  Id: string;
+  Names: string[];
+  Image: string;
+  State: string;
+  Status: string;
+  Labels?: Record<string, string>;
   Ports: {
-    IP?: string
-    PrivatePort: number
-    PublicPort?: number
-    Type: string
-  }[]
+    IP?: string;
+    PrivatePort: number;
+    PublicPort?: number;
+    Type: string;
+  }[];
 }
 
 export interface ContainerInspect {
-  Id: string
-  Name: string
-  Image: string
+  Id: string;
+  Name: string;
+  Image: string;
+  RestartCount?: number;
   State: {
-    Status: string
-    Running: boolean
-    Paused: boolean
-    Restarting: boolean
-    Dead: boolean
-    Pid: number
-    ExitCode: number
-  }
+    Status: string;
+    Running: boolean;
+    Paused: boolean;
+    Restarting: boolean;
+    Dead: boolean;
+    Pid: number;
+    ExitCode: number;
+    StartedAt?: string;
+    FinishedAt?: string;
+    Health?: { Status: string; FailingStreak?: number };
+  };
+  Config?: { Image?: string; Labels?: Record<string, string> };
+  NetworkSettings?: {
+    Ports?: Record<
+      string,
+      { HostIp?: string; HostPort?: string }[] | null
+    >;
+  };
 }
 
+export type DockerEvent = {
+  Type: string;
+  Action: string;
+  Actor: { ID: string; Attributes?: Record<string, string> };
+  time?: number;
+  timeNano?: number;
+  status?: string;
+  id?: string;
+  from?: string;
+};
+
 export class DockerClient {
-  #httpClient: Deno.HttpClient
-  #closed = false
+  #httpClient: Deno.HttpClient;
+  #closed = false;
 
   constructor(socketPath?: string) {
-    const path = socketPath ?? resolveDockerSocket()
+    const path = socketPath ?? resolveDockerSocket();
     this.#httpClient = Deno.createHttpClient({
-      proxy: { transport: 'unix', path },
-    })
+      proxy: { transport: "unix", path },
+    });
   }
 
   async ping(): Promise<boolean> {
     try {
-      const response = await this.#fetch('/_ping')
-      return response.status === 200
+      const response = await this.#fetch("/_ping");
+      return response.status === 200;
     } catch {
-      return false
+      return false;
     }
   }
 
   async listContainers(all = false): Promise<ContainerSummary[]> {
     const response = await this.#fetch(
-      `/containers/json?all=${all ? 'true' : 'false'}`,
-    )
+      `/containers/json?all=${all ? "true" : "false"}`,
+    );
     if (!response.ok) {
-      throw new Error(`list containers failed: HTTP ${response.status}`)
+      throw new Error(`list containers failed: HTTP ${response.status}`);
     }
-    return await response.json() as ContainerSummary[]
+    return await response.json() as ContainerSummary[];
   }
 
   async inspectContainer(id: string): Promise<ContainerInspect> {
-    const response = await this.#fetch(`/containers/${id}/json`)
+    const response = await this.#fetch(`/containers/${id}/json`);
     if (!response.ok) {
-      throw new Error(`inspect container failed: HTTP ${response.status}`)
+      throw new Error(`inspect container failed: HTTP ${response.status}`);
     }
-    return await response.json() as ContainerInspect
+    return await response.json() as ContainerInspect;
   }
 
   async startContainer(id: string): Promise<void> {
     const response = await this.#fetch(`/containers/${id}/start`, {
-      method: 'POST',
-    })
+      method: "POST",
+    });
     if (!response.ok && response.status !== 304) {
-      throw new Error(`start container failed: HTTP ${response.status}`)
+      throw new Error(`start container failed: HTTP ${response.status}`);
     }
   }
 
   async stopContainer(id: string, timeoutSecs?: number): Promise<void> {
-    const query = timeoutSecs !== undefined ? `?t=${timeoutSecs}` : ''
+    const query = timeoutSecs !== undefined ? `?t=${timeoutSecs}` : "";
     const response = await this.#fetch(`/containers/${id}/stop${query}`, {
-      method: 'POST',
-    })
+      method: "POST",
+    });
     if (!response.ok && response.status !== 304) {
-      throw new Error(`stop container failed: HTTP ${response.status}`)
+      throw new Error(`stop container failed: HTTP ${response.status}`);
+    }
+  }
+
+  async *streamEvents(signal: AbortSignal): AsyncGenerator<DockerEvent> {
+    const filters = {
+      type: ["container"],
+      event: [
+        "start",
+        "stop",
+        "die",
+        "destroy",
+        "remove",
+        "restart",
+        "oom",
+        "health_status",
+        "kill",
+        "pause",
+        "unpause",
+      ],
+    };
+    const query = `?filters=${encodeURIComponent(JSON.stringify(filters))}`;
+    let response: Response;
+    try {
+      response = await this.#fetch(`/events${query}`, { signal });
+    } catch (error) {
+      if (
+        signal.aborted ||
+        error instanceof DOMException && error.name === "AbortError"
+      ) {
+        return;
+      }
+      if (error instanceof Deno.errors.BadResource) {
+        return;
+      }
+      throw error;
+    }
+
+    if (!response.ok || !response.body) {
+      throw new Error(`stream events failed: HTTP ${response.status}`);
+    }
+
+    const reader = response.body
+      .pipeThrough(new TextDecoderStream())
+      .getReader();
+    let buffer = "";
+
+    try {
+      while (!signal.aborted) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += value;
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            yield JSON.parse(trimmed) as DockerEvent;
+          } catch {
+            logWarn("docker-client", "events stream: invalid json line");
+          }
+        }
+      }
+    } catch (error) {
+      if (
+        signal.aborted ||
+        error instanceof DOMException && error.name === "AbortError"
+      ) {
+        return;
+      }
+      if (error instanceof Deno.errors.BadResource) {
+        return;
+      }
+      throw error;
+    } finally {
+      try {
+        reader.releaseLock();
+      } catch {
+        // stream already closed
+      }
     }
   }
 
   close(): void {
     if (this.#closed) {
-      return
+      return;
     }
-    this.#closed = true
+    this.#closed = true;
     try {
-      this.#httpClient.close()
+      this.#httpClient.close();
     } catch (error) {
       if (!(error instanceof Deno.errors.BadResource)) {
-        throw error
+        throw error;
       }
     }
   }
 
   #fetch(path: string, init: RequestInit = {}): Promise<Response> {
-    const normalized = path.startsWith('/') ? path : `/${path}`
+    const normalized = path.startsWith("/") ? path : `/${path}`;
     return fetch(`${DOCKER_HTTP_ORIGIN}${normalized}`, {
       ...init,
       client: this.#httpClient,
-    })
+    });
   }
 }

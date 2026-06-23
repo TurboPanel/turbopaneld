@@ -1,4 +1,5 @@
 import { type InstanceConfig, instanceUrl } from "./paths.ts";
+import type { MonitorHeartbeatMessage, MonitorSyncMessage } from "../monitor/protocol.ts";
 
 export interface DaemonApiClientOptions {
   config: InstanceConfig;
@@ -56,6 +57,13 @@ export interface DaemonSessionResponse {
 export interface DaemonHeartbeatRequest {
   serverId: string;
   hostname: string;
+  /** WS-degraded fallback: monitor.sync or monitor.heartbeat envelope for ingestion. */
+  monitor?: MonitorHeartbeatMessage | MonitorSyncMessage;
+}
+
+export interface MonitorHeartbeatAck {
+  acceptedSequence: number;
+  resyncNeeded?: boolean;
 }
 
 export class DaemonApiClient {
@@ -89,13 +97,18 @@ export class DaemonApiClient {
   }
 
   async enroll(params: DaemonEnrollRequest): Promise<DaemonEnrollResponse> {
-    return await this.#requestJson<DaemonEnrollResponse>("/api/daemon/v1/enroll", {
-      method: "POST",
-      body: JSON.stringify(params),
-    });
+    return await this.#requestJson<DaemonEnrollResponse>(
+      "/api/daemon/v1/enroll",
+      {
+        method: "POST",
+        body: JSON.stringify(params),
+      },
+    );
   }
 
-  async createSession(params: DaemonSessionRequest): Promise<DaemonSessionResponse> {
+  async createSession(
+    params: DaemonSessionRequest,
+  ): Promise<DaemonSessionResponse> {
     return await this.#requestJson<DaemonSessionResponse>(
       "/api/daemon/v1/auth/session",
       {
@@ -105,8 +118,8 @@ export class DaemonApiClient {
     );
   }
 
-  async heartbeat(params: DaemonHeartbeatRequest): Promise<void> {
-    await this.#request(
+  async heartbeat(params: DaemonHeartbeatRequest): Promise<MonitorHeartbeatAck> {
+    return await this.#requestJson<MonitorHeartbeatAck>(
       "/api/daemon/v1/heartbeat",
       {
         method: "POST",
@@ -143,7 +156,9 @@ export class DaemonApiClient {
 
     let response = await this.#fetch(path, { ...init, headers });
     if (options.auth && response.status === 401) {
-      const refreshedToken = await this.#options.getToken({ forceRefresh: true });
+      const refreshedToken = await this.#options.getToken({
+        forceRefresh: true,
+      });
       const retryHeaders = new Headers(init.headers);
       retryHeaders.set("content-type", "application/json");
       retryHeaders.set("authorization", `Bearer ${refreshedToken}`);
