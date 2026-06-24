@@ -1,6 +1,8 @@
 ---
 # Switch between dev and production build modes (UI export + compiled instance).
 # Invoked by the dev console toggle or manually with extra-vars.
+# instance-certs reads TURBOPANEL_PUBLIC_URLS from the instance .env (source of truth
+# after public-url apply); the cert script merges .env + role env when SANs change.
 - name: TurboPanel instance build mode toggle
   hosts: localhost
   connection: local

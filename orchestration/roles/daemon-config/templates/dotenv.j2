@@ -4,6 +4,3 @@ TURBOPANEL_DAEMON_STATE_DIR={{ turbopanel_daemon_state_dir | default('/opt/turbo
 {% if turbopanel_instance_ca | length > 0 %}
 TURBOPANEL_INSTANCE_CA={{ turbopanel_instance_ca }}
 {% endif %}
-{% if turbopanel_tls_insecure | bool %}
-TURBOPANEL_TLS_INSECURE=1
-{% endif %}

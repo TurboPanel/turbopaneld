@@ -251,9 +251,6 @@ trap 'rm -f "$VARS_FILE"' EXIT
 	if [ -f "$CA_PATH" ]; then
 		printf 'turbopanel_instance_ca: %s\n' "$CA_PATH"
 	fi
-	if [ "$INSECURE_TLS" = true ]; then
-		printf 'turbopanel_tls_insecure: true\n'
-	fi
 	if [ -n "$TUNNEL_TOKEN" ]; then
 		printf 'turbopanel_tunnel_token: %s\n' "$TUNNEL_TOKEN"
 	fi

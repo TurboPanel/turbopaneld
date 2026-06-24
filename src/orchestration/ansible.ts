@@ -81,7 +81,7 @@ async function repointAnsibleCurrent(): Promise<void> {
   }
 }
 
-async function runLocalPlaybook(
+export async function runLocalPlaybook(
   playbook: string,
   extraArgs: string[] = [],
   onEvent?: AnsibleEventHandler,
@@ -96,25 +96,37 @@ async function runLocalPlaybook(
   })
 }
 
+/** Extra `-e` args for co-located dev ownership context (cert apply, converge, etc.). */
+export function devOwnershipPlaybookExtraArgs(
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+): string[] {
+  const args: string[] = []
+  const devUser = env.TURBOPANEL_DEV_USER
+  const devUid = env.TURBOPANEL_DEV_UID
+  const devGid = env.TURBOPANEL_DEV_GID
+  if (devUser) args.push('-e', `turbopanel_dev_user=${devUser}`)
+  if (devUid) args.push('-e', `turbopanel_dev_uid=${devUid}`)
+  if (devGid) args.push('-e', `turbopanel_dev_gid=${devGid}`)
+  return args
+}
+
 function devInstanceExtraArgs(): string[] {
-  const devUser = Deno.env.get('TURBOPANEL_DEV_USER')
-  const devUid = Deno.env.get('TURBOPANEL_DEV_UID')
-  const devGid = Deno.env.get('TURBOPANEL_DEV_GID')
   const uiMode = Deno.env.get('TURBOPANEL_UI_MODE') === 'static' ? 'static' : 'dev'
   const instanceRunMode =
     Deno.env.get('TURBOPANEL_INSTANCE_RUN_MODE') === 'compiled' ? 'compiled' : 'source'
   const instanceRuntime =
     Deno.env.get('TURBOPANEL_INSTANCE_RUNTIME') === 'workers' ? 'workers' : 'deno'
 
-  const args: string[] = []
-  if (devUser) args.push('-e', `turbopanel_dev_user=${devUser}`)
-  if (devUid) args.push('-e', `turbopanel_dev_uid=${devUid}`)
-  if (devGid) args.push('-e', `turbopanel_dev_gid=${devGid}`)
+  const args: string[] = [...devOwnershipPlaybookExtraArgs()]
   args.push('-e', `turbopanel_ui_mode=${uiMode}`)
   args.push('-e', `turbopanel_instance_run_mode=${instanceRunMode}`)
   args.push('-e', `turbopanel_instance_runtime=${instanceRuntime}`)
   if (instanceRuntime === 'workers') {
     args.push('-e', 'postgres_expose_port=true')
+  }
+  const publicUrls = Deno.env.get('TURBOPANEL_PUBLIC_URLS')
+  if (publicUrls) {
+    args.push('-e', `turbopanel_public_urls=${publicUrls}`)
   }
   return args
 }

@@ -58,5 +58,5 @@ mailpit_smtp_port: 1025
 dbstudio_service_name: turbopanel-dbstudio
 turbopanel_dev_user: ""
 # Co-located dev: Caddy serves /downloads/daemon from {{ turbopanel_daemon_dir }}/dist when UI_MODE=dev.
-turbopanel_dev_install_host: trbp.nl
-turbopanel_tls_extra_sans: "{{ turbopanel_dev_install_host if (turbopanel_dev_user | default('') | length > 0) else '' }}"
+turbopanel_public_urls: ""
+turbopanel_tls_extra_sans: ""

@@ -12,6 +12,7 @@ import {
   type DevSyncState,
   newDevSyncState,
 } from "../dev-sync-apply.ts";
+import { applyPublicUrls } from "./public-urls-apply.ts";
 import { writeInstanceTunnelToken } from "../tunnels.ts";
 import { logDebug, logError, logInfo, logWarn } from "../logger.ts";
 import { type DaemonKeyFile, loadDaemonKeyFile } from "../crypto/keys.ts";
@@ -90,6 +91,14 @@ type DaemonMessage =
   | { type: "tunnel-token"; id: string; token: string; at: string }
   | {
     type: "tunnel-token-result";
+    id: string;
+    ok: boolean;
+    error?: string;
+    at: string;
+  }
+  | { type: "public-urls-update"; id: string; urls: string[]; at: string }
+  | {
+    type: "public-urls-update-result";
     id: string;
     ok: boolean;
     error?: string;
@@ -801,6 +810,15 @@ export class InstanceClient {
           );
         });
         break;
+      case "public-urls-update":
+        this.#applyPublicUrls(message, ws).catch((err) => {
+          logWarn(
+            "instance",
+            "public-urls-update handler failed:",
+            sanitizeForLog(err),
+          );
+        });
+        break;
       case "update":
         this.#applyUpdate(message, ws).catch((err) => {
           logWarn("instance", "update handler failed:", sanitizeForLog(err));
@@ -855,6 +873,30 @@ export class InstanceClient {
 
     const result: DaemonMessage = {
       type: "tunnel-token-result",
+      id: message.id,
+      ok,
+      error,
+      at: new Date().toISOString(),
+    };
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result));
+  }
+
+  async #applyPublicUrls(
+    message: Extract<DaemonMessage, { type: "public-urls-update" }>,
+    ws: WebSocket,
+  ): Promise<void> {
+    let ok = false;
+    let error: string | undefined;
+    try {
+      await applyPublicUrls(message.urls);
+      ok = true;
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+      logError("public-urls", "failed:", sanitizeForLog(error));
+    }
+
+    const result: DaemonMessage = {
+      type: "public-urls-update-result",
       id: message.id,
       ok,
       error,

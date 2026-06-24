@@ -36,7 +36,7 @@ to upgrade or reconcile a node.
 | `--instance-url <URL>`   | **Required.** Base URL of the instance (`https://…` or `http://…`).                           |
 | `--tunnel-token <TOKEN>` | Cloudflare tunnel token. Stored at `cloudflared/tunnels/default.token` and run by the daemon. |
 | `--instance-ca <PATH>`   | PEM platform CA to trust (skips the automatic `/api/daemon/v1/instance/ca` fetch).            |
-| `--insecure-tls`         | Skip TLS verification when dialing the instance (dev only).                                   |
+| `--insecure-tls`         | Use `curl -k` for the bootstrap downloads (binary, CA, run.sh) only; dev/self-signed CDN. Does **not** relax daemon↔instance TLS — that always validates against the platform CA + cert SAN. |
 | `--branch <NAME>`        | Git branch to track (default: `trunk`).                                                       |
 | `--repo-url <URL>`       | Override the daemon git remote.                                                               |
 | `--no-start`             | Provision everything but do not start `turbopanel-daemon.service`.                            |
@@ -95,8 +95,7 @@ Runtime config lives in `/opt/turbopanel/platform/daemon/.env`:
 | Variable                  | Purpose                                                      |
 | ------------------------- | ------------------------------------------------------------ |
 | `TURBOPANEL_INSTANCE_URL` | Instance base URL (set by installer).                        |
-| `TURBOPANEL_INSTANCE_CA`  | Platform CA PEM (trust anchor for the instance server cert). |
-| `TURBOPANEL_TLS_INSECURE` | Set to `1` to skip TLS verification.                         |
+| `TURBOPANEL_INSTANCE_CA`  | Platform CA PEM (trust anchor for the instance server cert). When unset, the daemon uses the system trust store (publicly-valid certs: Let's Encrypt, Cloudflare). |
 
 Cloudflare tunnel tokens go in `cloudflared/tunnels/<name>.token` — one file per
 tunnel. Drop in more files to run multiple tunnels side by side.

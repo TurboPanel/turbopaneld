@@ -1,5 +1,8 @@
 ---
 # Re-template and restart instance/Caddy/UI/mailer units after runtime or build toggles.
+# instance-certs reads TURBOPANEL_PUBLIC_URLS from the instance .env (written by the
+# daemon); callers may pass turbopanel_public_urls as an extra-var when the .env is
+# not yet populated.
 - name: TurboPanel instance launch refresh
   hosts: localhost
   connection: local

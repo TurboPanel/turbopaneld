@@ -100,11 +100,14 @@ export interface InstanceHttpClientOptions {
  * - socket mode: a Unix-transport client (host in the URL is ignored).
  * - url mode with a CA: a client trusting the platform CA PEM (self-hosted).
  * - url mode without a CA: `undefined`, so the platform default fetch/WebSocket
- *   is used (valid public certs).
+ *   is used (valid public certs: Let's Encrypt, Cloudflare, etc.).
  *
- * To skip certificate validation entirely (not recommended), run Deno with
- * `--unsafely-ignore-certificate-errors` (the daemon systemd unit can add that
- * flag when `TURBOPANEL_TLS_INSECURE=1`).
+ * There is no "insecure"/skip-verification mode: the daemon either trusts a
+ * publicly-valid cert via the system store, or trusts the platform CA PEM. In
+ * both cases the instance server cert MUST be valid for the hostname the daemon
+ * dials (its SAN must include the configured public URL host) — otherwise the
+ * TLS handshake fails. Manage the instance cert SANs from the admin surface /
+ * `TURBOPANEL_PUBLIC_URL`, not by disabling verification.
  */
 export async function createInstanceHttpClient(
   config: InstanceConfig,

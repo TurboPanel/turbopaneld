@@ -182,6 +182,11 @@ export const BUILD_TOGGLE_PLAYBOOK = join(
   "playbooks",
   "instance-build-toggle.yml",
 );
+export const INSTANCE_CERTS_APPLY_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  "playbooks",
+  "instance-certs-apply.yml",
+);
 
 export interface UvTarget {
   /** uv release target triple, e.g. `aarch64-unknown-linux-gnu`. */
