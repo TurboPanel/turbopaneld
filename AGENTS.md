@@ -196,12 +196,14 @@ The daemon bootstraps uv/Python/ansible, then runs playbooks. Roles (in
 | `docker` / `daemon-repo` / `daemon-config` / `daemon-logs` / `daemon-launch` | managed-server daemon provisioning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 
 - Co-located **dev** install: `orchestration/playbooks/instance-dev-install.yml`
-  (single converge playbook), run by `initOrchestration()` when co-located
-  (socket mode) **and** `TURBOPANEL_DEV_INSTANCE=1`. The
+  (single converge playbook). The
   [turbopanel-dev](https://github.com/turbopanel/turbopanel-dev) console
-  (`./console` → **Start dev stack**) writes developer identity into the daemon
-  `.env`, bootstraps orchestration, and installs `turbopanel-daemon.service`,
-  which then installs the rest via Ansible. **Local Tilt dev**
+  (`./console` → **Start dev stack**) explicitly runs the converge (via
+  `runOrchestrationAction`), writes developer identity (`TURBOPANEL_DEV_INSTANCE=1`)
+  into the daemon `.env`, bootstraps orchestration, and installs
+  `turbopanel-daemon.service`. Daemon process restarts do **not** re-run the
+  instance stack converge (to avoid restarting turbopanel-instance/caddy/ui just
+  because the agent restarted). **Local Tilt dev**
   (`../dev/Tiltfile`) runs the daemon via `scripts/daemon-serve.sh` with
   `TURBOPANEL_SKIP_ORCHESTRATION=1` instead — Tilt already manages
   instance/Caddy/Postgres; Workers mode sets `TURBOPANEL_INSTANCE_URL` to Caddy
@@ -236,13 +238,13 @@ the daemon `.env`, then re-runs `instance-build-toggle.yml` (roles: `ui-build` �
   `docker` group (needed on co-located dev hosts where Docker predates the
   daemon).
 - Bootstrap also runs on every daemon start (idempotent; failures are logged,
-  daemon keeps running). `initOrchestration()` runs one convergence playbook per
-  mode: `daemon-converge.yml` (daemon-only) or `instance-dev-install.yml`
-  (co-located dev), gathering facts once and running shared roles without
-  overlapping docker/redis/rabbitmq/postgres invocations. **Co-located dev
-  restarts skip the full `instance-dev-install` playbook when a converge stamp
-  matches** (`/opt/turbopanel/runtimes/ansible/dev-converge.stamp` — playbook +
-  role trees + dev extra-vars); set `TURBOPANEL_FORCE_CONVERGE=1` to force a
+  daemon keeps running). `initOrchestration()` ensures the orchestration
+  runtimes (uv/python/ansible) and, for pure managed daemons (remote
+  `TURBOPANEL_INSTANCE_URL`), runs the lightweight `daemon-converge.yml`
+  (sockets/logs/prereqs). Co-located dev full-stack converge is explicit (see
+  above) and is not re-driven by daemon restarts. `daemon-converge` and the
+  tool bootstrap steps are cheap and stamped where possible. Set
+  `TURBOPANEL_FORCE_CONVERGE=1` to force a
   full converge. Explicit console actions (**Start dev stack**, repair) always
   run the playbook via `run-orchestration-action.ts`. Bootstrap stamps (under
   `/opt/turbopanel/runtimes/ansible/bootstrap.stamp`) skip redundant Galaxy

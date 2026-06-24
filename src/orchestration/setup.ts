@@ -1,7 +1,6 @@
 import {
   bootstrapOrchestrationRuntime,
   runDaemonConverge,
-  runInstanceDevInstall,
 } from "./ansible.ts";
 import { ensureOrchestrationTree } from "./bundle-extract.ts";
 import { ensurePython } from "./python.ts";
@@ -73,12 +72,13 @@ function shouldRunDaemonConverge(): boolean {
 /**
  * Bootstrap the orchestration runtime on daemon startup.
  *
- * Installs uv/Python/ansible once, then runs a single convergence playbook:
- * `daemon-converge.yml` on managed-node daemons (sockets/logs/prereqs only — no
- * Docker, redis, rabbitmq, or postgres; Docker installs on demand once a
- * container workload is assigned), or the co-located dev playbook when
- * `TURBOPANEL_DEV_INSTANCE=1` (full instance stack including those services).
- * Each step is idempotent so restarts are cheap.
+ * Ensures uv/Python/ansible toolchains (idempotent, stamped where possible).
+ * For managed-node daemons (TURBOPANEL_INSTANCE_URL set), also runs the
+ * lightweight `daemon-converge.yml` (sockets/logs/prereqs) so the agent host
+ * is ready. Co-located dev stack converge (instance/UI/Caddy) is driven
+ * explicitly by the dev console / "Start dev environment", not automatically
+ * on daemon process restart — restarting the daemon must not restart or
+ * re-install the instance stack.
  *
  * Failures are logged loudly but do NOT crash the daemon: a transient network
  * problem shouldn't take the whole service down. Returns `true` on success.
@@ -91,7 +91,6 @@ export async function initOrchestration(): Promise<boolean> {
 
   const started = performance.now();
   logInfo("orchestration", "bootstrapping runtime");
-  const devInstance = shouldInstallDevInstance();
   const preOptInDev = isPreOptInCoLocatedDev();
   const steps: Array<[string, () => Promise<void>]> = [
     ["ensureOrchestrationTree", ensureOrchestrationTree],
@@ -99,9 +98,7 @@ export async function initOrchestration(): Promise<boolean> {
     ["ensurePython", ensurePython],
     ["bootstrapOrchestrationRuntime", bootstrapOrchestrationRuntime],
   ];
-  if (devInstance) {
-    steps.push(["runInstanceDevInstall", runInstanceDevInstall]);
-  } else if (shouldRunDaemonConverge()) {
+  if (shouldRunDaemonConverge()) {
     steps.push(["runDaemonConverge", runDaemonConverge]);
   } else if (preOptInDev) {
     logInfo(
