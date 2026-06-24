@@ -887,6 +887,10 @@ export class InstanceClient {
   ): Promise<void> {
     let ok = false;
     let error: string | undefined;
+    // #region agent log
+    const _t0 = Date.now();
+    fetch('http://localhost:7882/ingest/09b3950f-5d3f-4c91-a3cf-e073cbcbe3cb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'3fe56e'},body:JSON.stringify({sessionId:'3fe56e',runId:'initial',hypothesisId:'A',location:'client.ts:#applyPublicUrls:start',message:'daemon received public-urls-update',data:{id:message.id,urlCount:message.urls.length},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     try {
       await applyPublicUrls(message.urls);
       ok = true;
@@ -902,6 +906,9 @@ export class InstanceClient {
       error,
       at: new Date().toISOString(),
     };
+    // #region agent log
+    fetch('http://localhost:7882/ingest/09b3950f-5d3f-4c91-a3cf-e073cbcbe3cb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'3fe56e'},body:JSON.stringify({sessionId:'3fe56e',runId:'initial',hypothesisId:'D',location:'client.ts:#applyPublicUrls:reply',message:'daemon replying public-urls-update-result',data:{id:message.id,ok,error:error??null,totalDurationMs:Date.now()-_t0,wsOpen:ws.readyState===WebSocket.OPEN},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result));
   }
 
