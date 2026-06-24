@@ -22,7 +22,12 @@
     turbopanel_service_name: turbopanel-daemon
     turbopanel_start: true
     turbopanel_after_instance_service: false
-    turbopanel_daemon_run_mode: binary
+    # Co-located dev path (this playbook is invoked by install-daemon-systemd.sh
+    # from the dev console). Dev hosts run the daemon from source via deno —
+    # the compiled binary on a dev host is only built to serve to test machines,
+    # never to run locally. Managed-server installs (daemon-install.yml) override
+    # this to `binary`.
+    turbopanel_daemon_run_mode: source
     turbopanel_daemon_binary: "{{ turbopanel_daemon_dir }}/dist/turbopaneld"
 
   roles:

@@ -13,7 +13,7 @@ Environment=TURBOPANEL_DAEMON_ROOT={{ turbopanel_daemon_dir }}
 Environment=TURBOPANEL_SERVICE_NAME={{ turbopanel_service_name }}
 ExecStartPre={{ turbopanel_daemon_dir }}/orchestration/scripts/ensure-single-daemon.sh
 {% if turbopanel_daemon_run_mode | default('binary') == 'source' %}
-ExecStart=/usr/bin/flock -n /run/turbopanel/daemon.lock /usr/local/bin/deno run --quiet --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env --env-file=.env main.ts
+ExecStart=/usr/bin/flock -n /run/turbopanel/daemon.lock {{ turbopanel_daemon_deno_bin | default('/usr/local/bin/deno') }} run --quiet --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env --env-file=.env main.ts
 {% else %}
 EnvironmentFile={{ turbopanel_daemon_dir }}/.env
 ExecStart=/usr/bin/flock -n /run/turbopanel/daemon.lock {{ turbopanel_daemon_binary }}

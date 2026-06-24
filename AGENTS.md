@@ -282,11 +282,17 @@ the daemon `.env`, then re-runs `instance-build-toggle.yml` (roles: `ui-build` �
 
 Managed server daemons and co-located dev hosts run
 **`turbopanel-daemon.service`** (systemd). The official installer /
-`daemon-install.yml` install the unit; co-located instance hosts use
-`scripts/install-daemon-systemd.sh` (which also ensures the user, prereqs, and
-Deno so a fresh dev host is self-sufficient). **Local Tilt dev** runs the same
-process from `../dev/scripts/daemon-serve.sh` (Tilt `daemon` resource) with
-`TURBOPANEL_SKIP_ORCHESTRATION=1` so Ansible bootstrap is skipped.
+`daemon-install.yml` install the unit in **binary run mode**
+(`turbopanel_daemon_run_mode=binary` → `ExecStart` = `dist/turbopaneld`).
+Co-located dev instance hosts use `scripts/install-daemon-systemd.sh`
+(→ `daemon-systemd-setup.yml`), which installs the unit in **source run mode**
+(`turbopanel_daemon_run_mode=source` → `ExecStart` = `deno run main.ts`,
+`--env-file=.env`). **A dev host never runs the compiled binary** — any
+`dist/turbopaneld` built on a dev host exists only to package/serve to remote
+test machines, never to run locally. The deno path defaults to
+`/usr/local/bin/deno` (override with `turbopanel_daemon_deno_bin`). **Local Tilt
+dev** runs the same process from `../dev/scripts/daemon-serve.sh` (Tilt `daemon`
+resource) with `TURBOPANEL_SKIP_ORCHESTRATION=1` so Ansible bootstrap is skipped.
 `scripts/ensure-single-daemon.sh` (ExecStartPre) ensures `/run/turbopanel`
 exists with correct permissions and clears any stale `daemon.lock` left by an
 unclean shutdown.
