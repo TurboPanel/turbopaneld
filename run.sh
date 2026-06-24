@@ -121,19 +121,6 @@ tp_install_daemon_binary() {
 	return 0
 }
 
-# #region agent log
-tp_agent_log() {
-	_hypothesisId="$1"
-	_location="$2"
-	_message="$3"
-	_data="$4"
-	_ts="$(($(date +%s) * 1000))"
-	_log="${TURBOPANEL_DEBUG_LOG:-/opt/turbopanel/platform/config/daemon-install-debug-a4fea3.ndjson}"
-	_line="{\"sessionId\":\"a4fea3\",\"hypothesisId\":\"$_hypothesisId\",\"location\":\"$_location\",\"message\":\"$_message\",\"data\":$_data,\"timestamp\":$_ts}"
-	printf '%s\n' "$_line" >> "$_log" 2>/dev/null || true
-}
-# #endregion
-
 set -eu
 
 LICENSE=""
@@ -237,18 +224,12 @@ else
 fi
 
 echo "run.sh: downloading released daemon binaries"
-# #region agent log
-tp_agent_log "C" "run.sh:binary" "fetch_binary" "{\"dest\":\"$DAEMON_DIR/dist\"}"
-# #endregion
 if ! tp_install_daemon_binary "$BINARY_URL" "$DAEMON_DIR"; then
 	echo "run.sh: failed to download daemon release from $BINARY_URL" >&2
 	exit 1
 fi
 
 export TURBOPANEL_DAEMON_ROOT="$DAEMON_DIR"
-# #region agent log
-tp_agent_log "A" "run.sh:main" "artifact_install_start" "{\"binaryUrl\":\"$BINARY_URL\",\"daemonDir\":\"$DAEMON_DIR\",\"noGitClone\":true}"
-# #endregion
 "$DAEMON_BINARY" bootstrap-orchestration
 
 if [ ! -f "$DAEMON_DIR/orchestration/ansible.cfg" ]; then
