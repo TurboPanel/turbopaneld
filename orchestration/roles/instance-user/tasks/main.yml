@@ -57,12 +57,34 @@
     state: present
     system: true
 
-- name: Ensure instance user (primary group turbopaneli, supplementary turbopanel)
+- name: Check whether redis access group exists
+  ansible.builtin.getent:
+    database: group
+    key: "{{ redis_primary_group }}"
+  register: _instance_redis_group_getent
+  failed_when: false
+
+- name: Build supplementary group list for instance user
+  ansible.builtin.set_fact:
+    _instance_supplementary_groups: >-
+      {{
+        [turbopanel_group]
+        + (
+          [redis_primary_group]
+          if (
+            _instance_redis_group_getent.ansible_facts.getent_group is defined
+            and _instance_redis_group_getent.ansible_facts.getent_group[redis_primary_group] is defined
+          )
+          else []
+        )
+      }}
+
+- name: Ensure instance user (primary group turbopaneli, supplementary turbopanel + turbopanelc)
   ansible.builtin.user:
     name: "{{ instance_user }}"
     uid: "{{ instance_uid }}"
     group: "{{ instance_primary_group }}"
-    groups: "{{ turbopanel_group }}"
+    groups: "{{ _instance_supplementary_groups | unique | join(',') }}"
     append: true
     home: "{{ turbopanel_instance_dir }}"
     shell: /usr/sbin/nologin

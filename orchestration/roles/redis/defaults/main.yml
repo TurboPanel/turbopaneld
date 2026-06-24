@@ -8,5 +8,6 @@ redis_user: turbopanelc
 redis_uid: 9997
 redis_primary_group: turbopanelc
 redis_primary_gid: 9997
+redis_instance_user: turbopaneli
 turbopanel_group: turbopanel
 turbopanel_config_dir: /opt/turbopanel/platform/config

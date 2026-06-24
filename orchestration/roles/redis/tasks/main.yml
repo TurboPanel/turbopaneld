@@ -24,6 +24,22 @@
     system: true
     create_home: false
 
+- name: Check whether instance user exists for Redis socket access
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ redis_instance_user }}"
+  register: _redis_instance_user_getent
+  failed_when: false
+
+- name: Ensure instance user can access redis socket group (turbopanelc)
+  ansible.builtin.user:
+    name: "{{ redis_instance_user }}"
+    groups: "{{ redis_primary_group }}"
+    append: true
+  when: >-
+    _redis_instance_user_getent.ansible_facts.getent_passwd is defined and
+    _redis_instance_user_getent.ansible_facts.getent_passwd[redis_instance_user] is defined
+
 - name: Resolve Redis build architecture
   ansible.builtin.set_fact:
     redis_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
