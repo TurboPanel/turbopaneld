@@ -3,6 +3,7 @@ import { join } from "@std/path";
 import { run, runLogged } from "./exec.ts";
 import { logInfo, logWarn } from "../logger.ts";
 import {
+  CACHE_DIR,
   resolveUvTarget,
   RUNTIME_BIN_DIR,
   RUNTIMES_DIR,
@@ -101,6 +102,7 @@ export async function ensureUv(): Promise<void> {
   logInfo("orchestration", "uv archive checksum verified");
 
   await Deno.mkdir(RUNTIME_BIN_DIR, { recursive: true });
+  await Deno.mkdir(CACHE_DIR, { recursive: true });
   await extractUv(archiveBytes, asset);
 
   const version = await installedUvVersion();

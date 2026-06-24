@@ -36,8 +36,24 @@
     - "{{ turbopanel_install_root }}/platform/config"
     - "{{ turbopanel_runtimes_dir }}"
     - "{{ turbopanel_runtimes_dir }}/uv"
+    - "{{ turbopanel_runtimes_dir }}/uv/cache"
     - "{{ turbopanel_runtimes_dir }}/python"
     - "{{ turbopanel_runtimes_dir }}/ansible"
+
+# The pre-playbook `turbopaneld bootstrap-orchestration` (invoked by run.sh as
+# root on first binary install) may have populated uv/python/ansible state dirs
+# as root. Fix ownership recursively here (right after user creation) so that
+# when later roles (esp. daemon-launch) start the turbopanel-daemon unit, the
+# daemon process (running as turbopanel) can write its uv cache and managed
+# pythons without permission errors.
+- name: Ensure turbopanel owns the runtimes tree
+  ansible.builtin.file:
+    path: "{{ turbopanel_runtimes_dir }}"
+    state: directory
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    recurse: true
+    mode: "0750"
 
 - name: Grant passwordless sudo for orchestration
   ansible.builtin.copy:
