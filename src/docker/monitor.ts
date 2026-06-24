@@ -4,7 +4,7 @@ import type {
   DockerClient,
   DockerEvent,
 } from "./client.ts";
-import { logWarn } from "../logger.ts";
+import { logInfo, logWarn } from "../logger.ts";
 
 export type DockerMonitorChange = {
   containerId: string;
@@ -23,6 +23,23 @@ function isContainerNotFound(err: unknown): boolean {
   return err instanceof Error && err.message.includes("HTTP 404");
 }
 
+/**
+ * True when the error is just "Docker isn't reachable" (socket absent or refused).
+ * On managed nodes Docker is installed on demand, so an absent socket is expected
+ * and must not spam the log — we report it once on transition and retry quietly.
+ */
+function isDockerUnavailable(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const message = err.message;
+  return (
+    message.includes("No such file or directory") ||
+    message.includes("os error 2") ||
+    message.includes("Connection refused") ||
+    message.includes("os error 111") ||
+    message.includes("client error (Connect)")
+  );
+}
+
 function isContainerDestroyEvent(event: DockerEvent): boolean {
   return event.Action === "destroy" || event.Action === "remove";
 }
@@ -36,6 +53,8 @@ export class DockerMonitor {
   #listeners = new Set<(change: DockerMonitorChange) => void>();
   #eventsBackoffMs = 1_000;
   #usingPollFallback = false;
+  /** Tri-state docker reachability: null = unknown, true/false after first probe. */
+  #dockerReachable: boolean | null = null;
   #readyPromise: Promise<void>;
   #markReady: () => void;
 
@@ -60,6 +79,31 @@ export class DockerMonitor {
 
   waitUntilReady(): Promise<void> {
     return this.#readyPromise;
+  }
+
+  /** Mark Docker reachable; log only when transitioning from unavailable. */
+  #markDockerReachable(): void {
+    if (this.#dockerReachable === false) {
+      logInfo("docker-monitor", "Docker socket is now reachable");
+    }
+    this.#dockerReachable = true;
+  }
+
+  /**
+   * Record that Docker is unavailable. Logs once on transition (info, not warn)
+   * so an intentionally Docker-less managed node doesn't flood the error log.
+   * Returns true if this was a state transition.
+   */
+  #markDockerUnavailable(reason: string): boolean {
+    const transitioned = this.#dockerReachable !== false;
+    if (transitioned) {
+      logInfo(
+        "docker-monitor",
+        `Docker socket unavailable (${reason}); will retry quietly until Docker is installed`,
+      );
+    }
+    this.#dockerReachable = false;
+    return transitioned;
   }
 
   getContainers(): ContainerSummary[] {
@@ -114,12 +158,17 @@ export class DockerMonitor {
           inspect: inspects.get(summary.Id),
         });
       }
+      this.#markDockerReachable();
     } catch (err) {
-      logWarn(
-        "docker-monitor",
-        "reconcile failed:",
-        err instanceof Error ? err.message : err,
-      );
+      if (isDockerUnavailable(err)) {
+        this.#markDockerUnavailable("reconcile");
+      } else {
+        logWarn(
+          "docker-monitor",
+          "reconcile failed:",
+          err instanceof Error ? err.message : err,
+        );
+      }
     } finally {
       this.#markReady();
     }
@@ -135,23 +184,32 @@ export class DockerMonitor {
 
   async #eventsLoop(signal: AbortSignal): Promise<void> {
     while (!signal.aborted) {
+      let streamedAny = false;
       try {
         this.#usingPollFallback = false;
-        this.#eventsBackoffMs = 1_000;
 
         for await (const event of this.#client.streamEvents(signal)) {
           if (signal.aborted) return;
+          streamedAny = true;
+          // A live event means the socket is reachable.
+          this.#markDockerReachable();
+          this.#eventsBackoffMs = 1_000;
           await this.#handleEvent(event, signal);
         }
 
         if (signal.aborted) return;
       } catch (err) {
         if (signal.aborted) return;
-        logWarn(
-          "docker-monitor",
-          "events stream failed:",
-          err instanceof Error ? err.message : err,
-        );
+        if (isDockerUnavailable(err)) {
+          // Expected on Docker-less managed nodes — log once on transition.
+          this.#markDockerUnavailable("events stream");
+        } else {
+          logWarn(
+            "docker-monitor",
+            "events stream failed:",
+            err instanceof Error ? err.message : err,
+          );
+        }
       }
 
       if (signal.aborted) return;
@@ -161,6 +219,11 @@ export class DockerMonitor {
         void this.#pollLoop(signal);
       }
 
+      // Only reset the backoff after a genuinely healthy stream; otherwise grow it
+      // so a missing socket doesn't drive a 1s retry/log loop.
+      if (streamedAny) {
+        this.#eventsBackoffMs = 1_000;
+      }
       await delay(this.#eventsBackoffMs, signal);
       this.#eventsBackoffMs = Math.min(this.#eventsBackoffMs * 2, 60_000);
     }
