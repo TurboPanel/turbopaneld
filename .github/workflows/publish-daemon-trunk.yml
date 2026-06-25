@@ -62,48 +62,37 @@ jobs:
       - name: Build cross-arch binaries
         run: deno task compile:all
 
-      - name: Extract raw binaries into staging
+      - name: Extract raw binaries for publish
         run: |
-          mkdir -p "staging/daemon/trunk/$BUILD_ID"
+          mkdir -p "publish/daemon/trunk/$BUILD_ID"
           amd64_tmp=$(mktemp -d)
           arm64_tmp=$(mktemp -d)
           zstd -d -c dist/turbopaneld-linux-amd64.tar.zst | tar -x -C "$amd64_tmp"
           zstd -d -c dist/turbopaneld-linux-arm64.tar.zst | tar -x -C "$arm64_tmp"
-          mv "$amd64_tmp/turbopaneld" "staging/daemon/trunk/$BUILD_ID/linux-amd64"
-          mv "$arm64_tmp/turbopaneld" "staging/daemon/trunk/$BUILD_ID/linux-arm64"
+          mv "$amd64_tmp/turbopaneld" "publish/daemon/trunk/$BUILD_ID/linux-amd64"
+          mv "$arm64_tmp/turbopaneld" "publish/daemon/trunk/$BUILD_ID/linux-arm64"
           rm -rf "$amd64_tmp" "$arm64_tmp"
 
       - name: Compute checksums and sizes
         run: |
-          echo "AMD64_SHA256=$(sha256sum "staging/daemon/trunk/$BUILD_ID/linux-amd64" | awk '{print $1}')" >> "$GITHUB_ENV"
-          echo "AMD64_SIZE=$(stat -c%s "staging/daemon/trunk/$BUILD_ID/linux-amd64")" >> "$GITHUB_ENV"
-          echo "ARM64_SHA256=$(sha256sum "staging/daemon/trunk/$BUILD_ID/linux-arm64" | awk '{print $1}')" >> "$GITHUB_ENV"
-          echo "ARM64_SIZE=$(stat -c%s "staging/daemon/trunk/$BUILD_ID/linux-arm64")" >> "$GITHUB_ENV"
+          echo "AMD64_SHA256=$(sha256sum "publish/daemon/trunk/$BUILD_ID/linux-amd64" | awk '{print $1}')" >> "$GITHUB_ENV"
+          echo "AMD64_SIZE=$(stat -c%s "publish/daemon/trunk/$BUILD_ID/linux-amd64")" >> "$GITHUB_ENV"
+          echo "ARM64_SHA256=$(sha256sum "publish/daemon/trunk/$BUILD_ID/linux-arm64" | awk '{print $1}')" >> "$GITHUB_ENV"
+          echo "ARM64_SIZE=$(stat -c%s "publish/daemon/trunk/$BUILD_ID/linux-arm64")" >> "$GITHUB_ENV"
 
       - name: Generate channel.json
         run: |
           deno run --allow-env --allow-write scripts/generate-channel-manifest.ts \
-            staging/daemon/trunk/channel.json
+            publish/daemon/trunk/channel.json
 
-      - name: Upload linux-amd64 binary via FTP
-        env:
-          FTP_HOST: ${{ secrets.DL_FTP_HOST }}
-          FTP_USER: ${{ secrets.DL_FTP_USERNAME }}
-          FTP_PASS: ${{ secrets.DL_FTP_PASSWORD }}
-        run: |
-          curl --ftp-create-dirs --upload-file "staging/daemon/trunk/$BUILD_ID/linux-amd64" \
-            --user "$FTP_USER:$FTP_PASS" \
-            "ftp://$FTP_HOST/daemon/trunk/$BUILD_ID/linux-amd64"
-
-      - name: Upload linux-arm64 binary via FTP
-        env:
-          FTP_HOST: ${{ secrets.DL_FTP_HOST }}
-          FTP_USER: ${{ secrets.DL_FTP_USERNAME }}
-          FTP_PASS: ${{ secrets.DL_FTP_PASSWORD }}
-        run: |
-          curl --ftp-create-dirs --upload-file "staging/daemon/trunk/$BUILD_ID/linux-arm64" \
-            --user "$FTP_USER:$FTP_PASS" \
-            "ftp://$FTP_HOST/daemon/trunk/$BUILD_ID/linux-arm64"
+      - name: Upload build binaries to FTP
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.DL_FTP_HOST }}
+          username: ${{ secrets.DL_FTP_USERNAME }}
+          password: ${{ secrets.DL_FTP_PASSWORD }}
+          local-dir: publish/daemon/trunk/${{ env.BUILD_ID }}/
+          server-dir: /daemon/trunk/${{ env.BUILD_ID }}/
 
       - name: Upload channel.json to FTP
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
@@ -111,7 +100,7 @@ jobs:
           server: ${{ secrets.DL_FTP_HOST }}
           username: ${{ secrets.DL_FTP_USERNAME }}
           password: ${{ secrets.DL_FTP_PASSWORD }}
-          local-dir: staging/daemon/trunk/
+          local-dir: publish/daemon/trunk/
           server-dir: /daemon/trunk/
           exclude: |
             **/*
