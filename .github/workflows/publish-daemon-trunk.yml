@@ -1,12 +1,17 @@
-# ⚠️  REQUIRED GITHUB REPOSITORY SECRETS
-# Before this workflow will succeed, create these three secrets in the
-# repository Settings → Secrets and variables → Actions:
+# ⚠️  REQUIRED GITHUB REPOSITORY CONFIGURATION
+# Before this workflow will succeed, configure Settings → Secrets and variables → Actions:
 #
-#   DL_FTP_HOST      — FTP server hostname for dl.trbp.nl
-#   DL_FTP_USERNAME  — FTP username
-#   DL_FTP_PASSWORD  — FTP password
+# Variables:
+#   DL_S3_ENDPOINT — Bunny S3 endpoint URL (e.g. https://de-s3.storage.bunnycdn.com)
+#   DL_S3_REGION   — Bunny storage region code for AWS CLI signing (e.g. de for
+#                    https://de-s3.storage.bunnycdn.com); must match DL_S3_ENDPOINT
 #
-# The workflow will fail with a clear error if any secret is missing.
+# Secrets:
+#   DL_S3_BUCKET            — Bunny Storage Zone name (bucket name)
+#   DL_S3_ACCESS_KEY_ID     — Bunny Storage Zone Access Key ID
+#   DL_S3_SECRET_ACCESS_KEY — Bunny Storage Zone Password (Secret Access Key)
+#
+# The workflow will fail with a clear error if any variable or secret is missing.
 
 name: Publish daemon trunk build
 
@@ -19,23 +24,33 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - name: Verify required secrets
+      - name: Verify required secrets and variables
         env:
-          DL_FTP_HOST: ${{ secrets.DL_FTP_HOST }}
-          DL_FTP_USERNAME: ${{ secrets.DL_FTP_USERNAME }}
-          DL_FTP_PASSWORD: ${{ secrets.DL_FTP_PASSWORD }}
+          DL_S3_ENDPOINT: ${{ vars.DL_S3_ENDPOINT }}
+          DL_S3_REGION: ${{ vars.DL_S3_REGION }}
+          DL_S3_BUCKET: ${{ secrets.DL_S3_BUCKET }}
+          DL_S3_ACCESS_KEY_ID: ${{ secrets.DL_S3_ACCESS_KEY_ID }}
+          DL_S3_SECRET_ACCESS_KEY: ${{ secrets.DL_S3_SECRET_ACCESS_KEY }}
         run: |
           missing=0
-          if [ -z "$DL_FTP_HOST" ]; then
-            echo "::error::Missing required secret: DL_FTP_HOST"
+          if [ -z "$DL_S3_ENDPOINT" ]; then
+            echo "::error::Missing required variable: DL_S3_ENDPOINT"
             missing=1
           fi
-          if [ -z "$DL_FTP_USERNAME" ]; then
-            echo "::error::Missing required secret: DL_FTP_USERNAME"
+          if [ -z "$DL_S3_REGION" ]; then
+            echo "::error::Missing required variable: DL_S3_REGION"
             missing=1
           fi
-          if [ -z "$DL_FTP_PASSWORD" ]; then
-            echo "::error::Missing required secret: DL_FTP_PASSWORD"
+          if [ -z "$DL_S3_BUCKET" ]; then
+            echo "::error::Missing required secret: DL_S3_BUCKET"
+            missing=1
+          fi
+          if [ -z "$DL_S3_ACCESS_KEY_ID" ]; then
+            echo "::error::Missing required secret: DL_S3_ACCESS_KEY_ID"
+            missing=1
+          fi
+          if [ -z "$DL_S3_SECRET_ACCESS_KEY" ]; then
+            echo "::error::Missing required secret: DL_S3_SECRET_ACCESS_KEY"
             missing=1
           fi
           if [ "$missing" -ne 0 ]; then
@@ -80,31 +95,40 @@ jobs:
           deno run --allow-env --allow-write scripts/generate-channel-manifest.ts \
             publish/daemon/trunk/channel.json
 
-      - name: Upload trunk build to FTP
-        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
-        with:
-          server: ${{ secrets.DL_FTP_HOST }}
-          username: ${{ secrets.DL_FTP_USERNAME }}
-          password: ${{ secrets.DL_FTP_PASSWORD }}
-          local-dir: publish/
-          server-dir: ./
+      - name: Upload trunk build to S3
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.DL_S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.DL_S3_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ vars.DL_S3_REGION }}
+        run: |
+          aws s3 cp "publish/daemon/trunk/$BUILD_ID/linux-amd64.tar.zst" \
+            "s3://${{ secrets.DL_S3_BUCKET }}/daemon/trunk/$BUILD_ID/linux-amd64.tar.zst" \
+            --endpoint-url "${{ vars.DL_S3_ENDPOINT }}"
+          aws s3 cp "publish/daemon/trunk/$BUILD_ID/linux-arm64.tar.zst" \
+            "s3://${{ secrets.DL_S3_BUCKET }}/daemon/trunk/$BUILD_ID/linux-arm64.tar.zst" \
+            --endpoint-url "${{ vars.DL_S3_ENDPOINT }}"
+          aws s3 cp "publish/daemon/trunk/channel.json" \
+            "s3://${{ secrets.DL_S3_BUCKET }}/daemon/trunk/channel.json" \
+            --endpoint-url "${{ vars.DL_S3_ENDPOINT }}"
 
       - name: Cleanup old trunk build directories
         continue-on-error: true
         env:
-          FTP_HOST: ${{ secrets.DL_FTP_HOST }}
-          FTP_USER: ${{ secrets.DL_FTP_USERNAME }}
-          FTP_PASS: ${{ secrets.DL_FTP_PASSWORD }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.DL_S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.DL_S3_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ vars.DL_S3_REGION }}
         run: |
           build_dirs=$(
-            curl --silent --list-only --user "$FTP_USER:$FTP_PASS" "ftp://$FTP_HOST/daemon/trunk/" \
+            aws s3 ls "s3://${{ secrets.DL_S3_BUCKET }}/daemon/trunk/" \
+              --endpoint-url "${{ vars.DL_S3_ENDPOINT }}" \
+              | awk '{print $2}' \
               | sed 's#/##g' \
               | grep -E '^[0-9]{8}-[0-9]{6}-[a-f0-9]+$' \
               | sort -r \
               | tail -n +3
           )
           for dir in $build_dirs; do
-            curl --user "$FTP_USER:$FTP_PASS" --quote "DELE /daemon/trunk/$dir/linux-amd64.tar.zst" "ftp://$FTP_HOST/"
-            curl --user "$FTP_USER:$FTP_PASS" --quote "DELE /daemon/trunk/$dir/linux-arm64.tar.zst" "ftp://$FTP_HOST/"
-            curl --user "$FTP_USER:$FTP_PASS" --quote "RMD /daemon/trunk/$dir" "ftp://$FTP_HOST/"
+            aws s3 rm "s3://${{ secrets.DL_S3_BUCKET }}/daemon/trunk/$dir/" \
+              --endpoint-url "${{ vars.DL_S3_ENDPOINT }}" \
+              --recursive
           done

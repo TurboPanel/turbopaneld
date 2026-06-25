@@ -139,16 +139,21 @@ permissions can write it. The daemon dials **`/ws/daemon/v1`** and may read
   immutable per-build zstd tar artifacts to
   `/daemon/trunk/<buildId>/linux-amd64.tar.zst` and `linux-arm64.tar.zst`,
   overwrites `/daemon/trunk/channel.json` with the latest manifest, and cleans
-  up old build directories on the FTP server (keeping the two newest). Cleanup
-  failure is tolerated and does not fail the publish job.
-- ⚠️ Three GitHub repository secrets must be created before the publish
-  workflow will succeed:
+  up old build directories on the S3-compatible storage (Bunny.net) (keeping the
+  two newest). Cleanup failure is tolerated and does not fail the publish job.
+- ⚠️ GitHub repository variables and secrets must be configured before the
+  publish workflow will succeed:
+
+| Variable | Purpose |
+| --- | --- |
+| `DL_S3_ENDPOINT` | Bunny S3 endpoint URL for `dl.trbp.nl` (e.g. `https://de-s3.storage.bunnycdn.com`) |
+| `DL_S3_REGION` | Bunny storage region code exported as `AWS_DEFAULT_REGION` for AWS CLI signing (e.g. `de` when `DL_S3_ENDPOINT` is `https://de-s3.storage.bunnycdn.com`); must match the endpoint |
 
 | Secret | Purpose |
 | --- | --- |
-| `DL_FTP_HOST` | FTP server hostname for `dl.trbp.nl` |
-| `DL_FTP_USERNAME` | FTP username |
-| `DL_FTP_PASSWORD` | FTP password |
+| `DL_S3_BUCKET` | Bunny Storage Zone name (used as the S3 bucket name) |
+| `DL_S3_ACCESS_KEY_ID` | Bunny Storage Zone Access Key ID |
+| `DL_S3_SECRET_ACCESS_KEY` | Bunny Storage Zone Password (Secret Access Key) |
 
 ### Daemon key authentication
 
