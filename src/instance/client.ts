@@ -128,9 +128,11 @@ const DEFAULT_MAX_BACKOFF_MS = 30_000;
 const BACKOFF_MULTIPLIER = 2;
 /** Co-located install wait: poll readiness on a fixed cadence before first connect. */
 const INSTALL_READINESS_POLL_MS = 5_000;
-/** Instance pings every 15s — close stale sockets so reconnect runs after instance restart. */
+/** Instance may ping every 15s on Deno; Workers cells often only reply with monitor.ack. */
 const INSTANCE_PING_MS = 15_000;
-const INSTANCE_STALE_MS = 45_000;
+/** Monitor heartbeats run every 60s — allow one full cadence plus jitter before forcing reconnect. */
+const MONITOR_HEARTBEAT_MS = 60_000;
+const INSTANCE_STALE_MS = MONITOR_HEARTBEAT_MS * 2 + 30_000;
 /** After a prior session, wait for the instance to come back after systemd restart. */
 const INSTANCE_RESTART_WAIT_MS = 120_000;
 

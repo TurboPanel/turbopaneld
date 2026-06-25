@@ -75,6 +75,20 @@ Deno.test("buildRemovalTransition emits offline event for removed container", ()
   assertEquals(bundle.payload.resources?.[0]?.status, "offline");
 });
 
+Deno.test("applyAck does not advance deliveredSequence beyond confirmed pending delivery", () => {
+  const tracker = createMonitorDeltaTracker();
+  const first = tracker.buildSync({}, [resource("container:a", "healthy")]);
+  tracker.registerPendingDelivery(first.sequence, first.resourcesAfter);
+  tracker.applyAck(6);
+
+  assertEquals(tracker.getSequence(), first.sequence);
+  const second = tracker.buildSync({}, [
+    resource("container:a", "healthy"),
+    resource("container:b", "healthy"),
+  ]);
+  assertEquals(second.sequence, first.sequence + 1);
+});
+
 Deno.test("buildSync establishes authoritative baseline after sequence gap", () => {
   const tracker = createMonitorDeltaTracker();
   const first = tracker.buildSync({}, [resource("container:a", "healthy")]);

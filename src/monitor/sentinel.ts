@@ -51,8 +51,16 @@ export class Sentinel {
   #transitionCallbacks = new Set<SentinelTransitionCallback>();
   #signal: AbortSignal | undefined;
   #unsubscribe: (() => void) | undefined;
+  readonly #ready: Promise<void>;
+  #markReady!: () => void;
 
   constructor(options: SentinelOptions) {
+    let markReady!: () => void;
+    this.#ready = new Promise<void>((resolve) => {
+      markReady = resolve;
+    });
+    this.#markReady = markReady;
+
     this.#dockerEnabled = options.dockerMonitor !== undefined;
     this.#dockerMonitor = options.dockerMonitor ?? createEmptyContainerMonitor();
     this.#hostSummaryCollector = options.hostSummaryCollector ??
@@ -114,6 +122,15 @@ export class Sentinel {
     this.#delta.confirmDelivery(sequence, resourcesAfter);
   }
 
+  async waitForReady(): Promise<void> {
+    await this.#ready;
+  }
+
+  async resetForReconnect(): Promise<void> {
+    await this.#ready;
+    this.#delta.seedTracked(this.#collectNormalizedResources());
+  }
+
   #collectNormalizedResources(): MonitorResourceState[] {
     if (!this.#dockerEnabled) return [];
 
@@ -148,6 +165,8 @@ export class Sentinel {
         "bootstrap failed:",
         err instanceof Error ? err.message : err,
       );
+    } finally {
+      this.#markReady();
     }
   }
 

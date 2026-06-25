@@ -23,4 +23,6 @@ export interface MonitorSource {
     sequence: number,
     resourcesAfter: MonitorResourceState[],
   ): void;
+  waitForReady?(): Promise<void>;
+  resetForReconnect?(): Promise<void>;
 }

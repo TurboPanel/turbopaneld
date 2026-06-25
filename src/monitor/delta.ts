@@ -147,28 +147,22 @@ export function createMonitorDeltaTracker() {
     pendingDeliveries.clear();
   }
 
-  function resolvePendingSnapshot(
-    acceptedSequence: number,
-  ): Map<string, MonitorResourceState> | undefined {
-    let bestSequence = -1;
-    let bestSnapshot: Map<string, MonitorResourceState> | undefined;
-
-    for (const [pendingSequence, snapshot] of pendingDeliveries) {
-      if (
-        pendingSequence <= acceptedSequence && pendingSequence > bestSequence
-      ) {
-        bestSequence = pendingSequence;
-        bestSnapshot = snapshot;
-      }
-    }
-
-    return bestSnapshot;
-  }
-
   function applyAck(acceptedSequence: number): void {
     if (acceptedSequence <= deliveredSequence) return;
 
-    const snapshot = resolvePendingSnapshot(acceptedSequence);
+    let confirmedSequence = -1;
+    let snapshot: Map<string, MonitorResourceState> | undefined;
+    for (const [pendingSequence, pendingSnapshot] of pendingDeliveries) {
+      if (
+        pendingSequence <= acceptedSequence &&
+        pendingSequence > confirmedSequence
+      ) {
+        confirmedSequence = pendingSequence;
+        snapshot = pendingSnapshot;
+      }
+    }
+    if (confirmedSequence <= deliveredSequence) return;
+
     if (snapshot) {
       deliveredBaseline.clear();
       for (const [resourceKey, resource] of snapshot) {
@@ -176,10 +170,10 @@ export function createMonitorDeltaTracker() {
       }
     }
 
-    deliveredSequence = acceptedSequence;
+    deliveredSequence = confirmedSequence;
 
     for (const pendingSequence of pendingDeliveries.keys()) {
-      if (pendingSequence <= acceptedSequence) {
+      if (pendingSequence <= confirmedSequence) {
         pendingDeliveries.delete(pendingSequence);
       }
     }

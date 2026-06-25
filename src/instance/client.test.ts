@@ -646,6 +646,74 @@ function parseSentMonitorFrames(
 }
 
 Deno.test({
+  name: 'MonitorSession defers heartbeat until initial sync completes',
+  permissions: { env: true },
+  fn: async () => {
+    const tracker = createMonitorDeltaTracker()
+    tracker.seedTracked([])
+    const readyDelayMs = 25
+    const heartbeatIntervalMs = 10
+    const originalSetInterval = globalThis.setInterval
+    const originalClearInterval = globalThis.clearInterval
+
+    globalThis.setInterval = ((
+      handler: (...args: unknown[]) => void,
+      _delayMs?: number,
+      ...args: unknown[]
+    ) => originalSetInterval(handler, heartbeatIntervalMs, ...args)) as typeof setInterval
+    globalThis.clearInterval = originalClearInterval
+
+    const source: MonitorSource = {
+      waitForReady: () =>
+        new Promise((resolve) => setTimeout(resolve, readyDelayMs)),
+      resetForReconnect: async () => {},
+      buildSync: async () => tracker.buildSync({}, []),
+      buildHeartbeat: async () => tracker.buildHeartbeat({}, []),
+      onTransition: () => () => {},
+      handleAck: (acceptedSequence) => tracker.applyAck(acceptedSequence),
+      registerPendingDelivery: (sequence, resourcesAfter) =>
+        tracker.registerPendingDelivery(sequence, resourcesAfter),
+      confirmDelivery: (sequence, resourcesAfter) =>
+        tracker.confirmDelivery(sequence, resourcesAfter),
+    }
+
+    const sentFrames: string[] = []
+    const ws = {
+      readyState: MockWebSocket.OPEN,
+      send(data: string) {
+        sentFrames.push(data)
+      },
+    } as unknown as WebSocket
+
+    const session = new MonitorSession({
+      source,
+      serverId: 'srv-monitor-bootstrap',
+      hostname: 'host-monitor',
+    })
+
+    try {
+      session.attach(ws)
+      await new Promise((resolve) => setTimeout(resolve, readyDelayMs + 20))
+
+      const parsed = parseSentMonitorFrames(sentFrames)
+      const syncIndex = parsed.findIndex((frame) => frame.type === 'monitor.sync')
+      const heartbeatIndex = parsed.findIndex((frame) =>
+        frame.type === 'monitor.heartbeat'
+      )
+
+      assertExists(parsed[syncIndex], 'monitor.sync should be sent')
+      assert(
+        heartbeatIndex === -1 || heartbeatIndex > syncIndex,
+        'monitor.heartbeat must not precede monitor.sync',
+      )
+    } finally {
+      globalThis.setInterval = originalSetInterval
+      session.detach()
+    }
+  },
+})
+
+Deno.test({
   name: 'MonitorSession fallback leaves delivery unconfirmed when resyncNeeded',
   fn: async () => {
     const tracker = createMonitorDeltaTracker()
@@ -828,4 +896,128 @@ Deno.test({
       await Deno.remove(tempDir, { recursive: true })
     }
   },
+})
+
+Deno.test({
+  name: 'INSTANCE_STALE_MS exceeds monitor heartbeat cadence plus jitter',
+  fn: () => {
+    const MONITOR_HEARTBEAT_MS = 60_000
+    const INSTANCE_STALE_MS = 150_000
+    assert(
+      INSTANCE_STALE_MS > MONITOR_HEARTBEAT_MS + 15_000,
+      'stale watchdog must survive one heartbeat interval',
+    )
+  },
+})
+
+Deno.test({
+  name: 'websocket survives inbound silence across one monitor heartbeat interval',
+  permissions: { env: true, read: true, write: true, sys: ['hostname'] },
+  fn: async () => {
+    const tempDir = await Deno.makeTempDir()
+    const originalFetch = globalThis.fetch
+    const originalWebSocket = globalThis.WebSocket
+    const originalStateDir = Deno.env.get('TURBOPANEL_DAEMON_STATE_DIR')
+    const originalForceEnroll = Deno.env.get('TURBOPANEL_FORCE_ENROLL')
+    const sockets: MockWebSocket[] = []
+    let closeCount = 0
+
+    class TrackingWebSocket extends MockWebSocket {
+      constructor(url: string, options?: unknown) {
+        super(url, options)
+        sockets.push(this)
+      }
+
+      override close(code = 1000, reason = ''): void {
+        closeCount += 1
+        super.close(code, reason)
+      }
+    }
+
+    Object.defineProperty(globalThis, 'WebSocket', {
+      configurable: true,
+      writable: true,
+      value: TrackingWebSocket,
+    })
+
+    const authToken = makeJwt(Math.floor(Date.now() / 1000) + 900)
+    Object.defineProperty(globalThis, 'fetch', {
+      configurable: true,
+      writable: true,
+      value: async (input: RequestInfo | URL) => {
+        const url = String(input)
+        if (url.endsWith('/api/health')) {
+          return new Response(JSON.stringify({ ok: true }), { status: 200 })
+        }
+        if (url.endsWith('/api/daemon/v1/auth/challenge')) {
+          return new Response(JSON.stringify({
+            challengeId: 'enroll-challenge',
+            nonce: 'enroll-nonce',
+            at: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          }), { status: 200 })
+        }
+        if (url.endsWith('/api/daemon/v1/enroll')) {
+          return new Response(JSON.stringify({ serverId: 'srv-1', keyId: 'kid-1' }), {
+            status: 200,
+          })
+        }
+        if (url.endsWith('/api/daemon/v1/auth/session')) {
+          return new Response(JSON.stringify({
+            token: authToken,
+            expiresAt: new Date(Date.now() + 900_000).toISOString(),
+          }), { status: 200 })
+        }
+        return new Response(JSON.stringify({ error: 'not found' }), { status: 404 })
+      },
+    })
+
+    Deno.env.set('TURBOPANEL_DAEMON_STATE_DIR', tempDir)
+    Deno.env.set('TURBOPANEL_FORCE_ENROLL', '1')
+    await Deno.writeTextFile(`${tempDir}/license.id`, 'license-123\n')
+    await Deno.writeTextFile(`${tempDir}/license.token`, 'token-abc\n')
+
+    const monitor = createTestMonitorSource()
+    const client = new InstanceClient({
+      config: { kind: 'url', baseUrl: 'https://instance.test', wsBaseUrl: 'wss://instance.test' },
+      reconnectDelayMs: 120_000,
+      monitor,
+    })
+
+    try {
+      client.start()
+      const socket = await waitFor('heartbeat idle websocket', () => sockets.at(0))
+      socket.open()
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      socket.receive(JSON.stringify({
+        type: 'monitor.ack',
+        from: 'instance',
+        serverId: 'srv-1',
+        at: new Date().toISOString(),
+        acceptedSequence: 1,
+      }))
+
+      await new Promise((resolve) => setTimeout(resolve, 65_000))
+
+      assertEquals(closeCount, 0)
+      assertEquals(socket.readyState, MockWebSocket.OPEN)
+      socket.close(1000, 'done')
+    } finally {
+      client.stop()
+      Object.defineProperty(globalThis, 'fetch', {
+        configurable: true,
+        writable: true,
+        value: originalFetch,
+      })
+      Object.defineProperty(globalThis, 'WebSocket', {
+        configurable: true,
+        writable: true,
+        value: originalWebSocket,
+      })
+      setOptionalEnv('TURBOPANEL_DAEMON_STATE_DIR', originalStateDir)
+      setOptionalEnv('TURBOPANEL_FORCE_ENROLL', originalForceEnroll)
+      await Deno.remove(tempDir, { recursive: true })
+    }
+  },
+  sanitizeResources: false,
 })

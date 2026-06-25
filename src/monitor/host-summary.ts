@@ -5,9 +5,21 @@ type CpuSnapshot = {
   idle: number;
 };
 
-function readTextFile(path: string): string | undefined {
+function readProcFile(path: string): string | undefined {
   try {
     return Deno.readTextFileSync(path);
+  } catch {
+    // Deno 2 blocks direct /proc reads under --allow-read; fall back to cat.
+  }
+
+  try {
+    const { code, stdout } = new Deno.Command("cat", {
+      args: [path],
+      stdout: "piped",
+      stderr: "null",
+    }).outputSync();
+    if (code !== 0) return undefined;
+    return new TextDecoder().decode(stdout);
   } catch {
     return undefined;
   }
@@ -131,7 +143,7 @@ export function createHostSummaryCollector(): HostSummaryCollector {
     async collect(): Promise<MonitorInstanceSummary> {
       const summary: MonitorInstanceSummary = {};
 
-      const statText = readTextFile("/proc/stat");
+      const statText = readProcFile("/proc/stat");
       if (statText) {
         const firstLine = statText.split("\n")[0];
         if (firstLine) {
@@ -153,22 +165,22 @@ export function createHostSummaryCollector(): HostSummaryCollector {
         }
       }
 
-      const memText = readTextFile("/proc/meminfo");
+      const memText = readProcFile("/proc/meminfo");
       if (memText) {
         summary.memory = parseMeminfo(memText);
       }
 
-      const loadText = readTextFile("/proc/loadavg");
+      const loadText = readProcFile("/proc/loadavg");
       if (loadText) {
         summary.load = parseLoadavg(loadText);
       }
 
-      const uptimeText = readTextFile("/proc/uptime");
+      const uptimeText = readProcFile("/proc/uptime");
       if (uptimeText) {
         summary.uptimeSeconds = parseUptime(uptimeText);
       }
 
-      const bootId = readTextFile("/proc/sys/kernel/random/boot_id");
+      const bootId = readProcFile("/proc/sys/kernel/random/boot_id");
       if (bootId) {
         summary.bootId = bootId.trim();
       }

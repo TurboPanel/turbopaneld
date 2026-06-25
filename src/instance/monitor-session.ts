@@ -61,15 +61,34 @@ export class MonitorSession {
     this.#ws = ws;
     this.stopFallback();
 
-    void this.#sendSync();
+    void this.#bootstrapMonitoring(ws);
+  }
 
-    this.#heartbeatTimer = setInterval(() => {
-      void this.#sendHeartbeatOverWs();
-    }, MONITOR_HEARTBEAT_MS);
+  async #bootstrapMonitoring(ws: WebSocket): Promise<void> {
+    try {
+      await this.#source.waitForReady?.();
+      if (this.#ws !== ws) return;
 
-    this.#unsubscribeTransition = this.#source.onTransition((bundle) => {
-      this.#sendTransitionOverWs(bundle);
-    });
+      await this.#source.resetForReconnect?.();
+      if (this.#ws !== ws) return;
+
+      await this.#sendSync();
+      if (this.#ws !== ws) return;
+
+      this.#heartbeatTimer = setInterval(() => {
+        void this.#sendHeartbeatOverWs();
+      }, MONITOR_HEARTBEAT_MS);
+
+      this.#unsubscribeTransition = this.#source.onTransition((bundle) => {
+        this.#sendTransitionOverWs(bundle);
+      });
+    } catch (err) {
+      logWarn(
+        "instance",
+        "monitor bootstrap failed:",
+        sanitizeForLog(err),
+      );
+    }
   }
 
   detach(): void {
