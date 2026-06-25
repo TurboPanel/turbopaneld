@@ -8,9 +8,8 @@ server-key-id
 license.id
 license.token
 cloudflared/tunnels/*.token
-dist/
-dist/turbopaneld-linux-amd64
-dist/turbopaneld-linux-arm64
+dist/*
+!dist/channels.json
 turbopaneld
 logs/
 state/
