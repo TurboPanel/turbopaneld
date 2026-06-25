@@ -97,21 +97,7 @@ export async function runInstanceCertsApply(
     `turbopanel_public_urls=${urls.join(",")}`,
     ...devOwnershipPlaybookExtraArgs(),
   ];
-  // #region agent log
-  const _t0 = Date.now();
-  fetch('http://localhost:7882/ingest/09b3950f-5d3f-4c91-a3cf-e073cbcbe3cb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'3fe56e'},body:JSON.stringify({sessionId:'3fe56e',runId:'initial',hypothesisId:'A',location:'public-urls-apply.ts:runInstanceCertsApply:start',message:'instance-certs-apply playbook starting',data:{instanceDir,urlCount:urls.length},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
-  try {
-    await runLocalPlaybook(INSTANCE_CERTS_APPLY_PLAYBOOK, args);
-    // #region agent log
-    fetch('http://localhost:7882/ingest/09b3950f-5d3f-4c91-a3cf-e073cbcbe3cb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'3fe56e'},body:JSON.stringify({sessionId:'3fe56e',runId:'initial',hypothesisId:'A',location:'public-urls-apply.ts:runInstanceCertsApply:done',message:'instance-certs-apply playbook completed',data:{durationMs:Date.now()-_t0},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
-  } catch (err) {
-    // #region agent log
-    fetch('http://localhost:7882/ingest/09b3950f-5d3f-4c91-a3cf-e073cbcbe3cb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'3fe56e'},body:JSON.stringify({sessionId:'3fe56e',runId:'initial',hypothesisId:'C',location:'public-urls-apply.ts:runInstanceCertsApply:error',message:'instance-certs-apply playbook threw',data:{durationMs:Date.now()-_t0,error:err instanceof Error?err.message:String(err)},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
-    throw err;
-  }
+  await runLocalPlaybook(INSTANCE_CERTS_APPLY_PLAYBOOK, args);
 }
 
 export async function applyPublicUrls(urls: string[]): Promise<void> {
