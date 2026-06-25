@@ -62,49 +62,32 @@ jobs:
       - name: Build cross-arch binaries
         run: deno task compile:all
 
-      - name: Extract raw binaries for publish
+      - name: Stage zstd release artifacts for publish
         run: |
           mkdir -p "publish/daemon/trunk/$BUILD_ID"
-          amd64_tmp=$(mktemp -d)
-          arm64_tmp=$(mktemp -d)
-          zstd -d -c dist/turbopaneld-linux-amd64.tar.zst | tar -x -C "$amd64_tmp"
-          zstd -d -c dist/turbopaneld-linux-arm64.tar.zst | tar -x -C "$arm64_tmp"
-          mv "$amd64_tmp/turbopaneld" "publish/daemon/trunk/$BUILD_ID/linux-amd64"
-          mv "$arm64_tmp/turbopaneld" "publish/daemon/trunk/$BUILD_ID/linux-arm64"
-          rm -rf "$amd64_tmp" "$arm64_tmp"
+          cp dist/turbopaneld-linux-amd64.tar.zst "publish/daemon/trunk/$BUILD_ID/linux-amd64.tar.zst"
+          cp dist/turbopaneld-linux-arm64.tar.zst "publish/daemon/trunk/$BUILD_ID/linux-arm64.tar.zst"
 
       - name: Compute checksums and sizes
         run: |
-          echo "AMD64_SHA256=$(sha256sum "publish/daemon/trunk/$BUILD_ID/linux-amd64" | awk '{print $1}')" >> "$GITHUB_ENV"
-          echo "AMD64_SIZE=$(stat -c%s "publish/daemon/trunk/$BUILD_ID/linux-amd64")" >> "$GITHUB_ENV"
-          echo "ARM64_SHA256=$(sha256sum "publish/daemon/trunk/$BUILD_ID/linux-arm64" | awk '{print $1}')" >> "$GITHUB_ENV"
-          echo "ARM64_SIZE=$(stat -c%s "publish/daemon/trunk/$BUILD_ID/linux-arm64")" >> "$GITHUB_ENV"
+          echo "AMD64_SHA256=$(sha256sum "publish/daemon/trunk/$BUILD_ID/linux-amd64.tar.zst" | awk '{print $1}')" >> "$GITHUB_ENV"
+          echo "AMD64_SIZE=$(stat -c%s "publish/daemon/trunk/$BUILD_ID/linux-amd64.tar.zst")" >> "$GITHUB_ENV"
+          echo "ARM64_SHA256=$(sha256sum "publish/daemon/trunk/$BUILD_ID/linux-arm64.tar.zst" | awk '{print $1}')" >> "$GITHUB_ENV"
+          echo "ARM64_SIZE=$(stat -c%s "publish/daemon/trunk/$BUILD_ID/linux-arm64.tar.zst")" >> "$GITHUB_ENV"
 
       - name: Generate channel.json
         run: |
           deno run --allow-env --allow-write scripts/generate-channel-manifest.ts \
             publish/daemon/trunk/channel.json
 
-      - name: Upload build binaries to FTP
+      - name: Upload trunk build to FTP
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
         with:
           server: ${{ secrets.DL_FTP_HOST }}
           username: ${{ secrets.DL_FTP_USERNAME }}
           password: ${{ secrets.DL_FTP_PASSWORD }}
-          local-dir: publish/daemon/trunk/${{ env.BUILD_ID }}/
-          server-dir: /daemon/trunk/${{ env.BUILD_ID }}/
-
-      - name: Upload channel.json to FTP
-        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
-        with:
-          server: ${{ secrets.DL_FTP_HOST }}
-          username: ${{ secrets.DL_FTP_USERNAME }}
-          password: ${{ secrets.DL_FTP_PASSWORD }}
-          local-dir: publish/daemon/trunk/
-          server-dir: /daemon/trunk/
-          exclude: |
-            **/*
-            !channel.json
+          local-dir: publish/
+          server-dir: ./
 
       - name: Cleanup old trunk build directories
         continue-on-error: true
@@ -121,7 +104,7 @@ jobs:
               | tail -n +3
           )
           for dir in $build_dirs; do
-            curl --user "$FTP_USER:$FTP_PASS" --quote "DELE /daemon/trunk/$dir/linux-amd64" "ftp://$FTP_HOST/"
-            curl --user "$FTP_USER:$FTP_PASS" --quote "DELE /daemon/trunk/$dir/linux-arm64" "ftp://$FTP_HOST/"
+            curl --user "$FTP_USER:$FTP_PASS" --quote "DELE /daemon/trunk/$dir/linux-amd64.tar.zst" "ftp://$FTP_HOST/"
+            curl --user "$FTP_USER:$FTP_PASS" --quote "DELE /daemon/trunk/$dir/linux-arm64.tar.zst" "ftp://$FTP_HOST/"
             curl --user "$FTP_USER:$FTP_PASS" --quote "RMD /daemon/trunk/$dir" "ftp://$FTP_HOST/"
           done

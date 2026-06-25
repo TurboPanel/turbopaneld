@@ -38,12 +38,12 @@ const manifest: ChannelManifest = {
   builtAt: BUILT_AT,
   artifacts: {
     "linux-amd64": {
-      path: `/daemon/trunk/${BUILD_ID}/linux-amd64`,
+      path: `/daemon/trunk/${BUILD_ID}/linux-amd64.tar.zst`,
       sha256: AMD64_SHA256,
       size: AMD64_SIZE,
     },
     "linux-arm64": {
-      path: `/daemon/trunk/${BUILD_ID}/linux-arm64`,
+      path: `/daemon/trunk/${BUILD_ID}/linux-arm64.tar.zst`,
       sha256: ARM64_SHA256,
       size: ARM64_SIZE,
     },

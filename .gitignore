@@ -9,7 +9,6 @@ license.id
 license.token
 cloudflared/tunnels/*.token
 dist/*
-!dist/channels.json
 turbopaneld
 logs/
 state/
