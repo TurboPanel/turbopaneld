@@ -261,6 +261,21 @@
     - Reload systemd for instance units
     - Restart turbopanel instance
 
+- name: Read platform CA for Workers daemon trust endpoint
+  ansible.builtin.slurp:
+    src: "{{ turbopanel_instance_dir }}/certs/ca.crt"
+  register: _instance_ca_raw
+  when: (turbopanel_instance_runtime | default('deno')) == 'workers'
+
+- name: Set Workers platform CA base64 fact
+  ansible.builtin.set_fact:
+    # slurp .content is already base64 of the file bytes; strip any whitespace so
+    # the value stays a single .dev.vars line (atob() decodes it in the Worker).
+    turbopanel_instance_ca_pem_b64: "{{ _instance_ca_raw.content | regex_replace('\\s+', '') }}"
+  when:
+    - (turbopanel_instance_runtime | default('deno')) == 'workers'
+    - _instance_ca_raw.content is defined
+
 - name: Install Workers wrangler .dev.vars
   ansible.builtin.template:
     src: instance-workers.dev-vars.j2

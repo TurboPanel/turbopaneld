@@ -2,3 +2,6 @@
 TURBOPANEL_SECRET={{ turbopanel_wrangler_secret }}
 TURBOPANEL_IS_SIGNUP_ENABLED=1
 TURBOPANEL_UI_CORS_ORIGINS={{ website_cors_origins }}
+# Platform CA (base64) so /api/daemon/v1/instance/ca can serve it to remote
+# daemons; the Workers runtime has no filesystem to read certs/ca.crt.
+TURBOPANEL_TLS_CA_PEM_B64={{ turbopanel_instance_ca_pem_b64 | default('') }}
