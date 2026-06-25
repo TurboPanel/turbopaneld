@@ -74,26 +74,59 @@ jobs:
           echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
           echo "BUILT_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_ENV"
 
+      - name: Embed build identity
+        run: |
+          cat > src/build-info.ts <<EOF
+          export interface BuildInfo {
+            commit: string;
+            buildId: string;
+            builtAt: string;
+            channel: string;
+          }
+
+          export const BUILD_INFO: BuildInfo = {
+            commit: "$SHORT_SHA",
+            buildId: "$BUILD_ID",
+            builtAt: "$BUILT_AT",
+            channel: "trunk",
+          };
+
+          export function getBuildInfo(): BuildInfo {
+            return BUILD_INFO;
+          }
+          EOF
+
       - name: Build cross-arch binaries
         run: deno task compile:all
 
       - name: Stage zstd release artifacts for publish
         run: |
-          mkdir -p "publish/daemon/trunk/$BUILD_ID"
-          cp dist/turbopaneld-linux-amd64.tar.zst "publish/daemon/trunk/$BUILD_ID/linux-amd64.tar.zst"
-          cp dist/turbopaneld-linux-arm64.tar.zst "publish/daemon/trunk/$BUILD_ID/linux-arm64.tar.zst"
+          mkdir -p publish/channels/trunk/daemon publish/channels/trunk
+          cp dist/turbopaneld-linux-amd64.tar.zst publish/channels/trunk/daemon/linux-amd64.tar.zst
+          cp dist/turbopaneld-linux-arm64.tar.zst publish/channels/trunk/daemon/linux-arm64.tar.zst
 
       - name: Compute checksums and sizes
         run: |
-          echo "AMD64_SHA256=$(sha256sum "publish/daemon/trunk/$BUILD_ID/linux-amd64.tar.zst" | awk '{print $1}')" >> "$GITHUB_ENV"
-          echo "AMD64_SIZE=$(stat -c%s "publish/daemon/trunk/$BUILD_ID/linux-amd64.tar.zst")" >> "$GITHUB_ENV"
-          echo "ARM64_SHA256=$(sha256sum "publish/daemon/trunk/$BUILD_ID/linux-arm64.tar.zst" | awk '{print $1}')" >> "$GITHUB_ENV"
-          echo "ARM64_SIZE=$(stat -c%s "publish/daemon/trunk/$BUILD_ID/linux-arm64.tar.zst")" >> "$GITHUB_ENV"
+          echo "AMD64_SHA256=$(sha256sum publish/channels/trunk/daemon/linux-amd64.tar.zst | awk '{print $1}')" >> "$GITHUB_ENV"
+          echo "AMD64_SIZE=$(stat -c%s publish/channels/trunk/daemon/linux-amd64.tar.zst)" >> "$GITHUB_ENV"
+          echo "ARM64_SHA256=$(sha256sum publish/channels/trunk/daemon/linux-arm64.tar.zst | awk '{print $1}')" >> "$GITHUB_ENV"
+          echo "ARM64_SIZE=$(stat -c%s publish/channels/trunk/daemon/linux-arm64.tar.zst)" >> "$GITHUB_ENV"
 
-      - name: Generate channel.json
+      - name: Generate channel manifest
         run: |
           deno run --allow-env --allow-write scripts/generate-channel-manifest.ts \
-            publish/daemon/trunk/channel.json
+            publish/channels/trunk/manifest.json
+          cat > publish/channels.json <<'EOF'
+          {
+            "schema": 1,
+            "defaultChannel": "trunk",
+            "channels": {
+              "trunk": {
+                "manifestUrl": "https://dl.trbp.nl/channels/trunk/manifest.json"
+              }
+            }
+          }
+          EOF
 
       - name: Upload trunk build to S3
         env:
@@ -101,34 +134,21 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.DL_S3_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: ${{ vars.DL_S3_REGION }}
         run: |
-          aws s3 cp "publish/daemon/trunk/$BUILD_ID/linux-amd64.tar.zst" \
-            "s3://${{ secrets.DL_S3_BUCKET }}/daemon/trunk/$BUILD_ID/linux-amd64.tar.zst" \
-            --endpoint-url "${{ vars.DL_S3_ENDPOINT }}"
-          aws s3 cp "publish/daemon/trunk/$BUILD_ID/linux-arm64.tar.zst" \
-            "s3://${{ secrets.DL_S3_BUCKET }}/daemon/trunk/$BUILD_ID/linux-arm64.tar.zst" \
-            --endpoint-url "${{ vars.DL_S3_ENDPOINT }}"
-          aws s3 cp "publish/daemon/trunk/channel.json" \
-            "s3://${{ secrets.DL_S3_BUCKET }}/daemon/trunk/channel.json" \
-            --endpoint-url "${{ vars.DL_S3_ENDPOINT }}"
-
-      - name: Cleanup old trunk build directories
-        continue-on-error: true
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.DL_S3_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.DL_S3_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: ${{ vars.DL_S3_REGION }}
-        run: |
-          build_dirs=$(
-            aws s3 ls "s3://${{ secrets.DL_S3_BUCKET }}/daemon/trunk/" \
-              --endpoint-url "${{ vars.DL_S3_ENDPOINT }}" \
-              | awk '{print $2}' \
-              | sed 's#/##g' \
-              | grep -E '^[0-9]{8}-[0-9]{6}-[a-f0-9]+$' \
-              | sort -r \
-              | tail -n +3
-          )
-          for dir in $build_dirs; do
-            aws s3 rm "s3://${{ secrets.DL_S3_BUCKET }}/daemon/trunk/$dir/" \
-              --endpoint-url "${{ vars.DL_S3_ENDPOINT }}" \
-              --recursive
-          done
+          aws s3 cp publish/channels/trunk/daemon/linux-amd64.tar.zst \
+            "s3://${{ secrets.DL_S3_BUCKET }}/channels/trunk/daemon/linux-amd64.tar.zst" \
+            --endpoint-url "${{ vars.DL_S3_ENDPOINT }}" \
+            --cache-control "public, max-age=30, must-revalidate"
+          aws s3 cp publish/channels/trunk/daemon/linux-arm64.tar.zst \
+            "s3://${{ secrets.DL_S3_BUCKET }}/channels/trunk/daemon/linux-arm64.tar.zst" \
+            --endpoint-url "${{ vars.DL_S3_ENDPOINT }}" \
+            --cache-control "public, max-age=30, must-revalidate"
+          aws s3 cp publish/channels/trunk/manifest.json \
+            "s3://${{ secrets.DL_S3_BUCKET }}/channels/trunk/manifest.json" \
+            --endpoint-url "${{ vars.DL_S3_ENDPOINT }}" \
+            --cache-control "public, max-age=30, must-revalidate" \
+            --content-type "application/json"
+          aws s3 cp publish/channels.json \
+            "s3://${{ secrets.DL_S3_BUCKET }}/channels.json" \
+            --endpoint-url "${{ vars.DL_S3_ENDPOINT }}" \
+            --cache-control "public, max-age=30, must-revalidate" \
+            --content-type "application/json"

@@ -17,6 +17,7 @@ import type {
   MonitorTransitionPayload,
 } from "../monitor/delta.ts";
 import type { MonitorSource } from "../monitor/source.ts";
+import { getBuildInfo } from "../build-info.ts";
 
 const MONITOR_HEARTBEAT_MS = 60_000;
 const MONITOR_FALLBACK_MS = 60_000;
@@ -150,11 +151,21 @@ export class MonitorSession {
   }
 
   #wrapSync(payload: MonitorSyncPayload): MonitorSyncMessage {
-    return { ...payload, from: "daemon", serverId: this.#serverId };
+    return {
+      ...payload,
+      from: "daemon",
+      serverId: this.#serverId,
+      agent: getBuildInfo(),
+    };
   }
 
   #wrapHeartbeat(payload: MonitorHeartbeatPayload): MonitorHeartbeatMessage {
-    return { ...payload, from: "daemon", serverId: this.#serverId };
+    return {
+      ...payload,
+      from: "daemon",
+      serverId: this.#serverId,
+      agent: getBuildInfo(),
+    };
   }
 
   #wrapTransition(payload: MonitorTransitionPayload): MonitorTransitionMessage {

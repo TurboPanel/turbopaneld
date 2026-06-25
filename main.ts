@@ -1,4 +1,5 @@
 import "./embedded-orchestration.ts";
+import "./src/build-info.ts";
 import { runBootstrapOrchestration } from "./src/orchestration/bootstrap-once.ts";
 
 if (Deno.args[0] === "bootstrap-orchestration") {

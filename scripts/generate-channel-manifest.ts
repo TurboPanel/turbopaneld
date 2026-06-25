@@ -27,23 +27,27 @@ const AMD64_SIZE = requireEnvNumber("AMD64_SIZE");
 const ARM64_SHA256 = requireEnv("ARM64_SHA256");
 const ARM64_SIZE = requireEnvNumber("ARM64_SIZE");
 
+const DL_BASE_URL = Deno.env.get("DL_BASE_URL")?.trim() ||
+  "https://dl.trbp.nl";
+const DEFAULT_CONTROL_PLANE_URL =
+  Deno.env.get("TURBOPANEL_DEFAULT_CONTROL_PLANE_URL")?.trim() ||
+  "https://turbopanel.app";
+
 const manifest: ChannelManifest = {
-  schemaVersion: 1,
-  app: "daemon",
+  schema: 1,
   channel: "trunk",
-  version: "0.0.0-trunk",
-  branch: "trunk",
-  buildId: BUILD_ID,
   commit: SHORT_SHA,
+  buildId: BUILD_ID,
   builtAt: BUILT_AT,
+  defaultControlPlaneUrl: DEFAULT_CONTROL_PLANE_URL,
   artifacts: {
     "linux-amd64": {
-      path: `/daemon/trunk/${BUILD_ID}/linux-amd64.tar.zst`,
+      url: `${DL_BASE_URL}/channels/trunk/daemon/linux-amd64.tar.zst`,
       sha256: AMD64_SHA256,
       size: AMD64_SIZE,
     },
     "linux-arm64": {
-      path: `/daemon/trunk/${BUILD_ID}/linux-arm64.tar.zst`,
+      url: `${DL_BASE_URL}/channels/trunk/daemon/linux-arm64.tar.zst`,
       sha256: ARM64_SHA256,
       size: ARM64_SIZE,
     },

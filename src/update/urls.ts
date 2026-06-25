@@ -9,14 +9,3 @@ function joinPath(base: string, path: string): string {
 export function rootCatalogUrl(base = DL_BASE_URL): string {
   return joinPath(base, "/channels.json");
 }
-
-export function channelManifestUrl(
-  manifestPath: string,
-  base = DL_BASE_URL,
-): string {
-  return joinPath(base, manifestPath);
-}
-
-export function artifactUrl(artifactPath: string, base = DL_BASE_URL): string {
-  return joinPath(base, artifactPath);
-}

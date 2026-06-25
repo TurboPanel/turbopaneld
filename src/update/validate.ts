@@ -2,10 +2,55 @@ import {
   MalformedManifestError,
   UnsupportedSchemaVersionError,
 } from "./errors.ts";
-import type { ChannelManifest, RootCatalog } from "./types.ts";
+import type { ArtifactEntry, ChannelManifest, RootCatalog } from "./types.ts";
+
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/i;
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function requireHttpsUrl(url: string, fieldName: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new MalformedManifestError(`${fieldName} must be a valid absolute URL`);
+  }
+  if (parsed.protocol !== "https:") {
+    throw new MalformedManifestError(`${fieldName} must use HTTPS`);
+  }
+}
+
+export function validateArtifactEntry(
+  entry: unknown,
+  fieldName: string,
+): ArtifactEntry {
+  if (!isObject(entry)) {
+    throw new MalformedManifestError(`${fieldName} must be an object`);
+  }
+
+  if (typeof entry.url !== "string" || entry.url.trim() === "") {
+    throw new MalformedManifestError(
+      `${fieldName} missing or invalid field: url`,
+    );
+  }
+  requireHttpsUrl(entry.url, `${fieldName}.url`);
+
+  if (typeof entry.sha256 !== "string" || !SHA256_HEX_RE.test(entry.sha256)) {
+    throw new MalformedManifestError(
+      `${fieldName} missing or invalid field: sha256`,
+    );
+  }
+
+  if (typeof entry.size !== "number" || !Number.isFinite(entry.size) ||
+    entry.size <= 0) {
+    throw new MalformedManifestError(
+      `${fieldName} missing or invalid field: size`,
+    );
+  }
+
+  return entry as unknown as ArtifactEntry;
 }
 
 export function parseRootCatalog(raw: unknown): RootCatalog {
@@ -13,31 +58,48 @@ export function parseRootCatalog(raw: unknown): RootCatalog {
     throw new MalformedManifestError("channels.json root must be an object");
   }
 
-  if (raw.schemaVersion !== 1) {
+  if (typeof raw.schema !== "number") {
+    throw new MalformedManifestError(
+      "channels.json missing or invalid field: schema",
+    );
+  }
+
+  if (raw.schema !== 1) {
     throw new UnsupportedSchemaVersionError(
-      `Unsupported channels.json schemaVersion: ${raw.schemaVersion}`,
+      `Unsupported channels.json schema: ${raw.schema}`,
     );
   }
 
-  if (typeof raw.generatedAt !== "string") {
+  if (typeof raw.defaultChannel !== "string") {
     throw new MalformedManifestError(
-      "channels.json missing or invalid field: generatedAt",
+      "channels.json missing or invalid field: defaultChannel",
     );
   }
 
-  if (typeof raw.baseUrl !== "string") {
+  if (!isObject(raw.channels)) {
     throw new MalformedManifestError(
-      "channels.json missing or invalid field: baseUrl",
+      "channels.json missing or invalid field: channels",
     );
   }
 
-  if (!isObject(raw.apps)) {
-    throw new MalformedManifestError(
-      "channels.json missing or invalid field: apps",
+  const catalog = raw as unknown as RootCatalog;
+  for (const [channelName, channelEntry] of Object.entries(catalog.channels)) {
+    if (
+      channelEntry === undefined ||
+      typeof channelEntry.manifestUrl !== "string" ||
+      channelEntry.manifestUrl.trim() === ""
+    ) {
+      throw new MalformedManifestError(
+        `channels.json channel ${channelName} missing or invalid manifestUrl`,
+      );
+    }
+    requireHttpsUrl(
+      channelEntry.manifestUrl,
+      `channels.json channel ${channelName}.manifestUrl`,
     );
   }
 
-  return raw as unknown as RootCatalog;
+  return catalog;
 }
 
 export function parseChannelManifest(raw: unknown): ChannelManifest {
@@ -45,15 +107,15 @@ export function parseChannelManifest(raw: unknown): ChannelManifest {
     throw new MalformedManifestError("channel.json root must be an object");
   }
 
-  if (raw.schemaVersion !== 1) {
-    throw new UnsupportedSchemaVersionError(
-      `Unsupported channel.json schemaVersion: ${raw.schemaVersion}`,
+  if (typeof raw.schema !== "number") {
+    throw new MalformedManifestError(
+      "channel.json missing or invalid field: schema",
     );
   }
 
-  if (typeof raw.app !== "string") {
-    throw new MalformedManifestError(
-      "channel.json missing or invalid field: app",
+  if (raw.schema !== 1) {
+    throw new UnsupportedSchemaVersionError(
+      `Unsupported channel.json schema: ${raw.schema}`,
     );
   }
 
@@ -63,27 +125,15 @@ export function parseChannelManifest(raw: unknown): ChannelManifest {
     );
   }
 
-  if (typeof raw.version !== "string") {
-    throw new MalformedManifestError(
-      "channel.json missing or invalid field: version",
-    );
-  }
-
-  if (typeof raw.buildId !== "string") {
-    throw new MalformedManifestError(
-      "channel.json missing or invalid field: buildId",
-    );
-  }
-
   if (typeof raw.commit !== "string") {
     throw new MalformedManifestError(
       "channel.json missing or invalid field: commit",
     );
   }
 
-  if (typeof raw.branch !== "string") {
+  if (typeof raw.buildId !== "string") {
     throw new MalformedManifestError(
-      "channel.json missing or invalid field: branch",
+      "channel.json missing or invalid field: buildId",
     );
   }
 
@@ -99,5 +149,14 @@ export function parseChannelManifest(raw: unknown): ChannelManifest {
     );
   }
 
-  return raw as unknown as ChannelManifest;
+  const artifacts: ChannelManifest["artifacts"] = {};
+  for (const [platform, entry] of Object.entries(raw.artifacts)) {
+    artifacts[platform as keyof ChannelManifest["artifacts"]] =
+      validateArtifactEntry(entry, `channel.json artifacts.${platform}`);
+  }
+
+  return {
+    ...(raw as unknown as ChannelManifest),
+    artifacts,
+  };
 }

@@ -2,41 +2,49 @@
 set -eu
 
 DAEMON_DIR="$(cd "$(dirname "$0")" && pwd)"
-RUNTIMES_DIR="/opt/turbopanel/runtimes"
-TMP_BINARY="/tmp/turbopaneld-new"
-RUNTIME_BINARY="$DAEMON_DIR/dist/turbopaneld"
+LOCK_FILE="${TURBOPANEL_UPDATE_LOCK_FILE:-$DAEMON_DIR/.update.lock}"
 
-# Step 1 — Resolve update URL
 if [ -z "${TURBOPANEL_UPDATE_URL:-}" ]; then
 	echo "update.sh: TURBOPANEL_UPDATE_URL is not set" >&2
+	exit 1
+fi
+
+if [ -z "${TURBOPANEL_UPDATE_SHA256:-}" ]; then
+	echo "update.sh: TURBOPANEL_UPDATE_SHA256 is not set" >&2
+	exit 1
+fi
+
+case "${TURBOPANEL_UPDATE_URL}" in
+	https://*) ;;
+	*)
+		echo "update.sh: TURBOPANEL_UPDATE_URL must use HTTPS" >&2
+		exit 1
+		;;
+esac
+
+mkdir -p "$(dirname "$LOCK_FILE")"
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+	echo "update.sh: another update is already in progress" >&2
 	exit 1
 fi
 
 # shellcheck source=scripts/lib/release-artifacts.sh
 . "$DAEMON_DIR/scripts/lib/release-artifacts.sh"
 
-# Step 2 — Download release (zstd tar preferred, raw binary fallback)
-if tp_install_daemon_release "$TURBOPANEL_UPDATE_URL" "$DAEMON_DIR"; then
-	:
-elif curl -fsSL "${TURBOPANEL_UPDATE_URL%/}/turbopaneld" -o "$TMP_BINARY"; then
-	if [ ! -s "$TMP_BINARY" ]; then
-		echo "update.sh: downloaded binary is empty" >&2
-		exit 1
-	fi
-	chmod 0755 "$TMP_BINARY"
-	mkdir -p "$(dirname "$RUNTIME_BINARY")"
-	if ! mv "$TMP_BINARY" "$RUNTIME_BINARY"; then
-		echo "update.sh: failed to install binary at $RUNTIME_BINARY" >&2
-		exit 1
-	fi
-else
-	echo "update.sh: failed to download release from $TURBOPANEL_UPDATE_URL" >&2
+if [ -n "${TURBOPANEL_UPDATE_BUILD_ID:-}" ]; then
+	echo "update.sh: installing build ${TURBOPANEL_UPDATE_BUILD_ID} from ${TURBOPANEL_UPDATE_URL}"
+fi
+
+if ! tp_install_verified_artifact "$TURBOPANEL_UPDATE_URL" "$TURBOPANEL_UPDATE_SHA256" "$DAEMON_DIR"; then
 	exit 1
 fi
 
+RUNTIME_BINARY="$(tp_daemon_dist_binary_path "$DAEMON_DIR")"
 if ! sudo chown turbopanel:turbopanel "$RUNTIME_BINARY"; then
 	echo "update.sh: failed to set ownership on $RUNTIME_BINARY" >&2
 	exit 1
 fi
 
-echo "update.sh: restart turbopanel-daemon to apply bundled orchestration updates"
+echo "update.sh: restart handled by daemon after update-result"
+exit 0

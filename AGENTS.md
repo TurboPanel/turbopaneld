@@ -125,22 +125,87 @@ permissions can write it. The daemon dials **`/ws/daemon/v1`** and may read
   eventually change this via the control-plane UI; the daemon-side model is
   ready but the UI is not yet implemented.
 - **Where it is read** — `src/update/config.ts` → `resolveUpdateChannelConfig()`.
-  The resolver (next phase) consumes this config; the daemon does not
-  self-update.
+  `src/update/resolver.ts` → `resolveUpdate()` fetches the channel manifest and
+  artifact metadata from `channels.json`.
+- **Update trigger flow** — on receiving `{ kind: 'update', channel }` (no
+  `updateUrl`) over the daemon WebSocket, `#applyUpdate` in
+  `src/instance/client.ts` calls `resolveUpdate()` using the message channel
+  (or env default), compares `getBuildInfo().commit` to the manifest `commit`,
+  replies `update-result { ok: true }` without restart when they match, otherwise
+  invokes `update.sh` with `TURBOPANEL_UPDATE_URL` (exact artifact URL) and
+  `TURBOPANEL_UPDATE_SHA256` (hex checksum from the manifest), then restarts
+  `turbopanel-daemon` after acking success. Legacy `{ updateUrl }` triggers still
+  invoke `update.sh` without checksum env (will fail unless SHA256 is added —
+  prefer channel-based triggers).
+- **`update.sh` env contract** — requires both `TURBOPANEL_UPDATE_URL` (absolute
+  HTTPS `.tar.zst` URL) and `TURBOPANEL_UPDATE_SHA256` (hex); optional
+  `TURBOPANEL_UPDATE_BUILD_ID` for logging. Verifies checksum via
+  `tp_install_verified_artifact` in `scripts/lib/release-artifacts.sh` before
+  extraction; restart is handled by the daemon after `update-result` is sent.
+- **`tp_install_verified_artifact`** — canonical verified install helper in
+  `scripts/lib/release-artifacts.sh`: download exact URL, `sha256sum -c`, extract
+  to staging, install to `dist/turbopaneld`.
 
 #### `channels.json` catalog
 
-- The root catalog at `https://dl.trbp.nl/channels.json` is **operator-maintained**
-  on the CDN — not published or tracked by this repo. Update it manually when
-  adding apps or channels.
-- The **`publish-daemon-trunk`** workflow triggers on every push to **`trunk`**.
-  It builds cross-arch `turbopaneld` binaries (`deno task compile:all`), generates
-  a typed `channel.json` via `scripts/generate-channel-manifest.ts`, uploads
-  immutable per-build zstd tar artifacts to
-  `/daemon/trunk/<buildId>/linux-amd64.tar.zst` and `linux-arm64.tar.zst`,
-  overwrites `/daemon/trunk/channel.json` with the latest manifest, and cleans
-  up old build directories on the S3-compatible storage (Bunny.net) (keeping the
-  two newest). Cleanup failure is tolerated and does not fail the publish job.
+- The root catalog at `https://dl.trbp.nl/channels.json` is overwritten by the
+  **`publish-daemon-trunk`** GitHub Actions workflow on every push to `trunk`
+  (see `.github/workflows/publish-daemon-trunk.yml`). Live shape:
+
+  ```json
+  {
+    "schema": 1,
+    "defaultChannel": "trunk",
+    "channels": {
+      "trunk": {
+        "manifestUrl": "https://dl.trbp.nl/channels/trunk/manifest.json"
+      }
+    }
+  }
+  ```
+
+- **Channel manifest schema** — per-channel manifests (e.g.
+  `https://dl.trbp.nl/channels/trunk/manifest.json`) are typed as
+  `ChannelManifest` in `src/update/types.ts` and validated by
+  `parseChannelManifest()` in `src/update/validate.ts` (`schema` must be a
+  number; only `1` is supported today). Shape:
+
+  ```json
+  {
+    "schema": 1,
+    "channel": "trunk",
+    "commit": "<short-sha>",
+    "buildId": "<build-id>",
+    "builtAt": "<iso8601>",
+    "defaultControlPlaneUrl": "https://turbopanel.app",
+    "artifacts": {
+      "linux-amd64": {
+        "url": "https://dl.trbp.nl/channels/trunk/daemon/linux-amd64.tar.zst",
+        "sha256": "<hex>",
+        "size": 12345678
+      },
+      "linux-arm64": { "...": "..." }
+    }
+  }
+  ```
+
+  `scripts/generate-channel-manifest.ts` emits this schema; artifact URLs target
+  the stable overwrite keys above. **`publish-daemon-trunk`** publishes
+  `channels.json` (short-cache, `max-age=30`) and
+  `channels/trunk/manifest.json` (short-cache) plus stable overwrite artifact
+  blobs `channels/trunk/daemon/linux-{amd64,arm64}.tar.zst` (immutable cache).
+  No versioned `$BUILD_ID` directories are created; no cleanup job runs. Build
+  identity (`commit`, `buildId`, `builtAt`) is embedded into `src/build-info.ts`
+  before `deno task compile:all` so the binary's `getBuildInfo().commit`
+  matches the manifest `commit` for the same build.
+- **`src/build-info.ts`** — compile-time build identity statically imported from
+  `main.ts` so `deno compile` bundles it. Committed with `commit: "dev"` /
+  `buildId: "dev"` placeholders; CI will overwrite this file before
+  `deno task compile:all` to embed the real commit, buildId, builtAt, and
+  channel. `getBuildInfo()` supplies the running binary's commit for the
+  no-op comparison in `#applyUpdate`.
+- **`UnsupportedAppError`** in `src/update/errors.ts` is retained but no longer
+  used by the resolver (cleanup deferred).
 - ⚠️ GitHub repository variables and secrets must be configured before the
   publish workflow will succeed:
 
@@ -182,7 +247,7 @@ On Cloudflare Workers it is a per-server SQLite-backed Durable Object. The
 daemon client (`src/instance/client.ts`) is unaffected — it still dials
 `/ws/daemon/v1` with `Authorization: Bearer <token>` and reconnects on `4401`.
 
-- **Monitoring transport (new):** after a successful WS connection, the daemon sends monitoring envelopes over the WebSocket — a full `monitor.sync` immediately on (re)connect, then `monitor.heartbeat` at a **60s** cadence (host summary + changed resources since the last acked sequence), and `monitor.transition` for focused single-resource changes. The cell responds with `monitor.ack` (accepted sequence + optional `resyncNeeded`). The old 30s `POST /api/daemon/v1/heartbeat` hot path is **removed**; an HTTP fallback seam remains only when the WebSocket is unavailable.
+- **Monitoring transport (new):** after a successful WS connection, the daemon sends monitoring envelopes over the WebSocket — a full `monitor.sync` immediately on (re)connect, then `monitor.heartbeat` at a **60s** cadence (host summary + changed resources since the last acked sequence), and `monitor.transition` for focused single-resource changes. The cell responds with `monitor.ack` (accepted sequence + optional `resyncNeeded`). The old 30s `POST /api/daemon/v1/heartbeat` hot path is **removed**; an HTTP fallback seam remains only when the WebSocket is unavailable. `monitor.sync` and `monitor.heartbeat` carry an optional `agent: { commit, buildId, builtAt, channel }` field populated from `getBuildInfo()` in `#wrapSync`/`#wrapHeartbeat`. Older daemons omit it; the instance accepts both.
 - **Token lifecycle**: `DaemonTokenManager` stores JWTs in memory only and
   refreshes lazily when less than 60 seconds remain (or immediately after a
   `4401` close).

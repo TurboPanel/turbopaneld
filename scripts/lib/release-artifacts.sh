@@ -141,6 +141,49 @@ tp_install_daemon_release() {
 	return 0
 }
 
+tp_install_verified_artifact() {
+	_url="$1"
+	_sha256="$2"
+	_daemon_dir="$3"
+	_tmp=""
+	_staging=""
+
+	_cleanup() {
+		rm -f "$_tmp"
+		rm -rf "$_staging"
+	}
+	trap _cleanup EXIT
+
+	case "$_url" in
+		https://*) ;;
+		*)
+			echo "tp_install_verified_artifact: URL must use HTTPS: $_url" >&2
+			return 1
+			;;
+	esac
+
+	_tmp="$(mktemp)"
+	_staging="$(mktemp -d)"
+
+	if ! curl -fsSL "$_url" -o "$_tmp"; then
+		echo "tp_install_verified_artifact: failed to download $_url" >&2
+		return 1
+	fi
+
+	if ! printf '%s  %s\n' "$_sha256" "$_tmp" | sha256sum -c -; then
+		echo "tp_install_verified_artifact: SHA-256 mismatch for $_url" >&2
+		return 1
+	fi
+
+	if ! tp_extract_daemon_release "$_tmp" "$_staging"; then
+		return 1
+	fi
+
+	mkdir -p "$(dirname "$(tp_daemon_dist_binary_path "$_daemon_dir")")"
+	install -m 0755 "$_staging/$(tp_daemon_binary_name)" "$(tp_daemon_dist_binary_path "$_daemon_dir")"
+	return 0
+}
+
 tp_fetch_daemon_release() {
 	_base_url="$1"
 	_dest_dir="$2"

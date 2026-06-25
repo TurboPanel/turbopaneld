@@ -24,6 +24,9 @@ import { join } from "@std/path";
 import type { MonitorSource } from "../monitor/source.ts";
 import { parseMonitorMessage } from "../monitor/protocol.ts";
 import { MonitorSession } from "./monitor-session.ts";
+import { getBuildInfo } from "../build-info.ts";
+import { resolveUpdateChannelConfig } from "../update/config.ts";
+import { resolveUpdate } from "../update/resolver.ts";
 
 /** Chained replace pattern Sonar S5145 recognizes for log-injection sanitization. */
 function stripLogInjection(text: string): string {
@@ -104,7 +107,14 @@ type DaemonMessage =
     error?: string;
     at: string;
   }
-  | { type: "update"; id: string; updateUrl: string; at: string }
+  | {
+    type: "update";
+    id: string;
+    channel?: string;
+    updateUrl?: string;
+    updateSha256?: string;
+    at: string;
+  }
   | {
     type: "update-result";
     id: string;
@@ -283,6 +293,7 @@ export class InstanceClient {
   #forceEnrollPending = false;
   #monitorSession: MonitorSession | undefined;
   #monitorHostname: string | undefined;
+  #updateInstallInProgress = false;
 
   constructor(options: InstanceClientOptions = {}) {
     this.#config = options.config ?? resolveInstanceConfig();
@@ -911,27 +922,99 @@ export class InstanceClient {
     message: Extract<DaemonMessage, { type: "update" }>,
     ws: WebSocket,
   ): Promise<void> {
+    if (this.#updateInstallInProgress) {
+      const busy: DaemonMessage = {
+        type: "update-result",
+        id: message.id,
+        ok: false,
+        error: "update already in progress",
+        at: new Date().toISOString(),
+      };
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(busy));
+      return;
+    }
+
+    this.#updateInstallInProgress = true;
     let ok = false;
+    let shouldRestart = false;
     let error: string | undefined;
     try {
       const updateScript = join(resolveDaemonDir(), "update.sh");
-      const command = new Deno.Command("sh", {
-        args: [updateScript],
-        env: {
-          ...Deno.env.toObject(),
-          TURBOPANEL_UPDATE_URL: message.updateUrl,
-        },
-        stdout: "piped",
-        stderr: "piped",
-      });
-      const out = await command.output();
-      if (!out.success) {
-        throw new Error(new TextDecoder().decode(out.stderr).trim());
+
+      if (message.updateUrl) {
+        if (!message.updateSha256) {
+          throw new Error("updateUrl requires updateSha256");
+        }
+        const parsedUrl = new URL(message.updateUrl);
+        if (parsedUrl.protocol !== "https:") {
+          throw new Error("updateUrl must use HTTPS");
+        }
+        const command = new Deno.Command("sh", {
+          args: [updateScript],
+          env: {
+            ...Deno.env.toObject(),
+            TURBOPANEL_UPDATE_URL: message.updateUrl,
+            TURBOPANEL_UPDATE_SHA256: message.updateSha256,
+          },
+          stdout: "piped",
+          stderr: "piped",
+        });
+        const out = await command.output();
+        if (!out.success) {
+          throw new Error(new TextDecoder().decode(out.stderr).trim());
+        }
+        ok = true;
+        shouldRestart = true;
+      } else {
+        let config = resolveUpdateChannelConfig(Deno.env.toObject());
+        const msgChannel = message.channel?.trim();
+        if (msgChannel) {
+          try {
+            config = resolveUpdateChannelConfig({
+              ...Deno.env.toObject(),
+              TURBOPANEL_UPDATE_CHANNEL: msgChannel,
+            });
+          } catch {
+            // fall back to env default when message.channel is invalid
+          }
+        }
+
+        const updateInfo = await resolveUpdate(config);
+
+        if (getBuildInfo().commit === updateInfo.commit) {
+          logInfo(
+            "update",
+            "already on current commit",
+            sanitizeForLog(updateInfo.commit),
+          );
+          ok = true;
+        } else {
+          const command = new Deno.Command("sh", {
+            args: [updateScript],
+            env: {
+              ...Deno.env.toObject(),
+              TURBOPANEL_UPDATE_URL: updateInfo.downloadUrl,
+              TURBOPANEL_UPDATE_SHA256: updateInfo.artifact.sha256,
+              TURBOPANEL_UPDATE_BUILD_ID: updateInfo.buildId,
+            },
+            stdout: "piped",
+            stderr: "piped",
+          });
+          const out = await command.output();
+          if (!out.success) {
+            throw new Error(new TextDecoder().decode(out.stderr).trim());
+          }
+          ok = true;
+          shouldRestart = true;
+        }
       }
-      ok = true;
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
       logError("update", "failed:", sanitizeForLog(error));
+    } finally {
+      if (!shouldRestart) {
+        this.#updateInstallInProgress = false;
+      }
     }
 
     const result: DaemonMessage = {
@@ -945,7 +1028,7 @@ export class InstanceClient {
 
     // Restart only after acking success, so the instance sees the result before
     // this process is replaced by the updated binary.
-    if (ok) await restartDaemonService();
+    if (ok && shouldRestart) await restartDaemonService();
   }
 
   #collectAddresses(

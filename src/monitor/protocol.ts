@@ -86,6 +86,13 @@ export type MonitorMetricSample = {
   load?: number;
 };
 
+export type DaemonAgentInfo = {
+  commit: string;
+  buildId: string;
+  builtAt?: string;
+  channel?: string;
+};
+
 export type MonitorSyncMessage = {
   type: "monitor.sync";
   from: "daemon";
@@ -96,6 +103,7 @@ export type MonitorSyncMessage = {
   resources: MonitorResourceState[];
   events?: MonitorEvent[];
   protocolVersion: typeof MONITOR_PROTOCOL_VERSION;
+  agent?: DaemonAgentInfo;
 };
 
 export type MonitorHeartbeatMessage = {
@@ -107,6 +115,7 @@ export type MonitorHeartbeatMessage = {
   instance: MonitorInstanceSummary;
   resources?: MonitorResourceState[];
   events?: MonitorEvent[];
+  agent?: DaemonAgentInfo;
 };
 
 export type MonitorTransitionMessage = {
@@ -195,6 +204,19 @@ function isMonitorInstanceSummary(
   return isRecord(value);
 }
 
+function parseDaemonAgentInfo(value: unknown): DaemonAgentInfo | undefined {
+  if (!isRecord(value)) return undefined;
+  if (!isString(value.commit) || value.commit.length === 0) return undefined;
+  if (!isString(value.buildId) || value.buildId.length === 0) return undefined;
+  const agent: DaemonAgentInfo = {
+    commit: value.commit,
+    buildId: value.buildId,
+  };
+  if (isString(value.builtAt)) agent.builtAt = value.builtAt;
+  if (isString(value.channel)) agent.channel = value.channel;
+  return agent;
+}
+
 function parseMonitorMessageObject(
   value: Record<string, unknown>,
 ): MonitorMessage | null {
@@ -213,6 +235,7 @@ function parseMonitorMessageObject(
         return null;
       }
       if (value.protocolVersion !== MONITOR_PROTOCOL_VERSION) return null;
+      const syncAgent = parseDaemonAgentInfo(value.agent);
       return {
         type: "monitor.sync",
         from: "daemon",
@@ -223,6 +246,7 @@ function parseMonitorMessageObject(
         resources: value.resources,
         events: value.events,
         protocolVersion: MONITOR_PROTOCOL_VERSION,
+        ...(syncAgent ? { agent: syncAgent } : {}),
       };
     }
     case "monitor.heartbeat": {
@@ -238,6 +262,7 @@ function parseMonitorMessageObject(
       if (value.events !== undefined && !isMonitorEventArray(value.events)) {
         return null;
       }
+      const heartbeatAgent = parseDaemonAgentInfo(value.agent);
       return {
         type: "monitor.heartbeat",
         from: "daemon",
@@ -247,6 +272,7 @@ function parseMonitorMessageObject(
         instance: value.instance,
         resources: value.resources,
         events: value.events,
+        ...(heartbeatAgent ? { agent: heartbeatAgent } : {}),
       };
     }
     case "monitor.transition": {
