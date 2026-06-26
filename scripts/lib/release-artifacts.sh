@@ -165,7 +165,13 @@ tp_install_verified_artifact() {
 	_tmp="$(mktemp)"
 	_staging="$(mktemp -d)"
 
-	if ! curl -fsSL "$_url" -o "$_tmp"; then
+	_curl_tls=""
+	if [ "${TURBOPANEL_RELEASE_TLS_INSECURE:-}" = 1 ]; then
+		_curl_tls="-k"
+	fi
+
+	# shellcheck disable=SC2086
+	if ! curl -fsSL $_curl_tls "$_url" -o "$_tmp"; then
 		echo "tp_install_verified_artifact: failed to download $_url" >&2
 		return 1
 	fi

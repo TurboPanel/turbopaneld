@@ -8,55 +8,49 @@ or pushing a dev-sync build.
 ## Install a testing node
 
 Run on a fresh Debian or Raspbian host (arm64 or amd64). The only required
-argument is the full URL of the instance you want this node to connect to —
-scheme, host, and port, with no defaults baked in.
-
-`install.sh` was removed from this repo. Use the **official CDN-hosted
-installer** published from
-[turbopanel/turbopanel-cdn](https://github.com/turbopanel/turbopanel-cdn):
+argument is a base64url-encoded license (`id:token`).
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/turbopanel/turbopanel-cdn/trunk/install.sh \
-  | sudo bash -s -- \
-      --instance-url https://<instance-host>:<port>
+curl -fsSL https://trbp.nl/run.sh | sudo sh -s -- --license <base64url-encoded-license>
 ```
 
-Replace `<instance-host>` and `<port>` with wherever your instance is reachable
-from this node (LAN hostname, public hostname, tunnel endpoint, etc.).
+For **production** (Cloudflare Workers control plane), `--host` is optional —
+the installer reads `defaultControlPlaneUrl` from the channel manifest
+(`https://turbopanel.app` on the `trunk` channel). For **self-hosted**
+instances, pass `--host` with the full instance URL (scheme, host, and port).
 
 For self-hosted instances over HTTPS, the installer automatically downloads the
-platform CA from `GET /api/daemon/v1/instance/ca` (one `curl -k` bootstrap) and
-restarts the daemon when configuration changes. Re-run the same command any time
-to upgrade or reconcile a node.
+platform CA from `GET /api/daemon/v1/instance/ca` and restarts the daemon when
+configuration changes. Re-run the same command any time to upgrade or reconcile
+a node.
 
 ### Options
 
 | Flag                     | Description                                                                                   |
 | ------------------------ | --------------------------------------------------------------------------------------------- |
-| `--instance-url <URL>`   | **Required.** Base URL of the instance (`https://…` or `http://…`).                           |
+| `--license <b64>`        | **Required.** Base64url-encoded `licenseId:licenseToken`.                                     |
+| `--host <URL>`           | Optional for production (defaults to manifest `defaultControlPlaneUrl`). Required for self-hosted instances (`https://…`). |
 | `--tunnel-token <TOKEN>` | Cloudflare tunnel token. Stored at `cloudflared/tunnels/default.token` and run by the daemon. |
 | `--instance-ca <PATH>`   | PEM platform CA to trust (skips the automatic `/api/daemon/v1/instance/ca` fetch).            |
 | `--insecure-tls`         | Use `curl -k` for the bootstrap downloads (binary, CA, run.sh) only; dev/self-signed CDN. Does **not** relax daemon↔instance TLS — that always validates against the platform CA + cert SAN. |
-| `--branch <NAME>`        | Git branch to track (default: `trunk`).                                                       |
-| `--repo-url <URL>`       | Override the daemon git remote.                                                               |
 | `--no-start`             | Provision everything but do not start `turbopanel-daemon.service`.                            |
 
-Example with a tunnel token and an explicit platform CA path:
+Example with a tunnel token and an explicit platform CA path (self-hosted):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/turbopanel/turbopanel-cdn/trunk/install.sh \
-  | sudo bash -s -- \
-      --instance-url https://<instance-host>:<port> \
-      --tunnel-token <CLOUDFLARED_TOKEN> \
-      --instance-ca /path/to/instance-ca.pem
+curl -fsSL https://trbp.nl/run.sh | sudo sh -s -- \
+  --license <base64url-encoded-license> \
+  --host https://<instance-host>:<port> \
+  --tunnel-token <CLOUDFLARED_TOKEN> \
+  --instance-ca /path/to/instance-ca.pem
 ```
 
-LAN example (same command — CA fetch is automatic):
+LAN example (self-hosted — CA fetch is automatic):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/turbopanel/turbopanel-cdn/trunk/install.sh \
-  | sudo bash -s -- \
-      --instance-url https://turbopanel.lan:8443
+curl -fsSL https://trbp.nl/run.sh | sudo sh -s -- \
+  --license <base64url-encoded-license> \
+  --host https://turbopanel.lan:8443
 ```
 
 Re-running the installer is safe — every Ansible role is idempotent and the

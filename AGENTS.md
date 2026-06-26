@@ -485,13 +485,19 @@ packaging, or `TURBOPANEL_DAEMON_RELEASE_VERSION` when downloading):
 - `turbopaneld-<version>-linux-arm64.tar.zst`
 
 Naming and fetch/extract helpers live in
-`scripts/lib/release-artifacts.sh` (used by `run.sh`, `update.sh`, the CDN
-`install.sh`, and the packager). The dev bootstrap **`run.sh`** is the single
-entrypoint: it exports `TURBOPANEL_DAEMON_BINARY_URL` (`--binary-url`), downloads
-and extracts `turbopaneld` into the daemon runtimes tree, then runs
-`daemon-install.yml`. There is no separate `install.sh` in this repo — the
-daemon provisions everything else (instance/Caddy/UI/Docker-on-demand) via
-Ansible after it starts.
+`scripts/lib/release-artifacts.sh` (used by `scripts/run.sh`, `update.sh`, and
+the packager). The operator bootstrap **`scripts/run.sh`** is the single
+entrypoint: **`--license` is required** and must be a **base64url-encoded**
+`licenseId:licenseToken` value (not raw `id:token` — see `README.md` and the
+decoder in `scripts/run.sh`). It fetches the binary URL and
+`defaultControlPlaneUrl` from the channel manifest at
+`https://dl.trbp.nl/channels.json`, verifies the artifact SHA-256, extracts
+`turbopaneld` into `platform/daemon/dist/`, bootstraps orchestration, then runs
+`daemon-install.yml`. There is no separate
+`install.sh` in this repo — the daemon provisions everything else
+(instance/Caddy/UI/Docker-on-demand) via Ansible after it starts. The internal
+self-update script `update.sh` at the repo root is invoked by `#applyUpdate` in
+`src/instance/client.ts` — it is not the operator-facing bootstrap.
 
 ### Slim Debian prerequisites
 
@@ -523,13 +529,18 @@ shared-library install.
 
 - `main.ts` — entry; orchestration bootstrap, tunnels, instance client (no
   self-update)
-- `run.sh` — the single dev bootstrap entrypoint (served at `/run.sh` by Caddy
-  in co-located dev): installs prereqs + Deno, clones the checkout, drops in the
-  released `turbopaneld`, bootstraps orchestration, and runs `daemon-install.yml`.
-  No companion `install.sh` — the daemon does the rest via Ansible. The official
-  production node installer lives in
-  [turbopanel/turbopanel-cdn](https://github.com/turbopanel/turbopanel-cdn) (see
-  `README.md` for the curl workflow)
+- `scripts/run.sh` — operator bootstrap entrypoint (served at
+  `https://trbp.nl/run.sh` via 301 redirect and at `/run.sh` by Caddy in
+  co-located dev): **`--license <b64>` is required** — a base64url-encoded
+  `licenseId:licenseToken` (not raw `id:token`). Fetches the release binary URL
+  and `defaultControlPlaneUrl` from the channel manifest at
+  `https://dl.trbp.nl/channels.json` (no `--binary-url` flag); `--host` is
+  optional and defaults to `defaultControlPlaneUrl` from the manifest
+  (production: `https://turbopanel.app`). Installs apt prereqs, downloads and
+  verifies `turbopaneld`, bootstraps orchestration, and runs `daemon-install.yml`.
+  See `README.md` for the curl workflow. `update.sh` at the repo root is the
+  **internal** daemon self-update script invoked by `#applyUpdate` — not the
+  operator-facing bootstrap.
 - `src/instance/client.ts` — WSS client; HTTP-first enrollment/session
   bootstrap + command/address + dev-sync/tunnel-token handlers
 - `src/instance/api-client.ts` — HTTP API client for daemon auth/enroll/session
