@@ -40,9 +40,13 @@
     _redis_instance_user_getent.ansible_facts.getent_passwd is defined and
     _redis_instance_user_getent.ansible_facts.getent_passwd[redis_instance_user] is defined
 
-- name: Resolve Redis build architecture
-  ansible.builtin.set_fact:
-    redis_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
+- name: Assert supported CPU architecture
+  ansible.builtin.assert:
+    that:
+      - ansible_architecture in ['aarch64', 'x86_64']
+    fail_msg: >-
+      Unsupported CPU architecture '{{ ansible_architecture }}'.
+      TurboPanel supports 64-bit Linux only: aarch64 (arm64), x86_64 (amd64).
 
 - name: Check vendored Redis binary
   ansible.builtin.stat:

@@ -7,8 +7,10 @@ or pushing a dev-sync build.
 
 ## Install a testing node
 
-Run on a fresh Debian or Raspbian host (arm64 or amd64). The only required
-argument is a base64url-encoded license (`id:token`).
+Run on a fresh **64-bit** Debian host (`x86_64` / amd64 or `aarch64` / arm64).
+Raspberry Pi OS is supported on **64-bit** images only — 32-bit ARM (including
+32-bit Raspberry Pi OS) is not supported. The only required argument is a
+base64url-encoded license (`id:token`).
 
 ```bash
 curl -fsSL https://trbp.nl/run.sh | sudo sh -s -- --license <base64url-encoded-license>
