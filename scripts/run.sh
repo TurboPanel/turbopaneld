@@ -264,15 +264,28 @@ mkdir -p "$CONFIG_DIR"
 if [ -n "$INSTANCE_CA" ]; then
 	install -m 0640 "$INSTANCE_CA" "$CA_PATH"
 else
-	_curl_ca="curl -fsSL"
-	[ "$INSECURE_TLS" = true ] && _curl_ca="curl -fsSLk"
+	_curl_base="curl -sSL"
+	[ "$INSECURE_TLS" = true ] && _curl_base="curl -sSLk"
+	_ca_tmp="$(mktemp)"
+	_ca_http_code=""
 	# shellcheck disable=SC2086
-	if $_curl_ca "${HOST_URL%/}/api/daemon/v1/instance/ca" > "$CA_PATH"; then
-		chmod 0640 "$CA_PATH"
-	else
-		rm -f "$CA_PATH"
-		echo "run.sh: warning: could not download instance CA from ${HOST_URL%/}" >&2
-	fi
+	_ca_http_code=$($_curl_base -o "$_ca_tmp" -w '%{http_code}' "${HOST_URL%/}/api/daemon/v1/instance/ca" || echo "000")
+	case "$_ca_http_code" in
+		200)
+			install -m 0640 "$_ca_tmp" "$CA_PATH"
+			;;
+		404)
+			# Workers production and other publicly-trusted control planes have no
+			# platform CA — the daemon uses the system trust store instead.
+			echo "run.sh: no platform CA at ${HOST_URL%/} (public TLS — daemon will use system trust store)" >&2
+			rm -f "$CA_PATH"
+			;;
+		*)
+			echo "run.sh: warning: could not download instance CA from ${HOST_URL%/} (HTTP ${_ca_http_code})" >&2
+			rm -f "$CA_PATH"
+			;;
+	esac
+	rm -f "$_ca_tmp"
 fi
 
 echo "run.sh: downloading released daemon binary"
