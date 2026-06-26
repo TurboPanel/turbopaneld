@@ -36,12 +36,14 @@ function shouldInstallDevInstance(): boolean {
 }
 
 /**
- * Co-located dev host (Unix socket) before the developer opts in via the
- * console. Orchestration bootstrap runs, but no converge playbook yet.
+ * Co-located dev host before the developer opts in via the console (Deno
+ * socket or Workers HTTPS). Orchestration bootstrap runs, but no converge
+ * playbook yet.
  */
 export function isPreOptInCoLocatedDev(): boolean {
   if (shouldInstallDevInstance()) return false;
-  return resolveInstanceConfig().kind === "socket";
+  if (resolveInstanceConfig().kind === "socket") return true;
+  return Deno.env.get("TURBOPANEL_INSTANCE_RUNTIME")?.trim() === "workers";
 }
 
 /** Dial the instance only when this host is meant to reach it yet. */
@@ -52,10 +54,12 @@ export function shouldConnectToInstance(): boolean {
 
 /**
  * Whether the daemon should connect to Docker (managed servers and opted-in dev).
- * Pre-opt-in co-located dev runs on Deno only and waits for opt-in first.
+ * Pre-opt-in co-located dev (Deno socket or Workers HTTPS) stays passive until
+ * the console opts in.
  */
 export function shouldEnableDockerIntegration(): boolean {
   if (shouldSkipOrchestration()) return false;
+  if (isPreOptInCoLocatedDev()) return false;
   if (shouldInstallDevInstance()) return true;
   if (shouldRunDaemonConverge()) return true;
   return false;
@@ -66,6 +70,7 @@ export function shouldEnableDockerIntegration(): boolean {
  * on startup outside the dev-console deferred-start install path.
  */
 function shouldRunDaemonConverge(): boolean {
+  if (isPreOptInCoLocatedDev()) return false;
   return resolveInstanceConfig().kind === "url";
 }
 
