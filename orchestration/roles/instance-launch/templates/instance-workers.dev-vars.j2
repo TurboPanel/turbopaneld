@@ -5,3 +5,8 @@ TURBOPANEL_UI_CORS_ORIGINS={{ website_cors_origins }}
 # Platform CA (base64) so /api/daemon/v1/instance/ca can serve it to remote
 # daemons; the Workers runtime has no filesystem to read certs/ca.crt.
 TURBOPANEL_TLS_CA_PEM_B64={{ turbopanel_instance_ca_pem_b64 | default('') }}
+{% if turbopanel_dev_user | length > 0 %}
+# Co-located dev: deliver signup/OTP email through local Mailpit (HTTP API).
+TURBOPANEL_SYSTEM_EMAIL__PROVIDER=mailpit
+MAILPIT_API_URL=http://127.0.0.1:{{ mailpit_web_port | default(8025) }}
+{% endif %}
