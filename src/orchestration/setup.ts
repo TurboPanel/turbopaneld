@@ -1,12 +1,16 @@
 import {
   bootstrapOrchestrationRuntime,
   runDaemonConverge,
+  runLocalPlaybook,
 } from "./ansible.ts";
+import type { AnsibleEventHandler } from "./ansible-events.ts";
 import { ensureOrchestrationTree } from "./bundle-extract.ts";
+import { createInstallerTui } from "./installer-tui.ts";
 import { ensurePython } from "./python.ts";
 import { ensureUv } from "./uv.ts";
 import { resolveInstanceConfig } from "../instance/paths.ts";
 import { logError, logInfo } from "../logger.ts";
+import { DAEMON_INSTALL_PLAYBOOK } from "./paths.ts";
 
 /**
  * True when Tilt/local dev already manages the instance stack and the daemon
@@ -126,5 +130,68 @@ export async function initOrchestration(): Promise<boolean> {
       "daemon will continue running without a verified runtime",
     );
     return false;
+  }
+}
+
+export interface RunInstallerOptions {
+  instanceUrl: string;
+  start: boolean;
+  instanceCa?: string;
+  tunnelToken?: string;
+}
+
+export async function runInstaller(opts: RunInstallerOptions): Promise<void> {
+  const varsFile = await Deno.makeTempFile();
+  const tui = createInstallerTui();
+  tui?.start();
+  try {
+    const lines: string[] = [
+      `turbopanel_instance_url: ${opts.instanceUrl}`,
+      `turbopanel_start: ${opts.start}`,
+    ];
+    if (opts.instanceCa) {
+      let stat: Deno.FileInfo;
+      try {
+        stat = Deno.statSync(opts.instanceCa);
+      } catch {
+        throw new Error(
+          `Instance CA file not found or unreadable: ${opts.instanceCa}`,
+        );
+      }
+      if (!stat.isFile) {
+        throw new Error(`Instance CA path is not a file: ${opts.instanceCa}`);
+      }
+      lines.push(`turbopanel_instance_ca: ${opts.instanceCa}`);
+    }
+    if (opts.tunnelToken?.trim()) {
+      lines.push(`turbopanel_tunnel_token: ${opts.tunnelToken.trim()}`);
+    }
+    await Deno.writeTextFile(varsFile, `${lines.join("\n")}\n`);
+
+    const onEvent: AnsibleEventHandler = (event) => {
+      tui?.onEvent(event);
+    };
+
+    await runLocalPlaybook(
+      DAEMON_INSTALL_PLAYBOOK,
+      ["-e", `@${varsFile}`],
+      onEvent,
+      undefined,
+      tui !== null,
+    );
+    tui?.finish(true, "TurboPanel daemon installed successfully");
+    logInfo("installer", "daemon provisioning complete");
+  } catch (err) {
+    tui?.finish(
+      false,
+      err instanceof Error ? err.message : String(err),
+    );
+    throw err;
+  } finally {
+    try {
+      await Deno.remove(varsFile);
+    } catch {
+      // best-effort cleanup
+    }
   }
 }

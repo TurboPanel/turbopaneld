@@ -127,21 +127,20 @@ permissions can write it. The daemon dials **`/ws/daemon/v1`** and may read
 - **Where it is read** — `src/update/config.ts` → `resolveUpdateChannelConfig()`.
   `src/update/resolver.ts` → `resolveUpdate()` fetches the channel manifest and
   artifact metadata from `channels.json`.
-- **Update trigger flow** — on receiving `{ kind: 'update', channel }` (no
-  `updateUrl`) over the daemon WebSocket, `#applyUpdate` in
-  `src/instance/client.ts` calls `resolveUpdate()` using the message channel
-  (or env default), compares `getBuildInfo().commit` to the manifest `commit`,
-  replies `update-result { ok: true }` without restart when they match, otherwise
-  invokes `update.sh` with `TURBOPANEL_UPDATE_URL` (exact artifact URL) and
-  `TURBOPANEL_UPDATE_SHA256` (hex checksum from the manifest), then restarts
-  `turbopanel-daemon` after acking success. Legacy `{ updateUrl }` triggers still
-  invoke `update.sh` without checksum env (will fail unless SHA256 is added —
-  prefer channel-based triggers).
-- **`update.sh` env contract** — requires both `TURBOPANEL_UPDATE_URL` (absolute
-  HTTPS `.tar.zst` URL) and `TURBOPANEL_UPDATE_SHA256` (hex); optional
-  `TURBOPANEL_UPDATE_BUILD_ID` for logging. Verifies checksum via
-  `tp_install_verified_artifact` in `scripts/lib/release-artifacts.sh` before
-  extraction; restart is handled by the daemon after `update-result` is sent.
+- **Update trigger flow** — on receiving `{ kind: 'update', channel }` over the
+  daemon WebSocket, `#applyUpdate` in `src/instance/client.ts` calls
+  `resolveUpdate()` using the message channel (or env default), compares
+  `getBuildInfo().commit` to the manifest `commit`, replies
+  `update-result { ok: true }` without restart when they match, otherwise
+  downloads the operator **`run.sh`** entrypoint (CDN for production, or
+  `{instance}/run.sh` for self-hosted), re-encodes stored license credentials as
+  base64url, and runs `sudo sh -s -- --license … [--host …] --no-start` to
+  idempotently reconcile the node via `daemon-install.yml`. The daemon acks
+  success, then restarts `turbopanel-daemon`. Legacy `{ updateUrl }` envelopes
+  are ignored — channel manifest resolution drives the reconcile.
+- **`update.sh`** — retained for manual/binary-only swaps; release tarballs ship
+  `turbopaneld` only (no checkout scripts), so UI-triggered updates must use
+  `run.sh`, not `update.sh`.
 - **`tp_install_verified_artifact`** — canonical verified install helper in
   `scripts/lib/release-artifacts.sh`: download exact URL, `sha256sum -c`, extract
   to staging, install to `dist/turbopaneld`.
@@ -495,9 +494,9 @@ decoder in `scripts/run.sh`). It fetches the binary URL and
 `turbopaneld` into `platform/daemon/dist/`, bootstraps orchestration, then runs
 `daemon-install.yml`. There is no separate
 `install.sh` in this repo — the daemon provisions everything else
-(instance/Caddy/UI/Docker-on-demand) via Ansible after it starts. The internal
-self-update script `update.sh` at the repo root is invoked by `#applyUpdate` in
-`src/instance/client.ts` — it is not the operator-facing bootstrap.
+(instance/Caddy/UI/Docker-on-demand) via Ansible after it starts. **`update.sh`**
+at the repo root is a manual binary-only swap helper; UI-triggered updates
+re-run **`run.sh`** via `#applyUpdate` in `src/instance/client.ts`.
 
 ### Slim Debian prerequisites
 
@@ -538,9 +537,9 @@ shared-library install.
   optional and defaults to `defaultControlPlaneUrl` from the manifest
   (production: `https://turbopanel.app`). Installs apt prereqs, downloads and
   verifies `turbopaneld`, bootstraps orchestration, and runs `daemon-install.yml`.
-  See `README.md` for the curl workflow. `update.sh` at the repo root is the
-  **internal** daemon self-update script invoked by `#applyUpdate` — not the
-  operator-facing bootstrap.
+  See `README.md` for the curl workflow. UI-triggered updates re-run this
+  script via `#applyUpdate` (`src/instance/run-reconcile.ts`); **`update.sh`**
+  is a manual binary-only helper and is not shipped on installed nodes.
 - `src/instance/client.ts` — WSS client; HTTP-first enrollment/session
   bootstrap + command/address + dev-sync/tunnel-token handlers
 - `src/instance/api-client.ts` — HTTP API client for daemon auth/enroll/session

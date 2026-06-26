@@ -187,6 +187,11 @@ export const INSTANCE_CERTS_APPLY_PLAYBOOK = join(
   "playbooks",
   "instance-certs-apply.yml",
 );
+export const DAEMON_INSTALL_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  "playbooks",
+  "daemon-install.yml",
+);
 
 export interface UvTarget {
   /** uv release target triple, e.g. `aarch64-unknown-linux-gnu`. */

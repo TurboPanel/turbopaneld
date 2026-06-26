@@ -186,34 +186,37 @@ export interface PlaybookStreamingOptions {
   cwd?: string;
   env?: Record<string, string>;
   onEvent?: AnsibleEventHandler;
+  /** When true, parsed events and raw stdout/stderr are not logged (TUI consumers). */
+  quiet?: boolean;
 }
 
 /**
  * Run ansible-playbook with stdout parsed as JSONL task events.
  *
- * Parsed events are logged via `logAnsibleEvent()`; unparseable stdout lines and all
- * stderr lines are still routed through the structured logger under the `ansible`
- * component.
+ * Parsed events are logged via `logAnsibleEvent()` unless `quiet` is set; unparseable
+ * stdout lines and all stderr lines are routed through the structured logger under the
+ * `ansible` component (also suppressed when `quiet`).
  */
 export async function runPlaybookStreaming(
   ansiblePlaybookBin: string,
   args: string[],
   options: PlaybookStreamingOptions,
 ): Promise<void> {
+  const quiet = options.quiet === true;
   const result = await runStreamingLines(ansiblePlaybookBin, args, {
     cwd: options.cwd,
     env: options.env,
     onStdoutLine: (line) => {
       const event = parseAnsibleJsonlLine(line);
       if (event) {
-        logAnsibleEvent(event);
+        if (!quiet) logAnsibleEvent(event);
         if (options.onEvent) options.onEvent(event);
-      } else if (line.trim().length > 0) {
+      } else if (!quiet && line.trim().length > 0) {
         logInfo("ansible", line);
       }
     },
     onStderrLine: (line) => {
-      if (line.trim().length > 0) logInfo("ansible", line);
+      if (!quiet && line.trim().length > 0) logInfo("ansible", line);
     },
   });
 

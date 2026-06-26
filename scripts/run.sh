@@ -21,11 +21,38 @@ tp_user_in_sudo_group() {
 tp_sudo_installed() { command -v sudo >/dev/null 2>&1; }
 tp_install_privilege_denied() {
 	if tp_user_in_sudo_group; then
-		echo "run.sh: run as root (su -); sudo is not installed yet — the daemon installer will install it" >&2
+		tp_print_error "run as root (su -); sudo is not installed yet — the daemon installer will install it"
 	else
-		echo "run.sh: must run as root or as a user in the sudo group" >&2
+		tp_print_error "must run as root or as a user in the sudo group"
 	fi
 	exit 1
+}
+
+tp_print_step() {
+	_glyph="$1"; _msg="$2"
+	if [ -t 1 ]; then
+		printf '\033[36m%s\033[0m %s\n' "$_glyph" "$_msg"
+	else
+		printf '%s %s\n' "$_glyph" "$_msg"
+	fi
+}
+
+tp_print_ok() {
+	_msg="$1"
+	if [ -t 1 ]; then
+		printf '\033[32m✓\033[0m %s\n' "$_msg"
+	else
+		printf '✓ %s\n' "$_msg"
+	fi
+}
+
+tp_print_error() {
+	_msg="$1"
+	if [ -t 2 ]; then
+		printf '\033[31m✗\033[0m %s\n' "$_msg" >&2
+	else
+		printf '✗ %s\n' "$_msg" >&2
+	fi
 }
 
 tp_daemon_binary_name() {
@@ -36,10 +63,7 @@ tp_daemon_linux_arch() {
 	case "$(uname -m)" in
 		x86_64 | amd64) echo amd64 ;;
 		aarch64 | arm64) echo arm64 ;;
-		*)
-			echo "tp_daemon_linux_arch: unsupported machine $(uname -m)" >&2
-			return 1
-		;;
+		*) return 1 ;;
 	esac
 }
 
@@ -53,16 +77,13 @@ tp_extract_daemon_release() {
 	_dest_dir="$2"
 	_binary_name="$(tp_daemon_binary_name)"
 	if ! command -v zstd >/dev/null 2>&1; then
-		echo "tp_extract_daemon_release: zstd is required" >&2
 		return 1
 	fi
 	mkdir -p "$_dest_dir"
 	if ! zstd -d -q -c "$_archive" | tar -x -C "$_dest_dir"; then
-		echo "tp_extract_daemon_release: failed to extract $_archive" >&2
 		return 1
 	fi
 	if [ ! -f "$_dest_dir/$_binary_name" ]; then
-		echo "tp_extract_daemon_release: archive missing $_binary_name member" >&2
 		return 1
 	fi
 	chmod 0755 "$_dest_dir/$_binary_name"
@@ -84,10 +105,7 @@ tp_install_verified_artifact() {
 
 	case "$_url" in
 		https://*) ;;
-		*)
-			echo "tp_install_verified_artifact: URL must use HTTPS: $_url" >&2
-			return 1
-			;;
+		*) return 1 ;;
 	esac
 
 	_tmp="$(mktemp)"
@@ -97,13 +115,11 @@ tp_install_verified_artifact() {
 	[ "${TURBOPANEL_RELEASE_TLS_INSECURE:-}" = 1 ] && _curl_tls="-k"
 
 	# shellcheck disable=SC2086
-	if ! curl -fsSL $_curl_tls "$_url" -o "$_tmp"; then
-		echo "tp_install_verified_artifact: failed to download $_url" >&2
+	if ! curl -fsSL $_curl_tls "$_url" -o "$_tmp" 2>/dev/null; then
 		return 1
 	fi
 
-	if ! printf '%s  %s\n' "$_sha256" "$_tmp" | sha256sum -c -; then
-		echo "tp_install_verified_artifact: SHA-256 mismatch for $_url" >&2
+	if ! printf '%s  %s\n' "$_sha256" "$_tmp" | sha256sum -c - >/dev/null 2>&1; then
 		return 1
 	fi
 
@@ -124,26 +140,24 @@ tp_fetch_channel_manifest() {
 	[ "${TURBOPANEL_RELEASE_TLS_INSECURE:-}" = 1 ] && _curl="curl -fsSLk"
 
 	_channels_json=""
-	if ! _channels_json="$($_curl "https://dl.trbp.nl/channels.json")"; then
-		echo "run.sh: failed to fetch https://dl.trbp.nl/channels.json" >&2
+	if ! _channels_json="$($_curl "https://dl.trbp.nl/channels.json" 2>/dev/null)"; then
 		return 1
 	fi
 
 	_channels_oneline="$(printf '%s' "$_channels_json" | tr -d '[:space:]')"
 	_manifest_url="$(printf '%s' "$_channels_oneline" | grep -o "\"${_channel}\"[^}]*manifestUrl\":\"[^\"]*\"" | sed 's/.*manifestUrl":"//' | tr -d '"')"
 	if [ -z "$_manifest_url" ]; then
-		echo "run.sh: channel ${_channel} not found in channels.json" >&2
 		return 1
 	fi
 
 	_manifest_json=""
-	if ! _manifest_json="$($_curl "$_manifest_url")"; then
-		echo "run.sh: failed to fetch $_manifest_url" >&2
+	if ! _manifest_json="$($_curl "$_manifest_url" 2>/dev/null)"; then
 		return 1
 	fi
 
 	_manifest_oneline="$(printf '%s' "$_manifest_json" | tr -d '[:space:]')"
 	_manifest_host="$(printf '%s' "$_manifest_oneline" | grep -o '"defaultControlPlaneUrl":"[^"]*"' | sed 's/.*":"//' | tr -d '"')"
+	_manifest_commit="$(printf '%s' "$_manifest_oneline" | grep -o '"commit":"[^"]*"' | sed 's/"commit":"//' | tr -d '"')"
 	_artifact_url="$(printf '%s' "$_manifest_oneline" | grep -o "\"${_arch_key}\"[^{]*{[^}]*\"url\":\"[^\"]*\"" | grep -o '"url":"[^"]*"' | sed 's/"url":"//' | tr -d '"')"
 	_artifact_sha256="$(printf '%s' "$_manifest_oneline" | grep -o "\"${_arch_key}\"[^{]*{[^}]*\"sha256\":\"[^\"]*\"" | grep -o '"sha256":"[^"]*"' | sed 's/"sha256":"//' | tr -d '"')"
 
@@ -151,7 +165,6 @@ tp_fetch_channel_manifest() {
 		_manifest_host="https://turbopanel.app"
 	fi
 	if [ -z "$_artifact_url" ] || [ -z "$_artifact_sha256" ]; then
-		echo "run.sh: artifact url/sha256 missing for ${_arch_key} in channel manifest" >&2
 		return 1
 	fi
 
@@ -159,6 +172,18 @@ tp_fetch_channel_manifest() {
 }
 
 set -eu
+
+tp_print_header() {
+	if [ -t 1 ]; then
+		printf '\n'
+		printf '  ╭─────────────────────────────────────────╮\n'
+		printf '  │  ⚡ TurboPanel  ·  Daemon Installer     │\n'
+		printf '  ╰─────────────────────────────────────────╯\n'
+		printf '\n'
+	else
+		printf 'TurboPanel Daemon Installer\n'
+	fi
+}
 
 LICENSE=""
 HOST_URL=""
@@ -170,28 +195,28 @@ NO_START=false
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--license)
-			[ $# -ge 2 ] || { echo "run.sh: --license requires an argument" >&2; exit 1; }
+			[ $# -ge 2 ] || { tp_print_error "--license requires an argument"; exit 1; }
 			LICENSE="$2"; shift 2 ;;
 		--host)
-			[ $# -ge 2 ] || { echo "run.sh: --host requires an argument" >&2; exit 1; }
+			[ $# -ge 2 ] || { tp_print_error "--host requires an argument"; exit 1; }
 			HOST_URL="$2"; shift 2 ;;
 		--instance-ca)
-			[ $# -ge 2 ] || { echo "run.sh: --instance-ca requires an argument" >&2; exit 1; }
+			[ $# -ge 2 ] || { tp_print_error "--instance-ca requires an argument"; exit 1; }
 			INSTANCE_CA="$2"; shift 2 ;;
 		--tunnel-token)
-			[ $# -ge 2 ] || { echo "run.sh: --tunnel-token requires an argument" >&2; exit 1; }
+			[ $# -ge 2 ] || { tp_print_error "--tunnel-token requires an argument"; exit 1; }
 			TUNNEL_TOKEN="$2"; shift 2 ;;
 		--insecure-tls)
 			INSECURE_TLS=true; shift ;;
 		--no-start)
 			NO_START=true; shift ;;
 		*)
-			echo "run.sh: unknown option: $1" >&2; exit 1 ;;
+			tp_print_error "unknown option: $1"; exit 1 ;;
 	esac
 done
 
 if [ -z "$LICENSE" ]; then
-	echo "run.sh: --license is required" >&2
+	tp_print_error "--license is required"
 	exit 1
 fi
 
@@ -200,13 +225,13 @@ while [ $(( ${#_padded} % 4 )) -ne 0 ]; do
 	_padded="${_padded}="
 done
 _decoded="$(printf '%s' "$_padded" | tr -- '-_' '+/' | base64 -d 2>/dev/null)" || {
-	echo "run.sh: invalid --license format; expected base64url-encoded id:token" >&2
+	tp_print_error "invalid --license format; expected base64url-encoded id:token"
 	exit 1
 }
 LICENSE_ID="$(echo "$_decoded" | cut -d: -f1)"
 LICENSE_TOKEN="$(echo "$_decoded" | cut -d: -f2-)"
 if [ -z "$LICENSE_ID" ] || [ -z "$LICENSE_TOKEN" ]; then
-	echo "run.sh: invalid --license format; expected base64url-encoded id:token" >&2
+	tp_print_error "invalid --license format; expected base64url-encoded id:token"
 	exit 1
 fi
 
@@ -231,6 +256,8 @@ if ! tp_is_root; then
 	tp_install_privilege_denied
 fi
 
+tp_print_header
+
 INSTALL_ROOT="/opt/turbopanel"
 DAEMON_DIR="$INSTALL_ROOT/platform/daemon"
 CONFIG_DIR="$INSTALL_ROOT/platform/config"
@@ -248,10 +275,17 @@ printf '%s' "$LICENSE_ID" > "$STAGING_DIR/license.id"
 printf '%s' "$LICENSE_TOKEN" > "$STAGING_DIR/license.token"
 
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq sudo curl ca-certificates xz-utils zstd tar unzip gnupg python3-debian
+tp_print_step "▸" "Checking system prerequisites…"
+if ! apt-get update -qq 2>/dev/null \
+	|| ! apt-get install -y -qq sudo curl ca-certificates xz-utils zstd tar unzip gnupg python3-debian 2>/dev/null; then
+	tp_print_error "apt prerequisites failed"
+	exit 1
+fi
+tp_print_ok "Prerequisites ready"
 
+tp_print_step "▸" "Fetching release manifest…"
 if ! tp_fetch_channel_manifest; then
+	tp_print_error "Failed to fetch release manifest"
 	exit 1
 fi
 if [ -z "$HOST_URL" ]; then
@@ -259,11 +293,16 @@ if [ -z "$HOST_URL" ]; then
 fi
 ARTIFACT_URL="$_artifact_url"
 ARTIFACT_SHA256="$_artifact_sha256"
+tp_print_ok "Release manifest resolved (channel ${TURBOPANEL_UPDATE_CHANNEL:-trunk}, linux-${_arch})"
+tp_print_step "  " "Artifact: $ARTIFACT_URL"
+tp_print_step "  " "Commit: ${_manifest_commit:-unknown}"
+tp_print_step "  " "Control plane: $HOST_URL"
 
 mkdir -p "$CONFIG_DIR"
 if [ -n "$INSTANCE_CA" ]; then
 	install -m 0640 "$INSTANCE_CA" "$CA_PATH"
 else
+	tp_print_step "▸" "Fetching instance CA…"
 	_curl_base="curl -sSL"
 	[ "$INSECURE_TLS" = true ] && _curl_base="curl -sSLk"
 	_ca_tmp="$(mktemp)"
@@ -273,38 +312,44 @@ else
 	case "$_ca_http_code" in
 		200)
 			install -m 0640 "$_ca_tmp" "$CA_PATH"
+			tp_print_ok "Instance CA downloaded"
 			;;
 		404)
 			# Workers production and other publicly-trusted control planes have no
 			# platform CA — the daemon uses the system trust store instead.
-			echo "run.sh: no platform CA at ${HOST_URL%/} (public TLS — daemon will use system trust store)" >&2
+			tp_print_step "–" "No platform CA (public TLS — using system trust store)"
 			rm -f "$CA_PATH"
 			;;
 		*)
-			echo "run.sh: warning: could not download instance CA from ${HOST_URL%/} (HTTP ${_ca_http_code})" >&2
+			tp_print_step "~" "Could not download instance CA (HTTP ${_ca_http_code}) — continuing"
 			rm -f "$CA_PATH"
 			;;
 	esac
 	rm -f "$_ca_tmp"
 fi
 
-echo "run.sh: downloading released daemon binary"
+tp_print_step "▸" "Downloading turbopaneld…"
 if ! tp_install_verified_artifact "$ARTIFACT_URL" "$ARTIFACT_SHA256" "$DAEMON_DIR"; then
-	echo "run.sh: failed to download daemon release from $ARTIFACT_URL" >&2
+	tp_print_error "Failed to download daemon release from $ARTIFACT_URL"
 	exit 1
 fi
+tp_print_ok "Verified (SHA-256 ok)"
 
+tp_print_step "▸" "Bootstrapping orchestration runtimes…"
 export TURBOPANEL_DAEMON_ROOT="$DAEMON_DIR"
 "$DAEMON_BINARY" bootstrap-orchestration
 
 if [ ! -f "$DAEMON_DIR/orchestration/ansible.cfg" ]; then
-	echo "run.sh: bootstrap did not materialize orchestration/ansible.cfg" >&2
+	tp_print_error "Bootstrap did not materialize orchestration/ansible.cfg"
 	exit 1
 fi
+tp_print_ok "Orchestration runtimes ready"
+
+tp_print_step "▸" "Running daemon provisioning…"
 
 ANSIBLE_PLAYBOOK="$RUNTIMES_DIR/ansible/current/bin/ansible-playbook"
 if [ ! -x "$ANSIBLE_PLAYBOOK" ]; then
-	echo "run.sh: ansible-playbook missing after bootstrap" >&2
+	tp_print_error "ansible-playbook missing after bootstrap"
 	exit 1
 fi
 
@@ -333,10 +378,13 @@ if [ -t 1 ]; then
 	export ANSIBLE_SHOW_CUSTOM_STATS=false
 fi
 
-"$ANSIBLE_PLAYBOOK" \
+if ! "$ANSIBLE_PLAYBOOK" \
 	-i localhost, \
 	-c local \
 	-e "@$VARS_FILE" \
-	"$DAEMON_DIR/orchestration/playbooks/daemon-install.yml"
+	"$DAEMON_DIR/orchestration/playbooks/daemon-install.yml"; then
+	tp_print_error "Daemon provisioning failed"
+	exit 1
+fi
 
-echo "run.sh: turbopanel-daemon provisioning complete"
+tp_print_ok "TurboPanel daemon provisioning complete"

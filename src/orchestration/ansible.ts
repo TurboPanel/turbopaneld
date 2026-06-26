@@ -86,6 +86,7 @@ export async function runLocalPlaybook(
   extraArgs: string[] = [],
   onEvent?: AnsibleEventHandler,
   env: Record<string, string> = ansibleEnv(),
+  quiet = false,
 ): Promise<void> {
   const args = ['-i', 'localhost,', '-c', 'local', ...extraArgs, playbook]
 
@@ -93,6 +94,7 @@ export async function runLocalPlaybook(
     cwd: ANSIBLE_PLAYBOOK_CWD,
     env,
     onEvent,
+    quiet,
   })
 }
 

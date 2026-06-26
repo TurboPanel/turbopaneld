@@ -20,13 +20,19 @@ import { DaemonApiClient } from "./api-client.ts";
 import { DaemonTokenManager } from "./token-manager.ts";
 import { enrollDaemon } from "./enroll.ts";
 import { decodeBase64 } from "@std/encoding/base64";
-import { join } from "@std/path";
 import type { MonitorSource } from "../monitor/source.ts";
 import { parseMonitorMessage } from "../monitor/protocol.ts";
 import { MonitorSession } from "./monitor-session.ts";
 import { getBuildInfo } from "../build-info.ts";
 import { resolveUpdateChannelConfig } from "../update/config.ts";
 import { resolveUpdate } from "../update/resolver.ts";
+import {
+  buildRunReconcileArgs,
+  downloadRunScript,
+  encodeLicenseArg,
+  executeRunReconcile,
+  resolveRunScriptUrl,
+} from "./run-reconcile.ts";
 
 /** Chained replace pattern Sonar S5145 recognizes for log-injection sanitization. */
 function stripLogInjection(text: string): string {
@@ -150,7 +156,6 @@ const SERVER_ID_FILE = "server.id";
 const SERVER_KEY_FILE = "server-key.json";
 const KEY_ID_FILE = "server-key-id";
 const DEFAULT_SERVER_ID_DIR = "/opt/turbopanel/platform/daemon/state";
-const DEFAULT_DAEMON_DIR = "/opt/turbopanel/platform/daemon";
 
 function isTruthyFlag(value: string | undefined): boolean {
   const normalized = value?.trim().toLowerCase();
@@ -172,14 +177,6 @@ function resolveServerIdDir(
   }
 
   return DEFAULT_SERVER_ID_DIR;
-}
-
-function resolveDaemonDir(
-  env: Record<string, string | undefined> = Deno.env.toObject(),
-): string {
-  const override = env.TURBOPANEL_DAEMON_DIR?.trim();
-  if (override) return stripTrailingSlash(override);
-  return DEFAULT_DAEMON_DIR;
 }
 
 function resolveServerIdPath(): string {
@@ -939,74 +936,66 @@ export class InstanceClient {
     let shouldRestart = false;
     let error: string | undefined;
     try {
-      const updateScript = join(resolveDaemonDir(), "update.sh");
-
-      if (message.updateUrl) {
-        if (!message.updateSha256) {
-          throw new Error("updateUrl requires updateSha256");
-        }
-        const parsedUrl = new URL(message.updateUrl);
-        if (parsedUrl.protocol !== "https:") {
-          throw new Error("updateUrl must use HTTPS");
-        }
-        const command = new Deno.Command("sh", {
-          args: [updateScript],
-          env: {
+      let config = resolveUpdateChannelConfig(Deno.env.toObject());
+      const msgChannel = message.channel?.trim();
+      if (msgChannel) {
+        try {
+          config = resolveUpdateChannelConfig({
             ...Deno.env.toObject(),
-            TURBOPANEL_UPDATE_URL: message.updateUrl,
-            TURBOPANEL_UPDATE_SHA256: message.updateSha256,
-          },
-          stdout: "piped",
-          stderr: "piped",
-        });
-        const out = await command.output();
-        if (!out.success) {
-          throw new Error(new TextDecoder().decode(out.stderr).trim());
+            TURBOPANEL_UPDATE_CHANNEL: msgChannel,
+          });
+        } catch {
+          // fall back to env default when message.channel is invalid
         }
+      }
+
+      const updateInfo = await resolveUpdate(config);
+
+      if (getBuildInfo().commit === updateInfo.commit) {
+        logInfo(
+          "update",
+          "already on current commit",
+          sanitizeForLog(updateInfo.commit),
+        );
+        ok = true;
+      } else {
+        const credentials = await readLicenseCredentials();
+        if (!credentials.licenseId || !credentials.licenseToken) {
+          throw new Error(
+            "license credentials missing; re-run the installer with --license",
+          );
+        }
+
+        const env = Deno.env.toObject();
+        const instanceUrl = env.TURBOPANEL_INSTANCE_URL?.trim();
+        const instanceCaPath = env.TURBOPANEL_INSTANCE_CA?.trim();
+        const insecureTls = env.TURBOPANEL_RELEASE_TLS_INSECURE === "1";
+        const licenseArg = encodeLicenseArg(
+          credentials.licenseId,
+          credentials.licenseToken,
+        );
+        const runScriptUrl = resolveRunScriptUrl(this.#config);
+        const reconcileArgs = buildRunReconcileArgs({
+          licenseArg,
+          instanceUrl,
+          instanceCaPath,
+          insecureTls,
+        });
+
+        logInfo(
+          "update",
+          "reconciling via run.sh",
+          sanitizeForLog(runScriptUrl),
+        );
+
+        const script = await downloadRunScript(runScriptUrl, insecureTls);
+        await executeRunReconcile({
+          script,
+          args: reconcileArgs,
+          channel: config.channel,
+        });
         ok = true;
         shouldRestart = true;
-      } else {
-        let config = resolveUpdateChannelConfig(Deno.env.toObject());
-        const msgChannel = message.channel?.trim();
-        if (msgChannel) {
-          try {
-            config = resolveUpdateChannelConfig({
-              ...Deno.env.toObject(),
-              TURBOPANEL_UPDATE_CHANNEL: msgChannel,
-            });
-          } catch {
-            // fall back to env default when message.channel is invalid
-          }
-        }
-
-        const updateInfo = await resolveUpdate(config);
-
-        if (getBuildInfo().commit === updateInfo.commit) {
-          logInfo(
-            "update",
-            "already on current commit",
-            sanitizeForLog(updateInfo.commit),
-          );
-          ok = true;
-        } else {
-          const command = new Deno.Command("sh", {
-            args: [updateScript],
-            env: {
-              ...Deno.env.toObject(),
-              TURBOPANEL_UPDATE_URL: updateInfo.downloadUrl,
-              TURBOPANEL_UPDATE_SHA256: updateInfo.artifact.sha256,
-              TURBOPANEL_UPDATE_BUILD_ID: updateInfo.buildId,
-            },
-            stdout: "piped",
-            stderr: "piped",
-          });
-          const out = await command.output();
-          if (!out.success) {
-            throw new Error(new TextDecoder().decode(out.stderr).trim());
-          }
-          ok = true;
-          shouldRestart = true;
-        }
       }
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
