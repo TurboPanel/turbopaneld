@@ -286,6 +286,22 @@ export function cloudflaredDownloadUrl(
 }
 
 /**
+ * Pinned Deno runtime. This is the daemon's **own** runtime (not just the
+ * instance stack) — the daemon always runs from source via this Deno. Keep in
+ * step with `deno_version` in `orchestration/roles/deno-runtime/defaults/main.yml`.
+ */
+export const DENO_VERSION = "2.9.0";
+
+/** Versioned directory where the Deno runtime is installed. */
+export const DENO_RUNTIME_DIR = join(RUNTIMES_DIR, "deno", DENO_VERSION);
+
+/** Stable `current` symlink pointing at the active Deno version dir. */
+export const DENO_CURRENT_DIR = join(RUNTIMES_DIR, "deno", "current");
+
+/** Resolved Deno binary path (matches `turbopanel_daemon_deno_bin`). */
+export const DENO_BIN = join(DENO_CURRENT_DIR, "deno");
+
+/**
  * Directory of per-tunnel token files. Each `*.token` file holds one Cloudflare
  * tunnel token; the file's basename is the tunnel's name. Drop in more files to
  * run more tunnels side by side.

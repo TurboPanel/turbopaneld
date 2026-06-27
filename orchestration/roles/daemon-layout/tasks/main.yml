@@ -11,23 +11,20 @@
     mode: "{{ item.mode }}"
   loop:
     - { path: "{{ turbopanel_daemon_dir }}", mode: "0750" }
-    - { path: "{{ turbopanel_daemon_dir }}/dist", mode: "0750" }
-    - { path: "{{ turbopanel_daemon_dir }}/logs", mode: "0750" }
     - { path: "{{ turbopanel_daemon_dir }}/cloudflared/tunnels", mode: "0750" }
 
-- name: Require released daemon binary
+- name: Require daemon source entrypoint
   ansible.builtin.stat:
-    path: "{{ turbopanel_daemon_binary }}"
-  register: _daemon_binary
+    path: "{{ turbopanel_daemon_dir }}/main.ts"
+  register: _daemon_source
 
-- name: Assert released daemon binary is present
+- name: Assert daemon source is present
   ansible.builtin.assert:
     that:
-      - _daemon_binary.stat.exists
-      - _daemon_binary.stat.executable | default(false)
+      - _daemon_source.stat.exists
     fail_msg: >-
-      Missing released daemon binary at {{ turbopanel_daemon_binary }}.
-      run.sh must download turbopaneld before this playbook runs.
+      Missing daemon source at {{ turbopanel_daemon_dir }}/main.ts.
+      run.sh must extract the daemon source release before this playbook runs.
 
 - name: Require orchestration tree
   ansible.builtin.stat:

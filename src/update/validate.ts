@@ -143,20 +143,13 @@ export function parseChannelManifest(raw: unknown): ChannelManifest {
     );
   }
 
-  if (!isObject(raw.artifacts)) {
-    throw new MalformedManifestError(
-      "channel.json missing or invalid field: artifacts",
-    );
-  }
-
-  const artifacts: ChannelManifest["artifacts"] = {};
-  for (const [platform, entry] of Object.entries(raw.artifacts)) {
-    artifacts[platform as keyof ChannelManifest["artifacts"]] =
-      validateArtifactEntry(entry, `channel.json artifacts.${platform}`);
-  }
+  const sourceArtifact = validateArtifactEntry(
+    raw.sourceArtifact,
+    "channel.json sourceArtifact",
+  );
 
   return {
     ...(raw as unknown as ChannelManifest),
-    artifacts,
+    sourceArtifact,
   };
 }

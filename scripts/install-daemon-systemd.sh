@@ -16,7 +16,7 @@ PLAYBOOK="$DAEMON_DIR/orchestration/playbooks/daemon-systemd-setup.yml"
 
 if [ ! -x "$ANSIBLE_PLAYBOOK" ]; then
   echo "ansible-playbook not found at $ANSIBLE_PLAYBOOK" >&2
-  echo "run turbopaneld bootstrap-orchestration or scripts/bootstrap-orchestration.ts first" >&2
+  echo "run scripts/bootstrap-orchestration.ts via Deno first (run.sh does this on managed installs)" >&2
   exit 1
 fi
 
@@ -35,6 +35,12 @@ trap 'rm -f "$VARS_FILE"' EXIT
 {
   printf 'turbopanel_after_instance_service: %s\n' "$([ "$AFTER_INSTANCE" = true ] && echo true || echo false)"
   printf 'turbopanel_start: %s\n' "$([ "$START_DAEMON" = true ] && echo true || echo false)"
+  # Optional override: point the daemon unit at a host-provided Deno or a
+  # nonstandard runtimes root. Unset → playbook/role default
+  # (/opt/turbopanel/runtimes/deno/current/deno).
+  if [ -n "${TURBOPANEL_DAEMON_DENO_BIN:-}" ]; then
+    printf 'turbopanel_daemon_deno_bin: %s\n' "$TURBOPANEL_DAEMON_DENO_BIN"
+  fi
 } > "$VARS_FILE"
 
 ANSIBLE_CONFIG="$ANSIBLE_CFG" \

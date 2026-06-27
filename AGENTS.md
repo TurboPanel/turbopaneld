@@ -117,8 +117,8 @@ permissions can write it. The daemon dials **`/ws/daemon/v1`** and may read
   when unset.
 - **Runtime separation** — the update channel is independent of
   `TURBOPANEL_INSTANCE_URL` and the control-plane environment. A daemon running
-  a `trunk` binary may connect to production Cloudflare Workers; do not couple
-  them. Example: `TURBOPANEL_UPDATE_CHANNEL=trunk` with
+  the `trunk` source build may connect to production Cloudflare Workers; do not
+  couple them. Example: `TURBOPANEL_UPDATE_CHANNEL=trunk` with
   `TURBOPANEL_INSTANCE_URL=https://panel.example.com`.
 - **Ansible default** — the `daemon-config` role defaults to `trunk`
   (`turbopanel_update_channel` in `defaults/main.yml`). Org managers will
@@ -138,12 +138,6 @@ permissions can write it. The daemon dials **`/ws/daemon/v1`** and may read
   idempotently reconcile the node via `daemon-install.yml`. The daemon acks
   success, then restarts `turbopanel-daemon`. Legacy `{ updateUrl }` envelopes
   are ignored — channel manifest resolution drives the reconcile.
-- **`update.sh`** — retained for manual/binary-only swaps; release tarballs ship
-  `turbopaneld` only (no checkout scripts), so UI-triggered updates must use
-  `run.sh`, not `update.sh`.
-- **`tp_install_verified_artifact`** — canonical verified install helper in
-  `scripts/lib/release-artifacts.sh`: download exact URL, `sha256sum -c`, extract
-  to staging, install to `dist/turbopaneld`.
 
 #### `channels.json` catalog
 
@@ -177,32 +171,28 @@ permissions can write it. The daemon dials **`/ws/daemon/v1`** and may read
     "buildId": "<build-id>",
     "builtAt": "<iso8601>",
     "defaultControlPlaneUrl": "https://turbopanel.app",
-    "artifacts": {
-      "linux-amd64": {
-        "url": "https://dl.trbp.nl/channels/trunk/daemon/linux-amd64.tar.zst",
-        "sha256": "<hex>",
-        "size": 12345678
-      },
-      "linux-arm64": { "...": "..." }
+    "sourceArtifact": {
+      "url": "https://dl.trbp.nl/channels/trunk/daemon/source.tar.zst",
+      "sha256": "<hex>",
+      "size": 12345678
     }
   }
   ```
 
-  `scripts/generate-channel-manifest.ts` emits this schema; artifact URLs target
-  the stable overwrite keys above. **`publish-daemon-trunk`** publishes
+  `scripts/generate-channel-manifest.ts` emits this schema; the artifact URL
+  targets the stable overwrite key above. **`publish-daemon-trunk`** publishes
   `channels.json` (short-cache, `max-age=30`) and
-  `channels/trunk/manifest.json` (short-cache) plus stable overwrite artifact
-  blobs `channels/trunk/daemon/linux-{amd64,arm64}.tar.zst` (immutable cache).
-  No versioned `$BUILD_ID` directories are created; no cleanup job runs. Build
-  identity (`commit`, `buildId`, `builtAt`) is embedded into `src/build-info.ts`
-  before `deno task compile:all` so the binary's `getBuildInfo().commit`
+  `channels/trunk/manifest.json` (short-cache) plus the stable overwrite source
+  blob `channels/trunk/daemon/source.tar.zst` (immutable cache). No versioned
+  `$BUILD_ID` directories are created; no cleanup job runs. Build identity
+  (`commit`, `buildId`, `builtAt`) is written into `src/build-info.ts` before
+  packaging the source tarball so the running daemon's `getBuildInfo().commit`
   matches the manifest `commit` for the same build.
-- **`src/build-info.ts`** — compile-time build identity statically imported from
-  `main.ts` so `deno compile` bundles it. Committed with `commit: "dev"` /
-  `buildId: "dev"` placeholders; CI will overwrite this file before
-  `deno task compile:all` to embed the real commit, buildId, builtAt, and
-  channel. `getBuildInfo()` supplies the running binary's commit for the
-  no-op comparison in `#applyUpdate`.
+- **`src/build-info.ts`** — build identity statically imported from `main.ts`.
+  Committed with `commit: "dev"` / `buildId: "dev"` placeholders; CI overwrites
+  this file before packaging the source tarball to embed the real commit,
+  buildId, builtAt, and channel. `getBuildInfo()` supplies the running daemon's
+  commit for the no-op comparison in `#applyUpdate`.
 - **`UnsupportedAppError`** in `src/update/errors.ts` is retained but no longer
   used by the resolver (cleanup deferred).
 - ⚠️ GitHub repository variables and secrets must be configured before the
@@ -267,11 +257,11 @@ Canonical payload formats:
 The co-located socket path uses the same auth model — there is no
 unauthenticated bypass. Never log the license token or private key material.
 
-Install flow: official installer (separate CDN repo) →
-`turbopaneld bootstrap-orchestration` (`ensureUv` → `ensurePython` →
-`bootstrapOrchestrationRuntime`; installs uv, Python, and Ansible into the
-**shared** `/opt/turbopanel/runtimes/{uv,python,ansible}` tree) →
-`orchestration/playbooks/daemon-install.yml`. **Docker is NOT installed at base
+Install flow: official installer (separate CDN repo) → `run.sh` runs
+`scripts/bootstrap-orchestration.ts` via the vendored Deno (`ensureUv` →
+`ensurePython` → `bootstrapOrchestrationRuntime`; installs uv, Python, and
+Ansible into the **shared** `/opt/turbopanel/runtimes/{uv,python,ansible}` tree)
+→ `orchestration/playbooks/daemon-install.yml`. **Docker is NOT installed at base
 install or routine converge** — a managed node may only ever run native web
 services (apache/nginx/openlitespeed) and never need a container runtime. The
 `docker` role (which also installs its own `iptables` networking prereq) is run
@@ -293,7 +283,8 @@ The daemon bootstraps uv/Python/ansible, then runs playbooks. Roles (in
 | `daemon-prereqs`                                                             | apt prerequisites (`xz-utils` for Node, `tar`, `unzip`, `pamtester`, Redis build deps)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `turbopanel-user` / `instance-user`                                          | the 9999 / 9998 (`turbopaneli`) users                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `runtime-sockets`                                                            | `/run/turbopanel` as `2770` setgid                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `deno-runtime` / `node-runtime` / `caddy`                                    | vendored runtimes under `runtimes/<tool>/<version>/` + `current` symlink for **instance** stack services; **no `/usr/local/bin` links** — all consumers resolve via `runtimes/<tool>/current`. The **daemon** runs as compiled `dist/turbopaneld` and does not install or require Deno.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `deno-runtime`                                                               | Installs Deno into `runtimes/deno/<version>/` with a `current` symlink — the **daemon's own runtime** (always run on every managed install, not just the instance stack). No `/usr/local/bin` links; all consumers resolve via `runtimes/deno/current/deno`. |
+| `node-runtime` / `caddy`                                                     | vendored runtimes under `runtimes/<tool>/<version>/` + `current` symlink for **instance** stack services; **no `/usr/local/bin` links** — all consumers resolve via `runtimes/<tool>/current`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `redis`                                                                      | Native Redis binary under `runtimes/redis/current`; dedicated **`turbopanelc`** system user (UID 9997, primary group **`turbopanelc`** GID 9997, supplementary **`turbopanel`** only for `/run/turbopanel` traversal); Unix socket at `/run/turbopanel/redis.sock` (mode 0660, group `turbopanelc`); instance user `turbopaneli` is appended to `turbopanelc` for least-privilege socket access; **`port 0`** in `redis.conf` (socket-only, no TCP listener); sets **`vm.overcommit_memory=1`** via `/etc/sysctl.d/99-turbopanel-redis.conf` (silences Redis background-save warning on default Linux kernels)                                                                                                                                                                                                                                                                                                      |
 | `rabbitmq`                                                                   | RabbitMQ `4-management` in Docker container **`turbopanelq`**; data in named volume **`turbopanelq`**; attached to Docker network **`turbopanel`**; generated password in `/opt/turbopanel/platform/config/rabbitmq/.rabbitmq_pass`; broker config at **`rabbitmq.conf`** disables deprecated management metrics collection (management UI remains for queue/connection inspection); AMQP on `127.0.0.1:5672`; management UI on `127.0.0.1:15672`; **`turbopanel-rabbitmq.service`** wraps the container for systemd ordering                                                                                                                                                                                                                                                                                                              |
 | `mailpit`                                                                    | Dev-only Mailpit in Docker container **`turbopanelmailpit`** on network **`turbopanel`**; web UI on `127.0.0.1:8025`, SMTP on `127.0.0.1:1025`; **`turbopanel-mailpit.service`** wraps the container (co-located dev converge only — not routed through Caddy). In dev, the **`turbopanel-instance`** unit is injected with `TURBOPANEL_SYSTEM_EMAIL__PROVIDER=smtp` and Mailpit SMTP settings on port 1025 so the instance can resolve email config when enqueueing jobs — the instance process does **not** deliver email itself. Actual delivery is owned by **`turbopanel-mailer.service`**, which consumes from RabbitMQ and sends via the **Mailpit HTTP API** (`POST /api/v1/send` on port 8025) — no SMTP installation required on the mailer platform.                                                                                                                                                                                                                                                                                                             |
@@ -366,8 +357,9 @@ the daemon `.env`, then re-runs `instance-build-toggle.yml` (roles: `ui-build` �
   `/opt/turbopanel/runtimes/{uv/<ver>/,python/,ansible/<ver>/}` with `current`
   symlinks — **not** inside the daemon checkout. The `orchestration/runtime/`
   directory no longer exists; `bootstrap-orchestration.sh` has been replaced by
-  `turbopaneld bootstrap-orchestration` (shared logic in `src/orchestration/bootstrap-once.ts`;
-  dev checkout may still use `scripts/bootstrap-orchestration.ts` via Deno). The Deno orchestration functions
+  `scripts/bootstrap-orchestration.ts` run via Deno (shared logic in
+  `src/orchestration/bootstrap-once.ts`; both `run.sh` and dev/Tilt invoke this
+  same script). The Deno orchestration functions
   (`ensureUv`, `ensurePython`, `ensureAnsible`, `ensureGalaxyRoles` in
   `src/orchestration/`) are the single canonical installer for all three tools.
 - **Structured Ansible output (`src/orchestration/ansible-events.ts`).** Daemon
@@ -381,10 +373,13 @@ the daemon `.env`, then re-runs `instance-build-toggle.yml` (roles: `ui-build` �
   exported from a stable path so the console can dynamically import the wrapper.
   A doc comment in the module marks the **API/WS streaming seam** where events
   will later be forwarded to the control surface.
-- Logs are written to checkout `logs/` files when running under systemd: daemon
-  `{daemon.log,daemon.err.log}` (`daemon-logs` role), co-located dev instance
-  `{instance.log,instance.err.log}`, UI `{ui.log,ui.err.log}` in dev mode, and
-  website `{website.log,website.err.log}` for the local Next.js docs dev server
+- Logs are written under systemd: **production** daemon logs go to
+  `/var/log/turbopanel/daemon/` (controlled by the systemd unit template);
+  **dev** daemon logs (co-located dev via `install-daemon-systemd.sh`) stay in
+  the checkout `logs/` dir as `{daemon.log,daemon.err.log}`. The co-located dev
+  instance writes `{instance.log,instance.err.log}`, UI `{ui.log,ui.err.log}` in
+  dev mode, and website `{website.log,website.err.log}` for the local Next.js
+  docs dev server to the checkout `logs/` dir
   (`instance-launch` `instance-logs` / `ui-logs` / `website-logs` tasks).
   Directories are gitignored; no `tmpfiles.d` or logrotate entries are needed.
   The official installer runs daemon logs via `daemon-launch`, and
@@ -393,19 +388,24 @@ the daemon `.env`, then re-runs `instance-build-toggle.yml` (roles: `ui-build` �
 
 ### Runtime (systemd + Tilt)
 
-Managed server daemons and co-located dev hosts run
-**`turbopanel-daemon.service`** (systemd). The official installer /
-`daemon-install.yml` install the unit in **binary run mode**
-(`turbopanel_daemon_run_mode=binary` → `ExecStart` = `dist/turbopaneld`).
-Co-located dev instance hosts use `scripts/install-daemon-systemd.sh`
-(→ `daemon-systemd-setup.yml`), which installs the unit in **source run mode**
-(`turbopanel_daemon_run_mode=source` → `ExecStart` = `deno run main.ts`,
-`--env-file=.env`). **A dev host never runs the compiled binary** — any
-`dist/turbopaneld` built on a dev host exists only to package/serve to remote
-test machines, never to run locally. The deno path defaults to
-`/usr/local/bin/deno` (override with `turbopanel_daemon_deno_bin`). **Local Tilt
-dev** runs the same process from `../dev/scripts/daemon-serve.sh` (Tilt `daemon`
-resource) with `TURBOPANEL_SKIP_ORCHESTRATION=1` so Ansible bootstrap is skipped.
+All managed server daemons and co-located dev hosts run
+**`turbopanel-daemon.service`** (systemd). The daemon **always runs from
+source**: `ExecStart` = `deno run main.ts --env-file=.env`, using Deno installed
+at `/opt/turbopanel/runtimes/deno/current/deno`. There is **no binary run mode,
+no `dist/turbopaneld`, and no 4 KB-page-size check** — the run mode is uniform.
+The `deno-runtime` Ansible role installs Deno for the **daemon itself** (not just
+the instance stack) into `runtimes/deno/<version>/` with a `current` symlink, and
+`daemon-install.yml` always runs this role.
+
+Co-located dev hosts use `scripts/install-daemon-systemd.sh`
+(→ `daemon-systemd-setup.yml`). The unit defaults to the vendored runtimes Deno
+(`/opt/turbopanel/runtimes/deno/current/deno`, the `daemon-launch` role default);
+to use a host-provided Deno or a nonstandard runtimes root, set
+`TURBOPANEL_DAEMON_DENO_BIN` (e.g. `/usr/local/bin/deno`) when running the
+script — it forwards the value as the `turbopanel_daemon_deno_bin` extra var.
+**Local Tilt dev** runs the same
+process from `../dev/scripts/daemon-serve.sh` (Tilt `daemon` resource) with
+`TURBOPANEL_SKIP_ORCHESTRATION=1` so Ansible bootstrap is skipped.
 `scripts/ensure-single-daemon.sh` (ExecStartPre) ensures `/run/turbopanel`
 exists with correct permissions and clears any stale `daemon.lock` left by an
 unclean shutdown.
@@ -454,49 +454,36 @@ and enables no ACME. Certs come only from the platform CA-signed leaf
 Cloudflare edge). Never add on-demand TLS or ACME configuration to any role or
 playbook.
 
-### Release artifacts (zstd tar)
+### Release artifacts (source tarball)
 
-Cross-arch daemon binaries ship as **zstd-compressed tar** (`.tar.zst`) — small
-on the wire, native on Debian via the `zstd` package (`daemon-prereqs` and
-`install.sh` apt).
+The daemon ships as a single **source tarball** `source.tar.zst` — **no compiled
+binaries**. zstd is native on Debian via the `zstd` package (`daemon-prereqs`
+apt).
 
-| Task | Purpose |
-| ---- | ------- |
-| `deno task compile:all` | cross-arch compile + zstd tar release artifacts in `dist/` |
-| `deno task release:package` | same as `compile:all` |
+CI (`publish-daemon-trunk`) packages
+`main.ts deno.json deno.lock embedded-orchestration.ts src orchestration scripts`
+into `source.tar.zst` and uploads it to the stable overwrite key
+`channels/trunk/daemon/source.tar.zst`.
 
-Release artifacts in `dist/` (compile intermediates are removed after packaging):
+The `deno task compile:all` / `release:package` tasks and the
+`turbopaneld-linux-{amd64,arm64}.tar.zst` artifacts **no longer exist** — there is
+no cross-arch compile step.
 
-- `turbopaneld-linux-amd64.tar.zst` — `turbopaneld` only (orchestration embedded at compile time)
-- `turbopaneld-linux-arm64.tar.zst` — same
-
-Co-located dev serves unversioned names from `/downloads/daemon/` (or `daemon/dist/`):
-
-- `turbopaneld-linux-amd64.tar.zst`
-- `turbopaneld-linux-arm64.tar.zst`
-
-`turbopaneld bootstrap-orchestration` materializes `orchestration/` from the bundle embedded in the binary at compile time (see `embedded-orchestration.ts` + `src/orchestration/bundle-extract.ts`; build via `deno task bundle:orchestration`).
-
-Versioned GitHub release assets (set `TURBOPANEL_RELEASE_VERSION` when
-packaging, or `TURBOPANEL_DAEMON_RELEASE_VERSION` when downloading):
-
-- `turbopaneld-<version>-linux-amd64.tar.zst`
-- `turbopaneld-<version>-linux-arm64.tar.zst`
-
-Naming and fetch/extract helpers live in
-`scripts/lib/release-artifacts.sh` (used by `scripts/run.sh`, `update.sh`, and
-the packager). The operator bootstrap **`scripts/run.sh`** is the single
-entrypoint: **`--license` is required** and must be a **base64url-encoded**
+The operator bootstrap **`scripts/run.sh`** is the single entrypoint:
+**`--license` is required** and must be a **base64url-encoded**
 `licenseId:licenseToken` value (not raw `id:token` — see `README.md` and the
-decoder in `scripts/run.sh`). It fetches the binary URL and
+decoder in `scripts/run.sh`). It fetches `sourceArtifact.url` and
 `defaultControlPlaneUrl` from the channel manifest at
-`https://dl.trbp.nl/channels.json`, verifies the artifact SHA-256, extracts
-`turbopaneld` into `platform/daemon/dist/`, bootstraps orchestration, then runs
-`daemon-install.yml`. There is no separate
-`install.sh` in this repo — the daemon provisions everything else
-(instance/Caddy/UI/Docker-on-demand) via Ansible after it starts. **`update.sh`**
-at the repo root is a manual binary-only swap helper; UI-triggered updates
-re-run **`run.sh`** via `#applyUpdate` in `src/instance/client.ts`.
+`https://dl.trbp.nl/channels.json`, downloads `source.tar.zst`, verifies its
+SHA-256, extracts the daemon source tree into `platform/daemon/`, installs Deno
+into `runtimes/deno/<version>/` + `current`, warms the module cache, then runs
+`daemon-install.yml`. There is no separate `install.sh` in this repo — the daemon
+provisions everything else (instance/Caddy/UI/Docker-on-demand) via Ansible after
+it starts. Orchestration is always present in the extracted source tree (no
+compile-time embedding).
+
+`scripts/lib/release-artifacts.sh` retains source-tarball naming and
+fetch/extract helpers only.
 
 ### Slim Debian prerequisites
 
@@ -531,15 +518,15 @@ shared-library install.
 - `scripts/run.sh` — operator bootstrap entrypoint (served at
   `https://trbp.nl/run.sh` via 301 redirect and at `/run.sh` by Caddy in
   co-located dev): **`--license <b64>` is required** — a base64url-encoded
-  `licenseId:licenseToken` (not raw `id:token`). Fetches the release binary URL
+  `licenseId:licenseToken` (not raw `id:token`). Fetches `sourceArtifact.url`
   and `defaultControlPlaneUrl` from the channel manifest at
-  `https://dl.trbp.nl/channels.json` (no `--binary-url` flag); `--host` is
-  optional and defaults to `defaultControlPlaneUrl` from the manifest
-  (production: `https://turbopanel.app`). Installs apt prereqs, downloads and
-  verifies `turbopaneld`, bootstraps orchestration, and runs `daemon-install.yml`.
-  See `README.md` for the curl workflow. UI-triggered updates re-run this
-  script via `#applyUpdate` (`src/instance/run-reconcile.ts`); **`update.sh`**
-  is a manual binary-only helper and is not shipped on installed nodes.
+  `https://dl.trbp.nl/channels.json`; `--host` is optional and defaults to
+  `defaultControlPlaneUrl` from the manifest (production:
+  `https://turbopanel.app`). Installs apt prereqs, downloads and verifies
+  `source.tar.zst`, extracts the daemon source tree, installs Deno into
+  `runtimes/deno/<version>/` + `current`, warms the module cache, and runs
+  `daemon-install.yml`. See `README.md` for the curl workflow. UI-triggered
+  updates re-run this script via `#applyUpdate` (`src/instance/run-reconcile.ts`).
 - `src/instance/client.ts` — WSS client; HTTP-first enrollment/session
   bootstrap + command/address + dev-sync/tunnel-token handlers
 - `src/instance/idle-presence.ts` — WS hello on connect + idle-only heartbeat when no other traffic for 60 s
@@ -562,8 +549,9 @@ shared-library install.
   — instance-side install roles
 - `orchestration/roles/daemon-launch/templates/turbopanel-daemon.service.j2` —
   daemon systemd unit template
-- `scripts/package-daemon-release.sh` — zstd tar release packager;
-  `scripts/lib/release-artifacts.sh` — shared naming + fetch helpers
+- `scripts/lib/release-artifacts.sh` — shared source-tarball naming + fetch
+  helpers (`scripts/package-daemon-release.sh` is no longer used for production
+  releases — CI packages `source.tar.zst` directly)
 - `scripts/install-daemon-systemd.sh` — install `turbopanel-daemon.service` on
   co-located dev (after `turbopanel-instance.service`)
-- `scripts/bootstrap-orchestration.ts` — dev/Tilt entry; runs `runBootstrapOrchestration()` from `src/orchestration/bootstrap-once.ts`. Production installs invoke the same logic via `turbopaneld bootstrap-orchestration`.
+- `scripts/bootstrap-orchestration.ts` — dev/Tilt and production entry; runs `runBootstrapOrchestration()` from `src/orchestration/bootstrap-once.ts`. Production installs invoke this same script via Deno from `run.sh`.

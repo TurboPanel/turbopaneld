@@ -85,15 +85,13 @@ Deno.test("parseChannelManifest validates artifact entries", () => {
     commit: "abc123",
     buildId: "build-1",
     builtAt: "2020-01-01T00:00:00.000Z",
-    artifacts: {
-      "linux-amd64": {
-        url: "https://dl.trbp.nl/channels/trunk/daemon/linux-amd64.tar.zst",
-        sha256: "b".repeat(64),
-        size: 456,
-      },
+    sourceArtifact: {
+      url: "https://dl.trbp.nl/channels/trunk/daemon/source.tar.zst",
+      sha256: "b".repeat(64),
+      size: 456,
     },
   });
 
   assertEquals(manifest.commit, "abc123");
-  assertEquals(manifest.artifacts["linux-amd64"]?.size, 456);
+  assertEquals(manifest.sourceArtifact.size, 456);
 });

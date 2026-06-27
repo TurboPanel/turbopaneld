@@ -23,8 +23,6 @@
     turbopanel_tunnel_token: ""
     turbopanel_instance_ca: ""
     turbopanel_start: true
-    turbopanel_daemon_run_mode: binary
-    turbopanel_daemon_binary: "{{ turbopanel_daemon_dir }}/dist/turbopaneld"
 
   pre_tasks:
     - name: Require instance URL
@@ -43,6 +41,10 @@
     - role: daemon-prereqs
     - role: turbopanel-user
     - role: daemon-layout
+    # The daemon runs from source via the stock Deno runtime. Install Deno first
+    # so daemon-launch's unit can exec it.
+    - role: deno-runtime
+    - role: daemon-logs
     - role: daemon-config
     - role: daemon-launch
 
@@ -54,11 +56,3 @@
         owner: "{{ turbopanel_user }}"
         group: "{{ turbopanel_group }}"
         recurse: true
-
-    - name: Ensure managed daemon binary ownership
-      when: turbopanel_daemon_run_mode == 'binary'
-      ansible.builtin.file:
-        path: "{{ turbopanel_daemon_binary }}"
-        owner: "{{ turbopanel_user }}"
-        group: "{{ turbopanel_group }}"
-        mode: "0755"

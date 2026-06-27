@@ -2,9 +2,10 @@
 # TurboPanel daemon bootstrap — single entrypoint served at https://trbp.nl/run.sh
 # (301 redirect) and at /run.sh by Caddy in co-located dev.
 #
-# Fetches the release binary URL and defaultControlPlaneUrl from the channel
-# manifest at https://dl.trbp.nl/channels.json, then downloads turbopaneld,
-# bootstraps orchestration, and runs daemon-install.yml via Ansible.
+# Fetches the source artifact URL and defaultControlPlaneUrl from the channel
+# manifest at https://dl.trbp.nl/channels.json, then downloads the daemon source
+# build, installs the Deno runtime, bootstraps orchestration, and runs
+# daemon-install.yml via Ansible.
 #
 # Run as root or as a sudo-capable user (self-escalates via sudo when available).
 
@@ -73,87 +74,37 @@ tp_print_error() {
 	fi
 }
 
-tp_daemon_binary_name() {
-	printf 'turbopaneld'
-}
+# Deno runtime version installed into the runtimes tree for the source build.
+# Keep in sync with orchestration/roles/deno-runtime/defaults/main.yml.
+TP_DENO_VERSION="2.9.0"
 
-tp_daemon_linux_arch() {
-	case "$(uname -m)" in
-		x86_64 | amd64) echo amd64 ;;
-		aarch64 | arm64) echo arm64 ;;
-		*) return 1 ;;
-	esac
-}
-
-tp_daemon_dist_binary_path() {
-	_daemon_dir="${1:-/opt/turbopanel/platform/daemon}"
-	printf '%s/dist/turbopaneld' "$_daemon_dir"
-}
-
-tp_extract_daemon_release() {
-	_archive="$1"
-	_dest_dir="$2"
-	_binary_name="$(tp_daemon_binary_name)"
-	if ! command -v zstd >/dev/null 2>&1; then
-		return 1
+# Install Deno into the runtimes tree (idempotent), mirroring uv/ansible/cloudflared:
+#   $RUNTIMES_DIR/deno/$TP_DENO_VERSION/deno  plus a `current` symlink.
+tp_install_deno_runtime() {
+	_deno_versioned_dir="$RUNTIMES_DIR/deno/$TP_DENO_VERSION"
+	_deno_bin="$_deno_versioned_dir/deno"
+	if [ -x "$_deno_bin" ]; then
+		return 0
 	fi
-	mkdir -p "$_dest_dir"
-	if ! zstd -d -q -c "$_archive" | tar -x -C "$_dest_dir"; then
-		return 1
-	fi
-	if [ ! -f "$_dest_dir/$_binary_name" ]; then
-		return 1
-	fi
-	chmod 0755 "$_dest_dir/$_binary_name"
-	return 0
-}
-
-tp_install_verified_artifact() {
-	_url="$1"
-	_sha256="$2"
-	_daemon_dir="$3"
-	_tmp=""
-	_staging=""
-
-	_cleanup() {
-		rm -f "$_tmp"
-		rm -rf "$_staging"
-	}
-	trap _cleanup EXIT
-
-	case "$_url" in
-		https://*) ;;
-		*) return 1 ;;
-	esac
-
-	_tmp="$(mktemp)"
-	_staging="$(mktemp -d)"
-
-	_curl_tls=""
-	[ "${TURBOPANEL_RELEASE_TLS_INSECURE:-}" = 1 ] && _curl_tls="-k"
-
+	_deno_tmp="$RUNTIMES_DIR/deno/.install"
+	rm -rf "$_deno_tmp"
+	mkdir -p "$_deno_tmp"
+	_curl="curl -fsSL"
+	[ "${TURBOPANEL_RELEASE_TLS_INSECURE:-}" = 1 ] && _curl="curl -fsSLk"
 	# shellcheck disable=SC2086
-	if ! curl -fsSL $_curl_tls "$_url" -o "$_tmp" 2>/dev/null; then
+	if ! $_curl https://deno.land/install.sh \
+		| DENO_INSTALL="$_deno_tmp" sh -s "v${TP_DENO_VERSION}" -- -y --no-modify-path >/dev/null 2>&1; then
+		rm -rf "$_deno_tmp"
 		return 1
 	fi
-
-	if ! printf '%s  %s\n' "$_sha256" "$_tmp" | sha256sum -c - >/dev/null 2>&1; then
-		return 1
-	fi
-
-	if ! tp_extract_daemon_release "$_tmp" "$_staging"; then
-		return 1
-	fi
-
-	mkdir -p "$(dirname "$(tp_daemon_dist_binary_path "$_daemon_dir")")"
-	install -m 0755 "$_staging/$(tp_daemon_binary_name)" "$(tp_daemon_dist_binary_path "$_daemon_dir")"
-	return 0
+	mkdir -p "$_deno_versioned_dir"
+	install -m 0755 "$_deno_tmp/bin/deno" "$_deno_bin"
+	rm -rf "$_deno_tmp"
+	ln -sfn "$TP_DENO_VERSION" "$RUNTIMES_DIR/deno/current"
 }
 
 tp_fetch_channel_manifest() {
 	_channel="${TURBOPANEL_UPDATE_CHANNEL:-trunk}"
-	_arch="$(tp_daemon_linux_arch)" || return 1
-	_arch_key="linux-${_arch}"
 	_curl="curl -fsSL"
 	[ "${TURBOPANEL_RELEASE_TLS_INSECURE:-}" = 1 ] && _curl="curl -fsSLk"
 
@@ -176,8 +127,8 @@ tp_fetch_channel_manifest() {
 	_manifest_oneline="$(printf '%s' "$_manifest_json" | tr -d '[:space:]')"
 	_manifest_host="$(printf '%s' "$_manifest_oneline" | grep -o '"defaultControlPlaneUrl":"[^"]*"' | sed 's/.*":"//' | tr -d '"')"
 	_manifest_commit="$(printf '%s' "$_manifest_oneline" | grep -o '"commit":"[^"]*"' | sed 's/"commit":"//' | tr -d '"')"
-	_artifact_url="$(printf '%s' "$_manifest_oneline" | grep -o "\"${_arch_key}\"[^{]*{[^}]*\"url\":\"[^\"]*\"" | grep -o '"url":"[^"]*"' | sed 's/"url":"//' | tr -d '"')"
-	_artifact_sha256="$(printf '%s' "$_manifest_oneline" | grep -o "\"${_arch_key}\"[^{]*{[^}]*\"sha256\":\"[^\"]*\"" | grep -o '"sha256":"[^"]*"' | sed 's/"sha256":"//' | tr -d '"')"
+	_artifact_url="$(printf '%s' "$_manifest_oneline" | grep -o '"sourceArtifact"[^{]*{[^}]*"url":"[^"]*"' | grep -o '"url":"[^"]*"' | sed 's/"url":"//' | tr -d '"')"
+	_artifact_sha256="$(printf '%s' "$_manifest_oneline" | grep -o '"sourceArtifact"[^{]*{[^}]*"sha256":"[^"]*"' | grep -o '"sha256":"[^"]*"' | sed 's/"sha256":"//' | tr -d '"')"
 
 	if [ -z "$_manifest_host" ]; then
 		_manifest_host="https://turbopanel.app"
@@ -286,14 +237,13 @@ DAEMON_DIR="$INSTALL_ROOT/platform/daemon"
 CONFIG_DIR="$INSTALL_ROOT/platform/config"
 RUNTIMES_DIR="$INSTALL_ROOT/runtimes"
 CA_PATH="$CONFIG_DIR/instance-ca.pem"
-DAEMON_BINARY="$DAEMON_DIR/dist/turbopaneld"
 
 if [ "$INSECURE_TLS" = true ]; then
 	export TURBOPANEL_RELEASE_TLS_INSECURE=1
 fi
 
 STAGING_DIR="$CONFIG_DIR/daemon-license-staging"
-mkdir -p "$STAGING_DIR" "$DAEMON_DIR/dist"
+mkdir -p "$STAGING_DIR"
 printf '%s' "$LICENSE_ID" > "$STAGING_DIR/license.id"
 printf '%s' "$LICENSE_TOKEN" > "$STAGING_DIR/license.token"
 
@@ -316,7 +266,7 @@ if [ -z "$HOST_URL" ]; then
 fi
 ARTIFACT_URL="$_artifact_url"
 ARTIFACT_SHA256="$_artifact_sha256"
-tp_print_ok "Release manifest resolved (channel ${TURBOPANEL_UPDATE_CHANNEL:-trunk}, linux-${_arch})"
+tp_print_ok "Release manifest resolved (channel ${TURBOPANEL_UPDATE_CHANNEL:-trunk})"
 tp_print_step "  " "Artifact: $ARTIFACT_URL"
 tp_print_step "  " "Commit: ${_manifest_commit:-unknown}"
 tp_print_step "  " "Control plane: $HOST_URL"
@@ -351,16 +301,49 @@ else
 	rm -f "$_ca_tmp"
 fi
 
-tp_print_step "▸" "Downloading turbopaneld…"
-if ! tp_install_verified_artifact "$ARTIFACT_URL" "$ARTIFACT_SHA256" "$DAEMON_DIR"; then
-	tp_print_error "Failed to download daemon release from $ARTIFACT_URL"
+export TURBOPANEL_DAEMON_ROOT="$DAEMON_DIR"
+
+tp_print_step "▸" "Downloading daemon source…"
+_src_tmp="$(mktemp)"
+_src_curl="curl -fsSL"
+[ "$INSECURE_TLS" = true ] && _src_curl="curl -fsSLk"
+# shellcheck disable=SC2086
+if ! $_src_curl "$ARTIFACT_URL" -o "$_src_tmp" 2>/dev/null; then
+	rm -f "$_src_tmp"
+	tp_print_error "Failed to download daemon source from $ARTIFACT_URL"
 	exit 1
 fi
-tp_print_ok "Verified (SHA-256 ok)"
+if ! printf '%s  %s\n' "$ARTIFACT_SHA256" "$_src_tmp" | sha256sum -c - >/dev/null 2>&1; then
+	rm -f "$_src_tmp"
+	tp_print_error "SHA-256 mismatch for $ARTIFACT_URL"
+	exit 1
+fi
+mkdir -p "$DAEMON_DIR"
+if ! zstd -d -q -c "$_src_tmp" | tar -x -C "$DAEMON_DIR"; then
+	rm -f "$_src_tmp"
+	tp_print_error "Failed to extract daemon source"
+	exit 1
+fi
+rm -f "$_src_tmp"
+if [ ! -f "$DAEMON_DIR/main.ts" ]; then
+	tp_print_error "Daemon source archive did not contain main.ts"
+	exit 1
+fi
+tp_print_ok "Source build installed (SHA-256 ok)"
+
+tp_print_step "▸" "Installing Deno runtime…"
+if ! tp_install_deno_runtime; then
+	tp_print_error "Failed to install Deno runtime"
+	exit 1
+fi
+DENO_BIN="$RUNTIMES_DIR/deno/current/deno"
+tp_print_ok "Deno ${TP_DENO_VERSION} ready"
 
 tp_print_step "▸" "Bootstrapping orchestration runtimes…"
-export TURBOPANEL_DAEMON_ROOT="$DAEMON_DIR"
-"$DAEMON_BINARY" bootstrap-orchestration
+"$DENO_BIN" run --allow-net --allow-read --allow-write --allow-run --allow-env \
+	"$DAEMON_DIR/scripts/bootstrap-orchestration.ts"
+# Warm the module cache under the daemon's HOME so first start is fast/offline.
+(cd "$DAEMON_DIR" && HOME="$INSTALL_ROOT" "$DENO_BIN" cache main.ts >/dev/null 2>&1) || true
 
 if [ ! -f "$DAEMON_DIR/orchestration/ansible.cfg" ]; then
 	tp_print_error "Bootstrap did not materialize orchestration/ansible.cfg"
@@ -381,6 +364,8 @@ trap 'rm -f "$VARS_FILE"' EXIT
 {
 	printf 'turbopanel_instance_url: %s\n' "$HOST_URL"
 	printf 'turbopanel_start: %s\n' "$([ "$NO_START" = true ] && echo false || echo true)"
+	printf 'turbopanel_daemon_run_mode: %s\n' "source"
+	printf 'turbopanel_daemon_deno_bin: %s\n' "/opt/turbopanel/runtimes/deno/current/deno"
 	if [ -f "$CA_PATH" ]; then
 		printf 'turbopanel_instance_ca: %s\n' "$CA_PATH"
 	fi

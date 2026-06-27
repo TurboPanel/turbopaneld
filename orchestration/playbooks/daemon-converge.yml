@@ -11,8 +11,17 @@
   vars:
     turbopanel_install_root: /opt/turbopanel
     turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/runtimes"
+    turbopanel_daemon_dir: "{{ turbopanel_install_root }}/platform/daemon"
     turbopanel_config_dir: /opt/turbopanel/platform/config
     turbopanel_dev_user: ""
+    turbopanel_user: turbopanel
+    turbopanel_group: turbopanel
+    turbopanel_service_name: turbopanel-daemon
+    # Daemon runs from source via the vendored Deno runtime — the same path
+    # managed installs (run.sh) and the daemon-launch role default use.
+    turbopanel_daemon_deno_bin: /opt/turbopanel/runtimes/deno/current/deno
+    # Managed daemon-only hosts have no co-located instance service to order after.
+    turbopanel_after_instance_service: false
 
   pre_tasks:
     - name: Refresh apt cache once per converge (Debian)
@@ -26,5 +35,37 @@
   # never pull a container runtime.
   roles:
     - role: runtime-sockets
+    - role: deno-runtime
     - role: daemon-logs
     - role: daemon-prereqs
+
+  # Already-provisioned managed daemons only ever receive this lightweight
+  # converge (see src/orchestration/setup.ts), never a full reinstall. Refresh
+  # the installed turbopanel-daemon.service so unit changes — e.g. the migrated
+  # /var/log/turbopanel/daemon log target rendered into
+  # roles/daemon-launch/templates/turbopanel-daemon.service.j2 — actually land on
+  # existing hosts. We deliberately re-render + daemon-reload ONLY: this playbook
+  # runs from inside the running daemon, so stopping or restarting it here would
+  # kill the converge mid-run. The refreshed unit takes effect on the daemon's
+  # next restart; its enabled/running state is preserved (no systemd state task,
+  # so turbopanel_start being unset never stops it).
+  post_tasks:
+    - name: Check for an installed daemon systemd unit
+      ansible.builtin.stat:
+        path: "/etc/systemd/system/{{ turbopanel_service_name }}.service"
+      register: turbopanel_daemon_unit
+
+    - name: Refresh installed daemon systemd unit
+      ansible.builtin.template:
+        src: "{{ turbopanel_daemon_dir }}/orchestration/roles/daemon-launch/templates/turbopanel-daemon.service.j2"
+        dest: "/etc/systemd/system/{{ turbopanel_service_name }}.service"
+        owner: root
+        group: root
+        mode: "0644"
+      when: turbopanel_daemon_unit.stat.exists
+      register: turbopanel_daemon_unit_render
+
+    - name: Reload systemd so the refreshed unit is registered
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: turbopanel_daemon_unit_render is changed

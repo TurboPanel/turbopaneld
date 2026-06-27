@@ -2,8 +2,6 @@ export type UpdateApp = "daemon";
 
 export type UpdateChannel = "trunk" | "edge" | "canary" | "rc" | "release";
 
-export type ArtifactPlatform = "linux-amd64" | "linux-arm64";
-
 export interface RootCatalog {
   schema: number;
   defaultChannel: string;
@@ -24,7 +22,7 @@ export interface ChannelManifest {
   buildId: string;
   builtAt: string;
   defaultControlPlaneUrl?: string;
-  artifacts: Partial<Record<ArtifactPlatform, ArtifactEntry>>;
+  sourceArtifact: ArtifactEntry;
   releaseNotesUrl?: string;
   signature?: Record<string, unknown>;
 }
@@ -34,7 +32,6 @@ export interface UpdateInfo {
   commit: string;
   buildId: string;
   builtAt: string;
-  platform: ArtifactPlatform;
-  artifact: ArtifactEntry;
+  sourceArtifact: ArtifactEntry;
   downloadUrl: string;
 }

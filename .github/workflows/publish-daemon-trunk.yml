@@ -65,9 +65,6 @@ jobs:
       - name: Install Deno
         uses: denoland/setup-deno@v2
 
-      - name: Install zstd
-        run: sudo apt-get install -y zstd
-
       - name: Compute build metadata
         run: |
           echo "BUILD_ID=$(date -u '+%Y%m%d-%H%M%S')-$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
@@ -96,21 +93,21 @@ jobs:
           }
           EOF
 
-      - name: Build cross-arch binaries
-        run: deno task compile:all
-
-      - name: Stage zstd release artifacts for publish
+      - name: Stage daemon source build
         run: |
+          # Source build runs via stock Deno (`deno run main.ts`) where the
+          # compiled binary's 4 KB-aligned segment can't load. build-info.ts was
+          # already overwritten with the real commit before compile:all.
           mkdir -p publish/channels/trunk/daemon publish/channels/trunk
-          cp dist/turbopaneld-linux-amd64.tar.zst publish/channels/trunk/daemon/linux-amd64.tar.zst
-          cp dist/turbopaneld-linux-arm64.tar.zst publish/channels/trunk/daemon/linux-arm64.tar.zst
+          tar -I 'zstd -19 -T0' \
+            -cf publish/channels/trunk/daemon/source.tar.zst \
+            main.ts deno.json deno.lock embedded-orchestration.ts \
+            src orchestration scripts
 
       - name: Compute checksums and sizes
         run: |
-          echo "AMD64_SHA256=$(sha256sum publish/channels/trunk/daemon/linux-amd64.tar.zst | awk '{print $1}')" >> "$GITHUB_ENV"
-          echo "AMD64_SIZE=$(stat -c%s publish/channels/trunk/daemon/linux-amd64.tar.zst)" >> "$GITHUB_ENV"
-          echo "ARM64_SHA256=$(sha256sum publish/channels/trunk/daemon/linux-arm64.tar.zst | awk '{print $1}')" >> "$GITHUB_ENV"
-          echo "ARM64_SIZE=$(stat -c%s publish/channels/trunk/daemon/linux-arm64.tar.zst)" >> "$GITHUB_ENV"
+          echo "SOURCE_SHA256=$(sha256sum publish/channels/trunk/daemon/source.tar.zst | awk '{print $1}')" >> "$GITHUB_ENV"
+          echo "SOURCE_SIZE=$(stat -c%s publish/channels/trunk/daemon/source.tar.zst)" >> "$GITHUB_ENV"
 
       - name: Generate channel manifest
         run: |
@@ -134,12 +131,8 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.DL_S3_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: ${{ vars.DL_S3_REGION }}
         run: |
-          aws s3 cp publish/channels/trunk/daemon/linux-amd64.tar.zst \
-            "s3://${{ secrets.DL_S3_BUCKET }}/channels/trunk/daemon/linux-amd64.tar.zst" \
-            --endpoint-url "${{ vars.DL_S3_ENDPOINT }}" \
-            --cache-control "public, max-age=30, must-revalidate"
-          aws s3 cp publish/channels/trunk/daemon/linux-arm64.tar.zst \
-            "s3://${{ secrets.DL_S3_BUCKET }}/channels/trunk/daemon/linux-arm64.tar.zst" \
+          aws s3 cp publish/channels/trunk/daemon/source.tar.zst \
+            "s3://${{ secrets.DL_S3_BUCKET }}/channels/trunk/daemon/source.tar.zst" \
             --endpoint-url "${{ vars.DL_S3_ENDPOINT }}" \
             --cache-control "public, max-age=30, must-revalidate"
           aws s3 cp publish/channels/trunk/manifest.json \

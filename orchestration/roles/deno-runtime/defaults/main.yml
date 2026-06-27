@@ -1,3 +1,6 @@
 ---
-# Must match turbopanel-dev scripts/lib/paths.sh DENO_VERSION.
-deno_version: "2.8.3"
+# Universal Deno runtime version installed on every host. Deno is the universal
+# daemon runtime — the daemon always runs from source via this Deno runtime.
+# Keep in step with turbopanel-dev scripts/lib/paths.sh DENO_VERSION and the
+# TP_DENO_VERSION pin in scripts/run.sh.
+deno_version: "2.9.0"

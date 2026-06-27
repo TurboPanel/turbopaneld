@@ -22,10 +22,8 @@ function requireEnvNumber(name: string): number {
 const BUILD_ID = requireEnv("BUILD_ID");
 const SHORT_SHA = requireEnv("SHORT_SHA");
 const BUILT_AT = requireEnv("BUILT_AT");
-const AMD64_SHA256 = requireEnv("AMD64_SHA256");
-const AMD64_SIZE = requireEnvNumber("AMD64_SIZE");
-const ARM64_SHA256 = requireEnv("ARM64_SHA256");
-const ARM64_SIZE = requireEnvNumber("ARM64_SIZE");
+const SOURCE_SHA256 = requireEnv("SOURCE_SHA256");
+const SOURCE_SIZE = requireEnvNumber("SOURCE_SIZE");
 
 const DL_BASE_URL = Deno.env.get("DL_BASE_URL")?.trim() ||
   "https://dl.trbp.nl";
@@ -40,17 +38,10 @@ const manifest: ChannelManifest = {
   buildId: BUILD_ID,
   builtAt: BUILT_AT,
   defaultControlPlaneUrl: DEFAULT_CONTROL_PLANE_URL,
-  artifacts: {
-    "linux-amd64": {
-      url: `${DL_BASE_URL}/channels/trunk/daemon/linux-amd64.tar.zst`,
-      sha256: AMD64_SHA256,
-      size: AMD64_SIZE,
-    },
-    "linux-arm64": {
-      url: `${DL_BASE_URL}/channels/trunk/daemon/linux-arm64.tar.zst`,
-      sha256: ARM64_SHA256,
-      size: ARM64_SIZE,
-    },
+  sourceArtifact: {
+    url: `${DL_BASE_URL}/channels/trunk/daemon/source.tar.zst`,
+    sha256: SOURCE_SHA256,
+    size: SOURCE_SIZE,
   },
 };
 

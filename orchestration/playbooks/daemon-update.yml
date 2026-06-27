@@ -1,20 +1,16 @@
 ---
-# Build (or force-rebuild) the daemon binary on the local host.
-# Invoked by the turbopanel-dev console "Build Daemon Binary" action.
-- name: TurboPanel daemon binary build
+# No longer applicable: the daemon always runs from source via the Deno runtime,
+# so there is no compiled binary to build. This playbook previously compiled
+# dist/turbopaneld via the daemon-build role; it now performs no work.
+- name: TurboPanel daemon binary build (deprecated, no-op)
   hosts: localhost
   connection: local
   become: true
-  gather_facts: true
+  gather_facts: false
 
-  vars:
-    turbopanel_install_root: /opt/turbopanel
-    turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/runtimes"
-    turbopanel_platform_dir: "{{ turbopanel_install_root }}/platform"
-    turbopanel_daemon_dir: "{{ turbopanel_platform_dir }}/daemon"
-    turbopanel_group: turbopanel
-    turbopanel_user: turbopanel
-    force_compile: true
-
-  roles:
-    - role: daemon-build
+  tasks:
+    - name: Daemon binary build is deprecated
+      ansible.builtin.debug:
+        msg: >-
+          The daemon now runs from source via the Deno runtime; there is no
+          compiled binary to build. This playbook is retained as a no-op.
