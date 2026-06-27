@@ -226,8 +226,14 @@ if ! tp_is_root; then
 	[ "$NO_START" = true ] && set -- "$@" --no-start
 	_curl="curl -fsSL"
 	[ "$INSECURE_TLS" = true ] && _curl="curl -fsSLk"
+	# Re-run the script under sudo. `exec` cannot be used here: in a pipeline
+	# each command runs in its own subshell, so `exec` would only replace the
+	# curl subshell, not this shell — leaving the original non-root shell to
+	# fall through and fail on the privileged mkdir calls below. Run the
+	# pipeline, then exit with its status so the parent shell never continues.
 	# shellcheck disable=SC2086
-	exec $_curl "$_REEXEC_SCRIPT_URL" | sudo sh -s -- "$@"
+	$_curl "$_REEXEC_SCRIPT_URL" | sudo sh -s -- "$@"
+	exit $?
 fi
 
 tp_print_header
