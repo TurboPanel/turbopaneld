@@ -38,6 +38,30 @@ async function readEnvFileMeta(envPath: string): Promise<EnvFileMeta | null> {
   }
 }
 
+async function chownFileOwner(
+  path: string,
+  uid: number,
+  gid: number,
+): Promise<void> {
+  try {
+    await Deno.chown(path, uid, gid);
+    return;
+  } catch (err) {
+    if (!(err instanceof Deno.errors.PermissionDenied)) throw err;
+  }
+  const result = await new Deno.Command("sudo", {
+    args: ["chown", `${uid}:${gid}`, path],
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  if (!result.success) {
+    throw new Error(
+      new TextDecoder().decode(result.stderr).trim() ||
+        `sudo chown ${uid}:${gid} failed for ${path}`,
+    );
+  }
+}
+
 async function writeEnvFileAtomic(
   envPath: string,
   content: string,
@@ -47,7 +71,7 @@ async function writeEnvFileAtomic(
   const tmpPath = join(dirname(envPath), `.env.tmp-${crypto.randomUUID()}`);
   await Deno.writeTextFile(tmpPath, content, { mode });
   if (meta?.uid !== undefined && meta?.gid !== undefined) {
-    await Deno.chown(tmpPath, meta.uid, meta.gid);
+    await chownFileOwner(tmpPath, meta.uid, meta.gid);
   }
   await Deno.rename(tmpPath, envPath);
 }
