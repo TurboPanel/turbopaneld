@@ -318,13 +318,51 @@ if ! printf '%s  %s\n' "$ARTIFACT_SHA256" "$_src_tmp" | sha256sum -c - >/dev/nul
 	tp_print_error "SHA-256 mismatch for $ARTIFACT_URL"
 	exit 1
 fi
-mkdir -p "$DAEMON_DIR"
-if ! zstd -d -q -c "$_src_tmp" | tar -x -C "$DAEMON_DIR"; then
+# Extract into a clean staging directory, then atomically replace the daemon
+# source tree, preserving only explicitly-allowed host-local artifacts. This
+# guarantees source files removed upstream do not survive an update.
+mkdir -p "$INSTALL_ROOT/platform"
+_src_staging="$INSTALL_ROOT/platform/.daemon-source-staging"
+rm -rf "$_src_staging"
+mkdir -p "$_src_staging"
+if ! zstd -d -q -c "$_src_tmp" | tar -x -C "$_src_staging"; then
 	rm -f "$_src_tmp"
+	rm -rf "$_src_staging"
 	tp_print_error "Failed to extract daemon source"
 	exit 1
 fi
 rm -f "$_src_tmp"
+if [ ! -f "$_src_staging/main.ts" ]; then
+	rm -rf "$_src_staging"
+	tp_print_error "Daemon source archive did not contain main.ts"
+	exit 1
+fi
+
+# Carry over host-local artifacts so daemon identity (state/), config (.env), and
+# tunnel state survive the swap. This list MUST stay in sync with
+# HOST_LOCAL_ARTIFACTS in src/dev-sync-apply.ts so the run.sh reconcile and
+# dev-sync paths cannot diverge.
+if [ -d "$DAEMON_DIR" ]; then
+	for _hostlocal in .env .git state logs cloudflared server.id server-key.json server-key-id; do
+		if [ -e "$DAEMON_DIR/$_hostlocal" ]; then
+			rm -rf "$_src_staging/$_hostlocal"
+			mv "$DAEMON_DIR/$_hostlocal" "$_src_staging/$_hostlocal"
+		fi
+	done
+fi
+
+# Atomically swap the staged tree into place.
+rm -rf "$DAEMON_DIR.dev-sync-old"
+if [ -d "$DAEMON_DIR" ]; then
+	mv "$DAEMON_DIR" "$DAEMON_DIR.dev-sync-old"
+fi
+if ! mv "$_src_staging" "$DAEMON_DIR"; then
+	[ -d "$DAEMON_DIR.dev-sync-old" ] && mv "$DAEMON_DIR.dev-sync-old" "$DAEMON_DIR"
+	rm -rf "$_src_staging"
+	tp_print_error "Failed to install daemon source"
+	exit 1
+fi
+rm -rf "$DAEMON_DIR.dev-sync-old"
 if [ ! -f "$DAEMON_DIR/main.ts" ]; then
 	tp_print_error "Daemon source archive did not contain main.ts"
 	exit 1
