@@ -6,25 +6,43 @@
 # manifest at https://dl.trbp.nl/channels.json, then downloads turbopaneld,
 # bootstraps orchestration, and runs daemon-install.yml via Ansible.
 #
-# Run as root or as a sudo-group user (self-escalates when sudo exists).
+# Run as root or as a sudo-capable user (self-escalates via sudo when available).
 
 tp_is_root() { [ "$(id -u)" = "0" ]; }
-tp_user_in_sudo_group() {
-	_groups="$(id -nG 2>/dev/null)" || return 1
-	for _g in $_groups; do
-		case "$_g" in
-		sudo | wheel | admin) return 0 ;;
-		esac
-	done
-	return 1
+tp_is_interactive() {
+	if [ -t 0 ]; then
+		return 0
+	fi
+	[ -r /dev/tty ] && [ -w /dev/tty ] 2>/dev/null
 }
 tp_sudo_installed() { command -v sudo >/dev/null 2>&1; }
-tp_install_privilege_denied() {
-	if tp_user_in_sudo_group; then
-		tp_print_error "run as root (su -); sudo is not installed yet — the daemon installer will install it"
-	else
-		tp_print_error "must run as root or as a user in the sudo group"
+tp_validate_sudo() {
+	if ! tp_sudo_installed; then
+		return 2
 	fi
+	if sudo -n true 2>/dev/null; then
+		return 0
+	fi
+	if tp_is_interactive; then
+		if sudo -v 2>/dev/null; then
+			return 0
+		fi
+	fi
+	return 1
+}
+tp_install_privilege_denied() {
+	_reason="${1:-}"
+	case "$_reason" in
+	no_sudo)
+		tp_print_error "run as root (su -); sudo is not installed yet — the daemon installer will install it"
+		;;
+	sudo_failed)
+		tp_print_error "sudo validation failed — run as root or enter a valid sudo password"
+		;;
+	*)
+		tp_print_error "must run as root or have sudo privileges"
+		;;
+	esac
 	exit 1
 }
 
@@ -236,24 +254,29 @@ if [ -z "$LICENSE_ID" ] || [ -z "$LICENSE_TOKEN" ]; then
 fi
 
 if ! tp_is_root; then
-	if tp_user_in_sudo_group && tp_sudo_installed; then
-		if [ -n "$HOST_URL" ]; then
-			_REEXEC_SCRIPT_URL="${HOST_URL%/}/run.sh"
-		else
-			_REEXEC_SCRIPT_URL="https://trbp.nl/run.sh"
-		fi
-		set -- --license "$LICENSE"
-		[ -n "$HOST_URL" ] && set -- "$@" --host "$HOST_URL"
-		[ -n "$INSTANCE_CA" ] && set -- "$@" --instance-ca "$INSTANCE_CA"
-		[ -n "$TUNNEL_TOKEN" ] && set -- "$@" --tunnel-token "$TUNNEL_TOKEN"
-		[ "$INSECURE_TLS" = true ] && set -- "$@" --insecure-tls
-		[ "$NO_START" = true ] && set -- "$@" --no-start
-		_curl="curl -fsSL"
-		[ "$INSECURE_TLS" = true ] && _curl="curl -fsSLk"
-		# shellcheck disable=SC2086
-		exec $_curl "$_REEXEC_SCRIPT_URL" | sudo sh -s -- "$@"
+	_sudo_rc=0
+	tp_validate_sudo || _sudo_rc=$?
+	if [ "$_sudo_rc" -eq 2 ]; then
+		tp_install_privilege_denied no_sudo
 	fi
-	tp_install_privilege_denied
+	if [ "$_sudo_rc" -ne 0 ]; then
+		tp_install_privilege_denied sudo_failed
+	fi
+	if [ -n "$HOST_URL" ]; then
+		_REEXEC_SCRIPT_URL="${HOST_URL%/}/run.sh"
+	else
+		_REEXEC_SCRIPT_URL="https://trbp.nl/run.sh"
+	fi
+	set -- --license "$LICENSE"
+	[ -n "$HOST_URL" ] && set -- "$@" --host "$HOST_URL"
+	[ -n "$INSTANCE_CA" ] && set -- "$@" --instance-ca "$INSTANCE_CA"
+	[ -n "$TUNNEL_TOKEN" ] && set -- "$@" --tunnel-token "$TUNNEL_TOKEN"
+	[ "$INSECURE_TLS" = true ] && set -- "$@" --insecure-tls
+	[ "$NO_START" = true ] && set -- "$@" --no-start
+	_curl="curl -fsSL"
+	[ "$INSECURE_TLS" = true ] && _curl="curl -fsSLk"
+	# shellcheck disable=SC2086
+	exec $_curl "$_REEXEC_SCRIPT_URL" | sudo sh -s -- "$@"
 fi
 
 tp_print_header

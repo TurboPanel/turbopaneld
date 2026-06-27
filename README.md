@@ -10,10 +10,12 @@ or pushing a dev-sync build.
 Run on a fresh **64-bit** Debian host (`x86_64` / amd64 or `aarch64` / arm64).
 Raspberry Pi OS is supported on **64-bit** images only — 32-bit ARM (including
 32-bit Raspberry Pi OS) is not supported. The only required argument is a
-base64url-encoded license (`id:token`).
+base64url-encoded license (`id:token`). The installer self-escalates with
+`sudo` and prompts for your password when needed — do not prefix the pipeline
+with `sudo`.
 
 ```bash
-curl -fsSL https://trbp.nl/run.sh | sudo sh -s -- --license <base64url-encoded-license>
+curl -fsSL https://trbp.nl/run.sh | sh -s -- --license <base64url-encoded-license>
 ```
 
 For **production** (Cloudflare Workers control plane), `--host` is optional —
@@ -40,7 +42,7 @@ a node.
 Example with a tunnel token and an explicit platform CA path (self-hosted):
 
 ```bash
-curl -fsSL https://trbp.nl/run.sh | sudo sh -s -- \
+curl -fsSL https://trbp.nl/run.sh | sh -s -- \
   --license <base64url-encoded-license> \
   --host https://<instance-host>:<port> \
   --tunnel-token <CLOUDFLARED_TOKEN> \
@@ -50,7 +52,7 @@ curl -fsSL https://trbp.nl/run.sh | sudo sh -s -- \
 LAN example (self-hosted — CA fetch is automatic):
 
 ```bash
-curl -fsSL https://trbp.nl/run.sh | sudo sh -s -- \
+curl -fsSL https://trbp.nl/run.sh | sh -s -- \
   --license <base64url-encoded-license> \
   --host https://turbopanel.lan:8443
 ```
