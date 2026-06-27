@@ -20,10 +20,11 @@ import { DaemonApiClient } from "./api-client.ts";
 import { DaemonTokenManager } from "./token-manager.ts";
 import { enrollDaemon } from "./enroll.ts";
 import { decodeBase64 } from "@std/encoding/base64";
-import type { MonitorSource } from "../monitor/source.ts";
-import { parseMonitorMessage } from "../monitor/protocol.ts";
-import { MonitorSession } from "./monitor-session.ts";
 import { getBuildInfo } from "../build-info.ts";
+import {
+  PRESENCE_HEARTBEAT_MS,
+  PresenceSession,
+} from "./presence-session.ts";
 import { resolveUpdateChannelConfig } from "../update/config.ts";
 import { resolveUpdate } from "../update/resolver.ts";
 import {
@@ -50,8 +51,6 @@ function sanitizeForLog(value: unknown): string {
 }
 
 type DaemonMessage =
-  | { type: "ping"; id: string; at: string }
-  | { type: "pong"; id: string; at: string }
   | { type: "echo"; payload: unknown; at: string }
   | { type: "version"; commit: string; branch: string; at: string }
   | { type: "command"; id: string; command: string; at: string }
@@ -135,8 +134,6 @@ export interface InstanceClientOptions {
   /** Initial reconnect delay; doubles on failure up to {@link DEFAULT_MAX_BACKOFF_MS}. */
   reconnectDelayMs?: number;
   onMessage?: (message: DaemonMessage) => void;
-  /** Phase-2 monitor source (Sentinel); drives WS monitor.* traffic when connected. */
-  monitor?: MonitorSource;
 }
 
 const DEFAULT_INITIAL_BACKOFF_MS = 2_000;
@@ -144,11 +141,10 @@ const DEFAULT_MAX_BACKOFF_MS = 30_000;
 const BACKOFF_MULTIPLIER = 2;
 /** Co-located install wait: poll readiness on a fixed cadence before first connect. */
 const INSTALL_READINESS_POLL_MS = 5_000;
-/** Instance may ping every 15s on Deno; Workers cells often only reply with monitor.ack. */
+/** Stale-check interval; daemon sends presence heartbeat every 60s. */
 const INSTANCE_PING_MS = 15_000;
-/** Monitor heartbeats run every 60s — allow one full cadence plus jitter before forcing reconnect. */
-const MONITOR_HEARTBEAT_MS = 60_000;
-const INSTANCE_STALE_MS = MONITOR_HEARTBEAT_MS * 2 + 30_000;
+/** Allow two heartbeat cadences plus jitter before forcing reconnect. */
+const INSTANCE_STALE_MS = PRESENCE_HEARTBEAT_MS * 2 + 30_000;
 /** After a prior session, wait for the instance to come back after systemd restart. */
 const INSTANCE_RESTART_WAIT_MS = 120_000;
 
@@ -275,7 +271,6 @@ export class InstanceClient {
   readonly #initialBackoffMs: number;
   readonly #maxBackoffMs: number;
   readonly #onMessage?: (message: DaemonMessage) => void;
-  readonly #monitor?: MonitorSource;
 
   #ws: WebSocket | undefined;
   #stopped = false;
@@ -288,8 +283,7 @@ export class InstanceClient {
   #tokenServerId: string | undefined;
   #tokenKeyId: string | undefined;
   #forceEnrollPending = false;
-  #monitorSession: MonitorSession | undefined;
-  #monitorHostname: string | undefined;
+  #presenceSession: PresenceSession | undefined;
   #updateInstallInProgress = false;
 
   constructor(options: InstanceClientOptions = {}) {
@@ -300,7 +294,8 @@ export class InstanceClient {
     this.#maxBackoffMs = DEFAULT_MAX_BACKOFF_MS;
     this.#backoffMs = this.#initialBackoffMs;
     this.#onMessage = options.onMessage;
-    this.#monitor = options.monitor;
+    // TODO(deferred): daemon-side SQLite monitoring store will subscribe to
+    // sentinel.onTransition() and sentinel.buildHeartbeat() here.
   }
 
   get config(): InstanceConfig {
@@ -439,9 +434,8 @@ export class InstanceClient {
 
   stop(): void {
     this.#stopped = true;
-    this.#monitorSession?.stopFallback();
-    this.#monitorSession?.detach();
-    this.#monitorSession = undefined;
+    this.#presenceSession?.detach();
+    this.#presenceSession = undefined;
     this.#tokenManager?.stop();
     this.#ws?.close();
     this.#ws = undefined;
@@ -466,8 +460,7 @@ export class InstanceClient {
           sanitizeForLog(err),
         );
         this.#closeActiveSocket();
-        this.#monitorSession?.detach();
-        this.#monitorSession?.startFallback();
+        this.#presenceSession?.detach();
         this.#increaseBackoff();
       }
 
@@ -618,8 +611,7 @@ export class InstanceClient {
     const ws = this.#newWebSocket(jwt);
     this.#ws = ws;
     let sessionRegistered = false;
-    this.#monitorHostname = hostname;
-    this.#ensureMonitorSession(serverId, hostname);
+    this.#ensurePresenceSession(serverId);
 
     await new Promise<void>((resolve, reject) => {
       const fail = (err: unknown) => {
@@ -658,11 +650,12 @@ export class InstanceClient {
     sessionRegistered = true;
     this.#hadStableSession = true;
     this.#resetBackoff();
-    this.#monitorSession?.attach(ws);
+    this.#presenceSession?.attach(ws);
 
     let lastInboundAt = Date.now();
     const staleTimer = setInterval(() => {
-      if (Date.now() - lastInboundAt > INSTANCE_STALE_MS) {
+      const lastAck = this.#presenceSession?.lastHeartbeatAckAt ?? lastInboundAt;
+      if (Date.now() - lastAck > INSTANCE_STALE_MS) {
         logWarn(
           "instance",
           "no websocket traffic from instance; closing to reconnect",
@@ -681,9 +674,15 @@ export class InstanceClient {
         ? event.data
         : String(event.data);
 
-      const monitorMessage = parseMonitorMessage(raw);
-      if (monitorMessage?.type === "monitor.ack") {
-        this.#monitorSession?.handleAck(monitorMessage);
+      let parsed: { type?: string } | null = null;
+      try {
+        parsed = JSON.parse(raw) as { type?: string };
+      } catch {
+        // handled below
+      }
+
+      if (parsed?.type === "heartbeat-ack") {
+        this.#presenceSession?.handleHeartbeatAck();
         return;
       }
 
@@ -708,8 +707,7 @@ export class InstanceClient {
         logDebug("instance", "websocket closed before registration");
       }
       if (this.#ws === ws) this.#ws = undefined;
-      this.#monitorSession?.detach();
-      this.#monitorSession?.startFallback();
+      this.#presenceSession?.detach();
     };
 
     const closeEvent = await new Promise<CloseEvent>((resolve) => {
@@ -729,41 +727,17 @@ export class InstanceClient {
     }
   }
 
-  #ensureMonitorSession(serverId: string, hostname: string): void {
-    if (!this.#monitor) return;
-
-    if (
-      this.#monitorSession &&
-      this.#tokenServerId === serverId &&
-      this.#monitorHostname === hostname
-    ) {
+  #ensurePresenceSession(serverId: string): void {
+    if (this.#presenceSession && this.#tokenServerId === serverId) {
       return;
     }
 
-    this.#monitorSession?.stopFallback();
-    this.#monitorSession?.detach();
-    this.#monitorSession = new MonitorSession({
-      source: this.#monitor,
-      serverId,
-      hostname,
-      apiClient: this.#apiClient,
-    });
+    this.#presenceSession?.detach();
+    this.#presenceSession = new PresenceSession({ serverId });
   }
 
   #handleMessage(message: DaemonMessage, ws: WebSocket): void {
     switch (message.type) {
-      case "ping":
-        ws.send(JSON.stringify(
-          {
-            type: "pong",
-            id: message.id,
-            at: new Date().toISOString(),
-          } satisfies DaemonMessage,
-        ));
-        break;
-      case "pong":
-        logDebug("instance", "pong", sanitizeForLog(message.id));
-        break;
       case "version":
         // Informational only. The daemon never self-updates; updates are
         // operator-driven via the developer upgrade button / dev-sync push.

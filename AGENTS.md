@@ -246,7 +246,7 @@ On Cloudflare Workers it is a per-server SQLite-backed Durable Object. The
 daemon client (`src/instance/client.ts`) is unaffected — it still dials
 `/ws/daemon/v1` with `Authorization: Bearer <token>` and reconnects on `4401`.
 
-- **Monitoring transport (new):** after a successful WS connection, the daemon sends monitoring envelopes over the WebSocket — a full `monitor.sync` immediately on (re)connect, then `monitor.heartbeat` at a **60s** cadence (host summary + changed resources since the last acked sequence), and `monitor.transition` for focused single-resource changes. The cell responds with `monitor.ack` (accepted sequence + optional `resyncNeeded`). The old 30s `POST /api/daemon/v1/heartbeat` hot path is **removed**; an HTTP fallback seam remains only when the WebSocket is unavailable. `monitor.sync` and `monitor.heartbeat` carry an optional `agent: { commit, buildId, builtAt, channel }` field populated from `getBuildInfo()` in `#wrapSync`/`#wrapHeartbeat`. Older daemons omit it; the instance accepts both.
+- **Presence heartbeat:** after a successful WS connection, the daemon sends `{ type: 'heartbeat', at, agent }` immediately on connect and every 60 s. The instance replies with `{ type: 'heartbeat-ack', at }`. No monitoring data is forwarded over the WS. The `Sentinel` continues to collect host/Docker state in-memory; a daemon-side SQLite monitoring store will consume it in a future effort.
 - **Token lifecycle**: `DaemonTokenManager` stores JWTs in memory only and
   refreshes lazily when less than 60 seconds remain (or immediately after a
   `4401` close).
@@ -542,6 +542,8 @@ shared-library install.
   is a manual binary-only helper and is not shipped on installed nodes.
 - `src/instance/client.ts` — WSS client; HTTP-first enrollment/session
   bootstrap + command/address + dev-sync/tunnel-token handlers
+- `src/instance/presence-session.ts` — slim WS presence heartbeat (`heartbeat` /
+  `heartbeat-ack`) every 60 s
 - `src/instance/api-client.ts` — HTTP API client for daemon auth/enroll/session
   endpoints
 - `src/instance/token-manager.ts` — in-memory daemon JWT manager with lazy

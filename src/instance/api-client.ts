@@ -1,5 +1,4 @@
 import { type InstanceConfig, instanceUrl } from "./paths.ts";
-import type { MonitorHeartbeatMessage, MonitorSyncMessage } from "../monitor/protocol.ts";
 
 export interface DaemonApiClientOptions {
   config: InstanceConfig;
@@ -54,18 +53,6 @@ export interface DaemonSessionResponse {
   expiresAt: string;
 }
 
-export interface DaemonHeartbeatRequest {
-  serverId: string;
-  hostname: string;
-  /** WS-degraded fallback: monitor.sync or monitor.heartbeat envelope for ingestion. */
-  monitor?: MonitorHeartbeatMessage | MonitorSyncMessage;
-}
-
-export interface MonitorHeartbeatAck {
-  acceptedSequence: number;
-  resyncNeeded?: boolean;
-}
-
 export class DaemonApiClient {
   readonly #options: DaemonApiClientOptions;
 
@@ -115,17 +102,6 @@ export class DaemonApiClient {
         method: "POST",
         body: JSON.stringify(params),
       },
-    );
-  }
-
-  async heartbeat(params: DaemonHeartbeatRequest): Promise<MonitorHeartbeatAck> {
-    return await this.#requestJson<MonitorHeartbeatAck>(
-      "/api/daemon/v1/heartbeat",
-      {
-        method: "POST",
-        body: JSON.stringify(params),
-      },
-      { auth: true },
     );
   }
 

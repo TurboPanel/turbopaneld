@@ -2,10 +2,7 @@ import { encodeBase64Url } from '@std/encoding/base64url'
 import { type DaemonApiClient, DaemonApiError } from './api-client.ts'
 import { InstanceClient } from './client.ts'
 import { enrollDaemon } from './enroll.ts'
-import { MonitorSession } from './monitor-session.ts'
-import { createMonitorDeltaTracker } from '../monitor/delta.ts'
-import type { MonitorSource } from '../monitor/source.ts'
-import { MONITOR_PROTOCOL_VERSION } from '../monitor/protocol.ts'
+import { PRESENCE_HEARTBEAT_MS, PresenceSession } from './presence-session.ts'
 import { DaemonTokenManager } from './token-manager.ts'
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -624,59 +621,17 @@ function makeJwt(exp: number): string {
   return `${header}.${payload}.signature`
 }
 
-function createTestMonitorSource(): MonitorSource {
-  const tracker = createMonitorDeltaTracker()
-  tracker.seedTracked([])
-  return {
-    buildSync: async () => tracker.buildSync({}, []),
-    buildHeartbeat: async () => tracker.buildHeartbeat({}, []),
-    onTransition: () => () => {},
-    handleAck: (acceptedSequence) => tracker.applyAck(acceptedSequence),
-    registerPendingDelivery: (sequence, resourcesAfter) =>
-      tracker.registerPendingDelivery(sequence, resourcesAfter),
-    confirmDelivery: (sequence, resourcesAfter) =>
-      tracker.confirmDelivery(sequence, resourcesAfter),
-  }
-}
-
-function parseSentMonitorFrames(
+function parseSentFrames(
   frames: string[],
 ): Array<Record<string, unknown>> {
   return frames.map((frame) => JSON.parse(frame) as Record<string, unknown>)
 }
 
 Deno.test({
-  name: 'MonitorSession defers heartbeat until initial sync completes',
+  name: 'PresenceSession sends heartbeat immediately on attach and on interval',
   permissions: { env: true },
   fn: async () => {
-    const tracker = createMonitorDeltaTracker()
-    tracker.seedTracked([])
-    const readyDelayMs = 25
     const heartbeatIntervalMs = 10
-    const originalSetInterval = globalThis.setInterval
-    const originalClearInterval = globalThis.clearInterval
-
-    globalThis.setInterval = ((
-      handler: (...args: unknown[]) => void,
-      _delayMs?: number,
-      ...args: unknown[]
-    ) => originalSetInterval(handler, heartbeatIntervalMs, ...args)) as typeof setInterval
-    globalThis.clearInterval = originalClearInterval
-
-    const source: MonitorSource = {
-      waitForReady: () =>
-        new Promise((resolve) => setTimeout(resolve, readyDelayMs)),
-      resetForReconnect: async () => {},
-      buildSync: async () => tracker.buildSync({}, []),
-      buildHeartbeat: async () => tracker.buildHeartbeat({}, []),
-      onTransition: () => () => {},
-      handleAck: (acceptedSequence) => tracker.applyAck(acceptedSequence),
-      registerPendingDelivery: (sequence, resourcesAfter) =>
-        tracker.registerPendingDelivery(sequence, resourcesAfter),
-      confirmDelivery: (sequence, resourcesAfter) =>
-        tracker.confirmDelivery(sequence, resourcesAfter),
-    }
-
     const sentFrames: string[] = []
     const ws = {
       readyState: MockWebSocket.OPEN,
@@ -685,104 +640,27 @@ Deno.test({
       },
     } as unknown as WebSocket
 
-    const session = new MonitorSession({
-      source,
-      serverId: 'srv-monitor-bootstrap',
-      hostname: 'host-monitor',
+    const session = new PresenceSession({
+      serverId: 'srv-presence',
+      heartbeatIntervalMs,
     })
 
     try {
       session.attach(ws)
-      await new Promise((resolve) => setTimeout(resolve, readyDelayMs + 20))
 
-      const parsed = parseSentMonitorFrames(sentFrames)
-      const syncIndex = parsed.findIndex((frame) => frame.type === 'monitor.sync')
-      const heartbeatIndex = parsed.findIndex((frame) =>
-        frame.type === 'monitor.heartbeat'
-      )
+      const afterAttach = parseSentFrames(sentFrames)
+      assertEquals(afterAttach.length, 1)
+      assertEquals(afterAttach[0]?.type, 'heartbeat')
+      assertExists(afterAttach[0]?.agent)
 
-      assertExists(parsed[syncIndex], 'monitor.sync should be sent')
-      assert(
-        heartbeatIndex === -1 || heartbeatIndex > syncIndex,
-        'monitor.heartbeat must not precede monitor.sync',
-      )
+      await new Promise((resolve) => setTimeout(resolve, heartbeatIntervalMs + 20))
+
+      const afterInterval = parseSentFrames(sentFrames)
+      assert(afterInterval.length >= 2, 'second heartbeat should be sent after interval')
+      assertEquals(afterInterval.at(-1)?.type, 'heartbeat')
     } finally {
-      globalThis.setInterval = originalSetInterval
       session.detach()
     }
-  },
-})
-
-Deno.test({
-  name: 'MonitorSession fallback leaves delivery unconfirmed when resyncNeeded',
-  fn: async () => {
-    const tracker = createMonitorDeltaTracker()
-    tracker.seedTracked([])
-    const source: MonitorSource = {
-      buildSync: async () => tracker.buildSync({}, []),
-      buildHeartbeat: async () => tracker.buildHeartbeat({}, []),
-      onTransition: () => () => {},
-      handleAck: (acceptedSequence) => tracker.applyAck(acceptedSequence),
-      registerPendingDelivery: (sequence, resourcesAfter) =>
-        tracker.registerPendingDelivery(sequence, resourcesAfter),
-      confirmDelivery: (sequence, resourcesAfter) =>
-        tracker.confirmDelivery(sequence, resourcesAfter),
-    }
-    let heartbeatCalls = 0
-    const session = new MonitorSession({
-      source,
-      serverId: 'srv-monitor',
-      hostname: 'host-monitor',
-      apiClient: {
-        heartbeat: async () => {
-          heartbeatCalls += 1
-          return { acceptedSequence: 0, resyncNeeded: true }
-        },
-      } as unknown as DaemonApiClient,
-    })
-    session.startFallback()
-    await new Promise((resolve) => setTimeout(resolve, 50))
-    assertEquals(heartbeatCalls, 2)
-    assertEquals(session.ackedSequence, 0)
-    session.stopFallback()
-  },
-})
-
-Deno.test({
-  name: 'MonitorSession fallback sends monitor.sync when heartbeat returns resyncNeeded',
-  fn: async () => {
-    const tracker = createMonitorDeltaTracker()
-    tracker.seedTracked([])
-    let heartbeatCalls = 0
-    const source: MonitorSource = {
-      buildSync: async () => tracker.buildSync({}, []),
-      buildHeartbeat: async () => tracker.buildHeartbeat({}, []),
-      onTransition: () => () => {},
-      handleAck: (acceptedSequence) => tracker.applyAck(acceptedSequence),
-      registerPendingDelivery: (sequence, resourcesAfter) =>
-        tracker.registerPendingDelivery(sequence, resourcesAfter),
-      confirmDelivery: (sequence, resourcesAfter) =>
-        tracker.confirmDelivery(sequence, resourcesAfter),
-    }
-    const session = new MonitorSession({
-      source,
-      serverId: 'srv-monitor',
-      hostname: 'host-monitor',
-      apiClient: {
-        heartbeat: async (params: { monitor?: { type?: string } }) => {
-          heartbeatCalls += 1
-          if (params.monitor?.type === 'monitor.sync') {
-            return { acceptedSequence: 1, resyncNeeded: false }
-          }
-          return { acceptedSequence: 0, resyncNeeded: true }
-        },
-      } as unknown as DaemonApiClient,
-    })
-    session.startFallback()
-    await new Promise((resolve) => setTimeout(resolve, 50))
-    assertEquals(heartbeatCalls, 2)
-    assertEquals(session.ackedSequence, 1)
-    session.stopFallback()
   },
 })
 
@@ -798,7 +676,7 @@ Deno.test({
 })
 
 Deno.test({
-  name: 'InstanceClient with host-only monitor sends monitor.sync over websocket',
+  name: 'InstanceClient sends presence heartbeat over websocket',
   permissions: { env: true, read: true, write: true, sys: ['hostname'] },
   fn: async () => {
     const tempDir = await Deno.makeTempDir()
@@ -858,26 +736,22 @@ Deno.test({
     await Deno.writeTextFile(`${tempDir}/license.id`, 'license-123\n')
     await Deno.writeTextFile(`${tempDir}/license.token`, 'token-abc\n')
 
-    const { createSentinel } = await import('../monitor/sentinel.ts')
-    const monitor = createSentinel({})
-
     const client = new InstanceClient({
       config: { kind: 'url', baseUrl: 'https://instance.test', wsBaseUrl: 'wss://instance.test' },
       reconnectDelayMs: 30_000,
-      monitor,
     })
 
     try {
       client.start()
-      const socket = await waitFor('monitor websocket', () => sockets.at(0))
+      const socket = await waitFor('presence websocket', () => sockets.at(0))
       socket.open()
       await new Promise((resolve) => setTimeout(resolve, 50))
-      const sync = parseSentMonitorFrames(socket.sentFrames).find((frame) =>
-        frame.type === 'monitor.sync'
+      const heartbeat = parseSentFrames(socket.sentFrames).find((frame) =>
+        frame.type === 'heartbeat'
       )
-      assertExists(sync)
-      assertEquals(sync.protocolVersion, MONITOR_PROTOCOL_VERSION)
-      assertEquals((sync.resources as unknown[] | undefined)?.length ?? 0, 0)
+      assertExists(heartbeat)
+      const agent = heartbeat.agent as { commit?: string } | undefined
+      assertExists(agent?.commit)
       socket.close(1000, 'done')
     } finally {
       client.stop()
@@ -899,19 +773,18 @@ Deno.test({
 })
 
 Deno.test({
-  name: 'INSTANCE_STALE_MS exceeds monitor heartbeat cadence plus jitter',
+  name: 'INSTANCE_STALE_MS exceeds presence heartbeat cadence plus jitter',
   fn: () => {
-    const MONITOR_HEARTBEAT_MS = 60_000
-    const INSTANCE_STALE_MS = 150_000
+    const INSTANCE_STALE_MS = PRESENCE_HEARTBEAT_MS * 2 + 30_000
     assert(
-      INSTANCE_STALE_MS > MONITOR_HEARTBEAT_MS + 15_000,
+      INSTANCE_STALE_MS > PRESENCE_HEARTBEAT_MS + 15_000,
       'stale watchdog must survive one heartbeat interval',
     )
   },
 })
 
 Deno.test({
-  name: 'websocket survives inbound silence across one monitor heartbeat interval',
+  name: 'websocket survives inbound silence across one presence heartbeat interval',
   permissions: { env: true, read: true, write: true, sys: ['hostname'] },
   fn: async () => {
     const tempDir = await Deno.makeTempDir()
@@ -977,11 +850,9 @@ Deno.test({
     await Deno.writeTextFile(`${tempDir}/license.id`, 'license-123\n')
     await Deno.writeTextFile(`${tempDir}/license.token`, 'token-abc\n')
 
-    const monitor = createTestMonitorSource()
     const client = new InstanceClient({
       config: { kind: 'url', baseUrl: 'https://instance.test', wsBaseUrl: 'wss://instance.test' },
       reconnectDelayMs: 120_000,
-      monitor,
     })
 
     try {
@@ -990,11 +861,8 @@ Deno.test({
       socket.open()
       await new Promise((resolve) => setTimeout(resolve, 50))
       socket.receive(JSON.stringify({
-        type: 'monitor.ack',
-        from: 'instance',
-        serverId: 'srv-1',
+        type: 'heartbeat-ack',
         at: new Date().toISOString(),
-        acceptedSequence: 1,
       }))
 
       await new Promise((resolve) => setTimeout(resolve, 65_000))

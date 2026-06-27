@@ -29,6 +29,8 @@ if (orchestrationReady && shouldEnableDockerIntegration()) {
   sentinelOptions.dockerMonitor = new DockerMonitor(dockerClient);
 }
 const sentinel = createSentinel(sentinelOptions);
+// TODO(deferred): daemon-side SQLite monitoring store will subscribe to
+// sentinel.onTransition() and sentinel.buildHeartbeat() here.
 sentinel.start(abort.signal);
 
 await startTunnels(abort.signal);
@@ -37,7 +39,7 @@ const instanceHandle = { stop() {} };
 let instance: { stop(): void } = instanceHandle;
 
 if (shouldConnectToInstance()) {
-  instance = await connectInstance({ monitor: sentinel });
+  instance = await connectInstance();
 } else {
   logInfo(
     "instance",
