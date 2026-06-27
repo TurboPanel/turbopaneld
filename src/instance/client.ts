@@ -21,10 +21,7 @@ import { DaemonTokenManager } from "./token-manager.ts";
 import { enrollDaemon } from "./enroll.ts";
 import { decodeBase64 } from "@std/encoding/base64";
 import { getBuildInfo } from "../build-info.ts";
-import {
-  PRESENCE_HEARTBEAT_MS,
-  PresenceSession,
-} from "./presence-session.ts";
+import { IdlePresence } from "./idle-presence.ts";
 import { resolveUpdateChannelConfig } from "../update/config.ts";
 import { resolveUpdate } from "../update/resolver.ts";
 import {
@@ -141,10 +138,6 @@ const DEFAULT_MAX_BACKOFF_MS = 30_000;
 const BACKOFF_MULTIPLIER = 2;
 /** Co-located install wait: poll readiness on a fixed cadence before first connect. */
 const INSTALL_READINESS_POLL_MS = 5_000;
-/** Stale-check interval; daemon sends presence heartbeat every 60s. */
-const INSTANCE_PING_MS = 15_000;
-/** Allow two heartbeat cadences plus jitter before forcing reconnect. */
-const INSTANCE_STALE_MS = PRESENCE_HEARTBEAT_MS * 2 + 30_000;
 /** After a prior session, wait for the instance to come back after systemd restart. */
 const INSTANCE_RESTART_WAIT_MS = 120_000;
 
@@ -283,7 +276,7 @@ export class InstanceClient {
   #tokenServerId: string | undefined;
   #tokenKeyId: string | undefined;
   #forceEnrollPending = false;
-  #presenceSession: PresenceSession | undefined;
+  #idlePresence: IdlePresence | undefined;
   #updateInstallInProgress = false;
 
   constructor(options: InstanceClientOptions = {}) {
@@ -434,8 +427,8 @@ export class InstanceClient {
 
   stop(): void {
     this.#stopped = true;
-    this.#presenceSession?.detach();
-    this.#presenceSession = undefined;
+    this.#idlePresence?.detach();
+    this.#idlePresence = undefined;
     this.#tokenManager?.stop();
     this.#ws?.close();
     this.#ws = undefined;
@@ -446,6 +439,7 @@ export class InstanceClient {
       throw new Error("instance websocket is not connected");
     }
     this.#ws.send(JSON.stringify(message));
+    this.#idlePresence?.touchActivity();
   }
 
   async #runConnectLoop(): Promise<void> {
@@ -460,7 +454,7 @@ export class InstanceClient {
           sanitizeForLog(err),
         );
         this.#closeActiveSocket();
-        this.#presenceSession?.detach();
+        this.#idlePresence?.detach();
         this.#increaseBackoff();
       }
 
@@ -611,7 +605,7 @@ export class InstanceClient {
     const ws = this.#newWebSocket(jwt);
     this.#ws = ws;
     let sessionRegistered = false;
-    this.#ensurePresenceSession(serverId);
+    this.#ensureIdlePresence(serverId);
 
     await new Promise<void>((resolve, reject) => {
       const fail = (err: unknown) => {
@@ -650,41 +644,13 @@ export class InstanceClient {
     sessionRegistered = true;
     this.#hadStableSession = true;
     this.#resetBackoff();
-    this.#presenceSession?.attach(ws);
-
-    let lastInboundAt = Date.now();
-    const staleTimer = setInterval(() => {
-      const lastAck = this.#presenceSession?.lastHeartbeatAckAt ?? lastInboundAt;
-      if (Date.now() - lastAck > INSTANCE_STALE_MS) {
-        logWarn(
-          "instance",
-          "no websocket traffic from instance; closing to reconnect",
-        );
-        try {
-          ws.close();
-        } catch {
-          // Socket may already be gone.
-        }
-      }
-    }, INSTANCE_PING_MS);
+    this.#idlePresence?.attach(ws);
 
     ws.onmessage = (event) => {
-      lastInboundAt = Date.now();
+      this.#idlePresence?.touchActivity();
       const raw = typeof event.data === "string"
         ? event.data
         : String(event.data);
-
-      let parsed: { type?: string } | null = null;
-      try {
-        parsed = JSON.parse(raw) as { type?: string };
-      } catch {
-        // handled below
-      }
-
-      if (parsed?.type === "heartbeat-ack") {
-        this.#presenceSession?.handleHeartbeatAck();
-        return;
-      }
 
       const message = parseMessage(raw);
       if (!message) {
@@ -697,7 +663,6 @@ export class InstanceClient {
     };
 
     ws.onclose = (event) => {
-      clearInterval(staleTimer);
       if (event.code === 4401) {
         logWarn("instance", "authentication rejected");
       }
@@ -707,7 +672,7 @@ export class InstanceClient {
         logDebug("instance", "websocket closed before registration");
       }
       if (this.#ws === ws) this.#ws = undefined;
-      this.#presenceSession?.detach();
+      this.#idlePresence?.detach();
     };
 
     const closeEvent = await new Promise<CloseEvent>((resolve) => {
@@ -715,7 +680,6 @@ export class InstanceClient {
         once: true,
       });
     });
-    clearInterval(staleTimer);
     if (closeEvent.code === 4401) {
       await this.#tokenManager?.refresh();
     }
@@ -727,13 +691,13 @@ export class InstanceClient {
     }
   }
 
-  #ensurePresenceSession(serverId: string): void {
-    if (this.#presenceSession && this.#tokenServerId === serverId) {
+  #ensureIdlePresence(serverId: string): void {
+    if (this.#idlePresence && this.#tokenServerId === serverId) {
       return;
     }
 
-    this.#presenceSession?.detach();
-    this.#presenceSession = new PresenceSession({ serverId });
+    this.#idlePresence?.detach();
+    this.#idlePresence = new IdlePresence({ serverId });
   }
 
   #handleMessage(message: DaemonMessage, ws: WebSocket): void {

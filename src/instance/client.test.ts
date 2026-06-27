@@ -2,7 +2,7 @@ import { encodeBase64Url } from '@std/encoding/base64url'
 import { type DaemonApiClient, DaemonApiError } from './api-client.ts'
 import { InstanceClient } from './client.ts'
 import { enrollDaemon } from './enroll.ts'
-import { PRESENCE_HEARTBEAT_MS, PresenceSession } from './presence-session.ts'
+import { IDLE_PRESENCE_MS, IdlePresence } from './idle-presence.ts'
 import { DaemonTokenManager } from './token-manager.ts'
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -628,10 +628,10 @@ function parseSentFrames(
 }
 
 Deno.test({
-  name: 'PresenceSession sends heartbeat immediately on attach and on interval',
+  name: 'IdlePresence sends hello on attach and idle heartbeat after silence',
   permissions: { env: true },
   fn: async () => {
-    const heartbeatIntervalMs = 10
+    const idleCheckIntervalMs = 10
     const sentFrames: string[] = []
     const ws = {
       readyState: MockWebSocket.OPEN,
@@ -640,9 +640,10 @@ Deno.test({
       },
     } as unknown as WebSocket
 
-    const session = new PresenceSession({
+    const session = new IdlePresence({
       serverId: 'srv-presence',
-      heartbeatIntervalMs,
+      idleCheckIntervalMs,
+      idleThresholdMs: idleCheckIntervalMs,
     })
 
     try {
@@ -650,14 +651,44 @@ Deno.test({
 
       const afterAttach = parseSentFrames(sentFrames)
       assertEquals(afterAttach.length, 1)
-      assertEquals(afterAttach[0]?.type, 'heartbeat')
+      assertEquals(afterAttach[0]?.type, 'hello')
       assertExists(afterAttach[0]?.agent)
 
-      await new Promise((resolve) => setTimeout(resolve, heartbeatIntervalMs + 20))
+      await new Promise((resolve) => setTimeout(resolve, idleCheckIntervalMs + 20))
 
       const afterInterval = parseSentFrames(sentFrames)
-      assert(afterInterval.length >= 2, 'second heartbeat should be sent after interval')
+      assert(afterInterval.length >= 2, 'idle heartbeat should be sent after silence')
       assertEquals(afterInterval.at(-1)?.type, 'heartbeat')
+    } finally {
+      session.detach()
+    }
+  },
+})
+
+Deno.test({
+  name: 'IdlePresence skips idle heartbeat when activity is recent',
+  permissions: { env: true },
+  fn: async () => {
+    const idleCheckIntervalMs = 10
+    const sentFrames: string[] = []
+    const ws = {
+      readyState: MockWebSocket.OPEN,
+      send(data: string) {
+        sentFrames.push(data)
+      },
+    } as unknown as WebSocket
+
+    const session = new IdlePresence({
+      serverId: 'srv-presence',
+      idleCheckIntervalMs,
+      idleThresholdMs: 60_000,
+    })
+
+    try {
+      session.attach(ws)
+      session.touchActivity()
+      await new Promise((resolve) => setTimeout(resolve, idleCheckIntervalMs + 20))
+      assertEquals(parseSentFrames(sentFrames).length, 1)
     } finally {
       session.detach()
     }
@@ -676,7 +707,7 @@ Deno.test({
 })
 
 Deno.test({
-  name: 'InstanceClient sends presence heartbeat over websocket',
+  name: 'InstanceClient sends hello over websocket on connect',
   permissions: { env: true, read: true, write: true, sys: ['hostname'] },
   fn: async () => {
     const tempDir = await Deno.makeTempDir()
@@ -746,11 +777,11 @@ Deno.test({
       const socket = await waitFor('presence websocket', () => sockets.at(0))
       socket.open()
       await new Promise((resolve) => setTimeout(resolve, 50))
-      const heartbeat = parseSentFrames(socket.sentFrames).find((frame) =>
-        frame.type === 'heartbeat'
+      const hello = parseSentFrames(socket.sentFrames).find((frame) =>
+        frame.type === 'hello'
       )
-      assertExists(heartbeat)
-      const agent = heartbeat.agent as { commit?: string } | undefined
+      assertExists(hello)
+      const agent = hello.agent as { commit?: string } | undefined
       assertExists(agent?.commit)
       socket.close(1000, 'done')
     } finally {
@@ -773,18 +804,7 @@ Deno.test({
 })
 
 Deno.test({
-  name: 'INSTANCE_STALE_MS exceeds presence heartbeat cadence plus jitter',
-  fn: () => {
-    const INSTANCE_STALE_MS = PRESENCE_HEARTBEAT_MS * 2 + 30_000
-    assert(
-      INSTANCE_STALE_MS > PRESENCE_HEARTBEAT_MS + 15_000,
-      'stale watchdog must survive one heartbeat interval',
-    )
-  },
-})
-
-Deno.test({
-  name: 'websocket survives inbound silence across one presence heartbeat interval',
+  name: 'InstanceClient keeps websocket open without instance stale watchdog',
   permissions: { env: true, read: true, write: true, sys: ['hostname'] },
   fn: async () => {
     const tempDir = await Deno.makeTempDir()
@@ -857,16 +877,9 @@ Deno.test({
 
     try {
       client.start()
-      const socket = await waitFor('heartbeat idle websocket', () => sockets.at(0))
+      const socket = await waitFor('idle websocket', () => sockets.at(0))
       socket.open()
-      await new Promise((resolve) => setTimeout(resolve, 50))
-      socket.receive(JSON.stringify({
-        type: 'heartbeat-ack',
-        at: new Date().toISOString(),
-      }))
-
-      await new Promise((resolve) => setTimeout(resolve, 65_000))
-
+      await new Promise((resolve) => setTimeout(resolve, 100))
       assertEquals(closeCount, 0)
       assertEquals(socket.readyState, MockWebSocket.OPEN)
       socket.close(1000, 'done')
