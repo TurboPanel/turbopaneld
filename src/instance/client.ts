@@ -29,6 +29,7 @@ import {
   downloadRunScript,
   encodeLicenseArg,
   executeRunReconcile,
+  resolveBootstrapInsecureTls,
   resolveRunScriptUrl,
 } from "./run-reconcile.ts";
 import { restartDaemonService } from "./restart-daemon-service.ts";
@@ -910,12 +911,16 @@ export class InstanceClient {
         const env = Deno.env.toObject();
         const instanceUrl = env.TURBOPANEL_INSTANCE_URL?.trim();
         const instanceCaPath = env.TURBOPANEL_INSTANCE_CA?.trim();
-        const insecureTls = env.TURBOPANEL_RELEASE_TLS_INSECURE === "1";
+        const runScriptUrl = resolveRunScriptUrl(this.#config);
+        const insecureTls = resolveBootstrapInsecureTls({
+          releaseTlsInsecure: env.TURBOPANEL_RELEASE_TLS_INSECURE,
+          runScriptUrl,
+          instanceCaPath,
+        });
         const licenseArg = encodeLicenseArg(
           credentials.licenseId,
           credentials.licenseToken,
         );
-        const runScriptUrl = resolveRunScriptUrl(this.#config);
         const reconcileArgs = buildRunReconcileArgs({
           licenseArg,
           instanceUrl,
@@ -929,7 +934,10 @@ export class InstanceClient {
           sanitizeForLog(runScriptUrl),
         );
 
-        const script = await downloadRunScript(runScriptUrl, insecureTls);
+        const script = await downloadRunScript(runScriptUrl, {
+          insecureTls,
+          caPath: insecureTls ? undefined : instanceCaPath,
+        });
         await executeRunReconcile({
           script,
           args: reconcileArgs,

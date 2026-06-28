@@ -3,6 +3,7 @@ import {
   CDN_RUN_SCRIPT,
   encodeLicenseArg,
   PRODUCTION_CONTROL_PLANE,
+  resolveBootstrapInsecureTls,
   resolveRunScriptUrl,
 } from "./run-reconcile.ts";
 import { join } from "@std/path";
@@ -55,6 +56,34 @@ Deno.test("buildRunReconcileArgs omits --host for production", () => {
   );
 });
 
+Deno.test("resolveBootstrapInsecureTls uses CDN without insecure flag", () => {
+  assertEquals(
+    resolveBootstrapInsecureTls({
+      runScriptUrl: CDN_RUN_SCRIPT,
+    }),
+    false,
+  );
+});
+
+Deno.test("resolveBootstrapInsecureTls enables insecure for self-hosted without CA", () => {
+  assertEquals(
+    resolveBootstrapInsecureTls({
+      runScriptUrl: "https://huey.lan:8443/run.sh",
+    }),
+    true,
+  );
+});
+
+Deno.test("resolveBootstrapInsecureTls prefers platform CA for self-hosted", () => {
+  assertEquals(
+    resolveBootstrapInsecureTls({
+      runScriptUrl: "https://huey.lan:8443/run.sh",
+      instanceCaPath: "/opt/turbopanel/platform/config/instance-ca.pem",
+    }),
+    false,
+  );
+});
+
 Deno.test("buildRunReconcileArgs includes self-hosted flags", () => {
   assertEquals(
     buildRunReconcileArgs({
@@ -68,8 +97,27 @@ Deno.test("buildRunReconcileArgs includes self-hosted flags", () => {
       "abc",
       "--host",
       "https://huey.lan:8443",
+      "--insecure-tls",
+      "--no-start",
+    ],
+  );
+});
+
+Deno.test("buildRunReconcileArgs passes non-canonical instance CA path", () => {
+  assertEquals(
+    buildRunReconcileArgs({
+      licenseArg: "abc",
+      instanceUrl: "https://huey.lan:8443",
+      instanceCaPath: "/tmp/platform-ca.pem",
+      insecureTls: true,
+    }),
+    [
+      "--license",
+      "abc",
+      "--host",
+      "https://huey.lan:8443",
       "--instance-ca",
-      "/opt/turbopanel/platform/config/instance-ca.pem",
+      "/tmp/platform-ca.pem",
       "--insecure-tls",
       "--no-start",
     ],

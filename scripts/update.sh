@@ -114,6 +114,7 @@ EOF
 CHANNEL=""
 LICENSE=""
 HOST_URL=""
+INSTANCE_CA=""
 INSECURE_TLS=false
 DRY_RUN=false
 
@@ -163,6 +164,9 @@ if [ -z "$HOST_URL" ]; then
 	HOST_URL="$(tp_read_dotenv TURBOPANEL_INSTANCE_URL "$ENV_FILE" 2>/dev/null)" || HOST_URL=""
 fi
 
+INSTANCE_CA="$(tp_read_dotenv TURBOPANEL_INSTANCE_CA "$ENV_FILE" 2>/dev/null)" || INSTANCE_CA=""
+CA_PATH="$INSTALL_ROOT/platform/config/instance-ca.pem"
+
 if [ -z "$LICENSE" ]; then
 	if [ ! -f "$LICENSE_ID_FILE" ] || [ ! -f "$LICENSE_TOKEN_FILE" ]; then
 		tp_print_error "license not found in $STATE_DIR"
@@ -196,6 +200,9 @@ if [ -n "$HOST_URL" ]; then
 			RUN_ARGS="$RUN_ARGS --host $HOST_URL"
 			;;
 	esac
+fi
+if [ -n "$INSTANCE_CA" ] && [ "$INSTANCE_CA" != "$CA_PATH" ]; then
+	RUN_ARGS="$RUN_ARGS --instance-ca $INSTANCE_CA"
 fi
 [ "$INSECURE_TLS" = true ] && RUN_ARGS="$RUN_ARGS --insecure-tls"
 

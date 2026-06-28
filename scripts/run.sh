@@ -327,7 +327,9 @@ tp_print_step "  " "Control plane: $HOST_URL"
 
 mkdir -p "$CONFIG_DIR"
 if [ -n "$INSTANCE_CA" ]; then
-	install -m 0640 "$INSTANCE_CA" "$CA_PATH"
+	if [ "$INSTANCE_CA" != "$CA_PATH" ]; then
+		install -m 0640 "$INSTANCE_CA" "$CA_PATH"
+	fi
 else
 	tp_print_step "▸" "Fetching instance CA…"
 	_curl_base="curl -sSL"
