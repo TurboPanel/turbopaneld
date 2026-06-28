@@ -340,6 +340,9 @@ else
 	tp_print_step "▸" "Fetching instance CA…"
 	_curl_base="curl -sSL"
 	[ "$INSECURE_TLS" = true ] && _curl_base="curl -sSLk"
+	if [ "$INSECURE_TLS" != true ] && [ -f "$CA_PATH" ]; then
+		_curl_base="curl -sSL --cacert $CA_PATH"
+	fi
 	_ca_tmp="$(mktemp)"
 	_ca_http_code=""
 	# shellcheck disable=SC2086
@@ -356,8 +359,7 @@ else
 			rm -f "$CA_PATH"
 			;;
 		*)
-			tp_print_step "~" "Could not download instance CA (HTTP ${_ca_http_code}) — continuing"
-			rm -f "$CA_PATH"
+			tp_print_step "~" "Could not download instance CA (HTTP ${_ca_http_code}) — keeping existing CA if present"
 			;;
 	esac
 	rm -f "$_ca_tmp"

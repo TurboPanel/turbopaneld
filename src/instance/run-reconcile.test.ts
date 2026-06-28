@@ -97,6 +97,8 @@ Deno.test("buildRunReconcileArgs includes self-hosted flags", () => {
       "abc",
       "--host",
       "https://huey.lan:8443",
+      "--instance-ca",
+      "/opt/turbopanel/platform/config/instance-ca.pem",
       "--insecure-tls",
       "--no-start",
     ],

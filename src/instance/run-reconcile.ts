@@ -53,7 +53,7 @@ export function buildRunReconcileArgs(options: {
     args.push("--host", instanceUrl);
   }
   const caPath = options.instanceCaPath?.trim();
-  if (caPath && caPath !== CANONICAL_INSTANCE_CA_PATH) {
+  if (caPath) {
     args.push("--instance-ca", caPath);
   }
   if (options.insecureTls) {

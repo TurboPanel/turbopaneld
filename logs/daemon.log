@@ -1,0 +1,294 @@
+2026-06-28T09:58:15.505Z INFO daemon  starting up
+2026-06-28T09:58:15.506Z INFO orchestration  bootstrapping runtime
+2026-06-28T09:58:15.506Z INFO orchestration  co-located dev host awaiting opt-in (TURBOPANEL_DEV_INSTANCE); skipping converge
+2026-06-28T09:58:15.512Z INFO orchestration  uv 0.11.19 already installed
+2026-06-28T09:58:15.512Z INFO orchestration  ensuring Python 3.14 is installed
+2026-06-28T09:58:15.533Z DEBUG python  Python 3.14 is already installed
+2026-06-28T09:58:15.533Z INFO orchestration  Python 3.14 ready
+2026-06-28T09:58:15.718Z INFO orchestration  ansible already installed, skipping setup
+2026-06-28T09:58:15.814Z INFO orchestration  galaxy content up to date, skipping install
+2026-06-28T09:58:15.814Z INFO orchestration  bootstrap inputs unchanged, skipping localhost smoke-test
+2026-06-28T09:58:15.814Z INFO orchestration  runtime ready in 0.3s
+2026-06-28T09:58:15.815Z INFO sentinel  starting
+2026-06-28T09:58:15.815Z INFO tunnels  Cloudflare tunnels disabled; skipping
+2026-06-28T09:58:15.815Z INFO instance  connection deferred until development environment opt-in (TURBOPANEL_DEV_INSTANCE)
+2026-06-28T10:01:30.839Z INFO daemon  shutting down
+2026-06-28T10:01:30.840Z INFO sentinel  stopped
+2026-06-28T10:01:30.841Z INFO daemon  shut down
+2026-06-28T10:01:31.154Z INFO daemon  starting up
+2026-06-28T10:01:31.155Z INFO orchestration  bootstrapping runtime
+2026-06-28T10:01:31.254Z INFO orchestration  uv 0.11.19 already installed
+2026-06-28T10:01:31.260Z INFO orchestration  ensuring Python 3.14 is installed
+2026-06-28T10:01:31.358Z DEBUG python  Python 3.14 is already installed
+2026-06-28T10:01:31.366Z INFO orchestration  Python 3.14 ready
+2026-06-28T10:01:31.741Z INFO orchestration  ansible already installed, skipping setup
+2026-06-28T10:01:31.864Z INFO orchestration  galaxy content up to date, skipping install
+2026-06-28T10:01:31.864Z INFO orchestration  bootstrap inputs unchanged, skipping localhost smoke-test
+2026-06-28T10:01:31.865Z INFO orchestration  runtime ready in 0.7s
+2026-06-28T10:01:31.879Z INFO sentinel  starting
+2026-06-28T10:01:31.881Z INFO tunnels  Cloudflare tunnels disabled; skipping
+2026-06-28T10:04:17.086Z INFO instance  instance ready for daemon registration via unix:///run/turbopanel/instance.sock
+2026-06-28T10:04:17.197Z INFO instance  enrolled with instance as 019f0daf-ddaa-7084-a388-5f5deaf1bb4e
+2026-06-28T10:04:17.207Z DEBUG instance  websocket connected via unix:///run/turbopanel/instance.sock
+2026-06-28T10:04:36.937Z INFO ansible  [play] TurboPanel instance certs apply
+2026-06-28T10:04:36.937Z DEBUG ansible  [task] Gathering Facts
+2026-06-28T10:04:37.491Z DEBUG ansible  [ok] Gathering Facts
+2026-06-28T10:04:37.491Z DEBUG ansible  [task] instance-certs : Ensure instance certs directory exists for cert generation
+2026-06-28T10:04:37.616Z INFO ansible  [changed] instance-certs : Ensure instance certs directory exists for cert generation
+2026-06-28T10:04:37.616Z DEBUG ansible  [task] instance-certs : Generate platform CA and server certificate
+2026-06-28T10:04:37.756Z DEBUG ansible  [ok] instance-certs : Generate platform CA and server certificate
+2026-06-28T10:04:37.756Z DEBUG ansible  [task] Reload turbopanel-caddy to serve updated leaf cert
+2026-06-28T10:04:38.060Z DEBUG ansible  [task] Restart turbopanel-caddy when reload is unsupported or failed
+2026-06-28T10:05:37.181Z INFO ansible  [changed] Restart turbopanel-caddy when reload is unsupported or failed
+2026-06-28T10:05:37.181Z INFO ansible  [recap] ok=4 changed=2 failed=0 unreachable=0
+2026-06-28T10:16:07.967Z INFO ansible  [play] TurboPanel instance certs apply
+2026-06-28T10:16:07.967Z DEBUG ansible  [task] Gathering Facts
+2026-06-28T10:16:08.464Z DEBUG ansible  [ok] Gathering Facts
+2026-06-28T10:16:08.464Z DEBUG ansible  [task] instance-certs : Ensure instance certs directory exists for cert generation
+2026-06-28T10:16:08.580Z DEBUG ansible  [ok] instance-certs : Ensure instance certs directory exists for cert generation
+2026-06-28T10:16:08.580Z DEBUG ansible  [task] instance-certs : Generate platform CA and server certificate
+2026-06-28T10:16:08.766Z DEBUG ansible  [ok] instance-certs : Generate platform CA and server certificate
+2026-06-28T10:16:08.766Z DEBUG ansible  [task] Reload turbopanel-caddy to serve updated leaf cert
+2026-06-28T10:16:09.016Z DEBUG ansible  [task] Restart turbopanel-caddy when reload is unsupported or failed
+2026-06-28T10:17:07.976Z INFO ansible  [changed] Restart turbopanel-caddy when reload is unsupported or failed
+2026-06-28T10:17:07.977Z INFO ansible  [recap] ok=4 changed=1 failed=0 unreachable=0
+2026-06-28T12:04:12.319Z INFO instance  websocket closed after registration
+2026-06-28T12:04:12.321Z DEBUG instance  reconnect scheduled in 2000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:04:14.358Z DEBUG instance  websocket connected via unix:///run/turbopanel/instance.sock
+2026-06-28T12:04:14.362Z INFO instance  websocket closed after registration
+2026-06-28T12:04:14.362Z DEBUG instance  reconnect scheduled in 2000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:04:26.408Z DEBUG instance  reconnect scheduled in 4000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:04:30.484Z DEBUG instance  reconnect scheduled in 8000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:04:38.518Z DEBUG instance  reconnect scheduled in 16000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:04:54.534Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:05:24.554Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:05:54.574Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:06:24.600Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:06:54.621Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:07:34.332Z INFO daemon  shutting down
+2026-06-28T12:07:34.332Z INFO sentinel  stopped
+2026-06-28T12:07:34.334Z INFO daemon  shut down
+2026-06-28T12:07:34.471Z INFO daemon  starting up
+2026-06-28T12:07:34.473Z INFO orchestration  bootstrapping runtime
+2026-06-28T12:07:34.559Z INFO orchestration  uv 0.11.19 already installed
+2026-06-28T12:07:34.560Z INFO orchestration  ensuring Python 3.14 is installed
+2026-06-28T12:07:34.663Z DEBUG python  Python 3.14 is already installed
+2026-06-28T12:07:34.668Z INFO orchestration  Python 3.14 ready
+2026-06-28T12:07:35.027Z INFO orchestration  ansible already installed, skipping setup
+2026-06-28T12:07:35.116Z INFO orchestration  galaxy content up to date, skipping install
+2026-06-28T12:07:35.116Z INFO orchestration  bootstrap inputs unchanged, skipping localhost smoke-test
+2026-06-28T12:07:35.118Z INFO orchestration  runtime ready in 0.6s
+2026-06-28T12:07:35.124Z INFO sentinel  starting
+2026-06-28T12:07:35.125Z INFO tunnels  Cloudflare tunnels disabled; skipping
+2026-06-28T12:07:35.142Z INFO instance  instance ready for daemon registration via unix:///run/turbopanel/instance.sock
+2026-06-28T12:07:35.165Z DEBUG instance  websocket connected via unix:///run/turbopanel/instance.sock
+2026-06-28T12:11:44.362Z INFO daemon  shutting down
+2026-06-28T12:11:44.363Z INFO sentinel  stopped
+2026-06-28T12:11:44.364Z INFO daemon  shut down
+2026-06-28T12:11:44.485Z INFO daemon  starting up
+2026-06-28T12:11:44.486Z INFO orchestration  bootstrapping runtime
+2026-06-28T12:11:44.516Z INFO orchestration  uv 0.11.19 already installed
+2026-06-28T12:11:44.518Z INFO orchestration  ensuring Python 3.14 is installed
+2026-06-28T12:11:44.647Z DEBUG python  Python 3.14 is already installed
+2026-06-28T12:11:44.658Z INFO orchestration  Python 3.14 ready
+2026-06-28T12:11:45.090Z INFO orchestration  ansible already installed, skipping setup
+2026-06-28T12:11:45.249Z INFO orchestration  galaxy content up to date, skipping install
+2026-06-28T12:11:45.249Z INFO orchestration  bootstrap inputs unchanged, skipping localhost smoke-test
+2026-06-28T12:11:45.250Z INFO orchestration  runtime ready in 0.8s
+2026-06-28T12:11:45.271Z INFO sentinel  starting
+2026-06-28T12:11:45.273Z INFO tunnels  Cloudflare tunnels disabled; skipping
+2026-06-28T12:11:45.289Z INFO instance  instance ready for daemon registration via unix:///run/turbopanel/instance.sock
+2026-06-28T12:11:45.319Z DEBUG instance  websocket connected via unix:///run/turbopanel/instance.sock
+2026-06-28T12:16:40.839Z INFO daemon  shutting down
+2026-06-28T12:16:40.840Z INFO sentinel  stopped
+2026-06-28T12:16:40.841Z INFO daemon  shut down
+2026-06-28T12:16:40.923Z INFO daemon  starting up
+2026-06-28T12:16:40.923Z INFO orchestration  bootstrapping runtime
+2026-06-28T12:16:40.933Z INFO orchestration  uv 0.11.19 already installed
+2026-06-28T12:16:40.933Z INFO orchestration  ensuring Python 3.14 is installed
+2026-06-28T12:16:40.959Z DEBUG python  Python 3.14 is already installed
+2026-06-28T12:16:40.960Z INFO orchestration  Python 3.14 ready
+2026-06-28T12:16:41.158Z INFO orchestration  ansible already installed, skipping setup
+2026-06-28T12:16:41.250Z INFO orchestration  galaxy content up to date, skipping install
+2026-06-28T12:16:41.250Z INFO orchestration  bootstrap inputs unchanged, skipping localhost smoke-test
+2026-06-28T12:16:41.251Z INFO orchestration  runtime ready in 0.3s
+2026-06-28T12:16:41.255Z INFO sentinel  starting
+2026-06-28T12:16:41.255Z INFO tunnels  Cloudflare tunnels disabled; skipping
+2026-06-28T12:16:41.263Z INFO instance  instance ready for daemon registration via unix:///run/turbopanel/instance.sock
+2026-06-28T12:16:41.278Z DEBUG instance  websocket connected via unix:///run/turbopanel/instance.sock
+2026-06-28T12:32:41.391Z INFO instance  websocket closed after registration
+2026-06-28T12:32:41.410Z DEBUG instance  reconnect scheduled in 2000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:32:43.468Z DEBUG instance  websocket connected via unix:///run/turbopanel/instance.sock
+2026-06-28T12:34:43.492Z INFO instance  websocket closed after registration
+2026-06-28T12:34:43.500Z DEBUG instance  reconnect scheduled in 2000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:34:45.583Z DEBUG instance  reconnect scheduled in 4000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:34:49.598Z DEBUG instance  reconnect scheduled in 8000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:34:57.652Z DEBUG instance  reconnect scheduled in 16000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:35:13.721Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:35:43.741Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:36:13.763Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:36:43.773Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:37:23.842Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:37:53.861Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:38:23.885Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:38:53.903Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:39:23.918Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:39:53.946Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:40:23.964Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:40:53.987Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:41:24.018Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:41:54.046Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:42:24.059Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:42:54.086Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:43:24.116Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:43:54.150Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:44:24.170Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:44:54.187Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:45:24.194Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:45:54.213Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:46:24.224Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T12:46:54.264Z DEBUG instance  websocket connected via unix:///run/turbopanel/instance.sock
+2026-06-28T13:08:35.576Z INFO instance  websocket closed after registration
+2026-06-28T13:08:35.577Z DEBUG instance  reconnect scheduled in 2000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:08:37.636Z DEBUG instance  websocket connected via unix:///run/turbopanel/instance.sock
+2026-06-28T13:15:31.577Z INFO instance  websocket closed after registration
+2026-06-28T13:15:31.577Z DEBUG instance  reconnect scheduled in 2000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:15:33.604Z DEBUG instance  reconnect scheduled in 4000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:15:37.621Z DEBUG instance  reconnect scheduled in 8000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:15:45.639Z DEBUG instance  reconnect scheduled in 16000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:16:01.651Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:16:31.676Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:17:01.689Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:17:31.704Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:18:01.735Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:18:31.761Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:19:01.798Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:19:31.807Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:20:01.823Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:20:31.841Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:21:01.868Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:21:31.884Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:22:01.901Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:22:31.918Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:23:01.956Z DEBUG instance  websocket connected via unix:///run/turbopanel/instance.sock
+2026-06-28T13:23:52.145Z INFO instance  websocket closed after registration
+2026-06-28T13:23:52.145Z DEBUG instance  reconnect scheduled in 2000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:23:54.161Z DEBUG instance  reconnect scheduled in 4000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:23:58.173Z DEBUG instance  reconnect scheduled in 8000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:24:06.182Z DEBUG instance  reconnect scheduled in 16000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:24:22.192Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:24:52.205Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:25:22.213Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:25:52.220Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:26:22.249Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:26:52.263Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:27:22.284Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:27:52.309Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:28:22.352Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:28:52.364Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:29:22.381Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:29:52.393Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:30:22.413Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:30:52.420Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:31:22.428Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:31:52.440Z DEBUG instance  reconnect scheduled in 30000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:32:10.125Z INFO daemon  shutting down
+2026-06-28T13:32:10.127Z INFO sentinel  stopped
+2026-06-28T13:32:10.135Z INFO daemon  shut down
+2026-06-28T13:32:10.391Z INFO daemon  starting up
+2026-06-28T13:32:10.394Z INFO orchestration  bootstrapping runtime
+2026-06-28T13:32:10.423Z INFO orchestration  uv 0.11.19 already installed
+2026-06-28T13:32:10.426Z INFO orchestration  ensuring Python 3.14 is installed
+2026-06-28T13:32:10.501Z DEBUG python  Python 3.14 is already installed
+2026-06-28T13:32:10.508Z INFO orchestration  Python 3.14 ready
+2026-06-28T13:32:10.950Z INFO orchestration  ansible already installed, skipping setup
+2026-06-28T13:32:11.088Z INFO orchestration  galaxy content up to date, skipping install
+2026-06-28T13:32:11.088Z INFO orchestration  bootstrap inputs unchanged, skipping localhost smoke-test
+2026-06-28T13:32:11.088Z INFO orchestration  runtime ready in 0.7s
+2026-06-28T13:32:11.097Z INFO sentinel  starting
+2026-06-28T13:32:11.100Z INFO tunnels  Cloudflare tunnels disabled; skipping
+2026-06-28T13:32:11.106Z INFO instance  instance ready for daemon registration via unix:///run/turbopanel/instance.sock
+2026-06-28T13:32:11.145Z DEBUG instance  websocket connected via unix:///run/turbopanel/instance.sock
+2026-06-28T13:32:41.080Z INFO instance  websocket closed after registration
+2026-06-28T13:32:41.088Z DEBUG instance  reconnect scheduled in 2000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:32:43.132Z INFO instance  forcing token refresh after failed ws upgrade
+2026-06-28T13:32:43.154Z DEBUG instance  reconnect scheduled in 4000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:32:47.165Z DEBUG instance  websocket connected via unix:///run/turbopanel/instance.sock
+2026-06-28T13:37:47.188Z INFO instance  websocket closed after registration
+2026-06-28T13:37:47.189Z DEBUG instance  reconnect scheduled in 2000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:37:49.219Z INFO instance  forcing token refresh after failed ws upgrade
+2026-06-28T13:37:49.237Z DEBUG instance  reconnect scheduled in 4000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:37:53.249Z DEBUG instance  websocket connected via unix:///run/turbopanel/instance.sock
+2026-06-28T13:42:53.269Z INFO instance  websocket closed after registration
+2026-06-28T13:42:53.270Z DEBUG instance  reconnect scheduled in 2000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:42:55.298Z INFO instance  forcing token refresh after failed ws upgrade
+2026-06-28T13:42:55.310Z DEBUG instance  reconnect scheduled in 4000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:42:59.320Z DEBUG instance  websocket connected via unix:///run/turbopanel/instance.sock
+2026-06-28T13:50:56.068Z INFO instance  websocket closed after registration
+2026-06-28T13:50:56.069Z DEBUG instance  reconnect scheduled in 2000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:50:58.082Z INFO instance  forcing token refresh after failed ws upgrade
+2026-06-28T13:50:58.091Z DEBUG instance  reconnect scheduled in 4000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T13:51:02.096Z DEBUG instance  websocket connected via unix:///run/turbopanel/instance.sock
+2026-06-28T14:00:21.024Z INFO daemon  shutting down
+2026-06-28T14:00:21.024Z INFO sentinel  stopped
+2026-06-28T14:00:21.026Z INFO daemon  shut down
+2026-06-28T14:00:21.132Z INFO daemon  starting up
+2026-06-28T14:00:21.133Z INFO orchestration  bootstrapping runtime
+2026-06-28T14:00:21.143Z INFO orchestration  uv 0.11.19 already installed
+2026-06-28T14:00:21.143Z INFO orchestration  ensuring Python 3.14 is installed
+2026-06-28T14:00:21.178Z DEBUG python  Python 3.14 is already installed
+2026-06-28T14:00:21.179Z INFO orchestration  Python 3.14 ready
+2026-06-28T14:00:21.477Z INFO orchestration  ansible already installed, skipping setup
+2026-06-28T14:00:21.579Z INFO orchestration  galaxy content up to date, skipping install
+2026-06-28T14:00:21.579Z INFO orchestration  bootstrap inputs unchanged, skipping localhost smoke-test
+2026-06-28T14:00:21.580Z INFO orchestration  runtime ready in 0.4s
+2026-06-28T14:00:21.584Z INFO sentinel  starting
+2026-06-28T14:00:21.585Z INFO tunnels  Cloudflare tunnels disabled; skipping
+2026-06-28T14:00:21.594Z INFO instance  instance ready for daemon registration via unix:///run/turbopanel/instance.sock
+2026-06-28T14:00:21.609Z DEBUG instance  websocket connected via unix:///run/turbopanel/instance.sock
+2026-06-28T14:12:08.814Z INFO instance  websocket closed after registration
+2026-06-28T14:12:08.815Z DEBUG instance  reconnect scheduled in 2000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T14:12:10.830Z INFO instance  forcing token refresh after failed ws upgrade
+2026-06-28T14:12:10.845Z DEBUG instance  reconnect scheduled in 4000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T14:12:14.855Z DEBUG instance  websocket connected via unix:///run/turbopanel/instance.sock
+2026-06-28T14:50:03.389Z INFO instance  websocket closed after registration
+2026-06-28T14:50:03.400Z DEBUG instance  reconnect scheduled in 2000 ms via unix:///run/turbopanel/instance.sock
+2026-06-28T14:50:05.454Z DEBUG instance  websocket connected via unix:///run/turbopanel/instance.sock
+2026-06-28T15:00:15.974Z INFO daemon  shutting down
+2026-06-28T15:00:15.974Z INFO sentinel  stopped
+2026-06-28T15:00:15.977Z INFO daemon  shut down
+2026-06-28T15:01:34.164Z INFO daemon  starting up
+2026-06-28T15:01:34.168Z INFO orchestration  bootstrapping runtime
+2026-06-28T15:01:34.191Z INFO orchestration  uv 0.11.19 already installed
+2026-06-28T15:01:34.192Z INFO orchestration  ensuring Python 3.14 is installed
+2026-06-28T15:01:34.245Z DEBUG python  Python 3.14 is already installed
+2026-06-28T15:01:34.249Z INFO orchestration  Python 3.14 ready
+2026-06-28T15:01:34.543Z INFO orchestration  ansible already installed, skipping setup
+2026-06-28T15:01:34.645Z INFO orchestration  galaxy content up to date, skipping install
+2026-06-28T15:01:34.645Z INFO orchestration  bootstrap inputs unchanged, skipping localhost smoke-test
+2026-06-28T15:01:34.646Z INFO orchestration  runtime ready in 0.5s
+2026-06-28T15:01:34.652Z INFO sentinel  starting
+2026-06-28T15:01:34.653Z INFO tunnels  Cloudflare tunnels disabled; skipping
+2026-06-28T15:01:34.654Z INFO debug-43c5ba  resolveInstanceCaPath {"source":"none","resolved":null,"hypothesisId":"H1-H3"}
+2026-06-28T15:01:34.655Z INFO debug-43c5ba  connectInstance startup {"target":"unix:///run/turbopanel/instance.sock","caCertPath":null,"hypothesisId":"H1-H3"}
+2026-06-28T15:01:34.665Z INFO instance  instance ready for daemon registration via unix:///run/turbopanel/instance.sock
+2026-06-28T15:01:34.684Z DEBUG instance  websocket connected via unix:///run/turbopanel/instance.sock
+2026-06-28T15:18:42.503Z INFO daemon  shutting down
+2026-06-28T15:18:42.503Z INFO sentinel  stopped
+2026-06-28T15:18:42.504Z INFO daemon  shut down
+2026-06-28T15:18:42.611Z INFO daemon  starting up
+2026-06-28T15:18:42.612Z INFO orchestration  bootstrapping runtime
+2026-06-28T15:18:42.622Z INFO orchestration  uv 0.11.19 already installed
+2026-06-28T15:18:42.622Z INFO orchestration  ensuring Python 3.14 is installed
+2026-06-28T15:18:42.655Z DEBUG python  Python 3.14 is already installed
+2026-06-28T15:18:42.655Z INFO orchestration  Python 3.14 ready
+2026-06-28T15:18:42.933Z INFO orchestration  ansible already installed, skipping setup
+2026-06-28T15:18:43.048Z INFO orchestration  galaxy content up to date, skipping install
+2026-06-28T15:18:43.048Z INFO orchestration  bootstrap inputs unchanged, skipping localhost smoke-test
+2026-06-28T15:18:43.049Z INFO orchestration  runtime ready in 0.4s
+2026-06-28T15:18:43.054Z INFO sentinel  starting
+2026-06-28T15:18:43.055Z INFO tunnels  Cloudflare tunnels disabled; skipping
+2026-06-28T15:18:43.056Z INFO debug-43c5ba  resolveInstanceCaPath {"source":"none","resolved":null,"hypothesisId":"H1-H3"}
+2026-06-28T15:18:43.056Z INFO debug-43c5ba  connectInstance startup {"target":"unix:///run/turbopanel/instance.sock","caCertPath":null,"hypothesisId":"H1-H3"}
+2026-06-28T15:18:43.061Z INFO instance  instance ready for daemon registration via unix:///run/turbopanel/instance.sock
+2026-06-28T15:18:43.080Z DEBUG instance  websocket connected via unix:///run/turbopanel/instance.sock

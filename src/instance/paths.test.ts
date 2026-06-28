@@ -50,12 +50,17 @@ Deno.test("workers transition: url and CA env keys resolve to url mode", () => {
   }
 });
 
-Deno.test("resolveInstanceCaPath prefers TURBOPANEL_INSTANCE_CA env", () => {
-  const path = resolveInstanceCaPath({
-    TURBOPANEL_INSTANCE_CA: PLATFORM_CA,
-  });
-  if (path !== PLATFORM_CA) {
-    throw new Error(`expected ${PLATFORM_CA}, got ${path}`);
+Deno.test("resolveInstanceCaPath prefers TURBOPANEL_INSTANCE_CA env when file exists", async () => {
+  const tmp = await Deno.makeTempFile({ suffix: ".pem" });
+  try {
+    const path = resolveInstanceCaPath({
+      TURBOPANEL_INSTANCE_CA: tmp,
+    });
+    if (path !== tmp) {
+      throw new Error(`expected ${tmp}, got ${path}`);
+    }
+  } finally {
+    await Deno.remove(tmp);
   }
 });
 

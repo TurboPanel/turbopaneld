@@ -941,6 +941,11 @@ export class InstanceClient {
           insecureTls,
         });
 
+        // #region agent log
+        fetch('http://localhost:7440/ingest/3e0179a5-fa63-49e5-b717-b62ee1a155c9',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'43c5ba'},body:JSON.stringify({sessionId:'43c5ba',location:'client.ts:#applyUpdate',message:'pre-reconcile update params',data:{instanceUrl:instanceUrl??null,instanceCaPath:instanceCaPath??null,insecureTls,runScriptUrl,reconcileArgs,passesInstanceCaFlag:reconcileArgs.includes('--instance-ca')},timestamp:Date.now(),hypothesisId:'H4'})}).catch(()=>{});
+        logInfo("debug-43c5ba", "#applyUpdate pre-reconcile", JSON.stringify({ instanceCaPath: instanceCaPath ?? null, insecureTls, reconcileArgs, hypothesisId: "H4" }));
+        // #endregion
+
         logInfo(
           "update",
           "reconciling via run.sh",
@@ -1091,6 +1096,11 @@ export async function connectInstance(
   const httpClient = options.httpClient ??
     await createInstanceHttpClient(config, { caCertPath });
 
+  // #region agent log
+  fetch('http://localhost:7440/ingest/3e0179a5-fa63-49e5-b717-b62ee1a155c9',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'43c5ba'},body:JSON.stringify({sessionId:'43c5ba',location:'client.ts:connectInstance',message:'connectInstance startup',data:{target:describeInstance(config),configKind:config.kind,caCertPath:caCertPath??null,hasHttpClient:!!httpClient,instanceUrl:env.TURBOPANEL_INSTANCE_URL??null},timestamp:Date.now(),hypothesisId:'H1-H3'})}).catch(()=>{});
+  logInfo("debug-43c5ba", "connectInstance startup", JSON.stringify({ target: describeInstance(config), caCertPath: caCertPath ?? null, hypothesisId: "H1-H3" }));
+  // #endregion
+
   const client = new InstanceClient({
     ...options,
     config,
@@ -1134,7 +1144,7 @@ export async function connectInstance(
           readyLogged = true;
         }
         break;
-      } catch {
+      } catch (err) {
         if (!waitingLogged) {
           logInfo(
             "instance",
@@ -1143,6 +1153,11 @@ export async function connectInstance(
           );
           waitingLogged = true;
         }
+        // #region agent log
+        const errMsg = err instanceof Error ? err.message : String(err);
+        fetch('http://localhost:7440/ingest/3e0179a5-fa63-49e5-b717-b62ee1a155c9',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'43c5ba'},body:JSON.stringify({sessionId:'43c5ba',location:'client.ts:connectInstance:fetchHealth',message:'fetchHealth failed',data:{target:client.target,error:errMsg,caCertPath:caCertPath??null},timestamp:Date.now(),hypothesisId:'H3-H5'})}).catch(()=>{});
+        logInfo("debug-43c5ba", "fetchHealth failed", JSON.stringify({ error: errMsg, caCertPath: caCertPath ?? null, hypothesisId: "H3-H5" }));
+        // #endregion
         await delay(backoffMs);
         backoffMs = nextBackoffMs(backoffMs, DEFAULT_MAX_BACKOFF_MS);
       }
