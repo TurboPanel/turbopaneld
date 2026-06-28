@@ -135,9 +135,13 @@ tp_install_deno_runtime() {
 	mkdir -p "$_deno_tmp"
 	_curl="curl -fsSL"
 	[ "${TURBOPANEL_RELEASE_TLS_INSECURE:-}" = 1 ] && _curl="curl -fsSLk"
+	# CI=1 (with no -y and non-TTY stdout) makes deno.land/install.sh skip its
+	# shell-setup step. Otherwise it appends `. "$DENO_INSTALL/env"` to the
+	# invoking user's ~/.bashrc — pointing at our temp dir which we delete below,
+	# breaking every subsequent login shell with a missing-file error.
 	# shellcheck disable=SC2086
 	if ! $_curl https://deno.land/install.sh \
-		| DENO_INSTALL="$_deno_tmp" sh -s "v${TP_DENO_VERSION}" -- -y --no-modify-path >/dev/null 2>&1; then
+		| CI=1 DENO_INSTALL="$_deno_tmp" sh -s "v${TP_DENO_VERSION}" >/dev/null 2>&1; then
 		rm -rf "$_deno_tmp"
 		return 1
 	fi

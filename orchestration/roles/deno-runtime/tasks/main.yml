@@ -18,7 +18,11 @@
     DENO_TMP="{{ turbopanel_runtimes_dir }}/deno/.install"
     rm -rf "$DENO_TMP"
     mkdir -p "$DENO_TMP"
-    curl -fsSL https://deno.land/install.sh | DENO_INSTALL="$DENO_TMP" sh -s "v{{ deno_version }}" -- -y --no-modify-path
+    # CI=1 (with no -y and non-TTY stdout) makes deno.land/install.sh skip its
+    # shell-setup step, which would otherwise append `. "$DENO_INSTALL/env"` to
+    # the invoking user's ~/.bashrc pointing at this temp dir we delete below,
+    # breaking every subsequent login shell with a missing-file error.
+    CI=1 curl -fsSL https://deno.land/install.sh | CI=1 DENO_INSTALL="$DENO_TMP" sh -s "v{{ deno_version }}"
     install -m 0755 "$DENO_TMP/bin/deno" "{{ turbopanel_runtimes_dir }}/deno/{{ deno_version }}/deno"
     rm -rf "$DENO_TMP"
   args:
