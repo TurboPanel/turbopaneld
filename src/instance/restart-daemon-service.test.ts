@@ -4,14 +4,14 @@ import {
   restartDaemonService,
 } from "./restart-daemon-service.ts";
 
-Deno.test("buildDaemonRestartSystemctlArgs enables then restarts", () => {
+Deno.test("buildDaemonRestartSystemctlArgs enables then restarts via sudo", () => {
   assertEquals(buildDaemonRestartSystemctlArgs("turbopanel-daemon.service"), [
-    ["enable", "turbopanel-daemon.service"],
-    ["restart", "turbopanel-daemon.service"],
+    ["-n", "systemctl", "enable", "turbopanel-daemon.service"],
+    ["-n", "systemctl", "restart", "turbopanel-daemon.service"],
   ]);
 });
 
-Deno.test("restartDaemonService runs enable before restart", async () => {
+Deno.test("restartDaemonService runs sudo systemctl enable before restart", async () => {
   const calls: string[][] = [];
   const ok = await restartDaemonService({
     unit: "turbopanel-daemon.service",
@@ -22,8 +22,8 @@ Deno.test("restartDaemonService runs enable before restart", async () => {
   });
   assertEquals(ok, true);
   assertEquals(calls, [
-    ["enable", "turbopanel-daemon.service"],
-    ["restart", "turbopanel-daemon.service"],
+    ["-n", "systemctl", "enable", "turbopanel-daemon.service"],
+    ["-n", "systemctl", "restart", "turbopanel-daemon.service"],
   ]);
 });
 
@@ -31,8 +31,8 @@ Deno.test("restartDaemonService returns false when restart fails", async () => {
   const ok = await restartDaemonService({
     unit: "turbopanel-daemon.service",
     runSystemctl: async (args) => ({
-      success: args[0] === "enable",
-      stderr: args[0] === "restart" ? "Job failed" : "",
+      success: args[2] === "enable",
+      stderr: args[2] === "restart" ? "Job failed" : "",
     }),
   });
   assertEquals(ok, false);

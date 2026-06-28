@@ -6,13 +6,13 @@ function stripLogInjection(text: string): string {
   return text.replace(/[\r\n\t]/g, " ");
 }
 
-/** Args passed to systemctl when restarting after dev-sync or UI update. */
+/** sudo -n systemctl invocations after dev-sync or UI update. */
 export function buildDaemonRestartSystemctlArgs(
   unit = DEFAULT_DAEMON_UNIT,
 ): string[][] {
   return [
-    ["enable", unit],
-    ["restart", unit],
+    ["-n", "systemctl", "enable", unit],
+    ["-n", "systemctl", "restart", unit],
   ];
 }
 
@@ -24,11 +24,11 @@ export function resolveDaemonServiceUnit(
 }
 
 /**
- * Enable and restart the daemon systemd unit.
+ * Enable and restart the daemon systemd unit via passwordless sudo.
  *
+ * The daemon process runs as `turbopanel`, not root — plain `systemctl` fails.
  * Uses `enable` then `restart` (not `enable --now`) so an already-active unit
- * is replaced with a new process after `--no-start` reconcile. `enable --now`
- * alone leaves a running daemon on old code.
+ * is replaced after `--no-start` reconcile.
  */
 export async function restartDaemonService(
   options: {
@@ -39,7 +39,7 @@ export async function restartDaemonService(
   const unit = options.unit ?? resolveDaemonServiceUnit();
   const runSystemctl = options.runSystemctl ??
     (async (args: string[]) => {
-      const result = await new Deno.Command("systemctl", {
+      const result = await new Deno.Command("sudo", {
         args,
         stdin: "null",
         stdout: "piped",
@@ -59,7 +59,7 @@ export async function restartDaemonService(
       const safeStderr = stripLogInjection(result.stderr || "unknown error");
       logWarn(
         "daemon",
-        "systemctl",
+        "sudo",
         safeArgs,
         safeUnit,
         "failed:",
