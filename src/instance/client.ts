@@ -31,6 +31,7 @@ import {
   executeRunReconcile,
   resolveRunScriptUrl,
 } from "./run-reconcile.ts";
+import { restartDaemonService } from "./restart-daemon-service.ts";
 
 /** Chained replace pattern Sonar S5145 recognizes for log-injection sanitization. */
 function stripLogInjection(text: string): string {
@@ -938,10 +939,6 @@ export class InstanceClient {
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
       logError("update", "failed:", sanitizeForLog(error));
-    } finally {
-      if (!shouldRestart) {
-        this.#updateInstallInProgress = false;
-      }
     }
 
     const result: DaemonMessage = {
@@ -954,8 +951,18 @@ export class InstanceClient {
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result));
 
     // Restart only after acking success, so the instance sees the result before
-    // this process is replaced by the updated binary.
-    if (ok && shouldRestart) await restartDaemonService();
+    // this process is replaced by the updated source tree.
+    if (ok && shouldRestart) {
+      const restarted = await restartDaemonService();
+      if (!restarted) {
+        logWarn(
+          "update",
+          "reconcile succeeded but systemd restart failed; daemon may still be on old code",
+        );
+      }
+    }
+
+    this.#updateInstallInProgress = false;
   }
 
   #collectAddresses(
@@ -1048,35 +1055,6 @@ function nextBackoffMs(current: number, max: number): number {
 
 function isColocatedSocketMode(config: InstanceConfig): boolean {
   return config.kind === "socket";
-}
-
-/** Ask systemd to enable and restart this daemon (dev-sync / UI update). */
-async function restartDaemonService(): Promise<void> {
-  const unit = Deno.env.get("TURBOPANEL_SERVICE_NAME")?.trim() ||
-    "turbopanel-daemon";
-  try {
-    const result = await new Deno.Command("systemctl", {
-      args: ["enable", "--now", unit],
-      stdin: "null",
-      stdout: "piped",
-      stderr: "piped",
-    }).output();
-    if (!result.success) {
-      const safeUnit = stripLogInjection(unit);
-      const safeStderr = stripLogInjection(
-        new TextDecoder().decode(result.stderr).trim() || "unknown error",
-      );
-      logWarn(
-        "daemon",
-        "systemctl enable --now",
-        safeUnit,
-        "failed:",
-        safeStderr,
-      );
-    }
-  } catch (err) {
-    logWarn("daemon", "restart failed:", sanitizeForLog(err));
-  }
 }
 
 export async function connectInstance(
