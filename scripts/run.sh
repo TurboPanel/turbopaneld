@@ -327,7 +327,13 @@ tp_print_step "  " "Control plane: $HOST_URL"
 
 mkdir -p "$CONFIG_DIR"
 if [ -n "$INSTANCE_CA" ]; then
-	if [ "$INSTANCE_CA" != "$CA_PATH" ]; then
+	# Compare resolved paths, not raw strings: a symlink or path-variant (e.g. a
+	# trailing slash or relative form) pointing at the canonical CA otherwise
+	# slips past a string-only check and makes `install` fail with
+	# "are the same file". Resolve both sides before deciding to copy.
+	_ca_src_resolved="$(readlink -f "$INSTANCE_CA" 2>/dev/null || echo "$INSTANCE_CA")"
+	_ca_dst_resolved="$(readlink -f "$CA_PATH" 2>/dev/null || echo "$CA_PATH")"
+	if [ "$_ca_src_resolved" != "$_ca_dst_resolved" ]; then
 		install -m 0640 "$INSTANCE_CA" "$CA_PATH"
 	fi
 else

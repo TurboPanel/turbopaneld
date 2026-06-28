@@ -98,6 +98,17 @@ async function replaceDaemonSourceTree(staging: string): Promise<void> {
  * `--allow-run` / `--allow-write`.
  */
 export async function applyDevSyncTarball(bytes: Uint8Array): Promise<void> {
+  // replaceDaemonSourceTree() swaps DAEMON_ROOT out from under the running
+  // process. If this process's cwd is inside that tree (e.g. a previous sync),
+  // it now points at a removed directory and every subprocess spawn fails with
+  // "failed resolving cwd". Anchor to the stable parent dir first, and pass an
+  // explicit cwd to spawned commands so they never depend on the process cwd.
+  const stableCwd = dirname(DAEMON_ROOT);
+  try {
+    Deno.chdir(stableCwd);
+  } catch {
+    Deno.chdir("/");
+  }
   const tmp = await Deno.makeTempFile({ suffix: ".tgz" });
   const staging = join(dirname(DAEMON_ROOT), ".daemon-dev-sync-staging");
   try {
@@ -108,6 +119,7 @@ export async function applyDevSyncTarball(bytes: Uint8Array): Promise<void> {
 
     const command = new Deno.Command("tar", {
       args: ["-xzf", tmp, "-C", staging],
+      cwd: stableCwd,
       stdout: "piped",
       stderr: "piped",
     });
@@ -123,19 +135,34 @@ export async function applyDevSyncTarball(bytes: Uint8Array): Promise<void> {
 
     await replaceDaemonSourceTree(staging);
 
-    // Warm Deno's module cache so the restarted process starts fast.
-    const cache = new Deno.Command("deno", {
-      args: ["cache", "main.ts"],
-      cwd: DAEMON_ROOT,
-      stdout: "piped",
-      stderr: "piped",
-    });
-    const cacheOut = await cache.output();
-    if (!cacheOut.success) {
+    // Warm Deno's module cache so the restarted process starts fast. Resolve the
+    // running daemon's own Deno binary via Deno.execPath() rather than the bare
+    // name "deno": on managed nodes Deno lives under
+    // /opt/turbopanel/runtimes/deno/current and is not on PATH, so spawning
+    // "deno" fails with "entity not found". Cache warming is only an
+    // optimization — the source swap above is the real work — so any failure
+    // here (including a missing binary) is logged and ignored, never aborting
+    // the sync.
+    try {
+      const cache = new Deno.Command(Deno.execPath(), {
+        args: ["cache", "main.ts"],
+        cwd: DAEMON_ROOT,
+        stdout: "piped",
+        stderr: "piped",
+      });
+      const cacheOut = await cache.output();
+      if (!cacheOut.success) {
+        logWarn(
+          "dev-sync",
+          "deno cache warning:",
+          new TextDecoder().decode(cacheOut.stderr).trim(),
+        );
+      }
+    } catch (err) {
       logWarn(
         "dev-sync",
-        "deno cache warning:",
-        new TextDecoder().decode(cacheOut.stderr).trim(),
+        "deno cache skipped:",
+        err instanceof Error ? err.message : String(err),
       );
     }
   } finally {

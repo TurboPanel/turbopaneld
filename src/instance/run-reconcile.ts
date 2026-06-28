@@ -140,10 +140,6 @@ export async function executeRunReconcile(options: {
   const run = await child.output();
   if (!run.success) {
     const stderr = new TextDecoder().decode(run.stderr).trim();
-    const stdout = new TextDecoder().decode(run.stdout).trim();
-    // #region agent log
-    fetch('http://localhost:7440/ingest/3e0179a5-fa63-49e5-b717-b62ee1a155c9', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '5d6f57' }, body: JSON.stringify({ sessionId: '5d6f57', runId: 'louie-update', hypothesisId: 'H4', location: 'daemon/src/instance/run-reconcile.ts:executeRunReconcile:exit', message: 'run.sh reconcile exited nonzero', data: { exitCode: run.code, channel: options.channel ?? null, cwd: reconcileCwd, args: options.args.map((a, i, arr) => arr[i - 1] === '--license' ? '[redacted]' : a), stderrTail: stderr.replace(/[A-Za-z0-9_-]{32,}/g, '[redacted]').slice(-1500), stdoutTail: stdout.replace(/[A-Za-z0-9_-]{32,}/g, '[redacted]').slice(-800) }, timestamp: Date.now() }) }).catch(() => {});
-    // #endregion
     throw new Error(
       stderr ||
         "run.sh reconcile failed",

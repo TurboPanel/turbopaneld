@@ -89,6 +89,29 @@ export function describeInstance(config: InstanceConfig): string {
   return config.kind === "url" ? config.baseUrl : `unix://${config.socketPath}`;
 }
 
+/** Default platform CA path written by run.sh / daemon-config on managed nodes. */
+export const CANONICAL_INSTANCE_CA_PATH =
+  "/opt/turbopanel/platform/config/instance-ca.pem";
+
+/**
+ * Resolve the platform CA PEM path for remote (url-mode) TLS trust.
+ *
+ * Prefers `TURBOPANEL_INSTANCE_CA` when set; otherwise falls back to the
+ * canonical config path when that file exists (e.g. operator recovery via curl).
+ */
+export function resolveInstanceCaPath(
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+): string | undefined {
+  const fromEnv = env.TURBOPANEL_INSTANCE_CA?.trim();
+  if (fromEnv) return fromEnv;
+  try {
+    Deno.statSync(CANONICAL_INSTANCE_CA_PATH);
+    return CANONICAL_INSTANCE_CA_PATH;
+  } catch {
+    return undefined;
+  }
+}
+
 export interface InstanceHttpClientOptions {
   /** Path to the platform CA PEM to trust (self-hosted instances). */
   caCertPath?: string;

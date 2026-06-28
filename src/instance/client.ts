@@ -4,6 +4,7 @@ import {
   type InstanceConfig,
   instanceUrl,
   instanceWebSocketUrl,
+  resolveInstanceCaPath,
   resolveInstanceConfig,
 } from "./paths.ts";
 import { collectServerAddresses } from "../server-addresses.ts";
@@ -645,9 +646,6 @@ export class InstanceClient {
       // proxied through Caddy), never as a 4401 close. Force a token refresh so
       // the next reconnect presents a freshly-signed token instead of looping
       // on the rejected one until it expires.
-      // #region agent log
-      logInfo("instance", "forcing token refresh after failed ws upgrade");
-      // #endregion
       await this.#tokenManager?.refresh().catch(() => {});
       throw err;
     }
@@ -892,10 +890,6 @@ export class InstanceClient {
     let ok = false;
     let shouldRestart = false;
     let error: string | undefined;
-    // #region agent log
-    let stage = "start";
-    fetch('http://localhost:7440/ingest/3e0179a5-fa63-49e5-b717-b62ee1a155c9', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '5d6f57' }, body: JSON.stringify({ sessionId: '5d6f57', runId: 'louie-update', hypothesisId: 'H1,H2,H3,H4', location: 'daemon/src/instance/client.ts:applyUpdate:entry', message: 'daemon received update request', data: { requestId: message.id, channel: message.channel ?? null, currentCommit: getBuildInfo().commit, instanceKind: this.#config.kind }, timestamp: Date.now() }) }).catch(() => {});
-    // #endregion
     try {
       let config = resolveUpdateChannelConfig(Deno.env.toObject());
       const msgChannel = message.channel?.trim();
@@ -910,13 +904,7 @@ export class InstanceClient {
         }
       }
 
-      // #region agent log
-      stage = "resolveUpdate";
-      // #endregion
       const updateInfo = await resolveUpdate(config);
-      // #region agent log
-      fetch('http://localhost:7440/ingest/3e0179a5-fa63-49e5-b717-b62ee1a155c9', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '5d6f57' }, body: JSON.stringify({ sessionId: '5d6f57', runId: 'louie-update', hypothesisId: 'H1', location: 'daemon/src/instance/client.ts:applyUpdate:resolved', message: 'resolveUpdate ok', data: { requestId: message.id, channel: config.channel, currentCommit: getBuildInfo().commit, targetCommit: updateInfo.commit, downloadUrl: updateInfo.downloadUrl }, timestamp: Date.now() }) }).catch(() => {});
-      // #endregion
 
       if (getBuildInfo().commit === updateInfo.commit) {
         logInfo(
@@ -926,9 +914,6 @@ export class InstanceClient {
         );
         ok = true;
       } else {
-        // #region agent log
-        stage = "readLicenseCredentials";
-        // #endregion
         const credentials = await readLicenseCredentials();
         if (!credentials.licenseId || !credentials.licenseToken) {
           throw new Error(
@@ -938,7 +923,7 @@ export class InstanceClient {
 
         const env = Deno.env.toObject();
         const instanceUrl = env.TURBOPANEL_INSTANCE_URL?.trim();
-        const instanceCaPath = env.TURBOPANEL_INSTANCE_CA?.trim();
+        const instanceCaPath = resolveInstanceCaPath(env);
         const runScriptUrl = resolveRunScriptUrl(this.#config);
         const insecureTls = resolveBootstrapInsecureTls({
           releaseTlsInsecure: env.TURBOPANEL_RELEASE_TLS_INSECURE,
@@ -956,27 +941,16 @@ export class InstanceClient {
           insecureTls,
         });
 
-        // #region agent log
-        fetch('http://localhost:7440/ingest/3e0179a5-fa63-49e5-b717-b62ee1a155c9', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '5d6f57' }, body: JSON.stringify({ sessionId: '5d6f57', runId: 'louie-update', hypothesisId: 'H2,H3,H4', location: 'daemon/src/instance/client.ts:applyUpdate:beforeReconcile', message: 'prepared reconcile', data: { requestId: message.id, hasLicenseId: Boolean(credentials.licenseId), hasLicenseToken: Boolean(credentials.licenseToken), runScriptUrl, hasInstanceUrl: Boolean(instanceUrl), instanceUrlHost: (() => { try { return instanceUrl ? new URL(instanceUrl).host : null } catch { return '[invalid]' } })(), hasInstanceCaPath: Boolean(instanceCaPath), insecureTls, reconcileArgs: reconcileArgs.map((a, i, arr) => arr[i - 1] === '--license' ? '[redacted]' : a) }, timestamp: Date.now() }) }).catch(() => {});
-        // #endregion
-
         logInfo(
           "update",
           "reconciling via run.sh",
           sanitizeForLog(runScriptUrl),
         );
 
-        // #region agent log
-        stage = "downloadRunScript";
-        // #endregion
         const script = await downloadRunScript(runScriptUrl, {
           insecureTls,
           caPath: insecureTls ? undefined : instanceCaPath,
         });
-        // #region agent log
-        fetch('http://localhost:7440/ingest/3e0179a5-fa63-49e5-b717-b62ee1a155c9', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '5d6f57' }, body: JSON.stringify({ sessionId: '5d6f57', runId: 'louie-update', hypothesisId: 'H3', location: 'daemon/src/instance/client.ts:applyUpdate:downloaded', message: 'run.sh downloaded', data: { requestId: message.id, scriptBytes: script.length }, timestamp: Date.now() }) }).catch(() => {});
-        stage = "executeRunReconcile";
-        // #endregion
         await executeRunReconcile({
           script,
           args: reconcileArgs,
@@ -987,9 +961,6 @@ export class InstanceClient {
       }
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
-      // #region agent log
-      fetch('http://localhost:7440/ingest/3e0179a5-fa63-49e5-b717-b62ee1a155c9', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '5d6f57' }, body: JSON.stringify({ sessionId: '5d6f57', runId: 'louie-update', hypothesisId: 'H1,H2,H3,H4', location: 'daemon/src/instance/client.ts:applyUpdate:catch', message: 'update failed', data: { requestId: message.id, failedStage: stage, error: sanitizeForLog(error).slice(0, 1500) }, timestamp: Date.now() }) }).catch(() => {});
-      // #endregion
       logError("update", "failed:", sanitizeForLog(error));
     }
 
@@ -1000,9 +971,6 @@ export class InstanceClient {
       error,
       at: new Date().toISOString(),
     };
-    // #region agent log
-    fetch('http://localhost:7440/ingest/3e0179a5-fa63-49e5-b717-b62ee1a155c9', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '5d6f57' }, body: JSON.stringify({ sessionId: '5d6f57', runId: 'louie-update', hypothesisId: 'H1,H2,H3,H4,H5', location: 'daemon/src/instance/client.ts:applyUpdate:result', message: 'sending update-result', data: { requestId: message.id, ok, failedStage: stage, error: error ? sanitizeForLog(error).slice(0, 500) : null, shouldRestart, wsOpen: ws.readyState === WebSocket.OPEN }, timestamp: Date.now() }) }).catch(() => {});
-    // #endregion
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result));
 
     // Restart only after acking success, so the instance sees the result before
@@ -1118,10 +1086,10 @@ export async function connectInstance(
   const initialBackoffMs = options.reconnectDelayMs ??
     DEFAULT_INITIAL_BACKOFF_MS;
   const config = options.config ?? resolveInstanceConfig();
+  const env = Deno.env.toObject();
+  const caCertPath = resolveInstanceCaPath(env);
   const httpClient = options.httpClient ??
-    await createInstanceHttpClient(config, {
-      caCertPath: Deno.env.get("TURBOPANEL_INSTANCE_CA")?.trim() || undefined,
-    });
+    await createInstanceHttpClient(config, { caCertPath });
 
   const client = new InstanceClient({
     ...options,
