@@ -66,21 +66,23 @@ daemon restarts when `.env` changes.
 
 ## Refresh an installed node
 
-Use **`update.sh`** when the node is already enrolled — it reads the license
-from `state/` and the channel from `.env`, then runs the latest CDN `run.sh`:
+Use **`update.sh`** in the checkout when the node is already enrolled — it reads
+the license from `state/` and the channel from `.env`, then runs the latest CDN
+`run.sh`:
 
 ```bash
-curl -fsSL https://trbp.nl/update.sh | sh
+sudo sh /opt/turbopanel/platform/daemon/scripts/update.sh
 ```
 
 Change channel:
 
 ```bash
-curl -fsSL https://trbp.nl/update.sh | sh -s -- --channel trunk
+sudo sh /opt/turbopanel/platform/daemon/scripts/update.sh --channel trunk
 ```
 
-Do **not** run `./scripts/run.sh` from the checkout you are trying to replace;
-always pipe from `https://trbp.nl/run.sh` or `https://trbp.nl/update.sh`.
+There is no `trbp.nl/update.sh` — only `trbp.nl/run.sh` is published. Do **not**
+run `./scripts/run.sh` from the checkout you are trying to replace; the update
+script fetches the current `run.sh` from the CDN.
 
 ## What gets installed
 

@@ -1,17 +1,14 @@
 #!/bin/sh
-# TurboPanel daemon update — refresh a stuck or outdated managed node.
-# Companion to run.sh; served at https://trbp.nl/update.sh (and /update.sh on
-# self-hosted instances in dev).
+# TurboPanel daemon update — manual refresh for an already-installed node.
 #
-# Reads the license from the daemon state directory and the update channel from
-# .env by default. Always downloads the latest run.sh from the CDN so you are not
-# stuck on an old checkout copy of the installer.
+# This script is NOT served from trbp.nl (unlike run.sh). It ships in the daemon
+# checkout and reads license + channel from the local state directory.
 #
 # Usage:
-#   curl -fsSL https://trbp.nl/update.sh | sh
-#   curl -fsSL https://trbp.nl/update.sh | sh -s -- --channel trunk
+#   sudo sh /opt/turbopanel/platform/daemon/scripts/update.sh
+#   sudo sh /opt/turbopanel/platform/daemon/scripts/update.sh --channel trunk
 #
-# Run as root or as a sudo-capable user (self-escalates via sudo when available).
+# Must run as root (or via sudo). It downloads the latest run.sh from trbp.nl.
 
 set -eu
 
@@ -22,34 +19,19 @@ ENV_FILE="$DAEMON_DIR/.env"
 LICENSE_ID_FILE="$STATE_DIR/license.id"
 LICENSE_TOKEN_FILE="$STATE_DIR/license.token"
 
+CURL_MAX_TIME="${TURBOPANEL_CURL_MAX_TIME:-300}"
 CDN_RUN_SCRIPT="https://trbp.nl/run.sh"
-CDN_UPDATE_SCRIPT="https://trbp.nl/update.sh"
 PRODUCTION_CONTROL_PLANE="https://turbopanel.app"
 
 VALID_CHANNELS="trunk edge canary rc release"
 
 tp_is_root() { [ "$(id -u)" = "0" ]; }
-tp_is_interactive() {
-	if [ -t 0 ]; then return 0; fi
-	[ -r /dev/tty ] && [ -w /dev/tty ] 2>/dev/null
-}
-tp_sudo_installed() { command -v sudo >/dev/null 2>&1; }
-tp_validate_sudo() {
-	if ! tp_sudo_installed; then return 2; fi
-	if sudo -n true 2>/dev/null; then return 0; fi
-	if tp_is_interactive; then
-		if sudo -v 2>/dev/null; then return 0; fi
-	fi
-	return 1
-}
-tp_install_privilege_denied() {
-	_reason="${1:-}"
-	case "$_reason" in
-	no_sudo) tp_print_error "run as root (su -); sudo is not installed yet" ;;
-	sudo_failed) tp_print_error "sudo validation failed — run as root or enter a valid sudo password" ;;
-	*) tp_print_error "must run as root or have sudo privileges" ;;
-	esac
-	exit 1
+
+tp_curl() {
+	_curl="curl -fsSL --max-time $CURL_MAX_TIME"
+	[ "${INSECURE_TLS:-false}" = true ] && _curl="curl -fsSLk --max-time $CURL_MAX_TIME"
+	# shellcheck disable=SC2086
+	$_curl "$@"
 }
 
 tp_print_step() {
@@ -88,7 +70,6 @@ tp_channel_valid() {
 	return 1
 }
 
-# Read a single KEY=value from a dotenv file (no export, strips one layer of quotes).
 tp_read_dotenv() {
 	_key="$1"
 	_file="$2"
@@ -114,8 +95,10 @@ tp_usage() {
 	cat <<EOF
 Usage: update.sh [options]
 
-Refresh an installed TurboPanel daemon from the release channel manifest.
-License credentials are read from $STATE_DIR by default.
+Manual refresh for an installed TurboPanel daemon. Not a CDN entrypoint —
+run from the checkout on the server:
+
+  sudo sh $DAEMON_DIR/scripts/update.sh
 
 Options:
   --channel <name>   Update channel (default: read from .env, else trunk)
@@ -125,11 +108,6 @@ Options:
   --insecure-tls     curl -k for bootstrap downloads only
   --dry-run          Print the command that would run, then exit
   -h, --help         Show this help
-
-Examples:
-  curl -fsSL https://trbp.nl/update.sh | sh
-  curl -fsSL https://trbp.nl/update.sh | sh -s -- --channel trunk
-  curl -fsSL https://trbp.nl/update.sh | sh -s -- --channel edge --dry-run
 EOF
 }
 
@@ -165,25 +143,9 @@ while [ $# -gt 0 ]; do
 done
 
 if ! tp_is_root; then
-	_sudo_rc=0
-	tp_validate_sudo || _sudo_rc=$?
-	if [ "$_sudo_rc" -eq 2 ]; then
-		tp_install_privilege_denied no_sudo
-	fi
-	if [ "$_sudo_rc" -ne 0 ]; then
-		tp_install_privilege_denied sudo_failed
-	fi
-	set -- 
-	[ -n "$CHANNEL" ] && set -- "$@" --channel "$CHANNEL"
-	[ -n "$LICENSE" ] && set -- "$@" --license "$LICENSE"
-	[ -n "$HOST_URL" ] && set -- "$@" --host "$HOST_URL"
-	[ "$INSECURE_TLS" = true ] && set -- "$@" --insecure-tls
-	[ "$DRY_RUN" = true ] && set -- "$@" --dry-run
-	_curl="curl -fsSL"
-	[ "$INSECURE_TLS" = true ] && _curl="curl -fsSLk"
-	# shellcheck disable=SC2086
-	$_curl "$CDN_UPDATE_SCRIPT" | sudo sh -s -- "$@"
-	exit $?
+	tp_print_error "must run as root"
+	tp_print_error "  sudo sh $DAEMON_DIR/scripts/update.sh"
+	exit 1
 fi
 
 tp_print_header
@@ -239,17 +201,14 @@ fi
 
 if [ "$DRY_RUN" = true ]; then
 	tp_print_ok "Dry run — would execute:"
-	printf '  curl -fsSL %s | sh -s -- %s\n' "$CDN_RUN_SCRIPT" "$RUN_ARGS"
+	printf '  curl -fsSL --max-time %s %s | sh -s -- %s\n' "$CURL_MAX_TIME" "$CDN_RUN_SCRIPT" "$RUN_ARGS"
 	exit 0
 fi
 
 tp_print_step "▸" "Downloading latest installer and refreshing daemon…"
-_curl="curl -fsSL"
-[ "$INSECURE_TLS" = true ] && _curl="curl -fsSLk"
 # shellcheck disable=SC2086
-# Intentionally word-split RUN_ARGS into separate installer flags.
 set -- $RUN_ARGS
-if ! $_curl "$CDN_RUN_SCRIPT" | sh -s -- "$@"; then
+if ! tp_curl "$CDN_RUN_SCRIPT" | sh -s -- "$@"; then
 	tp_print_error "Daemon update failed"
 	exit 1
 fi
