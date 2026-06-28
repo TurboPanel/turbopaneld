@@ -5,6 +5,7 @@ import {
   PRODUCTION_CONTROL_PLANE,
   resolveRunScriptUrl,
 } from "./run-reconcile.ts";
+import { join } from "@std/path";
 
 function assertEquals(actual: unknown, expected: unknown): void {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
@@ -73,4 +74,39 @@ Deno.test("buildRunReconcileArgs includes self-hosted flags", () => {
       "--no-start",
     ],
   );
+});
+
+Deno.test("executeRunReconcile chdir survives daemon directory swap", async () => {
+  const tmp = await Deno.makeTempDir({ prefix: "tp-reconcile-" });
+  const daemonDir = join(tmp, "daemon");
+  await Deno.mkdir(daemonDir, { recursive: true });
+  const originalCwd = Deno.cwd();
+  Deno.chdir(daemonDir);
+
+  const swapScript = [
+    "#!/bin/sh",
+    `mkdir -p "${tmp}/staging"`,
+    `echo x > "${tmp}/staging/main.ts"`,
+    `mv "${daemonDir}" "${daemonDir}.old"`,
+    `mv "${tmp}/staging" "${daemonDir}"`,
+    `rm -rf "${daemonDir}.old"`,
+    "exit 0",
+  ].join("\n");
+
+  const { executeRunReconcile } = await import("./run-reconcile.ts");
+  await executeRunReconcile({ script: swapScript, args: [] });
+
+  const cwdAfter = Deno.cwd();
+  if (cwdAfter === daemonDir) {
+    throw new Error(`expected cwd to move off deleted daemon dir, still ${cwdAfter}`);
+  }
+
+  Deno.chdir(originalCwd);
+  try {
+    await Deno.remove(tmp, { recursive: true });
+  } catch {
+    await new Deno.Command("sudo", {
+      args: ["rm", "-rf", tmp],
+    }).output();
+  }
 });

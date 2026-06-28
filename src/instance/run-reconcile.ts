@@ -68,6 +68,18 @@ export async function downloadRunScript(
   return script;
 }
 
+/** Stable cwd for reconcile — must not be under the daemon checkout run.sh replaces. */
+const RECONCILE_CWD = "/opt/turbopanel";
+
+function resolveReconcileCwd(): string {
+  try {
+    Deno.statSync(RECONCILE_CWD);
+    return RECONCILE_CWD;
+  } catch {
+    return "/";
+  }
+}
+
 export async function executeRunReconcile(options: {
   script: string;
   args: string[];
@@ -79,9 +91,17 @@ export async function executeRunReconcile(options: {
     env.TURBOPANEL_UPDATE_CHANNEL = channel;
   }
 
+  const reconcileCwd = resolveReconcileCwd();
+  try {
+    Deno.chdir(reconcileCwd);
+  } catch {
+    Deno.chdir("/");
+  }
+
   const command = new Deno.Command("sudo", {
     args: ["sh", "-s", "--", ...options.args],
     env,
+    cwd: reconcileCwd,
     stdin: "piped",
     stdout: "piped",
     stderr: "piped",
