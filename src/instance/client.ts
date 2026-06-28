@@ -1050,13 +1050,13 @@ function isColocatedSocketMode(config: InstanceConfig): boolean {
   return config.kind === "socket";
 }
 
-/** Ask systemd to restart this daemon (used after a dev-sync swap). */
+/** Ask systemd to enable and restart this daemon (dev-sync / UI update). */
 async function restartDaemonService(): Promise<void> {
   const unit = Deno.env.get("TURBOPANEL_SERVICE_NAME")?.trim() ||
     "turbopanel-daemon";
   try {
     const result = await new Deno.Command("systemctl", {
-      args: ["restart", unit],
+      args: ["enable", "--now", unit],
       stdin: "null",
       stdout: "piped",
       stderr: "piped",
@@ -1066,10 +1066,16 @@ async function restartDaemonService(): Promise<void> {
       const safeStderr = stripLogInjection(
         new TextDecoder().decode(result.stderr).trim() || "unknown error",
       );
-      logWarn("dev-sync", "systemctl restart", safeUnit, "failed:", safeStderr);
+      logWarn(
+        "daemon",
+        "systemctl enable --now",
+        safeUnit,
+        "failed:",
+        safeStderr,
+      );
     }
   } catch (err) {
-    logWarn("dev-sync", "restart failed:", sanitizeForLog(err));
+    logWarn("daemon", "restart failed:", sanitizeForLog(err));
   }
 }
 

@@ -27,8 +27,9 @@ For self-hosted instances over HTTPS, the installer automatically downloads the
 platform CA from `GET /api/daemon/v1/instance/ca` and restarts the daemon when
 configuration changes. Re-run the same command any time to upgrade or reconcile
 a node. On an existing install, `run.sh` stops `turbopanel-daemon.service`
-before replacing the source tree and starts it again after provisioning (unless
-`--no-start`, which the in-process UI update path uses).
+before replacing the source tree and restarts it after provisioning (unless
+`--no-start`, used by the in-process UI update path, which leaves the unit
+running and lets the daemon restart itself).
 
 ### Options
 

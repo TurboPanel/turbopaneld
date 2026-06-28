@@ -86,6 +86,9 @@ tp_stop_running_daemon_for_source_swap() {
 	if ! command -v systemctl >/dev/null 2>&1; then
 		return 0
 	fi
+	if ! systemctl cat "$DAEMON_SERVICE_NAME" >/dev/null 2>&1; then
+		return 0
+	fi
 	if ! systemctl is-active --quiet "$DAEMON_SERVICE_NAME" 2>/dev/null; then
 		return 0
 	fi
@@ -104,20 +107,13 @@ tp_start_or_restart_daemon() {
 	if ! command -v systemctl >/dev/null 2>&1; then
 		return 0
 	fi
-	if ! systemctl is-enabled --quiet "$DAEMON_SERVICE_NAME" 2>/dev/null; then
+	if ! systemctl cat "$DAEMON_SERVICE_NAME" >/dev/null 2>&1; then
 		return 0
 	fi
 	tp_print_step "▸" "Starting $DAEMON_SERVICE_NAME…"
-	if systemctl is-active --quiet "$DAEMON_SERVICE_NAME" 2>/dev/null; then
-		if ! systemctl restart "$DAEMON_SERVICE_NAME"; then
-			tp_print_error "Failed to restart $DAEMON_SERVICE_NAME"
-			exit 1
-		fi
-	else
-		if ! systemctl start "$DAEMON_SERVICE_NAME"; then
-			tp_print_error "Failed to start $DAEMON_SERVICE_NAME"
-			exit 1
-		fi
+	if ! systemctl enable --now "$DAEMON_SERVICE_NAME"; then
+		tp_print_error "Failed to enable/start $DAEMON_SERVICE_NAME"
+		exit 1
 	fi
 	tp_print_ok "Daemon running"
 }
@@ -457,6 +453,8 @@ trap 'rm -f "$VARS_FILE"' EXIT
 {
 	printf 'turbopanel_instance_url: %s\n' "$HOST_URL"
 	printf 'turbopanel_start: %s\n' "$([ "$NO_START" = true ] && echo false || echo true)"
+	printf 'turbopanel_manage_service_state: %s\n' "$([ "$NO_START" = true ] && echo false || echo true)"
+	printf 'turbopanel_restart_daemon: %s\n' "$([ "$NO_START" = true ] && echo false || echo true)"
 	printf 'turbopanel_daemon_run_mode: %s\n' "source"
 	printf 'turbopanel_daemon_deno_bin: %s\n' "/opt/turbopanel/runtimes/deno/current/deno"
 	if [ -f "$CA_PATH" ]; then

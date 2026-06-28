@@ -26,4 +26,17 @@
     name: "{{ turbopanel_service_name }}"
     daemon_reload: true
     enabled: "{{ turbopanel_start | bool }}"
-    state: "{{ 'started' if (turbopanel_start | bool) else 'stopped' }}"
+    state: >-
+      {{
+        'restarted'
+        if (
+          turbopanel_start | bool
+          and (turbopanel_restart_daemon | default(false) | bool)
+        )
+        else (
+          'started'
+          if (turbopanel_start | bool)
+          else 'stopped'
+        )
+      }}
+  when: turbopanel_manage_service_state | default(true) | bool

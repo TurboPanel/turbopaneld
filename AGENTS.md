@@ -526,8 +526,9 @@ shared-library install.
   `source.tar.zst`, extracts the daemon source tree, installs Deno into
   `runtimes/deno/<version>/` + `current`, warms the module cache, and runs
   `daemon-install.yml`. On manual reconcile (no `--no-start`), stops
-  `turbopanel-daemon.service` before the source swap and starts it after
-  provisioning; `--no-start` skips both (UI update — the caller restarts).
+  `turbopanel-daemon.service` before the source swap and restarts it after
+  provisioning; `--no-start` skips systemd state changes (UI update — the
+  caller runs `systemctl enable --now` after reconcile).
   Self-escalates via `sudo` for sudo-capable users. See `README.md` for the curl
   workflow. UI-triggered updates re-run this script via `#applyUpdate`
   (`src/instance/run-reconcile.ts`).

@@ -1,4 +1,9 @@
 ---
+# When false (--no-start / in-process UI update), skip enabling/stopping the unit
+# so run.sh does not kill the caller; the daemon restarts itself after reconcile.
+turbopanel_manage_service_state: true
+# When true (manual run.sh reconcile), restart after provisioning even if already running.
+turbopanel_restart_daemon: false
 turbopanel_after_instance_service: false
 turbopanel_install_root: /opt/turbopanel
 turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/runtimes"
