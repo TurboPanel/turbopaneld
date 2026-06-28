@@ -525,8 +525,12 @@ shared-library install.
   `https://turbopanel.app`). Installs apt prereqs, downloads and verifies
   `source.tar.zst`, extracts the daemon source tree, installs Deno into
   `runtimes/deno/<version>/` + `current`, warms the module cache, and runs
-  `daemon-install.yml`. See `README.md` for the curl workflow. UI-triggered
-  updates re-run this script via `#applyUpdate` (`src/instance/run-reconcile.ts`).
+  `daemon-install.yml`. On manual reconcile (no `--no-start`), stops
+  `turbopanel-daemon.service` before the source swap and starts it after
+  provisioning; `--no-start` skips both (UI update — the caller restarts).
+  Self-escalates via `sudo` for sudo-capable users. See `README.md` for the curl
+  workflow. UI-triggered updates re-run this script via `#applyUpdate`
+  (`src/instance/run-reconcile.ts`).
 - `src/instance/client.ts` — WSS client; HTTP-first enrollment/session
   bootstrap + command/address + dev-sync/tunnel-token handlers
 - `src/instance/idle-presence.ts` — WS hello on connect + idle-only heartbeat when no other traffic for 60 s

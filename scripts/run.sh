@@ -74,6 +74,54 @@ tp_print_error() {
 	fi
 }
 
+DAEMON_SERVICE_NAME="turbopanel-daemon.service"
+
+# Stop the running daemon before replacing the source tree on manual reconcile.
+# Skipped for --no-start (in-process UI update): that path must not stop the
+# caller; the daemon chdirs away and restarts itself after run.sh completes.
+tp_stop_running_daemon_for_source_swap() {
+	if [ "$NO_START" = true ]; then
+		return 0
+	fi
+	if ! command -v systemctl >/dev/null 2>&1; then
+		return 0
+	fi
+	if ! systemctl is-active --quiet "$DAEMON_SERVICE_NAME" 2>/dev/null; then
+		return 0
+	fi
+	tp_print_step "▸" "Stopping $DAEMON_SERVICE_NAME for source update…"
+	if ! systemctl stop "$DAEMON_SERVICE_NAME"; then
+		tp_print_error "Failed to stop $DAEMON_SERVICE_NAME"
+		exit 1
+	fi
+	tp_print_ok "Daemon stopped"
+}
+
+tp_start_or_restart_daemon() {
+	if [ "$NO_START" = true ]; then
+		return 0
+	fi
+	if ! command -v systemctl >/dev/null 2>&1; then
+		return 0
+	fi
+	if ! systemctl is-enabled --quiet "$DAEMON_SERVICE_NAME" 2>/dev/null; then
+		return 0
+	fi
+	tp_print_step "▸" "Starting $DAEMON_SERVICE_NAME…"
+	if systemctl is-active --quiet "$DAEMON_SERVICE_NAME" 2>/dev/null; then
+		if ! systemctl restart "$DAEMON_SERVICE_NAME"; then
+			tp_print_error "Failed to restart $DAEMON_SERVICE_NAME"
+			exit 1
+		fi
+	else
+		if ! systemctl start "$DAEMON_SERVICE_NAME"; then
+			tp_print_error "Failed to start $DAEMON_SERVICE_NAME"
+			exit 1
+		fi
+	fi
+	tp_print_ok "Daemon running"
+}
+
 # Deno runtime version installed into the runtimes tree for the source build.
 # Keep in sync with orchestration/roles/deno-runtime/defaults/main.yml.
 TP_DENO_VERSION="2.9.0"
@@ -349,6 +397,7 @@ fi
 # HOST_LOCAL_ARTIFACTS in src/dev-sync-apply.ts so the run.sh reconcile and
 # dev-sync paths cannot diverge.
 if [ -d "$DAEMON_DIR" ]; then
+	tp_stop_running_daemon_for_source_swap
 	for _hostlocal in .env .git state logs cloudflared server.id server-key.json server-key-id; do
 		if [ -e "$DAEMON_DIR/$_hostlocal" ]; then
 			rm -rf "$_src_staging/$_hostlocal"
@@ -438,5 +487,7 @@ if ! "$ANSIBLE_PLAYBOOK" \
 	tp_print_error "Daemon provisioning failed"
 	exit 1
 fi
+
+tp_start_or_restart_daemon
 
 tp_print_ok "TurboPanel daemon provisioning complete"
