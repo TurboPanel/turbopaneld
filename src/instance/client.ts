@@ -769,7 +769,7 @@ export class InstanceClient {
         });
         break;
       case "update":
-        this.#applyUpdate(message, ws).catch((err) => {
+        void this.#applyUpdate(message, ws).catch((err) => {
           logWarn("instance", "update handler failed:", sanitizeForLog(err));
         });
         break;
@@ -858,6 +858,8 @@ export class InstanceClient {
     message: Extract<DaemonMessage, { type: "update" }>,
     ws: WebSocket,
   ): Promise<void> {
+    // Long-running reconcile + restart runs here; the instance queues the request
+    // and returns immediately — this path is decoupled from that HTTP lifecycle.
     if (this.#updateInstallInProgress) {
       const busy: DaemonMessage = {
         type: "update-result",
