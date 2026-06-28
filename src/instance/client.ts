@@ -609,33 +609,48 @@ export class InstanceClient {
     let sessionRegistered = false;
     this.#ensureIdlePresence(serverId);
 
-    await new Promise<void>((resolve, reject) => {
-      const fail = (err: unknown) => {
-        cleanup();
-        reject(err instanceof Error ? err : new Error(String(err)));
-      };
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const fail = (err: unknown) => {
+          cleanup();
+          reject(err instanceof Error ? err : new Error(String(err)));
+        };
 
-      const cleanup = () => {
-        ws.removeEventListener("open", onOpen);
-        ws.removeEventListener("error", onError);
-        ws.removeEventListener("close", onClose);
-      };
+        const cleanup = () => {
+          ws.removeEventListener("open", onOpen);
+          ws.removeEventListener("error", onError);
+          ws.removeEventListener("close", onClose);
+        };
 
-      const onOpen = () => {
-        cleanup();
-        resolve();
-      };
-      const onError = (event: Event) => {
-        fail((event as ErrorEvent).message ?? "websocket error");
-      };
-      const onClose = () => {
-        fail("websocket closed before open");
-      };
+        const onOpen = () => {
+          cleanup();
+          resolve();
+        };
+        const onError = (event: Event) => {
+          fail((event as ErrorEvent).message ?? "websocket error");
+        };
+        const onClose = () => {
+          fail("websocket closed before open");
+        };
 
-      ws.addEventListener("open", onOpen);
-      ws.addEventListener("error", onError);
-      ws.addEventListener("close", onClose);
-    });
+        ws.addEventListener("open", onOpen);
+        ws.addEventListener("error", onError);
+        ws.addEventListener("close", onClose);
+      });
+    } catch (err) {
+      // The WS upgrade was rejected before the socket opened. The most common
+      // recoverable cause is a stale/expired daemon JWT (e.g. the instance's
+      // signing secret rotated on restart), which the upgrade rejects with HTTP
+      // 401 — surfaced here as a connect error (or an h2 protocol error when
+      // proxied through Caddy), never as a 4401 close. Force a token refresh so
+      // the next reconnect presents a freshly-signed token instead of looping
+      // on the rejected one until it expires.
+      // #region agent log
+      logInfo("instance", "forcing token refresh after failed ws upgrade");
+      // #endregion
+      await this.#tokenManager?.refresh().catch(() => {});
+      throw err;
+    }
 
     logDebug(
       "instance",
