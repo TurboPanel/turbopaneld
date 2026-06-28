@@ -223,6 +223,9 @@ while [ $# -gt 0 ]; do
 			INSECURE_TLS=true; shift ;;
 		--no-start)
 			NO_START=true; shift ;;
+		--channel)
+			[ $# -ge 2 ] || { tp_print_error "--channel requires an argument"; exit 1; }
+			export TURBOPANEL_UPDATE_CHANNEL="$2"; shift 2 ;;
 		*)
 			tp_print_error "unknown option: $1"; exit 1 ;;
 	esac
@@ -268,6 +271,7 @@ if ! tp_is_root; then
 	[ -n "$TUNNEL_TOKEN" ] && set -- "$@" --tunnel-token "$TUNNEL_TOKEN"
 	[ "$INSECURE_TLS" = true ] && set -- "$@" --insecure-tls
 	[ "$NO_START" = true ] && set -- "$@" --no-start
+	[ -n "${TURBOPANEL_UPDATE_CHANNEL:-}" ] && set -- "$@" --channel "$TURBOPANEL_UPDATE_CHANNEL"
 	_curl="curl -fsSL"
 	[ "$INSECURE_TLS" = true ] && _curl="curl -fsSLk"
 	# Re-run the script under sudo. `exec` cannot be used here: in a pipeline
@@ -460,6 +464,7 @@ trap 'rm -f "$VARS_FILE"' EXIT
 	if [ -f "$CA_PATH" ]; then
 		printf 'turbopanel_instance_ca: %s\n' "$CA_PATH"
 	fi
+	printf 'turbopanel_update_channel: %s\n' "${TURBOPANEL_UPDATE_CHANNEL:-trunk}"
 	if [ -n "$TUNNEL_TOKEN" ]; then
 		printf 'turbopanel_tunnel_token: %s\n' "$TUNNEL_TOKEN"
 	fi

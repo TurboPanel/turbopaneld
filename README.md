@@ -41,6 +41,7 @@ running and lets the daemon restart itself).
 | `--instance-ca <PATH>`   | PEM platform CA to trust (skips the automatic `/api/daemon/v1/instance/ca` fetch).            |
 | `--insecure-tls`         | Use `curl -k` for the bootstrap downloads (binary, CA, run.sh) only; dev/self-signed CDN. Does **not** relax daemon↔instance TLS — that always validates against the platform CA + cert SAN. |
 | `--no-start`             | Provision everything but do not start `turbopanel-daemon.service`.                            |
+| `--channel <name>`       | Release channel (`trunk`, `edge`, `canary`, `rc`, `release`). Default `trunk`. Persisted to `.env`. |
 
 Example with a tunnel token and an explicit platform CA path (self-hosted):
 
@@ -62,6 +63,24 @@ curl -fsSL https://trbp.nl/run.sh | sh -s -- \
 
 Re-running the installer is safe — every Ansible role is idempotent and the
 daemon restarts when `.env` changes.
+
+## Refresh an installed node
+
+Use **`update.sh`** when the node is already enrolled — it reads the license
+from `state/` and the channel from `.env`, then runs the latest CDN `run.sh`:
+
+```bash
+curl -fsSL https://trbp.nl/update.sh | sh
+```
+
+Change channel:
+
+```bash
+curl -fsSL https://trbp.nl/update.sh | sh -s -- --channel trunk
+```
+
+Do **not** run `./scripts/run.sh` from the checkout you are trying to replace;
+always pipe from `https://trbp.nl/run.sh` or `https://trbp.nl/update.sh`.
 
 ## What gets installed
 
