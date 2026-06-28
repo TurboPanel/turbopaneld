@@ -1,5 +1,3 @@
-import { logInfo } from "../logger.ts";
-
 /** Canonical runtime socket directory ( /var/run symlinks to /run on Linux ). */
 export const DEFAULT_SOCKET_DIR = "/run/turbopanel";
 
@@ -106,12 +104,10 @@ export function resolveInstanceCaPath(
 ): string | undefined {
   const fromEnv = env.TURBOPANEL_INSTANCE_CA?.trim();
   let resolved: string | undefined;
-  let source: "env" | "canonical" | "none" = "none";
   if (fromEnv) {
     try {
       Deno.statSync(fromEnv);
       resolved = fromEnv;
-      source = "env";
     } catch {
       // Stale env path — fall through to canonical file if present.
     }
@@ -120,15 +116,10 @@ export function resolveInstanceCaPath(
     try {
       Deno.statSync(CANONICAL_INSTANCE_CA_PATH);
       resolved = CANONICAL_INSTANCE_CA_PATH;
-      source = "canonical";
     } catch {
       resolved = undefined;
     }
   }
-  // #region agent log
-  fetch('http://localhost:7440/ingest/3e0179a5-fa63-49e5-b717-b62ee1a155c9',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'43c5ba'},body:JSON.stringify({sessionId:'43c5ba',location:'paths.ts:resolveInstanceCaPath',message:'resolved instance CA path',data:{source,resolved:resolved??null,fromEnv:fromEnv??null,canonicalExists:source==='canonical'},timestamp:Date.now(),hypothesisId:'H1-H3'})}).catch(()=>{});
-  logInfo("debug-43c5ba", "resolveInstanceCaPath", JSON.stringify({ source, resolved: resolved ?? null, hypothesisId: "H1-H3" }));
-  // #endregion
   return resolved;
 }
 
