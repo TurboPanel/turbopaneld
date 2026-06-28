@@ -216,6 +216,24 @@
     group: turbopanel
     mode: "0750"
 
+- name: Read legacy instance checkout .env when present
+  ansible.builtin.slurp:
+    src: "{{ turbopanel_instance_dir }}/.env"
+  register: _legacy_instance_env
+  failed_when: false
+
+- name: Extract legacy public URLs from checkout .env
+  ansible.builtin.set_fact:
+    turbopanel_public_urls: >-
+      {{ (_legacy_instance_env.content | b64decode).split('\n')
+      | select('match', '^TURBOPANEL_PUBLIC_URLS=')
+      | list | first | default('', true)
+      | regex_replace('^TURBOPANEL_PUBLIC_URLS=', '') | trim }}
+  when:
+    - _legacy_instance_env.content is defined
+    - (_legacy_instance_env.content | b64decode | trim | length) > 0
+    - (turbopanel_public_urls | default('', true) | trim | length) == 0
+
 - name: Ensure Workers wrangler secret exists
   ansible.builtin.shell:
     cmd: |
@@ -246,11 +264,19 @@
     - (turbopanel_instance_runtime | default('deno')) == 'workers'
     - _wrangler_secret_raw.content is defined
 
-- name: Install Workers wrangler .env
+- name: Remove legacy secret-bearing env files from instance checkout
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ turbopanel_instance_dir }}/.env"
+    - "{{ turbopanel_instance_dir }}/.dev.vars"
+
+- name: Install Workers runtime env (protected config dir)
   ansible.builtin.template:
     src: instance-workers.env.j2
-    dest: "{{ turbopanel_instance_dir }}/.env"
-    owner: "{{ instance_user }}"
+    dest: "{{ turbopanel_instance_runtime_env }}"
+    owner: root
     group: "{{ turbopanel_group }}"
     mode: "0640"
   when:
@@ -260,6 +286,20 @@
   notify:
     - Reload systemd for instance units
     - Restart turbopanel instance
+
+- name: Install Deno runtime env stub (protected config dir)
+  ansible.builtin.copy:
+    dest: "{{ turbopanel_instance_runtime_env }}"
+    content: |
+      # Managed by instance-launch / daemon public-urls-apply. Gitignored checkout env files are not used.
+      {% if turbopanel_public_urls | default('', true) | trim | length > 0 %}
+      TURBOPANEL_PUBLIC_URLS={{ turbopanel_public_urls }}
+      {% endif %}
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+    force: false
+  when: (turbopanel_instance_runtime | default('deno')) == 'deno'
 
 - name: Read platform CA for Workers daemon trust endpoint
   ansible.builtin.slurp:
@@ -276,11 +316,11 @@
     - (turbopanel_instance_runtime | default('deno')) == 'workers'
     - _instance_ca_raw.content is defined
 
-- name: Install Workers wrangler .dev.vars
+- name: Install Workers runtime dev vars (protected config dir)
   ansible.builtin.template:
     src: instance-workers.dev-vars.j2
-    dest: "{{ turbopanel_instance_dir }}/.dev.vars"
-    owner: "{{ instance_user }}"
+    dest: "{{ turbopanel_instance_runtime_dev_vars }}"
+    owner: root
     group: "{{ turbopanel_group }}"
     mode: "0640"
   when:

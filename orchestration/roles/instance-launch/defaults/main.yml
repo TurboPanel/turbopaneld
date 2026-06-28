@@ -1,5 +1,8 @@
 ---
 turbopanel_config_dir: /opt/turbopanel/platform/config
+# Secret-bearing runtime env lives under platform config — never in the git checkout.
+turbopanel_instance_runtime_env: "{{ turbopanel_config_dir }}/instance/runtime.env"
+turbopanel_instance_runtime_dev_vars: "{{ turbopanel_config_dir }}/instance/runtime.dev-vars"
 turbopanel_install_root: /opt/turbopanel
 turbopanel_user: turbopanel
 turbopanel_ssh_dir: "{{ turbopanel_install_root }}/.ssh"

@@ -1,7 +1,7 @@
 ---
 # Targeted cert regeneration + Caddy reload.
 # Invoked by the daemon public-urls-apply handler after writing TURBOPANEL_PUBLIC_URLS
-# to the instance .env. Runs instance-certs only (cheap, idempotent) then reloads
+# to {{ turbopanel_config_dir }}/instance/runtime.env. Runs instance-certs only (cheap, idempotent) then reloads
 # turbopanel-caddy so the new leaf cert is served immediately.
 # CA is preserved across runs; only the leaf is regenerated when SANs change.
 #

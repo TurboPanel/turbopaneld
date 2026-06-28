@@ -1,6 +1,6 @@
 # /opt/turbopanel/platform/config/
 #   rabbitmq/
-#     config.json   — connection metadata (host, port, user, vhost, amqp_url)
+#     config.json   — connection metadata only (host, port, user, vhost; no secrets)
 #     .rabbitmq_pass — generated password, mode 0600, owner root
 
 - name: Ensure rabbitmq config directory exists
@@ -42,7 +42,6 @@
     owner: root
     group: turbopanel
     mode: "0640"
-    force: false
 
 - name: Write rabbitmq broker config
   ansible.builtin.template:

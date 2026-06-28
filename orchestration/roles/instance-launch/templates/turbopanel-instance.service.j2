@@ -38,6 +38,9 @@ Environment=TURBOPANEL_SYSTEM_EMAIL__SMTP_HOST=127.0.0.1
 Environment=TURBOPANEL_SYSTEM_EMAIL__SMTP_PORT={{ mailpit_smtp_port | default(1025) }}
 {% endif %}
 Environment=TURBOPANEL_DAEMON_STATE_DIR={{ turbopanel_instance_daemon_state_dir }}
+Environment=TURBOPANEL_CONFIG_DIR={{ turbopanel_config_dir }}
+Environment=TURBOPANEL_INSTANCE_RUNTIME_ENV={{ turbopanel_instance_runtime_env }}
+Environment=TURBOPANEL_INSTANCE_RUNTIME_DEV_VARS={{ turbopanel_instance_runtime_dev_vars }}
 # turbopanel_instance_run_mode: "source" (deno run) | "compiled" (single binary)
 StandardOutput=append:{{ instance_log_dir }}/instance.log
 StandardError=append:{{ instance_log_dir }}/instance.err.log
