@@ -139,6 +139,8 @@ export interface InstanceClientOptions {
 const DEFAULT_INITIAL_BACKOFF_MS = 2_000;
 const DEFAULT_MAX_BACKOFF_MS = 30_000;
 const BACKOFF_MULTIPLIER = 2;
+/** Delay after sending update-result before restarting, so the instance can persist it. */
+export const UPDATE_RESULT_HANDOFF_DELAY_MS = 2_000;
 /** Co-located install wait: poll readiness on a fixed cadence before first connect. */
 const INSTALL_READINESS_POLL_MS = 5_000;
 /** After a prior session, wait for the instance to come back after systemd restart. */
@@ -973,9 +975,12 @@ export class InstanceClient {
     };
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result));
 
-    // Restart only after acking success, so the instance sees the result before
-    // this process is replaced by the updated source tree.
+    // Restart only after acking success and a short handoff delay, so the
+    // instance can persist update-result before this process is replaced.
     if (ok && shouldRestart) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, UPDATE_RESULT_HANDOFF_DELAY_MS)
+      );
       const restarted = await restartDaemonService();
       if (!restarted) {
         logWarn(
