@@ -154,3 +154,5 @@ await import("./src/daemon-run.ts");
 2026-06-30T01:26:51.540Z WARN daemon  sudo -n systemctl restart turbopanel-daemon turbopanel-daemon failed: unknown error
 2026-06-30T03:08:12.596Z WARN instance  websocket connect failed: NetworkError: failed to connect to WebSocket: Invalid status code: 401
 2026-06-30T03:14:02.146Z WARN instance  websocket connect failed: NetworkError: failed to connect to WebSocket: Invalid status code: 401
+2026-06-30T04:26:23.364Z WARN daemon  sudo -n systemctl restart turbopanel-daemon turbopanel-daemon failed: unknown error
+2026-06-30T04:31:25.653Z WARN instance  websocket connect failed: NetworkError: failed to connect to WebSocket: Invalid status code: 401

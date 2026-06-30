@@ -79,6 +79,47 @@ Deno.test({
 })
 
 Deno.test({
+  name: 'handleCommandDispatch acks then returns reboot outcome',
+  permissions: { env: true, sys: ['hostname'], read: true },
+  fn: async () => {
+    const { handleCommandDispatch } = await import('./command-router.ts')
+    const { setRebootExecutorForTests } = await import('./reboot.ts')
+
+    let executorScheduled = false
+    setRebootExecutorForTests(async () => {
+      executorScheduled = true
+      return { success: true, stderr: '' }
+    })
+
+    try {
+      const ws = new MockWebSocket() as unknown as WebSocket
+      const message: CommandDispatchMessage = {
+        type: 'command-dispatch',
+        id: 'req-reboot',
+        commandId: 'cmd-reboot',
+        commandType: 'server.reboot',
+        payload: {},
+        at: new Date().toISOString(),
+      }
+
+      await handleCommandDispatch(message, ws)
+
+      const frames = parseFrames((ws as unknown as MockWebSocket).sentFrames)
+      assertEquals(frames.length, 2)
+      assertEquals(frames[0]?.type, 'command-ack')
+      assertEquals(frames[1]?.type, 'command-outcome')
+      assertEquals(frames[1]?.ok, true)
+
+      const result = frames[1]?.result as Record<string, unknown>
+      assertEquals(result.scheduled, true)
+      assertEquals(executorScheduled, false)
+    } finally {
+      setRebootExecutorForTests(null)
+    }
+  },
+})
+
+Deno.test({
   name: 'handleCommandDispatch rejects invalid hostname before ansible',
   permissions: { env: true, sys: ['hostname'], read: true },
   fn: async () => {

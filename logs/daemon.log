@@ -444,3 +444,74 @@
 2026-06-30T03:14:00.079Z DEBUG instance  reconnect scheduled in 2000 ms via unix:///run/turbopanel/instance.sock
 2026-06-30T03:14:02.147Z DEBUG instance  reconnect scheduled in 4000 ms via unix:///run/turbopanel/instance.sock
 2026-06-30T03:14:06.159Z DEBUG instance  websocket connected via unix:///run/turbopanel/instance.sock
+2026-06-30T04:26:23.367Z INFO daemon  shutting down
+2026-06-30T04:26:23.371Z INFO sentinel  stopped
+2026-06-30T04:26:23.390Z INFO daemon  shut down
+2026-06-30T04:26:23.686Z INFO daemon  starting up
+2026-06-30T04:26:23.695Z INFO orchestration  bootstrapping runtime
+2026-06-30T04:26:23.780Z INFO orchestration  uv 0.11.19 already installed
+2026-06-30T04:26:23.782Z INFO orchestration  ensuring Python 3.14 is installed
+2026-06-30T04:26:23.873Z DEBUG python  Python 3.14 is already installed
+2026-06-30T04:26:23.878Z INFO orchestration  Python 3.14 ready
+2026-06-30T04:26:24.374Z INFO orchestration  ansible already installed, skipping setup
+2026-06-30T04:26:24.560Z INFO orchestration  galaxy content up to date, skipping install
+2026-06-30T04:26:24.560Z INFO orchestration  bootstrap inputs unchanged, skipping localhost smoke-test
+2026-06-30T04:26:24.561Z INFO orchestration  runtime ready in 0.9s
+2026-06-30T04:26:24.568Z INFO sentinel  starting
+2026-06-30T04:26:24.570Z INFO tunnels  Cloudflare tunnels disabled; skipping
+2026-06-30T04:26:24.584Z INFO instance  instance ready for daemon registration via unix:///run/turbopanel/instance.sock
+2026-06-30T04:26:24.632Z DEBUG instance  websocket connected via unix:///run/turbopanel/instance.sock
+2026-06-30T04:29:54.429Z INFO daemon  shutting down
+2026-06-30T04:29:54.430Z INFO sentinel  stopped
+2026-06-30T04:29:54.433Z INFO daemon  shut down
+2026-06-30T04:29:54.546Z INFO daemon  starting up
+2026-06-30T04:29:54.547Z INFO orchestration  bootstrapping runtime
+2026-06-30T04:29:54.560Z INFO orchestration  uv 0.11.19 already installed
+2026-06-30T04:29:54.561Z INFO orchestration  ensuring Python 3.14 is installed
+2026-06-30T04:29:54.609Z DEBUG python  Python 3.14 is already installed
+2026-06-30T04:29:54.611Z INFO orchestration  Python 3.14 ready
+2026-06-30T04:29:54.946Z INFO orchestration  ansible already installed, skipping setup
+2026-06-30T04:29:55.079Z INFO orchestration  galaxy content up to date, skipping install
+2026-06-30T04:29:55.079Z INFO orchestration  bootstrap inputs unchanged, skipping localhost smoke-test
+2026-06-30T04:29:55.079Z INFO orchestration  runtime ready in 0.5s
+2026-06-30T04:29:55.083Z INFO sentinel  starting
+2026-06-30T04:29:55.084Z INFO tunnels  Cloudflare tunnels disabled; skipping
+2026-06-30T04:29:55.095Z INFO instance  instance ready for daemon registration via unix:///run/turbopanel/instance.sock
+2026-06-30T04:29:55.119Z DEBUG instance  websocket connected via unix:///run/turbopanel/instance.sock
+2026-06-30T04:30:51.257Z INFO daemon  shutting down
+2026-06-30T04:30:51.258Z INFO sentinel  stopped
+2026-06-30T04:30:51.259Z INFO daemon  shut down
+2026-06-30T04:30:51.361Z INFO daemon  starting up
+2026-06-30T04:30:51.362Z INFO orchestration  bootstrapping runtime
+2026-06-30T04:30:51.373Z INFO orchestration  uv 0.11.19 already installed
+2026-06-30T04:30:51.373Z INFO orchestration  ensuring Python 3.14 is installed
+2026-06-30T04:30:51.411Z DEBUG python  Python 3.14 is already installed
+2026-06-30T04:30:51.414Z INFO orchestration  Python 3.14 ready
+2026-06-30T04:30:51.706Z INFO orchestration  ansible already installed, skipping setup
+2026-06-30T04:30:51.800Z INFO orchestration  galaxy content up to date, skipping install
+2026-06-30T04:30:51.800Z INFO orchestration  bootstrap inputs unchanged, skipping localhost smoke-test
+2026-06-30T04:30:51.801Z INFO orchestration  runtime ready in 0.4s
+2026-06-30T04:30:51.806Z INFO sentinel  starting
+2026-06-30T04:30:51.807Z INFO tunnels  Cloudflare tunnels disabled; skipping
+2026-06-30T04:30:51.812Z INFO instance  instance ready for daemon registration via unix:///run/turbopanel/instance.sock
+2026-06-30T04:30:51.831Z DEBUG instance  websocket connected via unix:///run/turbopanel/instance.sock
+2026-06-30T04:31:23.573Z INFO instance  websocket closed after registration
+2026-06-30T04:31:23.575Z DEBUG instance  reconnect scheduled in 2000 ms via unix:///run/turbopanel/instance.sock
+2026-06-30T04:31:25.654Z DEBUG instance  reconnect scheduled in 4000 ms via unix:///run/turbopanel/instance.sock
+2026-06-30T04:31:28.135Z INFO daemon  shutting down
+2026-06-30T04:31:28.136Z INFO sentinel  stopped
+2026-06-30T04:31:28.137Z INFO daemon  shut down
+2026-06-30T04:31:28.250Z INFO daemon  starting up
+2026-06-30T04:31:28.250Z INFO orchestration  bootstrapping runtime
+2026-06-30T04:31:28.267Z INFO orchestration  uv 0.11.19 already installed
+2026-06-30T04:31:28.268Z INFO orchestration  ensuring Python 3.14 is installed
+2026-06-30T04:31:28.301Z DEBUG python  Python 3.14 is already installed
+2026-06-30T04:31:28.301Z INFO orchestration  Python 3.14 ready
+2026-06-30T04:31:28.549Z INFO orchestration  ansible already installed, skipping setup
+2026-06-30T04:31:28.644Z INFO orchestration  galaxy content up to date, skipping install
+2026-06-30T04:31:28.644Z INFO orchestration  bootstrap inputs unchanged, skipping localhost smoke-test
+2026-06-30T04:31:28.645Z INFO orchestration  runtime ready in 0.4s
+2026-06-30T04:31:28.649Z INFO sentinel  starting
+2026-06-30T04:31:28.650Z INFO tunnels  Cloudflare tunnels disabled; skipping
+2026-06-30T04:31:28.660Z INFO instance  instance ready for daemon registration via unix:///run/turbopanel/instance.sock
+2026-06-30T04:31:28.676Z DEBUG instance  websocket connected via unix:///run/turbopanel/instance.sock

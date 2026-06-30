@@ -412,7 +412,7 @@ fi
 # dev-sync paths cannot diverge.
 if [ -d "$DAEMON_DIR" ]; then
 	tp_stop_running_daemon_for_source_swap
-	for _hostlocal in .env .git state logs cloudflared server.id server-key.json server-key-id; do
+	for _hostlocal in .env .git .github state logs cloudflared server.id server-key.json server-key-id; do
 		if [ -e "$DAEMON_DIR/$_hostlocal" ]; then
 			rm -rf "$_src_staging/$_hostlocal"
 			mv "$DAEMON_DIR/$_hostlocal" "$_src_staging/$_hostlocal"

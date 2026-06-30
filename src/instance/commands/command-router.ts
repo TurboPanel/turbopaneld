@@ -3,10 +3,16 @@ import type {
   CommandDispatchMessage,
   CommandOutcomeMessage,
   PingResult,
+  RebootPayload,
 } from "./contracts.ts";
-import { parseHostnamePayload, parsePingPayload } from "./contracts.ts";
+import {
+  parseHostnamePayload,
+  parsePingPayload,
+  parseRebootPayload,
+} from "./contracts.ts";
 import { handleHostname } from "./hostname.ts";
 import { handlePing } from "./ping.ts";
+import { handleReboot } from "./reboot.ts";
 
 export interface CommandRouterDeps {
   // extensible for future handlers (e.g. hostname needs ansible)
@@ -71,6 +77,16 @@ export async function handleCommandDispatch(
       case "server.hostname.set": {
         const payload = parseHostnamePayload(message.payload);
         result = await handleHostname(payload, daemonReceivedAt);
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
+      case "server.reboot": {
+        parseRebootPayload(message.payload);
+        result = await handleReboot(
+          message.payload as RebootPayload,
+          daemonReceivedAt,
+        );
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;

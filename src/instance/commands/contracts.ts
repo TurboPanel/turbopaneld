@@ -3,7 +3,11 @@
  * `src/lib/commands/` module. Keep in sync when instance command shapes change.
  */
 
-export const COMMAND_TYPES = ["daemon.ping", "server.hostname.set"] as const;
+export const COMMAND_TYPES = [
+  "daemon.ping",
+  "server.hostname.set",
+  "server.reboot",
+] as const;
 
 export type CommandType = (typeof COMMAND_TYPES)[number];
 
@@ -32,6 +36,13 @@ export type HostnamePayload = {
 
 export type HostnameResult = {
   observedHostname: string;
+  summary?: string;
+};
+
+export type RebootPayload = Record<string, never>;
+
+export type RebootResult = {
+  scheduled: boolean;
   summary?: string;
 };
 
@@ -96,6 +107,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export function parsePingPayload(value: unknown): PingPayload {
   if (!isRecord(value)) {
     throw new Error("Invalid ping payload");
+  }
+  return {};
+}
+
+export function parseRebootPayload(value: unknown): RebootPayload {
+  if (!isRecord(value)) {
+    throw new Error("Invalid reboot payload");
   }
   return {};
 }

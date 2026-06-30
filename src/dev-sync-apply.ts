@@ -23,6 +23,7 @@ export function newDevSyncState(totalChunks: number): DevSyncState {
 export const HOST_LOCAL_ARTIFACTS = [
   ".env",
   ".git",
+  ".github",
   "state",
   "logs",
   "cloudflared",
@@ -30,6 +31,14 @@ export const HOST_LOCAL_ARTIFACTS = [
   "server-key.json",
   "server-key-id",
 ] as const;
+
+export const COLOCATED_DEV_SYNC_REFUSED_REASON =
+  "dev-sync refused on co-located development daemon — edit the local checkout directly";
+
+function isColocatedDevDaemonHost(): boolean {
+  const flag = Deno.env.get("TURBOPANEL_DEV_INSTANCE")?.trim().toLowerCase();
+  return flag === "1" || flag === "true" || flag === "yes";
+}
 
 async function pathExists(path: string): Promise<boolean> {
   try {
@@ -98,6 +107,9 @@ async function replaceDaemonSourceTree(staging: string): Promise<void> {
  * `--allow-run` / `--allow-write`.
  */
 export async function applyDevSyncTarball(bytes: Uint8Array): Promise<void> {
+  if (isColocatedDevDaemonHost()) {
+    throw new Error(COLOCATED_DEV_SYNC_REFUSED_REASON);
+  }
   // replaceDaemonSourceTree() swaps DAEMON_ROOT out from under the running
   // process. If this process's cwd is inside that tree (e.g. a previous sync),
   // it now points at a removed directory and every subprocess spawn fails with
