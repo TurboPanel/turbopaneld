@@ -187,6 +187,11 @@ export const INSTANCE_CERTS_APPLY_PLAYBOOK = join(
   "playbooks",
   "instance-certs-apply.yml",
 );
+export const SET_HOSTNAME_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  "playbooks",
+  "set-hostname.yml",
+);
 export const DAEMON_INSTALL_PLAYBOOK = join(
   ORCHESTRATION_DIR,
   "playbooks",

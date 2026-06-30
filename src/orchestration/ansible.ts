@@ -1,5 +1,6 @@
 import { run, runLogged, runOrThrow } from './exec.ts'
 import {
+  AnsibleRunSummaryCollector,
   type AnsibleEventHandler,
   runPlaybookStreaming,
 } from './ansible-events.ts'
@@ -42,6 +43,7 @@ import {
   RABBITMQ_PLAYBOOK,
   REDIS_PLAYBOOK,
   REQUIREMENTS_FILE,
+  SET_HOSTNAME_PLAYBOOK,
   SOCKET_DIRS_PLAYBOOK,
   UV_BIN,
   VENV_BIN_DIR,
@@ -58,7 +60,7 @@ async function fileExists(path: string): Promise<boolean> {
   }
 }
 
-async function ansiblePlaybookWorks(): Promise<boolean> {
+export async function ansiblePlaybookWorks(): Promise<boolean> {
   if (!(await fileExists(ANSIBLE_PLAYBOOK_BIN))) return false
   const result = await run(ANSIBLE_PLAYBOOK_BIN, ['--version'], { stream: false })
   return result.success
@@ -239,6 +241,34 @@ export async function runSocketDirsSetup(onEvent?: AnsibleEventHandler): Promise
   logInfo('orchestration', 'running socket-dirs-setup playbook')
   await runLocalPlaybook(SOCKET_DIRS_PLAYBOOK, [], onEvent)
   logInfo('orchestration', 'socket-dirs-setup complete')
+}
+
+export async function runSetHostname(
+  hostname: string,
+  onEvent?: AnsibleEventHandler,
+): Promise<{ summary: string }> {
+  logInfo('orchestration', 'running set-hostname playbook')
+  const collector = new AnsibleRunSummaryCollector()
+  const eventHandler: AnsibleEventHandler = (event) => {
+    collector.handleEvent(event)
+    onEvent?.(event)
+  }
+  try {
+    await runLocalPlaybook(
+      SET_HOSTNAME_PLAYBOOK,
+      ['-e', `turbopanel_hostname=${hostname}`],
+      eventHandler,
+    )
+  } catch {
+    const summary = collector.build()
+    throw new Error(
+      summary.length > 0
+        ? `set-hostname playbook failed: ${summary}`
+        : 'set-hostname playbook failed',
+    )
+  }
+  logInfo('orchestration', 'set-hostname complete')
+  return { summary: collector.build() }
 }
 
 /**

@@ -117,7 +117,9 @@ export function parseAnsibleJsonlLine(line: string): AnsibleEvent | null {
   }
 }
 
-function formatStats(stats: AnsiblePlaybookStats): string {
+export const ANSIBLE_SUMMARY_MAX_LENGTH = 500;
+
+export function formatPlaybookRecap(stats: AnsiblePlaybookStats): string {
   let ok = 0;
   let changed = 0;
   let failed = 0;
@@ -131,6 +133,54 @@ function formatStats(stats: AnsiblePlaybookStats): string {
   }
 
   return `ok=${ok} changed=${changed} failed=${failed} unreachable=${unreachable}`;
+}
+
+/** Strip control characters and cap length for safe command-outcome relay. */
+export function sanitizeAnsibleSummaryText(text: string): string {
+  const stripped = text
+    .replaceAll("\n", " ")
+    .replaceAll("\r", " ")
+    .replaceAll("\t", " ")
+    .replace(/[\u0000-\u001f\u007f]/g, "");
+  const collapsed = stripped.replace(/\s+/g, " ").trim();
+  return collapsed.length > ANSIBLE_SUMMARY_MAX_LENGTH
+    ? collapsed.slice(0, ANSIBLE_SUMMARY_MAX_LENGTH)
+    : collapsed;
+}
+
+/** Collects a short recap plus the first failure from ansible.posix.jsonl events. */
+export class AnsibleRunSummaryCollector {
+  #recap: string | null = null;
+  #firstFailure: string | null = null;
+
+  handleEvent(event: AnsibleEvent): void {
+    switch (event._event) {
+      case "v2_playbook_on_stats": {
+        const statsEvent = event as AnsiblePlayStatsEvent;
+        this.#recap = formatPlaybookRecap(statsEvent.stats);
+        break;
+      }
+      case "v2_runner_on_failed":
+      case "v2_runner_on_unreachable": {
+        if (this.#firstFailure) break;
+        const failedEvent = event as AnsibleTaskResultEvent;
+        const firstHost = Object.values(failedEvent.hosts)[0];
+        const msg = typeof firstHost?.msg === "string"
+          ? firstHost.msg
+          : "unknown error";
+        const taskName = failedEvent.task.name ?? "task";
+        this.#firstFailure = `${taskName}: ${msg}`;
+        break;
+      }
+    }
+  }
+
+  build(): string {
+    const parts: string[] = [];
+    if (this.#recap) parts.push(this.#recap);
+    if (this.#firstFailure) parts.push(this.#firstFailure);
+    return sanitizeAnsibleSummaryText(parts.join("; "));
+  }
 }
 
 /** Map a parsed ansible.posix.jsonl event to structured daemon log lines. */
@@ -176,7 +226,7 @@ export function logAnsibleEvent(event: AnsibleEvent): void {
     }
     case "v2_playbook_on_stats": {
       const statsEvent = event as AnsiblePlayStatsEvent;
-      logInfo("ansible", "[recap] " + formatStats(statsEvent.stats));
+      logInfo("ansible", "[recap] " + formatPlaybookRecap(statsEvent.stats));
       break;
     }
   }

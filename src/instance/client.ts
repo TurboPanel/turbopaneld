@@ -1,3 +1,5 @@
+import { restartDaemonService } from "./restart-daemon-service.ts";
+import { handleCommandDispatch } from "./commands/command-router.ts";
 import {
   createInstanceHttpClient,
   describeInstance,
@@ -33,7 +35,6 @@ import {
   resolveBootstrapInsecureTls,
   resolveRunScriptUrl,
 } from "./run-reconcile.ts";
-import { restartDaemonService } from "./restart-daemon-service.ts";
 
 /** Chained replace pattern Sonar S5145 recognizes for log-injection sanitization. */
 function stripLogInjection(text: string): string {
@@ -126,6 +127,30 @@ type DaemonMessage =
     ok: boolean;
     error?: string;
     at: string;
+  }
+  | {
+    type: "command-dispatch";
+    id: string;
+    commandId: string;
+    commandType: string;
+    payload: unknown;
+    at: string;
+  }
+  | {
+    type: "command-ack";
+    id: string;
+    at: string;
+    daemonReceivedAt: string;
+  }
+  | {
+    type: "command-outcome";
+    id: string;
+    ok: boolean;
+    result?: unknown;
+    error?: string;
+    at: string;
+    daemonReceivedAt?: string;
+    daemonRespondedAt?: string;
   };
 
 export interface InstanceClientOptions {
@@ -737,14 +762,30 @@ export class InstanceClient {
           } satisfies DaemonMessage,
         ));
         break;
-      case "command":
-        this.#runCommand(message, ws).catch((err) => {
+      case "command-dispatch":
+        handleCommandDispatch(message, ws).catch((err) => {
           logWarn(
             "instance",
-            "command handler failed:",
+            "command-dispatch handler failed:",
             sanitizeForLog(err),
           );
         });
+        break;
+      case "command":
+        if (isTruthyFlag(Deno.env.get("TURBOPANEL_DEV_SHELL_COMMANDS"))) {
+          this.#runCommand(message, ws).catch((err) => {
+            logWarn(
+              "instance",
+              "command handler failed:",
+              sanitizeForLog(err),
+            );
+          });
+        } else {
+          logWarn(
+            "instance",
+            "ignoring legacy shell command — set TURBOPANEL_DEV_SHELL_COMMANDS=1 for dev-only use",
+          );
+        }
         break;
       case "addresses-request":
         this.#collectAddresses(message, ws);
@@ -874,6 +915,8 @@ export class InstanceClient {
     message: Extract<DaemonMessage, { type: "update" }>,
     ws: WebSocket,
   ): Promise<void> {
+    // Long-running reconcile + restart runs here; the instance queues the request
+    // and returns immediately — this path is decoupled from that HTTP lifecycle.
     // Long-running reconcile + restart runs here; the instance queues the request
     // and returns immediately — this path is decoupled from that HTTP lifecycle.
     if (this.#updateInstallInProgress) {
@@ -1032,8 +1075,8 @@ export class InstanceClient {
   /**
    * Run a shell command requested by the instance and stream the result back.
    *
-   * TEMPORARY: this executes arbitrary shell commands with the daemon's full
-   * privileges and has no auth. It exists only for the dev-only developer panel.
+   * Dev-only. Gate with `TURBOPANEL_DEV_SHELL_COMMANDS=1`. Never set in
+   * production. Production commands use typed handlers in `src/instance/commands/`.
    */
   async #runCommand(
     message: Extract<DaemonMessage, { type: "command" }>,
