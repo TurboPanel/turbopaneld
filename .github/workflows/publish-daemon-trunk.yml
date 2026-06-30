@@ -1,0 +1,147 @@
+# ⚠️  REQUIRED GITHUB REPOSITORY CONFIGURATION
+# Before this workflow will succeed, configure Settings → Secrets and variables → Actions:
+#
+# Variables:
+#   DL_S3_ENDPOINT — Bunny S3 endpoint URL (e.g. https://de-s3.storage.bunnycdn.com)
+#   DL_S3_REGION   — Bunny storage region code for AWS CLI signing (e.g. de for
+#                    https://de-s3.storage.bunnycdn.com); must match DL_S3_ENDPOINT
+#
+# Secrets:
+#   DL_S3_BUCKET            — Bunny Storage Zone name (bucket name)
+#   DL_S3_ACCESS_KEY_ID     — Bunny Storage Zone Access Key ID
+#   DL_S3_SECRET_ACCESS_KEY — Bunny Storage Zone Password (Secret Access Key)
+#
+# The workflow will fail with a clear error if any variable or secret is missing.
+
+name: Publish daemon trunk build
+
+on:
+  push:
+    branches:
+      - trunk
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify required secrets and variables
+        env:
+          DL_S3_ENDPOINT: ${{ vars.DL_S3_ENDPOINT }}
+          DL_S3_REGION: ${{ vars.DL_S3_REGION }}
+          DL_S3_BUCKET: ${{ secrets.DL_S3_BUCKET }}
+          DL_S3_ACCESS_KEY_ID: ${{ secrets.DL_S3_ACCESS_KEY_ID }}
+          DL_S3_SECRET_ACCESS_KEY: ${{ secrets.DL_S3_SECRET_ACCESS_KEY }}
+        run: |
+          missing=0
+          if [ -z "$DL_S3_ENDPOINT" ]; then
+            echo "::error::Missing required variable: DL_S3_ENDPOINT"
+            missing=1
+          fi
+          if [ -z "$DL_S3_REGION" ]; then
+            echo "::error::Missing required variable: DL_S3_REGION"
+            missing=1
+          fi
+          if [ -z "$DL_S3_BUCKET" ]; then
+            echo "::error::Missing required secret: DL_S3_BUCKET"
+            missing=1
+          fi
+          if [ -z "$DL_S3_ACCESS_KEY_ID" ]; then
+            echo "::error::Missing required secret: DL_S3_ACCESS_KEY_ID"
+            missing=1
+          fi
+          if [ -z "$DL_S3_SECRET_ACCESS_KEY" ]; then
+            echo "::error::Missing required secret: DL_S3_SECRET_ACCESS_KEY"
+            missing=1
+          fi
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Deno
+        uses: denoland/setup-deno@v2
+
+      - name: Compute build metadata
+        run: |
+          echo "BUILD_ID=$(date -u '+%Y%m%d-%H%M%S')-$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          echo "BUILT_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_ENV"
+
+      - name: Embed build identity
+        run: |
+          cat > src/build-info.ts <<EOF
+          export interface BuildInfo {
+            commit: string;
+            buildId: string;
+            builtAt: string;
+            channel: string;
+          }
+
+          export const BUILD_INFO: BuildInfo = {
+            commit: "$SHORT_SHA",
+            buildId: "$BUILD_ID",
+            builtAt: "$BUILT_AT",
+            channel: "trunk",
+          };
+
+          export function getBuildInfo(): BuildInfo {
+            return BUILD_INFO;
+          }
+          EOF
+
+      - name: Stage daemon source build
+        run: |
+          # Source build runs via stock Deno (`deno run main.ts`) where the
+          # compiled binary's 4 KB-aligned segment can't load. build-info.ts was
+          # already overwritten with the real commit before compile:all.
+          mkdir -p publish/channels/trunk/daemon publish/channels/trunk
+          tar -I 'zstd -19 -T0' \
+            -cf publish/channels/trunk/daemon/source.tar.zst \
+            main.ts deno.json deno.lock embedded-orchestration.ts \
+            src orchestration scripts
+
+      - name: Compute checksums and sizes
+        run: |
+          echo "SOURCE_SHA256=$(sha256sum publish/channels/trunk/daemon/source.tar.zst | awk '{print $1}')" >> "$GITHUB_ENV"
+          echo "SOURCE_SIZE=$(stat -c%s publish/channels/trunk/daemon/source.tar.zst)" >> "$GITHUB_ENV"
+
+      - name: Generate channel manifest
+        run: |
+          deno run --allow-env --allow-write scripts/generate-channel-manifest.ts \
+            publish/channels/trunk/manifest.json
+          cat > publish/channels.json <<'EOF'
+          {
+            "schema": 1,
+            "defaultChannel": "trunk",
+            "channels": {
+              "trunk": {
+                "manifestUrl": "https://dl.trbp.nl/channels/trunk/manifest.json"
+              }
+            }
+          }
+          EOF
+
+      - name: Upload trunk build to S3
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.DL_S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.DL_S3_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ vars.DL_S3_REGION }}
+        run: |
+          aws s3 cp publish/channels/trunk/daemon/source.tar.zst \
+            "s3://${{ secrets.DL_S3_BUCKET }}/channels/trunk/daemon/source.tar.zst" \
+            --endpoint-url "${{ vars.DL_S3_ENDPOINT }}" \
+            --cache-control "public, max-age=30, must-revalidate"
+          aws s3 cp publish/channels/trunk/manifest.json \
+            "s3://${{ secrets.DL_S3_BUCKET }}/channels/trunk/manifest.json" \
+            --endpoint-url "${{ vars.DL_S3_ENDPOINT }}" \
+            --cache-control "public, max-age=30, must-revalidate" \
+            --content-type "application/json"
+          aws s3 cp publish/channels.json \
+            "s3://${{ secrets.DL_S3_BUCKET }}/channels.json" \
+            --endpoint-url "${{ vars.DL_S3_ENDPOINT }}" \
+            --cache-control "public, max-age=30, must-revalidate" \
+            --content-type "application/json"
