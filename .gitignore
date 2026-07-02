@@ -1,0 +1,6 @@
+.env
+logs/
+state/
+cloudflared/
+dist/
+logs/

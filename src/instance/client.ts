@@ -19,7 +19,7 @@ import { applyPublicUrls } from "./public-urls-apply.ts";
 import { writeInstanceTunnelToken } from "../tunnels.ts";
 import { logDebug, logError, logInfo, logWarn } from "../logger.ts";
 import { type DaemonKeyFile, loadDaemonKeyFile } from "../crypto/keys.ts";
-import { DaemonApiClient } from "./api-client.ts";
+import { DaemonApiClient, DaemonApiError } from "./api-client.ts";
 import { DaemonTokenManager } from "./token-manager.ts";
 import { enrollDaemon } from "./enroll.ts";
 import { decodeBase64 } from "@std/encoding/base64";
@@ -302,6 +302,22 @@ function parseMessage(raw: string): DaemonMessage | null {
   }
 }
 
+function isStaleDaemonIdentityError(err: unknown): boolean {
+  return err instanceof DaemonApiError &&
+    err.status === 404 &&
+    err.message === "Server key not found";
+}
+
+async function clearDaemonIdentityState(stateDir: string): Promise<void> {
+  for (const file of [SERVER_ID_FILE, SERVER_KEY_FILE, KEY_ID_FILE]) {
+    try {
+      await Deno.remove(`${stateDir}/${file}`);
+    } catch {
+      // Missing files are fine.
+    }
+  }
+}
+
 export class InstanceClient {
   readonly #config: InstanceConfig;
   readonly #httpClient: Deno.HttpClient | undefined;
@@ -570,91 +586,121 @@ export class InstanceClient {
     // reconnect cycle, producing a perpetual ~2-second disconnect/reconnect storm.
 
     const stateDir = resolveServerIdDir();
-    const [loadedKeyFile, loadedServerId, loadedKeyId, machineId] =
-      await Promise.all([
+    const machineId = await readMachineId();
+    const hostname = Deno.hostname();
+
+    let keyFile: DaemonKeyFile | null = null;
+    let serverId: string | undefined;
+    let keyId: string | undefined;
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const [loadedKeyFile, loadedServerId, loadedKeyId] = await Promise.all([
         readDaemonKeyFile(),
         readServerId(),
         readKeyId(),
-        readMachineId(),
       ]);
-    const hostname = Deno.hostname();
 
-    let keyFile = loadedKeyFile;
-    let serverId = loadedServerId;
-    let keyId = loadedKeyId;
-    const needsEnrollment = this.#forceEnrollPending || keyFile === null ||
-      !serverId || !keyId;
-    if (needsEnrollment) {
-      const licenseCredentials = await readLicenseCredentials();
-      if (!licenseCredentials.licenseId || !licenseCredentials.licenseToken) {
-        throw new Error("missing license credentials for enrollment");
+      keyFile = loadedKeyFile;
+      serverId = loadedServerId;
+      keyId = loadedKeyId;
+      const needsEnrollment = this.#forceEnrollPending || keyFile === null ||
+        !serverId || !keyId;
+      if (needsEnrollment) {
+        const licenseCredentials = await readLicenseCredentials();
+        if (!licenseCredentials.licenseId || !licenseCredentials.licenseToken) {
+          throw new Error("missing license credentials for enrollment");
+        }
+
+        const enrollClient = this.#apiClient ?? new DaemonApiClient({
+          config: this.#config,
+          httpClient: this.#httpClient,
+          getToken: async () => {
+            throw new Error("token unavailable before enrollment");
+          },
+        });
+        const enrollment = await enrollDaemon({
+          apiClient: enrollClient,
+          machineId,
+          hostname,
+          licenseId: licenseCredentials.licenseId,
+          licenseToken: licenseCredentials.licenseToken,
+          stateDir,
+        });
+        keyFile = enrollment.keyFile;
+        serverId = enrollment.serverId;
+        keyId = enrollment.keyId;
+        this.#forceEnrollPending = false;
+        logInfo(
+          "instance",
+          "enrolled with instance as",
+          sanitizeForLog(serverId),
+        );
       }
 
-      const enrollClient = this.#apiClient ?? new DaemonApiClient({
-        config: this.#config,
-        httpClient: this.#httpClient,
-        getToken: async () => {
-          throw new Error("token unavailable before enrollment");
-        },
-      });
-      const enrollment = await enrollDaemon({
-        apiClient: enrollClient,
-        machineId,
-        hostname,
-        licenseId: licenseCredentials.licenseId,
-        licenseToken: licenseCredentials.licenseToken,
-        stateDir,
-      });
-      keyFile = enrollment.keyFile;
-      serverId = enrollment.serverId;
-      keyId = enrollment.keyId;
-      this.#forceEnrollPending = false;
-      logInfo(
-        "instance",
-        "enrolled with instance as",
-        sanitizeForLog(serverId),
-      );
+      if (keyFile === null || !serverId || !keyId) {
+        throw new Error(
+          "daemon identity incomplete after enrollment/auth bootstrap",
+        );
+      }
+
+      if (
+        !this.#tokenManager ||
+        !this.#apiClient ||
+        this.#tokenServerId !== serverId ||
+        this.#tokenKeyId !== keyId
+      ) {
+        let tokenManagerRef: DaemonTokenManager | undefined;
+        const apiClient = new DaemonApiClient({
+          config: this.#config,
+          httpClient: this.#httpClient,
+          getToken: async (options) => {
+            if (!tokenManagerRef) {
+              throw new Error("token manager not initialized");
+            }
+            return await tokenManagerRef.getToken(options);
+          },
+        });
+        const tokenManager = new DaemonTokenManager({
+          keyFile,
+          serverId,
+          keyId,
+          machineId,
+          hostname,
+          apiClient,
+        });
+        tokenManagerRef = tokenManager;
+        this.#tokenManager = tokenManager;
+        this.#apiClient = apiClient;
+        this.#tokenServerId = serverId;
+        this.#tokenKeyId = keyId;
+      }
+
+      try {
+        const jwt = await this.#tokenManager.getToken();
+        await this.#openDaemonWebSocket(jwt, serverId);
+        return;
+      } catch (err) {
+        if (attempt === 0 && isStaleDaemonIdentityError(err)) {
+          logWarn(
+            "instance",
+            "daemon identity is stale for this instance; clearing local state and re-enrolling",
+          );
+          await clearDaemonIdentityState(stateDir);
+          this.#tokenManager = undefined;
+          this.#apiClient = undefined;
+          this.#tokenServerId = undefined;
+          this.#tokenKeyId = undefined;
+          this.#forceEnrollPending = true;
+          continue;
+        }
+        throw err;
+      }
     }
 
-    if (keyFile === null || !serverId || !keyId) {
-      throw new Error(
-        "daemon identity incomplete after enrollment/auth bootstrap",
-      );
-    }
+    throw new Error("daemon identity bootstrap failed after stale identity retry");
+  }
 
-    if (
-      !this.#tokenManager ||
-      !this.#apiClient ||
-      this.#tokenServerId !== serverId ||
-      this.#tokenKeyId !== keyId
-    ) {
-      let tokenManagerRef: DaemonTokenManager | undefined;
-      const apiClient = new DaemonApiClient({
-        config: this.#config,
-        httpClient: this.#httpClient,
-        getToken: async (options) => {
-          if (!tokenManagerRef) {
-            throw new Error("token manager not initialized");
-          }
-          return await tokenManagerRef.getToken(options);
-        },
-      });
-      const tokenManager = new DaemonTokenManager({
-        keyFile,
-        serverId,
-        keyId,
-        machineId,
-        hostname,
-        apiClient,
-      });
-      tokenManagerRef = tokenManager;
-      this.#tokenManager = tokenManager;
-      this.#apiClient = apiClient;
-      this.#tokenServerId = serverId;
-      this.#tokenKeyId = keyId;
-    }
-
-    const jwt = await this.#tokenManager.getToken();
+  async #openDaemonWebSocket(jwt: string, serverId: string): Promise<void> {
     const ws = this.#newWebSocket(jwt);
     this.#ws = ws;
     let sessionRegistered = false;
