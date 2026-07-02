@@ -10,6 +10,8 @@ TurboPanel **daemon** — Ansible-driven node agent; connects to the instance ov
 
 `InstanceClient` maintains the daemon's authenticated WSS (or co-located Unix socket) to `/ws/daemon/v1`. Enrollment + JWT session issuance happen over REST first; the socket carries live traffic only (outbox delivery, command dispatch, dev-sync, tunnel-token, etc.).
 
+**Co-located dev connectivity** (`src/orchestration/setup.ts`, `src/instance/paths.ts`): after console opt-in (`TURBOPANEL_DEV_INSTANCE=1`), Deno runtime dials the local Unix socket (no `TURBOPANEL_INSTANCE_URL`); Workers runtime dials Caddy over HTTPS/WSS via `TURBOPANEL_INSTANCE_URL` + platform CA — same transport as a remote daemon, but still the co-located host. Connection stays deferred until opt-in on both runtimes.
+
 ### Idle presence (`src/instance/idle-presence.ts`)
 
 `IdlePresence` runs per open socket:

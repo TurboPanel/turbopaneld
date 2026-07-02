@@ -4,7 +4,6 @@ import { logInfo, logWarn } from "./logger.ts";
 import { createSentinel, type SentinelOptions } from "./monitor/index.ts";
 import {
   initOrchestration,
-  isCoLocatedWorkersDevHost,
   shouldConnectToInstance,
   shouldEnableDockerIntegration,
 } from "./orchestration/setup.ts";
@@ -41,11 +40,6 @@ let instance: { stop(): void } = instanceHandle;
 
 if (shouldConnectToInstance()) {
   instance = await connectInstance();
-} else if (isCoLocatedWorkersDevHost()) {
-  logInfo(
-    "instance",
-    "connection skipped on Workers dev control plane (remote daemons only)",
-  );
 } else {
   logInfo(
     "instance",

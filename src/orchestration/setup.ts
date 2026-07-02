@@ -27,8 +27,9 @@ function shouldSkipOrchestration(): boolean {
  * instance + UI in development mode.
  *
  * Deno runtime dials the local Unix socket (no `TURBOPANEL_INSTANCE_URL`).
- * Workers runtime runs the control plane on the same host but the co-located
- * daemon does not enroll — remote daemons dial `TURBOPANEL_INSTANCE_URL`.
+ * Workers runtime still runs on the same host but the daemon connects over
+ * HTTPS like a remote daemon — `TURBOPANEL_INSTANCE_URL` is set and
+ * `TURBOPANEL_INSTANCE_RUNTIME=workers` marks co-located Workers dev.
  */
 function shouldInstallDevInstance(): boolean {
   const flag = Deno.env.get("TURBOPANEL_DEV_INSTANCE")?.trim().toLowerCase();
@@ -49,18 +50,9 @@ export function isPreOptInCoLocatedDev(): boolean {
   return Deno.env.get("TURBOPANEL_INSTANCE_RUNTIME")?.trim() === "workers";
 }
 
-export function isCoLocatedWorkersDevHost(): boolean {
-  const devInstance = Deno.env.get("TURBOPANEL_DEV_INSTANCE")?.trim().toLowerCase();
-  const devEnabled = devInstance === "1" || devInstance === "true" ||
-    devInstance === "yes";
-  return devEnabled &&
-    Deno.env.get("TURBOPANEL_INSTANCE_RUNTIME")?.trim() === "workers";
-}
-
 /** Dial the instance only when this host is meant to reach it yet. */
 export function shouldConnectToInstance(): boolean {
   if (shouldSkipOrchestration()) return true;
-  if (isCoLocatedWorkersDevHost()) return false;
   return !isPreOptInCoLocatedDev();
 }
 
