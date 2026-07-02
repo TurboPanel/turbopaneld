@@ -1,4 +1,8 @@
-import { resolveInstanceConfig, resolveInstanceCaPath } from "./paths.ts";
+import {
+  createInstanceHttpClient,
+  resolveInstanceConfig,
+  resolveInstanceCaPath,
+} from "./paths.ts";
 
 const CADDY_HTTPS = "https://localhost:8443";
 const PLATFORM_CA = "/opt/turbopanel/platform/instance/certs/ca.crt";
@@ -68,6 +72,20 @@ Deno.test("resolveInstanceCaPath returns undefined when env unset and canonical 
   const path = resolveInstanceCaPath({});
   if (path !== undefined) {
     throw new Error(`expected undefined, got ${path}`);
+  }
+});
+
+Deno.test("createInstanceHttpClient returns undefined for plaintext http without reading CA", async () => {
+  const client = await createInstanceHttpClient(
+    {
+      kind: "url",
+      baseUrl: "http://localhost:8880",
+      wsBaseUrl: "ws://localhost:8880",
+    },
+    { caCertPath: "/nonexistent/platform/config/instance-ca.pem" },
+  );
+  if (client !== undefined) {
+    throw new Error(`expected undefined, got ${client}`);
   }
 });
 

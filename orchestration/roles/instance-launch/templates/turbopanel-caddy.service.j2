@@ -13,6 +13,8 @@ Environment=XDG_DATA_HOME={{ turbopanel_caddy_runtime_dir }}/share
 Environment=XDG_STATE_HOME={{ turbopanel_caddy_runtime_dir }}/state
 Environment=XDG_CONFIG_HOME={{ turbopanel_caddy_config_dir }}
 Environment=CADDY_PORT={{ caddy_port }}
+Environment=CADDY_HTTP_PORT={{ caddy_http_port }}
+Environment=TURBOPANEL_DEV_HTTP_CONTROL_PLANE={{ '1' if (turbopanel_dev_user | default('') | length > 0) else '0' }}
 Environment=TURBOPANEL_SOCKET_DIAL=run/turbopanel/instance.sock
 Environment=TURBOPANEL_INSTANCE_RUNTIME={{ turbopanel_instance_runtime | default('deno') }}
 Environment=WRANGLER_DEV_PORT={{ wrangler_dev_port | default(18787) }}

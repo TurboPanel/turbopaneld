@@ -153,6 +153,10 @@ export async function createInstanceHttpClient(
     });
   }
 
+  if (config.baseUrl.startsWith("http://")) {
+    return undefined;
+  }
+
   if (options.caCertPath) {
     const cert = await Deno.readTextFile(options.caCertPath);
     return Deno.createHttpClient({ caCerts: [cert] });

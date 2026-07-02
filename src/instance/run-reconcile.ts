@@ -6,6 +6,11 @@ export const CDN_RUN_SCRIPT = "https://trbp.nl/run.sh";
 export const CANONICAL_INSTANCE_CA_PATH =
   "/opt/turbopanel/platform/config/instance-ca.pem";
 
+export function isPlaintextHttpUrl(url: string | undefined): boolean {
+  const trimmed = url?.trim();
+  return trimmed !== undefined && trimmed.startsWith("http://");
+}
+
 export function encodeLicenseArg(
   licenseId: string,
   licenseToken: string,
@@ -34,6 +39,7 @@ export function resolveBootstrapInsecureTls(options: {
   runScriptUrl: string;
   instanceCaPath?: string;
 }): boolean {
+  if (isPlaintextHttpUrl(options.runScriptUrl)) return false;
   if (options.releaseTlsInsecure === "1") return true;
   if (options.runScriptUrl === CDN_RUN_SCRIPT) return false;
   // Self-hosted run.sh is served from the platform leaf cert; prefer --cacert
@@ -52,12 +58,14 @@ export function buildRunReconcileArgs(options: {
   if (instanceUrl && instanceUrl !== PRODUCTION_CONTROL_PLANE) {
     args.push("--host", instanceUrl);
   }
-  const caPath = options.instanceCaPath?.trim();
-  if (caPath) {
-    args.push("--instance-ca", caPath);
-  }
-  if (options.insecureTls) {
-    args.push("--insecure-tls");
+  if (!isPlaintextHttpUrl(instanceUrl)) {
+    const caPath = options.instanceCaPath?.trim();
+    if (caPath) {
+      args.push("--instance-ca", caPath);
+    }
+    if (options.insecureTls) {
+      args.push("--insecure-tls");
+    }
   }
   args.push("--no-start");
   return args;
@@ -70,13 +78,17 @@ export async function downloadRunScript(
   const opts = typeof options === "boolean"
     ? { insecureTls: options }
     : options;
-  const curlArgs = ["-fsSL"];
-  if (opts.insecureTls) {
-    curlArgs.push("-k");
-  } else if (opts.caPath?.trim()) {
-    curlArgs.push("--cacert", opts.caPath.trim());
+  const curlArgs = isPlaintextHttpUrl(runScriptUrl)
+    ? ["-fsSL", runScriptUrl]
+    : ["-fsSL"];
+  if (!isPlaintextHttpUrl(runScriptUrl)) {
+    if (opts.insecureTls) {
+      curlArgs.push("-k");
+    } else if (opts.caPath?.trim()) {
+      curlArgs.push("--cacert", opts.caPath.trim());
+    }
+    curlArgs.push(runScriptUrl);
   }
-  curlArgs.push(runScriptUrl);
   const curl = await new Deno.Command("curl", {
     args: curlArgs,
     stdout: "piped",

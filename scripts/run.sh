@@ -341,32 +341,39 @@ if [ -n "$INSTANCE_CA" ]; then
 		install -m 0640 "$INSTANCE_CA" "$CA_PATH"
 	fi
 else
-	tp_print_step "▸" "Fetching instance CA…"
-	_curl_base="curl -sSL"
-	[ "$INSECURE_TLS" = true ] && _curl_base="curl -sSLk"
-	if [ "$INSECURE_TLS" != true ] && [ -f "$CA_PATH" ]; then
-		_curl_base="curl -sSL --cacert $CA_PATH"
-	fi
-	_ca_tmp="$(mktemp)"
-	_ca_http_code=""
-	# shellcheck disable=SC2086
-	_ca_http_code=$($_curl_base -o "$_ca_tmp" -w '%{http_code}' "${HOST_URL%/}/api/daemon/v1/instance/ca" || echo "000")
-	case "$_ca_http_code" in
-		200)
-			install -m 0640 "$_ca_tmp" "$CA_PATH"
-			tp_print_ok "Instance CA downloaded"
-			;;
-		404)
-			# Workers production and other publicly-trusted control planes have no
-			# platform CA — the daemon uses the system trust store instead.
-			tp_print_step "–" "No platform CA (public TLS — using system trust store)"
-			rm -f "$CA_PATH"
+	case "$HOST_URL" in
+		http://*)
+			tp_print_step "–" "No platform CA (plaintext control plane — TLS not used)"
 			;;
 		*)
-			tp_print_step "~" "Could not download instance CA (HTTP ${_ca_http_code}) — keeping existing CA if present"
+			tp_print_step "▸" "Fetching instance CA…"
+			_curl_base="curl -sSL"
+			[ "$INSECURE_TLS" = true ] && _curl_base="curl -sSLk"
+			if [ "$INSECURE_TLS" != true ] && [ -f "$CA_PATH" ]; then
+				_curl_base="curl -sSL --cacert $CA_PATH"
+			fi
+			_ca_tmp="$(mktemp)"
+			_ca_http_code=""
+			# shellcheck disable=SC2086
+			_ca_http_code=$($_curl_base -o "$_ca_tmp" -w '%{http_code}' "${HOST_URL%/}/api/daemon/v1/instance/ca" || echo "000")
+			case "$_ca_http_code" in
+				200)
+					install -m 0640 "$_ca_tmp" "$CA_PATH"
+					tp_print_ok "Instance CA downloaded"
+					;;
+				404)
+					# Workers production and other publicly-trusted control planes have no
+					# platform CA — the daemon uses the system trust store instead.
+					tp_print_step "–" "No platform CA (public TLS — using system trust store)"
+					rm -f "$CA_PATH"
+					;;
+				*)
+					tp_print_step "~" "Could not download instance CA (HTTP ${_ca_http_code}) — keeping existing CA if present"
+					;;
+			esac
+			rm -f "$_ca_tmp"
 			;;
 	esac
-	rm -f "$_ca_tmp"
 fi
 
 export TURBOPANEL_DAEMON_ROOT="$DAEMON_DIR"
@@ -475,9 +482,14 @@ trap 'rm -f "$VARS_FILE"' EXIT
 	printf 'turbopanel_restart_daemon: %s\n' "$([ "$NO_START" = true ] && echo false || echo true)"
 	printf 'turbopanel_daemon_run_mode: %s\n' "source"
 	printf 'turbopanel_daemon_deno_bin: %s\n' "/opt/turbopanel/runtimes/deno/current/deno"
-	if [ -f "$CA_PATH" ]; then
-		printf 'turbopanel_instance_ca: %s\n' "$CA_PATH"
-	fi
+	case "$HOST_URL" in
+		http://*) ;;
+		*)
+			if [ -f "$CA_PATH" ]; then
+				printf 'turbopanel_instance_ca: %s\n' "$CA_PATH"
+			fi
+			;;
+	esac
 	printf 'turbopanel_update_channel: %s\n' "${TURBOPANEL_UPDATE_CHANNEL:-trunk}"
 	if [ -n "$TUNNEL_TOKEN" ]; then
 		printf 'turbopanel_tunnel_token: %s\n' "$TUNNEL_TOKEN"

@@ -31,6 +31,7 @@ instance_service_name: turbopanel-instance
 caddy_service_name: turbopanel-caddy
 ui_service_name: turbopanel-ui
 caddy_port: 8443
+caddy_http_port: 8880
 expo_port: 8081
 drizzle_studio_port: 4983
 # "dev" proxies Caddy to the Expo dev server (turbopanel-ui.service);

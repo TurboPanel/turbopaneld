@@ -1,6 +1,7 @@
 import {
   buildRunReconcileArgs,
   CDN_RUN_SCRIPT,
+  downloadRunScript,
   encodeLicenseArg,
   PRODUCTION_CONTROL_PLANE,
   resolveBootstrapInsecureTls,
@@ -54,6 +55,59 @@ Deno.test("buildRunReconcileArgs omits --host for production", () => {
     }),
     ["--license", "abc", "--no-start"],
   );
+});
+
+Deno.test("resolveBootstrapInsecureTls returns false for plaintext http even with releaseTlsInsecure", () => {
+  assertEquals(
+    resolveBootstrapInsecureTls({
+      releaseTlsInsecure: "1",
+      runScriptUrl: "http://localhost:8880/run.sh",
+    }),
+    false,
+  );
+});
+
+Deno.test("buildRunReconcileArgs omits TLS flags for plaintext http instance URL", () => {
+  assertEquals(
+    buildRunReconcileArgs({
+      licenseArg: "abc",
+      instanceUrl: "http://localhost:8880",
+      instanceCaPath: "/opt/turbopanel/platform/config/instance-ca.pem",
+      insecureTls: true,
+    }),
+    ["--license", "abc", "--host", "http://localhost:8880", "--no-start"],
+  );
+});
+
+Deno.test("downloadRunScript uses plain -fsSL for plaintext http URL", async () => {
+  const originalCommand = Deno.Command;
+  let capturedArgs: string[] | undefined;
+  try {
+    Deno.Command = class {
+      constructor(_cmd: string, opts: Deno.CommandOptions) {
+        capturedArgs = opts.args as string[];
+      }
+
+      output() {
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: new TextEncoder().encode("#!/bin/sh\necho ok"),
+          stderr: new Uint8Array(),
+        });
+      }
+    } as typeof Deno.Command;
+    const script = await downloadRunScript("http://localhost:8880/run.sh", {
+      insecureTls: true,
+      caPath: "/opt/turbopanel/platform/config/instance-ca.pem",
+    });
+    assertEquals(capturedArgs, ["-fsSL", "http://localhost:8880/run.sh"]);
+    if (!script.trim()) {
+      throw new Error("expected non-empty script");
+    }
+  } finally {
+    Deno.Command = originalCommand;
+  }
 });
 
 Deno.test("resolveBootstrapInsecureTls uses CDN without insecure flag", () => {
