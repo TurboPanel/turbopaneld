@@ -3,6 +3,9 @@ import { logWarn } from "../logger.ts";
 
 export const IDLE_PRESENCE_MS = 60_000;
 
+// Must match DAEMON_CELL_PING in instance/src/daemon/cell/protocol.ts exactly.
+const CELL_PING_MESSAGE = '{"type":"ping"}';
+
 function sanitizeForLog(value: unknown): string {
   if (value instanceof Error) return value.message.replaceAll("\n", "_");
   return String(value).replaceAll("\n", "_");
@@ -13,22 +16,28 @@ export type IdlePresenceOptions = {
   /** Override for tests; defaults to {@link IDLE_PRESENCE_MS}. */
   idleCheckIntervalMs?: number;
   idleThresholdMs?: number;
+  /** Minimum spacing between routine cell pings; defaults to {@link idleCheckIntervalMs}. */
+  minPresenceIntervalMs?: number;
 };
 
 export class IdlePresence {
   readonly #serverId: string;
   readonly #idleCheckIntervalMs: number;
   readonly #idleThresholdMs: number;
+  readonly #minPresenceIntervalMs: number;
 
   #ws: WebSocket | undefined;
   #idleTimer: ReturnType<typeof setInterval> | undefined;
   #lastActivityAt = Date.now();
+  #lastPresenceSendAt = 0;
   #lastAgentCommit: string | undefined;
 
   constructor(options: IdlePresenceOptions) {
     this.#serverId = options.serverId;
     this.#idleCheckIntervalMs = options.idleCheckIntervalMs ?? IDLE_PRESENCE_MS;
     this.#idleThresholdMs = options.idleThresholdMs ?? IDLE_PRESENCE_MS;
+    this.#minPresenceIntervalMs = options.minPresenceIntervalMs ??
+      this.#idleCheckIntervalMs;
   }
 
   get lastActivityAt(): number {
@@ -78,7 +87,33 @@ export class IdlePresence {
 
   #maybeSendIdleHeartbeat(): void {
     if (Date.now() - this.#lastActivityAt < this.#idleThresholdMs) return;
-    this.#sendIdleHeartbeat();
+    if (
+      this.#lastPresenceSendAt > 0 &&
+      Date.now() - this.#lastPresenceSendAt < this.#minPresenceIntervalMs
+    ) {
+      return;
+    }
+
+    this.#sendCellPing();
+
+    const agent = getBuildInfo();
+    if (agent.commit !== this.#lastAgentCommit) {
+      this.#sendIdleHeartbeat();
+    }
+  }
+
+  #sendCellPing(): void {
+    const ws = this.#ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+    try {
+      ws.send(CELL_PING_MESSAGE);
+      const now = Date.now();
+      this.#lastActivityAt = now;
+      this.#lastPresenceSendAt = now;
+    } catch (err) {
+      logWarn("instance", "cell ping send failed:", sanitizeForLog(err));
+    }
   }
 
   #sendIdleHeartbeat(): void {

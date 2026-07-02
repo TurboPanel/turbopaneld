@@ -156,14 +156,28 @@ type DaemonMessage =
 export interface InstanceClientOptions {
   config?: InstanceConfig;
   httpClient?: Deno.HttpClient;
-  /** Initial reconnect delay; doubles on failure up to {@link DEFAULT_MAX_BACKOFF_MS}. */
+  /** Initial reconnect delay; clamped to [DEFAULT_INITIAL_BACKOFF_MS, DEFAULT_MAX_BACKOFF_MS]. */
   reconnectDelayMs?: number;
   onMessage?: (message: DaemonMessage) => void;
 }
 
-const DEFAULT_INITIAL_BACKOFF_MS = 2_000;
-const DEFAULT_MAX_BACKOFF_MS = 30_000;
+export const DEFAULT_INITIAL_BACKOFF_MS = 2_000;
+export const DEFAULT_MAX_BACKOFF_MS = 30_000;
 const BACKOFF_MULTIPLIER = 2;
+
+/** Clamp caller-provided reconnect delay to supported [min, max] bounds. */
+export function normalizeReconnectDelayMs(reconnectDelayMs?: number): number {
+  const value = reconnectDelayMs ?? DEFAULT_INITIAL_BACKOFF_MS;
+  if (!Number.isFinite(value) || value <= 0) {
+    return DEFAULT_INITIAL_BACKOFF_MS;
+  }
+  return Math.min(
+    Math.max(value, DEFAULT_INITIAL_BACKOFF_MS),
+    DEFAULT_MAX_BACKOFF_MS,
+  );
+}
+/** Session open duration before a benign close resets reconnect backoff. */
+export const STABLE_SESSION_MS = 5_000;
 /** Delay after sending update-result before restarting, so the instance can persist it. */
 export const UPDATE_RESULT_HANDOFF_DELAY_MS = 2_000;
 /** Co-located install wait: poll readiness on a fixed cadence before first connect. */
@@ -312,8 +326,7 @@ export class InstanceClient {
   constructor(options: InstanceClientOptions = {}) {
     this.#config = options.config ?? resolveInstanceConfig();
     this.#httpClient = options.httpClient;
-    this.#initialBackoffMs = options.reconnectDelayMs ??
-      DEFAULT_INITIAL_BACKOFF_MS;
+    this.#initialBackoffMs = normalizeReconnectDelayMs(options.reconnectDelayMs);
     this.#maxBackoffMs = DEFAULT_MAX_BACKOFF_MS;
     this.#backoffMs = this.#initialBackoffMs;
     this.#onMessage = options.onMessage;
@@ -400,7 +413,9 @@ export class InstanceClient {
         if (maxWaitMs === 0 || Date.now() - started >= maxWaitMs) {
           throw new Error("instance install incomplete");
         }
-        await delay(INSTALL_READINESS_POLL_MS);
+        await delay(
+          fullJitterMs(this.#initialBackoffMs, INSTALL_READINESS_POLL_MS),
+        );
       }
     }
 
@@ -413,6 +428,11 @@ export class InstanceClient {
 
   #increaseBackoff(): void {
     this.#backoffMs = nextBackoffMs(this.#backoffMs, this.#maxBackoffMs);
+  }
+
+  /** Full-jitter sleep: random delay in [floor, ceiling] inclusive. */
+  #nextReconnectDelayMs(): number {
+    return fullJitterMs(this.#initialBackoffMs, this.#backoffMs);
   }
 
   async fetchVersion(): Promise<{ commit: string; branch: string }> {
@@ -489,14 +509,17 @@ export class InstanceClient {
       }
 
       if (this.#stopped) break;
+      const reconnectDelayMs = this.#nextReconnectDelayMs();
       logDebug(
         "instance",
         "reconnect scheduled in",
+        reconnectDelayMs,
+        "ms (ceiling",
         this.#backoffMs,
-        "ms via",
+        "ms) via",
         sanitizeForLog(this.target),
       );
-      await delay(this.#backoffMs);
+      await delay(reconnectDelayMs);
     }
   }
 
@@ -685,7 +708,7 @@ export class InstanceClient {
 
     sessionRegistered = true;
     this.#hadStableSession = true;
-    this.#resetBackoff();
+    const connectedAt = Date.now();
     this.#idlePresence?.attach(ws);
 
     ws.onmessage = (event) => {
@@ -722,11 +745,14 @@ export class InstanceClient {
         once: true,
       });
     });
-    if (closeEvent.code === 4401) {
+    const wasAuthFailure = closeEvent.code === 4401;
+    if (wasAuthFailure) {
       await this.#tokenManager?.refresh();
     }
 
-    if (sessionRegistered) {
+    const wasStableSession = sessionRegistered && !wasAuthFailure &&
+      Date.now() - connectedAt >= STABLE_SESSION_MS;
+    if (wasStableSession) {
       this.#resetBackoff();
     } else {
       this.#increaseBackoff();
@@ -1124,6 +1150,14 @@ function nextBackoffMs(current: number, max: number): number {
   return Math.min(current * BACKOFF_MULTIPLIER, max);
 }
 
+/** Full-jitter delay in [floor, ceiling] inclusive (AWS-style de-correlation). */
+export function fullJitterMs(floor: number, ceiling: number): number {
+  const lo = Math.min(floor, ceiling);
+  const hi = Math.max(floor, ceiling);
+  if (hi <= lo) return lo;
+  return lo + Math.floor(Math.random() * (hi - lo + 1));
+}
+
 function isColocatedSocketMode(config: InstanceConfig): boolean {
   return config.kind === "socket";
 }
@@ -1131,8 +1165,7 @@ function isColocatedSocketMode(config: InstanceConfig): boolean {
 export async function connectInstance(
   options: InstanceClientOptions = {},
 ): Promise<InstanceClient> {
-  const initialBackoffMs = options.reconnectDelayMs ??
-    DEFAULT_INITIAL_BACKOFF_MS;
+  const initialBackoffMs = normalizeReconnectDelayMs(options.reconnectDelayMs);
   const config = options.config ?? resolveInstanceConfig();
   const env = Deno.env.toObject();
   const caCertPath = resolveInstanceCaPath(env);
@@ -1163,7 +1196,9 @@ export async function connectInstance(
       } catch {
         // Instance not reachable yet — keep polling silently.
       }
-      await delay(INSTALL_READINESS_POLL_MS);
+      await delay(
+        fullJitterMs(initialBackoffMs, INSTALL_READINESS_POLL_MS),
+      );
     }
   } else {
     let waitingLogged = false;
@@ -1191,7 +1226,7 @@ export async function connectInstance(
           );
           waitingLogged = true;
         }
-        await delay(backoffMs);
+        await delay(fullJitterMs(initialBackoffMs, backoffMs));
         backoffMs = nextBackoffMs(backoffMs, DEFAULT_MAX_BACKOFF_MS);
       }
     }
