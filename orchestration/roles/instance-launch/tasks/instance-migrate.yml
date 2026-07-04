@@ -20,6 +20,7 @@
     HOME: "{{ turbopanel_install_root }}"
     PATH: "{{ turbopanel_runtime_path }}"
     TURBOPANEL_DATABASE_URL: "{{ _instance_migrate_database_url }}"
+    CI: "true"
   register: _instance_db_bootstrap
   changed_when: >-
     'empty database' in (_instance_db_bootstrap.stdout | default(''))

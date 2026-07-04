@@ -204,9 +204,6 @@
   ansible.builtin.set_fact:
     instance_unit_enabled: "{{ instance_start | bool }}"
 
-- name: Apply instance database migrations
-  ansible.builtin.import_tasks: instance-migrate.yml
-
 - name: Ensure instance config directory exists
   ansible.builtin.file:
     path: "{{ turbopanel_config_dir }}/instance"
@@ -344,6 +341,9 @@
   notify:
     - Reload systemd for instance units
     - Restart turbopanel instance
+
+- name: Apply instance database migrations
+  ansible.builtin.import_tasks: instance-migrate.yml
 
 - name: Ensure instance service desired state
   ansible.builtin.systemd:
