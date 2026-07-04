@@ -13,16 +13,17 @@
   block:
     - name: Ensure FHS trees are owned by the dev user
       ansible.builtin.file:
-        path: "{{ item }}"
+        path: "{{ item.path }}"
         state: directory
         owner: "{{ turbopanel_dev_user }}"
         group: "{{ turbopanel_group }}"
+        recurse: "{{ item.recurse | default(false) }}"
       loop:
-        - "{{ turbopanel_install_root }}"
-        - "{{ turbopanel_runtimes_dir }}"
-        - "{{ turbopanel_config_dir }}"
-        - "{{ turbopanel_state_dir }}"
-        - "{{ turbopanel_log_dir }}"
+        - { path: "{{ turbopanel_install_root }}", recurse: true }
+        - { path: "{{ turbopanel_runtimes_dir }}", recurse: true }
+        - { path: "{{ turbopanel_config_dir }}" }
+        - { path: "{{ turbopanel_state_dir }}" }
+        - { path: "{{ turbopanel_log_dir }}" }
 
     - name: Stat home source checkouts
       ansible.builtin.stat:
