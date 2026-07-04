@@ -12,7 +12,9 @@
 
 - name: Generate platform CA and server certificate
   ansible.builtin.command:
-    cmd: node scripts/generate-self-signed-cert.mjs
+    argv:
+      - "{{ turbopanel_node }}"
+      - scripts/generate-self-signed-cert.mjs
     chdir: "{{ turbopanel_instance_dir }}"
   # Co-located dev stores CA material as turbopanel (git/Ansible identity); turbopaneli
   # cannot chmod turbopanel-owned keys when the script normalizes permissions.
