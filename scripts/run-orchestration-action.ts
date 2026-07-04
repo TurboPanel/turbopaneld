@@ -33,7 +33,7 @@ import {
   ansibleEnv,
   ORCHESTRATION_DIR,
 } from "../src/orchestration/paths.ts";
-import { readEnv, resolveLayout } from "../src/paths/layout.ts";
+import { readEnv, resolveDevRoot, resolveLayout } from "../src/paths/layout.ts";
 
 /**
  * FHS daemon env file — the same `/etc/turbopanel/daemon.env` the dev console
@@ -108,6 +108,10 @@ function devInstanceExtraArgs(): string[] {
   if (devUser) args.push("-e", `turbopanel_dev_user=${devUser}`);
   if (devUid) args.push("-e", `turbopanel_dev_uid=${devUid}`);
   if (devGid) args.push("-e", `turbopanel_dev_gid=${devGid}`);
+  if (devUser) {
+    const devRoot = resolveDevRoot(Deno.env.toObject());
+    args.push("-e", `turbopanel_dev_root=${devRoot}`);
+  }
   args.push("-e", `turbopanel_ui_mode=${uiMode}`);
   args.push("-e", `turbopanel_instance_run_mode=${instanceRunMode}`);
   args.push("-e", `turbopanel_instance_runtime=${instanceRuntime}`);

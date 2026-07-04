@@ -8,6 +8,22 @@
   connection: local
   become: true
   gather_facts: true
+
+  pre_tasks:
+    - name: Resolve dev user account for source-checkout root
+      ansible.builtin.getent:
+        database: passwd
+        key: "{{ turbopanel_dev_user }}"
+      when: turbopanel_dev_user | default('') | length > 0
+
+    - name: Set dev source-repo root from the dev user's home directory
+      ansible.builtin.set_fact:
+        turbopanel_dev_root: "{{ getent_passwd[turbopanel_dev_user][4] }}"
+      when:
+        - turbopanel_dev_user | default('') | length > 0
+        - getent_passwd is defined
+        - getent_passwd[turbopanel_dev_user] is defined
+
   roles:
     # Caddy requires ./certs/self-signed.{crt,key}; idempotent and cheap.
     - role: instance-certs
