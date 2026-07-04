@@ -41,7 +41,7 @@
 - name: Resolve daemon state directory shared with instance service
   ansible.builtin.set_fact:
     turbopanel_instance_daemon_state_dir: >-
-      {{ turbopanel_daemon_dir if (turbopanel_dev_user | default('') | length > 0)
+      {{ turbopanel_daemon_state_dir if (turbopanel_dev_user | default('') | length > 0)
       else (turbopanel_daemon_state_dir | default(turbopanel_daemon_dir ~ '/state')) }}
 
 - name: Install instance systemd unit
@@ -152,8 +152,10 @@
   failed_when: false
 
 # The instance user runs `git` during upgrades but repos are owned by
-# turbopanel:turbopanel — mark them safe (Git 2.35+).
+# turbopanel:turbopanel — mark them safe (Git 2.35+). Only co-located dev has
+# editable source checkouts; the managed FHS tree has no repos to mark safe.
 - name: Read existing safe.directory entries for turbopanel user
+  when: turbopanel_dev_user | default('') | length > 0
   ansible.builtin.command:
     argv: [git, config, --global, --get-all, safe.directory]
   become_user: "{{ turbopanel_user }}"
@@ -175,9 +177,11 @@
     - "{{ turbopanel_ui_dir }}"
     - "{{ turbopanel_website_dir }}"
   when:
+    - turbopanel_dev_user | default('') | length > 0
     - item not in (_git_safe_tp_dirs.stdout_lines | default([]))
 
 - name: Read existing safe.directory entries for instance user
+  when: turbopanel_dev_user | default('') | length > 0
   ansible.builtin.command:
     argv: [git, config, --global, --get-all, safe.directory]
   become_user: "{{ instance_user }}"
@@ -199,6 +203,7 @@
     - "{{ turbopanel_ui_dir }}"
     - "{{ turbopanel_website_dir }}"
   when:
+    - turbopanel_dev_user | default('') | length > 0
     - item not in (_git_safe_instance_dirs.stdout_lines | default([]))
 
 - name: Resolve instance unit desired state
@@ -391,4 +396,5 @@
   ansible.builtin.import_tasks: upgrade-sudoers.yml
 
 - name: Reconcile dev checkout ownership (9999 develops, 9998 runs)
+  when: turbopanel_dev_user | default('') | length > 0
   ansible.builtin.import_tasks: checkout-permissions.yml

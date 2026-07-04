@@ -13,6 +13,8 @@ ANSIBLE_CFG="$DAEMON_DIR/orchestration/ansible.cfg"
 ANSIBLE_LOCAL_TMP="$RUNTIMES_DIR/uv/cache/ansible-tmp"
 ANSIBLE_COLLECTIONS_PATH="$RUNTIMES_DIR/ansible/galaxy-collections"
 PLAYBOOK="$DAEMON_DIR/orchestration/playbooks/daemon-systemd-setup.yml"
+SERVICE_NAME="turbopaneld"
+LEGACY_SERVICE_NAME="turbopanel-daemon"
 
 if [ ! -x "$ANSIBLE_PLAYBOOK" ]; then
   echo "ansible-playbook not found at $ANSIBLE_PLAYBOOK" >&2
@@ -37,7 +39,7 @@ trap 'rm -f "$VARS_FILE"' EXIT
   printf 'turbopanel_start: %s\n' "$([ "$START_DAEMON" = true ] && echo true || echo false)"
   # Optional override: point the daemon unit at a host-provided Deno or a
   # nonstandard runtimes root. Unset → playbook/role default
-  # (/opt/turbopanel/runtimes/deno/current/deno).
+  # (/opt/turbopanel/runtimes/deno/bin/deno).
   if [ -n "${TURBOPANEL_DAEMON_DENO_BIN:-}" ]; then
     printf 'turbopanel_daemon_deno_bin: %s\n' "$TURBOPANEL_DAEMON_DENO_BIN"
   fi
@@ -54,12 +56,19 @@ ANSIBLE_COLLECTIONS_PATH="$ANSIBLE_COLLECTIONS_PATH" \
 
 systemctl daemon-reload
 
-if [ "$START_DAEMON" = true ]; then
-  systemctl enable --now turbopanel-daemon
-  echo "turbopanel-daemon service installed and started"
-else
-  echo "turbopanel-daemon service installed (start deferred)"
+# Migrate any leftover legacy unit name from pre-rename installs.
+if systemctl cat "${LEGACY_SERVICE_NAME}.service" >/dev/null 2>&1; then
+  systemctl disable --now "$LEGACY_SERVICE_NAME" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/${LEGACY_SERVICE_NAME}.service"
+  systemctl daemon-reload
 fi
-echo "status: sudo systemctl status turbopanel-daemon"
+
+if [ "$START_DAEMON" = true ]; then
+  systemctl enable --now "$SERVICE_NAME"
+  echo "${SERVICE_NAME} service installed and started"
+else
+  echo "${SERVICE_NAME} service installed (start deferred)"
+fi
+echo "status: sudo systemctl status ${SERVICE_NAME}"
 echo "logs:   tail -f /opt/turbopanel/platform/daemon/logs/daemon.log"
-echo "        sudo journalctl -u turbopanel-daemon -f"
+echo "        sudo journalctl -u ${SERVICE_NAME} -f"

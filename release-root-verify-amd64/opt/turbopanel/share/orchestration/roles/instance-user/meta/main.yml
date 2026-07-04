@@ -1,0 +1,18 @@
+---
+galaxy_info:
+  author: turbopanel
+  description: >-
+    Create the low-privilege `instance` user (UID 9998) that runs the
+    self-hosted TurboPanel instance. Member of the turbopanel group with no
+    group of its own.
+  license: AGPL-3.0
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Debian
+      versions:
+        - all
+    - name: Raspbian
+      versions:
+        - all
+
+dependencies: []

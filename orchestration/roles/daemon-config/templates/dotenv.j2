@@ -1,6 +1,10 @@
 TURBOPANEL_INSTANCE_URL={{ turbopanel_instance_url }}
-TURBOPANEL_DAEMON_ROOT={{ turbopanel_daemon_dir }}
-TURBOPANEL_DAEMON_STATE_DIR={{ turbopanel_daemon_state_dir | default('/opt/turbopanel/platform/daemon/state') }}
+TURBOPANEL_RUNTIMES_DIR={{ turbopanel_runtimes_dir }}
+TURBOPANEL_ORCHESTRATION_DIR={{ turbopanel_orchestration_dir }}
+TURBOPANEL_CONFIG_DIR={{ turbopanel_config_dir }}
+TURBOPANEL_STATE_DIR={{ turbopanel_daemon_state_dir }}
+TURBOPANEL_DAEMON_STATE_DIR={{ turbopanel_daemon_state_dir }}
+TURBOPANEL_SERVICE_NAME={{ turbopanel_service_name | default('turbopaneld') }}
 {% if turbopanel_instance_ca | length > 0 %}
 TURBOPANEL_INSTANCE_CA={{ turbopanel_instance_ca }}
 {% endif %}

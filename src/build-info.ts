@@ -6,9 +6,9 @@ export interface BuildInfo {
 }
 
 export const BUILD_INFO: BuildInfo = {
-  commit: "dev",
-  buildId: "dev",
-  builtAt: "",
+  commit: "6a9c55f",
+  buildId: "test-20260703-153052-6a9c55f",
+  builtAt: "2026-07-03T15:30:52Z",
   channel: "trunk",
 };
 

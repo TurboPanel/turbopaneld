@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+
+container="{{ postgres_container_name }}"
+user="{{ postgres_user }}"
+max_attempts=30
+sleep_seconds=2
+
+running="$(/usr/bin/docker inspect -f '{% raw %}{{.State.Running}}{% endraw %}' "$container" 2>/dev/null || echo false)"
+if [ "$running" != "true" ]; then
+  /usr/bin/docker start "$container"
+fi
+
+i=0
+while ! /usr/bin/docker exec "$container" pg_isready -U "$user" >/dev/null 2>&1; do
+  i=$((i + 1))
+  if [ "$i" -ge "$max_attempts" ]; then
+    exit 1
+  fi
+  sleep "$sleep_seconds"
+done

@@ -1,6 +1,5 @@
 import { dirname, join } from "@std/path";
-
-const DEFAULT_CONFIG_DIR = "/opt/turbopanel/platform/config";
+import { resolveLayout } from "../paths/layout.ts";
 const RUNTIME_ENV_FILENAME = "runtime.env";
 const PUBLIC_URLS_KEY = "TURBOPANEL_PUBLIC_URLS=";
 const DEFAULT_ENV_MODE = 0o640;
@@ -11,16 +10,10 @@ type EnvFileMeta = {
   gid?: number;
 };
 
-function stripTrailingSlash(path: string): string {
-  return path.replace(/\/+$/, "");
-}
-
 export function resolveInstanceConfigDir(
   env: Record<string, string | undefined> = Deno.env.toObject(),
 ): string {
-  const override = env.TURBOPANEL_CONFIG_DIR?.trim();
-  const base = override ? stripTrailingSlash(override) : DEFAULT_CONFIG_DIR;
-  return join(base, "instance");
+  return resolveLayout(env).instanceConfigDir;
 }
 
 export function resolveInstanceRuntimeEnvPath(

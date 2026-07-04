@@ -1,4 +1,4 @@
-# /opt/turbopanel/platform/config/
+# {{ turbopanel_config_dir }}/  (managed: /etc/turbopanel, co-located dev: /opt/turbopanel/platform/config)
 #   postgres/
 #     config.json   — connection metadata (socket path, port, user, db)
 #     .pgpass       — generated password, mode 0600, owner root

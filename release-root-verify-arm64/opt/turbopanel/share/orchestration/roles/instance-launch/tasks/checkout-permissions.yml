@@ -1,0 +1,62 @@
+---
+# Co-located dev: turbopanel (9999) owns checkouts for editing; instance (9998,
+# group turbopanel) runs services and reads via group. Re-apply after git/pnpm/build
+# operations that may have used the wrong user (never chmod 640 the deploy key).
+- name: Install dev checkout ownership normalizer
+  ansible.builtin.copy:
+    src: "{{ turbopanel_daemon_dir }}/scripts/normalize-dev-checkout.sh"
+    dest: /usr/local/bin/turbopanel-normalize-dev-checkout
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Normalize daemon checkout ownership
+  ansible.builtin.command:
+    argv:
+    - /usr/local/bin/turbopanel-normalize-dev-checkout
+    - "{{ turbopanel_daemon_dir }}"
+    - "{{ '--force' if (force_checkout_normalize | default(false) | bool) else '--check-stamp' }}"
+  environment:
+    TURBOPANEL_DEV_USER: "{{ turbopanel_dev_user | default('') }}"
+    TURBOPANEL_DEV_UID: "{{ turbopanel_dev_uid | default('') }}"
+    TURBOPANEL_DEV_GID: "{{ turbopanel_dev_gid | default('') }}"
+  changed_when: false
+
+# dist/ stays instance-owned (see normalize-dev-checkout.sh ARTIFACT_DIRS); only
+# reclaim wrongly instance-owned source files under the checkout root.
+- name: Normalize instance checkout ownership
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/turbopanel-normalize-dev-checkout
+      - "{{ turbopanel_instance_dir }}"
+      - "{{ '--force' if (force_checkout_normalize | default(false) | bool) else '--check-stamp' }}"
+  environment:
+    TURBOPANEL_DEV_USER: "{{ turbopanel_dev_user | default('') }}"
+    TURBOPANEL_DEV_UID: "{{ turbopanel_dev_uid | default('') }}"
+    TURBOPANEL_DEV_GID: "{{ turbopanel_dev_gid | default('') }}"
+  changed_when: false
+
+- name: Normalize UI checkout ownership
+  when: turbopanel_ui_mode == 'dev'
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/turbopanel-normalize-dev-checkout
+      - "{{ turbopanel_ui_dir }}"
+      - "{{ '--force' if (force_checkout_normalize | default(false) | bool) else '--check-stamp' }}"
+  environment:
+    TURBOPANEL_DEV_USER: "{{ turbopanel_dev_user | default('') }}"
+    TURBOPANEL_DEV_UID: "{{ turbopanel_dev_uid | default('') }}"
+    TURBOPANEL_DEV_GID: "{{ turbopanel_dev_gid | default('') }}"
+  changed_when: false
+
+- name: Normalize website checkout ownership
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/turbopanel-normalize-dev-checkout
+      - "{{ turbopanel_website_dir }}"
+      - "{{ '--force' if (force_checkout_normalize | default(false) | bool) else '--check-stamp' }}"
+  environment:
+    TURBOPANEL_DEV_USER: "{{ turbopanel_dev_user | default('') }}"
+    TURBOPANEL_DEV_UID: "{{ turbopanel_dev_uid | default('') }}"
+    TURBOPANEL_DEV_GID: "{{ turbopanel_dev_gid | default('') }}"
+  changed_when: false

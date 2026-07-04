@@ -1,0 +1,56 @@
+---
+- name: Assert supported CPU architecture
+  ansible.builtin.assert:
+    that:
+      - ansible_architecture in ['aarch64', 'x86_64']
+    fail_msg: >-
+      Unsupported CPU architecture '{{ ansible_architecture }}'.
+      TurboPanel supports 64-bit Linux only: aarch64 (arm64), x86_64 (amd64).
+
+- name: Resolve Node release architecture
+  ansible.builtin.set_fact:
+    node_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'x64' }}"
+
+- name: Check system Node binary
+  ansible.builtin.stat:
+    path: "{{ node_prefix }}/bin/node"
+  register: _node_bin
+
+- name: Read installed Node version
+  ansible.builtin.command:
+    argv: ["{{ node_prefix }}/bin/node", --version]
+  register: _node_version
+  changed_when: false
+  failed_when: false
+  when: _node_bin.stat.exists
+
+- name: Install Node into /usr/local
+  when: >-
+    not _node_bin.stat.exists
+    or (_node_version.stdout | default('')) != ('v' + node_version)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    NODE_VER="v{{ node_version }}"
+    NODE_ARCH="{{ node_arch }}"
+    NODE_DIR="node-${NODE_VER}-linux-${NODE_ARCH}"
+    NODE_TMP="{{ turbopanel_runtimes_dir }}/node/.install"
+    rm -rf "$NODE_TMP"
+
+    mkdir -p "$NODE_TMP"
+    curl -fsSL -o "$NODE_TMP/${NODE_DIR}.tar.xz" \
+      "https://nodejs.org/dist/${NODE_VER}/${NODE_DIR}.tar.xz"
+    tar -xJf "$NODE_TMP/${NODE_DIR}.tar.xz" -C "$NODE_TMP"
+    cp -a "$NODE_TMP/${NODE_DIR}/bin" "$NODE_TMP/${NODE_DIR}/include" \
+      "$NODE_TMP/${NODE_DIR}/lib" "$NODE_TMP/${NODE_DIR}/share" \
+      "{{ node_prefix }}/"
+    rm -rf "$NODE_TMP"
+
+- name: Enable pnpm via corepack
+  ansible.builtin.command:
+    argv:
+      - "{{ node_prefix }}/bin/corepack"
+      - enable
+      - pnpm
+    creates: "{{ node_prefix }}/bin/pnpm"
+  environment:
+    PATH: "{{ node_prefix }}/bin:{{ ansible_env.PATH | default('/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin') }}"

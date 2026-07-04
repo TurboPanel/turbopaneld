@@ -1,0 +1,15 @@
+---
+galaxy_info:
+  author: turbopanel
+  description: Provision daemon log directories, logrotate, and tmpfiles.d entries.
+  license: AGPL-3.0
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Debian
+      versions:
+        - all
+    - name: Raspbian
+      versions:
+        - all
+
+dependencies: []

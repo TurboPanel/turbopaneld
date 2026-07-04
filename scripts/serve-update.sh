@@ -1,13 +1,15 @@
 #!/bin/sh
 set -eu
 
+# Co-located / checkout helper: serves checkout-local dist/turbopaneld only.
+# Managed hosts consume the release package via run.sh, not this path.
 DAEMON_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 DAEMON_BINARY="$DAEMON_DIR/dist/turbopaneld"
 CADDY_BIN="/opt/turbopanel/runtimes/caddy/current/caddy"
 
 if [ ! -s "$DAEMON_BINARY" ]; then
 	echo "serve-update.sh: $DAEMON_BINARY not found or empty" >&2
-	echo "run Build Daemon Binary first" >&2
+	echo "run the daemon-build role (or deno task compile) to produce dist/turbopaneld first" >&2
 	exit 1
 fi
 

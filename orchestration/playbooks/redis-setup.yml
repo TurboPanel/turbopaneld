@@ -4,7 +4,10 @@
   become: true
   gather_facts: true
   vars:
-    turbopanel_runtimes_dir: /opt/turbopanel/runtimes
+    # Managed standalone Redis setup: use the FHS runtime location so the redis
+    # role's turbopanel_managed_install default resolves to lib/runtime.
+    turbopanel_managed_install: true
+    turbopanel_runtimes_dir: /opt/turbopanel/lib/runtime
   roles:
     - role: daemon-prereqs
     - role: redis

@@ -1,0 +1,29 @@
+[Unit]
+Description=TurboPanel daemon
+After=network-online.target{% if turbopanel_after_instance_service | bool %} turbopanel-instance.service{% endif %}
+Wants=network-online.target{% if turbopanel_after_instance_service | bool %} turbopanel-instance.service{% endif %}
+
+[Service]
+Type=simple
+User={{ turbopanel_user }}
+Group={{ turbopanel_group }}
+WorkingDirectory={{ turbopanel_daemon_workdir }}
+Environment=TURBOPANEL_SERVICE_NAME={{ turbopanel_service_name }}
+{% if turbopanel_daemon_env_file | default('') | length > 0 %}
+EnvironmentFile=-{{ turbopanel_daemon_env_file }}
+{% endif %}
+ExecStartPre={{ turbopanel_orchestration_dir }}/scripts/ensure-single-daemon.sh
+{% if turbopanel_daemon_exec_mode | default('source') == 'native' %}
+ExecStart=/usr/bin/flock -n /run/turbopanel/daemon.lock {{ turbopanel_daemon_bin }}
+{% elif turbopanel_daemon_exec_mode | default('source') == 'js' %}
+ExecStart=/usr/bin/flock -n /run/turbopanel/daemon.lock {{ turbopanel_daemon_deno_bin }} run --allow-all {{ turbopanel_daemon_js }}
+{% else %}
+ExecStart=/usr/bin/flock -n /run/turbopanel/daemon.lock {{ turbopanel_daemon_deno_bin }} run --quiet --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env --env-file=.env main.ts
+{% endif %}
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:{{ daemon_log_dir }}/daemon.log
+StandardError=append:{{ daemon_log_dir }}/daemon.err.log
+
+[Install]
+WantedBy=multi-user.target

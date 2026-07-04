@@ -34,3 +34,18 @@
     dest: "{{ turbopanel_runtimes_dir }}/deno/current"
     state: link
     force: true
+
+# Stable path for the JS-fallback systemd ExecStart:
+#   {{ turbopanel_runtimes_dir }}/deno/bin/deno -> ../current/deno
+- name: Ensure Deno bin directory exists
+  ansible.builtin.file:
+    path: "{{ turbopanel_runtimes_dir }}/deno/bin"
+    state: directory
+    mode: "0755"
+
+- name: Point Deno bin/deno convenience symlink at current
+  ansible.builtin.file:
+    src: ../current/deno
+    dest: "{{ turbopanel_runtimes_dir }}/deno/bin/deno"
+    state: link
+    force: true

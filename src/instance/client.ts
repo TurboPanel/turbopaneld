@@ -8,12 +8,15 @@ import {
   instanceWebSocketUrl,
   resolveInstanceCaPath,
   resolveInstanceConfig,
+  resolveServerIdentityDir,
+  resolveServerKeyPath,
 } from "./paths.ts";
 import { collectServerAddresses } from "../server-addresses.ts";
 import {
   applyDevSyncTarball,
   type DevSyncState,
   newDevSyncState,
+  resolveDevSyncSourceRoot,
 } from "../dev-sync-apply.ts";
 import { applyPublicUrls } from "./public-urls-apply.ts";
 import { writeInstanceTunnelToken } from "../tunnels.ts";
@@ -188,36 +191,19 @@ const INSTANCE_RESTART_WAIT_MS = 120_000;
 const SERVER_ID_FILE = "server.id";
 const SERVER_KEY_FILE = "server-key.json";
 const KEY_ID_FILE = "server-key-id";
-const DEFAULT_SERVER_ID_DIR = "/opt/turbopanel/platform/daemon/state";
-
 function isTruthyFlag(value: string | undefined): boolean {
   const normalized = value?.trim().toLowerCase();
   return normalized === "1" || normalized === "true" || normalized === "yes";
 }
 
-function stripTrailingSlash(path: string): string {
-  return path.replace(/\/+$/, "");
-}
-
 function resolveServerIdDir(
   env: Record<string, string | undefined> = Deno.env.toObject(),
 ): string {
-  const override = env.TURBOPANEL_DAEMON_STATE_DIR?.trim();
-  if (override) return stripTrailingSlash(override);
-
-  if (isTruthyFlag(env.TURBOPANEL_SKIP_ORCHESTRATION)) {
-    return stripTrailingSlash(Deno.cwd());
-  }
-
-  return DEFAULT_SERVER_ID_DIR;
+  return resolveServerIdentityDir(env);
 }
 
 function resolveServerIdPath(): string {
   return `${resolveServerIdDir()}/${SERVER_ID_FILE}`;
-}
-
-export function resolveServerKeyPath(): string {
-  return `${resolveServerIdDir()}/${SERVER_KEY_FILE}`;
 }
 
 async function readMachineId(): Promise<string | undefined> {
@@ -331,6 +317,8 @@ export class InstanceClient {
   #backoffMs: number;
   #hadStableSession = false;
   readonly #devSync = new Map<string, DevSyncState>();
+  /** Transfer ids already refused at dev-sync-begin (managed / non-checkout). */
+  readonly #devSyncRefused = new Set<string>();
   #tokenManager: DaemonTokenManager | undefined;
   #apiClient: DaemonApiClient | undefined;
   #tokenServerId: string | undefined;
@@ -862,15 +850,28 @@ export class InstanceClient {
       case "addresses-request":
         this.#collectAddresses(message, ws);
         break;
-      case "dev-sync-begin":
+      case "dev-sync-begin": {
+        // Gate the transfer up front: only daemons with a real checkout-backed
+        // execution mode accept source-sync. Managed / compiled / JS-fallback
+        // installs refuse immediately instead of buffering a full tarball just
+        // to fail at dev-sync-end.
+        const source = resolveDevSyncSourceRoot();
+        if (!source.ok) {
+          this.#refuseDevSync(message.id, source.reason, ws);
+          break;
+        }
         this.#devSync.set(message.id, newDevSyncState(message.totalChunks));
         break;
+      }
       case "dev-sync-chunk": {
         const state = this.#devSync.get(message.id);
         if (state) state.chunks[message.index] = message.data;
         break;
       }
       case "dev-sync-end":
+        // Already refused at begin — swallow the trailing end so we don't send a
+        // second dev-sync-result for the same transfer.
+        if (this.#devSyncRefused.delete(message.id)) break;
         this.#applyDevSync(message.id, ws).catch((err) => {
           logWarn(
             "instance",
@@ -903,6 +904,26 @@ export class InstanceClient {
         });
         break;
     }
+  }
+
+  /**
+   * Reject a source-sync transfer up front on installs without an editable
+   * daemon checkout. Records the id so the trailing dev-sync-end is ignored and
+   * acks a single failed {@link dev-sync-result} to the instance, which
+   * classifies the stable managed-install reason as a skipped daemon.
+   */
+  #refuseDevSync(id: string, reason: string, ws: WebSocket): void {
+    this.#devSync.delete(id);
+    this.#devSyncRefused.add(id);
+    logWarn("dev-sync", "refused:", sanitizeForLog(reason));
+    const result: DaemonMessage = {
+      type: "dev-sync-result",
+      id,
+      ok: false,
+      error: reason,
+      at: new Date().toISOString(),
+    };
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result));
   }
 
   async #applyDevSync(id: string, ws: WebSocket): Promise<void> {

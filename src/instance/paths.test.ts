@@ -1,11 +1,121 @@
+import { join } from "@std/path";
 import {
+  CANONICAL_INSTANCE_CA_PATH,
   createInstanceHttpClient,
+  DEFAULT_SOCKET_DIR,
   resolveInstanceConfig,
   resolveInstanceCaPath,
+  resolveInstanceSocket,
+  resolveServerIdentityDir,
+  resolveServerKeyPath,
 } from "./paths.ts";
+import {
+  DEV_CONFIG_DIR_DEFAULT,
+  PROD_CONFIG_DIR_DEFAULT,
+  PROD_RUN_DIR_DEFAULT,
+  readEnv,
+  resolveLayout,
+} from "../paths/layout.ts";
+import { resolveInstanceConfigDir } from "./public-urls-env.ts";
 
 const CADDY_HTTPS = "https://localhost:8443";
 const PLATFORM_CA = "/opt/turbopanel/platform/instance/certs/ca.crt";
+
+function assertEq(actual: string, expected: string, label: string): void {
+  if (actual !== expected) {
+    throw new Error(`${label}: expected ${expected}, got ${actual}`);
+  }
+}
+
+Deno.test("development layout resolves legacy socket and CA paths", () => {
+  const layout = resolveLayout({}, { forceMode: "development" });
+  assertEq(layout.runDir, "/run/turbopanel", "runDir");
+  assertEq(
+    layout.instanceCaPath,
+    join(DEV_CONFIG_DIR_DEFAULT, "instance-ca.pem"),
+    "instanceCaPath",
+  );
+  assertEq(
+    layout.instanceConfigDir,
+    join(DEV_CONFIG_DIR_DEFAULT, "instance"),
+    "instanceConfigDir",
+  );
+});
+
+Deno.test("production layout resolves FHS socket and CA paths", () => {
+  const layout = resolveLayout({}, { forceMode: "production" });
+  assertEq(layout.runDir, PROD_RUN_DIR_DEFAULT, "runDir");
+  assertEq(
+    layout.instanceCaPath,
+    join(PROD_CONFIG_DIR_DEFAULT, "instance-ca.pem"),
+    "instanceCaPath",
+  );
+  assertEq(
+    layout.instanceConfigDir,
+    join(PROD_CONFIG_DIR_DEFAULT, "instance"),
+    "instanceConfigDir",
+  );
+});
+
+Deno.test("DEFAULT_SOCKET_DIR and CANONICAL_INSTANCE_CA_PATH match active layout", () => {
+  const layout = resolveLayout({
+    TURBOPANEL_RUN_DIR: readEnv("TURBOPANEL_RUN_DIR"),
+    TURBOPANEL_CONFIG_DIR: readEnv("TURBOPANEL_CONFIG_DIR"),
+    TURBOPANEL_DAEMON_ROOT: readEnv("TURBOPANEL_DAEMON_ROOT"),
+  });
+  assertEq(DEFAULT_SOCKET_DIR, layout.runDir, "DEFAULT_SOCKET_DIR");
+  assertEq(
+    CANONICAL_INSTANCE_CA_PATH,
+    layout.instanceCaPath,
+    "CANONICAL_INSTANCE_CA_PATH",
+  );
+});
+
+Deno.test("resolveInstanceSocket uses TURBOPANEL_RUN_DIR override", () => {
+  const socket = resolveInstanceSocket({
+    TURBOPANEL_RUN_DIR: "/custom/run",
+  });
+  assertEq(socket, "/custom/run/instance.sock", "socket path");
+});
+
+Deno.test("resolveInstanceConfigDir honors TURBOPANEL_CONFIG_DIR override", () => {
+  assertEq(
+    resolveInstanceConfigDir({ TURBOPANEL_CONFIG_DIR: "/custom/config" }),
+    "/custom/config/instance",
+    "instance config dir",
+  );
+});
+
+Deno.test("layout env overrides apply to socket and config paths", () => {
+  const layout = resolveLayout({
+    TURBOPANEL_RUN_DIR: "/custom/run",
+    TURBOPANEL_CONFIG_DIR: "/custom/config",
+  }, { forceMode: "production" });
+  assertEq(layout.runDir, "/custom/run", "runDir");
+  assertEq(layout.configDir, "/custom/config", "configDir");
+  assertEq(
+    layout.instanceCaPath,
+    "/custom/config/instance-ca.pem",
+    "instanceCaPath",
+  );
+});
+
+Deno.test("TURBOPANEL_STATE_DIR controls server identity storage", () => {
+  const env = { TURBOPANEL_STATE_DIR: "/custom/state" };
+  const layout = resolveLayout(env, { forceMode: "development" });
+  assertEq(layout.stateDir, "/custom/state", "stateDir");
+  assertEq(layout.daemonStateDir, "/custom/state", "daemonStateDir");
+  assertEq(
+    resolveServerIdentityDir(env),
+    "/custom/state",
+    "resolveServerIdentityDir",
+  );
+  assertEq(
+    resolveServerKeyPath(env),
+    "/custom/state/server-key.json",
+    "resolveServerKeyPath",
+  );
+});
 
 Deno.test("resolveInstanceConfig uses url mode when TURBOPANEL_INSTANCE_URL is set", () => {
   const config = resolveInstanceConfig({

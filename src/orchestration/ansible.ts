@@ -293,7 +293,7 @@ async function coLocatedInstanceServiceEnabled(): Promise<boolean> {
 }
 
 /**
- * Install or reconcile turbopanel-daemon.service (systemd). On co-located dev
+ * Install or reconcile turbopaneld.service (systemd). On co-located dev
  * hosts with turbopanel-instance.service, the unit is ordered after the
  * instance stack.
  */
@@ -367,6 +367,7 @@ export async function runBuildToggle(
     Deno.env.get('TURBOPANEL_INSTANCE_RUNTIME') === 'workers' ? 'workers' : 'deno'
 
   const args = [
+    ...devOwnershipPlaybookExtraArgs(),
     '-e',
     `turbopanel_ui_mode=${opts.uiMode}`,
     '-e',

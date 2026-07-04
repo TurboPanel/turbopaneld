@@ -85,13 +85,31 @@ Deno.test("parseChannelManifest validates artifact entries", () => {
     commit: "abc123",
     buildId: "build-1",
     builtAt: "2020-01-01T00:00:00.000Z",
-    sourceArtifact: {
-      url: "https://dl.trbp.nl/channels/trunk/daemon/source.tar.zst",
-      sha256: "b".repeat(64),
+    binaryArtifacts: {
+      "linux-amd64": {
+        url: "https://dl.trbp.nl/channels/trunk/daemon/turbopaneld-linux-amd64.tar.zst",
+        sha256: "a".repeat(64),
+        size: 123,
+      },
+      "linux-arm64": {
+        url: "https://dl.trbp.nl/channels/trunk/daemon/turbopaneld-linux-arm64.tar.zst",
+        sha256: "b".repeat(64),
+        size: 234,
+      },
+    },
+    jsFallbackArtifact: {
+      url: "https://dl.trbp.nl/channels/trunk/daemon/turbopaneld.js",
+      sha256: "c".repeat(64),
+      size: 345,
+    },
+    orchestrationArtifact: {
+      url: "https://dl.trbp.nl/channels/trunk/daemon/orchestration.tar.zst",
+      sha256: "d".repeat(64),
       size: 456,
     },
   });
 
   assertEquals(manifest.commit, "abc123");
-  assertEquals(manifest.sourceArtifact.size, 456);
+  assertEquals(manifest.binaryArtifacts["linux-amd64"].size, 123);
+  assertEquals(manifest.orchestrationArtifact.size, 456);
 });

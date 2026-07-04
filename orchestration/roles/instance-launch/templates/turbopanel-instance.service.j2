@@ -13,7 +13,7 @@ Environment=HOME={{ turbopanel_instance_runtime_dir }}
 Environment=XDG_DATA_HOME={{ turbopanel_instance_runtime_dir }}/share
 Environment=XDG_STATE_HOME={{ turbopanel_instance_runtime_dir }}/state
 Environment=XDG_CONFIG_HOME={{ turbopanel_instance_config_dir }}
-Environment=TURBOPANEL_NODE=/usr/local/bin/node
+Environment=TURBOPANEL_NODE={{ turbopanel_node }}
 Environment=PATH=/usr/local/bin:{{ turbopanel_runtimes_dir }}/caddy/current:/usr/bin:/bin
 Environment="GIT_SSH_COMMAND=ssh -i {{ turbopanel_github_key }} -o IdentitiesOnly=yes -o UserKnownHostsFile={{ turbopanel_ssh_dir }}/known_hosts -o StrictHostKeyChecking=yes"
 Environment=TURBOPANEL_INSTANCE_SERVICE={{ instance_service_name }}

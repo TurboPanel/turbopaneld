@@ -1,0 +1,7 @@
+- name: Ensure TurboPanel runtime socket directories exist
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: false
+  roles:
+    - role: runtime-sockets

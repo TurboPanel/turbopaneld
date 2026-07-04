@@ -6,6 +6,45 @@ TurboPanel **daemon** — Ansible-driven node agent; connects to the instance ov
 
 **Keep this file current.** When you learn something durable about daemon ↔ instance contracts — WS presence, reconnect behavior, command handlers, orchestration — add or update a note here in the same PR/session as the code change. Cross-repo cell/cost rules live in `../instance/AGENTS.md` (Daemon Cell section); link there instead of duplicating DO hibernation detail.
 
+## Filesystem layout & path model (dev vs prod)
+
+`src/paths/layout.ts` is the **single source of truth** for every managed install location. `resolveLayout(env, opts)` returns mode-aware defaults; `detectInstallMode()` picks `development` vs `production` (a resolvable daemon checkout — `orchestration/ansible.cfg` or `main.ts`, and not a `deno-compile-*` extraction dir — means development, otherwise production). Every path is env-overridable (`TURBOPANEL_HOME`, `TURBOPANEL_BIN_DIR`, `TURBOPANEL_LIB_DIR`, `TURBOPANEL_RUNTIME_DIR`, `TURBOPANEL_SHARE_DIR`, `TURBOPANEL_UI_DIR`, `TURBOPANEL_ORCHESTRATION_DIR`, `TURBOPANEL_CONFIG_DIR`, `TURBOPANEL_STATE_DIR`, `TURBOPANEL_DAEMON_STATE_DIR`, `TURBOPANEL_LOG_DIR`, `TURBOPANEL_RUN_DIR`, `TURBOPANEL_RUNTIMES_DIR`, `TURBOPANEL_DAEMON_ROOT`). `src/orchestration/paths.ts` and `src/instance/paths.ts` derive their constants from `resolveLayout` — do **not** hardcode absolute paths in runtime code; add/extend a layout field instead. Production runtime code must never name the dev checkout root (`/opt/turbopanel/platform*`); the layout module is the only place allowed to define it (as the development default).
+
+**Production (managed / FHS)** — compiled release, no source checkout:
+
+| Purpose | Path |
+|---|---|
+| Native daemon binary | `/opt/turbopanel/bin/turbopaneld` |
+| JS fallback (`deno run`) | `/opt/turbopanel/bin/turbopaneld.js` |
+| Managed update helper | `/opt/turbopanel/bin/turbopanel-update` |
+| Orchestration assets (Ansible) | `/opt/turbopanel/share/orchestration` |
+| Static UI export | `/opt/turbopanel/share/ui` |
+| Vendored runtimes (deno/uv/python/ansible/cloudflared) | `/opt/turbopanel/lib/runtime` |
+| Daemon install root (`daemonRootDefault`) | `/opt/turbopanel/lib/daemon` |
+| Config (`daemon.env`, `instance-ca.pem`) | `/etc/turbopanel` |
+| Persistent identity (license, `server.id`, keys, tunnels) | `/var/lib/turbopanel` |
+| Logs | `/var/log/turbopanel` |
+| Runtime (sockets, `daemon.lock`) | `/run/turbopanel` |
+
+**Development (co-located checkout)** — `./console` from `turbopanel-dev` runs the daemon from source (`deno run main.ts`):
+
+| Purpose | Path |
+|---|---|
+| Daemon checkout / install root | `/opt/turbopanel/platform/daemon` |
+| Orchestration assets | `<checkout>/orchestration` |
+| Vendored runtimes | `/opt/turbopanel/runtimes` (historical layout, **not** `lib/runtime`) |
+| Daemon env file | `<checkout>/.env` (`--env-file=.env`) |
+| Daemon state | `<checkout>/state` |
+| Logs | `<checkout>/logs` |
+| Config dir | `/opt/turbopanel/platform/config` |
+
+**Deno version pin:** `DENO_VERSION` (`src/orchestration/paths.ts`) = **`2.9.0`**. Keep it in step with `deno_version` in `orchestration/roles/deno-runtime/defaults/main.yml`, `TP_DENO_VERSION` in `scripts/run.sh`, and `DENO_VERSION` in `turbopanel-dev`'s `src/lib/paths.ts` (dev console bootstrap fallback + status label). `src/orchestration/paths.test.ts` pins the const to the role default.
+
+**Guards / tests:**
+- `deno task check:layout` (`scripts/check-production-layout.ts`) — asserts the production FHS tree resolves to the canonical absolute paths and that no production source (`src/**`, excluding `*.test.ts` and `src/paths/layout.ts`) references `/opt/turbopanel/platform` or the retired `share/ansible`. Wired into `publish-daemon-trunk.yml`.
+- `src/orchestration/paths.test.ts` — production/dev default trees, env overrides, and the `DENO_VERSION` ↔ role pin (`deno test src/orchestration/paths.test.ts`).
+- `scripts/verify-release-root.sh` / `tp_verify_release_root` (`scripts/lib/release-artifacts.sh`) — reject dev-only paths, TS sources, `share/ansible`, or a leaked daemon source tree in a packaged release root.
+
 ## Instance client (`src/instance/client.ts`)
 
 `InstanceClient` maintains the daemon's authenticated WSS (or co-located Unix socket) to `/ws/daemon/v1`. Enrollment + JWT session issuance happen over REST first; the socket carries live traffic only (outbox delivery, command dispatch, dev-sync, tunnel-token, etc.).
@@ -22,7 +61,11 @@ TurboPanel **daemon** — Ansible-driven node agent; connects to the instance ov
 
 **Reconnect jitter:** `InstanceClient` reconnects with **full-jitter** backoff in `[initialBackoffMs, currentBackoffMs]` (defaults 2 s → 30 s cap, doubling on auth failures). A benign close after a stable session (`STABLE_SESSION_MS`, 5 s) resets backoff to the initial floor so fleet-wide restarts do not align into a thundering herd.
 
-**Single-daemon guarantee:** only one live cell attachment per server. Runtime backstop is the instance cell's **single-writer lease** on attach (`attachDaemonSocket` / `detachDaemonSocket`). On managed hosts, `scripts/ensure-single-daemon.sh` (systemd `ExecStartPre`) adds a **flock** on `/run/turbopanel/daemon.lock` so a second `turbopanel-daemon.service` cannot start. Manual `deno task start/dev` bypasses flock (dev-only). Canonical cell semantics and cost rules: **`../instance/AGENTS.md`** (Daemon Cell).
+**Single-daemon guarantee:** only one live cell attachment per server. Runtime backstop is the instance cell's **single-writer lease** on attach (`attachDaemonSocket` / `detachDaemonSocket`). On managed hosts, `share/orchestration/scripts/ensure-single-daemon.sh` (systemd `ExecStartPre`) adds a **flock** on `/run/turbopanel/daemon.lock` so a second `turbopaneld.service` cannot start. Manual `deno task start/dev` bypasses flock (dev-only). Canonical cell semantics and cost rules: **`../instance/AGENTS.md`** (Daemon Cell).
+
+**Managed install layout (FHS):** `run.sh` installs the clean release package into `/opt/turbopanel/bin/{turbopaneld,turbopaneld.js,turbopanel-update}` and `/opt/turbopanel/share/orchestration/`. Config lives in `/etc/turbopanel` (`daemon.env`, `instance-ca.pem`); persistent identity in `/var/lib/turbopanel` (license, `server.id`, keys); runtime files in `/run/turbopanel`. The installer probes `turbopaneld --version` and selects native `ExecStart` or the Deno JS-fallback (`…/lib/runtime/deno/bin/deno run --allow-all …/bin/turbopaneld.js`) with `EnvironmentFile=/etc/turbopanel/daemon.env`. Co-located dev keeps `deno run main.ts` from the checkout via `daemon-systemd-setup.yml` and checkout-local `logs/`.
+
+**Managed update helper:** `scripts/update.sh` is packaged into the release tarball and installed as `/opt/turbopanel/bin/turbopanel-update` (release staging via `tp_stage_release_update_helper`; `tp_verify_release_root` full mode requires it). It is the checkout-free manual refresh path (`sudo sh /opt/turbopanel/bin/turbopanel-update`): it reads the license/channel from `/var/lib/turbopanel` + `/etc/turbopanel` and pipes `https://trbp.nl/run.sh` — it does **not** depend on `/opt/turbopanel/platform/daemon`.
 
 ### Daemon TLS trust model (4 paths)
 

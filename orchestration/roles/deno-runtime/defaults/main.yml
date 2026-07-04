@@ -1,7 +1,9 @@
 ---
-# Universal Deno runtime version installed on every host. Deno is the universal
-# daemon runtime — the daemon always runs from source via this Deno runtime.
-# Keep in step with turbopanel-dev scripts/lib/paths.sh DENO_VERSION and the
-# TP_DENO_VERSION pin in scripts/run.sh.
-turbopanel_runtimes_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/runtimes"
+# Universal Deno runtime version installed on every host. Used for co-located
+# `deno run main.ts` and the managed JS-fallback ExecStart
+# (`deno run …/bin/turbopaneld.js`). Keep in step with the TP_DENO_VERSION pin
+# in scripts/run.sh.
+# Managed installs (turbopanel_managed_install=true) use lib/runtime; co-located
+# dev keeps the historical runtimes/ layout.
+turbopanel_runtimes_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/{{ 'lib/runtime' if (turbopanel_managed_install | default(false)) else 'runtimes' }}"
 deno_version: "2.9.0"

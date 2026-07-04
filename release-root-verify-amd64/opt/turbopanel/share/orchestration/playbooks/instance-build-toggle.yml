@@ -1,0 +1,31 @@
+---
+# Switch between dev and production build modes (UI export + compiled instance).
+# Invoked by the dev console toggle or manually with extra-vars.
+# instance-certs reads TURBOPANEL_PUBLIC_URLS from protected runtime env (source of truth
+# after public-url apply); the cert script merges runtime env + role env when SANs change.
+- name: TurboPanel instance build mode toggle
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    turbopanel_install_root: /opt/turbopanel
+    turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/runtimes"
+    turbopanel_platform_dir: "{{ turbopanel_install_root }}/platform"
+    turbopanel_daemon_dir: "{{ turbopanel_platform_dir }}/daemon"
+    turbopanel_instance_dir: "{{ turbopanel_platform_dir }}/instance"
+    turbopanel_ui_dir: "{{ turbopanel_platform_dir }}/ui"
+    turbopanel_group: turbopanel
+    turbopanel_user: turbopanel
+    instance_user: turbopaneli
+    turbopanel_instance_runtime: deno
+    instance_start: true
+    force_build: false
+    force_compile: false
+
+  roles:
+    - role: ui-build
+    - role: instance-build
+    - role: instance-certs
+    - role: instance-launch

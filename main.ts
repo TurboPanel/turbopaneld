@@ -1,7 +1,15 @@
-import "./embedded-orchestration.ts";
 import "./src/build-info.ts";
+import { getBuildInfo } from "./src/build-info.ts";
 import { runBootstrapOrchestration } from "./src/orchestration/bootstrap-once.ts";
 import { runInstaller } from "./src/orchestration/setup.ts";
+
+if (Deno.args[0] === "--version" || Deno.args[0] === "version") {
+  const info = getBuildInfo();
+  console.log(
+    `turbopaneld ${info.commit} (${info.channel}, ${info.buildId}, ${info.builtAt})`,
+  );
+  Deno.exit(0);
+}
 
 if (Deno.args[0] === "bootstrap-orchestration") {
   try {

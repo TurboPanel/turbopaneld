@@ -1,4 +1,4 @@
 ---
 galaxy_info:
   role_name: daemon_layout
-  description: Ensure managed-node daemon layout without git clone.
+  description: Ensure managed-node FHS release layout (bin, share, etc, var).

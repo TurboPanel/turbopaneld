@@ -1,0 +1,10 @@
+- name: TurboPanel Redis setup
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+  vars:
+    turbopanel_runtimes_dir: /opt/turbopanel/runtimes
+  roles:
+    - role: daemon-prereqs
+    - role: redis

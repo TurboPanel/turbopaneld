@@ -1,4 +1,8 @@
 ---
+# Co-located / checkout builds only. Managed hosts install the release package
+# (bin/turbopaneld + bin/turbopaneld.js) via run.sh and never compile here.
+# Output remains checkout-local dist/turbopaneld.
+
 - name: Ensure daemon dist directory
   ansible.builtin.file:
     path: "{{ turbopanel_daemon_dist_dir }}"

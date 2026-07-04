@@ -1,0 +1,15 @@
+---
+# Set the system hostname idempotently using ansible.builtin.hostname.
+# Invoked by the daemon server.hostname.set command handler.
+# The hostname is passed as the extra-var turbopanel_hostname.
+# Uses systemd backend (appropriate for Debian with systemd-hostnamed).
+- name: TurboPanel set hostname
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Set system hostname
+      ansible.builtin.hostname:
+        name: "{{ turbopanel_hostname }}"
+        use: systemd

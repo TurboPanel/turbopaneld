@@ -43,7 +43,7 @@
 # The pre-playbook `turbopaneld bootstrap-orchestration` (invoked by run.sh as
 # root on first binary install) may have populated uv/python/ansible state dirs
 # as root. Fix ownership recursively here (right after user creation) so that
-# when later roles (esp. daemon-launch) start the turbopanel-daemon unit, the
+# when later roles (esp. daemon-launch) start the turbopaneld unit, the
 # daemon process (running as turbopanel) can write its uv cache and managed
 # pythons without permission errors.
 - name: Ensure turbopanel owns the runtimes tree

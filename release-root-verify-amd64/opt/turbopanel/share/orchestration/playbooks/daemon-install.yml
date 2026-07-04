@@ -1,0 +1,58 @@
+---
+# Provision a TurboPanel managed server (daemon checkout, runtimes, config, launch).
+#
+# Invoked by the CDN installer after scripts/bootstrap-orchestration.ts has placed
+# ansible-playbook in /opt/turbopanel/runtimes/ansible/current/. Every role is idempotent.
+- name: TurboPanel daemon install
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    turbopanel_install_root: /opt/turbopanel
+    turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/runtimes"
+    turbopanel_daemon_dir: "{{ turbopanel_install_root }}/platform/daemon"
+    turbopanel_config_dir: "{{ turbopanel_install_root }}/platform/config"
+    turbopanel_daemon_state_dir: "{{ turbopanel_install_root }}/platform/daemon/state"
+    turbopanel_user: turbopanel
+    turbopanel_group: turbopanel
+    turbopanel_uid: 9999
+    turbopanel_gid: 9999
+    turbopanel_service_name: turbopanel-daemon
+    turbopanel_tunnel_token: ""
+    turbopanel_instance_ca: ""
+    turbopanel_start: true
+
+  pre_tasks:
+    - name: Require instance URL
+      ansible.builtin.assert:
+        that:
+          - turbopanel_instance_url is defined
+          - turbopanel_instance_url | length > 0
+        fail_msg: >-
+          turbopanel_instance_url is required (pass --host to run.sh).
+
+  # Docker is intentionally NOT installed here. A managed node may only ever run
+  # native web services (apache/nginx/openlitespeed) and never need a container
+  # runtime. The docker role is installed on demand once a node is assigned a
+  # container workload.
+  roles:
+    - role: daemon-prereqs
+    - role: turbopanel-user
+    - role: daemon-layout
+    # The daemon runs from source via the stock Deno runtime. Install Deno first
+    # so daemon-launch's unit can exec it.
+    - role: deno-runtime
+    - role: daemon-logs
+    - role: daemon-config
+    - role: daemon-launch
+
+  post_tasks:
+    - name: Ensure turbopanel owns the install tree
+      ansible.builtin.file:
+        path: "{{ turbopanel_install_root }}"
+        state: directory
+        owner: "{{ turbopanel_user }}"
+        group: "{{ turbopanel_group }}"
+        recurse: true

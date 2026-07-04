@@ -1,0 +1,54 @@
+---
+- name: Ensure instance dist directory
+  when: turbopanel_instance_run_mode == 'compiled'
+  ansible.builtin.file:
+    path: "{{ turbopanel_instance_dist_dir }}"
+    state: directory
+    owner: "{{ instance_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "2770"
+
+- name: Check compiled instance binary
+  when: turbopanel_instance_run_mode == 'compiled'
+  ansible.builtin.stat:
+    path: "{{ turbopanel_instance_binary }}"
+  register: _instance_binary
+
+- name: Check if instance sources are newer than compiled binary
+  when:
+    - turbopanel_instance_run_mode == 'compiled'
+    - not (force_compile | bool)
+    - _instance_binary.stat.exists
+  ansible.builtin.shell: |
+    set -euo pipefail
+    cd "{{ turbopanel_instance_dir }}"
+    find src deno.json deno.lock -newer dist/turbopanel-instance -print -quit 2>/dev/null || true
+  register: _instance_stale_check
+  changed_when: false
+
+- name: Compile instance binary
+  when:
+    - turbopanel_instance_run_mode == 'compiled'
+    - force_compile | bool or not _instance_binary.stat.exists or (_instance_stale_check.stdout | default('') | trim | length > 0)
+  ansible.builtin.command:
+    cmd: "/usr/local/bin/deno task compile"
+    chdir: "{{ turbopanel_instance_dir }}"
+  become_user: "{{ turbopanel_user }}"
+  environment:
+    HOME: "{{ turbopanel_install_root }}"
+    PATH: "/usr/local/bin:/usr/bin:/bin"
+  notify: Restart turbopanel instance
+  register: _instance_compile
+
+- name: Record checkout normalize needed after instance compile
+  ansible.builtin.set_fact:
+    force_checkout_normalize: true
+  when: _instance_compile is defined and _instance_compile is changed
+
+- name: Set compiled instance binary ownership
+  when: turbopanel_instance_run_mode == 'compiled'
+  ansible.builtin.file:
+    path: "{{ turbopanel_instance_binary }}"
+    owner: "{{ instance_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0750"

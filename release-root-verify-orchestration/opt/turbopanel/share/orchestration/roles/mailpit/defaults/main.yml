@@ -1,0 +1,7 @@
+mailpit_image: axllent/mailpit:latest
+mailpit_container_name: turbopanelmailpit
+mailpit_service_name: turbopanel-mailpit
+mailpit_web_port: 8025
+mailpit_smtp_port: 1025
+turbopanel_docker_network: turbopanel
+turbopanel_config_dir: /opt/turbopanel/platform/config

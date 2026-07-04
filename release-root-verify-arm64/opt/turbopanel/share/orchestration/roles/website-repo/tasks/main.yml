@@ -1,0 +1,163 @@
+---
+# Like ui-repo: clone only when missing so a live dev working tree is never force-reset.
+- name: Check website checkout directory
+  ansible.builtin.stat:
+    path: "{{ turbopanel_website_dir }}"
+  register: _website_dir
+
+- name: Ensure website checkout directory is group-writable for turbopanel
+  when: _website_dir.stat.isdir | default(false)
+  ansible.builtin.file:
+    path: "{{ turbopanel_website_dir }}"
+    state: directory
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "2770"
+
+- name: Check website git metadata directory
+  when: _website_dir.stat.isdir | default(false)
+  ansible.builtin.stat:
+    path: "{{ turbopanel_website_dir }}/.git"
+  register: _website_git_dir
+
+- name: Reclaim website git metadata for turbopanel user
+  when: _website_git_dir.stat.exists | default(false)
+  ansible.builtin.file:
+    path: "{{ turbopanel_website_dir }}/.git"
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    recurse: true
+
+- name: Probe website checkout git metadata
+  when: _website_dir.stat.isdir | default(false)
+  ansible.builtin.command:
+    argv: [git, -C, "{{ turbopanel_website_dir }}", rev-parse, --git-dir]
+  become_user: "{{ turbopanel_user }}"
+  environment:
+    HOME: "{{ turbopanel_install_root }}"
+  register: _website_git_probe
+  changed_when: false
+  failed_when: false
+
+- name: Mark website checkout safe for turbopanel git
+  when: _website_dir.stat.isdir | default(false)
+  ansible.builtin.command:
+    argv: [git, config, --global, --add, safe.directory, "{{ turbopanel_website_dir }}"]
+  become_user: "{{ turbopanel_user }}"
+  environment:
+    HOME: "{{ turbopanel_install_root }}"
+  register: _website_safe_dir
+  changed_when: false
+  failed_when: false
+
+- name: Re-probe website checkout git metadata after safe.directory
+  when: _website_dir.stat.isdir | default(false)
+  ansible.builtin.command:
+    argv: [git, -C, "{{ turbopanel_website_dir }}", rev-parse, --git-dir]
+  become_user: "{{ turbopanel_user }}"
+  environment:
+    HOME: "{{ turbopanel_install_root }}"
+  register: _website_git_probe
+  changed_when: false
+  failed_when: false
+
+- name: Set website git checkout present flag
+  ansible.builtin.set_fact:
+    _website_git_present: "{{ _website_git_probe.rc | default(1) | int == 0 }}"
+
+- name: Stat website checkout normalizer script
+  when: _website_git_present | bool
+  ansible.builtin.stat:
+    path: "{{ turbopanel_install_root }}/platform/daemon/scripts/normalize-dev-checkout.sh"
+  register: _website_normalizer
+
+- name: Reclaim dev-owned website checkout files for turbopanel
+  when:
+    - _website_git_present | bool
+    - _website_normalizer.stat.exists | default(false)
+  ansible.builtin.command:
+    cmd: >-
+      {{ turbopanel_install_root }}/platform/daemon/scripts/normalize-dev-checkout.sh
+      {{ turbopanel_website_dir }} --force
+  environment:
+    TURBOPANEL_DEV_USER: "{{ turbopanel_dev_user | default('') }}"
+    TURBOPANEL_DEV_UID: "{{ turbopanel_dev_uid | default('') }}"
+    TURBOPANEL_DEV_GID: "{{ turbopanel_dev_gid | default('') }}"
+  changed_when: false
+
+- name: List non-placeholder website checkout entries when not a git repository
+  when:
+    - not _website_git_present | bool
+    - _website_dir.stat.isdir | default(false)
+  ansible.builtin.find:
+    paths: "{{ turbopanel_website_dir }}"
+    file_type: any
+    hidden: true
+    depth: 1
+    excludes: .turbopanel-checkout-stamp
+  register: _website_real_entries
+
+- name: Remove website checkout placeholder before clone
+  when:
+    - not _website_git_present | bool
+    - _website_dir.stat.isdir | default(false)
+    - _website_real_entries.matched == 0
+  ansible.builtin.file:
+    path: "{{ turbopanel_website_dir }}"
+    state: absent
+
+- name: Fail when website checkout exists without git metadata
+  when:
+    - not _website_git_present | bool
+    - _website_dir.stat.isdir | default(false)
+    - _website_real_entries.matched > 0
+  ansible.builtin.fail:
+    msg: >-
+      {{ turbopanel_website_dir }} exists but is not a git checkout.
+      Move or remove it manually, then re-run the dev stack.
+
+- name: Clone website repository when missing
+  when: not _website_git_present | bool
+  ansible.builtin.git:
+    repo: "{{ website_repo_url }}"
+    dest: "{{ turbopanel_website_dir }}"
+    version: "{{ website_branch }}"
+  become_user: "{{ turbopanel_user }}"
+  environment:
+    HOME: "{{ turbopanel_install_root }}"
+  register: _website_clone
+
+- name: Record checkout normalize needed after website clone
+  ansible.builtin.set_fact:
+    force_checkout_normalize: true
+  when: _website_clone is defined and _website_clone is changed
+
+- name: Check website dependencies
+  ansible.builtin.stat:
+    path: "{{ turbopanel_website_dir }}/node_modules"
+  register: _website_modules
+
+- name: Check website next binary
+  ansible.builtin.stat:
+    path: "{{ turbopanel_website_dir }}/node_modules/next/dist/bin/next"
+  register: _website_next_bin
+
+- name: Install website dependencies
+  when: >-
+    not _website_modules.stat.exists
+    or not _website_next_bin.stat.exists
+  ansible.builtin.command:
+    cmd: >-
+      pnpm install
+      {{ '' if (turbopanel_dev_user | default('') | length > 0) else '--frozen-lockfile' }}
+    chdir: "{{ turbopanel_website_dir }}"
+  become_user: "{{ turbopanel_user }}"
+  environment:
+    HOME: "{{ turbopanel_install_root }}"
+    PATH: "/usr/local/bin:/usr/bin:/bin"
+  register: _website_pnpm_install
+
+- name: Record checkout normalize needed after website pnpm install
+  ansible.builtin.set_fact:
+    force_checkout_normalize: true
+  when: _website_pnpm_install is defined and _website_pnpm_install is changed

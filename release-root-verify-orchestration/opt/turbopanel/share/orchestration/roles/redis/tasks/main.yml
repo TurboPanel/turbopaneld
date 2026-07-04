@@ -1,0 +1,125 @@
+---
+# Self-sufficient: does not depend on instance-user (Redis runs before instance on fresh hosts).
+- name: Ensure turbopanel group exists
+  ansible.builtin.group:
+    name: "{{ turbopanel_group }}"
+    state: present
+    system: true
+
+- name: Ensure turbopanelc primary group for redis user
+  ansible.builtin.group:
+    name: "{{ redis_primary_group }}"
+    gid: "{{ redis_primary_gid }}"
+    state: present
+    system: true
+
+- name: Ensure Redis service user (primary group turbopanelc, supplementary turbopanel)
+  ansible.builtin.user:
+    name: "{{ redis_user }}"
+    uid: "{{ redis_uid }}"
+    group: "{{ redis_primary_group }}"
+    groups: "{{ turbopanel_group }}"
+    append: true
+    shell: /usr/sbin/nologin
+    system: true
+    create_home: false
+
+- name: Check whether instance user exists for Redis socket access
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ redis_instance_user }}"
+  register: _redis_instance_user_getent
+  failed_when: false
+
+- name: Ensure instance user can access redis socket group (turbopanelc)
+  ansible.builtin.user:
+    name: "{{ redis_instance_user }}"
+    groups: "{{ redis_primary_group }}"
+    append: true
+  when: >-
+    _redis_instance_user_getent.ansible_facts.getent_passwd is defined and
+    _redis_instance_user_getent.ansible_facts.getent_passwd[redis_instance_user] is defined
+
+- name: Assert supported CPU architecture
+  ansible.builtin.assert:
+    that:
+      - ansible_architecture in ['aarch64', 'x86_64']
+    fail_msg: >-
+      Unsupported CPU architecture '{{ ansible_architecture }}'.
+      TurboPanel supports 64-bit Linux only: aarch64 (arm64), x86_64 (amd64).
+
+- name: Check vendored Redis binary
+  ansible.builtin.stat:
+    path: "{{ turbopanel_runtimes_dir }}/redis/{{ redis_version }}/bin/redis-server"
+  register: _redis_pinned
+
+- name: Install Redis build dependencies
+  when: not _redis_pinned.stat.exists
+  ansible.builtin.apt:
+    name:
+      - build-essential
+      - libssl-dev
+      - pkg-config
+    state: present
+
+- name: Install Redis into runtimes directory
+  when: not _redis_pinned.stat.exists
+  ansible.builtin.shell: |
+    set -euo pipefail
+    REDIS_VER="{{ redis_version }}"
+    TMP="$(mktemp -d)"
+    curl -fsSL -o "$TMP/redis-${REDIS_VER}.tar.gz" \
+      "https://download.redis.io/releases/redis-${REDIS_VER}.tar.gz"
+    tar -xzf "$TMP/redis-${REDIS_VER}.tar.gz" -C "$TMP"
+    make -C "$TMP/redis-${REDIS_VER}"
+    make -C "$TMP/redis-${REDIS_VER}" PREFIX="{{ turbopanel_runtimes_dir }}/redis/${REDIS_VER}" install
+    rm -rf "$TMP"
+  args:
+    creates: "{{ turbopanel_runtimes_dir }}/redis/{{ redis_version }}/bin/redis-server"
+
+- name: Point Redis current symlink at pinned version
+  ansible.builtin.file:
+    src: "{{ turbopanel_runtimes_dir }}/redis/{{ redis_version }}"
+    dest: "{{ turbopanel_runtimes_dir }}/redis/current"
+    state: link
+    force: true
+
+- name: Ensure redis config directory exists
+  ansible.builtin.file:
+    path: "{{ turbopanel_config_dir }}/redis"
+    state: directory
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
+- name: Write redis.conf
+  ansible.builtin.template:
+    src: redis.conf.j2
+    dest: "{{ turbopanel_config_dir }}/redis/redis.conf"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+
+- name: Install Redis systemd unit
+  ansible.builtin.template:
+    src: turbopanel-redis.service.j2
+    dest: "/etc/systemd/system/{{ redis_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Enable memory overcommit for Redis (background save / replication)
+  ansible.posix.sysctl:
+    name: vm.overcommit_memory
+    value: "1"
+    state: present
+    sysctl_set: true
+    reload: true
+    sysctl_file: /etc/sysctl.d/99-turbopanel-redis.conf
+
+- name: Ensure Redis service desired state
+  ansible.builtin.systemd:
+    name: "{{ redis_service_name }}"
+    daemon_reload: true
+    enabled: true
+    state: started

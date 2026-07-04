@@ -1,0 +1,7 @@
+---
+turbopanel_install_root: /opt/turbopanel
+turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/runtimes"
+turbopanel_user: turbopanel
+turbopanel_website_dir: "{{ turbopanel_install_root }}/platform/website"
+website_repo_url: https://github.com/turbopanel/turbopanel-website
+website_branch: trunk

@@ -6,9 +6,24 @@ turbopanel_manage_service_state: true
 turbopanel_restart_daemon: false
 turbopanel_after_instance_service: false
 turbopanel_install_root: /opt/turbopanel
-turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/runtimes"
+# Managed installs (turbopanel_managed_install=true) use lib/runtime; co-located
+# dev keeps the historical runtimes/ layout.
+turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/{{ 'lib/runtime' if (turbopanel_managed_install | default(false)) else 'runtimes' }}"
+# Co-located dev checkout root (source mode). Managed installs do not use this
+# as a source tree — they run from bin/turbopaneld or bin/turbopaneld.js.
 turbopanel_daemon_dir: "{{ turbopanel_install_root }}/platform/daemon"
-turbopanel_daemon_deno_bin: /opt/turbopanel/runtimes/deno/current/deno
+turbopanel_orchestration_dir: "{{ turbopanel_daemon_dir }}/orchestration"
+turbopanel_daemon_workdir: "{{ turbopanel_daemon_dir }}"
+turbopanel_daemon_deno_bin: "{{ turbopanel_runtimes_dir }}/deno/bin/deno"
+turbopanel_daemon_bin: "{{ turbopanel_install_root }}/bin/turbopaneld"
+turbopanel_daemon_js: "{{ turbopanel_install_root }}/bin/turbopaneld.js"
+# native | js | source (co-located dev: deno run main.ts from the checkout)
+turbopanel_daemon_exec_mode: source
+# Empty for co-located source mode (--env-file=.env). Managed installs set
+# /etc/turbopanel/daemon.env (native cannot take --env-file).
+turbopanel_daemon_env_file: ""
+turbopanel_service_name: turbopaneld
+turbopanel_legacy_service_name: turbopanel-daemon
 # Managed-host default log target. Co-located dev installs override this with
 # the checkout-local logs/ dir (daemon-systemd-setup.yml). Kept in sync with the
 # daemon-logs role default so the systemd unit template resolves either way.

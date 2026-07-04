@@ -1,0 +1,15 @@
+---
+- name: Install daemon prerequisites
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - git
+      - gnupg
+      - pamtester
+      - python3-debian
+      - tar
+      - unzip
+      - xz-utils
+      - zstd
+    state: present

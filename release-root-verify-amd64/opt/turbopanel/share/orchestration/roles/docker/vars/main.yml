@@ -1,0 +1,20 @@
+# Architecture values as reported by Ansible (ansible_architecture) mapped to
+# the Docker apt repository arch label. Only amd64 and arm64 are supported.
+# When a new arch is added, extend this map and add a matching tasks file.
+_docker_arch_map:
+  x86_64: amd64
+  aarch64: arm64
+
+# Distribution names as reported by Ansible (ansible_distribution) mapped to
+# the Docker apt repository subdomain. When a new distro family is added,
+# extend this map and add a matching tasks file under tasks/.
+_docker_distro_map:
+  Debian: debian
+  Raspbian: raspbian
+
+# Base URL passed to geerlingguy.docker as docker_repo_url. The Galaxy role
+# appends /{{ ansible_distribution | lower }} for apt uris and gpg — do not
+# include the distro segment here (…/linux/debian/debian/gpg 404s).
+_docker_repo_url:
+  Debian: https://download.docker.com/linux
+  Raspbian: https://download.docker.com/linux

@@ -1,4 +1,4 @@
-# /opt/turbopanel/platform/config/
+# {{ turbopanel_config_dir }}/  (managed: /etc/turbopanel, co-located dev: /opt/turbopanel/platform/config)
 #   rabbitmq/
 #     config.json   — connection metadata only (host, port, user, vhost; no secrets)
 #     .rabbitmq_pass — generated password, mode 0600, owner root

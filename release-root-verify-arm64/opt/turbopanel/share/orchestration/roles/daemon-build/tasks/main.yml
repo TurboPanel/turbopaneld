@@ -1,0 +1,42 @@
+---
+- name: Ensure daemon dist directory
+  ansible.builtin.file:
+    path: "{{ turbopanel_daemon_dist_dir }}"
+    state: directory
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "2770"
+
+- name: Check compiled daemon binary
+  ansible.builtin.stat:
+    path: "{{ turbopanel_daemon_dist_dir }}/turbopaneld"
+  register: _daemon_binary
+
+- name: Check if daemon sources are newer than compiled binary
+  when:
+    - not (force_compile | bool)
+    - _daemon_binary.stat.exists
+  ansible.builtin.shell: |
+    set -eu
+    cd "{{ turbopanel_daemon_dir }}"
+    find src main.ts deno.json deno.lock -newer dist/turbopaneld -print -quit 2>/dev/null || true
+  register: _daemon_stale_check
+  changed_when: false
+
+- name: Compile daemon binary
+  when: force_compile | bool or not _daemon_binary.stat.exists or (_daemon_stale_check.stdout | default('') | trim | length > 0)
+  ansible.builtin.command:
+    cmd: "/usr/local/bin/deno task compile"
+    chdir: "{{ turbopanel_daemon_dir }}"
+  become_user: "{{ turbopanel_user }}"
+  environment:
+    HOME: "{{ turbopanel_install_root }}"
+    PATH: "/usr/local/bin:/usr/bin:/bin"
+  register: _daemon_compile
+
+- name: Set compiled daemon binary ownership
+  ansible.builtin.file:
+    path: "{{ turbopanel_daemon_dist_dir }}/turbopaneld"
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0755"

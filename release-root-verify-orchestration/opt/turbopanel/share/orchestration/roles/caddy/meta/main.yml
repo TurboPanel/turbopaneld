@@ -1,0 +1,15 @@
+---
+galaxy_info:
+  author: turbopanel
+  description: >-
+    Install a pinned Caddy binary into the shared runtimes directory to
+    terminate TLS and reverse-proxy the self-hosted instance. Requires 64-bit
+    Linux (aarch64 or x86_64).
+  license: AGPL-3.0
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Debian
+      versions:
+        - all
+
+dependencies: []

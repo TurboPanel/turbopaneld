@@ -2,7 +2,13 @@ import {
   MalformedManifestError,
   UnsupportedSchemaVersionError,
 } from "./errors.ts";
-import type { ArtifactEntry, ChannelManifest, RootCatalog } from "./types.ts";
+import type {
+  ArtifactEntry,
+  BinaryArtifacts,
+  ChannelManifest,
+  LinuxArch,
+  RootCatalog,
+} from "./types.ts";
 
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/i;
 
@@ -51,6 +57,25 @@ export function validateArtifactEntry(
   }
 
   return entry as unknown as ArtifactEntry;
+}
+
+const LINUX_ARCHES: LinuxArch[] = ["linux-amd64", "linux-arm64"];
+
+export function validateBinaryArtifacts(entry: unknown): BinaryArtifacts {
+  if (!isObject(entry)) {
+    throw new MalformedManifestError(
+      "channel.json binaryArtifacts must be an object",
+    );
+  }
+
+  const artifacts = {} as BinaryArtifacts;
+  for (const arch of LINUX_ARCHES) {
+    artifacts[arch] = validateArtifactEntry(
+      entry[arch],
+      `channel.json binaryArtifacts.${arch}`,
+    );
+  }
+  return artifacts;
 }
 
 export function parseRootCatalog(raw: unknown): RootCatalog {
@@ -143,13 +168,20 @@ export function parseChannelManifest(raw: unknown): ChannelManifest {
     );
   }
 
-  const sourceArtifact = validateArtifactEntry(
-    raw.sourceArtifact,
-    "channel.json sourceArtifact",
+  const binaryArtifacts = validateBinaryArtifacts(raw.binaryArtifacts);
+  const jsFallbackArtifact = validateArtifactEntry(
+    raw.jsFallbackArtifact,
+    "channel.json jsFallbackArtifact",
+  );
+  const orchestrationArtifact = validateArtifactEntry(
+    raw.orchestrationArtifact,
+    "channel.json orchestrationArtifact",
   );
 
   return {
     ...(raw as unknown as ChannelManifest),
-    sourceArtifact,
+    binaryArtifacts,
+    jsFallbackArtifact,
+    orchestrationArtifact,
   };
 }

@@ -1,0 +1,14 @@
+[Unit]
+Description=TurboPanel PostgreSQL
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/bin/sh -c '/usr/bin/docker network inspect {{ turbopanel_docker_network }} >/dev/null 2>&1 || /usr/bin/docker network create {{ turbopanel_docker_network }}'
+ExecStart={{ turbopanel_config_dir }}/postgres/wrapper-start.sh
+ExecStop=/usr/bin/docker stop -t 10 {{ postgres_container_name }}
+
+[Install]
+WantedBy=multi-user.target

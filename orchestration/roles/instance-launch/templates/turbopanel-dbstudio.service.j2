@@ -10,7 +10,7 @@ Group={{ turbopanel_group }}
 WorkingDirectory={{ turbopanel_instance_dir }}
 Environment=HOME={{ turbopanel_instance_runtime_dir }}
 Environment=XDG_CONFIG_HOME={{ turbopanel_instance_config_dir }}
-Environment=TURBOPANEL_NODE=/usr/local/bin/node
+Environment=TURBOPANEL_NODE={{ turbopanel_node }}
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=TURBOPANEL_UI_MODE={{ turbopanel_ui_mode }}
 Environment=TURBOPANEL_DRIZZLE_STUDIO_PORT={{ drizzle_studio_port | default(4983) }}

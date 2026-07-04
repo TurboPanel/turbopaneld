@@ -1,22 +1,15 @@
 import { devOwnershipPlaybookExtraArgs, runLocalPlaybook } from "../orchestration/ansible.ts";
 import { INSTANCE_CERTS_APPLY_PLAYBOOK } from "../orchestration/paths.ts";
+import { resolveLayout } from "../paths/layout.ts";
 import {
   resolveInstanceRuntimeEnvPath,
   upsertPublicUrlsInEnv,
 } from "./public-urls-env.ts";
 
-const DEFAULT_INSTANCE_DIR = "/opt/turbopanel/platform/instance";
-
-function stripTrailingSlash(path: string): string {
-  return path.replace(/\/+$/, "");
-}
-
 export function resolveInstanceDir(
   env: Record<string, string | undefined> = Deno.env.toObject(),
 ): string {
-  const override = env.TURBOPANEL_INSTANCE_DIR?.trim();
-  if (override) return stripTrailingSlash(override);
-  return DEFAULT_INSTANCE_DIR;
+  return resolveLayout(env).instanceDir;
 }
 
 export {

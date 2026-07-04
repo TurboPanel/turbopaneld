@@ -6,7 +6,7 @@
 
 - name: Ensure daemon state directory
   ansible.builtin.file:
-    path: "{{ turbopanel_daemon_state_dir | default('/opt/turbopanel/platform/daemon/state') }}"
+    path: "{{ turbopanel_daemon_state_dir }}"
     state: directory
     owner: "{{ turbopanel_user }}"
     group: "{{ turbopanel_group }}"
@@ -18,7 +18,7 @@
     - name: Copy staged license.id into daemon state directory
       ansible.builtin.copy:
         src: "{{ turbopanel_daemon_license_staging_dir }}/license.id"
-        dest: "{{ turbopanel_daemon_state_dir | default('/opt/turbopanel/platform/daemon/state') }}/license.id"
+        dest: "{{ turbopanel_daemon_state_dir }}/license.id"
         remote_src: true
         owner: "{{ turbopanel_user }}"
         group: "{{ turbopanel_group }}"
@@ -27,7 +27,7 @@
     - name: Copy staged license.token into daemon state directory
       ansible.builtin.copy:
         src: "{{ turbopanel_daemon_license_staging_dir }}/license.token"
-        dest: "{{ turbopanel_daemon_state_dir | default('/opt/turbopanel/platform/daemon/state') }}/license.token"
+        dest: "{{ turbopanel_daemon_state_dir }}/license.token"
         remote_src: true
         owner: "{{ turbopanel_user }}"
         group: "{{ turbopanel_group }}"
@@ -38,10 +38,9 @@
         path: "{{ turbopanel_daemon_license_staging_dir }}"
         state: absent
 
-- name: Ensure platform CA directory
-  when: turbopanel_instance_ca | length > 0
+- name: Ensure config directory
   ansible.builtin.file:
-    path: "{{ turbopanel_instance_ca | dirname }}"
+    path: "{{ turbopanel_config_dir }}"
     state: directory
     owner: "{{ turbopanel_user }}"
     group: "{{ turbopanel_group }}"
@@ -60,7 +59,7 @@
 - name: Write daemon environment file
   ansible.builtin.template:
     src: dotenv.j2
-    dest: "{{ turbopanel_daemon_dir }}/.env"
+    dest: "{{ turbopanel_daemon_env_file }}"
     owner: "{{ turbopanel_user }}"
     group: "{{ turbopanel_group }}"
     mode: "0640"
@@ -68,7 +67,7 @@
 
 - name: Ensure Cloudflare tunnel token directory
   ansible.builtin.file:
-    path: "{{ turbopanel_daemon_dir }}/cloudflared/tunnels"
+    path: "{{ turbopanel_daemon_tunnels_dir }}"
     state: directory
     owner: "{{ turbopanel_user }}"
     group: "{{ turbopanel_group }}"
@@ -76,7 +75,7 @@
 
 - name: Store Cloudflare tunnel token
   ansible.builtin.copy:
-    dest: "{{ turbopanel_daemon_dir }}/cloudflared/tunnels/default.token"
+    dest: "{{ turbopanel_daemon_tunnels_dir }}/default.token"
     content: "{{ turbopanel_tunnel_token }}\n"
     owner: "{{ turbopanel_user }}"
     group: "{{ turbopanel_group }}"

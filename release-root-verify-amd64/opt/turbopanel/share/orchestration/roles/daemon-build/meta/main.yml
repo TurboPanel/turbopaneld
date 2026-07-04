@@ -1,0 +1,16 @@
+---
+galaxy_info:
+  author: turbopanel
+  description: >-
+    Compile the managed-server daemon into a single binary on demand.
+  license: AGPL-3.0
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Debian
+      versions:
+        - all
+    - name: Raspbian
+      versions:
+        - all
+
+dependencies: []

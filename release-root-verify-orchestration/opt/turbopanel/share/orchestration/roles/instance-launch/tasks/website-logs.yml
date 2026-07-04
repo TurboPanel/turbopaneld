@@ -1,0 +1,19 @@
+---
+- name: Ensure website log directory exists
+  ansible.builtin.file:
+    path: "{{ website_log_dir }}"
+    state: directory
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
+- name: Ensure website log files exist for systemd append
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: touch
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+  loop:
+    - "{{ website_log_dir }}/website.log"
+    - "{{ website_log_dir }}/website.err.log"

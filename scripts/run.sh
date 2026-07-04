@@ -2,12 +2,165 @@
 # TurboPanel daemon bootstrap — single entrypoint served at https://trbp.nl/run.sh
 # (301 redirect) and at /run.sh by Caddy in co-located dev.
 #
-# Fetches the source artifact URL and defaultControlPlaneUrl from the channel
-# manifest at https://dl.trbp.nl/channels.json, then downloads the daemon source
-# build, installs the Deno runtime, bootstraps orchestration, and runs
-# daemon-install.yml via Ansible.
+# Fetches the clean release package from the channel manifest at
+# https://dl.trbp.nl/channels.json, installs the production FHS layout
+# (bin/turbopaneld, bin/turbopaneld.js, share/orchestration/), probes native
+# binary executability, bootstraps orchestration runtimes, and runs
+# daemon-install.yml via Ansible (turbopaneld.service with native or JS fallback).
+#
+# Config: /etc/turbopanel  State: /var/lib/turbopanel  Runtime: /run/turbopanel
 #
 # Run as root or as a sudo-capable user (self-escalates via sudo when available).
+#
+# Manifest and release helpers below must stay in sync with scripts/lib/release-artifacts.sh.
+
+tp_prod_home() { printf '/opt/turbopanel'; }
+tp_daemon_binary_name() { printf 'turbopaneld'; }
+tp_daemon_js_fallback_name() { printf 'turbopaneld.js'; }
+tp_daemon_update_helper_name() { printf 'turbopanel-update'; }
+tp_daemon_binary_path() {
+	_home="${1:-$(tp_prod_home)}"
+	printf '%s/bin/%s' "$_home" "$(tp_daemon_binary_name)"
+}
+# Mirrors tp_daemon_js_fallback_path in scripts/lib/release-artifacts.sh — run.sh
+# inlines it because CDN bootstrap runs via curl | sh without a checkout to source.
+tp_daemon_js_fallback_path() {
+	_home="${1:-$(tp_prod_home)}"
+	printf '%s/bin/%s' "$_home" "$(tp_daemon_js_fallback_name)"
+}
+tp_daemon_update_helper_path() {
+	_home="${1:-$(tp_prod_home)}"
+	printf '%s/bin/%s' "$_home" "$(tp_daemon_update_helper_name)"
+}
+
+tp_resolve_linux_arch() {
+	_machine="$(uname -m)"
+	case "$_machine" in
+		x86_64) printf 'linux-amd64' ;;
+		aarch64 | arm64) printf 'linux-arm64' ;;
+		*)
+			echo "run.sh: unsupported CPU architecture for daemon updates: $_machine" >&2
+			return 1
+			;;
+	esac
+}
+
+tp_manifest_compact() {
+	# shellcheck disable=SC2086
+	printf '%s' "$1" | tr -d '[:space:]'
+}
+
+tp_manifest_field() {
+	_json="$1"
+	_field="$2"
+	# shellcheck disable=SC2086
+	printf '%s' "$_json" | grep -o "\"$_field\":\"[^\"]*\"" | head -1 | sed 's/.*":"//' | tr -d '"'
+}
+
+tp_manifest_artifact_field() {
+	_json="$1"
+	_artifact_key="$2"
+	_field="$3"
+	# shellcheck disable=SC2086
+	_block="$(printf '%s' "$_json" | grep -o "\"$_artifact_key\"[^}]*{[^}]*\"$_field\":\"[^\"]*\"" | head -1)"
+	[ -n "$_block" ] || return 1
+	printf '%s' "$_block" | grep -o "\"$_field\":\"[^\"]*\"" | sed 's/.*":"//' | tr -d '"'
+}
+
+tp_manifest_binary_artifact_field() {
+	_json="$1"
+	_arch="$2"
+	_field="$3"
+	# shellcheck disable=SC2086
+	_block="$(printf '%s' "$_json" | grep -o "\"$_arch\"[^}]*{[^}]*\"$_field\":\"[^\"]*\"" | head -1)"
+	[ -n "$_block" ] || return 1
+	printf '%s' "$_block" | grep -o "\"$_field\":\"[^\"]*\"" | sed 's/.*":"//' | tr -d '"'
+}
+
+tp_resolve_channel_manifest() {
+	_manifest_json="$1"
+	_compact="$(tp_manifest_compact "$_manifest_json")"
+	_manifest_host="$(tp_manifest_field "$_compact" "defaultControlPlaneUrl")"
+	_manifest_commit="$(tp_manifest_field "$_compact" "commit")"
+	_linux_arch="$(tp_resolve_linux_arch)" || return 1
+	_binary_artifact_url="$(tp_manifest_binary_artifact_field "$_compact" "$_linux_arch" "url")"
+	_binary_artifact_sha256="$(tp_manifest_binary_artifact_field "$_compact" "$_linux_arch" "sha256")"
+	_js_fallback_artifact_url="$(tp_manifest_artifact_field "$_compact" "jsFallbackArtifact" "url")"
+	_js_fallback_artifact_sha256="$(tp_manifest_artifact_field "$_compact" "jsFallbackArtifact" "sha256")"
+	_orchestration_artifact_url="$(tp_manifest_artifact_field "$_compact" "orchestrationArtifact" "url")"
+	_orchestration_artifact_sha256="$(tp_manifest_artifact_field "$_compact" "orchestrationArtifact" "sha256")"
+	if [ -z "$_manifest_host" ]; then
+		_manifest_host="https://turbopanel.app"
+	fi
+	if [ -z "$_binary_artifact_url" ] || [ -z "$_binary_artifact_sha256" ] \
+		|| [ -z "$_js_fallback_artifact_url" ] || [ -z "$_js_fallback_artifact_sha256" ] \
+		|| [ -z "$_orchestration_artifact_url" ] || [ -z "$_orchestration_artifact_sha256" ]; then
+		return 1
+	fi
+	return 0
+}
+
+tp_install_verified_release() {
+	_url="$1"
+	_sha256="$2"
+	_home="$(tp_prod_home)"
+	_binary_name="$(tp_daemon_binary_name)"
+	_js_name="$(tp_daemon_js_fallback_name)"
+	_update_name="$(tp_daemon_update_helper_name)"
+	_tmp=""
+	_staging=""
+
+	_cleanup() {
+		rm -f "$_tmp"
+		rm -rf "$_staging"
+	}
+	trap _cleanup EXIT INT HUP TERM
+
+	case "$_url" in
+		https://*) ;;
+		*)
+			echo "run.sh: release URL must use HTTPS: $_url" >&2
+			return 1
+			;;
+	esac
+
+	_tmp="$(mktemp)"
+	_staging="$(mktemp -d)"
+	_curl="curl -fsSL"
+	[ "${TURBOPANEL_RELEASE_TLS_INSECURE:-}" = 1 ] && _curl="curl -fsSLk"
+	# shellcheck disable=SC2086
+	if ! $_curl "$_url" -o "$_tmp"; then
+		echo "run.sh: failed to download $_url" >&2
+		return 1
+	fi
+	if ! printf '%s  %s\n' "$_sha256" "$_tmp" | sha256sum -c - >/dev/null 2>&1; then
+		echo "run.sh: SHA-256 mismatch for $_url" >&2
+		return 1
+	fi
+	if ! zstd -d -q -c "$_tmp" | tar -x -C "$_staging"; then
+		echo "run.sh: failed to extract $_url" >&2
+		return 1
+	fi
+	if [ ! -f "$_staging/$_home/bin/$_binary_name" ] \
+		|| [ ! -f "$_staging/$_home/bin/$_js_name" ] \
+		|| [ ! -f "$_staging/$_home/share/orchestration/ansible.cfg" ]; then
+		echo "run.sh: release archive missing expected production layout" >&2
+		return 1
+	fi
+	mkdir -p "$_home/bin" "$_home/share/orchestration"
+	install -m 0755 "$_staging/$_home/bin/$_binary_name" "$_home/bin/$_binary_name"
+	install -m 0644 "$_staging/$_home/bin/$_js_name" "$_home/bin/$_js_name"
+	# Install the managed update helper so nodes can self-refresh without a
+	# daemon source checkout. Best-effort: older tarballs may predate it.
+	if [ -f "$_staging/$_home/bin/$_update_name" ]; then
+		install -m 0755 "$_staging/$_home/bin/$_update_name" "$_home/bin/$_update_name"
+	fi
+	rm -rf "$_home/share/orchestration"
+	cp -a "$_staging/$_home/share/orchestration" "$_home/share/"
+	trap - EXIT INT HUP TERM
+	_cleanup
+	return 0
+}
 
 tp_is_root() { [ "$(id -u)" = "0" ]; }
 tp_is_interactive() {
@@ -74,30 +227,33 @@ tp_print_error() {
 	fi
 }
 
-DAEMON_SERVICE_NAME="turbopanel-daemon.service"
+DAEMON_SERVICE_NAME="turbopaneld.service"
+LEGACY_DAEMON_SERVICE_NAME="turbopanel-daemon.service"
 
-# Stop the running daemon before replacing the source tree on manual reconcile.
+# Stop the running daemon before replacing release binaries on manual reconcile.
 # Skipped for --no-start (in-process UI update): that path must not stop the
 # caller; the daemon chdirs away and restarts itself after run.sh completes.
-tp_stop_running_daemon_for_source_swap() {
+tp_stop_running_daemon_for_release_swap() {
 	if [ "$NO_START" = true ]; then
 		return 0
 	fi
 	if ! command -v systemctl >/dev/null 2>&1; then
 		return 0
 	fi
-	if ! systemctl cat "$DAEMON_SERVICE_NAME" >/dev/null 2>&1; then
-		return 0
-	fi
-	if ! systemctl is-active --quiet "$DAEMON_SERVICE_NAME" 2>/dev/null; then
-		return 0
-	fi
-	tp_print_step "▸" "Stopping $DAEMON_SERVICE_NAME for source update…"
-	if ! systemctl stop "$DAEMON_SERVICE_NAME"; then
-		tp_print_error "Failed to stop $DAEMON_SERVICE_NAME"
-		exit 1
-	fi
-	tp_print_ok "Daemon stopped"
+	for _unit in "$DAEMON_SERVICE_NAME" "$LEGACY_DAEMON_SERVICE_NAME"; do
+		if ! systemctl cat "$_unit" >/dev/null 2>&1; then
+			continue
+		fi
+		if ! systemctl is-active --quiet "$_unit" 2>/dev/null; then
+			continue
+		fi
+		tp_print_step "▸" "Stopping $_unit for release update…"
+		if ! systemctl stop "$_unit"; then
+			tp_print_error "Failed to stop $_unit"
+			exit 1
+		fi
+		tp_print_ok "Daemon stopped ($_unit)"
+	done
 }
 
 tp_start_or_restart_daemon() {
@@ -118,37 +274,96 @@ tp_start_or_restart_daemon() {
 	tp_print_ok "Daemon running"
 }
 
-# Deno runtime version installed into the runtimes tree for the source build.
+# Probe whether the native release binary can execute a trivial subcommand.
+# Records DAEMON_EXEC_MODE=native|js for the systemd unit template.
+tp_probe_native_daemon() {
+	_bin="$(tp_daemon_binary_path)"
+	if [ ! -x "$_bin" ]; then
+		return 1
+	fi
+	if "$_bin" --version >/dev/null 2>&1; then
+		return 0
+	fi
+	return 1
+}
+
+# Host-local carry-over for release swaps lives under FHS paths (not the old
+# platform/daemon checkout). Keep this list in sync with HOST_LOCAL_ARTIFACTS
+# in src/dev-sync-apply.ts — identity/config are under /var/lib and /etc, so
+# only checkout leftovers that may still appear under a source tree remain.
+# shellcheck disable=SC2034
+TP_HOST_LOCAL_ARTIFACTS=".git .github logs cloudflared"
+
+# Migrate pre-FHS managed installs into /etc/turbopanel and /var/lib/turbopanel.
+tp_migrate_legacy_layout() {
+	_legacy_daemon="$INSTALL_ROOT/platform/daemon"
+	_legacy_config="$INSTALL_ROOT/platform/config"
+	_legacy_state="$_legacy_daemon/state"
+	_legacy_env="$_legacy_daemon/.env"
+	_legacy_ca="$_legacy_config/instance-ca.pem"
+	_legacy_tunnels="$_legacy_daemon/cloudflared"
+	_legacy_license_staging="$_legacy_config/daemon-license-staging"
+
+	mkdir -p "$STATE_DIR" "$CONFIG_DIR"
+
+	for _f in license.id license.token server.id server-key.json server-key-id; do
+		if [ -f "$_legacy_state/$_f" ] && [ ! -e "$STATE_DIR/$_f" ]; then
+			mv "$_legacy_state/$_f" "$STATE_DIR/$_f"
+		fi
+		if [ -f "$_legacy_daemon/$_f" ] && [ ! -e "$STATE_DIR/$_f" ]; then
+			mv "$_legacy_daemon/$_f" "$STATE_DIR/$_f"
+		fi
+	done
+
+	if [ -f "$_legacy_env" ] && [ ! -e "$ENV_FILE" ]; then
+		mv "$_legacy_env" "$ENV_FILE"
+	fi
+
+	if [ -f "$_legacy_ca" ] && [ ! -e "$CA_PATH" ]; then
+		mv "$_legacy_ca" "$CA_PATH"
+	fi
+
+	if [ -d "$_legacy_tunnels" ] && [ ! -e "$STATE_DIR/cloudflared" ]; then
+		mv "$_legacy_tunnels" "$STATE_DIR/cloudflared"
+	fi
+
+	if [ -d "$_legacy_license_staging" ] && [ ! -e "$LICENSE_STAGING_DIR" ]; then
+		mv "$_legacy_license_staging" "$LICENSE_STAGING_DIR"
+	fi
+}
 # Keep in sync with orchestration/roles/deno-runtime/defaults/main.yml.
 TP_DENO_VERSION="2.9.0"
 
 # Install Deno into the runtimes tree (idempotent), mirroring uv/ansible/cloudflared:
-#   $RUNTIMES_DIR/deno/$TP_DENO_VERSION/deno  plus a `current` symlink.
+#   $RUNTIMES_DIR/deno/$TP_DENO_VERSION/deno  plus `current` and `bin/deno` symlinks.
 tp_install_deno_runtime() {
 	_deno_versioned_dir="$RUNTIMES_DIR/deno/$TP_DENO_VERSION"
 	_deno_bin="$_deno_versioned_dir/deno"
-	if [ -x "$_deno_bin" ]; then
-		return 0
-	fi
-	_deno_tmp="$RUNTIMES_DIR/deno/.install"
-	rm -rf "$_deno_tmp"
-	mkdir -p "$_deno_tmp"
-	_curl="curl -fsSL"
-	[ "${TURBOPANEL_RELEASE_TLS_INSECURE:-}" = 1 ] && _curl="curl -fsSLk"
-	# CI=1 (with no -y and non-TTY stdout) makes deno.land/install.sh skip its
-	# shell-setup step. Otherwise it appends `. "$DENO_INSTALL/env"` to the
-	# invoking user's ~/.bashrc — pointing at our temp dir which we delete below,
-	# breaking every subsequent login shell with a missing-file error.
-	# shellcheck disable=SC2086
-	if ! $_curl https://deno.land/install.sh \
-		| CI=1 DENO_INSTALL="$_deno_tmp" sh -s "v${TP_DENO_VERSION}" >/dev/null 2>&1; then
+	if [ ! -x "$_deno_bin" ]; then
+		_deno_tmp="$RUNTIMES_DIR/deno/.install"
 		rm -rf "$_deno_tmp"
-		return 1
+		mkdir -p "$_deno_tmp"
+		_curl="curl -fsSL"
+		[ "${TURBOPANEL_RELEASE_TLS_INSECURE:-}" = 1 ] && _curl="curl -fsSLk"
+		# CI=1 (with no -y and non-TTY stdout) makes deno.land/install.sh skip its
+		# shell-setup step. Otherwise it appends `. "$DENO_INSTALL/env"` to the
+		# invoking user's ~/.bashrc — pointing at our temp dir which we delete below,
+		# breaking every subsequent login shell with a missing-file error.
+		# shellcheck disable=SC2086
+		if ! $_curl https://deno.land/install.sh \
+			| CI=1 DENO_INSTALL="$_deno_tmp" sh -s "v${TP_DENO_VERSION}" >/dev/null 2>&1; then
+			rm -rf "$_deno_tmp"
+			return 1
+		fi
+		mkdir -p "$_deno_versioned_dir"
+		install -m 0755 "$_deno_tmp/bin/deno" "$_deno_bin"
+		rm -rf "$_deno_tmp"
 	fi
-	mkdir -p "$_deno_versioned_dir"
-	install -m 0755 "$_deno_tmp/bin/deno" "$_deno_bin"
-	rm -rf "$_deno_tmp"
+	# Always restore stable symlinks (repair/retry may leave them drifted).
 	ln -sfn "$TP_DENO_VERSION" "$RUNTIMES_DIR/deno/current"
+	# Stable path for the JS-fallback systemd ExecStart (next phase).
+	mkdir -p "$RUNTIMES_DIR/deno/bin"
+	ln -sfn "../current/deno" "$RUNTIMES_DIR/deno/bin/deno"
 }
 
 tp_fetch_channel_manifest() {
@@ -161,7 +376,7 @@ tp_fetch_channel_manifest() {
 		return 1
 	fi
 
-	_channels_oneline="$(printf '%s' "$_channels_json" | tr -d '[:space:]')"
+	_channels_oneline="$(tp_manifest_compact "$_channels_json")"
 	_manifest_url="$(printf '%s' "$_channels_oneline" | grep -o "\"${_channel}\"[^}]*manifestUrl\":\"[^\"]*\"" | sed 's/.*manifestUrl":"//' | tr -d '"')"
 	if [ -z "$_manifest_url" ]; then
 		return 1
@@ -172,16 +387,7 @@ tp_fetch_channel_manifest() {
 		return 1
 	fi
 
-	_manifest_oneline="$(printf '%s' "$_manifest_json" | tr -d '[:space:]')"
-	_manifest_host="$(printf '%s' "$_manifest_oneline" | grep -o '"defaultControlPlaneUrl":"[^"]*"' | sed 's/.*":"//' | tr -d '"')"
-	_manifest_commit="$(printf '%s' "$_manifest_oneline" | grep -o '"commit":"[^"]*"' | sed 's/"commit":"//' | tr -d '"')"
-	_artifact_url="$(printf '%s' "$_manifest_oneline" | grep -o '"sourceArtifact"[^{]*{[^}]*"url":"[^"]*"' | grep -o '"url":"[^"]*"' | sed 's/"url":"//' | tr -d '"')"
-	_artifact_sha256="$(printf '%s' "$_manifest_oneline" | grep -o '"sourceArtifact"[^{]*{[^}]*"sha256":"[^"]*"' | grep -o '"sha256":"[^"]*"' | sed 's/"sha256":"//' | tr -d '"')"
-
-	if [ -z "$_manifest_host" ]; then
-		_manifest_host="https://turbopanel.app"
-	fi
-	if [ -z "$_artifact_url" ] || [ -z "$_artifact_sha256" ]; then
+	if ! tp_resolve_channel_manifest "$_manifest_json"; then
 		return 1
 	fi
 
@@ -291,19 +497,28 @@ fi
 tp_print_header
 
 INSTALL_ROOT="/opt/turbopanel"
-DAEMON_DIR="$INSTALL_ROOT/platform/daemon"
-CONFIG_DIR="$INSTALL_ROOT/platform/config"
-RUNTIMES_DIR="$INSTALL_ROOT/runtimes"
+BIN_DIR="$INSTALL_ROOT/bin"
+ORCHESTRATION_DIR="$INSTALL_ROOT/share/orchestration"
+RUNTIMES_DIR="$INSTALL_ROOT/lib/runtime"
+CONFIG_DIR="/etc/turbopanel"
+STATE_DIR="/var/lib/turbopanel"
+RUN_DIR="/run/turbopanel"
+ENV_FILE="$CONFIG_DIR/daemon.env"
 CA_PATH="$CONFIG_DIR/instance-ca.pem"
+LICENSE_STAGING_DIR="$STATE_DIR/daemon-license-staging"
 
 if [ "$INSECURE_TLS" = true ]; then
 	export TURBOPANEL_RELEASE_TLS_INSECURE=1
 fi
 
-STAGING_DIR="$CONFIG_DIR/daemon-license-staging"
+tp_migrate_legacy_layout
+
+mkdir -p "$STATE_DIR" "$CONFIG_DIR" "$BIN_DIR" "$INSTALL_ROOT/share" "$RUN_DIR"
+STAGING_DIR="$LICENSE_STAGING_DIR"
 mkdir -p "$STAGING_DIR"
 printf '%s' "$LICENSE_ID" > "$STAGING_DIR/license.id"
 printf '%s' "$LICENSE_TOKEN" > "$STAGING_DIR/license.token"
+chmod 0640 "$STAGING_DIR/license.id" "$STAGING_DIR/license.token"
 
 export DEBIAN_FRONTEND=noninteractive
 tp_print_step "▸" "Checking system prerequisites…"
@@ -322,10 +537,10 @@ fi
 if [ -z "$HOST_URL" ]; then
 	HOST_URL="$_manifest_host"
 fi
-ARTIFACT_URL="$_artifact_url"
-ARTIFACT_SHA256="$_artifact_sha256"
-tp_print_ok "Release manifest resolved (channel ${TURBOPANEL_UPDATE_CHANNEL:-trunk})"
-tp_print_step "  " "Artifact: $ARTIFACT_URL"
+tp_print_ok "Release manifest resolved (channel ${TURBOPANEL_UPDATE_CHANNEL:-trunk}, arch ${_linux_arch:-unknown})"
+tp_print_step "  " "Binary: $_binary_artifact_url"
+tp_print_step "  " "JS fallback: $_js_fallback_artifact_url"
+tp_print_step "  " "Orchestration: $_orchestration_artifact_url"
 tp_print_step "  " "Commit: ${_manifest_commit:-unknown}"
 tp_print_step "  " "Control plane: $HOST_URL"
 
@@ -376,91 +591,65 @@ else
 	esac
 fi
 
-export TURBOPANEL_DAEMON_ROOT="$DAEMON_DIR"
+# Production FHS layout — never point TURBOPANEL_DAEMON_ROOT at a source
+# checkout or detectInstallMode() may classify this managed install as dev.
+export TURBOPANEL_RUNTIMES_DIR="$RUNTIMES_DIR"
+export TURBOPANEL_ORCHESTRATION_DIR="$ORCHESTRATION_DIR"
+export TURBOPANEL_CONFIG_DIR="$CONFIG_DIR"
+export TURBOPANEL_STATE_DIR="$STATE_DIR"
+export TURBOPANEL_DAEMON_STATE_DIR="$STATE_DIR"
+export TURBOPANEL_RUN_DIR="$RUN_DIR"
 
-tp_print_step "▸" "Downloading daemon source…"
-_src_tmp="$(mktemp)"
-_src_curl="curl -fsSL"
-[ "$INSECURE_TLS" = true ] && _src_curl="curl -fsSLk"
-# shellcheck disable=SC2086
-if ! $_src_curl "$ARTIFACT_URL" -o "$_src_tmp" 2>/dev/null; then
-	rm -f "$_src_tmp"
-	tp_print_error "Failed to download daemon source from $ARTIFACT_URL"
-	exit 1
-fi
-if ! printf '%s  %s\n' "$ARTIFACT_SHA256" "$_src_tmp" | sha256sum -c - >/dev/null 2>&1; then
-	rm -f "$_src_tmp"
-	tp_print_error "SHA-256 mismatch for $ARTIFACT_URL"
-	exit 1
-fi
-# Extract into a clean staging directory, then atomically replace the daemon
-# source tree, preserving only explicitly-allowed host-local artifacts. This
-# guarantees source files removed upstream do not survive an update.
-mkdir -p "$INSTALL_ROOT/platform"
-_src_staging="$INSTALL_ROOT/platform/.daemon-source-staging"
-rm -rf "$_src_staging"
-mkdir -p "$_src_staging"
-if ! zstd -d -q -c "$_src_tmp" | tar -x -C "$_src_staging"; then
-	rm -f "$_src_tmp"
-	rm -rf "$_src_staging"
-	tp_print_error "Failed to extract daemon source"
-	exit 1
-fi
-rm -f "$_src_tmp"
-if [ ! -f "$_src_staging/main.ts" ]; then
-	rm -rf "$_src_staging"
-	tp_print_error "Daemon source archive did not contain main.ts"
+tp_print_step "▸" "Downloading daemon release…"
+tp_stop_running_daemon_for_release_swap
+
+if ! tp_install_verified_release "$_binary_artifact_url" "$_binary_artifact_sha256"; then
+	tp_print_error "Failed to install daemon release from $_binary_artifact_url"
 	exit 1
 fi
 
-# Carry over host-local artifacts so daemon identity (state/), config (.env), and
-# tunnel state survive the swap. This list MUST stay in sync with
-# HOST_LOCAL_ARTIFACTS in src/dev-sync-apply.ts so the run.sh reconcile and
-# dev-sync paths cannot diverge.
-if [ -d "$DAEMON_DIR" ]; then
-	tp_stop_running_daemon_for_source_swap
-	for _hostlocal in .env .git .github state logs cloudflared server.id server-key.json server-key-id; do
-		if [ -e "$DAEMON_DIR/$_hostlocal" ]; then
-			rm -rf "$_src_staging/$_hostlocal"
-			mv "$DAEMON_DIR/$_hostlocal" "$_src_staging/$_hostlocal"
-		fi
-	done
+if [ ! -x "$(tp_daemon_binary_path)" ]; then
+	tp_print_error "Daemon release missing native binary at $(tp_daemon_binary_path)"
+	exit 1
 fi
+if [ ! -f "$BIN_DIR/$(tp_daemon_js_fallback_name)" ]; then
+	tp_print_error "Daemon release missing JS fallback at $BIN_DIR/$(tp_daemon_js_fallback_name)"
+	exit 1
+fi
+if [ ! -f "$ORCHESTRATION_DIR/ansible.cfg" ]; then
+	tp_print_error "Daemon release missing orchestration tree at $ORCHESTRATION_DIR"
+	exit 1
+fi
+tp_print_ok "Release installed (SHA-256 ok)"
 
-# Atomically swap the staged tree into place.
-rm -rf "$DAEMON_DIR.dev-sync-old"
-if [ -d "$DAEMON_DIR" ]; then
-	mv "$DAEMON_DIR" "$DAEMON_DIR.dev-sync-old"
+tp_print_step "▸" "Probing native daemon binary…"
+if tp_probe_native_daemon; then
+	DAEMON_EXEC_MODE="native"
+	tp_print_ok "Native binary is executable — using turbopaneld"
+else
+	DAEMON_EXEC_MODE="js"
+	tp_print_step "~" "Native binary not executable — using JS fallback (deno run turbopaneld.js)"
 fi
-if ! mv "$_src_staging" "$DAEMON_DIR"; then
-	[ -d "$DAEMON_DIR.dev-sync-old" ] && mv "$DAEMON_DIR.dev-sync-old" "$DAEMON_DIR"
-	rm -rf "$_src_staging"
-	tp_print_error "Failed to install daemon source"
-	exit 1
-fi
-rm -rf "$DAEMON_DIR.dev-sync-old"
-if [ ! -f "$DAEMON_DIR/main.ts" ]; then
-	tp_print_error "Daemon source archive did not contain main.ts"
-	exit 1
-fi
-tp_print_ok "Source build installed (SHA-256 ok)"
 
 tp_print_step "▸" "Installing Deno runtime…"
 if ! tp_install_deno_runtime; then
 	tp_print_error "Failed to install Deno runtime"
 	exit 1
 fi
-DENO_BIN="$RUNTIMES_DIR/deno/current/deno"
+DENO_BIN="$RUNTIMES_DIR/deno/bin/deno"
 tp_print_ok "Deno ${TP_DENO_VERSION} ready"
 
 tp_print_step "▸" "Bootstrapping orchestration runtimes…"
-"$DENO_BIN" run --allow-net --allow-read --allow-write --allow-run --allow-env \
-	"$DAEMON_DIR/scripts/bootstrap-orchestration.ts"
-# Warm the module cache under the daemon's HOME so first start is fast/offline.
-(cd "$DAEMON_DIR" && HOME="$INSTALL_ROOT" "$DENO_BIN" cache main.ts >/dev/null 2>&1) || true
+if [ "$DAEMON_EXEC_MODE" = "native" ]; then
+	"$(tp_daemon_binary_path)" bootstrap-orchestration
+else
+	HOME="$INSTALL_ROOT" "$DENO_BIN" run --allow-all "$(tp_daemon_js_fallback_path)" bootstrap-orchestration
+fi
+# Warm the JS fallback module cache so first start is fast/offline.
+HOME="$INSTALL_ROOT" "$DENO_BIN" cache "$(tp_daemon_js_fallback_path)" >/dev/null 2>&1 || true
 
-if [ ! -f "$DAEMON_DIR/orchestration/ansible.cfg" ]; then
-	tp_print_error "Bootstrap did not materialize orchestration/ansible.cfg"
+if [ ! -f "$ORCHESTRATION_DIR/ansible.cfg" ]; then
+	tp_print_error "Bootstrap did not leave orchestration/ansible.cfg in place"
 	exit 1
 fi
 tp_print_ok "Orchestration runtimes ready"
@@ -480,8 +669,17 @@ trap 'rm -f "$VARS_FILE"' EXIT
 	printf 'turbopanel_start: %s\n' "$([ "$NO_START" = true ] && echo false || echo true)"
 	printf 'turbopanel_manage_service_state: %s\n' "$([ "$NO_START" = true ] && echo false || echo true)"
 	printf 'turbopanel_restart_daemon: %s\n' "$([ "$NO_START" = true ] && echo false || echo true)"
-	printf 'turbopanel_daemon_run_mode: %s\n' "source"
-	printf 'turbopanel_daemon_deno_bin: %s\n' "/opt/turbopanel/runtimes/deno/current/deno"
+	printf 'turbopanel_daemon_exec_mode: %s\n' "$DAEMON_EXEC_MODE"
+	printf 'turbopanel_runtimes_dir: %s\n' "$RUNTIMES_DIR"
+	printf 'turbopanel_orchestration_dir: %s\n' "$ORCHESTRATION_DIR"
+	printf 'turbopanel_config_dir: %s\n' "$CONFIG_DIR"
+	printf 'turbopanel_daemon_state_dir: %s\n' "$STATE_DIR"
+	printf 'turbopanel_daemon_env_file: %s\n' "$ENV_FILE"
+	printf 'turbopanel_daemon_bin: %s\n' "$(tp_daemon_binary_path)"
+	printf 'turbopanel_daemon_js: %s\n' "$(tp_daemon_js_fallback_path)"
+	printf 'turbopanel_daemon_workdir: %s\n' "$INSTALL_ROOT"
+	printf 'turbopanel_daemon_deno_bin: %s\n' "$DENO_BIN"
+	printf 'turbopanel_service_name: %s\n' "turbopaneld"
 	case "$HOST_URL" in
 		http://*) ;;
 		*)
@@ -496,7 +694,7 @@ trap 'rm -f "$VARS_FILE"' EXIT
 	fi
 } > "$VARS_FILE"
 
-export ANSIBLE_CONFIG="$DAEMON_DIR/orchestration/ansible.cfg"
+export ANSIBLE_CONFIG="$ORCHESTRATION_DIR/ansible.cfg"
 export ANSIBLE_LOCAL_TEMP="$RUNTIMES_DIR/uv/cache/ansible-tmp"
 export ANSIBLE_COLLECTIONS_PATH="$RUNTIMES_DIR/ansible/galaxy-collections"
 
@@ -512,7 +710,7 @@ if ! "$ANSIBLE_PLAYBOOK" \
 	-i localhost, \
 	-c local \
 	-e "@$VARS_FILE" \
-	"$DAEMON_DIR/orchestration/playbooks/daemon-install.yml"; then
+	"$ORCHESTRATION_DIR/playbooks/daemon-install.yml"; then
 	tp_print_error "Daemon provisioning failed"
 	exit 1
 fi

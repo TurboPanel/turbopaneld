@@ -69,9 +69,11 @@ async function repointCurrent(version = CLOUDFLARED_VERSION): Promise<void> {
 
 /**
  * Ensure the vendored cloudflared binary exists at the pinned version under
- * `/opt/turbopanel/runtimes/cloudflared/<version>/cloudflared` and repoint the
- * `current` symlink. Idempotent: a no-op when the binary already reports the
- * pinned version. Returns the absolute path to the binary.
+ * `…/cloudflared/<version>/cloudflared` (production managed install:
+ * `/opt/turbopanel/lib/runtime/…`; co-located dev: `/opt/turbopanel/runtimes/…`)
+ * and repoint the `current` symlink. Path is derived from `RUNTIMES_DIR` via
+ * `paths.ts`. Idempotent: a no-op when the binary already reports the pinned
+ * version. Returns the absolute path to the binary.
  *
  * Unlike uv, cloudflared releases don't publish per-asset checksum siblings, so
  * the install is verified by invoking `cloudflared --version` afterwards.

@@ -1,0 +1,12 @@
+---
+turbopanel_install_root: /opt/turbopanel
+turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/runtimes"
+turbopanel_instance_dir: "{{ turbopanel_install_root }}/platform/instance"
+turbopanel_user: turbopanel
+instance_user: turbopaneli
+turbopanel_group: turbopanel
+# Co-located dev generates certs as turbopanel (see tasks); production uses turbopaneli.
+instance_certs_owner: "{{ turbopanel_user if (turbopanel_dev_user | default('') | length > 0) else instance_user }}"
+turbopanel_dev_user: ""
+turbopanel_public_urls: ""
+turbopanel_tls_extra_sans: ""

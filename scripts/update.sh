@@ -1,23 +1,27 @@
 #!/bin/sh
 # TurboPanel daemon update — manual refresh for an already-installed node.
 #
-# This script is NOT served from trbp.nl (unlike run.sh). It ships in the daemon
-# checkout and reads license + channel from the local state directory.
+# This script is NOT served from trbp.nl (unlike run.sh). It is installed into
+# the managed FHS tree at /opt/turbopanel/bin/turbopanel-update by run.sh and
+# reads license + channel from the FHS state/config directories — no daemon
+# source checkout required.
 #
 # Usage:
-#   sudo sh /opt/turbopanel/platform/daemon/scripts/update.sh
-#   sudo sh /opt/turbopanel/platform/daemon/scripts/update.sh --channel trunk
+#   sudo sh /opt/turbopanel/bin/turbopanel-update
+#   sudo sh /opt/turbopanel/bin/turbopanel-update --channel trunk
 #
 # Must run as root (or via sudo). It downloads the latest run.sh from trbp.nl.
 
 set -eu
 
 INSTALL_ROOT="/opt/turbopanel"
-DAEMON_DIR="$INSTALL_ROOT/platform/daemon"
-STATE_DIR="$DAEMON_DIR/state"
-ENV_FILE="$DAEMON_DIR/.env"
+STATE_DIR="/var/lib/turbopanel"
+CONFIG_DIR="/etc/turbopanel"
+ENV_FILE="$CONFIG_DIR/daemon.env"
+CA_PATH="$CONFIG_DIR/instance-ca.pem"
 LICENSE_ID_FILE="$STATE_DIR/license.id"
 LICENSE_TOKEN_FILE="$STATE_DIR/license.token"
+UPDATE_SH="$INSTALL_ROOT/bin/turbopanel-update"
 
 CURL_MAX_TIME="${TURBOPANEL_CURL_MAX_TIME:-300}"
 CDN_RUN_SCRIPT="https://trbp.nl/run.sh"
@@ -93,18 +97,18 @@ tp_encode_license_b64url() {
 
 tp_usage() {
 	cat <<EOF
-Usage: update.sh [options]
+Usage: turbopanel-update [options]
 
 Manual refresh for an installed TurboPanel daemon. Not a CDN entrypoint —
-run from the checkout on the server:
+run the installed helper on the server:
 
-  sudo sh $DAEMON_DIR/scripts/update.sh
+  sudo sh $UPDATE_SH
 
 Options:
-  --channel <name>   Update channel (default: read from .env, else trunk)
+  --channel <name>   Update channel (default: read from daemon.env, else trunk)
                      Valid: $VALID_CHANNELS
   --license <b64>    Base64url license (skip reading state files)
-  --host <URL>       Instance URL (default: read from .env; omit for production)
+  --host <URL>       Instance URL (default: read from daemon.env; omit for production)
   --insecure-tls     curl -k for bootstrap downloads only
   --dry-run          Print the command that would run, then exit
   -h, --help         Show this help
@@ -145,7 +149,7 @@ done
 
 if ! tp_is_root; then
 	tp_print_error "must run as root"
-	tp_print_error "  sudo sh $DAEMON_DIR/scripts/update.sh"
+	tp_print_error "  sudo sh $UPDATE_SH"
 	exit 1
 fi
 
@@ -165,7 +169,13 @@ if [ -z "$HOST_URL" ]; then
 fi
 
 INSTANCE_CA="$(tp_read_dotenv TURBOPANEL_INSTANCE_CA "$ENV_FILE" 2>/dev/null)" || INSTANCE_CA=""
-CA_PATH="$INSTALL_ROOT/platform/config/instance-ca.pem"
+# Drop stale pre-FHS CA paths; fall back to the canonical FHS location.
+if [ -n "$INSTANCE_CA" ] && [ ! -f "$INSTANCE_CA" ]; then
+	INSTANCE_CA=""
+fi
+if [ -z "$INSTANCE_CA" ] && [ -f "$CA_PATH" ]; then
+	INSTANCE_CA="$CA_PATH"
+fi
 
 if [ -z "$LICENSE" ]; then
 	if [ ! -f "$LICENSE_ID_FILE" ] || [ ! -f "$LICENSE_TOKEN_FILE" ]; then

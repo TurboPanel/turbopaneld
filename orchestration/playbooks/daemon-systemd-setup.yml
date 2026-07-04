@@ -1,10 +1,12 @@
 ---
-# Install turbopanel-daemon.service for co-located dev or managed server daemons.
-# Co-located hosts set turbopanel_after_instance_service so the daemon starts
-# after the instance stack (turbopanel-instance.service).
+# Install turbopaneld.service for co-located dev (deno run main.ts from the
+# checkout) or other source-mode installs. Co-located hosts set
+# turbopanel_after_instance_service so the daemon starts after the instance
+# stack (turbopanel-instance.service).
 #
 # Self-sufficient for fresh co-located dev hosts: ensures prerequisites and the
 # turbopanel user/group before installing the unit. All roles are idempotent.
+# Managed production installs use daemon-install.yml (native/JS FHS layout).
 - name: Install TurboPanel daemon systemd unit
   hosts: localhost
   connection: local
@@ -13,21 +15,29 @@
 
   vars:
     turbopanel_install_root: /opt/turbopanel
+    # Co-located-dev-only: turbopanel_managed_install defaults false, so roles
+    # resolve runtimes under /opt/turbopanel/runtimes (not lib/runtime).
     turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/runtimes"
     turbopanel_daemon_dir: "{{ turbopanel_install_root }}/platform/daemon"
+    turbopanel_orchestration_dir: "{{ turbopanel_daemon_dir }}/orchestration"
+    turbopanel_daemon_workdir: "{{ turbopanel_daemon_dir }}"
+    # Co-located keeps checkout-local .env via --env-file=.env (no EnvironmentFile).
+    turbopanel_daemon_env_file: ""
+    turbopanel_daemon_exec_mode: source
     turbopanel_user: turbopanel
     turbopanel_group: turbopanel
     turbopanel_uid: 9999
     turbopanel_gid: 9999
-    turbopanel_service_name: turbopanel-daemon
+    turbopanel_service_name: turbopaneld
     turbopanel_start: true
     turbopanel_after_instance_service: false
     # Co-located dev keeps daemon logs in the checkout (repo-local logs/ dir),
     # unlike managed-host installs (daemon-install.yml) which log under
     # /var/log/turbopanel/daemon. The daemon-logs role creates this directory.
     daemon_log_dir: "{{ turbopanel_daemon_dir }}/logs"
-    # The daemon runs from source via the vendored Deno runtime under
-    # /opt/turbopanel/runtimes/deno/current (provisioned by the deno-runtime role
+    # Co-located-dev-only (turbopanel_managed_install defaults false). The daemon
+    # runs from source via the vendored Deno runtime under
+    # /opt/turbopanel/runtimes/deno (provisioned by the deno-runtime role
     # below; this is also the daemon-launch role default). The Deno binary is not
     # hardcoded here: pass turbopanel_daemon_deno_bin as an extra var to override
     # it — install-daemon-systemd.sh forwards TURBOPANEL_DAEMON_DENO_BIN — for a

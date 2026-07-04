@@ -1,5 +1,11 @@
 ---
-turbopanel_config_dir: /opt/turbopanel/platform/config
-turbopanel_daemon_state_dir: "{{ turbopanel_daemon_dir }}/state"
-turbopanel_daemon_license_staging_dir: "{{ turbopanel_config_dir }}/daemon-license-staging"
+turbopanel_install_root: /opt/turbopanel
+turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/lib/runtime"
+turbopanel_orchestration_dir: "{{ turbopanel_install_root }}/share/orchestration"
+turbopanel_config_dir: /etc/turbopanel
+turbopanel_daemon_state_dir: /var/lib/turbopanel
+turbopanel_daemon_env_file: "{{ turbopanel_config_dir }}/daemon.env"
+turbopanel_daemon_license_staging_dir: "{{ turbopanel_daemon_state_dir }}/daemon-license-staging"
+turbopanel_daemon_tunnels_dir: "{{ turbopanel_daemon_state_dir }}/cloudflared/tunnels"
+turbopanel_service_name: turbopaneld
 turbopanel_update_channel: trunk

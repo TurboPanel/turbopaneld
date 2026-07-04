@@ -1,0 +1,29 @@
+[Unit]
+Description=TurboPanel UI (Expo web dev server)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ instance_user }}
+Group={{ turbopanel_group }}
+WorkingDirectory={{ turbopanel_ui_dir }}
+Environment=HOME={{ turbopanel_ui_runtime_dir }}
+Environment=XDG_DATA_HOME={{ turbopanel_ui_runtime_dir }}/share
+Environment=XDG_STATE_HOME={{ turbopanel_ui_runtime_dir }}/state
+Environment=XDG_CONFIG_HOME={{ turbopanel_ui_config_dir }}
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=BROWSER=none
+Environment=COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+# Do not set CI=1 — Expo/Metro disable Fast Refresh (hot=false) in CI mode.
+# Invoke expo/bin/cli via node — pnpm may leave node_modules/.bin unlinked after a
+# partial install, and `pnpm exec` prompts to purge node_modules when HOME differs.
+# Runtime state (Expo, pnpm XDG dirs) lives under {{ turbopanel_ui_runtime_dir }} (gitignored).
+StandardOutput=append:{{ ui_log_dir }}/ui.log
+StandardError=append:{{ ui_log_dir }}/ui.err.log
+ExecStart=/usr/local/bin/node {{ turbopanel_ui_dir }}/node_modules/expo/bin/cli start --web --port {{ expo_port }}
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

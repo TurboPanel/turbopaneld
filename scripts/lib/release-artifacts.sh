@@ -2,32 +2,70 @@
 # POSIX sh — sourced by update.sh (manual binary-only swap) and
 # scripts/package-daemon-release.sh (release packager).
 #
-# The operator bootstrap (scripts/run.sh) installs the daemon from a source
-# artifact and runs it via the Deno runtime, so it no longer sources this library
-# and there is no download-by-version install path here.
+# Release layout (mirrors production FHS install):
+#   /opt/turbopanel/bin/turbopaneld          native compiled binary
+#   /opt/turbopanel/bin/turbopaneld.js       bundled JS fallback (deno run)
+#   /opt/turbopanel/bin/turbopanel-update    managed update helper (scripts/update.sh)
+#   /opt/turbopanel/share/orchestration/…    Ansible playbooks + roles
 #
-# Compiled cross-arch binaries (staging under dist/.build/ during release:package):
-#   turbopaneld-linux-amd64
-#   turbopaneld-linux-arm64
-#
-# zstd-compressed tar release artifacts (dist/ after package:release):
+# Cross-arch release tarballs (dist/ after package:release):
 #   turbopaneld-linux-amd64.tar.zst
 #   turbopaneld-linux-arm64.tar.zst
 #
-# Each daemon tar contains a single member: turbopaneld (orchestration is embedded
-# in the binary at compile time via deno compile --include orchestration).
+# Each tarball contains opt/turbopanel/bin/* and opt/turbopanel/share/orchestration/.
 #
+# Standalone upload artifacts (also referenced in channel.json):
+#   turbopaneld.js
+#   orchestration.tar.zst  (contains opt/turbopanel/share/orchestration/…)
+#
+# Manifest parsing helpers (tp_resolve_channel_manifest, tp_resolve_linux_arch, …)
+# are canonical here; scripts/run.sh inlines a copy because CDN bootstrap runs via
+# curl | sh without a checkout path to source from.
 # Versioned GitHub release assets (set TURBOPANEL_RELEASE_VERSION when packaging):
 #   turbopaneld-<version>-linux-amd64.tar.zst
 #   turbopaneld-<version>-linux-arm64.tar.zst
+
+tp_prod_home() {
+	printf '/opt/turbopanel'
+}
 
 tp_daemon_binary_name() {
 	printf 'turbopaneld'
 }
 
+tp_daemon_js_fallback_name() {
+	printf 'turbopaneld.js'
+}
+
+# Managed update helper installed into the FHS bin dir so nodes can self-refresh
+# without a daemon source checkout (see scripts/update.sh).
+tp_daemon_update_helper_name() {
+	printf 'turbopanel-update'
+}
+
 tp_daemon_linux_arch_binary_name() {
 	_arch="$1"
 	printf 'turbopaneld-linux-%s' "$_arch"
+}
+
+tp_daemon_binary_path() {
+	_home="${1:-$(tp_prod_home)}"
+	printf '%s/bin/%s' "$_home" "$(tp_daemon_binary_name)"
+}
+
+tp_daemon_js_fallback_path() {
+	_home="${1:-$(tp_prod_home)}"
+	printf '%s/bin/%s' "$_home" "$(tp_daemon_js_fallback_name)"
+}
+
+tp_daemon_update_helper_path() {
+	_home="${1:-$(tp_prod_home)}"
+	printf '%s/bin/%s' "$_home" "$(tp_daemon_update_helper_name)"
+}
+
+tp_daemon_orchestration_dir() {
+	_home="${1:-$(tp_prod_home)}"
+	printf '%s/share/orchestration' "$_home"
 }
 
 tp_daemon_release_filename() {
@@ -40,36 +78,298 @@ tp_daemon_release_filename() {
 	fi
 }
 
+tp_orchestration_release_filename() {
+	_version="${1:-}"
+	if [ -n "$_version" ]; then
+		printf 'orchestration-%s.tar.zst' "$_version"
+	else
+		printf 'orchestration.tar.zst'
+	fi
+}
+
+# Map uname -m to channel.json binaryArtifacts keys.
+tp_resolve_linux_arch() {
+	_machine="$(uname -m)"
+	case "$_machine" in
+		x86_64) printf 'linux-amd64' ;;
+		aarch64 | arm64) printf 'linux-arm64' ;;
+		*)
+			echo "tp_resolve_linux_arch: unsupported CPU architecture: $_machine" >&2
+			return 1
+			;;
+	esac
+}
+
+tp_manifest_compact() {
+	# shellcheck disable=SC2086
+	printf '%s' "$1" | tr -d '[:space:]'
+}
+
+tp_manifest_field() {
+	_json="$1"
+	_field="$2"
+	# shellcheck disable=SC2086
+	printf '%s' "$_json" | grep -o "\"$_field\":\"[^\"]*\"" | head -1 | sed 's/.*":"//' | tr -d '"'
+}
+
+# Extract url or sha256 from a top-level manifest artifact object.
+tp_manifest_artifact_field() {
+	_json="$1"
+	_artifact_key="$2"
+	_field="$3"
+	# shellcheck disable=SC2086
+	_block="$(printf '%s' "$_json" | grep -o "\"$_artifact_key\"[^}]*{[^}]*\"$_field\":\"[^\"]*\"" | head -1)"
+	[ -n "$_block" ] || return 1
+	printf '%s' "$_block" | grep -o "\"$_field\":\"[^\"]*\"" | sed 's/.*":"//' | tr -d '"'
+}
+
+# Extract url or sha256 from binaryArtifacts.<arch>.
+tp_manifest_binary_artifact_field() {
+	_json="$1"
+	_arch="$2"
+	_field="$3"
+	# shellcheck disable=SC2086
+	_block="$(printf '%s' "$_json" | grep -o "\"$_arch\"[^}]*{[^}]*\"$_field\":\"[^\"]*\"" | head -1)"
+	[ -n "$_block" ] || return 1
+	printf '%s' "$_block" | grep -o "\"$_field\":\"[^\"]*\"" | sed 's/.*":"//' | tr -d '"'
+}
+
+# Populate manifest globals: _manifest_host, _manifest_commit, _linux_arch,
+# _binary_artifact_{url,sha256}, _js_fallback_artifact_{url,sha256},
+# _orchestration_artifact_{url,sha256}. Returns 1 when required fields are missing.
+tp_resolve_channel_manifest() {
+	_manifest_json="$1"
+
+	_compact="$(tp_manifest_compact "$_manifest_json")"
+	_manifest_host="$(tp_manifest_field "$_compact" "defaultControlPlaneUrl")"
+	_manifest_commit="$(tp_manifest_field "$_compact" "commit")"
+
+	_linux_arch="$(tp_resolve_linux_arch)" || return 1
+
+	_binary_artifact_url="$(tp_manifest_binary_artifact_field "$_compact" "$_linux_arch" "url")"
+	_binary_artifact_sha256="$(tp_manifest_binary_artifact_field "$_compact" "$_linux_arch" "sha256")"
+	_js_fallback_artifact_url="$(tp_manifest_artifact_field "$_compact" "jsFallbackArtifact" "url")"
+	_js_fallback_artifact_sha256="$(tp_manifest_artifact_field "$_compact" "jsFallbackArtifact" "sha256")"
+	_orchestration_artifact_url="$(tp_manifest_artifact_field "$_compact" "orchestrationArtifact" "url")"
+	_orchestration_artifact_sha256="$(tp_manifest_artifact_field "$_compact" "orchestrationArtifact" "sha256")"
+
+	if [ -z "$_manifest_host" ]; then
+		_manifest_host="https://turbopanel.app"
+	fi
+
+	if [ -z "$_binary_artifact_url" ] || [ -z "$_binary_artifact_sha256" ] \
+		|| [ -z "$_js_fallback_artifact_url" ] || [ -z "$_js_fallback_artifact_sha256" ] \
+		|| [ -z "$_orchestration_artifact_url" ] || [ -z "$_orchestration_artifact_sha256" ]; then
+		return 1
+	fi
+
+	return 0
+}
+
+# Stage orchestration/ under opt/turbopanel/share/orchestration for standalone upload.
+tp_build_orchestration_archive_staging() {
+	_staging="$1"
+	_home="${2:-$(tp_prod_home)}"
+	_orchestration_src="$3"
+	_dest="$_staging/$_home/share/orchestration"
+	mkdir -p "$_dest"
+	cp -a "$_orchestration_src/." "$_dest/"
+	tp_prune_release_orchestration_tree "$_dest"
+}
+
+# Pack a staging tree whose root already contains opt/turbopanel/share/orchestration.
+tp_pack_orchestration_archive() {
+	_staging="$1"
+	_output="$2"
+	_home="${3:-$(tp_prod_home)}"
+	if [ ! -f "$_staging/$_home/share/orchestration/ansible.cfg" ]; then
+		echo "tp_pack_orchestration_archive: missing $_staging/$_home/share/orchestration/ansible.cfg" >&2
+		return 1
+	fi
+	rm -f "$_output"
+	tar -I 'zstd -19 -T0' -cf "$_output" -C "$_staging" "opt"
+	return 0
+}
+
+tp_extract_orchestration_release() {
+	_archive="$1"
+	_dest_root="$2"
+	_home="${3:-$(tp_prod_home)}"
+	if ! command -v zstd >/dev/null 2>&1; then
+		echo "tp_extract_orchestration_release: zstd is required" >&2
+		return 1
+	fi
+	mkdir -p "$_dest_root"
+	if ! zstd -d -q -c "$_archive" | tar -x -C "$_dest_root"; then
+		echo "tp_extract_orchestration_release: failed to extract $_archive" >&2
+		return 1
+	fi
+	if [ ! -f "$_dest_root/$_home/share/orchestration/ansible.cfg" ]; then
+		echo "tp_extract_orchestration_release: archive missing $_home/share/orchestration/ansible.cfg" >&2
+		return 1
+	fi
+	return 0
+}
+
+# Resolve the production native binary path (legacy name kept for callers).
+tp_daemon_dist_binary_path() {
+	_home="${1:-$(tp_prod_home)}"
+	tp_daemon_binary_path "$_home"
+}
+
+tp_build_release_staging_root() {
+	_staging="$1"
+	_home="${2:-$(tp_prod_home)}"
+	mkdir -p "$_staging/$_home/bin" "$_staging/$_home/share/orchestration"
+}
+
+tp_stage_release_binaries() {
+	_staging="$1"
+	_home="$2"
+	_native_src="$3"
+	_js_src="$4"
+	_bin_dir="$_staging/$_home/bin"
+	install -m 0755 "$_native_src" "$_bin_dir/$(tp_daemon_binary_name)"
+	install -m 0644 "$_js_src" "$_bin_dir/$(tp_daemon_js_fallback_name)"
+}
+
+# Stage the managed update helper (scripts/update.sh) into the release bin dir as
+# turbopanel-update so clean-package installs get a checkout-free update entrypoint.
+tp_stage_release_update_helper() {
+	_staging="$1"
+	_home="$2"
+	_update_src="$3"
+	install -m 0755 "$_update_src" "$_staging/$_home/bin/$(tp_daemon_update_helper_name)"
+}
+
+tp_stage_release_orchestration() {
+	_staging="$1"
+	_home="$2"
+	_orchestration_src="$3"
+	_dest="$_staging/$_home/share/orchestration"
+	cp -a "$_orchestration_src/." "$_dest/"
+	tp_prune_release_orchestration_tree "$_dest"
+}
+
+# Remove dev-only paths from a staged share/orchestration tree (vendor roles may ship .github).
+tp_prune_release_orchestration_tree() {
+	_root="$1"
+	find "$_root" \( \
+		-name .git -o -name node_modules -o -name tests -o -name test \
+		-o -name spec -o -name fixtures -o -name coverage -o -name .github \
+	\) -print 2>/dev/null | while IFS= read -r _path; do
+		[ -n "$_path" ] || continue
+		rm -rf "$_path"
+	done
+}
+
+# Fail when dev-only paths or daemon source leaked into a release staging tree.
+# _root is the tarball extract root (contains opt/turbopanel/…).
+# _mode is "full" (default; requires bin/*) or "orchestration" (share/orchestration only).
+tp_verify_release_root() {
+	_root="$1"
+	_mode="${2:-full}"
+	_home="$(tp_prod_home)"
+	_prod="$_root/$_home"
+	_fail=0
+
+	_leaked="$(find "$_root" \( \
+		-name .git -o -name node_modules -o -name tests -o -name test \
+		-o -name spec -o -name fixtures -o -name coverage -o -name .github \
+	\) -print 2>/dev/null || true)"
+	if [ -n "$_leaked" ]; then
+		echo "tp_verify_release_root: dev-only paths leaked into release tree:" >&2
+		printf '%s\n' "$_leaked" >&2
+		_fail=1
+	fi
+
+	_ts_files="$(find "$_root" -name '*.ts' -print 2>/dev/null || true)"
+	if [ -n "$_ts_files" ]; then
+		echo "tp_verify_release_root: unexpected TypeScript sources in release tree:" >&2
+		printf '%s\n' "$_ts_files" >&2
+		_fail=1
+	fi
+
+	_ansible_share="$(find "$_root" -path "*/share/ansible/*" -print 2>/dev/null || true)"
+	if [ -n "$_ansible_share" ]; then
+		echo "tp_verify_release_root: share/ansible must not ship (use share/orchestration):" >&2
+		printf '%s\n' "$_ansible_share" >&2
+		_fail=1
+	fi
+
+	for _forbidden in \
+		"$_prod/src" \
+		"$_prod/main.ts" \
+		"$_prod/deno.json" \
+		"$_prod/deno.lock" \
+		"$_prod/scripts"; do
+		if [ -e "$_forbidden" ]; then
+			echo "tp_verify_release_root: daemon source tree leaked: $_forbidden" >&2
+			_fail=1
+		fi
+	done
+
+	if [ ! -f "$_prod/share/orchestration/ansible.cfg" ]; then
+		echo "tp_verify_release_root: missing $_prod/share/orchestration/ansible.cfg" >&2
+		_fail=1
+	fi
+
+	if [ "$_mode" = "full" ]; then
+		if [ ! -f "$_prod/bin/$(tp_daemon_binary_name)" ]; then
+			echo "tp_verify_release_root: missing $_prod/bin/$(tp_daemon_binary_name)" >&2
+			_fail=1
+		fi
+		if [ ! -f "$_prod/bin/$(tp_daemon_js_fallback_name)" ]; then
+			echo "tp_verify_release_root: missing $_prod/bin/$(tp_daemon_js_fallback_name)" >&2
+			_fail=1
+		fi
+		if [ ! -f "$_prod/bin/$(tp_daemon_update_helper_name)" ]; then
+			echo "tp_verify_release_root: missing $_prod/bin/$(tp_daemon_update_helper_name)" >&2
+			_fail=1
+		fi
+	fi
+
+	if [ "$_fail" -ne 0 ]; then
+		return 1
+	fi
+	return 0
+}
+
 tp_extract_daemon_release() {
 	_archive="$1"
-	_dest_dir="$2"
+	_dest_root="$2"
+	_home="${3:-$(tp_prod_home)}"
 	_binary_name="$(tp_daemon_binary_name)"
+	_js_name="$(tp_daemon_js_fallback_name)"
 	if ! command -v zstd >/dev/null 2>&1; then
 		echo "tp_extract_daemon_release: zstd is required" >&2
 		return 1
 	fi
-	mkdir -p "$_dest_dir"
-	if ! zstd -d -q -c "$_archive" | tar -x -C "$_dest_dir"; then
+	mkdir -p "$_dest_root"
+	if ! zstd -d -q -c "$_archive" | tar -x -C "$_dest_root"; then
 		echo "tp_extract_daemon_release: failed to extract $_archive" >&2
 		return 1
 	fi
-	if [ ! -f "$_dest_dir/$_binary_name" ]; then
-		echo "tp_extract_daemon_release: archive missing $_binary_name member" >&2
+	if [ ! -f "$_dest_root/$_home/bin/$_binary_name" ]; then
+		echo "tp_extract_daemon_release: archive missing $_home/bin/$_binary_name" >&2
 		return 1
 	fi
-	chmod 0755 "$_dest_dir/$_binary_name"
+	if [ ! -f "$_dest_root/$_home/bin/$_js_name" ]; then
+		echo "tp_extract_daemon_release: archive missing $_home/bin/$_js_name" >&2
+		return 1
+	fi
+	if [ ! -f "$_dest_root/$_home/share/orchestration/ansible.cfg" ]; then
+		echo "tp_extract_daemon_release: archive missing $_home/share/orchestration/ansible.cfg" >&2
+		return 1
+	fi
+	chmod 0755 "$_dest_root/$_home/bin/$_binary_name"
 	return 0
-}
-
-tp_daemon_dist_binary_path() {
-	_daemon_dir="${1:-/opt/turbopanel/platform/daemon}"
-	printf '%s/dist/turbopaneld' "$_daemon_dir"
 }
 
 tp_install_verified_artifact() {
 	_url="$1"
 	_sha256="$2"
-	_daemon_dir="$3"
+	_install_root="$3"
 	_tmp=""
 	_staging=""
 
@@ -106,11 +406,25 @@ tp_install_verified_artifact() {
 		return 1
 	fi
 
-	if ! tp_extract_daemon_release "$_tmp" "$_staging"; then
+	if ! tp_extract_daemon_release "$_tmp" "$_staging" "$(tp_prod_home)"; then
 		return 1
 	fi
 
-	mkdir -p "$(dirname "$(tp_daemon_dist_binary_path "$_daemon_dir")")"
-	install -m 0755 "$_staging/$(tp_daemon_binary_name)" "$(tp_daemon_dist_binary_path "$_daemon_dir")"
+	_home="$(tp_prod_home)"
+	mkdir -p "$_install_root/$_home/bin" "$_install_root/$_home/share/orchestration"
+	install -m 0755 \
+		"$_staging/$_home/bin/$(tp_daemon_binary_name)" \
+		"$_install_root/$_home/bin/$(tp_daemon_binary_name)"
+	install -m 0644 \
+		"$_staging/$_home/bin/$(tp_daemon_js_fallback_name)" \
+		"$_install_root/$_home/bin/$(tp_daemon_js_fallback_name)"
+	# Best-effort: install the managed update helper when the tarball carries it.
+	if [ -f "$_staging/$_home/bin/$(tp_daemon_update_helper_name)" ]; then
+		install -m 0755 \
+			"$_staging/$_home/bin/$(tp_daemon_update_helper_name)" \
+			"$_install_root/$_home/bin/$(tp_daemon_update_helper_name)"
+	fi
+	rm -rf "$_install_root/$_home/share/orchestration"
+	cp -a "$_staging/$_home/share/orchestration" "$_install_root/$_home/share/"
 	return 0
 }

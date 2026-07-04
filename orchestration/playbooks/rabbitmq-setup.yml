@@ -4,7 +4,8 @@
   become: true
   gather_facts: true
   vars:
-    turbopanel_config_dir: /opt/turbopanel/platform/config
+    # Standalone managed broker setup (daemon-only hosts) — FHS config layout.
+    turbopanel_config_dir: /etc/turbopanel
   roles:
     - role: docker
     - role: rabbitmq

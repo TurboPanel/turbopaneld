@@ -8,6 +8,8 @@ turbopanel_ui_runtime_dir: "{{ turbopanel_ui_dir }}/.local"
 instance_user: turbopaneli
 turbopanel_group: turbopanel
 turbopanel_ui_mode: dev
-turbopanel_ui_dist_dir: "{{ turbopanel_ui_dir }}/dist"
+# Co-located dev exports into the ui checkout; managed installs build/download
+# into the shared FHS location served by Caddy (owner turbopaneli:turbopanel).
+turbopanel_ui_dist_dir: "{{ (turbopanel_ui_dir ~ '/dist') if (turbopanel_dev_user | default('') | length > 0) else '/opt/turbopanel/share/ui' }}"
 turbopanel_ui_artifact_url: ""
 force_build: false

@@ -15,6 +15,13 @@ export interface ArtifactEntry {
   size: number;
 }
 
+export type LinuxArch = "linux-amd64" | "linux-arm64";
+
+export interface BinaryArtifacts {
+  "linux-amd64": ArtifactEntry;
+  "linux-arm64": ArtifactEntry;
+}
+
 export interface ChannelManifest {
   schema: number;
   channel: UpdateChannel;
@@ -22,7 +29,9 @@ export interface ChannelManifest {
   buildId: string;
   builtAt: string;
   defaultControlPlaneUrl?: string;
-  sourceArtifact: ArtifactEntry;
+  binaryArtifacts: BinaryArtifacts;
+  jsFallbackArtifact: ArtifactEntry;
+  orchestrationArtifact: ArtifactEntry;
   releaseNotesUrl?: string;
   signature?: Record<string, unknown>;
 }
@@ -32,6 +41,9 @@ export interface UpdateInfo {
   commit: string;
   buildId: string;
   builtAt: string;
-  sourceArtifact: ArtifactEntry;
+  binaryArtifact: ArtifactEntry;
+  jsFallbackArtifact: ArtifactEntry;
+  orchestrationArtifact: ArtifactEntry;
+  /** Native binary tarball URL for the current host architecture. */
   downloadUrl: string;
 }

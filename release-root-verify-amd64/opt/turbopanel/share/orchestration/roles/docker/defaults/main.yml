@@ -1,0 +1,14 @@
+# OS user the daemon runs as. This user is added to the docker group so the
+# daemon process can talk to the Docker socket without sudo.
+docker_user: turbopanel
+
+# Future toggle: when true, the role will configure rootless Docker (not yet
+# implemented). Playbooks may reference this variable now without breaking.
+docker_rootless: false
+
+# When true, docker_user is added to the docker group. Must be false when
+# docker_rootless is true — rootless Docker does not use the docker group.
+docker_add_turbopanel_user: true
+
+# Co-located dev: human developer invoking ./console (passed as extra-var).
+turbopanel_dev_user: ""

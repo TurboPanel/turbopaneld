@@ -1,0 +1,93 @@
+---
+# Co-located dev hosts already have the instance checkout as the live working
+# tree, so we clone only when it is missing and never force-reset it (that would
+# clobber uncommitted developer work). Production artifact deploys are handled
+# separately and are out of scope here.
+- name: Check instance checkout
+  ansible.builtin.stat:
+    path: "{{ turbopanel_instance_dir }}/.git"
+  register: _instance_git
+
+- name: Check instance checkout directory
+  ansible.builtin.stat:
+    path: "{{ turbopanel_instance_dir }}"
+  register: _instance_dir
+
+- name: List non-placeholder instance checkout entries when not a git repository
+  when:
+    - not _instance_git.stat.exists
+    - _instance_dir.stat.isdir | default(false)
+  ansible.builtin.find:
+    paths: "{{ turbopanel_instance_dir }}"
+    file_type: any
+    hidden: true
+    depth: 1
+    excludes: .turbopanel-checkout-stamp
+  register: _instance_real_entries
+
+# instance-user and dev-permissions may leave an empty checkout path (and a
+# normalize-dev-checkout stamp) before this role runs; git clone refuses to
+# target an existing directory even when only those placeholders are present.
+- name: Remove instance checkout placeholder before clone
+  when:
+    - not _instance_git.stat.exists
+    - _instance_dir.stat.isdir | default(false)
+    - _instance_real_entries.matched == 0
+  ansible.builtin.file:
+    path: "{{ turbopanel_instance_dir }}"
+    state: absent
+
+- name: Fail when instance checkout exists without git metadata
+  when:
+    - not _instance_git.stat.exists
+    - _instance_dir.stat.isdir | default(false)
+    - _instance_real_entries.matched > 0
+  ansible.builtin.fail:
+    msg: >-
+      {{ turbopanel_instance_dir }} exists but is not a git checkout.
+      Move or remove it manually, then re-run the dev stack.
+
+- name: Clone instance repository when missing
+  when: not _instance_git.stat.exists
+  ansible.builtin.git:
+    repo: "{{ instance_repo_url }}"
+    dest: "{{ turbopanel_instance_dir }}"
+    version: "{{ instance_branch }}"
+  become_user: "{{ turbopanel_user }}"
+  environment:
+    HOME: "{{ turbopanel_install_root }}"
+  register: _instance_clone
+
+- name: Record checkout normalize needed after instance clone
+  ansible.builtin.set_fact:
+    force_checkout_normalize: true
+  when: _instance_clone is defined and _instance_clone is changed
+
+- name: Report instance checkout state
+  ansible.builtin.debug:
+    msg: >-
+      instance checkout {{ 'present (left untouched)' if _instance_git.stat.exists
+      else 'cloned from ' + instance_repo_url }}
+
+- name: Check instance dependencies
+  ansible.builtin.stat:
+    path: "{{ turbopanel_instance_dir }}/node_modules"
+  register: _instance_modules
+
+# Speed: only run the slow install when node_modules is absent. Developers
+# re-run `pnpm install` manually after changing dependencies.
+- name: Install instance dependencies
+  when: not _instance_modules.stat.exists
+  ansible.builtin.command:
+    argv: [pnpm, install, --frozen-lockfile]
+    chdir: "{{ turbopanel_instance_dir }}"
+  become_user: "{{ turbopanel_user }}"
+  environment:
+    HOME: "{{ turbopanel_install_root }}"
+    PATH: "/usr/local/bin:/usr/bin:/bin"
+  register: _instance_pnpm_install
+
+- name: Record checkout normalize needed after instance pnpm install
+  ansible.builtin.set_fact:
+    force_checkout_normalize: true
+  when: _instance_pnpm_install is defined and _instance_pnpm_install is changed

@@ -1,0 +1,101 @@
+# Dev-only Mailpit container for local email capture (web UI + SMTP).
+# Not routed through Caddy — loopback ports only.
+
+- name: Ensure mailpit config directory exists
+  ansible.builtin.file:
+    path: "{{ turbopanel_config_dir }}/mailpit"
+    state: directory
+    owner: root
+    group: turbopanel
+    mode: "0750"
+
+- name: Ensure turbopanel Docker network exists
+  ansible.builtin.command:
+    argv: [docker, network, create, --driver, bridge, "{{ turbopanel_docker_network }}"]
+  register: _mailpit_network_create
+  changed_when: false
+  failed_when: false
+
+- name: Inspect mailpit container
+  ansible.builtin.command:
+    argv: [docker, inspect, "{{ mailpit_container_name }}"]
+  register: _mailpit_inspect_cmd
+  changed_when: false
+  failed_when: false
+
+- name: Parse mailpit container inspection
+  ansible.builtin.set_fact:
+    _mailpit_container: "{{ (_mailpit_inspect_cmd.stdout | from_json)[0] }}"
+  when: _mailpit_inspect_cmd.rc == 0
+
+- name: Set mailpit container state facts
+  ansible.builtin.set_fact:
+    _mailpit_container_exists: true
+    _mailpit_running: "{{ _mailpit_container.State.Running | default(false) }}"
+    _mailpit_status: "{{ _mailpit_container.State.Status | default('') }}"
+    _mailpit_network_ok: "{{ turbopanel_docker_network in (_mailpit_container.NetworkSettings.Networks | default({})) }}"
+    _mailpit_web_ok: "{{ _mailpit_container.HostConfig.PortBindings['8025/tcp'] is defined }}"
+    _mailpit_smtp_ok: "{{ _mailpit_container.HostConfig.PortBindings['1025/tcp'] is defined }}"
+  when: _mailpit_inspect_cmd.rc == 0
+
+- name: Set mailpit container missing facts
+  ansible.builtin.set_fact:
+    _mailpit_container_exists: false
+    _mailpit_running: false
+  when: _mailpit_inspect_cmd.rc != 0
+
+- name: Remove mailpit container when unhealthy
+  ansible.builtin.command:
+    cmd: docker rm -f {{ mailpit_container_name }}
+  when:
+    - _mailpit_container_exists | bool
+    - (not _mailpit_network_ok | bool) or (not _mailpit_web_ok | bool) or (not _mailpit_smtp_ok | bool) or (_mailpit_status | trim in ['restarting', 'exited', 'dead'])
+  register: _mailpit_removed
+  changed_when: _mailpit_removed.rc == 0
+
+- name: Refresh mailpit container facts after removal
+  ansible.builtin.set_fact:
+    _mailpit_container_exists: false
+    _mailpit_running: false
+  when: _mailpit_removed is changed
+
+- name: Create and start mailpit container
+  ansible.builtin.command:
+    cmd: >-
+      docker run
+      --name {{ mailpit_container_name }}
+      --restart unless-stopped
+      -d
+      --network {{ turbopanel_docker_network }}
+      -p 127.0.0.1:{{ mailpit_web_port }}:8025
+      -p 127.0.0.1:{{ mailpit_smtp_port }}:1025
+      {{ mailpit_image }}
+  when: not _mailpit_container_exists | bool
+
+- name: Install mailpit wrapper start script
+  ansible.builtin.template:
+    src: mailpit-wrapper-start.sh.j2
+    dest: "{{ turbopanel_config_dir }}/mailpit/wrapper-start.sh"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Ensure mailpit container is running and ready
+  ansible.builtin.command:
+    cmd: "{{ turbopanel_config_dir }}/mailpit/wrapper-start.sh"
+  changed_when: false
+
+- name: Install Mailpit systemd unit
+  ansible.builtin.template:
+    src: turbopanel-mailpit.service.j2
+    dest: "/etc/systemd/system/{{ mailpit_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Ensure Mailpit systemd unit desired state
+  ansible.builtin.systemd:
+    name: "{{ mailpit_service_name }}"
+    daemon_reload: true
+    enabled: true
+    state: started

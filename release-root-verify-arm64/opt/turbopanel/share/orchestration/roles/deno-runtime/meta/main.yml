@@ -1,0 +1,15 @@
+---
+galaxy_info:
+  author: turbopanel
+  description: Install a pinned Deno runtime to /usr/local/bin/deno for the instance stack (not the daemon).
+  license: AGPL-3.0
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Debian
+      versions:
+        - all
+    - name: Raspbian
+      versions:
+        - all
+
+dependencies: []

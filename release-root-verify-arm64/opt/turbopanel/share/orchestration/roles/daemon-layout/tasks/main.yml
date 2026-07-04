@@ -1,0 +1,45 @@
+---
+# Managed-node install layout without cloning the daemon git checkout.
+# run.sh drops the released binary and orchestration tarball before this playbook runs.
+
+- name: Ensure daemon install directories exist
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ turbopanel_daemon_dir }}", mode: "0750" }
+    - { path: "{{ turbopanel_daemon_dir }}/cloudflared/tunnels", mode: "0750" }
+
+- name: Require daemon source entrypoint
+  ansible.builtin.stat:
+    path: "{{ turbopanel_daemon_dir }}/main.ts"
+  register: _daemon_source
+
+- name: Assert daemon source is present
+  ansible.builtin.assert:
+    that:
+      - _daemon_source.stat.exists
+    fail_msg: >-
+      Missing daemon source at {{ turbopanel_daemon_dir }}/main.ts.
+      run.sh must extract the daemon source release before this playbook runs.
+
+- name: Require orchestration tree
+  ansible.builtin.stat:
+    path: "{{ turbopanel_daemon_dir }}/orchestration/ansible.cfg"
+  register: _orchestration_cfg
+
+- name: Assert orchestration tree is present
+  ansible.builtin.assert:
+    that:
+      - _orchestration_cfg.stat.exists
+    fail_msg: >-
+      Missing orchestration tree under {{ turbopanel_daemon_dir }}/orchestration.
+      run.sh must extract the orchestration release before this playbook runs.
+
+- name: Ensure ensure-single-daemon helper is executable
+  ansible.builtin.file:
+    path: "{{ turbopanel_daemon_dir }}/orchestration/scripts/ensure-single-daemon.sh"
+    mode: "0755"

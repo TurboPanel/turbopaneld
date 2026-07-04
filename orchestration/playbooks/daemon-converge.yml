@@ -1,7 +1,7 @@
 ---
-# Single convergence playbook for daemon-only hosts (no co-located dev instance).
-# Gathers facts once and runs shared infrastructure roles without overlapping
-# docker/redis/rabbitmq/postgres playbook invocations.
+# Single convergence playbook for managed daemon-only hosts (no co-located
+# instance). Gathers facts once and runs shared infrastructure roles without
+# overlapping docker/redis/rabbitmq/postgres playbook invocations.
 - name: TurboPanel daemon converge
   hosts: localhost
   connection: local
@@ -10,16 +10,20 @@
 
   vars:
     turbopanel_install_root: /opt/turbopanel
-    turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/runtimes"
-    turbopanel_daemon_dir: "{{ turbopanel_install_root }}/platform/daemon"
-    turbopanel_config_dir: /opt/turbopanel/platform/config
+    turbopanel_managed_install: true
+    turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/lib/runtime"
+    turbopanel_orchestration_dir: "{{ turbopanel_install_root }}/share/orchestration"
+    turbopanel_config_dir: /etc/turbopanel
+    turbopanel_daemon_state_dir: /var/lib/turbopanel
+    turbopanel_daemon_env_file: "{{ turbopanel_config_dir }}/daemon.env"
+    turbopanel_daemon_bin: "{{ turbopanel_install_root }}/bin/turbopaneld"
+    turbopanel_daemon_js: "{{ turbopanel_install_root }}/bin/turbopaneld.js"
+    turbopanel_daemon_workdir: "{{ turbopanel_install_root }}"
+    turbopanel_daemon_deno_bin: "{{ turbopanel_runtimes_dir }}/deno/bin/deno"
     turbopanel_dev_user: ""
     turbopanel_user: turbopanel
     turbopanel_group: turbopanel
-    turbopanel_service_name: turbopanel-daemon
-    # Daemon runs from source via the vendored Deno runtime — the same path
-    # managed installs (run.sh) and the daemon-launch role default use.
-    turbopanel_daemon_deno_bin: /opt/turbopanel/runtimes/deno/current/deno
+    turbopanel_service_name: turbopaneld
     # Managed daemon-only hosts have no co-located instance service to order after.
     turbopanel_after_instance_service: false
 
@@ -29,6 +33,17 @@
         update_cache: true
         cache_valid_time: 3600
       when: ansible_os_family == 'Debian'
+
+    - name: Probe native daemon binary executability
+      ansible.builtin.command:
+        cmd: "{{ turbopanel_daemon_bin }} --version"
+      register: _native_probe
+      failed_when: false
+      changed_when: false
+
+    - name: Select native or JS-fallback ExecStart
+      ansible.builtin.set_fact:
+        turbopanel_daemon_exec_mode: "{{ 'native' if _native_probe.rc == 0 else 'js' }}"
 
   # Docker is installed on demand (when a container workload is assigned), not as
   # part of routine daemon convergence — nodes that only run native web services
@@ -41,15 +56,28 @@
 
   # Already-provisioned managed daemons only ever receive this lightweight
   # converge (see src/orchestration/setup.ts), never a full reinstall. Refresh
-  # the installed turbopanel-daemon.service so unit changes — e.g. the migrated
-  # /var/log/turbopanel/daemon log target rendered into
-  # roles/daemon-launch/templates/turbopanel-daemon.service.j2 — actually land on
+  # the installed turbopaneld.service so unit changes — e.g. native-vs-JS
+  # ExecStart selection rendered into
+  # roles/daemon-launch/templates/turbopaneld.service.j2 — actually land on
   # existing hosts. We deliberately re-render + daemon-reload ONLY: this playbook
   # runs from inside the running daemon, so stopping or restarting it here would
   # kill the converge mid-run. The refreshed unit takes effect on the daemon's
   # next restart; its enabled/running state is preserved (no systemd state task,
   # so turbopanel_start being unset never stops it).
   post_tasks:
+    - name: Stop and disable legacy turbopanel-daemon.service
+      ansible.builtin.systemd:
+        name: turbopanel-daemon
+        enabled: false
+        state: stopped
+      failed_when: false
+
+    - name: Remove legacy turbopanel-daemon.service unit file
+      ansible.builtin.file:
+        path: /etc/systemd/system/turbopanel-daemon.service
+        state: absent
+      register: turbopanel_legacy_unit_removed
+
     - name: Check for an installed daemon systemd unit
       ansible.builtin.stat:
         path: "/etc/systemd/system/{{ turbopanel_service_name }}.service"
@@ -57,15 +85,15 @@
 
     - name: Refresh installed daemon systemd unit
       ansible.builtin.template:
-        src: "{{ turbopanel_daemon_dir }}/orchestration/roles/daemon-launch/templates/turbopanel-daemon.service.j2"
+        src: "{{ turbopanel_orchestration_dir }}/roles/daemon-launch/templates/turbopaneld.service.j2"
         dest: "/etc/systemd/system/{{ turbopanel_service_name }}.service"
         owner: root
         group: root
         mode: "0644"
-      when: turbopanel_daemon_unit.stat.exists
+      when: turbopanel_daemon_unit.stat.exists or turbopanel_legacy_unit_removed is changed
       register: turbopanel_daemon_unit_render
 
     - name: Reload systemd so the refreshed unit is registered
       ansible.builtin.systemd:
         daemon_reload: true
-      when: turbopanel_daemon_unit_render is changed
+      when: turbopanel_daemon_unit_render is changed or turbopanel_legacy_unit_removed is changed

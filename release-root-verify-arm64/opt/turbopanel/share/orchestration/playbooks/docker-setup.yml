@@ -1,0 +1,7 @@
+- name: Ensure Docker is installed and running
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+  roles:
+    - role: docker

@@ -65,6 +65,15 @@ jobs:
       - name: Install Deno
         uses: denoland/setup-deno@v2
 
+      - name: Check production layout contract
+        run: deno task check:layout
+
+      - name: Verify path resolution (dev vs prod)
+        run: deno test --allow-read --allow-write --allow-env src/orchestration/paths.test.ts
+
+      - name: Install zstd
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zstd
+
       - name: Compute build metadata
         run: |
           echo "BUILD_ID=$(date -u '+%Y%m%d-%H%M%S')-$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
@@ -93,25 +102,99 @@ jobs:
           }
           EOF
 
-      - name: Stage daemon source build
-        run: |
-          # Source build runs via stock Deno (`deno run main.ts`) where the
-          # compiled binary's 4 KB-aligned segment can't load. build-info.ts was
-          # already overwritten with the real commit before compile:all.
-          mkdir -p publish/channels/trunk/daemon publish/channels/trunk
-          tar -I 'zstd -19 -T0' \
-            -cf publish/channels/trunk/daemon/source.tar.zst \
-            main.ts deno.json deno.lock embedded-orchestration.ts \
-            src orchestration scripts
+      - name: Compile native binary
+        run: deno task compile
 
-      - name: Compute checksums and sizes
+      - name: Compile linux-amd64 binary
+        run: deno task compile:linux-amd64
+
+      - name: Compile linux-arm64 binary
+        run: deno task compile:linux-arm64
+
+      - name: Bundle JS fallback
+        run: deno task bundle:js
+
+      - name: Stage orchestration share tree
+        run: deno task bundle:orchestration
+
+      - name: Package per-arch release tarballs
+        run: deno task package:release
+
+      - name: Verify release packages and stage publish tree
         run: |
-          echo "SOURCE_SHA256=$(sha256sum publish/channels/trunk/daemon/source.tar.zst | awk '{print $1}')" >> "$GITHUB_ENV"
-          echo "SOURCE_SIZE=$(stat -c%s publish/channels/trunk/daemon/source.tar.zst)" >> "$GITHUB_ENV"
+          set -eu
+          # shellcheck source=scripts/lib/release-artifacts.sh
+          . scripts/lib/release-artifacts.sh
+          chmod +x scripts/verify-release-root.sh
+
+          _publish_dir="publish/channels/trunk/daemon"
+          mkdir -p "$_publish_dir" publish/channels/trunk
+
+          # Verify each arch release package, copy the verified tarball into
+          # publish/, and keep one extract to derive standalone artifacts.
+          _derive_root=""
+          for _arch in amd64 arm64; do
+            _tarball="dist/turbopaneld-linux-${_arch}.tar.zst"
+            _verify_root="release-root-verify-${_arch}"
+            rm -rf "$_verify_root"
+            mkdir -p "$_verify_root"
+            zstd -d -q -c "$_tarball" | tar -x -C "$_verify_root"
+            sh scripts/verify-release-root.sh "$_verify_root"
+            cp "$_tarball" "$_publish_dir/"
+            if [ -z "$_derive_root" ]; then
+              _derive_root="$_verify_root"
+            else
+              rm -rf "$_verify_root"
+            fi
+          done
+
+          _prod_home="$(tp_prod_home)"
+          _js_name="$(tp_daemon_js_fallback_name)"
+          _orch_name="$(tp_orchestration_release_filename)"
+
+          # Standalone JS and orchestration must come from the verified staged
+          # release-root tree, not from raw dist/ build outputs.
+          _js_src="$_derive_root${_prod_home}/bin/${_js_name}"
+          if [ ! -s "$_js_src" ]; then
+            echo "::error::missing ${_js_name} in verified release root"
+            exit 1
+          fi
+          cp "$_js_src" "$_publish_dir/${_js_name}"
+
+          _orch_staging="$(mktemp -d)"
+          mkdir -p "$_orch_staging${_prod_home}/share"
+          cp -a "$_derive_root${_prod_home}/share/orchestration" \
+            "$_orch_staging${_prod_home}/share/"
+          sh scripts/verify-release-root.sh --orchestration-only "$_orch_staging"
+          tp_pack_orchestration_archive \
+            "$_orch_staging" \
+            "$_publish_dir/${_orch_name}" \
+            "$_prod_home"
+          rm -rf "$_orch_staging" "$_derive_root"
+
+          # Verify the exact files staged for publish.
+          for _artifact in \
+            turbopaneld-linux-amd64.tar.zst \
+            turbopaneld-linux-arm64.tar.zst \
+            "$_js_name" \
+            "$_orch_name"; do
+            if [ ! -s "$_publish_dir/$_artifact" ]; then
+              echo "::error::missing or empty publish artifact: $_artifact"
+              exit 1
+            fi
+          done
+
+          _orch_verify="release-root-verify-orchestration-publish"
+          rm -rf "$_orch_verify"
+          mkdir -p "$_orch_verify"
+          zstd -d -q -c "$_publish_dir/${_orch_name}" | tar -x -C "$_orch_verify"
+          sh scripts/verify-release-root.sh --orchestration-only "$_orch_verify"
+          rm -rf "$_orch_verify"
 
       - name: Generate channel manifest
         run: |
-          deno run --allow-env --allow-write scripts/generate-channel-manifest.ts \
+          deno run --allow-env --allow-read --allow-write scripts/generate-channel-manifest.ts \
+            publish/channels/trunk/daemon \
             publish/channels/trunk/manifest.json
           cat > publish/channels.json <<'EOF'
           {
@@ -131,10 +214,17 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.DL_S3_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: ${{ vars.DL_S3_REGION }}
         run: |
-          aws s3 cp publish/channels/trunk/daemon/source.tar.zst \
-            "s3://${{ secrets.DL_S3_BUCKET }}/channels/trunk/daemon/source.tar.zst" \
-            --endpoint-url "${{ vars.DL_S3_ENDPOINT }}" \
-            --cache-control "public, max-age=30, must-revalidate"
+          _prefix="channels/trunk/daemon"
+          for _artifact in \
+            turbopaneld-linux-amd64.tar.zst \
+            turbopaneld-linux-arm64.tar.zst \
+            turbopaneld.js \
+            orchestration.tar.zst; do
+            aws s3 cp "publish/${_prefix}/${_artifact}" \
+              "s3://${{ secrets.DL_S3_BUCKET }}/${_prefix}/${_artifact}" \
+              --endpoint-url "${{ vars.DL_S3_ENDPOINT }}" \
+              --cache-control "public, max-age=30, must-revalidate"
+          done
           aws s3 cp publish/channels/trunk/manifest.json \
             "s3://${{ secrets.DL_S3_BUCKET }}/channels/trunk/manifest.json" \
             --endpoint-url "${{ vars.DL_S3_ENDPOINT }}" \

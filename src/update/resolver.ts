@@ -3,9 +3,22 @@ import {
   MalformedManifestError,
   MissingChannelError,
 } from "./errors.ts";
-import type { UpdateInfo } from "./types.ts";
+import type { LinuxArch, UpdateInfo } from "./types.ts";
 import { DL_BASE_URL, rootCatalogUrl } from "./urls.ts";
 import { parseChannelManifest, parseRootCatalog } from "./validate.ts";
+
+function resolveLinuxArch(): LinuxArch {
+  switch (Deno.build.arch) {
+    case "x86_64":
+      return "linux-amd64";
+    case "aarch64":
+      return "linux-arm64";
+    default:
+      throw new MalformedManifestError(
+        `Unsupported CPU architecture for daemon updates: ${Deno.build.arch}`,
+      );
+  }
+}
 
 export async function resolveUpdate(
   config: UpdateChannelConfig,
@@ -39,14 +52,17 @@ export async function resolveUpdate(
 
   const manifest = parseChannelManifest(await manifestResponse.json());
 
-  const sourceArtifact = manifest.sourceArtifact;
+  const arch = resolveLinuxArch();
+  const binaryArtifact = manifest.binaryArtifacts[arch];
 
   return {
     channel: manifest.channel,
     buildId: manifest.buildId,
     commit: manifest.commit,
     builtAt: manifest.builtAt,
-    sourceArtifact,
-    downloadUrl: sourceArtifact.url,
+    binaryArtifact,
+    jsFallbackArtifact: manifest.jsFallbackArtifact,
+    orchestrationArtifact: manifest.orchestrationArtifact,
+    downloadUrl: binaryArtifact.url,
   };
 }

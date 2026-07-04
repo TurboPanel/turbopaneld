@@ -1,6 +1,6 @@
 import { logWarn } from "../logger.ts";
 
-export const DEFAULT_DAEMON_UNIT = "turbopanel-daemon";
+export const DEFAULT_DAEMON_UNIT = "turbopaneld";
 
 function stripLogInjection(text: string): string {
   return text.replace(/[\r\n\t]/g, " ");

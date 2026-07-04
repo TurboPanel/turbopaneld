@@ -4,7 +4,8 @@ galaxy_info:
   license: AGPL-3.0
   description: >
     Run PostgreSQL 18 in Docker with persistent data, a Unix socket bind-mount,
-    and connection metadata under /opt/turbopanel/platform/config/postgres/.
+    and connection metadata under {{ turbopanel_config_dir }}/postgres/ (managed:
+    /etc/turbopanel, co-located dev: /opt/turbopanel/platform/config).
   min_ansible_version: "2.18"
   platforms:
     - name: Debian

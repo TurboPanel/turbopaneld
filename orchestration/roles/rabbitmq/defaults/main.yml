@@ -8,7 +8,8 @@ rabbitmq_volume_name: turbopanelq
 turbopanel_docker_network: turbopanel
 rabbitmq_user: turbopanel
 rabbitmq_vhost: /
-turbopanel_config_dir: /opt/turbopanel/platform/config
+# Co-located dev keeps the checkout config layout; managed installs use /etc/turbopanel.
+turbopanel_config_dir: "{{ '/opt/turbopanel/platform/config' if (turbopanel_dev_user | default('') | length > 0) else '/etc/turbopanel' }}"
 rabbitmq_service_name: turbopanel-rabbitmq
 rabbitmq_container_uid: "9995"
 rabbitmq_container_gid: "9995"

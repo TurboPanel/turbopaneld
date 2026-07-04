@@ -4,13 +4,13 @@
 # Ensures /run/turbopanel exists with shared group permissions and probes
 # daemon.lock for a live holder before systemd starts a second daemon.
 #
-# The co-located daemon is the same turbopanel-daemon.service process, so this
+# The co-located daemon is the same turbopaneld.service process, so this
 # flock guard applies identically. The instance cell's single-writer lease
 # (attachDaemonSocket / detachDaemonSocket, deduped by X-Real-IP / __direct__)
 # is the runtime backstop on both Workers (DO lease) and self-hosted (Redis
 # lease). Manual `deno task start/dev` bypasses flock (dev-only).
 #
-# The real single-daemon guard remains flock -n in turbopanel-daemon.service.
+# The real single-daemon guard remains flock -n in turbopaneld.service.
 set -euo pipefail
 
 RUN_DIR="/run/turbopanel"

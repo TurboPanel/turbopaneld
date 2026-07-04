@@ -1,5 +1,13 @@
+import { readEnv, resolveLayout } from "../paths/layout.ts";
+
+const layout = resolveLayout({
+  TURBOPANEL_RUN_DIR: readEnv("TURBOPANEL_RUN_DIR"),
+  TURBOPANEL_CONFIG_DIR: readEnv("TURBOPANEL_CONFIG_DIR"),
+  TURBOPANEL_DAEMON_ROOT: readEnv("TURBOPANEL_DAEMON_ROOT"),
+});
+
 /** Canonical runtime socket directory ( /var/run symlinks to /run on Linux ). */
-export const DEFAULT_SOCKET_DIR = "/run/turbopanel";
+export const DEFAULT_SOCKET_DIR = layout.runDir;
 
 /** Unix socket filename for the TurboPanel instance. */
 export const INSTANCE_SOCKET = "instance.sock";
@@ -27,7 +35,8 @@ export function resolveInstanceSocket(
   const override = env.TURBOPANEL_SOCKET?.trim();
   if (override) return override;
 
-  const dir = env.TURBOPANEL_SOCKET_DIR?.trim() || DEFAULT_SOCKET_DIR;
+  const layout = resolveLayout(env);
+  const dir = env.TURBOPANEL_SOCKET_DIR?.trim() || layout.runDir;
   return `${dir.replace(/\/$/, "")}/${INSTANCE_SOCKET}`;
 }
 
@@ -90,8 +99,40 @@ export function describeInstance(config: InstanceConfig): string {
 }
 
 /** Default platform CA path written by run.sh / daemon-config on managed nodes. */
-export const CANONICAL_INSTANCE_CA_PATH =
-  "/opt/turbopanel/platform/config/instance-ca.pem";
+export const CANONICAL_INSTANCE_CA_PATH = layout.instanceCaPath;
+
+function isTruthyFlag(value: string | undefined): boolean {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes";
+}
+
+function stripTrailingSlash(path: string): string {
+  return path.replace(/\/+$/, "");
+}
+
+/**
+ * Directory for daemon server identity files (`server.id`, keys, license).
+ *
+ * Honors `TURBOPANEL_DAEMON_STATE_DIR`, then `TURBOPANEL_STATE_DIR`, then
+ * mode-specific defaults via {@link resolveLayout}.
+ */
+export function resolveServerIdentityDir(
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+): string {
+  if (isTruthyFlag(env.TURBOPANEL_SKIP_ORCHESTRATION)) {
+    return stripTrailingSlash(Deno.cwd());
+  }
+  return resolveLayout(env).daemonStateDir;
+}
+
+export const SERVER_KEY_FILE = "server-key.json";
+
+/** Absolute path to the persisted daemon server key file. */
+export function resolveServerKeyPath(
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+): string {
+  return `${resolveServerIdentityDir(env)}/${SERVER_KEY_FILE}`;
+}
 
 /**
  * Resolve the platform CA PEM path for remote (url-mode) TLS trust.

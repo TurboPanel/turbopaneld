@@ -11,7 +11,12 @@ turbopanel_user: turbopanel
 turbopanel_group: turbopanel
 redis_primary_group: turbopanelc
 turbopanel_install_root: /opt/turbopanel
-turbopanel_instance_dir: "{{ turbopanel_install_root }}/platform/instance"
+turbopanel_dev_user: ""
+# Co-located dev keeps the /platform checkout as the instance user's home; managed
+# installs use the FHS lib tree.
+turbopanel_platform_dir: "{{ turbopanel_install_root }}/platform"
+turbopanel_lib_dir: "{{ turbopanel_install_root }}/lib"
+turbopanel_instance_dir: "{{ (turbopanel_platform_dir ~ '/instance') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/instance') }}"
 instance_service_name: turbopanel-instance
 caddy_service_name: turbopanel-caddy
 ui_service_name: turbopanel-ui

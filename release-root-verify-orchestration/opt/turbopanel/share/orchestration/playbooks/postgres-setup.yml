@@ -1,0 +1,9 @@
+- name: Ensure PostgreSQL 18 is running in Docker
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+  vars:
+    postgres_expose_port: false
+  roles:
+    - role: postgres

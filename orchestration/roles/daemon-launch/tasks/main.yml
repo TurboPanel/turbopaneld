@@ -1,18 +1,34 @@
 ---
 - name: Ensure single-daemon helper is executable
   ansible.builtin.file:
-    path: "{{ turbopanel_daemon_dir }}/orchestration/scripts/ensure-single-daemon.sh"
+    path: "{{ turbopanel_orchestration_dir }}/scripts/ensure-single-daemon.sh"
     mode: "0755"
 
 - name: Ensure runtime socket dir and clear stale daemon lock
   ansible.builtin.command:
-    cmd: "{{ turbopanel_daemon_dir }}/orchestration/scripts/ensure-single-daemon.sh"
+    cmd: "{{ turbopanel_orchestration_dir }}/scripts/ensure-single-daemon.sh"
   changed_when: false
   failed_when: false
 
+- name: Stop and disable legacy turbopanel-daemon.service
+  when: turbopanel_service_name != turbopanel_legacy_service_name
+  ansible.builtin.systemd:
+    name: "{{ turbopanel_legacy_service_name }}"
+    enabled: false
+    state: stopped
+  failed_when: false
+
+- name: Remove legacy turbopanel-daemon.service unit file
+  when: turbopanel_service_name != turbopanel_legacy_service_name
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ turbopanel_legacy_service_name }}.service"
+    state: absent
+  register: _legacy_unit_removed
+  notify: Reload systemd
+
 - name: Install daemon systemd unit
   ansible.builtin.template:
-    src: turbopanel-daemon.service.j2
+    src: turbopaneld.service.j2
     dest: "/etc/systemd/system/{{ turbopanel_service_name }}.service"
     owner: root
     group: root

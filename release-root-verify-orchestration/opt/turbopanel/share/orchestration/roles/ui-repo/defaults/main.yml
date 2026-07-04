@@ -1,0 +1,9 @@
+---
+turbopanel_install_root: /opt/turbopanel
+turbopanel_user: turbopanel
+turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/runtimes"
+turbopanel_ui_dir: "{{ turbopanel_install_root }}/platform/ui"
+instance_user: turbopaneli
+turbopanel_group: turbopanel
+ui_repo_url: https://github.com/turbopanel/turbopanel-ui
+ui_branch: trunk

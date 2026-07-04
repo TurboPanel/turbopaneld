@@ -1,45 +1,53 @@
 ---
-# Managed-node install layout without cloning the daemon git checkout.
-# run.sh drops the released binary and orchestration tarball before this playbook runs.
+# Managed-node FHS layout. run.sh installs bin/turbopaneld, bin/turbopaneld.js,
+# and share/orchestration/ before this playbook runs.
 
-- name: Ensure daemon install directories exist
+- name: Ensure production FHS directories exist
   ansible.builtin.file:
     path: "{{ item.path }}"
     state: directory
-    owner: "{{ turbopanel_user }}"
-    group: "{{ turbopanel_group }}"
+    owner: "{{ item.owner | default(turbopanel_user) }}"
+    group: "{{ item.group | default(turbopanel_group) }}"
     mode: "{{ item.mode }}"
   loop:
-    - { path: "{{ turbopanel_daemon_dir }}", mode: "0750" }
-    - { path: "{{ turbopanel_daemon_dir }}/cloudflared/tunnels", mode: "0750" }
+    - { path: "{{ turbopanel_install_root }}/bin", mode: "0755", owner: "root", group: "root" }
+    - { path: "{{ turbopanel_install_root }}/lib", mode: "0755", owner: "root", group: "root" }
+    - { path: "{{ turbopanel_install_root }}/share", mode: "0755", owner: "root", group: "root" }
+    - { path: "{{ turbopanel_orchestration_dir }}", mode: "0755" }
+    - { path: "{{ turbopanel_config_dir }}", mode: "0750" }
+    - { path: "{{ turbopanel_daemon_state_dir }}", mode: "0750" }
+    - { path: "{{ turbopanel_daemon_state_dir }}/cloudflared/tunnels", mode: "0750" }
+    - { path: "{{ turbopanel_run_dir | default('/run/turbopanel') }}", mode: "2770" }
 
-- name: Require daemon source entrypoint
+- name: Require native daemon binary
   ansible.builtin.stat:
-    path: "{{ turbopanel_daemon_dir }}/main.ts"
-  register: _daemon_source
+    path: "{{ turbopanel_daemon_bin }}"
+  register: _daemon_bin
 
-- name: Assert daemon source is present
-  ansible.builtin.assert:
-    that:
-      - _daemon_source.stat.exists
-    fail_msg: >-
-      Missing daemon source at {{ turbopanel_daemon_dir }}/main.ts.
-      run.sh must extract the daemon source release before this playbook runs.
+- name: Require JS fallback
+  ansible.builtin.stat:
+    path: "{{ turbopanel_daemon_js }}"
+  register: _daemon_js
 
 - name: Require orchestration tree
   ansible.builtin.stat:
-    path: "{{ turbopanel_daemon_dir }}/orchestration/ansible.cfg"
+    path: "{{ turbopanel_orchestration_dir }}/ansible.cfg"
   register: _orchestration_cfg
 
-- name: Assert orchestration tree is present
+- name: Assert release layout is present
   ansible.builtin.assert:
     that:
+      - _daemon_bin.stat.exists
+      - _daemon_bin.stat.executable
+      - _daemon_js.stat.exists
       - _orchestration_cfg.stat.exists
     fail_msg: >-
-      Missing orchestration tree under {{ turbopanel_daemon_dir }}/orchestration.
-      run.sh must extract the orchestration release before this playbook runs.
+      Missing production release layout under {{ turbopanel_install_root }}.
+      Expected {{ turbopanel_daemon_bin }}, {{ turbopanel_daemon_js }}, and
+      {{ turbopanel_orchestration_dir }}/ansible.cfg. run.sh must install the
+      clean release package before this playbook runs.
 
 - name: Ensure ensure-single-daemon helper is executable
   ansible.builtin.file:
-    path: "{{ turbopanel_daemon_dir }}/orchestration/scripts/ensure-single-daemon.sh"
+    path: "{{ turbopanel_orchestration_dir }}/scripts/ensure-single-daemon.sh"
     mode: "0755"

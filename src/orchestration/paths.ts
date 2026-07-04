@@ -1,37 +1,41 @@
-import { dirname, fromFileUrl, join } from "@std/path";
+import { dirname, join } from "@std/path";
+import {
+  readEnv,
+  resolveDaemonRoot,
+  resolveLayout,
+} from "../paths/layout.ts";
+
+export {
+  DaemonSourceRootError,
+  defaultDaemonRootForMode,
+  detectInstallMode,
+  DEV_DAEMON_ROOT_DEFAULT as DEV_DEFAULT_DAEMON_ROOT,
+  hasDaemonCheckout,
+  hasOrchestrationTree,
+  isCompiledStubRoot,
+  resolveDaemonRoot,
+} from "../paths/layout.ts";
 
 export const UV_VERSION = "0.11.19";
 export const PYTHON_VERSION = "3.14";
 export const ANSIBLE_CORE_VERSION = "2.18";
 
-/** Default managed install layout when running a compiled release binary. */
-export const DEFAULT_DAEMON_ROOT = "/opt/turbopanel/platform/daemon";
+const layoutEnv = {
+  TURBOPANEL_DAEMON_ROOT: readEnv("TURBOPANEL_DAEMON_ROOT"),
+  TURBOPANEL_RUNTIMES_DIR: readEnv("TURBOPANEL_RUNTIMES_DIR"),
+  TURBOPANEL_RUNTIME_DIR: readEnv("TURBOPANEL_RUNTIME_DIR"),
+  TURBOPANEL_ORCHESTRATION_DIR: readEnv("TURBOPANEL_ORCHESTRATION_DIR"),
+  TURBOPANEL_HOME: readEnv("TURBOPANEL_HOME"),
+  TURBOPANEL_LIB_DIR: readEnv("TURBOPANEL_LIB_DIR"),
+  TURBOPANEL_STATE_DIR: readEnv("TURBOPANEL_STATE_DIR"),
+  TURBOPANEL_DAEMON_STATE_DIR: readEnv("TURBOPANEL_DAEMON_STATE_DIR"),
+  TURBOPANEL_CONFIG_DIR: readEnv("TURBOPANEL_CONFIG_DIR"),
+};
 
-function pathExists(path: string): boolean {
-  try {
-    Deno.statSync(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
+const layout = resolveLayout(layoutEnv);
 
-function hasOrchestrationTree(root: string): boolean {
-  return pathExists(join(root, "orchestration", "ansible.cfg"));
-}
-
-function isCompiledStubRoot(root: string): boolean {
-  return root.includes("deno-compile") ||
-    (root.startsWith("/tmp/") && !hasOrchestrationTree(root));
-}
-
-function readEnv(name: string): string | undefined {
-  try {
-    return Deno.env.get(name) ?? undefined;
-  } catch {
-    return undefined;
-  }
-}
+/** Default managed install layout for the active install mode. */
+export const DEFAULT_DAEMON_ROOT = layout.daemonRootDefault;
 
 /**
  * Absolute path to the daemon install root.
@@ -41,39 +45,17 @@ function readEnv(name: string): string | undefined {
  * `TURBOPANEL_DAEMON_ROOT`, then cwd (systemd WorkingDirectory), then a tree
  * with `orchestration/ansible.cfg`, then the default managed install path.
  */
-export function resolveDaemonRoot(
-  env: Record<string, string | undefined> = {},
-): string {
-  const override = env.TURBOPANEL_DAEMON_ROOT?.trim();
-  if (override) return override;
-
-  const fromMeta = join(dirname(fromFileUrl(import.meta.url)), "..", "..");
-  if (hasOrchestrationTree(fromMeta)) return fromMeta;
-
-  const cwd = Deno.cwd();
-  if (hasOrchestrationTree(cwd)) return cwd;
-
-  if (hasOrchestrationTree(DEFAULT_DAEMON_ROOT)) return DEFAULT_DAEMON_ROOT;
-
-  if (isCompiledStubRoot(fromMeta)) return DEFAULT_DAEMON_ROOT;
-
-  return fromMeta;
-}
-
-export const DAEMON_ROOT = resolveDaemonRoot({
-  TURBOPANEL_DAEMON_ROOT: readEnv("TURBOPANEL_DAEMON_ROOT"),
-});
+export const DAEMON_ROOT = resolveDaemonRoot(layoutEnv);
 
 /** Checked-in orchestration source assets (playbooks, ansible.cfg, requirements). */
-export const ORCHESTRATION_DIR = join(DAEMON_ROOT, "orchestration");
+export const ORCHESTRATION_DIR = layout.orchestrationDir;
 
 /**
  * Root for vendored, versioned third-party runtimes shared across the host
  * (uv/python/ansible, cloudflared, and room for more). Override with
  * `TURBOPANEL_RUNTIMES_DIR`.
  */
-export const RUNTIMES_DIR = Deno.env.get("TURBOPANEL_RUNTIMES_DIR")?.trim() ||
-  "/opt/turbopanel/runtimes";
+export const RUNTIMES_DIR = layout.runtimesDir;
 
 /**
  * Working directory for ansible-playbook invocations.
@@ -291,9 +273,9 @@ export function cloudflaredDownloadUrl(
 }
 
 /**
- * Pinned Deno runtime. This is the daemon's **own** runtime (not just the
- * instance stack) — the daemon always runs from source via this Deno. Keep in
- * step with `deno_version` in `orchestration/roles/deno-runtime/defaults/main.yml`.
+ * Pinned Deno runtime. Used for co-located `deno run main.ts` and the managed
+ * JS-fallback ExecStart (`deno run …/bin/turbopaneld.js`). Keep in step with
+ * `deno_version` in `orchestration/roles/deno-runtime/defaults/main.yml`.
  */
 export const DENO_VERSION = "2.9.0";
 
@@ -303,12 +285,20 @@ export const DENO_RUNTIME_DIR = join(RUNTIMES_DIR, "deno", DENO_VERSION);
 /** Stable `current` symlink pointing at the active Deno version dir. */
 export const DENO_CURRENT_DIR = join(RUNTIMES_DIR, "deno", "current");
 
+/** Stable `bin/deno` convenience path used by the JS-fallback systemd unit. */
+export const DENO_BIN_DIR = join(RUNTIMES_DIR, "deno", "bin");
+
 /** Resolved Deno binary path (matches `turbopanel_daemon_deno_bin`). */
-export const DENO_BIN = join(DENO_CURRENT_DIR, "deno");
+export const DENO_BIN = join(DENO_BIN_DIR, "deno");
 
 /**
  * Directory of per-tunnel token files. Each `*.token` file holds one Cloudflare
  * tunnel token; the file's basename is the tunnel's name. Drop in more files to
  * run more tunnels side by side.
+ *
+ * Co-located dev keeps tokens under the checkout (`…/cloudflared/tunnels`).
+ * Managed installs store them under the FHS state dir (`/var/lib/turbopanel`).
  */
-export const TUNNELS_DIR = join(DAEMON_ROOT, "cloudflared", "tunnels");
+export const TUNNELS_DIR = layout.mode === "development"
+  ? join(DAEMON_ROOT, "cloudflared", "tunnels")
+  : join(layout.daemonStateDir, "cloudflared", "tunnels");

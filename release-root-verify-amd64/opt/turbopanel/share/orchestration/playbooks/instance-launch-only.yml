@@ -1,0 +1,14 @@
+---
+# Re-template and restart instance/Caddy/UI/mailer units after runtime or build toggles.
+# instance-certs reads TURBOPANEL_PUBLIC_URLS from protected runtime env (written by the
+# daemon); callers may pass turbopanel_public_urls as an extra-var when runtime.env is
+# not yet populated.
+- name: TurboPanel instance launch refresh
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+  roles:
+    # Caddy requires ./certs/self-signed.{crt,key}; idempotent and cheap.
+    - role: instance-certs
+    - role: instance-launch

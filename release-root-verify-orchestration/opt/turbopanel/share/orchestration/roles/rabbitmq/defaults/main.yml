@@ -1,0 +1,14 @@
+rabbitmq_image: rabbitmq:4-management
+rabbitmq_container_name: turbopanelq
+rabbitmq_amqp_port: 5672
+rabbitmq_mgmt_port: 15672
+rabbitmq_expose_amqp_port: false
+rabbitmq_expose_mgmt_port: true
+rabbitmq_volume_name: turbopanelq
+turbopanel_docker_network: turbopanel
+rabbitmq_user: turbopanel
+rabbitmq_vhost: /
+turbopanel_config_dir: /opt/turbopanel/platform/config
+rabbitmq_service_name: turbopanel-rabbitmq
+rabbitmq_container_uid: "9995"
+rabbitmq_container_gid: "9995"

@@ -1,4 +1,5 @@
-import type { ChannelManifest } from "../src/update/types.ts";
+import { encodeHex } from "@std/encoding/hex";
+import type { ArtifactEntry, ChannelManifest } from "../src/update/types.ts";
 
 function requireEnv(name: string): string {
   const value = Deno.env.get(name);
@@ -9,27 +10,76 @@ function requireEnv(name: string): string {
   return value;
 }
 
-function requireEnvNumber(name: string): number {
-  const value = requireEnv(name);
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed < 0) {
-    console.error(`Invalid numeric environment variable: ${name}=${value}`);
+async function artifactFromPublishFile(
+  publishDir: string,
+  filename: string,
+  url: string,
+): Promise<ArtifactEntry> {
+  const path = `${publishDir}/${filename}`;
+  let data: Uint8Array;
+  try {
+    data = await Deno.readFile(path);
+  } catch (error) {
+    console.error(`Missing publish artifact: ${path}`);
+    console.error(error instanceof Error ? error.message : String(error));
     Deno.exit(1);
   }
-  return parsed;
+  if (data.byteLength === 0) {
+    console.error(`Empty publish artifact: ${path}`);
+    Deno.exit(1);
+  }
+  const copy = new Uint8Array(data.length);
+  copy.set(data);
+  const digest = await crypto.subtle.digest("SHA-256", copy);
+  return {
+    url,
+    sha256: encodeHex(new Uint8Array(digest)),
+    size: data.byteLength,
+  };
 }
 
 const BUILD_ID = requireEnv("BUILD_ID");
 const SHORT_SHA = requireEnv("SHORT_SHA");
 const BUILT_AT = requireEnv("BUILT_AT");
-const SOURCE_SHA256 = requireEnv("SOURCE_SHA256");
-const SOURCE_SIZE = requireEnvNumber("SOURCE_SIZE");
 
 const DL_BASE_URL = Deno.env.get("DL_BASE_URL")?.trim() ||
   "https://dl.trbp.nl";
 const DEFAULT_CONTROL_PLANE_URL =
   Deno.env.get("TURBOPANEL_DEFAULT_CONTROL_PLANE_URL")?.trim() ||
   "https://turbopanel.app";
+
+const publishDir = Deno.args[0];
+const outputPath = Deno.args[1];
+
+if (!publishDir) {
+  console.error(
+    "Usage: generate-channel-manifest.ts <publish-daemon-dir> [manifest-output-path]",
+  );
+  Deno.exit(1);
+}
+
+const artifactBase = `${DL_BASE_URL}/channels/trunk/daemon`;
+
+const binaryAmd64 = await artifactFromPublishFile(
+  publishDir,
+  "turbopaneld-linux-amd64.tar.zst",
+  `${artifactBase}/turbopaneld-linux-amd64.tar.zst`,
+);
+const binaryArm64 = await artifactFromPublishFile(
+  publishDir,
+  "turbopaneld-linux-arm64.tar.zst",
+  `${artifactBase}/turbopaneld-linux-arm64.tar.zst`,
+);
+const jsFallback = await artifactFromPublishFile(
+  publishDir,
+  "turbopaneld.js",
+  `${artifactBase}/turbopaneld.js`,
+);
+const orchestration = await artifactFromPublishFile(
+  publishDir,
+  "orchestration.tar.zst",
+  `${artifactBase}/orchestration.tar.zst`,
+);
 
 const manifest: ChannelManifest = {
   schema: 1,
@@ -38,15 +88,15 @@ const manifest: ChannelManifest = {
   buildId: BUILD_ID,
   builtAt: BUILT_AT,
   defaultControlPlaneUrl: DEFAULT_CONTROL_PLANE_URL,
-  sourceArtifact: {
-    url: `${DL_BASE_URL}/channels/trunk/daemon/source.tar.zst`,
-    sha256: SOURCE_SHA256,
-    size: SOURCE_SIZE,
+  binaryArtifacts: {
+    "linux-amd64": binaryAmd64,
+    "linux-arm64": binaryArm64,
   },
+  jsFallbackArtifact: jsFallback,
+  orchestrationArtifact: orchestration,
 };
 
 const json = JSON.stringify(manifest, null, 2) + "\n";
-const outputPath = Deno.args[0];
 
 if (outputPath) {
   await Deno.writeTextFile(outputPath, json);

@@ -1,0 +1,31 @@
+---
+# Per-service runtime state inside git checkouts (.local / .config are gitignored).
+# The daemon (9999) keeps its own state under /opt/turbopanel via passwd HOME.
+- name: Ensure checkout-local runtime directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ instance_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "2770"
+  loop: >-
+    {{
+      [
+        turbopanel_instance_runtime_dir,
+        turbopanel_instance_runtime_dir + '/share',
+        turbopanel_instance_runtime_dir + '/state',
+        turbopanel_ui_runtime_dir,
+        turbopanel_ui_runtime_dir + '/share',
+        turbopanel_ui_runtime_dir + '/state',
+        turbopanel_instance_config_dir,
+        turbopanel_caddy_config_dir,
+        turbopanel_ui_config_dir,
+        turbopanel_ui_dir + '/.expo',
+        turbopanel_website_dir + '/.next',
+        turbopanel_website_dir + '/.source',
+        turbopanel_website_runtime_dir,
+        turbopanel_website_runtime_dir + '/share',
+        turbopanel_website_runtime_dir + '/state',
+        turbopanel_website_config_dir,
+      ]
+    }}

@@ -16,18 +16,17 @@
     "start": "deno run --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env main.ts",
     "dev": "deno run --watch --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env main.ts",
     "bootstrap-orchestration": "deno run --allow-net --allow-read --allow-write --allow-run --allow-env scripts/bootstrap-orchestration.ts",
+    "check:layout": "deno run --allow-read scripts/check-production-layout.ts",
+    "bundle:js": "deno bundle main.ts -o dist/turbopaneld.js",
     "bundle:orchestration": "sh scripts/bundle-orchestration.sh",
-    "compile": "deno task bundle:orchestration && deno compile --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env -o dist/turbopaneld main.ts",
-    "compile:linux-amd64": "deno task bundle:orchestration && deno compile --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env --target x86_64-unknown-linux-gnu -o dist/.build/turbopaneld-linux-amd64 main.ts",
-    "compile:linux-arm64": "deno task bundle:orchestration && deno compile --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env --target aarch64-unknown-linux-gnu -o dist/.build/turbopaneld-linux-arm64 main.ts",
-    "compile:all": "deno task compile:linux-amd64 && deno task compile:linux-arm64 && deno task package:release",
+    "compile": "deno compile --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env -o dist/turbopaneld main.ts",
+    "compile:linux-amd64": "deno compile --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env --target x86_64-unknown-linux-gnu -o dist/.build/turbopaneld-linux-amd64 main.ts",
+    "compile:linux-arm64": "deno compile --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env --target aarch64-unknown-linux-gnu -o dist/.build/turbopaneld-linux-arm64 main.ts",
+    "compile:all": "deno task compile:linux-amd64 && deno task compile:linux-arm64 && deno task bundle:js && deno task bundle:orchestration && deno task package:release",
     "package:release": "sh scripts/package-daemon-release.sh",
     "release:package": "deno task compile:all"
   },
   "compilerOptions": {
     "lib": ["deno.window", "deno.unstable"]
-  },
-  "compile": {
-    "include": ["dist/orchestration.tar.zst"]
   }
 }

@@ -1,0 +1,21 @@
+---
+- name: Ensure instance log directory exists
+  ansible.builtin.file:
+    path: "{{ instance_log_dir }}"
+    state: directory
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
+- name: Ensure instance log files exist for systemd append
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: touch
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+  loop:
+    - "{{ instance_log_dir }}/instance.log"
+    - "{{ instance_log_dir }}/instance.err.log"
+    - "{{ instance_log_dir }}/dbstudio.log"
+    - "{{ instance_log_dir }}/dbstudio.err.log"

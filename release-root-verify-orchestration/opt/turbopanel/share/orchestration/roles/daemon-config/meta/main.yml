@@ -1,0 +1,15 @@
+---
+galaxy_info:
+  author: turbopanel
+  description: Provision daemon state directories and platform CA paths.
+  license: AGPL-3.0
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Debian
+      versions:
+        - all
+    - name: Raspbian
+      versions:
+        - all
+
+dependencies: []

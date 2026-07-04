@@ -1,9 +1,13 @@
 ---
 turbopanel_install_root: /opt/turbopanel
 turbopanel_user: turbopanel
-turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/runtimes"
+turbopanel_dev_user: ""
+# Co-located dev keeps /opt/turbopanel/runtimes + the /platform checkout; managed
+# installs use the FHS lib tree.
 turbopanel_platform_dir: "{{ turbopanel_install_root }}/platform"
-turbopanel_instance_dir: "{{ turbopanel_platform_dir }}/instance"
+turbopanel_lib_dir: "{{ turbopanel_install_root }}/lib"
+turbopanel_runtimes_dir: "{{ (turbopanel_install_root ~ '/runtimes') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/runtime') }}"
+turbopanel_instance_dir: "{{ (turbopanel_platform_dir ~ '/instance') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/instance') }}"
 instance_user: turbopaneli
 turbopanel_group: turbopanel
 turbopanel_instance_run_mode: source

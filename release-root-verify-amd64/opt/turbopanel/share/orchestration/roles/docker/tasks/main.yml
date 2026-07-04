@@ -1,0 +1,82 @@
+---
+# TurboPanel wrapper around geerlingguy.docker (Ansible Galaxy).
+#
+# Fast-path: if the docker binary exists and the service is active, skip
+# install. Group membership for docker_user always runs (co-located hosts often
+# already have Docker). Otherwise include geerlingguy.docker after validation.
+
+- name: Assert rootless Docker is not requested
+  ansible.builtin.assert:
+    that: not docker_rootless | bool
+    fail_msg: >-
+      Rootless Docker support is planned but not yet implemented.
+      Set docker_rootless: false until the feature is built.
+
+- name: Check Docker binary
+  ansible.builtin.stat:
+    path: /usr/bin/docker
+  register: _docker_bin
+
+- name: Check Docker service state
+  ansible.builtin.command: systemctl is-active docker
+  register: _docker_svc
+  changed_when: false
+  failed_when: false
+
+- name: Set _docker_ready fact
+  ansible.builtin.set_fact:
+    _docker_ready: "{{ _docker_bin.stat.exists and _docker_svc.stdout == 'active' }}"
+
+- name: Docker already installed and running
+  ansible.builtin.debug:
+    msg: "Docker is already installed and running — skipping installation"
+  when: _docker_ready | bool
+
+- name: Install Docker
+  when: not _docker_ready | bool
+  block:
+    - name: Ensure Docker networking prerequisites (iptables)
+      ansible.builtin.apt:
+        name:
+          - iptables
+        state: present
+      when: ansible_os_family == 'Debian'
+
+    - name: Assert supported CPU architecture
+      ansible.builtin.assert:
+        that:
+          - ansible_architecture in _docker_arch_map
+        fail_msg: >-
+          Unsupported CPU architecture '{{ ansible_architecture }}'.
+          TurboPanel supports: {{ _docker_arch_map.keys() | list | join(', ') }}.
+
+    - name: Assert supported Linux distribution
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution in _docker_distro_map
+        fail_msg: >-
+          Unsupported distribution '{{ ansible_distribution }}'.
+          TurboPanel supports: {{ _docker_distro_map.keys() | list | join(', ') }}.
+
+    - name: Install Docker via geerlingguy.docker Galaxy role
+      ansible.builtin.include_role:
+        name: geerlingguy.docker
+      vars:
+        docker_repo_url: "{{ _docker_repo_url[ansible_distribution] }}"
+        docker_install_compose_plugin: true
+
+- name: Add daemon user to docker group
+  ansible.builtin.user:
+    name: "{{ docker_user }}"
+    groups: docker
+    append: true
+  when: docker_add_turbopanel_user | bool
+
+- name: Add dev user to docker group (co-located dev)
+  ansible.builtin.user:
+    name: "{{ turbopanel_dev_user }}"
+    groups: docker
+    append: true
+  when:
+    - docker_add_turbopanel_user | bool
+    - turbopanel_dev_user | length > 0
