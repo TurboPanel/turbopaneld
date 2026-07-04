@@ -10,6 +10,9 @@ turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') |
 turbopanel_lib_dir: "{{ turbopanel_install_root }}/lib"
 # Runtimes always live under the FHS lib/runtime tree (dev shares it with prod).
 turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/lib/runtime"
+turbopanel_node: "{{ turbopanel_runtimes_dir }}/node/current/bin/node"
+turbopanel_deno: "{{ turbopanel_runtimes_dir }}/deno/current/deno"
+turbopanel_runtime_path: "{{ turbopanel_runtimes_dir }}/node/current/bin:{{ turbopanel_runtimes_dir }}/deno/current:{{ turbopanel_runtimes_dir }}/caddy/current:/usr/bin:/bin"
 # Source checkout: co-located dev uses the dev user's home; managed installs use lib.
 turbopanel_instance_dir: "{{ (turbopanel_dev_root ~ '/instance') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/instance') }}"
 instance_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopaneli' }}"

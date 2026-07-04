@@ -37,7 +37,7 @@
   become_user: "{{ turbopanel_user }}"
   environment:
     HOME: "{{ turbopanel_ui_runtime_dir }}"
-    PATH: "/usr/local/bin:/usr/bin:/bin"
+    PATH: "{{ turbopanel_runtime_path }}"
   register: _ui_local_build
 
 - name: Publish locally-built UI export to the FHS static dir

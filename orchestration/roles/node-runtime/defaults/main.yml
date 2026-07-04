@@ -4,4 +4,6 @@ turbopanel_runtimes_dir: "{{ turbopanel_install_root | default('/opt/turbopanel'
 # Node is needed for the instance's cert generation script and to build/run the
 # Expo UI in development. Must match turbopanel-dev scripts/lib/paths.sh NODE_VERSION.
 node_version: "24.17.0"
-node_prefix: /usr/local
+turbopanel_node: "{{ turbopanel_runtimes_dir }}/node/current/bin/node"
+turbopanel_deno: "{{ turbopanel_runtimes_dir }}/deno/current/deno"
+turbopanel_runtime_path: "{{ turbopanel_runtimes_dir }}/node/current/bin:{{ turbopanel_runtimes_dir }}/deno/current:{{ turbopanel_runtimes_dir }}/caddy/current:/usr/bin:/bin"

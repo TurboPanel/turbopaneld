@@ -19,7 +19,7 @@ TurboPanel **daemon** — Ansible-driven node agent; connects to the instance ov
 | Managed update helper | `/opt/turbopanel/bin/turbopanel-update` |
 | Orchestration assets (Ansible) | `/opt/turbopanel/share/orchestration` |
 | Static UI export | `/opt/turbopanel/share/ui` |
-| Vendored runtimes (deno/uv/python/ansible/cloudflared) | `/opt/turbopanel/lib/runtime` |
+| Vendored runtimes (node/deno/caddy/uv/python/ansible/cloudflared) | `/opt/turbopanel/lib/runtime` |
 | Daemon install root (`daemonRootDefault`) | `/opt/turbopanel/lib/daemon` |
 | Config (`daemon.env`, `instance-ca.pem`) | `/etc/turbopanel` |
 | Persistent identity (license, `server.id`, keys, tunnels) | `/var/lib/turbopanel` |
@@ -42,6 +42,8 @@ TurboPanel **daemon** — Ansible-driven node agent; connects to the instance ov
 **Development identity:** co-located dev creates **no** dedicated `turbopanel`, `turbopaneli`, or `turbopanelc` service accounts. The `turbopaneld`, instance, UI, and Caddy systemd units, plus Docker-backed services (Postgres, Redis, RabbitMQ, Mailpit), all run as the **current dev user**. Production managed installs keep the dedicated service users described in the production table above.
 
 **Deno version pin:** `DENO_VERSION` (`src/orchestration/paths.ts`) = **`2.9.0`**. Keep it in step with `deno_version` in `orchestration/roles/deno-runtime/defaults/main.yml`, `TP_DENO_VERSION` in `scripts/run.sh`, and `DENO_VERSION` in `turbopanel-dev`'s `src/lib/paths.ts` (dev console bootstrap fallback + status label). `src/orchestration/paths.test.ts` pins the const to the role default.
+
+**Vendored Node/Deno layout:** Ansible roles install pinned runtimes under `/opt/turbopanel/lib/runtime/<tool>/<version>/` with a `current` symlink (see `node-runtime`, `deno-runtime`, `caddy`). Consumers resolve `turbopanel_node` (`…/node/current/bin/node`), `turbopanel_deno` (`…/deno/current/deno`), and `turbopanel_runtime_path` (colon-separated PATH prefix for systemd/Ansible tasks). Node **24.17.0** is pinned in `node-runtime/defaults/main.yml` — keep in step with `NODE_VERSION` in turbopanel-dev `scripts/lib/paths.sh`.
 
 **Guards / tests:**
 - `deno task check:layout` (`scripts/check-production-layout.ts`) — asserts the production FHS tree resolves to the canonical absolute paths and that no production source (`src/**`, excluding `*.test.ts` and `src/paths/layout.ts`) references `/opt/turbopanel/platform` or the retired `share/ansible`. Wired into `publish-daemon-trunk.yml`.

@@ -28,9 +28,9 @@ turbopanel_state_dir: /var/lib/turbopanel
 turbopanel_run_dir: /run/turbopanel
 # Runtimes always live under the FHS lib/runtime tree (dev shares it with prod).
 turbopanel_runtimes_dir: "{{ turbopanel_lib_dir }}/runtime"
-# Node: co-located dev uses the pinned /usr/local/bin/node; managed installs use
-# the vendored Node under the FHS runtime tree.
-turbopanel_node: "{{ '/usr/local/bin/node' if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_runtimes_dir ~ '/node/current/bin/node') }}"
+turbopanel_node: "{{ turbopanel_runtimes_dir }}/node/current/bin/node"
+turbopanel_deno: "{{ turbopanel_runtimes_dir }}/deno/current/deno"
+turbopanel_runtime_path: "{{ turbopanel_runtimes_dir }}/node/current/bin:{{ turbopanel_runtimes_dir }}/deno/current:{{ turbopanel_runtimes_dir }}/caddy/current:/usr/bin:/bin"
 # Source checkouts: co-located dev uses the dev user's home; managed installs use
 # the FHS lib tree.
 turbopanel_daemon_dir: "{{ (turbopanel_dev_root ~ '/daemon') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/daemon') }}"

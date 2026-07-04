@@ -18,7 +18,7 @@
   become_user: "{{ turbopanel_user }}"
   environment:
     HOME: "{{ turbopanel_install_root }}"
-    PATH: "/usr/local/bin:/usr/bin:/bin"
+    PATH: "{{ turbopanel_runtime_path }}"
     TURBOPANEL_DATABASE_URL: "{{ _instance_migrate_database_url }}"
   register: _instance_db_bootstrap
   changed_when: >-

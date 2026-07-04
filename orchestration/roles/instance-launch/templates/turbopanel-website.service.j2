@@ -12,14 +12,14 @@ Environment=HOME={{ turbopanel_website_runtime_dir }}
 Environment=XDG_DATA_HOME={{ turbopanel_website_runtime_dir }}/share
 Environment=XDG_STATE_HOME={{ turbopanel_website_runtime_dir }}/state
 Environment=XDG_CONFIG_HOME={{ turbopanel_website_config_dir }}
-Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=PATH={{ turbopanel_runtime_path }}
 Environment=WEBSITE_PORT={{ website_port }}
 Environment=NEXT_PUBLIC_WEBSITE_PORT={{ website_port }}
 Environment=CADDY_PORT={{ caddy_port }}
 Environment=NEXT_PUBLIC_CADDY_PORT={{ caddy_port }}
 Environment=COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 # Invoke next via node — pnpm exec can prompt when HOME differs from install user.
-ExecStart=/usr/local/bin/node {{ turbopanel_website_dir }}/node_modules/next/dist/bin/next dev --port {{ website_port }}
+ExecStart={{ turbopanel_node }} {{ turbopanel_website_dir }}/node_modules/next/dist/bin/next dev --port {{ website_port }}
 Restart=always
 RestartSec=3
 StandardOutput=append:{{ website_log_dir }}/website.log

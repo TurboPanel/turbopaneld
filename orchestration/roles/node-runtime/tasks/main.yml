@@ -11,22 +11,22 @@
   ansible.builtin.set_fact:
     node_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'x64' }}"
 
-- name: Check system Node binary
+- name: Check vendored Node binary
   ansible.builtin.stat:
-    path: "{{ node_prefix }}/bin/node"
-  register: _node_bin
+    path: "{{ turbopanel_runtimes_dir }}/node/{{ node_version }}/bin/node"
+  register: _node_pinned
 
 - name: Read installed Node version
   ansible.builtin.command:
-    argv: ["{{ node_prefix }}/bin/node", --version]
+    argv: ["{{ turbopanel_runtimes_dir }}/node/{{ node_version }}/bin/node", --version]
   register: _node_version
   changed_when: false
   failed_when: false
-  when: _node_bin.stat.exists
+  when: _node_pinned.stat.exists
 
-- name: Install Node into /usr/local
+- name: Install Node into runtimes directory
   when: >-
-    not _node_bin.stat.exists
+    not _node_pinned.stat.exists
     or (_node_version.stdout | default('')) != ('v' + node_version)
   ansible.builtin.shell: |
     set -euo pipefail
@@ -34,23 +34,33 @@
     NODE_ARCH="{{ node_arch }}"
     NODE_DIR="node-${NODE_VER}-linux-${NODE_ARCH}"
     NODE_TMP="{{ turbopanel_runtimes_dir }}/node/.install"
-    rm -rf "$NODE_TMP"
-
+    NODE_DEST="{{ turbopanel_runtimes_dir }}/node/{{ node_version }}"
+    rm -rf "$NODE_TMP" "$NODE_DEST"
     mkdir -p "$NODE_TMP"
     curl -fsSL -o "$NODE_TMP/${NODE_DIR}.tar.xz" \
       "https://nodejs.org/dist/${NODE_VER}/${NODE_DIR}.tar.xz"
     tar -xJf "$NODE_TMP/${NODE_DIR}.tar.xz" -C "$NODE_TMP"
+    install -d "$NODE_DEST"
     cp -a "$NODE_TMP/${NODE_DIR}/bin" "$NODE_TMP/${NODE_DIR}/include" \
       "$NODE_TMP/${NODE_DIR}/lib" "$NODE_TMP/${NODE_DIR}/share" \
-      "{{ node_prefix }}/"
+      "$NODE_DEST/"
     rm -rf "$NODE_TMP"
+  args:
+    creates: "{{ turbopanel_runtimes_dir }}/node/{{ node_version }}/bin/node"
+
+- name: Point Node current symlink at pinned version
+  ansible.builtin.file:
+    src: "{{ turbopanel_runtimes_dir }}/node/{{ node_version }}"
+    dest: "{{ turbopanel_runtimes_dir }}/node/current"
+    state: link
+    force: true
 
 - name: Enable pnpm via corepack
   ansible.builtin.command:
     argv:
-      - "{{ node_prefix }}/bin/corepack"
+      - "{{ turbopanel_runtimes_dir }}/node/current/bin/corepack"
       - enable
       - pnpm
-    creates: "{{ node_prefix }}/bin/pnpm"
+    creates: "{{ turbopanel_runtimes_dir }}/node/current/bin/pnpm"
   environment:
-    PATH: "{{ node_prefix }}/bin:{{ ansible_env.PATH | default('/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin') }}"
+    PATH: "{{ turbopanel_runtime_path }}"

@@ -82,5 +82,5 @@
   become_user: "{{ turbopanel_user }}"
   environment:
     HOME: "{{ turbopanel_dev_root if (turbopanel_dev_user | default('') | length > 0) else turbopanel_install_root }}"
-    PATH: "/usr/local/bin:/usr/bin:/bin"
+    PATH: "{{ turbopanel_runtime_path }}"
   register: _website_pnpm_install
