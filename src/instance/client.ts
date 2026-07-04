@@ -779,6 +779,12 @@ export class InstanceClient {
         once: true,
       });
     });
+    if (
+      closeEvent.code === 4401 &&
+      closeEvent.reason.includes("server row missing")
+    ) {
+      throw new DaemonApiError(404, "Server key not found");
+    }
     const wasAuthFailure = closeEvent.code === 4401;
     if (wasAuthFailure) {
       await this.#tokenManager?.refresh();
