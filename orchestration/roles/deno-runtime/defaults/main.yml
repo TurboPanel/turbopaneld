@@ -3,8 +3,8 @@
 # `deno run main.ts` and the managed JS-fallback ExecStart
 # (`deno run …/bin/turbopaneld.js`). Keep in step with the TP_DENO_VERSION pin
 # in scripts/run.sh.
-# Runtimes always live under the FHS lib/runtime tree (dev shares it with prod).
-turbopanel_runtimes_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/lib/runtime"
+# Runtimes always live under the FHS vendor tree (dev shares it with prod).
+turbopanel_runtimes_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/vendor"
 deno_version: "2.9.0"
 turbopanel_node: "{{ turbopanel_runtimes_dir }}/node/current/bin/node"
 turbopanel_deno: "{{ turbopanel_runtimes_dir }}/deno/current/deno"

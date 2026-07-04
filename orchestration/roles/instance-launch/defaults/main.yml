@@ -26,7 +26,7 @@ turbopanel_lib_dir: "{{ turbopanel_install_root }}/lib"
 turbopanel_state_dir: /var/lib/turbopanel
 # Runtime socket/run directory — matches instance resolveRunDir / resolveInstanceSocket.
 turbopanel_run_dir: /run/turbopanel
-# Runtimes always live under the FHS lib/runtime tree (dev shares it with prod).
+# Runtimes always live under the FHS vendor tree (dev shares it with prod).
 turbopanel_runtimes_dir: "{{ turbopanel_lib_dir }}/runtime"
 turbopanel_node: "{{ turbopanel_runtimes_dir }}/node/current/bin/node"
 turbopanel_deno: "{{ turbopanel_runtimes_dir }}/deno/current/deno"

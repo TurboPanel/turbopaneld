@@ -3,7 +3,7 @@
 #
 # Invoked by the CDN installer after run.sh has placed bin/turbopaneld,
 # bin/turbopaneld.js, and share/orchestration/, and bootstrapped ansible-playbook
-# under /opt/turbopanel/lib/runtime/ansible/current/. Every role is idempotent.
+# under /opt/turbopanel/vendor/ansible/current/. Every role is idempotent.
 - name: TurboPanel daemon install
   hosts: localhost
   connection: local
@@ -15,7 +15,7 @@
     # Production/managed-node install (run.sh). Roles key turbopanel_runtimes_dir
     # off this flag; co-located dev playbooks leave it unset (defaults false).
     turbopanel_managed_install: true
-    turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/lib/runtime"
+    turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/vendor"
     turbopanel_orchestration_dir: "{{ turbopanel_install_root }}/share/orchestration"
     turbopanel_config_dir: /etc/turbopanel
     turbopanel_daemon_state_dir: /var/lib/turbopanel

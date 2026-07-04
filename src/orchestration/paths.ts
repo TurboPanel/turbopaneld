@@ -72,8 +72,14 @@ export const UVX_BIN = join(RUNTIME_BIN_DIR, "uvx");
 /** Stable `current` symlink pointing at the active uv version dir. */
 export const UV_CURRENT_DIR = join(RUNTIMES_DIR, "uv", "current");
 
-/** `UV_PYTHON_INSTALL_DIR` target: keeps managed pythons under runtimes. */
-export const PYTHON_INSTALL_DIR = join(RUNTIMES_DIR, "python");
+/** `UV_PYTHON_INSTALL_DIR` target: versioned managed Python tree. */
+export const PYTHON_RUNTIME_DIR = join(RUNTIMES_DIR, "python", PYTHON_VERSION);
+
+/** Stable `current` symlink pointing at the active Python version dir. */
+export const PYTHON_CURRENT_DIR = join(RUNTIMES_DIR, "python", "current");
+
+/** @deprecated Alias for {@link PYTHON_RUNTIME_DIR} — passed to `UV_PYTHON_INSTALL_DIR`. */
+export const PYTHON_INSTALL_DIR = PYTHON_RUNTIME_DIR;
 
 /** `UV_CACHE_DIR` target: keeps uv's download/build cache under runtimes. */
 export const CACHE_DIR = join(RUNTIMES_DIR, "uv", "cache");

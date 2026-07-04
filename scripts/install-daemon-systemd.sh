@@ -8,7 +8,8 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DAEMON_DIR="${TURBOPANEL_DAEMON_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-RUNTIMES_DIR="${TURBOPANEL_RUNTIMES_DIR:-/opt/turbopanel/lib/runtime}"
+# shellcheck source=scripts/lib/runtime-paths.sh
+. "$SCRIPT_DIR/lib/runtime-paths.sh"
 ANSIBLE_PLAYBOOK="$RUNTIMES_DIR/ansible/current/bin/ansible-playbook"
 ANSIBLE_CFG="$DAEMON_DIR/orchestration/ansible.cfg"
 ANSIBLE_LOCAL_TMP="$RUNTIMES_DIR/uv/cache/ansible-tmp"
@@ -40,7 +41,7 @@ trap 'rm -f "$VARS_FILE"' EXIT
   printf 'turbopanel_start: %s\n' "$([ "$START_DAEMON" = true ] && echo true || echo false)"
   # Optional override: point the daemon unit at a host-provided Deno or a
   # nonstandard runtimes root. Unset → playbook/role default
-  # (/opt/turbopanel/runtimes/deno/bin/deno).
+  # ({{ turbopanel_runtimes_dir }}/deno/bin/deno).
   if [ -n "${TURBOPANEL_DAEMON_DENO_BIN:-}" ]; then
     printf 'turbopanel_daemon_deno_bin: %s\n' "$TURBOPANEL_DAEMON_DENO_BIN"
   fi

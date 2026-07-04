@@ -11,10 +11,10 @@
  * `/opt/turbopanel/platform` tree.
  *
  * Co-located dev converge (`instance-dev-install`) resolves the playbook + dev
- * overlay roles from the staged turbopanel-dev orchestration tree
- * (`dev-orchestration.ts`), layering the daemon's shared production roles via
- * `ANSIBLE_ROLES_PATH` (see `devOrchestrationAnsibleEnv`). Daemon-only playbooks
- * run from the daemon checkout's own `orchestration/` dir.
+ * overlay roles from `<daemon checkout>/dev/orchestration` ({@link dev-orchestration.ts}),
+ * layering the daemon's shared production roles via `ANSIBLE_ROLES_PATH`
+ * (see `devOrchestrationAnsibleEnv`). Daemon-only playbooks run from the daemon
+ * checkout's own `orchestration/` dir.
  */
 import { join } from "@std/path";
 import { runPlaybookStreaming } from "../src/orchestration/ansible-events.ts";

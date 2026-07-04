@@ -1,6 +1,6 @@
 redis_version: "8.0.2"
-# Runtimes always live under the FHS lib/runtime tree (dev shares it with prod).
-turbopanel_runtimes_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/lib/runtime"
+# Runtimes always live under the FHS vendor tree (dev shares it with prod).
+turbopanel_runtimes_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/vendor"
 redis_socket_dir: /run/turbopanel
 redis_socket_name: redis.sock
 redis_socket_path: "{{ redis_socket_dir }}/{{ redis_socket_name }}"

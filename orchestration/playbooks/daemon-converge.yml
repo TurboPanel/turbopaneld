@@ -11,7 +11,7 @@
   vars:
     turbopanel_install_root: /opt/turbopanel
     turbopanel_managed_install: true
-    turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/lib/runtime"
+    turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/vendor"
     turbopanel_orchestration_dir: "{{ turbopanel_install_root }}/share/orchestration"
     turbopanel_config_dir: /etc/turbopanel
     turbopanel_daemon_state_dir: /var/lib/turbopanel

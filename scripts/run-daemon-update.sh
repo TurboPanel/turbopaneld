@@ -2,11 +2,12 @@
 set -eu
 
 DAEMON_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-RUNTIMES_DIR="${TURBOPANEL_RUNTIMES_DIR:-/opt/turbopanel/runtimes}"
-ANSIBLE_PLAYBOOK="$RUNTIMES_DIR/ansible/current/bin/ansible-playbook"
+# shellcheck source=scripts/lib/runtime-paths.sh
+. "$DAEMON_DIR/scripts/lib/runtime-paths.sh"
+ANSIBLE_PLAYBOOK="$TURBOPANEL_RUNTIMES_DIR/ansible/current/bin/ansible-playbook"
 ANSIBLE_CONFIG="$DAEMON_DIR/orchestration/ansible.cfg"
-ANSIBLE_LOCAL_TMP="$RUNTIMES_DIR/uv/cache/ansible-tmp"
-ANSIBLE_COLLECTIONS_PATH="$RUNTIMES_DIR/ansible/galaxy-collections"
+ANSIBLE_LOCAL_TMP="$TURBOPANEL_RUNTIMES_DIR/uv/cache/ansible-tmp"
+ANSIBLE_COLLECTIONS_PATH="$TURBOPANEL_RUNTIMES_DIR/ansible/galaxy-collections"
 PLAYBOOK="$DAEMON_DIR/orchestration/playbooks/daemon-update.yml"
 
 if [ ! -x "$ANSIBLE_PLAYBOOK" ]; then

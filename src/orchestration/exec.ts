@@ -1,5 +1,5 @@
 import { log } from "../logger.ts";
-import { CACHE_DIR, PYTHON_INSTALL_DIR, RUNTIME_BIN_DIR } from "./paths.ts";
+import { CACHE_DIR, PYTHON_RUNTIME_DIR, RUNTIME_BIN_DIR } from "./paths.ts";
 
 export interface RunOptions {
   /** Working directory for the command. */
@@ -35,7 +35,7 @@ export function runtimeEnv(
   const path = `${RUNTIME_BIN_DIR}:${Deno.env.get("PATH") ?? ""}`;
   return {
     PATH: path,
-    UV_PYTHON_INSTALL_DIR: PYTHON_INSTALL_DIR,
+    UV_PYTHON_INSTALL_DIR: PYTHON_RUNTIME_DIR,
     // Managed Python lives under runtimes; skip ~/.local/bin shims (avoids PATH warning).
     UV_PYTHON_INSTALL_BIN: "0",
     UV_CACHE_DIR: CACHE_DIR,

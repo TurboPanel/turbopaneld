@@ -37,9 +37,9 @@
     NODE_DEST="{{ turbopanel_runtimes_dir }}/node/{{ node_version }}"
     rm -rf "$NODE_TMP" "$NODE_DEST"
     mkdir -p "$NODE_TMP"
-    curl -fsSL -o "$NODE_TMP/${NODE_DIR}.tar.xz" \
-      "https://nodejs.org/dist/${NODE_VER}/${NODE_DIR}.tar.xz"
-    tar -xJf "$NODE_TMP/${NODE_DIR}.tar.xz" -C "$NODE_TMP"
+    curl -fsSL -o "$NODE_TMP/${NODE_DIR}.tar.gz" \
+      "https://nodejs.org/dist/${NODE_VER}/${NODE_DIR}.tar.gz"
+    tar -xzf "$NODE_TMP/${NODE_DIR}.tar.gz" -C "$NODE_TMP"
     install -d "$NODE_DEST"
     cp -a "$NODE_TMP/${NODE_DIR}/bin" "$NODE_TMP/${NODE_DIR}/include" \
       "$NODE_TMP/${NODE_DIR}/lib" "$NODE_TMP/${NODE_DIR}/share" \

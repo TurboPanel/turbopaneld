@@ -4,8 +4,10 @@ set -eu
 # Co-located / checkout helper: serves checkout-local dist/turbopaneld only.
 # Managed hosts consume the release package via run.sh, not this path.
 DAEMON_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=scripts/lib/runtime-paths.sh
+. "$DAEMON_DIR/scripts/lib/runtime-paths.sh"
 DAEMON_BINARY="$DAEMON_DIR/dist/turbopaneld"
-CADDY_BIN="/opt/turbopanel/runtimes/caddy/current/caddy"
+CADDY_BIN="$TURBOPANEL_RUNTIMES_DIR/caddy/current/caddy"
 
 if [ ! -s "$DAEMON_BINARY" ]; then
 	echo "serve-update.sh: $DAEMON_BINARY not found or empty" >&2

@@ -29,7 +29,7 @@
     group: "{{ turbopanel_group }}"
     mode: "0750"
 
-# Runtimes live under the FHS lib/runtime tree; the mutable FHS dirs (config,
+# Runtimes live under the FHS vendor tree; the mutable FHS dirs (config,
 # state, logs) are owned by the resolved identity — the dev user in co-located
 # dev, the turbopanel service account on managed hosts. The retired co-located
 # /platform tree is gone: source checkouts now live under the dev user's home

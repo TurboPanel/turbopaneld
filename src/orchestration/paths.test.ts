@@ -17,7 +17,10 @@ import {
   DENO_VERSION,
   GALAXY_COLLECTIONS_DIR,
   ORCHESTRATION_DIR,
+  PYTHON_CURRENT_DIR,
   PYTHON_INSTALL_DIR,
+  PYTHON_RUNTIME_DIR,
+  PYTHON_VERSION,
   REQUIREMENTS_FILE,
   resolveDaemonRoot,
   RUNTIMES_DIR,
@@ -349,8 +352,18 @@ Deno.test("module-level orchestration constants match active layout", () => {
   assertEq(UV_CURRENT_DIR, join(layout.runtimesDir, "uv", "current"), "UV_CURRENT_DIR");
   assertEq(UV_BIN, join(layout.runtimesDir, "uv", UV_VERSION, "uv"), "UV_BIN");
   assertEq(
+    PYTHON_RUNTIME_DIR,
+    join(layout.runtimesDir, "python", PYTHON_VERSION),
+    "PYTHON_RUNTIME_DIR",
+  );
+  assertEq(
+    PYTHON_CURRENT_DIR,
+    join(layout.runtimesDir, "python", "current"),
+    "PYTHON_CURRENT_DIR",
+  );
+  assertEq(
     PYTHON_INSTALL_DIR,
-    join(layout.runtimesDir, "python"),
+    join(layout.runtimesDir, "python", PYTHON_VERSION),
     "PYTHON_INSTALL_DIR",
   );
   assertEq(
@@ -452,7 +465,7 @@ Deno.test("production FHS default constants are the canonical absolute paths", (
   assertEq(PROD_LIB_DIR_DEFAULT, "/opt/turbopanel/lib", "PROD_LIB_DIR_DEFAULT");
   assertEq(
     PROD_RUNTIME_DIR_DEFAULT,
-    "/opt/turbopanel/lib/runtime",
+    "/opt/turbopanel/vendor",
     "PROD_RUNTIME_DIR_DEFAULT",
   );
   assertEq(
@@ -513,7 +526,7 @@ Deno.test("production layout resolves the complete FHS tree with no defaults", (
   }
   if (layout.runtimesDir.includes("/runtimes")) {
     throw new Error(
-      `production runtimesDir must be lib/runtime, got: ${layout.runtimesDir}`,
+      `production runtimesDir must be vendor, got: ${layout.runtimesDir}`,
     );
   }
 });
@@ -528,7 +541,7 @@ Deno.test("development layout resolves source repos with FHS mutable dirs", () =
   assertEq(layout.daemonRootDefault, DEV_DAEMON_ROOT_DEFAULT, "daemonRootDefault");
   assertEq(layout.orchestrationDir, checkoutOrchestrationDir, "orchestrationDir");
   // Dev now shares the production FHS mutable dirs (dev-user-owned at runtime).
-  assertEq(layout.runtimesDir, "/opt/turbopanel/lib/runtime", "runtimesDir literal");
+  assertEq(layout.runtimesDir, "/opt/turbopanel/vendor", "runtimesDir literal");
   assertEq(layout.configDir, "/etc/turbopanel", "configDir literal");
   assertEq(layout.instanceDir, "/opt/turbopanel/lib/instance", "instanceDir literal");
   assertEq(layout.logDir, "/var/log/turbopanel", "logDir literal");
@@ -562,6 +575,20 @@ Deno.test("logDir follows the dev-vs-prod contract", () => {
   const prod = resolveLayout({}, { forceMode: "production" });
   assertEq(prod.logDir, PROD_LOG_DIR_DEFAULT, "production logDir");
   assertEq(prod.logDir, "/var/log/turbopanel", "production logDir literal");
+});
+
+Deno.test("PYTHON_VERSION matches uv-managed python pin", () => {
+  assertEq(PYTHON_VERSION, "3.14", "PYTHON_VERSION");
+  assertEq(
+    PYTHON_RUNTIME_DIR,
+    join(RUNTIMES_DIR, "python", PYTHON_VERSION),
+    "PYTHON_RUNTIME_DIR under RUNTIMES_DIR",
+  );
+  assertEq(
+    PYTHON_CURRENT_DIR,
+    join(RUNTIMES_DIR, "python", "current"),
+    "PYTHON_CURRENT_DIR under RUNTIMES_DIR",
+  );
 });
 
 Deno.test("DENO_VERSION matches the deno-runtime Ansible role default", () => {

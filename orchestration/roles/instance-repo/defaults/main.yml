@@ -7,7 +7,7 @@ turbopanel_dev_gid: ""
 # extra-var (turbopanel_dev_root) from the dev converge.
 turbopanel_dev_root: "{{ ansible_env.HOME }}"
 turbopanel_lib_dir: "{{ turbopanel_install_root }}/lib"
-turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/lib/runtime"
+turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/vendor"
 turbopanel_node: "{{ turbopanel_runtimes_dir }}/node/current/bin/node"
 turbopanel_deno: "{{ turbopanel_runtimes_dir }}/deno/current/deno"
 turbopanel_runtime_path: "{{ turbopanel_runtimes_dir }}/node/current/bin:{{ turbopanel_runtimes_dir }}/deno/current:{{ turbopanel_runtimes_dir }}/caddy/current:/usr/bin:/bin"

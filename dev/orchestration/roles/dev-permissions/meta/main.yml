@@ -1,0 +1,19 @@
+---
+galaxy_info:
+  author: turbopanel
+  description: >-
+    Co-located dev ownership backstop: ensure the shared FHS trees and the dev
+    user's home source checkouts are owned by the single dev user. No setgid,
+    no group/default ACLs, no checkout normalizer. No-op on managed servers when
+    turbopanel_dev_user is unset.
+  license: AGPL-3.0
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Debian
+      versions:
+        - all
+    - name: Raspbian
+      versions:
+        - all
+
+dependencies: []

@@ -13,8 +13,8 @@ turbopanel_dev_gid: ""
 # Co-located dev source checkout root (dev user's home); must be passed as an
 # extra-var from the dev console — never ansible_env.HOME (become runs as root).
 turbopanel_dev_root: ""
-# Runtimes always live under the FHS lib/runtime tree (dev shares it with prod).
-turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/lib/runtime"
+# Runtimes always live under the FHS vendor tree (dev shares it with prod).
+turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/vendor"
 # Co-located dev checkout root (source mode) lives under the dev user's home.
 # Managed installs do not use this as a source tree — they run from
 # bin/turbopaneld or bin/turbopaneld.js.

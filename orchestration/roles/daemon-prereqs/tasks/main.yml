@@ -1,5 +1,16 @@
 ---
-- name: Install daemon prerequisites
+# Host-base packages required before Ansible can converge managed services.
+# These are OS-level tools — not TurboPanel-managed vendor runtimes under
+# vendor (uv, Deno, Node, Caddy, Redis, Python, Ansible venv, …).
+#
+# Minimal host-base boundary:
+#   - curl/ca-certificates/tar/python3-minimal: release download + vendor zip extraction
+#   - git/gnupg/unzip/xz-utils/zstd: orchestration/Ansible/Docker roles on managed hosts
+#   - pamtester: instance install PAM gate (production)
+#
+# run.sh installs only the smaller curl/tar/python3-minimal set when missing;
+# this role covers the remainder once the daemon can run Ansible.
+- name: Install daemon host-base prerequisites
   ansible.builtin.apt:
     name:
       - ca-certificates

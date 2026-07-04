@@ -19,7 +19,7 @@ TurboPanel **daemon** — Ansible-driven node agent; connects to the instance ov
 | Managed update helper | `/opt/turbopanel/bin/turbopanel-update` |
 | Orchestration assets (Ansible) | `/opt/turbopanel/share/orchestration` |
 | Static UI export | `/opt/turbopanel/share/ui` |
-| Vendored runtimes (node/deno/caddy/uv/python/ansible/cloudflared) | `/opt/turbopanel/lib/runtime` |
+| Vendored runtimes (node/deno/caddy/uv/python/ansible/cloudflared) | `/opt/turbopanel/vendor` |
 | Daemon install root (`daemonRootDefault`) | `/opt/turbopanel/lib/daemon` |
 | Config (`daemon.env`, `instance-ca.pem`) | `/etc/turbopanel` |
 | Persistent identity (license, `server.id`, keys, tunnels) | `/var/lib/turbopanel` |
@@ -32,7 +32,7 @@ TurboPanel **daemon** — Ansible-driven node agent; connects to the instance ov
 |---|---|
 | Daemon checkout / install root | `<TURBOPANEL_DEV_ROOT|$HOME>/daemon` |
 | Orchestration assets | `<checkout>/orchestration` (prod roles) + `dev/orchestration/` overlay |
-| Vendored runtimes | `/opt/turbopanel/lib/runtime` |
+| Vendored runtimes | `/opt/turbopanel/vendor` |
 | Daemon env file | `/etc/turbopanel/daemon.env` |
 | Daemon state | `/var/lib/turbopanel` |
 | Logs | `/var/log/turbopanel` |
@@ -43,7 +43,9 @@ TurboPanel **daemon** — Ansible-driven node agent; connects to the instance ov
 
 **Deno version pin:** `DENO_VERSION` (`src/orchestration/paths.ts`) = **`2.9.0`**. Keep it in step with `deno_version` in `orchestration/roles/deno-runtime/defaults/main.yml`, `TP_DENO_VERSION` in `scripts/run.sh`, and `DENO_VERSION` in `turbopanel-dev`'s `src/lib/paths.ts` (dev console bootstrap fallback + status label). `src/orchestration/paths.test.ts` pins the const to the role default.
 
-**Vendored Node/Deno layout:** Ansible roles install pinned runtimes under `/opt/turbopanel/lib/runtime/<tool>/<version>/` with a `current` symlink (see `node-runtime`, `deno-runtime`, `caddy`). Consumers resolve `turbopanel_node` (`…/node/current/bin/node`), `turbopanel_deno` (`…/deno/current/deno`), and `turbopanel_runtime_path` (colon-separated PATH prefix for systemd/Ansible tasks). Node **24.17.0** is pinned in `node-runtime/defaults/main.yml` — keep in step with `NODE_VERSION` in turbopanel-dev `scripts/lib/paths.sh`.
+**Vendored Node/Deno layout:** Ansible roles install pinned runtimes under `/opt/turbopanel/vendor/<tool>/<version>/` with a `current` symlink (see `node-runtime`, `deno-runtime`, `caddy`). Consumers resolve `turbopanel_node` (`…/node/current/bin/node`), `turbopanel_deno` (`…/deno/current/deno`), and `turbopanel_runtime_path` (colon-separated PATH prefix for systemd/Ansible tasks). Node **24.17.0** is pinned in `node-runtime/defaults/main.yml` — keep in step with `NODE_VERSION` in turbopanel-dev `scripts/lib/paths.sh`. The vendored runtime root is defined once in `src/paths/layout.ts` (`resolveRuntimesDir()` / `PROD_RUNTIME_DIR_DEFAULT`); shell helpers live in `scripts/lib/runtime-paths.sh`.
+
+**Host-base prerequisite boundary:** TurboPanel-managed vendors (uv, Python, Ansible venv, Deno, Node, Caddy, Redis, cloudflared) install under `vendor` via orchestration bootstrap — not via apt in `run.sh`. The minimal host-base set is **sudo, curl, ca-certificates, tar, python3-minimal** (`run.sh` may apt-install these only when absent). `python3-minimal` extracts Deno release zips without apt `unzip`. The `daemon-prereqs` role covers the broader managed-host set (git, gnupg, pamtester, xz-utils, …) once Ansible can converge; Redis is vendored by extracting the official `packages.redis.io` `.deb` with `dpkg-deb -x` (no compile toolchain).
 
 **Guards / tests:**
 - `deno task check:layout` (`scripts/check-production-layout.ts`) — asserts the production FHS tree resolves to the canonical absolute paths and that no production source (`src/**`, excluding `*.test.ts` and `src/paths/layout.ts`) references `/opt/turbopanel/platform` or the retired `share/ansible`. Wired into `publish-daemon-trunk.yml`.
@@ -68,7 +70,7 @@ TurboPanel **daemon** — Ansible-driven node agent; connects to the instance ov
 
 **Single-daemon guarantee:** only one live cell attachment per server. Runtime backstop is the instance cell's **single-writer lease** on attach (`attachDaemonSocket` / `detachDaemonSocket`). On managed hosts, `share/orchestration/scripts/ensure-single-daemon.sh` (systemd `ExecStartPre`) adds a **flock** on `/run/turbopanel/daemon.lock` so a second `turbopaneld.service` cannot start. Manual `deno task start/dev` bypasses flock (dev-only). Canonical cell semantics and cost rules: **`../instance/AGENTS.md`** (Daemon Cell).
 
-**Managed install layout (FHS):** `run.sh` installs the clean release package into `/opt/turbopanel/bin/{turbopaneld,turbopaneld.js,turbopanel-update}` and `/opt/turbopanel/share/orchestration/`. Config lives in `/etc/turbopanel` (`daemon.env`, `instance-ca.pem`); persistent identity in `/var/lib/turbopanel` (license, `server.id`, keys); runtime files in `/run/turbopanel`. The installer probes `turbopaneld --version` and selects native `ExecStart` or the Deno JS-fallback (`…/lib/runtime/deno/bin/deno run --allow-all …/bin/turbopaneld.js`) with `EnvironmentFile=/etc/turbopanel/daemon.env`. Co-located dev keeps `deno run main.ts` from the home checkout via `daemon-systemd-setup.yml` and logs to `/var/log/turbopanel`.
+**Managed install layout (FHS):** `run.sh` installs the clean release package into `/opt/turbopanel/bin/{turbopaneld,turbopaneld.js,turbopanel-update}` and `/opt/turbopanel/share/orchestration/`. Config lives in `/etc/turbopanel` (`daemon.env`, `instance-ca.pem`); persistent identity in `/var/lib/turbopanel` (license, `server.id`, keys); runtime files in `/run/turbopanel`. The installer probes `turbopaneld --version` and selects native `ExecStart` or the Deno JS-fallback (`…/vendor/deno/bin/deno run --allow-all …/bin/turbopaneld.js`) with `EnvironmentFile=/etc/turbopanel/daemon.env`. Co-located dev keeps `deno run main.ts` from the home checkout via `daemon-systemd-setup.yml` and logs to `/var/log/turbopanel`.
 
 **Managed update helper:** `scripts/update.sh` is packaged into the release tarball and installed as `/opt/turbopanel/bin/turbopanel-update` (release staging via `tp_stage_release_update_helper`; `tp_verify_release_root` full mode requires it). It is the checkout-free manual refresh path (`sudo sh /opt/turbopanel/bin/turbopanel-update`): it reads the license/channel from `/var/lib/turbopanel` + `/etc/turbopanel` and pipes `https://trbp.nl/run.sh` — it does **not** depend on a source checkout.
 

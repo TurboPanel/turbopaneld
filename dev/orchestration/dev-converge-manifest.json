@@ -1,0 +1,33 @@
+{
+  "playbook": "playbooks/instance-dev-install.yml",
+  "roles": [
+    "turbopanel-user",
+    "runtime-sockets",
+    "daemon-logs",
+    "daemon-prereqs",
+    "docker",
+    "postgres",
+    "redis",
+    "rabbitmq",
+    "mailpit",
+    "instance-user",
+    "instance-dev-prereqs",
+    "node-runtime",
+    "deno-runtime",
+    "caddy",
+    "dev-host-access",
+    "dev-permissions",
+    "instance-repo",
+    "ui-repo",
+    "website-repo",
+    "ui-build",
+    "instance-build",
+    "instance-certs",
+    "instance-launch"
+  ],
+  "devRoles": [
+    "instance-dev-prereqs",
+    "dev-permissions",
+    "dev-host-access"
+  ]
+}

@@ -1,0 +1,18 @@
+---
+# Shared libraries for @react-native/debugger-shell (Electron/Chromium).
+# Debian 13+ may rename several to *t64; probe at runtime (see tasks).
+instance_dev_prereq_specs:
+  - libatk1.0-0
+  - libatk-bridge2.0-0
+  - libasound2
+  - libcups2
+  - libdrm2
+  - libgbm1
+  - libgtk-3-0
+  - libnspr4
+  - libnss3
+  - libxcomposite1
+  - libxdamage1
+  - libxfixes3
+  - libxkbcommon0
+  - libxrandr2

@@ -19,7 +19,7 @@ export class DaemonSourceRootError extends Error {
 export const PROD_HOME_DEFAULT = "/opt/turbopanel";
 export const PROD_BIN_DIR_DEFAULT = "/opt/turbopanel/bin";
 export const PROD_LIB_DIR_DEFAULT = "/opt/turbopanel/lib";
-export const PROD_RUNTIME_DIR_DEFAULT = "/opt/turbopanel/lib/runtime";
+export const PROD_RUNTIME_DIR_DEFAULT = "/opt/turbopanel/vendor";
 export const PROD_SHARE_DIR_DEFAULT = "/opt/turbopanel/share";
 export const PROD_UI_DIR_DEFAULT = "/opt/turbopanel/share/ui";
 export const PROD_CONFIG_DIR_DEFAULT = "/etc/turbopanel";
@@ -223,6 +223,18 @@ export function defaultDaemonRootForMode(
 /**
  * Resolve every managed install location with env overrides and mode-aware defaults.
  */
+/**
+ * Resolve the vendored runtime root (`TURBOPANEL_RUNTIMES_DIR` →
+ * `TURBOPANEL_RUNTIME_DIR` → mode default). Single contract for uv/python,
+ * node/deno/caddy, and every other tool under `vendor`.
+ */
+export function resolveRuntimesDir(
+  env: Record<string, string | undefined> = {},
+  options: ResolveLayoutOptions = {},
+): string {
+  return resolveLayout(env, options).runtimesDir;
+}
+
 export function resolveLayout(
   env: Record<string, string | undefined> = {},
   options: ResolveLayoutOptions = {},

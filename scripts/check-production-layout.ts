@@ -6,7 +6,7 @@
  *
  *  1. The FHS production tree resolves to the canonical absolute paths
  *     (`bin/turbopaneld`, `bin/turbopaneld.js`, `bin/turbopanel-update`,
- *     `share/orchestration`, `share/ui`, `lib/runtime`, `/etc/turbopanel`,
+ *     `share/orchestration`, `share/ui`, `vendor`, `/etc/turbopanel`,
  *     `/var/lib/turbopanel`, `/var/log/turbopanel`, `/run/turbopanel`).
  *
  *  2. The daemon systemd unit template derives daemon.lock from
@@ -25,7 +25,11 @@
  * Run: `deno task check:layout` (or `deno run --allow-read scripts/check-production-layout.ts`).
  */
 import { join, relative } from "@std/path";
-import { resolveLayout } from "../src/paths/layout.ts";
+import {
+  PROD_RUNTIME_DIR_DEFAULT,
+  resolveLayout,
+  resolveRuntimesDir,
+} from "../src/paths/layout.ts";
 
 const repoRoot = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
@@ -44,8 +48,8 @@ expect("mode", prod.mode, "production");
 expect("home", prod.home, "/opt/turbopanel");
 expect("binDir", prod.binDir, "/opt/turbopanel/bin");
 expect("libDir", prod.libDir, "/opt/turbopanel/lib");
-expect("runtimeDir", prod.runtimeDir, "/opt/turbopanel/lib/runtime");
-expect("runtimesDir", prod.runtimesDir, "/opt/turbopanel/lib/runtime");
+expect("runtimeDir", prod.runtimeDir, "/opt/turbopanel/vendor");
+expect("runtimesDir", prod.runtimesDir, "/opt/turbopanel/vendor");
 expect("shareDir", prod.shareDir, "/opt/turbopanel/share");
 expect("uiDir", prod.uiDir, "/opt/turbopanel/share/ui");
 expect(
@@ -179,6 +183,27 @@ const ANSIBLE_SCAN_ALLOWLIST = new Set([
   "scripts/check-production-layout.ts",
 ]);
 
+// Retired vendor trees — every caller must use TURBOPANEL_RUNTIMES_DIR / vendor.
+const RETIRED_RUNTIMES_REF = /\/opt\/turbopanel\/runtimes/;
+const RETIRED_LIB_RUNTIME_REF = /\/opt\/turbopanel\/lib\/runtime/;
+const RETIRED_RUNTIMES_SCAN_ALLOWLIST = new Set([
+  "scripts/check-production-layout.ts",
+  "src/dev-sync-apply.ts", // comment only: documents legacy path for operators
+  "src/orchestration/cloudflared.ts", // comment only
+]);
+
+// Unmanaged `/opt/turbopanel/vendor` literals outside approved layout modules.
+const RUNTIME_ROOT_LITERAL = /\/opt\/turbopanel\/vendor/;
+const RUNTIME_ROOT_SCAN_ALLOWLIST = new Set([
+  "src/paths/layout.ts",
+  "src/orchestration/paths.test.ts",
+  "scripts/check-production-layout.ts",
+  "scripts/lib/runtime-paths.sh",
+  "scripts/install-daemon-systemd.sh",
+  "orchestration/playbooks/daemon-install.yml", // comment only
+  "orchestration/roles/deno-runtime/meta/main.yml", // role description
+]);
+
 for (const root of PRODUCTION_SCAN_ROOTS) {
   const abs = join(repoRoot, root);
   let stat: Deno.FileInfo;
@@ -215,7 +240,39 @@ for (const root of PRODUCTION_SCAN_ROOTS) {
         }
       });
     }
+
+    if (!file.endsWith(".test.ts") && !RETIRED_RUNTIMES_SCAN_ALLOWLIST.has(rel)) {
+      lines.forEach((line, i) => {
+        if (RETIRED_RUNTIMES_REF.test(line)) {
+          failures.push(
+            `${rel}:${i + 1} references retired /opt/turbopanel/runtimes (use vendor contract)`,
+          );
+        }
+        if (RETIRED_LIB_RUNTIME_REF.test(line)) {
+          failures.push(
+            `${rel}:${i + 1} references retired /opt/turbopanel/lib/runtime (use vendor contract)`,
+          );
+        }
+      });
+    }
+
+    if (!file.endsWith(".test.ts") && !RUNTIME_ROOT_SCAN_ALLOWLIST.has(rel)) {
+      lines.forEach((line, i) => {
+        if (RUNTIME_ROOT_LITERAL.test(line)) {
+          failures.push(
+            `${rel}:${i + 1} hardcodes /opt/turbopanel/vendor outside approved layout modules`,
+          );
+        }
+      });
+    }
   }
+}
+
+// --- 4. resolveRuntimesDir matches production layout -----------------------
+if (resolveRuntimesDir({}, { forceMode: "production" }) !== PROD_RUNTIME_DIR_DEFAULT) {
+  failures.push(
+    `resolveRuntimesDir(production) must equal PROD_RUNTIME_DIR_DEFAULT (${PROD_RUNTIME_DIR_DEFAULT})`,
+  );
 }
 
 if (failures.length > 0) {

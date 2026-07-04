@@ -1,22 +1,13 @@
 import { join } from "@std/path";
+import { readEnv, resolveDaemonRoot } from "../paths/layout.ts";
 import {
-  GALAXY_COLLECTIONS_DIR,
   GALAXY_ROLES_DIR,
   ORCHESTRATION_DIR,
   RUNTIMES_DIR,
 } from "./paths.ts";
 
-/**
- * Default staged path for dev-owned orchestration.
- *
- * The turbopanel-dev console stages its `orchestration/` overlay here before the
- * dev converge. In co-located dev the daemon runs as the single dev user, so the
- * staged tree is dev-user-owned (world-readable dirs/files either way); the
- * daemon reads the overlay playbook + dev roles from here and layers the daemon's
- * shared production roles on top via {@link devOrchestrationAnsibleEnv}.
- */
-export const DEFAULT_DEV_ORCHESTRATION_DIR =
-  "/opt/turbopanel/dev-orchestration";
+/** Dev overlay playbook + roles live under `<daemon checkout>/dev/orchestration`. */
+export const DEV_ORCHESTRATION_SUBDIR = join("dev", "orchestration");
 
 export const DEV_CONVERGE_MANIFEST_FILE = "dev-converge-manifest.json";
 
@@ -45,21 +36,35 @@ async function fileExists(path: string): Promise<boolean> {
   }
 }
 
+function devOrchestrationEnv(
+  env: Record<string, string | undefined> = {},
+): Record<string, string | undefined> {
+  return {
+    TURBOPANEL_DAEMON_ROOT: env.TURBOPANEL_DAEMON_ROOT ?? readEnv("TURBOPANEL_DAEMON_ROOT"),
+    TURBOPANEL_DEV_ROOT: env.TURBOPANEL_DEV_ROOT ?? readEnv("TURBOPANEL_DEV_ROOT"),
+    HOME: env.HOME ?? readEnv("HOME"),
+  };
+}
+
 /**
- * Resolve the runtime-consumable dev orchestration root.
+ * Resolve the co-located dev orchestration root.
  *
- * Co-located development stages the turbopanel-dev `orchestration/` overlay under
- * `/opt/turbopanel/dev-orchestration` before bootstrap/converge. The staged tree
- * is owned by the single dev user (the daemon runs as that user in dev) and holds
- * the dev playbook, `ansible.cfg`, the dev converge manifest, and the dev-only
- * overlay roles. Override with `TURBOPANEL_DEV_ORCHESTRATION_DIR` for tests or
- * alternate layouts.
+ * Defaults to `<daemon checkout>/dev/orchestration` — the dev-owned overlay
+ * playbook, `ansible.cfg`, converge manifest, and dev-only roles. Production
+ * roles still resolve from the daemon checkout's shared `orchestration/roles`
+ * via {@link devOrchestrationAnsibleEnv}. Override with
+ * `TURBOPANEL_DEV_ORCHESTRATION_DIR` for tests or alternate layouts.
  */
-export function resolveDevOrchestrationDir(): string {
-  const override = Deno.env.get("TURBOPANEL_DEV_ORCHESTRATION_DIR")?.trim();
-  return override && override.length > 0
-    ? override
-    : DEFAULT_DEV_ORCHESTRATION_DIR;
+export function resolveDevOrchestrationDir(
+  env: Record<string, string | undefined> = {},
+): string {
+  const override = env.TURBOPANEL_DEV_ORCHESTRATION_DIR?.trim() ??
+    readEnv("TURBOPANEL_DEV_ORCHESTRATION_DIR")?.trim();
+  if (override && override.length > 0) {
+    return override.replace(/\/+$/, "");
+  }
+  const daemonRoot = resolveDaemonRoot(devOrchestrationEnv(env));
+  return join(daemonRoot, DEV_ORCHESTRATION_SUBDIR);
 }
 
 export async function readDevConvergeManifest(
@@ -79,10 +84,10 @@ export async function readDevConvergeManifest(
 }
 
 /** Shared layout for dev converge playbooks, stamp hashing, and ansible env. */
-export async function resolveDevOrchestrationLayout(): Promise<
-  DevOrchestrationLayout
-> {
-  const root = resolveDevOrchestrationDir();
+export async function resolveDevOrchestrationLayout(
+  env: Record<string, string | undefined> = {},
+): Promise<DevOrchestrationLayout> {
+  const root = resolveDevOrchestrationDir(env);
   const manifest = await readDevConvergeManifest(root);
   return {
     root,
@@ -94,8 +99,10 @@ export async function resolveDevOrchestrationLayout(): Promise<
   };
 }
 
-export async function devOrchestrationReady(): Promise<boolean> {
-  const root = resolveDevOrchestrationDir();
+export async function devOrchestrationReady(
+  env: Record<string, string | undefined> = {},
+): Promise<boolean> {
+  const root = resolveDevOrchestrationDir(env);
   const manifestPath = join(root, DEV_CONVERGE_MANIFEST_FILE);
   const ansibleCfgPath = join(root, "ansible.cfg");
   if (
@@ -104,7 +111,7 @@ export async function devOrchestrationReady(): Promise<boolean> {
     return false;
   }
   try {
-    const layout = await resolveDevOrchestrationLayout();
+    const layout = await resolveDevOrchestrationLayout(env);
     return await fileExists(layout.playbookPath);
   } catch {
     return false;
@@ -115,10 +122,10 @@ export async function devOrchestrationReady(): Promise<boolean> {
  * Resolve a role's source directory for dev converge stamp hashing.
  *
  * Mirrors the `ANSIBLE_ROLES_PATH` overlay precedence in
- * {@link devOrchestrationAnsibleEnv}: manifest `devRoles` come from the staged
- * dev overlay (`<root>/roles/<name>`); every other role resolves to the daemon
- * home checkout's shared production roles (`GALAXY_ROLES_DIR/<name>`). Keep the
- * two in sync so the stamp hash covers the exact files Ansible will run.
+ * {@link devOrchestrationAnsibleEnv}: manifest `devRoles` come from the dev
+ * overlay (`<root>/roles/<name>`); every other role resolves to the daemon home
+ * checkout's shared production roles (`GALAXY_ROLES_DIR/<name>`). Keep the two
+ * in sync so the stamp hash covers the exact files Ansible will run.
  */
 export function resolveDevConvergeRoleDir(
   layout: DevOrchestrationLayout,
@@ -133,13 +140,12 @@ export function resolveDevConvergeRoleDir(
 /**
  * Ansible env for co-located dev converge playbooks.
  *
- * `ANSIBLE_ROLES_PATH` overlays the staged dev-owned roles ahead of the daemon's
- * shared production roles: Ansible resolves each role name left-to-right, so a
- * dev overlay role (`instance-dev-prereqs`, `dev-permissions`, `dev-host-access`)
+ * `ANSIBLE_ROLES_PATH` overlays the dev-owned roles ahead of the daemon's shared
+ * production roles: Ansible resolves each role name left-to-right, so a dev
+ * overlay role (`instance-dev-prereqs`, `dev-permissions`, `dev-host-access`)
  * wins, and every other role in the manifest falls through to the daemon home
  * checkout's `orchestration/roles`. This overrides the relative `roles_path` in
- * the staged `ansible.cfg` (which cannot name the daemon checkout — its path is
- * no longer fixed). Keep the ordering in step with the manifest's
+ * the dev overlay `ansible.cfg`. Keep the ordering in step with the manifest's
  * `devRoles`/`roles` split and {@link resolveDevConvergeRoleDir}.
  */
 export function devOrchestrationAnsibleEnv(
@@ -148,19 +154,19 @@ export function devOrchestrationAnsibleEnv(
   return {
     ANSIBLE_CONFIG: layout.ansibleCfgPath,
     ANSIBLE_LOCAL_TEMP: join(RUNTIMES_DIR, "uv", "cache", "ansible-tmp"),
-    ANSIBLE_COLLECTIONS_PATH: GALAXY_COLLECTIONS_DIR,
+    ANSIBLE_COLLECTIONS_PATH: join(RUNTIMES_DIR, "ansible", "galaxy-collections"),
     ANSIBLE_ROLES_PATH: `${layout.devRolesDir}:${layout.daemonRolesDir}`,
   };
 }
 
-/** Fail fast when dev converge is requested but staging did not run. */
-export async function requireDevOrchestrationLayout(): Promise<
-  DevOrchestrationLayout
-> {
-  const layout = await resolveDevOrchestrationLayout();
+/** Fail fast when dev converge is requested but the overlay tree is missing. */
+export async function requireDevOrchestrationLayout(
+  env: Record<string, string | undefined> = {},
+): Promise<DevOrchestrationLayout> {
+  const layout = await resolveDevOrchestrationLayout(env);
   if (!(await fileExists(layout.playbookPath))) {
     throw new Error(
-      `Dev orchestration playbook missing at ${layout.playbookPath} — stage turbopanel-dev orchestration before converge`,
+      `Dev orchestration playbook missing at ${layout.playbookPath} — ensure ${DEV_ORCHESTRATION_SUBDIR} exists in the daemon checkout`,
     );
   }
   if (!(await fileExists(layout.ansibleCfgPath))) {

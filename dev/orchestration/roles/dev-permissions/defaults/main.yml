@@ -1,0 +1,21 @@
+---
+# Shared dev-identity contract (mirrors the daemon roles). When turbopanel_dev_user
+# is set (co-located dev), ownership collapses onto the single dev user and its
+# primary group. No-op on managed servers when turbopanel_dev_user is empty.
+turbopanel_dev_user: ""
+turbopanel_dev_uid: ""
+turbopanel_dev_gid: ""
+turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
+turbopanel_install_root: /opt/turbopanel
+# Every mutable dir is the shared FHS location (dev shares the production paths).
+turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/vendor"
+turbopanel_config_dir: /etc/turbopanel
+turbopanel_state_dir: /var/lib/turbopanel
+turbopanel_log_dir: /var/log/turbopanel
+# Dev source-repo root (dev user's home); the playbook overrides this from getent.
+turbopanel_dev_root: "{{ ansible_env.HOME }}"
+_dev_home_checkouts:
+  - "{{ turbopanel_dev_root }}/daemon"
+  - "{{ turbopanel_dev_root }}/instance"
+  - "{{ turbopanel_dev_root }}/ui"
+  - "{{ turbopanel_dev_root }}/website"

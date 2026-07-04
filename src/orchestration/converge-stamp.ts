@@ -108,7 +108,7 @@ export function devConvergeEnvMaterial(): string {
 /**
  * Fingerprint of the co-located dev converge playbook, its role task/template
  * trees, and dev-only extra-vars. Uses the same dev orchestration root as
- * `runInstanceDevInstall()` (staged turbopanel-dev tree + daemon shared roles).
+ * `runInstanceDevInstall()` (daemon checkout dev overlay + daemon shared roles).
  */
 export async function computeDevConvergeStamp(): Promise<string> {
   const layout = await resolveDevOrchestrationLayout();

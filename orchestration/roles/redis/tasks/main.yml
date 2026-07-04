@@ -58,31 +58,28 @@
       Unsupported CPU architecture '{{ ansible_architecture }}'.
       TurboPanel supports 64-bit Linux only: aarch64 (arm64), x86_64 (amd64).
 
+- name: Resolve Redis .deb architecture
+  ansible.builtin.set_fact:
+    redis_deb_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
+
 - name: Check vendored Redis binary
   ansible.builtin.stat:
     path: "{{ turbopanel_runtimes_dir }}/redis/{{ redis_version }}/bin/redis-server"
   register: _redis_pinned
-
-- name: Install Redis build dependencies
-  when: not _redis_pinned.stat.exists
-  ansible.builtin.apt:
-    name:
-      - build-essential
-      - libssl-dev
-      - pkg-config
-    state: present
 
 - name: Install Redis into runtimes directory
   when: not _redis_pinned.stat.exists
   ansible.builtin.shell: |
     set -euo pipefail
     REDIS_VER="{{ redis_version }}"
+    DEB_ARCH="{{ redis_deb_arch }}"
     TMP="$(mktemp -d)"
-    curl -fsSL -o "$TMP/redis-${REDIS_VER}.tar.gz" \
-      "https://download.redis.io/releases/redis-${REDIS_VER}.tar.gz"
-    tar -xzf "$TMP/redis-${REDIS_VER}.tar.gz" -C "$TMP"
-    make -C "$TMP/redis-${REDIS_VER}"
-    make -C "$TMP/redis-${REDIS_VER}" PREFIX="{{ turbopanel_runtimes_dir }}/redis/${REDIS_VER}" install
+    DEST="{{ turbopanel_runtimes_dir }}/redis/${REDIS_VER}/bin"
+    DEB_URL="https://packages.redis.io/deb/pool/bookworm/r/re/redis-server_${REDIS_VER}-1rl1~bookworm1_${DEB_ARCH}.deb"
+    curl -fsSL -o "$TMP/redis-server.deb" "$DEB_URL"
+    dpkg-deb -x "$TMP/redis-server.deb" "$TMP/extract"
+    install -d "$DEST"
+    install -m 0755 "$TMP/extract/usr/bin/redis-server" "$DEST/redis-server"
     rm -rf "$TMP"
   args:
     creates: "{{ turbopanel_runtimes_dir }}/redis/{{ redis_version }}/bin/redis-server"

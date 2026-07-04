@@ -499,7 +499,7 @@ tp_print_header
 INSTALL_ROOT="/opt/turbopanel"
 BIN_DIR="$INSTALL_ROOT/bin"
 ORCHESTRATION_DIR="$INSTALL_ROOT/share/orchestration"
-RUNTIMES_DIR="$INSTALL_ROOT/lib/runtime"
+RUNTIMES_DIR="$INSTALL_ROOT/vendor"
 CONFIG_DIR="/etc/turbopanel"
 STATE_DIR="/var/lib/turbopanel"
 RUN_DIR="/run/turbopanel"
@@ -521,13 +521,30 @@ printf '%s' "$LICENSE_TOKEN" > "$STAGING_DIR/license.token"
 chmod 0640 "$STAGING_DIR/license.id" "$STAGING_DIR/license.token"
 
 export DEBIAN_FRONTEND=noninteractive
-tp_print_step "▸" "Checking system prerequisites…"
-if ! apt-get update -qq 2>/dev/null \
-	|| ! apt-get install -y -qq sudo curl ca-certificates xz-utils zstd tar unzip gnupg python3-debian 2>/dev/null; then
-	tp_print_error "apt prerequisites failed"
+tp_print_step "▸" "Checking host prerequisites…"
+# Host-base boundary (not TurboPanel-managed vendors): tools required to
+# download/extract release artifacts and bootstrap vendor. Vendor runtimes
+# (uv, Deno, Node, Caddy, Redis, …) are installed by orchestration — never via
+# apt in run.sh.
+_tp_host_missing=""
+for _tp_host_cmd in sudo curl tar python3; do
+	if ! command -v "$_tp_host_cmd" >/dev/null 2>&1; then
+		_tp_host_missing="$_tp_host_missing $_tp_host_cmd"
+	fi
+done
+if [ -n "$_tp_host_missing" ]; then
+	if ! apt-get update -qq 2>/dev/null \
+		|| ! apt-get install -y -qq sudo curl ca-certificates tar python3-minimal 2>/dev/null; then
+		tp_print_error "host prerequisites failed (need:${_tp_host_missing})"
+		exit 1
+	fi
+fi
+if ! command -v curl >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1 \
+	|| ! command -v python3 >/dev/null 2>&1; then
+	tp_print_error "host prerequisites missing after install (need curl tar python3)"
 	exit 1
 fi
-tp_print_ok "Prerequisites ready"
+tp_print_ok "Host prerequisites ready"
 
 tp_print_step "▸" "Fetching release manifest…"
 if ! tp_fetch_channel_manifest; then
