@@ -1,15 +1,19 @@
 ---
 turbopanel_install_root: /opt/turbopanel
-turbopanel_user: turbopanel
 turbopanel_dev_user: ""
-# Co-located dev keeps /opt/turbopanel/runtimes + the /platform checkout; managed
-# installs use the FHS lib tree.
-turbopanel_platform_dir: "{{ turbopanel_install_root }}/platform"
+turbopanel_dev_uid: ""
+turbopanel_dev_gid: ""
+# Co-located dev source checkout root (dev user's home); overridden by an
+# extra-var (turbopanel_dev_root) from the dev converge.
+turbopanel_dev_root: "{{ ansible_env.HOME }}"
+turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
 turbopanel_lib_dir: "{{ turbopanel_install_root }}/lib"
-turbopanel_runtimes_dir: "{{ (turbopanel_install_root ~ '/runtimes') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/runtime') }}"
-turbopanel_instance_dir: "{{ (turbopanel_platform_dir ~ '/instance') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/instance') }}"
-instance_user: turbopaneli
-turbopanel_group: turbopanel
+# Runtimes always live under the FHS lib/runtime tree (dev shares it with prod).
+turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/lib/runtime"
+# Source checkout: co-located dev uses the dev user's home; managed installs use lib.
+turbopanel_instance_dir: "{{ (turbopanel_dev_root ~ '/instance') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/instance') }}"
+instance_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopaneli' }}"
+turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
 turbopanel_instance_run_mode: source
 turbopanel_instance_dist_dir: "{{ turbopanel_instance_dir }}/dist"
 turbopanel_instance_binary: "{{ turbopanel_instance_dist_dir }}/turbopanel-instance"

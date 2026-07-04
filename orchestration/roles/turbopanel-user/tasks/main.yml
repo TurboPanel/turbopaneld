@@ -1,10 +1,14 @@
 ---
+# Co-located dev collapses onto the single human dev user, which already exists —
+# so the dedicated turbopanel(9999) account and its passwordless sudo are only
+# created for managed/production installs (turbopanel_dev_user empty).
 - name: Ensure turbopanel group
   ansible.builtin.group:
     name: "{{ turbopanel_group }}"
     gid: "{{ turbopanel_gid }}"
     state: present
     system: true
+  when: turbopanel_dev_user | default('') | length == 0
 
 - name: Ensure turbopanel user
   ansible.builtin.user:
@@ -15,6 +19,7 @@
     shell: /usr/sbin/nologin
     system: true
     create_home: false
+  when: turbopanel_dev_user | default('') | length == 0
 
 - name: Ensure install root directory
   ansible.builtin.file:
@@ -24,7 +29,12 @@
     group: "{{ turbopanel_group }}"
     mode: "0750"
 
-- name: Ensure platform and runtimes directories
+# Runtimes live under the FHS lib/runtime tree; the mutable FHS dirs (config,
+# state, logs) are owned by the resolved identity — the dev user in co-located
+# dev, the turbopanel service account on managed hosts. The retired co-located
+# /platform tree is gone: source checkouts now live under the dev user's home
+# and config lives under /etc/turbopanel.
+- name: Ensure runtimes and FHS directories
   ansible.builtin.file:
     path: "{{ item }}"
     state: directory
@@ -32,13 +42,14 @@
     group: "{{ turbopanel_group }}"
     mode: "0750"
   loop:
-    - "{{ turbopanel_install_root }}/platform"
-    - "{{ turbopanel_install_root }}/platform/config"
     - "{{ turbopanel_runtimes_dir }}"
     - "{{ turbopanel_runtimes_dir }}/uv"
     - "{{ turbopanel_runtimes_dir }}/uv/cache"
     - "{{ turbopanel_runtimes_dir }}/python"
     - "{{ turbopanel_runtimes_dir }}/ansible"
+    - /etc/turbopanel
+    - /var/lib/turbopanel
+    - /var/log/turbopanel
 
 # The pre-playbook `turbopaneld bootstrap-orchestration` (invoked by run.sh as
 # root on first binary install) may have populated uv/python/ansible state dirs
@@ -63,3 +74,4 @@
     group: root
     mode: "0440"
     validate: "visudo -cf %s"
+  when: turbopanel_dev_user | default('') | length == 0

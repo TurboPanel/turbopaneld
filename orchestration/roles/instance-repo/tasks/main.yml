@@ -25,9 +25,10 @@
     excludes: .turbopanel-checkout-stamp
   register: _instance_real_entries
 
-# instance-user and dev-permissions may leave an empty checkout path (and a
-# normalize-dev-checkout stamp) before this role runs; git clone refuses to
-# target an existing directory even when only those placeholders are present.
+# instance-user may leave an empty checkout path before this role runs (and a
+# pre-migration host may still carry a legacy .turbopanel-checkout-stamp); git
+# clone refuses to target an existing directory even when only those
+# placeholders are present.
 - name: Remove instance checkout placeholder before clone
   when:
     - not _instance_git.stat.exists
@@ -55,13 +56,8 @@
     version: "{{ instance_branch }}"
   become_user: "{{ turbopanel_user }}"
   environment:
-    HOME: "{{ turbopanel_install_root }}"
+    HOME: "{{ turbopanel_dev_root if (turbopanel_dev_user | default('') | length > 0) else turbopanel_install_root }}"
   register: _instance_clone
-
-- name: Record checkout normalize needed after instance clone
-  ansible.builtin.set_fact:
-    force_checkout_normalize: true
-  when: _instance_clone is defined and _instance_clone is changed
 
 - name: Report instance checkout state
   ansible.builtin.debug:
@@ -83,11 +79,6 @@
     chdir: "{{ turbopanel_instance_dir }}"
   become_user: "{{ turbopanel_user }}"
   environment:
-    HOME: "{{ turbopanel_install_root }}"
+    HOME: "{{ turbopanel_dev_root if (turbopanel_dev_user | default('') | length > 0) else turbopanel_install_root }}"
     PATH: "/usr/local/bin:/usr/bin:/bin"
   register: _instance_pnpm_install
-
-- name: Record checkout normalize needed after instance pnpm install
-  ansible.builtin.set_fact:
-    force_checkout_normalize: true
-  when: _instance_pnpm_install is defined and _instance_pnpm_install is changed

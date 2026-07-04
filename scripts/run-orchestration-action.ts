@@ -1,19 +1,54 @@
-#!/usr/bin/env -S deno run --config=/opt/turbopanel/platform/daemon/deno.json --allow-read --allow-run --allow-env --allow-write
+#!/usr/bin/env -S deno run --allow-read --allow-run --allow-env --allow-write --allow-net
 /**
- * Runs daemon orchestration playbooks as turbopanel (invoked via sudo from the console).
- * Emits Ansible JSONL events on stdout — one JSON object per line.
+ * Runs daemon orchestration playbooks (invoked via `deno run` under sudo from the
+ * dev console). Emits Ansible JSONL events on stdout — one JSON object per line.
  *
- * Co-located dev converge resolves playbooks from the staged turbopanel-dev
- * orchestration tree; daemon-only playbooks continue to use the daemon checkout.
+ * Location-agnostic: this script lives inside the daemon checkout
+ * (`<checkout>/scripts/`) and resolves every path through the daemon's own
+ * layout-aware modules (`src/orchestration/paths.ts`, `src/paths/layout.ts`). It
+ * therefore works whether the checkout is the co-located dev tree under the dev
+ * user's home (`<home>/daemon`) or the FHS install root — it never names a
+ * `/opt/turbopanel/platform` tree.
+ *
+ * Co-located dev converge (`instance-dev-install`) resolves the playbook + dev
+ * overlay roles from the staged turbopanel-dev orchestration tree
+ * (`dev-orchestration.ts`), layering the daemon's shared production roles via
+ * `ANSIBLE_ROLES_PATH` (see `devOrchestrationAnsibleEnv`). Daemon-only playbooks
+ * run from the daemon checkout's own `orchestration/` dir.
  */
-const TURBOPANEL_ROOT = "/opt/turbopanel";
-/** Run playbooks outside daemon checkout so git as turbopanel does not walk into dev-owned .git */
-const ANSIBLE_PLAYBOOK_CWD = TURBOPANEL_ROOT;
-const TURBOPANEL_PLATFORM = `${TURBOPANEL_ROOT}/platform`;
-const RUNTIMES_DIR = `${TURBOPANEL_ROOT}/runtimes`;
-const ANSIBLE_PLAYBOOK_BIN =
-  `${RUNTIMES_DIR}/ansible/current/bin/ansible-playbook`;
-const DAEMON_ENV_PATH = `${TURBOPANEL_PLATFORM}/daemon/.env`;
+import { join } from "@std/path";
+import { runPlaybookStreaming } from "../src/orchestration/ansible-events.ts";
+import { runBuildToggle as runAnsibleBuildToggle } from "../src/orchestration/ansible.ts";
+import {
+  computeDevConvergeStamp,
+  writeDevConvergeStamp,
+} from "../src/orchestration/converge-stamp.ts";
+import {
+  devOrchestrationAnsibleEnv,
+  requireDevOrchestrationLayout,
+} from "../src/orchestration/dev-orchestration.ts";
+import {
+  ANSIBLE_PLAYBOOK_BIN,
+  ANSIBLE_PLAYBOOK_CWD,
+  ansibleEnv,
+  ORCHESTRATION_DIR,
+} from "../src/orchestration/paths.ts";
+import { readEnv, resolveLayout } from "../src/paths/layout.ts";
+
+/**
+ * FHS daemon env file — the same `/etc/turbopanel/daemon.env` the dev console
+ * writes and the source-mode `turbopaneld.service` consumes via `EnvironmentFile`.
+ * Read here to hoist runtime toggles the console does not set directly in the
+ * process env (`TURBOPANEL_UI_MODE`, `TURBOPANEL_INSTANCE_RUN_MODE`,
+ * `TURBOPANEL_INSTANCE_RUNTIME`). Dev-identity vars come pre-set from the console.
+ */
+const DAEMON_ENV_PATH = join(
+  resolveLayout({
+    TURBOPANEL_CONFIG_DIR: readEnv("TURBOPANEL_CONFIG_DIR"),
+    TURBOPANEL_DAEMON_ROOT: readEnv("TURBOPANEL_DAEMON_ROOT"),
+  }).configDir,
+  "daemon.env",
+);
 
 const SSH_REPO_URLS = {
   instance: "git@github.com:turbopanel/turbopanel.git",
@@ -21,17 +56,6 @@ const SSH_REPO_URLS = {
   website: "git@github.com:turbopanel/turbopanel-website.git",
   daemon: "git@github.com:turbopanel/turbopanel-daemon.git",
 } as const;
-
-const DAEMON_ANSIBLE_EVENTS_PATH =
-  `${TURBOPANEL_PLATFORM}/daemon/src/orchestration/ansible-events.ts`;
-const DAEMON_ANSIBLE_PATH =
-  `${TURBOPANEL_PLATFORM}/daemon/src/orchestration/ansible.ts`;
-const DAEMON_CONVERGE_STAMP_PATH =
-  `${TURBOPANEL_PLATFORM}/daemon/src/orchestration/converge-stamp.ts`;
-const DAEMON_DEV_ORCHESTRATION_PATH =
-  `${TURBOPANEL_PLATFORM}/daemon/src/orchestration/dev-orchestration.ts`;
-const DAEMON_ORCHESTRATION_DIR =
-  `${TURBOPANEL_PLATFORM}/daemon/orchestration`;
 
 function applyDaemonEnvToProcess(): void {
   let content = "";
@@ -49,14 +73,6 @@ function applyDaemonEnvToProcess(): void {
 }
 
 applyDaemonEnvToProcess();
-
-function daemonAnsibleEnv(): Record<string, string> {
-  return {
-    ANSIBLE_CONFIG: `${DAEMON_ORCHESTRATION_DIR}/ansible.cfg`,
-    ANSIBLE_LOCAL_TEMP: `${RUNTIMES_DIR}/uv/cache/ansible-tmp`,
-    ANSIBLE_COLLECTIONS_PATH: `${RUNTIMES_DIR}/ansible/galaxy-collections`,
-  };
-}
 
 function emitEvent(event: unknown): void {
   console.log(JSON.stringify(event));
@@ -102,53 +118,26 @@ function devInstanceExtraArgs(): string[] {
 }
 
 async function runInstanceDevInstall(): Promise<void> {
-  const devMod = await import(DAEMON_DEV_ORCHESTRATION_PATH) as {
-    requireDevOrchestrationLayout: () => Promise<{
-      playbookPath: string;
-      ansibleCfgPath: string;
-      root: string;
-      devRolesDir: string;
-      daemonRolesDir: string;
-      manifest: {
-        playbook: string;
-        roles: string[];
-        devRoles: string[];
-      };
-    }>;
-    devOrchestrationAnsibleEnv: (
-      layout: {
-        ansibleCfgPath: string;
-      },
-    ) => Record<string, string>;
-  };
-  const layout = await devMod.requireDevOrchestrationLayout();
+  const layout = await requireDevOrchestrationLayout();
 
-  const eventsMod = await import(DAEMON_ANSIBLE_EVENTS_PATH) as {
-    runPlaybookStreaming: (
-      ansiblePlaybookBin: string,
-      args: string[],
-      options: {
-        cwd?: string;
-        env?: Record<string, string>;
-        onEvent: (event: unknown) => void;
-      },
-    ) => Promise<void>;
-  };
-  await eventsMod.runPlaybookStreaming(
+  await runPlaybookStreaming(
     ANSIBLE_PLAYBOOK_BIN,
-    ["-i", "localhost,", "-c", "local", ...devInstanceExtraArgs(), layout.playbookPath],
+    [
+      "-i",
+      "localhost,",
+      "-c",
+      "local",
+      ...devInstanceExtraArgs(),
+      layout.playbookPath,
+    ],
     {
       cwd: ANSIBLE_PLAYBOOK_CWD,
-      env: devMod.devOrchestrationAnsibleEnv(layout),
+      env: devOrchestrationAnsibleEnv(layout),
       onEvent: emitEvent,
     },
   );
 
-  const stampMod = await import(DAEMON_CONVERGE_STAMP_PATH) as {
-    computeDevConvergeStamp: () => Promise<string>;
-    writeDevConvergeStamp: (stamp: string) => Promise<void>;
-  };
-  await stampMod.writeDevConvergeStamp(await stampMod.computeDevConvergeStamp());
+  await writeDevConvergeStamp(await computeDevConvergeStamp());
 }
 
 async function runBuildToggle(): Promise<void> {
@@ -161,17 +150,7 @@ async function runBuildToggle(): Promise<void> {
     instanceRunMode: "source" | "compiled";
     forceBuild?: boolean;
   };
-  const mod = await import(DAEMON_ANSIBLE_PATH) as {
-    runBuildToggle: (
-      opts: {
-        uiMode: "dev" | "static";
-        instanceRunMode: "source" | "compiled";
-        forceBuild?: boolean;
-      },
-      onEvent?: (event: unknown) => void,
-    ) => Promise<void>;
-  };
-  await mod.runBuildToggle(opts, emitEvent);
+  await runAnsibleBuildToggle(opts, emitEvent);
 }
 
 async function runPlaybook(): Promise<void> {
@@ -180,26 +159,23 @@ async function runPlaybook(): Promise<void> {
     throw new Error("playbook requires a playbook path argument");
   }
   const extraArgs = Deno.args.slice(2);
-  const eventsMod = await import(DAEMON_ANSIBLE_EVENTS_PATH) as {
-    runPlaybookStreaming: (
-      ansiblePlaybookBin: string,
-      args: string[],
-      options: {
-        cwd?: string;
-        env?: Record<string, string>;
-        onEvent: (event: unknown) => void;
-      },
-    ) => Promise<void>;
-  };
-  const playbook = `${DAEMON_ORCHESTRATION_DIR}/playbooks/${playbookRelative}`;
-  // Co-located dev playbooks need dev user + runtime context from the daemon .env;
+  const playbook = join(ORCHESTRATION_DIR, "playbooks", playbookRelative);
+  // Co-located dev playbooks need dev user + runtime context from the daemon env;
   // CLI extra-vars passed after dev defaults win on duplicate keys.
-  await eventsMod.runPlaybookStreaming(
+  await runPlaybookStreaming(
     ANSIBLE_PLAYBOOK_BIN,
-    ["-i", "localhost,", "-c", "local", ...devInstanceExtraArgs(), ...extraArgs, playbook],
+    [
+      "-i",
+      "localhost,",
+      "-c",
+      "local",
+      ...devInstanceExtraArgs(),
+      ...extraArgs,
+      playbook,
+    ],
     {
       cwd: ANSIBLE_PLAYBOOK_CWD,
-      env: daemonAnsibleEnv(),
+      env: ansibleEnv(),
       onEvent: emitEvent,
     },
   );

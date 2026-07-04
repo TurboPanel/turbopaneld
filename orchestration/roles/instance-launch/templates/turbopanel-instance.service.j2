@@ -37,8 +37,9 @@ Environment=TURBOPANEL_SYSTEM_EMAIL__PROVIDER=smtp
 Environment=TURBOPANEL_SYSTEM_EMAIL__SMTP_HOST=127.0.0.1
 Environment=TURBOPANEL_SYSTEM_EMAIL__SMTP_PORT={{ mailpit_smtp_port | default(1025) }}
 {% endif %}
-Environment=TURBOPANEL_DAEMON_STATE_DIR={{ turbopanel_instance_daemon_state_dir }}
+Environment=TURBOPANEL_DAEMON_STATE_DIR={{ turbopanel_daemon_state_dir }}
 Environment=TURBOPANEL_CONFIG_DIR={{ turbopanel_config_dir }}
+Environment=TURBOPANEL_RUN_DIR={{ turbopanel_run_dir }}
 Environment=TURBOPANEL_INSTANCE_RUNTIME_ENV={{ turbopanel_instance_runtime_env }}
 Environment=TURBOPANEL_INSTANCE_RUNTIME_DEV_VARS={{ turbopanel_instance_runtime_dev_vars }}
 # turbopanel_instance_run_mode: "source" (deno run) | "compiled" (single binary)
@@ -53,7 +54,7 @@ ExecStart={{ turbopanel_instance_dir }}/scripts/workers-serve.sh
 {% elif turbopanel_instance_run_mode == 'compiled' %}
 ExecStart={{ turbopanel_instance_binary }}
 {% else %}
-ExecStart=/usr/local/bin/deno run --allow-env --allow-sys=networkInterfaces,hostname --allow-read=/run/turbopanel,{{ postgres_socket_dir }},{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }},{{ turbopanel_instance_runtime_dir }} --allow-write=/run/turbopanel,{{ postgres_socket_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_instance_daemon_state_dir }} --allow-net=127.0.0.1:{{ drizzle_studio_port | default(4983) }},127.0.0.1:{{ rabbitmq_amqp_port }},127.0.0.1:{{ mailpit_smtp_port | default(1025) }},dl.trbp.nl:443 --allow-run=git,systemctl,tar,sudo,/usr/bin/sudo,/bin/sh,mkfifo,/usr/bin/mkfifo,pamtester,/usr/bin/pamtester,setfacl,/usr/bin/setfacl,/usr/local/bin/node,/usr/local/bin/deno,{{ turbopanel_runtimes_dir }}/deno/current/deno src/deno.ts
+ExecStart=/usr/local/bin/deno run --allow-env --allow-sys=networkInterfaces,hostname --allow-read={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }},{{ turbopanel_instance_runtime_dir }} --allow-write={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_daemon_state_dir }} --allow-net=127.0.0.1:{{ drizzle_studio_port | default(4983) }},127.0.0.1:{{ rabbitmq_amqp_port }},127.0.0.1:{{ mailpit_smtp_port | default(1025) }},dl.trbp.nl:443 --allow-run=git,systemctl,tar,sudo,/usr/bin/sudo,/bin/sh,mkfifo,/usr/bin/mkfifo,pamtester,/usr/bin/pamtester,setfacl,/usr/bin/setfacl,/usr/local/bin/node,/usr/local/bin/deno,{{ turbopanel_runtimes_dir }}/deno/current/deno src/deno.ts
 {% endif %}
 Restart=always
 RestartSec=2

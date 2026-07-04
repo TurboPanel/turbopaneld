@@ -1,16 +1,20 @@
 redis_version: "8.0.2"
-# Managed installs (turbopanel_managed_install=true) use lib/runtime; co-located
-# dev keeps the historical runtimes/ layout.
-turbopanel_runtimes_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/{{ 'lib/runtime' if (turbopanel_managed_install | default(false)) else 'runtimes' }}"
+# Runtimes always live under the FHS lib/runtime tree (dev shares it with prod).
+turbopanel_runtimes_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/lib/runtime"
 redis_socket_dir: /run/turbopanel
 redis_socket_name: redis.sock
 redis_socket_path: "{{ redis_socket_dir }}/{{ redis_socket_name }}"
 redis_service_name: turbopanel-redis
-redis_user: turbopanelc
-redis_uid: 9997
-redis_primary_group: turbopanelc
-redis_primary_gid: 9997
+# Shared dev-identity contract: dev collapses the redis service account onto the
+# single dev user; managed installs keep the dedicated turbopanelc(9997) account.
+turbopanel_dev_user: ""
+turbopanel_dev_uid: ""
+turbopanel_dev_gid: ""
+redis_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanelc' }}"
+redis_uid: "{{ turbopanel_dev_uid if (turbopanel_dev_user | default('') | length > 0) else 9997 }}"
+redis_primary_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanelc' }}"
+redis_primary_gid: "{{ turbopanel_dev_gid if (turbopanel_dev_user | default('') | length > 0) else 9997 }}"
 redis_instance_user: turbopaneli
-turbopanel_group: turbopanel
-# Co-located dev keeps the checkout config layout; managed installs use /etc/turbopanel.
-turbopanel_config_dir: "{{ '/opt/turbopanel/platform/config' if (turbopanel_dev_user | default('') | length > 0) else '/etc/turbopanel' }}"
+turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
+# FHS config dir (dev shares it with prod).
+turbopanel_config_dir: /etc/turbopanel

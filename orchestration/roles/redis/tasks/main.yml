@@ -1,10 +1,16 @@
 ---
 # Self-sufficient: does not depend on instance-user (Redis runs before instance on fresh hosts).
+#
+# Co-located dev collapses onto the single dev user, so the dedicated
+# turbopanelc(9997) Redis account/group and the cross-user socket-group
+# membership are only provisioned for managed installs (turbopanel_dev_user
+# empty). In dev the single dev user owns and reads the socket directly.
 - name: Ensure turbopanel group exists
   ansible.builtin.group:
     name: "{{ turbopanel_group }}"
     state: present
     system: true
+  when: turbopanel_dev_user | default('') | length == 0
 
 - name: Ensure turbopanelc primary group for redis user
   ansible.builtin.group:
@@ -12,6 +18,7 @@
     gid: "{{ redis_primary_gid }}"
     state: present
     system: true
+  when: turbopanel_dev_user | default('') | length == 0
 
 - name: Ensure Redis service user (primary group turbopanelc, supplementary turbopanel)
   ansible.builtin.user:
@@ -23,6 +30,7 @@
     shell: /usr/sbin/nologin
     system: true
     create_home: false
+  when: turbopanel_dev_user | default('') | length == 0
 
 - name: Check whether instance user exists for Redis socket access
   ansible.builtin.getent:
@@ -30,15 +38,17 @@
     key: "{{ redis_instance_user }}"
   register: _redis_instance_user_getent
   failed_when: false
+  when: turbopanel_dev_user | default('') | length == 0
 
 - name: Ensure instance user can access redis socket group (turbopanelc)
   ansible.builtin.user:
     name: "{{ redis_instance_user }}"
     groups: "{{ redis_primary_group }}"
     append: true
-  when: >-
-    _redis_instance_user_getent.ansible_facts.getent_passwd is defined and
-    _redis_instance_user_getent.ansible_facts.getent_passwd[redis_instance_user] is defined
+  when:
+    - turbopanel_dev_user | default('') | length == 0
+    - _redis_instance_user_getent.ansible_facts.getent_passwd is defined
+    - _redis_instance_user_getent.ansible_facts.getent_passwd[redis_instance_user] is defined
 
 - name: Assert supported CPU architecture
   ansible.builtin.assert:

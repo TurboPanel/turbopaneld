@@ -6,8 +6,9 @@ if [ "$(id -u)" != "0" ]; then
   exit 1
 fi
 
-DAEMON_DIR="/opt/turbopanel/platform/daemon"
-RUNTIMES_DIR="${TURBOPANEL_RUNTIMES_DIR:-/opt/turbopanel/runtimes}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DAEMON_DIR="${TURBOPANEL_DAEMON_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+RUNTIMES_DIR="${TURBOPANEL_RUNTIMES_DIR:-/opt/turbopanel/lib/runtime}"
 ANSIBLE_PLAYBOOK="$RUNTIMES_DIR/ansible/current/bin/ansible-playbook"
 ANSIBLE_CFG="$DAEMON_DIR/orchestration/ansible.cfg"
 ANSIBLE_LOCAL_TMP="$RUNTIMES_DIR/uv/cache/ansible-tmp"
@@ -43,6 +44,14 @@ trap 'rm -f "$VARS_FILE"' EXIT
   if [ -n "${TURBOPANEL_DAEMON_DENO_BIN:-}" ]; then
     printf 'turbopanel_daemon_deno_bin: %s\n' "$TURBOPANEL_DAEMON_DENO_BIN"
   fi
+  printf 'turbopanel_runtimes_dir: %s\n' "$RUNTIMES_DIR"
+  printf 'turbopanel_daemon_dir: %s\n' "$DAEMON_DIR"
+  if [ -n "${TURBOPANEL_DEV_USER:-}" ]; then
+    printf 'turbopanel_dev_user: %s\n' "$TURBOPANEL_DEV_USER"
+    printf 'turbopanel_dev_uid: %s\n' "${TURBOPANEL_DEV_UID:-}"
+    printf 'turbopanel_dev_gid: %s\n' "${TURBOPANEL_DEV_GID:-}"
+    printf 'turbopanel_dev_root: %s\n' "${TURBOPANEL_DEV_ROOT:-}"
+  fi
 } > "$VARS_FILE"
 
 ANSIBLE_CONFIG="$ANSIBLE_CFG" \
@@ -70,5 +79,5 @@ else
   echo "${SERVICE_NAME} service installed (start deferred)"
 fi
 echo "status: sudo systemctl status ${SERVICE_NAME}"
-echo "logs:   tail -f /opt/turbopanel/platform/daemon/logs/daemon.log"
+echo "logs:   tail -f /var/log/turbopanel/daemon/daemon.log"
 echo "        sudo journalctl -u ${SERVICE_NAME} -f"

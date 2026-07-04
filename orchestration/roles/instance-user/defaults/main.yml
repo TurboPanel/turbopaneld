@@ -3,20 +3,29 @@
 # primary group turbopaneli and supplementary membership in turbopanel and
 # turbopanelc. This keeps broad shared-platform access (turbopanel) separate
 # from Redis socket access (/run/turbopanel/redis.sock, group turbopanelc).
-instance_user: turbopaneli
-instance_uid: 9998
-instance_primary_group: turbopaneli
-instance_primary_gid: 9998
-turbopanel_user: turbopanel
-turbopanel_group: turbopanel
-redis_primary_group: turbopanelc
-turbopanel_install_root: /opt/turbopanel
+#
+# Co-located dev collapses this multi-user scheme onto the single dev user via
+# the shared dev-identity contract (turbopanel_dev_user set). Managed installs
+# keep the dedicated turbopaneli(9998)/turbopanel(9999)/turbopanelc(9997) split.
 turbopanel_dev_user: ""
-# Co-located dev keeps the /platform checkout as the instance user's home; managed
-# installs use the FHS lib tree.
-turbopanel_platform_dir: "{{ turbopanel_install_root }}/platform"
+turbopanel_dev_uid: ""
+turbopanel_dev_gid: ""
+instance_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopaneli' }}"
+instance_uid: "{{ turbopanel_dev_uid if (turbopanel_dev_user | default('') | length > 0) else 9998 }}"
+instance_primary_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopaneli' }}"
+instance_primary_gid: "{{ turbopanel_dev_gid if (turbopanel_dev_user | default('') | length > 0) else 9998 }}"
+turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
+turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
+redis_primary_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanelc' }}"
+turbopanel_install_root: /opt/turbopanel
+# Co-located dev source checkout root (dev user's home); overridden by an
+# extra-var (turbopanel_dev_root) from the dev converge.
+turbopanel_dev_root: "{{ ansible_env.HOME }}"
 turbopanel_lib_dir: "{{ turbopanel_install_root }}/lib"
-turbopanel_instance_dir: "{{ (turbopanel_platform_dir ~ '/instance') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/instance') }}"
+# Instance user's home = source checkout: co-located dev uses the dev user's home;
+# managed installs use the FHS lib tree. Only consumed by the managed-guarded user
+# task below, but kept dev-consistent so it never leaks a /platform path.
+turbopanel_instance_dir: "{{ (turbopanel_dev_root ~ '/instance') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/instance') }}"
 instance_service_name: turbopanel-instance
 caddy_service_name: turbopanel-caddy
 ui_service_name: turbopanel-ui

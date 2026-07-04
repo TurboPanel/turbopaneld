@@ -40,11 +40,6 @@
   notify: Restart turbopanel instance
   register: _instance_compile
 
-- name: Record checkout normalize needed after instance compile
-  ansible.builtin.set_fact:
-    force_checkout_normalize: true
-  when: _instance_compile is defined and _instance_compile is changed
-
 - name: Set compiled instance binary ownership
   when: turbopanel_instance_run_mode == 'compiled'
   ansible.builtin.file:

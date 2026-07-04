@@ -38,12 +38,6 @@
     - _launch_rabbitmq_pass.content is defined
     - (_launch_rabbitmq_pass.content | b64decode | trim | length) > 0
 
-- name: Resolve daemon state directory shared with instance service
-  ansible.builtin.set_fact:
-    turbopanel_instance_daemon_state_dir: >-
-      {{ turbopanel_daemon_state_dir if (turbopanel_dev_user | default('') | length > 0)
-      else (turbopanel_daemon_state_dir | default(turbopanel_daemon_dir ~ '/state')) }}
-
 - name: Install instance systemd unit
   ansible.builtin.template:
     src: turbopanel-instance.service.j2
@@ -218,7 +212,7 @@
     path: "{{ turbopanel_config_dir }}/instance"
     state: directory
     owner: root
-    group: turbopanel
+    group: "{{ turbopanel_group }}"
     mode: "0750"
 
 - name: Read legacy instance checkout .env when present
@@ -394,7 +388,3 @@
 
 - name: Install instance upgrade sudoers
   ansible.builtin.import_tasks: upgrade-sudoers.yml
-
-- name: Reconcile dev checkout ownership (9999 develops, 9998 runs)
-  when: turbopanel_dev_user | default('') | length > 0
-  ansible.builtin.import_tasks: checkout-permissions.yml

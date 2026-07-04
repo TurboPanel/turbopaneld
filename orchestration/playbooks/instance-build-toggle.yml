@@ -11,18 +11,20 @@
 
   vars:
     turbopanel_install_root: /opt/turbopanel
-    # Co-located dev (turbopanel_dev_user set via -e) keeps the /platform checkout +
-    # /opt/turbopanel/runtimes tree; managed installs use the FHS lib tree.
+    # Co-located dev (turbopanel_dev_user set via -e) keeps source checkouts under
+    # the dev user's home (turbopanel_dev_root) and shares the FHS runtime/lib tree;
+    # managed installs use the FHS lib tree. Identity (turbopanel_user/group,
+    # instance_user) resolves via the shared dev-identity contract in the role
+    # defaults, so the instance stack runs as the single dev user in dev.
     turbopanel_dev_user: ""
-    turbopanel_platform_dir: "{{ turbopanel_install_root }}/platform"
+    turbopanel_dev_uid: ""
+    turbopanel_dev_gid: ""
+    turbopanel_dev_root: "{{ ansible_env.HOME }}"
     turbopanel_lib_dir: "{{ turbopanel_install_root }}/lib"
-    turbopanel_runtimes_dir: "{{ (turbopanel_install_root ~ '/runtimes') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/runtime') }}"
-    turbopanel_daemon_dir: "{{ (turbopanel_platform_dir ~ '/daemon') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/daemon') }}"
-    turbopanel_instance_dir: "{{ (turbopanel_platform_dir ~ '/instance') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/instance') }}"
-    turbopanel_ui_dir: "{{ (turbopanel_platform_dir ~ '/ui') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/ui') }}"
-    turbopanel_group: turbopanel
-    turbopanel_user: turbopanel
-    instance_user: turbopaneli
+    turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/lib/runtime"
+    turbopanel_daemon_dir: "{{ (turbopanel_dev_root ~ '/daemon') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/daemon') }}"
+    turbopanel_instance_dir: "{{ (turbopanel_dev_root ~ '/instance') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/instance') }}"
+    turbopanel_ui_dir: "{{ (turbopanel_dev_root ~ '/ui') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/ui') }}"
     turbopanel_instance_runtime: deno
     instance_start: true
     force_build: false

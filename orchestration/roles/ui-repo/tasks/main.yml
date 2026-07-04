@@ -50,13 +50,8 @@
     version: "{{ ui_branch }}"
   become_user: "{{ turbopanel_user }}"
   environment:
-    HOME: "{{ turbopanel_install_root }}"
+    HOME: "{{ turbopanel_dev_root if (turbopanel_dev_user | default('') | length > 0) else turbopanel_install_root }}"
   register: _ui_clone
-
-- name: Record checkout normalize needed after UI clone
-  ansible.builtin.set_fact:
-    force_checkout_normalize: true
-  when: _ui_clone is defined and _ui_clone is changed
 
 - name: Check UI dependencies
   ansible.builtin.stat:
@@ -74,7 +69,7 @@
     chdir: "{{ turbopanel_ui_dir }}"
   become_user: "{{ turbopanel_user }}"
   environment:
-    HOME: "{{ turbopanel_install_root }}"
+    HOME: "{{ turbopanel_dev_root if (turbopanel_dev_user | default('') | length > 0) else turbopanel_install_root }}"
     PATH: "/usr/local/bin:/usr/bin:/bin"
   register: _ui_babel_probe
   changed_when: false
@@ -92,11 +87,6 @@
     chdir: "{{ turbopanel_ui_dir }}"
   become_user: "{{ turbopanel_user }}"
   environment:
-    HOME: "{{ turbopanel_install_root }}"
+    HOME: "{{ turbopanel_dev_root if (turbopanel_dev_user | default('') | length > 0) else turbopanel_install_root }}"
     PATH: "/usr/local/bin:/usr/bin:/bin"
   register: _ui_pnpm_install
-
-- name: Record checkout normalize needed after UI pnpm install
-  ansible.builtin.set_fact:
-    force_checkout_normalize: true
-  when: _ui_pnpm_install is defined and _ui_pnpm_install is changed

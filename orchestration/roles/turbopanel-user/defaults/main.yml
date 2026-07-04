@@ -1,0 +1,15 @@
+---
+# Shared dev-identity contract. When turbopanel_dev_user is set (co-located dev,
+# passed as an extra-var by the dev converge), the turbopanel service identity
+# collapses onto the single human dev user/uid/gid. When empty (managed /
+# production) it resolves to the dedicated turbopanel(9999) service account, so
+# managed converge is bit-for-bit unchanged.
+turbopanel_install_root: /opt/turbopanel
+turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/lib/runtime"
+turbopanel_dev_user: ""
+turbopanel_dev_uid: ""
+turbopanel_dev_gid: ""
+turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
+turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
+turbopanel_uid: "{{ turbopanel_dev_uid if (turbopanel_dev_user | default('') | length > 0) else 9999 }}"
+turbopanel_gid: "{{ turbopanel_dev_gid if (turbopanel_dev_user | default('') | length > 0) else 9999 }}"

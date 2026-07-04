@@ -15,9 +15,6 @@ export class DaemonSourceRootError extends Error {
   }
 }
 
-/** Development checkout default when no tree is resolvable. */
-export const DEV_DAEMON_ROOT_DEFAULT = "/opt/turbopanel/platform/daemon";
-
 /** Production FHS default install roots (overridable via env). */
 export const PROD_HOME_DEFAULT = "/opt/turbopanel";
 export const PROD_BIN_DIR_DEFAULT = "/opt/turbopanel/bin";
@@ -35,26 +32,62 @@ export const PROD_ORCHESTRATION_DIR_DEFAULT = join(
   PROD_SHARE_DIR_DEFAULT,
   "orchestration",
 );
-
-/** Development layout defaults (byte-compatible with the pre-FHS checkout tree). */
-export const DEV_RUNTIMES_DIR_DEFAULT = "/opt/turbopanel/runtimes";
-export const DEV_CONFIG_DIR_DEFAULT = "/opt/turbopanel/platform/config";
-export const DEV_INSTANCE_DIR_DEFAULT = "/opt/turbopanel/platform/instance";
 /**
  * Managed control-plane (instance) install root under the FHS lib tree, mirroring
  * the daemon install root ({@link PROD_DAEMON_ROOT_DEFAULT} = `lib/daemon`).
- * Production must never inherit the co-located dev checkout under `/platform`.
  */
 export const PROD_INSTANCE_DIR_DEFAULT = join(PROD_LIB_DIR_DEFAULT, "instance");
-export const DEV_DAEMON_STATE_DIR_DEFAULT = join(
-  DEV_DAEMON_ROOT_DEFAULT,
-  "state",
-);
-/** Co-located dev logs stay checkout-local (`<checkout>/logs`), never `<home>/log`. */
-export const DEV_DAEMON_LOG_DIR_DEFAULT = join(
-  DEV_DAEMON_ROOT_DEFAULT,
-  "logs",
-);
+
+/**
+ * Development source-repo root.
+ *
+ * In development the *source* repos (the daemon checkout, and its siblings) live
+ * under this root — the daemon checkout resolves to `<devRoot>/daemon`. Defaults
+ * to the dev user's home (`$HOME`); override with `TURBOPANEL_DEV_ROOT`. Every
+ * *mutable* dir (config/state/log/runtimes/run, instance install root) does NOT
+ * use this root — it resolves to the same production FHS paths, owned by the dev
+ * user at runtime.
+ */
+const DEV_ROOT_DEFAULT = readEnv("TURBOPANEL_DEV_ROOT")?.trim() ||
+  readEnv("HOME")?.trim() ||
+  PROD_HOME_DEFAULT;
+
+/**
+ * Resolve the development source-repo root from an env bag.
+ *
+ * Prefers `env.TURBOPANEL_DEV_ROOT`, then `env.HOME`, then the module-level
+ * default ({@link DEV_ROOT_DEFAULT}) so `resolveLayout(env)` and tests stay
+ * deterministic when the bag omits those keys.
+ */
+export function resolveDevRoot(
+  env: Record<string, string | undefined> = {},
+): string {
+  return stripTrailingSlash(
+    env.TURBOPANEL_DEV_ROOT?.trim() ||
+      env.HOME?.trim() ||
+      DEV_ROOT_DEFAULT,
+  );
+}
+
+/**
+ * Development daemon checkout default (`<devRoot>/daemon`) when no tree is
+ * resolvable. Keep the export name — tests and `orchestration/paths.ts`
+ * re-export it, and `resolveDevRoot({})` reproduces it deterministically.
+ */
+export const DEV_DAEMON_ROOT_DEFAULT = join(DEV_ROOT_DEFAULT, "daemon");
+
+/**
+ * Development mutable-dir defaults.
+ *
+ * Dev shares the production FHS paths for every mutable directory
+ * (runtimes/config/instance install root/state/log); only source repos live
+ * under {@link DEV_ROOT_DEFAULT}. All are dev-user-owned at runtime.
+ */
+export const DEV_RUNTIMES_DIR_DEFAULT = PROD_RUNTIME_DIR_DEFAULT;
+export const DEV_CONFIG_DIR_DEFAULT = PROD_CONFIG_DIR_DEFAULT;
+export const DEV_INSTANCE_DIR_DEFAULT = PROD_INSTANCE_DIR_DEFAULT;
+export const DEV_DAEMON_STATE_DIR_DEFAULT = PROD_STATE_DIR_DEFAULT;
+export const DEV_DAEMON_LOG_DIR_DEFAULT = PROD_LOG_DIR_DEFAULT;
 
 export interface LayoutPaths {
   mode: InstallMode;
@@ -170,15 +203,20 @@ export function detectInstallMode(
       // cwd unavailable in some embedded contexts
     }
 
-    if (hasDaemonCheckout(DEV_DAEMON_ROOT_DEFAULT)) return "development";
+    if (hasDaemonCheckout(join(resolveDevRoot(env), "daemon"))) {
+      return "development";
+    }
   }
 
   return "production";
 }
 
-export function defaultDaemonRootForMode(mode: InstallMode): string {
+export function defaultDaemonRootForMode(
+  mode: InstallMode,
+  env: Record<string, string | undefined> = {},
+): string {
   return mode === "development"
-    ? DEV_DAEMON_ROOT_DEFAULT
+    ? join(resolveDevRoot(env), "daemon")
     : PROD_DAEMON_ROOT_DEFAULT;
 }
 
@@ -262,7 +300,7 @@ export function resolveLayout(
     mode,
   );
 
-  const daemonRootDefault = defaultDaemonRootForMode(mode);
+  const daemonRootDefault = defaultDaemonRootForMode(mode, env);
 
   const orchestrationDir = (() => {
     const override = env.TURBOPANEL_ORCHESTRATION_DIR?.trim();
@@ -281,8 +319,9 @@ export function resolveLayout(
               return fromMeta;
             }
             if (hasDaemonCheckout(Deno.cwd())) return Deno.cwd();
-            if (hasDaemonCheckout(DEV_DAEMON_ROOT_DEFAULT)) {
-              return DEV_DAEMON_ROOT_DEFAULT;
+            const devDaemonRoot = join(resolveDevRoot(env), "daemon");
+            if (hasDaemonCheckout(devDaemonRoot)) {
+              return devDaemonRoot;
             }
           } catch {
             // discovery unavailable

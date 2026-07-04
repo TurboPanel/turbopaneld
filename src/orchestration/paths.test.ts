@@ -284,11 +284,6 @@ Deno.test("production layout resolves FHS orchestration and runtime dirs", () =>
     "/opt/turbopanel/lib/instance",
     "instanceDir literal",
   );
-  if (layout.instanceDir === DEV_INSTANCE_DIR_DEFAULT) {
-    throw new Error(
-      `production instanceDir must not equal the dev checkout: ${layout.instanceDir}`,
-    );
-  }
 });
 
 Deno.test("layout env overrides apply in development mode", () => {
@@ -427,7 +422,7 @@ Deno.test("module-level orchestration constants match active layout", () => {
   );
   assertEq(
     TUNNELS_DIR,
-    join(DAEMON_ROOT, "cloudflared", "tunnels"),
+    join(layout.daemonStateDir, "cloudflared", "tunnels"),
     "TUNNELS_DIR",
   );
 });
@@ -523,7 +518,7 @@ Deno.test("production layout resolves the complete FHS tree with no defaults", (
   }
 });
 
-Deno.test("development layout resolves the co-located checkout tree", () => {
+Deno.test("development layout resolves source repos with FHS mutable dirs", () => {
   const layout = resolveLayout({}, { forceMode: "development", fromMeta });
   assertEq(layout.mode, "development", "mode");
   assertEq(layout.runtimesDir, DEV_RUNTIMES_DIR_DEFAULT, "runtimesDir");
@@ -532,27 +527,25 @@ Deno.test("development layout resolves the co-located checkout tree", () => {
   assertEq(layout.logDir, DEV_DAEMON_LOG_DIR_DEFAULT, "logDir");
   assertEq(layout.daemonRootDefault, DEV_DAEMON_ROOT_DEFAULT, "daemonRootDefault");
   assertEq(layout.orchestrationDir, checkoutOrchestrationDir, "orchestrationDir");
-  // Dev keeps the historical /opt/turbopanel/runtimes layout, not lib/runtime.
-  assertEq(layout.runtimesDir, "/opt/turbopanel/runtimes", "runtimesDir literal");
-  if (layout.runtimesDir.startsWith(PROD_RUNTIME_DIR_DEFAULT)) {
-    throw new Error(
-      `dev runtimesDir must not be the production lib/runtime tree: ${layout.runtimesDir}`,
-    );
-  }
+  // Dev now shares the production FHS mutable dirs (dev-user-owned at runtime).
+  assertEq(layout.runtimesDir, "/opt/turbopanel/lib/runtime", "runtimesDir literal");
+  assertEq(layout.configDir, "/etc/turbopanel", "configDir literal");
+  assertEq(layout.instanceDir, "/opt/turbopanel/lib/instance", "instanceDir literal");
+  assertEq(layout.logDir, "/var/log/turbopanel", "logDir literal");
 });
 
-Deno.test("dev daemon state default lives under the checkout", () => {
+Deno.test("dev daemon state default uses the FHS state dir", () => {
   assertEq(
     DEV_DAEMON_STATE_DIR_DEFAULT,
-    "/opt/turbopanel/platform/daemon/state",
+    "/var/lib/turbopanel",
     "DEV_DAEMON_STATE_DIR_DEFAULT",
   );
 });
 
-Deno.test("dev daemon log dir default lives under the checkout", () => {
+Deno.test("dev daemon log dir default uses the FHS log dir", () => {
   assertEq(
     DEV_DAEMON_LOG_DIR_DEFAULT,
-    "/opt/turbopanel/platform/daemon/logs",
+    "/var/log/turbopanel",
     "DEV_DAEMON_LOG_DIR_DEFAULT",
   );
 });
@@ -562,7 +555,7 @@ Deno.test("logDir follows the dev-vs-prod contract", () => {
   assertEq(dev.logDir, DEV_DAEMON_LOG_DIR_DEFAULT, "development logDir");
   assertEq(
     dev.logDir,
-    "/opt/turbopanel/platform/daemon/logs",
+    "/var/log/turbopanel",
     "development logDir literal",
   );
 

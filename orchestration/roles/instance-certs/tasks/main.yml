@@ -18,7 +18,7 @@
   # cannot chmod turbopanel-owned keys when the script normalizes permissions.
   become_user: "{{ instance_certs_owner }}"
   environment:
-    HOME: "{{ turbopanel_install_root if (turbopanel_dev_user | default('') | length > 0) else turbopanel_instance_dir }}"
+    HOME: "{{ turbopanel_dev_root if (turbopanel_dev_user | default('') | length > 0) else turbopanel_instance_dir }}"
     PATH: "/usr/local/bin:/usr/bin:/bin"
     TURBOPANEL_TLS_EXTRA_SANS: "{{ turbopanel_tls_extra_sans | default('', true) }}"
     TURBOPANEL_PUBLIC_URLS: "{{ turbopanel_public_urls | default('', true) }}"

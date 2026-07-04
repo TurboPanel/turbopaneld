@@ -296,9 +296,11 @@ export const DENO_BIN = join(DENO_BIN_DIR, "deno");
  * tunnel token; the file's basename is the tunnel's name. Drop in more files to
  * run more tunnels side by side.
  *
- * Co-located dev keeps tokens under the checkout (`…/cloudflared/tunnels`).
- * Managed installs store them under the FHS state dir (`/var/lib/turbopanel`).
+ * Both dev and managed installs store tokens under the FHS state dir
+ * (`/var/lib/turbopanel/cloudflared/tunnels`).
  */
-export const TUNNELS_DIR = layout.mode === "development"
-  ? join(DAEMON_ROOT, "cloudflared", "tunnels")
-  : join(layout.daemonStateDir, "cloudflared", "tunnels");
+export const TUNNELS_DIR = join(
+  layout.daemonStateDir,
+  "cloudflared",
+  "tunnels",
+);

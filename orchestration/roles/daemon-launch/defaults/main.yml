@@ -6,12 +6,19 @@ turbopanel_manage_service_state: true
 turbopanel_restart_daemon: false
 turbopanel_after_instance_service: false
 turbopanel_install_root: /opt/turbopanel
-# Managed installs (turbopanel_managed_install=true) use lib/runtime; co-located
-# dev keeps the historical runtimes/ layout.
-turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/{{ 'lib/runtime' if (turbopanel_managed_install | default(false)) else 'runtimes' }}"
-# Co-located dev checkout root (source mode). Managed installs do not use this
-# as a source tree — they run from bin/turbopaneld or bin/turbopaneld.js.
-turbopanel_daemon_dir: "{{ turbopanel_install_root }}/platform/daemon"
+turbopanel_lib_dir: "{{ turbopanel_install_root }}/lib"
+turbopanel_dev_user: ""
+turbopanel_dev_uid: ""
+turbopanel_dev_gid: ""
+# Co-located dev source checkout root (dev user's home); must be passed as an
+# extra-var from the dev console — never ansible_env.HOME (become runs as root).
+turbopanel_dev_root: ""
+# Runtimes always live under the FHS lib/runtime tree (dev shares it with prod).
+turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/lib/runtime"
+# Co-located dev checkout root (source mode) lives under the dev user's home.
+# Managed installs do not use this as a source tree — they run from
+# bin/turbopaneld or bin/turbopaneld.js.
+turbopanel_daemon_dir: "{{ (turbopanel_dev_root ~ '/daemon') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/daemon') }}"
 turbopanel_orchestration_dir: "{{ turbopanel_daemon_dir }}/orchestration"
 turbopanel_daemon_workdir: "{{ turbopanel_daemon_dir }}"
 turbopanel_daemon_deno_bin: "{{ turbopanel_runtimes_dir }}/deno/bin/deno"
@@ -19,12 +26,18 @@ turbopanel_daemon_bin: "{{ turbopanel_install_root }}/bin/turbopaneld"
 turbopanel_daemon_js: "{{ turbopanel_install_root }}/bin/turbopaneld.js"
 # native | js | source (co-located dev: deno run main.ts from the checkout)
 turbopanel_daemon_exec_mode: source
-# Empty for co-located source mode (--env-file=.env). Managed installs set
-# /etc/turbopanel/daemon.env (native cannot take --env-file).
-turbopanel_daemon_env_file: ""
+turbopanel_config_dir: /etc/turbopanel
+# FHS daemon env file, shared by co-located dev (source mode) and managed
+# installs. The source-mode unit now consumes it via EnvironmentFile= instead of
+# a checkout-local --env-file=.env; native/js managed installs use the same file.
+turbopanel_daemon_env_file: "{{ turbopanel_config_dir }}/daemon.env"
 turbopanel_service_name: turbopaneld
 turbopanel_legacy_service_name: turbopanel-daemon
-# Managed-host default log target. Co-located dev installs override this with
-# the checkout-local logs/ dir (daemon-systemd-setup.yml). Kept in sync with the
-# daemon-logs role default so the systemd unit template resolves either way.
+# FHS daemon log target, shared by co-located dev and managed installs. Kept in
+# sync with the daemon-logs role default so the systemd unit template resolves
+# either way.
 daemon_log_dir: /var/log/turbopanel/daemon
+runtime_socket_dir: /run/turbopanel
+runtime_socket_owner: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
+runtime_socket_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
+runtime_socket_mode: "2770"

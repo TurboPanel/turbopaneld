@@ -12,13 +12,17 @@ Environment=TURBOPANEL_SERVICE_NAME={{ turbopanel_service_name }}
 {% if turbopanel_daemon_env_file | default('') | length > 0 %}
 EnvironmentFile=-{{ turbopanel_daemon_env_file }}
 {% endif %}
+Environment=TURBOPANEL_RUN_DIR={{ runtime_socket_dir | default('/run/turbopanel') }}
+Environment=TURBOPANEL_RUNTIME_SOCKET_OWNER={{ runtime_socket_owner | default(turbopanel_user) }}
+Environment=TURBOPANEL_RUNTIME_SOCKET_GROUP={{ runtime_socket_group | default(turbopanel_group) }}
+Environment=TURBOPANEL_RUNTIME_SOCKET_MODE={{ runtime_socket_mode | default('2770') }}
 ExecStartPre={{ turbopanel_orchestration_dir }}/scripts/ensure-single-daemon.sh
 {% if turbopanel_daemon_exec_mode | default('source') == 'native' %}
-ExecStart=/usr/bin/flock -n /run/turbopanel/daemon.lock {{ turbopanel_daemon_bin }}
+ExecStart=/usr/bin/flock -n {{ runtime_socket_dir }}/daemon.lock {{ turbopanel_daemon_bin }}
 {% elif turbopanel_daemon_exec_mode | default('source') == 'js' %}
-ExecStart=/usr/bin/flock -n /run/turbopanel/daemon.lock {{ turbopanel_daemon_deno_bin }} run --allow-all {{ turbopanel_daemon_js }}
+ExecStart=/usr/bin/flock -n {{ runtime_socket_dir }}/daemon.lock {{ turbopanel_daemon_deno_bin }} run --allow-all {{ turbopanel_daemon_js }}
 {% else %}
-ExecStart=/usr/bin/flock -n /run/turbopanel/daemon.lock {{ turbopanel_daemon_deno_bin }} run --quiet --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env --env-file=.env main.ts
+ExecStart=/usr/bin/flock -n {{ runtime_socket_dir }}/daemon.lock {{ turbopanel_daemon_deno_bin }} run --quiet --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env main.ts
 {% endif %}
 Restart=on-failure
 RestartSec=5

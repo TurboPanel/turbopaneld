@@ -1,7 +1,17 @@
 ---
 turbopanel_install_root: /opt/turbopanel
-turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/runtimes"
-turbopanel_user: turbopanel
-turbopanel_website_dir: "{{ turbopanel_install_root }}/platform/website"
+turbopanel_dev_user: ""
+turbopanel_dev_uid: ""
+turbopanel_dev_gid: ""
+# Co-located dev source checkout root (dev user's home); overridden by an
+# extra-var (turbopanel_dev_root) from the dev converge.
+turbopanel_dev_root: "{{ ansible_env.HOME }}"
+turbopanel_lib_dir: "{{ turbopanel_install_root }}/lib"
+# Runtimes always live under the FHS lib/runtime tree (dev shares it with prod).
+turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/lib/runtime"
+turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
+turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
+# Source checkout: co-located dev uses the dev user's home; managed installs use lib.
+turbopanel_website_dir: "{{ (turbopanel_dev_root ~ '/website') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/website') }}"
 website_repo_url: https://github.com/turbopanel/turbopanel-website
 website_branch: trunk

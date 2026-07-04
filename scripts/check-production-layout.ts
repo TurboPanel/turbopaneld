@@ -9,7 +9,10 @@
  *     `share/orchestration`, `share/ui`, `lib/runtime`, `/etc/turbopanel`,
  *     `/var/lib/turbopanel`, `/var/log/turbopanel`, `/run/turbopanel`).
  *
- *  2. No production-surface file (the same curated roots as the `share/ansible`
+ *  2. The daemon systemd unit template derives daemon.lock from
+ *     `runtime_socket_dir` (no hardcoded `/run/turbopanel/daemon.lock`).
+ *
+ *  3. No production-surface file (the same curated roots as the `share/ansible`
  *     scan — `src`, `scripts`, `orchestration`, `main.ts`) hardcodes the
  *     co-located dev checkout (`/opt/turbopanel/platform`,
  *     `/opt/turbopanel/platform/daemon`) or the old `share/ansible` asset path.
@@ -17,6 +20,7 @@
  *     dev-checkout root as the *development-mode* default; a small allowlist of
  *     dev-only scripts and `turbopanel_dev_user`-gated orchestration assets may
  *     also reference it. Tests are excluded from the dev-checkout scan.
+ *     `daemon-launch/defaults/main.yml` is included in this scan (no allowlist).
  *
  * Run: `deno task check:layout` (or `deno run --allow-read scripts/check-production-layout.ts`).
  */
@@ -54,6 +58,7 @@ expect("stateDir", prod.stateDir, "/var/lib/turbopanel");
 expect("daemonStateDir", prod.daemonStateDir, "/var/lib/turbopanel");
 expect("logDir", prod.logDir, "/var/log/turbopanel");
 expect("runDir", prod.runDir, "/run/turbopanel");
+expect("daemonRootDefault", prod.daemonRootDefault, "/opt/turbopanel/lib/daemon");
 expect("instanceDir", prod.instanceDir, "/opt/turbopanel/lib/instance");
 
 // Binary + helper entrypoints derived from the resolved bin dir.
@@ -81,7 +86,31 @@ if (prod.instanceDir.includes("/platform/")) {
   );
 }
 
-// --- 2. Forbidden references in production source ---------------------------
+if (prod.daemonRootDefault.includes("/platform/")) {
+  failures.push(
+    `production daemonRootDefault leaked the dev checkout: ${prod.daemonRootDefault}`,
+  );
+}
+
+// --- 2. Daemon unit template must derive lock path from runtime_socket_dir ---
+const DAEMON_UNIT_TEMPLATE = join(
+  repoRoot,
+  "orchestration/roles/daemon-launch/templates/turbopaneld.service.j2",
+);
+const daemonUnitText = await Deno.readTextFile(DAEMON_UNIT_TEMPLATE);
+const HARDCODED_DAEMON_LOCK = /\/run\/turbopanel\/daemon\.lock/;
+if (HARDCODED_DAEMON_LOCK.test(daemonUnitText)) {
+  failures.push(
+    "orchestration/roles/daemon-launch/templates/turbopaneld.service.j2 hardcodes /run/turbopanel/daemon.lock; use {{ runtime_socket_dir }}/daemon.lock",
+  );
+}
+if (!/\{\{\s*runtime_socket_dir\s*\}\}\/daemon\.lock/.test(daemonUnitText)) {
+  failures.push(
+    "orchestration/roles/daemon-launch/templates/turbopaneld.service.j2 must use {{ runtime_socket_dir }}/daemon.lock for flock ExecStart",
+  );
+}
+
+// --- 3. Forbidden references in production source ---------------------------
 const SKIP_DIRS = new Set([
   ".git",
   "node_modules",
@@ -128,7 +157,6 @@ const PLATFORM_REF = /\/opt\/turbopanel\/platform/;
 const PLATFORM_SCAN_ALLOWLIST = new Set([
   "src/paths/layout.ts",
   "scripts/check-production-layout.ts",
-  "scripts/install-daemon-systemd.sh",
   "scripts/run-orchestration-action.ts",
   "orchestration/roles/instance-launch/defaults/main.yml",
   "orchestration/roles/postgres/defaults/main.yml",

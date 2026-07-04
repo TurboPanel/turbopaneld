@@ -1,8 +1,16 @@
 ---
 turbopanel_install_root: /opt/turbopanel
-turbopanel_user: turbopanel
-turbopanel_instance_dir: "{{ turbopanel_install_root }}/platform/instance"
-instance_user: turbopaneli
-turbopanel_group: turbopanel
+turbopanel_dev_user: ""
+turbopanel_dev_uid: ""
+turbopanel_dev_gid: ""
+# Co-located dev source checkout root (dev user's home); overridden by an
+# extra-var (turbopanel_dev_root) from the dev converge.
+turbopanel_dev_root: "{{ ansible_env.HOME }}"
+turbopanel_lib_dir: "{{ turbopanel_install_root }}/lib"
+turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
+turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
+# Source checkout: co-located dev uses the dev user's home; managed installs use lib.
+turbopanel_instance_dir: "{{ (turbopanel_dev_root ~ '/instance') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/instance') }}"
+instance_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopaneli' }}"
 instance_repo_url: https://github.com/turbopanel/instance
 instance_branch: trunk

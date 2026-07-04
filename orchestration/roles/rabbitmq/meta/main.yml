@@ -5,8 +5,8 @@ galaxy_info:
   license: AGPL-3.0
   description: >
     Run RabbitMQ 4 with management plugin in Docker; generated password and
-    connection metadata under {{ turbopanel_config_dir }}/rabbitmq/ (managed:
-    /etc/turbopanel, co-located dev: /opt/turbopanel/platform/config).
+    connection metadata under {{ turbopanel_config_dir }}/rabbitmq/ (FHS
+    /etc/turbopanel; co-located dev shares it with prod).
   min_ansible_version: "2.18"
   platforms:
     - name: Debian

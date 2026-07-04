@@ -1,7 +1,6 @@
 ---
-# Managed installs (turbopanel_managed_install=true) use lib/runtime; co-located
-# dev keeps the historical runtimes/ layout.
-turbopanel_runtimes_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/{{ 'lib/runtime' if (turbopanel_managed_install | default(false)) else 'runtimes' }}"
+# Runtimes always live under the FHS lib/runtime tree (dev shares it with prod).
+turbopanel_runtimes_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/lib/runtime"
 # Pinned to match scripts/download-caddy.mjs in the instance repo.
 caddy_version: "2.10.2"
 caddy_release_tag: "v2.10.2"

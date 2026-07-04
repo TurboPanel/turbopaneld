@@ -1,7 +1,6 @@
 ---
-# Managed installs (turbopanel_managed_install=true) use lib/runtime; co-located
-# dev keeps the historical runtimes/ layout.
-turbopanel_runtimes_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/{{ 'lib/runtime' if (turbopanel_managed_install | default(false)) else 'runtimes' }}"
+# Runtimes always live under the FHS lib/runtime tree (dev shares it with prod).
+turbopanel_runtimes_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/lib/runtime"
 # Node is needed for the instance's cert generation script and to build/run the
 # Expo UI in development. Must match turbopanel-dev scripts/lib/paths.sh NODE_VERSION.
 node_version: "24.17.0"

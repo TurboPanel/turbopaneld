@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Runtime directory setup + single-daemon guard (runs as ExecStartPre).
 #
-# Ensures /run/turbopanel exists with shared group permissions and probes
-# daemon.lock for a live holder before systemd starts a second daemon.
+# Ensures the runtime dir (TURBOPANEL_RUN_DIR, default /run/turbopanel) exists
+# with shared group permissions and probes daemon.lock for a live holder before
+# systemd starts a second daemon.
 #
 # The co-located daemon is the same turbopaneld.service process, so this
 # flock guard applies identically. The instance cell's single-writer lease
@@ -13,16 +14,19 @@
 # The real single-daemon guard remains flock -n in turbopaneld.service.
 set -euo pipefail
 
-RUN_DIR="/run/turbopanel"
+RUN_DIR="${TURBOPANEL_RUN_DIR:-/run/turbopanel}"
 LOCK_FILE="$RUN_DIR/daemon.lock"
+RUN_OWNER="${TURBOPANEL_RUNTIME_SOCKET_OWNER:-turbopanel}"
+RUN_GROUP="${TURBOPANEL_RUNTIME_SOCKET_GROUP:-turbopanel}"
+RUN_MODE="${TURBOPANEL_RUNTIME_SOCKET_MODE:-2770}"
 
 if ! command -v flock >/dev/null 2>&1; then
   echo "ensure-single-daemon: flock (util-linux) is required but not installed" >&2
   exit 1
 fi
 
-# Group-writable + setgid so the in-group `instance` user can also bind sockets.
-install -d -m 2770 -o turbopanel -g turbopanel "$RUN_DIR"
+# Group-writable + setgid so the in-group instance user can also bind sockets.
+install -d -m "$RUN_MODE" -o "$RUN_OWNER" -g "$RUN_GROUP" "$RUN_DIR"
 
 # Probe lock liveness via flock — never delete a held lock (avoids psmisc/fuser).
 if [ -f "$LOCK_FILE" ]; then

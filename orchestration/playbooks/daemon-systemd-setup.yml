@@ -15,29 +15,34 @@
 
   vars:
     turbopanel_install_root: /opt/turbopanel
-    # Co-located-dev-only: turbopanel_managed_install defaults false, so roles
-    # resolve runtimes under /opt/turbopanel/runtimes (not lib/runtime).
-    turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/runtimes"
-    turbopanel_daemon_dir: "{{ turbopanel_install_root }}/platform/daemon"
+    # Co-located dev shares every FHS mutable path with production; only the source
+    # checkout differs (dev user's home). Identity resolves via the shared
+    # dev-identity contract in the turbopanel-user role: pass turbopanel_dev_user
+    # (+ _uid/_gid/_root) as extra-vars from install-daemon-systemd.sh — never
+    # ansible_env.HOME here (become: true runs as root, so HOME is /root).
+    turbopanel_dev_user: ""
+    turbopanel_dev_uid: ""
+    turbopanel_dev_gid: ""
+    turbopanel_dev_root: ""
+    turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/lib/runtime"
+    turbopanel_daemon_dir: "{{ (turbopanel_dev_root ~ '/daemon') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_install_root ~ '/lib/daemon') }}"
     turbopanel_orchestration_dir: "{{ turbopanel_daemon_dir }}/orchestration"
     turbopanel_daemon_workdir: "{{ turbopanel_daemon_dir }}"
-    # Co-located keeps checkout-local .env via --env-file=.env (no EnvironmentFile).
-    turbopanel_daemon_env_file: ""
+    turbopanel_config_dir: /etc/turbopanel
+    # Co-located source mode consumes the FHS daemon env file via EnvironmentFile=
+    # on the unit (no more checkout-local --env-file=.env). The dev console writes
+    # the real dev-identity/connectivity content; the tasks below guarantee the
+    # file exists before daemon-launch starts the unit.
+    turbopanel_daemon_env_file: "{{ turbopanel_config_dir }}/daemon.env"
     turbopanel_daemon_exec_mode: source
-    turbopanel_user: turbopanel
-    turbopanel_group: turbopanel
-    turbopanel_uid: 9999
-    turbopanel_gid: 9999
     turbopanel_service_name: turbopaneld
     turbopanel_start: true
     turbopanel_after_instance_service: false
-    # Co-located dev keeps daemon logs in the checkout (repo-local logs/ dir),
-    # unlike managed-host installs (daemon-install.yml) which log under
-    # /var/log/turbopanel/daemon. The daemon-logs role creates this directory.
-    daemon_log_dir: "{{ turbopanel_daemon_dir }}/logs"
-    # Co-located-dev-only (turbopanel_managed_install defaults false). The daemon
-    # runs from source via the vendored Deno runtime under
-    # /opt/turbopanel/runtimes/deno (provisioned by the deno-runtime role
+    # Co-located dev logs to the FHS daemon log dir (shared with managed installs);
+    # the daemon-logs role creates this directory.
+    daemon_log_dir: /var/log/turbopanel/daemon
+    # The daemon runs from source via the vendored Deno runtime under
+    # {{ turbopanel_runtimes_dir }}/deno (provisioned by the deno-runtime role
     # below; this is also the daemon-launch role default). The Deno binary is not
     # hardcoded here: pass turbopanel_daemon_deno_bin as an extra var to override
     # it — install-daemon-systemd.sh forwards TURBOPANEL_DAEMON_DENO_BIN — for a
@@ -47,5 +52,42 @@
     - role: daemon-prereqs
     - role: turbopanel-user
     - role: deno-runtime
+    - role: runtime-sockets
     - role: daemon-logs
-    - role: daemon-launch
+
+  pre_tasks:
+    - name: Require turbopanel_dev_root when co-located dev identity is set
+      ansible.builtin.assert:
+        that:
+          - turbopanel_dev_root | default('') | length > 0
+        fail_msg: >-
+          turbopanel_dev_root must be passed when turbopanel_dev_user is set
+          (ansible_env.HOME is root under become; use TURBOPANEL_DEV_ROOT from
+          the dev console).
+      when: turbopanel_dev_user | default('') | length > 0
+
+  # daemon-launch runs here (not in `roles:`) so the FHS daemon env file is
+  # provisioned first: the unit's EnvironmentFile=/etc/turbopanel/daemon.env must
+  # resolve before daemon-launch starts the service. The create-if-absent guard
+  # (force: false) never clobbers the real content written by the dev console.
+  tasks:
+    - name: Ensure daemon config directory exists
+      ansible.builtin.file:
+        path: "{{ turbopanel_config_dir }}"
+        state: directory
+        owner: "{{ turbopanel_user }}"
+        group: "{{ turbopanel_group }}"
+        mode: "0750"
+
+    - name: Ensure daemon environment file exists
+      ansible.builtin.copy:
+        dest: "{{ turbopanel_daemon_env_file }}"
+        content: ""
+        owner: "{{ turbopanel_user }}"
+        group: "{{ turbopanel_group }}"
+        mode: "0640"
+        force: false
+
+    - name: Install and start the daemon systemd unit
+      ansible.builtin.include_role:
+        name: daemon-launch

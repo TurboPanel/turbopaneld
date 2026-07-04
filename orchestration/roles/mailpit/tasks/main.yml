@@ -5,8 +5,8 @@
   ansible.builtin.file:
     path: "{{ turbopanel_config_dir }}/mailpit"
     state: directory
-    owner: root
-    group: turbopanel
+    owner: "{{ mailpit_config_owner }}"
+    group: "{{ turbopanel_group }}"
     mode: "0750"
 
 - name: Ensure turbopanel Docker network exists
@@ -59,17 +59,31 @@
     _mailpit_running: false
   when: _mailpit_removed is changed
 
+- name: Build mailpit docker run argument list
+  ansible.builtin.set_fact:
+    _mailpit_docker_run_args: "{{ _mailpit_docker_run_base + (_mailpit_docker_user if (turbopanel_dev_user | default('') | length > 0) else []) + [mailpit_image] }}"
+  vars:
+    _mailpit_docker_run_base:
+      - docker
+      - run
+      - "--name"
+      - "{{ mailpit_container_name }}"
+      - "--restart"
+      - unless-stopped
+      - "-d"
+      - "--network"
+      - "{{ turbopanel_docker_network }}"
+      - "-p"
+      - "127.0.0.1:{{ mailpit_web_port }}:8025"
+      - "-p"
+      - "127.0.0.1:{{ mailpit_smtp_port }}:1025"
+    _mailpit_docker_user:
+      - "--user"
+      - "{{ mailpit_container_uid }}:{{ mailpit_container_gid }}"
+
 - name: Create and start mailpit container
   ansible.builtin.command:
-    cmd: >-
-      docker run
-      --name {{ mailpit_container_name }}
-      --restart unless-stopped
-      -d
-      --network {{ turbopanel_docker_network }}
-      -p 127.0.0.1:{{ mailpit_web_port }}:8025
-      -p 127.0.0.1:{{ mailpit_smtp_port }}:1025
-      {{ mailpit_image }}
+    cmd: "{{ _mailpit_docker_run_args | join(' ') }}"
   when: not _mailpit_container_exists | bool
 
 - name: Install mailpit wrapper start script

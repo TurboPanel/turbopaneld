@@ -1,14 +1,15 @@
-# {{ turbopanel_config_dir }}/  (managed: /etc/turbopanel, co-located dev: /opt/turbopanel/platform/config)
+# {{ turbopanel_config_dir }}/ (FHS /etc/turbopanel; dev shares it with prod)
 #   rabbitmq/
 #     config.json   — connection metadata only (host, port, user, vhost; no secrets)
-#     .rabbitmq_pass — generated password, mode 0600, owner root
+#     .rabbitmq_pass — generated password, mode 0600, owned by rabbitmq_config_owner
+#                      (the dev user in co-located dev, else root)
 
 - name: Ensure rabbitmq config directory exists
   ansible.builtin.file:
     path: "{{ turbopanel_config_dir }}/rabbitmq"
     state: directory
-    owner: root
-    group: turbopanel
+    owner: "{{ rabbitmq_config_owner }}"
+    group: "{{ turbopanel_group }}"
     mode: "0750"
 
 - name: Generate rabbitmq password (idempotent)
@@ -19,7 +20,7 @@
       if [ ! -s "$f" ]; then
         openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 32 > "$f"
         chmod 0600 "$f"
-        chown root:root "$f"
+        chown {{ rabbitmq_config_owner }}:{{ turbopanel_group }} "$f"
         echo created
       fi
     executable: /bin/bash
@@ -39,15 +40,15 @@
   ansible.builtin.template:
     src: rabbitmq-config.json.j2
     dest: "{{ turbopanel_config_dir }}/rabbitmq/config.json"
-    owner: root
-    group: turbopanel
+    owner: "{{ rabbitmq_config_owner }}"
+    group: "{{ turbopanel_group }}"
     mode: "0640"
 
 - name: Write rabbitmq broker config
   ansible.builtin.template:
     src: rabbitmq.conf.j2
     dest: "{{ turbopanel_config_dir }}/rabbitmq/rabbitmq.conf"
-    owner: root
+    owner: "{{ rabbitmq_config_owner }}"
     group: root
     mode: "0644"
   register: _rmq_conf_written
@@ -123,7 +124,7 @@
 
 - name: Pre-own rabbitmq Docker volume data directory
   ansible.builtin.command:
-    cmd: docker run --rm -v {{ rabbitmq_volume_name }}:/data --user root alpine chown -R 9995:9995 /data
+    cmd: docker run --rm -v {{ rabbitmq_volume_name }}:/data --user root alpine chown -R {{ rabbitmq_container_uid }}:{{ rabbitmq_container_gid }} /data
   when: not _rabbitmq_container_exists | bool
 
 - name: Build docker run argument list

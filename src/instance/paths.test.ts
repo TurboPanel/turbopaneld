@@ -27,7 +27,7 @@ function assertEq(actual: string, expected: string, label: string): void {
   }
 }
 
-Deno.test("development layout resolves legacy socket and CA paths", () => {
+Deno.test("development layout resolves shared FHS socket and CA paths", () => {
   const layout = resolveLayout({}, { forceMode: "development" });
   assertEq(layout.runDir, "/run/turbopanel", "runDir");
   assertEq(

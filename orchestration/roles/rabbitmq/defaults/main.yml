@@ -8,8 +8,17 @@ rabbitmq_volume_name: turbopanelq
 turbopanel_docker_network: turbopanel
 rabbitmq_user: turbopanel
 rabbitmq_vhost: /
-# Co-located dev keeps the checkout config layout; managed installs use /etc/turbopanel.
-turbopanel_config_dir: "{{ '/opt/turbopanel/platform/config' if (turbopanel_dev_user | default('') | length > 0) else '/etc/turbopanel' }}"
+# FHS config dir (dev shares it with prod).
+turbopanel_config_dir: /etc/turbopanel
 rabbitmq_service_name: turbopanel-rabbitmq
-rabbitmq_container_uid: "9995"
-rabbitmq_container_gid: "9995"
+# Shared dev-identity contract: dev runs the container (and owns its secret files)
+# as the single dev uid:gid; managed installs use the reserved 9995 container id.
+turbopanel_dev_user: ""
+turbopanel_dev_uid: ""
+turbopanel_dev_gid: ""
+turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
+rabbitmq_container_uid: "{{ turbopanel_dev_uid if (turbopanel_dev_user | default('') | length > 0) else '9995' }}"
+rabbitmq_container_gid: "{{ turbopanel_dev_gid if (turbopanel_dev_user | default('') | length > 0) else '9995' }}"
+# Owner of the generated rabbitmq secret/config files: the dev user in dev (so it
+# owns its own secrets), else root.
+rabbitmq_config_owner: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'root' }}"

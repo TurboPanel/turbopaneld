@@ -1,11 +1,18 @@
 ---
 # Requires the turbopanel group to already exist (turbopanel-user role).
+#
+# Co-located dev collapses the instance stack onto the single human dev user,
+# which already exists on the host — so none of the dedicated turbopaneli(9998)
+# account/group provisioning runs in dev (guarded on turbopanel_dev_user). The
+# shared-checkout 2770 ownership model is retired: the home-dir checkout is owned
+# solely by the single dev user (handled by the repo-clone roles).
 - name: Check whether instance user already exists
   ansible.builtin.getent:
     database: passwd
     key: "{{ instance_user }}"
   register: _instance_user_getent
   failed_when: false
+  when: turbopanel_dev_user | default('') | length == 0
 
 - name: Detect existing instance user account
   ansible.builtin.set_fact:
@@ -14,6 +21,7 @@
         _instance_user_getent.ansible_facts.getent_passwd is defined
         and _instance_user_getent.ansible_facts.getent_passwd[instance_user] is defined
       }}
+  when: turbopanel_dev_user | default('') | length == 0
 
 - name: Detect instance user uid mismatch
   ansible.builtin.set_fact:
@@ -25,6 +33,7 @@
           != instance_uid | int
         )
       }}
+  when: turbopanel_dev_user | default('') | length == 0
 
 - name: Stop instance stack units before user account changes
   ansible.builtin.systemd:
@@ -36,7 +45,9 @@
     - "{{ ui_service_name }}"
     - "{{ caddy_service_name }}"
     - "{{ instance_service_name }}"
-  when: _instance_user_uid_mismatch | bool
+  when:
+    - turbopanel_dev_user | default('') | length == 0
+    - _instance_user_uid_mismatch | bool
   failed_when: false
 
 - name: Wait for instance user processes to exit after stopping instance stack
@@ -48,7 +59,9 @@
   delay: 1
   changed_when: false
   failed_when: false
-  when: _instance_user_uid_mismatch | bool
+  when:
+    - turbopanel_dev_user | default('') | length == 0
+    - _instance_user_uid_mismatch | bool
 
 - name: Ensure turbopaneli primary group for instance user
   ansible.builtin.group:
@@ -56,6 +69,7 @@
     gid: "{{ instance_primary_gid }}"
     state: present
     system: true
+  when: turbopanel_dev_user | default('') | length == 0
 
 - name: Check whether redis access group exists
   ansible.builtin.getent:
@@ -63,6 +77,7 @@
     key: "{{ redis_primary_group }}"
   register: _instance_redis_group_getent
   failed_when: false
+  when: turbopanel_dev_user | default('') | length == 0
 
 - name: Build supplementary group list for instance user
   ansible.builtin.set_fact:
@@ -78,6 +93,7 @@
           else []
         )
       }}
+  when: turbopanel_dev_user | default('') | length == 0
 
 - name: Ensure instance user (primary group turbopaneli, supplementary turbopanel + turbopanelc)
   ansible.builtin.user:
@@ -90,11 +106,4 @@
     shell: /usr/sbin/nologin
     system: true
     create_home: false
-
-- name: Ensure instance checkout directory owned by turbopanel:turbopanel (group-writable)
-  ansible.builtin.file:
-    path: "{{ turbopanel_instance_dir }}"
-    state: directory
-    owner: "{{ turbopanel_user }}"
-    group: "{{ turbopanel_group }}"
-    mode: "2770"
+  when: turbopanel_dev_user | default('') | length == 0

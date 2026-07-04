@@ -10,8 +10,17 @@ postgres_port: 5432
 postgres_expose_port: false
 postgres_user: turbopanel
 postgres_db: turbopanel
+# Shared dev-identity contract: dev runs the container (and owns its secret files)
+# as the single dev uid:gid; managed installs use the reserved 9996 container id.
+turbopanel_dev_user: ""
+turbopanel_dev_uid: ""
+turbopanel_dev_gid: ""
+turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
 # UID/GID of the `postgres` user inside the official postgres image.
-postgres_container_uid: "9996"
-postgres_container_gid: "9996"
-# Co-located dev keeps the checkout config layout; managed installs use /etc/turbopanel.
-turbopanel_config_dir: "{{ '/opt/turbopanel/platform/config' if (turbopanel_dev_user | default('') | length > 0) else '/etc/turbopanel' }}"
+postgres_container_uid: "{{ turbopanel_dev_uid if (turbopanel_dev_user | default('') | length > 0) else '9996' }}"
+postgres_container_gid: "{{ turbopanel_dev_gid if (turbopanel_dev_user | default('') | length > 0) else '9996' }}"
+# Owner of the generated postgres secret/config files: the dev user in dev (so it
+# owns its own secrets), else root.
+postgres_config_owner: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'root' }}"
+# FHS config dir (dev shares it with prod).
+turbopanel_config_dir: /etc/turbopanel
