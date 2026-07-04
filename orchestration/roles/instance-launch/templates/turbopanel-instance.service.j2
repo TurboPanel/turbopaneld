@@ -42,6 +42,7 @@ Environment=TURBOPANEL_CONFIG_DIR={{ turbopanel_config_dir }}
 Environment=TURBOPANEL_RUN_DIR={{ turbopanel_run_dir }}
 Environment=TURBOPANEL_INSTANCE_RUNTIME_ENV={{ turbopanel_instance_runtime_env }}
 Environment=TURBOPANEL_INSTANCE_RUNTIME_DEV_VARS={{ turbopanel_instance_runtime_dev_vars }}
+EnvironmentFile=-{{ turbopanel_instance_runtime_dev_vars }}
 # turbopanel_instance_run_mode: "source" (deno run) | "compiled" (single binary)
 StandardOutput=append:{{ instance_log_dir }}/instance.log
 StandardError=append:{{ instance_log_dir }}/instance.err.log

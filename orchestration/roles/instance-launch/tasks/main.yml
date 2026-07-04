@@ -233,11 +233,17 @@
     - (_legacy_instance_env.content | b64decode | trim | length) > 0
     - (turbopanel_public_urls | default('', true) | trim | length) == 0
 
-- name: Ensure Workers wrangler secret exists
+- name: Ensure instance signing secret exists
   ansible.builtin.shell:
     cmd: |
       set -euo pipefail
-      f='{{ turbopanel_config_dir }}/instance/.wrangler_secret'
+      f='{{ turbopanel_config_dir }}/instance/.instance_secret'
+      legacy='{{ turbopanel_config_dir }}/instance/.wrangler_secret'
+      if [ ! -s "$f" ] && [ -s "$legacy" ]; then
+        cp "$legacy" "$f"
+        chmod 0600 "$f"
+        chown root:root "$f"
+      fi
       if [ ! -s "$f" ]; then
         {{ turbopanel_node }} \
           {{ turbopanel_instance_dir }}/scripts/generate-secret.mjs > "$f"
@@ -246,22 +252,18 @@
         echo created
       fi
     executable: /bin/bash
-  register: _wrangler_secret_gen
-  changed_when: "'created' in _wrangler_secret_gen.stdout"
-  when: (turbopanel_instance_runtime | default('deno')) == 'workers'
+  register: _instance_secret_gen
+  changed_when: "'created' in _instance_secret_gen.stdout"
 
-- name: Read Workers wrangler secret
+- name: Read instance signing secret
   ansible.builtin.slurp:
-    src: "{{ turbopanel_config_dir }}/instance/.wrangler_secret"
-  register: _wrangler_secret_raw
-  when: (turbopanel_instance_runtime | default('deno')) == 'workers'
+    src: "{{ turbopanel_config_dir }}/instance/.instance_secret"
+  register: _instance_secret_raw
 
-- name: Set Workers wrangler secret fact
+- name: Set instance signing secret fact
   ansible.builtin.set_fact:
-    turbopanel_wrangler_secret: "{{ _wrangler_secret_raw.content | b64decode | trim }}"
-  when:
-    - (turbopanel_instance_runtime | default('deno')) == 'workers'
-    - _wrangler_secret_raw.content is defined
+    turbopanel_instance_secret: "{{ _instance_secret_raw.content | b64decode | trim }}"
+  when: _instance_secret_raw.content is defined
 
 - name: Remove legacy secret-bearing env files from instance checkout
   ansible.builtin.file:
@@ -281,24 +283,24 @@
   when:
     - (turbopanel_instance_runtime | default('deno')) == 'workers'
     - turbopanel_pg_password is defined
-    - turbopanel_wrangler_secret is defined
+    - turbopanel_instance_secret is defined
   notify:
     - Reload systemd for instance units
     - Restart turbopanel instance
 
 - name: Install Deno runtime env stub (protected config dir)
-  ansible.builtin.copy:
+  ansible.builtin.template:
+    src: instance-deno.env.j2
     dest: "{{ turbopanel_instance_runtime_env }}"
-    content: |
-      # Managed by instance-launch / daemon public-urls-apply. Gitignored checkout env files are not used.
-      {% if turbopanel_public_urls | default('', true) | trim | length > 0 %}
-      TURBOPANEL_PUBLIC_URLS={{ turbopanel_public_urls }}
-      {% endif %}
     owner: root
     group: "{{ turbopanel_group }}"
     mode: "0640"
-    force: false
-  when: (turbopanel_instance_runtime | default('deno')) == 'deno'
+  when:
+    - (turbopanel_instance_runtime | default('deno')) == 'deno'
+    - turbopanel_instance_secret is defined
+  notify:
+    - Reload systemd for instance units
+    - Restart turbopanel instance
 
 - name: Read platform CA for Workers daemon trust endpoint
   ansible.builtin.slurp:
@@ -324,7 +326,21 @@
     mode: "0640"
   when:
     - (turbopanel_instance_runtime | default('deno')) == 'workers'
-    - turbopanel_wrangler_secret is defined
+    - turbopanel_instance_secret is defined
+  notify:
+    - Reload systemd for instance units
+    - Restart turbopanel instance
+
+- name: Install Deno runtime dev vars (protected config dir)
+  ansible.builtin.template:
+    src: instance-deno.dev-vars.j2
+    dest: "{{ turbopanel_instance_runtime_dev_vars }}"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+  when:
+    - (turbopanel_instance_runtime | default('deno')) == 'deno'
+    - turbopanel_instance_secret is defined
   notify:
     - Reload systemd for instance units
     - Restart turbopanel instance
