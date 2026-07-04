@@ -332,7 +332,7 @@ tp_migrate_legacy_layout() {
 	fi
 }
 # Keep in sync with orchestration/roles/deno-runtime/defaults/main.yml.
-TP_DENO_VERSION="2.9.0"
+TP_DENO_VERSION="2.9.1"
 
 # Install Deno into the runtimes tree (idempotent), mirroring uv/ansible/cloudflared:
 #   $RUNTIMES_DIR/deno/$TP_DENO_VERSION/deno  plus `current` and `bin/deno` symlinks.
