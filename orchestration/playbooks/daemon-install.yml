@@ -2,7 +2,8 @@
 # Provision a TurboPanel managed server (FHS release layout, runtimes, config, launch).
 #
 # Invoked by the CDN installer after run.sh has placed bin/turbopaneld,
-# bin/turbopaneld.js, and share/orchestration/, and bootstrapped ansible-playbook
+# optional bin/turbopaneld.js (JS fallback only), and share/orchestration/,
+# and bootstrapped ansible-playbook
 # under /opt/turbopanel/vendor/ansible/current/. Every role is idempotent.
 - name: TurboPanel daemon install
   hosts: localhost

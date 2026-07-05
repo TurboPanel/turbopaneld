@@ -1,6 +1,6 @@
 ---
-# Managed-node FHS layout. run.sh installs bin/turbopaneld, bin/turbopaneld.js,
-# and share/orchestration/ before this playbook runs.
+# Managed-node FHS layout. run.sh installs bin/turbopaneld, share/orchestration/,
+# and optionally bin/turbopaneld.js (JS-fallback path only) before this playbook runs.
 
 - name: Ensure production FHS directories exist
   ansible.builtin.file:
@@ -25,6 +25,7 @@
   register: _daemon_bin
 
 - name: Require JS fallback
+  when: turbopanel_daemon_exec_mode | default('native') == 'js'
   ansible.builtin.stat:
     path: "{{ turbopanel_daemon_js }}"
   register: _daemon_js
@@ -34,18 +35,31 @@
     path: "{{ turbopanel_orchestration_dir }}/ansible.cfg"
   register: _orchestration_cfg
 
-- name: Assert release layout is present
+- name: Assert release layout is present (native)
+  when: turbopanel_daemon_exec_mode | default('native') != 'js'
   ansible.builtin.assert:
     that:
       - _daemon_bin.stat.exists
       - _daemon_bin.stat.executable
+      - _orchestration_cfg.stat.exists
+    fail_msg: >-
+      Missing production release layout under {{ turbopanel_install_root }}.
+      Expected {{ turbopanel_daemon_bin }} and
+      {{ turbopanel_orchestration_dir }}/ansible.cfg. run.sh must install the
+      clean release package before this playbook runs.
+
+- name: Assert release layout is present (JS fallback)
+  when: turbopanel_daemon_exec_mode | default('native') == 'js'
+  ansible.builtin.assert:
+    that:
+      - _daemon_bin.stat.exists
       - _daemon_js.stat.exists
       - _orchestration_cfg.stat.exists
     fail_msg: >-
       Missing production release layout under {{ turbopanel_install_root }}.
       Expected {{ turbopanel_daemon_bin }}, {{ turbopanel_daemon_js }}, and
       {{ turbopanel_orchestration_dir }}/ansible.cfg. run.sh must install the
-      clean release package before this playbook runs.
+      JS fallback bundle before this playbook runs.
 
 - name: Ensure ensure-single-daemon helper is executable
   ansible.builtin.file:
