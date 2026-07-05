@@ -872,7 +872,6 @@ trap 'rm -f "$VARS_FILE"' EXIT
 
 export ANSIBLE_CONFIG="$ORCHESTRATION_DIR/ansible.cfg"
 export ANSIBLE_LOCAL_TEMP="$RUNTIMES_DIR/uv/cache/ansible-tmp"
-export ANSIBLE_COLLECTIONS_PATH="$RUNTIMES_DIR/ansible/galaxy-collections"
 
 if [ -t 1 ]; then
 	export ANSIBLE_STDOUT_CALLBACK=default

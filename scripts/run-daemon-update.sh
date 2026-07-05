@@ -7,7 +7,6 @@ DAEMON_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ANSIBLE_PLAYBOOK="$TURBOPANEL_RUNTIMES_DIR/ansible/current/bin/ansible-playbook"
 ANSIBLE_CONFIG="$DAEMON_DIR/orchestration/ansible.cfg"
 ANSIBLE_LOCAL_TMP="$TURBOPANEL_RUNTIMES_DIR/uv/cache/ansible-tmp"
-ANSIBLE_COLLECTIONS_PATH="$TURBOPANEL_RUNTIMES_DIR/ansible/galaxy-collections"
 PLAYBOOK="$DAEMON_DIR/orchestration/playbooks/daemon-update.yml"
 
 if [ ! -x "$ANSIBLE_PLAYBOOK" ]; then
@@ -17,8 +16,7 @@ if [ ! -x "$ANSIBLE_PLAYBOOK" ]; then
 fi
 
 ANSIBLE_CONFIG="$ANSIBLE_CONFIG" \
-ANSIBLE_LOCAL_TEMP="$ANSIBLE_LOCAL_TMP" \
-ANSIBLE_COLLECTIONS_PATH="$ANSIBLE_COLLECTIONS_PATH" \
+ANSIBLE_LOCAL_TEMP="$ANSIBLE_LOCAL_TEMP" \
 "$ANSIBLE_PLAYBOOK" \
 	-i localhost, \
 	-c local \

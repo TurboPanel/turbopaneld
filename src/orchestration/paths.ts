@@ -111,12 +111,11 @@ export const GALAXY_COLLECTIONS_DIR = join(
 export const ANSIBLE_LOCAL_TMP = join(CACHE_DIR, "ansible-tmp");
 export const ANSIBLE_CFG = join(ORCHESTRATION_DIR, "ansible.cfg");
 
-/** Ansible env vars that honor `TURBOPANEL_RUNTIMES_DIR` at playbook invocation time. */
+/** Ansible env vars for playbook and galaxy bootstrap invocations. */
 export function ansibleEnv(): Record<string, string> {
   return {
     ANSIBLE_CONFIG: ANSIBLE_CFG,
     ANSIBLE_LOCAL_TEMP: ANSIBLE_LOCAL_TMP,
-    ANSIBLE_COLLECTIONS_PATH: GALAXY_COLLECTIONS_DIR,
   };
 }
 

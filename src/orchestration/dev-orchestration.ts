@@ -2,7 +2,6 @@ import { join } from "@std/path";
 import { readEnv, resolveDaemonRoot } from "../paths/layout.ts";
 import {
   GALAXY_ROLES_DIR,
-  ORCHESTRATION_DIR,
   RUNTIMES_DIR,
 } from "./paths.ts";
 
@@ -82,7 +81,7 @@ export async function readDevConvergeManifest(
     !Array.isArray(parsed.roles) ||
     !Array.isArray(parsed.devRoles)
   ) {
-    throw new Error(`Invalid dev converge manifest at ${manifestPath}`);
+    throw new TypeError(`Invalid dev converge manifest at ${manifestPath}`);
   }
   return parsed;
 }
@@ -158,7 +157,6 @@ export function devOrchestrationAnsibleEnv(
   return {
     ANSIBLE_CONFIG: layout.ansibleCfgPath,
     ANSIBLE_LOCAL_TEMP: join(RUNTIMES_DIR, "uv", "cache", "ansible-tmp"),
-    ANSIBLE_COLLECTIONS_PATH: join(RUNTIMES_DIR, "ansible", "galaxy-collections"),
     ANSIBLE_ROLES_PATH: `${layout.devRolesDir}:${layout.daemonRolesDir}`,
   };
 }
@@ -182,4 +180,4 @@ export async function requireDevOrchestrationLayout(
 }
 
 /** Daemon-only orchestration root (managed servers and daemon converge playbooks). */
-export const DAEMON_ORCHESTRATION_DIR = ORCHESTRATION_DIR;
+export { ORCHESTRATION_DIR as DAEMON_ORCHESTRATION_DIR } from "./paths.ts";

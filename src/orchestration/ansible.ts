@@ -121,18 +121,16 @@ function devInstanceExtraArgs(): string[] {
   const instanceRuntime =
     Deno.env.get('TURBOPANEL_INSTANCE_RUNTIME') === 'workers' ? 'workers' : 'deno'
 
-  const args: string[] = [...devOwnershipPlaybookExtraArgs()]
-  args.push('-e', `turbopanel_ui_mode=${uiMode}`)
-  args.push('-e', `turbopanel_instance_run_mode=${instanceRunMode}`)
-  args.push('-e', `turbopanel_instance_runtime=${instanceRuntime}`)
-  if (instanceRuntime === 'workers') {
-    args.push('-e', 'postgres_expose_port=true')
-  }
   const publicUrls = Deno.env.get('TURBOPANEL_PUBLIC_URLS')
-  if (publicUrls) {
-    args.push('-e', `turbopanel_public_urls=${publicUrls}`)
-  }
-  return args
+
+  return [
+    ...devOwnershipPlaybookExtraArgs(),
+    '-e', `turbopanel_ui_mode=${uiMode}`,
+    '-e', `turbopanel_instance_run_mode=${instanceRunMode}`,
+    '-e', `turbopanel_instance_runtime=${instanceRuntime}`,
+    ...(instanceRuntime === 'workers' ? ['-e', 'postgres_expose_port=true'] : []),
+    ...(publicUrls ? ['-e', `turbopanel_public_urls=${publicUrls}`] : []),
+  ]
 }
 
 /**
@@ -171,6 +169,22 @@ export async function ensureAnsible(): Promise<void> {
 }
 
 /**
+ * Cwd/env contract shared by ansible-galaxy bootstrap and ansible-playbook runs.
+ *
+ * Uses the checked-in `ansible.cfg` via {@link ansibleEnv} and a cwd outside the
+ * daemon checkout so discovery does not depend on process cwd.
+ */
+export function galaxyBootstrapRunContext(): {
+  cwd: string
+  env: Record<string, string>
+} {
+  return {
+    cwd: ANSIBLE_PLAYBOOK_CWD,
+    env: ansibleEnv(),
+  }
+}
+
+/**
  * Install pinned Ansible Galaxy roles and collections when bootstrap inputs changed.
  *
  * Roles land in `orchestration/roles/`; collections in `runtimes/ansible/galaxy-collections/`.
@@ -189,12 +203,13 @@ export async function ensureGalaxyRoles(): Promise<void> {
   }
 
   const galaxyBin = join(VENV_BIN_DIR, 'ansible-galaxy')
+  const galaxyRun = galaxyBootstrapRunContext()
 
   logInfo('orchestration', `installing galaxy roles from ${GALAXY_REQUIREMENTS_FILE}`)
   await runLogged(
     galaxyBin,
     ['role', 'install', '-r', GALAXY_REQUIREMENTS_FILE, '-p', GALAXY_ROLES_DIR],
-    { level: 'INFO', component: 'ansible-galaxy' },
+    { level: 'INFO', component: 'ansible-galaxy', ...galaxyRun },
   )
   logInfo('orchestration', 'galaxy roles ready')
 
@@ -209,7 +224,7 @@ export async function ensureGalaxyRoles(): Promise<void> {
       '-p',
       GALAXY_COLLECTIONS_DIR,
     ],
-    { level: 'INFO', component: 'ansible-galaxy' },
+    { level: 'INFO', component: 'ansible-galaxy', ...galaxyRun },
   )
   logInfo('orchestration', 'galaxy collections ready')
 }
