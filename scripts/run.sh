@@ -402,27 +402,51 @@ TP_DENO_VERSION="2.9.1"
 
 # Install Deno into the runtimes tree (idempotent), mirroring uv/ansible/cloudflared:
 #   $RUNTIMES_DIR/deno/$TP_DENO_VERSION/deno  plus `current` and `bin/deno` symlinks.
+# Keep the download/extract path in sync with orchestration/roles/deno-runtime/tasks/main.yml
+# (GitHub release zip + python3 stdlib — host-base only guarantees python3, not unzip).
 tp_install_deno_runtime() {
 	_deno_versioned_dir="$RUNTIMES_DIR/deno/$TP_DENO_VERSION"
 	_deno_bin="$_deno_versioned_dir/deno"
 	if [ ! -x "$_deno_bin" ]; then
-		_deno_tmp="$RUNTIMES_DIR/deno/.install"
-		rm -rf "$_deno_tmp"
-		mkdir -p "$_deno_tmp"
+		case "$(uname -m)" in
+		aarch64 | arm64) _deno_arch="aarch64-unknown-linux-gnu" ;;
+		x86_64 | amd64) _deno_arch="x86_64-unknown-linux-gnu" ;;
+		*)
+			tp_print_error "Unsupported architecture for Deno: $(uname -m)"
+			return 1
+			;;
+		esac
+		_deno_asset="deno-${_deno_arch}.zip"
+		_deno_url="https://github.com/denoland/deno/releases/download/v${TP_DENO_VERSION}/${_deno_asset}"
+		_deno_tmp="$(mktemp -d)"
 		_curl="curl -fsSL"
 		[ "${TURBOPANEL_RELEASE_TLS_INSECURE:-}" = 1 ] && _curl="curl -fsSLk"
-		# CI=1 (with no -y and non-TTY stdout) makes deno.land/install.sh skip its
-		# shell-setup step. Otherwise it appends `. "$DENO_INSTALL/env"` to the
-		# invoking user's ~/.bashrc — pointing at our temp dir which we delete below,
-		# breaking every subsequent login shell with a missing-file error.
 		# shellcheck disable=SC2086
-		if ! $_curl https://deno.land/install.sh \
-			| CI=1 DENO_INSTALL="$_deno_tmp" sh -s "v${TP_DENO_VERSION}" >/dev/null 2>&1; then
+		if ! $_curl -o "$_deno_tmp/$_deno_asset" "$_deno_url"; then
 			rm -rf "$_deno_tmp"
 			return 1
 		fi
 		mkdir -p "$_deno_versioned_dir"
-		install -m 0755 "$_deno_tmp/bin/deno" "$_deno_bin"
+		if ! python3 - "$_deno_tmp/$_deno_asset" "$_deno_bin" <<'PY'
+import shutil, sys, tempfile, zipfile
+from pathlib import Path
+
+archive, dest = Path(sys.argv[1]), Path(sys.argv[2])
+dest.parent.mkdir(parents=True, exist_ok=True)
+with tempfile.TemporaryDirectory(prefix="deno-zip-") as tmp:
+    tmp_path = Path(tmp)
+    with zipfile.ZipFile(archive) as zf:
+        zf.extractall(tmp_path)
+    candidates = list(tmp_path.rglob("deno"))
+    if not candidates:
+        raise SystemExit("deno binary not found in release zip")
+    shutil.copy2(candidates[0], dest)
+dest.chmod(0o755)
+PY
+		then
+			rm -rf "$_deno_tmp"
+			return 1
+		fi
 		rm -rf "$_deno_tmp"
 	fi
 	# Always restore stable symlinks (repair/retry may leave them drifted).
