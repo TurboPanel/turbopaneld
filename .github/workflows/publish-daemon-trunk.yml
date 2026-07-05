@@ -213,3 +213,40 @@ jobs:
             --endpoint-url "${DL_S3_ENDPOINT}" \
             --cache-control "public, max-age=30, must-revalidate" \
             --content-type "application/json"
+
+      - name: Verify published artifacts match manifest
+        run: |
+          python3 <<'PY'
+          import hashlib
+          import json
+          import sys
+          import urllib.request
+
+          manifest = json.load(
+              urllib.request.urlopen("https://dl.trbp.nl/channels/trunk/manifest.json")
+          )
+          checks = [
+              ("linux-amd64", manifest["binaryArtifacts"]["linux-amd64"]),
+              ("linux-arm64", manifest["binaryArtifacts"]["linux-arm64"]),
+              ("js", manifest["jsFallbackArtifact"]),
+              ("orchestration", manifest["orchestrationArtifact"]),
+          ]
+          failed = False
+          for name, entry in checks:
+              data = urllib.request.urlopen(entry["url"]).read()
+              digest = hashlib.sha256(data).hexdigest()
+              if digest != entry["sha256"] or len(data) != entry["size"]:
+                  print(
+                      f"::error::{name} CDN mismatch: "
+                      f"expected sha256={entry['sha256']} size={entry['size']} "
+                      f"got sha256={digest} size={len(data)}",
+                      file=sys.stderr,
+                  )
+                  failed = True
+          if failed:
+              sys.exit(1)
+          print(
+              f"Verified CDN artifacts for commit {manifest['commit']} "
+              f"({manifest['buildId']})"
+          )
+          PY
