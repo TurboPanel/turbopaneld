@@ -3,8 +3,8 @@
 # (301 redirect) and at /run.sh by Caddy in co-located dev.
 #
 # Fetches split release artifacts from the channel manifest at
-# https://dl.trbp.nl/channels.json (host-arch native binary + shared JS bundle),
-# installs the production FHS layout
+# https://dl.trbp.nl/channels.json (host-arch native binary + shared JS bundle
+# + orchestration tree), installs the production FHS layout
 # (bin/turbopaneld, bin/turbopaneld.js, share/orchestration/), probes native
 # binary executability, bootstraps orchestration runtimes, and runs
 # daemon-install.yml via Ansible (turbopaneld.service with native or JS fallback).
@@ -88,11 +88,14 @@ tp_resolve_channel_manifest() {
 	_binary_artifact_sha256="$(tp_manifest_binary_artifact_field "$_compact" "$_linux_arch" "sha256")"
 	_js_fallback_artifact_url="$(tp_manifest_artifact_field "$_compact" "jsFallbackArtifact" "url")"
 	_js_fallback_artifact_sha256="$(tp_manifest_artifact_field "$_compact" "jsFallbackArtifact" "sha256")"
+	_orchestration_artifact_url="$(tp_manifest_artifact_field "$_compact" "orchestrationArtifact" "url")"
+	_orchestration_artifact_sha256="$(tp_manifest_artifact_field "$_compact" "orchestrationArtifact" "sha256")"
 	if [ -z "$_manifest_host" ]; then
 		_manifest_host="https://turbopanel.app"
 	fi
 	if [ -z "$_binary_artifact_url" ] || [ -z "$_binary_artifact_sha256" ] \
-		|| [ -z "$_js_fallback_artifact_url" ] || [ -z "$_js_fallback_artifact_sha256" ]; then
+		|| [ -z "$_js_fallback_artifact_url" ] || [ -z "$_js_fallback_artifact_sha256" ] \
+		|| [ -z "$_orchestration_artifact_url" ] || [ -z "$_orchestration_artifact_sha256" ]; then
 		return 1
 	fi
 	return 0
@@ -108,6 +111,26 @@ tp_extract_tar_zst_archive() {
 	mkdir -p "$_dest_root"
 	if ! zstd -d -q -c "$_archive" | tar -x -C "$_dest_root"; then
 		echo "run.sh: failed to extract $_archive" >&2
+		return 1
+	fi
+	return 0
+}
+
+tp_extract_orchestration_release() {
+	_archive="$1"
+	_dest_root="$2"
+	_home="${3:-$(tp_prod_home)}"
+	if ! command -v zstd >/dev/null 2>&1; then
+		echo "run.sh: zstd is required" >&2
+		return 1
+	fi
+	mkdir -p "$_dest_root"
+	if ! zstd -d -q -c "$_archive" | tar -x -C "$_dest_root"; then
+		echo "run.sh: failed to extract $_archive" >&2
+		return 1
+	fi
+	if [ ! -f "$_dest_root/$_home/share/orchestration/ansible.cfg" ]; then
+		echo "run.sh: orchestration archive missing $_home/share/orchestration/ansible.cfg" >&2
 		return 1
 	fi
 	return 0
@@ -147,16 +170,18 @@ tp_install_verified_release() {
 	_update_name="$(tp_daemon_update_helper_name)"
 	_binary_archive=""
 	_js_archive=""
+	_orchestration_archive=""
 	_staging=""
 
 	_cleanup() {
-		rm -f "$_binary_archive" "$_js_archive"
+		rm -f "$_binary_archive" "$_js_archive" "$_orchestration_archive"
 		rm -rf "$_staging"
 	}
 	trap _cleanup EXIT INT HUP TERM
 
 	_binary_archive="$(mktemp)"
 	_js_archive="$(mktemp)"
+	_orchestration_archive="$(mktemp)"
 	_staging="$(mktemp -d)"
 
 	if ! tp_download_verified_artifact "$_binary_artifact_url" "$_binary_artifact_sha256" "$_binary_archive"; then
@@ -165,10 +190,14 @@ tp_install_verified_release() {
 	if ! tp_download_verified_artifact "$_js_fallback_artifact_url" "$_js_fallback_artifact_sha256" "$_js_archive"; then
 		return 1
 	fi
+	if ! tp_download_verified_artifact "$_orchestration_artifact_url" "$_orchestration_artifact_sha256" "$_orchestration_archive"; then
+		return 1
+	fi
 
 	_binary_staging="$_staging/binary"
 	_js_staging="$_staging/js"
-	mkdir -p "$_binary_staging" "$_js_staging"
+	_orchestration_staging="$_staging/orchestration"
+	mkdir -p "$_binary_staging" "$_js_staging" "$_orchestration_staging"
 
 	if ! tp_extract_tar_zst_archive "$_binary_archive" "$_binary_staging"; then
 		return 1
@@ -176,11 +205,14 @@ tp_install_verified_release() {
 	if ! tp_extract_tar_zst_archive "$_js_archive" "$_js_staging"; then
 		return 1
 	fi
+	if ! tp_extract_orchestration_release "$_orchestration_archive" "$_orchestration_staging" "$_home"; then
+		return 1
+	fi
 
 	if [ ! -f "$_binary_staging/$_home/bin/$_binary_name" ] \
 		|| [ ! -f "$_js_staging/$_home/bin/$_js_name" ] \
 		|| [ ! -f "$_js_staging/$_home/bin/$_update_name" ] \
-		|| [ ! -f "$_js_staging/$_home/share/orchestration/ansible.cfg" ]; then
+		|| [ ! -f "$_orchestration_staging/$_home/share/orchestration/ansible.cfg" ]; then
 		echo "run.sh: release artifacts missing expected production layout" >&2
 		return 1
 	fi
@@ -190,7 +222,7 @@ tp_install_verified_release() {
 	install -m 0644 "$_js_staging/$_home/bin/$_js_name" "$_home/bin/$_js_name"
 	install -m 0755 "$_js_staging/$_home/bin/$_update_name" "$_home/bin/$_update_name"
 	rm -rf "$_home/share/orchestration"
-	cp -a "$_js_staging/$_home/share/orchestration" "$_home/share/"
+	cp -a "$_orchestration_staging/$_home/share/orchestration" "$_home/share/"
 	trap - EXIT INT HUP TERM
 	_cleanup
 	return 0

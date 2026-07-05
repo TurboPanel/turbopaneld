@@ -63,7 +63,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install Deno
-        uses: denoland/setup-deno@v2
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
 
       - name: Check production layout contract
         run: deno task check:layout
@@ -131,6 +131,7 @@ jobs:
           mkdir -p "$_publish_dir" publish/channels/trunk
 
           _js_name="$(tp_js_release_filename)"
+          _orch_name="$(tp_orchestration_release_filename)"
 
           for _arch in amd64 arm64; do
             _tarball="dist/turbopaneld-${_arch}.tar.zst"
@@ -148,10 +149,18 @@ jobs:
           cp "$_js_tarball" "$_publish_dir/${_js_name}"
           rm -rf "$_js_verify"
 
+          _orch_tarball="dist/${_orch_name}"
+          _orch_verify="$(mktemp -d)"
+          zstd -d -q -c "$_orch_tarball" | tar -x -C "$_orch_verify"
+          sh scripts/verify-release-root.sh --orchestration-only "$_orch_verify"
+          cp "$_orch_tarball" "$_publish_dir/${_orch_name}"
+          rm -rf "$_orch_verify"
+
           for _artifact in \
             turbopaneld-amd64.tar.zst \
             turbopaneld-arm64.tar.zst \
-            "$_js_name"; do
+            "$_js_name" \
+            "$_orch_name"; do
             if [ ! -s "$_publish_dir/$_artifact" ]; then
               echo "::error::missing or empty publish artifact: $_artifact"
               exit 1
@@ -180,24 +189,27 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.DL_S3_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.DL_S3_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: ${{ vars.DL_S3_REGION }}
+          DL_S3_BUCKET: ${{ secrets.DL_S3_BUCKET }}
+          DL_S3_ENDPOINT: ${{ vars.DL_S3_ENDPOINT }}
         run: |
           _prefix="channels/trunk/daemon"
           for _artifact in \
             turbopaneld-amd64.tar.zst \
             turbopaneld-arm64.tar.zst \
-            turbopaneld.js.tar.zst; do
+            turbopaneld.js.tar.zst \
+            orchestration.tar.zst; do
             aws s3 cp "publish/${_prefix}/${_artifact}" \
-              "s3://${{ secrets.DL_S3_BUCKET }}/${_prefix}/${_artifact}" \
-              --endpoint-url "${{ vars.DL_S3_ENDPOINT }}" \
+              "s3://${DL_S3_BUCKET}/${_prefix}/${_artifact}" \
+              --endpoint-url "${DL_S3_ENDPOINT}" \
               --cache-control "public, max-age=30, must-revalidate"
           done
           aws s3 cp publish/channels/trunk/manifest.json \
-            "s3://${{ secrets.DL_S3_BUCKET }}/channels/trunk/manifest.json" \
-            --endpoint-url "${{ vars.DL_S3_ENDPOINT }}" \
+            "s3://${DL_S3_BUCKET}/channels/trunk/manifest.json" \
+            --endpoint-url "${DL_S3_ENDPOINT}" \
             --cache-control "public, max-age=30, must-revalidate" \
             --content-type "application/json"
           aws s3 cp publish/channels.json \
-            "s3://${{ secrets.DL_S3_BUCKET }}/channels.json" \
-            --endpoint-url "${{ vars.DL_S3_ENDPOINT }}" \
+            "s3://${DL_S3_BUCKET}/channels.json" \
+            --endpoint-url "${DL_S3_ENDPOINT}" \
             --cache-control "public, max-age=30, must-revalidate" \
             --content-type "application/json"

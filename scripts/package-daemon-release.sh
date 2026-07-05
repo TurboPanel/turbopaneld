@@ -1,14 +1,14 @@
 #!/bin/sh
 # Package split daemon release artifacts for CDN upload and GitHub releases.
 #
-# Three zstd-compressed tar artifacts:
+# Four zstd-compressed tar artifacts:
 #   turbopaneld-amd64.tar.zst  → opt/turbopanel/bin/turbopaneld
 #   turbopaneld-arm64.tar.zst  → opt/turbopanel/bin/turbopaneld
 #   turbopaneld.js.tar.zst     → opt/turbopanel/bin/{turbopaneld.js,turbopanel-update}
-#                              + opt/turbopanel/share/orchestration/…
+#   orchestration.tar.zst      → opt/turbopanel/share/orchestration/…
 #
 # Installers resolve the host CPU and download the matching native binary plus
-# the shared JS bundle — never both arch binaries.
+# the shared JS bundle and orchestration tree — never both arch binaries.
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -22,11 +22,11 @@ fi
 
 DIST="$ROOT/dist"
 BUILD="$DIST/.build"
-ORCHESTRATION_STAGING="$DIST/.orchestration-staging"
 VERSION="${TURBOPANEL_RELEASE_VERSION:-}"
 PROD_HOME="$(tp_prod_home)"
 JS_SRC="$DIST/$(tp_daemon_js_fallback_name)"
 UPDATE_HELPER_SRC="$ROOT/scripts/update.sh"
+ORCH_ARCHIVE="$DIST/$(tp_orchestration_release_filename "$VERSION")"
 mkdir -p "$BUILD"
 
 if [ ! -s "$JS_SRC" ]; then
@@ -39,8 +39,8 @@ if [ ! -s "$UPDATE_HELPER_SRC" ]; then
 	exit 1
 fi
 
-if [ ! -f "$ORCHESTRATION_STAGING/ansible.cfg" ]; then
-	echo "package-daemon-release.sh: missing $ORCHESTRATION_STAGING (run deno task bundle:orchestration)" >&2
+if [ ! -s "$ORCH_ARCHIVE" ]; then
+	echo "package-daemon-release.sh: missing $ORCH_ARCHIVE (run deno task bundle:orchestration)" >&2
 	exit 1
 fi
 
@@ -82,9 +82,8 @@ package_js_bundle() {
 	_staging="$(mktemp -d)"
 	_out_name="$(tp_js_release_filename "$VERSION")"
 
-	tp_build_release_staging_root "$_staging" "$PROD_HOME"
-	tp_stage_release_js_bundle \
-		"$_staging" "$PROD_HOME" "$JS_SRC" "$UPDATE_HELPER_SRC" "$ORCHESTRATION_STAGING"
+	mkdir -p "$_staging/$PROD_HOME/bin"
+	tp_stage_release_js_bundle "$_staging" "$PROD_HOME" "$JS_SRC" "$UPDATE_HELPER_SRC"
 
 	if ! tp_verify_release_root "$_staging" "js"; then
 		echo "package-daemon-release.sh: JS bundle verification failed" >&2
@@ -98,14 +97,14 @@ package_binary_arch amd64
 package_binary_arch arm64
 package_js_bundle
 
-rm -rf "$BUILD" "$ORCHESTRATION_STAGING"
+rm -rf "$BUILD"
 for _entry in "$DIST"/*; do
 	[ -e "$_entry" ] || continue
 	_base="$(basename "$_entry")"
 	case "$_base" in
 		turbopaneld-amd64.tar.zst | turbopaneld-arm64.tar.zst | \
 		turbopaneld-*-amd64.tar.zst | turbopaneld-*-arm64.tar.zst | \
-		turbopaneld.js*.tar.zst) ;;
+		turbopaneld.js*.tar.zst | orchestration.tar.zst | orchestration-*.tar.zst) ;;
 		*) rm -rf "$_entry" ;;
 	esac
 done

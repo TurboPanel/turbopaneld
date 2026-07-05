@@ -9,11 +9,11 @@
 #   /opt/turbopanel/share/orchestration/…    Ansible playbooks + roles
 #
 # Published artifacts (dist/ after package:release) — installers download the
-# host-arch native binary plus the shared JS bundle (never both amd64 and arm64):
+# host-arch native binary, shared JS bundle, and orchestration tree:
 #   turbopaneld-amd64.tar.zst  → opt/turbopanel/bin/turbopaneld
 #   turbopaneld-arm64.tar.zst  → opt/turbopanel/bin/turbopaneld
 #   turbopaneld.js.tar.zst     → opt/turbopanel/bin/turbopaneld.js (+ turbopanel-update)
-#                              + opt/turbopanel/share/orchestration/…
+#   orchestration.tar.zst      → opt/turbopanel/share/orchestration/…
 #
 # Manifest parsing helpers (tp_resolve_channel_manifest, tp_resolve_linux_arch, …)
 # are canonical here; scripts/run.sh inlines a copy because CDN bootstrap runs via
@@ -139,7 +139,8 @@ tp_manifest_binary_artifact_field() {
 }
 
 # Populate manifest globals: _manifest_host, _manifest_commit, _linux_arch,
-# _binary_artifact_{url,sha256}, _js_fallback_artifact_{url,sha256}.
+# _binary_artifact_{url,sha256}, _js_fallback_artifact_{url,sha256},
+# _orchestration_artifact_{url,sha256}.
 # Returns 1 when required fields are missing.
 tp_resolve_channel_manifest() {
 	_manifest_json="$1"
@@ -154,13 +155,16 @@ tp_resolve_channel_manifest() {
 	_binary_artifact_sha256="$(tp_manifest_binary_artifact_field "$_compact" "$_linux_arch" "sha256")"
 	_js_fallback_artifact_url="$(tp_manifest_artifact_field "$_compact" "jsFallbackArtifact" "url")"
 	_js_fallback_artifact_sha256="$(tp_manifest_artifact_field "$_compact" "jsFallbackArtifact" "sha256")"
+	_orchestration_artifact_url="$(tp_manifest_artifact_field "$_compact" "orchestrationArtifact" "url")"
+	_orchestration_artifact_sha256="$(tp_manifest_artifact_field "$_compact" "orchestrationArtifact" "sha256")"
 
 	if [ -z "$_manifest_host" ]; then
 		_manifest_host="https://turbopanel.app"
 	fi
 
 	if [ -z "$_binary_artifact_url" ] || [ -z "$_binary_artifact_sha256" ] \
-		|| [ -z "$_js_fallback_artifact_url" ] || [ -z "$_js_fallback_artifact_sha256" ]; then
+		|| [ -z "$_js_fallback_artifact_url" ] || [ -z "$_js_fallback_artifact_sha256" ] \
+		|| [ -z "$_orchestration_artifact_url" ] || [ -z "$_orchestration_artifact_sha256" ]; then
 		return 1
 	fi
 
@@ -238,13 +242,9 @@ tp_stage_release_js_bundle() {
 	_home="$2"
 	_js_src="$3"
 	_update_src="$4"
-	_orchestration_src="${5:-}"
 	_bin_dir="$_staging/$_home/bin"
 	install -m 0644 "$_js_src" "$_bin_dir/$(tp_daemon_js_fallback_name)"
 	install -m 0755 "$_update_src" "$_bin_dir/$(tp_daemon_update_helper_name)"
-	if [ -n "$_orchestration_src" ]; then
-		tp_stage_release_orchestration "$_staging" "$_home" "$_orchestration_src"
-	fi
 	return 0
 }
 
@@ -289,8 +289,7 @@ tp_prune_release_orchestration_tree() {
 }
 
 # _mode: "full" (bin native+js+update+orch), "binary" (native only), "js"
-# (turbopaneld.js + update helper + share/orchestration), or "orchestration"
-# (share/orchestration only).
+# (turbopaneld.js + update helper), or "orchestration" (share/orchestration only).
 tp_verify_release_root() {
 	_root="$1"
 	_mode="${2:-full}"
@@ -348,10 +347,6 @@ tp_verify_release_root() {
 		fi
 		if [ ! -f "$_prod/bin/$(tp_daemon_update_helper_name)" ]; then
 			echo "tp_verify_release_root: missing $_prod/bin/$(tp_daemon_update_helper_name)" >&2
-			_fail=1
-		fi
-		if [ ! -f "$_prod/share/orchestration/ansible.cfg" ]; then
-			echo "tp_verify_release_root: missing $_prod/share/orchestration/ansible.cfg" >&2
 			_fail=1
 		fi
 	elif [ "$_mode" = "full" ]; then
@@ -427,20 +422,23 @@ tp_download_verified_artifact() {
 	return 0
 }
 
-# Download the host-arch native binary and shared JS bundle from the channel
-# manifest and install into the production FHS layout.
+# Download the host-arch native binary, shared JS bundle, and orchestration tree
+# from the channel manifest and install into the production FHS layout.
 tp_install_verified_channel_release() {
 	_binary_url="$1"
 	_binary_sha256="$2"
 	_js_url="$3"
 	_js_sha256="$4"
+	_orchestration_url="$5"
+	_orchestration_sha256="$6"
 	_home="$(tp_prod_home)"
 	_binary_archive=""
 	_js_archive=""
+	_orchestration_archive=""
 	_staging=""
 
 	_cleanup() {
-		rm -f "$_binary_archive" "$_js_archive"
+		rm -f "$_binary_archive" "$_js_archive" "$_orchestration_archive"
 		rm -rf "$_staging"
 		return 0
 	}
@@ -448,6 +446,7 @@ tp_install_verified_channel_release() {
 
 	_binary_archive="$(mktemp)"
 	_js_archive="$(mktemp)"
+	_orchestration_archive="$(mktemp)"
 	_staging="$(mktemp -d)"
 
 	if ! tp_download_verified_artifact "$_binary_url" "$_binary_sha256" "$_binary_archive"; then
@@ -456,10 +455,14 @@ tp_install_verified_channel_release() {
 	if ! tp_download_verified_artifact "$_js_url" "$_js_sha256" "$_js_archive"; then
 		return 1
 	fi
+	if ! tp_download_verified_artifact "$_orchestration_url" "$_orchestration_sha256" "$_orchestration_archive"; then
+		return 1
+	fi
 
 	_binary_staging="$_staging/binary"
 	_js_staging="$_staging/js"
-	mkdir -p "$_binary_staging" "$_js_staging"
+	_orchestration_staging="$_staging/orchestration"
+	mkdir -p "$_binary_staging" "$_js_staging" "$_orchestration_staging"
 
 	if ! tp_extract_tar_zst_archive "$_binary_archive" "$_binary_staging"; then
 		return 1
@@ -475,6 +478,10 @@ tp_install_verified_channel_release() {
 		return 1
 	fi
 
+	if ! tp_extract_orchestration_release "$_orchestration_archive" "$_orchestration_staging" "$_home"; then
+		return 1
+	fi
+
 	mkdir -p "$_home/bin" "$_home/share/orchestration"
 	install -m 0755 \
 		"$_binary_staging/$_home/bin/$(tp_daemon_binary_name)" \
@@ -486,7 +493,7 @@ tp_install_verified_channel_release() {
 		"$_js_staging/$_home/bin/$(tp_daemon_update_helper_name)" \
 		"$_home/bin/$(tp_daemon_update_helper_name)"
 	rm -rf "$_home/share/orchestration"
-	cp -a "$_js_staging/$_home/share/orchestration" "$_home/share/"
+	cp -a "$_orchestration_staging/$_home/share/orchestration" "$_home/share/"
 
 	trap - EXIT INT HUP TERM
 	_cleanup

@@ -31,6 +31,7 @@ export interface ChannelManifest {
   defaultControlPlaneUrl?: string;
   binaryArtifacts: BinaryArtifacts;
   jsFallbackArtifact: ArtifactEntry;
+  orchestrationArtifact: ArtifactEntry;
   releaseNotesUrl?: string;
   signature?: Record<string, unknown>;
 }
@@ -42,6 +43,7 @@ export interface UpdateInfo {
   builtAt: string;
   binaryArtifact: ArtifactEntry;
   jsFallbackArtifact: ArtifactEntry;
+  orchestrationArtifact: ArtifactEntry;
   /** Native binary tarball URL for the current host architecture. */
   downloadUrl: string;
 }

@@ -173,10 +173,15 @@ export function parseChannelManifest(raw: unknown): ChannelManifest {
     raw.jsFallbackArtifact,
     "channel.json jsFallbackArtifact",
   );
+  const orchestrationArtifact = validateArtifactEntry(
+    raw.orchestrationArtifact,
+    "channel.json orchestrationArtifact",
+  );
 
   return {
     ...(raw as unknown as ChannelManifest),
     binaryArtifacts,
     jsFallbackArtifact,
+    orchestrationArtifact,
   };
 }

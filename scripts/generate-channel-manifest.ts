@@ -75,6 +75,11 @@ const jsFallback = await artifactFromPublishFile(
   "turbopaneld.js.tar.zst",
   `${artifactBase}/turbopaneld.js.tar.zst`,
 );
+const orchestration = await artifactFromPublishFile(
+  publishDir,
+  "orchestration.tar.zst",
+  `${artifactBase}/orchestration.tar.zst`,
+);
 
 const manifest: ChannelManifest = {
   schema: 1,
@@ -88,6 +93,7 @@ const manifest: ChannelManifest = {
     "linux-arm64": binaryArm64,
   },
   jsFallbackArtifact: jsFallback,
+  orchestrationArtifact: orchestration,
 };
 
 const json = JSON.stringify(manifest, null, 2) + "\n";

@@ -102,9 +102,15 @@ Deno.test("parseChannelManifest validates artifact entries", () => {
       sha256: "c".repeat(64),
       size: 345,
     },
+    orchestrationArtifact: {
+      url: "https://dl.trbp.nl/channels/trunk/daemon/orchestration.tar.zst",
+      sha256: "d".repeat(64),
+      size: 456,
+    },
   });
 
   assertEquals(manifest.commit, "abc123");
   assertEquals(manifest.binaryArtifacts["linux-amd64"].size, 123);
   assertEquals(manifest.jsFallbackArtifact.size, 345);
+  assertEquals(manifest.orchestrationArtifact.size, 456);
 });
