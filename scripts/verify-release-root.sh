@@ -16,6 +16,14 @@ case "${1:-}" in
 		_mode="orchestration"
 		_root="${2:-}"
 		;;
+	--binary-only)
+		_mode="binary"
+		_root="${2:-}"
+		;;
+	--js-only)
+		_mode="js"
+		_root="${2:-}"
+		;;
 	*)
 		_root="${1:-}"
 		;;
@@ -23,7 +31,7 @@ esac
 
 if [ -z "$_root" ] || [ ! -d "$_root" ]; then
 	echo "verify-release-root.sh: missing release root directory" >&2
-	echo "Usage: verify-release-root.sh [--orchestration-only] <extract-root>" >&2
+	echo "Usage: verify-release-root.sh [--orchestration-only|--binary-only|--js-only] <extract-root>" >&2
 	exit 1
 fi
 

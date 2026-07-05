@@ -1,13 +1,14 @@
 #!/bin/sh
-# Package cross-arch daemon release tarballs for dev downloads and GitHub releases.
+# Package split daemon release artifacts for CDN upload and GitHub releases.
 #
-# Staging mirrors production FHS layout:
-#   opt/turbopanel/bin/{turbopaneld,turbopaneld.js}
-#   opt/turbopanel/share/orchestration/…
+# Three zstd-compressed tar artifacts:
+#   turbopaneld-amd64.tar.zst  → opt/turbopanel/bin/turbopaneld
+#   turbopaneld-arm64.tar.zst  → opt/turbopanel/bin/turbopaneld
+#   turbopaneld.js.tar.zst     → opt/turbopanel/bin/{turbopaneld.js,turbopanel-update}
+#                              + opt/turbopanel/share/orchestration/…
 #
-# Only *.tar.zst release artifacts (plus the native turbopaneld binary,
-# standalone turbopaneld.js, and orchestration.tar.zst) remain in dist/
-# when finished.
+# Installers resolve the host CPU and download the matching native binary plus
+# the shared JS bundle — never both arch binaries.
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -55,7 +56,7 @@ write_tarball() {
 	echo "package-daemon-release.sh: wrote $_out"
 }
 
-package_arch() {
+package_binary_arch() {
 	_arch="$1"
 	_daemon_src="$BUILD/$(tp_daemon_linux_arch_binary_name "$_arch")"
 	if [ ! -s "$_daemon_src" ]; then
@@ -67,29 +68,44 @@ package_arch() {
 	_out_name="$(tp_daemon_release_filename "$_arch" "$VERSION")"
 
 	tp_build_release_staging_root "$_staging" "$PROD_HOME"
-	tp_stage_release_binaries "$_staging" "$PROD_HOME" "$_daemon_src" "$JS_SRC"
-	tp_stage_release_update_helper "$_staging" "$PROD_HOME" "$UPDATE_HELPER_SRC"
-	tp_stage_release_orchestration "$_staging" "$PROD_HOME" "$ORCHESTRATION_STAGING"
+	tp_stage_release_native_binary "$_staging" "$PROD_HOME" "$_daemon_src"
 
-	if ! tp_verify_release_root "$_staging" "full"; then
-		echo "package-daemon-release.sh: release verification failed for $_arch" >&2
+	if ! tp_verify_release_root "$_staging" "binary"; then
+		echo "package-daemon-release.sh: native binary verification failed for $_arch" >&2
 		exit 1
 	fi
 
 	write_tarball "$_out_name" "$_staging" "opt"
 }
 
-package_arch amd64
-package_arch arm64
+package_js_bundle() {
+	_staging="$(mktemp -d)"
+	_out_name="$(tp_js_release_filename "$VERSION")"
+
+	tp_build_release_staging_root "$_staging" "$PROD_HOME"
+	tp_stage_release_js_bundle \
+		"$_staging" "$PROD_HOME" "$JS_SRC" "$UPDATE_HELPER_SRC" "$ORCHESTRATION_STAGING"
+
+	if ! tp_verify_release_root "$_staging" "js"; then
+		echo "package-daemon-release.sh: JS bundle verification failed" >&2
+		exit 1
+	fi
+
+	write_tarball "$_out_name" "$_staging" "opt"
+}
+
+package_binary_arch amd64
+package_binary_arch arm64
+package_js_bundle
 
 rm -rf "$BUILD" "$ORCHESTRATION_STAGING"
 for _entry in "$DIST"/*; do
 	[ -e "$_entry" ] || continue
 	_base="$(basename "$_entry")"
 	case "$_base" in
-		turbopaneld-linux-*.tar.zst | turbopaneld-*-linux-*.tar.zst | \
-		$(tp_daemon_binary_name) | $(tp_daemon_js_fallback_name) | \
-		$(tp_orchestration_release_filename "$VERSION")) ;;
+		turbopaneld-amd64.tar.zst | turbopaneld-arm64.tar.zst | \
+		turbopaneld-*-amd64.tar.zst | turbopaneld-*-arm64.tar.zst | \
+		turbopaneld.js*.tar.zst) ;;
 		*) rm -rf "$_entry" ;;
 	esac
 done

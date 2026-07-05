@@ -117,7 +117,7 @@ jobs:
       - name: Stage orchestration share tree
         run: deno task bundle:orchestration
 
-      - name: Package per-arch release tarballs
+      - name: Package split release artifacts
         run: deno task package:release
 
       - name: Verify release packages and stage publish tree
@@ -130,66 +130,37 @@ jobs:
           _publish_dir="publish/channels/trunk/daemon"
           mkdir -p "$_publish_dir" publish/channels/trunk
 
-          # Verify each arch release package, copy the verified tarball into
-          # publish/, and keep one extract to derive standalone artifacts.
-          _derive_root=""
+          _js_name="$(tp_js_release_filename)"
+
           for _arch in amd64 arm64; do
-            _tarball="dist/turbopaneld-linux-${_arch}.tar.zst"
+            _tarball="dist/turbopaneld-${_arch}.tar.zst"
             _verify_root="release-root-verify-${_arch}"
             rm -rf "$_verify_root"
             mkdir -p "$_verify_root"
             zstd -d -q -c "$_tarball" | tar -x -C "$_verify_root"
-            sh scripts/verify-release-root.sh "$_verify_root"
+            sh scripts/verify-release-root.sh --binary-only "$_verify_root"
             cp "$_tarball" "$_publish_dir/"
-            if [ -z "$_derive_root" ]; then
-              _derive_root="$_verify_root"
-            else
-              rm -rf "$_verify_root"
-            fi
+            rm -rf "$_verify_root"
           done
 
-          _prod_home="$(tp_prod_home)"
-          _js_name="$(tp_daemon_js_fallback_name)"
-          _orch_name="$(tp_orchestration_release_filename)"
+          _js_tarball="dist/${_js_name}"
+          _js_verify="release-root-verify-js"
+          rm -rf "$_js_verify"
+          mkdir -p "$_js_verify"
+          zstd -d -q -c "$_js_tarball" | tar -x -C "$_js_verify"
+          sh scripts/verify-release-root.sh --js-only "$_js_verify"
+          cp "$_js_tarball" "$_publish_dir/${_js_name}"
+          rm -rf "$_js_verify"
 
-          # Standalone JS and orchestration must come from the verified staged
-          # release-root tree, not from raw dist/ build outputs.
-          _js_src="$_derive_root${_prod_home}/bin/${_js_name}"
-          if [ ! -s "$_js_src" ]; then
-            echo "::error::missing ${_js_name} in verified release root"
-            exit 1
-          fi
-          cp "$_js_src" "$_publish_dir/${_js_name}"
-
-          _orch_staging="$(mktemp -d)"
-          mkdir -p "$_orch_staging${_prod_home}/share"
-          cp -a "$_derive_root${_prod_home}/share/orchestration" \
-            "$_orch_staging${_prod_home}/share/"
-          sh scripts/verify-release-root.sh --orchestration-only "$_orch_staging"
-          tp_pack_orchestration_archive \
-            "$_orch_staging" \
-            "$_publish_dir/${_orch_name}" \
-            "$_prod_home"
-          rm -rf "$_orch_staging" "$_derive_root"
-
-          # Verify the exact files staged for publish.
           for _artifact in \
-            turbopaneld-linux-amd64.tar.zst \
-            turbopaneld-linux-arm64.tar.zst \
-            "$_js_name" \
-            "$_orch_name"; do
+            turbopaneld-amd64.tar.zst \
+            turbopaneld-arm64.tar.zst \
+            "$_js_name"; do
             if [ ! -s "$_publish_dir/$_artifact" ]; then
               echo "::error::missing or empty publish artifact: $_artifact"
               exit 1
             fi
           done
-
-          _orch_verify="release-root-verify-orchestration-publish"
-          rm -rf "$_orch_verify"
-          mkdir -p "$_orch_verify"
-          zstd -d -q -c "$_publish_dir/${_orch_name}" | tar -x -C "$_orch_verify"
-          sh scripts/verify-release-root.sh --orchestration-only "$_orch_verify"
-          rm -rf "$_orch_verify"
 
       - name: Generate channel manifest
         run: |
@@ -216,10 +187,9 @@ jobs:
         run: |
           _prefix="channels/trunk/daemon"
           for _artifact in \
-            turbopaneld-linux-amd64.tar.zst \
-            turbopaneld-linux-arm64.tar.zst \
-            turbopaneld.js \
-            orchestration.tar.zst; do
+            turbopaneld-amd64.tar.zst \
+            turbopaneld-arm64.tar.zst \
+            turbopaneld.js.tar.zst; do
             aws s3 cp "publish/${_prefix}/${_artifact}" \
               "s3://${{ secrets.DL_S3_BUCKET }}/${_prefix}/${_artifact}" \
               --endpoint-url "${{ vars.DL_S3_ENDPOINT }}" \

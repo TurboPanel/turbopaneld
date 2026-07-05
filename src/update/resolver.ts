@@ -62,7 +62,6 @@ export async function resolveUpdate(
     builtAt: manifest.builtAt,
     binaryArtifact,
     jsFallbackArtifact: manifest.jsFallbackArtifact,
-    orchestrationArtifact: manifest.orchestrationArtifact,
     downloadUrl: binaryArtifact.url,
   };
 }

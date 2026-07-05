@@ -62,23 +62,18 @@ const artifactBase = `${DL_BASE_URL}/channels/trunk/daemon`;
 
 const binaryAmd64 = await artifactFromPublishFile(
   publishDir,
-  "turbopaneld-linux-amd64.tar.zst",
-  `${artifactBase}/turbopaneld-linux-amd64.tar.zst`,
+  "turbopaneld-amd64.tar.zst",
+  `${artifactBase}/turbopaneld-amd64.tar.zst`,
 );
 const binaryArm64 = await artifactFromPublishFile(
   publishDir,
-  "turbopaneld-linux-arm64.tar.zst",
-  `${artifactBase}/turbopaneld-linux-arm64.tar.zst`,
+  "turbopaneld-arm64.tar.zst",
+  `${artifactBase}/turbopaneld-arm64.tar.zst`,
 );
 const jsFallback = await artifactFromPublishFile(
   publishDir,
-  "turbopaneld.js",
-  `${artifactBase}/turbopaneld.js`,
-);
-const orchestration = await artifactFromPublishFile(
-  publishDir,
-  "orchestration.tar.zst",
-  `${artifactBase}/orchestration.tar.zst`,
+  "turbopaneld.js.tar.zst",
+  `${artifactBase}/turbopaneld.js.tar.zst`,
 );
 
 const manifest: ChannelManifest = {
@@ -93,7 +88,6 @@ const manifest: ChannelManifest = {
     "linux-arm64": binaryArm64,
   },
   jsFallbackArtifact: jsFallback,
-  orchestrationArtifact: orchestration,
 };
 
 const json = JSON.stringify(manifest, null, 2) + "\n";

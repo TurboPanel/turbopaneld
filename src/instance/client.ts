@@ -942,6 +942,11 @@ export class InstanceClient {
       const base64 = state.chunks.join("");
       const bytes = decodeBase64(base64);
       await applyDevSyncTarball(bytes);
+
+      const restarted = await restartDaemonService();
+      if (!restarted) {
+        throw new Error("dev-sync unpack succeeded but daemon restart failed");
+      }
       ok = true;
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
@@ -956,10 +961,6 @@ export class InstanceClient {
       at: new Date().toISOString(),
     };
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result));
-
-    // Restart only after acking success, so the instance sees the result before
-    // this process is replaced by the freshly-synced build.
-    if (ok) await restartDaemonService();
   }
 
   async #applyTunnelToken(

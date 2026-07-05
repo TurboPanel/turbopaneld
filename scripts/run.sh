@@ -2,8 +2,9 @@
 # TurboPanel daemon bootstrap — single entrypoint served at https://trbp.nl/run.sh
 # (301 redirect) and at /run.sh by Caddy in co-located dev.
 #
-# Fetches the clean release package from the channel manifest at
-# https://dl.trbp.nl/channels.json, installs the production FHS layout
+# Fetches split release artifacts from the channel manifest at
+# https://dl.trbp.nl/channels.json (host-arch native binary + shared JS bundle),
+# installs the production FHS layout
 # (bin/turbopaneld, bin/turbopaneld.js, share/orchestration/), probes native
 # binary executability, bootstraps orchestration runtimes, and runs
 # daemon-install.yml via Ansible (turbopaneld.service with native or JS fallback).
@@ -87,34 +88,35 @@ tp_resolve_channel_manifest() {
 	_binary_artifact_sha256="$(tp_manifest_binary_artifact_field "$_compact" "$_linux_arch" "sha256")"
 	_js_fallback_artifact_url="$(tp_manifest_artifact_field "$_compact" "jsFallbackArtifact" "url")"
 	_js_fallback_artifact_sha256="$(tp_manifest_artifact_field "$_compact" "jsFallbackArtifact" "sha256")"
-	_orchestration_artifact_url="$(tp_manifest_artifact_field "$_compact" "orchestrationArtifact" "url")"
-	_orchestration_artifact_sha256="$(tp_manifest_artifact_field "$_compact" "orchestrationArtifact" "sha256")"
 	if [ -z "$_manifest_host" ]; then
 		_manifest_host="https://turbopanel.app"
 	fi
 	if [ -z "$_binary_artifact_url" ] || [ -z "$_binary_artifact_sha256" ] \
-		|| [ -z "$_js_fallback_artifact_url" ] || [ -z "$_js_fallback_artifact_sha256" ] \
-		|| [ -z "$_orchestration_artifact_url" ] || [ -z "$_orchestration_artifact_sha256" ]; then
+		|| [ -z "$_js_fallback_artifact_url" ] || [ -z "$_js_fallback_artifact_sha256" ]; then
 		return 1
 	fi
 	return 0
 }
 
-tp_install_verified_release() {
+tp_extract_tar_zst_archive() {
+	_archive="$1"
+	_dest_root="$2"
+	if ! command -v zstd >/dev/null 2>&1; then
+		echo "run.sh: zstd is required" >&2
+		return 1
+	fi
+	mkdir -p "$_dest_root"
+	if ! zstd -d -q -c "$_archive" | tar -x -C "$_dest_root"; then
+		echo "run.sh: failed to extract $_archive" >&2
+		return 1
+	fi
+	return 0
+}
+
+tp_download_verified_artifact() {
 	_url="$1"
 	_sha256="$2"
-	_home="$(tp_prod_home)"
-	_binary_name="$(tp_daemon_binary_name)"
-	_js_name="$(tp_daemon_js_fallback_name)"
-	_update_name="$(tp_daemon_update_helper_name)"
-	_tmp=""
-	_staging=""
-
-	_cleanup() {
-		rm -f "$_tmp"
-		rm -rf "$_staging"
-	}
-	trap _cleanup EXIT INT HUP TERM
+	_dest="$3"
 
 	case "$_url" in
 		https://*) ;;
@@ -124,39 +126,71 @@ tp_install_verified_release() {
 			;;
 	esac
 
-	_tmp="$(mktemp)"
-	_staging="$(mktemp -d)"
 	_curl="curl -fsSL"
 	[ "${TURBOPANEL_RELEASE_TLS_INSECURE:-}" = 1 ] && _curl="curl -fsSLk"
 	# shellcheck disable=SC2086
-	if ! $_curl "$_url" -o "$_tmp"; then
+	if ! $_curl "$_url" -o "$_dest"; then
 		echo "run.sh: failed to download $_url" >&2
 		return 1
 	fi
-	if ! printf '%s  %s\n' "$_sha256" "$_tmp" | sha256sum -c - >/dev/null 2>&1; then
+	if ! printf '%s  %s\n' "$_sha256" "$_dest" | sha256sum -c - >/dev/null 2>&1; then
 		echo "run.sh: SHA-256 mismatch for $_url" >&2
 		return 1
 	fi
-	if ! zstd -d -q -c "$_tmp" | tar -x -C "$_staging"; then
-		echo "run.sh: failed to extract $_url" >&2
+	return 0
+}
+
+tp_install_verified_release() {
+	_home="$(tp_prod_home)"
+	_binary_name="$(tp_daemon_binary_name)"
+	_js_name="$(tp_daemon_js_fallback_name)"
+	_update_name="$(tp_daemon_update_helper_name)"
+	_binary_archive=""
+	_js_archive=""
+	_staging=""
+
+	_cleanup() {
+		rm -f "$_binary_archive" "$_js_archive"
+		rm -rf "$_staging"
+	}
+	trap _cleanup EXIT INT HUP TERM
+
+	_binary_archive="$(mktemp)"
+	_js_archive="$(mktemp)"
+	_staging="$(mktemp -d)"
+
+	if ! tp_download_verified_artifact "$_binary_artifact_url" "$_binary_artifact_sha256" "$_binary_archive"; then
 		return 1
 	fi
-	if [ ! -f "$_staging/$_home/bin/$_binary_name" ] \
-		|| [ ! -f "$_staging/$_home/bin/$_js_name" ] \
-		|| [ ! -f "$_staging/$_home/share/orchestration/ansible.cfg" ]; then
-		echo "run.sh: release archive missing expected production layout" >&2
+	if ! tp_download_verified_artifact "$_js_fallback_artifact_url" "$_js_fallback_artifact_sha256" "$_js_archive"; then
 		return 1
 	fi
+
+	_binary_staging="$_staging/binary"
+	_js_staging="$_staging/js"
+	mkdir -p "$_binary_staging" "$_js_staging"
+
+	if ! tp_extract_tar_zst_archive "$_binary_archive" "$_binary_staging"; then
+		return 1
+	fi
+	if ! tp_extract_tar_zst_archive "$_js_archive" "$_js_staging"; then
+		return 1
+	fi
+
+	if [ ! -f "$_binary_staging/$_home/bin/$_binary_name" ] \
+		|| [ ! -f "$_js_staging/$_home/bin/$_js_name" ] \
+		|| [ ! -f "$_js_staging/$_home/bin/$_update_name" ] \
+		|| [ ! -f "$_js_staging/$_home/share/orchestration/ansible.cfg" ]; then
+		echo "run.sh: release artifacts missing expected production layout" >&2
+		return 1
+	fi
+
 	mkdir -p "$_home/bin" "$_home/share/orchestration"
-	install -m 0755 "$_staging/$_home/bin/$_binary_name" "$_home/bin/$_binary_name"
-	install -m 0644 "$_staging/$_home/bin/$_js_name" "$_home/bin/$_js_name"
-	# Install the managed update helper so nodes can self-refresh without a
-	# daemon source checkout. Best-effort: older tarballs may predate it.
-	if [ -f "$_staging/$_home/bin/$_update_name" ]; then
-		install -m 0755 "$_staging/$_home/bin/$_update_name" "$_home/bin/$_update_name"
-	fi
+	install -m 0755 "$_binary_staging/$_home/bin/$_binary_name" "$_home/bin/$_binary_name"
+	install -m 0644 "$_js_staging/$_home/bin/$_js_name" "$_home/bin/$_js_name"
+	install -m 0755 "$_js_staging/$_home/bin/$_update_name" "$_home/bin/$_update_name"
 	rm -rf "$_home/share/orchestration"
-	cp -a "$_staging/$_home/share/orchestration" "$_home/share/"
+	cp -a "$_js_staging/$_home/share/orchestration" "$_home/share/"
 	trap - EXIT INT HUP TERM
 	_cleanup
 	return 0
@@ -555,9 +589,8 @@ if [ -z "$HOST_URL" ]; then
 	HOST_URL="$_manifest_host"
 fi
 tp_print_ok "Release manifest resolved (channel ${TURBOPANEL_UPDATE_CHANNEL:-trunk}, arch ${_linux_arch:-unknown})"
-tp_print_step "  " "Binary: $_binary_artifact_url"
-tp_print_step "  " "JS fallback: $_js_fallback_artifact_url"
-tp_print_step "  " "Orchestration: $_orchestration_artifact_url"
+tp_print_step "  " "Binary (${_linux_arch:-unknown}): $_binary_artifact_url"
+tp_print_step "  " "JS bundle: $_js_fallback_artifact_url"
 tp_print_step "  " "Commit: ${_manifest_commit:-unknown}"
 tp_print_step "  " "Control plane: $HOST_URL"
 
@@ -620,8 +653,8 @@ export TURBOPANEL_RUN_DIR="$RUN_DIR"
 tp_print_step "▸" "Downloading daemon release…"
 tp_stop_running_daemon_for_release_swap
 
-if ! tp_install_verified_release "$_binary_artifact_url" "$_binary_artifact_sha256"; then
-	tp_print_error "Failed to install daemon release from $_binary_artifact_url"
+if ! tp_install_verified_release; then
+	tp_print_error "Failed to install daemon release artifacts"
 	exit 1
 fi
 
