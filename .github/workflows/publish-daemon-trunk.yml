@@ -214,39 +214,64 @@ jobs:
             --cache-control "public, max-age=30, must-revalidate" \
             --content-type "application/json"
 
-      - name: Verify published artifacts match manifest
+      - name: Verify uploaded artifacts match manifest
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.DL_S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.DL_S3_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ vars.DL_S3_REGION }}
+          DL_S3_BUCKET: ${{ secrets.DL_S3_BUCKET }}
+          DL_S3_ENDPOINT: ${{ vars.DL_S3_ENDPOINT }}
         run: |
           python3 <<'PY'
           import hashlib
           import json
+          import os
+          import subprocess
           import sys
-          import urllib.request
+          import tempfile
 
-          manifest = json.load(
-              urllib.request.urlopen("https://dl.trbp.nl/channels/trunk/manifest.json")
-          )
+          with open("publish/channels/trunk/manifest.json") as f:
+              manifest = json.load(f)
+
+          bucket = os.environ["DL_S3_BUCKET"]
+          endpoint = os.environ["DL_S3_ENDPOINT"]
+          prefix = "channels/trunk/daemon"
+
           checks = [
-              ("linux-amd64", manifest["binaryArtifacts"]["linux-amd64"]),
-              ("linux-arm64", manifest["binaryArtifacts"]["linux-arm64"]),
-              ("js", manifest["jsFallbackArtifact"]),
-              ("orchestration", manifest["orchestrationArtifact"]),
+              ("linux-amd64", "turbopaneld-amd64.tar.zst", manifest["binaryArtifacts"]["linux-amd64"]),
+              ("linux-arm64", "turbopaneld-arm64.tar.zst", manifest["binaryArtifacts"]["linux-arm64"]),
+              ("js", "turbopaneld.js.tar.zst", manifest["jsFallbackArtifact"]),
+              ("orchestration", "orchestration.tar.zst", manifest["orchestrationArtifact"]),
           ]
+
           failed = False
-          for name, entry in checks:
-              data = urllib.request.urlopen(entry["url"]).read()
-              digest = hashlib.sha256(data).hexdigest()
-              if digest != entry["sha256"] or len(data) != entry["size"]:
-                  print(
-                      f"::error::{name} CDN mismatch: "
-                      f"expected sha256={entry['sha256']} size={entry['size']} "
-                      f"got sha256={digest} size={len(data)}",
-                      file=sys.stderr,
+          with tempfile.TemporaryDirectory() as tmp:
+              for name, filename, entry in checks:
+                  dest = os.path.join(tmp, filename)
+                  subprocess.run(
+                      [
+                          "aws", "s3", "cp",
+                          f"s3://{bucket}/{prefix}/{filename}",
+                          dest,
+                          "--endpoint-url", endpoint,
+                      ],
+                      check=True,
                   )
-                  failed = True
+                  data = open(dest, "rb").read()
+                  digest = hashlib.sha256(data).hexdigest()
+                  if digest != entry["sha256"] or len(data) != entry["size"]:
+                      print(
+                          f"::error::{name} S3 mismatch: "
+                          f"expected sha256={entry['sha256']} size={entry['size']} "
+                          f"got sha256={digest} size={len(data)}",
+                          file=sys.stderr,
+                      )
+                      failed = True
+
           if failed:
               sys.exit(1)
           print(
-              f"Verified CDN artifacts for commit {manifest['commit']} "
+              f"Verified S3 artifacts for commit {manifest['commit']} "
               f"({manifest['buildId']})"
           )
           PY
