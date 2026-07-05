@@ -1,4 +1,4 @@
-- name: TurboPanel Redis setup
+- name: TurboPanel cache setup
   hosts: localhost
   connection: local
   become: true

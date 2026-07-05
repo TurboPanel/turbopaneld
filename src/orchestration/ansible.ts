@@ -2,6 +2,7 @@ import { run, runLogged, runOrThrow } from './exec.ts'
 import {
   AnsibleRunSummaryCollector,
   type AnsibleEventHandler,
+  type AnsibleRawLineStream,
   runPlaybookStreaming,
 } from './ansible-events.ts'
 import {
@@ -18,6 +19,7 @@ import {
 } from './converge-stamp.ts'
 import { join } from '@std/path'
 import { logInfo, logWarn } from '../logger.ts'
+import { logComponent } from './presentation.ts'
 import {
   devOrchestrationAnsibleEnv,
   requireDevOrchestrationLayout,
@@ -89,6 +91,7 @@ export async function runLocalPlaybook(
   onEvent?: AnsibleEventHandler,
   env: Record<string, string> = ansibleEnv(),
   quiet = false,
+  onRawLine?: (stream: AnsibleRawLineStream, line: string) => void,
 ): Promise<void> {
   const args = ['-i', 'localhost,', '-c', 'local', ...extraArgs, playbook]
 
@@ -97,6 +100,7 @@ export async function runLocalPlaybook(
     env,
     onEvent,
     quiet,
+    onRawLine,
   })
 }
 
@@ -209,7 +213,7 @@ export async function ensureGalaxyRoles(): Promise<void> {
   await runLogged(
     galaxyBin,
     ['role', 'install', '-r', GALAXY_REQUIREMENTS_FILE, '-p', GALAXY_ROLES_DIR],
-    { level: 'INFO', component: 'ansible-galaxy', ...galaxyRun },
+    { level: 'INFO', component: logComponent('ansible-galaxy'), ...galaxyRun },
   )
   logInfo('orchestration', 'galaxy roles ready')
 
@@ -224,7 +228,7 @@ export async function ensureGalaxyRoles(): Promise<void> {
       '-p',
       GALAXY_COLLECTIONS_DIR,
     ],
-    { level: 'INFO', component: 'ansible-galaxy', ...galaxyRun },
+    { level: 'INFO', component: logComponent('ansible-galaxy'), ...galaxyRun },
   )
   logInfo('orchestration', 'galaxy collections ready')
 }
@@ -232,9 +236,22 @@ export async function ensureGalaxyRoles(): Promise<void> {
 /**
  * Run the localhost smoke-test playbook to confirm the runtime is operational.
  */
-export async function runLocalhostTest(onEvent?: AnsibleEventHandler): Promise<void> {
+export async function runLocalhostTest(
+  onEvent?: AnsibleEventHandler,
+  opts?: {
+    quiet?: boolean;
+    onRawLine?: (stream: AnsibleRawLineStream, line: string) => void;
+  },
+): Promise<void> {
   logInfo('orchestration', 'running localhost smoke-test playbook')
-  await runLocalPlaybook(LOCALHOST_PLAYBOOK, [], onEvent)
+  await runLocalPlaybook(
+    LOCALHOST_PLAYBOOK,
+    [],
+    onEvent,
+    undefined,
+    opts?.quiet,
+    opts?.onRawLine,
+  )
   logInfo('orchestration', 'localhost smoke-test passed')
 }
 

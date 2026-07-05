@@ -1,6 +1,7 @@
 import { join } from "@std/path";
 import { runLogged } from "./exec.ts";
 import { logInfo, logWarn } from "../logger.ts";
+import { logComponent } from "./presentation.ts";
 import {
   PYTHON_CURRENT_DIR,
   PYTHON_RUNTIME_DIR,
@@ -41,7 +42,7 @@ export async function ensurePython(): Promise<void> {
   // Capture uv output — informational "already installed" lines belong in stdout, not err.log.
   await runLogged(UV_BIN, ["python", "install", "--no-bin", PYTHON_VERSION], {
     level: "DEBUG",
-    component: "python",
+    component: logComponent("python"),
   });
   await repointPythonCurrent();
   logInfo("orchestration", `Python ${PYTHON_VERSION} ready at ${PYTHON_RUNTIME_DIR}`);

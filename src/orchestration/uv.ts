@@ -2,6 +2,7 @@ import { encodeHex } from "@std/encoding/hex";
 import { join } from "@std/path";
 import { run, runLogged } from "./exec.ts";
 import { logInfo, logWarn } from "../logger.ts";
+import { logComponent } from "./presentation.ts";
 import {
   CACHE_DIR,
   resolveUvTarget,
@@ -166,7 +167,7 @@ async function extractUv(
 
     await runLogged("tar", ["-xzf", archivePath, "-C", tmpDir], {
       level: "DEBUG",
-      component: "uv",
+      component: logComponent("uv"),
     });
 
     // Tarball name is "uv-<triple>.tar.gz"; the inner dir is "uv-<triple>".

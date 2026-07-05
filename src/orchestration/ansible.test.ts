@@ -1,15 +1,23 @@
 import { join } from "@std/path";
+import { assertEquals } from "jsr:@std/assert";
 import { galaxyBootstrapRunContext } from "./ansible.ts";
 import {
   devOrchestrationAnsibleEnv,
   resolveDevOrchestrationLayout,
 } from "./dev-orchestration.ts";
 import {
+  setActiveInstallPresenter,
+} from "./install-presenter-context.ts";
+import { InstallPresenter } from "./install-presenter.ts";
+import { presentStatusLine } from "./presentation.ts";
+import {
   ANSIBLE_CFG,
   ANSIBLE_PLAYBOOK_CWD,
   ansibleEnv,
   DAEMON_ROOT,
   GALAXY_COLLECTIONS_DIR,
+  RABBITMQ_PLAYBOOK,
+  REDIS_PLAYBOOK,
 } from "./paths.ts";
 
 const VENDORED_COLLECTIONS_MARKER = "galaxy-collections";
@@ -103,5 +111,45 @@ Deno.test("galaxy collections install target matches cfg vendored path default",
     throw new Error(
       `expected GALAXY_COLLECTIONS_DIR to end with ${VENDORED_COLLECTIONS_MARKER}, got ${GALAXY_COLLECTIONS_DIR}`,
     );
+  }
+});
+
+Deno.test("setup playbook paths keep internal redis and rabbitmq identifiers", () => {
+  assertEquals(REDIS_PLAYBOOK.endsWith("redis-setup.yml"), true);
+  assertEquals(RABBITMQ_PLAYBOOK.endsWith("rabbitmq-setup.yml"), true);
+});
+
+Deno.test("converge setup status lines sanitize vendor tokens when presenter is active", () => {
+  const samples = [
+    "running redis-setup playbook",
+    "redis-setup complete",
+    "running rabbitmq-setup playbook",
+    "rabbitmq-setup complete",
+    "running daemon-converge playbook",
+  ];
+
+  setActiveInstallPresenter(null);
+  for (const line of samples) {
+    assertEquals(presentStatusLine(line), line, line);
+  }
+
+  const presenter = new InstallPresenter(false);
+  setActiveInstallPresenter(presenter);
+  try {
+    assertEquals(
+      presentStatusLine("running redis-setup playbook"),
+      "running cache-setup playbook",
+    );
+    assertEquals(
+      presentStatusLine("running rabbitmq-setup playbook"),
+      "running queue-setup playbook",
+    );
+    assertEquals(
+      presentStatusLine("running daemon-converge playbook"),
+      "running daemon-converge playbook",
+    );
+  } finally {
+    presenter.dispose();
+    setActiveInstallPresenter(null);
   }
 });

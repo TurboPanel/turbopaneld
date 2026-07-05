@@ -8,4 +8,4 @@
 
     - name: Confirm runtime
       ansible.builtin.debug:
-        msg: "Ansible orchestration runtime is operational"
+        msg: "Orchestration runtime is operational"

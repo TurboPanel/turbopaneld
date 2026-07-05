@@ -12,7 +12,7 @@
     system: true
   when: turbopanel_dev_user | default('') | length == 0
 
-- name: Ensure turbopanelc primary group for redis user
+- name: Ensure turbopanelc primary group for cache user
   ansible.builtin.group:
     name: "{{ redis_primary_group }}"
     gid: "{{ redis_primary_gid }}"
@@ -20,7 +20,7 @@
     system: true
   when: turbopanel_dev_user | default('') | length == 0
 
-- name: Ensure Redis service user (primary group turbopanelc, supplementary turbopanel)
+- name: Ensure cache service user (primary group turbopanelc, supplementary turbopanel)
   ansible.builtin.user:
     name: "{{ redis_user }}"
     uid: "{{ redis_uid }}"
@@ -32,7 +32,7 @@
     create_home: false
   when: turbopanel_dev_user | default('') | length == 0
 
-- name: Check whether instance user exists for Redis socket access
+- name: Check whether instance user exists for cache socket access
   ansible.builtin.getent:
     database: passwd
     key: "{{ redis_instance_user }}"
@@ -40,7 +40,7 @@
   failed_when: false
   when: turbopanel_dev_user | default('') | length == 0
 
-- name: Ensure instance user can access redis socket group (turbopanelc)
+- name: Ensure instance user can access cache socket group (turbopanelc)
   ansible.builtin.user:
     name: "{{ redis_instance_user }}"
     groups: "{{ redis_primary_group }}"
@@ -58,16 +58,16 @@
       Unsupported CPU architecture '{{ ansible_architecture }}'.
       TurboPanel supports 64-bit Linux only: aarch64 (arm64), x86_64 (amd64).
 
-- name: Resolve Redis .deb architecture
+- name: Resolve cache .deb architecture
   ansible.builtin.set_fact:
     redis_deb_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
 
-- name: Check vendored Redis binary
+- name: Check vendored cache binary
   ansible.builtin.stat:
     path: "{{ turbopanel_runtimes_dir }}/redis/{{ redis_version }}/bin/redis-server"
   register: _redis_pinned
 
-- name: Install Redis into runtimes directory
+- name: Install cache into runtimes directory
   when: not _redis_pinned.stat.exists
   ansible.builtin.shell: |
     set -euo pipefail
@@ -84,14 +84,14 @@
   args:
     creates: "{{ turbopanel_runtimes_dir }}/redis/{{ redis_version }}/bin/redis-server"
 
-- name: Point Redis current symlink at pinned version
+- name: Point cache current symlink at pinned version
   ansible.builtin.file:
     src: "{{ turbopanel_runtimes_dir }}/redis/{{ redis_version }}"
     dest: "{{ turbopanel_runtimes_dir }}/redis/current"
     state: link
     force: true
 
-- name: Ensure redis config directory exists
+- name: Ensure cache config directory exists
   ansible.builtin.file:
     path: "{{ turbopanel_config_dir }}/redis"
     state: directory
@@ -99,7 +99,7 @@
     group: "{{ turbopanel_group }}"
     mode: "0750"
 
-- name: Write redis.conf
+- name: Write cache configuration
   ansible.builtin.template:
     src: redis.conf.j2
     dest: "{{ turbopanel_config_dir }}/redis/redis.conf"
@@ -107,15 +107,15 @@
     group: "{{ turbopanel_group }}"
     mode: "0640"
 
-- name: Install Redis systemd unit
+- name: Install cache systemd unit
   ansible.builtin.template:
     src: turbopanel-redis.service.j2
     dest: "/etc/systemd/system/{{ redis_service_name }}.service"
     owner: root
     group: root
-    mode: "0644"
+    mode: "0640"
 
-- name: Enable memory overcommit for Redis (background save / replication)
+- name: Enable memory overcommit for cache (background save / replication)
   ansible.posix.sysctl:
     name: vm.overcommit_memory
     value: "1"
@@ -124,7 +124,7 @@
     reload: true
     sysctl_file: /etc/sysctl.d/99-turbopanel-redis.conf
 
-- name: Ensure Redis service desired state
+- name: Ensure cache service desired state
   ansible.builtin.systemd:
     name: "{{ redis_service_name }}"
     daemon_reload: true

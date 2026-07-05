@@ -1,4 +1,4 @@
-- name: TurboPanel RabbitMQ setup
+- name: TurboPanel queue setup
   hosts: localhost
   connection: local
   become: true

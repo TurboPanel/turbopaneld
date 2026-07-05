@@ -5,7 +5,15 @@ import {
 } from "./ansible.ts";
 import type { AnsibleEventHandler } from "./ansible-events.ts";
 import { ensureOrchestrationTree } from "./bundle-extract.ts";
-import { createInstallerTui } from "./installer-tui.ts";
+import { sanitizeStatusLine } from "./presentation.ts";
+import {
+  InstallerPresentedFailure,
+  setActiveInstallPresenter,
+} from "./install-presenter-context.ts";
+import {
+  createInstallPresenter,
+  InstallEventPresenter,
+} from "./installer-tui.ts";
 import { ensurePython } from "./python.ts";
 import { ensureUv } from "./uv.ts";
 import { resolveInstanceConfig } from "../instance/paths.ts";
@@ -140,10 +148,24 @@ export interface RunInstallerOptions {
   tunnelToken?: string;
 }
 
+function resolveInstallerFailureMessage(
+  failureDetail: string | null,
+  err: unknown,
+): string {
+  if (failureDetail) {
+    return sanitizeStatusLine(failureDetail) || failureDetail;
+  }
+  const raw = err instanceof Error ? err.message : String(err);
+  return sanitizeStatusLine(raw) || "orchestration failed";
+}
+
 export async function runInstaller(opts: RunInstallerOptions): Promise<void> {
   const varsFile = await Deno.makeTempFile();
-  const tui = createInstallerTui();
-  tui?.start();
+  const presenter = createInstallPresenter();
+  const events = new InstallEventPresenter(presenter);
+  setActiveInstallPresenter(presenter);
+  presenter.beginStep("Running daemon provisioning…");
+  events.beginStep();
   try {
     const lines: string[] = [
       `turbopanel_instance_url: ${opts.instanceUrl}`,
@@ -169,7 +191,7 @@ export async function runInstaller(opts: RunInstallerOptions): Promise<void> {
     await Deno.writeTextFile(varsFile, `${lines.join("\n")}\n`);
 
     const onEvent: AnsibleEventHandler = (event) => {
-      tui?.onEvent(event);
+      events.onEvent(event);
     };
 
     await runLocalPlaybook(
@@ -177,17 +199,21 @@ export async function runInstaller(opts: RunInstallerOptions): Promise<void> {
       ["-e", `@${varsFile}`],
       onEvent,
       undefined,
-      tui !== null,
+      true,
+      (stream, line) => {
+        events.onRawLine(stream, line);
+      },
     );
-    tui?.finish(true, "TurboPanel daemon installed successfully");
-    logInfo("installer", "daemon provisioning complete");
+    presenter.completeStep(
+      true,
+      "TurboPanel daemon provisioning complete",
+    );
   } catch (err) {
-    tui?.finish(
-      false,
-      err instanceof Error ? err.message : String(err),
-    );
-    throw err;
+    presenter.fail(resolveInstallerFailureMessage(events.failureDetail, err));
+    throw new InstallerPresentedFailure();
   } finally {
+    presenter.dispose();
+    setActiveInstallPresenter(null);
     try {
       await Deno.remove(varsFile);
     } catch {
@@ -195,3 +221,5 @@ export async function runInstaller(opts: RunInstallerOptions): Promise<void> {
     }
   }
 }
+
+export { InstallerPresentedFailure } from "./install-presenter-context.ts";

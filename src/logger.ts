@@ -1,4 +1,57 @@
+import {
+  getActiveInstallPresenter,
+} from "./orchestration/install-presenter-context.ts";
+import {
+  relabelComponent,
+  sanitizeStatusLine,
+  shouldDropPresenterLogLine,
+} from "./orchestration/presentation.ts";
+
 const encoder = new TextEncoder();
+
+type LogLevel = "DEBUG" | "INFO" | "WARN" | "ERROR";
+
+const PRESENTER_ROUTED_COMPONENTS = new Set([
+  "orchestration",
+  "ansible",
+  "ansible-galaxy",
+  "ansible-core",
+  "galaxy",
+  "uv",
+  "python",
+]);
+
+function shouldRouteLogThroughPresenter(component: string): boolean {
+  if (!getActiveInstallPresenter()) return false;
+  if (PRESENTER_ROUTED_COMPONENTS.has(component)) return true;
+  return relabelComponent(component) === "orchestration" ||
+    relabelComponent(component) === "runtime";
+}
+
+function routeLogThroughPresenter(
+  level: LogLevel,
+  message: string,
+): boolean {
+  const presenter = getActiveInstallPresenter();
+  if (!presenter) return false;
+
+  if (level === "DEBUG") {
+    return true;
+  }
+
+  const sanitized = sanitizeStatusLine(message);
+  if (!sanitized) {
+    return true;
+  }
+
+  presenter.pushDetail(message);
+
+  if (!shouldDropPresenterLogLine(message)) {
+    presenter.pushStatus(message);
+  }
+
+  return true;
+}
 
 /** Chained replace pattern Sonar S5145 recognizes for log-injection sanitization. */
 export function stripLogInjection(text: string): string {
@@ -29,7 +82,7 @@ function splitMessageLines(message: string): string[] {
 }
 
 function formatStructuredLine(
-  level: "DEBUG" | "INFO" | "WARN" | "ERROR",
+  level: LogLevel,
   component: string,
   message: string,
 ): string {
@@ -37,11 +90,17 @@ function formatStructuredLine(
 }
 
 export function log(
-  level: "DEBUG" | "INFO" | "WARN" | "ERROR",
+  level: LogLevel,
   component: string,
   ...parts: unknown[]
 ): void {
   const message = formatParts(parts);
+
+  if (shouldRouteLogThroughPresenter(component)) {
+    routeLogThroughPresenter(level, message);
+    return;
+  }
+
   const out = level === "INFO" || level === "DEBUG" ? Deno.stdout : Deno.stderr;
 
   for (const line of splitMessageLines(message)) {

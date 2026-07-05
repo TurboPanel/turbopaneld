@@ -1,5 +1,22 @@
 import { log } from "../logger.ts";
+import { getActiveInstallPresenter } from "./install-presenter-context.ts";
 import { CACHE_DIR, PYTHON_RUNTIME_DIR, RUNTIME_BIN_DIR } from "./paths.ts";
+
+function presenterLineHandlers(): Pick<
+  RunStreamingOptions,
+  "onStdoutLine" | "onStderrLine"
+> | null {
+  const presenter = getActiveInstallPresenter();
+  if (!presenter) return null;
+  return {
+    onStdoutLine: (line) => {
+      presenter.pushStatus(line);
+    },
+    onStderrLine: (line) => {
+      presenter.pushStatus(line);
+    },
+  };
+}
 
 export interface RunOptions {
   /** Working directory for the command. */
@@ -177,12 +194,17 @@ export async function runLogged(
   options: RunLoggedOptions,
 ): Promise<RunStreamingResult> {
   const { cwd, env, level, component, stderrLevel = level } = options;
+  const presented = presenterLineHandlers();
 
   const result = await runStreamingLines(cmd, args, {
     cwd,
     env,
-    onStdoutLine: (line) => log(level, component, line),
-    onStderrLine: (line) => log(stderrLevel, component, line),
+    onStdoutLine: presented
+      ? presented.onStdoutLine
+      : (line) => log(level, component, line),
+    onStderrLine: presented
+      ? presented.onStderrLine
+      : (line) => log(stderrLevel, component, line),
   });
 
   if (!result.success) {
@@ -200,6 +222,29 @@ export async function runOrThrow(
   args: string[],
   options: RunOptions = {},
 ): Promise<RunResult> {
+  const { cwd, env } = options;
+  const presented = presenterLineHandlers();
+
+  if (presented) {
+    const result = await runStreamingLines(cmd, args, {
+      cwd,
+      env,
+      onStdoutLine: presented.onStdoutLine,
+      onStderrLine: presented.onStderrLine,
+    });
+    if (!result.success) {
+      throw new Error(
+        `Command failed (exit ${result.code}): ${cmd} ${args.join(" ")}`,
+      );
+    }
+    return {
+      code: result.code,
+      success: result.success,
+      stdout: "",
+      stderr: "",
+    };
+  }
+
   const result = await run(cmd, args, options);
   if (!result.success) {
     const detail = result.stderr.trim() || result.stdout.trim();
