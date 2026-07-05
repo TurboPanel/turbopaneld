@@ -178,7 +178,7 @@ async function extractUv(
       ] as const
     ) {
       await Deno.copyFile(src, dst);
-      // Vendor CLIs under /opt/turbopanel/vendor must be executable by service users.
+      // Vendored CLIs must be executable by service users (group/other rx).
       await Deno.chmod(dst, INSTALLED_VENDOR_BINARY_MODE); // NOSONAR typescript:S2612
     }
   } finally {
