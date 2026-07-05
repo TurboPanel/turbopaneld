@@ -52,9 +52,9 @@
     - role: daemon-prereqs
     - role: turbopanel-user
     - role: daemon-layout
-    # Deno is required for the JS-fallback ExecStart path and for any tooling
-    # that shells out to deno on managed hosts.
+    # Deno is only required for the JS-fallback ExecStart path.
     - role: deno-runtime
+      when: turbopanel_daemon_exec_mode | default('native') == 'js'
     - role: daemon-logs
     - role: daemon-config
     - role: daemon-launch

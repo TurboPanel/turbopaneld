@@ -740,22 +740,26 @@ else
 	tp_print_step "~" "Native binary not executable — using JS fallback (deno run turbopaneld.js)"
 fi
 
-tp_print_step "▸" "Installing Deno runtime…"
-if ! tp_install_deno_runtime; then
-	tp_print_error "Failed to install Deno runtime"
-	exit 1
+if [ "$DAEMON_EXEC_MODE" = "js" ]; then
+	tp_print_step "▸" "Installing Deno runtime…"
+	if ! tp_install_deno_runtime; then
+		tp_print_error "Failed to install Deno runtime"
+		exit 1
+	fi
+	DENO_BIN="$RUNTIMES_DIR/deno/bin/deno"
+	tp_print_ok "Deno ${TP_DENO_VERSION} ready"
+else
+	tp_print_step "–" "Skipping Deno runtime (native binary)"
 fi
-DENO_BIN="$RUNTIMES_DIR/deno/bin/deno"
-tp_print_ok "Deno ${TP_DENO_VERSION} ready"
 
 tp_print_step "▸" "Bootstrapping orchestration runtimes…"
 if [ "$DAEMON_EXEC_MODE" = "native" ]; then
 	"$(tp_daemon_binary_path)" bootstrap-orchestration
 else
 	HOME="$INSTALL_ROOT" "$DENO_BIN" run --allow-all "$(tp_daemon_js_fallback_path)" bootstrap-orchestration
+	# Warm the JS fallback module cache so first start is fast/offline.
+	HOME="$INSTALL_ROOT" "$DENO_BIN" cache "$(tp_daemon_js_fallback_path)" >/dev/null 2>&1 || true
 fi
-# Warm the JS fallback module cache so first start is fast/offline.
-HOME="$INSTALL_ROOT" "$DENO_BIN" cache "$(tp_daemon_js_fallback_path)" >/dev/null 2>&1 || true
 
 if [ ! -f "$ORCHESTRATION_DIR/ansible.cfg" ]; then
 	tp_print_error "Bootstrap did not leave orchestration/ansible.cfg in place"
@@ -787,7 +791,9 @@ trap 'rm -f "$VARS_FILE"' EXIT
 	printf 'turbopanel_daemon_bin: %s\n' "$(tp_daemon_binary_path)"
 	printf 'turbopanel_daemon_js: %s\n' "$(tp_daemon_js_fallback_path)"
 	printf 'turbopanel_daemon_workdir: %s\n' "$INSTALL_ROOT"
-	printf 'turbopanel_daemon_deno_bin: %s\n' "$DENO_BIN"
+	if [ "$DAEMON_EXEC_MODE" = "js" ]; then
+		printf 'turbopanel_daemon_deno_bin: %s\n' "$DENO_BIN"
+	fi
 	printf 'turbopanel_service_name: %s\n' "turbopaneld"
 	case "$HOST_URL" in
 		http://*) ;;

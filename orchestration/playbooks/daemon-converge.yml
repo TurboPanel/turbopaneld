@@ -51,6 +51,7 @@
   roles:
     - role: runtime-sockets
     - role: deno-runtime
+      when: turbopanel_daemon_exec_mode == 'js'
     - role: daemon-logs
     - role: daemon-prereqs
 
