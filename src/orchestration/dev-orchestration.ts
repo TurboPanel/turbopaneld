@@ -61,7 +61,11 @@ export function resolveDevOrchestrationDir(
   const override = env.TURBOPANEL_DEV_ORCHESTRATION_DIR?.trim() ??
     readEnv("TURBOPANEL_DEV_ORCHESTRATION_DIR")?.trim();
   if (override && override.length > 0) {
-    return override.replace(/\/+$/, "");
+    let end = override.length
+    while (end > 0 && (override.codePointAt(end - 1) ?? 0) === 47) {
+      end--
+    }
+    return end === 0 ? "/" : override.slice(0, end);
   }
   const daemonRoot = resolveDaemonRoot(devOrchestrationEnv(env));
   return join(daemonRoot, DEV_ORCHESTRATION_SUBDIR);

@@ -88,6 +88,7 @@ tp_js_release_filename() {
 	else
 		printf 'turbopaneld.js.tar.zst'
 	fi
+	return 0
 }
 
 # Map uname -m to channel.json binaryArtifacts keys.
@@ -229,6 +230,7 @@ tp_stage_release_native_binary() {
 	_native_src="$3"
 	_bin_dir="$_staging/$_home/bin"
 	install -m 0755 "$_native_src" "$_bin_dir/$(tp_daemon_binary_name)"
+	return 0
 }
 
 tp_stage_release_js_bundle() {
@@ -243,6 +245,7 @@ tp_stage_release_js_bundle() {
 	if [ -n "$_orchestration_src" ]; then
 		tp_stage_release_orchestration "$_staging" "$_home" "$_orchestration_src"
 	fi
+	return 0
 }
 
 # Legacy helper kept for callers that stage both native + JS into one tree.
@@ -366,11 +369,10 @@ tp_verify_release_root() {
 		fi
 	fi
 
-	if [ "$_mode" = "full" ] || [ "$_mode" = "orchestration" ]; then
-		if [ ! -f "$_prod/share/orchestration/ansible.cfg" ]; then
-			echo "tp_verify_release_root: missing $_prod/share/orchestration/ansible.cfg" >&2
-			_fail=1
-		fi
+	if { [ "$_mode" = "full" ] || [ "$_mode" = "orchestration" ]; } \
+		&& [ ! -f "$_prod/share/orchestration/ansible.cfg" ]; then
+		echo "tp_verify_release_root: missing $_prod/share/orchestration/ansible.cfg" >&2
+		_fail=1
 	fi
 
 	if [ "$_fail" -ne 0 ]; then
@@ -440,6 +442,7 @@ tp_install_verified_channel_release() {
 	_cleanup() {
 		rm -f "$_binary_archive" "$_js_archive"
 		rm -rf "$_staging"
+		return 0
 	}
 	trap _cleanup EXIT INT HUP TERM
 

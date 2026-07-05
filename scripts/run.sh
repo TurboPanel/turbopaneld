@@ -566,12 +566,11 @@ for _tp_host_cmd in sudo curl tar python3; do
 		_tp_host_missing="$_tp_host_missing $_tp_host_cmd"
 	fi
 done
-if [ -n "$_tp_host_missing" ]; then
-	if ! apt-get update -qq 2>/dev/null \
-		|| ! apt-get install -y -qq sudo curl ca-certificates tar python3-minimal 2>/dev/null; then
-		tp_print_error "host prerequisites failed (need:${_tp_host_missing})"
-		exit 1
-	fi
+if [ -n "$_tp_host_missing" ] \
+	&& { ! apt-get update -qq 2>/dev/null \
+		|| ! apt-get install -y -qq sudo curl ca-certificates tar python3-minimal 2>/dev/null; }; then
+	tp_print_error "host prerequisites failed (need:${_tp_host_missing})"
+	exit 1
 fi
 if ! command -v curl >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1 \
 	|| ! command -v python3 >/dev/null 2>&1; then

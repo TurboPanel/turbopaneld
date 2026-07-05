@@ -10,6 +10,14 @@ import zipfile
 from pathlib import Path
 
 
+def safe_path(path: Path, base_dir: Path) -> Path:
+    resolved = path.resolve()
+    base = base_dir.resolve()
+    if resolved != base and not str(resolved).startswith(str(base) + os.sep):
+        raise ValueError(f"path {path!r} is outside the allowed directory")
+    return resolved
+
+
 def main() -> int:
     if len(sys.argv) != 5:
         print(
@@ -18,10 +26,15 @@ def main() -> int:
         )
         return 2
 
-    archive = Path(sys.argv[1])
-    version_dir = Path(sys.argv[2])
-    current_link = Path(sys.argv[3])
-    bin_link = Path(sys.argv[4])
+    base_dir = Path.cwd()
+    try:
+        archive = safe_path(Path(sys.argv[1]), base_dir)
+        version_dir = safe_path(Path(sys.argv[2]), base_dir)
+        current_link = safe_path(Path(sys.argv[3]), base_dir)
+        bin_link = safe_path(Path(sys.argv[4]), base_dir)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 1
 
     version_dir.parent.mkdir(parents=True, exist_ok=True)
     bin_link.parent.mkdir(parents=True, exist_ok=True)
