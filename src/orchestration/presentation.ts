@@ -107,8 +107,7 @@ function isBareTempOrVendorPathEcho(line: string): boolean {
   }
   return (
     /\/tmp(?:\/|$)/.test(trimmed) ||
-    /\/vendor(?:\/|$)/.test(trimmed) ||
-    trimmed.startsWith("/opt/turbopanel/vendor")
+    /\/vendor(?:\/|$)/.test(trimmed)
   );
 }
 
