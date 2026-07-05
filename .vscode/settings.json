@@ -1,4 +1,5 @@
 {
+    "sonarlint.pathToNodeExecutable": "/opt/turbopanel/vendor/node/current/bin/node",
     "sonarlint.connectedMode.project": {
         "connectionId": "turbopanel",
         "projectKey": "turbopanel_turbopaneld"
