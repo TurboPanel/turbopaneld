@@ -1,4 +1,5 @@
 import { getBuildInfo } from "./src/build-info.ts";
+import { sanitizeForLog } from "./src/logger.ts";
 import { runBootstrapOrchestration } from "./src/orchestration/bootstrap-once.ts";
 import { runInstaller } from "./src/orchestration/setup.ts";
 
@@ -14,8 +15,7 @@ if (Deno.args[0] === "bootstrap-orchestration") {
   try {
     await runBootstrapOrchestration();
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`[bootstrap] ${message}`);
+    console.error(`[bootstrap] ${sanitizeForLog(err)}`);
     Deno.exit(1);
   }
   Deno.exit(0);
@@ -67,7 +67,7 @@ if (Deno.args[0] === "run-installer") {
         break;
       }
       default:
-        console.error(`[installer] unknown flag: ${arg}`);
+        console.error(`[installer] unknown flag: ${sanitizeForLog(arg)}`);
         Deno.exit(1);
     }
   }
@@ -80,8 +80,7 @@ if (Deno.args[0] === "run-installer") {
   try {
     await runInstaller({ instanceUrl, start, instanceCa, tunnelToken });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`[installer] ${message}`);
+    console.error(`[installer] ${sanitizeForLog(err)}`);
     Deno.exit(1);
   }
   Deno.exit(0);

@@ -14,6 +14,9 @@ import {
   UVX_BIN,
 } from "./paths.ts";
 
+/** Mode for vendored CLI binaries installed under vendor (owner rwx, group/other rx). */
+const INSTALLED_VENDOR_BINARY_MODE = 0o755;
+
 async function fileExists(path: string): Promise<boolean> {
   try {
     await Deno.stat(path);
@@ -31,8 +34,8 @@ async function installedUvVersion(): Promise<string | null> {
     const result = await run(UV_BIN, ["--version"], { stream: false });
     if (!result.success) return null;
     // Output looks like: "uv 0.11.19"
-    const match = result.stdout.trim().match(/uv\s+(\S+)/);
-    return match ? match[1] : null;
+    const versionMatch = /^uv\s+(\S+)/.exec(result.stdout.trim());
+    return versionMatch?.[1] ?? null;
   } catch {
     return null;
   }
@@ -175,7 +178,8 @@ async function extractUv(
       ] as const
     ) {
       await Deno.copyFile(src, dst);
-      await Deno.chmod(dst, 0o755);
+      // Vendor CLIs under /opt/turbopanel/vendor must be executable by service users.
+      await Deno.chmod(dst, INSTALLED_VENDOR_BINARY_MODE); // NOSONAR typescript:S2612
     }
   } finally {
     await Deno.remove(tmpDir, { recursive: true }).catch(() => {});

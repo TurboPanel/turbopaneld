@@ -1,11 +1,26 @@
 const encoder = new TextEncoder();
 
+/** Chained replace pattern Sonar S5145 recognizes for log-injection sanitization. */
+export function stripLogInjection(text: string): string {
+  return text.replaceAll("\n", "_").replaceAll("\r", "_").replaceAll("\t", "_");
+}
+
+export function sanitizeForLog(value: unknown): string {
+  if (value instanceof Error) return stripLogInjection(value.message);
+  if (typeof value === "string") return stripLogInjection(value);
+  try {
+    return stripLogInjection(JSON.stringify(value) ?? String(value));
+  } catch {
+    return stripLogInjection(String(value));
+  }
+}
+
 function formatParts(parts: unknown[]): string {
-  return parts.map((part) => String(part)).join(" ");
+  return parts.map(String).join(" ");
 }
 
 function splitMessageLines(message: string): string[] {
-  const normalized = message.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const normalized = message.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
   const lines = normalized.split("\n");
   if (lines.length > 0 && lines.at(-1) === "") {
     lines.pop();
