@@ -5,7 +5,7 @@
  * Two guarantees, both cheap enough to run on every change:
  *
  *  1. The FHS production tree resolves to the canonical absolute paths
- *     (`bin/turbopaneld`, `bin/turbopaneld.js`, `bin/turbopanel-update`,
+ *     (`bin/turbopaneld`, optional `bin/turbopaneld.js`,
  *     `share/orchestration`, `share/ui`, `vendor`, `/etc/turbopanel`,
  *     `/var/lib/turbopanel`, `/var/log/turbopanel`, `/run/turbopanel`).
  *
@@ -93,11 +93,6 @@ expect(
   join(prod.binDir, "turbopaneld.js"),
   "/opt/turbopanel/bin/turbopaneld.js",
 );
-expect(
-  "update helper",
-  join(prod.binDir, "turbopanel-update"),
-  "/opt/turbopanel/bin/turbopanel-update",
-);
 
 if (prod.orchestrationDir.includes("/platform/")) {
   failures.push(
@@ -164,7 +159,7 @@ async function* walk(dir: string): AsyncGenerator<string> {
 }
 
 // Both forbidden-reference checks scan the same curated managed-install roots
-// so a hardcoded dev checkout path in main.ts, scripts/run.sh, scripts/update.sh,
+// so a hardcoded dev checkout path in main.ts, scripts/run.sh,
 // or a production playbook/template cannot slip through CI. Each pattern keeps
 // its own allowlist of files that legitimately name the forbidden string.
 const PRODUCTION_SCAN_ROOTS = ["src", "scripts", "orchestration", "main.ts"];

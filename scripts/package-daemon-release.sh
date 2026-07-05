@@ -4,7 +4,7 @@
 # Four zstd-compressed tar artifacts:
 #   turbopaneld-amd64.tar.zst  → opt/turbopanel/bin/turbopaneld
 #   turbopaneld-arm64.tar.zst  → opt/turbopanel/bin/turbopaneld
-#   turbopaneld.js.tar.zst     → opt/turbopanel/bin/{turbopaneld.js,turbopanel-update}
+#   turbopaneld.js.tar.zst     → opt/turbopanel/bin/turbopaneld.js
 #   orchestration.tar.zst      → opt/turbopanel/share/orchestration/…
 #
 # Installers resolve the host CPU and download the matching native binary plus
@@ -25,17 +25,11 @@ BUILD="$DIST/.build"
 VERSION="${TURBOPANEL_RELEASE_VERSION:-}"
 PROD_HOME="$(tp_prod_home)"
 JS_SRC="$DIST/$(tp_daemon_js_fallback_name)"
-UPDATE_HELPER_SRC="$ROOT/scripts/update.sh"
 ORCH_ARCHIVE="$DIST/$(tp_orchestration_release_filename "$VERSION")"
 mkdir -p "$BUILD"
 
 if [ ! -s "$JS_SRC" ]; then
 	echo "package-daemon-release.sh: missing $JS_SRC (run deno task bundle:js)" >&2
-	exit 1
-fi
-
-if [ ! -s "$UPDATE_HELPER_SRC" ]; then
-	echo "package-daemon-release.sh: missing $UPDATE_HELPER_SRC (managed update helper)" >&2
 	exit 1
 fi
 
@@ -83,7 +77,7 @@ package_js_bundle() {
 	_out_name="$(tp_js_release_filename "$VERSION")"
 
 	mkdir -p "$_staging/$PROD_HOME/bin"
-	tp_stage_release_js_bundle "$_staging" "$PROD_HOME" "$JS_SRC" "$UPDATE_HELPER_SRC"
+	tp_stage_release_js_bundle "$_staging" "$PROD_HOME" "$JS_SRC"
 
 	if ! tp_verify_release_root "$_staging" "js"; then
 		echo "package-daemon-release.sh: JS bundle verification failed" >&2

@@ -154,7 +154,7 @@ async function replaceDaemonSourceTree(
 export async function applyDevSyncTarball(bytes: Uint8Array): Promise<void> {
   // Hard-disable dev-sync on installs without an editable source checkout
   // (co-located dev daemon, managed / compiled / JS-fallback). There is no
-  // separate managed sync path — those installs update via run.sh / update.sh.
+  // separate managed sync path — those installs update via run.sh reconcile.
   const source = resolveDevSyncSourceRoot();
   if (!source.ok) {
     throw new Error(source.reason);

@@ -1,18 +1,17 @@
 # Shared TurboPanel daemon release artifact naming and verified-install helpers.
-# POSIX sh — sourced by update.sh (manual binary-only swap) and
-# scripts/package-daemon-release.sh (release packager).
+# POSIX sh — sourced by scripts/package-daemon-release.sh (release packager).
 #
 # Release layout (mirrors production FHS install):
 #   /opt/turbopanel/bin/turbopaneld          native compiled binary (arch-specific)
-#   /opt/turbopanel/bin/turbopaneld.js       bundled JS fallback (deno run)
-#   /opt/turbopanel/bin/turbopanel-update    managed update helper (scripts/update.sh)
+#   /opt/turbopanel/bin/turbopaneld.js       bundled JS fallback (deno run; optional)
 #   /opt/turbopanel/share/orchestration/…    Ansible playbooks + roles
 #
 # Published artifacts (dist/ after package:release) — installers download the
-# host-arch native binary, shared JS bundle, and orchestration tree:
+# host-arch native binary and orchestration tree always; the shared JS bundle
+# only when the native binary cannot execute:
 #   turbopaneld-amd64.tar.zst  → opt/turbopanel/bin/turbopaneld
 #   turbopaneld-arm64.tar.zst  → opt/turbopanel/bin/turbopaneld
-#   turbopaneld.js.tar.zst     → opt/turbopanel/bin/turbopaneld.js (+ turbopanel-update)
+#   turbopaneld.js.tar.zst     → opt/turbopanel/bin/turbopaneld.js
 #   orchestration.tar.zst      → opt/turbopanel/share/orchestration/…
 #
 # Manifest parsing helpers (tp_resolve_channel_manifest, tp_resolve_linux_arch, …)
@@ -31,17 +30,6 @@ tp_daemon_js_fallback_name() {
 	printf 'turbopaneld.js'
 }
 
-# Managed update helper installed into the FHS bin dir so nodes can self-refresh
-# without a daemon source checkout (see scripts/update.sh).
-tp_daemon_update_helper_name() {
-	printf 'turbopanel-update'
-}
-
-tp_daemon_linux_arch_binary_name() {
-	_arch="$1"
-	printf 'turbopaneld-linux-%s' "$_arch"
-}
-
 tp_daemon_binary_path() {
 	_home="${1:-$(tp_prod_home)}"
 	printf '%s/bin/%s' "$_home" "$(tp_daemon_binary_name)"
@@ -52,9 +40,9 @@ tp_daemon_js_fallback_path() {
 	printf '%s/bin/%s' "$_home" "$(tp_daemon_js_fallback_name)"
 }
 
-tp_daemon_update_helper_path() {
-	_home="${1:-$(tp_prod_home)}"
-	printf '%s/bin/%s' "$_home" "$(tp_daemon_update_helper_name)"
+tp_daemon_linux_arch_binary_name() {
+	_arch="$1"
+	printf 'turbopaneld-linux-%s' "$_arch"
 }
 
 tp_daemon_orchestration_dir() {
@@ -241,10 +229,8 @@ tp_stage_release_js_bundle() {
 	_staging="$1"
 	_home="$2"
 	_js_src="$3"
-	_update_src="$4"
 	_bin_dir="$_staging/$_home/bin"
 	install -m 0644 "$_js_src" "$_bin_dir/$(tp_daemon_js_fallback_name)"
-	install -m 0755 "$_update_src" "$_bin_dir/$(tp_daemon_update_helper_name)"
 	return 0
 }
 
@@ -256,15 +242,6 @@ tp_stage_release_binaries() {
 	_js_src="$4"
 	tp_stage_release_native_binary "$_staging" "$_home" "$_native_src"
 	install -m 0644 "$_js_src" "$_staging/$_home/bin/$(tp_daemon_js_fallback_name)"
-}
-
-# Stage the managed update helper (scripts/update.sh) into the release bin dir as
-# turbopanel-update so clean-package installs get a checkout-free update entrypoint.
-tp_stage_release_update_helper() {
-	_staging="$1"
-	_home="$2"
-	_update_src="$3"
-	install -m 0755 "$_update_src" "$_staging/$_home/bin/$(tp_daemon_update_helper_name)"
 }
 
 tp_stage_release_orchestration() {
@@ -288,8 +265,8 @@ tp_prune_release_orchestration_tree() {
 	done
 }
 
-# _mode: "full" (bin native+js+update+orch), "binary" (native only), "js"
-# (turbopaneld.js + update helper), or "orchestration" (share/orchestration only).
+# _mode: "full" (bin native+js+orch), "binary" (native only), "js"
+# (turbopaneld.js only), or "orchestration" (share/orchestration only).
 tp_verify_release_root() {
 	_root="$1"
 	_mode="${2:-full}"
@@ -345,10 +322,6 @@ tp_verify_release_root() {
 			echo "tp_verify_release_root: missing $_prod/bin/$(tp_daemon_js_fallback_name)" >&2
 			_fail=1
 		fi
-		if [ ! -f "$_prod/bin/$(tp_daemon_update_helper_name)" ]; then
-			echo "tp_verify_release_root: missing $_prod/bin/$(tp_daemon_update_helper_name)" >&2
-			_fail=1
-		fi
 	elif [ "$_mode" = "full" ]; then
 		if [ ! -f "$_prod/bin/$(tp_daemon_binary_name)" ]; then
 			echo "tp_verify_release_root: missing $_prod/bin/$(tp_daemon_binary_name)" >&2
@@ -356,10 +329,6 @@ tp_verify_release_root() {
 		fi
 		if [ ! -f "$_prod/bin/$(tp_daemon_js_fallback_name)" ]; then
 			echo "tp_verify_release_root: missing $_prod/bin/$(tp_daemon_js_fallback_name)" >&2
-			_fail=1
-		fi
-		if [ ! -f "$_prod/bin/$(tp_daemon_update_helper_name)" ]; then
-			echo "tp_verify_release_root: missing $_prod/bin/$(tp_daemon_update_helper_name)" >&2
 			_fail=1
 		fi
 	fi
@@ -422,8 +391,9 @@ tp_download_verified_artifact() {
 	return 0
 }
 
-# Download the host-arch native binary, shared JS bundle, and orchestration tree
-# from the channel manifest and install into the production FHS layout.
+# Download native binary, orchestration tree, and optional JS bundle from the
+# channel manifest and install into the production FHS layout. Callers that
+# need native-only installs should omit the JS download/install steps.
 tp_install_verified_channel_release() {
 	_binary_url="$1"
 	_binary_sha256="$2"
@@ -489,9 +459,7 @@ tp_install_verified_channel_release() {
 	install -m 0644 \
 		"$_js_staging/$_home/bin/$(tp_daemon_js_fallback_name)" \
 		"$_home/bin/$(tp_daemon_js_fallback_name)"
-	install -m 0755 \
-		"$_js_staging/$_home/bin/$(tp_daemon_update_helper_name)" \
-		"$_home/bin/$(tp_daemon_update_helper_name)"
+	rm -f "$_home/bin/turbopanel-update"
 	rm -rf "$_home/share/orchestration"
 	cp -a "$_orchestration_staging/$_home/share/orchestration" "$_home/share/"
 

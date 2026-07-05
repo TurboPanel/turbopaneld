@@ -3,10 +3,10 @@
 # (301 redirect) and at /run.sh by Caddy in co-located dev.
 #
 # Fetches split release artifacts from the channel manifest at
-# https://dl.trbp.nl/channels.json (host-arch native binary + shared JS bundle
-# + orchestration tree), installs the production FHS layout
-# (bin/turbopaneld, bin/turbopaneld.js, share/orchestration/), probes native
-# binary executability, bootstraps orchestration runtimes, and runs
+# https://dl.trbp.nl/channels.json (host-arch native binary + orchestration tree;
+# JS bundle only when the native binary cannot execute), installs the production
+# FHS layout (bin/turbopaneld, optional bin/turbopaneld.js, share/orchestration/),
+# probes native binary executability, bootstraps orchestration runtimes, and runs
 # daemon-install.yml via Ansible (turbopaneld.service with native or JS fallback).
 #
 # Config: /etc/turbopanel  State: /var/lib/turbopanel  Runtime: /run/turbopanel
@@ -18,7 +18,6 @@
 tp_prod_home() { printf '/opt/turbopanel'; }
 tp_daemon_binary_name() { printf 'turbopaneld'; }
 tp_daemon_js_fallback_name() { printf 'turbopaneld.js'; }
-tp_daemon_update_helper_name() { printf 'turbopanel-update'; }
 tp_daemon_binary_path() {
 	_home="${1:-$(tp_prod_home)}"
 	printf '%s/bin/%s' "$_home" "$(tp_daemon_binary_name)"
@@ -28,10 +27,6 @@ tp_daemon_binary_path() {
 tp_daemon_js_fallback_path() {
 	_home="${1:-$(tp_prod_home)}"
 	printf '%s/bin/%s' "$_home" "$(tp_daemon_js_fallback_name)"
-}
-tp_daemon_update_helper_path() {
-	_home="${1:-$(tp_prod_home)}"
-	printf '%s/bin/%s' "$_home" "$(tp_daemon_update_helper_name)"
 }
 
 tp_resolve_linux_arch() {
@@ -163,31 +158,34 @@ tp_download_verified_artifact() {
 	return 0
 }
 
-tp_install_verified_release() {
+tp_remove_js_fallback_binaries() {
+	_home="$(tp_prod_home)"
+	_js="$(tp_daemon_js_fallback_path "$_home")"
+	if [ -e "$_js" ]; then
+		rm -f "$_js"
+	fi
+	# Legacy installs may still have the retired update helper — remove it.
+	rm -f "$_home/bin/turbopanel-update"
+}
+
+tp_install_verified_binary_and_orchestration() {
 	_home="$(tp_prod_home)"
 	_binary_name="$(tp_daemon_binary_name)"
-	_js_name="$(tp_daemon_js_fallback_name)"
-	_update_name="$(tp_daemon_update_helper_name)"
 	_binary_archive=""
-	_js_archive=""
 	_orchestration_archive=""
 	_staging=""
 
 	_cleanup() {
-		rm -f "$_binary_archive" "$_js_archive" "$_orchestration_archive"
+		rm -f "$_binary_archive" "$_orchestration_archive"
 		rm -rf "$_staging"
 	}
 	trap _cleanup EXIT INT HUP TERM
 
 	_binary_archive="$(mktemp)"
-	_js_archive="$(mktemp)"
 	_orchestration_archive="$(mktemp)"
 	_staging="$(mktemp -d)"
 
 	if ! tp_download_verified_artifact "$_binary_artifact_url" "$_binary_artifact_sha256" "$_binary_archive"; then
-		return 1
-	fi
-	if ! tp_download_verified_artifact "$_js_fallback_artifact_url" "$_js_fallback_artifact_sha256" "$_js_archive"; then
 		return 1
 	fi
 	if ! tp_download_verified_artifact "$_orchestration_artifact_url" "$_orchestration_artifact_sha256" "$_orchestration_archive"; then
@@ -195,14 +193,10 @@ tp_install_verified_release() {
 	fi
 
 	_binary_staging="$_staging/binary"
-	_js_staging="$_staging/js"
 	_orchestration_staging="$_staging/orchestration"
-	mkdir -p "$_binary_staging" "$_js_staging" "$_orchestration_staging"
+	mkdir -p "$_binary_staging" "$_orchestration_staging"
 
 	if ! tp_extract_tar_zst_archive "$_binary_archive" "$_binary_staging"; then
-		return 1
-	fi
-	if ! tp_extract_tar_zst_archive "$_js_archive" "$_js_staging"; then
 		return 1
 	fi
 	if ! tp_extract_orchestration_release "$_orchestration_archive" "$_orchestration_staging" "$_home"; then
@@ -210,8 +204,6 @@ tp_install_verified_release() {
 	fi
 
 	if [ ! -f "$_binary_staging/$_home/bin/$_binary_name" ] \
-		|| [ ! -f "$_js_staging/$_home/bin/$_js_name" ] \
-		|| [ ! -f "$_js_staging/$_home/bin/$_update_name" ] \
 		|| [ ! -f "$_orchestration_staging/$_home/share/orchestration/ansible.cfg" ]; then
 		echo "run.sh: release artifacts missing expected production layout" >&2
 		return 1
@@ -219,10 +211,43 @@ tp_install_verified_release() {
 
 	mkdir -p "$_home/bin" "$_home/share/orchestration"
 	install -m 0755 "$_binary_staging/$_home/bin/$_binary_name" "$_home/bin/$_binary_name"
-	install -m 0644 "$_js_staging/$_home/bin/$_js_name" "$_home/bin/$_js_name"
-	install -m 0755 "$_js_staging/$_home/bin/$_update_name" "$_home/bin/$_update_name"
 	rm -rf "$_home/share/orchestration"
 	cp -a "$_orchestration_staging/$_home/share/orchestration" "$_home/share/"
+	trap - EXIT INT HUP TERM
+	_cleanup
+	return 0
+}
+
+tp_install_verified_js_fallback() {
+	_home="$(tp_prod_home)"
+	_js_name="$(tp_daemon_js_fallback_name)"
+	_js_archive=""
+	_staging=""
+
+	_cleanup() {
+		rm -f "$_js_archive"
+		rm -rf "$_staging"
+	}
+	trap _cleanup EXIT INT HUP TERM
+
+	_js_archive="$(mktemp)"
+	_staging="$(mktemp -d)"
+
+	if ! tp_download_verified_artifact "$_js_fallback_artifact_url" "$_js_fallback_artifact_sha256" "$_js_archive"; then
+		return 1
+	fi
+
+	if ! tp_extract_tar_zst_archive "$_js_archive" "$_staging"; then
+		return 1
+	fi
+
+	if [ ! -f "$_staging/$_home/bin/$_js_name" ]; then
+		echo "run.sh: JS fallback release missing $_home/bin/$_js_name" >&2
+		return 1
+	fi
+
+	mkdir -p "$_home/bin"
+	install -m 0644 "$_staging/$_home/bin/$_js_name" "$_home/bin/$_js_name"
 	trap - EXIT INT HUP TERM
 	_cleanup
 	return 0
@@ -649,7 +674,7 @@ if [ -z "$HOST_URL" ]; then
 fi
 tp_print_ok "Release manifest resolved (channel ${TURBOPANEL_UPDATE_CHANNEL:-trunk}, arch ${_linux_arch:-unknown})"
 tp_print_step "  " "Binary (${_linux_arch:-unknown}): $_binary_artifact_url"
-tp_print_step "  " "JS bundle: $_js_fallback_artifact_url"
+tp_print_step "  " "JS bundle (if needed): $_js_fallback_artifact_url"
 tp_print_step "  " "Commit: ${_manifest_commit:-unknown}"
 tp_print_step "  " "Control plane: $HOST_URL"
 
@@ -712,17 +737,13 @@ export TURBOPANEL_RUN_DIR="$RUN_DIR"
 tp_print_step "▸" "Downloading daemon release…"
 tp_stop_running_daemon_for_release_swap
 
-if ! tp_install_verified_release; then
+if ! tp_install_verified_binary_and_orchestration; then
 	tp_print_error "Failed to install daemon release artifacts"
 	exit 1
 fi
 
 if [ ! -x "$(tp_daemon_binary_path)" ]; then
 	tp_print_error "Daemon release missing native binary at $(tp_daemon_binary_path)"
-	exit 1
-fi
-if [ ! -f "$BIN_DIR/$(tp_daemon_js_fallback_name)" ]; then
-	tp_print_error "Daemon release missing JS fallback at $BIN_DIR/$(tp_daemon_js_fallback_name)"
 	exit 1
 fi
 if [ ! -f "$ORCHESTRATION_DIR/ansible.cfg" ]; then
@@ -735,9 +756,20 @@ tp_print_step "▸" "Probing native daemon binary…"
 if tp_probe_native_daemon; then
 	DAEMON_EXEC_MODE="native"
 	tp_print_ok "Native binary is executable — using turbopaneld"
+	tp_remove_js_fallback_binaries
 else
 	DAEMON_EXEC_MODE="js"
 	tp_print_step "~" "Native binary not executable — using JS fallback (deno run turbopaneld.js)"
+	tp_print_step "▸" "Downloading JS fallback bundle…"
+	if ! tp_install_verified_js_fallback; then
+		tp_print_error "Failed to install JS fallback bundle"
+		exit 1
+	fi
+	if [ ! -f "$BIN_DIR/$(tp_daemon_js_fallback_name)" ]; then
+		tp_print_error "Daemon release missing JS fallback at $BIN_DIR/$(tp_daemon_js_fallback_name)"
+		exit 1
+	fi
+	tp_print_ok "JS fallback installed"
 fi
 
 if [ "$DAEMON_EXEC_MODE" = "js" ]; then
