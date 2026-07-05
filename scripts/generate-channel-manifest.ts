@@ -32,7 +32,7 @@ async function artifactFromPublishFile(
   copy.set(data);
   const digest = await crypto.subtle.digest("SHA-256", copy);
   return {
-    url,
+    url: `${url}?build=${encodeURIComponent(BUILD_ID)}`,
     sha256: encodeHex(new Uint8Array(digest)),
     size: data.byteLength,
   };

@@ -78,6 +78,7 @@ tp_resolve_channel_manifest() {
 	_compact="$(tp_manifest_compact "$_manifest_json")"
 	_manifest_host="$(tp_manifest_field "$_compact" "defaultControlPlaneUrl")"
 	_manifest_commit="$(tp_manifest_field "$_compact" "commit")"
+	_manifest_build_id="$(tp_manifest_field "$_compact" "buildId")"
 	_linux_arch="$(tp_resolve_linux_arch)" || return 1
 	_binary_artifact_url="$(tp_manifest_binary_artifact_field "$_compact" "$_linux_arch" "url")"
 	_binary_artifact_sha256="$(tp_manifest_binary_artifact_field "$_compact" "$_linux_arch" "sha256")"
@@ -131,10 +132,24 @@ tp_extract_orchestration_release() {
 	return 0
 }
 
+tp_release_download_url() {
+	_url="$1"
+	_bust="${2:-}"
+	if [ -z "$_bust" ]; then
+		printf '%s' "$_url"
+		return 0
+	fi
+	case "$_url" in
+		*[\?\&]*) printf '%s&build=%s' "$_url" "$_bust" ;;
+		*) printf '%s?build=%s' "$_url" "$_bust" ;;
+	esac
+}
+
 tp_download_verified_artifact() {
 	_url="$1"
 	_sha256="$2"
 	_dest="$3"
+	_cache_bust="${4:-$_manifest_build_id}"
 
 	case "$_url" in
 		https://*) ;;
@@ -146,16 +161,30 @@ tp_download_verified_artifact() {
 
 	_curl="curl -fsSL"
 	[ "${TURBOPANEL_RELEASE_TLS_INSECURE:-}" = 1 ] && _curl="curl -fsSLk"
-	# shellcheck disable=SC2086
-	if ! $_curl "$_url" -o "$_dest"; then
-		echo "run.sh: failed to download $_url" >&2
-		return 1
-	fi
-	if ! printf '%s  %s\n' "$_sha256" "$_dest" | sha256sum -c - >/dev/null 2>&1; then
-		echo "run.sh: SHA-256 mismatch for $_url" >&2
-		return 1
-	fi
-	return 0
+	_fetch_url="$(tp_release_download_url "$_url" "$_cache_bust")"
+	_attempt=1
+	_max_attempts=5
+
+	while [ "$_attempt" -le "$_max_attempts" ]; do
+		rm -f "$_dest"
+		# shellcheck disable=SC2086
+		if ! $_curl "$_fetch_url" -o "$_dest"; then
+			echo "run.sh: failed to download $_fetch_url" >&2
+			return 1
+		fi
+		if printf '%s  %s\n' "$_sha256" "$_dest" | sha256sum -c - >/dev/null 2>&1; then
+			return 0
+		fi
+		if [ "$_attempt" -lt "$_max_attempts" ]; then
+			echo "run.sh: SHA-256 mismatch for $_url (attempt $_attempt/$_max_attempts), retrying…" >&2
+			sleep 3
+		fi
+		_attempt=$((_attempt + 1))
+	done
+
+	_actual_sha256="$(sha256sum "$_dest" | awk '{print $1}')"
+	echo "run.sh: SHA-256 mismatch for $_url (expected $_sha256, got $_actual_sha256)" >&2
+	return 1
 }
 
 tp_remove_js_fallback_binaries() {
@@ -502,7 +531,7 @@ tp_fetch_channel_manifest() {
 	fi
 
 	_manifest_json=""
-	if ! _manifest_json="$($_curl "$_manifest_url" 2>/dev/null)"; then
+	if ! _manifest_json="$($_curl "${_manifest_url}?$(date +%s)" 2>/dev/null)"; then
 		return 1
 	fi
 

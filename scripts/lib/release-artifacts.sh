@@ -360,10 +360,24 @@ tp_extract_tar_zst_archive() {
 	return 0
 }
 
+tp_release_download_url() {
+	_url="$1"
+	_bust="${2:-}"
+	if [ -z "$_bust" ]; then
+		printf '%s' "$_url"
+		return 0
+	fi
+	case "$_url" in
+		*[\?\&]*) printf '%s&build=%s' "$_url" "$_bust" ;;
+		*) printf '%s?build=%s' "$_url" "$_bust" ;;
+	esac
+}
+
 tp_download_verified_artifact() {
 	_url="$1"
 	_sha256="$2"
 	_dest="$3"
+	_cache_bust="${4:-}"
 
 	case "$_url" in
 		https://*) ;;
@@ -378,17 +392,30 @@ tp_download_verified_artifact() {
 		_curl_tls="-k"
 	fi
 
-	# shellcheck disable=SC2086
-	if ! curl -fsSL $_curl_tls "$_url" -o "$_dest"; then
-		echo "tp_download_verified_artifact: failed to download $_url" >&2
-		return 1
-	fi
+	_fetch_url="$(tp_release_download_url "$_url" "$_cache_bust")"
+	_attempt=1
+	_max_attempts=5
 
-	if ! printf '%s  %s\n' "$_sha256" "$_dest" | sha256sum -c - >/dev/null 2>&1; then
-		echo "tp_download_verified_artifact: SHA-256 mismatch for $_url" >&2
-		return 1
-	fi
-	return 0
+	while [ "$_attempt" -le "$_max_attempts" ]; do
+		rm -f "$_dest"
+		# shellcheck disable=SC2086
+		if ! curl -fsSL $_curl_tls "$_fetch_url" -o "$_dest"; then
+			echo "tp_download_verified_artifact: failed to download $_fetch_url" >&2
+			return 1
+		fi
+		if printf '%s  %s\n' "$_sha256" "$_dest" | sha256sum -c - >/dev/null 2>&1; then
+			return 0
+		fi
+		if [ "$_attempt" -lt "$_max_attempts" ]; then
+			echo "tp_download_verified_artifact: SHA-256 mismatch (attempt $_attempt/$_max_attempts), retrying…" >&2
+			sleep 3
+		fi
+		_attempt=$((_attempt + 1))
+	done
+
+	_actual_sha256="$(sha256sum "$_dest" | awk '{print $1}')"
+	echo "tp_download_verified_artifact: SHA-256 mismatch for $_url (expected $_sha256, got $_actual_sha256)" >&2
+	return 1
 }
 
 # Download native binary, orchestration tree, and optional JS bundle from the

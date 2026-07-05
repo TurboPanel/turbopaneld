@@ -23,6 +23,9 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    concurrency:
+      group: publish-daemon-trunk
+      cancel-in-progress: false
     steps:
       - name: Verify required secrets and variables
         env:
