@@ -403,7 +403,7 @@ TP_DENO_VERSION="2.9.1"
 # Install Deno into the runtimes tree (idempotent), mirroring uv/ansible/cloudflared:
 #   $RUNTIMES_DIR/deno/$TP_DENO_VERSION/deno  plus `current` and `bin/deno` symlinks.
 # Keep the download/extract path in sync with orchestration/roles/deno-runtime/tasks/main.yml
-# (GitHub release zip + python3 stdlib — host-base only guarantees python3, not unzip).
+# (dl.deno.land release zip + python3 stdlib — host-base only guarantees python3, not unzip).
 tp_install_deno_runtime() {
 	_deno_versioned_dir="$RUNTIMES_DIR/deno/$TP_DENO_VERSION"
 	_deno_bin="$_deno_versioned_dir/deno"
@@ -417,17 +417,19 @@ tp_install_deno_runtime() {
 			;;
 		esac
 		_deno_asset="deno-${_deno_arch}.zip"
-		_deno_url="https://github.com/denoland/deno/releases/download/v${TP_DENO_VERSION}/${_deno_asset}"
+		_deno_url="https://dl.deno.land/release/v${TP_DENO_VERSION}/${_deno_asset}"
 		_deno_tmp="$(mktemp -d)"
 		_curl="curl -fsSL"
 		[ "${TURBOPANEL_RELEASE_TLS_INSECURE:-}" = 1 ] && _curl="curl -fsSLk"
 		# shellcheck disable=SC2086
-		if ! $_curl -o "$_deno_tmp/$_deno_asset" "$_deno_url"; then
+		if ! $_curl -o "$_deno_tmp/$_deno_asset" "$_deno_url" 2>"$_deno_tmp/curl.err"; then
+			tp_print_error "Failed to download Deno from $_deno_url"
+			[ -s "$_deno_tmp/curl.err" ] && cat "$_deno_tmp/curl.err" >&2
 			rm -rf "$_deno_tmp"
 			return 1
 		fi
 		mkdir -p "$_deno_versioned_dir"
-		if ! python3 - "$_deno_tmp/$_deno_asset" "$_deno_bin" <<'PY'
+		if ! python3 - "$_deno_tmp/$_deno_asset" "$_deno_bin" 2>"$_deno_tmp/python.err" <<'PY'
 import shutil, sys, tempfile, zipfile
 from pathlib import Path
 
@@ -444,6 +446,8 @@ with tempfile.TemporaryDirectory(prefix="deno-zip-") as tmp:
 dest.chmod(0o755)
 PY
 		then
+			tp_print_error "Failed to extract Deno release zip"
+			[ -s "$_deno_tmp/python.err" ] && cat "$_deno_tmp/python.err" >&2
 			rm -rf "$_deno_tmp"
 			return 1
 		fi

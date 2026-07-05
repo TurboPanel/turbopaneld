@@ -21,7 +21,7 @@
     set -euo pipefail
     DENO_VER="{{ deno_version }}"
     ASSET="deno-{{ deno_asset_triple }}.zip"
-    URL="https://github.com/denoland/deno/releases/download/v${DENO_VER}/${ASSET}"
+    URL="https://dl.deno.land/release/v${DENO_VER}/${ASSET}"
     TMP="$(mktemp -d)"
     DEST="{{ turbopanel_runtimes_dir }}/deno/${DENO_VER}/deno"
     curl -fsSL -o "$TMP/${ASSET}" "$URL"
