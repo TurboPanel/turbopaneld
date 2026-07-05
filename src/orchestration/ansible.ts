@@ -272,8 +272,7 @@ export async function runSetHostname(
 }
 
 /**
- * Create /var/log/turbopanel/daemon, persist it across reboots via
- * systemd-tmpfiles, and install logrotate for daemon.log / daemon.err.log.
+ * Create /var/log/turbopanel/daemon.log and daemon.err.log for systemd append.
  */
 export async function runDaemonLogsSetup(onEvent?: AnsibleEventHandler): Promise<void> {
   logInfo('orchestration', 'running daemon-logs-setup playbook')

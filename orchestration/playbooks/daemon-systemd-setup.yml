@@ -38,9 +38,9 @@
     turbopanel_service_name: turbopaneld
     turbopanel_start: true
     turbopanel_after_instance_service: false
-    # Co-located dev logs to the FHS daemon log dir (shared with managed installs);
-    # the daemon-logs role creates this directory.
-    daemon_log_dir: /var/log/turbopanel/daemon
+    # Co-located dev logs to the FHS turbopanel log dir (shared with managed installs);
+    # the daemon-logs role creates daemon.log / daemon.err.log there.
+    daemon_log_dir: /var/log/turbopanel
     # The daemon runs from source via the vendored Deno runtime under
     # {{ turbopanel_runtimes_dir }}/deno (provisioned by the deno-runtime role
     # below; this is also the daemon-launch role default). The Deno binary is not

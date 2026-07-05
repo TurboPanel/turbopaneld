@@ -80,5 +80,5 @@ else
   echo "${SERVICE_NAME} service installed (start deferred)"
 fi
 echo "status: sudo systemctl status ${SERVICE_NAME}"
-echo "logs:   tail -f /var/log/turbopanel/daemon/daemon.log"
+echo "logs:   tail -f /var/log/turbopanel/daemon.log"
 echo "        sudo journalctl -u ${SERVICE_NAME} -f"

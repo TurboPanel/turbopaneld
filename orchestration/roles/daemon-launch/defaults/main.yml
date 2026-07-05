@@ -36,7 +36,7 @@ turbopanel_legacy_service_name: turbopanel-daemon
 # FHS daemon log target, shared by co-located dev and managed installs. Kept in
 # sync with the daemon-logs role default so the systemd unit template resolves
 # either way.
-daemon_log_dir: /var/log/turbopanel/daemon
+daemon_log_dir: /var/log/turbopanel
 runtime_socket_dir: /run/turbopanel
 runtime_socket_owner: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
 runtime_socket_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
