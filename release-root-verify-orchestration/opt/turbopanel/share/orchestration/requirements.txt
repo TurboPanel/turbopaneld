@@ -1,7 +1,0 @@
-# Python packages installed into the orchestration runtime venv via uv.
-# ansible-core provides ansible-playbook plus the builtin module set (ping, debug, ...),
-# which is all the localhost smoke test needs. Expand this list as orchestration grows.
-ansible-core==2.18.*
-# IDE/CI linting. Pin <25 until ansible-core is bumped to 2.20+ (Python 3.14 compat gate).
-ansible-lint>=24,<25
-ansible-compat>=24,<25

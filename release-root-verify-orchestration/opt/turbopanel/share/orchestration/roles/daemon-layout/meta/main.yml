@@ -1,4 +1,0 @@
----
-galaxy_info:
-  role_name: daemon_layout
-  description: Ensure managed-node daemon layout without git clone.

@@ -134,9 +134,7 @@ jobs:
 
           for _arch in amd64 arm64; do
             _tarball="dist/turbopaneld-${_arch}.tar.zst"
-            _verify_root="release-root-verify-${_arch}"
-            rm -rf "$_verify_root"
-            mkdir -p "$_verify_root"
+            _verify_root="$(mktemp -d)"
             zstd -d -q -c "$_tarball" | tar -x -C "$_verify_root"
             sh scripts/verify-release-root.sh --binary-only "$_verify_root"
             cp "$_tarball" "$_publish_dir/"
@@ -144,9 +142,7 @@ jobs:
           done
 
           _js_tarball="dist/${_js_name}"
-          _js_verify="release-root-verify-js"
-          rm -rf "$_js_verify"
-          mkdir -p "$_js_verify"
+          _js_verify="$(mktemp -d)"
           zstd -d -q -c "$_js_tarball" | tar -x -C "$_js_verify"
           sh scripts/verify-release-root.sh --js-only "$_js_verify"
           cp "$_js_tarball" "$_publish_dir/${_js_name}"

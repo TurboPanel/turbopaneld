@@ -1,8 +1,0 @@
----
-- name: Ensure TurboPanel daemon log directory and rotation
-  hosts: localhost
-  connection: local
-  become: true
-  gather_facts: false
-  roles:
-    - role: daemon-logs

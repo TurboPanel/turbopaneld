@@ -1,6 +1,0 @@
----
-turbopanel_runtimes_dir: /opt/turbopanel/runtimes
-# Node is needed for the instance's cert generation script and to build/run the
-# Expo UI in development. Must match turbopanel-dev scripts/lib/paths.sh NODE_VERSION.
-node_version: "24.17.0"
-node_prefix: /usr/local

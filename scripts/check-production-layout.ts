@@ -22,7 +22,7 @@
  *     also reference it. Tests are excluded from the dev-checkout scan.
  *     `daemon-launch/defaults/main.yml` is included in this scan (no allowlist).
  *
- * Run: `deno task check:layout` (or `deno run --allow-read scripts/check-production-layout.ts`).
+ * Run: `deno task check:layout` (or `deno run --allow-read --allow-run=git scripts/check-production-layout.ts`).
  */
 import { join, relative } from "@std/path";
 import {
@@ -35,11 +35,32 @@ const repoRoot = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
 const failures: string[] = [];
 
+/** CI verify extract trees must live in mktemp dirs, never in git. */
+async function assertReleaseRootVerifyNotTracked(): Promise<void> {
+  const { code, stdout } = await new Deno.Command("git", {
+    args: ["ls-files", "release-root-verify-*"],
+    cwd: repoRoot,
+    stdout: "piped",
+    stderr: "null",
+  }).output();
+  if (code !== 0) return;
+  const tracked = new TextDecoder().decode(stdout).trim();
+  if (!tracked) return;
+  const sample = tracked.split("\n").slice(0, 5).join("\n    ");
+  const more = tracked.split("\n").length > 5 ? "\n    …" : "";
+  failures.push(
+    `release-root-verify-* must not be tracked (extract to mktemp in CI, gitignore locally):\n    ${sample}${more}`,
+  );
+}
+
 function expect(label: string, actual: string, expected: string): void {
   if (actual !== expected) {
     failures.push(`layout ${label}: expected "${expected}", got "${actual}"`);
   }
 }
+
+// --- 0. No committed CI verify extract trees --------------------------------
+await assertReleaseRootVerifyNotTracked();
 
 // --- 1. Production FHS tree contract ----------------------------------------
 const prod = resolveLayout({}, { forceMode: "production" });
@@ -126,9 +147,7 @@ const SKIP_DIRS = new Set([
 
 /** Untracked/vendored build outputs that must not be scanned. */
 function isSkippedPath(rel: string): boolean {
-  if (rel.startsWith("release-root-verify")) return true;
-  if (rel.includes("geerlingguy.docker")) return true;
-  return false;
+  return rel.includes("geerlingguy.docker");
 }
 
 async function* walk(dir: string): AsyncGenerator<string> {

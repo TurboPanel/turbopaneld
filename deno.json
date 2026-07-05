@@ -16,7 +16,7 @@
     "start": "deno run --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env main.ts",
     "dev": "deno run --watch --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env main.ts",
     "bootstrap-orchestration": "deno run --allow-net --allow-read --allow-write --allow-run --allow-env scripts/bootstrap-orchestration.ts",
-    "check:layout": "deno run --allow-read scripts/check-production-layout.ts",
+    "check:layout": "deno run --allow-read --allow-run=git scripts/check-production-layout.ts",
     "bundle:js": "deno bundle main.ts -o dist/turbopaneld.js",
     "bundle:orchestration": "sh scripts/bundle-orchestration.sh",
     "compile": "deno compile --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env -o dist/turbopaneld main.ts",

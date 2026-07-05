@@ -1,9 +1,0 @@
----
-turbopanel_install_root: /opt/turbopanel
-turbopanel_user: turbopanel
-turbopanel_group: turbopanel
-turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/runtimes"
-turbopanel_platform_dir: "{{ turbopanel_install_root }}/platform"
-turbopanel_daemon_dir: "{{ turbopanel_platform_dir }}/daemon"
-turbopanel_daemon_dist_dir: "{{ turbopanel_daemon_dir }}/dist"
-force_compile: false

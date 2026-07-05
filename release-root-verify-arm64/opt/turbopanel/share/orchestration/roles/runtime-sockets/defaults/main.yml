@@ -1,9 +1,0 @@
----
-runtime_socket_dir: /run/turbopanel
-runtime_socket_owner: turbopanel
-runtime_socket_group: turbopanel
-# Group-writable + setgid (2770): the daemon (turbopanel) and the in-group
-# `instance` user both need to create/bind sockets here. Services can still
-# override file/socket group via their unit primary group when needed.
-runtime_socket_mode: "2770"
-turbopanel_dev_user: ""

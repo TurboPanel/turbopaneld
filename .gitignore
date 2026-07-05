@@ -3,5 +3,6 @@ logs/
 state/
 cloudflared/
 dist/
-logs/
+publish/
+release-root-verify-*/
 .turbopanel-checkout-stamp
