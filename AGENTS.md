@@ -25,7 +25,7 @@ TurboPanel **daemon** — Ansible-driven node agent; connects to the instance ov
 | Logs | `/var/log/turbopanel` |
 | Runtime (sockets, `daemon.lock`) | `/run/turbopanel` |
 
-**Development (co-located checkout)** — `./console` from `turbopanel-dev` runs the daemon from source (`deno run main.ts`); all mutable paths are **dev-user-owned**:
+**Development (co-located checkout)** — `./console` from [turbopanel/dev](https://github.com/turbopanel/dev) runs the daemon from source (`deno run main.ts`); all mutable paths are **dev-user-owned**:
 
 | Purpose | Path |
 |---|---|
@@ -40,9 +40,13 @@ TurboPanel **daemon** — Ansible-driven node agent; connects to the instance ov
 
 **Development identity:** co-located dev creates **no** dedicated `turbopanel`, `turbopaneli`, or `turbopanelc` service accounts. The `turbopaneld`, instance, UI, and Caddy systemd units, plus Docker-backed services (Postgres, Redis, RabbitMQ, Mailpit), all run as the **current dev user**. Production managed installs keep the dedicated service users described in the production table above.
 
-**Deno version pin:** `DENO_VERSION` (`src/orchestration/paths.ts`) = **`2.9.1`**. Keep it in step with `deno_version` in `orchestration/roles/deno-runtime/defaults/main.yml`, `TP_DENO_VERSION` in `scripts/run.sh`, and `DENO_VERSION` in `turbopanel-dev`'s `src/lib/paths.ts` (dev console bootstrap fallback + status label). `src/orchestration/paths.test.ts` pins the const to the role default.
+**Deno version pin:** `DENO_VERSION` (`src/orchestration/paths.ts`) = **`2.9.1`**. Keep it in step with `deno_version` in `orchestration/roles/deno-runtime/defaults/main.yml`, `TP_DENO_VERSION` in `scripts/run.sh`, and `DENO_VERSION` in [turbopanel/dev](https://github.com/turbopanel/dev) `src/lib/paths.ts` (dev console bootstrap fallback + status label). `src/orchestration/paths.test.ts` pins the const to the role default.
 
-**Vendored Node/Deno layout:** Ansible roles install pinned runtimes under `/opt/turbopanel/vendor/<tool>/<version>/` with a `current` symlink (see `node-runtime`, `deno-runtime`, `caddy`). Consumers resolve `turbopanel_node` (`…/node/current/bin/node`), `turbopanel_deno` (`…/deno/current/deno`), and `turbopanel_runtime_path` (colon-separated PATH prefix for systemd/Ansible tasks). Node **24.17.0** is pinned in `node-runtime/defaults/main.yml` — keep in step with `NODE_VERSION` in turbopanel-dev `scripts/lib/paths.sh`. The vendored runtime root is defined once in `src/paths/layout.ts` (`resolveRuntimesDir()` / `PROD_RUNTIME_DIR_DEFAULT`); shell helpers live in `scripts/lib/runtime-paths.sh`.
+**Vendored Node/Deno layout:** Ansible roles install pinned runtimes under `/opt/turbopanel/vendor/<tool>/<version>/` with a `current` symlink (see `node-runtime`, `deno-runtime`, `caddy`). Consumers resolve `turbopanel_node` (`…/node/current/bin/node`), `turbopanel_deno` (`…/deno/current/deno`), and `turbopanel_runtime_path` (colon-separated PATH prefix for systemd/Ansible tasks). Node **24.17.0** is pinned in `node-runtime/defaults/main.yml` — keep in step with `NODE_VERSION` in [turbopanel/dev](https://github.com/turbopanel/dev) `scripts/lib/paths.sh`. The vendored runtime root is defined once in `src/paths/layout.ts` (`resolveRuntimesDir()` / `PROD_RUNTIME_DIR_DEFAULT`); shell helpers live in `scripts/lib/runtime-paths.sh`.
+
+## Project metadata
+
+GitHub repository: [turbopanel/turbopaneld](https://github.com/turbopanel/turbopaneld). Deno package name: `turbopaneld` (`deno.json`), aligned with the repo slug and the compiled `/opt/turbopanel/bin/turbopaneld` binary.
 
 **Host-base prerequisite boundary:** TurboPanel-managed vendors (uv, Python, Ansible venv, Deno, Node, Caddy, Redis, cloudflared) install under `vendor` via orchestration bootstrap — not via apt in `run.sh`. The minimal host-base set is **sudo, curl, ca-certificates, tar, python3-minimal** (`run.sh` may apt-install these only when absent). `python3-minimal` extracts Deno release zips without apt `unzip`. The `daemon-prereqs` role covers the broader managed-host set (git, gnupg, pamtester, xz-utils, …) once Ansible can converge; Redis is vendored by extracting the official `packages.redis.io` `.deb` with `dpkg-deb -x` (no compile toolchain).
 

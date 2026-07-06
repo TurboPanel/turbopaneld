@@ -17,5 +17,5 @@ turbopanel_runtime_path: "{{ turbopanel_runtimes_dir }}/node/current/bin:{{ turb
 # Source checkout: co-located dev uses the dev user's home; managed installs use lib.
 turbopanel_ui_dir: "{{ (turbopanel_dev_root ~ '/ui') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/ui') }}"
 instance_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopaneli' }}"
-ui_repo_url: https://github.com/turbopanel/turbopanel-ui
+ui_repo_url: https://github.com/turbopanel/ui
 ui_branch: trunk

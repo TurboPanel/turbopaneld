@@ -16,5 +16,5 @@ turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') 
 # Source checkout: co-located dev uses the dev user's home; managed installs use lib.
 turbopanel_instance_dir: "{{ (turbopanel_dev_root ~ '/instance') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/instance') }}"
 instance_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopaneli' }}"
-instance_repo_url: https://github.com/turbopanel/instance
+instance_repo_url: https://github.com/turbopanel/turbopanel
 instance_branch: trunk

@@ -1,5 +1,5 @@
 ---
-# Co-located dev instance converge — OWNED BY turbopanel-dev (the dev overlay).
+# Co-located dev instance converge — OWNED BY turbopanel/dev (the dev overlay).
 #
 # This is the dev-only entrypoint. It sets the shared dev-identity contract
 # (turbopanel_dev_user/_uid/_gid/_root) so the daemon's *production* roles run in
@@ -41,9 +41,9 @@
     # with the dev user's real home resolved from getent. Passed on to every
     # daemon role, which derive <root>/{daemon,instance,ui,website} from it.
     turbopanel_dev_root: "{{ ansible_env.HOME }}"
-    instance_repo_url: https://github.com/turbopanel/instance
-    ui_repo_url: https://github.com/turbopanel/turbopanel-ui
-    website_repo_url: https://github.com/turbopanel/turbopanel-website
+    instance_repo_url: https://github.com/turbopanel/turbopanel
+    ui_repo_url: https://github.com/turbopanel/ui
+    website_repo_url: https://github.com/turbopanel/website
     instance_branch: trunk
     ui_branch: trunk
     website_branch: trunk
