@@ -28,13 +28,13 @@ async function fileExists(path: string): Promise<boolean> {
   }
 }
 
-/** Returns the installed uv version string (e.g. "0.11.19") or null if not present. */
+/** Returns the installed uv version string (e.g. "0.11.21") or null if not present. */
 async function installedUvVersion(): Promise<string | null> {
   if (!(await fileExists(UV_BIN))) return null;
   try {
     const result = await run(UV_BIN, ["--version"], { stream: false });
     if (!result.success) return null;
-    // Output looks like: "uv 0.11.19"
+    // Output looks like: "uv 0.11.21"
     const versionMatch = /^uv\s+(\S+)/.exec(result.stdout.trim());
     return versionMatch?.[1] ?? null;
   } catch {

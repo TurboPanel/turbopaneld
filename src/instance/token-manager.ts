@@ -4,7 +4,11 @@ import {
   type DaemonKeyFile,
   signChallenge,
 } from "../crypto/keys.ts";
+import { logWarn } from "../logger.ts";
 import type { DaemonApiClient } from "./api-client.ts";
+import type { VerifyInstanceJwtResult } from "./jwks-client.ts";
+
+export type VerifyResult = VerifyInstanceJwtResult;
 
 export interface TokenManagerOptions {
   keyFile: DaemonKeyFile;
@@ -14,6 +18,7 @@ export interface TokenManagerOptions {
   hostname: string;
   apiClient: Pick<DaemonApiClient, "getAuthChallenge" | "createSession">;
   refreshEarlyMs?: number;
+  verifyToken?: (token: string) => Promise<VerifyResult>;
 }
 
 const DEFAULT_REFRESH_EARLY_MS = 60_000;
@@ -50,7 +55,7 @@ export class DaemonTokenManager {
   }
 
   refresh(): Promise<void> {
-    if (this.#refreshPromise) return this.#refreshPromise;
+    if (this.#refreshPromise !== undefined) return this.#refreshPromise;
 
     this.#refreshPromise = this.#refreshWithRetry();
     return this.#refreshPromise;
@@ -104,8 +109,30 @@ export class DaemonTokenManager {
       at: new Date().toISOString(),
     });
 
+    if (this.#options.verifyToken) {
+      const verification = await this.#options.verifyToken(session.token);
+      if (!verification.ok) {
+        if (verification.reason === "invalid") {
+          throw new Error("instance JWT failed JWKS verification");
+        }
+        logWarn(
+          "instance",
+          "JWKS verification unavailable; using instance-issued token",
+        );
+        this.#expiresAtMs = parseJwtExpiryMs(session.token);
+      } else if (
+        verification.claims.sub !== this.#options.serverId ||
+        verification.claims.kid !== this.#options.keyId
+      ) {
+        throw new Error("instance JWT failed JWKS verification");
+      } else {
+        this.#expiresAtMs = verification.claims.exp * 1000;
+      }
+    } else {
+      this.#expiresAtMs = parseJwtExpiryMs(session.token);
+    }
+
     this.#token = session.token;
-    this.#expiresAtMs = parseJwtExpiryMs(session.token);
   }
 }
 
@@ -123,7 +150,7 @@ function parseJwtExpiryMs(token: string): number {
   const payloadText = new TextDecoder().decode(payloadBytes);
   const payload = JSON.parse(payloadText) as { exp?: unknown };
   if (typeof payload.exp !== "number" || !Number.isFinite(payload.exp)) {
-    throw new Error("invalid JWT exp claim");
+    throw new TypeError("invalid JWT exp claim");
   }
 
   return payload.exp * 1000;

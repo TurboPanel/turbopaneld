@@ -170,3 +170,179 @@ Deno.test("Retries once on refresh failure before throwing", async () => {
     throw new Error(`expected 2 challenge calls, got ${challengeCalls}`);
   }
 });
+
+Deno.test("verifyToken invalid causes refresh to throw after retry", async () => {
+  const keyFile = await makeKeyFile();
+  let sessionCalls = 0;
+  const apiClient = {
+    getAuthChallenge: async () => ({
+      challengeId: "c1",
+      nonce: "n1",
+      at: "",
+      expiresAt: "",
+    }),
+    createSession: async () => {
+      sessionCalls += 1;
+      return await Promise.resolve({
+        token: makeJwt(Math.floor(Date.now() / 1000) + 900),
+        expiresAt: new Date(Date.now() + 900_000).toISOString(),
+      });
+    },
+  };
+  const manager = new DaemonTokenManager({
+    keyFile,
+    serverId: "srv-1",
+    keyId: "kid-1",
+    machineId: "machine-1",
+    hostname: "host-1",
+    apiClient,
+    refreshEarlyMs: 0,
+    verifyToken: () => Promise.resolve({ ok: false, reason: "invalid" }),
+  });
+
+  let threw = false;
+  try {
+    await manager.getToken();
+  } catch (error) {
+    threw = true;
+    if (!(error instanceof Error)) {
+      throw new Error("expected Error");
+    }
+    if (!error.message.includes("JWKS verification")) {
+      throw new Error(`unexpected error: ${error.message}`);
+    }
+  }
+  if (!threw) {
+    throw new Error("expected getToken to throw on invalid verification");
+  }
+  if (sessionCalls !== 2) {
+    throw new Error(`expected 2 session calls after retry, got ${sessionCalls}`);
+  }
+});
+
+Deno.test("verifyToken unavailable still caches token", async () => {
+  const keyFile = await makeKeyFile();
+  const token = makeJwt(Math.floor(Date.now() / 1000) + 900);
+  const apiClient = {
+    getAuthChallenge: async () => ({
+      challengeId: "c1",
+      nonce: "n1",
+      at: "",
+      expiresAt: "",
+    }),
+    createSession: async () => ({
+      token,
+      expiresAt: new Date(Date.now() + 900_000).toISOString(),
+    }),
+  };
+  const manager = new DaemonTokenManager({
+    keyFile,
+    serverId: "srv-1",
+    keyId: "kid-1",
+    machineId: "machine-1",
+    hostname: "host-1",
+    apiClient,
+    verifyToken: () => Promise.resolve({ ok: false, reason: "unavailable" }),
+  });
+
+  const cached = await manager.getToken();
+  if (cached !== token) {
+    throw new Error("expected token to be cached despite unavailable JWKS");
+  }
+});
+
+Deno.test("verifyToken sub mismatch causes refresh to throw", async () => {
+  const keyFile = await makeKeyFile();
+  const apiClient = {
+    getAuthChallenge: async () => ({
+      challengeId: "c1",
+      nonce: "n1",
+      at: "",
+      expiresAt: "",
+    }),
+    createSession: async () => ({
+      token: makeJwt(Math.floor(Date.now() / 1000) + 900),
+      expiresAt: new Date(Date.now() + 900_000).toISOString(),
+    }),
+  };
+  const manager = new DaemonTokenManager({
+    keyFile,
+    serverId: "srv-1",
+    keyId: "kid-1",
+    machineId: "machine-1",
+    hostname: "host-1",
+    apiClient,
+    refreshEarlyMs: 0,
+    verifyToken: () => Promise.resolve({
+      ok: true,
+      claims: {
+        sub: "other-server",
+        kid: "kid-1",
+        jti: "jti-1",
+        iss: "turbopanel",
+        aud: "turbopanel-daemon-api",
+        typ: "daemon",
+        iat: Math.floor(Date.now() / 1000),
+        exp: Math.floor(Date.now() / 1000) + 900,
+      },
+    }),
+  });
+
+  let threw = false;
+  try {
+    await manager.getToken();
+  } catch {
+    threw = true;
+  }
+  if (!threw) {
+    throw new Error("expected getToken to throw on sub mismatch");
+  }
+});
+
+Deno.test("verifyToken kid mismatch causes refresh to throw", async () => {
+  const keyFile = await makeKeyFile();
+  const apiClient = {
+    getAuthChallenge: async () => ({
+      challengeId: "c1",
+      nonce: "n1",
+      at: "",
+      expiresAt: "",
+    }),
+    createSession: async () => ({
+      token: makeJwt(Math.floor(Date.now() / 1000) + 900),
+      expiresAt: new Date(Date.now() + 900_000).toISOString(),
+    }),
+  };
+  const manager = new DaemonTokenManager({
+    keyFile,
+    serverId: "srv-1",
+    keyId: "kid-1",
+    machineId: "machine-1",
+    hostname: "host-1",
+    apiClient,
+    refreshEarlyMs: 0,
+    verifyToken: () => Promise.resolve({
+      ok: true,
+      claims: {
+        sub: "srv-1",
+        kid: "other-kid",
+        jti: "jti-1",
+        iss: "turbopanel",
+        aud: "turbopanel-daemon-api",
+        typ: "daemon",
+        iat: Math.floor(Date.now() / 1000),
+        exp: Math.floor(Date.now() / 1000) + 900,
+      },
+    }),
+  });
+
+  let threw = false;
+  try {
+    await manager.getToken();
+  } catch {
+    threw = true;
+  }
+  if (!threw) {
+    throw new Error("expected getToken to throw on kid mismatch");
+  }
+});

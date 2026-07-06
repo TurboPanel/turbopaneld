@@ -23,6 +23,7 @@ import { writeInstanceTunnelToken } from "../tunnels.ts";
 import { logDebug, logError, logInfo, logWarn } from "../logger.ts";
 import { type DaemonKeyFile, loadDaemonKeyFile } from "../crypto/keys.ts";
 import { DaemonApiClient, DaemonApiError } from "./api-client.ts";
+import { DaemonJwksClient } from "./jwks-client.ts";
 import { DaemonTokenManager } from "./token-manager.ts";
 import { enrollDaemon } from "./enroll.ts";
 import { decodeBase64 } from "@std/encoding/base64";
@@ -320,6 +321,7 @@ export class InstanceClient {
   /** Transfer ids already refused at dev-sync-begin (managed / non-checkout). */
   readonly #devSyncRefused = new Set<string>();
   #tokenManager: DaemonTokenManager | undefined;
+  #jwksClient: DaemonJwksClient | undefined;
   #apiClient: DaemonApiClient | undefined;
   #tokenServerId: string | undefined;
   #tokenKeyId: string | undefined;
@@ -334,8 +336,6 @@ export class InstanceClient {
     this.#maxBackoffMs = DEFAULT_MAX_BACKOFF_MS;
     this.#backoffMs = this.#initialBackoffMs;
     this.#onMessage = options.onMessage;
-    // TODO(deferred): daemon-side SQLite monitoring store will subscribe to
-    // sentinel.onTransition() and sentinel.buildHeartbeat() here.
   }
 
   get config(): InstanceConfig {
@@ -564,6 +564,128 @@ export class InstanceClient {
     if (this.#ws === ws) this.#ws = undefined;
   }
 
+  async #loadOrEnrollIdentity(
+    stateDir: string,
+    machineId: string | undefined,
+    hostname: string,
+  ): Promise<{
+    keyFile: DaemonKeyFile | null;
+    serverId: string | undefined;
+    keyId: string | undefined;
+  }> {
+    const [loadedKeyFile, loadedServerId, loadedKeyId] = await Promise.all([
+      readDaemonKeyFile(),
+      readServerId(),
+      readKeyId(),
+    ]);
+
+    let keyFile = loadedKeyFile;
+    let serverId = loadedServerId;
+    let keyId = loadedKeyId;
+    const needsEnrollment = this.#forceEnrollPending || keyFile === null ||
+      !serverId || !keyId;
+    if (!needsEnrollment) {
+      return { keyFile, serverId, keyId };
+    }
+
+    const licenseCredentials = await readLicenseCredentials();
+    if (!licenseCredentials.licenseId || !licenseCredentials.licenseToken) {
+      throw new Error("missing license credentials for enrollment");
+    }
+
+    const enrollClient = this.#apiClient ?? new DaemonApiClient({
+      config: this.#config,
+      httpClient: this.#httpClient,
+      getToken: async () => {
+        throw new Error("token unavailable before enrollment");
+      },
+    });
+    const enrollment = await enrollDaemon({
+      apiClient: enrollClient,
+      machineId,
+      hostname,
+      licenseId: licenseCredentials.licenseId,
+      licenseToken: licenseCredentials.licenseToken,
+      stateDir,
+    });
+    keyFile = enrollment.keyFile;
+    serverId = enrollment.serverId;
+    keyId = enrollment.keyId;
+    this.#forceEnrollPending = false;
+    logInfo(
+      "instance",
+      "enrolled with instance as",
+      sanitizeForLog(serverId),
+    );
+    return { keyFile, serverId, keyId };
+  }
+
+  #ensureAuthClients(
+    identity: { keyFile: DaemonKeyFile; serverId: string; keyId: string },
+    machineId: string | undefined,
+    hostname: string,
+  ): void {
+    const { keyFile, serverId, keyId } = identity;
+    if (
+      this.#tokenManager &&
+      this.#apiClient &&
+      this.#tokenServerId === serverId &&
+      this.#tokenKeyId === keyId
+    ) {
+      return;
+    }
+
+    if (!this.#jwksClient) {
+      const jwksApiClient = new DaemonApiClient({
+        config: this.#config,
+        httpClient: this.#httpClient,
+        getToken: async () => {
+          throw new Error("token unavailable for JWKS fetch");
+        },
+      });
+      this.#jwksClient = new DaemonJwksClient({ apiClient: jwksApiClient });
+    }
+
+    let tokenManagerRef: DaemonTokenManager | undefined;
+    const apiClient = new DaemonApiClient({
+      config: this.#config,
+      httpClient: this.#httpClient,
+      getToken: async (options) => {
+        if (!tokenManagerRef) {
+          throw new Error("token manager not initialized");
+        }
+        return await tokenManagerRef.getToken(options);
+      },
+    });
+    const tokenManager = new DaemonTokenManager({
+      keyFile,
+      serverId,
+      keyId,
+      machineId,
+      hostname,
+      apiClient,
+      verifyToken: (token) => this.#jwksClient!.verifyInstanceJwt(token),
+    });
+    tokenManagerRef = tokenManager;
+    this.#tokenManager = tokenManager;
+    this.#apiClient = apiClient;
+    this.#tokenServerId = serverId;
+    this.#tokenKeyId = keyId;
+  }
+
+  async #recoverFromStaleIdentity(stateDir: string): Promise<void> {
+    logWarn(
+      "instance",
+      "daemon identity is stale for this instance; clearing local state and re-enrolling",
+    );
+    await clearDaemonIdentityState(stateDir);
+    this.#tokenManager = undefined;
+    this.#apiClient = undefined;
+    this.#tokenServerId = undefined;
+    this.#tokenKeyId = undefined;
+    this.#forceEnrollPending = true;
+  }
+
   async #connectOnce(): Promise<void> {
     await this.#waitForConnectPreconditions();
 
@@ -577,108 +699,35 @@ export class InstanceClient {
     const machineId = await readMachineId();
     const hostname = Deno.hostname();
 
-    let keyFile: DaemonKeyFile | null = null;
-    let serverId: string | undefined;
-    let keyId: string | undefined;
-
     for (let attempt = 0; attempt < 2; attempt++) {
-      const [loadedKeyFile, loadedServerId, loadedKeyId] = await Promise.all([
-        readDaemonKeyFile(),
-        readServerId(),
-        readKeyId(),
-      ]);
-
-      keyFile = loadedKeyFile;
-      serverId = loadedServerId;
-      keyId = loadedKeyId;
-      const needsEnrollment = this.#forceEnrollPending || keyFile === null ||
-        !serverId || !keyId;
-      if (needsEnrollment) {
-        const licenseCredentials = await readLicenseCredentials();
-        if (!licenseCredentials.licenseId || !licenseCredentials.licenseToken) {
-          throw new Error("missing license credentials for enrollment");
-        }
-
-        const enrollClient = this.#apiClient ?? new DaemonApiClient({
-          config: this.#config,
-          httpClient: this.#httpClient,
-          getToken: async () => {
-            throw new Error("token unavailable before enrollment");
-          },
-        });
-        const enrollment = await enrollDaemon({
-          apiClient: enrollClient,
-          machineId,
-          hostname,
-          licenseId: licenseCredentials.licenseId,
-          licenseToken: licenseCredentials.licenseToken,
-          stateDir,
-        });
-        keyFile = enrollment.keyFile;
-        serverId = enrollment.serverId;
-        keyId = enrollment.keyId;
-        this.#forceEnrollPending = false;
-        logInfo(
-          "instance",
-          "enrolled with instance as",
-          sanitizeForLog(serverId),
-        );
-      }
-
-      if (keyFile === null || !serverId || !keyId) {
+      const identity = await this.#loadOrEnrollIdentity(
+        stateDir,
+        machineId,
+        hostname,
+      );
+      if (identity.keyFile === null || !identity.serverId || !identity.keyId) {
         throw new Error(
           "daemon identity incomplete after enrollment/auth bootstrap",
         );
       }
 
-      if (
-        !this.#tokenManager ||
-        !this.#apiClient ||
-        this.#tokenServerId !== serverId ||
-        this.#tokenKeyId !== keyId
-      ) {
-        let tokenManagerRef: DaemonTokenManager | undefined;
-        const apiClient = new DaemonApiClient({
-          config: this.#config,
-          httpClient: this.#httpClient,
-          getToken: async (options) => {
-            if (!tokenManagerRef) {
-              throw new Error("token manager not initialized");
-            }
-            return await tokenManagerRef.getToken(options);
-          },
-        });
-        const tokenManager = new DaemonTokenManager({
-          keyFile,
-          serverId,
-          keyId,
-          machineId,
-          hostname,
-          apiClient,
-        });
-        tokenManagerRef = tokenManager;
-        this.#tokenManager = tokenManager;
-        this.#apiClient = apiClient;
-        this.#tokenServerId = serverId;
-        this.#tokenKeyId = keyId;
-      }
+      this.#ensureAuthClients(
+        {
+          keyFile: identity.keyFile,
+          serverId: identity.serverId,
+          keyId: identity.keyId,
+        },
+        machineId,
+        hostname,
+      );
 
       try {
-        const jwt = await this.#tokenManager.getToken();
-        await this.#openDaemonWebSocket(jwt, serverId);
+        const jwt = await this.#tokenManager!.getToken();
+        await this.#openDaemonWebSocket(jwt, identity.serverId);
         return;
       } catch (err) {
         if (attempt === 0 && isStaleDaemonIdentityError(err)) {
-          logWarn(
-            "instance",
-            "daemon identity is stale for this instance; clearing local state and re-enrolling",
-          );
-          await clearDaemonIdentityState(stateDir);
-          this.#tokenManager = undefined;
-          this.#apiClient = undefined;
-          this.#tokenServerId = undefined;
-          this.#tokenKeyId = undefined;
-          this.#forceEnrollPending = true;
+          await this.#recoverFromStaleIdentity(stateDir);
           continue;
         }
         throw err;
@@ -808,6 +857,8 @@ export class InstanceClient {
     this.#idlePresence = new IdlePresence({ serverId });
   }
 
+  // Identity is established locally (enrollment + server.id) and confirmed via
+  // verified JWT `sub` in DaemonTokenManager — no socket message adopts serverId.
   #handleMessage(message: DaemonMessage, ws: WebSocket): void {
     switch (message.type) {
       case "version":
@@ -1011,23 +1062,105 @@ export class InstanceClient {
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result));
   }
 
+  #resolveUpdateConfigForMessage(
+    message: Extract<DaemonMessage, { type: "update" }>,
+  ): ReturnType<typeof resolveUpdateChannelConfig> {
+    let config = resolveUpdateChannelConfig(Deno.env.toObject());
+    const msgChannel = message.channel?.trim();
+    if (!msgChannel) return config;
+
+    try {
+      return resolveUpdateChannelConfig({
+        ...Deno.env.toObject(),
+        TURBOPANEL_UPDATE_CHANNEL: msgChannel,
+      });
+    } catch {
+      return config;
+    }
+  }
+
+  async #reconcileToLatestUpdate(
+    config: ReturnType<typeof resolveUpdateChannelConfig>,
+  ): Promise<boolean> {
+    const updateInfo = await resolveUpdate(config);
+    if (getBuildInfo().commit === updateInfo.commit) {
+      logInfo(
+        "update",
+        "already on current commit",
+        sanitizeForLog(updateInfo.commit),
+      );
+      return false;
+    }
+
+    const credentials = await readLicenseCredentials();
+    if (!credentials.licenseId || !credentials.licenseToken) {
+      throw new Error(
+        "license credentials missing; re-run the installer with --license",
+      );
+    }
+
+    const env = Deno.env.toObject();
+    const instanceUrl = env.TURBOPANEL_INSTANCE_URL?.trim();
+    const instanceCaPath = resolveInstanceCaPath(env);
+    const runScriptUrl = resolveRunScriptUrl(this.#config);
+    const insecureTls = resolveBootstrapInsecureTls({
+      releaseTlsInsecure: env.TURBOPANEL_RELEASE_TLS_INSECURE,
+      runScriptUrl,
+      instanceCaPath,
+    });
+    const licenseArg = encodeLicenseArg(
+      credentials.licenseId,
+      credentials.licenseToken,
+    );
+    const reconcileArgs = buildRunReconcileArgs({
+      licenseArg,
+      instanceUrl,
+      instanceCaPath,
+      insecureTls,
+    });
+
+    logInfo(
+      "update",
+      "reconciling via run.sh",
+      sanitizeForLog(runScriptUrl),
+    );
+
+    const script = await downloadRunScript(runScriptUrl, {
+      insecureTls,
+      caPath: insecureTls ? undefined : instanceCaPath,
+    });
+    await executeRunReconcile({
+      script,
+      args: reconcileArgs,
+      channel: config.channel,
+    });
+    return true;
+  }
+
+  #sendUpdateResult(
+    ws: WebSocket,
+    id: string,
+    ok: boolean,
+    error?: string,
+  ): void {
+    const result: DaemonMessage = {
+      type: "update-result",
+      id,
+      ok,
+      error,
+      at: new Date().toISOString(),
+    };
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result));
+  }
+
   async #applyUpdate(
     message: Extract<DaemonMessage, { type: "update" }>,
     ws: WebSocket,
   ): Promise<void> {
     // Long-running reconcile + restart runs here; the instance queues the request
     // and returns immediately — this path is decoupled from that HTTP lifecycle.
-    // Long-running reconcile + restart runs here; the instance queues the request
-    // and returns immediately — this path is decoupled from that HTTP lifecycle.
     if (this.#updateInstallInProgress) {
-      const busy: DaemonMessage = {
-        type: "update-result",
-        id: message.id,
-        ok: false,
-        error: "update already in progress",
-        at: new Date().toISOString(),
-      };
-      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(busy));
+      this.#sendUpdateResult(ws, message.id, false, "update already in progress");
       return;
     }
 
@@ -1036,87 +1169,15 @@ export class InstanceClient {
     let shouldRestart = false;
     let error: string | undefined;
     try {
-      let config = resolveUpdateChannelConfig(Deno.env.toObject());
-      const msgChannel = message.channel?.trim();
-      if (msgChannel) {
-        try {
-          config = resolveUpdateChannelConfig({
-            ...Deno.env.toObject(),
-            TURBOPANEL_UPDATE_CHANNEL: msgChannel,
-          });
-        } catch {
-          // fall back to env default when message.channel is invalid
-        }
-      }
-
-      const updateInfo = await resolveUpdate(config);
-
-      if (getBuildInfo().commit === updateInfo.commit) {
-        logInfo(
-          "update",
-          "already on current commit",
-          sanitizeForLog(updateInfo.commit),
-        );
-        ok = true;
-      } else {
-        const credentials = await readLicenseCredentials();
-        if (!credentials.licenseId || !credentials.licenseToken) {
-          throw new Error(
-            "license credentials missing; re-run the installer with --license",
-          );
-        }
-
-        const env = Deno.env.toObject();
-        const instanceUrl = env.TURBOPANEL_INSTANCE_URL?.trim();
-        const instanceCaPath = resolveInstanceCaPath(env);
-        const runScriptUrl = resolveRunScriptUrl(this.#config);
-        const insecureTls = resolveBootstrapInsecureTls({
-          releaseTlsInsecure: env.TURBOPANEL_RELEASE_TLS_INSECURE,
-          runScriptUrl,
-          instanceCaPath,
-        });
-        const licenseArg = encodeLicenseArg(
-          credentials.licenseId,
-          credentials.licenseToken,
-        );
-        const reconcileArgs = buildRunReconcileArgs({
-          licenseArg,
-          instanceUrl,
-          instanceCaPath,
-          insecureTls,
-        });
-
-        logInfo(
-          "update",
-          "reconciling via run.sh",
-          sanitizeForLog(runScriptUrl),
-        );
-
-        const script = await downloadRunScript(runScriptUrl, {
-          insecureTls,
-          caPath: insecureTls ? undefined : instanceCaPath,
-        });
-        await executeRunReconcile({
-          script,
-          args: reconcileArgs,
-          channel: config.channel,
-        });
-        ok = true;
-        shouldRestart = true;
-      }
+      const config = this.#resolveUpdateConfigForMessage(message);
+      shouldRestart = await this.#reconcileToLatestUpdate(config);
+      ok = true;
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
       logError("update", "failed:", sanitizeForLog(error));
     }
 
-    const result: DaemonMessage = {
-      type: "update-result",
-      id: message.id,
-      ok,
-      error,
-      at: new Date().toISOString(),
-    };
-    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result));
+    this.#sendUpdateResult(ws, message.id, ok, error);
 
     // Restart only after acking success and a short handoff delay, so the
     // instance can persist update-result before this process is replaced.
@@ -1236,6 +1297,61 @@ function isColocatedSocketMode(config: InstanceConfig): boolean {
   return config.kind === "socket";
 }
 
+async function waitForColocatedReadiness(
+  client: InstanceClient,
+  initialBackoffMs: number,
+): Promise<void> {
+  while (true) {
+    try {
+      const readiness = await client.fetchDaemonReadiness();
+      if (readiness.ready) {
+        logInfo(
+          "instance",
+          "instance ready for daemon registration via",
+          sanitizeForLog(client.target),
+        );
+        break;
+      }
+    } catch {
+      // Instance not reachable yet — keep polling silently.
+    }
+    await delay(
+      fullJitterMs(initialBackoffMs, INSTALL_READINESS_POLL_MS),
+    );
+  }
+}
+
+async function waitForRemoteHealth(
+  client: InstanceClient,
+  initialBackoffMs: number,
+): Promise<void> {
+  let waitingLogged = false;
+  let backoffMs = initialBackoffMs;
+
+  while (true) {
+    try {
+      await client.fetchHealth();
+      logInfo(
+        "instance",
+        "instance available via",
+        sanitizeForLog(client.target),
+      );
+      break;
+    } catch {
+      if (!waitingLogged) {
+        logInfo(
+          "instance",
+          "waiting for instance to become available via",
+          sanitizeForLog(client.target),
+        );
+        waitingLogged = true;
+      }
+      await delay(fullJitterMs(initialBackoffMs, backoffMs));
+      backoffMs = nextBackoffMs(backoffMs, DEFAULT_MAX_BACKOFF_MS);
+    }
+  }
+}
+
 export async function connectInstance(
   options: InstanceClientOptions = {},
 ): Promise<InstanceClient> {
@@ -1256,54 +1372,9 @@ export async function connectInstance(
   const socketMode = isColocatedSocketMode(config);
 
   if (socketMode) {
-    while (true) {
-      try {
-        const readiness = await client.fetchDaemonReadiness();
-        if (readiness.ready) {
-          logInfo(
-            "instance",
-            "instance ready for daemon registration via",
-            sanitizeForLog(client.target),
-          );
-          break;
-        }
-      } catch {
-        // Instance not reachable yet — keep polling silently.
-      }
-      await delay(
-        fullJitterMs(initialBackoffMs, INSTALL_READINESS_POLL_MS),
-      );
-    }
+    await waitForColocatedReadiness(client, initialBackoffMs);
   } else {
-    let waitingLogged = false;
-    let readyLogged = false;
-    let backoffMs = initialBackoffMs;
-
-    while (true) {
-      try {
-        await client.fetchHealth();
-        if (!readyLogged) {
-          logInfo(
-            "instance",
-            "instance available via",
-            sanitizeForLog(client.target),
-          );
-          readyLogged = true;
-        }
-        break;
-      } catch {
-        if (!waitingLogged) {
-          logInfo(
-            "instance",
-            "waiting for instance to become available via",
-            sanitizeForLog(client.target),
-          );
-          waitingLogged = true;
-        }
-        await delay(fullJitterMs(initialBackoffMs, backoffMs));
-        backoffMs = nextBackoffMs(backoffMs, DEFAULT_MAX_BACKOFF_MS);
-      }
-    }
+    await waitForRemoteHealth(client, initialBackoffMs);
   }
 
   client.start();

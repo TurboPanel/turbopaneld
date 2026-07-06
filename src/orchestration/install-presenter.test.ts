@@ -175,7 +175,7 @@ Deno.test("InstallPresenter drops bootstrap noise from raw CPython, uv, and gala
 
   presenter.beginStep("Bootstrapping orchestration");
   presenter.pushStatus("Using CPython 3.12.7 interpreter at: /usr/bin/python3");
-  presenter.pushStatus("uv 0.11.19 already installed");
+  presenter.pushStatus("uv 0.11.21 already installed");
   presenter.pushStatus("installing galaxy roles from orchestration/galaxy.yml");
   presenter.pushStatus("meaningful progress update");
   presenter.completeStep(true, "orchestration ready");
@@ -189,7 +189,7 @@ Deno.test("InstallPresenter drops bootstrap noise from raw CPython, uv, and gala
   assertMatch(out, /meaningful progress update/);
   assertMatch(out, /✓ orchestration ready/);
   assertEquals(out.includes("Using runtime"), false, out);
-  assertEquals(out.includes("runtime 0.11.19 already installed"), false, out);
+  assertEquals(out.includes("runtime 0.11.21 already installed"), false, out);
   assertEquals(
     out.includes("installing orchestration roles from"),
     false,
@@ -205,7 +205,7 @@ Deno.test("logInfo routes bootstrap noise through presenter without leaking sani
 
   presenter.beginStep("Bootstrapping runtimes");
   logInfo("python", "Using CPython 3.12.7 interpreter at: /usr/bin/python3");
-  logInfo("uv", "uv 0.11.19 already installed");
+  logInfo("uv", "uv 0.11.21 already installed");
   logInfo("ansible-galaxy", "installing galaxy roles from orchestration/galaxy.yml");
   logInfo("orchestration", "platform services configured");
   presenter.completeStep(true, "bootstrap complete");
@@ -218,7 +218,7 @@ Deno.test("logInfo routes bootstrap noise through presenter without leaking sani
   assertMatch(out, /platform services configured/);
   assertMatch(out, /✓ bootstrap complete/);
   assertEquals(out.includes("Using runtime"), false, out);
-  assertEquals(out.includes("runtime 0.11.19 already installed"), false, out);
+  assertEquals(out.includes("runtime 0.11.21 already installed"), false, out);
   assertEquals(
     out.includes("installing orchestration roles from"),
     false,

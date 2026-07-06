@@ -53,6 +53,10 @@ export interface DaemonSessionResponse {
   expiresAt: string;
 }
 
+export interface JwksDocument {
+  keys: JsonWebKey[];
+}
+
 export class DaemonApiClient {
   readonly #options: DaemonApiClientOptions;
 
@@ -102,6 +106,13 @@ export class DaemonApiClient {
         method: "POST",
         body: JSON.stringify(params),
       },
+    );
+  }
+
+  async getJwks(): Promise<JwksDocument> {
+    return await this.#requestJson<JwksDocument>(
+      "/api/daemon/v1/jwks.json",
+      { method: "GET" },
     );
   }
 

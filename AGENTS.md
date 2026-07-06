@@ -79,7 +79,17 @@ Tests: `src/orchestration/presentation.test.ts`, `install-presenter.test.ts`, `a
 
 **Reconnect jitter:** `InstanceClient` reconnects with **full-jitter** backoff in `[initialBackoffMs, currentBackoffMs]` (defaults 2 s → 30 s cap, doubling on auth failures). A benign close after a stable session (`STABLE_SESSION_MS`, 5 s) resets backoff to the initial floor so fleet-wide restarts do not align into a thundering herd.
 
-**Single-daemon guarantee:** only one live cell attachment per server. Runtime backstop is the instance cell's **single-writer lease** on attach (`attachDaemonSocket` / `detachDaemonSocket`). On managed hosts, `share/orchestration/scripts/ensure-single-daemon.sh` (systemd `ExecStartPre`) adds a **flock** on `/run/turbopanel/daemon.lock` so a second `turbopaneld.service` cannot start. Manual `deno task start/dev` bypasses flock (dev-only). Canonical cell semantics and cost rules: **`../instance/AGENTS.md`** (Daemon Cell).
+**Single-daemon guarantee:** only one live cell attachment per server. Runtime backstop is the instance cell's **single-writer lease** on attach (`attachDaemonSocket` / `detachDaemonSocket`). On managed hosts, `share/orchestration/scripts/ensure-single-daemon.sh` (systemd `ExecStartPre`) adds a **flock** on `/run/turbopanel/daemon.lock` so a second `turbopaneld.service` cannot start. Manual `deno task start/dev` bypasses flock (dev-only). Canonical cell semantics, DO/SQLite billing, and cost rules: **`../instance/AGENTS.md`** (Daemon Cell) — do not duplicate DO pricing here.
+
+### JWKS verification
+
+The daemon fetches `GET /api/daemon/v1/jwks.json` via `DaemonApiClient.getJwks()` and verifies its instance-issued JWT by `kid` in `src/instance/jwks-client.ts` (`DaemonJwksClient`): in-memory cache with ~1h refresh TTL, ≥60s min refresh interval, single-flight refresh, and **refresh-on-unknown-kid** (one bounded retry); imports Ed25519 public JWKs and verifies EdDSA signature + `iss`/`aud`/`typ`/`exp`.
+
+`DaemonTokenManager` (`token-manager.ts`) verifies each freshly created session token via `verifyToken` before caching: hard-fail on `invalid`; on `unavailable` (JWKS unreachable) log a warning and fall back to the instance-issued token's `exp`; require verified `sub` == serverId and `kid` == keyId.
+
+**Trust authenticated claims over socket-pushed IDs:** identity is established locally (enrollment + persisted `server.id`) and confirmed via the verified JWT `sub`; no WebSocket message adopts `serverId` (see the guard comment in `client.ts` `#handleMessage`).
+
+Related files: `src/instance/jwks-client.ts`; `getJwks()` / `JwksDocument` on `src/instance/api-client.ts`.
 
 **Orchestration source tree:** the canonical Ansible playbooks and roles live in **`orchestration/`** in the daemon git checkout. Co-located dev runs that tree directly (plus the **`dev/orchestration/`** overlay for dev-user parameters — not shipped in release). Production installs extract **`orchestration.tar.zst`** from the channel manifest into `/opt/turbopanel/share/orchestration/`. Release CDN artifacts are four split tarballs: host-arch `turbopaneld-{amd64,arm64}.tar.zst`, shared `turbopaneld.js.tar.zst` (JS fallback only), and shared `orchestration.tar.zst`.
 

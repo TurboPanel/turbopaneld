@@ -18,7 +18,6 @@ import {
   GALAXY_COLLECTIONS_DIR,
   ORCHESTRATION_DIR,
   PYTHON_CURRENT_DIR,
-  PYTHON_INSTALL_DIR,
   PYTHON_RUNTIME_DIR,
   PYTHON_VERSION,
   REQUIREMENTS_FILE,
@@ -91,7 +90,8 @@ Deno.test("resolveDaemonRoot uses default install path for compiled stub roots",
   const root = resolveDaemonRoot({
     TURBOPANEL_DAEMON_ROOT: "",
   }, { fromMeta, skipDiscovery: true });
-  if (fromMeta.includes("deno-compile") || fromMeta.startsWith("/tmp/")) {
+  const tempDirPrefix = `${Deno.env.get("TMPDIR") ?? Deno.env.get("TEMP") ?? ""}/`;
+  if (fromMeta.includes("deno-compile") || (tempDirPrefix.length > 1 && fromMeta.startsWith(tempDirPrefix))) {
     assertEq(root, DEFAULT_DAEMON_ROOT, "compiled stub default root");
   }
 });
@@ -362,11 +362,6 @@ Deno.test("module-level orchestration constants match active layout", () => {
     "PYTHON_CURRENT_DIR",
   );
   assertEq(
-    PYTHON_INSTALL_DIR,
-    join(layout.runtimesDir, "python", PYTHON_VERSION),
-    "PYTHON_INSTALL_DIR",
-  );
-  assertEq(
     CACHE_DIR,
     join(layout.runtimesDir, "uv", "cache"),
     "CACHE_DIR",
@@ -578,7 +573,7 @@ Deno.test("logDir follows the dev-vs-prod contract", () => {
 });
 
 Deno.test("PYTHON_VERSION matches uv-managed python pin", () => {
-  assertEq(PYTHON_VERSION, "3.14", "PYTHON_VERSION");
+  assertEq(PYTHON_VERSION, "3.14.6", "PYTHON_VERSION");
   assertEq(
     PYTHON_RUNTIME_DIR,
     join(RUNTIMES_DIR, "python", PYTHON_VERSION),

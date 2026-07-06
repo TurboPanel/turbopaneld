@@ -16,8 +16,8 @@ export {
   resolveDaemonRoot,
 } from "../paths/layout.ts";
 
-export const UV_VERSION = "0.11.19";
-export const PYTHON_VERSION = "3.14";
+export const UV_VERSION = "0.11.21";
+export const PYTHON_VERSION = "3.14.6";
 export const ANSIBLE_CORE_VERSION = "2.18";
 
 const layoutEnv = {

@@ -1,4 +1,3 @@
-import { encodeBase64Url } from '@std/encoding/base64url'
 import { type DaemonApiClient, DaemonApiError } from './api-client.ts'
 import {
   DEFAULT_INITIAL_BACKOFF_MS,
@@ -10,7 +9,34 @@ import {
 } from './client.ts'
 import { enrollDaemon } from './enroll.ts'
 import { IdlePresence } from './idle-presence.ts'
+import {
+  createTestSigningKey,
+  signInstanceJwt,
+  type TestSigningMaterial,
+} from './jwks-test-helpers.ts'
 import { DaemonTokenManager } from './token-manager.ts'
+
+type EnrollIdentity = { serverId: string; keyId: string }
+
+const DEFAULT_ENROLL_IDENTITY: EnrollIdentity = {
+  serverId: 'srv-1',
+  keyId: 'kid-1',
+}
+
+async function prepareVerifiedAuth(
+  enroll: EnrollIdentity = DEFAULT_ENROLL_IDENTITY,
+) {
+  const signing = await createTestSigningKey()
+  const authToken = await signInstanceJwt(signing.privateKey, signing.kid, {
+    sub: enroll.serverId,
+    kid: enroll.keyId,
+  })
+  return { signing, authToken, enroll }
+}
+
+function jwksResponse(signing: TestSigningMaterial): Response {
+  return new Response(JSON.stringify(signing.jwks), { status: 200 })
+}
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message)
@@ -204,7 +230,7 @@ Deno.test({
       return originalRefresh.call(this)
     }
 
-    const authToken = makeJwt(Math.floor(Date.now() / 1000) + 900)
+    const { signing, authToken, enroll } = await prepareVerifiedAuth()
     Object.defineProperty(globalThis, 'fetch', {
       configurable: true,
       writable: true,
@@ -212,6 +238,9 @@ Deno.test({
         const url = String(input)
         if (url.endsWith('/api/health')) {
           return new Response(JSON.stringify({ ok: true }), { status: 200 })
+        }
+        if (url.endsWith('/api/daemon/v1/jwks.json')) {
+          return jwksResponse(signing)
         }
         if (url.endsWith('/api/daemon/v1/auth/challenge')) {
           const raw = init?.body ? await new Response(init.body).text() : '{}'
@@ -232,7 +261,7 @@ Deno.test({
           }), { status: 200 })
         }
         if (url.endsWith('/api/daemon/v1/enroll')) {
-          return new Response(JSON.stringify({ serverId: 'srv-1', keyId: 'kid-1' }), {
+          return new Response(JSON.stringify(enroll), {
             status: 200,
           })
         }
@@ -313,7 +342,7 @@ Deno.test({
     }
 
     let sessionCalls = 0
-    const authToken = makeJwt(Math.floor(Date.now() / 1000) + 900)
+    const { signing, authToken, enroll } = await prepareVerifiedAuth()
     Object.defineProperty(globalThis, 'fetch', {
       configurable: true,
       writable: true,
@@ -321,6 +350,9 @@ Deno.test({
         const url = String(input)
         if (url.endsWith('/api/health')) {
           return new Response(JSON.stringify({ ok: true }), { status: 200 })
+        }
+        if (url.endsWith('/api/daemon/v1/jwks.json')) {
+          return jwksResponse(signing)
         }
         if (url.endsWith('/api/daemon/v1/auth/challenge')) {
           const raw = init?.body ? await new Response(init.body).text() : '{}'
@@ -341,7 +373,7 @@ Deno.test({
           }), { status: 200 })
         }
         if (url.endsWith('/api/daemon/v1/enroll')) {
-          return new Response(JSON.stringify({ serverId: 'srv-1', keyId: 'kid-1' }), {
+          return new Response(JSON.stringify(enroll), {
             status: 200,
           })
         }
@@ -511,7 +543,10 @@ Deno.test({
     const originalForceEnroll = Deno.env.get('TURBOPANEL_FORCE_ENROLL')
     const sockets: MockWebSocket[] = []
     let authChallengeBody: { serverId?: string; keyId?: string } | undefined
-    const authToken = makeJwt(Math.floor(Date.now() / 1000) + 900)
+    const { signing, authToken, enroll } = await prepareVerifiedAuth({
+      serverId: 'srv-new',
+      keyId: 'kid-new',
+    })
 
     class TrackingWebSocket extends MockWebSocket {
       constructor(url: string, options?: unknown) {
@@ -534,6 +569,9 @@ Deno.test({
         if (url.endsWith('/api/health')) {
           return new Response(JSON.stringify({ ok: true }), { status: 200 })
         }
+        if (url.endsWith('/api/daemon/v1/jwks.json')) {
+          return jwksResponse(signing)
+        }
         if (url.endsWith('/api/daemon/v1/auth/challenge')) {
           const raw = init?.body ? await new Response(init.body).text() : '{}'
           const body = JSON.parse(raw) as { serverId?: string; keyId?: string }
@@ -554,7 +592,7 @@ Deno.test({
           }), { status: 200 })
         }
         if (url.endsWith('/api/daemon/v1/enroll')) {
-          return new Response(JSON.stringify({ serverId: 'srv-new', keyId: 'kid-new' }), {
+          return new Response(JSON.stringify(enroll), {
             status: 200,
           })
         }
@@ -616,12 +654,6 @@ async function assertRejects(
     throw new Error(`expected rejection including "${messageIncludes}", got "${message}"`)
   }
   throw new Error('expected promise rejection')
-}
-
-function makeJwt(exp: number): string {
-  const header = encodeBase64Url(new TextEncoder().encode(JSON.stringify({ alg: 'HS256', typ: 'JWT' })))
-  const payload = encodeBase64Url(new TextEncoder().encode(JSON.stringify({ exp })))
-  return `${header}.${payload}.signature`
 }
 
 function parseSentFrames(
@@ -737,7 +769,7 @@ Deno.test({
       value: TrackingWebSocket,
     })
 
-    const authToken = makeJwt(Math.floor(Date.now() / 1000) + 900)
+    const { signing, authToken, enroll } = await prepareVerifiedAuth()
     Object.defineProperty(globalThis, 'fetch', {
       configurable: true,
       writable: true,
@@ -745,6 +777,9 @@ Deno.test({
         const url = String(input)
         if (url.endsWith('/api/health')) {
           return new Response(JSON.stringify({ ok: true }), { status: 200 })
+        }
+        if (url.endsWith('/api/daemon/v1/jwks.json')) {
+          return jwksResponse(signing)
         }
         if (url.endsWith('/api/daemon/v1/auth/challenge')) {
           return new Response(JSON.stringify({
@@ -755,7 +790,7 @@ Deno.test({
           }), { status: 200 })
         }
         if (url.endsWith('/api/daemon/v1/enroll')) {
-          return new Response(JSON.stringify({ serverId: 'srv-1', keyId: 'kid-1' }), {
+          return new Response(JSON.stringify(enroll), {
             status: 200,
           })
         }
@@ -839,7 +874,7 @@ Deno.test({
       value: TrackingWebSocket,
     })
 
-    const authToken = makeJwt(Math.floor(Date.now() / 1000) + 900)
+    const { signing, authToken, enroll } = await prepareVerifiedAuth()
     Object.defineProperty(globalThis, 'fetch', {
       configurable: true,
       writable: true,
@@ -847,6 +882,9 @@ Deno.test({
         const url = String(input)
         if (url.endsWith('/api/health')) {
           return new Response(JSON.stringify({ ok: true }), { status: 200 })
+        }
+        if (url.endsWith('/api/daemon/v1/jwks.json')) {
+          return jwksResponse(signing)
         }
         if (url.endsWith('/api/daemon/v1/auth/challenge')) {
           return new Response(JSON.stringify({
@@ -857,7 +895,7 @@ Deno.test({
           }), { status: 200 })
         }
         if (url.endsWith('/api/daemon/v1/enroll')) {
-          return new Response(JSON.stringify({ serverId: 'srv-1', keyId: 'kid-1' }), {
+          return new Response(JSON.stringify(enroll), {
             status: 200,
           })
         }
@@ -912,7 +950,6 @@ Deno.test({
   name: 'normalizeReconnectDelayMs clamps below-min and above-max inputs',
   fn: () => {
     assertEquals(normalizeReconnectDelayMs(), DEFAULT_INITIAL_BACKOFF_MS)
-    assertEquals(normalizeReconnectDelayMs(undefined), DEFAULT_INITIAL_BACKOFF_MS)
     assertEquals(normalizeReconnectDelayMs(0), DEFAULT_INITIAL_BACKOFF_MS)
     assertEquals(normalizeReconnectDelayMs(-100), DEFAULT_INITIAL_BACKOFF_MS)
     assertEquals(normalizeReconnectDelayMs(Number.NaN), DEFAULT_INITIAL_BACKOFF_MS)
@@ -991,7 +1028,7 @@ Deno.test({
       value: TrackingWebSocket,
     })
 
-    const authToken = makeJwt(Math.floor(Date.now() / 1000) + 900)
+    const { signing, authToken, enroll } = await prepareVerifiedAuth()
     Object.defineProperty(globalThis, 'fetch', {
       configurable: true,
       writable: true,
@@ -999,6 +1036,9 @@ Deno.test({
         const url = String(input)
         if (url.endsWith('/api/health')) {
           return new Response(JSON.stringify({ ok: true }), { status: 200 })
+        }
+        if (url.endsWith('/api/daemon/v1/jwks.json')) {
+          return jwksResponse(signing)
         }
         if (url.endsWith('/api/daemon/v1/auth/challenge')) {
           const raw = init?.body ? await new Response(init.body).text() : '{}'
@@ -1019,7 +1059,7 @@ Deno.test({
           }), { status: 200 })
         }
         if (url.endsWith('/api/daemon/v1/enroll')) {
-          return new Response(JSON.stringify({ serverId: 'srv-1', keyId: 'kid-1' }), {
+          return new Response(JSON.stringify(enroll), {
             status: 200,
           })
         }
@@ -1118,7 +1158,7 @@ Deno.test({
       return originalRefresh.call(this)
     }
 
-    const authToken = makeJwt(Math.floor(Date.now() / 1000) + 900)
+    const { signing, authToken, enroll } = await prepareVerifiedAuth()
     Object.defineProperty(globalThis, 'fetch', {
       configurable: true,
       writable: true,
@@ -1126,6 +1166,9 @@ Deno.test({
         const url = String(input)
         if (url.endsWith('/api/health')) {
           return new Response(JSON.stringify({ ok: true }), { status: 200 })
+        }
+        if (url.endsWith('/api/daemon/v1/jwks.json')) {
+          return jwksResponse(signing)
         }
         if (url.endsWith('/api/daemon/v1/auth/challenge')) {
           const raw = init?.body ? await new Response(init.body).text() : '{}'
@@ -1146,7 +1189,7 @@ Deno.test({
           }), { status: 200 })
         }
         if (url.endsWith('/api/daemon/v1/enroll')) {
-          return new Response(JSON.stringify({ serverId: 'srv-1', keyId: 'kid-1' }), {
+          return new Response(JSON.stringify(enroll), {
             status: 200,
           })
         }
@@ -1253,7 +1296,7 @@ Deno.test({
       value: TrackingWebSocket,
     })
 
-    const authToken = makeJwt(Math.floor(Date.now() / 1000) + 900)
+    const { signing, authToken, enroll } = await prepareVerifiedAuth()
     Object.defineProperty(globalThis, 'fetch', {
       configurable: true,
       writable: true,
@@ -1261,6 +1304,9 @@ Deno.test({
         const url = String(input)
         if (url.endsWith('/api/health')) {
           return new Response(JSON.stringify({ ok: true }), { status: 200 })
+        }
+        if (url.endsWith('/api/daemon/v1/jwks.json')) {
+          return jwksResponse(signing)
         }
         if (url.endsWith('/api/daemon/v1/auth/challenge')) {
           const raw = init?.body ? await new Response(init.body).text() : '{}'
@@ -1281,7 +1327,7 @@ Deno.test({
           }), { status: 200 })
         }
         if (url.endsWith('/api/daemon/v1/enroll')) {
-          return new Response(JSON.stringify({ serverId: 'srv-1', keyId: 'kid-1' }), {
+          return new Response(JSON.stringify(enroll), {
             status: 200,
           })
         }

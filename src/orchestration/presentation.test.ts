@@ -49,16 +49,16 @@ Deno.test("shouldDropPresenterLogLine drops bootstrap orchestration internals", 
   const dropped = [
     "creating venv at /opt/turbopanel/vendor/ansible/venv",
     "installing packages from orchestration/requirements.txt",
-    "downloading uv 0.11.19 from https://example.com/uv.tar.gz",
+    "downloading uv 0.11.21 from https://example.com/uv.tar.gz",
     "ensuring Python 3.12.7 is installed",
     "installing galaxy roles from orchestration/galaxy.yml",
     "installing galaxy collections from orchestration/galaxy.yml",
     "ansible already installed, skipping setup",
     "galaxy content up to date, skipping install",
-    "uv 0.11.19 already installed",
-    "uv 0.11.0 found, replacing with pinned 0.11.19",
+    "uv 0.11.21 already installed",
+    "uv 0.11.0 found, replacing with pinned 0.11.21",
     "uv archive checksum verified",
-    "uv 0.11.19 installed at /opt/turbopanel/vendor/uv/current/bin/uv",
+    "uv 0.11.21 installed at /opt/turbopanel/vendor/uv/current/bin/uv",
     "Python 3.12.7 ready at /opt/turbopanel/vendor/python/3.12",
     "ansible installed",
     "galaxy roles ready",
@@ -151,7 +151,7 @@ Deno.test("shouldDropStatusLine drops package, venv, and galaxy noise", () => {
 Deno.test("shouldDropPresenterLogLine drops raw lines that survive sanitization", () => {
   const rawLines = [
     "Using CPython 3.12.7 interpreter at: /usr/bin/python3",
-    "uv 0.11.19 already installed",
+    "uv 0.11.21 already installed",
     "installing galaxy roles from orchestration/galaxy.yml",
   ];
 
@@ -169,7 +169,7 @@ Deno.test("shouldDropPresenterLogLine drops raw lines that survive sanitization"
 Deno.test("shouldDropPresenterLogLine drops sanitized bootstrap orchestration internals", () => {
   const dropped = [
     "Using runtime 3.12.7 interpreter at: /usr/bin/python3",
-    "runtime 0.11.19 already installed",
+    "runtime 0.11.21 already installed",
     "installing orchestration roles from orchestration/galaxy.yml",
     "orchestration already installed, skipping setup",
     "orchestration content up to date, skipping install",
