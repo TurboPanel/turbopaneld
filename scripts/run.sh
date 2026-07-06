@@ -193,8 +193,6 @@ tp_remove_js_fallback_binaries() {
 	if [ -e "$_js" ]; then
 		rm -f "$_js"
 	fi
-	# Legacy installs may still have the retired update helper — remove it.
-	rm -f "$_home/bin/turbopanel-update"
 }
 
 tp_install_verified_binary_and_orchestration() {
@@ -348,7 +346,6 @@ tp_print_error() {
 }
 
 DAEMON_SERVICE_NAME="turbopaneld.service"
-LEGACY_DAEMON_SERVICE_NAME="turbopanel-daemon.service"
 
 # Stop the running daemon before replacing release binaries on manual reconcile.
 # Skipped for --no-start (in-process UI update): that path must not stop the
@@ -360,20 +357,18 @@ tp_stop_running_daemon_for_release_swap() {
 	if ! command -v systemctl >/dev/null 2>&1; then
 		return 0
 	fi
-	for _unit in "$DAEMON_SERVICE_NAME" "$LEGACY_DAEMON_SERVICE_NAME"; do
-		if ! systemctl cat "$_unit" >/dev/null 2>&1; then
-			continue
-		fi
-		if ! systemctl is-active --quiet "$_unit" 2>/dev/null; then
-			continue
-		fi
-		tp_print_step "▸" "Stopping $_unit for release update…"
-		if ! systemctl stop "$_unit"; then
-			tp_print_error "Failed to stop $_unit"
-			exit 1
-		fi
-		tp_print_ok "Daemon stopped ($_unit)"
-	done
+	if ! systemctl cat "$DAEMON_SERVICE_NAME" >/dev/null 2>&1; then
+		return 0
+	fi
+	if ! systemctl is-active --quiet "$DAEMON_SERVICE_NAME" 2>/dev/null; then
+		return 0
+	fi
+	tp_print_step "▸" "Stopping $DAEMON_SERVICE_NAME for release update…"
+	if ! systemctl stop "$DAEMON_SERVICE_NAME"; then
+		tp_print_error "Failed to stop $DAEMON_SERVICE_NAME"
+		exit 1
+	fi
+	tp_print_ok "Daemon stopped ($DAEMON_SERVICE_NAME)"
 }
 
 tp_start_or_restart_daemon() {
@@ -414,43 +409,6 @@ tp_probe_native_daemon() {
 # shellcheck disable=SC2034
 TP_HOST_LOCAL_ARTIFACTS=".git .github logs cloudflared"
 
-# Migrate pre-FHS managed installs into /etc/turbopanel and /var/lib/turbopanel.
-tp_migrate_legacy_layout() {
-	_legacy_daemon="$INSTALL_ROOT/platform/daemon"
-	_legacy_config="$INSTALL_ROOT/platform/config"
-	_legacy_state="$_legacy_daemon/state"
-	_legacy_env="$_legacy_daemon/.env"
-	_legacy_ca="$_legacy_config/instance-ca.pem"
-	_legacy_tunnels="$_legacy_daemon/cloudflared"
-	_legacy_license_staging="$_legacy_config/daemon-license-staging"
-
-	mkdir -p "$STATE_DIR" "$CONFIG_DIR"
-
-	for _f in license.id license.token server.id server-key.json server-key-id; do
-		if [ -f "$_legacy_state/$_f" ] && [ ! -e "$STATE_DIR/$_f" ]; then
-			mv "$_legacy_state/$_f" "$STATE_DIR/$_f"
-		fi
-		if [ -f "$_legacy_daemon/$_f" ] && [ ! -e "$STATE_DIR/$_f" ]; then
-			mv "$_legacy_daemon/$_f" "$STATE_DIR/$_f"
-		fi
-	done
-
-	if [ -f "$_legacy_env" ] && [ ! -e "$ENV_FILE" ]; then
-		mv "$_legacy_env" "$ENV_FILE"
-	fi
-
-	if [ -f "$_legacy_ca" ] && [ ! -e "$CA_PATH" ]; then
-		mv "$_legacy_ca" "$CA_PATH"
-	fi
-
-	if [ -d "$_legacy_tunnels" ] && [ ! -e "$STATE_DIR/cloudflared" ]; then
-		mv "$_legacy_tunnels" "$STATE_DIR/cloudflared"
-	fi
-
-	if [ -d "$_legacy_license_staging" ] && [ ! -e "$LICENSE_STAGING_DIR" ]; then
-		mv "$_legacy_license_staging" "$LICENSE_STAGING_DIR"
-	fi
-}
 # Keep in sync with orchestration/roles/deno-runtime/defaults/main.yml.
 TP_DENO_VERSION="2.9.1"
 
@@ -658,8 +616,6 @@ LICENSE_STAGING_DIR="$STATE_DIR/daemon-license-staging"
 if [ "$INSECURE_TLS" = true ]; then
 	export TURBOPANEL_RELEASE_TLS_INSECURE=1
 fi
-
-tp_migrate_legacy_layout
 
 mkdir -p "$STATE_DIR" "$CONFIG_DIR" "$BIN_DIR" "$INSTALL_ROOT/share" "$RUN_DIR"
 STAGING_DIR="$LICENSE_STAGING_DIR"

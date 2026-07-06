@@ -1,6 +1,5 @@
 import {
   buildAuthPayload,
-  buildCanonicalPayload,
   buildEnrollmentPayload,
   computePublicKeyFingerprint,
   generateDaemonKeypair,
@@ -26,7 +25,7 @@ Deno.test("generateDaemonKeypair produces valid Ed25519 JWKs", async () => {
     throw new Error("keyId must be a non-empty string");
   }
   if (Number.isNaN(Date.parse(result.createdAt))) {
-    throw new Error("createdAt must be a valid ISO date string");
+    throw new TypeError("createdAt must be a valid ISO date string");
   }
   if (!result.privateJwk.d) {
     throw new Error("privateJwk.d must be present");
@@ -78,25 +77,6 @@ Deno.test("buildAuthPayload produces the exact expected string", () => {
       "turbopanel-daemon-auth-v1\ncid\nnonce\nsid\nkid\nmid\nhost"
   ) {
     throw new Error("auth payload did not match expected shape");
-  }
-});
-
-Deno.test("buildCanonicalPayload aliases buildAuthPayload", () => {
-  const payload = buildCanonicalPayload({
-    challengeId: "cid",
-    nonce: "nonce",
-    serverId: "sid",
-    fingerprint: "kid",
-    machineId: "mid",
-    hostname: "host",
-  });
-  if (
-    payload !==
-      "turbopanel-daemon-auth-v1\ncid\nnonce\nsid\nkid\nmid\nhost"
-  ) {
-    throw new Error(
-      "canonical payload alias did not match expected auth shape",
-    );
   }
 });
 

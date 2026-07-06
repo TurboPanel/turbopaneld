@@ -6,6 +6,20 @@ TurboPanel **daemon** — Ansible-driven node agent; connects to the instance ov
 
 **Keep this file current.** When you learn something durable about daemon ↔ instance contracts — WS presence, reconnect behavior, command handlers, orchestration — add or update a note here in the same PR/session as the code change. Cross-repo cell/cost rules live in `../instance/AGENTS.md` (Daemon Cell section); link there instead of duplicating DO hibernation detail.
 
+### TypeScript style (SonarQube)
+
+- Prefer **`String#replaceAll()`** over **`String#replace()` with a global regex** when replacing every occurrence of a substring (`typescript:S7781`).
+- Use **`String.raw`** for string literals that contain backslashes so escapes stay readable and correct (`typescript:S7780`).
+- Prefer **optional chaining** (`obj?.prop`) over `!obj || obj.prop` (`typescript:S6582`).
+- Use **`new TypeError()`** for type/shape assertions in tests (`typescript:S7786`).
+- Avoid **nested ternaries** — use `if`/`switch` or helpers (`typescript:S3358`).
+- Extract helpers when **cognitive complexity** exceeds 15 (`typescript:S3776`).
+- Add **`// NOSONAR rule-key — reason`** for intentional read-only `/tmp` path-prefix checks (`typescript:S5443`).
+
+### Ansible style (SonarQube)
+
+- Prefer **`mode: "0640"`** / **`0750"`** with explicit **`owner`** / **`group`** over world-readable modes (`ansible:S2612`).
+
 ## Filesystem layout & path model (dev vs prod)
 
 `src/paths/layout.ts` is the **single source of truth** for every managed install location. `resolveLayout(env, opts)` returns mode-aware defaults; `detectInstallMode()` picks `development` vs `production` (a resolvable daemon checkout — `orchestration/ansible.cfg` or `main.ts`, and not a `deno-compile-*` extraction dir — means development, otherwise production). Every path is env-overridable (`TURBOPANEL_HOME`, `TURBOPANEL_BIN_DIR`, `TURBOPANEL_LIB_DIR`, `TURBOPANEL_RUNTIME_DIR`, `TURBOPANEL_SHARE_DIR`, `TURBOPANEL_UI_DIR`, `TURBOPANEL_ORCHESTRATION_DIR`, `TURBOPANEL_CONFIG_DIR`, `TURBOPANEL_STATE_DIR`, `TURBOPANEL_DAEMON_STATE_DIR`, `TURBOPANEL_LOG_DIR`, `TURBOPANEL_RUN_DIR`, `TURBOPANEL_RUNTIMES_DIR`, `TURBOPANEL_DAEMON_ROOT`). `src/orchestration/paths.ts` and `src/instance/paths.ts` derive their constants from `resolveLayout` — do **not** hardcode absolute paths in runtime code; add/extend a layout field instead. The development default checkout root is `<devRoot>/daemon` (from `TURBOPANEL_DEV_ROOT` / `$HOME`); production runtime code must never name the retired `/opt/turbopanel/platform` token — the layout module and CI guard are the only places allowed to reference it.

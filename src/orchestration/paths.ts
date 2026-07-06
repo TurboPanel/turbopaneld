@@ -11,7 +11,6 @@ export {
   detectInstallMode,
   DEV_DAEMON_ROOT_DEFAULT as DEV_DEFAULT_DAEMON_ROOT,
   hasDaemonCheckout,
-  hasOrchestrationTree,
   isCompiledStubRoot,
   resolveDaemonRoot,
 } from "../paths/layout.ts";

@@ -32,7 +32,6 @@ turbopanel_config_dir: /etc/turbopanel
 # a checkout-local --env-file=.env; native/js managed installs use the same file.
 turbopanel_daemon_env_file: "{{ turbopanel_config_dir }}/daemon.env"
 turbopanel_service_name: turbopaneld
-turbopanel_legacy_service_name: turbopanel-daemon
 # FHS daemon log target, shared by co-located dev and managed installs. Kept in
 # sync with the daemon-logs role default so the systemd unit template resolves
 # either way.

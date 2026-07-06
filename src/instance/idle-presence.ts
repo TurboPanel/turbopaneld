@@ -21,7 +21,6 @@ export type IdlePresenceOptions = {
 };
 
 export class IdlePresence {
-  readonly #serverId: string;
   readonly #idleCheckIntervalMs: number;
   readonly #idleThresholdMs: number;
   readonly #minPresenceIntervalMs: number;
@@ -33,7 +32,6 @@ export class IdlePresence {
   #lastAgentCommit: string | undefined;
 
   constructor(options: IdlePresenceOptions) {
-    this.#serverId = options.serverId;
     this.#idleCheckIntervalMs = options.idleCheckIntervalMs ?? IDLE_PRESENCE_MS;
     this.#idleThresholdMs = options.idleThresholdMs ?? IDLE_PRESENCE_MS;
     this.#minPresenceIntervalMs = options.minPresenceIntervalMs ??
@@ -68,7 +66,7 @@ export class IdlePresence {
 
   #sendHello(): void {
     const ws = this.#ws;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (ws?.readyState !== WebSocket.OPEN) return;
 
     const agent = getBuildInfo();
     this.#lastAgentCommit = agent.commit;
@@ -104,7 +102,7 @@ export class IdlePresence {
 
   #sendCellPing(): void {
     const ws = this.#ws;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (ws?.readyState !== WebSocket.OPEN) return;
 
     try {
       ws.send(CELL_PING_MESSAGE);
@@ -118,7 +116,7 @@ export class IdlePresence {
 
   #sendIdleHeartbeat(): void {
     const ws = this.#ws;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (ws?.readyState !== WebSocket.OPEN) return;
 
     const agent = getBuildInfo();
     const payload: {
@@ -142,6 +140,3 @@ export class IdlePresence {
     }
   }
 }
-
-/** @deprecated use {@link IDLE_PRESENCE_MS} */
-export const PRESENCE_HEARTBEAT_MS = IDLE_PRESENCE_MS;

@@ -153,14 +153,3 @@ export { InstallPresenter } from "./install-presenter.ts";
 export function createInstallPresenter(): InstallPresenter {
   return new InstallPresenter();
 }
-
-/** @deprecated Use {@link InstallPresenter} and {@link InstallEventPresenter}. */
-export type InstallerTUI = InstallEventPresenter;
-
-/** @deprecated Use {@link createInstallPresenter}. */
-export function createInstallerTui(): InstallEventPresenter | null {
-  if (!Deno.stdout.isTerminal()) {
-    return null;
-  }
-  return new InstallEventPresenter(new InstallPresenter());
-}

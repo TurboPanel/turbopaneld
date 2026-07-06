@@ -157,18 +157,15 @@ export function hasDaemonCheckout(root: string): boolean {
     pathExists(join(root, "main.ts"));
 }
 
-/** @deprecated Alias for {@link hasDaemonCheckout} — orchestration/assets guard. */
-export function hasOrchestrationTree(root: string): boolean {
-  return hasDaemonCheckout(root);
-}
-
 /**
  * Compiled `turbopaneld` resolves `import.meta.url` under a temporary
  * `deno-compile-*` directory — never treat that as the install root.
  */
 export function isCompiledStubRoot(root: string): boolean {
+  // Read-only path-prefix check (no writes under /tmp) — detects Deno's own
+  // deterministic compiled-binary extraction dir, not a use of shared storage.
   return root.includes("deno-compile") ||
-    (root.startsWith("/tmp/") && !hasDaemonCheckout(root));
+    (root.startsWith("/tmp/") && !hasDaemonCheckout(root)); // NOSONAR typescript:S5443
 }
 
 export function readEnv(name: string): string | undefined {

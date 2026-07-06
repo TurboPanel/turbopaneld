@@ -86,27 +86,6 @@ export function buildAuthPayload(params: {
   return `turbopanel-daemon-auth-v1\n${params.challengeId}\n${params.nonce}\n${params.serverId}\n${params.keyId}\n${params.machineId}\n${params.hostname}`;
 }
 
-/**
- * @deprecated Use buildEnrollmentPayload/buildAuthPayload instead.
- */
-export function buildCanonicalPayload(params: {
-  challengeId: string;
-  nonce: string;
-  serverId?: string;
-  machineId?: string;
-  hostname?: string;
-  fingerprint?: string;
-}): string {
-  return buildAuthPayload({
-    challengeId: params.challengeId,
-    nonce: params.nonce,
-    serverId: params.serverId ?? "",
-    keyId: params.fingerprint ?? "",
-    machineId: params.machineId ?? "",
-    hostname: params.hostname ?? "",
-  });
-}
-
 export async function signChallenge(
   privateJwk: JsonWebKey,
   payload: string,

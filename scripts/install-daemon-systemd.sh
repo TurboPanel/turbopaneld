@@ -15,7 +15,6 @@ ANSIBLE_CFG="$DAEMON_DIR/orchestration/ansible.cfg"
 ANSIBLE_LOCAL_TMP="$RUNTIMES_DIR/uv/cache/ansible-tmp"
 PLAYBOOK="$DAEMON_DIR/orchestration/playbooks/daemon-systemd-setup.yml"
 SERVICE_NAME="turbopaneld"
-LEGACY_SERVICE_NAME="turbopanel-daemon"
 
 if [ ! -x "$ANSIBLE_PLAYBOOK" ]; then
   echo "ansible-playbook not found at $ANSIBLE_PLAYBOOK" >&2
@@ -63,13 +62,6 @@ ANSIBLE_LOCAL_TEMP="$ANSIBLE_LOCAL_TMP" \
   "$PLAYBOOK"
 
 systemctl daemon-reload
-
-# Migrate any leftover legacy unit name from pre-rename installs.
-if systemctl cat "${LEGACY_SERVICE_NAME}.service" >/dev/null 2>&1; then
-  systemctl disable --now "$LEGACY_SERVICE_NAME" >/dev/null 2>&1 || true
-  rm -f "/etc/systemd/system/${LEGACY_SERVICE_NAME}.service"
-  systemctl daemon-reload
-fi
 
 if [ "$START_DAEMON" = true ]; then
   systemctl enable --now "$SERVICE_NAME"

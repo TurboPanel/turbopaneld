@@ -58,15 +58,6 @@ function sanitizeForLog(value: unknown): string {
 type DaemonMessage =
   | { type: "echo"; payload: unknown; at: string }
   | { type: "version"; commit: string; branch: string; at: string }
-  | { type: "command"; id: string; command: string; at: string }
-  | {
-    type: "command-result";
-    id: string;
-    exitCode: number;
-    stdout: string;
-    stderr: string;
-    at: string;
-  }
   | { type: "addresses-request"; id: string; at: string }
   | {
     type: "addresses-result";
@@ -888,22 +879,6 @@ export class InstanceClient {
           );
         });
         break;
-      case "command":
-        if (isTruthyFlag(Deno.env.get("TURBOPANEL_DEV_SHELL_COMMANDS"))) {
-          this.#runCommand(message, ws).catch((err) => {
-            logWarn(
-              "instance",
-              "command handler failed:",
-              sanitizeForLog(err),
-            );
-          });
-        } else {
-          logWarn(
-            "instance",
-            "ignoring legacy shell command — set TURBOPANEL_DEV_SHELL_COMMANDS=1 for dev-only use",
-          );
-        }
-        break;
       case "addresses-request":
         this.#collectAddresses(message, ws);
         break;
@@ -1227,49 +1202,6 @@ export class InstanceClient {
       addresses,
       at: new Date().toISOString(),
     };
-
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(result));
-    }
-  }
-
-  /**
-   * Run a shell command requested by the instance and stream the result back.
-   *
-   * Dev-only. Gate with `TURBOPANEL_DEV_SHELL_COMMANDS=1`. Never set in
-   * production. Production commands use typed handlers in `src/instance/commands/`.
-   */
-  async #runCommand(
-    message: Extract<DaemonMessage, { type: "command" }>,
-    ws: WebSocket,
-  ): Promise<void> {
-    logInfo("instance", "run command:", stripLogInjection(message.command));
-    let result: Extract<DaemonMessage, { type: "command-result" }>;
-    try {
-      const command = new Deno.Command("sh", {
-        args: ["-c", message.command],
-        stdout: "piped",
-        stderr: "piped",
-      });
-      const { code, stdout, stderr } = await command.output();
-      result = {
-        type: "command-result",
-        id: message.id,
-        exitCode: code,
-        stdout: new TextDecoder().decode(stdout),
-        stderr: new TextDecoder().decode(stderr),
-        at: new Date().toISOString(),
-      };
-    } catch (err) {
-      result = {
-        type: "command-result",
-        id: message.id,
-        exitCode: -1,
-        stdout: "",
-        stderr: err instanceof Error ? err.message : String(err),
-        at: new Date().toISOString(),
-      };
-    }
 
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(result));
