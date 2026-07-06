@@ -602,3 +602,12 @@ Deno.test("DENO_VERSION matches the deno-runtime Ansible role default", () => {
   }
   assertEq(match[1], DENO_VERSION, "deno_version role default");
 });
+
+Deno.test("ANSIBLE_CORE_VERSION matches the ansible-core pin in requirements.txt", () => {
+  const requirements = Deno.readTextFileSync(REQUIREMENTS_FILE);
+  const match = requirements.match(/^ansible-core==(\d+\.\d+)\.\*/m);
+  if (!match) {
+    throw new Error(`could not read ansible-core pin from ${REQUIREMENTS_FILE}`);
+  }
+  assertEq(match[1], ANSIBLE_CORE_VERSION, "ansible-core requirements pin");
+});

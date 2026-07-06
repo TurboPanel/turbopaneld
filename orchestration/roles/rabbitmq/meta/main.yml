@@ -7,7 +7,7 @@ galaxy_info:
     Run RabbitMQ 4 with management plugin in Docker; generated password and
     connection metadata under {{ turbopanel_config_dir }}/rabbitmq/ (FHS
     /etc/turbopanel; co-located dev shares it with prod).
-  min_ansible_version: "2.18"
+  min_ansible_version: "2.20"
   platforms:
     - name: Debian
       versions:

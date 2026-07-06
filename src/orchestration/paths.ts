@@ -18,7 +18,7 @@ export {
 
 export const UV_VERSION = "0.11.21";
 export const PYTHON_VERSION = "3.14.6";
-export const ANSIBLE_CORE_VERSION = "2.18";
+export const ANSIBLE_CORE_VERSION = "2.20";
 
 const layoutEnv = {
   TURBOPANEL_DAEMON_ROOT: readEnv("TURBOPANEL_DAEMON_ROOT"),

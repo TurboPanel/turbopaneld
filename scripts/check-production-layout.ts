@@ -204,6 +204,9 @@ const RETIRED_RUNTIMES_SCAN_ALLOWLIST = new Set([
   "scripts/check-production-layout.ts",
   "src/dev-sync-apply.ts", // comment only: documents legacy path for operators
   "src/orchestration/cloudflared.ts", // comment only
+  // Cleans up a stale shell-rc line (`. "/opt/turbopanel/runtimes/deno/.install/env"`)
+  // left behind by a pre-vendor-rename bootstrap on already-provisioned hosts.
+  "orchestration/playbooks/daemon-converge.yml",
 ]);
 
 // Unmanaged `/opt/turbopanel/vendor` literals outside approved layout modules.
@@ -215,6 +218,7 @@ const RUNTIME_ROOT_SCAN_ALLOWLIST = new Set([
   "scripts/lib/runtime-paths.sh",
   "scripts/install-daemon-systemd.sh",
   "orchestration/playbooks/daemon-install.yml", // comment only
+  "orchestration/playbooks/daemon-converge.yml", // comment only (legacy rc cleanup)
   "orchestration/roles/deno-runtime/meta/main.yml", // role description
 ]);
 
