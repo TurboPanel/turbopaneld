@@ -119,9 +119,8 @@
   post_tasks:
     # If converge aborts after instance-user stops the stack (uid migration) or
     # any later failure, bring enabled units back up instead of leaving a partial stack.
-    - name: Resolve dev stack unit list
+    - name: Resolve dev stack unit list base
       ansible.builtin.set_fact:
-        _dev_stack_units: "{{ _dev_stack_units_base + (_dev_stack_units_deno_extra if turbopanel_instance_runtime == 'deno' else []) }}"
         _dev_stack_units_base:
           - turbopanel-postgres
           - turbopanel-mailpit
@@ -133,6 +132,10 @@
           - turbopanel-mailer
         _dev_stack_units_deno_extra:
           - turbopanel-redis-insight
+
+    - name: Resolve dev stack unit list
+      ansible.builtin.set_fact:
+        _dev_stack_units: "{{ _dev_stack_units_base + (_dev_stack_units_deno_extra if turbopanel_instance_runtime == 'deno' else []) }}"
 
     - name: Ensure dev stack services are running after converge
       when: instance_start | default(true) | bool
