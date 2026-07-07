@@ -85,6 +85,9 @@
       - "{{ redis_insight_socat_image }}"
       - "TCP-LISTEN:{{ redis_insight_bridge_port }},fork,reuseaddr,bind=0.0.0.0"
       - "UNIX-CONNECT:{{ redis_socket_path }}"
+    _redis_insight_docker_user:
+      - "--user"
+      - "{{ redis_insight_container_uid }}:{{ redis_insight_container_gid }}"
 
 - name: Create and start redis-insight TCP bridge container
   ansible.builtin.command:
