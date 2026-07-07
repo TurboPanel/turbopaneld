@@ -13,7 +13,7 @@ function requireEnv(name: string): string {
 async function artifactFromPublishFile(
   publishDir: string,
   filename: string,
-  url: string,
+  urlBase: string,
 ): Promise<ArtifactEntry> {
   const path = `${publishDir}/${filename}`;
   let data: Uint8Array;
@@ -32,7 +32,8 @@ async function artifactFromPublishFile(
   copy.set(data);
   const digest = await crypto.subtle.digest("SHA-256", copy);
   return {
-    url: `${url}?build=${encodeURIComponent(BUILD_ID)}`,
+    // Version artifact paths by buildId — Bunny CDN ignores ?build= cache-bust params.
+    url: `${urlBase}/${BUILD_ID}/${filename}`,
     sha256: encodeHex(new Uint8Array(digest)),
     size: data.byteLength,
   };
@@ -63,22 +64,22 @@ const artifactBase = `${DL_BASE_URL}/channels/trunk/daemon`;
 const binaryAmd64 = await artifactFromPublishFile(
   publishDir,
   "turbopaneld-amd64.tar.zst",
-  `${artifactBase}/turbopaneld-amd64.tar.zst`,
+  artifactBase,
 );
 const binaryArm64 = await artifactFromPublishFile(
   publishDir,
   "turbopaneld-arm64.tar.zst",
-  `${artifactBase}/turbopaneld-arm64.tar.zst`,
+  artifactBase,
 );
 const jsFallback = await artifactFromPublishFile(
   publishDir,
   "turbopaneld.js.tar.zst",
-  `${artifactBase}/turbopaneld.js.tar.zst`,
+  artifactBase,
 );
 const orchestration = await artifactFromPublishFile(
   publishDir,
   "orchestration.tar.zst",
-  `${artifactBase}/orchestration.tar.zst`,
+  artifactBase,
 );
 
 const manifest: ChannelManifest = {

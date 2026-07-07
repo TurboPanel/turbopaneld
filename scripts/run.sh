@@ -134,22 +134,13 @@ tp_extract_orchestration_release() {
 
 tp_release_download_url() {
 	_url="$1"
-	_bust="${2:-}"
-	if [ -z "$_bust" ]; then
-		printf '%s' "$_url"
-		return 0
-	fi
-	case "$_url" in
-		*[\?\&]*) printf '%s&build=%s' "$_url" "$_bust" ;;
-		*) printf '%s?build=%s' "$_url" "$_bust" ;;
-	esac
+	printf '%s' "$_url"
 }
 
 tp_download_verified_artifact() {
 	_url="$1"
 	_sha256="$2"
 	_dest="$3"
-	_cache_bust="${4:-$_manifest_build_id}"
 
 	case "$_url" in
 		https://*) ;;
@@ -161,7 +152,7 @@ tp_download_verified_artifact() {
 
 	_curl="curl -fsSL"
 	[ "${TURBOPANEL_RELEASE_TLS_INSECURE:-}" = 1 ] && _curl="curl -fsSLk"
-	_fetch_url="$(tp_release_download_url "$_url" "$_cache_bust")"
+	_fetch_url="$(tp_release_download_url "$_url")"
 	_attempt=1
 	_max_attempts=5
 
