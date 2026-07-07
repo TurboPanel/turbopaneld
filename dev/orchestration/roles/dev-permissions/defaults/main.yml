@@ -12,6 +12,7 @@ turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/vendor"
 turbopanel_config_dir: /etc/turbopanel
 turbopanel_state_dir: /var/lib/turbopanel
 turbopanel_log_dir: /var/log/turbopanel
+runtime_socket_dir: /run/turbopanel
 # Dev source-repo root (dev user's home); the playbook overrides this from getent.
 turbopanel_dev_root: "{{ ansible_env.HOME }}"
 _dev_home_checkouts:

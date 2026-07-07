@@ -18,7 +18,14 @@
 - name: Ensure runtime socket dir and clear stale daemon lock
   ansible.builtin.command:
     cmd: "{{ turbopanel_orchestration_dir }}/scripts/ensure-single-daemon.sh"
+  environment:
+    TURBOPANEL_RUN_DIR: "{{ runtime_socket_dir }}"
+    TURBOPANEL_RUNTIME_SOCKET_OWNER: "{{ runtime_socket_owner }}"
+    TURBOPANEL_RUNTIME_SOCKET_GROUP: "{{ runtime_socket_group }}"
+    TURBOPANEL_RUNTIME_SOCKET_MODE: "{{ runtime_socket_mode }}"
   changed_when: false
+  # Install may run while turbopaneld is already active; flock then reports a held
+  # lock. Ownership migration is handled by runtime-sockets — this is only a probe.
   failed_when: false
 
 - name: Install daemon systemd unit

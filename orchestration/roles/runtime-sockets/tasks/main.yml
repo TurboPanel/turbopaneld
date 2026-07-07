@@ -20,3 +20,22 @@
   changed_when: >-
     runtime_sockets_tmpfiles.changed | default(false) or
     not runtime_socket_dir_stat.stat.exists | default(false)
+
+# tmpfiles.d only creates missing paths — it does not migrate ownership when a
+# prior managed converge left /run/turbopanel owned by the turbopanel service
+# account and co-located dev now runs as the human dev user.
+- name: Ensure runtime socket directory ownership
+  ansible.builtin.file:
+    path: "{{ runtime_socket_dir }}"
+    state: directory
+    owner: "{{ runtime_socket_owner }}"
+    group: "{{ runtime_socket_group }}"
+    mode: "{{ runtime_socket_mode }}"
+
+- name: Ensure postgres runtime socket directory ownership
+  ansible.builtin.file:
+    path: "{{ runtime_socket_dir }}/postgres"
+    state: directory
+    owner: "{{ postgres_socket_owner }}"
+    group: "{{ postgres_socket_group }}"
+    mode: "2770"

@@ -24,6 +24,7 @@
         - { path: "{{ turbopanel_config_dir }}" }
         - { path: "{{ turbopanel_state_dir }}" }
         - { path: "{{ turbopanel_log_dir }}" }
+        - { path: "{{ runtime_socket_dir }}" }
 
     - name: Stat home source checkouts
       ansible.builtin.stat:
