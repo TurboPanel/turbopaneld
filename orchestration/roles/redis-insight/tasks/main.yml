@@ -23,6 +23,74 @@
   changed_when: _redis_insight_volume_create.rc == 0
   failed_when: false
 
+- name: Inspect redis-insight TCP bridge container
+  ansible.builtin.command:
+    argv: [docker, inspect, "{{ redis_insight_bridge_container_name }}"]
+  register: _redis_insight_bridge_inspect_cmd
+  changed_when: false
+  failed_when: false
+
+- name: Parse redis-insight TCP bridge container inspection
+  ansible.builtin.set_fact:
+    _redis_insight_bridge_container: "{{ (_redis_insight_bridge_inspect_cmd.stdout | from_json)[0] }}"
+  when: _redis_insight_bridge_inspect_cmd.rc == 0
+
+- name: Set redis-insight TCP bridge container state facts
+  ansible.builtin.set_fact:
+    _redis_insight_bridge_container_exists: true
+    _redis_insight_bridge_running: "{{ _redis_insight_bridge_container.State.Running | default(false) }}"
+    _redis_insight_bridge_status: "{{ _redis_insight_bridge_container.State.Status | default('') }}"
+    _redis_insight_bridge_network_ok: "{{ turbopanel_docker_network in (_redis_insight_bridge_container.NetworkSettings.Networks | default({})) }}"
+    _redis_insight_bridge_socket_ok: "{{ (_redis_insight_bridge_container.Mounts | default([]) | selectattr('Destination', 'equalto', redis_socket_mount_dir) | list | length) > 0 }}"
+  when: _redis_insight_bridge_inspect_cmd.rc == 0
+
+- name: Set redis-insight TCP bridge container missing facts
+  ansible.builtin.set_fact:
+    _redis_insight_bridge_container_exists: false
+    _redis_insight_bridge_running: false
+  when: _redis_insight_bridge_inspect_cmd.rc != 0
+
+- name: Remove redis-insight TCP bridge container when unhealthy
+  ansible.builtin.command:
+    cmd: docker rm -f {{ redis_insight_bridge_container_name }}
+  when:
+    - _redis_insight_bridge_container_exists | bool
+    - (not _redis_insight_bridge_network_ok | bool) or (not _redis_insight_bridge_socket_ok | bool) or (_redis_insight_bridge_status | trim in ['restarting', 'exited', 'dead'])
+  register: _redis_insight_bridge_removed
+  changed_when: _redis_insight_bridge_removed.rc == 0
+
+- name: Refresh redis-insight TCP bridge container facts after removal
+  ansible.builtin.set_fact:
+    _redis_insight_bridge_container_exists: false
+    _redis_insight_bridge_running: false
+  when: _redis_insight_bridge_removed is changed
+
+- name: Build redis-insight TCP bridge docker run argument list
+  ansible.builtin.set_fact:
+    _redis_insight_bridge_docker_run_args: "{{ _redis_insight_bridge_docker_run_base + (_redis_insight_docker_user if (turbopanel_dev_user | default('') | length > 0) else []) + _redis_insight_bridge_docker_run_cmd }}"
+  vars:
+    _redis_insight_bridge_docker_run_base:
+      - docker
+      - run
+      - "--name"
+      - "{{ redis_insight_bridge_container_name }}"
+      - "--restart"
+      - unless-stopped
+      - "-d"
+      - "--network"
+      - "{{ turbopanel_docker_network }}"
+      - "-v"
+      - "{{ redis_socket_mount_dir }}:{{ redis_socket_mount_dir }}:ro"
+    _redis_insight_bridge_docker_run_cmd:
+      - "{{ redis_insight_socat_image }}"
+      - "TCP-LISTEN:{{ redis_insight_bridge_port }},fork,reuseaddr,bind=0.0.0.0"
+      - "UNIX-CONNECT:{{ redis_socket_path }}"
+
+- name: Create and start redis-insight TCP bridge container
+  ansible.builtin.command:
+    cmd: "{{ _redis_insight_bridge_docker_run_args | join(' ') }}"
+  when: not _redis_insight_bridge_container_exists | bool
+
 - name: Inspect redis-insight container
   ansible.builtin.command:
     argv: [docker, inspect, "{{ redis_insight_container_name }}"]
@@ -43,6 +111,11 @@
     _redis_insight_network_ok: "{{ turbopanel_docker_network in (_redis_insight_container.NetworkSettings.Networks | default({})) }}"
     _redis_insight_web_ok: "{{ _redis_insight_container.HostConfig.PortBindings['5540/tcp'] is defined }}"
     _redis_insight_socket_ok: "{{ (_redis_insight_container.Mounts | default([]) | selectattr('Destination', 'equalto', redis_socket_mount_dir) | list | length) > 0 }}"
+    _redis_insight_preconfig_ok: >-
+      {{
+        ('RI_REDIS_HOST=' ~ redis_insight_bridge_container_name) in (_redis_insight_container.Config.Env | default([]))
+        and ('RI_ACCEPT_TERMS_AND_CONDITIONS=true') in (_redis_insight_container.Config.Env | default([]))
+      }}
   when: _redis_insight_inspect_cmd.rc == 0
 
 - name: Set redis-insight container missing facts
@@ -56,7 +129,7 @@
     cmd: docker rm -f {{ redis_insight_container_name }}
   when:
     - _redis_insight_container_exists | bool
-    - (not _redis_insight_network_ok | bool) or (not _redis_insight_web_ok | bool) or (not _redis_insight_socket_ok | bool) or (_redis_insight_status | trim in ['restarting', 'exited', 'dead'])
+    - (not _redis_insight_network_ok | bool) or (not _redis_insight_web_ok | bool) or (not _redis_insight_socket_ok | bool) or (not _redis_insight_preconfig_ok | bool) or (_redis_insight_status | trim in ['restarting', 'exited', 'dead'])
   register: _redis_insight_removed
   changed_when: _redis_insight_removed.rc == 0
 
@@ -86,6 +159,14 @@
       - "{{ redis_insight_volume_name }}:/data"
       - "-v"
       - "{{ redis_socket_mount_dir }}:{{ redis_socket_mount_dir }}:ro"
+      - "-e"
+      - "RI_ACCEPT_TERMS_AND_CONDITIONS=true"
+      - "-e"
+      - "RI_REDIS_HOST={{ redis_insight_bridge_container_name }}"
+      - "-e"
+      - "RI_REDIS_PORT={{ redis_insight_bridge_port }}"
+      - "-e"
+      - "RI_REDIS_ALIAS={{ redis_insight_redis_alias }}"
     _redis_insight_docker_user:
       - "--user"
       - "{{ redis_insight_container_uid }}:{{ redis_insight_container_gid }}"

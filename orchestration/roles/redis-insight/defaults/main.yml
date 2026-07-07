@@ -3,7 +3,13 @@ redis_insight_container_name: turbopanelredisinsight
 redis_insight_volume_name: turbopanelredisinsight
 redis_insight_service_name: turbopanel-redis-insight
 redis_insight_web_port: 5540
+# TCP bridge (socat) so Redis Insight can reach the host Unix socket via RI_REDIS_* env vars.
+redis_insight_bridge_container_name: turbopanelredisinsight-bridge
+redis_insight_socat_image: alpine/socat
+redis_insight_bridge_port: 6379
+redis_insight_redis_alias: turbopanel-dev-cache
 redis_socket_mount_dir: /run/turbopanel
+redis_socket_path: "{{ redis_socket_mount_dir }}/redis.sock"
 turbopanel_docker_network: turbopanel
 # FHS config dir (dev shares it with prod).
 turbopanel_config_dir: /etc/turbopanel

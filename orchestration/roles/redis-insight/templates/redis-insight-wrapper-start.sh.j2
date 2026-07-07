@@ -1,10 +1,16 @@
 #!/bin/sh
 set -eu
 
+bridge="{{ redis_insight_bridge_container_name }}"
 container="{{ redis_insight_container_name }}"
 web_port="{{ redis_insight_web_port }}"
 max_attempts=30
 sleep_seconds=1
+
+bridge_running="$(/usr/bin/docker inspect -f '{% raw %}{{.State.Running}}{% endraw %}' "$bridge" 2>/dev/null || echo false)"
+if [ "$bridge_running" != "true" ]; then
+  /usr/bin/docker start "$bridge"
+fi
 
 running="$(/usr/bin/docker inspect -f '{% raw %}{{.State.Running}}{% endraw %}' "$container" 2>/dev/null || echo false)"
 if [ "$running" != "true" ]; then

@@ -9,7 +9,7 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStartPre=/bin/sh -c '/usr/bin/docker network inspect {{ turbopanel_docker_network }} >/dev/null 2>&1 || /usr/bin/docker network create {{ turbopanel_docker_network }}'
 ExecStart={{ turbopanel_config_dir }}/redis-insight/wrapper-start.sh
-ExecStop=/usr/bin/docker stop -t 10 {{ redis_insight_container_name }}
+ExecStop=/bin/sh -c '/usr/bin/docker stop -t 10 {{ redis_insight_container_name }} {{ redis_insight_bridge_container_name }}'
 
 [Install]
 WantedBy=multi-user.target
