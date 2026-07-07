@@ -1,5 +1,5 @@
 import { getBuildInfo } from "../build-info.ts";
-import { logWarn } from "../logger.ts";
+import { logDebug, logWarn } from "../logger.ts";
 
 export const IDLE_PRESENCE_MS = 60_000;
 
@@ -99,6 +99,7 @@ export class IdlePresence {
     this.#sendHello();
     this.#idleTimer = setInterval(() => {
       this.#checkStaleConnection();
+      this.#maybeSendCellPing();
       this.#maybeSendIdleHeartbeat();
     }, this.#idleCheckIntervalMs);
   }
@@ -147,16 +148,34 @@ export class IdlePresence {
     }
   }
 
-  #maybeSendIdleHeartbeat(): void {
-    if (Date.now() - this.#lastActivityAt < this.#idleThresholdMs) return;
+  /**
+   * Keeps the instance's `getWebSocketAutoResponseTimestamp` warm on a fixed
+   * cadence — the offline-sweep cron (`instance` repo, `cell/offline-sweep.ts`)
+   * has no other cheap liveness signal for a hibernating Durable Object, and
+   * falls back to comparing against the connection's original `connectedAt`
+   * when it's never seen a ping. That fallback is only safe for a
+   * freshly-attached socket; for any long-lived connection `connectedAt` is
+   * always "old", so if this ping is gated behind "has the connection been
+   * idle" (as it used to be), a busy/healthy connection that has other
+   * traffic flowing (via `touchActivity()`/`noteInboundActivity()`) never
+   * looks idle, the ping never fires, and the sweep misclassifies it as
+   * stale forever. So: send the ping unconditionally on this cadence,
+   * independent of `#lastActivityAt` — only `minPresenceIntervalMs` spacing
+   * applies.
+   */
+  #maybeSendCellPing(): void {
     if (
       this.#lastPresenceSendAt > 0 &&
       Date.now() - this.#lastPresenceSendAt < this.#minPresenceIntervalMs
     ) {
       return;
     }
-
     this.#sendCellPing();
+  }
+
+  /** App-level heartbeat (build info) — fine to skip while other traffic is flowing. */
+  #maybeSendIdleHeartbeat(): void {
+    if (Date.now() - this.#lastActivityAt < this.#idleThresholdMs) return;
 
     const agent = getBuildInfo();
     if (agent.commit !== this.#lastAgentCommit) {
@@ -170,6 +189,14 @@ export class IdlePresence {
 
     try {
       ws.send(CELL_PING_MESSAGE);
+      // #region agent log — debug session 2e6859, hypothesis H5 (cell ping
+      // starved by idle-gate on busy connections). Remove after verification.
+      logDebug(
+        "instance",
+        "[debug:2e6859:H5] cell ping sent, idleSinceActivityMs=",
+        Date.now() - this.#lastActivityAt,
+      );
+      // #endregion
       const now = Date.now();
       this.#lastActivityAt = now;
       this.#lastPresenceSendAt = now;

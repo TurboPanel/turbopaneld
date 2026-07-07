@@ -705,9 +705,14 @@ Deno.test({
 })
 
 Deno.test({
-  name: 'IdlePresence skips idle heartbeat when activity is recent',
+  name:
+    'IdlePresence sends cell ping on schedule even when other traffic keeps the connection busy',
   permissions: { env: true },
   fn: async () => {
+    // Regression test for the "busy connection never looks idle, so the cell
+    // ping never fires, so the offline-sweep's getWebSocketAutoResponseTimestamp
+    // never gets warmed" bug: the dedicated liveness ping must not be gated
+    // behind the same idle-activity clock as the app-level heartbeat.
     const idleCheckIntervalMs = 10
     const sentFrames: string[] = []
     const ws = {
@@ -727,7 +732,15 @@ Deno.test({
       session.attach(ws)
       session.touchActivity()
       await new Promise((resolve) => setTimeout(resolve, idleCheckIntervalMs + 20))
-      assertEquals(parseSentFrames(sentFrames).length, 1)
+      const frames = parseSentFrames(sentFrames)
+      assert(
+        frames.some((frame) => frame.type === 'ping'),
+        'cell ping must be sent even though the connection has recent (non-idle) activity',
+      )
+      assert(
+        !frames.some((frame) => frame.type === 'heartbeat'),
+        'app-level heartbeat should still be skipped without an agent-commit change',
+      )
     } finally {
       session.detach()
     }
