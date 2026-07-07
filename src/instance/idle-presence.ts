@@ -99,8 +99,7 @@ export class IdlePresence {
     this.#sendHello();
     this.#idleTimer = setInterval(() => {
       this.#checkStaleConnection();
-      this.#maybeSendCellPing();
-      this.#maybeSendIdleHeartbeat();
+      this.#maybeSendPresence();
     }, this.#idleCheckIntervalMs);
   }
 
@@ -149,21 +148,33 @@ export class IdlePresence {
   }
 
   /**
-   * Keeps the instance's `getWebSocketAutoResponseTimestamp` warm on a fixed
-   * cadence — the offline-sweep cron (`instance` repo, `cell/offline-sweep.ts`)
-   * has no other cheap liveness signal for a hibernating Durable Object, and
-   * falls back to comparing against the connection's original `connectedAt`
-   * when it's never seen a ping. That fallback is only safe for a
-   * freshly-attached socket; for any long-lived connection `connectedAt` is
-   * always "old", so if this ping is gated behind "has the connection been
-   * idle" (as it used to be), a busy/healthy connection that has other
-   * traffic flowing (via `touchActivity()`/`noteInboundActivity()`) never
-   * looks idle, the ping never fires, and the sweep misclassifies it as
-   * stale forever. So: send the ping unconditionally on this cadence,
-   * independent of `#lastActivityAt` — only `minPresenceIntervalMs` spacing
-   * applies.
+   * Keeps two independent server-side liveness signals warm on a fixed
+   * cadence, regardless of other traffic on the connection:
+   *
+   * 1. The raw cell ping — the instance's `getWebSocketAutoResponseTimestamp`
+   *    (the offline-sweep cron's only cheap liveness signal for a
+   *    hibernating Durable Object; see `cell/offline-sweep.ts`).
+   * 2. The app-level heartbeat — the *only* thing that invokes the
+   *    instance's `onDaemonInbound`, which self-heals a Postgres
+   *    `connected: false` projection back to online when the connection is
+   *    actually still healthy (see `cell/control-plane-monitor.ts`
+   *    `onDaemonInbound`'s `projectedOffline` check). Raw pings are answered
+   *    by `setWebSocketAutoResponse` entirely at the runtime level and never
+   *    reach that JS handler, so without a periodic heartbeat a
+   *    false-positive "offline" mark (from the sweep, or any other cause) is
+   *    permanently sticky for an otherwise-healthy, quiet connection — the
+   *    daemon never has a reason to reconnect, so nothing ever re-triggers
+   *    `onDaemonConnected`.
+   *
+   * Both used to be gated behind "has the connection been idle" and (for the
+   * heartbeat) "did the agent commit change" — which meant a busy connection
+   * with other traffic (via `touchActivity()`/`noteInboundActivity()`) never
+   * looked idle, so neither signal ever fired. Send both unconditionally on
+   * this cadence; only `minPresenceIntervalMs` spacing applies. The
+   * instance's `HEARTBEAT_DEBOUNCE_MS` (60s) already assumes this cadence
+   * and coalesces the resulting Postgres touches.
    */
-  #maybeSendCellPing(): void {
+  #maybeSendPresence(): void {
     if (
       this.#lastPresenceSendAt > 0 &&
       Date.now() - this.#lastPresenceSendAt < this.#minPresenceIntervalMs
@@ -171,16 +182,7 @@ export class IdlePresence {
       return;
     }
     this.#sendCellPing();
-  }
-
-  /** App-level heartbeat (build info) — fine to skip while other traffic is flowing. */
-  #maybeSendIdleHeartbeat(): void {
-    if (Date.now() - this.#lastActivityAt < this.#idleThresholdMs) return;
-
-    const agent = getBuildInfo();
-    if (agent.commit !== this.#lastAgentCommit) {
-      this.#sendIdleHeartbeat();
-    }
+    this.#sendHeartbeat();
   }
 
   #sendCellPing(): void {
@@ -205,7 +207,7 @@ export class IdlePresence {
     }
   }
 
-  #sendIdleHeartbeat(): void {
+  #sendHeartbeat(): void {
     const ws = this.#ws;
     if (ws?.readyState !== WebSocket.OPEN) return;
 
@@ -225,9 +227,14 @@ export class IdlePresence {
 
     try {
       ws.send(JSON.stringify(payload));
+      // #region agent log — debug session 2e6859, hypothesis H7 (sticky
+      // offline projection: onDaemonInbound self-heal never invoked because
+      // heartbeats were commit-gated). Remove after verification.
+      logDebug("instance", "[debug:2e6859:H7] heartbeat sent");
+      // #endregion
       this.#lastActivityAt = Date.now();
     } catch (err) {
-      logWarn("instance", "idle heartbeat send failed:", sanitizeForLog(err));
+      logWarn("instance", "heartbeat send failed:", sanitizeForLog(err));
     }
   }
 }

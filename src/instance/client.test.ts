@@ -692,11 +692,19 @@ Deno.test({
       await new Promise((resolve) => setTimeout(resolve, idleCheckIntervalMs + 20))
 
       const afterInterval = parseSentFrames(sentFrames)
-      assert(afterInterval.length >= 2, 'cell ping should be sent after silence')
-      assertEquals(afterInterval.at(-1)?.type, 'ping')
       assert(
-        !afterInterval.some((frame) => frame.type === 'heartbeat'),
-        'idle cadence must not send app-level heartbeat without agent change',
+        afterInterval.length >= 3,
+        'cell ping and app-level heartbeat should both be sent after silence',
+      )
+      assert(
+        afterInterval.some((frame) => frame.type === 'ping'),
+        'cell ping should be sent',
+      )
+      assert(
+        afterInterval.some((frame) => frame.type === 'heartbeat'),
+        'app-level heartbeat must also be sent on this cadence — it is the only ' +
+          'thing that invokes the instance onDaemonInbound self-heal for a ' +
+          'Postgres connected:false projection (see idle-presence.ts docs)',
       )
     } finally {
       session.detach()
@@ -706,13 +714,14 @@ Deno.test({
 
 Deno.test({
   name:
-    'IdlePresence sends cell ping on schedule even when other traffic keeps the connection busy',
+    'IdlePresence sends cell ping and heartbeat on schedule even when other traffic keeps the connection busy',
   permissions: { env: true },
   fn: async () => {
     // Regression test for the "busy connection never looks idle, so the cell
-    // ping never fires, so the offline-sweep's getWebSocketAutoResponseTimestamp
-    // never gets warmed" bug: the dedicated liveness ping must not be gated
-    // behind the same idle-activity clock as the app-level heartbeat.
+    // ping/heartbeat never fire, so neither the offline-sweep's
+    // getWebSocketAutoResponseTimestamp nor the instance's onDaemonInbound
+    // self-heal ever gets warmed" bug: neither liveness signal may be gated
+    // behind the idle-activity clock.
     const idleCheckIntervalMs = 10
     const sentFrames: string[] = []
     const ws = {
@@ -738,8 +747,8 @@ Deno.test({
         'cell ping must be sent even though the connection has recent (non-idle) activity',
       )
       assert(
-        !frames.some((frame) => frame.type === 'heartbeat'),
-        'app-level heartbeat should still be skipped without an agent-commit change',
+        frames.some((frame) => frame.type === 'heartbeat'),
+        'app-level heartbeat must be sent even though the connection has recent (non-idle) activity',
       )
     } finally {
       session.detach()
