@@ -18,24 +18,60 @@ export type IdlePresenceOptions = {
   idleThresholdMs?: number;
   /** Minimum spacing between routine cell pings; defaults to {@link idleCheckIntervalMs}. */
   minPresenceIntervalMs?: number;
+  /**
+   * How long we tolerate sending cell pings with zero inbound traffic before
+   * treating the socket as dead (see the "Zombie-connection note" on
+   * {@link IdlePresence}). Defaults to 3x {@link idleThresholdMs}.
+   */
+  staleConnectionMs?: number;
+  /**
+   * Invoked at most once per `attach()` when {@link staleConnectionMs} elapses
+   * with no inbound traffic despite outgoing pings. The owner is expected to
+   * close/replace the socket so the reconnect loop can run.
+   */
+  onStaleConnection?: () => void;
 };
 
+/**
+ * Tracks idle presence for one daemon<->instance WebSocket and detects
+ * "zombie" connections.
+ *
+ * Zombie-connection note: a WebSocket can go half-open — the local socket
+ * object still reports `OPEN` and `ws.send()` keeps "succeeding" (the OS just
+ * buffers the write) even though the peer is long gone and nothing is coming
+ * back. Historically this class only tracked "have we sent or received
+ * *anything* recently", and `#sendCellPing` re-armed that same clock on every
+ * successful *send* — so a one-way-dead socket could ping into the void
+ * forever without ever being detected, leaving the daemon "connected" in its
+ * own eyes while the instance had already reaped the session (see
+ * `daemon-cell event=detach code=1006` / offline-sweep in the instance repo).
+ * `#lastInboundAt` is the fix: it only advances on confirmed inbound traffic
+ * (`noteInboundActivity()`, wired to `ws.onmessage`), so a stalled read is
+ * detected independent of how many pings we've successfully sent.
+ */
 export class IdlePresence {
   readonly #idleCheckIntervalMs: number;
   readonly #idleThresholdMs: number;
   readonly #minPresenceIntervalMs: number;
+  readonly #staleConnectionMs: number;
+  readonly #onStaleConnection: (() => void) | undefined;
 
   #ws: WebSocket | undefined;
   #idleTimer: ReturnType<typeof setInterval> | undefined;
   #lastActivityAt = Date.now();
+  #lastInboundAt = Date.now();
   #lastPresenceSendAt = 0;
   #lastAgentCommit: string | undefined;
+  #staleReported = false;
 
   constructor(options: IdlePresenceOptions) {
     this.#idleCheckIntervalMs = options.idleCheckIntervalMs ?? IDLE_PRESENCE_MS;
     this.#idleThresholdMs = options.idleThresholdMs ?? IDLE_PRESENCE_MS;
     this.#minPresenceIntervalMs = options.minPresenceIntervalMs ??
       this.#idleCheckIntervalMs;
+    this.#staleConnectionMs = options.staleConnectionMs ??
+      this.#idleThresholdMs * 3;
+    this.#onStaleConnection = options.onStaleConnection;
   }
 
   get lastActivityAt(): number {
@@ -46,12 +82,23 @@ export class IdlePresence {
     this.#lastActivityAt = Date.now();
   }
 
+  /** Call only for confirmed inbound WebSocket traffic — see class docs. */
+  noteInboundActivity(): void {
+    const now = Date.now();
+    this.#lastActivityAt = now;
+    this.#lastInboundAt = now;
+    this.#staleReported = false;
+  }
+
   attach(ws: WebSocket): void {
     this.detach();
     this.#ws = ws;
     this.#lastActivityAt = Date.now();
+    this.#lastInboundAt = Date.now();
+    this.#staleReported = false;
     this.#sendHello();
     this.#idleTimer = setInterval(() => {
+      this.#checkStaleConnection();
       this.#maybeSendIdleHeartbeat();
     }, this.#idleCheckIntervalMs);
   }
@@ -62,6 +109,23 @@ export class IdlePresence {
       this.#idleTimer = undefined;
     }
     this.#ws = undefined;
+  }
+
+  #checkStaleConnection(): void {
+    if (this.#staleReported) return;
+    const silentForMs = Date.now() - this.#lastInboundAt;
+    if (silentForMs <= this.#staleConnectionMs) return;
+    this.#staleReported = true;
+    // #region agent log
+    fetch('http://localhost:7437/ingest/3675226b-64d8-4d3b-9f8c-56c9f0e5d72f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'2e6859'},body:JSON.stringify({sessionId:'2e6859',hypothesisId:'H3-zombie-socket',location:'idle-presence.ts:#checkStaleConnection',message:'stale connection detected, forcing reconnect',data:{silentForMs,staleConnectionMs:this.#staleConnectionMs},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion agent log
+    logWarn(
+      "instance",
+      "no inbound cell traffic for",
+      silentForMs,
+      "ms despite outgoing pings; forcing reconnect",
+    );
+    this.#onStaleConnection?.();
   }
 
   #sendHello(): void {

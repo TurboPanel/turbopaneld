@@ -786,7 +786,7 @@ export class InstanceClient {
     this.#idlePresence?.attach(ws);
 
     ws.onmessage = (event) => {
-      this.#idlePresence?.touchActivity();
+      this.#idlePresence?.noteInboundActivity();
       const raw = typeof event.data === "string"
         ? event.data
         : String(event.data);
@@ -845,7 +845,13 @@ export class InstanceClient {
     }
 
     this.#idlePresence?.detach();
-    this.#idlePresence = new IdlePresence({ serverId });
+    this.#idlePresence = new IdlePresence({
+      serverId,
+      // A stalled/half-open socket never fires onclose/onerror on its own —
+      // force-close it here so #runConnectLoop's close-event await resolves
+      // and the normal reconnect/backoff path takes over. See idle-presence.ts.
+      onStaleConnection: () => this.#closeActiveSocket(),
+    });
   }
 
   // Identity is established locally (enrollment + server.id) and confirmed via

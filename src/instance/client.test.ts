@@ -1438,3 +1438,78 @@ Deno.test({
     }
   },
 })
+
+Deno.test({
+  name: 'IdlePresence forces reconnect when pings go unanswered (zombie connection)',
+  permissions: { env: true },
+  fn: async () => {
+    const idleCheckIntervalMs = 5
+    const sentFrames: string[] = []
+    const ws = {
+      readyState: MockWebSocket.OPEN,
+      send(data: string) {
+        sentFrames.push(data)
+      },
+    } as unknown as WebSocket
+
+    let staleCount = 0
+    const session = new IdlePresence({
+      serverId: 'srv-presence',
+      idleCheckIntervalMs,
+      idleThresholdMs: idleCheckIntervalMs,
+      staleConnectionMs: idleCheckIntervalMs * 3,
+      onStaleConnection: () => {
+        staleCount++
+      },
+    })
+
+    try {
+      session.attach(ws)
+      // Pings keep being sent successfully, but nothing ever comes back —
+      // this must NOT reset the staleness clock the way it used to.
+      await new Promise((resolve) => setTimeout(resolve, idleCheckIntervalMs * 6))
+
+      const pingCount = sentFrames.filter((frame) => frame.includes('"type":"ping"')).length
+      assert(pingCount >= 2, 'pings should keep going out while the socket looks open')
+      assertEquals(staleCount, 1, 'a one-way-dead socket must be reported exactly once')
+    } finally {
+      session.detach()
+    }
+  },
+})
+
+Deno.test({
+  name: 'IdlePresence does not report stale when pongs/messages keep arriving',
+  permissions: { env: true },
+  fn: async () => {
+    const idleCheckIntervalMs = 5
+    const ws = {
+      readyState: MockWebSocket.OPEN,
+      send() {},
+    } as unknown as WebSocket
+
+    let staleCount = 0
+    const session = new IdlePresence({
+      serverId: 'srv-presence',
+      idleCheckIntervalMs,
+      idleThresholdMs: idleCheckIntervalMs,
+      staleConnectionMs: idleCheckIntervalMs * 3,
+      onStaleConnection: () => {
+        staleCount++
+      },
+    })
+
+    try {
+      session.attach(ws)
+      const inboundTimer = setInterval(() => session.noteInboundActivity(), idleCheckIntervalMs)
+      try {
+        await new Promise((resolve) => setTimeout(resolve, idleCheckIntervalMs * 10))
+      } finally {
+        clearInterval(inboundTimer)
+      }
+      assertEquals(staleCount, 0, 'a healthy, responsive socket must never be reported stale')
+    } finally {
+      session.detach()
+    }
+  },
+})
