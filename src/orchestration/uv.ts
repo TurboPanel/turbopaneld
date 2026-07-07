@@ -3,6 +3,7 @@ import { join } from "@std/path";
 import { run, runLogged } from "./exec.ts";
 import { logInfo, logWarn } from "../logger.ts";
 import { logComponent } from "./presentation.ts";
+import { withRetry } from "./retry.ts";
 import {
   CACHE_DIR,
   resolveUvTarget,
@@ -17,6 +18,11 @@ import {
 
 /** Mode for vendored CLI binaries installed under vendor (owner rwx, group/other rx). */
 const INSTALLED_VENDOR_BINARY_MODE = 0o755;
+
+/** Per-request timeout for uv download fetches. Generous for slow/throttled links. */
+const FETCH_TIMEOUT_MS = 30_000;
+/** Total attempts (including the first) for each fetch before giving up. */
+const FETCH_RETRY_ATTEMPTS = 4;
 
 async function fileExists(path: string): Promise<boolean> {
   try {
@@ -121,32 +127,51 @@ export async function ensureUv(): Promise<void> {
   logInfo("orchestration", `uv ${UV_VERSION} installed at ${UV_BIN}`);
 }
 
+/**
+ * Fetches with a bounded timeout so a stalled connection fails fast enough for
+ * {@link withRetry} to try again, instead of hanging the whole bootstrap step.
+ */
+async function fetchWithTimeout(url: string): Promise<Response> {
+  return await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+}
+
+/**
+ * Downloads bytes from `url`, retrying transient failures (DNS blips, TCP
+ * resets, upstream 5xx, timeouts) with backoff. A single bad attempt against
+ * GitHub's release CDN should not fail the whole bootstrap — see {@link withRetry}.
+ */
 async function fetchBytes(url: string): Promise<Uint8Array> {
-  const res = await fetch(url);
-  if (!res.ok) {
-    throw new Error(
-      `Failed to download ${url}: ${res.status} ${res.statusText}`,
-    );
-  }
-  return new Uint8Array(await res.arrayBuffer());
+  return await withRetry(async () => {
+    const res = await fetchWithTimeout(url);
+    if (!res.ok) {
+      await res.body?.cancel();
+      throw new Error(
+        `Failed to download ${url}: ${res.status} ${res.statusText}`,
+      );
+    }
+    return new Uint8Array(await res.arrayBuffer());
+  }, { label: `download ${url}`, attempts: FETCH_RETRY_ATTEMPTS });
 }
 
 async function fetchSha256(url: string): Promise<string> {
-  const res = await fetch(url);
-  if (!res.ok) {
-    throw new Error(
-      `Failed to download checksum ${url}: ${res.status} ${res.statusText}`,
-    );
-  }
-  // Format is "<hex>  <filename>".
-  const text = await res.text();
-  const hex = text.trim().split(/\s+/)[0]?.toLowerCase();
-  if (!hex || !/^[0-9a-f]{64}$/.test(hex)) {
-    throw new Error(
-      `Unexpected checksum content from ${url}: "${text.trim()}"`,
-    );
-  }
-  return hex;
+  return await withRetry(async () => {
+    const res = await fetchWithTimeout(url);
+    if (!res.ok) {
+      await res.body?.cancel();
+      throw new Error(
+        `Failed to download checksum ${url}: ${res.status} ${res.statusText}`,
+      );
+    }
+    // Format is "<hex>  <filename>".
+    const text = await res.text();
+    const hex = text.trim().split(/\s+/)[0]?.toLowerCase();
+    if (!hex || !/^[0-9a-f]{64}$/.test(hex)) {
+      throw new Error(
+        `Unexpected checksum content from ${url}: "${text.trim()}"`,
+      );
+    }
+    return hex;
+  }, { label: `download checksum ${url}`, attempts: FETCH_RETRY_ATTEMPTS });
 }
 
 /**

@@ -1,9 +1,18 @@
 ---
 - name: Ensure single-daemon helper is executable
+  # Must be executable by the daemon's own service account: systemd runs
+  # ExecStartPre= as the unit's User=/Group= (turbopanel_user/turbopanel_group —
+  # the co-located dev user in dev, the `turbopanel` service account in
+  # production), not root. Owning this by root:root (as a prior pass at the
+  # ansible:S2612 world-readable-mode fix did) leaves ExecStartPre unable to
+  # exec it (systemd exit 203/EXEC) — production was masked by the
+  # daemon-install.yml post_task that recursively re-chowns
+  # turbopanel_orchestration_dir to turbopanel_user afterwards; co-located dev
+  # has no such fixup, so it always fails there.
   ansible.builtin.file:
     path: "{{ turbopanel_orchestration_dir }}/scripts/ensure-single-daemon.sh"
-    owner: root
-    group: root
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
     mode: "0750"
 
 - name: Ensure runtime socket dir and clear stale daemon lock

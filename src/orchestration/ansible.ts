@@ -20,6 +20,7 @@ import {
 import { join } from '@std/path'
 import { logInfo, logWarn } from '../logger.ts'
 import { logComponent } from './presentation.ts'
+import { withRetry } from './retry.ts'
 import {
   devOrchestrationAnsibleEnv,
   requireDevOrchestrationLayout,
@@ -153,17 +154,26 @@ export async function ensureAnsible(): Promise<void> {
   }
 
   logInfo('orchestration', `creating venv at ${VENV_DIR}`)
-  await runOrThrow(UV_BIN, ['venv', '--python', PYTHON_VERSION, VENV_DIR])
+  // uv may need to fetch a managed Python interpreter here (UV_PYTHON_DOWNLOADS=automatic),
+  // so this is a network operation too — retry the same transient blips as ensureUv().
+  await withRetry(
+    () => runOrThrow(UV_BIN, ['venv', '--python', PYTHON_VERSION, VENV_DIR]),
+    { label: 'create ansible venv', attempts: 3 },
+  )
 
   logInfo('orchestration', `installing packages from ${REQUIREMENTS_FILE}`)
-  await runOrThrow(UV_BIN, [
-    'pip',
-    'install',
-    '--python',
-    VENV_DIR,
-    '--requirements',
-    REQUIREMENTS_FILE,
-  ])
+  await withRetry(
+    () =>
+      runOrThrow(UV_BIN, [
+        'pip',
+        'install',
+        '--python',
+        VENV_DIR,
+        '--requirements',
+        REQUIREMENTS_FILE,
+      ]),
+    { label: 'install ansible packages from PyPI', attempts: 3 },
+  )
 
   if (!(await ansiblePlaybookWorks())) {
     throw new Error('ansible install verification failed: ansible-playbook not runnable')
@@ -210,25 +220,33 @@ export async function ensureGalaxyRoles(): Promise<void> {
   const galaxyRun = galaxyBootstrapRunContext()
 
   logInfo('orchestration', `installing galaxy roles from ${GALAXY_REQUIREMENTS_FILE}`)
-  await runLogged(
-    galaxyBin,
-    ['role', 'install', '-r', GALAXY_REQUIREMENTS_FILE, '-p', GALAXY_ROLES_DIR],
-    { level: 'INFO', component: logComponent('ansible-galaxy'), ...galaxyRun },
+  await withRetry(
+    () =>
+      runLogged(
+        galaxyBin,
+        ['role', 'install', '-r', GALAXY_REQUIREMENTS_FILE, '-p', GALAXY_ROLES_DIR],
+        { level: 'INFO', component: logComponent('ansible-galaxy'), ...galaxyRun },
+      ),
+    { label: 'install galaxy roles', attempts: 3 },
   )
   logInfo('orchestration', 'galaxy roles ready')
 
   logInfo('orchestration', `installing galaxy collections from ${GALAXY_REQUIREMENTS_FILE}`)
-  await runLogged(
-    galaxyBin,
-    [
-      'collection',
-      'install',
-      '-r',
-      GALAXY_REQUIREMENTS_FILE,
-      '-p',
-      GALAXY_COLLECTIONS_DIR,
-    ],
-    { level: 'INFO', component: logComponent('ansible-galaxy'), ...galaxyRun },
+  await withRetry(
+    () =>
+      runLogged(
+        galaxyBin,
+        [
+          'collection',
+          'install',
+          '-r',
+          GALAXY_REQUIREMENTS_FILE,
+          '-p',
+          GALAXY_COLLECTIONS_DIR,
+        ],
+        { level: 'INFO', component: logComponent('ansible-galaxy'), ...galaxyRun },
+      ),
+    { label: 'install galaxy collections', attempts: 3 },
   )
   logInfo('orchestration', 'galaxy collections ready')
 }
