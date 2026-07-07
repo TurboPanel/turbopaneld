@@ -1,0 +1,18 @@
+redis_insight_image: redis/redisinsight:latest
+redis_insight_container_name: turbopanelredisinsight
+redis_insight_volume_name: turbopanelredisinsight
+redis_insight_service_name: turbopanel-redis-insight
+redis_insight_web_port: 5540
+redis_socket_mount_dir: /run/turbopanel
+turbopanel_docker_network: turbopanel
+# FHS config dir (dev shares it with prod).
+turbopanel_config_dir: /etc/turbopanel
+# Shared dev-identity contract: config dir group resolves to the dev group in dev.
+turbopanel_dev_user: ""
+turbopanel_dev_uid: ""
+turbopanel_dev_gid: ""
+turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
+# Dev runs the container as the single dev uid:gid so it can read the Redis Unix socket.
+redis_insight_container_uid: "{{ turbopanel_dev_uid if (turbopanel_dev_user | default('') | length > 0) else '' }}"
+redis_insight_container_gid: "{{ turbopanel_dev_gid if (turbopanel_dev_user | default('') | length > 0) else '' }}"
+redis_insight_config_owner: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'root' }}"

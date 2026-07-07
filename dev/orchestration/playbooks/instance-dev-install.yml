@@ -59,6 +59,7 @@
     mailpit_web_port: 8025
     mailpit_smtp_port: 1025
     redis_socket_path: /run/turbopanel/redis.sock
+    redis_insight_web_port: 5540
 
   pre_tasks:
     - name: Refresh apt cache once per converge (Debian)
@@ -91,6 +92,8 @@
     - role: docker
     - role: postgres
     - role: redis
+    - role: redis-insight
+      when: turbopanel_instance_runtime == 'deno'
     - role: rabbitmq
     - role: mailpit
     - role: instance-user
@@ -118,7 +121,8 @@
     # any later failure, bring enabled units back up instead of leaving a partial stack.
     - name: Resolve dev stack unit list
       ansible.builtin.set_fact:
-        _dev_stack_units:
+        _dev_stack_units: "{{ _dev_stack_units_base + (_dev_stack_units_deno_extra if turbopanel_instance_runtime == 'deno' else []) }}"
+        _dev_stack_units_base:
           - turbopanel-postgres
           - turbopanel-mailpit
           - turbopanel-instance
@@ -127,6 +131,8 @@
           - turbopanel-ui
           - turbopanel-website
           - turbopanel-mailer
+        _dev_stack_units_deno_extra:
+          - turbopanel-redis-insight
 
     - name: Ensure dev stack services are running after converge
       when: instance_start | default(true) | bool

@@ -8,6 +8,7 @@
     "docker",
     "postgres",
     "redis",
+    "redis-insight",
     "rabbitmq",
     "mailpit",
     "instance-user",

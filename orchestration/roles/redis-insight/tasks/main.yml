@@ -1,0 +1,124 @@
+# Dev-only Redis Insight container for browsing the co-located Redis Unix socket.
+# Not routed through Caddy — loopback port only. Deno self-hosted dev only.
+
+- name: Ensure redis-insight config directory exists
+  ansible.builtin.file:
+    path: "{{ turbopanel_config_dir }}/redis-insight"
+    state: directory
+    owner: "{{ redis_insight_config_owner }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
+- name: Ensure turbopanel Docker network exists
+  ansible.builtin.command:
+    argv: [docker, network, create, --driver, bridge, "{{ turbopanel_docker_network }}"]
+  register: _redis_insight_network_create
+  changed_when: false
+  failed_when: false
+
+- name: Ensure redis-insight data volume exists
+  ansible.builtin.command:
+    argv: [docker, volume, create, "{{ redis_insight_volume_name }}"]
+  register: _redis_insight_volume_create
+  changed_when: _redis_insight_volume_create.rc == 0
+  failed_when: false
+
+- name: Inspect redis-insight container
+  ansible.builtin.command:
+    argv: [docker, inspect, "{{ redis_insight_container_name }}"]
+  register: _redis_insight_inspect_cmd
+  changed_when: false
+  failed_when: false
+
+- name: Parse redis-insight container inspection
+  ansible.builtin.set_fact:
+    _redis_insight_container: "{{ (_redis_insight_inspect_cmd.stdout | from_json)[0] }}"
+  when: _redis_insight_inspect_cmd.rc == 0
+
+- name: Set redis-insight container state facts
+  ansible.builtin.set_fact:
+    _redis_insight_container_exists: true
+    _redis_insight_running: "{{ _redis_insight_container.State.Running | default(false) }}"
+    _redis_insight_status: "{{ _redis_insight_container.State.Status | default('') }}"
+    _redis_insight_network_ok: "{{ turbopanel_docker_network in (_redis_insight_container.NetworkSettings.Networks | default({})) }}"
+    _redis_insight_web_ok: "{{ _redis_insight_container.HostConfig.PortBindings['5540/tcp'] is defined }}"
+    _redis_insight_socket_ok: "{{ (_redis_insight_container.Mounts | default([]) | selectattr('Destination', 'equalto', redis_socket_mount_dir) | list | length) > 0 }}"
+  when: _redis_insight_inspect_cmd.rc == 0
+
+- name: Set redis-insight container missing facts
+  ansible.builtin.set_fact:
+    _redis_insight_container_exists: false
+    _redis_insight_running: false
+  when: _redis_insight_inspect_cmd.rc != 0
+
+- name: Remove redis-insight container when unhealthy
+  ansible.builtin.command:
+    cmd: docker rm -f {{ redis_insight_container_name }}
+  when:
+    - _redis_insight_container_exists | bool
+    - (not _redis_insight_network_ok | bool) or (not _redis_insight_web_ok | bool) or (not _redis_insight_socket_ok | bool) or (_redis_insight_status | trim in ['restarting', 'exited', 'dead'])
+  register: _redis_insight_removed
+  changed_when: _redis_insight_removed.rc == 0
+
+- name: Refresh redis-insight container facts after removal
+  ansible.builtin.set_fact:
+    _redis_insight_container_exists: false
+    _redis_insight_running: false
+  when: _redis_insight_removed is changed
+
+- name: Build redis-insight docker run argument list
+  ansible.builtin.set_fact:
+    _redis_insight_docker_run_args: "{{ _redis_insight_docker_run_base + (_redis_insight_docker_user if (turbopanel_dev_user | default('') | length > 0) else []) + [redis_insight_image] }}"
+  vars:
+    _redis_insight_docker_run_base:
+      - docker
+      - run
+      - "--name"
+      - "{{ redis_insight_container_name }}"
+      - "--restart"
+      - unless-stopped
+      - "-d"
+      - "--network"
+      - "{{ turbopanel_docker_network }}"
+      - "-p"
+      - "127.0.0.1:{{ redis_insight_web_port }}:5540"
+      - "-v"
+      - "{{ redis_insight_volume_name }}:/data"
+      - "-v"
+      - "{{ redis_socket_mount_dir }}:{{ redis_socket_mount_dir }}:ro"
+    _redis_insight_docker_user:
+      - "--user"
+      - "{{ redis_insight_container_uid }}:{{ redis_insight_container_gid }}"
+
+- name: Create and start redis-insight container
+  ansible.builtin.command:
+    cmd: "{{ _redis_insight_docker_run_args | join(' ') }}"
+  when: not _redis_insight_container_exists | bool
+
+- name: Install redis-insight wrapper start script
+  ansible.builtin.template:
+    src: redis-insight-wrapper-start.sh.j2
+    dest: "{{ turbopanel_config_dir }}/redis-insight/wrapper-start.sh"
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Ensure redis-insight container is running and ready
+  ansible.builtin.command:
+    cmd: "{{ turbopanel_config_dir }}/redis-insight/wrapper-start.sh"
+  changed_when: false
+
+- name: Install Redis Insight systemd unit
+  ansible.builtin.template:
+    src: turbopanel-redis-insight.service.j2
+    dest: "/etc/systemd/system/{{ redis_insight_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0640"
+
+- name: Ensure Redis Insight systemd unit desired state
+  ansible.builtin.systemd:
+    name: "{{ redis_insight_service_name }}"
+    daemon_reload: true
+    enabled: true
+    state: started
