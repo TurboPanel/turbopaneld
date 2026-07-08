@@ -93,7 +93,7 @@ Tests: `src/orchestration/presentation.test.ts`, `install-presenter.test.ts`, `a
 
 - Sends `{ type: "hello", at, agent }` once on attach.
 - After **~60 s** of inbound silence (`IDLE_PRESENCE_MS`), sends the wire **`{"type":"ping"}`** cell ping (must match `DAEMON_CELL_PING` in `instance/src/daemon/cell/protocol.ts`). On Workers the DO answers via `setWebSocketAutoResponse` without waking the object; on self-hosted Redis the same ping updates cell `lastSeenAt`.
-- Sends app-level `{ type: "heartbeat", at }` **only when the build agent commit changed** since the last hello/heartbeat — not on every idle tick.
+- Sends app-level `{ type: "heartbeat", at }` **only when the build agent commit changed** since the last hello/heartbeat — not on every idle tick. Offline self-heal (Postgres `connected: false` while the socket is still live) is handled by the instance **offline-sweep cron** re-projecting online via `onDaemonConnected` — not by a periodic daemon heartbeat.
 
 **Reconnect jitter:** `InstanceClient` reconnects with **full-jitter** backoff in `[initialBackoffMs, currentBackoffMs]` (defaults 2 s → 30 s cap, doubling on auth failures). A benign close after a stable session (`STABLE_SESSION_MS`, 5 s) resets backoff to the initial floor so fleet-wide restarts do not align into a thundering herd.
 

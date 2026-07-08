@@ -1,5 +1,5 @@
 import { getBuildInfo } from "../build-info.ts";
-import { logDebug, logWarn } from "../logger.ts";
+import { logWarn } from "../logger.ts";
 
 export const IDLE_PRESENCE_MS = 60_000;
 
@@ -116,9 +116,6 @@ export class IdlePresence {
     const silentForMs = Date.now() - this.#lastInboundAt;
     if (silentForMs <= this.#staleConnectionMs) return;
     this.#staleReported = true;
-    // #region agent log
-    fetch('http://localhost:7437/ingest/3675226b-64d8-4d3b-9f8c-56c9f0e5d72f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'2e6859'},body:JSON.stringify({sessionId:'2e6859',hypothesisId:'H3-zombie-socket',location:'idle-presence.ts:#checkStaleConnection',message:'stale connection detected, forcing reconnect',data:{silentForMs,staleConnectionMs:this.#staleConnectionMs},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion agent log
     logWarn(
       "instance",
       "no inbound cell traffic for",
@@ -148,31 +145,26 @@ export class IdlePresence {
   }
 
   /**
-   * Keeps two independent server-side liveness signals warm on a fixed
-   * cadence, regardless of other traffic on the connection:
+   * Steady-state presence on a fixed cadence, regardless of other traffic on
+   * the connection:
    *
-   * 1. The raw cell ping — the instance's `getWebSocketAutoResponseTimestamp`
-   *    (the offline-sweep cron's only cheap liveness signal for a
-   *    hibernating Durable Object; see `cell/offline-sweep.ts`).
-   * 2. The app-level heartbeat — the *only* thing that invokes the
-   *    instance's `onDaemonInbound`, which self-heals a Postgres
-   *    `connected: false` projection back to online when the connection is
-   *    actually still healthy (see `cell/control-plane-monitor.ts`
-   *    `onDaemonInbound`'s `projectedOffline` check). Raw pings are answered
-   *    by `setWebSocketAutoResponse` entirely at the runtime level and never
-   *    reach that JS handler, so without a periodic heartbeat a
-   *    false-positive "offline" mark (from the sweep, or any other cause) is
-   *    permanently sticky for an otherwise-healthy, quiet connection — the
-   *    daemon never has a reason to reconnect, so nothing ever re-triggers
-   *    `onDaemonConnected`.
+   * 1. The raw cell ping — always sent on this cadence. Keeps the instance's
+   *    `getWebSocketAutoResponseTimestamp` warm (the offline-sweep cron's cheap
+   *    liveness signal for a hibernating Durable Object; see
+   *    `cell/offline-sweep.ts`). Answered by `setWebSocketAutoResponse` at
+   *    the runtime level without waking the DO.
+   * 2. The app-level heartbeat — sent **only when the build agent commit
+   *    changed** since the last hello/heartbeat. Carries the new `agent`
+   *    identity so the instance can project agent updates to Postgres.
    *
-   * Both used to be gated behind "has the connection been idle" and (for the
-   * heartbeat) "did the agent commit change" — which meant a busy connection
-   * with other traffic (via `touchActivity()`/`noteInboundActivity()`) never
-   * looked idle, so neither signal ever fired. Send both unconditionally on
-   * this cadence; only `minPresenceIntervalMs` spacing applies. The
-   * instance's `HEARTBEAT_DEBOUNCE_MS` (60s) already assumes this cadence
-   * and coalesces the resulting Postgres touches.
+   * Offline self-heal (Postgres `connected: false` while the socket is still
+   * live) is handled by the instance offline-sweep cron re-projecting online
+   * via `onDaemonConnected` — not by a periodic heartbeat from the daemon.
+   *
+   * Only `minPresenceIntervalMs` spacing applies to the cell ping. The
+   * heartbeat is not gated behind idle detection so a busy connection still
+   * gets ping cadence; `#sendHello` seeds `#lastAgentCommit` on attach so the
+   * first post-attach tick sends ping only.
    */
   #maybeSendPresence(): void {
     if (
@@ -182,7 +174,10 @@ export class IdlePresence {
       return;
     }
     this.#sendCellPing();
-    this.#sendHeartbeat();
+    const agent = getBuildInfo();
+    if (agent.commit !== this.#lastAgentCommit) {
+      this.#sendHeartbeat();
+    }
   }
 
   #sendCellPing(): void {
@@ -191,14 +186,6 @@ export class IdlePresence {
 
     try {
       ws.send(CELL_PING_MESSAGE);
-      // #region agent log — debug session 2e6859, hypothesis H5 (cell ping
-      // starved by idle-gate on busy connections). Remove after verification.
-      logDebug(
-        "instance",
-        "[debug:2e6859:H5] cell ping sent, idleSinceActivityMs=",
-        Date.now() - this.#lastActivityAt,
-      );
-      // #endregion
       const now = Date.now();
       this.#lastActivityAt = now;
       this.#lastPresenceSendAt = now;
@@ -227,11 +214,6 @@ export class IdlePresence {
 
     try {
       ws.send(JSON.stringify(payload));
-      // #region agent log — debug session 2e6859, hypothesis H7 (sticky
-      // offline projection: onDaemonInbound self-heal never invoked because
-      // heartbeats were commit-gated). Remove after verification.
-      logDebug("instance", "[debug:2e6859:H7] heartbeat sent");
-      // #endregion
       this.#lastActivityAt = Date.now();
     } catch (err) {
       logWarn("instance", "heartbeat send failed:", sanitizeForLog(err));

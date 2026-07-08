@@ -693,18 +693,17 @@ Deno.test({
 
       const afterInterval = parseSentFrames(sentFrames)
       assert(
-        afterInterval.length >= 3,
-        'cell ping and app-level heartbeat should both be sent after silence',
+        afterInterval.length >= 2,
+        'cell ping should be sent after silence',
       )
       assert(
         afterInterval.some((frame) => frame.type === 'ping'),
         'cell ping should be sent',
       )
-      assert(
+      assertEquals(
         afterInterval.some((frame) => frame.type === 'heartbeat'),
-        'app-level heartbeat must also be sent on this cadence — it is the only ' +
-          'thing that invokes the instance onDaemonInbound self-heal for a ' +
-          'Postgres connected:false projection (see idle-presence.ts docs)',
+        false,
+        'steady-state silence must be ping-only when build commit is unchanged',
       )
     } finally {
       session.detach()
@@ -714,14 +713,12 @@ Deno.test({
 
 Deno.test({
   name:
-    'IdlePresence sends cell ping and heartbeat on schedule even when other traffic keeps the connection busy',
+    'IdlePresence sends cell ping on schedule even when other traffic keeps the connection busy',
   permissions: { env: true },
   fn: async () => {
     // Regression test for the "busy connection never looks idle, so the cell
-    // ping/heartbeat never fire, so neither the offline-sweep's
-    // getWebSocketAutoResponseTimestamp nor the instance's onDaemonInbound
-    // self-heal ever gets warmed" bug: neither liveness signal may be gated
-    // behind the idle-activity clock.
+    // ping never fires" bug: the cell ping must not be gated behind the
+    // idle-activity clock. Heartbeats are commit-gated separately.
     const idleCheckIntervalMs = 10
     const sentFrames: string[] = []
     const ws = {
@@ -746,9 +743,10 @@ Deno.test({
         frames.some((frame) => frame.type === 'ping'),
         'cell ping must be sent even though the connection has recent (non-idle) activity',
       )
-      assert(
+      assertEquals(
         frames.some((frame) => frame.type === 'heartbeat'),
-        'app-level heartbeat must be sent even though the connection has recent (non-idle) activity',
+        false,
+        'steady state must not send heartbeat when build commit is unchanged',
       )
     } finally {
       session.detach()
