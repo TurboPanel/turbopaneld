@@ -410,7 +410,7 @@ Deno.test("module-level orchestration constants match active layout", () => {
   assertEq(ANSIBLE_CFG, join(layout.orchestrationDir, "ansible.cfg"), "ANSIBLE_CFG");
   assertEq(
     DENO_RUNTIME_DIR,
-    join(layout.runtimesDir, "deno", "2.9.1"),
+    join(layout.runtimesDir, "deno", "2.9.2"),
     "DENO_RUNTIME_DIR",
   );
   assertEq(

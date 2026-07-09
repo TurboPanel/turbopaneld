@@ -281,7 +281,7 @@ export function cloudflaredDownloadUrl(
  * JS-fallback ExecStart (`deno run …/bin/turbopaneld.js`). Keep in step with
  * `deno_version` in `orchestration/roles/deno-runtime/defaults/main.yml`.
  */
-export const DENO_VERSION = "2.9.1";
+export const DENO_VERSION = "2.9.2";
 
 /** Versioned directory where the Deno runtime is installed. */
 export const DENO_RUNTIME_DIR = join(RUNTIMES_DIR, "deno", DENO_VERSION);
