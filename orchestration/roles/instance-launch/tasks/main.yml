@@ -212,35 +212,11 @@
     group: "{{ turbopanel_group }}"
     mode: "0750"
 
-- name: Read legacy instance checkout .env when present
-  ansible.builtin.slurp:
-    src: "{{ turbopanel_instance_dir }}/.env"
-  register: _legacy_instance_env
-  failed_when: false
-
-- name: Extract legacy public URLs from checkout .env
-  ansible.builtin.set_fact:
-    turbopanel_public_urls: >-
-      {{ (_legacy_instance_env.content | b64decode).split('\n')
-      | select('match', '^TURBOPANEL_PUBLIC_URLS=')
-      | list | first | default('', true)
-      | regex_replace('^TURBOPANEL_PUBLIC_URLS=', '') | trim }}
-  when:
-    - _legacy_instance_env.content is defined
-    - (_legacy_instance_env.content | b64decode | trim | length) > 0
-    - (turbopanel_public_urls | default('', true) | trim | length) == 0
-
 - name: Ensure instance signing secret exists
   ansible.builtin.shell:
     cmd: |
       set -euo pipefail
       f='{{ turbopanel_config_dir }}/instance/.instance_secret'
-      legacy='{{ turbopanel_config_dir }}/instance/.wrangler_secret'
-      if [ ! -s "$f" ] && [ -s "$legacy" ]; then
-        cp "$legacy" "$f"
-        chmod 0600 "$f"
-        chown root:root "$f"
-      fi
       if [ ! -s "$f" ]; then
         {{ turbopanel_node }} \
           {{ turbopanel_instance_dir }}/scripts/generate-secret.mjs > "$f"
@@ -261,14 +237,6 @@
   ansible.builtin.set_fact:
     turbopanel_instance_secret: "{{ _instance_secret_raw.content | b64decode | trim }}"
   when: _instance_secret_raw.content is defined
-
-- name: Remove legacy secret-bearing env files from instance checkout
-  ansible.builtin.file:
-    path: "{{ item }}"
-    state: absent
-  loop:
-    - "{{ turbopanel_instance_dir }}/.env"
-    - "{{ turbopanel_instance_dir }}/.dev.vars"
 
 - name: Install Workers runtime env (protected config dir)
   ansible.builtin.template:

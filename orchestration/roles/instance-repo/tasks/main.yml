@@ -13,36 +13,10 @@
     path: "{{ turbopanel_instance_dir }}"
   register: _instance_dir
 
-- name: List non-placeholder instance checkout entries when not a git repository
-  when:
-    - not _instance_git.stat.exists
-    - _instance_dir.stat.isdir | default(false)
-  ansible.builtin.find:
-    paths: "{{ turbopanel_instance_dir }}"
-    file_type: any
-    hidden: true
-    depth: 1
-    excludes: .turbopanel-checkout-stamp
-  register: _instance_real_entries
-
-# instance-user may leave an empty checkout path before this role runs (and a
-# pre-migration host may still carry a legacy .turbopanel-checkout-stamp); git
-# clone refuses to target an existing directory even when only those
-# placeholders are present.
-- name: Remove instance checkout placeholder before clone
-  when:
-    - not _instance_git.stat.exists
-    - _instance_dir.stat.isdir | default(false)
-    - _instance_real_entries.matched == 0
-  ansible.builtin.file:
-    path: "{{ turbopanel_instance_dir }}"
-    state: absent
-
 - name: Fail when instance checkout exists without git metadata
   when:
     - not _instance_git.stat.exists
     - _instance_dir.stat.isdir | default(false)
-    - _instance_real_entries.matched > 0
   ansible.builtin.fail:
     msg: >-
       {{ turbopanel_instance_dir }} exists but is not a git checkout.

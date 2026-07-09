@@ -12,32 +12,10 @@
     path: "{{ turbopanel_website_dir }}"
   register: _website_dir
 
-- name: List non-placeholder website checkout entries when not a git repository
-  when:
-    - not _website_git.stat.exists
-    - _website_dir.stat.isdir | default(false)
-  ansible.builtin.find:
-    paths: "{{ turbopanel_website_dir }}"
-    file_type: any
-    hidden: true
-    depth: 1
-    excludes: .turbopanel-checkout-stamp
-  register: _website_real_entries
-
-- name: Remove website checkout placeholder before clone
-  when:
-    - not _website_git.stat.exists
-    - _website_dir.stat.isdir | default(false)
-    - _website_real_entries.matched == 0
-  ansible.builtin.file:
-    path: "{{ turbopanel_website_dir }}"
-    state: absent
-
 - name: Fail when website checkout exists without git metadata
   when:
     - not _website_git.stat.exists
     - _website_dir.stat.isdir | default(false)
-    - _website_real_entries.matched > 0
   ansible.builtin.fail:
     msg: >-
       {{ turbopanel_website_dir }} exists but is not a git checkout.

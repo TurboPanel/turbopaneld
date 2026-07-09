@@ -204,12 +204,6 @@ tp_extract_orchestration_release() {
 	return 0
 }
 
-# Resolve the production native binary path (legacy name kept for callers).
-tp_daemon_dist_binary_path() {
-	_home="${1:-$(tp_prod_home)}"
-	tp_daemon_binary_path "$_home"
-}
-
 tp_build_release_staging_root() {
 	_staging="$1"
 	_home="${2:-$(tp_prod_home)}"
@@ -232,16 +226,6 @@ tp_stage_release_js_bundle() {
 	_bin_dir="$_staging/$_home/bin"
 	install -m 0644 "$_js_src" "$_bin_dir/$(tp_daemon_js_fallback_name)"
 	return 0
-}
-
-# Legacy helper kept for callers that stage both native + JS into one tree.
-tp_stage_release_binaries() {
-	_staging="$1"
-	_home="$2"
-	_native_src="$3"
-	_js_src="$4"
-	tp_stage_release_native_binary "$_staging" "$_home" "$_native_src"
-	install -m 0644 "$_js_src" "$_staging/$_home/bin/$(tp_daemon_js_fallback_name)"
 }
 
 tp_stage_release_orchestration() {
