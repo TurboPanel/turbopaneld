@@ -611,6 +611,15 @@ test("DENO_VERSION matches the deno-runtime Ansible role default", () => {
   assertEq(match[1], DENO_VERSION, "deno_version role default");
 });
 
+test("DENO_VERSION matches TP_DENO_VERSION in scripts/run.sh", () => {
+  const runSh = Deno.readTextFileSync(join(fromMeta, "scripts", "run.sh"));
+  const match = /TP_DENO_VERSION="([\d.]+)"/.exec(runSh);
+  if (!match) {
+    throw new Error("could not read TP_DENO_VERSION from scripts/run.sh");
+  }
+  assertEq(match[1], DENO_VERSION, "TP_DENO_VERSION in run.sh");
+});
+
 test("ANSIBLE_CORE_VERSION matches the ansible-core pin in requirements.txt", () => {
   const requirements = Deno.readTextFileSync(REQUIREMENTS_FILE);
   const match = requirements.match(/^ansible-core==(\d+\.\d+)\.\*/m);

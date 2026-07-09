@@ -21,10 +21,15 @@ Environment=MAILPIT_SMTP_PORT={{ mailpit_smtp_port | default(1025) }}
 Environment=TURBOPANEL_SYSTEM_EMAIL__PROVIDER=mailpit
 Environment=MAILPIT_API_URL=http://127.0.0.1:{{ mailpit_web_port | default(8025) }}
 {% endif %}
+{# Deno 2.9+ treats Unix-domain connect as --allow-net (not --allow-read).
+   postgres.js also needs --allow-write on the socket path to connect. #}
 ExecStart={{ turbopanel_deno }} run \
   --allow-env \
-  --allow-net=127.0.0.1:{{ rabbitmq_amqp_port }},127.0.0.1:{{ mailpit_smtp_port | default(1025) }},127.0.0.1:{{ mailpit_web_port | default(8025) }},127.0.0.1:{{ drizzle_studio_port | default(4983) }} \
+  --allow-net=127.0.0.1:{{ rabbitmq_amqp_port }},127.0.0.1:{{ mailpit_smtp_port | default(1025) }},127.0.0.1:{{ mailpit_web_port | default(8025) }},127.0.0.1:{{ drizzle_studio_port | default(4983) }}{% if turbopanel_pg_password is defined %},unix:{{ postgres_socket_dir }}/.s.PGSQL.5432{% endif %} \
   --allow-read={{ turbopanel_instance_dir }},{{ turbopanel_instance_runtime_dir }}{% if turbopanel_pg_password is defined %},{{ postgres_socket_dir }}{% endif %} \
+{% if turbopanel_pg_password is defined %}
+  --allow-write={{ postgres_socket_dir }} \
+{% endif %}
   mailer/main.ts
 Restart=always
 RestartSec=5
