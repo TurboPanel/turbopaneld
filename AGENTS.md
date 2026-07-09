@@ -91,7 +91,7 @@ Tests: `src/orchestration/presentation.test.ts`, `install-presenter.test.ts`, `a
 
 `IdlePresence` runs per open socket:
 
-- Sends `{ type: "hello", at, agent, hostname?, machineId?, os? }` once on attach. Host OS comes from `/etc/os-release` via `src/host/os-release.ts` (`getHostHelloIdentity()`); the instance persists `os` on `server.metadata.os` and exposes a formatted `osDisplay` (e.g. `"Debian 13 (Trixie)"`) on `GET /api/client/v1/servers`.
+- Sends `{ type: "hello", at, agent, hostname?, machineId?, os? }` once on attach. Host OS comes from `/etc/os-release` (+ `/etc/debian_version`, `/etc/rpi-issue`) via `src/host/os-release.ts` (`getHostHelloIdentity()`). Prefer dotted point-release (`DEBIAN_VERSION_FULL` / `debian_version`, e.g. `13.5`) over bare `VERSION_ID`. Raspberry Pi OS / Raspbian set `variant: "raspberry-pi-os"` (`ID=raspbian` or `/etc/rpi-issue` present — 64-bit Pi OS still reports `ID=debian`). The instance persists `os` on `server.metadata.os` and exposes `osDisplay` / `osLogo` on `GET /api/client/v1/servers`.
 - After **~60 s** of inbound silence (`IDLE_PRESENCE_MS`), sends the wire **`{"type":"ping"}`** cell ping (must match `DAEMON_CELL_PING` in `instance/src/daemon/cell/protocol.ts`). On Workers the DO answers via `setWebSocketAutoResponse` without waking the object; on self-hosted Redis the same ping updates cell `lastSeenAt`.
 - Sends app-level `{ type: "heartbeat", at }` **only when the build agent commit changed** since the last hello/heartbeat — not on every idle tick. Do **not** put OS on heartbeat. Offline self-heal (Postgres `connected: false` while the socket is still live) is handled by the instance **offline-sweep cron** re-projecting online via `onDaemonConnected` — not by a periodic daemon heartbeat.
 

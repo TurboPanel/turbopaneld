@@ -2,14 +2,26 @@
 export type HostOsFamily = "linux" | "windows" | "freebsd" | "darwin";
 
 /**
+ * Distro variant beyond raw `ID=` — used when Debian-based images are actually
+ * Raspberry Pi OS (64-bit reports `ID=debian` but ships `/etc/rpi-issue`).
+ */
+export type HostOsVariant = "raspberry-pi-os";
+
+/**
  * Host OS identity collected from `/etc/os-release` (+ Deno build info).
  * Mirrored by instance `ServerOsMetadata`.
  */
 export type HostOsMetadata = {
   family: HostOsFamily;
-  /** Distro id from `ID=` (e.g. `"debian"`). */
+  /** Distro id from `ID=` (e.g. `"debian"`, `"raspbian"`). */
   id?: string;
-  /** `VERSION_ID` (e.g. `"13"` / `"13.1"`). */
+  /**
+   * Product variant when `ID` alone is misleading.
+   * Set to `"raspberry-pi-os"` when `/etc/rpi-issue` exists (incl. 64-bit
+   * Raspberry Pi OS that still reports `ID=debian`).
+   */
+  variant?: HostOsVariant;
+  /** Prefer `DEBIAN_VERSION_FULL` / `/etc/debian_version` (e.g. `"13.5"`). */
   version?: string;
   /** `VERSION_CODENAME` (e.g. `"trixie"`). */
   versionCodename?: string;
@@ -26,6 +38,8 @@ export type HostHelloIdentity = {
 };
 
 const OS_RELEASE_PATH = "/etc/os-release";
+const DEBIAN_VERSION_PATH = "/etc/debian_version";
+const RPI_ISSUE_PATH = "/etc/rpi-issue";
 
 let cachedOs: HostOsMetadata | undefined | null = null;
 let cachedMachineId: string | undefined | null = null;
@@ -47,6 +61,25 @@ function readTextFile(path: string): string | undefined {
     return new TextDecoder().decode(stdout);
   } catch {
     return undefined;
+  }
+}
+
+function pathExists(path: string): boolean {
+  try {
+    Deno.statSync(path);
+    return true;
+  } catch {
+    // fall through
+  }
+  try {
+    const { code } = new Deno.Command("test", {
+      args: ["-e", path],
+      stdout: "null",
+      stderr: "null",
+    }).outputSync();
+    return code === 0;
+  } catch {
+    return false;
   }
 }
 
@@ -112,12 +145,48 @@ function familyFromOsRelease(
 }
 
 /**
+ * Prefer the dotted Debian point-release (`13.5`) over bare `VERSION_ID` (`13`).
+ * Exported for tests.
+ */
+export function resolveOsVersion(
+  fields: Record<string, string>,
+  debianVersionFile?: string,
+): string | undefined {
+  const full = fields.DEBIAN_VERSION_FULL?.trim();
+  if (full && /^\d/.test(full)) return full;
+
+  const fromFile = debianVersionFile?.trim();
+  // Ignore suite names like "trixie/sid"; keep numeric point releases.
+  if (fromFile && /^\d+(\.\d+)*/.test(fromFile)) {
+    const match = /^(\d+(?:\.\d+)*)/.exec(fromFile);
+    if (match?.[1]) return match[1];
+  }
+
+  const versionId = fields.VERSION_ID?.trim();
+  if (versionId) return versionId;
+  return undefined;
+}
+
+function resolveOsVariant(
+  fields: Record<string, string>,
+  rpiIssuePresent: boolean,
+): HostOsVariant | undefined {
+  const id = fields.ID?.trim().toLowerCase();
+  if (id === "raspbian" || rpiIssuePresent) return "raspberry-pi-os";
+  return undefined;
+}
+
+/**
  * Build {@link HostOsMetadata} from os-release field map + Deno build info.
  * Exported for unit tests with fixture strings.
  */
 export function hostOsFromFields(
   fields: Record<string, string>,
   build: { os: string; arch: string } = Deno.build,
+  extras: {
+    debianVersionFile?: string;
+    rpiIssuePresent?: boolean;
+  } = {},
 ): HostOsMetadata | undefined {
   const family = familyFromOsRelease(fields) ?? mapDenoOsFamily(build.os);
   if (!family) return undefined;
@@ -125,7 +194,9 @@ export function hostOsFromFields(
   const os: HostOsMetadata = { family };
   const id = fields.ID?.trim();
   if (id) os.id = id;
-  const version = fields.VERSION_ID?.trim();
+  const variant = resolveOsVariant(fields, extras.rpiIssuePresent === true);
+  if (variant) os.variant = variant;
+  const version = resolveOsVersion(fields, extras.debianVersionFile);
   if (version) os.version = version;
   const codename = fields.VERSION_CODENAME?.trim();
   if (codename) os.versionCodename = codename;
@@ -146,7 +217,10 @@ export function readOsRelease(
 
   const text = readTextFile(path);
   const os = text
-    ? hostOsFromFields(parseOsReleaseText(text))
+    ? hostOsFromFields(parseOsReleaseText(text), Deno.build, {
+      debianVersionFile: readTextFile(DEBIAN_VERSION_PATH),
+      rpiIssuePresent: pathExists(RPI_ISSUE_PATH),
+    })
     : (() => {
       const family = mapDenoOsFamily(Deno.build.os);
       if (!family) return undefined;
