@@ -59,6 +59,14 @@ import {
 const fromMeta = new URL("../..", import.meta.url).pathname;
 const checkoutOrchestrationDir = join(fromMeta, "orchestration");
 
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno);
+
 function assertEq(actual: string, expected: string, label: string): void {
   if (actual !== expected) {
     throw new Error(`${label}: expected ${expected}, got ${actual}`);
@@ -79,14 +87,14 @@ function assertThrowsSourceRoot(fn: () => unknown, label: string): void {
   throw new Error(`${label}: expected DaemonSourceRootError, none thrown`);
 }
 
-Deno.test("resolveDaemonRoot prefers TURBOPANEL_DAEMON_ROOT", () => {
+test("resolveDaemonRoot prefers TURBOPANEL_DAEMON_ROOT", () => {
   const root = resolveDaemonRoot({
     TURBOPANEL_DAEMON_ROOT: "/custom/daemon",
   }, { skipDiscovery: true });
   assertEq(root, "/custom/daemon", "resolveDaemonRoot override");
 });
 
-Deno.test("resolveDaemonRoot uses default install path for compiled stub roots", () => {
+test("resolveDaemonRoot uses default install path for compiled stub roots", () => {
   const root = resolveDaemonRoot({
     TURBOPANEL_DAEMON_ROOT: "",
   }, { fromMeta, skipDiscovery: true });
@@ -96,7 +104,7 @@ Deno.test("resolveDaemonRoot uses default install path for compiled stub roots",
   }
 });
 
-Deno.test("detectInstallMode ignores deno-compile root containing main.ts", async () => {
+test("detectInstallMode ignores deno-compile root containing main.ts", async () => {
   const compiledRoot = await Deno.makeTempDir({
     prefix: "deno-compile-",
     dir: fromMeta,
@@ -113,7 +121,7 @@ Deno.test("detectInstallMode ignores deno-compile root containing main.ts", asyn
   }
 });
 
-Deno.test("resolveDaemonRoot ignores deno-compile root containing main.ts", async () => {
+test("resolveDaemonRoot ignores deno-compile root containing main.ts", async () => {
   const compiledRoot = await Deno.makeTempDir({
     prefix: "deno-compile-",
     dir: fromMeta,
@@ -138,7 +146,7 @@ Deno.test("resolveDaemonRoot ignores deno-compile root containing main.ts", asyn
 // and the compiled/native stub path, and assert source-sync cannot resolve a
 // managed FHS install.
 
-Deno.test("resolveDaemonRoot requireCheckout accepts a real checkout override", async () => {
+test("resolveDaemonRoot requireCheckout accepts a real checkout override", async () => {
   const checkout = await Deno.makeTempDir({ dir: fromMeta });
   try {
     await Deno.writeTextFile(join(checkout, "main.ts"), "// checkout\n");
@@ -152,7 +160,7 @@ Deno.test("resolveDaemonRoot requireCheckout accepts a real checkout override", 
   }
 });
 
-Deno.test("resolveDaemonRoot requireCheckout rejects a non-checkout override", async () => {
+test("resolveDaemonRoot requireCheckout rejects a non-checkout override", async () => {
   const notCheckout = await Deno.makeTempDir({ dir: fromMeta });
   try {
     assertThrowsSourceRoot(
@@ -168,7 +176,7 @@ Deno.test("resolveDaemonRoot requireCheckout rejects a non-checkout override", a
   }
 });
 
-Deno.test("resolveDaemonRoot requireCheckout rejects the bundled JS entrypoint location", async () => {
+test("resolveDaemonRoot requireCheckout rejects the bundled JS entrypoint location", async () => {
   // A non-compiled, non-checkout dir (e.g. /opt/turbopanel/bin where the
   // turbopaneld.js fallback resolves import.meta) — never under /tmp so it is
   // not classified as a compiled stub.
@@ -197,7 +205,7 @@ Deno.test("resolveDaemonRoot requireCheckout rejects the bundled JS entrypoint l
   }
 });
 
-Deno.test("resolveDaemonRoot requireCheckout rejects the compiled/native stub root", async () => {
+test("resolveDaemonRoot requireCheckout rejects the compiled/native stub root", async () => {
   const compiledRoot = await Deno.makeTempDir({
     prefix: "deno-compile-",
     dir: fromMeta,
@@ -219,7 +227,7 @@ Deno.test("resolveDaemonRoot requireCheckout rejects the compiled/native stub ro
   }
 });
 
-Deno.test("production orchestration dir resolves share/orchestration", () => {
+test("production orchestration dir resolves share/orchestration", () => {
   const layout = resolveLayout({}, { forceMode: "production" });
   assertEq(
     layout.orchestrationDir,
@@ -233,7 +241,7 @@ Deno.test("production orchestration dir resolves share/orchestration", () => {
   );
 });
 
-Deno.test("development layout resolves checkout orchestration and legacy runtimes", () => {
+test("development layout resolves checkout orchestration and legacy runtimes", () => {
   const layout = resolveLayout({}, { forceMode: "development", fromMeta });
   assertEq(layout.mode, "development", "mode");
   assertEq(
@@ -254,7 +262,7 @@ Deno.test("development layout resolves checkout orchestration and legacy runtime
   );
 });
 
-Deno.test("production layout resolves FHS orchestration and runtime dirs", () => {
+test("production layout resolves FHS orchestration and runtime dirs", () => {
   const layout = resolveLayout({}, { forceMode: "production" });
   assertEq(layout.mode, "production", "mode");
   assertEq(
@@ -289,7 +297,7 @@ Deno.test("production layout resolves FHS orchestration and runtime dirs", () =>
   );
 });
 
-Deno.test("layout env overrides apply in development mode", () => {
+test("layout env overrides apply in development mode", () => {
   const layout = resolveLayout({
     TURBOPANEL_RUNTIMES_DIR: "/custom/runtimes",
     TURBOPANEL_ORCHESTRATION_DIR: "/custom/orchestration",
@@ -313,7 +321,7 @@ Deno.test("layout env overrides apply in development mode", () => {
   );
 });
 
-Deno.test("layout env overrides apply in production mode", () => {
+test("layout env overrides apply in production mode", () => {
   const layout = resolveLayout({
     TURBOPANEL_RUNTIME_DIR: "/custom/lib/runtime",
     TURBOPANEL_ORCHESTRATION_DIR: "/custom/share/orchestration",
@@ -331,7 +339,7 @@ Deno.test("layout env overrides apply in production mode", () => {
   assertEq(layout.stateDir, "/custom/var/lib/turbopanel", "stateDir");
 });
 
-Deno.test("module-level orchestration constants match active layout", () => {
+test("module-level orchestration constants match active layout", () => {
   const layout = resolveLayout({
     TURBOPANEL_DAEMON_ROOT: readEnv("TURBOPANEL_DAEMON_ROOT"),
     TURBOPANEL_RUNTIMES_DIR: readEnv("TURBOPANEL_RUNTIMES_DIR"),
@@ -435,7 +443,7 @@ Deno.test("module-level orchestration constants match active layout", () => {
   );
 });
 
-Deno.test("module-level orchestration constants honor TURBOPANEL_RUNTIMES_DIR", () => {
+test("module-level orchestration constants honor TURBOPANEL_RUNTIMES_DIR", () => {
   const customRuntimes = "/override/runtimes";
   const layout = resolveLayout({
     TURBOPANEL_RUNTIMES_DIR: customRuntimes,
@@ -454,7 +462,7 @@ Deno.test("module-level orchestration constants honor TURBOPANEL_RUNTIMES_DIR", 
 // so a regression to either default (or a leak of one into the other) fails CI
 // rather than silently shipping the wrong layout.
 
-Deno.test("production FHS default constants are the canonical absolute paths", () => {
+test("production FHS default constants are the canonical absolute paths", () => {
   assertEq(PROD_HOME_DEFAULT, "/opt/turbopanel", "PROD_HOME_DEFAULT");
   assertEq(PROD_BIN_DIR_DEFAULT, "/opt/turbopanel/bin", "PROD_BIN_DIR_DEFAULT");
   assertEq(PROD_LIB_DIR_DEFAULT, "/opt/turbopanel/lib", "PROD_LIB_DIR_DEFAULT");
@@ -490,7 +498,7 @@ Deno.test("production FHS default constants are the canonical absolute paths", (
   assertEq(PROD_RUN_DIR_DEFAULT, "/run/turbopanel", "PROD_RUN_DIR_DEFAULT");
 });
 
-Deno.test("production layout resolves the complete FHS tree with no defaults", () => {
+test("production layout resolves the complete FHS tree with no defaults", () => {
   const layout = resolveLayout({}, { forceMode: "production" });
   assertEq(layout.mode, "production", "mode");
   assertEq(layout.home, PROD_HOME_DEFAULT, "home");
@@ -526,7 +534,7 @@ Deno.test("production layout resolves the complete FHS tree with no defaults", (
   }
 });
 
-Deno.test("development layout resolves source repos with FHS mutable dirs", () => {
+test("development layout resolves source repos with FHS mutable dirs", () => {
   const layout = resolveLayout({}, { forceMode: "development", fromMeta });
   assertEq(layout.mode, "development", "mode");
   assertEq(layout.runtimesDir, DEV_RUNTIMES_DIR_DEFAULT, "runtimesDir");
@@ -542,7 +550,7 @@ Deno.test("development layout resolves source repos with FHS mutable dirs", () =
   assertEq(layout.logDir, "/var/log/turbopanel", "logDir literal");
 });
 
-Deno.test("dev daemon state default uses the FHS state dir", () => {
+test("dev daemon state default uses the FHS state dir", () => {
   assertEq(
     DEV_DAEMON_STATE_DIR_DEFAULT,
     "/var/lib/turbopanel",
@@ -550,7 +558,7 @@ Deno.test("dev daemon state default uses the FHS state dir", () => {
   );
 });
 
-Deno.test("dev daemon log dir default uses the FHS log dir", () => {
+test("dev daemon log dir default uses the FHS log dir", () => {
   assertEq(
     DEV_DAEMON_LOG_DIR_DEFAULT,
     "/var/log/turbopanel",
@@ -558,7 +566,7 @@ Deno.test("dev daemon log dir default uses the FHS log dir", () => {
   );
 });
 
-Deno.test("logDir follows the dev-vs-prod contract", () => {
+test("logDir follows the dev-vs-prod contract", () => {
   const dev = resolveLayout({}, { forceMode: "development", fromMeta });
   assertEq(dev.logDir, DEV_DAEMON_LOG_DIR_DEFAULT, "development logDir");
   assertEq(
@@ -572,7 +580,7 @@ Deno.test("logDir follows the dev-vs-prod contract", () => {
   assertEq(prod.logDir, "/var/log/turbopanel", "production logDir literal");
 });
 
-Deno.test("PYTHON_VERSION matches uv-managed python pin", () => {
+test("PYTHON_VERSION matches uv-managed python pin", () => {
   assertEq(PYTHON_VERSION, "3.14.6", "PYTHON_VERSION");
   assertEq(
     PYTHON_RUNTIME_DIR,
@@ -586,7 +594,7 @@ Deno.test("PYTHON_VERSION matches uv-managed python pin", () => {
   );
 });
 
-Deno.test("DENO_VERSION matches the deno-runtime Ansible role default", () => {
+test("DENO_VERSION matches the deno-runtime Ansible role default", () => {
   const roleDefaults = join(
     fromMeta,
     "orchestration",
@@ -603,7 +611,7 @@ Deno.test("DENO_VERSION matches the deno-runtime Ansible role default", () => {
   assertEq(match[1], DENO_VERSION, "deno_version role default");
 });
 
-Deno.test("ANSIBLE_CORE_VERSION matches the ansible-core pin in requirements.txt", () => {
+test("ANSIBLE_CORE_VERSION matches the ansible-core pin in requirements.txt", () => {
   const requirements = Deno.readTextFileSync(REQUIREMENTS_FILE);
   const match = requirements.match(/^ansible-core==(\d+\.\d+)\.\*/m);
   if (!match) {
