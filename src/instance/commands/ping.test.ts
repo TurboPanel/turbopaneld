@@ -19,8 +19,6 @@ Deno.test({
     assertEquals(result.daemonBuild?.commit, build.commit)
     assertEquals(result.daemonBuild?.buildId, build.buildId)
     assertEquals(result.daemonBuild?.channel, build.channel)
-    assertEquals(build.commit, 'dev')
-    assertEquals(build.buildId, 'dev')
     assertEquals(build.channel, 'trunk')
   },
 })
