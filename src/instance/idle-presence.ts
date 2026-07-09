@@ -1,4 +1,5 @@
 import { getBuildInfo } from "../build-info.ts";
+import { getHostHelloIdentity } from "../host/os-release.ts";
 import { logWarn } from "../logger.ts";
 
 export const IDLE_PRESENCE_MS = 60_000;
@@ -131,12 +132,16 @@ export class IdlePresence {
 
     const agent = getBuildInfo();
     this.#lastAgentCommit = agent.commit;
+    const host = getHostHelloIdentity();
 
     try {
       ws.send(JSON.stringify({
         type: "hello",
         at: new Date().toISOString(),
         agent,
+        ...(host.hostname ? { hostname: host.hostname } : {}),
+        ...(host.machineId ? { machineId: host.machineId } : {}),
+        ...(host.os ? { os: host.os } : {}),
       }));
       this.#lastActivityAt = Date.now();
     } catch (err) {
