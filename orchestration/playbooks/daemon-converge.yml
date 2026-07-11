@@ -66,6 +66,32 @@
   # next restart; its enabled/running state is preserved (no systemd state task,
   # so turbopanel_start being unset never stops it).
   post_tasks:
+    # Pre-vendor-rename artifact: an old bootstrap installed Deno via the
+    # upstream install script into the since-retired /opt/turbopanel/runtimes
+    # tree (now /opt/turbopanel/vendor), which appended a shell-rc line
+    # sourcing its env file (e.g. `. "/opt/turbopanel/runtimes/deno/.install/env"`).
+    # That file no longer exists post-rename, so every login/subshell prints
+    # "No such file or directory". Strip any such stale lines wherever found.
+    - name: Find shell rc files referencing the retired /opt/turbopanel/runtimes tree
+      ansible.builtin.shell: |
+        set -o pipefail
+        grep -lE '(^|[[:space:]])(\.|source)[[:space:]]+"?/opt/turbopanel/runtimes/' \
+          /root/.bashrc /root/.bash_profile /root/.profile /root/.zshrc \
+          /home/*/.bashrc /home/*/.bash_profile /home/*/.profile /home/*/.zshrc \
+          2>/dev/null || true
+      args:
+        executable: /bin/bash
+      register: turbopanel_legacy_deno_rc_files
+      changed_when: false
+      failed_when: false
+
+    - name: Remove stale legacy /opt/turbopanel/runtimes sourcing line from shell rc files
+      ansible.builtin.lineinfile:
+        path: "{{ item }}"
+        regexp: '^\s*(\.|source)\s+"?/opt/turbopanel/runtimes/.*$'
+        state: absent
+      loop: "{{ turbopanel_legacy_deno_rc_files.stdout_lines }}"
+
     - name: Check for an installed daemon systemd unit
       ansible.builtin.stat:
         path: "/etc/systemd/system/{{ turbopanel_service_name }}.service"

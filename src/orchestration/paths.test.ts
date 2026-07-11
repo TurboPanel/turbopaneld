@@ -418,7 +418,7 @@ test("module-level orchestration constants match active layout", () => {
   );
   assertEq(
     ANSIBLE_HOME,
-    join(layout.runtimesDir, "ansible", "home"),
+    "/tmp/turbopanel-ansible",
     "ANSIBLE_HOME",
   );
   assertEq(ANSIBLE_CFG, join(layout.orchestrationDir, "ansible.cfg"), "ANSIBLE_CFG");

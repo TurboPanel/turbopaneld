@@ -61,6 +61,28 @@
     - role: daemon-launch
 
   post_tasks:
+    # Same cleanup as daemon-converge.yml: old Deno install.sh left a shell-rc
+    # line sourcing /opt/turbopanel/runtimes/deno/.install/env (retired path).
+    - name: Find shell rc files referencing the retired /opt/turbopanel/runtimes tree
+      ansible.builtin.shell: |
+        set -o pipefail
+        grep -lE '(^|[[:space:]])(\.|source)[[:space:]]+"?/opt/turbopanel/runtimes/' \
+          /root/.bashrc /root/.bash_profile /root/.profile /root/.zshrc \
+          /home/*/.bashrc /home/*/.bash_profile /home/*/.profile /home/*/.zshrc \
+          2>/dev/null || true
+      args:
+        executable: /bin/bash
+      register: turbopanel_legacy_deno_rc_files
+      changed_when: false
+      failed_when: false
+
+    - name: Remove stale legacy /opt/turbopanel/runtimes sourcing line from shell rc files
+      ansible.builtin.lineinfile:
+        path: "{{ item }}"
+        regexp: '^\s*(\.|source)\s+"?/opt/turbopanel/runtimes/.*$'
+        state: absent
+      loop: "{{ turbopanel_legacy_deno_rc_files.stdout_lines }}"
+
     - name: Ensure turbopanel owns runtime and state trees
       ansible.builtin.file:
         path: "{{ item }}"
@@ -73,3 +95,14 @@
         - "{{ turbopanel_daemon_state_dir }}"
         - "{{ turbopanel_config_dir }}"
         - "{{ turbopanel_orchestration_dir }}"
+
+    # Galaxy install uses ANSIBLE_HOME=/tmp/turbopanel-ansible (see paths.ts).
+    # Roles/collections are already in FHS paths; drop the disposable cache and
+    # any accidental /root/.ansible from older ansible defaults.
+    - name: Remove install-time Ansible scratch dirs
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/turbopanel-ansible
+        - /root/.ansible

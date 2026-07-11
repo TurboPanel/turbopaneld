@@ -156,7 +156,7 @@ export function devOrchestrationAnsibleEnv(
 ): Record<string, string> {
   return {
     ANSIBLE_CONFIG: layout.ansibleCfgPath,
-    ANSIBLE_HOME: join(RUNTIMES_DIR, "ansible", "home"),
+    ANSIBLE_HOME: "/tmp/turbopanel-ansible",
     ANSIBLE_LOCAL_TEMP: join(RUNTIMES_DIR, "uv", "cache", "ansible-tmp"),
     ANSIBLE_ROLES_PATH: `${layout.devRolesDir}:${layout.daemonRolesDir}`,
   };

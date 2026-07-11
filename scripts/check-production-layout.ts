@@ -207,6 +207,7 @@ const RETIRED_RUNTIMES_SCAN_ALLOWLIST = new Set([
   // Cleans up a stale shell-rc line (`. "/opt/turbopanel/runtimes/deno/.install/env"`)
   // left behind by a pre-vendor-rename bootstrap on already-provisioned hosts.
   "orchestration/playbooks/daemon-converge.yml",
+  "orchestration/playbooks/daemon-install.yml",
 ]);
 
 // Unmanaged `/opt/turbopanel/vendor` literals outside approved layout modules.

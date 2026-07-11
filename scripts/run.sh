@@ -815,10 +815,14 @@ trap 'rm -f "$VARS_FILE"' EXIT
 
 if [ "$DAEMON_EXEC_MODE" = "native" ]; then
 	if ! "$(tp_daemon_binary_path)" run-installer --vars-file "$VARS_FILE"; then
+		rm -rf /tmp/turbopanel-ansible /root/.ansible
 		exit 1
 	fi
 else
 	if ! HOME="$INSTALL_ROOT" "$DENO_BIN" run --allow-all "$(tp_daemon_js_fallback_path)" run-installer --vars-file "$VARS_FILE"; then
+		rm -rf /tmp/turbopanel-ansible /root/.ansible
 		exit 1
 	fi
 fi
+# Disposable ansible scratch (ANSIBLE_HOME); roles/collections already live under FHS.
+rm -rf /tmp/turbopanel-ansible /root/.ansible

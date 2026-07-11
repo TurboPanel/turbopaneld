@@ -109,10 +109,11 @@ export const GALAXY_COLLECTIONS_DIR = join(
 );
 export const ANSIBLE_LOCAL_TMP = join(CACHE_DIR, "ansible-tmp");
 /**
- * Ansible-owned home (galaxy download cache, etc.). Kept under the vendor tree
- * so root-run install bootstrap never writes `/root/.ansible`.
+ * Ephemeral Ansible home (galaxy download cache, etc.). Under `/tmp` so root-run
+ * install bootstrap never writes `/root/.ansible`. Real content lands in FHS
+ * paths (`GALAXY_*`); this dir is disposable and cleaned after managed install.
  */
-export const ANSIBLE_HOME = join(RUNTIMES_DIR, "ansible", "home");
+export const ANSIBLE_HOME = "/tmp/turbopanel-ansible";
 export const ANSIBLE_CFG = join(ORCHESTRATION_DIR, "ansible.cfg");
 
 /** Ansible env vars for playbook and galaxy bootstrap invocations. */
