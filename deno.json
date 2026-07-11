@@ -10,7 +10,8 @@
     "@std/encoding/base64": "jsr:@std/encoding@1/base64",
     "@std/encoding/base64url": "jsr:@std/encoding@1/base64url",
     "@std/encoding/hex": "jsr:@std/encoding@1/hex",
-    "@std/path": "jsr:@std/path@1"
+    "@std/path": "jsr:@std/path@1",
+    "yaml": "npm:yaml@^2.8.0"
   },
   "tasks": {
     "start": "deno run --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env main.ts",

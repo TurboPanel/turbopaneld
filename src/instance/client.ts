@@ -791,6 +791,28 @@ export class InstanceClient {
         ? event.data
         : String(event.data);
 
+      // #region agent log
+      fetch("http://localhost:7262/ingest/30307085-a951-482e-af80-d101537cd557", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Debug-Session-Id": "8627a0",
+        },
+        body: JSON.stringify({
+          sessionId: "8627a0",
+          runId: "pre-fix",
+          hypothesisId: "A",
+          location: "client.ts:onmessage",
+          message: "daemon inbound websocket frame",
+          data: {
+            rawPreview: raw.slice(0, 80),
+            isPong: raw === '{"type":"pong"}',
+          },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
+
       const message = parseMessage(raw);
       if (!message) {
         logWarn("instance", "ignored non-JSON websocket message");
@@ -802,6 +824,29 @@ export class InstanceClient {
     };
 
     ws.onclose = (event) => {
+      // #region agent log
+      fetch("http://localhost:7262/ingest/30307085-a951-482e-af80-d101537cd557", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Debug-Session-Id": "8627a0",
+        },
+        body: JSON.stringify({
+          sessionId: "8627a0",
+          runId: "pre-fix",
+          hypothesisId: "E",
+          location: "client.ts:onclose",
+          message: "daemon websocket closed",
+          data: {
+            code: event.code,
+            reason: event.reason,
+            wasClean: event.wasClean,
+            sessionRegistered,
+          },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
       if (event.code === 4401) {
         logWarn("instance", "authentication rejected");
       }

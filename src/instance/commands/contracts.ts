@@ -5,6 +5,7 @@
 
 export const COMMAND_TYPES = [
   "daemon.ping",
+  "environment.deploy",
   "server.hostname.set",
   "server.reboot",
 ] as const;
@@ -44,6 +45,29 @@ export type RebootPayload = Record<string, never>;
 export type RebootResult = {
   scheduled: boolean;
   summary?: string;
+};
+
+export type EnvironmentDeployHosting = {
+  hostingId: string;
+  serviceId: string;
+  composeServiceName: string;
+  hostnames: string[];
+  pathPrefix?: string;
+  targetPort?: number;
+};
+
+export type EnvironmentDeployPayload = {
+  environmentId: string;
+  projectId: string;
+  projectName: string;
+  composeYaml: string;
+  hostings: EnvironmentDeployHosting[];
+};
+
+export type EnvironmentDeployResult = {
+  projectName: string;
+  summary: string;
+  services?: string[];
 };
 
 /** Must stay in sync with the instance canonical version in src/lib/commands/hostname.ts */
@@ -129,4 +153,82 @@ export function parseHostnamePayload(value: unknown): HostnamePayload {
   }
   assertValidHostname(hostname);
   return { hostname };
+}
+
+function parseNonEmptyString(
+  record: Record<string, unknown>,
+  key: string,
+): string {
+  const value = record[key];
+  if (typeof value !== "string" || value.length === 0) {
+    throw new TypeError(`${key} must be a non-empty string`);
+  }
+  return value;
+}
+
+function parseHosting(value: unknown): EnvironmentDeployHosting {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid environment deploy hosting");
+  }
+
+  const hostnames = value.hostnames;
+  if (!Array.isArray(hostnames)) {
+    throw new TypeError("hostings[].hostnames must contain valid hostnames");
+  }
+  const parsedHostnames: string[] = [];
+  for (const hostname of hostnames) {
+    if (!isValidHostname(hostname)) {
+      throw new TypeError("hostings[].hostnames must contain valid hostnames");
+    }
+    parsedHostnames.push(hostname);
+  }
+
+  const pathPrefix = value.pathPrefix;
+  if (
+    pathPrefix !== undefined &&
+    (typeof pathPrefix !== "string" || !pathPrefix.startsWith("/"))
+  ) {
+    throw new TypeError("hostings[].pathPrefix must start with /");
+  }
+
+  const targetPort = value.targetPort;
+  if (
+    targetPort !== undefined &&
+    (typeof targetPort !== "number" ||
+      !Number.isInteger(targetPort) ||
+      targetPort < 1 ||
+      targetPort > 65_535)
+  ) {
+    throw new TypeError("hostings[].targetPort must be a valid port");
+  }
+
+  return {
+    hostingId: parseNonEmptyString(value, "hostingId"),
+    serviceId: parseNonEmptyString(value, "serviceId"),
+    composeServiceName: parseNonEmptyString(value, "composeServiceName"),
+    hostnames: parsedHostnames,
+    ...(pathPrefix === undefined ? {} : { pathPrefix }),
+    ...(targetPort === undefined ? {} : { targetPort }),
+  };
+}
+
+export function parseEnvironmentDeployPayload(
+  value: unknown,
+): EnvironmentDeployPayload {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid environment deploy payload");
+  }
+
+  const hostings = value.hostings;
+  if (!Array.isArray(hostings)) {
+    throw new TypeError("hostings must be an array");
+  }
+
+  return {
+    environmentId: parseNonEmptyString(value, "environmentId"),
+    projectId: parseNonEmptyString(value, "projectId"),
+    projectName: parseNonEmptyString(value, "projectName"),
+    composeYaml: parseNonEmptyString(value, "composeYaml"),
+    hostings: hostings.map(parseHosting),
+  };
 }

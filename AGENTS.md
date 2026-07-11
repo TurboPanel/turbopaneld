@@ -92,7 +92,7 @@ Tests: `src/orchestration/presentation.test.ts`, `install-presenter.test.ts`, `a
 `IdlePresence` runs per open socket:
 
 - Sends `{ type: "hello", at, agent, hostname?, machineId?, os? }` once on attach. Host OS comes from `/etc/os-release` (+ `/etc/debian_version`, `/etc/rpi-issue`) via `src/host/os-release.ts` (`getHostHelloIdentity()`). Prefer dotted point-release (`DEBIAN_VERSION_FULL` / `debian_version`, e.g. `13.5`) over bare `VERSION_ID`. Raspberry Pi OS / Raspbian set `variant: "raspberry-pi-os"` (`ID=raspbian` or `/etc/rpi-issue` present — 64-bit Pi OS still reports `ID=debian`). The instance persists `os` on `server.metadata.os` and exposes `osDisplay` / `osLogo` on `GET /api/client/v1/servers`.
-- After **~60 s** of inbound silence (`IDLE_PRESENCE_MS`), sends the wire **`{"type":"ping"}`** cell ping (must match `DAEMON_CELL_PING` in `instance/src/daemon/cell/protocol.ts`). On Workers the DO answers via `setWebSocketAutoResponse` without waking the object; on self-hosted Redis the same ping updates cell `lastSeenAt`.
+- After **~60 s** of inbound silence (`IDLE_PRESENCE_MS`), sends the wire **`{"type":"ping"}`** cell ping (must match `DAEMON_CELL_PING` in `instance/src/daemon/cell/protocol.ts`). On Workers the DO answers via `setWebSocketAutoResponse` without waking the object; on self-hosted Redis the same ping updates cell `lastSeenAt`. When the min-presence interval equals the check interval (default), `IdlePresence` allows ~5s of `setInterval` skew so early ticks still send — otherwise early fires were skipped and Redis coalesce could false-demote a live socket.
 - Sends app-level `{ type: "heartbeat", at }` **only when the build agent commit changed** since the last hello/heartbeat — not on every idle tick. Do **not** put OS on heartbeat. Offline self-heal (Postgres `connected: false` while the socket is still live) is handled by the instance **offline-sweep cron** re-projecting online via `onDaemonConnected` — not by a periodic daemon heartbeat.
 
 **Reconnect jitter:** `InstanceClient` reconnects with **full-jitter** backoff in `[initialBackoffMs, currentBackoffMs]` (defaults 2 s → 30 s cap, doubling on auth failures). A benign close after a stable session (`STABLE_SESSION_MS`, 5 s) resets backoff to the initial floor so fleet-wide restarts do not align into a thundering herd.
@@ -129,3 +129,15 @@ The daemon validates the instance server cert on **every HTTPS connect** — bot
 The plaintext HTTP path targets the dev-only `:8880` entrypoint in `../instance/Caddyfile` (see **`../instance/AGENTS.md`** "Caddy (dev + production)" — dev-only plaintext HTTP entrypoint). It requires `TURBOPANEL_DEV_HTTP_CONTROL_PLANE=1` on co-located dev hosts and is never valid on managed or production installs.
 
 Note: `Deno.createHttpClient({ caCerts })` **adds** to the system roots (does not replace them), so configuring the platform CA does not break validation of publicly-trusted certs.
+
+### Tenant Docker Compose deploy + hosting ingress
+
+`environment.deploy` (command router → `src/instance/commands/deploy-environment.ts`):
+
+1. Ensure Docker engine (`runDockerSetup` / `docker-setup.yml` when `/usr/bin/docker` is missing).
+2. Bootstrap Traefik on Docker network `turbopanel-ingress` (internal bind `127.0.0.1:8080` only — **no** public `:80`/`:443` on Traefik; **no** ACME/LE).
+3. Write runtime compose under `<stateDir>/deployments/<environmentId>/docker-compose.yml` with Traefik labels (`src/deploy/compose-labels.ts`).
+4. `docker compose -p <projectName> up -d --remove-orphans`.
+5. Refresh hosting-edge Caddy config under `/etc/turbopanel/hosting/` (`auto_https off`, `tls internal` for HTTPS) using vendor caddy; unit `turbopanel-hosting-caddy.service` when sudo allows. **Distinct** from control-plane Caddy (`:8443`).
+
+Helpers: `src/deploy/ensure-docker.ts`, `src/deploy/ingress.ts`. Future seams (not MVP): multi-server service placement, WireGuard mesh, swarm-style replicas.

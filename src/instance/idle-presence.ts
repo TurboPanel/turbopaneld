@@ -117,6 +117,28 @@ export class IdlePresence {
     const silentForMs = Date.now() - this.#lastInboundAt;
     if (silentForMs <= this.#staleConnectionMs) return;
     this.#staleReported = true;
+    // #region agent log
+    fetch("http://localhost:7667/ingest/9155d0c0-169f-4b06-b30f-6c6dba44779e", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Debug-Session-Id": "f40664",
+      },
+      body: JSON.stringify({
+        sessionId: "f40664",
+        runId: "post-fix",
+        hypothesisId: "A",
+        location: "idle-presence.ts:#checkStaleConnection",
+        message: "daemon forcing reconnect: no inbound despite pings",
+        data: {
+          silentForMs,
+          staleConnectionMs: this.#staleConnectionMs,
+          wsReadyState: this.#ws?.readyState ?? null,
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
     logWarn(
       "instance",
       "no inbound cell traffic for",
@@ -172,10 +194,40 @@ export class IdlePresence {
    * first post-attach tick sends ping only.
    */
   #maybeSendPresence(): void {
+    // When minPresenceIntervalMs equals the check interval (production default),
+    // setInterval can fire a few ms early and the old `< min` guard skipped the
+    // ping entirely — every-other-tick gaps then raced Redis coalesce past the
+    // 150s offline sweep. Allow ~5s skew in that equal-interval case. When the
+    // caller sets a *larger* min interval (tests / burst control), honor it fully.
+    const skipBelowMs = this.#minPresenceIntervalMs > this.#idleCheckIntervalMs
+      ? this.#minPresenceIntervalMs
+      : Math.max(0, this.#minPresenceIntervalMs - 5_000);
     if (
       this.#lastPresenceSendAt > 0 &&
-      Date.now() - this.#lastPresenceSendAt < this.#minPresenceIntervalMs
+      Date.now() - this.#lastPresenceSendAt < skipBelowMs
     ) {
+      // #region agent log
+      fetch("http://localhost:7667/ingest/9155d0c0-169f-4b06-b30f-6c6dba44779e", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Debug-Session-Id": "f40664",
+        },
+        body: JSON.stringify({
+          sessionId: "f40664",
+          runId: "post-fix",
+          hypothesisId: "A",
+          location: "idle-presence.ts:#maybeSendPresence",
+          message: "presence tick skipped by skipBelowMs",
+          data: {
+            sinceLastPresenceMs: Date.now() - this.#lastPresenceSendAt,
+            skipBelowMs,
+            silentInboundMs: Date.now() - this.#lastInboundAt,
+          },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
       return;
     }
     this.#sendCellPing();
@@ -187,14 +239,73 @@ export class IdlePresence {
 
   #sendCellPing(): void {
     const ws = this.#ws;
-    if (ws?.readyState !== WebSocket.OPEN) return;
+    if (ws?.readyState !== WebSocket.OPEN) {
+      // #region agent log
+      fetch("http://localhost:7667/ingest/9155d0c0-169f-4b06-b30f-6c6dba44779e", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Debug-Session-Id": "f40664",
+        },
+        body: JSON.stringify({
+          sessionId: "f40664",
+          runId: "post-fix",
+          hypothesisId: "A",
+          location: "idle-presence.ts:#sendCellPing",
+          message: "cell ping skipped: websocket not OPEN",
+          data: { wsReadyState: ws?.readyState ?? null },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
+      return;
+    }
 
     try {
       ws.send(CELL_PING_MESSAGE);
       const now = Date.now();
       this.#lastActivityAt = now;
       this.#lastPresenceSendAt = now;
+      // #region agent log
+      fetch("http://localhost:7667/ingest/9155d0c0-169f-4b06-b30f-6c6dba44779e", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Debug-Session-Id": "f40664",
+        },
+        body: JSON.stringify({
+          sessionId: "f40664",
+          runId: "post-fix",
+          hypothesisId: "A",
+          location: "idle-presence.ts:#sendCellPing",
+          message: "cell ping sent",
+          data: {
+            silentInboundMs: now - this.#lastInboundAt,
+            lastPresenceSendAt: this.#lastPresenceSendAt,
+          },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
     } catch (err) {
+      // #region agent log
+      fetch("http://localhost:7667/ingest/9155d0c0-169f-4b06-b30f-6c6dba44779e", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Debug-Session-Id": "f40664",
+        },
+        body: JSON.stringify({
+          sessionId: "f40664",
+          runId: "post-fix",
+          hypothesisId: "A",
+          location: "idle-presence.ts:#sendCellPing",
+          message: "cell ping send threw",
+          data: { err: sanitizeForLog(err) },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
       logWarn("instance", "cell ping send failed:", sanitizeForLog(err));
     }
   }

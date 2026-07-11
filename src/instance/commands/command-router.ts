@@ -6,10 +6,12 @@ import type {
   RebootPayload,
 } from "./contracts.ts";
 import {
+  parseEnvironmentDeployPayload,
   parseHostnamePayload,
   parsePingPayload,
   parseRebootPayload,
 } from "./contracts.ts";
+import { handleEnvironmentDeploy } from "./deploy-environment.ts";
 import { handleHostname } from "./hostname.ts";
 import { handlePing } from "./ping.ts";
 import { handleReboot } from "./reboot.ts";
@@ -87,6 +89,13 @@ export async function handleCommandDispatch(
           message.payload as RebootPayload,
           daemonReceivedAt,
         );
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
+      case "environment.deploy": {
+        const payload = parseEnvironmentDeployPayload(message.payload);
+        result = await handleEnvironmentDeploy(payload, daemonReceivedAt);
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;
