@@ -3,6 +3,7 @@ import {
   ANSIBLE_CORE_VERSION,
   ANSIBLE_CFG,
   ANSIBLE_CURRENT_DIR,
+  ANSIBLE_HOME,
   ANSIBLE_INSTALL_DIR,
   ANSIBLE_LOCAL_TMP,
   ANSIBLE_PLAYBOOK_BIN,
@@ -414,6 +415,11 @@ test("module-level orchestration constants match active layout", () => {
     ANSIBLE_LOCAL_TMP,
     join(layout.runtimesDir, "uv", "cache", "ansible-tmp"),
     "ANSIBLE_LOCAL_TMP",
+  );
+  assertEq(
+    ANSIBLE_HOME,
+    join(layout.runtimesDir, "ansible", "home"),
+    "ANSIBLE_HOME",
   );
   assertEq(ANSIBLE_CFG, join(layout.orchestrationDir, "ansible.cfg"), "ANSIBLE_CFG");
   assertEq(

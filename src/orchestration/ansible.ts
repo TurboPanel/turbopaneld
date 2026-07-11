@@ -28,6 +28,7 @@ import {
 import {
   ansibleEnv,
   ANSIBLE_CURRENT_DIR,
+  ANSIBLE_HOME,
   ANSIBLE_INSTALL_DIR,
   ANSIBLE_PLAYBOOK_BIN,
   ANSIBLE_PLAYBOOK_CWD,
@@ -218,6 +219,7 @@ export async function ensureGalaxyRoles(): Promise<void> {
 
   const galaxyBin = join(VENV_BIN_DIR, 'ansible-galaxy')
   const galaxyRun = galaxyBootstrapRunContext()
+  await Deno.mkdir(ANSIBLE_HOME, { recursive: true })
 
   logInfo('orchestration', `installing galaxy roles from ${GALAXY_REQUIREMENTS_FILE}`)
   await withRetry(

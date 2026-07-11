@@ -47,6 +47,7 @@
     - "{{ turbopanel_runtimes_dir }}/uv/cache"
     - "{{ turbopanel_runtimes_dir }}/python"
     - "{{ turbopanel_runtimes_dir }}/ansible"
+    - "{{ turbopanel_runtimes_dir }}/ansible/home"
     - /etc/turbopanel
     - /var/lib/turbopanel
     - /var/log/turbopanel
@@ -65,6 +66,16 @@
     group: "{{ turbopanel_group }}"
     recurse: true
     mode: "0750"
+
+# Install-time bootstrap runs as root before turbopanel exists. Older builds
+# defaulted ANSIBLE_HOME to /root/.ansible (galaxy_cache). New installs pin
+# ANSIBLE_HOME under vendor/ansible/home; remove any leftover root home
+# artifact so managed hosts stay clean. Runtime ansible runs as turbopanel.
+- name: Remove install-time Ansible artifacts from root home
+  ansible.builtin.file:
+    path: /root/.ansible
+    state: absent
+  when: turbopanel_dev_user | default('') | length == 0
 
 - name: Grant passwordless sudo for orchestration
   ansible.builtin.copy:

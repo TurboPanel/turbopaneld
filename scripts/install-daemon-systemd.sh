@@ -12,6 +12,7 @@ DAEMON_DIR="${TURBOPANEL_DAEMON_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 . "$SCRIPT_DIR/lib/runtime-paths.sh"
 ANSIBLE_PLAYBOOK="$RUNTIMES_DIR/ansible/current/bin/ansible-playbook"
 ANSIBLE_CFG="$DAEMON_DIR/orchestration/ansible.cfg"
+ANSIBLE_HOME_DIR="$RUNTIMES_DIR/ansible/home"
 ANSIBLE_LOCAL_TMP="$RUNTIMES_DIR/uv/cache/ansible-tmp"
 PLAYBOOK="$DAEMON_DIR/orchestration/playbooks/daemon-systemd-setup.yml"
 SERVICE_NAME="turbopaneld"
@@ -53,7 +54,9 @@ trap 'rm -f "$VARS_FILE"' EXIT
   fi
 } > "$VARS_FILE"
 
+mkdir -p "$ANSIBLE_HOME_DIR"
 ANSIBLE_CONFIG="$ANSIBLE_CFG" \
+ANSIBLE_HOME="$ANSIBLE_HOME_DIR" \
 ANSIBLE_LOCAL_TEMP="$ANSIBLE_LOCAL_TMP" \
 "$ANSIBLE_PLAYBOOK" \
   -i localhost, \

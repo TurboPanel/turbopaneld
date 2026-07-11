@@ -58,6 +58,8 @@ TurboPanel **daemon** — Ansible-driven node agent; connects to the instance ov
 
 **Vendored Node/Deno layout:** Ansible roles install pinned runtimes under `/opt/turbopanel/vendor/<tool>/<version>/` with a `current` symlink (see `node-runtime`, `deno-runtime`, `caddy`). Consumers resolve `turbopanel_node` (`…/node/current/bin/node`), `turbopanel_deno` (`…/deno/current/deno`), and `turbopanel_runtime_path` (colon-separated PATH prefix for systemd/Ansible tasks). Node **24.17.0** is pinned in `node-runtime/defaults/main.yml` — keep in step with `NODE_VERSION` in [turbopanel/dev](https://github.com/turbopanel/dev) `scripts/lib/paths.sh`. The vendored runtime root is defined once in `src/paths/layout.ts` (`resolveRuntimesDir()` / `PROD_RUNTIME_DIR_DEFAULT`); shell helpers live in `scripts/lib/runtime-paths.sh`.
 
+**Ansible home (no root pollution):** `ansibleEnv()` / `devOrchestrationAnsibleEnv()` set `ANSIBLE_HOME` to `/opt/turbopanel/vendor/ansible/home` (alongside `ANSIBLE_LOCAL_TEMP` under `vendor/uv/cache/ansible-tmp`). Galaxy download cache and other Ansible-owned state stay in the vendor tree — never `/root/.ansible`. Managed `turbopanel-user` also removes any leftover `/root/.ansible` after install-time root bootstrap. Runtime orchestration runs as `turbopanel` (dev: the current dev user).
+
 ## Project metadata
 
 GitHub repository: [turbopanel/turbopaneld](https://github.com/turbopanel/turbopaneld). Deno package name: `turbopaneld` (`deno.json`), aligned with the repo slug and the compiled `/opt/turbopanel/bin/turbopaneld` binary.

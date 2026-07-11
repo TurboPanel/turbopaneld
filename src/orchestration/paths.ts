@@ -108,12 +108,18 @@ export const GALAXY_COLLECTIONS_DIR = join(
   "galaxy-collections",
 );
 export const ANSIBLE_LOCAL_TMP = join(CACHE_DIR, "ansible-tmp");
+/**
+ * Ansible-owned home (galaxy download cache, etc.). Kept under the vendor tree
+ * so root-run install bootstrap never writes `/root/.ansible`.
+ */
+export const ANSIBLE_HOME = join(RUNTIMES_DIR, "ansible", "home");
 export const ANSIBLE_CFG = join(ORCHESTRATION_DIR, "ansible.cfg");
 
 /** Ansible env vars for playbook and galaxy bootstrap invocations. */
 export function ansibleEnv(): Record<string, string> {
   return {
     ANSIBLE_CONFIG: ANSIBLE_CFG,
+    ANSIBLE_HOME,
     ANSIBLE_LOCAL_TEMP: ANSIBLE_LOCAL_TMP,
   };
 }

@@ -53,14 +53,30 @@ Deno.test("checked-in ansible.cfg defines vendored collections_path", async () =
       /\/usr\/share\/ansible\/collections/,
       `system fallback collections_path in ${cfgPath}`,
     );
+    const collectionsLine = cfg
+      .split("\n")
+      .find((line) => line.trimStart().startsWith("collections_path"));
+    if (!collectionsLine) {
+      throw new Error(`${cfgPath}: missing collections_path`);
+    }
+    if (collectionsLine.includes("~/.ansible")) {
+      throw new Error(
+        `${cfgPath}: collections_path must not include ~/.ansible (ANSIBLE_HOME is vendor-scoped)`,
+      );
+    }
   }
 });
 
-Deno.test("ansibleEnv selects checked-in config without overriding collections_path", () => {
+Deno.test("ansibleEnv pins ANSIBLE_HOME under vendor without overriding collections_path", () => {
   const env = ansibleEnv();
   if (env.ANSIBLE_CONFIG !== ANSIBLE_CFG) {
     throw new Error(
       `expected ANSIBLE_CONFIG=${ANSIBLE_CFG}, got ${env.ANSIBLE_CONFIG}`,
+    );
+  }
+  if (!env.ANSIBLE_HOME?.endsWith(join("ansible", "home"))) {
+    throw new Error(
+      `expected ANSIBLE_HOME under ansible/home, got ${env.ANSIBLE_HOME}`,
     );
   }
   assertNotIn(env, "ANSIBLE_COLLECTIONS_PATH", "ansibleEnv");
@@ -87,6 +103,11 @@ Deno.test("galaxyBootstrapRunContext matches playbook ansible contract", () => {
   if (ctx.env.ANSIBLE_CONFIG !== ANSIBLE_CFG) {
     throw new Error(
       `expected ANSIBLE_CONFIG=${ANSIBLE_CFG}, got ${ctx.env.ANSIBLE_CONFIG}`,
+    );
+  }
+  if (!ctx.env.ANSIBLE_HOME?.endsWith(join("ansible", "home"))) {
+    throw new Error(
+      `expected ANSIBLE_HOME under ansible/home, got ${ctx.env.ANSIBLE_HOME}`,
     );
   }
   assertNotIn(ctx.env, "ANSIBLE_COLLECTIONS_PATH", "galaxyBootstrapRunContext");
