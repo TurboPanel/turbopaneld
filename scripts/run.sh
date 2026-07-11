@@ -627,17 +627,23 @@ for _tp_host_cmd in sudo curl tar python3; do
 		_tp_host_missing="$_tp_host_missing $_tp_host_cmd"
 	fi
 done
-if [ -n "$_tp_host_missing" ] \
-	&& { ! apt-get update -qq 2>/dev/null \
-		|| ! apt-get install -y -qq sudo curl ca-certificates tar python3-minimal 2>/dev/null; }; then
-	tp_print_error "host prerequisites failed (need:${_tp_host_missing})"
+_tp_host_prereq_fail() {
+	tp_print_error "$1"
+	cat "$_apt_log" >&2
+	rm -f "$_apt_log"
 	exit 1
+}
+_apt_log="$(mktemp)"
+if [ -n "$_tp_host_missing" ] \
+	&& { ! apt-get update -qq >>"$_apt_log" 2>&1 \
+		|| ! apt-get install -y -qq sudo curl ca-certificates tar python3-minimal >>"$_apt_log" 2>&1; }; then
+	_tp_host_prereq_fail "host prerequisites failed (need:${_tp_host_missing})"
 fi
 if ! command -v curl >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1 \
 	|| ! command -v python3 >/dev/null 2>&1; then
-	tp_print_error "host prerequisites missing after install (need curl tar python3)"
-	exit 1
+	_tp_host_prereq_fail "host prerequisites missing after install (need curl tar python3)"
 fi
+rm -f "$_apt_log"
 tp_print_ok "Host prerequisites ready"
 
 tp_print_step "▸" "Fetching release manifest…"
@@ -760,7 +766,6 @@ else
 	tp_print_step "–" "Skipping Deno runtime (native binary)"
 fi
 
-tp_print_step "▸" "Bootstrapping orchestration runtimes…"
 if [ "$DAEMON_EXEC_MODE" = "native" ]; then
 	"$(tp_daemon_binary_path)" bootstrap-orchestration
 else
@@ -771,15 +776,6 @@ fi
 
 if [ ! -f "$ORCHESTRATION_DIR/ansible.cfg" ]; then
 	tp_print_error "Bootstrap did not leave orchestration/ansible.cfg in place"
-	exit 1
-fi
-tp_print_ok "Orchestration runtimes ready"
-
-tp_print_step "▸" "Running daemon provisioning…"
-
-ANSIBLE_PLAYBOOK="$RUNTIMES_DIR/ansible/current/bin/ansible-playbook"
-if [ ! -x "$ANSIBLE_PLAYBOOK" ]; then
-	tp_print_error "ansible-playbook missing after bootstrap"
 	exit 1
 fi
 
@@ -817,26 +813,12 @@ trap 'rm -f "$VARS_FILE"' EXIT
 	fi
 } > "$VARS_FILE"
 
-export ANSIBLE_CONFIG="$ORCHESTRATION_DIR/ansible.cfg"
-export ANSIBLE_LOCAL_TEMP="$RUNTIMES_DIR/uv/cache/ansible-tmp"
-
-if [ -t 1 ]; then
-	export ANSIBLE_STDOUT_CALLBACK=default
-	export ANSIBLE_LOAD_CALLBACK_PLUGINS=true
-	export ANSIBLE_DISPLAY_SKIPPED_HOSTS=false
-	export ANSIBLE_DISPLAY_OK_HOSTS=true
-	export ANSIBLE_SHOW_CUSTOM_STATS=false
+if [ "$DAEMON_EXEC_MODE" = "native" ]; then
+	if ! "$(tp_daemon_binary_path)" run-installer --vars-file "$VARS_FILE"; then
+		exit 1
+	fi
+else
+	if ! HOME="$INSTALL_ROOT" "$DENO_BIN" run --allow-all "$(tp_daemon_js_fallback_path)" run-installer --vars-file "$VARS_FILE"; then
+		exit 1
+	fi
 fi
-
-if ! "$ANSIBLE_PLAYBOOK" \
-	-i localhost, \
-	-c local \
-	-e "@$VARS_FILE" \
-	"$ORCHESTRATION_DIR/playbooks/daemon-install.yml"; then
-	tp_print_error "Daemon provisioning failed"
-	exit 1
-fi
-
-tp_start_or_restart_daemon
-
-tp_print_ok "TurboPanel daemon provisioning complete"

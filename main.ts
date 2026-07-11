@@ -31,6 +31,7 @@ if (Deno.args[0] === "run-installer") {
   let start = true;
   let instanceCa: string | undefined;
   let tunnelToken: string | undefined;
+  let varsFile: string | undefined;
 
   for (let i = 1; i < Deno.args.length; i++) {
     const arg = Deno.args[i];
@@ -71,19 +72,28 @@ if (Deno.args[0] === "run-installer") {
         tunnelToken = value;
         break;
       }
+      case "--vars-file": {
+        const value = Deno.args[++i];
+        if (!value) {
+          console.error("[installer] --vars-file requires a value");
+          Deno.exit(1);
+        }
+        varsFile = value;
+        break;
+      }
       default:
         console.error(`[installer] unknown flag: ${sanitizeForLog(arg)}`);
         Deno.exit(1);
     }
   }
 
-  if (!instanceUrl) {
-    console.error("[installer] --instance-url is required");
+  if (!instanceUrl && !varsFile) {
+    console.error("[installer] --instance-url or --vars-file is required");
     Deno.exit(1);
   }
 
   try {
-    await runInstaller({ instanceUrl, start, instanceCa, tunnelToken });
+    await runInstaller({ instanceUrl, start, instanceCa, tunnelToken, varsFile });
   } catch (err) {
     if (!(err instanceof InstallerPresentedFailure)) {
       console.error(`[installer] ${sanitizeForLog(err)}`);
