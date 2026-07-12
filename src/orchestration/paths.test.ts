@@ -15,6 +15,7 @@ import {
   DENO_BIN,
   DENO_CURRENT_DIR,
   DENO_RUNTIME_DIR,
+  CLICKHOUSE_VERSION,
   DENO_VERSION,
   GALAXY_COLLECTIONS_DIR,
   ORCHESTRATION_DIR,
@@ -624,6 +625,23 @@ test("DENO_VERSION matches TP_DENO_VERSION in scripts/run.sh", () => {
     throw new Error("could not read TP_DENO_VERSION from scripts/run.sh");
   }
   assertEq(match[1], DENO_VERSION, "TP_DENO_VERSION in run.sh");
+});
+
+test("CLICKHOUSE_VERSION matches the clickhouse Ansible role default", () => {
+  const roleDefaults = join(
+    fromMeta,
+    "orchestration",
+    "roles",
+    "clickhouse",
+    "defaults",
+    "main.yml",
+  );
+  const yaml = Deno.readTextFileSync(roleDefaults);
+  const match = yaml.match(/^\s*clickhouse_version:\s*["']?([\d.]+)["']?\s*$/m);
+  if (!match) {
+    throw new Error(`could not read clickhouse_version from ${roleDefaults}`);
+  }
+  assertEq(match[1], CLICKHOUSE_VERSION, "clickhouse_version role default");
 });
 
 test("ANSIBLE_CORE_VERSION matches the ansible-core pin in requirements.txt", () => {

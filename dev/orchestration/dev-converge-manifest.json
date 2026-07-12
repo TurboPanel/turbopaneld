@@ -10,6 +10,8 @@
     "redis",
     "redis-insight",
     "rabbitmq",
+    "clickhouse",
+    "tabix",
     "mailpit",
     "instance-user",
     "instance-dev-prereqs",

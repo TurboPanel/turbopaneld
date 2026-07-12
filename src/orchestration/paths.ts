@@ -113,7 +113,7 @@ export const ANSIBLE_LOCAL_TMP = join(CACHE_DIR, "ansible-tmp");
  * install bootstrap never writes `/root/.ansible`. Real content lands in FHS
  * paths (`GALAXY_*`); this dir is disposable and cleaned after managed install.
  */
-export const ANSIBLE_HOME = "/tmp/turbopanel-ansible";
+export const ANSIBLE_HOME = "/tmp/turbopanel-ansible"; // NOSONAR typescript:S5443 — disposable ephemeral cache; durable content uses FHS GALAXY_* paths
 export const ANSIBLE_CFG = join(ORCHESTRATION_DIR, "ansible.cfg");
 
 /** Ansible env vars for playbook and galaxy bootstrap invocations. */
@@ -154,6 +154,11 @@ export const RABBITMQ_PLAYBOOK = join(
   ORCHESTRATION_DIR,
   "playbooks",
   "rabbitmq-setup.yml",
+);
+export const CLICKHOUSE_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  "playbooks",
+  "clickhouse-setup.yml",
 );
 export const SOCKET_DIRS_PLAYBOOK = join(
   ORCHESTRATION_DIR,
@@ -289,6 +294,13 @@ export function cloudflaredDownloadUrl(
  * `deno_version` in `orchestration/roles/deno-runtime/defaults/main.yml`.
  */
 export const DENO_VERSION = "2.9.2";
+
+/**
+ * Pinned ClickHouse version — Docker image tag
+ * (`clickhouse/clickhouse-server:<version>`). Keep in step with
+ * `clickhouse_version` in `orchestration/roles/clickhouse/defaults/main.yml`.
+ */
+export const CLICKHOUSE_VERSION = "26.5.5.8"; // NOSONAR typescript:S1313 — pinned ClickHouse semver, not an IP address
 
 /** Versioned directory where the Deno runtime is installed. */
 export const DENO_RUNTIME_DIR = join(RUNTIMES_DIR, "deno", DENO_VERSION);

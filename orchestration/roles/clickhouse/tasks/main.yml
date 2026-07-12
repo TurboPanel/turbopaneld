@@ -1,0 +1,345 @@
+# {{ turbopanel_config_dir }}/ (FHS /etc/turbopanel; dev shares it with prod)
+#   clickhouse/
+#     config.xml / users.xml — config.d/users.d overlays bind-mounted into the
+#                              official image (base image config preserved)
+#     config.json            — connection metadata + password-file paths (no secret values)
+#     .clickhouse_admin_pass — bootstrap/default admin password (mode 0600)
+#     .clickhouse_app_pass   — least-privilege {{ clickhouse_app_user }} password (mode 0600)
+#     wrapper-start.sh       — start the container and wait until GET /ping succeeds
+#
+# ClickHouse runs as a Docker container ({{ clickhouse_container_name }}) on the
+# {{ turbopanel_docker_network }} network with data in the named volume
+# {{ clickhouse_volume_name }}. HTTP is published loopback-only on
+# 127.0.0.1:{{ clickhouse_http_port }}; native TCP 9000 stays internal to the
+# container/network (bootstrap SQL runs via docker exec).
+#
+# Self-sufficient: does not depend on instance-user (ClickHouse can run before instance).
+# Co-located dev collapses onto the single dev user; managed installs use the
+# reserved container id 9994.
+
+- name: Ensure ClickHouse config directory exists
+  ansible.builtin.file:
+    path: "{{ turbopanel_config_dir }}/clickhouse"
+    state: directory
+    owner: "{{ clickhouse_config_owner }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
+- name: Ensure ClickHouse log directory exists
+  ansible.builtin.file:
+    path: "{{ clickhouse_log_dir }}"
+    state: directory
+    owner: "{{ clickhouse_container_uid }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
+- name: Generate ClickHouse admin password (idempotent)
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      dir='{{ turbopanel_config_dir }}/clickhouse'
+      admin="$dir/.clickhouse_admin_pass"
+      legacy="$dir/.clickhouse_pass"
+      if [ ! -s "$admin" ]; then
+        if [ -s "$legacy" ]; then
+          # Migrate shared legacy secret to admin-only; app gets a new password below.
+          cp -a "$legacy" "$admin"
+        else
+          openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 32 > "$admin"
+          chmod 0600 "$admin"
+          chown {{ clickhouse_config_owner }}:{{ turbopanel_group }} "$admin"
+        fi
+        echo created
+      fi
+    executable: /bin/bash
+  register: _ch_admin_pass_gen
+  changed_when: "'created' in _ch_admin_pass_gen.stdout"
+
+- name: Generate ClickHouse app password (idempotent)
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      f='{{ turbopanel_config_dir }}/clickhouse/.clickhouse_app_pass'
+      if [ ! -s "$f" ]; then
+        openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 32 > "$f"
+        chmod 0600 "$f"
+        chown {{ clickhouse_config_owner }}:{{ turbopanel_group }} "$f"
+        echo created
+      fi
+    executable: /bin/bash
+  register: _ch_app_pass_gen
+  changed_when: "'created' in _ch_app_pass_gen.stdout"
+
+- name: Read ClickHouse admin password
+  ansible.builtin.slurp:
+    src: "{{ turbopanel_config_dir }}/clickhouse/.clickhouse_admin_pass"
+  register: _ch_admin_pass_raw
+
+- name: Read ClickHouse app password
+  ansible.builtin.slurp:
+    src: "{{ turbopanel_config_dir }}/clickhouse/.clickhouse_app_pass"
+  register: _ch_app_pass_raw
+
+- name: Set ClickHouse password facts
+  ansible.builtin.set_fact:
+    _clickhouse_admin_password: "{{ _ch_admin_pass_raw.content | b64decode | trim }}"
+    _clickhouse_app_password: "{{ _ch_app_pass_raw.content | b64decode | trim }}"
+  no_log: true
+
+- name: Write ClickHouse config.json (idempotent)
+  ansible.builtin.template:
+    src: clickhouse-config.json.j2
+    dest: "{{ turbopanel_config_dir }}/clickhouse/config.json"
+    owner: "{{ clickhouse_config_owner }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+
+# The config.d/users.d overlays are bind-mounted read-only into the container,
+# which runs as {{ clickhouse_container_uid }}:{{ clickhouse_container_gid }}
+# (9994:9994 in production — neither root nor in the turbopanel group). Own the
+# overlays by the container id/gid so that user can read them; mode 0640 keeps
+# users.xml non-world-readable (it carries the admin password).
+- name: Write ClickHouse config.d overlay (config.xml)
+  ansible.builtin.template:
+    src: config.xml.j2
+    dest: "{{ turbopanel_config_dir }}/clickhouse/config.xml"
+    owner: "{{ clickhouse_container_uid }}"
+    group: "{{ clickhouse_container_gid }}"
+    mode: "0640"
+  register: _ch_config_written
+
+- name: Write ClickHouse users.d overlay (users.xml)
+  ansible.builtin.template:
+    src: users.xml.j2
+    dest: "{{ turbopanel_config_dir }}/clickhouse/users.xml"
+    owner: "{{ clickhouse_container_uid }}"
+    group: "{{ clickhouse_container_gid }}"
+    mode: "0640"
+  register: _ch_users_written
+  no_log: true
+
+- name: Ensure turbopanel Docker network exists
+  ansible.builtin.command:
+    argv: [docker, network, create, --driver, bridge, "{{ turbopanel_docker_network }}"]
+  register: _ch_network_create
+  changed_when: false
+  failed_when: false
+
+- name: Ensure turbopanelch Docker volume exists
+  ansible.builtin.command:
+    argv: [docker, volume, create, "{{ clickhouse_volume_name }}"]
+  register: _ch_volume_create
+  changed_when: false
+
+- name: Inspect clickhouse container
+  ansible.builtin.command:
+    argv: [docker, inspect, "{{ clickhouse_container_name }}"]
+  register: _ch_inspect_cmd
+  changed_when: false
+  failed_when: false
+
+- name: Parse clickhouse container inspection
+  ansible.builtin.set_fact:
+    _ch_container: "{{ (_ch_inspect_cmd.stdout | from_json)[0] }}"
+  when: _ch_inspect_cmd.rc == 0
+
+- name: Set clickhouse container state facts
+  ansible.builtin.set_fact:
+    _clickhouse_container_exists: true
+    _clickhouse_running: "{{ _ch_container.State.Running | default(false) }}"
+    _ch_status: "{{ _ch_container.State.Status | default('') }}"
+    _ch_volume_ok: >-
+      {{ _ch_container.Mounts | default([]) | selectattr('Type', 'equalto', 'volume') | selectattr('Name', 'equalto', clickhouse_volume_name) | list | length > 0 }}
+    _ch_network_ok: "{{ turbopanel_docker_network in (_ch_container.NetworkSettings.Networks | default({})) }}"
+    _ch_config_mount_ok: >-
+      {{ _ch_container.Mounts | default([]) | selectattr('Destination', 'equalto', '/etc/clickhouse-server/config.d/turbopanel.xml') | list | length > 0 }}
+    _ch_users_mount_ok: >-
+      {{ _ch_container.Mounts | default([]) | selectattr('Destination', 'equalto', '/etc/clickhouse-server/users.d/turbopanel.xml') | list | length > 0 }}
+    _ch_http_binding_ok: >-
+      {{ (_ch_container.HostConfig.PortBindings['8123/tcp'] | default([]) | length > 0)
+         and ((_ch_container.HostConfig.PortBindings['8123/tcp'] | first).HostIp | default('')) == '127.0.0.1'
+         and ((_ch_container.HostConfig.PortBindings['8123/tcp'] | first).HostPort | default('')) == (clickhouse_http_port | string) }}
+    _ch_image_ok: "{{ (_ch_container.Config.Image | default('')) == clickhouse_image }}"
+    _ch_user_ok: >-
+      {{ (_ch_container.Config.User | default('')) == (clickhouse_container_uid | string ~ ':' ~ clickhouse_container_gid | string) }}
+  when: _ch_inspect_cmd.rc == 0
+
+- name: Set clickhouse container missing facts
+  ansible.builtin.set_fact:
+    _clickhouse_container_exists: false
+    _clickhouse_running: false
+  when: _ch_inspect_cmd.rc != 0
+
+# Recreate (not just restart) when the running container has drifted from the
+# role's contract: missing volume/network, missing config.d/users.d overlay
+# mounts, a wrong/public 8123 host binding (must be exactly 127.0.0.1:<port>),
+# a stale image or --user, or an unhealthy status. `docker restart` cannot add
+# missing bind mounts or correct a port binding, so those must force a rebuild.
+- name: Remove clickhouse container with drifted configuration
+  ansible.builtin.command:
+    cmd: docker rm -f {{ clickhouse_container_name }}
+  when:
+    - _clickhouse_container_exists | bool
+    - >-
+      (not _ch_volume_ok | bool)
+      or (not _ch_network_ok | bool)
+      or (not _ch_config_mount_ok | bool)
+      or (not _ch_users_mount_ok | bool)
+      or (not _ch_http_binding_ok | bool)
+      or (not _ch_image_ok | bool)
+      or (not _ch_user_ok | bool)
+      or (_ch_status | trim in ['restarting', 'exited', 'dead'])
+  register: _ch_removed
+  changed_when: _ch_removed.rc == 0
+
+- name: Refresh clickhouse container facts after removal
+  ansible.builtin.set_fact:
+    _clickhouse_container_exists: false
+    _clickhouse_running: false
+  when: _ch_removed is changed
+
+- name: Pre-own clickhouse Docker volume data directory
+  ansible.builtin.command:
+    cmd: docker run --rm -v {{ clickhouse_volume_name }}:/var/lib/clickhouse --user root alpine chown -R {{ clickhouse_container_uid }}:{{ clickhouse_container_gid }} /var/lib/clickhouse
+  when: not _clickhouse_container_exists | bool
+
+- name: Build docker run argument list
+  ansible.builtin.set_fact:
+    _docker_run_args: "{{ _docker_run_base + [clickhouse_image] }}"
+  vars:
+    _docker_run_base:
+      - "--name"
+      - "{{ clickhouse_container_name }}"
+      - "--restart"
+      - "unless-stopped"
+      - "-d"
+      - "--user"
+      - "{{ clickhouse_container_uid }}:{{ clickhouse_container_gid }}"
+      - "--network"
+      - "{{ turbopanel_docker_network }}"
+      - "-v"
+      - "{{ clickhouse_volume_name }}:/var/lib/clickhouse"
+      - "-v"
+      - "{{ clickhouse_log_dir }}:/var/log/clickhouse-server"
+      - "-v"
+      - "{{ turbopanel_config_dir }}/clickhouse/config.xml:/etc/clickhouse-server/config.d/turbopanel.xml:ro"
+      - "-v"
+      - "{{ turbopanel_config_dir }}/clickhouse/users.xml:/etc/clickhouse-server/users.d/turbopanel.xml:ro"
+      - "--ulimit"
+      - "nofile=262144:262144"
+      - "-p"
+      - "127.0.0.1:{{ clickhouse_http_port }}:8123"
+
+# Pre-flight: prove the container id/gid (9994:9994 in production) can actually
+# read both bind-mounted overlays before the real container start / readiness /
+# bootstrap. A throwaway container using the same --user and the same read-only
+# mounts fails loudly here instead of crash-looping ClickHouse for ~2 minutes
+# until the /ping readiness wrapper gives up.
+- name: Verify clickhouse container user can read mounted overlay files
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --user
+      - "{{ clickhouse_container_uid }}:{{ clickhouse_container_gid }}"
+      - --entrypoint
+      - sh
+      - -v
+      - "{{ turbopanel_config_dir }}/clickhouse/config.xml:/etc/clickhouse-server/config.d/turbopanel.xml:ro"
+      - -v
+      - "{{ turbopanel_config_dir }}/clickhouse/users.xml:/etc/clickhouse-server/users.d/turbopanel.xml:ro"
+      - "{{ clickhouse_image }}"
+      - -c
+      - >-
+        cat /etc/clickhouse-server/config.d/turbopanel.xml >/dev/null
+        && cat /etc/clickhouse-server/users.d/turbopanel.xml >/dev/null
+  changed_when: false
+
+- name: Create and start clickhouse container
+  ansible.builtin.command:
+    cmd: docker run {{ _docker_run_args | join(' ') }}
+  when: not _clickhouse_container_exists | bool
+  no_log: true
+
+- name: Restart clickhouse container when overlay config changed
+  ansible.builtin.command:
+    cmd: docker restart {{ clickhouse_container_name }}
+  when:
+    - _clickhouse_container_exists | bool
+    - _ch_config_written is changed or _ch_users_written is changed
+    - _ch_removed is not changed
+  register: _ch_conf_restart
+  changed_when: _ch_conf_restart.rc == 0
+
+- name: Install ClickHouse wrapper start script
+  ansible.builtin.template:
+    src: clickhouse-wrapper-start.sh.j2
+    dest: "{{ turbopanel_config_dir }}/clickhouse/wrapper-start.sh"
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Ensure clickhouse container is running and ready
+  ansible.builtin.command:
+    cmd: "{{ turbopanel_config_dir }}/clickhouse/wrapper-start.sh"
+  changed_when: false
+
+# Admin-owned destructive migration: drop retired raw/rollup/MV objects and any
+# legacy snake_case layout. Metrics is disposable — instance runtime must never
+# run DROP DDL with the app user.
+- name: Drop legacy ClickHouse metrics schema objects (admin migration)
+  args:
+    executable: /bin/bash
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker exec -i {{ clickhouse_container_name }} clickhouse-client \
+      --user default --password '{{ _clickhouse_admin_password }}' --multiquery <<'EOSQL'
+    DROP VIEW IF EXISTS host_metrics_mv_5m;
+    DROP VIEW IF EXISTS host_metrics_mv_1h;
+    DROP VIEW IF EXISTS host_metrics_mv_1d;
+    DROP TABLE IF EXISTS host_metrics_rollup_5m;
+    DROP TABLE IF EXISTS host_metrics_rollup_1h;
+    DROP TABLE IF EXISTS host_metrics_rollup_1d;
+    DROP TABLE IF EXISTS host_metrics_raw;
+    EOSQL
+    if docker exec -i {{ clickhouse_container_name }} clickhouse-client \
+      --user default --password '{{ _clickhouse_admin_password }}' --query \
+      "SELECT count() FROM system.columns WHERE database = '{{ clickhouse_database }}' AND table = 'turbopanel_server_metrics' AND name = 'server_id'" \
+      | grep -q '^1$'; then
+      docker exec -i {{ clickhouse_container_name }} clickhouse-client \
+        --user default --password '{{ _clickhouse_admin_password }}' --database {{ clickhouse_database }} --query \
+        'DROP TABLE IF EXISTS turbopanel_server_metrics'
+    fi
+  no_log: true
+  changed_when: false
+
+- name: Install ClickHouse systemd unit
+  ansible.builtin.template:
+    src: turbopanel-clickhouse.service.j2
+    dest: "/etc/systemd/system/{{ clickhouse_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0640"
+
+- name: Ensure ClickHouse service desired state
+  ansible.builtin.systemd:
+    name: "{{ clickhouse_service_name }}"
+    daemon_reload: true
+    enabled: true
+    state: started
+
+- name: Bootstrap ClickHouse database and app user (idempotent)
+  args:
+    executable: /bin/bash
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker exec -i {{ clickhouse_container_name }} clickhouse-client \
+      --user default --password '{{ _clickhouse_admin_password }}' --multiquery <<EOSQL
+    CREATE DATABASE IF NOT EXISTS {{ clickhouse_database }};
+    CREATE USER IF NOT EXISTS {{ clickhouse_app_user }} IDENTIFIED WITH sha256_password BY '{{ _clickhouse_app_password }}';
+    ALTER USER {{ clickhouse_app_user }} IDENTIFIED WITH sha256_password BY '{{ _clickhouse_app_password }}';
+    GRANT SELECT, INSERT, CREATE TABLE, CREATE VIEW, SHOW ON {{ clickhouse_database }}.* TO {{ clickhouse_app_user }};
+    EOSQL
+  no_log: true
+  changed_when: false

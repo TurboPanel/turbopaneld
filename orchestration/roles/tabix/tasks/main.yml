@@ -1,0 +1,165 @@
+# Dev-only Tabix container: a static browser client for the ClickHouse metrics DB.
+# Not routed through Caddy — loopback port only. The browser talks to ClickHouse
+# cross-origin over 127.0.0.1:{{ clickhouse_http_port }}, prefilled to the
+# least-privilege {{ clickhouse_app_user }} (the default admin is
+# <networks>-restricted to loopback and only reachable via docker exec).
+
+- name: Ensure tabix config directory exists
+  ansible.builtin.file:
+    path: "{{ turbopanel_config_dir }}/tabix"
+    state: directory
+    owner: "{{ tabix_config_owner }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
+- name: Ensure turbopanel Docker network exists
+  ansible.builtin.command:
+    argv: [docker, network, create, --driver, bridge, "{{ turbopanel_docker_network }}"]
+  register: _tabix_network_create
+  changed_when: false
+  failed_when: false
+
+- name: Check ClickHouse app password file exists
+  ansible.builtin.stat:
+    path: "{{ turbopanel_config_dir }}/clickhouse/.clickhouse_app_pass"
+  register: _tabix_ch_app_pass_stat
+
+- name: Fail when ClickHouse app password is missing
+  ansible.builtin.fail:
+    msg: >-
+      {{ turbopanel_config_dir }}/clickhouse/.clickhouse_app_pass is missing.
+      The clickhouse role must run before tabix (it generates the app password).
+  when: not _tabix_ch_app_pass_stat.stat.exists
+
+- name: Read ClickHouse app password
+  ansible.builtin.slurp:
+    src: "{{ turbopanel_config_dir }}/clickhouse/.clickhouse_app_pass"
+  register: _tabix_ch_app_pass_raw
+  no_log: true
+
+- name: Set ClickHouse app password fact
+  ansible.builtin.set_fact:
+    _tabix_ch_app_password: "{{ _tabix_ch_app_pass_raw.content | b64decode | trim }}"
+  no_log: true
+
+- name: Inspect tabix container
+  ansible.builtin.command:
+    argv: [docker, inspect, "{{ tabix_container_name }}"]
+  register: _tabix_inspect_cmd
+  changed_when: false
+  failed_when: false
+
+- name: Parse tabix container inspection
+  ansible.builtin.set_fact:
+    _tabix_container: "{{ (_tabix_inspect_cmd.stdout | from_json)[0] }}"
+  when: _tabix_inspect_cmd.rc == 0
+
+- name: Set tabix container state facts
+  ansible.builtin.set_fact:
+    _tabix_container_exists: true
+    _tabix_running: "{{ _tabix_container.State.Running | default(false) }}"
+    _tabix_status: "{{ _tabix_container.State.Status | default('') }}"
+    _tabix_network_ok: "{{ turbopanel_docker_network in (_tabix_container.NetworkSettings.Networks | default({})) }}"
+    _tabix_web_ok: >-
+      {{ (_tabix_container.HostConfig.PortBindings['80/tcp'] | default([]) | length > 0)
+         and ((_tabix_container.HostConfig.PortBindings['80/tcp'] | first).HostIp | default('')) == '127.0.0.1'
+         and ((_tabix_container.HostConfig.PortBindings['80/tcp'] | first).HostPort | default('')) == (tabix_web_port | string) }}
+    _tabix_preconfig_ok: >-
+      {{ (('CH_HOST=' ~ tabix_ch_host) in (_tabix_container.Config.Env | default([])))
+         and (('CH_LOGIN=' ~ clickhouse_app_user) in (_tabix_container.Config.Env | default([])))
+         and (('CH_PARAMS=' ~ tabix_ch_params) in (_tabix_container.Config.Env | default([]))) }}
+    _tabix_user_ok: >-
+      {{ (_tabix_container.Config.User | default(''))
+         == (tabix_container_uid | string ~ ':' ~ tabix_container_gid | string
+             if (turbopanel_dev_user | default('') | length > 0) else '') }}
+  when: _tabix_inspect_cmd.rc == 0
+
+- name: Set tabix container missing facts
+  ansible.builtin.set_fact:
+    _tabix_container_exists: false
+    _tabix_running: false
+  when: _tabix_inspect_cmd.rc != 0
+
+- name: Remove tabix container when unhealthy
+  ansible.builtin.command:
+    cmd: docker rm -f {{ tabix_container_name }}
+  when:
+    - _tabix_container_exists | bool
+    - (not _tabix_network_ok | bool) or (not _tabix_web_ok | bool) or (not _tabix_preconfig_ok | bool) or (not _tabix_user_ok | bool) or (_tabix_status | trim in ['restarting', 'exited', 'dead'])
+  register: _tabix_removed
+  changed_when: _tabix_removed.rc == 0
+
+- name: Refresh tabix container facts after removal
+  ansible.builtin.set_fact:
+    _tabix_container_exists: false
+    _tabix_running: false
+  when: _tabix_removed is changed
+
+# Dev runs the container as the single dev uid:gid (matching redis-insight/mailpit);
+# managed installs omit --user. Modern Docker sets ip_unprivileged_port_start=0 for
+# containers, so the internal web server binds port 80 fine as a non-root user.
+- name: Build tabix docker run argument list
+  ansible.builtin.set_fact:
+    _tabix_docker_run_args: "{{ _tabix_docker_run_base + (_tabix_docker_user if (turbopanel_dev_user | default('') | length > 0) else []) + _tabix_docker_run_env + [tabix_image] }}"
+  no_log: true
+  vars:
+    _tabix_docker_run_base:
+      - docker
+      - run
+      - "--name"
+      - "{{ tabix_container_name }}"
+      - "--restart"
+      - unless-stopped
+      - "-d"
+      - "--network"
+      - "{{ turbopanel_docker_network }}"
+      - "-p"
+      - "127.0.0.1:{{ tabix_web_port }}:80"
+    _tabix_docker_run_env:
+      - "-e"
+      - "CH_NAME={{ tabix_ch_name }}"
+      - "-e"
+      - "CH_HOST={{ tabix_ch_host }}"
+      - "-e"
+      - "CH_LOGIN={{ clickhouse_app_user }}"
+      - "-e"
+      - "CH_PASSWORD={{ _tabix_ch_app_password }}"
+      - "-e"
+      - "CH_PARAMS={{ tabix_ch_params }}"
+    _tabix_docker_user:
+      - "--user"
+      - "{{ tabix_container_uid }}:{{ tabix_container_gid }}"
+
+- name: Create and start tabix container
+  ansible.builtin.command:
+    cmd: "{{ _tabix_docker_run_args | join(' ') }}"
+  when: not _tabix_container_exists | bool
+  no_log: true
+
+- name: Install tabix wrapper start script
+  ansible.builtin.template:
+    src: tabix-wrapper-start.sh.j2
+    dest: "{{ turbopanel_config_dir }}/tabix/wrapper-start.sh"
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Ensure tabix container is running and ready
+  ansible.builtin.command:
+    cmd: "{{ turbopanel_config_dir }}/tabix/wrapper-start.sh"
+  changed_when: false
+
+- name: Install Tabix systemd unit
+  ansible.builtin.template:
+    src: turbopanel-tabix.service.j2
+    dest: "/etc/systemd/system/{{ tabix_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0640"
+
+- name: Ensure Tabix systemd unit desired state
+  ansible.builtin.systemd:
+    name: "{{ tabix_service_name }}"
+    daemon_reload: true
+    enabled: true
+    state: started

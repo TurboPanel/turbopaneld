@@ -1,0 +1,29 @@
+tabix_image: spoonest/clickhouse-tabix-web-client:latest
+tabix_container_name: turbopaneltabix
+tabix_service_name: turbopanel-tabix
+tabix_web_port: 8125
+turbopanel_docker_network: turbopanel
+# FHS config dir (dev shares it with prod).
+turbopanel_config_dir: /etc/turbopanel
+# Shared dev-identity contract: config dir group resolves to the dev group in dev.
+turbopanel_dev_user: ""
+turbopanel_dev_uid: ""
+turbopanel_dev_gid: ""
+turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
+# Dev runs the container as the single dev uid:gid (matching mailpit/redis-insight);
+# managed installs omit --user. Modern Docker sets ip_unprivileged_port_start=0 for
+# containers, so the internal web server can bind port 80 even as a non-root user.
+tabix_container_uid: "{{ turbopanel_dev_uid if (turbopanel_dev_user | default('') | length > 0) else '' }}"
+tabix_container_gid: "{{ turbopanel_dev_gid if (turbopanel_dev_user | default('') | length > 0) else '' }}"
+tabix_config_owner: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'root' }}"
+# ClickHouse connection prefill (must reach ClickHouse from the browser, so the
+# host-published loopback port — not the container name — is used).
+clickhouse_http_port: 8123
+clickhouse_database: turbopanel_metrics
+clickhouse_app_user: turbopanel_app
+tabix_ch_name: turbopanel-metrics
+tabix_ch_host: "http://127.0.0.1:{{ clickhouse_http_port }}"
+# Prefilled ClickHouse HTTP request params (Tabix appends them to every request):
+# enable the CORS header and select the metrics database so unqualified queries
+# resolve against turbopanel_metrics instead of ClickHouse's default database.
+tabix_ch_params: "add_http_cors_header=1&database={{ clickhouse_database }}"

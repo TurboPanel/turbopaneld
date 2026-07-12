@@ -26,17 +26,34 @@
     - (_launch_pgpass.content | b64decode | trim | length) > 0
 
 - name: Read RabbitMQ password for systemd units
+  when: (turbopanel_instance_runtime | default('deno')) == 'deno'
   ansible.builtin.slurp:
     src: "{{ turbopanel_config_dir }}/rabbitmq/.rabbitmq_pass"
   register: _launch_rabbitmq_pass
   failed_when: false
 
 - name: Set RabbitMQ URL for systemd units
-  ansible.builtin.set_fact:
-    turbopanel_amqp_url: "amqp://{{ rabbitmq_user }}:{{ _launch_rabbitmq_pass.content | b64decode | trim }}@127.0.0.1:{{ rabbitmq_amqp_port }}{{ rabbitmq_vhost }}"
   when:
+    - (turbopanel_instance_runtime | default('deno')) == 'deno'
     - _launch_rabbitmq_pass.content is defined
     - (_launch_rabbitmq_pass.content | b64decode | trim | length) > 0
+  ansible.builtin.set_fact:
+    turbopanel_amqp_url: "amqp://{{ rabbitmq_user }}:{{ _launch_rabbitmq_pass.content | b64decode | trim }}@127.0.0.1:{{ rabbitmq_amqp_port }}{{ rabbitmq_vhost }}"
+
+- name: Read ClickHouse app password for systemd units
+  ansible.builtin.slurp:
+    src: "{{ turbopanel_config_dir }}/clickhouse/.clickhouse_app_pass"
+  register: _launch_clickhouse_app_pass
+  failed_when: false
+
+- name: Set ClickHouse connection facts for systemd units
+  ansible.builtin.set_fact:
+    turbopanel_clickhouse_url: "http://127.0.0.1:{{ clickhouse_http_port }}"
+    turbopanel_clickhouse_password: "{{ _launch_clickhouse_app_pass.content | b64decode | trim }}"
+  when:
+    - _launch_clickhouse_app_pass.content is defined
+    - (_launch_clickhouse_app_pass.content | b64decode | trim | length) > 0
+  no_log: true
 
 - name: Install instance systemd unit
   ansible.builtin.template:
@@ -44,7 +61,7 @@
     dest: "/etc/systemd/system/{{ instance_service_name }}.service"
     owner: root
     group: root
-    mode: "0644"
+    mode: "0640"
   notify:
     - Reload systemd for instance units
     - Restart turbopanel instance
@@ -53,7 +70,9 @@
   when: turbopanel_ui_mode == 'dev'
   ansible.builtin.file:
     path: "{{ turbopanel_instance_dir }}/scripts/drizzle-studio-serve.sh"
-    mode: "0755"
+    owner: "{{ instance_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
   failed_when: false
 
 - name: Install Drizzle Studio systemd unit
@@ -63,7 +82,7 @@
     dest: "/etc/systemd/system/{{ dbstudio_service_name }}.service"
     owner: root
     group: root
-    mode: "0644"
+    mode: "0640"
   notify:
     - Reload systemd for instance units
     - Restart turbopanel dbstudio
@@ -74,7 +93,7 @@
     dest: "/etc/systemd/system/{{ caddy_service_name }}.service"
     owner: root
     group: root
-    mode: "0644"
+    mode: "0640"
   notify:
     - Reload systemd for instance units
     - Restart turbopanel caddy
@@ -86,7 +105,7 @@
     dest: "/etc/systemd/system/{{ ui_service_name }}.service"
     owner: root
     group: root
-    mode: "0644"
+    mode: "0640"
   notify:
     - Reload systemd for instance units
     - Restart turbopanel ui
@@ -97,18 +116,19 @@
     dest: "/etc/systemd/system/{{ website_service_name }}.service"
     owner: root
     group: root
-    mode: "0644"
+    mode: "0640"
   notify:
     - Reload systemd for instance units
     - Restart turbopanel website
 
 - name: Install mailer systemd unit
+  when: (turbopanel_instance_runtime | default('deno')) == 'deno'
   ansible.builtin.template:
     src: turbopanel-mailer.service.j2
     dest: "/etc/systemd/system/{{ mailer_service_name }}.service"
     owner: root
     group: root
-    mode: "0644"
+    mode: "0640"
   notify:
     - Reload systemd for instance units
     - Restart turbopanel mailer
@@ -282,6 +302,28 @@
     - (turbopanel_instance_runtime | default('deno')) == 'workers'
     - _instance_ca_raw.content is defined
 
+- name: Stat Analytics Engine API token file
+  ansible.builtin.stat:
+    path: "{{ turbopanel_config_dir }}/instance/.analytics_engine_api_token"
+  register: _analytics_engine_api_token_stat
+  when: (turbopanel_instance_runtime | default('deno')) == 'workers'
+
+- name: Read Analytics Engine API token
+  ansible.builtin.slurp:
+    src: "{{ turbopanel_config_dir }}/instance/.analytics_engine_api_token"
+  register: _analytics_engine_api_token_raw
+  when:
+    - (turbopanel_instance_runtime | default('deno')) == 'workers'
+    - _analytics_engine_api_token_stat.stat.exists | default(false)
+
+- name: Set Analytics Engine API token fact
+  ansible.builtin.set_fact:
+    turbopanel_analytics_engine_api_token: "{{ _analytics_engine_api_token_raw.content | b64decode | trim }}"
+  when:
+    - (turbopanel_instance_runtime | default('deno')) == 'workers'
+    - _analytics_engine_api_token_raw.content is defined
+    - (_analytics_engine_api_token_raw.content | b64decode | trim) | length > 0
+
 - name: Install Workers runtime dev vars (protected config dir)
   ansible.builtin.template:
     src: instance-workers.dev-vars.j2
@@ -363,12 +405,29 @@
     enabled: false
   failed_when: false
 
-- name: Ensure mailer service desired state
+- name: Ensure mailer service desired state (Deno runtime)
+  when: (turbopanel_instance_runtime | default('deno')) == 'deno'
   ansible.builtin.systemd:
     name: "{{ mailer_service_name }}"
     daemon_reload: true
     enabled: "{{ instance_start | bool }}"
     state: "{{ 'started' if (instance_start | bool) else 'stopped' }}"
+
+- name: Stop and disable mailer when Workers runtime
+  when: (turbopanel_instance_runtime | default('deno')) == 'workers'
+  ansible.builtin.systemd:
+    name: "{{ mailer_service_name }}"
+    state: stopped
+    enabled: false
+  failed_when: false
+
+- name: Stop and disable queue service when Workers runtime
+  when: (turbopanel_instance_runtime | default('deno')) == 'workers'
+  ansible.builtin.systemd:
+    name: "{{ rabbitmq_service_name }}"
+    state: stopped
+    enabled: false
+  failed_when: false
 
 - name: Install instance upgrade sudoers
   ansible.builtin.import_tasks: upgrade-sudoers.yml

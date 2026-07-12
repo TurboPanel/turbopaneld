@@ -1,0 +1,37 @@
+---
+# Pinned ClickHouse stable (verified 26.5.5.8-stable). Used as the Docker image
+# tag (clickhouse/clickhouse-server:<version>); paths.test reads this value.
+clickhouse_version: "26.5.5.8"
+clickhouse_http_port: 8123
+clickhouse_log_dir: "{{ turbopanel_log_dir | default('/var/log/turbopanel') }}/clickhouse"
+clickhouse_service_name: turbopanel-clickhouse
+# Docker model (mirrors postgres/rabbitmq): official image, named volume, and the
+# shared turbopanel bridge network.
+clickhouse_image: "clickhouse/clickhouse-server:{{ clickhouse_version }}"
+clickhouse_container_name: turbopanelch
+clickhouse_volume_name: turbopanelch
+turbopanel_docker_network: turbopanel
+# Shared dev-identity contract: dev runs the container (and owns its secret files)
+# as the single dev uid:gid; managed installs use the reserved 9994 container id
+# (reuses the freed turbopanelh number).
+turbopanel_dev_user: ""
+turbopanel_dev_uid: ""
+turbopanel_dev_gid: ""
+clickhouse_container_uid: "{{ turbopanel_dev_uid if (turbopanel_dev_user | default('') | length > 0) else '9994' }}"
+clickhouse_container_gid: "{{ turbopanel_dev_gid if (turbopanel_dev_user | default('') | length > 0) else '9994' }}"
+turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
+# Ownership split:
+# - Host-read secret/config files (.clickhouse_admin_pass, .clickhouse_app_pass,
+#   config.json) are owned by clickhouse_config_owner + turbopanel_group so the
+#   dev user (dev) / root + the turbopanel group (prod) — including instance-launch
+#   — can read them.
+# - The container-read config.d/users.d overlays (config.xml, users.xml) are owned
+#   by clickhouse_container_uid:clickhouse_container_gid instead, because the
+#   container runs as that id (9994:9994 in prod) and is neither root nor in the
+#   turbopanel group after the dedicated turbopanelh account was removed.
+# Owner of the generated ClickHouse secret/config files: the dev user in dev, else root.
+clickhouse_config_owner: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'root' }}"
+# FHS config dir (dev shares it with prod).
+turbopanel_config_dir: /etc/turbopanel
+clickhouse_database: turbopanel_metrics
+clickhouse_app_user: turbopanel_app

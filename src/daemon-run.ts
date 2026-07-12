@@ -7,6 +7,7 @@ import {
   shouldConnectToInstance,
   shouldEnableDockerIntegration,
 } from "./orchestration/setup.ts";
+import { createMetricsCollector } from "./metrics/collector/index.ts";
 import { startTunnels } from "./tunnels.ts";
 
 logInfo("daemon", "starting up");
@@ -29,7 +30,7 @@ if (orchestrationReady && shouldEnableDockerIntegration()) {
   sentinelOptions.dockerMonitor = new DockerMonitor(dockerClient);
 }
 const sentinel = createSentinel(sentinelOptions);
-// TODO(deferred): daemon-side SQLite monitoring store will subscribe to
+// Future: daemon-side SQLite monitoring store will subscribe to
 // sentinel.onTransition() and sentinel.buildHeartbeat() here.
 sentinel.start(abort.signal);
 
@@ -39,7 +40,9 @@ const instanceHandle = { stop() {} };
 let instance: { stop(): void } = instanceHandle;
 
 if (shouldConnectToInstance()) {
-  instance = await connectInstance();
+  instance = await connectInstance({
+    metricsCollectorFactory: () => createMetricsCollector(),
+  });
 } else {
   logInfo(
     "instance",

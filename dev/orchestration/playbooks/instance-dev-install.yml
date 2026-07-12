@@ -95,6 +95,11 @@
     - role: redis-insight
       when: turbopanel_instance_runtime == 'deno'
     - role: rabbitmq
+      when: turbopanel_instance_runtime == 'deno'
+    - role: clickhouse
+      when: turbopanel_instance_runtime == 'deno'
+    - role: tabix
+      when: turbopanel_instance_runtime == 'deno'
     - role: mailpit
     - role: instance-user
     # GTK/NSS/GBM stack for @react-native/debugger-shell (Debian only).
@@ -129,9 +134,12 @@
           - turbopanel-caddy
           - turbopanel-ui
           - turbopanel-website
-          - turbopanel-mailer
         _dev_stack_units_deno_extra:
+          - turbopanel-rabbitmq
+          - turbopanel-mailer
           - turbopanel-redis-insight
+          - turbopanel-clickhouse
+          - turbopanel-tabix
 
     - name: Resolve dev stack unit list
       ansible.builtin.set_fact:

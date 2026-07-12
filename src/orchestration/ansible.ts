@@ -468,6 +468,14 @@ export async function runRabbitmqSetup(onEvent?: AnsibleEventHandler): Promise<v
 }
 
 /**
+ * ClickHouse setup is deferred: co-located dev installs it via the
+ * dev-converge-manifest.json role list (same as postgres/redis/rabbitmq).
+ * There is no discrete runClickHouseSetup() step here unless a managed
+ * daemon-only-host use case is confirmed — use CLICKHOUSE_PLAYBOOK /
+ * playbooks/clickhouse-setup.yml for that future path.
+ */
+
+/**
  * Bootstrap orchestration runtime tools (uv, Python, ansible, Galaxy).
  *
  * Runs the localhost smoke test only when bootstrap inputs changed or ansible

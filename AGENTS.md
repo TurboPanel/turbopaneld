@@ -52,7 +52,7 @@ TurboPanel **daemon** — Ansible-driven node agent; connects to the instance ov
 | Config dir | `/etc/turbopanel` |
 | Runtime (sockets, `daemon.lock`) | `/run/turbopanel` |
 
-**Development identity:** co-located dev creates **no** dedicated `turbopanel`, `turbopaneli`, or `turbopanelc` service accounts. The `turbopaneld`, instance, UI, and Caddy systemd units, plus Docker-backed services (Postgres, Redis, RabbitMQ, Mailpit), all run as the **current dev user**. Production managed installs keep the dedicated service users described in the production table above.
+**Development identity:** co-located dev creates **no** dedicated `turbopanel`, `turbopaneli`, or `turbopanelc` / `turbopanelh` service accounts. The `turbopaneld`, instance, UI, and Caddy systemd units, plus Docker-backed services (Postgres, Redis, RabbitMQ, Mailpit, ClickHouse — `turbopanel-clickhouse`, Tabix — `turbopanel-tabix`), all run as the **current dev user**. Production managed installs keep the dedicated service users described in the production table above.
 
 **Deno version pin:** `DENO_VERSION` (`src/orchestration/paths.ts`) = **`2.9.2`**. Keep it in step with `deno_version` in `orchestration/roles/deno-runtime/defaults/main.yml`, `TP_DENO_VERSION` in `scripts/run.sh`, and `DENO_VERSION` in [turbopanel/dev](https://github.com/turbopanel/dev) `src/lib/paths.ts` (dev console bootstrap fallback + status label). `src/orchestration/paths.test.ts` pins the const to the role default.
 
@@ -97,6 +97,8 @@ Tests: `src/orchestration/presentation.test.ts`, `install-presenter.test.ts`, `a
 - After **~60 s** of inbound silence (`IDLE_PRESENCE_MS`), sends the wire **`{"type":"ping"}`** cell ping (must match `DAEMON_CELL_PING` in `instance/src/daemon/cell/protocol.ts`). On Workers the DO answers via `setWebSocketAutoResponse` without waking the object; on self-hosted Redis the same ping updates cell `lastSeenAt`. When the min-presence interval equals the check interval (default), `IdlePresence` allows ~5s of `setInterval` skew so early ticks still send — otherwise early fires were skipped and Redis coalesce could false-demote a live socket.
 - Sends app-level `{ type: "heartbeat", at }` **only when the build agent commit changed** since the last hello/heartbeat — not on every idle tick. Do **not** put OS on heartbeat. Offline self-heal (Postgres `connected: false` while the socket is still live) is handled by the instance **offline-sweep cron** re-projecting online via `onDaemonConnected` — not by a periodic daemon heartbeat.
 
+**Heartbeat vs metrics:** ping/`heartbeat` (above) = liveness only. Host metrics are a separate completed measurement interval — see **Host metrics** below. `MetricsScheduler` is independent of `IdlePresence` (neither suppresses the other).
+
 **Reconnect jitter:** `InstanceClient` reconnects with **full-jitter** backoff in `[initialBackoffMs, currentBackoffMs]` (defaults 2 s → 30 s cap, doubling on auth failures). A benign close after a stable session (`STABLE_SESSION_MS`, 5 s) resets backoff to the initial floor so fleet-wide restarts do not align into a thundering herd.
 
 **Single-daemon guarantee:** only one live cell attachment per server. Runtime backstop is the instance cell's **single-writer lease** on attach (`attachDaemonSocket` / `detachDaemonSocket`). On managed hosts, `share/orchestration/scripts/ensure-single-daemon.sh` (systemd `ExecStartPre`) adds a **flock** on `/run/turbopanel/daemon.lock` so a second `turbopaneld.service` cannot start. Manual `deno task start/dev` bypasses flock (dev-only). Canonical cell semantics, DO/SQLite billing, and cost rules: **`../instance/AGENTS.md`** (Daemon Cell) — do not duplicate DO pricing here.
@@ -131,6 +133,58 @@ The daemon validates the instance server cert on **every HTTPS connect** — bot
 The plaintext HTTP path targets the dev-only `:8880` entrypoint in `../instance/Caddyfile` (see **`../instance/AGENTS.md`** "Caddy (dev + production)" — dev-only plaintext HTTP entrypoint). It requires `TURBOPANEL_DEV_HTTP_CONTROL_PLANE=1` on co-located dev hosts and is never valid on managed or production installs.
 
 Note: `Deno.createHttpClient({ caCerts })` **adds** to the system roots (does not replace them), so configuring the platform CA does not break validation of publicly-trusted certs.
+
+### Host metrics
+
+Protocol v1 wire frame over `/ws/daemon/v1`:
+
+```json
+{ "type": "metrics", "version": 1, "at", "intervalSeconds", "sequence", "metrics", "dimensions" }
+```
+
+Contract mirrored (not build-coupled) in `src/metrics/contract.ts` ↔ `../instance/src/daemon/metrics/contract.ts` (`METRICS_SCHEMA_VERSION = 1`). The 20-metric ordered list (`HOST_METRIC_KEYS`: `cpuUsagePercent` … `uptimeSeconds`) is an **external storage contract** — positional AE doubles and ClickHouse columns depend on this order.
+
+**Scheduling** (`src/metrics/scheduler.ts`): one sample ~every **60 s** (`METRICS_INTERVAL_MS`) while connected; deterministic per-`serverId` phase jitter ≤**5 s** (`METRICS_JITTER_MAX_MS`, FNV‑1a — does not change query resolution). Monotonic process-local `sequence` resets on daemon restart (not persisted). Fire-and-forget, disposable — no acks, retries, or outbox. Never blocks startup, connect, liveness, command dispatch, shutdown, or reconnect. Factory/collect/send failures are rate-limited (`METRICS_LOG_RATE_LIMIT_MS` = 5 min) and must not tear down the socket. Overlapping ticks are dropped; the steady interval arms when the jittered first tick fires (not after first-collect completion). Attach-scoped generation ignores stale in-flight emits across detach/reconnect. Scheduler rebinding tracks `#metricsSchedulerServerId` separately from `#tokenServerId` so jitter stays tied to the authenticated server after identity recovery.
+
+**Collector** (`src/metrics/collector/`): async reads only — **no subprocesses per interval** (no `top`/`vmstat`/`iostat`/`free`/`df`/`ps`/`sar`). Sources: `/proc/stat`, `/proc/loadavg`, `/proc/meminfo`, `/proc/uptime`, `/proc/diskstats`, `/proc/net/dev`, `/proc/sys/kernel/osrelease`, process count via `/proc`, root filesystem via `node:fs/promises` `statfs` on `/` (no `df`). CPU % and per-second rates use two-snapshot deltas; first-sample rate metrics are **`null`** (never coerced to `0`). **Disk filter** (`parse-diskstats.ts`): exclude device prefixes `loop`, `ram`, `zram`, `fd`, `dm-`, `md`, `dcssblk`, `sr`, `nbd`; drop partition rows (`^p?\d+$` suffix) when the parent whole-disk row survives; sectors = 512 B. **Net filter** (`parse-net-dev.ts`): exclude `lo`. Per-filesystem and per-interface series are deferred to future event types. **Unsupported OS:** `UnsupportedMetricsCollector` returns `{ supported: false, reason: "unsupported_os:<os>" }` and keeps the daemon running.
+
+**Env:** `TURBOPANEL_SERVER_METRICS_RETENTION_DAYS` default `90` (instance ClickHouse raw TTL). Server metrics are always on — there is no instance-side enable/disable gate; the daemon always collects and emits host metrics fire-and-forget, and the instance always persists when a backend is configured. ClickHouse connection vars and `CLICKHOUSE_VERSION` pin: see **ClickHouse** below and **`../instance/AGENTS.md`** (Server metrics).
+
+**Local validation:** fixture-driven tests under `src/metrics/` (no live `/proc` required):
+
+```bash
+deno test src/metrics/
+deno fmt && deno lint && deno check
+deno task check:layout
+```
+
+Fixtures: `src/metrics/collector/testdata/`.
+
+### ClickHouse (self-hosted analytics)
+
+ClickHouse runs as a **Docker container** (official `clickhouse/clickhouse-server:<version>` image) by the `clickhouse` Ansible role — mirroring the Postgres/RabbitMQ Docker roles (named volume, `turbopanel` bridge network, `Type=oneshot` unit). The `clickhouse` role has an explicit `docker` meta-dependency:
+
+| Path / resource | Purpose |
+|---|---|
+| Docker image `clickhouse/clickhouse-server:{{ clickhouse_version }}` | ClickHouse server (no vendored binaries) |
+| Container `turbopanelch` / volume `turbopanelch` on network `turbopanel` | Running server + persistent MergeTree data (in-container `/var/lib/clickhouse`) |
+| `/etc/turbopanel/clickhouse/` | `config.xml` (`config.d` overlay), `users.xml` (`users.d` overlay — bootstrap `default` admin only), `config.json` (host/port/database/user + password-file paths — no secret values), `.clickhouse_admin_pass` + `.clickhouse_app_pass` (mode `0600`), `wrapper-start.sh`. The two XML overlays are bind-mounted read-only into the image's `config.d`/`users.d` (base image config preserved). The overlays are owned by `clickhouse_container_uid`:`clickhouse_container_gid` (`9994:9994` in production, the dev uid:gid in co-located dev) — **not** `root`/`turbopanel` — so the `--user 9994:9994` container process can actually read them (mode `0640` keeps `users.xml`, which holds the admin password, non-world-readable); the secret/password files and `config.json` stay owned for root/dev + the `turbopanel` group as `instance-launch` needs. A pre-flight throwaway container (same `--user` + read-only mounts) verifies both overlays are readable before readiness/bootstrap |
+| `/var/log/turbopanel/clickhouse/` | server logs (bind-mounted to the container's `/var/log/clickhouse-server`) |
+| `turbopanel-clickhouse.service` | Type=oneshot (`ExecStart`=wrapper-start.sh, `ExecStop`=`docker stop`); container runs `--user 9994:9994` on managed hosts, or the single dev uid:gid in co-located dev |
+
+The `config.d` overlay carries **idle-CPU tuning** for an otherwise-idle single-server box: slow async-metrics cadence (`asynchronous_metrics_update_period_s`/`asynchronous_heavy_metrics_update_period_s` = 120) and shrunken always-awake background pools (`background_pool_size`/`background_schedule_pool_size`/`background_common_pool_size` = 2, `background_merges_mutations_concurrency_ratio` = 1, `merge_tree/merge_selecting_sleep_ms` = 30000).
+
+HTTP interface is published **loopback-only on `127.0.0.1:8123`** (native TCP `9000` is **not** published — it stays internal to the container/network; bootstrap SQL runs via `docker exec … clickhouse-client` on the container's loopback). Default anonymous access is disabled. **Separate secrets:** `.clickhouse_admin_pass` authenticates the `default` admin user in the `users.d` overlay (bootstrap DDL / `access_management`); `.clickhouse_app_pass` authenticates the least-privilege `turbopanel_app` user, which is created and granted **only via SQL** (not declared in `users.xml`, default `HOST ANY`) and scoped to database `turbopanel_metrics`.
+
+**`turbopanel_app` grants (SQL bootstrap):** `SELECT`, `INSERT`, `CREATE TABLE`, `CREATE VIEW`, and `SHOW` on `turbopanel_metrics.*` only — enough for instance-owned `ensureSchema()` (`CREATE TABLE IF NOT EXISTS` + `CREATE MATERIALIZED VIEW IF NOT EXISTS`) and metrics reads/writes. No `DROP`, `TRUNCATE`, or `ALTER`; schema migrations that need destructive DDL run via the `default` admin user during converge, not at runtime.
+
+**Converge wiring:** co-located dev installs ClickHouse via `dev/orchestration/dev-converge-manifest.json` (role `clickhouse`, after `postgres`/`redis`/`rabbitmq`, before `instance-user`) — same pattern as those data services (not a discrete `setup.ts` step). Managed daemon-only hosts omit it (`daemon-converge.yml`); use standalone `playbooks/clickhouse-setup.yml` / `CLICKHOUSE_VERSION` (`26.5.5.8`) when a control-plane host needs the Deno metrics store without the full dev overlay.
+
+**instance-launch env:** when `.clickhouse_app_pass` exists, injects `TURBOPANEL_CLICKHOUSE_URL` / `DATABASE` / `USER` into `runtime.env` and `TURBOPANEL_CLICKHOUSE_PASSWORD` (app password only) into `runtime.dev-vars`. The Deno/compiled `turbopanel-instance.service` loads `runtime.env` then `runtime.dev-vars` via `EnvironmentFile=` so the process sees the full ClickHouse + metrics config. Default: `TURBOPANEL_SERVER_METRICS_RETENTION_DAYS=90` (metrics are always on — no enable/disable env). Schema/query contract: **`../instance/AGENTS.md`** (Server metrics — ClickHouse).
+
+**Workers runtime dev vars:** `instance-workers.dev-vars.j2` injects `TURBOPANEL_ANALYTICS_ENGINE_API_TOKEN` when `/etc/turbopanel/instance/.analytics_engine_api_token` exists (mode `0600`, operator-provided Cloudflare **Account Analytics Read** token). Writes use the wrangler `SERVER_METRICS` binding; chart queries need this token for the AE SQL API. `CLOUDFLARE_ACCOUNT_ID` is already in `wrangler.jsonc` vars.
+
+**Tabix dev GUI (dev-only):** the `tabix` Ansible role runs a dev-only container `turbopaneltabix` (unit `turbopanel-tabix.service`) — a static browser client for the ClickHouse metrics DB, opened at **`http://127.0.0.1:8125`**. It is prefilled (via `CH_*` container env, slurped from `.clickhouse_app_pass`) to connect to **`http://127.0.0.1:8123`** as **`turbopanel_app`** (app password) against DB **`turbopanel_metrics`**. It **must** use the app user: the `default` admin is `<networks>`-restricted to `127.0.0.1`/`::1` (docker-exec only). Cross-origin browser access is enabled via the **dev-gated `http_options_response` CORS block** in the ClickHouse `config.d` overlay (only rendered when `turbopanel_dev_user` is set, so managed/prod config is byte-for-byte unchanged) plus a `CH_PARAMS` value of `add_http_cors_header=1&database={{ clickhouse_database }}` carried on every Tabix request (enables the CORS header **and** selects the `turbopanel_metrics` database so unqualified queries resolve there instead of ClickHouse's default DB). Loopback-only; **not** routed through Caddy; runs as the **current dev `--user`** (`tabix_container_uid:tabix_container_gid` derived from the dev uid/gid, matching the redis-insight/mailpit contract — modern Docker sets `ip_unprivileged_port_start=0` for containers, so the internal web server binds port 80 fine as a non-root user). Installed via `dev-converge-manifest.json` only (after `clickhouse`, so the app password exists) — omitted from `daemon-converge.yml`, so daemon-only hosts get no GUI. The app password is baked into the container env (dev-only, `docker inspect`-visible).
 
 ### Tenant Docker Compose deploy + hosting ingress
 

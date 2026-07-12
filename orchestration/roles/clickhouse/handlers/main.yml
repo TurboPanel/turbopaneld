@@ -1,0 +1,4 @@
+---
+# Container config-reload is handled by the explicit "Restart clickhouse container
+# when overlay config changed" task (docker restart) in tasks/main.yml, so this
+# role has no handlers.

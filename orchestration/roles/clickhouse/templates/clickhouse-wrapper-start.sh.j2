@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+
+container="{{ clickhouse_container_name }}"
+url="http://127.0.0.1:{{ clickhouse_http_port }}/ping"
+max_attempts=60
+sleep_seconds=2
+
+running="$(/usr/bin/docker inspect -f '{% raw %}{{.State.Running}}{% endraw %}' "$container" 2>/dev/null || echo false)"
+if [ "$running" != "true" ]; then
+  /usr/bin/docker start "$container"
+fi
+
+i=0
+while ! curl -fsS "$url" >/dev/null 2>&1; do
+  i=$((i + 1))
+  if [ "$i" -ge "$max_attempts" ]; then
+    exit 1
+  fi
+  sleep "$sleep_seconds"
+done

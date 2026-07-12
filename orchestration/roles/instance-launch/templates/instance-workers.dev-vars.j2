@@ -10,3 +10,7 @@ TURBOPANEL_TLS_CA_PEM_B64={{ turbopanel_instance_ca_pem_b64 | default('') }}
 TURBOPANEL_SYSTEM_EMAIL__PROVIDER=mailpit
 MAILPIT_API_URL=http://127.0.0.1:{{ mailpit_web_port | default(8025) }}
 {% endif %}
+{% if turbopanel_analytics_engine_api_token | default('') | length > 0 %}
+# Account Analytics Read — chart queries via the AE SQL API (wrangler dev / Workers).
+TURBOPANEL_ANALYTICS_ENGINE_API_TOKEN={{ turbopanel_analytics_engine_api_token }}
+{% endif %}

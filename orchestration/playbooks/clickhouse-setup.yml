@@ -1,0 +1,29 @@
+---
+# Standalone ClickHouse setup for hosts that need the self-hosted metrics
+# backend (HTTP interface on 127.0.0.1:8123).
+#
+# ClickHouse is only required where a co-located self-hosted instance runs
+# (Deno metrics store). Managed daemon-only hosts do NOT need it — the plain
+# daemon converge (daemon-converge.yml) intentionally omits Postgres/Redis/
+# RabbitMQ/ClickHouse; those roles are pulled in by instance-dev-install /
+# the co-located dev converge manifest instead.
+#
+# Future: invoke this playbook on managed control-plane hosts that run the
+# Deno instance without the full co-located dev overlay.
+- name: TurboPanel ClickHouse setup
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+  vars:
+    turbopanel_managed_install: true
+  # turbopanel-user must run before clickhouse: the clickhouse role writes files
+  # with group: {{ turbopanel_group }} (turbopanel in production) and its docker
+  # meta-dependency adds docker_user (turbopanel) to the docker group. On a fresh
+  # control-plane host neither the base turbopanel user nor its group exists yet,
+  # so both fail without this role first. (No dedicated turbopanelh account — the
+  # base turbopanel identity covers it.)
+  roles:
+    - role: daemon-prereqs
+    - role: turbopanel-user
+    - role: clickhouse

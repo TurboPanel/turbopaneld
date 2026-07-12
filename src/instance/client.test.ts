@@ -1,4 +1,5 @@
 import { type DaemonApiClient, DaemonApiError } from './api-client.ts'
+import { it } from "@std/testing/bdd";
 import {
   DEFAULT_INITIAL_BACKOFF_MS,
   DEFAULT_MAX_BACKOFF_MS,
@@ -142,7 +143,7 @@ async function waitFor<T>(
   throw new Error(`timed out waiting for ${label}`)
 }
 
-Deno.test({
+it({
   name: 'enrollDaemon calls correct HTTP endpoints',
   permissions: { read: true, write: true },
   fn: async () => {
@@ -200,7 +201,7 @@ Deno.test({
   },
 })
 
-Deno.test({
+it({
   name: 'InstanceClient uses JWT in WS Authorization header after enrollment',
   permissions: { env: true, read: true, write: true, sys: ['hostname'] },
   fn: async () => {
@@ -311,7 +312,7 @@ Deno.test({
   },
 })
 
-Deno.test({
+it({
   name: '4401 WS close triggers tokenManager.refresh()',
   permissions: { env: true, read: true, write: true, sys: ['hostname'] },
   fn: async () => {
@@ -427,7 +428,7 @@ Deno.test({
   },
 })
 
-Deno.test({
+it({
   name: 'enrollment requires valid license — hostname/machineId alone cannot create a server',
   permissions: { env: true, read: true, write: true, sys: ['hostname'] },
   fn: async () => {
@@ -532,7 +533,7 @@ Deno.test({
   },
 })
 
-Deno.test({
+it({
   name: 'token manager is created after enrollment',
   permissions: { env: true, read: true, write: true, sys: ['hostname'] },
   fn: async () => {
@@ -662,7 +663,7 @@ function parseSentFrames(
   return frames.map((frame) => JSON.parse(frame) as Record<string, unknown>)
 }
 
-Deno.test({
+it({
   name: 'IdlePresence sends hello on attach and cell ping after silence',
   permissions: { env: true },
   fn: async () => {
@@ -711,7 +712,7 @@ Deno.test({
   },
 })
 
-Deno.test({
+it({
   name:
     'IdlePresence sends cell ping on schedule even when other traffic keeps the connection busy',
   permissions: { env: true },
@@ -754,7 +755,7 @@ Deno.test({
   },
 })
 
-Deno.test({
+it({
   name: 'host-only sentinel reports empty resources with host summary',
   fn: async () => {
     const { createSentinel } = await import('../monitor/sentinel.ts')
@@ -765,7 +766,7 @@ Deno.test({
   },
 })
 
-Deno.test({
+it({
   name: 'InstanceClient sends hello over websocket on connect',
   permissions: { env: true, read: true, write: true, sys: ['hostname'] },
   fn: async () => {
@@ -864,7 +865,7 @@ Deno.test({
   },
 })
 
-Deno.test({
+it({
   name: 'InstanceClient keeps websocket open without instance stale watchdog',
   permissions: { env: true, read: true, write: true, sys: ['hostname'] },
   fn: async () => {
@@ -966,7 +967,7 @@ Deno.test({
   sanitizeResources: false,
 })
 
-Deno.test({
+it({
   name: 'normalizeReconnectDelayMs clamps below-min and above-max inputs',
   fn: () => {
     assertEquals(normalizeReconnectDelayMs(), DEFAULT_INITIAL_BACKOFF_MS)
@@ -981,7 +982,7 @@ Deno.test({
   },
 })
 
-Deno.test({
+it({
   name: 'fullJitterMs returns values within [floor, ceiling] and respects max',
   fn: () => {
     const floor = 30
@@ -998,7 +999,7 @@ Deno.test({
   },
 })
 
-Deno.test({
+it({
   name: 'fullJitterMs produces varying delays across samples',
   fn: () => {
     const floor = DEFAULT_INITIAL_BACKOFF_MS
@@ -1011,7 +1012,7 @@ Deno.test({
   },
 })
 
-Deno.test({
+it({
   name: 'InstanceClient reconnect delay is jittered within backoff bounds',
   permissions: { env: true, read: true, write: true, sys: ['hostname'] },
   fn: async () => {
@@ -1137,7 +1138,7 @@ Deno.test({
   },
 })
 
-Deno.test({
+it({
   name: 'repeated open→4401→close increases reconnect backoff ceiling',
   permissions: { env: true, read: true, write: true, sys: ['hostname'] },
   fn: async () => {
@@ -1283,7 +1284,7 @@ Deno.test({
   },
 })
 
-Deno.test({
+it({
   name: 'benign close after stable session resets reconnect backoff',
   permissions: { env: true, read: true, write: true, sys: ['hostname'] },
   fn: async () => {
@@ -1418,7 +1419,7 @@ Deno.test({
   sanitizeResources: false,
 })
 
-Deno.test({
+it({
   name: 'IdlePresence honors minimum-interval guard between cell pings',
   permissions: { env: true },
   fn: async () => {
@@ -1459,7 +1460,7 @@ Deno.test({
   },
 })
 
-Deno.test({
+it({
   name: 'IdlePresence forces reconnect when pings go unanswered (zombie connection)',
   permissions: { env: true },
   fn: async () => {
@@ -1498,7 +1499,7 @@ Deno.test({
   },
 })
 
-Deno.test({
+it({
   name: 'IdlePresence does not report stale when pongs/messages keep arriving',
   permissions: { env: true },
   fn: async () => {
@@ -1530,6 +1531,117 @@ Deno.test({
       assertEquals(staleCount, 0, 'a healthy, responsive socket must never be reported stale')
     } finally {
       session.detach()
+    }
+  },
+})
+
+it({
+  name: 'InstanceClient keeps websocket connected when metricsCollectorFactory throws',
+  permissions: { env: true, read: true, write: true, sys: ['hostname'] },
+  fn: async () => {
+    const tempDir = await Deno.makeTempDir()
+    const originalFetch = globalThis.fetch
+    const originalWebSocket = globalThis.WebSocket
+    const originalStateDir = Deno.env.get('TURBOPANEL_DAEMON_STATE_DIR')
+    const originalForceEnroll = Deno.env.get('TURBOPANEL_FORCE_ENROLL')
+    const sockets: MockWebSocket[] = []
+    const { signing, authToken, enroll } = await prepareVerifiedAuth()
+
+    class TrackingWebSocket extends MockWebSocket {
+      constructor(url: string, options?: unknown) {
+        super(url, options)
+        sockets.push(this)
+      }
+    }
+
+    Object.defineProperty(globalThis, 'WebSocket', {
+      configurable: true,
+      writable: true,
+      value: TrackingWebSocket,
+    })
+    Object.defineProperty(globalThis, 'fetch', {
+      configurable: true,
+      writable: true,
+      value: async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input)
+        if (url.endsWith('/api/health')) {
+          return new Response(JSON.stringify({ ok: true }), { status: 200 })
+        }
+        if (url.endsWith('/api/daemon/v1/jwks.json')) {
+          return jwksResponse(signing)
+        }
+        if (url.endsWith('/api/daemon/v1/auth/challenge')) {
+          const raw = init?.body ? await new Response(init.body).text() : '{}'
+          const body = JSON.parse(raw) as { serverId?: string; keyId?: string }
+          if (body.serverId && body.keyId) {
+            return new Response(JSON.stringify({
+              challengeId: 'auth-challenge',
+              nonce: 'auth-nonce',
+              at: new Date().toISOString(),
+              expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            }), { status: 200 })
+          }
+          return new Response(JSON.stringify({
+            challengeId: 'enroll-challenge',
+            nonce: 'enroll-nonce',
+            at: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          }), { status: 200 })
+        }
+        if (url.endsWith('/api/daemon/v1/enroll')) {
+          return new Response(JSON.stringify(enroll), { status: 200 })
+        }
+        if (url.endsWith('/api/daemon/v1/auth/session')) {
+          return new Response(JSON.stringify({
+            token: authToken,
+            expiresAt: new Date(Date.now() + 900_000).toISOString(),
+          }), { status: 200 })
+        }
+        return new Response(JSON.stringify({ error: 'not found' }), { status: 404 })
+      },
+    })
+
+    Deno.env.set('TURBOPANEL_DAEMON_STATE_DIR', tempDir)
+    Deno.env.set('TURBOPANEL_FORCE_ENROLL', '1')
+    await Deno.writeTextFile(`${tempDir}/license.id`, 'license-123\n')
+    await Deno.writeTextFile(`${tempDir}/license.token`, 'token-abc\n')
+
+    const client = new InstanceClient({
+      config: { kind: 'url', baseUrl: 'https://instance.test', wsBaseUrl: 'wss://instance.test' },
+      metricsCollectorFactory: () => {
+        throw new Error('metrics factory boom')
+      },
+    })
+
+    try {
+      client.start()
+      const socket = await waitFor('metrics-factory websocket', () => sockets.at(0))
+      socket.open()
+      // Factory throw must not tear down the authenticated socket.
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      assertEquals(socket.readyState, MockWebSocket.OPEN)
+      // Hello from IdlePresence should still have been sent.
+      const frames = parseSentFrames(socket.sentFrames)
+      assert(
+        frames.some((frame) => frame.type === 'hello'),
+        'expected hello despite metrics factory failure',
+      )
+      socket.close(1000, 'done')
+    } finally {
+      client.stop()
+      Object.defineProperty(globalThis, 'fetch', {
+        configurable: true,
+        writable: true,
+        value: originalFetch,
+      })
+      Object.defineProperty(globalThis, 'WebSocket', {
+        configurable: true,
+        writable: true,
+        value: originalWebSocket,
+      })
+      setOptionalEnv('TURBOPANEL_DAEMON_STATE_DIR', originalStateDir)
+      setOptionalEnv('TURBOPANEL_FORCE_ENROLL', originalForceEnroll)
+      await Deno.remove(tempDir, { recursive: true })
     }
   },
 })

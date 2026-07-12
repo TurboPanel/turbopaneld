@@ -29,6 +29,11 @@ import { enrollDaemon } from "./enroll.ts";
 import { decodeBase64 } from "@std/encoding/base64";
 import { getBuildInfo } from "../build-info.ts";
 import { IdlePresence } from "./idle-presence.ts";
+import type { MetricsCollector } from "../metrics/collector/index.ts";
+import {
+  rebindMetricsScheduler,
+  MetricsScheduler,
+} from "../metrics/scheduler.ts";
 import { resolveUpdateChannelConfig } from "../update/config.ts";
 import { resolveUpdate } from "../update/resolver.ts";
 import {
@@ -154,6 +159,8 @@ export interface InstanceClientOptions {
   /** Initial reconnect delay; clamped to [DEFAULT_INITIAL_BACKOFF_MS, DEFAULT_MAX_BACKOFF_MS]. */
   reconnectDelayMs?: number;
   onMessage?: (message: DaemonMessage) => void;
+  /** When set, enables host metrics on the daemon WebSocket. */
+  metricsCollectorFactory?: () => MetricsCollector;
 }
 
 export const DEFAULT_INITIAL_BACKOFF_MS = 2_000;
@@ -318,6 +325,10 @@ export class InstanceClient {
   #tokenKeyId: string | undefined;
   #forceEnrollPending = false;
   #idlePresence: IdlePresence | undefined;
+  #metricsScheduler: MetricsScheduler | undefined;
+  /** Server id the current metrics scheduler was bound for (not `#tokenServerId`). */
+  #metricsSchedulerServerId: string | undefined;
+  readonly #metricsCollectorFactory?: () => MetricsCollector;
   #updateInstallInProgress = false;
 
   constructor(options: InstanceClientOptions = {}) {
@@ -327,6 +338,7 @@ export class InstanceClient {
     this.#maxBackoffMs = DEFAULT_MAX_BACKOFF_MS;
     this.#backoffMs = this.#initialBackoffMs;
     this.#onMessage = options.onMessage;
+    this.#metricsCollectorFactory = options.metricsCollectorFactory;
   }
 
   get config(): InstanceConfig {
@@ -474,6 +486,9 @@ export class InstanceClient {
     this.#stopped = true;
     this.#idlePresence?.detach();
     this.#idlePresence = undefined;
+    this.#metricsScheduler?.detach();
+    this.#metricsScheduler = undefined;
+    this.#metricsSchedulerServerId = undefined;
     this.#tokenManager?.stop();
     this.#ws?.close();
     this.#ws = undefined;
@@ -500,6 +515,7 @@ export class InstanceClient {
         );
         this.#closeActiveSocket();
         this.#idlePresence?.detach();
+        this.#metricsScheduler?.detach();
         this.#increaseBackoff();
       }
 
@@ -733,6 +749,7 @@ export class InstanceClient {
     this.#ws = ws;
     let sessionRegistered = false;
     this.#ensureIdlePresence(serverId);
+    this.#ensureMetricsScheduler(serverId);
 
     try {
       await new Promise<void>((resolve, reject) => {
@@ -784,34 +801,13 @@ export class InstanceClient {
     this.#hadStableSession = true;
     const connectedAt = Date.now();
     this.#idlePresence?.attach(ws);
+    this.#metricsScheduler?.attach(ws);
 
     ws.onmessage = (event) => {
       this.#idlePresence?.noteInboundActivity();
       const raw = typeof event.data === "string"
         ? event.data
         : String(event.data);
-
-      // #region agent log
-      fetch("http://localhost:7262/ingest/30307085-a951-482e-af80-d101537cd557", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Debug-Session-Id": "8627a0",
-        },
-        body: JSON.stringify({
-          sessionId: "8627a0",
-          runId: "pre-fix",
-          hypothesisId: "A",
-          location: "client.ts:onmessage",
-          message: "daemon inbound websocket frame",
-          data: {
-            rawPreview: raw.slice(0, 80),
-            isPong: raw === '{"type":"pong"}',
-          },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
 
       const message = parseMessage(raw);
       if (!message) {
@@ -824,29 +820,6 @@ export class InstanceClient {
     };
 
     ws.onclose = (event) => {
-      // #region agent log
-      fetch("http://localhost:7262/ingest/30307085-a951-482e-af80-d101537cd557", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Debug-Session-Id": "8627a0",
-        },
-        body: JSON.stringify({
-          sessionId: "8627a0",
-          runId: "pre-fix",
-          hypothesisId: "E",
-          location: "client.ts:onclose",
-          message: "daemon websocket closed",
-          data: {
-            code: event.code,
-            reason: event.reason,
-            wasClean: event.wasClean,
-            sessionRegistered,
-          },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
       if (event.code === 4401) {
         logWarn("instance", "authentication rejected");
       }
@@ -857,6 +830,7 @@ export class InstanceClient {
       }
       if (this.#ws === ws) this.#ws = undefined;
       this.#idlePresence?.detach();
+      this.#metricsScheduler?.detach();
     };
 
     const closeEvent = await new Promise<CloseEvent>((resolve) => {
@@ -897,6 +871,19 @@ export class InstanceClient {
       // and the normal reconnect/backoff path takes over. See idle-presence.ts.
       onStaleConnection: () => this.#closeActiveSocket(),
     });
+  }
+
+  #ensureMetricsScheduler(serverId: string): void {
+    if (!this.#metricsCollectorFactory) return;
+
+    const rebound = rebindMetricsScheduler({
+      existing: this.#metricsScheduler,
+      existingServerId: this.#metricsSchedulerServerId,
+      serverId,
+      collectorFactory: this.#metricsCollectorFactory,
+    });
+    this.#metricsScheduler = rebound.scheduler;
+    this.#metricsSchedulerServerId = rebound.serverId;
   }
 
   // Identity is established locally (enrollment + server.id) and confirmed via
@@ -1273,7 +1260,7 @@ export function fullJitterMs(floor: number, ceiling: number): number {
   const lo = Math.min(floor, ceiling);
   const hi = Math.max(floor, ceiling);
   if (hi <= lo) return lo;
-  return lo + Math.floor(Math.random() * (hi - lo + 1));
+  return lo + Math.floor(Math.random() * (hi - lo + 1)); // NOSONAR typescript:S2245 — jitter timing only, not a security context
 }
 
 function isColocatedSocketMode(config: InstanceConfig): boolean {

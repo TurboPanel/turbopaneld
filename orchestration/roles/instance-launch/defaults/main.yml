@@ -84,7 +84,13 @@ website_log_dir: "{{ turbopanel_log_dir }}/website"
 rabbitmq_amqp_port: 5672
 rabbitmq_vhost: /
 rabbitmq_user: turbopanel
+rabbitmq_service_name: turbopanel-rabbitmq
 redis_socket_path: /run/turbopanel/redis.sock
+clickhouse_http_port: 8123
+clickhouse_database: turbopanel_metrics
+clickhouse_app_user: turbopanel_app
+# Server metrics on by default; set false to opt out.
+turbopanel_server_metrics_retention_days: 90
 mailer_service_name: turbopanel-mailer
 mailpit_web_port: 8025
 mailpit_smtp_port: 1025

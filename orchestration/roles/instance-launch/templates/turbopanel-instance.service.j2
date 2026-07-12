@@ -1,7 +1,9 @@
 [Unit]
 Description=TurboPanel instance
-After=network-online.target docker.service turbopanel-postgres.service turbopanel-rabbitmq.service
-Wants=network-online.target turbopanel-postgres.service turbopanel-rabbitmq.service
+After=network-online.target docker.service turbopanel-postgres.service{% if (turbopanel_instance_runtime | default('deno')) == 'deno' %} turbopanel-rabbitmq.service{% endif %}
+
+Wants=network-online.target turbopanel-postgres.service{% if (turbopanel_instance_runtime | default('deno')) == 'deno' %} turbopanel-rabbitmq.service{% endif %}
+
 Requires=docker.service
 
 [Service]
@@ -25,14 +27,14 @@ Environment=TURBOPANEL_UI_CORS_ORIGINS={{ website_cors_origins }}
 {% if turbopanel_pg_password is defined and (turbopanel_instance_runtime | default('deno')) == 'deno' %}
 Environment=TURBOPANEL_DATABASE_URL=postgresql://{{ postgres_user }}:{{ turbopanel_pg_password }}@/{{ postgres_db }}?host={{ postgres_socket_dir }}
 {% endif %}
-{% if turbopanel_amqp_url is defined %}
+{% if turbopanel_amqp_url is defined and (turbopanel_instance_runtime | default('deno')) == 'deno' %}
 Environment=TURBOPANEL_AMQP_URL={{ turbopanel_amqp_url }}
 {% endif %}
 Environment=TURBOPANEL_REDIS_SOCKET={{ redis_socket_path }}
 {% if turbopanel_dev_user | length > 0 %}
 Environment=TURBOPANEL_DEV_USER={{ turbopanel_dev_user }}
 {% endif %}
-{% if turbopanel_dev_user | length > 0 %}
+{% if turbopanel_dev_user | length > 0 and (turbopanel_instance_runtime | default('deno')) == 'deno' %}
 Environment=TURBOPANEL_SYSTEM_EMAIL__PROVIDER=smtp
 Environment=TURBOPANEL_SYSTEM_EMAIL__SMTP_HOST=127.0.0.1
 Environment=TURBOPANEL_SYSTEM_EMAIL__SMTP_PORT={{ mailpit_smtp_port | default(1025) }}
@@ -42,6 +44,10 @@ Environment=TURBOPANEL_CONFIG_DIR={{ turbopanel_config_dir }}
 Environment=TURBOPANEL_RUN_DIR={{ turbopanel_run_dir }}
 Environment=TURBOPANEL_INSTANCE_RUNTIME_ENV={{ turbopanel_instance_runtime_env }}
 Environment=TURBOPANEL_INSTANCE_RUNTIME_DEV_VARS={{ turbopanel_instance_runtime_dev_vars }}
+{% if (turbopanel_instance_runtime | default('deno')) != 'workers' %}
+{# Deno/compiled: non-secret runtime.env first, then secrets from runtime.dev-vars. #}
+EnvironmentFile=-{{ turbopanel_instance_runtime_env }}
+{% endif %}
 EnvironmentFile=-{{ turbopanel_instance_runtime_dev_vars }}
 # turbopanel_instance_run_mode: "source" (deno run) | "compiled" (single binary)
 StandardOutput=append:{{ instance_log_dir }}/instance.log
@@ -56,7 +62,7 @@ ExecStart={{ turbopanel_instance_dir }}/scripts/workers-serve.sh
 ExecStart={{ turbopanel_instance_binary }}
 {% else %}
 {# Deno 2.9+ treats Unix-domain connect as --allow-net (not --allow-read). #}
-ExecStart={{ turbopanel_deno }} run --allow-env --allow-sys=networkInterfaces,hostname --allow-read={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }},{{ turbopanel_instance_runtime_dir }} --allow-write={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_daemon_state_dir }} --allow-net=127.0.0.1:{{ drizzle_studio_port | default(4983) }},127.0.0.1:{{ rabbitmq_amqp_port }},127.0.0.1:{{ mailpit_smtp_port | default(1025) }},dl.trbp.nl:443,unix:{{ turbopanel_run_dir }}/instance.sock,unix:{{ postgres_socket_dir }}/.s.PGSQL.5432,unix:{{ redis_socket_path }} --allow-run=git,systemctl,tar,sudo,/usr/bin/sudo,/bin/sh,mkfifo,/usr/bin/mkfifo,pamtester,/usr/bin/pamtester,{{ turbopanel_node }},{{ turbopanel_deno }} src/deno.ts
+ExecStart={{ turbopanel_deno }} run --allow-env --allow-sys=networkInterfaces,hostname --allow-read={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }},{{ turbopanel_instance_runtime_dir }} --allow-write={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_daemon_state_dir }} --allow-net=127.0.0.1:{{ drizzle_studio_port | default(4983) }},127.0.0.1:{{ rabbitmq_amqp_port }},127.0.0.1:{{ mailpit_smtp_port | default(1025) }},127.0.0.1:{{ clickhouse_http_port | default(8123) }},dl.trbp.nl:443,unix:{{ turbopanel_run_dir }}/instance.sock,unix:{{ postgres_socket_dir }}/.s.PGSQL.5432,unix:{{ redis_socket_path }} --allow-run=git,systemctl,tar,sudo,/usr/bin/sudo,/bin/sh,mkfifo,/usr/bin/mkfifo,pamtester,/usr/bin/pamtester,{{ turbopanel_node }},{{ turbopanel_deno }} src/deno.ts
 {% endif %}
 Restart=always
 RestartSec=2

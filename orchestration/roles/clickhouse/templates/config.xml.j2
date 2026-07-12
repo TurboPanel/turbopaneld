@@ -1,0 +1,100 @@
+<?xml version="1.0"?>
+<!--
+  TurboPanel ClickHouse — config.d overlay.
+
+  Mounted read-only at /etc/clickhouse-server/config.d/turbopanel.xml inside the
+  official clickhouse/clickhouse-server image; the base image config is preserved
+  and this overlay only adjusts what we care about. Paths point at the image's
+  in-container defaults under /var/lib/clickhouse and /var/log/clickhouse-server
+  (the log dir is bind-mounted to {{ clickhouse_log_dir }} on the host). HTTP/TCP
+  ports keep the base-image defaults — the container listens on 0.0.0.0 inside the
+  Docker network; host exposure is already limited to the loopback -p publish.
+
+  Memory caps (small co-located / single-server installs):
+  - max_server_memory_usage_to_ram_ratio = 0.35 — keep ClickHouse well under half
+    of host RAM so Postgres/Redis/RabbitMQ/instance share the box peacefully.
+  - mark_cache_size = 536870912 (512 MiB) — enough for MergeTree mark cache on
+    metrics volumes without claiming multi-GB by default.
+
+  Idle-CPU tuning (single otherwise-idle server): slow the async-metrics cadence
+  and shrink the always-awake background merge/schedule pools so an idle box does
+  not spin the CPU.
+-->
+<clickhouse>
+    <logger>
+        <level>information</level>
+        <log>/var/log/clickhouse-server/clickhouse-server.log</log>
+        <errorlog>/var/log/clickhouse-server/clickhouse-server.err.log</errorlog>
+        <size>100M</size>
+        <count>3</count>
+    </logger>
+
+    <path>/var/lib/clickhouse/</path>
+    <tmp_path>/var/lib/clickhouse/tmp/</tmp_path>
+    <user_files_path>/var/lib/clickhouse/user_files/</user_files_path>
+    <format_schema_path>/var/lib/clickhouse/format_schemas/</format_schema_path>
+
+    <max_server_memory_usage_to_ram_ratio>0.35</max_server_memory_usage_to_ram_ratio>
+    <mark_cache_size>536870912</mark_cache_size>
+
+    <mlock_executable>false</mlock_executable>
+
+    <builtin_dictionaries_reload_interval>3600</builtin_dictionaries_reload_interval>
+
+    <max_session_timeout>3600</max_session_timeout>
+    <default_session_timeout>60</default_session_timeout>
+
+    <!-- Idle-CPU tuning: stop the 1s async-metrics wakeups. -->
+    <asynchronous_metrics_update_period_s>120</asynchronous_metrics_update_period_s>
+    <asynchronous_heavy_metrics_update_period_s>120</asynchronous_heavy_metrics_update_period_s>
+
+    <!-- Shrink always-awake background pools on an idle single-server box. -->
+    <background_pool_size>2</background_pool_size>
+    <background_schedule_pool_size>2</background_schedule_pool_size>
+    <background_common_pool_size>2</background_common_pool_size>
+    <background_merges_mutations_concurrency_ratio>1</background_merges_mutations_concurrency_ratio>
+    <max_thread_pool_size>1000</max_thread_pool_size>
+    <tables_loader_foreground_pool_size>2</tables_loader_foreground_pool_size>
+    <tables_loader_background_pool_size>2</tables_loader_background_pool_size>
+
+    <merge_tree>
+        <!-- Stop the constant merge-selector wakeups when there is nothing to merge. -->
+        <merge_selecting_sleep_ms>30000</merge_selecting_sleep_ms>
+    </merge_tree>
+
+    <query_log remove="remove"/>
+    <trace_log remove="remove"/>
+    <metric_log remove="remove"/>
+    <asynchronous_metric_log remove="remove"/>
+    <session_log remove="remove"/>
+    <part_log remove="remove"/>
+    <text_log remove="remove"/>
+{% if turbopanel_dev_user | default('') | length > 0 %}
+    <!--
+      Dev-only CORS preflight response for the loopback Tabix browser client
+      (http://127.0.0.1:{{ tabix_web_port | default('8125') }}). This block only
+      answers the OPTIONS preflight; the actual response CORS header is emitted
+      per-request via add_http_cors_header=1 carried on every Tabix query
+      (CH_PARAMS). Gated on turbopanel_dev_user so managed/prod config is
+      byte-for-byte unchanged.
+    -->
+    <http_options_response>
+        <header>
+            <name>Access-Control-Allow-Origin</name>
+            <value>*</value>
+        </header>
+        <header>
+            <name>Access-Control-Allow-Headers</name>
+            <value>origin, x-requested-with, content-type, accept, authorization, x-clickhouse-user, x-clickhouse-key, x-clickhouse-format, x-clickhouse-database</value>
+        </header>
+        <header>
+            <name>Access-Control-Allow-Methods</name>
+            <value>GET, POST, OPTIONS</value>
+        </header>
+        <header>
+            <name>Access-Control-Max-Age</name>
+            <value>86400</value>
+        </header>
+    </http_options_response>
+{% endif %}
+</clickhouse>

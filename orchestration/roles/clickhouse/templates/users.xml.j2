@@ -1,0 +1,50 @@
+<?xml version="1.0"?>
+<!--
+  TurboPanel ClickHouse — users.d overlay.
+
+  Mounted read-only at /etc/clickhouse-server/users.d/turbopanel.xml inside the
+  official image. Default anonymous (empty-password) access is disabled.
+  - default: bootstrap admin (access_management) used for SQL CREATE DATABASE /
+    CREATE USER / GRANT via `docker exec … clickhouse-client` on the container's
+    native loopback. Password: .clickhouse_admin_pass. Networks 127.0.0.1 + ::1.
+  - {{ clickhouse_app_user }} is NOT defined here — it is created and granted
+    only via SQL (bootstrap task) with .clickhouse_app_pass and default HOST ANY,
+    so instance HTTP requests (seen as the Docker-gateway source) are accepted.
+    Config-file users are read-only access entities; declaring the app user in
+    XML and again in SQL conflicts with least-privilege SQL access control.
+-->
+<clickhouse>
+    <profiles>
+        <default>
+            <max_memory_usage>1000000000</max_memory_usage>
+            <use_uncompressed_cache>0</use_uncompressed_cache>
+            <load_balancing>random</load_balancing>
+        </default>
+    </profiles>
+
+    <users>
+        <default>
+            <password>{{ _clickhouse_admin_password }}</password>
+            <networks>
+                <ip>127.0.0.1</ip>
+                <ip>::1</ip>
+            </networks>
+            <profile>default</profile>
+            <quota>default</quota>
+            <access_management>1</access_management>
+        </default>
+    </users>
+
+    <quotas>
+        <default>
+            <interval>
+                <duration>3600</duration>
+                <queries>0</queries>
+                <errors>0</errors>
+                <result_rows>0</result_rows>
+                <read_rows>0</read_rows>
+                <execution_time>0</execution_time>
+            </interval>
+        </default>
+    </quotas>
+</clickhouse>

@@ -1,0 +1,8 @@
+{
+  "host": "127.0.0.1",
+  "port": {{ clickhouse_http_port }},
+  "database": "{{ clickhouse_database }}",
+  "user": "{{ clickhouse_app_user }}",
+  "adminPasswordFile": "{{ turbopanel_config_dir }}/clickhouse/.clickhouse_admin_pass",
+  "appPasswordFile": "{{ turbopanel_config_dir }}/clickhouse/.clickhouse_app_pass"
+}

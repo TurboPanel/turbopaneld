@@ -1,0 +1,15 @@
+[Unit]
+Description=TurboPanel Tabix (dev ClickHouse UI)
+After=docker.service turbopanel-clickhouse.service
+Requires=docker.service
+Wants=turbopanel-clickhouse.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/bin/sh -c '/usr/bin/docker network inspect {{ turbopanel_docker_network }} >/dev/null 2>&1 || /usr/bin/docker network create {{ turbopanel_docker_network }}'
+ExecStart={{ turbopanel_config_dir }}/tabix/wrapper-start.sh
+ExecStop=/usr/bin/docker stop -t 10 {{ tabix_container_name }}
+
+[Install]
+WantedBy=multi-user.target

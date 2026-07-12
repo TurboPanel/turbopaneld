@@ -1,0 +1,19 @@
+---
+galaxy_info:
+  author: turbopanel
+  description: >-
+    Run ClickHouse in Docker (official clickhouse/clickhouse-server image),
+    localhost-only HTTP (127.0.0.1:8123), data in a named volume, separate admin
+    and app passwords (SQL-managed app user). Requires 64-bit Linux.
+  license: AGPL-3.0
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Debian
+      versions:
+        - all
+    - name: Ubuntu
+      versions:
+        - all
+
+dependencies:
+  - role: docker
