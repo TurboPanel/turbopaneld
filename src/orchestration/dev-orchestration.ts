@@ -1,9 +1,6 @@
 import { join } from "@std/path";
 import { readEnv, resolveDaemonRoot } from "../paths/layout.ts";
-import {
-  GALAXY_ROLES_DIR,
-  RUNTIMES_DIR,
-} from "./paths.ts";
+import { GALAXY_ROLES_DIR, RUNTIMES_DIR } from "./paths.ts";
 
 /** Dev overlay playbook + roles live under `<daemon checkout>/dev/orchestration`. */
 export const DEV_ORCHESTRATION_SUBDIR = join("dev", "orchestration");
@@ -39,8 +36,10 @@ function devOrchestrationEnv(
   env: Record<string, string | undefined> = {},
 ): Record<string, string | undefined> {
   return {
-    TURBOPANEL_DAEMON_ROOT: env.TURBOPANEL_DAEMON_ROOT ?? readEnv("TURBOPANEL_DAEMON_ROOT"),
-    TURBOPANEL_DEV_ROOT: env.TURBOPANEL_DEV_ROOT ?? readEnv("TURBOPANEL_DEV_ROOT"),
+    TURBOPANEL_DAEMON_ROOT: env.TURBOPANEL_DAEMON_ROOT ??
+      readEnv("TURBOPANEL_DAEMON_ROOT"),
+    TURBOPANEL_DEV_ROOT: env.TURBOPANEL_DEV_ROOT ??
+      readEnv("TURBOPANEL_DEV_ROOT"),
     HOME: env.HOME ?? readEnv("HOME"),
   };
 }
@@ -60,9 +59,9 @@ export function resolveDevOrchestrationDir(
   const override = env.TURBOPANEL_DEV_ORCHESTRATION_DIR?.trim() ??
     readEnv("TURBOPANEL_DEV_ORCHESTRATION_DIR")?.trim();
   if (override && override.length > 0) {
-    let end = override.length
+    let end = override.length;
     while (end > 0 && (override.codePointAt(end - 1) ?? 0) === 47) {
-      end--
+      end--;
     }
     return end === 0 ? "/" : override.slice(0, end);
   }

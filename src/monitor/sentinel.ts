@@ -30,7 +30,11 @@ export type SentinelTransitionCallback = (
 
 type ContainerMonitor = Pick<
   DockerMonitor,
-  "start" | "waitUntilReady" | "getContainers" | "getContainerInspect" | "subscribe"
+  | "start"
+  | "waitUntilReady"
+  | "getContainers"
+  | "getContainerInspect"
+  | "subscribe"
 >;
 
 function createEmptyContainerMonitor(): ContainerMonitor {
@@ -62,7 +66,8 @@ export class Sentinel {
     this.#markReady = markReady;
 
     this.#dockerEnabled = options.dockerMonitor !== undefined;
-    this.#dockerMonitor = options.dockerMonitor ?? createEmptyContainerMonitor();
+    this.#dockerMonitor = options.dockerMonitor ??
+      createEmptyContainerMonitor();
     this.#hostSummaryCollector = options.hostSummaryCollector ??
       createHostSummaryCollector();
   }

@@ -15,7 +15,11 @@ async function repointPythonCurrent(): Promise<void> {
     await Deno.remove(PYTHON_CURRENT_DIR);
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) {
-      logWarn("orchestration", "could not replace python current symlink:", err);
+      logWarn(
+        "orchestration",
+        "could not replace python current symlink:",
+        err,
+      );
       return;
     }
   }
@@ -45,5 +49,8 @@ export async function ensurePython(): Promise<void> {
     component: logComponent("python"),
   });
   await repointPythonCurrent();
-  logInfo("orchestration", `Python ${PYTHON_VERSION} ready at ${PYTHON_RUNTIME_DIR}`);
+  logInfo(
+    "orchestration",
+    `Python ${PYTHON_VERSION} ready at ${PYTHON_RUNTIME_DIR}`,
+  );
 }

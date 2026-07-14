@@ -83,11 +83,19 @@ expect("stateDir", prod.stateDir, "/var/lib/turbopanel");
 expect("daemonStateDir", prod.daemonStateDir, "/var/lib/turbopanel");
 expect("logDir", prod.logDir, "/var/log/turbopanel");
 expect("runDir", prod.runDir, "/run/turbopanel");
-expect("daemonRootDefault", prod.daemonRootDefault, "/opt/turbopanel/lib/daemon");
+expect(
+  "daemonRootDefault",
+  prod.daemonRootDefault,
+  "/opt/turbopanel/lib/daemon",
+);
 expect("instanceDir", prod.instanceDir, "/opt/turbopanel/lib/instance");
 
 // Binary + helper entrypoints derived from the resolved bin dir.
-expect("daemon binary", join(prod.binDir, "turbopaneld"), "/opt/turbopanel/bin/turbopaneld");
+expect(
+  "daemon binary",
+  join(prod.binDir, "turbopaneld"),
+  "/opt/turbopanel/bin/turbopaneld",
+);
 expect(
   "js fallback",
   join(prod.binDir, "turbopaneld.js"),
@@ -239,7 +247,9 @@ for (const root of PRODUCTION_SCAN_ROOTS) {
       lines.forEach((line, i) => {
         if (PLATFORM_REF.test(line)) {
           failures.push(
-            `${rel}:${i + 1} references the dev checkout /opt/turbopanel/platform in production source`,
+            `${rel}:${
+              i + 1
+            } references the dev checkout /opt/turbopanel/platform in production source`,
           );
         }
       });
@@ -249,22 +259,30 @@ for (const root of PRODUCTION_SCAN_ROOTS) {
       lines.forEach((line, i) => {
         if (ANSIBLE_SHARE_REF.test(line)) {
           failures.push(
-            `${rel}:${i + 1} references retired share/ansible (use share/orchestration)`,
+            `${rel}:${
+              i + 1
+            } references retired share/ansible (use share/orchestration)`,
           );
         }
       });
     }
 
-    if (!file.endsWith(".test.ts") && !RETIRED_RUNTIMES_SCAN_ALLOWLIST.has(rel)) {
+    if (
+      !file.endsWith(".test.ts") && !RETIRED_RUNTIMES_SCAN_ALLOWLIST.has(rel)
+    ) {
       lines.forEach((line, i) => {
         if (RETIRED_RUNTIMES_REF.test(line)) {
           failures.push(
-            `${rel}:${i + 1} references retired /opt/turbopanel/runtimes (use vendor contract)`,
+            `${rel}:${
+              i + 1
+            } references retired /opt/turbopanel/runtimes (use vendor contract)`,
           );
         }
         if (RETIRED_LIB_RUNTIME_REF.test(line)) {
           failures.push(
-            `${rel}:${i + 1} references retired /opt/turbopanel/lib/runtime (use vendor contract)`,
+            `${rel}:${
+              i + 1
+            } references retired /opt/turbopanel/lib/runtime (use vendor contract)`,
           );
         }
       });
@@ -274,7 +292,9 @@ for (const root of PRODUCTION_SCAN_ROOTS) {
       lines.forEach((line, i) => {
         if (RUNTIME_ROOT_LITERAL.test(line)) {
           failures.push(
-            `${rel}:${i + 1} hardcodes /opt/turbopanel/vendor outside approved layout modules`,
+            `${rel}:${
+              i + 1
+            } hardcodes /opt/turbopanel/vendor outside approved layout modules`,
           );
         }
       });
@@ -283,7 +303,10 @@ for (const root of PRODUCTION_SCAN_ROOTS) {
 }
 
 // --- 4. resolveRuntimesDir matches production layout -----------------------
-if (resolveRuntimesDir({}, { forceMode: "production" }) !== PROD_RUNTIME_DIR_DEFAULT) {
+if (
+  resolveRuntimesDir({}, { forceMode: "production" }) !==
+    PROD_RUNTIME_DIR_DEFAULT
+) {
   failures.push(
     `resolveRuntimesDir(production) must equal PROD_RUNTIME_DIR_DEFAULT (${PROD_RUNTIME_DIR_DEFAULT})`,
   );
@@ -298,4 +321,6 @@ if (failures.length > 0) {
   Deno.exit(1);
 }
 
-console.log("Production layout check passed: FHS tree + no dev-checkout leaks.");
+console.log(
+  "Production layout check passed: FHS tree + no dev-checkout leaks.",
+);

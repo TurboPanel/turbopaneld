@@ -202,7 +202,9 @@ Deno.test("executeRunReconcile chdir survives daemon directory swap", async () =
 
   const cwdAfter = Deno.cwd();
   if (cwdAfter === daemonDir) {
-    throw new Error(`expected cwd to move off deleted daemon dir, still ${cwdAfter}`);
+    throw new Error(
+      `expected cwd to move off deleted daemon dir, still ${cwdAfter}`,
+    );
   }
 
   Deno.chdir(originalCwd);

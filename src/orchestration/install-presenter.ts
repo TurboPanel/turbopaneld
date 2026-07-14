@@ -153,7 +153,9 @@ export class InstallPresenter {
       return `▸ ${label}`;
     }
     const frame = animated
-      ? ` ${CYAN}${BRAILLE_FRAMES[this.#spinnerFrame % BRAILLE_FRAMES.length]!}${RESET}`
+      ? ` ${CYAN}${BRAILLE_FRAMES[
+        this.#spinnerFrame % BRAILLE_FRAMES.length
+      ]!}${RESET}`
       : "";
     return `${CYAN}▸${RESET} ${label}${frame}`;
   }

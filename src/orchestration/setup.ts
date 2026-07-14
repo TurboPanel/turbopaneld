@@ -172,7 +172,9 @@ export async function runInstaller(opts: RunInstallerOptions): Promise<void> {
   try {
     if (!varsFile) {
       if (!opts.instanceUrl) {
-        throw new Error("--instance-url is required when --vars-file is not set");
+        throw new Error(
+          "--instance-url is required when --vars-file is not set",
+        );
       }
       varsFile = await Deno.makeTempFile();
       internallyCreatedVarsFile = true;

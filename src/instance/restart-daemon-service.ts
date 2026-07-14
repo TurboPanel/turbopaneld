@@ -33,7 +33,9 @@ export function resolveDaemonServiceUnit(
 export async function restartDaemonService(
   options: {
     unit?: string;
-    runSystemctl?: (args: string[]) => Promise<{ success: boolean; stderr: string }>;
+    runSystemctl?: (
+      args: string[],
+    ) => Promise<{ success: boolean; stderr: string }>;
   } = {},
 ): Promise<boolean> {
   const unit = options.unit ?? resolveDaemonServiceUnit();

@@ -18,7 +18,10 @@
 
 - name: Read installed Node version
   ansible.builtin.command:
-    argv: ["{{ turbopanel_runtimes_dir }}/node/{{ node_version }}/bin/node", --version]
+    argv: [
+      "{{ turbopanel_runtimes_dir }}/node/{{ node_version }}/bin/node",
+      --version,
+    ]
   register: _node_version
   changed_when: false
   failed_when: false

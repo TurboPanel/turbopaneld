@@ -38,7 +38,9 @@ function assertNoForbiddenInstallerOutput(text: string, label: string): void {
   const lower = text.toLowerCase();
   for (const token of FORBIDDEN_TOKENS) {
     if (lower.includes(token)) {
-      throw new Error(`${label}: forbidden token "${token}" in output:\n${text}`);
+      throw new Error(
+        `${label}: forbidden token "${token}" in output:\n${text}`,
+      );
     }
   }
   if (PACKAGE_LINE.test(text)) {
@@ -79,19 +81,35 @@ Deno.test("InstallPresenter fail reveals buffered detail tail on stderr", () => 
 
   presenter.beginStep("Provisioning platform services");
   presenter.pushStatus("orchestration › Ensure cache service desired state");
-  presenter.pushDetail("EACCES: permission denied while updating cache configuration");
-  presenter.pushStatus("orchestration › Ensure cache service desired state: permission denied", {
-    force: true,
-  });
-  presenter.fail("orchestration › Ensure cache service desired state: permission denied");
+  presenter.pushDetail(
+    "EACCES: permission denied while updating cache configuration",
+  );
+  presenter.pushStatus(
+    "orchestration › Ensure cache service desired state: permission denied",
+    {
+      force: true,
+    },
+  );
+  presenter.fail(
+    "orchestration › Ensure cache service desired state: permission denied",
+  );
 
   stdout.restore();
   stderr.restore();
 
   const err = stderr.text();
-  assertMatch(err, /✗ orchestration › Ensure cache service desired state: permission denied/);
-  assertMatch(err, /EACCES: permission denied while updating cache configuration/);
-  assertNoForbiddenInstallerOutput(stdout.text() + err, "failure reveal output");
+  assertMatch(
+    err,
+    /✗ orchestration › Ensure cache service desired state: permission denied/,
+  );
+  assertMatch(
+    err,
+    /EACCES: permission denied while updating cache configuration/,
+  );
+  assertNoForbiddenInstallerOutput(
+    stdout.text() + err,
+    "failure reveal output",
+  );
 });
 
 Deno.test("InstallEventPresenter simulated stream scrubs vendor vocabulary", () => {
@@ -153,7 +171,10 @@ Deno.test("InstallEventPresenter simulated stream scrubs vendor vocabulary", () 
 
   events.onRawLine("stderr", " + ansible-core==2.17.0");
   events.onRawLine("stdout", "Resolved 42 packages in 1.2s");
-  events.onRawLine("stderr", "Using CPython 3.12.7 interpreter at: /usr/bin/python3");
+  events.onRawLine(
+    "stderr",
+    "Using CPython 3.12.7 interpreter at: /usr/bin/python3",
+  );
 
   presenter.completeStep(true, "Platform services ready");
 
@@ -206,7 +227,10 @@ Deno.test("logInfo routes bootstrap noise through presenter without leaking sani
   presenter.beginStep("Bootstrapping runtimes");
   logInfo("python", "Using CPython 3.12.7 interpreter at: /usr/bin/python3");
   logInfo("uv", "uv 0.11.21 already installed");
-  logInfo("ansible-galaxy", "installing galaxy roles from orchestration/galaxy.yml");
+  logInfo(
+    "ansible-galaxy",
+    "installing galaxy roles from orchestration/galaxy.yml",
+  );
   logInfo("orchestration", "platform services configured");
   presenter.completeStep(true, "bootstrap complete");
 
@@ -224,7 +248,11 @@ Deno.test("logInfo routes bootstrap noise through presenter without leaking sani
     false,
     out,
   );
-  assertEquals(STRUCTURED_LOG_LINE.test(out), false, "structured log leaked:\n" + out);
+  assertEquals(
+    STRUCTURED_LOG_LINE.test(out),
+    false,
+    "structured log leaked:\n" + out,
+  );
   assertNoForbiddenInstallerOutput(out, "logger bootstrap noise");
 });
 
@@ -243,5 +271,9 @@ Deno.test("installer success path emits only presenter output without trailing s
 
   assertMatch(out, /▸ Running daemon provisioning/);
   assertMatch(out, /✓ TurboPanel daemon provisioning complete/);
-  assertEquals(STRUCTURED_LOG_LINE.test(out), false, "structured log leaked:\n" + out);
+  assertEquals(
+    STRUCTURED_LOG_LINE.test(out),
+    false,
+    "structured log leaked:\n" + out,
+  );
 });

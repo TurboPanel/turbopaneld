@@ -26,7 +26,14 @@
 
 - name: Ensure turbopanel Docker network exists
   ansible.builtin.command:
-    argv: [docker, network, create, --driver, bridge, "{{ turbopanel_docker_network }}"]
+    argv: [
+      docker,
+      network,
+      create,
+      --driver,
+      bridge,
+      "{{ turbopanel_docker_network }}",
+    ]
   register: _tabix_network_create
   changed_when: false
   failed_when: false
@@ -61,7 +68,13 @@
 
 - name: Pull Tabix assets image (amd64 metadata only; not executed)
   ansible.builtin.command:
-    argv: [docker, pull, "--platform", "linux/amd64", "{{ tabix_assets_image }}"]
+    argv: [
+      docker,
+      pull,
+      "--platform",
+      "linux/amd64",
+      "{{ tabix_assets_image }}",
+    ]
   when: not _tabix_assets_stat.stat.exists
   register: _tabix_assets_pull
   changed_when: "'Downloaded newer image' in (_tabix_assets_pull.stdout | default('')) or 'Pull complete' in (_tabix_assets_pull.stdout | default(''))"
@@ -169,12 +182,12 @@
   when:
     - _tabix_container_exists | bool
     - >-
-      (not _tabix_network_ok | bool)
-      or (not _tabix_web_ok | bool)
-      or (not _tabix_html_mount_ok | bool)
-      or (not _tabix_image_ok | bool)
-      or (not _tabix_user_ok | bool)
-      or (_tabix_status | trim in ['restarting', 'exited', 'dead'])
+        (not _tabix_network_ok | bool)
+        or (not _tabix_web_ok | bool)
+        or (not _tabix_html_mount_ok | bool)
+        or (not _tabix_image_ok | bool)
+        or (not _tabix_user_ok | bool)
+        or (_tabix_status | trim in ['restarting', 'exited', 'dead'])
   register: _tabix_removed
   changed_when: _tabix_removed.rc == 0
 

@@ -1,6 +1,9 @@
 import type { CpuCounters } from "./types.ts";
 
-function parseOptionalField(parts: string[], index: number): number | undefined {
+function parseOptionalField(
+  parts: string[],
+  index: number,
+): number | undefined {
   if (index >= parts.length) return undefined;
   const value = Number(parts[index]);
   return Number.isFinite(value) ? value : undefined;
@@ -31,8 +34,10 @@ export function parseStatCpuLine(line: string): CpuCounters | null {
   const softirq = parseOptionalField(fields, 6);
   const steal = parseOptionalField(fields, 7);
 
-  if (user === undefined && nice === undefined && system === undefined &&
-    idle === undefined) {
+  if (
+    user === undefined && nice === undefined && system === undefined &&
+    idle === undefined
+  ) {
     return null;
   }
 

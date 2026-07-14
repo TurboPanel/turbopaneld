@@ -36,7 +36,9 @@ function createFixtureDeps(
       }
       if (path === "/proc/loadavg") return fixture(FIXTURES["/proc/loadavg"]);
       if (path === "/proc/uptime") return fixture(FIXTURES["/proc/uptime"]);
-      if (path === "/proc/diskstats") return fixture(FIXTURES["/proc/diskstats"]);
+      if (path === "/proc/diskstats") {
+        return fixture(FIXTURES["/proc/diskstats"]);
+      }
       if (path === "/proc/net/dev") return fixture(FIXTURES["/proc/net/dev"]);
       if (path === "/proc/sys/kernel/random/boot_id") {
         return fixture(FIXTURES["/proc/sys/kernel/random/boot_id"]);
@@ -165,7 +167,9 @@ it("LinuxMetricsCollector boot_id change nulls rate metrics", async () => {
       if (path === "/proc/uptime") return fixture("proc-uptime.txt");
       if (path === "/proc/diskstats") return fixture("proc-diskstats.txt");
       if (path === "/proc/net/dev") return fixture("proc-net-dev.txt");
-      if (path === "/proc/sys/kernel/random/boot_id") return fixture(bootFixture);
+      if (path === "/proc/sys/kernel/random/boot_id") {
+        return fixture(bootFixture);
+      }
       return undefined;
     },
     statfs: () => ({

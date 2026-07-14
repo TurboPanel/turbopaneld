@@ -1,8 +1,5 @@
 import type { UpdateChannelConfig } from "./config.ts";
-import {
-  MalformedManifestError,
-  MissingChannelError,
-} from "./errors.ts";
+import { MalformedManifestError, MissingChannelError } from "./errors.ts";
 import type { LinuxArch, UpdateInfo } from "./types.ts";
 import { DL_BASE_URL, rootCatalogUrl } from "./urls.ts";
 import { parseChannelManifest, parseRootCatalog } from "./validate.ts";

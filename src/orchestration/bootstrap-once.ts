@@ -5,7 +5,10 @@ import {
   ensureGalaxyRoles,
   runLocalhostTest,
 } from "./ansible.ts";
-import type { AnsibleEventHandler, AnsibleRawLineStream } from "./ansible-events.ts";
+import type {
+  AnsibleEventHandler,
+  AnsibleRawLineStream,
+} from "./ansible-events.ts";
 import {
   computeBootstrapStamp,
   readBootstrapStamp,

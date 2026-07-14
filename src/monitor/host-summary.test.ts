@@ -38,7 +38,9 @@ function assertSectionShape(summary: MonitorInstanceSummary): void {
   }
 
   if (summary.memory) {
-    assert(typeof summary.memory === "object" && !Array.isArray(summary.memory));
+    assert(
+      typeof summary.memory === "object" && !Array.isArray(summary.memory),
+    );
     for (const field of ["usedBytes", "totalBytes", "usagePercent"] as const) {
       const value = summary.memory[field];
       if (value != null) assert(typeof value === "number");

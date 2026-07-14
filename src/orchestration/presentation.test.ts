@@ -7,18 +7,24 @@ import {
   shouldDropStatusLine,
   summarizeRecap,
 } from "./presentation.ts";
-import {
-  setActiveInstallPresenter,
-} from "./install-presenter-context.ts";
+import { setActiveInstallPresenter } from "./install-presenter-context.ts";
 import { InstallPresenter } from "./install-presenter.ts";
 
-const FORBIDDEN_TOKENS = ["ansible", "ansible-galaxy", "redis", "rabbitmq", "uv"];
+const FORBIDDEN_TOKENS = [
+  "ansible",
+  "ansible-galaxy",
+  "redis",
+  "rabbitmq",
+  "uv",
+];
 
 function assertNoForbiddenTokens(text: string, label: string): void {
   const lower = text.toLowerCase();
   for (const token of FORBIDDEN_TOKENS) {
     if (lower.includes(token)) {
-      throw new Error(`${label}: forbidden token "${token}" survived in "${text}"`);
+      throw new Error(
+        `${label}: forbidden token "${token}" survived in "${text}"`,
+      );
     }
   }
 }
@@ -93,7 +99,10 @@ Deno.test("relabelComponent output contains no forbidden tokens", () => {
     "python",
   ];
   for (const component of inputs) {
-    assertNoForbiddenTokens(relabelComponent(component), `relabelComponent(${component})`);
+    assertNoForbiddenTokens(
+      relabelComponent(component),
+      `relabelComponent(${component})`,
+    );
   }
 });
 
@@ -102,7 +111,10 @@ Deno.test("sanitizeStatusLine scrubs vendor tokens case-insensitively", () => {
     ["Connecting to Redis cache", "Connecting to cache cache"],
     ["RabbitMQ broker ready", "queue broker ready"],
     ["rabbit mq listener started", "queue listener started"],
-    ["Running ansible-galaxy collection install", "Running orchestration collection install"],
+    [
+      "Running ansible-galaxy collection install",
+      "Running orchestration collection install",
+    ],
     ["ansible playbook complete", "orchestration playbook complete"],
     ["uv resolved dependencies", "runtime resolved dependencies"],
     ["Using CPython 3.12", "Using runtime 3.12"],
@@ -112,19 +124,32 @@ Deno.test("sanitizeStatusLine scrubs vendor tokens case-insensitively", () => {
 
   for (const [input, expected] of samples) {
     assertEquals(sanitizeStatusLine(input), expected, input);
-    assertNoForbiddenTokens(sanitizeStatusLine(input), `sanitizeStatusLine(${input})`);
+    assertNoForbiddenTokens(
+      sanitizeStatusLine(input),
+      `sanitizeStatusLine(${input})`,
+    );
   }
 });
 
 Deno.test("sanitizeStatusLine preserves path-like segments on whole-word boundaries", () => {
   const line = "installed to /opt/turbopanel/vendor/redis/current";
   const sanitized = sanitizeStatusLine(line);
-  assertEquals(sanitized.includes("/opt/turbopanel/vendor/redis/current"), true);
+  assertEquals(
+    sanitized.includes("/opt/turbopanel/vendor/redis/current"),
+    true,
+  );
 });
 
 Deno.test("shouldDropStatusLine drops package, venv, and galaxy noise", () => {
-  const bareTempDownloadPath = ["Downloading community.docker to ", "/", "tmp", "/ansible-galaxy-abc123"].join("");
-  const bareTempPathEcho = ["/", "tmp", "/", "ansible-galaxy-roles-xyz"].join("");
+  const bareTempDownloadPath = [
+    "Downloading community.docker to ",
+    "/",
+    "tmp",
+    "/ansible-galaxy-abc123",
+  ].join("");
+  const bareTempPathEcho = ["/", "tmp", "/", "ansible-galaxy-roles-xyz"].join(
+    "",
+  );
   const dropped = [
     " + ansible-core==2.17.0",
     "Resolved 42 packages in 1.2s",

@@ -2,37 +2,19 @@ import { assertEquals, assertNotEquals } from "jsr:@std/assert";
 import { it } from "@std/testing/bdd";
 import {
   createMetricsCollector,
-  type MetricsCollectResult,
   type MetricsCollector,
+  type MetricsCollectResult,
 } from "./collector/index.ts";
 import type { CollectorDeps } from "./collector/types.ts";
 import { METRICS_SCHEMA_VERSION } from "./contract.ts";
 import {
   deterministicJitterMs,
-  rebindMetricsScheduler,
   METRICS_INTERVAL_MS,
   METRICS_JITTER_MAX_MS,
   MetricsScheduler,
+  type MetricsSink,
+  rebindMetricsScheduler,
 } from "./scheduler.ts";
-
-class MockWebSocket {
-  static readonly CONNECTING = 0;
-  static readonly OPEN = 1;
-  static readonly CLOSING = 2;
-  static readonly CLOSED = 3;
-
-  readonly sentFrames: string[] = [];
-  readyState = MockWebSocket.OPEN;
-  sendThrow = false;
-
-  send(data: string): void {
-    if (this.sendThrow) throw new Error("send boom");
-    if (this.readyState !== MockWebSocket.OPEN) {
-      throw new Error("WebSocket is not open");
-    }
-    this.sentFrames.push(data);
-  }
-}
 
 type TimerHandle = { id: number };
 type TimeoutEntry = {
@@ -87,7 +69,7 @@ class FakeClock {
 
   clearIntervalFn = (handle: TimerHandle | number): void => {
     const id = typeof handle === "number" ? handle : handle.id;
-    const entry = this.#intervals.find((t) => t.id === id);
+    const entry = this.#intervals.find((i) => i.id === id);
     if (entry) entry.cleared = true;
   };
 
@@ -147,20 +129,29 @@ class FakeClock {
   }
 }
 
-function parseMetricsFrames(frames: string[]): Array<{
+function parseMetricsFrames(sent: unknown[]): Array<{
   type: string;
   version: number;
   sequence: number;
   metrics: Record<string, number | null>;
 }> {
-  return frames
-    .map((raw) => JSON.parse(raw) as {
-      type: string;
-      version: number;
-      sequence: number;
-      metrics: Record<string, number | null>;
-    })
+  return sent
+    .map((sample) =>
+      sample as {
+        type: string;
+        version: number;
+        sequence: number;
+        metrics: Record<string, number | null>;
+      }
+    )
     .filter((f) => f.type === "metrics");
+}
+
+function capturingSink(sent: unknown[]): MetricsSink {
+  return (sample) => {
+    sent.push(sample);
+    return Promise.resolve();
+  };
 }
 
 function fixture(name: string): string {
@@ -227,7 +218,9 @@ function createFixtureCollectorFactory(): () => MetricsCollector {
 }
 
 function createFakeCollector(
-  handler: (sequence: number) => Promise<MetricsCollectResult> | MetricsCollectResult,
+  handler: (
+    sequence: number,
+  ) => Promise<MetricsCollectResult> | MetricsCollectResult,
 ): MetricsCollector {
   return {
     collect({ sequence }) {
@@ -307,7 +300,7 @@ function makeScheduler(options: {
 
 it("MetricsScheduler emits metrics frame after jittered first tick", async () => {
   const clock = new FakeClock();
-  const ws = new MockWebSocket();
+  const sent: unknown[] = [];
   const scheduler = makeScheduler({
     clock,
     jitterMaxMs: 50,
@@ -316,13 +309,13 @@ it("MetricsScheduler emits metrics frame after jittered first tick", async () =>
   });
 
   const expectedJitter = deterministicJitterMs("server-a", 50);
-  scheduler.attach(ws as unknown as WebSocket);
+  scheduler.attach(capturingSink(sent));
 
   await clock.advance(expectedJitter - 1);
-  assertEquals(ws.sentFrames.length, 0);
+  assertEquals(sent.length, 0);
 
   await clock.advance(1);
-  const frames = parseMetricsFrames(ws.sentFrames);
+  const frames = parseMetricsFrames(sent);
   assertEquals(frames.length, 1);
   assertEquals(frames[0].type, "metrics");
   assertEquals(frames[0].version, 1);
@@ -331,7 +324,7 @@ it("MetricsScheduler emits metrics frame after jittered first tick", async () =>
 
 it("MetricsScheduler steady cadence emits one frame per interval", async () => {
   const clock = new FakeClock();
-  const ws = new MockWebSocket();
+  const sent: unknown[] = [];
   const intervalMs = 1_000;
   const scheduler = makeScheduler({
     clock,
@@ -341,15 +334,15 @@ it("MetricsScheduler steady cadence emits one frame per interval", async () => {
       createFakeCollector((sequence) => supportedSample(sequence)),
   });
 
-  scheduler.attach(ws as unknown as WebSocket);
+  scheduler.attach(capturingSink(sent));
   await clock.advance(0); // first emit at jitter 0
-  assertEquals(parseMetricsFrames(ws.sentFrames).length, 1);
+  assertEquals(parseMetricsFrames(sent).length, 1);
 
   await clock.advance(intervalMs);
-  assertEquals(parseMetricsFrames(ws.sentFrames).length, 2);
+  assertEquals(parseMetricsFrames(sent).length, 2);
 
   await clock.advance(intervalMs * 3);
-  assertEquals(parseMetricsFrames(ws.sentFrames).length, 5);
+  assertEquals(parseMetricsFrames(sent).length, 5);
 });
 
 it("deterministicJitterMs is bounded, stable, and spreads across ids", () => {
@@ -369,7 +362,7 @@ it("deterministicJitterMs is bounded, stable, and spreads across ids", () => {
 
 it("MetricsScheduler first emit is scheduled at deterministic jitter offset", async () => {
   const clock = new FakeClock();
-  const ws = new MockWebSocket();
+  const sent: unknown[] = [];
   const serverId = "jitter-server";
   const jitterMaxMs = 200;
   const expected = deterministicJitterMs(serverId, jitterMaxMs);
@@ -383,18 +376,18 @@ it("MetricsScheduler first emit is scheduled at deterministic jitter offset", as
   });
 
   assertEquals(scheduler.jitterMs(), expected);
-  scheduler.attach(ws as unknown as WebSocket);
+  scheduler.attach(capturingSink(sent));
 
   await clock.advance(expected - 1);
-  assertEquals(ws.sentFrames.length, 0);
+  assertEquals(sent.length, 0);
   await clock.advance(1);
-  assertEquals(parseMetricsFrames(ws.sentFrames).length, 1);
+  assertEquals(parseMetricsFrames(sent).length, 1);
 });
 
 it("MetricsScheduler sequence increases across ticks and survives detach→attach", async () => {
   const clock = new FakeClock();
-  const ws1 = new MockWebSocket();
-  const ws2 = new MockWebSocket();
+  const sent1: unknown[] = [];
+  const sent2: unknown[] = [];
   const intervalMs = 500;
   const scheduler = makeScheduler({
     clock,
@@ -404,17 +397,17 @@ it("MetricsScheduler sequence increases across ticks and survives detach→attac
       createFakeCollector((sequence) => supportedSample(sequence)),
   });
 
-  scheduler.attach(ws1 as unknown as WebSocket);
+  scheduler.attach(capturingSink(sent1));
   await clock.advance(0);
   await clock.advance(intervalMs);
-  const first = parseMetricsFrames(ws1.sentFrames);
+  const first = parseMetricsFrames(sent1);
   assertEquals(first.map((f) => f.sequence), [1, 2]);
 
   scheduler.detach();
-  scheduler.attach(ws2 as unknown as WebSocket);
+  scheduler.attach(capturingSink(sent2));
   await clock.advance(0);
   await clock.advance(intervalMs);
-  const second = parseMetricsFrames(ws2.sentFrames);
+  const second = parseMetricsFrames(sent2);
   assertEquals(second.map((f) => f.sequence), [3, 4]);
 });
 
@@ -431,25 +424,25 @@ it("MetricsScheduler fresh collector after reattach nulls rate metrics", async (
     collectorFactory: factory,
   });
 
-  const ws1 = new MockWebSocket();
-  scheduler.attach(ws1 as unknown as WebSocket);
+  const sent1: unknown[] = [];
+  scheduler.attach(capturingSink(sent1));
   await clock.advance(0);
-  const firstAttach = parseMetricsFrames(ws1.sentFrames);
+  const firstAttach = parseMetricsFrames(sent1);
   assertEquals(firstAttach.length, 1);
   assertEquals(firstAttach[0].metrics.cpuUsagePercent, null);
   assertEquals(firstAttach[0].metrics.diskReadBytesPerSecond, null);
 
   await clock.advance(intervalMs);
-  const secondTick = parseMetricsFrames(ws1.sentFrames);
+  const secondTick = parseMetricsFrames(sent1);
   assertEquals(secondTick.length, 2);
   assertEquals(typeof secondTick[1].metrics.cpuUsagePercent, "number");
   assertEquals(secondTick[1].metrics.cpuUsagePercent !== null, true);
 
   scheduler.detach();
-  const ws2 = new MockWebSocket();
-  scheduler.attach(ws2 as unknown as WebSocket);
+  const sent2: unknown[] = [];
+  scheduler.attach(capturingSink(sent2));
   await clock.advance(0);
-  const afterReattach = parseMetricsFrames(ws2.sentFrames);
+  const afterReattach = parseMetricsFrames(sent2);
   assertEquals(afterReattach.length, 1);
   assertEquals(afterReattach[0].metrics.cpuUsagePercent, null);
   assertEquals(afterReattach[0].metrics.diskReadBytesPerSecond, null);
@@ -457,7 +450,7 @@ it("MetricsScheduler fresh collector after reattach nulls rate metrics", async (
 
 it("MetricsScheduler is independent of other socket traffic", async () => {
   const clock = new FakeClock();
-  const ws = new MockWebSocket();
+  const sent: unknown[] = [];
   const intervalMs = 1_000;
   const scheduler = makeScheduler({
     clock,
@@ -467,23 +460,19 @@ it("MetricsScheduler is independent of other socket traffic", async () => {
       createFakeCollector((sequence) => supportedSample(sequence)),
   });
 
-  scheduler.attach(ws as unknown as WebSocket);
+  scheduler.attach(capturingSink(sent));
   await clock.advance(0);
-  assertEquals(parseMetricsFrames(ws.sentFrames).length, 1);
+  assertEquals(parseMetricsFrames(sent).length, 1);
 
-  // Push arbitrary other frames between ticks — must not suppress metrics.
-  ws.sentFrames.push('{"type":"ping"}');
-  ws.sentFrames.push('{"type":"hello","at":"x"}');
-
+  // Unrelated activity between ticks must not suppress metrics cadence.
   await clock.advance(intervalMs);
-  const metrics = parseMetricsFrames(ws.sentFrames);
+  const metrics = parseMetricsFrames(sent);
   assertEquals(metrics.length, 2);
 });
 
-it("MetricsScheduler emits nothing when socket is closed or detached", async () => {
+it("MetricsScheduler emits nothing when detached", async () => {
   const clock = new FakeClock();
-  const closed = new MockWebSocket();
-  closed.readyState = MockWebSocket.CLOSED;
+  const sent: unknown[] = [];
   const scheduler = makeScheduler({
     clock,
     jitterMaxMs: 0,
@@ -492,16 +481,11 @@ it("MetricsScheduler emits nothing when socket is closed or detached", async () 
       createFakeCollector((sequence) => supportedSample(sequence)),
   });
 
-  scheduler.attach(closed as unknown as WebSocket);
-  await clock.advance(0);
-  assertEquals(closed.sentFrames.length, 0);
-
-  const open = new MockWebSocket();
-  scheduler.attach(open as unknown as WebSocket);
+  scheduler.attach(capturingSink(sent));
   scheduler.detach();
   await clock.advance(0);
   await clock.advance(500);
-  assertEquals(open.sentFrames.length, 0);
+  assertEquals(sent.length, 0);
 });
 
 it("MetricsScheduler rate-limits collect/send failure logs and never rejects", async () => {
@@ -511,7 +495,14 @@ it("MetricsScheduler rate-limits collect/send failure logs and never rejects", a
   const logRateLimitMs = 10_000;
 
   let mode: "collect" | "send" = "collect";
-  const ws = new MockWebSocket();
+  const sent: unknown[] = [];
+  const sink: MetricsSink = (sample) => {
+    if (mode === "send") {
+      return Promise.reject(new Error("send boom"));
+    }
+    sent.push(sample);
+    return Promise.resolve();
+  };
   const scheduler = makeScheduler({
     clock,
     intervalMs,
@@ -527,7 +518,7 @@ it("MetricsScheduler rate-limits collect/send failure logs and never rejects", a
       }),
   });
 
-  scheduler.attach(ws as unknown as WebSocket);
+  scheduler.attach(sink);
   for (let i = 0; i < 10; i++) {
     await clock.advance(i === 0 ? 0 : intervalMs);
   }
@@ -538,7 +529,6 @@ it("MetricsScheduler rate-limits collect/send failure logs and never rejects", a
 
   // Switch to send failures; many ticks inside one rate-limit window → one log.
   mode = "send";
-  ws.sendThrow = true;
   logs.length = 0;
   for (let i = 0; i < 10; i++) {
     await clock.advance(intervalMs);
@@ -552,7 +542,7 @@ it("MetricsScheduler rate-limits collect/send failure logs and never rejects", a
 it("MetricsScheduler stops periodic emits on unsupported result", async () => {
   const clock = new FakeClock();
   const logs: string[] = [];
-  const ws = new MockWebSocket();
+  const sent: unknown[] = [];
   const intervalMs = 200;
   const scheduler = makeScheduler({
     clock,
@@ -566,19 +556,19 @@ it("MetricsScheduler stops periodic emits on unsupported result", async () => {
       })),
   });
 
-  scheduler.attach(ws as unknown as WebSocket);
+  scheduler.attach(capturingSink(sent));
   await clock.advance(0);
-  assertEquals(ws.sentFrames.length, 0);
+  assertEquals(sent.length, 0);
   assertEquals(logs.some((m) => m.includes("unsupported_os:windows")), true);
 
   const logCount = logs.length;
   await clock.advance(intervalMs * 5);
-  assertEquals(ws.sentFrames.length, 0);
+  assertEquals(sent.length, 0);
   // No further unsupported spam after stop (rate-limited + timer cleared).
   assertEquals(logs.length, logCount);
 });
 
-it("slow metrics collect does not delay concurrent websocket work", async () => {
+it("slow metrics collect does not delay concurrent work", async () => {
   const clock = new FakeClock();
   let resolveCollect!: (result: MetricsCollectResult) => void;
   let collectStarted!: () => void;
@@ -599,28 +589,26 @@ it("slow metrics collect does not delay concurrent websocket work", async () => 
     }),
   });
 
-  const ws = new MockWebSocket();
-  scheduler.attach(ws as unknown as WebSocket);
+  const sent: unknown[] = [];
+  scheduler.attach(capturingSink(sent));
 
   // Fire the first tick; collection starts but hangs.
   const emitPromise = clock.advance(0);
   await collectStartedPromise;
 
-  // While collect is in flight, liveness / ordinary WS work must still run.
-  let livenessSent = false;
-  const livenessPromise = Promise.resolve().then(() => {
-    ws.send(JSON.stringify({ type: "ping" }));
-    livenessSent = true;
+  // While collect is in flight, unrelated work must still run.
+  let concurrentWorkDone = false;
+  const concurrentPromise = Promise.resolve().then(() => {
+    concurrentWorkDone = true;
   });
-  await livenessPromise;
-  assertEquals(livenessSent, true);
-  assertEquals(ws.sentFrames.includes('{"type":"ping"}'), true);
-  // Metrics frame must not have been sent yet (collect still pending).
-  assertEquals(parseMetricsFrames(ws.sentFrames).length, 0);
+  await concurrentPromise;
+  assertEquals(concurrentWorkDone, true);
+  // Metrics sample must not have been sent yet (collect still pending).
+  assertEquals(parseMetricsFrames(sent).length, 0);
 
   resolveCollect(supportedSample(1));
   await emitPromise;
-  assertEquals(parseMetricsFrames(ws.sentFrames).length, 1);
+  assertEquals(parseMetricsFrames(sent).length, 1);
 });
 
 it(
@@ -628,7 +616,7 @@ it(
   async () => {
     const clock = new FakeClock();
     const intervalMs = 1_000;
-    const ws = new MockWebSocket();
+    const sent: unknown[] = [];
 
     let inFlight = 0;
     let maxInFlight = 0;
@@ -660,20 +648,20 @@ it(
       }),
     });
 
-    scheduler.attach(ws as unknown as WebSocket);
+    scheduler.attach(capturingSink(sent));
 
     // First tick completes immediately; interval is armed on the same tick.
     await clock.advance(0);
     assertEquals(collectCount, 1);
     assertEquals(
-      parseMetricsFrames(ws.sentFrames).map((f) => f.sequence),
+      parseMetricsFrames(sent).map((f) => f.sequence),
       [1],
     );
 
     // Second tick starts a slow collect.
     await clock.advance(intervalMs);
     assertEquals(collectCount, 2);
-    assertEquals(parseMetricsFrames(ws.sentFrames).length, 1);
+    assertEquals(parseMetricsFrames(sent).length, 1);
     assertEquals(inFlight, 1);
 
     // Third tick while collect #2 is still running — must skip, not overlap.
@@ -686,7 +674,7 @@ it(
       await Promise.resolve();
     }
 
-    const afterSlow = parseMetricsFrames(ws.sentFrames);
+    const afterSlow = parseMetricsFrames(sent);
     assertEquals(afterSlow.map((f) => f.sequence), [1, 2]);
     for (let i = 1; i < afterSlow.length; i++) {
       assertEquals(afterSlow[i].sequence > afterSlow[i - 1].sequence, true);
@@ -694,7 +682,7 @@ it(
 
     // Next cadence tick still works and keeps send-order sequences increasing.
     await clock.advance(intervalMs);
-    const frames = parseMetricsFrames(ws.sentFrames);
+    const frames = parseMetricsFrames(sent);
     assertEquals(frames.map((f) => f.sequence), [1, 2, 3]);
     assertEquals(maxInFlight, 1);
     for (let i = 1; i < frames.length; i++) {
@@ -725,8 +713,8 @@ it("in-flight emit after detach+attach does not arm a duplicate interval", async
       }),
   });
 
-  const ws1 = new MockWebSocket();
-  scheduler.attach(ws1 as unknown as WebSocket);
+  const sent1: unknown[] = [];
+  scheduler.attach(capturingSink(sent1));
   // Start first emit (hangs on collect).
   const firstAdvance = clock.advance(0);
   await Promise.resolve();
@@ -734,12 +722,12 @@ it("in-flight emit after detach+attach does not arm a duplicate interval", async
 
   // Reconnect while first collect is still in flight.
   scheduler.detach();
-  const ws2 = new MockWebSocket();
-  scheduler.attach(ws2 as unknown as WebSocket);
+  const sent2: unknown[] = [];
+  scheduler.attach(capturingSink(sent2));
   await clock.advance(0);
-  assertEquals(parseMetricsFrames(ws2.sentFrames).length, 1);
+  assertEquals(parseMetricsFrames(sent2).length, 1);
 
-  // Stale first collect resolves — must not arm an extra interval on ws2.
+  // Stale first collect resolves — must not arm an extra interval on the new attach.
   resolveFirst(supportedSample(1));
   await firstAdvance;
   await Promise.resolve();
@@ -747,8 +735,8 @@ it("in-flight emit after detach+attach does not arm a duplicate interval", async
 
   await clock.advance(intervalMs);
   // One interval tick only (not two overlapping intervals).
-  assertEquals(parseMetricsFrames(ws2.sentFrames).length, 2);
-  assertEquals(ws1.sentFrames.length, 0);
+  assertEquals(parseMetricsFrames(sent2).length, 2);
+  assertEquals(sent1.length, 0);
 });
 
 it("stale unsupported result after reconnect does not stop new attach", async () => {
@@ -773,17 +761,17 @@ it("stale unsupported result after reconnect does not stop new attach", async ()
       }),
   });
 
-  const ws1 = new MockWebSocket();
-  scheduler.attach(ws1 as unknown as WebSocket);
+  const sent1: unknown[] = [];
+  scheduler.attach(capturingSink(sent1));
   const firstAdvance = clock.advance(0);
   await Promise.resolve();
   await Promise.resolve();
 
   scheduler.detach();
-  const ws2 = new MockWebSocket();
-  scheduler.attach(ws2 as unknown as WebSocket);
+  const sent2: unknown[] = [];
+  scheduler.attach(capturingSink(sent2));
   await clock.advance(0);
-  assertEquals(parseMetricsFrames(ws2.sentFrames).length, 1);
+  assertEquals(parseMetricsFrames(sent2).length, 1);
 
   // Old attach's unsupported result arrives late — must not freeze new attach.
   resolveFirst({ supported: false, reason: "unsupported_os:windows" });
@@ -792,13 +780,13 @@ it("stale unsupported result after reconnect does not stop new attach", async ()
   await Promise.resolve();
 
   await clock.advance(intervalMs);
-  assertEquals(parseMetricsFrames(ws2.sentFrames).length, 2);
+  assertEquals(parseMetricsFrames(sent2).length, 2);
 });
 
 it("collector factory throw disables metrics without throwing", () => {
   const clock = new FakeClock();
   const logs: string[] = [];
-  const ws = new MockWebSocket();
+  const sent: unknown[] = [];
   const scheduler = makeScheduler({
     clock,
     jitterMaxMs: 0,
@@ -808,7 +796,7 @@ it("collector factory throw disables metrics without throwing", () => {
     },
   });
 
-  scheduler.attach(ws as unknown as WebSocket);
+  scheduler.attach(capturingSink(sent));
   assertEquals(logs.some((m) => m.includes("collector factory failed")), true);
 });
 
@@ -839,15 +827,17 @@ it("rebindMetricsScheduler updates serverId and preserves sequence", async () =>
     deterministicJitterMs("server-old", METRICS_JITTER_MAX_MS),
   );
 
-  const ws1 = new MockWebSocket();
-  first.scheduler.attach(ws1 as unknown as WebSocket);
-  await clock.advance(deterministicJitterMs("server-old", METRICS_JITTER_MAX_MS));
-  assertEquals(parseMetricsFrames(ws1.sentFrames)[0].sequence, 1);
+  const sent1: unknown[] = [];
+  first.scheduler.attach(capturingSink(sent1));
+  await clock.advance(
+    deterministicJitterMs("server-old", METRICS_JITTER_MAX_MS),
+  );
+  assertEquals(parseMetricsFrames(sent1)[0].sequence, 1);
 
   // Simulate tokenServerId already equal to the new id (the reuse bug condition).
   const tokenServerIdAlreadyUpdated = "server-new";
-  const reusedWrongly =
-    first.scheduler && tokenServerIdAlreadyUpdated === "server-new";
+  const reusedWrongly = first.scheduler &&
+    tokenServerIdAlreadyUpdated === "server-new";
   assertEquals(reusedWrongly, true);
 
   const rebound = rebindMetricsScheduler({
@@ -864,9 +854,11 @@ it("rebindMetricsScheduler updates serverId and preserves sequence", async () =>
     deterministicJitterMs("server-new", METRICS_JITTER_MAX_MS),
   );
 
-  const ws2 = new MockWebSocket();
-  rebound.scheduler.attach(ws2 as unknown as WebSocket);
-  await clock.advance(deterministicJitterMs("server-new", METRICS_JITTER_MAX_MS));
+  const sent2: unknown[] = [];
+  rebound.scheduler.attach(capturingSink(sent2));
+  await clock.advance(
+    deterministicJitterMs("server-new", METRICS_JITTER_MAX_MS),
+  );
   // Process-local sequence continues after identity rebind.
-  assertEquals(parseMetricsFrames(ws2.sentFrames)[0].sequence, 2);
+  assertEquals(parseMetricsFrames(sent2)[0].sequence, 2);
 });

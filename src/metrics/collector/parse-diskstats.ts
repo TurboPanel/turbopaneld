@@ -29,7 +29,9 @@ function isPartition(name: string, survivors: string[]): boolean {
   return false;
 }
 
-function parseDiskstatsRow(line: string): { name: string; counters: DiskDeviceCounters } | null {
+function parseDiskstatsRow(
+  line: string,
+): { name: string; counters: DiskDeviceCounters } | null {
   const parts = line.trim().split(/\s+/);
   if (parts.length < 14) return null;
 

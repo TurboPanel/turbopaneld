@@ -20,7 +20,9 @@ async function isAnsibleRuntimeAvailable(): Promise<boolean> {
   if (ansibleAvailabilityCheckOverride) {
     return ansibleAvailabilityCheckOverride();
   }
-  const { ansiblePlaybookWorks } = await import("../../orchestration/ansible.ts");
+  const { ansiblePlaybookWorks } = await import(
+    "../../orchestration/ansible.ts"
+  );
   return ansiblePlaybookWorks();
 }
 

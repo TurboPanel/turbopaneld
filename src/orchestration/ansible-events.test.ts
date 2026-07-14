@@ -5,9 +5,7 @@ import {
   formatPlaybookRecap,
   sanitizeAnsibleSummaryText,
 } from "./ansible-events.ts";
-import {
-  setActiveInstallPresenter,
-} from "./install-presenter-context.ts";
+import { setActiveInstallPresenter } from "./install-presenter-context.ts";
 import { InstallPresenter } from "./install-presenter.ts";
 
 const TASK_DURATION = { start: "2026-01-01T00:00:00Z" };
@@ -130,7 +128,10 @@ Deno.test("formatAnsibleEventLog sanitizes play and recap lines for installers",
       custom_stats: {},
       global_custom_stats: {},
     });
-    assertEquals(recap?.message, "[recap] ok=2 changed=1 failed=0 unreachable=0");
+    assertEquals(
+      recap?.message,
+      "[recap] ok=2 changed=1 failed=0 unreachable=0",
+    );
   } finally {
     presenter.dispose();
     setActiveInstallPresenter(null);

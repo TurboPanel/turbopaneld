@@ -10,14 +10,35 @@
     group: "{{ item.group | default(turbopanel_group) }}"
     mode: "{{ item.mode }}"
   loop:
-    - { path: "{{ turbopanel_install_root }}/bin", mode: "0755", owner: "root", group: "root" }
-    - { path: "{{ turbopanel_install_root }}/lib", mode: "0755", owner: "root", group: "root" }
-    - { path: "{{ turbopanel_install_root }}/share", mode: "0755", owner: "root", group: "root" }
+    - {
+        path: "{{ turbopanel_install_root }}/bin",
+        mode: "0755",
+        owner: "root",
+        group: "root",
+      }
+    - {
+        path: "{{ turbopanel_install_root }}/lib",
+        mode: "0755",
+        owner: "root",
+        group: "root",
+      }
+    - {
+        path: "{{ turbopanel_install_root }}/share",
+        mode: "0755",
+        owner: "root",
+        group: "root",
+      }
     - { path: "{{ turbopanel_orchestration_dir }}", mode: "0755" }
     - { path: "{{ turbopanel_config_dir }}", mode: "0750" }
     - { path: "{{ turbopanel_daemon_state_dir }}", mode: "0750" }
-    - { path: "{{ turbopanel_daemon_state_dir }}/cloudflared/tunnels", mode: "0750" }
-    - { path: "{{ turbopanel_run_dir | default('/run/turbopanel') }}", mode: "2770" }
+    - {
+        path: "{{ turbopanel_daemon_state_dir }}/cloudflared/tunnels",
+        mode: "0750",
+      }
+    - {
+        path: "{{ turbopanel_run_dir | default('/run/turbopanel') }}",
+        mode: "2770",
+      }
 
 - name: Require native daemon binary
   ansible.builtin.stat:

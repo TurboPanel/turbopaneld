@@ -11,7 +11,11 @@ export interface RetryOptions {
   label: string;
 }
 
-function delayMs(attempt: number, baseDelayMs: number, maxDelayMs: number): number {
+function delayMs(
+  attempt: number,
+  baseDelayMs: number,
+  maxDelayMs: number,
+): number {
   const backoff = Math.min(maxDelayMs, baseDelayMs * 2 ** (attempt - 1));
   // Full jitter (AWS backoff guidance): avoids every retrying host/process
   // hammering the same endpoint in lockstep after a shared blip. Not

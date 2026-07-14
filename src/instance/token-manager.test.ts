@@ -216,7 +216,9 @@ Deno.test("verifyToken invalid causes refresh to throw after retry", async () =>
     throw new Error("expected getToken to throw on invalid verification");
   }
   if (sessionCalls !== 2) {
-    throw new Error(`expected 2 session calls after retry, got ${sessionCalls}`);
+    throw new Error(
+      `expected 2 session calls after retry, got ${sessionCalls}`,
+    );
   }
 });
 
@@ -273,19 +275,20 @@ Deno.test("verifyToken sub mismatch causes refresh to throw", async () => {
     hostname: "host-1",
     apiClient,
     refreshEarlyMs: 0,
-    verifyToken: () => Promise.resolve({
-      ok: true,
-      claims: {
-        sub: "other-server",
-        kid: "kid-1",
-        jti: "jti-1",
-        iss: "turbopanel",
-        aud: "turbopanel-daemon-api",
-        typ: "daemon",
-        iat: Math.floor(Date.now() / 1000),
-        exp: Math.floor(Date.now() / 1000) + 900,
-      },
-    }),
+    verifyToken: () =>
+      Promise.resolve({
+        ok: true,
+        claims: {
+          sub: "other-server",
+          kid: "kid-1",
+          jti: "jti-1",
+          iss: "turbopanel",
+          aud: "turbopanel-daemon-api",
+          typ: "daemon",
+          iat: Math.floor(Date.now() / 1000),
+          exp: Math.floor(Date.now() / 1000) + 900,
+        },
+      }),
   });
 
   let threw = false;
@@ -321,19 +324,20 @@ Deno.test("verifyToken kid mismatch causes refresh to throw", async () => {
     hostname: "host-1",
     apiClient,
     refreshEarlyMs: 0,
-    verifyToken: () => Promise.resolve({
-      ok: true,
-      claims: {
-        sub: "srv-1",
-        kid: "other-kid",
-        jti: "jti-1",
-        iss: "turbopanel",
-        aud: "turbopanel-daemon-api",
-        typ: "daemon",
-        iat: Math.floor(Date.now() / 1000),
-        exp: Math.floor(Date.now() / 1000) + 900,
-      },
-    }),
+    verifyToken: () =>
+      Promise.resolve({
+        ok: true,
+        claims: {
+          sub: "srv-1",
+          kid: "other-kid",
+          jti: "jti-1",
+          iss: "turbopanel",
+          aud: "turbopanel-daemon-api",
+          typ: "daemon",
+          iat: Math.floor(Date.now() / 1000),
+          exp: Math.floor(Date.now() / 1000) + 900,
+        },
+      }),
   });
 
   let threw = false;

@@ -111,5 +111,8 @@ Deno.test("hostOsFromFields falls back to Deno.build.os when fields empty", () =
 });
 
 Deno.test("hostOsFromFields returns undefined for unknown non-linux build", () => {
-  assertEquals(hostOsFromFields({}, { os: "sunos", arch: "x86_64" }), undefined);
+  assertEquals(
+    hostOsFromFields({}, { os: "sunos", arch: "x86_64" }),
+    undefined,
+  );
 });

@@ -55,7 +55,14 @@
 
 - name: Ensure turbopanel Docker network exists
   ansible.builtin.command:
-    argv: [docker, network, create, --driver, bridge, "{{ turbopanel_docker_network }}"]
+    argv: [
+      docker,
+      network,
+      create,
+      --driver,
+      bridge,
+      "{{ turbopanel_docker_network }}",
+    ]
   register: _rmq_network_create
   changed_when: false
   failed_when: false

@@ -70,7 +70,9 @@ Deno.test("parseRootCatalog validates manifestUrl is HTTPS", () => {
         schema: 1,
         defaultChannel: "trunk",
         channels: {
-          trunk: { manifestUrl: "http://dl.trbp.nl/channels/trunk/manifest.json" },
+          trunk: {
+            manifestUrl: "http://dl.trbp.nl/channels/trunk/manifest.json",
+          },
         },
       }),
     MalformedManifestError,
@@ -87,12 +89,14 @@ Deno.test("parseChannelManifest validates artifact entries", () => {
     builtAt: "2020-01-01T00:00:00.000Z",
     binaryArtifacts: {
       "linux-amd64": {
-        url: "https://dl.trbp.nl/channels/trunk/daemon/turbopaneld-amd64.tar.zst",
+        url:
+          "https://dl.trbp.nl/channels/trunk/daemon/turbopaneld-amd64.tar.zst",
         sha256: "a".repeat(64),
         size: 123,
       },
       "linux-arm64": {
-        url: "https://dl.trbp.nl/channels/trunk/daemon/turbopaneld-arm64.tar.zst",
+        url:
+          "https://dl.trbp.nl/channels/trunk/daemon/turbopaneld-arm64.tar.zst",
         sha256: "b".repeat(64),
         size: 234,
       },

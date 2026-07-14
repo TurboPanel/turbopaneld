@@ -1,11 +1,5 @@
-import {
-  DaemonJwksClient,
-  type InstanceJwtClaims,
-} from "./jwks-client.ts";
-import {
-  createTestSigningKey,
-  signInstanceJwt,
-} from "./jwks-test-helpers.ts";
+import { DaemonJwksClient, type InstanceJwtClaims } from "./jwks-client.ts";
+import { createTestSigningKey, signInstanceJwt } from "./jwks-test-helpers.ts";
 import type { JwksDocument } from "./api-client.ts";
 
 function makeClient(
@@ -225,10 +219,12 @@ Deno.test("empty sub or kid claim returns invalid", async () => {
   const { kid, privateKey, jwks } = await createTestSigningKey();
   const { client } = makeClient(jwks);
 
-  for (const claimOverrides of [
-    { sub: "", kid: "daemon-key-1" },
-    { sub: "server-1", kid: "" },
-  ] satisfies Array<Pick<InstanceJwtClaims, "sub" | "kid">>) {
+  for (
+    const claimOverrides of [
+      { sub: "", kid: "daemon-key-1" },
+      { sub: "server-1", kid: "" },
+    ] satisfies Array<Pick<InstanceJwtClaims, "sub" | "kid">>
+  ) {
     const token = await signInstanceJwt(privateKey, kid, claimOverrides);
     const result = await client.verifyInstanceJwt(token);
     if (result.ok || result.reason !== "invalid") {

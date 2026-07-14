@@ -1,7 +1,7 @@
 import { dirname, join } from "@std/path";
 import {
-  ANSIBLE_CORE_VERSION,
   ANSIBLE_CFG,
+  ANSIBLE_CORE_VERSION,
   ANSIBLE_CURRENT_DIR,
   ANSIBLE_HOME,
   ANSIBLE_INSTALL_DIR,
@@ -9,13 +9,13 @@ import {
   ANSIBLE_PLAYBOOK_BIN,
   ANSIBLE_PLAYBOOK_CWD,
   CACHE_DIR,
+  CLICKHOUSE_VERSION,
   CLOUDFLARED_CURRENT_DIR,
   DAEMON_ROOT,
   DEFAULT_DAEMON_ROOT,
   DENO_BIN,
   DENO_CURRENT_DIR,
   DENO_RUNTIME_DIR,
-  CLICKHOUSE_VERSION,
   DENO_VERSION,
   GALAXY_COLLECTIONS_DIR,
   ORCHESTRATION_DIR,
@@ -34,6 +34,7 @@ import {
 } from "./paths.ts";
 import {
   DaemonSourceRootError,
+  detectInstallMode,
   DEV_CONFIG_DIR_DEFAULT,
   DEV_DAEMON_LOG_DIR_DEFAULT,
   DEV_DAEMON_ROOT_DEFAULT,
@@ -48,12 +49,11 @@ import {
   PROD_LIB_DIR_DEFAULT,
   PROD_LOG_DIR_DEFAULT,
   PROD_ORCHESTRATION_DIR_DEFAULT,
-  PROD_SHARE_DIR_DEFAULT,
-  PROD_RUNTIME_DIR_DEFAULT,
   PROD_RUN_DIR_DEFAULT,
+  PROD_RUNTIME_DIR_DEFAULT,
+  PROD_SHARE_DIR_DEFAULT,
   PROD_STATE_DIR_DEFAULT,
   PROD_UI_DIR_DEFAULT,
-  detectInstallMode,
   readEnv,
   resolveLayout,
 } from "../paths/layout.ts";
@@ -100,8 +100,13 @@ test("resolveDaemonRoot uses default install path for compiled stub roots", () =
   const root = resolveDaemonRoot({
     TURBOPANEL_DAEMON_ROOT: "",
   }, { fromMeta, skipDiscovery: true });
-  const tempDirPrefix = `${Deno.env.get("TMPDIR") ?? Deno.env.get("TEMP") ?? ""}/`;
-  if (fromMeta.includes("deno-compile") || (tempDirPrefix.length > 1 && fromMeta.startsWith(tempDirPrefix))) {
+  const tempDirPrefix = `${
+    Deno.env.get("TMPDIR") ?? Deno.env.get("TEMP") ?? ""
+  }/`;
+  if (
+    fromMeta.includes("deno-compile") ||
+    (tempDirPrefix.length > 1 && fromMeta.startsWith(tempDirPrefix))
+  ) {
     assertEq(root, DEFAULT_DAEMON_ROOT, "compiled stub default root");
   }
 });
@@ -190,7 +195,11 @@ test("resolveDaemonRoot requireCheckout rejects the bundled JS entrypoint locati
       forceMode: "production",
       skipDiscovery: true,
     });
-    assertEq(fallback, binDir, "managed fallback returns bundled entrypoint dir");
+    assertEq(
+      fallback,
+      binDir,
+      "managed fallback returns bundled entrypoint dir",
+    );
     // ...but source-sync must refuse it.
     assertThrowsSourceRoot(
       () =>
@@ -310,7 +319,11 @@ test("layout env overrides apply in development mode", () => {
   }, { forceMode: "development" });
 
   assertEq(layout.runtimesDir, "/custom/runtimes", "runtimesDir");
-  assertEq(layout.orchestrationDir, "/custom/orchestration", "orchestrationDir");
+  assertEq(
+    layout.orchestrationDir,
+    "/custom/orchestration",
+    "orchestrationDir",
+  );
   assertEq(layout.instanceDir, "/custom/instance", "instanceDir");
   assertEq(layout.configDir, "/custom/config", "configDir");
   assertEq(layout.runDir, "/custom/run", "runDir");
@@ -357,9 +370,21 @@ test("module-level orchestration constants match active layout", () => {
   );
   assertEq(ORCHESTRATION_DIR, layout.orchestrationDir, "ORCHESTRATION_DIR");
   assertEq(RUNTIMES_DIR, layout.runtimesDir, "RUNTIMES_DIR");
-  assertEq(ANSIBLE_PLAYBOOK_CWD, dirname(layout.runtimesDir), "ANSIBLE_PLAYBOOK_CWD");
-  assertEq(UV_INSTALL_DIR, join(layout.runtimesDir, "uv", UV_VERSION), "UV_INSTALL_DIR");
-  assertEq(UV_CURRENT_DIR, join(layout.runtimesDir, "uv", "current"), "UV_CURRENT_DIR");
+  assertEq(
+    ANSIBLE_PLAYBOOK_CWD,
+    dirname(layout.runtimesDir),
+    "ANSIBLE_PLAYBOOK_CWD",
+  );
+  assertEq(
+    UV_INSTALL_DIR,
+    join(layout.runtimesDir, "uv", UV_VERSION),
+    "UV_INSTALL_DIR",
+  );
+  assertEq(
+    UV_CURRENT_DIR,
+    join(layout.runtimesDir, "uv", "current"),
+    "UV_CURRENT_DIR",
+  );
   assertEq(UV_BIN, join(layout.runtimesDir, "uv", UV_VERSION, "uv"), "UV_BIN");
   assertEq(
     PYTHON_RUNTIME_DIR,
@@ -422,7 +447,11 @@ test("module-level orchestration constants match active layout", () => {
     "/tmp/turbopanel-ansible",
     "ANSIBLE_HOME",
   );
-  assertEq(ANSIBLE_CFG, join(layout.orchestrationDir, "ansible.cfg"), "ANSIBLE_CFG");
+  assertEq(
+    ANSIBLE_CFG,
+    join(layout.orchestrationDir, "ansible.cfg"),
+    "ANSIBLE_CFG",
+  );
   assertEq(
     DENO_RUNTIME_DIR,
     join(layout.runtimesDir, "deno", "2.9.2"),
@@ -483,7 +512,11 @@ test("production FHS default constants are the canonical absolute paths", () => 
     "/opt/turbopanel/share",
     "PROD_SHARE_DIR_DEFAULT",
   );
-  assertEq(PROD_UI_DIR_DEFAULT, "/opt/turbopanel/share/ui", "PROD_UI_DIR_DEFAULT");
+  assertEq(
+    PROD_UI_DIR_DEFAULT,
+    "/opt/turbopanel/share/ui",
+    "PROD_UI_DIR_DEFAULT",
+  );
   assertEq(
     PROD_ORCHESTRATION_DIR_DEFAULT,
     "/opt/turbopanel/share/orchestration",
@@ -499,8 +532,16 @@ test("production FHS default constants are the canonical absolute paths", () => 
     "/opt/turbopanel/lib/instance",
     "PROD_INSTANCE_DIR_DEFAULT",
   );
-  assertEq(PROD_CONFIG_DIR_DEFAULT, "/etc/turbopanel", "PROD_CONFIG_DIR_DEFAULT");
-  assertEq(PROD_STATE_DIR_DEFAULT, "/var/lib/turbopanel", "PROD_STATE_DIR_DEFAULT");
+  assertEq(
+    PROD_CONFIG_DIR_DEFAULT,
+    "/etc/turbopanel",
+    "PROD_CONFIG_DIR_DEFAULT",
+  );
+  assertEq(
+    PROD_STATE_DIR_DEFAULT,
+    "/var/lib/turbopanel",
+    "PROD_STATE_DIR_DEFAULT",
+  );
   assertEq(PROD_LOG_DIR_DEFAULT, "/var/log/turbopanel", "PROD_LOG_DIR_DEFAULT");
   assertEq(PROD_RUN_DIR_DEFAULT, "/run/turbopanel", "PROD_RUN_DIR_DEFAULT");
 });
@@ -515,13 +556,21 @@ test("production layout resolves the complete FHS tree with no defaults", () => 
   assertEq(layout.runtimesDir, PROD_RUNTIME_DIR_DEFAULT, "runtimesDir");
   assertEq(layout.shareDir, PROD_SHARE_DIR_DEFAULT, "shareDir");
   assertEq(layout.uiDir, PROD_UI_DIR_DEFAULT, "uiDir");
-  assertEq(layout.orchestrationDir, PROD_ORCHESTRATION_DIR_DEFAULT, "orchestrationDir");
+  assertEq(
+    layout.orchestrationDir,
+    PROD_ORCHESTRATION_DIR_DEFAULT,
+    "orchestrationDir",
+  );
   assertEq(layout.configDir, PROD_CONFIG_DIR_DEFAULT, "configDir");
   assertEq(layout.stateDir, PROD_STATE_DIR_DEFAULT, "stateDir");
   assertEq(layout.daemonStateDir, PROD_STATE_DIR_DEFAULT, "daemonStateDir");
   assertEq(layout.logDir, PROD_LOG_DIR_DEFAULT, "logDir");
   assertEq(layout.runDir, PROD_RUN_DIR_DEFAULT, "runDir");
-  assertEq(layout.daemonRootDefault, PROD_DAEMON_ROOT_DEFAULT, "daemonRootDefault");
+  assertEq(
+    layout.daemonRootDefault,
+    PROD_DAEMON_ROOT_DEFAULT,
+    "daemonRootDefault",
+  );
   assertEq(layout.instanceDir, PROD_INSTANCE_DIR_DEFAULT, "instanceDir");
   // The production tree must never inherit the co-located dev checkout root.
   if (layout.orchestrationDir.includes("/platform/")) {
@@ -548,12 +597,24 @@ test("development layout resolves source repos with FHS mutable dirs", () => {
   assertEq(layout.configDir, DEV_CONFIG_DIR_DEFAULT, "configDir");
   assertEq(layout.instanceDir, DEV_INSTANCE_DIR_DEFAULT, "instanceDir");
   assertEq(layout.logDir, DEV_DAEMON_LOG_DIR_DEFAULT, "logDir");
-  assertEq(layout.daemonRootDefault, DEV_DAEMON_ROOT_DEFAULT, "daemonRootDefault");
-  assertEq(layout.orchestrationDir, checkoutOrchestrationDir, "orchestrationDir");
+  assertEq(
+    layout.daemonRootDefault,
+    DEV_DAEMON_ROOT_DEFAULT,
+    "daemonRootDefault",
+  );
+  assertEq(
+    layout.orchestrationDir,
+    checkoutOrchestrationDir,
+    "orchestrationDir",
+  );
   // Dev now shares the production FHS mutable dirs (dev-user-owned at runtime).
   assertEq(layout.runtimesDir, "/opt/turbopanel/vendor", "runtimesDir literal");
   assertEq(layout.configDir, "/etc/turbopanel", "configDir literal");
-  assertEq(layout.instanceDir, "/opt/turbopanel/lib/instance", "instanceDir literal");
+  assertEq(
+    layout.instanceDir,
+    "/opt/turbopanel/lib/instance",
+    "instanceDir literal",
+  );
   assertEq(layout.logDir, "/var/log/turbopanel", "logDir literal");
 });
 
@@ -648,7 +709,9 @@ test("ANSIBLE_CORE_VERSION matches the ansible-core pin in requirements.txt", ()
   const requirements = Deno.readTextFileSync(REQUIREMENTS_FILE);
   const match = requirements.match(/^ansible-core==(\d+\.\d+)\.\*/m);
   if (!match) {
-    throw new Error(`could not read ansible-core pin from ${REQUIREMENTS_FILE}`);
+    throw new Error(
+      `could not read ansible-core pin from ${REQUIREMENTS_FILE}`,
+    );
   }
   assertEq(match[1], ANSIBLE_CORE_VERSION, "ansible-core requirements pin");
 });

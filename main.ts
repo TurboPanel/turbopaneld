@@ -2,9 +2,7 @@ import { getBuildInfo } from "./src/build-info.ts";
 import { sanitizeForLog } from "./src/logger.ts";
 import { runBootstrapOrchestration } from "./src/orchestration/bootstrap-once.ts";
 import { InstallerPresentedFailure } from "./src/orchestration/install-presenter-context.ts";
-import {
-  runInstaller,
-} from "./src/orchestration/setup.ts";
+import { runInstaller } from "./src/orchestration/setup.ts";
 
 if (Deno.args[0] === "--version" || Deno.args[0] === "version") {
   const info = getBuildInfo();
@@ -93,7 +91,13 @@ if (Deno.args[0] === "run-installer") {
   }
 
   try {
-    await runInstaller({ instanceUrl, start, instanceCa, tunnelToken, varsFile });
+    await runInstaller({
+      instanceUrl,
+      start,
+      instanceCa,
+      tunnelToken,
+      varsFile,
+    });
   } catch (err) {
     if (!(err instanceof InstallerPresentedFailure)) {
       console.error(`[installer] ${sanitizeForLog(err)}`);

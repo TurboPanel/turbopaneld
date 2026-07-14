@@ -10,7 +10,9 @@ export class InstallerPresentedFailure extends Error {
   }
 }
 
-export function setActiveInstallPresenter(presenter: InstallPresenter | null): void {
+export function setActiveInstallPresenter(
+  presenter: InstallPresenter | null,
+): void {
   activePresenter = presenter;
 }
 

@@ -4,11 +4,11 @@
   vars:
     params:
       files:
-        - '{{ansible_facts.distribution}}.yml'
-        - '{{ansible_facts.os_family}}.yml'
+        - "{{ansible_facts.distribution}}.yml"
+        - "{{ansible_facts.os_family}}.yml"
         - main.yml
       paths:
-        - 'vars'
+        - "vars"
 
 - include_tasks: setup-RedHat.yml
   when: ansible_facts.os_family == 'RedHat'
@@ -107,7 +107,7 @@
   getent:
     database: group
     key: docker
-    split: ':'
+    split: ":"
   when: docker_users | length > 0
 
 - name: Check if there are any users to add to the docker group.

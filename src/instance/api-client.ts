@@ -116,6 +116,19 @@ export class DaemonApiClient {
     );
   }
 
+  /**
+   * POST a host-metrics sample to the instance (authenticated).
+   * Fire-and-forget at the call site — the scheduler awaits and rate-limit-logs
+   * on failure; this method does not swallow errors.
+   */
+  async sendHostMetrics(sample: unknown): Promise<void> {
+    await this.#request(
+      "/api/daemon/v1/metrics",
+      { method: "POST", body: JSON.stringify(sample) },
+      { auth: true },
+    );
+  }
+
   async #requestJson<T>(
     path: string,
     init: RequestInit,

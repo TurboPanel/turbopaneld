@@ -5,17 +5,12 @@ import { parseMeminfo } from "./parse-meminfo.ts";
 import { parseNetDev } from "./parse-net-dev.ts";
 import { parseStat } from "./parse-stat.ts";
 import { parseUptime } from "./parse-uptime.ts";
-import {
-  bootChanged,
-  cpuPercentages,
-  diskRates,
-  netRates,
-} from "./rates.ts";
+import { bootChanged, cpuPercentages, diskRates, netRates } from "./rates.ts";
 import type {
   CollectorDeps,
-  RawSnapshot,
-  MetricsCollectResult,
   MetricsCollector,
+  MetricsCollectResult,
+  RawSnapshot,
 } from "./types.ts";
 
 const PROC_STAT = "/proc/stat";
@@ -106,7 +101,8 @@ function snapshotToMetrics(
   previous: RawSnapshot | undefined,
   seconds: number,
 ): Partial<Record<HostMetricKey, number | null>> {
-  const reset = previous !== undefined && bootChanged(previous.bootId, current.bootId);
+  const reset = previous !== undefined &&
+    bootChanged(previous.bootId, current.bootId);
 
   const cpu = reset
     ? { usage: null, user: null, system: null, iowait: null }

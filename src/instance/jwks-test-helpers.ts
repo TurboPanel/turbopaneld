@@ -43,14 +43,16 @@ export async function createTestSigningKey(): Promise<TestSigningMaterial> {
     privateKey,
     publicJwk,
     jwks: {
-      keys: [{
-        kty: "OKP",
-        crv: "Ed25519",
-        x: publicJwk.x,
-        kid,
-        use: "sig",
-        alg: "EdDSA",
-      } as JsonWebKey & { kid: string; use: string; alg: string }],
+      keys: [
+        {
+          kty: "OKP",
+          crv: "Ed25519",
+          x: publicJwk.x,
+          kid,
+          use: "sig",
+          alg: "EdDSA",
+        } as JsonWebKey & { kid: string; use: string; alg: string },
+      ],
     },
   };
 }

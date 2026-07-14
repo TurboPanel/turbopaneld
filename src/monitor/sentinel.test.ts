@@ -41,14 +41,15 @@ function makeInspect(
   };
 }
 
-class FakeDockerMonitor implements Pick<
-  DockerMonitor,
-  | "start"
-  | "waitUntilReady"
-  | "getContainers"
-  | "getContainerInspect"
-  | "subscribe"
-> {
+class FakeDockerMonitor implements
+  Pick<
+    DockerMonitor,
+    | "start"
+    | "waitUntilReady"
+    | "getContainers"
+    | "getContainerInspect"
+    | "subscribe"
+  > {
   #containers: ContainerSummary[] = [];
   #inspects = new Map<string, ContainerInspect>();
   #listeners = new Set<(change: DockerMonitorChange) => void>();
@@ -96,7 +97,9 @@ class FakeDockerMonitor implements Pick<
       );
       if (index >= 0) this.#containers[index] = change.summary;
       else this.#containers.push(change.summary);
-      if (change.inspect) this.#inspects.set(change.containerId, change.inspect);
+      if (change.inspect) {
+        this.#inspects.set(change.containerId, change.inspect);
+      }
     }
 
     for (const listener of this.#listeners) {
@@ -156,8 +159,9 @@ Deno.test("sentinel emits offline transition bundle when a container is removed"
     removed: true,
   });
 
-  await waitFor("removal transition", () =>
-    transitions.length > 0 ? transitions[0] : undefined
+  await waitFor(
+    "removal transition",
+    () => transitions.length > 0 ? transitions[0] : undefined,
   );
 
   assertEquals(transitions[0]?.payload.events[0]?.toStatus, "offline");
@@ -200,8 +204,9 @@ Deno.test("sentinel emits transition bundle when a container status changes", as
     } as DockerEvent,
   });
 
-  await waitFor("status transition", () =>
-    transitions.length > 0 ? transitions[0] : undefined
+  await waitFor(
+    "status transition",
+    () => transitions.length > 0 ? transitions[0] : undefined,
   );
 
   assertEquals(transitions[0]?.payload.events[0]?.toStatus, "unhealthy");

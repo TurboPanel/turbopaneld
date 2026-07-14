@@ -5,8 +5,8 @@ import {
   clampPercent,
   HOST_METRIC_KEYS,
   type HostMetricsDimensions,
-  sanitizeFinite,
   METRICS_SCHEMA_VERSION,
+  sanitizeFinite,
 } from "./contract.ts";
 
 /** Parity lock: mirrored instance contract must keep this exact order + schema version. */

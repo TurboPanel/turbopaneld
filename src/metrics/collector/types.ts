@@ -1,7 +1,4 @@
-import type {
-  HostMetricsDimensions,
-  HostMetricsSample,
-} from "../contract.ts";
+import type { HostMetricsDimensions, HostMetricsSample } from "../contract.ts";
 
 /** Outcome of a single collect() invocation. */
 export type MetricsCollectResult =

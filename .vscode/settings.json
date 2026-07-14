@@ -1,11 +1,11 @@
 {
-    "sonarlint.connectedMode.project": {
-        "connectionId": "turbopanel",
-        "projectKey": "turbopanel_turbopaneld"
-    },
-    "sonarlint.rules": {
-        "typescript:S2187": {
-            "level": "off"
-        }
+  "sonarlint.connectedMode.project": {
+    "connectionId": "turbopanel",
+    "projectKey": "turbopanel_turbopaneld"
+  },
+  "sonarlint.rules": {
+    "typescript:S2187": {
+      "level": "off"
     }
+  }
 }

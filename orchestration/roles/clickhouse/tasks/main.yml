@@ -113,7 +113,14 @@
 
 - name: Ensure turbopanel Docker network exists
   ansible.builtin.command:
-    argv: [docker, network, create, --driver, bridge, "{{ turbopanel_docker_network }}"]
+    argv: [
+      docker,
+      network,
+      create,
+      --driver,
+      bridge,
+      "{{ turbopanel_docker_network }}",
+    ]
   register: _ch_network_create
   changed_when: false
   failed_when: false
@@ -174,14 +181,14 @@
   when:
     - _clickhouse_container_exists | bool
     - >-
-      (not _ch_volume_ok | bool)
-      or (not _ch_network_ok | bool)
-      or (not _ch_config_mount_ok | bool)
-      or (not _ch_users_mount_ok | bool)
-      or (not _ch_http_binding_ok | bool)
-      or (not _ch_image_ok | bool)
-      or (not _ch_user_ok | bool)
-      or (_ch_status | trim in ['restarting', 'exited', 'dead'])
+        (not _ch_volume_ok | bool)
+        or (not _ch_network_ok | bool)
+        or (not _ch_config_mount_ok | bool)
+        or (not _ch_users_mount_ok | bool)
+        or (not _ch_http_binding_ok | bool)
+        or (not _ch_image_ok | bool)
+        or (not _ch_user_ok | bool)
+        or (_ch_status | trim in ['restarting', 'exited', 'dead'])
   register: _ch_removed
   changed_when: _ch_removed.rc == 0
 
@@ -245,8 +252,8 @@
       - "{{ clickhouse_image }}"
       - -c
       - >-
-        cat /etc/clickhouse-server/config.d/turbopanel.xml >/dev/null
-        && cat /etc/clickhouse-server/users.d/turbopanel.xml >/dev/null
+          cat /etc/clickhouse-server/config.d/turbopanel.xml >/dev/null
+          && cat /etc/clickhouse-server/users.d/turbopanel.xml >/dev/null
   changed_when: false
 
 - name: Create and start clickhouse container

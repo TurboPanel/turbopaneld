@@ -1,8 +1,16 @@
 import { getBuildInfo } from "../build-info.ts";
 import { getHostHelloIdentity } from "../host/os-release.ts";
-import { logWarn } from "../logger.ts";
+import { logInfo, logWarn } from "../logger.ts";
 
 export const IDLE_PRESENCE_MS = 60_000;
+
+/**
+ * Hard lifetime cap for a single daemon↔instance WebSocket. Mirrors the
+ * instance's `MAX_WS_CONNECTION_AGE_MS` (`src/daemon/cell/socket-health.ts`).
+ * Post AE-driven sweep, this daemon-side recycle is the primary enforcer of
+ * the hard lifetime cap (the instance only watchdogs AE-suspect servers).
+ */
+export const MAX_CONNECTION_AGE_MS = 2 * 60 * 60 * 1_000;
 
 // Must match DAEMON_CELL_PING in instance/src/daemon/cell/protocol.ts exactly.
 const CELL_PING_MESSAGE = '{"type":"ping"}';
@@ -31,6 +39,14 @@ export type IdlePresenceOptions = {
    * close/replace the socket so the reconnect loop can run.
    */
   onStaleConnection?: () => void;
+  /** Override for tests; defaults to {@link MAX_CONNECTION_AGE_MS}. */
+  maxConnectionAgeMs?: number;
+  /**
+   * Invoked at most once per `attach()` when the connection exceeds its max
+   * lifetime. The owner is expected to close/replace the socket so the
+   * reconnect loop can run.
+   */
+  onMaxAge?: () => void;
 };
 
 /**
@@ -56,6 +72,8 @@ export class IdlePresence {
   readonly #minPresenceIntervalMs: number;
   readonly #staleConnectionMs: number;
   readonly #onStaleConnection: (() => void) | undefined;
+  readonly #maxConnectionAgeMs: number;
+  readonly #onMaxAge: (() => void) | undefined;
 
   #ws: WebSocket | undefined;
   #idleTimer: ReturnType<typeof setInterval> | undefined;
@@ -64,6 +82,8 @@ export class IdlePresence {
   #lastPresenceSendAt = 0;
   #lastAgentCommit: string | undefined;
   #staleReported = false;
+  #connectedAtMs = Date.now();
+  #maxAgeReported = false;
 
   constructor(options: IdlePresenceOptions) {
     this.#idleCheckIntervalMs = options.idleCheckIntervalMs ?? IDLE_PRESENCE_MS;
@@ -73,6 +93,9 @@ export class IdlePresence {
     this.#staleConnectionMs = options.staleConnectionMs ??
       this.#idleThresholdMs * 3;
     this.#onStaleConnection = options.onStaleConnection;
+    this.#maxConnectionAgeMs = options.maxConnectionAgeMs ??
+      MAX_CONNECTION_AGE_MS;
+    this.#onMaxAge = options.onMaxAge;
   }
 
   get lastActivityAt(): number {
@@ -97,8 +120,11 @@ export class IdlePresence {
     this.#lastActivityAt = Date.now();
     this.#lastInboundAt = Date.now();
     this.#staleReported = false;
+    this.#connectedAtMs = Date.now();
+    this.#maxAgeReported = false;
     this.#sendHello();
     this.#idleTimer = setInterval(() => {
+      if (this.#checkMaxConnectionAge()) return;
       this.#checkStaleConnection();
       this.#maybeSendPresence();
     }, this.#idleCheckIntervalMs);
@@ -110,6 +136,26 @@ export class IdlePresence {
       this.#idleTimer = undefined;
     }
     this.#ws = undefined;
+  }
+
+  /**
+   * Returns true when the connection was recycled so the tick can stop early
+   * (no cell ping on a socket that is about to close).
+   */
+  #checkMaxConnectionAge(): boolean {
+    if (this.#maxAgeReported) return false;
+    if (this.#ws?.readyState !== WebSocket.OPEN) return false;
+    const ageMs = Date.now() - this.#connectedAtMs;
+    if (ageMs < this.#maxConnectionAgeMs) return false;
+    this.#maxAgeReported = true;
+    logInfo(
+      "instance",
+      "recycling connection older than",
+      ageMs,
+      "ms; forcing reconnect",
+    );
+    this.#onMaxAge?.();
+    return true;
   }
 
   #checkStaleConnection(): void {

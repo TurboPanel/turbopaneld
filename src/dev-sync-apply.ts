@@ -69,7 +69,10 @@ export function resolveDevSyncSourceRoot(
     return { ok: false, reason: COLOCATED_DEV_SYNC_REFUSED_REASON };
   }
   try {
-    return { ok: true, root: resolveDaemonRoot(env, { requireCheckout: true }) };
+    return {
+      ok: true,
+      root: resolveDaemonRoot(env, { requireCheckout: true }),
+    };
   } catch (err) {
     if (err instanceof DaemonSourceRootError) {
       return { ok: false, reason: MANAGED_DEV_SYNC_REFUSED_REASON };

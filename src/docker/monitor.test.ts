@@ -47,10 +47,11 @@ function makeDestroyEvent(id = CONTAINER_ID): DockerEvent {
   };
 }
 
-class MockDockerClient implements Pick<
-  DockerClient,
-  "listContainers" | "inspectContainer" | "streamEvents"
-> {
+class MockDockerClient implements
+  Pick<
+    DockerClient,
+    "listContainers" | "inspectContainer" | "streamEvents"
+  > {
   containers: ContainerSummary[] = [];
   inspects = new Map<string, ContainerInspect>();
   #eventQueue: DockerEvent[] = [];
@@ -149,9 +150,12 @@ Deno.test("reconcile bootstrap seeds tracked containers and notifies listeners",
   await monitor.waitUntilReady();
 
   assertEquals(monitor.getContainers().length, 1);
-  assertEquals(changes.some((change) =>
-    change.containerId === CONTAINER_ID && !change.removed
-  ), true);
+  assertEquals(
+    changes.some((change) =>
+      change.containerId === CONTAINER_ID && !change.removed
+    ),
+    true,
+  );
 
   controller.abort();
 });
@@ -173,8 +177,9 @@ Deno.test("destroy event removes container and emits removed change", async () =
   await monitor.waitUntilReady();
   client.pushEvent(makeDestroyEvent());
 
-  await waitFor("destroy removal", () =>
-    removed.length > 0 ? removed[0] : undefined
+  await waitFor(
+    "destroy removal",
+    () => removed.length > 0 ? removed[0] : undefined,
   );
 
   assertEquals(monitor.getContainers().length, 0);
@@ -262,9 +267,11 @@ Deno.test("reconcile loop recovers containers missed by the events stream", asyn
   client.containers = [makeSummary(), makeSummary(missedId)];
   client.inspects.set(missedId, makeInspect(missedId));
 
-  await waitFor("reconcile recovery", () =>
-    seen.has(missedId) ? true : undefined
-  , 3_000);
+  await waitFor(
+    "reconcile recovery",
+    () => seen.has(missedId) ? true : undefined,
+    3_000,
+  );
 
   assertEquals(seen.has(missedId), true);
 

@@ -1,37 +1,37 @@
-import { run, runLogged, runOrThrow } from './exec.ts'
+import { run, runLogged, runOrThrow } from "./exec.ts";
 import {
-  AnsibleRunSummaryCollector,
   type AnsibleEventHandler,
   type AnsibleRawLineStream,
+  AnsibleRunSummaryCollector,
   runPlaybookStreaming,
-} from './ansible-events.ts'
+} from "./ansible-events.ts";
 import {
   computeBootstrapStamp,
   galaxyContentPresent,
   readBootstrapStamp,
   writeBootstrapStamp,
-} from './bootstrap-stamp.ts'
+} from "./bootstrap-stamp.ts";
 import {
   computeDevConvergeStamp,
   describeDevConvergeDecision,
   shouldSkipDevConverge,
   writeDevConvergeStamp,
-} from './converge-stamp.ts'
-import { join } from '@std/path'
-import { logInfo, logWarn } from '../logger.ts'
-import { logComponent } from './presentation.ts'
-import { withRetry } from './retry.ts'
+} from "./converge-stamp.ts";
+import { join } from "@std/path";
+import { logInfo, logWarn } from "../logger.ts";
+import { logComponent } from "./presentation.ts";
+import { withRetry } from "./retry.ts";
 import {
   devOrchestrationAnsibleEnv,
   requireDevOrchestrationLayout,
-} from './dev-orchestration.ts'
+} from "./dev-orchestration.ts";
 import {
-  ansibleEnv,
   ANSIBLE_CURRENT_DIR,
   ANSIBLE_HOME,
   ANSIBLE_INSTALL_DIR,
   ANSIBLE_PLAYBOOK_BIN,
   ANSIBLE_PLAYBOOK_CWD,
+  ansibleEnv,
   BUILD_TOGGLE_PLAYBOOK,
   DAEMON_CONVERGE_PLAYBOOK,
   DAEMON_LOGS_PLAYBOOK,
@@ -52,38 +52,46 @@ import {
   UV_BIN,
   VENV_BIN_DIR,
   VENV_DIR,
-} from './paths.ts'
+} from "./paths.ts";
 
 async function fileExists(path: string): Promise<boolean> {
   try {
-    await Deno.stat(path)
-    return true
+    await Deno.stat(path);
+    return true;
   } catch (err) {
-    if (err instanceof Deno.errors.NotFound) return false
-    throw err
+    if (err instanceof Deno.errors.NotFound) return false;
+    throw err;
   }
 }
 
 export async function ansiblePlaybookWorks(): Promise<boolean> {
-  if (!(await fileExists(ANSIBLE_PLAYBOOK_BIN))) return false
-  const result = await run(ANSIBLE_PLAYBOOK_BIN, ['--version'], { stream: false })
-  return result.success
+  if (!(await fileExists(ANSIBLE_PLAYBOOK_BIN))) return false;
+  const result = await run(ANSIBLE_PLAYBOOK_BIN, ["--version"], {
+    stream: false,
+  });
+  return result.success;
 }
 
 /** Point the stable `current` symlink at the active ansible venv directory. */
 async function repointAnsibleCurrent(): Promise<void> {
   try {
-    await Deno.remove(ANSIBLE_CURRENT_DIR)
+    await Deno.remove(ANSIBLE_CURRENT_DIR);
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) {
-      logWarn('orchestration', 'could not replace ansible current symlink:', err)
-      return
+      logWarn(
+        "orchestration",
+        "could not replace ansible current symlink:",
+        err,
+      );
+      return;
     }
   }
   try {
-    await Deno.symlink(ANSIBLE_INSTALL_DIR, ANSIBLE_CURRENT_DIR, { type: 'dir' })
+    await Deno.symlink(ANSIBLE_INSTALL_DIR, ANSIBLE_CURRENT_DIR, {
+      type: "dir",
+    });
   } catch (err) {
-    logWarn('orchestration', 'could not create ansible current symlink:', err)
+    logWarn("orchestration", "could not create ansible current symlink:", err);
   }
 }
 
@@ -95,7 +103,7 @@ export async function runLocalPlaybook(
   quiet = false,
   onRawLine?: (stream: AnsibleRawLineStream, line: string) => void,
 ): Promise<void> {
-  const args = ['-i', 'localhost,', '-c', 'local', ...extraArgs, playbook]
+  const args = ["-i", "localhost,", "-c", "local", ...extraArgs, playbook];
 
   await runPlaybookStreaming(ANSIBLE_PLAYBOOK_BIN, args, {
     cwd: ANSIBLE_PLAYBOOK_CWD,
@@ -103,40 +111,51 @@ export async function runLocalPlaybook(
     onEvent,
     quiet,
     onRawLine,
-  })
+  });
 }
 
 /** Extra `-e` args for co-located dev ownership context (cert apply, converge, etc.). */
 export function devOwnershipPlaybookExtraArgs(
   env: Record<string, string | undefined> = Deno.env.toObject(),
 ): string[] {
-  const args: string[] = []
-  const devUser = env.TURBOPANEL_DEV_USER
-  const devUid = env.TURBOPANEL_DEV_UID
-  const devGid = env.TURBOPANEL_DEV_GID
-  if (devUser) args.push('-e', `turbopanel_dev_user=${devUser}`)
-  if (devUid) args.push('-e', `turbopanel_dev_uid=${devUid}`)
-  if (devGid) args.push('-e', `turbopanel_dev_gid=${devGid}`)
-  return args
+  const args: string[] = [];
+  const devUser = env.TURBOPANEL_DEV_USER;
+  const devUid = env.TURBOPANEL_DEV_UID;
+  const devGid = env.TURBOPANEL_DEV_GID;
+  if (devUser) args.push("-e", `turbopanel_dev_user=${devUser}`);
+  if (devUid) args.push("-e", `turbopanel_dev_uid=${devUid}`);
+  if (devGid) args.push("-e", `turbopanel_dev_gid=${devGid}`);
+  return args;
 }
 
 function devInstanceExtraArgs(): string[] {
-  const uiMode = Deno.env.get('TURBOPANEL_UI_MODE') === 'static' ? 'static' : 'dev'
+  const uiMode = Deno.env.get("TURBOPANEL_UI_MODE") === "static"
+    ? "static"
+    : "dev";
   const instanceRunMode =
-    Deno.env.get('TURBOPANEL_INSTANCE_RUN_MODE') === 'compiled' ? 'compiled' : 'source'
+    Deno.env.get("TURBOPANEL_INSTANCE_RUN_MODE") === "compiled"
+      ? "compiled"
+      : "source";
   const instanceRuntime =
-    Deno.env.get('TURBOPANEL_INSTANCE_RUNTIME') === 'workers' ? 'workers' : 'deno'
+    Deno.env.get("TURBOPANEL_INSTANCE_RUNTIME") === "workers"
+      ? "workers"
+      : "deno";
 
-  const publicUrls = Deno.env.get('TURBOPANEL_PUBLIC_URLS')
+  const publicUrls = Deno.env.get("TURBOPANEL_PUBLIC_URLS");
 
   return [
     ...devOwnershipPlaybookExtraArgs(),
-    '-e', `turbopanel_ui_mode=${uiMode}`,
-    '-e', `turbopanel_instance_run_mode=${instanceRunMode}`,
-    '-e', `turbopanel_instance_runtime=${instanceRuntime}`,
-    ...(instanceRuntime === 'workers' ? ['-e', 'postgres_expose_port=true'] : []),
-    ...(publicUrls ? ['-e', `turbopanel_public_urls=${publicUrls}`] : []),
-  ]
+    "-e",
+    `turbopanel_ui_mode=${uiMode}`,
+    "-e",
+    `turbopanel_instance_run_mode=${instanceRunMode}`,
+    "-e",
+    `turbopanel_instance_runtime=${instanceRuntime}`,
+    ...(instanceRuntime === "workers"
+      ? ["-e", "postgres_expose_port=true"]
+      : []),
+    ...(publicUrls ? ["-e", `turbopanel_public_urls=${publicUrls}`] : []),
+  ];
 }
 
 /**
@@ -149,38 +168,40 @@ function devInstanceExtraArgs(): string[] {
  */
 export async function ensureAnsible(): Promise<void> {
   if (await ansiblePlaybookWorks()) {
-    logInfo('orchestration', 'ansible already installed, skipping setup')
-    await repointAnsibleCurrent()
-    return
+    logInfo("orchestration", "ansible already installed, skipping setup");
+    await repointAnsibleCurrent();
+    return;
   }
 
-  logInfo('orchestration', `creating venv at ${VENV_DIR}`)
+  logInfo("orchestration", `creating venv at ${VENV_DIR}`);
   // uv may need to fetch a managed Python interpreter here (UV_PYTHON_DOWNLOADS=automatic),
   // so this is a network operation too — retry the same transient blips as ensureUv().
   await withRetry(
-    () => runOrThrow(UV_BIN, ['venv', '--python', PYTHON_VERSION, VENV_DIR]),
-    { label: 'create ansible venv', attempts: 3 },
-  )
+    () => runOrThrow(UV_BIN, ["venv", "--python", PYTHON_VERSION, VENV_DIR]),
+    { label: "create ansible venv", attempts: 3 },
+  );
 
-  logInfo('orchestration', `installing packages from ${REQUIREMENTS_FILE}`)
+  logInfo("orchestration", `installing packages from ${REQUIREMENTS_FILE}`);
   await withRetry(
     () =>
       runOrThrow(UV_BIN, [
-        'pip',
-        'install',
-        '--python',
+        "pip",
+        "install",
+        "--python",
         VENV_DIR,
-        '--requirements',
+        "--requirements",
         REQUIREMENTS_FILE,
       ]),
-    { label: 'install ansible packages from PyPI', attempts: 3 },
-  )
+    { label: "install ansible packages from PyPI", attempts: 3 },
+  );
 
   if (!(await ansiblePlaybookWorks())) {
-    throw new Error('ansible install verification failed: ansible-playbook not runnable')
+    throw new Error(
+      "ansible install verification failed: ansible-playbook not runnable",
+    );
   }
-  await repointAnsibleCurrent()
-  logInfo('orchestration', 'ansible installed')
+  await repointAnsibleCurrent();
+  logInfo("orchestration", "ansible installed");
 }
 
 /**
@@ -190,13 +211,13 @@ export async function ensureAnsible(): Promise<void> {
  * daemon checkout so discovery does not depend on process cwd.
  */
 export function galaxyBootstrapRunContext(): {
-  cwd: string
-  env: Record<string, string>
+  cwd: string;
+  env: Record<string, string>;
 } {
   return {
     cwd: ANSIBLE_PLAYBOOK_CWD,
     env: ansibleEnv(),
-  }
+  };
 }
 
 /**
@@ -207,50 +228,73 @@ export function galaxyBootstrapRunContext(): {
  */
 export async function ensureGalaxyRoles(): Promise<void> {
   if (!(await ansiblePlaybookWorks())) {
-    throw new Error('ansible-galaxy requires a working ansible-playbook install')
+    throw new Error(
+      "ansible-galaxy requires a working ansible-playbook install",
+    );
   }
 
-  const stamp = await computeBootstrapStamp()
-  const storedStamp = await readBootstrapStamp()
+  const stamp = await computeBootstrapStamp();
+  const storedStamp = await readBootstrapStamp();
   if (storedStamp === stamp && await galaxyContentPresent()) {
-    logInfo('orchestration', 'galaxy content up to date, skipping install')
-    return
+    logInfo("orchestration", "galaxy content up to date, skipping install");
+    return;
   }
 
-  const galaxyBin = join(VENV_BIN_DIR, 'ansible-galaxy')
-  const galaxyRun = galaxyBootstrapRunContext()
-  await Deno.mkdir(ANSIBLE_HOME, { recursive: true })
+  const galaxyBin = join(VENV_BIN_DIR, "ansible-galaxy");
+  const galaxyRun = galaxyBootstrapRunContext();
+  await Deno.mkdir(ANSIBLE_HOME, { recursive: true });
 
-  logInfo('orchestration', `installing galaxy roles from ${GALAXY_REQUIREMENTS_FILE}`)
-  await withRetry(
-    () =>
-      runLogged(
-        galaxyBin,
-        ['role', 'install', '-r', GALAXY_REQUIREMENTS_FILE, '-p', GALAXY_ROLES_DIR],
-        { level: 'INFO', component: logComponent('ansible-galaxy'), ...galaxyRun },
-      ),
-    { label: 'install galaxy roles', attempts: 3 },
-  )
-  logInfo('orchestration', 'galaxy roles ready')
-
-  logInfo('orchestration', `installing galaxy collections from ${GALAXY_REQUIREMENTS_FILE}`)
+  logInfo(
+    "orchestration",
+    `installing galaxy roles from ${GALAXY_REQUIREMENTS_FILE}`,
+  );
   await withRetry(
     () =>
       runLogged(
         galaxyBin,
         [
-          'collection',
-          'install',
-          '-r',
+          "role",
+          "install",
+          "-r",
           GALAXY_REQUIREMENTS_FILE,
-          '-p',
+          "-p",
+          GALAXY_ROLES_DIR,
+        ],
+        {
+          level: "INFO",
+          component: logComponent("ansible-galaxy"),
+          ...galaxyRun,
+        },
+      ),
+    { label: "install galaxy roles", attempts: 3 },
+  );
+  logInfo("orchestration", "galaxy roles ready");
+
+  logInfo(
+    "orchestration",
+    `installing galaxy collections from ${GALAXY_REQUIREMENTS_FILE}`,
+  );
+  await withRetry(
+    () =>
+      runLogged(
+        galaxyBin,
+        [
+          "collection",
+          "install",
+          "-r",
+          GALAXY_REQUIREMENTS_FILE,
+          "-p",
           GALAXY_COLLECTIONS_DIR,
         ],
-        { level: 'INFO', component: logComponent('ansible-galaxy'), ...galaxyRun },
+        {
+          level: "INFO",
+          component: logComponent("ansible-galaxy"),
+          ...galaxyRun,
+        },
       ),
-    { label: 'install galaxy collections', attempts: 3 },
-  )
-  logInfo('orchestration', 'galaxy collections ready')
+    { label: "install galaxy collections", attempts: 3 },
+  );
+  logInfo("orchestration", "galaxy collections ready");
 }
 
 /**
@@ -263,7 +307,7 @@ export async function runLocalhostTest(
     onRawLine?: (stream: AnsibleRawLineStream, line: string) => void;
   },
 ): Promise<void> {
-  logInfo('orchestration', 'running localhost smoke-test playbook')
+  logInfo("orchestration", "running localhost smoke-test playbook");
   await runLocalPlaybook(
     LOCALHOST_PLAYBOOK,
     [],
@@ -271,75 +315,85 @@ export async function runLocalhostTest(
     undefined,
     opts?.quiet,
     opts?.onRawLine,
-  )
-  logInfo('orchestration', 'localhost smoke-test passed')
+  );
+  logInfo("orchestration", "localhost smoke-test passed");
 }
 
 /**
  * Single convergence playbook for daemon-only hosts (no co-located dev instance).
  */
-export async function runDaemonConverge(onEvent?: AnsibleEventHandler): Promise<void> {
-  const args = devInstanceExtraArgs()
-  logInfo('orchestration', 'running daemon-converge playbook')
-  await runLocalPlaybook(DAEMON_CONVERGE_PLAYBOOK, args, onEvent)
-  logInfo('orchestration', 'daemon-converge complete')
+export async function runDaemonConverge(
+  onEvent?: AnsibleEventHandler,
+): Promise<void> {
+  const args = devInstanceExtraArgs();
+  logInfo("orchestration", "running daemon-converge playbook");
+  await runLocalPlaybook(DAEMON_CONVERGE_PLAYBOOK, args, onEvent);
+  logInfo("orchestration", "daemon-converge complete");
 }
 
 /**
  * Create /run/turbopanel for TurboPanel Unix domain sockets and persist it
  * across reboots via systemd-tmpfiles.
  */
-export async function runSocketDirsSetup(onEvent?: AnsibleEventHandler): Promise<void> {
-  logInfo('orchestration', 'running socket-dirs-setup playbook')
-  await runLocalPlaybook(SOCKET_DIRS_PLAYBOOK, [], onEvent)
-  logInfo('orchestration', 'socket-dirs-setup complete')
+export async function runSocketDirsSetup(
+  onEvent?: AnsibleEventHandler,
+): Promise<void> {
+  logInfo("orchestration", "running socket-dirs-setup playbook");
+  await runLocalPlaybook(SOCKET_DIRS_PLAYBOOK, [], onEvent);
+  logInfo("orchestration", "socket-dirs-setup complete");
 }
 
 export async function runSetHostname(
   hostname: string,
   onEvent?: AnsibleEventHandler,
 ): Promise<{ summary: string }> {
-  logInfo('orchestration', 'running set-hostname playbook')
-  const collector = new AnsibleRunSummaryCollector()
+  logInfo("orchestration", "running set-hostname playbook");
+  const collector = new AnsibleRunSummaryCollector();
   const eventHandler: AnsibleEventHandler = (event) => {
-    collector.handleEvent(event)
-    onEvent?.(event)
-  }
+    collector.handleEvent(event);
+    onEvent?.(event);
+  };
   try {
     await runLocalPlaybook(
       SET_HOSTNAME_PLAYBOOK,
-      ['-e', `turbopanel_hostname=${hostname}`],
+      ["-e", `turbopanel_hostname=${hostname}`],
       eventHandler,
-    )
+    );
   } catch {
-    const summary = collector.build()
+    const summary = collector.build();
     throw new Error(
       summary.length > 0
         ? `set-hostname playbook failed: ${summary}`
-        : 'set-hostname playbook failed',
-    )
+        : "set-hostname playbook failed",
+    );
   }
-  logInfo('orchestration', 'set-hostname complete')
-  return { summary: collector.build() }
+  logInfo("orchestration", "set-hostname complete");
+  return { summary: collector.build() };
 }
 
 /**
  * Create /var/log/turbopanel/daemon.log and daemon.err.log for systemd append.
  */
-export async function runDaemonLogsSetup(onEvent?: AnsibleEventHandler): Promise<void> {
-  logInfo('orchestration', 'running daemon-logs-setup playbook')
-  await runLocalPlaybook(DAEMON_LOGS_PLAYBOOK, [], onEvent)
-  logInfo('orchestration', 'daemon-logs-setup complete')
+export async function runDaemonLogsSetup(
+  onEvent?: AnsibleEventHandler,
+): Promise<void> {
+  logInfo("orchestration", "running daemon-logs-setup playbook");
+  await runLocalPlaybook(DAEMON_LOGS_PLAYBOOK, [], onEvent);
+  logInfo("orchestration", "daemon-logs-setup complete");
 }
 
 async function coLocatedInstanceServiceEnabled(): Promise<boolean> {
   try {
-    const result = await run('systemctl', ['is-enabled', 'turbopanel-instance'], {
-      stream: false,
-    })
-    return result.success
+    const result = await run(
+      "systemctl",
+      ["is-enabled", "turbopanel-instance"],
+      {
+        stream: false,
+      },
+    );
+    return result.success;
   } catch {
-    return false
+    return false;
   }
 }
 
@@ -348,59 +402,63 @@ async function coLocatedInstanceServiceEnabled(): Promise<boolean> {
  * hosts with turbopanel-instance.service, the unit is ordered after the
  * instance stack.
  */
-export async function runDaemonSystemdSetup(onEvent?: AnsibleEventHandler): Promise<void> {
-  const afterInstance = await coLocatedInstanceServiceEnabled()
+export async function runDaemonSystemdSetup(
+  onEvent?: AnsibleEventHandler,
+): Promise<void> {
+  const afterInstance = await coLocatedInstanceServiceEnabled();
   logInfo(
-    'orchestration',
+    "orchestration",
     `running daemon-systemd-setup playbook (after_instance=${afterInstance})`,
-  )
+  );
   const args = [
-    '-i',
-    'localhost,',
-    '-c',
-    'local',
-    '-e',
+    "-i",
+    "localhost,",
+    "-c",
+    "local",
+    "-e",
     `turbopanel_after_instance_service=${afterInstance}`,
     DAEMON_SYSTEMD_PLAYBOOK,
-  ]
-  const cwd = ORCHESTRATION_DIR
+  ];
+  const cwd = ORCHESTRATION_DIR;
 
   await runPlaybookStreaming(ANSIBLE_PLAYBOOK_BIN, args, {
     cwd,
     env: ansibleEnv(),
     onEvent,
-  })
-  logInfo('orchestration', 'daemon-systemd-setup complete')
+  });
+  logInfo("orchestration", "daemon-systemd-setup complete");
 }
 
 /**
  * Convergence playbook for the co-located self-hosted instance + UI + Caddy.
  */
-export async function runInstanceDevInstall(onEvent?: AnsibleEventHandler): Promise<void> {
-  const instanceEnabled = await coLocatedInstanceServiceEnabled()
-  const convergeReason = await describeDevConvergeDecision(instanceEnabled)
+export async function runInstanceDevInstall(
+  onEvent?: AnsibleEventHandler,
+): Promise<void> {
+  const instanceEnabled = await coLocatedInstanceServiceEnabled();
+  const convergeReason = await describeDevConvergeDecision(instanceEnabled);
   if (await shouldSkipDevConverge(instanceEnabled)) {
     logInfo(
-      'orchestration',
+      "orchestration",
       `skipping instance-dev-install: ${convergeReason}`,
-    )
-    return
+    );
+    return;
   }
 
-  const layout = await requireDevOrchestrationLayout()
-  const args = devInstanceExtraArgs()
+  const layout = await requireDevOrchestrationLayout();
+  const args = devInstanceExtraArgs();
   logInfo(
-    'orchestration',
+    "orchestration",
     `running instance-dev-install converge playbook (${layout.playbookPath}): ${convergeReason}`,
-  )
+  );
   await runLocalPlaybook(
     layout.playbookPath,
     args,
     onEvent,
     devOrchestrationAnsibleEnv(layout),
-  )
-  await writeDevConvergeStamp(await computeDevConvergeStamp())
-  logInfo('orchestration', 'instance-dev-install complete')
+  );
+  await writeDevConvergeStamp(await computeDevConvergeStamp());
+  logInfo("orchestration", "instance-dev-install complete");
 }
 
 /**
@@ -408,63 +466,73 @@ export async function runInstanceDevInstall(onEvent?: AnsibleEventHandler): Prom
  */
 export async function runBuildToggle(
   opts: {
-    uiMode: 'dev' | 'static'
-    instanceRunMode: 'source' | 'compiled'
-    forceBuild?: boolean
+    uiMode: "dev" | "static";
+    instanceRunMode: "source" | "compiled";
+    forceBuild?: boolean;
   },
   onEvent?: AnsibleEventHandler,
 ): Promise<void> {
   const instanceRuntime =
-    Deno.env.get('TURBOPANEL_INSTANCE_RUNTIME') === 'workers' ? 'workers' : 'deno'
+    Deno.env.get("TURBOPANEL_INSTANCE_RUNTIME") === "workers"
+      ? "workers"
+      : "deno";
 
   const args = [
     ...devOwnershipPlaybookExtraArgs(),
-    '-e',
+    "-e",
     `turbopanel_ui_mode=${opts.uiMode}`,
-    '-e',
+    "-e",
     `turbopanel_instance_run_mode=${opts.instanceRunMode}`,
-    '-e',
+    "-e",
     `turbopanel_instance_runtime=${instanceRuntime}`,
-    '-e',
+    "-e",
     `force_build=${opts.forceBuild ?? false}`,
-    '-e',
+    "-e",
     `force_compile=${opts.forceBuild ?? false}`,
-  ]
+  ];
 
   logInfo(
-    'orchestration',
+    "orchestration",
     `running instance-build-toggle playbook (ui=${opts.uiMode}, instance=${opts.instanceRunMode})`,
-  )
-  await runLocalPlaybook(BUILD_TOGGLE_PLAYBOOK, args, onEvent)
-  logInfo('orchestration', 'instance-build-toggle complete')
+  );
+  await runLocalPlaybook(BUILD_TOGGLE_PLAYBOOK, args, onEvent);
+  logInfo("orchestration", "instance-build-toggle complete");
 }
 
 /** Install Docker and ensure turbopanel/dev users are in the docker group. */
-export async function runDockerSetup(onEvent?: AnsibleEventHandler): Promise<void> {
-  logInfo('orchestration', 'running docker-setup playbook')
-  await runLocalPlaybook(DOCKER_PLAYBOOK, devInstanceExtraArgs(), onEvent)
-  logInfo('orchestration', 'docker-setup complete')
+export async function runDockerSetup(
+  onEvent?: AnsibleEventHandler,
+): Promise<void> {
+  logInfo("orchestration", "running docker-setup playbook");
+  await runLocalPlaybook(DOCKER_PLAYBOOK, devInstanceExtraArgs(), onEvent);
+  logInfo("orchestration", "docker-setup complete");
 }
 
 /** Run PostgreSQL 18 in Docker (daemon-only hosts). */
-export async function runPostgresSetup(onEvent?: AnsibleEventHandler): Promise<void> {
-  logInfo('orchestration', 'running postgres-setup playbook')
-  await runLocalPlaybook(POSTGRES_PLAYBOOK, [], onEvent)
-  logInfo('orchestration', 'postgres-setup complete')
+export async function runPostgresSetup(
+  onEvent?: AnsibleEventHandler,
+): Promise<void> {
+  logInfo("orchestration", "running postgres-setup playbook");
+  await runLocalPlaybook(POSTGRES_PLAYBOOK, [], onEvent);
+  logInfo("orchestration", "postgres-setup complete");
 }
 
 /** Build and install Redis under runtimes/redis/current. */
-export async function runRedisSetup(onEvent?: AnsibleEventHandler): Promise<void> {
-  logInfo('orchestration', 'running redis-setup playbook')
-  await runLocalPlaybook(REDIS_PLAYBOOK, [], onEvent)
-  logInfo('orchestration', 'redis-setup complete')
+export async function runRedisSetup(
+  onEvent?: AnsibleEventHandler,
+): Promise<void> {
+  logInfo("orchestration", "running redis-setup playbook");
+  await runLocalPlaybook(REDIS_PLAYBOOK, [], onEvent);
+  logInfo("orchestration", "redis-setup complete");
 }
 
 /** Run RabbitMQ 4 with management plugin in Docker. */
-export async function runRabbitmqSetup(onEvent?: AnsibleEventHandler): Promise<void> {
-  logInfo('orchestration', 'running rabbitmq-setup playbook')
-  await runLocalPlaybook(RABBITMQ_PLAYBOOK, [], onEvent)
-  logInfo('orchestration', 'rabbitmq-setup complete')
+export async function runRabbitmqSetup(
+  onEvent?: AnsibleEventHandler,
+): Promise<void> {
+  logInfo("orchestration", "running rabbitmq-setup playbook");
+  await runLocalPlaybook(RABBITMQ_PLAYBOOK, [], onEvent);
+  logInfo("orchestration", "rabbitmq-setup complete");
 }
 
 /**
@@ -482,21 +550,24 @@ export async function runRabbitmqSetup(onEvent?: AnsibleEventHandler): Promise<v
  * was freshly installed. Writes the bootstrap stamp on success.
  */
 export async function bootstrapOrchestrationRuntime(): Promise<void> {
-  const stamp = await computeBootstrapStamp()
-  const previousStamp = await readBootstrapStamp()
-  const bootstrapInputsChanged = previousStamp !== stamp
-  const ansibleWasReady = await ansiblePlaybookWorks()
+  const stamp = await computeBootstrapStamp();
+  const previousStamp = await readBootstrapStamp();
+  const bootstrapInputsChanged = previousStamp !== stamp;
+  const ansibleWasReady = await ansiblePlaybookWorks();
 
-  await ensureAnsible()
-  const ansibleReinstalled = !ansibleWasReady
+  await ensureAnsible();
+  const ansibleReinstalled = !ansibleWasReady;
 
-  await ensureGalaxyRoles()
+  await ensureGalaxyRoles();
 
   if (bootstrapInputsChanged || ansibleReinstalled) {
-    await runLocalhostTest()
+    await runLocalhostTest();
   } else {
-    logInfo('orchestration', 'bootstrap inputs unchanged, skipping localhost smoke-test')
+    logInfo(
+      "orchestration",
+      "bootstrap inputs unchanged, skipping localhost smoke-test",
+    );
   }
 
-  await writeBootstrapStamp(stamp)
+  await writeBootstrapStamp(stamp);
 }

@@ -31,8 +31,8 @@ import { getBuildInfo } from "../build-info.ts";
 import { IdlePresence } from "./idle-presence.ts";
 import type { MetricsCollector } from "../metrics/collector/index.ts";
 import {
-  rebindMetricsScheduler,
   MetricsScheduler,
+  rebindMetricsScheduler,
 } from "../metrics/scheduler.ts";
 import { resolveUpdateChannelConfig } from "../update/config.ts";
 import { resolveUpdate } from "../update/resolver.ts";
@@ -334,7 +334,9 @@ export class InstanceClient {
   constructor(options: InstanceClientOptions = {}) {
     this.#config = options.config ?? resolveInstanceConfig();
     this.#httpClient = options.httpClient;
-    this.#initialBackoffMs = normalizeReconnectDelayMs(options.reconnectDelayMs);
+    this.#initialBackoffMs = normalizeReconnectDelayMs(
+      options.reconnectDelayMs,
+    );
     this.#maxBackoffMs = DEFAULT_MAX_BACKOFF_MS;
     this.#backoffMs = this.#initialBackoffMs;
     this.#onMessage = options.onMessage;
@@ -741,7 +743,9 @@ export class InstanceClient {
       }
     }
 
-    throw new Error("daemon identity bootstrap failed after stale identity retry");
+    throw new Error(
+      "daemon identity bootstrap failed after stale identity retry",
+    );
   }
 
   async #openDaemonWebSocket(jwt: string, serverId: string): Promise<void> {
@@ -801,7 +805,9 @@ export class InstanceClient {
     this.#hadStableSession = true;
     const connectedAt = Date.now();
     this.#idlePresence?.attach(ws);
-    this.#metricsScheduler?.attach(ws);
+    this.#metricsScheduler?.attach((sample) =>
+      this.#apiClient?.sendHostMetrics(sample) ?? Promise.resolve()
+    );
 
     ws.onmessage = (event) => {
       this.#idlePresence?.noteInboundActivity();
@@ -870,6 +876,8 @@ export class InstanceClient {
       // force-close it here so #runConnectLoop's close-event await resolves
       // and the normal reconnect/backoff path takes over. See idle-presence.ts.
       onStaleConnection: () => this.#closeActiveSocket(),
+      // Daemon-side max-lifetime backstop (mirrors instance MAX_WS_CONNECTION_AGE_MS).
+      onMaxAge: () => this.#closeActiveSocket(),
     });
   }
 
@@ -1173,7 +1181,12 @@ export class InstanceClient {
     // Long-running reconcile + restart runs here; the instance queues the request
     // and returns immediately — this path is decoupled from that HTTP lifecycle.
     if (this.#updateInstallInProgress) {
-      this.#sendUpdateResult(ws, message.id, false, "update already in progress");
+      this.#sendUpdateResult(
+        ws,
+        message.id,
+        false,
+        "update already in progress",
+      );
       return;
     }
 

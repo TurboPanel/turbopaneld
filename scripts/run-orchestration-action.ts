@@ -89,13 +89,17 @@ function devInstanceExtraArgs(): string[] {
   const devUser = Deno.env.get("TURBOPANEL_DEV_USER");
   const devUid = Deno.env.get("TURBOPANEL_DEV_UID");
   const devGid = Deno.env.get("TURBOPANEL_DEV_GID");
-  const uiMode = Deno.env.get("TURBOPANEL_UI_MODE") === "static" ? "static" : "dev";
-  const instanceRunMode = Deno.env.get("TURBOPANEL_INSTANCE_RUN_MODE") === "compiled"
-    ? "compiled"
-    : "source";
-  const instanceRuntime = Deno.env.get("TURBOPANEL_INSTANCE_RUNTIME") === "workers"
-    ? "workers"
-    : "deno";
+  const uiMode = Deno.env.get("TURBOPANEL_UI_MODE") === "static"
+    ? "static"
+    : "dev";
+  const instanceRunMode =
+    Deno.env.get("TURBOPANEL_INSTANCE_RUN_MODE") === "compiled"
+      ? "compiled"
+      : "source";
+  const instanceRuntime =
+    Deno.env.get("TURBOPANEL_INSTANCE_RUNTIME") === "workers"
+      ? "workers"
+      : "deno";
 
   const args: string[] = [
     "-e",

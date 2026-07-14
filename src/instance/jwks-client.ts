@@ -59,7 +59,9 @@ function decodePayloadClaims(
   if (claims.typ !== INSTANCE_JWT_TYP) {
     return { ok: false };
   }
-  if (typeof claims.exp !== "number" || claims.exp <= Math.floor(nowMs / 1000)) {
+  if (
+    typeof claims.exp !== "number" || claims.exp <= Math.floor(nowMs / 1000)
+  ) {
     return { ok: false };
   }
 
@@ -192,7 +194,10 @@ export class DaemonJwksClient {
 
       for (const entry of doc.keys) {
         const jwk = entry as JsonWebKey & { kid?: string };
-        if (jwk.kty !== "OKP" || jwk.crv !== "Ed25519" || typeof jwk.x !== "string") {
+        if (
+          jwk.kty !== "OKP" || jwk.crv !== "Ed25519" ||
+          typeof jwk.x !== "string"
+        ) {
           continue;
         }
         if (typeof jwk.kid !== "string" || jwk.kid.length === 0) {

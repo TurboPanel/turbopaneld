@@ -183,7 +183,9 @@ export function detectInstallMode(
   if (options.forceMode) return options.forceMode;
 
   const override = env.TURBOPANEL_DAEMON_ROOT?.trim();
-  if (override && !isCompiledStubRoot(override) && hasDaemonCheckout(override)) {
+  if (
+    override && !isCompiledStubRoot(override) && hasDaemonCheckout(override)
+  ) {
     return "development";
   }
 
@@ -337,7 +339,9 @@ export function resolveLayout(
           }
           return undefined;
         })());
-      if (checkoutRoot) return join(stripTrailingSlash(checkoutRoot), "orchestration");
+      if (checkoutRoot) {
+        return join(stripTrailingSlash(checkoutRoot), "orchestration");
+      }
       return join(daemonRootDefault, "orchestration");
     }
     return PROD_ORCHESTRATION_DIR_DEFAULT;

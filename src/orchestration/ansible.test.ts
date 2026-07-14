@@ -5,9 +5,7 @@ import {
   devOrchestrationAnsibleEnv,
   resolveDevOrchestrationLayout,
 } from "./dev-orchestration.ts";
-import {
-  setActiveInstallPresenter,
-} from "./install-presenter-context.ts";
+import { setActiveInstallPresenter } from "./install-presenter-context.ts";
 import { InstallPresenter } from "./install-presenter.ts";
 import { presentStatusLine } from "./presentation.ts";
 import {
@@ -37,7 +35,11 @@ function assertMatch(value: string, pattern: RegExp, label: string): void {
   }
 }
 
-function assertNotIn(value: Record<string, string>, key: string, label: string): void {
+function assertNotIn(
+  value: Record<string, string>,
+  key: string,
+  label: string,
+): void {
   if (key in value) {
     throw new Error(`${label}: did not expect ${key} to be set`);
   }

@@ -21,7 +21,9 @@ export function requireHttpsUrl(url: string, fieldName: string): void {
   try {
     parsed = new URL(url);
   } catch {
-    throw new MalformedManifestError(`${fieldName} must be a valid absolute URL`);
+    throw new MalformedManifestError(
+      `${fieldName} must be a valid absolute URL`,
+    );
   }
   if (parsed.protocol !== "https:") {
     throw new MalformedManifestError(`${fieldName} must use HTTPS`);
@@ -49,8 +51,10 @@ export function validateArtifactEntry(
     );
   }
 
-  if (typeof entry.size !== "number" || !Number.isFinite(entry.size) ||
-    entry.size <= 0) {
+  if (
+    typeof entry.size !== "number" || !Number.isFinite(entry.size) ||
+    entry.size <= 0
+  ) {
     throw new MalformedManifestError(
       `${fieldName} missing or invalid field: size`,
     );

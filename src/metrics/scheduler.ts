@@ -1,9 +1,10 @@
 /**
- * Independent host-metrics cadence on an attached daemon WebSocket.
+ * Independent host-metrics cadence via an injected async send sink.
  *
  * Observes no traffic and shares nothing with {@link IdlePresence}: normal WS
  * activity cannot suppress scheduled samples, and metrics never suppresses
- * the cell ping. Emits `{type:"metrics",…}` fire-and-forget on the socket.
+ * the cell ping. Emits fire-and-forget via the injected sink (authenticated
+ * HTTP), not the daemon WebSocket.
  *
  * Interval cadence is independent of collect latency: the steady timer is armed
  * when the jittered first tick fires, not after the first collect completes.
@@ -46,6 +47,9 @@ export function deterministicJitterMs(serverId: string, maxMs: number): number {
 }
 
 export type MetricsLogLevel = "info" | "warn";
+
+/** Async (or sync) sink that delivers a collected host-metrics sample. */
+export type MetricsSink = (sample: unknown) => Promise<void> | void;
 
 export type MetricsSchedulerOptions = {
   serverId: string;
@@ -119,7 +123,7 @@ export class MetricsScheduler {
   readonly #logRateLimitMs: number;
   readonly #onLog: (level: MetricsLogLevel, message: string) => void;
 
-  #ws: WebSocket | undefined;
+  #send: MetricsSink | undefined;
   #collector: MetricsCollector | undefined;
   #firstTimer: ReturnType<typeof setTimeout> | undefined;
   #intervalTimer: ReturnType<typeof setInterval> | undefined;
@@ -167,7 +171,7 @@ export class MetricsScheduler {
     this.#serverId = serverId;
   }
 
-  attach(ws: WebSocket): void {
+  attach(send: MetricsSink): void {
     this.detach();
     this.#attachGeneration += 1;
     const generation = this.#attachGeneration;
@@ -186,7 +190,7 @@ export class MetricsScheduler {
       return;
     }
 
-    this.#ws = ws;
+    this.#send = send;
     this.#collector = collector;
     this.#unsupportedStopped = false;
 
@@ -195,17 +199,17 @@ export class MetricsScheduler {
       this.#firstTimer = undefined;
       // Arm the steady interval immediately so cadence tracks the jittered
       // schedule, not first-collect completion latency.
-      void this.#emit(generation, ws);
-      this.#armInterval(generation, ws);
+      void this.#emit(generation, send);
+      this.#armInterval(generation, send);
     }, jitterMs);
   }
 
-  #armInterval(generation: number, ws: WebSocket): void {
+  #armInterval(generation: number, send: MetricsSink): void {
     if (generation !== this.#attachGeneration) return;
-    if (this.#unsupportedStopped || this.#ws !== ws) return;
+    if (this.#unsupportedStopped || this.#send !== send) return;
     if (this.#intervalTimer !== undefined) return;
     this.#intervalTimer = this.#setIntervalFn(() => {
-      void this.#emit(generation, ws);
+      void this.#emit(generation, send);
     }, this.#intervalMs);
   }
 
@@ -219,14 +223,13 @@ export class MetricsScheduler {
       this.#clearIntervalFn(this.#intervalTimer);
       this.#intervalTimer = undefined;
     }
-    this.#ws = undefined;
+    this.#send = undefined;
     this.#collector = undefined;
   }
 
-  async #emit(generation: number, ws: WebSocket): Promise<void> {
+  async #emit(generation: number, send: MetricsSink): Promise<void> {
     if (generation !== this.#attachGeneration) return;
     if (this.#unsupportedStopped) return;
-    if (ws.readyState !== WebSocket.OPEN) return;
     // Drop overlapping ticks — do not queue a backlog of collects.
     if (this.#activeEmitGeneration === generation) return;
 
@@ -266,10 +269,10 @@ export class MetricsScheduler {
         return;
       }
 
-      if (this.#ws !== ws || ws.readyState !== WebSocket.OPEN) return;
+      if (this.#send !== send) return;
 
       try {
-        ws.send(JSON.stringify(result.sample));
+        await send(result.sample);
       } catch (err) {
         this.#logRateLimited(
           "send",

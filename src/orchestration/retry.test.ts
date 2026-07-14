@@ -31,7 +31,10 @@ Deno.test("withRetry throws the last error once attempts are exhausted", async (
     }, { label: "test op", attempts: 3, baseDelayMs: 1, maxDelayMs: 1 });
     throw new Error("expected withRetry to throw");
   } catch (err) {
-    assertEquals(err instanceof Error ? err.message : String(err), "always fails 3");
+    assertEquals(
+      err instanceof Error ? err.message : String(err),
+      "always fails 3",
+    );
   }
   assertEquals(calls, 3);
 });

@@ -11,9 +11,9 @@ import { readProcFile } from "./proc-read.ts";
 import { statfs } from "node:fs/promises";
 import type {
   CollectorDeps,
-  StatfsResult,
   MetricsCollector,
   MetricsCollectResult,
+  StatfsResult,
 } from "./types.ts";
 
 export type {
@@ -21,12 +21,12 @@ export type {
   CpuCounters,
   DiskCounters,
   DiskDeviceCounters,
+  MetricsCollector,
+  MetricsCollectResult,
   NetCounters,
   NetInterfaceCounters,
   RawSnapshot,
   StatfsResult,
-  MetricsCollectResult,
-  MetricsCollector,
 } from "./types.ts";
 
 export { LinuxMetricsCollector } from "./linux-collector.ts";

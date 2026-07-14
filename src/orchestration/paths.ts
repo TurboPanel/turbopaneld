@@ -1,9 +1,5 @@
 import { dirname, join } from "@std/path";
-import {
-  readEnv,
-  resolveDaemonRoot,
-  resolveLayout,
-} from "../paths/layout.ts";
+import { readEnv, resolveDaemonRoot, resolveLayout } from "../paths/layout.ts";
 
 export {
   DaemonSourceRootError,
