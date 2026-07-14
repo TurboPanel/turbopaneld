@@ -1,12 +1,24 @@
-# Dev-only Tabix container: a static browser client for the ClickHouse metrics DB.
+# Dev-only Tabix: static browser client for the ClickHouse metrics DB.
 # Not routed through Caddy — loopback port only. The browser talks to ClickHouse
 # cross-origin over 127.0.0.1:{{ clickhouse_http_port }}, prefilled to the
 # least-privilege {{ clickhouse_app_user }} (the default admin is
 # <networks>-restricted to loopback and only reachable via docker exec).
+#
+# Runtime image is multi-arch nginx-unprivileged. Assets come from the upstream
+# spoonest image via `docker create` + `docker cp` (no exec — that image is
+# amd64-only and crashes with "exec format error" on arm64).
 
 - name: Ensure tabix config directory exists
   ansible.builtin.file:
     path: "{{ turbopanel_config_dir }}/tabix"
+    state: directory
+    owner: "{{ tabix_config_owner }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
+- name: Ensure tabix HTML directory exists
+  ansible.builtin.file:
+    path: "{{ tabix_html_dir }}"
     state: directory
     owner: "{{ tabix_config_owner }}"
     group: "{{ turbopanel_group }}"
@@ -42,6 +54,76 @@
     _tabix_ch_app_password: "{{ _tabix_ch_app_pass_raw.content | b64decode | trim }}"
   no_log: true
 
+- name: Check whether Tabix static assets are present
+  ansible.builtin.stat:
+    path: "{{ tabix_html_dir }}/index.html.orig"
+  register: _tabix_assets_stat
+
+- name: Pull Tabix assets image (amd64 metadata only; not executed)
+  ansible.builtin.command:
+    argv: [docker, pull, "--platform", "linux/amd64", "{{ tabix_assets_image }}"]
+  when: not _tabix_assets_stat.stat.exists
+  register: _tabix_assets_pull
+  changed_when: "'Downloaded newer image' in (_tabix_assets_pull.stdout | default('')) or 'Pull complete' in (_tabix_assets_pull.stdout | default(''))"
+
+- name: Extract Tabix static assets from upstream image
+  args:
+    executable: /bin/bash
+  ansible.builtin.shell: |
+    set -euo pipefail
+    cid=""
+    tmp=""
+    cleanup() {
+      if [ -n "${cid}" ]; then docker rm -f "${cid}" >/dev/null 2>&1 || true; fi
+      if [ -n "${tmp}" ]; then rm -rf "${tmp}"; fi
+    }
+    trap cleanup EXIT
+    cid="$(docker create --platform linux/amd64 "{{ tabix_assets_image }}")"
+    tmp="$(mktemp -d)"
+    docker cp "${cid}:/var/www/html/." "${tmp}/"
+    # Preserve a pristine index for idempotent connection-script injection.
+    cp -a "${tmp}/index.html" "${tmp}/index.html.orig"
+    rm -rf "{{ tabix_html_dir }}"
+    mkdir -p "{{ tabix_html_dir }}"
+    cp -a "${tmp}"/. "{{ tabix_html_dir }}/"
+    chown -R "{{ tabix_config_owner }}:{{ turbopanel_group }}" "{{ tabix_html_dir }}"
+    chmod -R u=rwX,g=rX,o= "{{ tabix_html_dir }}"
+  when: not _tabix_assets_stat.stat.exists
+  register: _tabix_assets_extracted
+  changed_when: true
+
+- name: Install Tabix index inject helper
+  ansible.builtin.copy:
+    src: inject-tabix-index.py
+    dest: "{{ turbopanel_config_dir }}/tabix/inject-tabix-index.py"
+    owner: "{{ tabix_config_owner }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
+- name: Inject ClickHouse connection defaults into Tabix index.html
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ turbopanel_config_dir }}/tabix/inject-tabix-index.py"
+  environment:
+    TABIX_INDEX_ORIG: "{{ tabix_html_dir }}/index.html.orig"
+    TABIX_INDEX_DEST: "{{ tabix_html_dir }}/index.html"
+    TABIX_CH_NAME: "{{ tabix_ch_name }}"
+    TABIX_CH_HOST: "{{ tabix_ch_host }}"
+    TABIX_CH_LOGIN: "{{ clickhouse_app_user }}"
+    TABIX_CH_SECRET: "{{ _tabix_ch_app_password }}"
+    TABIX_CH_PARAMS: "{{ tabix_ch_params }}"
+  no_log: true
+  register: _tabix_index_injected
+  changed_when: true
+
+- name: Restrict Tabix index.html permissions after inject
+  ansible.builtin.file:
+    path: "{{ tabix_html_dir }}/index.html"
+    owner: "{{ tabix_config_owner }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+
 - name: Inspect tabix container
   ansible.builtin.command:
     argv: [docker, inspect, "{{ tabix_container_name }}"]
@@ -61,13 +143,14 @@
     _tabix_status: "{{ _tabix_container.State.Status | default('') }}"
     _tabix_network_ok: "{{ turbopanel_docker_network in (_tabix_container.NetworkSettings.Networks | default({})) }}"
     _tabix_web_ok: >-
-      {{ (_tabix_container.HostConfig.PortBindings['80/tcp'] | default([]) | length > 0)
-         and ((_tabix_container.HostConfig.PortBindings['80/tcp'] | first).HostIp | default('')) == '127.0.0.1'
-         and ((_tabix_container.HostConfig.PortBindings['80/tcp'] | first).HostPort | default('')) == (tabix_web_port | string) }}
-    _tabix_preconfig_ok: >-
-      {{ (('CH_HOST=' ~ tabix_ch_host) in (_tabix_container.Config.Env | default([])))
-         and (('CH_LOGIN=' ~ clickhouse_app_user) in (_tabix_container.Config.Env | default([])))
-         and (('CH_PARAMS=' ~ tabix_ch_params) in (_tabix_container.Config.Env | default([]))) }}
+      {{ (_tabix_container.HostConfig.PortBindings[(tabix_container_port | string ~ '/tcp')] | default([]) | length > 0)
+         and ((_tabix_container.HostConfig.PortBindings[(tabix_container_port | string ~ '/tcp')] | first).HostIp | default('')) == '127.0.0.1'
+         and ((_tabix_container.HostConfig.PortBindings[(tabix_container_port | string ~ '/tcp')] | first).HostPort | default('')) == (tabix_web_port | string) }}
+    _tabix_html_mount_ok: >-
+      {{ _tabix_container.Mounts | default([])
+         | selectattr('Destination', 'equalto', '/usr/share/nginx/html')
+         | list | length > 0 }}
+    _tabix_image_ok: "{{ (_tabix_container.Config.Image | default('')) == tabix_image }}"
     _tabix_user_ok: >-
       {{ (_tabix_container.Config.User | default(''))
          == (tabix_container_uid | string ~ ':' ~ tabix_container_gid | string
@@ -80,12 +163,18 @@
     _tabix_running: false
   when: _tabix_inspect_cmd.rc != 0
 
-- name: Remove tabix container when unhealthy
+- name: Remove tabix container when unhealthy or drifted
   ansible.builtin.command:
     cmd: docker rm -f {{ tabix_container_name }}
   when:
     - _tabix_container_exists | bool
-    - (not _tabix_network_ok | bool) or (not _tabix_web_ok | bool) or (not _tabix_preconfig_ok | bool) or (not _tabix_user_ok | bool) or (_tabix_status | trim in ['restarting', 'exited', 'dead'])
+    - >-
+      (not _tabix_network_ok | bool)
+      or (not _tabix_web_ok | bool)
+      or (not _tabix_html_mount_ok | bool)
+      or (not _tabix_image_ok | bool)
+      or (not _tabix_user_ok | bool)
+      or (_tabix_status | trim in ['restarting', 'exited', 'dead'])
   register: _tabix_removed
   changed_when: _tabix_removed.rc == 0
 
@@ -95,13 +184,11 @@
     _tabix_running: false
   when: _tabix_removed is changed
 
-# Dev runs the container as the single dev uid:gid (matching redis-insight/mailpit);
-# managed installs omit --user. Modern Docker sets ip_unprivileged_port_start=0 for
-# containers, so the internal web server binds port 80 fine as a non-root user.
+# Dev runs nginx-unprivileged as the single dev uid:gid (matching redis-insight/mailpit).
+# Container listens on 8080; host publish stays 127.0.0.1:{{ tabix_web_port }}.
 - name: Build tabix docker run argument list
   ansible.builtin.set_fact:
-    _tabix_docker_run_args: "{{ _tabix_docker_run_base + (_tabix_docker_user if (turbopanel_dev_user | default('') | length > 0) else []) + _tabix_docker_run_env + [tabix_image] }}"
-  no_log: true
+    _tabix_docker_run_args: "{{ _tabix_docker_run_base + (_tabix_docker_user if (turbopanel_dev_user | default('') | length > 0) else []) + [tabix_image] }}"
   vars:
     _tabix_docker_run_base:
       - docker
@@ -114,18 +201,9 @@
       - "--network"
       - "{{ turbopanel_docker_network }}"
       - "-p"
-      - "127.0.0.1:{{ tabix_web_port }}:80"
-    _tabix_docker_run_env:
-      - "-e"
-      - "CH_NAME={{ tabix_ch_name }}"
-      - "-e"
-      - "CH_HOST={{ tabix_ch_host }}"
-      - "-e"
-      - "CH_LOGIN={{ clickhouse_app_user }}"
-      - "-e"
-      - "CH_PASSWORD={{ _tabix_ch_app_password }}"
-      - "-e"
-      - "CH_PARAMS={{ tabix_ch_params }}"
+      - "127.0.0.1:{{ tabix_web_port }}:{{ tabix_container_port }}"
+      - "-v"
+      - "{{ tabix_html_dir }}:/usr/share/nginx/html:ro"
     _tabix_docker_user:
       - "--user"
       - "{{ tabix_container_uid }}:{{ tabix_container_gid }}"
@@ -134,7 +212,6 @@
   ansible.builtin.command:
     cmd: "{{ _tabix_docker_run_args | join(' ') }}"
   when: not _tabix_container_exists | bool
-  no_log: true
 
 - name: Install tabix wrapper start script
   ansible.builtin.template:

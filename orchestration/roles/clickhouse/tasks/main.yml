@@ -125,7 +125,7 @@
   changed_when: false
   failed_when: false
 
-- name: Ensure turbopanelch Docker volume exists
+- name: Ensure turbopanela Docker volume exists
   ansible.builtin.command:
     argv: [docker, volume, create, "{{ clickhouse_volume_name }}"]
   register: _ch_volume_create

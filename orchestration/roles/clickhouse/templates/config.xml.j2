@@ -60,6 +60,15 @@
     <merge_tree>
         <!-- Stop the constant merge-selector wakeups when there is nothing to merge. -->
         <merge_selecting_sleep_ms>30000</merge_selecting_sleep_ms>
+        <!--
+          ClickHouse 26.x refuses to start when these defaults (20 / 8 / 25) exceed
+          background_pool_size * background_merges_mutations_concurrency_ratio
+          (2 * 1 = 2 above). Keep each threshold ≤ that product so idle-CPU pool
+          shrinks stay valid.
+        -->
+        <number_of_free_entries_in_pool_to_execute_mutation>1</number_of_free_entries_in_pool_to_execute_mutation>
+        <number_of_free_entries_in_pool_to_lower_max_size_of_merge>1</number_of_free_entries_in_pool_to_lower_max_size_of_merge>
+        <number_of_free_entries_in_pool_to_execute_optimize_entire_partition>1</number_of_free_entries_in_pool_to_execute_optimize_entire_partition>
     </merge_tree>
 
     <query_log remove="remove"/>

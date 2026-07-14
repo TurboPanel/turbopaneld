@@ -8,8 +8,8 @@ clickhouse_service_name: turbopanel-clickhouse
 # Docker model (mirrors postgres/rabbitmq): official image, named volume, and the
 # shared turbopanel bridge network.
 clickhouse_image: "clickhouse/clickhouse-server:{{ clickhouse_version }}"
-clickhouse_container_name: turbopanelch
-clickhouse_volume_name: turbopanelch
+clickhouse_container_name: turbopanela
+clickhouse_volume_name: turbopanela
 turbopanel_docker_network: turbopanel
 # Shared dev-identity contract: dev runs the container (and owns its secret files)
 # as the single dev uid:gid; managed installs use the reserved 9994 container id
