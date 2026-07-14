@@ -16,9 +16,12 @@
   - mark_cache_size = 536870912 (512 MiB) — enough for MergeTree mark cache on
     metrics volumes without claiming multi-GB by default.
 
-  Idle-CPU tuning (single otherwise-idle server): slow the async-metrics cadence
-  and shrink the always-awake background merge/schedule pools so an idle box does
-  not spin the CPU.
+  Idle-CPU tuning (single otherwise-idle server): slow the async-metrics cadence,
+  shrink always-awake background merge/schedule pools, cap the global thread pool
+  and idle retention (max_thread_pool_size / max_thread_pool_free_size /
+  thread_pool_queue_size), shrink eager-spawn schedule/move/fetch pools unused by
+  the metrics-only workload, and disable the full ClickHouse 26.x system *_log
+  MergeTree set so idle boxes do not keep ~100+ warm threads.
 -->
 <clickhouse>
     <logger>
@@ -53,7 +56,17 @@
     <background_schedule_pool_size>2</background_schedule_pool_size>
     <background_common_pool_size>2</background_common_pool_size>
     <background_merges_mutations_concurrency_ratio>1</background_merges_mutations_concurrency_ratio>
-    <max_thread_pool_size>1000</max_thread_pool_size>
+    <!-- Global thread pool: keep the ceiling low and do not retain ~1000 idle threads. -->
+    <max_thread_pool_size>64</max_thread_pool_size>
+    <max_thread_pool_free_size>8</max_thread_pool_free_size>
+    <thread_pool_queue_size>64</thread_pool_queue_size>
+    <!-- Eager-spawn schedule pools (spawn full count at startup; unused by metrics). -->
+    <background_message_broker_schedule_pool_size>1</background_message_broker_schedule_pool_size>
+    <background_distributed_schedule_pool_size>1</background_distributed_schedule_pool_size>
+    <background_buffer_flush_schedule_pool_size>1</background_buffer_flush_schedule_pool_size>
+    <!-- On-demand background pools: cap ceiling (no tiered storage / replication). -->
+    <background_move_pool_size>1</background_move_pool_size>
+    <background_fetches_pool_size>1</background_fetches_pool_size>
     <tables_loader_foreground_pool_size>2</tables_loader_foreground_pool_size>
     <tables_loader_background_pool_size>2</tables_loader_background_pool_size>
 
@@ -71,6 +84,7 @@
         <number_of_free_entries_in_pool_to_execute_optimize_entire_partition>1</number_of_free_entries_in_pool_to_execute_optimize_entire_partition>
     </merge_tree>
 
+    <!-- Disable system *_log MergeTree tables (each adds flush + merge scheduler threads). -->
     <query_log remove="remove"/>
     <trace_log remove="remove"/>
     <metric_log remove="remove"/>
@@ -78,6 +92,24 @@
     <session_log remove="remove"/>
     <part_log remove="remove"/>
     <text_log remove="remove"/>
+    <error_log remove="remove"/>
+    <crash_log remove="remove"/>
+    <query_thread_log remove="remove"/>
+    <query_views_log remove="remove"/>
+    <query_metric_log remove="remove"/>
+    <processors_profile_log remove="remove"/>
+    <latency_log remove="remove"/>
+    <backup_log remove="remove"/>
+    <asynchronous_insert_log remove="remove"/>
+    <opentelemetry_span_log remove="remove"/>
+    <blob_storage_log remove="remove"/>
+    <filesystem_cache_log remove="remove"/>
+    <filesystem_read_prefetches_log remove="remove"/>
+    <s3queue_log remove="remove"/>
+    <background_schedule_pool_log remove="remove"/>
+    <zookeeper_log remove="remove"/>
+    <zookeeper_connection_log remove="remove"/>
+    <aggregated_zookeeper_log remove="remove"/>
 {% if turbopanel_dev_user | default('') | length > 0 %}
     <!--
       Dev-only CORS preflight response for the loopback Tabix browser client
