@@ -1,5 +1,5 @@
 mailpit_image: axllent/mailpit:latest
-mailpit_container_name: turbopanelmailpit
+mailpit_container_name: turbopanel-dev-mailpit
 mailpit_service_name: turbopanel-mailpit
 mailpit_web_port: 8025
 mailpit_smtp_port: 1025

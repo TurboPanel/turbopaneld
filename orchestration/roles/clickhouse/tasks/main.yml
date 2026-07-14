@@ -37,18 +37,11 @@
   ansible.builtin.shell:
     cmd: |
       set -euo pipefail
-      dir='{{ turbopanel_config_dir }}/clickhouse'
-      admin="$dir/.clickhouse_admin_pass"
-      legacy="$dir/.clickhouse_pass"
+      admin='{{ turbopanel_config_dir }}/clickhouse/.clickhouse_admin_pass'
       if [ ! -s "$admin" ]; then
-        if [ -s "$legacy" ]; then
-          # Migrate shared legacy secret to admin-only; app gets a new password below.
-          cp -a "$legacy" "$admin"
-        else
-          openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 32 > "$admin"
-          chmod 0600 "$admin"
-          chown {{ clickhouse_config_owner }}:{{ turbopanel_group }} "$admin"
-        fi
+        openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 32 > "$admin"
+        chmod 0600 "$admin"
+        chown {{ clickhouse_config_owner }}:{{ turbopanel_group }} "$admin"
         echo created
       fi
     executable: /bin/bash
@@ -125,7 +118,7 @@
   changed_when: false
   failed_when: false
 
-- name: Ensure turbopanela Docker volume exists
+- name: Ensure turbopanel-analytics Docker volume exists
   ansible.builtin.command:
     argv: [docker, volume, create, "{{ clickhouse_volume_name }}"]
   register: _ch_volume_create
@@ -283,35 +276,6 @@
 - name: Ensure clickhouse container is running and ready
   ansible.builtin.command:
     cmd: "{{ turbopanel_config_dir }}/clickhouse/wrapper-start.sh"
-  changed_when: false
-
-# Admin-owned destructive migration: drop retired raw/rollup/MV objects and any
-# legacy snake_case layout. Metrics is disposable — instance runtime must never
-# run DROP DDL with the app user.
-- name: Drop legacy ClickHouse metrics schema objects (admin migration)
-  args:
-    executable: /bin/bash
-  ansible.builtin.shell: |
-    set -euo pipefail
-    docker exec -i {{ clickhouse_container_name }} clickhouse-client \
-      --user default --password '{{ _clickhouse_admin_password }}' --multiquery <<'EOSQL'
-    DROP VIEW IF EXISTS host_metrics_mv_5m;
-    DROP VIEW IF EXISTS host_metrics_mv_1h;
-    DROP VIEW IF EXISTS host_metrics_mv_1d;
-    DROP TABLE IF EXISTS host_metrics_rollup_5m;
-    DROP TABLE IF EXISTS host_metrics_rollup_1h;
-    DROP TABLE IF EXISTS host_metrics_rollup_1d;
-    DROP TABLE IF EXISTS host_metrics_raw;
-    EOSQL
-    if docker exec -i {{ clickhouse_container_name }} clickhouse-client \
-      --user default --password '{{ _clickhouse_admin_password }}' --query \
-      "SELECT count() FROM system.columns WHERE database = '{{ clickhouse_database }}' AND table = 'turbopanel_server_metrics' AND name = 'server_id'" \
-      | grep -q '^1$'; then
-      docker exec -i {{ clickhouse_container_name }} clickhouse-client \
-        --user default --password '{{ _clickhouse_admin_password }}' --database {{ clickhouse_database }} --query \
-        'DROP TABLE IF EXISTS turbopanel_server_metrics'
-    fi
-  no_log: true
   changed_when: false
 
 - name: Install ClickHouse systemd unit

@@ -60,7 +60,7 @@
   changed_when: false
   failed_when: false
 
-- name: Ensure turbopanelq Docker volume exists
+- name: Ensure turbopanel-queue Docker volume exists
   ansible.builtin.command:
     argv: [docker, volume, create, "{{ rabbitmq_volume_name }}"]
   register: _rmq_volume_create

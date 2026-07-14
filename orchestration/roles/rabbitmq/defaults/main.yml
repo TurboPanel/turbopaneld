@@ -1,10 +1,10 @@
 rabbitmq_image: rabbitmq:4-management
-rabbitmq_container_name: turbopanelq
+rabbitmq_container_name: turbopanel-queue
 rabbitmq_amqp_port: 5672
 rabbitmq_mgmt_port: 15672
 rabbitmq_expose_amqp_port: false
 rabbitmq_expose_mgmt_port: true
-rabbitmq_volume_name: turbopanelq
+rabbitmq_volume_name: turbopanel-queue
 turbopanel_docker_network: turbopanel
 rabbitmq_user: turbopanel
 rabbitmq_vhost: /

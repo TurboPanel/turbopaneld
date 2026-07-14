@@ -1,10 +1,10 @@
 redis_insight_image: redis/redisinsight:latest
-redis_insight_container_name: turbopanelredisinsight
-redis_insight_volume_name: turbopanelredisinsight
+redis_insight_container_name: turbopanel-dev-redis-insight
+redis_insight_volume_name: turbopanel-dev-redis-insight
 redis_insight_service_name: turbopanel-redis-insight
 redis_insight_web_port: 5540
 # TCP bridge (socat) so Redis Insight can reach the host Unix socket via RI_REDIS_* env vars.
-redis_insight_bridge_container_name: turbopanelredisinsight-bridge
+redis_insight_bridge_container_name: turbopanel-dev-redis-insight-bridge
 redis_insight_socat_image: alpine/socat
 redis_insight_bridge_port: 6379
 redis_insight_redis_alias: turbopanel-dev-cache

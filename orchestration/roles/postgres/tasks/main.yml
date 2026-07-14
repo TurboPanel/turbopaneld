@@ -61,7 +61,7 @@
   changed_when: false
   failed_when: false
 
-- name: Ensure turbopaneldb Docker volume exists
+- name: Ensure turbopanel-database Docker volume exists
   ansible.builtin.command:
     argv: [docker, volume, create, "{{ postgres_volume_name }}"]
   register: _pg_volume_create

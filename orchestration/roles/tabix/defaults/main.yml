@@ -3,7 +3,7 @@
 # serve them with nginx-unprivileged (listens on 8080 as a non-root user).
 tabix_image: nginxinc/nginx-unprivileged:alpine
 tabix_assets_image: spoonest/clickhouse-tabix-web-client:latest
-tabix_container_name: turbopaneltabix
+tabix_container_name: turbopanel-dev-tablix
 tabix_service_name: turbopanel-tabix
 tabix_web_port: 8125
 tabix_container_port: 8080
