@@ -195,10 +195,11 @@ const PLATFORM_SCAN_ALLOWLIST = new Set([
   "orchestration/roles/mailpit/defaults/main.yml",
 ]);
 
-// `share/ansible` is retired everywhere (production ships share/orchestration).
+// TurboPanel's `share/ansible` is retired (production ships share/orchestration).
+// Do not flag Ansible's system collections path `/usr/share/ansible/…`.
 // The release verifiers and this checker legitimately name the retired path in
 // order to *reject* it, so they are allowlisted from the scan.
-const ANSIBLE_SHARE_REF = /share\/ansible(\/|\b)/;
+const ANSIBLE_SHARE_REF = /(?<!\/usr\/)share\/ansible(\/|\b)/;
 const ANSIBLE_SCAN_ALLOWLIST = new Set([
   "scripts/lib/release-artifacts.sh",
   "scripts/verify-release-root.sh",
