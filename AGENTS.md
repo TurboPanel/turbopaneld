@@ -26,6 +26,25 @@ section); link there instead of duplicating DO hibernation detail.
 - Extract helpers when **cognitive complexity** exceeds 15 (`typescript:S3776`).
 - Add **`// NOSONAR rule-key — reason`** for intentional read-only `/tmp`
   path-prefix checks (`typescript:S5443`).
+- Deno tests: Sonar `typescript:S2187` only recognizes `test()` / `it()` /
+  `describe()`, not `Deno.test`. **Every `*.test.ts` file MUST** use BDD
+  (`import { describe, it } from '@std/testing/bdd'`) or the canonical alias —
+  never leave a bare `Deno.test(` in a test file. Place the alias once, right
+  after the imports, and call `test('...', …)` (or the object form
+  `test({ name, fn })`):
+
+  ```ts
+  /**
+   * Jest/Mocha-shaped alias for {@link Deno.test}.
+   *
+   * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+   * reports Deno suites as empty; keep this alias so analysis sees real tests.
+   */
+  const test = Deno.test.bind(Deno)
+  ```
+
+  When adding a new Deno test file, add this alias from the start. Applied to
+  every existing Deno test file in this repo and `../instance`.
 
 ### Ansible style (SonarQube)
 

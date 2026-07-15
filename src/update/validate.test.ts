@@ -7,7 +7,15 @@ import {
   validateArtifactEntry,
 } from "./validate.ts";
 
-Deno.test("requireHttpsUrl rejects non-HTTPS URLs", () => {
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno)
+
+test("requireHttpsUrl rejects non-HTTPS URLs", () => {
   assertThrows(
     () => requireHttpsUrl("http://example.com/file.tar.zst", "artifact.url"),
     MalformedManifestError,
@@ -15,7 +23,7 @@ Deno.test("requireHttpsUrl rejects non-HTTPS URLs", () => {
   );
 });
 
-Deno.test("validateArtifactEntry requires HTTPS url, sha256, and positive size", () => {
+test("validateArtifactEntry requires HTTPS url, sha256, and positive size", () => {
   assertEquals(
     validateArtifactEntry({
       url: "https://dl.trbp.nl/channels/trunk/daemon/linux-amd64.tar.zst",
@@ -63,7 +71,7 @@ Deno.test("validateArtifactEntry requires HTTPS url, sha256, and positive size",
   );
 });
 
-Deno.test("parseRootCatalog validates manifestUrl is HTTPS", () => {
+test("parseRootCatalog validates manifestUrl is HTTPS", () => {
   assertThrows(
     () =>
       parseRootCatalog({
@@ -80,7 +88,7 @@ Deno.test("parseRootCatalog validates manifestUrl is HTTPS", () => {
   );
 });
 
-Deno.test("parseChannelManifest validates artifact entries", () => {
+test("parseChannelManifest validates artifact entries", () => {
   const manifest = parseChannelManifest({
     schema: 1,
     channel: "trunk",

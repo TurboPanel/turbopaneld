@@ -1,7 +1,15 @@
 import { assertEquals } from "jsr:@std/assert";
 import { withRetry } from "./retry.ts";
 
-Deno.test("withRetry returns the first successful result without retrying", async () => {
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno)
+
+test("withRetry returns the first successful result without retrying", async () => {
   let calls = 0;
   const result = await withRetry(async () => {
     calls++;
@@ -11,7 +19,7 @@ Deno.test("withRetry returns the first successful result without retrying", asyn
   assertEquals(calls, 1);
 });
 
-Deno.test("withRetry retries transient failures and eventually succeeds", async () => {
+test("withRetry retries transient failures and eventually succeeds", async () => {
   let calls = 0;
   const result = await withRetry(async (attempt) => {
     calls++;
@@ -22,7 +30,7 @@ Deno.test("withRetry retries transient failures and eventually succeeds", async 
   assertEquals(calls, 3);
 });
 
-Deno.test("withRetry throws the last error once attempts are exhausted", async () => {
+test("withRetry throws the last error once attempts are exhausted", async () => {
   let calls = 0;
   try {
     await withRetry(async (attempt) => {

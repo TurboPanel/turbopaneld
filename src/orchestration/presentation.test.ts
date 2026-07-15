@@ -29,7 +29,15 @@ function assertNoForbiddenTokens(text: string, label: string): void {
   }
 }
 
-Deno.test("logComponent preserves vendor names when presenter is inactive", () => {
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno)
+
+test("logComponent preserves vendor names when presenter is inactive", () => {
   setActiveInstallPresenter(null);
   assertEquals(logComponent("ansible"), "ansible");
   assertEquals(logComponent("ansible-galaxy"), "ansible-galaxy");
@@ -37,7 +45,7 @@ Deno.test("logComponent preserves vendor names when presenter is inactive", () =
   assertEquals(logComponent("python"), "python");
 });
 
-Deno.test("logComponent relabels vendor names when presenter is active", () => {
+test("logComponent relabels vendor names when presenter is active", () => {
   const presenter = new InstallPresenter(false);
   setActiveInstallPresenter(presenter);
   try {
@@ -51,7 +59,7 @@ Deno.test("logComponent relabels vendor names when presenter is active", () => {
   }
 });
 
-Deno.test("shouldDropPresenterLogLine drops bootstrap orchestration internals", () => {
+test("shouldDropPresenterLogLine drops bootstrap orchestration internals", () => {
   const dropped = [
     "creating venv at /opt/turbopanel/vendor/ansible/venv",
     "installing packages from orchestration/requirements.txt",
@@ -77,7 +85,7 @@ Deno.test("shouldDropPresenterLogLine drops bootstrap orchestration internals", 
   }
 });
 
-Deno.test("relabelComponent maps vendor components to neutral labels", () => {
+test("relabelComponent maps vendor components to neutral labels", () => {
   assertEquals(relabelComponent("ansible"), "orchestration");
   assertEquals(relabelComponent("ansible-galaxy"), "orchestration");
   assertEquals(relabelComponent("ansible-core"), "orchestration");
@@ -89,7 +97,7 @@ Deno.test("relabelComponent maps vendor components to neutral labels", () => {
   assertEquals(relabelComponent("daemon"), "daemon");
 });
 
-Deno.test("relabelComponent output contains no forbidden tokens", () => {
+test("relabelComponent output contains no forbidden tokens", () => {
   const inputs = [
     "ansible",
     "ansible-galaxy",
@@ -106,7 +114,7 @@ Deno.test("relabelComponent output contains no forbidden tokens", () => {
   }
 });
 
-Deno.test("sanitizeStatusLine scrubs vendor tokens case-insensitively", () => {
+test("sanitizeStatusLine scrubs vendor tokens case-insensitively", () => {
   const samples: Array<[string, string]> = [
     ["Connecting to Redis cache", "Connecting to cache cache"],
     ["RabbitMQ broker ready", "queue broker ready"],
@@ -131,7 +139,7 @@ Deno.test("sanitizeStatusLine scrubs vendor tokens case-insensitively", () => {
   }
 });
 
-Deno.test("sanitizeStatusLine preserves path-like segments on whole-word boundaries", () => {
+test("sanitizeStatusLine preserves path-like segments on whole-word boundaries", () => {
   const line = "installed to /opt/turbopanel/vendor/redis/current";
   const sanitized = sanitizeStatusLine(line);
   assertEquals(
@@ -140,7 +148,7 @@ Deno.test("sanitizeStatusLine preserves path-like segments on whole-word boundar
   );
 });
 
-Deno.test("shouldDropStatusLine drops package, venv, and galaxy noise", () => {
+test("shouldDropStatusLine drops package, venv, and galaxy noise", () => {
   const bareTempDownloadPath = [
     "Downloading community.docker to ",
     "/",
@@ -173,7 +181,7 @@ Deno.test("shouldDropStatusLine drops package, venv, and galaxy noise", () => {
   }
 });
 
-Deno.test("shouldDropPresenterLogLine drops raw lines that survive sanitization", () => {
+test("shouldDropPresenterLogLine drops raw lines that survive sanitization", () => {
   const rawLines = [
     "Using CPython 3.12.7 interpreter at: /usr/bin/python3",
     "uv 0.11.21 already installed",
@@ -191,7 +199,7 @@ Deno.test("shouldDropPresenterLogLine drops raw lines that survive sanitization"
   }
 });
 
-Deno.test("shouldDropPresenterLogLine drops sanitized bootstrap orchestration internals", () => {
+test("shouldDropPresenterLogLine drops sanitized bootstrap orchestration internals", () => {
   const dropped = [
     "Using runtime 3.12.7 interpreter at: /usr/bin/python3",
     "runtime 0.11.21 already installed",
@@ -205,7 +213,7 @@ Deno.test("shouldDropPresenterLogLine drops sanitized bootstrap orchestration in
   }
 });
 
-Deno.test("shouldDropStatusLine keeps meaningful installer status", () => {
+test("shouldDropStatusLine keeps meaningful installer status", () => {
   const kept = [
     "orchestration applied (33 steps, 15 changes)",
     "runtime ready",
@@ -219,7 +227,7 @@ Deno.test("shouldDropStatusLine keeps meaningful installer status", () => {
   }
 });
 
-Deno.test("summarizeRecap produces neutral success and failure one-liners", () => {
+test("summarizeRecap produces neutral success and failure one-liners", () => {
   assertEquals(
     summarizeRecap("ok=33 changed=15 failed=0 unreachable=0"),
     "orchestration applied (33 steps, 15 changes)",
