@@ -1,5 +1,5 @@
 # Shared TurboPanel daemon release artifact naming and verified-install helpers.
-# POSIX sh — sourced by scripts/package-daemon-release.sh (release packager).
+# Bash — sourced by scripts/package-daemon-release.sh (release packager).
 #
 # Release layout (mirrors production FHS install):
 #   /opt/turbopanel/bin/turbopaneld          native compiled binary (arch-specific)
@@ -15,63 +15,72 @@
 #   orchestration.tar.zst      → opt/turbopanel/share/orchestration/…
 #
 # Manifest parsing helpers (tp_resolve_channel_manifest, tp_resolve_linux_arch, …)
-# are canonical here; scripts/run.sh inlines a copy because CDN bootstrap runs via
-# curl | sh without a checkout path to source from.
+# are canonical here; scripts/run.sh inlines a POSIX copy because CDN bootstrap
+# runs via curl | sh without a checkout path to source from.
 
 tp_prod_home() {
 	printf '/opt/turbopanel'
+	return 0
 }
 
 tp_daemon_binary_name() {
 	printf 'turbopaneld'
+	return 0
 }
 
 tp_daemon_js_fallback_name() {
 	printf 'turbopaneld.js'
+	return 0
 }
 
 tp_daemon_binary_path() {
 	_home="${1:-$(tp_prod_home)}"
 	printf '%s/bin/%s' "$_home" "$(tp_daemon_binary_name)"
+	return 0
 }
 
 tp_daemon_js_fallback_path() {
 	_home="${1:-$(tp_prod_home)}"
 	printf '%s/bin/%s' "$_home" "$(tp_daemon_js_fallback_name)"
+	return 0
 }
 
 tp_daemon_linux_arch_binary_name() {
 	_arch="$1"
 	printf 'turbopaneld-linux-%s' "$_arch"
+	return 0
 }
 
 tp_daemon_orchestration_dir() {
 	_home="${1:-$(tp_prod_home)}"
 	printf '%s/share/orchestration' "$_home"
+	return 0
 }
 
 tp_daemon_release_filename() {
 	_arch="$1"
 	_version="${2:-}"
-	if [ -n "$_version" ]; then
+	if [[ -n "$_version" ]]; then
 		printf 'turbopaneld-%s-%s.tar.zst' "$_version" "$_arch"
 	else
 		printf 'turbopaneld-%s.tar.zst' "$_arch"
 	fi
+	return 0
 }
 
 tp_orchestration_release_filename() {
 	_version="${1:-}"
-	if [ -n "$_version" ]; then
+	if [[ -n "$_version" ]]; then
 		printf 'orchestration-%s.tar.zst' "$_version"
 	else
 		printf 'orchestration.tar.zst'
 	fi
+	return 0
 }
 
 tp_js_release_filename() {
 	_version="${1:-}"
-	if [ -n "$_version" ]; then
+	if [[ -n "$_version" ]]; then
 		printf 'turbopaneld.js-%s.tar.zst' "$_version"
 	else
 		printf 'turbopaneld.js.tar.zst'
@@ -90,11 +99,14 @@ tp_resolve_linux_arch() {
 			return 1
 			;;
 	esac
+	return 0
 }
 
 tp_manifest_compact() {
+	_json="$1"
 	# shellcheck disable=SC2086
-	printf '%s' "$1" | tr -d '[:space:]'
+	printf '%s' "$_json" | tr -d '[:space:]'
+	return 0
 }
 
 tp_manifest_field() {
@@ -102,6 +114,7 @@ tp_manifest_field() {
 	_field="$2"
 	# shellcheck disable=SC2086
 	printf '%s' "$_json" | grep -o "\"$_field\":\"[^\"]*\"" | head -1 | sed 's/.*":"//' | tr -d '"'
+	return 0
 }
 
 # Extract url or sha256 from a top-level manifest artifact object.
@@ -111,8 +124,9 @@ tp_manifest_artifact_field() {
 	_field="$3"
 	# shellcheck disable=SC2086
 	_block="$(printf '%s' "$_json" | grep -o "\"$_artifact_key\"[^}]*{[^}]*\"$_field\":\"[^\"]*\"" | head -1)"
-	[ -n "$_block" ] || return 1
+	[[ -n "$_block" ]] || return 1
 	printf '%s' "$_block" | grep -o "\"$_field\":\"[^\"]*\"" | sed 's/.*":"//' | tr -d '"'
+	return 0
 }
 
 # Extract url or sha256 from binaryArtifacts.<arch>.
@@ -122,8 +136,9 @@ tp_manifest_binary_artifact_field() {
 	_field="$3"
 	# shellcheck disable=SC2086
 	_block="$(printf '%s' "$_json" | grep -o "\"$_arch\"[^}]*{[^}]*\"$_field\":\"[^\"]*\"" | head -1)"
-	[ -n "$_block" ] || return 1
+	[[ -n "$_block" ]] || return 1
 	printf '%s' "$_block" | grep -o "\"$_field\":\"[^\"]*\"" | sed 's/.*":"//' | tr -d '"'
+	return 0
 }
 
 # Populate manifest globals: _manifest_host, _manifest_commit, _linux_arch,
@@ -146,13 +161,13 @@ tp_resolve_channel_manifest() {
 	_orchestration_artifact_url="$(tp_manifest_artifact_field "$_compact" "orchestrationArtifact" "url")"
 	_orchestration_artifact_sha256="$(tp_manifest_artifact_field "$_compact" "orchestrationArtifact" "sha256")"
 
-	if [ -z "$_manifest_host" ]; then
+	if [[ -z "$_manifest_host" ]]; then
 		_manifest_host="https://turbopanel.app"
 	fi
 
-	if [ -z "$_binary_artifact_url" ] || [ -z "$_binary_artifact_sha256" ] \
-		|| [ -z "$_js_fallback_artifact_url" ] || [ -z "$_js_fallback_artifact_sha256" ] \
-		|| [ -z "$_orchestration_artifact_url" ] || [ -z "$_orchestration_artifact_sha256" ]; then
+	if [[ -z "$_binary_artifact_url" ]] || [[ -z "$_binary_artifact_sha256" ]] \
+		|| [[ -z "$_js_fallback_artifact_url" ]] || [[ -z "$_js_fallback_artifact_sha256" ]] \
+		|| [[ -z "$_orchestration_artifact_url" ]] || [[ -z "$_orchestration_artifact_sha256" ]]; then
 		return 1
 	fi
 
@@ -168,6 +183,7 @@ tp_build_orchestration_archive_staging() {
 	mkdir -p "$_dest"
 	cp -a "$_orchestration_src/." "$_dest/"
 	tp_prune_release_orchestration_tree "$_dest"
+	return 0
 }
 
 # Pack a staging tree whose root already contains opt/turbopanel/share/orchestration.
@@ -175,7 +191,7 @@ tp_pack_orchestration_archive() {
 	_staging="$1"
 	_output="$2"
 	_home="${3:-$(tp_prod_home)}"
-	if [ ! -f "$_staging/$_home/share/orchestration/ansible.cfg" ]; then
+	if [[ ! -f "$_staging/$_home/share/orchestration/ansible.cfg" ]]; then
 		echo "tp_pack_orchestration_archive: missing $_staging/$_home/share/orchestration/ansible.cfg" >&2
 		return 1
 	fi
@@ -197,7 +213,7 @@ tp_extract_orchestration_release() {
 		echo "tp_extract_orchestration_release: failed to extract $_archive" >&2
 		return 1
 	fi
-	if [ ! -f "$_dest_root/$_home/share/orchestration/ansible.cfg" ]; then
+	if [[ ! -f "$_dest_root/$_home/share/orchestration/ansible.cfg" ]]; then
 		echo "tp_extract_orchestration_release: archive missing $_home/share/orchestration/ansible.cfg" >&2
 		return 1
 	fi
@@ -208,6 +224,7 @@ tp_build_release_staging_root() {
 	_staging="$1"
 	_home="${2:-$(tp_prod_home)}"
 	mkdir -p "$_staging/$_home/bin" "$_staging/$_home/share/orchestration"
+	return 0
 }
 
 tp_stage_release_native_binary() {
@@ -235,6 +252,7 @@ tp_stage_release_orchestration() {
 	_dest="$_staging/$_home/share/orchestration"
 	cp -a "$_orchestration_src/." "$_dest/"
 	tp_prune_release_orchestration_tree "$_dest"
+	return 0
 }
 
 # Remove dev-only paths from a staged share/orchestration tree (vendor roles may ship .github).
@@ -244,9 +262,10 @@ tp_prune_release_orchestration_tree() {
 		-name .git -o -name node_modules -o -name tests -o -name test \
 		-o -name spec -o -name fixtures -o -name coverage -o -name .github \
 	\) -print 2>/dev/null | while IFS= read -r _path; do
-		[ -n "$_path" ] || continue
+		[[ -n "$_path" ]] || continue
 		rm -rf "$_path"
 	done
+	return 0
 }
 
 # _mode: "full" (bin native+js+orch), "binary" (native only), "js"
@@ -262,21 +281,21 @@ tp_verify_release_root() {
 		-name .git -o -name node_modules -o -name tests -o -name test \
 		-o -name spec -o -name fixtures -o -name coverage -o -name .github \
 	\) -print 2>/dev/null || true)"
-	if [ -n "$_leaked" ]; then
+	if [[ -n "$_leaked" ]]; then
 		echo "tp_verify_release_root: dev-only paths leaked into release tree:" >&2
 		printf '%s\n' "$_leaked" >&2
 		_fail=1
 	fi
 
 	_ts_files="$(find "$_root" -name '*.ts' -print 2>/dev/null || true)"
-	if [ -n "$_ts_files" ]; then
+	if [[ -n "$_ts_files" ]]; then
 		echo "tp_verify_release_root: unexpected TypeScript sources in release tree:" >&2
 		printf '%s\n' "$_ts_files" >&2
 		_fail=1
 	fi
 
 	_ansible_share="$(find "$_root" -path "*/share/ansible/*" -print 2>/dev/null || true)"
-	if [ -n "$_ansible_share" ]; then
+	if [[ -n "$_ansible_share" ]]; then
 		echo "tp_verify_release_root: share/ansible must not ship (use share/orchestration):" >&2
 		printf '%s\n' "$_ansible_share" >&2
 		_fail=1
@@ -288,42 +307,42 @@ tp_verify_release_root() {
 		"$_prod/deno.json" \
 		"$_prod/deno.lock" \
 		"$_prod/scripts"; do
-		if [ -e "$_forbidden" ]; then
+		if [[ -e "$_forbidden" ]]; then
 			echo "tp_verify_release_root: daemon source tree leaked: $_forbidden" >&2
 			_fail=1
 		fi
 	done
 
-	if [ "$_mode" = "orchestration" ]; then
+	if [[ "$_mode" = "orchestration" ]]; then
 		:
-	elif [ "$_mode" = "binary" ]; then
-		if [ ! -f "$_prod/bin/$(tp_daemon_binary_name)" ]; then
+	elif [[ "$_mode" = "binary" ]]; then
+		if [[ ! -f "$_prod/bin/$(tp_daemon_binary_name)" ]]; then
 			echo "tp_verify_release_root: missing $_prod/bin/$(tp_daemon_binary_name)" >&2
 			_fail=1
 		fi
-	elif [ "$_mode" = "js" ]; then
-		if [ ! -f "$_prod/bin/$(tp_daemon_js_fallback_name)" ]; then
+	elif [[ "$_mode" = "js" ]]; then
+		if [[ ! -f "$_prod/bin/$(tp_daemon_js_fallback_name)" ]]; then
 			echo "tp_verify_release_root: missing $_prod/bin/$(tp_daemon_js_fallback_name)" >&2
 			_fail=1
 		fi
-	elif [ "$_mode" = "full" ]; then
-		if [ ! -f "$_prod/bin/$(tp_daemon_binary_name)" ]; then
+	elif [[ "$_mode" = "full" ]]; then
+		if [[ ! -f "$_prod/bin/$(tp_daemon_binary_name)" ]]; then
 			echo "tp_verify_release_root: missing $_prod/bin/$(tp_daemon_binary_name)" >&2
 			_fail=1
 		fi
-		if [ ! -f "$_prod/bin/$(tp_daemon_js_fallback_name)" ]; then
+		if [[ ! -f "$_prod/bin/$(tp_daemon_js_fallback_name)" ]]; then
 			echo "tp_verify_release_root: missing $_prod/bin/$(tp_daemon_js_fallback_name)" >&2
 			_fail=1
 		fi
 	fi
 
-	if { [ "$_mode" = "full" ] || [ "$_mode" = "orchestration" ]; } \
-		&& [ ! -f "$_prod/share/orchestration/ansible.cfg" ]; then
+	if { [[ "$_mode" = "full" ]] || [[ "$_mode" = "orchestration" ]]; } \
+		&& [[ ! -f "$_prod/share/orchestration/ansible.cfg" ]]; then
 		echo "tp_verify_release_root: missing $_prod/share/orchestration/ansible.cfg" >&2
 		_fail=1
 	fi
 
-	if [ "$_fail" -ne 0 ]; then
+	if [[ "$_fail" -ne 0 ]]; then
 		return 1
 	fi
 	return 0
@@ -347,6 +366,7 @@ tp_extract_tar_zst_archive() {
 tp_release_download_url() {
 	_url="$1"
 	printf '%s' "$_url"
+	return 0
 }
 
 tp_download_verified_artifact() {
@@ -363,7 +383,7 @@ tp_download_verified_artifact() {
 	esac
 
 	_curl_tls=""
-	if [ "${TURBOPANEL_RELEASE_TLS_INSECURE:-}" = 1 ]; then
+	if [[ "${TURBOPANEL_RELEASE_TLS_INSECURE:-}" = 1 ]]; then
 		_curl_tls="-k"
 	fi
 
@@ -371,7 +391,7 @@ tp_download_verified_artifact() {
 	_attempt=1
 	_max_attempts=5
 
-	while [ "$_attempt" -le "$_max_attempts" ]; do
+	while [[ "$_attempt" -le "$_max_attempts" ]]; do
 		rm -f "$_dest"
 		# shellcheck disable=SC2086
 		if ! curl -fsSL $_curl_tls "$_fetch_url" -o "$_dest"; then
@@ -381,7 +401,7 @@ tp_download_verified_artifact() {
 		if printf '%s  %s\n' "$_sha256" "$_dest" | sha256sum -c - >/dev/null 2>&1; then
 			return 0
 		fi
-		if [ "$_attempt" -lt "$_max_attempts" ]; then
+		if [[ "$_attempt" -lt "$_max_attempts" ]]; then
 			echo "tp_download_verified_artifact: SHA-256 mismatch (attempt $_attempt/$_max_attempts), retrying…" >&2
 			sleep 3
 		fi

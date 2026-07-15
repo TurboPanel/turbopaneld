@@ -1,15 +1,17 @@
 ---
 - name: Check vendored Deno binary
   ansible.builtin.stat:
-    path: "{{ turbopanel_runtimes_dir }}/deno/{{ deno_version }}/deno"
+    path: "{{ turbopanel_vendor_dir }}/deno/{{ deno_version }}/deno"
   register: _deno_pinned
 
 - name: Ensure Deno version directory exists
   when: not _deno_pinned.stat.exists
   ansible.builtin.file:
-    path: "{{ turbopanel_runtimes_dir }}/deno/{{ deno_version }}"
+    path: "{{ turbopanel_vendor_dir }}/deno/{{ deno_version }}"
     state: directory
-    mode: "0755"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
 
 - name: Resolve Deno release asset triple
   ansible.builtin.set_fact:
@@ -23,7 +25,7 @@
     ASSET="deno-{{ deno_asset_triple }}.zip"
     URL="https://dl.deno.land/release/v${DENO_VER}/${ASSET}"
     TMP="$(mktemp -d)"
-    DEST="{{ turbopanel_runtimes_dir }}/deno/${DENO_VER}/deno"
+    DEST="{{ turbopanel_vendor_dir }}/deno/${DENO_VER}/deno"
     curl -fsSL -o "$TMP/${ASSET}" "$URL"
     python3 - "$TMP/${ASSET}" "$DEST" <<'PY'
     import shutil, sys, tempfile, zipfile
@@ -39,30 +41,39 @@
         if not candidates:
             raise SystemExit("deno binary not found in release zip")
         shutil.copy2(candidates[0], dest)
-    dest.chmod(0o755)
+    dest.chmod(0o750)
     PY
     rm -rf "$TMP"
   args:
-    creates: "{{ turbopanel_runtimes_dir }}/deno/{{ deno_version }}/deno"
+    creates: "{{ turbopanel_vendor_dir }}/deno/{{ deno_version }}/deno"
+
+- name: Harden Deno binary permissions
+  ansible.builtin.file:
+    path: "{{ turbopanel_vendor_dir }}/deno/{{ deno_version }}/deno"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
 
 - name: Point Deno current symlink at pinned version
   ansible.builtin.file:
-    src: "{{ turbopanel_runtimes_dir }}/deno/{{ deno_version }}"
-    dest: "{{ turbopanel_runtimes_dir }}/deno/current"
+    src: "{{ turbopanel_vendor_dir }}/deno/{{ deno_version }}"
+    dest: "{{ turbopanel_vendor_dir }}/deno/current"
     state: link
     force: true
 
 # Stable path for the JS-fallback systemd ExecStart:
-#   {{ turbopanel_runtimes_dir }}/deno/bin/deno -> ../current/deno
+#   {{ turbopanel_vendor_dir }}/deno/bin/deno -> ../current/deno
 - name: Ensure Deno bin directory exists
   ansible.builtin.file:
-    path: "{{ turbopanel_runtimes_dir }}/deno/bin"
+    path: "{{ turbopanel_vendor_dir }}/deno/bin"
     state: directory
-    mode: "0755"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
 
 - name: Point Deno bin/deno convenience symlink at current
   ansible.builtin.file:
     src: ../current/deno
-    dest: "{{ turbopanel_runtimes_dir }}/deno/bin/deno"
+    dest: "{{ turbopanel_vendor_dir }}/deno/bin/deno"
     state: link
     force: true

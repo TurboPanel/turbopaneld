@@ -13,10 +13,10 @@
 
   vars:
     turbopanel_install_root: /opt/turbopanel
-    # Production/managed-node install (run.sh). Roles key turbopanel_runtimes_dir
+    # Production/managed-node install (run.sh). Roles key turbopanel_vendor_dir
     # off this flag; co-located dev playbooks leave it unset (defaults false).
     turbopanel_managed_install: true
-    turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/vendor"
+    turbopanel_vendor_dir: "{{ turbopanel_install_root }}/vendor"
     turbopanel_orchestration_dir: "{{ turbopanel_install_root }}/share/orchestration"
     turbopanel_config_dir: /etc/turbopanel
     turbopanel_daemon_state_dir: /var/lib/turbopanel
@@ -24,7 +24,7 @@
     turbopanel_daemon_bin: "{{ turbopanel_install_root }}/bin/turbopaneld"
     turbopanel_daemon_js: "{{ turbopanel_install_root }}/bin/turbopaneld.js"
     turbopanel_daemon_workdir: "{{ turbopanel_install_root }}"
-    turbopanel_daemon_deno_bin: "{{ turbopanel_runtimes_dir }}/deno/bin/deno"
+    turbopanel_daemon_deno_bin: "{{ turbopanel_vendor_dir }}/deno/bin/deno"
     # native | js — set by run.sh after the native-binary executability probe.
     turbopanel_daemon_exec_mode: native
     turbopanel_user: turbopanel
@@ -69,7 +69,7 @@
         group: "{{ turbopanel_group }}"
         recurse: true
       loop:
-        - "{{ turbopanel_runtimes_dir }}"
+        - "{{ turbopanel_vendor_dir }}"
         - "{{ turbopanel_daemon_state_dir }}"
         - "{{ turbopanel_config_dir }}"
         - "{{ turbopanel_orchestration_dir }}"

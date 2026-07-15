@@ -8,7 +8,7 @@ turbopanel_dev_gid: ""
 turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
 turbopanel_install_root: /opt/turbopanel
 # Every mutable dir is the shared FHS location (dev shares the production paths).
-turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/vendor"
+turbopanel_vendor_dir: "{{ turbopanel_install_root }}/vendor"
 turbopanel_config_dir: /etc/turbopanel
 turbopanel_state_dir: /var/lib/turbopanel
 turbopanel_log_dir: /var/log/turbopanel

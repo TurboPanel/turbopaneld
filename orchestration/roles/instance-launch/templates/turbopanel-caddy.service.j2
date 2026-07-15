@@ -26,8 +26,8 @@ Environment=TURBOPANEL_UI_ROOT={{ turbopanel_ui_dist_dir }}
 Environment=TURBOPANEL_DAEMON_REPO={{ turbopanel_daemon_dir }}
 {% endif %}
 Environment=GOMAXPROCS=1
-ExecStart={{ turbopanel_runtimes_dir }}/caddy/current/caddy run --config {{ turbopanel_instance_dir }}/Caddyfile --adapter caddyfile
-ExecReload={{ turbopanel_runtimes_dir }}/caddy/current/caddy reload --config {{ turbopanel_instance_dir }}/Caddyfile --adapter caddyfile
+ExecStart={{ turbopanel_vendor_dir }}/caddy/current/caddy run --config {{ turbopanel_instance_dir }}/Caddyfile --adapter caddyfile
+ExecReload={{ turbopanel_vendor_dir }}/caddy/current/caddy reload --config {{ turbopanel_instance_dir }}/Caddyfile --adapter caddyfile
 Restart=always
 RestartSec=2
 CPUQuota=100%

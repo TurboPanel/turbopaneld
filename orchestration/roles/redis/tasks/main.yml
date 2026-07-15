@@ -64,7 +64,7 @@
 
 - name: Check vendored cache binary
   ansible.builtin.stat:
-    path: "{{ turbopanel_runtimes_dir }}/redis/{{ redis_version }}/bin/redis-server"
+    path: "{{ turbopanel_vendor_dir }}/redis/{{ redis_version }}/bin/redis-server"
   register: _redis_pinned
 
 - name: Install cache into runtimes directory
@@ -74,20 +74,27 @@
     REDIS_VER="{{ redis_version }}"
     DEB_ARCH="{{ redis_deb_arch }}"
     TMP="$(mktemp -d)"
-    DEST="{{ turbopanel_runtimes_dir }}/redis/${REDIS_VER}/bin"
+    DEST="{{ turbopanel_vendor_dir }}/redis/${REDIS_VER}/bin"
     DEB_URL="https://packages.redis.io/deb/pool/bookworm/r/re/redis-server_${REDIS_VER}-1rl1~bookworm1_${DEB_ARCH}.deb"
     curl -fsSL -o "$TMP/redis-server.deb" "$DEB_URL"
     dpkg-deb -x "$TMP/redis-server.deb" "$TMP/extract"
     install -d "$DEST"
-    install -m 0755 "$TMP/extract/usr/bin/redis-server" "$DEST/redis-server"
+    install -m 0750 "$TMP/extract/usr/bin/redis-server" "$DEST/redis-server"
     rm -rf "$TMP"
   args:
-    creates: "{{ turbopanel_runtimes_dir }}/redis/{{ redis_version }}/bin/redis-server"
+    creates: "{{ turbopanel_vendor_dir }}/redis/{{ redis_version }}/bin/redis-server"
+
+- name: Harden cache binary permissions
+  ansible.builtin.file:
+    path: "{{ turbopanel_vendor_dir }}/redis/{{ redis_version }}/bin/redis-server"
+    owner: "{{ redis_user }}"
+    group: "{{ redis_primary_group }}"
+    mode: "0750"
 
 - name: Point cache current symlink at pinned version
   ansible.builtin.file:
-    src: "{{ turbopanel_runtimes_dir }}/redis/{{ redis_version }}"
-    dest: "{{ turbopanel_runtimes_dir }}/redis/current"
+    src: "{{ turbopanel_vendor_dir }}/redis/{{ redis_version }}"
+    dest: "{{ turbopanel_vendor_dir }}/redis/current"
     state: link
     force: true
 

@@ -42,11 +42,11 @@
     group: "{{ turbopanel_group }}"
     mode: "0750"
   loop:
-    - "{{ turbopanel_runtimes_dir }}"
-    - "{{ turbopanel_runtimes_dir }}/uv"
-    - "{{ turbopanel_runtimes_dir }}/uv/cache"
-    - "{{ turbopanel_runtimes_dir }}/python"
-    - "{{ turbopanel_runtimes_dir }}/ansible"
+    - "{{ turbopanel_vendor_dir }}"
+    - "{{ turbopanel_vendor_dir }}/uv"
+    - "{{ turbopanel_vendor_dir }}/uv/cache"
+    - "{{ turbopanel_vendor_dir }}/python"
+    - "{{ turbopanel_vendor_dir }}/ansible"
     - /etc/turbopanel
     - /var/lib/turbopanel
     - /var/log/turbopanel
@@ -59,7 +59,7 @@
 # pythons without permission errors.
 - name: Ensure turbopanel owns the runtimes tree
   ansible.builtin.file:
-    path: "{{ turbopanel_runtimes_dir }}"
+    path: "{{ turbopanel_vendor_dir }}"
     state: directory
     owner: "{{ turbopanel_user }}"
     group: "{{ turbopanel_group }}"

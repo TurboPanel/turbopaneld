@@ -1,6 +1,8 @@
 ---
 # Runtimes always live under the FHS vendor tree (dev shares it with prod).
-turbopanel_runtimes_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/vendor"
+turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/vendor"
 # Pinned to match scripts/download-caddy.mjs in the instance repo.
 caddy_version: "2.10.2"
 caddy_release_tag: "v2.10.2"
+turbopanel_dev_user: ""
+turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"

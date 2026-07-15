@@ -143,7 +143,7 @@ jobs:
             _tarball="dist/turbopaneld-${_arch}.tar.zst"
             _verify_root="$(mktemp -d)"
             zstd -d -q -c "$_tarball" | tar -x -C "$_verify_root"
-            sh scripts/verify-release-root.sh --binary-only "$_verify_root"
+            bash scripts/verify-release-root.sh --binary-only "$_verify_root"
             cp "$_tarball" "$_publish_dir/"
             rm -rf "$_verify_root"
           done
@@ -151,14 +151,14 @@ jobs:
           _js_tarball="dist/${_js_name}"
           _js_verify="$(mktemp -d)"
           zstd -d -q -c "$_js_tarball" | tar -x -C "$_js_verify"
-          sh scripts/verify-release-root.sh --js-only "$_js_verify"
+          bash scripts/verify-release-root.sh --js-only "$_js_verify"
           cp "$_js_tarball" "$_publish_dir/${_js_name}"
           rm -rf "$_js_verify"
 
           _orch_tarball="dist/${_orch_name}"
           _orch_verify="$(mktemp -d)"
           zstd -d -q -c "$_orch_tarball" | tar -x -C "$_orch_verify"
-          sh scripts/verify-release-root.sh --orchestration-only "$_orch_verify"
+          bash scripts/verify-release-root.sh --orchestration-only "$_orch_verify"
           cp "$_orch_tarball" "$_publish_dir/${_orch_name}"
           rm -rf "$_orch_verify"
 

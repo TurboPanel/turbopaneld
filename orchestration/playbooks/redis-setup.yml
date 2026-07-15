@@ -7,7 +7,7 @@
     # Managed standalone Redis setup: use the FHS runtime location so the redis
     # role's turbopanel_managed_install default resolves to vendor.
     turbopanel_managed_install: true
-    turbopanel_runtimes_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/vendor"
+    turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/vendor"
   roles:
     - role: daemon-prereqs
     - role: redis

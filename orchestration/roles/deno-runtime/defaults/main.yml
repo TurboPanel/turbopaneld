@@ -1,11 +1,14 @@
 ---
+# Runtimes always live under the FHS vendor tree (dev shares it with prod).
+turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/vendor"
 # Universal Deno runtime version installed on every host. Used for co-located
 # `deno run main.ts` and the managed JS-fallback ExecStart
 # (`deno run …/bin/turbopaneld.js`). Keep in step with the TP_DENO_VERSION pin
 # in scripts/run.sh.
-# Runtimes always live under the FHS vendor tree (dev shares it with prod).
-turbopanel_runtimes_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/vendor"
 deno_version: "2.9.2"
-turbopanel_node: "{{ turbopanel_runtimes_dir }}/node/current/bin/node"
-turbopanel_deno: "{{ turbopanel_runtimes_dir }}/deno/current/deno"
-turbopanel_runtime_path: "{{ turbopanel_runtimes_dir }}/node/current/bin:{{ turbopanel_runtimes_dir }}/deno/current:{{ turbopanel_runtimes_dir }}/caddy/current:/usr/bin:/bin"
+turbopanel_dev_user: ""
+turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
+turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
+turbopanel_node: "{{ turbopanel_vendor_dir }}/node/current/bin/node"
+turbopanel_deno: "{{ turbopanel_vendor_dir }}/deno/current/deno"
+turbopanel_runtime_path: "{{ turbopanel_vendor_dir }}/node/current/bin:{{ turbopanel_vendor_dir }}/deno/current:{{ turbopanel_vendor_dir }}/caddy/current:/usr/bin:/bin"

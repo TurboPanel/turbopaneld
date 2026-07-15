@@ -65,7 +65,7 @@ function applyDaemonEnvToProcess(): void {
     return;
   }
   for (const line of content.split("\n")) {
-    const match = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
+    const match = /^([A-Z_][A-Z0-9_]*)=(.*)$/.exec(line);
     if (match && !Deno.env.has(match[1])) {
       Deno.env.set(match[1], match[2]);
     }
@@ -116,9 +116,14 @@ function devInstanceExtraArgs(): string[] {
     const devRoot = resolveDevRoot(Deno.env.toObject());
     args.push("-e", `turbopanel_dev_root=${devRoot}`);
   }
-  args.push("-e", `turbopanel_ui_mode=${uiMode}`);
-  args.push("-e", `turbopanel_instance_run_mode=${instanceRunMode}`);
-  args.push("-e", `turbopanel_instance_runtime=${instanceRuntime}`);
+  args.push(
+    "-e",
+    `turbopanel_ui_mode=${uiMode}`,
+    "-e",
+    `turbopanel_instance_run_mode=${instanceRunMode}`,
+    "-e",
+    `turbopanel_instance_runtime=${instanceRuntime}`,
+  );
   if (instanceRuntime === "workers") {
     args.push("-e", "postgres_expose_port=true");
   }

@@ -6,6 +6,14 @@ import {
   parseEnvironmentDeployPayload,
 } from "../instance/commands/contracts.ts";
 
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno);
+
 const payload: EnvironmentDeployPayload = {
   environmentId: "env_123",
   projectId: "project_123",
@@ -26,7 +34,7 @@ const payload: EnvironmentDeployPayload = {
   }],
 };
 
-Deno.test("injectHostingLabels configures Traefik and ingress network", () => {
+test("injectHostingLabels configures Traefik and ingress network", () => {
   const result = injectHostingLabels(payload);
   const compose = parse(result.composeYaml) as {
     services: { app: { labels: Record<string, string>; networks: string[] } };
@@ -50,7 +58,7 @@ Deno.test("injectHostingLabels configures Traefik and ingress network", () => {
   assertEquals(compose.networks["turbopanel-ingress"].external, true);
 });
 
-Deno.test("parseEnvironmentDeployPayload rejects invalid hosting routes", () => {
+test("parseEnvironmentDeployPayload rejects invalid hosting routes", () => {
   assertThrows(
     () =>
       parseEnvironmentDeployPayload({

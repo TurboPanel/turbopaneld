@@ -1,20 +1,29 @@
-# POSIX privilege helpers for TurboPanel daemon install scripts.
-# Piped entrypoints (run.sh) duplicate this logic inline because curl | sh has no checkout path to source from.
+# Privilege helpers for TurboPanel daemon install scripts (bash).
+# Piped entrypoints (run.sh) keep an inline POSIX copy because curl | sh has no checkout path to source from.
 
 tp_is_root() {
-	[ "$(id -u)" = "0" ]
+	if [[ "$(id -u)" = "0" ]]; then
+		return 0
+	fi
+	return 1
 }
 
 # True when prompts can use the controlling terminal (including curl | sh from a TTY).
 tp_is_interactive() {
-	if [ -t 0 ]; then
+	if [[ -t 0 ]]; then
 		return 0
 	fi
-	[ -r /dev/tty ] && [ -w /dev/tty ] 2>/dev/null
+	if [[ -r /dev/tty ]] && [[ -w /dev/tty ]] 2>/dev/null; then
+		return 0
+	fi
+	return 1
 }
 
 tp_sudo_installed() {
-	command -v sudo >/dev/null 2>&1
+	if command -v sudo >/dev/null 2>&1; then
+		return 0
+	fi
+	return 1
 }
 
 # Validate real sudo capability (not group-name membership).
@@ -27,10 +36,8 @@ tp_validate_sudo() {
 	if sudo -n true 2>/dev/null; then
 		return 0
 	fi
-	if tp_is_interactive; then
-		if sudo -v 2>/dev/null; then
-			return 0
-		fi
+	if tp_is_interactive && sudo -v 2>/dev/null; then
+		return 0
 	fi
 	return 1
 }
@@ -49,7 +56,7 @@ tp_install_privilege_denied() {
 		echo "$_script: must run as root or have sudo privileges" >&2
 		;;
 	esac
-	exit 1
+	return 1
 }
 
 # Re-exec a curl | sh entrypoint under sudo after validating real sudo access.
@@ -63,11 +70,13 @@ tp_reexec_piped_under_sudo() {
 	fi
 	_sudo_rc=0
 	tp_validate_sudo || _sudo_rc=$?
-	if [ "$_sudo_rc" -eq 2 ]; then
+	if [[ "$_sudo_rc" -eq 2 ]]; then
 		tp_install_privilege_denied "$_script" no_sudo
+		exit 1
 	fi
-	if [ "$_sudo_rc" -ne 0 ]; then
+	if [[ "$_sudo_rc" -ne 0 ]]; then
 		tp_install_privilege_denied "$_script" sudo_failed
+		exit 1
 	fi
 	# shellcheck disable=SC2068
 	exec curl -fsSL "$_url" | sudo sh -s -- "$@"

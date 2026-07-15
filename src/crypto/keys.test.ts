@@ -9,7 +9,15 @@ import {
   verifyChallenge,
 } from "./keys.ts";
 
-Deno.test("generateDaemonKeypair produces valid Ed25519 JWKs", async () => {
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno);
+
+test("generateDaemonKeypair produces valid Ed25519 JWKs", async () => {
   const result = await generateDaemonKeypair();
 
   if (result.algorithm !== "Ed25519") {
@@ -32,7 +40,7 @@ Deno.test("generateDaemonKeypair produces valid Ed25519 JWKs", async () => {
   }
 });
 
-Deno.test("computePublicKeyFingerprint is deterministic", async () => {
+test("computePublicKeyFingerprint is deterministic", async () => {
   const keypair = await generateDaemonKeypair();
 
   const fingerprintOne = await computePublicKeyFingerprint(keypair.publicJwk);
@@ -46,7 +54,7 @@ Deno.test("computePublicKeyFingerprint is deterministic", async () => {
   }
 });
 
-Deno.test("buildEnrollmentPayload produces the exact expected string", () => {
+test("buildEnrollmentPayload produces the exact expected string", () => {
   const payload = buildEnrollmentPayload({
     challengeId: "cid",
     nonce: "nonce",
@@ -63,7 +71,7 @@ Deno.test("buildEnrollmentPayload produces the exact expected string", () => {
   }
 });
 
-Deno.test("buildAuthPayload produces the exact expected string", () => {
+test("buildAuthPayload produces the exact expected string", () => {
   const payload = buildAuthPayload({
     challengeId: "cid",
     nonce: "nonce",
@@ -80,7 +88,7 @@ Deno.test("buildAuthPayload produces the exact expected string", () => {
   }
 });
 
-Deno.test("signChallenge and verifyChallenge round-trip for enrollment payload", async () => {
+test("signChallenge and verifyChallenge round-trip for enrollment payload", async () => {
   const keypair = await generateDaemonKeypair();
   const payload = buildEnrollmentPayload({
     challengeId: "cid",
@@ -99,7 +107,7 @@ Deno.test("signChallenge and verifyChallenge round-trip for enrollment payload",
   }
 });
 
-Deno.test("signChallenge and verifyChallenge round-trip for auth payload", async () => {
+test("signChallenge and verifyChallenge round-trip for auth payload", async () => {
   const keypair = await generateDaemonKeypair();
   const payload = buildAuthPayload({
     challengeId: "cid",
@@ -118,7 +126,7 @@ Deno.test("signChallenge and verifyChallenge round-trip for auth payload", async
   }
 });
 
-Deno.test("verifyChallenge returns false for tampered payload", async () => {
+test("verifyChallenge returns false for tampered payload", async () => {
   const keypair = await generateDaemonKeypair();
   const payload = buildAuthPayload({
     challengeId: "cid",
@@ -141,14 +149,14 @@ Deno.test("verifyChallenge returns false for tampered payload", async () => {
   }
 });
 
-Deno.test("loadDaemonKeyFile returns null for missing file", async () => {
+test("loadDaemonKeyFile returns null for missing file", async () => {
   const result = await loadDaemonKeyFile("/nonexistent/path/server-key.json");
   if (result !== null) {
     throw new Error("missing key file should return null");
   }
 });
 
-Deno.test("loadDaemonKeyFile returns null for structurally invalid JSON", async () => {
+test("loadDaemonKeyFile returns null for structurally invalid JSON", async () => {
   const tempDir = await Deno.makeTempDir();
   const keyFilePath = `${tempDir}/server-key.json`;
 
@@ -171,7 +179,7 @@ Deno.test("loadDaemonKeyFile returns null for structurally invalid JSON", async 
   }
 });
 
-Deno.test("saveDaemonKeyFile and loadDaemonKeyFile round-trip", async () => {
+test("saveDaemonKeyFile and loadDaemonKeyFile round-trip", async () => {
   const tempDir = await Deno.makeTempDir();
   const keyFilePath = `${tempDir}/server-key.json`;
 

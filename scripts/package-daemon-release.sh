@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Package split daemon release artifacts for CDN upload and GitHub releases.
 #
 # Four zstd-compressed tar artifacts:
@@ -28,12 +28,12 @@ JS_SRC="$DIST/$(tp_daemon_js_fallback_name)"
 ORCH_ARCHIVE="$DIST/$(tp_orchestration_release_filename "$VERSION")"
 mkdir -p "$BUILD"
 
-if [ ! -s "$JS_SRC" ]; then
+if [[ ! -s "$JS_SRC" ]]; then
 	echo "package-daemon-release.sh: missing $JS_SRC (run deno task bundle:js)" >&2
 	exit 1
 fi
 
-if [ ! -s "$ORCH_ARCHIVE" ]; then
+if [[ ! -s "$ORCH_ARCHIVE" ]]; then
 	echo "package-daemon-release.sh: missing $ORCH_ARCHIVE (run deno task bundle:orchestration)" >&2
 	exit 1
 fi
@@ -48,12 +48,13 @@ write_tarball() {
 	chmod g+w "$_out" 2>/dev/null || true
 	rm -rf "$_staging"
 	echo "package-daemon-release.sh: wrote $_out"
+	return 0
 }
 
 package_binary_arch() {
 	_arch="$1"
 	_daemon_src="$BUILD/$(tp_daemon_linux_arch_binary_name "$_arch")"
-	if [ ! -s "$_daemon_src" ]; then
+	if [[ ! -s "$_daemon_src" ]]; then
 		echo "package-daemon-release.sh: missing $_daemon_src (run deno task compile:all)" >&2
 		exit 1
 	fi
@@ -70,6 +71,7 @@ package_binary_arch() {
 	fi
 
 	write_tarball "$_out_name" "$_staging" "opt"
+	return 0
 }
 
 package_js_bundle() {
@@ -85,6 +87,7 @@ package_js_bundle() {
 	fi
 
 	write_tarball "$_out_name" "$_staging" "opt"
+	return 0
 }
 
 package_binary_arch amd64
@@ -93,7 +96,7 @@ package_js_bundle
 
 rm -rf "$BUILD"
 for _entry in "$DIST"/*; do
-	[ -e "$_entry" ] || continue
+	[[ -e "$_entry" ]] || continue
 	_base="$(basename "$_entry")"
 	case "$_base" in
 		turbopaneld-amd64.tar.zst | turbopaneld-arm64.tar.zst | \

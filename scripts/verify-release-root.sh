@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Verify a clean production release staging tree (extracted tarball root or pre-pack staging).
 #
 # Usage:
@@ -29,7 +29,7 @@ case "${1:-}" in
 		;;
 esac
 
-if [ -z "$_root" ] || [ ! -d "$_root" ]; then
+if [[ -z "$_root" ]] || [[ ! -d "$_root" ]]; then
 	echo "verify-release-root.sh: missing release root directory" >&2
 	echo "Usage: verify-release-root.sh [--orchestration-only|--binary-only|--js-only] <extract-root>" >&2
 	exit 1

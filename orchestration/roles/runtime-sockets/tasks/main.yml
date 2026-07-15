@@ -2,7 +2,9 @@
 - name: Install tmpfiles.d entry for TurboPanel runtime sockets
   ansible.builtin.copy:
     dest: /etc/tmpfiles.d/turbopanel.conf
-    mode: "0644"
+    owner: root
+    group: root
+    mode: "0640"
     content: |
       # Managed by TurboPanel daemon orchestration (runtime-sockets role).
       d {{ runtime_socket_dir }} {{ runtime_socket_mode }} {{ runtime_socket_owner }} {{ runtime_socket_group }} -

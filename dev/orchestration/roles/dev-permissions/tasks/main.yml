@@ -20,7 +20,7 @@
         recurse: "{{ item.recurse | default(false) }}"
       loop:
         - { path: "{{ turbopanel_install_root }}", recurse: true }
-        - { path: "{{ turbopanel_runtimes_dir }}", recurse: true }
+        - { path: "{{ turbopanel_vendor_dir }}", recurse: true }
         - { path: "{{ turbopanel_config_dir }}" }
         - { path: "{{ turbopanel_state_dir }}" }
         - { path: "{{ turbopanel_log_dir }}" }

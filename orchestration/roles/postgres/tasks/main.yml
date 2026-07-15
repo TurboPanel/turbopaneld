@@ -173,7 +173,7 @@
     dest: "{{ turbopanel_config_dir }}/postgres/wrapper-start.sh"
     owner: root
     group: root
-    mode: "0755"
+    mode: "0750"
 
 - name: Ensure postgres container is running and ready
   ansible.builtin.command:
@@ -186,7 +186,7 @@
     dest: "/etc/systemd/system/{{ postgres_service_name }}.service"
     owner: root
     group: root
-    mode: "0644"
+    mode: "0640"
 
 - name: Ensure PostgreSQL systemd unit desired state
   ansible.builtin.systemd:

@@ -13,13 +13,13 @@
 
 - name: Check vendored Node binary
   ansible.builtin.stat:
-    path: "{{ turbopanel_runtimes_dir }}/node/{{ node_version }}/bin/node"
+    path: "{{ turbopanel_vendor_dir }}/node/{{ node_version }}/bin/node"
   register: _node_pinned
 
 - name: Read installed Node version
   ansible.builtin.command:
     argv: [
-      "{{ turbopanel_runtimes_dir }}/node/{{ node_version }}/bin/node",
+      "{{ turbopanel_vendor_dir }}/node/{{ node_version }}/bin/node",
       --version,
     ]
   register: _node_version
@@ -36,8 +36,8 @@
     NODE_VER="v{{ node_version }}"
     NODE_ARCH="{{ node_arch }}"
     NODE_DIR="node-${NODE_VER}-linux-${NODE_ARCH}"
-    NODE_TMP="{{ turbopanel_runtimes_dir }}/node/.install"
-    NODE_DEST="{{ turbopanel_runtimes_dir }}/node/{{ node_version }}"
+    NODE_TMP="{{ turbopanel_vendor_dir }}/node/.install"
+    NODE_DEST="{{ turbopanel_vendor_dir }}/node/{{ node_version }}"
     rm -rf "$NODE_TMP" "$NODE_DEST"
     mkdir -p "$NODE_TMP"
     curl -fsSL -o "$NODE_TMP/${NODE_DIR}.tar.gz" \
@@ -49,21 +49,21 @@
       "$NODE_DEST/"
     rm -rf "$NODE_TMP"
   args:
-    creates: "{{ turbopanel_runtimes_dir }}/node/{{ node_version }}/bin/node"
+    creates: "{{ turbopanel_vendor_dir }}/node/{{ node_version }}/bin/node"
 
 - name: Point Node current symlink at pinned version
   ansible.builtin.file:
-    src: "{{ turbopanel_runtimes_dir }}/node/{{ node_version }}"
-    dest: "{{ turbopanel_runtimes_dir }}/node/current"
+    src: "{{ turbopanel_vendor_dir }}/node/{{ node_version }}"
+    dest: "{{ turbopanel_vendor_dir }}/node/current"
     state: link
     force: true
 
 - name: Enable pnpm via corepack
   ansible.builtin.command:
     argv:
-      - "{{ turbopanel_runtimes_dir }}/node/current/bin/corepack"
+      - "{{ turbopanel_vendor_dir }}/node/current/bin/corepack"
       - enable
       - pnpm
-    creates: "{{ turbopanel_runtimes_dir }}/node/current/bin/pnpm"
+    creates: "{{ turbopanel_vendor_dir }}/node/current/bin/pnpm"
   environment:
     PATH: "{{ turbopanel_runtime_path }}"

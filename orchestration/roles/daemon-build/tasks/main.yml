@@ -43,4 +43,4 @@
     path: "{{ turbopanel_daemon_dist_dir }}/turbopaneld"
     owner: "{{ turbopanel_user }}"
     group: "{{ turbopanel_group }}"
-    mode: "0755"
+    mode: "0750"

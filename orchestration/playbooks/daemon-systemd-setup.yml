@@ -24,7 +24,7 @@
     turbopanel_dev_uid: ""
     turbopanel_dev_gid: ""
     turbopanel_dev_root: ""
-    turbopanel_runtimes_dir: "{{ turbopanel_install_root }}/vendor"
+    turbopanel_vendor_dir: "{{ turbopanel_install_root }}/vendor"
     turbopanel_daemon_dir: "{{ (turbopanel_dev_root ~ '/daemon') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_install_root ~ '/lib/daemon') }}"
     turbopanel_orchestration_dir: "{{ turbopanel_daemon_dir }}/orchestration"
     turbopanel_daemon_workdir: "{{ turbopanel_daemon_dir }}"
@@ -42,7 +42,7 @@
     # the daemon-logs role creates daemon.log / daemon.err.log there.
     daemon_log_dir: /var/log/turbopanel
     # The daemon runs from source via the vendored Deno runtime under
-    # {{ turbopanel_runtimes_dir }}/deno (provisioned by the deno-runtime role
+    # {{ turbopanel_vendor_dir }}/deno (provisioned by the deno-runtime role
     # below; this is also the daemon-launch role default). The Deno binary is not
     # hardcoded here: pass turbopanel_daemon_deno_bin as an extra var to override
     # it — install-daemon-systemd.sh forwards TURBOPANEL_DAEMON_DENO_BIN — for a

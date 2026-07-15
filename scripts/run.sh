@@ -787,7 +787,7 @@ trap 'rm -f "$VARS_FILE"' EXIT
 	printf 'turbopanel_manage_service_state: %s\n' "$([ "$NO_START" = true ] && echo false || echo true)"
 	printf 'turbopanel_restart_daemon: %s\n' "$([ "$NO_START" = true ] && echo false || echo true)"
 	printf 'turbopanel_daemon_exec_mode: %s\n' "$DAEMON_EXEC_MODE"
-	printf 'turbopanel_runtimes_dir: %s\n' "$RUNTIMES_DIR"
+	printf 'turbopanel_vendor_dir: %s\n' "$RUNTIMES_DIR"
 	printf 'turbopanel_orchestration_dir: %s\n' "$ORCHESTRATION_DIR"
 	printf 'turbopanel_config_dir: %s\n' "$CONFIG_DIR"
 	printf 'turbopanel_daemon_state_dir: %s\n' "$STATE_DIR"

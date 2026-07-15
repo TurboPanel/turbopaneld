@@ -13,7 +13,7 @@
 
 - name: Check vendored Caddy binary
   ansible.builtin.stat:
-    path: "{{ turbopanel_runtimes_dir }}/caddy/{{ caddy_version }}/caddy"
+    path: "{{ turbopanel_vendor_dir }}/caddy/{{ caddy_version }}/caddy"
   register: _caddy_pinned
 
 - name: Install Caddy into runtimes directory
@@ -28,15 +28,22 @@
     curl -fsSL -o "$TMP/$ASSET" \
       "https://github.com/caddyserver/caddy/releases/download/${CADDY_TAG}/${ASSET}"
     tar -xzf "$TMP/$ASSET" -C "$TMP" caddy
-    install -d "{{ turbopanel_runtimes_dir }}/caddy/${CADDY_VER}"
-    install -m 0755 "$TMP/caddy" "{{ turbopanel_runtimes_dir }}/caddy/${CADDY_VER}/caddy"
+    install -d "{{ turbopanel_vendor_dir }}/caddy/${CADDY_VER}"
+    install -m 0750 "$TMP/caddy" "{{ turbopanel_vendor_dir }}/caddy/${CADDY_VER}/caddy"
     rm -rf "$TMP"
   args:
-    creates: "{{ turbopanel_runtimes_dir }}/caddy/{{ caddy_version }}/caddy"
+    creates: "{{ turbopanel_vendor_dir }}/caddy/{{ caddy_version }}/caddy"
+
+- name: Harden Caddy binary permissions
+  ansible.builtin.file:
+    path: "{{ turbopanel_vendor_dir }}/caddy/{{ caddy_version }}/caddy"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
 
 - name: Point Caddy current symlink at pinned version
   ansible.builtin.file:
-    src: "{{ turbopanel_runtimes_dir }}/caddy/{{ caddy_version }}"
-    dest: "{{ turbopanel_runtimes_dir }}/caddy/current"
+    src: "{{ turbopanel_vendor_dir }}/caddy/{{ caddy_version }}"
+    dest: "{{ turbopanel_vendor_dir }}/caddy/current"
     state: link
     force: true

@@ -12,23 +12,23 @@
   loop:
     - {
         path: "{{ turbopanel_install_root }}/bin",
-        mode: "0755",
+        mode: "0750",
         owner: "root",
-        group: "root",
+        group: "{{ turbopanel_group }}",
       }
     - {
         path: "{{ turbopanel_install_root }}/lib",
-        mode: "0755",
+        mode: "0750",
         owner: "root",
-        group: "root",
+        group: "{{ turbopanel_group }}",
       }
     - {
         path: "{{ turbopanel_install_root }}/share",
-        mode: "0755",
+        mode: "0750",
         owner: "root",
-        group: "root",
+        group: "{{ turbopanel_group }}",
       }
-    - { path: "{{ turbopanel_orchestration_dir }}", mode: "0755" }
+    - { path: "{{ turbopanel_orchestration_dir }}", mode: "0750" }
     - { path: "{{ turbopanel_config_dir }}", mode: "0750" }
     - { path: "{{ turbopanel_daemon_state_dir }}", mode: "0750" }
     - {
@@ -85,4 +85,6 @@
 - name: Ensure ensure-single-daemon helper is executable
   ansible.builtin.file:
     path: "{{ turbopanel_orchestration_dir }}/scripts/ensure-single-daemon.sh"
-    mode: "0755"
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
