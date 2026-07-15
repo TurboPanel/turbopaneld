@@ -6,7 +6,15 @@ import {
   resolveOsVersion,
 } from "./os-release.ts";
 
-Deno.test("parseOsReleaseText unquotes values and skips comments", () => {
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno);
+
+test("parseOsReleaseText unquotes values and skips comments", () => {
   const fields = parseOsReleaseText(String.raw`
 # comment
 PRETTY_NAME="Debian GNU/Linux 13 (trixie)"
@@ -27,7 +35,7 @@ HOME_URL='https://www.debian.org/'
   assertEquals(fields.HOME_URL, "https://www.debian.org/");
 });
 
-Deno.test("resolveOsVersion prefers DEBIAN_VERSION_FULL then debian_version file", () => {
+test("resolveOsVersion prefers DEBIAN_VERSION_FULL then debian_version file", () => {
   assertEquals(
     resolveOsVersion({ VERSION_ID: "13", DEBIAN_VERSION_FULL: "13.5" }),
     "13.5",
@@ -42,7 +50,7 @@ Deno.test("resolveOsVersion prefers DEBIAN_VERSION_FULL then debian_version file
   );
 });
 
-Deno.test("hostOsFromFields maps Debian os-release with point release", () => {
+test("hostOsFromFields maps Debian os-release with point release", () => {
   resetHostOsCacheForTests();
   const os = hostOsFromFields(
     {
@@ -65,7 +73,7 @@ Deno.test("hostOsFromFields maps Debian os-release with point release", () => {
   });
 });
 
-Deno.test("hostOsFromFields marks raspbian ID as raspberry-pi-os", () => {
+test("hostOsFromFields marks raspbian ID as raspberry-pi-os", () => {
   const os = hostOsFromFields(
     {
       PRETTY_NAME: "Raspbian GNU/Linux 12 (bookworm)",
@@ -82,7 +90,7 @@ Deno.test("hostOsFromFields marks raspbian ID as raspberry-pi-os", () => {
   assertEquals(os?.version, "12");
 });
 
-Deno.test("hostOsFromFields marks debian+rpi-issue as raspberry-pi-os", () => {
+test("hostOsFromFields marks debian+rpi-issue as raspberry-pi-os", () => {
   const os = hostOsFromFields(
     {
       PRETTY_NAME: "Debian GNU/Linux 12 (bookworm)",
@@ -105,12 +113,12 @@ Deno.test("hostOsFromFields marks debian+rpi-issue as raspberry-pi-os", () => {
   });
 });
 
-Deno.test("hostOsFromFields falls back to Deno.build.os when fields empty", () => {
+test("hostOsFromFields falls back to Deno.build.os when fields empty", () => {
   const os = hostOsFromFields({}, { os: "linux", arch: "x86_64" });
   assertEquals(os, { family: "linux", arch: "x86_64" });
 });
 
-Deno.test("hostOsFromFields returns undefined for unknown non-linux build", () => {
+test("hostOsFromFields returns undefined for unknown non-linux build", () => {
   assertEquals(
     hostOsFromFields({}, { os: "sunos", arch: "x86_64" }),
     undefined,

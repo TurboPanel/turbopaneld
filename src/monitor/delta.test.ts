@@ -1,6 +1,14 @@
 import { createMonitorDeltaTracker } from "./delta.ts";
 import type { MonitorResourceState } from "./protocol.ts";
 
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno);
+
 const resource = (
   key: string,
   status: MonitorResourceState["status"],
@@ -10,7 +18,7 @@ const resource = (
   status,
 });
 
-Deno.test("buildSync returns sequence 1 on first call and includes all resources", () => {
+test("buildSync returns sequence 1 on first call and includes all resources", () => {
   const tracker = createMonitorDeltaTracker();
   const bundle = tracker.buildSync({}, [resource("container:a", "healthy")]);
   assertEquals(bundle.sequence, 1);
@@ -18,7 +26,7 @@ Deno.test("buildSync returns sequence 1 on first call and includes all resources
   assertEquals(bundle.payload.resources?.length, 1);
 });
 
-Deno.test("buildHeartbeat returns only changed resources since last acked sequence", () => {
+test("buildHeartbeat returns only changed resources since last acked sequence", () => {
   const tracker = createMonitorDeltaTracker();
   tracker.seedTracked([resource("container:a", "healthy")]);
   tracker.registerPendingDelivery(1, [resource("container:a", "healthy")]);
@@ -33,7 +41,7 @@ Deno.test("buildHeartbeat returns only changed resources since last acked sequen
   assertEquals(bundle.payload.resources?.[0]?.resourceKey, "container:b");
 });
 
-Deno.test("applyAck advances baseline so subsequent heartbeats omit acked resources", () => {
+test("applyAck advances baseline so subsequent heartbeats omit acked resources", () => {
   const tracker = createMonitorDeltaTracker();
   tracker.seedTracked([resource("container:a", "healthy")]);
   const first = tracker.buildHeartbeat({}, [
@@ -48,7 +56,7 @@ Deno.test("applyAck advances baseline so subsequent heartbeats omit acked resour
   assertEquals(second.payload.resources, undefined);
 });
 
-Deno.test("buildTransition emits a focused event for a single changed resource", () => {
+test("buildTransition emits a focused event for a single changed resource", () => {
   const tracker = createMonitorDeltaTracker();
   tracker.seedTracked([resource("container:a", "healthy")]);
   const next = resource("container:a", "unhealthy");
@@ -62,7 +70,7 @@ Deno.test("buildTransition emits a focused event for a single changed resource",
   assertEquals(bundle!.payload.events[0]?.toStatus, "unhealthy");
 });
 
-Deno.test("buildRemovalTransition emits offline event for removed container", () => {
+test("buildRemovalTransition emits offline event for removed container", () => {
   const tracker = createMonitorDeltaTracker();
   const previous = resource("container:a", "healthy");
   tracker.seedTracked([previous]);
@@ -75,7 +83,7 @@ Deno.test("buildRemovalTransition emits offline event for removed container", ()
   assertEquals(bundle.payload.resources?.[0]?.status, "offline");
 });
 
-Deno.test("applyAck does not advance deliveredSequence beyond confirmed pending delivery", () => {
+test("applyAck does not advance deliveredSequence beyond confirmed pending delivery", () => {
   const tracker = createMonitorDeltaTracker();
   const first = tracker.buildSync({}, [resource("container:a", "healthy")]);
   tracker.registerPendingDelivery(first.sequence, first.resourcesAfter);
@@ -89,7 +97,7 @@ Deno.test("applyAck does not advance deliveredSequence beyond confirmed pending 
   assertEquals(second.sequence, first.sequence + 1);
 });
 
-Deno.test("buildSync establishes authoritative baseline after sequence gap", () => {
+test("buildSync establishes authoritative baseline after sequence gap", () => {
   const tracker = createMonitorDeltaTracker();
   const first = tracker.buildSync({}, [resource("container:a", "healthy")]);
   tracker.registerPendingDelivery(first.sequence, first.resourcesAfter);

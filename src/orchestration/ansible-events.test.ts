@@ -8,9 +8,17 @@ import {
 import { setActiveInstallPresenter } from "./install-presenter-context.ts";
 import { InstallPresenter } from "./install-presenter.ts";
 
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno);
+
 const TASK_DURATION = { start: "2026-01-01T00:00:00Z" };
 
-Deno.test("formatPlaybookRecap aggregates host stats", () => {
+test("formatPlaybookRecap aggregates host stats", () => {
   assertEquals(
     formatPlaybookRecap({
       localhost: { ok: 3, changed: 1, failed: 0, unreachable: 0 },
@@ -19,7 +27,7 @@ Deno.test("formatPlaybookRecap aggregates host stats", () => {
   );
 });
 
-Deno.test("AnsibleRunSummaryCollector builds recap and first failure", () => {
+test("AnsibleRunSummaryCollector builds recap and first failure", () => {
   const collector = new AnsibleRunSummaryCollector();
 
   collector.handleEvent({
@@ -48,7 +56,7 @@ Deno.test("AnsibleRunSummaryCollector builds recap and first failure", () => {
   );
 });
 
-Deno.test("sanitizeAnsibleSummaryText strips control characters and caps length", () => {
+test("sanitizeAnsibleSummaryText strips control characters and caps length", () => {
   const long = "a".repeat(600);
   assertEquals(sanitizeAnsibleSummaryText(long).length, 500);
   assertEquals(
@@ -57,7 +65,7 @@ Deno.test("sanitizeAnsibleSummaryText strips control characters and caps length"
   );
 });
 
-Deno.test("formatAnsibleEventLog preserves vendor detail when presenter is inactive", () => {
+test("formatAnsibleEventLog preserves vendor detail when presenter is inactive", () => {
   setActiveInstallPresenter(null);
 
   const line = formatAnsibleEventLog({
@@ -76,7 +84,7 @@ Deno.test("formatAnsibleEventLog preserves vendor detail when presenter is inact
   assertEquals(line?.message, "[task] Ensure Redis service desired state");
 });
 
-Deno.test("formatAnsibleEventLog relabels component and sanitizes when presenter is active", () => {
+test("formatAnsibleEventLog relabels component and sanitizes when presenter is active", () => {
   const presenter = new InstallPresenter(false);
   setActiveInstallPresenter(presenter);
   try {
@@ -104,7 +112,7 @@ Deno.test("formatAnsibleEventLog relabels component and sanitizes when presenter
   }
 });
 
-Deno.test("formatAnsibleEventLog sanitizes play and recap lines for installers", () => {
+test("formatAnsibleEventLog sanitizes play and recap lines for installers", () => {
   const presenter = new InstallPresenter(false);
   setActiveInstallPresenter(presenter);
   try {

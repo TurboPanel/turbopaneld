@@ -2,9 +2,17 @@ import { assert, assertEquals } from "jsr:@std/assert";
 import { getBuildInfo } from "../../build-info.ts";
 import { handlePing } from "./ping.ts";
 
-Deno.test({
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno);
+
+test({
   name: "handlePing returns timestamps, hostname, and build info",
-  permissions: { sys: ["hostname"] },
+  permissions: { env: true, sys: ["hostname"], read: true },
   fn: () => {
     const daemonReceivedAt = "2020-01-01T00:00:00.000Z";
     const result = handlePing(daemonReceivedAt);

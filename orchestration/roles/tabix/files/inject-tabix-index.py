@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Inject Tabix connection defaults into index.html (after <head>).
 
-Reads values from the environment (never from argv) so orchestration secrets
-are not embedded in process argument lists. The Tabix UI contract uses
-window.global_tabix_default_settings with the upstream field names.
+Reads connection values from the environment (never from argv) so orchestration
+secrets are not embedded in process argument lists. File paths are fixed FHS
+locations under /var/lib/turbopanel/tabix/html — never taken from env/argv — so
+I/O cannot be redirected via path injection.
 
-Paths are fixed filenames under TABIX_HTML_DIR (never full paths from env).
+The Tabix UI contract uses window.global_tabix_default_settings with the
+upstream field names.
 """
 
 from __future__ import annotations
@@ -15,31 +17,15 @@ import os
 import pathlib
 import sys
 
-# Fixed relative names — do not read path components from env/argv.
-_ORIG_NAME = "index.html.orig"
-_DEST_NAME = "index.html"
-
-
-def _path_under(base: pathlib.Path, name: str) -> pathlib.Path:
-    """Resolve a fixed relative name under base; reject escapes."""
-    candidate = (base / name).resolve()
-    base_resolved = base.resolve()
-    if candidate != base_resolved and not candidate.is_relative_to(base_resolved):
-        raise ValueError(f"refusing path outside TABIX_HTML_DIR: {candidate}")
-    return candidate
+# Fixed FHS paths (orchestration/roles/tabix defaults). Never from env/argv.
+_HTML_DIR = pathlib.Path("/var/lib/turbopanel/tabix/html")
+_ORIG_PATH = _HTML_DIR / "index.html.orig"
+_DEST_PATH = _HTML_DIR / "index.html"
 
 
 def main() -> int:
-    html_dir = pathlib.Path(os.environ["TABIX_HTML_DIR"]).resolve()
-    if not html_dir.is_dir():
-        print(f"TABIX_HTML_DIR is not a directory: {html_dir}", file=sys.stderr)
-        return 1
-
-    try:
-        orig_path = _path_under(html_dir, _ORIG_NAME)
-        dest_path = _path_under(html_dir, _DEST_NAME)
-    except ValueError as exc:
-        print(exc, file=sys.stderr)
+    if not _HTML_DIR.is_dir():
+        print(f"tabix HTML directory missing: {_HTML_DIR}", file=sys.stderr)
         return 1
 
     settings = {
@@ -58,14 +44,14 @@ def main() -> int:
         "<script>window.global_tabix_default_settings={};"
         f"{assignments}</script>"
     )
-    text = orig_path.read_text(encoding="utf-8")
+    text = _ORIG_PATH.read_text(encoding="utf-8")
     needle = "<head>"
     idx = text.lower().find(needle)
     if idx < 0:
         print("tabix index.html.orig missing <head>", file=sys.stderr)
         return 1
     out = text[: idx + len(needle)] + script + text[idx + len(needle) :]
-    dest_path.write_text(out, encoding="utf-8")
+    _DEST_PATH.write_text(out, encoding="utf-8")
     return 0
 
 

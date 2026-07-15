@@ -44,8 +44,8 @@ function isContainerDestroyEvent(event: DockerEvent): boolean {
   return event.Action === "destroy" || event.Action === "remove";
 }
 
-function errMessage(err: unknown): string | unknown {
-  return err instanceof Error ? err.message : err;
+function errMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 export class DockerMonitor {

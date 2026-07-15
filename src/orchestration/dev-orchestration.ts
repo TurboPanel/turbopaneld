@@ -1,6 +1,10 @@
 import { join } from "@std/path";
 import { readEnv, resolveDaemonRoot } from "../paths/layout.ts";
-import { GALAXY_ROLES_DIR, RUNTIMES_DIR } from "./paths.ts";
+import {
+  ANSIBLE_HOME,
+  ANSIBLE_LOCAL_TMP,
+  GALAXY_ROLES_DIR,
+} from "./paths.ts";
 
 /** Dev overlay playbook + roles live under `<daemon checkout>/dev/orchestration`. */
 export const DEV_ORCHESTRATION_SUBDIR = join("dev", "orchestration");
@@ -155,8 +159,8 @@ export function devOrchestrationAnsibleEnv(
 ): Record<string, string> {
   return {
     ANSIBLE_CONFIG: layout.ansibleCfgPath,
-    ANSIBLE_HOME: "/tmp/turbopanel-ansible",
-    ANSIBLE_LOCAL_TEMP: join(RUNTIMES_DIR, "uv", "cache", "ansible-tmp"),
+    ANSIBLE_HOME,
+    ANSIBLE_LOCAL_TEMP: ANSIBLE_LOCAL_TMP,
     ANSIBLE_ROLES_PATH: `${layout.devRolesDir}:${layout.daemonRolesDir}`,
   };
 }

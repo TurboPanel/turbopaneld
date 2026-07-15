@@ -5,7 +5,15 @@ import {
   setRebootExecutorForTests,
 } from "./reboot.ts";
 
-Deno.test({
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno);
+
+test({
   name: "handleReboot returns scheduled true without invoking systemctl",
   fn: async () => {
     let invoked = false;
@@ -23,7 +31,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "handleReboot invokes stub executor after handoff delay",
   sanitizeOps: false,
   sanitizeResources: false,
@@ -46,7 +54,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "handleReboot rejects invalid payload",
   fn: async () => {
     setRebootExecutorForTests(async () => ({ success: true, stderr: "" }));

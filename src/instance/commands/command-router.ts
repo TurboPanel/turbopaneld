@@ -1,3 +1,4 @@
+import { sanitizeForLog } from "../../logger.ts";
 import type {
   CommandAckMessage,
   CommandDispatchMessage,
@@ -20,20 +21,8 @@ export interface CommandRouterDeps {
   // extensible for future handlers (e.g. hostname needs ansible)
 }
 
-function stripLogInjection(text: string): string {
-  return text.replaceAll("\n", "_").replaceAll("\r", "_").replaceAll("\t", "_");
-}
-
 function sanitizeError(value: unknown, maxLen = 500): string {
-  let text: string;
-  if (value instanceof Error) {
-    text = value.message;
-  } else if (typeof value === "string") {
-    text = value;
-  } else {
-    text = String(value);
-  }
-  text = stripLogInjection(text);
+  const text = sanitizeForLog(value);
   return text.length > maxLen ? text.slice(0, maxLen) : text;
 }
 

@@ -53,6 +53,8 @@ function countCpuCores(statText: string): number {
   return cores;
 }
 
+const MEMINFO_LINE = /^(\w+):\s+(\d+)\s+kB/;
+
 function parseMeminfo(
   text: string,
 ): MonitorInstanceSummary["memory"] | undefined {
@@ -60,7 +62,7 @@ function parseMeminfo(
   let memAvailable: number | undefined;
 
   for (const line of text.split("\n")) {
-    const match = line.match(/^(\w+):\s+(\d+)\s+kB/);
+    const match = MEMINFO_LINE.exec(line);
     if (!match) continue;
     if (match[1] === "MemTotal") memTotal = Number(match[2]) * 1024;
     if (match[1] === "MemAvailable") memAvailable = Number(match[2]) * 1024;
@@ -132,6 +134,31 @@ async function collectDiskSummary(): Promise<
   }
 }
 
+function applyCpuSummary(
+  summary: MonitorInstanceSummary,
+  statText: string,
+  previousCpu: CpuSnapshot | undefined,
+): CpuSnapshot | undefined {
+  const firstLine = statText.split("\n")[0];
+  if (!firstLine) return previousCpu;
+
+  const current = parseCpuLine(firstLine);
+  if (!current) return previousCpu;
+
+  summary.cpu = { cores: countCpuCores(statText) };
+
+  if (previousCpu) {
+    const totalDelta = current.total - previousCpu.total;
+    const idleDelta = current.idle - previousCpu.idle;
+    if (totalDelta > 0) {
+      const usage = ((totalDelta - idleDelta) / totalDelta) * 100;
+      summary.cpu.usagePercent = Math.round(usage * 10) / 10;
+    }
+  }
+
+  return current;
+}
+
 export type HostSummaryCollector = {
   collect(): Promise<MonitorInstanceSummary>;
 };
@@ -145,24 +172,7 @@ export function createHostSummaryCollector(): HostSummaryCollector {
 
       const statText = readProcFile("/proc/stat");
       if (statText) {
-        const firstLine = statText.split("\n")[0];
-        if (firstLine) {
-          const current = parseCpuLine(firstLine);
-          if (current) {
-            const cores = countCpuCores(statText);
-            summary.cpu = { cores };
-
-            if (previousCpu) {
-              const totalDelta = current.total - previousCpu.total;
-              const idleDelta = current.idle - previousCpu.idle;
-              if (totalDelta > 0) {
-                const usage = ((totalDelta - idleDelta) / totalDelta) * 100;
-                summary.cpu.usagePercent = Math.round(usage * 10) / 10;
-              }
-            }
-            previousCpu = current;
-          }
-        }
+        previousCpu = applyCpuSummary(summary, statText, previousCpu);
       }
 
       const memText = readProcFile("/proc/meminfo");

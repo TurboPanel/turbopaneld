@@ -1,7 +1,15 @@
 import { collectHostSummary } from "./host-summary.ts";
 import type { MonitorInstanceSummary } from "./protocol.ts";
 
-Deno.test("collectHostSummary returns contract-shaped sections", async () => {
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno);
+
+test("collectHostSummary returns contract-shaped sections", async () => {
   const summary = await collectHostSummary();
 
   assert(

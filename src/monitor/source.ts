@@ -2,7 +2,6 @@ import type {
   MonitorDeliveryBundle,
   MonitorHeartbeatPayload,
   MonitorSyncPayload,
-  MonitorTransitionPayload,
 } from "./delta.ts";
 import type { MonitorResourceState } from "./protocol.ts";
 import type { SentinelTransitionCallback } from "./sentinel.ts";

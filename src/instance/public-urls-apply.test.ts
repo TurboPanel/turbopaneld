@@ -2,6 +2,14 @@ import { assertEquals } from "jsr:@std/assert";
 import { join } from "@std/path";
 import { upsertPublicUrlsInEnv } from "./public-urls-env.ts";
 
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno);
+
 async function listEnvTmpFiles(dir: string): Promise<string[]> {
   const found: string[] = [];
   for await (const entry of Deno.readDir(dir)) {
@@ -12,7 +20,7 @@ async function listEnvTmpFiles(dir: string): Promise<string[]> {
   return found;
 }
 
-Deno.test("upsertPublicUrlsInEnv writes public URLs to protected runtime env", async () => {
+test("upsertPublicUrlsInEnv writes public URLs to protected runtime env", async () => {
   const root = await Deno.makeTempDir({ prefix: "tp-public-urls-" });
   const checkoutDir = join(root, "checkout", "instance");
   const configDir = join(root, "config", "instance");
@@ -36,7 +44,7 @@ Deno.test("upsertPublicUrlsInEnv writes public URLs to protected runtime env", a
   }
 });
 
-Deno.test("upsertPublicUrlsInEnv removes temp files when rename fails", async () => {
+test("upsertPublicUrlsInEnv removes temp files when rename fails", async () => {
   const root = await Deno.makeTempDir({ prefix: "tp-public-urls-fail-" });
   const checkoutDir = join(root, "checkout", "instance");
   const configDir = join(root, "config", "instance");

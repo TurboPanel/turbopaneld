@@ -4,14 +4,22 @@ import {
   restartDaemonService,
 } from "./restart-daemon-service.ts";
 
-Deno.test("buildDaemonRestartSystemctlArgs enables then restarts via sudo", () => {
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno);
+
+test("buildDaemonRestartSystemctlArgs enables then restarts via sudo", () => {
   assertEquals(buildDaemonRestartSystemctlArgs("turbopaneld.service"), [
     ["-n", "systemctl", "enable", "turbopaneld.service"],
     ["-n", "systemctl", "restart", "turbopaneld.service"],
   ]);
 });
 
-Deno.test("restartDaemonService runs sudo systemctl enable before restart", async () => {
+test("restartDaemonService runs sudo systemctl enable before restart", async () => {
   const calls: string[][] = [];
   const ok = await restartDaemonService({
     unit: "turbopaneld.service",
@@ -27,7 +35,7 @@ Deno.test("restartDaemonService runs sudo systemctl enable before restart", asyn
   ]);
 });
 
-Deno.test("restartDaemonService returns false when restart fails", async () => {
+test("restartDaemonService returns false when restart fails", async () => {
   const ok = await restartDaemonService({
     unit: "turbopaneld.service",
     runSystemctl: async (args) => ({

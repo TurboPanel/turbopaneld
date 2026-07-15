@@ -2,6 +2,14 @@ import { encodeBase64Url } from "@std/encoding/base64url";
 import { DaemonTokenManager } from "./token-manager.ts";
 import type { DaemonKeyFile } from "../crypto/keys.ts";
 
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno);
+
 function makeJwt(exp: number): string {
   const header = encodeBase64Url(
     new TextEncoder().encode(JSON.stringify({ alg: "HS256", typ: "JWT" })),
@@ -29,7 +37,7 @@ async function makeKeyFile(): Promise<DaemonKeyFile> {
   };
 }
 
-Deno.test("Returns cached token when not near expiry", async () => {
+test("Returns cached token when not near expiry", async () => {
   const keyFile = await makeKeyFile();
   let challengeCalls = 0;
   const apiClient = {
@@ -58,7 +66,7 @@ Deno.test("Returns cached token when not near expiry", async () => {
   }
 });
 
-Deno.test("Refreshes when less than 60 s remain", async () => {
+test("Refreshes when less than 60 s remain", async () => {
   const keyFile = await makeKeyFile();
   let challengeCalls = 0;
   let sessionCalls = 0;
@@ -98,7 +106,7 @@ Deno.test("Refreshes when less than 60 s remain", async () => {
   }
 });
 
-Deno.test("Concurrent getToken() calls share one refresh promise", async () => {
+test("Concurrent getToken() calls share one refresh promise", async () => {
   const keyFile = await makeKeyFile();
   let challengeCalls = 0;
   let release: (() => void) | undefined;
@@ -136,7 +144,7 @@ Deno.test("Concurrent getToken() calls share one refresh promise", async () => {
   }
 });
 
-Deno.test("Retries once on refresh failure before throwing", async () => {
+test("Retries once on refresh failure before throwing", async () => {
   const keyFile = await makeKeyFile();
   let challengeCalls = 0;
   const apiClient = {
@@ -171,7 +179,7 @@ Deno.test("Retries once on refresh failure before throwing", async () => {
   }
 });
 
-Deno.test("verifyToken invalid causes refresh to throw after retry", async () => {
+test("verifyToken invalid causes refresh to throw after retry", async () => {
   const keyFile = await makeKeyFile();
   let sessionCalls = 0;
   const apiClient = {
@@ -222,7 +230,7 @@ Deno.test("verifyToken invalid causes refresh to throw after retry", async () =>
   }
 });
 
-Deno.test("verifyToken unavailable still caches token", async () => {
+test("verifyToken unavailable still caches token", async () => {
   const keyFile = await makeKeyFile();
   const token = makeJwt(Math.floor(Date.now() / 1000) + 900);
   const apiClient = {
@@ -253,7 +261,7 @@ Deno.test("verifyToken unavailable still caches token", async () => {
   }
 });
 
-Deno.test("verifyToken sub mismatch causes refresh to throw", async () => {
+test("verifyToken sub mismatch causes refresh to throw", async () => {
   const keyFile = await makeKeyFile();
   const apiClient = {
     getAuthChallenge: async () => ({
@@ -302,7 +310,7 @@ Deno.test("verifyToken sub mismatch causes refresh to throw", async () => {
   }
 });
 
-Deno.test("verifyToken kid mismatch causes refresh to throw", async () => {
+test("verifyToken kid mismatch causes refresh to throw", async () => {
   const keyFile = await makeKeyFile();
   const apiClient = {
     getAuthChallenge: async () => ({

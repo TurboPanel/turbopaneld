@@ -1,6 +1,14 @@
 import { deriveContainerStatus, normalizeContainer } from "./normalize.ts";
 import type { ContainerInspect, ContainerSummary } from "../docker/client.ts";
 
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno);
+
 function inspect(
   partial: Partial<ContainerInspect> & { Id: string },
 ): ContainerInspect {
@@ -13,7 +21,7 @@ function summary(
   return partial as ContainerSummary;
 }
 
-Deno.test("normalizeContainer maps a healthy container to status healthy", () => {
+test("normalizeContainer maps a healthy container to status healthy", () => {
   const state = normalizeContainer({
     inspect: inspect({
       Id: "abc123def456",
@@ -23,7 +31,7 @@ Deno.test("normalizeContainer maps a healthy container to status healthy", () =>
   assertEquals(state.status, "healthy");
 });
 
-Deno.test("normalizeContainer maps an unhealthy health-check to status unhealthy", () => {
+test("normalizeContainer maps an unhealthy health-check to status unhealthy", () => {
   const state = normalizeContainer({
     inspect: inspect({
       Id: "abc123def456",
@@ -33,7 +41,7 @@ Deno.test("normalizeContainer maps an unhealthy health-check to status unhealthy
   assertEquals(state.status, "unhealthy");
 });
 
-Deno.test("normalizeContainer maps a stopped container to status stopped", () => {
+test("normalizeContainer maps a stopped container to status stopped", () => {
   const state = normalizeContainer({
     inspect: inspect({
       Id: "abc123def456",
@@ -43,7 +51,7 @@ Deno.test("normalizeContainer maps a stopped container to status stopped", () =>
   assertEquals(state.status, "stopped");
 });
 
-Deno.test("normalizeContainer maps an OOM-killed container to status failed", () => {
+test("normalizeContainer maps an OOM-killed container to status failed", () => {
   const state = normalizeContainer({
     inspect: inspect({
       Id: "abc123def456",
@@ -53,7 +61,7 @@ Deno.test("normalizeContainer maps an OOM-killed container to status failed", ()
   assertEquals(state.status, "failed");
 });
 
-Deno.test("deriveContainerStatus covers docker state and health combinations", () => {
+test("deriveContainerStatus covers docker state and health combinations", () => {
   assertEquals(
     deriveContainerStatus({
       inspect: inspect({
@@ -83,7 +91,7 @@ Deno.test("deriveContainerStatus covers docker state and health combinations", (
   );
 });
 
-Deno.test("resourceKey is stable across calls for the same container ID", () => {
+test("resourceKey is stable across calls for the same container ID", () => {
   const first = normalizeContainer({
     inspect: inspect({ Id: "abc123def4567890" }),
   });

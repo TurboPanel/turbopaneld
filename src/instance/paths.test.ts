@@ -18,6 +18,14 @@ import {
 } from "../paths/layout.ts";
 import { resolveInstanceConfigDir } from "./public-urls-env.ts";
 
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno);
+
 const CADDY_HTTPS = "https://localhost:8443";
 const PLATFORM_CA = "/opt/turbopanel/platform/instance/certs/ca.crt";
 
@@ -27,7 +35,7 @@ function assertEq(actual: string, expected: string, label: string): void {
   }
 }
 
-Deno.test("development layout resolves shared FHS socket and CA paths", () => {
+test("development layout resolves shared FHS socket and CA paths", () => {
   const layout = resolveLayout({}, { forceMode: "development" });
   assertEq(layout.runDir, "/run/turbopanel", "runDir");
   assertEq(
@@ -42,7 +50,7 @@ Deno.test("development layout resolves shared FHS socket and CA paths", () => {
   );
 });
 
-Deno.test("production layout resolves FHS socket and CA paths", () => {
+test("production layout resolves FHS socket and CA paths", () => {
   const layout = resolveLayout({}, { forceMode: "production" });
   assertEq(layout.runDir, PROD_RUN_DIR_DEFAULT, "runDir");
   assertEq(
@@ -57,7 +65,7 @@ Deno.test("production layout resolves FHS socket and CA paths", () => {
   );
 });
 
-Deno.test("DEFAULT_SOCKET_DIR and CANONICAL_INSTANCE_CA_PATH match active layout", () => {
+test("DEFAULT_SOCKET_DIR and CANONICAL_INSTANCE_CA_PATH match active layout", () => {
   const layout = resolveLayout({
     TURBOPANEL_RUN_DIR: readEnv("TURBOPANEL_RUN_DIR"),
     TURBOPANEL_CONFIG_DIR: readEnv("TURBOPANEL_CONFIG_DIR"),
@@ -71,14 +79,14 @@ Deno.test("DEFAULT_SOCKET_DIR and CANONICAL_INSTANCE_CA_PATH match active layout
   );
 });
 
-Deno.test("resolveInstanceSocket uses TURBOPANEL_RUN_DIR override", () => {
+test("resolveInstanceSocket uses TURBOPANEL_RUN_DIR override", () => {
   const socket = resolveInstanceSocket({
     TURBOPANEL_RUN_DIR: "/custom/run",
   });
   assertEq(socket, "/custom/run/instance.sock", "socket path");
 });
 
-Deno.test("resolveInstanceConfigDir honors TURBOPANEL_CONFIG_DIR override", () => {
+test("resolveInstanceConfigDir honors TURBOPANEL_CONFIG_DIR override", () => {
   assertEq(
     resolveInstanceConfigDir({ TURBOPANEL_CONFIG_DIR: "/custom/config" }),
     "/custom/config/instance",
@@ -86,7 +94,7 @@ Deno.test("resolveInstanceConfigDir honors TURBOPANEL_CONFIG_DIR override", () =
   );
 });
 
-Deno.test("layout env overrides apply to socket and config paths", () => {
+test("layout env overrides apply to socket and config paths", () => {
   const layout = resolveLayout({
     TURBOPANEL_RUN_DIR: "/custom/run",
     TURBOPANEL_CONFIG_DIR: "/custom/config",
@@ -100,7 +108,7 @@ Deno.test("layout env overrides apply to socket and config paths", () => {
   );
 });
 
-Deno.test("TURBOPANEL_STATE_DIR controls server identity storage", () => {
+test("TURBOPANEL_STATE_DIR controls server identity storage", () => {
   const env = { TURBOPANEL_STATE_DIR: "/custom/state" };
   const layout = resolveLayout(env, { forceMode: "development" });
   assertEq(layout.stateDir, "/custom/state", "stateDir");
@@ -117,7 +125,7 @@ Deno.test("TURBOPANEL_STATE_DIR controls server identity storage", () => {
   );
 });
 
-Deno.test("resolveInstanceConfig uses url mode when TURBOPANEL_INSTANCE_URL is set", () => {
+test("resolveInstanceConfig uses url mode when TURBOPANEL_INSTANCE_URL is set", () => {
   const config = resolveInstanceConfig({
     TURBOPANEL_INSTANCE_URL: CADDY_HTTPS,
   });
@@ -135,7 +143,7 @@ Deno.test("resolveInstanceConfig uses url mode when TURBOPANEL_INSTANCE_URL is s
   }
 });
 
-Deno.test("resolveInstanceConfig uses socket mode when TURBOPANEL_INSTANCE_URL is absent", () => {
+test("resolveInstanceConfig uses socket mode when TURBOPANEL_INSTANCE_URL is absent", () => {
   const config = resolveInstanceConfig({
     TURBOPANEL_INSTANCE_RUNTIME: "deno",
   });
@@ -147,7 +155,7 @@ Deno.test("resolveInstanceConfig uses socket mode when TURBOPANEL_INSTANCE_URL i
   }
 });
 
-Deno.test("workers transition: url and CA env keys resolve to url mode", () => {
+test("workers transition: url and CA env keys resolve to url mode", () => {
   const config = resolveInstanceConfig({
     TURBOPANEL_INSTANCE_RUNTIME: "workers",
     TURBOPANEL_INSTANCE_URL: CADDY_HTTPS,
@@ -164,7 +172,7 @@ Deno.test("workers transition: url and CA env keys resolve to url mode", () => {
   }
 });
 
-Deno.test("resolveInstanceCaPath prefers TURBOPANEL_INSTANCE_CA env when file exists", async () => {
+test("resolveInstanceCaPath prefers TURBOPANEL_INSTANCE_CA env when file exists", async () => {
   const tmp = await Deno.makeTempFile({ suffix: ".pem" });
   try {
     const path = resolveInstanceCaPath({
@@ -178,14 +186,14 @@ Deno.test("resolveInstanceCaPath prefers TURBOPANEL_INSTANCE_CA env when file ex
   }
 });
 
-Deno.test("resolveInstanceCaPath returns undefined when env unset and canonical file missing", () => {
+test("resolveInstanceCaPath returns undefined when env unset and canonical file missing", () => {
   const path = resolveInstanceCaPath({});
   if (path !== undefined) {
     throw new Error(`expected undefined, got ${path}`);
   }
 });
 
-Deno.test("createInstanceHttpClient returns undefined for plaintext http without reading CA", async () => {
+test("createInstanceHttpClient returns undefined for plaintext http without reading CA", async () => {
   const client = await createInstanceHttpClient(
     {
       kind: "url",
@@ -199,7 +207,7 @@ Deno.test("createInstanceHttpClient returns undefined for plaintext http without
   }
 });
 
-Deno.test("deno transition: cleared URL key restores socket mode", () => {
+test("deno transition: cleared URL key restores socket mode", () => {
   const config = resolveInstanceConfig({
     TURBOPANEL_INSTANCE_RUNTIME: "deno",
     TURBOPANEL_INSTANCE_CA: PLATFORM_CA,

@@ -1,8 +1,3 @@
-import type {
-  ContainerInspect,
-  ContainerSummary,
-  DockerEvent,
-} from "../docker/client.ts";
 import type { DockerMonitor, DockerMonitorChange } from "../docker/monitor.ts";
 import { logInfo, logWarn } from "../logger.ts";
 import { createMonitorDeltaTracker } from "./delta.ts";
@@ -48,15 +43,15 @@ function createEmptyContainerMonitor(): ContainerMonitor {
 }
 
 export class Sentinel {
-  #dockerMonitor: ContainerMonitor;
-  #dockerEnabled: boolean;
-  #hostSummaryCollector: HostSummaryCollector;
-  #delta = createMonitorDeltaTracker();
-  #transitionCallbacks = new Set<SentinelTransitionCallback>();
+  readonly #dockerMonitor: ContainerMonitor;
+  readonly #dockerEnabled: boolean;
+  readonly #hostSummaryCollector: HostSummaryCollector;
+  readonly #delta = createMonitorDeltaTracker();
+  readonly #transitionCallbacks = new Set<SentinelTransitionCallback>();
   #signal: AbortSignal | undefined;
   #unsubscribe: (() => void) | undefined;
   readonly #ready: Promise<void>;
-  #markReady!: () => void;
+  readonly #markReady!: () => void;
 
   constructor(options: SentinelOptions) {
     let markReady!: () => void;

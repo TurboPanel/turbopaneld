@@ -4,10 +4,7 @@ import {
 } from "../orchestration/ansible.ts";
 import { INSTANCE_CERTS_APPLY_PLAYBOOK } from "../orchestration/paths.ts";
 import { resolveLayout } from "../paths/layout.ts";
-import {
-  resolveInstanceRuntimeEnvPath,
-  upsertPublicUrlsInEnv,
-} from "./public-urls-env.ts";
+import { upsertPublicUrlsInEnv } from "./public-urls-env.ts";
 
 export function resolveInstanceDir(
   env: Record<string, string | undefined> = Deno.env.toObject(),

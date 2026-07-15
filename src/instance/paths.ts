@@ -63,17 +63,17 @@ export function resolveInstanceConfig(
 ): InstanceConfig {
   const url = env.TURBOPANEL_INSTANCE_URL?.trim();
   if (url) {
-    const baseUrl = url.replace(/\/+$/, "");
+    const baseUrl = stripTrailingSlashes(url);
     return { kind: "url", baseUrl, wsBaseUrl: httpToWs(baseUrl) };
   }
   return { kind: "socket", socketPath: resolveInstanceSocket(env) };
 }
 
 /** Base URL used with the Unix-socket HTTP client (host is ignored). */
-export const INSTANCE_HTTP_ORIGIN = "http://instance";
+export const INSTANCE_HTTP_ORIGIN = "http://instance"; // NOSONAR typescript:S5332 — Unix-socket origin only; host ignored, never a network cleartext endpoint
 
 /** Base URL used with the Unix-socket WebSocket (host is ignored). */
-export const INSTANCE_WS_ORIGIN = "ws://instance";
+export const INSTANCE_WS_ORIGIN = "ws://instance"; // NOSONAR typescript:S5332 — Unix-socket origin only; host ignored, never a network cleartext endpoint
 
 function joinPath(base: string, path: string): string {
   const normalized = path.startsWith("/") ? path : `/${path}`;
@@ -106,8 +106,13 @@ function isTruthyFlag(value: string | undefined): boolean {
   return normalized === "1" || normalized === "true" || normalized === "yes";
 }
 
-function stripTrailingSlash(path: string): string {
-  return path.replace(/\/+$/, "");
+/** Strip all trailing `/` without a backtracking regex. */
+export function stripTrailingSlashes(path: string): string {
+  let end = path.length;
+  while (end > 0 && path.codePointAt(end - 1) === 0x2f) {
+    end -= 1;
+  }
+  return end === path.length ? path : path.slice(0, end);
 }
 
 /**
@@ -120,7 +125,7 @@ export function resolveServerIdentityDir(
   env: Record<string, string | undefined> = Deno.env.toObject(),
 ): string {
   if (isTruthyFlag(env.TURBOPANEL_SKIP_ORCHESTRATION)) {
-    return stripTrailingSlash(Deno.cwd());
+    return stripTrailingSlashes(Deno.cwd());
   }
   return resolveLayout(env).daemonStateDir;
 }

@@ -6,7 +6,15 @@ import {
   parseHostnamePayload,
 } from "./contracts.ts";
 
-Deno.test("isValidHostname mirrors instance rejection cases", () => {
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno);
+
+test("isValidHostname mirrors instance rejection cases", () => {
   const reject = [
     "a b",
     "Web01",
@@ -33,7 +41,7 @@ Deno.test("isValidHostname mirrors instance rejection cases", () => {
   assertEquals(isValidHostname(labels), true);
 });
 
-Deno.test("assertValidHostname and parseHostnamePayload enforce hostname safety", () => {
+test("assertValidHostname and parseHostnamePayload enforce hostname safety", () => {
   assertThrows(
     () => assertValidHostname("a;rm -rf /"),
     Error,
@@ -54,7 +62,7 @@ Deno.test("assertValidHostname and parseHostnamePayload enforce hostname safety"
   );
 });
 
-Deno.test({
+test({
   name: "handleHostname rejects when ansible runtime is missing",
   fn: async () => {
     const { handleHostname, setAnsibleAvailabilityCheckForTests } =

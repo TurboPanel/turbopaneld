@@ -255,16 +255,16 @@ tp_stage_release_orchestration() {
 	return 0
 }
 
-# Remove dev-only paths from a staged share/orchestration tree (vendor roles may ship .github).
+# Remove dev-only paths from a staged share/orchestration tree (vendor roles may
+# ship .github / molecule / tests). Uses find -exec so prune works under dash
+# too — deno tasks must invoke the packagers with bash (see deno.json).
 tp_prune_release_orchestration_tree() {
 	_root="$1"
 	find "$_root" \( \
 		-name .git -o -name node_modules -o -name tests -o -name test \
 		-o -name spec -o -name fixtures -o -name coverage -o -name .github \
-	\) -print 2>/dev/null | while IFS= read -r _path; do
-		[[ -n "$_path" ]] || continue
-		rm -rf "$_path"
-	done
+		-o -name molecule \
+	\) -prune -exec rm -rf {} + 2>/dev/null || true
 	return 0
 }
 
@@ -280,6 +280,7 @@ tp_verify_release_root() {
 	_leaked="$(find "$_root" \( \
 		-name .git -o -name node_modules -o -name tests -o -name test \
 		-o -name spec -o -name fixtures -o -name coverage -o -name .github \
+		-o -name molecule \
 	\) -print 2>/dev/null || true)"
 	if [[ -n "$_leaked" ]]; then
 		echo "tp_verify_release_root: dev-only paths leaked into release tree:" >&2

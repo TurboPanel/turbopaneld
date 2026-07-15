@@ -217,111 +217,144 @@ function parseDaemonAgentInfo(value: unknown): DaemonAgentInfo | undefined {
   return agent;
 }
 
+type MonitorDaemonBase = {
+  serverId: string;
+  at: string;
+  sequence: number;
+};
+
+function parseDaemonBase(
+  value: Record<string, unknown>,
+): MonitorDaemonBase | null {
+  if (value.from !== "daemon") return null;
+  if (!isString(value.serverId) || !isString(value.at)) return null;
+  if (!isNumber(value.sequence)) return null;
+  return {
+    serverId: value.serverId,
+    at: value.at,
+    sequence: value.sequence,
+  };
+}
+
+function optionalResourceStates(
+  value: unknown,
+): MonitorResourceState[] | undefined | null {
+  if (value === undefined) return undefined;
+  if (!isMonitorResourceStateArray(value)) return null;
+  return value;
+}
+
+function optionalEvents(value: unknown): MonitorEvent[] | undefined | null {
+  if (value === undefined) return undefined;
+  if (!isMonitorEventArray(value)) return null;
+  return value;
+}
+
+function parseMonitorSync(
+  value: Record<string, unknown>,
+): MonitorSyncMessage | null {
+  const base = parseDaemonBase(value);
+  if (!base) return null;
+  if (!isMonitorInstanceSummary(value.instance)) return null;
+  if (!isMonitorResourceStateArray(value.resources)) return null;
+  const events = optionalEvents(value.events);
+  if (events === null) return null;
+  if (value.protocolVersion !== MONITOR_PROTOCOL_VERSION) return null;
+  const agent = parseDaemonAgentInfo(value.agent);
+  return {
+    type: "monitor.sync",
+    from: "daemon",
+    ...base,
+    instance: value.instance,
+    resources: value.resources,
+    events,
+    protocolVersion: MONITOR_PROTOCOL_VERSION,
+    ...(agent ? { agent } : {}),
+  };
+}
+
+function parseMonitorHeartbeat(
+  value: Record<string, unknown>,
+): MonitorHeartbeatMessage | null {
+  const base = parseDaemonBase(value);
+  if (!base) return null;
+  if (!isMonitorInstanceSummary(value.instance)) return null;
+  const resources = optionalResourceStates(value.resources);
+  if (resources === null) return null;
+  const events = optionalEvents(value.events);
+  if (events === null) return null;
+  const agent = parseDaemonAgentInfo(value.agent);
+  return {
+    type: "monitor.heartbeat",
+    from: "daemon",
+    ...base,
+    instance: value.instance,
+    resources,
+    events,
+    ...(agent ? { agent } : {}),
+  };
+}
+
+function parseMonitorTransition(
+  value: Record<string, unknown>,
+): MonitorTransitionMessage | null {
+  const base = parseDaemonBase(value);
+  if (!base) return null;
+  if (!isMonitorEventArray(value.events)) return null;
+  const resources = optionalResourceStates(value.resources);
+  if (resources === null) return null;
+  return {
+    type: "monitor.transition",
+    from: "daemon",
+    ...base,
+    events: value.events,
+    resources,
+  };
+}
+
+function parseMonitorAck(
+  value: Record<string, unknown>,
+): MonitorAckMessage | null {
+  if (value.from !== "instance") return null;
+  if (!isString(value.serverId) || !isString(value.at)) return null;
+  if (!isNumber(value.acceptedSequence)) return null;
+  if (
+    value.resyncNeeded !== undefined && typeof value.resyncNeeded !== "boolean"
+  ) {
+    return null;
+  }
+  return {
+    type: "monitor.ack",
+    from: "instance",
+    serverId: value.serverId,
+    at: value.at,
+    acceptedSequence: value.acceptedSequence,
+    resyncNeeded: value.resyncNeeded,
+  };
+}
+
 function parseMonitorMessageObject(
   value: Record<string, unknown>,
 ): MonitorMessage | null {
   const type = value.type;
   if (!isString(type) || !MONITOR_MESSAGE_TYPES.has(type)) return null;
-  if (!isString(value.serverId)) return null;
-  if (!isString(value.at)) return null;
 
   switch (type) {
-    case "monitor.sync": {
-      if (value.from !== "daemon") return null;
-      if (!isNumber(value.sequence)) return null;
-      if (!isMonitorInstanceSummary(value.instance)) return null;
-      if (!isMonitorResourceStateArray(value.resources)) return null;
-      if (value.events !== undefined && !isMonitorEventArray(value.events)) {
-        return null;
-      }
-      if (value.protocolVersion !== MONITOR_PROTOCOL_VERSION) return null;
-      const syncAgent = parseDaemonAgentInfo(value.agent);
-      return {
-        type: "monitor.sync",
-        from: "daemon",
-        serverId: value.serverId,
-        at: value.at,
-        sequence: value.sequence,
-        instance: value.instance,
-        resources: value.resources,
-        events: value.events,
-        protocolVersion: MONITOR_PROTOCOL_VERSION,
-        ...(syncAgent ? { agent: syncAgent } : {}),
-      };
-    }
-    case "monitor.heartbeat": {
-      if (value.from !== "daemon") return null;
-      if (!isNumber(value.sequence)) return null;
-      if (!isMonitorInstanceSummary(value.instance)) return null;
-      if (
-        value.resources !== undefined &&
-        !isMonitorResourceStateArray(value.resources)
-      ) {
-        return null;
-      }
-      if (value.events !== undefined && !isMonitorEventArray(value.events)) {
-        return null;
-      }
-      const heartbeatAgent = parseDaemonAgentInfo(value.agent);
-      return {
-        type: "monitor.heartbeat",
-        from: "daemon",
-        serverId: value.serverId,
-        at: value.at,
-        sequence: value.sequence,
-        instance: value.instance,
-        resources: value.resources,
-        events: value.events,
-        ...(heartbeatAgent ? { agent: heartbeatAgent } : {}),
-      };
-    }
-    case "monitor.transition": {
-      if (value.from !== "daemon") return null;
-      if (!isNumber(value.sequence)) return null;
-      if (!isMonitorEventArray(value.events)) return null;
-      if (
-        value.resources !== undefined &&
-        !isMonitorResourceStateArray(value.resources)
-      ) {
-        return null;
-      }
-      return {
-        type: "monitor.transition",
-        from: "daemon",
-        serverId: value.serverId,
-        at: value.at,
-        sequence: value.sequence,
-        events: value.events,
-        resources: value.resources,
-      };
-    }
-    case "monitor.ack": {
-      if (value.from !== "instance") return null;
-      if (!isNumber(value.acceptedSequence)) return null;
-      if (
-        value.resyncNeeded !== undefined &&
-        typeof value.resyncNeeded !== "boolean"
-      ) {
-        return null;
-      }
-      return {
-        type: "monitor.ack",
-        from: "instance",
-        serverId: value.serverId,
-        at: value.at,
-        acceptedSequence: value.acceptedSequence,
-        resyncNeeded: value.resyncNeeded,
-      };
-    }
+    case "monitor.sync":
+      return parseMonitorSync(value);
+    case "monitor.heartbeat":
+      return parseMonitorHeartbeat(value);
+    case "monitor.transition":
+      return parseMonitorTransition(value);
+    case "monitor.ack":
+      return parseMonitorAck(value);
     default:
       return null;
   }
 }
 
 /** validate and parse a monitor wire message from json or an already-parsed value. */
-export function parseMonitorMessage(
-  raw: string | unknown,
-): MonitorMessage | null {
+export function parseMonitorMessage(raw: unknown): MonitorMessage | null {
   let value: unknown = raw;
   if (typeof raw === "string") {
     try {

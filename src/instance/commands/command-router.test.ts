@@ -1,6 +1,14 @@
 import { assert, assertEquals, assertMatch } from "jsr:@std/assert";
 import type { CommandDispatchMessage } from "./contracts.ts";
 
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno);
+
 class MockWebSocket extends EventTarget {
   static readonly OPEN = 1;
 
@@ -19,7 +27,7 @@ function parseFrames(frames: string[]): Record<string, unknown>[] {
   return frames.map((frame) => JSON.parse(frame) as Record<string, unknown>);
 }
 
-Deno.test({
+test({
   name: "handleCommandDispatch acks then returns ping outcome",
   permissions: { env: true, sys: ["hostname"], read: true },
   fn: async () => {
@@ -57,7 +65,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "handleCommandDispatch returns sanitized error for unknown command type",
   permissions: { env: true, sys: ["hostname"], read: true },
@@ -85,7 +93,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "handleCommandDispatch acks then returns reboot outcome",
   permissions: { env: true, sys: ["hostname"], read: true },
   fn: async () => {
@@ -126,7 +134,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "handleCommandDispatch rejects invalid hostname before ansible",
   permissions: { env: true, sys: ["hostname"], read: true },
   fn: async () => {

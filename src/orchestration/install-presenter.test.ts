@@ -5,6 +5,14 @@ import { setActiveInstallPresenter } from "./install-presenter-context.ts";
 import { InstallPresenter } from "./install-presenter.ts";
 import { logInfo } from "../logger.ts";
 
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno);
+
 const STRUCTURED_LOG_LINE = /^\d{4}-\d{2}-\d{2}T.*\s(INFO|WARN|ERROR)\s+\S+/m;
 
 const FORBIDDEN_TOKENS = [
@@ -50,7 +58,7 @@ function assertNoForbiddenInstallerOutput(text: string, label: string): void {
 
 const TASK_DURATION = { start: "2026-01-01T00:00:00Z" };
 
-Deno.test("InstallPresenter non-TTY emits one sanitized status line per update", () => {
+test("InstallPresenter non-TTY emits one sanitized status line per update", () => {
   const stdout = captureWriteStream(Deno.stdout);
   const presenter = new InstallPresenter(false);
 
@@ -74,7 +82,7 @@ Deno.test("InstallPresenter non-TTY emits one sanitized status line per update",
   assertNoForbiddenInstallerOutput(out, "non-TTY stdout");
 });
 
-Deno.test("InstallPresenter fail reveals buffered detail tail on stderr", () => {
+test("InstallPresenter fail reveals buffered detail tail on stderr", () => {
   const stdout = captureWriteStream(Deno.stdout);
   const stderr = captureWriteStream(Deno.stderr);
   const presenter = new InstallPresenter(false);
@@ -112,7 +120,7 @@ Deno.test("InstallPresenter fail reveals buffered detail tail on stderr", () => 
   );
 });
 
-Deno.test("InstallEventPresenter simulated stream scrubs vendor vocabulary", () => {
+test("InstallEventPresenter simulated stream scrubs vendor vocabulary", () => {
   const stdout = captureWriteStream(Deno.stdout);
   const stderr = captureWriteStream(Deno.stderr);
   const presenter = new InstallPresenter(false);
@@ -189,7 +197,7 @@ Deno.test("InstallEventPresenter simulated stream scrubs vendor vocabulary", () 
   assertNoForbiddenInstallerOutput(combined, "simulated event stream");
 });
 
-Deno.test("InstallPresenter drops bootstrap noise from raw CPython, uv, and galaxy lines", () => {
+test("InstallPresenter drops bootstrap noise from raw CPython, uv, and galaxy lines", () => {
   const stdout = captureWriteStream(Deno.stdout);
   const presenter = new InstallPresenter(false);
   setActiveInstallPresenter(presenter);
@@ -219,7 +227,7 @@ Deno.test("InstallPresenter drops bootstrap noise from raw CPython, uv, and gala
   assertNoForbiddenInstallerOutput(out, "bootstrap noise drop");
 });
 
-Deno.test("logInfo routes bootstrap noise through presenter without leaking sanitized forms", () => {
+test("logInfo routes bootstrap noise through presenter without leaking sanitized forms", () => {
   const stdout = captureWriteStream(Deno.stdout);
   const presenter = new InstallPresenter(false);
   setActiveInstallPresenter(presenter);
@@ -256,7 +264,7 @@ Deno.test("logInfo routes bootstrap noise through presenter without leaking sani
   assertNoForbiddenInstallerOutput(out, "logger bootstrap noise");
 });
 
-Deno.test("installer success path emits only presenter output without trailing structured log", () => {
+test("installer success path emits only presenter output without trailing structured log", () => {
   const stdout = captureWriteStream(Deno.stdout);
   const presenter = new InstallPresenter(false);
   setActiveInstallPresenter(presenter);

@@ -38,7 +38,18 @@ export interface RunBootstrapOrchestrationOptions {
 }
 
 function resolveFailureMessage(err: unknown): string {
-  const raw = err instanceof Error ? err.message : String(err);
+  let raw: string;
+  if (err instanceof Error) {
+    raw = err.message;
+  } else if (typeof err === "string") {
+    raw = err;
+  } else {
+    try {
+      raw = JSON.stringify(err) ?? "orchestration failed";
+    } catch {
+      raw = "orchestration failed";
+    }
+  }
   return sanitizeStatusLine(raw) || "orchestration failed";
 }
 

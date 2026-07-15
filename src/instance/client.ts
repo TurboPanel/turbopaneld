@@ -20,7 +20,13 @@ import {
 } from "../dev-sync-apply.ts";
 import { applyPublicUrls } from "./public-urls-apply.ts";
 import { writeInstanceTunnelToken } from "../tunnels.ts";
-import { logDebug, logError, logInfo, logWarn } from "../logger.ts";
+import {
+  logDebug,
+  logError,
+  logInfo,
+  logWarn,
+  sanitizeForLog,
+} from "../logger.ts";
 import { type DaemonKeyFile, loadDaemonKeyFile } from "../crypto/keys.ts";
 import { DaemonApiClient, DaemonApiError } from "./api-client.ts";
 import { DaemonJwksClient } from "./jwks-client.ts";
@@ -44,21 +50,6 @@ import {
   resolveBootstrapInsecureTls,
   resolveRunScriptUrl,
 } from "./run-reconcile.ts";
-
-/** Chained replace pattern Sonar S5145 recognizes for log-injection sanitization. */
-function stripLogInjection(text: string): string {
-  return text.replaceAll("\n", "_").replaceAll("\r", "_").replaceAll("\t", "_");
-}
-
-function sanitizeForLog(value: unknown): string {
-  if (value instanceof Error) return stripLogInjection(value.message);
-  if (typeof value === "string") return stripLogInjection(value);
-  try {
-    return stripLogInjection(JSON.stringify(value) ?? String(value));
-  } catch {
-    return stripLogInjection(String(value));
-  }
-}
 
 type DaemonMessage =
   | { type: "echo"; payload: unknown; at: string }
@@ -759,7 +750,7 @@ export class InstanceClient {
       await new Promise<void>((resolve, reject) => {
         const fail = (err: unknown) => {
           cleanup();
-          reject(err instanceof Error ? err : new Error(String(err)));
+          reject(err instanceof Error ? err : new Error(sanitizeForLog(err)));
         };
 
         const cleanup = () => {

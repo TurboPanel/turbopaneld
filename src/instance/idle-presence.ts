@@ -1,6 +1,6 @@
 import { getBuildInfo } from "../build-info.ts";
 import { getHostHelloIdentity } from "../host/os-release.ts";
-import { logInfo, logWarn } from "../logger.ts";
+import { logInfo, logWarn, sanitizeForLog } from "../logger.ts";
 
 export const IDLE_PRESENCE_MS = 60_000;
 
@@ -15,10 +15,6 @@ export const MAX_CONNECTION_AGE_MS = 2 * 60 * 60 * 1_000;
 // Must match DAEMON_CELL_PING in instance/src/daemon/cell/protocol.ts exactly.
 const CELL_PING_MESSAGE = '{"type":"ping"}';
 
-function sanitizeForLog(value: unknown): string {
-  if (value instanceof Error) return value.message.replaceAll("\n", "_");
-  return String(value).replaceAll("\n", "_");
-}
 
 export type IdlePresenceOptions = {
   serverId: string;

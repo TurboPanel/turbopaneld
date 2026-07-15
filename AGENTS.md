@@ -165,9 +165,10 @@ compile toolchain).
   (`scripts/lib/release-artifacts.sh`) — reject dev-only paths, TS sources,
   `share/ansible`, or a leaked daemon source tree in a packaged release root.
   Release packaging helpers (`release-artifacts.sh`, `package-daemon-release.sh`,
-  `bundle-orchestration.sh`, `verify-release-root.sh`) are **bash**; `run.sh`
-  stays POSIX and inlines a separate copy of the manifest helpers for
-  `curl | sh`.
+  `bundle-orchestration.sh`, `verify-release-root.sh`) are **bash** — `deno.json`
+  must invoke them with `bash`, not `sh` (Debian `/bin/sh` is dash and silently
+  skips prune/verify checks that use `[[`). `run.sh` stays POSIX and inlines a
+  separate copy of the manifest helpers for `curl | sh`.
 
 ### Installer presentation layer
 

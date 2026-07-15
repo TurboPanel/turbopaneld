@@ -74,7 +74,7 @@ async function collectRoleYamlMaterial(
   }
 
   await walk(roleDir);
-  collected.sort();
+  collected.sort((a, b) => a.localeCompare(b));
   return collected;
 }
 

@@ -6,7 +6,10 @@ import {
   cloudflaredDownloadUrl,
   resolveCloudflaredAsset,
 } from "./paths.ts";
-import { logError, logInfo, logWarn } from "../logger.ts";
+import { logInfo, logWarn } from "../logger.ts";
+
+/** Mode for vendored CLI binaries installed under vendor (owner rwx, group/other rx). */
+const INSTALLED_VENDOR_BINARY_MODE = 0o755;
 
 async function fileExists(path: string): Promise<boolean> {
   try {
@@ -32,7 +35,7 @@ async function installedCloudflaredVersion(
     const { success, stdout } = await command.output();
     if (!success) return null;
     // Output looks like: "cloudflared version 2026.5.2 (built ...)"
-    const match = new TextDecoder().decode(stdout).match(/version\s+(\S+)/);
+    const match = /version\s+(\S+)/.exec(new TextDecoder().decode(stdout));
     return match ? match[1] : null;
   } catch {
     return null;
@@ -95,7 +98,8 @@ export async function ensureCloudflared(): Promise<string> {
 
   await Deno.mkdir(cloudflaredDir(), { recursive: true });
   await Deno.writeFile(bin, bytes);
-  await Deno.chmod(bin, 0o755);
+  // Vendored CLIs must be executable by service users (group/other rx).
+  await Deno.chmod(bin, INSTALLED_VENDOR_BINARY_MODE); // NOSONAR typescript:S2612
 
   const version = await installedCloudflaredVersion(bin);
   if (version !== CLOUDFLARED_VERSION) {

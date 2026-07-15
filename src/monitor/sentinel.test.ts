@@ -8,6 +8,14 @@ import type { MonitorDeliveryBundle } from "./delta.ts";
 import type { MonitorTransitionPayload } from "./delta.ts";
 import { createSentinel } from "./sentinel.ts";
 
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno);
+
 const CONTAINER_ID = "abc123def456789012345678901234567890123456789012345678";
 
 function makeSummary(id = CONTAINER_ID): ContainerSummary {
@@ -108,7 +116,7 @@ class FakeDockerMonitor implements
   }
 }
 
-Deno.test("sentinel bootstrap seeds tracked resources for sync payloads", async () => {
+test("sentinel bootstrap seeds tracked resources for sync payloads", async () => {
   const dockerMonitor = new FakeDockerMonitor();
   const sentinel = createSentinel({
     dockerMonitor: dockerMonitor as unknown as DockerMonitor,
@@ -131,7 +139,7 @@ Deno.test("sentinel bootstrap seeds tracked resources for sync payloads", async 
   sentinel.stop();
 });
 
-Deno.test("sentinel emits offline transition bundle when a container is removed", async () => {
+test("sentinel emits offline transition bundle when a container is removed", async () => {
   const dockerMonitor = new FakeDockerMonitor();
   const sentinel = createSentinel({
     dockerMonitor: dockerMonitor as unknown as DockerMonitor,
@@ -174,7 +182,7 @@ Deno.test("sentinel emits offline transition bundle when a container is removed"
   sentinel.stop();
 });
 
-Deno.test("sentinel emits transition bundle when a container status changes", async () => {
+test("sentinel emits transition bundle when a container status changes", async () => {
   const dockerMonitor = new FakeDockerMonitor();
   const sentinel = createSentinel({
     dockerMonitor: dockerMonitor as unknown as DockerMonitor,

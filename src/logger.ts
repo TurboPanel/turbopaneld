@@ -61,15 +61,26 @@ export function stripLogInjection(text: string): string {
 export function sanitizeForLog(value: unknown): string {
   if (value instanceof Error) return stripLogInjection(value.message);
   if (typeof value === "string") return stripLogInjection(value);
-  try {
-    return stripLogInjection(JSON.stringify(value) ?? String(value));
-  } catch {
-    return stripLogInjection(String(value));
+  if (
+    typeof value === "number" ||
+    typeof value === "boolean" ||
+    typeof value === "bigint"
+  ) {
+    return stripLogInjection(value.toString());
   }
+  if (value === null) return "null";
+  if (value === undefined) return "undefined";
+  try {
+    const json = JSON.stringify(value);
+    if (typeof json === "string") return stripLogInjection(json);
+  } catch {
+    // circular or otherwise unserializable
+  }
+  return "[unserializable]";
 }
 
 function formatParts(parts: unknown[]): string {
-  return parts.map(String).join(" ");
+  return parts.map(sanitizeForLog).join(" ");
 }
 
 function splitMessageLines(message: string): string[] {

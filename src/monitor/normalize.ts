@@ -85,10 +85,12 @@ function mapDockerStateStatus(
   }
 }
 
+const HEALTH_STATUS_ACTION = /^health_status:\s*(.+)$/i;
+
 function deriveStatusFromEventAction(
   action: string,
 ): MonitorResourceStatus | undefined {
-  const healthMatch = action.match(/^health_status:\s*(.+)$/i);
+  const healthMatch = HEALTH_STATUS_ACTION.exec(action);
   if (healthMatch) {
     return mapHealthStatus(healthMatch[1].trim());
   }
@@ -120,33 +122,51 @@ export function deriveContainerStatus(
   return "unknown";
 }
 
+type PortBinding = { HostIp?: string; HostPort?: string };
+type NetworkPorts = Record<string, PortBinding[] | null>;
+type SummaryPort = ContainerSummary["Ports"][number];
+
+function resolvePublishedHost(ip: string | undefined): string {
+  return ip && ip !== "0.0.0.0" ? ip : "0.0.0.0";
+}
+
+function formatInspectPortBinding(
+  privatePort: string,
+  binding: PortBinding,
+): string {
+  const host = resolvePublishedHost(binding.HostIp);
+  const hostPort = binding.HostPort ?? "?";
+  return `${host}:${hostPort}->${privatePort}`;
+}
+
+function formatInspectPorts(networkPorts: NetworkPorts): string[] | undefined {
+  const formatted: string[] = [];
+  for (const [privatePort, bindings] of Object.entries(networkPorts)) {
+    if (!bindings?.length) continue;
+    for (const binding of bindings) {
+      formatted.push(formatInspectPortBinding(privatePort, binding));
+    }
+  }
+  if (formatted.length === 0) return undefined;
+  return formatted;
+}
+
+function formatSummaryPort(port: SummaryPort): string {
+  const host = resolvePublishedHost(port.IP);
+  const publicPort = port.PublicPort ?? "?";
+  return `${host}:${publicPort}->${port.PrivatePort}/${port.Type}`;
+}
+
 function formatPorts(input: NormalizeContainerInput): string[] | undefined {
   const networkPorts = input.inspect?.NetworkSettings?.Ports;
   if (networkPorts) {
-    const formatted: string[] = [];
-    for (const [privatePort, bindings] of Object.entries(networkPorts)) {
-      if (!bindings || bindings.length === 0) continue;
-      for (const binding of bindings) {
-        const host = binding.HostIp && binding.HostIp !== "0.0.0.0"
-          ? binding.HostIp
-          : "0.0.0.0";
-        const hostPort = binding.HostPort ?? "?";
-        formatted.push(`${host}:${hostPort}->${privatePort}`);
-      }
-    }
-    if (formatted.length > 0) return formatted;
+    const fromInspect = formatInspectPorts(networkPorts);
+    if (fromInspect) return fromInspect;
   }
 
   const summaryPorts = input.summary?.Ports;
-  if (summaryPorts && summaryPorts.length > 0) {
-    return summaryPorts.map((port) => {
-      const host = port.IP && port.IP !== "0.0.0.0" ? port.IP : "0.0.0.0";
-      const publicPort = port.PublicPort ?? "?";
-      return `${host}:${publicPort}->${port.PrivatePort}/${port.Type}`;
-    });
-  }
-
-  return undefined;
+  if (!summaryPorts?.length) return undefined;
+  return summaryPorts.map(formatSummaryPort);
 }
 
 function resolveImage(input: NormalizeContainerInput): string | undefined {

@@ -119,7 +119,8 @@
       - python3
       - "{{ turbopanel_config_dir }}/tabix/inject-tabix-index.py"
   environment:
-    TABIX_HTML_DIR: "{{ tabix_html_dir }}"
+    # Paths are hardcoded in inject-tabix-index.py (FHS); only connection
+    # settings come from env so secrets stay out of argv / process lists.
     TABIX_CH_NAME: "{{ tabix_ch_name }}"
     TABIX_CH_HOST: "{{ tabix_ch_host }}"
     TABIX_CH_LOGIN: "{{ clickhouse_app_user }}"

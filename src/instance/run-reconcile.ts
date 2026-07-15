@@ -1,6 +1,9 @@
 import { encodeBase64Url } from "@std/encoding/base64url";
 import { readEnv, resolveLayout } from "../paths/layout.ts";
-import type { InstanceConfig } from "./paths.ts";
+import {
+  stripTrailingSlashes,
+  type InstanceConfig,
+} from "./paths.ts";
 
 export const PRODUCTION_CONTROL_PLANE = "https://turbopanel.app";
 export const CDN_RUN_SCRIPT = "https://trbp.nl/run.sh";
@@ -13,8 +16,7 @@ const layout = resolveLayout({
 export const CANONICAL_INSTANCE_CA_PATH = layout.instanceCaPath;
 
 export function isPlaintextHttpUrl(url: string | undefined): boolean {
-  const trimmed = url?.trim();
-  return trimmed !== undefined && trimmed.startsWith("http://");
+  return url?.trim()?.startsWith("http://") === true;
 }
 
 export function encodeLicenseArg(
@@ -26,7 +28,7 @@ export function encodeLicenseArg(
 
 export function resolveRunScriptUrl(config: InstanceConfig): string {
   if (config.kind === "url") {
-    const base = config.baseUrl.replace(/\/+$/, "");
+    const base = stripTrailingSlashes(config.baseUrl);
     if (base === PRODUCTION_CONTROL_PLANE) {
       return CDN_RUN_SCRIPT;
     }
@@ -60,7 +62,10 @@ export function buildRunReconcileArgs(options: {
   insecureTls?: boolean;
 }): string[] {
   const args = ["--license", options.licenseArg];
-  const instanceUrl = options.instanceUrl?.trim().replace(/\/+$/, "");
+  const trimmedUrl = options.instanceUrl?.trim();
+  const instanceUrl = trimmedUrl
+    ? stripTrailingSlashes(trimmedUrl)
+    : undefined;
   if (instanceUrl && instanceUrl !== PRODUCTION_CONTROL_PLANE) {
     args.push("--host", instanceUrl);
   }

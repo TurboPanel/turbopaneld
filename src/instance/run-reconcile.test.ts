@@ -9,6 +9,14 @@ import {
 } from "./run-reconcile.ts";
 import { join } from "@std/path";
 
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno);
+
 function assertEquals(actual: unknown, expected: unknown): void {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
     throw new Error(
@@ -17,7 +25,7 @@ function assertEquals(actual: unknown, expected: unknown): void {
   }
 }
 
-Deno.test("encodeLicenseArg uses base64url without padding", () => {
+test("encodeLicenseArg uses base64url without padding", () => {
   const encoded = encodeLicenseArg("license-id", "token");
   assertEquals(encoded.includes(":"), false);
   assertEquals(encoded.includes("+"), false);
@@ -25,7 +33,7 @@ Deno.test("encodeLicenseArg uses base64url without padding", () => {
   assertEquals(encoded.includes("="), false);
 });
 
-Deno.test("resolveRunScriptUrl uses CDN for production control plane", () => {
+test("resolveRunScriptUrl uses CDN for production control plane", () => {
   assertEquals(
     resolveRunScriptUrl({
       kind: "url",
@@ -36,7 +44,7 @@ Deno.test("resolveRunScriptUrl uses CDN for production control plane", () => {
   );
 });
 
-Deno.test("resolveRunScriptUrl uses instance host for self-hosted installs", () => {
+test("resolveRunScriptUrl uses instance host for self-hosted installs", () => {
   assertEquals(
     resolveRunScriptUrl({
       kind: "url",
@@ -47,7 +55,7 @@ Deno.test("resolveRunScriptUrl uses instance host for self-hosted installs", () 
   );
 });
 
-Deno.test("buildRunReconcileArgs omits --host for production", () => {
+test("buildRunReconcileArgs omits --host for production", () => {
   assertEquals(
     buildRunReconcileArgs({
       licenseArg: "abc",
@@ -57,7 +65,7 @@ Deno.test("buildRunReconcileArgs omits --host for production", () => {
   );
 });
 
-Deno.test("resolveBootstrapInsecureTls returns false for plaintext http even with releaseTlsInsecure", () => {
+test("resolveBootstrapInsecureTls returns false for plaintext http even with releaseTlsInsecure", () => {
   assertEquals(
     resolveBootstrapInsecureTls({
       releaseTlsInsecure: "1",
@@ -67,7 +75,7 @@ Deno.test("resolveBootstrapInsecureTls returns false for plaintext http even wit
   );
 });
 
-Deno.test("buildRunReconcileArgs omits TLS flags for plaintext http instance URL", () => {
+test("buildRunReconcileArgs omits TLS flags for plaintext http instance URL", () => {
   assertEquals(
     buildRunReconcileArgs({
       licenseArg: "abc",
@@ -79,7 +87,7 @@ Deno.test("buildRunReconcileArgs omits TLS flags for plaintext http instance URL
   );
 });
 
-Deno.test("downloadRunScript uses plain -fsSL for plaintext http URL", async () => {
+test("downloadRunScript uses plain -fsSL for plaintext http URL", async () => {
   const originalCommand = Deno.Command;
   let capturedArgs: string[] | undefined;
   try {
@@ -110,7 +118,7 @@ Deno.test("downloadRunScript uses plain -fsSL for plaintext http URL", async () 
   }
 });
 
-Deno.test("resolveBootstrapInsecureTls uses CDN without insecure flag", () => {
+test("resolveBootstrapInsecureTls uses CDN without insecure flag", () => {
   assertEquals(
     resolveBootstrapInsecureTls({
       runScriptUrl: CDN_RUN_SCRIPT,
@@ -119,7 +127,7 @@ Deno.test("resolveBootstrapInsecureTls uses CDN without insecure flag", () => {
   );
 });
 
-Deno.test("resolveBootstrapInsecureTls enables insecure for self-hosted without CA", () => {
+test("resolveBootstrapInsecureTls enables insecure for self-hosted without CA", () => {
   assertEquals(
     resolveBootstrapInsecureTls({
       runScriptUrl: "https://huey.lan:8443/run.sh",
@@ -128,7 +136,7 @@ Deno.test("resolveBootstrapInsecureTls enables insecure for self-hosted without 
   );
 });
 
-Deno.test("resolveBootstrapInsecureTls prefers platform CA for self-hosted", () => {
+test("resolveBootstrapInsecureTls prefers platform CA for self-hosted", () => {
   assertEquals(
     resolveBootstrapInsecureTls({
       runScriptUrl: "https://huey.lan:8443/run.sh",
@@ -138,7 +146,7 @@ Deno.test("resolveBootstrapInsecureTls prefers platform CA for self-hosted", () 
   );
 });
 
-Deno.test("buildRunReconcileArgs includes self-hosted flags", () => {
+test("buildRunReconcileArgs includes self-hosted flags", () => {
   assertEquals(
     buildRunReconcileArgs({
       licenseArg: "abc",
@@ -159,7 +167,7 @@ Deno.test("buildRunReconcileArgs includes self-hosted flags", () => {
   );
 });
 
-Deno.test("buildRunReconcileArgs passes non-canonical instance CA path", () => {
+test("buildRunReconcileArgs passes non-canonical instance CA path", () => {
   assertEquals(
     buildRunReconcileArgs({
       licenseArg: "abc",
@@ -180,7 +188,7 @@ Deno.test("buildRunReconcileArgs passes non-canonical instance CA path", () => {
   );
 });
 
-Deno.test("executeRunReconcile chdir survives daemon directory swap", async () => {
+test("executeRunReconcile chdir survives daemon directory swap", async () => {
   const tmp = await Deno.makeTempDir({ prefix: "tp-reconcile-" });
   const daemonDir = join(tmp, "daemon");
   await Deno.mkdir(daemonDir, { recursive: true });

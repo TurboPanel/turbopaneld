@@ -1,3 +1,4 @@
+import { it } from "@std/testing/bdd";
 import { DaemonJwksClient, type InstanceJwtClaims } from "./jwks-client.ts";
 import { createTestSigningKey, signInstanceJwt } from "./jwks-test-helpers.ts";
 import type { JwksDocument } from "./api-client.ts";
@@ -23,7 +24,7 @@ function makeClient(
   return { client, getJwksCalls: () => calls };
 }
 
-Deno.test("valid token verifies and cache hit avoids refetch", async () => {
+it("valid token verifies and cache hit avoids refetch", async () => {
   const { kid, privateKey, jwks } = await createTestSigningKey();
   const { client, getJwksCalls } = makeClient(jwks);
   const token = await signInstanceJwt(privateKey, kid, {
@@ -45,7 +46,7 @@ Deno.test("valid token verifies and cache hit avoids refetch", async () => {
   }
 });
 
-Deno.test("unknown kid triggers exactly one refresh and is bounded", async () => {
+it("unknown kid triggers exactly one refresh and is bounded", async () => {
   const primary = await createTestSigningKey();
   const secondary = await createTestSigningKey();
   let calls = 0;
@@ -84,7 +85,7 @@ Deno.test("unknown kid triggers exactly one refresh and is bounded", async () =>
   }
 });
 
-Deno.test("expired token returns invalid", async () => {
+it("expired token returns invalid", async () => {
   const { kid, privateKey, jwks } = await createTestSigningKey();
   const { client } = makeClient(jwks);
   const token = await signInstanceJwt(privateKey, kid, {
@@ -99,7 +100,7 @@ Deno.test("expired token returns invalid", async () => {
   }
 });
 
-Deno.test("bad signature returns invalid", async () => {
+it("bad signature returns invalid", async () => {
   const { encodeBase64Url } = await import("@std/encoding/base64url");
   const { kid, privateKey, jwks } = await createTestSigningKey();
   const { client } = makeClient(jwks);
@@ -117,7 +118,7 @@ Deno.test("bad signature returns invalid", async () => {
   }
 });
 
-Deno.test("wrong iss aud typ return invalid", async () => {
+it("wrong iss aud typ return invalid", async () => {
   const { kid, privateKey, jwks } = await createTestSigningKey();
   const { client } = makeClient(jwks);
 
@@ -140,7 +141,7 @@ Deno.test("wrong iss aud typ return invalid", async () => {
   }
 });
 
-Deno.test("getJwks throws with empty cache returns unavailable", async () => {
+it("getJwks throws with empty cache returns unavailable", async () => {
   const client = new DaemonJwksClient({
     apiClient: {
       getJwks: async () => {
@@ -162,7 +163,7 @@ Deno.test("getJwks throws with empty cache returns unavailable", async () => {
   }
 });
 
-Deno.test("getJwks throws with expired token returns invalid not unavailable", async () => {
+it("getJwks throws with expired token returns invalid not unavailable", async () => {
   const client = new DaemonJwksClient({
     apiClient: {
       getJwks: async () => {
@@ -183,7 +184,7 @@ Deno.test("getJwks throws with expired token returns invalid not unavailable", a
   }
 });
 
-Deno.test("getJwks throws with wrong iss aud typ returns invalid", async () => {
+it("getJwks throws with wrong iss aud typ returns invalid", async () => {
   const client = new DaemonJwksClient({
     apiClient: {
       getJwks: async () => {
@@ -215,7 +216,7 @@ Deno.test("getJwks throws with wrong iss aud typ returns invalid", async () => {
   }
 });
 
-Deno.test("empty sub or kid claim returns invalid", async () => {
+it("empty sub or kid claim returns invalid", async () => {
   const { kid, privateKey, jwks } = await createTestSigningKey();
   const { client } = makeClient(jwks);
 

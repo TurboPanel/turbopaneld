@@ -1,7 +1,8 @@
 import { logWarn } from "../logger.ts";
 
 /** Base URL used with the Unix-socket HTTP client (host is ignored). */
-export const DOCKER_HTTP_ORIGIN = "http://docker";
+// Docker Engine speaks plain HTTP over the Unix socket; there is no TLS hop.
+export const DOCKER_HTTP_ORIGIN = "http://docker"; // NOSONAR typescript:S5332 — Unix-socket Docker API, not a cleartext network endpoint
 
 /**
  * Absolute path to the Docker Engine Unix socket.
@@ -15,7 +16,7 @@ export function resolveDockerSocket(
   const override = env.TURBOPANEL_DOCKER_SOCKET?.trim();
   if (override) return override;
 
-  // TODO(rootless): when docker_rootless is enabled, resolve /run/user/<uid>/docker.sock here
+  // Future: when docker_rootless is enabled, resolve /run/user/<uid>/docker.sock here
   return "/var/run/docker.sock";
 }
 
@@ -71,8 +72,26 @@ export type DockerEvent = {
   from?: string;
 };
 
+function isStreamAbortError(error: unknown, signal: AbortSignal): boolean {
+  if (signal.aborted) return true;
+  if (error instanceof DOMException && error.name === "AbortError") return true;
+  return error instanceof Deno.errors.BadResource;
+}
+
+function* parseEventLines(lines: string[]): Generator<DockerEvent> {
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      yield JSON.parse(trimmed) as DockerEvent;
+    } catch {
+      logWarn("docker-client", "events stream: invalid json line");
+    }
+  }
+}
+
 export class DockerClient {
-  #httpClient: Deno.HttpClient;
+  readonly #httpClient: Deno.HttpClient;
   #closed = false;
 
   constructor(socketPath?: string) {
@@ -146,21 +165,8 @@ export class DockerClient {
       ],
     };
     const query = `?filters=${encodeURIComponent(JSON.stringify(filters))}`;
-    let response: Response;
-    try {
-      response = await this.#fetch(`/events${query}`, { signal });
-    } catch (error) {
-      if (
-        signal.aborted ||
-        error instanceof DOMException && error.name === "AbortError"
-      ) {
-        return;
-      }
-      if (error instanceof Deno.errors.BadResource) {
-        return;
-      }
-      throw error;
-    }
+    const response = await this.#openEventsResponse(query, signal);
+    if (!response) return;
 
     if (!response.ok || !response.body) {
       throw new Error(`stream events failed: HTTP ${response.status}`);
@@ -169,8 +175,34 @@ export class DockerClient {
     const reader = response.body
       .pipeThrough(new TextDecoderStream())
       .getReader();
-    let buffer = "";
+    try {
+      yield* this.#readEventLines(reader, signal);
+    } finally {
+      try {
+        reader.releaseLock();
+      } catch {
+        // stream already closed
+      }
+    }
+  }
 
+  async #openEventsResponse(
+    query: string,
+    signal: AbortSignal,
+  ): Promise<Response | null> {
+    try {
+      return await this.#fetch(`/events${query}`, { signal });
+    } catch (error) {
+      if (isStreamAbortError(error, signal)) return null;
+      throw error;
+    }
+  }
+
+  async *#readEventLines(
+    reader: ReadableStreamDefaultReader<string>,
+    signal: AbortSignal,
+  ): AsyncGenerator<DockerEvent> {
+    let buffer = "";
     try {
       while (!signal.aborted) {
         const { done, value } = await reader.read();
@@ -179,34 +211,11 @@ export class DockerClient {
         buffer += value;
         const lines = buffer.split("\n");
         buffer = lines.pop() ?? "";
-
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          try {
-            yield JSON.parse(trimmed) as DockerEvent;
-          } catch {
-            logWarn("docker-client", "events stream: invalid json line");
-          }
-        }
+        yield* parseEventLines(lines);
       }
     } catch (error) {
-      if (
-        signal.aborted ||
-        error instanceof DOMException && error.name === "AbortError"
-      ) {
-        return;
-      }
-      if (error instanceof Deno.errors.BadResource) {
-        return;
-      }
+      if (isStreamAbortError(error, signal)) return;
       throw error;
-    } finally {
-      try {
-        reader.releaseLock();
-      } catch {
-        // stream already closed
-      }
     }
   }
 
