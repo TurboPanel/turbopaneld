@@ -45,6 +45,17 @@ function assertNotIn(
   }
 }
 
+function parseYamlInt(yaml: string, key: string): number {
+  const match = new RegExp(
+    String.raw`^\s*${key}:\s*["']?(\d+)["']?\s*$`,
+    "m",
+  ).exec(yaml);
+  if (!match) {
+    throw new TypeError(`could not parse ${key} as integer from YAML`);
+  }
+  return Number(match[1]);
+}
+
 test("checked-in ansible.cfg defines vendored collections_path", async () => {
   const cfgPaths = [
     join(CHECKOUT_ORCHESTRATION_DIR, "ansible.cfg"),
@@ -167,6 +178,124 @@ test(
       /\.clickhouse_app_pass/,
       "config.json references app password file",
     );
+  },
+);
+
+test(
+  "clickhouse low-footprint defaults pin cache size and container resource caps",
+  async () => {
+    const defaultsPath = join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/clickhouse/defaults/main.yml",
+    );
+    const configPath = join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/clickhouse/templates/config.xml.j2",
+    );
+    const tasksPath = join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/clickhouse/tasks/main.yml",
+    );
+    const defaults = await Deno.readTextFile(defaultsPath);
+    const config = await Deno.readTextFile(configPath);
+    const tasks = await Deno.readTextFile(tasksPath);
+
+    const markCache = parseYamlInt(defaults, "clickhouse_mark_cache_size");
+    const serverMemory = parseYamlInt(
+      defaults,
+      "clickhouse_max_server_memory_usage",
+    );
+    const memoryBytes = parseYamlInt(
+      defaults,
+      "clickhouse_container_memory_bytes",
+    );
+    const nanoCpus = parseYamlInt(defaults, "clickhouse_container_nanocpus");
+
+    // Ceilings: catch silent upward regressions of the low-footprint profile.
+    if (markCache > 67_108_864) {
+      throw new Error(
+        `${defaultsPath}: clickhouse_mark_cache_size=${markCache} exceeds 64 MiB ceiling`,
+      );
+    }
+    if (serverMemory > 536_870_912) {
+      throw new Error(
+        `${defaultsPath}: clickhouse_max_server_memory_usage=${serverMemory} exceeds 512 MiB ceiling`,
+      );
+    }
+    if (memoryBytes > 805_306_368) {
+      throw new Error(
+        `${defaultsPath}: clickhouse_container_memory_bytes=${memoryBytes} exceeds 768 MiB ceiling`,
+      );
+    }
+    if (nanoCpus > 1_000_000_000) {
+      throw new Error(
+        `${defaultsPath}: clickhouse_container_nanocpus=${nanoCpus} exceeds 1.0 CPU ceiling`,
+      );
+    }
+
+    assertMatch(
+      config,
+      /<mark_cache_size>\{\{\s*clickhouse_mark_cache_size\s*\}\}<\/mark_cache_size>/,
+      "config.xml.j2 renders mark_cache_size from defaults",
+    );
+    assertMatch(
+      config,
+      /<max_server_memory_usage>\{\{\s*clickhouse_max_server_memory_usage\s*\}\}<\/max_server_memory_usage>/,
+      "config.xml.j2 renders max_server_memory_usage from defaults",
+    );
+    assertMatch(
+      tasks,
+      /"--memory"/,
+      "tasks pass --memory to docker run",
+    );
+    assertMatch(
+      tasks,
+      /"--cpus"/,
+      "tasks pass --cpus to docker run",
+    );
+    assertMatch(
+      tasks,
+      /_ch_memory_ok/,
+      "tasks drift-check container memory",
+    );
+    assertMatch(
+      tasks,
+      /_ch_cpus_ok/,
+      "tasks drift-check container cpus",
+    );
+  },
+);
+
+test(
+  "clickhouse system-log DROP cleanup stays aligned with config.xml remove list",
+  async () => {
+    const configPath = join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/clickhouse/templates/config.xml.j2",
+    );
+    const tasksPath = join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/clickhouse/tasks/main.yml",
+    );
+    const config = await Deno.readTextFile(configPath);
+    const tasks = await Deno.readTextFile(tasksPath);
+
+    const removedLogs = [
+      ...config.matchAll(/<([a-z0-9_]+)\s+remove="remove"\s*\/>/g),
+    ].map((match) => match[1]!);
+    if (removedLogs.length === 0) {
+      throw new Error(
+        `${configPath}: expected at least one <*_log remove="remove"/> entry`,
+      );
+    }
+    for (const logName of removedLogs) {
+      const drop = `DROP TABLE IF EXISTS system.${logName};`;
+      if (!tasks.includes(drop)) {
+        throw new Error(
+          `${tasksPath}: missing cleanup for disabled system log ${logName} (expected ${drop})`,
+        );
+      }
+    }
   },
 );
 

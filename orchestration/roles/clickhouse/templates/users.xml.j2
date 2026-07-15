@@ -22,14 +22,15 @@
             <max_threads>2</max_threads>
             <max_final_threads>2</max_final_threads>
             <!--
-              Batch single-row host-metrics inserts (one sample/~60s) into fewer
-              MergeTree parts. turbopanel_app inherits this profile via SQL CREATE
-              USER … SETTINGS PROFILE 'default'. wait_for_async_insert=0 matches
-              fire-and-forget metrics writes — the client does not block on flush.
+              Secondary server-side coalescing only. Primary batching for the
+              ~1 sample/min metrics workload lives in the instance
+              ClickHouseServerMetricsStore (row count + age). A short
+              async_insert_busy_timeout_ms is not the main part-batching path.
+              turbopanel_app inherits this profile via SQL CREATE USER.
             -->
             <async_insert>1</async_insert>
             <wait_for_async_insert>0</wait_for_async_insert>
-            <async_insert_busy_timeout_ms>2000</async_insert_busy_timeout_ms>
+            <async_insert_busy_timeout_ms>60000</async_insert_busy_timeout_ms>
             <async_insert_max_data_size>1000000</async_insert_max_data_size>
         </default>
     </profiles>

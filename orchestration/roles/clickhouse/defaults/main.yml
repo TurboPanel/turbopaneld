@@ -35,3 +35,16 @@ clickhouse_config_owner: "{{ turbopanel_dev_user if (turbopanel_dev_user | defau
 turbopanel_config_dir: /etc/turbopanel
 clickhouse_database: turbopanel_metrics
 clickhouse_app_user: turbopanel_app
+# Low-footprint profile for a one-server metrics workload (co-located / small
+# control-plane hosts). Tests in ansible.test.ts pin these ceilings so they
+# cannot regress upward unnoticed.
+# Mark cache: 64 MiB (was 512 MiB — too large for tiny MergeTree volumes).
+clickhouse_mark_cache_size: 67108864
+# Absolute server memory cap: 512 MiB (preferred over a RAM-ratio that grows
+# with host size).
+clickhouse_max_server_memory_usage: 536870912
+# Docker runtime caps (inspect drift recreates containers missing these).
+clickhouse_container_memory: 768m
+clickhouse_container_memory_bytes: 805306368
+clickhouse_container_cpus: "1.0"
+clickhouse_container_nanocpus: 1000000000

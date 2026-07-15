@@ -10,11 +10,11 @@
   ports keep the base-image defaults — the container listens on 0.0.0.0 inside the
   Docker network; host exposure is already limited to the loopback -p publish.
 
-  Memory caps (small co-located / single-server installs):
-  - max_server_memory_usage_to_ram_ratio = 0.35 — keep ClickHouse well under half
-    of host RAM so Postgres/Redis/RabbitMQ/instance share the box peacefully.
-  - mark_cache_size = 536870912 (512 MiB) — enough for MergeTree mark cache on
-    metrics volumes without claiming multi-GB by default.
+  Memory caps (small co-located / single-server installs — defaults in
+  roles/clickhouse/defaults/main.yml):
+  - max_server_memory_usage = {{ clickhouse_max_server_memory_usage }} (absolute)
+  - mark_cache_size = {{ clickhouse_mark_cache_size }}
+  Docker also applies --memory / --cpus from the same defaults.
 
   Idle-CPU tuning (single otherwise-idle server): slow the async-metrics cadence,
   shrink always-awake background merge/schedule pools, cap the global thread pool
@@ -37,8 +37,8 @@
     <user_files_path>/var/lib/clickhouse/user_files/</user_files_path>
     <format_schema_path>/var/lib/clickhouse/format_schemas/</format_schema_path>
 
-    <max_server_memory_usage_to_ram_ratio>0.35</max_server_memory_usage_to_ram_ratio>
-    <mark_cache_size>536870912</mark_cache_size>
+    <max_server_memory_usage>{{ clickhouse_max_server_memory_usage }}</max_server_memory_usage>
+    <mark_cache_size>{{ clickhouse_mark_cache_size }}</mark_cache_size>
 
     <mlock_executable>false</mlock_executable>
 

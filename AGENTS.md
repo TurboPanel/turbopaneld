@@ -443,17 +443,22 @@ MergeTree free-entry gates (`number_of_free_entries_in_pool_to_execute_mutation`
 ClickHouse 26.x refuses to start when any of those defaults (20 / 8 / 25) exceed
 `background_pool_size * background_merges_mutations_concurrency_ratio` (keep
 `background_pool_size` and the ratio at 2/1). Disabling a system log in config
-stops new writes but does not drop an already-materialized table: after
-restarting ClickHouse with the updated overlay, if
-`system.aggregated_zookeeper_log` still exists from a prior run, drop it once as
-the bootstrap admin
-(`docker exec turbopanel-analytics clickhouse-client --query "DROP TABLE IF EXISTS system.aggregated_zookeeper_log"`).
+stops new writes but does not drop an already-materialized table: the
+`clickhouse` role runs an idempotent post-ready admin cleanup that
+`DROP TABLE IF EXISTS` every `*_log` removed in `config.xml.j2` (including
+`aggregated_zookeeper_log`). `ansible.test.ts` asserts the DROP list stays
+aligned with the config remove list.
 
-The `users.d` **default** profile also enables **async insert batching**
-(`async_insert=1`, `wait_for_async_insert=0`,
-`async_insert_busy_timeout_ms=2000`, `async_insert_max_data_size=1000000`) so
-single-row host-metrics inserts from `turbopanel_app` (inherits `default`)
-coalesce into fewer MergeTree parts instead of one part per ~60 s sample.
+**Low-footprint resource caps** (role defaults — `ansible.test.ts` pin ceilings):
+`mark_cache_size` **64 MiB**, `max_server_memory_usage` **512 MiB**, Docker
+`--memory 768m` / `--cpus 1.0`. Drift checks recreate containers missing the
+memory/CPU limits.
+
+Primary write batching for ~1 sample/min traffic lives in the instance
+`ClickHouseServerMetricsStore` (row count + max age). The `users.d` **default**
+profile still enables secondary **async insert** coalescing (`async_insert=1`,
+`wait_for_async_insert=0`, `async_insert_busy_timeout_ms=60000`,
+`async_insert_max_data_size=1000000`) — not the main part-batching path.
 `wait_for_async_insert=0` keeps the fire-and-forget write path non-blocking.
 
 HTTP interface is published **loopback-only on `127.0.0.1:8123`** (native TCP
@@ -467,9 +472,10 @@ granted **only via SQL** (not declared in `users.xml`, default `HOST ANY`) and
 scoped to database `turbopanel_metrics`.
 
 **`turbopanel_app` grants (SQL bootstrap):** `SELECT`, `INSERT`, `CREATE TABLE`,
-`CREATE VIEW`, and `SHOW` on `turbopanel_metrics.*` only — enough for
-instance-owned `ensureSchema()` (`CREATE TABLE IF NOT EXISTS`) and metrics
-reads/writes. No `DROP`, `TRUNCATE`, or `ALTER`.
+`CREATE VIEW`, `ALTER`, and `SHOW` on `turbopanel_metrics.*` — enough for
+instance-owned `ensureSchema()` (`CREATE TABLE IF NOT EXISTS` plus
+`MODIFY SETTING` / `MODIFY TTL`) and metrics reads/writes. No `DROP` or
+`TRUNCATE`.
 
 **Converge wiring:** co-located dev installs ClickHouse via
 `dev/orchestration/dev-converge-manifest.json` (role `clickhouse`, after

@@ -162,6 +162,12 @@
     _ch_image_ok: "{{ (_ch_container.Config.Image | default('')) == clickhouse_image }}"
     _ch_user_ok: >-
       {{ (_ch_container.Config.User | default('')) == (clickhouse_container_uid | string ~ ':' ~ clickhouse_container_gid | string) }}
+    _ch_memory_ok: >-
+      {{ (_ch_container.HostConfig.Memory | default(0) | int)
+         == (clickhouse_container_memory_bytes | int) }}
+    _ch_cpus_ok: >-
+      {{ (_ch_container.HostConfig.NanoCpus | default(0) | int)
+         == (clickhouse_container_nanocpus | int) }}
   when: _ch_inspect_cmd.rc == 0
 
 - name: Set clickhouse container missing facts
@@ -173,8 +179,9 @@
 # Recreate (not just restart) when the running container has drifted from the
 # role's contract: missing volume/network, missing config.d/users.d overlay
 # mounts, a wrong/public 8123 host binding (must be exactly 127.0.0.1:<port>),
-# a stale image or --user, or an unhealthy status. `docker restart` cannot add
-# missing bind mounts or correct a port binding, so those must force a rebuild.
+# a stale image or --user, missing --memory/--cpus caps, or an unhealthy status.
+# `docker restart` cannot add missing bind mounts, port bindings, or resource
+# limits, so those must force a rebuild.
 - name: Remove clickhouse container with drifted configuration
   ansible.builtin.command:
     cmd: docker rm -f {{ clickhouse_container_name }}
@@ -188,6 +195,8 @@
         or (not _ch_http_binding_ok | bool)
         or (not _ch_image_ok | bool)
         or (not _ch_user_ok | bool)
+        or (not _ch_memory_ok | bool)
+        or (not _ch_cpus_ok | bool)
         or (_ch_status | trim in ['restarting', 'exited', 'dead'])
   register: _ch_removed
   changed_when: _ch_removed.rc == 0
@@ -227,6 +236,10 @@
       - "{{ turbopanel_config_dir }}/clickhouse/users.xml:/etc/clickhouse-server/users.d/turbopanel.xml:ro"
       - "--ulimit"
       - "nofile=262144:262144"
+      - "--memory"
+      - "{{ clickhouse_container_memory }}"
+      - "--cpus"
+      - "{{ clickhouse_container_cpus }}"
       - "-p"
       - "127.0.0.1:{{ clickhouse_http_port }}:8123"
 
@@ -310,7 +323,47 @@
     CREATE DATABASE IF NOT EXISTS {{ clickhouse_database }};
     CREATE USER IF NOT EXISTS {{ clickhouse_app_user }} IDENTIFIED WITH sha256_password BY '{{ _clickhouse_app_password }}';
     ALTER USER {{ clickhouse_app_user }} IDENTIFIED WITH sha256_password BY '{{ _clickhouse_app_password }}';
-    GRANT SELECT, INSERT, CREATE TABLE, CREATE VIEW, SHOW ON {{ clickhouse_database }}.* TO {{ clickhouse_app_user }};
+    GRANT SELECT, INSERT, CREATE TABLE, CREATE VIEW, ALTER, SHOW ON {{ clickhouse_database }}.* TO {{ clickhouse_app_user }};
+    EOSQL
+  no_log: true
+  changed_when: false
+
+# Disabling system *_log in config.d stops new writes but does not drop tables
+# that already exist from a prior run — those keep flush/merge scheduler threads
+# alive. Drop every remove="remove" log from config.xml.j2 (keep lists aligned;
+# guarded by ansible.test.ts).
+- name: Drop disabled ClickHouse system log tables (idempotent)
+  args:
+    executable: /bin/bash
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker exec -i {{ clickhouse_container_name }} clickhouse-client \
+      --user default --password '{{ _clickhouse_admin_password }}' --multiquery <<EOSQL
+    DROP TABLE IF EXISTS system.query_log;
+    DROP TABLE IF EXISTS system.trace_log;
+    DROP TABLE IF EXISTS system.metric_log;
+    DROP TABLE IF EXISTS system.asynchronous_metric_log;
+    DROP TABLE IF EXISTS system.session_log;
+    DROP TABLE IF EXISTS system.part_log;
+    DROP TABLE IF EXISTS system.text_log;
+    DROP TABLE IF EXISTS system.error_log;
+    DROP TABLE IF EXISTS system.crash_log;
+    DROP TABLE IF EXISTS system.query_thread_log;
+    DROP TABLE IF EXISTS system.query_views_log;
+    DROP TABLE IF EXISTS system.query_metric_log;
+    DROP TABLE IF EXISTS system.processors_profile_log;
+    DROP TABLE IF EXISTS system.latency_log;
+    DROP TABLE IF EXISTS system.backup_log;
+    DROP TABLE IF EXISTS system.asynchronous_insert_log;
+    DROP TABLE IF EXISTS system.opentelemetry_span_log;
+    DROP TABLE IF EXISTS system.blob_storage_log;
+    DROP TABLE IF EXISTS system.filesystem_cache_log;
+    DROP TABLE IF EXISTS system.filesystem_read_prefetches_log;
+    DROP TABLE IF EXISTS system.s3queue_log;
+    DROP TABLE IF EXISTS system.background_schedule_pool_log;
+    DROP TABLE IF EXISTS system.zookeeper_log;
+    DROP TABLE IF EXISTS system.zookeeper_connection_log;
+    DROP TABLE IF EXISTS system.aggregated_zookeeper_log;
     EOSQL
   no_log: true
   changed_when: false
