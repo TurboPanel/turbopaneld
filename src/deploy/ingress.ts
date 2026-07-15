@@ -183,13 +183,23 @@ export async function ensureHostingIngress(layout: LayoutPaths): Promise<void> {
   await installAndStartCaddy(unitSource);
 }
 
-function siteSnippet(hostname: string): string {
+function siteSnippet(
+  hostname: string,
+  tlsId: string | undefined,
+  tlsDir: string,
+): string {
+  const tlsLine = tlsId
+    ? `  tls ${join(tlsDir, tlsId, "fullchain.pem")} ${
+      join(tlsDir, tlsId, "privkey.pem")
+    }`
+    : "  tls internal";
+
   return `http://${hostname} {
   reverse_proxy 127.0.0.1:8080
 }
 
 ${hostname} {
-  tls internal
+${tlsLine}
   reverse_proxy 127.0.0.1:8080
 }
 `;
@@ -198,6 +208,7 @@ ${hostname} {
 export async function rewriteHostingCaddySites(
   layout: LayoutPaths,
   payload: EnvironmentDeployPayload,
+  hostnameTls?: Map<string, string>,
 ): Promise<void> {
   if (!SAFE_FILE_ID_RE.test(payload.environmentId)) {
     throw new Error("environmentId contains unsupported characters");
@@ -211,7 +222,11 @@ export async function rewriteHostingCaddySites(
     .sort((a, b) => a.localeCompare(b));
   await Deno.writeTextFile(
     join(sitesDir, `${payload.environmentId}.caddy`),
-    hostnames.map(siteSnippet).join("\n"),
+    hostnames
+      .map((hostname) =>
+        siteSnippet(hostname, hostnameTls?.get(hostname), layout.tlsDir)
+      )
+      .join("\n"),
     { mode: 0o640 },
   );
 

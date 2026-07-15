@@ -582,15 +582,24 @@ so daemon-only hosts get no GUI.
    `<stateDir>/deployments/<environmentId>/docker-compose.yml` with Traefik
    labels (`src/deploy/compose-labels.ts`).
 5. `docker compose -p <projectName> up -d --remove-orphans`.
-6. Refresh hosting-edge Caddy config under `/etc/turbopanel/hosting/`
-   (`auto_https off`, `tls internal` for HTTPS) using vendor caddy; unit
-   `turbopanel-hosting-caddy.service` when sudo allows. **Distinct** from
-   control-plane Caddy (`:8443`).
-7. Best-effort `docker compose ps --format json` — per-container identity/status
+6. When the payload includes `tlsMaterial[]`, materialize org certs under
+   `layout.tlsDir` (`/etc/turbopanel/tls/<tlsId>/fullchain.pem` +
+   `privkey.pem`, modes `0640`/`0600`) via `materializeTlsCertificates`
+   (`src/deploy/materialize-tls.ts`). Private keys arrive as
+   `tpdaemon` envelopes — decrypt only through
+   `POST /api/daemon/v1/secrets/decrypt` (daemon JWT); never log plaintext.
+7. Refresh hosting-edge Caddy config under `/etc/turbopanel/hosting/`
+   (`auto_https off` always). Per-hostname site blocks use
+   `tls <fullchain> <privkey>` when a resolved `tlsId` was materialized;
+   otherwise `tls internal`. Unit `turbopanel-hosting-caddy.service` when
+   sudo allows. **Distinct** from control-plane Caddy (`:8443`).
+8. Best-effort `docker compose ps --format json` — per-container identity/status
    (`containerId`, `containerName`, `composeServiceName`, `status`, optional
    `serviceId` from `payload.hostings`) is included in the command result when
    collection succeeds; a `ps`/parse failure never fails an otherwise-successful
    deploy.
 
-Helpers: `src/deploy/ensure-docker.ts`, `src/deploy/ingress.ts`. Future seams
-(not MVP): multi-server service placement, WireGuard mesh, swarm-style replicas.
+Helpers: `src/deploy/ensure-docker.ts`, `src/deploy/ingress.ts`,
+`src/deploy/materialize-tls.ts`, `src/deploy/ensure-hosting-caddy.ts`. Future
+seams (not MVP): multi-server service placement, WireGuard mesh, swarm-style
+replicas, ACME issuance on the daemon.

@@ -18,7 +18,8 @@ import { handlePing } from "./ping.ts";
 import { handleReboot } from "./reboot.ts";
 
 export interface CommandRouterDeps {
-  // extensible for future handlers (e.g. hostname needs ansible)
+  /** Decrypt tpdaemon envelopes via POST /api/daemon/v1/secrets/decrypt. */
+  decryptSecrets?: (ciphertexts: string[]) => Promise<(string | null)[]>;
 }
 
 function sanitizeError(value: unknown, maxLen = 500): string {
@@ -38,7 +39,7 @@ function sendOutcome(
 export async function handleCommandDispatch(
   message: CommandDispatchMessage,
   ws: WebSocket,
-  _deps?: CommandRouterDeps,
+  deps?: CommandRouterDeps,
 ): Promise<void> {
   const daemonReceivedAt = new Date().toISOString();
 
@@ -84,7 +85,9 @@ export async function handleCommandDispatch(
       }
       case "environment.deploy": {
         const payload = parseEnvironmentDeployPayload(message.payload);
-        result = await handleEnvironmentDeploy(payload, daemonReceivedAt);
+        result = await handleEnvironmentDeploy(payload, daemonReceivedAt, {
+          decryptSecrets: deps?.decryptSecrets,
+        });
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;

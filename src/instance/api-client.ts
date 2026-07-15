@@ -129,6 +129,30 @@ export class DaemonApiClient {
     );
   }
 
+  /**
+   * Batch-decrypt daemon-recipient sealed envelopes (`tpdaemon.v1…`).
+   * Returns one plaintext (or null) per input ciphertext, in order.
+   */
+  async decryptSecrets(ciphertexts: string[]): Promise<(string | null)[]> {
+    const body = await this.#requestJson<{
+      ok?: boolean;
+      plaintexts?: unknown;
+    }>(
+      "/api/daemon/v1/secrets/decrypt",
+      {
+        method: "POST",
+        body: JSON.stringify({ ciphertexts }),
+      },
+      { auth: true },
+    );
+    if (!Array.isArray(body.plaintexts)) {
+      throw new DaemonApiError(500, "Invalid secrets/decrypt response");
+    }
+    return body.plaintexts.map((entry) =>
+      typeof entry === "string" ? entry : null
+    );
+  }
+
   async #requestJson<T>(
     path: string,
     init: RequestInit,

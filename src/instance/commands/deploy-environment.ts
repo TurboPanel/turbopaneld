@@ -6,6 +6,11 @@ import {
   ensureHostingIngress,
   rewriteHostingCaddySites,
 } from "../../deploy/ingress.ts";
+import {
+  hostnameTlsMap,
+  materializeTlsCertificates,
+  type DecryptSecretsFn,
+} from "../../deploy/materialize-tls.ts";
 import { logInfo } from "../../logger.ts";
 import { resolveLayout } from "../../paths/layout.ts";
 import {
@@ -155,9 +160,14 @@ async function composeUp(
   }
 }
 
+export type EnvironmentDeployDeps = {
+  decryptSecrets?: DecryptSecretsFn;
+};
+
 export async function handleEnvironmentDeploy(
   payload: EnvironmentDeployPayload,
   daemonReceivedAt: string,
+  deps?: EnvironmentDeployDeps,
 ): Promise<EnvironmentDeployResult> {
   const parsedPayload = parseEnvironmentDeployPayload(payload);
   assertSafeDeploymentIdentifiers(parsedPayload);
@@ -179,7 +189,22 @@ export async function handleEnvironmentDeploy(
     mode: 0o640,
   });
   await composeUp(parsedPayload.projectName, composePath);
-  await rewriteHostingCaddySites(layout, parsedPayload);
+
+  let hostnameTls: Map<string, string> | undefined;
+  const tlsMaterial = parsedPayload.tlsMaterial ?? [];
+  if (tlsMaterial.length > 0) {
+    if (!deps?.decryptSecrets) {
+      throw new Error("TLS material present but secrets decrypt is unavailable");
+    }
+    await materializeTlsCertificates(
+      layout,
+      tlsMaterial,
+      deps.decryptSecrets,
+    );
+    hostnameTls = hostnameTlsMap(parsedPayload);
+  }
+
+  await rewriteHostingCaddySites(layout, parsedPayload, hostnameTls);
   const containers = await collectDeployedContainers(
     parsedPayload.projectName,
     parsedPayload.hostings,

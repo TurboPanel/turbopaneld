@@ -908,7 +908,11 @@ export class InstanceClient {
         ));
         break;
       case "command-dispatch":
-        handleCommandDispatch(message, ws).catch((err) => {
+        handleCommandDispatch(message, ws, {
+          decryptSecrets: this.#apiClient
+            ? (ciphertexts) => this.#apiClient!.decryptSecrets(ciphertexts)
+            : undefined,
+        }).catch((err) => {
           logWarn(
             "instance",
             "command-dispatch handler failed:",

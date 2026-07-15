@@ -294,6 +294,11 @@ test("production layout resolves FHS orchestration and runtime dirs", () => {
     join(PROD_CONFIG_DIR_DEFAULT, "instance-ca.pem"),
     "instanceCaPath",
   );
+  assertEq(
+    layout.tlsDir,
+    join(PROD_CONFIG_DIR_DEFAULT, "tls"),
+    "tlsDir",
+  );
   assertEq(layout.stateDir, PROD_STATE_DIR_DEFAULT, "stateDir");
   // Managed installs must resolve the FHS lib tree — never the dev checkout.
   assertEq(

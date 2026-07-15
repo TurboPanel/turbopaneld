@@ -108,6 +108,8 @@ export interface LayoutPaths {
   instanceConfigDir: string;
   instanceCaPath: string;
   daemonStateDir: string;
+  /** Hosting-edge TLS materialization root (`/etc/turbopanel/tls`). */
+  tlsDir: string;
 }
 
 export interface ResolveLayoutOptions {
@@ -368,6 +370,7 @@ export function resolveLayout(
 
   const instanceConfigDir = join(configDir, "instance");
   const instanceCaPath = join(configDir, "instance-ca.pem");
+  const tlsDir = join(configDir, "tls");
   const daemonStateDir = (() => {
     const override = env.TURBOPANEL_DAEMON_STATE_DIR?.trim();
     if (override) return stripTrailingSlash(override);
@@ -393,6 +396,7 @@ export function resolveLayout(
     instanceConfigDir,
     instanceCaPath,
     daemonStateDir,
+    tlsDir,
   };
 }
 

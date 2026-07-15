@@ -54,6 +54,15 @@ export type EnvironmentDeployHosting = {
   hostnames: string[];
   pathPrefix?: string;
   targetPort?: number;
+  /** Resolved org TLS id; null/omit = Caddy `tls internal`. */
+  tlsId?: string | null;
+};
+
+export type EnvironmentDeployTlsMaterial = {
+  tlsId: string;
+  certificatePem: string;
+  /** Daemon-recipient sealed private key (`tpdaemon.v1…`). */
+  privateKeyEnvelope: string;
 };
 
 export type EnvironmentDeployPayload = {
@@ -62,6 +71,7 @@ export type EnvironmentDeployPayload = {
   projectName: string;
   composeYaml: string;
   hostings: EnvironmentDeployHosting[];
+  tlsMaterial?: EnvironmentDeployTlsMaterial[];
 };
 
 export type EnvironmentDeployContainer = {
@@ -212,6 +222,13 @@ function parseHosting(value: unknown): EnvironmentDeployHosting {
     throw new TypeError("hostings[].targetPort must be a valid port");
   }
 
+  let tlsId: string | null | undefined;
+  if (value.tlsId === null) {
+    tlsId = null;
+  } else if (typeof value.tlsId === "string" && value.tlsId.length > 0) {
+    tlsId = value.tlsId;
+  }
+
   return {
     hostingId: parseNonEmptyString(value, "hostingId"),
     serviceId: parseNonEmptyString(value, "serviceId"),
@@ -219,6 +236,18 @@ function parseHosting(value: unknown): EnvironmentDeployHosting {
     hostnames: parsedHostnames,
     ...(pathPrefix === undefined ? {} : { pathPrefix }),
     ...(targetPort === undefined ? {} : { targetPort }),
+    ...(tlsId === undefined ? {} : { tlsId }),
+  };
+}
+
+function parseTlsMaterial(value: unknown): EnvironmentDeployTlsMaterial {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid environment deploy tlsMaterial entry");
+  }
+  return {
+    tlsId: parseNonEmptyString(value, "tlsId"),
+    certificatePem: parseNonEmptyString(value, "certificatePem"),
+    privateKeyEnvelope: parseNonEmptyString(value, "privateKeyEnvelope"),
   };
 }
 
@@ -234,11 +263,20 @@ export function parseEnvironmentDeployPayload(
     throw new TypeError("hostings must be an array");
   }
 
+  let tlsMaterial: EnvironmentDeployTlsMaterial[] | undefined;
+  if (value.tlsMaterial !== undefined) {
+    if (!Array.isArray(value.tlsMaterial)) {
+      throw new TypeError("tlsMaterial must be an array");
+    }
+    tlsMaterial = value.tlsMaterial.map(parseTlsMaterial);
+  }
+
   return {
     environmentId: parseNonEmptyString(value, "environmentId"),
     projectId: parseNonEmptyString(value, "projectId"),
     projectName: parseNonEmptyString(value, "projectName"),
     composeYaml: parseNonEmptyString(value, "composeYaml"),
     hostings: hostings.map(parseHosting),
+    ...(tlsMaterial === undefined ? {} : { tlsMaterial }),
   };
 }
