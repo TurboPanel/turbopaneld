@@ -6,6 +6,14 @@ import type {
 } from "./client.ts";
 import { DockerMonitor, type DockerMonitorChange } from "./monitor.ts";
 
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno);
+
 const CONTAINER_ID = "abc123def456789012345678901234567890123456789012345678";
 
 function makeSummary(id = CONTAINER_ID): ContainerSummary {
@@ -130,7 +138,7 @@ async function waitFor<T>(
   throw new Error(`timed out waiting for ${label}`);
 }
 
-Deno.test("reconcile bootstrap seeds tracked containers and notifies listeners", async () => {
+test("reconcile bootstrap seeds tracked containers and notifies listeners", async () => {
   const client = new MockDockerClient();
   client.containers = [makeSummary()];
   client.inspects.set(CONTAINER_ID, makeInspect());
@@ -160,7 +168,7 @@ Deno.test("reconcile bootstrap seeds tracked containers and notifies listeners",
   controller.abort();
 });
 
-Deno.test("destroy event removes container and emits removed change", async () => {
+test("destroy event removes container and emits removed change", async () => {
   const client = new MockDockerClient();
   client.containers = [makeSummary()];
   client.inspects.set(CONTAINER_ID, makeInspect());
@@ -190,7 +198,7 @@ Deno.test("destroy event removes container and emits removed change", async () =
   controller.abort();
 });
 
-Deno.test("remove event removes container and emits removed change", async () => {
+test("remove event removes container and emits removed change", async () => {
   const client = new MockDockerClient();
   client.containers = [makeSummary()];
   client.inspects.set(CONTAINER_ID, makeInspect());
@@ -217,7 +225,7 @@ Deno.test("remove event removes container and emits removed change", async () =>
   controller.abort();
 });
 
-Deno.test("inspect 404 during event refresh falls back to removal", async () => {
+test("inspect 404 during event refresh falls back to removal", async () => {
   const client = new MockDockerClient();
   client.containers = [makeSummary()];
   client.inspects.set(CONTAINER_ID, makeInspect());
@@ -246,7 +254,7 @@ Deno.test("inspect 404 during event refresh falls back to removal", async () => 
   controller.abort();
 });
 
-Deno.test("reconcile loop recovers containers missed by the events stream", async () => {
+test("reconcile loop recovers containers missed by the events stream", async () => {
   const client = new MockDockerClient();
   client.containers = [makeSummary()];
   client.inspects.set(CONTAINER_ID, makeInspect());

@@ -15,6 +15,10 @@
 #
 # Manifest and release helpers below must stay in sync with scripts/lib/release-artifacts.sh.
 
+# Shared curl prefixes for HTTPS downloads (and the insecure-TLS install path).
+TP_CURL_FETCH='curl -fsSL'
+TP_CURL_FETCH_INSECURE='curl -fsSLk'
+
 tp_prod_home() { printf '/opt/turbopanel'; }
 tp_daemon_binary_name() { printf 'turbopaneld'; }
 tp_daemon_js_fallback_name() { printf 'turbopaneld.js'; }
@@ -42,8 +46,9 @@ tp_resolve_linux_arch() {
 }
 
 tp_manifest_compact() {
+	_json="$1"
 	# shellcheck disable=SC2086
-	printf '%s' "$1" | tr -d '[:space:]'
+	printf '%s' "$_json" | tr -d '[:space:]'
 }
 
 tp_manifest_field() {
@@ -150,8 +155,8 @@ tp_download_verified_artifact() {
 			;;
 	esac
 
-	_curl="curl -fsSL"
-	[ "${TURBOPANEL_RELEASE_TLS_INSECURE:-}" = 1 ] && _curl="curl -fsSLk"
+	_curl="$TP_CURL_FETCH"
+	[ "${TURBOPANEL_RELEASE_TLS_INSECURE:-}" = 1 ] && _curl="$TP_CURL_FETCH_INSECURE"
 	_fetch_url="$(tp_release_download_url "$_url")"
 	_attempt=1
 	_max_attempts=5
@@ -286,10 +291,8 @@ tp_validate_sudo() {
 	if sudo -n true 2>/dev/null; then
 		return 0
 	fi
-	if tp_is_interactive; then
-		if sudo -v 2>/dev/null; then
-			return 0
-		fi
+	if tp_is_interactive && sudo -v 2>/dev/null; then
+		return 0
 	fi
 	return 1
 }
@@ -422,8 +425,8 @@ tp_install_deno_runtime() {
 		_deno_asset="deno-${_deno_arch}.zip"
 		_deno_url="https://dl.deno.land/release/v${TP_DENO_VERSION}/${_deno_asset}"
 		_deno_tmp="$(mktemp -d)"
-		_curl="curl -fsSL"
-		[ "${TURBOPANEL_RELEASE_TLS_INSECURE:-}" = 1 ] && _curl="curl -fsSLk"
+		_curl="$TP_CURL_FETCH"
+		[ "${TURBOPANEL_RELEASE_TLS_INSECURE:-}" = 1 ] && _curl="$TP_CURL_FETCH_INSECURE"
 		# shellcheck disable=SC2086
 		if ! $_curl -o "$_deno_tmp/$_deno_asset" "$_deno_url" 2>"$_deno_tmp/curl.err"; then
 			tp_print_error "Failed to download Deno from $_deno_url"
@@ -465,8 +468,8 @@ PY
 
 tp_fetch_channel_manifest() {
 	_channel="${TURBOPANEL_UPDATE_CHANNEL:-trunk}"
-	_curl="curl -fsSL"
-	[ "${TURBOPANEL_RELEASE_TLS_INSECURE:-}" = 1 ] && _curl="curl -fsSLk"
+	_curl="$TP_CURL_FETCH"
+	[ "${TURBOPANEL_RELEASE_TLS_INSECURE:-}" = 1 ] && _curl="$TP_CURL_FETCH_INSECURE"
 
 	_channels_json=""
 	if ! _channels_json="$($_curl "https://dl.trbp.nl/channels.json" 2>/dev/null)"; then
@@ -579,8 +582,8 @@ if ! tp_is_root; then
 	[ "$INSECURE_TLS" = true ] && set -- "$@" --insecure-tls
 	[ "$NO_START" = true ] && set -- "$@" --no-start
 	[ -n "${TURBOPANEL_UPDATE_CHANNEL:-}" ] && set -- "$@" --channel "$TURBOPANEL_UPDATE_CHANNEL"
-	_curl="curl -fsSL"
-	[ "$INSECURE_TLS" = true ] && _curl="curl -fsSLk"
+	_curl="$TP_CURL_FETCH"
+	[ "$INSECURE_TLS" = true ] && _curl="$TP_CURL_FETCH_INSECURE"
 	# Re-run the script under sudo. `exec` cannot be used here: in a pipeline
 	# each command runs in its own subshell, so `exec` would only replace the
 	# curl subshell, not this shell — leaving the original non-root shell to
@@ -628,7 +631,8 @@ for _tp_host_cmd in sudo curl tar python3; do
 	fi
 done
 _tp_host_prereq_fail() {
-	tp_print_error "$1"
+	_msg="$1"
+	tp_print_error "$_msg"
 	cat "$_apt_log" >&2
 	rm -f "$_apt_log"
 	exit 1

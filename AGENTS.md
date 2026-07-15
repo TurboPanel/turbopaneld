@@ -125,6 +125,15 @@ FHS (`share/orchestration/roles`, `vendor/ansible/galaxy-collections`). Managed
 accidental `/root/.ansible` after install. Runtime orchestration runs as
 `turbopanel` (dev: the current dev user).
 
+**Galaxy roles are not committed:** pins live in
+`orchestration/requirements.yml` (`geerlingguy.docker`, collections). Bootstrap
+(`ensureGalaxyRoles`) installs roles into `orchestration/roles/` and
+collections under `vendor/ansible/galaxy-collections`. First-party roles
+(e.g. `docker`, which wraps Galaxy via `include_role`) stay in git; Galaxy
+install trees (`geerlingguy.docker/`, …) are gitignored. Do not vend them into
+the repo — Sonar would scan third-party `mode: 0644`/`0755` as false
+vulnerabilities, and release hosts already reinstall from Galaxy at bootstrap.
+
 ## Project metadata
 
 GitHub repository:

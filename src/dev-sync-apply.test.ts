@@ -5,6 +5,14 @@ import {
   resolveDevSyncSourceRoot,
 } from "./dev-sync-apply.ts";
 
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno);
+
 // Source dev-sync replaces an editable checkout in place. It must refuse the
 // co-located development daemon and every managed / compiled / JS-fallback
 // install (no editable source tree). These pin that contract so a managed target
@@ -26,7 +34,7 @@ function withEnv<T>(
   }
 }
 
-Deno.test("resolveDevSyncSourceRoot refuses the co-located dev daemon", () => {
+test("resolveDevSyncSourceRoot refuses the co-located dev daemon", () => {
   withEnv("TURBOPANEL_DEV_INSTANCE", "1", () => {
     const result = resolveDevSyncSourceRoot({});
     if (result.ok) {
@@ -38,7 +46,7 @@ Deno.test("resolveDevSyncSourceRoot refuses the co-located dev daemon", () => {
   });
 });
 
-Deno.test("resolveDevSyncSourceRoot refuses managed installs (bundled JS / compiled / native)", async () => {
+test("resolveDevSyncSourceRoot refuses managed installs (bundled JS / compiled / native)", async () => {
   // A non-checkout root override models the managed install layout where the
   // resolver would otherwise fall back to the bundled entrypoint dir.
   const notCheckout = await Deno.makeTempDir();
@@ -61,7 +69,7 @@ Deno.test("resolveDevSyncSourceRoot refuses managed installs (bundled JS / compi
   }
 });
 
-Deno.test("resolveDevSyncSourceRoot accepts a real checkout override", async () => {
+test("resolveDevSyncSourceRoot accepts a real checkout override", async () => {
   const checkout = await Deno.makeTempDir();
   try {
     await Deno.writeTextFile(join(checkout, "main.ts"), "// checkout\n");

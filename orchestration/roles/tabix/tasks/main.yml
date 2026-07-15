@@ -119,8 +119,7 @@
       - python3
       - "{{ turbopanel_config_dir }}/tabix/inject-tabix-index.py"
   environment:
-    TABIX_INDEX_ORIG: "{{ tabix_html_dir }}/index.html.orig"
-    TABIX_INDEX_DEST: "{{ tabix_html_dir }}/index.html"
+    TABIX_HTML_DIR: "{{ tabix_html_dir }}"
     TABIX_CH_NAME: "{{ tabix_ch_name }}"
     TABIX_CH_HOST: "{{ tabix_ch_host }}"
     TABIX_CH_LOGIN: "{{ clickhouse_app_user }}"

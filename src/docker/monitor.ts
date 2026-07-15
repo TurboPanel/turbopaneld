@@ -44,18 +44,22 @@ function isContainerDestroyEvent(event: DockerEvent): boolean {
   return event.Action === "destroy" || event.Action === "remove";
 }
 
+function errMessage(err: unknown): string | unknown {
+  return err instanceof Error ? err.message : err;
+}
+
 export class DockerMonitor {
-  #client: DockerClient;
-  #pollIntervalMs: number;
-  #reconcileIntervalMs: number;
+  readonly #client: DockerClient;
+  readonly #pollIntervalMs: number;
+  readonly #reconcileIntervalMs: number;
   #containers: ContainerSummary[] = [];
   #inspects = new Map<string, ContainerInspect>();
-  #listeners = new Set<(change: DockerMonitorChange) => void>();
+  readonly #listeners = new Set<(change: DockerMonitorChange) => void>();
   #eventsBackoffMs = 1_000;
   #usingPollFallback = false;
   /** Tri-state docker reachability: null = unknown, true/false after first probe. */
   #dockerReachable: boolean | null = null;
-  #readyPromise: Promise<void>;
+  readonly #readyPromise: Promise<void>;
   #markReady: () => void;
 
   constructor(
@@ -133,45 +137,54 @@ export class DockerMonitor {
     try {
       const summaries = await this.#client.listContainers(true);
       this.#containers = summaries;
-
-      const inspects = new Map<string, ContainerInspect>();
-      for (const summary of summaries) {
-        if (signal.aborted) return;
-        try {
-          const inspect = await this.#client.inspectContainer(summary.Id);
-          inspects.set(summary.Id, inspect);
-        } catch (err) {
-          logWarn(
-            "docker-monitor",
-            "inspect failed:",
-            err instanceof Error ? err.message : err,
-          );
-        }
-      }
-
-      this.#inspects = inspects;
+      this.#inspects = await this.#inspectAll(summaries, signal);
+      if (signal.aborted) return;
 
       for (const summary of summaries) {
         this.#notify({
           containerId: summary.Id,
           summary,
-          inspect: inspects.get(summary.Id),
+          inspect: this.#inspects.get(summary.Id),
         });
       }
       this.#markDockerReachable();
     } catch (err) {
-      if (isDockerUnavailable(err)) {
-        this.#markDockerUnavailable("reconcile");
-      } else {
-        logWarn(
-          "docker-monitor",
-          "reconcile failed:",
-          err instanceof Error ? err.message : err,
-        );
-      }
+      this.#handleReconcileError(err);
     } finally {
       this.#markReady();
     }
+  }
+
+  async #inspectAll(
+    summaries: ContainerSummary[],
+    signal: AbortSignal,
+  ): Promise<Map<string, ContainerInspect>> {
+    const inspects = new Map<string, ContainerInspect>();
+    for (const summary of summaries) {
+      if (signal.aborted) break;
+      await this.#inspectOne(summary.Id, inspects);
+    }
+    return inspects;
+  }
+
+  async #inspectOne(
+    containerId: string,
+    inspects: Map<string, ContainerInspect>,
+  ): Promise<void> {
+    try {
+      const inspect = await this.#client.inspectContainer(containerId);
+      inspects.set(containerId, inspect);
+    } catch (err) {
+      logWarn("docker-monitor", "inspect failed:", errMessage(err));
+    }
+  }
+
+  #handleReconcileError(err: unknown): void {
+    if (isDockerUnavailable(err)) {
+      this.#markDockerUnavailable("reconcile");
+      return;
+    }
+    logWarn("docker-monitor", "reconcile failed:", errMessage(err));
   }
 
   async #reconcileLoop(signal: AbortSignal): Promise<void> {
@@ -184,49 +197,59 @@ export class DockerMonitor {
 
   async #eventsLoop(signal: AbortSignal): Promise<void> {
     while (!signal.aborted) {
-      let streamedAny = false;
-      try {
-        this.#usingPollFallback = false;
-
-        for await (const event of this.#client.streamEvents(signal)) {
-          if (signal.aborted) return;
-          streamedAny = true;
-          // A live event means the socket is reachable.
-          this.#markDockerReachable();
-          this.#eventsBackoffMs = 1_000;
-          await this.#handleEvent(event, signal);
-        }
-
-        if (signal.aborted) return;
-      } catch (err) {
-        if (signal.aborted) return;
-        if (isDockerUnavailable(err)) {
-          // Expected on Docker-less managed nodes — log once on transition.
-          this.#markDockerUnavailable("events stream");
-        } else {
-          logWarn(
-            "docker-monitor",
-            "events stream failed:",
-            err instanceof Error ? err.message : err,
-          );
-        }
-      }
-
+      const streamedAny = await this.#runEventsStream(signal);
       if (signal.aborted) return;
 
-      if (!this.#usingPollFallback) {
-        this.#usingPollFallback = true;
-        void this.#pollLoop(signal);
-      }
-
-      // Only reset the backoff after a genuinely healthy stream; otherwise grow it
-      // so a missing socket doesn't drive a 1s retry/log loop.
-      if (streamedAny) {
-        this.#eventsBackoffMs = 1_000;
-      }
-      await delay(this.#eventsBackoffMs, signal);
-      this.#eventsBackoffMs = Math.min(this.#eventsBackoffMs * 2, 60_000);
+      this.#ensurePollFallback(signal);
+      await this.#backoffAfterStream(streamedAny, signal);
     }
+  }
+
+  async #runEventsStream(signal: AbortSignal): Promise<boolean> {
+    let streamedAny = false;
+    try {
+      this.#usingPollFallback = false;
+
+      for await (const event of this.#client.streamEvents(signal)) {
+        if (signal.aborted) return streamedAny;
+        streamedAny = true;
+        // A live event means the socket is reachable.
+        this.#markDockerReachable();
+        this.#eventsBackoffMs = 1_000;
+        await this.#handleEvent(event, signal);
+      }
+    } catch (err) {
+      if (!signal.aborted) this.#handleEventsStreamError(err);
+    }
+    return streamedAny;
+  }
+
+  #handleEventsStreamError(err: unknown): void {
+    if (isDockerUnavailable(err)) {
+      // Expected on Docker-less managed nodes — log once on transition.
+      this.#markDockerUnavailable("events stream");
+      return;
+    }
+    logWarn("docker-monitor", "events stream failed:", errMessage(err));
+  }
+
+  #ensurePollFallback(signal: AbortSignal): void {
+    if (this.#usingPollFallback) return;
+    this.#usingPollFallback = true;
+    void this.#pollLoop(signal);
+  }
+
+  async #backoffAfterStream(
+    streamedAny: boolean,
+    signal: AbortSignal,
+  ): Promise<void> {
+    // Only reset the backoff after a genuinely healthy stream; otherwise grow it
+    // so a missing socket doesn't drive a 1s retry/log loop.
+    if (streamedAny) {
+      this.#eventsBackoffMs = 1_000;
+    }
+    await delay(this.#eventsBackoffMs, signal);
+    this.#eventsBackoffMs = Math.min(this.#eventsBackoffMs * 2, 60_000);
   }
 
   async #handleEvent(event: DockerEvent, signal: AbortSignal): Promise<void> {
@@ -241,45 +264,46 @@ export class DockerMonitor {
     try {
       const inspect = await this.#client.inspectContainer(containerId);
       this.#inspects.set(containerId, inspect);
-
-      const summaryIndex = this.#containers.findIndex((c) =>
-        c.Id === containerId
-      );
-      let summary: ContainerSummary | undefined;
-      if (summaryIndex >= 0) {
-        summary = this.#containers[summaryIndex];
-      } else {
-        try {
-          const summaries = await this.#client.listContainers(true);
-          this.#containers = summaries;
-          summary = summaries.find((c) => c.Id === containerId);
-        } catch (err) {
-          logWarn(
-            "docker-monitor",
-            "list after event failed:",
-            err instanceof Error ? err.message : err,
-          );
-        }
-      }
-
-      this.#notify({
-        containerId,
-        summary,
-        inspect,
-        event,
-      });
+      const summary = await this.#resolveSummary(containerId);
+      this.#notify({ containerId, summary, inspect, event });
     } catch (err) {
-      if (signal.aborted) return;
-      if (isContainerNotFound(err)) {
-        this.#removeContainer(containerId, event);
-        return;
-      }
-      logWarn(
-        "docker-monitor",
-        "event refresh failed:",
-        err instanceof Error ? err.message : err,
-      );
+      this.#handleEventRefreshError(err, containerId, event, signal);
     }
+  }
+
+  async #resolveSummary(
+    containerId: string,
+  ): Promise<ContainerSummary | undefined> {
+    const existing = this.#containers.find((c) => c.Id === containerId);
+    if (existing) return existing;
+    return await this.#refreshSummaryFromList(containerId);
+  }
+
+  async #refreshSummaryFromList(
+    containerId: string,
+  ): Promise<ContainerSummary | undefined> {
+    try {
+      const summaries = await this.#client.listContainers(true);
+      this.#containers = summaries;
+      return summaries.find((c) => c.Id === containerId);
+    } catch (err) {
+      logWarn("docker-monitor", "list after event failed:", errMessage(err));
+      return undefined;
+    }
+  }
+
+  #handleEventRefreshError(
+    err: unknown,
+    containerId: string,
+    event: DockerEvent,
+    signal: AbortSignal,
+  ): void {
+    if (signal.aborted) return;
+    if (isContainerNotFound(err)) {
+      this.#removeContainer(containerId, event);
+      return;
+    }
+    logWarn("docker-monitor", "event refresh failed:", errMessage(err));
   }
 
   #removeContainer(containerId: string, event?: DockerEvent): void {
@@ -319,11 +343,7 @@ export class DockerMonitor {
       try {
         listener(change);
       } catch (err) {
-        logWarn(
-          "docker-monitor",
-          "listener failed:",
-          err instanceof Error ? err.message : err,
-        );
+        logWarn("docker-monitor", "listener failed:", errMessage(err));
       }
     }
   }

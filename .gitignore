@@ -7,3 +7,7 @@ dist/
 publish/
 release-root-verify-*/
 .turbopanel-checkout-stamp
+
+# Ansible Galaxy roles install into orchestration/roles/ (see requirements.yml).
+# Never commit them — bootstrap runs ansible-galaxy role install.
+orchestration/roles/geerlingguy.docker/

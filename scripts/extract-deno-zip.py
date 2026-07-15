@@ -53,7 +53,8 @@ def main() -> int:
         version_dir.mkdir(parents=True, exist_ok=True)
         dest = version_dir / "deno"
         shutil.copy2(src, dest)
-        os.chmod(dest, 0o755)
+        # Owner+group execute only — not world-writable or world-executable.
+        os.chmod(dest, 0o750)
 
     if current_link.is_symlink() or current_link.exists():
         current_link.unlink()

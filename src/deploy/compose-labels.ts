@@ -30,13 +30,23 @@ function addLabel(
   labels[key] = value;
 }
 
+function scalarLabelValue(labelValue: unknown): string {
+  if (typeof labelValue === "string") return labelValue;
+  if (typeof labelValue === "number" || typeof labelValue === "boolean") {
+    return String(labelValue);
+  }
+  if (labelValue === null || labelValue === undefined) return "";
+  throw new TypeError("Compose label values must be strings or scalars");
+}
+
 function normalizeLabels(value: unknown): Record<string, string> {
   if (value === undefined) return {};
   if (isRecord(value)) {
     return Object.fromEntries(
-      Object.entries(value).map((
-        [key, labelValue],
-      ) => [key, String(labelValue)]),
+      Object.entries(value).map(([key, labelValue]) => [
+        key,
+        scalarLabelValue(labelValue),
+      ]),
     );
   }
   if (Array.isArray(value)) {

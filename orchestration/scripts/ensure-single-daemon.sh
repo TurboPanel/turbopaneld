@@ -29,10 +29,8 @@ fi
 install -d -m "$RUN_MODE" -o "$RUN_OWNER" -g "$RUN_GROUP" "$RUN_DIR"
 
 # Probe lock liveness via flock — never delete a held lock (avoids psmisc/fuser).
-if [ -f "$LOCK_FILE" ]; then
-  if ! flock -n "$LOCK_FILE" -c true; then
-    echo "ensure-single-daemon: another turbopanel daemon already holds $LOCK_FILE" >&2
-    echo "ensure-single-daemon: refusing duplicate start (double cell attach / heartbeats)" >&2
-    exit 1
-  fi
+if [[ -f "$LOCK_FILE" ]] && ! flock -n "$LOCK_FILE" -c true; then
+  echo "ensure-single-daemon: another turbopanel daemon already holds $LOCK_FILE" >&2
+  echo "ensure-single-daemon: refusing duplicate start (double cell attach / heartbeats)" >&2
+  exit 1
 fi

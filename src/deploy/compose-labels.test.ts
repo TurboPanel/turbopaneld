@@ -68,3 +68,38 @@ test("parseEnvironmentDeployPayload rejects invalid hosting routes", () => {
     TypeError,
   );
 });
+
+test("injectHostingLabels rejects nested object label values", () => {
+  assertThrows(
+    () =>
+      injectHostingLabels({
+        ...payload,
+        composeYaml: `services:
+  app:
+    image: nginx:alpine
+    labels:
+      nested: { oops: true }
+`,
+      }),
+    TypeError,
+    "Compose label values must be strings or scalars",
+  );
+});
+
+test("injectHostingLabels stringifies scalar label values", () => {
+  const result = injectHostingLabels({
+    ...payload,
+    composeYaml: `services:
+  app:
+    image: nginx:alpine
+    labels:
+      numeric: 42
+      flag: true
+`,
+  });
+  const compose = parse(result.composeYaml) as {
+    services: { app: { labels: Record<string, string> } };
+  };
+  assertEquals(compose.services.app.labels.numeric, "42");
+  assertEquals(compose.services.app.labels.flag, "true");
+});
