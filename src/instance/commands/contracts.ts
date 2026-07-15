@@ -64,10 +64,20 @@ export type EnvironmentDeployPayload = {
   hostings: EnvironmentDeployHosting[];
 };
 
+export type EnvironmentDeployContainer = {
+  /** Present when the compose service appears in `payload.hostings`. */
+  serviceId?: string;
+  composeServiceName: string;
+  containerId: string;
+  containerName: string;
+  status: string;
+};
+
 export type EnvironmentDeployResult = {
   projectName: string;
   summary: string;
   services?: string[];
+  containers?: EnvironmentDeployContainer[];
 };
 
 /** Must stay in sync with the instance canonical version in src/lib/commands/hostname.ts */

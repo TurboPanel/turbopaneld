@@ -35,6 +35,7 @@ import {
   BUILD_TOGGLE_PLAYBOOK,
   DAEMON_CONVERGE_PLAYBOOK,
   DAEMON_LOGS_PLAYBOOK,
+  CADDY_PLAYBOOK,
   DAEMON_SYSTEMD_PLAYBOOK,
   DOCKER_PLAYBOOK,
   GALAXY_COLLECTIONS_DIR,
@@ -506,6 +507,15 @@ export async function runDockerSetup(
   logInfo("orchestration", "running docker-setup playbook");
   await runLocalPlaybook(DOCKER_PLAYBOOK, devInstanceExtraArgs(), onEvent);
   logInfo("orchestration", "docker-setup complete");
+}
+
+/** Vendor the Caddy binary for hosting-edge ingress (daemon-only hosts). */
+export async function runCaddySetup(
+  onEvent?: AnsibleEventHandler,
+): Promise<void> {
+  logInfo("orchestration", "running caddy-setup playbook");
+  await runLocalPlaybook(CADDY_PLAYBOOK, devInstanceExtraArgs(), onEvent);
+  logInfo("orchestration", "caddy-setup complete");
 }
 
 /** Run PostgreSQL 18 in Docker (daemon-only hosts). */

@@ -1,0 +1,10 @@
+# On-demand Caddy binary for hosting-edge ingress (environment.deploy).
+# Distinct from control-plane turbopanel-caddy (:8443) — this only vendors the
+# binary under /opt/turbopanel/vendor/caddy for turbopanel-hosting-caddy.service.
+- name: Ensure hosting Caddy runtime is installed
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+  roles:
+    - role: caddy

@@ -567,19 +567,30 @@ so daemon-only hosts get no GUI.
 `environment.deploy` (command router →
 `src/instance/commands/deploy-environment.ts`):
 
-1. Ensure Docker engine (`runDockerSetup` / `docker-setup.yml` when
-   `/usr/bin/docker` is missing).
+1. Ensure Docker engine (`ensureDocker` → `runDockerSetup` when the binary is
+   missing or the Engine API is unreachable). Docker CLI calls use `sg docker`
+   fallback so the first deploy after group membership still works without a
+   daemon restart.
 2. Bootstrap Traefik on Docker network `turbopanel-ingress` (internal bind
    `127.0.0.1:8080` only — **no** public `:80`/`:443` on Traefik; **no**
    ACME/LE).
-3. Write runtime compose under
+3. Ensure vendored hosting Caddy (`ensureHostingCaddy` — Ansible `caddy-setup`
+   then direct GitHub download) when
+   `/opt/turbopanel/vendor/caddy/current/caddy` is missing. On-demand like
+   Docker; daemon-converge does not install it. Required for hostname ingress.
+4. Write runtime compose under
    `<stateDir>/deployments/<environmentId>/docker-compose.yml` with Traefik
    labels (`src/deploy/compose-labels.ts`).
-4. `docker compose -p <projectName> up -d --remove-orphans`.
-5. Refresh hosting-edge Caddy config under `/etc/turbopanel/hosting/`
+5. `docker compose -p <projectName> up -d --remove-orphans`.
+6. Refresh hosting-edge Caddy config under `/etc/turbopanel/hosting/`
    (`auto_https off`, `tls internal` for HTTPS) using vendor caddy; unit
    `turbopanel-hosting-caddy.service` when sudo allows. **Distinct** from
    control-plane Caddy (`:8443`).
+7. Best-effort `docker compose ps --format json` — per-container identity/status
+   (`containerId`, `containerName`, `composeServiceName`, `status`, optional
+   `serviceId` from `payload.hostings`) is included in the command result when
+   collection succeeds; a `ps`/parse failure never fails an otherwise-successful
+   deploy.
 
 Helpers: `src/deploy/ensure-docker.ts`, `src/deploy/ingress.ts`. Future seams
 (not MVP): multi-server service placement, WireGuard mesh, swarm-style replicas.

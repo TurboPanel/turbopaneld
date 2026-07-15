@@ -2,6 +2,8 @@ import { join } from "@std/path";
 import { logWarn } from "../logger.ts";
 import type { EnvironmentDeployPayload } from "../instance/commands/contracts.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
+import { runDocker } from "./docker-cli.ts";
+import { ensureHostingCaddy } from "./ensure-hosting-caddy.ts";
 
 const INGRESS_NETWORK = "turbopanel-ingress";
 const CADDY_SERVICE = "turbopanel-hosting-caddy.service";
@@ -34,18 +36,10 @@ function commandError(action: string, result: CommandResult): Error {
 }
 
 async function ensureIngressNetwork(): Promise<void> {
-  const inspect = await run("/usr/bin/docker", [
-    "network",
-    "inspect",
-    INGRESS_NETWORK,
-  ]);
+  const inspect = await runDocker(["network", "inspect", INGRESS_NETWORK]);
   if (inspect.success) return;
 
-  const create = await run("/usr/bin/docker", [
-    "network",
-    "create",
-    INGRESS_NETWORK,
-  ]);
+  const create = await runDocker(["network", "create", INGRESS_NETWORK]);
   if (!create.success) {
     throw commandError("Creating ingress Docker network", create);
   }
@@ -106,17 +100,6 @@ WantedBy=multi-user.target
 `;
 }
 
-async function ensureCaddyRuntime(layout: LayoutPaths): Promise<void> {
-  const caddy = join(layout.runtimesDir, "caddy", "current", "caddy");
-  try {
-    const stat = await Deno.stat(caddy);
-    if (stat.isFile) return;
-  } catch (err) {
-    if (!(err instanceof Deno.errors.NotFound)) throw err;
-  }
-  throw new Error(`Hosting Caddy runtime is missing: ${caddy}`);
-}
-
 async function installAndStartCaddy(
   unitSource: string,
 ): Promise<boolean> {
@@ -162,7 +145,7 @@ export async function ensureHostingIngress(layout: LayoutPaths): Promise<void> {
   await Deno.mkdir(ingressDir, { recursive: true, mode: 0o750 });
   const composePath = join(ingressDir, "docker-compose.yml");
   await Deno.writeTextFile(composePath, traefikCompose(), { mode: 0o640 });
-  const composeUp = await run("/usr/bin/docker", [
+  const composeUp = await runDocker([
     "compose",
     "-p",
     "turbopanel-ingress",
@@ -176,7 +159,7 @@ export async function ensureHostingIngress(layout: LayoutPaths): Promise<void> {
     throw commandError("Starting Traefik ingress", composeUp);
   }
 
-  await ensureCaddyRuntime(layout);
+  await ensureHostingCaddy(layout);
   const hostingDir = join(layout.configDir, "hosting");
   const sitesDir = join(hostingDir, "sites");
   await Deno.mkdir(sitesDir, { recursive: true, mode: 0o750 });

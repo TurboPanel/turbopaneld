@@ -240,13 +240,20 @@
       if [ ! -s "$f" ]; then
         {{ turbopanel_node }} \
           {{ turbopanel_instance_dir }}/scripts/generate-secret.mjs > "$f"
-        chmod 0600 "$f"
-        chown root:root "$f"
         echo created
       fi
     executable: /bin/bash
   register: _instance_secret_gen
   changed_when: "'created' in _instance_secret_gen.stdout"
+
+# root:turbopanel_group 0640 — console (dev user / group) and Ansible can read
+# for Local-Console HMAC; secret value is also injected into runtime.dev-vars.
+- name: Harden instance signing secret ownership
+  ansible.builtin.file:
+    path: "{{ turbopanel_config_dir }}/instance/.instance_secret"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
 
 - name: Read instance signing secret
   ansible.builtin.slurp:

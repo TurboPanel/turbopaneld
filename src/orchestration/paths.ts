@@ -136,6 +136,11 @@ export const DOCKER_PLAYBOOK = join(
   "playbooks",
   "docker-setup.yml",
 );
+export const CADDY_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  "playbooks",
+  "caddy-setup.yml",
+);
 export const POSTGRES_PLAYBOOK = join(
   ORCHESTRATION_DIR,
   "playbooks",
