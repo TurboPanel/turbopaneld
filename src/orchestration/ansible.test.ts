@@ -233,6 +233,24 @@ test(
       );
     }
 
+    // Single memory source: docker run and drift check must share the byte var
+    // (no parallel clickhouse_container_memory string that can diverge).
+    if (/^\s*clickhouse_container_memory:/m.test(defaults)) {
+      throw new Error(
+        `${defaultsPath}: clickhouse_container_memory must not exist; use clickhouse_container_memory_bytes only`,
+      );
+    }
+    assertMatch(
+      tasks,
+      /"--memory"\s*\n\s*-\s*"\{\{\s*clickhouse_container_memory_bytes\s*\}\}"/,
+      "tasks pass --memory from clickhouse_container_memory_bytes",
+    );
+    assertMatch(
+      tasks,
+      /_ch_memory_ok:[\s\S]*clickhouse_container_memory_bytes/,
+      "tasks drift-check memory against clickhouse_container_memory_bytes",
+    );
+
     assertMatch(
       config,
       /<mark_cache_size>\{\{\s*clickhouse_mark_cache_size\s*\}\}<\/mark_cache_size>/,
@@ -245,24 +263,158 @@ test(
     );
     assertMatch(
       tasks,
-      /"--memory"/,
-      "tasks pass --memory to docker run",
-    );
-    assertMatch(
-      tasks,
       /"--cpus"/,
       "tasks pass --cpus to docker run",
-    );
-    assertMatch(
-      tasks,
-      /_ch_memory_ok/,
-      "tasks drift-check container memory",
     );
     assertMatch(
       tasks,
       /_ch_cpus_ok/,
       "tasks drift-check container cpus",
     );
+  },
+);
+
+test(
+  "clickhouse normal converge removes legacy container names before create",
+  async () => {
+    const defaultsPath = join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/clickhouse/defaults/main.yml",
+    );
+    const tasksPath = join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/clickhouse/tasks/main.yml",
+    );
+    const defaults = await Deno.readTextFile(defaultsPath);
+    const tasks = await Deno.readTextFile(tasksPath);
+
+    const currentMatch = /^\s*clickhouse_container_name:\s*(\S+)\s*$/m.exec(
+      defaults,
+    );
+    if (!currentMatch) {
+      throw new TypeError(
+        `could not parse clickhouse_container_name from ${defaultsPath}`,
+      );
+    }
+    const currentName = currentMatch[1]!;
+
+    assertMatch(
+      defaults,
+      /clickhouse_legacy_container_names:/,
+      "defaults list clickhouse_legacy_container_names for rename upgrades",
+    );
+    for (const legacy of ["turbopanelch", "turbopanela"]) {
+      if (legacy === currentName) {
+        throw new Error(
+          `${defaultsPath}: current container name ${currentName} must not also be listed as legacy`,
+        );
+      }
+      if (!defaults.includes(legacy)) {
+        throw new Error(
+          `${defaultsPath}: clickhouse_legacy_container_names must include ${legacy}`,
+        );
+      }
+    }
+
+    assertMatch(
+      tasks,
+      /Stop and remove legacy ClickHouse containers \(normal converge\)/,
+      "tasks include normal-converge legacy container cleanup",
+    );
+    assertMatch(
+      tasks,
+      /clickhouse_legacy_container_names/,
+      "legacy cleanup iterates clickhouse_legacy_container_names",
+    );
+    assertMatch(
+      tasks,
+      /docker update --restart=no/,
+      "legacy cleanup clears Docker restart policy before remove",
+    );
+    assertMatch(
+      tasks,
+      /docker rm -f/,
+      "legacy cleanup removes blocking legacy containers",
+    );
+    // Volume deletion must stay on explicit purge — not normal converge.
+    if (
+      /docker volume rm/.test(tasks) &&
+      /legacy/i.test(tasks)
+    ) {
+      const legacyVolumeRm =
+        /legacy[\s\S]{0,400}docker volume rm|docker volume rm[\s\S]{0,400}legacy/i;
+      if (legacyVolumeRm.test(tasks)) {
+        throw new Error(
+          `${tasksPath}: must not delete legacy ClickHouse volumes on normal converge`,
+        );
+      }
+    }
+
+    const legacyTaskIdx = tasks.indexOf(
+      "Stop and remove legacy ClickHouse containers (normal converge)",
+    );
+    const createIdx = tasks.indexOf("Create and start clickhouse container");
+    if (legacyTaskIdx < 0 || createIdx < 0 || legacyTaskIdx >= createIdx) {
+      throw new Error(
+        `${tasksPath}: legacy container cleanup must run before Create and start clickhouse container`,
+      );
+    }
+  },
+);
+
+test(
+  "clickhouse admin migration drops legacy snake_case metrics schema",
+  async () => {
+    const tasksPath = join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/clickhouse/tasks/main.yml",
+    );
+    const tasks = await Deno.readTextFile(tasksPath);
+
+    assertMatch(
+      tasks,
+      /Drop legacy ClickHouse metrics schema objects \(admin migration\)/,
+      "tasks include guarded legacy metrics schema migration",
+    );
+    for (const obj of [
+      "host_metrics_mv_5m",
+      "host_metrics_mv_1h",
+      "host_metrics_mv_1d",
+      "host_metrics_rollup_5m",
+      "host_metrics_rollup_1h",
+      "host_metrics_rollup_1d",
+      "host_metrics_raw",
+    ]) {
+      if (!tasks.includes(obj)) {
+        throw new Error(
+          `${tasksPath}: legacy migration must drop ${obj}`,
+        );
+      }
+    }
+    assertMatch(
+      tasks,
+      /name = 'server_id'/,
+      "legacy migration detects turbopanel_server_metrics.server_id",
+    );
+    assertMatch(
+      tasks,
+      /DROP TABLE IF EXISTS turbopanel_server_metrics/,
+      "legacy migration drops incompatible turbopanel_server_metrics",
+    );
+
+    const readyIdx = tasks.indexOf(
+      "Ensure clickhouse container is running and ready",
+    );
+    const legacySchemaIdx = tasks.indexOf(
+      "Drop legacy ClickHouse metrics schema objects (admin migration)",
+    );
+    if (
+      readyIdx < 0 || legacySchemaIdx < 0 || legacySchemaIdx <= readyIdx
+    ) {
+      throw new Error(
+        `${tasksPath}: legacy schema migration must run after ClickHouse is ready`,
+      );
+    }
   },
 );
 

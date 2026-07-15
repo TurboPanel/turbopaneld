@@ -44,7 +44,16 @@ clickhouse_mark_cache_size: 67108864
 # with host size).
 clickhouse_max_server_memory_usage: 536870912
 # Docker runtime caps (inspect drift recreates containers missing these).
-clickhouse_container_memory: 768m
+# Single source of truth: bytes only — docker run --memory and the drift check
+# both use this value so they cannot diverge (ansible.test.ts asserts that).
+# 768 MiB
 clickhouse_container_memory_bytes: 805306368
 clickhouse_container_cpus: "1.0"
 clickhouse_container_nanocpus: 1000000000
+# Pre-rename container names (turbopanelch → turbopanela → turbopanel-analytics).
+# Normal converge stops/removes these when they are TurboPanel-owned or still
+# publish the ClickHouse HTTP port; legacy volumes are NOT deleted here (that
+# stays on explicit purge/reset so metrics data survives upgrades).
+clickhouse_legacy_container_names:
+  - turbopanelch
+  - turbopanela

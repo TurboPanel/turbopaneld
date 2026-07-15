@@ -451,8 +451,19 @@ aligned with the config remove list.
 
 **Low-footprint resource caps** (role defaults — `ansible.test.ts` pin ceilings):
 `mark_cache_size` **64 MiB**, `max_server_memory_usage` **512 MiB**, Docker
-`--memory 768m` / `--cpus 1.0`. Drift checks recreate containers missing the
+`--memory` / drift check both use `clickhouse_container_memory_bytes` (**768
+MiB**) and `--cpus 1.0`. Drift checks recreate containers missing the
 memory/CPU limits.
+
+**Rename upgrades (normal converge):** the role stops/removes legacy containers
+`turbopanelch` / `turbopanela` when they are TurboPanel-owned or still publish
+the ClickHouse HTTP port (`docker update --restart=no` then `docker rm -f`)
+before creating `turbopanel-analytics`. Legacy volumes are **not** deleted on
+converge — only explicit purge/reset (dev `platform-docker-resources`) removes
+them. After ready + DB bootstrap, an admin migration drops retired
+`host_metrics_*` objects and any `turbopanel_server_metrics` still carrying the
+snake_case `server_id` column so instance `schema.ts` can recreate the
+positional table.
 
 Primary write batching for ~1 sample/min traffic lives in the instance
 `ClickHouseServerMetricsStore` (row count + max age). The `users.d` **default**
