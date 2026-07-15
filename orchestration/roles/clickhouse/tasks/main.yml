@@ -131,52 +131,6 @@
   register: _ch_volume_create
   changed_when: false
 
-# Normal-upgrade cleanup: renamed containers (turbopanelch → turbopanela →
-# turbopanel-analytics) can keep holding 127.0.0.1:8123 and block docker run of
-# the current name. Stop/remove TurboPanel-owned or HTTP-port-publishing
-# legacy containers; clear restart policy first so they cannot come back.
-# Do NOT delete legacy volumes here — that is reserved for explicit purge/reset
-# (see platform-docker-resources / reset-dev) so metrics data survives upgrades.
-- name: Stop and remove legacy ClickHouse containers (normal converge)
-  ansible.builtin.shell: |
-    set -euo pipefail
-    changed=0
-    http_port='{{ clickhouse_http_port }}'
-    current='{{ clickhouse_container_name }}'
-    for name in {{ clickhouse_legacy_container_names | join(' ') }}; do
-      if [ "$name" = "$current" ]; then
-        continue
-      fi
-      if ! docker inspect "$name" >/dev/null 2>&1; then
-        continue
-      fi
-      image="$(docker inspect -f '{% raw %}{{.Config.Image}}{% endraw %}' "$name" 2>/dev/null || true)"
-      is_tp=0
-      case "$image" in
-        clickhouse/clickhouse-server*|*/clickhouse/clickhouse-server*) is_tp=1 ;;
-      esac
-      mounts="$(docker inspect -f '{% raw %}{{range .Mounts}}{{.Source}} {{end}}{% endraw %}' "$name" 2>/dev/null || true)"
-      case "$mounts" in
-        */etc/turbopanel/clickhouse*|*/turbopanel/clickhouse*) is_tp=1 ;;
-      esac
-      publishes_http=0
-      bindings="$(docker inspect -f '{% raw %}{{json .HostConfig.PortBindings}}{% endraw %}' "$name" 2>/dev/null || true)"
-      case "$bindings" in
-        *\"${http_port}/tcp\"*|*"8123/tcp"*) publishes_http=1 ;;
-      esac
-      if [ "$is_tp" -eq 0 ] && [ "$publishes_http" -eq 0 ]; then
-        continue
-      fi
-      docker update --restart=no "$name" >/dev/null 2>&1 || true
-      docker rm -f "$name" >/dev/null
-      changed=1
-    done
-    if [ "$changed" -eq 1 ]; then echo changed; fi
-  args:
-    executable: /bin/bash
-  register: _ch_legacy_containers_removed
-  changed_when: "'changed' in _ch_legacy_containers_removed.stdout"
-
 - name: Inspect clickhouse container
   ansible.builtin.command:
     argv: [docker, inspect, "{{ clickhouse_container_name }}"]
@@ -371,39 +325,6 @@
     ALTER USER {{ clickhouse_app_user }} IDENTIFIED WITH sha256_password BY '{{ _clickhouse_app_password }}';
     GRANT SELECT, INSERT, CREATE TABLE, CREATE VIEW, ALTER, SHOW ON {{ clickhouse_database }}.* TO {{ clickhouse_app_user }};
     EOSQL
-  no_log: true
-  changed_when: false
-
-# Admin-owned destructive migration: drop retired raw/rollup/MV objects and any
-# legacy snake_case layout (e.g. turbopanel_server_metrics.server_id). Metrics
-# is disposable — instance runtime must never run DROP DDL with the app user.
-# CREATE IF NOT EXISTS in instance schema.ts cannot replace an incompatible
-# table, so older installs must be cleared here before the app relies on the
-# positional schema.
-- name: Drop legacy ClickHouse metrics schema objects (admin migration)
-  args:
-    executable: /bin/bash
-  ansible.builtin.shell: |
-    set -euo pipefail
-    docker exec -i {{ clickhouse_container_name }} clickhouse-client \
-      --user default --password '{{ _clickhouse_admin_password }}' \
-      --database {{ clickhouse_database }} --multiquery <<'EOSQL'
-    DROP VIEW IF EXISTS host_metrics_mv_5m;
-    DROP VIEW IF EXISTS host_metrics_mv_1h;
-    DROP VIEW IF EXISTS host_metrics_mv_1d;
-    DROP TABLE IF EXISTS host_metrics_rollup_5m;
-    DROP TABLE IF EXISTS host_metrics_rollup_1h;
-    DROP TABLE IF EXISTS host_metrics_rollup_1d;
-    DROP TABLE IF EXISTS host_metrics_raw;
-    EOSQL
-    if docker exec -i {{ clickhouse_container_name }} clickhouse-client \
-      --user default --password '{{ _clickhouse_admin_password }}' --query \
-      "SELECT count() FROM system.columns WHERE database = '{{ clickhouse_database }}' AND table = 'turbopanel_server_metrics' AND name = 'server_id'" \
-      | grep -q '^1$'; then
-      docker exec -i {{ clickhouse_container_name }} clickhouse-client \
-        --user default --password '{{ _clickhouse_admin_password }}' --database {{ clickhouse_database }} --query \
-        'DROP TABLE IF EXISTS turbopanel_server_metrics'
-    fi
   no_log: true
   changed_when: false
 

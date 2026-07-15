@@ -491,16 +491,6 @@ aligned with the config remove list.
 MiB**) and `--cpus 1.0`. Drift checks recreate containers missing the
 memory/CPU limits.
 
-**Rename upgrades (normal converge):** the role stops/removes legacy containers
-`turbopanelch` / `turbopanela` when they are TurboPanel-owned or still publish
-the ClickHouse HTTP port (`docker update --restart=no` then `docker rm -f`)
-before creating `turbopanel-analytics`. Legacy volumes are **not** deleted on
-converge — only explicit purge/reset (dev `platform-docker-resources`) removes
-them. After ready + DB bootstrap, an admin migration drops retired
-`host_metrics_*` objects and any `turbopanel_server_metrics` still carrying the
-snake_case `server_id` column so instance `schema.ts` can recreate the
-positional table.
-
 Primary write batching for ~1 sample/min traffic lives in the instance
 `ClickHouseServerMetricsStore` (row count + max age). The `users.d` **default**
 profile still enables secondary **async insert** coalescing (`async_insert=1`,
