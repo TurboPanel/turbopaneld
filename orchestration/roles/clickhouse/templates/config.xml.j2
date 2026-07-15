@@ -10,11 +10,11 @@
   ports keep the base-image defaults — the container listens on 0.0.0.0 inside the
   Docker network; host exposure is already limited to the loopback -p publish.
 
-  Memory caps (small co-located / single-server installs — defaults in
+  Memory caps (small co-located / single-server installs; defaults in
   roles/clickhouse/defaults/main.yml):
   - max_server_memory_usage = {{ clickhouse_max_server_memory_usage }} (absolute)
   - mark_cache_size = {{ clickhouse_mark_cache_size }}
-  Docker also applies --memory / --cpus from the same defaults.
+  Docker also applies memory and cpus resource flags from the same defaults.
 
   Idle-CPU tuning (single otherwise-idle server): slow the async-metrics cadence,
   shrink always-awake background merge/schedule pools, cap the global thread pool

@@ -267,6 +267,28 @@ test(
 );
 
 test(
+  "clickhouse config.xml.j2 comments never contain XML-illegal double hyphens",
+  async () => {
+    const configPath = join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/clickhouse/templates/config.xml.j2",
+    );
+    const config = await Deno.readTextFile(configPath);
+    // XML comments may not contain "--" (SAXParseException / CH refuses to boot).
+    const commentBodies = [...config.matchAll(/<!--([\s\S]*?)-->/g)].map(
+      (match) => match[1]!,
+    );
+    for (const body of commentBodies) {
+      if (body.includes("--")) {
+        throw new Error(
+          `${configPath}: XML comment contains "--" (illegal; breaks ClickHouse config merge):\n${body.slice(0, 200)}`,
+        );
+      }
+    }
+  },
+);
+
+test(
   "clickhouse system-log DROP cleanup stays aligned with config.xml remove list",
   async () => {
     const configPath = join(
