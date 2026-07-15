@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Pack daemon/orchestration/ into the standalone orchestration release tarball.
-# Co-located dev uses the git checkout (orchestration/ + dev/orchestration overlay);
+# Co-located dev uses the daemon git checkout plus the turbopanel/dev orchestration overlay;
 # production installs extract this artifact to /opt/turbopanel/share/orchestration/.
 set -eu
 

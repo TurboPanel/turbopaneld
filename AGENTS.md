@@ -92,7 +92,7 @@ module and CI guard are the only places allowed to reference it.
 | Purpose                          | Path                                                                   |
 | -------------------------------- | ---------------------------------------------------------------------- |
 | Daemon checkout / install root   | `<TURBOPANEL_DEV_ROOT or $HOME>/daemon`                                |
-| Orchestration assets             | `<checkout>/orchestration` (prod roles) + `dev/orchestration/` overlay |
+| Orchestration assets             | `<checkout>/orchestration` (prod roles); overlay in `<dev checkout>/orchestration` |
 | Vendored runtimes                | `/opt/turbopanel/vendor`                                               |
 | Daemon env file                  | `/etc/turbopanel/daemon.env`                                           |
 | Daemon state                     | `/var/lib/turbopanel`                                                  |
@@ -320,8 +320,11 @@ Related files: `src/instance/jwks-client.ts`; `getJwks()` / `JwksDocument` on
 
 **Orchestration source tree:** the canonical Ansible playbooks and roles live in
 **`orchestration/`** in the daemon git checkout. Co-located dev runs that tree
-directly (plus the **`dev/orchestration/`** overlay for dev-user parameters —
-not shipped in release). Production installs extract **`orchestration.tar.zst`**
+directly (plus the **dev repo** overlay at `<dev checkout>/orchestration` for
+dev-user parameters — not shipped in release; resolved via
+`TURBOPANEL_DEV_ORCHESTRATION_DIR` / `resolveDevOrchestrationDir`, layered with
+daemon production roles through `ANSIBLE_ROLES_PATH`). Production installs extract
+**`orchestration.tar.zst`**
 from the channel manifest into `/opt/turbopanel/share/orchestration/`. Release
 CDN artifacts are four split tarballs per build under versioned paths
 (`channels/trunk/daemon/<buildId>/…`): host-arch
@@ -521,8 +524,8 @@ instance-owned `ensureSchema()` (`CREATE TABLE IF NOT EXISTS` plus
 `MODIFY SETTING` / `MODIFY TTL`) and metrics reads/writes. No `DROP` or
 `TRUNCATE`.
 
-**Converge wiring:** co-located dev installs ClickHouse via
-`dev/orchestration/dev-converge-manifest.json` (role `clickhouse`, after
+**Converge wiring:** co-located dev installs ClickHouse via the dev-repo
+`<dev checkout>/orchestration/dev-converge-manifest.json` (role `clickhouse`, after
 `postgres`/`redis`/`rabbitmq`, before `instance-user`) — same pattern as those
 data services (not a discrete `setup.ts` step). Managed daemon-only hosts omit
 it (`daemon-converge.yml`); use standalone `playbooks/clickhouse-setup.yml` /
@@ -565,7 +568,7 @@ rendered when `turbopanel_dev_user` is set, so managed/prod config is
 byte-for-byte unchanged) plus a `CH_PARAMS` value of
 `add_http_cors_header=1&database={{ clickhouse_database }}` carried on every
 Tabix request. Loopback-only; **not** routed through Caddy; runs as the
-**current dev `--user`**. Installed via `dev-converge-manifest.json` only (after
+**current dev `--user`**. Installed via the dev-repo `dev-converge-manifest.json` only (after
 `clickhouse`, so the app password exists) — omitted from `daemon-converge.yml`,
 so daemon-only hosts get no GUI.
 

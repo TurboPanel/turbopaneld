@@ -1,6 +1,0 @@
----
-# Shared dev-identity contract. The sudoers fragment is only installed for the
-# co-located dev user; no-op on managed servers when turbopanel_dev_user is unset.
-turbopanel_dev_user: ""
-turbopanel_dev_uid: ""
-turbopanel_dev_gid: ""

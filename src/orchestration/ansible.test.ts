@@ -2,6 +2,7 @@ import { join } from "@std/path";
 import { assertEquals } from "jsr:@std/assert";
 import { galaxyBootstrapRunContext } from "./ansible.ts";
 import {
+  DEV_CONVERGE_MANIFEST_FILE,
   devOrchestrationAnsibleEnv,
   resolveDevOrchestrationLayout,
 } from "./dev-orchestration.ts";
@@ -20,6 +21,41 @@ import {
 
 const VENDORED_COLLECTIONS_MARKER = "galaxy-collections";
 const CHECKOUT_ORCHESTRATION_DIR = join(DAEMON_ROOT, "orchestration");
+
+/** Minimal overlay layout for {@link resolveDevOrchestrationLayout} unit tests. */
+async function makeDevOrchestrationFixture(): Promise<string> {
+  const root = await Deno.makeTempDir({ prefix: "tp-dev-orch-" });
+  await Deno.writeTextFile(
+    join(root, "ansible.cfg"),
+    `[defaults]
+host_key_checking = False
+collections_path = /opt/turbopanel/vendor/ansible/galaxy-collections:/usr/share/ansible/collections
+roles_path = roles
+`,
+  );
+  await Deno.writeTextFile(
+    join(root, DEV_CONVERGE_MANIFEST_FILE),
+    `${JSON.stringify({
+      playbook: "playbooks/instance-dev-install.yml",
+      roles: [],
+      devRoles: [],
+    }, null, 2)}\n`,
+  );
+  await Deno.mkdir(join(root, "playbooks"), { recursive: true });
+  await Deno.writeTextFile(
+    join(root, "playbooks", "instance-dev-install.yml"),
+    `---
+# Stub playbook for overlay-resolution unit tests only.
+- hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Fixture noop
+      ansible.builtin.debug:
+        msg: fixture
+`,
+  );
+  return root;
+}
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -59,7 +95,6 @@ function parseYamlInt(yaml: string, key: string): number {
 test("checked-in ansible.cfg defines vendored collections_path", async () => {
   const cfgPaths = [
     join(CHECKOUT_ORCHESTRATION_DIR, "ansible.cfg"),
-    join(DAEMON_ROOT, "dev", "orchestration", "ansible.cfg"),
   ];
 
   for (const cfgPath of cfgPaths) {
@@ -489,14 +524,21 @@ test("ansibleEnv pins ANSIBLE_HOME under /tmp without overriding collections_pat
 });
 
 test("devOrchestrationAnsibleEnv selects overlay config without collections override", async () => {
-  const layout = await resolveDevOrchestrationLayout();
-  const env = devOrchestrationAnsibleEnv(layout);
-  if (env.ANSIBLE_CONFIG !== layout.ansibleCfgPath) {
-    throw new Error(
-      `expected ANSIBLE_CONFIG=${layout.ansibleCfgPath}, got ${env.ANSIBLE_CONFIG}`,
-    );
+  const fixtureRoot = await makeDevOrchestrationFixture();
+  try {
+    const layout = await resolveDevOrchestrationLayout({
+      TURBOPANEL_DEV_ORCHESTRATION_DIR: fixtureRoot,
+    });
+    const env = devOrchestrationAnsibleEnv(layout);
+    if (env.ANSIBLE_CONFIG !== layout.ansibleCfgPath) {
+      throw new Error(
+        `expected ANSIBLE_CONFIG=${layout.ansibleCfgPath}, got ${env.ANSIBLE_CONFIG}`,
+      );
+    }
+    assertNotIn(env, "ANSIBLE_COLLECTIONS_PATH", "devOrchestrationAnsibleEnv");
+  } finally {
+    await Deno.remove(fixtureRoot, { recursive: true });
   }
-  assertNotIn(env, "ANSIBLE_COLLECTIONS_PATH", "devOrchestrationAnsibleEnv");
 });
 
 test("galaxyBootstrapRunContext matches playbook ansible contract", () => {

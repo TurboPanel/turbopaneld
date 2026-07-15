@@ -1,12 +1,12 @@
 import { join } from "@std/path";
-import { readEnv, resolveDaemonRoot } from "../paths/layout.ts";
+import { readEnv, resolveDevRoot } from "../paths/layout.ts";
 import {
   ANSIBLE_HOME,
   ANSIBLE_LOCAL_TMP,
   GALAXY_ROLES_DIR,
 } from "./paths.ts";
 
-/** Dev overlay playbook + roles live under `<daemon checkout>/dev/orchestration`. */
+/** Dev overlay playbook + roles live under `<dev checkout>/orchestration`. */
 export const DEV_ORCHESTRATION_SUBDIR = join("dev", "orchestration");
 
 export const DEV_CONVERGE_MANIFEST_FILE = "dev-converge-manifest.json";
@@ -40,8 +40,6 @@ function devOrchestrationEnv(
   env: Record<string, string | undefined> = {},
 ): Record<string, string | undefined> {
   return {
-    TURBOPANEL_DAEMON_ROOT: env.TURBOPANEL_DAEMON_ROOT ??
-      readEnv("TURBOPANEL_DAEMON_ROOT"),
     TURBOPANEL_DEV_ROOT: env.TURBOPANEL_DEV_ROOT ??
       readEnv("TURBOPANEL_DEV_ROOT"),
     HOME: env.HOME ?? readEnv("HOME"),
@@ -51,11 +49,11 @@ function devOrchestrationEnv(
 /**
  * Resolve the co-located dev orchestration root.
  *
- * Defaults to `<daemon checkout>/dev/orchestration` — the dev-owned overlay
- * playbook, `ansible.cfg`, converge manifest, and dev-only roles. Production
- * roles still resolve from the daemon checkout's shared `orchestration/roles`
- * via {@link devOrchestrationAnsibleEnv}. Override with
- * `TURBOPANEL_DEV_ORCHESTRATION_DIR` for tests or alternate layouts.
+ * Defaults to `<dev checkout>/orchestration` (`<devRoot>/dev/orchestration`) —
+ * the dev-owned overlay playbook, `ansible.cfg`, converge manifest, and
+ * dev-only roles. Production roles still resolve from the daemon checkout's
+ * shared `orchestration/roles` via {@link devOrchestrationAnsibleEnv}. Override
+ * with `TURBOPANEL_DEV_ORCHESTRATION_DIR` for tests or alternate layouts.
  */
 export function resolveDevOrchestrationDir(
   env: Record<string, string | undefined> = {},
@@ -69,8 +67,8 @@ export function resolveDevOrchestrationDir(
     }
     return end === 0 ? "/" : override.slice(0, end);
   }
-  const daemonRoot = resolveDaemonRoot(devOrchestrationEnv(env));
-  return join(daemonRoot, DEV_ORCHESTRATION_SUBDIR);
+  const devRoot = resolveDevRoot(devOrchestrationEnv(env));
+  return join(devRoot, DEV_ORCHESTRATION_SUBDIR);
 }
 
 export async function readDevConvergeManifest(
@@ -172,7 +170,7 @@ export async function requireDevOrchestrationLayout(
   const layout = await resolveDevOrchestrationLayout(env);
   if (!(await fileExists(layout.playbookPath))) {
     throw new Error(
-      `Dev orchestration playbook missing at ${layout.playbookPath} — ensure ${DEV_ORCHESTRATION_SUBDIR} exists in the daemon checkout`,
+      `Dev orchestration playbook missing at ${layout.playbookPath} — ensure ${DEV_ORCHESTRATION_SUBDIR} exists in the dev checkout`,
     );
   }
   if (!(await fileExists(layout.ansibleCfgPath))) {
