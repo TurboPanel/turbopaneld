@@ -86,18 +86,17 @@ export function presentStatusLine(text: string): string {
 }
 
 const DROP_LINE_PATTERNS: readonly RegExp[] = [
-  /^\s*\+\s+\S+==\S+\s*$/,
+  /^\s*\+\s+[^=\s]+==\S+\s*$/,
   /^(?:Resolved|Prepared|Installed)\s+\d+\s+packages/i,
   /^Using CPython/i,
   /^Using runtime/i,
   /^Creating virtual environment/i,
   /^Activate with:/i,
-  /^Using Python .* environment at:/i,
-  /^Using runtime .* environment at:/i,
-  /^Downloading .+ to \/[^\s]*tmp/i,
+  /^Using Python \S+ environment at:/i,
+  /^Using runtime \S+ environment at:/i,
+  /^Downloading \S+ to \/\S*tmp/i,
   /^Process install dependency map/i,
-  /^Starting .+ install process/i,
-  /^Starting orchestration .+ install process/i,
+  /^Starting(?: \S+)+ install process/i,
 ];
 
 function isBareTempOrVendorPathEcho(line: string): boolean {

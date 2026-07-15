@@ -126,8 +126,13 @@ export interface ResolveLayoutOptions {
   requireCheckout?: boolean;
 }
 
+/** Strip all trailing `/` without a backtracking regex. */
 function stripTrailingSlash(path: string): string {
-  return path.replace(/\/+$/, "");
+  let end = path.length;
+  while (end > 0 && path.codePointAt(end - 1) === 0x2f) {
+    end -= 1;
+  }
+  return end === path.length ? path : path.slice(0, end);
 }
 
 function pickPath(

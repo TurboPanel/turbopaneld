@@ -17,7 +17,7 @@ import {
 import { ensurePython } from "./python.ts";
 import { ensureUv } from "./uv.ts";
 import { resolveInstanceConfig } from "../instance/paths.ts";
-import { logError, logInfo } from "../logger.ts";
+import { logError, logInfo, sanitizeForLog } from "../logger.ts";
 import { DAEMON_INSTALL_PLAYBOOK } from "./paths.ts";
 
 /**
@@ -131,8 +131,7 @@ export async function initOrchestration(): Promise<boolean> {
     logInfo("orchestration", `runtime ready in ${elapsed}s`);
     return true;
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    logError("orchestration", "bootstrap failed:", message);
+    logError("orchestration", "bootstrap failed:", err);
     logError(
       "orchestration",
       "daemon will continue running without a verified runtime",
@@ -156,8 +155,44 @@ function resolveInstallerFailureMessage(
   if (failureDetail) {
     return sanitizeStatusLine(failureDetail) || failureDetail;
   }
-  const raw = err instanceof Error ? err.message : String(err);
+  const raw = sanitizeForLog(err);
   return sanitizeStatusLine(raw) || "orchestration failed";
+}
+
+function assertInstanceCaFile(path: string): void {
+  let stat: Deno.FileInfo;
+  try {
+    stat = Deno.statSync(path);
+  } catch {
+    throw new Error(`Instance CA file not found or unreadable: ${path}`);
+  }
+  if (!stat.isFile) {
+    throw new Error(`Instance CA path is not a file: ${path}`);
+  }
+}
+
+async function createInstallerVarsFile(
+  opts: RunInstallerOptions,
+): Promise<string> {
+  if (!opts.instanceUrl) {
+    throw new Error(
+      "--instance-url is required when --vars-file is not set",
+    );
+  }
+  const varsFile = await Deno.makeTempFile();
+  const lines: string[] = [
+    `turbopanel_instance_url: ${opts.instanceUrl}`,
+    `turbopanel_start: ${opts.start}`,
+  ];
+  if (opts.instanceCa) {
+    assertInstanceCaFile(opts.instanceCa);
+    lines.push(`turbopanel_instance_ca: ${opts.instanceCa}`);
+  }
+  if (opts.tunnelToken?.trim()) {
+    lines.push(`turbopanel_tunnel_token: ${opts.tunnelToken.trim()}`);
+  }
+  await Deno.writeTextFile(varsFile, `${lines.join("\n")}\n`);
+  return varsFile;
 }
 
 export async function runInstaller(opts: RunInstallerOptions): Promise<void> {
@@ -171,35 +206,8 @@ export async function runInstaller(opts: RunInstallerOptions): Promise<void> {
   events.beginStep();
   try {
     if (!varsFile) {
-      if (!opts.instanceUrl) {
-        throw new Error(
-          "--instance-url is required when --vars-file is not set",
-        );
-      }
-      varsFile = await Deno.makeTempFile();
+      varsFile = await createInstallerVarsFile(opts);
       internallyCreatedVarsFile = true;
-      const lines: string[] = [
-        `turbopanel_instance_url: ${opts.instanceUrl}`,
-        `turbopanel_start: ${opts.start}`,
-      ];
-      if (opts.instanceCa) {
-        let stat: Deno.FileInfo;
-        try {
-          stat = Deno.statSync(opts.instanceCa);
-        } catch {
-          throw new Error(
-            `Instance CA file not found or unreadable: ${opts.instanceCa}`,
-          );
-        }
-        if (!stat.isFile) {
-          throw new Error(`Instance CA path is not a file: ${opts.instanceCa}`);
-        }
-        lines.push(`turbopanel_instance_ca: ${opts.instanceCa}`);
-      }
-      if (opts.tunnelToken?.trim()) {
-        lines.push(`turbopanel_tunnel_token: ${opts.tunnelToken.trim()}`);
-      }
-      await Deno.writeTextFile(varsFile, `${lines.join("\n")}\n`);
     }
 
     const onEvent: AnsibleEventHandler = (event) => {

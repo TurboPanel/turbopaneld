@@ -13,14 +13,17 @@ import {
   summarizeRecap,
 } from "./presentation.ts";
 
-const TASK_NAME_PATTERN = /^\s*([^:]+)\s*:\s*(.+)$/;
-
 function parseTaskName(full: string): { role: string | null; task: string } {
-  const match = TASK_NAME_PATTERN.exec(full);
-  if (match) {
-    return { role: match[1]!.trim(), task: match[2]!.trim() };
+  const colon = full.indexOf(":");
+  if (colon === -1) {
+    return { role: null, task: full.trim() };
   }
-  return { role: null, task: full.trim() };
+  const role = full.slice(0, colon).trim();
+  const task = full.slice(colon + 1).trim();
+  if (!role) {
+    return { role: null, task: full.trim() };
+  }
+  return { role, task };
 }
 
 function taskLabel(full: string): string {

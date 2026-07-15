@@ -124,9 +124,9 @@ export function collectServerAddresses(): ServerAddresses {
   }
 
   return {
-    privateIpv4: [...privateIpv4].sort(),
-    privateIpv6: [...privateIpv6].sort(),
-    publicIpv4: [...publicIpv4].sort(),
-    publicIpv6: [...publicIpv6].sort(),
+    privateIpv4: [...privateIpv4].sort((a, b) => a.localeCompare(b)),
+    privateIpv6: [...privateIpv6].sort((a, b) => a.localeCompare(b)),
+    publicIpv4: [...publicIpv4].sort((a, b) => a.localeCompare(b)),
+    publicIpv6: [...publicIpv6].sort((a, b) => a.localeCompare(b)),
   };
 }

@@ -85,16 +85,14 @@ function mapDockerStateStatus(
   }
 }
 
-const HEALTH_STATUS_ACTION = /^health_status:\s*(.+)$/i;
-
 function deriveStatusFromEventAction(
   action: string,
 ): MonitorResourceStatus | undefined {
-  const healthMatch = HEALTH_STATUS_ACTION.exec(action);
-  if (healthMatch) {
-    return mapHealthStatus(healthMatch[1].trim());
-  }
-  return undefined;
+  const colon = action.indexOf(":");
+  if (colon === -1) return undefined;
+  const prefix = action.slice(0, colon).trim().toLowerCase();
+  if (prefix !== "health_status") return undefined;
+  return mapHealthStatus(action.slice(colon + 1).trim());
 }
 
 export function deriveContainerStatus(

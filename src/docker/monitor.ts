@@ -44,10 +44,6 @@ function isContainerDestroyEvent(event: DockerEvent): boolean {
   return event.Action === "destroy" || event.Action === "remove";
 }
 
-function errMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
-
 export class DockerMonitor {
   readonly #client: DockerClient;
   readonly #pollIntervalMs: number;
@@ -175,7 +171,7 @@ export class DockerMonitor {
       const inspect = await this.#client.inspectContainer(containerId);
       inspects.set(containerId, inspect);
     } catch (err) {
-      logWarn("docker-monitor", "inspect failed:", errMessage(err));
+      logWarn("docker-monitor", "inspect failed:", err);
     }
   }
 
@@ -184,7 +180,7 @@ export class DockerMonitor {
       this.#markDockerUnavailable("reconcile");
       return;
     }
-    logWarn("docker-monitor", "reconcile failed:", errMessage(err));
+    logWarn("docker-monitor", "reconcile failed:", err);
   }
 
   async #reconcileLoop(signal: AbortSignal): Promise<void> {
@@ -230,7 +226,7 @@ export class DockerMonitor {
       this.#markDockerUnavailable("events stream");
       return;
     }
-    logWarn("docker-monitor", "events stream failed:", errMessage(err));
+    logWarn("docker-monitor", "events stream failed:", err);
   }
 
   #ensurePollFallback(signal: AbortSignal): void {
@@ -287,7 +283,7 @@ export class DockerMonitor {
       this.#containers = summaries;
       return summaries.find((c) => c.Id === containerId);
     } catch (err) {
-      logWarn("docker-monitor", "list after event failed:", errMessage(err));
+      logWarn("docker-monitor", "list after event failed:", err);
       return undefined;
     }
   }
@@ -303,7 +299,7 @@ export class DockerMonitor {
       this.#removeContainer(containerId, event);
       return;
     }
-    logWarn("docker-monitor", "event refresh failed:", errMessage(err));
+    logWarn("docker-monitor", "event refresh failed:", err);
   }
 
   #removeContainer(containerId: string, event?: DockerEvent): void {
@@ -343,7 +339,7 @@ export class DockerMonitor {
       try {
         listener(change);
       } catch (err) {
-        logWarn("docker-monitor", "listener failed:", errMessage(err));
+        logWarn("docker-monitor", "listener failed:", err);
       }
     }
   }
