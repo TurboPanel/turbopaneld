@@ -117,7 +117,7 @@ async function downloadHostingCaddy(runtimesDir: string): Promise<void> {
 }
 
 /**
- * Ensure `/opt/turbopanel/vendor/caddy/current/caddy` exists for hosting ingress.
+ * Ensure `<runtimesDir>/caddy/current/caddy` exists for hosting ingress.
  */
 export async function ensureHostingCaddy(layout: LayoutPaths): Promise<string> {
   const caddy = caddyBinaryPath(layout.runtimesDir);

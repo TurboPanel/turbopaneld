@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install the vendored hosting-edge Caddy binary on a managed daemon host.
 # Used when environment.deploy fails with:
-#   Hosting Caddy runtime is missing: /opt/turbopanel/vendor/caddy/current/caddy
+#   Hosting Caddy runtime is missing: <runtimesDir>/caddy/current/caddy
 # before the daemon has on-demand caddy-setup (or when Sync Dev Build cannot
 # reach managed installs).
 #
@@ -14,7 +14,9 @@ set -eu
 
 CADDY_VER="${CADDY_VER:-2.10.2}"
 CADDY_TAG="${CADDY_TAG:-v${CADDY_VER}}"
-VENDOR_DIR="${TURBOPANEL_RUNTIMES_DIR:-/opt/turbopanel/vendor}"
+# Same composition as scripts/lib/runtime-paths.sh (keep curl|sh self-contained).
+TURBOPANEL_HOME="${TURBOPANEL_HOME:-/opt/turbopanel}"
+VENDOR_DIR="${TURBOPANEL_RUNTIMES_DIR:-${TURBOPANEL_RUNTIME_DIR:-${TURBOPANEL_HOME}/vendor}}"
 GROUP="${TURBOPANEL_GROUP:-turbopanel}"
 
 arch="$(uname -m)"
