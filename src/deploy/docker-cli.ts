@@ -39,7 +39,7 @@ async function runRaw(
 }
 
 function shellSingleQuote(value: string): string {
-  return `'${value.replaceAll("'", String.raw`'\''`)}'`;
+  return "'" + value.replaceAll("'", String.raw`'\''`) + "'";
 }
 
 /**
