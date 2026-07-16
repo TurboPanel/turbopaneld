@@ -19,7 +19,8 @@ async function dockerBinaryPresent(): Promise<boolean> {
  *
  * Always runs docker-setup when the binary is missing OR the socket is
  * unreachable (e.g. user not yet in the `docker` group). Group membership
- * changes require `sg docker` for the rest of this process — see docker-cli.ts.
+ * changes use `sudo -n -u <self>` for the rest of this process — see
+ * docker-cli.ts (`sg` fails for `/usr/sbin/nologin` service accounts).
  */
 export async function ensureDocker(): Promise<void> {
   const present = await dockerBinaryPresent();

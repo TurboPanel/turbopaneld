@@ -571,9 +571,11 @@ so daemon-only hosts get no GUI.
 `src/instance/commands/deploy-environment.ts`):
 
 1. Ensure Docker engine (`ensureDocker` → `runDockerSetup` when the binary is
-   missing or the Engine API is unreachable). Docker CLI calls use `sg docker`
-   fallback so the first deploy after group membership still works without a
-   daemon restart.
+   missing or the Engine API is unreachable). Docker CLI calls fall back to
+   `sudo -n -u <self> -- docker …` when the socket is permission-denied so the
+   first deploy after group membership still works without a daemon restart
+   (`sg docker` fails for `/usr/sbin/nologin` service accounts with "This
+   account is currently not available").
 2. Bootstrap Traefik on Docker network `turbopanel-ingress` (internal bind
    `127.0.0.1:8080` only — **no** public `:80`/`:443` on Traefik; **no**
    ACME/LE).
