@@ -6,6 +6,7 @@
 export const COMMAND_TYPES = [
   "daemon.ping",
   "environment.deploy",
+  "environment.stop",
   "server.hostname.set",
   "server.reboot",
 ] as const;
@@ -88,6 +89,19 @@ export type EnvironmentDeployResult = {
   summary: string;
   services?: string[];
   containers?: EnvironmentDeployContainer[];
+};
+
+export type EnvironmentStopPayload = {
+  environmentId: string;
+  projectId: string;
+  projectName: string;
+};
+
+export type EnvironmentStopResult = {
+  projectName: string;
+  summary: string;
+  /** Authoritative empty report so the instance clears container pins. */
+  containers: EnvironmentDeployContainer[];
 };
 
 /** Must stay in sync with the instance canonical version in src/lib/commands/hostname.ts */
@@ -278,5 +292,18 @@ export function parseEnvironmentDeployPayload(
     composeYaml: parseNonEmptyString(value, "composeYaml"),
     hostings: hostings.map(parseHosting),
     ...(tlsMaterial === undefined ? {} : { tlsMaterial }),
+  };
+}
+
+export function parseEnvironmentStopPayload(
+  value: unknown,
+): EnvironmentStopPayload {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid environment stop payload");
+  }
+  return {
+    environmentId: parseNonEmptyString(value, "environmentId"),
+    projectId: parseNonEmptyString(value, "projectId"),
+    projectName: parseNonEmptyString(value, "projectName"),
   };
 }

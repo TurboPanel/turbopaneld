@@ -240,3 +240,37 @@ export async function rewriteHostingCaddySites(
     logWarn("deploy", `hosting Caddy reload skipped: ${reload.stderr}`);
   }
 }
+
+/** Remove the per-environment hosting site snippet and best-effort reload Caddy. */
+export async function removeHostingCaddySite(
+  layout: LayoutPaths,
+  environmentId: string,
+): Promise<void> {
+  if (!SAFE_FILE_ID_RE.test(environmentId)) {
+    throw new Error("environmentId contains unsupported characters");
+  }
+
+  const sitePath = join(
+    layout.configDir,
+    "hosting",
+    "sites",
+    `${environmentId}.caddy`,
+  );
+  try {
+    await Deno.remove(sitePath);
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) {
+      throw err;
+    }
+  }
+
+  const reload = await run("sudo", [
+    "-n",
+    "systemctl",
+    "reload",
+    CADDY_SERVICE,
+  ]);
+  if (!reload.success) {
+    logWarn("deploy", `hosting Caddy reload skipped: ${reload.stderr}`);
+  }
+}

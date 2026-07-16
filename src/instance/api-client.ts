@@ -26,6 +26,8 @@ export interface DaemonChallengeResponse {
 export interface DaemonEnrollRequest {
   licenseId: string;
   licenseToken: string;
+  /** Persisted server.id from a prior enroll — required to re-enroll a consumed license. */
+  serverId?: string;
   machineId?: string;
   hostname: string;
   publicJwk: JsonWebKey;

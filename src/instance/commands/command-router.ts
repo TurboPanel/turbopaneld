@@ -8,11 +8,13 @@ import type {
 } from "./contracts.ts";
 import {
   parseEnvironmentDeployPayload,
+  parseEnvironmentStopPayload,
   parseHostnamePayload,
   parsePingPayload,
   parseRebootPayload,
 } from "./contracts.ts";
 import { handleEnvironmentDeploy } from "./deploy-environment.ts";
+import { handleEnvironmentStop } from "./stop-environment.ts";
 import { handleHostname } from "./hostname.ts";
 import { handlePing } from "./ping.ts";
 import { handleReboot } from "./reboot.ts";
@@ -88,6 +90,13 @@ export async function handleCommandDispatch(
         result = await handleEnvironmentDeploy(payload, daemonReceivedAt, {
           decryptSecrets: deps?.decryptSecrets,
         });
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
+      case "environment.stop": {
+        const payload = parseEnvironmentStopPayload(message.payload);
+        result = await handleEnvironmentStop(payload, daemonReceivedAt);
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;

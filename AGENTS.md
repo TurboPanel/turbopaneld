@@ -230,7 +230,10 @@ Tests: `src/orchestration/presentation.test.ts`, `install-presenter.test.ts`,
 `InstanceClient` maintains the daemon's authenticated WSS (or co-located Unix
 socket) to `/ws/daemon/v1`. Enrollment + JWT session issuance happen over REST
 first; the socket carries live traffic only (outbox delivery, command dispatch,
-dev-sync, tunnel-token, etc.).
+dev-sync, tunnel-token, etc.). Registration keys are one-shot: `enrollDaemon`
+sends a persisted `server.id` (when present) so re-enroll of the same host
+works; a consumed key cannot latch a second server (see instance Daemon Cell /
+license notes).
 
 **Co-located dev connectivity** (`src/orchestration/setup.ts`,
 `src/instance/paths.ts`): after console opt-in (`TURBOPANEL_DEV_INSTANCE=1`),
@@ -598,6 +601,14 @@ so daemon-only hosts get no GUI.
    `serviceId` from `payload.hostings`) is included in the command result when
    collection succeeds; a `ps`/parse failure never fails an otherwise-successful
    deploy.
+
+`environment.stop` (command router →
+`src/instance/commands/stop-environment.ts`):
+
+1. `docker compose -p <projectName> -f <stateDir>/deployments/<environmentId>/docker-compose.yml down --remove-orphans --volumes` when the compose file exists (idempotent no-op when missing).
+2. Remove `/etc/turbopanel/hosting/sites/<environmentId>.caddy` via `removeHostingCaddySite` and best-effort reload hosting Caddy.
+3. Delete the deployment directory.
+4. Return authoritative `containers: []` so the instance clears Postgres container pins.
 
 Helpers: `src/deploy/ensure-docker.ts`, `src/deploy/ingress.ts`,
 `src/deploy/materialize-tls.ts`, `src/deploy/ensure-hosting-caddy.ts`. Future

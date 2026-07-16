@@ -13,6 +13,19 @@ const SERVER_ID_FILE = "server.id";
 const SERVER_KEY_FILE = "server-key.json";
 const KEY_ID_FILE = "server-key-id";
 
+async function readPersistedServerId(
+  stateDir: string,
+): Promise<string | undefined> {
+  try {
+    const raw = await Deno.readTextFile(join(stateDir, SERVER_ID_FILE));
+    const trimmed = raw.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return undefined;
+    throw err;
+  }
+}
+
 export async function enrollDaemon(params: {
   apiClient: DaemonApiClient;
   machineId: string | undefined;
@@ -35,9 +48,11 @@ export async function enrollDaemon(params: {
     publicKeyFingerprint: fingerprint,
   });
   const signature = await signChallenge(enrollmentKeyFile.privateJwk, payload);
+  const persistedServerId = await readPersistedServerId(params.stateDir);
   const enrollment = await params.apiClient.enroll({
     licenseId: params.licenseId,
     licenseToken: params.licenseToken,
+    serverId: persistedServerId,
     machineId: params.machineId,
     hostname: params.hostname,
     publicJwk: enrollmentKeyFile.publicJwk,
