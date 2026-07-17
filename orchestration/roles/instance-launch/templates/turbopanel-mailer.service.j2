@@ -9,6 +9,12 @@ User={{ instance_user }}
 Group={{ turbopanel_group }}
 WorkingDirectory={{ turbopanel_instance_dir }}
 Environment=HOME={{ turbopanel_instance_runtime_dir }}
+{# Load the same runtime secret env the instance uses (runtime.dev-vars carries
+   TURBOPANEL_SECRET) so the mailer can decrypt DB-backed email secrets
+   (MAILGUN_API_KEY / SMTP_PASS sealed as tpsecret). Placed before the explicit
+   Environment= lines below so the mailer-specific overrides still win. #}
+EnvironmentFile=-{{ turbopanel_instance_runtime_env }}
+EnvironmentFile=-{{ turbopanel_instance_runtime_dev_vars }}
 {% if turbopanel_amqp_url is defined %}
 Environment=TURBOPANEL_AMQP_URL={{ turbopanel_amqp_url }}
 {% endif %}

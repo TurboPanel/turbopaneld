@@ -16,6 +16,14 @@ export class DaemonApiError extends Error {
   }
 }
 
+/**
+ * Client-side mirrors of the instance `/secrets/decrypt` limits (see
+ * `instance/src/daemon/api-routes.ts`). Enforced before sending so a daemon-side
+ * bug fails locally instead of stressing the instance with an oversized batch.
+ */
+export const MAX_SECRETS_DECRYPT_BATCH = 100;
+export const MAX_SECRETS_DECRYPT_CIPHERTEXT_CHARS = 16 * 1024;
+
 export interface DaemonChallengeResponse {
   challengeId: string;
   nonce: string;
@@ -136,6 +144,23 @@ export class DaemonApiClient {
    * Returns one plaintext (or null) per input ciphertext, in order.
    */
   async decryptSecrets(ciphertexts: string[]): Promise<(string | null)[]> {
+    if (
+      ciphertexts.length === 0 ||
+      ciphertexts.length > MAX_SECRETS_DECRYPT_BATCH
+    ) {
+      throw new DaemonApiError(
+        400,
+        `ciphertexts length must be 1-${MAX_SECRETS_DECRYPT_BATCH}`,
+      );
+    }
+    for (const ciphertext of ciphertexts) {
+      if (ciphertext.length > MAX_SECRETS_DECRYPT_CIPHERTEXT_CHARS) {
+        throw new DaemonApiError(
+          400,
+          `ciphertext exceeds ${MAX_SECRETS_DECRYPT_CIPHERTEXT_CHARS} chars`,
+        );
+      }
+    }
     const body = await this.#requestJson<{
       ok?: boolean;
       plaintexts?: unknown;
