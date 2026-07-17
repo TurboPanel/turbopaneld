@@ -3,6 +3,7 @@ import {
   CDN_RUN_SCRIPT,
   downloadRunScript,
   encodeLicenseArg,
+  executeRunReconcile,
   PRODUCTION_CONTROL_PLANE,
   resolveBootstrapInsecureTls,
   resolveRunScriptUrl,
@@ -188,6 +189,89 @@ test("buildRunReconcileArgs passes non-canonical instance CA path", () => {
   );
 });
 
+test("buildRunReconcileArgs never emits a release-insecure token during insecure instance bootstrap", () => {
+  const args = buildRunReconcileArgs({
+    licenseArg: "abc",
+    instanceUrl: "https://huey.lan:8443",
+    insecureTls: true,
+  });
+  // Instance bootstrap relaxation is expressed only as --insecure-tls, which
+  // run.sh scopes to the self-hosted instance legs (run.sh re-exec + CA fetch).
+  assertEquals(args.includes("--insecure-tls"), true);
+  // Release/CDN downloads must stay TLS-verified: no release-insecure flag or
+  // override token may ever leak into the reconcile args.
+  const joined = args.join(" ").toLowerCase();
+  assertEquals(joined.includes("release"), false);
+  assertEquals(joined.includes("override"), false);
+});
+
+test("executeRunReconcile keeps release downloads TLS-verified when instance bootstrap is insecure", async () => {
+  const originalCommand = Deno.Command;
+  let capturedEnv: Record<string, string> | undefined;
+  let capturedArgs: string[] | undefined;
+  try {
+    Deno.Command = class {
+      constructor(_cmd: string, opts: Deno.CommandOptions) {
+        capturedEnv = opts.env as Record<string, string> | undefined;
+        capturedArgs = opts.args as string[];
+      }
+
+      spawn() {
+        return {
+          stdin: {
+            getWriter() {
+              return {
+                write() {
+                  return Promise.resolve();
+                },
+                close() {
+                  return Promise.resolve();
+                },
+              };
+            },
+          },
+          output() {
+            return Promise.resolve({
+              success: true,
+              code: 0,
+              stdout: new Uint8Array(),
+              stderr: new Uint8Array(),
+            });
+          },
+        };
+      }
+    } as unknown as typeof Deno.Command;
+
+    const args = buildRunReconcileArgs({
+      licenseArg: "abc",
+      // Self-hosted, self-signed, no CA on disk → insecure instance bootstrap.
+      instanceUrl: "https://huey.lan:8443",
+      insecureTls: true,
+    });
+    await executeRunReconcile({
+      script: "#!/bin/sh\nexit 0",
+      args,
+    });
+
+    // Instance bootstrap relaxation is passed as --insecure-tls only.
+    assertEquals(capturedArgs?.includes("--insecure-tls"), true);
+    // run.sh only relaxes release/CDN downloads via the undocumented
+    // operator-only override; reconcile must never inject it, so release
+    // manifest/artifact/Deno downloads stay TLS-verified.
+    assertEquals(
+      capturedEnv?.TURBOPANEL_RELEASE_TLS_INSECURE_OVERRIDE ?? undefined,
+      undefined,
+    );
+    // The retired signal must not be forwarded either.
+    assertEquals(
+      capturedEnv?.TURBOPANEL_RELEASE_TLS_INSECURE ?? undefined,
+      undefined,
+    );
+  } finally {
+    Deno.Command = originalCommand;
+  }
+});
+
 test("executeRunReconcile chdir survives daemon directory swap", async () => {
   const tmp = await Deno.makeTempDir({ prefix: "tp-reconcile-" });
   const daemonDir = join(tmp, "daemon");
@@ -205,7 +289,6 @@ test("executeRunReconcile chdir survives daemon directory swap", async () => {
     "exit 0",
   ].join("\n");
 
-  const { executeRunReconcile } = await import("./run-reconcile.ts");
   await executeRunReconcile({ script: swapScript, args: [] });
 
   const cwdAfter = Deno.cwd();

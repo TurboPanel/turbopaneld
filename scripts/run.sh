@@ -19,6 +19,23 @@
 TP_CURL_FETCH='curl -fsSL'
 TP_CURL_FETCH_INSECURE='curl -fsSLk'
 
+# Release artifact downloads (channel manifest, verified binary/orchestration/JS
+# artifacts, and the Deno runtime zip) always verify TLS against public trust.
+# `--insecure-tls` only relaxes trust for the self-hosted *instance* bootstrap
+# legs (the initial run.sh re-exec and the instance CA fetch) — it must never
+# weaken release/CDN trust, so bootstrapping a self-signed instance cannot
+# silently disable verification of the code we execute. If a genuine
+# release-download TLS emergency ever arises, TURBOPANEL_RELEASE_TLS_INSECURE_OVERRIDE=1
+# is a deliberately undocumented, operator-only escape hatch: it is never derived
+# from --insecure-tls and never emitted by the install-command builder.
+tp_release_curl() {
+	if [ "${TURBOPANEL_RELEASE_TLS_INSECURE_OVERRIDE:-}" = 1 ]; then
+		printf '%s' "$TP_CURL_FETCH_INSECURE"
+	else
+		printf '%s' "$TP_CURL_FETCH"
+	fi
+}
+
 tp_prod_home() { printf '/opt/turbopanel'; }
 tp_daemon_binary_name() { printf 'turbopaneld'; }
 tp_daemon_js_fallback_name() { printf 'turbopaneld.js'; }
@@ -155,8 +172,7 @@ tp_download_verified_artifact() {
 			;;
 	esac
 
-	_curl="$TP_CURL_FETCH"
-	[ "${TURBOPANEL_RELEASE_TLS_INSECURE:-}" = 1 ] && _curl="$TP_CURL_FETCH_INSECURE"
+	_curl="$(tp_release_curl)"
 	_fetch_url="$(tp_release_download_url "$_url")"
 	_attempt=1
 	_max_attempts=5
@@ -425,8 +441,7 @@ tp_install_deno_runtime() {
 		_deno_asset="deno-${_deno_arch}.zip"
 		_deno_url="https://dl.deno.land/release/v${TP_DENO_VERSION}/${_deno_asset}"
 		_deno_tmp="$(mktemp -d)"
-		_curl="$TP_CURL_FETCH"
-		[ "${TURBOPANEL_RELEASE_TLS_INSECURE:-}" = 1 ] && _curl="$TP_CURL_FETCH_INSECURE"
+		_curl="$(tp_release_curl)"
 		# shellcheck disable=SC2086
 		if ! $_curl -o "$_deno_tmp/$_deno_asset" "$_deno_url" 2>"$_deno_tmp/curl.err"; then
 			tp_print_error "Failed to download Deno from $_deno_url"
@@ -468,8 +483,7 @@ PY
 
 tp_fetch_channel_manifest() {
 	_channel="${TURBOPANEL_UPDATE_CHANNEL:-trunk}"
-	_curl="$TP_CURL_FETCH"
-	[ "${TURBOPANEL_RELEASE_TLS_INSECURE:-}" = 1 ] && _curl="$TP_CURL_FETCH_INSECURE"
+	_curl="$(tp_release_curl)"
 
 	_channels_json=""
 	if ! _channels_json="$($_curl "https://dl.trbp.nl/channels.json" 2>/dev/null)"; then
@@ -607,9 +621,11 @@ ENV_FILE="$CONFIG_DIR/daemon.env"
 CA_PATH="$CONFIG_DIR/instance-ca.pem"
 LICENSE_STAGING_DIR="$STATE_DIR/daemon-license-staging"
 
-if [ "$INSECURE_TLS" = true ]; then
-	export TURBOPANEL_RELEASE_TLS_INSECURE=1
-fi
+# NOTE: `--insecure-tls` (INSECURE_TLS) deliberately does NOT export any
+# release-insecure flag. It only relaxes trust for the self-hosted instance
+# bootstrap legs below (the run.sh re-exec above and the instance CA fetch).
+# Release/CDN downloads stay TLS-verified via tp_release_curl(); the only way to
+# relax them is the undocumented operator-only TURBOPANEL_RELEASE_TLS_INSECURE_OVERRIDE.
 
 mkdir -p "$STATE_DIR" "$CONFIG_DIR" "$BIN_DIR" "$INSTALL_ROOT/share" "$RUN_DIR"
 STAGING_DIR="$LICENSE_STAGING_DIR"

@@ -193,17 +193,71 @@ test("resolveInstanceCaPath returns undefined when env unset and canonical file 
   }
 });
 
-test("createInstanceHttpClient returns undefined for plaintext http without reading CA", async () => {
+test("createInstanceHttpClient returns undefined for plaintext http with dev flag without reading CA", async () => {
   const client = await createInstanceHttpClient(
     {
       kind: "url",
       baseUrl: "http://localhost:8880",
       wsBaseUrl: "ws://localhost:8880",
     },
-    { caCertPath: "/nonexistent/platform/config/instance-ca.pem" },
+    {
+      caCertPath: "/nonexistent/platform/config/instance-ca.pem",
+      env: { TURBOPANEL_DEV_HTTP_CONTROL_PLANE: "1" },
+    },
   );
   if (client !== undefined) {
     throw new Error(`expected undefined, got ${client}`);
+  }
+});
+
+test("createInstanceHttpClient rejects plaintext http without the dev flag", async () => {
+  let threw = false;
+  try {
+    await createInstanceHttpClient(
+      {
+        kind: "url",
+        baseUrl: "http://managed.example.com",
+        wsBaseUrl: "ws://managed.example.com",
+      },
+      { env: {} },
+    );
+  } catch {
+    threw = true;
+  }
+  if (!threw) {
+    throw new Error(
+      "expected createInstanceHttpClient to reject plaintext http without TURBOPANEL_DEV_HTTP_CONTROL_PLANE",
+    );
+  }
+});
+
+test("resolveInstanceConfig rejects plaintext http control plane without the dev flag", () => {
+  let threw = false;
+  try {
+    resolveInstanceConfig({ TURBOPANEL_INSTANCE_URL: "http://managed.example.com" });
+  } catch {
+    threw = true;
+  }
+  if (!threw) {
+    throw new Error(
+      "expected resolveInstanceConfig to reject plaintext http without TURBOPANEL_DEV_HTTP_CONTROL_PLANE",
+    );
+  }
+});
+
+test("resolveInstanceConfig allows plaintext http control plane with the dev flag", () => {
+  const config = resolveInstanceConfig({
+    TURBOPANEL_INSTANCE_URL: "http://localhost:8880",
+    TURBOPANEL_DEV_HTTP_CONTROL_PLANE: "1",
+  });
+  if (config.kind !== "url") {
+    throw new Error("expected url mode for plaintext http with dev flag");
+  }
+  if (config.baseUrl !== "http://localhost:8880") {
+    throw new Error(`expected http://localhost:8880, got ${config.baseUrl}`);
+  }
+  if (config.wsBaseUrl !== "ws://localhost:8880") {
+    throw new Error(`expected ws://localhost:8880, got ${config.wsBaseUrl}`);
   }
 });
 

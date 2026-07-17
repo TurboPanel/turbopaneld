@@ -58,12 +58,30 @@ function httpToWs(url: string): string {
  * `https://<instance-host>:<port>`). Otherwise it falls back to the
  * local Unix socket used by the co-located dev setup.
  */
+/**
+ * Plaintext `http://` to the control plane is a development-only path gated by
+ * `TURBOPANEL_DEV_HTTP_CONTROL_PLANE`. On managed/production hosts the flag is
+ * never set, so a plaintext control-plane URL is rejected rather than silently
+ * dialed without TLS.
+ */
+function isDevHttpControlPlaneEnabled(
+  env: Record<string, string | undefined>,
+): boolean {
+  return isTruthyFlag(env.TURBOPANEL_DEV_HTTP_CONTROL_PLANE);
+}
+
 export function resolveInstanceConfig(
   env: Record<string, string | undefined> = Deno.env.toObject(),
 ): InstanceConfig {
   const url = env.TURBOPANEL_INSTANCE_URL?.trim();
   if (url) {
     const baseUrl = stripTrailingSlashes(url);
+    if (baseUrl.startsWith("http://") && !isDevHttpControlPlaneEnabled(env)) {
+      throw new Error(
+        `TURBOPANEL_INSTANCE_URL must use https:// (got "${baseUrl}"); ` +
+          "set TURBOPANEL_DEV_HTTP_CONTROL_PLANE=1 to allow plaintext http in development only",
+      );
+    }
     return { kind: "url", baseUrl, wsBaseUrl: httpToWs(baseUrl) };
   }
   return { kind: "socket", socketPath: resolveInstanceSocket(env) };
@@ -172,6 +190,8 @@ export function resolveInstanceCaPath(
 export interface InstanceHttpClientOptions {
   /** Path to the platform CA PEM to trust (self-hosted instances). */
   caCertPath?: string;
+  /** Environment used to gate the dev-only plaintext http control plane. */
+  env?: Record<string, string | undefined>;
 }
 
 /**
@@ -200,6 +220,14 @@ export async function createInstanceHttpClient(
   }
 
   if (config.baseUrl.startsWith("http://")) {
+    const env = options.env ??
+      (typeof Deno !== "undefined" ? Deno.env.toObject() : {});
+    if (!isDevHttpControlPlaneEnabled(env)) {
+      throw new Error(
+        `instance base URL must use https:// (got "${config.baseUrl}"); ` +
+          "set TURBOPANEL_DEV_HTTP_CONTROL_PLANE=1 to allow plaintext http in development only",
+      );
+    }
     return undefined;
   }
 
