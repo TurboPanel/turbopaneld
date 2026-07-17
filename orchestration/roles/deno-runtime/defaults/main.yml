@@ -5,7 +5,7 @@ turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') 
 # `deno run main.ts` and the managed JS-fallback ExecStart
 # (`deno run …/bin/turbopaneld.js`). Keep in step with the TP_DENO_VERSION pin
 # in scripts/run.sh.
-deno_version: "2.9.2"
+deno_version: "2.9.3"
 turbopanel_dev_user: ""
 turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
 turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"

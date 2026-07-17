@@ -294,7 +294,7 @@ export function cloudflaredDownloadUrl(
  * JS-fallback ExecStart (`deno run …/bin/turbopaneld.js`). Keep in step with
  * `deno_version` in `orchestration/roles/deno-runtime/defaults/main.yml`.
  */
-export const DENO_VERSION = "2.9.2";
+export const DENO_VERSION = "2.9.3";
 
 /**
  * Pinned ClickHouse version — Docker image tag
