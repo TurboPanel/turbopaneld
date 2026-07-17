@@ -12,6 +12,12 @@
 # this role covers the remainder once the daemon can run Ansible.
 - name: Install daemon host-base prerequisites
   ansible.builtin.apt:
+    # Refresh stale package indexes so pool fetches don't 404 when the mirror
+    # has rolled a package revision since the host's last apt update (e.g.
+    # fresh dev bootstrap via daemon-systemd-setup.yml, which has no separate
+    # cache-refresh pre-task like daemon-converge.yml).
+    update_cache: true
+    cache_valid_time: 3600
     name:
       - ca-certificates
       - curl
