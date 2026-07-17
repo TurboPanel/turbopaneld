@@ -371,9 +371,15 @@ downloads over HTTPS). Four valid configurations:
 
 The plaintext HTTP path targets the dev-only `:8880` entrypoint in
 `../instance/Caddyfile` (see **`../instance/AGENTS.md`** "Caddy (dev +
-production)" — dev-only plaintext HTTP entrypoint). It requires
-`TURBOPANEL_DEV_HTTP_CONTROL_PLANE=1` on co-located dev hosts and is never valid
-on managed or production installs.
+production)" — dev-only plaintext HTTP entrypoint). The daemon refuses
+`TURBOPANEL_INSTANCE_URL=http://…` unless `TURBOPANEL_DEV_HTTP_CONTROL_PLANE=1`
+is set (development-only gate — never valid on managed/production installs).
+Co-located Caddy injects the flag via the unit template when
+`turbopanel_dev_user` is set. Remote **Add Server** installs that pass
+`--host http://…:8880` must get the same opt-in in `/etc/turbopanel/daemon.env`:
+`daemon-config` `dotenv.j2` derives it from the URL, and `scripts/run.sh`
+ensures the line after install (so older CDN orchestration tarballs still
+work). HTTPS `--host` installs never write the flag.
 
 Note: `Deno.createHttpClient({ caCerts })` **adds** to the system roots (does
 not replace them), so configuring the platform CA does not break validation of

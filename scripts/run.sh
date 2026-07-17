@@ -846,3 +846,41 @@ else
 fi
 # Disposable ansible scratch (ANSIBLE_HOME); roles/collections already live under FHS.
 rm -rf /tmp/turbopanel-ansible /root/.ansible
+
+# Plaintext --host http://… installs must opt into TURBOPANEL_DEV_HTTP_CONTROL_PLANE
+# or the daemon refuses to start (resolveInstanceConfig). Newer daemon-config
+# templates write this from the URL; older release orchestration trees do not —
+# ensure the line is present (and restart if we had to patch) so Add Server →
+# :8880 works immediately against a CDN-published orchestration tarball.
+tp_ensure_dev_http_control_plane_env() {
+	_env_file="$1"
+	_host_url="$2"
+	_svc_name="$3"
+	case "$_host_url" in
+		http://*)
+			;;
+		*)
+			return 0
+			;;
+	esac
+	if [ ! -f "$_env_file" ]; then
+		tp_print_error "daemon env missing after install: $_env_file"
+		return 1
+	fi
+	if grep -q '^TURBOPANEL_DEV_HTTP_CONTROL_PLANE=1$' "$_env_file" 2>/dev/null; then
+		return 0
+	fi
+	tp_print_step "▸" "Enabling development plaintext control plane (TURBOPANEL_DEV_HTTP_CONTROL_PLANE=1)…"
+	# Drop any stale/disabled value, then append the required opt-in.
+	_tmp_env="$(mktemp)"
+	grep -v '^TURBOPANEL_DEV_HTTP_CONTROL_PLANE=' "$_env_file" > "$_tmp_env" || true
+	printf 'TURBOPANEL_DEV_HTTP_CONTROL_PLANE=1\n' >> "$_tmp_env"
+	install -m 0640 "$_tmp_env" "$_env_file"
+	rm -f "$_tmp_env"
+	if [ -n "$_svc_name" ] && command -v systemctl >/dev/null 2>&1; then
+		systemctl restart "$_svc_name" >/dev/null 2>&1 || true
+	fi
+	tp_print_ok "Plaintext control-plane opt-in written"
+	return 0
+}
+tp_ensure_dev_http_control_plane_env "$ENV_FILE" "$HOST_URL" "turbopaneld"
