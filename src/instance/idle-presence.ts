@@ -15,7 +15,6 @@ export const MAX_CONNECTION_AGE_MS = 2 * 60 * 60 * 1_000;
 // Must match DAEMON_CELL_PING in instance/src/daemon/cell/protocol.ts exactly.
 const CELL_PING_MESSAGE = '{"type":"ping"}';
 
-
 export type IdlePresenceOptions = {
   serverId: string;
   /** Override for tests; defaults to {@link IDLE_PRESENCE_MS}. */

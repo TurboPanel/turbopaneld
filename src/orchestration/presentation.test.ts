@@ -35,7 +35,7 @@ function assertNoForbiddenTokens(text: string, label: string): void {
  * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
-const test = Deno.test.bind(Deno)
+const test = Deno.test.bind(Deno);
 
 test("logComponent preserves vendor names when presenter is inactive", () => {
   setActiveInstallPresenter(null);

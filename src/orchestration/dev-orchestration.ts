@@ -1,10 +1,6 @@
 import { join } from "@std/path";
 import { readEnv, resolveDevRoot } from "../paths/layout.ts";
-import {
-  ANSIBLE_HOME,
-  ANSIBLE_LOCAL_TMP,
-  GALAXY_ROLES_DIR,
-} from "./paths.ts";
+import { ANSIBLE_HOME, ANSIBLE_LOCAL_TMP, GALAXY_ROLES_DIR } from "./paths.ts";
 
 /** Dev overlay playbook + roles live under `<dev checkout>/orchestration`. */
 export const DEV_ORCHESTRATION_SUBDIR = join("dev", "orchestration");

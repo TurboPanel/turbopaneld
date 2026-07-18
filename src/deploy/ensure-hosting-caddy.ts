@@ -76,7 +76,13 @@ async function downloadHostingCaddy(runtimesDir: string): Promise<void> {
     if (!curl.success) {
       throw new Error(`curl failed: ${curl.stderr || "download error"}`);
     }
-    const tar = await run("/usr/bin/tar", ["-xzf", tarball, "-C", tmp, "caddy"]);
+    const tar = await run("/usr/bin/tar", [
+      "-xzf",
+      tarball,
+      "-C",
+      tmp,
+      "caddy",
+    ]);
     if (!tar.success) {
       throw new Error(`tar failed: ${tar.stderr || "extract error"}`);
     }
@@ -105,7 +111,9 @@ async function downloadHostingCaddy(runtimesDir: string): Promise<void> {
     if (!chown.success) {
       logWarn(
         "deploy",
-        `hosting Caddy chown skipped: ${chown.stderr || "no passwordless sudo"}`,
+        `hosting Caddy chown skipped: ${
+          chown.stderr || "no passwordless sudo"
+        }`,
       );
     }
   } finally {

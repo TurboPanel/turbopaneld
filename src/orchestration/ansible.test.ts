@@ -35,11 +35,17 @@ roles_path = roles
   );
   await Deno.writeTextFile(
     join(root, DEV_CONVERGE_MANIFEST_FILE),
-    `${JSON.stringify({
-      playbook: "playbooks/instance-dev-install.yml",
-      roles: [],
-      devRoles: [],
-    }, null, 2)}\n`,
+    `${
+      JSON.stringify(
+        {
+          playbook: "playbooks/instance-dev-install.yml",
+          roles: [],
+          devRoles: [],
+        },
+        null,
+        2,
+      )
+    }\n`,
   );
   await Deno.mkdir(join(root, "playbooks"), { recursive: true });
   await Deno.writeTextFile(
@@ -324,7 +330,9 @@ test(
     for (const body of commentBodies) {
       if (body.includes("--")) {
         throw new Error(
-          `${configPath}: XML comment contains "--" (illegal; breaks ClickHouse config merge):\n${body.slice(0, 200)}`,
+          `${configPath}: XML comment contains "--" (illegal; breaks ClickHouse config merge):\n${
+            body.slice(0, 200)
+          }`,
         );
       }
     }

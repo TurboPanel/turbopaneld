@@ -1,13 +1,16 @@
 import { type DaemonApiClient, DaemonApiError } from "./api-client.ts";
 import { it } from "@std/testing/bdd";
+import { join } from "@std/path";
 import {
   DEFAULT_INITIAL_BACKOFF_MS,
   DEFAULT_MAX_BACKOFF_MS,
   fullJitterMs,
   InstanceClient,
   normalizeReconnectDelayMs,
+  PARKED_BACKOFF_MIN_MS,
   STABLE_SESSION_MS,
 } from "./client.ts";
+import { generateDaemonKeypair, saveDaemonKeyFile } from "../crypto/keys.ts";
 import { enrollDaemon } from "./enroll.ts";
 import { IdlePresence } from "./idle-presence.ts";
 import {
@@ -39,6 +42,18 @@ function jwksResponse(signing: TestSigningMaterial): Response {
   return new Response(JSON.stringify(signing.jwks), { status: 200 });
 }
 
+async function seedDaemonIdentity(
+  tempDir: string,
+  identity: { serverId: string; keyId: string },
+): Promise<void> {
+  await saveDaemonKeyFile(
+    join(tempDir, "server-key.json"),
+    await generateDaemonKeypair(),
+  );
+  await Deno.writeTextFile(`${tempDir}/server.id`, `${identity.serverId}\n`);
+  await Deno.writeTextFile(`${tempDir}/server-key-id`, `${identity.keyId}\n`);
+}
+
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
@@ -62,6 +77,19 @@ function assertExists<T>(
   if (value === undefined || value === null) {
     throw new Error(message ?? "expected value to exist");
   }
+}
+
+async function assertPathMissing(
+  path: string,
+  message?: string,
+): Promise<void> {
+  try {
+    await Deno.stat(path);
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return;
+    throw error;
+  }
+  throw new Error(message ?? `expected path to be missing: ${path}`);
 }
 
 class MockWebSocket extends EventTarget {
@@ -2034,6 +2062,809 @@ it({
       socket.close(1000, "done");
     } finally {
       client.stop();
+      Object.defineProperty(globalThis, "fetch", {
+        configurable: true,
+        writable: true,
+        value: originalFetch,
+      });
+      Object.defineProperty(globalThis, "WebSocket", {
+        configurable: true,
+        writable: true,
+        value: originalWebSocket,
+      });
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+      await Deno.remove(tempDir, { recursive: true });
+    }
+  },
+});
+
+it({
+  name: "DB-wipe → daemon parks without an enroll storm",
+  permissions: { env: true, read: true, write: true, sys: ["hostname"] },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const tempDir = await Deno.makeTempDir();
+    const originalFetch = globalThis.fetch;
+    const originalWebSocket = globalThis.WebSocket;
+    const originalSetTimeout = globalThis.setTimeout;
+    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const sockets: MockWebSocket[] = [];
+    const reconnectDelays: number[] = [];
+    let enrollCount = 0;
+
+    class TrackingWebSocket extends MockWebSocket {
+      constructor(url: string, options?: unknown) {
+        super(url, options);
+        sockets.push(this);
+      }
+    }
+
+    globalThis.setTimeout = ((
+      handler: (...args: unknown[]) => void,
+      timeout?: number,
+      ...args: unknown[]
+    ) => {
+      if (
+        typeof timeout === "number" && timeout >= DEFAULT_INITIAL_BACKOFF_MS
+      ) {
+        reconnectDelays.push(timeout);
+      }
+      return originalSetTimeout(handler, 0, ...args);
+    }) as typeof setTimeout;
+
+    Object.defineProperty(globalThis, "WebSocket", {
+      configurable: true,
+      writable: true,
+      value: TrackingWebSocket,
+    });
+
+    const { signing } = await prepareVerifiedAuth();
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      writable: true,
+      value: async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/api/health")) {
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        if (url.endsWith("/api/daemon/v1/jwks.json")) {
+          return jwksResponse(signing);
+        }
+        if (url.endsWith("/api/daemon/v1/auth/challenge")) {
+          const raw = init?.body ? await new Response(init.body).text() : "{}";
+          const body = JSON.parse(raw) as { serverId?: string; keyId?: string };
+          if (body.serverId && body.keyId) {
+            return new Response(
+              JSON.stringify({ error: "Server key not found" }),
+              { status: 404 },
+            );
+          }
+          return new Response(
+            JSON.stringify({
+              challengeId: "enroll-challenge",
+              nonce: "enroll-nonce",
+              at: new Date().toISOString(),
+              expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.endsWith("/api/daemon/v1/enroll")) {
+          enrollCount += 1;
+          return new Response(JSON.stringify({ error: "Invalid license" }), {
+            status: 401,
+          });
+        }
+        return new Response(JSON.stringify({ error: "not found" }), {
+          status: 404,
+        });
+      },
+    });
+
+    Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", tempDir);
+    Deno.env.delete("TURBOPANEL_FORCE_ENROLL");
+    await seedDaemonIdentity(tempDir, { serverId: "srv-1", keyId: "kid-1" });
+    await Deno.writeTextFile(`${tempDir}/license.id`, "license-123\n");
+    await Deno.writeTextFile(`${tempDir}/license.token`, "token-abc\n");
+
+    const client = new InstanceClient({
+      config: {
+        kind: "url",
+        baseUrl: "https://instance.test",
+        wsBaseUrl: "wss://instance.test",
+      },
+    });
+
+    try {
+      client.start();
+      await waitFor(
+        "parked delay",
+        () =>
+          reconnectDelays.some((d) => d >= PARKED_BACKOFF_MIN_MS)
+            ? true
+            : undefined,
+      );
+      const enrollAtPark = enrollCount;
+      await new Promise((resolve) => originalSetTimeout(resolve, 50));
+      assertEquals(
+        enrollAtPark,
+        1,
+        `expected stale-identity recovery to enroll once before park, got ${enrollAtPark}`,
+      );
+      assertEquals(
+        enrollCount,
+        1,
+        `expected no enroll storm after park, got ${enrollCount}`,
+      );
+      assert(
+        enrollCount <= 1,
+        `expected no enroll storm, got ${enrollCount} (was ${enrollAtPark} at park)`,
+      );
+      assertEquals(
+        (await Deno.readTextFile(`${tempDir}/server.id`)).trim(),
+        "srv-1",
+      );
+      await assertPathMissing(
+        `${tempDir}/server-key.json`,
+        "expected server-key.json to be cleared before park",
+      );
+      await assertPathMissing(
+        `${tempDir}/server-key-id`,
+        "expected server-key-id to be cleared before park",
+      );
+      assertEquals(sockets.length, 0);
+    } finally {
+      client.stop();
+      globalThis.setTimeout = originalSetTimeout;
+      Object.defineProperty(globalThis, "fetch", {
+        configurable: true,
+        writable: true,
+        value: originalFetch,
+      });
+      Object.defineProperty(globalThis, "WebSocket", {
+        configurable: true,
+        writable: true,
+        value: originalWebSocket,
+      });
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+      await Deno.remove(tempDir, { recursive: true });
+    }
+  },
+});
+
+it({
+  name: "transient 503 keeps normal reconnect backoff (no park)",
+  permissions: { env: true, read: true, write: true, sys: ["hostname"] },
+  fn: async () => {
+    const tempDir = await Deno.makeTempDir();
+    const originalFetch = globalThis.fetch;
+    const originalWebSocket = globalThis.WebSocket;
+    const originalSetTimeout = globalThis.setTimeout;
+    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const sockets: MockWebSocket[] = [];
+    const reconnectDelays: number[] = [];
+    let sessionCalls = 0;
+    let enrollCount = 0;
+
+    class TrackingWebSocket extends MockWebSocket {
+      constructor(url: string, options?: unknown) {
+        super(url, options);
+        sockets.push(this);
+      }
+    }
+
+    globalThis.setTimeout = ((
+      handler: (...args: unknown[]) => void,
+      timeout?: number,
+      ...args: unknown[]
+    ) => {
+      if (
+        typeof timeout === "number" && timeout >= DEFAULT_INITIAL_BACKOFF_MS
+      ) {
+        reconnectDelays.push(timeout);
+      }
+      return originalSetTimeout(handler, 0, ...args);
+    }) as typeof setTimeout;
+
+    Object.defineProperty(globalThis, "WebSocket", {
+      configurable: true,
+      writable: true,
+      value: TrackingWebSocket,
+    });
+
+    const { signing, authToken } = await prepareVerifiedAuth();
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      writable: true,
+      value: async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/api/health")) {
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        if (url.endsWith("/api/daemon/v1/jwks.json")) {
+          return jwksResponse(signing);
+        }
+        if (url.endsWith("/api/daemon/v1/auth/challenge")) {
+          const raw = init?.body ? await new Response(init.body).text() : "{}";
+          const body = JSON.parse(raw) as { serverId?: string; keyId?: string };
+          if (body.serverId && body.keyId) {
+            return new Response(
+              JSON.stringify({
+                challengeId: "auth-challenge",
+                nonce: "auth-nonce",
+                at: new Date().toISOString(),
+                expiresAt: new Date(Date.now() + 60_000).toISOString(),
+              }),
+              { status: 200 },
+            );
+          }
+          return new Response(
+            JSON.stringify({
+              challengeId: "enroll-challenge",
+              nonce: "enroll-nonce",
+              at: new Date().toISOString(),
+              expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.endsWith("/api/daemon/v1/enroll")) {
+          enrollCount += 1;
+          return new Response(
+            JSON.stringify({ serverId: "srv-1", keyId: "kid-1" }),
+            { status: 200 },
+          );
+        }
+        if (url.endsWith("/api/daemon/v1/auth/session")) {
+          sessionCalls += 1;
+          if (sessionCalls <= 2) {
+            return new Response(JSON.stringify({ error: "unavailable" }), {
+              status: 503,
+            });
+          }
+          return new Response(
+            JSON.stringify({
+              token: authToken,
+              expiresAt: new Date(Date.now() + 900_000).toISOString(),
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(JSON.stringify({ error: "not found" }), {
+          status: 404,
+        });
+      },
+    });
+
+    Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", tempDir);
+    Deno.env.delete("TURBOPANEL_FORCE_ENROLL");
+    await seedDaemonIdentity(tempDir, { serverId: "srv-1", keyId: "kid-1" });
+    await Deno.writeTextFile(`${tempDir}/license.id`, "license-123\n");
+    await Deno.writeTextFile(`${tempDir}/license.token`, "token-abc\n");
+
+    const client = new InstanceClient({
+      config: {
+        kind: "url",
+        baseUrl: "https://instance.test",
+        wsBaseUrl: "wss://instance.test",
+      },
+    });
+
+    try {
+      client.start();
+      const socket = await waitFor(
+        "transient-503 websocket",
+        () => sockets.at(0),
+      );
+      socket.open();
+      assertEquals(socket.readyState, MockWebSocket.OPEN);
+      assertEquals(
+        enrollCount,
+        0,
+        `expected transient 503 path to skip enroll, got ${enrollCount}`,
+      );
+      assert(
+        reconnectDelays.length >= 1,
+        "expected at least one reconnect/backoff delay",
+      );
+      for (const delay of reconnectDelays) {
+        assert(
+          delay >= DEFAULT_INITIAL_BACKOFF_MS &&
+            delay <= DEFAULT_MAX_BACKOFF_MS,
+          `delay ${delay} outside normal reconnect bounds`,
+        );
+      }
+      assert(
+        !reconnectDelays.some((d) => d >= PARKED_BACKOFF_MIN_MS),
+        "expected no parked backoff for transient 503",
+      );
+      socket.close(1000, "done");
+    } finally {
+      client.stop();
+      globalThis.setTimeout = originalSetTimeout;
+      Object.defineProperty(globalThis, "fetch", {
+        configurable: true,
+        writable: true,
+        value: originalFetch,
+      });
+      Object.defineProperty(globalThis, "WebSocket", {
+        configurable: true,
+        writable: true,
+        value: originalWebSocket,
+      });
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+      await Deno.remove(tempDir, { recursive: true });
+    }
+  },
+});
+
+it({
+  name: "valid license re-enroll after true stale identity",
+  permissions: { env: true, read: true, write: true, sys: ["hostname"] },
+  fn: async () => {
+    const tempDir = await Deno.makeTempDir();
+    const originalFetch = globalThis.fetch;
+    const originalWebSocket = globalThis.WebSocket;
+    const originalSetTimeout = globalThis.setTimeout;
+    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const sockets: MockWebSocket[] = [];
+    const reconnectDelays: number[] = [];
+    let enrolled = false;
+    let capturedEnrollBody: { serverId?: string } | undefined;
+
+    class TrackingWebSocket extends MockWebSocket {
+      constructor(url: string, options?: unknown) {
+        super(url, options);
+        sockets.push(this);
+      }
+    }
+
+    globalThis.setTimeout = ((
+      handler: (...args: unknown[]) => void,
+      timeout?: number,
+      ...args: unknown[]
+    ) => {
+      if (
+        typeof timeout === "number" && timeout >= DEFAULT_INITIAL_BACKOFF_MS
+      ) {
+        reconnectDelays.push(timeout);
+      }
+      return originalSetTimeout(handler, 0, ...args);
+    }) as typeof setTimeout;
+
+    Object.defineProperty(globalThis, "WebSocket", {
+      configurable: true,
+      writable: true,
+      value: TrackingWebSocket,
+    });
+
+    const { signing, authToken } = await prepareVerifiedAuth({
+      serverId: "srv-1",
+      keyId: "kid-new",
+    });
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      writable: true,
+      value: async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/api/health")) {
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        if (url.endsWith("/api/daemon/v1/jwks.json")) {
+          return jwksResponse(signing);
+        }
+        if (url.endsWith("/api/daemon/v1/auth/challenge")) {
+          const raw = init?.body ? await new Response(init.body).text() : "{}";
+          const body = JSON.parse(raw) as { serverId?: string; keyId?: string };
+          if (body.serverId && body.keyId) {
+            return new Response(
+              JSON.stringify({
+                challengeId: "auth-challenge",
+                nonce: "auth-nonce",
+                at: new Date().toISOString(),
+                expiresAt: new Date(Date.now() + 60_000).toISOString(),
+              }),
+              { status: 200 },
+            );
+          }
+          return new Response(
+            JSON.stringify({
+              challengeId: "enroll-challenge",
+              nonce: "enroll-nonce",
+              at: new Date().toISOString(),
+              expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.endsWith("/api/daemon/v1/enroll")) {
+          const raw = init?.body ? await new Response(init.body).text() : "{}";
+          capturedEnrollBody = JSON.parse(raw) as { serverId?: string };
+          enrolled = true;
+          return new Response(
+            JSON.stringify({ serverId: "srv-1", keyId: "kid-new" }),
+            { status: 200 },
+          );
+        }
+        if (url.endsWith("/api/daemon/v1/auth/session")) {
+          if (!enrolled) {
+            return new Response(
+              JSON.stringify({ error: "Server key not found" }),
+              { status: 404 },
+            );
+          }
+          return new Response(
+            JSON.stringify({
+              token: authToken,
+              expiresAt: new Date(Date.now() + 900_000).toISOString(),
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(JSON.stringify({ error: "not found" }), {
+          status: 404,
+        });
+      },
+    });
+
+    Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", tempDir);
+    Deno.env.delete("TURBOPANEL_FORCE_ENROLL");
+    await seedDaemonIdentity(tempDir, { serverId: "srv-1", keyId: "kid-1" });
+    await Deno.writeTextFile(`${tempDir}/license.id`, "license-123\n");
+    await Deno.writeTextFile(`${tempDir}/license.token`, "token-abc\n");
+
+    const client = new InstanceClient({
+      config: {
+        kind: "url",
+        baseUrl: "https://instance.test",
+        wsBaseUrl: "wss://instance.test",
+      },
+    });
+
+    try {
+      client.start();
+      const socket = await waitFor(
+        "stale-identity re-enroll websocket",
+        () => sockets.at(0),
+      );
+      socket.open();
+      assertEquals(socket.readyState, MockWebSocket.OPEN);
+      assertEquals(capturedEnrollBody?.serverId, "srv-1");
+      socket.close(1000, "done");
+    } finally {
+      client.stop();
+      globalThis.setTimeout = originalSetTimeout;
+      Object.defineProperty(globalThis, "fetch", {
+        configurable: true,
+        writable: true,
+        value: originalFetch,
+      });
+      Object.defineProperty(globalThis, "WebSocket", {
+        configurable: true,
+        writable: true,
+        value: originalWebSocket,
+      });
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+      await Deno.remove(tempDir, { recursive: true });
+    }
+  },
+});
+
+it({
+  name: "valid license re-enroll after 400 Server key mismatch",
+  permissions: { env: true, read: true, write: true, sys: ["hostname"] },
+  fn: async () => {
+    const tempDir = await Deno.makeTempDir();
+    const originalFetch = globalThis.fetch;
+    const originalWebSocket = globalThis.WebSocket;
+    const originalSetTimeout = globalThis.setTimeout;
+    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const sockets: MockWebSocket[] = [];
+    const reconnectDelays: number[] = [];
+    let enrolled = false;
+    let capturedEnrollBody: { serverId?: string } | undefined;
+
+    class TrackingWebSocket extends MockWebSocket {
+      constructor(url: string, options?: unknown) {
+        super(url, options);
+        sockets.push(this);
+      }
+    }
+
+    globalThis.setTimeout = ((
+      handler: (...args: unknown[]) => void,
+      timeout?: number,
+      ...args: unknown[]
+    ) => {
+      if (
+        typeof timeout === "number" && timeout >= DEFAULT_INITIAL_BACKOFF_MS
+      ) {
+        reconnectDelays.push(timeout);
+      }
+      return originalSetTimeout(handler, 0, ...args);
+    }) as typeof setTimeout;
+
+    Object.defineProperty(globalThis, "WebSocket", {
+      configurable: true,
+      writable: true,
+      value: TrackingWebSocket,
+    });
+
+    const { signing, authToken } = await prepareVerifiedAuth({
+      serverId: "srv-1",
+      keyId: "kid-new",
+    });
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      writable: true,
+      value: async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/api/health")) {
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        if (url.endsWith("/api/daemon/v1/jwks.json")) {
+          return jwksResponse(signing);
+        }
+        if (url.endsWith("/api/daemon/v1/auth/challenge")) {
+          const raw = init?.body ? await new Response(init.body).text() : "{}";
+          const body = JSON.parse(raw) as { serverId?: string; keyId?: string };
+          if (body.serverId && body.keyId) {
+            return new Response(
+              JSON.stringify({
+                challengeId: "auth-challenge",
+                nonce: "auth-nonce",
+                at: new Date().toISOString(),
+                expiresAt: new Date(Date.now() + 60_000).toISOString(),
+              }),
+              { status: 200 },
+            );
+          }
+          return new Response(
+            JSON.stringify({
+              challengeId: "enroll-challenge",
+              nonce: "enroll-nonce",
+              at: new Date().toISOString(),
+              expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.endsWith("/api/daemon/v1/enroll")) {
+          const raw = init?.body ? await new Response(init.body).text() : "{}";
+          capturedEnrollBody = JSON.parse(raw) as { serverId?: string };
+          enrolled = true;
+          return new Response(
+            JSON.stringify({ serverId: "srv-1", keyId: "kid-new" }),
+            { status: 200 },
+          );
+        }
+        if (url.endsWith("/api/daemon/v1/auth/session")) {
+          if (!enrolled) {
+            return new Response(
+              JSON.stringify({ error: "Server key mismatch" }),
+              { status: 400 },
+            );
+          }
+          return new Response(
+            JSON.stringify({
+              token: authToken,
+              expiresAt: new Date(Date.now() + 900_000).toISOString(),
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(JSON.stringify({ error: "not found" }), {
+          status: 404,
+        });
+      },
+    });
+
+    Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", tempDir);
+    Deno.env.delete("TURBOPANEL_FORCE_ENROLL");
+    await seedDaemonIdentity(tempDir, { serverId: "srv-1", keyId: "kid-1" });
+    await Deno.writeTextFile(`${tempDir}/license.id`, "license-123\n");
+    await Deno.writeTextFile(`${tempDir}/license.token`, "token-abc\n");
+
+    const client = new InstanceClient({
+      config: {
+        kind: "url",
+        baseUrl: "https://instance.test",
+        wsBaseUrl: "wss://instance.test",
+      },
+    });
+
+    try {
+      client.start();
+      const socket = await waitFor(
+        "server-key-mismatch re-enroll websocket",
+        () => sockets.at(0),
+      );
+      socket.open();
+      assertEquals(socket.readyState, MockWebSocket.OPEN);
+      assertEquals(capturedEnrollBody?.serverId, "srv-1");
+      assertEquals(
+        (await Deno.readTextFile(`${tempDir}/server.id`)).trim(),
+        "srv-1",
+      );
+      socket.close(1000, "done");
+    } finally {
+      client.stop();
+      globalThis.setTimeout = originalSetTimeout;
+      Object.defineProperty(globalThis, "fetch", {
+        configurable: true,
+        writable: true,
+        value: originalFetch,
+      });
+      Object.defineProperty(globalThis, "WebSocket", {
+        configurable: true,
+        writable: true,
+        value: originalWebSocket,
+      });
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+      await Deno.remove(tempDir, { recursive: true });
+    }
+  },
+});
+
+it({
+  name: "parked daemon unparks and reconnects on license-file change",
+  permissions: { env: true, read: true, write: true, sys: ["hostname"] },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const tempDir = await Deno.makeTempDir();
+    const originalFetch = globalThis.fetch;
+    const originalWebSocket = globalThis.WebSocket;
+    const originalSetTimeout = globalThis.setTimeout;
+    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const sockets: MockWebSocket[] = [];
+    const reconnectDelays: number[] = [];
+    let restored = false;
+
+    class TrackingWebSocket extends MockWebSocket {
+      constructor(url: string, options?: unknown) {
+        super(url, options);
+        sockets.push(this);
+      }
+    }
+
+    globalThis.setTimeout = ((
+      handler: (...args: unknown[]) => void,
+      timeout?: number,
+      ...args: unknown[]
+    ) => {
+      if (
+        typeof timeout === "number" && timeout >= DEFAULT_INITIAL_BACKOFF_MS
+      ) {
+        reconnectDelays.push(timeout);
+      }
+      return originalSetTimeout(handler, 0, ...args);
+    }) as typeof setTimeout;
+
+    Object.defineProperty(globalThis, "WebSocket", {
+      configurable: true,
+      writable: true,
+      value: TrackingWebSocket,
+    });
+
+    const { signing, authToken } = await prepareVerifiedAuth({
+      serverId: "srv-1",
+      keyId: "kid-new",
+    });
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      writable: true,
+      value: async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/api/health")) {
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        if (url.endsWith("/api/daemon/v1/jwks.json")) {
+          return jwksResponse(signing);
+        }
+        if (url.endsWith("/api/daemon/v1/auth/challenge")) {
+          const raw = init?.body ? await new Response(init.body).text() : "{}";
+          const body = JSON.parse(raw) as { serverId?: string; keyId?: string };
+          if (body.serverId && body.keyId) {
+            if (restored) {
+              return new Response(
+                JSON.stringify({
+                  challengeId: "auth-challenge",
+                  nonce: "auth-nonce",
+                  at: new Date().toISOString(),
+                  expiresAt: new Date(Date.now() + 60_000).toISOString(),
+                }),
+                { status: 200 },
+              );
+            }
+            return new Response(
+              JSON.stringify({ error: "Server key not found" }),
+              { status: 404 },
+            );
+          }
+          return new Response(
+            JSON.stringify({
+              challengeId: "enroll-challenge",
+              nonce: "enroll-nonce",
+              at: new Date().toISOString(),
+              expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.endsWith("/api/daemon/v1/enroll")) {
+          if (restored) {
+            return new Response(
+              JSON.stringify({ serverId: "srv-1", keyId: "kid-new" }),
+              { status: 200 },
+            );
+          }
+          return new Response(JSON.stringify({ error: "Invalid license" }), {
+            status: 401,
+          });
+        }
+        if (url.endsWith("/api/daemon/v1/auth/session")) {
+          return new Response(
+            JSON.stringify({
+              token: authToken,
+              expiresAt: new Date(Date.now() + 900_000).toISOString(),
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(JSON.stringify({ error: "not found" }), {
+          status: 404,
+        });
+      },
+    });
+
+    Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", tempDir);
+    Deno.env.delete("TURBOPANEL_FORCE_ENROLL");
+    await seedDaemonIdentity(tempDir, { serverId: "srv-1", keyId: "kid-1" });
+    await Deno.writeTextFile(`${tempDir}/license.id`, "license-123\n");
+    await Deno.writeTextFile(`${tempDir}/license.token`, "token-abc\n");
+
+    const client = new InstanceClient({
+      config: {
+        kind: "url",
+        baseUrl: "https://instance.test",
+        wsBaseUrl: "wss://instance.test",
+      },
+    });
+
+    try {
+      client.start();
+      await waitFor(
+        "parked delay",
+        () =>
+          reconnectDelays.some((d) => d >= PARKED_BACKOFF_MIN_MS)
+            ? true
+            : undefined,
+      );
+      restored = true;
+      await Deno.writeTextFile(`${tempDir}/license.id`, "license-456\n");
+      await Deno.writeTextFile(`${tempDir}/license.token`, "token-xyz\n");
+      const socket = await waitFor(
+        "unpark websocket",
+        () => sockets.at(0),
+      );
+      socket.open();
+      assertEquals(socket.readyState, MockWebSocket.OPEN);
+      socket.close(1000, "done");
+    } finally {
+      client.stop();
+      globalThis.setTimeout = originalSetTimeout;
       Object.defineProperty(globalThis, "fetch", {
         configurable: true,
         writable: true,

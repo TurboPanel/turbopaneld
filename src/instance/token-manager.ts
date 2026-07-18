@@ -6,6 +6,7 @@ import {
 } from "../crypto/keys.ts";
 import { logWarn } from "../logger.ts";
 import type { DaemonApiClient } from "./api-client.ts";
+import { classifyConnectFailure } from "./connect-failure.ts";
 import type { VerifyInstanceJwtResult } from "./jwks-client.ts";
 
 export type VerifyResult = VerifyInstanceJwtResult;
@@ -69,6 +70,9 @@ export class DaemonTokenManager {
     try {
       await this.#doRefresh();
     } catch (firstError) {
+      if (classifyConnectFailure(firstError).kind === "permanent") {
+        throw firstError;
+      }
       await delay(2_000);
       try {
         await this.#doRefresh();

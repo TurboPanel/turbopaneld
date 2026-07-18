@@ -7,9 +7,9 @@ import {
   rewriteHostingCaddySites,
 } from "../../deploy/ingress.ts";
 import {
+  type DecryptSecretsFn,
   hostnameTlsMap,
   materializeTlsCertificates,
-  type DecryptSecretsFn,
 } from "../../deploy/materialize-tls.ts";
 import { logInfo } from "../../logger.ts";
 import { resolveLayout } from "../../paths/layout.ts";
@@ -80,7 +80,9 @@ async function collectDeployedContainers(
     if (!result.success) {
       logInfo(
         "commands",
-        `environment.deploy container collect failed project=${projectName}: ${result.stderr || "docker compose ps failed"}`,
+        `environment.deploy container collect failed project=${projectName}: ${
+          result.stderr || "docker compose ps failed"
+        }`,
       );
       return null;
     }
@@ -194,7 +196,9 @@ export async function handleEnvironmentDeploy(
   const tlsMaterial = parsedPayload.tlsMaterial ?? [];
   if (tlsMaterial.length > 0) {
     if (!deps?.decryptSecrets) {
-      throw new Error("TLS material present but secrets decrypt is unavailable");
+      throw new Error(
+        "TLS material present but secrets decrypt is unavailable",
+      );
     }
     await materializeTlsCertificates(
       layout,

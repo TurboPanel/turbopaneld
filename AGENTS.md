@@ -40,7 +40,7 @@ section); link there instead of duplicating DO hibernation detail.
    * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
    * reports Deno suites as empty; keep this alias so analysis sees real tests.
    */
-  const test = Deno.test.bind(Deno)
+  const test = Deno.test.bind(Deno);
   ```
 
   When adding a new Deno test file, add this alias from the start. Applied to
@@ -89,16 +89,16 @@ module and CI guard are the only places allowed to reference it.
 [turbopanel/dev](https://github.com/turbopanel/dev) runs the daemon from source
 (`deno run main.ts`); all mutable paths are **dev-user-owned**:
 
-| Purpose                          | Path                                                                   |
-| -------------------------------- | ---------------------------------------------------------------------- |
-| Daemon checkout / install root   | `<TURBOPANEL_DEV_ROOT or $HOME>/daemon`                                |
+| Purpose                          | Path                                                                               |
+| -------------------------------- | ---------------------------------------------------------------------------------- |
+| Daemon checkout / install root   | `<TURBOPANEL_DEV_ROOT or $HOME>/daemon`                                            |
 | Orchestration assets             | `<checkout>/orchestration` (prod roles); overlay in `<dev checkout>/orchestration` |
-| Vendored runtimes                | `/opt/turbopanel/vendor`                                               |
-| Daemon env file                  | `/etc/turbopanel/daemon.env`                                           |
-| Daemon state                     | `/var/lib/turbopanel`                                                  |
-| Logs                             | `/var/log/turbopanel`                                                  |
-| Config dir                       | `/etc/turbopanel`                                                      |
-| Runtime (sockets, `daemon.lock`) | `/run/turbopanel`                                                      |
+| Vendored runtimes                | `/opt/turbopanel/vendor`                                                           |
+| Daemon env file                  | `/etc/turbopanel/daemon.env`                                                       |
+| Daemon state                     | `/var/lib/turbopanel`                                                              |
+| Logs                             | `/var/log/turbopanel`                                                              |
+| Config dir                       | `/etc/turbopanel`                                                                  |
+| Runtime (sockets, `daemon.lock`) | `/run/turbopanel`                                                                  |
 
 **Development identity:** co-located dev creates **no** dedicated `turbopanel`,
 `turbopaneli`, or `turbopanelc` / `turbopanelh` service accounts. The
@@ -146,12 +146,12 @@ accidental `/root/.ansible` after install. Runtime orchestration runs as
 
 **Galaxy roles are not committed:** pins live in
 `orchestration/requirements.yml` (`geerlingguy.docker`, collections). Bootstrap
-(`ensureGalaxyRoles`) installs roles into `orchestration/roles/` and
-collections under `vendor/ansible/galaxy-collections`. First-party roles
-(e.g. `docker`, which wraps Galaxy via `include_role`) stay in git; Galaxy
-install trees (`geerlingguy.docker/`, …) are gitignored. Do not vend them into
-the repo — Sonar would scan third-party `mode: 0644`/`0755` as false
-vulnerabilities, and release hosts already reinstall from Galaxy at bootstrap.
+(`ensureGalaxyRoles`) installs roles into `orchestration/roles/` and collections
+under `vendor/ansible/galaxy-collections`. First-party roles (e.g. `docker`,
+which wraps Galaxy via `include_role`) stay in git; Galaxy install trees
+(`geerlingguy.docker/`, …) are gitignored. Do not vend them into the repo —
+Sonar would scan third-party `mode: 0644`/`0755` as false vulnerabilities, and
+release hosts already reinstall from Galaxy at bootstrap.
 
 ## Project metadata
 
@@ -183,11 +183,12 @@ compile toolchain).
 - `scripts/verify-release-root.sh` / `tp_verify_release_root`
   (`scripts/lib/release-artifacts.sh`) — reject dev-only paths, TS sources,
   `share/ansible`, or a leaked daemon source tree in a packaged release root.
-  Release packaging helpers (`release-artifacts.sh`, `package-daemon-release.sh`,
-  `bundle-orchestration.sh`, `verify-release-root.sh`) are **bash** — `deno.json`
-  must invoke them with `bash`, not `sh` (Debian `/bin/sh` is dash and silently
-  skips prune/verify checks that use `[[`). `run.sh` stays POSIX and inlines a
-  separate copy of the manifest helpers for `curl | sh`.
+  Release packaging helpers (`release-artifacts.sh`,
+  `package-daemon-release.sh`, `bundle-orchestration.sh`,
+  `verify-release-root.sh`) are **bash** — `deno.json` must invoke them with
+  `bash`, not `sh` (Debian `/bin/sh` is dash and silently skips prune/verify
+  checks that use `[[`). `run.sh` stays POSIX and inlines a separate copy of the
+  manifest helpers for `curl | sh`.
 
 ### Installer presentation layer
 
@@ -271,12 +272,12 @@ stays deferred until opt-in on both runtimes.
   heartbeat.
 - **Max-connection-age self-recycle:** once per idle tick,
   `#checkMaxConnectionAge` enforces `MAX_CONNECTION_AGE_MS` (2 h, mirrors the
-  instance `MAX_WS_CONNECTION_AGE_MS`). When the socket exceeds that age it fires
-  once via `onMaxAge` → `InstanceClient.#closeActiveSocket`, then full-jitter
-  reconnect. Complements the existing half-open `#checkStaleConnection`
-  (`staleConnectionMs`). This daemon-side cap is the **primary lifetime
-  enforcer** now that the instance no longer wakes healthy DOs each minute
-  (AE-driven offline sweep). Cost rules:
+  instance `MAX_WS_CONNECTION_AGE_MS`). When the socket exceeds that age it
+  fires once via `onMaxAge` → `InstanceClient.#closeActiveSocket`, then
+  full-jitter reconnect. Complements the existing half-open
+  `#checkStaleConnection` (`staleConnectionMs`). This daemon-side cap is the
+  **primary lifetime enforcer** now that the instance no longer wakes healthy
+  DOs each minute (AE-driven offline sweep). Cost rules:
   **`../instance/AGENTS.md`** (Daemon Cell) — do not duplicate DO pricing here.
 
 **Heartbeat vs metrics:** ping/`heartbeat` (above) = liveness only. Host metrics
@@ -289,6 +290,39 @@ in `[initialBackoffMs, currentBackoffMs]` (defaults 2 s → 30 s cap, doubling o
 auth failures). A benign close after a stable session (`STABLE_SESSION_MS`, 5 s)
 resets backoff to the initial floor so fleet-wide restarts do not align into a
 thundering herd.
+
+**Parked state:** `classifyConnectFailure` (`src/instance/connect-failure.ts`)
+maps enroll/session failures to `transient` (network, `>=500`, `429`,
+`400 Invalid or expired challenge` → normal full-jitter reconnect),
+`temporary-auth` (reserved — close-code / stale-JWT refresh path, e.g. `4401` →
+refresh, no identity clear), `stale-identity` (`404 Server key not found`,
+`400 Server key mismatch` → recover + re-enroll), or `permanent`
+(`401 Invalid license`, `400 License already consumed or invalid`,
+`400 License is inactive`, `400 Server key is inactive`,
+`403 Invalid signature`, `409 Fingerprint already exists`, and the local
+`missing license credentials for enrollment` → **park**). On `permanent`,
+`InstanceClient` enters `#enterParkedState` instead of `#increaseBackoff` —
+full-jitter backoff in `[PARKED_BACKOFF_MIN_MS, PARKED_BACKOFF_MAX_MS]`
+(**5 min → 1 h**, vs the transient `DEFAULT_MAX_BACKOFF_MS` 30 s ceiling) with
+**no** enroll/challenge/session network traffic while parked. This parked
+state — not the instance rate limiter — is the primary storm protection.
+`#recoverFromStaleIdentity` calls `clearDaemonKeyState` (removes only
+`server-key.json` + `server-key-id`, **keeps** `server.id`) so `enrollDaemon`
+can re-present the persisted `serverId` for an already-latched license; a
+permanent enroll failure on that path then parks rather than re-clearing every
+cycle. Unpark triggers while the process stays up: license-file change
+(SHA-256 stamp of `license.id` + `license.token` differs) or
+`TURBOPANEL_FORCE_ENROLL` truthy — both reset backoff and force re-enroll on
+the next cycle. Daemon restart clears the in-memory parked backoff and retries
+the normal identity path; forced re-enroll after restart still requires
+`TURBOPANEL_FORCE_ENROLL` or missing/cleared key files. Greppable park
+log: `daemon control-plane permanently rejected enrollment (<reason>); parked —
+install a fresh registration key (Add Server) or point TURBOPANEL_INSTANCE_URL
+at the correct control plane, then the daemon auto-recovers`.
+`token-manager.ts` skips its 2 s session-refresh retry on a `permanent` first
+error (no double challenge+session per cycle). Status → action table:
+**`../instance/AGENTS.md`** (Daemon key authentication — do-not-retry-soon
+table).
 
 **Single-daemon guarantee:** only one live cell attachment per server. Runtime
 backstop is the instance cell's **single-writer lease** on attach
@@ -326,14 +360,13 @@ Related files: `src/instance/jwks-client.ts`; `getJwks()` / `JwksDocument` on
 directly (plus the **dev repo** overlay at `<dev checkout>/orchestration` for
 dev-user parameters — not shipped in release; resolved via
 `TURBOPANEL_DEV_ORCHESTRATION_DIR` / `resolveDevOrchestrationDir`, layered with
-daemon production roles through `ANSIBLE_ROLES_PATH`). Production installs extract
-**`orchestration.tar.zst`**
-from the channel manifest into `/opt/turbopanel/share/orchestration/`. Release
-CDN artifacts are four split tarballs per build under versioned paths
-(`channels/trunk/daemon/<buildId>/…`): host-arch
-`turbopaneld-{amd64,arm64}.tar.zst`, shared `turbopaneld.js.tar.zst` (JS
-fallback only), and shared `orchestration.tar.zst`. Manifest artifact URLs are
-canonical — Bunny CDN ignores `?build=` query cache-bust, so each publish
+daemon production roles through `ANSIBLE_ROLES_PATH`). Production installs
+extract **`orchestration.tar.zst`** from the channel manifest into
+`/opt/turbopanel/share/orchestration/`. Release CDN artifacts are four split
+tarballs per build under versioned paths (`channels/trunk/daemon/<buildId>/…`):
+host-arch `turbopaneld-{amd64,arm64}.tar.zst`, shared `turbopaneld.js.tar.zst`
+(JS fallback only), and shared `orchestration.tar.zst`. Manifest artifact URLs
+are canonical — Bunny CDN ignores `?build=` query cache-bust, so each publish
 uploads to a new `<buildId>/` prefix with `Cache-Control: immutable`.
 
 **Managed install layout (FHS):** `run.sh` always downloads the host-arch native
@@ -378,8 +411,8 @@ Co-located Caddy injects the flag via the unit template when
 `turbopanel_dev_user` is set. Remote **Add Server** installs that pass
 `--host http://…:8880` must get the same opt-in in `/etc/turbopanel/daemon.env`:
 `daemon-config` `dotenv.j2` derives it from the URL, and `scripts/run.sh`
-ensures the line after install (so older CDN orchestration tarballs still
-work). HTTPS `--host` installs never write the flag.
+ensures the line after install (so older CDN orchestration tarballs still work).
+HTTPS `--host` installs never write the flag.
 
 Note: `Deno.createHttpClient({ caCerts })` **adds** to the system roots (does
 not replace them), so configuring the platform CA does not break validation of
@@ -401,9 +434,9 @@ Contract mirrored (not build-coupled) in `src/metrics/contract.ts` ↔
 is an **external storage contract** — positional AE doubles and ClickHouse
 columns depend on this order.
 
-**Scheduling** (`src/metrics/scheduler.ts`): `MetricsScheduler` takes an injected
-`MetricsSink` (`attach(send)`) rather than the raw `WebSocket` — the WS keeps
-only commands/outbox + the cell ping. One sample ~every **60 s**
+**Scheduling** (`src/metrics/scheduler.ts`): `MetricsScheduler` takes an
+injected `MetricsSink` (`attach(send)`) rather than the raw `WebSocket` — the WS
+keeps only commands/outbox + the cell ping. One sample ~every **60 s**
 (`METRICS_INTERVAL_MS`) while connected; deterministic per-`serverId` phase
 jitter ≤**5 s** (`METRICS_JITTER_MAX_MS`, FNV‑1a — does not change query
 resolution). Monotonic process-local `sequence` resets on daemon restart (not
@@ -494,10 +527,10 @@ stops new writes but does not drop an already-materialized table: the
 `aggregated_zookeeper_log`). `ansible.test.ts` asserts the DROP list stays
 aligned with the config remove list.
 
-**Low-footprint resource caps** (role defaults — `ansible.test.ts` pin ceilings):
-`mark_cache_size` **64 MiB**, `max_server_memory_usage` **512 MiB**, Docker
-`--memory` / drift check both use `clickhouse_container_memory_bytes` (**768
-MiB**) and `--cpus 1.0`. Drift checks recreate containers missing the
+**Low-footprint resource caps** (role defaults — `ansible.test.ts` pin
+ceilings): `mark_cache_size` **64 MiB**, `max_server_memory_usage` **512 MiB**,
+Docker `--memory` / drift check both use `clickhouse_container_memory_bytes`
+(**768 MiB**) and `--cpus 1.0`. Drift checks recreate containers missing the
 memory/CPU limits.
 
 Primary write batching for ~1 sample/min traffic lives in the instance
@@ -524,11 +557,11 @@ instance-owned `ensureSchema()` (`CREATE TABLE IF NOT EXISTS` plus
 `TRUNCATE`.
 
 **Converge wiring:** co-located dev installs ClickHouse via the dev-repo
-`<dev checkout>/orchestration/dev-converge-manifest.json` (role `clickhouse`, after
-`postgres`/`redis`/`rabbitmq`, before `instance-user`) — same pattern as those
-data services (not a discrete `setup.ts` step). Managed daemon-only hosts omit
-it (`daemon-converge.yml`); use standalone `playbooks/clickhouse-setup.yml` /
-`CLICKHOUSE_VERSION` (`26.5.5.8`) when a control-plane host needs the Deno
+`<dev checkout>/orchestration/dev-converge-manifest.json` (role `clickhouse`,
+after `postgres`/`redis`/`rabbitmq`, before `instance-user`) — same pattern as
+those data services (not a discrete `setup.ts` step). Managed daemon-only hosts
+omit it (`daemon-converge.yml`); use standalone `playbooks/clickhouse-setup.yml`
+/ `CLICKHOUSE_VERSION` (`26.5.5.8`) when a control-plane host needs the Deno
 metrics store without the full dev overlay.
 
 **instance-launch env:** when `.clickhouse_app_pass` exists, injects
@@ -567,9 +600,9 @@ rendered when `turbopanel_dev_user` is set, so managed/prod config is
 byte-for-byte unchanged) plus a `CH_PARAMS` value of
 `add_http_cors_header=1&database={{ clickhouse_database }}` carried on every
 Tabix request. Loopback-only; **not** routed through Caddy; runs as the
-**current dev `--user`**. Installed via the dev-repo `dev-converge-manifest.json` only (after
-`clickhouse`, so the app password exists) — omitted from `daemon-converge.yml`,
-so daemon-only hosts get no GUI.
+**current dev `--user`**. Installed via the dev-repo
+`dev-converge-manifest.json` only (after `clickhouse`, so the app password
+exists) — omitted from `daemon-converge.yml`, so daemon-only hosts get no GUI.
 
 ### Tenant Docker Compose deploy + hosting ingress
 
@@ -594,16 +627,16 @@ so daemon-only hosts get no GUI.
    labels (`src/deploy/compose-labels.ts`).
 5. `docker compose -p <projectName> up -d --remove-orphans`.
 6. When the payload includes `tlsMaterial[]`, materialize org certs under
-   `layout.tlsDir` (`/etc/turbopanel/tls/<tlsId>/fullchain.pem` +
-   `privkey.pem`, modes `0640`/`0600`) via `materializeTlsCertificates`
-   (`src/deploy/materialize-tls.ts`). Private keys arrive as
-   `tpdaemon` envelopes — decrypt only through
-   `POST /api/daemon/v1/secrets/decrypt` (daemon JWT); never log plaintext.
+   `layout.tlsDir` (`/etc/turbopanel/tls/<tlsId>/fullchain.pem` + `privkey.pem`,
+   modes `0640`/`0600`) via `materializeTlsCertificates`
+   (`src/deploy/materialize-tls.ts`). Private keys arrive as `tpdaemon`
+   envelopes — decrypt only through `POST /api/daemon/v1/secrets/decrypt`
+   (daemon JWT); never log plaintext.
 7. Refresh hosting-edge Caddy config under `/etc/turbopanel/hosting/`
    (`auto_https off` always). Per-hostname site blocks use
    `tls <fullchain> <privkey>` when a resolved `tlsId` was materialized;
-   otherwise `tls internal`. Unit `turbopanel-hosting-caddy.service` when
-   sudo allows. **Distinct** from control-plane Caddy (`:8443`).
+   otherwise `tls internal`. Unit `turbopanel-hosting-caddy.service` when sudo
+   allows. **Distinct** from control-plane Caddy (`:8443`).
 8. Best-effort `docker compose ps --format json` — per-container identity/status
    (`containerId`, `containerName`, `composeServiceName`, `status`, optional
    `serviceId` from `payload.hostings`) is included in the command result when
@@ -613,10 +646,13 @@ so daemon-only hosts get no GUI.
 `environment.stop` (command router →
 `src/instance/commands/stop-environment.ts`):
 
-1. `docker compose -p <projectName> -f <stateDir>/deployments/<environmentId>/docker-compose.yml down --remove-orphans --volumes` when the compose file exists (idempotent no-op when missing).
-2. Remove `/etc/turbopanel/hosting/sites/<environmentId>.caddy` via `removeHostingCaddySite` and best-effort reload hosting Caddy.
+1. `docker compose -p <projectName> -f <stateDir>/deployments/<environmentId>/docker-compose.yml down --remove-orphans --volumes`
+   when the compose file exists (idempotent no-op when missing).
+2. Remove `/etc/turbopanel/hosting/sites/<environmentId>.caddy` via
+   `removeHostingCaddySite` and best-effort reload hosting Caddy.
 3. Delete the deployment directory.
-4. Return authoritative `containers: []` so the instance clears Postgres container pins.
+4. Return authoritative `containers: []` so the instance clears Postgres
+   container pins.
 
 Helpers: `src/deploy/ensure-docker.ts`, `src/deploy/ingress.ts`,
 `src/deploy/materialize-tls.ts`, `src/deploy/ensure-hosting-caddy.ts`. Future

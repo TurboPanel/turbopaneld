@@ -13,7 +13,7 @@ import {
  * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
-const test = Deno.test.bind(Deno)
+const test = Deno.test.bind(Deno);
 
 test("requireHttpsUrl rejects non-HTTPS URLs", () => {
   assertThrows(

@@ -1,9 +1,6 @@
 import { encodeBase64Url } from "@std/encoding/base64url";
 import { readEnv, resolveLayout } from "../paths/layout.ts";
-import {
-  stripTrailingSlashes,
-  type InstanceConfig,
-} from "./paths.ts";
+import { type InstanceConfig, stripTrailingSlashes } from "./paths.ts";
 
 export const PRODUCTION_CONTROL_PLANE = "https://turbopanel.app";
 export const CDN_RUN_SCRIPT = "https://trbp.nl/run.sh";
@@ -63,9 +60,7 @@ export function buildRunReconcileArgs(options: {
 }): string[] {
   const args = ["--license", options.licenseArg];
   const trimmedUrl = options.instanceUrl?.trim();
-  const instanceUrl = trimmedUrl
-    ? stripTrailingSlashes(trimmedUrl)
-    : undefined;
+  const instanceUrl = trimmedUrl ? stripTrailingSlashes(trimmedUrl) : undefined;
   if (instanceUrl && instanceUrl !== PRODUCTION_CONTROL_PLANE) {
     args.push("--host", instanceUrl);
   }

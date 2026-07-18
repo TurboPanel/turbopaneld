@@ -5,7 +5,8 @@ import type {
 } from "../instance/commands/contracts.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 
-const SAFE_TLS_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SAFE_TLS_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export type DecryptSecretsFn = (
   ciphertexts: string[],

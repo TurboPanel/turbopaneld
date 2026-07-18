@@ -234,7 +234,9 @@ test("createInstanceHttpClient rejects plaintext http without the dev flag", asy
 test("resolveInstanceConfig rejects plaintext http control plane without the dev flag", () => {
   let threw = false;
   try {
-    resolveInstanceConfig({ TURBOPANEL_INSTANCE_URL: "http://managed.example.com" });
+    resolveInstanceConfig({
+      TURBOPANEL_INSTANCE_URL: "http://managed.example.com",
+    });
   } catch {
     threw = true;
   }

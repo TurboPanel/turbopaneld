@@ -29,6 +29,7 @@ import {
 } from "../logger.ts";
 import { type DaemonKeyFile, loadDaemonKeyFile } from "../crypto/keys.ts";
 import { DaemonApiClient, DaemonApiError } from "./api-client.ts";
+import { classifyConnectFailure } from "./connect-failure.ts";
 import { DaemonJwksClient } from "./jwks-client.ts";
 import { DaemonTokenManager } from "./token-manager.ts";
 import { enrollDaemon } from "./enroll.ts";
@@ -156,6 +157,8 @@ export interface InstanceClientOptions {
 
 export const DEFAULT_INITIAL_BACKOFF_MS = 2_000;
 export const DEFAULT_MAX_BACKOFF_MS = 30_000;
+export const PARKED_BACKOFF_MIN_MS = 5 * 60_000;
+export const PARKED_BACKOFF_MAX_MS = 60 * 60_000;
 const BACKOFF_MULTIPLIER = 2;
 
 /** Clamp caller-provided reconnect delay to supported [min, max] bounds. */
@@ -278,14 +281,8 @@ function parseMessage(raw: string): DaemonMessage | null {
   }
 }
 
-function isStaleDaemonIdentityError(err: unknown): boolean {
-  return err instanceof DaemonApiError &&
-    err.status === 404 &&
-    err.message === "Server key not found";
-}
-
-async function clearDaemonIdentityState(stateDir: string): Promise<void> {
-  for (const file of [SERVER_ID_FILE, SERVER_KEY_FILE, KEY_ID_FILE]) {
+async function clearDaemonKeyState(stateDir: string): Promise<void> {
+  for (const file of [SERVER_KEY_FILE, KEY_ID_FILE]) {
     try {
       await Deno.remove(`${stateDir}/${file}`);
     } catch {
@@ -315,6 +312,10 @@ export class InstanceClient {
   #tokenServerId: string | undefined;
   #tokenKeyId: string | undefined;
   #forceEnrollPending = false;
+  #parked = false;
+  #parkedReason: string | undefined;
+  #parkedBackoffMs = PARKED_BACKOFF_MIN_MS;
+  #licenseStamp: string | undefined;
   #idlePresence: IdlePresence | undefined;
   #metricsScheduler: MetricsScheduler | undefined;
   /** Server id the current metrics scheduler was bound for (not `#tokenServerId`). */
@@ -497,22 +498,19 @@ export class InstanceClient {
 
   async #runConnectLoop(): Promise<void> {
     while (!this.#stopped) {
+      if (!(await this.#waitForParkedWake())) {
+        if (this.#stopped) break;
+        continue;
+      }
+
       try {
         await this.#connectOnce();
       } catch (err) {
-        const logConnectFailure = this.#hadStableSession ? logWarn : logDebug;
-        logConnectFailure(
-          "instance",
-          "websocket connect failed:",
-          sanitizeForLog(err),
-        );
-        this.#closeActiveSocket();
-        this.#idlePresence?.detach();
-        this.#metricsScheduler?.detach();
-        this.#increaseBackoff();
+        await this.#handleConnectFailure(err);
       }
 
       if (this.#stopped) break;
+      if (this.#parked) continue;
       const reconnectDelayMs = this.#nextReconnectDelayMs();
       logDebug(
         "instance",
@@ -525,6 +523,94 @@ export class InstanceClient {
       );
       await delay(reconnectDelayMs);
     }
+  }
+
+  /**
+   * When parked, wait out the parked backoff and check for unpark conditions.
+   * @returns true when the loop should proceed to `#connectOnce()`.
+   */
+  async #waitForParkedWake(): Promise<boolean> {
+    if (!this.#parked) return true;
+    await delay(this.#nextParkedDelayMs());
+    if (this.#stopped) return false;
+    if (await this.#shouldUnpark()) {
+      this.#unpark();
+      return true;
+    }
+    return false;
+  }
+
+  async #handleConnectFailure(err: unknown): Promise<void> {
+    const logConnectFailure = this.#hadStableSession ? logWarn : logDebug;
+    logConnectFailure(
+      "instance",
+      "websocket connect failed:",
+      sanitizeForLog(err),
+    );
+    this.#closeActiveSocket();
+    this.#idlePresence?.detach();
+    this.#metricsScheduler?.detach();
+    const classified = classifyConnectFailure(err);
+    if (classified.kind === "permanent") {
+      await this.#enterParkedState(classified.reason);
+    } else {
+      this.#increaseBackoff();
+    }
+  }
+
+  async #readLicenseStamp(): Promise<string | undefined> {
+    const { licenseId, licenseToken } = await readLicenseCredentials();
+    if (!licenseId || !licenseToken) return undefined;
+    const digest = await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(`${licenseId}\n${licenseToken}`),
+    );
+    return Array.from(
+      new Uint8Array(digest),
+      (byte) => byte.toString(16).padStart(2, "0"),
+    ).join("");
+  }
+
+  async #enterParkedState(reason: string): Promise<void> {
+    this.#parked = true;
+    this.#parkedReason = reason;
+    this.#forceEnrollPending = false;
+    this.#licenseStamp = await this.#readLicenseStamp();
+    logError(
+      "instance",
+      `daemon control-plane permanently rejected enrollment (${reason}); parked — install a fresh registration key (Add Server) or point TURBOPANEL_INSTANCE_URL at the correct control plane, then the daemon auto-recovers`,
+    );
+  }
+
+  #nextParkedDelayMs(): number {
+    const delayMs = fullJitterMs(
+      PARKED_BACKOFF_MIN_MS,
+      this.#parkedBackoffMs,
+    );
+    this.#parkedBackoffMs = nextBackoffMs(
+      this.#parkedBackoffMs,
+      PARKED_BACKOFF_MAX_MS,
+    );
+    return delayMs;
+  }
+
+  async #shouldUnpark(): Promise<boolean> {
+    if (isTruthyFlag(Deno.env.get("TURBOPANEL_FORCE_ENROLL"))) return true;
+    const stamp = await this.#readLicenseStamp();
+    return stamp !== this.#licenseStamp;
+  }
+
+  #unpark(): void {
+    const reason = this.#parkedReason ?? "unknown";
+    this.#parked = false;
+    this.#parkedReason = undefined;
+    this.#parkedBackoffMs = PARKED_BACKOFF_MIN_MS;
+    this.#resetBackoff();
+    this.#forceEnrollPending = true;
+    logDebug(
+      "instance",
+      `unparking after permanent rejection (${reason}); retrying enrollment`,
+    );
   }
 
   #newWebSocket(jwt: string): WebSocket {
@@ -676,9 +762,9 @@ export class InstanceClient {
   async #recoverFromStaleIdentity(stateDir: string): Promise<void> {
     logWarn(
       "instance",
-      "daemon identity is stale for this instance; clearing local state and re-enrolling",
+      "daemon identity is stale for this instance; clearing local key files and re-enrolling",
     );
-    await clearDaemonIdentityState(stateDir);
+    await clearDaemonKeyState(stateDir);
     this.#tokenManager = undefined;
     this.#apiClient = undefined;
     this.#tokenServerId = undefined;
@@ -726,7 +812,10 @@ export class InstanceClient {
         await this.#openDaemonWebSocket(jwt, identity.serverId);
         return;
       } catch (err) {
-        if (attempt === 0 && isStaleDaemonIdentityError(err)) {
+        if (
+          attempt === 0 &&
+          classifyConnectFailure(err).kind === "stale-identity"
+        ) {
           await this.#recoverFromStaleIdentity(stateDir);
           continue;
         }
