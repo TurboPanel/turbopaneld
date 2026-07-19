@@ -384,9 +384,12 @@ binary and skip `deno-runtime` in `daemon-install.yml`. Co-located dev keeps
 logs to `/var/log/turbopanel`.
 
 **Managed updates:** the running daemon reconciles in-place via `run.sh`
-(downloaded from `https://trbp.nl/run.sh` or the instance host) when triggered
-from the control-plane UI or manually with the same piped installer. There is no
-separate update binary installed under `/opt/turbopanel/bin/`.
+(downloaded from `trbp.nl/run.sh` or the instance host) when triggered
+from the control-plane UI or manually with the same piped installer
+(`curl -fsSL trbp.nl/run.sh | TURBOPANEL_LICENSE=… sh`; optional
+`TURBOPANEL_HOST` / `TURBOPANEL_INSECURE_TLS=1`). Flags (`--license`, `--host`,
+…) remain supported for scripts and sudo re-exec. There is no separate update
+binary installed under `/opt/turbopanel/bin/`.
 
 ### Daemon TLS trust model (4 paths)
 

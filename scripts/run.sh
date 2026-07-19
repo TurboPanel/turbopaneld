@@ -13,6 +13,11 @@
 #
 # Run as root or as a sudo-capable user (self-escalates via sudo when available).
 #
+# Typical install (production):
+#   curl -fsSL trbp.nl/run.sh | TURBOPANEL_LICENSE=<b64> sh
+# Optional: TURBOPANEL_HOST, TURBOPANEL_INSECURE_TLS=1, TURBOPANEL_UPDATE_CHANNEL.
+# Flags (--license, --host, …) remain supported for scripts and sudo re-exec.
+#
 # Manifest and release helpers below must stay in sync with scripts/lib/release-artifacts.sh.
 
 # Shared curl prefixes for HTTPS downloads (and the insecure-TLS install path).
@@ -555,8 +560,17 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
+# Piped install form prefers env vars so the copy-paste command stays clean:
+#   curl -fsSL trbp.nl/run.sh | TURBOPANEL_LICENSE=… sh
+# Explicit flags win when both are set (sudo re-exec always uses flags).
+[ -n "$LICENSE" ] || LICENSE="${TURBOPANEL_LICENSE:-}"
+[ -n "$HOST_URL" ] || HOST_URL="${TURBOPANEL_HOST:-}"
+case "${TURBOPANEL_INSECURE_TLS:-}" in
+	1|true|TRUE|yes|YES) INSECURE_TLS=true ;;
+esac
+
 if [ -z "$LICENSE" ]; then
-	tp_print_error "--license is required"
+	tp_print_error "TURBOPANEL_LICENSE (or --license) is required"
 	exit 1
 fi
 

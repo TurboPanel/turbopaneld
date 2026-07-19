@@ -1200,7 +1200,7 @@ export class InstanceClient {
     const credentials = await readLicenseCredentials();
     if (!credentials.licenseId || !credentials.licenseToken) {
       throw new Error(
-        "license credentials missing; re-run the installer with --license",
+        "license credentials missing; re-run the installer with TURBOPANEL_LICENSE",
       );
     }
 
