@@ -41,7 +41,8 @@ fi
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 ASSET="caddy_${CADDY_VER}_linux_${CADDY_ARCH}.tar.gz"
-curl -fsSL -o "${TMP}/${ASSET}" \
+# HTTPS-only fetch (block clear-text redirect downgrades; Sonar shell:S6506).
+curl -fsSL --proto "=https" --proto-redir "=https" -o "${TMP}/${ASSET}" \
   "https://github.com/caddyserver/caddy/releases/download/${CADDY_TAG}/${ASSET}"
 tar -xzf "${TMP}/${ASSET}" -C "$TMP" caddy
 

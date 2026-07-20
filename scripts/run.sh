@@ -569,6 +569,9 @@ done
 [ -n "$HOST_URL" ] || HOST_URL="${TURBOPANEL_HOST:-}"
 case "${TURBOPANEL_INSECURE_TLS:-}" in
 	1|true|TRUE|yes|YES) INSECURE_TLS=true ;;
+	*)
+		# Leave INSECURE_TLS unchanged (may already be set by --insecure-tls).
+		;;
 esac
 
 if [ -z "$LICENSE" ]; then
