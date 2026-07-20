@@ -18,6 +18,7 @@
 #   curl -fsSL trbp.nl/run.sh | TURBOPANEL_LICENSE=<b64> sh
 # Optional: TURBOPANEL_HOST, TURBOPANEL_INSECURE_TLS=1, TURBOPANEL_UPDATE_CHANNEL.
 # Flags (--license, --host, …) remain supported for scripts and sudo re-exec.
+# Bare trbp.nl relies on Cloudflare HTTP→HTTPS 301 (+ curl -L).
 #
 # Manifest and release helpers below must stay in sync with scripts/lib/release-artifacts.sh.
 
