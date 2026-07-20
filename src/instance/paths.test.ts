@@ -27,7 +27,7 @@ import { resolveInstanceConfigDir } from "./public-urls-env.ts";
 const test = Deno.test.bind(Deno);
 
 const CADDY_HTTPS = "https://localhost:8443";
-const PLATFORM_CA = "/opt/turbopanel/platform/instance/certs/ca.crt";
+const INSTANCE_CA = "/etc/turbopanel/instance-ca.pem";
 
 function assertEq(actual: string, expected: string, label: string): void {
   if (actual !== expected) {
@@ -159,7 +159,7 @@ test("workers transition: url and CA env keys resolve to url mode", () => {
   const config = resolveInstanceConfig({
     TURBOPANEL_INSTANCE_RUNTIME: "workers",
     TURBOPANEL_INSTANCE_URL: CADDY_HTTPS,
-    TURBOPANEL_INSTANCE_CA: PLATFORM_CA,
+    TURBOPANEL_INSTANCE_CA: INSTANCE_CA,
   });
 
   if (config.kind !== "url") {
@@ -201,7 +201,7 @@ test("createInstanceHttpClient returns undefined for plaintext http with dev fla
       wsBaseUrl: "ws://localhost:8880",
     },
     {
-      caCertPath: "/nonexistent/platform/config/instance-ca.pem",
+      caCertPath: "/nonexistent/etc/turbopanel/instance-ca.pem",
       env: { TURBOPANEL_DEV_HTTP_CONTROL_PLANE: "1" },
     },
   );
@@ -266,7 +266,7 @@ test("resolveInstanceConfig allows plaintext http control plane with the dev fla
 test("deno transition: cleared URL key restores socket mode", () => {
   const config = resolveInstanceConfig({
     TURBOPANEL_INSTANCE_RUNTIME: "deno",
-    TURBOPANEL_INSTANCE_CA: PLATFORM_CA,
+    TURBOPANEL_INSTANCE_CA: INSTANCE_CA,
   });
 
   if (config.kind !== "socket") {

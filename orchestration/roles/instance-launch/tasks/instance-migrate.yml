@@ -1,6 +1,7 @@
 ---
-# Fresh Postgres has no tables; incremental migrations/ assume a base schema.
-# Push schema.ts on first boot, otherwise apply pending SQL migrations.
+# Fresh databases are bootstrapped only via versioned `pnpm migrate`
+# (scripts/bootstrap-dev-db.sh → drizzle-kit migrate against migrations/).
+# There is no drizzle-kit push / schema.ts push path for first boot.
 - name: Resolve instance database URL for migrations
   when:
     - instance_start | default(true) | bool
@@ -8,7 +9,7 @@
   ansible.builtin.set_fact:
     _instance_migrate_database_url: "{% if (turbopanel_instance_runtime | default('deno')) == 'workers' %}postgresql://{{ postgres_user }}:{{ turbopanel_pg_password }}@localhost:{{ postgres_port }}/{{ postgres_db }}{% else %}postgresql://{{ postgres_user }}:{{ turbopanel_pg_password }}@/{{ postgres_db }}?host={{ postgres_socket_dir }}{% endif %}"
 
-- name: Bootstrap instance database schema
+- name: Apply versioned instance database migrations
   when:
     - instance_start | default(true) | bool
     - turbopanel_pg_password is defined

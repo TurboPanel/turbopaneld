@@ -81,7 +81,7 @@ test("buildRunReconcileArgs omits TLS flags for plaintext http instance URL", ()
     buildRunReconcileArgs({
       licenseArg: "abc",
       instanceUrl: "http://localhost:8880",
-      instanceCaPath: "/opt/turbopanel/platform/config/instance-ca.pem",
+      instanceCaPath: "/etc/turbopanel/instance-ca.pem",
       insecureTls: true,
     }),
     ["--license", "abc", "--host", "http://localhost:8880", "--no-start"],
@@ -108,7 +108,7 @@ test("downloadRunScript uses plain -fsSL for plaintext http URL", async () => {
     } as typeof Deno.Command;
     const script = await downloadRunScript("http://localhost:8880/run.sh", {
       insecureTls: true,
-      caPath: "/opt/turbopanel/platform/config/instance-ca.pem",
+      caPath: "/etc/turbopanel/instance-ca.pem",
     });
     assertEquals(capturedArgs, ["-fsSL", "http://localhost:8880/run.sh"]);
     if (!script.trim()) {
@@ -141,7 +141,7 @@ test("resolveBootstrapInsecureTls prefers platform CA for self-hosted", () => {
   assertEquals(
     resolveBootstrapInsecureTls({
       runScriptUrl: "https://huey.lan:8443/run.sh",
-      instanceCaPath: "/opt/turbopanel/platform/config/instance-ca.pem",
+      instanceCaPath: "/etc/turbopanel/instance-ca.pem",
     }),
     false,
   );
@@ -152,7 +152,7 @@ test("buildRunReconcileArgs includes self-hosted flags", () => {
     buildRunReconcileArgs({
       licenseArg: "abc",
       instanceUrl: "https://huey.lan:8443",
-      instanceCaPath: "/opt/turbopanel/platform/config/instance-ca.pem",
+      instanceCaPath: "/etc/turbopanel/instance-ca.pem",
       insecureTls: true,
     }),
     [
@@ -161,7 +161,7 @@ test("buildRunReconcileArgs includes self-hosted flags", () => {
       "--host",
       "https://huey.lan:8443",
       "--instance-ca",
-      "/opt/turbopanel/platform/config/instance-ca.pem",
+      "/etc/turbopanel/instance-ca.pem",
       "--insecure-tls",
       "--no-start",
     ],

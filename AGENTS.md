@@ -75,7 +75,7 @@ module and CI guard are the only places allowed to reference it.
 | Purpose                                                           | Path                                  |
 | ----------------------------------------------------------------- | ------------------------------------- |
 | Native daemon binary                                              | `/opt/turbopanel/bin/turbopaneld`     |
-| JS fallback (`deno run`; only when native binary cannot execute)  | `/opt/turbopanel/bin/turbopaneld.js`  |
+| Deno JS runtime (`turbopaneld.js`; page-size-incompatible hosts)  | `/opt/turbopanel/bin/turbopaneld.js`  |
 | Orchestration assets (Ansible)                                    | `/opt/turbopanel/share/orchestration` |
 | Static UI export                                                  | `/opt/turbopanel/share/ui`            |
 | Vendored runtimes (node/deno/caddy/uv/python/ansible/cloudflared) | `/opt/turbopanel/vendor`              |
@@ -365,23 +365,30 @@ extract **`orchestration.tar.zst`** from the channel manifest into
 `/opt/turbopanel/share/orchestration/`. Release CDN artifacts are four split
 tarballs per build under versioned paths (`channels/trunk/daemon/<buildId>/…`):
 host-arch `turbopaneld-{amd64,arm64}.tar.zst`, shared `turbopaneld.js.tar.zst`
-(JS fallback only), and shared `orchestration.tar.zst`. Manifest artifact URLs
-are canonical — Bunny CDN ignores `?build=` query cache-bust, so each publish
-uploads to a new `<buildId>/` prefix with `Cache-Control: immutable`.
+(Deno JS runtime for hosts that cannot execute the native binary), and shared
+`orchestration.tar.zst`. Manifest artifact URLs are canonical — Bunny CDN
+ignores `?build=` query cache-bust, so each publish uploads to a new
+`<buildId>/` prefix with `Cache-Control: immutable`.
 
-**Managed install layout (FHS):** `run.sh` always downloads the host-arch native
-binary and orchestration tree; it downloads `turbopaneld.js` **only** when the
-native binary probe fails. Native hosts remove any leftover JS fallback files on
-install/update. Config lives in `/etc/turbopanel` (`daemon.env`,
-`instance-ca.pem`); persistent identity in `/var/lib/turbopanel` (license,
-`server.id`, keys); runtime files in `/run/turbopanel`. The installer probes
-`turbopaneld --version` and selects native `ExecStart` or the Deno JS-fallback
-(`…/vendor/deno/bin/deno run --allow-all …/bin/turbopaneld.js`) with
-`EnvironmentFile=/etc/turbopanel/daemon.env`. **Deno is installed only on the
-JS-fallback path** — native hosts bootstrap orchestration via the compiled
-binary and skip `deno-runtime` in `daemon-install.yml`. Co-located dev keeps
-`deno run main.ts` from the home checkout via `daemon-systemd-setup.yml` and
-logs to `/var/log/turbopanel`.
+**Two managed ExecStart modes (native vs Deno JS):** `run.sh` always downloads
+the host-arch native binary and orchestration tree, then probes
+`turbopaneld --version`. On typical amd64/arm64 servers that works and the unit
+runs the native binary (no Deno install). Some arm64 boards — notably Raspberry
+Pi hosts with a **16 KiB** page-size kernel — cannot load that `deno compile`
+binary (built for the usual **4 KiB** page size). There the probe fails and the
+installer downloads `turbopaneld.js`, installs vendored Deno, and uses
+`deno run …/bin/turbopaneld.js` as **the** supported ExecStart for that
+hardware. Do not treat the JS path as a temporary shim or something to delete
+“once native works everywhere”; it is the production runtime for those kernels.
+Wire/manifest names still say `jsFallbackArtifact` for compatibility with
+published channel.json — the product meaning is “alternate runtime,” not
+“deprecated fallback.” Native hosts remove leftover `turbopaneld.js` on
+install/update; Deno is installed only when the JS ExecStart is selected
+(`daemon-install.yml` skips `deno-runtime` otherwise). Config lives in
+`/etc/turbopanel` (`daemon.env`, `instance-ca.pem`); persistent identity in
+`/var/lib/turbopanel` (license, `server.id`, keys); runtime files in
+`/run/turbopanel`. Co-located dev keeps `deno run main.ts` from the home
+checkout via `daemon-systemd-setup.yml` and logs to `/var/log/turbopanel`.
 
 **Managed updates:** the running daemon reconciles in-place via `run.sh`
 (downloaded from `trbp.nl/run.sh` or the instance host) when triggered
@@ -413,9 +420,10 @@ is set (development-only gate — never valid on managed/production installs).
 Co-located Caddy injects the flag via the unit template when
 `turbopanel_dev_user` is set. Remote **Add Server** installs that pass
 `--host http://…:8880` must get the same opt-in in `/etc/turbopanel/daemon.env`:
-`daemon-config` `dotenv.j2` derives it from the URL, and `scripts/run.sh`
-ensures the line after install (so older CDN orchestration tarballs still work).
-HTTPS `--host` installs never write the flag.
+`daemon-config` `dotenv.j2` is the only writer (derives it from the URL).
+`scripts/run.sh` validates the line after install and fails if missing —
+it does not patch `daemon.env` outside Ansible. HTTPS `--host` installs never
+write the flag.
 
 Note: `Deno.createHttpClient({ caCerts })` **adds** to the system roots (does
 not replace them), so configuring the platform CA does not break validation of

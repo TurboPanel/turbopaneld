@@ -4,10 +4,11 @@
 #
 # Fetches split release artifacts from the channel manifest at
 # https://dl.trbp.nl/channels.json (host-arch native binary + orchestration tree;
-# JS bundle only when the native binary cannot execute), installs the production
-# FHS layout (bin/turbopaneld, optional bin/turbopaneld.js, share/orchestration/),
-# probes native binary executability, bootstraps orchestration runtimes, and runs
-# daemon-install.yml via Ansible (turbopaneld.service with native or JS fallback).
+# JS bundle when the native binary cannot execute on this host), installs the
+# production FHS layout (bin/turbopaneld, optional bin/turbopaneld.js,
+# share/orchestration/), probes native binary executability, bootstraps
+# orchestration runtimes, and runs daemon-install.yml via Ansible
+# (turbopaneld.service — native or Deno JS runtime; see AGENTS.md).
 #
 # Config: /etc/turbopanel  State: /var/lib/turbopanel  Runtime: /run/turbopanel
 #
@@ -286,7 +287,7 @@ tp_install_verified_js_fallback() {
 	fi
 
 	if [ ! -f "$_staging/$_home/bin/$_js_name" ]; then
-		echo "run.sh: JS fallback release missing $_home/bin/$_js_name" >&2
+		echo "run.sh: Deno JS runtime release missing $_home/bin/$_js_name" >&2
 		return 1
 	fi
 
@@ -775,17 +776,17 @@ if tp_probe_native_daemon; then
 	tp_remove_js_fallback_binaries
 else
 	DAEMON_EXEC_MODE="js"
-	tp_print_step "~" "Native binary not executable — using JS fallback (deno run turbopaneld.js)"
-	tp_print_step "▸" "Downloading JS fallback bundle…"
+	tp_print_step "~" "Native binary not executable on this host — using Deno JS runtime (turbopaneld.js)"
+	tp_print_step "▸" "Downloading Deno JS runtime bundle…"
 	if ! tp_install_verified_js_fallback; then
-		tp_print_error "Failed to install JS fallback bundle"
+		tp_print_error "Failed to install Deno JS runtime bundle"
 		exit 1
 	fi
 	if [ ! -f "$BIN_DIR/$(tp_daemon_js_fallback_name)" ]; then
-		tp_print_error "Daemon release missing JS fallback at $BIN_DIR/$(tp_daemon_js_fallback_name)"
+		tp_print_error "Daemon release missing turbopaneld.js at $BIN_DIR/$(tp_daemon_js_fallback_name)"
 		exit 1
 	fi
-	tp_print_ok "JS fallback installed"
+	tp_print_ok "Deno JS runtime installed"
 fi
 
 if [ "$DAEMON_EXEC_MODE" = "js" ]; then
@@ -804,7 +805,7 @@ if [ "$DAEMON_EXEC_MODE" = "native" ]; then
 	"$(tp_daemon_binary_path)" bootstrap-orchestration
 else
 	HOME="$INSTALL_ROOT" "$DENO_BIN" run --allow-all "$(tp_daemon_js_fallback_path)" bootstrap-orchestration
-	# Warm the JS fallback module cache so first start is fast/offline.
+	# Warm the JS module cache so first start is fast/offline.
 	HOME="$INSTALL_ROOT" "$DENO_BIN" cache "$(tp_daemon_js_fallback_path)" >/dev/null 2>&1 || true
 fi
 
@@ -862,14 +863,11 @@ fi
 rm -rf /tmp/turbopanel-ansible /root/.ansible
 
 # Plaintext --host http://… installs must opt into TURBOPANEL_DEV_HTTP_CONTROL_PLANE
-# or the daemon refuses to start (resolveInstanceConfig). Newer daemon-config
-# templates write this from the URL; older release orchestration trees do not —
-# ensure the line is present (and restart if we had to patch) so Add Server →
-# :8880 works immediately against a CDN-published orchestration tarball.
-tp_ensure_dev_http_control_plane_env() {
+# or the daemon refuses to start (resolveInstanceConfig). daemon-config dotenv.j2
+# is the only writer — validate rather than patching daemon.env outside Ansible.
+tp_assert_dev_http_control_plane_env() {
 	_env_file="$1"
 	_host_url="$2"
-	_svc_name="$3"
 	case "$_host_url" in
 		http://*)
 			;;
@@ -884,17 +882,9 @@ tp_ensure_dev_http_control_plane_env() {
 	if grep -q '^TURBOPANEL_DEV_HTTP_CONTROL_PLANE=1$' "$_env_file" 2>/dev/null; then
 		return 0
 	fi
-	tp_print_step "▸" "Enabling development plaintext control plane (TURBOPANEL_DEV_HTTP_CONTROL_PLANE=1)…"
-	# Drop any stale/disabled value, then append the required opt-in.
-	_tmp_env="$(mktemp)"
-	grep -v '^TURBOPANEL_DEV_HTTP_CONTROL_PLANE=' "$_env_file" > "$_tmp_env" || true
-	printf 'TURBOPANEL_DEV_HTTP_CONTROL_PLANE=1\n' >> "$_tmp_env"
-	install -m 0640 "$_tmp_env" "$_env_file"
-	rm -f "$_tmp_env"
-	if [ -n "$_svc_name" ] && command -v systemctl >/dev/null 2>&1; then
-		systemctl restart "$_svc_name" >/dev/null 2>&1 || true
-	fi
-	tp_print_ok "Plaintext control-plane opt-in written"
-	return 0
+	tp_print_error "http:// control plane requires TURBOPANEL_DEV_HTTP_CONTROL_PLANE=1 in $_env_file (written by daemon-config dotenv.j2; older orchestration bundles are unsupported)"
+	return 1
 }
-tp_ensure_dev_http_control_plane_env "$ENV_FILE" "$HOST_URL" "turbopaneld"
+if ! tp_assert_dev_http_control_plane_env "$ENV_FILE" "$HOST_URL"; then
+	exit 1
+fi
