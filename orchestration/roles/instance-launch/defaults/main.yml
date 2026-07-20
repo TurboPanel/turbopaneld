@@ -63,7 +63,11 @@ expo_port: 8081
 drizzle_studio_port: 4983
 # "dev" proxies Caddy to the Expo dev server (turbopanel-ui.service);
 # "static" serves the exported web build from {{ turbopanel_ui_dist_dir }}.
-turbopanel_ui_mode: dev
+# Production default is static; co-located converge passes -e turbopanel_ui_mode=dev.
+turbopanel_ui_mode: static
+# Co-located (turbopanel_dev_user set) loads the development Caddyfile from the
+# turbopanel/dev overlay; managed/production uses the instance checkout Caddyfile.
+turbopanel_caddyfile: "{{ (turbopanel_dev_root ~ '/dev/orchestration/Caddyfile') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_instance_dir ~ '/Caddyfile') }}"
 # "source" runs deno run src/deno.ts; "compiled" exec's dist/turbopanel-instance.
 turbopanel_instance_run_mode: source
 turbopanel_instance_binary: "{{ turbopanel_instance_dir }}/dist/turbopanel-instance"
@@ -95,6 +99,7 @@ mailer_service_name: turbopanel-mailer
 mailpit_web_port: 8025
 mailpit_smtp_port: 1025
 dbstudio_service_name: turbopanel-dbstudio
-# Co-located dev: Caddy serves /downloads/daemon from {{ turbopanel_daemon_dir }}/dist when UI_MODE=dev.
+# Co-located: the development Caddyfile serves /downloads/daemon from
+# {{ turbopanel_daemon_dir }}/dist when UI_MODE=dev.
 turbopanel_public_urls: ""
 turbopanel_tls_extra_sans: ""

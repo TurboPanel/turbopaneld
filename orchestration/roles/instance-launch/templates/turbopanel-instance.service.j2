@@ -29,8 +29,10 @@ Environment=TURBOPANEL_UI_MODE={{ turbopanel_ui_mode }}
 # (isExplicitDevelopmentMode) — the surface fails closed without this flag.
 Environment=TURBOPANEL_DEV_SURFACE=1
 {% endif %}
+{% if turbopanel_dev_user | length > 0 %}
 # Docs site (turbopanel-website on WEBSITE_PORT) fetches OpenAPI from Caddy cross-origin.
 Environment=TURBOPANEL_UI_CORS_ORIGINS={{ website_cors_origins }}
+{% endif %}
 {% if turbopanel_pg_password is defined and (turbopanel_instance_runtime | default('deno')) == 'deno' %}
 Environment=TURBOPANEL_DATABASE_URL=postgresql://{{ postgres_user }}:{{ turbopanel_pg_password }}@/{{ postgres_db }}?host={{ postgres_socket_dir }}
 {% endif %}

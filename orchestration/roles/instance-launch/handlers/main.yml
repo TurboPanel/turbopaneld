@@ -29,6 +29,7 @@
     state: restarted
   when:
     - instance_start | bool
+    - turbopanel_dev_user | default('') | length > 0
     - (turbopanel_instance_runtime | default('deno')) == 'workers'
 
 - name: Restart turbopanel mailer

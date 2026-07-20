@@ -20,12 +20,18 @@
         turbopanel_instance_config_dir,
         turbopanel_caddy_config_dir,
         turbopanel_ui_config_dir,
-        turbopanel_ui_dir + '/.expo',
-        turbopanel_website_dir + '/.next',
-        turbopanel_website_dir + '/.source',
-        turbopanel_website_runtime_dir,
-        turbopanel_website_runtime_dir + '/share',
-        turbopanel_website_runtime_dir + '/state',
-        turbopanel_website_config_dir,
       ]
+      + (
+        [
+          turbopanel_ui_dir + '/.expo',
+          turbopanel_website_dir + '/.next',
+          turbopanel_website_dir + '/.source',
+          turbopanel_website_runtime_dir,
+          turbopanel_website_runtime_dir + '/share',
+          turbopanel_website_runtime_dir + '/state',
+          turbopanel_website_config_dir,
+        ]
+        if (turbopanel_dev_user | default('') | length > 0)
+        else []
+      )
     }}

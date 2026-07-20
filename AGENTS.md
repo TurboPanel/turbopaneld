@@ -412,14 +412,14 @@ downloads over HTTPS). Four valid configurations:
 | **Let's Encrypt**                    | Publicly-valid → daemon uses the **system trust store** (ship **no** `TURBOPANEL_INSTANCE_CA`)                                                                                               | The real cert already covers the public hostname.                                                                                                                                                                                                                                                                                                                                                                             |
 | **Cloudflare tunnel / proxy**        | Cloudflare's edge cert is publicly-valid → **system trust**                                                                                                                                  | Daemon dials the public Cloudflare hostname, which the edge cert already covers. **Caveat:** behind a tunnel the instance cannot auto-discover its own public hostname (cloudflared dials out), so the reachable URL(s) must be **declared by the operator** (admin surface / `TURBOPANEL_PUBLIC_URL`), not auto-detected. The self-signed origin leg (cloudflared → local Caddy) is separate from what the daemon validates. |
 
-The plaintext HTTP path targets the dev-only `:8880` entrypoint in
-`../instance/Caddyfile` (see **`../instance/AGENTS.md`** "Caddy (dev +
-production)" — dev-only plaintext HTTP entrypoint). The daemon refuses
-`TURBOPANEL_INSTANCE_URL=http://…` unless `TURBOPANEL_DEV_HTTP_CONTROL_PLANE=1`
-is set (development-only gate — never valid on managed/production installs).
-Co-located Caddy injects the flag via the unit template when
-`turbopanel_dev_user` is set. Remote **Add Server** installs that pass
-`--host http://…:8880` must get the same opt-in in `/etc/turbopanel/daemon.env`:
+The plaintext HTTP path targets the **dev overlay** Caddyfile at
+`../dev/orchestration/Caddyfile` (`:8880`, always on when that file is loaded —
+see **`../dev/AGENTS.md`**). The production `../instance/Caddyfile` has no
+plaintext listener. The daemon refuses `TURBOPANEL_INSTANCE_URL=http://…`
+unless `TURBOPANEL_DEV_HTTP_CONTROL_PLANE=1` is set (client-side gate for
+dialing a development control plane — never valid on managed/production
+installs that serve HTTPS only). Remote **Add Server** installs that pass
+`--host http://…:8880` get the opt-in in `/etc/turbopanel/daemon.env`:
 `daemon-config` `dotenv.j2` is the only writer (derives it from the URL).
 `scripts/run.sh` validates the line after install and fails if missing —
 it does not patch `daemon.env` outside Ansible. HTTPS `--host` installs never

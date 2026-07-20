@@ -10,6 +10,7 @@
   ansible.builtin.import_tasks: ui-logs.yml
 
 - name: Ensure website file logs for developer console
+  when: turbopanel_dev_user | default('') | length > 0
   ansible.builtin.import_tasks: website-logs.yml
 
 - name: Read postgres password for systemd units
@@ -111,6 +112,7 @@
     - Restart turbopanel ui
 
 - name: Install website (Next.js) systemd unit
+  when: turbopanel_dev_user | default('') | length > 0
   ansible.builtin.template:
     src: turbopanel-website.service.j2
     dest: "/etc/systemd/system/{{ website_service_name }}.service"
@@ -399,10 +401,19 @@
     state: "{{ 'started' if (instance_start | bool) else 'stopped' }}"
 
 - name: Ensure website service desired state
+  when: turbopanel_dev_user | default('') | length > 0
   ansible.builtin.systemd:
     name: "{{ website_service_name }}"
     enabled: "{{ instance_start | bool }}"
     state: "{{ 'started' if (instance_start | bool) else 'stopped' }}"
+
+- name: Stop and disable website when not co-located
+  when: turbopanel_dev_user | default('') | length == 0
+  ansible.builtin.systemd:
+    name: "{{ website_service_name }}"
+    state: stopped
+    enabled: false
+  failed_when: false
 
 - name: Stop and disable UI service when not in dev mode
   when: turbopanel_ui_mode != 'dev'

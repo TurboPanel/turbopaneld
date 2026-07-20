@@ -486,3 +486,79 @@ test("converge setup status lines sanitize vendor tokens when presenter is activ
     setActiveInstallPresenter(null);
   }
 });
+
+test(
+  "instance-launch defaults production Caddyfile and static UI mode",
+  async () => {
+    const defaultsPath = join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/instance-launch/defaults/main.yml",
+    );
+    const caddyUnitPath = join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/instance-launch/templates/turbopanel-caddy.service.j2",
+    );
+    const defaults = await Deno.readTextFile(defaultsPath);
+    const caddyUnit = await Deno.readTextFile(caddyUnitPath);
+
+    assertMatch(
+      defaults,
+      /^\s*turbopanel_ui_mode:\s*static\s*$/m,
+      "production default turbopanel_ui_mode is static",
+    );
+    assertMatch(
+      defaults,
+      /turbopanel_caddyfile:.*dev\/orchestration\/Caddyfile/,
+      "turbopanel_caddyfile selects the dev overlay when turbopanel_dev_user is set",
+    );
+    assertMatch(
+      defaults,
+      /turbopanel_caddyfile:.*\/Caddyfile/,
+      "turbopanel_caddyfile falls back to the instance checkout Caddyfile",
+    );
+    assertMatch(
+      caddyUnit,
+      /--config \{\{\s*turbopanel_caddyfile\s*\}\}/,
+      "caddy unit uses turbopanel_caddyfile",
+    );
+    if (caddyUnit.includes("TURBOPANEL_DEV_HTTP_CONTROL_PLANE")) {
+      throw new Error(
+        `${caddyUnitPath}: Caddy unit must not set TURBOPANEL_DEV_HTTP_CONTROL_PLANE (client-only flag)`,
+      );
+    }
+    // Production unit must not bake Expo/wrangler env outside the turbopanel_dev_user block.
+    const prodEnvBlock = caddyUnit.split("{% if turbopanel_dev_user")[0] ??
+      caddyUnit;
+    for (
+      const forbidden of [
+        "CADDY_HTTP_PORT",
+        "EXPO_PORT",
+        "WRANGLER_DEV_PORT",
+        "TURBOPANEL_UI_MODE",
+        "TURBOPANEL_DAEMON_REPO",
+      ]
+    ) {
+      if (prodEnvBlock.includes(forbidden)) {
+        throw new Error(
+          `${caddyUnitPath}: ${forbidden} must only appear inside the turbopanel_dev_user block`,
+        );
+      }
+    }
+  },
+);
+
+test(
+  "ui-build defaults turbopanel_ui_mode to static",
+  async () => {
+    const defaultsPath = join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/ui-build/defaults/main.yml",
+    );
+    const defaults = await Deno.readTextFile(defaultsPath);
+    assertMatch(
+      defaults,
+      /^\s*turbopanel_ui_mode:\s*static\s*$/m,
+      "ui-build production default turbopanel_ui_mode is static",
+    );
+  },
+);
