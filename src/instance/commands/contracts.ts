@@ -48,15 +48,11 @@ export type RebootResult = {
   summary?: string;
 };
 
-export type EnvironmentDeployHosting = {
-  hostingId: string;
-  serviceId: string;
-  composeServiceName: string;
-  hostnames: string[];
-  pathPrefix?: string;
-  targetPort?: number;
-  /** Resolved org TLS id; null/omit = Caddy `tls internal`. */
-  tlsId?: string | null;
+export type EnvironmentDeployHostingProxy = {
+  forceHttps?: boolean;
+  gzip?: boolean;
+  brotli?: boolean;
+  stripPrefix?: string;
 };
 
 export type EnvironmentDeployTlsMaterial = {
@@ -66,13 +62,67 @@ export type EnvironmentDeployTlsMaterial = {
   privateKeyEnvelope: string;
 };
 
+export type EnvironmentDeployHosting = {
+  hostingId: string;
+  serviceId: string;
+  composeServiceName: string;
+  hostnames: string[];
+  pathPrefix?: string;
+  targetPort?: number;
+  /** Resolved org TLS id; null/omit = Caddy `tls internal`. */
+  tlsId?: string | null;
+  proxy?: EnvironmentDeployHostingProxy;
+};
+
+export type EnvironmentDeployVariableMaterial = {
+  key: string;
+  composeServiceName: string | null;
+  forBuild: boolean;
+  forRuntime: boolean;
+  isLiteral: boolean;
+  valueEnvelope: string;
+};
+
+export type EnvironmentDeployStorageMaterial = {
+  storageId: string;
+  kind: "docker_volume" | "bind_mount" | "file" | "directory";
+  name: string;
+  sourcePath?: string;
+  destinationPath: string;
+  principalId?: string;
+  serviceId?: string;
+  composeServiceName?: string;
+  serverId: string;
+  contentEnvelope?: string;
+};
+
+export type EnvironmentDeployPrincipalMaterial = {
+  principalId: string;
+  username: string;
+  uid: number;
+  gid: number;
+  home?: string;
+};
+
+export type EnvironmentDeployServiceHook = {
+  composeServiceName: string;
+  preDeployCommand?: string;
+  postDeployCommand?: string;
+  buildDisableCache?: boolean;
+};
+
 export type EnvironmentDeployPayload = {
   environmentId: string;
   projectId: string;
+  organizationId: string;
   projectName: string;
   composeYaml: string;
   hostings: EnvironmentDeployHosting[];
   tlsMaterial?: EnvironmentDeployTlsMaterial[];
+  variableMaterial?: EnvironmentDeployVariableMaterial[];
+  storageMaterial?: EnvironmentDeployStorageMaterial[];
+  principalMaterial?: EnvironmentDeployPrincipalMaterial[];
+  serviceHooks?: EnvironmentDeployServiceHook[];
 };
 
 export type EnvironmentDeployContainer = {
@@ -200,57 +250,80 @@ function parseNonEmptyString(
   return value;
 }
 
+function parseHostingHostnames(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    throw new TypeError("hostings[].hostnames must contain valid hostnames");
+  }
+  const hostnames: string[] = [];
+  for (const hostname of value) {
+    if (!isValidHostname(hostname)) {
+      throw new TypeError("hostings[].hostnames must contain valid hostnames");
+    }
+    hostnames.push(hostname);
+  }
+  return hostnames;
+}
+
+function parseHostingPathPrefix(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !value.startsWith("/")) {
+    throw new TypeError("hostings[].pathPrefix must start with /");
+  }
+  return value;
+}
+
+function parseHostingTargetPort(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < 1 ||
+    value > 65_535
+  ) {
+    throw new TypeError("hostings[].targetPort must be a valid port");
+  }
+  return value;
+}
+
+function parseHostingTlsId(value: unknown): string | null | undefined {
+  if (value === null) return null;
+  if (typeof value === "string" && value.length > 0) return value;
+  return undefined;
+}
+
+function parseHostingProxy(
+  value: unknown,
+): EnvironmentDeployHostingProxy | undefined {
+  if (!isRecord(value)) return undefined;
+  const proxy: EnvironmentDeployHostingProxy = {};
+  if (typeof value.forceHttps === "boolean") proxy.forceHttps = value.forceHttps;
+  if (typeof value.gzip === "boolean") proxy.gzip = value.gzip;
+  if (typeof value.brotli === "boolean") proxy.brotli = value.brotli;
+  if (typeof value.stripPrefix === "string") {
+    proxy.stripPrefix = value.stripPrefix;
+  }
+  return Object.keys(proxy).length === 0 ? undefined : proxy;
+}
+
 function parseHosting(value: unknown): EnvironmentDeployHosting {
   if (!isRecord(value)) {
     throw new TypeError("Invalid environment deploy hosting");
   }
 
-  const hostnames = value.hostnames;
-  if (!Array.isArray(hostnames)) {
-    throw new TypeError("hostings[].hostnames must contain valid hostnames");
-  }
-  const parsedHostnames: string[] = [];
-  for (const hostname of hostnames) {
-    if (!isValidHostname(hostname)) {
-      throw new TypeError("hostings[].hostnames must contain valid hostnames");
-    }
-    parsedHostnames.push(hostname);
-  }
-
-  const pathPrefix = value.pathPrefix;
-  if (
-    pathPrefix !== undefined &&
-    (typeof pathPrefix !== "string" || !pathPrefix.startsWith("/"))
-  ) {
-    throw new TypeError("hostings[].pathPrefix must start with /");
-  }
-
-  const targetPort = value.targetPort;
-  if (
-    targetPort !== undefined &&
-    (typeof targetPort !== "number" ||
-      !Number.isInteger(targetPort) ||
-      targetPort < 1 ||
-      targetPort > 65_535)
-  ) {
-    throw new TypeError("hostings[].targetPort must be a valid port");
-  }
-
-  let tlsId: string | null | undefined;
-  if (value.tlsId === null) {
-    tlsId = null;
-  } else if (typeof value.tlsId === "string" && value.tlsId.length > 0) {
-    tlsId = value.tlsId;
-  }
+  const pathPrefix = parseHostingPathPrefix(value.pathPrefix);
+  const targetPort = parseHostingTargetPort(value.targetPort);
+  const tlsId = parseHostingTlsId(value.tlsId);
+  const proxy = parseHostingProxy(value.proxy);
 
   return {
     hostingId: parseNonEmptyString(value, "hostingId"),
     serviceId: parseNonEmptyString(value, "serviceId"),
     composeServiceName: parseNonEmptyString(value, "composeServiceName"),
-    hostnames: parsedHostnames,
+    hostnames: parseHostingHostnames(value.hostnames),
     ...(pathPrefix === undefined ? {} : { pathPrefix }),
     ...(targetPort === undefined ? {} : { targetPort }),
     ...(tlsId === undefined ? {} : { tlsId }),
+    ...(proxy === undefined ? {} : { proxy }),
   };
 }
 
@@ -265,6 +338,101 @@ function parseTlsMaterial(value: unknown): EnvironmentDeployTlsMaterial {
   };
 }
 
+function parseVariableMaterial(
+  value: unknown,
+): EnvironmentDeployVariableMaterial {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid environment deploy variableMaterial entry");
+  }
+  return {
+    key: parseNonEmptyString(value, "key"),
+    composeServiceName: typeof value.composeServiceName === "string"
+      ? value.composeServiceName
+      : null,
+    forBuild: value.forBuild === true,
+    forRuntime: value.forRuntime !== false,
+    isLiteral: value.isLiteral === true,
+    valueEnvelope: parseNonEmptyString(value, "valueEnvelope"),
+  };
+}
+
+function parseStorageMaterial(
+  value: unknown,
+): EnvironmentDeployStorageMaterial {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid environment deploy storageMaterial entry");
+  }
+  const material: EnvironmentDeployStorageMaterial = {
+    storageId: parseNonEmptyString(value, "storageId"),
+    kind: parseNonEmptyString(value, "kind") as EnvironmentDeployStorageMaterial["kind"],
+    name: parseNonEmptyString(value, "name"),
+    destinationPath: parseNonEmptyString(value, "destinationPath"),
+    serverId: parseNonEmptyString(value, "serverId"),
+  };
+  if (typeof value.sourcePath === "string") material.sourcePath = value.sourcePath;
+  if (typeof value.principalId === "string") {
+    material.principalId = value.principalId;
+  }
+  if (typeof value.serviceId === "string") material.serviceId = value.serviceId;
+  if (typeof value.composeServiceName === "string") {
+    material.composeServiceName = value.composeServiceName;
+  }
+  if (typeof value.contentEnvelope === "string") {
+    material.contentEnvelope = value.contentEnvelope;
+  }
+  return material;
+}
+
+function parsePrincipalMaterial(
+  value: unknown,
+): EnvironmentDeployPrincipalMaterial {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid environment deploy principalMaterial entry");
+  }
+  const uid = value.uid;
+  const gid = value.gid;
+  if (typeof uid !== "number" || typeof gid !== "number") {
+    throw new TypeError("Invalid environment deploy principalMaterial entry");
+  }
+  const material: EnvironmentDeployPrincipalMaterial = {
+    principalId: parseNonEmptyString(value, "principalId"),
+    username: parseNonEmptyString(value, "username"),
+    uid,
+    gid,
+  };
+  if (typeof value.home === "string") material.home = value.home;
+  return material;
+}
+
+function parseServiceHook(value: unknown): EnvironmentDeployServiceHook {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid environment deploy serviceHooks entry");
+  }
+  const hook: EnvironmentDeployServiceHook = {
+    composeServiceName: parseNonEmptyString(value, "composeServiceName"),
+  };
+  if (typeof value.preDeployCommand === "string") {
+    hook.preDeployCommand = value.preDeployCommand;
+  }
+  if (typeof value.postDeployCommand === "string") {
+    hook.postDeployCommand = value.postDeployCommand;
+  }
+  if (value.buildDisableCache === true) hook.buildDisableCache = true;
+  return hook;
+}
+
+function parseOptionalMaterialArray<T>(
+  value: unknown,
+  fieldName: string,
+  parseEntry: (entry: unknown) => T,
+): T[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw new TypeError(`${fieldName} must be an array`);
+  }
+  return value.map(parseEntry);
+}
+
 export function parseEnvironmentDeployPayload(
   value: unknown,
 ): EnvironmentDeployPayload {
@@ -277,21 +445,44 @@ export function parseEnvironmentDeployPayload(
     throw new TypeError("hostings must be an array");
   }
 
-  let tlsMaterial: EnvironmentDeployTlsMaterial[] | undefined;
-  if (value.tlsMaterial !== undefined) {
-    if (!Array.isArray(value.tlsMaterial)) {
-      throw new TypeError("tlsMaterial must be an array");
-    }
-    tlsMaterial = value.tlsMaterial.map(parseTlsMaterial);
-  }
+  const tlsMaterial = parseOptionalMaterialArray(
+    value.tlsMaterial,
+    "tlsMaterial",
+    parseTlsMaterial,
+  );
+  const variableMaterial = parseOptionalMaterialArray(
+    value.variableMaterial,
+    "variableMaterial",
+    parseVariableMaterial,
+  );
+  const storageMaterial = parseOptionalMaterialArray(
+    value.storageMaterial,
+    "storageMaterial",
+    parseStorageMaterial,
+  );
+  const principalMaterial = parseOptionalMaterialArray(
+    value.principalMaterial,
+    "principalMaterial",
+    parsePrincipalMaterial,
+  );
+  const serviceHooks = parseOptionalMaterialArray(
+    value.serviceHooks,
+    "serviceHooks",
+    parseServiceHook,
+  );
 
   return {
     environmentId: parseNonEmptyString(value, "environmentId"),
     projectId: parseNonEmptyString(value, "projectId"),
+    organizationId: parseNonEmptyString(value, "organizationId"),
     projectName: parseNonEmptyString(value, "projectName"),
     composeYaml: parseNonEmptyString(value, "composeYaml"),
     hostings: hostings.map(parseHosting),
     ...(tlsMaterial === undefined ? {} : { tlsMaterial }),
+    ...(variableMaterial === undefined ? {} : { variableMaterial }),
+    ...(storageMaterial === undefined ? {} : { storageMaterial }),
+    ...(principalMaterial === undefined ? {} : { principalMaterial }),
+    ...(serviceHooks === undefined ? {} : { serviceHooks }),
   };
 }
 

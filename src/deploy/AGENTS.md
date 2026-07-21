@@ -22,11 +22,24 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../insta
    then direct GitHub download) when
    `/opt/turbopanel/vendor/caddy/current/caddy` is missing. On-demand like
    Docker; daemon-converge does not install it. Required for hostname ingress.
-4. Write runtime compose under
+4. When `principalMaterial[]` is present, ensure Linux users/groups on the host
+   (`ensureSystemPrincipals` in `src/deploy/ensure-principal.ts`).
+5. When `storageMaterial[]` is present, materialize paths under
+   `<stateDir>/storage/<organizationId>/<storageId>/` (`materialize-storage.ts`);
+   `docker volume create` for `docker_volume` kinds; optional `chown` when a
+   principal is linked.
+6. Decrypt secret variables from `variableMaterial[]` into compose YAML
+   (`apply-deploy-variables.ts`); patch storage bind/volume mounts
+   (`apply-storage-volumes.ts`).
+7. Write runtime compose under
    `<stateDir>/deployments/<environmentId>/docker-compose.yml` with Traefik
-   labels (`src/deploy/compose-labels.ts`).
-5. `docker compose -p <projectName> up -d --remove-orphans`.
-6. When the payload includes `tlsMaterial[]`, materialize org certs under
+   labels (`src/deploy/compose-labels.ts`) — proxy middleware for
+   `stripPrefix`, `gzip`/`brotli` compress; hosting Caddy respects
+   `forceHttps` per hostname (`ingress.ts`).
+8. Run pre-deploy hooks (`serviceHooks[]`: optional `build --no-cache`, shell
+   preDeployCommand) then `docker compose up -d --remove-orphans`, then post-deploy
+   hooks (`run-deploy-hooks.ts`).
+9. When the payload includes `tlsMaterial[]`, materialize org certs under
    `layout.tlsDir` (`/etc/turbopanel/tls/<tlsId>/fullchain.pem` + `privkey.pem`,
    modes `0640`/`0600`) via `materializeTlsCertificates`
    (`src/deploy/materialize-tls.ts`). Private keys arrive as `tpdaemon`
@@ -37,7 +50,7 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../insta
    `tls <fullchain> <privkey>` when a resolved `tlsId` was materialized;
    otherwise `tls internal`. Unit `turbopanel-hosting-caddy.service` when sudo
    allows. **Distinct** from control-plane Caddy (`:8443`).
-8. Best-effort `docker compose ps --format json` — per-container identity/status
+10. Best-effort `docker compose ps --format json` — per-container identity/status
    (`containerId`, `containerName`, `composeServiceName`, `status`, optional
    `serviceId` from `payload.hostings`) is included in the command result when
    collection succeeds; a `ps`/parse failure never fails an otherwise-successful
@@ -55,6 +68,8 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../insta
    container pins.
 
 Helpers: `src/deploy/ensure-docker.ts`, `src/deploy/ingress.ts`,
-`src/deploy/materialize-tls.ts`, `src/deploy/ensure-hosting-caddy.ts`. Future
+`src/deploy/materialize-tls.ts`, `src/deploy/ensure-hosting-caddy.ts`,
+`src/deploy/materialize-storage.ts`, `src/deploy/apply-storage-volumes.ts`,
+`src/deploy/run-deploy-hooks.ts`, `src/deploy/ensure-principal.ts`. Future
 seams (not MVP): multi-server service placement, WireGuard mesh, swarm-style
 replicas, ACME issuance on the daemon.

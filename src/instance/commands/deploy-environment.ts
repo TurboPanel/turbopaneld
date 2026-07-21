@@ -1,16 +1,24 @@
 import { join } from "@std/path";
+import { applySecretVariablesToCompose } from "../../deploy/apply-deploy-variables.ts";
+import { applyStorageVolumesToCompose } from "../../deploy/apply-storage-volumes.ts";
 import { injectHostingLabels } from "../../deploy/compose-labels.ts";
 import { runDocker } from "../../deploy/docker-cli.ts";
 import { ensureDocker } from "../../deploy/ensure-docker.ts";
+import { ensureSystemPrincipals } from "../../deploy/ensure-principal.ts";
 import {
   ensureHostingIngress,
   rewriteHostingCaddySites,
 } from "../../deploy/ingress.ts";
+import { materializeStorageEntries } from "../../deploy/materialize-storage.ts";
 import {
   type DecryptSecretsFn,
   hostnameTlsMap,
   materializeTlsCertificates,
 } from "../../deploy/materialize-tls.ts";
+import {
+  runDeployServiceHooks,
+  runPostDeployHooks,
+} from "../../deploy/run-deploy-hooks.ts";
 import { logInfo } from "../../logger.ts";
 import { resolveLayout } from "../../paths/layout.ts";
 import {
@@ -173,10 +181,8 @@ export async function handleEnvironmentDeploy(
 ): Promise<EnvironmentDeployResult> {
   const parsedPayload = parseEnvironmentDeployPayload(payload);
   assertSafeDeploymentIdentifiers(parsedPayload);
-  const labeledCompose = injectHostingLabels(parsedPayload);
   const layout = resolveLayout(Deno.env.toObject());
 
-  // On-demand: Docker Engine (+ docker group) and hosting Caddy for hostnames.
   await ensureDocker();
   await ensureHostingIngress(layout);
 
@@ -186,10 +192,74 @@ export async function handleEnvironmentDeploy(
     parsedPayload.environmentId,
   );
   await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
+
+  const principalMaterial = parsedPayload.principalMaterial ?? [];
+  if (principalMaterial.length > 0) {
+    await ensureSystemPrincipals(
+      layout,
+      principalMaterial.map((principal) => ({
+        principalId: principal.principalId,
+        username: principal.username,
+        uid: principal.uid,
+        gid: principal.gid,
+        home: principal.home,
+      })),
+    );
+  }
+
+  let mountPaths = new Map<string, string>();
+  if (parsedPayload.storageMaterial && parsedPayload.storageMaterial.length > 0) {
+    mountPaths = await materializeStorageEntries(
+      layout,
+      parsedPayload.organizationId,
+      parsedPayload.storageMaterial,
+      principalMaterial,
+      deps?.decryptSecrets,
+    );
+  }
+
+  let composeYaml = parsedPayload.composeYaml;
+  const variableMaterial = parsedPayload.variableMaterial ?? [];
+  if (variableMaterial.length > 0) {
+    if (!deps?.decryptSecrets) {
+      throw new Error(
+        "Variable material present but secrets decrypt is unavailable",
+      );
+    }
+    composeYaml = await applySecretVariablesToCompose(
+      composeYaml,
+      variableMaterial,
+      deps.decryptSecrets,
+    );
+  }
+
+  if (parsedPayload.storageMaterial && parsedPayload.storageMaterial.length > 0) {
+    composeYaml = applyStorageVolumesToCompose(
+      composeYaml,
+      parsedPayload.storageMaterial,
+      mountPaths,
+    );
+  }
+
+  const labeledCompose = injectHostingLabels({
+    ...parsedPayload,
+    composeYaml,
+  });
+
   const composePath = join(deploymentDir, "docker-compose.yml");
   await Deno.writeTextFile(composePath, labeledCompose.composeYaml, {
     mode: 0o640,
   });
+
+  const serviceHooks = parsedPayload.serviceHooks ?? [];
+  if (serviceHooks.length > 0) {
+    await runDeployServiceHooks(serviceHooks, {
+      projectName: parsedPayload.projectName,
+      composePath,
+      deploymentDir,
+    });
+  }
+
   await composeUp(parsedPayload.projectName, composePath);
 
   let hostnameTls: Map<string, string> | undefined;
@@ -209,6 +279,11 @@ export async function handleEnvironmentDeploy(
   }
 
   await rewriteHostingCaddySites(layout, parsedPayload, hostnameTls);
+
+  if (serviceHooks.length > 0) {
+    await runPostDeployHooks(serviceHooks, deploymentDir);
+  }
+
   const containers = await collectDeployedContainers(
     parsedPayload.projectName,
     parsedPayload.hostings,

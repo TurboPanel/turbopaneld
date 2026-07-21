@@ -105,6 +105,47 @@ function parseCompose(composeYaml: string): ComposeDocument {
   return document as ComposeDocument;
 }
 
+function applyProxyMiddlewareLabels(
+  labels: Record<string, string>,
+  routerId: string,
+  proxy: EnvironmentDeployPayload["hostings"][number]["proxy"],
+): void {
+  if (!proxy) return;
+
+  const middlewares: string[] = [];
+
+  if (proxy.stripPrefix) {
+    const middlewareId = `${routerId}-strip`;
+    addLabel(
+      labels,
+      `traefik.http.middlewares.${middlewareId}.stripprefix.prefixes`,
+      proxy.stripPrefix,
+    );
+    middlewares.push(middlewareId);
+  }
+
+  if (proxy.gzip || proxy.brotli) {
+    const middlewareId = `${routerId}-compress`;
+    addLabel(labels, `traefik.http.middlewares.${middlewareId}.compress`, "true");
+    if (proxy.brotli) {
+      addLabel(
+        labels,
+        `traefik.http.middlewares.${middlewareId}.compress.encodings`,
+        "gzip,br",
+      );
+    }
+    middlewares.push(middlewareId);
+  }
+
+  if (middlewares.length > 0) {
+    addLabel(
+      labels,
+      `traefik.http.routers.${routerId}.middlewares`,
+      middlewares.join(","),
+    );
+  }
+}
+
 export function injectHostingLabels(payload: EnvironmentDeployPayload): {
   composeYaml: string;
   services: string[];
@@ -141,6 +182,7 @@ export function injectHostingLabels(payload: EnvironmentDeployPayload): {
     addLabel(labels, "com.turbopanel.project", payload.projectId);
     addLabel(labels, "com.turbopanel.environment", payload.environmentId);
     addLabel(labels, "com.turbopanel.service", hosting.serviceId);
+    applyProxyMiddlewareLabels(labels, routerId, hosting.proxy);
     service.labels = labels;
     attachIngressNetwork(service);
   }

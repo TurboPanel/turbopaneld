@@ -187,6 +187,7 @@ function siteSnippet(
   hostname: string,
   tlsId: string | undefined,
   tlsDir: string,
+  forceHttps = true,
 ): string {
   const tlsLine = tlsId
     ? `  tls ${join(tlsDir, tlsId, "fullchain.pem")} ${
@@ -194,15 +195,27 @@ function siteSnippet(
     }`
     : "  tls internal";
 
-  return `http://${hostname} {
+  const httpBlock = forceHttps
+    ? `http://${hostname} {
+  redir https://{host}{uri} permanent
+}
+
+`
+    : `http://${hostname} {
   reverse_proxy 127.0.0.1:8080
 }
 
-${hostname} {
+`;
+
+  const httpsBlock = forceHttps
+    ? `${hostname} {
 ${tlsLine}
   reverse_proxy 127.0.0.1:8080
 }
-`;
+`
+    : "";
+
+  return httpBlock + httpsBlock;
 }
 
 export async function rewriteHostingCaddySites(
@@ -216,15 +229,28 @@ export async function rewriteHostingCaddySites(
 
   const sitesDir = join(layout.configDir, "hosting", "sites");
   await Deno.mkdir(sitesDir, { recursive: true, mode: 0o750 });
-  const hostnames = [
-    ...new Set(payload.hostings.flatMap((hosting) => hosting.hostnames)),
-  ]
-    .sort((a, b) => a.localeCompare(b));
+
+  const hostnameForceHttps = new Map<string, boolean>();
+  for (const hosting of payload.hostings) {
+    const forceHttps = hosting.proxy?.forceHttps ?? true;
+    for (const hostname of hosting.hostnames) {
+      hostnameForceHttps.set(hostname, forceHttps);
+    }
+  }
+
+  const hostnames = [...hostnameForceHttps.keys()].sort((a, b) =>
+    a.localeCompare(b)
+  );
   await Deno.writeTextFile(
     join(sitesDir, `${payload.environmentId}.caddy`),
     hostnames
       .map((hostname) =>
-        siteSnippet(hostname, hostnameTls?.get(hostname), layout.tlsDir)
+        siteSnippet(
+          hostname,
+          hostnameTls?.get(hostname),
+          layout.tlsDir,
+          hostnameForceHttps.get(hostname) ?? true,
+        )
       )
       .join("\n"),
     { mode: 0o640 },
