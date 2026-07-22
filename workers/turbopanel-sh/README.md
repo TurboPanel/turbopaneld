@@ -20,9 +20,13 @@ into a gitignored `public/run.sh` before upload — nothing is duplicated in git
 From this directory:
 
 ```bash
-npm install
+npm ci
 npm run deploy
 ```
+
+`package-lock.json` is committed so Cloudflare Workers Builds installs with npm
+deterministically. Local installs may use `npm install` instead of `npm ci` when
+the lockfile changes.
 
 `deploy` runs `wrangler deploy`, which executes the `build.command` in
 `wrangler.jsonc` first (staging `../../scripts/run.sh` → `public/run.sh`) then

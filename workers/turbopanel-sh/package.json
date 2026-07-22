@@ -1,5 +1,6 @@
 {
   "private": true,
+  "packageManager": "npm@11.13.0",
   "scripts": {
     "stage": "mkdir -p public && cp ../../scripts/run.sh public/run.sh",
     "deploy": "wrangler deploy"
