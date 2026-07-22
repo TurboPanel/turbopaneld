@@ -12,6 +12,9 @@
     }
   },
   "main": "src/worker.ts",
+  "build": {
+    "command": "npm run stage"
+  },
   "assets": {
     "binding": "ASSETS",
     "directory": "./public",

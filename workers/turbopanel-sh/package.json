@@ -2,7 +2,7 @@
   "private": true,
   "scripts": {
     "stage": "mkdir -p public && cp ../../scripts/run.sh public/run.sh",
-    "deploy": "npm run stage && wrangler deploy"
+    "deploy": "wrangler deploy"
   },
   "devDependencies": {
     "wrangler": "^4.109.0"

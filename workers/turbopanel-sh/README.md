@@ -24,9 +24,10 @@ npm install
 npm run deploy
 ```
 
-`deploy` runs `stage` (copies `../../scripts/run.sh` → `public/run.sh`) then
-`wrangler deploy`. Each deploy re-uploads the asset so content changes take
-effect immediately.
+`deploy` runs `wrangler deploy`, which executes the `build.command` in
+`wrangler.jsonc` first (staging `../../scripts/run.sh` → `public/run.sh`) then
+uploads. Cloudflare Workers Builds that invoke `npx wrangler deploy` directly
+get the same stage step automatically.
 
 ## Legacy URL
 
