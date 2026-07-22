@@ -15,9 +15,14 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../insta
    first deploy after group membership still works without a daemon restart
    (`sg docker` fails for `/usr/sbin/nologin` service accounts with "This
    account is currently not available").
-2. Bootstrap Traefik on Docker network `turbopanel-ingress` (internal bind
-   `127.0.0.1:8080` only — **no** public `:80`/`:443` on Traefik; **no**
-   ACME/LE).
+2. Bootstrap Traefik on Docker network `turbopanel-ingress` with loopback-only
+   entrypoints `127.0.0.1:7080` (`web`) and `127.0.0.1:7443` (`websecure`,
+   entrypoint-level TLS via Traefik's default self-signed cert), both with
+   `proxyProtocol.insecure=true`. **No** socat/`ingress-bridge`/unix socket.
+   Hosting Caddy dials `:7080` over h2c and `:7443` over HTTP/2+TLS
+   (`tls_insecure_skip_verify`) with PROXY protocol v2. HTTP/3 is offered only
+   at the public browser edge (browser→Caddy). **No** public `:80`/`:443` on
+   Traefik; **no** ACME/LE.
 3. Ensure vendored hosting Caddy (`ensureHostingCaddy` — Ansible `caddy-setup`
    then direct GitHub download) when
    `/opt/turbopanel/vendor/caddy/current/caddy` is missing. On-demand like

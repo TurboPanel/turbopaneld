@@ -7,8 +7,33 @@ import { ensureHostingCaddy } from "./ensure-hosting-caddy.ts";
 
 const INGRESS_NETWORK = "turbopanel-ingress";
 const CADDY_SERVICE = "turbopanel-hosting-caddy.service";
+const TRAEFIK_IMAGE = "traefik:v3.6.6";
+const TRAEFIK_LOOPBACK = "127.0.0.1";
+const TRAEFIK_HTTP_PORT = 7080;
+const TRAEFIK_HTTPS_PORT = 7443;
 const SAFE_FILE_ID_RE = /^[A-Za-z0-9_-]+$/;
 const decoder = new TextDecoder();
+
+export function caddyTraefikUpstream(hop: "http" | "https"): string {
+  if (hop === "http") {
+    return `reverse_proxy ${TRAEFIK_LOOPBACK}:${TRAEFIK_HTTP_PORT} {
+  transport http {
+    proxy_protocol v2
+    keepalive off
+    versions h2c
+  }
+}`;
+  }
+  return `reverse_proxy ${TRAEFIK_LOOPBACK}:${TRAEFIK_HTTPS_PORT} {
+  transport http {
+    proxy_protocol v2
+    keepalive off
+    versions 2
+    tls
+    tls_insecure_skip_verify
+  }
+}`;
+}
 
 type CommandResult = {
   success: boolean;
@@ -45,31 +70,40 @@ async function ensureIngressNetwork(): Promise<void> {
   }
 }
 
-function traefikCompose(): string {
+export function traefikCompose(): string {
   return `services:
   traefik:
-    image: traefik:v3.3
+    image: ${TRAEFIK_IMAGE}
     restart: unless-stopped
     command:
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
       - --providers.docker.network=${INGRESS_NETWORK}
-      - --entrypoints.web.address=:80
+      - --entrypoints.web.address=:${TRAEFIK_HTTP_PORT}
+      - --entrypoints.web.proxyProtocol.insecure=true
+      - --entrypoints.websecure.address=:${TRAEFIK_HTTPS_PORT}
+      - --entrypoints.websecure.proxyProtocol.insecure=true
+      - --entrypoints.websecure.http.tls=true
     ports:
-      - 127.0.0.1:8080:80
+      - ${TRAEFIK_LOOPBACK}:${TRAEFIK_HTTP_PORT}:${TRAEFIK_HTTP_PORT}
+      - ${TRAEFIK_LOOPBACK}:${TRAEFIK_HTTPS_PORT}:${TRAEFIK_HTTPS_PORT}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - ${INGRESS_NETWORK}
+
 networks:
   ${INGRESS_NETWORK}:
     external: true
 `;
 }
 
-function caddyfile(configDir: string): string {
+export function caddyfile(configDir: string): string {
   return `{
   auto_https off
+  servers {
+    protocols h1 h2 h3
+  }
 }
 import ${join(configDir, "hosting", "sites", "*.caddy")}
 `;
@@ -144,7 +178,9 @@ export async function ensureHostingIngress(layout: LayoutPaths): Promise<void> {
   const ingressDir = join(layout.stateDir, "ingress", "traefik");
   await Deno.mkdir(ingressDir, { recursive: true, mode: 0o750 });
   const composePath = join(ingressDir, "docker-compose.yml");
-  await Deno.writeTextFile(composePath, traefikCompose(), { mode: 0o640 });
+  await Deno.writeTextFile(composePath, traefikCompose(), {
+    mode: 0o640,
+  });
   const composeUp = await runDocker([
     "compose",
     "-p",
@@ -189,6 +225,8 @@ function siteSnippet(
   tlsDir: string,
   forceHttps = true,
 ): string {
+  const httpUpstream = caddyTraefikUpstream("http");
+  const httpsUpstream = caddyTraefikUpstream("https");
   const tlsLine = tlsId
     ? `  tls ${join(tlsDir, tlsId, "fullchain.pem")} ${
       join(tlsDir, tlsId, "privkey.pem")
@@ -202,7 +240,7 @@ function siteSnippet(
 
 `
     : `http://${hostname} {
-  reverse_proxy 127.0.0.1:8080
+  ${httpUpstream}
 }
 
 `;
@@ -210,7 +248,7 @@ function siteSnippet(
   const httpsBlock = forceHttps
     ? `${hostname} {
 ${tlsLine}
-  reverse_proxy 127.0.0.1:8080
+  ${httpsUpstream}
 }
 `
     : "";
@@ -241,18 +279,19 @@ export async function rewriteHostingCaddySites(
   const hostnames = [...hostnameForceHttps.keys()].sort((a, b) =>
     a.localeCompare(b)
   );
+  const siteContent = hostnames
+    .map((hostname) =>
+      siteSnippet(
+        hostname,
+        hostnameTls?.get(hostname),
+        layout.tlsDir,
+        hostnameForceHttps.get(hostname) ?? true,
+      )
+    )
+    .join("\n");
   await Deno.writeTextFile(
     join(sitesDir, `${payload.environmentId}.caddy`),
-    hostnames
-      .map((hostname) =>
-        siteSnippet(
-          hostname,
-          hostnameTls?.get(hostname),
-          layout.tlsDir,
-          hostnameForceHttps.get(hostname) ?? true,
-        )
-      )
-      .join("\n"),
+    siteContent,
     { mode: 0o640 },
   );
 
