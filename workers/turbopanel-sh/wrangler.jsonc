@@ -1,0 +1,24 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "send_metrics": false,
+  "account_id": "a574c2793baa3e2276ac16e96097bc8c",
+  "name": "turbopanel-sh",
+  "compatibility_date": "2026-06-01",
+  "workers_dev": false,
+  "preview_urls": false,
+  "observability": {
+    "logs": {
+      "enabled": true
+    }
+  },
+  "main": "src/worker.ts",
+  "assets": {
+    "binding": "ASSETS",
+    "directory": "./public",
+    "run_worker_first": true
+  },
+  "route": {
+    "pattern": "turbopanel.sh",
+    "custom_domain": true
+  }
+}

@@ -190,6 +190,19 @@ compile toolchain).
   checks that use `[[`). `run.sh` stays POSIX and inlines a separate copy of the
   manifest helpers for `curl | sh`.
 
+## Installer script hosting (`workers/turbopanel-sh/`)
+
+**https://turbopanel.sh** is the canonical **free** (Cloudflare Workers Static
+Assets) host for `scripts/run.sh`. Deploy tooling lives in the isolated
+`workers/turbopanel-sh/` package (Node + wrangler only — not part of the Deno
+graph). Manual deploy: `npm install` then `npm run deploy` from that directory;
+the stage step copies `scripts/run.sh` into gitignored `public/` at deploy time
+so the script stays a single source of truth. Existing **trbp.nl/run.sh**
+references remain valid via a dashboard redirect to `https://turbopanel.sh`.
+The `workers/` tree is deploy tooling only and is excluded from release
+packaging (`package-daemon-release.sh` / `bundle-orchestration.sh` stage from
+`orchestration/` and `dist/.build` only).
+
 ## Subsystem docs (nested `AGENTS.md`)
 
 Large subsystems live in focused `AGENTS.md` files next to their code — Cursor loads the nearest one automatically when you work in that directory. **Read the matching file before editing that area.** This root keeps the foundational path model + conventions; the detail moved to:
