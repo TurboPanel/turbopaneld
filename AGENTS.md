@@ -109,7 +109,7 @@ dev user**. Production managed installs keep the dedicated service users
 `tp`, `tpctrl`, `tpcache`, `tpdata`, `tpqueue`, `tpmetrics`, and `tpcaddy` — see **`../instance/AGENTS.md`** (Production UID/GID allocation).
 
 **Deno version pin:** `DENO_VERSION` (`src/orchestration/paths.ts`) =
-**`2.9.3`**. Keep it in step with `deno_version` in
+**`2.9.4`**. Keep it in step with `deno_version` in
 `orchestration/roles/deno-runtime/defaults/main.yml`, `TP_DENO_VERSION` in
 `scripts/run.sh`, and `DENO_VERSION` in
 [turbopanel/dev](https://github.com/turbopanel/dev) `src/lib/paths.ts` (dev

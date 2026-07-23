@@ -15,6 +15,9 @@ release-root-verify-*/
 # Ansible Galaxy roles install into orchestration/roles/ (see requirements.yml).
 # Never commit them — bootstrap runs ansible-galaxy role install.
 orchestration/roles/geerlingguy.docker/
+# Local Galaxy/dependency cache (wrong install target if ansible-galaxy runs from checkout).
+orchestration/.ansible/
+.ansible/
 
 # Isolated Workers deploy tooling (Node/wrangler only).
 workers/turbopanel-sh/public/

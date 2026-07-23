@@ -459,7 +459,7 @@ test("module-level orchestration constants match active layout", () => {
   );
   assertEq(
     DENO_RUNTIME_DIR,
-    join(layout.runtimesDir, "deno", "2.9.3"),
+    join(layout.runtimesDir, "deno", DENO_VERSION),
     "DENO_RUNTIME_DIR",
   );
   assertEq(
