@@ -4,6 +4,10 @@
 
 set -eu
 
+# Same composition as scripts/lib/runtime-paths.sh (keep host diagnostics self-contained).
+TURBOPANEL_HOME="${TURBOPANEL_HOME:-/opt/turbopanel}"
+TURBOPANEL_RUNTIMES_DIR="${TURBOPANEL_RUNTIMES_DIR:-${TURBOPANEL_RUNTIME_DIR:-${TURBOPANEL_HOME}/vendor}}"
+
 HOSTING_SERVICE="turbopanel-hosting-caddy.service"
 HOSTING_DIR="/etc/turbopanel/hosting"
 SITES_DIR="${HOSTING_DIR}/sites"
@@ -89,7 +93,7 @@ else
 fi
 
 section "caddy binary"
-CADDY_BIN="/opt/turbopanel/vendor/caddy/current/caddy"
+CADDY_BIN="${TURBOPANEL_RUNTIMES_DIR}/caddy/current/caddy"
 if [ -x "${CADDY_BIN}" ]; then
   echo "present: ${CADDY_BIN}"
   "${CADDY_BIN}" version 2>&1 || true
