@@ -18,7 +18,10 @@
  */
 import { join } from "@std/path";
 import { runPlaybookStreaming } from "../src/orchestration/ansible-events.ts";
-import { runBuildToggle as runAnsibleBuildToggle } from "../src/orchestration/ansible.ts";
+import {
+  ensureAnsible,
+  runBuildToggle as runAnsibleBuildToggle,
+} from "../src/orchestration/ansible.ts";
 import {
   computeDevConvergeStamp,
   writeDevConvergeStamp,
@@ -132,6 +135,9 @@ function devInstanceExtraArgs(): string[] {
 
 async function runInstanceDevInstall(): Promise<void> {
   const layout = await requireDevOrchestrationLayout();
+
+  // Sync orchestration venv packages (ansible-lint for IDE linting, etc.) before converge.
+  await ensureAnsible();
 
   await runPlaybookStreaming(
     ANSIBLE_PLAYBOOK_BIN,

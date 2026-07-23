@@ -88,6 +88,7 @@ export const ANSIBLE_INSTALL_DIR = join(
 export const VENV_DIR = ANSIBLE_INSTALL_DIR;
 export const VENV_BIN_DIR = join(VENV_DIR, "bin");
 export const ANSIBLE_PLAYBOOK_BIN = join(VENV_BIN_DIR, "ansible-playbook");
+export const ANSIBLE_LINT_BIN = join(VENV_BIN_DIR, "ansible-lint");
 
 /** Stable `current` symlink pointing at the active ansible venv dir. */
 export const ANSIBLE_CURRENT_DIR = join(RUNTIMES_DIR, "ansible", "current");

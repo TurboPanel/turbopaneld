@@ -1,0 +1,8 @@
+---
+# Co-located with ansible.cfg — ansible-lint resolves roles_path from there.
+# The VS Code / Cursor Ansible extension must set ansible.config.path to this
+# tree (see dev.code-workspace and daemon/.vscode/settings.json).
+offline: true
+exclude_paths:
+  - .cache/
+  - roles/geerlingguy.docker/

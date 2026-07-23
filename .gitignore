@@ -1,5 +1,9 @@
 .env
 logs/
+
+# Python bytecode (e.g. scripts/extract-deno-zip.py)
+__pycache__/
+*.py[cod]
 .pnpm-store/
 state/
 cloudflared/

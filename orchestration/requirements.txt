@@ -2,6 +2,6 @@
 # ansible-core provides ansible-playbook plus the builtin module set (ping, debug, ...),
 # which is all the localhost smoke test needs. Expand this list as orchestration grows.
 ansible-core==2.20.*
-# IDE/CI linting. Pin <25 until ansible-core is bumped to 2.20+ (Python 3.14 compat gate).
-ansible-lint>=24,<25
-ansible-compat>=24,<25
+# IDE/CI linting (VS Code Ansible extension + CI). Requires ansible-core 2.20+ on Python 3.14.
+ansible-lint>=25,<26
+ansible-compat>=25,<26

@@ -29,6 +29,7 @@ import {
   ANSIBLE_CURRENT_DIR,
   ANSIBLE_HOME,
   ANSIBLE_INSTALL_DIR,
+  ANSIBLE_LINT_BIN,
   ANSIBLE_PLAYBOOK_BIN,
   ANSIBLE_PLAYBOOK_CWD,
   ansibleEnv,
@@ -68,6 +69,14 @@ async function fileExists(path: string): Promise<boolean> {
 export async function ansiblePlaybookWorks(): Promise<boolean> {
   if (!(await fileExists(ANSIBLE_PLAYBOOK_BIN))) return false;
   const result = await run(ANSIBLE_PLAYBOOK_BIN, ["--version"], {
+    stream: false,
+  });
+  return result.success;
+}
+
+export async function ansibleLintWorks(): Promise<boolean> {
+  if (!(await fileExists(ANSIBLE_LINT_BIN))) return false;
+  const result = await run(ANSIBLE_LINT_BIN, ["--version"], {
     stream: false,
   });
   return result.success;
@@ -159,29 +168,7 @@ function devInstanceExtraArgs(): string[] {
   ];
 }
 
-/**
- * Ensure the ansible virtualenv exists and the pinned packages are installed.
- *
- * Creates the venv with the managed Python, then installs from
- * `orchestration/requirements.txt`. Idempotent: if `ansible-playbook` is already
- * present in the venv and runnable, the (network-touching) install is skipped so
- * restarts are cheap and work offline.
- */
-export async function ensureAnsible(): Promise<void> {
-  if (await ansiblePlaybookWorks()) {
-    logInfo("orchestration", "ansible already installed, skipping setup");
-    await repointAnsibleCurrent();
-    return;
-  }
-
-  logInfo("orchestration", `creating venv at ${VENV_DIR}`);
-  // uv may need to fetch a managed Python interpreter here (UV_PYTHON_DOWNLOADS=automatic),
-  // so this is a network operation too — retry the same transient blips as ensureUv().
-  await withRetry(
-    () => runOrThrow(UV_BIN, ["venv", "--python", PYTHON_VERSION, VENV_DIR]),
-    { label: "create ansible venv", attempts: 3 },
-  );
-
+async function installAnsiblePackages(): Promise<void> {
   logInfo("orchestration", `installing packages from ${REQUIREMENTS_FILE}`);
   await withRetry(
     () =>
@@ -195,12 +182,54 @@ export async function ensureAnsible(): Promise<void> {
       ]),
     { label: "install ansible packages from PyPI", attempts: 3 },
   );
+}
 
+async function verifyAnsibleInstall(): Promise<void> {
   if (!(await ansiblePlaybookWorks())) {
     throw new Error(
       "ansible install verification failed: ansible-playbook not runnable",
     );
   }
+  if (!(await ansibleLintWorks())) {
+    throw new Error(
+      "ansible install verification failed: ansible-lint not runnable",
+    );
+  }
+}
+
+/**
+ * Ensure the ansible virtualenv exists and the pinned packages are installed.
+ *
+ * Creates the venv with the managed Python, then installs from
+ * `orchestration/requirements.txt`. Idempotent when `ansible-playbook` and
+ * `ansible-lint` are runnable and bootstrap inputs are unchanged; re-runs pip
+ * install when requirements change or ansible-lint is missing/broken.
+ */
+export async function ensureAnsible(): Promise<void> {
+  const stamp = await computeBootstrapStamp();
+  const previousStamp = await readBootstrapStamp();
+  const requirementsChanged = previousStamp !== stamp;
+  const playbookReady = await ansiblePlaybookWorks();
+  const lintReady = await ansibleLintWorks();
+
+  if (playbookReady && lintReady && !requirementsChanged) {
+    logInfo("orchestration", "ansible already installed, skipping setup");
+    await repointAnsibleCurrent();
+    return;
+  }
+
+  if (!playbookReady) {
+    logInfo("orchestration", `creating venv at ${VENV_DIR}`);
+    // uv may need to fetch a managed Python interpreter here (UV_PYTHON_DOWNLOADS=automatic),
+    // so this is a network operation too — retry the same transient blips as ensureUv().
+    await withRetry(
+      () => runOrThrow(UV_BIN, ["venv", "--python", PYTHON_VERSION, VENV_DIR]),
+      { label: "create ansible venv", attempts: 3 },
+    );
+  }
+
+  await installAnsiblePackages();
+  await verifyAnsibleInstall();
   await repointAnsibleCurrent();
   logInfo("orchestration", "ansible installed");
 }
