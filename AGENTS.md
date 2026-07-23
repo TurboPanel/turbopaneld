@@ -70,7 +70,7 @@ add/extend a layout field instead. The development default checkout root is
 code must never name the retired `/opt/turbopanel/platform` token — the layout
 module and CI guard are the only places allowed to reference it.
 
-**Production (managed / FHS)** — compiled release, no source checkout:
+**Production (managed / FHS)** — compiled release, no source checkout. The daemon runs as **`tp:tp`** (UID/GID 9999); per-service accounts (`tpctrl`, `tpcache`, `tpdata`, `tpqueue`, `tpmetrics`, `tpcaddy`) are listed in **`../instance/AGENTS.md`** (Production UID/GID allocation):
 
 | Purpose                                                           | Path                                  |
 | ----------------------------------------------------------------- | ------------------------------------- |
@@ -100,13 +100,13 @@ module and CI guard are the only places allowed to reference it.
 | Config dir                       | `/etc/turbopanel`                                                                  |
 | Runtime (sockets, `daemon.lock`) | `/run/turbopanel`                                                                  |
 
-**Development identity:** co-located dev creates **no** dedicated `turbopanel`,
-`turbopaneli`, or `turbopanelc` / `turbopanelh` service accounts. The
+**Development identity:** co-located dev creates **no** dedicated `tp`,
+`tpctrl`, or `tpcache` / `tpmetrics` service accounts. The
 `turbopaneld`, instance, UI, and Caddy systemd units, plus Docker-backed
 services (Postgres, Redis, RabbitMQ, Mailpit, ClickHouse —
 `turbopanel-clickhouse`, Tabix — `turbopanel-tabix`), all run as the **current
 dev user**. Production managed installs keep the dedicated service users
-described in the production table above.
+`tp`, `tpctrl`, `tpcache`, `tpdata`, `tpqueue`, `tpmetrics`, and `tpcaddy` — see **`../instance/AGENTS.md`** (Production UID/GID allocation).
 
 **Deno version pin:** `DENO_VERSION` (`src/orchestration/paths.ts`) =
 **`2.9.3`**. Keep it in step with `deno_version` in
@@ -142,7 +142,7 @@ download cache is disposable scratch — installed roles/collections live under
 FHS (`share/orchestration/roles`, `vendor/ansible/galaxy-collections`). Managed
 `run.sh` + `daemon-install.yml` remove `/tmp/turbopanel-ansible` and any
 accidental `/root/.ansible` after install. Runtime orchestration runs as
-`turbopanel` (dev: the current dev user).
+`tp` (dev: the current dev user).
 
 **Galaxy roles are not committed:** pins live in
 `orchestration/requirements.yml` (`geerlingguy.docker`, collections). Bootstrap

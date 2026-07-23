@@ -37,6 +37,6 @@ turbopanel_service_name: turbopaneld
 # either way.
 daemon_log_dir: /var/log/turbopanel
 runtime_socket_dir: /run/turbopanel
-runtime_socket_owner: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
-runtime_socket_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
+runtime_socket_owner: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
+runtime_socket_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
 runtime_socket_mode: "2770"

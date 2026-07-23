@@ -5,4 +5,4 @@ turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') 
 caddy_version: "2.10.2"
 caddy_release_tag: "v2.10.2"
 turbopanel_dev_user: ""
-turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
+turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"

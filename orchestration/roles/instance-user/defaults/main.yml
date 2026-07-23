@@ -1,22 +1,27 @@
 ---
 # The self-hosted instance stack runs as a dedicated, low-privilege user with
-# primary group turbopaneli and supplementary membership in turbopanel and
-# turbopanelc. This keeps broad shared-platform access (turbopanel) separate
-# from Redis socket access (/run/turbopanel/redis.sock, group turbopanelc).
+# primary group tpctrl and supplementary membership in tp and tpcache. Caddy runs
+# as a separate tpcaddy(9993) account (primary group tpcaddy, supplementary tp).
+# This keeps broad shared-platform access (tp) separate from Redis socket access
+# (/run/turbopanel/redis.sock, group tpcache).
 #
 # Co-located dev collapses this multi-user scheme onto the single dev user via
 # the shared dev-identity contract (turbopanel_dev_user set). Managed installs
-# keep the dedicated turbopaneli(9998)/turbopanel(9999)/turbopanelc(9997) split.
+# keep the dedicated tpcaddy(9993)/tpctrl(9998)/tp(9999)/tpcache(9997) split.
 turbopanel_dev_user: ""
 turbopanel_dev_uid: ""
 turbopanel_dev_gid: ""
-instance_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopaneli' }}"
+instance_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tpctrl' }}"
 instance_uid: "{{ turbopanel_dev_uid if (turbopanel_dev_user | default('') | length > 0) else 9998 }}"
-instance_primary_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopaneli' }}"
+instance_primary_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tpctrl' }}"
 instance_primary_gid: "{{ turbopanel_dev_gid if (turbopanel_dev_user | default('') | length > 0) else 9998 }}"
-turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
-turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
-redis_primary_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanelc' }}"
+caddy_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tpcaddy' }}"
+caddy_uid: "{{ turbopanel_dev_uid if (turbopanel_dev_user | default('') | length > 0) else 9993 }}"
+caddy_primary_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tpcaddy' }}"
+caddy_primary_gid: "{{ turbopanel_dev_gid if (turbopanel_dev_user | default('') | length > 0) else 9993 }}"
+turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
+turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
+redis_primary_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tpcache' }}"
 turbopanel_install_root: /opt/turbopanel
 # Co-located dev source checkout root (dev user's home); overridden by an
 # extra-var (turbopanel_dev_root) from the dev converge.

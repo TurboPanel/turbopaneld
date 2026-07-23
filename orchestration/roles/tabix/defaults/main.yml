@@ -17,7 +17,7 @@ tabix_html_dir: "{{ turbopanel_state_dir }}/tabix/html"
 turbopanel_dev_user: ""
 turbopanel_dev_uid: ""
 turbopanel_dev_gid: ""
-turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
+turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
 # Dev runs the container as the single dev uid:gid (matching mailpit/redis-insight).
 # nginx-unprivileged listens on 8080 so non-root bind works without privileged ports.
 tabix_container_uid: "{{ turbopanel_dev_uid if (turbopanel_dev_user | default('') | length > 0) else '' }}"

@@ -4,6 +4,6 @@ daemon_log_dir: /var/log/turbopanel
 # co-located dev (turbopanel_user set by the turbopanel-user role) and to the
 # turbopanel service account otherwise. Standalone daemon-logs-setup runs without
 # the identity vars, so the defaults preserve the managed behavior.
-daemon_log_owner: "{{ turbopanel_user | default('turbopanel') }}"
-daemon_log_group: "{{ turbopanel_group | default('turbopanel') }}"
+daemon_log_owner: "{{ turbopanel_user | default('tp') }}"
+daemon_log_group: "{{ turbopanel_group | default('tp') }}"
 daemon_log_dir_mode: "0750"

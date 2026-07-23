@@ -15,11 +15,11 @@ turbopanel_runtime_path: "{{ turbopanel_vendor_dir }}/node/current/bin:{{ turbop
 # Source checkout: co-located dev uses the dev user's home; managed installs use
 # the FHS lib tree.
 turbopanel_instance_dir: "{{ (turbopanel_dev_root ~ '/instance') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/instance') }}"
-turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
-instance_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopaneli' }}"
-turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
-# Co-located dev generates certs as the dev user (git/Ansible identity); production
-# uses turbopaneli. Both branches naturally resolve to the single dev user in dev.
+turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
+instance_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tpctrl' }}"
+turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
+# Co-located dev generates certs as the dev user (git/Ansible identity); managed
+# installs use tpctrl. Both branches naturally resolve to the single dev user in dev.
 instance_certs_owner: "{{ turbopanel_user if (turbopanel_dev_user | default('') | length > 0) else instance_user }}"
 turbopanel_public_urls: ""
 turbopanel_tls_extra_sans: ""

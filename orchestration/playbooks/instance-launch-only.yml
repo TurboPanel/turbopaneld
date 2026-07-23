@@ -25,6 +25,8 @@
         - getent_passwd[turbopanel_dev_user] is defined
 
   roles:
+    # Provision tpcaddy/tpctrl before Caddy runtime dirs and the unit template.
+    - role: instance-user
     # Caddy requires ./certs/self-signed.{crt,key}; idempotent and cheap.
     - role: instance-certs
     - role: instance-launch

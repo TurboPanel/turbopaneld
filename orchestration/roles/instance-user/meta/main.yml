@@ -2,16 +2,14 @@
 galaxy_info:
   author: turbopanel
   description: >-
-    Create the low-privilege `instance` user (UID 9998) that runs the
-    self-hosted TurboPanel instance. Member of the turbopanel group with no
-    group of its own.
+    Create the low-privilege `instance` user (UID 9998, tpctrl) that runs the
+    self-hosted TurboPanel instance, plus the dedicated Caddy user (UID 9993,
+    tpcaddy). tpctrl is a member of the tp group with supplementary tpcache
+    membership; tpcaddy is a member of tp.
   license: AGPL-3.0
   min_ansible_version: "2.14"
   platforms:
     - name: Debian
-      versions:
-        - all
-    - name: Raspbian
       versions:
         - all
 

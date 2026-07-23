@@ -10,29 +10,31 @@ clickhouse_service_name: turbopanel-clickhouse
 clickhouse_image: "clickhouse/clickhouse-server:{{ clickhouse_version }}"
 clickhouse_container_name: turbopanel-analytics
 clickhouse_volume_name: turbopanel-analytics
-turbopanel_docker_network: turbopanel
+turbopanel_docker_network: turbopanel  # noqa: var-naming[no-role-prefix]
 # Shared dev-identity contract: dev runs the container (and owns its secret files)
-# as the single dev uid:gid; managed installs use the reserved 9994 container id
-# (reuses the freed turbopanelh number).
-turbopanel_dev_user: ""
-turbopanel_dev_uid: ""
-turbopanel_dev_gid: ""
+# as the single dev uid:gid; managed installs use the dedicated tpmetrics(9994) account.
+turbopanel_dev_user: ""  # noqa: var-naming[no-role-prefix]
+turbopanel_dev_uid: ""  # noqa: var-naming[no-role-prefix]
+turbopanel_dev_gid: ""  # noqa: var-naming[no-role-prefix]
+clickhouse_system_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tpmetrics' }}"
+clickhouse_primary_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tpmetrics' }}"
 clickhouse_container_uid: "{{ turbopanel_dev_uid if (turbopanel_dev_user | default('') | length > 0) else '9994' }}"
 clickhouse_container_gid: "{{ turbopanel_dev_gid if (turbopanel_dev_user | default('') | length > 0) else '9994' }}"
-turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
+turbopanel_group: >-  # noqa: var-naming[no-role-prefix]
+  {{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}
 # Ownership split:
 # - Host-read secret/config files (.clickhouse_admin_pass, .clickhouse_app_pass,
 #   config.json) are owned by clickhouse_config_owner + turbopanel_group so the
-#   dev user (dev) / root + the turbopanel group (prod) — including instance-launch
+#   dev user (dev) / root + the tp group (prod) — including instance-launch
 #   — can read them.
 # - The container-read config.d/users.d overlays (config.xml, users.xml) are owned
-#   by clickhouse_container_uid:clickhouse_container_gid instead, because the
-#   container runs as that id (9994:9994 in prod) and is neither root nor in the
-#   turbopanel group after the dedicated turbopanelh account was removed.
+#   by clickhouse_container_uid:clickhouse_container_gid instead, because inside
+#   Docker the process runs with only gid 9994 (no host supplementary groups), so
+#   overlay ownership must be by the container id — not tp.
 # Owner of the generated ClickHouse secret/config files: the dev user in dev, else root.
 clickhouse_config_owner: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'root' }}"
 # FHS config dir (dev shares it with prod).
-turbopanel_config_dir: /etc/turbopanel
+turbopanel_config_dir: /etc/turbopanel  # noqa: var-naming[no-role-prefix]
 clickhouse_database: turbopanel_metrics
 clickhouse_app_user: turbopanel_app
 # Low-footprint profile for a one-server metrics workload (co-located / small

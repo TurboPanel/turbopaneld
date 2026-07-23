@@ -39,7 +39,8 @@
     - _launch_rabbitmq_pass.content is defined
     - (_launch_rabbitmq_pass.content | b64decode | trim | length) > 0
   ansible.builtin.set_fact:
-    turbopanel_amqp_url: "amqp://{{ rabbitmq_user }}:{{ _launch_rabbitmq_pass.content | b64decode | trim }}@127.0.0.1:{{ rabbitmq_amqp_port }}{{ rabbitmq_vhost }}"
+    turbopanel_amqp_url: >-
+      amqp://{{ rabbitmq_user }}:{{ _launch_rabbitmq_pass.content | b64decode | trim }}@127.0.0.1:{{ rabbitmq_amqp_port }}{{ rabbitmq_vhost }}
 
 - name: Read ClickHouse app password for systemd units
   ansible.builtin.slurp:
@@ -88,6 +89,10 @@
     - Reload systemd for instance units
     - Restart turbopanel dbstudio
 
+- name: Ensure vendored Caddy binary is installed and group-executable
+  ansible.builtin.include_role:
+    name: caddy
+
 - name: Install Caddy systemd unit
   ansible.builtin.template:
     src: turbopanel-caddy.service.j2
@@ -135,7 +140,7 @@
     - Reload systemd for instance units
     - Restart turbopanel mailer
 
-# Upgrades run `sudo -u turbopanel git` from the instance (see upgrade-sudoers.yml).
+# Upgrades run `sudo -u tp git` from the instance (see upgrade-sudoers.yml).
 # The deploy key must stay mode 0600 — SSH rejects group-readable private keys.
 - name: Check turbopanel GitHub deploy key
   ansible.builtin.stat:
@@ -168,12 +173,13 @@
   failed_when: false
 
 # The instance user runs `git` during upgrades but repos are owned by
-# turbopanel:turbopanel — mark them safe (Git 2.35+). Only co-located dev has
+# tp:tp — mark them safe (Git 2.35+). Only co-located dev has
 # editable source checkouts; the managed FHS tree has no repos to mark safe.
 - name: Read existing safe.directory entries for turbopanel user
   when: turbopanel_dev_user | default('') | length > 0
   ansible.builtin.command:
     argv: [git, config, --global, --get-all, safe.directory]
+  become: true
   become_user: "{{ turbopanel_user }}"
   environment:
     HOME: "{{ turbopanel_install_root }}"
@@ -184,6 +190,7 @@
 - name: Mark platform repos as safe git directories for turbopanel user
   ansible.builtin.command:
     argv: [git, config, --global, --add, safe.directory, "{{ item }}"]
+  become: true
   become_user: "{{ turbopanel_user }}"
   environment:
     HOME: "{{ turbopanel_install_root }}"
@@ -195,11 +202,13 @@
   when:
     - turbopanel_dev_user | default('') | length > 0
     - item not in (_git_safe_tp_dirs.stdout_lines | default([]))
+  changed_when: true
 
 - name: Read existing safe.directory entries for instance user
   when: turbopanel_dev_user | default('') | length > 0
   ansible.builtin.command:
     argv: [git, config, --global, --get-all, safe.directory]
+  become: true
   become_user: "{{ instance_user }}"
   environment:
     HOME: "{{ turbopanel_instance_dir }}"
@@ -210,6 +219,7 @@
 - name: Mark platform repos as safe git directories for instance user
   ansible.builtin.command:
     argv: [git, config, --global, --add, safe.directory, "{{ item }}"]
+  become: true
   become_user: "{{ instance_user }}"
   environment:
     HOME: "{{ turbopanel_instance_dir }}"
@@ -221,6 +231,7 @@
   when:
     - turbopanel_dev_user | default('') | length > 0
     - item not in (_git_safe_instance_dirs.stdout_lines | default([]))
+  changed_when: true
 
 - name: Resolve instance unit desired state
   ansible.builtin.set_fact:

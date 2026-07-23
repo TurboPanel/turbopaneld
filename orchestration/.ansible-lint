@@ -1,7 +1,9 @@
 ---
 # Co-located with ansible.cfg — ansible-lint resolves roles_path from there.
-# The VS Code / Cursor Ansible extension must set ansible.config.path to this
-# tree (see dev.code-workspace and daemon/.vscode/settings.json).
+# The VS Code / Cursor Ansible extension must set ansible.config.path to the
+# daemon repo root ansible.cfg (see daemon/.vscode/settings.json and
+# dev.code-workspace daemon folder) so playbooks under orchestration/playbooks/
+# resolve roles correctly; runtime converge still uses orchestration/ansible.cfg.
 offline: true
 exclude_paths:
   - .cache/

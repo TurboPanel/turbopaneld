@@ -18,7 +18,6 @@
         turbopanel_ui_runtime_dir + '/share',
         turbopanel_ui_runtime_dir + '/state',
         turbopanel_instance_config_dir,
-        turbopanel_caddy_config_dir,
         turbopanel_ui_config_dir,
       ]
       + (
@@ -35,3 +34,28 @@
         else []
       )
     }}
+
+- name: Ensure Caddy runtime directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ caddy_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "2770"
+  loop:
+    - "{{ turbopanel_caddy_runtime_dir }}"
+    - "{{ turbopanel_caddy_runtime_dir }}/share"
+    - "{{ turbopanel_caddy_runtime_dir }}/state"
+    - "{{ turbopanel_caddy_config_dir }}"
+
+# Upgraded hosts may still have nested XDG state owned by tpctrl from before the
+# tpcaddy unit user switch; migrate ownership without forcing file modes.
+- name: Migrate existing Caddy XDG subtree ownership to caddy user
+  ansible.builtin.file:
+    path: "{{ item }}"
+    owner: "{{ caddy_user }}"
+    group: "{{ turbopanel_group }}"
+    recurse: true
+  loop:
+    - "{{ turbopanel_caddy_runtime_dir }}"
+    - "{{ turbopanel_caddy_config_dir }}"

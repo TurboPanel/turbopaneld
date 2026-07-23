@@ -1,7 +1,10 @@
 ---
 # Co-located dev collapses onto the single human dev user, which already exists —
-# so the dedicated turbopanel(9999) account and its passwordless sudo are only
+# so the dedicated tp(9999) account and its passwordless sudo are only
 # created for managed/production installs (turbopanel_dev_user empty).
+- name: Cut over legacy turbopanel* service identities
+  ansible.builtin.import_tasks: identity-cutover.yml
+
 - name: Ensure turbopanel group
   ansible.builtin.group:
     name: "{{ turbopanel_group }}"
@@ -55,7 +58,7 @@
 # root on first binary install) may have populated uv/python/ansible state dirs
 # as root. Fix ownership recursively here (right after user creation) so that
 # when later roles (esp. daemon-launch) start the turbopaneld unit, the
-# daemon process (running as turbopanel) can write its uv cache and managed
+# daemon process (running as tp) can write its uv cache and managed
 # pythons without permission errors.
 - name: Ensure turbopanel owns the runtimes tree
   ansible.builtin.file:
@@ -68,10 +71,16 @@
 
 - name: Grant passwordless sudo for orchestration
   ansible.builtin.copy:
-    dest: /etc/sudoers.d/turbopanel
+    dest: /etc/sudoers.d/tp
     content: "{{ turbopanel_user }} ALL=(ALL) NOPASSWD:ALL\n"
     owner: root
     group: root
     mode: "0440"
     validate: "visudo -cf %s"
+  when: turbopanel_dev_user | default('') | length == 0
+
+- name: Remove legacy turbopanel sudoers fragment
+  ansible.builtin.file:
+    path: /etc/sudoers.d/turbopanel
+    state: absent
   when: turbopanel_dev_user | default('') | length == 0

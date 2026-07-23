@@ -1,0 +1,102 @@
+---
+# Identity primitive only — future web-server install roles include this on
+# demand. Requires tp for supplementary membership when present (turbopanel-user
+# on managed daemon hosts); getent-safe when tp is absent.
+- name: Assert web service identity input contract
+  ansible.builtin.assert:
+    that:
+      - >
+        (web_service_key | default('') | length > 0)
+        or (
+          web_service_user | default('') | length > 0
+          and web_service_group | default('') | length > 0
+          and web_service_uid | default('') | string | length > 0
+          and web_service_gid | default('') | string | length > 0
+        )
+    fail_msg: >-
+      Set web_service_key (nginx/apache/openlitespeed/litespeed) or all of
+      web_service_user, web_service_uid, web_service_group, web_service_gid.
+
+- name: Assert web service key is known
+  ansible.builtin.assert:
+    that:
+      - web_service_key in web_service_user_map
+    fail_msg: >-
+      Unknown web_service_key '{{ web_service_key }}'.
+      Known keys: {{ web_service_user_map.keys() | list | sort | join(', ') }}
+  when: web_service_key | default('') | length > 0
+
+- name: Resolve web service identity from service key
+  ansible.builtin.set_fact:
+    _web_service_resolved_user: "{{ web_service_user_map[web_service_key].user }}"
+    _web_service_resolved_uid: "{{ web_service_user_map[web_service_key].uid }}"
+    _web_service_resolved_group: "{{ web_service_user_map[web_service_key].group }}"
+    _web_service_resolved_gid: "{{ web_service_user_map[web_service_key].gid }}"
+  when: web_service_key | default('') | length > 0
+
+- name: Resolve web service identity from explicit inputs
+  ansible.builtin.set_fact:
+    _web_service_resolved_user: "{{ web_service_user }}"
+    _web_service_resolved_uid: "{{ web_service_uid }}"
+    _web_service_resolved_group: "{{ web_service_group }}"
+    _web_service_resolved_gid: "{{ web_service_gid }}"
+  when: web_service_key | default('') | length == 0
+
+- name: Assert resolved web service identity is valid
+  ansible.builtin.assert:
+    that:
+      - _web_service_resolved_user | default('') | length > 0
+      - _web_service_resolved_group | default('') | length > 0
+      - _web_service_resolved_uid | int > 0
+      - _web_service_resolved_gid | int > 0
+    fail_msg: >-
+      Resolved web service identity is incomplete or invalid after input
+      resolution.
+
+- name: Check whether turbopanel group exists for supplementary membership
+  ansible.builtin.getent:
+    database: group
+    key: "{{ turbopanel_group }}"
+  register: _web_service_tp_group_getent
+  failed_when: false
+
+- name: Build supplementary group list for web service user
+  ansible.builtin.set_fact:
+    _web_service_supplementary_groups: >-
+      {{
+        [turbopanel_group]
+        if (
+          _web_service_tp_group_getent.ansible_facts.getent_group is defined
+          and _web_service_tp_group_getent.ansible_facts.getent_group[turbopanel_group] is defined
+        )
+        else []
+      }}
+
+- name: Ensure web service primary group
+  ansible.builtin.group:
+    name: "{{ _web_service_resolved_group }}"
+    gid: "{{ _web_service_resolved_gid }}"
+    state: present
+    system: true
+
+- name: Ensure web service system user
+  ansible.builtin.user:
+    name: "{{ _web_service_resolved_user }}"
+    uid: "{{ _web_service_resolved_uid }}"
+    group: "{{ _web_service_resolved_group }}"
+    groups: "{{ _web_service_supplementary_groups | unique | join(',') }}"
+    append: true
+    shell: /usr/sbin/nologin
+    system: true
+    create_home: false
+  when: _web_service_supplementary_groups | length > 0
+
+- name: Ensure web service system user without supplementary groups
+  ansible.builtin.user:
+    name: "{{ _web_service_resolved_user }}"
+    uid: "{{ _web_service_resolved_uid }}"
+    group: "{{ _web_service_resolved_group }}"
+    shell: /usr/sbin/nologin
+    system: true
+    create_home: false
+  when: _web_service_supplementary_groups | length == 0

@@ -3,19 +3,19 @@ runtime_socket_dir: /run/turbopanel
 # Shared dev-identity contract (mirrors the user, instance, and broker roles):
 # co-located dev (turbopanel_dev_user set) collapses the socket owner/group onto
 # the single dev user, so a fresh dev host with no dedicated turbopanel account
-# still resolves; managed installs keep the dedicated turbopanel(9999) service
+# still resolves; managed installs keep the dedicated tp(9999) service
 # account.
 turbopanel_dev_user: ""
 turbopanel_dev_uid: ""
 turbopanel_dev_gid: ""
-runtime_socket_owner: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
-runtime_socket_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
-# Group-writable + setgid (2770): the daemon (turbopanel) and the in-group
+runtime_socket_owner: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
+runtime_socket_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
+# Group-writable + setgid (2770): the daemon (tp) and the in-group
 # `instance` user both need to create/bind sockets here. Services can still
 # override file/socket group via their unit primary group when needed.
 runtime_socket_mode: "2770"
 # Postgres socket subdir owner/group, resolved from the same dev-identity
 # contract as the postgres broker role: dev uses the single dev uid:gid; managed
-# installs use the reserved postgres container id (9996) in the turbopanel group.
+# installs use the reserved postgres container id (9996) in the tp group.
 postgres_socket_owner: "{{ turbopanel_dev_uid if (turbopanel_dev_user | default('') | length > 0) else '9996' }}"
-postgres_socket_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
+postgres_socket_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"

@@ -27,8 +27,8 @@
     turbopanel_daemon_deno_bin: "{{ turbopanel_vendor_dir }}/deno/bin/deno"
     # native | js — set by run.sh after the native-binary executability probe.
     turbopanel_daemon_exec_mode: native
-    turbopanel_user: turbopanel
-    turbopanel_group: turbopanel
+    turbopanel_user: tp
+    turbopanel_group: tp
     turbopanel_uid: 9999
     turbopanel_gid: 9999
     turbopanel_service_name: turbopaneld
@@ -61,7 +61,7 @@
     - role: daemon-launch
 
   post_tasks:
-    - name: Ensure turbopanel owns runtime and state trees
+    - name: Ensure tp owns runtime and state trees
       ansible.builtin.file:
         path: "{{ item }}"
         state: directory

@@ -18,11 +18,11 @@
   vars:
     turbopanel_managed_install: true
   # turbopanel-user must run before clickhouse: the clickhouse role writes files
-  # with group: {{ turbopanel_group }} (turbopanel in production) and its docker
-  # meta-dependency adds docker_user (turbopanel) to the docker group. On a fresh
-  # control-plane host neither the base turbopanel user nor its group exists yet,
-  # so both fail without this role first. (No dedicated turbopanelh account — the
-  # base turbopanel identity covers it.)
+  # with group: {{ turbopanel_group }} (tp in production) and its docker
+  # meta-dependency adds docker_user (tp) to the docker group. On a fresh
+  # control-plane host neither the base tp user nor its group exists yet,
+  # so both fail without this role first. ClickHouse also provisions a dedicated
+  # tpmetrics account; turbopanel-user guarantees tp exists before that role runs.
   roles:
     - role: daemon-prereqs
     - role: turbopanel-user

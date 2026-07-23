@@ -27,8 +27,8 @@
     turbopanel_daemon_workdir: "{{ turbopanel_install_root }}"
     turbopanel_daemon_deno_bin: "{{ turbopanel_vendor_dir }}/deno/bin/deno"
     turbopanel_dev_user: ""
-    turbopanel_user: turbopanel
-    turbopanel_group: turbopanel
+    turbopanel_user: tp
+    turbopanel_group: tp
     turbopanel_service_name: turbopaneld
     # Managed daemon-only hosts have no co-located instance service to order after.
     turbopanel_after_instance_service: false

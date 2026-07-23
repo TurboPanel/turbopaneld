@@ -7,8 +7,8 @@ turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') 
 # in scripts/run.sh.
 deno_version: "2.9.3"
 turbopanel_dev_user: ""
-turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
-turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
+turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
+turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
 turbopanel_node: "{{ turbopanel_vendor_dir }}/node/current/bin/node"
 turbopanel_deno: "{{ turbopanel_vendor_dir }}/deno/current/deno"
 turbopanel_runtime_path: "{{ turbopanel_vendor_dir }}/node/current/bin:{{ turbopanel_vendor_dir }}/deno/current:{{ turbopanel_vendor_dir }}/caddy/current:/usr/bin:/bin"

@@ -4,6 +4,36 @@
 #     .rabbitmq_pass — generated password, mode 0600, owned by rabbitmq_config_owner
 #                      (the dev user in co-located dev, else root)
 
+- name: Cut over legacy turbopanel* service identities
+  ansible.builtin.import_tasks: ../turbopanel-user/tasks/identity-cutover.yml
+
+- name: Ensure turbopanel group exists
+  ansible.builtin.group:
+    name: "{{ turbopanel_group }}"
+    state: present
+    system: true
+  when: turbopanel_dev_user | default('') | length == 0
+
+- name: Ensure tpqueue primary group for queue user
+  ansible.builtin.group:
+    name: "{{ rabbitmq_primary_group }}"
+    gid: "{{ rabbitmq_container_gid }}"
+    state: present
+    system: true
+  when: turbopanel_dev_user | default('') | length == 0
+
+- name: Ensure queue service user (primary group tpqueue, supplementary tp)
+  ansible.builtin.user:
+    name: "{{ rabbitmq_system_user }}"
+    uid: "{{ rabbitmq_container_uid }}"
+    group: "{{ rabbitmq_primary_group }}"
+    groups: "{{ turbopanel_group }}"
+    append: true
+    shell: /usr/sbin/nologin
+    system: true
+    create_home: false
+  when: turbopanel_dev_user | default('') | length == 0
+
 - name: Ensure queue config directory exists
   ansible.builtin.file:
     path: "{{ turbopanel_config_dir }}/rabbitmq"

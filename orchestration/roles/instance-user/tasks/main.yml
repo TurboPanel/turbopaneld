@@ -2,68 +2,14 @@
 # Requires the turbopanel group to already exist (turbopanel-user role).
 #
 # Co-located dev collapses the instance stack onto the single human dev user,
-# which already exists on the host — so none of the dedicated turbopaneli(9998)
+# which already exists on the host — so none of the dedicated tpctrl(9998)
 # account/group provisioning runs in dev (guarded on turbopanel_dev_user). The
 # shared-checkout 2770 ownership model is retired: the home-dir checkout is owned
 # solely by the single dev user (handled by the repo-clone roles).
-- name: Check whether instance user already exists
-  ansible.builtin.getent:
-    database: passwd
-    key: "{{ instance_user }}"
-  register: _instance_user_getent
-  failed_when: false
-  when: turbopanel_dev_user | default('') | length == 0
+- name: Cut over legacy turbopanel* service identities
+  ansible.builtin.import_tasks: ../turbopanel-user/tasks/identity-cutover.yml
 
-- name: Detect existing instance user account
-  ansible.builtin.set_fact:
-    _instance_user_exists: >-
-      {{
-        _instance_user_getent.ansible_facts.getent_passwd is defined
-        and _instance_user_getent.ansible_facts.getent_passwd[instance_user] is defined
-      }}
-  when: turbopanel_dev_user | default('') | length == 0
-
-- name: Detect instance user uid mismatch
-  ansible.builtin.set_fact:
-    _instance_user_uid_mismatch: >-
-      {{
-        _instance_user_exists | bool
-        and (
-          _instance_user_getent.ansible_facts.getent_passwd[instance_user][1] | int
-          != instance_uid | int
-        )
-      }}
-  when: turbopanel_dev_user | default('') | length == 0
-
-- name: Stop instance stack units before user account changes
-  ansible.builtin.systemd:
-    name: "{{ item }}"
-    state: stopped
-  loop:
-    - "{{ mailer_service_name }}"
-    - "{{ website_service_name }}"
-    - "{{ ui_service_name }}"
-    - "{{ caddy_service_name }}"
-    - "{{ instance_service_name }}"
-  when:
-    - turbopanel_dev_user | default('') | length == 0
-    - _instance_user_uid_mismatch | bool
-  failed_when: false
-
-- name: Wait for instance user processes to exit after stopping instance stack
-  ansible.builtin.command:
-    cmd: "pgrep -u {{ instance_user }}"
-  register: _instance_user_pgrep
-  until: _instance_user_pgrep.rc == 1
-  retries: 15
-  delay: 1
-  changed_when: false
-  failed_when: false
-  when:
-    - turbopanel_dev_user | default('') | length == 0
-    - _instance_user_uid_mismatch | bool
-
-- name: Ensure turbopaneli primary group for instance user
+- name: Ensure tpctrl primary group for instance user
   ansible.builtin.group:
     name: "{{ instance_primary_group }}"
     gid: "{{ instance_primary_gid }}"
@@ -95,7 +41,7 @@
       }}
   when: turbopanel_dev_user | default('') | length == 0
 
-- name: Ensure instance user (primary group turbopaneli, supplementary turbopanel + turbopanelc)
+- name: Ensure instance user (primary group tpctrl, supplementary tp + tpcache)
   ansible.builtin.user:
     name: "{{ instance_user }}"
     uid: "{{ instance_uid }}"
@@ -103,6 +49,26 @@
     groups: "{{ _instance_supplementary_groups | unique | join(',') }}"
     append: true
     home: "{{ turbopanel_instance_dir }}"
+    shell: /usr/sbin/nologin
+    system: true
+    create_home: false
+  when: turbopanel_dev_user | default('') | length == 0
+
+- name: Ensure tpcaddy primary group for caddy user
+  ansible.builtin.group:
+    name: "{{ caddy_primary_group }}"
+    gid: "{{ caddy_primary_gid }}"
+    state: present
+    system: true
+  when: turbopanel_dev_user | default('') | length == 0
+
+- name: Ensure caddy service user (primary group tpcaddy, supplementary tp)
+  ansible.builtin.user:
+    name: "{{ caddy_user }}"
+    uid: "{{ caddy_uid }}"
+    group: "{{ caddy_primary_group }}"
+    groups: "{{ turbopanel_group }}"
+    append: true
     shell: /usr/sbin/nologin
     system: true
     create_home: false

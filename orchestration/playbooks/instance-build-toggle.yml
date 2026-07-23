@@ -33,5 +33,6 @@
   roles:
     - role: ui-build
     - role: instance-build
+    - role: instance-user
     - role: instance-certs
     - role: instance-launch

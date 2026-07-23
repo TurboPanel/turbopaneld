@@ -7,7 +7,7 @@ turbopanel_dev_gid: ""
 # extra-var (turbopanel_dev_root) from the dev converge.
 turbopanel_dev_root: "{{ ansible_env.HOME }}"
 turbopanel_lib_dir: "{{ turbopanel_install_root }}/lib"
-turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
+turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
 # Runtimes always live under the FHS vendor tree (dev shares it with prod).
 turbopanel_vendor_dir: "{{ turbopanel_install_root }}/vendor"
 turbopanel_node: "{{ turbopanel_vendor_dir }}/node/current/bin/node"
@@ -19,8 +19,8 @@ turbopanel_state_dir: /var/lib/turbopanel
 # (matches the instance-launch role) so dev builds never write runtime state back
 # into the checkout.
 turbopanel_ui_runtime_dir: "{{ turbopanel_state_dir }}/ui/.local"
-instance_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopaneli' }}"
-turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
+instance_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tpctrl' }}"
+turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
 # Production default is static; co-located converge passes -e turbopanel_ui_mode=dev.
 turbopanel_ui_mode: static
 # Static UI export dir: always the shared FHS location served by Caddy.

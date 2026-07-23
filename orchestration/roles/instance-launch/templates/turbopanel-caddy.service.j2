@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User={{ instance_user }}
+User={{ caddy_user }}
 Group={{ turbopanel_group }}
 WorkingDirectory={{ turbopanel_instance_dir }}
 Environment=HOME={{ turbopanel_caddy_runtime_dir }}

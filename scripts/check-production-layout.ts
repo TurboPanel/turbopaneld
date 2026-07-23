@@ -313,6 +313,55 @@ if (
   );
 }
 
+// --- 5. Retired production service identity fallbacks ----------------------
+const RETIRED_IDENTITY_ALLOWLIST = new Set([
+  "orchestration/roles/turbopanel-user/tasks/identity-cutover.yml",
+  "scripts/check-production-layout.ts",
+]);
+const RETIRED_IDENTITY_PATTERNS: Array<{ label: string; re: RegExp }> = [
+  {
+    label: "turbopaneli service identity fallback",
+    re: /\belse\s+['"]turbopaneli['"]|\bdefault\(\s*['"]turbopaneli['"]\s*\)/,
+  },
+  {
+    label: "turbopanelc service identity fallback",
+    re: /\belse\s+['"]turbopanelc['"]|\bdefault\(\s*['"]turbopanelc['"]\s*\)/,
+  },
+  {
+    label: "turbopanel service identity fallback",
+    re: /\belse\s+['"]turbopanel['"]|\bdefault\(\s*['"]turbopanel['"]\s*\)/,
+  },
+];
+
+for (const root of PRODUCTION_SCAN_ROOTS) {
+  const abs = join(repoRoot, root);
+  let stat: Deno.FileInfo;
+  try {
+    stat = await Deno.stat(abs);
+  } catch {
+    continue;
+  }
+  const files = stat.isDirectory ? walk(abs) : (async function* () {
+    yield abs;
+  })();
+  for await (const file of files) {
+    if (!SCAN_EXTENSIONS.test(file)) continue;
+    const rel = relative(repoRoot, file);
+    if (RETIRED_IDENTITY_ALLOWLIST.has(rel)) continue;
+    const text = await Deno.readTextFile(file);
+    const lines = text.split("\n");
+    lines.forEach((line, i) => {
+      for (const { label, re } of RETIRED_IDENTITY_PATTERNS) {
+        if (re.test(line)) {
+          failures.push(
+            `${rel}:${i + 1} uses retired ${label} (use tp/tpctrl/tpcache)`,
+          );
+        }
+      }
+    });
+  }
+}
+
 if (failures.length > 0) {
   console.error("Production layout check failed:\n");
   for (const failure of failures) {

@@ -16,8 +16,8 @@
       - "{{ turbopanel_node }}"
       - scripts/generate-self-signed-cert.mjs
     chdir: "{{ turbopanel_instance_dir }}"
-  # Co-located dev stores CA material as turbopanel (git/Ansible identity); turbopaneli
-  # cannot chmod turbopanel-owned keys when the script normalizes permissions.
+  # Co-located dev stores CA material as the dev user (git/Ansible identity); tpctrl
+  # cannot chmod dev-user-owned keys when the script normalizes permissions.
   become_user: "{{ instance_certs_owner }}"
   environment:
     HOME: "{{ turbopanel_dev_root if (turbopanel_dev_user | default('') | length > 0) else turbopanel_instance_dir }}"
@@ -26,5 +26,11 @@
     TURBOPANEL_PUBLIC_URLS: "{{ turbopanel_public_urls | default('', true) }}"
   changed_when: false
 
-# Caddy runs as turbopaneli (group turbopanel) and must read the server leaf key.
-# generate-self-signed-cert.mjs sets group-readable key modes (0640) on write.
+# Caddy runs as `tpcaddy` (supplementary group `tp`) and must read the server leaf key.
+# generate-self-signed-cert.mjs chmods keys to 0640 but does not set group ownership.
+- name: Harden server leaf key ownership for Caddy
+  ansible.builtin.file:
+    path: "{{ turbopanel_instance_dir }}/certs/self-signed.key"
+    owner: "{{ instance_certs_owner }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0640"

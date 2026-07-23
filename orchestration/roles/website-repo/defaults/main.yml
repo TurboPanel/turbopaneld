@@ -12,8 +12,8 @@ turbopanel_vendor_dir: "{{ turbopanel_install_root }}/vendor"
 turbopanel_node: "{{ turbopanel_vendor_dir }}/node/current/bin/node"
 turbopanel_deno: "{{ turbopanel_vendor_dir }}/deno/current/deno"
 turbopanel_runtime_path: "{{ turbopanel_vendor_dir }}/node/current/bin:{{ turbopanel_vendor_dir }}/deno/current:{{ turbopanel_vendor_dir }}/caddy/current:/usr/bin:/bin"
-turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
-turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
+turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
+turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
 # Source checkout: co-located dev uses the dev user's home; managed installs use lib.
 turbopanel_website_dir: "{{ (turbopanel_dev_root ~ '/website') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/website') }}"
 website_repo_url: https://github.com/turbopanel/website

@@ -1,0 +1,16 @@
+---
+galaxy_info:
+  author: turbopanel
+  description: >-
+    Provision a tenant/daemon-host web-server system user and primary group at a
+    fixed uid/gid (99xx block), with supplementary tp membership. Identity
+    only — no web-server package install. Invoked on demand when a web server
+    is assigned; not part of routine daemon convergence.
+  license: AGPL-3.0
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Debian
+      versions:
+        - all
+
+dependencies: []

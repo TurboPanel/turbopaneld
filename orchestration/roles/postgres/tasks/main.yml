@@ -5,6 +5,36 @@
 #                     (the dev user in co-located dev, else root)
 # /var/run/turbopanel/postgres — canonical Unix socket directory (postgres_socket_dir)
 
+- name: Cut over legacy turbopanel* service identities
+  ansible.builtin.import_tasks: ../turbopanel-user/tasks/identity-cutover.yml
+
+- name: Ensure turbopanel group exists
+  ansible.builtin.group:
+    name: "{{ turbopanel_group }}"
+    state: present
+    system: true
+  when: turbopanel_dev_user | default('') | length == 0
+
+- name: Ensure tpdata primary group for database user
+  ansible.builtin.group:
+    name: "{{ postgres_primary_group }}"
+    gid: "{{ postgres_container_gid }}"
+    state: present
+    system: true
+  when: turbopanel_dev_user | default('') | length == 0
+
+- name: Ensure database service user (primary group tpdata, supplementary tp)
+  ansible.builtin.user:
+    name: "{{ postgres_system_user }}"
+    uid: "{{ postgres_container_uid }}"
+    group: "{{ postgres_primary_group }}"
+    groups: "{{ turbopanel_group }}"
+    append: true
+    shell: /usr/sbin/nologin
+    system: true
+    create_home: false
+  when: turbopanel_dev_user | default('') | length == 0
+
 - name: Ensure postgres config directory exists
   ansible.builtin.file:
     path: "{{ turbopanel_config_dir }}/postgres"

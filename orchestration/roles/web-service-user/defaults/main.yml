@@ -1,0 +1,39 @@
+---
+# Tenant/daemon-host web-server service identities (99xx block). Control-plane
+# Caddy uses tpcaddy(9993) via instance-user — not this role. Provision only
+# when a web server is installed (include_role on demand); daemon-converge does
+# not create these accounts.
+#
+# Callers pass web_service_key (nginx/apache/openlitespeed/litespeed) to resolve
+# user/group/uid/gid from the map, or set web_service_user/web_service_uid/
+# web_service_group/web_service_gid explicitly.
+web_service_key: ""
+
+web_service_user_map:
+  nginx:
+    user: tpnginx
+    uid: 9992
+    group: tpnginx
+    gid: 9992
+  apache:
+    user: tpapache
+    uid: 9991
+    group: tpapache
+    gid: 9991
+  openlitespeed:
+    user: tpols
+    uid: 9990
+    group: tpols
+    gid: 9990
+  litespeed:
+    user: tplsws
+    uid: 9989
+    group: tplsws
+    gid: 9989
+
+web_service_user: ""
+web_service_uid: ""
+web_service_group: ""
+web_service_gid: ""
+
+turbopanel_group: tp  # noqa: var-naming[no-role-prefix]

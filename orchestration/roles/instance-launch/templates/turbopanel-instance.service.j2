@@ -49,6 +49,7 @@ Environment=TURBOPANEL_SYSTEM_EMAIL__SMTP_HOST=127.0.0.1
 Environment=TURBOPANEL_SYSTEM_EMAIL__SMTP_PORT={{ mailpit_smtp_port | default(1025) }}
 {% endif %}
 Environment=TURBOPANEL_DAEMON_STATE_DIR={{ turbopanel_daemon_state_dir }}
+Environment=TURBOPANEL_USER={{ turbopanel_user }}
 Environment=TURBOPANEL_CONFIG_DIR={{ turbopanel_config_dir }}
 Environment=TURBOPANEL_RUN_DIR={{ turbopanel_run_dir }}
 Environment=TURBOPANEL_INSTANCE_RUNTIME_ENV={{ turbopanel_instance_runtime_env }}

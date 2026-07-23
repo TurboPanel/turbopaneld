@@ -7,8 +7,8 @@ turbopanel_dev_gid: ""
 # extra-var (turbopanel_dev_root) from the dev converge.
 turbopanel_dev_root: "{{ ansible_env.HOME }}"
 turbopanel_lib_dir: "{{ turbopanel_install_root }}/lib"
-turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
-turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopanel' }}"
+turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
+turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
 # Runtimes always live under the FHS vendor tree (dev shares it with prod).
 turbopanel_vendor_dir: "{{ turbopanel_install_root }}/vendor"
 turbopanel_node: "{{ turbopanel_vendor_dir }}/node/current/bin/node"
@@ -16,6 +16,6 @@ turbopanel_deno: "{{ turbopanel_vendor_dir }}/deno/current/deno"
 turbopanel_runtime_path: "{{ turbopanel_vendor_dir }}/node/current/bin:{{ turbopanel_vendor_dir }}/deno/current:{{ turbopanel_vendor_dir }}/caddy/current:/usr/bin:/bin"
 # Source checkout: co-located dev uses the dev user's home; managed installs use lib.
 turbopanel_ui_dir: "{{ (turbopanel_dev_root ~ '/ui') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/ui') }}"
-instance_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'turbopaneli' }}"
+instance_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tpctrl' }}"
 ui_repo_url: https://github.com/turbopanel/ui
 ui_branch: trunk

@@ -153,6 +153,11 @@ test(
         `${unitPath}: runtime.env EnvironmentFile must precede runtime.dev-vars`,
       );
     }
+    if (!unit.includes("Environment=TURBOPANEL_USER={{ turbopanel_user }}")) {
+      throw new Error(
+        `${unitPath}: must inject Environment=TURBOPANEL_USER={{ turbopanel_user }}`,
+      );
+    }
     // Gate runtime.env on non-workers so Deno/compiled get ClickHouse + metrics env.
     assertMatch(
       unit,
@@ -288,7 +293,7 @@ test(
     );
     assertMatch(
       tasks,
-      /_ch_memory_ok:[\s\S]*clickhouse_container_memory_bytes/,
+      /clickhouse_memory_ok:[\s\S]*clickhouse_container_memory_bytes/,
       "tasks drift-check memory against clickhouse_container_memory_bytes",
     );
 
@@ -309,7 +314,7 @@ test(
     );
     assertMatch(
       tasks,
-      /_ch_cpus_ok/,
+      /clickhouse_cpus_ok/,
       "tasks drift-check container cpus",
     );
   },
