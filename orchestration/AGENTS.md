@@ -2,6 +2,24 @@
 
 Ansible roles and playbooks under `orchestration/`. Root context: `../AGENTS.md`. Cross-repo `../<repo>/…` links are relative to the repo root.
 
+### Time sync (`time-sync`)
+
+First-party role (no Galaxy deps) that installs/enables `systemd-timesyncd`,
+templates `/etc/systemd/timesyncd.conf`, toggles NTP via `timedatectl set-ntp`,
+and optionally sets timezone via `timedatectl set-timezone` when
+`turbopanel_timezone` is non-empty. Defaults: Debian NTP pool +
+`time.cloudflare.com` fallback; `turbopanel_ntp_enabled: true`; empty timezone
+(leave unchanged). Wired into `playbooks/daemon-converge.yml` so every managed
+converge re-ensures NTP. Command-driven apply playbook:
+`playbooks/time-sync-apply.yml` (invoked by daemon `server.timezone.set` /
+`server.ntp.set` via `runTimeSyncApply`). Extra-vars are passed as **one JSON
+`-e` object** so `turbopanel_ntp_servers` / `turbopanel_ntp_fallback_servers`
+stay lists and `turbopanel_ntp_enabled` stays a boolean (`key=value` would
+stringify them). `timesyncd.conf` is `root:<systemd-timesync|root>` mode
+`0640` so the `User=systemd-timesync` service can read it; the restart handler
+is gated on `turbopanel_ntp_enabled | bool` so a disable + config change does
+not restart/start timesyncd after `timedatectl set-ntp false`.
+
 ### Web-service user (`web-service-user`)
 
 Tenant/daemon-host web servers (nginx, Apache, OpenLiteSpeed, LiteSpeed enterprise) run under dedicated **99xx** system accounts — distinct from control-plane **tpcaddy(9993)**. The `web-service-user` role provisions **only** the group + system user (no package install). **Not** wired into `daemon-converge.yml`; future web-server install roles `include_role` it when a server is assigned.

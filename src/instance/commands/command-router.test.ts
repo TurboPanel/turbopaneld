@@ -161,3 +161,175 @@ test({
     assert(String(frames[1]?.error).length <= 500);
   },
 });
+
+test({
+  name: "handleCommandDispatch acks then returns timezone outcome",
+  permissions: { env: true, sys: ["hostname"], read: true },
+  fn: async () => {
+    const { handleCommandDispatch } = await import("./command-router.ts");
+    const {
+      setAnsibleAvailabilityCheckForTests,
+      setTimeSyncApplyForTests,
+      setTimeSyncReaderForTests,
+    } = await import("./timezone.ts");
+
+    setAnsibleAvailabilityCheckForTests(async () => true);
+    setTimeSyncApplyForTests(async () => ({ summary: "tz-ok" }));
+    setTimeSyncReaderForTests(() => ({
+      timezone: "UTC",
+      ntpServers: [],
+    }));
+    try {
+      const ws = new MockWebSocket() as unknown as WebSocket;
+      const message: CommandDispatchMessage = {
+        type: "command-dispatch",
+        id: "req-tz",
+        commandId: "cmd-tz",
+        commandType: "server.timezone.set",
+        payload: { timezone: "UTC" },
+        at: new Date().toISOString(),
+      };
+
+      await handleCommandDispatch(message, ws);
+
+      const frames = parseFrames((ws as unknown as MockWebSocket).sentFrames);
+      assertEquals(frames.length, 2);
+      assertEquals(frames[0]?.type, "command-ack");
+      assertEquals(frames[1]?.type, "command-outcome");
+      assertEquals(frames[1]?.ok, true);
+      const result = frames[1]?.result as Record<string, unknown>;
+      assertEquals(result.timezone, "UTC");
+      assertEquals(result.summary, "tz-ok");
+    } finally {
+      setAnsibleAvailabilityCheckForTests(null);
+      setTimeSyncApplyForTests(null);
+      setTimeSyncReaderForTests(null);
+    }
+  },
+});
+
+test({
+  name: "handleCommandDispatch rejects invalid timezone before ansible",
+  permissions: { env: true, sys: ["hostname"], read: true },
+  fn: async () => {
+    const { handleCommandDispatch } = await import("./command-router.ts");
+    const { setTimeSyncApplyForTests } = await import("./timezone.ts");
+
+    let runnerCalled = false;
+    setTimeSyncApplyForTests(async () => {
+      runnerCalled = true;
+      return { summary: "" };
+    });
+    try {
+      const ws = new MockWebSocket() as unknown as WebSocket;
+      const message: CommandDispatchMessage = {
+        type: "command-dispatch",
+        id: "req-tz-bad",
+        commandId: "cmd-tz-bad",
+        commandType: "server.timezone.set",
+        payload: { timezone: "a;rm -rf /" },
+        at: new Date().toISOString(),
+      };
+
+      await handleCommandDispatch(message, ws);
+
+      const frames = parseFrames((ws as unknown as MockWebSocket).sentFrames);
+      assertEquals(frames[0]?.type, "command-ack");
+      assertEquals(frames[1]?.type, "command-outcome");
+      assertEquals(frames[1]?.ok, false);
+      assertMatch(String(frames[1]?.error), /Invalid timezone/);
+      assertEquals(runnerCalled, false);
+    } finally {
+      setTimeSyncApplyForTests(null);
+    }
+  },
+});
+
+test({
+  name: "handleCommandDispatch acks then returns ntp outcome",
+  permissions: { env: true, sys: ["hostname"], read: true },
+  fn: async () => {
+    const { handleCommandDispatch } = await import("./command-router.ts");
+    const {
+      setAnsibleAvailabilityCheckForTests,
+      setTimeSyncApplyForTests,
+      setTimeSyncReaderForTests,
+    } = await import("./ntp.ts");
+
+    setAnsibleAvailabilityCheckForTests(async () => true);
+    setTimeSyncApplyForTests(async () => ({ summary: "ntp-ok" }));
+    setTimeSyncReaderForTests(() => ({
+      ntpEnabled: true,
+      ntpSynced: true,
+      ntpServers: ["0.debian.pool.ntp.org"],
+      fallbackNtpServers: ["time.cloudflare.com"],
+    }));
+    try {
+      const ws = new MockWebSocket() as unknown as WebSocket;
+      const message: CommandDispatchMessage = {
+        type: "command-dispatch",
+        id: "req-ntp",
+        commandId: "cmd-ntp",
+        commandType: "server.ntp.set",
+        payload: {
+          enabled: true,
+          servers: ["0.debian.pool.ntp.org"],
+        },
+        at: new Date().toISOString(),
+      };
+
+      await handleCommandDispatch(message, ws);
+
+      const frames = parseFrames((ws as unknown as MockWebSocket).sentFrames);
+      assertEquals(frames.length, 2);
+      assertEquals(frames[0]?.type, "command-ack");
+      assertEquals(frames[1]?.type, "command-outcome");
+      assertEquals(frames[1]?.ok, true);
+      const result = frames[1]?.result as Record<string, unknown>;
+      assertEquals(result.ntpEnabled, true);
+      assertEquals(result.ntpSynced, true);
+      assertEquals(result.summary, "ntp-ok");
+    } finally {
+      setAnsibleAvailabilityCheckForTests(null);
+      setTimeSyncApplyForTests(null);
+      setTimeSyncReaderForTests(null);
+    }
+  },
+});
+
+test({
+  name: "handleCommandDispatch rejects invalid ntp payload before ansible",
+  permissions: { env: true, sys: ["hostname"], read: true },
+  fn: async () => {
+    const { handleCommandDispatch } = await import("./command-router.ts");
+    const { setTimeSyncApplyForTests } = await import("./ntp.ts");
+
+    let runnerCalled = false;
+    setTimeSyncApplyForTests(async () => {
+      runnerCalled = true;
+      return { summary: "" };
+    });
+    try {
+      const ws = new MockWebSocket() as unknown as WebSocket;
+      const message: CommandDispatchMessage = {
+        type: "command-dispatch",
+        id: "req-ntp-bad",
+        commandId: "cmd-ntp-bad",
+        commandType: "server.ntp.set",
+        payload: { servers: ["a;rm -rf /"] },
+        at: new Date().toISOString(),
+      };
+
+      await handleCommandDispatch(message, ws);
+
+      const frames = parseFrames((ws as unknown as MockWebSocket).sentFrames);
+      assertEquals(frames[0]?.type, "command-ack");
+      assertEquals(frames[1]?.type, "command-outcome");
+      assertEquals(frames[1]?.ok, false);
+      assertMatch(String(frames[1]?.error), /Invalid NTP server/);
+      assertEquals(runnerCalled, false);
+    } finally {
+      setTimeSyncApplyForTests(null);
+    }
+  },
+});

@@ -60,6 +60,7 @@
       when: turbopanel_daemon_exec_mode == 'js'
     - role: daemon-logs
     - role: daemon-prereqs
+    - role: time-sync
 
   # Already-provisioned managed daemons only ever receive this lightweight
   # converge (see src/orchestration/setup.ts), never a full reinstall. Refresh
@@ -85,9 +86,9 @@
         group: root
         mode: "0640"
       when: turbopanel_daemon_unit.stat.exists
-      register: turbopanel_daemon_unit_render
+      notify: Reload systemd for refreshed daemon unit
 
-    - name: Reload systemd so the refreshed unit is registered
+  handlers:
+    - name: Reload systemd for refreshed daemon unit
       ansible.builtin.systemd:
         daemon_reload: true
-      when: turbopanel_daemon_unit_render is changed

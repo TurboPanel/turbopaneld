@@ -1,0 +1,83 @@
+---
+# Idempotent time sync: systemd-timesyncd + timesyncd.conf + timedatectl NTP/timezone.
+# No Galaxy deps — uses ansible.builtin + timedatectl only.
+
+- name: Install systemd-timesyncd
+  ansible.builtin.apt:
+    name: systemd-timesyncd
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  when: ansible_os_family == 'Debian'
+
+- name: Resolve systemd-timesyncd config group
+  ansible.builtin.getent:
+    database: group
+    key: systemd-timesync
+  register: turbopanel_timesync_group_getent
+  failed_when: false
+
+- name: Set timesyncd.conf group fact
+  ansible.builtin.set_fact:
+    # systemd-timesyncd runs as User=systemd-timesync; mode 0640 must be
+    # group-readable by that account (not root-only).
+    turbopanel_timesyncd_conf_group: >-
+      {{
+        'systemd-timesync'
+        if (
+          turbopanel_timesync_group_getent.ansible_facts.getent_group is defined
+          and turbopanel_timesync_group_getent.ansible_facts.getent_group['systemd-timesync'] is defined
+        )
+        else 'root'
+      }}
+
+- name: Template timesyncd.conf
+  ansible.builtin.template:
+    src: timesyncd.conf.j2
+    dest: /etc/systemd/timesyncd.conf
+    owner: root
+    group: "{{ turbopanel_timesyncd_conf_group }}"
+    mode: "0640"
+  notify: Restart systemd-timesyncd
+  when: turbopanel_apply_ntp_config | bool
+
+- name: Enable and start systemd-timesyncd
+  ansible.builtin.systemd:
+    name: systemd-timesyncd
+    enabled: true
+    state: started
+  when:
+    - turbopanel_apply_ntp_config | bool
+    - turbopanel_ntp_enabled | bool
+
+- name: Read current timedatectl NTP state
+  ansible.builtin.command:
+    cmd: timedatectl show --property=NTP --value
+  register: turbopanel_timedatectl_ntp
+  changed_when: false
+  when: turbopanel_apply_ntp_config | bool
+
+- name: Set timedatectl NTP to match turbopanel_ntp_enabled
+  ansible.builtin.command:
+    cmd: "timedatectl set-ntp {{ 'true' if (turbopanel_ntp_enabled | bool) else 'false' }}"
+  when:
+    - turbopanel_apply_ntp_config | bool
+    - >
+      (turbopanel_timedatectl_ntp.stdout | trim | lower == 'yes') !=
+      (turbopanel_ntp_enabled | bool)
+  changed_when: true
+
+- name: Read current timezone
+  ansible.builtin.command:
+    cmd: timedatectl show --property=Timezone --value
+  register: turbopanel_timedatectl_timezone
+  changed_when: false
+  when: turbopanel_timezone | length > 0
+
+- name: Set timezone via timedatectl
+  ansible.builtin.command:
+    cmd: "timedatectl set-timezone {{ turbopanel_timezone }}"
+  when:
+    - turbopanel_timezone | length > 0
+    - (turbopanel_timedatectl_timezone.stdout | trim) != turbopanel_timezone
+  changed_when: true

@@ -192,6 +192,11 @@ export const SET_HOSTNAME_PLAYBOOK = join(
   "playbooks",
   "set-hostname.yml",
 );
+export const TIME_SYNC_APPLY_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  "playbooks",
+  "time-sync-apply.yml",
+);
 export const DAEMON_INSTALL_PLAYBOOK = join(
   ORCHESTRATION_DIR,
   "playbooks",

@@ -11,8 +11,5 @@ galaxy_info:
     - name: Debian
       versions:
         - all
-    - name: Raspbian
-      versions:
-        - all
 
 dependencies: []

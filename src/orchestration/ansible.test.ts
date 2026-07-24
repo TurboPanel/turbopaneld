@@ -1,6 +1,10 @@
 import { join } from "@std/path";
 import { assertEquals } from "jsr:@std/assert";
-import { galaxyBootstrapRunContext } from "./ansible.ts";
+import {
+  buildTimeSyncApplyExtraArgs,
+  galaxyBootstrapRunContext,
+  mergeTimeSyncApplyWithHostState,
+} from "./ansible.ts";
 import {
   DEV_CONVERGE_MANIFEST_FILE,
   devOrchestrationAnsibleEnv,
@@ -567,3 +571,51 @@ test(
     );
   },
 );
+
+test("mergeTimeSyncApplyWithHostState preserves host NTP when command omits it", () => {
+  const merged = mergeTimeSyncApplyWithHostState(
+    { timezone: "America/Chicago" },
+    {
+      ntpEnabled: false,
+      ntpServers: ["203.0.113.10"],
+      fallbackNtpServers: ["time.cloudflare.com"],
+    },
+  );
+  assertEquals(merged, {
+    timezone: "America/Chicago",
+    ntpEnabled: false,
+    ntpServers: ["203.0.113.10"],
+    ntpFallbackServers: ["time.cloudflare.com"],
+  });
+  assertEquals(
+    mergeTimeSyncApplyWithHostState({ ntpEnabled: true }, {
+      ntpEnabled: false,
+      ntpServers: ["custom.example"],
+    }),
+    { ntpEnabled: true, ntpServers: ["custom.example"] },
+  );
+});
+
+test("buildTimeSyncApplyExtraArgs preserves native list and boolean types", () => {
+  const args = buildTimeSyncApplyExtraArgs({
+    ntpEnabled: false,
+    ntpServers: ["203.0.113.10", "0.debian.pool.ntp.org"],
+    ntpFallbackServers: ["time.cloudflare.com"],
+    timezone: "UTC",
+  });
+  assertEquals(args.length, 2);
+  assertEquals(args[0], "-e");
+  const parsed = JSON.parse(args[1]!);
+  assertEquals(parsed, {
+    turbopanel_timezone: "UTC",
+    turbopanel_ntp_servers: ["203.0.113.10", "0.debian.pool.ntp.org"],
+    turbopanel_ntp_fallback_servers: ["time.cloudflare.com"],
+    turbopanel_ntp_enabled: false,
+    turbopanel_apply_ntp_config: true,
+  });
+  assertEquals(typeof parsed.turbopanel_ntp_enabled, "boolean");
+  assertEquals(Array.isArray(parsed.turbopanel_ntp_servers), true);
+  const timezoneOnly = JSON.parse(buildTimeSyncApplyExtraArgs({ timezone: "UTC" })[1]!);
+  assertEquals(timezoneOnly.turbopanel_apply_ntp_config, false);
+  assertEquals(buildTimeSyncApplyExtraArgs({}), []);
+});

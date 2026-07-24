@@ -1,0 +1,8 @@
+---
+- name: Restart systemd-timesyncd
+  ansible.builtin.systemd:
+    name: systemd-timesyncd
+    state: restarted
+  # Avoid starting timesyncd after timedatectl set-ntp false when a template
+  # change also notified this handler in the same play.
+  when: turbopanel_ntp_enabled | bool

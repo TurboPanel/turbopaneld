@@ -1,0 +1,20 @@
+---
+# NTP servers written to /etc/systemd/timesyncd.conf (space-joined in template).
+# Override with -e turbopanel_ntp_servers='["…"]' (JSON list) or equivalent.
+turbopanel_ntp_servers:
+  - 0.debian.pool.ntp.org
+  - 1.debian.pool.ntp.org
+  - 2.debian.pool.ntp.org
+  - 3.debian.pool.ntp.org
+
+turbopanel_ntp_fallback_servers:
+  - time.cloudflare.com
+
+# Empty string = leave the host timezone unchanged (converge default).
+turbopanel_timezone: ""
+
+# When false, timedatectl NTP is disabled; timesyncd unit is not started.
+turbopanel_ntp_enabled: true
+
+# When false, skip timesyncd.conf and timedatectl NTP tasks (timezone-only command apply).
+turbopanel_apply_ntp_config: true

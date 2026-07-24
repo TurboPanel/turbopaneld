@@ -5,10 +5,12 @@
 
 export const COMMAND_TYPES = [
   "daemon.ping",
+  "server.hostname.set",
+  "server.ntp.set",
+  "server.reboot",
+  "server.timezone.set",
   "environment.deploy",
   "environment.stop",
-  "server.hostname.set",
-  "server.reboot",
 ] as const;
 
 export type CommandType = (typeof COMMAND_TYPES)[number];
@@ -45,6 +47,33 @@ export type RebootPayload = Record<string, never>;
 
 export type RebootResult = {
   scheduled: boolean;
+  summary?: string;
+};
+
+/** Must stay in sync with the instance canonical `server.timezone.set` shape. */
+export type TimezoneSetPayload = {
+  timezone: string;
+};
+
+/** Must stay in sync with the instance canonical `server.timezone.set` shape. */
+export type TimezoneSetResult = {
+  timezone: string;
+  summary?: string;
+};
+
+/** Must stay in sync with the instance canonical `server.ntp.set` shape. */
+export type NtpSetPayload = {
+  enabled?: boolean;
+  servers?: string[];
+  fallbackServers?: string[];
+};
+
+/** Must stay in sync with the instance canonical `server.ntp.set` shape. */
+export type NtpSetResult = {
+  ntpEnabled?: boolean;
+  ntpSynced?: boolean;
+  ntpServers: string[];
+  fallbackNtpServers?: string[];
   summary?: string;
 };
 
@@ -181,6 +210,112 @@ export function assertValidHostname(value: unknown): asserts value is string {
   }
 }
 
+/**
+ * Strict IANA timezone allow-list (Area/Location[/…], or bare identifiers like UTC).
+ * Must stay in sync with the instance canonical `server.timezone.set` validator.
+ */
+export const TIMEZONE_RE =
+  /^[A-Za-z][A-Za-z0-9_+-]*(\/[A-Za-z0-9_+-]+)*$/;
+
+export const TIMEZONE_MAX_LENGTH = 64;
+
+/** Must stay in sync with the instance canonical `server.timezone.set` validator. */
+export function isValidTimezone(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  if (value.length === 0) return false;
+  if (value.length > TIMEZONE_MAX_LENGTH) return false;
+  if (/\s/.test(value)) return false;
+  if (SHELL_METACHAR_RE.test(value)) return false;
+  return TIMEZONE_RE.test(value);
+}
+
+/** Must stay in sync with the instance canonical `server.timezone.set` validator. */
+export function assertValidTimezone(value: unknown): asserts value is string {
+  if (!isValidTimezone(value)) {
+    throw new Error("Invalid timezone");
+  }
+}
+
+/** Dotted-quad shape (octets validated separately). */
+const IPV4_SHAPE_RE = /^(?:\d{1,3}\.){3}\d{1,3}$/;
+
+/** Must stay in sync with the instance canonical `server.ntp.set` validator. */
+function isValidIpv4Literal(value: string): boolean {
+  if (!IPV4_SHAPE_RE.test(value)) return false;
+  const octets = value.split(".");
+  for (const octet of octets) {
+    // Reject leading zeros (`01`) and out-of-range values.
+    if (!/^(?:0|[1-9]\d{0,2})$/.test(octet)) return false;
+    const n = Number(octet);
+    if (n > 255) return false;
+  }
+  return true;
+}
+
+/**
+ * Conservative IPv6 literal check (RFC 4291 / RFC 5952 shapes).
+ * Must stay in sync with the instance canonical `server.ntp.set` validator.
+ */
+function isValidIpv6Literal(value: string): boolean {
+  if (!value.includes(":")) return false;
+  if (value.includes("%")) return false;
+  if (value.includes(":::")) return false;
+
+  const sides = value.split("::");
+  if (sides.length > 2) return false;
+
+  const parseSide = (side: string): number | null => {
+    if (side === "") return 0;
+    const parts = side.split(":");
+    let hextets = 0;
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i]!;
+      if (part.includes(".")) {
+        if (i !== parts.length - 1) return null;
+        if (!isValidIpv4Literal(part)) return null;
+        hextets += 2;
+        continue;
+      }
+      if (!/^[0-9a-fA-F]{1,4}$/.test(part)) return null;
+      hextets += 1;
+    }
+    return hextets;
+  };
+
+  if (sides.length === 1) {
+    const count = parseSide(sides[0]!);
+    return count === 8;
+  }
+
+  const left = parseSide(sides[0]!);
+  const right = parseSide(sides[1]!);
+  if (left === null || right === null) return false;
+  // Compressed form must omit at least one hextet.
+  return left + right < 8;
+}
+
+/** Must stay in sync with the instance canonical `server.ntp.set` validator. */
+export function isValidNtpServer(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  if (value.length === 0) return false;
+  if (value.length > HOSTNAME_MAX_LENGTH) return false;
+  if (/\s/.test(value)) return false;
+  if (SHELL_METACHAR_RE.test(value)) return false;
+  // Validate IP-shaped values before hostname so out-of-range dotted quads
+  // (e.g. 999.999.999.999) are not accepted via HOSTNAME_RE.
+  if (IPV4_SHAPE_RE.test(value)) return isValidIpv4Literal(value);
+  if (value.includes(":")) return isValidIpv6Literal(value);
+  if (isValidHostname(value)) return true;
+  return false;
+}
+
+/** Must stay in sync with the instance canonical `server.ntp.set` validator. */
+export function assertValidNtpServer(value: unknown): asserts value is string {
+  if (!isValidNtpServer(value)) {
+    throw new Error("Invalid NTP server");
+  }
+}
+
 export type CommandDispatchMessage = {
   type: "command-dispatch";
   id: string;
@@ -237,6 +372,74 @@ export function parseHostnamePayload(value: unknown): HostnamePayload {
   }
   assertValidHostname(hostname);
   return { hostname };
+}
+
+export function parseTimezoneSetPayload(value: unknown): TimezoneSetPayload {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Invalid timezone payload");
+  }
+  const record = value as Record<string, unknown>;
+  const timezone = record.timezone;
+  if (typeof timezone !== "string" || timezone.length === 0) {
+    throw new Error("timezone must be a non-empty string");
+  }
+  assertValidTimezone(timezone);
+  return { timezone };
+}
+
+function parseOptionalNtpServerList(
+  value: unknown,
+  field: string,
+): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw new TypeError(`${field} must be an array of server hostnames or IPs`);
+  }
+  if (value.length === 0) {
+    throw new Error(`${field} must not be empty when provided`);
+  }
+  const servers: string[] = [];
+  for (const entry of value) {
+    assertValidNtpServer(entry);
+    servers.push(entry);
+  }
+  return servers;
+}
+
+export function parseNtpSetPayload(value: unknown): NtpSetPayload {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Invalid ntp payload");
+  }
+  const record = value as Record<string, unknown>;
+  const payload: NtpSetPayload = {};
+
+  if (record.enabled !== undefined) {
+    if (typeof record.enabled !== "boolean") {
+      throw new TypeError("enabled must be a boolean");
+    }
+    payload.enabled = record.enabled;
+  }
+
+  const servers = parseOptionalNtpServerList(record.servers, "servers");
+  if (servers !== undefined) payload.servers = servers;
+
+  const fallbackServers = parseOptionalNtpServerList(
+    record.fallbackServers,
+    "fallbackServers",
+  );
+  if (fallbackServers !== undefined) payload.fallbackServers = fallbackServers;
+
+  if (
+    payload.enabled === undefined &&
+    payload.servers === undefined &&
+    payload.fallbackServers === undefined
+  ) {
+    throw new Error(
+      "ntp payload must include enabled, servers, and/or fallbackServers",
+    );
+  }
+
+  return payload;
 }
 
 function parseNonEmptyString(

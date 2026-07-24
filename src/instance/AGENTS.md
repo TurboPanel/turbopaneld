@@ -25,15 +25,19 @@ stays deferred until opt-in on both runtimes.
 
 `IdlePresence` runs per open socket:
 
-- Sends `{ type: "hello", at, agent, hostname?, machineId?, os? }` once on
-  attach. Host OS comes from `/etc/os-release` (+ `/etc/debian_version`,
-  `/etc/rpi-issue`) via `src/host/os-release.ts` (`getHostHelloIdentity()`).
-  Prefer dotted point-release (`DEBIAN_VERSION_FULL` / `debian_version`, e.g.
-  `13.5`) over bare `VERSION_ID`. Raspberry Pi OS / Raspbian set
-  `variant: "raspberry-pi-os"` (`ID=raspbian` or `/etc/rpi-issue` present —
-  64-bit Pi OS still reports `ID=debian`). The instance persists `os` on
-  `server.metadata.os` and exposes `osDisplay` / `osLogo` on
-  `GET /api/client/v1/servers`.
+- Sends `{ type: "hello", at, agent, hostname?, machineId?, os?, timeSync?,
+  addresses? }` once on attach. Host OS comes from `/etc/os-release` (+
+  `/etc/debian_version`, `/etc/rpi-issue`) via `src/host/os-release.ts`
+  (`getHostHelloIdentity()`). Prefer dotted point-release
+  (`DEBIAN_VERSION_FULL` / `debian_version`, e.g. `13.5`) over bare
+  `VERSION_ID`. Raspberry Pi OS / Raspbian set `variant: "raspberry-pi-os"`
+  (`ID=raspbian` or `/etc/rpi-issue` present — 64-bit Pi OS still reports
+  `ID=debian`). Time sync facts come from `src/host/time-sync.ts`
+  (`timedatectl` + `/etc/systemd/timesyncd.conf`); addresses from
+  `collectServerAddresses()` (`src/server-addresses.ts`). The instance
+  persists `os` on `server.metadata.os` and exposes `osDisplay` / `osLogo` on
+  `GET /api/client/v1/servers`. All new hello fields stay optional for
+  back-compat.
 - After **~60 s** of inbound silence (`IDLE_PRESENCE_MS`), sends the wire
   **`{"type":"ping"}`** cell ping (must match `DAEMON_CELL_PING` in
   `instance/src/daemon/cell/protocol.ts`). On Workers the DO answers via
@@ -42,12 +46,19 @@ stays deferred until opt-in on both runtimes.
   check interval (default), `IdlePresence` allows ~5s of `setInterval` skew so
   early ticks still send — otherwise early fires were skipped and Redis coalesce
   could false-demote a live socket.
-- Sends app-level `{ type: "heartbeat", at }` **only when the build agent commit
-  changed** since the last hello/heartbeat — not on every idle tick. Do **not**
-  put OS on heartbeat. Offline self-heal (Postgres `connected: false` while the
-  socket is still live) is handled by the instance **offline-sweep cron**
-  re-projecting online via `onDaemonConnected` — not by a periodic daemon
-  heartbeat.
+- Sends app-level `{ type: "heartbeat", at, agent?, timeSync?, addresses? }`
+  when the build agent commit changed **or** when `timeSync` / `addresses`
+  differ from the snapshot seeded on hello (change-detected, still cadence-bound
+  to the ~60s idle tick). Do **not** put OS on heartbeat. Offline self-heal
+  (Postgres `connected: false` while the socket is still live) is handled by the
+  instance **offline-sweep cron** re-projecting online via `onDaemonConnected`
+  — not by a periodic daemon heartbeat.
+- Command handlers `server.timezone.set` / `server.ntp.set`
+  (`src/instance/commands/timezone.ts`, `ntp.ts`) apply via
+  `runTimeSyncApply` → `time-sync-apply.yml` and return observed host state
+  from `readTimeSync()`. Wire contracts live in
+  `src/instance/commands/contracts.ts` and must stay aligned with the instance
+  canonical `server.timezone.set` / `server.ntp.set` shapes.
 - **Max-connection-age self-recycle:** once per idle tick,
   `#checkMaxConnectionAge` enforces `MAX_CONNECTION_AGE_MS` (2 h, mirrors the
   instance `MAX_WS_CONNECTION_AGE_MS`). When the socket exceeds that age it

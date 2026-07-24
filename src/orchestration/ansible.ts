@@ -51,6 +51,7 @@ import {
   REQUIREMENTS_FILE,
   SET_HOSTNAME_PLAYBOOK,
   SOCKET_DIRS_PLAYBOOK,
+  TIME_SYNC_APPLY_PLAYBOOK,
   UV_BIN,
   VENV_BIN_DIR,
   VENV_DIR,
@@ -398,6 +399,99 @@ export async function runSetHostname(
     );
   }
   logInfo("orchestration", "set-hostname complete");
+  return { summary: collector.build() };
+}
+
+export type TimeSyncApplyOpts = {
+  timezone?: string;
+  ntpServers?: string[];
+  ntpFallbackServers?: string[];
+  ntpEnabled?: boolean;
+};
+
+type HostTimeSyncSnapshot = {
+  ntpEnabled?: boolean;
+  ntpServers: string[];
+  fallbackNtpServers?: string[];
+};
+
+/**
+ * Fill omitted NTP fields from the current host so partial command applies do
+ * not fall back to Ansible role defaults (Debian pool + enabled=true).
+ */
+export function mergeTimeSyncApplyWithHostState(
+  commandOpts: TimeSyncApplyOpts,
+  host: HostTimeSyncSnapshot,
+): TimeSyncApplyOpts {
+  const merged: TimeSyncApplyOpts = { ...commandOpts };
+  if (merged.ntpEnabled === undefined && host.ntpEnabled !== undefined) {
+    merged.ntpEnabled = host.ntpEnabled;
+  }
+  if (merged.ntpServers === undefined) {
+    merged.ntpServers = host.ntpServers;
+  }
+  if (
+    merged.ntpFallbackServers === undefined &&
+    host.fallbackNtpServers !== undefined
+  ) {
+    merged.ntpFallbackServers = host.fallbackNtpServers;
+  }
+  return merged;
+}
+
+function timeSyncApplyIncludesNtpConfig(opts: TimeSyncApplyOpts): boolean {
+  return (
+    opts.ntpEnabled !== undefined ||
+    opts.ntpServers !== undefined ||
+    opts.ntpFallbackServers !== undefined
+  );
+}
+
+/**
+ * Build a single JSON `-e` object so lists/booleans stay native Ansible types
+ * (key=value extra-vars are always strings).
+ */
+export function buildTimeSyncApplyExtraArgs(opts: TimeSyncApplyOpts): string[] {
+  const extra: Record<string, unknown> = {};
+  if (opts.timezone !== undefined) {
+    extra.turbopanel_timezone = opts.timezone;
+  }
+  if (opts.ntpServers !== undefined) {
+    extra.turbopanel_ntp_servers = opts.ntpServers;
+  }
+  if (opts.ntpFallbackServers !== undefined) {
+    extra.turbopanel_ntp_fallback_servers = opts.ntpFallbackServers;
+  }
+  if (opts.ntpEnabled !== undefined) {
+    extra.turbopanel_ntp_enabled = opts.ntpEnabled;
+  }
+  if (Object.keys(extra).length === 0) return [];
+  extra.turbopanel_apply_ntp_config = timeSyncApplyIncludesNtpConfig(opts);
+  return ["-e", JSON.stringify(extra)];
+}
+
+export async function runTimeSyncApply(
+  opts: TimeSyncApplyOpts,
+  onEvent?: AnsibleEventHandler,
+): Promise<{ summary: string }> {
+  logInfo("orchestration", "running time-sync-apply playbook");
+  const collector = new AnsibleRunSummaryCollector();
+  const eventHandler: AnsibleEventHandler = (event) => {
+    collector.handleEvent(event);
+    onEvent?.(event);
+  };
+  const args = buildTimeSyncApplyExtraArgs(opts);
+  try {
+    await runLocalPlaybook(TIME_SYNC_APPLY_PLAYBOOK, args, eventHandler);
+  } catch {
+    const summary = collector.build();
+    throw new Error(
+      summary.length > 0
+        ? `time-sync-apply playbook failed: ${summary}`
+        : "time-sync-apply playbook failed",
+    );
+  }
+  logInfo("orchestration", "time-sync-apply complete");
   return { summary: collector.build() };
 }
 

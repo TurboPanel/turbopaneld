@@ -1,0 +1,16 @@
+---
+# Apply timezone / NTP settings idempotently via the time-sync role.
+# Invoked by the daemon server.timezone.set / server.ntp.set command handlers.
+# Extra-vars (all optional; role defaults apply when omitted):
+#   turbopanel_timezone
+#   turbopanel_ntp_servers
+#   turbopanel_ntp_fallback_servers
+#   turbopanel_ntp_enabled
+- name: TurboPanel time sync apply
+  hosts: localhost
+  connection: local
+  become: true
+  # Facts required for ansible_os_family gate in the time-sync role.
+  gather_facts: true
+  roles:
+    - role: time-sync

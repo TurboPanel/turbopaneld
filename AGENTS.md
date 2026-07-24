@@ -203,16 +203,30 @@ The `workers/` tree is deploy tooling only and is excluded from release
 packaging (`package-daemon-release.sh` / `bundle-orchestration.sh` stage from
 `orchestration/` and `dist/.build` only).
 
+### Host facts + command handlers (time sync)
+
+- **Host OS** — `src/host/os-release.ts` (process-cached; attached once on hello).
+- **Time sync** — `src/host/time-sync.ts` (cache-light `timedatectl show`,
+  with `timedatectl status` + `/etc/timezone` fallbacks, plus `timesyncd.conf`
+  read; carried on hello and change-detected heartbeats with `addresses` from
+  `src/server-addresses.ts`).
+- **Commands** — `server.hostname.set`, `server.reboot`, `server.timezone.set`,
+  `server.ntp.set` (and deploy/stop/ping) via `src/instance/commands/`. Timezone
+  / NTP apply through Ansible role `time-sync` + playbook `time-sync-apply.yml`
+  (`runTimeSyncApply`); contracts in `contracts.ts` must match the instance
+  canonical `server.timezone.set` / `server.ntp.set` shapes.
+
 ## Subsystem docs (nested `AGENTS.md`)
 
 Large subsystems live in focused `AGENTS.md` files next to their code — Cursor loads the nearest one automatically when you work in that directory. **Read the matching file before editing that area.** This root keeps the foundational path model + conventions; the detail moved to:
 
 | Subsystem | Read before editing | Covers |
 |---|---|---|
-| **Instance client** | `src/instance/AGENTS.md` | WSS / Unix-socket connection, idle presence + heartbeats, reconnect / parked backoff, JWKS JWT verification, daemon TLS trust model |
+| **Instance client** | `src/instance/AGENTS.md` | WSS / Unix-socket connection, idle presence + heartbeats (`timeSync`/`addresses`), reconnect / parked backoff, JWKS JWT verification, daemon TLS trust model |
 | **Host metrics (collector)** | `src/metrics/AGENTS.md` | `/proc`-based collection + scheduling, `POST /api/daemon/v1/metrics`, 20-metric contract |
 | **Tenant deploy & hosting ingress** | `src/deploy/AGENTS.md` | `environment.deploy` / `.stop`, Docker Compose + Traefik, hosting-edge Caddy, TLS materialization |
 | **Installer presentation** | `src/orchestration/AGENTS.md` | Installer presenter + sanitizer / vocabulary map for `run.sh` install & converge |
 | **ClickHouse (analytics)** | `orchestration/AGENTS.md` | `clickhouse` Ansible role (Docker), idle-CPU tuning, app-user grants, dev-only Tabix GUI |
+| **Time sync (Ansible)** | `orchestration/AGENTS.md` | `time-sync` role + `time-sync-apply.yml` (NTP / timezone) |
 
 Ansible playbooks/roles live under `orchestration/`; runtime TypeScript under `src/`.

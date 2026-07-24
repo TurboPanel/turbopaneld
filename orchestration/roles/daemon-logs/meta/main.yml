@@ -1,5 +1,6 @@
 ---
 galaxy_info:
+  role_name: daemon_logs
   author: turbopanel
   description: Provision daemon log directories, logrotate, and tmpfiles.d entries.
   license: AGPL-3.0
@@ -7,9 +8,6 @@ galaxy_info:
   platforms:
     - name: Debian
       versions:
-        - all
-    - name: Raspbian
-      versions:
-        - all
+        - trixie
 
 dependencies: []

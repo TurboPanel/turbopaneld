@@ -1,6 +1,11 @@
 import { getBuildInfo } from "../build-info.ts";
 import { getHostHelloIdentity } from "../host/os-release.ts";
+import { readTimeSync, type HostTimeSync } from "../host/time-sync.ts";
 import { logInfo, logWarn, sanitizeForLog } from "../logger.ts";
+import {
+  collectServerAddresses,
+  type ServerAddresses,
+} from "../server-addresses.ts";
 
 export const IDLE_PRESENCE_MS = 60_000;
 
@@ -44,6 +49,11 @@ export type IdlePresenceOptions = {
   onMaxAge?: () => void;
 };
 
+type PresenceSnapshot = {
+  timeSync: HostTimeSync;
+  addresses: ServerAddresses;
+};
+
 /**
  * Tracks idle presence for one daemon<->instance WebSocket and detects
  * "zombie" connections.
@@ -76,6 +86,7 @@ export class IdlePresence {
   #lastInboundAt = Date.now();
   #lastPresenceSendAt = 0;
   #lastAgentCommit: string | undefined;
+  #lastPresenceSnapshot: string | undefined;
   #staleReported = false;
   #connectedAtMs = Date.now();
   #maxAgeReported = false;
@@ -167,6 +178,17 @@ export class IdlePresence {
     this.#onStaleConnection?.();
   }
 
+  #collectPresenceSnapshot(): PresenceSnapshot {
+    return {
+      timeSync: readTimeSync(),
+      addresses: collectServerAddresses(),
+    };
+  }
+
+  #serializePresenceSnapshot(snapshot: PresenceSnapshot): string {
+    return JSON.stringify(snapshot);
+  }
+
   #sendHello(): void {
     const ws = this.#ws;
     if (ws?.readyState !== WebSocket.OPEN) return;
@@ -174,6 +196,8 @@ export class IdlePresence {
     const agent = getBuildInfo();
     this.#lastAgentCommit = agent.commit;
     const host = getHostHelloIdentity();
+    const presence = this.#collectPresenceSnapshot();
+    this.#lastPresenceSnapshot = this.#serializePresenceSnapshot(presence);
 
     try {
       ws.send(JSON.stringify({
@@ -183,6 +207,8 @@ export class IdlePresence {
         ...(host.hostname ? { hostname: host.hostname } : {}),
         ...(host.machineId ? { machineId: host.machineId } : {}),
         ...(host.os ? { os: host.os } : {}),
+        timeSync: presence.timeSync,
+        addresses: presence.addresses,
       }));
       this.#lastActivityAt = Date.now();
     } catch (err) {
@@ -199,9 +225,9 @@ export class IdlePresence {
    *    liveness signal for a hibernating Durable Object; see
    *    `cell/offline-sweep.ts`). Answered by `setWebSocketAutoResponse` at
    *    the runtime level without waking the DO.
-   * 2. The app-level heartbeat — sent **only when the build agent commit
-   *    changed** since the last hello/heartbeat. Carries the new `agent`
-   *    identity so the instance can project agent updates to Postgres.
+   * 2. The app-level heartbeat — sent when the build agent commit changed
+   *    since the last hello/heartbeat, **or** when `timeSync` / `addresses`
+   *    changed since the last presence snapshot (change-detected, cadence-bound).
    *
    * Offline self-heal (Postgres `connected: false` while the socket is still
    * live) is handled by the instance offline-sweep cron re-projecting online
@@ -209,8 +235,9 @@ export class IdlePresence {
    *
    * Only `minPresenceIntervalMs` spacing applies to the cell ping. The
    * heartbeat is not gated behind idle detection so a busy connection still
-   * gets ping cadence; `#sendHello` seeds `#lastAgentCommit` on attach so the
-   * first post-attach tick sends ping only.
+   * gets ping cadence; `#sendHello` seeds `#lastAgentCommit` and
+   * `#lastPresenceSnapshot` on attach so the first post-attach tick sends
+   * ping only unless presence fields changed.
    */
   #maybeSendPresence(): void {
     // When minPresenceIntervalMs equals the check interval (production default),
@@ -229,8 +256,21 @@ export class IdlePresence {
     }
     this.#sendCellPing();
     const agent = getBuildInfo();
-    if (agent.commit !== this.#lastAgentCommit) {
-      this.#sendHeartbeat();
+    const agentChanged = agent.commit !== this.#lastAgentCommit;
+
+    const presence = this.#collectPresenceSnapshot();
+    const serialized = this.#serializePresenceSnapshot(presence);
+    const presenceChanged = serialized !== this.#lastPresenceSnapshot;
+
+    if (agentChanged || presenceChanged) {
+      this.#sendHeartbeat({
+        agent: agentChanged ? agent : undefined,
+        timeSync: presenceChanged ? presence.timeSync : undefined,
+        addresses: presenceChanged ? presence.addresses : undefined,
+      });
+      if (presenceChanged) {
+        this.#lastPresenceSnapshot = serialized;
+      }
     }
   }
 
@@ -250,23 +290,30 @@ export class IdlePresence {
     }
   }
 
-  #sendHeartbeat(): void {
+  #sendHeartbeat(fields: {
+    agent?: ReturnType<typeof getBuildInfo>;
+    timeSync?: HostTimeSync;
+    addresses?: ServerAddresses;
+  }): void {
     const ws = this.#ws;
     if (ws?.readyState !== WebSocket.OPEN) return;
 
-    const agent = getBuildInfo();
     const payload: {
       type: "heartbeat";
       at: string;
-      agent?: typeof agent;
+      agent?: ReturnType<typeof getBuildInfo>;
+      timeSync?: HostTimeSync;
+      addresses?: ServerAddresses;
     } = {
       type: "heartbeat",
       at: new Date().toISOString(),
     };
-    if (agent.commit !== this.#lastAgentCommit) {
-      payload.agent = agent;
-      this.#lastAgentCommit = agent.commit;
+    if (fields.agent) {
+      payload.agent = fields.agent;
+      this.#lastAgentCommit = fields.agent.commit;
     }
+    if (fields.timeSync) payload.timeSync = fields.timeSync;
+    if (fields.addresses) payload.addresses = fields.addresses;
 
     try {
       ws.send(JSON.stringify(payload));
