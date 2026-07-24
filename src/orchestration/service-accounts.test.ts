@@ -389,3 +389,30 @@ test("identity-cutover argv rename lines map legacy names to canonical tp* accou
     assertMatch(cutover, new RegExp(pattern), `identity-cutover ${pattern}`);
   }
 });
+
+test("identity-cutover fail_msg never interpolates getent ansible_facts", async () => {
+  // ansible-core 2.19+ always templates assert fail_msg. Missing getent keys
+  // leave register results without ansible_facts — bare .ansible_facts access
+  // then aborts a clean production install before the assert body runs.
+  const cutover = await readRole(
+    "roles/turbopanel-user/tasks/identity-cutover.yml",
+  );
+  const failMsgBlocks = cutover.matchAll(
+    /fail_msg:\s*>-\n((?:[ \t]+.+\n)+)/g,
+  );
+  let count = 0;
+  for (const match of failMsgBlocks) {
+    count += 1;
+    const body = match[1] ?? "";
+    if (body.includes("ansible_facts")) {
+      throw new TypeError(
+        `identity-cutover fail_msg interpolates ansible_facts:\n${body}`,
+      );
+    }
+  }
+  if (count < 6) {
+    throw new TypeError(
+      `expected at least 6 identity-cutover fail_msg blocks, found ${count}`,
+    );
+  }
+});

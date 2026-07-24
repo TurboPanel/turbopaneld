@@ -48,12 +48,13 @@
             != turbopanel_gid | default(9999) | int
           )
         )
+    # fail_msg is always templated (ansible-core 2.19+) — never interpolate
+    # getent register paths that are absent on a clean host.
     fail_msg: >-
       Legacy group turbopanel and canonical group tp both exist, or turbopanel
-      occupies GID {{ _legacy_tp_group_getent.ansible_facts.getent_group.turbopanel[1] }}
-      instead of {{ turbopanel_gid | default(9999) }}. Stop TurboPanel services,
-      rename or remove the conflicting group (groupmod -n tp turbopanel when GID
-      matches), then re-run converge.
+      occupies a GID other than {{ turbopanel_gid | default(9999) }}. Stop
+      TurboPanel services, rename or remove the conflicting group (groupmod -n
+      tp turbopanel when GID matches), then re-run converge.
   when: turbopanel_dev_user | default('') | length == 0
 
 - name: Stop daemon before tp identity cutover
@@ -121,10 +122,9 @@
         )
     fail_msg: >-
       Legacy user turbopanel and canonical user tp both exist, or turbopanel
-      occupies UID {{ _legacy_tp_user_getent.ansible_facts.getent_passwd.turbopanel[1] }}
-      instead of {{ turbopanel_uid | default(9999) }}. Stop turbopaneld, rename or
-      remove the conflicting account (usermod -l tp turbopanel when UID matches),
-      then re-run converge.
+      occupies a UID other than {{ turbopanel_uid | default(9999) }}. Stop
+      turbopaneld, rename or remove the conflicting account (usermod -l tp
+      turbopanel when UID matches), then re-run converge.
   when: turbopanel_dev_user | default('') | length == 0
 
 - name: Rename legacy turbopanel user to tp
@@ -183,10 +183,9 @@
         )
     fail_msg: >-
       Legacy group turbopanelc and canonical group tpcache both exist, or
-      turbopanelc occupies GID {{ _legacy_tpcache_group_getent.ansible_facts.getent_group.turbopanelc[1] }}
-      instead of {{ redis_primary_gid | default(9997) }}. Stop turbopanel-redis,
-      rename or remove the conflicting group (groupmod -n tpcache turbopanelc when
-      GID matches), then re-run converge.
+      turbopanelc occupies a GID other than {{ redis_primary_gid | default(9997) }}.
+      Stop turbopanel-redis, rename or remove the conflicting group (groupmod -n
+      tpcache turbopanelc when GID matches), then re-run converge.
   when: turbopanel_dev_user | default('') | length == 0
 
 - name: Stop cache service before tpcache identity cutover
@@ -254,10 +253,9 @@
         )
     fail_msg: >-
       Legacy user turbopanelc and canonical user tpcache both exist, or
-      turbopanelc occupies UID {{ _legacy_tpcache_user_getent.ansible_facts.getent_passwd.turbopanelc[1] }}
-      instead of {{ redis_uid | default(9997) }}. Stop turbopanel-redis, rename or
-      remove the conflicting account (usermod -l tpcache turbopanelc when UID
-      matches), then re-run converge.
+      turbopanelc occupies a UID other than {{ redis_uid | default(9997) }}. Stop
+      turbopanel-redis, rename or remove the conflicting account (usermod -l
+      tpcache turbopanelc when UID matches), then re-run converge.
   when: turbopanel_dev_user | default('') | length == 0
 
 - name: Rename legacy turbopanelc user to tpcache
@@ -316,10 +314,10 @@
         )
     fail_msg: >-
       Legacy group turbopaneli and canonical group tpctrl both exist, or
-      turbopaneli occupies GID {{ _legacy_tpctrl_group_getent.ansible_facts.getent_group.turbopaneli[1] }}
-      instead of {{ instance_primary_gid | default(9998) }}. Stop the instance
-      stack, rename or remove the conflicting group (groupmod -n tpctrl turbopaneli
-      when GID matches), then re-run converge.
+      turbopaneli occupies a GID other than
+      {{ instance_primary_gid | default(9998) }}. Stop the instance stack, rename
+      or remove the conflicting group (groupmod -n tpctrl turbopaneli when GID
+      matches), then re-run converge.
   when: turbopanel_dev_user | default('') | length == 0
 
 - name: Stop instance stack before tpctrl identity cutover
@@ -393,10 +391,9 @@
         )
     fail_msg: >-
       Legacy user turbopaneli and canonical user tpctrl both exist, or turbopaneli
-      occupies UID {{ _legacy_tpctrl_user_getent.ansible_facts.getent_passwd.turbopaneli[1] }}
-      instead of {{ instance_uid | default(9998) }}. Stop the instance stack, rename
-      or remove the conflicting account (usermod -l tpctrl turbopaneli when UID
-      matches), then re-run converge.
+      occupies a UID other than {{ instance_uid | default(9998) }}. Stop the
+      instance stack, rename or remove the conflicting account (usermod -l tpctrl
+      turbopaneli when UID matches), then re-run converge.
   when: turbopanel_dev_user | default('') | length == 0
 
 - name: Rename legacy turbopaneli user to tpctrl
