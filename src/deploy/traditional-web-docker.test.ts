@@ -66,7 +66,7 @@ test("apacheSiteConfig adds docker VirtualHost address when bind provided", () =
       listenPort: 18081,
     },
     "/var/lib/turbopanel/sites/env/site/public",
-    "172.17.0.1",
+    { dockerBindAddress: "172.17.0.1" },
   );
   assertStringIncludes(conf, "Listen 172.17.0.1:18081");
   assertStringIncludes(conf, "<VirtualHost 127.0.0.1:18081 172.17.0.1:18081>");

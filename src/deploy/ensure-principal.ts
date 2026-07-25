@@ -8,6 +8,14 @@ export type PrincipalEnsureSpec = {
   home?: string;
 };
 
+/**
+ * Primary group name created by {@link ensureSystemPrincipals}
+ * (`groupadd … ${username}-grp`).
+ */
+export function principalUnixGroupName(username: string): string {
+  return `${username}-grp`;
+}
+
 const decoder = new TextDecoder();
 
 async function run(command: string, args: string[]): Promise<{ success: boolean; stderr: string }> {

@@ -23,12 +23,42 @@ import {
 } from "../orchestration/paths.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import type { EnvironmentDeployTraditionalWebSite } from "../instance/commands/contracts.ts";
+import { principalUnixGroupName } from "./ensure-principal.ts";
 
 const SAFE_ID_RE = /^[A-Za-z0-9_-]+$/;
 const SAFE_ROOT_RE = /^[A-Za-z0-9._/-]+$/;
+const PRINCIPAL_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
 const decoder = new TextDecoder();
 
 export type TraditionalWebApplySite = EnvironmentDeployTraditionalWebSite;
+
+/** Engine service account under `/opt/turbopanel/vendor` (web-service-user role). */
+export function traditionalWebEngineUnixUser(
+  engine: TraditionalWebApplySite["engine"],
+): string {
+  if (engine === "nginx") return "tpnginx";
+  if (engine === "apache") return "tpapache";
+  return "tpols";
+}
+
+/**
+ * Site-tree ownership: assigned principal owns files; engine group retains
+ * group-read so nginx/apache/OLS can serve. Without a principal pin, the
+ * engine user owns the tree (previous default).
+ */
+export function resolveTraditionalWebSiteOwnership(
+  site: TraditionalWebApplySite,
+): { user: string; group: string } {
+  const engineUser = traditionalWebEngineUnixUser(site.engine);
+  const principal = site.principal;
+  if (!principal) return { user: engineUser, group: engineUser };
+  if (!PRINCIPAL_USERNAME_RE.test(principal.username)) {
+    throw new Error(
+      `traditional-web principal username is unsafe: ${principal.username}`,
+    );
+  }
+  return { user: principal.username, group: engineUser };
+}
 
 function assertSafeId(value: string, field: string): void {
   if (!SAFE_ID_RE.test(value)) {
@@ -211,7 +241,9 @@ function buildApachePhpBlock(phpFpmSocket: string | null): string {
 
 /**
  * Per-site php-fpm pool fragment. Memory / max_execution_time come from
- * hosting `web.php`; workers run as tpapache (same as turbopanel-apache).
+ * hosting `web.php`. Workers run as the assigned project principal when
+ * pinned (isolation); otherwise as tpapache. The listen socket stays owned
+ * by tpapache so mod_proxy_fcgi can connect.
  */
 export function phpFpmPoolConfig(
   environmentId: string,
@@ -224,10 +256,16 @@ export function phpFpmPoolConfig(
   const adminBlock = adminLines.length > 0
     ? `\n${adminLines.join("\n")}`
     : "";
+  // Validates principal username shape when pinned (same gate as site chown).
+  resolveTraditionalWebSiteOwnership(site);
+  const poolUser = site.principal?.username ?? "tpapache";
+  const poolGroup = site.principal
+    ? principalUnixGroupName(site.principal.username)
+    : "tpapache";
   return `; TurboPanel traditional-web ${site.composeServiceName}
 [${poolId}]
-user = tpapache
-group = tpapache
+user = ${poolUser}
+group = ${poolGroup}
 listen = ${socketPath}
 listen.owner = tpapache
 listen.group = tpapache
@@ -868,6 +906,10 @@ function assertTraditionalWebSite(site: TraditionalWebApplySite): void {
   ) {
     throw new Error(`traditional-web listenPort is invalid: ${site.listenPort}`);
   }
+  if (site.principal) {
+    // Validates username shape used by chown / php-fpm pool user lines.
+    resolveTraditionalWebSiteOwnership(site);
+  }
 }
 
 async function chownWebTree(
@@ -878,6 +920,33 @@ async function chownWebTree(
   const chown = await run("sudo", ["-n", "chown", "-R", `${user}:${group}`, base]);
   if (!chown.success) {
     logWarn("deploy", `chown ${user} skipped for ${base}: ${chown.stderr}`);
+    return;
+  }
+  // Owner write + engine group read; setgid dirs so new files keep the engine group.
+  const chmod = await run("sudo", [
+    "-n",
+    "chmod",
+    "-R",
+    "u=rwX,g=rX,o=",
+    base,
+  ]);
+  if (!chmod.success) {
+    logWarn("deploy", `chmod skipped for ${base}: ${chmod.stderr}`);
+  }
+  const setgid = await run("sudo", [
+    "-n",
+    "find",
+    base,
+    "-type",
+    "d",
+    "-exec",
+    "chmod",
+    "g+s",
+    "{}",
+    "+",
+  ]);
+  if (!setgid.success) {
+    logWarn("deploy", `setgid skipped for ${base}: ${setgid.stderr}`);
   }
 }
 
@@ -995,7 +1064,8 @@ async function applyNginxSite(
   const configPath = join(paths.sitesDir, paths.configName);
   const contents = nginxSiteConfig(site, paths.documentRoot, dockerBind);
   await writeOwnedConfigFile(configPath, contents, "tpnginx");
-  await chownWebTree(paths.base, "tpnginx", "tpnginx");
+  const ownership = resolveTraditionalWebSiteOwnership(site);
+  await chownWebTree(paths.base, ownership.user, ownership.group);
 }
 
 async function applyApacheSite(
@@ -1030,7 +1100,8 @@ async function applyApacheSite(
     phpFpmSocket,
   });
   await writeOwnedConfigFile(configPath, contents, "tpapache");
-  await chownWebTree(paths.base, "tpapache", "tpapache");
+  const ownership = resolveTraditionalWebSiteOwnership(site);
+  await chownWebTree(paths.base, ownership.user, ownership.group);
   return needsPhp;
 }
 
@@ -1058,7 +1129,8 @@ async function applyOpenLiteSpeedSite(
     fragment,
     { mode: 0o640 },
   );
-  await chownWebTree(paths.base, "tpols", "tpols");
+  const ownership = resolveTraditionalWebSiteOwnership(site);
+  await chownWebTree(paths.base, ownership.user, ownership.group);
 }
 
 async function applyOneTraditionalWebSite(

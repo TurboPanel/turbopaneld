@@ -202,6 +202,18 @@ export type EnvironmentDeployHostingPhp = {
   maxExecutionTime?: number;
 };
 
+/**
+ * Project principal that owns a traditional-web site tree on the host.
+ * `ensureSystemPrincipals` creates the Linux user before apply; document
+ * roots are owned by this user with the engine group for read access.
+ */
+export type EnvironmentDeployTraditionalWebPrincipal = {
+  principalId: string;
+  username: string;
+  uid: number;
+  gid: number;
+};
+
 export type EnvironmentDeployTraditionalWebSite = {
   composeServiceName: string;
   engine: "apache" | "nginx" | "openlitespeed";
@@ -209,6 +221,11 @@ export type EnvironmentDeployTraditionalWebSite = {
   listenPort: number;
   webEnv?: Record<string, string>;
   php?: EnvironmentDeployHostingPhp;
+  /**
+   * When set (from a project principal ↔ service assignment), the site tree
+   * is owned by this principal and Apache php-fpm workers run as that user.
+   */
+  principal?: EnvironmentDeployTraditionalWebPrincipal;
 };
 
 export type EnvironmentDeployPayload = {
@@ -999,6 +1016,37 @@ function parseTraditionalWebListenPort(value: unknown): number {
   return value;
 }
 
+const PRINCIPAL_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
+
+function parseTraditionalWebPrincipal(
+  value: unknown,
+): EnvironmentDeployTraditionalWebPrincipal | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid traditionalWebSites.principal entry");
+  }
+  if (
+    typeof value.principalId !== "string" ||
+    value.principalId.length === 0 ||
+    typeof value.username !== "string" ||
+    !PRINCIPAL_USERNAME_RE.test(value.username) ||
+    typeof value.uid !== "number" ||
+    !Number.isInteger(value.uid) ||
+    value.uid < 0 ||
+    typeof value.gid !== "number" ||
+    !Number.isInteger(value.gid) ||
+    value.gid < 0
+  ) {
+    throw new TypeError("Invalid traditionalWebSites.principal entry");
+  }
+  return {
+    principalId: value.principalId,
+    username: value.username,
+    uid: value.uid,
+    gid: value.gid,
+  };
+}
+
 function parseTraditionalWebSite(
   value: unknown,
 ): EnvironmentDeployTraditionalWebSite {
@@ -1015,6 +1063,8 @@ function parseTraditionalWebSite(
   if (webEnv) site.webEnv = webEnv;
   const php = parseHostingPhp(value.php);
   if (php) site.php = php;
+  const principal = parseTraditionalWebPrincipal(value.principal);
+  if (principal) site.principal = principal;
   return site;
 }
 

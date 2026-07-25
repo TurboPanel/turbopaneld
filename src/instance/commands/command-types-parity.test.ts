@@ -93,11 +93,18 @@ test("environment.deploy traditionalWebSites fixture round-trips", () => {
         engine: "nginx",
         root: "public",
         listenPort: 18080,
+        principal: {
+          principalId: "00000000-0000-4000-8000-000000000099",
+          username: "site_user",
+          uid: 10001,
+          gid: 10001,
+        },
       },
     ],
   });
   assertEquals(payload.traditionalWebSites?.[0]?.engine, "nginx");
   assertEquals(payload.traditionalWebSites?.[0]?.listenPort, 18080);
+  assertEquals(payload.traditionalWebSites?.[0]?.principal?.username, "site_user");
 });
 
 test("server.wireguard.apply fixture round-trips", () => {

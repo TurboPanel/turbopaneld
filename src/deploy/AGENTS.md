@@ -149,7 +149,16 @@ Docker Compose. The daemon:
    `<stateDir>/sites/<environmentId>/<composeServiceName>/<root>/` (default
    `public`; writes a placeholder `index.html` when empty). Merged hosting
    `webEnv` / `php` hints land in `<site>/.turbopanel/hosting.env` and
-   `php.json`.
+   `php.json`. When `traditionalWebSites[].principal` is set (from a project
+   principal ↔ service assignment), the site tree is `chown`ed to
+   `principal:engineGroup` (`site_user:tpnginx` / `tpapache` / `tpols`) with
+   `u=rwX,g=rX` + setgid dirs so the engine can read while the principal owns
+   writes. Without a pin, ownership stays the engine user (previous default).
+   Apache php-fpm pools run workers as the principal when pinned (`user` /
+   `group = ${username}-grp` from `ensureSystemPrincipals`); the listen socket
+   stays `tpapache:tpapache` for mod_proxy_fcgi. Multiple principals on one
+   traditional-web service are rejected at deploy-prepare
+   (`traditional_web_principal_ambiguous`).
 5. Installs loopback-only vhosts under FHS config — nginx
    `<configDir>/nginx/sites/tp-<environmentId>-<service>.conf`, Apache
    `<configDir>/apache/sites/…`, OpenLiteSpeed fragments +

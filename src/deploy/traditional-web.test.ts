@@ -14,6 +14,8 @@ import {
   phpFpmSocketPath,
   PINNED_PHP_FPM_SERIES,
   resolveApachePhpVersion,
+  resolveTraditionalWebSiteOwnership,
+  traditionalWebEngineUnixUser,
 } from "./traditional-web.ts";
 import { caddyHttpUpstream, siteSnippet } from "./ingress.ts";
 import { resolveLayout } from "../paths/layout.ts";
@@ -124,6 +126,59 @@ test("phpFpmPoolConfig emits per-site socket and admin values", () => {
   );
   assertStringIncludes(conf, "php_admin_value[memory_limit] = 256M");
   assertStringIncludes(conf, "php_admin_value[max_execution_time] = 30");
+});
+
+test("phpFpmPoolConfig runs workers as assigned principal", () => {
+  const conf = phpFpmPoolConfig(
+    "env1",
+    {
+      composeServiceName: "phpapp",
+      engine: "apache",
+      root: "public",
+      listenPort: 18081,
+      php: { version: "8.4" },
+      principal: {
+        principalId: "00000000-0000-4000-8000-000000000099",
+        username: "site_user",
+        uid: 10001,
+        gid: 10001,
+      },
+    },
+    "/var/lib/turbopanel/sites/env1/phpapp/public",
+    "/run/turbopanel/php/tp-env1-phpapp.sock",
+  );
+  assertStringIncludes(conf, "user = site_user");
+  assertStringIncludes(conf, "group = site_user-grp");
+  assertStringIncludes(conf, "listen.owner = tpapache");
+  assertStringIncludes(conf, "listen.group = tpapache");
+});
+
+test("resolveTraditionalWebSiteOwnership prefers principal over engine user", () => {
+  assertEquals(traditionalWebEngineUnixUser("nginx"), "tpnginx");
+  assertEquals(
+    resolveTraditionalWebSiteOwnership({
+      composeServiceName: "static",
+      engine: "nginx",
+      root: "public",
+      listenPort: 18080,
+    }),
+    { user: "tpnginx", group: "tpnginx" },
+  );
+  assertEquals(
+    resolveTraditionalWebSiteOwnership({
+      composeServiceName: "static",
+      engine: "nginx",
+      root: "public",
+      listenPort: 18080,
+      principal: {
+        principalId: "00000000-0000-4000-8000-000000000099",
+        username: "site_user",
+        uid: 10001,
+        gid: 10001,
+      },
+    }),
+    { user: "site_user", group: "tpnginx" },
+  );
 });
 
 test("phpFpmPoolId and phpFpmSocketPath are stable under layout.runDir", async () => {
