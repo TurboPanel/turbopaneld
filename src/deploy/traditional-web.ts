@@ -1,8 +1,8 @@
 /**
  * Host-native traditional-web deploy (nginx + apache + OpenLiteSpeed).
  *
- * Installs web servers on demand (vendored under `/opt/turbopanel/vendor` for
- * OpenLiteSpeed — never a distro package; nginx/apache still use apt), and
+ * Installs web servers on demand (OpenLiteSpeed is vendored under the FHS
+ * runtime tree — never a distro package; nginx/apache still use apt), and
  * provisions service identities via Ansible, writes per-site loopback vhosts,
  * and reloads the engine. OpenLiteSpeed is static-only for now (no PHP/env
  * hints — parity with nginx; PHP stays Apache/mod_php only).
@@ -209,7 +209,7 @@ Listen 127.0.0.1:${site.listenPort}${dockerListen}
 `;
 }
 
-const OLS_NAME_UNSAFE_RE = /[^A-Za-z0-9_]/g;
+const OLS_NAME_UNSAFE_RE = /\W/g;
 
 /**
  * OpenLiteSpeed `virtualHost`/`listener` names accept only word characters in
@@ -752,47 +752,45 @@ type TraditionalWebSitesDirs = {
   openlitespeed: string;
 };
 
+type TraditionalWebSitePaths = {
+  base: string;
+  documentRoot: string;
+  sitesDir: string;
+  configName: string;
+};
+
 async function applyNginxSite(
   site: TraditionalWebApplySite,
-  base: string,
-  documentRoot: string,
-  sitesDir: string,
-  configName: string,
+  paths: TraditionalWebSitePaths,
   dockerBind: string | null,
 ): Promise<void> {
-  const configPath = join("/etc/nginx/sites-enabled", configName);
-  const stagingPath = join(sitesDir, configName);
-  const contents = nginxSiteConfig(site, documentRoot, dockerBind);
+  const configPath = join("/etc/nginx/sites-enabled", paths.configName);
+  const stagingPath = join(paths.sitesDir, paths.configName);
+  const contents = nginxSiteConfig(site, paths.documentRoot, dockerBind);
   await Deno.writeTextFile(stagingPath, contents, { mode: 0o640 });
   await writeNginxSiteFile(configPath, contents);
-  await chownWebTree(base, "tpnginx", "tpnginx");
+  await chownWebTree(paths.base, "tpnginx", "tpnginx");
 }
 
 async function applyApacheSite(
   site: TraditionalWebApplySite,
-  base: string,
-  documentRoot: string,
-  sitesDir: string,
-  configName: string,
+  paths: TraditionalWebSitePaths,
   dockerBind: string | null,
 ): Promise<void> {
-  const configPath = join("/etc/apache2/sites-available", configName);
-  const stagingPath = join(sitesDir, configName);
-  const contents = apacheSiteConfig(site, documentRoot, dockerBind);
+  const configPath = join("/etc/apache2/sites-available", paths.configName);
+  const stagingPath = join(paths.sitesDir, paths.configName);
+  const contents = apacheSiteConfig(site, paths.documentRoot, dockerBind);
   await Deno.writeTextFile(stagingPath, contents, { mode: 0o640 });
   await writeApacheSiteFile(configPath, contents);
-  await enableApacheSite(configName);
-  await chownWebTree(base, "tpapache", "tpapache");
+  await enableApacheSite(paths.configName);
+  await chownWebTree(paths.base, "tpapache", "tpapache");
 }
 
 async function applyOpenLiteSpeedSite(
   layout: LayoutPaths,
   environmentId: string,
   site: TraditionalWebApplySite,
-  base: string,
-  documentRoot: string,
-  sitesDir: string,
-  configName: string,
+  paths: TraditionalWebSitePaths,
   dockerBind: string | null,
 ): Promise<void> {
   const olsName = openlitespeedSiteName(environmentId, site.composeServiceName);
@@ -804,11 +802,15 @@ async function applyOpenLiteSpeedSite(
     environmentId,
     site,
     vhConfigPath,
-    documentRoot,
+    paths.documentRoot,
     dockerBind,
   );
-  await Deno.writeTextFile(join(sitesDir, configName), fragment, { mode: 0o640 });
-  await chownWebTree(base, "tpols", "tpols");
+  await Deno.writeTextFile(
+    join(paths.sitesDir, paths.configName),
+    fragment,
+    { mode: 0o640 },
+  );
+  await chownWebTree(paths.base, "tpols", "tpols");
 }
 
 async function applyOneTraditionalWebSite(
@@ -824,23 +826,29 @@ async function applyOneTraditionalWebSite(
   await writeHostingWebMetadata(base, site);
 
   const configName = `tp-${environmentId}-${site.composeServiceName}.conf`;
+  const pathBase = { base, documentRoot, configName };
 
   if (site.engine === "nginx") {
-    await applyNginxSite(site, base, documentRoot, sitesDirs.nginx, configName, dockerBind);
+    await applyNginxSite(
+      site,
+      { ...pathBase, sitesDir: sitesDirs.nginx },
+      dockerBind,
+    );
     return;
   }
   if (site.engine === "apache") {
-    await applyApacheSite(site, base, documentRoot, sitesDirs.apache, configName, dockerBind);
+    await applyApacheSite(
+      site,
+      { ...pathBase, sitesDir: sitesDirs.apache },
+      dockerBind,
+    );
     return;
   }
   await applyOpenLiteSpeedSite(
     layout,
     environmentId,
     site,
-    base,
-    documentRoot,
-    sitesDirs.openlitespeed,
-    configName,
+    { ...pathBase, sitesDir: sitesDirs.openlitespeed },
     dockerBind,
   );
 }
@@ -1037,6 +1045,18 @@ async function removeOpenLiteSpeedTraditionalWebSites(
   return removed;
 }
 
+async function tryReloadAfterSiteRemoval(
+  label: string,
+  reload: () => Promise<void>,
+): Promise<void> {
+  try {
+    await reload();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logWarn("deploy", `${label} reload after site removal skipped: ${message}`);
+  }
+}
+
 /** Remove nginx/apache/OpenLiteSpeed site configs for an environment (best-effort reload). */
 export async function removeTraditionalWebSites(
   layout: LayoutPaths,
@@ -1051,30 +1071,12 @@ export async function removeTraditionalWebSites(
   );
 
   if (nginxRemoved > 0) {
-    try {
-      await reloadNginx();
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      logWarn("deploy", `nginx reload after site removal skipped: ${message}`);
-    }
+    await tryReloadAfterSiteRemoval("nginx", reloadNginx);
   }
   if (apacheRemoved > 0) {
-    try {
-      await reloadApache();
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      logWarn("deploy", `apache reload after site removal skipped: ${message}`);
-    }
+    await tryReloadAfterSiteRemoval("apache", reloadApache);
   }
   if (openlitespeedRemoved > 0) {
-    try {
-      await reloadOpenLiteSpeed();
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      logWarn(
-        "deploy",
-        `OpenLiteSpeed reload after site removal skipped: ${message}`,
-      );
-    }
+    await tryReloadAfterSiteRemoval("OpenLiteSpeed", reloadOpenLiteSpeed);
   }
 }
