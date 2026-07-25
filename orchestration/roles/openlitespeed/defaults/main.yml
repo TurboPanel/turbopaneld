@@ -1,0 +1,20 @@
+---
+# Runtimes always live under the FHS vendor tree (dev shares it with prod).
+turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/vendor"
+# Pinned to the litespeedtech/openlitespeed GitHub release tag/asset naming.
+openlitespeed_version: "1.9.1"
+openlitespeed_release_tag: "v1.9.1"
+turbopanel_dev_user: ""
+turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
+
+# Service identity (must match web-service-user's openlitespeed entry).
+openlitespeed_service_user: tpols
+openlitespeed_service_group: tpols
+
+# FHS mutable paths — decoupled from the vendored (read-mostly) tree via
+# symlinks so `current` can be repointed at a new version without losing
+# config/logs. Daemon TypeScript (src/deploy/traditional-web.ts) owns the
+# actual file contents under turbopanel_config_dir/openlitespeed.
+turbopanel_config_dir: "/etc/turbopanel"
+turbopanel_log_dir: "/var/log/turbopanel"
+turbopanel_state_dir: "/var/lib/turbopanel"

@@ -6,6 +6,7 @@
 # Minimal host-base boundary:
 #   - curl/ca-certificates/tar/python3-minimal: release download + vendor zip extraction
 #   - git/gnupg/unzip/xz-utils/zstd: orchestration/Ansible/Docker roles on managed hosts
+#   - wireguard-tools: VPN mesh apply (`server.wireguard.apply`) on managed hosts
 #   - pamtester: instance install PAM gate (production)
 #
 # run.sh installs only the smaller curl/tar/python3-minimal set when missing;
@@ -27,6 +28,7 @@
       - python3-debian
       - tar
       - unzip
+      - wireguard-tools
       - xz-utils
       - zstd
     state: present

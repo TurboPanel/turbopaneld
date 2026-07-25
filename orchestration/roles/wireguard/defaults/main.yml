@@ -1,0 +1,7 @@
+---
+wireguard_configure: true
+wireguard_interface: ""
+wireguard_address: ""
+wireguard_private_key_file: ""
+wireguard_listen_port: ""
+wireguard_peers: []

@@ -14,6 +14,7 @@ import {
   parsePingPayload,
   parseRebootPayload,
   parseTimezoneSetPayload,
+  parseWireguardApplyPayload,
 } from "./contracts.ts";
 import { handleEnvironmentDeploy } from "./deploy-environment.ts";
 import { handleEnvironmentStop } from "./stop-environment.ts";
@@ -22,6 +23,7 @@ import { handleNtp } from "./ntp.ts";
 import { handlePing } from "./ping.ts";
 import { handleReboot } from "./reboot.ts";
 import { handleTimezone } from "./timezone.ts";
+import { handleWireguardApply } from "./wireguard.ts";
 
 export interface CommandRouterDeps {
   /** Decrypt tpdaemon envelopes via POST /api/daemon/v1/secrets/decrypt. */
@@ -89,6 +91,15 @@ export async function handleCommandDispatch(
       case "server.ntp.set": {
         const payload = parseNtpSetPayload(message.payload);
         result = await handleNtp(payload, daemonReceivedAt);
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
+      case "server.wireguard.apply": {
+        const payload = parseWireguardApplyPayload(message.payload);
+        result = await handleWireguardApply(payload, daemonReceivedAt, {
+          decryptSecrets: deps?.decryptSecrets,
+        });
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;

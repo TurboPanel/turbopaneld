@@ -214,7 +214,15 @@ packaging (`package-daemon-release.sh` / `bundle-orchestration.sh` stage from
   `server.ntp.set` (and deploy/stop/ping) via `src/instance/commands/`. Timezone
   / NTP apply through Ansible role `time-sync` + playbook `time-sync-apply.yml`
   (`runTimeSyncApply`); contracts in `contracts.ts` must match the instance
-  canonical `server.timezone.set` / `server.ntp.set` shapes.
+  canonical `server.timezone.set` / `server.ntp.set` shapes. **`server.wireguard.apply`**
+  applies org VPN meshes via the `wireguard` role + `wireguard-apply.yml`
+  (`runWireguardApply` in `src/orchestration/ansible.ts`); interface private keys
+  and decrypted peer preshared keys live under `<daemonStateDir>/wireguard/` at
+  mode `0600` (PSK files under `psk/`, deleted after apply) and never appear in
+  Ansible `-e` extra-vars or leave the host. **`environment.deploy`** may carry
+  `traditionalWebSites[]` for host-native nginx sites (compose
+  `serviceKind: traditional-web`); see `src/deploy/AGENTS.md` and
+  `playbooks/traditional-web-apply.yml`.
 
 ## Subsystem docs (nested `AGENTS.md`)
 

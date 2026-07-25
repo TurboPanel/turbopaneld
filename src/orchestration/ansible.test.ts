@@ -2,6 +2,7 @@ import { join } from "@std/path";
 import { assertEquals } from "jsr:@std/assert";
 import {
   buildTimeSyncApplyExtraArgs,
+  buildWireguardApplyExtraArgs,
   galaxyBootstrapRunContext,
   mergeTimeSyncApplyWithHostState,
 } from "./ansible.ts";
@@ -15,6 +16,7 @@ import { InstallPresenter } from "./install-presenter.ts";
 import { presentStatusLine } from "./presentation.ts";
 import {
   ANSIBLE_CFG,
+  ANSIBLE_PLAYBOOK_BIN,
   ANSIBLE_PLAYBOOK_CWD,
   ansibleEnv,
   DAEMON_ROOT,
@@ -618,4 +620,113 @@ test("buildTimeSyncApplyExtraArgs preserves native list and boolean types", () =
   const timezoneOnly = JSON.parse(buildTimeSyncApplyExtraArgs({ timezone: "UTC" })[1]!);
   assertEquals(timezoneOnly.turbopanel_apply_ntp_config, false);
   assertEquals(buildTimeSyncApplyExtraArgs({}), []);
+});
+
+test("buildWireguardApplyExtraArgs stringifies listenPort and omits plaintext PSK", () => {
+  const plaintextPsk = "SHOULD_NOT_APPEAR";
+  const args = buildWireguardApplyExtraArgs({
+    interfaceName: "tpwg550e8400",
+    address: "203.0.113.10/32",
+    privateKeyFile: "/var/lib/turbopanel/wireguard/tpwg550e8400.key",
+    listenPort: 51820,
+    peers: [
+      {
+        publicKey: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+        allowedIps: ["203.0.113.11/32"],
+        presharedKeyFile: "/var/lib/turbopanel/wireguard/psk/peer.psk",
+      },
+    ],
+    configure: true,
+  });
+  assertEquals(args[0], "-e");
+  const parsed = JSON.parse(args[1]!);
+  assertEquals(parsed.wireguard_listen_port, "51820");
+  assertEquals(typeof parsed.wireguard_listen_port, "string");
+  assertEquals(
+    parsed.wireguard_peers[0].presharedKeyFile,
+    "/var/lib/turbopanel/wireguard/psk/peer.psk",
+  );
+  assertEquals(JSON.stringify(parsed).includes(plaintextPsk), false);
+  assertEquals("presharedKey" in (parsed.wireguard_peers[0] as object), false);
+});
+
+test("wireguard template renders ListenPort for numeric listen port", async () => {
+  const templatePath = join(
+    CHECKOUT_ORCHESTRATION_DIR,
+    "roles/wireguard/templates/wg.conf.j2",
+  );
+  const template = await Deno.readTextFile(templatePath);
+  // Avoid `wireguard_listen_port | length` on a bare number (Jinja TypeError).
+  assertEquals(template.includes("wireguard_listen_port | length"), false);
+  assertEquals(
+    template.includes("wireguard_listen_port | string | length"),
+    true,
+  );
+  assertEquals(template.includes("peer.presharedKeyFile"), true);
+  assertEquals(template.includes("peer.presharedKey "), false);
+
+  const tmpDir = await Deno.makeTempDir({ prefix: "tp-wg-template-" });
+  const privateKeyFile = join(tmpDir, "iface.key");
+  const pskFile = join(tmpDir, "peer.psk");
+  const dest = join(tmpDir, "wg.conf");
+  await Deno.writeTextFile(privateKeyFile, "PRIVATEKEYLINE\n", { mode: 0o600 });
+  await Deno.writeTextFile(pskFile, "PSKLINE\n", { mode: 0o600 });
+
+  const playbook = join(tmpDir, "render.yml");
+  await Deno.writeTextFile(
+    playbook,
+    [
+      "---",
+      "- hosts: localhost",
+      "  gather_facts: false",
+      "  connection: local",
+      "  tasks:",
+      "    - ansible.builtin.template:",
+      `        src: ${templatePath}`,
+      `        dest: ${dest}`,
+      "",
+    ].join("\n"),
+  );
+
+  const extra = {
+    wireguard_interface: "tpwgtest",
+    wireguard_address: "203.0.113.10/32",
+    wireguard_private_key_file: privateKeyFile,
+    wireguard_listen_port: "51820",
+    wireguard_peers: [
+      {
+        publicKey: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+        allowedIps: ["203.0.113.11/32"],
+        presharedKeyFile: pskFile,
+      },
+    ],
+  };
+
+  try {
+    await Deno.stat(ANSIBLE_PLAYBOOK_BIN);
+  } catch {
+    console.warn("Skipping WireGuard template render: ansible-playbook unavailable");
+    await Deno.remove(tmpDir, { recursive: true });
+    return;
+  }
+
+  const command = new Deno.Command(ANSIBLE_PLAYBOOK_BIN, {
+    args: ["-i", "localhost,", "-c", "local", "-e", JSON.stringify(extra), playbook],
+    cwd: CHECKOUT_ORCHESTRATION_DIR,
+    env: ansibleEnv(),
+    stdout: "piped",
+    stderr: "piped",
+  });
+  const output = await command.output();
+  if (!output.success) {
+    const stderr = new TextDecoder().decode(output.stderr);
+    throw new Error(`ansible-playbook failed: ${stderr}`);
+  }
+
+  const rendered = await Deno.readTextFile(dest);
+  assertEquals(rendered.includes("ListenPort = 51820"), true);
+  assertEquals(rendered.includes("PresharedKey = PSKLINE"), true);
+  assertEquals(rendered.includes("PrivateKey = PRIVATEKEYLINE"), true);
+
+  await Deno.remove(tmpDir, { recursive: true });
 });

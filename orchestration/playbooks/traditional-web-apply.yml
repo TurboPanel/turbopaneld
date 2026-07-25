@@ -1,0 +1,37 @@
+---
+# Ensure nginx package + tpnginx identity for traditional-web deploy.
+# Site vhosts are written by the daemon TypeScript apply path after this playbook.
+- name: TurboPanel traditional-web prerequisites (nginx)
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Install nginx package
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Provision nginx service identity
+      ansible.builtin.include_role:
+        name: web-service-user
+      vars:
+        web_service_key: nginx
+
+    # Hosting-edge Caddy owns public :80/:443. Traditional-web vhosts listen on
+    # loopback high ports only — remove the distro default site if present.
+    - name: Disable distro default nginx site (sites-enabled)
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/nginx/sites-enabled/default
+        - /etc/nginx/sites-enabled/default.conf
+
+    - name: Ensure nginx is enabled and running
+      ansible.builtin.service:
+        name: nginx
+        state: started
+        enabled: true

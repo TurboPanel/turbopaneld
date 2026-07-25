@@ -17,6 +17,7 @@ const test = Deno.test.bind(Deno);
 const payload: EnvironmentDeployPayload = {
   environmentId: "env_123",
   projectId: "project_123",
+  organizationId: "org_123",
   projectName: "web_app",
   composeYaml: `services:
   app:
@@ -102,4 +103,76 @@ test("injectHostingLabels stringifies scalar label values", () => {
   };
   assertEquals(compose.services.app.labels.numeric, "42");
   assertEquals(compose.services.app.labels.flag, "true");
+});
+
+const tcpUdpPayload: EnvironmentDeployPayload = {
+  environmentId: "env_123",
+  projectId: "project_123",
+  organizationId: "org_123",
+  projectName: "web_app",
+  composeYaml: `services:
+  db:
+    image: postgres:16
+`,
+  hostings: [{
+    hostingId: "hosting_db",
+    serviceId: "service_db",
+    composeServiceName: "db",
+    hostnames: [],
+    protocol: "tcp",
+    ports: [{ published: 5432, target: 5432 }],
+    bindAddress: "203.0.113.10",
+  }],
+};
+
+test("injectHostingLabels configures a tcp router+service per published port, no hostname rule", () => {
+  const result = injectHostingLabels(tcpUdpPayload);
+  const compose = parse(result.composeYaml) as {
+    services: { db: { labels: Record<string, string>; networks: string[] } };
+  };
+  const labels = compose.services.db.labels;
+
+  assertEquals(result.services, ["db"]);
+  assertEquals(labels["traefik.enable"], "true");
+  assertEquals(labels["traefik.tcp.routers.hosting_db-5432.entrypoints"], "tcp5432");
+  assertEquals(labels["traefik.tcp.routers.hosting_db-5432.rule"], "HostSNI(`*`)");
+  assertEquals(
+    labels["traefik.tcp.services.hosting_db-5432.loadbalancer.server.port"],
+    "5432",
+  );
+  assertEquals(labels["traefik.http.routers.hosting_db-5432.rule"], undefined);
+  assertEquals(compose.services.db.networks, ["turbopanel-ingress"]);
+});
+
+test("injectHostingLabels configures a udp router+service with no rule label", () => {
+  const result = injectHostingLabels({
+    ...tcpUdpPayload,
+    hostings: [{
+      ...tcpUdpPayload.hostings[0],
+      protocol: "udp",
+      ports: [{ published: 5300, target: 53 }],
+    }],
+  });
+  const compose = parse(result.composeYaml) as {
+    services: { db: { labels: Record<string, string> } };
+  };
+  const labels = compose.services.db.labels;
+  assertEquals(labels["traefik.udp.routers.hosting_db-5300.entrypoints"], "udp5300");
+  assertEquals(
+    labels["traefik.udp.services.hosting_db-5300.loadbalancer.server.port"],
+    "53",
+  );
+  assertEquals(labels["traefik.udp.routers.hosting_db-5300.rule"], undefined);
+});
+
+test("injectHostingLabels rejects a tcp/udp hosting with empty ports", () => {
+  assertThrows(
+    () =>
+      injectHostingLabels({
+        ...tcpUdpPayload,
+        hostings: [{ ...tcpUdpPayload.hostings[0], ports: undefined }],
+      }),
+    Error,
+    "ports must not be empty",
+  );
 });

@@ -197,6 +197,26 @@ export const TIME_SYNC_APPLY_PLAYBOOK = join(
   "playbooks",
   "time-sync-apply.yml",
 );
+export const WIREGUARD_APPLY_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  "playbooks",
+  "wireguard-apply.yml",
+);
+export const TRADITIONAL_WEB_APPLY_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  "playbooks",
+  "traditional-web-apply.yml",
+);
+export const TRADITIONAL_WEB_APACHE_APPLY_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  "playbooks",
+  "traditional-web-apache-apply.yml",
+);
+export const TRADITIONAL_WEB_OPENLITESPEED_APPLY_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  "playbooks",
+  "traditional-web-openlitespeed-apply.yml",
+);
 export const DAEMON_INSTALL_PLAYBOOK = join(
   ORCHESTRATION_DIR,
   "playbooks",

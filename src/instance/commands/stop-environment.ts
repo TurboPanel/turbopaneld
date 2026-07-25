@@ -1,6 +1,11 @@
 import { join } from "@std/path";
 import { runDocker } from "../../deploy/docker-cli.ts";
-import { removeHostingCaddySite } from "../../deploy/ingress.ts";
+import {
+  ensureHostingIngress,
+  removeHostingCaddySite,
+  removeTcpUdpIngressEntries,
+} from "../../deploy/ingress.ts";
+import { removeTraditionalWebSites } from "../../deploy/traditional-web.ts";
 import { logInfo } from "../../logger.ts";
 import { resolveLayout } from "../../paths/layout.ts";
 import {
@@ -81,6 +86,15 @@ export async function handleEnvironmentStop(
   }
 
   await removeHostingCaddySite(layout, parsedPayload.environmentId);
+  await removeTraditionalWebSites(layout, parsedPayload.environmentId);
+
+  const remainingTcpUdpEntries = await removeTcpUdpIngressEntries(
+    layout,
+    parsedPayload.environmentId,
+  );
+  if (remainingTcpUdpEntries !== null) {
+    await ensureHostingIngress(layout, remainingTcpUdpEntries);
+  }
 
   try {
     await Deno.remove(deploymentDir, { recursive: true });

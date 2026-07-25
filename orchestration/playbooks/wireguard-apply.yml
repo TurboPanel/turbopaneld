@@ -1,0 +1,15 @@
+---
+# Extra-vars (single JSON -e object from the daemon):
+#   wireguard_interface
+#   wireguard_address
+#   wireguard_private_key_file
+#   wireguard_listen_port (optional)
+#   wireguard_peers
+#   wireguard_configure (bool; false = package install only)
+- name: TurboPanel WireGuard apply
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+  roles:
+    - role: wireguard

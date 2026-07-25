@@ -1,0 +1,18 @@
+[Unit]
+Description=TurboPanel OpenLiteSpeed (traditional-web static hosting)
+After=network.target
+
+[Service]
+Type=forking
+User={{ openlitespeed_service_user }}
+Group={{ openlitespeed_service_group }}
+Environment=PIDFILE={{ turbopanel_state_dir }}/openlitespeed/lshttpd.pid
+PIDFile={{ turbopanel_state_dir }}/openlitespeed/lshttpd.pid
+ExecStart={{ turbopanel_vendor_dir }}/openlitespeed/current/bin/lswsctrl start
+ExecReload={{ turbopanel_vendor_dir }}/openlitespeed/current/bin/lswsctrl restart
+ExecStop={{ turbopanel_vendor_dir }}/openlitespeed/current/bin/lswsctrl delay-stop
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

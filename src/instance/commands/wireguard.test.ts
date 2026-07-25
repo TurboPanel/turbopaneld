@@ -1,0 +1,206 @@
+import { assertEquals } from "jsr:@std/assert";
+import { join } from "@std/path";
+import {
+  buildWireguardApplyExtraArgs,
+  type WireguardApplyOpts,
+} from "../../orchestration/ansible.ts";
+import {
+  computeWireguardApplyStamp,
+  ensureWireguardKeypair,
+  handleWireguardApply,
+  materializePeerPresharedKeyFiles,
+  setAnsibleAvailabilityCheckForWireguardTests,
+  setEnsureWireguardKeypairForTests,
+  setEnsureWireguardToolsForTests,
+  setWireguardApplyForTests,
+  setWireguardStampIoForTests,
+  setWireguardStateDirForTests,
+  setWgShowCheckForTests,
+} from "./wireguard.ts";
+import { parseWireguardApplyPayload } from "./contracts.ts";
+
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno);
+
+const WG_PUBKEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+const WG_PUBKEY_B = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=";
+
+const basePayload = parseWireguardApplyPayload({
+  vpnId: "550e8400-e29b-41d4-a716-446655440000",
+  peerId: "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+  interfaceName: "tpwg550e8400",
+  address: "203.0.113.10/32",
+  peers: [
+    {
+      peerId: "6ba7b811-9dad-11d1-80b4-00c04fd430c8",
+      publicKey: WG_PUBKEY_B,
+      allowedIps: ["203.0.113.11/32"],
+    },
+  ],
+});
+
+test("parseWireguardApplyPayload rejects bad public keys", () => {
+  let threw = false;
+  try {
+    parseWireguardApplyPayload({
+      ...basePayload,
+      peers: [{ ...basePayload.peers[0]!, publicKey: "not-valid" }],
+    });
+  } catch {
+    threw = true;
+  }
+  assertEquals(threw, true);
+});
+
+test("stamp fast-path skips playbook when interface is up", async () => {
+  setEnsureWireguardToolsForTests(async () => {});
+  setEnsureWireguardKeypairForTests(async () => WG_PUBKEY);
+  setWgShowCheckForTests(async () => true);
+  setAnsibleAvailabilityCheckForWireguardTests(async () => true);
+
+  let playbookRuns = 0;
+  setWireguardApplyForTests(async () => {
+    playbookRuns += 1;
+    return { summary: "should-not-run" };
+  });
+
+  const stamp = await computeWireguardApplyStamp(basePayload, WG_PUBKEY);
+  setWireguardStampIoForTests({
+    read: async () => stamp,
+    write: async () => {},
+  });
+  setWireguardStateDirForTests("/tmp/tp-wg-test-state");
+
+  const result = await handleWireguardApply(basePayload, new Date().toISOString());
+  assertEquals(result.applied, false);
+  assertEquals(result.publicKey, WG_PUBKEY);
+  assertEquals(playbookRuns, 0);
+  assertEquals("privateKey" in result, false);
+
+  setEnsureWireguardToolsForTests(null);
+  setEnsureWireguardKeypairForTests(null);
+  setWgShowCheckForTests(null);
+  setAnsibleAvailabilityCheckForWireguardTests(null);
+  setWireguardApplyForTests(null);
+  setWireguardStampIoForTests({ read: null, write: null });
+  setWireguardStateDirForTests(null);
+});
+
+test("ensureWireguardKeypair returns public key only", async () => {
+  setEnsureWireguardKeypairForTests(async () => WG_PUBKEY);
+  const pubkey = await ensureWireguardKeypair("tpwgtest01");
+  assertEquals(pubkey, WG_PUBKEY);
+  assertEquals(pubkey.includes("\n"), false);
+  setEnsureWireguardKeypairForTests(null);
+});
+
+test("WireGuard apply extra-vars never include plaintext preshared keys", async () => {
+  const stateDir = await Deno.makeTempDir({ prefix: "tp-wg-psk-" });
+  setWireguardStateDirForTests(stateDir);
+
+  const plaintextPsk = "PLAINTEXT_PSK_MUST_NOT_APPEAR_IN_EXTRA_VARS";
+  const payload = parseWireguardApplyPayload({
+    ...basePayload,
+    peers: [
+      {
+        ...basePayload.peers[0]!,
+        peerId: "6ba7b811-9dad-11d1-80b4-00c04fd430c8",
+        publicKey: WG_PUBKEY_B,
+        allowedIps: ["203.0.113.11/32"],
+        presharedKeyEnvelope: "sealed-envelope",
+      },
+    ],
+  });
+
+  const { peers, pskFiles } = await materializePeerPresharedKeyFiles(
+    payload,
+    async () => [plaintextPsk],
+  );
+  assertEquals(pskFiles.length, 1);
+  assertEquals(peers[0]?.presharedKeyFile, pskFiles[0]);
+
+  const opts: WireguardApplyOpts = {
+    interfaceName: payload.interfaceName,
+    address: payload.address,
+    privateKeyFile: join(stateDir, `${payload.interfaceName}.key`),
+    peers,
+    configure: true,
+  };
+  const args = buildWireguardApplyExtraArgs(opts);
+  const serialized = JSON.stringify(args);
+  assertEquals(serialized.includes(plaintextPsk), false);
+  assertEquals(serialized.includes("presharedKeyFile"), true);
+  assertEquals(serialized.includes('"presharedKey"'), false);
+
+  const onDisk = (await Deno.readTextFile(pskFiles[0]!)).trim();
+  assertEquals(onDisk, plaintextPsk);
+
+  for (const path of pskFiles) {
+    await Deno.remove(path);
+  }
+  setWireguardStateDirForTests(null);
+  await Deno.remove(stateDir, { recursive: true });
+});
+
+test("handleWireguardApply deletes PSK temp files after apply", async () => {
+  const stateDir = await Deno.makeTempDir({ prefix: "tp-wg-psk-apply-" });
+  setWireguardStateDirForTests(stateDir);
+  setEnsureWireguardToolsForTests(async () => {});
+  setEnsureWireguardKeypairForTests(async () => WG_PUBKEY);
+  setWgShowCheckForTests(async () => false);
+  setAnsibleAvailabilityCheckForWireguardTests(async () => true);
+  setWireguardStampIoForTests({
+    read: async () => null,
+    write: async () => {},
+  });
+
+  let capturedOpts: WireguardApplyOpts | null = null;
+  setWireguardApplyForTests(async (opts) => {
+    capturedOpts = opts;
+    return { summary: "ok" };
+  });
+
+  const plaintextPsk = "TEMP_PSK_DELETED_AFTER_APPLY";
+  const payload = parseWireguardApplyPayload({
+    ...basePayload,
+    peers: [
+      {
+        ...basePayload.peers[0]!,
+        presharedKeyEnvelope: "sealed-envelope",
+      },
+    ],
+  });
+
+  await handleWireguardApply(payload, new Date().toISOString(), {
+    decryptSecrets: async () => [plaintextPsk],
+  });
+
+  assertEquals(capturedOpts !== null, true);
+  const pskFile = capturedOpts!.peers[0]?.presharedKeyFile;
+  assertEquals(typeof pskFile, "string");
+  const extra = buildWireguardApplyExtraArgs(capturedOpts!);
+  assertEquals(JSON.stringify(extra).includes(plaintextPsk), false);
+
+  let missing = false;
+  try {
+    await Deno.stat(pskFile!);
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) missing = true;
+    else throw err;
+  }
+  assertEquals(missing, true);
+
+  setEnsureWireguardToolsForTests(null);
+  setEnsureWireguardKeypairForTests(null);
+  setWgShowCheckForTests(null);
+  setAnsibleAvailabilityCheckForWireguardTests(null);
+  setWireguardApplyForTests(null);
+  setWireguardStampIoForTests({ read: null, write: null });
+  setWireguardStateDirForTests(null);
+  await Deno.remove(stateDir, { recursive: true });
+});

@@ -1,0 +1,22 @@
+[Interface]
+Address = {{ wireguard_address }}
+{% if wireguard_listen_port is defined and (wireguard_listen_port | string | length > 0) %}
+ListenPort = {{ wireguard_listen_port }}
+{% endif %}
+PrivateKey = {{ lookup('ansible.builtin.file', wireguard_private_key_file) }}
+
+{% for peer in wireguard_peers %}
+[Peer]
+PublicKey = {{ peer.publicKey }}
+AllowedIPs = {{ peer.allowedIps | join(', ') }}
+{% if peer.endpoint is defined and (peer.endpoint | length > 0) %}
+Endpoint = {{ peer.endpoint }}
+{% endif %}
+{% if peer.persistentKeepalive is defined %}
+PersistentKeepalive = {{ peer.persistentKeepalive }}
+{% endif %}
+{% if peer.presharedKeyFile is defined and (peer.presharedKeyFile | length > 0) %}
+PresharedKey = {{ lookup('ansible.builtin.file', peer.presharedKeyFile) }}
+{% endif %}
+
+{% endfor %}

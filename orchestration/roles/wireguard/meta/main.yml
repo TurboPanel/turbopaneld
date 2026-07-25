@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  role_name: wireguard
+  author: TurboPanel
+  description: Install wireguard-tools and apply wg-quick interface configuration.
+  license: AGPL-3.0-only
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Debian
+      versions:
+        - trixie
+dependencies: []

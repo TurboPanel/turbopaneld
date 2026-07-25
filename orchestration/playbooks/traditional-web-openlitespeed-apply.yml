@@ -1,0 +1,19 @@
+---
+# Vendor OpenLiteSpeed (never a distro package) + tpols identity for
+# traditional-web deploy. Per-site httpd_config.conf / vhost configs are
+# written by the daemon TypeScript apply path after this playbook runs.
+- name: TurboPanel traditional-web prerequisites (OpenLiteSpeed)
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Provision OpenLiteSpeed service identity
+      ansible.builtin.include_role:
+        name: web-service-user
+      vars:
+        web_service_key: openlitespeed
+
+    - name: Vendor OpenLiteSpeed binary + FHS config/log/state dirs
+      ansible.builtin.include_role:
+        name: openlitespeed

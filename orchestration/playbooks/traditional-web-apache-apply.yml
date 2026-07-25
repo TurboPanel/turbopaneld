@@ -1,0 +1,62 @@
+---
+# Ensure apache2 package + tpapache identity for traditional-web deploy.
+# Site vhosts are written by the daemon TypeScript apply path after this playbook.
+# When PHP hosting is requested, installs mod_php (version-specific package when
+# traditional_web_php_version is set, else distro default libapache2-mod-php).
+- name: TurboPanel traditional-web prerequisites (apache)
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Install Apache package
+      ansible.builtin.apt:
+        name: apache2
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Resolve mod_php package name
+      ansible.builtin.set_fact:
+        _tp_mod_php_package: >-
+          {{
+            ('libapache2-mod-php' ~ traditional_web_php_version)
+            if (traditional_web_php_version | default('') | length > 0)
+            else 'libapache2-mod-php'
+          }}
+      when: traditional_web_install_php | default(false) | bool
+
+    - name: Install mod_php for Apache when PHP hosting is requested
+      ansible.builtin.apt:
+        name: "{{ _tp_mod_php_package }}"
+        state: present
+      when: traditional_web_install_php | default(false) | bool
+
+    - name: Enable Apache PHP module when version-specific package was installed
+      ansible.builtin.command:
+        cmd: "a2enmod php{{ traditional_web_php_version }}"
+      register: _tp_a2enmod_php
+      changed_when: "'already enabled' not in _tp_a2enmod_php.stdout"
+      failed_when: _tp_a2enmod_php.rc != 0
+      when:
+        - traditional_web_install_php | default(false) | bool
+        - traditional_web_php_version | default('') | length > 0
+
+    - name: Provision apache service identity
+      ansible.builtin.include_role:
+        name: web-service-user
+      vars:
+        web_service_key: apache
+
+    - name: Disable distro default Apache site
+      ansible.builtin.command:
+        cmd: a2dissite 000-default.conf
+      register: _tp_a2dissite_default
+      changed_when: "'Site 000-default disabled' in _tp_a2dissite_default.stdout"
+      failed_when: false
+
+    - name: Ensure Apache is enabled and running
+      ansible.builtin.service:
+        name: apache2
+        state: started
+        enabled: true

@@ -40,7 +40,9 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../insta
    `<stateDir>/deployments/<environmentId>/docker-compose.yml` with Traefik
    labels (`src/deploy/compose-labels.ts`) — proxy middleware for
    `stripPrefix`, `gzip`/`brotli` compress; hosting Caddy respects
-   `forceHttps` per hostname (`ingress.ts`).
+   `forceHttps` per hostname (`ingress.ts`). HTTP hostings that share a hostname
+   are merged into one Caddy site with `handle` / path matchers (`pathPrefix`);
+   Traefik routers already used `pathPrefix` via compose labels.
 8. Run pre-deploy hooks (`serviceHooks[]`: optional `build --no-cache`, shell
    preDeployCommand) then `docker compose up -d --remove-orphans`, then post-deploy
    hooks (`run-deploy-hooks.ts`).
@@ -53,13 +55,57 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../insta
 7. Refresh hosting-edge Caddy config under `/etc/turbopanel/hosting/`
    (`auto_https off` always). Per-hostname site blocks use
    `tls <fullchain> <privkey>` when a resolved `tlsId` was materialized;
-   otherwise `tls internal`. Unit `turbopanel-hosting-caddy.service` when sudo
+   otherwise `tls internal`. When `hostings[].bindAddress` is set, both the
+   HTTPS site block and the `forceHttps` HTTP redirect block emit a Caddy
+   `bind <address>` directive (IPv4/IPv6 literal validated before interpolation)
+   so neither listener attaches to all interfaces — sourced at deploy-prepare
+   time from hosting `bind` scope: **public** pinned `ip` row, **datacenter**
+   private `ip` (`scope = 'datacenter'` on the target server), or **local**
+   loopback `127.0.0.1`. Unit `turbopanel-hosting-caddy.service` when sudo
    allows. **Distinct** from control-plane Caddy (`:8443`).
 10. Best-effort `docker compose ps --format json` — per-container identity/status
    (`containerId`, `containerName`, `composeServiceName`, `status`, optional
    `serviceId` from `payload.hostings`) is included in the command result when
    collection succeeds; a `ps`/parse failure never fails an otherwise-successful
    deploy.
+
+### Raw TCP/UDP port hosting (non-HTTP docker services)
+
+`hostings[].protocol` (`http` default/omitted, or `tcp`/`udp`) lets a Docker
+service (Postgres, a game server, a UDP relay, …) publish raw port(s) straight
+through Traefik instead of routing hostnames through hosting Caddy — **no**
+hostname/TLS/path routing for those hostings; `hostings[].ports[]` (required,
+non-empty for `tcp`/`udp`) is a `{ published, target }` list.
+
+- **Compose labels** (`compose-labels.ts` `applyTcpUdpHostingLabels`): one
+  `traefik.tcp.routers.<hostingId>-<published>` / `traefik.udp.routers…` pair
+  per published port. TCP routers get a catch-all `HostSNI(\`*\`)` rule (no
+  SNI to match without a hostname); UDP routers take no rule label at all.
+  Both get a `…loadbalancer.server.port` label targeting the container port.
+- **Traefik static config is regenerated, not hot-reloaded**: Traefik cannot
+  add entrypoints at runtime, so `traefikCompose()` (`ingress.ts`) takes the
+  full merged set of `TcpUdpIngressEntry` and emits one
+  `--entrypoints.<protocol><port>.address=:<port>[/udp]` static arg plus one
+  `<bind>:<port>:<port>/<protocol>` compose `ports:` line per entry (bind
+  defaults `0.0.0.0`; IPv6 literals get bracketed). `ensureHostingIngress`
+  rewrites this file and `docker compose up -d` every deploy/stop — Traefik
+  restarts whenever the merged entrypoint set changes, which is why entries
+  are deduped and sorted for a stable diff.
+- **Cross-environment port uniqueness**: the daemon has no global view of
+  every environment's hostings, so each environment's TCP/UDP entries are
+  persisted to `<stateDir>/ingress/tcp-udp/<environmentId>.json`
+  (`syncTcpUdpIngressEntries`, called from both `deploy-environment.ts` and
+  `stop-environment.ts`). Sync reads every *other* environment's file
+  (`collectTcpUdpIngressEntries`), rejects with `TcpUdpPortConflictError` when
+  another environment already claims the same `protocol`+`publishedPort`
+  (**no partial write** on conflict), then writes this environment's file
+  (or deletes it when empty) and returns the full merged set for
+  `ensureHostingIngress`. `environment.stop` calls
+  `removeTcpUdpIngressEntries` and only re-syncs Traefik when that environment
+  actually had entries (`null` return short-circuits a no-op restart).
+- Extraction from the deploy payload: `buildTcpUdpIngressEntries` maps each
+  `tcp`/`udp` hosting's `ports[]` to one `TcpUdpIngressEntry` (carrying that
+  hosting's resolved `bindAddress`, if any).
 
 `environment.stop` (command router →
 `src/instance/commands/stop-environment.ts`):
@@ -75,6 +121,73 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../insta
 Helpers: `src/deploy/ensure-docker.ts`, `src/deploy/ingress.ts`,
 `src/deploy/materialize-tls.ts`, `src/deploy/ensure-hosting-caddy.ts`,
 `src/deploy/materialize-storage.ts`, `src/deploy/apply-storage-volumes.ts`,
-`src/deploy/run-deploy-hooks.ts`, `src/deploy/ensure-principal.ts`. Future
-seams (not MVP): multi-server service placement, WireGuard mesh, swarm-style
-replicas, ACME issuance on the daemon.
+`src/deploy/run-deploy-hooks.ts`, `src/deploy/ensure-principal.ts`,
+`src/deploy/traditional-web.ts`, `src/deploy/traditional-web-docker.ts`,
+`src/deploy/ensure-docker-networks.ts`.
+
+### Traditional web (nginx + apache)
+
+When `environment.deploy` carries `traditionalWebSites[]` (compose services with
+`x-turbopanel.serviceKind: traditional-web`), those services are **not** in
+Docker Compose. The daemon:
+
+1. Runs `playbooks/traditional-web-apply.yml` (apt `nginx` + `web-service-user`
+   for `tpnginx`) when any site uses `engine: nginx`.
+2. Runs `playbooks/traditional-web-apache-apply.yml` (apt `apache2` + optional
+   mod_php + `tpapache`) when any site uses `engine: apache`. PHP package is
+   `libapache2-mod-php<version>` when hosting `php.version` is set (e.g. `8.4`),
+   else distro default `libapache2-mod-php`. Conflicting versions across sites
+   in one deploy fail before apt.
+3. Materializes document roots under
+   `<stateDir>/sites/<environmentId>/<composeServiceName>/<root>/` (default
+   `public`; writes a placeholder `index.html` when empty). Merged hosting
+   `webEnv` / `php` hints land in `<site>/.turbopanel/hosting.env` and
+   `php.json`.
+4. Installs loopback-only vhosts — nginx under
+   `/etc/nginx/sites-enabled/tp-<environmentId>-<service>.conf` or Apache under
+   `/etc/apache2/sites-available/` + `a2ensite` — listening on
+   `127.0.0.1:<listenPort>`.
+5. Rewrites hosting Caddy so hostnames for those services
+   `reverse_proxy 127.0.0.1:<listenPort>` instead of Traefik.
+6. Skips Docker/Traefik entirely when the payload has **no** container services
+   (`composeYaml` is `services: {}`) — still ensures hosting-edge Caddy via
+   `ensureHostingCaddyRuntime`.
+
+Apache sites enable `mod_php` when deploy payload includes PHP hints, and apply
+`memoryLimit` / `maxExecutionTime` as vhost `php_admin_value` directives.
+Static env vars from the payload are written as `SetEnv` in the vhost.
+
+**Mixed Docker + traditional-web:** when an environment deploy includes both
+container services and `traditionalWebSites[]`, the daemon (1) binds each
+traditional-web vhost on loopback (for hosting Caddy) and on the docker bridge
+address (`docker0`, override `TURBOPANEL_DOCKER_HOST_GATEWAY`), (2) applies
+traditional-web **before** `docker compose up`, and (3) patches compose with
+`extra_hosts: host.docker.internal:host-gateway` plus
+`TURBOPANEL_TRADITIONAL_WEB_<SERVICE>_URL` and
+`TURBOPANEL_TRADITIONAL_WEB_ENDPOINTS` JSON env on every container service.
+
+**External Docker networks:** compose `networks.*.external: true` names must be
+registered in the org network table (`kind: docker`, `options.dockerNetworkName`)
+for the deploy server. Payload `dockerExternalNetworks[]` is ensured with
+`docker network create` before compose up (`ensure-docker-networks.ts`).
+
+`environment.stop` removes nginx, Apache, and OpenLiteSpeed site
+fragments/vhost dirs (best-effort reload/regenerate) in addition to compose
+down + hosting Caddy site removal.
+
+**OpenLiteSpeed** is vendored under `/opt/turbopanel/vendor/openlitespeed`
+(never a distro package) by the `openlitespeed` Ansible role — see
+`../../orchestration/AGENTS.md` (Tenant/daemon-host web servers) for the
+`tpols` service identity. Unlike nginx/apache (`sites-enabled` /
+`a2ensite`), OpenLiteSpeed has no per-site config directory convention: the
+daemon keeps one fragment per active site under
+`<configDir>/openlitespeed/sites/` and regenerates the whole
+`httpd_config.conf` from every fragment on each apply/remove
+(`openlitespeedMainConfig`), then `systemctl restart
+turbopanel-openlitespeed`. It is static-only for now — no PHP/env hints
+(parity with nginx; PHP stays Apache/mod_php only).
+
+Future seams (not MVP): multi-server service placement, swarm-style replicas, ACME
+issuance on the daemon, docker↔traditional-web networking. WireGuard mesh apply is
+handled by `server.wireguard.apply` — see `src/instance/commands/wireguard.ts`
+and `../../orchestration/AGENTS.md` (WireGuard).

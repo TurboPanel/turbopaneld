@@ -17,12 +17,28 @@ converge re-ensures NTP. Command-driven apply playbook:
 stay lists and `turbopanel_ntp_enabled` stays a boolean (`key=value` would
 stringify them). `timesyncd.conf` is `root:<systemd-timesync|root>` mode
 `0640` so the `User=systemd-timesync` service can read it; the restart handler
-is gated on `turbopanel_ntp_enabled | bool` so a disable + config change does
-not restart/start timesyncd after `timedatectl set-ntp false`.
+  is gated on `turbopanel_ntp_enabled | bool` so a disable + config change does
+  not restart/start timesyncd after `timedatectl set-ntp false`.
+
+### WireGuard (`wireguard`)
+
+First-party role (no Galaxy deps) that installs `wireguard-tools`, templates
+`/etc/wireguard/<interface>.conf` at mode **`0600`** with **`no_log: true`**, and
+enables `wg-quick@<interface>` via systemd. The interface **private key never
+travels through Ansible extra-vars** — the template reads
+`wireguard_private_key_file` via `lookup('ansible.builtin.file', …)`.
+Command-driven apply playbook: `playbooks/wireguard-apply.yml` (invoked by daemon
+`server.wireguard.apply` via `runWireguardApply`). Extra-vars are passed as **one
+JSON `-e` object** so `wireguard_peers` stays a list and
+`wireguard_configure` stays a boolean. Set `wireguard_configure:
+false` for a package-only run (tools install without bouncing the tunnel). The
+restart handler is gated on `wireguard_configure | bool`.
+`wireguard-tools` is also listed in `daemon-prereqs` on managed hosts. **Not**
+wired into `daemon-converge.yml` (command-driven only, like `time-sync-apply`).
 
 ### Web-service user (`web-service-user`)
 
-Tenant/daemon-host web servers (nginx, Apache, OpenLiteSpeed, LiteSpeed enterprise) run under dedicated **99xx** system accounts — distinct from control-plane **tpcaddy(9993)**. The `web-service-user` role provisions **only** the group + system user (no package install). **Not** wired into `daemon-converge.yml`; future web-server install roles `include_role` it when a server is assigned.
+Tenant/daemon-host web servers (nginx, Apache, OpenLiteSpeed, LiteSpeed enterprise) run under dedicated **99xx** system accounts — distinct from control-plane **tpcaddy(9993)**. The `web-service-user` role provisions **only** the group + system user (no package install). **Not** wired into `daemon-converge.yml`; `playbooks/traditional-web-apply.yml` (and future web-server install roles) `include_role` it on demand when a traditional-web site is deployed.
 
 | Service key | User / group | uid / gid |
 | ----------- | ------------ | --------- |
@@ -42,6 +58,41 @@ Each account uses primary group matching its username, `shell: /usr/sbin/nologin
 ```
 
 Override the map by passing `web_service_user`, `web_service_uid`, `web_service_group`, and `web_service_gid` directly instead of `web_service_key`. Canonical map: `roles/web-service-user/defaults/main.yml` → `web_service_user_map`.
+
+### OpenLiteSpeed (`openlitespeed`)
+
+Vendored — **never** a distro package. The role downloads the official
+precompiled binary tarball from the `litespeedtech/openlitespeed` GitHub
+release matching `openlitespeed_release_tag`, extracts it under
+`{{ turbopanel_vendor_dir }}/openlitespeed/<version>/` with a `current`
+symlink (same layout as `caddy`/`deno`/`node`), and prunes everything but the
+core HTTP server: the bundled admin console, docs, and `example/` vhost are
+removed. OpenLiteSpeed determines its own home directory relative to `bin/`
+at startup (it is inherently relocatable), so the pruned tarball structure —
+not just the `openlitespeed` binary — must stay intact under the vendor path.
+A `bin/litespeed → bin/openlitespeed` symlink exists solely so the bundled
+`lswsctrl` control script (which looks for a binary literally named
+`litespeed`) keeps working if invoked manually; the daemon itself drives the
+server through the templated **`turbopanel-openlitespeed.service`** systemd
+unit (`systemctl start|stop|restart`), not `lswsctrl`.
+
+The role also provisions FHS-compliant config/log/state directories (mirroring
+`instance-certs`-style ownership, not the vendor tree itself):
+
+| Path | Owner | Mode | Purpose |
+| ---- | ----- | ---- | ------- |
+| `/etc/turbopanel/openlitespeed/` | `root:tpols` | `0750` | `httpd_config.conf` (daemon-owned, regenerated whole on every apply — no `sites-enabled` convention) + `mime.properties` + per-site fragments (`sites/`) + per-vhost `vhconf.conf` (`vhosts/<name>/`) |
+| `/var/log/turbopanel/openlitespeed/` | `tpols:tpols` | `0750` | `error.log` / `access.log` |
+| `/var/lib/turbopanel/openlitespeed/` | `tpols:tpols` | `0750` | PID file (`lshttpd.pid`), `swap/` (`swappingDir`) |
+| `{{ turbopanel_vendor_dir }}/openlitespeed/<version>/{cachedata,autoupdate,tmp,tmp/ocspcache}` | `tpols:tpols` | `0750` | OLS's own writable runtime dirs, kept inside the vendored tree since the binary resolves paths relative to its own `bin/` |
+
+Identity comes from `web-service-user` (`tpols`, uid/gid **9990** — see the
+table above); the **`traditional-web-openlitespeed-apply`** playbook
+`include_role`s `web-service-user` (key `openlitespeed`) before `openlitespeed`
+itself, mirroring `traditional-web-apache-apply`. Daemon-side config
+generation (per-site `virtualHost`/`listener` fragments aggregated into the
+single `httpd_config.conf`, `vhconf.conf` per vhost) lives in
+`../src/deploy/traditional-web.ts` — see `../src/deploy/AGENTS.md`.
 
 ---
 

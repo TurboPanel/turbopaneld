@@ -2,12 +2,16 @@ import { join } from "@std/path";
 import { applySecretVariablesToCompose } from "../../deploy/apply-deploy-variables.ts";
 import { applyStorageVolumesToCompose } from "../../deploy/apply-storage-volumes.ts";
 import { injectHostingLabels } from "../../deploy/compose-labels.ts";
+import { composeHasContainerServices } from "../../deploy/compose-services.ts";
 import { runDocker } from "../../deploy/docker-cli.ts";
 import { ensureDocker } from "../../deploy/ensure-docker.ts";
 import { ensureSystemPrincipals } from "../../deploy/ensure-principal.ts";
 import {
+  buildTcpUdpIngressEntries,
+  ensureHostingCaddyRuntime,
   ensureHostingIngress,
   rewriteHostingCaddySites,
+  syncTcpUdpIngressEntries,
 } from "../../deploy/ingress.ts";
 import { materializeStorageEntries } from "../../deploy/materialize-storage.ts";
 import {
@@ -19,6 +23,12 @@ import {
   runDeployServiceHooks,
   runPostDeployHooks,
 } from "../../deploy/run-deploy-hooks.ts";
+import { applyTraditionalWebSites } from "../../deploy/traditional-web.ts";
+import { ensureExternalDockerNetworks } from "../../deploy/ensure-docker-networks.ts";
+import {
+  injectTraditionalWebDockerReachability,
+  resolveDockerHostGatewayAddress,
+} from "../../deploy/traditional-web-docker.ts";
 import { logInfo } from "../../logger.ts";
 import { resolveLayout } from "../../paths/layout.ts";
 import {
@@ -183,8 +193,28 @@ export async function handleEnvironmentDeploy(
   assertSafeDeploymentIdentifiers(parsedPayload);
   const layout = resolveLayout(Deno.env.toObject());
 
-  await ensureDocker();
-  await ensureHostingIngress(layout);
+  const traditionalWebSites = parsedPayload.traditionalWebSites ?? [];
+  const traditionalNames = new Set(
+    traditionalWebSites.map((site) => site.composeServiceName),
+  );
+  const hasContainers = composeHasContainerServices(parsedPayload.composeYaml);
+  const containerHostings = parsedPayload.hostings.filter(
+    (hosting) => !traditionalNames.has(hosting.composeServiceName),
+  );
+
+  if (hasContainers) {
+    await ensureDocker();
+    const tcpUdpEntries = buildTcpUdpIngressEntries(containerHostings);
+    const mergedTcpUdpEntries = await syncTcpUdpIngressEntries(
+      layout,
+      parsedPayload.environmentId,
+      tcpUdpEntries,
+    );
+    await ensureHostingIngress(layout, mergedTcpUdpEntries);
+  } else {
+    // Traditional-web-only: edge Caddy without Traefik/Docker.
+    await ensureHostingCaddyRuntime(layout);
+  }
 
   const deploymentDir = join(
     layout.stateDir,
@@ -220,7 +250,7 @@ export async function handleEnvironmentDeploy(
 
   let composeYaml = parsedPayload.composeYaml;
   const variableMaterial = parsedPayload.variableMaterial ?? [];
-  if (variableMaterial.length > 0) {
+  if (variableMaterial.length > 0 && hasContainers) {
     if (!deps?.decryptSecrets) {
       throw new Error(
         "Variable material present but secrets decrypt is unavailable",
@@ -233,7 +263,11 @@ export async function handleEnvironmentDeploy(
     );
   }
 
-  if (parsedPayload.storageMaterial && parsedPayload.storageMaterial.length > 0) {
+  if (
+    parsedPayload.storageMaterial &&
+    parsedPayload.storageMaterial.length > 0 &&
+    hasContainers
+  ) {
     composeYaml = applyStorageVolumesToCompose(
       composeYaml,
       parsedPayload.storageMaterial,
@@ -241,26 +275,62 @@ export async function handleEnvironmentDeploy(
     );
   }
 
-  const labeledCompose = injectHostingLabels({
-    ...parsedPayload,
-    composeYaml,
-  });
-
-  const composePath = join(deploymentDir, "docker-compose.yml");
-  await Deno.writeTextFile(composePath, labeledCompose.composeYaml, {
-    mode: 0o640,
-  });
-
-  const serviceHooks = parsedPayload.serviceHooks ?? [];
-  if (serviceHooks.length > 0) {
-    await runDeployServiceHooks(serviceHooks, {
-      projectName: parsedPayload.projectName,
-      composePath,
-      deploymentDir,
-    });
+  const mixedTraditionalAndContainers = hasContainers &&
+    traditionalWebSites.length > 0;
+  let dockerBindAddress: string | null = null;
+  if (mixedTraditionalAndContainers) {
+    dockerBindAddress = await resolveDockerHostGatewayAddress();
+    composeYaml = injectTraditionalWebDockerReachability(
+      composeYaml,
+      traditionalWebSites,
+    );
   }
 
-  await composeUp(parsedPayload.projectName, composePath);
+  if (traditionalWebSites.length > 0) {
+    await applyTraditionalWebSites(
+      layout,
+      parsedPayload.environmentId,
+      traditionalWebSites,
+      { dockerBindAddress: mixedTraditionalAndContainers ? dockerBindAddress : null },
+    );
+  }
+
+  let labeledServices: string[] = [];
+  const composePath = join(deploymentDir, "docker-compose.yml");
+  if (hasContainers) {
+    const labeledCompose = injectHostingLabels({
+      ...parsedPayload,
+      composeYaml,
+      hostings: containerHostings,
+    });
+    labeledServices = labeledCompose.services;
+    await Deno.writeTextFile(composePath, labeledCompose.composeYaml, {
+      mode: 0o640,
+    });
+
+    const serviceHooks = parsedPayload.serviceHooks ?? [];
+    if (serviceHooks.length > 0) {
+      await runDeployServiceHooks(serviceHooks, {
+        projectName: parsedPayload.projectName,
+        composePath,
+        deploymentDir,
+      });
+    }
+
+    const externalNetworks = parsedPayload.dockerExternalNetworks ?? [];
+    if (externalNetworks.length > 0) {
+      await ensureExternalDockerNetworks(externalNetworks);
+    }
+
+    await composeUp(parsedPayload.projectName, composePath);
+
+    if (serviceHooks.length > 0) {
+      await runPostDeployHooks(serviceHooks, deploymentDir);
+    }
+  } else {
+    // Persist an empty compose marker so stop/idempotency paths stay consistent.
+    await Deno.writeTextFile(composePath, composeYaml, { mode: 0o640 });
+  }
 
   let hostnameTls: Map<string, string> | undefined;
   const tlsMaterial = parsedPayload.tlsMaterial ?? [];
@@ -280,27 +350,36 @@ export async function handleEnvironmentDeploy(
 
   await rewriteHostingCaddySites(layout, parsedPayload, hostnameTls);
 
-  if (serviceHooks.length > 0) {
-    await runPostDeployHooks(serviceHooks, deploymentDir);
+  const containers = hasContainers
+    ? await collectDeployedContainers(
+      parsedPayload.projectName,
+      containerHostings,
+    )
+    : [];
+
+  const traditionalCount = traditionalWebSites.length;
+  const summaryParts = [
+    `Deployed ${labeledServices.length} container service(s)`,
+  ];
+  if (traditionalCount > 0) {
+    summaryParts.push(`${traditionalCount} traditional-web site(s)`);
   }
-
-  const containers = await collectDeployedContainers(
-    parsedPayload.projectName,
-    parsedPayload.hostings,
-  );
-
   const summary =
-    `Deployed ${labeledCompose.services.length} service(s) for environment ${parsedPayload.environmentId}`;
+    `${summaryParts.join(" + ")} for environment ${parsedPayload.environmentId}`;
   logInfo(
     "commands",
     `environment.deploy completed project=${parsedPayload.projectName} received=${daemonReceivedAt}`,
   );
+
+  const serviceNames = [
+    ...labeledServices,
+    ...traditionalWebSites.map((site) => site.composeServiceName),
+  ].sort((a, b) => a.localeCompare(b));
+
   return {
     projectName: parsedPayload.projectName,
     summary,
-    ...(labeledCompose.services.length > 0
-      ? { services: labeledCompose.services }
-      : {}),
+    ...(serviceNames.length > 0 ? { services: serviceNames } : {}),
     // Include `containers: []` when collection succeeded with no rows; omit the
     // field entirely when collection failed (non-authoritative).
     ...(containers === null ? {} : { containers }),

@@ -146,6 +146,64 @@ function applyProxyMiddlewareLabels(
   }
 }
 
+function applyHttpHostingLabels(
+  labels: Record<string, string>,
+  hosting: EnvironmentDeployPayload["hostings"][number],
+): void {
+  if (hosting.hostnames.length === 0) {
+    throw new Error("hostings[].hostnames must not be empty");
+  }
+  const routerId = hosting.hostingId;
+  addLabel(
+    labels,
+    `traefik.http.routers.${routerId}.rule`,
+    buildRouterRule(hosting.hostnames, hosting.pathPrefix),
+  );
+  addLabel(
+    labels,
+    `traefik.http.services.${routerId}.loadbalancer.server.port`,
+    String(hosting.targetPort ?? 80),
+  );
+  applyProxyMiddlewareLabels(labels, routerId, hosting.proxy);
+}
+
+/**
+ * `tcp`/`udp` hosting publishes raw port(s) straight through Traefik — no
+ * hostname rule (TCP uses a catch-all `HostSNI` rule; UDP routers take no
+ * rule at all). One router+service pair per published port.
+ */
+function applyTcpUdpHostingLabels(
+  labels: Record<string, string>,
+  hosting: EnvironmentDeployPayload["hostings"][number],
+): void {
+  const protocol = hosting.protocol as "tcp" | "udp";
+  const ports = hosting.ports ?? [];
+  if (ports.length === 0) {
+    throw new Error("hostings[].ports must not be empty for tcp/udp protocol");
+  }
+  for (const port of ports) {
+    const routerId = `${hosting.hostingId}-${port.published}`;
+    assertRouterId(routerId, "hostings[].ports router id");
+    const entrypoint = `${protocol}${port.published}`;
+    if (protocol === "tcp") {
+      addLabel(labels, `traefik.tcp.routers.${routerId}.entrypoints`, entrypoint);
+      addLabel(labels, `traefik.tcp.routers.${routerId}.rule`, "HostSNI(`*`)");
+      addLabel(
+        labels,
+        `traefik.tcp.services.${routerId}.loadbalancer.server.port`,
+        String(port.target),
+      );
+    } else {
+      addLabel(labels, `traefik.udp.routers.${routerId}.entrypoints`, entrypoint);
+      addLabel(
+        labels,
+        `traefik.udp.services.${routerId}.loadbalancer.server.port`,
+        String(port.target),
+      );
+    }
+  }
+}
+
 export function injectHostingLabels(payload: EnvironmentDeployPayload): {
   composeYaml: string;
   services: string[];
@@ -155,9 +213,6 @@ export function injectHostingLabels(payload: EnvironmentDeployPayload): {
 
   for (const hosting of payload.hostings) {
     assertRouterId(hosting.hostingId, "hostings[].hostingId");
-    if (hosting.hostnames.length === 0) {
-      throw new Error("hostings[].hostnames must not be empty");
-    }
     const service = services[hosting.composeServiceName];
     if (!isRecord(service)) {
       throw new Error(
@@ -166,23 +221,16 @@ export function injectHostingLabels(payload: EnvironmentDeployPayload): {
     }
 
     const labels = normalizeLabels(service.labels);
-    const routerId = hosting.hostingId;
     addLabel(labels, "traefik.enable", "true");
     addLabel(labels, "traefik.docker.network", INGRESS_NETWORK);
-    addLabel(
-      labels,
-      `traefik.http.routers.${routerId}.rule`,
-      buildRouterRule(hosting.hostnames, hosting.pathPrefix),
-    );
-    addLabel(
-      labels,
-      `traefik.http.services.${routerId}.loadbalancer.server.port`,
-      String(hosting.targetPort ?? 80),
-    );
+    if (hosting.protocol === "tcp" || hosting.protocol === "udp") {
+      applyTcpUdpHostingLabels(labels, hosting);
+    } else {
+      applyHttpHostingLabels(labels, hosting);
+    }
     addLabel(labels, "com.turbopanel.project", payload.projectId);
     addLabel(labels, "com.turbopanel.environment", payload.environmentId);
     addLabel(labels, "com.turbopanel.service", hosting.serviceId);
-    applyProxyMiddlewareLabels(labels, routerId, hosting.proxy);
     service.labels = labels;
     attachIngressNetwork(service);
   }
