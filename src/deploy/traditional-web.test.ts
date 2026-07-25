@@ -1,6 +1,5 @@
 import { assertEquals, assertStringIncludes, assertThrows } from "jsr:@std/assert";
 import {
-  apachePhpAdminDirectives,
   apacheSiteConfig,
   defaultIndexHtml,
   formatHostingEnvFile,
@@ -9,6 +8,11 @@ import {
   openlitespeedSiteFragment,
   openlitespeedSiteName,
   openlitespeedVhostConfig,
+  phpFpmPoolAdminDirectives,
+  phpFpmPoolConfig,
+  phpFpmPoolId,
+  phpFpmSocketPath,
+  PINNED_PHP_FPM_SERIES,
   resolveApachePhpVersion,
 } from "./traditional-web.ts";
 import { caddyHttpUpstream, siteSnippet } from "./ingress.ts";
@@ -24,6 +28,7 @@ async function makeTestLayout(): Promise<
       TURBOPANEL_STATE_DIR: `${root}/state`,
       TURBOPANEL_CONFIG_DIR: `${root}/config`,
       TURBOPANEL_LOG_DIR: `${root}/log`,
+      TURBOPANEL_RUN_DIR: `${root}/run`,
     },
     { skipDiscovery: true, forceMode: "production" },
   );
@@ -53,7 +58,9 @@ test("nginxSiteConfig listens on loopback only", () => {
   assertStringIncludes(conf, "root /var/lib/turbopanel/sites/env/site/public;");
 });
 
-test("apacheSiteConfig listens on loopback and applies PHP admin values", () => {
+test("apacheSiteConfig listens on loopback and proxies PHP to php-fpm", () => {
+  const socket =
+    "/run/turbopanel/php/tp-env-phpapp.sock";
   const conf = apacheSiteConfig(
     {
       composeServiceName: "phpapp",
@@ -64,22 +71,72 @@ test("apacheSiteConfig listens on loopback and applies PHP admin values", () => 
       php: { version: "8.4", memoryLimit: "256M", maxExecutionTime: 30 },
     },
     "/var/lib/turbopanel/sites/env/phpapp/public",
+    { phpFpmSocket: socket },
   );
   assertStringIncludes(conf, "Listen 127.0.0.1:18081");
-  assertStringIncludes(conf, "SetHandler application/x-httpd-php");
+  assertStringIncludes(
+    conf,
+    `SetHandler "proxy:unix:${socket}|fcgi://localhost/"`,
+  );
   assertStringIncludes(conf, 'SetEnv APP_ENV "production"');
-  assertStringIncludes(conf, "php_admin_value memory_limit 256M");
-  assertStringIncludes(conf, "php_admin_value max_execution_time 30");
+  assertStringIncludes(conf, "DirectoryIndex index.php index.html");
+  if (conf.includes("mod_php") || conf.includes("php_admin_value")) {
+    throw new Error("Apache vhost must use proxy_fcgi, not mod_php directives");
+  }
 });
 
-test("apachePhpAdminDirectives ignores unsafe memory values", () => {
+test("phpFpmPoolAdminDirectives ignores unsafe memory values", () => {
   assertEquals(
-    apachePhpAdminDirectives({ memoryLimit: "256M; rm -rf /" }),
+    phpFpmPoolAdminDirectives({ memoryLimit: "256M; rm -rf /" }),
     [],
   );
-  assertEquals(apachePhpAdminDirectives({ memoryLimit: "512M" }), [
-    "  php_admin_value memory_limit 512M",
+  assertEquals(phpFpmPoolAdminDirectives({ memoryLimit: "512M" }), [
+    "php_admin_value[memory_limit] = 512M",
   ]);
+  assertEquals(
+    phpFpmPoolAdminDirectives({ memoryLimit: "256M", maxExecutionTime: 30 }),
+    [
+      "php_admin_value[memory_limit] = 256M",
+      "php_admin_value[max_execution_time] = 30",
+    ],
+  );
+});
+
+test("phpFpmPoolConfig emits per-site socket and admin values", () => {
+  const conf = phpFpmPoolConfig(
+    "env1",
+    {
+      composeServiceName: "phpapp",
+      engine: "apache",
+      root: "public",
+      listenPort: 18081,
+      php: { version: "8.4", memoryLimit: "256M", maxExecutionTime: 30 },
+    },
+    "/var/lib/turbopanel/sites/env1/phpapp/public",
+    "/run/turbopanel/php/tp-env1-phpapp.sock",
+  );
+  assertStringIncludes(conf, "[tp-env1-phpapp]");
+  assertStringIncludes(conf, "listen = /run/turbopanel/php/tp-env1-phpapp.sock");
+  assertStringIncludes(conf, "user = tpapache");
+  assertStringIncludes(
+    conf,
+    "chdir = /var/lib/turbopanel/sites/env1/phpapp/public",
+  );
+  assertStringIncludes(conf, "php_admin_value[memory_limit] = 256M");
+  assertStringIncludes(conf, "php_admin_value[max_execution_time] = 30");
+});
+
+test("phpFpmPoolId and phpFpmSocketPath are stable under layout.runDir", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    assertEquals(phpFpmPoolId("env1", "app"), "tp-env1-app");
+    assertEquals(
+      phpFpmSocketPath(layout, "env1", "app"),
+      `${layout.runDir}/php/tp-env1-app.sock`,
+    );
+  } finally {
+    await cleanup();
+  }
 });
 
 test("resolveApachePhpVersion returns a single version or throws on conflict", () => {
@@ -94,6 +151,18 @@ test("resolveApachePhpVersion returns a single version or throws on conflict", (
       },
     ]),
     "8.4",
+  );
+  assertEquals(
+    resolveApachePhpVersion([
+      {
+        composeServiceName: "a",
+        engine: "apache",
+        root: "public",
+        listenPort: 18080,
+        php: { memoryLimit: "128M" },
+      },
+    ]),
+    PINNED_PHP_FPM_SERIES,
   );
   assertThrows(
     () =>
@@ -115,6 +184,20 @@ test("resolveApachePhpVersion returns a single version or throws on conflict", (
       ]),
     Error,
     "conflicting PHP versions",
+  );
+  assertThrows(
+    () =>
+      resolveApachePhpVersion([
+        {
+          composeServiceName: "a",
+          engine: "apache",
+          root: "public",
+          listenPort: 18080,
+          php: { version: "8.3" },
+        },
+      ]),
+    Error,
+    "is not vendored",
   );
 });
 

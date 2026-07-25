@@ -1,20 +1,20 @@
 ---
 # Runtimes always live under the FHS vendor tree (dev shares it with prod).
 turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/vendor"  # noqa: var-naming[no-role-prefix]
-# Pinned to the litespeedtech/openlitespeed GitHub release tag/asset naming.
-openlitespeed_version: "1.9.1"
-openlitespeed_release_tag: "v1.9.1"
+# Pinned nginx.org stable package (extracted with dpkg-deb -x — never apt-installed).
+nginx_version: "1.28.3"
+nginx_deb_version: "1.28.3-1~bookworm"
+# nginx.org still publishes bookworm packages; they run on Debian 13 (trixie).
+nginx_deb_dist: "bookworm"
 turbopanel_dev_user: ""  # noqa: var-naming[no-role-prefix]
 turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"  # noqa: var-naming[no-role-prefix]
 
-# Service identity (must match web-service-user's openlitespeed entry).
-openlitespeed_service_user: tpols
-openlitespeed_service_group: tpols
+# Service identity (must match web-service-user's nginx entry).
+nginx_service_user: tpnginx
+nginx_service_group: tpnginx
 
-# FHS mutable paths — decoupled from the vendored (read-mostly) tree via
-# symlinks so `current` can be repointed at a new version without losing
-# config/logs. Daemon TypeScript (src/deploy/traditional-web.ts) owns the
-# actual file contents under turbopanel_config_dir/openlitespeed.
+# FHS mutable paths — config/logs/state stay outside the versioned vendor tree.
 turbopanel_config_dir: "/etc/turbopanel"  # noqa: var-naming[no-role-prefix]
 turbopanel_log_dir: "/var/log/turbopanel"  # noqa: var-naming[no-role-prefix]
 turbopanel_state_dir: "/var/lib/turbopanel"  # noqa: var-naming[no-role-prefix]
+turbopanel_run_dir: "/run/turbopanel"  # noqa: var-naming[no-role-prefix]

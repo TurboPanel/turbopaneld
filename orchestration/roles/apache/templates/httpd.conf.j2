@@ -1,0 +1,55 @@
+# Managed by TurboPanel — do not edit by hand.
+# Site vhosts live in {{ turbopanel_config_dir }}/apache/sites/*.conf
+# (written by the daemon traditional-web apply path).
+
+ServerRoot "{{ turbopanel_vendor_dir }}/apache/current"
+PidFile "{{ turbopanel_run_dir }}/apache/httpd.pid"
+ServerName localhost
+ServerAdmin turbopanel@localhost
+
+User {{ apache_service_user }}
+Group {{ apache_service_group }}
+
+# MPM is built as a shared module (--enable-mpms-shared=event).
+# Remaining modules are shared (--enable-mods-shared=most).
+# PHP runs via vendored php-fpm + mod_proxy_fcgi (ASF httpd has no mod_php).
+LoadModule mpm_event_module modules/mod_mpm_event.so
+LoadModule authz_core_module modules/mod_authz_core.so
+LoadModule authz_host_module modules/mod_authz_host.so
+LoadModule dir_module modules/mod_dir.so
+LoadModule mime_module modules/mod_mime.so
+LoadModule env_module modules/mod_env.so
+LoadModule unixd_module modules/mod_unixd.so
+LoadModule alias_module modules/mod_alias.so
+LoadModule rewrite_module modules/mod_rewrite.so
+LoadModule headers_module modules/mod_headers.so
+LoadModule setenvif_module modules/mod_setenvif.so
+LoadModule log_config_module modules/mod_log_config.so
+LoadModule proxy_module modules/mod_proxy.so
+LoadModule proxy_fcgi_module modules/mod_proxy_fcgi.so
+
+TypesConfig conf/mime.types
+AddType application/x-compress .Z
+AddType application/x-gzip .gz .tgz
+
+DirectoryIndex index.html
+
+ErrorLog "{{ turbopanel_log_dir }}/apache/error.log"
+LogLevel notice
+CustomLog "{{ turbopanel_log_dir }}/apache/access.log" combined
+
+# Dummy document root (unused — each site sets its own DocumentRoot).
+DocumentRoot "{{ turbopanel_state_dir }}/apache/empty"
+<Directory "{{ turbopanel_state_dir }}/apache/empty">
+    Require all denied
+</Directory>
+
+# Hosting-edge Caddy owns public :80/:443. Traditional-web vhosts Listen on
+# loopback (and optionally docker-bridge) high ports only.
+#
+# Apache refuses to start with zero Listen sockets, so keep a bootstrap
+# loopback listener here. Per-site Listen directives are added by site
+# fragments under sites/*.conf.
+Listen 127.0.0.1:19080
+
+IncludeOptional {{ turbopanel_config_dir }}/apache/sites/*.conf

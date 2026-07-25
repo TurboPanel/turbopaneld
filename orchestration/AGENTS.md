@@ -38,7 +38,7 @@ wired into `daemon-converge.yml` (command-driven only, like `time-sync-apply`).
 
 ### Web-service user (`web-service-user`)
 
-Tenant/daemon-host web servers (nginx, Apache, OpenLiteSpeed, LiteSpeed enterprise) run under dedicated **99xx** system accounts — distinct from control-plane **tpcaddy(9993)**. The `web-service-user` role provisions **only** the group + system user (no package install). **Not** wired into `daemon-converge.yml`; `playbooks/traditional-web-apply.yml` (and future web-server install roles) `include_role` it on demand when a traditional-web site is deployed.
+Tenant/daemon-host web servers (nginx, Apache, OpenLiteSpeed, LiteSpeed enterprise) run under dedicated **99xx** system accounts — distinct from control-plane **tpcaddy(9993)**. The `web-service-user` role provisions **only** the group + system user (no package install). **Not** wired into `daemon-converge.yml`; traditional-web apply playbooks `include_role` it on demand when a traditional-web site is deployed, then vendor the matching engine role.
 
 | Service key | User / group | uid / gid |
 | ----------- | ------------ | --------- |
@@ -58,6 +58,76 @@ Each account uses primary group matching its username, `shell: /usr/sbin/nologin
 ```
 
 Override the map by passing `web_service_user`, `web_service_uid`, `web_service_group`, and `web_service_gid` directly instead of `web_service_key`. Canonical map: `roles/web-service-user/defaults/main.yml` → `web_service_user_map`.
+
+**All three engines are vendored** under
+`{{ turbopanel_vendor_dir }}/<tool>/<version>/` with a `current` symlink
+(same layout as `caddy`/`deno`/`node`/`redis`) — **never** `apt install
+nginx|apache2|openlitespeed`. Apply playbooks:
+
+| Engine | Playbook | Role | Systemd unit |
+| ------ | -------- | ---- | ------------ |
+| nginx | `traditional-web-apply.yml` | `nginx` | `turbopanel-nginx` |
+| apache | `traditional-web-apache-apply.yml` | `apache` (+ `php-fpm` when PHP) | `turbopanel-apache` (+ `turbopanel-php-fpm`) |
+| openlitespeed | `traditional-web-openlitespeed-apply.yml` | `openlitespeed` | `turbopanel-openlitespeed` |
+
+Site fragments live under `/etc/turbopanel/{nginx,apache,openlitespeed}/sites/`
+(and php-fpm pools under `/etc/turbopanel/php/pools/`) — daemon TypeScript owns
+the file contents (see `../src/deploy/traditional-web.ts` /
+`../src/deploy/AGENTS.md`). Leftover distro `nginx` / `apache2` / `php*-fpm`
+units are stopped/disabled when the vendor roles run so they cannot steal
+ports or config.
+
+### nginx (`nginx`)
+
+Vendored — **never** a distro package. The role downloads the pinned
+**nginx.org** Debian `.deb` (`nginx_deb_version`, bookworm pool — runs on
+Debian 13 too), extracts the binary with `dpkg-deb -x` (same pattern as the
+`redis` role / packages.redis.io), and installs
+`{{ turbopanel_vendor_dir }}/nginx/<version>/sbin/nginx` + `current`. Main
+config is templated to `/etc/turbopanel/nginx/nginx.conf` and
+`Include`s `/etc/turbopanel/nginx/sites/*.conf`. Temp paths / logs / pidfile
+are under `/var/lib|/var/log|/run/turbopanel/nginx/`. Driven by
+**`turbopanel-nginx.service`** (runs as `tpnginx`; high-port vhosts only —
+hosting-edge Caddy owns `:80`/`:443`).
+
+### Apache (`apache`)
+
+Vendored — **never** a distro package. The role downloads pinned ASF
+**httpd** + **APR** + **APR-util** source tarballs, builds them with
+`--prefix={{ turbopanel_vendor_dir }}/apache/<version>` (compile-time apt
+deps only: `build-essential`, `libssl-dev`, `libpcre2-dev`, … — not
+`apache2`), and points `current` at that tree. Main config is
+`/etc/turbopanel/apache/httpd.conf` with `IncludeOptional …/sites/*.conf`
+and loads `mod_proxy` + `mod_proxy_fcgi` for PHP. Driven by
+**`turbopanel-apache.service`** (master starts as root and drops to
+`tpapache` via `User`/`Group` in `httpd.conf`). Main config includes a
+bootstrap `Listen 127.0.0.1:19080` so httpd can start before any site
+fragment exists (Apache refuses zero-Listen configs). ASF httpd has **no**
+mod_php — PHP is the sibling `php-fpm` role below.
+
+### php-fpm (`php-fpm`)
+
+Vendored — **never** a distro package. Official PHP source has no relocatable
+prebuilt Linux binaries, so the role **compiles** the pinned release
+(`php_fpm_version`, series `php_fpm_series`) with `--enable-fpm` into
+`{{ turbopanel_vendor_dir }}/php/<version>/` plus `current` and
+`<series>` symlinks (idempotent short-circuit when `sbin/php-fpm` already
+exists). Compile-time apt deps only (`build-essential`, `libssl-dev`,
+`libxml2-dev`, … — not `php-fpm` / `libapache2-mod-php`). FHS layout:
+
+| Path | Owner | Mode | Purpose |
+| ---- | ----- | ---- | ------- |
+| `/etc/turbopanel/php/` | `root:tpapache` | `0750` | `php.ini`, `php-fpm.conf`, `conf.d/`, per-site `pools/*.conf` |
+| `/var/log/turbopanel/php/` | `tpapache:tpapache` | `0750` | `php-fpm.log` / `php-error.log` |
+| `/run/turbopanel/php/` | `tpapache:tpapache` | `0750` | pidfile + unix sockets |
+
+Driven by **`turbopanel-php-fpm.service`**. Workers run as **tpapache** (same
+identity as Apache — provisioned by `web-service-user` before this role).
+`traditional-web-apache-apply` includes this role only when the daemon passes
+`turbopanel_php_fpm_install: true` (Apache sites with `web.php` hints).
+Daemon TypeScript writes per-site pools and reloads the unit before Apache
+so `proxy:unix:…|fcgi://localhost/` sockets exist. One series per host for
+now (multi-version side-by-side is a future seam).
 
 ### OpenLiteSpeed (`openlitespeed`)
 

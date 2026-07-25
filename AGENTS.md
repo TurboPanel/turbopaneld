@@ -220,9 +220,11 @@ packaging (`package-daemon-release.sh` / `bundle-orchestration.sh` stage from
   and decrypted peer preshared keys live under `<daemonStateDir>/wireguard/` at
   mode `0600` (PSK files under `psk/`, deleted after apply) and never appear in
   Ansible `-e` extra-vars or leave the host. **`environment.deploy`** may carry
-  `traditionalWebSites[]` for host-native nginx sites (compose
-  `serviceKind: traditional-web`); see `src/deploy/AGENTS.md` and
-  `playbooks/traditional-web-apply.yml`.
+  `traditionalWebSites[]` for host-native nginx/Apache/OpenLiteSpeed sites
+  (compose `serviceKind: traditional-web`); engines are vendored under
+  `/opt/turbopanel/vendor/{nginx,apache,openlitespeed}` and Apache PHP via
+  vendored php-fpm under `/opt/turbopanel/vendor/php/` — see
+  `src/deploy/AGENTS.md` and `orchestration/AGENTS.md`.
 
 ## Subsystem docs (nested `AGENTS.md`)
 

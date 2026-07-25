@@ -125,37 +125,49 @@ Helpers: `src/deploy/ensure-docker.ts`, `src/deploy/ingress.ts`,
 `src/deploy/traditional-web.ts`, `src/deploy/traditional-web-docker.ts`,
 `src/deploy/ensure-docker-networks.ts`.
 
-### Traditional web (nginx + apache)
+### Traditional web (nginx + apache + OpenLiteSpeed)
 
 When `environment.deploy` carries `traditionalWebSites[]` (compose services with
 `x-turbopanel.serviceKind: traditional-web`), those services are **not** in
 Docker Compose. The daemon:
 
-1. Runs `playbooks/traditional-web-apply.yml` (apt `nginx` + `web-service-user`
-   for `tpnginx`) when any site uses `engine: nginx`.
-2. Runs `playbooks/traditional-web-apache-apply.yml` (apt `apache2` + optional
-   mod_php + `tpapache`) when any site uses `engine: apache`. PHP package is
-   `libapache2-mod-php<version>` when hosting `php.version` is set (e.g. `8.4`),
-   else distro default `libapache2-mod-php`. Conflicting versions across sites
-   in one deploy fail before apt.
-3. Materializes document roots under
+1. Runs `playbooks/traditional-web-apply.yml` (vendor `nginx` role +
+   `web-service-user` for `tpnginx`) when any site uses `engine: nginx`.
+2. Runs `playbooks/traditional-web-apache-apply.yml` (vendor `apache` role +
+   `tpapache`) when any site uses `engine: apache`. When any Apache site
+   carries hosting `web.php` hints, the playbook also vendors **php-fpm**
+   (`turbopanel_php_fpm_install=true`). Conflicting PHP series across sites
+   fail validation; only the pinned series (`PINNED_PHP_FPM_SERIES` /
+   `php_fpm_series`, currently **8.4**) is accepted. Per-site FPM pools under
+   `<configDir>/php/pools/tp-<environmentId>-<service>.conf` honor
+   `memoryLimit` / `maxExecutionTime` via `php_admin_value[…]`; Apache vhosts
+   `SetHandler "proxy:unix:…|fcgi://localhost/"` (mod_proxy_fcgi — **never**
+   mod_php). Metadata still lands in `.turbopanel/php.json`.
+3. Runs `playbooks/traditional-web-openlitespeed-apply.yml` (vendor
+   `openlitespeed` + `tpols`) when any site uses `engine: openlitespeed`.
+4. Materializes document roots under
    `<stateDir>/sites/<environmentId>/<composeServiceName>/<root>/` (default
    `public`; writes a placeholder `index.html` when empty). Merged hosting
    `webEnv` / `php` hints land in `<site>/.turbopanel/hosting.env` and
    `php.json`.
-4. Installs loopback-only vhosts — nginx under
-   `/etc/nginx/sites-enabled/tp-<environmentId>-<service>.conf` or Apache under
-   `/etc/apache2/sites-available/` + `a2ensite` — listening on
-   `127.0.0.1:<listenPort>`.
-5. Rewrites hosting Caddy so hostnames for those services
+5. Installs loopback-only vhosts under FHS config — nginx
+   `<configDir>/nginx/sites/tp-<environmentId>-<service>.conf`, Apache
+   `<configDir>/apache/sites/…`, OpenLiteSpeed fragments +
+   regenerated `httpd_config.conf` — listening on `127.0.0.1:<listenPort>`
+   (and optionally the docker bridge). Reloads `turbopanel-php-fpm` (when PHP
+   pools changed) then `turbopanel-nginx` / `turbopanel-apache` /
+   `turbopanel-openlitespeed` (never distro `nginx`/`apache2`/`php*-fpm`
+   units).
+6. Rewrites hosting Caddy so hostnames for those services
    `reverse_proxy 127.0.0.1:<listenPort>` instead of Traefik.
-6. Skips Docker/Traefik entirely when the payload has **no** container services
+7. Skips Docker/Traefik entirely when the payload has **no** container services
    (`composeYaml` is `services: {}`) — still ensures hosting-edge Caddy via
    `ensureHostingCaddyRuntime`.
 
-Apache sites enable `mod_php` when deploy payload includes PHP hints, and apply
-`memoryLimit` / `maxExecutionTime` as vhost `php_admin_value` directives.
-Static env vars from the payload are written as `SetEnv` in the vhost.
+All three engines (plus php-fpm for Apache PHP) are vendored under
+`/opt/turbopanel/vendor/<tool>/<version>/` with a `current` symlink — **never**
+distro apt packages. See `../../orchestration/AGENTS.md` (Tenant/daemon-host
+web servers).
 
 **Mixed Docker + traditional-web:** when an environment deploy includes both
 container services and `traditionalWebSites[]`, the daemon (1) binds each
@@ -171,23 +183,17 @@ registered in the org network table (`kind: docker`, `options.dockerNetworkName`
 for the deploy server. Payload `dockerExternalNetworks[]` is ensured with
 `docker network create` before compose up (`ensure-docker-networks.ts`).
 
-`environment.stop` removes nginx, Apache, and OpenLiteSpeed site
+`environment.stop` removes nginx, Apache, php-fpm pool, and OpenLiteSpeed site
 fragments/vhost dirs (best-effort reload/regenerate) in addition to compose
 down + hosting Caddy site removal.
 
-**OpenLiteSpeed** is vendored under `/opt/turbopanel/vendor/openlitespeed`
-(never a distro package) by the `openlitespeed` Ansible role — see
-`../../orchestration/AGENTS.md` (Tenant/daemon-host web servers) for the
-`tpols` service identity. Unlike nginx/apache (`sites-enabled` /
-`a2ensite`), OpenLiteSpeed has no per-site config directory convention: the
-daemon keeps one fragment per active site under
-`<configDir>/openlitespeed/sites/` and regenerates the whole
-`httpd_config.conf` from every fragment on each apply/remove
-(`openlitespeedMainConfig`), then `systemctl restart
-turbopanel-openlitespeed`. It is static-only for now — no PHP/env hints
-(parity with nginx; PHP stays Apache/mod_php only).
+**OpenLiteSpeed** regenerates a whole `httpd_config.conf` from every fragment
+under `<configDir>/openlitespeed/sites/` on each apply/remove (no
+`sites-enabled` convention). It is static-only for now — no PHP/env hints
+(parity with nginx).
 
-Future seams (not MVP): multi-server service placement, swarm-style replicas, ACME
-issuance on the daemon, docker↔traditional-web networking. WireGuard mesh apply is
-handled by `server.wireguard.apply` — see `src/instance/commands/wireguard.ts`
-and `../../orchestration/AGENTS.md` (WireGuard).
+Future seams (not MVP): multi-version PHP side-by-side, OLS/nginx PHP,
+multi-server service placement, swarm-style replicas, ACME issuance on the
+daemon. WireGuard mesh apply is handled by `server.wireguard.apply` — see
+`src/instance/commands/wireguard.ts` and `../../orchestration/AGENTS.md`
+(WireGuard).

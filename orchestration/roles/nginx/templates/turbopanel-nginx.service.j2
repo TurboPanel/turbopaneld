@@ -1,0 +1,19 @@
+[Unit]
+Description=TurboPanel nginx (traditional-web static hosting)
+After=network.target
+# Prefer the vendored unit over any leftover distro nginx package unit.
+Conflicts=nginx.service
+
+[Service]
+Type=forking
+User={{ nginx_service_user }}
+Group={{ nginx_service_group }}
+PIDFile={{ turbopanel_run_dir }}/nginx/nginx.pid
+ExecStart={{ turbopanel_vendor_dir }}/nginx/current/sbin/nginx -c {{ turbopanel_config_dir }}/nginx/nginx.conf
+ExecReload={{ turbopanel_vendor_dir }}/nginx/current/sbin/nginx -c {{ turbopanel_config_dir }}/nginx/nginx.conf -s reload
+ExecStop={{ turbopanel_vendor_dir }}/nginx/current/sbin/nginx -c {{ turbopanel_config_dir }}/nginx/nginx.conf -s quit
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

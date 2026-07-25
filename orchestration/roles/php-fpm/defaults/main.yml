@@ -1,0 +1,22 @@
+---
+# Runtimes always live under the FHS vendor tree (dev shares it with prod).
+turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/vendor"  # noqa: var-naming[no-role-prefix]
+# Official PHP source build into vendor — never apt install php-fpm / libapache2-mod-php.
+# Series (major.minor) is what hosting `web.php.version` requests; patch is the pin.
+php_fpm_version: "8.4.23"
+php_fpm_series: "8.4"
+php_fpm_url: "https://www.php.net/distributions/php-{{ php_fpm_version }}.tar.xz"
+turbopanel_dev_user: ""  # noqa: var-naming[no-role-prefix]
+turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"  # noqa: var-naming[no-role-prefix]
+
+# Runs as tpapache so document roots + Apache proxy_fcgi unix sockets share an identity
+# (must match web-service-user's apache entry — provisioned by traditional-web-apache-apply).
+php_fpm_service_user: tpapache
+php_fpm_service_group: tpapache
+
+# FHS mutable paths — config/logs/state stay outside the versioned vendor tree.
+# Per-site pool fragments are written by src/deploy/traditional-web.ts under pools/.
+turbopanel_config_dir: "/etc/turbopanel"  # noqa: var-naming[no-role-prefix]
+turbopanel_log_dir: "/var/log/turbopanel"  # noqa: var-naming[no-role-prefix]
+turbopanel_state_dir: "/var/lib/turbopanel"  # noqa: var-naming[no-role-prefix]
+turbopanel_run_dir: "/run/turbopanel"  # noqa: var-naming[no-role-prefix]

@@ -730,3 +730,89 @@ test("wireguard template renders ListenPort for numeric listen port", async () =
 
   await Deno.remove(tmpDir, { recursive: true });
 });
+
+test("traditional-web apply playbooks vendor engines (never apt nginx/apache2)", async () => {
+  const nginxPlaybook = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "playbooks/traditional-web-apply.yml"),
+  );
+  const apachePlaybook = await Deno.readTextFile(
+    join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "playbooks/traditional-web-apache-apply.yml",
+    ),
+  );
+  const olsPlaybook = await Deno.readTextFile(
+    join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "playbooks/traditional-web-openlitespeed-apply.yml",
+    ),
+  );
+
+  assertEquals(nginxPlaybook.includes("name: nginx"), true);
+  assertEquals(apachePlaybook.includes("name: apache"), true);
+  assertEquals(apachePlaybook.includes("name: php-fpm"), true);
+  assertEquals(olsPlaybook.includes("name: openlitespeed"), true);
+
+  // Distro package installs must stay gone — engines come from vendor roles.
+  for (const [label, body] of [
+    ["nginx", nginxPlaybook],
+    ["apache", apachePlaybook],
+    ["openlitespeed", olsPlaybook],
+  ] as const) {
+    if (/ansible\.builtin\.apt:/.test(body)) {
+      throw new Error(
+        `traditional-web ${label} playbook must not apt-install packages`,
+      );
+    }
+    if (/\bname:\s*nginx\b/.test(body) && label === "nginx" && /apt:/.test(body)) {
+      throw new Error("traditional-web nginx playbook must not apt install nginx");
+    }
+    if (body.includes("apache2") || body.includes("libapache2-mod-php")) {
+      throw new Error(
+        `traditional-web ${label} playbook must not reference distro apache2 packages`,
+      );
+    }
+  }
+
+  const nginxDefaults = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/nginx/defaults/main.yml"),
+  );
+  const apacheDefaults = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/apache/defaults/main.yml"),
+  );
+  const phpFpmDefaults = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/php-fpm/defaults/main.yml"),
+  );
+  assertMatch(nginxDefaults, /nginx_version:\s*"1\.\d+\.\d+"/, "nginx pin");
+  assertMatch(apacheDefaults, /apache_version:\s*"2\.\d+\.\d+"/, "apache pin");
+  assertMatch(phpFpmDefaults, /php_fpm_version:\s*"8\.\d+\.\d+"/, "php-fpm pin");
+  assertMatch(phpFpmDefaults, /php_fpm_series:\s*"8\.\d+"/, "php-fpm series");
+
+  const nginxUnit = await Deno.readTextFile(
+    join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/nginx/templates/turbopanel-nginx.service.j2",
+    ),
+  );
+  const apacheUnit = await Deno.readTextFile(
+    join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/apache/templates/turbopanel-apache.service.j2",
+    ),
+  );
+  const phpFpmUnit = await Deno.readTextFile(
+    join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/php-fpm/templates/turbopanel-php-fpm.service.j2",
+    ),
+  );
+  assertEquals(nginxUnit.includes("turbopanel_vendor_dir }}/nginx/current"), true);
+  assertEquals(
+    apacheUnit.includes("turbopanel_vendor_dir }}/apache/current"),
+    true,
+  );
+  assertEquals(
+    phpFpmUnit.includes("turbopanel_vendor_dir }}/php/current"),
+    true,
+  );
+});

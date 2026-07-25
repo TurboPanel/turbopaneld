@@ -1,0 +1,171 @@
+---
+# Vendors the official nginx.org Debian package binary via dpkg-deb -x —
+# never `apt install nginx`, never the distro nginx unit. Mirrors the redis
+# role (packages.redis.io .deb extract) and the openlitespeed/caddy vendor
+# layout: `vendor/nginx/<version>/` + `current` symlink.
+#
+# Config/logs/state live under FHS (`/etc|/var/log|/var/lib|/run/turbopanel/nginx`)
+# so version upgrades do not lose site fragments written by
+# `src/deploy/traditional-web.ts`.
+- name: Assert supported CPU architecture
+  ansible.builtin.assert:
+    that:
+      - ansible_architecture in ['aarch64', 'x86_64']
+    fail_msg: >-
+      Unsupported CPU architecture '{{ ansible_architecture }}'.
+      TurboPanel supports 64-bit Linux only: aarch64 (arm64), x86_64 (amd64).
+
+- name: Resolve nginx .deb architecture
+  ansible.builtin.set_fact:
+    nginx_deb_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
+
+- name: Check vendored nginx binary
+  ansible.builtin.stat:
+    path: "{{ turbopanel_vendor_dir }}/nginx/{{ nginx_version }}/sbin/nginx"
+  register: _nginx_pinned
+
+- name: Install nginx into runtimes directory
+  when: not _nginx_pinned.stat.exists
+  ansible.builtin.shell: |
+    set -euo pipefail
+    NGINX_VER="{{ nginx_version }}"
+    DEB_VER="{{ nginx_deb_version }}"
+    DEB_ARCH="{{ nginx_deb_arch }}"
+    DEB_DIST="{{ nginx_deb_dist }}"
+    TMP="$(mktemp -d)"
+    DEST="{{ turbopanel_vendor_dir }}/nginx/${NGINX_VER}"
+    DEB_URL="https://nginx.org/packages/debian/pool/nginx/n/nginx/nginx_${DEB_VER}_${DEB_ARCH}.deb"
+    curl -fsSL -o "$TMP/nginx.deb" "$DEB_URL"
+    dpkg-deb -x "$TMP/nginx.deb" "$TMP/extract"
+    install -d "$DEST/sbin"
+    install -m 0750 "$TMP/extract/usr/sbin/nginx" "$DEST/sbin/nginx"
+    # Seed mime.types into FHS config on first install only (force=false below).
+    if [ ! -f "{{ turbopanel_config_dir }}/nginx/mime.types" ]; then
+      install -d "{{ turbopanel_config_dir }}/nginx"
+      install -m 0640 "$TMP/extract/etc/nginx/mime.types" \
+        "{{ turbopanel_config_dir }}/nginx/mime.types"
+    fi
+    rm -rf "$TMP"
+  args:
+    creates: "{{ turbopanel_vendor_dir }}/nginx/{{ nginx_version }}/sbin/nginx"
+
+- name: Harden nginx binary permissions
+  ansible.builtin.file:
+    path: "{{ turbopanel_vendor_dir }}/nginx/{{ nginx_version }}/sbin/nginx"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
+- name: Point nginx current symlink at pinned version
+  ansible.builtin.file:
+    src: "{{ turbopanel_vendor_dir }}/nginx/{{ nginx_version }}"
+    dest: "{{ turbopanel_vendor_dir }}/nginx/current"
+    state: link
+    force: true
+
+- name: Ensure FHS nginx config directories
+  ansible.builtin.file:
+    path: "{{ turbopanel_config_dir }}/nginx/{{ item }}"
+    state: directory
+    owner: root
+    group: "{{ nginx_service_group }}"
+    mode: "0750"
+  loop:
+    - ""
+    - sites
+
+- name: Ensure mime.types exists (fallback when extract seed was skipped)
+  ansible.builtin.copy:
+    dest: "{{ turbopanel_config_dir }}/nginx/mime.types"
+    owner: root
+    group: "{{ nginx_service_group }}"
+    mode: "0640"
+    force: false
+    content: |
+      types {
+          text/html                             html htm shtml;
+          text/css                              css;
+          text/xml                              xml;
+          image/gif                             gif;
+          image/jpeg                            jpeg jpg;
+          application/javascript                js;
+          application/json                      json;
+          image/png                             png;
+          image/svg+xml                         svg svgz;
+          application/font-woff                 woff;
+          font/woff2                            woff2;
+          application/octet-stream              bin exe dll;
+      }
+
+- name: Harden mime.types ownership
+  ansible.builtin.file:
+    path: "{{ turbopanel_config_dir }}/nginx/mime.types"
+    owner: root
+    group: "{{ nginx_service_group }}"
+    mode: "0640"
+
+- name: Ensure nginx log directory
+  ansible.builtin.file:
+    path: "{{ turbopanel_log_dir }}/nginx"
+    state: directory
+    owner: "{{ nginx_service_user }}"
+    group: "{{ nginx_service_group }}"
+    mode: "0750"
+
+- name: Ensure nginx state directories (temp paths)
+  ansible.builtin.file:
+    path: "{{ turbopanel_state_dir }}/nginx/{{ item }}"
+    state: directory
+    owner: "{{ nginx_service_user }}"
+    group: "{{ nginx_service_group }}"
+    mode: "0750"
+  loop:
+    - ""
+    - client_temp
+    - proxy_temp
+    - fastcgi_temp
+    - uwsgi_temp
+    - scgi_temp
+
+- name: Ensure nginx runtime directory (pidfile)
+  ansible.builtin.file:
+    path: "{{ turbopanel_run_dir }}/nginx"
+    state: directory
+    owner: "{{ nginx_service_user }}"
+    group: "{{ nginx_service_group }}"
+    mode: "0750"
+
+- name: Install TurboPanel nginx main config
+  ansible.builtin.template:
+    src: nginx.conf.j2
+    dest: "{{ turbopanel_config_dir }}/nginx/nginx.conf"
+    owner: root
+    group: "{{ nginx_service_group }}"
+    mode: "0640"
+
+- name: Install turbopanel-nginx systemd unit
+  ansible.builtin.template:
+    src: turbopanel-nginx.service.j2
+    dest: /etc/systemd/system/turbopanel-nginx.service
+    owner: root
+    group: root
+    mode: "0640"
+  register: _nginx_unit
+
+- name: Reload systemd after nginx unit change
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: _nginx_unit.changed # noqa: no-handler
+
+- name: Stop and disable leftover distro nginx unit when present
+  ansible.builtin.systemd:
+    name: nginx
+    state: stopped
+    enabled: false
+  failed_when: false
+
+- name: Ensure turbopanel-nginx is enabled
+  ansible.builtin.systemd:
+    name: turbopanel-nginx
+    enabled: true
+    daemon_reload: true

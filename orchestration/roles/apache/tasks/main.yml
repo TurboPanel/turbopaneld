@@ -1,0 +1,177 @@
+---
+# Builds pinned ASF httpd (+ APR / APR-util) from source into
+# `vendor/apache/<version>/` with a `current` symlink — never
+# `apt install apache2`, never the distro apache2 unit. Compile-time host
+# packages (build-essential, libssl-dev, …) are install-deps only; the
+# resulting binary tree is TurboPanel-owned under /opt/turbopanel/vendor.
+#
+# Config/logs/state live under FHS so version upgrades do not lose site
+# fragments written by `src/deploy/traditional-web.ts`. PHP is not built into
+# httpd — the sibling `php-fpm` role vendors php-fpm; site configs use
+# mod_proxy_fcgi (loaded in httpd.conf).
+- name: Assert supported CPU architecture
+  ansible.builtin.assert:
+    that:
+      - ansible_architecture in ['aarch64', 'x86_64']
+    fail_msg: >-
+      Unsupported CPU architecture '{{ ansible_architecture }}'.
+      TurboPanel supports 64-bit Linux only: aarch64 (arm64), x86_64 (amd64).
+
+- name: Check vendored Apache httpd binary
+  ansible.builtin.stat:
+    path: "{{ turbopanel_vendor_dir }}/apache/{{ apache_version }}/bin/httpd"
+  register: _apache_pinned
+
+- name: Install Apache build dependencies (compile-time only; not apache2)
+  ansible.builtin.apt:
+    name:
+      - build-essential
+      - libexpat1-dev
+      - libpcre2-dev
+      - libssl-dev
+      - zlib1g-dev
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  when: not _apache_pinned.stat.exists
+
+- name: Build and install Apache httpd into runtimes directory
+  when: not _apache_pinned.stat.exists
+  ansible.builtin.shell: |
+    set -euo pipefail
+    HTTPD_VER="{{ apache_version }}"
+    APR_VER="{{ apache_apr_version }}"
+    APU_VER="{{ apache_apr_util_version }}"
+    DEST="{{ turbopanel_vendor_dir }}/apache/${HTTPD_VER}"
+    TMP="$(mktemp -d)"
+    trap 'rm -rf "$TMP"' EXIT
+
+    curl -fsSL -o "$TMP/httpd.tar.gz" "{{ apache_httpd_url }}"
+    curl -fsSL -o "$TMP/apr.tar.gz" "{{ apache_apr_url }}"
+    curl -fsSL -o "$TMP/apr-util.tar.gz" "{{ apache_apr_util_url }}"
+
+    tar -xzf "$TMP/httpd.tar.gz" -C "$TMP"
+    tar -xzf "$TMP/apr.tar.gz" -C "$TMP"
+    tar -xzf "$TMP/apr-util.tar.gz" -C "$TMP"
+
+    mv "$TMP/apr-${APR_VER}" "$TMP/httpd-${HTTPD_VER}/srclib/apr"
+    mv "$TMP/apr-util-${APU_VER}" "$TMP/httpd-${HTTPD_VER}/srclib/apr-util"
+
+    cd "$TMP/httpd-${HTTPD_VER}"
+    ./configure \
+      --prefix="${DEST}" \
+      --with-included-apr \
+      --enable-mpms-shared=event \
+      --with-mpm=event \
+      --enable-mods-shared=most \
+      --enable-so \
+      --disable-imagemap
+    make -j"$(nproc)"
+    make install
+
+    # Drop ASF default htdocs/manual noise from the vendor tree — sites use
+    # FHS document roots under turbopanel_state_dir/sites/.
+    rm -rf "${DEST}/manual" "${DEST}/htdocs" "${DEST}/cgi-bin" || true
+    install -d "${DEST}/htdocs"
+  args:
+    creates: "{{ turbopanel_vendor_dir }}/apache/{{ apache_version }}/bin/httpd"
+
+- name: Harden Apache httpd binary permissions
+  ansible.builtin.file:
+    path: "{{ turbopanel_vendor_dir }}/apache/{{ apache_version }}/bin/httpd"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
+- name: Point Apache current symlink at pinned version
+  ansible.builtin.file:
+    src: "{{ turbopanel_vendor_dir }}/apache/{{ apache_version }}"
+    dest: "{{ turbopanel_vendor_dir }}/apache/current"
+    state: link
+    force: true
+
+- name: Ensure FHS Apache config directories
+  ansible.builtin.file:
+    path: "{{ turbopanel_config_dir }}/apache/{{ item }}"
+    state: directory
+    owner: root
+    group: "{{ apache_service_group }}"
+    mode: "0750"
+  loop:
+    - ""
+    - sites
+
+- name: Ensure Apache log directory
+  ansible.builtin.file:
+    path: "{{ turbopanel_log_dir }}/apache"
+    state: directory
+    owner: "{{ apache_service_user }}"
+    group: "{{ apache_service_group }}"
+    mode: "0750"
+
+- name: Ensure Apache log files exist with service ownership
+  ansible.builtin.file:
+    path: "{{ turbopanel_log_dir }}/apache/{{ item }}"
+    state: touch
+    owner: "{{ apache_service_user }}"
+    group: "{{ apache_service_group }}"
+    mode: "0640"
+    modification_time: preserve
+    access_time: preserve
+  loop:
+    - error.log
+    - access.log
+
+- name: Ensure Apache state directories
+  ansible.builtin.file:
+    path: "{{ turbopanel_state_dir }}/apache/{{ item }}"
+    state: directory
+    owner: "{{ apache_service_user }}"
+    group: "{{ apache_service_group }}"
+    mode: "0750"
+  loop:
+    - ""
+    - empty
+
+- name: Ensure Apache runtime directory (pidfile)
+  ansible.builtin.file:
+    path: "{{ turbopanel_run_dir }}/apache"
+    state: directory
+    owner: "{{ apache_service_user }}"
+    group: "{{ apache_service_group }}"
+    mode: "0750"
+
+- name: Install TurboPanel Apache main config
+  ansible.builtin.template:
+    src: httpd.conf.j2
+    dest: "{{ turbopanel_config_dir }}/apache/httpd.conf"
+    owner: root
+    group: "{{ apache_service_group }}"
+    mode: "0640"
+
+- name: Install turbopanel-apache systemd unit
+  ansible.builtin.template:
+    src: turbopanel-apache.service.j2
+    dest: /etc/systemd/system/turbopanel-apache.service
+    owner: root
+    group: root
+    mode: "0640"
+  register: _apache_unit
+
+- name: Reload systemd after Apache unit change
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: _apache_unit.changed # noqa: no-handler
+
+- name: Stop and disable leftover distro apache2 unit when present
+  ansible.builtin.systemd:
+    name: apache2
+    state: stopped
+    enabled: false
+  failed_when: false
+
+- name: Ensure turbopanel-apache is enabled
+  ansible.builtin.systemd:
+    name: turbopanel-apache
+    enabled: true
+    daemon_reload: true

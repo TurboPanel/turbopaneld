@@ -1,0 +1,21 @@
+[Unit]
+Description=TurboPanel Apache httpd (traditional-web hosting)
+After=network.target
+# Prefer the vendored unit over any leftover distro apache2 package unit.
+Conflicts=apache2.service
+
+[Service]
+Type=forking
+# Master starts as root and drops to User/Group from httpd.conf (tpapache).
+# Running the whole unit as tpapache cannot open ErrorLog when the file was
+# root-created, and matches neither the distro apache2 model nor our need to
+# open FHS paths owned root:tpapache mode 0640.
+PIDFile={{ turbopanel_run_dir }}/apache/httpd.pid
+ExecStart={{ turbopanel_vendor_dir }}/apache/current/bin/httpd -f {{ turbopanel_config_dir }}/apache/httpd.conf -k start
+ExecReload={{ turbopanel_vendor_dir }}/apache/current/bin/httpd -f {{ turbopanel_config_dir }}/apache/httpd.conf -k graceful
+ExecStop={{ turbopanel_vendor_dir }}/apache/current/bin/httpd -f {{ turbopanel_config_dir }}/apache/httpd.conf -k graceful-stop
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

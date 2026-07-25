@@ -1,0 +1,215 @@
+---
+# Builds pinned official PHP (+ php-fpm) from source into
+# `vendor/php/<version>/` with a `current` symlink — never
+# `apt install php-fpm` / `libapache2-mod-php`. Compile-time host packages
+# (build-essential, libssl-dev, …) are install-deps only; the resulting binary
+# tree is TurboPanel-owned under /opt/turbopanel/vendor.
+#
+# Config/logs/state live under FHS so version upgrades do not lose per-site
+# pool fragments written by `src/deploy/traditional-web.ts`. Apache talks to
+# php-fpm over unix sockets via mod_proxy_fcgi (not mod_php).
+- name: Assert supported CPU architecture
+  ansible.builtin.assert:
+    that:
+      - ansible_architecture in ['aarch64', 'x86_64']
+    fail_msg: >-
+      Unsupported CPU architecture '{{ ansible_architecture }}'.
+      TurboPanel supports 64-bit Linux only: aarch64 (arm64), x86_64 (amd64).
+
+- name: Check vendored php-fpm binary
+  ansible.builtin.stat:
+    path: "{{ turbopanel_vendor_dir }}/php/{{ php_fpm_version }}/sbin/php-fpm"
+  register: _php_fpm_pinned
+
+- name: Install PHP build dependencies (compile-time only; not php-fpm packages)
+  ansible.builtin.apt:
+    name:
+      - build-essential
+      - pkg-config
+      - autoconf
+      - bison
+      - re2c
+      - libxml2-dev
+      - libssl-dev
+      - libcurl4-openssl-dev
+      - libsqlite3-dev
+      - libonig-dev
+      - libzip-dev
+      - zlib1g-dev
+      - libpng-dev
+      - libjpeg62-turbo-dev
+      - libfreetype6-dev
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  when: not _php_fpm_pinned.stat.exists
+
+- name: Build and install PHP + php-fpm into runtimes directory
+  when: not _php_fpm_pinned.stat.exists
+  ansible.builtin.shell: |
+    set -euo pipefail
+    PHP_VER="{{ php_fpm_version }}"
+    DEST="{{ turbopanel_vendor_dir }}/php/${PHP_VER}"
+    TMP="$(mktemp -d)"
+    trap 'rm -rf "$TMP"' EXIT
+
+    curl -fsSL -o "$TMP/php.tar.xz" "{{ php_fpm_url }}"
+    tar -xJf "$TMP/php.tar.xz" -C "$TMP"
+
+    cd "$TMP/php-${PHP_VER}"
+    ./configure \
+      --prefix="${DEST}" \
+      --sysconfdir="{{ turbopanel_config_dir }}/php" \
+      --with-config-file-path="{{ turbopanel_config_dir }}/php" \
+      --with-config-file-scan-dir="{{ turbopanel_config_dir }}/php/conf.d" \
+      --enable-fpm \
+      --with-fpm-user="{{ php_fpm_service_user }}" \
+      --with-fpm-group="{{ php_fpm_service_group }}" \
+      --disable-cgi \
+      --enable-cli \
+      --enable-opcache \
+      --enable-mbstring \
+      --enable-bcmath \
+      --with-openssl \
+      --with-zlib \
+      --with-curl \
+      --with-zip \
+      --with-pdo-mysql \
+      --with-mysqli \
+      --with-pdo-sqlite \
+      --with-sqlite3 \
+      --enable-gd \
+      --with-freetype \
+      --with-jpeg
+    make -j"$(nproc)"
+    make install
+
+    # Drop PEAR/docs noise from the vendor tree — sites use FHS document roots.
+    rm -rf "${DEST}/php" "${DEST}/man" || true
+  args:
+    creates: "{{ turbopanel_vendor_dir }}/php/{{ php_fpm_version }}/sbin/php-fpm"
+
+- name: Harden php-fpm binary permissions
+  ansible.builtin.file:
+    path: "{{ turbopanel_vendor_dir }}/php/{{ php_fpm_version }}/sbin/php-fpm"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
+- name: Harden php CLI binary permissions
+  ansible.builtin.file:
+    path: "{{ turbopanel_vendor_dir }}/php/{{ php_fpm_version }}/bin/php"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
+- name: Point PHP current symlink at pinned version
+  ansible.builtin.file:
+    src: "{{ turbopanel_vendor_dir }}/php/{{ php_fpm_version }}"
+    dest: "{{ turbopanel_vendor_dir }}/php/current"
+    state: link
+    force: true
+
+- name: Point PHP series symlink at pinned version
+  ansible.builtin.file:
+    src: "{{ turbopanel_vendor_dir }}/php/{{ php_fpm_version }}"
+    dest: "{{ turbopanel_vendor_dir }}/php/{{ php_fpm_series }}"
+    state: link
+    force: true
+
+- name: Ensure FHS PHP config directories
+  ansible.builtin.file:
+    path: "{{ turbopanel_config_dir }}/php/{{ item }}"
+    state: directory
+    owner: root
+    group: "{{ php_fpm_service_group }}"
+    mode: "0750"
+  loop:
+    - ""
+    - pools
+    - conf.d
+
+- name: Ensure PHP log directory
+  ansible.builtin.file:
+    path: "{{ turbopanel_log_dir }}/php"
+    state: directory
+    owner: "{{ php_fpm_service_user }}"
+    group: "{{ php_fpm_service_group }}"
+    mode: "0750"
+
+- name: Ensure PHP log files exist with service ownership
+  ansible.builtin.file:
+    path: "{{ turbopanel_log_dir }}/php/{{ item }}"
+    state: touch
+    owner: "{{ php_fpm_service_user }}"
+    group: "{{ php_fpm_service_group }}"
+    mode: "0640"
+    modification_time: preserve
+    access_time: preserve
+  loop:
+    - php-fpm.log
+    - php-error.log
+
+- name: Ensure PHP runtime directory (pidfile + sockets)
+  ansible.builtin.file:
+    path: "{{ turbopanel_run_dir }}/php"
+    state: directory
+    owner: "{{ php_fpm_service_user }}"
+    group: "{{ php_fpm_service_group }}"
+    mode: "0750"
+
+- name: Install TurboPanel php.ini
+  ansible.builtin.template:
+    src: php.ini.j2
+    dest: "{{ turbopanel_config_dir }}/php/php.ini"
+    owner: root
+    group: "{{ php_fpm_service_group }}"
+    mode: "0640"
+
+- name: Install TurboPanel php-fpm main config
+  ansible.builtin.template:
+    src: php-fpm.conf.j2
+    dest: "{{ turbopanel_config_dir }}/php/php-fpm.conf"
+    owner: root
+    group: "{{ php_fpm_service_group }}"
+    mode: "0640"
+
+- name: Install bootstrap default php-fpm pool
+  ansible.builtin.template:
+    src: default-pool.conf.j2
+    dest: "{{ turbopanel_config_dir }}/php/pools/default.conf"
+    owner: root
+    group: "{{ php_fpm_service_group }}"
+    mode: "0640"
+
+- name: Install turbopanel-php-fpm systemd unit
+  ansible.builtin.template:
+    src: turbopanel-php-fpm.service.j2
+    dest: /etc/systemd/system/turbopanel-php-fpm.service
+    owner: root
+    group: root
+    mode: "0640"
+  register: _php_fpm_unit
+
+- name: Reload systemd after php-fpm unit change
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: _php_fpm_unit.changed # noqa: no-handler
+
+- name: Stop and disable leftover distro php-fpm units when present
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+  failed_when: false
+  loop:
+    - php8.4-fpm
+    - php8.3-fpm
+    - php-fpm
+
+- name: Ensure turbopanel-php-fpm is enabled and started
+  ansible.builtin.systemd:
+    name: turbopanel-php-fpm
+    enabled: true
+    state: started
+    daemon_reload: true

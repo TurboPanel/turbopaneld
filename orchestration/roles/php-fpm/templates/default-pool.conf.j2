@@ -1,0 +1,15 @@
+; Bootstrap pool so php-fpm can start before any traditional-web site pools exist.
+; Site traffic uses per-site sockets under the same run directory — not this one.
+[default]
+user = {{ php_fpm_service_user }}
+group = {{ php_fpm_service_group }}
+listen = {{ turbopanel_run_dir }}/php/default.sock
+listen.owner = {{ php_fpm_service_user }}
+listen.group = {{ php_fpm_service_group }}
+listen.mode = 0660
+pm = ondemand
+pm.max_children = 2
+pm.process_idle_timeout = 10s
+chdir = /
+catch_workers_output = yes
+decorate_workers_output = no
