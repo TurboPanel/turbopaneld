@@ -6,6 +6,11 @@
 #   wireguard_listen_port (optional)
 #   wireguard_peers
 #   wireguard_configure (bool; false = package install only)
+#   wireguard_ip_forward (bool; desired host-wide sysctl forwarding state —
+#     the OR across every managed interface, computed by the daemon)
+#   wireguard_manage_forwarding (bool; true = reconcile ip_forward sysctls on
+#     this run; the daemon omits this for bootstrap/tools-only runs so a call
+#     with no host-wide interface knowledge cannot reset current state)
 - name: TurboPanel WireGuard apply
   hosts: localhost
   connection: local

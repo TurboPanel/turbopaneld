@@ -510,6 +510,20 @@ export type WireguardApplyOpts = {
   listenPort?: number;
   peers: WireguardApplyPeerOpts[];
   configure?: boolean;
+  /**
+   * Desired host-wide sysctl forwarding state — the OR across every managed
+   * WireGuard interface on this host, computed by the daemon (never just
+   * this one interface's own gateway role). Only meaningful alongside
+   * `manageForwarding: true`.
+   */
+  enableIpForwarding?: boolean;
+  /**
+   * When true, reconcile `net.ipv4.ip_forward` / `net.ipv6.conf.all.forwarding`
+   * to match `enableIpForwarding` on this run. Bootstrap/tools-only runs must
+   * omit this (leave current sysctl state untouched) since they have no
+   * host-wide interface knowledge.
+   */
+  manageForwarding?: boolean;
 };
 
 export function buildWireguardApplyExtraArgs(opts: WireguardApplyOpts): string[] {
@@ -519,6 +533,8 @@ export function buildWireguardApplyExtraArgs(opts: WireguardApplyOpts): string[]
     wireguard_private_key_file: opts.privateKeyFile,
     wireguard_peers: opts.peers,
     wireguard_configure: opts.configure !== false,
+    wireguard_ip_forward: opts.enableIpForwarding === true,
+    wireguard_manage_forwarding: opts.manageForwarding === true,
   };
   if (opts.listenPort !== undefined) {
     // Stringify so Jinja length/emptiness checks work (numeric | length fails).

@@ -147,6 +147,73 @@ test("WireGuard apply extra-vars never include plaintext preshared keys", async 
   await Deno.remove(stateDir, { recursive: true });
 });
 
+test("parseWireguardApplyPayload accepts multi-CIDR allowedIps and enableIpForwarding", () => {
+  const payload = parseWireguardApplyPayload({
+    ...basePayload,
+    enableIpForwarding: true,
+    peers: [
+      {
+        ...basePayload.peers[0]!,
+        allowedIps: ["203.0.113.11/32", "10.10.0.0/16"],
+      },
+    ],
+  });
+  assertEquals(payload.enableIpForwarding, true);
+  assertEquals(payload.peers[0]?.allowedIps, ["203.0.113.11/32", "10.10.0.0/16"]);
+});
+
+test("enableIpForwarding round-trips into WireguardApplyOpts", async () => {
+  setEnsureWireguardToolsForTests(async () => {});
+  setEnsureWireguardKeypairForTests(async () => WG_PUBKEY);
+  setWgShowCheckForTests(async () => false);
+  setAnsibleAvailabilityCheckForWireguardTests(async () => true);
+  setWireguardStampIoForTests({
+    read: async () => null,
+    write: async () => {},
+  });
+
+  const capture: { opts: WireguardApplyOpts | null } = { opts: null };
+  setWireguardApplyForTests(async (opts) => {
+    capture.opts = opts;
+    return { summary: "ok" };
+  });
+
+  const payload = parseWireguardApplyPayload({
+    ...basePayload,
+    enableIpForwarding: true,
+  });
+  await handleWireguardApply(payload, new Date().toISOString());
+  assertEquals(capture.opts !== null, true);
+  assertEquals(capture.opts!.enableIpForwarding, true);
+  const args = buildWireguardApplyExtraArgs(capture.opts!);
+  const extra = JSON.parse(args[1]!) as { wireguard_ip_forward: boolean };
+  assertEquals(extra.wireguard_ip_forward, true);
+
+  setEnsureWireguardToolsForTests(null);
+  setEnsureWireguardKeypairForTests(null);
+  setWgShowCheckForTests(null);
+  setAnsibleAvailabilityCheckForWireguardTests(null);
+  setWireguardApplyForTests(null);
+  setWireguardStampIoForTests({ read: null, write: null });
+});
+
+test("computeWireguardApplyStamp changes when only allowedIps change", async () => {
+  const base = await computeWireguardApplyStamp(basePayload, WG_PUBKEY);
+  const changed = await computeWireguardApplyStamp(
+    parseWireguardApplyPayload({
+      ...basePayload,
+      peers: [
+        {
+          ...basePayload.peers[0]!,
+          allowedIps: ["203.0.113.11/32", "10.10.0.0/16"],
+        },
+      ],
+    }),
+    WG_PUBKEY,
+  );
+  assertEquals(base === changed, false);
+});
+
 test("handleWireguardApply deletes PSK temp files after apply", async () => {
   const stateDir = await Deno.makeTempDir({ prefix: "tp-wg-psk-apply-" });
   setWireguardStateDirForTests(stateDir);
@@ -202,5 +269,175 @@ test("handleWireguardApply deletes PSK temp files after apply", async () => {
   setWireguardApplyForTests(null);
   setWireguardStampIoForTests({ read: null, write: null });
   setWireguardStateDirForTests(null);
+  await Deno.remove(stateDir, { recursive: true });
+});
+
+// --- Host-wide forwarding reconciliation: promotion / demotion / coexistence ---
+//
+// These tests use a real temp state directory (no stamp-io override) so
+// `forwarding-state.json` round-trips through actual file I/O across
+// sequential `handleWireguardApply` calls, mirroring how multiple managed
+// WireGuard interfaces on the same host share one daemon state dir.
+
+function payloadFor(interfaceName: string, enableIpForwarding: boolean) {
+  return parseWireguardApplyPayload({
+    ...basePayload,
+    interfaceName,
+    ...(enableIpForwarding ? { enableIpForwarding: true } : {}),
+  });
+}
+
+async function setupForwardingTestEnv(stateDir: string) {
+  setWireguardStateDirForTests(stateDir);
+  setEnsureWireguardToolsForTests(async () => {});
+  setEnsureWireguardKeypairForTests(async () => WG_PUBKEY);
+  setWgShowCheckForTests(async () => false);
+  setAnsibleAvailabilityCheckForWireguardTests(async () => true);
+}
+
+function teardownForwardingTestEnv() {
+  setWireguardStateDirForTests(null);
+  setEnsureWireguardToolsForTests(null);
+  setEnsureWireguardKeypairForTests(null);
+  setWgShowCheckForTests(null);
+  setAnsibleAvailabilityCheckForWireguardTests(null);
+  setWireguardApplyForTests(null);
+}
+
+test("gateway promotion enables host-wide forwarding for a lone interface", async () => {
+  const stateDir = await Deno.makeTempDir({ prefix: "tp-wg-fwd-promote-" });
+  await setupForwardingTestEnv(stateDir);
+
+  const captured: WireguardApplyOpts[] = [];
+  setWireguardApplyForTests(async (opts) => {
+    captured.push(opts);
+    return { summary: "ok" };
+  });
+
+  // First apply: not a gateway yet.
+  await handleWireguardApply(
+    payloadFor("tpwg00000001", false),
+    new Date().toISOString(),
+  );
+  assertEquals(captured[0]?.enableIpForwarding, false);
+  assertEquals(captured[0]?.manageForwarding, true);
+
+  // Promoted to primary gateway: host-wide forwarding must turn on.
+  await handleWireguardApply(
+    payloadFor("tpwg00000001", true),
+    new Date().toISOString(),
+  );
+  assertEquals(captured[1]?.enableIpForwarding, true);
+  assertEquals(captured[1]?.manageForwarding, true);
+
+  teardownForwardingTestEnv();
+  await Deno.remove(stateDir, { recursive: true });
+});
+
+test("gateway demotion disables host-wide forwarding when no interface still needs it", async () => {
+  const stateDir = await Deno.makeTempDir({ prefix: "tp-wg-fwd-demote-" });
+  await setupForwardingTestEnv(stateDir);
+
+  const captured: WireguardApplyOpts[] = [];
+  setWireguardApplyForTests(async (opts) => {
+    captured.push(opts);
+    return { summary: "ok" };
+  });
+
+  // Establish this interface as the (only) primary gateway.
+  await handleWireguardApply(
+    payloadFor("tpwg00000002", true),
+    new Date().toISOString(),
+  );
+  assertEquals(captured[0]?.enableIpForwarding, true);
+
+  // Demoted: no other managed interface requires forwarding, so the
+  // host-wide sysctl must be reconciled back to disabled.
+  await handleWireguardApply(
+    payloadFor("tpwg00000002", false),
+    new Date().toISOString(),
+  );
+  assertEquals(captured[1]?.enableIpForwarding, false);
+  assertEquals(captured[1]?.manageForwarding, true);
+
+  teardownForwardingTestEnv();
+  await Deno.remove(stateDir, { recursive: true });
+});
+
+test("demoting one interface keeps host-wide forwarding on while a sibling VPN still needs it", async () => {
+  const stateDir = await Deno.makeTempDir({ prefix: "tp-wg-fwd-coexist-" });
+  await setupForwardingTestEnv(stateDir);
+
+  const captured: WireguardApplyOpts[] = [];
+  setWireguardApplyForTests(async (opts) => {
+    captured.push(opts);
+    return { summary: "ok" };
+  });
+
+  // Two distinct VPN interfaces on the same host, both gateways.
+  await handleWireguardApply(
+    payloadFor("tpwgaaaaaaaa", true),
+    new Date().toISOString(),
+  );
+  await handleWireguardApply(
+    payloadFor("tpwgbbbbbbbb", true),
+    new Date().toISOString(),
+  );
+  assertEquals(captured[0]?.enableIpForwarding, true);
+  assertEquals(captured[1]?.enableIpForwarding, true);
+
+  // Demote the first interface only — the second VPN's interface is still a
+  // gateway, so the shared host-wide sysctl must remain enabled.
+  await handleWireguardApply(
+    payloadFor("tpwgaaaaaaaa", false),
+    new Date().toISOString(),
+  );
+  assertEquals(captured[2]?.enableIpForwarding, true);
+  assertEquals(captured[2]?.manageForwarding, true);
+
+  // Now demote the second interface too — nothing on the host needs
+  // forwarding anymore, so it must finally turn off.
+  await handleWireguardApply(
+    payloadFor("tpwgbbbbbbbb", false),
+    new Date().toISOString(),
+  );
+  assertEquals(captured[3]?.enableIpForwarding, false);
+  assertEquals(captured[3]?.manageForwarding, true);
+
+  teardownForwardingTestEnv();
+  await Deno.remove(stateDir, { recursive: true });
+});
+
+test("forwarding reconciliation is not skipped on stamp match when desired forwarding changed", async () => {
+  const stateDir = await Deno.makeTempDir({ prefix: "tp-wg-fwd-stale-" });
+  await setupForwardingTestEnv(stateDir);
+
+  // Simulate a pre-existing interface applied by older daemon code that
+  // never tracked per-interface forwarding state: stamp + live interface
+  // already match, but `forwarding-state.json` has no entry at all.
+  const publicKey = WG_PUBKEY;
+  const payload = payloadFor("tpwg00000003", true);
+  const stamp = await computeWireguardApplyStamp(payload, publicKey);
+  await Deno.writeTextFile(
+    join(stateDir, `${payload.interfaceName}.stamp`),
+    `${stamp}\n`,
+  );
+  setWgShowCheckForTests(async () => true);
+
+  const captured: WireguardApplyOpts[] = [];
+  setWireguardApplyForTests(async (opts) => {
+    captured.push(opts);
+    return { summary: "ok" };
+  });
+
+  await handleWireguardApply(payload, new Date().toISOString());
+
+  // Must NOT be skipped: even though the stamp matches, the missing
+  // forwarding-state entry means the host sysctl might still be wrong.
+  assertEquals(captured.length, 1);
+  assertEquals(captured[0]?.enableIpForwarding, true);
+  assertEquals(captured[0]?.manageForwarding, true);
+
+  teardownForwardingTestEnv();
   await Deno.remove(stateDir, { recursive: true });
 });

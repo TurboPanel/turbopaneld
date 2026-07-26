@@ -33,3 +33,19 @@
     enabled: true
     state: started
   when: wireguard_configure | bool
+
+- name: Reconcile IPv4 forwarding across managed WireGuard interfaces
+  ansible.posix.sysctl:
+    name: net.ipv4.ip_forward
+    value: "{{ '1' if (wireguard_ip_forward | bool) else '0' }}"
+    sysctl_file: /etc/sysctl.d/99-turbopanel-wireguard.conf
+    reload: true
+  when: wireguard_manage_forwarding | bool
+
+- name: Reconcile IPv6 forwarding across managed WireGuard interfaces
+  ansible.posix.sysctl:
+    name: net.ipv6.conf.all.forwarding
+    value: "{{ '1' if (wireguard_ip_forward | bool) else '0' }}"
+    sysctl_file: /etc/sysctl.d/99-turbopanel-wireguard.conf
+    reload: true
+  when: wireguard_manage_forwarding | bool

@@ -95,6 +95,8 @@ export type WireguardApplyPayload = {
   interfaceName: string;
   address: string;
   listenPort?: number;
+  /** When true, enable host IP forwarding (primary gateway). */
+  enableIpForwarding?: boolean;
   peers: WireguardApplyPeer[];
 };
 
@@ -707,6 +709,12 @@ export function parseWireguardApplyPayload(value: unknown): WireguardApplyPayloa
       throw new Error("Invalid wireguard apply listenPort");
     }
     payload.listenPort = record.listenPort;
+  }
+  if (record.enableIpForwarding !== undefined) {
+    if (typeof record.enableIpForwarding !== "boolean") {
+      throw new TypeError("Invalid wireguard apply enableIpForwarding");
+    }
+    payload.enableIpForwarding = record.enableIpForwarding;
   }
   return payload;
 }

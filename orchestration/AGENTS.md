@@ -30,11 +30,42 @@ travels through Ansible extra-vars** — the template reads
 Command-driven apply playbook: `playbooks/wireguard-apply.yml` (invoked by daemon
 `server.wireguard.apply` via `runWireguardApply`). Extra-vars are passed as **one
 JSON `-e` object** so `wireguard_peers` stays a list and
-`wireguard_configure` stays a boolean. Set `wireguard_configure:
-false` for a package-only run (tools install without bouncing the tunnel). The
-restart handler is gated on `wireguard_configure | bool`.
-`wireguard-tools` is also listed in `daemon-prereqs` on managed hosts. **Not**
-wired into `daemon-converge.yml` (command-driven only, like `time-sync-apply`).
+`wireguard_configure` / `wireguard_ip_forward` / `wireguard_manage_forwarding`
+stay booleans. Set `wireguard_configure: false` for a package-only run (tools
+install without bouncing the tunnel). The restart handler is gated on
+`wireguard_configure | bool`. Peer `AllowedIPs` is a multi-CIDR list
+(`join(', ')`) so site-to-site gateways can advertise datacenter LAN CIDRs
+alongside host routes.
+
+**Forwarding sysctls are host-wide, not per-interface** —
+`net.ipv4.ip_forward` / `net.ipv6.conf.all.forwarding` apply to the whole
+host, but a single host can run multiple managed WireGuard interfaces (one
+per VPN) with independent gateway roles. The role itself only reconciles
+whatever single boolean it is given (`wireguard_ip_forward`) and only when
+`wireguard_manage_forwarding | bool` is true — it has no cross-interface
+knowledge. The daemon (`src/instance/commands/wireguard.ts`) owns the
+cross-interface union: it persists a per-interface forwarding requirement in
+`forwarding-state.json` under the WireGuard state dir, recomputes the `OR`
+across every interface it has ever applied on this host on every
+`handleWireguardApply` call, and passes that union (never just the current
+call's own interface) as `wireguard_ip_forward` alongside
+`wireguard_manage_forwarding: true`. This is why demoting one gateway
+interface correctly leaves the sysctl **enabled** when a sibling VPN
+interface on the same host is still a gateway, and correctly disables it once
+none are. The stamp-match fast path in `handleWireguardApply` additionally
+checks the interface's *recorded* forwarding requirement (not just its
+WireGuard config stamp) before skipping, so a stale/missing forwarding-state
+entry cannot leave the host sysctl wrong indefinitely.
+`ensureWireguardTools()`'s bootstrap/tools-only call omits both
+`enableIpForwarding` and `manageForwarding` (defaulting to `false` in the
+extra-vars builder) so a call with no host-wide interface knowledge never
+resets the current sysctl state. The role writes both sysctls via
+`ansible.posix.sysctl` to `/etc/sysctl.d/99-turbopanel-wireguard.conf`.
+**No NAT/masquerade is configured** — the operator must ensure the
+datacenter LAN has a return route to the gateway for site traffic.
+`wireguard-tools` is also listed in `daemon-prereqs` on managed hosts.
+**Not** wired into `daemon-converge.yml` (command-driven only, like
+`time-sync-apply`).
 
 ### Web-service user (`web-service-user`)
 

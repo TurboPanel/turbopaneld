@@ -148,6 +148,54 @@ function stampFilePath(interfaceName: string): string {
   return join(wireguardStateDir(), `${interfaceName}.stamp`);
 }
 
+/**
+ * Host-wide record of which managed WireGuard interfaces currently require
+ * gateway IP forwarding, keyed by interface name. `net.ipv4.ip_forward` /
+ * `net.ipv6.conf.all.forwarding` are host-wide sysctls shared by every
+ * interface on this daemon's host, so the desired sysctl value is the union
+ * (`OR`) across every entry here — never just the interface being applied in
+ * the current command. Each `handleWireguardApply` call updates only its own
+ * entry, but reads the full map so a demoted interface does not clobber a
+ * sysctl another still-active gateway interface still needs, and a promoted
+ * interface enables forwarding even though it cannot see other interfaces'
+ * live payloads.
+ */
+function forwardingStatePath(): string {
+  return join(wireguardStateDir(), "forwarding-state.json");
+}
+
+async function readForwardingState(): Promise<Record<string, boolean>> {
+  const raw = await readStamp(forwardingStatePath());
+  if (!raw) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      typeof parsed !== "object" || parsed === null || Array.isArray(parsed)
+    ) {
+      return {};
+    }
+    const state: Record<string, boolean> = {};
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      state[key] = value === true;
+    }
+    return state;
+  } catch {
+    return {};
+  }
+}
+
+async function writeForwardingState(
+  state: Record<string, boolean>,
+): Promise<void> {
+  await writeStamp(forwardingStatePath(), JSON.stringify(state));
+}
+
+function anyInterfaceRequiresForwarding(
+  state: Record<string, boolean>,
+): boolean {
+  return Object.values(state).includes(true);
+}
+
 async function digestStampMaterial(material: string): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
@@ -326,6 +374,7 @@ export async function handleWireguardApply(
   deps?: WireguardHandlerDeps,
 ): Promise<WireguardApplyResult> {
   const validated = parseWireguardApplyPayload(payload);
+  const desiredForwarding = validated.enableIpForwarding === true;
 
   await ensureWireguardTools();
   const publicKey = await ensureWireguardKeypair(validated.interfaceName);
@@ -333,10 +382,23 @@ export async function handleWireguardApply(
   const stampPath = stampFilePath(validated.interfaceName);
   const currentStamp = await computeWireguardApplyStamp(validated, publicKey);
   const storedStamp = await readStamp(stampPath);
-  if (storedStamp === currentStamp && await wgShowInterface(validated.interfaceName)) {
+  const configUnchanged = storedStamp === currentStamp &&
+    await wgShowInterface(validated.interfaceName);
+
+  const forwardingState = await readForwardingState();
+  const storedForwarding = forwardingState[validated.interfaceName] === true;
+  const forwardingUnchanged = storedForwarding === desiredForwarding;
+
+  // The stamp only covers this interface's own WireGuard config (keys,
+  // peers, address). Forwarding is a host-wide sysctl, so even when this
+  // interface's own config is stable we must still confirm its recorded
+  // forwarding requirement matches the desired one before skipping —
+  // otherwise a stale/missing forwarding-state entry (e.g. first run after
+  // this tracking was introduced) could leave the host sysctl wrong forever.
+  if (configUnchanged && forwardingUnchanged) {
     logInfo(
       "commands",
-      `wireguard apply skipped (stamp match) iface=${validated.interfaceName} pubkey=${publicKey}`,
+      `wireguard apply skipped (stamp + forwarding match) iface=${validated.interfaceName} pubkey=${publicKey}`,
     );
     return {
       interfaceName: validated.interfaceName,
@@ -373,6 +435,14 @@ export async function handleWireguardApply(
     ansiblePeers = validated.peers.map(peerWithoutSecrets);
   }
 
+  const nextForwardingState = {
+    ...forwardingState,
+    [validated.interfaceName]: desiredForwarding,
+  };
+  const hostRequiresForwarding = anyInterfaceRequiresForwarding(
+    nextForwardingState,
+  );
+
   const applyOpts: WireguardApplyOpts = {
     interfaceName: validated.interfaceName,
     address: validated.address,
@@ -382,15 +452,19 @@ export async function handleWireguardApply(
     ...(validated.listenPort !== undefined
       ? { listenPort: validated.listenPort }
       : {}),
+    enableIpForwarding: hostRequiresForwarding,
+    manageForwarding: true,
   };
 
   logInfo(
     "commands",
-    `applying WireGuard interface=${validated.interfaceName} pubkey=${publicKey}`,
+    `applying WireGuard interface=${validated.interfaceName} pubkey=${publicKey} ` +
+      `forwarding=${desiredForwarding} hostForwarding=${hostRequiresForwarding}`,
   );
   try {
     const { summary } = await runWireguardApplyPlaybook(applyOpts);
     await writeStamp(stampPath, currentStamp);
+    await writeForwardingState(nextForwardingState);
 
     return {
       interfaceName: validated.interfaceName,

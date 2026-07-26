@@ -650,6 +650,42 @@ test("buildWireguardApplyExtraArgs stringifies listenPort and omits plaintext PS
   assertEquals("presharedKey" in (parsed.wireguard_peers[0] as object), false);
 });
 
+test("buildWireguardApplyExtraArgs wires manageForwarding + enableIpForwarding independently", () => {
+  const baseOpts = {
+    interfaceName: "tpwg550e8400",
+    address: "203.0.113.10/32",
+    privateKeyFile: "/var/lib/turbopanel/wireguard/tpwg550e8400.key",
+    peers: [],
+  };
+
+  // Bootstrap/tools-only runs omit both — must not reset host sysctl state.
+  const bootstrap = JSON.parse(buildWireguardApplyExtraArgs(baseOpts)[1]!);
+  assertEquals(bootstrap.wireguard_manage_forwarding, false);
+  assertEquals(bootstrap.wireguard_ip_forward, false);
+
+  // Host-wide reconciliation disabling forwarding (no interface needs it).
+  const disable = JSON.parse(
+    buildWireguardApplyExtraArgs({
+      ...baseOpts,
+      manageForwarding: true,
+      enableIpForwarding: false,
+    })[1]!,
+  );
+  assertEquals(disable.wireguard_manage_forwarding, true);
+  assertEquals(disable.wireguard_ip_forward, false);
+
+  // Host-wide reconciliation enabling forwarding (at least one interface needs it).
+  const enable = JSON.parse(
+    buildWireguardApplyExtraArgs({
+      ...baseOpts,
+      manageForwarding: true,
+      enableIpForwarding: true,
+    })[1]!,
+  );
+  assertEquals(enable.wireguard_manage_forwarding, true);
+  assertEquals(enable.wireguard_ip_forward, true);
+});
+
 test("wireguard template renders ListenPort for numeric listen port", async () => {
   const templatePath = join(
     CHECKOUT_ORCHESTRATION_DIR,
