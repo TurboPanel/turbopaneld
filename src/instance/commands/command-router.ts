@@ -10,6 +10,11 @@ import {
   parseEnvironmentDeployPayload,
   parseEnvironmentStopPayload,
   parseHostnamePayload,
+  parseManagedApplyPayload,
+  parseManagedBackupPayload,
+  parseManagedDestroyPayload,
+  parseManagedLifecyclePayload,
+  parseManagedRestorePayload,
   parseNtpSetPayload,
   parsePingPayload,
   parseRebootPayload,
@@ -17,6 +22,10 @@ import {
   parseWireguardApplyPayload,
 } from "./contracts.ts";
 import { handleEnvironmentDeploy } from "./deploy-environment.ts";
+import { handleManagedApply } from "../../managed/apply.ts";
+import { handleManagedBackup, handleManagedRestore } from "../../managed/backup.ts";
+import { handleManagedDestroy } from "../../managed/destroy.ts";
+import { handleManagedLifecycle } from "../../managed/lifecycle.ts";
 import { handleEnvironmentStop } from "./stop-environment.ts";
 import { handleHostname } from "./hostname.ts";
 import { handleNtp } from "./ntp.ts";
@@ -126,6 +135,49 @@ export async function handleCommandDispatch(
       case "environment.stop": {
         const payload = parseEnvironmentStopPayload(message.payload);
         result = await handleEnvironmentStop(payload, daemonReceivedAt);
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
+      case "managed.apply": {
+        const payload = parseManagedApplyPayload(message.payload);
+        result = await handleManagedApply(payload, daemonReceivedAt, {
+          decryptSecrets: deps?.decryptSecrets,
+        });
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
+      case "managed.lifecycle": {
+        const payload = parseManagedLifecyclePayload(message.payload);
+        result = await handleManagedLifecycle(payload, daemonReceivedAt, {
+          decryptSecrets: deps?.decryptSecrets,
+        });
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
+      case "managed.destroy": {
+        const payload = parseManagedDestroyPayload(message.payload);
+        result = await handleManagedDestroy(payload, daemonReceivedAt, {
+          decryptSecrets: deps?.decryptSecrets,
+        });
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
+      case "managed.backup": {
+        // No credential envelopes on this command — backups/restores run
+        // through the already-running engine container via `docker exec`.
+        const payload = parseManagedBackupPayload(message.payload);
+        result = await handleManagedBackup(payload, daemonReceivedAt);
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
+      case "managed.restore": {
+        const payload = parseManagedRestorePayload(message.payload);
+        result = await handleManagedRestore(payload, daemonReceivedAt);
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;

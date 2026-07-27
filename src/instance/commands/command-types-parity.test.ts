@@ -1,7 +1,17 @@
-import { assertEquals } from "jsr:@std/assert";
+import { assertEquals, assertThrows } from "jsr:@std/assert";
 import {
   COMMAND_TYPES,
   parseEnvironmentDeployPayload,
+  parseManagedApplyPayload,
+  parseManagedApplyResult,
+  parseManagedBackupPayload,
+  parseManagedBackupResult,
+  parseManagedDestroyPayload,
+  parseManagedDestroyResult,
+  parseManagedLifecyclePayload,
+  parseManagedLifecycleResult,
+  parseManagedRestorePayload,
+  parseManagedRestoreResult,
   parseWireguardApplyPayload,
 } from "./contracts.ts";
 
@@ -23,6 +33,11 @@ const INSTANCE_COMMAND_TYPES = [
   "server.wireguard.apply",
   "environment.deploy",
   "environment.stop",
+  "managed.apply",
+  "managed.lifecycle",
+  "managed.destroy",
+  "managed.backup",
+  "managed.restore",
 ] as const;
 
 test("COMMAND_TYPES matches instance canonical order", () => {
@@ -125,4 +140,524 @@ test("server.wireguard.apply fixture round-trips", () => {
   });
   assertEquals(payload.address, "203.0.113.10/32");
   assertEquals(payload.peers[0]?.endpoint, "203.0.113.1:51820");
+});
+
+const VALID_MANAGED_APPLY = {
+  managedId: "00000000-0000-4000-8000-000000000001",
+  environmentId: "00000000-0000-4000-8000-000000000002",
+  engine: "postgres",
+  projectName: "tp-managed-pg",
+  image: "docker.io/library/postgres:18-alpine",
+  containerPort: 5432,
+  composeYaml: "services:\n  postgres:\n    image: postgres:18-alpine\n",
+  configFiles: [
+    {
+      path: "postgresql.conf",
+      contents: "listen_addresses = '*'\n",
+      mode: "0640",
+    },
+  ],
+  volumes: [{ name: "pgdata", target: "/var/lib/postgresql" }],
+  exposure: { enabled: false, protocol: "tcp" },
+  credentials: [
+    {
+      principalId: "00000000-0000-4000-8000-000000000003",
+      username: "postgres",
+      role: "root",
+      databases: ["postgres"],
+      password: "tpdaemon.v1.server.key.1.iv.ciphertext",
+    },
+  ],
+} as const;
+
+test("managed.apply fixture round-trips", () => {
+  const payload = parseManagedApplyPayload(VALID_MANAGED_APPLY);
+  assertEquals(payload.engine, "postgres");
+  assertEquals(payload.projectName, "tp-managed-pg");
+  assertEquals(payload.credentials[0]?.username, "postgres");
+});
+
+test("managed.apply admits dropUsers and rejects unsafe names", () => {
+  assertEquals(
+    parseManagedApplyPayload({
+      ...VALID_MANAGED_APPLY,
+      dropUsers: ["app_user", "readonly_user"],
+    }).dropUsers,
+    ["app_user", "readonly_user"],
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        dropUsers: ["bad;user"],
+      }),
+    TypeError,
+    "Invalid managed.apply dropUsers entry",
+  );
+});
+
+test("managed.apply rejects missing required fields", () => {
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        composeYaml: "",
+      }),
+    TypeError,
+    "Invalid managed.apply payload",
+  );
+});
+
+test("managed.apply rejects hostile dockerOptions and path traversal", () => {
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        dockerOptions: { privileged: true },
+      }),
+    TypeError,
+    "Invalid managed.apply dockerOptions",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        configFiles: [
+          { path: "../etc/passwd", contents: "x", mode: "0640" },
+        ],
+      }),
+    TypeError,
+    "Invalid managed.apply configFiles entry",
+  );
+});
+
+test("managed.apply rejects nested dockerOptions and enabled exposure without port", () => {
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        dockerOptions: { restart: "invalid-policy" },
+      }),
+    TypeError,
+    "Invalid managed.apply dockerOptions",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        dockerOptions: {
+          ulimits: { nofile: { soft: 2048, hard: 1024 } },
+        },
+      }),
+    TypeError,
+    "Invalid managed.apply dockerOptions",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        dockerOptions: {
+          labels: { "traefik.enable": "true" },
+        },
+      }),
+    TypeError,
+    "Invalid managed.apply dockerOptions",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        exposure: { enabled: true, protocol: "tcp" },
+      }),
+    TypeError,
+    "Invalid managed.apply exposure",
+  );
+  assertEquals(
+    parseManagedApplyPayload({
+      ...VALID_MANAGED_APPLY,
+      exposure: { enabled: true, protocol: "tcp", publishedPort: 15432 },
+    }).exposure.publishedPort,
+    15432,
+  );
+});
+
+test("managed.apply rejects dockerOptions.extraEnv overriding postgres-reserved env keys", () => {
+  const reservedOverrides: Array<[string, string]> = [
+    ["POSTGRES_PASSWORD", "hunter2"],
+    ["POSTGRES_USER", "root"],
+    ["POSTGRES_DB", "postgres"],
+    ["POSTGRES_INITDB_ARGS", "--data-checksums"],
+    ["POSTGRES_HOST_AUTH_METHOD", "trust"],
+    ["PGDATA", "/var/lib/postgresql/evil"],
+  ];
+  for (const [key, value] of reservedOverrides) {
+    assertThrows(
+      () =>
+        parseManagedApplyPayload({
+          ...VALID_MANAGED_APPLY,
+          dockerOptions: { extraEnv: { [key]: value } },
+        }),
+      TypeError,
+      "Invalid managed.apply dockerOptions",
+    );
+  }
+});
+
+test("managed.apply admits dockerOptions.extraEnv with harmless keys", () => {
+  const payload = parseManagedApplyPayload({
+    ...VALID_MANAGED_APPLY,
+    dockerOptions: { extraEnv: { TZ: "UTC" } },
+  });
+  assertEquals(payload.dockerOptions?.extraEnv, { TZ: "UTC" });
+});
+
+test("managed.apply admits allowlisted config paths and rejects unexpected relative names", () => {
+  assertEquals(
+    parseManagedApplyPayload({
+      ...VALID_MANAGED_APPLY,
+      configFiles: [
+        { path: "postgresql.conf", contents: "x\n", mode: "0640" },
+        { path: "tls/server.crt", contents: "cert\n", mode: "0640" },
+        { path: "tls/server.key", contents: "key\n", mode: "0600" },
+      ],
+    }).configFiles.map((file) => file.path),
+    ["postgresql.conf", "tls/server.crt", "tls/server.key"],
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        configFiles: [
+          { path: "unexpected.conf", contents: "x\n", mode: "0640" },
+        ],
+      }),
+    TypeError,
+    "Invalid managed.apply configFiles entry",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        configFiles: [
+          { path: "nested/postgresql.conf", contents: "x\n", mode: "0640" },
+        ],
+      }),
+    TypeError,
+    "Invalid managed.apply configFiles entry",
+  );
+});
+
+test("managed.apply admits tlsMaterial and rejects hostile cert paths", () => {
+  const payload = parseManagedApplyPayload({
+    ...VALID_MANAGED_APPLY,
+    tlsMaterial: {
+      selfSigned: true,
+      commonName: "managed-postgres",
+      certPath: "tls/server.crt",
+      keyPath: "tls/server.key",
+    },
+  });
+  assertEquals(payload.tlsMaterial?.commonName, "managed-postgres");
+  assertEquals(payload.tlsMaterial?.certPath, "tls/server.crt");
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        tlsMaterial: {
+          selfSigned: true,
+          commonName: "managed-postgres",
+          certPath: "../etc/passwd",
+          keyPath: "tls/server.key",
+        },
+      }),
+    TypeError,
+    "Invalid managed.apply tlsMaterial",
+  );
+});
+
+test("managed.lifecycle fixture round-trips and rejects invalid action", () => {
+  assertEquals(
+    parseManagedLifecyclePayload({ managedId: "m1", action: "stop" }),
+    { managedId: "m1", action: "stop" },
+  );
+  assertThrows(
+    () => parseManagedLifecyclePayload({ managedId: "m1", action: "pause" }),
+    TypeError,
+    "Invalid managed.lifecycle payload",
+  );
+});
+
+test("managed.destroy fixture round-trips and rejects missing removeVolumes", () => {
+  assertEquals(
+    parseManagedDestroyPayload({ managedId: "m1", removeVolumes: true }),
+    { managedId: "m1", removeVolumes: true },
+  );
+  assertThrows(
+    () => parseManagedDestroyPayload({ managedId: "m1" }),
+    TypeError,
+    "Invalid managed.destroy payload",
+  );
+});
+
+test("managed.destroy admits the instance-only deleteAfterDestroy marker but never requires it", () => {
+  assertEquals(
+    parseManagedDestroyPayload({
+      managedId: "m1",
+      removeVolumes: true,
+      deleteAfterDestroy: true,
+    }),
+    { managedId: "m1", removeVolumes: true, deleteAfterDestroy: true },
+  );
+  assertEquals(
+    parseManagedDestroyPayload({ managedId: "m1", removeVolumes: true }),
+    { managedId: "m1", removeVolumes: true },
+  );
+  assertThrows(
+    () =>
+      parseManagedDestroyPayload({
+        managedId: "m1",
+        removeVolumes: true,
+        deleteAfterDestroy: "yes",
+      }),
+    TypeError,
+    "Invalid managed.destroy payload",
+  );
+});
+
+test("managed result parsers round-trip and reject hostile shapes", () => {
+  assertEquals(
+    parseManagedApplyResult({
+      host: "203.0.113.10",
+      port: 5432,
+      summary: "ready",
+      appliedUsers: ["postgres"],
+    }),
+    {
+      host: "203.0.113.10",
+      port: 5432,
+      summary: "ready",
+      appliedUsers: ["postgres"],
+    },
+  );
+  assertEquals(parseManagedApplyResult(null), { host: "", port: 0 });
+  assertEquals(parseManagedApplyResult({ host: 12, port: "x" }), {
+    host: "",
+    port: 0,
+  });
+
+  assertEquals(parseManagedLifecycleResult({ status: "ready" }), {
+    status: "ready",
+  });
+  assertEquals(
+    parseManagedLifecycleResult({ status: "failed", summary: "compose down" }),
+    { status: "failed", summary: "compose down" },
+  );
+  assertEquals(parseManagedLifecycleResult(null), { status: "" });
+  assertEquals(parseManagedLifecycleResult({ status: 12 }), { status: "" });
+
+  assertEquals(
+    parseManagedDestroyResult({
+      status: "stopped",
+      containers: [],
+      summary: "removed",
+    }),
+    { status: "stopped", containers: [], summary: "removed" },
+  );
+  assertEquals(parseManagedDestroyResult({ status: "failed" }), {
+    status: "failed",
+    containers: [],
+  });
+  assertEquals(parseManagedDestroyResult(null), {
+    status: "",
+    containers: [],
+  });
+  assertEquals(
+    parseManagedDestroyResult({
+      status: "stopped",
+      containers: [
+        {
+          composeServiceName: "postgres",
+          containerId: "abc",
+          containerName: "pg-1",
+          status: "exited",
+        },
+        { composeServiceName: "bad" },
+      ],
+    }),
+    {
+      status: "stopped",
+      containers: [
+        {
+          composeServiceName: "postgres",
+          containerId: "abc",
+          containerName: "pg-1",
+          status: "exited",
+        },
+      ],
+    },
+  );
+});
+
+const VALID_MANAGED_BACKUP_CREATE = {
+  managedId: "00000000-0000-4000-8000-000000000001",
+  engine: "postgres",
+  action: "create",
+  backupId: "bk_1700000000000",
+  artifactExtension: "dump",
+  scope: "database",
+  database: "appdb",
+} as const;
+
+test("managed.backup fixture round-trips (create + delete) and rejects hostile input", () => {
+  assertEquals(
+    parseManagedBackupPayload(VALID_MANAGED_BACKUP_CREATE),
+    VALID_MANAGED_BACKUP_CREATE,
+  );
+  assertEquals(
+    parseManagedBackupPayload({
+      ...VALID_MANAGED_BACKUP_CREATE,
+      action: "delete",
+      retentionKeep: 7,
+    }),
+    { ...VALID_MANAGED_BACKUP_CREATE, action: "delete", retentionKeep: 7 },
+  );
+  assertThrows(
+    () =>
+      parseManagedBackupPayload({
+        ...VALID_MANAGED_BACKUP_CREATE,
+        backupId: "../etc/passwd",
+      }),
+    Error,
+    "Invalid managed.backup payload",
+  );
+  assertThrows(
+    () =>
+      parseManagedBackupPayload({
+        ...VALID_MANAGED_BACKUP_CREATE,
+        backupId: "bk_1; rm -rf /",
+      }),
+    Error,
+    "Invalid managed.backup payload",
+  );
+  assertThrows(
+    () =>
+      parseManagedBackupPayload({
+        ...VALID_MANAGED_BACKUP_CREATE,
+        artifactExtension: "exe",
+      }),
+    Error,
+    "Invalid managed.backup payload",
+  );
+  assertThrows(
+    () => {
+      const { database: _database, ...rest } = VALID_MANAGED_BACKUP_CREATE;
+      return parseManagedBackupPayload(rest);
+    },
+    Error,
+    "scope database requires database",
+  );
+  assertThrows(
+    () =>
+      parseManagedBackupPayload({
+        ...VALID_MANAGED_BACKUP_CREATE,
+        retentionKeep: 0,
+      }),
+    Error,
+    "Invalid managed.backup payload retentionKeep",
+  );
+});
+
+test("managed.backup result parser is lenient and drops malformed checksum", () => {
+  assertEquals(parseManagedBackupResult(null), { backupId: "" });
+  assertEquals(
+    parseManagedBackupResult({
+      backupId: "bk_1",
+      path: "/var/lib/turbopanel/managed/m1/backups/bk_1.dump",
+      sizeBytes: 1024,
+      checksum: "a".repeat(64),
+      completedAt: "2020-01-01T00:00:00.000Z",
+      pruned: ["bk_0"],
+    }),
+    {
+      backupId: "bk_1",
+      path: "/var/lib/turbopanel/managed/m1/backups/bk_1.dump",
+      sizeBytes: 1024,
+      checksum: "a".repeat(64),
+      completedAt: "2020-01-01T00:00:00.000Z",
+      pruned: ["bk_0"],
+    },
+  );
+  assertEquals(
+    parseManagedBackupResult({ backupId: "bk_1", checksum: "not-hex" }),
+    { backupId: "bk_1" },
+  );
+});
+
+const VALID_MANAGED_RESTORE = {
+  managedId: "00000000-0000-4000-8000-000000000001",
+  engine: "postgres",
+  backupId: "bk_1700000000000",
+  artifactExtension: "dump",
+  database: "appdb",
+  checksum: "c".repeat(64),
+} as const;
+
+test("managed.restore fixture round-trips and rejects hostile input", () => {
+  assertEquals(
+    parseManagedRestorePayload(VALID_MANAGED_RESTORE),
+    VALID_MANAGED_RESTORE,
+  );
+  assertThrows(
+    () =>
+      parseManagedRestorePayload({
+        ...VALID_MANAGED_RESTORE,
+        backupId: "../../etc",
+      }),
+    Error,
+    "Invalid managed.restore payload",
+  );
+  assertThrows(
+    () =>
+      parseManagedRestorePayload({
+        ...VALID_MANAGED_RESTORE,
+        checksum: "not-hex",
+      }),
+    Error,
+    "Invalid managed.restore payload",
+  );
+  assertThrows(
+    () =>
+      parseManagedRestorePayload({
+        ...VALID_MANAGED_RESTORE,
+        database: "bad; name",
+      }),
+    Error,
+    "Invalid managed.restore payload database",
+  );
+  assertThrows(
+    () =>
+      parseManagedRestorePayload({ ...VALID_MANAGED_RESTORE, sizeBytes: -1 }),
+    Error,
+    "Invalid managed.restore payload sizeBytes",
+  );
+});
+
+test("managed.restore result parser is lenient", () => {
+  assertEquals(parseManagedRestoreResult(null), { backupId: "" });
+  assertEquals(
+    parseManagedRestoreResult({
+      backupId: "bk_1",
+      status: "ready",
+      restoredAt: "2020-01-01T00:00:00.000Z",
+      database: "appdb",
+      summary: "restored",
+    }),
+    {
+      backupId: "bk_1",
+      status: "ready",
+      restoredAt: "2020-01-01T00:00:00.000Z",
+      database: "appdb",
+      summary: "restored",
+    },
+  );
 });

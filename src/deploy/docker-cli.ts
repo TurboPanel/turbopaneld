@@ -20,6 +20,11 @@ export type DockerCliResult = {
   stderr: string;
 };
 
+export type RunDockerOptions = {
+  /** Pipe this string to docker stdin (e.g. SQL / secrets — never put them on argv). */
+  input?: string;
+};
+
 function isDockerSocketPermissionError(stderr: string): boolean {
   const lower = stderr.toLowerCase();
   return lower.includes("permission denied") && lower.includes("docker");
@@ -28,14 +33,27 @@ function isDockerSocketPermissionError(stderr: string): boolean {
 async function runRaw(
   command: string,
   args: string[],
+  options?: RunDockerOptions,
 ): Promise<DockerCliResult> {
   try {
-    const result = await new Deno.Command(command, {
+    const hasInput = options?.input !== undefined;
+    const child = new Deno.Command(command, {
       args,
-      stdin: "null",
+      stdin: hasInput ? "piped" : "null",
       stdout: "piped",
       stderr: "piped",
-    }).output();
+    }).spawn();
+
+    if (hasInput) {
+      const writer = child.stdin.getWriter();
+      try {
+        await writer.write(new TextEncoder().encode(options.input));
+      } finally {
+        await writer.close();
+      }
+    }
+
+    const result = await child.output();
     return {
       success: result.success,
       code: result.code,
@@ -70,30 +88,41 @@ async function currentUsername(): Promise<string> {
  */
 async function runDockerWithFreshGroups(
   args: string[],
+  options?: RunDockerOptions,
 ): Promise<DockerCliResult> {
   const user = await currentUsername();
-  return await runRaw(SUDO_BIN, [
-    "-n",
-    "-u",
-    user,
-    "--",
-    DOCKER_BIN,
-    ...args,
-  ]);
+  return await runRaw(
+    SUDO_BIN,
+    [
+      "-n",
+      "-u",
+      user,
+      "--",
+      DOCKER_BIN,
+      ...args,
+    ],
+    options,
+  );
 }
 
 /**
  * Run `/usr/bin/docker …args`, retrying via `sudo -n -u <self>` when the
  * socket is permission-denied (stale process credentials after group
  * membership change).
+ *
+ * Optional `options.input` is piped to stdin so secrets/SQL never appear on
+ * argv. Do not pass secrets via environment — the sudo fallback would drop it.
  */
-export async function runDocker(args: string[]): Promise<DockerCliResult> {
-  const direct = await runRaw(DOCKER_BIN, args);
+export async function runDocker(
+  args: string[],
+  options?: RunDockerOptions,
+): Promise<DockerCliResult> {
+  const direct = await runRaw(DOCKER_BIN, args, options);
   if (direct.success || !isDockerSocketPermissionError(direct.stderr)) {
     return direct;
   }
 
-  const refreshed = await runDockerWithFreshGroups(args);
+  const refreshed = await runDockerWithFreshGroups(args, options);
   if (refreshed.success) return refreshed;
   // Prefer the original docker.sock error when the refresh path also fails.
   return {
@@ -112,4 +141,70 @@ export async function dockerEngineReachable(): Promise<boolean> {
     "{{.Server.Version}}",
   ]);
   return result.success;
+}
+
+export type DockerInvocation = {
+  bin: string;
+  prefixArgs: string[];
+};
+
+let cachedInvocation: DockerInvocation | undefined;
+let cachedInvocationPromise: Promise<DockerInvocation> | undefined;
+
+async function probeDockerInvocation(): Promise<DockerInvocation> {
+  const direct = await runRaw(DOCKER_BIN, [
+    "version",
+    "--format",
+    "{{.Server.Version}}",
+  ]);
+  if (direct.success || !isDockerSocketPermissionError(direct.stderr)) {
+    return { bin: DOCKER_BIN, prefixArgs: [] };
+  }
+  const user = await currentUsername();
+  return { bin: SUDO_BIN, prefixArgs: ["-n", "-u", user, "--", DOCKER_BIN] };
+}
+
+/**
+ * Resolve (and cache for the lifetime of the process) whether docker must be
+ * invoked directly or via `sudo -n -u <self> --` (stale group membership
+ * before the daemon restarts after Docker install — see the module doc
+ * comment). `runDocker` retries reactively after inspecting stderr, but a
+ * streaming spawn cannot buffer-then-retry mid-stream, so this probes once
+ * with a cheap `docker version` call and every `spawnDockerStreaming` call
+ * reuses the cached result.
+ */
+export async function resolveDockerInvocation(): Promise<DockerInvocation> {
+  if (cachedInvocation) return cachedInvocation;
+  if (!cachedInvocationPromise) {
+    cachedInvocationPromise = probeDockerInvocation().then((resolved) => {
+      cachedInvocation = resolved;
+      return resolved;
+    });
+  }
+  return await cachedInvocationPromise;
+}
+
+export type SpawnDockerStreamingOptions = {
+  stdin?: "piped" | "null";
+  stdout?: "piped" | "inherit";
+};
+
+/**
+ * Spawn docker with the resolved invocation and return the live
+ * `Deno.ChildProcess` so callers can stream stdin/stdout without ever
+ * decoding the payload into a string (`runDocker` buffers stdout as text —
+ * unsafe for binary dump artifacts). Used only by `managed/backup.ts`;
+ * everything else keeps using `runDocker`.
+ */
+export async function spawnDockerStreaming(
+  args: string[],
+  options?: SpawnDockerStreamingOptions,
+): Promise<Deno.ChildProcess> {
+  const invocation = await resolveDockerInvocation();
+  return new Deno.Command(invocation.bin, {
+    args: [...invocation.prefixArgs, ...args],
+    stdin: options?.stdin ?? "null",
+    stdout: options?.stdout ?? "piped",
+    stderr: "piped",
+  }).spawn();
 }

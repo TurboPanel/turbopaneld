@@ -2,6 +2,8 @@
 
 The `environment.deploy` / `environment.stop` command handlers: Docker Compose bring-up with Traefik labels, hosting-edge Caddy (`:80`/`:443`, distinct from control-plane Caddy), org TLS materialization from `tpdaemon` envelopes, and best-effort container reporting.
 
+**Managed engines are a separate path** (`../managed/AGENTS.md`): platform-owned compose + config under `<stateDir>/managed/<managedId>/`, native ports only, no hosting-edge Caddy, no tenant Traefik/`turbopanel-ingress`, no user compose merge. Do not route `managed.*` commands through this deploy stack.
+
 Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../instance/src/lib/commands/AGENTS.md`. Cross-repo `../<repo>/…` links are relative to the repo root.
 
 ### Tenant Docker Compose deploy + hosting ingress

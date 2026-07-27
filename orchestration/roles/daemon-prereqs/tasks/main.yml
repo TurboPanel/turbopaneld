@@ -7,6 +7,7 @@
 #   - curl/ca-certificates/tar/python3-minimal: release download + vendor zip extraction
 #   - git/gnupg/unzip/xz-utils/zstd: orchestration/Ansible/Docker roles on managed hosts
 #   - wireguard-tools: VPN mesh apply (`server.wireguard.apply`) on managed hosts
+#   - openssl: managed-engine self-signed TLS material (`managed.apply`)
 #   - pamtester: instance install PAM gate (production)
 #
 # run.sh installs only the smaller curl/tar/python3-minimal set when missing;
@@ -24,6 +25,7 @@
       - curl
       - git
       - gnupg
+      - openssl
       - pamtester
       - python3-debian
       - tar

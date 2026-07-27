@@ -12,6 +12,7 @@ import {
   resolveServerKeyPath,
 } from "./paths.ts";
 import { collectServerAddresses } from "../server-addresses.ts";
+import { collectManagedLogs } from "../managed/logs.ts";
 import {
   applyDevSyncTarball,
   type DevSyncState,
@@ -65,6 +66,20 @@ type DaemonMessage =
       publicIpv4: string[];
       publicIpv6: string[];
     };
+    at: string;
+  }
+  | {
+    type: "managed-logs-request";
+    id: string;
+    managedId: string;
+    tail: number;
+    at: string;
+  }
+  | {
+    type: "managed-logs-result";
+    id: string;
+    logs: string;
+    error?: string;
     at: string;
   }
   | {
@@ -1012,6 +1027,9 @@ export class InstanceClient {
       case "addresses-request":
         this.#collectAddresses(message, ws);
         break;
+      case "managed-logs-request":
+        this.#collectManagedLogs(message, ws);
+        break;
       case "dev-sync-begin": {
         // Gate the transfer up front: only daemons with a real checkout-backed
         // execution mode accept source-sync. Managed / compiled / JS-fallback
@@ -1335,6 +1353,45 @@ export class InstanceClient {
       type: "addresses-result",
       id: message.id,
       addresses,
+      at: new Date().toISOString(),
+    };
+
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(result));
+    }
+  }
+
+  #collectManagedLogs(
+    message: Extract<DaemonMessage, { type: "managed-logs-request" }>,
+    ws: WebSocket,
+  ): void {
+    void this.#collectManagedLogsAsync(message, ws);
+  }
+
+  async #collectManagedLogsAsync(
+    message: Extract<DaemonMessage, { type: "managed-logs-request" }>,
+    ws: WebSocket,
+  ): Promise<void> {
+    let logs = "";
+    let error: string | undefined;
+    try {
+      logs = await collectManagedLogs(message.managedId, {
+        tail: message.tail,
+      });
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+      logWarn(
+        "instance",
+        "collect managed logs failed:",
+        sanitizeForLog(err),
+      );
+    }
+
+    const result: DaemonMessage = {
+      type: "managed-logs-result",
+      id: message.id,
+      logs,
+      ...(error === undefined ? {} : { error }),
       at: new Date().toISOString(),
     };
 
