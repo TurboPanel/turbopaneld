@@ -3,7 +3,7 @@
 # `vendor/apache/<version>/` with a `current` symlink — never
 # `apt install apache2`, never the distro apache2 unit. Compile-time host
 # packages (build-essential, libssl-dev, …) are install-deps only; the
-# resulting binary tree is TurboPanel-owned under /opt/turbopanel/vendor.
+# resulting binary tree is TurboPanel-owned under the FHS vendor tree.
 #
 # Config/logs/state live under FHS so version upgrades do not lose site
 # fragments written by `src/deploy/traditional-web.ts`. PHP is not built into

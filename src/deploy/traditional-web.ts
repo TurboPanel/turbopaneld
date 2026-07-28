@@ -2,14 +2,14 @@
  * Host-native traditional-web deploy (nginx + apache + OpenLiteSpeed).
  *
  * Installs web servers on demand — all three engines are vendored under the
- * FHS runtime tree (`/opt/turbopanel/vendor/<tool>/<version>/` + `current`,
- * never distro apt packages), provisions service identities via Ansible,
- * writes per-site loopback vhosts under `/etc/turbopanel/{nginx,apache,
- * openlitespeed}/`, and reloads the matching `turbopanel-*` systemd unit.
- * OpenLiteSpeed and nginx are static-only for now. Apache PHP uses vendored
- * php-fpm (`/opt/turbopanel/vendor/php/…`) + mod_proxy_fcgi — never mod_php
- * or distro php-fpm packages. Hosting `web.php` (version / memory /
- * maxExecutionTime) becomes per-site FPM pool admin values.
+ * FHS runtime tree (`vendor/<tool>/<version>/` + `current`, never distro apt
+ * packages), provisions service identities via Ansible, writes per-site
+ * loopback vhosts under `/etc/turbopanel/{nginx,apache,openlitespeed}/`, and
+ * reloads the matching `turbopanel-*` systemd unit. OpenLiteSpeed and nginx
+ * are static-only for now. Apache PHP uses vendored php-fpm
+ * (`vendor/php/…`) + mod_proxy_fcgi — never mod_php or distro php-fpm
+ * packages. Hosting `web.php` (version / memory / maxExecutionTime) becomes
+ * per-site FPM pool admin values.
  */
 
 import { join } from "@std/path";
@@ -32,7 +32,7 @@ const decoder = new TextDecoder();
 
 export type TraditionalWebApplySite = EnvironmentDeployTraditionalWebSite;
 
-/** Engine service account under `/opt/turbopanel/vendor` (web-service-user role). */
+/** Engine service account for the FHS vendor tree (web-service-user role). */
 export function traditionalWebEngineUnixUser(
   engine: TraditionalWebApplySite["engine"],
 ): string {
