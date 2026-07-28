@@ -22,29 +22,32 @@
 - name: Check vendored OpenLiteSpeed binary
   ansible.builtin.stat:
     path: "{{ turbopanel_vendor_dir }}/openlitespeed/{{ openlitespeed_version }}/bin/openlitespeed"
-  register: _ols_pinned
+  register: _openlitespeed_pinned
 
 - name: Install OpenLiteSpeed into runtimes directory
-  when: not _ols_pinned.stat.exists
+  when: not _openlitespeed_pinned.stat.exists
   block:
     - name: Create temp dir for OpenLiteSpeed download
       ansible.builtin.tempfile:
         state: directory
         suffix: ols
-      register: _ols_tmp
+      register: _openlitespeed_tmp
 
     - name: Download OpenLiteSpeed release tarball
+      vars:
+        openlitespeed_tarball: >-
+          openlitespeed-{{ openlitespeed_version }}-{{ ansible_architecture }}-linux.tgz
       ansible.builtin.get_url:
         url: >-
-          https://github.com/litespeedtech/openlitespeed/releases/download/{{ openlitespeed_release_tag }}/openlitespeed-{{ openlitespeed_version }}-{{ ansible_architecture }}-linux.tgz
-        dest: "{{ _ols_tmp.path }}/openlitespeed.tgz"
+          https://github.com/litespeedtech/openlitespeed/releases/download/{{ openlitespeed_release_tag }}/{{ openlitespeed_tarball }}
+        dest: "{{ _openlitespeed_tmp.path }}/openlitespeed.tgz"
         mode: "0640"
         timeout: 120
 
     - name: Extract OpenLiteSpeed tarball
       ansible.builtin.unarchive:
-        src: "{{ _ols_tmp.path }}/openlitespeed.tgz"
-        dest: "{{ _ols_tmp.path }}"
+        src: "{{ _openlitespeed_tmp.path }}/openlitespeed.tgz"
+        dest: "{{ _openlitespeed_tmp.path }}"
         remote_src: true
 
     - name: Create versioned install directory
@@ -58,8 +61,12 @@
     - name: Install pruned subset of the release tree
       ansible.builtin.copy:
         remote_src: true
-        src: "{{ _ols_tmp.path }}/openlitespeed/{{ item }}"
+        src: "{{ _openlitespeed_tmp.path }}/openlitespeed/{{ item }}"
         dest: "{{ turbopanel_vendor_dir }}/openlitespeed/{{ openlitespeed_version }}/"
+        owner: root
+        group: "{{ turbopanel_group }}"
+        mode: "0750"
+        directory_mode: "0750"
       loop:
         - bin
         - modules
@@ -71,14 +78,14 @@
     - name: Install lsperld.fpl only (drop node/ruby fcgi helpers — unused, unvendored runtimes)
       ansible.builtin.copy:
         remote_src: true
-        src: "{{ _ols_tmp.path }}/openlitespeed/fcgi-bin/lsperld.fpl"
+        src: "{{ _openlitespeed_tmp.path }}/openlitespeed/fcgi-bin/lsperld.fpl"
         dest: "{{ turbopanel_vendor_dir }}/openlitespeed/{{ openlitespeed_version }}/fcgi-bin/lsperld.fpl"
         mode: "0750"
 
     - name: Seed FHS mime.properties from the release tree (first install only)
       ansible.builtin.copy:
         remote_src: true
-        src: "{{ _ols_tmp.path }}/openlitespeed/conf/mime.properties"
+        src: "{{ _openlitespeed_tmp.path }}/openlitespeed/conf/mime.properties"
         dest: "{{ turbopanel_config_dir }}/openlitespeed/mime.properties"
         owner: root
         group: "{{ openlitespeed_service_group }}"
@@ -87,7 +94,7 @@
 
     - name: Remove temp download dir
       ansible.builtin.file:
-        path: "{{ _ols_tmp.path }}"
+        path: "{{ _openlitespeed_tmp.path }}"
         state: absent
 
     - name: Create litespeed exec name expected by lswsctrl
@@ -156,13 +163,13 @@
     dest: /etc/systemd/system/turbopanel-openlitespeed.service
     owner: root
     group: root
-    mode: "0644"
-  register: _ols_unit
+    mode: "0640"
+  register: _openlitespeed_unit
 
 - name: Reload systemd after unit change
   ansible.builtin.systemd:
     daemon_reload: true
-  when: _ols_unit.changed # noqa: no-handler
+  when: _openlitespeed_unit.changed # noqa: no-handler
 
 - name: Point versioned conf/ at the FHS config dir (decouple config from version upgrades)
   ansible.builtin.file:

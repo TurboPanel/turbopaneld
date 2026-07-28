@@ -7,12 +7,13 @@
  */
 
 import { join } from "@std/path";
-import type { ManagedApplyPayload } from "../instance/commands/contracts.ts";
 import {
   isManagedBackupArtifactExtension,
-  type ManagedBackupArtifactExtension,
+  type ManagedApplyPayload,
 } from "../instance/commands/contracts.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
+
+export type { ManagedBackupArtifactExtension } from "../instance/commands/contracts.ts";
 
 /** Mirrors `SAFE_FILE_ID_RE` in `src/deploy/ingress.ts`. */
 export const SAFE_MANAGED_ID_RE = /^[A-Za-z0-9_-]+$/;
@@ -91,8 +92,6 @@ export function managedBackupArtifactPath(
   }
   return join(managedBackupsDir(layout, managedId), `${backupId}.${ext}`);
 }
-
-export type { ManagedBackupArtifactExtension };
 
 /**
  * Join `relative` under `baseDir` after re-validating the relative path.

@@ -14,12 +14,12 @@
 import { crypto } from "@std/crypto";
 import { encodeHex } from "@std/encoding/hex";
 import type {
+  EnvironmentDeployContainer,
   ManagedBackupPayload,
   ManagedBackupResult,
   ManagedRestorePayload,
   ManagedRestoreResult,
 } from "../instance/commands/contracts.ts";
-import type { EnvironmentDeployContainer } from "../instance/commands/contracts.ts";
 import { ensureDocker } from "../deploy/ensure-docker.ts";
 import { spawnDockerStreaming } from "../deploy/docker-cli.ts";
 import { sanitizeForLog } from "../logger.ts";
@@ -36,6 +36,17 @@ import {
 } from "./paths.ts";
 
 type StreamExecOutcome = { success: boolean; stderr: string };
+
+/** Readable message for pipe failures without `[object Object]` stringification. */
+function formatPipeError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string") return err;
+  try {
+    return JSON.stringify(err) ?? "unknown error";
+  } catch {
+    return "unknown error";
+  }
+}
 
 /** Overridable for tests so they can exercise path/mode/prune/checksum logic without Docker. */
 export type ManagedBackupHandlerDeps = {
@@ -124,14 +135,11 @@ export async function pipeDumpOutput(
     child.status,
   ]);
   if (pipeError !== undefined) {
-    const message = pipeError instanceof Error
-      ? pipeError.message
-      : String(pipeError);
     return {
       success: false,
       stderr: stderrText.length > 0
         ? stderrText
-        : `dump output stream failed: ${sanitizeForLog(message)}`,
+        : `dump output stream failed: ${sanitizeForLog(formatPipeError(pipeError))}`,
     };
   }
   return { success: status.success, stderr: stderrText };
@@ -159,14 +167,11 @@ export async function pipeRestoreInput(
     child.status,
   ]);
   if (pipeError !== undefined) {
-    const message = pipeError instanceof Error
-      ? pipeError.message
-      : String(pipeError);
     return {
       success: false,
       stderr: stderrText.length > 0
         ? stderrText
-        : `restore input stream failed: ${sanitizeForLog(message)}`,
+        : `restore input stream failed: ${sanitizeForLog(formatPipeError(pipeError))}`,
     };
   }
   return { success: status.success, stderr: stderrText };
