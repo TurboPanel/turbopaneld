@@ -28,6 +28,7 @@ describe('applyStorageVolumesToCompose', () => {
           destinationPath: '/cache',
           composeServiceName: 'web',
           serverId: 'srv',
+          volumeName: 'tp-00000000-cache',
         },
       ],
       new Map([
@@ -40,6 +41,39 @@ describe('applyStorageVolumesToCompose', () => {
     assertEquals(patched.includes('/data'), true)
     assertEquals(patched.includes('tp-00000000-cache'), true)
     assertEquals(patched.includes('/cache'), true)
+    assertEquals(patched.includes('external: true'), true)
+  })
+
+  it('emits external:true for docker_volume and skips mount without destinationPath', () => {
+    const composeYaml = [
+      'services:',
+      '  web:',
+      '    image: nginx:latest',
+      '    volumes:',
+      '      - data:/data',
+      'volumes:',
+      '  data: {}',
+    ].join('\n')
+
+    const volumeId = '01936b3e-8c7a-7b2d-a1f0-123456789abc'
+    const patched = applyStorageVolumesToCompose(
+      composeYaml,
+      [
+        {
+          storageId: volumeId,
+          kind: 'docker_volume',
+          name: 'data',
+          serverId: 'srv',
+          volumeName: volumeId,
+        },
+      ],
+      new Map([[volumeId, volumeId]]),
+    )
+
+    assertEquals(patched.includes('external: true'), true)
+    assertEquals(patched.includes(`name: ${volumeId}`), true)
+    // No service mount append — compose already references the volume.
+    assertEquals(patched.includes('target:'), false)
   })
 
   it('throws when compose service is missing', () => {

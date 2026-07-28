@@ -223,6 +223,7 @@ async function ensureDeployPrincipals(
       uid: principal.uid,
       gid: principal.gid,
       home: principal.home,
+      shell: principal.shell,
     })),
   );
 }

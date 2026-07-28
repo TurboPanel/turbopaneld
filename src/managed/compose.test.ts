@@ -27,6 +27,7 @@ function basePayload(
     environmentId: "00000000-0000-4000-8000-000000000002",
     engine: "postgres",
     projectName: "tp-managed-pg",
+    containerName: "01936b3e-aaaa-bbbb-cccc-123456789abc-1",
     image: "docker.io/library/postgres:18-alpine",
     containerPort: 5432,
     composeYaml: [
@@ -92,10 +93,38 @@ test("normalizeManagedCompose preserves config/tls mounts and forces image", () 
   const services = doc.services as Record<string, Record<string, unknown>>;
   const service = services.postgres!;
   assertEquals(service.image, "docker.io/library/postgres:18-alpine");
+  assertEquals(
+    service.container_name,
+    "01936b3e-aaaa-bbbb-cccc-123456789abc-1",
+  );
   const volumes = service.volumes as string[];
   assertEquals(volumes.includes("./config:/etc/postgresql:ro"), true);
   assertEquals(volumes.includes("./tls:/etc/postgresql/tls:ro"), true);
   assertEquals(volumes.includes("pgdata:/var/lib/postgresql"), true);
+});
+
+test("normalizeManagedCompose emits container_name and keeps it across dockerOptions/exposure", () => {
+  const named = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee-1";
+  const withOptions = parseNormalized(
+    basePayload({
+      containerName: named,
+      dockerOptions: {
+        restart: "unless-stopped",
+        labels: { "tp.managed": "1" },
+      },
+      exposure: {
+        enabled: true,
+        protocol: "tcp",
+        publishedPort: 15432,
+      },
+    }),
+  );
+  const service = (withOptions.services as Record<string, Record<string, unknown>>)
+    .postgres!;
+  assertEquals(service.container_name, named);
+  assertEquals(service.restart, "unless-stopped");
+  const labels = service.labels as Record<string, string>;
+  assertEquals(labels["tp.managed"], "1");
 });
 
 test("normalizeManagedCompose strips ports and maps resources", () => {

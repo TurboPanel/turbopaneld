@@ -30,14 +30,32 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../insta
    `/opt/turbopanel/vendor/caddy/current/caddy` is missing. On-demand like
    Docker; daemon-converge does not install it. Required for hostname ingress.
 4. When `principalMaterial[]` is present, ensure Linux users/groups on the host
-   (`ensureSystemPrincipals` in `src/deploy/ensure-principal.ts`).
+   (`ensureSystemPrincipals` in `src/deploy/ensure-principal.ts`). Homes live
+   under `layout.principalHomeRoot` (default `/srv/users/<principalId>`):
+   home `0750`, `.ssh` `0700` (reserved for `authorized_keys`), and `volumes`
+   `0750`, all owned `uid:gid`. Shell comes from `principalMaterial[].shell`
+   (default `/usr/sbin/nologin`) via `useradd -s` / `usermod -s`. Existing users
+   are reconciled with `usermod -d` / `usermod -s` when home/shell differ —
+   never `usermod -m` (no data move) — but only after the passwd UID/GID match
+   the principal; a username collision with a different account fails instead
+   of mutating that account. Directory creation uses
+   `sudo -n install -d` so a non-root daemon can write under `/srv`.
 5. When `storageMaterial[]` is present, materialize paths under
    `<stateDir>/storage/<organizationId>/<storageId>/` (`materialize-storage.ts`);
-   `docker volume create` for `docker_volume` kinds; optional `chown` when a
-   principal is linked.
+   `docker volume create` for `docker_volume` kinds using instance-supplied
+   **`volumeName`** when present (else legacy `tp-<org8>-<name>`); optional
+   `chown` when a principal is linked. The instance owns Docker volume naming.
+   Principal-owned `bind_mount` entries arrive with an instance-derived
+   `sourcePath` of `/srv/users/<principalId>/volumes/<storageId>` (explicit
+   operator paths still win); those paths are created via the same sudo-backed
+   helper.
 6. Decrypt secret variables from `variableMaterial[]` into compose YAML
    (`apply-deploy-variables.ts`); patch storage bind/volume mounts
-   (`apply-storage-volumes.ts`).
+   (`apply-storage-volumes.ts`) — docker volumes emit
+   `volumes.<name> = { name, external: true }` so Compose mounts the
+   pre-created volume (not a `<project>_<name>` orphan); `docker_volume`
+   entries may omit `destinationPath` when the volume is only compose-declared
+   (no service-mount append).
 7. Write runtime compose under
    `<stateDir>/deployments/<environmentId>/docker-compose.yml` with Traefik
    labels (`src/deploy/compose-labels.ts`) — proxy middleware for

@@ -77,13 +77,20 @@ function applyDockerVolumeEntry(
   entry: EnvironmentDeployStorageMaterial,
   mountPaths: Map<string, string>,
 ): void {
-  const volumeName = requireMountPath(
-    mountPaths,
-    entry.storageId,
-    "docker volume path",
-  );
-  topVolumes[volumeName] = {};
-  if (!entry.composeServiceName) return;
+  const volumeName = entry.volumeName && entry.volumeName.length > 0
+    ? entry.volumeName
+    : requireMountPath(
+      mountPaths,
+      entry.storageId,
+      "docker volume path",
+    );
+  // Point compose at the pre-created volume (do not let Compose invent
+  // `<project>_<name>` orphans).
+  topVolumes[volumeName] = { name: volumeName, external: true };
+
+  // Compose-declared volumes already have service mounts; skip append when
+  // there is no destinationPath (or no composeServiceName).
+  if (!entry.destinationPath || !entry.composeServiceName) return;
 
   const service = requireComposeService(
     services,

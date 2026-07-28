@@ -23,6 +23,7 @@ test("assertSafeManagedIdentifiers rejects hostile ids", () => {
         managedId: "../escape",
         environmentId: "env1",
         projectName: "proj",
+        containerName: "ok-name-1",
         volumes: [],
       }),
     Error,
@@ -34,15 +35,41 @@ test("assertSafeManagedIdentifiers rejects hostile ids", () => {
         managedId: "ok-id",
         environmentId: "env1",
         projectName: "Bad Name!",
+        containerName: "ok-name-1",
         volumes: [],
       }),
     Error,
     "projectName",
   );
+  assertThrows(
+    () =>
+      assertSafeManagedIdentifiers({
+        managedId: "ok-id",
+        environmentId: "env1",
+        projectName: "tp-managed-pg",
+        containerName: "-starts-with-hyphen",
+        volumes: [],
+      }),
+    Error,
+    "containerName",
+  );
+  assertThrows(
+    () =>
+      assertSafeManagedIdentifiers({
+        managedId: "ok-id",
+        environmentId: "env1",
+        projectName: "tp-managed-pg",
+        containerName: "has/slash",
+        volumes: [],
+      }),
+    Error,
+    "containerName",
+  );
   assertSafeManagedIdentifiers({
     managedId: "00000000-0000-4000-8000-000000000001",
     environmentId: "env_1",
     projectName: "tp-managed-pg",
+    containerName: "01936b3e-aaaa-bbbb-cccc-123456789abc-1",
     volumes: [{ name: "pgdata", target: "/var/lib/postgresql" }],
   });
 });

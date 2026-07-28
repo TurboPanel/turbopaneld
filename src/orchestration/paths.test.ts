@@ -300,6 +300,7 @@ test("production layout resolves FHS orchestration and runtime dirs", () => {
     "tlsDir",
   );
   assertEq(layout.stateDir, PROD_STATE_DIR_DEFAULT, "stateDir");
+  assertEq(layout.principalHomeRoot, "/srv/users", "principalHomeRoot");
   // Managed installs must resolve the FHS lib tree — never the dev checkout.
   assertEq(
     layout.instanceDir,
@@ -321,6 +322,7 @@ test("layout env overrides apply in development mode", () => {
     TURBOPANEL_CONFIG_DIR: "/custom/config",
     TURBOPANEL_RUN_DIR: "/custom/run",
     TURBOPANEL_STATE_DIR: "/custom/state",
+    TURBOPANEL_PRINCIPAL_HOME_ROOT: "/custom/srv/users",
   }, { forceMode: "development" });
 
   assertEq(layout.runtimesDir, "/custom/runtimes", "runtimesDir");
@@ -339,6 +341,7 @@ test("layout env overrides apply in development mode", () => {
     "/custom/config/instance-ca.pem",
     "instanceCaPath",
   );
+  assertEq(layout.principalHomeRoot, "/custom/srv/users", "principalHomeRoot");
 });
 
 test("layout env overrides apply in production mode", () => {
@@ -571,6 +574,7 @@ test("production layout resolves the complete FHS tree with no defaults", () => 
   assertEq(layout.daemonStateDir, PROD_STATE_DIR_DEFAULT, "daemonStateDir");
   assertEq(layout.logDir, PROD_LOG_DIR_DEFAULT, "logDir");
   assertEq(layout.runDir, PROD_RUN_DIR_DEFAULT, "runDir");
+  assertEq(layout.principalHomeRoot, "/srv/users", "principalHomeRoot");
   assertEq(
     layout.daemonRootDefault,
     PROD_DAEMON_ROOT_DEFAULT,

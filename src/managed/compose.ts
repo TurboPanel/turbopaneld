@@ -332,6 +332,7 @@ export function normalizeManagedCompose(
   }
 
   service.image = payload.image;
+  service.container_name = payload.containerName;
   ensureTopLevelVolumes(document, payload.volumes);
   ensureServiceVolumeMounts(service, payload.volumes);
 

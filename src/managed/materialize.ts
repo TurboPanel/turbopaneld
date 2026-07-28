@@ -27,6 +27,29 @@ function parseMode(mode: "0640" | "0600"): number {
 }
 
 /**
+ * Write a config file under the managed config dir.
+ *
+ * After ownership normalization, existing files are often `root:<engineGroup>`
+ * `0640` (or `<engineUser>:<engineGroup>` `0600`) — the daemon cannot open
+ * them for write. It still owns the parent directory, so unlink-then-create
+ * is the re-apply path (same pattern as replacing a root-owned bind-mount
+ * file in place).
+ */
+async function writeManagedConfigFile(
+  dest: string,
+  contents: string,
+  mode: number,
+): Promise<void> {
+  try {
+    await Deno.remove(dest);
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+  await Deno.writeTextFile(dest, contents);
+  await Deno.chmod(dest, mode);
+}
+
+/**
  * Write config files and optional TLS material under
  * `<stateDir>/managed/<managedId>/`.
  */
@@ -42,8 +65,7 @@ export async function materializeManagedState(
   for (const file of payload.configFiles) {
     const dest = resolveManagedRelativePath(configDir, file.path);
     await Deno.mkdir(dirnameOf(dest), { recursive: true, mode: DIR_MODE });
-    await Deno.writeTextFile(dest, file.contents);
-    await Deno.chmod(dest, parseMode(file.mode));
+    await writeManagedConfigFile(dest, file.contents, parseMode(file.mode));
   }
 
   if (payload.tlsMaterial) {
@@ -65,6 +87,12 @@ function dirnameOf(path: string): string {
  * Daemon-written files are owned by the daemon user; Postgres (and peers)
  * refuse keys not owned by root-with-0640 or the DB user. Owner/group names
  * come from the engine runtime descriptor — never hardcoded here.
+ *
+ * Directories keep the daemon UID as owner (so re-apply can rewrite files) but
+ * take the engine group + `0750` so the engine user can traverse bind mounts
+ * like `./config:/etc/postgresql`. File-only chown left dirs as
+ * `daemon:daemon` `0750`, which blocked the engine UID with "Permission denied"
+ * on the conf path.
  */
 export async function normalizeManagedFileOwnership(
   image: string,
@@ -73,20 +101,26 @@ export async function normalizeManagedFileOwnership(
   containerGroup: string,
 ): Promise<void> {
   // Shell script runs as root inside a throwaway engine image.
+  // Scope to bind-mounted trees only (`config/`, `tls/`) — never
+  // `docker-compose.yml`, short-lived `.env`, or `backups/` (daemon-owned).
+  // Whole-tree chown left compose as root:<engineGroup> 0640 and broke
+  // re-apply with writefile Permission denied.
   // 0640 → root:<engineGroup>; 0600 → <engineUser>:<engineGroup>.
-  // `backups/` is pruned from every find below: backup artifacts are written
-  // 0600 by the daemon user itself (`src/managed/backup.ts`) so it can read
-  // them back for restore/checksum — chowning them to the container engine
-  // user here would make the daemon unable to read its own dumps.
+  // dirs → keep owner, set group to <engineGroup>, mode 0750.
   const script = [
     "set -eu",
     `USER_NAME=${shellSingleQuote(containerUser)}`,
     `GROUP_NAME=${shellSingleQuote(containerGroup)}`,
-    'find /managed -path /managed/backups -prune -o -type f -perm 640 -exec chown "root:$GROUP_NAME" {} +',
-    'find /managed -path /managed/backups -prune -o -type f -perm 640 -exec chmod 0640 {} +',
-    'find /managed -path /managed/backups -prune -o -type f -perm 600 -exec chown "$USER_NAME:$GROUP_NAME" {} +',
-    'find /managed -path /managed/backups -prune -o -type f -perm 600 -exec chmod 0600 {} +',
-    'find /managed -path /managed/backups -prune -o -type d -exec chmod 0750 {} +',
+    "for TREE in /managed/config /managed/tls; do",
+    '  [ -d "$TREE" ] || continue',
+    '  find "$TREE" -type f -perm 640 -exec chown "root:$GROUP_NAME" {} +',
+    '  find "$TREE" -type f -perm 640 -exec chmod 0640 {} +',
+    '  find "$TREE" -type f -perm 600 -exec chown "$USER_NAME:$GROUP_NAME" {} +',
+    '  find "$TREE" -type f -perm 600 -exec chmod 0600 {} +',
+    // Group-only chown keeps the daemon UID as owner for re-apply writes.
+    '  find "$TREE" -type d -exec chown ":$GROUP_NAME" {} +',
+    '  find "$TREE" -type d -exec chmod 0750 {} +',
+    "done",
   ].join("\n");
 
   const result = await runDocker([

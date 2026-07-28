@@ -21,6 +21,8 @@ export const SAFE_MANAGED_ID_RE = /^[A-Za-z0-9_-]+$/;
 const COMPOSE_PROJECT_RE = /^[a-z0-9][a-z0-9_-]*$/;
 const SHELL_METACHAR_RE = /[;|&$`()<>\\"'!*?{}]/;
 const SAFE_VOLUME_NAME_RE = /^[A-Za-z_]\w*$/;
+/** Hyphen-permitting; must stay in sync with instance `DOCKER_RESOURCE_NAME_RE`. */
+const SAFE_CONTAINER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/;
 
 export function managedDir(layout: LayoutPaths, managedId: string): string {
   return join(layout.stateDir, "managed", managedId);
@@ -125,7 +127,7 @@ export function resolveManagedRelativePath(
 export function assertSafeManagedIdentifiers(
   payload: Pick<
     ManagedApplyPayload,
-    "managedId" | "environmentId" | "projectName" | "volumes"
+    "managedId" | "environmentId" | "projectName" | "containerName" | "volumes"
   >,
 ): void {
   if (!SAFE_MANAGED_ID_RE.test(payload.managedId)) {
@@ -140,6 +142,9 @@ export function assertSafeManagedIdentifiers(
     !COMPOSE_PROJECT_RE.test(payload.projectName)
   ) {
     throw new Error("projectName must be a valid Docker Compose project name");
+  }
+  if (!SAFE_CONTAINER_NAME_RE.test(payload.containerName)) {
+    throw new Error("containerName contains unsupported characters");
   }
   for (const volume of payload.volumes) {
     if (

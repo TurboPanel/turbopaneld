@@ -206,6 +206,21 @@ async function cleanupManagedEnvFile(
   }
 }
 
+/** Unlink then create — survives a leftover root-owned file from older normalize. */
+async function rewriteDaemonOwnedFile(
+  path: string,
+  contents: string,
+  mode: number,
+): Promise<void> {
+  try {
+    await Deno.remove(path);
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+  await Deno.writeTextFile(path, contents);
+  await Deno.chmod(path, mode);
+}
+
 async function composeUpManagedEngine(
   layout: LayoutPaths,
   payload: ManagedApplyPayload,
@@ -217,15 +232,14 @@ async function composeUpManagedEngine(
   const envPath = managedEnvFilePath(layout, payload.managedId);
   const project = managedComposeProject(payload.managedId);
 
-  await Deno.writeTextFile(composePath, composeYaml);
-  await Deno.chmod(composePath, 0o640);
+  await rewriteDaemonOwnedFile(composePath, composeYaml, 0o640);
 
   try {
-    await Deno.writeTextFile(
+    await rewriteDaemonOwnedFile(
       envPath,
       `${MANAGED_ROOT_PASSWORD_VAR}=${rootCredential.password}\n`,
+      0o600,
     );
-    await Deno.chmod(envPath, 0o600);
 
     const up = await runDocker([
       "compose",

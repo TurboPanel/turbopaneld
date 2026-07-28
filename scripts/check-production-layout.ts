@@ -83,6 +83,7 @@ expect("stateDir", prod.stateDir, "/var/lib/turbopanel");
 expect("daemonStateDir", prod.daemonStateDir, "/var/lib/turbopanel");
 expect("logDir", prod.logDir, "/var/log/turbopanel");
 expect("runDir", prod.runDir, "/run/turbopanel");
+expect("principalHomeRoot", prod.principalHomeRoot, "/srv/users");
 expect(
   "daemonRootDefault",
   prod.daemonRootDefault,

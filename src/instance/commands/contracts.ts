@@ -180,7 +180,16 @@ export type EnvironmentDeployStorageMaterial = {
   kind: "docker_volume" | "bind_mount" | "file" | "directory";
   name: string;
   sourcePath?: string;
-  destinationPath: string;
+  /**
+   * Mount target inside the container. Required for bind/file/directory;
+   * optional for `docker_volume` when the volume is only declared in compose.
+   */
+  destinationPath?: string;
+  /**
+   * On-host Docker volume name supplied by the instance. When absent, the
+   * daemon falls back to the legacy `tp-<org8>-<name>` namespace.
+   */
+  volumeName?: string;
   principalId?: string;
   serviceId?: string;
   composeServiceName?: string;
@@ -194,6 +203,7 @@ export type EnvironmentDeployPrincipalMaterial = {
   uid: number;
   gid: number;
   home?: string;
+  shell?: string;
 };
 
 export type EnvironmentDeployServiceHook = {
@@ -363,6 +373,8 @@ export type ManagedApplyPayload = {
   environmentId: string;
   engine: ManagedEngineCode;
   projectName: string;
+  /** Compose `container_name` — `<container.id>-1` from instance pre-allocation. */
+  containerName: string;
   image: string;
   containerPort: number;
   composeYaml: string;
@@ -1079,19 +1091,32 @@ function parseVariableMaterial(
   };
 }
 
+const DOCKER_RESOURCE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/;
+
 function parseStorageMaterial(
   value: unknown,
 ): EnvironmentDeployStorageMaterial {
   if (!isRecord(value)) {
     throw new TypeError("Invalid environment deploy storageMaterial entry");
   }
+  const kind = parseNonEmptyString(value, "kind") as EnvironmentDeployStorageMaterial["kind"];
   const material: EnvironmentDeployStorageMaterial = {
     storageId: parseNonEmptyString(value, "storageId"),
-    kind: parseNonEmptyString(value, "kind") as EnvironmentDeployStorageMaterial["kind"],
+    kind,
     name: parseNonEmptyString(value, "name"),
-    destinationPath: parseNonEmptyString(value, "destinationPath"),
     serverId: parseNonEmptyString(value, "serverId"),
   };
+  if (kind !== "docker_volume") {
+    material.destinationPath = parseNonEmptyString(value, "destinationPath");
+  } else if (typeof value.destinationPath === "string" && value.destinationPath.length > 0) {
+    material.destinationPath = value.destinationPath;
+  }
+  if (typeof value.volumeName === "string") {
+    if (!DOCKER_RESOURCE_NAME_RE.test(value.volumeName)) {
+      throw new TypeError("Invalid environment deploy storageMaterial volumeName");
+    }
+    material.volumeName = value.volumeName;
+  }
   if (typeof value.sourcePath === "string") material.sourcePath = value.sourcePath;
   if (typeof value.principalId === "string") {
     material.principalId = value.principalId;
@@ -1104,6 +1129,24 @@ function parseStorageMaterial(
     material.contentEnvelope = value.contentEnvelope;
   }
   return material;
+}
+
+/** Absolute path: leading `/`, no whitespace/newline/NUL (mirrors instance). */
+const PRINCIPAL_SHELL_RE = /^\/[A-Za-z0-9._+/-]{0,254}$/;
+
+function isValidAbsolutePrincipalPath(value: string): boolean {
+  if (value.length === 0 || value.length > 255) return false;
+  if (!value.startsWith("/")) return false;
+  if (/\s/.test(value) || value.includes("\0") || value.includes("\n")) {
+    return false;
+  }
+  if (value.split("/").includes("..")) return false;
+  return true;
+}
+
+function isValidPrincipalShellPath(value: string): boolean {
+  if (!isValidAbsolutePrincipalPath(value)) return false;
+  return PRINCIPAL_SHELL_RE.test(value);
 }
 
 function parsePrincipalMaterial(
@@ -1123,7 +1166,18 @@ function parsePrincipalMaterial(
     uid,
     gid,
   };
-  if (typeof value.home === "string") material.home = value.home;
+  if (value.home !== undefined) {
+    if (typeof value.home !== "string" || !isValidAbsolutePrincipalPath(value.home)) {
+      throw new TypeError("Invalid environment deploy principalMaterial home");
+    }
+    material.home = value.home;
+  }
+  if (value.shell !== undefined) {
+    if (typeof value.shell !== "string" || !isValidPrincipalShellPath(value.shell)) {
+      throw new TypeError("Invalid environment deploy principalMaterial shell");
+    }
+    material.shell = value.shell;
+  }
   return material;
 }
 
@@ -1958,6 +2012,13 @@ function parseManagedApplyTlsMaterial(
   };
 }
 
+/**
+ * Must stay in sync with the instance canonical validator
+ * (`DOCKER_RESOURCE_NAME_RE` / `isValidDockerResourceName` in
+ * `instance/src/lib/naming.ts`).
+ */
+const SAFE_CONTAINER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/;
+
 /** Must stay in sync with the instance canonical `managed.apply` validator. */
 export function parseManagedApplyPayload(
   value: unknown,
@@ -1974,6 +2035,8 @@ export function parseManagedApplyPayload(
     !isManagedEngineCode(value.engine) ||
     typeof value.projectName !== "string" ||
     !isComposeProjectName(value.projectName) ||
+    typeof value.containerName !== "string" ||
+    !SAFE_CONTAINER_NAME_RE.test(value.containerName) ||
     typeof value.image !== "string" ||
     !isValidManagedImageRef(value.image) ||
     !isValidPortNumber(value.containerPort) ||
@@ -1997,6 +2060,7 @@ export function parseManagedApplyPayload(
     environmentId: value.environmentId,
     engine: value.engine,
     projectName: value.projectName,
+    containerName: value.containerName,
     image: value.image,
     containerPort: value.containerPort,
     composeYaml: value.composeYaml,

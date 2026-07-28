@@ -95,33 +95,47 @@ the UI.
 
 ## Rules
 
-1. **Native port, never remapped.** Normalized compose never emits `ports:`.
+1. **Container name from the instance.** The instance supplies `containerName`
+   (`<container.id>-1`); `normalizeManagedCompose` writes it as
+   `container_name`. `assertSafeManagedIdentifiers` guards it with its own
+   hyphen-permitting regex (do not reuse `SAFE_VOLUME_NAME_RE`). Container
+   resolution (`containers.ts`) still keys off `Service` / `State`, never
+   `Name`.
+2. **Native port, never remapped.** Normalized compose never emits `ports:`.
    The container listens on the engine native port; exposure is Traefik's job
    via `turbopanel-managed` + TCP router labels.
-2. **Config is verbatim.** The daemon does **not** rebuild `postgresql.conf`
+3. **Config is verbatim.** The daemon does **not** rebuild `postgresql.conf`
    (or peer engine files). The instance engine spec is the single source of
-   truth for base + operator snippet + `ssl = on`.
-3. **Secrets.** Credential envelopes decrypt in memory → root password reaches
+   truth for base + operator snippet + `ssl = on`. Re-apply **unlinks then
+   recreates** each config file — after ownership normalization they are
+   often `root:<engineGroup>` `0640`, which the daemon cannot open for
+   write, but it owns the parent directory so unlink+create succeeds.
+4. **Secrets.** Credential envelopes decrypt in memory → root password reaches
    compose only through the short-lived `0600` env-file → deleted after `up`.
    Plaintext never lands in `docker-compose.yml` on disk and never appears in
    logs (`redactSecrets` + `sanitizeForLog`). SQL/password input uses
    `runDocker(…, { input })` stdin — never argv.
-4. **Ownership normalization.** Files written by the daemon user are unreadable
+5. **Ownership normalization.** Files written by the daemon user are unreadable
    by the container engine user. `normalizeManagedFileOwnership` runs one
    throwaway `docker run --user 0` of the engine image to `chown`/`chmod`
-   bind-mounted files. Owner/group names come from the engine runtime
-   descriptor — never hardcoded in shared code. **`backups/` is pruned from
-   every `find` in that script** — backup artifacts are written `0600` by the
-   *daemon* user (not the container engine user) so the daemon can read them
-   back for checksum/restore; chowning them to the container user would break
-   that.
-5. **Engine extension.** One file under `engines/` implementing
+   **only** the bind-mounted trees (`config/`, `tls/`) — never
+   `docker-compose.yml`, the short-lived `.env`, or `backups/` (those stay
+   daemon-owned so re-apply can rewrite them). Owner/group names come from
+   the engine runtime descriptor — never hardcoded in shared code. Modes:
+   `0640` → `root:<engineGroup>`; `0600` → `<engineUser>:<engineGroup>`;
+   directories keep the daemon UID as owner but take `<engineGroup>` + `0750` so
+   the engine user can traverse mounts like `./config:/etc/postgresql`
+   (file-only chown left dirs as `daemon:daemon` `0750` and caused Postgres
+   "Permission denied" on `postgresql.conf`). Whole-tree chown previously
+   made `docker-compose.yml` `root:<engineGroup>` `0640` and broke re-apply
+   with `writefile` Permission denied.
+6. **Engine extension.** One file under `engines/` implementing
    `ManagedEngineRuntime` (+ `supportsSni`) + one registry entry in
    `engines/index.ts`.
-6. **Tenant isolation.** Never import or mutate tenant Traefik / hosting
+7. **Tenant isolation.** Never import or mutate tenant Traefik / hosting
    Caddy state from this package beyond shared helpers (`assertValidBindAddress`,
    `runDocker`).
-7. **Backup/restore (`backup.ts`).** Optional per engine via
+8. **Backup/restore (`backup.ts`).** Optional per engine via
    `ManagedEngineRuntime.backup` (`ManagedBackupNotSupportedError` when absent).
    - **Stream, never buffer.** Dump stdout pipes directly to a `<backupId>.<ext>.part`
      file opened at `0600`; restore pipes the artifact file straight into

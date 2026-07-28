@@ -62,7 +62,8 @@ env-overridable (`TURBOPANEL_HOME`, `TURBOPANEL_BIN_DIR`, `TURBOPANEL_LIB_DIR`,
 `TURBOPANEL_RUNTIME_DIR`, `TURBOPANEL_SHARE_DIR`, `TURBOPANEL_UI_DIR`,
 `TURBOPANEL_ORCHESTRATION_DIR`, `TURBOPANEL_CONFIG_DIR`, `TURBOPANEL_STATE_DIR`,
 `TURBOPANEL_DAEMON_STATE_DIR`, `TURBOPANEL_LOG_DIR`, `TURBOPANEL_RUN_DIR`,
-`TURBOPANEL_RUNTIMES_DIR`, `TURBOPANEL_DAEMON_ROOT`).
+`TURBOPANEL_RUNTIMES_DIR`, `TURBOPANEL_DAEMON_ROOT`,
+`TURBOPANEL_PRINCIPAL_HOME_ROOT`).
 `src/orchestration/paths.ts` and `src/instance/paths.ts` derive their constants
 from `resolveLayout` — do **not** hardcode absolute paths in runtime code;
 add/extend a layout field instead. The development default checkout root is
@@ -82,8 +83,14 @@ module and CI guard are the only places allowed to reference it.
 | Daemon install root (`daemonRootDefault`)                         | `/opt/turbopanel/lib/daemon`          |
 | Config (`daemon.env`, `instance-ca.pem`)                          | `/etc/turbopanel`                     |
 | Persistent identity (license, `server.id`, keys, tunnels)         | `/var/lib/turbopanel`                 |
+| Tenant principal homes (`principalHomeRoot`)                      | `/srv/users/<principalId>`            |
 | Logs                                                              | `/var/log/turbopanel`                 |
 | Runtime (sockets, `daemon.lock`)                                  | `/run/turbopanel`                     |
+
+TurboPanel project principals allocate UID/GID from the instance-wide
+`principal_uid_seq` starting at **10001**, clear of the `tp*` service accounts
+at **9989–9999**. Override the home root with `TURBOPANEL_PRINCIPAL_HOME_ROOT`
+(`layout.principalHomeRoot`).
 
 **Development (co-located checkout)** — `./console` from
 [turbopanel/dev](https://github.com/turbopanel/dev) runs the daemon from source

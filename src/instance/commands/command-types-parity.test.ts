@@ -87,6 +87,54 @@ test("environment.deploy hosting fixture round-trips tcp protocol and ports", ()
   assertEquals(payload.hostings[0]?.ports, [{ published: 5432, target: 5432 }]);
 });
 
+test("environment.deploy storageMaterial accepts docker_volume without destinationPath", () => {
+  const volumeId = "01936b3e-8c7a-7b2d-a1f0-123456789abc";
+  const payload = parseEnvironmentDeployPayload({
+    environmentId: "env-1",
+    projectId: "proj-1",
+    organizationId: "org-1",
+    projectName: "demo",
+    composeYaml: "services:\n  web:\n    image: nginx\n",
+    hostings: [],
+    storageMaterial: [
+      {
+        storageId: volumeId,
+        kind: "docker_volume",
+        name: "data",
+        serverId: "srv-1",
+        volumeName: volumeId,
+      },
+    ],
+  });
+  assertEquals(payload.storageMaterial?.[0]?.volumeName, volumeId);
+  assertEquals(payload.storageMaterial?.[0]?.destinationPath, undefined);
+});
+
+test("environment.deploy storageMaterial rejects invalid volumeName", () => {
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        environmentId: "env-1",
+        projectId: "proj-1",
+        organizationId: "org-1",
+        projectName: "demo",
+        composeYaml: "services: {}\n",
+        hostings: [],
+        storageMaterial: [
+          {
+            storageId: "st1",
+            kind: "docker_volume",
+            name: "data",
+            serverId: "srv-1",
+            volumeName: "-bad",
+          },
+        ],
+      }),
+    TypeError,
+    "volumeName",
+  );
+});
+
 test("environment.deploy traditionalWebSites fixture round-trips", () => {
   const payload = parseEnvironmentDeployPayload({
     environmentId: "env-1",
@@ -147,6 +195,7 @@ const VALID_MANAGED_APPLY = {
   environmentId: "00000000-0000-4000-8000-000000000002",
   engine: "postgres",
   projectName: "tp-managed-pg",
+  containerName: "01936b3e-aaaa-bbbb-cccc-123456789abc-1",
   image: "docker.io/library/postgres:18-alpine",
   containerPort: 5432,
   composeYaml: "services:\n  postgres:\n    image: postgres:18-alpine\n",
@@ -174,7 +223,32 @@ test("managed.apply fixture round-trips", () => {
   const payload = parseManagedApplyPayload(VALID_MANAGED_APPLY);
   assertEquals(payload.engine, "postgres");
   assertEquals(payload.projectName, "tp-managed-pg");
+  assertEquals(
+    payload.containerName,
+    "01936b3e-aaaa-bbbb-cccc-123456789abc-1",
+  );
   assertEquals(payload.credentials[0]?.username, "postgres");
+});
+
+test("managed.apply rejects unsafe containerName", () => {
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        containerName: "-bad",
+      }),
+    TypeError,
+    "Invalid managed.apply payload",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        containerName: "has/slash",
+      }),
+    TypeError,
+    "Invalid managed.apply payload",
+  );
 });
 
 test("managed.apply admits dropUsers and rejects unsafe names", () => {

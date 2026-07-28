@@ -28,6 +28,10 @@ function resolveOwnership(
   return principalMap.get(entry.principalId);
 }
 
+/**
+ * Legacy volume naming for older instances that omit `volumeName`.
+ * The instance owns naming for new deploys — prefer `entry.volumeName`.
+ */
 function namespaceDockerVolumeName(organizationId: string, name: string): string {
   return `tp-${organizationId.slice(0, 8)}-${name}`;
 }
@@ -71,7 +75,11 @@ async function materializeDockerVolume(
   organizationId: string,
   entry: EnvironmentDeployStorageMaterial,
 ): Promise<string> {
-  const volumeName = namespaceDockerVolumeName(organizationId, entry.name);
+  // Instance owns Docker volume names (`volumeName`); legacy fallback only
+  // for older control planes that omit the field.
+  const volumeName = entry.volumeName && entry.volumeName.length > 0
+    ? entry.volumeName
+    : namespaceDockerVolumeName(organizationId, entry.name);
   const create = await runDocker(["volume", "create", volumeName]);
   if (!create.success) {
     throw new Error(create.stderr || `Failed to create docker volume ${volumeName}`);
@@ -92,11 +100,19 @@ async function materializeHostPathEntry(
   } else if (entry.kind === "file") {
     hostPath = await materializeFile(baseDir, entry, ownership, fileContent);
   } else if (entry.kind === "bind_mount") {
-    await ensureParentDirectory(hostPath);
-    await Deno.mkdir(hostPath, { recursive: true, mode: 0o750 }).catch(() => {
-      // Path may already exist as a file mount point.
-    });
-    await maybeChown(hostPath, ownership);
+    if (ownership) {
+      // Sudo-backed create so parents under principal-owned 0750 trees exist.
+      await ensureDirectoryOwnedByPrincipal(
+        hostPath,
+        ownership.uid,
+        ownership.gid,
+      );
+    } else {
+      await ensureParentDirectory(hostPath);
+      await Deno.mkdir(hostPath, { recursive: true, mode: 0o750 }).catch(() => {
+        // Path may already exist as a file mount point.
+      });
+    }
   }
 
   return hostPath;
