@@ -1,8 +1,8 @@
 # Tenant deploy & hosting ingress — AGENTS.md
 
-The `environment.deploy` / `environment.stop` command handlers: Docker Compose bring-up with Traefik labels, hosting-edge Caddy (`:80`/`:443`, distinct from control-plane Caddy), org TLS materialization from `tpdaemon` envelopes, and best-effort container reporting.
+The `environment.deploy` / `environment.stop` command handlers: Docker Compose bring-up with Traefik labels, hosting Caddy (`:80`/`:443`, distinct from control-plane Caddy), org TLS materialization from `tpdaemon` envelopes, and best-effort container reporting.
 
-**Managed engines are a separate path** (`../managed/AGENTS.md`): platform-owned compose + config under `<stateDir>/managed/<managedId>/`, native ports only, no hosting-edge Caddy, no tenant Traefik/`turbopanel-ingress`, no user compose merge. Do not route `managed.*` commands through this deploy stack.
+**Managed engines are a separate path** (`../managed/AGENTS.md`): platform-owned compose + config under `<stateDir>/managed/<managedId>/`, native ports only, no hosting Caddy, no tenant Traefik/`turbopanel-ingress`, no user compose merge. Do not route `managed.*` commands through this deploy stack.
 
 Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../instance/src/lib/commands/AGENTS.md`. Cross-repo `../<repo>/…` links are relative to the repo root.
 
@@ -54,7 +54,7 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../insta
    (`src/deploy/materialize-tls.ts`). Private keys arrive as `tpdaemon`
    envelopes — decrypt only through `POST /api/daemon/v1/secrets/decrypt`
    (daemon JWT); never log plaintext.
-7. Refresh hosting-edge Caddy config under `/etc/turbopanel/hosting/`
+7. Refresh hosting Caddy config under `/etc/turbopanel/hosting/`
    (`auto_https off` always). Per-hostname site blocks use
    `tls <fullchain> <privkey>` when a resolved `tlsId` was materialized;
    otherwise `tls internal`. When `hostings[].bindAddress` is set, both the
@@ -172,7 +172,7 @@ Docker Compose. The daemon:
 6. Rewrites hosting Caddy so hostnames for those services
    `reverse_proxy 127.0.0.1:<listenPort>` instead of Traefik.
 7. Skips Docker/Traefik entirely when the payload has **no** container services
-   (`composeYaml` is `services: {}`) — still ensures hosting-edge Caddy via
+   (`composeYaml` is `services: {}`) — still ensures hosting Caddy via
    `ensureHostingCaddyRuntime`.
 
 All three engines (plus php-fpm for Apache PHP) are vendored under

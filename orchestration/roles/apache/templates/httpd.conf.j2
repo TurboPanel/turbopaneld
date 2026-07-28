@@ -44,7 +44,7 @@ DocumentRoot "{{ turbopanel_state_dir }}/apache/empty"
     Require all denied
 </Directory>
 
-# Hosting-edge Caddy owns public :80/:443. Traditional-web vhosts Listen on
+# Hosting Caddy owns public :80/:443. Traditional-web vhosts Listen on
 # loopback (and optionally docker-bridge) high ports only.
 #
 # Apache refuses to start with zero Listen sockets, so keep a bootstrap

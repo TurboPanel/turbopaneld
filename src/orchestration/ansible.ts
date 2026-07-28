@@ -705,7 +705,7 @@ export async function runDockerSetup(
   logInfo("orchestration", "docker-setup complete");
 }
 
-/** Vendor the Caddy binary for hosting-edge ingress (daemon-only hosts). */
+/** Vendor the Caddy binary for public ingress (daemon-only hosts). */
 export async function runCaddySetup(
   onEvent?: AnsibleEventHandler,
 ): Promise<void> {

@@ -119,7 +119,7 @@ config is templated to `/etc/turbopanel/nginx/nginx.conf` and
 `Include`s `/etc/turbopanel/nginx/sites/*.conf`. Temp paths / logs / pidfile
 are under `/var/lib|/var/log|/run/turbopanel/nginx/`. Driven by
 **`turbopanel-nginx.service`** (runs as `tpnginx`; high-port vhosts only —
-hosting-edge Caddy owns `:80`/`:443`).
+hosting Caddy owns `:80`/`:443`).
 
 ### Apache (`apache`)
 

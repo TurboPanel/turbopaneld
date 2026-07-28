@@ -187,7 +187,7 @@ export type EnvironmentDeployDeps = {
   decryptSecrets?: DecryptSecretsFn;
 };
 
-/** Sets up Traefik/Docker ingress for container deploys, or the edge-Caddy-only
+/** Sets up Traefik/Docker ingress for container deploys, or the hosting-Caddy-only
  * runtime for traditional-web-only environments. */
 async function ensureDeployIngress(
   layout: LayoutPaths,
@@ -196,7 +196,7 @@ async function ensureDeployIngress(
   containerHostings: EnvironmentDeployHosting[],
 ): Promise<void> {
   if (!hasContainers) {
-    // Traditional-web-only: edge Caddy without Traefik/Docker.
+    // Traditional-web-only: hosting Caddy without Traefik/Docker.
     await ensureHostingCaddyRuntime(layout);
     return;
   }

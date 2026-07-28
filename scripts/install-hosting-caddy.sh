@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install the vendored hosting-edge Caddy binary on a managed daemon host.
+# Install the vendored hosting Caddy binary on a managed daemon host.
 # Used when environment.deploy fails with:
 #   Hosting Caddy runtime is missing: <runtimesDir>/caddy/current/caddy
 # before the daemon has on-demand caddy-setup (or when Sync Dev Build cannot

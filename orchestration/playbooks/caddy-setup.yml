@@ -1,4 +1,4 @@
-# On-demand Caddy binary for hosting-edge ingress (environment.deploy).
+# On-demand Caddy binary for public ingress (environment.deploy).
 # Distinct from control-plane turbopanel-caddy (:8443) — this only vendors the
 # Caddy binary under {{ turbopanel_vendor_dir }}/caddy for
 # turbopanel-hosting-caddy.service.

@@ -1,5 +1,5 @@
 /**
- * Ensure the hosting-edge Caddy binary exists under the vendor tree.
+ * Ensure the hosting Caddy binary exists under the vendor tree.
  *
  * Called from environment.deploy (not daemon-converge). Managed hosts often
  * have no Caddy until the first deploy that needs hostname ingress.

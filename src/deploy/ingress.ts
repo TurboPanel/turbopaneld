@@ -247,7 +247,7 @@ async function installAndStartCaddy(
   return true;
 }
 
-/** Ensure hosting-edge Caddy binary, Caddyfile, sites dir, and systemd unit. */
+/** Ensure hosting Caddy binary, Caddyfile, sites dir, and systemd unit. */
 export async function ensureHostingCaddyRuntime(
   layout: LayoutPaths,
 ): Promise<void> {
@@ -326,7 +326,7 @@ export type CaddyUpstream =
 
 const DEFAULT_TRAEFIK_UPSTREAM: CaddyUpstream = { kind: "traefik" };
 
-/** One path-routed upstream on a shared hostname (hosting-edge Caddy). */
+/** One path-routed upstream on a shared hostname (hosting Caddy). */
 export type CaddySiteRoute = {
   pathPrefix?: string;
   upstream: CaddyUpstream;

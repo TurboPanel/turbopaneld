@@ -2,7 +2,7 @@
 
 Daemon-side runtime for environment-scoped managed database/cache engines
 (Postgres first). Completely separate from tenant `environment.deploy` — no
-hosting-edge Caddy, no tenant Traefik network, no user compose merge.
+hosting Caddy, no tenant Traefik network, no user compose merge.
 
 Root context: `../../AGENTS.md`. Instance engine specs:
 `../../../instance/src/lib/managed/AGENTS.md`. Command contracts:
@@ -118,7 +118,7 @@ the UI.
 5. **Engine extension.** One file under `engines/` implementing
    `ManagedEngineRuntime` (+ `supportsSni`) + one registry entry in
    `engines/index.ts`.
-6. **Tenant isolation.** Never import or mutate tenant Traefik / hosting-edge
+6. **Tenant isolation.** Never import or mutate tenant Traefik / hosting
    Caddy state from this package beyond shared helpers (`assertValidBindAddress`,
    `runDocker`).
 7. **Backup/restore (`backup.ts`).** Optional per engine via

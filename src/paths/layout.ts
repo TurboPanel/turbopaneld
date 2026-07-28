@@ -108,7 +108,7 @@ export interface LayoutPaths {
   instanceConfigDir: string;
   instanceCaPath: string;
   daemonStateDir: string;
-  /** Hosting-edge TLS materialization root (`/etc/turbopanel/tls`). */
+  /** Hosting TLS materialization root (`/etc/turbopanel/tls`). */
   tlsDir: string;
 }
 

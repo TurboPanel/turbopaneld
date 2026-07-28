@@ -29,7 +29,7 @@ http {
     uwsgi_temp_path       {{ turbopanel_state_dir }}/nginx/uwsgi_temp;
     scgi_temp_path        {{ turbopanel_state_dir }}/nginx/scgi_temp;
 
-    # Hosting-edge Caddy owns public :80/:443. Traditional-web vhosts listen on
+    # Hosting Caddy owns public :80/:443. Traditional-web vhosts listen on
     # loopback (and optionally docker-bridge) high ports only.
     include {{ turbopanel_config_dir }}/nginx/sites/*.conf;
 }
