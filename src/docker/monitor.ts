@@ -23,26 +23,51 @@ function isContainerNotFound(err: unknown): boolean {
   return err instanceof Error && err.message.includes("HTTP 404");
 }
 
+const DOCKER_UNAVAILABLE_PATTERNS = [
+  "No such file or directory",
+  "os error 2",
+  "Connection refused",
+  "os error 111",
+  "client error (Connect)",
+];
+
+/** Bound on how deep `err.cause` chains are walked when classifying errors. */
+const MAX_CAUSE_DEPTH = 5;
+
 /**
  * True when the error is just "Docker isn't reachable" (socket absent or refused).
  * On managed nodes Docker is installed on demand, so an absent socket is expected
  * and must not spam the log — we report it once on transition and retry quietly.
+ *
+ * Deno's `fetch` reports connection failures (ENOENT for a missing socket,
+ * ECONNREFUSED, …) as a generic top-level `TypeError: fetch failed`, with the
+ * actual reason nested in `err.cause` (sometimes several levels deep). Only
+ * checking `err.message` misses every one of these on a Docker-less host,
+ * which routes them through the loud `logWarn` path instead of this quiet one.
  */
 function isDockerUnavailable(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  const message = err.message;
-  return (
-    message.includes("No such file or directory") ||
-    message.includes("os error 2") ||
-    message.includes("Connection refused") ||
-    message.includes("os error 111") ||
-    message.includes("client error (Connect)")
-  );
+  let current: unknown = err;
+  for (let depth = 0; depth < MAX_CAUSE_DEPTH && current instanceof Error; depth++) {
+    const message = current.message;
+    if (DOCKER_UNAVAILABLE_PATTERNS.some((pattern) => message.includes(pattern))) {
+      return true;
+    }
+    current = current.cause;
+  }
+  return false;
 }
 
 function isContainerDestroyEvent(event: DockerEvent): boolean {
   return event.Action === "destroy" || event.Action === "remove";
 }
+
+/**
+ * Ceiling for the reconcile/poll backoff below — on a host with no Docker at
+ * all, settle into a slow, infrequent retry rather than hammering the socket
+ * at the base cadence forever (Docker may still be installed later; see
+ * `isDockerUnavailable`'s "installed on demand" note).
+ */
+const MAX_IDLE_BACKOFF_MS = 5 * 60_000;
 
 export class DockerMonitor {
   readonly #client: DockerClient;
@@ -52,6 +77,8 @@ export class DockerMonitor {
   #inspects = new Map<string, ContainerInspect>();
   readonly #listeners = new Set<(change: DockerMonitorChange) => void>();
   #eventsBackoffMs = 1_000;
+  #reconcileBackoffMs: number;
+  #pollBackoffMs: number;
   #usingPollFallback = false;
   /** Tri-state docker reachability: null = unknown, true/false after first probe. */
   #dockerReachable: boolean | null = null;
@@ -66,6 +93,8 @@ export class DockerMonitor {
     this.#client = client;
     this.#pollIntervalMs = pollIntervalMs;
     this.#reconcileIntervalMs = reconcileIntervalMs;
+    this.#reconcileBackoffMs = reconcileIntervalMs;
+    this.#pollBackoffMs = pollIntervalMs;
 
     let markReady!: () => void;
     this.#readyPromise = new Promise((resolve) => {
@@ -124,17 +153,24 @@ export class DockerMonitor {
   start(signal: AbortSignal): void {
     void this.#reconcileAll(signal);
     void this.#eventsLoop(signal);
+    // A single periodic loop drives both the "catch anything the events
+    // stream missed" cadence and the "events stream isn't working, poll
+    // instead" fallback — see `#reconcileLoop`. Running these as two
+    // independent always-on loops (as before this fix) meant every host
+    // where the events stream never connects (e.g. no Docker installed)
+    // permanently paid for two concurrent reconcile timers instead of one.
     void this.#reconcileLoop(signal);
   }
 
-  async #reconcileAll(signal: AbortSignal): Promise<void> {
-    if (signal.aborted) return;
+  /** Returns whether the reconcile succeeded, so callers can adapt their retry cadence. */
+  async #reconcileAll(signal: AbortSignal): Promise<boolean> {
+    if (signal.aborted) return false;
 
     try {
       const summaries = await this.#client.listContainers(true);
       this.#containers = summaries;
       this.#inspects = await this.#inspectAll(summaries, signal);
-      if (signal.aborted) return;
+      if (signal.aborted) return false;
 
       for (const summary of summaries) {
         this.#notify({
@@ -144,8 +180,10 @@ export class DockerMonitor {
         });
       }
       this.#markDockerReachable();
+      return true;
     } catch (err) {
       this.#handleReconcileError(err);
+      return false;
     } finally {
       this.#markReady();
     }
@@ -183,11 +221,45 @@ export class DockerMonitor {
     logWarn("docker-monitor", "reconcile failed:", err);
   }
 
+  /**
+   * The single periodic reconcile timer. It drives two purposes with one
+   * loop, alternating cadence based on `#usingPollFallback`:
+   *  - events stream healthy: a slow "catch anything the stream missed" tick
+   *    (`#reconcileIntervalMs`, backing off further on failure)
+   *  - events stream not connected: a faster poll cadence standing in for
+   *    the live stream (`#pollIntervalMs`, backing off further on failure)
+   *
+   * Previously the poll fallback ran as its own independently-spawned loop
+   * (`#pollLoop`/`#ensurePollFallback`), gated by a shared boolean flag. That
+   * flag was reset to `false` before every retry of the events stream and
+   * then unconditionally re-checked right after — so every failed connect
+   * attempt raced a **new** poll loop into existence without ever stopping
+   * the previous one. On a host where the events stream never connects (no
+   * Docker installed, socket unreachable, …) that meant an ever-growing pile
+   * of concurrent 10s reconcile timers, each hitting the Docker socket and
+   * logging a failure — the root cause of sustained, ever-increasing CPU use.
+   * A single loop that just reads `#usingPollFallback` to pick its own delay
+   * makes that class of leak structurally impossible.
+   */
   async #reconcileLoop(signal: AbortSignal): Promise<void> {
     while (!signal.aborted) {
-      await delay(this.#reconcileIntervalMs, signal);
+      const usingPollFallback = this.#usingPollFallback;
+      const delayMs = usingPollFallback
+        ? this.#pollBackoffMs
+        : this.#reconcileBackoffMs;
+      await delay(delayMs, signal);
       if (signal.aborted) break;
-      await this.#reconcileAll(signal);
+
+      const ok = await this.#reconcileAll(signal);
+      if (this.#usingPollFallback) {
+        this.#pollBackoffMs = ok
+          ? this.#pollIntervalMs
+          : Math.min(this.#pollBackoffMs * 2, MAX_IDLE_BACKOFF_MS);
+      } else {
+        this.#reconcileBackoffMs = ok
+          ? this.#reconcileIntervalMs
+          : Math.min(this.#reconcileBackoffMs * 2, MAX_IDLE_BACKOFF_MS);
+      }
     }
   }
 
@@ -196,7 +268,12 @@ export class DockerMonitor {
       const streamedAny = await this.#runEventsStream(signal);
       if (signal.aborted) return;
 
-      this.#ensurePollFallback(signal);
+      if (!streamedAny) {
+        // Events aren't flowing (connect failed, or the stream ended with
+        // nothing to report) — lean on `#reconcileLoop`'s faster poll
+        // cadence until a live event proves the stream is healthy again.
+        this.#usingPollFallback = true;
+      }
       await this.#backoffAfterStream(streamedAny, signal);
     }
   }
@@ -204,12 +281,13 @@ export class DockerMonitor {
   async #runEventsStream(signal: AbortSignal): Promise<boolean> {
     let streamedAny = false;
     try {
-      this.#usingPollFallback = false;
-
       for await (const event of this.#client.streamEvents(signal)) {
         if (signal.aborted) return streamedAny;
         streamedAny = true;
-        // A live event means the socket is reachable.
+        // A live event means the socket is reachable and events are
+        // flowing — only now is it safe to stop leaning on the poll
+        // fallback cadence in `#reconcileLoop`.
+        this.#usingPollFallback = false;
         this.#markDockerReachable();
         this.#eventsBackoffMs = 1_000;
         await this.#handleEvent(event, signal);
@@ -227,12 +305,6 @@ export class DockerMonitor {
       return;
     }
     logWarn("docker-monitor", "events stream failed:", err);
-  }
-
-  #ensurePollFallback(signal: AbortSignal): void {
-    if (this.#usingPollFallback) return;
-    this.#usingPollFallback = true;
-    void this.#pollLoop(signal);
   }
 
   async #backoffAfterStream(
@@ -323,15 +395,6 @@ export class DockerMonitor {
       event,
       removed: true,
     });
-  }
-
-  async #pollLoop(signal: AbortSignal): Promise<void> {
-    while (!signal.aborted && this.#usingPollFallback) {
-      await delay(this.#pollIntervalMs, signal);
-      if (signal.aborted || !this.#usingPollFallback) break;
-
-      await this.#reconcileAll(signal);
-    }
   }
 
   #notify(change: DockerMonitorChange): void {

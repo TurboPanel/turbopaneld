@@ -286,6 +286,55 @@ test("reconcile loop recovers containers missed by the events stream", async () 
   controller.abort();
 });
 
+test("a permanently failing events stream never leaks more than one poll-fallback loop", async () => {
+  const client = new MockDockerClient();
+  client.containers = [makeSummary()];
+  client.inspects.set(CONTAINER_ID, makeInspect());
+
+  // Simulate a Docker-less host: every connection attempt fails immediately.
+  // deno-lint-ignore require-yield
+  client.streamEvents = async function* (
+    _signal: AbortSignal,
+  ): AsyncGenerator<DockerEvent> {
+    throw new Error("Connection refused (os error 111)");
+  };
+
+  // Hold each reconcile call open long enough that a second, leaked poll
+  // loop's own tick would provably overlap with this one's in-flight call.
+  const HOLD_MS = 30;
+  let activeCalls = 0;
+  let maxConcurrentCalls = 0;
+  const originalListContainers = client.listContainers;
+  client.listContainers = async (all: boolean) => {
+    activeCalls++;
+    maxConcurrentCalls = Math.max(maxConcurrentCalls, activeCalls);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, HOLD_MS));
+      return await originalListContainers(all);
+    } finally {
+      activeCalls--;
+    }
+  };
+
+  // pollIntervalMs/reconcileIntervalMs = 40ms: the events loop's fixed 1s
+  // initial backoff means a second failed connect attempt (and, pre-fix, a
+  // second spawned poll loop) lands well within this window.
+  const monitor = new DockerMonitor(
+    client as unknown as DockerClient,
+    40,
+    40,
+  );
+  const controller = new AbortController();
+
+  monitor.start(controller.signal);
+  await monitor.waitUntilReady();
+
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  controller.abort();
+
+  assertEquals(maxConcurrentCalls, 1);
+});
+
 function assertEquals(actual: unknown, expected: unknown): void {
   if (actual !== expected) {
     throw new Error(`expected ${String(expected)} but got ${String(actual)}`);
