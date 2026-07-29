@@ -151,14 +151,25 @@ FHS (`share/orchestration/roles`, `vendor/ansible/galaxy-collections`). Managed
 accidental `/root/.ansible` after install. Runtime orchestration runs as
 `tp` (dev: the current dev user).
 
-**Galaxy roles are not committed:** pins live in
-`orchestration/requirements.yml` (`geerlingguy.docker`, collections). Bootstrap
-(`ensureGalaxyRoles`) installs roles into `orchestration/roles/` and collections
-under `vendor/ansible/galaxy-collections`. First-party roles (e.g. `docker`,
-which wraps Galaxy via `include_role`) stay in git; Galaxy install trees
-(`geerlingguy.docker/`, …) are gitignored. Do not vend them into the repo —
-Sonar would scan third-party `mode: 0644`/`0755` as false vulnerabilities, and
-release hosts already reinstall from Galaxy at bootstrap.
+**Galaxy content is not committed:** collection pins live in
+`orchestration/requirements.yml` (`ansible.posix`); Docker role pins live in
+`orchestration/requirements-docker.yml` (`geerlingguy.docker`). Bootstrap
+(`ensureGalaxyCollections`) installs only collections under
+`vendor/ansible/galaxy-collections` — needed for the JSONL callback and
+`ansible.posix.sysctl` on every playbook. The Docker Galaxy role is deferred
+(`ensureGalaxyDockerRole`) until a host actually needs the container runtime
+(`runDockerSetup` / co-located dev converge / postgres|rabbitmq setup), so
+fresh daemon installs and pre-Docker hosts skip that download. First-party
+roles (e.g. `docker`, which wraps Galaxy via `include_role`) stay in git;
+Galaxy install trees (`geerlingguy.docker/`, …) are gitignored. Do not vend
+them into the repo — Sonar would scan third-party `mode: 0644`/`0755` as false
+vulnerabilities, and release hosts reinstall collections at bootstrap and the
+Docker role on first Docker use. Keep that tree out of ansible-lint / the
+Ansible IDE extension: `exclude_paths` in repo-root + `orchestration/.ansible-lint`,
+`files.exclude` in `.vscode` / `dev.code-workspace`, and after Galaxy install
+`ensureGalaxyDockerRole` rewrites the role's nested `.ansible-lint` with a
+broad `skip_list` (opening a file under the role otherwise walks up to upstream
+lint rules).
 
 ## Project metadata
 

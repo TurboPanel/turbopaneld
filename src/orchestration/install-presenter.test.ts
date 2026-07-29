@@ -205,7 +205,9 @@ test("InstallPresenter drops bootstrap noise from raw CPython, uv, and galaxy li
   presenter.beginStep("Bootstrapping orchestration");
   presenter.pushStatus("Using CPython 3.12.7 interpreter at: /usr/bin/python3");
   presenter.pushStatus("uv 0.11.21 already installed");
-  presenter.pushStatus("installing galaxy roles from orchestration/galaxy.yml");
+  presenter.pushStatus(
+    "installing galaxy collections from orchestration/galaxy.yml",
+  );
   presenter.pushStatus("meaningful progress update");
   presenter.completeStep(true, "orchestration ready");
 
@@ -220,7 +222,7 @@ test("InstallPresenter drops bootstrap noise from raw CPython, uv, and galaxy li
   assertEquals(out.includes("Using runtime"), false, out);
   assertEquals(out.includes("runtime 0.11.21 already installed"), false, out);
   assertEquals(
-    out.includes("installing orchestration roles from"),
+    out.includes("installing orchestration collections from"),
     false,
     out,
   );
@@ -237,7 +239,7 @@ test("logInfo routes bootstrap noise through presenter without leaking sanitized
   logInfo("uv", "uv 0.11.21 already installed");
   logInfo(
     "ansible-galaxy",
-    "installing galaxy roles from orchestration/galaxy.yml",
+    "installing galaxy collections from orchestration/galaxy.yml",
   );
   logInfo("orchestration", "platform services configured");
   presenter.completeStep(true, "bootstrap complete");
@@ -252,7 +254,7 @@ test("logInfo routes bootstrap noise through presenter without leaking sanitized
   assertEquals(out.includes("Using runtime"), false, out);
   assertEquals(out.includes("runtime 0.11.21 already installed"), false, out);
   assertEquals(
-    out.includes("installing orchestration roles from"),
+    out.includes("installing orchestration collections from"),
     false,
     out,
   );

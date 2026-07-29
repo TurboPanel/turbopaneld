@@ -2,7 +2,7 @@ import {
   ansiblePlaybookWorks,
   bootstrapOrchestrationRuntime,
   ensureAnsible,
-  ensureGalaxyRoles,
+  ensureGalaxyCollections,
   runLocalhostTest,
 } from "./ansible.ts";
 import type {
@@ -126,7 +126,7 @@ export async function runBootstrapOrchestration(
       presenter,
       "Installing orchestration components",
       async () => {
-        await ensureGalaxyRoles();
+        await ensureGalaxyCollections();
       },
     );
 

@@ -4,7 +4,12 @@
 # daemon repo root ansible.cfg (see daemon/.vscode/settings.json and
 # dev.code-workspace daemon folder) so playbooks under orchestration/playbooks/
 # resolve roles correctly; runtime converge still uses orchestration/ansible.cfg.
+#
+# Repo-root .ansible-lint also excludes the Galaxy docker role for IDE cwd.
+# geerlingguy.docker is installed by ansible-galaxy (requirements-docker.yml) —
+# never first-party; do not lint or edit it.
 offline: true
 exclude_paths:
   - .cache/
   - roles/geerlingguy.docker/
+

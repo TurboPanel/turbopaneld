@@ -1,0 +1,7 @@
+---
+# Ansible Galaxy roles needed only when installing Docker Engine.
+# Installed on demand by ensureGalaxyDockerRole() — not during bootstrap —
+# so daemon-only / pre-Docker hosts skip this download.
+roles:
+  - name: geerlingguy.docker
+    version: "8.0.0"

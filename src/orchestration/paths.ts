@@ -94,9 +94,15 @@ export const ANSIBLE_LINT_BIN = join(VENV_BIN_DIR, "ansible-lint");
 export const ANSIBLE_CURRENT_DIR = join(RUNTIMES_DIR, "ansible", "current");
 
 export const REQUIREMENTS_FILE = join(ORCHESTRATION_DIR, "requirements.txt");
+/** Collections (ansible.posix) — installed at orchestration bootstrap. */
 export const GALAXY_REQUIREMENTS_FILE = join(
   ORCHESTRATION_DIR,
   "requirements.yml",
+);
+/** Docker Galaxy roles (geerlingguy.docker) — installed on demand only. */
+export const GALAXY_DOCKER_REQUIREMENTS_FILE = join(
+  ORCHESTRATION_DIR,
+  "requirements-docker.yml",
 );
 export const GALAXY_ROLES_DIR = join(ORCHESTRATION_DIR, "roles");
 export const GALAXY_COLLECTIONS_DIR = join(

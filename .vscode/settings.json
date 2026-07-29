@@ -4,6 +4,12 @@
   "ansible.python.interpreterPath": "/opt/turbopanel/vendor/ansible/current/bin/python3",
   "ansible.validation.lint.enabled": true,
   "ansible.validation.lint.path": "/opt/turbopanel/vendor/ansible/current/bin/ansible-lint",
+  "files.exclude": {
+    "**/orchestration/roles/geerlingguy.docker": true
+  },
+  "files.watcherExclude": {
+    "**/orchestration/roles/geerlingguy.docker/**": true
+  },
   "sonarlint.connectedMode.project": {
     "connectionId": "turbopanel",
     "projectKey": "turbopanel_turbopaneld"

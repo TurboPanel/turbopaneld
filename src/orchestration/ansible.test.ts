@@ -448,6 +448,27 @@ test("requirements.yml pins ansible.posix to an exact version", async () => {
   if (/version:\s*">=/.test(requirements)) {
     throw new Error("requirements.yml must not use ranged collection versions");
   }
+  if (/geerlingguy\.docker/.test(requirements)) {
+    throw new Error(
+      "geerlingguy.docker must live in requirements-docker.yml (deferred), not bootstrap requirements.yml",
+    );
+  }
+});
+
+test("requirements-docker.yml pins geerlingguy.docker to an exact version", async () => {
+  const requirements = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "requirements-docker.yml"),
+  );
+  assertMatch(
+    requirements,
+    /name:\s*geerlingguy\.docker[\s\S]*version:\s*"\d+\.\d+\.\d+"/,
+    "exact geerlingguy.docker pin",
+  );
+  if (/version:\s*">=/.test(requirements)) {
+    throw new Error(
+      "requirements-docker.yml must not use ranged role versions",
+    );
+  }
 });
 
 test("galaxy collections install target matches cfg vendored path default", () => {

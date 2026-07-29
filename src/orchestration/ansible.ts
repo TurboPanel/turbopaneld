@@ -7,9 +7,13 @@ import {
 } from "./ansible-events.ts";
 import {
   computeBootstrapStamp,
-  galaxyContentPresent,
+  computeGalaxyDockerStamp,
+  galaxyCollectionsPresent,
+  galaxyDockerRolePresent,
   readBootstrapStamp,
+  readGalaxyDockerStamp,
   writeBootstrapStamp,
+  writeGalaxyDockerStamp,
 } from "./bootstrap-stamp.ts";
 import {
   computeDevConvergeStamp,
@@ -40,6 +44,7 @@ import {
   DAEMON_SYSTEMD_PLAYBOOK,
   DOCKER_PLAYBOOK,
   GALAXY_COLLECTIONS_DIR,
+  GALAXY_DOCKER_REQUIREMENTS_FILE,
   GALAXY_REQUIREMENTS_FILE,
   GALAXY_ROLES_DIR,
   LOCALHOST_PLAYBOOK,
@@ -253,12 +258,13 @@ export function galaxyBootstrapRunContext(): {
 }
 
 /**
- * Install pinned Ansible Galaxy roles and collections when bootstrap inputs changed.
+ * Install pinned Ansible Galaxy collections needed for every playbook run.
  *
- * Roles land in `orchestration/roles/`; collections in `runtimes/ansible/galaxy-collections/`.
- * Skips Galaxy when the bootstrap stamp matches and content is already present.
+ * Collections land in `runtimes/ansible/galaxy-collections/` (`ansible.posix`
+ * for the JSONL callback and sysctl modules). Docker Galaxy roles are deferred
+ * to {@link ensureGalaxyDockerRole} — they are not part of bootstrap.
  */
-export async function ensureGalaxyRoles(): Promise<void> {
+export async function ensureGalaxyCollections(): Promise<void> {
   if (!(await ansiblePlaybookWorks())) {
     throw new Error(
       "ansible-galaxy requires a working ansible-playbook install",
@@ -267,7 +273,7 @@ export async function ensureGalaxyRoles(): Promise<void> {
 
   const stamp = await computeBootstrapStamp();
   const storedStamp = await readBootstrapStamp();
-  if (storedStamp === stamp && await galaxyContentPresent()) {
+  if (storedStamp === stamp && await galaxyCollectionsPresent()) {
     logInfo("orchestration", "galaxy content up to date, skipping install");
     return;
   }
@@ -275,32 +281,6 @@ export async function ensureGalaxyRoles(): Promise<void> {
   const galaxyBin = join(VENV_BIN_DIR, "ansible-galaxy");
   const galaxyRun = galaxyBootstrapRunContext();
   await Deno.mkdir(ANSIBLE_HOME, { recursive: true });
-
-  logInfo(
-    "orchestration",
-    `installing galaxy roles from ${GALAXY_REQUIREMENTS_FILE}`,
-  );
-  await withRetry(
-    () =>
-      runLogged(
-        galaxyBin,
-        [
-          "role",
-          "install",
-          "-r",
-          GALAXY_REQUIREMENTS_FILE,
-          "-p",
-          GALAXY_ROLES_DIR,
-        ],
-        {
-          level: "INFO",
-          component: logComponent("ansible-galaxy"),
-          ...galaxyRun,
-        },
-      ),
-    { label: "install galaxy roles", attempts: 3 },
-  );
-  logInfo("orchestration", "galaxy roles ready");
 
   logInfo(
     "orchestration",
@@ -327,6 +307,104 @@ export async function ensureGalaxyRoles(): Promise<void> {
     { label: "install galaxy collections", attempts: 3 },
   );
   logInfo("orchestration", "galaxy collections ready");
+}
+
+/**
+ * Replace the Galaxy role's shipped `.ansible-lint` so IDE/CLI lint against an
+ * open file under `geerlingguy.docker/` does not use upstream rules. The role
+ * is third-party (gitignored); project configs already exclude the tree from
+ * discovery, but ansible-lint still lints an explicitly opened path and walks
+ * up to this nested config.
+ */
+async function neutralizeGalaxyDockerLintConfig(): Promise<void> {
+  const roleDir = join(GALAXY_ROLES_DIR, "geerlingguy.docker");
+  if (!(await galaxyDockerRolePresent())) {
+    return;
+  }
+  await Deno.writeTextFile(
+    join(roleDir, ".ansible-lint"),
+    `# Written by TurboPanel ensureGalaxyDockerRole after ansible-galaxy install.
+# Third-party Galaxy role — do not lint or edit this tree.
+offline: true
+skip_list:
+  - command-instead-of-module
+  - experimental
+  - fqcn
+  - galaxy
+  - jinja
+  - key-order
+  - literal-compare
+  - name
+  - no-handler
+  - package-latest
+  - partial-become
+  - risky-file-permissions
+  - risky-shell-pipe
+  - role-name
+  - run-once
+  - schema
+  - var-naming
+  - yaml
+`,
+  );
+}
+
+/**
+ * Install the pinned geerlingguy.docker Galaxy role when a host needs Docker.
+ *
+ * Called from docker-using entry points (`runDockerSetup`, co-located dev
+ * converge, postgres/rabbitmq setup) — never from orchestration bootstrap —
+ * so daemon install skips this download until a container workload appears.
+ */
+export async function ensureGalaxyDockerRole(): Promise<void> {
+  if (!(await ansiblePlaybookWorks())) {
+    throw new Error(
+      "ansible-galaxy requires a working ansible-playbook install",
+    );
+  }
+
+  const stamp = await computeGalaxyDockerStamp();
+  const storedStamp = await readGalaxyDockerStamp();
+  if (storedStamp === stamp && await galaxyDockerRolePresent()) {
+    logInfo(
+      "orchestration",
+      "galaxy docker role up to date, skipping install",
+    );
+    await neutralizeGalaxyDockerLintConfig();
+    return;
+  }
+
+  const galaxyBin = join(VENV_BIN_DIR, "ansible-galaxy");
+  const galaxyRun = galaxyBootstrapRunContext();
+  await Deno.mkdir(ANSIBLE_HOME, { recursive: true });
+
+  logInfo(
+    "orchestration",
+    `installing galaxy docker role from ${GALAXY_DOCKER_REQUIREMENTS_FILE}`,
+  );
+  await withRetry(
+    () =>
+      runLogged(
+        galaxyBin,
+        [
+          "role",
+          "install",
+          "-r",
+          GALAXY_DOCKER_REQUIREMENTS_FILE,
+          "-p",
+          GALAXY_ROLES_DIR,
+        ],
+        {
+          level: "INFO",
+          component: logComponent("ansible-galaxy"),
+          ...galaxyRun,
+        },
+      ),
+    { label: "install galaxy docker role", attempts: 3 },
+  );
+  logInfo("orchestration", "galaxy docker role ready");
+  await neutralizeGalaxyDockerLintConfig();
+  await writeGalaxyDockerStamp(stamp);
 }
 
 /**
@@ -644,6 +722,9 @@ export async function runInstanceDevInstall(
 
   const layout = await requireDevOrchestrationLayout();
   const args = devInstanceExtraArgs();
+  // Dev converge pulls Docker (postgres/redis/rabbitmq/clickhouse/…); fetch the
+  // Galaxy docker role only now, not during orchestration bootstrap.
+  await ensureGalaxyDockerRole();
   logInfo(
     "orchestration",
     `running instance-dev-install converge playbook (${layout.playbookPath}): ${convergeReason}`,
@@ -700,6 +781,7 @@ export async function runBuildToggle(
 export async function runDockerSetup(
   onEvent?: AnsibleEventHandler,
 ): Promise<void> {
+  await ensureGalaxyDockerRole();
   logInfo("orchestration", "running docker-setup playbook");
   await runLocalPlaybook(DOCKER_PLAYBOOK, devInstanceExtraArgs(), onEvent);
   logInfo("orchestration", "docker-setup complete");
@@ -718,6 +800,7 @@ export async function runCaddySetup(
 export async function runPostgresSetup(
   onEvent?: AnsibleEventHandler,
 ): Promise<void> {
+  await ensureGalaxyDockerRole();
   logInfo("orchestration", "running postgres-setup playbook");
   await runLocalPlaybook(POSTGRES_PLAYBOOK, [], onEvent);
   logInfo("orchestration", "postgres-setup complete");
@@ -736,6 +819,7 @@ export async function runRedisSetup(
 export async function runRabbitmqSetup(
   onEvent?: AnsibleEventHandler,
 ): Promise<void> {
+  await ensureGalaxyDockerRole();
   logInfo("orchestration", "running rabbitmq-setup playbook");
   await runLocalPlaybook(RABBITMQ_PLAYBOOK, [], onEvent);
   logInfo("orchestration", "rabbitmq-setup complete");
@@ -750,8 +834,9 @@ export async function runRabbitmqSetup(
  */
 
 /**
- * Bootstrap orchestration runtime tools (uv, Python, ansible, Galaxy).
+ * Bootstrap orchestration runtime tools (uv, Python, ansible, Galaxy collections).
  *
+ * Docker Galaxy roles are not installed here — see {@link ensureGalaxyDockerRole}.
  * Runs the localhost smoke test only when bootstrap inputs changed or ansible
  * was freshly installed. Writes the bootstrap stamp on success.
  */
@@ -764,7 +849,7 @@ export async function bootstrapOrchestrationRuntime(): Promise<void> {
   await ensureAnsible();
   const ansibleReinstalled = !ansibleWasReady;
 
-  await ensureGalaxyRoles();
+  await ensureGalaxyCollections();
 
   if (bootstrapInputsChanged || ansibleReinstalled) {
     await runLocalhostTest();

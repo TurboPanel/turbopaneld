@@ -1,0 +1,10 @@
+---
+# Repo-root config for IDE ansible-lint (cwd = daemon checkout).
+# Runtime converge still uses orchestration/ansible.cfg + orchestration/.ansible-lint.
+#
+# geerlingguy.docker is a Galaxy install (requirements-docker.yml) — third-party,
+# gitignored, and must not be linted or edited.
+offline: true
+exclude_paths:
+  - .cache/
+  - orchestration/roles/geerlingguy.docker/

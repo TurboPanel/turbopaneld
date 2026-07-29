@@ -1,6 +1,9 @@
 ---
 # TurboPanel wrapper around geerlingguy.docker (Ansible Galaxy).
 #
+# The Galaxy role itself is fetched on demand by ensureGalaxyDockerRole()
+# (requirements-docker.yml) — not during orchestration bootstrap.
+#
 # Fast-path: if the docker binary exists and the service is active, skip
 # install. Group membership for docker_user always runs (co-located hosts often
 # already have Docker). Otherwise include geerlingguy.docker after validation.
@@ -18,14 +21,17 @@
   register: _docker_bin
 
 - name: Check Docker service state
-  ansible.builtin.command: systemctl is-active docker
+  ansible.builtin.systemd:
+    name: docker
   register: _docker_svc
-  changed_when: false
   failed_when: false
+  check_mode: false
 
 - name: Set _docker_ready fact
   ansible.builtin.set_fact:
-    _docker_ready: "{{ _docker_bin.stat.exists and _docker_svc.stdout == 'active' }}"
+    _docker_ready: >-
+      {{ _docker_bin.stat.exists
+      and (_docker_svc.status.ActiveState | default('')) == 'active' }}
 
 - name: Docker already installed and running
   ansible.builtin.debug:

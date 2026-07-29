@@ -1,10 +1,9 @@
 ---
-# Ansible Galaxy roles and collections installed during bootstrap.
+# Ansible Galaxy collections installed during orchestration bootstrap.
 # Exact version pins keep installs reproducible across managed server daemons.
-roles:
-  - name: geerlingguy.docker
-    version: "8.0.0"
-
+#
+# Docker Galaxy roles live in requirements-docker.yml and are installed on
+# demand when a host first needs the container runtime (not at bootstrap).
 collections:
   - name: ansible.posix
     version: "2.2.1"
