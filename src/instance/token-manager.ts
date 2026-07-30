@@ -15,7 +15,7 @@ export interface TokenManagerOptions {
   keyFile: DaemonKeyFile;
   serverId: string;
   keyId: string;
-  machineId: string | undefined;
+  machineKey: string | undefined;
   hostname: string;
   apiClient: Pick<DaemonApiClient, "getAuthChallenge" | "createSession">;
   refreshEarlyMs?: number;
@@ -95,7 +95,7 @@ export class DaemonTokenManager {
       nonce: challenge.nonce,
       serverId: this.#options.serverId,
       keyId: this.#options.keyId,
-      machineId: this.#options.machineId ?? "",
+      machineKey: this.#options.machineKey ?? "",
       hostname: this.#options.hostname,
     });
 
@@ -108,7 +108,7 @@ export class DaemonTokenManager {
       keyId: this.#options.keyId,
       challengeId: challenge.challengeId,
       signature,
-      machineId: this.#options.machineId,
+      machineKey: this.#options.machineKey,
       hostname: this.#options.hostname,
       at: new Date().toISOString(),
     });

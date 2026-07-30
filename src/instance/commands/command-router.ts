@@ -35,7 +35,7 @@ import { handleTimezone } from "./timezone.ts";
 import { handleWireguardApply } from "./wireguard.ts";
 
 export interface CommandRouterDeps {
-  /** Decrypt tpdaemon envelopes via POST /api/daemon/v1/secrets/decrypt. */
+  /** Decrypt denc envelopes via POST /api/daemon/v1/secrets/decrypt. */
   decryptSecrets?: (ciphertexts: string[]) => Promise<(string | null)[]>;
 }
 

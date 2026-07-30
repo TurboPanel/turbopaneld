@@ -68,11 +68,11 @@ export function buildEnrollmentPayload(params: {
   challengeId: string;
   nonce: string;
   licenseId: string;
-  machineId: string;
+  machineKey: string;
   hostname: string;
   publicKeyFingerprint: string;
 }): string {
-  return `turbopanel-daemon-enroll-v1\n${params.challengeId}\n${params.nonce}\n${params.licenseId}\n${params.machineId}\n${params.hostname}\n${params.publicKeyFingerprint}`;
+  return `turbopanel-daemon-enroll-v1\n${params.challengeId}\n${params.nonce}\n${params.licenseId}\n${params.machineKey}\n${params.hostname}\n${params.publicKeyFingerprint}`;
 }
 
 export function buildAuthPayload(params: {
@@ -80,10 +80,10 @@ export function buildAuthPayload(params: {
   nonce: string;
   serverId: string;
   keyId: string;
-  machineId: string;
+  machineKey: string;
   hostname: string;
 }): string {
-  return `turbopanel-daemon-auth-v1\n${params.challengeId}\n${params.nonce}\n${params.serverId}\n${params.keyId}\n${params.machineId}\n${params.hostname}`;
+  return `turbopanel-daemon-auth-v1\n${params.challengeId}\n${params.nonce}\n${params.serverId}\n${params.keyId}\n${params.machineKey}\n${params.hostname}`;
 }
 
 export async function signChallenge(

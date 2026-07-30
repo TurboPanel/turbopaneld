@@ -59,7 +59,7 @@ test("buildEnrollmentPayload produces the exact expected string", () => {
     challengeId: "cid",
     nonce: "nonce",
     licenseId: "lid",
-    machineId: "mid",
+    machineKey: "mid",
     hostname: "host",
     publicKeyFingerprint: "fp",
   });
@@ -77,7 +77,7 @@ test("buildAuthPayload produces the exact expected string", () => {
     nonce: "nonce",
     serverId: "sid",
     keyId: "kid",
-    machineId: "mid",
+    machineKey: "mid",
     hostname: "host",
   });
   if (
@@ -94,7 +94,7 @@ test("signChallenge and verifyChallenge round-trip for enrollment payload", asyn
     challengeId: "cid",
     nonce: "nonce",
     licenseId: "lid",
-    machineId: "mid",
+    machineKey: "mid",
     hostname: "host",
     publicKeyFingerprint: "fp",
   });
@@ -114,7 +114,7 @@ test("signChallenge and verifyChallenge round-trip for auth payload", async () =
     nonce: "nonce",
     serverId: "sid",
     keyId: "kid",
-    machineId: "mid",
+    machineKey: "mid",
     hostname: "host",
   });
 
@@ -133,7 +133,7 @@ test("verifyChallenge returns false for tampered payload", async () => {
     nonce: "nonce",
     serverId: "sid",
     keyId: "kid",
-    machineId: "mid",
+    machineKey: "mid",
     hostname: "host",
   });
 

@@ -205,7 +205,7 @@ export class IdlePresence {
         at: new Date().toISOString(),
         agent,
         ...(host.hostname ? { hostname: host.hostname } : {}),
-        ...(host.machineId ? { machineId: host.machineId } : {}),
+        ...(host.machineKey ? { machineKey: host.machineKey } : {}),
         ...(host.os ? { os: host.os } : {}),
         timeSync: presence.timeSync,
         addresses: presence.addresses,

@@ -53,7 +53,7 @@ function basePayload(
         username: "postgres",
         role: "root",
         databases: ["postgres"],
-        password: "tpdaemon.v1.server.key.1.iv.ciphertext",
+        password: "denc.server.key.1.payload",
       },
     ],
     ...overrides,

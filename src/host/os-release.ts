@@ -1,3 +1,5 @@
+import { cachedMachineKey } from "./machine-key.ts";
+
 /** OS families we may report; keep in sync with instance `ServerOsFamily`. */
 export type HostOsFamily = "linux" | "windows" | "freebsd" | "darwin";
 
@@ -33,7 +35,7 @@ export type HostOsMetadata = {
 
 export type HostHelloIdentity = {
   hostname?: string;
-  machineId?: string;
+  machineKey?: string;
   os?: HostOsMetadata;
 };
 
@@ -42,7 +44,6 @@ const DEBIAN_VERSION_PATH = "/etc/debian_version";
 const RPI_ISSUE_PATH = "/etc/rpi-issue";
 
 let cachedOs: HostOsMetadata | undefined | null = null;
-let cachedMachineId: string | undefined | null = null;
 
 function readTextFile(path: string): string | undefined {
   try {
@@ -235,16 +236,11 @@ export function readOsRelease(
   return os;
 }
 
-function readMachineIdCached(): string | undefined {
-  if (cachedMachineId !== null) return cachedMachineId;
-  const text = readTextFile("/etc/machine-id")?.trim();
-  cachedMachineId = text && text.length > 0 ? text : undefined;
-  return cachedMachineId;
-}
-
 /**
  * Host identity fields attached to the daemon WS `hello` frame once per connect.
- * OS is static for the process; hostname/machineId are re-read cheaply.
+ * OS is static for the process; hostname is re-read cheaply. `machineKey` comes
+ * from the process-level cache in `machine-key.ts` — warm it with
+ * `readMachineKey()` on the connect path before hello (HMAC is async).
  */
 export function getHostHelloIdentity(): HostHelloIdentity {
   const identity: HostHelloIdentity = {};
@@ -254,8 +250,8 @@ export function getHostHelloIdentity(): HostHelloIdentity {
   } catch {
     // hostname may be unavailable under restricted --allow-sys
   }
-  const machineId = readMachineIdCached();
-  if (machineId) identity.machineId = machineId;
+  const machineKey = cachedMachineKey();
+  if (machineKey) identity.machineKey = machineKey;
   const os = readOsRelease();
   if (os) identity.os = os;
   return identity;
@@ -264,5 +260,4 @@ export function getHostHelloIdentity(): HostHelloIdentity {
 /** Test helper — clear process caches between fixture cases. */
 export function resetHostOsCacheForTests(): void {
   cachedOs = null;
-  cachedMachineId = null;
 }

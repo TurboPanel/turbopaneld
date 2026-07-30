@@ -29,6 +29,7 @@ import {
   sanitizeForLog,
 } from "../logger.ts";
 import { type DaemonKeyFile, loadDaemonKeyFile } from "../crypto/keys.ts";
+import { readMachineKey } from "../host/machine-key.ts";
 import { DaemonApiClient, DaemonApiError } from "./api-client.ts";
 import { classifyConnectFailure } from "./connect-failure.ts";
 import { DaemonJwksClient } from "./jwks-client.ts";
@@ -212,16 +213,6 @@ function resolveServerIdDir(
 
 function resolveServerIdPath(): string {
   return `${resolveServerIdDir()}/${SERVER_ID_FILE}`;
-}
-
-async function readMachineId(): Promise<string | undefined> {
-  try {
-    const id = await Deno.readTextFile("/etc/machine-id");
-    const trimmed = id.trim();
-    return trimmed.length > 0 ? trimmed : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 async function readServerId(): Promise<string | undefined> {
@@ -667,7 +658,7 @@ export class InstanceClient {
 
   async #loadOrEnrollIdentity(
     stateDir: string,
-    machineId: string | undefined,
+    machineKey: string | undefined,
     hostname: string,
   ): Promise<{
     keyFile: DaemonKeyFile | null;
@@ -703,7 +694,7 @@ export class InstanceClient {
     });
     const enrollment = await enrollDaemon({
       apiClient: enrollClient,
-      machineId,
+      machineKey,
       hostname,
       licenseId: licenseCredentials.licenseId,
       licenseToken: licenseCredentials.licenseToken,
@@ -723,7 +714,7 @@ export class InstanceClient {
 
   #ensureAuthClients(
     identity: { keyFile: DaemonKeyFile; serverId: string; keyId: string },
-    machineId: string | undefined,
+    machineKey: string | undefined,
     hostname: string,
   ): void {
     const { keyFile, serverId, keyId } = identity;
@@ -762,7 +753,7 @@ export class InstanceClient {
       keyFile,
       serverId,
       keyId,
-      machineId,
+      machineKey,
       hostname,
       apiClient,
       verifyToken: (token) => this.#jwksClient!.verifyInstanceJwt(token),
@@ -797,13 +788,13 @@ export class InstanceClient {
     // reconnect cycle, producing a perpetual ~2-second disconnect/reconnect storm.
 
     const stateDir = resolveServerIdDir();
-    const machineId = await readMachineId();
+    const machineKey = await readMachineKey();
     const hostname = Deno.hostname();
 
     for (let attempt = 0; attempt < 2; attempt++) {
       const identity = await this.#loadOrEnrollIdentity(
         stateDir,
-        machineId,
+        machineKey,
         hostname,
       );
       if (identity.keyFile === null || !identity.serverId || !identity.keyId) {
@@ -818,7 +809,7 @@ export class InstanceClient {
           serverId: identity.serverId,
           keyId: identity.keyId,
         },
-        machineId,
+        machineKey,
         hostname,
       );
 

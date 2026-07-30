@@ -28,7 +28,7 @@ async function readPersistedServerId(
 
 export async function enrollDaemon(params: {
   apiClient: DaemonApiClient;
-  machineId: string | undefined;
+  machineKey: string | undefined;
   hostname: string;
   licenseId: string;
   licenseToken: string;
@@ -43,7 +43,7 @@ export async function enrollDaemon(params: {
     challengeId: challenge.challengeId,
     nonce: challenge.nonce,
     licenseId: params.licenseId,
-    machineId: params.machineId ?? "",
+    machineKey: params.machineKey ?? "",
     hostname: params.hostname,
     publicKeyFingerprint: fingerprint,
   });
@@ -53,7 +53,7 @@ export async function enrollDaemon(params: {
     licenseId: params.licenseId,
     licenseToken: params.licenseToken,
     serverId: persistedServerId,
-    machineId: params.machineId,
+    machineKey: params.machineKey,
     hostname: params.hostname,
     publicJwk: enrollmentKeyFile.publicJwk,
     challengeId: challenge.challengeId,

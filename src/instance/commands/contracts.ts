@@ -124,7 +124,7 @@ export type EnvironmentDeployHostingProxy = {
 export type EnvironmentDeployTlsMaterial = {
   tlsId: string;
   certificatePem: string;
-  /** Daemon-recipient sealed private key (`tpdaemon.v1…`). */
+  /** Daemon-recipient sealed private key (`denc.…`). */
   privateKeyEnvelope: string;
 };
 
@@ -330,7 +330,7 @@ export type ManagedApplyCredential = {
   role: "root" | "user";
   databases: string[];
   privileges?: string[];
-  /** Daemon-recipient sealed password (`tpdaemon.…`). */
+  /** Daemon-recipient sealed password (`denc.…`). */
   password: string;
 };
 
@@ -1403,7 +1403,7 @@ const MAX_MANAGED_CREDENTIALS = 32;
 const MAX_MANAGED_DATABASES = 64;
 const MAX_MANAGED_DROP_USERS = 32;
 const MAX_MANAGED_IMAGE_LENGTH = 256;
-const TPDAEMON_ENVELOPE_PREFIX = "tpdaemon.";
+const DAEMON_ENVELOPE_PREFIX = "denc.";
 const MANAGED_CONFIG_MODES = new Set(["0640", "0600"]);
 const MANAGED_LIFECYCLE_ACTIONS = new Set(["start", "stop", "restart"]);
 const MANAGED_EXPOSURE_PROTOCOLS = new Set(["tcp", "udp", "http"]);
@@ -1911,7 +1911,7 @@ function parseManagedApplyCredentialEntry(
     typeof entry.role !== "string" ||
     !MANAGED_CREDENTIAL_ROLES.has(entry.role) ||
     typeof entry.password !== "string" ||
-    !entry.password.startsWith(TPDAEMON_ENVELOPE_PREFIX)
+    !entry.password.startsWith(DAEMON_ENVELOPE_PREFIX)
   ) {
     throw new TypeError("Invalid managed.apply credentials entry");
   }

@@ -213,7 +213,7 @@ it({
     try {
       const result = await enrollDaemon({
         apiClient,
-        machineId: "mid-1",
+        machineKey: "mid-1",
         hostname: "host-1",
         licenseId: "license-123",
         licenseToken: "token-abc",
@@ -518,7 +518,7 @@ it({
 
 it({
   name:
-    "enrollment requires valid license — hostname/machineId alone cannot create a server",
+    "enrollment requires valid license — hostname/machineKey alone cannot create a server",
   permissions: { env: true, read: true, write: true, sys: ["hostname"] },
   fn: async () => {
     const tempDir = await Deno.makeTempDir();
@@ -602,7 +602,7 @@ it({
         () =>
           enrollDaemon({
             apiClient,
-            machineId: "mid-1",
+            machineKey: "mid-1",
             hostname: "host-1",
             licenseId: "license-123",
             licenseToken: "bad-token",

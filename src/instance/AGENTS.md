@@ -25,8 +25,10 @@ stays deferred until opt-in on both runtimes.
 
 `IdlePresence` runs per open socket:
 
-- Sends `{ type: "hello", at, agent, hostname?, machineId?, os?, timeSync?,
-  addresses? }` once on attach. Host OS comes from `/etc/os-release` (+
+- Sends `{ type: "hello", at, agent, hostname?, machineKey?, os?, timeSync?,
+  addresses? }` once on attach. `machineKey` is a derived, non-reversible
+  HMAC of `/etc/machine-id` (`src/host/machine-key.ts`) — warmed on the
+  connect path before hello. Host OS comes from `/etc/os-release` (+
   `/etc/debian_version`, `/etc/rpi-issue`) via `src/host/os-release.ts`
   (`getHostHelloIdentity()`). Prefer dotted point-release
   (`DEBIAN_VERSION_FULL` / `debian_version`, e.g. `13.5`) over bare

@@ -36,7 +36,7 @@ export interface DaemonEnrollRequest {
   licenseToken: string;
   /** Persisted server.id from a prior enroll — required to re-enroll a consumed license. */
   serverId?: string;
-  machineId?: string;
+  machineKey?: string;
   hostname: string;
   publicJwk: JsonWebKey;
   challengeId: string;
@@ -53,7 +53,7 @@ export interface DaemonSessionRequest {
   keyId: string;
   challengeId: string;
   signature: string;
-  machineId?: string;
+  machineKey?: string;
   hostname: string;
   at: string;
 }
@@ -140,7 +140,7 @@ export class DaemonApiClient {
   }
 
   /**
-   * Batch-decrypt daemon-recipient sealed envelopes (`tpdaemon.v1…`).
+   * Batch-decrypt daemon-recipient sealed envelopes (`denc.…`).
    * Returns one plaintext (or null) per input ciphertext, in order.
    */
   async decryptSecrets(ciphertexts: string[]): Promise<(string | null)[]> {
