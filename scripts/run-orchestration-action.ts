@@ -15,11 +15,17 @@
  * layering the daemon's shared production roles via `ANSIBLE_ROLES_PATH`
  * (see `devOrchestrationAnsibleEnv`). Daemon-only playbooks run from the daemon
  * checkout's own `orchestration/` dir.
+ *
+ * Docker Galaxy (`geerlingguy.docker`) is not part of bootstrap — call
+ * {@link ensureGalaxyDockerRole} before any playbook that pulls in the docker
+ * role (dev converge, docker/postgres/rabbitmq/clickhouse setup). Same gate as
+ * production `runDockerSetup` / `runPostgresSetup` / `runRabbitmqSetup`.
  */
 import { join } from "@std/path";
 import { runPlaybookStreaming } from "../src/orchestration/ansible-events.ts";
 import {
   ensureAnsible,
+  ensureGalaxyDockerRole,
   runBuildToggle as runAnsibleBuildToggle,
 } from "../src/orchestration/ansible.ts";
 import {
@@ -37,6 +43,14 @@ import {
   ORCHESTRATION_DIR,
 } from "../src/orchestration/paths.ts";
 import { readEnv, resolveDevRoot, resolveLayout } from "../src/paths/layout.ts";
+
+/** Playbooks that include the docker role (or a role with a docker meta-dep). */
+const PLAYBOOKS_NEEDING_DOCKER_GALAXY = new Set([
+  "docker-setup.yml",
+  "postgres-setup.yml",
+  "rabbitmq-setup.yml",
+  "clickhouse-setup.yml",
+]);
 
 /**
  * FHS daemon env file — the same `/etc/turbopanel/daemon.env` the dev console
@@ -138,6 +152,9 @@ async function runInstanceDevInstall(): Promise<void> {
 
   // Sync orchestration venv packages (ansible-lint for IDE linting, etc.) before converge.
   await ensureAnsible();
+  // Dev converge always pulls Docker (postgres/redis/rabbitmq/clickhouse/…);
+  // fetch the Galaxy docker role only now — not during orchestration bootstrap.
+  await ensureGalaxyDockerRole();
 
   await runPlaybookStreaming(
     ANSIBLE_PLAYBOOK_BIN,
@@ -179,6 +196,9 @@ async function runPlaybook(): Promise<void> {
   }
   const extraArgs = Deno.args.slice(2);
   const playbook = join(ORCHESTRATION_DIR, "playbooks", playbookRelative);
+  if (PLAYBOOKS_NEEDING_DOCKER_GALAXY.has(playbookRelative)) {
+    await ensureGalaxyDockerRole();
+  }
   // Co-located dev playbooks need dev user + runtime context from the daemon env;
   // CLI extra-vars passed after dev defaults win on duplicate keys.
   await runPlaybookStreaming(

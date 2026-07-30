@@ -158,8 +158,10 @@ accidental `/root/.ansible` after install. Runtime orchestration runs as
 `vendor/ansible/galaxy-collections` — needed for the JSONL callback and
 `ansible.posix.sysctl` on every playbook. The Docker Galaxy role is deferred
 (`ensureGalaxyDockerRole`) until a host actually needs the container runtime
-(`runDockerSetup` / co-located dev converge / postgres|rabbitmq setup), so
-fresh daemon installs and pre-Docker hosts skip that download. First-party
+(`runDockerSetup` / co-located dev converge via
+`scripts/run-orchestration-action.ts` `instance-dev-install` /
+postgres|rabbitmq|clickhouse setup), so fresh daemon installs and pre-Docker
+hosts skip that download. First-party
 roles (e.g. `docker`, which wraps Galaxy via `include_role`) stay in git;
 Galaxy install trees (`geerlingguy.docker/`, …) are gitignored. Do not vend
 them into the repo — Sonar would scan third-party `mode: 0644`/`0755` as false

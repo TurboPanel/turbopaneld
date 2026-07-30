@@ -471,6 +471,34 @@ test("requirements-docker.yml pins geerlingguy.docker to an exact version", asyn
   }
 });
 
+test("TUI orchestration script fetches Docker Galaxy before docker-using playbooks", () => {
+  // Dev console converge uses scripts/run-orchestration-action.ts — not
+  // ansible.ts runInstanceDevInstall — so the script must call
+  // ensureGalaxyDockerRole itself (bootstrap no longer installs the role).
+  const script = Deno.readTextFileSync(
+    join(DAEMON_ROOT, "scripts", "run-orchestration-action.ts"),
+  );
+  if (!script.includes("ensureGalaxyDockerRole")) {
+    throw new Error(
+      "run-orchestration-action.ts must call ensureGalaxyDockerRole before docker-using playbooks",
+    );
+  }
+  for (
+    const playbook of [
+      "docker-setup.yml",
+      "postgres-setup.yml",
+      "rabbitmq-setup.yml",
+      "clickhouse-setup.yml",
+    ]
+  ) {
+    if (!script.includes(`"${playbook}"`)) {
+      throw new Error(
+        `run-orchestration-action.ts must list ${playbook} in PLAYBOOKS_NEEDING_DOCKER_GALAXY`,
+      );
+    }
+  }
+});
+
 test("galaxy collections install target matches cfg vendored path default", () => {
   if (!GALAXY_COLLECTIONS_DIR.endsWith(VENDORED_COLLECTIONS_MARKER)) {
     throw new Error(
