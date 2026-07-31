@@ -281,16 +281,19 @@ from production code.
 
 ## Installer script hosting (`workers/turbopanel-sh/`)
 
-**https://turbopanel.sh** is the canonical **free** (Cloudflare Workers Static
-Assets) host for `scripts/run.sh`. Deploy tooling lives in the isolated
-`workers/turbopanel-sh/` package (Node + wrangler only — not part of the Deno
-graph). Manual deploy: `npm install` then `npm run deploy` from that directory;
-the stage step copies `scripts/run.sh` into gitignored `public/` at deploy time
-so the script stays a single source of truth. Existing **trbp.nl/run.sh**
-references remain valid via a dashboard redirect to `https://turbopanel.sh`.
-The `workers/` tree is deploy tooling only and is excluded from release
-packaging (`package-daemon-release.sh` / `bundle-orchestration.sh` stage from
-`orchestration/` and `dist/.build` only).
+**https://turbopanel.sh** is the canonical **assets-only** Workers Static Assets
+host for `scripts/run.sh` — **no Worker script**, so public installer traffic
+can never generate Worker invocation billing. `_redirects` handles the bare-root
+`301` to `/run.sh`; `_headers` sets the shellscript content type + `no-store`.
+Deploy tooling lives in the isolated `workers/turbopanel-sh/` package (Node +
+wrangler only — not part of the Deno graph). Manual deploy: `npm install` then
+`npm run deploy` from that directory; the stage step copies `scripts/run.sh`
+(plus committed `assets/_headers` and `assets/_redirects`) into gitignored
+`public/` at deploy time so the script stays a single source of truth. Existing
+**trbp.nl/run.sh** references remain valid via a dashboard redirect to
+`https://turbopanel.sh`. The `workers/` tree is deploy tooling only and is
+excluded from release packaging (`package-daemon-release.sh` /
+`bundle-orchestration.sh` stage from `orchestration/` and `dist/.build` only).
 
 ### Host facts + command handlers (time sync)
 

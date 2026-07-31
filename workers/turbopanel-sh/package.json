@@ -2,7 +2,7 @@
   "private": true,
   "packageManager": "npm@11.13.0",
   "scripts": {
-    "stage": "mkdir -p public && cp ../../scripts/run.sh public/run.sh",
+    "stage": "mkdir -p public && cp ../../scripts/run.sh public/run.sh && cp assets/_headers assets/_redirects public/",
     "deploy": "wrangler deploy"
   },
   "devDependencies": {

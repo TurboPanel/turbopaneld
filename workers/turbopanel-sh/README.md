@@ -1,13 +1,22 @@
 # turbopanel-sh
 
-Cloudflare Worker that serves the daemon installer script (`run.sh`) from
-**https://turbopanel.sh** with correct `Content-Type` and `Cache-Control: no-store`
-headers so `curl | sh` fetches are always fresh.
+Assets-only Workers Static Assets deployment of the daemon installer script
+(`run.sh`) on **https://turbopanel.sh** — no Worker script, so public installer
+requests are free/unbilled. `/run.sh` is served with
+`Content-Type: text/x-shellscript; charset=utf-8` and `Cache-Control: no-store`
+so `curl | sh` fetches are always fresh; the bare root is a `301` to `/run.sh`.
 
 ## Source of truth
 
 `scripts/run.sh` in the daemon repo is the only copy. The deploy flow stages it
 into a gitignored `public/run.sh` before upload — nothing is duplicated in git.
+
+Committed asset config lives under `assets/` (`_headers`, `_redirects`) and is
+staged into `public/` next to `run.sh` by `npm run stage`. Wrangler consumes
+those files at deploy time rather than uploading them as downloadable assets.
+
+Non-GET/HEAD requests no longer get a hand-rolled `405` from Worker code —
+method handling is whatever the asset server returns.
 
 ## Prerequisites
 
@@ -29,24 +38,28 @@ deterministically. Local installs may use `npm install` instead of `npm ci` when
 the lockfile changes.
 
 `deploy` runs `wrangler deploy`, which executes the `build.command` in
-`wrangler.jsonc` first (staging `../../scripts/run.sh` → `public/run.sh`) then
-uploads. Cloudflare Workers Builds that invoke `npx wrangler deploy` directly
-get the same stage step automatically.
+`wrangler.jsonc` first (staging `../../scripts/run.sh` → `public/run.sh` plus
+`assets/_headers` and `assets/_redirects` into `public/`) then uploads.
+Cloudflare Workers Builds that invoke `npx wrangler deploy` directly get the
+same stage step automatically.
 
 ## Legacy URL
 
 Existing references to **https://trbp.nl/run.sh** remain valid after repointing
-the dashboard-managed redirect to **https://turbopanel.sh** (bare). No code
-changes are required in `run.sh` or daemon bootstrap paths — `curl -fsSL`
-follows the redirect.
+the dashboard-managed redirect to be **path-preserving**
+(`trbp.nl/run.sh` → `https://turbopanel.sh/run.sh`) so installs resolve in one
+hop instead of bouncing through the bare host. No code changes are required in
+`run.sh` or daemon bootstrap paths — `curl -fsSL` follows the redirect.
 
 ## Verify
 
 ```bash
+curl -sI https://turbopanel.sh
 curl -fsSL https://turbopanel.sh | head
 curl -fsSL https://turbopanel.sh/run.sh | head
-curl -sI https://turbopanel.sh | grep -E '^(content-type|cache-control):'
+curl -sI https://turbopanel.sh/run.sh | grep -E '^(content-type|cache-control):'
 ```
 
-Expect `Content-Type: text/x-shellscript; charset=utf-8` and
-`Cache-Control: no-store`.
+Expect `301` with `location: /run.sh` on the bare host, and
+`Content-Type: text/x-shellscript; charset=utf-8` plus `Cache-Control: no-store`
+on `/run.sh`. The bare-host `curl -fsSL` check works via `-L`.

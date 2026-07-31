@@ -1,6 +1,7 @@
 #!/bin/sh
-# TurboPanel daemon bootstrap — single entrypoint served at https://trbp.nl/run.sh
-# (301 redirect) and at /run.sh by Caddy in co-located dev.
+# TurboPanel daemon bootstrap — single entrypoint served at
+# https://turbopanel.sh/run.sh (canonical static URL); trbp.nl/run.sh is a legacy
+# 301 alias. Caddy also serves /run.sh in co-located dev.
 #
 # Fetches split release artifacts from the channel manifest at
 # https://dl.trbp.nl/channels.json (host-arch native binary + orchestration tree;

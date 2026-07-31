@@ -6,19 +6,11 @@
   "compatibility_date": "2026-06-01",
   "workers_dev": false,
   "preview_urls": false,
-  "observability": {
-    "logs": {
-      "enabled": true
-    }
-  },
-  "main": "src/worker.ts",
   "build": {
     "command": "npm run stage"
   },
   "assets": {
-    "binding": "ASSETS",
-    "directory": "./public",
-    "run_worker_first": true
+    "directory": "./public"
   },
   "route": {
     "pattern": "turbopanel.sh",
