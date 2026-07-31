@@ -1,9 +1,8 @@
 import { join } from "@std/path";
 import { runDocker } from "../../deploy/docker-cli.ts";
 import {
-  ensureHostingIngress,
+  removeEnvironmentTcpUdpServiceIngress,
   removeHostingCaddySite,
-  removeTcpUdpIngressEntries,
 } from "../../deploy/ingress.ts";
 import { removeTraditionalWebSites } from "../../deploy/traditional-web.ts";
 import { logInfo } from "../../logger.ts";
@@ -88,13 +87,14 @@ export async function handleEnvironmentStop(
   await removeHostingCaddySite(layout, parsedPayload.environmentId);
   await removeTraditionalWebSites(layout, parsedPayload.environmentId);
 
-  const remainingTcpUdpEntries = await removeTcpUdpIngressEntries(
+  // Union payload ingressServices with daemon-persisted environment index so
+  // a hosting deleted (or flipped to HTTP) before stop still tears down the
+  // per-service Traefik project + published ports.
+  await removeEnvironmentTcpUdpServiceIngress(
     layout,
     parsedPayload.environmentId,
+    (parsedPayload.ingressServices ?? []).map((ingress) => ingress.serviceId),
   );
-  if (remainingTcpUdpEntries !== null) {
-    await ensureHostingIngress(layout, remainingTcpUdpEntries);
-  }
 
   try {
     await Deno.remove(deploymentDir, { recursive: true });

@@ -39,7 +39,7 @@ const IDENTITY: ManagedIngressIdentity = {
   managedId: "m1",
   serviceId: "00000000-0000-4000-8000-000000000099",
   composeServiceName: "postgres-ingress",
-  containerName: "00000000-0000-4000-8000-000000000099-1",
+  containerName: "00000000-0000-4000-8000-000000000099-ingress",
 };
 
 async function makeTestLayout(): Promise<{
@@ -73,11 +73,13 @@ function identityFor(
   managedId: string,
   overrides: Partial<ManagedIngressIdentity> = {},
 ): ManagedIngressIdentity {
+  const serviceId = overrides.serviceId ??
+    "00000000-0000-4000-8000-000000000099";
   return {
     managedId,
-    serviceId: "00000000-0000-4000-8000-000000000099",
+    serviceId,
     composeServiceName: "postgres-ingress",
-    containerName: "00000000-0000-4000-8000-000000000099-1",
+    containerName: `${serviceId}-ingress`,
     ...overrides,
   };
 }
@@ -218,6 +220,21 @@ test("managedTraefikCompose rejects invalid bind addresses", () => {
       ),
     Error,
     "bindAddress contains unsupported characters",
+  );
+});
+
+test("managedTraefikCompose rejects obsolete <serviceId>-1 ingress containerName", () => {
+  assertThrows(
+    () =>
+      managedTraefikCompose(
+        [entry({ managedId: "m1", publishedPort: 15432 })],
+        {
+          ...IDENTITY,
+          containerName: `${IDENTITY.serviceId}-1`,
+        },
+      ),
+    Error,
+    "ingress containerName must equal <serviceId>-ingress",
   );
 });
 

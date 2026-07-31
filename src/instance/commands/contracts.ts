@@ -245,6 +245,13 @@ export type EnvironmentDeployTraditionalWebSite = {
   principal?: EnvironmentDeployTraditionalWebPrincipal;
 };
 
+/** Per-service Traefik for tenant tcp/udp — mirrors instance `EnvironmentDeployIngressService`. */
+export type EnvironmentDeployIngressService = {
+  serviceId: string;
+  composeServiceName: string;
+  containerName: string;
+};
+
 export type EnvironmentDeployPayload = {
   environmentId: string;
   projectId: string;
@@ -253,6 +260,11 @@ export type EnvironmentDeployPayload = {
   composeYaml: string;
   hostings: EnvironmentDeployHosting[];
   traditionalWebSites?: EnvironmentDeployTraditionalWebSite[];
+  /**
+   * Per-service Traefik projects for services that publish at least one
+   * `tcp`/`udp` port. HTTP hostings never appear here.
+   */
+  ingressServices?: EnvironmentDeployIngressService[];
   dockerExternalNetworks?: string[];
   tlsMaterial?: EnvironmentDeployTlsMaterial[];
   variableMaterial?: EnvironmentDeployVariableMaterial[];
@@ -268,6 +280,8 @@ export type EnvironmentDeployContainer = {
   containerId: string;
   containerName: string;
   status: string;
+  /** Workload replica vs Traefik ingress; omitted by older daemons (defaults to `'app'`). */
+  role?: "app" | "ingress";
 };
 
 export type EnvironmentDeployResult = {
@@ -281,6 +295,8 @@ export type EnvironmentStopPayload = {
   environmentId: string;
   projectId: string;
   projectName: string;
+  /** Service ids whose per-service tcp/udp Traefik projects should be torn down. */
+  ingressServices?: Array<{ serviceId: string }>;
 };
 
 export type EnvironmentStopResult = {
@@ -1359,6 +1375,52 @@ function parseOptionalStringArray(
   return [...new Set(names)].sort((a, b) => a.localeCompare(b));
 }
 
+const DEPLOY_INGRESS_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const DEPLOY_INGRESS_COMPOSE_NAME_RE = /^[A-Za-z0-9 ._-]+$/;
+const DEPLOY_INGRESS_CONTAINER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/;
+
+function parseDeployIngressService(
+  value: unknown,
+): EnvironmentDeployIngressService {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid environment.deploy ingressServices entry");
+  }
+  if (
+    typeof value.serviceId !== "string" ||
+    !DEPLOY_INGRESS_UUID_RE.test(value.serviceId) ||
+    typeof value.composeServiceName !== "string" ||
+    value.composeServiceName.length === 0 ||
+    value.composeServiceName.length > 255 ||
+    !DEPLOY_INGRESS_COMPOSE_NAME_RE.test(value.composeServiceName) ||
+    typeof value.containerName !== "string" ||
+    !DEPLOY_INGRESS_CONTAINER_NAME_RE.test(value.containerName)
+  ) {
+    throw new TypeError("Invalid environment.deploy ingressServices entry");
+  }
+  if (value.containerName !== `${value.serviceId}-ingress`) {
+    throw new TypeError("Invalid environment.deploy ingressServices entry");
+  }
+  return {
+    serviceId: value.serviceId,
+    composeServiceName: value.composeServiceName,
+    containerName: value.containerName,
+  };
+}
+
+function parseStopIngressService(value: unknown): { serviceId: string } {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid environment.stop ingressServices entry");
+  }
+  if (
+    typeof value.serviceId !== "string" ||
+    !DEPLOY_INGRESS_UUID_RE.test(value.serviceId)
+  ) {
+    throw new TypeError("Invalid environment.stop ingressServices entry");
+  }
+  return { serviceId: value.serviceId };
+}
+
 export function parseEnvironmentDeployPayload(
   value: unknown,
 ): EnvironmentDeployPayload {
@@ -1401,6 +1463,11 @@ export function parseEnvironmentDeployPayload(
     "traditionalWebSites",
     parseTraditionalWebSite,
   );
+  const ingressServices = parseOptionalMaterialArray(
+    value.ingressServices,
+    "ingressServices",
+    parseDeployIngressService,
+  );
   const dockerExternalNetworks = parseOptionalStringArray(
     value.dockerExternalNetworks,
     "dockerExternalNetworks",
@@ -1414,6 +1481,7 @@ export function parseEnvironmentDeployPayload(
     composeYaml: parseNonEmptyString(value, "composeYaml"),
     hostings: hostings.map(parseHosting),
     ...(traditionalWebSites === undefined ? {} : { traditionalWebSites }),
+    ...(ingressServices === undefined ? {} : { ingressServices }),
     ...(dockerExternalNetworks === undefined ? {} : { dockerExternalNetworks }),
     ...(tlsMaterial === undefined ? {} : { tlsMaterial }),
     ...(variableMaterial === undefined ? {} : { variableMaterial }),
@@ -1429,10 +1497,16 @@ export function parseEnvironmentStopPayload(
   if (!isRecord(value)) {
     throw new TypeError("Invalid environment stop payload");
   }
+  const ingressServices = parseOptionalMaterialArray(
+    value.ingressServices,
+    "ingressServices",
+    parseStopIngressService,
+  );
   return {
     environmentId: parseNonEmptyString(value, "environmentId"),
     projectId: parseNonEmptyString(value, "projectId"),
     projectName: parseNonEmptyString(value, "projectName"),
+    ...(ingressServices === undefined ? {} : { ingressServices }),
   };
 }
 
@@ -2101,6 +2175,9 @@ function parseManagedApplyIngress(value: unknown): ManagedApplyIngress {
   ) {
     throw new TypeError("Invalid managed.apply ingress");
   }
+  if (value.containerName !== `${value.serviceId}-ingress`) {
+    throw new TypeError("Invalid managed.apply ingress");
+  }
   return {
     serviceId: value.serviceId,
     composeServiceName: value.composeServiceName,
@@ -2256,6 +2333,9 @@ function parseDeployContainerEntry(
     status: entry.status,
   };
   if (isString(entry.serviceId)) container.serviceId = entry.serviceId;
+  if (entry.role === "app" || entry.role === "ingress") {
+    container.role = entry.role;
+  }
   return container;
 }
 

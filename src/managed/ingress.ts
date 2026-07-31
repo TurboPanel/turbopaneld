@@ -19,7 +19,11 @@
 
 import { join } from "@std/path";
 import { assertValidBindAddress } from "../deploy/ingress.ts";
-import { runDocker } from "../deploy/docker-cli.ts";
+import {
+  type DockerCliResult,
+  runDocker as defaultRunDocker,
+  type RunDockerOptions,
+} from "../deploy/docker-cli.ts";
 import { logInfo, sanitizeForLog } from "../logger.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import {
@@ -28,6 +32,11 @@ import {
   managedIngressProject,
   SAFE_MANAGED_ID_RE,
 } from "./paths.ts";
+
+type RunDockerFn = (
+  args: string[],
+  options?: RunDockerOptions,
+) => Promise<DockerCliResult>;
 
 /** Single source of truth for the managed ingress Docker network name. */
 export const MANAGED_INGRESS_NETWORK = "turbopanel-managed";
@@ -214,6 +223,9 @@ function assertSafeIngressIdentity(identity: ManagedIngressIdentity): void {
   ) {
     throw new Error("ingress serviceId is invalid");
   }
+  if (identity.containerName !== `${identity.serviceId}-ingress`) {
+    throw new Error("ingress containerName must equal <serviceId>-ingress");
+  }
 }
 
 /**
@@ -270,14 +282,14 @@ export function managedTraefikCompose(
 }
 
 async function ensureManagedIngressNetwork(): Promise<void> {
-  const inspect = await runDocker([
+  const inspect = await defaultRunDocker([
     "network",
     "inspect",
     MANAGED_INGRESS_NETWORK,
   ]);
   if (inspect.success) return;
 
-  const create = await runDocker([
+  const create = await defaultRunDocker([
     "network",
     "create",
     MANAGED_INGRESS_NETWORK,
@@ -536,12 +548,14 @@ export function removeManagedIngressEntries(
 /**
  * Best-effort one-shot teardown of the pre-release host-wide managed Traefik
  * (`turbopanel-managed-ingress` + `<stateDir>/managed/ingress/traefik/`).
- * Claim JSON files under `ingress/` are left alone.
+ * Claim JSON files under `ingress/` are left alone. Called from apply **and**
+ * destroy so a last-service delete cannot leave the shared Traefik running.
  */
 export async function teardownLegacyManagedIngress(
   layout: LayoutPaths,
+  run: RunDockerFn = defaultRunDocker,
 ): Promise<void> {
-  const down = await runDocker([
+  const down = await run([
     "compose",
     "-p",
     LEGACY_MANAGED_INGRESS_PROJECT,
@@ -599,7 +613,7 @@ export async function ensureManagedIngress(
     { mode: 0o640 },
   );
   const project = managedIngressProject(managedId);
-  const composeUp = await runDocker([
+  const composeUp = await defaultRunDocker([
     "compose",
     "-p",
     project,
@@ -623,6 +637,7 @@ export async function ensureManagedIngress(
 export async function removeManagedIngress(
   layout: LayoutPaths,
   managedId: string,
+  run: RunDockerFn = defaultRunDocker,
 ): Promise<void> {
   if (!SAFE_MANAGED_ID_RE.test(managedId)) {
     throw new Error("managedId contains unsupported characters");
@@ -637,7 +652,7 @@ export async function removeManagedIngress(
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) throw err;
   }
-  const down = await runDocker(args);
+  const down = await run(args);
   if (!down.success) {
     logInfo(
       "managed",

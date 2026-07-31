@@ -93,39 +93,52 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../insta
 
 `hostings[].protocol` (`http` default/omitted, or `tcp`/`udp`) lets a Docker
 service (Postgres, a game server, a UDP relay, …) publish raw port(s) straight
-through Traefik instead of routing hostnames through hosting Caddy — **no**
-hostname/TLS/path routing for those hostings; `hostings[].ports[]` (required,
-non-empty for `tcp`/`udp`) is a `{ published, target }` list.
+through a **per-service Traefik** instead of routing hostnames through hosting
+Caddy — **no** hostname/TLS/path routing for those hostings;
+`hostings[].ports[]` (required, non-empty for `tcp`/`udp`) is a
+`{ published, target }` list.
+
+**HTTP hostings are excluded** from this path: they stay on the shared
+loopback Traefik (`turbopanel-ingress` / `traefikCompose()` — `web` /
+`websecure` only, no published public ports) via Docker labels. They never
+get a per-service Traefik project or an `ingressServices[]` entry.
 
 - **Compose labels** (`compose-labels.ts` `applyTcpUdpHostingLabels`): one
   `traefik.tcp.routers.<hostingId>-<published>` / `traefik.udp.routers…` pair
-  per published port. TCP routers get a catch-all `HostSNI(\`*\`)` rule (no
-  SNI to match without a hostname); UDP routers take no rule label at all.
-  Both get a `…loadbalancer.server.port` label targeting the container port.
-- **Traefik static config is regenerated, not hot-reloaded**: Traefik cannot
-  add entrypoints at runtime, so `traefikCompose()` (`ingress.ts`) takes the
-  full merged set of `TcpUdpIngressEntry` and emits one
-  `--entrypoints.<protocol><port>.address=:<port>[/udp]` static arg plus one
-  `<bind>:<port>:<port>/<protocol>` compose `ports:` line per entry (bind
-  defaults `0.0.0.0`; IPv6 literals get bracketed). `ensureHostingIngress`
-  rewrites this file and `docker compose up -d` every deploy/stop — Traefik
-  restarts whenever the merged entrypoint set changes, which is why entries
-  are deduped and sorted for a stable diff.
-- **Cross-environment port uniqueness**: the daemon has no global view of
-  every environment's hostings, so each environment's TCP/UDP entries are
-  persisted to `<stateDir>/ingress/tcp-udp/<environmentId>.json`
-  (`syncTcpUdpIngressEntries`, called from both `deploy-environment.ts` and
-  `stop-environment.ts`). Sync reads every *other* environment's file
-  (`collectTcpUdpIngressEntries`), rejects with `TcpUdpPortConflictError` when
-  another environment already claims the same `protocol`+`publishedPort`
-  (**no partial write** on conflict), then writes this environment's file
-  (or deletes it when empty) and returns the full merged set for
-  `ensureHostingIngress`. `environment.stop` calls
-  `removeTcpUdpIngressEntries` and only re-syncs Traefik when that environment
-  actually had entries (`null` return short-circuits a no-op restart).
-- Extraction from the deploy payload: `buildTcpUdpIngressEntries` maps each
-  `tcp`/`udp` hosting's `ports[]` to one `TcpUdpIngressEntry` (carrying that
-  hosting's resolved `bindAddress`, if any).
+  per published port, plus `com.turbopanel.service=<serviceId>` (from
+  `injectHostingLabels`). TCP routers get a catch-all `HostSNI(\`*\`)` rule;
+  UDP routers take no rule label. Both get a `…loadbalancer.server.port`
+  label targeting the container port.
+- **Per-service Traefik** (`serviceTraefikCompose` / `ensureServiceIngress`):
+  every service in `payload.ingressServices[]` gets its own compose project
+  `turbopanel-ingress-<serviceId>` under
+  `<stateDir>/ingress/services/<serviceId>/`, with
+  `container_name: <serviceId>-ingress`,
+  `x-turbopanel: { kind: ingress, serviceId, containerName }`, joined to
+  `turbopanel-ingress`, and
+  `--providers.docker.constraints=Label(\`com.turbopanel.service\`,\`<serviceId>\`)`.
+  Static config is regenerated (not hot-reloaded): one quoted
+  `--entrypoints.<protocol><port>.address=:<port>[/udp]` arg and one quoted
+  `"<bind>:<port>:<port>/<protocol>"` `ports:` line per entry (bind defaults
+  `0.0.0.0`; IPv6 bracketed; `assertValidBindAddress`). Entries are deduped
+  and sorted for a stable diff.
+- **Cross-service port uniqueness**: claim files live at
+  `<stateDir>/ingress/tcp-udp/<serviceId>.json`
+  (`syncTcpUdpIngressEntries`). Sync reads every *other* service's file
+  (`collectTcpUdpIngressEntries`), rejects with `TcpUdpPortConflictError`
+  when another service already claims the same `protocol`+`publishedPort`
+  (**no partial write** on conflict), then writes this service's file (or
+  deletes it when empty) and returns **this service's own entries** for
+  `ensureServiceIngress`. Deploy syncs ingress **before** app `compose up`.
+- **Stop**: `removeEnvironmentTcpUdpServiceIngress` unions payload
+  `ingressServices[]` with the daemon-persisted environment index
+  (`ingress/by-environment/<environmentId>.json`), then
+  `removeServiceIngress` + `removeTcpUdpIngressEntries` for each and clears
+  the index. Payload alone is not teardown truth — a hosting deleted or
+  flipped to HTTP before stop still cleans stale Traefik. Shared HTTP
+  Traefik is left alone (tcp/udp no longer live there).
+- Extraction: `buildTcpUdpIngressEntries` maps each `tcp`/`udp` hosting's
+  `ports[]` to one `TcpUdpIngressEntry` (with that hosting's `bindAddress`).
 
 `environment.stop` (command router →
 `src/instance/commands/stop-environment.ts`):
@@ -133,9 +146,12 @@ non-empty for `tcp`/`udp`) is a `{ published, target }` list.
 1. `docker compose -p <projectName> -f <stateDir>/deployments/<environmentId>/docker-compose.yml down --remove-orphans --volumes`
    when the compose file exists (idempotent no-op when missing).
 2. Remove `/etc/turbopanel/hosting/sites/<environmentId>.caddy` via
-   `removeHostingCaddySite` and best-effort reload hosting Caddy.
-3. Delete the deployment directory.
-4. Return authoritative `containers: []` so the instance clears Postgres
+   `removeHostingCaddySite` and best-effort reload hosting Caddy; remove
+   traditional-web sites.
+3. Tear down per-service tcp/udp ingress via
+   `removeEnvironmentTcpUdpServiceIngress` (payload ∪ environment index).
+4. Delete the deployment directory.
+5. Return authoritative `containers: []` so the instance clears Postgres
    container pins.
 
 Helpers: `src/deploy/ensure-docker.ts`, `src/deploy/ingress.ts`,

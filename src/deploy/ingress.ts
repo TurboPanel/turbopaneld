@@ -20,12 +20,12 @@ const SAFE_FILE_ID_RE = /^[A-Za-z0-9_-]+$/;
 const decoder = new TextDecoder();
 
 /**
- * One raw TCP/UDP port Traefik publishes straight through (no hostname/TLS
- * routing) for a `tcp`/`udp` protocol hosting. Persisted per environment
- * under `<stateDir>/ingress/tcp-udp/<environmentId>.json` and merged across
- * every environment's file to build one consistent Traefik static config —
- * Traefik entrypoints cannot be added dynamically, so the ingress container
- * is recreated whenever the merged entrypoint set changes.
+ * One raw TCP/UDP port a **per-service** Traefik publishes straight through
+ * (no hostname/TLS routing) for a `tcp`/`udp` protocol hosting. Persisted per
+ * service under `<stateDir>/ingress/tcp-udp/<serviceId>.json` for
+ * cross-service conflict detection. Each service that publishes ports gets
+ * its own Traefik compose project (`turbopanel-ingress-<serviceId>`); the
+ * shared `turbopanel-ingress` Traefik stays HTTP-only (loopback web/websecure).
  */
 export type TcpUdpIngressEntry = {
   hostingId: string;
@@ -34,7 +34,14 @@ export type TcpUdpIngressEntry = {
   bindAddress?: string;
 };
 
-/** Raised when two hostings (in different environments) claim the same protocol+port. */
+/** Instance-allocated identity for a per-service tenant Traefik container. */
+export type ServiceIngressIdentity = {
+  serviceId: string;
+  composeServiceName: string;
+  containerName: string;
+};
+
+/** Raised when two hostings (on different services) claim the same protocol+port. */
 export class TcpUdpPortConflictError extends Error {
   constructor(
     readonly protocol: "tcp" | "udp",
@@ -126,13 +133,23 @@ function dedupeTcpUdpEntries(
   );
 }
 
+function quoteYamlScalar(value: string): string {
+  return `"${
+    value.replaceAll("\\", String.raw`\\`).replaceAll('"', String.raw`\"`)
+  }"`;
+}
+
 function tcpUdpStaticArgLines(
   entries: readonly TcpUdpIngressEntry[],
 ): string[] {
   return dedupeTcpUdpEntries(entries).map((entry) => {
     const name = tcpUdpEntrypointName(entry.protocol, entry.publishedPort);
     const suffix = entry.protocol === "udp" ? "/udp" : "";
-    return `      - --entrypoints.${name}.address=:${entry.publishedPort}${suffix}`;
+    return `      - ${
+      quoteYamlScalar(
+        `--entrypoints.${name}.address=:${entry.publishedPort}${suffix}`,
+      )
+    }`;
   });
 }
 
@@ -141,15 +158,16 @@ function tcpUdpPortLines(entries: readonly TcpUdpIngressEntry[]): string[] {
     const bindAddress = entry.bindAddress ?? "0.0.0.0";
     assertValidBindAddress(bindAddress);
     const host = bindAddress.includes(":") ? `[${bindAddress}]` : bindAddress;
-    return `      - ${host}:${entry.publishedPort}:${entry.publishedPort}/${entry.protocol}`;
+    return `      - ${
+      quoteYamlScalar(
+        `${host}:${entry.publishedPort}:${entry.publishedPort}/${entry.protocol}`,
+      )
+    }`;
   });
 }
 
-export function traefikCompose(
-  entries: readonly TcpUdpIngressEntry[] = [],
-): string {
-  const staticArgs = tcpUdpStaticArgLines(entries);
-  const portLines = tcpUdpPortLines(entries);
+/** Shared HTTP-only Traefik (loopback web/websecure). No tcp/udp entrypoints. */
+export function traefikCompose(): string {
   const lines = [
     "services:",
     "  traefik:",
@@ -164,13 +182,126 @@ export function traefikCompose(
     `      - --entrypoints.websecure.address=:${TRAEFIK_HTTPS_PORT}`,
     "      - --entrypoints.websecure.proxyProtocol.insecure=true",
     "      - --entrypoints.websecure.http.tls=true",
-    ...staticArgs,
     "    ports:",
     `      - ${TRAEFIK_LOOPBACK}:${TRAEFIK_HTTP_PORT}:${TRAEFIK_HTTP_PORT}`,
     `      - ${TRAEFIK_LOOPBACK}:${TRAEFIK_HTTPS_PORT}:${TRAEFIK_HTTPS_PORT}`,
-    ...portLines,
     "    volumes:",
     "      - /var/run/docker.sock:/var/run/docker.sock:ro",
+    "    networks:",
+    `      - ${INGRESS_NETWORK}`,
+    "",
+    "networks:",
+    `  ${INGRESS_NETWORK}:`,
+    "    external: true",
+    "",
+  ];
+  return lines.join("\n");
+}
+
+function assertSafeServiceIngressIdentity(
+  identity: ServiceIngressIdentity,
+): void {
+  if (!SAFE_FILE_ID_RE.test(identity.serviceId)) {
+    throw new Error("serviceId contains unsupported characters");
+  }
+  if (identity.serviceId.includes("`")) {
+    throw new Error("serviceId contains unsupported characters");
+  }
+  if (
+    identity.composeServiceName.length === 0 ||
+    identity.composeServiceName.length > 255 ||
+    !/^[A-Za-z0-9 ._-]+$/.test(identity.composeServiceName)
+  ) {
+    throw new Error(
+      "ingress composeServiceName contains unsupported characters",
+    );
+  }
+  if (
+    identity.containerName.length === 0 ||
+    !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/.test(identity.containerName)
+  ) {
+    throw new Error("ingress containerName contains unsupported characters");
+  }
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      identity.serviceId,
+    )
+  ) {
+    throw new Error("ingress serviceId is invalid");
+  }
+  if (identity.containerName !== `${identity.serviceId}-ingress`) {
+    throw new Error("ingress containerName must equal <serviceId>-ingress");
+  }
+}
+
+/** Compose project name for one service's tenant Traefik. */
+export function serviceIngressProject(serviceId: string): string {
+  if (!SAFE_FILE_ID_RE.test(serviceId)) {
+    throw new Error("serviceId contains unsupported characters");
+  }
+  return `turbopanel-ingress-${serviceId}`;
+}
+
+export function serviceIngressDir(
+  layout: LayoutPaths,
+  serviceId: string,
+): string {
+  if (!SAFE_FILE_ID_RE.test(serviceId)) {
+    throw new Error("serviceId contains unsupported characters");
+  }
+  return join(layout.stateDir, "ingress", "services", serviceId);
+}
+
+export function serviceIngressComposePath(
+  layout: LayoutPaths,
+  serviceId: string,
+): string {
+  return join(serviceIngressDir(layout, serviceId), "docker-compose.yml");
+}
+
+/**
+ * Compose document for one tenant service's Traefik project.
+ *
+ * Joins {@link INGRESS_NETWORK}, constrains the Docker provider to
+ * `com.turbopanel.service=<serviceId>` **and** `com.turbopanel.raw-port=true`
+ * (stamped by `injectHostingLabels` only on services that publish tcp/udp),
+ * and emits only that service's tcp/udp entrypoints + published ports.
+ * HTTP routers on mixed-hosting services are pinned to `web,websecure`, which
+ * this Traefik does not define — so HTTP config stays on shared loopback Traefik.
+ */
+export function serviceTraefikCompose(
+  entries: readonly TcpUdpIngressEntry[],
+  identity: ServiceIngressIdentity,
+): string {
+  assertSafeServiceIngressIdentity(identity);
+  const staticArgs = tcpUdpStaticArgLines(entries);
+  const portLines = tcpUdpPortLines(entries);
+  const constraint =
+    `Label(\`com.turbopanel.service\`,\`${identity.serviceId}\`) && Label(\`com.turbopanel.raw-port\`,\`true\`)`;
+  const lines = [
+    "services:",
+    `  ${identity.composeServiceName}:`,
+    `    image: ${TRAEFIK_IMAGE}`,
+    `    container_name: ${identity.containerName}`,
+    "    x-turbopanel:",
+    "      kind: ingress",
+    `      serviceId: ${identity.serviceId}`,
+    `      containerName: ${identity.containerName}`,
+    "    restart: unless-stopped",
+    "    command:",
+    "      - --providers.docker=true",
+    "      - --providers.docker.exposedbydefault=false",
+    `      - --providers.docker.network=${INGRESS_NETWORK}`,
+    `      - ${
+      quoteYamlScalar(`--providers.docker.constraints=${constraint}`)
+    }`,
+    ...staticArgs,
+    ...(portLines.length > 0 ? ["    ports:", ...portLines] : []),
+    "    volumes:",
+    "      - /var/run/docker.sock:/var/run/docker.sock:ro",
+    "    labels:",
+    "      turbopanel.role: ingress",
+    `      com.turbopanel.service: ${quoteYamlScalar(identity.serviceId)}`,
     "    networks:",
     `      - ${INGRESS_NETWORK}`,
     "",
@@ -284,16 +415,16 @@ export async function ensureHostingCaddyRuntime(
   await installAndStartCaddy(unitSource);
 }
 
+/** Ensure the shared HTTP-only Traefik + hosting Caddy runtime. */
 export async function ensureHostingIngress(
   layout: LayoutPaths,
-  tcpUdpEntries: readonly TcpUdpIngressEntry[] = [],
 ): Promise<void> {
   await ensureIngressNetwork();
 
   const ingressDir = join(layout.stateDir, "ingress", "traefik");
   await Deno.mkdir(ingressDir, { recursive: true, mode: 0o750 });
   const composePath = join(ingressDir, "docker-compose.yml");
-  await Deno.writeTextFile(composePath, traefikCompose(tcpUdpEntries), {
+  await Deno.writeTextFile(composePath, traefikCompose(), {
     mode: 0o640,
   });
   const composeUp = await runDocker([
@@ -311,6 +442,90 @@ export async function ensureHostingIngress(
   }
 
   await ensureHostingCaddyRuntime(layout);
+}
+
+/**
+ * Ensure this service's Traefik is running with its own entrypoint set.
+ * Writes compose under `<stateDir>/ingress/services/<serviceId>/`.
+ */
+export async function ensureServiceIngress(
+  layout: LayoutPaths,
+  serviceId: string,
+  entries: readonly TcpUdpIngressEntry[],
+  identity: ServiceIngressIdentity,
+): Promise<void> {
+  if (identity.serviceId !== serviceId) {
+    throw new Error("ingress identity serviceId mismatch");
+  }
+  await ensureIngressNetwork();
+
+  const ingressDir = serviceIngressDir(layout, serviceId);
+  await Deno.mkdir(ingressDir, { recursive: true, mode: 0o750 });
+  const composePath = serviceIngressComposePath(layout, serviceId);
+  await Deno.writeTextFile(
+    composePath,
+    serviceTraefikCompose(entries, identity),
+    { mode: 0o640 },
+  );
+  const project = serviceIngressProject(serviceId);
+  const composeUp = await runDocker([
+    "compose",
+    "-p",
+    project,
+    "-f",
+    composePath,
+    "up",
+    "-d",
+    "--remove-orphans",
+  ]);
+  if (!composeUp.success) {
+    throw commandError("Starting service Traefik ingress", composeUp);
+  }
+}
+
+/**
+ * Best-effort `docker compose down` for this service's Traefik project, then
+ * remove the per-service ingress compose directory.
+ */
+export async function removeServiceIngress(
+  layout: LayoutPaths,
+  serviceId: string,
+): Promise<void> {
+  if (!SAFE_FILE_ID_RE.test(serviceId)) {
+    throw new Error("serviceId contains unsupported characters");
+  }
+  const project = serviceIngressProject(serviceId);
+  const composePath = serviceIngressComposePath(layout, serviceId);
+  const ingressDir = serviceIngressDir(layout, serviceId);
+  const args = ["compose", "-p", project, "down", "--remove-orphans"];
+  try {
+    await Deno.stat(composePath);
+    args.splice(3, 0, "-f", composePath);
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+  const down = await runDocker(args);
+  if (!down.success) {
+    logWarn(
+      "deploy",
+      `service ingress down soft-failed project=${project}: ${
+        down.stderr || "compose down failed"
+      }`,
+    );
+  }
+
+  try {
+    await Deno.remove(ingressDir, { recursive: true });
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) {
+      logWarn(
+        "deploy",
+        `service ingress dir remove soft-failed project=${project}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
 }
 
 /** Strict allowlist for Caddy `bind` interpolation — IPv4/IPv6 literals only. */
@@ -710,17 +925,105 @@ function tcpUdpStateDir(layout: LayoutPaths): string {
   return join(layout.stateDir, "ingress", "tcp-udp");
 }
 
-function tcpUdpStateFile(layout: LayoutPaths, environmentId: string): string {
-  if (!SAFE_FILE_ID_RE.test(environmentId)) {
-    throw new Error("environmentId contains unsupported characters");
+function tcpUdpStateFile(layout: LayoutPaths, serviceId: string): string {
+  if (!SAFE_FILE_ID_RE.test(serviceId)) {
+    throw new Error("serviceId contains unsupported characters");
   }
-  return join(tcpUdpStateDir(layout), `${environmentId}.json`);
+  return join(tcpUdpStateDir(layout), `${serviceId}.json`);
 }
 
-/** Read every persisted per-environment TCP/UDP entry list, optionally excluding one environment. */
+function isValidPortNumberLike(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= 1 &&
+    value <= 65535
+  );
+}
+
+/** Shape-validate one persisted entry — mirrors {@link TcpUdpIngressEntry}. */
+function isValidTcpUdpIngressEntry(
+  value: unknown,
+): value is TcpUdpIngressEntry {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  if (typeof record.hostingId !== "string" || record.hostingId.length === 0) {
+    return false;
+  }
+  if (record.protocol !== "tcp" && record.protocol !== "udp") return false;
+  if (!isValidPortNumberLike(record.publishedPort)) return false;
+  if (
+    record.bindAddress !== undefined && typeof record.bindAddress !== "string"
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function isValidTcpUdpIngressEntryArray(
+  value: unknown,
+): value is TcpUdpIngressEntry[] {
+  return Array.isArray(value) && value.every(isValidTcpUdpIngressEntry);
+}
+
+/**
+ * Serializes every {@link syncTcpUdpIngressEntries} /
+ * {@link removeTcpUdpIngressEntries} call across **every** serviceId.
+ *
+ * The published-port conflict check in `syncTcpUdpIngressEntries` reads
+ * every *other* service's persisted file before writing its own. A lock
+ * keyed by `serviceId` would not help — the race is *between two different*
+ * services contending for the same port, so serialization must cover the
+ * whole `ingress/tcp-udp` state directory.
+ */
+let tcpUdpIngressLockTail: Promise<unknown> = Promise.resolve();
+
+function withTcpUdpIngressLock<T>(fn: () => Promise<T>): Promise<T> {
+  const result = tcpUdpIngressLockTail.then(fn, fn);
+  // Chain the next caller off this call's settlement, but swallow rejection
+  // here so a failed call doesn't turn every later call into a rejection too
+  // (each caller already observes its own failure via the returned promise).
+  tcpUdpIngressLockTail = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+/**
+ * Write `entries` to `filePath` via a temp file in the same directory,
+ * validate the bytes actually landed on disk round-trip to the expected
+ * shape, then atomically rename over `filePath`.
+ */
+async function writeTcpUdpIngressEntriesAtomic(
+  dir: string,
+  filePath: string,
+  entries: readonly TcpUdpIngressEntry[],
+): Promise<void> {
+  const tmpPath = join(dir, `.${crypto.randomUUID()}.tmp`);
+  await Deno.writeTextFile(tmpPath, JSON.stringify(entries), { mode: 0o640 });
+  try {
+    const written = JSON.parse(await Deno.readTextFile(tmpPath));
+    if (!isValidTcpUdpIngressEntryArray(written)) {
+      throw new Error(
+        `tcp/udp ingress entries for ${filePath} failed validation before commit`,
+      );
+    }
+    await Deno.rename(tmpPath, filePath);
+  } catch (err) {
+    await Deno.remove(tmpPath).catch(() => {});
+    throw err;
+  }
+}
+
+/**
+ * Read every persisted per-service TCP/UDP entry list, optionally excluding one
+ * service.
+ *
+ * Throws a clear error when a state file contains invalid JSON or an entry
+ * that doesn't match {@link TcpUdpIngressEntry} — corrupt state must fail
+ * loudly rather than silently feeding garbage into conflict detection.
+ */
 export async function collectTcpUdpIngressEntries(
   layout: LayoutPaths,
-  excludeEnvironmentId?: string,
+  excludeServiceId?: string,
 ): Promise<TcpUdpIngressEntry[]> {
   const dir = tcpUdpStateDir(layout);
   let dirEntries: Deno.DirEntry[];
@@ -732,35 +1035,208 @@ export async function collectTcpUdpIngressEntries(
     throw err;
   }
 
-  const excludeFile = excludeEnvironmentId
-    ? `${excludeEnvironmentId}.json`
-    : undefined;
+  const excludeFile = excludeServiceId ? `${excludeServiceId}.json` : undefined;
   const merged: TcpUdpIngressEntry[] = [];
   for (const entry of dirEntries) {
     if (!entry.isFile || !entry.name.endsWith(".json")) continue;
+    // Skip in-progress atomic writes (`.*.tmp`) and any non-claim files.
+    if (entry.name.startsWith(".")) continue;
     if (entry.name === excludeFile) continue;
     const contents = await Deno.readTextFile(join(dir, entry.name));
-    const parsed: unknown = JSON.parse(contents);
-    if (Array.isArray(parsed)) merged.push(...(parsed as TcpUdpIngressEntry[]));
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(contents);
+    } catch (err) {
+      throw new Error(
+        `corrupt tcp/udp ingress state file ${entry.name}: invalid JSON`,
+        { cause: err },
+      );
+    }
+    if (!isValidTcpUdpIngressEntryArray(parsed)) {
+      throw new Error(
+        `corrupt tcp/udp ingress state file ${entry.name}: expected an array of tcp/udp ingress entries`,
+      );
+    }
+    merged.push(...parsed);
   }
   return merged;
 }
 
 /**
- * Persist this environment's TCP/UDP entries (deleting the file when empty),
- * check for protocol+port conflicts against every other environment's
- * entries, and return the full merged set for `ensureHostingIngress`.
- * Throws {@link TcpUdpPortConflictError} on conflict — no partial write.
+ * ServiceIds that currently have a claim file and/or a per-service Traefik
+ * project directory on disk.
  */
-export async function syncTcpUdpIngressEntries(
+export async function listPersistedTcpUdpServiceIds(
+  layout: LayoutPaths,
+): Promise<string[]> {
+  const ids = new Set<string>();
+
+  const claimDir = tcpUdpStateDir(layout);
+  try {
+    for await (const entry of Deno.readDir(claimDir)) {
+      if (!entry.isFile || !entry.name.endsWith(".json")) continue;
+      if (entry.name.startsWith(".")) continue;
+      const serviceId = entry.name.slice(0, -".json".length);
+      if (SAFE_FILE_ID_RE.test(serviceId)) ids.add(serviceId);
+    }
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+
+  const servicesDir = join(layout.stateDir, "ingress", "services");
+  try {
+    for await (const entry of Deno.readDir(servicesDir)) {
+      if (!entry.isDirectory) continue;
+      if (!SAFE_FILE_ID_RE.test(entry.name)) continue;
+      ids.add(entry.name);
+    }
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+
+  return [...ids].sort((a, b) => a.localeCompare(b));
+}
+
+function environmentIngressIndexPath(
   layout: LayoutPaths,
   environmentId: string,
+): string {
+  if (!SAFE_FILE_ID_RE.test(environmentId)) {
+    throw new Error("environmentId contains unsupported characters");
+  }
+  return join(
+    layout.stateDir,
+    "ingress",
+    "by-environment",
+    `${environmentId}.json`,
+  );
+}
+
+/** Previously active raw-port serviceIds for one environment (may be empty). */
+export async function readEnvironmentTcpUdpServiceIds(
+  layout: LayoutPaths,
+  environmentId: string,
+): Promise<string[]> {
+  const path = environmentIngressIndexPath(layout, environmentId);
+  try {
+    const parsed: unknown = JSON.parse(await Deno.readTextFile(path));
+    if (
+      !Array.isArray(parsed) ||
+      !parsed.every((id) => typeof id === "string" && SAFE_FILE_ID_RE.test(id))
+    ) {
+      throw new Error(
+        `corrupt environment tcp/udp ingress index for ${environmentId}`,
+      );
+    }
+    return parsed;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return [];
+    throw err;
+  }
+}
+
+async function writeEnvironmentTcpUdpServiceIds(
+  layout: LayoutPaths,
+  environmentId: string,
+  serviceIds: readonly string[],
+): Promise<void> {
+  const path = environmentIngressIndexPath(layout, environmentId);
+  const dir = join(layout.stateDir, "ingress", "by-environment");
+  await Deno.mkdir(dir, { recursive: true, mode: 0o750 });
+  const sorted = [...serviceIds].sort((a, b) => a.localeCompare(b));
+  if (sorted.length === 0) {
+    try {
+      await Deno.remove(path);
+    } catch (err) {
+      if (!(err instanceof Deno.errors.NotFound)) throw err;
+    }
+    return;
+  }
+  await Deno.writeTextFile(path, JSON.stringify(sorted), { mode: 0o640 });
+}
+
+/**
+ * Tear down every per-service Traefik project + claim file for an environment
+ * stop.
+ *
+ * Unions the daemon-persisted environment index with `payloadServiceIds` from
+ * `environment.stop` so ingress is removed even when the instance payload
+ * omits `ingressServices` (hosting deleted or flipped to HTTP before stop).
+ * Clears the environment index afterward.
+ */
+export async function removeEnvironmentTcpUdpServiceIngress(
+  layout: LayoutPaths,
+  environmentId: string,
+  payloadServiceIds: readonly string[] = [],
+): Promise<string[]> {
+  const fromIndex = await readEnvironmentTcpUdpServiceIds(
+    layout,
+    environmentId,
+  );
+  const serviceIds = new Set<string>([...fromIndex, ...payloadServiceIds]);
+  const removed: string[] = [];
+  for (const serviceId of [...serviceIds].sort((a, b) => a.localeCompare(b))) {
+    await removeServiceIngress(layout, serviceId);
+    await removeTcpUdpIngressEntries(layout, serviceId);
+    removed.push(serviceId);
+  }
+  await writeEnvironmentTcpUdpServiceIds(layout, environmentId, []);
+  return removed;
+}
+
+/**
+ * Tear down per-service Traefik projects + claim files for services that
+ * previously published raw ports for this environment but are absent from
+ * the new `ingressServices[]` set (e.g. tcp/udp → HTTP-only redeploy).
+ *
+ * Discovery unions (1) the environment index written on the last deploy and
+ * (2) on-disk claim/project state for serviceIds still present in this
+ * environment's hostings — so a tcp→HTTP flip is cleaned even before an
+ * index exists, and a later `environment.stop` need not rediscover them.
+ */
+export async function cleanupStaleTcpUdpServiceIngress(
+  layout: LayoutPaths,
+  environmentId: string,
+  environmentServiceIds: ReadonlySet<string>,
+  activeIngressServiceIds: ReadonlySet<string>,
+): Promise<string[]> {
+  const previousFromIndex = await readEnvironmentTcpUdpServiceIds(
+    layout,
+    environmentId,
+  );
+  const persisted = await listPersistedTcpUdpServiceIds(layout);
+  const candidates = new Set<string>(previousFromIndex);
+  for (const serviceId of persisted) {
+    if (environmentServiceIds.has(serviceId)) candidates.add(serviceId);
+  }
+
+  const removed: string[] = [];
+  for (const serviceId of [...candidates].sort((a, b) => a.localeCompare(b))) {
+    if (activeIngressServiceIds.has(serviceId)) continue;
+    if (persisted.includes(serviceId)) {
+      await removeServiceIngress(layout, serviceId);
+      await removeTcpUdpIngressEntries(layout, serviceId);
+    }
+    removed.push(serviceId);
+  }
+
+  await writeEnvironmentTcpUdpServiceIds(
+    layout,
+    environmentId,
+    [...activeIngressServiceIds],
+  );
+  return removed;
+}
+
+async function syncTcpUdpIngressEntriesLocked(
+  layout: LayoutPaths,
+  serviceId: string,
   entries: readonly TcpUdpIngressEntry[],
 ): Promise<TcpUdpIngressEntry[]> {
   const dir = tcpUdpStateDir(layout);
   await Deno.mkdir(dir, { recursive: true, mode: 0o750 });
 
-  const others = await collectTcpUdpIngressEntries(layout, environmentId);
+  const others = await collectTcpUdpIngressEntries(layout, serviceId);
   for (const entry of entries) {
     const conflict = others.find(
       (o) =>
@@ -776,30 +1252,41 @@ export async function syncTcpUdpIngressEntries(
     }
   }
 
-  const filePath = tcpUdpStateFile(layout, environmentId);
+  const filePath = tcpUdpStateFile(layout, serviceId);
   if (entries.length === 0) {
     try {
       await Deno.remove(filePath);
     } catch (err) {
       if (!(err instanceof Deno.errors.NotFound)) throw err;
     }
-    return others;
+    return [];
   }
 
-  await Deno.writeTextFile(filePath, JSON.stringify(entries), { mode: 0o640 });
-  return [...others, ...entries];
+  await writeTcpUdpIngressEntriesAtomic(dir, filePath, entries);
+  return [...entries];
 }
 
 /**
- * Remove this environment's persisted TCP/UDP entries. Returns `null` when
- * the environment had none (caller can skip re-syncing Traefik); otherwise
- * returns the remaining merged set from every other environment.
+ * Persist this service's TCP/UDP entries (deleting the file when empty),
+ * check for protocol+port conflicts against every other service's entries,
+ * and return **this service's own entries** for `ensureServiceIngress`.
+ * Throws {@link TcpUdpPortConflictError} on conflict — **no partial write**.
  */
-export async function removeTcpUdpIngressEntries(
+export function syncTcpUdpIngressEntries(
   layout: LayoutPaths,
-  environmentId: string,
+  serviceId: string,
+  entries: readonly TcpUdpIngressEntry[],
+): Promise<TcpUdpIngressEntry[]> {
+  return withTcpUdpIngressLock(() =>
+    syncTcpUdpIngressEntriesLocked(layout, serviceId, entries)
+  );
+}
+
+async function removeTcpUdpIngressEntriesLocked(
+  layout: LayoutPaths,
+  serviceId: string,
 ): Promise<TcpUdpIngressEntry[] | null> {
-  const filePath = tcpUdpStateFile(layout, environmentId);
+  const filePath = tcpUdpStateFile(layout, serviceId);
   try {
     await Deno.stat(filePath);
   } catch (err) {
@@ -808,5 +1295,19 @@ export async function removeTcpUdpIngressEntries(
   }
 
   await Deno.remove(filePath);
-  return await collectTcpUdpIngressEntries(layout, environmentId);
+  return await collectTcpUdpIngressEntries(layout, serviceId);
+}
+
+/**
+ * Remove this service's persisted TCP/UDP claim file. Returns `null` when
+ * the service had none; otherwise the remaining claims from every other
+ * service (callers no longer restart a shared Traefik for tcp/udp).
+ */
+export function removeTcpUdpIngressEntries(
+  layout: LayoutPaths,
+  serviceId: string,
+): Promise<TcpUdpIngressEntry[] | null> {
+  return withTcpUdpIngressLock(() =>
+    removeTcpUdpIngressEntriesLocked(layout, serviceId)
+  );
 }

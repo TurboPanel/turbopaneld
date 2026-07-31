@@ -6,12 +6,17 @@ import type {
   ManagedDestroyPayload,
   ManagedDestroyResult,
 } from "../instance/commands/contracts.ts";
-import { runDocker } from "../deploy/docker-cli.ts";
+import {
+  type DockerCliResult,
+  runDocker as defaultRunDocker,
+  type RunDockerOptions,
+} from "../deploy/docker-cli.ts";
 import { logInfo, sanitizeForLog } from "../logger.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import {
   removeManagedIngress,
   removeManagedIngressEntries,
+  teardownLegacyManagedIngress,
 } from "./ingress.ts";
 import {
   managedComposeProject,
@@ -20,9 +25,15 @@ import {
 } from "./paths.ts";
 
 type DecryptSecretsFn = (ciphertexts: string[]) => Promise<(string | null)[]>;
+type RunDockerFn = (
+  args: string[],
+  options?: RunDockerOptions,
+) => Promise<DockerCliResult>;
 
 export type ManagedDestroyHandlerDeps = {
   decryptSecrets?: DecryptSecretsFn;
+  /** Test seam — defaults to {@link defaultRunDocker}. */
+  runDocker?: RunDockerFn;
 };
 
 async function pathExists(path: string): Promise<boolean> {
@@ -38,12 +49,13 @@ async function pathExists(path: string): Promise<boolean> {
 export async function handleManagedDestroy(
   payload: ManagedDestroyPayload,
   _daemonReceivedAt: string,
-  _deps?: ManagedDestroyHandlerDeps,
+  deps?: ManagedDestroyHandlerDeps,
 ): Promise<ManagedDestroyResult> {
   if (!SAFE_MANAGED_ID_RE.test(payload.managedId)) {
     throw new Error("managedId contains unsupported characters");
   }
 
+  const run = deps?.runDocker ?? defaultRunDocker;
   const layout = resolveLayout(Deno.env.toObject());
   const root = managedDir(layout, payload.managedId);
   const project = managedComposeProject(payload.managedId);
@@ -60,7 +72,7 @@ export async function handleManagedDestroy(
     if (payload.removeVolumes) {
       args.push("--volumes");
     }
-    const down = await runDocker(args);
+    const down = await run(args);
     if (!down.success) {
       // Idempotent when the project was never brought up.
       logInfo(
@@ -72,8 +84,11 @@ export async function handleManagedDestroy(
     }
   }
 
-  await removeManagedIngress(layout, payload.managedId);
+  // Per-service Traefik first, then claim file, then the pre-release shared
+  // project — so a last-service delete cannot leave either Traefik running.
+  await removeManagedIngress(layout, payload.managedId, run);
   await removeManagedIngressEntries(layout, payload.managedId);
+  await teardownLegacyManagedIngress(layout, run);
 
   try {
     await Deno.remove(root, { recursive: true });

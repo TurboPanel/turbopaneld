@@ -351,7 +351,7 @@ test("managed.apply requires ingress iff exposure.enabled", () => {
   const VALID_INGRESS = {
     serviceId: "00000000-0000-4000-8000-000000000099",
     composeServiceName: "postgres-ingress",
-    containerName: "00000000-0000-4000-8000-000000000099-1",
+    containerName: "00000000-0000-4000-8000-000000000099-ingress",
   };
   assertThrows(
     () =>
@@ -378,6 +378,23 @@ test("managed.apply requires ingress iff exposure.enabled", () => {
     ingress: VALID_INGRESS,
   });
   assertEquals(payload.ingress, VALID_INGRESS);
+});
+
+test("managed.apply rejects obsolete <serviceId>-1 ingress containerName", () => {
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        exposure: { enabled: true, protocol: "tcp", publishedPort: 15432 },
+        ingress: {
+          serviceId: "00000000-0000-4000-8000-000000000099",
+          composeServiceName: "postgres-ingress",
+          containerName: "00000000-0000-4000-8000-000000000099-1",
+        },
+      }),
+    TypeError,
+    "Invalid managed.apply ingress",
+  );
 });
 
 test("managed.apply rejects unsafe containerName", () => {
@@ -503,7 +520,7 @@ test("managed.apply rejects nested dockerOptions and enabled exposure without po
       ingress: {
         serviceId: "00000000-0000-4000-8000-000000000099",
         composeServiceName: "postgres-ingress",
-        containerName: "00000000-0000-4000-8000-000000000099-1",
+        containerName: "00000000-0000-4000-8000-000000000099-ingress",
       },
     }).exposure.publishedPort,
     15432,
@@ -650,6 +667,48 @@ test("managed.destroy admits the instance-only deleteAfterDestroy marker but nev
       }),
     TypeError,
     "Invalid managed.destroy payload",
+  );
+});
+
+test("managed apply result preserves container role and ignores invalid role", () => {
+  assertEquals(
+    parseManagedApplyResult({
+      host: "203.0.113.10",
+      port: 5432,
+      containers: [
+        {
+          serviceId: "svc-1",
+          composeServiceName: "postgres-ingress",
+          containerId: "cid-ingress",
+          containerName: "svc-1-ingress",
+          status: "running",
+          role: "ingress",
+        },
+        {
+          composeServiceName: "postgres",
+          containerId: "cid-app",
+          containerName: "svc-1-1",
+          status: "running",
+          role: "not-a-role",
+        },
+      ],
+    }).containers,
+    [
+      {
+        serviceId: "svc-1",
+        composeServiceName: "postgres-ingress",
+        containerId: "cid-ingress",
+        containerName: "svc-1-ingress",
+        status: "running",
+        role: "ingress",
+      },
+      {
+        composeServiceName: "postgres",
+        containerId: "cid-app",
+        containerName: "svc-1-1",
+        status: "running",
+      },
+    ],
   );
 });
 

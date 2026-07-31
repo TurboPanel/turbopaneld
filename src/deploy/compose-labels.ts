@@ -158,6 +158,14 @@ function applyHttpHostingLabels(
     throw new Error("hostings[].hostnames must not be empty");
   }
   const routerId = hosting.hostingId;
+  // Pin HTTP routers to the shared loopback Traefik entrypoints so a
+  // per-service raw-port Traefik (tcp/udp entrypoints only) cannot satisfy
+  // them even when the same container also carries tcp/udp labels.
+  addLabel(
+    labels,
+    `traefik.http.routers.${routerId}.entrypoints`,
+    "web,websecure",
+  );
   addLabel(
     labels,
     `traefik.http.routers.${routerId}.rule`,
@@ -237,6 +245,9 @@ export function injectHostingLabels(payload: EnvironmentDeployPayload): {
     addLabel(labels, "traefik.docker.network", INGRESS_NETWORK);
     if (hosting.protocol === "tcp" || hosting.protocol === "udp") {
       applyTcpUdpHostingLabels(labels, hosting);
+      // Boundary for per-service Traefik: only containers that publish raw
+      // ports carry this label (see `serviceTraefikCompose` constraints).
+      addLabel(labels, "com.turbopanel.raw-port", "true");
     } else {
       applyHttpHostingLabels(labels, hosting);
     }

@@ -47,6 +47,10 @@ test("injectHostingLabels configures Traefik and ingress network", () => {
   assertEquals(labels["traefik.enable"], "true");
   assertEquals(labels["traefik.docker.network"], "turbopanel-ingress");
   assertEquals(
+    labels["traefik.http.routers.hosting_123.entrypoints"],
+    "web,websecure",
+  );
+  assertEquals(
     labels["traefik.http.routers.hosting_123.rule"],
     "(Host(`app.example.test`) || Host(`www.example.test`)) && PathPrefix(`/api`)",
   );
@@ -55,6 +59,7 @@ test("injectHostingLabels configures Traefik and ingress network", () => {
     "3000",
   );
   assertEquals(labels["com.turbopanel.project"], "project_123");
+  assertEquals(labels["com.turbopanel.raw-port"], undefined);
   assertEquals(compose.services.app.networks, ["turbopanel-ingress"]);
   assertEquals(compose.networks["turbopanel-ingress"].external, true);
 });
@@ -147,6 +152,7 @@ test("injectHostingLabels configures a tcp router+service per published port, no
     "5432",
   );
   assertEquals(labels["traefik.http.routers.hosting_db-5432.rule"], undefined);
+  assertEquals(labels["com.turbopanel.raw-port"], "true");
   assertEquals(compose.services.db.networks, ["turbopanel-ingress"]);
 });
 
@@ -183,5 +189,78 @@ test("injectHostingLabels rejects a tcp/udp hosting with empty ports", () => {
       }),
     Error,
     "ports must not be empty",
+  );
+});
+
+test("injectHostingLabels stamps raw-port on tcp/udp and pins HTTP entrypoints on mixed services", () => {
+  const result = injectHostingLabels({
+    environmentId: "env_123",
+    projectId: "project_123",
+    organizationId: "org_123",
+    projectName: "web_app",
+    composeYaml: `services:
+  app:
+    image: nginx:alpine
+`,
+    hostings: [
+      {
+        hostingId: "hosting_http",
+        serviceId: "service_mixed",
+        composeServiceName: "app",
+        hostnames: ["app.example.test"],
+        targetPort: 8080,
+      },
+      {
+        hostingId: "hosting_tcp",
+        serviceId: "service_mixed",
+        composeServiceName: "app",
+        hostnames: [],
+        protocol: "tcp",
+        ports: [{ published: 5432, target: 5432 }],
+      },
+    ],
+  });
+  const compose = parse(result.composeYaml) as {
+    services: { app: { labels: Record<string, string> } };
+  };
+  const labels = compose.services.app.labels;
+
+  // Per-service Traefik selects only raw-port containers.
+  assertEquals(labels["com.turbopanel.raw-port"], "true");
+  assertEquals(labels["com.turbopanel.service"], "service_mixed");
+
+  // HTTP stays on shared loopback Traefik entrypoints.
+  assertEquals(
+    labels["traefik.http.routers.hosting_http.entrypoints"],
+    "web,websecure",
+  );
+  assertEquals(
+    labels["traefik.http.routers.hosting_http.rule"],
+    "Host(`app.example.test`)",
+  );
+
+  // TCP routers keep their dedicated entrypoints (not web/websecure).
+  assertEquals(
+    labels["traefik.tcp.routers.hosting_tcp-5432.entrypoints"],
+    "tcp5432",
+  );
+  assertEquals(
+    labels["traefik.http.routers.hosting_tcp-5432.entrypoints"],
+    undefined,
+  );
+});
+
+test("injectHostingLabels does not stamp raw-port on HTTP-only services", () => {
+  const result = injectHostingLabels(payload);
+  const compose = parse(result.composeYaml) as {
+    services: { app: { labels: Record<string, string> } };
+  };
+  assertEquals(
+    compose.services.app.labels["com.turbopanel.raw-port"],
+    undefined,
+  );
+  assertEquals(
+    compose.services.app.labels["traefik.http.routers.hosting_123.entrypoints"],
+    "web,websecure",
   );
 });

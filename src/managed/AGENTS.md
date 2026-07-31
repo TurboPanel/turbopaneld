@@ -52,8 +52,7 @@ Compose project names:
 - Ingress Traefik (per service): `turbopanel-managed-<managedId>-ingress` on
   Docker network `turbopanel-managed` (shared by engines + their Traefik —
   **never** joins the tenant `turbopanel-ingress` network)
-- Ingress container name: instance-allocated `<ingressServiceId>-1` (same
-  `managedContainerName` rule as the engine)
+- Ingress container name: instance-allocated `<engine service.id>-ingress`
 
 ## Managed Traefik ingress
 
@@ -96,31 +95,39 @@ entrypoints at runtime):
    HTTP-ish engine (e.g. ClickHouse).
 6. **Legacy teardown:** `teardownLegacyManagedIngress` best-effort `down`s the
    old host-wide `turbopanel-managed-ingress` project and removes
-   `<stateDir>/managed/ingress/traefik/` on first apply (pre-release hosts).
+   `<stateDir>/managed/ingress/traefik/` on apply **and** destroy
+   (pre-release hosts). Destroy must call it — the old shared path used to
+   reconfigure Traefik with an empty entry set instead of `compose down`,
+   which left `turbopanel-managed-ingress-traefik-1` running after the last
+   managed service was deleted.
 7. **Trade-off:** N exposed services ⇒ N small Traefik containers, each with a
    read-only Docker socket mount — apply/lifecycle/destroy touch only that
    service's ingress.
 
 Apply syncs this service's ingress **before** engine `compose up` so port
 conflicts fail early and the managed network exists before the engine joins
-it. Destroy/`exposure.enabled=false` call `removeManagedIngress` for this
-service only (plus claim-file removal). `removeManagedIngress` downs the
-compose project **and deletes** `<managedId>/ingress/` so a later
-`managed.lifecycle` start/restart cannot treat a stale compose file as
-active. `ManagedPortConflictError` propagates as the command-outcome error
-string for the UI.
+it. Destroy downs (1) the engine project, (2) this service's Traefik via
+`removeManagedIngress` + claim-file removal, then (3) any leftover legacy
+shared Traefik via `teardownLegacyManagedIngress`.
+`removeManagedIngress` downs the compose project **and deletes**
+`<managedId>/ingress/` so a later `managed.lifecycle` start/restart cannot
+treat a stale compose file as active. `exposure.enabled=false` uses the same
+per-service remove path (without legacy teardown). `ManagedPortConflictError`
+propagates as the command-outcome error string for the UI.
 
 ## Rules
 
 1. **Container names from the instance.** The instance supplies engine
-   `containerName` (`<service.id>-1`) and, when exposed, `ingress.{serviceId,
-   composeServiceName, containerName}` for the Traefik sidecar
-   (`<ingressServiceId>-1`). `normalizeManagedCompose` /
-   `managedTraefikCompose` write them as `container_name`.
-   `assertSafeManagedIdentifiers` guards both with the hyphen-permitting
-   Docker-name regex (do not reuse `SAFE_VOLUME_NAME_RE`). Container
-   resolution (`containers.ts`) still keys off `Service` / `State`, never
-   `Name`.
+   `containerName` (`<service.id>-1`) and, when exposed,
+   `ingress.{serviceId, composeServiceName, containerName}` where `serviceId`
+   is the **engine's own** service id and `containerName` is
+   `<engine service.id>-ingress` — there is **no** separate ingress `service`
+   row; the row is a `role='ingress'`, ordinal-1 `container` row on the engine
+   service. `normalizeManagedCompose` / `managedTraefikCompose` write them as
+   `container_name`. `assertSafeManagedIdentifiers` guards both with the
+   hyphen-permitting Docker-name regex (do not reuse `SAFE_VOLUME_NAME_RE`).
+   Container resolution (`containers.ts`) still keys off `Service` / `State`,
+   never `Name`.
 2. **Native port, never remapped.** Normalized compose never emits `ports:`.
    The container listens on the engine native port; exposure is Traefik's job
    via `turbopanel-managed` + TCP router labels.

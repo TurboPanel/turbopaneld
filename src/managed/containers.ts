@@ -165,5 +165,9 @@ export async function collectManagedContainersForService(
 ): Promise<EnvironmentDeployContainer[] | undefined> {
   const containers = await collectManagedContainers(project, redact);
   if (containers === undefined) return undefined;
-  return containers.map((row) => ({ ...row, serviceId }));
+  return containers.map((row) => ({
+    ...row,
+    serviceId,
+    role: "ingress" as const,
+  }));
 }

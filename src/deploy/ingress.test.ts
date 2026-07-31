@@ -4,14 +4,22 @@ import {
   assertStringIncludes,
   assertThrows,
 } from "@std/assert";
+import { join } from "@std/path";
 import {
   assertValidBindAddress,
   buildCaddyHostnameRoutes,
   buildTcpUdpIngressEntries,
   caddyfile,
   caddyTraefikUpstream,
+  cleanupStaleTcpUdpServiceIngress,
   collectTcpUdpIngressEntries,
+  listPersistedTcpUdpServiceIds,
+  readEnvironmentTcpUdpServiceIds,
+  removeEnvironmentTcpUdpServiceIngress,
+  removeServiceIngress,
   removeTcpUdpIngressEntries,
+  serviceIngressDir,
+  serviceTraefikCompose,
   siteSnippet,
   sortCaddySiteRoutes,
   syncTcpUdpIngressEntries,
@@ -274,31 +282,68 @@ test("assertValidBindAddress rejects garbage before interpolation", () => {
   );
 });
 
-test("traefikCompose with no tcp/udp entries matches baseline (no extra entrypoints/ports)", () => {
-  assertEquals(traefikCompose([]), traefikCompose());
+test("traefikCompose is HTTP-only (no tcp/udp entrypoints or public ports)", () => {
+  const compose = traefikCompose();
+  assertEquals(compose.includes("entrypoints.tcp"), false);
+  assertEquals(compose.includes("entrypoints.udp"), false);
+  assertEquals(compose.includes(":5432:5432"), false);
+  assertStringIncludes(compose, "--entrypoints.web.address=:7080");
+  assertStringIncludes(compose, "--entrypoints.websecure.address=:7443");
 });
 
-test("traefikCompose adds a static entrypoint and published port per tcp/udp entry", () => {
-  const compose = traefikCompose([
-    {
-      hostingId: "h1",
-      protocol: "tcp",
-      publishedPort: 5432,
-      bindAddress: "203.0.113.10",
-    },
-    { hostingId: "h2", protocol: "udp", publishedPort: 53 },
-  ]);
+const SERVICE_INGRESS_IDENTITY = {
+  serviceId: "00000000-0000-4000-8000-0000000000aa",
+  composeServiceName: "db-ingress",
+  containerName: "00000000-0000-4000-8000-0000000000aa-ingress",
+};
+
+test("serviceTraefikCompose emits container_name, constraint, and x-turbopanel", () => {
+  const compose = serviceTraefikCompose([], SERVICE_INGRESS_IDENTITY);
+  assertStringIncludes(
+    compose,
+    `container_name: ${SERVICE_INGRESS_IDENTITY.containerName}`,
+  );
+  assertStringIncludes(compose, "kind: ingress");
+  assertStringIncludes(
+    compose,
+    `serviceId: ${SERVICE_INGRESS_IDENTITY.serviceId}`,
+  );
+  assertStringIncludes(
+    compose,
+    `Label(\`com.turbopanel.service\`,\`${SERVICE_INGRESS_IDENTITY.serviceId}\`) && Label(\`com.turbopanel.raw-port\`,\`true\`)`,
+  );
+  assertStringIncludes(compose, "turbopanel-ingress");
+  assertEquals(compose.includes("entrypoints.web"), false);
+  assertEquals(compose.includes("entrypoints.websecure"), false);
+});
+
+test("serviceTraefikCompose adds a static entrypoint and published port per tcp/udp entry", () => {
+  const compose = serviceTraefikCompose(
+    [
+      {
+        hostingId: "h1",
+        protocol: "tcp",
+        publishedPort: 5432,
+        bindAddress: "203.0.113.10",
+      },
+      { hostingId: "h2", protocol: "udp", publishedPort: 53 },
+    ],
+    SERVICE_INGRESS_IDENTITY,
+  );
   assertStringIncludes(compose, "--entrypoints.tcp5432.address=:5432");
   assertStringIncludes(compose, "--entrypoints.udp53.address=:53/udp");
   assertStringIncludes(compose, "203.0.113.10:5432:5432/tcp");
   assertStringIncludes(compose, "0.0.0.0:53:53/udp");
 });
 
-test("traefikCompose dedupes entries claiming the same protocol+port", () => {
-  const compose = traefikCompose([
-    { hostingId: "h1", protocol: "tcp", publishedPort: 5432 },
-    { hostingId: "h1", protocol: "tcp", publishedPort: 5432 },
-  ]);
+test("serviceTraefikCompose dedupes entries claiming the same protocol+port", () => {
+  const compose = serviceTraefikCompose(
+    [
+      { hostingId: "h1", protocol: "tcp", publishedPort: 5432 },
+      { hostingId: "h1", protocol: "tcp", publishedPort: 5432 },
+    ],
+    SERVICE_INGRESS_IDENTITY,
+  );
   const occurrences = compose.split("entrypoints.tcp5432").length - 1;
   assertEquals(occurrences, 1);
 });
@@ -340,49 +385,219 @@ test("buildTcpUdpIngressEntries extracts one entry per port for tcp/udp hostings
   ]);
 });
 
-test("syncTcpUdpIngressEntries persists, merges across environments, and removeTcpUdpIngressEntries cleans up", async () => {
+test("syncTcpUdpIngressEntries persists per service, returns own entries, and remove cleans up", async () => {
   const { layout, cleanup } = await makeTestLayout();
   try {
-    const mergedAfterEnvA = await syncTcpUdpIngressEntries(layout, "env-a", [
+    const ownAfterSvcA = await syncTcpUdpIngressEntries(layout, "svc-a", [
       { hostingId: "h1", protocol: "tcp", publishedPort: 5432 },
     ]);
-    assertEquals(mergedAfterEnvA.length, 1);
+    assertEquals(ownAfterSvcA.length, 1);
 
-    const mergedAfterEnvB = await syncTcpUdpIngressEntries(layout, "env-b", [
+    const ownAfterSvcB = await syncTcpUdpIngressEntries(layout, "svc-b", [
       { hostingId: "h2", protocol: "udp", publishedPort: 53 },
     ]);
-    assertEquals(mergedAfterEnvB.length, 2);
+    assertEquals(ownAfterSvcB.length, 1);
+    assertEquals(ownAfterSvcB[0]?.hostingId, "h2");
 
     const all = await collectTcpUdpIngressEntries(layout);
     assertEquals(all.length, 2);
 
     const remainingAfterRemoveA = await removeTcpUdpIngressEntries(
       layout,
-      "env-a",
+      "svc-a",
     );
     assertEquals(remainingAfterRemoveA?.length, 1);
     assertEquals(remainingAfterRemoveA?.[0]?.hostingId, "h2");
 
-    const noopRemove = await removeTcpUdpIngressEntries(layout, "env-a");
+    const noopRemove = await removeTcpUdpIngressEntries(layout, "svc-a");
     assertEquals(noopRemove, null);
   } finally {
     await cleanup();
   }
 });
 
-test("syncTcpUdpIngressEntries throws TcpUdpPortConflictError when another environment already claims the port", async () => {
+test("syncTcpUdpIngressEntries throws TcpUdpPortConflictError when another service already claims the port", async () => {
   const { layout, cleanup } = await makeTestLayout();
   try {
-    await syncTcpUdpIngressEntries(layout, "env-a", [
+    await syncTcpUdpIngressEntries(layout, "svc-a", [
       { hostingId: "h1", protocol: "tcp", publishedPort: 5432 },
     ]);
     await assertRejects(
       () =>
-        syncTcpUdpIngressEntries(layout, "env-b", [
+        syncTcpUdpIngressEntries(layout, "svc-b", [
           { hostingId: "h2", protocol: "tcp", publishedPort: 5432 },
         ]),
       TcpUdpPortConflictError,
     );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("syncTcpUdpIngressEntries serializes concurrent same-port claims — only one commits", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    const results = await Promise.allSettled([
+      syncTcpUdpIngressEntries(layout, "svc-a", [
+        { hostingId: "h1", protocol: "tcp", publishedPort: 25432 },
+      ]),
+      syncTcpUdpIngressEntries(layout, "svc-b", [
+        { hostingId: "h2", protocol: "tcp", publishedPort: 25432 },
+      ]),
+    ]);
+
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+    assertEquals(fulfilled.length, 1);
+    assertEquals(rejected.length, 1);
+    if (rejected[0]?.status === "rejected") {
+      if (!(rejected[0].reason instanceof TcpUdpPortConflictError)) {
+        throw new TypeError(
+          "expected the losing concurrent claim to reject with TcpUdpPortConflictError",
+        );
+      }
+    }
+
+    const all = await collectTcpUdpIngressEntries(layout);
+    assertEquals(all.length, 1);
+    assertEquals(all[0]?.publishedPort, 25432);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("syncTcpUdpIngressEntries never leaves a temp file behind after a successful write", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    await syncTcpUdpIngressEntries(layout, "svc-a", [
+      { hostingId: "h1", protocol: "tcp", publishedPort: 15432 },
+    ]);
+
+    const dir = join(layout.stateDir, "ingress", "tcp-udp");
+    const names: string[] = [];
+    for await (const dirEntry of Deno.readDir(dir)) names.push(dirEntry.name);
+    assertEquals(names, ["svc-a.json"]);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("collectTcpUdpIngressEntries rejects corrupt/partially-written state with a clear error", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    const dir = join(layout.stateDir, "ingress", "tcp-udp");
+    await Deno.mkdir(dir, { recursive: true, mode: 0o750 });
+
+    await Deno.writeTextFile(
+      join(dir, "svc-crashed.json"),
+      '[{"hostingId":"h1","protocol":"tcp","publishedPort":543',
+    );
+
+    await assertRejects(
+      () => collectTcpUdpIngressEntries(layout),
+      Error,
+      "corrupt tcp/udp ingress state file",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("cleanupStaleTcpUdpServiceIngress removes claim+project on tcp/udp→HTTP-only redeploy", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const serviceId = "00000000-0000-4000-8000-0000000000bb";
+  const environmentId = "env-http-only";
+  try {
+    await syncTcpUdpIngressEntries(layout, serviceId, [
+      { hostingId: "h-tcp", protocol: "tcp", publishedPort: 5432 },
+    ]);
+    // Seed a per-service project dir the way ensureServiceIngress would.
+    const projectDir = serviceIngressDir(layout, serviceId);
+    await Deno.mkdir(projectDir, { recursive: true, mode: 0o750 });
+    await Deno.writeTextFile(
+      join(projectDir, "docker-compose.yml"),
+      "services: {}\n",
+      { mode: 0o640 },
+    );
+
+    // First deploy records the active raw-port service in the env index.
+    await cleanupStaleTcpUdpServiceIngress(
+      layout,
+      environmentId,
+      new Set([serviceId]),
+      new Set([serviceId]),
+    );
+    assertEquals(
+      await readEnvironmentTcpUdpServiceIds(layout, environmentId),
+      [serviceId],
+    );
+
+    // Redeploy as HTTP-only: service still in the environment, but not in
+    // ingressServices[] — claim file + Traefik project must be removed.
+    const removed = await cleanupStaleTcpUdpServiceIngress(
+      layout,
+      environmentId,
+      new Set([serviceId]),
+      new Set(),
+    );
+    assertEquals(removed, [serviceId]);
+    assertEquals(await listPersistedTcpUdpServiceIds(layout), []);
+    assertEquals(
+      await readEnvironmentTcpUdpServiceIds(layout, environmentId),
+      [],
+    );
+    await assertRejects(
+      () =>
+        Deno.stat(
+          join(layout.stateDir, "ingress", "tcp-udp", `${serviceId}.json`),
+        ),
+      Deno.errors.NotFound,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("removeEnvironmentTcpUdpServiceIngress tears down from index when payload is empty", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const serviceId = "00000000-0000-4000-8000-0000000000cc";
+  const environmentId = "env-then-stop";
+  try {
+    await syncTcpUdpIngressEntries(layout, serviceId, [
+      { hostingId: "h-tcp", protocol: "tcp", publishedPort: 6432 },
+    ]);
+    const projectDir = serviceIngressDir(layout, serviceId);
+    await Deno.mkdir(projectDir, { recursive: true, mode: 0o750 });
+    await Deno.writeTextFile(
+      join(projectDir, "docker-compose.yml"),
+      "services: {}\n",
+      { mode: 0o640 },
+    );
+    await cleanupStaleTcpUdpServiceIngress(
+      layout,
+      environmentId,
+      new Set([serviceId]),
+      new Set([serviceId]),
+    );
+    assertEquals(
+      await readEnvironmentTcpUdpServiceIds(layout, environmentId),
+      [serviceId],
+    );
+
+    // Stop with empty payload service ids (hosting gone) — index is truth.
+    const removed = await removeEnvironmentTcpUdpServiceIngress(
+      layout,
+      environmentId,
+      [],
+    );
+    assertEquals(removed, [serviceId]);
+    assertEquals(await listPersistedTcpUdpServiceIds(layout), []);
+    assertEquals(
+      await readEnvironmentTcpUdpServiceIds(layout, environmentId),
+      [],
+    );
+    assertEquals(await collectTcpUdpIngressEntries(layout), []);
+    await assertRejects(() => Deno.stat(projectDir), Deno.errors.NotFound);
   } finally {
     await cleanup();
   }

@@ -8,9 +8,13 @@ import { ensureDocker } from "../../deploy/ensure-docker.ts";
 import { ensureSystemPrincipals } from "../../deploy/ensure-principal.ts";
 import {
   buildTcpUdpIngressEntries,
+  cleanupStaleTcpUdpServiceIngress,
   ensureHostingCaddyRuntime,
   ensureHostingIngress,
+  ensureServiceIngress,
   rewriteHostingCaddySites,
+  serviceIngressComposePath,
+  serviceIngressProject,
   syncTcpUdpIngressEntries,
 } from "../../deploy/ingress.ts";
 import { materializeStorageEntries } from "../../deploy/materialize-storage.ts";
@@ -34,6 +38,7 @@ import { resolveLayout } from "../../paths/layout.ts";
 import {
   type EnvironmentDeployContainer,
   type EnvironmentDeployHosting,
+  type EnvironmentDeployIngressService,
   type EnvironmentDeployPayload,
   type EnvironmentDeployPrincipalMaterial,
   type EnvironmentDeployResult,
@@ -139,6 +144,7 @@ async function collectDeployedContainers(
         containerId,
         containerName,
         status,
+        role: "app",
         ...(serviceId === undefined ? {} : { serviceId }),
       });
     }
@@ -148,6 +154,74 @@ async function collectDeployedContainers(
     logInfo(
       "commands",
       `environment.deploy container collect failed project=${projectName}: ${message}`,
+    );
+    return null;
+  }
+}
+
+/**
+ * Best-effort `docker compose ps` for one per-service Traefik project.
+ * Never throws — soft-fails with a log line like app-container collection.
+ */
+async function collectServiceIngressContainer(
+  ingress: EnvironmentDeployIngressService,
+  layout: LayoutPaths,
+): Promise<EnvironmentDeployContainer | null> {
+  try {
+    const composePath = serviceIngressComposePath(layout, ingress.serviceId);
+    const project = serviceIngressProject(ingress.serviceId);
+    const result = await runDocker([
+      "compose",
+      "-p",
+      project,
+      "-f",
+      composePath,
+      "ps",
+      "--format",
+      "json",
+    ]);
+    if (!result.success) {
+      logInfo(
+        "commands",
+        `environment.deploy ingress collect failed service=${ingress.serviceId}: ${
+          result.stderr || "docker compose ps failed"
+        }`,
+      );
+      return null;
+    }
+    const entries = parseComposePsEntries(result.stdout);
+    for (const entry of entries) {
+      const containerId = entry.ID;
+      const containerName = entry.Name;
+      const composeServiceName = entry.Service;
+      const status = entry.State;
+      if (
+        typeof containerId !== "string" ||
+        containerId.length === 0 ||
+        typeof containerName !== "string" ||
+        containerName.length === 0 ||
+        typeof composeServiceName !== "string" ||
+        composeServiceName.length === 0 ||
+        typeof status !== "string" ||
+        status.length === 0
+      ) {
+        continue;
+      }
+      return {
+        serviceId: ingress.serviceId,
+        composeServiceName,
+        containerId,
+        containerName,
+        status,
+        role: "ingress",
+      };
+    }
+    return null;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logInfo(
+      "commands",
+      `environment.deploy ingress collect failed service=${ingress.serviceId}: ${message}`,
     );
     return null;
   }
@@ -188,26 +262,66 @@ export type EnvironmentDeployDeps = {
 };
 
 /** Sets up Traefik/Docker ingress for container deploys, or the hosting-Caddy-only
- * runtime for traditional-web-only environments. */
+ * runtime for traditional-web-only environments. Shared Traefik is HTTP-only;
+ * per-service Traefik projects handle tcp/udp via `ingressServices[]`.
+ *
+ * Services that previously published raw ports but are absent from the new
+ * `ingressServices[]` (e.g. tcp/udp → HTTP-only redeploy) are torn down here
+ * so a later `environment.stop` does not depend on current hostings to find
+ * stale claim files / Traefik projects.
+ */
 async function ensureDeployIngress(
   layout: LayoutPaths,
   environmentId: string,
   hasContainers: boolean,
   containerHostings: EnvironmentDeployHosting[],
+  allHostings: readonly EnvironmentDeployHosting[],
+  ingressServices: readonly EnvironmentDeployIngressService[],
 ): Promise<void> {
+  const activeIngressServiceIds = new Set(
+    ingressServices.map((ingress) => ingress.serviceId),
+  );
+  const environmentServiceIds = new Set(
+    allHostings.map((h) => h.serviceId),
+  );
+
   if (!hasContainers) {
     // Traditional-web-only: hosting Caddy without Traefik/Docker.
+    await cleanupStaleTcpUdpServiceIngress(
+      layout,
+      environmentId,
+      environmentServiceIds,
+      activeIngressServiceIds,
+    );
     await ensureHostingCaddyRuntime(layout);
     return;
   }
   await ensureDocker();
-  const tcpUdpEntries = buildTcpUdpIngressEntries(containerHostings);
-  const mergedTcpUdpEntries = await syncTcpUdpIngressEntries(
+  await ensureHostingIngress(layout);
+
+  await cleanupStaleTcpUdpServiceIngress(
     layout,
     environmentId,
-    tcpUdpEntries,
+    environmentServiceIds,
+    activeIngressServiceIds,
   );
-  await ensureHostingIngress(layout, mergedTcpUdpEntries);
+
+  for (const ingress of ingressServices) {
+    const hostingsForService = containerHostings.filter(
+      (h) => h.serviceId === ingress.serviceId,
+    );
+    const entries = buildTcpUdpIngressEntries(hostingsForService);
+    const ownEntries = await syncTcpUdpIngressEntries(
+      layout,
+      ingress.serviceId,
+      entries,
+    );
+    await ensureServiceIngress(layout, ingress.serviceId, ownEntries, {
+      serviceId: ingress.serviceId,
+      composeServiceName: ingress.composeServiceName,
+      containerName: ingress.containerName,
+    });
+  }
 }
 
 async function ensureDeployPrincipals(
@@ -449,11 +563,14 @@ export async function handleEnvironmentDeploy(
     (hosting) => !traditionalNames.has(hosting.composeServiceName),
   );
 
+  const ingressServices = parsedPayload.ingressServices ?? [];
   await ensureDeployIngress(
     layout,
     parsedPayload.environmentId,
     hasContainers,
     containerHostings,
+    parsedPayload.hostings,
+    ingressServices,
   );
 
   const deploymentDir = join(
@@ -507,12 +624,22 @@ export async function handleEnvironmentDeploy(
 
   await rewriteHostingCaddySites(layout, parsedPayload, hostnameTls);
 
-  const containers = hasContainers
+  const containers: EnvironmentDeployContainer[] | null = hasContainers
     ? await collectDeployedContainers(
       parsedPayload.projectName,
       containerHostings,
     )
     : [];
+
+  if (containers !== null && ingressServices.length > 0) {
+    for (const ingress of ingressServices) {
+      const ingressContainer = await collectServiceIngressContainer(
+        ingress,
+        layout,
+      );
+      if (ingressContainer) containers.push(ingressContainer);
+    }
+  }
 
   logInfo(
     "commands",
