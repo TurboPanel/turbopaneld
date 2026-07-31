@@ -68,19 +68,33 @@ jobs:
       - name: Test with coverage
         run: deno task test:coverage
 
-      - name: Assert LCOV paths are repo-relative
-        # Deno 2.9.4 emits SF:src/... (repo-relative). SonarCloud resolves those
-        # against the project root; absolute or file:// SF paths would miss.
-        # If this fails after a Deno bump, add a strip-prefix normalization step.
+      - name: Normalize LCOV SF paths for SonarCloud
+        # Deno 2.9.4 on GitHub Actions emits absolute SF:/home/runner/work/...
+        # paths; SonarCloud needs repo-relative SF:src/... Resolve against the
+        # checkout root, then assert nothing absolute remains.
         run: |
           set -eu
           if [ ! -f coverage/lcov.info ]; then
             echo "::error::Missing coverage/lcov.info"
             exit 1
           fi
+          workspace="${GITHUB_WORKSPACE:-$(pwd)}"
+          workspace="${workspace%/}"
+          export LCOV_WORKSPACE="$workspace"
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+
+          path = Path("coverage/lcov.info")
+          text = path.read_text()
+          workspace = os.environ["LCOV_WORKSPACE"].rstrip("/")
+          for prefix in (f"file://{workspace}/", f"{workspace}/"):
+              text = text.replace(f"SF:{prefix}", "SF:")
+          path.write_text(text)
+          PY
           bad="$(grep -E '^SF:(/|file:)' coverage/lcov.info || true)"
           if [ -n "$bad" ]; then
-            echo "::error::LCOV SF paths must be repo-relative for SonarCloud"
+            echo "::error::LCOV SF paths must be repo-relative for SonarCloud after normalization"
             printf '%s\n' "$bad" | head -n 20
             exit 1
           fi

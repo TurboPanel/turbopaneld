@@ -210,8 +210,9 @@ compile toolchain).
 - **SonarCloud coverage (CI):** `.github/workflows/verify.yml` runs
   `deno task test:coverage` then uploads LCOV via
   `sonar.javascript.lcov.reportPaths=coverage/lcov.info` (CI-based analysis;
-  Automatic Analysis must stay **off** for `turbopanel_turbopaneld`). Deno
-  emits repo-relative `SF:src/...` paths — no prefix rewrite needed. The
+  Automatic Analysis must stay **off** for `turbopanel_turbopaneld`). Deno may
+  emit absolute `SF:/home/runner/work/...` paths on Actions; verify.yml strips
+  the checkout prefix to repo-relative `SF:src/...` before upload. The
   project uses the built-in **Sonar way** quality gate, which fails when
   **coverage on new code is below 80%** (`new_coverage` LT 80); the scan waits
   on the gate (`sonar.qualitygate.wait=true`). When `SONAR_TOKEN` is unset the
