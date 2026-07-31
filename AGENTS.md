@@ -283,8 +283,9 @@ from production code.
 
 **https://turbopanel.sh** is the canonical **assets-only** Workers Static Assets
 host for `scripts/run.sh` — **no Worker script**, so public installer traffic
-can never generate Worker invocation billing. `_redirects` handles the bare-root
-`301` to `/run.sh`; `_headers` sets the shellscript content type + `no-store`.
+can never generate Worker invocation billing. `_redirects` `200`-proxies the
+bare root to `/run.sh` (no client redirect); `_headers` sets the shellscript
+content type + `no-store` on both paths.
 Deploy tooling lives in the isolated `workers/turbopanel-sh/` package (Node +
 wrangler only — not part of the Deno graph). Manual deploy: `npm install` then
 `npm run deploy` from that directory; the stage step copies `scripts/run.sh`

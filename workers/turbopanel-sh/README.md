@@ -2,9 +2,10 @@
 
 Assets-only Workers Static Assets deployment of the daemon installer script
 (`run.sh`) on **https://turbopanel.sh** — no Worker script, so public installer
-requests are free/unbilled. `/run.sh` is served with
-`Content-Type: text/x-shellscript; charset=utf-8` and `Cache-Control: no-store`
-so `curl | sh` fetches are always fresh; the bare root is a `301` to `/run.sh`.
+requests are free/unbilled. `/run.sh` is the static asset; the bare root is a
+`200` proxy rewrite to that file (no client redirect). Both paths are served
+with `Content-Type: text/x-shellscript; charset=utf-8` and
+`Cache-Control: no-store` so `curl | sh` fetches are always fresh.
 
 ## Source of truth
 
@@ -60,6 +61,6 @@ curl -fsSL https://turbopanel.sh/run.sh | head
 curl -sI https://turbopanel.sh/run.sh | grep -E '^(content-type|cache-control):'
 ```
 
-Expect `301` with `location: /run.sh` on the bare host, and
+Expect `200` with the shell body on both the bare host and `/run.sh`, and
 `Content-Type: text/x-shellscript; charset=utf-8` plus `Cache-Control: no-store`
-on `/run.sh`. The bare-host `curl -fsSL` check works via `-L`.
+on each. No `-L` is required for the bare host.
