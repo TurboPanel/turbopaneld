@@ -149,7 +149,9 @@ export function dedupeManagedIngressEntries(
 }
 
 function quoteYamlScalar(value: string): string {
-  return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+  return `"${
+    value.replaceAll("\\", String.raw`\\`).replaceAll('"', String.raw`\"`)
+  }"`;
 }
 
 function managedStaticArgLines(
