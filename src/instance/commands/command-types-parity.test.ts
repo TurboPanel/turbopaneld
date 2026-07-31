@@ -347,6 +347,39 @@ test("managed.apply fixture round-trips", () => {
   assertEquals(payload.credentials[0]?.username, "postgres");
 });
 
+test("managed.apply requires ingress iff exposure.enabled", () => {
+  const VALID_INGRESS = {
+    serviceId: "00000000-0000-4000-8000-000000000099",
+    composeServiceName: "postgres-ingress",
+    containerName: "00000000-0000-4000-8000-000000000099-1",
+  };
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        exposure: { enabled: true, protocol: "tcp", publishedPort: 15432 },
+      }),
+    TypeError,
+    "Invalid managed.apply ingress",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        exposure: { enabled: false, protocol: "tcp" },
+        ingress: VALID_INGRESS,
+      }),
+    TypeError,
+    "Invalid managed.apply ingress",
+  );
+  const payload = parseManagedApplyPayload({
+    ...VALID_MANAGED_APPLY,
+    exposure: { enabled: true, protocol: "tcp", publishedPort: 15432 },
+    ingress: VALID_INGRESS,
+  });
+  assertEquals(payload.ingress, VALID_INGRESS);
+});
+
 test("managed.apply rejects unsafe containerName", () => {
   assertThrows(
     () =>
@@ -467,6 +500,11 @@ test("managed.apply rejects nested dockerOptions and enabled exposure without po
     parseManagedApplyPayload({
       ...VALID_MANAGED_APPLY,
       exposure: { enabled: true, protocol: "tcp", publishedPort: 15432 },
+      ingress: {
+        serviceId: "00000000-0000-4000-8000-000000000099",
+        composeServiceName: "postgres-ingress",
+        containerName: "00000000-0000-4000-8000-000000000099-1",
+      },
     }).exposure.publishedPort,
     15432,
   );

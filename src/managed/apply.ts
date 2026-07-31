@@ -19,6 +19,7 @@ import {
 } from "./compose.ts";
 import {
   collectManagedContainers,
+  collectManagedContainersForService,
   resolveEngineContainerId,
 } from "./containers.ts";
 import { getManagedEngineRuntime } from "./engines/index.ts";
@@ -26,8 +27,11 @@ import type { ManagedEngineContext } from "./engines/types.ts";
 import {
   ensureManagedIngress,
   type ManagedIngressEntry,
+  type ManagedIngressIdentity,
+  removeManagedIngress,
   removeManagedIngressEntries,
   syncManagedIngressEntries,
+  teardownLegacyManagedIngress,
 } from "./ingress.ts";
 import {
   materializeManagedState,
@@ -38,6 +42,7 @@ import {
   managedComposePath,
   managedComposeProject,
   managedEnvFilePath,
+  managedIngressProject,
 } from "./paths.ts";
 
 type DecryptSecretsFn = (ciphertexts: string[]) => Promise<(string | null)[]>;
@@ -125,6 +130,21 @@ function buildIngressEntry(
   };
 }
 
+function buildIngressIdentity(
+  payload: ManagedApplyPayload,
+): ManagedIngressIdentity {
+  const ingress = payload.ingress;
+  if (!ingress) {
+    throw new Error("managed.apply requires ingress when exposure.enabled");
+  }
+  return {
+    managedId: payload.managedId,
+    serviceId: ingress.serviceId,
+    composeServiceName: ingress.composeServiceName,
+    containerName: ingress.containerName,
+  };
+}
+
 /**
  * Host reported on the apply result.
  *
@@ -148,23 +168,28 @@ async function prepareManagedIngressForApply(
   layout: LayoutPaths,
   payload: ManagedApplyPayload,
 ): Promise<void> {
+  await teardownLegacyManagedIngress(layout);
+
   const ingressEntry = buildIngressEntry(payload);
   if (ingressEntry) {
-    const merged = await syncManagedIngressEntries(
+    if (!payload.ingress) {
+      throw new Error("managed.apply requires ingress when exposure.enabled");
+    }
+    const ownEntries = await syncManagedIngressEntries(
       layout,
       payload.managedId,
       [ingressEntry],
     );
-    await ensureManagedIngress(layout, merged);
+    await ensureManagedIngress(
+      layout,
+      payload.managedId,
+      ownEntries,
+      buildIngressIdentity(payload),
+    );
     return;
   }
-  const remaining = await removeManagedIngressEntries(
-    layout,
-    payload.managedId,
-  );
-  if (remaining !== null) {
-    await ensureManagedIngress(layout, remaining);
-  }
+  await removeManagedIngressEntries(layout, payload.managedId);
+  await removeManagedIngress(layout, payload.managedId);
 }
 
 async function requireDecryptedCredentials(
@@ -350,6 +375,48 @@ function buildManagedApplyResult(
   return result;
 }
 
+/**
+ * Merge engine + best-effort ingress container reports for the apply result.
+ * Ingress collection failure must not drop already-collected engine rows.
+ */
+export function mergeManagedApplyContainers(
+  engineContainers: EnvironmentDeployContainer[] | undefined,
+  ingressContainers: EnvironmentDeployContainer[] | undefined,
+): EnvironmentDeployContainer[] | undefined {
+  if (ingressContainers === undefined) return engineContainers;
+  return [...(engineContainers ?? []), ...ingressContainers];
+}
+
+async function collectApplyContainers(
+  payload: ManagedApplyPayload,
+  engineProject: string,
+  redact: (text: string) => string,
+): Promise<{
+  engineContainers: EnvironmentDeployContainer[] | undefined;
+  resultContainers: EnvironmentDeployContainer[] | undefined;
+}> {
+  const engineContainers = await collectManagedContainers(
+    engineProject,
+    redact,
+  );
+  if (!payload.ingress) {
+    return { engineContainers, resultContainers: engineContainers };
+  }
+
+  const ingressContainers = await collectManagedContainersForService(
+    managedIngressProject(payload.managedId),
+    payload.ingress.serviceId,
+    redact,
+  );
+  return {
+    engineContainers,
+    resultContainers: mergeManagedApplyContainers(
+      engineContainers,
+      ingressContainers,
+    ),
+  };
+}
+
 export async function handleManagedApply(
   payload: ManagedApplyPayload,
   _daemonReceivedAt: string,
@@ -382,8 +449,15 @@ export async function handleManagedApply(
     redact,
   );
 
-  const containers = await collectManagedContainers(project, redact);
-  const containerId = resolveEngineContainerId(containers, composeServiceName);
+  const { engineContainers, resultContainers } = await collectApplyContainers(
+    payload,
+    project,
+    redact,
+  );
+  const containerId = resolveEngineContainerId(
+    engineContainers,
+    composeServiceName,
+  );
 
   const ctx: ManagedEngineContext = {
     containerId,
@@ -400,7 +474,7 @@ export async function handleManagedApply(
       payload,
       decrypted.credentials,
     );
-    return buildManagedApplyResult(payload, state, containers);
+    return buildManagedApplyResult(payload, state, resultContainers);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(redact(message));

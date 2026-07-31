@@ -1,10 +1,12 @@
 /**
  * Managed-engine Traefik ingress — independent of tenant `deploy/ingress.ts`.
  *
- * Compose project `turbopanel-managed-ingress` on Docker network
+ * Each exposed managed service gets its own compose project
+ * (`turbopanel-managed-<managedId>-ingress`) on Docker network
  * {@link MANAGED_INGRESS_NETWORK}. Static Traefik config is regenerated (not
- * hot-reloaded) whenever the merged entrypoint set changes — same mechanics as
- * tenant `traefikCompose` / `syncTcpUdpIngressEntries`.
+ * hot-reloaded) whenever that service's entrypoint set changes. Claim files
+ * under `<stateDir>/managed/ingress/<managedId>.json` remain for
+ * cross-`managedId` published-port conflict detection only.
  *
  * **SNI seam:** {@link ManagedIngressEntry} may carry optional `sni.hostnames`,
  * and {@link managedTcpRouterRule} branches on the engine runtime's
@@ -18,13 +20,21 @@
 import { join } from "@std/path";
 import { assertValidBindAddress } from "../deploy/ingress.ts";
 import { runDocker } from "../deploy/docker-cli.ts";
+import { logInfo, sanitizeForLog } from "../logger.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
-import { SAFE_MANAGED_ID_RE } from "./paths.ts";
+import {
+  managedIngressComposePath,
+  managedIngressDir,
+  managedIngressProject,
+  SAFE_MANAGED_ID_RE,
+} from "./paths.ts";
 
 /** Single source of truth for the managed ingress Docker network name. */
 export const MANAGED_INGRESS_NETWORK = "turbopanel-managed";
 
-const MANAGED_INGRESS_PROJECT = "turbopanel-managed-ingress";
+/** Pre-release host-wide project — torn down once on first apply. */
+const LEGACY_MANAGED_INGRESS_PROJECT = "turbopanel-managed-ingress";
+
 const TRAEFIK_IMAGE = "traefik:v3.6.6";
 
 export type ManagedIngressEntry = {
@@ -35,6 +45,14 @@ export type ManagedIngressEntry = {
   bindAddress?: string;
   /** Optional SNI hostnames — used only when the engine sets `supportsSni`. */
   sni?: { hostnames: string[] };
+};
+
+/** Instance-allocated identity for the per-service Traefik container. */
+export type ManagedIngressIdentity = {
+  managedId: string;
+  serviceId: string;
+  composeServiceName: string;
+  containerName: string;
 };
 
 export class ManagedPortConflictError extends Error {
@@ -130,6 +148,10 @@ export function dedupeManagedIngressEntries(
   );
 }
 
+function quoteYamlScalar(value: string): string {
+  return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+}
+
 function managedStaticArgLines(
   entries: readonly ManagedIngressEntry[],
 ): string[] {
@@ -137,7 +159,11 @@ function managedStaticArgLines(
     const name = managedEntrypointName(entry.protocol, entry.publishedPort);
     const wire = wireProtocol(entry.protocol);
     const suffix = wire === "udp" ? "/udp" : "";
-    return `      - --entrypoints.${name}.address=:${entry.publishedPort}${suffix}`;
+    return `      - ${
+      quoteYamlScalar(
+        `--entrypoints.${name}.address=:${entry.publishedPort}${suffix}`,
+      )
+    }`;
   });
 }
 
@@ -149,35 +175,87 @@ function managedPortLines(entries: readonly ManagedIngressEntry[]): string[] {
     const wire = wireProtocol(entry.protocol);
     // Quote short-syntax mappings so bracketed IPv6 hosts are not parsed as
     // YAML flow sequences (e.g. `[2001:db8::10]:15432:15432/tcp`).
-    return `      - "${host}:${entry.publishedPort}:${entry.publishedPort}/${wire}"`;
+    return `      - ${
+      quoteYamlScalar(
+        `${host}:${entry.publishedPort}:${entry.publishedPort}/${wire}`,
+      )
+    }`;
   });
 }
 
+function assertSafeIngressIdentity(identity: ManagedIngressIdentity): void {
+  if (!SAFE_MANAGED_ID_RE.test(identity.managedId)) {
+    throw new Error("managedId contains unsupported characters");
+  }
+  if (identity.managedId.includes("`")) {
+    throw new Error("managedId contains unsupported characters");
+  }
+  if (
+    identity.composeServiceName.length === 0 ||
+    identity.composeServiceName.length > 255 ||
+    !/^[A-Za-z0-9 ._-]+$/.test(identity.composeServiceName)
+  ) {
+    throw new Error(
+      "ingress composeServiceName contains unsupported characters",
+    );
+  }
+  if (
+    identity.containerName.length === 0 ||
+    !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/.test(identity.containerName)
+  ) {
+    throw new Error("ingress containerName contains unsupported characters");
+  }
+  if (
+    identity.serviceId.length === 0 ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+      .test(identity.serviceId)
+  ) {
+    throw new Error("ingress serviceId is invalid");
+  }
+}
+
 /**
- * Compose document for the managed Traefik project.
+ * Compose document for one managed service's Traefik project.
  *
  * No TLS termination, no ACME, no `auto_https`, no tenant web/websecure
- * entrypoints — only per-service TCP/UDP entrypoints plus the Docker provider
- * on {@link MANAGED_INGRESS_NETWORK}.
+ * entrypoints — only this service's TCP/UDP entrypoints plus a Docker
+ * provider constrained to `turbopanel.managed.id=<managedId>` on
+ * {@link MANAGED_INGRESS_NETWORK}.
  */
 export function managedTraefikCompose(
-  entries: readonly ManagedIngressEntry[] = [],
+  entries: readonly ManagedIngressEntry[],
+  identity: ManagedIngressIdentity,
 ): string {
+  assertSafeIngressIdentity(identity);
   const staticArgs = managedStaticArgLines(entries);
   const portLines = managedPortLines(entries);
+  const constraint =
+    `Label(\`turbopanel.managed.id\`,\`${identity.managedId}\`)`;
   const lines = [
     "services:",
-    "  traefik:",
+    `  ${identity.composeServiceName}:`,
     `    image: ${TRAEFIK_IMAGE}`,
+    `    container_name: ${identity.containerName}`,
+    "    x-turbopanel:",
+    "      kind: ingress",
+    `      managedId: ${identity.managedId}`,
+    `      serviceId: ${identity.serviceId}`,
+    `      containerName: ${identity.containerName}`,
     "    restart: unless-stopped",
     "    command:",
     "      - --providers.docker=true",
     "      - --providers.docker.exposedbydefault=false",
     `      - --providers.docker.network=${MANAGED_INGRESS_NETWORK}`,
+    `      - ${
+      quoteYamlScalar(`--providers.docker.constraints=${constraint}`)
+    }`,
     ...staticArgs,
     ...(portLines.length > 0 ? ["    ports:", ...portLines] : []),
     "    volumes:",
     "      - /var/run/docker.sock:/var/run/docker.sock:ro",
+    "    labels:",
+    `      turbopanel.managed.id: ${quoteYamlScalar(identity.managedId)}`,
+    "      turbopanel.role: ingress",
     "    networks:",
     `      - ${MANAGED_INGRESS_NETWORK}`,
     "",
@@ -284,9 +362,6 @@ function isValidManagedIngressEntryArray(
  * keyed by `managedId` would not help here — the race is *between two
  * different* managedIds contending for the same port, so serialization must
  * cover the whole ingress state directory, not one managedId's slice of it.
- * Without this, two concurrent applies for different managedIds could both
- * pass the conflict check (reading a directory that has neither write yet)
- * before either file landed, and both would claim the same port.
  */
 let ingressLockTail: Promise<unknown> = Promise.resolve();
 
@@ -301,12 +376,11 @@ function withIngressLock<T>(fn: () => Promise<T>): Promise<T> {
 
 /**
  * Read every persisted per-service entry list, optionally excluding one
- * managedId (so sync can merge "every other" service before writing).
+ * managedId (so sync can check conflicts against "every other" service).
  *
  * Throws a clear error when a state file contains invalid JSON or an entry
- * that doesn't match {@link ManagedIngressEntry} — corrupt state (e.g. a
- * crashed partial write that predates atomic rename) must fail loudly rather
- * than silently feeding garbage into the merged Traefik entrypoint set.
+ * that doesn't match {@link ManagedIngressEntry} — corrupt state must fail
+ * loudly rather than silently feeding garbage into conflict detection.
  */
 export async function collectManagedIngressEntries(
   layout: LayoutPaths,
@@ -350,9 +424,7 @@ export async function collectManagedIngressEntries(
 /**
  * Write `entries` to `filePath` via a temp file in the same directory,
  * validate the bytes actually landed on disk round-trip to the expected
- * shape, then atomically rename over `filePath`. The file is never left
- * half-written: readers only ever see the previous complete file or the new
- * complete file, never a partial one.
+ * shape, then atomically rename over `filePath`.
  */
 async function writeManagedIngressEntriesAtomic(
   dir: string,
@@ -403,24 +475,20 @@ async function syncManagedIngressEntriesLocked(
     } catch (err) {
       if (!(err instanceof Deno.errors.NotFound)) throw err;
     }
-    return others;
+    return [];
   }
 
   await writeManagedIngressEntriesAtomic(dir, filePath, entries);
-  return [...others, ...entries];
+  // Own entries only — Traefik is per-service; the merge is for conflicts.
+  return [...entries];
 }
 
 /**
  * Persist this managed service's ingress entries (deleting the file when empty),
  * check for wire-protocol+port conflicts against every other service's entries,
- * and return the full merged set for {@link ensureManagedIngress}.
+ * and return **this service's own entries** for {@link ensureManagedIngress}.
  *
  * Throws {@link ManagedPortConflictError} on conflict — **no partial write**.
- * `http` and `tcp` share the TCP wire protocol and therefore conflict on the
- * same published port. The whole collect → conflict-check → write sequence
- * runs under {@link withIngressLock} so two concurrent calls (for different
- * managedIds) cannot both observe "port free" before either one's write
- * lands — see that helper for why the lock cannot be keyed per managedId.
  */
 export function syncManagedIngressEntries(
   layout: LayoutPaths,
@@ -449,15 +517,10 @@ async function removeManagedIngressEntriesLocked(
 }
 
 /**
- * Remove this managed service's persisted ingress entries.
+ * Remove this managed service's persisted ingress claim file.
  *
- * Runs under the same {@link withIngressLock} as
- * {@link syncManagedIngressEntries} — a concurrent apply for another
- * managedId must never interleave its conflict check between this remove's
- * `stat` and `remove`.
- *
- * @returns `null` when the service had none (callers skip a pointless Traefik
- * restart); otherwise the remaining merged set from every other service.
+ * @returns `null` when the service had none; otherwise the remaining claims
+ * from every other service (callers no longer restart a shared Traefik).
  */
 export function removeManagedIngressEntries(
   layout: LayoutPaths,
@@ -469,30 +532,75 @@ export function removeManagedIngressEntries(
 }
 
 /**
- * Ensure managed Traefik is running with the given merged entrypoint set.
+ * Best-effort one-shot teardown of the pre-release host-wide managed Traefik
+ * (`turbopanel-managed-ingress` + `<stateDir>/managed/ingress/traefik/`).
+ * Claim JSON files under `ingress/` are left alone.
+ */
+export async function teardownLegacyManagedIngress(
+  layout: LayoutPaths,
+): Promise<void> {
+  const down = await runDocker([
+    "compose",
+    "-p",
+    LEGACY_MANAGED_INGRESS_PROJECT,
+    "down",
+    "--remove-orphans",
+  ]);
+  if (!down.success) {
+    logInfo(
+      "managed",
+      `legacy managed ingress down soft-failed: ${
+        sanitizeForLog(down.stderr || "compose down failed")
+      }`,
+    );
+  }
+
+  const legacyDir = join(layout.stateDir, "managed", "ingress", "traefik");
+  try {
+    await Deno.remove(legacyDir, { recursive: true });
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) {
+      logInfo(
+        "managed",
+        `legacy managed ingress dir remove soft-failed: ${
+          sanitizeForLog(err instanceof Error ? err.message : String(err))
+        }`,
+      );
+    }
+  }
+}
+
+/**
+ * Ensure this managed service's Traefik is running with its own entrypoint set.
  *
  * Idempotently creates {@link MANAGED_INGRESS_NETWORK}, writes the Traefik
- * compose file under `<stateDir>/managed/ingress/traefik/`, and
- * `docker compose up -d` the {@link MANAGED_INGRESS_PROJECT} project.
- * Entries are deduped/sorted inside {@link managedTraefikCompose} so Traefik
- * only restarts when the entrypoint set really changes.
+ * compose file under `<stateDir>/managed/<managedId>/ingress/`, and
+ * `docker compose up -d` the per-service ingress project.
  */
 export async function ensureManagedIngress(
   layout: LayoutPaths,
+  managedId: string,
   entries: readonly ManagedIngressEntry[],
+  identity: ManagedIngressIdentity,
 ): Promise<void> {
+  if (identity.managedId !== managedId) {
+    throw new Error("ingress identity managedId mismatch");
+  }
   await ensureManagedIngressNetwork();
 
-  const ingressDir = join(layout.stateDir, "managed", "ingress", "traefik");
+  const ingressDir = managedIngressDir(layout, managedId);
   await Deno.mkdir(ingressDir, { recursive: true, mode: 0o750 });
-  const composePath = join(ingressDir, "docker-compose.yml");
-  await Deno.writeTextFile(composePath, managedTraefikCompose(entries), {
-    mode: 0o640,
-  });
+  const composePath = managedIngressComposePath(layout, managedId);
+  await Deno.writeTextFile(
+    composePath,
+    managedTraefikCompose(entries, identity),
+    { mode: 0o640 },
+  );
+  const project = managedIngressProject(managedId);
   const composeUp = await runDocker([
     "compose",
     "-p",
-    MANAGED_INGRESS_PROJECT,
+    project,
     "-f",
     composePath,
     "up",
@@ -501,5 +609,54 @@ export async function ensureManagedIngress(
   ]);
   if (!composeUp.success) {
     throw commandError("Starting managed Traefik ingress", composeUp);
+  }
+}
+
+/**
+ * Best-effort `docker compose down` for this managed service's Traefik project,
+ * then remove the per-service ingress compose directory so a later
+ * `managed.lifecycle` cannot treat a stale compose file as still active.
+ * Soft-fails with {@link logInfo} — same idiom as {@link handleManagedDestroy}.
+ */
+export async function removeManagedIngress(
+  layout: LayoutPaths,
+  managedId: string,
+): Promise<void> {
+  if (!SAFE_MANAGED_ID_RE.test(managedId)) {
+    throw new Error("managedId contains unsupported characters");
+  }
+  const project = managedIngressProject(managedId);
+  const composePath = managedIngressComposePath(layout, managedId);
+  const ingressDir = managedIngressDir(layout, managedId);
+  const args = ["compose", "-p", project, "down", "--remove-orphans"];
+  try {
+    await Deno.stat(composePath);
+    args.splice(3, 0, "-f", composePath);
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+  const down = await runDocker(args);
+  if (!down.success) {
+    logInfo(
+      "managed",
+      `managed ingress down soft-failed project=${project}: ${
+        sanitizeForLog(down.stderr || "compose down failed")
+      }`,
+    );
+  }
+
+  // Clear on-disk compose after down so lifecycle's pathExists gate cannot
+  // revive Traefik after exposure.enabled=false (or destroy) tore it down.
+  try {
+    await Deno.remove(ingressDir, { recursive: true });
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) {
+      logInfo(
+        "managed",
+        `managed ingress dir remove soft-failed project=${project}: ${
+          sanitizeForLog(err instanceof Error ? err.message : String(err))
+        }`,
+      );
+    }
   }
 }

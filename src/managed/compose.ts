@@ -249,6 +249,8 @@ function applyExposureLabels(
     )
     : {};
   labels["traefik.enable"] = "true";
+  labels["turbopanel.managed.id"] = payload.managedId;
+  labels["turbopanel.role"] = "engine";
   const entrypoint = `${protocol}${publishedPort}`;
   labels[`traefik.${protocol}.routers.${routerId}.entrypoints`] = entrypoint;
   if (protocol === "tcp") {

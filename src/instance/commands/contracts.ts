@@ -367,13 +367,23 @@ export type ManagedApplyTlsMaterial = {
   keyPath: string;
 };
 
+/**
+ * Per-service managed Traefik identity — must stay in sync with the instance
+ * canonical `managed.apply` ingress block.
+ */
+export type ManagedApplyIngress = {
+  serviceId: string;
+  composeServiceName: string;
+  containerName: string;
+};
+
 /** Must stay in sync with the instance canonical `managed.apply` shape. */
 export type ManagedApplyPayload = {
   managedId: string;
   environmentId: string;
   engine: ManagedEngineCode;
   projectName: string;
-  /** Compose `container_name` — `<container.id>-1` from instance pre-allocation. */
+  /** Compose `container_name` — `<service.id>-1` from instance pre-allocation. */
   containerName: string;
   image: string;
   containerPort: number;
@@ -383,6 +393,11 @@ export type ManagedApplyPayload = {
   resources?: ManagedApplyResources;
   dockerOptions?: ManagedApplyDockerOptions;
   exposure: ManagedApplyExposure;
+  /**
+   * Required when `exposure.enabled`; omitted when exposure is disabled.
+   * Identity for the dedicated per-service Traefik ingress container.
+   */
+  ingress?: ManagedApplyIngress;
   credentials: ManagedApplyCredential[];
   databases?: ManagedApplyDatabaseOp[];
   /** Transient usernames to drop after credentials are applied (never root). */
@@ -2057,6 +2072,42 @@ function parseManagedApplyTlsMaterial(
  */
 const SAFE_CONTAINER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/;
 
+/** Matches instance `service_display_name_format_check` / compose-service-name. */
+const COMPOSE_SERVICE_NAME_RE = /^[A-Za-z0-9 ._-]+$/;
+
+const MANAGED_APPLY_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isValidComposeServiceName(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value.length <= 255 &&
+    COMPOSE_SERVICE_NAME_RE.test(value)
+  );
+}
+
+/** Must stay in sync with the instance canonical `managed.apply` ingress parser. */
+function parseManagedApplyIngress(value: unknown): ManagedApplyIngress {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid managed.apply ingress");
+  }
+  if (
+    typeof value.serviceId !== "string" ||
+    !MANAGED_APPLY_UUID_RE.test(value.serviceId) ||
+    typeof value.composeServiceName !== "string" ||
+    !isValidComposeServiceName(value.composeServiceName) ||
+    typeof value.containerName !== "string" ||
+    !SAFE_CONTAINER_NAME_RE.test(value.containerName)
+  ) {
+    throw new TypeError("Invalid managed.apply ingress");
+  }
+  return {
+    serviceId: value.serviceId,
+    composeServiceName: value.composeServiceName,
+    containerName: value.containerName,
+  };
+}
+
 /** Must stay in sync with the instance canonical `managed.apply` validator. */
 export function parseManagedApplyPayload(
   value: unknown,
@@ -2092,6 +2143,22 @@ export function parseManagedApplyPayload(
   const databases = parseManagedApplyDatabases(value.databases);
   const dropUsers = parseManagedApplyDropUsers(value.dropUsers);
   const tlsMaterial = parseManagedApplyTlsMaterial(value.tlsMaterial);
+  const exposure = parseManagedApplyExposure(value.exposure);
+
+  let ingress: ManagedApplyIngress | undefined;
+  if (value.ingress !== undefined) {
+    ingress = parseManagedApplyIngress(value.ingress);
+  }
+  if (exposure.enabled && ingress === undefined) {
+    throw new TypeError(
+      "Invalid managed.apply ingress: required when exposure.enabled",
+    );
+  }
+  if (!exposure.enabled && ingress !== undefined) {
+    throw new TypeError(
+      "Invalid managed.apply ingress: must be omitted when exposure is disabled",
+    );
+  }
 
   return {
     managedId: value.managedId,
@@ -2106,7 +2173,8 @@ export function parseManagedApplyPayload(
     volumes: parseManagedApplyVolumes(value.volumes),
     ...(resources === undefined ? {} : { resources }),
     ...(dockerOptions === undefined ? {} : { dockerOptions }),
-    exposure: parseManagedApplyExposure(value.exposure),
+    exposure,
+    ...(ingress === undefined ? {} : { ingress }),
     credentials: parseManagedApplyCredentials(value.credentials),
     ...(databases === undefined ? {} : { databases }),
     ...(dropUsers === undefined ? {} : { dropUsers }),

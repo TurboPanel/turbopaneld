@@ -8,12 +8,14 @@ import { join } from "@std/path";
 import { parse } from "yaml";
 import { resolveLayout } from "../paths/layout.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
+import { managedIngressProject } from "./paths.ts";
 import {
   collectManagedIngressEntries,
   dedupeManagedIngressEntries,
   MANAGED_INGRESS_NETWORK,
   managedEntrypointName,
   type ManagedIngressEntry,
+  type ManagedIngressIdentity,
   ManagedPortConflictError,
   managedTcpRouterRule,
   managedTraefikCompose,
@@ -32,6 +34,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
 const test = Deno.test.bind(Deno);
+
+const IDENTITY: ManagedIngressIdentity = {
+  managedId: "m1",
+  serviceId: "00000000-0000-4000-8000-000000000099",
+  composeServiceName: "postgres-ingress",
+  containerName: "00000000-0000-4000-8000-000000000099-1",
+};
 
 async function makeTestLayout(): Promise<{
   layout: LayoutPaths;
@@ -60,8 +69,28 @@ function entry(
   };
 }
 
+function identityFor(
+  managedId: string,
+  overrides: Partial<ManagedIngressIdentity> = {},
+): ManagedIngressIdentity {
+  return {
+    managedId,
+    serviceId: "00000000-0000-4000-8000-000000000099",
+    composeServiceName: "postgres-ingress",
+    containerName: "00000000-0000-4000-8000-000000000099-1",
+    ...overrides,
+  };
+}
+
+test("managedIngressProject is per-managedId", () => {
+  assertEquals(
+    managedIngressProject("abc"),
+    "turbopanel-managed-abc-ingress",
+  );
+});
+
 test("managedTraefikCompose uses managed network and omits tenant HTTP/TLS entrypoints", () => {
-  const compose = managedTraefikCompose();
+  const compose = managedTraefikCompose([], IDENTITY);
   assertStringIncludes(compose, `network=${MANAGED_INGRESS_NETWORK}`);
   assertStringIncludes(compose, `  ${MANAGED_INGRESS_NETWORK}:`);
   assertStringIncludes(compose, "external: true");
@@ -79,51 +108,78 @@ test("managedTraefikCompose uses managed network and omits tenant HTTP/TLS entry
   }
 });
 
-test("managedTraefikCompose adds one entrypoint and ports line per exposed service", () => {
-  const compose = managedTraefikCompose([
-    entry({
-      managedId: "m1",
-      publishedPort: 15432,
-      bindAddress: "203.0.113.10",
-    }),
-    entry({
-      managedId: "m2",
-      protocol: "udp",
-      publishedPort: 53,
-      containerPort: 53,
-    }),
-  ]);
+test("managedTraefikCompose emits container_name, x-turbopanel, and provider constraint", () => {
+  const compose = managedTraefikCompose(
+    [entry({ managedId: "m1", publishedPort: 15432 })],
+    IDENTITY,
+  );
+  assertStringIncludes(compose, `  ${IDENTITY.composeServiceName}:`);
+  assertStringIncludes(
+    compose,
+    `    container_name: ${IDENTITY.containerName}`,
+  );
+  assertStringIncludes(compose, "    x-turbopanel:");
+  assertStringIncludes(compose, "      kind: ingress");
+  assertStringIncludes(compose, `      managedId: ${IDENTITY.managedId}`);
+  assertStringIncludes(compose, `      serviceId: ${IDENTITY.serviceId}`);
+  assertStringIncludes(
+    compose,
+    `turbopanel.managed.id: "${IDENTITY.managedId}"`,
+  );
+  assertStringIncludes(compose, "turbopanel.role: ingress");
+  assertStringIncludes(
+    compose,
+    "--providers.docker.constraints=Label(`turbopanel.managed.id`,`m1`)",
+  );
+});
+
+test("managedTraefikCompose adds one entrypoint and ports line for this service only", () => {
+  const compose = managedTraefikCompose(
+    [
+      entry({
+        managedId: "m1",
+        publishedPort: 15432,
+        bindAddress: "203.0.113.10",
+      }),
+    ],
+    IDENTITY,
+  );
   assertStringIncludes(compose, "--entrypoints.tcp15432.address=:15432");
-  assertStringIncludes(compose, "--entrypoints.udp53.address=:53/udp");
   assertStringIncludes(compose, '"203.0.113.10:15432:15432/tcp"');
-  assertStringIncludes(compose, '"0.0.0.0:53:53/udp"');
   assertEquals(managedEntrypointName("tcp", 15432), "tcp15432");
   assertEquals(managedEntrypointName("http", 8123), "tcp8123");
+
+  // Own-entries-only: a second managedId's port must not appear when not fed.
+  if (compose.includes("udp53") || compose.includes(":53/udp")) {
+    throw new TypeError("compose must not include other services' entrypoints");
+  }
 });
 
 test("managedTraefikCompose defaults bind to 0.0.0.0 and brackets IPv6", () => {
-  const v4 = managedTraefikCompose([
-    entry({ managedId: "m1", publishedPort: 15432 }),
-  ]);
+  const v4 = managedTraefikCompose(
+    [entry({ managedId: "m1", publishedPort: 15432 })],
+    IDENTITY,
+  );
   assertStringIncludes(v4, '"0.0.0.0:15432:15432/tcp"');
 
-  const v6 = managedTraefikCompose([
-    entry({
-      managedId: "m1",
-      publishedPort: 15432,
-      bindAddress: "2001:db8::10",
-    }),
-  ]);
+  const v6 = managedTraefikCompose(
+    [
+      entry({
+        managedId: "m1",
+        publishedPort: 15432,
+        bindAddress: "2001:db8::10",
+      }),
+    ],
+    IDENTITY,
+  );
   assertStringIncludes(v6, '"[2001:db8::10]:15432:15432/tcp"');
 
-  // Bracketed IPv6 must remain a string port mapping after YAML parse — not a
-  // flow sequence (unquoted `[…]` would be unsafe compose YAML).
   const doc = parse(v6);
   if (!isRecord(doc)) throw new TypeError("expected compose object");
   const services = doc.services;
   if (!isRecord(services)) throw new TypeError("expected services object");
-  const traefik = services.traefik;
-  if (!isRecord(traefik)) throw new TypeError("expected traefik service");
+  const traefik = services[IDENTITY.composeServiceName];
+  if (!isRecord(traefik)) throw new TypeError("expected ingress service");
   const ports = traefik.ports;
   if (!Array.isArray(ports) || ports.length !== 1) {
     throw new TypeError("expected one ports entry");
@@ -135,41 +191,51 @@ test("managedTraefikCompose defaults bind to 0.0.0.0 and brackets IPv6", () => {
 test("managedTraefikCompose rejects invalid bind addresses", () => {
   assertThrows(
     () =>
-      managedTraefikCompose([
-        entry({
-          managedId: "m1",
-          publishedPort: 15432,
-          bindAddress: "not a valid ip",
-        }),
-      ]),
+      managedTraefikCompose(
+        [
+          entry({
+            managedId: "m1",
+            publishedPort: 15432,
+            bindAddress: "not a valid ip",
+          }),
+        ],
+        IDENTITY,
+      ),
     Error,
     "bindAddress contains unsupported characters",
   );
   assertThrows(
     () =>
-      managedTraefikCompose([
-        entry({
-          managedId: "m1",
-          publishedPort: 15432,
-          bindAddress: "evil;rm -rf /",
-        }),
-      ]),
+      managedTraefikCompose(
+        [
+          entry({
+            managedId: "m1",
+            publishedPort: 15432,
+            bindAddress: "evil;rm -rf /",
+          }),
+        ],
+        IDENTITY,
+      ),
     Error,
     "bindAddress contains unsupported characters",
   );
 });
 
 test("managedTraefikCompose dedupes and sorts entries for a stable diff", () => {
-  const a = managedTraefikCompose([
-    entry({ managedId: "m2", publishedPort: 15433 }),
-    entry({ managedId: "m1", publishedPort: 15432 }),
-    entry({ managedId: "m1-dup", publishedPort: 15432 }),
-  ]);
+  const a = managedTraefikCompose(
+    [
+      entry({ managedId: "m1", publishedPort: 15433 }),
+      entry({ managedId: "m1", publishedPort: 15432 }),
+      entry({ managedId: "m1-dup", publishedPort: 15432 }),
+    ],
+    IDENTITY,
+  );
   const b = managedTraefikCompose(
     dedupeManagedIngressEntries([
       entry({ managedId: "m1", publishedPort: 15432 }),
-      entry({ managedId: "m2", publishedPort: 15433 }),
+      entry({ managedId: "m1", publishedPort: 15433 }),
     ]),
+    IDENTITY,
   );
   assertEquals(a, b);
   const tcp15432Count = a.split("entrypoints.tcp15432").length - 1;
@@ -195,7 +261,6 @@ test("managedTcpRouterRule selects explicit HostSNI when supportsSni is true", (
     ),
     "HostSNI(`ch.example.com`,`ch2.example.com`)",
   );
-  // supportsSni but no hostnames → still catch-all
   assertEquals(managedTcpRouterRule({}, true), "HostSNI(`*`)");
   assertEquals(
     managedTcpRouterRule({ sni: { hostnames: [] } }, true),
@@ -215,15 +280,16 @@ test("managedTcpRouterRule rejects hostile SNI hostnames", () => {
   );
 });
 
-test("syncManagedIngressEntries persists, merges across services, and remove short-circuits", async () => {
+test("syncManagedIngressEntries persists own entries and remove short-circuits", async () => {
   const { layout, cleanup } = await makeTestLayout();
   try {
-    const mergedA = await syncManagedIngressEntries(layout, "svc-a", [
+    const ownA = await syncManagedIngressEntries(layout, "svc-a", [
       entry({ managedId: "svc-a", publishedPort: 15432 }),
     ]);
-    assertEquals(mergedA.length, 1);
+    assertEquals(ownA.length, 1);
+    assertEquals(ownA[0]?.managedId, "svc-a");
 
-    const mergedB = await syncManagedIngressEntries(layout, "svc-b", [
+    const ownB = await syncManagedIngressEntries(layout, "svc-b", [
       entry({
         managedId: "svc-b",
         protocol: "udp",
@@ -231,7 +297,9 @@ test("syncManagedIngressEntries persists, merges across services, and remove sho
         containerPort: 53,
       }),
     ]);
-    assertEquals(mergedB.length, 2);
+    // Own entries only — not the merged host-wide set.
+    assertEquals(ownB.length, 1);
+    assertEquals(ownB[0]?.managedId, "svc-b");
 
     const all = await collectManagedIngressEntries(layout);
     assertEquals(all.length, 2);
@@ -272,7 +340,6 @@ test("syncManagedIngressEntries throws ManagedPortConflictError with no partial 
       ManagedPortConflictError,
     );
 
-    // Conflicting service must not have written a state file.
     try {
       await Deno.stat(
         join(layout.stateDir, "managed", "ingress", "svc-b.json"),
@@ -358,10 +425,6 @@ test("syncManagedIngressEntries serializes concurrent same-port applies — only
       }
     }
 
-    // The persisted state must reflect exactly one winner — never both (that
-    // would mean the conflict check ran concurrently against a directory
-    // neither write had landed in yet), and never neither (that would mean a
-    // crash mid-write corrupted the file the winner should have produced).
     const all = await collectManagedIngressEntries(layout);
     assertEquals(all.length, 1);
     assertEquals(all[0]?.publishedPort, 25432);
@@ -376,10 +439,6 @@ test("collectManagedIngressEntries rejects corrupt/partially-written state with 
     const dir = join(layout.stateDir, "managed", "ingress");
     await Deno.mkdir(dir, { recursive: true, mode: 0o750 });
 
-    // Simulate a crash mid-write (e.g. a process killed after
-    // `Deno.writeTextFile` but before the old non-atomic rename would have
-    // happened) by writing truncated JSON directly — never through
-    // `syncManagedIngressEntries`, which now can't produce this on its own.
     await Deno.writeTextFile(
       join(dir, "svc-crashed.json"),
       '[{"managedId":"svc-crashed","protocol":"tcp","publishedPort":543',
@@ -429,4 +488,15 @@ test("syncManagedIngressEntries never leaves a temp file behind after a successf
   } finally {
     await cleanup();
   }
+});
+
+test("managedTraefikCompose identity managedId is used in constraint", () => {
+  const compose = managedTraefikCompose(
+    [entry({ managedId: "svc-z", publishedPort: 15432 })],
+    identityFor("svc-z"),
+  );
+  assertStringIncludes(
+    compose,
+    "Label(`turbopanel.managed.id`,`svc-z`)",
+  );
 });

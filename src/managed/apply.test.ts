@@ -1,5 +1,9 @@
 import { assertEquals } from "@std/assert";
-import { resolveManagedApplyHost } from "./apply.ts";
+import {
+  mergeManagedApplyContainers,
+  resolveManagedApplyHost,
+} from "./apply.ts";
+import { managedIngressProject } from "./paths.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -36,5 +40,69 @@ test("resolveManagedApplyHost reports loopback when exposure is disabled", () =>
   assertEquals(
     resolveManagedApplyHost({ enabled: false, protocol: "tcp" }),
     "127.0.0.1",
+  );
+});
+
+test("managedIngressProject names the per-service Traefik compose project", () => {
+  assertEquals(
+    managedIngressProject("00000000-0000-4000-8000-000000000001"),
+    "turbopanel-managed-00000000-0000-4000-8000-000000000001-ingress",
+  );
+});
+
+test("mergeManagedApplyContainers appends ingress rows when collected", () => {
+  const engine = [
+    {
+      composeServiceName: "postgres",
+      containerId: "e1",
+      containerName: "svc-1",
+      status: "running",
+    },
+  ];
+  const ingress = [
+    {
+      composeServiceName: "postgres-ingress",
+      containerId: "i1",
+      containerName: "ing-1",
+      status: "running",
+      serviceId: "00000000-0000-4000-8000-000000000099",
+    },
+  ];
+  assertEquals(mergeManagedApplyContainers(engine, ingress), [
+    ...engine,
+    ...ingress,
+  ]);
+});
+
+test("mergeManagedApplyContainers keeps engine rows when ingress collect fails", () => {
+  const engine = [
+    {
+      composeServiceName: "postgres",
+      containerId: "e1",
+      containerName: "svc-1",
+      status: "running",
+    },
+  ];
+  assertEquals(mergeManagedApplyContainers(engine, undefined), engine);
+  assertEquals(mergeManagedApplyContainers(undefined, undefined), undefined);
+  assertEquals(
+    mergeManagedApplyContainers(undefined, [
+      {
+        composeServiceName: "postgres-ingress",
+        containerId: "i1",
+        containerName: "ing-1",
+        status: "running",
+        serviceId: "00000000-0000-4000-8000-000000000099",
+      },
+    ]),
+    [
+      {
+        composeServiceName: "postgres-ingress",
+        containerId: "i1",
+        containerName: "ing-1",
+        status: "running",
+        serviceId: "00000000-0000-4000-8000-000000000099",
+      },
+    ],
   );
 });

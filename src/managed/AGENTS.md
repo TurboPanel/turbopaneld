@@ -16,7 +16,7 @@ Root context: `../../AGENTS.md`. Instance engine specs:
 | `compose.ts` | Platform compose normalization (image, volumes, resources, exposure labels) |
 | `materialize.ts` | Write `config/` verbatim; ownership normalization via throwaway container (skips `backups/`) |
 | `tls.ts` | Self-signed cert generation (`openssl`) under `tls/` |
-| `ingress.ts` | Managed Traefik (`turbopanel-managed-ingress`) + network + entry persistence |
+| `ingress.ts` | Per-service managed Traefik (`turbopanel-managed-<id>-ingress`) + network + port-claim persistence |
 | `containers.ts` | Shared `docker compose ps` collection + running-container resolution used by `apply.ts` and `backup.ts` |
 | `apply.ts` / `lifecycle.ts` / `destroy.ts` | Command handlers (wired from `command-router.ts`) |
 | `backup.ts` | `managed.backup` (`create`/`delete`) + `managed.restore` command handlers — streamed dump/restore, checksum, prune |
@@ -33,13 +33,14 @@ Root context: `../../AGENTS.md`. Instance engine specs:
 ├── tls/                 # sibling of config/ — matches `./tls` mount
 │   ├── server.crt       # 0640
 │   └── server.key       # 0600
+├── ingress/             # per-service Traefik compose (daemon-owned; not chowned)
+│   └── docker-compose.yml   # mode 0640
 └── backups/             # 0750; artifacts written 0600 by the daemon user itself
     └── <backupId>.<ext> # <ext> from MANAGED_BACKUP_ARTIFACT_EXTENSIONS (dump | sql)
 
 <stateDir>/managed/ingress/
-├── <managedId>.json     # per-service ManagedIngressEntry[] (mode 0640)
-└── traefik/
-    └── docker-compose.yml   # managed Traefik static config (mode 0640)
+└── <managedId>.json     # per-service ManagedIngressEntry[] claim files (mode 0640)
+                         # conflict detection only — not Traefik compose
 ```
 
 `.env` (`TURBOPANEL_MANAGED_ROOT_PASSWORD=…`, mode `0600`) exists **only** for
@@ -48,34 +49,41 @@ the duration of `docker compose --env-file … up` and is deleted in `finally`.
 Compose project names:
 
 - Engine: `turbopanel-managed-<managedId>`
-- Ingress Traefik: `turbopanel-managed-ingress` on Docker network
-  `turbopanel-managed` (created via the same `ensureIngressNetwork` pattern as
-  tenant `turbopanel-ingress` — **never** joins the tenant network)
+- Ingress Traefik (per service): `turbopanel-managed-<managedId>-ingress` on
+  Docker network `turbopanel-managed` (shared by engines + their Traefik —
+  **never** joins the tenant `turbopanel-ingress` network)
+- Ingress container name: instance-allocated `<ingressServiceId>-1` (same
+  `managedContainerName` rule as the engine)
 
 ## Managed Traefik ingress
 
-Independent of tenant `src/deploy/ingress.ts`. Static config is **regenerated,
-not hot-reloaded** (Traefik cannot add entrypoints at runtime):
+Independent of tenant `src/deploy/ingress.ts`. Each exposed managed service
+gets its **own** Traefik compose project (not a host-wide shared container).
+Static config is **regenerated, not hot-reloaded** (Traefik cannot add
+entrypoints at runtime):
 
 1. One `--entrypoints.<tcp|udp><port>.address=:<port>[/udp]` static arg and one
-   quoted `"<bind>:<port>:<port>/<tcp|udp>"` compose `ports:` line per exposed
-   service (`http` exposures use the TCP wire protocol). Bind defaults to
-   `0.0.0.0`; instance-resolved `bindAddress` (public pinned IP / datacenter IP /
-   `127.0.0.1`) is validated with the same IPv4/IPv6 literal allowlist as
-   tenant `assertValidBindAddress` before interpolation; IPv6 literals are
-   bracketed and the whole mapping is quoted so YAML does not treat `[…]` as a
-   flow sequence. Apply reports the same bind fallback (`0.0.0.0` when
-   exposed without `bindAddress`) — never loopback for an all-interfaces bind.
-2. Per-service entries persist under
+   quoted `"<bind>:<port>:<port>/<tcp|udp>"` compose `ports:` line for **this**
+   service only (`http` exposures use the TCP wire protocol). Bind defaults to
+   `0.0.0.0`; instance-resolved `bindAddress` is validated with the same
+   IPv4/IPv6 literal allowlist as tenant `assertValidBindAddress`; IPv6
+   literals are bracketed and command/port lines are quoted so YAML stays
+   valid. Apply reports the same bind fallback (`0.0.0.0` when exposed without
+   `bindAddress`) — never loopback for an all-interfaces bind.
+2. Port-claim files persist under
    `<stateDir>/managed/ingress/<managedId>.json`. `syncManagedIngressEntries`
-   merges every *other* service's file and throws
+   checks every *other* service's file and throws
    `ManagedPortConflictError` (`kind: managed_port_conflict`) on
    **wire-protocol**+published-port collision (`http` and `tcp` share TCP) —
-   **no partial write**. Entries are deduped and sorted so Traefik only
-   restarts when the entrypoint set really changes.
-3. `removeManagedIngressEntries` returns `null` when the service had none
-   (apply/destroy short-circuit a pointless Traefik restart) — same idiom as
-   tenant `removeTcpUdpIngressEntries`.
+   **no partial write**. Sync returns **this service's own entries** (not a
+   host-wide merge); removal no longer restarts other services' Traefik.
+3. Compose self-describes via `x-turbopanel: { kind: ingress, managedId,
+   serviceId, containerName }` plus Docker labels
+   `turbopanel.managed.id=<managedId>` / `turbopanel.role=ingress`. The Docker
+   provider is constrained with
+   `--providers.docker.constraints=Label(\`turbopanel.managed.id\`,\`<id>\`)`
+   so this Traefik only routes its own engine (which carries the matching
+   `turbopanel.managed.id` + `turbopanel.role=engine` labels).
 4. Engine containers join `turbopanel-managed` and carry Traefik Docker labels
    (`compose.ts`): TCP router + `loadbalancer.server.port` = native container
    port. **No** TLS termination, ACME, or `auto_https` on managed Traefik —
@@ -86,19 +94,31 @@ not hot-reloaded** (Traefik cannot add entrypoints at runtime):
    `supportsSni: false` and always takes catch-all `HostSNI(\`*\`)`. Do not
    build hostname/TLS material handling here — the branch exists for a future
    HTTP-ish engine (e.g. ClickHouse).
+6. **Legacy teardown:** `teardownLegacyManagedIngress` best-effort `down`s the
+   old host-wide `turbopanel-managed-ingress` project and removes
+   `<stateDir>/managed/ingress/traefik/` on first apply (pre-release hosts).
+7. **Trade-off:** N exposed services ⇒ N small Traefik containers, each with a
+   read-only Docker socket mount — apply/lifecycle/destroy touch only that
+   service's ingress.
 
-Apply syncs ingress **before** engine `compose up` so port conflicts fail
-early and the managed network exists before the engine joins it. Destroy
-removes entries and re-syncs Traefik only when the service actually had any.
-`ManagedPortConflictError` propagates as the command-outcome error string for
-the UI.
+Apply syncs this service's ingress **before** engine `compose up` so port
+conflicts fail early and the managed network exists before the engine joins
+it. Destroy/`exposure.enabled=false` call `removeManagedIngress` for this
+service only (plus claim-file removal). `removeManagedIngress` downs the
+compose project **and deletes** `<managedId>/ingress/` so a later
+`managed.lifecycle` start/restart cannot treat a stale compose file as
+active. `ManagedPortConflictError` propagates as the command-outcome error
+string for the UI.
 
 ## Rules
 
-1. **Container name from the instance.** The instance supplies `containerName`
-   (`<container.id>-1`); `normalizeManagedCompose` writes it as
-   `container_name`. `assertSafeManagedIdentifiers` guards it with its own
-   hyphen-permitting regex (do not reuse `SAFE_VOLUME_NAME_RE`). Container
+1. **Container names from the instance.** The instance supplies engine
+   `containerName` (`<service.id>-1`) and, when exposed, `ingress.{serviceId,
+   composeServiceName, containerName}` for the Traefik sidecar
+   (`<ingressServiceId>-1`). `normalizeManagedCompose` /
+   `managedTraefikCompose` write them as `container_name`.
+   `assertSafeManagedIdentifiers` guards both with the hyphen-permitting
+   Docker-name regex (do not reuse `SAFE_VOLUME_NAME_RE`). Container
    resolution (`containers.ts`) still keys off `Service` / `State`, never
    `Name`.
 2. **Native port, never remapped.** Normalized compose never emits `ports:`.

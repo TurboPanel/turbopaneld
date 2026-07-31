@@ -10,7 +10,7 @@ import { runDocker } from "../deploy/docker-cli.ts";
 import { logInfo, sanitizeForLog } from "../logger.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import {
-  ensureManagedIngress,
+  removeManagedIngress,
   removeManagedIngressEntries,
 } from "./ingress.ts";
 import {
@@ -72,13 +72,8 @@ export async function handleManagedDestroy(
     }
   }
 
-  const remaining = await removeManagedIngressEntries(
-    layout,
-    payload.managedId,
-  );
-  if (remaining !== null) {
-    await ensureManagedIngress(layout, remaining);
-  }
+  await removeManagedIngress(layout, payload.managedId);
+  await removeManagedIngressEntries(layout, payload.managedId);
 
   try {
     await Deno.remove(root, { recursive: true });

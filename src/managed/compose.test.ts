@@ -277,6 +277,11 @@ test("normalizeManagedCompose exposure attaches managed network and TCP labels",
   const labels = service.labels as Record<string, string>;
   assertEquals(labels["traefik.enable"], "true");
   assertEquals(
+    labels["turbopanel.managed.id"],
+    "00000000-0000-4000-8000-000000000001",
+  );
+  assertEquals(labels["turbopanel.role"], "engine");
+  assertEquals(
     labels[
       "traefik.tcp.routers.m-00000000-0000-4000-8000-000000000001.entrypoints"
     ],

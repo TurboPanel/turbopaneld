@@ -152,3 +152,18 @@ export function resolveSoleEngineContainer(
   }
   return chosen;
 }
+
+/**
+ * Collect a project's containers and stamp each row with `serviceId` so
+ * reconcile fills the instance-allocated ingress (or other) service row.
+ * Best-effort — returns `undefined` on collection failure (never throws).
+ */
+export async function collectManagedContainersForService(
+  project: string,
+  serviceId: string,
+  redact: (text: string) => string = (text) => text,
+): Promise<EnvironmentDeployContainer[] | undefined> {
+  const containers = await collectManagedContainers(project, redact);
+  if (containers === undefined) return undefined;
+  return containers.map((row) => ({ ...row, serviceId }));
+}

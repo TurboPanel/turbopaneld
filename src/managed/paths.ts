@@ -61,6 +61,25 @@ export function managedComposeProject(managedId: string): string {
   return `turbopanel-managed-${managedId}`;
 }
 
+/** Per-service managed Traefik compose project. */
+export function managedIngressProject(managedId: string): string {
+  return `turbopanel-managed-${managedId}-ingress`;
+}
+
+export function managedIngressDir(
+  layout: LayoutPaths,
+  managedId: string,
+): string {
+  return join(managedDir(layout, managedId), "ingress");
+}
+
+export function managedIngressComposePath(
+  layout: LayoutPaths,
+  managedId: string,
+): string {
+  return join(managedIngressDir(layout, managedId), "docker-compose.yml");
+}
+
 /**
  * `<stateDir>/managed/<managedId>/backups` — written 0600 by the daemon
  * user itself (never chowned to the container engine user; see
@@ -124,10 +143,17 @@ export function resolveManagedRelativePath(
   return join(baseDir, ...segments);
 }
 
+const COMPOSE_SERVICE_NAME_RE = /^[A-Za-z0-9 ._-]+$/;
+
 export function assertSafeManagedIdentifiers(
   payload: Pick<
     ManagedApplyPayload,
-    "managedId" | "environmentId" | "projectName" | "containerName" | "volumes"
+    | "managedId"
+    | "environmentId"
+    | "projectName"
+    | "containerName"
+    | "volumes"
+    | "ingress"
   >,
 ): void {
   if (!SAFE_MANAGED_ID_RE.test(payload.managedId)) {
@@ -145,6 +171,20 @@ export function assertSafeManagedIdentifiers(
   }
   if (!SAFE_CONTAINER_NAME_RE.test(payload.containerName)) {
     throw new Error("containerName contains unsupported characters");
+  }
+  if (payload.ingress !== undefined) {
+    if (!SAFE_CONTAINER_NAME_RE.test(payload.ingress.containerName)) {
+      throw new Error("ingress.containerName contains unsupported characters");
+    }
+    if (
+      payload.ingress.composeServiceName.length === 0 ||
+      payload.ingress.composeServiceName.length > 255 ||
+      !COMPOSE_SERVICE_NAME_RE.test(payload.ingress.composeServiceName)
+    ) {
+      throw new Error(
+        "ingress.composeServiceName contains unsupported characters",
+      );
+    }
   }
   for (const volume of payload.volumes) {
     if (
