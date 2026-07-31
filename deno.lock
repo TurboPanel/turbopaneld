@@ -50,6 +50,7 @@
   },
   "workspace": {
     "dependencies": [
+      "jsr:@std/assert@1",
       "jsr:@std/crypto@1",
       "jsr:@std/encoding@1",
       "jsr:@std/path@1",

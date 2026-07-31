@@ -1,3 +1,4 @@
+import { assertEquals } from "@std/assert";
 import type {
   ContainerInspect,
   ContainerSummary,
@@ -237,10 +238,4 @@ async function waitFor<T>(
     }
   }
   throw new Error(`timed out waiting for ${label}`);
-}
-
-function assertEquals(actual: unknown, expected: unknown): void {
-  if (actual !== expected) {
-    throw new Error(`expected ${String(expected)} but got ${String(actual)}`);
-  }
 }

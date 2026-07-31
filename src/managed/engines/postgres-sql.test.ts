@@ -1,10 +1,4 @@
-/**
- * Jest/Mocha-shaped alias for {@link Deno.test}.
- *
- * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
- * reports Deno suites as empty; keep this alias so analysis sees real tests.
- */
-import { assertEquals, assertThrows } from "jsr:@std/assert@1";
+import { assertEquals, assertThrows } from "@std/assert";
 import {
   createDatabaseSql,
   createOrAlterRoleSql,
@@ -15,6 +9,12 @@ import {
   quoteLiteral,
 } from "./postgres-sql.ts";
 
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
 const test = Deno.test.bind(Deno);
 
 test("quoteIdentifier doubles embedded quotes and rejects injection", () => {

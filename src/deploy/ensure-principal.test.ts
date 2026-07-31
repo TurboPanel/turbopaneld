@@ -1,10 +1,4 @@
-/**
- * Jest/Mocha-shaped alias for {@link Deno.test}.
- *
- * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
- * reports Deno suites as empty; keep this alias so analysis sees real tests.
- */
-import { assertEquals, assertRejects } from "jsr:@std/assert@1";
+import { assertEquals, assertRejects } from "@std/assert";
 import type { LayoutPaths } from "../paths/layout.ts";
 import {
   DEFAULT_PRINCIPAL_SHELL,
@@ -14,6 +8,12 @@ import {
   type RunResult,
 } from "./ensure-principal.ts";
 
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
 const test = Deno.test.bind(Deno);
 
 function stubLayout(principalHomeRoot = "/srv/users"): LayoutPaths {

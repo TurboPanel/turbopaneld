@@ -1,4 +1,4 @@
-import { assertEquals } from "jsr:@std/assert";
+import { assertEquals } from "@std/assert";
 import { isExcludedNetInterface, parseNetDev } from "./parse-net-dev.ts";
 import { it } from "@std/testing/bdd";
 

@@ -1,6 +1,9 @@
-import { getBuildInfo } from "../build-info.ts";
-import { getHostHelloIdentity } from "../host/os-release.ts";
-import { readTimeSync, type HostTimeSync } from "../host/time-sync.ts";
+import { type BuildInfo, getBuildInfo } from "../build-info.ts";
+import {
+  getHostHelloIdentity,
+  type HostHelloIdentity,
+} from "../host/os-release.ts";
+import { type HostTimeSync, readTimeSync } from "../host/time-sync.ts";
 import { logInfo, logWarn, sanitizeForLog } from "../logger.ts";
 import {
   collectServerAddresses,
@@ -53,6 +56,48 @@ type PresenceSnapshot = {
   timeSync: HostTimeSync;
   addresses: ServerAddresses;
 };
+
+type BuildInfoProvider = () => BuildInfo;
+type HostHelloIdentityProvider = () => HostHelloIdentity;
+type PresenceSnapshotProvider = () => PresenceSnapshot;
+
+function defaultPresenceSnapshot(): PresenceSnapshot {
+  return {
+    timeSync: readTimeSync(),
+    addresses: collectServerAddresses(),
+  };
+}
+
+let buildInfoProvider: BuildInfoProvider = getBuildInfo;
+let hostHelloIdentityProvider: HostHelloIdentityProvider = getHostHelloIdentity;
+let presenceSnapshotProvider: PresenceSnapshotProvider =
+  defaultPresenceSnapshot;
+
+/**
+ * Test-only injection for hello/heartbeat presence inputs. Returns a restore
+ * function. Default behavior is byte-identical to the live host providers.
+ */
+export function installIdlePresenceProviders(source: {
+  getBuildInfo?: BuildInfoProvider;
+  getHostHelloIdentity?: HostHelloIdentityProvider;
+  collectPresenceSnapshot?: PresenceSnapshotProvider;
+}): () => void {
+  const previousBuildInfo = buildInfoProvider;
+  const previousHost = hostHelloIdentityProvider;
+  const previousPresence = presenceSnapshotProvider;
+  if (source.getBuildInfo) buildInfoProvider = source.getBuildInfo;
+  if (source.getHostHelloIdentity) {
+    hostHelloIdentityProvider = source.getHostHelloIdentity;
+  }
+  if (source.collectPresenceSnapshot) {
+    presenceSnapshotProvider = source.collectPresenceSnapshot;
+  }
+  return () => {
+    buildInfoProvider = previousBuildInfo;
+    hostHelloIdentityProvider = previousHost;
+    presenceSnapshotProvider = previousPresence;
+  };
+}
 
 /**
  * Tracks idle presence for one daemon<->instance WebSocket and detects
@@ -179,10 +224,7 @@ export class IdlePresence {
   }
 
   #collectPresenceSnapshot(): PresenceSnapshot {
-    return {
-      timeSync: readTimeSync(),
-      addresses: collectServerAddresses(),
-    };
+    return presenceSnapshotProvider();
   }
 
   #serializePresenceSnapshot(snapshot: PresenceSnapshot): string {
@@ -193,9 +235,9 @@ export class IdlePresence {
     const ws = this.#ws;
     if (ws?.readyState !== WebSocket.OPEN) return;
 
-    const agent = getBuildInfo();
+    const agent = buildInfoProvider();
     this.#lastAgentCommit = agent.commit;
-    const host = getHostHelloIdentity();
+    const host = hostHelloIdentityProvider();
     const presence = this.#collectPresenceSnapshot();
     this.#lastPresenceSnapshot = this.#serializePresenceSnapshot(presence);
 
@@ -255,7 +297,7 @@ export class IdlePresence {
       return;
     }
     this.#sendCellPing();
-    const agent = getBuildInfo();
+    const agent = buildInfoProvider();
     const agentChanged = agent.commit !== this.#lastAgentCommit;
 
     const presence = this.#collectPresenceSnapshot();
@@ -291,7 +333,7 @@ export class IdlePresence {
   }
 
   #sendHeartbeat(fields: {
-    agent?: ReturnType<typeof getBuildInfo>;
+    agent?: BuildInfo;
     timeSync?: HostTimeSync;
     addresses?: ServerAddresses;
   }): void {
@@ -301,7 +343,7 @@ export class IdlePresence {
     const payload: {
       type: "heartbeat";
       at: string;
-      agent?: ReturnType<typeof getBuildInfo>;
+      agent?: BuildInfo;
       timeSync?: HostTimeSync;
       addresses?: ServerAddresses;
     } = {

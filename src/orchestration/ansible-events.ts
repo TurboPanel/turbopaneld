@@ -139,6 +139,7 @@ export function sanitizeAnsibleSummaryText(text: string): string {
     .replaceAll("\n", " ")
     .replaceAll("\r", " ")
     .replaceAll("\t", " ")
+    // deno-lint-ignore no-control-regex -- intentional control-char scrub for summaries
     .replace(/[\u0000-\u001f\u007f]/g, "");
   const collapsed = stripped.replace(/\s+/g, " ").trim();
   return collapsed.length > ANSIBLE_SUMMARY_MAX_LENGTH

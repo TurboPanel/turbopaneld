@@ -15,7 +15,9 @@ const STORAGE_KINDS = new Set([
   "directory",
 ]);
 
-export function validateDeployPathPrefix(pathPrefix: string | undefined): boolean {
+export function validateDeployPathPrefix(
+  pathPrefix: string | undefined,
+): boolean {
   if (pathPrefix === undefined) return true;
   return pathPrefix.startsWith("/");
 }
@@ -29,7 +31,9 @@ export function normalizeDeployPathPrefix(
   return trimmed;
 }
 
-export function pathPrefixHasUnsupportedCharacters(pathPrefix: string): boolean {
+export function pathPrefixHasUnsupportedCharacters(
+  pathPrefix: string,
+): boolean {
   return pathPrefix.includes("`") || /[\r\n]/.test(pathPrefix);
 }
 
@@ -127,7 +131,9 @@ export function validateDeployHostnameRouting(
   return findDuplicateCatchAllHostname(byHostname);
 }
 
-export function validateDeployTargetPort(targetPort: number | undefined): boolean {
+export function validateDeployTargetPort(
+  targetPort: number | undefined,
+): boolean {
   if (targetPort === undefined) return true;
   return Number.isInteger(targetPort) && targetPort >= 1 && targetPort <= 65535;
 }

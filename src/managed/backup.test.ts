@@ -1,10 +1,4 @@
-/**
- * Jest/Mocha-shaped alias for {@link Deno.test}.
- *
- * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
- * reports Deno suites as empty; keep this alias so analysis sees real tests.
- */
-import { assertEquals, assertRejects, assertThrows } from "jsr:@std/assert@1";
+import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { encodeHex } from "@std/encoding/hex";
 import { join } from "@std/path";
 import type { EnvironmentDeployContainer } from "../instance/commands/contracts.ts";
@@ -17,6 +11,12 @@ import {
 import { getManagedEngineRuntime } from "./engines/index.ts";
 import { managedBackupArtifactPath, managedBackupsDir } from "./paths.ts";
 
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
 const test = Deno.test.bind(Deno);
 
 const FAKE_CONTAINER: EnvironmentDeployContainer = {
@@ -53,7 +53,9 @@ async function writeAllToStream(
   }
 }
 
-async function drainStream(source: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+async function drainStream(
+  source: ReadableStream<Uint8Array>,
+): Promise<Uint8Array> {
   const reader = source.getReader();
   const chunks: Uint8Array[] = [];
   for (;;) {
@@ -97,7 +99,7 @@ test("handleManagedBackup writes a 0600 artifact and checksums the written bytes
       },
       new Date().toISOString(),
       {
-        resolveContainer: async () => FAKE_CONTAINER,
+        resolveContainer: () => Promise.resolve(FAKE_CONTAINER),
         runDump: async (_argv, destination) => {
           await writeAllToStream(destination, bytes);
           return { success: true, stderr: "" };
@@ -153,7 +155,7 @@ test("handleManagedBackup removes the .part file when the dump command fails", a
           },
           new Date().toISOString(),
           {
-            resolveContainer: async () => FAKE_CONTAINER,
+            resolveContainer: () => Promise.resolve(FAKE_CONTAINER),
             runDump: async (_argv, destination) => {
               // Simulate a dump that starts writing, then the process fails.
               await writeAllToStream(
@@ -168,7 +170,9 @@ test("handleManagedBackup removes the .part file when the dump command fails", a
       "dump failed",
     );
 
-    const layout = { stateDir: Deno.env.get("TURBOPANEL_STATE_DIR")! } as Parameters<
+    const layout = {
+      stateDir: Deno.env.get("TURBOPANEL_STATE_DIR")!,
+    } as Parameters<
       typeof managedBackupArtifactPath
     >[0];
     const artifactPath = managedBackupArtifactPath(
@@ -209,7 +213,7 @@ test(
             },
             new Date().toISOString(),
             {
-              resolveContainer: async () => FAKE_CONTAINER,
+              resolveContainer: () => Promise.resolve(FAKE_CONTAINER),
               // Mirrors the fixed `defaultRunDump`: the destination write
               // rejects while the spawned "process" reports success — a
               // naive `.catch(() => {})` on `pipeTo()` would let this
@@ -234,7 +238,11 @@ test(
                       },
                     }),
                     status: Promise.resolve(
-                      { success: true, code: 0, signal: null } as Deno.CommandStatus,
+                      {
+                        success: true,
+                        code: 0,
+                        signal: null,
+                      } as Deno.CommandStatus,
                     ),
                   },
                   new WritableStream<Uint8Array>({
@@ -250,7 +258,9 @@ test(
         "dump failed",
       );
 
-      const layout = { stateDir: Deno.env.get("TURBOPANEL_STATE_DIR")! } as Parameters<
+      const layout = {
+        stateDir: Deno.env.get("TURBOPANEL_STATE_DIR")!,
+      } as Parameters<
         typeof managedBackupArtifactPath
       >[0];
       const artifactPath = managedBackupArtifactPath(
@@ -262,7 +272,9 @@ test(
       for (const candidate of [artifactPath, `${artifactPath}.part`]) {
         try {
           await Deno.stat(candidate);
-          throw new TypeError(`${candidate} should not exist after a pipe failure`);
+          throw new TypeError(
+            `${candidate} should not exist after a pipe failure`,
+          );
         } catch (err) {
           if (!(err instanceof Deno.errors.NotFound)) throw err;
         }
@@ -284,7 +296,9 @@ test("handleManagedBackup prune keeps exactly the newest retentionKeep artifacts
     const base = Date.now() - 60_000;
     for (let i = 0; i < older.length; i++) {
       const path = join(dir, `${older[i]}.dump`);
-      await Deno.writeFile(path, new TextEncoder().encode("old"), { mode: 0o600 });
+      await Deno.writeFile(path, new TextEncoder().encode("old"), {
+        mode: 0o600,
+      });
       const mtime = new Date(base + i * 1_000);
       await Deno.utime(path, mtime, mtime);
     }
@@ -304,7 +318,7 @@ test("handleManagedBackup prune keeps exactly the newest retentionKeep artifacts
       },
       new Date().toISOString(),
       {
-        resolveContainer: async () => FAKE_CONTAINER,
+        resolveContainer: () => Promise.resolve(FAKE_CONTAINER),
         runDump: async (_argv, destination) => {
           await writeAllToStream(destination, bytes);
           return { success: true, stderr: "" };
@@ -331,10 +345,17 @@ test("handleManagedRestore rejects a checksum mismatch before touching the engin
   await withTempStateDir(async (tmp) => {
     const managedId = `bk-${crypto.randomUUID()}`;
     const backupId = "restore_me";
-    const layout = { stateDir: tmp } as Parameters<typeof managedBackupArtifactPath>[0];
+    const layout = { stateDir: tmp } as Parameters<
+      typeof managedBackupArtifactPath
+    >[0];
     const dir = managedBackupsDir(layout, managedId);
     await Deno.mkdir(dir, { recursive: true, mode: 0o750 });
-    const artifactPath = managedBackupArtifactPath(layout, managedId, backupId, "dump");
+    const artifactPath = managedBackupArtifactPath(
+      layout,
+      managedId,
+      backupId,
+      "dump",
+    );
     await Deno.writeFile(
       artifactPath,
       new TextEncoder().encode("real-dump-contents"),
@@ -357,6 +378,7 @@ test("handleManagedRestore rejects a checksum mismatch before touching the engin
           new Date().toISOString(),
           {
             resolveContainer: async () => {
+              await Promise.resolve();
               engineTouched = true;
               return FAKE_CONTAINER;
             },
@@ -379,10 +401,17 @@ test("handleManagedRestore streams the artifact into the engine on a checksum ma
   await withTempStateDir(async (tmp) => {
     const managedId = `bk-${crypto.randomUUID()}`;
     const backupId = "restore_ok";
-    const layout = { stateDir: tmp } as Parameters<typeof managedBackupArtifactPath>[0];
+    const layout = { stateDir: tmp } as Parameters<
+      typeof managedBackupArtifactPath
+    >[0];
     const dir = managedBackupsDir(layout, managedId);
     await Deno.mkdir(dir, { recursive: true, mode: 0o750 });
-    const artifactPath = managedBackupArtifactPath(layout, managedId, backupId, "dump");
+    const artifactPath = managedBackupArtifactPath(
+      layout,
+      managedId,
+      backupId,
+      "dump",
+    );
     const bytes = new TextEncoder().encode("real-dump-contents");
     await Deno.writeFile(artifactPath, bytes, { mode: 0o600 });
     const checksum = await sha256Hex(bytes);
@@ -400,7 +429,7 @@ test("handleManagedRestore streams the artifact into the engine on a checksum ma
       },
       new Date().toISOString(),
       {
-        resolveContainer: async () => FAKE_CONTAINER,
+        resolveContainer: () => Promise.resolve(FAKE_CONTAINER),
         runRestore: async (_argv, source) => {
           streamed = await drainStream(source);
           return { success: true, stderr: "" };
@@ -421,7 +450,7 @@ test("postgres backup runtime rejects unsafe database identifiers in dump/restor
     composeServiceName: "postgres",
     rootUsername: "postgres",
     defaultDatabase: "postgres",
-    exec: async () => ({ success: true, stdout: "", stderr: "" }),
+    exec: () => Promise.resolve({ success: true, stdout: "", stderr: "" }),
   };
   assertThrows(
     () => engine.backup!.dumpArgv(ctx, { database: "bad name; drop table" }),
@@ -466,7 +495,10 @@ test(
     );
 
     assertEquals(outcome.success, false);
-    assertEquals(outcome.stderr.includes("simulated destination write failure"), true);
+    assertEquals(
+      outcome.stderr.includes("simulated destination write failure"),
+      true,
+    );
   },
 );
 
@@ -563,7 +595,10 @@ test(
     );
 
     assertEquals(outcome.success, false);
-    assertEquals(outcome.stderr.includes("simulated stdin write failure"), true);
+    assertEquals(
+      outcome.stderr.includes("simulated stdin write failure"),
+      true,
+    );
   },
 );
 
@@ -573,10 +608,17 @@ test(
     await withTempStateDir(async (tmp) => {
       const managedId = `bk-${crypto.randomUUID()}`;
       const backupId = "restore_pipe_fail";
-      const layout = { stateDir: tmp } as Parameters<typeof managedBackupArtifactPath>[0];
+      const layout = { stateDir: tmp } as Parameters<
+        typeof managedBackupArtifactPath
+      >[0];
       const dir = managedBackupsDir(layout, managedId);
       await Deno.mkdir(dir, { recursive: true, mode: 0o750 });
-      const artifactPath = managedBackupArtifactPath(layout, managedId, backupId, "dump");
+      const artifactPath = managedBackupArtifactPath(
+        layout,
+        managedId,
+        backupId,
+        "dump",
+      );
       const bytes = new TextEncoder().encode("real-dump-contents");
       await Deno.writeFile(artifactPath, bytes, { mode: 0o600 });
       const checksum = await sha256Hex(bytes);
@@ -595,7 +637,7 @@ test(
             },
             new Date().toISOString(),
             {
-              resolveContainer: async () => FAKE_CONTAINER,
+              resolveContainer: () => Promise.resolve(FAKE_CONTAINER),
               // Mirrors the fixed `defaultRunRestore`: `child.stdin` rejects
               // while the spawned "process" reports success — a naive
               // `.catch(() => {})` on `pipeTo()` would let this through as a
@@ -614,7 +656,11 @@ test(
                       },
                     }),
                     status: Promise.resolve(
-                      { success: true, code: 0, signal: null } as Deno.CommandStatus,
+                      {
+                        success: true,
+                        code: 0,
+                        signal: null,
+                      } as Deno.CommandStatus,
                     ),
                   },
                   source,

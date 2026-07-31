@@ -1,4 +1,9 @@
-import { assertEquals, assertRejects, assertStringIncludes, assertThrows } from "jsr:@std/assert";
+import {
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
 import {
   assertValidBindAddress,
   buildCaddyHostnameRoutes,
@@ -16,7 +21,9 @@ import {
 import { resolveLayout } from "../paths/layout.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 
-async function makeTestLayout(): Promise<{ layout: LayoutPaths; cleanup: () => Promise<void> }> {
+async function makeTestLayout(): Promise<
+  { layout: LayoutPaths; cleanup: () => Promise<void> }
+> {
   const root = await Deno.makeTempDir({ prefix: "tp-ingress-test-" });
   const layout = resolveLayout(
     {
@@ -46,7 +53,10 @@ test("traefikCompose publishes loopback ports with proxy protocol and TLS", () =
   assertStringIncludes(compose, "--entrypoints.web.address=:7080");
   assertStringIncludes(compose, "--entrypoints.websecure.address=:7443");
   assertStringIncludes(compose, "--entrypoints.websecure.http.tls=true");
-  assertStringIncludes(compose, "--entrypoints.web.proxyProtocol.insecure=true");
+  assertStringIncludes(
+    compose,
+    "--entrypoints.web.proxyProtocol.insecure=true",
+  );
   assertStringIncludes(
     compose,
     "--entrypoints.websecure.proxyProtocol.insecure=true",
@@ -270,7 +280,12 @@ test("traefikCompose with no tcp/udp entries matches baseline (no extra entrypoi
 
 test("traefikCompose adds a static entrypoint and published port per tcp/udp entry", () => {
   const compose = traefikCompose([
-    { hostingId: "h1", protocol: "tcp", publishedPort: 5432, bindAddress: "203.0.113.10" },
+    {
+      hostingId: "h1",
+      protocol: "tcp",
+      publishedPort: 5432,
+      bindAddress: "203.0.113.10",
+    },
     { hostingId: "h2", protocol: "udp", publishedPort: 53 },
   ]);
   assertStringIncludes(compose, "--entrypoints.tcp5432.address=:5432");
@@ -302,13 +317,26 @@ test("buildTcpUdpIngressEntries extracts one entry per port for tcp/udp hostings
       composeServiceName: "db",
       hostnames: [],
       protocol: "tcp",
-      ports: [{ published: 5432, target: 5432 }, { published: 5433, target: 5432 }],
+      ports: [{ published: 5432, target: 5432 }, {
+        published: 5433,
+        target: 5432,
+      }],
       bindAddress: "203.0.113.10",
     },
   ]);
   assertEquals(entries, [
-    { hostingId: "h2", protocol: "tcp", publishedPort: 5432, bindAddress: "203.0.113.10" },
-    { hostingId: "h2", protocol: "tcp", publishedPort: 5433, bindAddress: "203.0.113.10" },
+    {
+      hostingId: "h2",
+      protocol: "tcp",
+      publishedPort: 5432,
+      bindAddress: "203.0.113.10",
+    },
+    {
+      hostingId: "h2",
+      protocol: "tcp",
+      publishedPort: 5433,
+      bindAddress: "203.0.113.10",
+    },
   ]);
 });
 
@@ -328,7 +356,10 @@ test("syncTcpUdpIngressEntries persists, merges across environments, and removeT
     const all = await collectTcpUdpIngressEntries(layout);
     assertEquals(all.length, 2);
 
-    const remainingAfterRemoveA = await removeTcpUdpIngressEntries(layout, "env-a");
+    const remainingAfterRemoveA = await removeTcpUdpIngressEntries(
+      layout,
+      "env-a",
+    );
     assertEquals(remainingAfterRemoveA?.length, 1);
     assertEquals(remainingAfterRemoveA?.[0]?.hostingId, "h2");
 

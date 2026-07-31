@@ -1,5 +1,5 @@
 import { join } from "@std/path";
-import { assertEquals } from "jsr:@std/assert";
+import { assertEquals } from "@std/assert";
 import {
   buildTimeSyncApplyExtraArgs,
   buildWireguardApplyExtraArgs,
@@ -27,6 +27,16 @@ import {
 
 const VENDORED_COLLECTIONS_MARKER = "galaxy-collections";
 const CHECKOUT_ORCHESTRATION_DIR = join(DAEMON_ROOT, "orchestration");
+
+/** True when the vendored ansible-playbook binary is present on this host. */
+function ansiblePlaybookAvailable(): boolean {
+  try {
+    Deno.statSync(ANSIBLE_PLAYBOOK_BIN);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /** Minimal overlay layout for {@link resolveDevOrchestrationLayout} unit tests. */
 async function makeDevOrchestrationFixture(): Promise<string> {
@@ -483,6 +493,25 @@ test("TUI orchestration script fetches Docker Galaxy before docker-using playboo
       "run-orchestration-action.ts must call ensureGalaxyDockerRole before docker-using playbooks",
     );
   }
+  if (!script.includes("quiet: true")) {
+    throw new Error(
+      "run-orchestration-action.ts must run playbooks with quiet: true for clean TUI JSONL",
+    );
+  }
+  if (!script.includes("slimAnsibleEvent")) {
+    throw new Error(
+      "run-orchestration-action.ts must slim ansible events before emitting to the TUI",
+    );
+  }
+  // instance-dev-install must ensure Galaxy *before* the playbook streams —
+  // otherwise the TUI hits include_role: geerlingguy.docker with an empty tree.
+  const ensureCall = script.indexOf("await ensureGalaxyDockerRole()");
+  const playbookCall = script.indexOf("await runPlaybookStreaming(");
+  if (ensureCall < 0 || playbookCall < 0 || ensureCall > playbookCall) {
+    throw new Error(
+      "run-orchestration-action.ts must await ensureGalaxyDockerRole() before runPlaybookStreaming()",
+    );
+  }
   for (
     const playbook of [
       "docker-setup.yml",
@@ -496,6 +525,24 @@ test("TUI orchestration script fetches Docker Galaxy before docker-using playboo
         `run-orchestration-action.ts must list ${playbook} in PLAYBOOKS_NEEDING_DOCKER_GALAXY`,
       );
     }
+  }
+});
+
+test("daemon-run attaches Docker monitor via decideDockerMonitorAttach", () => {
+  // Keep the startup path on the extracted decision helper so "skip when Docker
+  // is not installed" stays enforced (partial-converge stuck-state fix).
+  const source = Deno.readTextFileSync(
+    join(DAEMON_ROOT, "src", "daemon-run.ts"),
+  );
+  if (!source.includes("decideDockerMonitorAttach")) {
+    throw new Error(
+      "daemon-run.ts must use decideDockerMonitorAttach for monitor attach",
+    );
+  }
+  if (!source.includes("dockerBinaryPresent")) {
+    throw new Error(
+      "daemon-run.ts must consult dockerBinaryPresent before attaching the monitor",
+    );
   }
 });
 
@@ -666,7 +713,9 @@ test("buildTimeSyncApplyExtraArgs preserves native list and boolean types", () =
   });
   assertEquals(typeof parsed.turbopanel_ntp_enabled, "boolean");
   assertEquals(Array.isArray(parsed.turbopanel_ntp_servers), true);
-  const timezoneOnly = JSON.parse(buildTimeSyncApplyExtraArgs({ timezone: "UTC" })[1]!);
+  const timezoneOnly = JSON.parse(
+    buildTimeSyncApplyExtraArgs({ timezone: "UTC" })[1]!,
+  );
   assertEquals(timezoneOnly.turbopanel_apply_ntp_config, false);
   assertEquals(buildTimeSyncApplyExtraArgs({}), []);
 });
@@ -735,7 +784,7 @@ test("buildWireguardApplyExtraArgs wires manageForwarding + enableIpForwarding i
   assertEquals(enable.wireguard_ip_forward, true);
 });
 
-test("wireguard template renders ListenPort for numeric listen port", async () => {
+test("wireguard template guards ListenPort and PSK file lookups", async () => {
   const templatePath = join(
     CHECKOUT_ORCHESTRATION_DIR,
     "roles/wireguard/templates/wg.conf.j2",
@@ -749,71 +798,87 @@ test("wireguard template renders ListenPort for numeric listen port", async () =
   );
   assertEquals(template.includes("peer.presharedKeyFile"), true);
   assertEquals(template.includes("peer.presharedKey "), false);
+});
 
-  const tmpDir = await Deno.makeTempDir({ prefix: "tp-wg-template-" });
-  const privateKeyFile = join(tmpDir, "iface.key");
-  const pskFile = join(tmpDir, "peer.psk");
-  const dest = join(tmpDir, "wg.conf");
-  await Deno.writeTextFile(privateKeyFile, "PRIVATEKEYLINE\n", { mode: 0o600 });
-  await Deno.writeTextFile(pskFile, "PSKLINE\n", { mode: 0o600 });
+test({
+  name: "wireguard template renders ListenPort for numeric listen port",
+  // Requires vendored ansible-playbook; skip explicitly when absent so CI does
+  // not report a green test that never ran the render.
+  ignore: !ansiblePlaybookAvailable(),
+  fn: async () => {
+    const templatePath = join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/wireguard/templates/wg.conf.j2",
+    );
+    const tmpDir = await Deno.makeTempDir({ prefix: "tp-wg-template-" });
+    try {
+      const privateKeyFile = join(tmpDir, "iface.key");
+      const pskFile = join(tmpDir, "peer.psk");
+      const dest = join(tmpDir, "wg.conf");
+      await Deno.writeTextFile(privateKeyFile, "PRIVATEKEYLINE\n", {
+        mode: 0o600,
+      });
+      await Deno.writeTextFile(pskFile, "PSKLINE\n", { mode: 0o600 });
 
-  const playbook = join(tmpDir, "render.yml");
-  await Deno.writeTextFile(
-    playbook,
-    [
-      "---",
-      "- hosts: localhost",
-      "  gather_facts: false",
-      "  connection: local",
-      "  tasks:",
-      "    - ansible.builtin.template:",
-      `        src: ${templatePath}`,
-      `        dest: ${dest}`,
-      "",
-    ].join("\n"),
-  );
+      const playbook = join(tmpDir, "render.yml");
+      await Deno.writeTextFile(
+        playbook,
+        [
+          "---",
+          "- hosts: localhost",
+          "  gather_facts: false",
+          "  connection: local",
+          "  tasks:",
+          "    - ansible.builtin.template:",
+          `        src: ${templatePath}`,
+          `        dest: ${dest}`,
+          "",
+        ].join("\n"),
+      );
 
-  const extra = {
-    wireguard_interface: "tpwgtest",
-    wireguard_address: "203.0.113.10/32",
-    wireguard_private_key_file: privateKeyFile,
-    wireguard_listen_port: "51820",
-    wireguard_peers: [
-      {
-        publicKey: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
-        allowedIps: ["203.0.113.11/32"],
-        presharedKeyFile: pskFile,
-      },
-    ],
-  };
+      const extra = {
+        wireguard_interface: "tpwgtest",
+        wireguard_address: "203.0.113.10/32",
+        wireguard_private_key_file: privateKeyFile,
+        wireguard_listen_port: "51820",
+        wireguard_peers: [
+          {
+            publicKey: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+            allowedIps: ["203.0.113.11/32"],
+            presharedKeyFile: pskFile,
+          },
+        ],
+      };
 
-  try {
-    await Deno.stat(ANSIBLE_PLAYBOOK_BIN);
-  } catch {
-    console.warn("Skipping WireGuard template render: ansible-playbook unavailable");
-    await Deno.remove(tmpDir, { recursive: true });
-    return;
-  }
+      const command = new Deno.Command(ANSIBLE_PLAYBOOK_BIN, {
+        args: [
+          "-i",
+          "localhost,",
+          "-c",
+          "local",
+          "-e",
+          JSON.stringify(extra),
+          playbook,
+        ],
+        cwd: CHECKOUT_ORCHESTRATION_DIR,
+        env: ansibleEnv(),
+        stdout: "piped",
+        stderr: "piped",
+      });
+      const output = await command.output();
+      if (!output.success) {
+        const stderr = new TextDecoder().decode(output.stderr);
+        throw new Error(`ansible-playbook failed: ${stderr}`);
+      }
 
-  const command = new Deno.Command(ANSIBLE_PLAYBOOK_BIN, {
-    args: ["-i", "localhost,", "-c", "local", "-e", JSON.stringify(extra), playbook],
-    cwd: CHECKOUT_ORCHESTRATION_DIR,
-    env: ansibleEnv(),
-    stdout: "piped",
-    stderr: "piped",
-  });
-  const output = await command.output();
-  if (!output.success) {
-    const stderr = new TextDecoder().decode(output.stderr);
-    throw new Error(`ansible-playbook failed: ${stderr}`);
-  }
-
-  const rendered = await Deno.readTextFile(dest);
-  assertEquals(rendered.includes("ListenPort = 51820"), true);
-  assertEquals(rendered.includes("PresharedKey = PSKLINE"), true);
-  assertEquals(rendered.includes("PrivateKey = PRIVATEKEYLINE"), true);
-
-  await Deno.remove(tmpDir, { recursive: true });
+      const rendered = await Deno.readTextFile(dest);
+      assertEquals(rendered.includes("ListenPort = 51820"), true);
+      assertEquals(rendered.includes("PresharedKey = PSKLINE"), true);
+      assertEquals(rendered.includes("PrivateKey = PRIVATEKEYLINE"), true);
+    } finally {
+      await Deno.remove(tmpDir, { recursive: true });
+    }
+  },
 });
 
 test("traditional-web apply playbooks vendor engines (never apt nginx/apache2)", async () => {
@@ -839,18 +904,24 @@ test("traditional-web apply playbooks vendor engines (never apt nginx/apache2)",
   assertEquals(olsPlaybook.includes("name: openlitespeed"), true);
 
   // Distro package installs must stay gone — engines come from vendor roles.
-  for (const [label, body] of [
-    ["nginx", nginxPlaybook],
-    ["apache", apachePlaybook],
-    ["openlitespeed", olsPlaybook],
-  ] as const) {
+  for (
+    const [label, body] of [
+      ["nginx", nginxPlaybook],
+      ["apache", apachePlaybook],
+      ["openlitespeed", olsPlaybook],
+    ] as const
+  ) {
     if (/ansible\.builtin\.apt:/.test(body)) {
       throw new Error(
         `traditional-web ${label} playbook must not apt-install packages`,
       );
     }
-    if (/\bname:\s*nginx\b/.test(body) && label === "nginx" && /apt:/.test(body)) {
-      throw new Error("traditional-web nginx playbook must not apt install nginx");
+    if (
+      /\bname:\s*nginx\b/.test(body) && label === "nginx" && /apt:/.test(body)
+    ) {
+      throw new Error(
+        "traditional-web nginx playbook must not apt install nginx",
+      );
     }
     if (body.includes("apache2") || body.includes("libapache2-mod-php")) {
       throw new Error(
@@ -870,7 +941,11 @@ test("traditional-web apply playbooks vendor engines (never apt nginx/apache2)",
   );
   assertMatch(nginxDefaults, /nginx_version:\s*"1\.\d+\.\d+"/, "nginx pin");
   assertMatch(apacheDefaults, /apache_version:\s*"2\.\d+\.\d+"/, "apache pin");
-  assertMatch(phpFpmDefaults, /php_fpm_version:\s*"8\.\d+\.\d+"/, "php-fpm pin");
+  assertMatch(
+    phpFpmDefaults,
+    /php_fpm_version:\s*"8\.\d+\.\d+"/,
+    "php-fpm pin",
+  );
   assertMatch(phpFpmDefaults, /php_fpm_series:\s*"8\.\d+"/, "php-fpm series");
 
   const nginxUnit = await Deno.readTextFile(
@@ -891,7 +966,10 @@ test("traditional-web apply playbooks vendor engines (never apt nginx/apache2)",
       "roles/php-fpm/templates/turbopanel-php-fpm.service.j2",
     ),
   );
-  assertEquals(nginxUnit.includes("turbopanel_vendor_dir }}/nginx/current"), true);
+  assertEquals(
+    nginxUnit.includes("turbopanel_vendor_dir }}/nginx/current"),
+    true,
+  );
   assertEquals(
     apacheUnit.includes("turbopanel_vendor_dir }}/apache/current"),
     true,

@@ -1,4 +1,5 @@
 import { dirname, join } from "@std/path";
+import { assertEquals } from "@std/assert";
 import {
   ANSIBLE_CFG,
   ANSIBLE_CORE_VERSION,
@@ -69,12 +70,6 @@ const checkoutOrchestrationDir = join(fromMeta, "orchestration");
  */
 const test = Deno.test.bind(Deno);
 
-function assertEq(actual: string, expected: string, label: string): void {
-  if (actual !== expected) {
-    throw new Error(`${label}: expected ${expected}, got ${actual}`);
-  }
-}
-
 function assertThrowsSourceRoot(fn: () => unknown, label: string): void {
   try {
     fn();
@@ -93,7 +88,7 @@ test("resolveDaemonRoot prefers TURBOPANEL_DAEMON_ROOT", () => {
   const root = resolveDaemonRoot({
     TURBOPANEL_DAEMON_ROOT: "/custom/daemon",
   }, { skipDiscovery: true });
-  assertEq(root, "/custom/daemon", "resolveDaemonRoot override");
+  assertEquals(root, "/custom/daemon", "resolveDaemonRoot override");
 });
 
 test("resolveDaemonRoot uses default install path for compiled stub roots", () => {
@@ -107,7 +102,7 @@ test("resolveDaemonRoot uses default install path for compiled stub roots", () =
     fromMeta.includes("deno-compile") ||
     (tempDirPrefix.length > 1 && fromMeta.startsWith(tempDirPrefix))
   ) {
-    assertEq(root, DEFAULT_DAEMON_ROOT, "compiled stub default root");
+    assertEquals(root, DEFAULT_DAEMON_ROOT, "compiled stub default root");
   }
 });
 
@@ -122,7 +117,7 @@ test("detectInstallMode ignores deno-compile root containing main.ts", async () 
       fromMeta: compiledRoot,
       skipDiscovery: true,
     });
-    assertEq(mode, "production", "mode");
+    assertEquals(mode, "production", "mode");
   } finally {
     await Deno.remove(compiledRoot, { recursive: true });
   }
@@ -139,7 +134,7 @@ test("resolveDaemonRoot ignores deno-compile root containing main.ts", async () 
       fromMeta: compiledRoot,
       skipDiscovery: true,
     });
-    assertEq(root, PROD_DAEMON_ROOT_DEFAULT, "resolveDaemonRoot");
+    assertEquals(root, PROD_DAEMON_ROOT_DEFAULT, "resolveDaemonRoot");
   } finally {
     await Deno.remove(compiledRoot, { recursive: true });
   }
@@ -154,21 +149,27 @@ test("resolveDaemonRoot ignores deno-compile root containing main.ts", async () 
 // managed FHS install.
 
 test("resolveDaemonRoot requireCheckout accepts a real checkout override", async () => {
-  const checkout = await Deno.makeTempDir({ dir: fromMeta });
+  const checkout = await Deno.makeTempDir({
+    prefix: "paths-test-",
+    dir: fromMeta,
+  });
   try {
     await Deno.writeTextFile(join(checkout, "main.ts"), "// checkout\n");
     const root = resolveDaemonRoot(
       { TURBOPANEL_DAEMON_ROOT: checkout },
       { skipDiscovery: true, requireCheckout: true },
     );
-    assertEq(root, checkout, "requireCheckout checkout override");
+    assertEquals(root, checkout, "requireCheckout checkout override");
   } finally {
     await Deno.remove(checkout, { recursive: true });
   }
 });
 
 test("resolveDaemonRoot requireCheckout rejects a non-checkout override", async () => {
-  const notCheckout = await Deno.makeTempDir({ dir: fromMeta });
+  const notCheckout = await Deno.makeTempDir({
+    prefix: "paths-test-",
+    dir: fromMeta,
+  });
   try {
     assertThrowsSourceRoot(
       () =>
@@ -187,7 +188,10 @@ test("resolveDaemonRoot requireCheckout rejects the bundled JS entrypoint locati
   // A non-compiled, non-checkout dir (e.g. /opt/turbopanel/bin where the
   // turbopaneld.js fallback resolves import.meta) — never under /tmp so it is
   // not classified as a compiled stub.
-  const binDir = await Deno.makeTempDir({ dir: fromMeta });
+  const binDir = await Deno.makeTempDir({
+    prefix: "paths-test-",
+    dir: fromMeta,
+  });
   try {
     // Without requireCheckout the resolver falls back to this wrong root...
     const fallback = resolveDaemonRoot({}, {
@@ -195,7 +199,7 @@ test("resolveDaemonRoot requireCheckout rejects the bundled JS entrypoint locati
       forceMode: "production",
       skipDiscovery: true,
     });
-    assertEq(
+    assertEquals(
       fallback,
       binDir,
       "managed fallback returns bundled entrypoint dir",
@@ -240,12 +244,12 @@ test("resolveDaemonRoot requireCheckout rejects the compiled/native stub root", 
 
 test("production orchestration dir resolves share/orchestration", () => {
   const layout = resolveLayout({}, { forceMode: "production" });
-  assertEq(
+  assertEquals(
     layout.orchestrationDir,
     join(PROD_SHARE_DIR_DEFAULT, "orchestration"),
     "orchestrationDir",
   );
-  assertEq(
+  assertEquals(
     layout.orchestrationDir,
     PROD_ORCHESTRATION_DIR_DEFAULT,
     "PROD_ORCHESTRATION_DIR_DEFAULT",
@@ -254,19 +258,19 @@ test("production orchestration dir resolves share/orchestration", () => {
 
 test("development layout resolves checkout orchestration and legacy runtimes", () => {
   const layout = resolveLayout({}, { forceMode: "development", fromMeta });
-  assertEq(layout.mode, "development", "mode");
-  assertEq(
+  assertEquals(layout.mode, "development", "mode");
+  assertEquals(
     layout.daemonRootDefault,
     DEV_DAEMON_ROOT_DEFAULT,
     "daemonRootDefault",
   );
-  assertEq(
+  assertEquals(
     layout.orchestrationDir,
     checkoutOrchestrationDir,
     "orchestrationDir",
   );
-  assertEq(layout.runtimesDir, DEV_RUNTIMES_DIR_DEFAULT, "runtimesDir");
-  assertEq(
+  assertEquals(layout.runtimesDir, DEV_RUNTIMES_DIR_DEFAULT, "runtimesDir");
+  assertEquals(
     layout.instanceDir,
     DEV_INSTANCE_DIR_DEFAULT,
     "instanceDir",
@@ -275,39 +279,39 @@ test("development layout resolves checkout orchestration and legacy runtimes", (
 
 test("production layout resolves FHS orchestration and runtime dirs", () => {
   const layout = resolveLayout({}, { forceMode: "production" });
-  assertEq(layout.mode, "production", "mode");
-  assertEq(
+  assertEquals(layout.mode, "production", "mode");
+  assertEquals(
     layout.daemonRootDefault,
     PROD_DAEMON_ROOT_DEFAULT,
     "daemonRootDefault",
   );
-  assertEq(
+  assertEquals(
     layout.orchestrationDir,
     join(PROD_SHARE_DIR_DEFAULT, "orchestration"),
     "orchestrationDir",
   );
-  assertEq(layout.runtimesDir, PROD_RUNTIME_DIR_DEFAULT, "runtimesDir");
-  assertEq(layout.runDir, PROD_RUN_DIR_DEFAULT, "runDir");
-  assertEq(layout.configDir, PROD_CONFIG_DIR_DEFAULT, "configDir");
-  assertEq(
+  assertEquals(layout.runtimesDir, PROD_RUNTIME_DIR_DEFAULT, "runtimesDir");
+  assertEquals(layout.runDir, PROD_RUN_DIR_DEFAULT, "runDir");
+  assertEquals(layout.configDir, PROD_CONFIG_DIR_DEFAULT, "configDir");
+  assertEquals(
     layout.instanceCaPath,
     join(PROD_CONFIG_DIR_DEFAULT, "instance-ca.pem"),
     "instanceCaPath",
   );
-  assertEq(
+  assertEquals(
     layout.tlsDir,
     join(PROD_CONFIG_DIR_DEFAULT, "tls"),
     "tlsDir",
   );
-  assertEq(layout.stateDir, PROD_STATE_DIR_DEFAULT, "stateDir");
-  assertEq(layout.principalHomeRoot, "/srv/users", "principalHomeRoot");
+  assertEquals(layout.stateDir, PROD_STATE_DIR_DEFAULT, "stateDir");
+  assertEquals(layout.principalHomeRoot, "/srv/users", "principalHomeRoot");
   // Managed installs must resolve the FHS lib tree — never the dev checkout.
-  assertEq(
+  assertEquals(
     layout.instanceDir,
     PROD_INSTANCE_DIR_DEFAULT,
     "PROD_INSTANCE_DIR_DEFAULT",
   );
-  assertEq(
+  assertEquals(
     layout.instanceDir,
     "/opt/turbopanel/lib/instance",
     "instanceDir literal",
@@ -325,23 +329,27 @@ test("layout env overrides apply in development mode", () => {
     TURBOPANEL_PRINCIPAL_HOME_ROOT: "/custom/srv/users",
   }, { forceMode: "development" });
 
-  assertEq(layout.runtimesDir, "/custom/runtimes", "runtimesDir");
-  assertEq(
+  assertEquals(layout.runtimesDir, "/custom/runtimes", "runtimesDir");
+  assertEquals(
     layout.orchestrationDir,
     "/custom/orchestration",
     "orchestrationDir",
   );
-  assertEq(layout.instanceDir, "/custom/instance", "instanceDir");
-  assertEq(layout.configDir, "/custom/config", "configDir");
-  assertEq(layout.runDir, "/custom/run", "runDir");
-  assertEq(layout.stateDir, "/custom/state", "stateDir");
-  assertEq(layout.daemonStateDir, "/custom/state", "daemonStateDir");
-  assertEq(
+  assertEquals(layout.instanceDir, "/custom/instance", "instanceDir");
+  assertEquals(layout.configDir, "/custom/config", "configDir");
+  assertEquals(layout.runDir, "/custom/run", "runDir");
+  assertEquals(layout.stateDir, "/custom/state", "stateDir");
+  assertEquals(layout.daemonStateDir, "/custom/state", "daemonStateDir");
+  assertEquals(
     layout.instanceCaPath,
     "/custom/config/instance-ca.pem",
     "instanceCaPath",
   );
-  assertEq(layout.principalHomeRoot, "/custom/srv/users", "principalHomeRoot");
+  assertEquals(
+    layout.principalHomeRoot,
+    "/custom/srv/users",
+    "principalHomeRoot",
+  );
 });
 
 test("layout env overrides apply in production mode", () => {
@@ -352,14 +360,14 @@ test("layout env overrides apply in production mode", () => {
     TURBOPANEL_STATE_DIR: "/custom/var/lib/turbopanel",
   }, { forceMode: "production" });
 
-  assertEq(layout.runtimesDir, "/custom/lib/runtime", "runtimesDir");
-  assertEq(
+  assertEquals(layout.runtimesDir, "/custom/lib/runtime", "runtimesDir");
+  assertEquals(
     layout.orchestrationDir,
     "/custom/share/orchestration",
     "orchestrationDir",
   );
-  assertEq(layout.configDir, "/custom/etc/turbopanel", "configDir");
-  assertEq(layout.stateDir, "/custom/var/lib/turbopanel", "stateDir");
+  assertEquals(layout.configDir, "/custom/etc/turbopanel", "configDir");
+  assertEquals(layout.stateDir, "/custom/var/lib/turbopanel", "stateDir");
 });
 
 test("module-level orchestration constants match active layout", () => {
@@ -369,57 +377,61 @@ test("module-level orchestration constants match active layout", () => {
     TURBOPANEL_RUNTIME_DIR: readEnv("TURBOPANEL_RUNTIME_DIR"),
     TURBOPANEL_ORCHESTRATION_DIR: readEnv("TURBOPANEL_ORCHESTRATION_DIR"),
   });
-  assertEq(
+  assertEquals(
     DAEMON_ROOT,
     resolveDaemonRoot({
       TURBOPANEL_DAEMON_ROOT: readEnv("TURBOPANEL_DAEMON_ROOT"),
     }),
     "DAEMON_ROOT",
   );
-  assertEq(ORCHESTRATION_DIR, layout.orchestrationDir, "ORCHESTRATION_DIR");
-  assertEq(RUNTIMES_DIR, layout.runtimesDir, "RUNTIMES_DIR");
-  assertEq(
+  assertEquals(ORCHESTRATION_DIR, layout.orchestrationDir, "ORCHESTRATION_DIR");
+  assertEquals(RUNTIMES_DIR, layout.runtimesDir, "RUNTIMES_DIR");
+  assertEquals(
     ANSIBLE_PLAYBOOK_CWD,
     dirname(layout.runtimesDir),
     "ANSIBLE_PLAYBOOK_CWD",
   );
-  assertEq(
+  assertEquals(
     UV_INSTALL_DIR,
     join(layout.runtimesDir, "uv", UV_VERSION),
     "UV_INSTALL_DIR",
   );
-  assertEq(
+  assertEquals(
     UV_CURRENT_DIR,
     join(layout.runtimesDir, "uv", "current"),
     "UV_CURRENT_DIR",
   );
-  assertEq(UV_BIN, join(layout.runtimesDir, "uv", UV_VERSION, "uv"), "UV_BIN");
-  assertEq(
+  assertEquals(
+    UV_BIN,
+    join(layout.runtimesDir, "uv", UV_VERSION, "uv"),
+    "UV_BIN",
+  );
+  assertEquals(
     PYTHON_RUNTIME_DIR,
     join(layout.runtimesDir, "python", PYTHON_VERSION),
     "PYTHON_RUNTIME_DIR",
   );
-  assertEq(
+  assertEquals(
     PYTHON_CURRENT_DIR,
     join(layout.runtimesDir, "python", "current"),
     "PYTHON_CURRENT_DIR",
   );
-  assertEq(
+  assertEquals(
     CACHE_DIR,
     join(layout.runtimesDir, "uv", "cache"),
     "CACHE_DIR",
   );
-  assertEq(
+  assertEquals(
     ANSIBLE_INSTALL_DIR,
     join(layout.runtimesDir, "ansible", ANSIBLE_CORE_VERSION),
     "ANSIBLE_INSTALL_DIR",
   );
-  assertEq(
+  assertEquals(
     VENV_BIN_DIR,
     join(layout.runtimesDir, "ansible", ANSIBLE_CORE_VERSION, "bin"),
     "VENV_BIN_DIR",
   );
-  assertEq(
+  assertEquals(
     ANSIBLE_PLAYBOOK_BIN,
     join(
       layout.runtimesDir,
@@ -430,57 +442,57 @@ test("module-level orchestration constants match active layout", () => {
     ),
     "ANSIBLE_PLAYBOOK_BIN",
   );
-  assertEq(
+  assertEquals(
     ANSIBLE_CURRENT_DIR,
     join(layout.runtimesDir, "ansible", "current"),
     "ANSIBLE_CURRENT_DIR",
   );
-  assertEq(
+  assertEquals(
     REQUIREMENTS_FILE,
     join(layout.orchestrationDir, "requirements.txt"),
     "REQUIREMENTS_FILE",
   );
-  assertEq(
+  assertEquals(
     GALAXY_COLLECTIONS_DIR,
     join(layout.runtimesDir, "ansible", "galaxy-collections"),
     "GALAXY_COLLECTIONS_DIR",
   );
-  assertEq(
+  assertEquals(
     ANSIBLE_LOCAL_TMP,
     join(layout.runtimesDir, "uv", "cache", "ansible-tmp"),
     "ANSIBLE_LOCAL_TMP",
   );
-  assertEq(
+  assertEquals(
     ANSIBLE_HOME,
     "/tmp/turbopanel-ansible",
     "ANSIBLE_HOME",
   );
-  assertEq(
+  assertEquals(
     ANSIBLE_CFG,
     join(layout.orchestrationDir, "ansible.cfg"),
     "ANSIBLE_CFG",
   );
-  assertEq(
+  assertEquals(
     DENO_RUNTIME_DIR,
     join(layout.runtimesDir, "deno", DENO_VERSION),
     "DENO_RUNTIME_DIR",
   );
-  assertEq(
+  assertEquals(
     DENO_CURRENT_DIR,
     join(layout.runtimesDir, "deno", "current"),
     "DENO_CURRENT_DIR",
   );
-  assertEq(
+  assertEquals(
     DENO_BIN,
     join(layout.runtimesDir, "deno", "bin", "deno"),
     "DENO_BIN",
   );
-  assertEq(
+  assertEquals(
     CLOUDFLARED_CURRENT_DIR,
     join(layout.runtimesDir, "cloudflared", "current"),
     "CLOUDFLARED_CURRENT_DIR",
   );
-  assertEq(
+  assertEquals(
     TUNNELS_DIR,
     join(layout.daemonStateDir, "cloudflared", "tunnels"),
     "TUNNELS_DIR",
@@ -492,8 +504,8 @@ test("module-level orchestration constants honor TURBOPANEL_RUNTIMES_DIR", () =>
   const layout = resolveLayout({
     TURBOPANEL_RUNTIMES_DIR: customRuntimes,
   }, { forceMode: "development", fromMeta });
-  assertEq(layout.runtimesDir, customRuntimes, "layout runtimesDir");
-  assertEq(
+  assertEquals(layout.runtimesDir, customRuntimes, "layout runtimesDir");
+  assertEquals(
     join(customRuntimes, "uv", UV_VERSION),
     join(layout.runtimesDir, "uv", UV_VERSION),
     "uv install path shape",
@@ -507,80 +519,92 @@ test("module-level orchestration constants honor TURBOPANEL_RUNTIMES_DIR", () =>
 // rather than silently shipping the wrong layout.
 
 test("production FHS default constants are the canonical absolute paths", () => {
-  assertEq(PROD_HOME_DEFAULT, "/opt/turbopanel", "PROD_HOME_DEFAULT");
-  assertEq(PROD_BIN_DIR_DEFAULT, "/opt/turbopanel/bin", "PROD_BIN_DIR_DEFAULT");
-  assertEq(PROD_LIB_DIR_DEFAULT, "/opt/turbopanel/lib", "PROD_LIB_DIR_DEFAULT");
-  assertEq(
+  assertEquals(PROD_HOME_DEFAULT, "/opt/turbopanel", "PROD_HOME_DEFAULT");
+  assertEquals(
+    PROD_BIN_DIR_DEFAULT,
+    "/opt/turbopanel/bin",
+    "PROD_BIN_DIR_DEFAULT",
+  );
+  assertEquals(
+    PROD_LIB_DIR_DEFAULT,
+    "/opt/turbopanel/lib",
+    "PROD_LIB_DIR_DEFAULT",
+  );
+  assertEquals(
     PROD_RUNTIME_DIR_DEFAULT,
     "/opt/turbopanel/vendor",
     "PROD_RUNTIME_DIR_DEFAULT",
   );
-  assertEq(
+  assertEquals(
     PROD_SHARE_DIR_DEFAULT,
     "/opt/turbopanel/share",
     "PROD_SHARE_DIR_DEFAULT",
   );
-  assertEq(
+  assertEquals(
     PROD_UI_DIR_DEFAULT,
     "/opt/turbopanel/share/ui",
     "PROD_UI_DIR_DEFAULT",
   );
-  assertEq(
+  assertEquals(
     PROD_ORCHESTRATION_DIR_DEFAULT,
     "/opt/turbopanel/share/orchestration",
     "PROD_ORCHESTRATION_DIR_DEFAULT",
   );
-  assertEq(
+  assertEquals(
     PROD_DAEMON_ROOT_DEFAULT,
     "/opt/turbopanel/lib/daemon",
     "PROD_DAEMON_ROOT_DEFAULT",
   );
-  assertEq(
+  assertEquals(
     PROD_INSTANCE_DIR_DEFAULT,
     "/opt/turbopanel/lib/instance",
     "PROD_INSTANCE_DIR_DEFAULT",
   );
-  assertEq(
+  assertEquals(
     PROD_CONFIG_DIR_DEFAULT,
     "/etc/turbopanel",
     "PROD_CONFIG_DIR_DEFAULT",
   );
-  assertEq(
+  assertEquals(
     PROD_STATE_DIR_DEFAULT,
     "/var/lib/turbopanel",
     "PROD_STATE_DIR_DEFAULT",
   );
-  assertEq(PROD_LOG_DIR_DEFAULT, "/var/log/turbopanel", "PROD_LOG_DIR_DEFAULT");
-  assertEq(PROD_RUN_DIR_DEFAULT, "/run/turbopanel", "PROD_RUN_DIR_DEFAULT");
+  assertEquals(
+    PROD_LOG_DIR_DEFAULT,
+    "/var/log/turbopanel",
+    "PROD_LOG_DIR_DEFAULT",
+  );
+  assertEquals(PROD_RUN_DIR_DEFAULT, "/run/turbopanel", "PROD_RUN_DIR_DEFAULT");
 });
 
 test("production layout resolves the complete FHS tree with no defaults", () => {
   const layout = resolveLayout({}, { forceMode: "production" });
-  assertEq(layout.mode, "production", "mode");
-  assertEq(layout.home, PROD_HOME_DEFAULT, "home");
-  assertEq(layout.binDir, PROD_BIN_DIR_DEFAULT, "binDir");
-  assertEq(layout.libDir, PROD_LIB_DIR_DEFAULT, "libDir");
-  assertEq(layout.runtimeDir, PROD_RUNTIME_DIR_DEFAULT, "runtimeDir");
-  assertEq(layout.runtimesDir, PROD_RUNTIME_DIR_DEFAULT, "runtimesDir");
-  assertEq(layout.shareDir, PROD_SHARE_DIR_DEFAULT, "shareDir");
-  assertEq(layout.uiDir, PROD_UI_DIR_DEFAULT, "uiDir");
-  assertEq(
+  assertEquals(layout.mode, "production", "mode");
+  assertEquals(layout.home, PROD_HOME_DEFAULT, "home");
+  assertEquals(layout.binDir, PROD_BIN_DIR_DEFAULT, "binDir");
+  assertEquals(layout.libDir, PROD_LIB_DIR_DEFAULT, "libDir");
+  assertEquals(layout.runtimeDir, PROD_RUNTIME_DIR_DEFAULT, "runtimeDir");
+  assertEquals(layout.runtimesDir, PROD_RUNTIME_DIR_DEFAULT, "runtimesDir");
+  assertEquals(layout.shareDir, PROD_SHARE_DIR_DEFAULT, "shareDir");
+  assertEquals(layout.uiDir, PROD_UI_DIR_DEFAULT, "uiDir");
+  assertEquals(
     layout.orchestrationDir,
     PROD_ORCHESTRATION_DIR_DEFAULT,
     "orchestrationDir",
   );
-  assertEq(layout.configDir, PROD_CONFIG_DIR_DEFAULT, "configDir");
-  assertEq(layout.stateDir, PROD_STATE_DIR_DEFAULT, "stateDir");
-  assertEq(layout.daemonStateDir, PROD_STATE_DIR_DEFAULT, "daemonStateDir");
-  assertEq(layout.logDir, PROD_LOG_DIR_DEFAULT, "logDir");
-  assertEq(layout.runDir, PROD_RUN_DIR_DEFAULT, "runDir");
-  assertEq(layout.principalHomeRoot, "/srv/users", "principalHomeRoot");
-  assertEq(
+  assertEquals(layout.configDir, PROD_CONFIG_DIR_DEFAULT, "configDir");
+  assertEquals(layout.stateDir, PROD_STATE_DIR_DEFAULT, "stateDir");
+  assertEquals(layout.daemonStateDir, PROD_STATE_DIR_DEFAULT, "daemonStateDir");
+  assertEquals(layout.logDir, PROD_LOG_DIR_DEFAULT, "logDir");
+  assertEquals(layout.runDir, PROD_RUN_DIR_DEFAULT, "runDir");
+  assertEquals(layout.principalHomeRoot, "/srv/users", "principalHomeRoot");
+  assertEquals(
     layout.daemonRootDefault,
     PROD_DAEMON_ROOT_DEFAULT,
     "daemonRootDefault",
   );
-  assertEq(layout.instanceDir, PROD_INSTANCE_DIR_DEFAULT, "instanceDir");
+  assertEquals(layout.instanceDir, PROD_INSTANCE_DIR_DEFAULT, "instanceDir");
   // The production tree must never inherit the co-located dev checkout root.
   if (layout.orchestrationDir.includes("/platform/")) {
     throw new Error(
@@ -601,34 +625,38 @@ test("production layout resolves the complete FHS tree with no defaults", () => 
 
 test("development layout resolves source repos with FHS mutable dirs", () => {
   const layout = resolveLayout({}, { forceMode: "development", fromMeta });
-  assertEq(layout.mode, "development", "mode");
-  assertEq(layout.runtimesDir, DEV_RUNTIMES_DIR_DEFAULT, "runtimesDir");
-  assertEq(layout.configDir, DEV_CONFIG_DIR_DEFAULT, "configDir");
-  assertEq(layout.instanceDir, DEV_INSTANCE_DIR_DEFAULT, "instanceDir");
-  assertEq(layout.logDir, DEV_DAEMON_LOG_DIR_DEFAULT, "logDir");
-  assertEq(
+  assertEquals(layout.mode, "development", "mode");
+  assertEquals(layout.runtimesDir, DEV_RUNTIMES_DIR_DEFAULT, "runtimesDir");
+  assertEquals(layout.configDir, DEV_CONFIG_DIR_DEFAULT, "configDir");
+  assertEquals(layout.instanceDir, DEV_INSTANCE_DIR_DEFAULT, "instanceDir");
+  assertEquals(layout.logDir, DEV_DAEMON_LOG_DIR_DEFAULT, "logDir");
+  assertEquals(
     layout.daemonRootDefault,
     DEV_DAEMON_ROOT_DEFAULT,
     "daemonRootDefault",
   );
-  assertEq(
+  assertEquals(
     layout.orchestrationDir,
     checkoutOrchestrationDir,
     "orchestrationDir",
   );
   // Dev now shares the production FHS mutable dirs (dev-user-owned at runtime).
-  assertEq(layout.runtimesDir, "/opt/turbopanel/vendor", "runtimesDir literal");
-  assertEq(layout.configDir, "/etc/turbopanel", "configDir literal");
-  assertEq(
+  assertEquals(
+    layout.runtimesDir,
+    "/opt/turbopanel/vendor",
+    "runtimesDir literal",
+  );
+  assertEquals(layout.configDir, "/etc/turbopanel", "configDir literal");
+  assertEquals(
     layout.instanceDir,
     "/opt/turbopanel/lib/instance",
     "instanceDir literal",
   );
-  assertEq(layout.logDir, "/var/log/turbopanel", "logDir literal");
+  assertEquals(layout.logDir, "/var/log/turbopanel", "logDir literal");
 });
 
 test("dev daemon state default uses the FHS state dir", () => {
-  assertEq(
+  assertEquals(
     DEV_DAEMON_STATE_DIR_DEFAULT,
     "/var/lib/turbopanel",
     "DEV_DAEMON_STATE_DIR_DEFAULT",
@@ -636,7 +664,7 @@ test("dev daemon state default uses the FHS state dir", () => {
 });
 
 test("dev daemon log dir default uses the FHS log dir", () => {
-  assertEq(
+  assertEquals(
     DEV_DAEMON_LOG_DIR_DEFAULT,
     "/var/log/turbopanel",
     "DEV_DAEMON_LOG_DIR_DEFAULT",
@@ -645,26 +673,26 @@ test("dev daemon log dir default uses the FHS log dir", () => {
 
 test("logDir follows the dev-vs-prod contract", () => {
   const dev = resolveLayout({}, { forceMode: "development", fromMeta });
-  assertEq(dev.logDir, DEV_DAEMON_LOG_DIR_DEFAULT, "development logDir");
-  assertEq(
+  assertEquals(dev.logDir, DEV_DAEMON_LOG_DIR_DEFAULT, "development logDir");
+  assertEquals(
     dev.logDir,
     "/var/log/turbopanel",
     "development logDir literal",
   );
 
   const prod = resolveLayout({}, { forceMode: "production" });
-  assertEq(prod.logDir, PROD_LOG_DIR_DEFAULT, "production logDir");
-  assertEq(prod.logDir, "/var/log/turbopanel", "production logDir literal");
+  assertEquals(prod.logDir, PROD_LOG_DIR_DEFAULT, "production logDir");
+  assertEquals(prod.logDir, "/var/log/turbopanel", "production logDir literal");
 });
 
 test("PYTHON_VERSION matches uv-managed python pin", () => {
-  assertEq(PYTHON_VERSION, "3.14.6", "PYTHON_VERSION");
-  assertEq(
+  assertEquals(PYTHON_VERSION, "3.14.6", "PYTHON_VERSION");
+  assertEquals(
     PYTHON_RUNTIME_DIR,
     join(RUNTIMES_DIR, "python", PYTHON_VERSION),
     "PYTHON_RUNTIME_DIR under RUNTIMES_DIR",
   );
-  assertEq(
+  assertEquals(
     PYTHON_CURRENT_DIR,
     join(RUNTIMES_DIR, "python", "current"),
     "PYTHON_CURRENT_DIR under RUNTIMES_DIR",
@@ -685,7 +713,7 @@ test("DENO_VERSION matches the deno-runtime Ansible role default", () => {
   if (!match) {
     throw new Error(`could not read deno_version from ${roleDefaults}`);
   }
-  assertEq(match[1], DENO_VERSION, "deno_version role default");
+  assertEquals(match[1], DENO_VERSION, "deno_version role default");
 });
 
 test("DENO_VERSION matches TP_DENO_VERSION in scripts/run.sh", () => {
@@ -694,7 +722,7 @@ test("DENO_VERSION matches TP_DENO_VERSION in scripts/run.sh", () => {
   if (!match) {
     throw new Error("could not read TP_DENO_VERSION from scripts/run.sh");
   }
-  assertEq(match[1], DENO_VERSION, "TP_DENO_VERSION in run.sh");
+  assertEquals(match[1], DENO_VERSION, "TP_DENO_VERSION in run.sh");
 });
 
 test("CLICKHOUSE_VERSION matches the clickhouse Ansible role default", () => {
@@ -711,7 +739,7 @@ test("CLICKHOUSE_VERSION matches the clickhouse Ansible role default", () => {
   if (!match) {
     throw new Error(`could not read clickhouse_version from ${roleDefaults}`);
   }
-  assertEq(match[1], CLICKHOUSE_VERSION, "clickhouse_version role default");
+  assertEquals(match[1], CLICKHOUSE_VERSION, "clickhouse_version role default");
 });
 
 test("ANSIBLE_CORE_VERSION matches the ansible-core pin in requirements.txt", () => {
@@ -722,5 +750,5 @@ test("ANSIBLE_CORE_VERSION matches the ansible-core pin in requirements.txt", ()
       `could not read ansible-core pin from ${REQUIREMENTS_FILE}`,
     );
   }
-  assertEq(match[1], ANSIBLE_CORE_VERSION, "ansible-core requirements pin");
+  assertEquals(match[1], ANSIBLE_CORE_VERSION, "ansible-core requirements pin");
 });

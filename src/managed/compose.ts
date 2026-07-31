@@ -15,10 +15,7 @@ import {
   type ManagedApplyResources,
 } from "../instance/commands/contracts.ts";
 import { getManagedEngineRuntime } from "./engines/index.ts";
-import {
-  MANAGED_INGRESS_NETWORK,
-  managedTcpRouterRule,
-} from "./ingress.ts";
+import { MANAGED_INGRESS_NETWORK, managedTcpRouterRule } from "./ingress.ts";
 
 /** Placeholder token permitted in managed compose (mirrors ManagedSecretPlaceholder). */
 export const MANAGED_ROOT_PASSWORD_VAR = "TURBOPANEL_MANAGED_ROOT_PASSWORD"; // NOSONAR typescript:S2068 — compose env var name for ${…} interpolation, not a credential value
@@ -345,7 +342,9 @@ export function normalizeManagedCompose(
 
   if (payload.exposure.enabled) {
     attachManagedIngressNetwork(service);
-    const networks = isRecord(document.networks) ? { ...document.networks } : {};
+    const networks = isRecord(document.networks)
+      ? { ...document.networks }
+      : {};
     networks[MANAGED_INGRESS_NETWORK] = { external: true };
     document.networks = networks;
     applyExposureLabels(service, payload);

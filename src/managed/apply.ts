@@ -12,16 +12,22 @@ import { assertValidBindAddress } from "../deploy/ingress.ts";
 import { ensureDocker } from "../deploy/ensure-docker.ts";
 import { runDocker } from "../deploy/docker-cli.ts";
 import { logInfo, sanitizeForLog } from "../logger.ts";
-import { resolveLayout, type LayoutPaths } from "../paths/layout.ts";
-import { MANAGED_ROOT_PASSWORD_VAR, normalizeManagedCompose } from "./compose.ts";
-import { collectManagedContainers, resolveEngineContainerId } from "./containers.ts";
+import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
+import {
+  MANAGED_ROOT_PASSWORD_VAR,
+  normalizeManagedCompose,
+} from "./compose.ts";
+import {
+  collectManagedContainers,
+  resolveEngineContainerId,
+} from "./containers.ts";
 import { getManagedEngineRuntime } from "./engines/index.ts";
 import type { ManagedEngineContext } from "./engines/types.ts";
 import {
   ensureManagedIngress,
+  type ManagedIngressEntry,
   removeManagedIngressEntries,
   syncManagedIngressEntries,
-  type ManagedIngressEntry,
 } from "./ingress.ts";
 import {
   materializeManagedState,
@@ -65,7 +71,11 @@ async function decryptCredentialPasswords(
     const plain = plaintexts[i];
     if (typeof plain !== "string" || plain.length === 0) {
       throw new Error(
-        redact(`failed to decrypt credential password for ${credentials[i]!.username}`),
+        redact(
+          `failed to decrypt credential password for ${
+            credentials[i]!.username
+          }`,
+        ),
       );
     }
     secrets.push(plain);
@@ -273,7 +283,9 @@ async function dropManagedUsers(
   payload: ManagedApplyPayload,
   appliedUsers: string[],
 ): Promise<void> {
-  if (!payload.dropUsers || payload.dropUsers.length === 0 || !engine.dropUsers) {
+  if (
+    !payload.dropUsers || payload.dropUsers.length === 0 || !engine.dropUsers
+  ) {
     return;
   }
   const toDrop = payload.dropUsers.filter(
@@ -290,7 +302,11 @@ async function applyManagedEngineState(
   payload: ManagedApplyPayload,
   credentials: ManagedApplyCredential[],
 ): Promise<
-  { appliedUsers: string[]; appliedDatabases: string[]; engineVersion: string | undefined }
+  {
+    appliedUsers: string[];
+    appliedDatabases: string[];
+    engineVersion: string | undefined;
+  }
 > {
   await engine.waitReady(ctx);
   const appliedUsers = await engine.applyCredentials(ctx, credentials);

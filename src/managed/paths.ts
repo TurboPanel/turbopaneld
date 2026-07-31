@@ -152,7 +152,9 @@ export function assertSafeManagedIdentifiers(
       volume.name.length > 63 ||
       !SAFE_VOLUME_NAME_RE.test(volume.name)
     ) {
-      throw new Error(`volume name contains unsupported characters: ${volume.name}`);
+      throw new Error(
+        `volume name contains unsupported characters: ${volume.name}`,
+      );
     }
   }
 }

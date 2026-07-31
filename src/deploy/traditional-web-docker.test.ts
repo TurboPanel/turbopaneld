@@ -1,9 +1,9 @@
-import { assertEquals, assertStringIncludes } from "jsr:@std/assert";
+import { assertEquals, assertStringIncludes } from "@std/assert";
 import {
   buildTraditionalWebEndpointMap,
   injectTraditionalWebDockerReachability,
-  traditionalWebEnvKeyForService,
   TRADITIONAL_WEB_ENDPOINTS_ENV,
+  traditionalWebEnvKeyForService,
 } from "./traditional-web-docker.ts";
 import { apacheSiteConfig, nginxSiteConfig } from "./traditional-web.ts";
 
@@ -16,7 +16,10 @@ import { apacheSiteConfig, nginxSiteConfig } from "./traditional-web.ts";
 const test = Deno.test.bind(Deno);
 
 test("traditionalWebEnvKeyForService sanitizes compose service names", () => {
-  assertEquals(traditionalWebEnvKeyForService("my-app"), "TURBOPANEL_TRADITIONAL_WEB_MY_APP_URL");
+  assertEquals(
+    traditionalWebEnvKeyForService("my-app"),
+    "TURBOPANEL_TRADITIONAL_WEB_MY_APP_URL",
+  );
 });
 
 test("injectTraditionalWebDockerReachability adds extra_hosts and env URLs", () => {

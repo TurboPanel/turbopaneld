@@ -1,10 +1,4 @@
-/**
- * Jest/Mocha-shaped alias for {@link Deno.test}.
- *
- * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
- * reports Deno suites as empty; keep this alias so analysis sees real tests.
- */
-import { assertEquals, assertThrows } from "jsr:@std/assert@1";
+import { assertEquals, assertThrows } from "@std/assert";
 import { parse } from "yaml";
 import type { ManagedApplyPayload } from "../instance/commands/contracts.ts";
 import {
@@ -13,6 +7,12 @@ import {
 } from "./compose.ts";
 import { MANAGED_INGRESS_NETWORK } from "./ingress.ts";
 
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
 const test = Deno.test.bind(Deno);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -43,7 +43,11 @@ function basePayload(
       "  pgdata:",
     ].join("\n"),
     configFiles: [
-      { path: "postgresql.conf", contents: "listen_addresses = '*'\n", mode: "0640" },
+      {
+        path: "postgresql.conf",
+        contents: "listen_addresses = '*'\n",
+        mode: "0640",
+      },
     ],
     volumes: [{ name: "pgdata", target: "/var/lib/postgresql" }],
     exposure: { enabled: false, protocol: "tcp" },
@@ -60,7 +64,9 @@ function basePayload(
   };
 }
 
-function parseNormalized(payload: ManagedApplyPayload): Record<string, unknown> {
+function parseNormalized(
+  payload: ManagedApplyPayload,
+): Record<string, unknown> {
   const { composeYaml } = normalizeManagedCompose(payload);
   const doc = parse(composeYaml);
   if (!isRecord(doc)) throw new TypeError("expected compose object");
@@ -119,8 +125,9 @@ test("normalizeManagedCompose emits container_name and keeps it across dockerOpt
       },
     }),
   );
-  const service = (withOptions.services as Record<string, Record<string, unknown>>)
-    .postgres!;
+  const service =
+    (withOptions.services as Record<string, Record<string, unknown>>)
+      .postgres!;
   assertEquals(service.container_name, named);
   assertEquals(service.restart, "unless-stopped");
   const labels = service.labels as Record<string, string>;
@@ -270,7 +277,9 @@ test("normalizeManagedCompose exposure attaches managed network and TCP labels",
   const labels = service.labels as Record<string, string>;
   assertEquals(labels["traefik.enable"], "true");
   assertEquals(
-    labels["traefik.tcp.routers.m-00000000-0000-4000-8000-000000000001.entrypoints"],
+    labels[
+      "traefik.tcp.routers.m-00000000-0000-4000-8000-000000000001.entrypoints"
+    ],
     "tcp15432",
   );
   assertEquals(
@@ -294,7 +303,9 @@ test("normalizeManagedCompose exposure attaches managed network and TCP labels",
       .labels
   ) as Record<string, string>;
   assertEquals(
-    catchLabels["traefik.tcp.routers.m-00000000-0000-4000-8000-000000000001.rule"],
+    catchLabels[
+      "traefik.tcp.routers.m-00000000-0000-4000-8000-000000000001.rule"
+    ],
     "HostSNI(`*`)",
   );
 });

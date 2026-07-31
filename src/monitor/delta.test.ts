@@ -1,5 +1,6 @@
 import { createMonitorDeltaTracker } from "./delta.ts";
 import type { MonitorResourceState } from "./protocol.ts";
+import { assert, assertEquals, assertExists } from "@std/assert";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -118,20 +119,3 @@ test("buildSync establishes authoritative baseline after sequence gap", () => {
   assert(resync.sequence > gapHeartbeat.sequence);
   assertEquals(resync.payload.resources?.length, 2);
 });
-
-function assertEquals(actual: unknown, expected: unknown): void {
-  if (actual !== expected) {
-    throw new Error(`expected ${String(expected)} but got ${String(actual)}`);
-  }
-}
-
-function assertExists<T>(value: T | null | undefined): asserts value is T {
-  if (value == null) throw new Error("expected value to exist");
-}
-
-function assert(
-  condition: unknown,
-  message = "assertion failed",
-): asserts condition {
-  if (!condition) throw new Error(message);
-}

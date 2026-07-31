@@ -23,7 +23,10 @@ import {
 } from "./contracts.ts";
 import { handleEnvironmentDeploy } from "./deploy-environment.ts";
 import { handleManagedApply } from "../../managed/apply.ts";
-import { handleManagedBackup, handleManagedRestore } from "../../managed/backup.ts";
+import {
+  handleManagedBackup,
+  handleManagedRestore,
+} from "../../managed/backup.ts";
 import { handleManagedDestroy } from "../../managed/destroy.ts";
 import { handleManagedLifecycle } from "../../managed/lifecycle.ts";
 import { handleEnvironmentStop } from "./stop-environment.ts";

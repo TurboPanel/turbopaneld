@@ -37,8 +37,9 @@ let ensureToolsOverride: (() => Promise<void>) | null = null;
 let ensureKeypairOverride: ((interfaceName: string) => Promise<string>) | null =
   null;
 let stampReadOverride: ((path: string) => Promise<string | null>) | null = null;
-let stampWriteOverride: ((path: string, stamp: string) => Promise<void>) | null =
-  null;
+let stampWriteOverride:
+  | ((path: string, stamp: string) => Promise<void>)
+  | null = null;
 let wireguardStateDirOverride: (() => string) | null = null;
 
 /** Test-only override for the WireGuard state directory root. */
@@ -175,7 +176,9 @@ async function readForwardingState(): Promise<Record<string, boolean>> {
       return {};
     }
     const state: Record<string, boolean> = {};
-    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+    for (
+      const [key, value] of Object.entries(parsed as Record<string, unknown>)
+    ) {
       state[key] = value === true;
     }
     return state;

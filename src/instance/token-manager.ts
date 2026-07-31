@@ -43,7 +43,7 @@ export class DaemonTokenManager {
     if (
       !options.forceRefresh &&
       this.#token &&
-      this.#expiresAtMs - Date.now() >= this.#refreshEarlyMs
+      this.#expiresAtMs - now() >= this.#refreshEarlyMs
     ) {
       return this.#token;
     }
@@ -70,7 +70,13 @@ export class DaemonTokenManager {
     try {
       await this.#doRefresh();
     } catch (firstError) {
-      if (classifyConnectFailure(firstError).kind === "permanent") {
+      // Permanent enroll/auth failures and JWKS trust failures (invalid signature
+      // / claims, or verified sub/kid mismatch) must not burn a second
+      // challenge+session round-trip — hard-fail on the first error.
+      if (
+        classifyConnectFailure(firstError).kind === "permanent" ||
+        isJwksTrustFailure(firstError)
+      ) {
         throw firstError;
       }
       await delay(2_000);
@@ -117,7 +123,7 @@ export class DaemonTokenManager {
       const verification = await this.#options.verifyToken(session.token);
       if (!verification.ok) {
         if (verification.reason === "invalid") {
-          throw new Error("instance JWT failed JWKS verification");
+          throw new Error(JWKS_TRUST_FAILURE_MESSAGE);
         }
         logWarn(
           "instance",
@@ -128,7 +134,7 @@ export class DaemonTokenManager {
         verification.claims.sub !== this.#options.serverId ||
         verification.claims.kid !== this.#options.keyId
       ) {
-        throw new Error("instance JWT failed JWKS verification");
+        throw new Error(JWKS_TRUST_FAILURE_MESSAGE);
       } else {
         this.#expiresAtMs = verification.claims.exp * 1000;
       }
@@ -138,6 +144,12 @@ export class DaemonTokenManager {
 
     this.#token = session.token;
   }
+}
+
+const JWKS_TRUST_FAILURE_MESSAGE = "instance JWT failed JWKS verification";
+
+function isJwksTrustFailure(err: unknown): boolean {
+  return err instanceof Error && err.message === JWKS_TRUST_FAILURE_MESSAGE;
 }
 
 function parseJwtExpiryMs(token: string): number {
@@ -160,6 +172,32 @@ function parseJwtExpiryMs(token: string): number {
   return payload.exp * 1000;
 }
 
+let nowFn: () => number = () => Date.now();
+let delayFn: (ms: number) => Promise<void> = (ms) =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+function now(): number {
+  return nowFn();
+}
+
 function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return delayFn(ms);
+}
+
+/**
+ * Test-only injection for wall-clock and delay. Returns a restore function.
+ * Default behavior is byte-identical to Date.now / setTimeout.
+ */
+export function installTokenManagerTimeSource(source: {
+  now?: () => number;
+  delay?: (ms: number) => Promise<void>;
+}): () => void {
+  const previousNow = nowFn;
+  const previousDelay = delayFn;
+  if (source.now) nowFn = source.now;
+  if (source.delay) delayFn = source.delay;
+  return () => {
+    nowFn = previousNow;
+    delayFn = previousDelay;
+  };
 }

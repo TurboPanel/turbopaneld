@@ -1,4 +1,4 @@
-import { assertEquals, assertMatch } from "jsr:@std/assert";
+import { assertEquals, assertMatch } from "@std/assert";
 import type { AnsibleEvent } from "./ansible-events.ts";
 import { InstallEventPresenter } from "./installer-tui.ts";
 import { setActiveInstallPresenter } from "./install-presenter-context.ts";

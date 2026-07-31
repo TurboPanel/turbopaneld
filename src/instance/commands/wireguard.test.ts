@@ -1,4 +1,4 @@
-import { assertEquals } from "jsr:@std/assert";
+import { assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import {
   buildWireguardApplyExtraArgs,
@@ -12,10 +12,10 @@ import {
   setAnsibleAvailabilityCheckForWireguardTests,
   setEnsureWireguardKeypairForTests,
   setEnsureWireguardToolsForTests,
+  setWgShowCheckForTests,
   setWireguardApplyForTests,
   setWireguardStampIoForTests,
   setWireguardStateDirForTests,
-  setWgShowCheckForTests,
 } from "./wireguard.ts";
 import { parseWireguardApplyPayload } from "./contracts.ts";
 
@@ -58,25 +58,29 @@ test("parseWireguardApplyPayload rejects bad public keys", () => {
 });
 
 test("stamp fast-path skips playbook when interface is up", async () => {
-  setEnsureWireguardToolsForTests(async () => {});
-  setEnsureWireguardKeypairForTests(async () => WG_PUBKEY);
-  setWgShowCheckForTests(async () => true);
-  setAnsibleAvailabilityCheckForWireguardTests(async () => true);
+  setEnsureWireguardToolsForTests(() => Promise.resolve());
+  setEnsureWireguardKeypairForTests(() => Promise.resolve(WG_PUBKEY));
+  setWgShowCheckForTests(() => Promise.resolve(true));
+  setAnsibleAvailabilityCheckForWireguardTests(() => Promise.resolve(true));
 
   let playbookRuns = 0;
   setWireguardApplyForTests(async () => {
+    await Promise.resolve();
     playbookRuns += 1;
     return { summary: "should-not-run" };
   });
 
   const stamp = await computeWireguardApplyStamp(basePayload, WG_PUBKEY);
   setWireguardStampIoForTests({
-    read: async () => stamp,
-    write: async () => {},
+    read: () => Promise.resolve(stamp),
+    write: () => Promise.resolve(),
   });
   setWireguardStateDirForTests("/tmp/tp-wg-test-state");
 
-  const result = await handleWireguardApply(basePayload, new Date().toISOString());
+  const result = await handleWireguardApply(
+    basePayload,
+    new Date().toISOString(),
+  );
   assertEquals(result.applied, false);
   assertEquals(result.publicKey, WG_PUBKEY);
   assertEquals(playbookRuns, 0);
@@ -92,7 +96,7 @@ test("stamp fast-path skips playbook when interface is up", async () => {
 });
 
 test("ensureWireguardKeypair returns public key only", async () => {
-  setEnsureWireguardKeypairForTests(async () => WG_PUBKEY);
+  setEnsureWireguardKeypairForTests(() => Promise.resolve(WG_PUBKEY));
   const pubkey = await ensureWireguardKeypair("tpwgtest01");
   assertEquals(pubkey, WG_PUBKEY);
   assertEquals(pubkey.includes("\n"), false);
@@ -119,7 +123,7 @@ test("WireGuard apply extra-vars never include plaintext preshared keys", async 
 
   const { peers, pskFiles } = await materializePeerPresharedKeyFiles(
     payload,
-    async () => [plaintextPsk],
+    () => Promise.resolve([plaintextPsk]),
   );
   assertEquals(pskFiles.length, 1);
   assertEquals(peers[0]?.presharedKeyFile, pskFiles[0]);
@@ -159,21 +163,25 @@ test("parseWireguardApplyPayload accepts multi-CIDR allowedIps and enableIpForwa
     ],
   });
   assertEquals(payload.enableIpForwarding, true);
-  assertEquals(payload.peers[0]?.allowedIps, ["203.0.113.11/32", "10.10.0.0/16"]);
+  assertEquals(payload.peers[0]?.allowedIps, [
+    "203.0.113.11/32",
+    "10.10.0.0/16",
+  ]);
 });
 
 test("enableIpForwarding round-trips into WireguardApplyOpts", async () => {
-  setEnsureWireguardToolsForTests(async () => {});
-  setEnsureWireguardKeypairForTests(async () => WG_PUBKEY);
-  setWgShowCheckForTests(async () => false);
-  setAnsibleAvailabilityCheckForWireguardTests(async () => true);
+  setEnsureWireguardToolsForTests(() => Promise.resolve());
+  setEnsureWireguardKeypairForTests(() => Promise.resolve(WG_PUBKEY));
+  setWgShowCheckForTests(() => Promise.resolve(false));
+  setAnsibleAvailabilityCheckForWireguardTests(() => Promise.resolve(true));
   setWireguardStampIoForTests({
-    read: async () => null,
-    write: async () => {},
+    read: () => Promise.resolve(null),
+    write: () => Promise.resolve(),
   });
 
   const capture: { opts: WireguardApplyOpts | null } = { opts: null };
   setWireguardApplyForTests(async (opts) => {
+    await Promise.resolve();
     capture.opts = opts;
     return { summary: "ok" };
   });
@@ -217,17 +225,18 @@ test("computeWireguardApplyStamp changes when only allowedIps change", async () 
 test("handleWireguardApply deletes PSK temp files after apply", async () => {
   const stateDir = await Deno.makeTempDir({ prefix: "tp-wg-psk-apply-" });
   setWireguardStateDirForTests(stateDir);
-  setEnsureWireguardToolsForTests(async () => {});
-  setEnsureWireguardKeypairForTests(async () => WG_PUBKEY);
-  setWgShowCheckForTests(async () => false);
-  setAnsibleAvailabilityCheckForWireguardTests(async () => true);
+  setEnsureWireguardToolsForTests(() => Promise.resolve());
+  setEnsureWireguardKeypairForTests(() => Promise.resolve(WG_PUBKEY));
+  setWgShowCheckForTests(() => Promise.resolve(false));
+  setAnsibleAvailabilityCheckForWireguardTests(() => Promise.resolve(true));
   setWireguardStampIoForTests({
-    read: async () => null,
-    write: async () => {},
+    read: () => Promise.resolve(null),
+    write: () => Promise.resolve(),
   });
 
   let capturedOpts: WireguardApplyOpts | null = null;
   setWireguardApplyForTests(async (opts) => {
+    await Promise.resolve();
     capturedOpts = opts;
     return { summary: "ok" };
   });
@@ -244,7 +253,7 @@ test("handleWireguardApply deletes PSK temp files after apply", async () => {
   });
 
   await handleWireguardApply(payload, new Date().toISOString(), {
-    decryptSecrets: async () => [plaintextPsk],
+    decryptSecrets: () => Promise.resolve([plaintextPsk]),
   });
 
   assertEquals(capturedOpts !== null, true);
@@ -288,11 +297,12 @@ function payloadFor(interfaceName: string, enableIpForwarding: boolean) {
 }
 
 async function setupForwardingTestEnv(stateDir: string) {
+  await Promise.resolve();
   setWireguardStateDirForTests(stateDir);
-  setEnsureWireguardToolsForTests(async () => {});
-  setEnsureWireguardKeypairForTests(async () => WG_PUBKEY);
-  setWgShowCheckForTests(async () => false);
-  setAnsibleAvailabilityCheckForWireguardTests(async () => true);
+  setEnsureWireguardToolsForTests(() => Promise.resolve());
+  setEnsureWireguardKeypairForTests(() => Promise.resolve(WG_PUBKEY));
+  setWgShowCheckForTests(() => Promise.resolve(false));
+  setAnsibleAvailabilityCheckForWireguardTests(() => Promise.resolve(true));
 }
 
 function teardownForwardingTestEnv() {
@@ -310,6 +320,7 @@ test("gateway promotion enables host-wide forwarding for a lone interface", asyn
 
   const captured: WireguardApplyOpts[] = [];
   setWireguardApplyForTests(async (opts) => {
+    await Promise.resolve();
     captured.push(opts);
     return { summary: "ok" };
   });
@@ -340,6 +351,7 @@ test("gateway demotion disables host-wide forwarding when no interface still nee
 
   const captured: WireguardApplyOpts[] = [];
   setWireguardApplyForTests(async (opts) => {
+    await Promise.resolve();
     captured.push(opts);
     return { summary: "ok" };
   });
@@ -370,6 +382,7 @@ test("demoting one interface keeps host-wide forwarding on while a sibling VPN s
 
   const captured: WireguardApplyOpts[] = [];
   setWireguardApplyForTests(async (opts) => {
+    await Promise.resolve();
     captured.push(opts);
     return { summary: "ok" };
   });
@@ -422,10 +435,11 @@ test("forwarding reconciliation is not skipped on stamp match when desired forwa
     join(stateDir, `${payload.interfaceName}.stamp`),
     `${stamp}\n`,
   );
-  setWgShowCheckForTests(async () => true);
+  setWgShowCheckForTests(() => Promise.resolve(true));
 
   const captured: WireguardApplyOpts[] = [];
   setWireguardApplyForTests(async (opts) => {
+    await Promise.resolve();
     captured.push(opts);
     return { summary: "ok" };
   });

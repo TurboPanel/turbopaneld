@@ -195,7 +195,9 @@ async function ensurePrincipalUser(
       principal.username,
     ]);
     if (!usermodShell.success) {
-      throw new Error(usermodShell.stderr || "Failed to update principal shell");
+      throw new Error(
+        usermodShell.stderr || "Failed to update principal shell",
+      );
     }
   }
 }

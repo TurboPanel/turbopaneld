@@ -1,3 +1,4 @@
+import { assertEquals } from "@std/assert";
 import {
   buildRunReconcileArgs,
   CDN_RUN_SCRIPT,
@@ -17,14 +18,6 @@ import { join } from "@std/path";
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
 const test = Deno.test.bind(Deno);
-
-function assertEquals(actual: unknown, expected: unknown): void {
-  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
-    throw new Error(
-      `Expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`,
-    );
-  }
-}
 
 test("encodeLicenseArg uses base64url without padding", () => {
   const encoded = encodeLicenseArg("license-id", "token");
@@ -277,33 +270,38 @@ test("executeRunReconcile chdir survives daemon directory swap", async () => {
   const daemonDir = join(tmp, "daemon");
   await Deno.mkdir(daemonDir, { recursive: true });
   const originalCwd = Deno.cwd();
-  Deno.chdir(daemonDir);
-
-  const swapScript = [
-    "#!/bin/sh",
-    `mkdir -p "${tmp}/staging"`,
-    `echo x > "${tmp}/staging/main.ts"`,
-    `mv "${daemonDir}" "${daemonDir}.old"`,
-    `mv "${tmp}/staging" "${daemonDir}"`,
-    `rm -rf "${daemonDir}.old"`,
-    "exit 0",
-  ].join("\n");
-
-  await executeRunReconcile({ script: swapScript, args: [] });
-
-  const cwdAfter = Deno.cwd();
-  if (cwdAfter === daemonDir) {
-    throw new Error(
-      `expected cwd to move off deleted daemon dir, still ${cwdAfter}`,
-    );
-  }
-
-  Deno.chdir(originalCwd);
   try {
-    await Deno.remove(tmp, { recursive: true });
-  } catch {
-    await new Deno.Command("sudo", {
-      args: ["rm", "-rf", tmp],
-    }).output();
+    Deno.chdir(daemonDir);
+
+    const swapScript = [
+      "#!/bin/sh",
+      `mkdir -p "${tmp}/staging"`,
+      `echo x > "${tmp}/staging/main.ts"`,
+      `mv "${daemonDir}" "${daemonDir}.old"`,
+      `mv "${tmp}/staging" "${daemonDir}"`,
+      `rm -rf "${daemonDir}.old"`,
+      "exit 0",
+    ].join("\n");
+
+    await executeRunReconcile({ script: swapScript, args: [] });
+
+    const cwdAfter = Deno.cwd();
+    if (cwdAfter === daemonDir) {
+      throw new Error(
+        `expected cwd to move off deleted daemon dir, still ${cwdAfter}`,
+      );
+    }
+  } finally {
+    Deno.chdir(originalCwd);
+    // Directory swap can leave an unremovable tree; never hang on sudo.
+    await Deno.remove(tmp, { recursive: true }).catch((err) => {
+      if (
+        err instanceof Deno.errors.PermissionDenied ||
+        err instanceof Deno.errors.NotFound
+      ) {
+        return;
+      }
+      console.warn(`cleanup ${tmp}:`, err);
+    });
   }
 });

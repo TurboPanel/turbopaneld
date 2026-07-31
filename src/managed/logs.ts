@@ -8,10 +8,7 @@
 
 import { runDocker } from "../deploy/docker-cli.ts";
 import { sanitizeForLog } from "../logger.ts";
-import {
-  managedComposeProject,
-  SAFE_MANAGED_ID_RE,
-} from "./paths.ts";
+import { managedComposeProject, SAFE_MANAGED_ID_RE } from "./paths.ts";
 
 const DEFAULT_TAIL = 200;
 const MAX_TAIL = 2_000;
@@ -48,7 +45,9 @@ export async function collectManagedLogs(
 
   if (!result.success) {
     throw new Error(
-      `managed logs failed: ${sanitizeForLog(result.stderr || "compose logs failed")}`,
+      `managed logs failed: ${
+        sanitizeForLog(result.stderr || "compose logs failed")
+      }`,
     );
   }
 

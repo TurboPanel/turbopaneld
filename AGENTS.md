@@ -197,6 +197,29 @@ compile toolchain).
   production source (`src/**`, excluding `*.test.ts` and `src/paths/layout.ts`)
   references `/opt/turbopanel/platform` or the retired `share/ansible`. Wired
   into `publish-daemon-trunk.yml`.
+- `deno task test` / `test:coverage` / `lint` / `fmt:check` / `check` — quality
+  surface in `deno.json`. The `test` task grants `-A` at the process level on
+  purpose: Deno's per-test `permissions` option can only *reduce* from the
+  process grant, so a narrower task grant would silently break
+  `src/instance/commands/ping.test.ts` (`sys: ["hostname"]`),
+  `src/instance/commands/stop-environment.test.ts` (`run: true`), and the
+  twelve `permissions:` blocks in `src/instance/client.test.ts`. **Do not
+  weaken or remove any existing per-test `permissions` block.** Coverage
+  writes `coverage/lcov.info` (gitignored; already in Sonar / layout
+  `SKIP_DIRS`).
+- **SonarCloud coverage (CI):** `.github/workflows/verify.yml` runs
+  `deno task test:coverage` then uploads LCOV via
+  `sonar.javascript.lcov.reportPaths=coverage/lcov.info` (CI-based analysis;
+  Automatic Analysis must stay **off** for `turbopanel_turbopaneld`). Deno
+  emits repo-relative `SF:src/...` paths — no prefix rewrite needed. The
+  project uses the built-in **Sonar way** quality gate, which fails when
+  **coverage on new code is below 80%** (`new_coverage` LT 80); the scan waits
+  on the gate (`sonar.qualitygate.wait=true`). The scan step is skipped when
+  `SONAR_TOKEN` is unset (fork PRs). Coverage exclusions include
+  `**/*.test.ts`, `src/testing/**`, `src/build-info.ts`, `dist/**`,
+  `publish/**`, the Galaxy Docker role tree, and `workers/**`. The
+  `denoS2187` issue-ignore (`typescript:S2187` on `**/*.test.ts`) remains —
+  LCOV import does not replace that false-positive suppression.
 - `src/orchestration/paths.test.ts` — production/dev default trees, env
   overrides, and the `DENO_VERSION` ↔ role pin
   (`deno test src/orchestration/paths.test.ts`).
@@ -209,6 +232,47 @@ compile toolchain).
   `bash`, not `sh` (Debian `/bin/sh` is dash and silently skips prune/verify
   checks that use `[[`). `run.sh` stays POSIX and inlines a separate copy of the
   manifest helpers for `curl | sh`.
+- **CI gate:** `.github/workflows/verify.yml` is the canonical quality gate —
+  reusable via `workflow_call`, the trunk `publish` job `needs: verify`, and
+  promotion re-verifies artifact hashes only (no new compile from source).
+
+## Testing
+
+Local commands: `deno task test`, `deno task test:coverage`, `deno task
+fmt:check`, `deno task lint`, `deno task check`, `deno task check:layout`. See
+**Guards / tests** above for the `-A` grant, per-test `permissions:` rule, and
+Sonar-way **80% new-code** floor.
+
+**Test style:** use the mandatory `const test = Deno.test.bind(Deno);` alias and
+`new TypeError()` for shape assertions — both under TypeScript style
+(SonarQube) above; do not restate them here.
+
+**Pre-commit** (`.githooks/pre-commit`): `scripts/scan-secrets.sh` first (never
+skippable), then `deno task fmt:check`, `deno task lint`, and a host-free test
+subset (`deno test -A src/instance/ src/metrics/collector/ src/testing/`). Warm
+`deno task test` measured ≈**11s** (three runs: 12.1 / 10.5 / 11.1) — over the
+~5s hook budget, so the full suite stays in `verify.yml`. Set
+`TURBOPANEL_SKIP_HOOK_TESTS` (any non-empty value) to skip fmt/lint/tests after
+the secret scan; the hook also exits 0 with a notice when neither host nor
+vendored Deno is executable. The dev console’s daemon install
+(`cloneOrUpdateRepo` in `../dev/src/lib/platform-install.ts`) sets
+`core.hooksPath=.githooks` after a successful clone or update when
+`.githooks/pre-commit` exists. Production `scripts/run.sh` never wires hooks.
+
+**Shared test helpers:** new tests must consume the helpers in `src/testing/`
+(`fake-websocket.ts`, `fake-clock.ts`, `temp-layout.ts`, `fake-instance-api.ts`,
+`jwks-test-helpers.ts`, re-exported from `src/testing/index.ts`) instead of
+hand-rolled doubles. `src/testing/**` is test-only and must never be imported
+from production code.
+
+**Gate matrix** (one policy with the dev repo):
+
+| Stage | dev | daemon | Rationale |
+| ----- | --- | ------ | --------- |
+| pre-commit | scan-secrets → `pnpm typecheck` → `pnpm test` | scan-secrets → `fmt:check` → `lint` → tests | fast local feedback |
+| PR → `trunk` | `verify.yml` | `verify.yml` | blocks merge |
+| push `trunk` | `verify.yml` | `verify.yml`; `publish` job `needs: verify` | nothing compiles from failing code |
+| promote → canary/rc/release | n/a | **artifact integrity only** (S3 sha256/size + CDN fetch) | no new code enters after publish |
 
 ## Installer script hosting (`workers/turbopanel-sh/`)
 

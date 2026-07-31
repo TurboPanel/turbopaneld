@@ -47,9 +47,15 @@ const MAX_CAUSE_DEPTH = 5;
  */
 function isDockerUnavailable(err: unknown): boolean {
   let current: unknown = err;
-  for (let depth = 0; depth < MAX_CAUSE_DEPTH && current instanceof Error; depth++) {
+  for (
+    let depth = 0;
+    depth < MAX_CAUSE_DEPTH && current instanceof Error;
+    depth++
+  ) {
     const message = current.message;
-    if (DOCKER_UNAVAILABLE_PATTERNS.some((pattern) => message.includes(pattern))) {
+    if (
+      DOCKER_UNAVAILABLE_PATTERNS.some((pattern) => message.includes(pattern))
+    ) {
       return true;
     }
     current = current.cause;

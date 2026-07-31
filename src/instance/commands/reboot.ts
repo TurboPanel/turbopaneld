@@ -45,6 +45,7 @@ export async function handleReboot(
   payload: RebootPayload,
   _daemonReceivedAt: string,
 ): Promise<RebootResult> {
+  await Promise.resolve();
   parseRebootPayload(payload);
 
   logInfo("commands", "scheduling system reboot");

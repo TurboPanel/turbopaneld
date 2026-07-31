@@ -1,4 +1,4 @@
-import { assertEquals, assertRejects, assertThrows } from "jsr:@std/assert";
+import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import {
   assertValidTimezone,
   isValidTimezone,
@@ -68,8 +68,9 @@ test({
       setTimeSyncReaderForTests,
     } = await import("./timezone.ts");
 
-    setAnsibleAvailabilityCheckForTests(async () => false);
+    setAnsibleAvailabilityCheckForTests(() => Promise.resolve(false));
     setTimeSyncApplyForTests(async () => {
+      await Promise.resolve();
       throw new Error("runner should not be called");
     });
     setTimeSyncReaderForTests(() => {
@@ -101,8 +102,9 @@ test({
     } = await import("./timezone.ts");
 
     let applied: unknown;
-    setAnsibleAvailabilityCheckForTests(async () => true);
+    setAnsibleAvailabilityCheckForTests(() => Promise.resolve(true));
     setTimeSyncApplyForTests(async (opts) => {
+      await Promise.resolve();
       applied = opts;
       return { summary: "ok" };
     });

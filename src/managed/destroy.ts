@@ -72,7 +72,10 @@ export async function handleManagedDestroy(
     }
   }
 
-  const remaining = await removeManagedIngressEntries(layout, payload.managedId);
+  const remaining = await removeManagedIngressEntries(
+    layout,
+    payload.managedId,
+  );
   if (remaining !== null) {
     await ensureManagedIngress(layout, remaining);
   }

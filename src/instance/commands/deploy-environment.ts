@@ -374,7 +374,8 @@ async function materializeDeployTls(
   return hostnameTlsMap(parsedPayload);
 }
 
-function buildDeploySummary(
+/** Pure result-shaping helper — exported for hermetic contract tests. */
+export function buildDeploySummary(
   environmentId: string,
   labeledServices: string[],
   traditionalWebSites: EnvironmentDeployTraditionalWebSite[],
@@ -389,7 +390,8 @@ function buildDeploySummary(
   return `${summaryParts.join(" + ")} for environment ${environmentId}`;
 }
 
-function buildDeployServiceNames(
+/** Pure result-shaping helper — exported for hermetic contract tests. */
+export function buildDeployServiceNames(
   labeledServices: string[],
   traditionalWebSites: EnvironmentDeployTraditionalWebSite[],
 ): string[] {
@@ -397,6 +399,36 @@ function buildDeployServiceNames(
     ...labeledServices,
     ...traditionalWebSites.map((site) => site.composeServiceName),
   ].sort((a, b) => a.localeCompare(b));
+}
+
+/**
+ * Builds the {@link EnvironmentDeployResult} returned after a successful deploy.
+ * Exported for hermetic success-path shape coverage without Docker/ingress I/O.
+ */
+export function shapeEnvironmentDeployResult(input: {
+  projectName: string;
+  environmentId: string;
+  labeledServices: string[];
+  traditionalWebSites: EnvironmentDeployTraditionalWebSite[];
+  containers: EnvironmentDeployContainer[] | null;
+}): EnvironmentDeployResult {
+  const summary = buildDeploySummary(
+    input.environmentId,
+    input.labeledServices,
+    input.traditionalWebSites,
+  );
+  const serviceNames = buildDeployServiceNames(
+    input.labeledServices,
+    input.traditionalWebSites,
+  );
+  return {
+    projectName: input.projectName,
+    summary,
+    ...(serviceNames.length > 0 ? { services: serviceNames } : {}),
+    // Include `containers: []` when collection succeeded with no rows; omit the
+    // field entirely when collection failed (non-authoritative).
+    ...(input.containers === null ? {} : { containers: input.containers }),
+  };
 }
 
 export async function handleEnvironmentDeploy(
@@ -482,27 +514,16 @@ export async function handleEnvironmentDeploy(
     )
     : [];
 
-  const summary = buildDeploySummary(
-    parsedPayload.environmentId,
-    labeledServices,
-    traditionalWebSites,
-  );
   logInfo(
     "commands",
     `environment.deploy completed project=${parsedPayload.projectName} received=${daemonReceivedAt}`,
   );
 
-  const serviceNames = buildDeployServiceNames(
+  return shapeEnvironmentDeployResult({
+    projectName: parsedPayload.projectName,
+    environmentId: parsedPayload.environmentId,
     labeledServices,
     traditionalWebSites,
-  );
-
-  return {
-    projectName: parsedPayload.projectName,
-    summary,
-    ...(serviceNames.length > 0 ? { services: serviceNames } : {}),
-    // Include `containers: []` when collection succeeded with no rows; omit the
-    // field entirely when collection failed (non-authoritative).
-    ...(containers === null ? {} : { containers }),
-  };
+    containers,
+  });
 }

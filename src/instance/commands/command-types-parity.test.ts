@@ -1,7 +1,11 @@
-import { assertEquals, assertThrows } from "jsr:@std/assert";
+import { assertEquals, assertThrows } from "@std/assert";
 import {
   COMMAND_TYPES,
+  type CommandAckMessage,
+  type CommandDispatchMessage,
+  type CommandOutcomeMessage,
   parseEnvironmentDeployPayload,
+  parseEnvironmentStopPayload,
   parseManagedApplyPayload,
   parseManagedApplyResult,
   parseManagedBackupPayload,
@@ -167,7 +171,120 @@ test("environment.deploy traditionalWebSites fixture round-trips", () => {
   });
   assertEquals(payload.traditionalWebSites?.[0]?.engine, "nginx");
   assertEquals(payload.traditionalWebSites?.[0]?.listenPort, 18080);
-  assertEquals(payload.traditionalWebSites?.[0]?.principal?.username, "site_user");
+  assertEquals(
+    payload.traditionalWebSites?.[0]?.principal?.username,
+    "site_user",
+  );
+});
+
+test("environment.deploy principalMaterial round-trips home and shell", () => {
+  const payload = parseEnvironmentDeployPayload({
+    environmentId: "env-1",
+    projectId: "proj-1",
+    organizationId: "org-1",
+    projectName: "demo",
+    composeYaml: "services: {}\n",
+    hostings: [],
+    principalMaterial: [
+      {
+        principalId: "00000000-0000-4000-8000-000000000099",
+        username: "app_user",
+        uid: 10001,
+        gid: 10001,
+        home: "/srv/users/00000000-0000-4000-8000-000000000099",
+        shell: "/usr/sbin/nologin",
+      },
+    ],
+  });
+  assertEquals(
+    payload.principalMaterial?.[0]?.home,
+    "/srv/users/00000000-0000-4000-8000-000000000099",
+  );
+  assertEquals(payload.principalMaterial?.[0]?.shell, "/usr/sbin/nologin");
+});
+
+test("environment.deploy round-trips dockerExternalNetworks and serviceHooks", () => {
+  const payload = parseEnvironmentDeployPayload({
+    environmentId: "env-1",
+    projectId: "proj-1",
+    organizationId: "org-1",
+    projectName: "demo",
+    composeYaml: "services:\n  web:\n    image: nginx\n",
+    hostings: [],
+    dockerExternalNetworks: ["org-net-a"],
+    serviceHooks: [
+      {
+        composeServiceName: "web",
+        preDeployCommand: "echo pre",
+        postDeployCommand: "echo post",
+        buildDisableCache: true,
+      },
+    ],
+  });
+  assertEquals(payload.dockerExternalNetworks, ["org-net-a"]);
+  assertEquals(payload.serviceHooks?.[0]?.composeServiceName, "web");
+  assertEquals(payload.serviceHooks?.[0]?.preDeployCommand, "echo pre");
+  assertEquals(payload.serviceHooks?.[0]?.postDeployCommand, "echo post");
+  assertEquals(payload.serviceHooks?.[0]?.buildDisableCache, true);
+});
+
+test("environment.stop payload parser round-trips", () => {
+  assertEquals(
+    parseEnvironmentStopPayload({
+      environmentId: "env-1",
+      projectId: "proj-1",
+      projectName: "tp-demo",
+    }),
+    {
+      environmentId: "env-1",
+      projectId: "proj-1",
+      projectName: "tp-demo",
+    },
+  );
+  assertThrows(
+    () => parseEnvironmentStopPayload(null),
+    TypeError,
+    "Invalid environment stop payload",
+  );
+  assertThrows(
+    () => parseEnvironmentStopPayload({ environmentId: "env-1" }),
+    TypeError,
+    "projectId must be a non-empty string",
+  );
+});
+
+test("command wire message types carry required shape fields", () => {
+  const dispatch: CommandDispatchMessage = {
+    type: "command-dispatch",
+    id: "corr-1",
+    commandId: "cmd-1",
+    commandType: "daemon.ping",
+    payload: {},
+    at: "2020-01-01T00:00:00.000Z",
+  };
+  assertEquals(dispatch.type, "command-dispatch");
+  assertEquals(dispatch.commandType, "daemon.ping");
+
+  const ack: CommandAckMessage = {
+    type: "command-ack",
+    id: "corr-1",
+    at: "2020-01-01T00:00:01.000Z",
+    daemonReceivedAt: "2020-01-01T00:00:01.000Z",
+  };
+  assertEquals(ack.type, "command-ack");
+  assertEquals(ack.id, dispatch.id);
+
+  const outcome: CommandOutcomeMessage = {
+    type: "command-outcome",
+    id: "corr-1",
+    ok: true,
+    result: { pong: true },
+    at: "2020-01-01T00:00:02.000Z",
+    daemonReceivedAt: ack.daemonReceivedAt,
+    daemonRespondedAt: "2020-01-01T00:00:02.000Z",
+  };
+  assertEquals(outcome.type, "command-outcome");
+  assertEquals(outcome.ok, true);
 });
 
 test("server.wireguard.apply fixture round-trips", () => {

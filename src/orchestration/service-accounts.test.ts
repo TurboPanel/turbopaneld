@@ -221,7 +221,9 @@ test("web-service-user map pins optional web server identities", async () => {
   const actualKeys = Object.keys(map).sort((a, b) => a.localeCompare(b));
   if (actualKeys.join(",") !== expectedKeys.join(",")) {
     throw new Error(
-      `web_service_user_map keys: expected [${expectedKeys.join(", ")}], got [${actualKeys.join(", ")}]`,
+      `web_service_user_map keys: expected [${expectedKeys.join(", ")}], got [${
+        actualKeys.join(", ")
+      }]`,
     );
   }
 
@@ -361,7 +363,8 @@ test("systemd units and docker wrappers bind the expected identity variables", a
   for (const { role, uidVar, gidVar } of dockerRoles) {
     const tasks = await readRole(`roles/${role}/tasks/main.yml`);
     const userPattern = new RegExp(
-      String.raw`"--user"\s*\n\s*-\s*"\{\{\s*${uidVar}\s*\}\}:\{\{\s*${gidVar}\s*\}\}"`,
+      String
+        .raw`"--user"\s*\n\s*-\s*"\{\{\s*${uidVar}\s*\}\}:\{\{\s*${gidVar}\s*\}\}"`,
     );
     assertMatch(
       tasks,
@@ -379,10 +382,14 @@ test("identity-cutover argv rename lines map legacy names to canonical tp* accou
   const argvPatterns = [
     String.raw`argv:\s*\[\s*groupmod\s*,\s*-n\s*,\s*tp\s*,\s*turbopanel\s*\]`,
     String.raw`argv:\s*\[\s*usermod\s*,\s*-l\s*,\s*tp\s*,\s*turbopanel\s*\]`,
-    String.raw`argv:\s*\[\s*groupmod\s*,\s*-n\s*,\s*tpcache\s*,\s*turbopanelc\s*\]`,
-    String.raw`argv:\s*\[\s*usermod\s*,\s*-l\s*,\s*tpcache\s*,\s*turbopanelc\s*\]`,
-    String.raw`argv:\s*\[\s*groupmod\s*,\s*-n\s*,\s*tpctrl\s*,\s*turbopaneli\s*\]`,
-    String.raw`argv:\s*\[\s*usermod\s*,\s*-l\s*,\s*tpctrl\s*,\s*turbopaneli\s*\]`,
+    String
+      .raw`argv:\s*\[\s*groupmod\s*,\s*-n\s*,\s*tpcache\s*,\s*turbopanelc\s*\]`,
+    String
+      .raw`argv:\s*\[\s*usermod\s*,\s*-l\s*,\s*tpcache\s*,\s*turbopanelc\s*\]`,
+    String
+      .raw`argv:\s*\[\s*groupmod\s*,\s*-n\s*,\s*tpctrl\s*,\s*turbopaneli\s*\]`,
+    String
+      .raw`argv:\s*\[\s*usermod\s*,\s*-l\s*,\s*tpctrl\s*,\s*turbopaneli\s*\]`,
   ];
 
   for (const pattern of argvPatterns) {

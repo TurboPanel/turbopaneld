@@ -277,7 +277,9 @@ function readConfiguredServers(): {
     : undefined;
   return {
     ntpServers,
-    ...(fallback && fallback.length > 0 ? { fallbackNtpServers: fallback } : {}),
+    ...(fallback && fallback.length > 0
+      ? { fallbackNtpServers: fallback }
+      : {}),
   };
 }
 

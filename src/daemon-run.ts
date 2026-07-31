@@ -1,4 +1,9 @@
-import { DockerClient, DockerMonitor } from "./docker/index.ts";
+import {
+  decideDockerMonitorAttach,
+  dockerBinaryPresent,
+  DockerClient,
+  DockerMonitor,
+} from "./docker/index.ts";
 import { connectInstance } from "./instance/client.ts";
 import { logInfo, logWarn } from "./logger.ts";
 import { createSentinel, type SentinelOptions } from "./monitor/index.ts";
@@ -21,13 +26,30 @@ let dockerClient: DockerClient | undefined;
 const sentinelOptions: SentinelOptions = {};
 if (orchestrationReady && shouldEnableDockerIntegration()) {
   dockerClient = new DockerClient();
-  if (!(await dockerClient.ping())) {
-    logWarn(
+  const decision = decideDockerMonitorAttach({
+    socketReachable: await dockerClient.ping(),
+    dockerBinaryPresent: await dockerBinaryPresent(),
+  });
+  if (decision.attach) {
+    if (decision.warnSocketDown) {
+      logWarn(
+        "docker",
+        "Docker socket not reachable yet — monitor will retry on each poll",
+      );
+    }
+    sentinelOptions.dockerMonitor = new DockerMonitor(dockerClient);
+  } else {
+    logInfo(
       "docker",
-      "Docker socket not reachable yet — monitor will retry on each poll",
+      "Docker not installed yet — skipping monitor until converge installs it",
     );
+    try {
+      dockerClient.close();
+    } catch {
+      // Probe HttpClient may already be closed.
+    }
+    dockerClient = undefined;
   }
-  sentinelOptions.dockerMonitor = new DockerMonitor(dockerClient);
 }
 const sentinel = createSentinel(sentinelOptions);
 // Future: daemon-side SQLite monitoring store will subscribe to

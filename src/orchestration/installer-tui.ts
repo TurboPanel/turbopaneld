@@ -80,7 +80,7 @@ export class InstallEventPresenter {
   }
 
   /** Capture quiet-mode stderr / unparseable stdout for presenter detail on failure. */
-  onRawLine(stream: AnsibleRawLineStream, line: string): void {
+  onRawLine(_stream: AnsibleRawLineStream, line: string): void {
     const sanitized = sanitizeStatusLine(line);
     if (!sanitized) return;
 

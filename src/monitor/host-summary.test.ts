@@ -1,5 +1,6 @@
 import { collectHostSummary } from "./host-summary.ts";
 import type { MonitorInstanceSummary } from "./protocol.ts";
+import { assert, assertExists } from "@std/assert";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -19,19 +20,23 @@ test("collectHostSummary returns contract-shaped sections", async () => {
 
   assertSectionShape(summary);
 
+  let hasProcStat = true;
   try {
     await Deno.stat("/proc/stat");
-    assertExists(summary.cpu);
-    assert(typeof summary.cpu!.cores === "number");
-    assertExists(summary.memory);
-    assert(typeof summary.memory!.totalBytes === "number");
-    assertExists(summary.load);
-    assert(typeof summary.load!.one === "number");
-    assert(typeof summary.load!.five === "number");
-    assert(typeof summary.load!.fifteen === "number");
   } catch {
     // Non-Linux hosts rely on the generic shape checks above.
+    hasProcStat = false;
   }
+  if (!hasProcStat) return;
+
+  assertExists(summary.cpu);
+  assert(typeof summary.cpu.cores === "number");
+  assertExists(summary.memory);
+  assert(typeof summary.memory.totalBytes === "number");
+  assertExists(summary.load);
+  assert(typeof summary.load.one === "number");
+  assert(typeof summary.load.five === "number");
+  assert(typeof summary.load.fifteen === "number");
 });
 
 function assertSectionShape(summary: MonitorInstanceSummary): void {
@@ -73,18 +78,4 @@ function assertSectionShape(summary: MonitorInstanceSummary): void {
   if (summary.bootId != null) {
     assert(typeof summary.bootId === "string");
   }
-}
-
-function assertExists<T>(
-  value: T | null | undefined,
-  message = "expected value to exist",
-): asserts value is T {
-  if (value == null) throw new Error(message);
-}
-
-function assert(
-  condition: unknown,
-  message = "assertion failed",
-): asserts condition {
-  if (!condition) throw new Error(message);
 }

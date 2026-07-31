@@ -24,7 +24,10 @@ import { ensureDocker } from "../deploy/ensure-docker.ts";
 import { spawnDockerStreaming } from "../deploy/docker-cli.ts";
 import { sanitizeForLog } from "../logger.ts";
 import { resolveLayout } from "../paths/layout.ts";
-import { collectManagedContainers, resolveSoleEngineContainer } from "./containers.ts";
+import {
+  collectManagedContainers,
+  resolveSoleEngineContainer,
+} from "./containers.ts";
 import { getManagedEngineRuntime } from "./engines/index.ts";
 import { ManagedBackupNotSupportedError } from "./engines/types.ts";
 import type { ManagedEngineContext } from "./engines/types.ts";
@@ -139,7 +142,9 @@ export async function pipeDumpOutput(
       success: false,
       stderr: stderrText.length > 0
         ? stderrText
-        : `dump output stream failed: ${sanitizeForLog(formatPipeError(pipeError))}`,
+        : `dump output stream failed: ${
+          sanitizeForLog(formatPipeError(pipeError))
+        }`,
     };
   }
   return { success: status.success, stderr: stderrText };
@@ -171,7 +176,9 @@ export async function pipeRestoreInput(
       success: false,
       stderr: stderrText.length > 0
         ? stderrText
-        : `restore input stream failed: ${sanitizeForLog(formatPipeError(pipeError))}`,
+        : `restore input stream failed: ${
+          sanitizeForLog(formatPipeError(pipeError))
+        }`,
     };
   }
   return { success: status.success, stderr: stderrText };
@@ -399,7 +406,8 @@ export async function handleManagedBackup(
     checksum,
     completedAt: now().toISOString(),
     database,
-    summary: `managed.backup completed for ${payload.managedId} (received ${daemonReceivedAt})`,
+    summary:
+      `managed.backup completed for ${payload.managedId} (received ${daemonReceivedAt})`,
   };
   if (pruned.length > 0) result.pruned = pruned;
   return result;
@@ -434,7 +442,9 @@ export async function handleManagedRestore(
   );
 
   if (!(await pathExists(artifactPath))) {
-    throw new Error(`managed.restore backup artifact not found: ${payload.backupId}`);
+    throw new Error(
+      `managed.restore backup artifact not found: ${payload.backupId}`,
+    );
   }
 
   const stat = await Deno.stat(artifactPath);
@@ -483,6 +493,7 @@ export async function handleManagedRestore(
     status: "restored",
     restoredAt: now().toISOString(),
     database,
-    summary: `managed.restore completed for ${payload.managedId} (received ${daemonReceivedAt})`,
+    summary:
+      `managed.restore completed for ${payload.managedId} (received ${daemonReceivedAt})`,
   };
 }

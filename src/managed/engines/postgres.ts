@@ -15,8 +15,8 @@ import {
   dropDatabaseSql,
   dropRoleSql,
   grantDatabaseSql,
-  quoteIdentifier,
   type ManagedDatabasePrivilege,
+  quoteIdentifier,
 } from "./postgres-sql.ts";
 import type {
   ManagedEngineBackupRuntime,
@@ -82,7 +82,9 @@ async function runPsql(
   );
   if (!result.success) {
     throw new Error(
-      `psql failed: ${sanitizeForLog(result.stderr || result.stdout || "unknown")}`,
+      `psql failed: ${
+        sanitizeForLog(result.stderr || result.stdout || "unknown")
+      }`,
     );
   }
 }
@@ -122,7 +124,10 @@ async function applyOneCredential(
     for (const raw of privileges) {
       const privilege = asPrivilege(raw);
       if (privilege === null) continue;
-      await runPsql(ctx, grantDatabaseSql(database, credential.username, privilege));
+      await runPsql(
+        ctx,
+        grantDatabaseSql(database, credential.username, privilege),
+      );
     }
   }
 }

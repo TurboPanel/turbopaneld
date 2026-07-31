@@ -1,4 +1,5 @@
 import { join } from "@std/path";
+import { assertEquals } from "@std/assert";
 import {
   CANONICAL_INSTANCE_CA_PATH,
   createInstanceHttpClient,
@@ -17,6 +18,7 @@ import {
   resolveLayout,
 } from "../paths/layout.ts";
 import { resolveInstanceConfigDir } from "./public-urls-env.ts";
+import { withTempLayout } from "../testing/temp-layout.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -29,21 +31,15 @@ const test = Deno.test.bind(Deno);
 const CADDY_HTTPS = "https://localhost:8443";
 const INSTANCE_CA = "/etc/turbopanel/instance-ca.pem";
 
-function assertEq(actual: string, expected: string, label: string): void {
-  if (actual !== expected) {
-    throw new Error(`${label}: expected ${expected}, got ${actual}`);
-  }
-}
-
 test("development layout resolves shared FHS socket and CA paths", () => {
   const layout = resolveLayout({}, { forceMode: "development" });
-  assertEq(layout.runDir, "/run/turbopanel", "runDir");
-  assertEq(
+  assertEquals(layout.runDir, "/run/turbopanel", "runDir");
+  assertEquals(
     layout.instanceCaPath,
     join(DEV_CONFIG_DIR_DEFAULT, "instance-ca.pem"),
     "instanceCaPath",
   );
-  assertEq(
+  assertEquals(
     layout.instanceConfigDir,
     join(DEV_CONFIG_DIR_DEFAULT, "instance"),
     "instanceConfigDir",
@@ -52,13 +48,13 @@ test("development layout resolves shared FHS socket and CA paths", () => {
 
 test("production layout resolves FHS socket and CA paths", () => {
   const layout = resolveLayout({}, { forceMode: "production" });
-  assertEq(layout.runDir, PROD_RUN_DIR_DEFAULT, "runDir");
-  assertEq(
+  assertEquals(layout.runDir, PROD_RUN_DIR_DEFAULT, "runDir");
+  assertEquals(
     layout.instanceCaPath,
     join(PROD_CONFIG_DIR_DEFAULT, "instance-ca.pem"),
     "instanceCaPath",
   );
-  assertEq(
+  assertEquals(
     layout.instanceConfigDir,
     join(PROD_CONFIG_DIR_DEFAULT, "instance"),
     "instanceConfigDir",
@@ -71,8 +67,8 @@ test("DEFAULT_SOCKET_DIR and CANONICAL_INSTANCE_CA_PATH match active layout", ()
     TURBOPANEL_CONFIG_DIR: readEnv("TURBOPANEL_CONFIG_DIR"),
     TURBOPANEL_DAEMON_ROOT: readEnv("TURBOPANEL_DAEMON_ROOT"),
   });
-  assertEq(DEFAULT_SOCKET_DIR, layout.runDir, "DEFAULT_SOCKET_DIR");
-  assertEq(
+  assertEquals(DEFAULT_SOCKET_DIR, layout.runDir, "DEFAULT_SOCKET_DIR");
+  assertEquals(
     CANONICAL_INSTANCE_CA_PATH,
     layout.instanceCaPath,
     "CANONICAL_INSTANCE_CA_PATH",
@@ -83,11 +79,11 @@ test("resolveInstanceSocket uses TURBOPANEL_RUN_DIR override", () => {
   const socket = resolveInstanceSocket({
     TURBOPANEL_RUN_DIR: "/custom/run",
   });
-  assertEq(socket, "/custom/run/instance.sock", "socket path");
+  assertEquals(socket, "/custom/run/instance.sock", "socket path");
 });
 
 test("resolveInstanceConfigDir honors TURBOPANEL_CONFIG_DIR override", () => {
-  assertEq(
+  assertEquals(
     resolveInstanceConfigDir({ TURBOPANEL_CONFIG_DIR: "/custom/config" }),
     "/custom/config/instance",
     "instance config dir",
@@ -99,30 +95,38 @@ test("layout env overrides apply to socket and config paths", () => {
     TURBOPANEL_RUN_DIR: "/custom/run",
     TURBOPANEL_CONFIG_DIR: "/custom/config",
   }, { forceMode: "production" });
-  assertEq(layout.runDir, "/custom/run", "runDir");
-  assertEq(layout.configDir, "/custom/config", "configDir");
-  assertEq(
+  assertEquals(layout.runDir, "/custom/run", "runDir");
+  assertEquals(layout.configDir, "/custom/config", "configDir");
+  assertEquals(
     layout.instanceCaPath,
     "/custom/config/instance-ca.pem",
     "instanceCaPath",
   );
 });
 
-test("TURBOPANEL_STATE_DIR controls server identity storage", () => {
-  const env = { TURBOPANEL_STATE_DIR: "/custom/state" };
-  const layout = resolveLayout(env, { forceMode: "development" });
-  assertEq(layout.stateDir, "/custom/state", "stateDir");
-  assertEq(layout.daemonStateDir, "/custom/state", "daemonStateDir");
-  assertEq(
-    resolveServerIdentityDir(env),
-    "/custom/state",
-    "resolveServerIdentityDir",
-  );
-  assertEq(
-    resolveServerKeyPath(env),
-    "/custom/state/server-key.json",
-    "resolveServerKeyPath",
-  );
+test("TURBOPANEL_STATE_DIR controls server identity storage", async () => {
+  await withTempLayout((fixture) => {
+    const layout = resolveLayout(fixture.env, { forceMode: "development" });
+    assertEquals(layout.stateDir, fixture.dirs.stateDir, "stateDir");
+    assertEquals(
+      layout.daemonStateDir,
+      fixture.dirs.stateDir,
+      "daemonStateDir",
+    );
+    assertEquals(layout.configDir, fixture.dirs.configDir, "configDir");
+    assertEquals(layout.logDir, fixture.dirs.logDir, "logDir");
+    assertEquals(layout.runDir, fixture.dirs.runDir, "runDir");
+    assertEquals(
+      resolveServerIdentityDir(fixture.env),
+      fixture.dirs.stateDir,
+      "resolveServerIdentityDir",
+    );
+    assertEquals(
+      resolveServerKeyPath(fixture.env),
+      join(fixture.dirs.stateDir, "server-key.json"),
+      "resolveServerKeyPath",
+    );
+  });
 });
 
 test("resolveInstanceConfig uses url mode when TURBOPANEL_INSTANCE_URL is set", () => {

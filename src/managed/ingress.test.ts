@@ -1,15 +1,9 @@
-/**
- * Jest/Mocha-shaped alias for {@link Deno.test}.
- *
- * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
- * reports Deno suites as empty; keep this alias so analysis sees real tests.
- */
 import {
   assertEquals,
   assertRejects,
   assertStringIncludes,
   assertThrows,
-} from "jsr:@std/assert@1";
+} from "@std/assert";
 import { join } from "@std/path";
 import { parse } from "yaml";
 import { resolveLayout } from "../paths/layout.ts";
@@ -17,20 +11,26 @@ import type { LayoutPaths } from "../paths/layout.ts";
 import {
   collectManagedIngressEntries,
   dedupeManagedIngressEntries,
+  MANAGED_INGRESS_NETWORK,
   managedEntrypointName,
+  type ManagedIngressEntry,
+  ManagedPortConflictError,
   managedTcpRouterRule,
   managedTraefikCompose,
-  ManagedPortConflictError,
-  MANAGED_INGRESS_NETWORK,
   removeManagedIngressEntries,
   syncManagedIngressEntries,
-  type ManagedIngressEntry,
 } from "./ingress.ts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
 const test = Deno.test.bind(Deno);
 
 async function makeTestLayout(): Promise<{
@@ -49,8 +49,9 @@ async function makeTestLayout(): Promise<{
 }
 
 function entry(
-  overrides: Partial<ManagedIngressEntry> &
-    Pick<ManagedIngressEntry, "managedId" | "publishedPort">,
+  overrides:
+    & Partial<ManagedIngressEntry>
+    & Pick<ManagedIngressEntry, "managedId" | "publishedPort">,
 ): ManagedIngressEntry {
   return {
     protocol: "tcp",
@@ -66,7 +67,9 @@ test("managedTraefikCompose uses managed network and omits tenant HTTP/TLS entry
   assertStringIncludes(compose, "external: true");
   assertStringIncludes(compose, "traefik:v3.6.6");
   if (compose.includes("entrypoints.web")) {
-    throw new TypeError("managed Traefik must not declare tenant web entrypoints");
+    throw new TypeError(
+      "managed Traefik must not declare tenant web entrypoints",
+    );
   }
   if (compose.includes("websecure") || compose.includes("proxyProtocol")) {
     throw new TypeError("managed Traefik must not declare TLS/proxyProtocol");
@@ -315,7 +318,9 @@ test("syncManagedIngressEntries rejects http/tcp same-port claims with no partia
       await Deno.stat(
         join(layout.stateDir, "managed", "ingress", "svc-tcp.json"),
       );
-      throw new TypeError("svc-tcp.json must not exist after http/tcp conflict");
+      throw new TypeError(
+        "svc-tcp.json must not exist after http/tcp conflict",
+      );
     } catch (err) {
       if (!(err instanceof Deno.errors.NotFound)) throw err;
     }

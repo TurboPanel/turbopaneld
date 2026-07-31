@@ -57,10 +57,10 @@ import {
   SET_HOSTNAME_PLAYBOOK,
   SOCKET_DIRS_PLAYBOOK,
   TIME_SYNC_APPLY_PLAYBOOK,
-  WIREGUARD_APPLY_PLAYBOOK,
   UV_BIN,
   VENV_BIN_DIR,
   VENV_DIR,
+  WIREGUARD_APPLY_PLAYBOOK,
 } from "./paths.ts";
 
 async function fileExists(path: string): Promise<boolean> {
@@ -604,7 +604,9 @@ export type WireguardApplyOpts = {
   manageForwarding?: boolean;
 };
 
-export function buildWireguardApplyExtraArgs(opts: WireguardApplyOpts): string[] {
+export function buildWireguardApplyExtraArgs(
+  opts: WireguardApplyOpts,
+): string[] {
   const extra: Record<string, unknown> = {
     wireguard_interface: opts.interfaceName,
     wireguard_address: opts.address,

@@ -107,7 +107,9 @@ export async function applySecretVariablesToCompose(
 
   const document = parseComposeDocument(composeYaml);
   const services = document.services as Record<string, ComposeService>;
-  const plaintexts = await decryptSecrets(material.map((entry) => entry.valueEnvelope));
+  const plaintexts = await decryptSecrets(
+    material.map((entry) => entry.valueEnvelope),
+  );
   if (plaintexts.length !== material.length) {
     throw new Error("secrets/decrypt returned unexpected length");
   }

@@ -91,8 +91,43 @@ function applyDaemonEnvToProcess(): void {
 
 applyDaemonEnvToProcess();
 
+/**
+ * Drop bulky host payloads (especially `ansible_facts` from Gathering Facts)
+ * before writing JSONL for the TUI. Full facts can be 100KB+ per event and
+ * stall Ink while the console JSON.parses them on the main thread.
+ */
+function slimAnsibleEvent(event: unknown): unknown {
+  if (typeof event !== "object" || event === null) {
+    return event;
+  }
+  const record = event as Record<string, unknown>;
+  const hosts = record.hosts;
+  if (typeof hosts !== "object" || hosts === null) {
+    return event;
+  }
+  const slimHosts: Record<string, unknown> = {};
+  for (
+    const [host, result] of Object.entries(hosts as Record<string, unknown>)
+  ) {
+    if (typeof result !== "object" || result === null) {
+      slimHosts[host] = result;
+      continue;
+    }
+    const body = result as Record<string, unknown>;
+    slimHosts[host] = {
+      action: body.action,
+      changed: body.changed,
+      failed: body.failed,
+      skipped: body.skipped,
+      unreachable: body.unreachable,
+      msg: body.msg,
+    };
+  }
+  return { ...record, hosts: slimHosts };
+}
+
 function emitEvent(event: unknown): void {
-  console.log(JSON.stringify(event));
+  console.log(JSON.stringify(slimAnsibleEvent(event)));
 }
 
 function usage(): never {
@@ -169,6 +204,9 @@ async function runInstanceDevInstall(): Promise<void> {
     {
       cwd: ANSIBLE_PLAYBOOK_CWD,
       env: devOrchestrationAnsibleEnv(layout),
+      // TUI consumes JSONL via onEvent only — suppress structured log lines on
+      // stdout so they are not mixed with event payloads.
+      quiet: true,
       onEvent: emitEvent,
     },
   );
@@ -215,6 +253,7 @@ async function runPlaybook(): Promise<void> {
     {
       cwd: ANSIBLE_PLAYBOOK_CWD,
       env: ansibleEnv(),
+      quiet: true,
       onEvent: emitEvent,
     },
   );

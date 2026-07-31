@@ -32,7 +32,10 @@ function resolveOwnership(
  * Legacy volume naming for older instances that omit `volumeName`.
  * The instance owns naming for new deploys — prefer `entry.volumeName`.
  */
-function namespaceDockerVolumeName(organizationId: string, name: string): string {
+function namespaceDockerVolumeName(
+  organizationId: string,
+  name: string,
+): string {
   return `tp-${organizationId.slice(0, 8)}-${name}`;
 }
 
@@ -82,7 +85,9 @@ async function materializeDockerVolume(
     : namespaceDockerVolumeName(organizationId, entry.name);
   const create = await runDocker(["volume", "create", volumeName]);
   if (!create.success) {
-    throw new Error(create.stderr || `Failed to create docker volume ${volumeName}`);
+    throw new Error(
+      create.stderr || `Failed to create docker volume ${volumeName}`,
+    );
   }
   return volumeName;
 }
@@ -132,7 +137,9 @@ async function decryptEntryContents(
     return entries.map(() => "");
   }
   if (!decryptSecrets) {
-    throw new Error("Storage content present but secrets decrypt is unavailable");
+    throw new Error(
+      "Storage content present but secrets decrypt is unavailable",
+    );
   }
   const decryptedContents = await decryptSecrets(contentEnvelopes);
   if (decryptedContents.length !== entries.length) {
@@ -149,7 +156,9 @@ function resolveEntryFileContent(
   if (!envelope || envelope.length === 0) return "";
   if (!isEncryptedEnvelope(envelope)) return envelope;
   if (typeof decrypted !== "string") {
-    throw new TypeError(`Failed to decrypt storage content for ${entry.storageId}`);
+    throw new TypeError(
+      `Failed to decrypt storage content for ${entry.storageId}`,
+    );
   }
   return decrypted;
 }

@@ -1,4 +1,4 @@
-import { assert, assertEquals, assertMatch } from "jsr:@std/assert";
+import { assert, assertEquals, assertMatch } from "@std/assert";
 import type { CommandDispatchMessage } from "./contracts.ts";
 
 /**
@@ -102,6 +102,7 @@ test({
 
     let executorScheduled = false;
     setRebootExecutorForTests(async () => {
+      await Promise.resolve();
       executorScheduled = true;
       return { success: true, stderr: "" };
     });
@@ -173,8 +174,8 @@ test({
       setTimeSyncReaderForTests,
     } = await import("./timezone.ts");
 
-    setAnsibleAvailabilityCheckForTests(async () => true);
-    setTimeSyncApplyForTests(async () => ({ summary: "tz-ok" }));
+    setAnsibleAvailabilityCheckForTests(() => Promise.resolve(true));
+    setTimeSyncApplyForTests(() => Promise.resolve({ summary: "tz-ok" }));
     setTimeSyncReaderForTests(() => ({
       timezone: "UTC",
       ntpServers: [],
@@ -217,6 +218,7 @@ test({
 
     let runnerCalled = false;
     setTimeSyncApplyForTests(async () => {
+      await Promise.resolve();
       runnerCalled = true;
       return { summary: "" };
     });
@@ -256,8 +258,8 @@ test({
       setTimeSyncReaderForTests,
     } = await import("./ntp.ts");
 
-    setAnsibleAvailabilityCheckForTests(async () => true);
-    setTimeSyncApplyForTests(async () => ({ summary: "ntp-ok" }));
+    setAnsibleAvailabilityCheckForTests(() => Promise.resolve(true));
+    setTimeSyncApplyForTests(() => Promise.resolve({ summary: "ntp-ok" }));
     setTimeSyncReaderForTests(() => ({
       ntpEnabled: true,
       ntpSynced: true,
@@ -306,6 +308,7 @@ test({
 
     let runnerCalled = false;
     setTimeSyncApplyForTests(async () => {
+      await Promise.resolve();
       runnerCalled = true;
       return { summary: "" };
     });

@@ -7,7 +7,8 @@
 
 const IDENTIFIER_RE = /^[A-Za-z_]\w*$/;
 const MAX_IDENTIFIER_LENGTH = 63;
-const CONTROL_CHAR_RE = /[\u0000-\u001F\u007F]/
+// deno-lint-ignore no-control-regex -- intentional control-char reject list
+const CONTROL_CHAR_RE = /[\u0000-\u001F\u007F]/;
 
 export type ManagedDatabasePrivilege = "owner" | "read-write" | "read-only";
 
@@ -86,7 +87,9 @@ export function dropDatabaseSql(name: string): string {
   return [
     `SELECT pg_catalog.pg_terminate_backend(pid)`,
     `FROM pg_catalog.pg_stat_activity`,
-    `WHERE datname = ${quoteLiteral(name)} AND pid <> pg_catalog.pg_backend_pid();`,
+    `WHERE datname = ${
+      quoteLiteral(name)
+    } AND pid <> pg_catalog.pg_backend_pid();`,
     `DROP DATABASE IF EXISTS ${ident};`,
   ].join("\n");
 }

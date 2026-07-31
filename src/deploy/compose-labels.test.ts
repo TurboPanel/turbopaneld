@@ -1,4 +1,4 @@
-import { assertEquals, assertThrows } from "jsr:@std/assert";
+import { assertEquals, assertThrows } from "@std/assert";
 import { parse } from "yaml";
 import { injectHostingLabels } from "./compose-labels.ts";
 import {
@@ -134,8 +134,14 @@ test("injectHostingLabels configures a tcp router+service per published port, no
 
   assertEquals(result.services, ["db"]);
   assertEquals(labels["traefik.enable"], "true");
-  assertEquals(labels["traefik.tcp.routers.hosting_db-5432.entrypoints"], "tcp5432");
-  assertEquals(labels["traefik.tcp.routers.hosting_db-5432.rule"], "HostSNI(`*`)");
+  assertEquals(
+    labels["traefik.tcp.routers.hosting_db-5432.entrypoints"],
+    "tcp5432",
+  );
+  assertEquals(
+    labels["traefik.tcp.routers.hosting_db-5432.rule"],
+    "HostSNI(`*`)",
+  );
   assertEquals(
     labels["traefik.tcp.services.hosting_db-5432.loadbalancer.server.port"],
     "5432",
@@ -157,7 +163,10 @@ test("injectHostingLabels configures a udp router+service with no rule label", (
     services: { db: { labels: Record<string, string> } };
   };
   const labels = compose.services.db.labels;
-  assertEquals(labels["traefik.udp.routers.hosting_db-5300.entrypoints"], "udp5300");
+  assertEquals(
+    labels["traefik.udp.routers.hosting_db-5300.entrypoints"],
+    "udp5300",
+  );
   assertEquals(
     labels["traefik.udp.services.hosting_db-5300.loadbalancer.server.port"],
     "53",

@@ -13,7 +13,8 @@ const DEFAULT_DOCKER_GATEWAY = "172.17.0.1"; // NOSONAR typescript:S1313 — Doc
 const HOST_DOCKER_INTERNAL = "host.docker.internal:host-gateway";
 const decoder = new TextDecoder();
 
-export const TRADITIONAL_WEB_ENDPOINTS_ENV = "TURBOPANEL_TRADITIONAL_WEB_ENDPOINTS";
+export const TRADITIONAL_WEB_ENDPOINTS_ENV =
+  "TURBOPANEL_TRADITIONAL_WEB_ENDPOINTS";
 
 export type TraditionalWebDockerSite = {
   composeServiceName: string;
@@ -54,7 +55,9 @@ export async function resolveDockerHostGatewayAddress(): Promise<string> {
 }
 
 /** `TURBOPANEL_TRADITIONAL_WEB_<SERVICE>_URL` suffix from compose service name. */
-export function traditionalWebEnvKeyForService(composeServiceName: string): string {
+export function traditionalWebEnvKeyForService(
+  composeServiceName: string,
+): string {
   let sanitized = composeServiceName.replaceAll(/\W/g, "_");
   if (/^\d/.test(sanitized)) {
     sanitized = `_${sanitized}`;

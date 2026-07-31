@@ -1,10 +1,10 @@
 import { join } from "@std/path";
 import { logWarn } from "../logger.ts";
 import {
-  isValidIpv4Literal,
-  isValidIpv6Literal,
   type EnvironmentDeployHosting,
   type EnvironmentDeployPayload,
+  isValidIpv4Literal,
+  isValidIpv6Literal,
 } from "../instance/commands/contracts.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { runDocker } from "./docker-cli.ts";
@@ -105,12 +105,17 @@ async function ensureIngressNetwork(): Promise<void> {
 }
 
 /** Traefik entrypoint name for one raw TCP/UDP published port (must be a valid Traefik entrypoint name). */
-function tcpUdpEntrypointName(protocol: "tcp" | "udp", publishedPort: number): string {
+function tcpUdpEntrypointName(
+  protocol: "tcp" | "udp",
+  publishedPort: number,
+): string {
   return `${protocol}${publishedPort}`;
 }
 
 /** Dedupe by protocol+port (first entry wins — callers must resolve conflicts before this point). */
-function dedupeTcpUdpEntries(entries: readonly TcpUdpIngressEntry[]): TcpUdpIngressEntry[] {
+function dedupeTcpUdpEntries(
+  entries: readonly TcpUdpIngressEntry[],
+): TcpUdpIngressEntry[] {
   const byKey = new Map<string, TcpUdpIngressEntry>();
   for (const entry of entries) {
     const key = `${entry.protocol}:${entry.publishedPort}`;
@@ -121,7 +126,9 @@ function dedupeTcpUdpEntries(entries: readonly TcpUdpIngressEntry[]): TcpUdpIngr
   );
 }
 
-function tcpUdpStaticArgLines(entries: readonly TcpUdpIngressEntry[]): string[] {
+function tcpUdpStaticArgLines(
+  entries: readonly TcpUdpIngressEntry[],
+): string[] {
   return dedupeTcpUdpEntries(entries).map((entry) => {
     const name = tcpUdpEntrypointName(entry.protocol, entry.publishedPort);
     const suffix = entry.protocol === "udp" ? "/udp" : "";
@@ -138,7 +145,9 @@ function tcpUdpPortLines(entries: readonly TcpUdpIngressEntry[]): string[] {
   });
 }
 
-export function traefikCompose(entries: readonly TcpUdpIngressEntry[] = []): string {
+export function traefikCompose(
+  entries: readonly TcpUdpIngressEntry[] = [],
+): string {
   const staticArgs = tcpUdpStaticArgLines(entries);
   const portLines = tcpUdpPortLines(entries);
   const lines = [
@@ -314,9 +323,7 @@ export function assertValidBindAddress(value: string): void {
 function formatBindDirective(bindAddress: string): string {
   assertValidBindAddress(bindAddress);
   // Bracket IPv6 so Caddyfile does not treat `:` as a port separator.
-  const rendered = bindAddress.includes(":")
-    ? `[${bindAddress}]`
-    : bindAddress;
+  const rendered = bindAddress.includes(":") ? `[${bindAddress}]` : bindAddress;
   return `  bind ${rendered}\n`;
 }
 
@@ -725,7 +732,9 @@ export async function collectTcpUdpIngressEntries(
     throw err;
   }
 
-  const excludeFile = excludeEnvironmentId ? `${excludeEnvironmentId}.json` : undefined;
+  const excludeFile = excludeEnvironmentId
+    ? `${excludeEnvironmentId}.json`
+    : undefined;
   const merged: TcpUdpIngressEntry[] = [];
   for (const entry of dirEntries) {
     if (!entry.isFile || !entry.name.endsWith(".json")) continue;
@@ -754,7 +763,9 @@ export async function syncTcpUdpIngressEntries(
   const others = await collectTcpUdpIngressEntries(layout, environmentId);
   for (const entry of entries) {
     const conflict = others.find(
-      (o) => o.protocol === entry.protocol && o.publishedPort === entry.publishedPort,
+      (o) =>
+        o.protocol === entry.protocol &&
+        o.publishedPort === entry.publishedPort,
     );
     if (conflict) {
       throw new TcpUdpPortConflictError(

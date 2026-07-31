@@ -1,16 +1,16 @@
-/**
- * Jest/Mocha-shaped alias for {@link Deno.test}.
- *
- * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
- * reports Deno suites as empty; keep this alias so analysis sees real tests.
- */
-import { assertEquals, assertThrows } from "jsr:@std/assert@1";
+import { assertEquals, assertThrows } from "@std/assert";
 import type { EnvironmentDeployContainer } from "../instance/commands/contracts.ts";
 import {
   resolveEngineContainerId,
   resolveSoleEngineContainer,
 } from "./containers.ts";
 
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
 const test = Deno.test.bind(Deno);
 
 const UUID_SHAPED_NAME = "01936b3e-aaaa-bbbb-cccc-123456789abc-1";

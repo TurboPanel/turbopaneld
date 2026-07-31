@@ -1,6 +1,8 @@
 import { encodeBase64Url } from "@std/encoding/base64url";
 import { DaemonTokenManager } from "./token-manager.ts";
 import type { DaemonKeyFile } from "../crypto/keys.ts";
+import { DaemonApiError } from "./api-client.ts";
+import { createFakeClock, flushMicrotasks } from "../testing/fake-clock.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -42,13 +44,15 @@ test("Returns cached token when not near expiry", async () => {
   let challengeCalls = 0;
   const apiClient = {
     getAuthChallenge: async () => {
+      await Promise.resolve();
       challengeCalls += 1;
       return { challengeId: "c1", nonce: "n1", at: "", expiresAt: "" };
     },
-    createSession: async () => ({
-      token: makeJwt(Math.floor(Date.now() / 1000) + 900),
-      expiresAt: new Date(Date.now() + 900_000).toISOString(),
-    }),
+    createSession: () =>
+      Promise.resolve({
+        token: makeJwt(Math.floor(Date.now() / 1000) + 900),
+        expiresAt: new Date(Date.now() + 900_000).toISOString(),
+      }),
   };
   const manager = new DaemonTokenManager({
     keyFile,
@@ -72,6 +76,7 @@ test("Refreshes when less than 60 s remain", async () => {
   let sessionCalls = 0;
   const apiClient = {
     getAuthChallenge: async () => {
+      await Promise.resolve();
       challengeCalls += 1;
       return {
         challengeId: `c-${challengeCalls}`,
@@ -81,6 +86,7 @@ test("Refreshes when less than 60 s remain", async () => {
       };
     },
     createSession: async () => {
+      await Promise.resolve();
       sessionCalls += 1;
       return {
         token: sessionCalls === 1
@@ -119,10 +125,11 @@ test("Concurrent getToken() calls share one refresh promise", async () => {
       await waitForRelease;
       return { challengeId: "c1", nonce: "n1", at: "", expiresAt: "" };
     },
-    createSession: async () => ({
-      token: makeJwt(Math.floor(Date.now() / 1000) + 900),
-      expiresAt: new Date(Date.now() + 900_000).toISOString(),
-    }),
+    createSession: () =>
+      Promise.resolve({
+        token: makeJwt(Math.floor(Date.now() / 1000) + 900),
+        expiresAt: new Date(Date.now() + 900_000).toISOString(),
+      }),
   };
   const manager = new DaemonTokenManager({
     keyFile,
@@ -145,50 +152,76 @@ test("Concurrent getToken() calls share one refresh promise", async () => {
 });
 
 test("Retries once on refresh failure before throwing", async () => {
-  const keyFile = await makeKeyFile();
-  let challengeCalls = 0;
-  const apiClient = {
-    getAuthChallenge: async () => {
-      challengeCalls += 1;
-      if (challengeCalls === 1) {
-        throw new Error("temporary failure");
-      }
-      return { challengeId: "c2", nonce: "n2", at: "", expiresAt: "" };
-    },
-    createSession: async () => ({
-      token: makeJwt(Math.floor(Date.now() / 1000) + 900),
-      expiresAt: new Date(Date.now() + 900_000).toISOString(),
-    }),
-  };
-  const manager = new DaemonTokenManager({
-    keyFile,
-    serverId: "srv-1",
-    keyId: "kid-1",
-    machineKey: "machine-1",
-    hostname: "host-1",
-    apiClient,
-    refreshEarlyMs: 0,
-  });
+  const clock = createFakeClock({ now: 1_000_000 });
+  const restoreClock = clock.install();
+  try {
+    const keyFile = await makeKeyFile();
+    let challengeCalls = 0;
+    const apiClient = {
+      getAuthChallenge: async () => {
+        await Promise.resolve();
+        challengeCalls += 1;
+        if (challengeCalls === 1) {
+          throw new Error("temporary failure");
+        }
+        return { challengeId: "c2", nonce: "n2", at: "", expiresAt: "" };
+      },
+      createSession: () =>
+        Promise.resolve({
+          token: makeJwt(Math.floor(Date.now() / 1000) + 900),
+          expiresAt: new Date(Date.now() + 900_000).toISOString(),
+        }),
+    };
+    const manager = new DaemonTokenManager({
+      keyFile,
+      serverId: "srv-1",
+      keyId: "kid-1",
+      machineKey: "machine-1",
+      hostname: "host-1",
+      apiClient,
+      refreshEarlyMs: 0,
+    });
 
-  const token = await manager.getToken();
-  if (!token) {
-    throw new Error("expected token after retry");
-  }
-  if (challengeCalls !== 2) {
-    throw new Error(`expected 2 challenge calls, got ${challengeCalls}`);
+    const tokenPromise = manager.getToken();
+    for (let i = 0; i < 10 && challengeCalls < 1; i++) {
+      await flushMicrotasks();
+    }
+    if (challengeCalls < 1) {
+      throw new Error(
+        `expected first challenge call before retry delay, got ${challengeCalls}`,
+      );
+    }
+
+    const wallStart = performance.now();
+    await clock.advance(2_000);
+    const token = await tokenPromise;
+    if (performance.now() - wallStart >= 500) {
+      throw new Error(
+        "expected fake-clock advance to drive retry without sleep",
+      );
+    }
+    if (!token) {
+      throw new Error("expected token after retry");
+    }
+    if (challengeCalls !== 2) {
+      throw new Error(`expected 2 challenge calls, got ${challengeCalls}`);
+    }
+  } finally {
+    restoreClock();
   }
 });
 
-test("verifyToken invalid causes refresh to throw after retry", async () => {
+test("verifyToken invalid hard-fails without retry", async () => {
   const keyFile = await makeKeyFile();
   let sessionCalls = 0;
   const apiClient = {
-    getAuthChallenge: async () => ({
-      challengeId: "c1",
-      nonce: "n1",
-      at: "",
-      expiresAt: "",
-    }),
+    getAuthChallenge: () =>
+      Promise.resolve({
+        challengeId: "c1",
+        nonce: "n1",
+        at: "",
+        expiresAt: "",
+      }),
     createSession: async () => {
       sessionCalls += 1;
       return await Promise.resolve({
@@ -223,10 +256,68 @@ test("verifyToken invalid causes refresh to throw after retry", async () => {
   if (!threw) {
     throw new Error("expected getToken to throw on invalid verification");
   }
-  if (sessionCalls !== 2) {
+  if (sessionCalls !== 1) {
     throw new Error(
-      `expected 2 session calls after retry, got ${sessionCalls}`,
+      `expected 1 session call without retry, got ${sessionCalls}`,
     );
+  }
+});
+
+test("permanent first error skips 2s retry", async () => {
+  const clock = createFakeClock({ now: 1_000_000 });
+  const restoreClock = clock.install();
+  try {
+    const keyFile = await makeKeyFile();
+    let challengeCalls = 0;
+    const apiClient = {
+      getAuthChallenge: async () => {
+        await Promise.resolve();
+        challengeCalls += 1;
+        throw new DaemonApiError(401, "Invalid license");
+      },
+      createSession: () =>
+        Promise.resolve({
+          token: makeJwt(Math.floor(Date.now() / 1000) + 900),
+          expiresAt: new Date(Date.now() + 900_000).toISOString(),
+        }),
+    };
+    const manager = new DaemonTokenManager({
+      keyFile,
+      serverId: "srv-1",
+      keyId: "kid-1",
+      machineKey: "machine-1",
+      hostname: "host-1",
+      apiClient,
+      refreshEarlyMs: 0,
+    });
+
+    let threw = false;
+    try {
+      await manager.getToken();
+    } catch (error) {
+      threw = true;
+      if (!(error instanceof DaemonApiError) || error.status !== 401) {
+        throw new Error(`unexpected error: ${String(error)}`);
+      }
+    }
+    if (!threw) {
+      throw new Error("expected getToken to throw on permanent failure");
+    }
+    if (challengeCalls !== 1) {
+      throw new Error(
+        `expected 1 challenge call without retry, got ${challengeCalls}`,
+      );
+    }
+    // Advancing the fake clock must not trigger a second attempt.
+    await clock.advance(2_000);
+    await flushMicrotasks();
+    if (challengeCalls !== 1) {
+      throw new Error(
+        `expected no delayed retry after permanent error, got ${challengeCalls}`,
+      );
+    }
+  } finally {
+    restoreClock();
   }
 });
 
@@ -234,16 +325,18 @@ test("verifyToken unavailable still caches token", async () => {
   const keyFile = await makeKeyFile();
   const token = makeJwt(Math.floor(Date.now() / 1000) + 900);
   const apiClient = {
-    getAuthChallenge: async () => ({
-      challengeId: "c1",
-      nonce: "n1",
-      at: "",
-      expiresAt: "",
-    }),
-    createSession: async () => ({
-      token,
-      expiresAt: new Date(Date.now() + 900_000).toISOString(),
-    }),
+    getAuthChallenge: () =>
+      Promise.resolve({
+        challengeId: "c1",
+        nonce: "n1",
+        at: "",
+        expiresAt: "",
+      }),
+    createSession: () =>
+      Promise.resolve({
+        token,
+        expiresAt: new Date(Date.now() + 900_000).toISOString(),
+      }),
   };
   const manager = new DaemonTokenManager({
     keyFile,
@@ -261,19 +354,24 @@ test("verifyToken unavailable still caches token", async () => {
   }
 });
 
-test("verifyToken sub mismatch causes refresh to throw", async () => {
+test("verifyToken sub mismatch hard-fails without retry", async () => {
   const keyFile = await makeKeyFile();
+  let sessionCalls = 0;
   const apiClient = {
-    getAuthChallenge: async () => ({
-      challengeId: "c1",
-      nonce: "n1",
-      at: "",
-      expiresAt: "",
-    }),
-    createSession: async () => ({
-      token: makeJwt(Math.floor(Date.now() / 1000) + 900),
-      expiresAt: new Date(Date.now() + 900_000).toISOString(),
-    }),
+    getAuthChallenge: () =>
+      Promise.resolve({
+        challengeId: "c1",
+        nonce: "n1",
+        at: "",
+        expiresAt: "",
+      }),
+    createSession: async () => {
+      sessionCalls += 1;
+      return await Promise.resolve({
+        token: makeJwt(Math.floor(Date.now() / 1000) + 900),
+        expiresAt: new Date(Date.now() + 900_000).toISOString(),
+      });
+    },
   };
   const manager = new DaemonTokenManager({
     keyFile,
@@ -308,21 +406,31 @@ test("verifyToken sub mismatch causes refresh to throw", async () => {
   if (!threw) {
     throw new Error("expected getToken to throw on sub mismatch");
   }
+  if (sessionCalls !== 1) {
+    throw new Error(
+      `expected 1 session call without retry, got ${sessionCalls}`,
+    );
+  }
 });
 
-test("verifyToken kid mismatch causes refresh to throw", async () => {
+test("verifyToken kid mismatch hard-fails without retry", async () => {
   const keyFile = await makeKeyFile();
+  let sessionCalls = 0;
   const apiClient = {
-    getAuthChallenge: async () => ({
-      challengeId: "c1",
-      nonce: "n1",
-      at: "",
-      expiresAt: "",
-    }),
-    createSession: async () => ({
-      token: makeJwt(Math.floor(Date.now() / 1000) + 900),
-      expiresAt: new Date(Date.now() + 900_000).toISOString(),
-    }),
+    getAuthChallenge: () =>
+      Promise.resolve({
+        challengeId: "c1",
+        nonce: "n1",
+        at: "",
+        expiresAt: "",
+      }),
+    createSession: async () => {
+      sessionCalls += 1;
+      return await Promise.resolve({
+        token: makeJwt(Math.floor(Date.now() / 1000) + 900),
+        expiresAt: new Date(Date.now() + 900_000).toISOString(),
+      });
+    },
   };
   const manager = new DaemonTokenManager({
     keyFile,
@@ -356,5 +464,10 @@ test("verifyToken kid mismatch causes refresh to throw", async () => {
   }
   if (!threw) {
     throw new Error("expected getToken to throw on kid mismatch");
+  }
+  if (sessionCalls !== 1) {
+    throw new Error(
+      `expected 1 session call without retry, got ${sessionCalls}`,
+    );
   }
 });

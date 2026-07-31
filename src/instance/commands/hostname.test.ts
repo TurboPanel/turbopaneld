@@ -1,4 +1,4 @@
-import { assertEquals, assertRejects, assertThrows } from "jsr:@std/assert";
+import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import {
   assertValidHostname,
   HOSTNAME_MAX_LENGTH,
@@ -70,7 +70,7 @@ test({
         "./hostname.ts"
       );
 
-    setAnsibleAvailabilityCheckForTests(async () => false);
+    setAnsibleAvailabilityCheckForTests(() => Promise.resolve(false));
     try {
       const nowIso = new Date().toISOString();
       await assertRejects(

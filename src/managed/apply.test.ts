@@ -1,12 +1,12 @@
+import { assertEquals } from "@std/assert";
+import { resolveManagedApplyHost } from "./apply.ts";
+
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
  *
  * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
-import { assertEquals } from "jsr:@std/assert@1";
-import { resolveManagedApplyHost } from "./apply.ts";
-
 const test = Deno.test.bind(Deno);
 
 test("resolveManagedApplyHost reports 0.0.0.0 when exposed without bindAddress", () => {

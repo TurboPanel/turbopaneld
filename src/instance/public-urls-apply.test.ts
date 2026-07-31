@@ -1,4 +1,4 @@
-import { assertEquals } from "jsr:@std/assert";
+import { assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { upsertPublicUrlsInEnv } from "./public-urls-env.ts";
 

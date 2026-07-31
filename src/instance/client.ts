@@ -39,10 +39,8 @@ import { decodeBase64 } from "@std/encoding/base64";
 import { getBuildInfo } from "../build-info.ts";
 import { IdlePresence } from "./idle-presence.ts";
 import type { MetricsCollector } from "../metrics/collector/index.ts";
-import {
-  MetricsScheduler,
-  rebindMetricsScheduler,
-} from "../metrics/scheduler.ts";
+import type { MetricsScheduler } from "../metrics/scheduler.ts";
+import { rebindMetricsScheduler } from "../metrics/scheduler.ts";
 import { resolveUpdateChannelConfig } from "../update/config.ts";
 import { resolveUpdate } from "../update/resolver.ts";
 import {
@@ -287,7 +285,8 @@ function parseMessage(raw: string): DaemonMessage | null {
   }
 }
 
-async function clearDaemonKeyState(stateDir: string): Promise<void> {
+/** Removes only `server-key.json` + `server-key-id`; keeps persisted `server.id`. */
+export async function clearDaemonKeyState(stateDir: string): Promise<void> {
   for (const file of [SERVER_KEY_FILE, KEY_ID_FILE]) {
     try {
       await Deno.remove(`${stateDir}/${file}`);
@@ -409,7 +408,7 @@ export class InstanceClient {
   async #waitForConnectPreconditions(): Promise<void> {
     if (this.#isColocatedSocketMode()) {
       const maxWaitMs = this.#hadStableSession ? INSTANCE_RESTART_WAIT_MS : 0;
-      const started = Date.now();
+      const started = now();
       while (true) {
         try {
           const readiness = await this.fetchDaemonReadiness();
@@ -417,7 +416,7 @@ export class InstanceClient {
         } catch {
           // Instance unreachable during restart — keep polling when recovering.
         }
-        if (maxWaitMs === 0 || Date.now() - started >= maxWaitMs) {
+        if (maxWaitMs === 0 || now() - started >= maxWaitMs) {
           throw new Error("instance install incomplete");
         }
         await delay(
@@ -688,9 +687,8 @@ export class InstanceClient {
     const enrollClient = this.#apiClient ?? new DaemonApiClient({
       config: this.#config,
       httpClient: this.#httpClient,
-      getToken: async () => {
-        throw new Error("token unavailable before enrollment");
-      },
+      getToken: () =>
+        Promise.reject(new Error("token unavailable before enrollment")),
     });
     const enrollment = await enrollDaemon({
       apiClient: enrollClient,
@@ -731,22 +729,21 @@ export class InstanceClient {
       const jwksApiClient = new DaemonApiClient({
         config: this.#config,
         httpClient: this.#httpClient,
-        getToken: async () => {
-          throw new Error("token unavailable for JWKS fetch");
-        },
+        getToken: () =>
+          Promise.reject(new Error("token unavailable for JWKS fetch")),
       });
       this.#jwksClient = new DaemonJwksClient({ apiClient: jwksApiClient });
     }
 
-    let tokenManagerRef: DaemonTokenManager | undefined;
+    const tokenManagerRef: { current?: DaemonTokenManager } = {};
     const apiClient = new DaemonApiClient({
       config: this.#config,
       httpClient: this.#httpClient,
       getToken: async (options) => {
-        if (!tokenManagerRef) {
+        if (!tokenManagerRef.current) {
           throw new Error("token manager not initialized");
         }
-        return await tokenManagerRef.getToken(options);
+        return await tokenManagerRef.current.getToken(options);
       },
     });
     const tokenManager = new DaemonTokenManager({
@@ -758,7 +755,7 @@ export class InstanceClient {
       apiClient,
       verifyToken: (token) => this.#jwksClient!.verifyInstanceJwt(token),
     });
-    tokenManagerRef = tokenManager;
+    tokenManagerRef.current = tokenManager;
     this.#tokenManager = tokenManager;
     this.#apiClient = apiClient;
     this.#tokenServerId = serverId;
@@ -889,7 +886,7 @@ export class InstanceClient {
 
     sessionRegistered = true;
     this.#hadStableSession = true;
-    const connectedAt = Date.now();
+    const connectedAt = now();
     this.#idlePresence?.attach(ws);
     this.#metricsScheduler?.attach((sample) =>
       this.#apiClient?.sendHostMetrics(sample) ?? Promise.resolve()
@@ -942,7 +939,7 @@ export class InstanceClient {
     }
 
     const wasStableSession = sessionRegistered && !wasAuthFailure &&
-      Date.now() - connectedAt >= STABLE_SESSION_MS;
+      now() - connectedAt >= STABLE_SESSION_MS;
     if (wasStableSession) {
       this.#resetBackoff();
     } else {
@@ -1179,7 +1176,7 @@ export class InstanceClient {
   #resolveUpdateConfigForMessage(
     message: Extract<DaemonMessage, { type: "update" }>,
   ): ReturnType<typeof resolveUpdateChannelConfig> {
-    let config = resolveUpdateChannelConfig(Deno.env.toObject());
+    const config = resolveUpdateChannelConfig(Deno.env.toObject());
     const msgChannel = message.channel?.trim();
     if (!msgChannel) return config;
 
@@ -1392,8 +1389,34 @@ export class InstanceClient {
   }
 }
 
+let nowFn: () => number = () => Date.now();
+let delayFn: (ms: number) => Promise<void> = (ms) =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+function now(): number {
+  return nowFn();
+}
+
 function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return delayFn(ms);
+}
+
+/**
+ * Test-only injection for wall-clock and delay. Returns a restore function.
+ * Default behavior is byte-identical to Date.now / setTimeout.
+ */
+export function installClientTimeSource(source: {
+  now?: () => number;
+  delay?: (ms: number) => Promise<void>;
+}): () => void {
+  const previousNow = nowFn;
+  const previousDelay = delayFn;
+  if (source.now) nowFn = source.now;
+  if (source.delay) delayFn = source.delay;
+  return () => {
+    nowFn = previousNow;
+    delayFn = previousDelay;
+  };
 }
 
 function nextBackoffMs(current: number, max: number): number {

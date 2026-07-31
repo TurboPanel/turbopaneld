@@ -1,0 +1,34 @@
+#!/usr/bin/env sh
+set -eu
+ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
+
+# Secret scan is never skippable.
+"$ROOT/scripts/scan-secrets.sh"
+
+if [ -n "${TURBOPANEL_SKIP_HOOK_TESTS:-}" ]; then
+  echo "pre-commit: TURBOPANEL_SKIP_HOOK_TESTS set — skipping fmt/lint/tests" >&2
+  exit 0
+fi
+
+DENO_BIN=
+if command -v deno >/dev/null 2>&1; then
+  DENO_BIN=$(command -v deno)
+elif [ -f "$ROOT/scripts/lib/runtime-paths.sh" ]; then
+  # shellcheck source=scripts/lib/runtime-paths.sh
+  . "$ROOT/scripts/lib/runtime-paths.sh"
+  if [ -x "$TURBOPANEL_RUNTIMES_DIR/deno/current/deno" ]; then
+    DENO_BIN="$TURBOPANEL_RUNTIMES_DIR/deno/current/deno"
+  fi
+fi
+
+if [ -z "$DENO_BIN" ] || [ ! -x "$DENO_BIN" ]; then
+  echo "pre-commit: deno not found — install host Deno or converge vendor runtime (skips fmt/lint/tests)" >&2
+  exit 0
+fi
+
+cd "$ROOT"
+"$DENO_BIN" task fmt:check
+"$DENO_BIN" task lint
+# Measured warm `deno task test` ≈11s (3 runs: 12.1 / 10.5 / 11.1) — over the
+# ~5s hook budget. verify.yml owns the full suite; hook runs host-free leaves.
+"$DENO_BIN" test -A src/instance/ src/metrics/collector/ src/testing/

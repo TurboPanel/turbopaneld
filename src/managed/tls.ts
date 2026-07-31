@@ -89,7 +89,9 @@ export async function ensureManagedSelfSignedCert(
   if (!result.success) {
     const stderr = new TextDecoder().decode(result.stderr).trim();
     throw new Error(
-      `openssl failed to generate managed TLS material: ${sanitizeForLog(stderr)}`,
+      `openssl failed to generate managed TLS material: ${
+        sanitizeForLog(stderr)
+      }`,
     );
   }
 

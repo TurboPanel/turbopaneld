@@ -1,4 +1,4 @@
-import { assertEquals } from "jsr:@std/assert";
+import { assertEquals } from "@std/assert";
 import { withRetry } from "./retry.ts";
 
 /**
@@ -12,6 +12,7 @@ const test = Deno.test.bind(Deno);
 test("withRetry returns the first successful result without retrying", async () => {
   let calls = 0;
   const result = await withRetry(async () => {
+    await Promise.resolve();
     calls++;
     return "ok";
   }, { label: "test op", baseDelayMs: 1, maxDelayMs: 1 });
@@ -22,6 +23,7 @@ test("withRetry returns the first successful result without retrying", async () 
 test("withRetry retries transient failures and eventually succeeds", async () => {
   let calls = 0;
   const result = await withRetry(async (attempt) => {
+    await Promise.resolve();
     calls++;
     if (attempt < 3) throw new Error(`transient failure ${attempt}`);
     return "recovered";
@@ -34,6 +36,7 @@ test("withRetry throws the last error once attempts are exhausted", async () => 
   let calls = 0;
   try {
     await withRetry(async (attempt) => {
+      await Promise.resolve();
       calls++;
       throw new Error(`always fails ${attempt}`);
     }, { label: "test op", attempts: 3, baseDelayMs: 1, maxDelayMs: 1 });

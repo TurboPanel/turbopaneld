@@ -1,14 +1,14 @@
+import { assertEquals } from "@std/assert";
+import { join } from "@std/path";
+import { handleManagedDestroy } from "./destroy.ts";
+import { handleManagedLifecycle } from "./lifecycle.ts";
+
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
  *
  * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
-import { assertEquals } from "jsr:@std/assert@1";
-import { join } from "@std/path";
-import { handleManagedDestroy } from "./destroy.ts";
-import { handleManagedLifecycle } from "./lifecycle.ts";
-
 const test = Deno.test.bind(Deno);
 
 test("handleManagedLifecycle is idempotent when state dir is missing", async () => {

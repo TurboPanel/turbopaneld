@@ -1,4 +1,4 @@
-import { assertEquals } from "jsr:@std/assert";
+import { assertEquals } from "@std/assert";
 import {
   buildDaemonRestartSystemctlArgs,
   restartDaemonService,
@@ -24,6 +24,7 @@ test("restartDaemonService runs sudo systemctl enable before restart", async () 
   const ok = await restartDaemonService({
     unit: "turbopaneld.service",
     runSystemctl: async (args) => {
+      await Promise.resolve();
       calls.push([...args]);
       return { success: true, stderr: "" };
     },
@@ -38,10 +39,11 @@ test("restartDaemonService runs sudo systemctl enable before restart", async () 
 test("restartDaemonService returns false when restart fails", async () => {
   const ok = await restartDaemonService({
     unit: "turbopaneld.service",
-    runSystemctl: async (args) => ({
-      success: args[2] === "enable",
-      stderr: args[2] === "restart" ? "Job failed" : "",
-    }),
+    runSystemctl: (args) =>
+      Promise.resolve({
+        success: args[2] === "enable",
+        stderr: args[2] === "restart" ? "Job failed" : "",
+      }),
   });
   assertEquals(ok, false);
 });

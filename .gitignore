@@ -1,5 +1,6 @@
 .env
 logs/
+coverage/
 
 # Python bytecode (e.g. scripts/extract-deno-zip.py)
 __pycache__/
@@ -11,6 +12,10 @@ dist/
 publish/
 release-root-verify-*/
 .turbopanel-checkout-stamp
+
+# paths.test.ts makeTempDir({ dir: repoRoot }) leftovers from interrupted runs
+deno-compile-*/
+paths-test-*/
 
 # Ansible Galaxy roles install into orchestration/roles/ (see requirements.yml).
 # Never commit them — bootstrap runs ansible-galaxy role install.

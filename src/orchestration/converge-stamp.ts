@@ -44,7 +44,7 @@ async function collectRoleYamlMaterial(
   const collected: string[] = [];
 
   async function walk(dir: string): Promise<void> {
-    let entries: Deno.DirEntry[] = [];
+    const entries: Deno.DirEntry[] = [];
     try {
       for await (const entry of Deno.readDir(dir)) {
         entries.push(entry);

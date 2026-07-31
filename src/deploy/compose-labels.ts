@@ -126,7 +126,11 @@ function applyProxyMiddlewareLabels(
 
   if (proxy.gzip || proxy.brotli) {
     const middlewareId = `${routerId}-compress`;
-    addLabel(labels, `traefik.http.middlewares.${middlewareId}.compress`, "true");
+    addLabel(
+      labels,
+      `traefik.http.middlewares.${middlewareId}.compress`,
+      "true",
+    );
     if (proxy.brotli) {
       addLabel(
         labels,
@@ -186,7 +190,11 @@ function applyTcpUdpHostingLabels(
     assertRouterId(routerId, "hostings[].ports router id");
     const entrypoint = `${protocol}${port.published}`;
     if (protocol === "tcp") {
-      addLabel(labels, `traefik.tcp.routers.${routerId}.entrypoints`, entrypoint);
+      addLabel(
+        labels,
+        `traefik.tcp.routers.${routerId}.entrypoints`,
+        entrypoint,
+      );
       addLabel(labels, `traefik.tcp.routers.${routerId}.rule`, "HostSNI(`*`)");
       addLabel(
         labels,
@@ -194,7 +202,11 @@ function applyTcpUdpHostingLabels(
         String(port.target),
       );
     } else {
-      addLabel(labels, `traefik.udp.routers.${routerId}.entrypoints`, entrypoint);
+      addLabel(
+        labels,
+        `traefik.udp.routers.${routerId}.entrypoints`,
+        entrypoint,
+      );
       addLabel(
         labels,
         `traefik.udp.services.${routerId}.loadbalancer.server.port`,

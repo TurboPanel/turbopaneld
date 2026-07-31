@@ -10,3 +10,8 @@ export {
   type DockerMonitorChange,
   type DockerMonitorOptions,
 } from "./monitor.ts";
+export {
+  decideDockerMonitorAttach,
+  dockerBinaryPresent,
+  type DockerMonitorAttachDecision,
+} from "./monitor-attach.ts";

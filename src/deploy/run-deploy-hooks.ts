@@ -57,7 +57,9 @@ export async function runDeployServiceHooks(
         hook.composeServiceName,
       ]);
       if (!build.success) {
-        throw new Error(build.stderr || "docker compose build --no-cache failed");
+        throw new Error(
+          build.stderr || "docker compose build --no-cache failed",
+        );
       }
     }
 

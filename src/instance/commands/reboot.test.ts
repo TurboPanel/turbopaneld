@@ -1,4 +1,4 @@
-import { assertEquals, assertRejects } from "jsr:@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import {
   handleReboot,
   REBOOT_HANDOFF_DELAY_MS,
@@ -18,6 +18,7 @@ test({
   fn: async () => {
     let invoked = false;
     setRebootExecutorForTests(async () => {
+      await Promise.resolve();
       invoked = true;
       return { success: true, stderr: "" };
     });
@@ -38,6 +39,7 @@ test({
   fn: async () => {
     let invoked = false;
     setRebootExecutorForTests(async () => {
+      await Promise.resolve();
       invoked = true;
       return { success: true, stderr: "" };
     });
@@ -57,7 +59,9 @@ test({
 test({
   name: "handleReboot rejects invalid payload",
   fn: async () => {
-    setRebootExecutorForTests(async () => ({ success: true, stderr: "" }));
+    setRebootExecutorForTests(() =>
+      Promise.resolve({ success: true, stderr: "" })
+    );
     try {
       await assertRejects(
         () => handleReboot(null as unknown as Record<string, never>, ""),

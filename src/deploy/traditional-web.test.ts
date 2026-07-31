@@ -1,4 +1,4 @@
-import { assertEquals, assertStringIncludes, assertThrows } from "jsr:@std/assert";
+import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import {
   apacheSiteConfig,
   defaultIndexHtml,
@@ -61,8 +61,7 @@ test("nginxSiteConfig listens on loopback only", () => {
 });
 
 test("apacheSiteConfig listens on loopback and proxies PHP to php-fpm", () => {
-  const socket =
-    "/run/turbopanel/php/tp-env-phpapp.sock";
+  const socket = "/run/turbopanel/php/tp-env-phpapp.sock";
   const conf = apacheSiteConfig(
     {
       composeServiceName: "phpapp",
@@ -118,7 +117,10 @@ test("phpFpmPoolConfig emits per-site socket and admin values", () => {
     "/run/turbopanel/php/tp-env1-phpapp.sock",
   );
   assertStringIncludes(conf, "[tp-env1-phpapp]");
-  assertStringIncludes(conf, "listen = /run/turbopanel/php/tp-env1-phpapp.sock");
+  assertStringIncludes(
+    conf,
+    "listen = /run/turbopanel/php/tp-env1-phpapp.sock",
+  );
   assertStringIncludes(conf, "user = tpapache");
   assertStringIncludes(
     conf,
@@ -266,7 +268,10 @@ test("defaultIndexHtml includes the compose service name", () => {
 });
 
 test("caddyHttpUpstream only allows loopback hosts", () => {
-  assertEquals(caddyHttpUpstream("127.0.0.1", 18080), "reverse_proxy 127.0.0.1:18080");
+  assertEquals(
+    caddyHttpUpstream("127.0.0.1", 18080),
+    "reverse_proxy 127.0.0.1:18080",
+  );
   assertThrows(
     () => caddyHttpUpstream("203.0.113.10", 18080),
     Error,
@@ -358,7 +363,10 @@ test("openlitespeedMainConfig assembles a single httpd_config.conf from fragment
 test("defaultIndexHtml labels each traditional-web engine", () => {
   assertStringIncludes(defaultIndexHtml("site", "nginx"), "nginx");
   assertStringIncludes(defaultIndexHtml("site", "apache"), "Apache");
-  assertStringIncludes(defaultIndexHtml("site", "openlitespeed"), "OpenLiteSpeed");
+  assertStringIncludes(
+    defaultIndexHtml("site", "openlitespeed"),
+    "OpenLiteSpeed",
+  );
 });
 
 test("siteSnippet with http upstream proxies to nginx listen port", () => {

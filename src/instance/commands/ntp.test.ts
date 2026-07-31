@@ -1,4 +1,4 @@
-import { assertEquals, assertRejects, assertThrows } from "jsr:@std/assert";
+import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import {
   assertValidNtpServer,
   isValidNtpServer,
@@ -102,8 +102,9 @@ test({
       setTimeSyncReaderForTests,
     } = await import("./ntp.ts");
 
-    setAnsibleAvailabilityCheckForTests(async () => false);
+    setAnsibleAvailabilityCheckForTests(() => Promise.resolve(false));
     setTimeSyncApplyForTests(async () => {
+      await Promise.resolve();
       throw new Error("runner should not be called");
     });
     setTimeSyncReaderForTests(() => {
@@ -135,8 +136,9 @@ test({
     } = await import("./ntp.ts");
 
     let applied: unknown;
-    setAnsibleAvailabilityCheckForTests(async () => true);
+    setAnsibleAvailabilityCheckForTests(() => Promise.resolve(true));
     setTimeSyncApplyForTests(async (opts) => {
+      await Promise.resolve();
       applied = opts;
       return { summary: "ok" };
     });
@@ -186,8 +188,9 @@ test({
     } = await import("./ntp.ts");
 
     let applied: unknown;
-    setAnsibleAvailabilityCheckForTests(async () => true);
+    setAnsibleAvailabilityCheckForTests(() => Promise.resolve(true));
     setTimeSyncApplyForTests(async (opts) => {
+      await Promise.resolve();
       applied = opts;
       return { summary: "disabled" };
     });
@@ -237,8 +240,9 @@ test({
     } = await import("./ntp.ts");
 
     let applied: unknown;
-    setAnsibleAvailabilityCheckForTests(async () => true);
+    setAnsibleAvailabilityCheckForTests(() => Promise.resolve(true));
     setTimeSyncApplyForTests(async (opts) => {
+      await Promise.resolve();
       applied = opts;
       return { summary: "ok" };
     });

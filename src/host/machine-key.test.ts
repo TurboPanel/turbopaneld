@@ -1,8 +1,8 @@
-import { assertEquals } from "jsr:@std/assert@1";
+import { assertEquals } from "@std/assert";
 import {
-  TURBOPANEL_MACHINE_ID_NAMESPACE,
   deriveMachineKey,
   resetMachineKeyCacheForTests,
+  TURBOPANEL_MACHINE_ID_NAMESPACE,
 } from "./machine-key.ts";
 
 /**
@@ -48,6 +48,8 @@ test("deriveMachineKey matches the pinned parity vector", async () => {
 });
 
 test("deriveMachineKey normalizes trim + lowercase before HMAC", async () => {
-  const upper = await deriveMachineKey(`  ${FIXTURE_MACHINE_ID.toUpperCase()}  `);
+  const upper = await deriveMachineKey(
+    `  ${FIXTURE_MACHINE_ID.toUpperCase()}  `,
+  );
   assertEquals(upper, PINNED_MACHINE_KEY);
 });

@@ -1,4 +1,4 @@
-import { assertEquals } from "jsr:@std/assert";
+import { assertEquals } from "@std/assert";
 import { LinuxMetricsCollector } from "./linux-collector.ts";
 import type { CollectorDeps } from "./types.ts";
 import { METRICS_SCHEMA_VERSION } from "../contract.ts";

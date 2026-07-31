@@ -1,3 +1,4 @@
+import { assertEquals } from "@std/assert";
 import type {
   ContainerInspect,
   ContainerSummary,
@@ -67,10 +68,12 @@ class MockDockerClient implements
   streamEnded = false;
 
   listContainers = async (_all: boolean): Promise<ContainerSummary[]> => {
+    await Promise.resolve();
     return this.containers;
   };
 
   inspectContainer = async (id: string): Promise<ContainerInspect> => {
+    await Promise.resolve();
     const inspect = this.inspects.get(id);
     if (!inspect) {
       throw new Error(`inspect container failed: HTTP 404`);
@@ -334,9 +337,3 @@ test("a permanently failing events stream never leaks more than one poll-fallbac
 
   assertEquals(maxConcurrentCalls, 1);
 });
-
-function assertEquals(actual: unknown, expected: unknown): void {
-  if (actual !== expected) {
-    throw new Error(`expected ${String(expected)} but got ${String(actual)}`);
-  }
-}

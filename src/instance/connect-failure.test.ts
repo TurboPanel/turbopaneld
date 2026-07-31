@@ -1,5 +1,6 @@
 import { it } from "@std/testing/bdd";
 import { DaemonApiError } from "./api-client.ts";
+import { assert, assertEquals } from "@std/assert";
 import {
   classifyConnectFailure,
   isPermanentAuthError,
@@ -8,31 +9,28 @@ import {
   isTransientConnectError,
   temporaryAuthFailure,
 } from "./connect-failure.ts";
+import {
+  permanentAuthErrorResponse,
+  permanentEnrollmentErrorResponse,
+  serverKeyMismatchResponse,
+  staleIdentityErrorResponse,
+  toDaemonApiError,
+} from "../testing/fake-instance-api.ts";
 
-function assert(condition: unknown, message: string): asserts condition {
-  if (!condition) throw new Error(message);
-}
-
-function assertEquals(
-  actual: unknown,
-  expected: unknown,
-  message?: string,
-): void {
-  if (actual !== expected) {
-    throw new Error(
-      message ?? `expected ${String(expected)} but got ${String(actual)}`,
-    );
-  }
-}
-
-it("classifies permanent enrollment and auth errors", () => {
+it("classifies permanent enrollment and auth errors", async () => {
   const permanentCases: unknown[] = [
-    new DaemonApiError(401, "Invalid license"),
-    new DaemonApiError(400, "License already consumed or invalid"),
-    new DaemonApiError(400, "License is inactive"),
-    new DaemonApiError(400, "Server key is inactive"),
-    new DaemonApiError(403, "Invalid signature"),
-    new DaemonApiError(409, "Fingerprint already exists"),
+    await toDaemonApiError(permanentEnrollmentErrorResponse("invalid-license")),
+    await toDaemonApiError(
+      permanentEnrollmentErrorResponse("already-consumed"),
+    ),
+    await toDaemonApiError(permanentAuthErrorResponse("license-inactive")),
+    await toDaemonApiError(permanentAuthErrorResponse("key-inactive")),
+    await toDaemonApiError(
+      permanentEnrollmentErrorResponse("invalid-signature"),
+    ),
+    await toDaemonApiError(
+      permanentEnrollmentErrorResponse("fingerprint-exists"),
+    ),
     new Error("missing license credentials for enrollment"),
   ];
   for (const err of permanentCases) {
@@ -44,14 +42,14 @@ it("classifies permanent enrollment and auth errors", () => {
   }
 });
 
-it("classifies stale-identity errors", () => {
+it("classifies stale-identity errors", async () => {
   assertEquals(
-    classifyConnectFailure(new DaemonApiError(404, "Server key not found"))
+    classifyConnectFailure(await toDaemonApiError(staleIdentityErrorResponse()))
       .kind,
     "stale-identity",
   );
   assertEquals(
-    classifyConnectFailure(new DaemonApiError(400, "Server key mismatch"))
+    classifyConnectFailure(await toDaemonApiError(serverKeyMismatchResponse()))
       .kind,
     "stale-identity",
   );
@@ -73,38 +71,48 @@ it("classifies transient errors", () => {
   }
 });
 
-it("keeps isStaleDaemonIdentityError narrow (404 only)", () => {
+it("keeps isStaleDaemonIdentityError narrow (404 only)", async () => {
   assert(
     isStaleDaemonIdentityError(
-      new DaemonApiError(404, "Server key not found"),
+      await toDaemonApiError(staleIdentityErrorResponse()),
     ),
     "404 Server key not found should match",
   );
   assert(
     !isStaleDaemonIdentityError(
-      new DaemonApiError(400, "Server key mismatch"),
+      await toDaemonApiError(serverKeyMismatchResponse()),
     ),
     "400 Server key mismatch must not match the narrow predicate",
   );
 });
 
-it("spot-checks permanent and transient predicates", () => {
+it("spot-checks permanent and transient predicates", async () => {
   assert(
-    isPermanentEnrollmentError(new DaemonApiError(401, "Invalid license")),
+    isPermanentEnrollmentError(
+      await toDaemonApiError(
+        permanentEnrollmentErrorResponse("invalid-license"),
+      ),
+    ),
     "enrollment permanent",
   );
   assert(
     !isPermanentEnrollmentError(
-      new DaemonApiError(400, "License is inactive"),
+      await toDaemonApiError(permanentAuthErrorResponse("license-inactive")),
     ),
     "inactive license is auth, not enrollment",
   );
   assert(
-    isPermanentAuthError(new DaemonApiError(400, "License is inactive")),
+    isPermanentAuthError(
+      await toDaemonApiError(permanentAuthErrorResponse("license-inactive")),
+    ),
     "auth permanent",
   );
   assert(
-    !isPermanentAuthError(new DaemonApiError(401, "Invalid license")),
+    !isPermanentAuthError(
+      await toDaemonApiError(
+        permanentEnrollmentErrorResponse("invalid-license"),
+      ),
+    ),
     "invalid license is enrollment, not auth",
   );
   assert(
@@ -112,7 +120,11 @@ it("spot-checks permanent and transient predicates", () => {
     "5xx is transient",
   );
   assert(
-    !isTransientConnectError(new DaemonApiError(401, "Invalid license")),
+    !isTransientConnectError(
+      await toDaemonApiError(
+        permanentEnrollmentErrorResponse("invalid-license"),
+      ),
+    ),
     "permanent enrollment is not transient",
   );
   assert(
@@ -121,9 +133,9 @@ it("spot-checks permanent and transient predicates", () => {
   );
 });
 
-it("includes DaemonApiError message in reason", () => {
+it("includes DaemonApiError message in reason", async () => {
   const classified = classifyConnectFailure(
-    new DaemonApiError(401, "Invalid license"),
+    await toDaemonApiError(permanentEnrollmentErrorResponse("invalid-license")),
   );
   assert(classified.reason.length > 0, "reason should be non-empty");
   assert(

@@ -2,9 +2,9 @@ import { logInfo } from "../../logger.ts";
 import type { HostTimeSync } from "../../host/time-sync.ts";
 import type { TimeSyncApplyOpts } from "../../orchestration/ansible.ts";
 import {
-  parseNtpSetPayload,
   type NtpSetPayload,
   type NtpSetResult,
+  parseNtpSetPayload,
 } from "./contracts.ts";
 
 type AnsibleAvailabilityCheck = () => Promise<boolean>;

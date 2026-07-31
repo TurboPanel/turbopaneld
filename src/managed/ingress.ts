@@ -130,7 +130,9 @@ export function dedupeManagedIngressEntries(
   );
 }
 
-function managedStaticArgLines(entries: readonly ManagedIngressEntry[]): string[] {
+function managedStaticArgLines(
+  entries: readonly ManagedIngressEntry[],
+): string[] {
   return dedupeManagedIngressEntries(entries).map((entry) => {
     const name = managedEntrypointName(entry.protocol, entry.publishedPort);
     const wire = wireProtocol(entry.protocol);
@@ -249,7 +251,9 @@ function isValidManagedIngressEntry(
   }
   if (!isValidPortNumberLike(record.publishedPort)) return false;
   if (!isValidPortNumberLike(record.containerPort)) return false;
-  if (record.bindAddress !== undefined && typeof record.bindAddress !== "string") {
+  if (
+    record.bindAddress !== undefined && typeof record.bindAddress !== "string"
+  ) {
     return false;
   }
   if (record.sni !== undefined) {

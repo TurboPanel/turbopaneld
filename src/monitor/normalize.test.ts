@@ -1,5 +1,6 @@
 import { deriveContainerStatus, normalizeContainer } from "./normalize.ts";
 import type { ContainerInspect, ContainerSummary } from "../docker/client.ts";
+import { assertEquals } from "@std/assert";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -10,15 +11,15 @@ import type { ContainerInspect, ContainerSummary } from "../docker/client.ts";
 const test = Deno.test.bind(Deno);
 
 function inspect(
-  partial: Partial<ContainerInspect> & { Id: string },
+  partial: { Id: string } & Record<string, unknown>,
 ): ContainerInspect {
-  return partial as ContainerInspect;
+  return partial as unknown as ContainerInspect;
 }
 
 function summary(
-  partial: Partial<ContainerSummary> & { Id: string },
+  partial: { Id: string } & Record<string, unknown>,
 ): ContainerSummary {
-  return partial as ContainerSummary;
+  return partial as unknown as ContainerSummary;
 }
 
 test("normalizeContainer maps a healthy container to status healthy", () => {
@@ -85,7 +86,11 @@ test("deriveContainerStatus covers docker state and health combinations", () => 
   );
   assertEquals(
     deriveContainerStatus({
-      event: { Action: "health_status: unhealthy", Type: "container" },
+      event: {
+        Action: "health_status: unhealthy",
+        Type: "container",
+        Actor: { ID: "3" },
+      },
     }),
     "unhealthy",
   );
@@ -101,9 +106,3 @@ test("resourceKey is stable across calls for the same container ID", () => {
   assertEquals(first.resourceKey, second.resourceKey);
   assertEquals(first.resourceKey, "container:abc123def456");
 });
-
-function assertEquals(actual: unknown, expected: unknown): void {
-  if (actual !== expected) {
-    throw new Error(`expected ${String(expected)} but got ${String(actual)}`);
-  }
-}

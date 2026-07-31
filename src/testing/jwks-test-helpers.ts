@@ -1,11 +1,15 @@
+/**
+ * Test-only helpers — do not import from production code.
+ */
+
 import { encodeBase64Url } from "@std/encoding/base64url";
 import {
   INSTANCE_JWT_AUD,
   INSTANCE_JWT_ISS,
   INSTANCE_JWT_TYP,
   type InstanceJwtClaims,
-} from "./jwks-client.ts";
-import type { JwksDocument } from "./api-client.ts";
+} from "../instance/jwks-client.ts";
+import type { JwksDocument } from "../instance/api-client.ts";
 
 const textEncoder = new TextEncoder();
 

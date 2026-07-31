@@ -1,4 +1,4 @@
-import { assertEquals } from "jsr:@std/assert";
+import { assertEquals } from "@std/assert";
 import { parseUptime } from "./parse-uptime.ts";
 import { it } from "@std/testing/bdd";
 

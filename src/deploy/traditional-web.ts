@@ -253,9 +253,7 @@ export function phpFpmPoolConfig(
 ): string {
   const poolId = phpFpmPoolId(environmentId, site.composeServiceName);
   const adminLines = site.php ? phpFpmPoolAdminDirectives(site.php) : [];
-  const adminBlock = adminLines.length > 0
-    ? `\n${adminLines.join("\n")}`
-    : "";
+  const adminBlock = adminLines.length > 0 ? `\n${adminLines.join("\n")}` : "";
   // Validates principal username shape when pinned (same gate as site chown).
   resolveTraditionalWebSiteOwnership(site);
   const poolUser = site.principal?.username ?? "tpapache";
@@ -435,7 +433,9 @@ autoRestart                       1
 chrootPath                        /
 enableChroot                      0
 inMemBufSize                      60M
-swappingDir                       ${join(layout.stateDir, "openlitespeed", "swap")}
+swappingDir                       ${
+    join(layout.stateDir, "openlitespeed", "swap")
+  }
 autoFix503                        1
 gracefulRestartTimeout            300
 mime                              ${join(configDir, "mime.properties")}
@@ -492,7 +492,8 @@ async function writeHostingWebMetadata(
   siteBase: string,
   site: TraditionalWebApplySite,
 ): Promise<void> {
-  const hasEnv = site.webEnv !== undefined && Object.keys(site.webEnv).length > 0;
+  const hasEnv = site.webEnv !== undefined &&
+    Object.keys(site.webEnv).length > 0;
   const hasPhp = site.php !== undefined && Object.keys(site.php).length > 0;
   if (!hasEnv && !hasPhp) return;
 
@@ -598,7 +599,16 @@ async function reloadNginx(layout: LayoutPaths): Promise<void> {
   // Run -t as tpnginx: the nginx.org binary defaults to user "nginx", and a
   // root-owned configtest looks that user up even without a `user` directive.
   // The systemd unit also runs as tpnginx (high-port vhosts only).
-  const test = await run("sudo", ["-n", "-u", "tpnginx", "--", binary, "-t", "-c", conf]);
+  const test = await run("sudo", [
+    "-n",
+    "-u",
+    "tpnginx",
+    "--",
+    binary,
+    "-t",
+    "-c",
+    conf,
+  ]);
   if (!test.success) {
     throw new Error(test.stderr || "nginx -t failed");
   }
@@ -619,7 +629,8 @@ async function reloadNginx(layout: LayoutPaths): Promise<void> {
     ]);
     if (!start.success) {
       throw new Error(
-        reload.stderr || start.stderr || "Failed to reload/start turbopanel-nginx",
+        reload.stderr || start.stderr ||
+          "Failed to reload/start turbopanel-nginx",
       );
     }
   }
@@ -841,7 +852,10 @@ async function removeStagingPrefixedFiles(
   }
 }
 
-async function tryRemoveSiteConfigFile(path: string, label: string): Promise<boolean> {
+async function tryRemoveSiteConfigFile(
+  path: string,
+  label: string,
+): Promise<boolean> {
   const rm = await run("sudo", ["-n", "rm", "-f", path]);
   if (rm.success) return true;
   logWarn("deploy", `failed to remove ${label} site ${path}: ${rm.stderr}`);
@@ -904,7 +918,9 @@ function assertTraditionalWebSite(site: TraditionalWebApplySite): void {
     site.listenPort < 1024 ||
     site.listenPort > 65_535
   ) {
-    throw new Error(`traditional-web listenPort is invalid: ${site.listenPort}`);
+    throw new Error(
+      `traditional-web listenPort is invalid: ${site.listenPort}`,
+    );
   }
   if (site.principal) {
     // Validates username shape used by chown / php-fpm pool user lines.
@@ -917,7 +933,13 @@ async function chownWebTree(
   user: string,
   group: string,
 ): Promise<void> {
-  const chown = await run("sudo", ["-n", "chown", "-R", `${user}:${group}`, base]);
+  const chown = await run("sudo", [
+    "-n",
+    "chown",
+    "-R",
+    `${user}:${group}`,
+    base,
+  ]);
   if (!chown.success) {
     logWarn("deploy", `chown ${user} skipped for ${base}: ${chown.stderr}`);
     return;
@@ -975,7 +997,9 @@ function resolveTraditionalWebEngineNeeds(
     nginx: sites.some((site) => site.engine === "nginx"),
     apache: sites.some((site) => site.engine === "apache"),
     openlitespeed: sites.some((site) => site.engine === "openlitespeed"),
-    phpFpm: sites.some((site) => site.engine === "apache" && siteNeedsPhp(site)),
+    phpFpm: sites.some((site) =>
+      site.engine === "apache" && siteNeedsPhp(site)
+    ),
   };
 }
 
@@ -1140,7 +1164,11 @@ async function applyOneTraditionalWebSite(
   sitesDirs: TraditionalWebSitesDirs,
   dockerBind: string | null,
 ): Promise<{ appliedPhpFpm: boolean }> {
-  const base = traditionalWebSiteDir(layout, environmentId, site.composeServiceName);
+  const base = traditionalWebSiteDir(
+    layout,
+    environmentId,
+    site.composeServiceName,
+  );
   const documentRoot = join(base, site.root);
   await ensureDocumentRoot(documentRoot, site.composeServiceName, site.engine);
   await writeHostingWebMetadata(base, site);
@@ -1257,7 +1285,11 @@ async function removeApacheTraditionalWebSites(
   const prefix = `tp-${environmentId}-`;
   const sitesDir = join(layout.configDir, "apache", "sites");
   const poolsDir = phpFpmPoolsDir(layout);
-  const sitesRemoved = await removePrefixedConfFiles(sitesDir, prefix, "apache");
+  const sitesRemoved = await removePrefixedConfFiles(
+    sitesDir,
+    prefix,
+    "apache",
+  );
   const poolsRemoved = await removePrefixedConfFiles(
     poolsDir,
     prefix,
@@ -1272,7 +1304,10 @@ async function removeApacheTraditionalWebSites(
 async function tryRemoveOpenLiteSpeedVhostDir(vhostDir: string): Promise<void> {
   const rm = await run("sudo", ["-n", "rm", "-rf", vhostDir]);
   if (!rm.success) {
-    logWarn("deploy", `failed to remove OpenLiteSpeed vhost dir ${vhostDir}: ${rm.stderr}`);
+    logWarn(
+      "deploy",
+      `failed to remove OpenLiteSpeed vhost dir ${vhostDir}: ${rm.stderr}`,
+    );
   }
 }
 
@@ -1293,7 +1328,9 @@ async function removeOpenLiteSpeedTraditionalWebSites(
   try {
     for await (const entry of Deno.readDir(sitesDir)) {
       if (!isPrefixedConfFile(entry, prefix)) continue;
-      const composeServiceName = stripConfSuffix(entry.name.slice(prefix.length));
+      const composeServiceName = stripConfSuffix(
+        entry.name.slice(prefix.length),
+      );
       const olsName = openlitespeedSiteName(environmentId, composeServiceName);
       await tryRemoveOpenLiteSpeedVhostDir(join(vhostsDir, olsName));
       try {
@@ -1331,8 +1368,14 @@ export async function removeTraditionalWebSites(
   environmentId: string,
 ): Promise<void> {
   assertSafeId(environmentId, "environmentId");
-  const nginxRemoved = await removeNginxTraditionalWebSites(layout, environmentId);
-  const apacheRemoved = await removeApacheTraditionalWebSites(layout, environmentId);
+  const nginxRemoved = await removeNginxTraditionalWebSites(
+    layout,
+    environmentId,
+  );
+  const apacheRemoved = await removeApacheTraditionalWebSites(
+    layout,
+    environmentId,
+  );
   const openlitespeedRemoved = await removeOpenLiteSpeedTraditionalWebSites(
     layout,
     environmentId,

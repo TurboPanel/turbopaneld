@@ -1,10 +1,4 @@
-/**
- * Jest/Mocha-shaped alias for {@link Deno.test}.
- *
- * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
- * reports Deno suites as empty; keep this alias so analysis sees real tests.
- */
-import { assertEquals } from "jsr:@std/assert@1";
+import { assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import type { ManagedApplyPayload } from "../instance/commands/contracts.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
@@ -12,6 +6,12 @@ import { materializeManagedState } from "./materialize.ts";
 import { managedConfigDir, managedTlsDir } from "./paths.ts";
 import { ensureManagedSelfSignedCert } from "./tls.ts";
 
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
 const test = Deno.test.bind(Deno);
 
 async function withTempLayout(
@@ -41,7 +41,8 @@ function basePayload(
     configFiles: [
       {
         path: "postgresql.conf",
-        contents: "# verbatim platform conf\nlisten_addresses = '*'\nssl = on\n",
+        contents:
+          "# verbatim platform conf\nlisten_addresses = '*'\nssl = on\n",
         mode: "0640",
       },
     ],
@@ -126,8 +127,14 @@ test("ensureManagedSelfSignedCert writes under tls/ at expected modes", async ()
       },
     });
     const managedRoot = await materializeManagedState(layout, payload);
-    const certPath = join(managedTlsDir(layout, payload.managedId), "server.crt");
-    const keyPath = join(managedTlsDir(layout, payload.managedId), "server.key");
+    const certPath = join(
+      managedTlsDir(layout, payload.managedId),
+      "server.crt",
+    );
+    const keyPath = join(
+      managedTlsDir(layout, payload.managedId),
+      "server.key",
+    );
     const certStat = await Deno.stat(certPath);
     const keyStat = await Deno.stat(keyPath);
     assertEquals(certStat.isFile, true);

@@ -29,6 +29,10 @@ fail=0
 for file in $FILES; do
   [ -f "$file" ] || continue
   case "$file" in
+    .secretscan-allowlist)
+      # Allowlist entries echo the exact fixture lines; skip self-scan.
+      continue
+      ;;
     *.png|*.jpg|*.jpeg|*.gif|*.webp|*.ico|*.woff|*.woff2|*.ttf|*.otf|*.zip|*.tar|*.zst|*.gz)
       continue
       ;;

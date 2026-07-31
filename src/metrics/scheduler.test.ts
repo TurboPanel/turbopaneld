@@ -1,4 +1,4 @@
-import { assertEquals, assertNotEquals } from "jsr:@std/assert";
+import { assertEquals, assertNotEquals } from "@std/assert";
 import { it } from "@std/testing/bdd";
 import {
   createMetricsCollector,
@@ -411,41 +411,44 @@ it("MetricsScheduler sequence increases across ticks and survives detach→attac
   assertEquals(second.map((f) => f.sequence), [3, 4]);
 });
 
-it("MetricsScheduler fresh collector after reattach nulls rate metrics", async () => {
-  if (Deno.build.os !== "linux") return;
+it({
+  name: "MetricsScheduler fresh collector after reattach nulls rate metrics",
+  // Fixture collector factory is linux-shaped; skip explicitly off linux.
+  ignore: Deno.build.os !== "linux",
+  fn: async () => {
+    const clock = new FakeClock();
+    const intervalMs = 1_000;
+    const factory = createFixtureCollectorFactory();
+    const scheduler = makeScheduler({
+      clock,
+      intervalMs,
+      jitterMaxMs: 0,
+      collectorFactory: factory,
+    });
 
-  const clock = new FakeClock();
-  const intervalMs = 1_000;
-  const factory = createFixtureCollectorFactory();
-  const scheduler = makeScheduler({
-    clock,
-    intervalMs,
-    jitterMaxMs: 0,
-    collectorFactory: factory,
-  });
+    const sent1: unknown[] = [];
+    scheduler.attach(capturingSink(sent1));
+    await clock.advance(0);
+    const firstAttach = parseMetricsFrames(sent1);
+    assertEquals(firstAttach.length, 1);
+    assertEquals(firstAttach[0].metrics.cpuUsagePercent, null);
+    assertEquals(firstAttach[0].metrics.diskReadBytesPerSecond, null);
 
-  const sent1: unknown[] = [];
-  scheduler.attach(capturingSink(sent1));
-  await clock.advance(0);
-  const firstAttach = parseMetricsFrames(sent1);
-  assertEquals(firstAttach.length, 1);
-  assertEquals(firstAttach[0].metrics.cpuUsagePercent, null);
-  assertEquals(firstAttach[0].metrics.diskReadBytesPerSecond, null);
+    await clock.advance(intervalMs);
+    const secondTick = parseMetricsFrames(sent1);
+    assertEquals(secondTick.length, 2);
+    assertEquals(typeof secondTick[1].metrics.cpuUsagePercent, "number");
+    assertEquals(secondTick[1].metrics.cpuUsagePercent !== null, true);
 
-  await clock.advance(intervalMs);
-  const secondTick = parseMetricsFrames(sent1);
-  assertEquals(secondTick.length, 2);
-  assertEquals(typeof secondTick[1].metrics.cpuUsagePercent, "number");
-  assertEquals(secondTick[1].metrics.cpuUsagePercent !== null, true);
-
-  scheduler.detach();
-  const sent2: unknown[] = [];
-  scheduler.attach(capturingSink(sent2));
-  await clock.advance(0);
-  const afterReattach = parseMetricsFrames(sent2);
-  assertEquals(afterReattach.length, 1);
-  assertEquals(afterReattach[0].metrics.cpuUsagePercent, null);
-  assertEquals(afterReattach[0].metrics.diskReadBytesPerSecond, null);
+    scheduler.detach();
+    const sent2: unknown[] = [];
+    scheduler.attach(capturingSink(sent2));
+    await clock.advance(0);
+    const afterReattach = parseMetricsFrames(sent2);
+    assertEquals(afterReattach.length, 1);
+    assertEquals(afterReattach[0].metrics.cpuUsagePercent, null);
+    assertEquals(afterReattach[0].metrics.diskReadBytesPerSecond, null);
+  },
 });
 
 it("MetricsScheduler is independent of other socket traffic", async () => {

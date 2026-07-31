@@ -465,8 +465,7 @@ export function assertValidHostname(value: unknown): asserts value is string {
  * Strict IANA timezone allow-list (Area/Location[/…], or bare identifiers like UTC).
  * Must stay in sync with the instance canonical `server.timezone.set` validator.
  */
-export const TIMEZONE_RE =
-  /^[A-Za-z][A-Za-z0-9_+-]*(\/[A-Za-z0-9_+-]+)*$/;
+export const TIMEZONE_RE = /^[A-Za-z][A-Za-z0-9_+-]*(\/[A-Za-z0-9_+-]+)*$/;
 
 export const TIMEZONE_MAX_LENGTH = 64;
 
@@ -836,7 +835,9 @@ function parseWireguardPeerEntry(value: unknown): WireguardApplyPeer {
 }
 
 /** Must stay in sync with the instance canonical `server.wireguard.apply` validator. */
-export function parseWireguardApplyPayload(value: unknown): WireguardApplyPayload {
+export function parseWireguardApplyPayload(
+  value: unknown,
+): WireguardApplyPayload {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Invalid wireguard apply payload");
   }
@@ -933,7 +934,9 @@ function parseHostingTlsId(value: unknown): string | null | undefined {
 function parseHostingBindAddress(value: unknown): string | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "string" || value.length === 0) {
-    throw new TypeError("hostings[].bindAddress must be a non-empty IP address");
+    throw new TypeError(
+      "hostings[].bindAddress must be a non-empty IP address",
+    );
   }
   if (!isValidIpv4Literal(value) && !isValidIpv6Literal(value)) {
     throw new TypeError("hostings[].bindAddress must be a valid IP address");
@@ -968,7 +971,9 @@ function parseHostingPortEntry(value: unknown): EnvironmentDeployHostingPort {
     !isValidPortNumber(value.published) ||
     !isValidPortNumber(value.target)
   ) {
-    throw new TypeError("hostings[].ports entries must have valid published/target ports");
+    throw new TypeError(
+      "hostings[].ports entries must have valid published/target ports",
+    );
   }
   return { published: value.published, target: value.target };
 }
@@ -978,7 +983,9 @@ function parseHostingPorts(
 ): EnvironmentDeployHostingPort[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value) || value.length === 0) {
-    throw new TypeError("hostings[].ports must be a non-empty array when present");
+    throw new TypeError(
+      "hostings[].ports must be a non-empty array when present",
+    );
   }
   return value.map(parseHostingPortEntry);
 }
@@ -988,7 +995,9 @@ function parseHostingProxy(
 ): EnvironmentDeployHostingProxy | undefined {
   if (!isRecord(value)) return undefined;
   const proxy: EnvironmentDeployHostingProxy = {};
-  if (typeof value.forceHttps === "boolean") proxy.forceHttps = value.forceHttps;
+  if (typeof value.forceHttps === "boolean") {
+    proxy.forceHttps = value.forceHttps;
+  }
   if (typeof value.gzip === "boolean") proxy.gzip = value.gzip;
   if (typeof value.brotli === "boolean") proxy.brotli = value.brotli;
   if (typeof value.stripPrefix === "string") {
@@ -1008,11 +1017,15 @@ function parseStringRecord(value: unknown): Record<string, string> | undefined {
 }
 
 /** Shared by `parseHostingWeb` / `parseTraditionalWebSite` for the `php` sub-object. */
-function parseHostingPhp(value: unknown): EnvironmentDeployHostingPhp | undefined {
+function parseHostingPhp(
+  value: unknown,
+): EnvironmentDeployHostingPhp | undefined {
   if (!isRecord(value)) return undefined;
   const php: EnvironmentDeployHostingPhp = {};
   if (typeof value.version === "string") php.version = value.version;
-  if (typeof value.memoryLimit === "string") php.memoryLimit = value.memoryLimit;
+  if (typeof value.memoryLimit === "string") {
+    php.memoryLimit = value.memoryLimit;
+  }
   if (
     typeof value.maxExecutionTime === "number" &&
     Number.isInteger(value.maxExecutionTime)
@@ -1022,7 +1035,9 @@ function parseHostingPhp(value: unknown): EnvironmentDeployHostingPhp | undefine
   return Object.keys(php).length > 0 ? php : undefined;
 }
 
-function parseHostingWeb(value: unknown): EnvironmentDeployHostingWeb | undefined {
+function parseHostingWeb(
+  value: unknown,
+): EnvironmentDeployHostingWeb | undefined {
   if (!isRecord(value)) return undefined;
   const web: EnvironmentDeployHostingWeb = {};
   const env = parseStringRecord(value.env);
@@ -1099,7 +1114,10 @@ function parseStorageMaterial(
   if (!isRecord(value)) {
     throw new TypeError("Invalid environment deploy storageMaterial entry");
   }
-  const kind = parseNonEmptyString(value, "kind") as EnvironmentDeployStorageMaterial["kind"];
+  const kind = parseNonEmptyString(
+    value,
+    "kind",
+  ) as EnvironmentDeployStorageMaterial["kind"];
   const material: EnvironmentDeployStorageMaterial = {
     storageId: parseNonEmptyString(value, "storageId"),
     kind,
@@ -1108,16 +1126,23 @@ function parseStorageMaterial(
   };
   if (kind !== "docker_volume") {
     material.destinationPath = parseNonEmptyString(value, "destinationPath");
-  } else if (typeof value.destinationPath === "string" && value.destinationPath.length > 0) {
+  } else if (
+    typeof value.destinationPath === "string" &&
+    value.destinationPath.length > 0
+  ) {
     material.destinationPath = value.destinationPath;
   }
   if (typeof value.volumeName === "string") {
     if (!DOCKER_RESOURCE_NAME_RE.test(value.volumeName)) {
-      throw new TypeError("Invalid environment deploy storageMaterial volumeName");
+      throw new TypeError(
+        "Invalid environment deploy storageMaterial volumeName",
+      );
     }
     material.volumeName = value.volumeName;
   }
-  if (typeof value.sourcePath === "string") material.sourcePath = value.sourcePath;
+  if (typeof value.sourcePath === "string") {
+    material.sourcePath = value.sourcePath;
+  }
   if (typeof value.principalId === "string") {
     material.principalId = value.principalId;
   }
@@ -1167,13 +1192,18 @@ function parsePrincipalMaterial(
     gid,
   };
   if (value.home !== undefined) {
-    if (typeof value.home !== "string" || !isValidAbsolutePrincipalPath(value.home)) {
+    if (
+      typeof value.home !== "string" ||
+      !isValidAbsolutePrincipalPath(value.home)
+    ) {
       throw new TypeError("Invalid environment deploy principalMaterial home");
     }
     material.home = value.home;
   }
   if (value.shell !== undefined) {
-    if (typeof value.shell !== "string" || !isValidPrincipalShellPath(value.shell)) {
+    if (
+      typeof value.shell !== "string" || !isValidPrincipalShellPath(value.shell)
+    ) {
       throw new TypeError("Invalid environment deploy principalMaterial shell");
     }
     material.shell = value.shell;
@@ -1446,9 +1476,10 @@ const MAX_MANAGED_LABEL_VALUE_LENGTH = 256;
 const MAX_MANAGED_EXTRA_ENV_ENTRIES = 32;
 const MAX_MANAGED_EXTRA_ENV_VALUE_LENGTH = 4096;
 const MANAGED_DENIED_LABEL_PREFIXES = ["traefik.", "com.docker.compose."];
-const MANAGED_CONTROL_CHAR_RE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/
-const OCI_NAME_SEGMENT_RE =
-  /^[a-zA-Z0-9](?:[a-zA-Z0-9._-]*[a-zA-Z0-9])?$/;
+const MANAGED_CONTROL_CHAR_RE =
+  // deno-lint-ignore no-control-regex -- intentional control-char reject list
+  /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/;
+const OCI_NAME_SEGMENT_RE = /^[a-zA-Z0-9](?:[a-zA-Z0-9._-]*[a-zA-Z0-9])?$/;
 /**
  * Relative paths the platform may materialize under managed state.
  * Must stay in sync with instance `src/lib/commands/schemas.ts`.
@@ -1482,9 +1513,10 @@ const POSTGRES_RESERVED_ENV_KEYS = new Set([
  * came from the instance). Must stay in sync with
  * `MANAGED_RESERVED_ENV_KEYS_BY_ENGINE` in instance `src/lib/managed/settings.ts`.
  */
-const MANAGED_RESERVED_ENV_KEYS_BY_ENGINE: Record<string, ReadonlySet<string>> = {
-  postgres: POSTGRES_RESERVED_ENV_KEYS,
-};
+const MANAGED_RESERVED_ENV_KEYS_BY_ENGINE: Record<string, ReadonlySet<string>> =
+  {
+    postgres: POSTGRES_RESERVED_ENV_KEYS,
+  };
 
 /**
  * Exported so `../managed/compose.ts` can re-assert the same reserved-key
@@ -1555,7 +1587,9 @@ function isAbsoluteContainerPath(value: string): boolean {
   );
 }
 
-function parseManagedApplyConfigFiles(value: unknown): ManagedApplyConfigFile[] {
+function parseManagedApplyConfigFiles(
+  value: unknown,
+): ManagedApplyConfigFile[] {
   if (!Array.isArray(value)) {
     throw new TypeError("Invalid managed.apply configFiles");
   }
@@ -1679,7 +1713,9 @@ function parseManagedLabels(value: unknown): Record<string, string> | null {
   const labels: Record<string, string> = {};
   for (const [key, raw] of entries) {
     if (!isValidOciNamePath(key) || isDeniedLabelKey(key)) return null;
-    if (typeof raw !== "string" || raw.length > MAX_MANAGED_LABEL_VALUE_LENGTH) {
+    if (
+      typeof raw !== "string" || raw.length > MAX_MANAGED_LABEL_VALUE_LENGTH
+    ) {
       return null;
     }
     labels[key] = raw;
@@ -1698,7 +1734,9 @@ function parseManagedExtraEnv(
   for (const [key, raw] of entries) {
     if (!MANAGED_EXTRA_ENV_KEY_RE.test(key)) return null;
     if (reservedEnvKeys.has(key)) return null;
-    if (typeof raw !== "string" || raw.length > MAX_MANAGED_EXTRA_ENV_VALUE_LENGTH) {
+    if (
+      typeof raw !== "string" || raw.length > MAX_MANAGED_EXTRA_ENV_VALUE_LENGTH
+    ) {
       return null;
     }
     if (MANAGED_CONTROL_CHAR_RE.test(raw)) return null;
@@ -2334,7 +2372,9 @@ export function parseManagedBackupPayload(
     scope: value.scope as ManagedBackupPayload["scope"],
   };
   if (value.database !== undefined) {
-    if (typeof value.database !== "string" || !isSafeIdentifier(value.database)) {
+    if (
+      typeof value.database !== "string" || !isSafeIdentifier(value.database)
+    ) {
       throw new Error("Invalid managed.backup payload database");
     }
     payload.database = value.database;
@@ -2360,7 +2400,9 @@ export function parseManagedBackupPayload(
 
 /** Lenient result parser (like other managed results): missing → omitted. Never carries dump contents. */
 export function parseManagedBackupResult(value: unknown): ManagedBackupResult {
-  if (!isRecord(value) || !isString(value.backupId) || value.backupId.length === 0) {
+  if (
+    !isRecord(value) || !isString(value.backupId) || value.backupId.length === 0
+  ) {
     return { backupId: "" };
   }
   const result: ManagedBackupResult = { backupId: value.backupId };
@@ -2414,7 +2456,9 @@ export function parseManagedRestorePayload(
     checksum: value.checksum,
   };
   if (value.database !== undefined) {
-    if (typeof value.database !== "string" || !isSafeIdentifier(value.database)) {
+    if (
+      typeof value.database !== "string" || !isSafeIdentifier(value.database)
+    ) {
       throw new Error("Invalid managed.restore payload database");
     }
     payload.database = value.database;
@@ -2436,7 +2480,9 @@ export function parseManagedRestorePayload(
 export function parseManagedRestoreResult(
   value: unknown,
 ): ManagedRestoreResult {
-  if (!isRecord(value) || !isString(value.backupId) || value.backupId.length === 0) {
+  if (
+    !isRecord(value) || !isString(value.backupId) || value.backupId.length === 0
+  ) {
     return { backupId: "" };
   }
   const result: ManagedRestoreResult = { backupId: value.backupId };
