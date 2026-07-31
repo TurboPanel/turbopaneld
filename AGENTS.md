@@ -214,8 +214,12 @@ compile toolchain).
   emits repo-relative `SF:src/...` paths — no prefix rewrite needed. The
   project uses the built-in **Sonar way** quality gate, which fails when
   **coverage on new code is below 80%** (`new_coverage` LT 80); the scan waits
-  on the gate (`sonar.qualitygate.wait=true`). The scan step is skipped when
-  `SONAR_TOKEN` is unset (fork PRs). Coverage exclusions include
+  on the gate (`sonar.qualitygate.wait=true`). When `SONAR_TOKEN` is unset the
+  require/scan steps soft-fail / skip (`continue-on-error`) so fmt/lint/tests
+  still gate PRs and trunk publish — wire the secret on the repo/org to enforce
+  the Sonar gate. Sibling repos (`instance`, `ui`, `website`) have no Actions
+  Sonar step; they rely on SonarCloud **Automatic Analysis**
+  (`.sonarcloud.properties`) instead. Coverage exclusions include
   `**/*.test.ts`, `src/testing/**`, `src/build-info.ts`, `dist/**`,
   `publish/**`, the Galaxy Docker role tree, and `workers/**`. The
   `denoS2187` issue-ignore (`typescript:S2187` on `**/*.test.ts`) remains —

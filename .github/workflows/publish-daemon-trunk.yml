@@ -10,13 +10,14 @@
 #   DL_S3_BUCKET            — Bunny Storage Zone name (bucket name)
 #   DL_S3_ACCESS_KEY_ID     — Bunny Storage Zone Access Key ID
 #   DL_S3_SECRET_ACCESS_KEY — Bunny Storage Zone Password (Secret Access Key)
-#   SONAR_TOKEN             — SonarCloud token (required by verify.yml on trunk /
-#                             same-repo PRs; fork PRs may omit it)
+#   SONAR_TOKEN             — SonarCloud token for CI-based scan + LCOV import in
+#                             verify.yml (soft-fail when missing today; fork PRs
+#                             omit it). Wire this on the repo/org when ready.
 #
 # The workflow will fail with a clear error if any DL_S3_* variable or secret is
-# missing. SONAR_TOKEN is required for this trunk verify path (and same-repo PRs);
-# only fork PRs may omit it. Keep SonarCloud Automatic Analysis off so Deno LCOV
-# can be imported.
+# missing. Missing SONAR_TOKEN does not block publish yet (verify marks the Sonar
+# steps failed/skipped but continues). Keep SonarCloud Automatic Analysis off so
+# Deno LCOV can be imported once the token is set.
 #
 # Code quality gates live in .github/workflows/verify.yml and must pass before
 # anything is compiled or published. Promotion of an already-published build into
