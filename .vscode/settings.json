@@ -7,6 +7,9 @@
   "files.exclude": {
     "**/orchestration/roles/geerlingguy.docker": true
   },
+  "files.associations": {
+    ".secretscan-allowlist": "plaintext"
+  },
   "files.watcherExclude": {
     "**/orchestration/roles/geerlingguy.docker/**": true
   },

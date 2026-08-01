@@ -16,7 +16,6 @@ import {
   listPersistedTcpUdpServiceIds,
   readEnvironmentTcpUdpServiceIds,
   removeEnvironmentTcpUdpServiceIngress,
-  removeServiceIngress,
   removeTcpUdpIngressEntries,
   serviceIngressDir,
   serviceTraefikCompose,
