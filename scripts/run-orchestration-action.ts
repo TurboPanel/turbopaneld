@@ -71,6 +71,7 @@ const SSH_REPO_URLS = {
   instance: "git@github.com:turbopanel/turbopanel.git",
   ui: "git@github.com:turbopanel/ui.git",
   website: "git@github.com:turbopanel/website.git",
+  github: "git@github.com:turbopanel/.github.git",
   daemon: "git@github.com:turbopanel/turbopaneld.git",
 } as const;
 
@@ -160,6 +161,8 @@ function devInstanceExtraArgs(): string[] {
     `ui_repo_url=${SSH_REPO_URLS.ui}`,
     "-e",
     `website_repo_url=${SSH_REPO_URLS.website}`,
+    "-e",
+    `github_repo_url=${SSH_REPO_URLS.github}`,
   ];
   if (devUser) args.push("-e", `turbopanel_dev_user=${devUser}`);
   if (devUid) args.push("-e", `turbopanel_dev_uid=${devUid}`);

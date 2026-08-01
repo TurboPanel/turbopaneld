@@ -1,0 +1,39 @@
+---
+# Clone only when missing so a live dev working tree is never force-reset.
+# Co-located dev is single-user now, so there is no cross-user ownership to
+# reclaim — the dev user owns its own checkout outright.
+- name: Check .github checkout
+  ansible.builtin.stat:
+    path: "{{ turbopanel_github_dir }}/.git"
+  register: _github_git
+
+- name: Check .github checkout directory
+  ansible.builtin.stat:
+    path: "{{ turbopanel_github_dir }}"
+  register: _github_dir
+
+- name: Fail when .github checkout exists without git metadata
+  when:
+    - not _github_git.stat.exists
+    - _github_dir.stat.isdir | default(false)
+  ansible.builtin.fail:
+    msg: >-
+      {{ turbopanel_github_dir }} exists but is not a git checkout.
+      Move or remove it manually, then re-run the dev stack.
+
+- name: Clone .github repository when missing
+  when: not _github_git.stat.exists
+  ansible.builtin.git:
+    repo: "{{ github_repo_url }}"
+    dest: "{{ turbopanel_github_dir }}"
+    version: "{{ github_branch }}"
+  become_user: "{{ turbopanel_user }}"
+  environment:
+    HOME: "{{ turbopanel_dev_root if (turbopanel_dev_user | default('') | length > 0) else turbopanel_install_root }}"
+  register: _github_clone
+
+- name: Report .github checkout state
+  ansible.builtin.debug:
+    msg: >-
+      .github checkout {{ 'present (left untouched)' if _github_git.stat.exists
+      else 'cloned from ' + github_repo_url }}

@@ -180,6 +180,8 @@ GitHub repository:
 package name: `turbopaneld` (`deno.json`), aligned with the repo slug and the
 compiled `/opt/turbopanel/bin/turbopaneld` binary.
 
+**Public naming:** **TurboPanel Daemon** → [turbopanel/turbopaneld](https://github.com/turbopanel/turbopaneld); internal term `daemon`. **License:** AGPL-3.0-only ([`LICENSE`](./LICENSE), `deno.json`). **Maturity:** **Public beta**. README is product-facing; AGENTS.md is maintainer-facing.
+
 **Host-base prerequisite boundary:** TurboPanel-managed vendors (uv, Python,
 Ansible venv, Deno, Node, Caddy, Redis, cloudflared) install under `vendor` via
 orchestration bootstrap — not via apt in `run.sh`. The minimal host-base set is

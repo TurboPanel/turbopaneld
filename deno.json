@@ -1,7 +1,7 @@
 {
   "name": "turbopaneld",
   "version": "0.1.0",
-  "license": "AGPL-3.0-or-later",
+  "license": "AGPL-3.0-only",
   "exports": {
     ".": "./main.ts",
     "./orchestration/ansible-events": "./src/orchestration/ansible-events.ts"

@@ -1,0 +1,20 @@
+---
+turbopanel_install_root: /opt/turbopanel
+turbopanel_dev_user: ""
+turbopanel_dev_uid: ""
+turbopanel_dev_gid: ""
+# Co-located dev source checkout root (dev user's home); overridden by an
+# extra-var (turbopanel_dev_root) from the dev converge.
+turbopanel_dev_root: "{{ ansible_env.HOME }}"
+turbopanel_lib_dir: "{{ turbopanel_install_root }}/lib"
+# Runtimes always live under the FHS vendor tree (dev shares it with prod).
+turbopanel_vendor_dir: "{{ turbopanel_install_root }}/vendor"
+turbopanel_node: "{{ turbopanel_vendor_dir }}/node/current/bin/node"
+turbopanel_deno: "{{ turbopanel_vendor_dir }}/deno/current/deno"
+turbopanel_runtime_path: "{{ turbopanel_vendor_dir }}/node/current/bin:{{ turbopanel_vendor_dir }}/deno/current:{{ turbopanel_vendor_dir }}/caddy/current:/usr/bin:/bin"
+turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
+turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
+# Source checkout: co-located dev uses the dev user's home; managed installs use lib.
+turbopanel_github_dir: "{{ (turbopanel_dev_root ~ '/.github') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/.github') }}"
+github_repo_url: https://github.com/turbopanel/.github
+github_branch: trunk
