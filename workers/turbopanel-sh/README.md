@@ -44,14 +44,6 @@ the lockfile changes.
 Cloudflare Workers Builds that invoke `npx wrangler deploy` directly get the
 same stage step automatically.
 
-## Legacy URL
-
-Existing references to **https://trbp.nl/run.sh** remain valid after repointing
-the dashboard-managed redirect to be **path-preserving**
-(`trbp.nl/run.sh` → `https://turbopanel.sh/run.sh`) so installs resolve in one
-hop instead of bouncing through the bare host. No code changes are required in
-`run.sh` or daemon bootstrap paths — `curl -fsSL` follows the redirect.
-
 ## Verify
 
 ```bash

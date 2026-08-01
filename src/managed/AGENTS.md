@@ -93,22 +93,14 @@ entrypoints at runtime):
    `supportsSni: false` and always takes catch-all `HostSNI(\`*\`)`. Do not
    build hostname/TLS material handling here — the branch exists for a future
    HTTP-ish engine (e.g. ClickHouse).
-6. **Legacy teardown:** `teardownLegacyManagedIngress` best-effort `down`s the
-   old host-wide `turbopanel-managed-ingress` project and removes
-   `<stateDir>/managed/ingress/traefik/` on apply **and** destroy
-   (pre-release hosts). Destroy must call it — the old shared path used to
-   reconfigure Traefik with an empty entry set instead of `compose down`,
-   which left `turbopanel-managed-ingress-traefik-1` running after the last
-   managed service was deleted.
-7. **Trade-off:** N exposed services ⇒ N small Traefik containers, each with a
+6. **Trade-off:** N exposed services ⇒ N small Traefik containers, each with a
    read-only Docker socket mount — apply/lifecycle/destroy touch only that
    service's ingress.
 
 Apply syncs this service's ingress **before** engine `compose up` so port
 conflicts fail early and the managed network exists before the engine joins
 it. Destroy downs (1) the engine project, (2) this service's Traefik via
-`removeManagedIngress` + claim-file removal, then (3) any leftover legacy
-shared Traefik via `teardownLegacyManagedIngress`.
+`removeManagedIngress` + claim-file removal.
 `removeManagedIngress` downs the compose project **and deletes**
 `<managedId>/ingress/` so a later `managed.lifecycle` start/restart cannot
 treat a stale compose file as active. `exposure.enabled=false` uses the same

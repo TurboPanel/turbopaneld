@@ -28,17 +28,6 @@ function resolveOwnership(
   return principalMap.get(entry.principalId);
 }
 
-/**
- * Legacy volume naming for older instances that omit `volumeName`.
- * The instance owns naming for new deploys — prefer `entry.volumeName`.
- */
-function namespaceDockerVolumeName(
-  organizationId: string,
-  name: string,
-): string {
-  return `tp-${organizationId.slice(0, 8)}-${name}`;
-}
-
 async function maybeChown(
   hostPath: string,
   ownership: EnvironmentDeployPrincipalMaterial | undefined,
@@ -75,14 +64,14 @@ async function materializeFile(
 }
 
 async function materializeDockerVolume(
-  organizationId: string,
   entry: EnvironmentDeployStorageMaterial,
 ): Promise<string> {
-  // Instance owns Docker volume names (`volumeName`); legacy fallback only
-  // for older control planes that omit the field.
-  const volumeName = entry.volumeName && entry.volumeName.length > 0
-    ? entry.volumeName
-    : namespaceDockerVolumeName(organizationId, entry.name);
+  if (!entry.volumeName || entry.volumeName.length === 0) {
+    throw new Error(
+      `docker_volume ${entry.storageId} missing volumeName`,
+    );
+  }
+  const volumeName = entry.volumeName;
   const create = await runDocker(["volume", "create", volumeName]);
   if (!create.success) {
     throw new Error(
@@ -187,7 +176,7 @@ export async function materializeStorageEntries(
     if (entry.kind === "docker_volume") {
       mountPaths.set(
         entry.storageId,
-        await materializeDockerVolume(organizationId, entry),
+        await materializeDockerVolume(entry),
       );
       continue;
     }

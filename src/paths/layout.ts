@@ -238,8 +238,8 @@ export function defaultDaemonRootForMode(
  * Resolve every managed install location with env overrides and mode-aware defaults.
  */
 /**
- * Resolve the vendored runtime root (`TURBOPANEL_RUNTIMES_DIR` →
- * `TURBOPANEL_RUNTIME_DIR` → mode default). Single contract for uv/python,
+ * Resolve the vendored runtime root (`TURBOPANEL_RUNTIMES_DIR` → mode default).
+ * Single contract for uv/python,
  * node/deno/caddy, and every other tool under `vendor`.
  */
 export function resolveRuntimesDir(
@@ -276,13 +276,9 @@ export function resolveLayout(
     PROD_LIB_DIR_DEFAULT,
     mode,
   );
-  const runtimeDir = pickPath(
-    env,
-    "TURBOPANEL_RUNTIME_DIR",
-    DEV_RUNTIMES_DIR_DEFAULT,
-    PROD_RUNTIME_DIR_DEFAULT,
-    mode,
-  );
+  const runtimeDir = mode === "development"
+    ? DEV_RUNTIMES_DIR_DEFAULT
+    : PROD_RUNTIME_DIR_DEFAULT;
   const shareDir = pickPath(
     env,
     "TURBOPANEL_SHARE_DIR",
@@ -365,7 +361,9 @@ export function resolveLayout(
   const runtimesDir = (() => {
     const override = env.TURBOPANEL_RUNTIMES_DIR?.trim();
     if (override) return stripTrailingSlash(override);
-    return mode === "development" ? DEV_RUNTIMES_DIR_DEFAULT : runtimeDir;
+    return mode === "development"
+      ? DEV_RUNTIMES_DIR_DEFAULT
+      : PROD_RUNTIME_DIR_DEFAULT;
   })();
 
   const instanceDir = pickPath(

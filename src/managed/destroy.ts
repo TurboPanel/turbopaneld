@@ -16,7 +16,6 @@ import { resolveLayout } from "../paths/layout.ts";
 import {
   removeManagedIngress,
   removeManagedIngressEntries,
-  teardownLegacyManagedIngress,
 } from "./ingress.ts";
 import {
   managedComposeProject,
@@ -84,11 +83,9 @@ export async function handleManagedDestroy(
     }
   }
 
-  // Per-service Traefik first, then claim file, then the pre-release shared
-  // project — so a last-service delete cannot leave either Traefik running.
+  // Per-service Traefik first, then claim file removal.
   await removeManagedIngress(layout, payload.managedId, run);
   await removeManagedIngressEntries(layout, payload.managedId);
-  await teardownLegacyManagedIngress(layout, run);
 
   try {
     await Deno.remove(root, { recursive: true });

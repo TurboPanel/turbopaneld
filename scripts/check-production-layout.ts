@@ -315,10 +315,6 @@ if (
 }
 
 // --- 5. Retired production service identity fallbacks ----------------------
-const RETIRED_IDENTITY_ALLOWLIST = new Set([
-  "orchestration/roles/turbopanel-user/tasks/identity-cutover.yml",
-  "scripts/check-production-layout.ts",
-]);
 const RETIRED_IDENTITY_PATTERNS: Array<{ label: string; re: RegExp }> = [
   {
     label: "turbopaneli service identity fallback",
@@ -348,7 +344,6 @@ for (const root of PRODUCTION_SCAN_ROOTS) {
   for await (const file of files) {
     if (!SCAN_EXTENSIONS.test(file)) continue;
     const rel = relative(repoRoot, file);
-    if (RETIRED_IDENTITY_ALLOWLIST.has(rel)) continue;
     const text = await Deno.readTextFile(file);
     const lines = text.split("\n");
     lines.forEach((line, i) => {

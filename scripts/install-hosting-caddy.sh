@@ -16,7 +16,7 @@ CADDY_VER="${CADDY_VER:-2.10.2}"
 CADDY_TAG="${CADDY_TAG:-v${CADDY_VER}}"
 # Same composition as scripts/lib/runtime-paths.sh (keep curl|sh self-contained).
 TURBOPANEL_HOME="${TURBOPANEL_HOME:-/opt/turbopanel}"
-VENDOR_DIR="${TURBOPANEL_RUNTIMES_DIR:-${TURBOPANEL_RUNTIME_DIR:-${TURBOPANEL_HOME}/vendor}}"
+VENDOR_DIR="${TURBOPANEL_RUNTIMES_DIR:-${TURBOPANEL_HOME}/vendor}"
 GROUP="${TURBOPANEL_GROUP:-tp}"
 
 arch="$(uname -m)"

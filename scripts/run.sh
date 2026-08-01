@@ -1,7 +1,6 @@
 #!/bin/sh
 # TurboPanel daemon bootstrap — single entrypoint served at
-# https://turbopanel.sh/run.sh (canonical static URL); trbp.nl/run.sh is a legacy
-# 301 alias. Caddy also serves /run.sh in co-located dev.
+# https://turbopanel.sh/run.sh. Caddy also serves /run.sh in co-located dev.
 #
 # Fetches split release artifacts from the channel manifest at
 # https://dl.trbp.nl/channels.json (host-arch native binary + orchestration tree;
@@ -19,8 +18,6 @@
 #   curl -fsSL turbopanel.sh/run.sh | TURBOPANEL_LICENSE=<b64> sh
 # Optional: TURBOPANEL_HOST, TURBOPANEL_INSECURE_TLS=1, TURBOPANEL_UPDATE_CHANNEL.
 # Flags (--license, --host, …) remain supported for scripts and sudo re-exec.
-# Canonical advertised host is turbopanel.sh; bare trbp.nl is a legacy alias
-# that relies on Cloudflare HTTP→HTTPS 301 (+ curl -L).
 #
 # Manifest and release helpers below must stay in sync with scripts/lib/release-artifacts.sh.
 

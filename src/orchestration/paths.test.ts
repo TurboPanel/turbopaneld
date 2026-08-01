@@ -354,7 +354,7 @@ test("layout env overrides apply in development mode", () => {
 
 test("layout env overrides apply in production mode", () => {
   const layout = resolveLayout({
-    TURBOPANEL_RUNTIME_DIR: "/custom/lib/runtime",
+    TURBOPANEL_RUNTIMES_DIR: "/custom/lib/runtime",
     TURBOPANEL_ORCHESTRATION_DIR: "/custom/share/orchestration",
     TURBOPANEL_CONFIG_DIR: "/custom/etc/turbopanel",
     TURBOPANEL_STATE_DIR: "/custom/var/lib/turbopanel",
@@ -374,7 +374,6 @@ test("module-level orchestration constants match active layout", () => {
   const layout = resolveLayout({
     TURBOPANEL_DAEMON_ROOT: readEnv("TURBOPANEL_DAEMON_ROOT"),
     TURBOPANEL_RUNTIMES_DIR: readEnv("TURBOPANEL_RUNTIMES_DIR"),
-    TURBOPANEL_RUNTIME_DIR: readEnv("TURBOPANEL_RUNTIME_DIR"),
     TURBOPANEL_ORCHESTRATION_DIR: readEnv("TURBOPANEL_ORCHESTRATION_DIR"),
   });
   assertEquals(

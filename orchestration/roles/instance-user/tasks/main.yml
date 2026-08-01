@@ -6,9 +6,6 @@
 # account/group provisioning runs in dev (guarded on turbopanel_dev_user). The
 # shared-checkout 2770 ownership model is retired: the home-dir checkout is owned
 # solely by the single dev user (handled by the repo-clone roles).
-- name: Cut over legacy turbopanel* service identities
-  ansible.builtin.import_tasks: ../turbopanel-user/tasks/identity-cutover.yml
-
 - name: Ensure tpctrl primary group for instance user
   ansible.builtin.group:
     name: "{{ instance_primary_group }}"

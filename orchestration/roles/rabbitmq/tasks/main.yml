@@ -4,8 +4,6 @@
 #     .rabbitmq_pass — generated password, mode 0600, owned by rabbitmq_config_owner
 #                      (the dev user in co-located dev, else root)
 
-- name: Cut over legacy turbopanel* service identities
-  ansible.builtin.import_tasks: ../turbopanel-user/tasks/identity-cutover.yml
 
 - name: Ensure turbopanel group exists
   ansible.builtin.group:
@@ -54,17 +52,17 @@
         echo created
       fi
     executable: /bin/bash
-  register: _rmqpass_gen
-  changed_when: "'created' in _rmqpass_gen.stdout"
+  register: rabbitmq_pass_gen
+  changed_when: "'created' in rabbitmq_pass_gen.stdout"
 
 - name: Read queue password
   ansible.builtin.slurp:
     src: "{{ turbopanel_config_dir }}/rabbitmq/.rabbitmq_pass"
-  register: _rmqpass_raw
+  register: rabbitmq_pass_raw
 
 - name: Set queue password fact
   ansible.builtin.set_fact:
-    _rabbitmq_password: "{{ _rmqpass_raw.content | b64decode | trim }}"
+    _rabbitmq_password: "{{ rabbitmq_pass_raw.content | b64decode | trim }}"
 
 - name: Write queue config.json (idempotent)
   ansible.builtin.template:
@@ -81,7 +79,7 @@
     owner: "{{ rabbitmq_config_owner }}"
     group: root
     mode: "0640"
-  register: _rmq_conf_written
+  register: rabbitmq_conf_written
 
 - name: Ensure turbopanel Docker network exists
   ansible.builtin.command:
@@ -93,82 +91,98 @@
       bridge,
       "{{ turbopanel_docker_network }}",
     ]
-  register: _rmq_network_create
+  register: rabbitmq_network_create
   changed_when: false
   failed_when: false
 
 - name: Ensure turbopanel-queue Docker volume exists
   ansible.builtin.command:
     argv: [docker, volume, create, "{{ rabbitmq_volume_name }}"]
-  register: _rmq_volume_create
+  register: rabbitmq_volume_create
   changed_when: false
 
 - name: Inspect queue container
   ansible.builtin.command:
     argv: [docker, inspect, "{{ rabbitmq_container_name }}"]
-  register: _rmq_inspect_cmd
+  register: rabbitmq_inspect_cmd
   changed_when: false
   failed_when: false
 
 - name: Parse queue container inspection
   ansible.builtin.set_fact:
-    _rmq_container: "{{ (_rmq_inspect_cmd.stdout | from_json)[0] }}"
-  when: _rmq_inspect_cmd.rc == 0
+    rabbitmq_inspect: "{{ (rabbitmq_inspect_cmd.stdout | from_json)[0] }}"
+  when: rabbitmq_inspect_cmd.rc == 0
 
 - name: Set queue container state facts
   ansible.builtin.set_fact:
     _rabbitmq_container_exists: true
-    _rabbitmq_running: "{{ _rmq_container.State.Running | default(false) }}"
-    _rmq_status: "{{ _rmq_container.State.Status | default('') }}"
-    _rmq_volume_ok: >-
-      {{ _rmq_container.Mounts | default([]) | selectattr('Type', 'equalto', 'volume') | selectattr('Name', 'equalto', rabbitmq_volume_name) | list | length > 0 }}
-    _rmq_network_ok: "{{ turbopanel_docker_network in (_rmq_container.NetworkSettings.Networks | default({})) }}"
-    _rmq_mgmt_exposed: "{{ _rmq_container.HostConfig.PortBindings['15672/tcp'] is defined }}"
-    _rmq_conf_mounted: >-
-      {{ _rmq_container.Mounts | default([]) | selectattr('Destination', 'equalto', '/etc/rabbitmq/rabbitmq.conf') | list | length > 0 }}
-  when: _rmq_inspect_cmd.rc == 0
+    _rabbitmq_running: "{{ rabbitmq_inspect.State.Running | default(false) }}"
+    rabbitmq_container_status: "{{ rabbitmq_inspect.State.Status | default('') }}"
+    rabbitmq_volume_ok: >-
+      {{
+        rabbitmq_inspect.Mounts | default([])
+        | selectattr('Type', 'equalto', 'volume')
+        | selectattr('Name', 'equalto', rabbitmq_volume_name)
+        | list | length > 0
+      }}
+    rabbitmq_network_ok: "{{ turbopanel_docker_network in (rabbitmq_inspect.NetworkSettings.Networks | default({})) }}"
+    rabbitmq_mgmt_exposed: "{{ rabbitmq_inspect.HostConfig.PortBindings['15672/tcp'] is defined }}"
+    rabbitmq_conf_mounted: >-
+      {{
+        rabbitmq_inspect.Mounts | default([])
+        | selectattr('Destination', 'equalto', '/etc/rabbitmq/rabbitmq.conf')
+        | list | length > 0
+      }}
+  when: rabbitmq_inspect_cmd.rc == 0
 
 - name: Set queue container missing facts
   ansible.builtin.set_fact:
     _rabbitmq_container_exists: false
     _rabbitmq_running: false
-  when: _rmq_inspect_cmd.rc != 0
+  when: rabbitmq_inspect_cmd.rc != 0
 
 - name: Remove queue container when unhealthy
   ansible.builtin.command:
     cmd: docker rm -f {{ rabbitmq_container_name }}
   when:
     - _rabbitmq_container_exists | bool
-    - (not _rmq_volume_ok | bool) or (not _rmq_network_ok | bool) or (not _rmq_conf_mounted | bool) or (_rmq_status | trim in ['restarting', 'exited', 'dead'])
-  register: _rmq_removed
-  changed_when: _rmq_removed.rc == 0
+    - >-
+        (not rabbitmq_volume_ok | bool)
+        or (not rabbitmq_network_ok | bool)
+        or (not rabbitmq_conf_mounted | bool)
+        or (rabbitmq_container_status | trim in ['restarting', 'exited', 'dead'])
+  register: rabbitmq_removed
+  changed_when: rabbitmq_removed.rc == 0
 
 - name: Remove queue container when management port exposure does not match config
   ansible.builtin.command:
     cmd: docker rm -f {{ rabbitmq_container_name }}
   when:
     - _rabbitmq_container_exists | bool
-    - _rmq_removed is not changed
-    - (rabbitmq_expose_mgmt_port | bool and (not _rmq_mgmt_exposed | bool)) or ((not rabbitmq_expose_mgmt_port | bool) and (_rmq_mgmt_exposed | bool))
-  register: _rmq_removed_mgmt
-  changed_when: _rmq_removed_mgmt.rc == 0
+    - rabbitmq_removed is not changed
+    - >-
+        (rabbitmq_expose_mgmt_port | bool and (not rabbitmq_mgmt_exposed | bool))
+        or ((not rabbitmq_expose_mgmt_port | bool) and (rabbitmq_mgmt_exposed | bool))
+  register: rabbitmq_removed_mgmt
+  changed_when: rabbitmq_removed_mgmt.rc == 0
 
 - name: Refresh queue container facts after removal
   ansible.builtin.set_fact:
     _rabbitmq_container_exists: false
     _rabbitmq_running: false
-  when: _rmq_removed is changed or _rmq_removed_mgmt is changed
+  when: rabbitmq_removed is changed or rabbitmq_removed_mgmt is changed
 
 - name: Pre-own queue Docker volume data directory
   ansible.builtin.command:
     cmd: docker run --rm -v {{ rabbitmq_volume_name }}:/data --user root alpine chown -R {{ rabbitmq_container_uid }}:{{ rabbitmq_container_gid }} /data
   when: not _rabbitmq_container_exists | bool
+  changed_when: true
 
 - name: Build docker run argument list
   ansible.builtin.set_fact:
-    _docker_run_args: "{{ _docker_run_base + (_docker_run_mgmt if rabbitmq_expose_mgmt_port | bool else []) + [rabbitmq_image] }}"
+    rabbitmq_docker_run_args: "{{ rabbitmq_docker_run_base + (rabbitmq_docker_run_mgmt if rabbitmq_expose_mgmt_port | bool else []) + [rabbitmq_image] }}"
   vars:
-    _docker_run_base:
+    rabbitmq_docker_run_base:
       - "--name"
       - "{{ rabbitmq_container_name }}"
       - "--restart"
@@ -190,14 +204,15 @@
       - "RABBITMQ_DEFAULT_VHOST={{ rabbitmq_vhost }}"
       - "-p"
       - "127.0.0.1:{{ rabbitmq_amqp_port }}:5672"
-    _docker_run_mgmt:
+    rabbitmq_docker_run_mgmt:
       - "-p"
       - "127.0.0.1:{{ rabbitmq_mgmt_port }}:15672"
 
 - name: Create and start queue container
   ansible.builtin.command:
-    cmd: docker run {{ _docker_run_args | join(' ') }}
+    cmd: docker run {{ rabbitmq_docker_run_args | join(' ') }}
   when: not _rabbitmq_container_exists | bool
+  changed_when: true
   no_log: true
 
 - name: Restart queue container when broker config changed
@@ -205,11 +220,11 @@
     cmd: docker restart {{ rabbitmq_container_name }}
   when:
     - _rabbitmq_container_exists | bool
-    - _rmq_conf_written is changed
-    - _rmq_removed is not changed
-    - _rmq_removed_mgmt is not changed
-  register: _rmq_conf_restart
-  changed_when: _rmq_conf_restart.rc == 0
+    - rabbitmq_conf_written is changed
+    - rabbitmq_removed is not changed
+    - rabbitmq_removed_mgmt is not changed
+  register: rabbitmq_conf_restart
+  changed_when: rabbitmq_conf_restart.rc == 0
 
 - name: Install queue wrapper start script
   ansible.builtin.template:

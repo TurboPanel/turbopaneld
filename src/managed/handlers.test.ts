@@ -69,7 +69,7 @@ test("handleManagedDestroy is idempotent when state dir is missing", async () =>
   }
 });
 
-test("handleManagedDestroy downs per-service and legacy ingress Traefik projects", async () => {
+test("handleManagedDestroy downs per-service ingress Traefik project", async () => {
   const managedId = `destroy-ingress-${crypto.randomUUID()}`;
   const prior = Deno.env.get("TURBOPANEL_STATE_DIR");
   const tmp = await Deno.makeTempDir({ prefix: "tp-managed-destroy-ingress-" });
@@ -83,14 +83,6 @@ test("handleManagedDestroy downs per-service and legacy ingress Traefik projects
     const ingressCompose = managedIngressComposePath(layout, managedId);
     await Deno.mkdir(join(managedRoot, "ingress"), { recursive: true });
     await Deno.writeTextFile(ingressCompose, "services: {}\n", { mode: 0o640 });
-    await Deno.mkdir(join(layout.stateDir, "managed", "ingress", "traefik"), {
-      recursive: true,
-    });
-    await Deno.writeTextFile(
-      join(layout.stateDir, "managed", "ingress", "traefik", "docker-compose.yml"),
-      "services: {}\n",
-      { mode: 0o640 },
-    );
 
     const dockerCalls: string[][] = [];
     const result = await handleManagedDestroy(
@@ -122,25 +114,10 @@ test("handleManagedDestroy downs per-service and legacy ingress Traefik projects
       ),
       true,
     );
-    assertEquals(
-      dockerCalls.some((args) =>
-        args.includes("-p") && args.includes("turbopanel-managed-ingress") &&
-        args.includes("down")
-      ),
-      true,
-    );
 
     try {
       await Deno.stat(ingressCompose);
       throw new TypeError("per-service ingress compose must be removed");
-    } catch (err) {
-      if (!(err instanceof Deno.errors.NotFound)) throw err;
-    }
-    try {
-      await Deno.stat(
-        join(layout.stateDir, "managed", "ingress", "traefik"),
-      );
-      throw new TypeError("legacy ingress traefik dir must be removed");
     } catch (err) {
       if (!(err instanceof Deno.errors.NotFound)) throw err;
     }

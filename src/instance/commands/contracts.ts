@@ -186,8 +186,7 @@ export type EnvironmentDeployStorageMaterial = {
    */
   destinationPath?: string;
   /**
-   * On-host Docker volume name supplied by the instance. When absent, the
-   * daemon falls back to the legacy `tp-<org8>-<name>` namespace.
+   * On-host Docker volume name. Required for `docker_volume` rows.
    */
   volumeName?: string;
   principalId?: string;
@@ -1163,13 +1162,14 @@ function parseStorageMaterial(
   ) {
     material.destinationPath = value.destinationPath;
   }
-  if (typeof value.volumeName === "string") {
-    if (!DOCKER_RESOURCE_NAME_RE.test(value.volumeName)) {
+  if (kind === "docker_volume") {
+    const volumeName = parseNonEmptyString(value, "volumeName");
+    if (!DOCKER_RESOURCE_NAME_RE.test(volumeName)) {
       throw new TypeError(
         "Invalid environment deploy storageMaterial volumeName",
       );
     }
-    material.volumeName = value.volumeName;
+    material.volumeName = volumeName;
   }
   if (typeof value.sourcePath === "string") {
     material.sourcePath = value.sourcePath;

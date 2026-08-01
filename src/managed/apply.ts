@@ -31,7 +31,6 @@ import {
   removeManagedIngress,
   removeManagedIngressEntries,
   syncManagedIngressEntries,
-  teardownLegacyManagedIngress,
 } from "./ingress.ts";
 import {
   materializeManagedState,
@@ -168,8 +167,6 @@ async function prepareManagedIngressForApply(
   layout: LayoutPaths,
   payload: ManagedApplyPayload,
 ): Promise<void> {
-  await teardownLegacyManagedIngress(layout);
-
   const ingressEntry = buildIngressEntry(payload);
   if (ingressEntry) {
     if (!payload.ingress) {

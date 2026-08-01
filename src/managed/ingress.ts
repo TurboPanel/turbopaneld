@@ -41,9 +41,6 @@ type RunDockerFn = (
 /** Single source of truth for the managed ingress Docker network name. */
 export const MANAGED_INGRESS_NETWORK = "turbopanel-managed";
 
-/** Pre-release host-wide project — torn down once on first apply. */
-const LEGACY_MANAGED_INGRESS_PROJECT = "turbopanel-managed-ingress";
-
 const TRAEFIK_IMAGE = "traefik:v3.6.6";
 
 export type ManagedIngressEntry = {
@@ -543,47 +540,6 @@ export function removeManagedIngressEntries(
   return withIngressLock(() =>
     removeManagedIngressEntriesLocked(layout, managedId)
   );
-}
-
-/**
- * Best-effort one-shot teardown of the pre-release host-wide managed Traefik
- * (`turbopanel-managed-ingress` + `<stateDir>/managed/ingress/traefik/`).
- * Claim JSON files under `ingress/` are left alone. Called from apply **and**
- * destroy so a last-service delete cannot leave the shared Traefik running.
- */
-export async function teardownLegacyManagedIngress(
-  layout: LayoutPaths,
-  run: RunDockerFn = defaultRunDocker,
-): Promise<void> {
-  const down = await run([
-    "compose",
-    "-p",
-    LEGACY_MANAGED_INGRESS_PROJECT,
-    "down",
-    "--remove-orphans",
-  ]);
-  if (!down.success) {
-    logInfo(
-      "managed",
-      `legacy managed ingress down soft-failed: ${
-        sanitizeForLog(down.stderr || "compose down failed")
-      }`,
-    );
-  }
-
-  const legacyDir = join(layout.stateDir, "managed", "ingress", "traefik");
-  try {
-    await Deno.remove(legacyDir, { recursive: true });
-  } catch (err) {
-    if (!(err instanceof Deno.errors.NotFound)) {
-      logInfo(
-        "managed",
-        `legacy managed ingress dir remove soft-failed: ${
-          sanitizeForLog(err instanceof Error ? err.message : String(err))
-        }`,
-      );
-    }
-  }
 }
 
 /**

@@ -9,7 +9,7 @@ GitHub: [turbopanel/turbopaneld](https://github.com/turbopanel/turbopaneld). Pac
 Do **not** bootstrap this repo on its own. The co-located stack is owned by **[turbopanel/dev](https://github.com/turbopanel/dev)**.
 
 ```sh
-curl -fsSL trbp.nl/develop.sh | sh
+curl -fsSL https://dev.turbopanel.sh | sh
 ```
 
 That installs/updates `~/dev`, launches the developer console, and (after **Converge**) runs the daemon from this checkout via Deno (`turbopaneld.service`) with the `dev/orchestration` overlay. Mutable data lives under FHS paths (`/etc/turbopanel`, `/var/lib/turbopanel`, …) owned by the current dev user.
@@ -26,6 +26,6 @@ Typical layout after converge:
 
 Edit sources in place under `$HOME`. Re-converge from the console when the stack needs refresh. Details: [dev README](https://github.com/turbopanel/dev#readme) and [Local development](https://turbopanel.io/docs/getting-started/development).
 
-Production installs use `curl -fsSL turbopanel.sh/run.sh | sh` (legacy alias: `trbp.nl/run.sh`) — separate from the developer console.
+Production installs use `curl -fsSL https://turbopanel.sh/run.sh | sh` — separate from the developer console.
 
 Agent conventions and path model: [AGENTS.md](./AGENTS.md).

@@ -5,8 +5,6 @@
 # tpcache(9997) Redis account/group and the cross-user socket-group
 # membership are only provisioned for managed installs (turbopanel_dev_user
 # empty). In dev the single dev user owns and reads the socket directly.
-- name: Cut over legacy turbopanel* service identities
-  ansible.builtin.import_tasks: ../turbopanel-user/tasks/identity-cutover.yml
 
 - name: Ensure turbopanel group exists
   ansible.builtin.group:

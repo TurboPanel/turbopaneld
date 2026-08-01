@@ -374,52 +374,54 @@ test("systemd units and docker wrappers bind the expected identity variables", a
   }
 });
 
-test("identity-cutover argv rename lines map legacy names to canonical tp* accounts", async () => {
-  const cutover = await readRole(
-    "roles/turbopanel-user/tasks/identity-cutover.yml",
-  );
-
-  const argvPatterns = [
-    String.raw`argv:\s*\[\s*groupmod\s*,\s*-n\s*,\s*tp\s*,\s*turbopanel\s*\]`,
-    String.raw`argv:\s*\[\s*usermod\s*,\s*-l\s*,\s*tp\s*,\s*turbopanel\s*\]`,
-    String
-      .raw`argv:\s*\[\s*groupmod\s*,\s*-n\s*,\s*tpcache\s*,\s*turbopanelc\s*\]`,
-    String
-      .raw`argv:\s*\[\s*usermod\s*,\s*-l\s*,\s*tpcache\s*,\s*turbopanelc\s*\]`,
-    String
-      .raw`argv:\s*\[\s*groupmod\s*,\s*-n\s*,\s*tpctrl\s*,\s*turbopaneli\s*\]`,
-    String
-      .raw`argv:\s*\[\s*usermod\s*,\s*-l\s*,\s*tpctrl\s*,\s*turbopaneli\s*\]`,
-  ];
-
-  for (const pattern of argvPatterns) {
-    assertMatch(cutover, new RegExp(pattern), `identity-cutover ${pattern}`);
-  }
-});
-
-test("identity-cutover fail_msg never interpolates getent ansible_facts", async () => {
-  // ansible-core 2.19+ always templates assert fail_msg. Missing getent keys
-  // leave register results without ansible_facts — bare .ansible_facts access
-  // then aborts a clean production install before the assert body runs.
-  const cutover = await readRole(
-    "roles/turbopanel-user/tasks/identity-cutover.yml",
-  );
-  const failMsgBlocks = cutover.matchAll(
-    /fail_msg:\s*>-\n((?:[ \t]+.+\n)+)/g,
-  );
-  let count = 0;
-  for (const match of failMsgBlocks) {
-    count += 1;
-    const body = match[1] ?? "";
-    if (body.includes("ansible_facts")) {
+test("orchestration roles do not import identity-cutover tasks", async () => {
+  const rolesDir = join(CHECKOUT_ORCHESTRATION_DIR, "roles");
+  for await (const entry of Deno.readDir(rolesDir)) {
+    if (!entry.isDirectory) continue;
+    const mainPath = join(rolesDir, entry.name, "tasks", "main.yml");
+    let body: string;
+    try {
+      body = await Deno.readTextFile(mainPath);
+    } catch {
+      continue;
+    }
+    if (body.includes("identity-cutover.yml")) {
       throw new TypeError(
-        `identity-cutover fail_msg interpolates ansible_facts:\n${body}`,
+        `${entry.name}/tasks/main.yml must not import identity-cutover.yml`,
       );
     }
   }
-  if (count < 6) {
-    throw new TypeError(
-      `expected at least 6 identity-cutover fail_msg blocks, found ${count}`,
-    );
+});
+
+test("orchestration roles forbid retired turbopanel* service identity fallbacks", async () => {
+  const retiredPatterns = [
+    {
+      label: "turbopaneli service identity fallback",
+      re: /\belse\s+['"]turbopaneli['"]|\bdefault\(\s*['"]turbopaneli['"]\s*\)/,
+    },
+    {
+      label: "turbopanelc service identity fallback",
+      re: /\belse\s+['"]turbopanelc['"]|\bdefault\(\s*['"]turbopanelc['"]\s*\)/,
+    },
+    {
+      label: "turbopanel service identity fallback",
+      re: /\belse\s+['"]turbopanel['"]|\bdefault\(\s*['"]turbopanel['"]\s*\)/,
+    },
+  ];
+
+  const rolesDir = join(CHECKOUT_ORCHESTRATION_DIR, "roles");
+  for await (const entry of Deno.readDir(rolesDir)) {
+    if (!entry.isDirectory) continue;
+    const tasksDir = join(rolesDir, entry.name, "tasks");
+    for await (const taskEntry of Deno.readDir(tasksDir)) {
+      if (!taskEntry.isFile || !taskEntry.name.endsWith(".yml")) continue;
+      const rel = `roles/${entry.name}/tasks/${taskEntry.name}`;
+      const body = await Deno.readTextFile(join(tasksDir, taskEntry.name));
+      for (const { label, re } of retiredPatterns) {
+        if (re.test(body)) {
+          throw new TypeError(`${rel} uses retired ${label}`);
+        }
+      }
+    }
   }
 });

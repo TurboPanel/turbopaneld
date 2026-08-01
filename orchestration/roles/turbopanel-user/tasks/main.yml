@@ -2,9 +2,6 @@
 # Co-located dev collapses onto the single human dev user, which already exists —
 # so the dedicated tp(9999) account and its passwordless sudo are only
 # created for managed/production installs (turbopanel_dev_user empty).
-- name: Cut over legacy turbopanel* service identities
-  ansible.builtin.import_tasks: identity-cutover.yml
-
 - name: Ensure turbopanel group
   ansible.builtin.group:
     name: "{{ turbopanel_group }}"
@@ -77,10 +74,4 @@
     group: root
     mode: "0440"
     validate: "visudo -cf %s"
-  when: turbopanel_dev_user | default('') | length == 0
-
-- name: Remove legacy turbopanel sudoers fragment
-  ansible.builtin.file:
-    path: /etc/sudoers.d/turbopanel
-    state: absent
   when: turbopanel_dev_user | default('') | length == 0

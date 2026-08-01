@@ -17,8 +17,6 @@
 # Co-located dev collapses onto the single dev user; managed installs use the
 # dedicated tpmetrics(9994) account.
 
-- name: Cut over legacy turbopanel* service identities
-  ansible.builtin.import_tasks: ../turbopanel-user/tasks/identity-cutover.yml
 
 - name: Ensure turbopanel group exists
   ansible.builtin.group:
