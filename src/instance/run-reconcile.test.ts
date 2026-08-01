@@ -45,7 +45,7 @@ test("resolveRunScriptUrl uses instance host for self-hosted installs", () => {
       baseUrl: "https://huey.lan:8443",
       wsBaseUrl: "wss://huey.lan:8443",
     }),
-    "https://huey.lan:8443/run.sh",
+    "https://huey.lan:8443",
   );
 });
 
@@ -63,7 +63,7 @@ test("resolveBootstrapInsecureTls returns false for plaintext http even with rel
   assertEquals(
     resolveBootstrapInsecureTls({
       releaseTlsInsecure: "1",
-      runScriptUrl: "http://localhost:8880/run.sh",
+      runScriptUrl: "http://localhost:8880",
     }),
     false,
   );
@@ -99,11 +99,11 @@ test("downloadRunScript uses plain -fsSL for plaintext http URL", async () => {
         });
       }
     } as typeof Deno.Command;
-    const script = await downloadRunScript("http://localhost:8880/run.sh", {
+    const script = await downloadRunScript("http://localhost:8880", {
       insecureTls: true,
       caPath: "/etc/turbopanel/instance-ca.pem",
     });
-    assertEquals(capturedArgs, ["-fsSL", "http://localhost:8880/run.sh"]);
+    assertEquals(capturedArgs, ["-fsSL", "http://localhost:8880"]);
     if (!script.trim()) {
       throw new Error("expected non-empty script");
     }
@@ -124,7 +124,7 @@ test("resolveBootstrapInsecureTls uses CDN without insecure flag", () => {
 test("resolveBootstrapInsecureTls enables insecure for self-hosted without CA", () => {
   assertEquals(
     resolveBootstrapInsecureTls({
-      runScriptUrl: "https://huey.lan:8443/run.sh",
+      runScriptUrl: "https://huey.lan:8443",
     }),
     true,
   );
@@ -133,7 +133,7 @@ test("resolveBootstrapInsecureTls enables insecure for self-hosted without CA", 
 test("resolveBootstrapInsecureTls prefers platform CA for self-hosted", () => {
   assertEquals(
     resolveBootstrapInsecureTls({
-      runScriptUrl: "https://huey.lan:8443/run.sh",
+      runScriptUrl: "https://huey.lan:8443",
       instanceCaPath: "/etc/turbopanel/instance-ca.pem",
     }),
     false,

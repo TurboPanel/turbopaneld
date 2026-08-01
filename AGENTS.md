@@ -282,15 +282,14 @@ from production code.
 ## Installer script hosting (`workers/turbopanel-sh/`)
 
 **https://turbopanel.sh** is the canonical **assets-only** Workers Static Assets
-host for `scripts/run.sh` — **no Worker script**, so public installer traffic
-can never generate Worker invocation billing. `_redirects` `200`-proxies the
-bare root to `/run.sh` (no client redirect); `_headers` sets the shellscript
-content type + `no-store` on both paths.
+host for the daemon installer script — **no Worker script**, so public installer traffic
+can never generate Worker invocation billing. `_headers` sets the shellscript
+content type + `no-store` on `/`.
 Deploy tooling lives in the isolated `workers/turbopanel-sh/` package (Node +
 wrangler only — not part of the Deno graph). Manual deploy: `npm install` then
-`npm run deploy` from that directory; the stage step copies `scripts/run.sh`
-(plus committed `assets/_headers` and `assets/_redirects`) into gitignored
-`public/` at deploy time so the script stays a single source of truth. The
+`npm run deploy` from that directory; the stage step copies `scripts/run.sh` to
+`public/bootstrap` (plus committed `assets/_headers` and `assets/_redirects`) into
+gitignored `public/` at deploy time so the script stays a single source of truth. The
 `workers/` tree is deploy tooling only and is
 excluded from release packaging (`package-daemon-release.sh` /
 `bundle-orchestration.sh` stage from `orchestration/` and `dist/.build` only).

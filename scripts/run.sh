@@ -1,6 +1,6 @@
 #!/bin/sh
-# TurboPanel daemon bootstrap — single entrypoint served at
-# https://turbopanel.sh/run.sh. Caddy also serves /run.sh in co-located dev.
+# TurboPanel daemon bootstrap — single entrypoint served at turbopanel.sh.
+# Co-located dev Caddy serves the same script at / (non-browser requests).
 #
 # Fetches split release artifacts from the channel manifest at
 # https://dl.trbp.nl/channels.json (host-arch native binary + orchestration tree;
@@ -15,7 +15,7 @@
 # Run as root or as a sudo-capable user (self-escalates via sudo when available).
 #
 # Typical install (production):
-#   curl -fsSL turbopanel.sh/run.sh | TURBOPANEL_LICENSE=<b64> sh
+#   curl -fsSL turbopanel.sh | TURBOPANEL_LICENSE=<b64> sh
 # Optional: TURBOPANEL_HOST, TURBOPANEL_INSECURE_TLS=1, TURBOPANEL_UPDATE_CHANNEL.
 # Flags (--license, --host, …) remain supported for scripts and sudo re-exec.
 #
@@ -562,7 +562,7 @@ while [ $# -gt 0 ]; do
 done
 
 # Piped install form prefers env vars so the copy-paste command stays clean:
-#   curl -fsSL turbopanel.sh/run.sh | TURBOPANEL_LICENSE=… sh
+#   curl -fsSL turbopanel.sh | TURBOPANEL_LICENSE=… sh
 # Explicit flags win when both are set (sudo re-exec always uses flags).
 [ -n "$LICENSE" ] || LICENSE="${TURBOPANEL_LICENSE:-}"
 [ -n "$HOST_URL" ] || HOST_URL="${TURBOPANEL_HOST:-}"
@@ -603,9 +603,9 @@ if ! tp_is_root; then
     tp_install_privilege_denied sudo_failed
   fi
   if [ -n "$HOST_URL" ]; then
-    _REEXEC_SCRIPT_URL="${HOST_URL%/}/run.sh"
+    _REEXEC_SCRIPT_URL="${HOST_URL%/}"
   else
-    _REEXEC_SCRIPT_URL="https://turbopanel.sh/run.sh"
+    _REEXEC_SCRIPT_URL="https://turbopanel.sh"
   fi
   set -- --license "$LICENSE"
   [ -n "$HOST_URL" ] && set -- "$@" --host "$HOST_URL"
