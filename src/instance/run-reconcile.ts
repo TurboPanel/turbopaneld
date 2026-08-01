@@ -3,7 +3,7 @@ import { readEnv, resolveLayout } from "../paths/layout.ts";
 import { type InstanceConfig, stripTrailingSlashes } from "./paths.ts";
 
 export const PRODUCTION_CONTROL_PLANE = "https://turbopanel.app";
-export const CDN_RUN_SCRIPT = "https://trbp.nl/run.sh";
+export const CDN_RUN_SCRIPT = "https://turbopanel.sh/run.sh";
 
 const layout = resolveLayout({
   TURBOPANEL_CONFIG_DIR: readEnv("TURBOPANEL_CONFIG_DIR"),

@@ -16,10 +16,11 @@
 # Run as root or as a sudo-capable user (self-escalates via sudo when available).
 #
 # Typical install (production):
-#   curl -fsSL trbp.nl/run.sh | TURBOPANEL_LICENSE=<b64> sh
+#   curl -fsSL turbopanel.sh/run.sh | TURBOPANEL_LICENSE=<b64> sh
 # Optional: TURBOPANEL_HOST, TURBOPANEL_INSECURE_TLS=1, TURBOPANEL_UPDATE_CHANNEL.
 # Flags (--license, --host, …) remain supported for scripts and sudo re-exec.
-# Bare trbp.nl relies on Cloudflare HTTP→HTTPS 301 (+ curl -L).
+# Canonical advertised host is turbopanel.sh; bare trbp.nl is a legacy alias
+# that relies on Cloudflare HTTP→HTTPS 301 (+ curl -L).
 #
 # Manifest and release helpers below must stay in sync with scripts/lib/release-artifacts.sh.
 
@@ -564,7 +565,7 @@ while [ $# -gt 0 ]; do
 done
 
 # Piped install form prefers env vars so the copy-paste command stays clean:
-#   curl -fsSL trbp.nl/run.sh | TURBOPANEL_LICENSE=… sh
+#   curl -fsSL turbopanel.sh/run.sh | TURBOPANEL_LICENSE=… sh
 # Explicit flags win when both are set (sudo re-exec always uses flags).
 [ -n "$LICENSE" ] || LICENSE="${TURBOPANEL_LICENSE:-}"
 [ -n "$HOST_URL" ] || HOST_URL="${TURBOPANEL_HOST:-}"
@@ -607,7 +608,7 @@ if ! tp_is_root; then
   if [ -n "$HOST_URL" ]; then
     _REEXEC_SCRIPT_URL="${HOST_URL%/}/run.sh"
   else
-    _REEXEC_SCRIPT_URL="https://trbp.nl/run.sh"
+    _REEXEC_SCRIPT_URL="https://turbopanel.sh/run.sh"
   fi
   set -- --license "$LICENSE"
   [ -n "$HOST_URL" ] && set -- "$@" --host "$HOST_URL"

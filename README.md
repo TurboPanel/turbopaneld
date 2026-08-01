@@ -26,6 +26,6 @@ Typical layout after converge:
 
 Edit sources in place under `$HOME`. Re-converge from the console when the stack needs refresh. Details: [dev README](https://github.com/turbopanel/dev#readme) and [Local development](https://turbopanel.io/docs/getting-started/development).
 
-Production installs use `curl -fsSL turbopanel.sh/run.sh | sh` (or `trbp.nl/run.sh`) — separate from the developer console.
+Production installs use `curl -fsSL turbopanel.sh/run.sh | sh` (legacy alias: `trbp.nl/run.sh`) — separate from the developer console.
 
 Agent conventions and path model: [AGENTS.md](./AGENTS.md).
