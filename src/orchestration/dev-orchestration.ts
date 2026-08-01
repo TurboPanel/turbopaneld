@@ -142,7 +142,7 @@ export function resolveDevConvergeRoleDir(
  *
  * `ANSIBLE_ROLES_PATH` overlays the dev-owned roles ahead of the daemon's shared
  * production roles: Ansible resolves each role name left-to-right, so a dev
- * overlay role (`instance-dev-prereqs`, `dev-permissions`, `dev-host-access`)
+ * overlay role (`instance-dev-prereqs`, `dev-shell-path`, `dev-permissions`, `dev-host-access`)
  * wins, and every other role in the manifest falls through to the daemon home
  * checkout's `orchestration/roles`. This overrides the relative `roles_path` in
  * the dev overlay `ansible.cfg`. Keep the ordering in step with the manifest's
