@@ -8,6 +8,7 @@ import type {
 } from "./contracts.ts";
 import {
   parseEnvironmentDeployPayload,
+  parseEnvironmentLifecyclePayload,
   parseEnvironmentStopPayload,
   parseHostnamePayload,
   parseManagedApplyPayload,
@@ -29,6 +30,7 @@ import {
 } from "../../managed/backup.ts";
 import { handleManagedDestroy } from "../../managed/destroy.ts";
 import { handleManagedLifecycle } from "../../managed/lifecycle.ts";
+import { handleEnvironmentLifecycle } from "./lifecycle-environment.ts";
 import { handleEnvironmentStop } from "./stop-environment.ts";
 import { handleHostname } from "./hostname.ts";
 import { handleNtp } from "./ntp.ts";
@@ -131,6 +133,13 @@ export async function handleCommandDispatch(
         result = await handleEnvironmentDeploy(payload, daemonReceivedAt, {
           decryptSecrets: deps?.decryptSecrets,
         });
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
+      case "environment.lifecycle": {
+        const payload = parseEnvironmentLifecyclePayload(message.payload);
+        result = await handleEnvironmentLifecycle(payload, daemonReceivedAt);
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;

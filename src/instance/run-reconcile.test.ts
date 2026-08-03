@@ -38,14 +38,25 @@ test("resolveRunScriptUrl uses CDN for production control plane", () => {
   );
 });
 
-test("resolveRunScriptUrl uses instance host for self-hosted installs", () => {
+test("resolveRunScriptUrl uses CDN for self-hosted HTTPS installs", () => {
   assertEquals(
     resolveRunScriptUrl({
       kind: "url",
       baseUrl: "https://huey.lan:8443",
       wsBaseUrl: "wss://huey.lan:8443",
     }),
-    "https://huey.lan:8443",
+    CDN_RUN_SCRIPT,
+  );
+});
+
+test("resolveRunScriptUrl uses instance host for plaintext dev overlay", () => {
+  assertEquals(
+    resolveRunScriptUrl({
+      kind: "url",
+      baseUrl: "http://huey.lan:8880",
+      wsBaseUrl: "ws://huey.lan:8880",
+    }),
+    "http://huey.lan:8880/run.sh",
   );
 });
 

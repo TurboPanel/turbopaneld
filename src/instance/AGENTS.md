@@ -182,7 +182,8 @@ install/update; Deno is installed only when the JS ExecStart is selected
 checkout via `daemon-systemd-setup.yml` and logs to `/var/log/turbopanel`.
 
 **Managed updates:** the running daemon reconciles in-place via `run.sh`
-(downloaded from `turbopanel.sh` or the instance host) when triggered
+(downloaded from `turbopanel.sh`, or from `<instance>/run.sh` when dialing the
+**dev overlay** plaintext HTTP control plane) when triggered
 from the control-plane UI or manually with the same piped installer
 (`curl -fsSL turbopanel.sh | TURBOPANEL_LICENSE=… sh`; optional
 `TURBOPANEL_HOST` / `TURBOPANEL_INSECURE_TLS=1`). Flags (`--license`, `--host`,

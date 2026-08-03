@@ -4,6 +4,7 @@ import { type InstanceConfig, stripTrailingSlashes } from "./paths.ts";
 
 export const PRODUCTION_CONTROL_PLANE = "https://turbopanel.app";
 export const CDN_RUN_SCRIPT = "https://turbopanel.sh";
+export const RUN_SCRIPT_PATH = "/run.sh";
 
 const layout = resolveLayout({
   TURBOPANEL_CONFIG_DIR: readEnv("TURBOPANEL_CONFIG_DIR"),
@@ -23,13 +24,21 @@ export function encodeLicenseArg(
   return encodeBase64Url(`${licenseId}:${licenseToken}`);
 }
 
+/**
+ * Resolve where reconcile downloads `run.sh` from.
+ *
+ * Production and self-hosted instances never serve `/run.sh` (the production
+ * Caddyfile has no such route). Only the **dev overlay** Caddyfile
+ * (`:8880` plaintext HTTP) serves the daemon checkout's installer — use that
+ * host path exclusively when dialing a plaintext HTTP control plane. All other
+ * targets (managed Workers, self-hosted HTTPS) curl the CDN.
+ */
 export function resolveRunScriptUrl(config: InstanceConfig): string {
   if (config.kind === "url") {
     const base = stripTrailingSlashes(config.baseUrl);
-    if (base === PRODUCTION_CONTROL_PLANE) {
-      return CDN_RUN_SCRIPT;
+    if (isPlaintextHttpUrl(base)) {
+      return `${base}${RUN_SCRIPT_PATH}`;
     }
-    return base;
   }
   return CDN_RUN_SCRIPT;
 }
@@ -47,8 +56,8 @@ export function resolveBootstrapInsecureTls(options: {
   if (isPlaintextHttpUrl(options.runScriptUrl)) return false;
   if (options.releaseTlsInsecure === "1") return true;
   if (options.runScriptUrl === CDN_RUN_SCRIPT) return false;
-  // Self-hosted run.sh is served from the platform leaf cert; prefer --cacert
-  // when configured and fall back to curl -k for dev hosts without a trust anchor.
+  // Non-CDN run.sh over HTTPS (unusual; prefer --cacert when configured and
+  // fall back to curl -k for hosts without a trust anchor).
   return !options.instanceCaPath?.trim();
 }
 

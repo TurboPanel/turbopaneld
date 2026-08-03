@@ -5,6 +5,7 @@ import {
   type CommandDispatchMessage,
   type CommandOutcomeMessage,
   parseEnvironmentDeployPayload,
+  parseEnvironmentLifecyclePayload,
   parseEnvironmentStopPayload,
   parseManagedApplyPayload,
   parseManagedApplyResult,
@@ -36,6 +37,7 @@ const INSTANCE_COMMAND_TYPES = [
   "server.timezone.set",
   "server.wireguard.apply",
   "environment.deploy",
+  "environment.lifecycle",
   "environment.stop",
   "managed.apply",
   "managed.lifecycle",
@@ -250,6 +252,34 @@ test("environment.stop payload parser round-trips", () => {
     () => parseEnvironmentStopPayload({ environmentId: "env-1" }),
     TypeError,
     "projectId must be a non-empty string",
+  );
+});
+
+test("environment.lifecycle payload parser round-trips", () => {
+  assertEquals(
+    parseEnvironmentLifecyclePayload({
+      environmentId: "env-1",
+      projectId: "proj-1",
+      projectName: "tp-demo",
+      action: "restart",
+    }),
+    {
+      environmentId: "env-1",
+      projectId: "proj-1",
+      projectName: "tp-demo",
+      action: "restart",
+    },
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentLifecyclePayload({
+        environmentId: "env-1",
+        projectId: "proj-1",
+        projectName: "tp-demo",
+        action: "down",
+      }),
+    TypeError,
+    "Invalid environment lifecycle payload",
   );
 });
 

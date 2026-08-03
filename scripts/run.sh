@@ -1,6 +1,6 @@
 #!/bin/sh
 # TurboPanel daemon bootstrap — single entrypoint served at turbopanel.sh.
-# Co-located dev Caddy serves the same script at / (non-browser requests).
+# Co-located dev Caddy serves the same script at /run.sh.
 #
 # Fetches split release artifacts from the channel manifest at
 # https://dl.trbp.nl/channels.json (host-arch native binary + orchestration tree;

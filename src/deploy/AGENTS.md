@@ -1,6 +1,6 @@
 # Tenant deploy & hosting ingress — AGENTS.md
 
-The `environment.deploy` / `environment.stop` command handlers: Docker Compose bring-up with Traefik labels, hosting Caddy (`:80`/`:443`, distinct from control-plane Caddy), org TLS materialization from `denc` envelopes, and best-effort container reporting.
+The `environment.deploy` / `environment.lifecycle` / `environment.stop` command handlers: Docker Compose bring-up with Traefik labels, hosting Caddy (`:80`/`:443`, distinct from control-plane Caddy), org TLS materialization from `denc` envelopes, non-destructive start/stop/restart, and best-effort container reporting.
 
 **Managed engines are a separate path** (`../managed/AGENTS.md`): platform-owned compose + config under `<stateDir>/managed/<managedId>/`, native ports only, no hosting Caddy, no tenant Traefik/`turbopanel-ingress`, no user compose merge. Do not route `managed.*` commands through this deploy stack.
 
@@ -154,12 +154,30 @@ get a per-service Traefik project or an `ingressServices[]` entry.
 5. Return authoritative `containers: []` so the instance clears Postgres
    container pins.
 
+`environment.lifecycle` (command router →
+`src/instance/commands/lifecycle-environment.ts`):
+
+1. Require
+   `<stateDir>/deployments/<environmentId>/docker-compose.yml` — missing
+   compose **fails** with a deploy-first message (unlike idempotent stop).
+2. `docker compose -p <projectName> -f <composePath> <start|stop|restart>` —
+   never `down`, `--volumes`, or `--remove-orphans`.
+3. Best-effort apply the same action to each per-service Traefik project for
+   this environment (`readEnvironmentTcpUdpServiceIds` →
+   `serviceIngressComposePath` / `serviceIngressProject`); log and continue
+   on failure. Read-only w.r.t. claim files.
+4. Best-effort `docker compose … ps -a --format json` (include stopped
+   containers); omit `containers` from the result when collection fails so
+   the instance skips reconcile.
+5. **Never** removes volumes, the deployment dir, hosting Caddy sites, or
+   tcp/udp claim files.
+
 Helpers: `src/deploy/ensure-docker.ts`, `src/deploy/ingress.ts`,
 `src/deploy/materialize-tls.ts`, `src/deploy/ensure-hosting-caddy.ts`,
 `src/deploy/materialize-storage.ts`, `src/deploy/apply-storage-volumes.ts`,
 `src/deploy/run-deploy-hooks.ts`, `src/deploy/ensure-principal.ts`,
 `src/deploy/traditional-web.ts`, `src/deploy/traditional-web-docker.ts`,
-`src/deploy/ensure-docker-networks.ts`.
+`src/deploy/ensure-docker-networks.ts`, `src/deploy/compose-ps.ts`.
 
 ### Traditional web (nginx + apache + OpenLiteSpeed)
 

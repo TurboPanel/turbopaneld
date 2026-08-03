@@ -304,7 +304,9 @@ excluded from release packaging (`package-daemon-release.sh` /
   read; carried on hello and change-detected heartbeats with `addresses` from
   `src/server-addresses.ts`).
 - **Commands** — `server.hostname.set`, `server.reboot`, `server.timezone.set`,
-  `server.ntp.set` (and deploy/stop/ping) via `src/instance/commands/`. Timezone
+  `server.ntp.set` (and deploy/lifecycle/stop/ping) via `src/instance/commands/`.
+  `environment.lifecycle` is non-destructive `compose start|stop|restart`
+  (volumes, deployment dir, and hosting Caddy sites untouched). Timezone
   / NTP apply through Ansible role `time-sync` + playbook `time-sync-apply.yml`
   (`runTimeSyncApply`); contracts in `contracts.ts` must match the instance
   canonical `server.timezone.set` / `server.ntp.set` shapes. **`server.wireguard.apply`**
@@ -327,7 +329,7 @@ Large subsystems live in focused `AGENTS.md` files next to their code — Cursor
 |---|---|---|
 | **Instance client** | `src/instance/AGENTS.md` | WSS / Unix-socket connection, idle presence + heartbeats (`timeSync`/`addresses`), reconnect / parked backoff, JWKS JWT verification, daemon TLS trust model |
 | **Host metrics (collector)** | `src/metrics/AGENTS.md` | `/proc`-based collection + scheduling, `POST /api/daemon/v1/metrics`, 20-metric contract |
-| **Tenant deploy & hosting ingress** | `src/deploy/AGENTS.md` | `environment.deploy` / `.stop`, Docker Compose + Traefik, hosting Caddy, TLS materialization |
+| **Tenant deploy & hosting ingress** | `src/deploy/AGENTS.md` | `environment.deploy` / `.lifecycle` / `.stop`, Docker Compose + Traefik, hosting Caddy, TLS materialization |
 | **Managed engines (daemon runtime)** | `src/managed/AGENTS.md` | `managed.apply` / `.lifecycle` / `.destroy`, platform compose + per-service managed Traefik ingress (`turbopanel-managed-<id>-ingress` on network `turbopanel-managed`), engine registry (Postgres first); separate from tenant deploy |
 | **Installer presentation** | `src/orchestration/AGENTS.md` | Installer presenter + sanitizer / vocabulary map for `run.sh` install & converge |
 | **ClickHouse (analytics)** | `orchestration/AGENTS.md` | `clickhouse` Ansible role (Docker), idle-CPU tuning, app-user grants, dev-only Tabix GUI |

@@ -11,6 +11,7 @@ export const COMMAND_TYPES = [
   "server.timezone.set",
   "server.wireguard.apply",
   "environment.deploy",
+  "environment.lifecycle",
   "environment.stop",
   "managed.apply",
   "managed.lifecycle",
@@ -303,6 +304,31 @@ export type EnvironmentStopResult = {
   summary: string;
   /** Authoritative empty report so the instance clears container pins. */
   containers: EnvironmentDeployContainer[];
+};
+
+/** Must stay in sync with the instance canonical `environment.lifecycle` action set. */
+export type EnvironmentLifecycleAction = "start" | "stop" | "restart";
+
+/** Must stay in sync with the instance canonical `environment.lifecycle` action set. */
+export const ENVIRONMENT_LIFECYCLE_ACTIONS = new Set([
+  "start",
+  "stop",
+  "restart",
+]);
+
+/** Must stay in sync with the instance canonical `environment.lifecycle` shape. */
+export type EnvironmentLifecyclePayload = {
+  environmentId: string;
+  projectId: string;
+  projectName: string;
+  action: EnvironmentLifecycleAction;
+};
+
+/** Must stay in sync with the instance canonical `environment.lifecycle` shape. */
+export type EnvironmentLifecycleResult = {
+  projectName: string;
+  summary: string;
+  containers?: EnvironmentDeployContainer[];
 };
 
 /** Must stay in sync with the instance canonical managed engine codes. */
@@ -1507,6 +1533,25 @@ export function parseEnvironmentStopPayload(
     projectId: parseNonEmptyString(value, "projectId"),
     projectName: parseNonEmptyString(value, "projectName"),
     ...(ingressServices === undefined ? {} : { ingressServices }),
+  };
+}
+
+/** Must stay in sync with the instance canonical `environment.lifecycle` validator. */
+export function parseEnvironmentLifecyclePayload(
+  value: unknown,
+): EnvironmentLifecyclePayload {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid environment lifecycle payload");
+  }
+  const action = value.action;
+  if (typeof action !== "string" || !ENVIRONMENT_LIFECYCLE_ACTIONS.has(action)) {
+    throw new TypeError("Invalid environment lifecycle payload");
+  }
+  return {
+    environmentId: parseNonEmptyString(value, "environmentId"),
+    projectId: parseNonEmptyString(value, "projectId"),
+    projectName: parseNonEmptyString(value, "projectName"),
+    action: action as EnvironmentLifecycleAction,
   };
 }
 

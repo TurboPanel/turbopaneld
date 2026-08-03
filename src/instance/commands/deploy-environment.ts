@@ -2,6 +2,10 @@ import { join } from "@std/path";
 import { applySecretVariablesToCompose } from "../../deploy/apply-deploy-variables.ts";
 import { applyStorageVolumesToCompose } from "../../deploy/apply-storage-volumes.ts";
 import { injectHostingLabels } from "../../deploy/compose-labels.ts";
+import {
+  parseComposePsEntries,
+  readComposePsContainer,
+} from "../../deploy/compose-ps.ts";
 import { composeHasContainerServices } from "../../deploy/compose-services.ts";
 import { runDocker } from "../../deploy/docker-cli.ts";
 import { ensureDocker } from "../../deploy/ensure-docker.ts";
@@ -50,40 +54,6 @@ import type { LayoutPaths } from "../../paths/layout.ts";
 const SAFE_PATH_ID_RE = /^[A-Za-z0-9_-]+$/;
 const COMPOSE_PROJECT_RE = /^[a-z0-9][a-z0-9_-]*$/;
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function parseComposePsEntries(stdout: string): Record<string, unknown>[] {
-  const trimmed = stdout.trim();
-  if (trimmed.length === 0) return [];
-
-  try {
-    const parsed: unknown = JSON.parse(trimmed);
-    if (Array.isArray(parsed)) {
-      return parsed.filter(isRecord);
-    }
-    if (isRecord(parsed)) {
-      return [parsed];
-    }
-  } catch {
-    // Fall through to NDJSON.
-  }
-
-  const entries: Record<string, unknown>[] = [];
-  for (const line of trimmed.split("\n")) {
-    const row = line.trim();
-    if (row.length === 0) continue;
-    try {
-      const parsed: unknown = JSON.parse(row);
-      if (isRecord(parsed)) entries.push(parsed);
-    } catch {
-      return [];
-    }
-  }
-  return entries;
-}
-
 /**
  * Best-effort `docker compose ps --format json` after a successful compose up.
  * Never throws. Returns `null` when collection fails (non-authoritative — omit
@@ -122,29 +92,11 @@ async function collectDeployedContainers(
 
     const containers: EnvironmentDeployContainer[] = [];
     for (const entry of entries) {
-      const containerId = entry.ID;
-      const containerName = entry.Name;
-      const composeServiceName = entry.Service;
-      const status = entry.State;
-      if (
-        typeof containerId !== "string" ||
-        containerId.length === 0 ||
-        typeof containerName !== "string" ||
-        containerName.length === 0 ||
-        typeof composeServiceName !== "string" ||
-        composeServiceName.length === 0 ||
-        typeof status !== "string" ||
-        status.length === 0
-      ) {
-        continue;
-      }
-      const serviceId = serviceIdByComposeName.get(composeServiceName);
+      const row = readComposePsContainer(entry, "app");
+      if (row === null) continue;
+      const serviceId = serviceIdByComposeName.get(row.composeServiceName);
       containers.push({
-        composeServiceName,
-        containerId,
-        containerName,
-        status,
-        role: "app",
+        ...row,
         ...(serviceId === undefined ? {} : { serviceId }),
       });
     }
@@ -191,29 +143,11 @@ async function collectServiceIngressContainer(
     }
     const entries = parseComposePsEntries(result.stdout);
     for (const entry of entries) {
-      const containerId = entry.ID;
-      const containerName = entry.Name;
-      const composeServiceName = entry.Service;
-      const status = entry.State;
-      if (
-        typeof containerId !== "string" ||
-        containerId.length === 0 ||
-        typeof containerName !== "string" ||
-        containerName.length === 0 ||
-        typeof composeServiceName !== "string" ||
-        composeServiceName.length === 0 ||
-        typeof status !== "string" ||
-        status.length === 0
-      ) {
-        continue;
-      }
+      const row = readComposePsContainer(entry, "ingress");
+      if (row === null) continue;
       return {
+        ...row,
         serviceId: ingress.serviceId,
-        composeServiceName,
-        containerId,
-        containerName,
-        status,
-        role: "ingress",
       };
     }
     return null;
