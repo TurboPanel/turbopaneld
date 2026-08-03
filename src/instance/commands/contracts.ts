@@ -1544,7 +1544,9 @@ export function parseEnvironmentLifecyclePayload(
     throw new TypeError("Invalid environment lifecycle payload");
   }
   const action = value.action;
-  if (typeof action !== "string" || !ENVIRONMENT_LIFECYCLE_ACTIONS.has(action)) {
+  if (
+    typeof action !== "string" || !ENVIRONMENT_LIFECYCLE_ACTIONS.has(action)
+  ) {
     throw new TypeError("Invalid environment lifecycle payload");
   }
   return {

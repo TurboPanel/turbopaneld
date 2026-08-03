@@ -69,7 +69,10 @@ async function applyIngressLifecycle(
   action: EnvironmentLifecyclePayload["action"],
   run: RunDockerFn,
 ): Promise<void> {
-  const serviceIds = await readEnvironmentTcpUdpServiceIds(layout, environmentId);
+  const serviceIds = await readEnvironmentTcpUdpServiceIds(
+    layout,
+    environmentId,
+  );
   for (const serviceId of serviceIds) {
     const composePath = serviceIngressComposePath(layout, serviceId);
     if (!(await composeFileExists(composePath))) continue;

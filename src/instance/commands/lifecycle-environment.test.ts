@@ -77,12 +77,12 @@ test({
     await Deno.writeTextFile(composePath, "services: {}\n", { mode: 0o640 });
 
     const calls: string[][] = [];
-    const fakeRunDocker = async (
+    const fakeRunDocker = (
       args: string[],
     ): Promise<DockerCliResult> => {
       calls.push([...args]);
       if (args.includes("ps")) {
-        return {
+        return Promise.resolve({
           success: true,
           stdout: JSON.stringify([
             {
@@ -94,9 +94,14 @@ test({
           ]),
           stderr: "",
           code: 0,
-        };
+        });
       }
-      return { success: true, stdout: "", stderr: "", code: 0 };
+      return Promise.resolve({
+        success: true,
+        stdout: "",
+        stderr: "",
+        code: 0,
+      });
     };
 
     try {

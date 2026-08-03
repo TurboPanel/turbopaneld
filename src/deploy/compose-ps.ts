@@ -9,7 +9,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /** Parse compose `ps --format json` stdout (JSON array or NDJSON). */
-export function parseComposePsEntries(stdout: string): Record<string, unknown>[] {
+export function parseComposePsEntries(
+  stdout: string,
+): Record<string, unknown>[] {
   const trimmed = stdout.trim();
   if (trimmed.length === 0) return [];
 
