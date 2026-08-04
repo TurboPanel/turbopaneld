@@ -6,7 +6,7 @@ The `environment.deploy` / `environment.lifecycle` / `environment.stop` command 
 
 Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../instance/src/lib/commands/AGENTS.md`. Cross-repo `../<repo>/…` links are relative to the repo root.
 
-### Tenant Docker Compose deploy + hosting ingress
+## Tenant Docker Compose deploy + hosting ingress
 
 `environment.deploy` (command router →
 `src/instance/commands/deploy-environment.ts`):
@@ -24,7 +24,14 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../insta
    Hosting Caddy dials `:7080` over h2c and `:7443` over HTTP/2+TLS
    (`tls_insecure_skip_verify`) with PROXY protocol v2. HTTP/3 is offered only
    at the public browser edge (browser→Caddy). **No** public `:80`/`:443` on
-   Traefik; **no** ACME/LE.
+   Traefik; **no** ACME/LE. When
+   `<stateDir>/system/hosting-ingress.json` is present,
+   `ensureHostingIngress` passes that descriptor into `traefikCompose()` so
+   the shared container gets allocated `container_name` /
+   `x-turbopanel` / labels; when absent (or corrupt — logged and ignored),
+   the anonymous pre-identity shape is written so older installs keep working
+   and tenant deploys cannot orphan an allocated inventory row by rewriting
+   anonymous compose over an identity-bearing Traefik.
 3. Ensure vendored hosting Caddy (`ensureHostingCaddy` — Ansible `caddy-setup`
    then direct GitHub download) when
    `/opt/turbopanel/vendor/caddy/current/caddy` is missing. On-demand like
@@ -72,7 +79,7 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../insta
    (`src/deploy/materialize-tls.ts`). Private keys arrive as `denc`
    envelopes — decrypt only through `POST /api/daemon/v1/secrets/decrypt`
    (daemon JWT); never log plaintext.
-7. Refresh hosting Caddy config under `/etc/turbopanel/hosting/`
+10. Refresh hosting Caddy config under `/etc/turbopanel/hosting/`
    (`auto_https off` always). Per-hostname site blocks use
    `tls <fullchain> <privkey>` when a resolved `tlsId` was materialized;
    otherwise `tls internal`. When `hostings[].bindAddress` is set, both the
@@ -83,13 +90,13 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../insta
    private `ip` (`scope = 'datacenter'` on the target server), or **local**
    loopback `127.0.0.1`. Unit `turbopanel-hosting-caddy.service` when sudo
    allows. **Distinct** from control-plane Caddy (`:8443`).
-10. Best-effort `docker compose ps --format json` — per-container identity/status
+11. Best-effort `docker compose ps --format json` — per-container identity/status
    (`containerId`, `containerName`, `composeServiceName`, `status`, optional
    `serviceId` from `payload.hostings`) is included in the command result when
    collection succeeds; a `ps`/parse failure never fails an otherwise-successful
    deploy.
 
-### Raw TCP/UDP port hosting (non-HTTP docker services)
+## Raw TCP/UDP port hosting (non-HTTP docker services)
 
 `hostings[].protocol` (`http` default/omitted, or `tcp`/`udp`) lets a Docker
 service (Postgres, a game server, a UDP relay, …) publish raw port(s) straight
@@ -116,10 +123,10 @@ get a per-service Traefik project or an `ingressServices[]` entry.
   `container_name: <serviceId>-ingress`,
   `x-turbopanel: { kind: ingress, serviceId, containerName }`, joined to
   `turbopanel-ingress`, and
-  `--providers.docker.constraints=Label(\`com.turbopanel.service\`,\`<serviceId>\`)`.
+  ``--providers.docker.constraints=Label(`com.turbopanel.service`,`<serviceId>`)``.
   Static config is regenerated (not hot-reloaded): one quoted
-  `--entrypoints.<protocol><port>.address=:<port>[/udp]` arg and one quoted
-  `"<bind>:<port>:<port>/<protocol>"` `ports:` line per entry (bind defaults
+  ``--entrypoints.<protocol><port>.address=:<port>[/udp]`` arg and one quoted
+  ``"<bind>:<port>:<port>/<protocol>"`` `ports:` line per entry (bind defaults
   `0.0.0.0`; IPv6 bracketed; `assertValidBindAddress`). Entries are deduped
   and sorted for a stable diff.
 - **Cross-service port uniqueness**: claim files live at
@@ -173,13 +180,82 @@ get a per-service Traefik project or an `ingressServices[]` entry.
    tcp/udp claim files.
 
 Helpers: `src/deploy/ensure-docker.ts`, `src/deploy/ingress.ts`,
-`src/deploy/materialize-tls.ts`, `src/deploy/ensure-hosting-caddy.ts`,
+`src/deploy/labels.ts`, `src/deploy/ingress-identity.ts`,
+`src/deploy/system-component.ts`, `src/deploy/materialize-tls.ts`,
+`src/deploy/ensure-hosting-caddy.ts`,
 `src/deploy/materialize-storage.ts`, `src/deploy/apply-storage-volumes.ts`,
 `src/deploy/run-deploy-hooks.ts`, `src/deploy/ensure-principal.ts`,
 `src/deploy/traditional-web.ts`, `src/deploy/traditional-web-docker.ts`,
 `src/deploy/ensure-docker-networks.ts`, `src/deploy/compose-ps.ts`.
 
-### Traditional web (nginx + apache + OpenLiteSpeed)
+## Shared HTTP ingress identity
+
+The shared loopback Traefik (compose project `turbopanel-ingress`, service key
+`traefik`) is **platform inventory**, distinct from per-service tenant TCP/UDP
+Traefik and from managed-engine Traefik:
+
+| Pattern | Ownership | Compose project |
+| --- | --- | --- |
+| Shared HTTP ingress | Platform (`system/hosting-ingress.json`) | `turbopanel-ingress` |
+| Tenant TCP/UDP ingress | Tenant service (`ingress/services/<serviceId>/`) | `turbopanel-ingress-<serviceId>` |
+| Managed-engine ingress | Managed service (`managed/<id>/ingress/`) | `turbopanel-managed-<id>-ingress` |
+| System stack (database/queue/analytics) | Ansible/Ops (`system-compose` role), inspected via `system/<component>.json` | `turbopanel-system` |
+
+**System stack (`turbopanel-system`) is a distinct, fourth pattern — inspect-only,
+never self-healed.** PostgreSQL/RabbitMQ/ClickHouse are provisioned into the
+`turbopanel-system` Compose project by the `system-compose` Ansible role (see
+`../../orchestration/AGENTS.md`), not by this deploy stack. The daemon never
+`docker compose up`s, stops, or restarts that project — `system.reconcile`
+only persists the identity descriptor and calls
+`inspectSystemStackContainer` (`src/deploy/system-stack.ts`) to report
+`docker compose ps` identity/status, exactly as `SYSTEM_COMPONENT_CONTRACTS`
+declares (`selfHealAllowed: false` for `database` / `queue` / `analytics` vs
+`true` for `hosting-ingress`). Adoption requires labels
+`turbopanel.role=app` + `com.turbopanel.system.component=<database|queue|analytics>`
+on the compose-ps row — **never** `com.turbopanel.service` (that label is
+reserved for tenant/system Traefik identity) and **never**
+`traefik.enable` (the system stack has no HTTP ingress of its own). A missing
+`turbopanel-system` compose file is authoritative absence (`null`, not a
+collection failure — Ansible/Ops has not provisioned the stack on this host
+yet); a `compose ps` failure returns `undefined` so the instance omits
+`containers` from that command's result. Keep all **four** patterns
+distinct: shared HTTP ingress self-heals via `ensureDocker`, tenant TCP/UDP
+and managed-engine ingress stay on their own tenant/engine service, and the
+system stack is observed only.
+
+Descriptor path: `<stateDir>/system/hosting-ingress.json`
+(`SystemComponentDescriptor`: `component`, `serviceId`, `composeServiceName`
+must stay `traefik`, `containerName` = `<serviceId>-ingress`). When present,
+`traefikCompose(identity)` emits `container_name`,
+`x-turbopanel: { kind: system, component: hosting-ingress, … }`, and labels
+`turbopanel.role=ingress`, `com.turbopanel.system.component=hosting-ingress`,
+`com.turbopanel.service=<serviceId>` — **never** `traefik.enable`, HTTP router
+labels, or `com.turbopanel.raw-port` (so tenant Traefik providers stay blind to
+it). `ensureHostingIngress` reads the descriptor on every deploy; a missing
+file is the normal pre-provision / older-control-plane path; a corrupt file
+logs a warning and falls back to the anonymous YAML so tenant deploys still
+succeed. `inspectHostingIngressContainer` best-effort returns the observed
+container in `EnvironmentDeployContainer` shape (`role: ingress`); compose-ps
+failure returns `undefined` (omit `containers`), absence returns `null`.
+A missing compose file is authoritative absence (`null`), not a collection
+failure. Observed rows must match the allocated `container_name` **and**
+compose service **and** carry allowlisted platform labels
+(`turbopanel.role=ingress`, `com.turbopanel.system.component=hosting-ingress`,
+`com.turbopanel.service=<serviceId>`) — legacy unlabelled
+`turbopanel-ingress-traefik-1` rows are ignored.
+Production writer: the `system.reconcile` handler always calls
+`writeSystemComponentDescriptor`, then self-heals via `ensureDocker` +
+`ensureHostingIngress` when `desired: 'present'` (plus compose `restart` when
+`action: 'restart'`), intentionally stops the shared project when
+`action: 'stop'` (hosting-disable PATCH — `compose stop`, then `ps -a`
+inspect), or report-only inspect when `desired: 'absent'` with
+`action: 'reconcile'` — ordinary disabled-state drift must not silently tear
+down a running proxy. Keep the three
+Traefik patterns distinct: shared HTTP ingress = system-workspace inventory,
+tenant TCP/UDP ingress stays on its tenant service, managed-engine ingress
+stays on the engine's service.
+
+## Traditional web (nginx + apache + OpenLiteSpeed)
 
 When `environment.deploy` carries `traditionalWebSites[]` (compose services with
 `x-turbopanel.serviceKind: traditional-web`), those services are **not** in

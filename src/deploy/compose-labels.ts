@@ -1,5 +1,11 @@
 import { parse, stringify } from "yaml";
 import type { EnvironmentDeployPayload } from "../instance/commands/contracts.ts";
+import {
+  LABEL_ENVIRONMENT,
+  LABEL_PROJECT,
+  LABEL_RAW_PORT,
+  LABEL_SERVICE_ID,
+} from "./labels.ts";
 
 const INGRESS_NETWORK = "turbopanel-ingress";
 const ROUTER_ID_RE = /^[A-Za-z0-9_-]+$/;
@@ -247,13 +253,13 @@ export function injectHostingLabels(payload: EnvironmentDeployPayload): {
       applyTcpUdpHostingLabels(labels, hosting);
       // Boundary for per-service Traefik: only containers that publish raw
       // ports carry this label (see `serviceTraefikCompose` constraints).
-      addLabel(labels, "com.turbopanel.raw-port", "true");
+      addLabel(labels, LABEL_RAW_PORT, "true");
     } else {
       applyHttpHostingLabels(labels, hosting);
     }
-    addLabel(labels, "com.turbopanel.project", payload.projectId);
-    addLabel(labels, "com.turbopanel.environment", payload.environmentId);
-    addLabel(labels, "com.turbopanel.service", hosting.serviceId);
+    addLabel(labels, LABEL_PROJECT, payload.projectId);
+    addLabel(labels, LABEL_ENVIRONMENT, payload.environmentId);
+    addLabel(labels, LABEL_SERVICE_ID, hosting.serviceId);
     service.labels = labels;
     attachIngressNetwork(service);
   }

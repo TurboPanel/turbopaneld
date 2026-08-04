@@ -1,9 +1,7 @@
 [Unit]
 Description=TurboPanel instance
-After=network-online.target docker.service turbopanel-postgres.service{% if (turbopanel_instance_runtime | default('deno')) == 'deno' %} turbopanel-rabbitmq.service{% endif %}
-
-Wants=network-online.target turbopanel-postgres.service{% if (turbopanel_instance_runtime | default('deno')) == 'deno' %} turbopanel-rabbitmq.service{% endif %}
-
+After=network-online.target docker.service turbopanel-system-stack.service
+Wants=network-online.target turbopanel-system-stack.service
 Requires=docker.service
 
 [Service]

@@ -1,7 +1,7 @@
 [Unit]
 Description=TurboPanel mailer
-After=turbopanel-instance.service turbopanel-rabbitmq.service
-Requires=turbopanel-rabbitmq.service
+After=turbopanel-instance.service turbopanel-system-stack.service
+Requires=turbopanel-system-stack.service
 
 [Service]
 Type=simple

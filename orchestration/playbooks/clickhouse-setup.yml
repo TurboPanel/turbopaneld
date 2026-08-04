@@ -27,3 +27,4 @@
     - role: daemon-prereqs
     - role: turbopanel-user
     - role: clickhouse
+    - role: system-compose

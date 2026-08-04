@@ -1,0 +1,106 @@
+# Managed by TurboPanel (system-compose role) — do not edit by hand.
+#
+# Regenerated on every converge from the postgres/rabbitmq/clickhouse role
+# defaults (image, uid/gid, ports, users, …) plus secrets slurped directly
+# from their generated password files. A service block below only renders
+# once that service's role has generated its secret; `queue` / `analytics`
+# are additionally omitted on Workers runtime (Mailgun / Cloudflare
+# Analytics Engine replace them — see ../../instance/AGENTS.md).
+#
+# Labels intentionally carry ONLY `com.turbopanel.system.component` +
+# `turbopanel.role` — never `com.turbopanel.service`, `traefik.enable`, or
+# `com.turbopanel.raw-port` (those identify *tenant* deploy containers; see
+# ../../../src/deploy/system-component.ts and ../../../src/deploy/labels.ts).
+name: {{ system_compose_project_name }}
+
+services:
+{% if _system_compose_database_active %}
+  database:
+    image: {{ postgres_image }}
+    container_name: {{ postgres_container_name }}
+    restart: unless-stopped
+    user: "{{ postgres_container_uid }}:{{ postgres_container_gid }}"
+    networks:
+      - {{ turbopanel_docker_network }}
+    volumes:
+      - {{ postgres_volume_name }}:/var/lib/postgresql
+      - {{ postgres_socket_dir }}:/var/run/postgresql
+    environment:
+      POSTGRES_USER: {{ postgres_user }}
+      POSTGRES_DB: {{ postgres_db }}
+      POSTGRES_PASSWORD: "{{ _system_compose_pg_password }}"
+{% if postgres_expose_port | default(false) | bool %}
+    ports:
+      - "127.0.0.1:{{ postgres_port }}:5432"
+{% endif %}
+    labels:
+      com.turbopanel.system.component: database
+      turbopanel.role: app
+{% endif %}
+{% if _system_compose_queue_active %}
+  queue:
+    image: {{ rabbitmq_image }}
+    container_name: {{ rabbitmq_container_name }}
+    restart: unless-stopped
+    user: "{{ rabbitmq_container_uid }}:{{ rabbitmq_container_gid }}"
+    networks:
+      - {{ turbopanel_docker_network }}
+    volumes:
+      - {{ rabbitmq_volume_name }}:/var/lib/rabbitmq
+      - {{ turbopanel_config_dir }}/rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+    environment:
+      RABBITMQ_DEFAULT_USER: {{ rabbitmq_user }}
+      RABBITMQ_DEFAULT_PASS: "{{ _system_compose_rabbitmq_password }}"
+      RABBITMQ_DEFAULT_VHOST: "{{ rabbitmq_vhost }}"
+    ports:
+      - "127.0.0.1:{{ rabbitmq_amqp_port }}:5672"
+{% if rabbitmq_expose_mgmt_port | default(true) | bool %}
+      - "127.0.0.1:{{ rabbitmq_mgmt_port }}:15672"
+{% endif %}
+    labels:
+      com.turbopanel.system.component: queue
+      turbopanel.role: app
+{% endif %}
+{% if _system_compose_analytics_active %}
+  analytics:
+    image: {{ clickhouse_image }}
+    container_name: {{ clickhouse_container_name }}
+    restart: unless-stopped
+    user: "{{ clickhouse_container_uid }}:{{ clickhouse_container_gid }}"
+    networks:
+      - {{ turbopanel_docker_network }}
+    volumes:
+      - {{ clickhouse_volume_name }}:/var/lib/clickhouse
+      - {{ clickhouse_log_dir }}:/var/log/clickhouse-server
+      - {{ turbopanel_config_dir }}/clickhouse/config.xml:/etc/clickhouse-server/config.d/turbopanel.xml:ro
+      - {{ turbopanel_config_dir }}/clickhouse/users.xml:/etc/clickhouse-server/users.d/turbopanel.xml:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    mem_limit: {{ clickhouse_container_memory_bytes }}
+    cpus: "{{ clickhouse_container_cpus }}"
+    ports:
+      - "127.0.0.1:{{ clickhouse_http_port }}:8123"
+    labels:
+      com.turbopanel.system.component: analytics
+      turbopanel.role: app
+{% endif %}
+
+networks:
+  {{ turbopanel_docker_network }}:
+    external: true
+
+volumes:
+{% if _system_compose_database_active %}
+  {{ postgres_volume_name }}:
+    external: true
+{% endif %}
+{% if _system_compose_queue_active %}
+  {{ rabbitmq_volume_name }}:
+    external: true
+{% endif %}
+{% if _system_compose_analytics_active %}
+  {{ clickhouse_volume_name }}:
+    external: true
+{% endif %}

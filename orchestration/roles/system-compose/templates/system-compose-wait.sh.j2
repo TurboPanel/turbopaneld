@@ -1,0 +1,34 @@
+#!/bin/sh
+# Wait for whichever services this converge activated to accept connections.
+#
+# `docker compose up -d` (the preceding ExecStart) returns once containers are
+# *started*, not once they are ready. This script — run as a second ExecStart
+# in the same oneshot unit — is what gives dependent units (instance/mailer/
+# tabix, via After=/Wants={{ system_compose_service_name }}.service) a real
+# readiness guarantee, mirroring the per-service wrapper-start.sh scripts this
+# role replaces.
+set -eu
+
+max_attempts=60
+sleep_seconds=2
+
+wait_for() {
+  i=0
+  while ! "$@" >/dev/null 2>&1; do
+    i=$((i + 1))
+    if [ "$i" -ge "$max_attempts" ]; then
+      return 1
+    fi
+    sleep "$sleep_seconds"
+  done
+}
+
+{% if _system_compose_database_active %}
+wait_for /usr/bin/docker exec {{ postgres_container_name }} pg_isready -U {{ postgres_user }}
+{% endif %}
+{% if _system_compose_queue_active %}
+wait_for /usr/bin/docker exec {{ rabbitmq_container_name }} rabbitmq-diagnostics -q ping
+{% endif %}
+{% if _system_compose_analytics_active %}
+wait_for curl -fsS http://127.0.0.1:{{ clickhouse_http_port }}/ping
+{% endif %}

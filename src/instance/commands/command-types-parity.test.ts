@@ -17,6 +17,7 @@ import {
   parseManagedLifecycleResult,
   parseManagedRestorePayload,
   parseManagedRestoreResult,
+  parseSystemReconcilePayload,
   parseWireguardApplyPayload,
 } from "./contracts.ts";
 
@@ -44,6 +45,7 @@ const INSTANCE_COMMAND_TYPES = [
   "managed.destroy",
   "managed.backup",
   "managed.restore",
+  "system.reconcile",
 ] as const;
 
 test("COMMAND_TYPES matches instance canonical order", () => {
@@ -280,6 +282,183 @@ test("environment.lifecycle payload parser round-trips", () => {
       }),
     TypeError,
     "Invalid environment lifecycle payload",
+  );
+});
+
+test("system.reconcile payload parser round-trips and rejects invalid shapes", () => {
+  const serviceId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  assertEquals(
+    parseSystemReconcilePayload({
+      environmentId: "11111111-2222-3333-4444-555555555555",
+      action: "restart",
+      components: [
+        {
+          component: "hosting-ingress",
+          serviceId,
+          composeServiceName: "traefik",
+          containerName: `${serviceId}-ingress`,
+          role: "ingress",
+          desired: "present",
+        },
+      ],
+    }),
+    {
+      environmentId: "11111111-2222-3333-4444-555555555555",
+      action: "restart",
+      components: [
+        {
+          component: "hosting-ingress",
+          serviceId,
+          composeServiceName: "traefik",
+          containerName: `${serviceId}-ingress`,
+          role: "ingress",
+          desired: "present",
+        },
+      ],
+    },
+  );
+  assertEquals(
+    parseSystemReconcilePayload({
+      environmentId: "11111111-2222-3333-4444-555555555555",
+      action: "stop",
+      components: [
+        {
+          component: "hosting-ingress",
+          serviceId,
+          composeServiceName: "traefik",
+          containerName: `${serviceId}-ingress`,
+          role: "ingress",
+          desired: "absent",
+        },
+      ],
+    }).action,
+    "stop",
+  );
+  assertThrows(
+    () =>
+      parseSystemReconcilePayload({
+        environmentId: "11111111-2222-3333-4444-555555555555",
+        components: [
+          {
+            component: "not-allowlisted",
+            serviceId,
+            composeServiceName: "traefik",
+            containerName: `${serviceId}-ingress`,
+            role: "ingress",
+            desired: "present",
+          },
+        ],
+      }),
+    TypeError,
+    "Invalid system.reconcile payload",
+  );
+  assertThrows(
+    () =>
+      parseSystemReconcilePayload({
+        environmentId: "11111111-2222-3333-4444-555555555555",
+        components: [
+          {
+            component: "hosting-ingress",
+            serviceId,
+            composeServiceName: "traefik",
+            containerName: "wrong-name",
+            role: "ingress",
+            desired: "present",
+          },
+        ],
+      }),
+    TypeError,
+    "Invalid system.reconcile payload",
+  );
+});
+
+test("system.reconcile payload parser accepts the widened database/queue/analytics component keys with app role and bare serviceId containerName", () => {
+  const serviceId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  for (const component of ["database", "queue", "analytics"] as const) {
+    assertEquals(
+      parseSystemReconcilePayload({
+        environmentId: "11111111-2222-3333-4444-555555555555",
+        components: [
+          {
+            component,
+            serviceId,
+            composeServiceName: component,
+            containerName: serviceId,
+            role: "app",
+            desired: "present",
+          },
+        ],
+      }).components[0],
+      {
+        component,
+        serviceId,
+        composeServiceName: component,
+        containerName: serviceId,
+        role: "app",
+        desired: "present",
+      },
+    );
+  }
+});
+
+test("system.reconcile payload parser rejects role/containerName mismatches across the app/ingress split", () => {
+  const serviceId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  // hosting-ingress must be role: "ingress" — declaring "app" is rejected.
+  assertThrows(
+    () =>
+      parseSystemReconcilePayload({
+        environmentId: "11111111-2222-3333-4444-555555555555",
+        components: [
+          {
+            component: "hosting-ingress",
+            serviceId,
+            composeServiceName: "traefik",
+            containerName: `${serviceId}-ingress`,
+            role: "app",
+            desired: "present",
+          },
+        ],
+      }),
+    TypeError,
+    "Invalid system.reconcile payload",
+  );
+  // database must be role: "app" — declaring "ingress" is rejected.
+  assertThrows(
+    () =>
+      parseSystemReconcilePayload({
+        environmentId: "11111111-2222-3333-4444-555555555555",
+        components: [
+          {
+            component: "database",
+            serviceId,
+            composeServiceName: "database",
+            containerName: `${serviceId}-ingress`,
+            role: "ingress",
+            desired: "present",
+          },
+        ],
+      }),
+    TypeError,
+    "Invalid system.reconcile payload",
+  );
+  // database with role: "app" but an ingress-shaped containerName is rejected.
+  assertThrows(
+    () =>
+      parseSystemReconcilePayload({
+        environmentId: "11111111-2222-3333-4444-555555555555",
+        components: [
+          {
+            component: "database",
+            serviceId,
+            composeServiceName: "database",
+            containerName: `${serviceId}-ingress`,
+            role: "app",
+            desired: "present",
+          },
+        ],
+      }),
+    TypeError,
+    "Invalid system.reconcile payload",
   );
 });
 

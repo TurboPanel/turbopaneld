@@ -25,6 +25,13 @@ import {
   TcpUdpPortConflictError,
   traefikCompose,
 } from "./ingress.ts";
+import {
+  assertSafeSystemIngressIdentity,
+  readSystemComponentDescriptor,
+  SHARED_TRAEFIK_COMPOSE_SERVICE_NAME,
+  SYSTEM_HOSTING_INGRESS_COMPONENT,
+  writeSystemComponentDescriptor,
+} from "./system-component.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 
@@ -53,6 +60,14 @@ const test = Deno.test.bind(Deno);
 const CONFIG_DIR = "/etc/turbopanel";
 const TLS_DIR = "/etc/turbopanel/tls";
 
+const SYSTEM_INGRESS_IDENTITY = {
+  component: SYSTEM_HOSTING_INGRESS_COMPONENT,
+  serviceId: "00000000-0000-4000-8000-0000000000bb",
+  composeServiceName: SHARED_TRAEFIK_COMPOSE_SERVICE_NAME,
+  containerName: "00000000-0000-4000-8000-0000000000bb-ingress",
+  role: "ingress",
+} as const;
+
 test("traefikCompose publishes loopback ports with proxy protocol and TLS", () => {
   const compose = traefikCompose();
   assertStringIncludes(compose, "127.0.0.1:7080:7080");
@@ -69,13 +84,170 @@ test("traefikCompose publishes loopback ports with proxy protocol and TLS", () =
     "--entrypoints.websecure.proxyProtocol.insecure=true",
   );
   if (compose.includes("socat")) {
-    throw new Error("traefikCompose must not include socat");
+    throw new TypeError("traefikCompose must not include socat");
   }
   if (compose.includes("ingress-bridge")) {
-    throw new Error("traefikCompose must not include ingress-bridge");
+    throw new TypeError("traefikCompose must not include ingress-bridge");
   }
   if (compose.includes("alpine")) {
-    throw new Error("traefikCompose must not include alpine");
+    throw new TypeError("traefikCompose must not include alpine");
+  }
+});
+
+test("traefikCompose without identity stays anonymous", () => {
+  const compose = traefikCompose();
+  assertEquals(compose.includes("container_name:"), false);
+  assertEquals(compose.includes("x-turbopanel:"), false);
+  assertEquals(compose.includes("labels:"), false);
+});
+
+test("traefikCompose with identity emits container_name, system x-turbopanel, and labels", () => {
+  const compose = traefikCompose(SYSTEM_INGRESS_IDENTITY);
+  assertStringIncludes(
+    compose,
+    `container_name: ${SYSTEM_INGRESS_IDENTITY.containerName}`,
+  );
+  assertStringIncludes(compose, "kind: system");
+  assertStringIncludes(compose, "component: hosting-ingress");
+  assertStringIncludes(
+    compose,
+    `serviceId: ${SYSTEM_INGRESS_IDENTITY.serviceId}`,
+  );
+  assertStringIncludes(compose, "turbopanel.role: ingress");
+  assertStringIncludes(
+    compose,
+    'com.turbopanel.system.component: "hosting-ingress"',
+  );
+  assertStringIncludes(
+    compose,
+    `com.turbopanel.service: "${SYSTEM_INGRESS_IDENTITY.serviceId}"`,
+  );
+  assertEquals(compose.includes("traefik.enable"), false);
+  assertEquals(compose.includes("com.turbopanel.raw-port"), false);
+  // Loopback / PROXY / TLS / socket / network unchanged vs anonymous shape.
+  assertStringIncludes(compose, "127.0.0.1:7080:7080");
+  assertStringIncludes(compose, "127.0.0.1:7443:7443");
+  assertStringIncludes(
+    compose,
+    "--entrypoints.web.proxyProtocol.insecure=true",
+  );
+  assertStringIncludes(
+    compose,
+    "--entrypoints.websecure.proxyProtocol.insecure=true",
+  );
+  assertStringIncludes(compose, "--entrypoints.websecure.http.tls=true");
+  assertStringIncludes(
+    compose,
+    "/var/run/docker.sock:/var/run/docker.sock:ro",
+  );
+  assertStringIncludes(compose, "turbopanel-ingress:");
+  assertStringIncludes(compose, "external: true");
+});
+
+test("assertSafeSystemIngressIdentity rejects unsafe or mismatched identity", () => {
+  assertThrows(
+    () =>
+      assertSafeSystemIngressIdentity({
+        ...SYSTEM_INGRESS_IDENTITY,
+        serviceId: "not-a-uuid",
+        containerName: "not-a-uuid-ingress",
+      }),
+    Error,
+    "ingress serviceId is invalid",
+  );
+  assertThrows(
+    () =>
+      assertSafeSystemIngressIdentity({
+        ...SYSTEM_INGRESS_IDENTITY,
+        containerName:
+          `${SYSTEM_INGRESS_IDENTITY.serviceId}-ingress with space`,
+      }),
+    Error,
+    "ingress containerName contains unsupported characters",
+  );
+  assertThrows(
+    () =>
+      assertSafeSystemIngressIdentity({
+        ...SYSTEM_INGRESS_IDENTITY,
+        containerName: `${SYSTEM_INGRESS_IDENTITY.serviceId}-\`ingress`,
+      }),
+    Error,
+    "ingress containerName contains unsupported characters",
+  );
+  assertThrows(
+    () =>
+      assertSafeSystemIngressIdentity({
+        ...SYSTEM_INGRESS_IDENTITY,
+        containerName: `${SYSTEM_INGRESS_IDENTITY.serviceId}-other`,
+      }),
+    Error,
+    "ingress containerName must equal <serviceId>-ingress",
+  );
+  assertThrows(
+    () =>
+      assertSafeSystemIngressIdentity({
+        ...SYSTEM_INGRESS_IDENTITY,
+        composeServiceName: "not-traefik",
+      }),
+    Error,
+    "system ingress composeServiceName must be 'traefik'",
+  );
+  assertThrows(
+    () =>
+      assertSafeSystemIngressIdentity({
+        ...SYSTEM_INGRESS_IDENTITY,
+        // @ts-expect-error — intentional unknown component for guard coverage
+        component: "unknown-component",
+      }),
+    Error,
+    "is not allowlisted",
+  );
+});
+
+test("system component descriptor round-trips and rejects corrupt state", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    await writeSystemComponentDescriptor(layout, SYSTEM_INGRESS_IDENTITY);
+    const loaded = await readSystemComponentDescriptor(
+      layout,
+      SYSTEM_HOSTING_INGRESS_COMPONENT,
+    );
+    assertEquals(loaded, { ...SYSTEM_INGRESS_IDENTITY });
+
+    const systemDir = join(layout.stateDir, "system");
+    for await (const entry of Deno.readDir(systemDir)) {
+      if (entry.name.endsWith(".tmp")) {
+        throw new TypeError(`leftover temp file: ${entry.name}`);
+      }
+    }
+
+    const corruptPath = join(systemDir, "hosting-ingress.json");
+    await Deno.writeTextFile(corruptPath, "{not-json");
+    await assertRejects(
+      () =>
+        readSystemComponentDescriptor(
+          layout,
+          SYSTEM_HOSTING_INGRESS_COMPONENT,
+        ),
+      Error,
+      "corrupt system component descriptor",
+    );
+
+    await Deno.writeTextFile(
+      corruptPath,
+      JSON.stringify({ component: "hosting-ingress", serviceId: "x" }),
+    );
+    await assertRejects(
+      () =>
+        readSystemComponentDescriptor(
+          layout,
+          SYSTEM_HOSTING_INGRESS_COMPONENT,
+        ),
+      Error,
+      "corrupt system component descriptor",
+    );
+  } finally {
+    await cleanup();
   }
 });
 

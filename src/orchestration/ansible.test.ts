@@ -254,13 +254,16 @@ test(
       CHECKOUT_ORCHESTRATION_DIR,
       "roles/clickhouse/templates/config.xml.j2",
     );
-    const tasksPath = join(
+    // Container resource caps (mem_limit/cpus) are rendered into the shared
+    // turbopanel-system Compose file by system-compose, not a per-role docker
+    // run/inspect path — see roles/system-compose/templates/docker-compose.yml.j2.
+    const composeTemplatePath = join(
       CHECKOUT_ORCHESTRATION_DIR,
-      "roles/clickhouse/tasks/main.yml",
+      "roles/system-compose/templates/docker-compose.yml.j2",
     );
     const defaults = await Deno.readTextFile(defaultsPath);
     const config = await Deno.readTextFile(configPath);
-    const tasks = await Deno.readTextFile(tasksPath);
+    const composeTemplate = await Deno.readTextFile(composeTemplatePath);
 
     const markCache = parseYamlInt(defaults, "clickhouse_mark_cache_size");
     const serverMemory = parseYamlInt(
@@ -271,7 +274,6 @@ test(
       defaults,
       "clickhouse_container_memory_bytes",
     );
-    const nanoCpus = parseYamlInt(defaults, "clickhouse_container_nanocpus");
 
     // Ceilings: catch silent upward regressions of the low-footprint profile.
     if (markCache > 67_108_864) {
@@ -289,28 +291,19 @@ test(
         `${defaultsPath}: clickhouse_container_memory_bytes=${memoryBytes} exceeds 768 MiB ceiling`,
       );
     }
-    if (nanoCpus > 1_000_000_000) {
-      throw new Error(
-        `${defaultsPath}: clickhouse_container_nanocpus=${nanoCpus} exceeds 1.0 CPU ceiling`,
-      );
-    }
 
-    // Single memory source: docker run and drift check must share the byte var
-    // (no parallel clickhouse_container_memory string that can diverge).
+    // Single memory source: the Compose template and cache-size config must
+    // share the byte var (no parallel clickhouse_container_memory string that
+    // can diverge).
     if (/^\s*clickhouse_container_memory:/m.test(defaults)) {
       throw new Error(
         `${defaultsPath}: clickhouse_container_memory must not exist; use clickhouse_container_memory_bytes only`,
       );
     }
     assertMatch(
-      tasks,
-      /"--memory"\s*\n\s*-\s*"\{\{\s*clickhouse_container_memory_bytes\s*\}\}"/,
-      "tasks pass --memory from clickhouse_container_memory_bytes",
-    );
-    assertMatch(
-      tasks,
-      /clickhouse_memory_ok:[\s\S]*clickhouse_container_memory_bytes/,
-      "tasks drift-check memory against clickhouse_container_memory_bytes",
+      composeTemplate,
+      /mem_limit:\s*\{\{\s*clickhouse_container_memory_bytes\s*\}\}/,
+      "compose template sets mem_limit from clickhouse_container_memory_bytes",
     );
 
     assertMatch(
@@ -324,14 +317,9 @@ test(
       "config.xml.j2 renders max_server_memory_usage from defaults",
     );
     assertMatch(
-      tasks,
-      /"--cpus"/,
-      "tasks pass --cpus to docker run",
-    );
-    assertMatch(
-      tasks,
-      /clickhouse_cpus_ok/,
-      "tasks drift-check container cpus",
+      composeTemplate,
+      /cpus:\s*"\{\{\s*clickhouse_container_cpus\s*\}\}"/,
+      "compose template sets cpus from clickhouse_container_cpus",
     );
   },
 );
@@ -369,7 +357,7 @@ test(
     );
     const tasksPath = join(
       CHECKOUT_ORCHESTRATION_DIR,
-      "roles/clickhouse/tasks/main.yml",
+      "roles/clickhouse/tasks/bootstrap.yml",
     );
     const config = await Deno.readTextFile(configPath);
     const tasks = await Deno.readTextFile(tasksPath);

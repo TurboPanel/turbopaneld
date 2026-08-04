@@ -10,7 +10,6 @@ rabbitmq_user: turbopanel
 rabbitmq_vhost: /
 # FHS config dir (dev shares it with prod).
 turbopanel_config_dir: /etc/turbopanel  # noqa: var-naming[no-role-prefix]
-rabbitmq_service_name: turbopanel-rabbitmq
 # Shared dev-identity contract: dev runs the container (and owns its secret files)
 # as the single dev uid:gid; managed installs use the dedicated tpqueue(9995) account.
 turbopanel_dev_user: ""  # noqa: var-naming[no-role-prefix]

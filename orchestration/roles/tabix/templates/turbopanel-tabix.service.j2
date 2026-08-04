@@ -1,8 +1,8 @@
 [Unit]
 Description=TurboPanel Tabix (dev ClickHouse UI)
-After=docker.service turbopanel-clickhouse.service
+After=docker.service turbopanel-system-stack.service
 Requires=docker.service
-Wants=turbopanel-clickhouse.service
+Wants=turbopanel-system-stack.service
 
 [Service]
 Type=oneshot

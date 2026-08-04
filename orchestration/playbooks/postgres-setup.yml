@@ -7,3 +7,4 @@
     postgres_expose_port: false
   roles:
     - role: postgres
+    - role: system-compose

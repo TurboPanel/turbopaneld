@@ -19,6 +19,7 @@ import {
   parseNtpSetPayload,
   parsePingPayload,
   parseRebootPayload,
+  parseSystemReconcilePayload,
   parseTimezoneSetPayload,
   parseWireguardApplyPayload,
 } from "./contracts.ts";
@@ -32,6 +33,7 @@ import { handleManagedDestroy } from "../../managed/destroy.ts";
 import { handleManagedLifecycle } from "../../managed/lifecycle.ts";
 import { handleEnvironmentLifecycle } from "./lifecycle-environment.ts";
 import { handleEnvironmentStop } from "./stop-environment.ts";
+import { handleSystemReconcile } from "./system-reconcile.ts";
 import { handleHostname } from "./hostname.ts";
 import { handleNtp } from "./ntp.ts";
 import { handlePing } from "./ping.ts";
@@ -190,6 +192,13 @@ export async function handleCommandDispatch(
       case "managed.restore": {
         const payload = parseManagedRestorePayload(message.payload);
         result = await handleManagedRestore(payload, daemonReceivedAt);
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
+      case "system.reconcile": {
+        const payload = parseSystemReconcilePayload(message.payload);
+        result = await handleSystemReconcile(payload, daemonReceivedAt);
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;

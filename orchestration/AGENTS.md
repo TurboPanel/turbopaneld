@@ -197,27 +197,120 @@ single `httpd_config.conf`, `vhconf.conf` per vhost) lives in
 
 ---
 
+### System services Compose stack (`system-compose`)
+
+Postgres, RabbitMQ, and ClickHouse run as **one Docker Compose project**,
+**`turbopanel-system`** (`docker-compose.yml` at
+`/etc/turbopanel/system/docker-compose.yml`, services `database` / `queue` /
+`analytics`), brought up by a single `Type=oneshot` systemd unit —
+**`turbopanel-system-stack.service`** — instead of three independent
+`docker run` containers each with its own unit. This replaced the older
+per-service `turbopanel-postgres.service` / `turbopanel-rabbitmq.service` /
+`turbopanel-clickhouse.service` units and their `*-wrapper-start.sh` scripts.
+
+**Role split:** the `postgres` / `rabbitmq` / `clickhouse` roles are now
+**config-only** — user/group provisioning, secret generation
+(`.pgpass` / `.rabbitmq_pass` / `.clickhouse_admin_pass` +
+`.clickhouse_app_pass`), `config.json`, and (for ClickHouse) the
+`config.xml`/`users.xml` `config.d`/`users.d` overlays. None of them run
+`docker`/`docker inspect`/`docker run`, install a per-service systemd unit, or
+install a wrapper-start script anymore. The **`system-compose`** role (meta
+`docker` dependency) runs *after* whichever of those three roles ran in the
+same play and:
+
+1. Slurps each service's password file directly (`.pgpass` / `.rabbitmq_pass`
+   / `.clickhouse_admin_pass`) — it does not depend on facts set by the prior
+   roles, so it stays idempotent/self-sufficient across separate playbook runs.
+2. A service block only renders when its secret file exists, so the role
+   degrades gracefully when only a subset of the three roles ran in this play
+   (see the standalone `postgres-setup.yml` / `rabbitmq-setup.yml` /
+   `clickhouse-setup.yml` playbooks, which each add `system-compose` after
+   their one role). `queue` / `analytics` are additionally omitted on Workers
+   runtime (`turbopanel_instance_runtime == 'workers'` — Mailgun / Cloudflare
+   Analytics Engine replace them).
+3. Ensures the `turbopanel` Docker network + the active named volumes exist,
+   pre-owns volume data directories on the very first run (before Compose
+   takes ownership), and force-removes any pre-existing non-Compose container
+   with a conflicting name (migration path from the old per-service `docker
+   run` containers — container names are unchanged: `turbopanel-database` /
+   `turbopanel-queue` / `turbopanel-analytics`).
+4. Templates `docker-compose.yml` (mode `0640`, owner `root:{{
+   turbopanel_group }}`) and a `wait-ready.sh` readiness script, installs
+   `turbopanel-system-stack.service`, stops/disables the three legacy
+   per-service units, and starts the new unit.
+5. `docker compose -p turbopanel-system … up -d --remove-orphans` — the
+   `--remove-orphans` flag is what tears down `queue`/`analytics` containers
+   when a converge switches to Workers runtime (no per-runtime "stop and
+   disable" systemd task needed in `instance-launch`).
+6. Restarts (targeted `docker restart`, not `--force-recreate`) just the
+   `queue` or `analytics` container when the `rabbitmq`/`clickhouse` roles'
+   config-overlay `template` tasks reported `changed` earlier in the play
+   (`docker compose up -d` alone does not notice a bind-mounted file's
+   *content* changing), then re-waits for readiness on that container.
+7. Once ClickHouse is up (first run or after a config-triggered restart),
+   `include_role: clickhouse, tasks_from: bootstrap` runs the post-ready SQL
+   bootstrap (see below) — it needs a running container, so it cannot happen
+   inside the trimmed `clickhouse` role itself.
+
+**Labels:** every service in the Compose file carries **only**
+`com.turbopanel.system.component: <database|queue|analytics>` and
+`turbopanel.role: app` — never `com.turbopanel.service`, `traefik.enable`, or
+`com.turbopanel.raw-port` (those identify *tenant* deploy containers; see
+`../src/deploy/system-component.ts` / `../src/deploy/labels.ts`).
+
+| Path / resource                                                                | Purpose                                                                                                                                                                                       |
+| ------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/etc/turbopanel/system/docker-compose.yml`                                     | The `turbopanel-system` Compose project (services `database`/`queue`/`analytics`)                                                                                                              |
+| `/etc/turbopanel/system/wait-ready.sh`                                          | Readiness script (`pg_isready` / `rabbitmq-diagnostics -q ping` / `curl .../ping` via `docker exec`), run as a second `ExecStart` so the oneshot unit blocks until services actually answer     |
+| `turbopanel-system-stack.service`                                               | `Type=oneshot`, `RemainAfterExit=yes`; `ExecStart` = compose `up -d --remove-orphans` then `wait-ready.sh`; `ExecStop` = compose `down`                                                        |
+| Containers `turbopanel-database` / `turbopanel-queue` / `turbopanel-analytics`  | Unchanged names/volumes from the old per-service containers — Compose adopts them (old non-Compose containers with the same name are force-removed on first run)                              |
+
+Dependent units (`turbopanel-instance.service`, `turbopanel-dbstudio.service`,
+`turbopanel-mailer.service`, `turbopanel-tabix.service`) declare
+`After=`/`Wants=`/`Requires=turbopanel-system-stack.service` instead of the
+retired per-service unit names.
+
+**Converge order:** `postgres` → `rabbitmq` → `clickhouse` (config only) →
+`system-compose` (brings the stack up, then runs the ClickHouse bootstrap
+internally) → `tabix`. Standalone single-service playbooks
+(`postgres-setup.yml` / `rabbitmq-setup.yml` / `clickhouse-setup.yml`) each run
+their one config role followed by `system-compose`.
+
+**`turbopanel-system` is inspect-only from the daemon's side** — this role (and
+its readiness/restart-on-config-change logic above) is the *only* thing that
+brings the stack up or restarts a service in it. `system.reconcile` never
+calls `docker compose up`/`restart` for `database`/`queue`/`analytics` (see
+`../src/deploy/AGENTS.md` → "Shared HTTP ingress identity", fourth table row).
+Caddy (control-plane + hosting), Redis, the control-plane instance, and
+`turbopaneld` itself stay **host-native** and are never part of this or any
+other Compose project — they have no `container` row, and their health/restart
+surface is the server **Control** tab / system-component control API on the
+instance, not a container table. Rationale for why those four stay host-native
+(PAM, `systemctl`/`git` update access, socket uid/gid, unix-socket
+permissions) is canonical in `../../instance/AGENTS.md` → "Self-host system
+inventory" — do not duplicate it here.
+
 ### ClickHouse (self-hosted analytics)
 
-The `clickhouse` Ansible role: Docker-based ClickHouse server, config/users overlays, low-footprint idle-CPU tuning, least-privilege app-user SQL grants, converge wiring, and the dev-only Tabix GUI (`tabix` role).
+The `clickhouse` Ansible role is **config-only**: user/group provisioning,
+admin + app secret generation, `config.json`, and the `config.xml`/`users.xml`
+`config.d`/`users.d` overlays. Container lifecycle (create/start/readiness) is
+owned by the `system-compose` role above — see **System services Compose
+stack** for the Compose service definition, labels, and the
+`turbopanel-system-stack.service` unit. Post-ready SQL bootstrap + disabled
+system-log `DROP TABLE` cleanup live in `roles/clickhouse/tasks/bootstrap.yml`,
+`include_role`'d from `system-compose` once the analytics container is up and
+ready (they need `docker exec` against a running container, so they cannot run
+from the trimmed config-only role itself).
 
 Instance-side ClickHouse metrics store + schema/query contract: `../../instance/src/daemon/metrics/AGENTS.md`.
 
-### ClickHouse (self-hosted analytics)
-
-ClickHouse runs as a **Docker container** (official
-`clickhouse/clickhouse-server:<version>` image) by the `clickhouse` Ansible role
-— mirroring the Postgres/RabbitMQ Docker roles (named volume, `turbopanel`
-bridge network, `Type=oneshot` unit). The `clickhouse` role has an explicit
-`docker` meta-dependency:
-
-| Path / resource                                                                          | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Docker image `clickhouse/clickhouse-server:{{ clickhouse_version }}`                     | ClickHouse server (no vendored binaries)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| Container `turbopanel-analytics` / volume `turbopanel-analytics` on network `turbopanel` | Running server + persistent MergeTree data (in-container `/var/lib/clickhouse`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `/etc/turbopanel/clickhouse/`                                                            | `config.xml` (`config.d` overlay), `users.xml` (`users.d` overlay — bootstrap `default` admin only), `config.json` (host/port/database/user + password-file paths — no secret values), `.clickhouse_admin_pass` + `.clickhouse_app_pass` (mode `0600`), `wrapper-start.sh`. The two XML overlays are bind-mounted read-only into the image's `config.d`/`users.d` (base image config preserved). The overlays are owned by `clickhouse_container_uid`:`clickhouse_container_gid` (`9994:9994` in production, backed by **`tpmetrics`**; the dev uid:gid in co-located dev) with group **`tp`** — **not** `root` — so the `--user 9994:9994` (**`tpmetrics`**) container process can actually read them (mode `0640` keeps `users.xml`, which holds the admin password, non-world-readable); the secret/password files and `config.json` stay owned for root/dev + the **`tp`** group as `instance-launch` needs. A pre-flight throwaway container (same `--user` + read-only mounts) verifies both overlays are readable before readiness/bootstrap |
-| `/var/log/turbopanel/clickhouse/`                                                        | server logs (bind-mounted to the container's `/var/log/clickhouse-server`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `turbopanel-clickhouse.service`                                                          | Type=oneshot (`ExecStart`=wrapper-start.sh, `ExecStop`=`docker stop`); container runs `--user 9994:9994` (**`tpmetrics`**) on managed hosts, or the single dev uid:gid in co-located dev                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Path / resource                                                                          | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Docker image `clickhouse/clickhouse-server:{{ clickhouse_version }}`                     | ClickHouse server (no vendored binaries); referenced by the `analytics` service in the shared `turbopanel-system` Compose file (`system-compose` role)                                                                                                                                                                                                                                                                                                          |
+| Container `turbopanel-analytics` / volume `turbopanel-analytics` on network `turbopanel` | Running server + persistent MergeTree data (in-container `/var/lib/clickhouse`)                                                                                                                                                                                                                                                                                                                                                                                 |
+| `/etc/turbopanel/clickhouse/`                                                            | `config.xml` (`config.d` overlay), `users.xml` (`users.d` overlay — bootstrap `default` admin only), `config.json` (host/port/database/user + password-file paths — no secret values), `.clickhouse_admin_pass` + `.clickhouse_app_pass` (mode `0600`). The two XML overlays are bind-mounted read-only into the image's `config.d`/`users.d` by the Compose file (base image config preserved). The overlays are owned by `clickhouse_container_uid`:`clickhouse_container_gid` (`9994:9994` in production, backed by **`tpmetrics`**; the dev uid:gid in co-located dev) with group **`tp`** — **not** `root` — so the container process can actually read them (mode `0640` keeps `users.xml`, which holds the admin password, non-world-readable); the secret/password files and `config.json` stay owned for root/dev + the **`tp`** group as `instance-launch` needs |
+| `/var/log/turbopanel/clickhouse/`                                                        | server logs (bind-mounted to the container's `/var/log/clickhouse-server`)                                                                                                                                                                                                                                                                                                                                                                                      |
 
 The `config.d` overlay carries **idle-CPU tuning** for an otherwise-idle
 single-server box: slow async-metrics cadence
@@ -241,17 +334,20 @@ MergeTree free-entry gates (`number_of_free_entries_in_pool_to_execute_mutation`
 ClickHouse 26.x refuses to start when any of those defaults (20 / 8 / 25) exceed
 `background_pool_size * background_merges_mutations_concurrency_ratio` (keep
 `background_pool_size` and the ratio at 2/1). Disabling a system log in config
-stops new writes but does not drop an already-materialized table: the
-`clickhouse` role runs an idempotent post-ready admin cleanup that
+stops new writes but does not drop an already-materialized table:
+`roles/clickhouse/tasks/bootstrap.yml` (run from `system-compose` once the
+analytics container is ready) does an idempotent post-ready admin cleanup that
 `DROP TABLE IF EXISTS` every `*_log` removed in `config.xml.j2` (including
 `aggregated_zookeeper_log`). `ansible.test.ts` asserts the DROP list stays
 aligned with the config remove list.
 
 **Low-footprint resource caps** (role defaults — `ansible.test.ts` pin
-ceilings): `mark_cache_size` **64 MiB**, `max_server_memory_usage` **512 MiB**,
-Docker `--memory` / drift check both use `clickhouse_container_memory_bytes`
-(**768 MiB**) and `--cpus 1.0`. Drift checks recreate containers missing the
-memory/CPU limits.
+ceilings): `mark_cache_size` **64 MiB**, `max_server_memory_usage` **512 MiB**.
+Container runtime caps are rendered into the shared `turbopanel-system`
+Compose file by `system-compose`: `mem_limit` uses
+`clickhouse_container_memory_bytes` (**768 MiB**) and `cpus` uses
+`clickhouse_container_cpus` (**"1.0"**) — see
+`roles/system-compose/templates/docker-compose.yml.j2`.
 
 Primary write batching for ~1 sample/min traffic lives in the instance
 `ClickHouseServerMetricsStore` (row count + max age). The `users.d` **default**
@@ -278,10 +374,12 @@ instance-owned `ensureSchema()` (`CREATE TABLE IF NOT EXISTS` plus
 
 **Converge wiring:** co-located dev installs ClickHouse via the dev-repo
 `<dev checkout>/orchestration/dev-converge-manifest.json` (role `clickhouse`,
-after `postgres`/`redis`/`rabbitmq`, before `instance-user`) — same pattern as
-those data services (not a discrete `setup.ts` step). Managed daemon-only hosts
-omit it (`daemon-converge.yml`); use standalone `playbooks/clickhouse-setup.yml`
-/ `CLICKHOUSE_VERSION` (`26.5.5.8`) when a control-plane host needs the Deno
+after `postgres`/`redis`/`rabbitmq`, then `system-compose` brings the Compose
+stack up before `tabix`/`mailpit`/`instance-user`) — same pattern as those data
+services (not a discrete `setup.ts` step). Managed daemon-only hosts omit it
+(`daemon-converge.yml`); use standalone `playbooks/clickhouse-setup.yml` (which
+also runs `system-compose` after the config-only `clickhouse` role) /
+`CLICKHOUSE_VERSION` (`26.5.5.8`) when a control-plane host needs the Deno
 metrics store without the full dev overlay.
 
 **instance-launch env:** when `.clickhouse_app_pass` exists, injects

@@ -4,7 +4,6 @@
 clickhouse_version: "26.5.5.8"
 clickhouse_http_port: 8123
 clickhouse_log_dir: "{{ turbopanel_log_dir | default('/var/log/turbopanel') }}/clickhouse"
-clickhouse_service_name: turbopanel-clickhouse
 # Docker model (mirrors postgres/rabbitmq): official image, named volume, and the
 # shared turbopanel bridge network.
 clickhouse_image: "clickhouse/clickhouse-server:{{ clickhouse_version }}"
@@ -45,10 +44,10 @@ clickhouse_mark_cache_size: 67108864
 # Absolute server memory cap: 512 MiB (preferred over a RAM-ratio that grows
 # with host size).
 clickhouse_max_server_memory_usage: 536870912
-# Docker runtime caps (inspect drift recreates containers missing these).
-# Single source of truth: bytes only — docker run --memory and the drift check
-# both use this value so they cannot diverge (ansible.test.ts asserts that).
+# Docker runtime caps rendered into the shared turbopanel-system Compose file
+# by system-compose (mem_limit / cpus) — see
+# ../system-compose/templates/docker-compose.yml.j2. Single source of truth:
+# bytes only (ansible.test.ts asserts the Compose template uses this value).
 # 768 MiB
 clickhouse_container_memory_bytes: 805306368
 clickhouse_container_cpus: "1.0"
-clickhouse_container_nanocpus: 1000000000

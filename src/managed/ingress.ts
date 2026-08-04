@@ -24,6 +24,7 @@ import {
   runDocker as defaultRunDocker,
   type RunDockerOptions,
 } from "../deploy/docker-cli.ts";
+import { LABEL_ROLE, LABEL_ROLE_INGRESS } from "../deploy/labels.ts";
 import { logInfo, sanitizeForLog } from "../logger.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import {
@@ -266,7 +267,7 @@ export function managedTraefikCompose(
     "      - /var/run/docker.sock:/var/run/docker.sock:ro",
     "    labels:",
     `      turbopanel.managed.id: ${quoteYamlScalar(identity.managedId)}`,
-    "      turbopanel.role: ingress",
+    `      ${LABEL_ROLE}: ${LABEL_ROLE_INGRESS}`,
     "    networks:",
     `      - ${MANAGED_INGRESS_NETWORK}`,
     "",

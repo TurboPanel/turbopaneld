@@ -341,35 +341,27 @@ test("systemd units and docker wrappers bind the expected identity variables", a
     "turbopanel-redis.service Group",
   );
 
-  // Type=oneshot docker wrappers — identity via docker run --user, not User= in the unit.
-  const dockerRoles = [
-    {
-      role: "postgres",
-      uidVar: "postgres_container_uid",
-      gidVar: "postgres_container_gid",
-    },
-    {
-      role: "rabbitmq",
-      uidVar: "rabbitmq_container_uid",
-      gidVar: "rabbitmq_container_gid",
-    },
-    {
-      role: "clickhouse",
-      uidVar: "clickhouse_container_uid",
-      gidVar: "clickhouse_container_gid",
-    },
+  // postgres/rabbitmq/clickhouse are Type=oneshot Compose services managed by
+  // system-compose — identity via the Compose `user:` key (rendered by that
+  // role's docker-compose.yml.j2), not `User=` in a per-service unit or a
+  // per-role `docker run --user`.
+  const composeServices = [
+    { uidVar: "postgres_container_uid", gidVar: "postgres_container_gid" },
+    { uidVar: "rabbitmq_container_uid", gidVar: "rabbitmq_container_gid" },
+    { uidVar: "clickhouse_container_uid", gidVar: "clickhouse_container_gid" },
   ] as const;
 
-  for (const { role, uidVar, gidVar } of dockerRoles) {
-    const tasks = await readRole(`roles/${role}/tasks/main.yml`);
+  const composeTemplate = await readRole(
+    "roles/system-compose/templates/docker-compose.yml.j2",
+  );
+  for (const { uidVar, gidVar } of composeServices) {
     const userPattern = new RegExp(
-      String
-        .raw`"--user"\s*\n\s*-\s*"\{\{\s*${uidVar}\s*\}\}:\{\{\s*${gidVar}\s*\}\}"`,
+      String.raw`user:\s*"\{\{\s*${uidVar}\s*\}\}:\{\{\s*${gidVar}\s*\}\}"`,
     );
     assertMatch(
-      tasks,
+      composeTemplate,
       userPattern,
-      `${role} docker run --user`,
+      `system-compose docker-compose.yml.j2 user for ${uidVar}/${gidVar}`,
     );
   }
 });

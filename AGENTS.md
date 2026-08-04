@@ -110,10 +110,12 @@ at **9989–9999**. Override the home root with `TURBOPANEL_PRINCIPAL_HOME_ROOT`
 **Development identity:** co-located dev creates **no** dedicated `tp`,
 `tpctrl`, or `tpcache` / `tpmetrics` service accounts. The
 `turbopaneld`, instance, UI, and Caddy systemd units, plus Docker-backed
-services (Postgres, Redis, RabbitMQ, Mailpit, ClickHouse —
-`turbopanel-clickhouse`, Tabix — `turbopanel-tabix`), all run as the **current
-dev user**. Production managed installs keep the dedicated service users
-`tp`, `tpctrl`, `tpcache`, `tpdata`, `tpqueue`, `tpmetrics`, and `tpcaddy` — see **`../instance/AGENTS.md`** (Production UID/GID allocation).
+services (Postgres, RabbitMQ, and ClickHouse consolidated under the single
+`turbopanel-system-stack` Compose stack — see **System services Compose stack**
+below — plus standalone Redis, Mailpit, Tabix — `turbopanel-tabix`), all run as
+the **current dev user**. Production managed installs keep the dedicated
+service users `tp`, `tpctrl`, `tpcache`, `tpdata`, `tpqueue`, `tpmetrics`, and
+`tpcaddy` — see **`../instance/AGENTS.md`** (Production UID/GID allocation).
 
 **Deno version pin:** `DENO_VERSION` (`src/orchestration/paths.ts`) =
 **`2.9.4`**. Keep it in step with `deno_version` in

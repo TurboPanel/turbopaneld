@@ -450,13 +450,10 @@
     enabled: false
   failed_when: false
 
-- name: Stop and disable queue service when Workers runtime
-  when: (turbopanel_instance_runtime | default('deno')) == 'workers'
-  ansible.builtin.systemd:
-    name: "{{ rabbitmq_service_name }}"
-    state: stopped
-    enabled: false
-  failed_when: false
+# The queue container itself is stopped/removed on Workers runtime by the
+# system-compose role (its rendered docker-compose.yml omits the `queue`
+# service on that runtime, and `docker compose up -d --remove-orphans` tears
+# down the now-orphaned container) — no per-runtime systemd action needed here.
 
 - name: Install instance upgrade sudoers
   ansible.builtin.import_tasks: upgrade-sudoers.yml

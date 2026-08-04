@@ -1,14 +1,42 @@
 import { join } from "@std/path";
-import { logWarn } from "../logger.ts";
+import { logInfo, logWarn } from "../logger.ts";
 import {
+  type EnvironmentDeployContainer,
   type EnvironmentDeployHosting,
   type EnvironmentDeployPayload,
   isValidIpv4Literal,
   isValidIpv6Literal,
 } from "../instance/commands/contracts.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
-import { runDocker } from "./docker-cli.ts";
+import {
+  parseComposePsEntries,
+  readComposePsContainer,
+  readComposePsLabels,
+} from "./compose-ps.ts";
+import {
+  type DockerCliResult,
+  runDocker as defaultRunDocker,
+  type RunDockerOptions,
+} from "./docker-cli.ts";
 import { ensureHostingCaddy } from "./ensure-hosting-caddy.ts";
+import {
+  assertSafeIngressIdentity,
+  type IngressIdentity,
+} from "./ingress-identity.ts";
+import {
+  LABEL_RAW_PORT,
+  LABEL_ROLE,
+  LABEL_ROLE_INGRESS,
+  LABEL_SERVICE_ID,
+  LABEL_SYSTEM_COMPONENT,
+} from "./labels.ts";
+import {
+  assertSafeSystemIngressIdentity,
+  readSystemComponentDescriptor,
+  SHARED_TRAEFIK_COMPOSE_SERVICE_NAME,
+  SYSTEM_HOSTING_INGRESS_COMPONENT,
+  type SystemComponentDescriptor,
+} from "./system-component.ts";
 
 const INGRESS_NETWORK = "turbopanel-ingress";
 const CADDY_SERVICE = "turbopanel-hosting-caddy.service";
@@ -18,6 +46,20 @@ const TRAEFIK_HTTP_PORT = 7080;
 const TRAEFIK_HTTPS_PORT = 7443;
 const SAFE_FILE_ID_RE = /^[A-Za-z0-9_-]+$/;
 const decoder = new TextDecoder();
+
+/**
+ * Compose project name for the shared HTTP Traefik.
+ * Happens to equal {@link INGRESS_NETWORK}; kept as a distinct constant.
+ */
+export const HOSTING_INGRESS_PROJECT = "turbopanel-ingress";
+
+export function hostingIngressDir(layout: LayoutPaths): string {
+  return join(layout.stateDir, "ingress", "traefik");
+}
+
+export function hostingIngressComposePath(layout: LayoutPaths): string {
+  return join(hostingIngressDir(layout), "docker-compose.yml");
+}
 
 /**
  * One raw TCP/UDP port a **per-service** Traefik publishes straight through
@@ -35,11 +77,7 @@ export type TcpUdpIngressEntry = {
 };
 
 /** Instance-allocated identity for a per-service tenant Traefik container. */
-export type ServiceIngressIdentity = {
-  serviceId: string;
-  composeServiceName: string;
-  containerName: string;
-};
+export type ServiceIngressIdentity = IngressIdentity;
 
 /** Raised when two hostings (on different services) claim the same protocol+port. */
 export class TcpUdpPortConflictError extends Error {
@@ -102,10 +140,14 @@ function commandError(action: string, result: CommandResult): Error {
 }
 
 async function ensureIngressNetwork(): Promise<void> {
-  const inspect = await runDocker(["network", "inspect", INGRESS_NETWORK]);
+  const inspect = await defaultRunDocker([
+    "network",
+    "inspect",
+    INGRESS_NETWORK,
+  ]);
   if (inspect.success) return;
 
-  const create = await runDocker(["network", "create", INGRESS_NETWORK]);
+  const create = await defaultRunDocker(["network", "create", INGRESS_NETWORK]);
   if (!create.success) {
     throw commandError("Creating ingress Docker network", create);
   }
@@ -167,11 +209,52 @@ function tcpUdpPortLines(entries: readonly TcpUdpIngressEntry[]): string[] {
 }
 
 /** Shared HTTP-only Traefik (loopback web/websecure). No tcp/udp entrypoints. */
-export function traefikCompose(): string {
+/**
+ * Shared HTTP-only Traefik compose document (project {@link HOSTING_INGRESS_PROJECT}).
+ *
+ * Without `identity`, returns the anonymous shape used by older / un-provisioned
+ * installs (no `container_name`, no `x-turbopanel`, no labels).
+ *
+ * With `identity`, emits allocated `container_name`, an `x-turbopanel` block
+ * (`kind: system`), and canonical role / system-component / service labels —
+ * never `traefik.enable`, HTTP router labels, or `com.turbopanel.raw-port`
+ * (omitting raw-port keeps the shared container invisible to every tenant
+ * Traefik provider constraint).
+ *
+ * Adding `container_name` causes one compose recreation of the existing
+ * `turbopanel-ingress-traefik-1` container on first identity-bearing ensure —
+ * expected and self-healing, since `up -d` replaces the same compose service
+ * rather than orphaning it.
+ */
+export function traefikCompose(
+  identity?: SystemComponentDescriptor,
+): string {
+  if (identity !== undefined) {
+    assertSafeSystemIngressIdentity(identity);
+  }
+
+  const identityLines = identity === undefined ? [] : [
+    `    container_name: ${identity.containerName}`,
+    "    x-turbopanel:",
+    "      kind: system",
+    `      component: ${SYSTEM_HOSTING_INGRESS_COMPONENT}`,
+    `      serviceId: ${identity.serviceId}`,
+    `      containerName: ${identity.containerName}`,
+  ];
+  const labelLines = identity === undefined ? [] : [
+    "    labels:",
+    `      ${LABEL_ROLE}: ${LABEL_ROLE_INGRESS}`,
+    `      ${LABEL_SYSTEM_COMPONENT}: ${
+      quoteYamlScalar(SYSTEM_HOSTING_INGRESS_COMPONENT)
+    }`,
+    `      ${LABEL_SERVICE_ID}: ${quoteYamlScalar(identity.serviceId)}`,
+  ];
+
   const lines = [
     "services:",
-    "  traefik:",
+    `  ${SHARED_TRAEFIK_COMPOSE_SERVICE_NAME}:`,
     `    image: ${TRAEFIK_IMAGE}`,
+    ...identityLines,
     "    restart: unless-stopped",
     "    command:",
     "      - --providers.docker=true",
@@ -187,6 +270,7 @@ export function traefikCompose(): string {
     `      - ${TRAEFIK_LOOPBACK}:${TRAEFIK_HTTPS_PORT}:${TRAEFIK_HTTPS_PORT}`,
     "    volumes:",
     "      - /var/run/docker.sock:/var/run/docker.sock:ro",
+    ...labelLines,
     "    networks:",
     `      - ${INGRESS_NETWORK}`,
     "",
@@ -201,37 +285,7 @@ export function traefikCompose(): string {
 function assertSafeServiceIngressIdentity(
   identity: ServiceIngressIdentity,
 ): void {
-  if (!SAFE_FILE_ID_RE.test(identity.serviceId)) {
-    throw new Error("serviceId contains unsupported characters");
-  }
-  if (identity.serviceId.includes("`")) {
-    throw new Error("serviceId contains unsupported characters");
-  }
-  if (
-    identity.composeServiceName.length === 0 ||
-    identity.composeServiceName.length > 255 ||
-    !/^[A-Za-z0-9 ._-]+$/.test(identity.composeServiceName)
-  ) {
-    throw new Error(
-      "ingress composeServiceName contains unsupported characters",
-    );
-  }
-  if (
-    identity.containerName.length === 0 ||
-    !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/.test(identity.containerName)
-  ) {
-    throw new Error("ingress containerName contains unsupported characters");
-  }
-  if (
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-      identity.serviceId,
-    )
-  ) {
-    throw new Error("ingress serviceId is invalid");
-  }
-  if (identity.containerName !== `${identity.serviceId}-ingress`) {
-    throw new Error("ingress containerName must equal <serviceId>-ingress");
-  }
+  assertSafeIngressIdentity(identity);
 }
 
 /** Compose project name for one service's tenant Traefik. */
@@ -277,7 +331,7 @@ export function serviceTraefikCompose(
   const staticArgs = tcpUdpStaticArgLines(entries);
   const portLines = tcpUdpPortLines(entries);
   const constraint =
-    `Label(\`com.turbopanel.service\`,\`${identity.serviceId}\`) && Label(\`com.turbopanel.raw-port\`,\`true\`)`;
+    `Label(\`${LABEL_SERVICE_ID}\`,\`${identity.serviceId}\`) && Label(\`${LABEL_RAW_PORT}\`,\`true\`)`;
   const lines = [
     "services:",
     `  ${identity.composeServiceName}:`,
@@ -300,8 +354,8 @@ export function serviceTraefikCompose(
     "    volumes:",
     "      - /var/run/docker.sock:/var/run/docker.sock:ro",
     "    labels:",
-    "      turbopanel.role: ingress",
-    `      com.turbopanel.service: ${quoteYamlScalar(identity.serviceId)}`,
+    `      ${LABEL_ROLE}: ${LABEL_ROLE_INGRESS}`,
+    `      ${LABEL_SERVICE_ID}: ${quoteYamlScalar(identity.serviceId)}`,
     "    networks:",
     `      - ${INGRESS_NETWORK}`,
     "",
@@ -421,16 +475,32 @@ export async function ensureHostingIngress(
 ): Promise<void> {
   await ensureIngressNetwork();
 
-  const ingressDir = join(layout.stateDir, "ingress", "traefik");
+  const ingressDir = hostingIngressDir(layout);
   await Deno.mkdir(ingressDir, { recursive: true, mode: 0o750 });
-  const composePath = join(ingressDir, "docker-compose.yml");
-  await Deno.writeTextFile(composePath, traefikCompose(), {
+  const composePath = hostingIngressComposePath(layout);
+
+  let descriptor: SystemComponentDescriptor | undefined;
+  try {
+    const loaded = await readSystemComponentDescriptor(
+      layout,
+      SYSTEM_HOSTING_INGRESS_COMPONENT,
+    );
+    if (loaded !== null) descriptor = loaded;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logWarn(
+      "deploy",
+      `hosting ingress descriptor unreadable; using anonymous Traefik: ${message}`,
+    );
+  }
+
+  await Deno.writeTextFile(composePath, traefikCompose(descriptor), {
     mode: 0o640,
   });
-  const composeUp = await runDocker([
+  const composeUp = await defaultRunDocker([
     "compose",
     "-p",
-    "turbopanel-ingress",
+    HOSTING_INGRESS_PROJECT,
     "-f",
     composePath,
     "up",
@@ -442,6 +512,122 @@ export async function ensureHostingIngress(
   }
 
   await ensureHostingCaddyRuntime(layout);
+}
+
+type RunDockerFn = (
+  args: string[],
+  options?: RunDockerOptions,
+) => Promise<DockerCliResult>;
+
+/** Optional test seams for {@link inspectHostingIngressContainer}. */
+export type InspectHostingIngressDeps = {
+  runDocker?: RunDockerFn;
+};
+
+/**
+ * True when the compose-ps row carries the allowlisted platform labels for
+ * the shared hosting-ingress Traefik (`turbopanel.role=ingress`,
+ * `com.turbopanel.system.component=hosting-ingress`, and
+ * `com.turbopanel.service=<serviceId>`). Unlabelled / legacy rows fail.
+ */
+function hasHostingIngressLabels(
+  entry: Record<string, unknown>,
+  serviceId: string,
+): boolean {
+  const labels = readComposePsLabels(entry);
+  return (
+    labels[LABEL_ROLE] === LABEL_ROLE_INGRESS &&
+    labels[LABEL_SYSTEM_COMPONENT] === SYSTEM_HOSTING_INGRESS_COMPONENT &&
+    labels[LABEL_SERVICE_ID] === serviceId
+  );
+}
+
+async function hostingIngressComposeFileExists(
+  composePath: string,
+): Promise<boolean> {
+  try {
+    await Deno.stat(composePath);
+    return true;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return false;
+    throw err;
+  }
+}
+
+/**
+ * Best-effort observe the shared hosting-ingress Traefik container.
+ *
+ * Returns `undefined` when Docker/`ps` fails (caller should omit
+ * `containers` from the command result). Returns `null` when no descriptor
+ * is allocated, the compose file is missing, or the expected labelled
+ * identity is absent (authoritative empty). Never throws; never scans
+ * Docker broadly — only the canonical compose project and allocated
+ * identity with allowlisted platform labels are accepted.
+ */
+export async function inspectHostingIngressContainer(
+  layout: LayoutPaths,
+  deps?: InspectHostingIngressDeps,
+): Promise<EnvironmentDeployContainer | null | undefined> {
+  const run = deps?.runDocker ?? defaultRunDocker;
+  try {
+    const descriptor = await readSystemComponentDescriptor(
+      layout,
+      SYSTEM_HOSTING_INGRESS_COMPONENT,
+    );
+    if (descriptor === null) return null;
+
+    const composePath = hostingIngressComposePath(layout);
+    // Missing compose file = authoritative absence (never written / removed
+    // with the project). Do not invoke `docker compose -f <missing>` —
+    // that fails and would look like a collection error.
+    if (!(await hostingIngressComposeFileExists(composePath))) {
+      return null;
+    }
+
+    const result = await run([
+      "compose",
+      "-p",
+      HOSTING_INGRESS_PROJECT,
+      "-f",
+      composePath,
+      "ps",
+      "-a",
+      "--format",
+      "json",
+    ]);
+    if (!result.success) {
+      logInfo(
+        "deploy",
+        `hosting ingress inspect failed: ${
+          result.stderr || "docker compose ps failed"
+        }`,
+      );
+      return undefined;
+    }
+    const entries = parseComposePsEntries(result.stdout);
+    for (const entry of entries) {
+      const row = readComposePsContainer(entry, "ingress");
+      if (row === null) continue;
+      // Require the allocated container_name AND compose service — never
+      // accept a legacy default name just because Service === traefik.
+      if (
+        row.composeServiceName !== descriptor.composeServiceName ||
+        row.containerName !== descriptor.containerName
+      ) {
+        continue;
+      }
+      if (!hasHostingIngressLabels(entry, descriptor.serviceId)) continue;
+      return {
+        ...row,
+        serviceId: descriptor.serviceId,
+      };
+    }
+    return null;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logWarn("deploy", `hosting ingress inspect failed: ${message}`);
+    return undefined;
+  }
 }
 
 /**
@@ -468,7 +654,7 @@ export async function ensureServiceIngress(
     { mode: 0o640 },
   );
   const project = serviceIngressProject(serviceId);
-  const composeUp = await runDocker([
+  const composeUp = await defaultRunDocker([
     "compose",
     "-p",
     project,
@@ -504,7 +690,7 @@ export async function removeServiceIngress(
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) throw err;
   }
-  const down = await runDocker(args);
+  const down = await defaultRunDocker(args);
   if (!down.success) {
     logWarn(
       "deploy",
@@ -1013,6 +1199,56 @@ async function writeTcpUdpIngressEntriesAtomic(
   }
 }
 
+/** List directory entries; missing directory → empty array. */
+async function listDirEntriesOrEmpty(dir: string): Promise<Deno.DirEntry[]> {
+  try {
+    const entries: Deno.DirEntry[] = [];
+    for await (const entry of Deno.readDir(dir)) entries.push(entry);
+    return entries;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return [];
+    throw err;
+  }
+}
+
+/**
+ * Committed per-service claim filenames only — skip dirs, non-`.json`, and
+ * in-progress atomic writes (`.*.tmp`).
+ */
+function isCommittedTcpUdpClaimFile(entry: Deno.DirEntry): boolean {
+  return (
+    entry.isFile &&
+    entry.name.endsWith(".json") &&
+    !entry.name.startsWith(".")
+  );
+}
+
+/**
+ * Parse + shape-validate one claim file. Corrupt JSON or unexpected shapes
+ * fail loudly so conflict detection never sees garbage.
+ */
+async function readTcpUdpIngressEntriesFile(
+  dir: string,
+  fileName: string,
+): Promise<TcpUdpIngressEntry[]> {
+  const contents = await Deno.readTextFile(join(dir, fileName));
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(contents);
+  } catch (err) {
+    throw new Error(
+      `corrupt tcp/udp ingress state file ${fileName}: invalid JSON`,
+      { cause: err },
+    );
+  }
+  if (!isValidTcpUdpIngressEntryArray(parsed)) {
+    throw new Error(
+      `corrupt tcp/udp ingress state file ${fileName}: expected an array of tcp/udp ingress entries`,
+    );
+  }
+  return parsed;
+}
+
 /**
  * Read every persisted per-service TCP/UDP entry list, optionally excluding one
  * service.
@@ -1026,40 +1262,37 @@ export async function collectTcpUdpIngressEntries(
   excludeServiceId?: string,
 ): Promise<TcpUdpIngressEntry[]> {
   const dir = tcpUdpStateDir(layout);
-  let dirEntries: Deno.DirEntry[];
-  try {
-    dirEntries = [];
-    for await (const entry of Deno.readDir(dir)) dirEntries.push(entry);
-  } catch (err) {
-    if (err instanceof Deno.errors.NotFound) return [];
-    throw err;
-  }
-
+  const dirEntries = await listDirEntriesOrEmpty(dir);
   const excludeFile = excludeServiceId ? `${excludeServiceId}.json` : undefined;
   const merged: TcpUdpIngressEntry[] = [];
   for (const entry of dirEntries) {
-    if (!entry.isFile || !entry.name.endsWith(".json")) continue;
-    // Skip in-progress atomic writes (`.*.tmp`) and any non-claim files.
-    if (entry.name.startsWith(".")) continue;
+    if (!isCommittedTcpUdpClaimFile(entry)) continue;
     if (entry.name === excludeFile) continue;
-    const contents = await Deno.readTextFile(join(dir, entry.name));
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(contents);
-    } catch (err) {
-      throw new Error(
-        `corrupt tcp/udp ingress state file ${entry.name}: invalid JSON`,
-        { cause: err },
-      );
-    }
-    if (!isValidTcpUdpIngressEntryArray(parsed)) {
-      throw new Error(
-        `corrupt tcp/udp ingress state file ${entry.name}: expected an array of tcp/udp ingress entries`,
-      );
-    }
-    merged.push(...parsed);
+    merged.push(...await readTcpUdpIngressEntriesFile(dir, entry.name));
   }
   return merged;
+}
+
+function addClaimFileServiceIds(
+  entries: readonly Deno.DirEntry[],
+  ids: Set<string>,
+): void {
+  for (const entry of entries) {
+    if (!isCommittedTcpUdpClaimFile(entry)) continue;
+    const serviceId = entry.name.slice(0, -".json".length);
+    if (SAFE_FILE_ID_RE.test(serviceId)) ids.add(serviceId);
+  }
+}
+
+function addServiceDirIds(
+  entries: readonly Deno.DirEntry[],
+  ids: Set<string>,
+): void {
+  for (const entry of entries) {
+    if (!entry.isDirectory) continue;
+    if (!SAFE_FILE_ID_RE.test(entry.name)) continue;
+    ids.add(entry.name);
+  }
 }
 
 /**
@@ -1070,30 +1303,14 @@ export async function listPersistedTcpUdpServiceIds(
   layout: LayoutPaths,
 ): Promise<string[]> {
   const ids = new Set<string>();
-
-  const claimDir = tcpUdpStateDir(layout);
-  try {
-    for await (const entry of Deno.readDir(claimDir)) {
-      if (!entry.isFile || !entry.name.endsWith(".json")) continue;
-      if (entry.name.startsWith(".")) continue;
-      const serviceId = entry.name.slice(0, -".json".length);
-      if (SAFE_FILE_ID_RE.test(serviceId)) ids.add(serviceId);
-    }
-  } catch (err) {
-    if (!(err instanceof Deno.errors.NotFound)) throw err;
-  }
-
-  const servicesDir = join(layout.stateDir, "ingress", "services");
-  try {
-    for await (const entry of Deno.readDir(servicesDir)) {
-      if (!entry.isDirectory) continue;
-      if (!SAFE_FILE_ID_RE.test(entry.name)) continue;
-      ids.add(entry.name);
-    }
-  } catch (err) {
-    if (!(err instanceof Deno.errors.NotFound)) throw err;
-  }
-
+  addClaimFileServiceIds(
+    await listDirEntriesOrEmpty(tcpUdpStateDir(layout)),
+    ids,
+  );
+  addServiceDirIds(
+    await listDirEntriesOrEmpty(join(layout.stateDir, "ingress", "services")),
+    ids,
+  );
   return [...ids].sort((a, b) => a.localeCompare(b));
 }
 

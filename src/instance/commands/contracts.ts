@@ -18,6 +18,7 @@ export const COMMAND_TYPES = [
   "managed.destroy",
   "managed.backup",
   "managed.restore",
+  "system.reconcile",
 ] as const;
 
 export type CommandType = (typeof COMMAND_TYPES)[number];
@@ -328,6 +329,59 @@ export type EnvironmentLifecyclePayload = {
 export type EnvironmentLifecycleResult = {
   projectName: string;
   summary: string;
+  containers?: EnvironmentDeployContainer[];
+};
+
+/** Must stay in sync with the instance canonical `system.reconcile` component key. */
+export type SystemComponentKey =
+  | "hosting-ingress"
+  | "database"
+  | "queue"
+  | "analytics";
+
+/** Must stay in sync with the instance canonical `system.reconcile` action set. */
+export type SystemReconcileAction = "reconcile" | "restart" | "stop";
+
+/**
+ * Must stay in sync with the instance canonical `SYSTEM_COMPONENT_ROLES`
+ * container-name rule / role per system component.
+ */
+export const SYSTEM_COMPONENT_ROLES: Record<
+  SystemComponentKey,
+  "app" | "ingress"
+> = {
+  "hosting-ingress": "ingress",
+  database: "app",
+  queue: "app",
+  analytics: "app",
+};
+
+/**
+ * Must stay in sync with the instance canonical `system.reconcile` component.
+ * Field names match `SystemComponentDescriptor` plus `desired`.
+ */
+export type SystemComponentDescriptorPayload = {
+  component: SystemComponentKey;
+  serviceId: string;
+  composeServiceName: string;
+  containerName: string;
+  role: "app" | "ingress";
+  desired: "present" | "absent";
+};
+
+/** Must stay in sync with the instance canonical `system.reconcile` shape. */
+export type SystemReconcilePayload = {
+  environmentId: string;
+  action: SystemReconcileAction;
+  components: SystemComponentDescriptorPayload[];
+};
+
+/**
+ * Must stay in sync with the instance canonical `system.reconcile` result.
+ * No `environmentId` — the instance trusts only the payload's.
+ */
+export type SystemReconcileResult = {
+  summary?: string;
   containers?: EnvironmentDeployContainer[];
 };
 
@@ -1555,6 +1609,106 @@ export function parseEnvironmentLifecyclePayload(
     projectName: parseNonEmptyString(value, "projectName"),
     action: action as EnvironmentLifecycleAction,
   };
+}
+
+const SYSTEM_COMPONENT_KEYS = new Set([
+  "hosting-ingress",
+  "database",
+  "queue",
+  "analytics",
+]);
+const SYSTEM_RECONCILE_ACTIONS = new Set(["reconcile", "restart", "stop"]);
+const SYSTEM_RECONCILE_DESIRED = new Set(["present", "absent"]);
+const MAX_SYSTEM_RECONCILE_COMPONENTS = 8;
+const SYSTEM_RECONCILE_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function parseSystemReconcileComponent(
+  value: unknown,
+  seen: Set<string>,
+): SystemComponentDescriptorPayload {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid system.reconcile payload");
+  }
+  const component = value.component;
+  if (
+    typeof component !== "string" || !SYSTEM_COMPONENT_KEYS.has(component)
+  ) {
+    throw new TypeError("Invalid system.reconcile payload");
+  }
+  if (seen.has(component)) {
+    throw new TypeError("Invalid system.reconcile payload");
+  }
+  seen.add(component);
+
+  const serviceId = parseNonEmptyString(value, "serviceId");
+  if (!SYSTEM_RECONCILE_UUID_RE.test(serviceId)) {
+    throw new TypeError("Invalid system.reconcile payload");
+  }
+  const composeServiceName = parseNonEmptyString(value, "composeServiceName");
+  const expectedRole = SYSTEM_COMPONENT_ROLES[component as SystemComponentKey];
+  const role = value.role;
+  if (role !== expectedRole) {
+    throw new TypeError("Invalid system.reconcile payload");
+  }
+  const containerName = parseNonEmptyString(value, "containerName");
+  const expectedContainerName = role === "ingress"
+    ? `${serviceId}-ingress`
+    : serviceId;
+  if (containerName !== expectedContainerName) {
+    throw new TypeError("Invalid system.reconcile payload");
+  }
+  const desired = value.desired;
+  if (typeof desired !== "string" || !SYSTEM_RECONCILE_DESIRED.has(desired)) {
+    throw new TypeError("Invalid system.reconcile payload");
+  }
+  return {
+    component: component as SystemComponentKey,
+    serviceId,
+    composeServiceName,
+    containerName,
+    role: role as "app" | "ingress",
+    desired: desired as "present" | "absent",
+  };
+}
+
+/** Must stay in sync with the instance canonical `system.reconcile` validator. */
+export function parseSystemReconcilePayload(
+  value: unknown,
+): SystemReconcilePayload {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid system.reconcile payload");
+  }
+  const environmentId = parseNonEmptyString(value, "environmentId");
+  if (!SYSTEM_RECONCILE_UUID_RE.test(environmentId)) {
+    throw new TypeError("Invalid system.reconcile payload");
+  }
+
+  let action: SystemReconcileAction = "reconcile";
+  if (value.action !== undefined) {
+    if (
+      typeof value.action !== "string" ||
+      !SYSTEM_RECONCILE_ACTIONS.has(value.action)
+    ) {
+      throw new TypeError("Invalid system.reconcile payload");
+    }
+    action = value.action as SystemReconcileAction;
+  }
+
+  if (!Array.isArray(value.components) || value.components.length === 0) {
+    throw new TypeError("Invalid system.reconcile payload");
+  }
+  if (value.components.length > MAX_SYSTEM_RECONCILE_COMPONENTS) {
+    throw new TypeError("Invalid system.reconcile payload");
+  }
+
+  const seen = new Set<string>();
+  const components: SystemComponentDescriptorPayload[] = [];
+  for (const entry of value.components) {
+    components.push(parseSystemReconcileComponent(entry, seen));
+  }
+
+  return { environmentId, action, components };
 }
 
 /** Must stay in sync with the instance canonical managed validators. */

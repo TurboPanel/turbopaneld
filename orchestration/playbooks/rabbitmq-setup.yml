@@ -9,3 +9,4 @@
   roles:
     - role: docker
     - role: rabbitmq
+    - role: system-compose

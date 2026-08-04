@@ -1,7 +1,7 @@
 [Unit]
 Description=TurboPanel Drizzle Studio
-After=network-online.target docker.service turbopanel-postgres.service {{ instance_service_name }}.service
-Wants=network-online.target turbopanel-postgres.service {{ instance_service_name }}.service
+After=network-online.target docker.service turbopanel-system-stack.service {{ instance_service_name }}.service
+Wants=network-online.target turbopanel-system-stack.service {{ instance_service_name }}.service
 
 [Service]
 Type=simple

@@ -1,0 +1,15 @@
+[Unit]
+Description=TurboPanel system services (Postgres/RabbitMQ/ClickHouse)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/bin/sh -c '/usr/bin/docker network inspect {{ turbopanel_docker_network }} >/dev/null 2>&1 || /usr/bin/docker network create {{ turbopanel_docker_network }}'
+ExecStart=/usr/bin/docker compose -p {{ system_compose_project_name }} -f {{ system_compose_dir }}/docker-compose.yml up -d --remove-orphans
+ExecStart={{ system_compose_dir }}/wait-ready.sh
+ExecStop=/usr/bin/docker compose -p {{ system_compose_project_name }} -f {{ system_compose_dir }}/docker-compose.yml down
+
+[Install]
+WantedBy=multi-user.target

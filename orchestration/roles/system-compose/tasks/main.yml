@@ -1,0 +1,255 @@
+# Brings up postgres/rabbitmq/clickhouse as one Docker Compose project
+# (turbopanel-system) under {{ system_compose_dir }}/docker-compose.yml.
+#
+# Must run AFTER the (trimmed) postgres/rabbitmq/clickhouse roles in the same
+# play — they generate the secrets this role slurps directly, and this role
+# reads their OTHER role defaults (image, volume/container names, uid/gid,
+# ports, users, …) straight out of play scope rather than redeclaring them.
+# A service is considered "active" purely by its secret file existing, so
+# this role degrades gracefully when only a subset of the three ran (see the
+# standalone postgres-setup.yml / rabbitmq-setup.yml / clickhouse-setup.yml
+# playbooks). `queue` / `analytics` are additionally deactivated on Workers
+# runtime (Mailgun / Cloudflare Analytics Engine replace them) — mirroring
+# the `when: turbopanel_instance_runtime == 'deno'` gate already used to skip
+# the rabbitmq/clickhouse roles themselves in instance-dev-install.yml.
+
+
+- name: Ensure system compose config directory exists
+  ansible.builtin.file:
+    path: "{{ system_compose_dir }}"
+    state: directory
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
+- name: Check for generated postgres password
+  ansible.builtin.stat:
+    path: "{{ turbopanel_config_dir }}/postgres/.pgpass"
+  register: _system_compose_pg_pass_stat
+
+- name: Check for generated queue password
+  ansible.builtin.stat:
+    path: "{{ turbopanel_config_dir }}/rabbitmq/.rabbitmq_pass"
+  register: _system_compose_rabbitmq_pass_stat
+
+- name: Check for generated ClickHouse admin password
+  ansible.builtin.stat:
+    path: "{{ turbopanel_config_dir }}/clickhouse/.clickhouse_admin_pass"
+  register: _system_compose_ch_admin_pass_stat
+
+- name: Check whether the Compose file already exists (first run vs. steady state)
+  ansible.builtin.stat:
+    path: "{{ system_compose_dir }}/docker-compose.yml"
+  register: _system_compose_file_stat
+
+- name: Set active-service facts
+  ansible.builtin.set_fact:
+    _system_compose_database_active: "{{ _system_compose_pg_pass_stat.stat.exists }}"
+    _system_compose_queue_active: >-
+      {{ _system_compose_rabbitmq_pass_stat.stat.exists
+         and (turbopanel_instance_runtime | default('deno')) != 'workers' }}
+    _system_compose_analytics_active: >-
+      {{ _system_compose_ch_admin_pass_stat.stat.exists
+         and (turbopanel_instance_runtime | default('deno')) != 'workers' }}
+
+- name: Set combined active-service facts
+  ansible.builtin.set_fact:
+    _system_compose_any_active: >-
+      {{ _system_compose_database_active or _system_compose_queue_active or _system_compose_analytics_active }}
+    _system_compose_active_container_names: >-
+      {{
+        ([postgres_container_name] if _system_compose_database_active else [])
+        + ([rabbitmq_container_name] if _system_compose_queue_active else [])
+        + ([clickhouse_container_name] if _system_compose_analytics_active else [])
+      }}
+    _system_compose_active_volume_names: >-
+      {{
+        ([postgres_volume_name] if _system_compose_database_active else [])
+        + ([rabbitmq_volume_name] if _system_compose_queue_active else [])
+        + ([clickhouse_volume_name] if _system_compose_analytics_active else [])
+      }}
+
+- name: Read postgres password
+  ansible.builtin.slurp:
+    src: "{{ turbopanel_config_dir }}/postgres/.pgpass"
+  register: _system_compose_pg_pass_raw
+  when: _system_compose_database_active | bool
+
+- name: Read queue password
+  ansible.builtin.slurp:
+    src: "{{ turbopanel_config_dir }}/rabbitmq/.rabbitmq_pass"
+  register: _system_compose_rabbitmq_pass_raw
+  when: _system_compose_queue_active | bool
+
+- name: Read ClickHouse admin password
+  ansible.builtin.slurp:
+    src: "{{ turbopanel_config_dir }}/clickhouse/.clickhouse_admin_pass"
+  register: _system_compose_ch_admin_pass_raw
+  when: _system_compose_analytics_active | bool
+
+- name: Set service password facts
+  ansible.builtin.set_fact:
+    _system_compose_pg_password: "{{ _system_compose_pg_pass_raw.content | b64decode | trim if _system_compose_database_active else '' }}"
+    _system_compose_rabbitmq_password: "{{ _system_compose_rabbitmq_pass_raw.content | b64decode | trim if _system_compose_queue_active else '' }}"
+    _system_compose_ch_admin_password: "{{ _system_compose_ch_admin_pass_raw.content | b64decode | trim if _system_compose_analytics_active else '' }}"
+  no_log: true
+
+- name: Bring up the consolidated system-services Compose project
+  when: _system_compose_any_active | bool
+  block:
+    - name: Ensure turbopanel Docker network exists
+      ansible.builtin.command:
+        argv: [docker, network, create, --driver, bridge, "{{ turbopanel_docker_network }}"]
+      register: _system_compose_network_create
+      changed_when: false
+      failed_when: false
+
+    - name: Ensure Docker volumes exist for active services
+      ansible.builtin.command:
+        argv: [docker, volume, create, "{{ item }}"]
+      loop: "{{ _system_compose_active_volume_names }}"
+      register: _system_compose_volume_create
+      changed_when: false
+
+    - name: Remove pre-existing non-Compose containers before first Compose run
+      ansible.builtin.command:
+        argv: [docker, rm, -f, "{{ item }}"]
+      loop: "{{ _system_compose_active_container_names }}"
+      when: not _system_compose_file_stat.stat.exists
+      register: _system_compose_migrate_removed
+      changed_when: _system_compose_migrate_removed.rc == 0
+      failed_when: false
+
+    - name: Pre-own volume data directories before first Compose run
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --rm
+          - -v
+          - "{{ item.volume }}:{{ item.mount }}"
+          - --user
+          - root
+          - alpine
+          - chown
+          - -R
+          - "{{ item.uid }}:{{ item.gid }}"
+          - "{{ item.mount }}"
+      loop:
+        - volume: "{{ postgres_volume_name | default('') }}"
+          mount: /var/lib/postgresql
+          uid: "{{ postgres_container_uid | default('') }}"
+          gid: "{{ postgres_container_gid | default('') }}"
+          active: "{{ _system_compose_database_active }}"
+        - volume: "{{ rabbitmq_volume_name | default('') }}"
+          mount: /var/lib/rabbitmq
+          uid: "{{ rabbitmq_container_uid | default('') }}"
+          gid: "{{ rabbitmq_container_gid | default('') }}"
+          active: "{{ _system_compose_queue_active }}"
+        - volume: "{{ clickhouse_volume_name | default('') }}"
+          mount: /var/lib/clickhouse
+          uid: "{{ clickhouse_container_uid | default('') }}"
+          gid: "{{ clickhouse_container_gid | default('') }}"
+          active: "{{ _system_compose_analytics_active }}"
+      loop_control:
+        label: "{{ item.mount }}"
+      when:
+        - not _system_compose_file_stat.stat.exists
+        - item.active | bool
+      changed_when: true
+
+    - name: Write turbopanel-system docker-compose.yml
+      ansible.builtin.template:
+        src: docker-compose.yml.j2
+        dest: "{{ system_compose_dir }}/docker-compose.yml"
+        owner: root
+        group: "{{ turbopanel_group }}"
+        mode: "0640"
+      no_log: true
+
+    - name: Install system-compose readiness wait script
+      ansible.builtin.template:
+        src: system-compose-wait.sh.j2
+        dest: "{{ system_compose_dir }}/wait-ready.sh"
+        owner: root
+        group: root
+        mode: "0750"
+
+    - name: Install turbopanel-system-stack systemd unit
+      ansible.builtin.template:
+        src: turbopanel-system-stack.service.j2
+        dest: "/etc/systemd/system/{{ system_compose_service_name }}.service"
+        owner: root
+        group: root
+        mode: "0640"
+
+    - name: Stop and disable legacy per-service systemd units
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+      loop: "{{ system_compose_legacy_units }}"
+      failed_when: false
+
+    - name: Ensure turbopanel-system-stack systemd unit desired state
+      ansible.builtin.systemd:
+        name: "{{ system_compose_service_name }}"
+        daemon_reload: true
+        enabled: true
+        state: started
+
+    # docker compose up -d does not restart an already-running container just
+    # because a bind-mounted config file's *content* changed (only container
+    # recreation picks that up) — replicate the targeted restart-on-change the
+    # trimmed rabbitmq/clickhouse roles used to do via their own docker-run path.
+    - name: Restart queue container when broker config changed
+      ansible.builtin.command:
+        argv: [docker, restart, "{{ rabbitmq_container_name }}"]
+      when:
+        - _system_compose_queue_active | bool
+        - rabbitmq_conf_written is defined
+        - rabbitmq_conf_written is changed
+      changed_when: true
+
+    - name: Wait for queue readiness after config-triggered restart
+      ansible.builtin.command:
+        argv: [docker, exec, "{{ rabbitmq_container_name }}", rabbitmq-diagnostics, -q, ping]
+      register: _system_compose_queue_recheck
+      until: _system_compose_queue_recheck.rc == 0
+      retries: 30
+      delay: 2
+      changed_when: false
+      when:
+        - _system_compose_queue_active | bool
+        - rabbitmq_conf_written is defined
+        - rabbitmq_conf_written is changed
+
+    - name: Restart analytics container when overlay config changed
+      ansible.builtin.command:
+        argv: [docker, restart, "{{ clickhouse_container_name }}"]
+      when:
+        - _system_compose_analytics_active | bool
+        - >-
+          (clickhouse_config_written is defined and clickhouse_config_written is changed)
+          or (clickhouse_users_written is defined and clickhouse_users_written is changed)
+      changed_when: true
+
+    - name: Wait for analytics readiness after config-triggered restart
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ clickhouse_http_port }}/ping"
+        status_code: 200
+      register: _system_compose_analytics_recheck
+      until: _system_compose_analytics_recheck.status == 200
+      retries: 30
+      delay: 2
+      when:
+        - _system_compose_analytics_active | bool
+        - >-
+          (clickhouse_config_written is defined and clickhouse_config_written is changed)
+          or (clickhouse_users_written is defined and clickhouse_users_written is changed)
+
+    - name: Bootstrap ClickHouse database, app user, and disabled system-log cleanup
+      ansible.builtin.include_role:
+        name: clickhouse
+        tasks_from: bootstrap
+      when: _system_compose_analytics_active | bool
