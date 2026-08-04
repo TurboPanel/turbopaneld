@@ -5,7 +5,7 @@
 [![Release](https://img.shields.io/github/v/release/turbopanel/turbopaneld?label=release)](https://github.com/turbopanel/turbopaneld/releases)
 [![License: AGPL-3.0-only](https://img.shields.io/badge/License-AGPL--3.0--only-blue.svg)](./LICENSE)
 [![Docs](https://img.shields.io/badge/docs-daemon%20setup-3366cc)](https://turbopanel.io/docs/deployment/daemon-setup)
-[![Status: Public beta](https://img.shields.io/badge/status-public%20beta-3dd68c)](https://turbopanel.io/roadmap)
+[![Status: Private alpha](https://img.shields.io/badge/status-private%20alpha-3dd68c)](https://turbopanel.io/roadmap)
 
 GitHub: [turbopanel/turbopaneld](https://github.com/turbopanel/turbopaneld). Package name: `turbopaneld`.
 
