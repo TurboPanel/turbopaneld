@@ -24,12 +24,14 @@
 import { join } from "@std/path";
 import { runPlaybookStreaming } from "../src/orchestration/ansible-events.ts";
 import {
+  coLocatedInstanceServiceEnabled,
   ensureAnsible,
   ensureGalaxyDockerRole,
   runBuildToggle as runAnsibleBuildToggle,
 } from "../src/orchestration/ansible.ts";
 import {
   computeDevConvergeStamp,
+  emitDevConvergeSkippedIfNeeded,
   writeDevConvergeStamp,
 } from "../src/orchestration/converge-stamp.ts";
 import {
@@ -185,7 +187,21 @@ function devInstanceExtraArgs(): string[] {
   return args;
 }
 
-async function runInstanceDevInstall(): Promise<void> {
+async function runInstanceDevInstall(ifNeeded: boolean): Promise<void> {
+  if (ifNeeded) {
+    const instanceEnabled = await coLocatedInstanceServiceEnabled();
+    if (
+      await emitDevConvergeSkippedIfNeeded(
+        true,
+        instanceEnabled,
+        emitEvent,
+      )
+    ) {
+      // Stamp matches — exit before ensureAnsible / Galaxy / playbook.
+      return;
+    }
+  }
+
   const layout = await requireDevOrchestrationLayout();
 
   // Sync orchestration venv packages (ansible-lint for IDE linting, etc.) before converge.
@@ -270,7 +286,7 @@ if (!action) {
 try {
   switch (action) {
     case "instance-dev-install":
-      await runInstanceDevInstall();
+      await runInstanceDevInstall(Deno.args.includes("--if-needed"));
       break;
     case "build-toggle":
       await runBuildToggle();

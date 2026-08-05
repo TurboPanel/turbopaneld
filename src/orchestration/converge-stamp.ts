@@ -1,17 +1,22 @@
 import { encodeHex } from "@std/encoding/hex";
-import { join, relative } from "@std/path";
+import { dirname, join, relative } from "@std/path";
 import {
   type DevOrchestrationLayout,
   resolveDevConvergeRoleDir,
   resolveDevOrchestrationLayout,
 } from "./dev-orchestration.ts";
-import { RUNTIMES_DIR } from "./paths.ts";
+import { resolveRuntimesDir } from "../paths/layout.ts";
 
-export const DEV_CONVERGE_STAMP_FILE = join(
-  RUNTIMES_DIR,
-  "ansible",
-  "dev-converge.stamp",
-);
+/**
+ * Resolve the stamp path from the current process env (or an explicit env bag).
+ * Lazily derived so tests can point `TURBOPANEL_RUNTIMES_DIR` at a temp tree
+ * without fighting module-load-time path constants.
+ */
+export function resolveDevConvergeStampFile(
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+): string {
+  return join(resolveRuntimesDir(env), "ansible", "dev-converge.stamp");
+}
 
 function forceConvergeRequested(): boolean {
   const flag = Deno.env.get("TURBOPANEL_FORCE_CONVERGE")?.trim().toLowerCase();
@@ -127,15 +132,17 @@ export async function computeDevConvergeStamp(): Promise<string> {
 }
 
 export async function readDevConvergeStamp(): Promise<string | null> {
-  if (!(await fileExists(DEV_CONVERGE_STAMP_FILE))) return null;
-  const text = await Deno.readTextFile(DEV_CONVERGE_STAMP_FILE);
+  const stampFile = resolveDevConvergeStampFile();
+  if (!(await fileExists(stampFile))) return null;
+  const text = await Deno.readTextFile(stampFile);
   const stamp = text.trim();
   return stamp.length > 0 ? stamp : null;
 }
 
 export async function writeDevConvergeStamp(stamp: string): Promise<void> {
-  await Deno.mkdir(join(RUNTIMES_DIR, "ansible"), { recursive: true });
-  await Deno.writeTextFile(DEV_CONVERGE_STAMP_FILE, `${stamp}\n`);
+  const stampFile = resolveDevConvergeStampFile();
+  await Deno.mkdir(dirname(stampFile), { recursive: true });
+  await Deno.writeTextFile(stampFile, `${stamp}\n`);
 }
 
 export async function shouldSkipDevConverge(
@@ -170,4 +177,23 @@ export async function describeDevConvergeDecision(
     return "dev converge stamp matches (orchestration inputs unchanged)";
   }
   return "dev converge stamp mismatch (orchestration, roles, or dev env changed)";
+}
+
+/**
+ * When `ifNeeded` is true and the stamp says converge is current, emit the
+ * `dev_converge_skipped` JSONL event and return true so callers exit before
+ * expensive Ansible/Galaxy setup.
+ */
+export async function emitDevConvergeSkippedIfNeeded(
+  ifNeeded: boolean,
+  instanceServiceEnabled: boolean,
+  emit: (event: { _event: "dev_converge_skipped"; reason: string }) => void,
+): Promise<boolean> {
+  if (!ifNeeded) return false;
+  const reason = await describeDevConvergeDecision(instanceServiceEnabled);
+  if (!(await shouldSkipDevConverge(instanceServiceEnabled))) {
+    return false;
+  }
+  emit({ _event: "dev_converge_skipped", reason });
+  return true;
 }

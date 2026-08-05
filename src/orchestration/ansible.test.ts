@@ -469,6 +469,47 @@ test("requirements-docker.yml pins geerlingguy.docker to an exact version", asyn
   }
 });
 
+test("TUI orchestration script emits dev_converge_skipped before expensive setup", () => {
+  // instance-dev-install --if-needed must emit the skip JSONL event and return
+  // before ensureAnsible / Galaxy / playbook when the stamp matches.
+  const script = Deno.readTextFileSync(
+    join(DAEMON_ROOT, "scripts", "run-orchestration-action.ts"),
+  );
+  if (!script.includes("emitDevConvergeSkippedIfNeeded")) {
+    throw new Error(
+      "run-orchestration-action.ts must use emitDevConvergeSkippedIfNeeded for --if-needed skip",
+    );
+  }
+  const skipCall = script.indexOf("emitDevConvergeSkippedIfNeeded");
+  const ensureAnsibleCall = script.indexOf("await ensureAnsible()");
+  const galaxyCall = script.indexOf("await ensureGalaxyDockerRole()");
+  const playbookCall = script.indexOf("await runPlaybookStreaming(");
+  if (skipCall < 0 || ensureAnsibleCall < 0 || skipCall > ensureAnsibleCall) {
+    throw new Error(
+      "run-orchestration-action.ts must call emitDevConvergeSkippedIfNeeded before ensureAnsible()",
+    );
+  }
+  if (galaxyCall < 0 || skipCall > galaxyCall) {
+    throw new Error(
+      "run-orchestration-action.ts must call emitDevConvergeSkippedIfNeeded before ensureGalaxyDockerRole()",
+    );
+  }
+  if (playbookCall < 0 || skipCall > playbookCall) {
+    throw new Error(
+      "run-orchestration-action.ts must call emitDevConvergeSkippedIfNeeded before runPlaybookStreaming()",
+    );
+  }
+
+  const helper = Deno.readTextFileSync(
+    join(DAEMON_ROOT, "src", "orchestration", "converge-stamp.ts"),
+  );
+  if (!helper.includes('_event: "dev_converge_skipped"')) {
+    throw new Error(
+      "converge-stamp.ts must emit { _event: \"dev_converge_skipped\", reason } on skip",
+    );
+  }
+});
+
 test("TUI orchestration script fetches Docker Galaxy before docker-using playbooks", () => {
   // Dev console converge uses scripts/run-orchestration-action.ts — not
   // ansible.ts runInstanceDevInstall — so the script must call

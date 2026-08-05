@@ -659,7 +659,7 @@ export async function runDaemonLogsSetup(
   logInfo("orchestration", "daemon-logs-setup complete");
 }
 
-async function coLocatedInstanceServiceEnabled(): Promise<boolean> {
+export async function coLocatedInstanceServiceEnabled(): Promise<boolean> {
   try {
     const result = await run(
       "systemctl",

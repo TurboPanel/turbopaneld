@@ -175,6 +175,20 @@ Ansible IDE extension: `exclude_paths` in repo-root + `orchestration/.ansible-li
 broad `skip_list` (opening a file under the role otherwise walks up to upstream
 lint rules).
 
+**`instance-dev-install --if-needed`:** `scripts/run-orchestration-action.ts`
+accepts an `--if-needed` flag on `instance-dev-install`. When set, it calls
+`coLocatedInstanceServiceEnabled()` + `emitDevConvergeSkippedIfNeeded()`
+(`src/orchestration/converge-stamp.ts`) and, when the stamp matches, emits a
+single `dev_converge_skipped` JSONL event and exits **before**
+`ensureAnsible` / `ensureGalaxyDockerRole` / the playbook run. Unflagged
+invocations (and any flow with `TURBOPANEL_FORCE_CONVERGE=1` set) behave
+exactly as before via `shouldSkipDevConverge()` / `forceConvergeRequested()`.
+The [dev](https://github.com/turbopanel/dev) console threads this as
+`installDevEnvironment(..., mode)` with `mode: "if-needed" | "force"` —
+`"if-needed"` only for the post-daemon-install chain; `"force"` (and
+`TURBOPANEL_FORCE_CONVERGE=1`) for Developer → Converge / re-converge and
+legacy reset/provisioner callers.
+
 ## Project metadata
 
 GitHub repository:
