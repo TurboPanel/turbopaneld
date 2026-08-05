@@ -83,14 +83,14 @@ module and CI guard are the only places allowed to reference it.
 | Daemon install root (`daemonRootDefault`)                         | `/opt/turbopanel/lib/daemon`          |
 | Config (`daemon.env`, `instance-ca.pem`)                          | `/etc/turbopanel`                     |
 | Persistent identity (license, `server.id`, keys, tunnels)         | `/var/lib/turbopanel`                 |
-| Tenant principal homes (`principalHomeRoot`)                      | `/srv/users/<principalId>`            |
+| Tenant principal homes (`principalHomeRoot`)                      | `/srv/users/<username>`               |
 | Logs                                                              | `/var/log/turbopanel`                 |
 | Runtime (sockets, `daemon.lock`)                                  | `/run/turbopanel`                     |
 
-TurboPanel project principals allocate UID/GID from the instance-wide
-`principal_uid_seq` starting at **10001**, clear of the `tp*` service accounts
-at **9989–9999**. Override the home root with `TURBOPANEL_PRINCIPAL_HOME_ROOT`
-(`layout.principalHomeRoot`).
+The **host** allocates UID/GID via `useradd`/`groupadd`. The control plane may
+send an optional operator override, which must clear the `tp*` service band
+**9989–9999**. Homes are keyed on the username. Override the home root with
+`TURBOPANEL_PRINCIPAL_HOME_ROOT` (`layout.principalHomeRoot`).
 
 **Development (co-located checkout)** — `./console` from
 [turbopanel/dev](https://github.com/turbopanel/dev) runs the daemon from source

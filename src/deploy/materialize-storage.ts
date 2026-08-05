@@ -5,7 +5,10 @@ import type {
   EnvironmentDeployStorageMaterial,
 } from "../instance/commands/contracts.ts";
 import type { DecryptSecretsFn } from "./materialize-tls.ts";
-import { ensureDirectoryOwnedByPrincipal } from "./ensure-principal.ts";
+import {
+  ensureDirectoryOwnedByPrincipal,
+  principalUnixGroupName,
+} from "./ensure-principal.ts";
 import { runDocker } from "./docker-cli.ts";
 
 const STORAGE_ROOT = "storage";
@@ -33,7 +36,11 @@ async function maybeChown(
   ownership: EnvironmentDeployPrincipalMaterial | undefined,
 ): Promise<void> {
   if (!ownership) return;
-  await ensureDirectoryOwnedByPrincipal(hostPath, ownership.uid, ownership.gid);
+  await ensureDirectoryOwnedByPrincipal(
+    hostPath,
+    ownership.username,
+    principalUnixGroupName(ownership.username),
+  );
 }
 
 async function ensureParentDirectory(hostPath: string): Promise<void> {
@@ -98,8 +105,8 @@ async function materializeHostPathEntry(
       // Sudo-backed create so parents under principal-owned 0750 trees exist.
       await ensureDirectoryOwnedByPrincipal(
         hostPath,
-        ownership.uid,
-        ownership.gid,
+        ownership.username,
+        principalUnixGroupName(ownership.username),
       );
     } else {
       await ensureParentDirectory(hostPath);

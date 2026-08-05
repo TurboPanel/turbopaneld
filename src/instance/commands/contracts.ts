@@ -198,11 +198,17 @@ export type EnvironmentDeployStorageMaterial = {
   contentEnvelope?: string;
 };
 
+/**
+ * Host Linux account material for a project principal.
+ *
+ * The host allocates UID/GID via `useradd`/`groupadd` unless the control plane
+ * sends an explicit operator override (`uid`/`gid`).
+ */
 export type EnvironmentDeployPrincipalMaterial = {
   principalId: string;
   username: string;
-  uid: number;
-  gid: number;
+  uid?: number;
+  gid?: number;
   home?: string;
   shell?: string;
 };
@@ -224,12 +230,13 @@ export type EnvironmentDeployHostingPhp = {
  * Project principal that owns a traditional-web site tree on the host.
  * `ensureSystemPrincipals` creates the Linux user before apply; document
  * roots are owned by this user with the engine group for read access.
+ * UID/GID are optional operator overrides — the host allocates otherwise.
  */
 export type EnvironmentDeployTraditionalWebPrincipal = {
   principalId: string;
   username: string;
-  uid: number;
-  gid: number;
+  uid?: number;
+  gid?: number;
 };
 
 export type EnvironmentDeployTraditionalWebSite = {
@@ -1285,22 +1292,43 @@ function isValidPrincipalShellPath(value: string): boolean {
   return PRINCIPAL_SHELL_RE.test(value);
 }
 
+const PRINCIPAL_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
+/** Cap so `${username}-grp` fits the Linux 32-char group-name limit. */
+const MAX_PRINCIPAL_USERNAME_LENGTH = 28;
+
+function isValidPrincipalUsername(value: unknown): value is string {
+  return typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= MAX_PRINCIPAL_USERNAME_LENGTH &&
+    PRINCIPAL_USERNAME_RE.test(value);
+}
+
+function parseOptionalPrincipalId(
+  value: unknown,
+): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new TypeError("Invalid environment deploy principalMaterial entry");
+  }
+  return value;
+}
+
 function parsePrincipalMaterial(
   value: unknown,
 ): EnvironmentDeployPrincipalMaterial {
   if (!isRecord(value)) {
     throw new TypeError("Invalid environment deploy principalMaterial entry");
   }
-  const uid = value.uid;
-  const gid = value.gid;
-  if (typeof uid !== "number" || typeof gid !== "number") {
+  if (!isValidPrincipalUsername(value.username)) {
     throw new TypeError("Invalid environment deploy principalMaterial entry");
   }
+  const uid = parseOptionalPrincipalId(value.uid);
+  const gid = parseOptionalPrincipalId(value.gid);
   const material: EnvironmentDeployPrincipalMaterial = {
     principalId: parseNonEmptyString(value, "principalId"),
-    username: parseNonEmptyString(value, "username"),
-    uid,
-    gid,
+    username: value.username,
+    ...(uid === undefined ? {} : { uid }),
+    ...(gid === undefined ? {} : { gid }),
   };
   if (value.home !== undefined) {
     if (
@@ -1366,7 +1394,13 @@ function parseTraditionalWebListenPort(value: unknown): number {
   return value;
 }
 
-const PRINCIPAL_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
+function parseTraditionalWebOptionalId(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new TypeError("Invalid traditionalWebSites.principal entry");
+  }
+  return value;
+}
 
 function parseTraditionalWebPrincipal(
   value: unknown,
@@ -1378,22 +1412,17 @@ function parseTraditionalWebPrincipal(
   if (
     typeof value.principalId !== "string" ||
     value.principalId.length === 0 ||
-    typeof value.username !== "string" ||
-    !PRINCIPAL_USERNAME_RE.test(value.username) ||
-    typeof value.uid !== "number" ||
-    !Number.isInteger(value.uid) ||
-    value.uid < 0 ||
-    typeof value.gid !== "number" ||
-    !Number.isInteger(value.gid) ||
-    value.gid < 0
+    !isValidPrincipalUsername(value.username)
   ) {
     throw new TypeError("Invalid traditionalWebSites.principal entry");
   }
+  const uid = parseTraditionalWebOptionalId(value.uid);
+  const gid = parseTraditionalWebOptionalId(value.gid);
   return {
     principalId: value.principalId,
     username: value.username,
-    uid: value.uid,
-    gid: value.gid,
+    ...(uid === undefined ? {} : { uid }),
+    ...(gid === undefined ? {} : { gid }),
   };
 }
 

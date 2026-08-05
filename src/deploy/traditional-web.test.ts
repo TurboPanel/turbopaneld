@@ -142,8 +142,6 @@ test("phpFpmPoolConfig runs workers as assigned principal", () => {
       principal: {
         principalId: "00000000-0000-4000-8000-000000000099",
         username: "site_user",
-        uid: 10001,
-        gid: 10001,
       },
     },
     "/var/lib/turbopanel/sites/env1/phpapp/public",
@@ -175,8 +173,6 @@ test("resolveTraditionalWebSiteOwnership prefers principal over engine user", ()
       principal: {
         principalId: "00000000-0000-4000-8000-000000000099",
         username: "site_user",
-        uid: 10001,
-        gid: 10001,
       },
     }),
     { user: "site_user", group: "tpnginx" },

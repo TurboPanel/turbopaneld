@@ -38,22 +38,28 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../insta
    Docker; daemon-converge does not install it. Required for hostname ingress.
 4. When `principalMaterial[]` is present, ensure Linux users/groups on the host
    (`ensureSystemPrincipals` in `src/deploy/ensure-principal.ts`). Homes live
-   under `layout.principalHomeRoot` (default `/srv/users/<principalId>`):
+   under `layout.principalHomeRoot` (default `/srv/users/<username>`):
    home `0750`, `.ssh` `0700` (reserved for `authorized_keys`), and `volumes`
-   `0750`, all owned `uid:gid`. Shell comes from `principalMaterial[].shell`
-   (default `/usr/sbin/nologin`) via `useradd -s` / `usermod -s`. Existing users
-   are reconciled with `usermod -d` / `usermod -s` when home/shell differ —
-   never `usermod -m` (no data move) — but only after the passwd UID/GID match
-   the principal; a username collision with a different account fails instead
-   of mutating that account. Directory creation uses
-   `sudo -n install -d` so a non-root daemon can write under `/srv`.
+   `0750`, all owned `username:<username>-grp`. UID/GID are host-assigned
+   unless an explicit operator override arrives on the payload. Username max
+   length is **28** so `<username>-grp` fits the Linux 32-char group-name
+   limit (keep in sync with instance `MAX_PRINCIPAL_USERNAME_LENGTH`). When a GID
+   override is supplied and `<username>-grp` already exists with a different
+   numeric GID, ensure fails (conflict) instead of silently attaching the
+   principal to that group. Shell comes from `principalMaterial[].shell`
+   (default `/usr/sbin/nologin`) via `useradd -s` / `usermod -s`. Existing
+   accounts are adopted only when the passwd **home** matches the expected
+   path — a username collision with a foreign home fails the deploy instead
+   of mutating that account. Shell is still reconciled via `usermod -s`;
+   never `usermod -m` / `-d`. Directory creation uses `sudo -n install -d`
+   so a non-root daemon can write under `/srv`.
 5. When `storageMaterial[]` is present, materialize paths under
    `<stateDir>/storage/<organizationId>/<storageId>/` (`materialize-storage.ts`);
    `docker volume create` for `docker_volume` kinds using instance-supplied
    **`volumeName`** when present (else legacy `tp-<org8>-<name>`); optional
    `chown` when a principal is linked. The instance owns Docker volume naming.
    Principal-owned `bind_mount` entries arrive with an instance-derived
-   `sourcePath` of `/srv/users/<principalId>/volumes/<storageId>` (explicit
+   `sourcePath` of `/srv/users/<username>/volumes/<storageId>` (explicit
    operator paths still win); those paths are created via the same sudo-backed
    helper.
 6. Decrypt secret variables from `variableMaterial[]` into compose YAML

@@ -268,10 +268,10 @@ async function ensureDeployPrincipals(
     principalMaterial.map((principal) => ({
       principalId: principal.principalId,
       username: principal.username,
-      uid: principal.uid,
-      gid: principal.gid,
-      home: principal.home,
-      shell: principal.shell,
+      ...(principal.uid === undefined ? {} : { uid: principal.uid }),
+      ...(principal.gid === undefined ? {} : { gid: principal.gid }),
+      ...(principal.home === undefined ? {} : { home: principal.home }),
+      ...(principal.shell === undefined ? {} : { shell: principal.shell }),
     })),
   );
 }

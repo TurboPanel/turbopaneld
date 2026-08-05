@@ -167,8 +167,6 @@ test("environment.deploy traditionalWebSites fixture round-trips", () => {
         principal: {
           principalId: "00000000-0000-4000-8000-000000000099",
           username: "site_user",
-          uid: 10001,
-          gid: 10001,
         },
       },
     ],
@@ -181,7 +179,33 @@ test("environment.deploy traditionalWebSites fixture round-trips", () => {
   );
 });
 
-test("environment.deploy principalMaterial round-trips home and shell", () => {
+test("environment.deploy principalMaterial round-trips without uid/gid", () => {
+  const payload = parseEnvironmentDeployPayload({
+    environmentId: "env-1",
+    projectId: "proj-1",
+    organizationId: "org-1",
+    projectName: "demo",
+    composeYaml: "services: {}\n",
+    hostings: [],
+    principalMaterial: [
+      {
+        principalId: "00000000-0000-4000-8000-000000000099",
+        username: "app_user",
+        home: "/srv/users/app_user",
+        shell: "/usr/sbin/nologin",
+      },
+    ],
+  });
+  assertEquals(
+    payload.principalMaterial?.[0]?.home,
+    "/srv/users/app_user",
+  );
+  assertEquals(payload.principalMaterial?.[0]?.shell, "/usr/sbin/nologin");
+  assertEquals(payload.principalMaterial?.[0]?.uid, undefined);
+  assertEquals(payload.principalMaterial?.[0]?.gid, undefined);
+});
+
+test("environment.deploy principalMaterial round-trips with uid/gid", () => {
   const payload = parseEnvironmentDeployPayload({
     environmentId: "env-1",
     projectId: "proj-1",
@@ -195,16 +219,65 @@ test("environment.deploy principalMaterial round-trips home and shell", () => {
         username: "app_user",
         uid: 10001,
         gid: 10001,
-        home: "/srv/users/00000000-0000-4000-8000-000000000099",
+        home: "/srv/users/app_user",
         shell: "/usr/sbin/nologin",
       },
     ],
   });
+  assertEquals(payload.principalMaterial?.[0]?.uid, 10001);
+  assertEquals(payload.principalMaterial?.[0]?.gid, 10001);
   assertEquals(
     payload.principalMaterial?.[0]?.home,
-    "/srv/users/00000000-0000-4000-8000-000000000099",
+    "/srv/users/app_user",
   );
-  assertEquals(payload.principalMaterial?.[0]?.shell, "/usr/sbin/nologin");
+});
+
+test("environment.deploy principalMaterial rejects negative uid", () => {
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        environmentId: "env-1",
+        projectId: "proj-1",
+        organizationId: "org-1",
+        projectName: "demo",
+        composeYaml: "services: {}\n",
+        hostings: [],
+        principalMaterial: [
+          {
+            principalId: "00000000-0000-4000-8000-000000000099",
+            username: "app_user",
+            uid: -1,
+            home: "/srv/users/app_user",
+          },
+        ],
+      }),
+    TypeError,
+    "Invalid environment deploy principalMaterial entry",
+  );
+});
+
+test("environment.deploy principalMaterial rejects non-integer uid", () => {
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        environmentId: "env-1",
+        projectId: "proj-1",
+        organizationId: "org-1",
+        projectName: "demo",
+        composeYaml: "services: {}\n",
+        hostings: [],
+        principalMaterial: [
+          {
+            principalId: "00000000-0000-4000-8000-000000000099",
+            username: "app_user",
+            uid: 1.5,
+            home: "/srv/users/app_user",
+          },
+        ],
+      }),
+    TypeError,
+    "Invalid environment deploy principalMaterial entry",
+  );
 });
 
 test("environment.deploy round-trips dockerExternalNetworks and serviceHooks", () => {

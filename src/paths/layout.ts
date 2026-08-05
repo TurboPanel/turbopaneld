@@ -52,7 +52,7 @@ const DEV_ROOT_DEFAULT = readEnv("TURBOPANEL_DEV_ROOT")?.trim() ||
   readEnv("HOME")?.trim() ||
   PROD_HOME_DEFAULT;
 
-/** Tenant principal home root — clears `tp*` service UIDs (9989–9999). */
+/** Tenant principal home root — homes keyed as `/srv/users/<username>`. */
 const PRINCIPAL_HOME_ROOT_DEFAULT = "/srv/users";
 
 /**
@@ -114,7 +114,7 @@ export interface LayoutPaths {
   /** Hosting TLS materialization root (`/etc/turbopanel/tls`). */
   tlsDir: string;
   /**
-   * Tenant principal home root (`/srv/users/<principalId>`).
+   * Tenant principal home root (`/srv/users/<username>`).
    * Override with `TURBOPANEL_PRINCIPAL_HOME_ROOT`.
    */
   principalHomeRoot: string;
