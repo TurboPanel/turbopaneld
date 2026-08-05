@@ -505,7 +505,7 @@ test("TUI orchestration script emits dev_converge_skipped before expensive setup
   );
   if (!helper.includes('_event: "dev_converge_skipped"')) {
     throw new Error(
-      "converge-stamp.ts must emit { _event: \"dev_converge_skipped\", reason } on skip",
+      'converge-stamp.ts must emit { _event: "dev_converge_skipped", reason } on skip',
     );
   }
 });

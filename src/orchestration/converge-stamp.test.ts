@@ -24,9 +24,9 @@ const test = Deno.test.bind(Deno);
 /** Real host stamp path — tests must never read or write this. */
 const REAL_HOST_STAMP_PREFIX = "/opt/turbopanel/vendor";
 
-async function applyFixtureEnv(
+function applyFixtureEnv(
   fixture: TempLayoutFixture,
-): Promise<() => void> {
+): () => void {
   const previous = new Map<string, string | undefined>();
   for (const [key, value] of Object.entries(fixture.env)) {
     previous.set(key, Deno.env.get(key));
@@ -51,7 +51,7 @@ async function withIsolatedStamp(
   fn: (stampFile: string, fixture: TempLayoutFixture) => Promise<void>,
 ): Promise<void> {
   await withTempLayout(async (fixture) => {
-    const restoreEnv = await applyFixtureEnv(fixture);
+    const restoreEnv = applyFixtureEnv(fixture);
     try {
       const stampFile = resolveDevConvergeStampFile();
       if (!stampFile.startsWith(fixture.dirs.runtimesDir)) {
