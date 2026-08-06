@@ -5,7 +5,13 @@
  * stamped by `compose-labels.ts` and the Traefik compose emitters.
  */
 
-/** Role of a container on the ingress path (`ingress` vs engine/app). */
+/**
+ * Role of a container in the TurboPanel inventory vocabulary:
+ * `service` (tenant workload / managed engine row), `ingress` (Traefik),
+ * or `system` (platform database/queue/analytics). Managed **engine**
+ * containers additionally stamp the separate value `engine` for Traefik
+ * provider constraints — that is not part of the inventory `role` union.
+ */
 export const LABEL_ROLE = "turbopanel.role";
 
 /** TurboPanel service UUID (tenant hosting or system Traefik). */
@@ -26,5 +32,16 @@ export const LABEL_ENVIRONMENT = "com.turbopanel.environment";
  */
 export const LABEL_SYSTEM_COMPONENT = "com.turbopanel.system.component";
 
+/**
+ * Inventory role for tenant workload / managed-engine container rows.
+ * Reserved — no producer stamps it today (`compose-labels.ts` sets no
+ * role label on tenant workloads); compose-ps reporters pass it as the
+ * wire `role` field instead.
+ */
+export const LABEL_ROLE_SERVICE = "service";
+
 /** Value for {@link LABEL_ROLE} on every Traefik ingress container. */
 export const LABEL_ROLE_INGRESS = "ingress";
+
+/** Value for {@link LABEL_ROLE} on system-stack (database/queue/analytics) containers. */
+export const LABEL_ROLE_SYSTEM = "system";

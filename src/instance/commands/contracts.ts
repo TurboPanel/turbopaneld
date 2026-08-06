@@ -253,7 +253,11 @@ export type EnvironmentDeployTraditionalWebSite = {
   principal?: EnvironmentDeployTraditionalWebPrincipal;
 };
 
-/** Per-service Traefik for tenant tcp/udp — mirrors instance `EnvironmentDeployIngressService`. */
+/**
+ * Per-service Traefik for tenant tcp/udp — mirrors instance
+ * `EnvironmentDeployIngressService`. `containerName` must equal
+ * `<serviceId>-in`.
+ */
 export type EnvironmentDeployIngressService = {
   serviceId: string;
   composeServiceName: string;
@@ -288,8 +292,11 @@ export type EnvironmentDeployContainer = {
   containerId: string;
   containerName: string;
   status: string;
-  /** Workload replica vs Traefik ingress; omitted by older daemons (defaults to `'app'`). */
-  role?: "app" | "ingress";
+  /**
+   * Workload / ingress / platform role — required on the wire.
+   * Must be `"service"`, `"ingress"`, or `"system"`.
+   */
+  role: "service" | "ingress" | "system";
 };
 
 export type EnvironmentDeployResult = {
@@ -355,12 +362,12 @@ export type SystemReconcileAction = "reconcile" | "restart" | "stop";
  */
 export const SYSTEM_COMPONENT_ROLES: Record<
   SystemComponentKey,
-  "app" | "ingress"
+  "service" | "ingress" | "system"
 > = {
   "hosting-ingress": "ingress",
-  database: "app",
-  queue: "app",
-  analytics: "app",
+  database: "system",
+  queue: "system",
+  analytics: "system",
 };
 
 /**
@@ -372,7 +379,7 @@ export type SystemComponentDescriptorPayload = {
   serviceId: string;
   composeServiceName: string;
   containerName: string;
-  role: "app" | "ingress";
+  role: "service" | "ingress" | "system";
   desired: "present" | "absent";
 };
 
@@ -1488,6 +1495,8 @@ const DEPLOY_INGRESS_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DEPLOY_INGRESS_COMPOSE_NAME_RE = /^[A-Za-z0-9 ._-]+$/;
 const DEPLOY_INGRESS_CONTAINER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/;
+/** Mirrors instance `src/lib/naming.ts` `INGRESS_CONTAINER_NAME_SUFFIX`. */
+const INGRESS_CONTAINER_NAME_SUFFIX = "-in";
 
 function parseDeployIngressService(
   value: unknown,
@@ -1507,7 +1516,10 @@ function parseDeployIngressService(
   ) {
     throw new TypeError("Invalid environment.deploy ingressServices entry");
   }
-  if (value.containerName !== `${value.serviceId}-ingress`) {
+  if (
+    value.containerName !==
+      `${value.serviceId}${INGRESS_CONTAINER_NAME_SUFFIX}`
+  ) {
     throw new TypeError("Invalid environment.deploy ingressServices entry");
   }
   return {
@@ -1682,7 +1694,7 @@ function parseSystemReconcileComponent(
   }
   const containerName = parseNonEmptyString(value, "containerName");
   const expectedContainerName = role === "ingress"
-    ? `${serviceId}-ingress`
+    ? `${serviceId}${INGRESS_CONTAINER_NAME_SUFFIX}`
     : serviceId;
   if (containerName !== expectedContainerName) {
     throw new TypeError("Invalid system.reconcile payload");
@@ -1696,7 +1708,7 @@ function parseSystemReconcileComponent(
     serviceId,
     composeServiceName,
     containerName,
-    role: role as "app" | "ingress",
+    role: role as "service" | "ingress" | "system",
     desired: desired as "present" | "absent",
   };
 }
@@ -2405,7 +2417,10 @@ function parseManagedApplyIngress(value: unknown): ManagedApplyIngress {
   ) {
     throw new TypeError("Invalid managed.apply ingress");
   }
-  if (value.containerName !== `${value.serviceId}-ingress`) {
+  if (
+    value.containerName !==
+      `${value.serviceId}${INGRESS_CONTAINER_NAME_SUFFIX}`
+  ) {
     throw new TypeError("Invalid managed.apply ingress");
   }
   return {
@@ -2556,16 +2571,23 @@ function parseDeployContainerEntry(
   ) {
     return undefined;
   }
+  // Role is required — omit or misspell drops the entry rather than defaulting
+  // to "service" (which would silently mis-classify ingress/system rows).
+  if (
+    entry.role !== "service" &&
+    entry.role !== "ingress" &&
+    entry.role !== "system"
+  ) {
+    return undefined;
+  }
   const container: EnvironmentDeployContainer = {
     composeServiceName: entry.composeServiceName,
     containerId: entry.containerId,
     containerName: entry.containerName,
     status: entry.status,
+    role: entry.role,
   };
   if (isString(entry.serviceId)) container.serviceId = entry.serviceId;
-  if (entry.role === "app" || entry.role === "ingress") {
-    container.role = entry.role;
-  }
   return container;
 }
 

@@ -92,7 +92,7 @@ async function collectDeployedContainers(
 
     const containers: EnvironmentDeployContainer[] = [];
     for (const entry of entries) {
-      const row = readComposePsContainer(entry, "app");
+      const row = readComposePsContainer(entry, "service");
       if (row === null) continue;
       const serviceId = serviceIdByComposeName.get(row.composeServiceName);
       containers.push({
@@ -113,7 +113,7 @@ async function collectDeployedContainers(
 
 /**
  * Best-effort `docker compose ps` for one per-service Traefik project.
- * Never throws — soft-fails with a log line like app-container collection.
+ * Never throws — soft-fails with a log line like service-container collection.
  */
 async function collectServiceIngressContainer(
   ingress: EnvironmentDeployIngressService,

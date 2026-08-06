@@ -11,6 +11,12 @@ const UUID_RE =
 const COMPOSE_SERVICE_NAME_RE = /^[A-Za-z0-9 ._-]+$/;
 const CONTAINER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/;
 
+/**
+ * Ingress container-name suffix — mirrors instance `src/lib/naming.ts`
+ * `INGRESS_CONTAINER_NAME_SUFFIX`.
+ */
+export const INGRESS_CONTAINER_NAME_SUFFIX = "-in";
+
 /** Instance-allocated identity for a Traefik ingress container. */
 export type IngressIdentity = {
   serviceId: string;
@@ -18,14 +24,19 @@ export type IngressIdentity = {
   containerName: string;
 };
 
+/** Build `<serviceId>-in` — mirrors instance `ingressContainerName`. */
+export function ingressContainerName(serviceId: string): string {
+  return `${serviceId}${INGRESS_CONTAINER_NAME_SUFFIX}`;
+}
+
 /**
  * Validate the UUID / safe-name shape of an identity before interpolating
  * into compose YAML — everything except the ingress-specific
- * `<serviceId>-ingress` container-name suffix rule.
+ * `<serviceId>-in` container-name suffix rule.
  *
  * Shared by {@link assertSafeIngressIdentity} (ingress role) and the
- * per-component system contract in `system-component.ts` (app role, where
- * `containerName === serviceId` instead).
+ * per-component system contract in `system-component.ts` (service/system
+ * role, where `containerName === serviceId` instead).
  */
 export function assertSafeIdentityShape(identity: IngressIdentity): void {
   if (!SAFE_FILE_ID_RE.test(identity.serviceId)) {
@@ -58,11 +69,11 @@ export function assertSafeIdentityShape(identity: IngressIdentity): void {
  * Validate an ingress identity before interpolating into compose YAML.
  *
  * Rejects non-UUID `serviceId`, unsafe compose/container names, and any
- * `containerName` that is not exactly `<serviceId>-ingress`.
+ * `containerName` that is not exactly `<serviceId>-in`.
  */
 export function assertSafeIngressIdentity(identity: IngressIdentity): void {
   assertSafeIdentityShape(identity);
-  if (identity.containerName !== `${identity.serviceId}-ingress`) {
-    throw new Error("ingress containerName must equal <serviceId>-ingress");
+  if (identity.containerName !== ingressContainerName(identity.serviceId)) {
+    throw new Error("ingress containerName must equal <serviceId>-in");
   }
 }

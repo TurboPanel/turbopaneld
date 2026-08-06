@@ -97,10 +97,10 @@ async function applyIngressLifecycle(
 }
 
 /**
- * Collect app containers via `compose ps -a`. On failure, return `undefined`
- * so the instance skips reconcile (never clear pins). `serviceId` is absent —
- * no hostings in this payload; the instance reconciles by container name /
- * compose service.
+ * Collect service containers via `compose ps -a`. On failure, return
+ * `undefined` so the instance skips reconcile (never clear pins). `serviceId`
+ * is absent — no hostings in this payload; the instance reconciles by
+ * container name / compose service. Each row carries `role: 'service'`.
  */
 async function collectLifecycleContainers(
   projectName: string,
@@ -130,7 +130,7 @@ async function collectLifecycleContainers(
     }
     const containers: EnvironmentDeployContainer[] = [];
     for (const entry of parseComposePsEntries(result.stdout)) {
-      const row = readComposePsContainer(entry, "app");
+      const row = readComposePsContainer(entry, "service");
       if (row !== null) containers.push(row);
     }
     return containers;

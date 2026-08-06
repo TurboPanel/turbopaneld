@@ -93,6 +93,7 @@ export async function collectManagedContainers(
         containerId,
         containerName,
         status,
+        role: "service",
       });
     }
     // Return all observed rows; the caller resolves the engine service.

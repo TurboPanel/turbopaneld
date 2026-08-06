@@ -22,6 +22,7 @@ function uuidNamedRunning(): EnvironmentDeployContainer[] {
       containerId: "abc123def456",
       containerName: UUID_SHAPED_NAME,
       status: "running",
+      role: "service",
     },
   ];
 }
@@ -48,6 +49,7 @@ test("resolveEngineContainerId still rejects non-running UUID-named containers",
             containerId: "abc123def456",
             containerName: UUID_SHAPED_NAME,
             status: "exited",
+            role: "service",
           },
         ],
         "postgres",

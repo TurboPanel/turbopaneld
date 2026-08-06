@@ -24,6 +24,7 @@ const FAKE_CONTAINER: EnvironmentDeployContainer = {
   containerId: "container-abc",
   containerName: "turbopanel-managed-x-postgres-1",
   status: "running",
+  role: "service",
 };
 
 async function withTempStateDir<T>(

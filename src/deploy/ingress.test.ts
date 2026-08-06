@@ -64,7 +64,7 @@ const SYSTEM_INGRESS_IDENTITY = {
   component: SYSTEM_HOSTING_INGRESS_COMPONENT,
   serviceId: "00000000-0000-4000-8000-0000000000bb",
   composeServiceName: SHARED_TRAEFIK_COMPOSE_SERVICE_NAME,
-  containerName: "00000000-0000-4000-8000-0000000000bb-ingress",
+  containerName: "00000000-0000-4000-8000-0000000000bb-in",
   role: "ingress",
 } as const;
 
@@ -150,7 +150,7 @@ test("assertSafeSystemIngressIdentity rejects unsafe or mismatched identity", ()
       assertSafeSystemIngressIdentity({
         ...SYSTEM_INGRESS_IDENTITY,
         serviceId: "not-a-uuid",
-        containerName: "not-a-uuid-ingress",
+        containerName: "not-a-uuid-in",
       }),
     Error,
     "ingress serviceId is invalid",
@@ -159,8 +159,7 @@ test("assertSafeSystemIngressIdentity rejects unsafe or mismatched identity", ()
     () =>
       assertSafeSystemIngressIdentity({
         ...SYSTEM_INGRESS_IDENTITY,
-        containerName:
-          `${SYSTEM_INGRESS_IDENTITY.serviceId}-ingress with space`,
+        containerName: `${SYSTEM_INGRESS_IDENTITY.serviceId}-in with space`,
       }),
     Error,
     "ingress containerName contains unsupported characters",
@@ -169,7 +168,7 @@ test("assertSafeSystemIngressIdentity rejects unsafe or mismatched identity", ()
     () =>
       assertSafeSystemIngressIdentity({
         ...SYSTEM_INGRESS_IDENTITY,
-        containerName: `${SYSTEM_INGRESS_IDENTITY.serviceId}-\`ingress`,
+        containerName: `${SYSTEM_INGRESS_IDENTITY.serviceId}-\`in`,
       }),
     Error,
     "ingress containerName contains unsupported characters",
@@ -181,7 +180,7 @@ test("assertSafeSystemIngressIdentity rejects unsafe or mismatched identity", ()
         containerName: `${SYSTEM_INGRESS_IDENTITY.serviceId}-other`,
       }),
     Error,
-    "ingress containerName must equal <serviceId>-ingress",
+    "ingress containerName must equal <serviceId>-in",
   );
   assertThrows(
     () =>
@@ -465,7 +464,7 @@ test("traefikCompose is HTTP-only (no tcp/udp entrypoints or public ports)", () 
 const SERVICE_INGRESS_IDENTITY = {
   serviceId: "00000000-0000-4000-8000-0000000000aa",
   composeServiceName: "db-ingress",
-  containerName: "00000000-0000-4000-8000-0000000000aa-ingress",
+  containerName: "00000000-0000-4000-8000-0000000000aa-in",
 };
 
 test("serviceTraefikCompose emits container_name, constraint, and x-turbopanel", () => {

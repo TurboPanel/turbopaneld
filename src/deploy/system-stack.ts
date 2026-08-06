@@ -5,7 +5,8 @@
  * Unlike the shared hosting-ingress Traefik (`ingress.ts`), the daemon never
  * deploys, starts, or restarts this stack — it is Ansible/Ops-managed. This
  * module only observes already-running containers so `system.reconcile` can
- * report status alongside the persisted identity descriptor.
+ * report status alongside the persisted identity descriptor. Adoption requires
+ * `turbopanel.role=system` on the compose-ps row.
  */
 
 import { join } from "@std/path";
@@ -22,16 +23,17 @@ import {
   runDocker as defaultRunDocker,
   type RunDockerOptions,
 } from "./docker-cli.ts";
-import { LABEL_ROLE, LABEL_SYSTEM_COMPONENT } from "./labels.ts";
+import {
+  LABEL_ROLE,
+  LABEL_ROLE_SYSTEM,
+  LABEL_SYSTEM_COMPONENT,
+} from "./labels.ts";
 import {
   SYSTEM_STACK_PROJECT,
   type SystemComponentDescriptor,
 } from "./system-component.ts";
 
 export { SYSTEM_STACK_PROJECT };
-
-/** Value stamped on {@link LABEL_ROLE} for every system-stack app container. */
-const SYSTEM_STACK_ROLE = "app";
 
 export function systemStackComposePath(layout: LayoutPaths): string {
   return join(layout.configDir, "system", "docker-compose.yml");
@@ -49,9 +51,9 @@ export type InspectSystemStackDeps = {
 
 /**
  * True when the compose-ps row carries the allowlisted platform labels for
- * this system component (`turbopanel.role=app`,
+ * this system component (`turbopanel.role=system`,
  * `com.turbopanel.system.component=<component>`). Unlabelled / legacy rows
- * fail — the daemon never adopts a container by name heuristic alone.
+ * fail — the daemon never adopts a system container by name heuristic alone.
  */
 function hasSystemStackLabels(
   entry: Record<string, unknown>,
@@ -59,7 +61,7 @@ function hasSystemStackLabels(
 ): boolean {
   const labels = readComposePsLabels(entry);
   return (
-    labels[LABEL_ROLE] === SYSTEM_STACK_ROLE &&
+    labels[LABEL_ROLE] === LABEL_ROLE_SYSTEM &&
     labels[LABEL_SYSTEM_COMPONENT] === component
   );
 }
@@ -127,14 +129,14 @@ export async function inspectSystemStackContainer(
     }
     const entries = parseComposePsEntries(result.stdout);
     for (const entry of entries) {
-      const row = readComposePsContainer(entry, "app");
+      const row = readComposePsContainer(entry, "system");
       if (row === null) continue;
       if (row.composeServiceName !== descriptor.composeServiceName) continue;
       if (!hasSystemStackLabels(entry, descriptor.component)) continue;
       return {
         ...row,
         serviceId: descriptor.serviceId,
-        role: "app",
+        role: "system",
       };
     }
     return null;

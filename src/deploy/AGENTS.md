@@ -29,9 +29,10 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../insta
    `ensureHostingIngress` passes that descriptor into `traefikCompose()` so
    the shared container gets allocated `container_name` /
    `x-turbopanel` / labels; when absent (or corrupt — logged and ignored),
-   the anonymous pre-identity shape is written so older installs keep working
-   and tenant deploys cannot orphan an allocated inventory row by rewriting
-   anonymous compose over an identity-bearing Traefik.
+   the anonymous pre-identity shape is written for the fresh pre-provision
+   state (descriptor not yet written by `system.reconcile`) so tenant deploys
+   cannot orphan an allocated inventory row by rewriting anonymous compose
+   over an identity-bearing Traefik.
 3. Ensure vendored hosting Caddy (`ensureHostingCaddy` — Ansible `caddy-setup`
    then direct GitHub download) when
    `/opt/turbopanel/vendor/caddy/current/caddy` is missing. On-demand like
@@ -126,7 +127,7 @@ get a per-service Traefik project or an `ingressServices[]` entry.
   every service in `payload.ingressServices[]` gets its own compose project
   `turbopanel-ingress-<serviceId>` under
   `<stateDir>/ingress/services/<serviceId>/`, with
-  `container_name: <serviceId>-ingress`,
+  `container_name: <serviceId>-in`,
   `x-turbopanel: { kind: ingress, serviceId, containerName }`, joined to
   `turbopanel-ingress`, and
   ``--providers.docker.constraints=Label(`com.turbopanel.service`,`<serviceId>`)``.
@@ -217,7 +218,7 @@ only persists the identity descriptor and calls
 `docker compose ps` identity/status, exactly as `SYSTEM_COMPONENT_CONTRACTS`
 declares (`selfHealAllowed: false` for `database` / `queue` / `analytics` vs
 `true` for `hosting-ingress`). Adoption requires labels
-`turbopanel.role=app` + `com.turbopanel.system.component=<database|queue|analytics>`
+`turbopanel.role=system` + `com.turbopanel.system.component=<database|queue|analytics>`
 on the compose-ps row — **never** `com.turbopanel.service` (that label is
 reserved for tenant/system Traefik identity) and **never**
 `traefik.enable` (the system stack has no HTTP ingress of its own). A missing
@@ -231,24 +232,25 @@ system stack is observed only.
 
 Descriptor path: `<stateDir>/system/hosting-ingress.json`
 (`SystemComponentDescriptor`: `component`, `serviceId`, `composeServiceName`
-must stay `traefik`, `containerName` = `<serviceId>-ingress`). When present,
+must stay `traefik`, `containerName` = `<serviceId>-in`). When present,
 `traefikCompose(identity)` emits `container_name`,
 `x-turbopanel: { kind: system, component: hosting-ingress, … }`, and labels
 `turbopanel.role=ingress`, `com.turbopanel.system.component=hosting-ingress`,
 `com.turbopanel.service=<serviceId>` — **never** `traefik.enable`, HTTP router
 labels, or `com.turbopanel.raw-port` (so tenant Traefik providers stay blind to
 it). `ensureHostingIngress` reads the descriptor on every deploy; a missing
-file is the normal pre-provision / older-control-plane path; a corrupt file
-logs a warning and falls back to the anonymous YAML so tenant deploys still
-succeed. `inspectHostingIngressContainer` best-effort returns the observed
-container in `EnvironmentDeployContainer` shape (`role: ingress`); compose-ps
-failure returns `undefined` (omit `containers`), absence returns `null`.
-A missing compose file is authoritative absence (`null`), not a collection
-failure. Observed rows must match the allocated `container_name` **and**
-compose service **and** carry allowlisted platform labels
-(`turbopanel.role=ingress`, `com.turbopanel.system.component=hosting-ingress`,
-`com.turbopanel.service=<serviceId>`) — legacy unlabelled
-`turbopanel-ingress-traefik-1` rows are ignored.
+file is the normal pre-provision path (before `system.reconcile` writes
+identity); a corrupt file logs a warning and falls back to the anonymous YAML
+so tenant deploys still succeed. `inspectHostingIngressContainer` best-effort
+returns the observed container in `EnvironmentDeployContainer` shape
+(`role: ingress`); compose-ps failure returns `undefined` (omit `containers`),
+absence returns `null`. A missing compose file is authoritative absence
+(`null`), not a collection failure. Observed rows must match the allocated
+`container_name` **and** compose service **and** carry allowlisted platform
+labels (`turbopanel.role=ingress`,
+`com.turbopanel.system.component=hosting-ingress`,
+`com.turbopanel.service=<serviceId>`) — anonymous pre-provision
+`turbopanel-ingress-traefik-1` rows (no platform labels) are ignored.
 Production writer: the `system.reconcile` handler always calls
 `writeSystemComponentDescriptor`, then self-heals via `ensureDocker` +
 `ensureHostingIngress` when `desired: 'present'` (plus compose `restart` when

@@ -22,7 +22,7 @@ const DATABASE_DESCRIPTOR: SystemComponentDescriptor = {
   serviceId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
   composeServiceName: "database",
   containerName: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-  role: "app",
+  role: "system",
 };
 
 async function withComposeFile<T>(
@@ -42,14 +42,14 @@ function labelledRow(overrides?: Partial<Record<string, unknown>>) {
     Service: "database",
     State: "running",
     Labels: {
-      "turbopanel.role": "app",
+      "turbopanel.role": "system",
       "com.turbopanel.system.component": "database",
     },
     ...overrides,
   };
 }
 
-test("inspectSystemStackContainer maps a labelled row onto the descriptor's serviceId with role app", async () => {
+test("inspectSystemStackContainer maps a labelled row onto the descriptor's serviceId with role system", async () => {
   const fixture = await createTempLayout();
   try {
     const layout = resolveLayout(fixture.env, {
@@ -73,7 +73,7 @@ test("inspectSystemStackContainer maps a labelled row onto the descriptor's serv
     );
 
     assertEquals(result?.serviceId, DATABASE_DESCRIPTOR.serviceId);
-    assertEquals(result?.role, "app");
+    assertEquals(result?.role, "system");
     assertEquals(result?.containerId, "docker-id-1");
     assertEquals(result?.composeServiceName, "database");
   } finally {
@@ -129,7 +129,7 @@ test("inspectSystemStackContainer ignores a row whose label names another compon
                 stdout: JSON.stringify([
                   labelledRow({
                     Labels: {
-                      "turbopanel.role": "app",
+                      "turbopanel.role": "system",
                       "com.turbopanel.system.component": "queue",
                     },
                   }),

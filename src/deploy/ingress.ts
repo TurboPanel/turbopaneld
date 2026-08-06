@@ -212,8 +212,9 @@ function tcpUdpPortLines(entries: readonly TcpUdpIngressEntry[]): string[] {
 /**
  * Shared HTTP-only Traefik compose document (project {@link HOSTING_INGRESS_PROJECT}).
  *
- * Without `identity`, returns the anonymous shape used by older / un-provisioned
- * installs (no `container_name`, no `x-turbopanel`, no labels).
+ * Without `identity`, returns the anonymous shape used in the fresh
+ * pre-provision state (no `container_name`, no `x-turbopanel`, no labels)
+ * before `system.reconcile` writes `<stateDir>/system/hosting-ingress.json`.
  *
  * With `identity`, emits allocated `container_name`, an `x-turbopanel` block
  * (`kind: system`), and canonical role / system-component / service labels —

@@ -23,7 +23,7 @@ const test = Deno.test.bind(Deno);
 const SERVICE_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 const DATABASE_SERVICE_ID = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
 const ENVIRONMENT_ID = "11111111-2222-3333-4444-555555555555";
-const CONTAINER_NAME = `${SERVICE_ID}-ingress`;
+const CONTAINER_NAME = `${SERVICE_ID}-in`;
 
 function basePayload(desired: "present" | "absent") {
   return {
@@ -50,7 +50,7 @@ function databaseComponent(
     serviceId: DATABASE_SERVICE_ID,
     composeServiceName: "database",
     containerName: DATABASE_SERVICE_ID,
-    role: "app",
+    role: "system",
     desired,
   };
 }
@@ -484,7 +484,7 @@ test({
                 containerId: "db-cid-1",
                 containerName: descriptor.containerName,
                 status: "running",
-                role: "app",
+                role: "system",
               });
             },
           },
@@ -495,14 +495,14 @@ test({
         assertEquals(inspectSystemStackCalls, 1);
         assertEquals(result.containers?.length, 1);
         assertEquals(result.containers?.[0]?.containerId, "db-cid-1");
-        assertEquals(result.containers?.[0]?.role, "app");
+        assertEquals(result.containers?.[0]?.role, "system");
 
         const descriptor = await readSystemComponentDescriptor(
           resolveLayout(Deno.env.toObject()),
           "database",
         );
         assertEquals(descriptor?.serviceId, DATABASE_SERVICE_ID);
-        assertEquals(descriptor?.role, "app");
+        assertEquals(descriptor?.role, "system");
       });
     });
   },

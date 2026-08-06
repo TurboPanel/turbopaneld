@@ -117,6 +117,7 @@ async function collectContainers(
       containerId,
       containerName,
       status,
+      role: "service",
     });
   }
   return containers;

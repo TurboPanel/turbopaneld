@@ -39,7 +39,7 @@ const IDENTITY: ManagedIngressIdentity = {
   managedId: "m1",
   serviceId: "00000000-0000-4000-8000-000000000099",
   composeServiceName: "postgres-ingress",
-  containerName: "00000000-0000-4000-8000-000000000099-ingress",
+  containerName: "00000000-0000-4000-8000-000000000099-in",
 };
 
 async function makeTestLayout(): Promise<{
@@ -79,7 +79,7 @@ function identityFor(
     managedId,
     serviceId,
     composeServiceName: "postgres-ingress",
-    containerName: `${serviceId}-ingress`,
+    containerName: `${serviceId}-in`,
     ...overrides,
   };
 }
@@ -234,7 +234,7 @@ test("managedTraefikCompose rejects obsolete <serviceId>-1 ingress containerName
         },
       ),
     Error,
-    "ingress containerName must equal <serviceId>-ingress",
+    "ingress containerName must equal <serviceId>-in",
   );
 });
 

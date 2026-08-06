@@ -369,7 +369,7 @@ test("system.reconcile payload parser round-trips and rejects invalid shapes", (
           component: "hosting-ingress",
           serviceId,
           composeServiceName: "traefik",
-          containerName: `${serviceId}-ingress`,
+          containerName: `${serviceId}-in`,
           role: "ingress",
           desired: "present",
         },
@@ -383,7 +383,7 @@ test("system.reconcile payload parser round-trips and rejects invalid shapes", (
           component: "hosting-ingress",
           serviceId,
           composeServiceName: "traefik",
-          containerName: `${serviceId}-ingress`,
+          containerName: `${serviceId}-in`,
           role: "ingress",
           desired: "present",
         },
@@ -399,7 +399,7 @@ test("system.reconcile payload parser round-trips and rejects invalid shapes", (
           component: "hosting-ingress",
           serviceId,
           composeServiceName: "traefik",
-          containerName: `${serviceId}-ingress`,
+          containerName: `${serviceId}-in`,
           role: "ingress",
           desired: "absent",
         },
@@ -416,7 +416,7 @@ test("system.reconcile payload parser round-trips and rejects invalid shapes", (
             component: "not-allowlisted",
             serviceId,
             composeServiceName: "traefik",
-            containerName: `${serviceId}-ingress`,
+            containerName: `${serviceId}-in`,
             role: "ingress",
             desired: "present",
           },
@@ -445,7 +445,7 @@ test("system.reconcile payload parser round-trips and rejects invalid shapes", (
   );
 });
 
-test("system.reconcile payload parser accepts the widened database/queue/analytics component keys with app role and bare serviceId containerName", () => {
+test("system.reconcile payload parser accepts the widened database/queue/analytics component keys with system role and bare serviceId containerName", () => {
   const serviceId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
   for (const component of ["database", "queue", "analytics"] as const) {
     assertEquals(
@@ -457,7 +457,7 @@ test("system.reconcile payload parser accepts the widened database/queue/analyti
             serviceId,
             composeServiceName: component,
             containerName: serviceId,
-            role: "app",
+            role: "system",
             desired: "present",
           },
         ],
@@ -467,16 +467,16 @@ test("system.reconcile payload parser accepts the widened database/queue/analyti
         serviceId,
         composeServiceName: component,
         containerName: serviceId,
-        role: "app",
+        role: "system",
         desired: "present",
       },
     );
   }
 });
 
-test("system.reconcile payload parser rejects role/containerName mismatches across the app/ingress split", () => {
+test("system.reconcile payload parser rejects role/containerName mismatches across the system/ingress split", () => {
   const serviceId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
-  // hosting-ingress must be role: "ingress" — declaring "app" is rejected.
+  // hosting-ingress must be role: "ingress" — declaring "service" is rejected.
   assertThrows(
     () =>
       parseSystemReconcilePayload({
@@ -486,8 +486,8 @@ test("system.reconcile payload parser rejects role/containerName mismatches acro
             component: "hosting-ingress",
             serviceId,
             composeServiceName: "traefik",
-            containerName: `${serviceId}-ingress`,
-            role: "app",
+            containerName: `${serviceId}-in`,
+            role: "service",
             desired: "present",
           },
         ],
@@ -495,7 +495,7 @@ test("system.reconcile payload parser rejects role/containerName mismatches acro
     TypeError,
     "Invalid system.reconcile payload",
   );
-  // database must be role: "app" — declaring "ingress" is rejected.
+  // database must be role: "system" — declaring "ingress" is rejected.
   assertThrows(
     () =>
       parseSystemReconcilePayload({
@@ -505,7 +505,7 @@ test("system.reconcile payload parser rejects role/containerName mismatches acro
             component: "database",
             serviceId,
             composeServiceName: "database",
-            containerName: `${serviceId}-ingress`,
+            containerName: `${serviceId}-in`,
             role: "ingress",
             desired: "present",
           },
@@ -514,7 +514,7 @@ test("system.reconcile payload parser rejects role/containerName mismatches acro
     TypeError,
     "Invalid system.reconcile payload",
   );
-  // database with role: "app" but an ingress-shaped containerName is rejected.
+  // database with role: "system" but an ingress-shaped containerName is rejected.
   assertThrows(
     () =>
       parseSystemReconcilePayload({
@@ -524,8 +524,8 @@ test("system.reconcile payload parser rejects role/containerName mismatches acro
             component: "database",
             serviceId,
             composeServiceName: "database",
-            containerName: `${serviceId}-ingress`,
-            role: "app",
+            containerName: `${serviceId}-in`,
+            role: "system",
             desired: "present",
           },
         ],
@@ -633,7 +633,7 @@ test("managed.apply requires ingress iff exposure.enabled", () => {
   const VALID_INGRESS = {
     serviceId: "00000000-0000-4000-8000-000000000099",
     composeServiceName: "postgres-ingress",
-    containerName: "00000000-0000-4000-8000-000000000099-ingress",
+    containerName: "00000000-0000-4000-8000-000000000099-in",
   };
   assertThrows(
     () =>
@@ -802,7 +802,7 @@ test("managed.apply rejects nested dockerOptions and enabled exposure without po
       ingress: {
         serviceId: "00000000-0000-4000-8000-000000000099",
         composeServiceName: "postgres-ingress",
-        containerName: "00000000-0000-4000-8000-000000000099-ingress",
+        containerName: "00000000-0000-4000-8000-000000000099-in",
       },
     }).exposure.publishedPort,
     15432,
@@ -952,7 +952,7 @@ test("managed.destroy admits the instance-only deleteAfterDestroy marker but nev
   );
 });
 
-test("managed apply result preserves container role and ignores invalid role", () => {
+test("managed apply result preserves container role and drops omitted or invalid roles", () => {
   assertEquals(
     parseManagedApplyResult({
       host: "203.0.113.10",
@@ -962,7 +962,7 @@ test("managed apply result preserves container role and ignores invalid role", (
           serviceId: "svc-1",
           composeServiceName: "postgres-ingress",
           containerId: "cid-ingress",
-          containerName: "svc-1-ingress",
+          containerName: "svc-1-in",
           status: "running",
           role: "ingress",
         },
@@ -973,6 +973,19 @@ test("managed apply result preserves container role and ignores invalid role", (
           status: "running",
           role: "not-a-role",
         },
+        {
+          composeServiceName: "postgres",
+          containerId: "cid-omit",
+          containerName: "svc-1-2",
+          status: "running",
+        },
+        {
+          composeServiceName: "postgres",
+          containerId: "cid-service",
+          containerName: "svc-1-3",
+          status: "running",
+          role: "service",
+        },
       ],
     }).containers,
     [
@@ -980,15 +993,16 @@ test("managed apply result preserves container role and ignores invalid role", (
         serviceId: "svc-1",
         composeServiceName: "postgres-ingress",
         containerId: "cid-ingress",
-        containerName: "svc-1-ingress",
+        containerName: "svc-1-in",
         status: "running",
         role: "ingress",
       },
       {
         composeServiceName: "postgres",
-        containerId: "cid-app",
-        containerName: "svc-1-1",
+        containerId: "cid-service",
+        containerName: "svc-1-3",
         status: "running",
+        role: "service",
       },
     ],
   );
@@ -1050,6 +1064,7 @@ test("managed result parsers round-trip and reject hostile shapes", () => {
           containerId: "abc",
           containerName: "pg-1",
           status: "exited",
+          role: "service",
         },
         { composeServiceName: "bad" },
       ],
@@ -1062,6 +1077,7 @@ test("managed result parsers round-trip and reject hostile shapes", () => {
           containerId: "abc",
           containerName: "pg-1",
           status: "exited",
+          role: "service",
         },
       ],
     },

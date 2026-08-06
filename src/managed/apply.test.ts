@@ -57,6 +57,7 @@ test("mergeManagedApplyContainers appends ingress rows when collected", () => {
       containerId: "e1",
       containerName: "svc-1",
       status: "running",
+      role: "service" as const,
     },
   ];
   const ingress = [
@@ -66,6 +67,7 @@ test("mergeManagedApplyContainers appends ingress rows when collected", () => {
       containerName: "ing-1",
       status: "running",
       serviceId: "00000000-0000-4000-8000-000000000099",
+      role: "ingress" as const,
     },
   ];
   assertEquals(mergeManagedApplyContainers(engine, ingress), [
@@ -81,6 +83,7 @@ test("mergeManagedApplyContainers keeps engine rows when ingress collect fails",
       containerId: "e1",
       containerName: "svc-1",
       status: "running",
+      role: "service" as const,
     },
   ];
   assertEquals(mergeManagedApplyContainers(engine, undefined), engine);
@@ -93,6 +96,7 @@ test("mergeManagedApplyContainers keeps engine rows when ingress collect fails",
         containerName: "ing-1",
         status: "running",
         serviceId: "00000000-0000-4000-8000-000000000099",
+        role: "ingress" as const,
       },
     ]),
     [
@@ -102,6 +106,7 @@ test("mergeManagedApplyContainers keeps engine rows when ingress collect fails",
         containerName: "ing-1",
         status: "running",
         serviceId: "00000000-0000-4000-8000-000000000099",
+        role: "ingress" as const,
       },
     ],
   );

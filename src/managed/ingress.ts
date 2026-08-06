@@ -24,6 +24,7 @@ import {
   runDocker as defaultRunDocker,
   type RunDockerOptions,
 } from "../deploy/docker-cli.ts";
+import { ingressContainerName } from "../deploy/ingress-identity.ts";
 import { LABEL_ROLE, LABEL_ROLE_INGRESS } from "../deploy/labels.ts";
 import { logInfo, sanitizeForLog } from "../logger.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
@@ -221,8 +222,8 @@ function assertSafeIngressIdentity(identity: ManagedIngressIdentity): void {
   ) {
     throw new Error("ingress serviceId is invalid");
   }
-  if (identity.containerName !== `${identity.serviceId}-ingress`) {
-    throw new Error("ingress containerName must equal <serviceId>-ingress");
+  if (identity.containerName !== ingressContainerName(identity.serviceId)) {
+    throw new Error("ingress containerName must equal <serviceId>-in");
   }
 }
 

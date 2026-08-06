@@ -52,7 +52,7 @@ Compose project names:
 - Ingress Traefik (per service): `turbopanel-managed-<managedId>-ingress` on
   Docker network `turbopanel-managed` (shared by engines + their Traefik —
   **never** joins the tenant `turbopanel-ingress` network)
-- Ingress container name: instance-allocated `<engine service.id>-ingress`
+- Ingress container name: instance-allocated `<engine service.id>-in`
 
 ## Managed Traefik ingress
 
@@ -113,7 +113,7 @@ propagates as the command-outcome error string for the UI.
    `containerName` (`<service.id>-1`) and, when exposed,
    `ingress.{serviceId, composeServiceName, containerName}` where `serviceId`
    is the **engine's own** service id and `containerName` is
-   `<engine service.id>-ingress` — there is **no** separate ingress `service`
+   `<engine service.id>-in` — there is **no** separate ingress `service`
    row; the row is a `role='ingress'`, ordinal-1 `container` row on the engine
    service. `normalizeManagedCompose` / `managedTraefikCompose` write them as
    `container_name`. `assertSafeManagedIdentifiers` guards both with the

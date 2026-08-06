@@ -9,6 +9,7 @@ import { join } from "@std/path";
 import type { LayoutPaths } from "../paths/layout.ts";
 import {
   assertSafeIdentityShape,
+  ingressContainerName,
   type IngressIdentity,
 } from "./ingress-identity.ts";
 
@@ -40,7 +41,8 @@ const SYSTEM_COMPONENT_KEYS = new Set<string>([
 
 /**
  * Per-component contract: which compose project/service it lives in, its
- * container role, and whether the daemon may self-heal (deploy/restart) it.
+ * container role (`service` / `ingress` / `system`), and whether the daemon
+ * may self-heal (deploy/restart) it.
  *
  * `hosting-ingress` is the only self-healing entry — the daemon owns
  * bringing the shared Traefik up. `database` / `queue` / `analytics` live in
@@ -50,7 +52,7 @@ const SYSTEM_COMPONENT_KEYS = new Set<string>([
 export type SystemComponentContract = {
   project: string;
   composeServiceName: string;
-  role: "app" | "ingress";
+  role: "service" | "ingress" | "system";
   selfHealAllowed: boolean;
 };
 
@@ -67,19 +69,19 @@ export const SYSTEM_COMPONENT_CONTRACTS: Record<
   database: {
     project: SYSTEM_STACK_PROJECT,
     composeServiceName: "database",
-    role: "app",
+    role: "system",
     selfHealAllowed: false,
   },
   queue: {
     project: SYSTEM_STACK_PROJECT,
     composeServiceName: "queue",
-    role: "app",
+    role: "system",
     selfHealAllowed: false,
   },
   analytics: {
     project: SYSTEM_STACK_PROJECT,
     composeServiceName: "analytics",
-    role: "app",
+    role: "system",
     selfHealAllowed: false,
   },
 };
@@ -96,7 +98,7 @@ export type SystemComponentDescriptor = {
   serviceId: string;
   composeServiceName: string;
   containerName: string;
-  role: "app" | "ingress";
+  role: "service" | "ingress" | "system";
 };
 
 export function systemComponentDescriptorPath(
@@ -115,7 +117,7 @@ export function systemComponentDescriptorPath(
  *   renaming it would orphan the running container in its compose project.
  * - `role` matches the contract's role.
  * - `containerName` matches the role-aware naming rule: `ingress` →
- *   `<serviceId>-ingress`; `app` → `<serviceId>` (bare, matching
+ *   `<serviceId>-in`; `service` / `system` → `<serviceId>` (bare, matching
  *   `containerNameFromService` at `instanceCount: 1`).
  */
 export function assertSafeSystemIngressIdentity(
@@ -133,10 +135,9 @@ export function assertSafeSystemIngressIdentity(
     );
   }
   const contract = SYSTEM_COMPONENT_CONTRACTS[descriptor.component];
-  const roleLabel = contract.role === "ingress" ? "ingress" : "app";
   if (descriptor.composeServiceName !== contract.composeServiceName) {
     throw new Error(
-      `system ${roleLabel} composeServiceName must be '${contract.composeServiceName}'`,
+      `system ${contract.role} composeServiceName must be '${contract.composeServiceName}'`,
     );
   }
   if (descriptor.role !== contract.role) {
@@ -145,13 +146,13 @@ export function assertSafeSystemIngressIdentity(
     );
   }
   const expectedContainerName = contract.role === "ingress"
-    ? `${descriptor.serviceId}-ingress`
+    ? ingressContainerName(descriptor.serviceId)
     : descriptor.serviceId;
   if (descriptor.containerName !== expectedContainerName) {
     throw new Error(
       contract.role === "ingress"
-        ? "ingress containerName must equal <serviceId>-ingress"
-        : "system app containerName must equal <serviceId>",
+        ? "ingress containerName must equal <serviceId>-in"
+        : `system ${contract.role} containerName must equal <serviceId>`,
     );
   }
 }
@@ -183,7 +184,11 @@ export function isValidSystemComponentDescriptor(
   ) {
     return false;
   }
-  if (record.role !== "app" && record.role !== "ingress") {
+  if (
+    record.role !== "service" &&
+    record.role !== "ingress" &&
+    record.role !== "system"
+  ) {
     return false;
   }
   return true;
