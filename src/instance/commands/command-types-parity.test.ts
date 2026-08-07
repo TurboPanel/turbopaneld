@@ -305,6 +305,36 @@ test("environment.deploy round-trips dockerExternalNetworks and serviceHooks", (
   assertEquals(payload.serviceHooks?.[0]?.buildDisableCache, true);
 });
 
+test("environment.deploy round-trips noCache", () => {
+  const payload = parseEnvironmentDeployPayload({
+    environmentId: "env-1",
+    projectId: "proj-1",
+    organizationId: "org-1",
+    projectName: "demo",
+    composeYaml: "services:\n  web:\n    image: nginx\n",
+    hostings: [],
+    noCache: true,
+  });
+  assertEquals(payload.noCache, true);
+});
+
+test("environment.deploy rejects non-boolean noCache", () => {
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        environmentId: "env-1",
+        projectId: "proj-1",
+        organizationId: "org-1",
+        projectName: "demo",
+        composeYaml: "services:\n  web:\n    image: nginx\n",
+        hostings: [],
+        noCache: "yes",
+      }),
+    TypeError,
+    "noCache must be a boolean",
+  );
+});
+
 test("environment.stop payload parser round-trips", () => {
   assertEquals(
     parseEnvironmentStopPayload({

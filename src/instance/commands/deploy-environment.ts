@@ -191,6 +191,27 @@ async function composeUp(
   }
 }
 
+async function composeBuildNoCache(
+  projectName: string,
+  composePath: string,
+): Promise<void> {
+  const result = await runDocker([
+    "compose",
+    "-p",
+    projectName,
+    "-f",
+    composePath,
+    "build",
+    "--no-cache",
+    "--pull",
+  ]);
+  if (!result.success) {
+    throw new Error(
+      result.stderr || "Docker Compose cacheless build failed",
+    );
+  }
+}
+
 export type EnvironmentDeployDeps = {
   decryptSecrets?: DecryptSecretsFn;
 };
@@ -385,6 +406,14 @@ async function deployContainerServices(
   const externalNetworks = parsedPayload.dockerExternalNetworks ?? [];
   if (externalNetworks.length > 0) {
     await ensureExternalDockerNetworks(externalNetworks);
+  }
+
+  if (parsedPayload.noCache === true) {
+    logInfo(
+      "commands",
+      `cacheless rebuild for compose project ${parsedPayload.projectName}`,
+    );
+    await composeBuildNoCache(parsedPayload.projectName, composePath);
   }
 
   await composeUp(parsedPayload.projectName, composePath);

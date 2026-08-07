@@ -278,6 +278,11 @@ export type EnvironmentDeployPayload = {
    */
   ingressServices?: EnvironmentDeployIngressService[];
   dockerExternalNetworks?: string[];
+  /**
+   * When true, run `docker compose build --no-cache --pull` before `up`
+   * (cacheless redeploy from the control plane).
+   */
+  noCache?: boolean;
   tlsMaterial?: EnvironmentDeployTlsMaterial[];
   variableMaterial?: EnvironmentDeployVariableMaterial[];
   storageMaterial?: EnvironmentDeployStorageMaterial[];
@@ -1593,6 +1598,13 @@ export function parseEnvironmentDeployPayload(
     value.dockerExternalNetworks,
     "dockerExternalNetworks",
   );
+  let noCache: boolean | undefined;
+  if (value.noCache !== undefined) {
+    if (typeof value.noCache !== "boolean") {
+      throw new TypeError("noCache must be a boolean");
+    }
+    noCache = value.noCache;
+  }
 
   return {
     environmentId: parseNonEmptyString(value, "environmentId"),
@@ -1604,6 +1616,7 @@ export function parseEnvironmentDeployPayload(
     ...(traditionalWebSites === undefined ? {} : { traditionalWebSites }),
     ...(ingressServices === undefined ? {} : { ingressServices }),
     ...(dockerExternalNetworks === undefined ? {} : { dockerExternalNetworks }),
+    ...(noCache === undefined ? {} : { noCache }),
     ...(tlsMaterial === undefined ? {} : { tlsMaterial }),
     ...(variableMaterial === undefined ? {} : { variableMaterial }),
     ...(storageMaterial === undefined ? {} : { storageMaterial }),

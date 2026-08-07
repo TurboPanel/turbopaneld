@@ -78,8 +78,10 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../insta
    are merged into one Caddy site with `handle` / path matchers (`pathPrefix`);
    Traefik routers already used `pathPrefix` via compose labels.
 8. Run pre-deploy hooks (`serviceHooks[]`: optional `build --no-cache`, shell
-   preDeployCommand) then `docker compose up -d --remove-orphans`, then post-deploy
-   hooks (`run-deploy-hooks.ts`).
+   preDeployCommand). When the payload sets `noCache: true`, run
+   `docker compose build --no-cache --pull` for the whole project, then
+   `docker compose up -d --remove-orphans`, then post-deploy hooks
+   (`run-deploy-hooks.ts`).
 9. When the payload includes `tlsMaterial[]`, materialize org certs under
    `layout.tlsDir` (`/etc/turbopanel/tls/<tlsId>/fullchain.pem` + `privkey.pem`,
    modes `0640`/`0600`) via `materializeTlsCertificates`
