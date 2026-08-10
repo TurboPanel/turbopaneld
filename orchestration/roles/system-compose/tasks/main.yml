@@ -183,13 +183,6 @@
         group: root
         mode: "0640"
 
-    - name: Stop and disable legacy per-service systemd units
-      ansible.builtin.systemd:
-        name: "{{ item }}"
-        state: stopped
-        enabled: false
-      loop: "{{ system_compose_legacy_units }}"
-      failed_when: false
 
     - name: Ensure turbopanel-system-stack systemd unit desired state
       ansible.builtin.systemd:

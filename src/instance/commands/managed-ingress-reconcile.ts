@@ -29,7 +29,6 @@ import {
   assertNoFrontendUserConflict,
   buildProxySqlAdminStatements,
   inspectProxySqlContainer,
-  legacySweepLegacyManagedTraefikIngress,
   proxysqlCompose,
   type ProxySqlDesiredState,
   readPublishedBindAddressFromCompose,
@@ -204,7 +203,6 @@ export async function handleManagedIngressReconcile(
 
   await ensureDockerFn();
   await ensureManagedIngressNetwork(run);
-  await legacySweepLegacyManagedTraefikIngress(layout, run);
 
   const descriptor = await readSystemComponentDescriptor(
     layout,

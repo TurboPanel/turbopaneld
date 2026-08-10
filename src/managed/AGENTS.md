@@ -20,7 +20,7 @@ Root context: `../../AGENTS.md`. Instance engine specs:
 | `materialize.ts` | Write `config/` verbatim; optional engine self-signed TLS + `orgTlsMaterial` → `tls/server.*` + `tls/proxysql/`; ownership normalization via throwaway container (skips `backups/`). Standby replication passwords are **not** written under `auth/`. |
 | `tls.ts` | Engine self-signed cert generation; org-CA materialization for engine leaf + ProxySQL; standby passfile materialization |
 | `networks.ts` | Ensure Docker network `turbopanel-managed` (engines + ProxySQL) |
-| `proxysql.ts` | Shared ProxySQL compose + durable `proxysql.cnf` generation, static-section diffing, inspect/start/stop/restart, legacy Traefik-ingress teardown |
+| `proxysql.ts` | Shared ProxySQL compose + durable `proxysql.cnf` generation, static-section diffing, inspect/start/stop/restart |
 | `proxysql-admin.ts` | Runtime admin apply via `docker exec` + `admin.cnf` (`[client]` secrets never on argv/logs) |
 | `containers.ts` | Shared `docker compose ps` collection + running-container resolution used by `apply.ts` and `backup.ts` |
 | `apply.ts` / `lifecycle.ts` / `destroy.ts` / `promote.ts` | Engine command handlers (wired from `command-router.ts`); apply/destroy do **not** bring up per-service Traefik; promote is operator-only |
@@ -86,9 +86,8 @@ Compose project names:
   replicas)
 
 Legacy on-disk artifacts from the former per-service managed Traefik path
-(`managed/<id>/ingress/`, `<stateDir>/managed/ingress/*.json`) are removed by
-`proxysql.ts` migration helpers on first ProxySQL bring-up — do not recreate
-them.
+(`managed/<id>/ingress/`, `<stateDir>/managed/ingress/*.json`) are obsolete —
+do not recreate them. ProxySQL reconcile no longer sweeps those trees.
 
 ## ProxySQL ingress
 

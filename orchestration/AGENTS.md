@@ -246,11 +246,7 @@ Postgres, RabbitMQ, and ClickHouse run as **one Docker Compose project**,
 `/etc/turbopanel/system/docker-compose.yml`, services `database` / `queue` /
 `analytics`), brought up by a single `Type=oneshot` systemd unit —
 **`turbopanel-system-stack.service`** — instead of three independent
-`docker run` containers each with its own unit. This replaced the older
-per-service `turbopanel-postgres.service` / `turbopanel-rabbitmq.service` /
-`turbopanel-clickhouse.service` units and their `*-wrapper-start.sh` scripts.
-
-**Role split:** the `postgres` / `rabbitmq` / `clickhouse` roles are now
+`docker run` containers each with its own unit. **Role split:** the `postgres` / `rabbitmq` / `clickhouse` roles are now
 **config-only** — user/group provisioning, secret generation
 (`.pgpass` / `.rabbitmq_pass` / `.clickhouse_admin_pass` +
 `.clickhouse_app_pass`), `config.json`, and (for ClickHouse) the
@@ -278,8 +274,7 @@ same play and:
    `turbopanel-queue` / `turbopanel-analytics`).
 4. Templates `docker-compose.yml` (mode `0640`, owner `root:{{
    turbopanel_group }}`) and a `wait-ready.sh` readiness script, installs
-   `turbopanel-system-stack.service`, stops/disables the three legacy
-   per-service units, and starts the new unit.
+   `turbopanel-system-stack.service`, and starts the new unit.
 5. `docker compose -p turbopanel-system … up -d --remove-orphans` — the
    `--remove-orphans` flag is what tears down `queue`/`analytics` containers
    when a converge switches to Workers runtime (no per-runtime "stop and
@@ -309,8 +304,7 @@ same play and:
 
 Dependent units (`turbopanel-instance.service`, `turbopanel-dbstudio.service`,
 `turbopanel-mailer.service`, `turbopanel-tabix.service`) declare
-`After=`/`Wants=`/`Requires=turbopanel-system-stack.service` instead of the
-retired per-service unit names.
+`After=`/`Wants=`/`Requires=turbopanel-system-stack.service`.
 
 **Converge order:** `postgres` → `rabbitmq` → `clickhouse` (config only) →
 `system-compose` (brings the stack up, then runs the ClickHouse bootstrap

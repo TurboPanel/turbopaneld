@@ -502,16 +502,6 @@ export type ManagedApplyOrgTlsMaterial = {
   caCertPem: string;
 };
 
-/**
- * Per-service managed Traefik identity — must stay in sync with the instance
- * canonical `managed.apply` ingress block.
- */
-export type ManagedApplyIngress = {
-  serviceId: string;
-  composeServiceName: string;
-  containerName: string;
-};
-
 /** Must stay in sync with the instance canonical `managed.apply` shape. */
 export type ManagedApplyPeer = {
   memberId: string;
@@ -585,11 +575,6 @@ export type ManagedApplyPayload = {
   peers: ManagedApplyPeer[];
   privateListener?: ManagedApplyPrivateListener;
   replication?: ManagedApplyReplication;
-  /**
-   * Required when `exposure.enabled`; omitted when exposure is disabled.
-   * Identity for the dedicated per-service Traefik ingress container.
-   */
-  ingress?: ManagedApplyIngress;
   credentials: ManagedApplyCredential[];
   databases?: ManagedApplyDatabaseOp[];
   /** Transient usernames to drop after credentials are applied (never root). */
@@ -2668,47 +2653,8 @@ function parseManagedApplyOrgTlsMaterial(
  */
 const SAFE_CONTAINER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/;
 
-/** Matches instance `service_display_name_format_check` / compose-service-name. */
-const COMPOSE_SERVICE_NAME_RE = /^[A-Za-z0-9 ._-]+$/;
-
 const MANAGED_APPLY_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-function isValidComposeServiceName(value: string): boolean {
-  return (
-    value.length > 0 &&
-    value.length <= 255 &&
-    COMPOSE_SERVICE_NAME_RE.test(value)
-  );
-}
-
-/** Must stay in sync with the instance canonical `managed.apply` ingress parser. */
-function parseManagedApplyIngress(value: unknown): ManagedApplyIngress {
-  if (!isRecord(value)) {
-    throw new TypeError("Invalid managed.apply ingress");
-  }
-  if (
-    typeof value.serviceId !== "string" ||
-    !MANAGED_APPLY_UUID_RE.test(value.serviceId) ||
-    typeof value.composeServiceName !== "string" ||
-    !isValidComposeServiceName(value.composeServiceName) ||
-    typeof value.containerName !== "string" ||
-    !SAFE_CONTAINER_NAME_RE.test(value.containerName)
-  ) {
-    throw new TypeError("Invalid managed.apply ingress");
-  }
-  if (
-    value.containerName !==
-      `${value.serviceId}${INGRESS_CONTAINER_NAME_SUFFIX}`
-  ) {
-    throw new TypeError("Invalid managed.apply ingress");
-  }
-  return {
-    serviceId: value.serviceId,
-    composeServiceName: value.composeServiceName,
-    containerName: value.containerName,
-  };
-}
 
 function isLoopbackIpLiteral(value: string): boolean {
   if (value === "::1") return true;
@@ -3031,11 +2977,6 @@ export function parseManagedApplyPayload(
   );
   const replication = parseManagedApplyReplication(value.replication);
 
-  let ingress: ManagedApplyIngress | undefined;
-  if (value.ingress !== undefined) {
-    ingress = parseManagedApplyIngress(value.ingress);
-  }
-
   return {
     managedId: value.managedId,
     environmentId: value.environmentId,
@@ -3057,7 +2998,6 @@ export function parseManagedApplyPayload(
     peers,
     ...(privateListener === undefined ? {} : { privateListener }),
     ...(replication === undefined ? {} : { replication }),
-    ...(ingress === undefined ? {} : { ingress }),
     credentials: parseManagedApplyCredentials(value.credentials),
     ...(databases === undefined ? {} : { databases }),
     ...(dropUsers === undefined ? {} : { dropUsers }),

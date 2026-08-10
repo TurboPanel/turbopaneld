@@ -760,48 +760,16 @@ test("managed.apply enforces the engine image allowlist", () => {
 });
 
 test("managed.apply requires no Traefik ingress — ProxySQL is out of band", () => {
-  const VALID_INGRESS = {
-    serviceId: "00000000-0000-4000-8000-000000000099",
-    composeServiceName: "postgres-ingress",
-    containerName: "00000000-0000-4000-8000-000000000099-in",
-  };
   // exposure enabled without ingress is valid (shared ProxySQL frontends).
   const enabled = parseManagedApplyPayload({
     ...VALID_MANAGED_APPLY,
     exposure: { enabled: true, protocol: "tcp" },
   });
   assertEquals(enabled.exposure.enabled, true);
-  assertEquals(enabled.ingress, undefined);
-  // Optional legacy ingress is still accepted when present.
-  const withIngress = parseManagedApplyPayload({
-    ...VALID_MANAGED_APPLY,
-    exposure: { enabled: true, protocol: "tcp" },
-    ingress: VALID_INGRESS,
-  });
-  assertEquals(withIngress.ingress, VALID_INGRESS);
-  // Disabled exposure may still carry legacy ingress for teardown payloads.
-  const withLegacy = parseManagedApplyPayload({
-    ...VALID_MANAGED_APPLY,
-    exposure: { enabled: false, protocol: "tcp" },
-    ingress: VALID_INGRESS,
-  });
-  assertEquals(withLegacy.ingress, VALID_INGRESS);
-});
-
-test("managed.apply rejects obsolete <serviceId>-1 ingress containerName", () => {
-  assertThrows(
-    () =>
-      parseManagedApplyPayload({
-        ...VALID_MANAGED_APPLY,
-        exposure: { enabled: true, protocol: "tcp" },
-        ingress: {
-          serviceId: "00000000-0000-4000-8000-000000000099",
-          composeServiceName: "postgres-ingress",
-          containerName: "00000000-0000-4000-8000-000000000099-1",
-        },
-      }),
-    TypeError,
-    "Invalid managed.apply ingress",
+  // Ingress identity is not part of managed.apply (ProxySQL reconcile is separate).
+  assertEquals(
+    Object.prototype.hasOwnProperty.call(enabled, "ingress"),
+    false,
   );
 });
 

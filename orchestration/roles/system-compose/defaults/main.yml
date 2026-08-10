@@ -13,11 +13,6 @@
 system_compose_project_name: turbopanel-system
 system_compose_dir: "{{ turbopanel_config_dir }}/system"
 system_compose_service_name: turbopanel-system-stack
-# Retired once the consolidated stack takes over container lifecycle.
-system_compose_legacy_units:
-  - turbopanel-postgres
-  - turbopanel-rabbitmq
-  - turbopanel-clickhouse
 # Shared vars other roles also redefine defensively (noqa: this role can be
 # invoked without postgres/rabbitmq/clickhouse having run, e.g. bare `docker`
 # + `system-compose`, and still needs these to resolve the config directory).
