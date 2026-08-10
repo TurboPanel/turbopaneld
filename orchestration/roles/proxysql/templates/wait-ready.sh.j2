@@ -1,0 +1,36 @@
+#!/bin/sh
+# Wait for the ProxySQL admin interface on 127.0.0.1:{{ proxysql_admin_port }}.
+#
+# The oneshot unit runs this after `docker compose up` so operators (and any
+# future After= dependents) know the admin listener actually accepts
+# connections. When compose has not been written yet the unit never reaches
+# this script (ExecStart short-circuits).
+set -eu
+
+max_attempts=60
+sleep_seconds=2
+admin_port={{ proxysql_admin_port }}
+compose_file="{{ proxysql_config_dir }}/docker-compose.yml"
+project="{{ proxysql_project_name }}"
+
+wait_for() {
+  i=0
+  while ! "$@" >/dev/null 2>&1; do
+    i=$((i + 1))
+    if [ "$i" -ge "$max_attempts" ]; then
+      return 1
+    fi
+    sleep "$sleep_seconds"
+  done
+}
+
+# Prefer docker exec when the compose project is up; fall back to a TCP probe
+# on the published admin loopback port.
+if [ -f "$compose_file" ] && command -v docker >/dev/null 2>&1; then
+  if /usr/bin/docker compose -p "$project" -f "$compose_file" ps --status running -q 2>/dev/null | grep -q .; then
+    wait_for /usr/bin/docker compose -p "$project" -f "$compose_file" exec -T proxysql \
+      sh -c "true </dev/tcp/127.0.0.1/${admin_port}" && exit 0
+  fi
+fi
+
+wait_for /bin/sh -c "true </dev/tcp/127.0.0.1/${admin_port}"

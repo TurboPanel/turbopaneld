@@ -50,6 +50,7 @@ import {
   LOCALHOST_PLAYBOOK,
   ORCHESTRATION_DIR,
   POSTGRES_PLAYBOOK,
+  PROXYSQL_PLAYBOOK,
   PYTHON_VERSION,
   RABBITMQ_PLAYBOOK,
   REDIS_PLAYBOOK,
@@ -310,43 +311,128 @@ export async function ensureGalaxyCollections(): Promise<void> {
 }
 
 /**
- * Replace the Galaxy role's shipped `.ansible-lint` so IDE/CLI lint against an
- * open file under `geerlingguy.docker/` does not use upstream rules. The role
- * is third-party (gitignored); project configs already exclude the tree from
- * discovery, but ansible-lint still lints an explicitly opened path and walks
- * up to this nested config.
+ * Nested ansible-lint config written into Galaxy role trees. Project
+ * `exclude_paths` skip discovery, but Red Hat Ansible / ansible-lint still
+ * lint an explicitly opened path and use the nearest `.ansible-lint` (so this
+ * must silence nearly all rules). `skip_list` tags + rule ids; unskippable
+ * rules (`syntax-check`, `load-failure`, …) cannot be listed.
  */
-async function neutralizeGalaxyDockerLintConfig(): Promise<void> {
-  const roleDir = join(GALAXY_ROLES_DIR, "geerlingguy.docker");
-  if (!(await galaxyDockerRolePresent())) {
+const GALAXY_ROLE_ANSIBLE_LINT_CONFIG =
+  `# Written by TurboPanel ensureGalaxyDockerRole after ansible-galaxy install.
+# Third-party Galaxy role — do not lint or edit this tree.
+offline: true
+exclude_paths:
+  - .cache/
+  - .github/
+  - molecule/
+skip_list:
+  # Tags (covers current + future rules that share them)
+  - command-shell
+  - core
+  - deprecations
+  - experimental
+  - formatting
+  - idempotency
+  - idiom
+  - metadata
+  - opt-in
+  - risk
+  - security
+  - syntax
+  - unpredictability
+  - yaml
+  # Rule ids (match.tag cleansing needs the bare id; tags alone are not enough)
+  - args
+  - avoid-implicit
+  - command-instead-of-module
+  - command-instead-of-shell
+  - complexity
+  - deprecated-bare-vars
+  - deprecated-local-action
+  - deprecated-module
+  - empty-string-compare
+  - fqcn
+  - galaxy
+  - galaxy-version-incorrect
+  - ignore-errors
+  - inline-env-var
+  - jinja
+  - key-order
+  - latest
+  - literal-compare
+  - loop-var-prefix
+  - meta-incorrect
+  - meta-no-tags
+  - meta-runtime
+  - meta-video-links
+  - name
+  - no-changed-when
+  - no-free-form
+  - no-handler
+  - no-jinja-when
+  - no-log-password
+  - no-prompting
+  - no-relative-paths
+  - no-same-owner
+  - no-tabs
+  - only-builtins
+  - package-latest
+  - partial-become
+  - playbook-extension
+  - risky-file-permissions
+  - risky-octal
+  - risky-shell-pipe
+  - role-name
+  - run-once
+  - sanity
+  - schema
+  - var-naming
+  - warning
+`;
+
+/**
+ * On-disk roots for the geerlingguy Docker Galaxy role. Canonical Galaxy
+ * install is `geerlingguy.docker/`; some tools/docs use the author/role form
+ * `geerlingguy/docker/`. Neutralize every present layout so opens under either
+ * path (including `tasks/docker-*.yml`) use our skip config.
+ */
+function galaxyDockerRoleDirCandidates(): string[] {
+  return [
+    join(GALAXY_ROLES_DIR, "geerlingguy.docker"),
+    join(GALAXY_ROLES_DIR, "geerlingguy", "docker"),
+  ];
+}
+
+async function neutralizeOneGalaxyRoleLintTree(roleDir: string): Promise<void> {
+  if (!(await fileExists(roleDir))) {
     return;
   }
   await Deno.writeTextFile(
     join(roleDir, ".ansible-lint"),
-    `# Written by TurboPanel ensureGalaxyDockerRole after ansible-galaxy install.
-# Third-party Galaxy role — do not lint or edit this tree.
-offline: true
-skip_list:
-  - command-instead-of-module
-  - experimental
-  - fqcn
-  - galaxy
-  - jinja
-  - key-order
-  - literal-compare
-  - name
-  - no-handler
-  - package-latest
-  - partial-become
-  - risky-file-permissions
-  - risky-shell-pipe
-  - role-name
-  - run-once
-  - schema
-  - var-naming
-  - yaml
-`,
+    GALAXY_ROLE_ANSIBLE_LINT_CONFIG,
   );
+  // Upstream extends default yamllint values that ansible-lint rejects (and
+  // prints a noisy WARNING on every IDE validation of files in this tree).
+  try {
+    await Deno.remove(join(roleDir, ".yamllint"));
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) {
+      throw err;
+    }
+  }
+}
+
+/**
+ * Replace each present Galaxy docker role tree's shipped `.ansible-lint` (and
+ * drop its ansible-lint-incompatible `.yamllint`) so IDE/CLI lint against an
+ * open file does not use upstream rules. The role is third-party (gitignored);
+ * project configs already exclude the tree from discovery, but ansible-lint
+ * still lints an explicitly opened path and walks up to this nested config.
+ */
+async function neutralizeGalaxyDockerLintConfig(): Promise<void> {
+  for (const roleDir of galaxyDockerRoleDirCandidates()) {
+    await neutralizeOneGalaxyRoleLintTree(roleDir);
+  }
 }
 
 /**
@@ -806,6 +892,20 @@ export async function runPostgresSetup(
   logInfo("orchestration", "running postgres-setup playbook");
   await runLocalPlaybook(POSTGRES_PLAYBOOK, [], onEvent);
   logInfo("orchestration", "postgres-setup complete");
+}
+
+/**
+ * Host prerequisites for shared ProxySQL managed ingress (dirs, admin.cnf,
+ * static base config, systemd unit, turbopanel-managed network). Compose is
+ * daemon-written later via managed.ingress.reconcile.
+ */
+export async function runProxySqlSetup(
+  onEvent?: AnsibleEventHandler,
+): Promise<void> {
+  await ensureGalaxyDockerRole();
+  logInfo("orchestration", "running proxysql-setup playbook");
+  await runLocalPlaybook(PROXYSQL_PLAYBOOK, [], onEvent);
+  logInfo("orchestration", "proxysql-setup complete");
 }
 
 /** Build and install Redis under runtimes/redis/current. */

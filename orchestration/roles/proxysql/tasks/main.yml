@@ -1,0 +1,180 @@
+# Host prerequisites for shared ProxySQL managed ingress.
+#
+# Ansible owns: config/tls/data dirs, one-shot admin.cnf, initial static
+# proxysql.cnf (when absent), wait-ready.sh, turbopanel-proxysql-stack unit,
+# turbopanel-managed Docker network.
+#
+# The daemon owns docker-compose.yml under {{ proxysql_config_dir }} and
+# regenerates the dynamic portion of proxysql.cnf (users/servers/rules) on
+# managed.ingress.reconcile. Do not write compose content here.
+#
+# Daemon-writable trees are group-writable for {{ turbopanel_group }} (the
+# daemon user is a member). admin.cnf stays owner-private (0600) on disk for
+# the host process that regenerates durable cnf, but is also mounted read-only
+# into the ProxySQL container for admin SQL apply.
+
+- name: Ensure ProxySQL config directory exists
+  ansible.builtin.file:
+    path: "{{ proxysql_config_dir }}"
+    state: directory
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0770"
+
+- name: Ensure ProxySQL TLS directory exists
+  ansible.builtin.file:
+    path: "{{ proxysql_tls_dir }}"
+    state: directory
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0770"
+
+- name: Ensure ProxySQL data directory exists
+  ansible.builtin.file:
+    path: "{{ proxysql_data_dir }}"
+    state: directory
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0770"
+
+- name: Check whether ProxySQL data dir has been pre-owned
+  ansible.builtin.stat:
+    path: "{{ proxysql_data_dir }}/.turbopanel-owned"
+  register: _proxysql_owned_marker
+
+- name: Pre-own ProxySQL data directory for container uid/gid
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - -v
+      - "{{ proxysql_data_dir }}:/var/lib/proxysql"
+      - --user
+      - root
+      - alpine
+      - chown
+      - -R
+      - "{{ proxysql_container_uid }}:{{ proxysql_container_gid }}"
+      - /var/lib/proxysql
+  when: not _proxysql_owned_marker.stat.exists
+  changed_when: true
+
+- name: Mark ProxySQL data directory as pre-owned
+  ansible.builtin.file:
+    path: "{{ proxysql_data_dir }}/.turbopanel-owned"
+    state: touch
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+    modification_time: preserve
+    access_time: preserve
+  when: not _proxysql_owned_marker.stat.exists
+
+- name: Generate ProxySQL admin credentials (idempotent)
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      f='{{ proxysql_config_dir }}/admin.cnf'
+      if [ ! -s "$f" ]; then
+        pass="$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 32)"
+        umask 077
+        printf '%s\n' '[client]' "user={{ proxysql_admin_user }}" "password=${pass}" > "$f"
+        chmod 0640 "$f"
+        chown root:{{ turbopanel_group }} "$f"
+        echo created
+      fi
+    executable: /bin/bash
+  register: proxysql_admin_gen
+  changed_when: "'created' in proxysql_admin_gen.stdout"
+  no_log: true
+
+- name: Ensure ProxySQL admin.cnf is group-readable for the daemon
+  ansible.builtin.file:
+    path: "{{ proxysql_config_dir }}/admin.cnf"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+  no_log: true
+
+- name: Read ProxySQL admin credentials
+  ansible.builtin.slurp:
+    src: "{{ proxysql_config_dir }}/admin.cnf"
+  register: proxysql_admin_raw
+  no_log: true
+
+- name: Parse ProxySQL admin password from admin.cnf
+  ansible.builtin.set_fact:
+    _proxysql_admin_password: >-
+      {{
+        (
+          proxysql_admin_raw.content | b64decode
+        ).splitlines()
+         | select('match', '^password=')
+         | map('regex_replace', '^password=', '')
+         | first
+         | default('')
+      }}
+  no_log: true
+
+- name: Check whether base proxysql.cnf already exists
+  ansible.builtin.stat:
+    path: "{{ proxysql_config_dir }}/proxysql.cnf"
+  register: _proxysql_cnf_stat
+
+- name: Write initial static proxysql.cnf when absent
+  ansible.builtin.template:
+    src: proxysql.cnf.j2
+    dest: "{{ proxysql_config_dir }}/proxysql.cnf"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0660"
+    force: false
+  when: not _proxysql_cnf_stat.stat.exists
+  no_log: true
+
+- name: Ensure existing proxysql.cnf is group-writable for the daemon
+  ansible.builtin.file:
+    path: "{{ proxysql_config_dir }}/proxysql.cnf"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0660"
+  when: _proxysql_cnf_stat.stat.exists
+
+- name: Install ProxySQL readiness wait script
+  ansible.builtin.template:
+    src: wait-ready.sh.j2
+    dest: "{{ proxysql_config_dir }}/wait-ready.sh"
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Install turbopanel-proxysql-stack systemd unit
+  ansible.builtin.template:
+    src: turbopanel-proxysql-stack.service.j2
+    dest: "/etc/systemd/system/{{ proxysql_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0640"
+
+- name: Ensure turbopanel-managed Docker network exists
+  ansible.builtin.command:
+    argv:
+      - docker
+      - network
+      - create
+      - --driver
+      - bridge
+      - "{{ proxysql_managed_network }}"
+  register: _proxysql_network_create
+  changed_when: _proxysql_network_create.rc == 0
+  failed_when: >-
+    _proxysql_network_create.rc != 0
+    and ('already exists' not in (_proxysql_network_create.stderr | default('')))
+
+- name: Ensure turbopanel-proxysql-stack systemd unit is enabled and started
+  ansible.builtin.systemd:
+    name: "{{ proxysql_service_name }}"
+    daemon_reload: true
+    enabled: true
+    state: started

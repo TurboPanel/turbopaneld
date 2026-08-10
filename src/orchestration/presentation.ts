@@ -16,6 +16,7 @@ export const COMPONENT_VOCABULARY: Readonly<Record<string, string>> = {
   galaxy: "orchestration",
   uv: "runtime",
   python: "runtime",
+  proxysql: "ingress",
 };
 
 const NEUTRAL_COMPONENTS = new Set(["orchestration", "installer"]);
@@ -44,6 +45,7 @@ const STATUS_TOKEN_REPLACEMENTS: ReadonlyArray<[RegExp, string]> = [
   [/\bansible-core\b/gi, "orchestration"],
   [/\bansible\b/gi, "orchestration"],
   [/\bredis\b/gi, "cache"],
+  [/\bproxysql\b/gi, "ingress"],
   [/\bcpython\b/gi, "runtime"],
   [/\bgalaxy\b/gi, "orchestration"],
   [/\bpython\b/gi, "runtime"],

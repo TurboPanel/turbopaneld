@@ -24,6 +24,36 @@ const SAFE_VOLUME_NAME_RE = /^[A-Za-z_]\w*$/;
 /** Hyphen-permitting; must stay in sync with instance `DOCKER_RESOURCE_NAME_RE`. */
 const SAFE_CONTAINER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/;
 
+export const PROXYSQL_PROJECT = "turbopanel-proxysql";
+
+export function proxysqlProject(): string {
+  return PROXYSQL_PROJECT;
+}
+
+export function proxysqlConfigDir(layout: LayoutPaths): string {
+  return join(layout.configDir, "proxysql");
+}
+
+export function proxysqlComposePath(layout: LayoutPaths): string {
+  return join(proxysqlConfigDir(layout), "docker-compose.yml");
+}
+
+export function proxysqlConfigPath(layout: LayoutPaths): string {
+  return join(proxysqlConfigDir(layout), "proxysql.cnf");
+}
+
+export function proxysqlTlsDir(layout: LayoutPaths): string {
+  return join(proxysqlConfigDir(layout), "tls");
+}
+
+export function proxysqlDataDir(layout: LayoutPaths): string {
+  return join(layout.stateDir, "proxysql");
+}
+
+export function proxysqlAdminCnfPath(layout: LayoutPaths): string {
+  return join(proxysqlConfigDir(layout), "admin.cnf");
+}
+
 export function managedDir(layout: LayoutPaths, managedId: string): string {
   return join(layout.stateDir, "managed", managedId);
 }
@@ -59,25 +89,6 @@ export function managedEnvFilePath(
 
 export function managedComposeProject(managedId: string): string {
   return `turbopanel-managed-${managedId}`;
-}
-
-/** Per-service managed Traefik compose project. */
-export function managedIngressProject(managedId: string): string {
-  return `turbopanel-managed-${managedId}-ingress`;
-}
-
-export function managedIngressDir(
-  layout: LayoutPaths,
-  managedId: string,
-): string {
-  return join(managedDir(layout, managedId), "ingress");
-}
-
-export function managedIngressComposePath(
-  layout: LayoutPaths,
-  managedId: string,
-): string {
-  return join(managedIngressDir(layout, managedId), "docker-compose.yml");
 }
 
 /**
@@ -143,8 +154,6 @@ export function resolveManagedRelativePath(
   return join(baseDir, ...segments);
 }
 
-const COMPOSE_SERVICE_NAME_RE = /^[A-Za-z0-9 ._-]+$/;
-
 export function assertSafeManagedIdentifiers(
   payload: Pick<
     ManagedApplyPayload,
@@ -153,7 +162,6 @@ export function assertSafeManagedIdentifiers(
     | "projectName"
     | "containerName"
     | "volumes"
-    | "ingress"
   >,
 ): void {
   if (!SAFE_MANAGED_ID_RE.test(payload.managedId)) {
@@ -171,20 +179,6 @@ export function assertSafeManagedIdentifiers(
   }
   if (!SAFE_CONTAINER_NAME_RE.test(payload.containerName)) {
     throw new Error("containerName contains unsupported characters");
-  }
-  if (payload.ingress !== undefined) {
-    if (!SAFE_CONTAINER_NAME_RE.test(payload.ingress.containerName)) {
-      throw new Error("ingress.containerName contains unsupported characters");
-    }
-    if (
-      payload.ingress.composeServiceName.length === 0 ||
-      payload.ingress.composeServiceName.length > 255 ||
-      !COMPOSE_SERVICE_NAME_RE.test(payload.ingress.composeServiceName)
-    ) {
-      throw new Error(
-        "ingress.composeServiceName contains unsupported characters",
-      );
-    }
   }
   for (const volume of payload.volumes) {
     if (

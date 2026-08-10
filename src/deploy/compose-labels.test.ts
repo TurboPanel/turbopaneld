@@ -264,3 +264,69 @@ test("injectHostingLabels does not stamp raw-port on HTTP-only services", () => 
     "web,websecure",
   );
 });
+
+test("injectHostingLabels without hostings leaves services free of ingress network", () => {
+  const result = injectHostingLabels({
+    ...payload,
+    hostings: [],
+  });
+  const compose = parse(result.composeYaml) as {
+    services: { app: { labels?: Record<string, string>; networks?: string[] } };
+    networks?: Record<string, unknown>;
+  };
+  assertEquals(compose.services.app.labels?.["traefik.enable"], undefined);
+  assertEquals(compose.services.app.networks, undefined);
+  assertEquals(compose.networks?.["turbopanel-ingress"], undefined);
+});
+
+test("injectHostingLabels attaches turbopanel-managed to managedNetworkServices", () => {
+  const result = injectHostingLabels({
+    ...payload,
+    hostings: [],
+    managedNetworkServices: ["app"],
+  });
+  const compose = parse(result.composeYaml) as {
+    services: { app: { networks?: string[] } };
+    networks?: { "turbopanel-managed"?: { external: boolean } };
+  };
+  assertEquals(compose.services.app.networks, ["turbopanel-managed"]);
+  assertEquals(compose.networks?.["turbopanel-managed"]?.external, true);
+});
+
+test("injectHostingLabels merges ingress and managed networks on the same service", () => {
+  const result = injectHostingLabels({
+    ...payload,
+    managedNetworkServices: ["app"],
+  });
+  const compose = parse(result.composeYaml) as {
+    services: { app: { networks?: string[] } };
+    networks?: Record<string, { external: boolean }>;
+  };
+  assertEquals(compose.services.app.networks, [
+    "turbopanel-ingress",
+    "turbopanel-managed",
+  ]);
+  assertEquals(compose.networks?.["turbopanel-ingress"]?.external, true);
+  assertEquals(compose.networks?.["turbopanel-managed"]?.external, true);
+});
+
+test("injectHostingLabels rejects an unknown managedNetworkServices entry", () => {
+  assertThrows(
+    () =>
+      injectHostingLabels({
+        ...payload,
+        hostings: [],
+        managedNetworkServices: ["does-not-exist"],
+      }),
+    Error,
+    "Compose service not found: does-not-exist",
+  );
+});
+
+test("injectHostingLabels leaves compose untouched when managedNetworkServices is absent", () => {
+  const result = injectHostingLabels({ ...payload, hostings: [] });
+  const compose = parse(result.composeYaml) as {
+    networks?: Record<string, unknown>;
+  };
+  assertEquals(compose.networks?.["turbopanel-managed"], undefined);
+});

@@ -469,6 +469,37 @@ test("requirements-docker.yml pins geerlingguy.docker to an exact version", asyn
   }
 });
 
+test("galaxy docker lint neutralize silences third-party ansible-lint", () => {
+  // Nested role .ansible-lint is the only path the IDE uses when a Galaxy file
+  // is opened (exclude_paths do not apply to explicit lintables). Cover both
+  // geerlingguy.docker/ and geerlingguy/docker/ layouts.
+  const source = Deno.readTextFileSync(
+    join(DAEMON_ROOT, "src", "orchestration", "ansible.ts"),
+  );
+  if (!source.includes("GALAXY_ROLE_ANSIBLE_LINT_CONFIG")) {
+    throw new Error(
+      "ansible.ts must define GALAXY_ROLE_ANSIBLE_LINT_CONFIG for ensureGalaxyDockerRole",
+    );
+  }
+  for (
+    const needle of [
+      "no-free-form",
+      "fqcn",
+      "yaml",
+      "offline: true",
+      'Deno.remove(join(roleDir, ".yamllint"))',
+      'join(GALAXY_ROLES_DIR, "geerlingguy.docker")',
+      'join(GALAXY_ROLES_DIR, "geerlingguy", "docker")',
+    ]
+  ) {
+    if (!source.includes(needle)) {
+      throw new Error(
+        `galaxy docker lint neutralize must include ${JSON.stringify(needle)}`,
+      );
+    }
+  }
+});
+
 test("TUI orchestration script emits dev_converge_skipped before expensive setup", () => {
   // instance-dev-install --if-needed must emit the skip JSONL event and return
   // before ensureAnsible / Galaxy / playbook when the stamp matches.

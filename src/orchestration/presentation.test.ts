@@ -15,6 +15,7 @@ const FORBIDDEN_TOKENS = [
   "ansible-galaxy",
   "redis",
   "rabbitmq",
+  "proxysql",
   "uv",
 ];
 
@@ -53,6 +54,7 @@ test("logComponent relabels vendor names when presenter is active", () => {
     assertEquals(logComponent("ansible-galaxy"), "orchestration");
     assertEquals(logComponent("uv"), "runtime");
     assertEquals(logComponent("python"), "runtime");
+    assertEquals(logComponent("proxysql"), "ingress");
   } finally {
     presenter.dispose();
     setActiveInstallPresenter(null);
@@ -106,6 +108,7 @@ test("relabelComponent output contains no forbidden tokens", () => {
     "galaxy",
     "uv",
     "python",
+    "proxysql",
   ];
   for (const component of inputs) {
     assertNoForbiddenTokens(
@@ -129,6 +132,7 @@ test("sanitizeStatusLine scrubs vendor tokens case-insensitively", () => {
     ["Using CPython 3.12", "Using runtime 3.12"],
     ["Python environment ready", "runtime environment ready"],
     ["galaxy roles installed", "orchestration roles installed"],
+    ["proxysql setup complete", "ingress setup complete"],
   ];
 
   for (const [input, expected] of samples) {

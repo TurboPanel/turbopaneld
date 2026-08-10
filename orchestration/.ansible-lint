@@ -5,11 +5,18 @@
 # dev.code-workspace daemon folder) so playbooks under orchestration/playbooks/
 # resolve roles correctly; runtime converge still uses orchestration/ansible.cfg.
 #
-# Repo-root .ansible-lint also excludes the Galaxy docker role for IDE cwd.
-# geerlingguy.docker is installed by ansible-galaxy (requirements-docker.yml) —
-# never first-party; do not lint or edit it.
+# Repo-root .ansible-lint also excludes Galaxy roles for IDE cwd.
+# geerlingguy.* is installed by ansible-galaxy (requirements-docker.yml) —
+# never first-party; do not lint or edit it. Discovery exclusions only; open
+# files use nested geerlingguy.*/.ansible-lint (ensureGalaxyDockerRole).
 offline: true
 exclude_paths:
   - .cache/
+  # Galaxy geerlingguy.docker (dot layout) and geerlingguy/docker (author/role)
   - roles/geerlingguy.docker/
+  - roles/geerlingguy/
+  - roles/geerlingguy.*/
+  - "**/roles/geerlingguy.docker/**"
+  - "**/roles/geerlingguy/**"
+  - "**/roles/geerlingguy.*/**"
 

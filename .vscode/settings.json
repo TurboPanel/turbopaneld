@@ -5,13 +5,17 @@
   "ansible.validation.lint.enabled": true,
   "ansible.validation.lint.path": "/opt/turbopanel/vendor/ansible/current/bin/ansible-lint",
   "files.exclude": {
-    "**/orchestration/roles/geerlingguy.docker": true
+    "**/orchestration/roles/geerlingguy.docker": true,
+    "**/orchestration/roles/geerlingguy.*": true,
+    "**/orchestration/roles/geerlingguy": true
   },
   "files.associations": {
     ".secretscan-allowlist": "plaintext"
   },
   "files.watcherExclude": {
-    "**/orchestration/roles/geerlingguy.docker/**": true
+    "**/orchestration/roles/geerlingguy.docker/**": true,
+    "**/orchestration/roles/geerlingguy.*/**": true,
+    "**/orchestration/roles/geerlingguy/**": true
   },
   "sonarlint.connectedMode.project": {
     "connectionId": "turbopanel",

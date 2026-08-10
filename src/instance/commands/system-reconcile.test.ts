@@ -3,7 +3,11 @@ import type { DockerCliResult } from "../../deploy/docker-cli.ts";
 import {
   readSystemComponentDescriptor,
   SYSTEM_HOSTING_INGRESS_COMPONENT,
+  SYSTEM_MANAGED_INGRESS_COMPONENT,
+  type SystemComponentDescriptor,
 } from "../../deploy/system-component.ts";
+import { ensureProxySqlIngress } from "../../managed/proxysql.ts";
+import { proxysqlComposePath } from "../../managed/paths.ts";
 import { resolveLayout } from "../../paths/layout.ts";
 import {
   type TempLayoutFixture,
@@ -564,6 +568,118 @@ test({
           },
         );
         assertEquals(result.containers, undefined);
+      });
+    });
+  },
+});
+
+const PROXYSQL_SERVICE_ID = "cccccccc-dddd-eeee-ffff-000000000000";
+
+function proxysqlPayload(): {
+  environmentId: string;
+  action: "reconcile";
+  components: SystemComponentDescriptorPayload[];
+} {
+  return {
+    environmentId: ENVIRONMENT_ID,
+    action: "reconcile",
+    components: [
+      {
+        component: SYSTEM_MANAGED_INGRESS_COMPONENT,
+        serviceId: PROXYSQL_SERVICE_ID,
+        composeServiceName: "proxysql",
+        containerName: PROXYSQL_SERVICE_ID,
+        role: "system",
+        desired: "present",
+      },
+    ],
+  };
+}
+
+function fakeRunOk(): (args: string[]) => Promise<DockerCliResult> {
+  return (_args: string[]) =>
+    Promise.resolve(
+      {
+        success: true,
+        stdout: "",
+        stderr: "",
+        code: 0,
+      } satisfies DockerCliResult,
+    );
+}
+
+test({
+  name:
+    "handleSystemReconcile proxysql self-heal never widens bind to public when nothing was ever published",
+  permissions: { env: true, read: true, write: true },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await withLayoutEnv(fixture, async () => {
+        const layout = resolveLayout(Deno.env.toObject());
+
+        await handleSystemReconcile(
+          proxysqlPayload(),
+          new Date().toISOString(),
+          {
+            ensureDocker: () => Promise.resolve(),
+            runDocker: fakeRunOk(),
+            inspectSystemStackContainer: () => Promise.resolve(null),
+          },
+        );
+
+        const composeText = await Deno.readTextFile(
+          proxysqlComposePath(layout),
+        );
+        // No prior explicit bind exists — self-heal must not guess `0.0.0.0`.
+        assertEquals(composeText.includes(":5432:5432"), false);
+        assertEquals(composeText.includes(":3306:3306"), false);
+      });
+    });
+  },
+});
+
+test({
+  name:
+    "handleSystemReconcile proxysql self-heal preserves a previously-published explicit bind address",
+  permissions: { env: true, read: true, write: true },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await withLayoutEnv(fixture, async () => {
+        const layout = resolveLayout(Deno.env.toObject());
+        const descriptor: SystemComponentDescriptor = {
+          component: SYSTEM_MANAGED_INGRESS_COMPONENT,
+          serviceId: PROXYSQL_SERVICE_ID,
+          composeServiceName: "proxysql",
+          containerName: PROXYSQL_SERVICE_ID,
+          role: "system",
+        };
+
+        // Simulate a prior `managed.ingress.reconcile` that explicitly
+        // published the frontend on a specific address (exposure enabled).
+        await ensureProxySqlIngress(
+          layout,
+          descriptor,
+          fakeRunOk(),
+          "203.0.113.9",
+        );
+
+        await handleSystemReconcile(
+          proxysqlPayload(),
+          new Date().toISOString(),
+          {
+            ensureDocker: () => Promise.resolve(),
+            runDocker: fakeRunOk(),
+            inspectSystemStackContainer: () => Promise.resolve(null),
+          },
+        );
+
+        const composeText = await Deno.readTextFile(
+          proxysqlComposePath(layout),
+        );
+        // Self-heal must preserve the previously-desired explicit bind, not
+        // reset it to private-only or widen it to every interface.
+        assertEquals(composeText.includes('"203.0.113.9:5432:5432"'), true);
+        assertEquals(composeText.includes('"0.0.0.0:5432:5432"'), false);
       });
     });
   },

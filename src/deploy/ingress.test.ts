@@ -23,6 +23,7 @@ import {
   sortCaddySiteRoutes,
   syncTcpUdpIngressEntries,
   TcpUdpPortConflictError,
+  TcpUdpPortReservedError,
   traefikCompose,
 } from "./ingress.ts";
 import {
@@ -559,7 +560,7 @@ test("syncTcpUdpIngressEntries persists per service, returns own entries, and re
   const { layout, cleanup } = await makeTestLayout();
   try {
     const ownAfterSvcA = await syncTcpUdpIngressEntries(layout, "svc-a", [
-      { hostingId: "h1", protocol: "tcp", publishedPort: 5432 },
+      { hostingId: "h1", protocol: "tcp", publishedPort: 15432 },
     ]);
     assertEquals(ownAfterSvcA.length, 1);
 
@@ -590,14 +591,36 @@ test("syncTcpUdpIngressEntries throws TcpUdpPortConflictError when another servi
   const { layout, cleanup } = await makeTestLayout();
   try {
     await syncTcpUdpIngressEntries(layout, "svc-a", [
-      { hostingId: "h1", protocol: "tcp", publishedPort: 5432 },
+      { hostingId: "h1", protocol: "tcp", publishedPort: 15432 },
     ]);
     await assertRejects(
       () =>
         syncTcpUdpIngressEntries(layout, "svc-b", [
-          { hostingId: "h2", protocol: "tcp", publishedPort: 5432 },
+          { hostingId: "h2", protocol: "tcp", publishedPort: 15432 },
         ]),
       TcpUdpPortConflictError,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("syncTcpUdpIngressEntries rejects ports reserved for ProxySQL managed listeners", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    await assertRejects(
+      () =>
+        syncTcpUdpIngressEntries(layout, "svc-a", [
+          { hostingId: "h1", protocol: "tcp", publishedPort: 5432 },
+        ]),
+      TcpUdpPortReservedError,
+    );
+    await assertRejects(
+      () =>
+        syncTcpUdpIngressEntries(layout, "svc-b", [
+          { hostingId: "h2", protocol: "tcp", publishedPort: 3306 },
+        ]),
+      TcpUdpPortReservedError,
     );
   } finally {
     await cleanup();
@@ -679,7 +702,7 @@ test("cleanupStaleTcpUdpServiceIngress removes claim+project on tcp/udp→HTTP-o
   const environmentId = "env-http-only";
   try {
     await syncTcpUdpIngressEntries(layout, serviceId, [
-      { hostingId: "h-tcp", protocol: "tcp", publishedPort: 5432 },
+      { hostingId: "h-tcp", protocol: "tcp", publishedPort: 15432 },
     ]);
     // Seed a per-service project dir the way ensureServiceIngress would.
     const projectDir = serviceIngressDir(layout, serviceId);

@@ -14,10 +14,6 @@ import {
 import { logInfo, sanitizeForLog } from "../logger.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import {
-  removeManagedIngress,
-  removeManagedIngressEntries,
-} from "./ingress.ts";
-import {
   managedComposeProject,
   managedDir,
   SAFE_MANAGED_ID_RE,
@@ -82,10 +78,6 @@ export async function handleManagedDestroy(
       );
     }
   }
-
-  // Per-service Traefik first, then claim file removal.
-  await removeManagedIngress(layout, payload.managedId, run);
-  await removeManagedIngressEntries(layout, payload.managedId);
 
   try {
     await Deno.remove(root, { recursive: true });

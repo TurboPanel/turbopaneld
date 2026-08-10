@@ -18,6 +18,8 @@ export const COMMAND_TYPES = [
   "managed.destroy",
   "managed.backup",
   "managed.restore",
+  "managed.promote",
+  "managed.ingress.reconcile",
   "system.reconcile",
 ] as const;
 
@@ -279,6 +281,13 @@ export type EnvironmentDeployPayload = {
   ingressServices?: EnvironmentDeployIngressService[];
   dockerExternalNetworks?: string[];
   /**
+   * Compose service names that must join the shared managed-ingress network
+   * (`turbopanel-managed`) so a managed-database binding endpoint (a
+   * ProxySQL container name) resolves. Platform-managed — never
+   * operator-registered like `dockerExternalNetworks`.
+   */
+  managedNetworkServices?: string[];
+  /**
    * When true, run `docker compose build --no-cache --pull` before `up`
    * (cacheless redeploy from the control plane).
    */
@@ -354,6 +363,7 @@ export type EnvironmentLifecycleResult = {
 /** Must stay in sync with the instance canonical `system.reconcile` component key. */
 export type SystemComponentKey =
   | "hosting-ingress"
+  | "managed-ingress"
   | "database"
   | "queue"
   | "analytics";
@@ -370,6 +380,7 @@ export const SYSTEM_COMPONENT_ROLES: Record<
   "service" | "ingress" | "system"
 > = {
   "hosting-ingress": "ingress",
+  "managed-ingress": "system",
   database: "system",
   queue: "system",
   analytics: "system",
@@ -432,16 +443,15 @@ export type ManagedApplyVolume = {
 export type ManagedApplyExposure = {
   enabled: boolean;
   protocol: "tcp" | "udp" | "http";
-  publishedPort?: number;
+  /** Instance-resolved bind for legacy/Traefik paths; ProxySQL uses system reconcile. */
   bindAddress?: string;
-  sni?: { hostnames: string[] };
 };
 
 /** Must stay in sync with the instance canonical `managed.apply` shape. */
 export type ManagedApplyCredential = {
   principalId: string;
   username: string;
-  role: "root" | "user";
+  role: "root" | "user" | "replication";
   databases: string[];
   privileges?: string[];
   /** Daemon-recipient sealed password (`denc.…`). */
@@ -482,6 +492,17 @@ export type ManagedApplyTlsMaterial = {
 };
 
 /**
+ * Org-CA-signed leaf material for managed frontend (ProxySQL) TLS.
+ * Private key is a daemon-recipient `denc` envelope; cert + CA PEM are plain.
+ * Must stay in sync with the instance canonical `managed.apply` shape.
+ */
+export type ManagedApplyOrgTlsMaterial = {
+  certificatePem: string;
+  privateKeyEnvelope: string;
+  caCertPem: string;
+};
+
+/**
  * Per-service managed Traefik identity — must stay in sync with the instance
  * canonical `managed.apply` ingress block.
  */
@@ -492,12 +513,62 @@ export type ManagedApplyIngress = {
 };
 
 /** Must stay in sync with the instance canonical `managed.apply` shape. */
+export type ManagedApplyPeer = {
+  memberId: string;
+  role: "primary" | "replica";
+  readEligible: boolean;
+  address: string;
+  transport: "local" | "datacenter" | "vpn";
+  port: number;
+  containerName?: string;
+};
+
+/** Must stay in sync with the instance canonical `managed.apply` shape. */
+export type ManagedApplyPrivateListener = {
+  address: string;
+  port: number;
+};
+
+/** Must stay in sync with the instance canonical `managed.apply` shape. */
+export type ManagedApplyReplicationPrimary = {
+  host: string;
+  hostaddr?: string;
+  port: number;
+};
+
+/** Must stay in sync with the instance canonical `managed.apply` shape. */
+export type ManagedApplyReplication = {
+  role: "primary" | "standby";
+  username: string;
+  slotName?: string;
+  desiredSlots?: string[];
+  peerAddresses?: string[];
+  primary?: ManagedApplyReplicationPrimary;
+};
+
+/** Must stay in sync with the instance canonical `managed.apply` shape. */
+export type ManagedReplicationHealth = {
+  state: string;
+  lagBytes?: number;
+  lagSeconds?: number;
+  observedAt: string;
+};
+
+/** Must stay in sync with the instance canonical `managed.apply` shape. */
+export type ManagedMemberObservedResult = {
+  memberId: string;
+  role: string;
+  status: string;
+  replication?: ManagedReplicationHealth;
+};
+
+/** Must stay in sync with the instance canonical `managed.apply` shape. */
 export type ManagedApplyPayload = {
   managedId: string;
   environmentId: string;
   engine: ManagedEngineCode;
   projectName: string;
-  /** Compose `container_name` — `<service.id>-1` from instance pre-allocation. */
+  /** Compose `container_name` — `<service.id>-<ordinal>` from instance pre-allocation. */
   containerName: string;
   image: string;
   containerPort: number;
@@ -507,6 +578,13 @@ export type ManagedApplyPayload = {
   resources?: ManagedApplyResources;
   dockerOptions?: ManagedApplyDockerOptions;
   exposure: ManagedApplyExposure;
+  memberId: string;
+  memberRole: "primary" | "replica";
+  memberOrdinal: number;
+  readEligible: boolean;
+  peers: ManagedApplyPeer[];
+  privateListener?: ManagedApplyPrivateListener;
+  replication?: ManagedApplyReplication;
   /**
    * Required when `exposure.enabled`; omitted when exposure is disabled.
    * Identity for the dedicated per-service Traefik ingress container.
@@ -518,6 +596,8 @@ export type ManagedApplyPayload = {
   dropUsers?: string[];
   /** When set, daemon generates a self-signed cert under managed state `tls/`. */
   tlsMaterial?: ManagedApplyTlsMaterial;
+  /** Org-CA leaf + CA PEM for ProxySQL-facing files under `tls/proxysql/`. */
+  orgTlsMaterial?: ManagedApplyOrgTlsMaterial;
 };
 
 /** Must stay in sync with the instance canonical `managed.apply` shape. */
@@ -529,18 +609,27 @@ export type ManagedApplyResult = {
   appliedDatabases?: string[];
   engineVersion?: string;
   summary?: string;
+  member?: ManagedMemberObservedResult;
 };
 
 /** Must stay in sync with the instance canonical `managed.lifecycle` shape. */
 export type ManagedLifecyclePayload = {
   managedId: string;
   action: "start" | "stop" | "restart";
+  memberId?: string;
+  /**
+   * Optional engine code so the daemon resolves the correct runtime for
+   * member health. Absent on in-flight commands from older releases
+   * (defaults to postgres).
+   */
+  engine?: ManagedEngineCode;
 };
 
 /** Must stay in sync with the instance canonical `managed.lifecycle` shape. */
 export type ManagedLifecycleResult = {
   status: string;
   summary?: string;
+  member?: ManagedMemberObservedResult;
 };
 
 /**
@@ -551,6 +640,7 @@ export type ManagedLifecycleResult = {
 export type ManagedDestroyPayload = {
   managedId: string;
   removeVolumes: boolean;
+  memberId?: string;
   deleteAfterDestroy?: boolean;
 };
 
@@ -561,6 +651,77 @@ export type ManagedDestroyResult = {
   /** Always present — destroy returns `[]` so the instance clears pins. */
   containers: EnvironmentDeployContainer[];
   summary?: string;
+};
+
+/** Must stay in sync with the instance canonical `managed.promote` shape. */
+export type ManagedPromotePayload = {
+  managedId: string;
+  memberId: string;
+  demoteMemberId?: string;
+  /**
+   * Optional engine code so the daemon resolves the correct promotion
+   * runtime. Absent on in-flight commands from older releases (defaults to
+   * postgres).
+   */
+  engine?: ManagedEngineCode;
+};
+
+/** Must stay in sync with the instance canonical `managed.promote` shape. */
+export type ManagedPromoteResult = {
+  status: string;
+  role: string;
+  summary?: string;
+  promotedMemberId: string;
+  demotedMemberId?: string;
+  demoted: boolean;
+  replication?: ManagedReplicationHealth;
+};
+
+/** Must stay in sync with the instance canonical `managed.ingress.reconcile` shape. */
+export type ProxySqlBackendPayload = {
+  memberId: string;
+  role: "primary" | "replica";
+  readEligible: boolean;
+  address: string;
+  port: number;
+  transport: "local" | "datacenter" | "vpn";
+};
+
+/** Must stay in sync with the instance canonical `managed.ingress.reconcile` shape. */
+export type ProxySqlUserPayload = {
+  username: string;
+  role: "root" | "user";
+  /** Daemon-recipient sealed password (`denc.…`) for ProxySQL frontend auth. */
+  password: string;
+  defaultDatabase?: string;
+};
+
+/** Must stay in sync with the instance canonical `managed.ingress.reconcile` shape. */
+export type ProxySqlClusterPayload = {
+  managedId: string;
+  engine: string;
+  protocolPort: 5432 | 3306;
+  writerHostgroup: number;
+  readerHostgroup: number;
+  backends: ProxySqlBackendPayload[];
+  users: ProxySqlUserPayload[];
+};
+
+/** Must stay in sync with the instance canonical `managed.ingress.reconcile` shape. */
+export type ManagedIngressReconcilePayload = {
+  serverId: string;
+  bindAddress?: string;
+  orgTlsMaterial: ManagedApplyOrgTlsMaterial;
+  clusters: ProxySqlClusterPayload[];
+};
+
+/** Must stay in sync with the instance canonical `managed.ingress.reconcile` shape. */
+export type ManagedIngressReconcileResult = {
+  summary: string;
+  appliedUsers: string[];
+  appliedBackends: string[];
+  restarted: boolean;
+  containers?: EnvironmentDeployContainer[];
 };
 
 /** Must stay in sync with the instance canonical version in src/lib/commands/hostname.ts */
@@ -1496,6 +1657,27 @@ function parseOptionalStringArray(
   return [...new Set(names)].sort((a, b) => a.localeCompare(b));
 }
 
+function parseManagedNetworkServiceName(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > 255 ||
+    !DEPLOY_INGRESS_COMPOSE_NAME_RE.test(value)
+  ) {
+    throw new TypeError("Invalid managedNetworkServices entry");
+  }
+  return value;
+}
+
+function parseManagedNetworkServices(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw new TypeError("managedNetworkServices must be an array");
+  }
+  const names = value.map(parseManagedNetworkServiceName);
+  return [...new Set(names)].sort((a, b) => a.localeCompare(b));
+}
+
 const DEPLOY_INGRESS_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DEPLOY_INGRESS_COMPOSE_NAME_RE = /^[A-Za-z0-9 ._-]+$/;
@@ -1598,6 +1780,9 @@ export function parseEnvironmentDeployPayload(
     value.dockerExternalNetworks,
     "dockerExternalNetworks",
   );
+  const managedNetworkServices = parseManagedNetworkServices(
+    value.managedNetworkServices,
+  );
   let noCache: boolean | undefined;
   if (value.noCache !== undefined) {
     if (typeof value.noCache !== "boolean") {
@@ -1616,6 +1801,7 @@ export function parseEnvironmentDeployPayload(
     ...(traditionalWebSites === undefined ? {} : { traditionalWebSites }),
     ...(ingressServices === undefined ? {} : { ingressServices }),
     ...(dockerExternalNetworks === undefined ? {} : { dockerExternalNetworks }),
+    ...(managedNetworkServices === undefined ? {} : { managedNetworkServices }),
     ...(noCache === undefined ? {} : { noCache }),
     ...(tlsMaterial === undefined ? {} : { tlsMaterial }),
     ...(variableMaterial === undefined ? {} : { variableMaterial }),
@@ -1667,6 +1853,7 @@ export function parseEnvironmentLifecyclePayload(
 
 const SYSTEM_COMPONENT_KEYS = new Set([
   "hosting-ingress",
+  "managed-ingress",
   "database",
   "queue",
   "analytics",
@@ -1777,13 +1964,66 @@ const MAX_MANAGED_CREDENTIALS = 32;
 const MAX_MANAGED_DATABASES = 64;
 const MAX_MANAGED_DROP_USERS = 32;
 const MAX_MANAGED_IMAGE_LENGTH = 256;
+
+/**
+ * Approved managed-engine image references — must stay byte-for-byte in sync
+ * with `POSTGRES_ALLOWED_IMAGES` / `MYSQL_ALLOWED_IMAGES` /
+ * `MARIADB_ALLOWED_IMAGES` in the instance repo's
+ * `src/lib/managed/settings.ts`. The instance settings parser and the
+ * `managed.apply` command payload parser both enforce this list; this daemon
+ * mirror is the last stop before a payload reaches Docker, so a forged,
+ * replayed, or otherwise-bypassed command still cannot run an unsupported or
+ * EOL major version. Neither MySQL nor MariaDB publish an official
+ * Alpine-based image, so both allowlists use the Docker Official Image's
+ * default Debian-based tag, with the vendor-published Oracle Linux (MySQL) /
+ * UBI (MariaDB) variant as the documented alternative; PostgreSQL's official
+ * Alpine variant stays the default for its smaller footprint.
+ */
+const MANAGED_ALLOWED_IMAGES_BY_ENGINE: Record<string, readonly string[]> = {
+  postgres: [
+    "docker.io/library/postgres:18-alpine",
+    "docker.io/library/postgres:18",
+  ],
+  mysql: [
+    "docker.io/library/mysql:9.7",
+    "docker.io/library/mysql:9.7-oraclelinux9",
+  ],
+  mariadb: [
+    "docker.io/library/mariadb:12.3",
+    "docker.io/library/mariadb:12.3-ubi",
+  ],
+};
+
+/** `true` when `engine` has no curated allowlist (unrestricted) or `image` is a member of it. */
+function isManagedImageAllowed(engine: string, image: string): boolean {
+  const allowed = MANAGED_ALLOWED_IMAGES_BY_ENGINE[engine];
+  if (allowed === undefined) return true;
+  return allowed.includes(image);
+}
+
 const DAEMON_ENVELOPE_PREFIX = "denc.";
 const MANAGED_CONFIG_MODES = new Set(["0640", "0600"]);
 const MANAGED_LIFECYCLE_ACTIONS = new Set(["start", "stop", "restart"]);
 const MANAGED_EXPOSURE_PROTOCOLS = new Set(["tcp", "udp", "http"]);
-const MANAGED_CREDENTIAL_ROLES = new Set(["root", "user"]);
+const MANAGED_CREDENTIAL_ROLES = new Set(["root", "user", "replication"]);
+const MANAGED_MEMBER_ROLES = new Set(["primary", "replica"]);
+const MANAGED_PEER_TRANSPORTS = new Set(["local", "datacenter", "vpn"]);
+const MANAGED_REPLICATION_ROLES = new Set(["primary", "standby"]);
+const MANAGED_REPLICATION_STATES = new Set([
+  "streaming",
+  "catchup",
+  "stopped",
+  "unknown",
+  "needs_resync",
+]);
+const MAX_MANAGED_PEERS = 4;
+const MAX_MANAGED_DESIRED_SLOTS = 8;
+const MAX_MANAGED_PEER_ADDRESSES = 16;
+const MANAGED_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MANAGED_DATABASE_ACTIONS = new Set(["create", "drop"]);
-const RESERVED_PUBLISHED_PORTS = new Set([22, 80, 443, 8443, 8880]);
+
+/** Relative-only allowlist for managed `configFiles[].path`. */
 const MANAGED_DOCKER_OPTION_DENYLIST = new Set([
   "privileged",
   "network_mode",
@@ -1830,6 +2070,9 @@ const OCI_NAME_SEGMENT_RE = /^[a-zA-Z0-9](?:[a-zA-Z0-9._-]*[a-zA-Z0-9])?$/;
  */
 const MANAGED_CONFIG_PATH_ALLOWLIST = new Set([
   "postgresql.conf",
+  "pg_hba.conf",
+  "my.cnf",
+  "initdb/00-turbopanel.sql",
   "tls/server.crt",
   "tls/server.key",
 ]);
@@ -1849,6 +2092,34 @@ const POSTGRES_RESERVED_ENV_KEYS = new Set([
   "PGDATA",
 ]);
 
+/** Must stay in sync with instance `MYSQL_RESERVED_ENV_KEYS`. */
+const MYSQL_RESERVED_ENV_KEYS = new Set([
+  "MYSQL_ROOT_PASSWORD",
+  "MYSQL_ROOT_HOST",
+  "MYSQL_DATABASE",
+  "MYSQL_USER",
+  "MYSQL_PASSWORD",
+  "MYSQL_ALLOW_EMPTY_PASSWORD",
+  "MYSQL_RANDOM_ROOT_PASSWORD",
+  "MYSQL_INITDB_SKIP_TZINFO",
+]);
+
+/**
+ * Must stay in sync with instance `MARIADB_RESERVED_ENV_KEYS` (MariaDB +
+ * legacy MySQL env names both blocked).
+ */
+const MARIADB_RESERVED_ENV_KEYS = new Set([
+  "MARIADB_ROOT_PASSWORD",
+  "MARIADB_ROOT_HOST",
+  "MARIADB_DATABASE",
+  "MARIADB_USER",
+  "MARIADB_PASSWORD",
+  "MARIADB_ALLOW_EMPTY_PASSWORD",
+  "MARIADB_RANDOM_ROOT_PASSWORD",
+  "MARIADB_INITDB_SKIP_TZINFO",
+  ...MYSQL_RESERVED_ENV_KEYS,
+]);
+
 /**
  * Engine-reserved env keys keyed by managed engine code — second, independent
  * enforcement of the same invariant as the instance parser (defense in depth
@@ -1860,6 +2131,8 @@ const POSTGRES_RESERVED_ENV_KEYS = new Set([
 const MANAGED_RESERVED_ENV_KEYS_BY_ENGINE: Record<string, ReadonlySet<string>> =
   {
     postgres: POSTGRES_RESERVED_ENV_KEYS,
+    mysql: MYSQL_RESERVED_ENV_KEYS,
+    mariadb: MARIADB_RESERVED_ENV_KEYS,
   };
 
 /**
@@ -1906,10 +2179,6 @@ function isValidManagedImageRef(value: string): boolean {
   if (/\s/.test(value)) return false;
   if (SHELL_METACHAR_RE.test(value)) return false;
   return true;
-}
-
-function isValidPublishedManagedPort(value: unknown): value is number {
-  return isValidPortNumber(value) && !RESERVED_PUBLISHED_PORTS.has(value);
 }
 
 /** Relative-only allowlist for managed `configFiles[].path`. */
@@ -2203,22 +2472,6 @@ function parseManagedExposureBindAddress(value: unknown): string {
   return value;
 }
 
-function parseManagedExposureSni(
-  value: unknown,
-): NonNullable<ManagedApplyExposure["sni"]> {
-  if (!isRecord(value) || !Array.isArray(value.hostnames)) {
-    throw new TypeError("Invalid managed.apply exposure.sni");
-  }
-  const hostnames: string[] = [];
-  for (const hostname of value.hostnames) {
-    if (!isValidHostname(hostname)) {
-      throw new TypeError("Invalid managed.apply exposure.sni.hostnames");
-    }
-    hostnames.push(hostname);
-  }
-  return { hostnames };
-}
-
 function parseManagedApplyExposure(value: unknown): ManagedApplyExposure {
   if (!isRecord(value) || typeof value.enabled !== "boolean") {
     throw new TypeError("Invalid managed.apply exposure");
@@ -2233,21 +2486,8 @@ function parseManagedApplyExposure(value: unknown): ManagedApplyExposure {
     enabled: value.enabled,
     protocol: value.protocol as ManagedApplyExposure["protocol"],
   };
-  if (value.publishedPort !== undefined) {
-    if (!isValidPublishedManagedPort(value.publishedPort)) {
-      throw new TypeError("Invalid managed.apply exposure.publishedPort");
-    }
-    exposure.publishedPort = value.publishedPort;
-  }
   if (value.bindAddress !== undefined) {
     exposure.bindAddress = parseManagedExposureBindAddress(value.bindAddress);
-  }
-  if (value.sni !== undefined) {
-    exposure.sni = parseManagedExposureSni(value.sni);
-  }
-  // Mirror instance managed/settings.ts: enabled exposure requires a published port.
-  if (exposure.enabled && exposure.publishedPort === undefined) {
-    throw new TypeError("Invalid managed.apply exposure");
   }
   return exposure;
 }
@@ -2394,6 +2634,33 @@ function parseManagedApplyTlsMaterial(
   };
 }
 
+/** Must stay in sync with the instance canonical `managed.apply` validator. */
+function parseManagedApplyOrgTlsMaterial(
+  value: unknown,
+): ManagedApplyOrgTlsMaterial | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid managed.apply orgTlsMaterial");
+  }
+  if (
+    typeof value.certificatePem !== "string" ||
+    value.certificatePem.length === 0 ||
+    !value.certificatePem.includes("BEGIN CERTIFICATE") ||
+    typeof value.privateKeyEnvelope !== "string" ||
+    value.privateKeyEnvelope.length === 0 ||
+    typeof value.caCertPem !== "string" ||
+    value.caCertPem.length === 0 ||
+    !value.caCertPem.includes("BEGIN CERTIFICATE")
+  ) {
+    throw new TypeError("Invalid managed.apply orgTlsMaterial");
+  }
+  return {
+    certificatePem: value.certificatePem,
+    privateKeyEnvelope: value.privateKeyEnvelope,
+    caCertPem: value.caCertPem,
+  };
+}
+
 /**
  * Must stay in sync with the instance canonical validator
  * (`DOCKER_RESOURCE_NAME_RE` / `isValidDockerResourceName` in
@@ -2443,6 +2710,269 @@ function parseManagedApplyIngress(value: unknown): ManagedApplyIngress {
   };
 }
 
+function isLoopbackIpLiteral(value: string): boolean {
+  if (value === "::1") return true;
+  if (!isValidIpv4Literal(value)) return false;
+  const first = Number(value.split(".")[0]);
+  return first === 127;
+}
+
+function isIsoTimestamp(value: string): boolean {
+  if (value.length === 0 || value.length > 64) return false;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms);
+}
+
+function parseManagedApplyPeers(value: unknown): ManagedApplyPeer[] {
+  if (!Array.isArray(value)) {
+    throw new TypeError("Invalid managed.apply peers");
+  }
+  if (value.length > MAX_MANAGED_PEERS) {
+    throw new TypeError("Invalid managed.apply peers: too many entries");
+  }
+  const peers: ManagedApplyPeer[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) {
+      throw new TypeError("Invalid managed.apply peers entry");
+    }
+    if (
+      typeof entry.memberId !== "string" ||
+      !MANAGED_UUID_RE.test(entry.memberId) ||
+      typeof entry.role !== "string" ||
+      !MANAGED_MEMBER_ROLES.has(entry.role) ||
+      typeof entry.readEligible !== "boolean" ||
+      typeof entry.address !== "string" ||
+      entry.address.length === 0 ||
+      typeof entry.transport !== "string" ||
+      !MANAGED_PEER_TRANSPORTS.has(entry.transport) ||
+      !isValidPortNumber(entry.port)
+    ) {
+      throw new TypeError("Invalid managed.apply peers entry");
+    }
+    const peer: ManagedApplyPeer = {
+      memberId: entry.memberId,
+      role: entry.role as ManagedApplyPeer["role"],
+      readEligible: entry.readEligible,
+      address: entry.address,
+      transport: entry.transport as ManagedApplyPeer["transport"],
+      port: entry.port,
+    };
+    if (entry.containerName !== undefined) {
+      if (
+        typeof entry.containerName !== "string" ||
+        !SAFE_CONTAINER_NAME_RE.test(entry.containerName)
+      ) {
+        throw new TypeError("Invalid managed.apply peers entry");
+      }
+      peer.containerName = entry.containerName;
+    }
+    peers.push(peer);
+  }
+  return peers;
+}
+
+function parseManagedApplyPrivateListener(
+  value: unknown,
+): ManagedApplyPrivateListener | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid managed.apply privateListener");
+  }
+  if (
+    typeof value.address !== "string" ||
+    (!isValidIpv4Literal(value.address) &&
+      !isValidIpv6Literal(value.address)) ||
+    isLoopbackIpLiteral(value.address) ||
+    !isValidPortNumber(value.port)
+  ) {
+    throw new TypeError("Invalid managed.apply privateListener");
+  }
+  return { address: value.address, port: value.port };
+}
+
+function parseReplicationSlotName(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !isSafeIdentifier(value)) {
+    throw new TypeError("Invalid managed.apply replication.slotName");
+  }
+  return value;
+}
+
+function parseReplicationDesiredSlots(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > MAX_MANAGED_DESIRED_SLOTS) {
+    throw new TypeError("Invalid managed.apply replication.desiredSlots");
+  }
+  const slots: string[] = [];
+  for (const slot of value) {
+    if (typeof slot !== "string" || !isSafeIdentifier(slot)) {
+      throw new TypeError("Invalid managed.apply replication.desiredSlots");
+    }
+    slots.push(slot);
+  }
+  return slots;
+}
+
+function parseReplicationPeerAddresses(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > MAX_MANAGED_PEER_ADDRESSES) {
+    throw new TypeError("Invalid managed.apply replication.peerAddresses");
+  }
+  const addresses: string[] = [];
+  for (const address of value) {
+    if (typeof address !== "string" || address.length === 0) {
+      throw new TypeError("Invalid managed.apply replication.peerAddresses");
+    }
+    addresses.push(address);
+  }
+  return addresses;
+}
+
+function parseReplicationPrimaryHostaddr(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "string" ||
+    (!isValidIpv4Literal(value) && !isValidIpv6Literal(value))
+  ) {
+    throw new TypeError("Invalid managed.apply replication.primary.hostaddr");
+  }
+  return value;
+}
+
+function parseReplicationPrimary(
+  value: unknown,
+): ManagedApplyReplicationPrimary | undefined {
+  if (value === undefined) return undefined;
+  if (
+    !isRecord(value) ||
+    typeof value.host !== "string" ||
+    value.host.length === 0 ||
+    !isValidPortNumber(value.port)
+  ) {
+    throw new TypeError("Invalid managed.apply replication.primary");
+  }
+  const primary: ManagedApplyReplicationPrimary = {
+    host: value.host,
+    port: value.port,
+  };
+  const hostaddr = parseReplicationPrimaryHostaddr(value.hostaddr);
+  if (hostaddr !== undefined) {
+    primary.hostaddr = hostaddr;
+  }
+  return primary;
+}
+
+function assertReplicationRoleInvariants(
+  replication: ManagedApplyReplication,
+): void {
+  if (
+    replication.role === "standby" &&
+    (replication.slotName === undefined || replication.primary === undefined)
+  ) {
+    throw new TypeError(
+      "Invalid managed.apply replication: standby requires slotName and primary",
+    );
+  }
+  if (
+    replication.role === "primary" &&
+    replication.desiredSlots === undefined
+  ) {
+    throw new TypeError(
+      "Invalid managed.apply replication: primary requires desiredSlots",
+    );
+  }
+}
+
+function parseManagedApplyReplication(
+  value: unknown,
+): ManagedApplyReplication | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid managed.apply replication");
+  }
+  if (
+    typeof value.role !== "string" ||
+    !MANAGED_REPLICATION_ROLES.has(value.role) ||
+    typeof value.username !== "string" ||
+    !isSafeUsername(value.username)
+  ) {
+    throw new TypeError("Invalid managed.apply replication");
+  }
+  const replication: ManagedApplyReplication = {
+    role: value.role as ManagedApplyReplication["role"],
+    username: value.username,
+  };
+  const slotName = parseReplicationSlotName(value.slotName);
+  if (slotName !== undefined) replication.slotName = slotName;
+  const desiredSlots = parseReplicationDesiredSlots(value.desiredSlots);
+  if (desiredSlots !== undefined) replication.desiredSlots = desiredSlots;
+  const peerAddresses = parseReplicationPeerAddresses(value.peerAddresses);
+  if (peerAddresses !== undefined) replication.peerAddresses = peerAddresses;
+  const primary = parseReplicationPrimary(value.primary);
+  if (primary !== undefined) replication.primary = primary;
+  assertReplicationRoleInvariants(replication);
+  return replication;
+}
+
+export function parseManagedReplicationHealth(
+  value: unknown,
+): ManagedReplicationHealth | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) return undefined;
+  if (
+    typeof value.state !== "string" ||
+    !MANAGED_REPLICATION_STATES.has(value.state) ||
+    typeof value.observedAt !== "string" ||
+    !isIsoTimestamp(value.observedAt)
+  ) {
+    return undefined;
+  }
+  const health: ManagedReplicationHealth = {
+    state: value.state,
+    observedAt: value.observedAt,
+  };
+  if (
+    typeof value.lagBytes === "number" &&
+    Number.isFinite(value.lagBytes) &&
+    value.lagBytes >= 0
+  ) {
+    health.lagBytes = value.lagBytes;
+  }
+  if (
+    typeof value.lagSeconds === "number" &&
+    Number.isFinite(value.lagSeconds) &&
+    value.lagSeconds >= 0
+  ) {
+    health.lagSeconds = value.lagSeconds;
+  }
+  return health;
+}
+
+function parseManagedMemberObservedResult(
+  value: unknown,
+): ManagedMemberObservedResult | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) return undefined;
+  if (
+    typeof value.memberId !== "string" ||
+    !MANAGED_UUID_RE.test(value.memberId) ||
+    typeof value.role !== "string" ||
+    value.role.length === 0 ||
+    typeof value.status !== "string" ||
+    value.status.length === 0
+  ) {
+    return undefined;
+  }
+  const member: ManagedMemberObservedResult = {
+    memberId: value.memberId,
+    role: value.role,
+    status: value.status,
+  };
+  const replication = parseManagedReplicationHealth(value.replication);
+  if (replication !== undefined) member.replication = replication;
+  return member;
+}
+
 /** Must stay in sync with the instance canonical `managed.apply` validator. */
 export function parseManagedApplyPayload(
   value: unknown,
@@ -2465,8 +2995,23 @@ export function parseManagedApplyPayload(
     !isValidManagedImageRef(value.image) ||
     !isValidPortNumber(value.containerPort) ||
     typeof value.composeYaml !== "string" ||
-    value.composeYaml.length === 0
+    value.composeYaml.length === 0 ||
+    typeof value.memberId !== "string" ||
+    !MANAGED_UUID_RE.test(value.memberId) ||
+    typeof value.memberRole !== "string" ||
+    !MANAGED_MEMBER_ROLES.has(value.memberRole) ||
+    typeof value.memberOrdinal !== "number" ||
+    !Number.isInteger(value.memberOrdinal) ||
+    value.memberOrdinal < 1 ||
+    typeof value.readEligible !== "boolean"
   ) {
+    throw new TypeError("Invalid managed.apply payload");
+  }
+
+  // Mirrors the instance settings parser's image allowlist so a
+  // forged/replayed command payload cannot smuggle an unsupported or EOL
+  // image past this last daemon-side check before Docker runs it.
+  if (!isManagedImageAllowed(value.engine, value.image)) {
     throw new TypeError("Invalid managed.apply payload");
   }
 
@@ -2478,21 +3023,17 @@ export function parseManagedApplyPayload(
   const databases = parseManagedApplyDatabases(value.databases);
   const dropUsers = parseManagedApplyDropUsers(value.dropUsers);
   const tlsMaterial = parseManagedApplyTlsMaterial(value.tlsMaterial);
+  const orgTlsMaterial = parseManagedApplyOrgTlsMaterial(value.orgTlsMaterial);
   const exposure = parseManagedApplyExposure(value.exposure);
+  const peers = parseManagedApplyPeers(value.peers);
+  const privateListener = parseManagedApplyPrivateListener(
+    value.privateListener,
+  );
+  const replication = parseManagedApplyReplication(value.replication);
 
   let ingress: ManagedApplyIngress | undefined;
   if (value.ingress !== undefined) {
     ingress = parseManagedApplyIngress(value.ingress);
-  }
-  if (exposure.enabled && ingress === undefined) {
-    throw new TypeError(
-      "Invalid managed.apply ingress: required when exposure.enabled",
-    );
-  }
-  if (!exposure.enabled && ingress !== undefined) {
-    throw new TypeError(
-      "Invalid managed.apply ingress: must be omitted when exposure is disabled",
-    );
   }
 
   return {
@@ -2509,11 +3050,19 @@ export function parseManagedApplyPayload(
     ...(resources === undefined ? {} : { resources }),
     ...(dockerOptions === undefined ? {} : { dockerOptions }),
     exposure,
+    memberId: value.memberId,
+    memberRole: value.memberRole as ManagedApplyPayload["memberRole"],
+    memberOrdinal: value.memberOrdinal,
+    readEligible: value.readEligible,
+    peers,
+    ...(privateListener === undefined ? {} : { privateListener }),
+    ...(replication === undefined ? {} : { replication }),
     ...(ingress === undefined ? {} : { ingress }),
     credentials: parseManagedApplyCredentials(value.credentials),
     ...(databases === undefined ? {} : { databases }),
     ...(dropUsers === undefined ? {} : { dropUsers }),
     ...(tlsMaterial === undefined ? {} : { tlsMaterial }),
+    ...(orgTlsMaterial === undefined ? {} : { orgTlsMaterial }),
   };
 }
 
@@ -2532,10 +3081,28 @@ export function parseManagedLifecyclePayload(
   ) {
     throw new TypeError("Invalid managed.lifecycle payload");
   }
-  return {
+  const payload: ManagedLifecyclePayload = {
     managedId: value.managedId,
     action: value.action as ManagedLifecyclePayload["action"],
   };
+  if (value.memberId !== undefined) {
+    if (
+      typeof value.memberId !== "string" ||
+      !MANAGED_UUID_RE.test(value.memberId)
+    ) {
+      throw new TypeError("Invalid managed.lifecycle payload");
+    }
+    payload.memberId = value.memberId;
+  }
+  if (value.engine !== undefined) {
+    if (
+      typeof value.engine !== "string" || !isManagedEngineCode(value.engine)
+    ) {
+      throw new TypeError("Invalid managed.lifecycle payload");
+    }
+    payload.engine = value.engine;
+  }
+  return payload;
 }
 
 /** Must stay in sync with the instance canonical `managed.destroy` validator. */
@@ -2565,7 +3132,88 @@ export function parseManagedDestroyPayload(
   if (typeof value.deleteAfterDestroy === "boolean") {
     payload.deleteAfterDestroy = value.deleteAfterDestroy;
   }
+  if (value.memberId !== undefined) {
+    if (
+      typeof value.memberId !== "string" ||
+      !MANAGED_UUID_RE.test(value.memberId)
+    ) {
+      throw new TypeError("Invalid managed.destroy payload");
+    }
+    payload.memberId = value.memberId;
+  }
   return payload;
+}
+
+/** Must stay in sync with the instance canonical `managed.promote` validator. */
+export function parseManagedPromotePayload(
+  value: unknown,
+): ManagedPromotePayload {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid managed.promote payload");
+  }
+  if (
+    typeof value.managedId !== "string" ||
+    !MANAGED_UUID_RE.test(value.managedId) ||
+    typeof value.memberId !== "string" ||
+    !MANAGED_UUID_RE.test(value.memberId)
+  ) {
+    throw new TypeError("Invalid managed.promote payload");
+  }
+  const payload: ManagedPromotePayload = {
+    managedId: value.managedId,
+    memberId: value.memberId,
+  };
+  if (value.demoteMemberId !== undefined) {
+    if (
+      typeof value.demoteMemberId !== "string" ||
+      !MANAGED_UUID_RE.test(value.demoteMemberId)
+    ) {
+      throw new TypeError("Invalid managed.promote payload");
+    }
+    payload.demoteMemberId = value.demoteMemberId;
+  }
+  if (value.engine !== undefined) {
+    if (
+      typeof value.engine !== "string" || !isManagedEngineCode(value.engine)
+    ) {
+      throw new TypeError("Invalid managed.promote payload");
+    }
+    payload.engine = value.engine;
+  }
+  return payload;
+}
+
+/** Must stay in sync with the instance canonical `managed.promote` result parser. */
+export function parseManagedPromoteResult(
+  value: unknown,
+): ManagedPromoteResult {
+  if (!isRecord(value)) {
+    return {
+      status: "",
+      role: "",
+      promotedMemberId: "",
+      demoted: false,
+    };
+  }
+  const result: ManagedPromoteResult = {
+    status: isString(value.status) ? value.status : "",
+    role: isString(value.role) ? value.role : "",
+    promotedMemberId: isString(value.promotedMemberId) &&
+        MANAGED_UUID_RE.test(value.promotedMemberId)
+      ? value.promotedMemberId
+      : "",
+    demoted: value.demoted === true,
+  };
+  if (
+    isString(value.demotedMemberId) &&
+    MANAGED_UUID_RE.test(value.demotedMemberId)
+  ) {
+    result.demotedMemberId = value.demotedMemberId;
+  }
+  if (isString(value.summary)) result.summary = value.summary;
+  const replication = parseManagedReplicationHealth(value.replication);
+  if (replication !== undefined) result.replication = replication;
+  return result;
 }
 
 function isString(value: unknown): value is string {
@@ -2642,6 +3290,8 @@ export function parseManagedApplyResult(value: unknown): ManagedApplyResult {
   }
   if (isString(value.engineVersion)) result.engineVersion = value.engineVersion;
   if (isString(value.summary)) result.summary = value.summary;
+  const member = parseManagedMemberObservedResult(value.member);
+  if (member !== undefined) result.member = member;
   return result;
 }
 
@@ -2656,6 +3306,8 @@ export function parseManagedLifecycleResult(
     status: isString(value.status) ? value.status : "",
   };
   if (isString(value.summary)) result.summary = value.summary;
+  const member = parseManagedMemberObservedResult(value.member);
+  if (member !== undefined) result.member = member;
   return result;
 }
 
@@ -2903,5 +3555,191 @@ export function parseManagedRestoreResult(
   if (isString(value.restoredAt)) result.restoredAt = value.restoredAt;
   if (isString(value.database)) result.database = value.database;
   if (isString(value.summary)) result.summary = value.summary;
+  return result;
+}
+
+function parseProxySqlBackendPayload(value: unknown): ProxySqlBackendPayload {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid managed.ingress.reconcile backend");
+  }
+  if (
+    typeof value.memberId !== "string" ||
+    !MANAGED_APPLY_UUID_RE.test(value.memberId) ||
+    (value.role !== "primary" && value.role !== "replica") ||
+    typeof value.readEligible !== "boolean" ||
+    typeof value.address !== "string" ||
+    value.address.length === 0 ||
+    !isValidPortNumber(value.port) ||
+    (value.transport !== "local" &&
+      value.transport !== "datacenter" &&
+      value.transport !== "vpn")
+  ) {
+    throw new TypeError("Invalid managed.ingress.reconcile backend");
+  }
+  return {
+    memberId: value.memberId,
+    role: value.role,
+    readEligible: value.readEligible,
+    address: value.address,
+    port: value.port,
+    transport: value.transport,
+  };
+}
+
+function parseProxySqlUserPayload(value: unknown): ProxySqlUserPayload {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid managed.ingress.reconcile user");
+  }
+  if (
+    typeof value.username !== "string" ||
+    !isSafeUsername(value.username) ||
+    (value.role !== "root" && value.role !== "user") ||
+    typeof value.password !== "string" ||
+    !value.password.startsWith("denc.")
+  ) {
+    throw new TypeError("Invalid managed.ingress.reconcile user");
+  }
+  const user: ProxySqlUserPayload = {
+    username: value.username,
+    role: value.role,
+    password: value.password,
+  };
+  if (value.defaultDatabase !== undefined) {
+    if (
+      typeof value.defaultDatabase !== "string" ||
+      !isSafeIdentifier(value.defaultDatabase)
+    ) {
+      throw new TypeError(
+        "Invalid managed.ingress.reconcile user defaultDatabase",
+      );
+    }
+    user.defaultDatabase = value.defaultDatabase;
+  }
+  return user;
+}
+
+function isValidHostgroupId(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= 0 &&
+    value <= 65_535
+  );
+}
+
+function parseProxySqlClusterPayload(value: unknown): ProxySqlClusterPayload {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid managed.ingress.reconcile cluster");
+  }
+  if (
+    typeof value.managedId !== "string" ||
+    !SAFE_BACKUP_ID_RE.test(value.managedId) ||
+    typeof value.engine !== "string" ||
+    !isManagedEngineCode(value.engine) ||
+    (value.protocolPort !== 5432 && value.protocolPort !== 3306) ||
+    !isValidHostgroupId(value.writerHostgroup) ||
+    !isValidHostgroupId(value.readerHostgroup) ||
+    !Array.isArray(value.backends) ||
+    !Array.isArray(value.users)
+  ) {
+    throw new TypeError("Invalid managed.ingress.reconcile cluster");
+  }
+  return {
+    managedId: value.managedId,
+    engine: value.engine,
+    protocolPort: value.protocolPort,
+    writerHostgroup: value.writerHostgroup,
+    readerHostgroup: value.readerHostgroup,
+    backends: value.backends.map(parseProxySqlBackendPayload),
+    users: value.users.map(parseProxySqlUserPayload),
+  };
+}
+
+function parseManagedIngressOrgTlsMaterial(
+  value: unknown,
+): ManagedApplyOrgTlsMaterial {
+  const parsed = parseManagedApplyOrgTlsMaterial(value);
+  if (parsed === undefined) {
+    throw new TypeError("Invalid managed.ingress.reconcile orgTlsMaterial");
+  }
+  return parsed;
+}
+
+/** Must stay in sync with the instance canonical `managed.ingress.reconcile` validator. */
+export function parseManagedIngressReconcilePayload(
+  value: unknown,
+): ManagedIngressReconcilePayload {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid managed.ingress.reconcile payload");
+  }
+  if (
+    typeof value.serverId !== "string" ||
+    !MANAGED_APPLY_UUID_RE.test(value.serverId) ||
+    !Array.isArray(value.clusters)
+  ) {
+    throw new TypeError("Invalid managed.ingress.reconcile payload");
+  }
+  const payload: ManagedIngressReconcilePayload = {
+    serverId: value.serverId,
+    orgTlsMaterial: parseManagedIngressOrgTlsMaterial(value.orgTlsMaterial),
+    clusters: value.clusters.map(parseProxySqlClusterPayload),
+  };
+  if (value.bindAddress !== undefined) {
+    if (
+      typeof value.bindAddress !== "string" ||
+      (!isValidIpv4Literal(value.bindAddress) &&
+        !isValidIpv6Literal(value.bindAddress) &&
+        value.bindAddress !== "0.0.0.0" &&
+        value.bindAddress !== "::" &&
+        value.bindAddress !== "::0") // NOSONAR typescript:S1313 — IPv6 all-interfaces bind synonym (::0 == ::), not a reachable host
+    ) {
+      throw new TypeError("Invalid managed.ingress.reconcile bindAddress");
+    }
+    payload.bindAddress = value.bindAddress;
+  }
+  return payload;
+}
+
+/** Must stay in sync with the instance canonical `managed.ingress.reconcile` result parser. */
+export function parseManagedIngressReconcileResult(
+  value: unknown,
+): ManagedIngressReconcileResult {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid managed.ingress.reconcile result");
+  }
+  if (
+    typeof value.summary !== "string" ||
+    !Array.isArray(value.appliedUsers) ||
+    !value.appliedUsers.every((entry) =>
+      typeof entry === "string" && isSafeUsername(entry)
+    ) ||
+    !Array.isArray(value.appliedBackends) ||
+    !value.appliedBackends.every((entry) =>
+      typeof entry === "string" && MANAGED_APPLY_UUID_RE.test(entry)
+    ) ||
+    typeof value.restarted !== "boolean"
+  ) {
+    throw new TypeError("Invalid managed.ingress.reconcile result");
+  }
+  const result: ManagedIngressReconcileResult = {
+    summary: value.summary,
+    appliedUsers: value.appliedUsers as string[],
+    appliedBackends: value.appliedBackends as string[],
+    restarted: value.restarted,
+  };
+  if (value.containers !== undefined) {
+    if (!Array.isArray(value.containers)) {
+      throw new TypeError(
+        "Invalid managed.ingress.reconcile result containers",
+      );
+    }
+    const parsedContainers = parseDeployContainers(value.containers);
+    if (parsedContainers?.length !== value.containers.length) {
+      throw new TypeError(
+        "Invalid managed.ingress.reconcile result containers",
+      );
+    }
+    result.containers = parsedContainers;
+  }
   return result;
 }

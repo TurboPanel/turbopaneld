@@ -151,7 +151,8 @@ const SKIP_DIRS = new Set([
 
 /** Untracked/vendored build outputs that must not be scanned. */
 function isSkippedPath(rel: string): boolean {
-  return rel.includes("geerlingguy.docker");
+  // Galaxy docker: geerlingguy.docker/ or geerlingguy/docker/
+  return /(^|\/)roles\/geerlingguy([./]|$)/.test(rel);
 }
 
 async function* walk(dir: string): AsyncGenerator<string> {

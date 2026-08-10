@@ -1,5 +1,5 @@
 /**
- * Managed engine apply: materialize → compose up → credentials → ingress.
+ * Managed engine apply: materialize → compose up → credentials.
  */
 
 import type {
@@ -8,7 +8,6 @@ import type {
   ManagedApplyPayload,
   ManagedApplyResult,
 } from "../instance/commands/contracts.ts";
-import { assertValidBindAddress } from "../deploy/ingress.ts";
 import { ensureDocker } from "../deploy/ensure-docker.ts";
 import { runDocker } from "../deploy/docker-cli.ts";
 import { logInfo, sanitizeForLog } from "../logger.ts";
@@ -19,19 +18,10 @@ import {
 } from "./compose.ts";
 import {
   collectManagedContainers,
-  collectManagedContainersForService,
   resolveEngineContainerId,
 } from "./containers.ts";
 import { getManagedEngineRuntime } from "./engines/index.ts";
 import type { ManagedEngineContext } from "./engines/types.ts";
-import {
-  ensureManagedIngress,
-  type ManagedIngressEntry,
-  type ManagedIngressIdentity,
-  removeManagedIngress,
-  removeManagedIngressEntries,
-  syncManagedIngressEntries,
-} from "./ingress.ts";
 import {
   materializeManagedState,
   normalizeManagedFileOwnership,
@@ -41,7 +31,6 @@ import {
   managedComposePath,
   managedComposeProject,
   managedEnvFilePath,
-  managedIngressProject,
 } from "./paths.ts";
 
 type DecryptSecretsFn = (ciphertexts: string[]) => Promise<(string | null)[]>;
@@ -105,88 +94,11 @@ function buildEngineExec(
   };
 }
 
-function buildIngressEntry(
-  payload: ManagedApplyPayload,
-): ManagedIngressEntry | null {
-  if (!payload.exposure.enabled) return null;
-  if (payload.exposure.publishedPort === undefined) {
-    throw new Error("exposure.enabled requires publishedPort");
-  }
-  if (payload.exposure.bindAddress !== undefined) {
-    assertValidBindAddress(payload.exposure.bindAddress);
-  }
-  return {
-    managedId: payload.managedId,
-    protocol: payload.exposure.protocol,
-    publishedPort: payload.exposure.publishedPort,
-    containerPort: payload.containerPort,
-    ...(payload.exposure.bindAddress !== undefined
-      ? { bindAddress: payload.exposure.bindAddress }
-      : {}),
-    ...(payload.exposure.sni !== undefined
-      ? { sni: payload.exposure.sni }
-      : {}),
-  };
-}
-
-function buildIngressIdentity(
-  payload: ManagedApplyPayload,
-): ManagedIngressIdentity {
-  const ingress = payload.ingress;
-  if (!ingress) {
-    throw new Error("managed.apply requires ingress when exposure.enabled");
-  }
-  return {
-    managedId: payload.managedId,
-    serviceId: ingress.serviceId,
-    composeServiceName: ingress.composeServiceName,
-    containerName: ingress.containerName,
-  };
-}
-
-/**
- * Host reported on the apply result.
- *
- * When exposure is disabled the engine is loopback-only. When exposed, match
- * Traefik's bind fallback (`bindAddress ?? "0.0.0.0"`) — never report loopback
- * for an all-interfaces bind.
- */
+/** Managed engines are loopback-only; external access is via ProxySQL ingress. */
 export function resolveManagedApplyHost(
-  exposure: ManagedApplyPayload["exposure"],
+  _exposure: ManagedApplyPayload["exposure"],
 ): string {
-  if (!exposure.enabled) return "127.0.0.1";
-  return exposure.bindAddress ?? "0.0.0.0";
-}
-
-/**
- * Sync managed Traefik before engine compose up so port conflicts fail early
- * and the managed Docker network exists before the engine joins it.
- * {@link ManagedPortConflictError} propagates as a clean command-outcome error.
- */
-async function prepareManagedIngressForApply(
-  layout: LayoutPaths,
-  payload: ManagedApplyPayload,
-): Promise<void> {
-  const ingressEntry = buildIngressEntry(payload);
-  if (ingressEntry) {
-    if (!payload.ingress) {
-      throw new Error("managed.apply requires ingress when exposure.enabled");
-    }
-    const ownEntries = await syncManagedIngressEntries(
-      layout,
-      payload.managedId,
-      [ingressEntry],
-    );
-    await ensureManagedIngress(
-      layout,
-      payload.managedId,
-      ownEntries,
-      buildIngressIdentity(payload),
-    );
-    return;
-  }
-  await removeManagedIngressEntries(layout, payload.managedId);
-  await removeManagedIngress(layout, payload.managedId);
+  return "127.0.0.1";
 }
 
 async function requireDecryptedCredentials(
@@ -318,7 +230,14 @@ async function dropManagedUsers(
   appliedUsers.push(...dropped);
 }
 
-async function applyManagedEngineState(
+/**
+ * Primary path: credentials + databases + version.
+ * Standby is read-only for **user-data** mutation — never run credential /
+ * database SQL here. Engines whose standby is configured by SQL (MySQL /
+ * MariaDB) still run {@link ManagedEngineReplicationRuntime.configureStandby}
+ * first (replication channel setup is not user-data mutation).
+ */
+export async function applyManagedEngineState(
   ctx: ManagedEngineContext,
   engine: ReturnType<typeof getManagedEngineRuntime>,
   payload: ManagedApplyPayload,
@@ -331,6 +250,27 @@ async function applyManagedEngineState(
   }
 > {
   await engine.waitReady(ctx);
+
+  if (payload.replication?.role === "standby") {
+    if (
+      engine.replication?.configureStandby &&
+      payload.replication.primary
+    ) {
+      const replCred = credentials.find((c) => c.role === "replication");
+      if (replCred) {
+        await engine.replication.configureStandby(ctx, {
+          username: payload.replication.username,
+          password: replCred.password,
+          primary: payload.replication.primary,
+          slotName: payload.replication.slotName ??
+            `tp_member_${payload.memberOrdinal}`,
+        });
+      }
+    }
+    const engineVersion = await engine.readVersion(ctx);
+    return { appliedUsers: [], appliedDatabases: [], engineVersion };
+  }
+
   const appliedUsers = await engine.applyCredentials(ctx, credentials);
   await dropManagedUsers(ctx, engine, payload, appliedUsers);
   const appliedDatabases = payload.databases
@@ -338,6 +278,21 @@ async function applyManagedEngineState(
     : [];
   const engineVersion = await engine.readVersion(ctx);
   return { appliedUsers, appliedDatabases, engineVersion };
+}
+
+/** Pure member DTO for needs_resync early-return path. Exported for tests. */
+export function buildNeedsResyncMember(
+  memberId: string,
+): NonNullable<ManagedApplyResult["member"]> {
+  return {
+    memberId,
+    role: "replica",
+    status: "needs_resync",
+    replication: {
+      state: "needs_resync",
+      observedAt: new Date().toISOString(),
+    },
+  };
 }
 
 function buildManagedApplyResult(
@@ -348,15 +303,11 @@ function buildManagedApplyResult(
     engineVersion: string | undefined;
   },
   containers: EnvironmentDeployContainer[] | undefined,
+  member?: ManagedApplyResult["member"],
 ): ManagedApplyResult {
-  const host = resolveManagedApplyHost(payload.exposure);
-  const port = payload.exposure.enabled
-    ? (payload.exposure.publishedPort ?? payload.containerPort)
-    : payload.containerPort;
-
   const result: ManagedApplyResult = {
-    host,
-    port,
+    host: resolveManagedApplyHost(payload.exposure),
+    port: payload.containerPort,
     appliedUsers: state.appliedUsers,
     ...(state.appliedDatabases.length > 0
       ? { appliedDatabases: state.appliedDatabases }
@@ -369,48 +320,88 @@ function buildManagedApplyResult(
   if (containers !== undefined) {
     result.containers = containers;
   }
+  if (member !== undefined) {
+    result.member = member;
+  }
   return result;
 }
 
 /**
- * Merge engine + best-effort ingress container reports for the apply result.
- * Ingress collection failure must not drop already-collected engine rows.
+ * Volume already has data that is not a standby. Stop any running project so
+ * we never promote it as a writable primary, and return needs_resync without
+ * compose up or engine SQL mutation.
  */
-export function mergeManagedApplyContainers(
-  engineContainers: EnvironmentDeployContainer[] | undefined,
-  ingressContainers: EnvironmentDeployContainer[] | undefined,
-): EnvironmentDeployContainer[] | undefined {
-  if (ingressContainers === undefined) return engineContainers;
-  return [...(engineContainers ?? []), ...ingressContainers];
-}
-
-async function collectApplyContainers(
+async function returnStandbyNeedsResync(
   payload: ManagedApplyPayload,
-  engineProject: string,
   redact: (text: string) => string,
-): Promise<{
-  engineContainers: EnvironmentDeployContainer[] | undefined;
-  resultContainers: EnvironmentDeployContainer[] | undefined;
-}> {
-  const engineContainers = await collectManagedContainers(
-    engineProject,
-    redact,
-  );
-  if (!payload.ingress) {
-    return { engineContainers, resultContainers: engineContainers };
+): Promise<ManagedApplyResult> {
+  const project = managedComposeProject(payload.managedId);
+  const stop = await runDocker(["compose", "-p", project, "stop"]);
+  if (!stop.success) {
+    logInfo(
+      "managed",
+      `needs_resync compose stop soft-failed project=${project}: ${
+        redact(stop.stderr || stop.stdout || "compose stop failed")
+      }`,
+    );
   }
 
-  const ingressContainers = await collectManagedContainersForService(
-    managedIngressProject(payload.managedId),
-    payload.ingress.serviceId,
-    redact,
+  const observedAt = new Date().toISOString();
+  const member = payload.memberId
+    ? buildNeedsResyncMember(payload.memberId)
+    : undefined;
+
+  // buildNeedsResyncMember stamps its own observedAt; refresh is immaterial.
+  if (member?.replication) {
+    member.replication.observedAt = observedAt;
+  }
+
+  return buildManagedApplyResult(
+    payload,
+    { appliedUsers: [], appliedDatabases: [], engineVersion: undefined },
+    undefined,
+    member,
   );
+}
+
+async function collectMemberHealth(
+  ctx: ManagedEngineContext,
+  engine: ReturnType<typeof getManagedEngineRuntime>,
+  payload: ManagedApplyPayload,
+  decryptedCredentials: ManagedApplyCredential[],
+): Promise<ManagedApplyResult["member"] | undefined> {
+  if (!payload.memberId) return undefined;
+
+  if (payload.replication && engine.replication) {
+    if (payload.replication.role === "primary") {
+      const replCred = decryptedCredentials.find(
+        (c) => c.role === "replication",
+      );
+      if (replCred) {
+        await engine.replication.ensurePrimary(ctx, {
+          username: payload.replication.username,
+          password: replCred.password,
+          desiredSlots: payload.replication.desiredSlots ?? [],
+          peerAddresses: payload.replication.peerAddresses,
+        });
+      }
+    }
+    const health = await engine.replication.readHealth(
+      ctx,
+      payload.replication.role === "primary" ? "primary" : "standby",
+    );
+    return {
+      memberId: payload.memberId,
+      role: payload.memberRole,
+      status: "ready",
+      replication: health,
+    };
+  }
+
   return {
-    engineContainers,
-    resultContainers: mergeManagedApplyContainers(
-      engineContainers,
-      ingressContainers,
-    ),
+    memberId: payload.memberId,
+    role: payload.memberRole,
+    status: "ready",
   };
 }
 
@@ -424,9 +415,12 @@ export async function handleManagedApply(
   const engine = getManagedEngineRuntime(payload.engine);
 
   await ensureDocker();
-  await prepareManagedIngressForApply(layout, payload);
 
-  const managedRoot = await materializeManagedState(layout, payload);
+  const managedRoot = await materializeManagedState(
+    layout,
+    payload,
+    deps?.decryptSecrets,
+  );
   await normalizeManagedFileOwnership(
     payload.image,
     managedRoot,
@@ -437,6 +431,50 @@ export async function handleManagedApply(
   const { decrypted, redact, rootCredential } =
     await requireDecryptedCredentials(payload, deps);
 
+  // Standby bootstrap must run before compose up (empty volume → avoid dual primary).
+  if (
+    payload.replication?.role === "standby" &&
+    engine.replication &&
+    payload.replication.primary
+  ) {
+    const replCred = decrypted.credentials.find((c) =>
+      c.role === "replication"
+    );
+    if (!replCred) {
+      throw new Error(
+        "managed.apply standby requires a replication credential",
+      );
+    }
+    const boot = await engine.replication.bootstrapStandby(
+      {
+        managedId: payload.managedId,
+        image: payload.image,
+        volumes: payload.volumes,
+        stateDir: managedRoot,
+        containerUser: engine.containerUser,
+        containerGroup: engine.containerGroup,
+        runDocker: async (argv, options) => {
+          const result = await runDocker(argv, options);
+          return {
+            success: result.success,
+            stdout: result.stdout,
+            stderr: redact(result.stderr),
+          };
+        },
+      },
+      {
+        username: payload.replication.username,
+        password: replCred.password,
+        primary: payload.replication.primary,
+        slotName: payload.replication.slotName ??
+          `tp_member_${payload.memberOrdinal}`,
+      },
+    );
+    if (boot === "needs_resync") {
+      return await returnStandbyNeedsResync(payload, redact);
+    }
+  }
+
   const { composeYaml, composeServiceName } = normalizeManagedCompose(payload);
   const project = await composeUpManagedEngine(
     layout,
@@ -446,11 +484,7 @@ export async function handleManagedApply(
     redact,
   );
 
-  const { engineContainers, resultContainers } = await collectApplyContainers(
-    payload,
-    project,
-    redact,
-  );
+  const engineContainers = await collectManagedContainers(project, redact);
   const containerId = resolveEngineContainerId(
     engineContainers,
     composeServiceName,
@@ -471,7 +505,15 @@ export async function handleManagedApply(
       payload,
       decrypted.credentials,
     );
-    return buildManagedApplyResult(payload, state, resultContainers);
+
+    const member = await collectMemberHealth(
+      ctx,
+      engine,
+      payload,
+      decrypted.credentials,
+    );
+
+    return buildManagedApplyResult(payload, state, engineContainers, member);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(redact(message));

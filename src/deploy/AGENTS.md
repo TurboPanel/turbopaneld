@@ -2,7 +2,11 @@
 
 The `environment.deploy` / `environment.lifecycle` / `environment.stop` command handlers: Docker Compose bring-up with Traefik labels, hosting Caddy (`:80`/`:443`, distinct from control-plane Caddy), org TLS materialization from `denc` envelopes, non-destructive start/stop/restart, and best-effort container reporting.
 
-**Managed engines are a separate path** (`../managed/AGENTS.md`): platform-owned compose + config under `<stateDir>/managed/<managedId>/`, native ports only, no hosting Caddy, no tenant Traefik/`turbopanel-ingress`, no user compose merge. Do not route `managed.*` commands through this deploy stack.
+**Managed engines are a separate path** (`../managed/AGENTS.md`): platform-owned
+compose + config under `<stateDir>/managed/<managedId>/`, native ports only, no
+hosting Caddy, no tenant Traefik/`turbopanel-ingress`, no user compose merge,
+shared ProxySQL frontend (`turbopanel-proxysql` / `managed-ingress`). Do not
+route `managed.*` commands through this deploy stack.
 
 Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../instance/src/lib/commands/AGENTS.md`. Cross-repo `../<repo>/…` links are relative to the repo root.
 
@@ -17,14 +21,12 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../insta
    first deploy after group membership still works without a daemon restart
    (`sg docker` fails for `/usr/sbin/nologin` service accounts with "This
    account is currently not available").
-2. Bootstrap Traefik on Docker network `turbopanel-ingress` with loopback-only
-   entrypoints `127.0.0.1:7080` (`web`) and `127.0.0.1:7443` (`websecure`,
-   entrypoint-level TLS via Traefik's default self-signed cert), both with
-   `proxyProtocol.insecure=true`. **No** socat/`ingress-bridge`/unix socket.
-   Hosting Caddy dials `:7080` over h2c and `:7443` over HTTP/2+TLS
-   (`tls_insecure_skip_verify`) with PROXY protocol v2. HTTP/3 is offered only
-   at the public browser edge (browser→Caddy). **No** public `:80`/`:443` on
-   Traefik; **no** ACME/LE. When
+2. Bootstrap Traefik on Docker network `turbopanel-ingress` **only when the
+   deploy has at least one container HTTP hosting with hostnames** (shared
+   loopback entrypoints `127.0.0.1:7080` / `127.0.0.1:7443`, PROXY protocol,
+   …). Bare container deploys (no hostnames / no HTTP hosting rows) never start
+   the platform `-in` Traefik or declare the external ingress network on
+   compose. When
    `<stateDir>/system/hosting-ingress.json` is present,
    `ensureHostingIngress` passes that descriptor into `traefikCompose()` so
    the shared container gets allocated `container_name` /
@@ -114,6 +116,10 @@ Caddy — **no** hostname/TLS/path routing for those hostings;
 `hostings[].ports[]` (required, non-empty for `tcp`/`udp`) is a
 `{ published, target }` list.
 
+**Managed engines do not use this path** — they enter via the shared ProxySQL
+project (`turbopanel-proxysql` / `managed-ingress`). This section applies only
+to **tenant** docker-compose hostings.
+
 **HTTP hostings are excluded** from this path: they stay on the shared
 loopback Traefik (`turbopanel-ingress` / `traefikCompose()` — `web` /
 `websecure` only, no published public ports) via Docker labels. They never
@@ -201,36 +207,39 @@ Helpers: `src/deploy/ensure-docker.ts`, `src/deploy/ingress.ts`,
 
 The shared loopback Traefik (compose project `turbopanel-ingress`, service key
 `traefik`) is **platform inventory**, distinct from per-service tenant TCP/UDP
-Traefik and from managed-engine Traefik:
+Traefik and from managed-engine ProxySQL:
 
 | Pattern | Ownership | Compose project |
 | --- | --- | --- |
 | Shared HTTP ingress | Platform (`system/hosting-ingress.json`) | `turbopanel-ingress` |
 | Tenant TCP/UDP ingress | Tenant service (`ingress/services/<serviceId>/`) | `turbopanel-ingress-<serviceId>` |
-| Managed-engine ingress | Managed service (`managed/<id>/ingress/`) | `turbopanel-managed-<id>-ingress` |
+| Managed-engine ingress | Platform system component (`managed-ingress` → ProxySQL under `configDir/proxysql/`) | `turbopanel-proxysql` |
 | System stack (database/queue/analytics) | Ansible/Ops (`system-compose` role), inspected via `system/<component>.json` | `turbopanel-system` |
 
-**System stack (`turbopanel-system`) is a distinct, fourth pattern — inspect-only,
-never self-healed.** PostgreSQL/RabbitMQ/ClickHouse are provisioned into the
-`turbopanel-system` Compose project by the `system-compose` Ansible role (see
-`../../orchestration/AGENTS.md`), not by this deploy stack. The daemon never
-`docker compose up`s, stops, or restarts that project — `system.reconcile`
-only persists the identity descriptor and calls
-`inspectSystemStackContainer` (`src/deploy/system-stack.ts`) to report
-`docker compose ps` identity/status, exactly as `SYSTEM_COMPONENT_CONTRACTS`
-declares (`selfHealAllowed: false` for `database` / `queue` / `analytics` vs
-`true` for `hosting-ingress`). Adoption requires labels
-`turbopanel.role=system` + `com.turbopanel.system.component=<database|queue|analytics>`
-on the compose-ps row — **never** `com.turbopanel.service` (that label is
-reserved for tenant/system Traefik identity) and **never**
-`traefik.enable` (the system stack has no HTTP ingress of its own). A missing
-`turbopanel-system` compose file is authoritative absence (`null`, not a
-collection failure — Ansible/Ops has not provisioned the stack on this host
-yet); a `compose ps` failure returns `undefined` so the instance omits
-`containers` from that command's result. Keep all **four** patterns
-distinct: shared HTTP ingress self-heals via `ensureDocker`, tenant TCP/UDP
-and managed-engine ingress stay on their own tenant/engine service, and the
-system stack is observed only.
+**Keep these four patterns distinct:**
+
+1. **Shared HTTP Traefik** (`hosting-ingress`) — self-heals via
+   `ensureHostingIngress` when demand exists; loopback only to hosting Caddy.
+2. **Tenant raw TCP/UDP Traefik** — still **per tenant service** under
+   `ingress/services/<serviceId>/` for docker-compose hostings with
+   `protocol: tcp|udp`. **Do not** fold tenant raw ports into ProxySQL.
+   Ports `5432` / `3306` are reserved for the shared ProxySQL listeners
+   (`PROXYSQL_RESERVED_PUBLISHED_PORTS`); tenant claims colliding on those
+   published ports are rejected daemon-side.
+3. **Managed-engine ProxySQL** (`managed-ingress`) — one per server,
+   `proxysql/proxysql:3.0.2`, project `turbopanel-proxysql`. Desired state is
+   whole-server `managed.ingress.reconcile` (not embedded on `managed.apply`).
+   System self-heal dispatches to ProxySQL compose start/restart when the
+   inventory component is present. Engine containers never publish host ports
+   and never get a per-managed Traefik project.
+4. **System stack (`turbopanel-system`)** — inspect-only, never self-healed.
+   PostgreSQL/RabbitMQ/ClickHouse are provisioned by the `system-compose`
+   Ansible role. `system.reconcile` only inspects (`selfHeal: none`).
+
+Adoption for hosting-ingress and system-stack rows requires the documented
+labels (`turbopanel.role`, `com.turbopanel.system.component`, …) — see below.
+ProxySQL uses `role: system` + `com.turbopanel.system.component=managed-ingress`
+when identity is stamped.
 
 Descriptor path: `<stateDir>/system/hosting-ingress.json`
 (`SystemComponentDescriptor`: `component`, `serviceId`, `composeServiceName`
@@ -260,10 +269,25 @@ Production writer: the `system.reconcile` handler always calls
 `action: 'stop'` (hosting-disable PATCH — `compose stop`, then `ps -a`
 inspect), or report-only inspect when `desired: 'absent'` with
 `action: 'reconcile'` — ordinary disabled-state drift must not silently tear
-down a running proxy. Keep the three
-Traefik patterns distinct: shared HTTP ingress = system-workspace inventory,
-tenant TCP/UDP ingress stays on its tenant service, managed-engine ingress
-stays on the engine's service.
+down a running proxy. **`desired: 'present'` is demand-driven**: hosting
+enabled alone leaves the inventory pending until an HTTP hostname hosting
+exists on the server (or the ingress was already observed after first start)
+— bare enroll / enable-hosting must not pull Traefik.
+
+For ProxySQL / `managed-ingress`, the descriptor + compose identity live with
+`SYSTEM_COMPONENT_CONTRACTS.managed-ingress` (`selfHeal: "proxysql"`); runtime
+files under `configDir/proxysql/` are written by `managed.ingress.reconcile`
+and optionally re-started by `system.reconcile`. Host dirs and the
+`turbopanel-proxysql-stack` unit are Ansible-owned (`proxysql` role).
+
+**System stack (`turbopanel-system`) is inspect-only:**
+`inspectSystemStackContainer` (`src/deploy/system-stack.ts`) reports
+`docker compose ps` identity/status (`selfHealAllowed: false` for
+`database` / `queue` / `analytics`). Adoption requires labels
+`turbopanel.role=system` + `com.turbopanel.system.component=<database|queue|analytics>`
+— **never** `com.turbopanel.service` (tenant/system Traefik identity) and
+**never** `traefik.enable`. A missing `turbopanel-system` compose file is
+authoritative absence (`null`).
 
 ## Traditional web (nginx + apache + OpenLiteSpeed)
 

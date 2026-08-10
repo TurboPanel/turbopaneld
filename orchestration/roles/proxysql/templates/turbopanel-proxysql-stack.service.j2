@@ -1,0 +1,19 @@
+[Unit]
+Description=TurboPanel ProxySQL managed ingress
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Managed-engine network — engines and ProxySQL join this; never tenant turbopanel-ingress.
+ExecStartPre=/bin/sh -c '/usr/bin/docker network inspect {{ proxysql_managed_network }} >/dev/null 2>&1 || /usr/bin/docker network create {{ proxysql_managed_network }}'
+# Compose is daemon-written under configDir/proxysql. Before the first
+# managed.ingress.reconcile there is no docker-compose.yml — exit 0 so the unit
+# can enable on a fresh host without failing converge.
+ExecStart=/bin/sh -c 'if [ -f {{ proxysql_config_dir }}/docker-compose.yml ]; then /usr/bin/docker compose -p {{ proxysql_project_name }} -f {{ proxysql_config_dir }}/docker-compose.yml up -d --remove-orphans; else echo "proxysql compose not yet provisioned; skipping up"; fi'
+ExecStart=/bin/sh -c 'if [ -f {{ proxysql_config_dir }}/docker-compose.yml ]; then {{ proxysql_config_dir }}/wait-ready.sh; fi'
+ExecStop=/bin/sh -c 'if [ -f {{ proxysql_config_dir }}/docker-compose.yml ]; then /usr/bin/docker compose -p {{ proxysql_project_name }} -f {{ proxysql_config_dir }}/docker-compose.yml down; fi'
+
+[Install]
+WantedBy=multi-user.target

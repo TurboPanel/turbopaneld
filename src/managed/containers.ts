@@ -172,3 +172,97 @@ export async function collectManagedContainersForService(
     role: "ingress" as const,
   }));
 }
+
+/**
+ * Collect docker compose container rows and optional replication health for a
+ * member when the engine supports it. Compose collection stays engine-agnostic.
+ */
+export async function collectManagedMemberHealth(
+  project: string,
+  engine: {
+    composeServiceName?: string;
+    rootUsername: string;
+    defaultDatabase: string;
+    replication?: {
+      readHealth: (
+        ctx: {
+          containerId: string;
+          composeServiceName: string;
+          rootUsername: string;
+          defaultDatabase: string;
+          exec: (
+            argv: string[],
+            input?: string,
+          ) => Promise<{ success: boolean; stdout: string; stderr: string }>;
+        },
+        role: "primary" | "standby",
+      ) => Promise<{
+        state: string;
+        lagBytes?: number;
+        lagSeconds?: number;
+        observedAt: string;
+      }>;
+    };
+  },
+  params: {
+    memberId: string;
+    role: "primary" | "replica";
+    redact?: (text: string) => string;
+  },
+): Promise<{
+  containers: EnvironmentDeployContainer[] | undefined;
+  member?: {
+    memberId: string;
+    role: "primary" | "replica";
+    status: string;
+    replication?: {
+      state: string;
+      lagBytes?: number;
+      lagSeconds?: number;
+      observedAt: string;
+    };
+  };
+}> {
+  const containers = await collectManagedContainers(project, params.redact);
+  if (!containers || !engine.replication) {
+    return { containers };
+  }
+  try {
+    const containerId = resolveEngineContainerId(
+      containers,
+      containers[0]!.composeServiceName,
+    );
+    const health = await engine.replication.readHealth(
+      {
+        containerId,
+        composeServiceName: containers[0]!.composeServiceName,
+        rootUsername: engine.rootUsername,
+        defaultDatabase: engine.defaultDatabase,
+        exec: async (argv, input) => {
+          const result = await runDocker(
+            ["exec", "-i", containerId, ...argv],
+            input === undefined ? undefined : { input },
+          );
+          const redact = params.redact ?? ((text: string) => text);
+          return {
+            success: result.success,
+            stdout: result.stdout,
+            stderr: redact(result.stderr),
+          };
+        },
+      },
+      params.role === "primary" ? "primary" : "standby",
+    );
+    return {
+      containers,
+      member: {
+        memberId: params.memberId,
+        role: params.role,
+        status: "ready",
+        replication: health,
+      },
+    };
+  } catch {
+    return { containers };
+  }
+}

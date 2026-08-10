@@ -2,26 +2,34 @@
 
 Daemon-side runtime for environment-scoped managed database/cache engines
 (Postgres first). Completely separate from tenant `environment.deploy` — no
-hosting Caddy, no tenant Traefik network, no user compose merge.
+hosting Caddy, no tenant Traefik network, no user compose merge. Frontend
+access for managed engines is **one shared ProxySQL** per server
+(`turbopanel-proxysql`), not per-service Traefik.
 
 Root context: `../../AGENTS.md`. Instance engine specs:
 `../../../instance/src/lib/managed/AGENTS.md`. Command contracts:
-`../instance/commands/contracts.ts`.
+`../instance/commands/contracts.ts`. Host prerequisites:
+`../../orchestration/AGENTS.md` → **ProxySQL (`proxysql`)**.
 
 ## Module map
 
 | File | Role |
 | --- | --- |
-| `paths.ts` | State-dir layout + identifier / relative-path guards; `managedBackupsDir` / `managedBackupArtifactPath` |
-| `compose.ts` | Platform compose normalization (image, volumes, resources, exposure labels) |
-| `materialize.ts` | Write `config/` verbatim; ownership normalization via throwaway container (skips `backups/`) |
-| `tls.ts` | Self-signed cert generation (`openssl`) under `tls/` |
-| `ingress.ts` | Per-service managed Traefik (`turbopanel-managed-<id>-ingress`) + network + port-claim persistence |
+| `paths.ts` | Managed state-dir layout + identifier / relative-path guards; `managedBackupsDir` / `managedBackupArtifactPath`; ProxySQL layout helpers (`proxysqlConfigDir`, `proxysqlComposePath`, `proxysqlConfigPath`, `proxysqlTlsDir`, `proxysqlDataDir`, `proxysqlAdminCnfPath`, `PROXYSQL_PROJECT`) |
+| `compose.ts` | Platform compose normalization (image, volumes, resources); always joins `turbopanel-managed`; optional private-listener-only `ports:` (rejects all other publishes / Traefik labels) |
+| `materialize.ts` | Write `config/` verbatim; optional engine self-signed TLS + `orgTlsMaterial` → `tls/server.*` + `tls/proxysql/`; ownership normalization via throwaway container (skips `backups/`). Standby replication passwords are **not** written under `auth/`. |
+| `tls.ts` | Engine self-signed cert generation; org-CA materialization for engine leaf + ProxySQL; standby passfile materialization |
+| `networks.ts` | Ensure Docker network `turbopanel-managed` (engines + ProxySQL) |
+| `proxysql.ts` | Shared ProxySQL compose + durable `proxysql.cnf` generation, static-section diffing, inspect/start/stop/restart, legacy Traefik-ingress teardown |
+| `proxysql-admin.ts` | Runtime admin apply via `docker exec` + `admin.cnf` (`[client]` secrets never on argv/logs) |
 | `containers.ts` | Shared `docker compose ps` collection + running-container resolution used by `apply.ts` and `backup.ts` |
-| `apply.ts` / `lifecycle.ts` / `destroy.ts` | Command handlers (wired from `command-router.ts`) |
-| `backup.ts` | `managed.backup` (`create`/`delete`) + `managed.restore` command handlers — streamed dump/restore, checksum, prune |
-| `logs.ts` | Bounded `compose logs`; transported via cell `managed-logs-request` / `managed-logs-result` (not a command) |
-| `engines/` | Per-engine runtime registry (`postgres` first); optional `dropUsers` for `managed.apply` `dropUsers[]`; optional `backup` for `managed.backup`/`managed.restore` |
+| `apply.ts` / `lifecycle.ts` / `destroy.ts` / `promote.ts` | Engine command handlers (wired from `command-router.ts`); apply/destroy do **not** bring up per-service Traefik; promote is operator-only |
+| `backup.ts` | `managed.backup` (`create`/`delete`) + `managed.restore` — streamed dump/restore, checksum, prune |
+| `logs.ts` | Bounded `compose logs`; cell `managed-logs-request` / `managed-logs-result` (not a command) |
+| `engines/` | Per-engine runtime registry (`postgres`, `mysql`, `mariadb`); optional `dropUsers` / `backup` / `replication` (+ optional `configureStandby` for SQL-configured standbys) |
+| `engines/postgres.ts` + `postgres-sql.ts` | Postgres runtime + pure SQL builders |
+| `engines/mysql.ts` + `mysql-sql.ts` | MySQL runtime + pure SQL builders (GTID, auth_socket platform admin keeps `backup.ts` credential-free) |
+| `engines/mariadb.ts` + `mariadb-sql.ts` | MariaDB runtime + **own** dialect (not a MySQL alias; `MASTER_USE_GTID=slave_pos`, `mariadb-dump --gtid`) |
 
 ## State tree
 
@@ -29,112 +37,118 @@ Root context: `../../AGENTS.md`. Instance engine specs:
 <stateDir>/managed/<managedId>/
 ├── docker-compose.yml   # normalized runtime compose (mode 0640)
 ├── config/              # engine config files (verbatim from payload)
-│   └── postgresql.conf
+│   ├── postgresql.conf
+│   └── pg_hba.conf      # platform-owned HBA (multi-member / ssl)
 ├── tls/                 # sibling of config/ — matches `./tls` mount
-│   ├── server.crt       # 0640
-│   └── server.key       # 0600
-├── ingress/             # per-service Traefik compose (daemon-owned; not chowned)
-│   └── docker-compose.yml   # mode 0640
+│   ├── server.crt       # 0640 (org-CA leaf when multi-member; else self-signed)
+│   ├── server.key       # 0600
+│   ├── ca.crt           # 0640 when org material present (verify-full root)
+│   └── proxysql/        # org-CA leaf material for ProxySQL path
+│       ├── fullchain.pem  # 0640
+│       ├── privkey.pem    # 0600
+│       └── ca.pem         # 0640
 └── backups/             # 0750; artifacts written 0600 by the daemon user itself
     └── <backupId>.<ext> # <ext> from MANAGED_BACKUP_ARTIFACT_EXTENSIONS (dump | sql)
 
-<stateDir>/managed/ingress/
-└── <managedId>.json     # per-service ManagedIngressEntry[] claim files (mode 0640)
-                         # conflict detection only — not Traefik compose
+# Standby replication passwords must not live under managed/<id>/auth.
+# Bootstrap uses a short-lived 0600 env-file; streaming password is seeded by
+# pg_basebackup -R into the data volume (not managed state).
+
+# Shared ProxySQL (one per server) — daemon-owned runtime files;
+# Ansible provisions directories / admin.cnf / base static cnf / unit only.
+<configDir>/proxysql/
+├── docker-compose.yml   # daemon-written (mode 0640); absent until first reconcile
+├── proxysql.cnf         # durable cold-start config (static + users/servers/rules)
+├── admin.cnf            # [client] admin user/password, mode 0600 (Ansible once)
+├── wait-ready.sh        # Ansible; admin-port readiness for the oneshot unit
+└── tls/                 # leaf fullchain/privkey + CA PEMs written on reconcile
+    ├── fullchain.pem
+    ├── privkey.pem
+    └── ca.pem
+
+<stateDir>/proxysql/     # optional host-side data tree (uid pre-owned by Ansible);
+                         # compose typically uses a named volume for /var/lib/proxysql
 ```
 
 `.env` (`TURBOPANEL_MANAGED_ROOT_PASSWORD=…`, mode `0600`) exists **only** for
-the duration of `docker compose --env-file … up` and is deleted in `finally`.
+the duration of engine `docker compose --env-file … up` and is deleted in
+`finally`.
 
 Compose project names:
 
-- Engine: `turbopanel-managed-<managedId>`
-- Ingress Traefik (per service): `turbopanel-managed-<managedId>-ingress` on
-  Docker network `turbopanel-managed` (shared by engines + their Traefik —
-  **never** joins the tenant `turbopanel-ingress` network)
-- Ingress container name: instance-allocated `<engine service.id>-in`
+- Engine: `turbopanel-managed-<managedId>` on Docker network
+  `turbopanel-managed` (**always** — not only when exposed; **never** joins
+  tenant `turbopanel-ingress`)
+- Shared ProxySQL: `turbopanel-proxysql` (system component
+  `managed-ingress`, compose service `proxysql`) on the same
+  `turbopanel-managed` network
+- Engine container name: instance-allocated `<service.id>-1` (ordinal 2/3 for
+  replicas)
 
-## Managed Traefik ingress
+Legacy on-disk artifacts from the former per-service managed Traefik path
+(`managed/<id>/ingress/`, `<stateDir>/managed/ingress/*.json`) are removed by
+`proxysql.ts` migration helpers on first ProxySQL bring-up — do not recreate
+them.
 
-Independent of tenant `src/deploy/ingress.ts`. Each exposed managed service
-gets its **own** Traefik compose project (not a host-wide shared container).
-Static config is **regenerated, not hot-reloaded** (Traefik cannot add
-entrypoints at runtime):
+## ProxySQL ingress
 
-1. One `--entrypoints.<tcp|udp><port>.address=:<port>[/udp]` static arg and one
-   quoted `"<bind>:<port>:<port>/<tcp|udp>"` compose `ports:` line for **this**
-   service only (`http` exposures use the TCP wire protocol). Bind defaults to
-   `0.0.0.0`; instance-resolved `bindAddress` is validated with the same
-   IPv4/IPv6 literal allowlist as tenant `assertValidBindAddress`; IPv6
-   literals are bracketed and command/port lines are quoted so YAML stays
-   valid. Apply reports the same bind fallback (`0.0.0.0` when exposed without
-   `bindAddress`) — never loopback for an all-interfaces bind.
-2. Port-claim files persist under
-   `<stateDir>/managed/ingress/<managedId>.json`. `syncManagedIngressEntries`
-   checks every *other* service's file and throws
-   `ManagedPortConflictError` (`kind: managed_port_conflict`) on
-   **wire-protocol**+published-port collision (`http` and `tcp` share TCP) —
-   **no partial write**. Sync returns **this service's own entries** (not a
-   host-wide merge); removal no longer restarts other services' Traefik.
-3. Compose self-describes via `x-turbopanel: { kind: ingress, managedId,
-   serviceId, containerName }` plus Docker labels
-   `turbopanel.managed.id=<managedId>` / `turbopanel.role=ingress`. The Docker
-   provider is constrained with
-   `--providers.docker.constraints=Label(\`turbopanel.managed.id\`,\`<id>\`)`
-   so this Traefik only routes its own engine (which carries the matching
-   `turbopanel.managed.id` + `turbopanel.role=engine` labels).
-4. Engine containers join `turbopanel-managed` and carry Traefik Docker labels
-   (`compose.ts`): TCP router + `loadbalancer.server.port` = native container
-   port. **No** TLS termination, ACME, or `auto_https` on managed Traefik —
-   Postgres negotiates TLS end to end.
-5. **SNI seam (structure only):** `ManagedIngressEntry.sni?.hostnames` plus
-   `ManagedEngineRuntime.supportsSni`. `managedTcpRouterRule` emits explicit
-   `HostSNI(\`h1\`,\`h2\`)` only when `supportsSni` is true; Postgres sets
-   `supportsSni: false` and always takes catch-all `HostSNI(\`*\`)`. Do not
-   build hostname/TLS material handling here — the branch exists for a future
-   HTTP-ish engine (e.g. ClickHouse).
-6. **Trade-off:** N exposed services ⇒ N small Traefik containers, each with a
-   read-only Docker socket mount — apply/lifecycle/destroy touch only that
-   service's ingress.
+Independent of tenant `src/deploy/ingress.ts` Traefik. **One** ProxySQL
+container per managed host terminates the public (or scoped) MySQL/Postgres
+listeners and routes to engine members on `turbopanel-managed`.
 
-Apply syncs this service's ingress **before** engine `compose up` so port
-conflicts fail early and the managed network exists before the engine joins
-it. Destroy downs (1) the engine project, (2) this service's Traefik via
-`removeManagedIngress` + claim-file removal.
-`removeManagedIngress` downs the compose project **and deletes**
-`<managedId>/ingress/` so a later `managed.lifecycle` start/restart cannot
-treat a stale compose file as active. `exposure.enabled=false` uses the same
-per-service remove path (without legacy teardown). `ManagedPortConflictError`
-propagates as the command-outcome error string for the UI.
+| Piece | Detail |
+| --- | --- |
+| Image pin | `proxysql/proxysql:3.0.2` (`PROXYSQL_IMAGE`) — **do not loosen** without reviewing **GHSA-58ww-865x-grpr** (pre-auth heap overflow on first-packet path, ProxySQL 3.0.x, May 2026) |
+| Listeners | Published `5432` (pgsql) and `3306` (mysql) on the instance-resolved `bindAddress`; admin on `127.0.0.1:6032` only |
+| TLS | Frontend/backend TLS uses org-CA material under `configDir/proxysql/tls/` (and per-engine copies under `tls/proxysql/` for materialize). Engines still use self-signed `tlsMaterial` for their own listener when requested |
+| Desired state | Whole-server command `managed.ingress.reconcile` carries `bindAddress` + `clusters[]` (backends + users); **not** embedded on each `managed.apply` |
+| Admin apply | `proxysql-admin.ts` loads `admin.cnf`, mounts it into a throwaway client or uses stdin; SQL LOAD/SAVE — credentials never argv/logs |
+| Cold start | Full `proxysql.cnf` (static + dynamic tables) is rewritten so reboot/`compose up` restores routing without a live admin session |
+| Static vs dynamic | Static section = datadir, admin_variables, mysql_variables, pgsql_variables (interfaces + `have_ssl` + cert paths). Dynamic = `mysql_*` / `pgsql_*` servers, users, query_rules. Listener/static changes require container restart; user/backend changes prefer admin interface only |
+| Inventory | System component `managed-ingress` / project `turbopanel-proxysql`; self-heal via `system.reconcile` → `proxysql` (distinct from inspect-only `database`/`queue`/`analytics`) |
+| Host prep | Ansible role `proxysql` + playbook `proxysql-setup.yml` (`runProxySqlSetup`) — dirs, admin.cnf, initial static cnf when absent, wait-ready, `turbopanel-proxysql-stack.service`, network. **Never** daemon compose contents |
+
+Username frontend namespace is **server-wide** across every cluster hosted on that
+org's servers: `ManagedFrontendUserConflictError` when the same login would map
+to two managed ids. The instance enforces the same org-owner login uniqueness
+before enqueue (see `instance/src/lib/managed/AGENTS.md` → Login namespace).
 
 ## Rules
 
 1. **Container names from the instance.** The instance supplies engine
-   `containerName` (`<service.id>-1`) and, when exposed,
-   `ingress.{serviceId, composeServiceName, containerName}` where `serviceId`
-   is the **engine's own** service id and `containerName` is
-   `<engine service.id>-in` — there is **no** separate ingress `service`
-   row; the row is a `role='ingress'`, ordinal-1 `container` row on the engine
-   service. `normalizeManagedCompose` / `managedTraefikCompose` write them as
-   `container_name`. `assertSafeManagedIdentifiers` guards both with the
-   hyphen-permitting Docker-name regex (do not reuse `SAFE_VOLUME_NAME_RE`).
-   Container resolution (`containers.ts`) still keys off `Service` / `State`,
-   never `Name`.
-2. **Native port, never remapped.** Normalized compose never emits `ports:`.
-   The container listens on the engine native port; exposure is Traefik's job
-   via `turbopanel-managed` + TCP router labels.
-3. **Config is verbatim.** The daemon does **not** rebuild `postgresql.conf`
+   `containerName` (`<service.id>-N`). There is **no** per-managed Traefik /
+   `-in` ingress row on the engine service for ProxySQL path. ProxySQL identity
+   (when provisioned into the system workspace) uses system-component
+   allocation (`managed-ingress`), not engine ordinal slots.
+   `assertSafeManagedIdentifiers` guards Docker names with the
+   hyphen-permitting regex (do not reuse `SAFE_VOLUME_NAME_RE`). Container
+   resolution (`containers.ts`) still keys off `Service` / `State`, never
+   `Name`.
+2. **Native port, never remapped; published only via private listener.**
+   Normalized engine compose never emits arbitrary `ports:`. Multi-member
+   clusters may publish **one** engine port bound exclusively to the member's
+   private datacenter/VPN address at the instance-allocated
+   `managed_member.private_port` — that private listener is the single
+   cross-host path for both streaming replication and remote ProxySQL
+   backends. Loopback and `0.0.0.0` binds are rejected. Single-member
+   clusters still publish nothing; client traffic enters only via shared
+   ProxySQL (`5432` / `3306`).
+3. **Always join `turbopanel-managed`.** Every managed engine container joins
+   that network whether or not frontend exposure is enabled, so ProxySQL can
+   reach it and so multi-member replication paths stay consistent.
+4. **Config is verbatim.** The daemon does **not** rebuild `postgresql.conf`
    (or peer engine files). The instance engine spec is the single source of
    truth for base + operator snippet + `ssl = on`. Re-apply **unlinks then
    recreates** each config file — after ownership normalization they are
    often `root:<engineGroup>` `0640`, which the daemon cannot open for
    write, but it owns the parent directory so unlink+create succeeds.
-4. **Secrets.** Credential envelopes decrypt in memory → root password reaches
+5. **Secrets.** Credential envelopes decrypt in memory → root password reaches
    compose only through the short-lived `0600` env-file → deleted after `up`.
    Plaintext never lands in `docker-compose.yml` on disk and never appears in
    logs (`redactSecrets` + `sanitizeForLog`). SQL/password input uses
-   `runDocker(…, { input })` stdin — never argv.
-5. **Ownership normalization.** Files written by the daemon user are unreadable
+   `runDocker(…, { input })` stdin — never argv. ProxySQL admin password
+   lives only in `admin.cnf` (mode `0600`).
+6. **Ownership normalization.** Files written by the daemon user are unreadable
    by the container engine user. `normalizeManagedFileOwnership` runs one
    throwaway `docker run --user 0` of the engine image to `chown`/`chmod`
    **only** the bind-mounted trees (`config/`, `tls/`) — never
@@ -142,47 +156,56 @@ propagates as the command-outcome error string for the UI.
    daemon-owned so re-apply can rewrite them). Owner/group names come from
    the engine runtime descriptor — never hardcoded in shared code. Modes:
    `0640` → `root:<engineGroup>`; `0600` → `<engineUser>:<engineGroup>`;
-   directories keep the daemon UID as owner but take `<engineGroup>` + `0750` so
-   the engine user can traverse mounts like `./config:/etc/postgresql`
-   (file-only chown left dirs as `daemon:daemon` `0750` and caused Postgres
-   "Permission denied" on `postgresql.conf`). Whole-tree chown previously
-   made `docker-compose.yml` `root:<engineGroup>` `0640` and broke re-apply
-   with `writefile` Permission denied.
-6. **Engine extension.** One file under `engines/` implementing
-   `ManagedEngineRuntime` (+ `supportsSni`) + one registry entry in
-   `engines/index.ts`.
-7. **Tenant isolation.** Never import or mutate tenant Traefik / hosting
+   directories keep the daemon UID as owner but take `<engineGroup>` + `0750`.
+7. **Engine extension.** One file under `engines/` implementing
+   `ManagedEngineRuntime` + one registry entry in `engines/index.ts`.
+8. **Tenant isolation.** Never import or mutate tenant Traefik / hosting
    Caddy state from this package beyond shared helpers (`assertValidBindAddress`,
-   `runDocker`).
-8. **Backup/restore (`backup.ts`).** Optional per engine via
+   `runDocker`). Tenant raw TCP/UDP Traefik remains `src/deploy/ingress.ts`.
+9. **Username conflict guard.** Do not insert frontend users that would
+   collide across clusters on the same host org namespace
+   (`ManagedFrontendUserConflictError`).
+9a. **Platform admin vs. frontend root login.** `ManagedEngineContext.rootUsername`
+   (built from the static `engine.rootUsername` in `apply.ts` / `backup.ts` /
+   `promote.ts` / `containers.ts` — **never** from a payload credential) is
+   always the stable platform admin the daemon uses for every internal admin
+   path (`waitReady`, `psql`/`mysql` exec, `pg_dump`/`pg_restore`,
+   promote/replication health). The user-facing "root" principal an operator
+   connects with may be a *different*, possibly org-suffixed username
+   (`resolveAvailableManagedRootUsername` in the instance repo) — it is
+   applied as an ordinary `role: "root"` credential in `applyCredentials`
+   (a separate SUPERUSER/grant, not a rename of the connection identity).
+   Never assume the payload's root credential username equals
+   `ctx.rootUsername`. Canonical contract:
+   `../../instance/src/lib/managed/AGENTS.md` → "Managed root username".
+10. **Backup/restore (`backup.ts`).** Optional per engine via
    `ManagedEngineRuntime.backup` (`ManagedBackupNotSupportedError` when absent).
-   - **Stream, never buffer.** Dump stdout pipes directly to a `<backupId>.<ext>.part`
-     file opened at `0600`; restore pipes the artifact file straight into
-     `docker exec -i <cid> <restoreArgv>` stdin. The command result carries
-     **only metadata** (`path`, `sizeBytes`, `checksum`, timestamps) — dump
-     bytes never appear on the wire. `runDocker` (buffers stdout as text) is
-     never used for dump/restore; use `spawnDockerStreaming`
-     (`src/deploy/docker-cli.ts`) instead.
-   - **Checksum before restore.** `handleManagedRestore` verifies the
-     artifact's size (when the payload supplies one) and SHA-256 against
-     `payload.checksum` **before** touching the running engine container. A
-     mismatch throws without ever invoking `docker exec`.
-   - **`.part` cleanup on failure.** Any non-zero dump exit or thrown error
-     removes the `.part` file — a partial artifact must never look like a
-     complete one.
-   - **Prune by payload retention.** After a successful create, list the
-     backups dir, keep the newest `payload.retentionKeep` artifacts by mtime
-     (plus the one just written), unlink the rest, and report their ids as
-     `result.pruned[]`. When `retentionKeep` is omitted, nothing is pruned —
-     the instance is expected to always resolve a retention value from
-     `ManagedSettings.backups.retentionKeep` or the engine's
-     `defaultRetentionKeep` before enqueueing.
-   - **`managed.destroy` removes `backups/` too** — it is inside `managedDir`,
-     so the existing `Deno.remove(root, { recursive: true })` already covers
-     it; no separate cleanup path exists or should be added.
-   - **Scheduled backups are an explicit future seam** — there is no timer or
-     scheduler anywhere in this module; every backup is operator/API-triggered.
-   - Container resolution reuses `containers.ts` — backup/restore only know
-     `managedId` (not the user compose document), so they resolve the *sole*
-     container in the compose project (`resolveSoleEngineContainer`) rather
-     than matching a specific `composeServiceName`.
+   - **Stream, never buffer.** Dump stdout pipes to a `<backupId>.<ext>.part`
+     file at `0600`; restore pipes the artifact into `docker exec -i`
+     stdin. Result carries **only metadata**. Use `spawnDockerStreaming`, not
+     `runDocker`, for dump/restore.
+   - **Checksum before restore.** Verify size/checksum before touching the
+     engine container.
+   - **`.part` cleanup on failure.** Partial artifacts must never look complete.
+   - **Prune by payload retention.** After create, keep newest
+     `payload.retentionKeep` artifacts; omit retention → no prune.
+   - **`managed.destroy` removes `backups/`** with the managed dir.
+   - **Scheduled backups** remain an explicit future seam (no timers here).
+   - Container resolution reuses `containers.ts` /
+     `resolveSoleEngineContainer`.
+
+## Replication
+
+Physical / GTID streaming is **engine → engine**, never through ProxySQL.
+
+| Path | Postgres | MySQL / MariaDB |
+| --- | --- | --- |
+| Co-resident | Peers by `containerName` on `turbopanel-managed` | same |
+| Cross-host | Private listener (`private_port` on member IP) | same |
+| Config | Instance owns `postgresql.conf` + `pg_hba.conf` | Instance owns `my.cnf` + `initdb/00-turbopanel.sql` (socket-auth platform admin — keeps SQL/`backup.ts` credential-free) |
+| Slots / disk hazard | Physical slots + orphan drop on `ensurePrimary` | **No slots** — bounded `binlog_expire_logs_seconds` in platform `my.cnf` |
+| Bootstrap | `bootstrapStandby` **before** compose up seeds via `pg_basebackup -R` | Probe only before compose up (uninit → `seeded` deferred; marker → `already_standby`; datadir without marker → `needs_resync`). Actual seed in **`configureStandby`** after compose up (logical dump + `CHANGE REPLICATION SOURCE` / MariaDB `CHANGE MASTER` + GTID) |
+| Credentials | Short-lived `0600` env-file for basebackup | Short-lived `0600` defaults file over exec stdin (never `-p` / never `MYSQL_PWD`) |
+| Standby SQL | not used (config-file primary_conninfo) | Optional `configureStandby` hook — replication channel setup is not user-data mutation |
+| Promote | Operator only — no auto-failover | same (`STOP REPLICA` / `STOP SLAVE` + clear read_only) |
+| Health | `streaming` requires active WAL receiver | `streaming` requires both IO + SQL threads running |

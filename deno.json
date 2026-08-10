@@ -25,6 +25,7 @@
     "coverage",
     ".ansible",
     "orchestration/roles/geerlingguy.docker",
+    "orchestration/roles/geerlingguy",
     "workers"
   ],
   "fmt": {

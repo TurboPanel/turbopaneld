@@ -1,0 +1,8 @@
+- name: Ensure ProxySQL managed-ingress host prerequisites
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+  roles:
+    - role: docker
+    - role: proxysql

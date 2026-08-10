@@ -3,24 +3,24 @@
  *
  * The instance engine spec is the source of truth for service shape; this
  * module re-asserts image/volumes/resources/dockerOptions, strips `ports:`,
- * rejects denylisted keys, and attaches managed-ingress Traefik labels when
- * exposure is enabled.
+ * rejects denylisted keys, and always attaches the managed Docker network for
+ * ProxySQL reachability.
  */
 
 import { parse, stringify } from "yaml";
 import {
   getManagedReservedEnvKeys,
+  isValidIpv4Literal,
+  isValidIpv6Literal,
   type ManagedApplyDockerOptions,
   type ManagedApplyPayload,
   type ManagedApplyResources,
 } from "../instance/commands/contracts.ts";
-import { getManagedEngineRuntime } from "./engines/index.ts";
-import { MANAGED_INGRESS_NETWORK, managedTcpRouterRule } from "./ingress.ts";
+import { MANAGED_INGRESS_NETWORK } from "./networks.ts";
 
 /** Placeholder token permitted in managed compose (mirrors ManagedSecretPlaceholder). */
 export const MANAGED_ROOT_PASSWORD_VAR = "TURBOPANEL_MANAGED_ROOT_PASSWORD"; // NOSONAR typescript:S2068 — compose env var name for ${…} interpolation, not a credential value
 
-const ROUTER_ID_RE = /^[A-Za-z0-9_-]+$/;
 const INTERPOLATION_RE = /\$\{([^}]+)\}/g;
 const MANAGED_SERVICE_DENYLIST = new Set([
   "privileged",
@@ -37,6 +37,37 @@ const MANAGED_SERVICE_DENYLIST = new Set([
 ]);
 
 type ComposeService = Record<string, unknown>;
+
+function isLoopbackOrUnspecified(address: string): boolean {
+  if (address === "0.0.0.0" || address === "::" || address === "::1") {
+    return true;
+  }
+  if (isValidIpv4Literal(address)) {
+    return address.startsWith("127.");
+  }
+  return false;
+}
+
+/**
+ * Private listener publishes one engine port on a concrete private address.
+ * Loopback / unspecified binds are rejected — engines never publish on 0.0.0.0
+ * or host loopback.
+ */
+function assertPrivateListener(address: string, port: number): void {
+  if (!isValidIpv4Literal(address) && !isValidIpv6Literal(address)) {
+    throw new Error(
+      `managed privateListener address is not a valid IP: ${address}`,
+    );
+  }
+  if (isLoopbackOrUnspecified(address)) {
+    throw new Error(
+      `managed privateListener must not bind loopback or unspecified: ${address}`,
+    );
+  }
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new Error(`managed privateListener port out of range: ${port}`);
+  }
+}
 type ComposeDocument = Record<string, unknown> & {
   services?: Record<string, ComposeService>;
   networks?: Record<string, unknown>;
@@ -76,14 +107,6 @@ function environmentFromRecord(
     if (isEnvScalar(value)) env[key] = String(value);
   }
   return env;
-}
-
-function assertRouterId(value: string): void {
-  if (!ROUTER_ID_RE.test(value)) {
-    throw new Error(
-      "managed router id must contain only letters, digits, hyphens, and underscores",
-    );
-  }
 }
 
 function parseCompose(composeYaml: string): ComposeDocument {
@@ -231,40 +254,6 @@ function applyDockerOptions(
   }
 }
 
-function applyExposureLabels(
-  service: ComposeService,
-  payload: ManagedApplyPayload,
-): void {
-  const publishedPort = payload.exposure.publishedPort;
-  if (publishedPort === undefined) {
-    throw new Error("exposure.enabled requires publishedPort");
-  }
-  const protocol = payload.exposure.protocol === "udp" ? "udp" : "tcp";
-  const routerId = `m-${payload.managedId}`;
-  assertRouterId(routerId);
-
-  const labels = isRecord(service.labels)
-    ? Object.fromEntries(
-      Object.entries(service.labels).map(([k, v]) => [k, String(v)]),
-    )
-    : {};
-  labels["traefik.enable"] = "true";
-  labels["turbopanel.managed.id"] = payload.managedId;
-  labels["turbopanel.role"] = "engine";
-  const entrypoint = `${protocol}${publishedPort}`;
-  labels[`traefik.${protocol}.routers.${routerId}.entrypoints`] = entrypoint;
-  if (protocol === "tcp") {
-    const engine = getManagedEngineRuntime(payload.engine);
-    labels[`traefik.tcp.routers.${routerId}.rule`] = managedTcpRouterRule(
-      { sni: payload.exposure.sni },
-      engine.supportsSni,
-    );
-  }
-  labels[`traefik.${protocol}.services.${routerId}.loadbalancer.server.port`] =
-    String(payload.containerPort);
-  service.labels = labels;
-}
-
 function ensureTopLevelVolumes(
   document: ComposeDocument,
   volumes: ManagedApplyPayload["volumes"],
@@ -324,10 +313,22 @@ export function normalizeManagedCompose(
   }
   delete service.ports;
 
+  if (payload.privateListener) {
+    const { address, port } = payload.privateListener;
+    // Single deliberate publish: private address only (never loopback/unspecified).
+    assertPrivateListener(address, port);
+    service.ports = [`${address}:${port}:${payload.containerPort}`];
+  }
+
   for (const key of Object.keys(service)) {
     if (MANAGED_SERVICE_DENYLIST.has(key)) {
       throw new Error(`managed compose rejects service key: ${key}`);
     }
+  }
+
+  // After denylist: if ports remain and are not exactly our privateListener, reject.
+  if (service.ports !== undefined && !payload.privateListener) {
+    throw new Error("managed compose must not declare ports");
   }
 
   service.image = payload.image;
@@ -342,15 +343,10 @@ export function normalizeManagedCompose(
     applyDockerOptions(service, payload.dockerOptions, payload.engine);
   }
 
-  if (payload.exposure.enabled) {
-    attachManagedIngressNetwork(service);
-    const networks = isRecord(document.networks)
-      ? { ...document.networks }
-      : {};
-    networks[MANAGED_INGRESS_NETWORK] = { external: true };
-    document.networks = networks;
-    applyExposureLabels(service, payload);
-  }
+  attachManagedIngressNetwork(service);
+  const networks = isRecord(document.networks) ? { ...document.networks } : {};
+  networks[MANAGED_INGRESS_NETWORK] = { external: true };
+  document.networks = networks;
 
   assertNoForbiddenInterpolation(document);
 

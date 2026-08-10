@@ -5,7 +5,7 @@ import {
   MANAGED_ROOT_PASSWORD_VAR,
   normalizeManagedCompose,
 } from "./compose.ts";
-import { MANAGED_INGRESS_NETWORK } from "./ingress.ts";
+import { MANAGED_INGRESS_NETWORK } from "./networks.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -60,6 +60,11 @@ function basePayload(
         password: "denc.server.key.1.payload",
       },
     ],
+    memberId: "00000000-0000-4000-8000-0000000000a1",
+    memberRole: "primary",
+    memberOrdinal: 1,
+    readEligible: false,
+    peers: [],
     ...overrides,
   };
 }
@@ -121,7 +126,6 @@ test("normalizeManagedCompose emits container_name and keeps it across dockerOpt
       exposure: {
         enabled: true,
         protocol: "tcp",
-        publishedPort: 15432,
       },
     }),
   );
@@ -164,6 +168,26 @@ test("normalizeManagedCompose strips ports and maps resources", () => {
   const limits = resources.limits as Record<string, unknown>;
   assertEquals(limits.cpus, "1.5");
   assertEquals(limits.memory, String(512 * 1024 * 1024));
+});
+
+test("normalizeManagedCompose emits privateListener ports only", () => {
+  const doc = parseNormalized(
+    basePayload({
+      privateListener: { address: "203.0.113.50", port: 45001 },
+    }),
+  );
+  const service = (doc.services as Record<string, Record<string, unknown>>)
+    .postgres!;
+  assertEquals(service.ports, ["203.0.113.50:45001:5432"]);
+  assertThrows(
+    () =>
+      normalizeManagedCompose(
+        basePayload({
+          privateListener: { address: "127.0.0.1", port: 45001 },
+        }),
+      ),
+    Error,
+  );
 });
 
 test("normalizeManagedCompose applies dockerOptions and rejects denylist keys", () => {
@@ -251,66 +275,16 @@ test("normalizeManagedCompose rejects unknown interpolation tokens", () => {
   );
 });
 
-test("normalizeManagedCompose exposure attaches managed network and TCP labels", () => {
-  const off = parseNormalized(basePayload());
-  assertEquals(off.networks, undefined);
-
-  const on = parseNormalized(
-    basePayload({
-      exposure: {
-        enabled: true,
-        protocol: "tcp",
-        publishedPort: 15432,
-        // Postgres supportsSni=false — hostnames must not change the rule.
-        sni: { hostnames: ["db.example.com", "db2.example.com"] },
-      },
-    }),
-  );
-  const networks = on.networks as Record<string, unknown>;
+test("normalizeManagedCompose always attaches managed network for ProxySQL reachability", () => {
+  const doc = parseNormalized(basePayload());
+  const networks = doc.networks as Record<string, unknown>;
   assertEquals(networks[MANAGED_INGRESS_NETWORK], { external: true });
-  const service = (on.services as Record<string, Record<string, unknown>>)
+  const service = (doc.services as Record<string, Record<string, unknown>>)
     .postgres!;
   assertEquals(
     (service.networks as string[]).includes(MANAGED_INGRESS_NETWORK),
     true,
   );
-  const labels = service.labels as Record<string, string>;
-  assertEquals(labels["traefik.enable"], "true");
-  assertEquals(
-    labels["turbopanel.managed.id"],
-    "00000000-0000-4000-8000-000000000001",
-  );
-  assertEquals(labels["turbopanel.role"], "engine");
-  assertEquals(
-    labels[
-      "traefik.tcp.routers.m-00000000-0000-4000-8000-000000000001.entrypoints"
-    ],
-    "tcp15432",
-  );
-  assertEquals(
-    labels["traefik.tcp.routers.m-00000000-0000-4000-8000-000000000001.rule"],
-    "HostSNI(`*`)",
-  );
-  assertEquals(
-    labels[
-      "traefik.tcp.services.m-00000000-0000-4000-8000-000000000001.loadbalancer.server.port"
-    ],
-    "5432",
-  );
-
-  const catchAll = parseNormalized(
-    basePayload({
-      exposure: { enabled: true, protocol: "tcp", publishedPort: 15432 },
-    }),
-  );
-  const catchLabels = (
-    (catchAll.services as Record<string, Record<string, unknown>>).postgres!
-      .labels
-  ) as Record<string, string>;
-  assertEquals(
-    catchLabels[
-      "traefik.tcp.routers.m-00000000-0000-4000-8000-000000000001.rule"
-    ],
-    "HostSNI(`*`)",
-  );
+  const labels = service.labels as Record<string, string> | undefined;
+  assertEquals(labels?.["traefik.enable"], undefined);
 });

@@ -27,6 +27,14 @@ import {
   hostingIngressComposePath,
   inspectHostingIngressContainer as defaultInspectHostingIngressContainer,
 } from "../../deploy/ingress.ts";
+import { ensureManagedIngressNetwork } from "../../managed/networks.ts";
+import {
+  ensureProxySqlIngress,
+  inspectProxySqlContainer,
+  readCurrentProxySqlBindAddress,
+  restartProxySqlIngress,
+  stopProxySqlIngress,
+} from "../../managed/proxysql.ts";
 import {
   SYSTEM_COMPONENT_CONTRACTS,
   type SystemComponentDescriptor,
@@ -236,27 +244,58 @@ async function reconcileOneComponent(params: {
   const contract = SYSTEM_COMPONENT_CONTRACTS[component.component];
 
   let observed: EnvironmentDeployContainer | null | undefined;
-  if (contract.selfHealAllowed) {
-    if (action === "stop") {
-      // Explicit hosting-disable stop — tear down the running proxy, then
-      // inspect. Ordinary desired:'absent' reconcile stays report-only.
-      await ensureDockerFn();
-      await stopHostingIngress(layout, run);
-    } else if (component.desired === "present") {
-      await ensureDockerFn();
-      await ensureHostingIngressFn(layout);
-      if (action === "restart") {
-        await restartHostingIngress(layout, run);
+  switch (contract.selfHeal) {
+    case "hosting-ingress": {
+      if (action === "stop") {
+        await ensureDockerFn();
+        await stopHostingIngress(layout, run);
+      } else if (component.desired === "present") {
+        await ensureDockerFn();
+        await ensureHostingIngressFn(layout);
+        if (action === "restart") {
+          await restartHostingIngress(layout, run);
+        }
       }
+      observed = await inspectHostingIngressFn(layout);
+      break;
     }
-    // desired === 'absent' && action !== 'stop' → report-only: skip
-    // ensureDocker / ensureHostingIngress / compose writes.
-    observed = await inspectHostingIngressFn(layout);
-  } else {
-    // database / queue / analytics: platform-managed production stack.
-    // Inspect only — never ensureDocker, never compose up, never restart,
-    // regardless of `desired` or `action`.
-    observed = await inspectSystemStackFn(layout, descriptor);
+    case "proxysql": {
+      if (action === "stop") {
+        await ensureDockerFn();
+        await stopProxySqlIngress(layout, run);
+      } else if (component.desired === "present") {
+        await ensureDockerFn();
+        await ensureManagedIngressNetwork(run);
+        // Preserve whatever bind the last `managed.ingress.reconcile` desired
+        // (or `null`/private when never published) — self-heal has no fresh
+        // desired-state payload and must never widen exposure by guessing
+        // `0.0.0.0`. See `readPublishedBindAddressFromCompose`.
+        const preservedBindAddress = await readCurrentProxySqlBindAddress(
+          layout,
+        );
+        await ensureProxySqlIngress(
+          layout,
+          descriptor,
+          run,
+          preservedBindAddress,
+        );
+        if (action === "restart") {
+          await restartProxySqlIngress(layout, run);
+        }
+      }
+      observed = await inspectProxySqlContainer(layout, descriptor, {
+        runDocker: run,
+      });
+      break;
+    }
+    case "none": {
+      observed = await inspectSystemStackFn(layout, descriptor);
+      break;
+    }
+    default: {
+      const exhaustive: never = contract.selfHeal;
+      throw new TypeError(`unsupported selfHeal strategy: ${exhaustive}`);
+    }
   }
 
   if (observed === undefined) {

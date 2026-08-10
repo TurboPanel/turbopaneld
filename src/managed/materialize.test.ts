@@ -57,6 +57,11 @@ function basePayload(
         password: "denc.server.key.1.payload",
       },
     ],
+    memberId: "00000000-0000-4000-8000-0000000000a1",
+    memberRole: "primary",
+    memberOrdinal: 1,
+    readEligible: false,
+    peers: [],
     ...overrides,
   };
 }
@@ -144,5 +149,47 @@ test("ensureManagedSelfSignedCert writes under tls/ at expected modes", async ()
 
     // Idempotent re-apply does not throw.
     await ensureManagedSelfSignedCert(managedRoot, payload.tlsMaterial!);
+  });
+});
+
+test("materializeManagedState writes orgTlsMaterial under tls/proxysql before normalize", async () => {
+  await withTempLayout(async (layout) => {
+    const privatePem =
+      "-----BEGIN PRIVATE KEY-----\nORGLEAF\n-----END PRIVATE KEY-----\n";
+    const leafPem =
+      "-----BEGIN CERTIFICATE-----\nORGLEAF\n-----END CERTIFICATE-----\n";
+    const caPem =
+      "-----BEGIN CERTIFICATE-----\nORGCA\n-----END CERTIFICATE-----\n";
+    const decryptCalls: string[][] = [];
+
+    const payload = basePayload({
+      orgTlsMaterial: {
+        certificatePem: leafPem,
+        privateKeyEnvelope: "denc.server.key.1.payload",
+        caCertPem: caPem,
+      },
+    });
+
+    const managedRoot = await materializeManagedState(
+      layout,
+      payload,
+      (ciphertexts) => {
+        decryptCalls.push([...ciphertexts]);
+        return Promise.resolve(ciphertexts.map(() => privatePem));
+      },
+    );
+
+    assertEquals(decryptCalls, [["denc.server.key.1.payload"]]);
+
+    const fullchain = join(managedRoot, "tls/proxysql/fullchain.pem");
+    const privkey = join(managedRoot, "tls/proxysql/privkey.pem");
+    const ca = join(managedRoot, "tls/proxysql/ca.pem");
+
+    assertEquals(await Deno.readTextFile(fullchain), leafPem);
+    assertEquals(await Deno.readTextFile(privkey), privatePem);
+    assertEquals(await Deno.readTextFile(ca), caPem);
+    assertEquals((await Deno.stat(fullchain)).mode! & 0o777, 0o640);
+    assertEquals((await Deno.stat(privkey)).mode! & 0o777, 0o600);
+    assertEquals((await Deno.stat(ca)).mode! & 0o777, 0o640);
   });
 });

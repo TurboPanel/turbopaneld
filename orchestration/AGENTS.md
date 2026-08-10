@@ -67,6 +67,48 @@ datacenter LAN has a return route to the gateway for site traffic.
 **Not** wired into `daemon-converge.yml` (command-driven only, like
 `time-sync-apply`).
 
+### ProxySQL (`proxysql`)
+
+Shared **managed-database ingress** on every host that will run managed
+engines. Host prerequisites only — **not** a full stack bring-up of compose
+content. Meta-depends on the `docker` role. Standalone playbook:
+`playbooks/proxysql-setup.yml` (invoked by daemon `runProxySqlSetup` after
+`ensureGalaxyDockerRole`).
+
+**Division of labour**
+
+| Owner | Responsibility |
+| --- | --- |
+| Ansible (`proxysql` role) | Config dir `0750` root:`turbopanel_group`, `tls/` subdir, state data dir + first-run alpine `chown` to `999:999`, one-shot `admin.cnf` mode `0600`, initial static `proxysql.cnf` **only when absent** (`force: no`), `wait-ready.sh`, `turbopanel-proxysql-stack.service`, ensure docker network `turbopanel-managed` |
+| Daemon (`src/managed/proxysql.ts`, `managed.ingress.reconcile`) | Write/update `docker-compose.yml`, regenerate full durable `proxysql.cnf` (static listeners + users/servers/rules), materialize TLS PEMs under `tls/`, admin runtime apply, compose up/restart |
+| Systemd unit | `Type=oneshot` `RemainAfterExit`; create network if missing; **if compose file exists** → `docker compose up -d` + wait-ready; **if compose not yet written** → no-op success (pre-reconcile hosts stay healthy after converge) |
+
+**Paths**
+
+| Path | Mode / owner | Purpose |
+| --- | --- | --- |
+| `/etc/turbopanel/proxysql/` | `0750` root:group | Config root (`proxysql_config_dir`) |
+| `…/tls/` | `0750` root:group | Org-CA leaf + CA for frontend TLS (daemon writes PEMs) |
+| `…/admin.cnf` | `0600` root:group | mysql-client-style `[client]` admin user/password (like postgres `.pgpass`) |
+| `…/proxysql.cnf` | `0640` root:group | Cold-start config (Ansible seeds static globals once; daemon owns thereafter) |
+| `…/wait-ready.sh` | `0750` root:root | Probe admin `127.0.0.1:6032` after compose up |
+| `…/docker-compose.yml` | daemon `0640` | **Not** written by Ansible |
+| `/var/lib/turbopanel/proxysql/` | pre-owned `999:999` | Host-side data tree marker / optional bind target |
+| Network `turbopanel-managed` | bridge | Engines + ProxySQL (never tenant `turbopanel-ingress`) |
+| Unit `turbopanel-proxysql-stack.service` | `0640` | Reboot durability once compose exists |
+
+**Image pin:** `proxysql_image: proxysql/proxysql:3.0.2`. Must not be loosened
+without reviewing **GHSA-58ww-865x-grpr** (pre-auth heap overflow on the
+first-packet path affecting ProxySQL **3.0.x** listeners, May 2026 advisory).
+Keep in step with daemon `PROXYSQL_IMAGE` in `src/managed/proxysql.ts`.
+
+**Ports (defaults):** admin `6032` (loopback), pgsql frontend `5432`, mysql
+frontend `3306`. These published frontend ports are reserved against tenant
+raw TCP hostings (`PROXYSQL_RESERVED_PUBLISHED_PORTS`).
+
+**Installer vocabulary:** component/status token `proxysql` → **ingress** (see
+`src/orchestration/presentation.ts`).
+
 ### Web-service user (`web-service-user`)
 
 Tenant/daemon-host web servers (nginx, Apache, OpenLiteSpeed, LiteSpeed enterprise) run under dedicated **99xx** system accounts — distinct from control-plane **tpcaddy(9993)**. The `web-service-user` role provisions **only** the group + system user (no package install). **Not** wired into `daemon-converge.yml`; traditional-web apply playbooks `include_role` it on demand when a traditional-web site is deployed, then vendor the matching engine role.

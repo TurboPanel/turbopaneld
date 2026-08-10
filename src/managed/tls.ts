@@ -1,12 +1,17 @@
 /**
- * Managed-engine self-signed TLS materialization.
+ * Managed-engine TLS materialization.
  *
- * Uses host `/usr/bin/openssl`. Idempotent: skips regeneration when a valid
- * cert already exists at the requested path.
+ * - `ensureManagedSelfSignedCert` — host openssl self-signed for the engine leg.
+ * - `materializeProxySqlTlsMaterial` — org-CA-signed leaf + CA write for the
+ *   ProxySQL-facing frontend (decrypt envelopes via the same secrets path as
+ *   tenant deploy TLS materialization).
  */
 
-import { dirname } from "@std/path";
-import type { ManagedApplyTlsMaterial } from "../instance/commands/contracts.ts";
+import { join } from "@std/path";
+import type {
+  ManagedApplyOrgTlsMaterial,
+  ManagedApplyTlsMaterial,
+} from "../instance/commands/contracts.ts";
 import { sanitizeForLog } from "../logger.ts";
 import { resolveManagedRelativePath } from "./paths.ts";
 
@@ -16,6 +21,15 @@ const KEY_MODE = 0o600;
 const DIR_MODE = 0o750;
 /** Multi-year validity for managed self-signed material. */
 const VALIDITY_DAYS = 3650;
+
+const PROXYSQL_TLS_SUBDIR = "tls/proxysql";
+const FULLCHAIN_NAME = "fullchain.pem";
+const PRIVKEY_NAME = "privkey.pem";
+const CA_NAME = "ca.pem";
+
+export type DecryptSecretsFn = (
+  ciphertexts: string[],
+) => Promise<(string | null)[]>;
 
 async function pathExists(path: string): Promise<boolean> {
   try {
@@ -61,8 +75,8 @@ export async function ensureManagedSelfSignedCert(
     return;
   }
 
-  await Deno.mkdir(dirname(certPath), { recursive: true, mode: DIR_MODE });
-  await Deno.mkdir(dirname(keyPath), { recursive: true, mode: DIR_MODE });
+  await Deno.mkdir(dirnameOf(certPath), { recursive: true, mode: DIR_MODE });
+  await Deno.mkdir(dirnameOf(keyPath), { recursive: true, mode: DIR_MODE });
 
   const subject = `/CN=${request.commonName}`;
   const result = await new Deno.Command(OPENSSL_BIN, {
@@ -97,4 +111,143 @@ export async function ensureManagedSelfSignedCert(
 
   await Deno.chmod(certPath, CERT_MODE);
   await Deno.chmod(keyPath, KEY_MODE);
+}
+
+function dirnameOf(path: string): string {
+  const idx = path.lastIndexOf("/");
+  if (idx <= 0) return ".";
+  return path.slice(0, idx);
+}
+
+/**
+ * Decrypt org-CA leaf material and write ProxySQL-facing PEMs under
+ * `targetDir/{fullchain.pem,privkey.pem,ca.pem}` (modes `0640` / `0600` /
+ * `0640`). Idempotent re-apply overwrites.
+ */
+export async function materializeProxySqlTlsMaterial(
+  targetDir: string,
+  material: ManagedApplyOrgTlsMaterial,
+  decryptSecrets: DecryptSecretsFn,
+): Promise<void> {
+  const [privateKeyPem] = await decryptSecrets([material.privateKeyEnvelope]);
+  if (typeof privateKeyPem !== "string" || privateKeyPem.length === 0) {
+    throw new Error("failed to decrypt ProxySQL private key envelope");
+  }
+  if (
+    material.certificatePem.length === 0 ||
+    material.caCertPem.length === 0
+  ) {
+    throw new Error("ProxySQL TLS material missing certificate or CA PEM");
+  }
+
+  await Deno.mkdir(targetDir, { recursive: true, mode: DIR_MODE });
+
+  const fullchainPath = join(targetDir, FULLCHAIN_NAME);
+  const privkeyPath = join(targetDir, PRIVKEY_NAME);
+  const caPath = join(targetDir, CA_NAME);
+
+  await Deno.writeTextFile(fullchainPath, material.certificatePem, {
+    mode: CERT_MODE,
+  });
+  await Deno.writeTextFile(privkeyPath, privateKeyPem, { mode: KEY_MODE });
+  await Deno.writeTextFile(caPath, material.caCertPem, { mode: CERT_MODE });
+
+  await Deno.chmod(fullchainPath, CERT_MODE);
+  await Deno.chmod(privkeyPath, KEY_MODE);
+  await Deno.chmod(caPath, CERT_MODE);
+}
+
+/**
+ * Engine-local ProxySQL TLS material under `<managedDir>/tls/proxysql/`.
+ * Also mirrors the org-CA leaf into `tls/server.{crt,key}` + `tls/ca.crt` so
+ * the engine listener can serve `verify-full` for ProxySQL backends and
+ * streaming replication.
+ */
+export async function materializeManagedProxySqlTlsMaterial(
+  managedDir: string,
+  material: ManagedApplyOrgTlsMaterial,
+  decryptSecrets: DecryptSecretsFn,
+): Promise<void> {
+  const [privateKeyPem] = await decryptSecrets([material.privateKeyEnvelope]);
+  if (typeof privateKeyPem !== "string" || privateKeyPem.length === 0) {
+    throw new Error("failed to decrypt ProxySQL private key envelope");
+  }
+  if (
+    material.certificatePem.length === 0 ||
+    material.caCertPem.length === 0
+  ) {
+    throw new Error("ProxySQL TLS material missing certificate or CA PEM");
+  }
+
+  const dir = resolveManagedRelativePath(managedDir, PROXYSQL_TLS_SUBDIR);
+  await Deno.mkdir(dir, { recursive: true, mode: DIR_MODE });
+
+  const fullchainPath = join(dir, FULLCHAIN_NAME);
+  const privkeyPath = join(dir, PRIVKEY_NAME);
+  const caPath = join(dir, CA_NAME);
+  await Deno.writeTextFile(fullchainPath, material.certificatePem, {
+    mode: CERT_MODE,
+  });
+  await Deno.writeTextFile(privkeyPath, privateKeyPem, { mode: KEY_MODE });
+  await Deno.writeTextFile(caPath, material.caCertPem, { mode: CERT_MODE });
+  await Deno.chmod(fullchainPath, CERT_MODE);
+  await Deno.chmod(privkeyPath, KEY_MODE);
+  await Deno.chmod(caPath, CERT_MODE);
+
+  // Mirror org-CA leaf to engine listener paths (verify-full primary_conninfo
+  // + ProxySQL backend SSL).
+  const tlsDir = resolveManagedRelativePath(managedDir, "tls");
+  await Deno.mkdir(tlsDir, { recursive: true, mode: DIR_MODE });
+  const certPath = join(tlsDir, "server.crt");
+  const keyPath = join(tlsDir, "server.key");
+  const engineCaPath = join(tlsDir, "ca.crt");
+  await Deno.writeTextFile(certPath, material.certificatePem, {
+    mode: CERT_MODE,
+  });
+  await Deno.writeTextFile(keyPath, privateKeyPem, { mode: KEY_MODE });
+  await Deno.writeTextFile(engineCaPath, material.caCertPem, {
+    mode: CERT_MODE,
+  });
+  await Deno.chmod(certPath, CERT_MODE);
+  await Deno.chmod(keyPath, KEY_MODE);
+  await Deno.chmod(engineCaPath, CERT_MODE);
+}
+
+/**
+ * Materialize a short-lived `.pgpass` for ephemeral bootstrap only.
+ *
+ * **Do not call from durable apply materialization.** Replication passwords
+ * must not live as long-lived plaintext under `managed/<id>/auth`. Prefer the
+ * short-lived 0600 basebackup env-file + `pg_basebackup -R` data-volume
+ * password. Host field must use `replication.primary.host` (leaf SAN), never
+ * `hostaddr`, so libpq passfile lookup matches `host=` in primary_conninfo.
+ * IPv6 hosts with colons are escaped per libpq passfile rules.
+ */
+export async function materializeStandbyPassfile(
+  managedDir: string,
+  entry: {
+    host: string;
+    port: number;
+    username: string;
+    password: string;
+  },
+): Promise<void> {
+  const authDir = resolveManagedRelativePath(managedDir, "auth");
+  await Deno.mkdir(authDir, { recursive: true, mode: 0o750 });
+  // libpq: escape `:` and `\` in hostname/user/password fields. The search
+  // argument for a lone backslash cannot itself be written with
+  // `String.raw` — a raw template cannot end in an unescaped backslash
+  // (it would escape the closing backtick) — so only the replacement
+  // strings (which are not a single trailing backslash) use it.
+  const escape = (value: string): string =>
+    value.replaceAll("\\", String.raw`\\`).replaceAll(
+      ":",
+      String.raw`\:`,
+    );
+  const line = `${escape(entry.host)}:${entry.port}:*:${
+    escape(entry.username)
+  }:${escape(entry.password)}\n`;
+  const path = join(authDir, "pgpass");
+  await Deno.writeTextFile(path, line, { mode: 0o600 });
+  await Deno.chmod(path, 0o600);
 }

@@ -88,7 +88,7 @@ test({
       // environment index. Hosting is then deleted so stop carries no
       // ingressServices — teardown must still find the persisted index.
       await syncTcpUdpIngressEntries(layout, serviceId, [
-        { hostingId: "h-tcp", protocol: "tcp", publishedPort: 5432 },
+        { hostingId: "h-tcp", protocol: "tcp", publishedPort: 15432 },
       ]);
       const projectDir = serviceIngressDir(layout, serviceId);
       await Deno.mkdir(projectDir, { recursive: true, mode: 0o750 });

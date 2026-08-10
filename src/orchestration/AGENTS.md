@@ -17,11 +17,13 @@ free-text status lines pass through `relabelComponent()` /
 `sanitizeStatusLine()` while the presenter is active
 (`src/orchestration/presentation.ts`). Common mappings: `ansible` /
 `ansible-galaxy` / `galaxy` → **orchestration**; `redis` → **cache**; `rabbitmq`
-/ `rabbit mq` → **queue**; `uv` / `python` / `cpython` → **runtime**. Ansible
+/ `rabbit mq` → **queue**; `proxysql` → **ingress**; `uv` / `python` /
+`cpython` → **runtime**. Ansible
 JSONL events (`logAnsibleEvent` / `InstallEventPresenter`) and orchestration
 `logInfo` lines (`runRedisSetup`, `runRabbitmqSetup`, `runPostgresSetup`,
-`runDockerSetup`, `runInstanceDevInstall`, `runDaemonConverge`, …) all funnel
-through the same helpers when `setActiveInstallPresenter()` is set.
+`runProxySqlSetup`, `runDockerSetup`, `runInstanceDevInstall`,
+`runDaemonConverge`, …) all funnel through the same helpers when
+`setActiveInstallPresenter()` is set.
 
 **Intentionally unchanged:** vendor directory names
 (`/opt/turbopanel/vendor/redis/…`), Ansible role directory names (`roles/redis`,

@@ -152,6 +152,11 @@ export const POSTGRES_PLAYBOOK = join(
   "playbooks",
   "postgres-setup.yml",
 );
+export const PROXYSQL_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  "playbooks",
+  "proxysql-setup.yml",
+);
 export const REDIS_PLAYBOOK = join(
   ORCHESTRATION_DIR,
   "playbooks",

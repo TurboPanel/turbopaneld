@@ -5,6 +5,8 @@
  */
 
 import type { ManagedEngineCode } from "../../instance/commands/contracts.ts";
+import { mariadbManagedEngineRuntime } from "./mariadb.ts";
+import { mysqlManagedEngineRuntime } from "./mysql.ts";
 import { postgresManagedEngineRuntime } from "./postgres.ts";
 import {
   ManagedEngineNotSupportedError,
@@ -13,6 +15,8 @@ import {
 
 const RUNTIMES: Partial<Record<ManagedEngineCode, ManagedEngineRuntime>> = {
   postgres: postgresManagedEngineRuntime,
+  mysql: mysqlManagedEngineRuntime,
+  mariadb: mariadbManagedEngineRuntime,
 };
 
 export function getManagedEngineRuntime(

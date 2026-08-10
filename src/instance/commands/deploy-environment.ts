@@ -33,6 +33,7 @@ import {
 } from "../../deploy/run-deploy-hooks.ts";
 import { applyTraditionalWebSites } from "../../deploy/traditional-web.ts";
 import { ensureExternalDockerNetworks } from "../../deploy/ensure-docker-networks.ts";
+import { ensureManagedIngressNetwork } from "../../managed/networks.ts";
 import {
   injectTraditionalWebDockerReachability,
   resolveDockerHostGatewayAddress,
@@ -216,9 +217,25 @@ export type EnvironmentDeployDeps = {
   decryptSecrets?: DecryptSecretsFn;
 };
 
+/**
+ * True when any container hosting routes HTTP hostnames through the shared
+ * loopback Traefik (`turbopanel-ingress`). Empty hostnames and `tcp`/`udp`
+ * hostings do not need the shared proxy — per-service Traefik covers raw ports.
+ */
+export function containerHostingsNeedSharedHttpIngress(
+  hostings: readonly EnvironmentDeployHosting[],
+): boolean {
+  for (const hosting of hostings) {
+    if (hosting.protocol === "tcp" || hosting.protocol === "udp") continue;
+    if (hosting.hostnames.length > 0) return true;
+  }
+  return false;
+}
+
 /** Sets up Traefik/Docker ingress for container deploys, or the hosting-Caddy-only
- * runtime for traditional-web-only environments. Shared Traefik is HTTP-only;
- * per-service Traefik projects handle tcp/udp via `ingressServices[]`.
+ * runtime for traditional-web-only environments. Shared Traefik is HTTP-only and
+ * starts only when an HTTP hosting actually routes hostnames; per-service
+ * Traefik projects handle tcp/udp via `ingressServices[]`.
  *
  * Services that previously published raw ports but are absent from the new
  * `ingressServices[]` (e.g. tcp/udp → HTTP-only redeploy) are torn down here
@@ -252,7 +269,12 @@ async function ensureDeployIngress(
     return;
   }
   await ensureDocker();
-  await ensureHostingIngress(layout);
+
+  // Shared loopback Traefik only when something HTTP actually needs it —
+  // bare nginx/workload deploys must not create the platform `-in` proxy.
+  if (containerHostingsNeedSharedHttpIngress(containerHostings)) {
+    await ensureHostingIngress(layout);
+  }
 
   await cleanupStaleTcpUdpServiceIngress(
     layout,
@@ -406,6 +428,11 @@ async function deployContainerServices(
   const externalNetworks = parsedPayload.dockerExternalNetworks ?? [];
   if (externalNetworks.length > 0) {
     await ensureExternalDockerNetworks(externalNetworks);
+  }
+
+  const managedNetworkServices = parsedPayload.managedNetworkServices ?? [];
+  if (managedNetworkServices.length > 0) {
+    await ensureManagedIngressNetwork();
   }
 
   if (parsedPayload.noCache === true) {

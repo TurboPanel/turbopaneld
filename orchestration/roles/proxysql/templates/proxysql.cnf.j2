@@ -1,0 +1,29 @@
+# Static globals only — Ansible templates this file once when absent.
+# Daemon regenerates dynamic users/servers/rules and may rewrite listeners
+# (managed.ingress.reconcile → proxysql.ts). Do not put mysql_*/pgsql_*
+# server/user/query_rule tables here.
+datadir="/var/lib/proxysql"
+
+admin_variables=
+{
+    admin_credentials="{{ proxysql_admin_user }}:{{ _proxysql_admin_password }}"
+    mysql_ifaces="127.0.0.1:{{ proxysql_admin_port }}"
+}
+
+mysql_variables=
+{
+    interfaces="0.0.0.0:{{ proxysql_mysql_port }}"
+    have_ssl=1
+    ssl_p2s_cert="/var/lib/proxysql/certs/fullchain.pem"
+    ssl_p2s_key="/var/lib/proxysql/certs/privkey.pem"
+    ssl_p2s_ca="/var/lib/proxysql/certs/ca.pem"
+}
+
+pgsql_variables=
+{
+    interfaces="0.0.0.0:{{ proxysql_pgsql_port }}"
+    have_ssl=1
+    ssl_p2s_cert="/var/lib/proxysql/certs/fullchain.pem"
+    ssl_p2s_key="/var/lib/proxysql/certs/privkey.pem"
+    ssl_p2s_ca="/var/lib/proxysql/certs/ca.pem"
+}

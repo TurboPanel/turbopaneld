@@ -1,5 +1,6 @@
 import { parse, stringify } from "yaml";
 import type { EnvironmentDeployPayload } from "../instance/commands/contracts.ts";
+import { MANAGED_INGRESS_NETWORK } from "../managed/networks.ts";
 import {
   LABEL_ENVIRONMENT,
   LABEL_PROJECT,
@@ -73,23 +74,62 @@ function normalizeLabels(value: unknown): Record<string, string> {
   throw new Error("Compose labels must be strings or an object");
 }
 
-function attachIngressNetwork(service: ComposeService): void {
+function attachComposeNetwork(
+  service: ComposeService,
+  networkName: string,
+): void {
   const networks = service.networks;
   if (networks === undefined) {
-    service.networks = [INGRESS_NETWORK];
+    service.networks = [networkName];
     return;
   }
   if (Array.isArray(networks)) {
-    if (!networks.includes(INGRESS_NETWORK)) {
-      networks.push(INGRESS_NETWORK);
+    if (!networks.includes(networkName)) {
+      networks.push(networkName);
     }
     return;
   }
   if (isRecord(networks)) {
-    networks[INGRESS_NETWORK] ??= {};
+    networks[networkName] ??= {};
     return;
   }
   throw new Error("Compose service networks must be an array or object");
+}
+
+function attachIngressNetwork(service: ComposeService): void {
+  attachComposeNetwork(service, INGRESS_NETWORK);
+}
+
+/**
+ * Attach the daemon's shared managed-ingress network
+ * (`turbopanel-managed`) to every compose service that owns a
+ * managed-database binding, so the ProxySQL container-name endpoint
+ * resolved by the instance (`resolveBindingEndpoint`) is dial-able. Mirrors
+ * {@link attachIngressNetwork} but for a platform-managed (never
+ * operator-registered) network.
+ */
+function injectManagedNetworkAttachment(
+  compose: ComposeDocument,
+  payload: EnvironmentDeployPayload,
+): void {
+  const serviceNames = payload.managedNetworkServices ?? [];
+  if (serviceNames.length === 0) return;
+
+  const services = compose.services!;
+  for (const composeServiceName of serviceNames) {
+    const service = services[composeServiceName];
+    if (!isRecord(service)) {
+      throw new Error(`Compose service not found: ${composeServiceName}`);
+    }
+    attachComposeNetwork(service, MANAGED_INGRESS_NETWORK);
+  }
+
+  const networks = compose.networks ?? {};
+  if (!isRecord(networks)) {
+    throw new TypeError("Compose networks must be an object");
+  }
+  networks[MANAGED_INGRESS_NETWORK] = { external: true };
+  compose.networks = networks;
 }
 
 function buildRouterRule(hostnames: string[], pathPrefix?: string): string {
@@ -264,12 +304,18 @@ export function injectHostingLabels(payload: EnvironmentDeployPayload): {
     attachIngressNetwork(service);
   }
 
-  const networks = compose.networks ?? {};
-  if (!isRecord(networks)) {
-    throw new TypeError("Compose networks must be an object");
+  // Only declare the external ingress network when something actually routes
+  // through it — bare container deploys must not require Traefik/network.
+  if (payload.hostings.length > 0) {
+    const networks = compose.networks ?? {};
+    if (!isRecord(networks)) {
+      throw new TypeError("Compose networks must be an object");
+    }
+    networks[INGRESS_NETWORK] = { external: true };
+    compose.networks = networks;
   }
-  networks[INGRESS_NETWORK] = { external: true };
-  compose.networks = networks;
+
+  injectManagedNetworkAttachment(compose, payload);
 
   return {
     composeYaml: stringify(compose),

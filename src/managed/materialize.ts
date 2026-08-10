@@ -16,7 +16,11 @@ import {
   managedDir,
   resolveManagedRelativePath,
 } from "./paths.ts";
-import { ensureManagedSelfSignedCert } from "./tls.ts";
+import {
+  type DecryptSecretsFn,
+  ensureManagedSelfSignedCert,
+  materializeManagedProxySqlTlsMaterial,
+} from "./tls.ts";
 
 const DIR_MODE = 0o750;
 const MODE_0640 = 0o640;
@@ -52,10 +56,14 @@ async function writeManagedConfigFile(
 /**
  * Write config files and optional TLS material under
  * `<stateDir>/managed/<managedId>/`.
+ *
+ * When `payload.orgTlsMaterial` is set, `decryptSecrets` is required so the
+ * leaf private key envelope can be unwrapped before writing ProxySQL PEMs.
  */
 export async function materializeManagedState(
   layout: LayoutPaths,
   payload: ManagedApplyPayload,
+  decryptSecrets?: DecryptSecretsFn,
 ): Promise<string> {
   const root = managedDir(layout, payload.managedId);
   const configDir = managedConfigDir(layout, payload.managedId);
@@ -71,6 +79,24 @@ export async function materializeManagedState(
   if (payload.tlsMaterial) {
     await ensureManagedSelfSignedCert(root, payload.tlsMaterial);
   }
+
+  if (payload.orgTlsMaterial) {
+    if (!decryptSecrets) {
+      throw new Error(
+        "managed.apply orgTlsMaterial requires decryptSecrets",
+      );
+    }
+    await materializeManagedProxySqlTlsMaterial(
+      root,
+      payload.orgTlsMaterial,
+      decryptSecrets,
+    );
+  }
+
+  // Standby replication passwords must not be written as durable plaintext
+  // under managed/<id>/auth. Bootstrap uses a short-lived 0600 env-file for
+  // pg_basebackup only; ongoing streaming relies on password seeded into the
+  // data volume via `pg_basebackup -R` (postgresql.auto.conf), not managed state.
 
   return root;
 }

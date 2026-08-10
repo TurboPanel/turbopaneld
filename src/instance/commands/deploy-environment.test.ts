@@ -1,5 +1,6 @@
 import { assertEquals, assertRejects } from "@std/assert";
 import {
+  containerHostingsNeedSharedHttpIngress,
   handleEnvironmentDeploy,
   shapeEnvironmentDeployResult,
 } from "./deploy-environment.ts";
@@ -16,6 +17,39 @@ const test = Deno.test.bind(Deno);
 // checks; broader validation lives in deploy-validation.test.ts.
 // Success-path dispatch/result shape is covered via shapeEnvironmentDeployResult
 // (same helper handleEnvironmentDeploy returns) for a container-free deploy.
+
+test("containerHostingsNeedSharedHttpIngress requires HTTP hostnames", () => {
+  assertEquals(containerHostingsNeedSharedHttpIngress([]), false);
+  assertEquals(
+    containerHostingsNeedSharedHttpIngress([{
+      hostingId: "h1",
+      serviceId: "s1",
+      composeServiceName: "web",
+      hostnames: [],
+      protocol: "tcp",
+      ports: [{ published: 5432, target: 5432 }],
+    }]),
+    false,
+  );
+  assertEquals(
+    containerHostingsNeedSharedHttpIngress([{
+      hostingId: "h1",
+      serviceId: "s1",
+      composeServiceName: "web",
+      hostnames: [],
+    }]),
+    false,
+  );
+  assertEquals(
+    containerHostingsNeedSharedHttpIngress([{
+      hostingId: "h1",
+      serviceId: "s1",
+      composeServiceName: "web",
+      hostnames: ["app.example.test"],
+    }]),
+    true,
+  );
+});
 
 test("handleEnvironmentDeploy rejects unsupported environmentId characters", async () => {
   await assertRejects(

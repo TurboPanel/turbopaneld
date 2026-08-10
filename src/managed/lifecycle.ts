@@ -18,10 +18,13 @@ import {
 import { sanitizeForLog } from "../logger.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import {
+  collectManagedContainers,
+  collectManagedMemberHealth,
+} from "./containers.ts";
+import { getManagedEngineRuntime } from "./engines/index.ts";
+import {
   managedComposeProject,
   managedDir,
-  managedIngressComposePath,
-  managedIngressProject,
   SAFE_MANAGED_ID_RE,
 } from "./paths.ts";
 
@@ -37,92 +40,6 @@ export type ManagedLifecycleHandlerDeps = {
   runDocker?: RunDockerFn;
 };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function parseComposePsEntries(stdout: string): Record<string, unknown>[] {
-  const trimmed = stdout.trim();
-  if (trimmed.length === 0) return [];
-
-  try {
-    const parsed: unknown = JSON.parse(trimmed);
-    if (Array.isArray(parsed)) {
-      return parsed.filter(isRecord);
-    }
-    if (isRecord(parsed)) return [parsed];
-  } catch {
-    // Fall through to NDJSON.
-  }
-
-  const entries: Record<string, unknown>[] = [];
-  for (const line of trimmed.split("\n")) {
-    const row = line.trim();
-    if (row.length === 0) continue;
-    try {
-      const parsed: unknown = JSON.parse(row);
-      if (isRecord(parsed)) entries.push(parsed);
-    } catch {
-      return [];
-    }
-  }
-  return entries;
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    const stat = await Deno.stat(path);
-    return stat.isDirectory || stat.isFile;
-  } catch (err) {
-    if (err instanceof Deno.errors.NotFound) return false;
-    throw err;
-  }
-}
-
-async function collectContainers(
-  project: string,
-  run: RunDockerFn = defaultRunDocker,
-): Promise<EnvironmentDeployContainer[]> {
-  const result = await run([
-    "compose",
-    "-p",
-    project,
-    "ps",
-    "-a",
-    "--format",
-    "json",
-  ]);
-  if (!result.success) return [];
-
-  const containers: EnvironmentDeployContainer[] = [];
-  for (const entry of parseComposePsEntries(result.stdout)) {
-    const containerId = entry.ID;
-    const containerName = entry.Name;
-    const composeServiceName = entry.Service;
-    const status = entry.State;
-    if (
-      typeof containerId !== "string" ||
-      containerId.length === 0 ||
-      typeof containerName !== "string" ||
-      containerName.length === 0 ||
-      typeof composeServiceName !== "string" ||
-      composeServiceName.length === 0 ||
-      typeof status !== "string" ||
-      status.length === 0
-    ) {
-      continue;
-    }
-    containers.push({
-      composeServiceName,
-      containerId,
-      containerName,
-      status,
-      role: "service",
-    });
-  }
-  return containers;
-}
-
 function statusFromContainers(
   containers: EnvironmentDeployContainer[],
 ): "ready" | "stopped" | "failed" {
@@ -134,6 +51,16 @@ function statusFromContainers(
   }
   if (states.includes("running")) return "ready";
   return "failed";
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    const stat = await Deno.stat(path);
+    return stat.isDirectory || stat.isFile;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return false;
+    throw err;
+  }
 }
 
 export async function handleManagedLifecycle(
@@ -172,30 +99,25 @@ export async function handleManagedLifecycle(
     );
   }
 
-  // Active only while compose exists — removeManagedIngress deletes this path
-  // when exposure is disabled so start/restart cannot revive stale Traefik.
-  const ingressCompose = managedIngressComposePath(layout, payload.managedId);
-  if (await pathExists(ingressCompose)) {
-    const ingressProject = managedIngressProject(payload.managedId);
-    const ingressResult = await run([
-      "compose",
-      "-p",
-      ingressProject,
-      "-f",
-      ingressCompose,
-      payload.action,
-    ]);
-    if (!ingressResult.success) {
-      throw new Error(
-        `managed.lifecycle ${payload.action} ingress failed: ${
-          sanitizeForLog(ingressResult.stderr || "compose failed")
-        }`,
-      );
-    }
+  if (payload.memberId) {
+    const engine = getManagedEngineRuntime(payload.engine ?? "postgres");
+    const collected = await collectManagedMemberHealth(project, engine, {
+      memberId: payload.memberId,
+      role: "primary",
+      redact: (text) => sanitizeForLog(text),
+    });
+    const containers = collected.containers ?? [];
+    const status = statusFromContainers(containers);
+    return {
+      status,
+      summary: `managed ${payload.action} observed status=${status}`,
+      ...(collected.member !== undefined ? { member: collected.member } : {}),
+    };
   }
 
-  // Status is derived from the engine project only — ingress is sidecar.
-  const containers = await collectContainers(project, run);
+  const containers =
+    (await collectManagedContainers(project, (text) => sanitizeForLog(text))) ??
+      [];
   const status = statusFromContainers(containers);
   return {
     status,

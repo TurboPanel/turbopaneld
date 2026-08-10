@@ -14,7 +14,9 @@ import {
   parseManagedApplyPayload,
   parseManagedBackupPayload,
   parseManagedDestroyPayload,
+  parseManagedIngressReconcilePayload,
   parseManagedLifecyclePayload,
+  parseManagedPromotePayload,
   parseManagedRestorePayload,
   parseNtpSetPayload,
   parsePingPayload,
@@ -31,6 +33,8 @@ import {
 } from "../../managed/backup.ts";
 import { handleManagedDestroy } from "../../managed/destroy.ts";
 import { handleManagedLifecycle } from "../../managed/lifecycle.ts";
+import { handleManagedPromote } from "../../managed/promote.ts";
+import { handleManagedIngressReconcile } from "./managed-ingress-reconcile.ts";
 import { handleEnvironmentLifecycle } from "./lifecycle-environment.ts";
 import { handleEnvironmentStop } from "./stop-environment.ts";
 import { handleSystemReconcile } from "./system-reconcile.ts";
@@ -180,6 +184,15 @@ export async function handleCommandDispatch(
         daemonRespondedAt = new Date().toISOString();
         break;
       }
+      case "managed.promote": {
+        const payload = parseManagedPromotePayload(message.payload);
+        result = await handleManagedPromote(payload, daemonReceivedAt, {
+          decryptSecrets: deps?.decryptSecrets,
+        });
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
       case "managed.backup": {
         // No credential envelopes on this command — backups/restores run
         // through the already-running engine container via `docker exec`.
@@ -192,6 +205,17 @@ export async function handleCommandDispatch(
       case "managed.restore": {
         const payload = parseManagedRestorePayload(message.payload);
         result = await handleManagedRestore(payload, daemonReceivedAt);
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
+      case "managed.ingress.reconcile": {
+        const payload = parseManagedIngressReconcilePayload(message.payload);
+        result = await handleManagedIngressReconcile(
+          payload,
+          daemonReceivedAt,
+          { decryptSecrets: deps?.decryptSecrets },
+        );
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;

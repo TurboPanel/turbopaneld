@@ -16,9 +16,13 @@ import {
 /** Shared HTTP Traefik system component key. */
 export const SYSTEM_HOSTING_INGRESS_COMPONENT = "hosting-ingress";
 
+/** Shared ProxySQL (managed DB) ingress system component key. */
+export const SYSTEM_MANAGED_INGRESS_COMPONENT = "managed-ingress";
+
 /** Allowlisted system component keys — never an arbitrary wire string. */
 export type SystemComponentKey =
   | typeof SYSTEM_HOSTING_INGRESS_COMPONENT
+  | typeof SYSTEM_MANAGED_INGRESS_COMPONENT
   | "database"
   | "queue"
   | "analytics";
@@ -29,31 +33,42 @@ export type SystemComponentKey =
  */
 export const SHARED_TRAEFIK_COMPOSE_SERVICE_NAME = "traefik";
 
+/** Compose service key inside project `turbopanel-proxysql`. */
+export const PROXYSQL_COMPOSE_SERVICE_NAME = "proxysql";
+
 /** Compose project name for the production system stack (database/queue/analytics). */
 export const SYSTEM_STACK_PROJECT = "turbopanel-system";
 
+/** Compose project name for the shared ProxySQL managed ingress. */
+export const PROXYSQL_PROJECT = "turbopanel-proxysql";
+
 const SYSTEM_COMPONENT_KEYS = new Set<string>([
   SYSTEM_HOSTING_INGRESS_COMPONENT,
+  SYSTEM_MANAGED_INGRESS_COMPONENT,
   "database",
   "queue",
   "analytics",
 ]);
 
 /**
+ * Per-component self-heal dispatch. `hosting-ingress` and `proxysql` are
+ * self-healing; `database` / `queue` / `analytics` are inspect-only.
+ */
+export type SystemComponentSelfHeal =
+  | "hosting-ingress"
+  | "proxysql"
+  | "none";
+
+/**
  * Per-component contract: which compose project/service it lives in, its
- * container role (`service` / `ingress` / `system`), and whether the daemon
- * may self-heal (deploy/restart) it.
- *
- * `hosting-ingress` is the only self-healing entry — the daemon owns
- * bringing the shared Traefik up. `database` / `queue` / `analytics` live in
- * the platform-managed `turbopanel-system` production stack; the daemon may
- * only persist identity and inspect, never `docker compose up` / restart.
+ * container role (`service` / `ingress` / `system`), and the self-heal
+ * strategy used by `system.reconcile`.
  */
 export type SystemComponentContract = {
   project: string;
   composeServiceName: string;
   role: "service" | "ingress" | "system";
-  selfHealAllowed: boolean;
+  selfHeal: SystemComponentSelfHeal;
 };
 
 export const SYSTEM_COMPONENT_CONTRACTS: Record<
@@ -64,25 +79,31 @@ export const SYSTEM_COMPONENT_CONTRACTS: Record<
     project: "turbopanel-ingress",
     composeServiceName: SHARED_TRAEFIK_COMPOSE_SERVICE_NAME,
     role: "ingress",
-    selfHealAllowed: true,
+    selfHeal: "hosting-ingress",
+  },
+  [SYSTEM_MANAGED_INGRESS_COMPONENT]: {
+    project: PROXYSQL_PROJECT,
+    composeServiceName: PROXYSQL_COMPOSE_SERVICE_NAME,
+    role: "system",
+    selfHeal: "proxysql",
   },
   database: {
     project: SYSTEM_STACK_PROJECT,
     composeServiceName: "database",
     role: "system",
-    selfHealAllowed: false,
+    selfHeal: "none",
   },
   queue: {
     project: SYSTEM_STACK_PROJECT,
     composeServiceName: "queue",
     role: "system",
-    selfHealAllowed: false,
+    selfHeal: "none",
   },
   analytics: {
     project: SYSTEM_STACK_PROJECT,
     composeServiceName: "analytics",
     role: "system",
-    selfHealAllowed: false,
+    selfHeal: "none",
   },
 };
 

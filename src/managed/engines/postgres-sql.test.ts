@@ -2,11 +2,18 @@ import { assertEquals, assertThrows } from "@std/assert";
 import {
   createDatabaseSql,
   createOrAlterRoleSql,
+  createPhysicalSlotSql,
+  createReplicationRoleSql,
   dropDatabaseSql,
+  dropPhysicalSlotSql,
   dropRoleSql,
   grantDatabaseSql,
+  listManagedSlotsSql,
+  primaryReplicationStatusSql,
+  promoteSql,
   quoteIdentifier,
   quoteLiteral,
+  standbyReplicationStatusSql,
 } from "./postgres-sql.ts";
 
 /**
@@ -66,4 +73,44 @@ test("grantDatabaseSql covers privilege levels", () => {
     grantDatabaseSql("appdb", "app", "read-only"),
     'GRANT CONNECT ON DATABASE "appdb" TO "app";',
   );
+});
+
+test("replication SQL builders use quoted identifiers and managed slot prefix", () => {
+  const roleSql = createReplicationRoleSql("tp_repl", "s3cret");
+  assertEquals(roleSql.includes("REPLICATION"), true);
+  assertEquals(roleSql.includes('"tp_repl"'), true);
+
+  const createSlot = createPhysicalSlotSql("tp_member_2");
+  assertEquals(
+    createSlot.includes("pg_create_physical_replication_slot"),
+    true,
+  );
+  assertEquals(createSlot.includes("'tp_member_2'"), true);
+  assertThrows(() => createPhysicalSlotSql("bad-slot"), Error);
+
+  const dropSlot = dropPhysicalSlotSql("tp_member_2");
+  assertEquals(dropSlot.includes("pg_drop_replication_slot"), true);
+
+  assertEquals(listManagedSlotsSql().includes("tp_member_"), true);
+  assertEquals(
+    primaryReplicationStatusSql().includes("pg_stat_replication"),
+    true,
+  );
+  const standbySql = standbyReplicationStatusSql();
+  assertEquals(standbySql.includes("pg_is_in_recovery"), true);
+  assertEquals(standbySql.includes("pg_stat_wal_receiver"), true);
+  assertEquals(standbySql.includes("status = 'streaming'"), true);
+  assertEquals(standbySql.includes("'stopped'"), true);
+  assertEquals(promoteSql().includes("pg_promote"), true);
+});
+
+test("standbyReplicationStatusSql does not report streaming solely from recovery", () => {
+  const sql = standbyReplicationStatusSql();
+  // The old check set streaming whenever pg_is_in_recovery() was true — forbid that.
+  assertEquals(
+    /THEN 'streaming' ELSE/.test(sql.replaceAll("\n", " ")) &&
+      !sql.includes("pg_stat_wal_receiver"),
+    false,
+  );
+  assertEquals(sql.includes("r.status = 'streaming' THEN 'streaming'"), true);
 });

@@ -171,9 +171,11 @@ vulnerabilities, and release hosts reinstall collections at bootstrap and the
 Docker role on first Docker use. Keep that tree out of ansible-lint / the
 Ansible IDE extension: `exclude_paths` in repo-root + `orchestration/.ansible-lint`,
 `files.exclude` in `.vscode` / `dev.code-workspace`, and after Galaxy install
-`ensureGalaxyDockerRole` rewrites the role's nested `.ansible-lint` with a
-broad `skip_list` (opening a file under the role otherwise walks up to upstream
-lint rules).
+`ensureGalaxyDockerRole` rewrites each present layout's nested `.ansible-lint`
+(`geerlingguy.docker/` and `geerlingguy/docker/`) with a near-total
+`skip_list` (and removes upstream `.yamllint`) so opening files under the role
+— including `tasks/docker-*.yml` — is quiet. Path exclusions only apply to
+discovery, not explicitly opened files.
 
 **`instance-dev-install --if-needed`:** `scripts/run-orchestration-action.ts`
 accepts an `--if-needed` flag on `instance-dev-install`. When set, it calls
@@ -346,7 +348,7 @@ Large subsystems live in focused `AGENTS.md` files next to their code — Cursor
 | **Instance client** | `src/instance/AGENTS.md` | WSS / Unix-socket connection, idle presence + heartbeats (`timeSync`/`addresses`), reconnect / parked backoff, JWKS JWT verification, daemon TLS trust model |
 | **Host metrics (collector)** | `src/metrics/AGENTS.md` | `/proc`-based collection + scheduling, `POST /api/daemon/v1/metrics`, 20-metric contract |
 | **Tenant deploy & hosting ingress** | `src/deploy/AGENTS.md` | `environment.deploy` / `.lifecycle` / `.stop`, Docker Compose + Traefik, hosting Caddy, TLS materialization |
-| **Managed engines (daemon runtime)** | `src/managed/AGENTS.md` | `managed.apply` / `.lifecycle` / `.destroy`, platform compose + per-service managed Traefik ingress (`turbopanel-managed-<id>-ingress` on network `turbopanel-managed`), engine registry (Postgres first); separate from tenant deploy |
+| **Managed engines (daemon runtime)** | `src/managed/AGENTS.md` | `managed.apply` / `.lifecycle` / `.destroy`, `managed.ingress.reconcile` (shared ProxySQL `turbopanel-proxysql` on network `turbopanel-managed`), engine registry (Postgres first); separate from tenant deploy |
 | **Installer presentation** | `src/orchestration/AGENTS.md` | Installer presenter + sanitizer / vocabulary map for `run.sh` install & converge |
 | **ClickHouse (analytics)** | `orchestration/AGENTS.md` | `clickhouse` Ansible role (Docker), idle-CPU tuning, app-user grants, dev-only Tabix GUI |
 | **Time sync (Ansible)** | `orchestration/AGENTS.md` | `time-sync` role + `time-sync-apply.yml` (NTP / timezone) |

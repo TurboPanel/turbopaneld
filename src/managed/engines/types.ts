@@ -31,12 +31,6 @@ export type ManagedEngineRuntime = {
   containerGroup: string;
   rootUsername: string;
   defaultDatabase: string;
-  /**
-   * When false (Postgres), Traefik TCP routers always use catch-all
-   * `HostSNI(\`*\`)`. When true, optional `exposure.sni.hostnames` may select
-   * an explicit HostSNI rule — seam for future HTTP-ish engines.
-   */
-  supportsSni: boolean;
   waitReady(ctx: ManagedEngineContext): Promise<void>;
   readVersion(ctx: ManagedEngineContext): Promise<string | undefined>;
   applyCredentials(
@@ -63,6 +57,12 @@ export type ManagedEngineRuntime = {
    * `userOperations` rule for the instance engine spec.
    */
   backup?: ManagedEngineBackupRuntime;
+  /**
+   * Optional streaming-replication capability (primary/standby bootstrap,
+   * promote, health). Engines without this field cannot join multi-member
+   * clusters — callers throw {@link ManagedReplicationNotSupportedError}.
+   */
+  replication?: ManagedEngineReplicationRuntime;
 };
 
 export type ManagedEngineBackupRuntime = {
@@ -77,6 +77,82 @@ export type ManagedEngineBackupRuntime = {
     ctx: ManagedEngineContext,
     opts: { database: string },
   ): string[];
+};
+
+/** Streaming replication / promotion hooks for multi-member clusters. */
+export type ManagedEngineReplicationRuntime = {
+  ensurePrimary(
+    ctx: ManagedEngineContext,
+    spec: {
+      username: string;
+      password: string;
+      desiredSlots: string[];
+      /** Peer hosts for MySQL/MariaDB account host scoping (ignored by Postgres). */
+      peerAddresses?: string[];
+    },
+  ): Promise<void>;
+  /**
+   * Seed an empty data volume from the primary via basebackup and mark it
+   * as a standby. Must run **before** `compose up`. Returns `needs_resync`
+   * when the volume is already initialized but is not a standby.
+   */
+  bootstrapStandby(
+    ctx: ManagedEngineBootstrapContext,
+    spec: {
+      username: string;
+      password: string;
+      primary: {
+        host: string;
+        hostaddr?: string;
+        port: number;
+      };
+      slotName: string;
+    },
+  ): Promise<"seeded" | "already_standby" | "needs_resync">;
+  /**
+   * Engines whose standby is configured by SQL rather than by config file
+   * (MySQL / MariaDB GTID). Called **after** compose up + waitReady and
+   * before the standby early-return that skips credential/database mutation.
+   * Postgres does not implement this — zero behaviour change.
+   */
+  configureStandby?(
+    ctx: ManagedEngineContext,
+    spec: {
+      username: string;
+      password: string;
+      primary: {
+        host: string;
+        hostaddr?: string;
+        port: number;
+      };
+      slotName: string;
+    },
+  ): Promise<void>;
+  promote(ctx: ManagedEngineContext): Promise<void>;
+  readHealth(
+    ctx: ManagedEngineContext,
+    role: "primary" | "standby",
+  ): Promise<ManagedReplicationObservedHealth>;
+};
+
+export type ManagedEngineBootstrapContext = {
+  managedId: string;
+  image: string;
+  volumes: Array<{ name: string; target: string }>;
+  stateDir: string;
+  containerUser: string;
+  containerGroup: string;
+  runDocker: (
+    argv: string[],
+    options?: { input?: string; envFile?: string },
+  ) => Promise<{ success: boolean; stdout: string; stderr: string }>;
+};
+
+export type ManagedReplicationObservedHealth = {
+  state: string;
+  lagBytes?: number;
+  lagSeconds?: number;
+  observedAt: string;
 };
 
 export class ManagedEngineNotSupportedError extends Error {
@@ -94,5 +170,14 @@ export class ManagedBackupNotSupportedError extends Error {
   constructor(readonly engine: string) {
     super(`managed backup not supported on this engine: ${engine}`);
     this.name = "ManagedBackupNotSupportedError";
+  }
+}
+
+export class ManagedReplicationNotSupportedError extends Error {
+  readonly kind = "managed_replication_not_supported" as const;
+
+  constructor(readonly engine: string) {
+    super(`managed replication not supported on this engine: ${engine}`);
+    this.name = "ManagedReplicationNotSupportedError";
   }
 }

@@ -15,6 +15,8 @@ import {
   parseManagedDestroyResult,
   parseManagedLifecyclePayload,
   parseManagedLifecycleResult,
+  parseManagedPromotePayload,
+  parseManagedPromoteResult,
   parseManagedRestorePayload,
   parseManagedRestoreResult,
   parseSystemReconcilePayload,
@@ -45,6 +47,8 @@ const INSTANCE_COMMAND_TYPES = [
   "managed.destroy",
   "managed.backup",
   "managed.restore",
+  "managed.promote",
+  "managed.ingress.reconcile",
   "system.reconcile",
 ] as const;
 
@@ -303,6 +307,34 @@ test("environment.deploy round-trips dockerExternalNetworks and serviceHooks", (
   assertEquals(payload.serviceHooks?.[0]?.preDeployCommand, "echo pre");
   assertEquals(payload.serviceHooks?.[0]?.postDeployCommand, "echo post");
   assertEquals(payload.serviceHooks?.[0]?.buildDisableCache, true);
+});
+
+test("environment.deploy round-trips managedNetworkServices and rejects hostile entries", () => {
+  const payload = parseEnvironmentDeployPayload({
+    environmentId: "env-1",
+    projectId: "proj-1",
+    organizationId: "org-1",
+    projectName: "demo",
+    composeYaml: "services:\n  app:\n    image: nginx\n",
+    hostings: [],
+    managedNetworkServices: ["app", "app"],
+  });
+  // Deduped and sorted, mirroring the instance parser.
+  assertEquals(payload.managedNetworkServices, ["app"]);
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        environmentId: "env-1",
+        projectId: "proj-1",
+        organizationId: "org-1",
+        projectName: "demo",
+        composeYaml: "services:\n  app:\n    image: nginx\n",
+        hostings: [],
+        managedNetworkServices: ["bad;name"],
+      }),
+    TypeError,
+    "Invalid managedNetworkServices entry",
+  );
 });
 
 test("environment.deploy round-trips noCache", () => {
@@ -634,6 +666,12 @@ const VALID_MANAGED_APPLY = {
       contents: "listen_addresses = '*'\n",
       mode: "0640",
     },
+    {
+      path: "pg_hba.conf",
+      contents:
+        "# TurboPanel managed PostgreSQL — platform pg_hba\nlocal all all peer\n",
+      mode: "0640",
+    },
   ],
   volumes: [{ name: "pgdata", target: "/var/lib/postgresql" }],
   exposure: { enabled: false, protocol: "tcp" },
@@ -646,6 +684,11 @@ const VALID_MANAGED_APPLY = {
       password: "denc.server.key.1.payload",
     },
   ],
+  memberId: "00000000-0000-4000-8000-0000000000a1",
+  memberRole: "primary",
+  memberOrdinal: 1,
+  readEligible: false,
+  peers: [],
 } as const;
 
 test("managed.apply fixture round-trips", () => {
@@ -659,37 +702,90 @@ test("managed.apply fixture round-trips", () => {
   assertEquals(payload.credentials[0]?.username, "postgres");
 });
 
-test("managed.apply requires ingress iff exposure.enabled", () => {
+test("managed.apply enforces the engine image allowlist", () => {
+  // Mirrors the instance settings-parser allowlist
+  // (`src/lib/managed/settings.ts`) so a forged/replayed command payload
+  // cannot smuggle an unsupported or EOL image past this last daemon-side
+  // check before Docker runs it.
+  assertEquals(
+    parseManagedApplyPayload(VALID_MANAGED_APPLY).image,
+    "docker.io/library/postgres:18-alpine",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        image: "docker.io/library/postgres:17",
+      }),
+    TypeError,
+    "Invalid managed.apply payload",
+  );
+  // Cross-engine image swap must also be rejected even though it is on the
+  // MySQL allowlist — the payload's `engine` is postgres.
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        image: "docker.io/library/mysql:9.7",
+      }),
+    TypeError,
+    "Invalid managed.apply payload",
+  );
+  assertEquals(
+    parseManagedApplyPayload({
+      ...VALID_MANAGED_APPLY,
+      engine: "mysql",
+      image: "docker.io/library/mysql:9.7",
+      credentials: [{
+        ...VALID_MANAGED_APPLY.credentials[0],
+        username: "root",
+      }],
+    }).image,
+    "docker.io/library/mysql:9.7",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        engine: "mariadb",
+        image: "docker.io/library/mariadb:11",
+        credentials: [{
+          ...VALID_MANAGED_APPLY.credentials[0],
+          username: "root",
+        }],
+      }),
+    TypeError,
+    "Invalid managed.apply payload",
+  );
+});
+
+test("managed.apply requires no Traefik ingress — ProxySQL is out of band", () => {
   const VALID_INGRESS = {
     serviceId: "00000000-0000-4000-8000-000000000099",
     composeServiceName: "postgres-ingress",
     containerName: "00000000-0000-4000-8000-000000000099-in",
   };
-  assertThrows(
-    () =>
-      parseManagedApplyPayload({
-        ...VALID_MANAGED_APPLY,
-        exposure: { enabled: true, protocol: "tcp", publishedPort: 15432 },
-      }),
-    TypeError,
-    "Invalid managed.apply ingress",
-  );
-  assertThrows(
-    () =>
-      parseManagedApplyPayload({
-        ...VALID_MANAGED_APPLY,
-        exposure: { enabled: false, protocol: "tcp" },
-        ingress: VALID_INGRESS,
-      }),
-    TypeError,
-    "Invalid managed.apply ingress",
-  );
-  const payload = parseManagedApplyPayload({
+  // exposure enabled without ingress is valid (shared ProxySQL frontends).
+  const enabled = parseManagedApplyPayload({
     ...VALID_MANAGED_APPLY,
-    exposure: { enabled: true, protocol: "tcp", publishedPort: 15432 },
+    exposure: { enabled: true, protocol: "tcp" },
+  });
+  assertEquals(enabled.exposure.enabled, true);
+  assertEquals(enabled.ingress, undefined);
+  // Optional legacy ingress is still accepted when present.
+  const withIngress = parseManagedApplyPayload({
+    ...VALID_MANAGED_APPLY,
+    exposure: { enabled: true, protocol: "tcp" },
     ingress: VALID_INGRESS,
   });
-  assertEquals(payload.ingress, VALID_INGRESS);
+  assertEquals(withIngress.ingress, VALID_INGRESS);
+  // Disabled exposure may still carry legacy ingress for teardown payloads.
+  const withLegacy = parseManagedApplyPayload({
+    ...VALID_MANAGED_APPLY,
+    exposure: { enabled: false, protocol: "tcp" },
+    ingress: VALID_INGRESS,
+  });
+  assertEquals(withLegacy.ingress, VALID_INGRESS);
 });
 
 test("managed.apply rejects obsolete <serviceId>-1 ingress containerName", () => {
@@ -697,7 +793,7 @@ test("managed.apply rejects obsolete <serviceId>-1 ingress containerName", () =>
     () =>
       parseManagedApplyPayload({
         ...VALID_MANAGED_APPLY,
-        exposure: { enabled: true, protocol: "tcp", publishedPort: 15432 },
+        exposure: { enabled: true, protocol: "tcp" },
         ingress: {
           serviceId: "00000000-0000-4000-8000-000000000099",
           composeServiceName: "postgres-ingress",
@@ -784,7 +880,7 @@ test("managed.apply rejects hostile dockerOptions and path traversal", () => {
   );
 });
 
-test("managed.apply rejects nested dockerOptions and enabled exposure without port", () => {
+test("managed.apply rejects nested dockerOptions; exposure ignores publishedPort", () => {
   assertThrows(
     () =>
       parseManagedApplyPayload({
@@ -816,26 +912,13 @@ test("managed.apply rejects nested dockerOptions and enabled exposure without po
     TypeError,
     "Invalid managed.apply dockerOptions",
   );
-  assertThrows(
-    () =>
-      parseManagedApplyPayload({
-        ...VALID_MANAGED_APPLY,
-        exposure: { enabled: true, protocol: "tcp" },
-      }),
-    TypeError,
-    "Invalid managed.apply exposure",
-  );
+  // publishedPort is no longer part of exposure — ignored when present.
   assertEquals(
     parseManagedApplyPayload({
       ...VALID_MANAGED_APPLY,
       exposure: { enabled: true, protocol: "tcp", publishedPort: 15432 },
-      ingress: {
-        serviceId: "00000000-0000-4000-8000-000000000099",
-        composeServiceName: "postgres-ingress",
-        containerName: "00000000-0000-4000-8000-000000000099-in",
-      },
-    }).exposure.publishedPort,
-    15432,
+    }).exposure,
+    { enabled: true, protocol: "tcp" },
   );
 });
 
@@ -875,11 +958,26 @@ test("managed.apply admits allowlisted config paths and rejects unexpected relat
       ...VALID_MANAGED_APPLY,
       configFiles: [
         { path: "postgresql.conf", contents: "x\n", mode: "0640" },
+        { path: "pg_hba.conf", contents: "local all all peer\n", mode: "0640" },
         { path: "tls/server.crt", contents: "cert\n", mode: "0640" },
         { path: "tls/server.key", contents: "key\n", mode: "0600" },
       ],
     }).configFiles.map((file) => file.path),
-    ["postgresql.conf", "tls/server.crt", "tls/server.key"],
+    ["postgresql.conf", "pg_hba.conf", "tls/server.crt", "tls/server.key"],
+  );
+  assertEquals(
+    parseManagedApplyPayload({
+      ...VALID_MANAGED_APPLY,
+      configFiles: [
+        { path: "my.cnf", contents: "[mysqld]\n", mode: "0640" },
+        {
+          path: "initdb/00-turbopanel.sql",
+          contents: "SELECT 1;\n",
+          mode: "0640",
+        },
+      ],
+    }).configFiles.map((file) => file.path),
+    ["my.cnf", "initdb/00-turbopanel.sql"],
   );
   assertThrows(
     () =>
@@ -930,6 +1028,36 @@ test("managed.apply admits tlsMaterial and rejects hostile cert paths", () => {
       }),
     TypeError,
     "Invalid managed.apply tlsMaterial",
+  );
+});
+
+test("managed.apply admits orgTlsMaterial and rejects incomplete envelopes", () => {
+  const payload = parseManagedApplyPayload({
+    ...VALID_MANAGED_APPLY,
+    orgTlsMaterial: {
+      certificatePem:
+        "-----BEGIN CERTIFICATE-----\nLEAF\n-----END CERTIFICATE-----\n",
+      privateKeyEnvelope: "denc.server.key.ciphertext",
+      caCertPem: "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n",
+    },
+  });
+  assertEquals(
+    payload.orgTlsMaterial?.privateKeyEnvelope,
+    "denc.server.key.ciphertext",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        orgTlsMaterial: {
+          certificatePem: "not-a-pem",
+          privateKeyEnvelope: "denc.x",
+          caCertPem:
+            "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n",
+        },
+      }),
+    TypeError,
+    "Invalid managed.apply orgTlsMaterial",
   );
 });
 
@@ -1276,4 +1404,93 @@ test("managed.restore result parser is lenient", () => {
       summary: "restored",
     },
   );
+});
+
+test("managed.apply admits privateListener, peers, and replication blocks", () => {
+  const payload = parseManagedApplyPayload({
+    ...VALID_MANAGED_APPLY,
+    privateListener: { address: "203.0.113.50", port: 45001 },
+    peers: [
+      {
+        memberId: "00000000-0000-4000-8000-0000000000a2",
+        role: "replica",
+        readEligible: true,
+        address: "203.0.113.51",
+        port: 45002,
+        transport: "datacenter",
+      },
+    ],
+    replication: {
+      role: "primary",
+      username: "tp_repl",
+      desiredSlots: ["tp_member_2"],
+      peerAddresses: ["203.0.113.51"],
+    },
+    credentials: [
+      ...VALID_MANAGED_APPLY.credentials,
+      {
+        principalId: "00000000-0000-4000-8000-0000000000b1",
+        username: "tp_repl",
+        role: "replication",
+        databases: [],
+        password: "denc.server.key.repl",
+      },
+    ],
+  });
+  assertEquals(payload.privateListener?.port, 45001);
+  assertEquals(payload.replication?.role, "primary");
+  assertEquals(payload.peers.length, 1);
+  assertEquals(payload.credentials.some((c) => c.role === "replication"), true);
+});
+
+test("managed.apply rejects loopback privateListener", () => {
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        privateListener: { address: "127.0.0.1", port: 45001 },
+      }),
+    Error,
+  );
+});
+
+test("managed.apply result admits member replication health", () => {
+  const result = parseManagedApplyResult({
+    host: "203.0.113.10",
+    port: 5432,
+    member: {
+      memberId: "00000000-0000-4000-8000-0000000000a1",
+      role: "primary",
+      status: "ready",
+      replication: {
+        state: "streaming",
+        lagBytes: 0,
+        observedAt: "2026-08-09T12:00:00.000Z",
+      },
+    },
+  });
+  assertEquals(result.member?.status, "ready");
+  assertEquals(result.member?.replication?.state, "streaming");
+});
+
+test("managed.promote payload and result round-trip", () => {
+  const payload = parseManagedPromotePayload({
+    managedId: "00000000-0000-4000-8000-000000000001",
+    memberId: "00000000-0000-4000-8000-0000000000a2",
+    demoteMemberId: "00000000-0000-4000-8000-0000000000a1",
+  });
+  assertEquals(payload.memberId, "00000000-0000-4000-8000-0000000000a2");
+  const result = parseManagedPromoteResult({
+    status: "ready",
+    role: "primary",
+    promotedMemberId: "00000000-0000-4000-8000-0000000000a2",
+    demotedMemberId: "00000000-0000-4000-8000-0000000000a1",
+    demoted: true,
+    replication: {
+      state: "ready",
+      observedAt: "2026-08-09T12:00:00.000Z",
+    },
+  });
+  assertEquals(result.promotedMemberId, payload.memberId);
+  assertEquals(result.demoted, true);
 });

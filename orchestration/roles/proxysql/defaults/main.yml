@@ -1,0 +1,25 @@
+---
+# Image pin must not be loosened without reviewing GHSA-58ww-865x-grpr
+# (pre-auth heap overflow on first-packet path affecting ProxySQL 3.0.x
+# listeners, May 2026 advisory). Use a patched 3.0.x only.
+proxysql_image: proxysql/proxysql:3.0.2
+proxysql_project_name: turbopanel-proxysql
+proxysql_config_dir: "{{ turbopanel_config_dir }}/proxysql"
+proxysql_tls_dir: "{{ proxysql_config_dir }}/tls"
+proxysql_data_dir: "{{ turbopanel_state_dir }}/proxysql"
+proxysql_service_name: turbopanel-proxysql-stack
+proxysql_admin_port: 6032
+proxysql_pgsql_port: 5432
+proxysql_mysql_port: 3306
+# Runtime uid/gid for image — ProxySQL official image often runs as 999 or 2;
+# use 999:999 for datadir pre-own (document if adjustable).
+proxysql_container_uid: 999
+proxysql_container_gid: 999
+proxysql_admin_user: admin
+# Network for managed engines + ProxySQL
+proxysql_managed_network: turbopanel-managed
+turbopanel_config_dir: /etc/turbopanel  # noqa: var-naming[no-role-prefix]
+turbopanel_state_dir: /var/lib/turbopanel  # noqa: var-naming[no-role-prefix]
+turbopanel_dev_user: ""  # noqa: var-naming[no-role-prefix]
+turbopanel_group: >-  # noqa: var-naming[no-role-prefix]
+  {{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}

@@ -19,7 +19,9 @@ paths-test-*/
 
 # Ansible Galaxy roles install into orchestration/roles/ (see requirements.yml).
 # Never commit them — bootstrap runs ansible-galaxy role install.
+# Dot layout (canonical ansible-galaxy -p) and author/role slash layout.
 orchestration/roles/geerlingguy.docker/
+orchestration/roles/geerlingguy/
 # Local Galaxy/dependency cache (wrong install target if ansible-galaxy runs from checkout).
 orchestration/.ansible/
 .ansible/

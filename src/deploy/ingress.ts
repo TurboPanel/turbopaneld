@@ -93,6 +93,25 @@ export class TcpUdpPortConflictError extends Error {
   }
 }
 
+/**
+ * Protocol ports reserved for the shared ProxySQL managed-ingress listeners.
+ * Tenant raw `tcp`/`udp` hostings must not claim these.
+ */
+export const PROXYSQL_RESERVED_PUBLISHED_PORTS = new Set([5432, 3306]);
+
+/** Raised when a tenant claim tries to take a ProxySQL listener port. */
+export class TcpUdpPortReservedError extends Error {
+  constructor(
+    readonly protocol: "tcp" | "udp",
+    readonly publishedPort: number,
+  ) {
+    super(
+      `${protocol} port ${publishedPort} is reserved for managed database ingress (ProxySQL)`,
+    );
+    this.name = "TcpUdpPortReservedError";
+  }
+}
+
 export function caddyTraefikUpstream(hop: "http" | "https"): string {
   if (hop === "http") {
     return `reverse_proxy ${TRAEFIK_LOOPBACK}:${TRAEFIK_HTTP_PORT} {
@@ -1456,6 +1475,12 @@ async function syncTcpUdpIngressEntriesLocked(
 
   const others = await collectTcpUdpIngressEntries(layout, serviceId);
   for (const entry of entries) {
+    if (
+      entry.protocol === "tcp" &&
+      PROXYSQL_RESERVED_PUBLISHED_PORTS.has(entry.publishedPort)
+    ) {
+      throw new TcpUdpPortReservedError(entry.protocol, entry.publishedPort);
+    }
     const conflict = others.find(
       (o) =>
         o.protocol === entry.protocol &&

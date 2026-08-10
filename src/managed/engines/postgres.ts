@@ -12,16 +12,27 @@ import { sanitizeForLog } from "../../logger.ts";
 import {
   createDatabaseSql,
   createOrAlterRoleSql,
+  createPhysicalSlotSql,
+  createReplicationRoleSql,
   dropDatabaseSql,
+  dropPhysicalSlotSql,
   dropRoleSql,
   grantDatabaseSql,
+  isInRecoverySql,
+  listManagedSlotsSql,
   type ManagedDatabasePrivilege,
+  primaryReplicationStatusSql,
+  promoteSql,
   quoteIdentifier,
+  standbyReplicationStatusSql,
 } from "./postgres-sql.ts";
 import type {
   ManagedEngineBackupRuntime,
+  ManagedEngineBootstrapContext,
   ManagedEngineContext,
+  ManagedEngineReplicationRuntime,
   ManagedEngineRuntime,
+  ManagedReplicationObservedHealth,
 } from "./types.ts";
 
 /**
@@ -59,6 +70,25 @@ const postgresBackupRuntime: ManagedEngineBackupRuntime = {
 
 const READY_POLL_MS = 1_000;
 const READY_TIMEOUT_MS = 120_000;
+
+/**
+ * libpq connection string for standby basebackup.
+ * `host` is the cert SAN for verify-full; optional `hostaddr` is the dial IP.
+ */
+export function buildBasebackupConnectionString(primary: {
+  host: string;
+  hostaddr?: string;
+  port: number;
+}, username: string): string {
+  return [
+    `host=${primary.host}`,
+    ...(primary.hostaddr ? [`hostaddr=${primary.hostaddr}`] : []),
+    `port=${primary.port}`,
+    `user=${username}`,
+    "sslmode=verify-full",
+    "sslrootcert=/etc/postgresql/tls/ca.crt",
+  ].join(" ");
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -111,6 +141,14 @@ async function applyOneCredential(
     return;
   }
 
+  if (credential.role === "replication") {
+    await runPsql(
+      ctx,
+      createReplicationRoleSql(credential.username, credential.password),
+    );
+    return;
+  }
+
   await runPsql(
     ctx,
     createOrAlterRoleSql(credential.username, credential.password, {
@@ -132,14 +170,224 @@ async function applyOneCredential(
   }
 }
 
+async function parsePsqlRows(
+  ctx: ManagedEngineContext,
+  sql: string,
+): Promise<string[][]> {
+  const result = await ctx.exec(
+    [
+      "psql",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-U",
+      ctx.rootUsername,
+      "-d",
+      ctx.defaultDatabase,
+      "-t",
+      "-A",
+      "-F",
+      "\t",
+    ],
+    sql,
+  );
+  if (!result.success) {
+    throw new Error(
+      `psql failed: ${
+        sanitizeForLog(result.stderr || result.stdout || "unknown")
+      }`,
+    );
+  }
+  return result.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((line) => line.split("\t"));
+}
+
+const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
+  async ensurePrimary(ctx, spec) {
+    await runPsql(
+      ctx,
+      createReplicationRoleSql(spec.username, spec.password),
+    );
+
+    const desired = new Set(spec.desiredSlots);
+    for (const slot of desired) {
+      await runPsql(ctx, createPhysicalSlotSql(slot));
+    }
+
+    const rows = await parsePsqlRows(ctx, listManagedSlotsSql());
+    for (const [slotName] of rows) {
+      if (!slotName || desired.has(slotName)) continue;
+      await runPsql(ctx, dropPhysicalSlotSql(slotName));
+    }
+  },
+
+  async bootstrapStandby(ctx: ManagedEngineBootstrapContext, spec) {
+    // Idempotent: data volume already has PG_VERSION.
+    const volumeArgs: string[] = [];
+    for (const volume of ctx.volumes) {
+      volumeArgs.push("-v", `${volume.name}:${volume.target}`);
+    }
+    const dataRoot = ctx.volumes[0]?.target ?? "/var/lib/postgresql";
+    const probe = await ctx.runDocker([
+      "run",
+      "--rm",
+      "--user",
+      ctx.containerUser,
+      ...volumeArgs,
+      ctx.image,
+      "test",
+      "-f",
+      `${dataRoot}/PG_VERSION`,
+    ]);
+    if (probe.success) {
+      // Initialized — need standby.signal to confirm standby role.
+      const signalProbe = await ctx.runDocker([
+        "run",
+        "--rm",
+        "--user",
+        ctx.containerUser,
+        ...volumeArgs,
+        ctx.image,
+        "test",
+        "-f",
+        `${dataRoot}/standby.signal`,
+      ]);
+      if (signalProbe.success) return "already_standby";
+      // Initialized but not a standby (orphaned primary data) — never auto-rewind.
+      return "needs_resync";
+    }
+
+    // Connection string: `host` is the cert SAN / leaf name used for
+    // verify-full; optional `hostaddr` is the dial IP (private/VPN leg).
+    // Mount engine TLS (org CA at tls/ca.crt) so basebackup trusts the primary.
+    const connectionString = buildBasebackupConnectionString(
+      spec.primary,
+      spec.username,
+    );
+    const envFile = `${ctx.stateDir}/.basebackup-env`;
+    const envBody = `PGPASSWORD=${spec.password}\n`;
+    await Deno.writeTextFile(envFile, envBody, { mode: 0o600 });
+    try {
+      const basebackup = await ctx.runDocker(
+        [
+          "run",
+          "--rm",
+          "--user",
+          ctx.containerUser,
+          "--network",
+          "turbopanel-managed",
+          ...volumeArgs,
+          "-v",
+          `${ctx.stateDir}/tls:/etc/postgresql/tls:ro`,
+          "--env-file",
+          envFile,
+          ctx.image,
+          "pg_basebackup",
+          "-d",
+          connectionString,
+          "-D",
+          `${dataRoot}/data`,
+          "-X",
+          "stream",
+          "-c",
+          "fast",
+          "-R",
+          "-S",
+          spec.slotName,
+          "--no-password",
+        ],
+      );
+      if (!basebackup.success) {
+        throw new Error(
+          `pg_basebackup failed: ${
+            sanitizeForLog(basebackup.stderr || basebackup.stdout || "unknown")
+          }`,
+        );
+      }
+    } finally {
+      try {
+        await Deno.remove(envFile);
+      } catch {
+        // ignore
+      }
+    }
+
+    // -R writes standby.signal; reaffirm when using alternate layouts.
+    await ctx.runDocker([
+      "run",
+      "--rm",
+      "--user",
+      ctx.containerUser,
+      ...volumeArgs,
+      ctx.image,
+      "sh",
+      "-c",
+      "touch /var/lib/postgresql/data/standby.signal 2>/dev/null || touch /var/lib/postgresql/standby.signal 2>/dev/null || true",
+    ]);
+    return "seeded";
+  },
+
+  async promote(ctx) {
+    await runPsql(ctx, promoteSql());
+    const deadline = Date.now() + 60_000;
+    while (Date.now() < deadline) {
+      const rows = await parsePsqlRows(ctx, isInRecoverySql());
+      const value = rows[0]?.[0]?.toLowerCase();
+      if (value === "f" || value === "false") return;
+      await sleep(500);
+    }
+    throw new Error("pg_promote did not leave recovery within 60s");
+  },
+
+  async readHealth(ctx, role): Promise<ManagedReplicationObservedHealth> {
+    const observedAt = new Date().toISOString();
+    if (role === "primary") {
+      const rows = await parsePsqlRows(ctx, primaryReplicationStatusSql());
+      if (rows.length === 0) {
+        return { state: "unknown", observedAt };
+      }
+      const [state, lagBytesRaw] = rows[0]!;
+      const lagBytes = Number(lagBytesRaw);
+      return {
+        state: state || "unknown",
+        ...(Number.isFinite(lagBytes) ? { lagBytes } : {}),
+        observedAt,
+      };
+    }
+    const rows = await parsePsqlRows(ctx, standbyReplicationStatusSql());
+    if (rows.length === 0) {
+      return { state: "unknown", observedAt };
+    }
+    const [state, lagBytesRaw, lagSecondsRaw] = rows[0]!;
+    const health: ManagedReplicationObservedHealth = {
+      state: state || "unknown",
+      observedAt,
+    };
+    if (
+      lagBytesRaw !== undefined && lagBytesRaw !== "" && lagBytesRaw !== null
+    ) {
+      const lagBytes = Number(lagBytesRaw);
+      if (Number.isFinite(lagBytes)) health.lagBytes = lagBytes;
+    }
+    if (
+      lagSecondsRaw !== undefined && lagSecondsRaw !== "" &&
+      lagSecondsRaw !== null
+    ) {
+      const lagSeconds = Number(lagSecondsRaw);
+      if (Number.isFinite(lagSeconds)) health.lagSeconds = lagSeconds;
+    }
+    return health;
+  },
+};
+
 export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
   engine: "postgres",
   containerUser: "postgres",
   containerGroup: "postgres",
   rootUsername: "postgres",
   defaultDatabase: "postgres",
-  /** Postgres negotiates TLS itself — Traefik always uses catch-all HostSNI. */
-  supportsSni: false,
 
   async waitReady(ctx: ManagedEngineContext): Promise<void> {
     const deadline = Date.now() + READY_TIMEOUT_MS;
@@ -230,6 +478,7 @@ export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
    * `instance/src/lib/managed/AGENTS.md`.
    */
   backup: postgresBackupRuntime,
+  replication: postgresReplicationRuntime,
 };
 
 /** Exported for tests that need drop-role SQL coverage via the runtime module. */

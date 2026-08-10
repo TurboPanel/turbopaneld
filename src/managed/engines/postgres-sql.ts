@@ -119,3 +119,105 @@ export function grantDatabaseSql(
     }
   }
 }
+
+const MANAGED_SLOT_PREFIX = "tp_member_";
+
+export function createReplicationRoleSql(
+  username: string,
+  password: string,
+): string {
+  const ident = quoteIdentifier(username);
+  const lit = quoteLiteral(password);
+  return [
+    `DO $turbopanel$`,
+    `BEGIN`,
+    `  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = ${
+      quoteLiteral(username)
+    }) THEN`,
+    `    CREATE ROLE ${ident} WITH LOGIN REPLICATION PASSWORD ${lit};`,
+    `  ELSE`,
+    `    ALTER ROLE ${ident} WITH LOGIN REPLICATION PASSWORD ${lit};`,
+    `  END IF;`,
+    `END`,
+    `$turbopanel$;`,
+  ].join("\n");
+}
+
+export function createPhysicalSlotSql(slotName: string): string {
+  quoteIdentifier(slotName);
+  return [
+    `SELECT pg_catalog.pg_create_physical_replication_slot(${
+      quoteLiteral(slotName)
+    }, true, false)`,
+    `WHERE NOT EXISTS (`,
+    `  SELECT 1 FROM pg_catalog.pg_replication_slots WHERE slot_name = ${
+      quoteLiteral(slotName)
+    }`,
+    `);`,
+  ].join("\n");
+}
+
+export function dropPhysicalSlotSql(slotName: string): string {
+  quoteIdentifier(slotName);
+  return [
+    `SELECT pg_catalog.pg_drop_replication_slot(slot_name)`,
+    `FROM pg_catalog.pg_replication_slots`,
+    `WHERE slot_name = ${quoteLiteral(slotName)};`,
+  ].join("\n");
+}
+
+/** List physical slots owned by the managed prefix (`tp_member_`). */
+export function listManagedSlotsSql(): string {
+  const managedSlotPattern = `${MANAGED_SLOT_PREFIX}%`;
+  return [
+    `SELECT slot_name FROM pg_catalog.pg_replication_slots`,
+    `WHERE slot_name LIKE ${quoteLiteral(managedSlotPattern)}`,
+    `  AND slot_type = 'physical';`,
+  ].join("\n");
+}
+
+export function primaryReplicationStatusSql(): string {
+  return [
+    `SELECT COALESCE(state, 'unknown') AS state,`,
+    `  COALESCE(pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn), 0) AS lag_bytes`,
+    `FROM pg_catalog.pg_stat_replication`,
+    `ORDER BY backend_start ASC NULLS LAST`,
+    `LIMIT 1;`,
+  ].join("\n");
+}
+
+export function standbyReplicationStatusSql(): string {
+  // Only report `streaming` when a live WAL receiver is active. A disconnected
+  // hot standby remains in recovery but must not look promote-ready.
+  return [
+    `SELECT`,
+    `  CASE`,
+    `    WHEN NOT pg_catalog.pg_is_in_recovery() THEN 'unknown'`,
+    `    WHEN r.status IS NULL THEN 'stopped'`,
+    `    WHEN r.status = 'streaming' THEN 'streaming'`,
+    `    ELSE COALESCE(r.status, 'unknown')`,
+    `  END AS state,`,
+    `  CASE`,
+    `    WHEN r.status = 'streaming' AND r.received_lsn IS NOT NULL`,
+    `    THEN COALESCE(pg_catalog.pg_wal_lsn_diff(r.received_lsn, pg_catalog.pg_last_wal_replay_lsn()), 0)`,
+    `    ELSE NULL`,
+    `  END AS lag_bytes,`,
+    `  CASE`,
+    `    WHEN r.status = 'streaming' AND pg_catalog.pg_last_xact_replay_timestamp() IS NOT NULL`,
+    `    THEN EXTRACT(EPOCH FROM (now() - pg_catalog.pg_last_xact_replay_timestamp()))`,
+    `    ELSE NULL`,
+    `  END AS lag_seconds`,
+    `FROM (SELECT 1) AS _dummy`,
+    `LEFT JOIN pg_catalog.pg_stat_wal_receiver r ON true;`,
+  ].join("\n");
+}
+
+export function promoteSql(): string {
+  return "SELECT pg_catalog.pg_promote(true, 60);";
+}
+
+export function isInRecoverySql(): string {
+  return "SELECT pg_catalog.pg_is_in_recovery();";
+}
+
+export { MANAGED_SLOT_PREFIX };
