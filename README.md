@@ -9,6 +9,8 @@
 
 GitHub: [turbopanel/turbopaneld](https://github.com/turbopanel/turbopaneld). Package name: `turbopaneld`.
 
+> **Private alpha** — Neither TurboPanel High Availability nor self-hosted is publicly available yet. The production install steps below describe the target flow as we work toward a beta release; see the [roadmap](https://turbopanel.io/roadmap) for progress.
+
 ## What the daemon does
 
 On each enrolled server, `turbopaneld`:
