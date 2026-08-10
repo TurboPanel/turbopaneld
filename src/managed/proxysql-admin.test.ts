@@ -52,9 +52,14 @@ test("applyProxySqlAdminStatements uses mounted defaults path (not host temp)", 
       {
         layout,
         containerName: "proxysql-test",
-        runDocker: async (args, options) => {
+        runDocker: (args, options) => {
           calls.push({ args, input: options?.input });
-          return { success: true, code: 0, stdout: "", stderr: "" };
+          return Promise.resolve({
+            success: true,
+            code: 0,
+            stdout: "",
+            stderr: "",
+          });
         },
       },
     );
@@ -88,12 +93,13 @@ test("applyProxySqlAdminStatements rejects missing host admin.cnf", async () => 
         applyProxySqlAdminStatements(["SELECT 1"], {
           layout,
           containerName: "proxysql-test",
-          runDocker: async () => ({
-            success: true,
-            code: 0,
-            stdout: "",
-            stderr: "",
-          }),
+          runDocker: () =>
+            Promise.resolve({
+              success: true,
+              code: 0,
+              stdout: "",
+              stderr: "",
+            }),
         }),
       TypeError,
     );
@@ -120,12 +126,13 @@ test("applyProxySqlAdminStatements redacts password on failure", async () => {
         applyProxySqlAdminStatements(["SELECT 1"], {
           layout,
           containerName: "proxysql-test",
-          runDocker: async () => ({
-            success: false,
-            code: 1,
-            stdout: "",
-            stderr: "boom s3cret-password",
-          }),
+          runDocker: () =>
+            Promise.resolve({
+              success: false,
+              code: 1,
+              stdout: "",
+              stderr: "boom s3cret-password",
+            }),
         }),
       Error,
     );

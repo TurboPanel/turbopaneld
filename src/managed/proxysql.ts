@@ -31,7 +31,7 @@ import {
   readComposePsLabels,
 } from "../deploy/compose-ps.ts";
 import type { EnvironmentDeployContainer } from "../instance/commands/contracts.ts";
-import { logInfo, sanitizeForLog } from "../logger.ts";
+import { logInfo } from "../logger.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { MANAGED_INGRESS_NETWORK } from "./networks.ts";
 import {

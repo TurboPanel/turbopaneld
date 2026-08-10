@@ -105,7 +105,7 @@ test("dumpArgv rejects system schemas and validates identifiers", () => {
     composeServiceName: "mysql",
     rootUsername: "root",
     defaultDatabase: "appdb",
-    exec: async () => ({ success: true, stdout: "", stderr: "" }),
+    exec: () => Promise.resolve({ success: true, stdout: "", stderr: "" }),
   };
   const argv = backup.dumpArgv(ctx, { database: "appdb" });
   assertEquals(argv[0], "mysqldump");

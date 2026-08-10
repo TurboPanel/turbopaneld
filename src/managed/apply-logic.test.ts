@@ -57,24 +57,25 @@ test("standby applyManagedEngineState skips credentials/databases/dropUsers", as
 
   const engine = {
     rootUsername: "postgres",
-    waitReady: async () => {
+    waitReady: () => {
       calls.push("waitReady");
+      return Promise.resolve();
     },
-    applyCredentials: async () => {
+    applyCredentials: () => {
       calls.push("applyCredentials");
-      return ["postgres"];
+      return Promise.resolve(["postgres"]);
     },
-    applyDatabases: async () => {
+    applyDatabases: () => {
       calls.push("applyDatabases");
-      return ["appdb"];
+      return Promise.resolve(["appdb"]);
     },
-    dropUsers: async () => {
+    dropUsers: () => {
       calls.push("dropUsers");
-      return ["app_user"];
+      return Promise.resolve(["app_user"]);
     },
-    readVersion: async () => {
+    readVersion: () => {
       calls.push("readVersion");
-      return "18.0";
+      return Promise.resolve("18.0");
     },
   };
 
@@ -117,20 +118,21 @@ test("primary applyManagedEngineState still mutates credentials/databases", asyn
 
   const engine = {
     rootUsername: "postgres",
-    waitReady: async () => {
+    waitReady: () => {
       calls.push("waitReady");
+      return Promise.resolve();
     },
-    applyCredentials: async () => {
+    applyCredentials: () => {
       calls.push("applyCredentials");
-      return ["postgres"];
+      return Promise.resolve(["postgres"]);
     },
-    applyDatabases: async () => {
+    applyDatabases: () => {
       calls.push("applyDatabases");
-      return ["appdb"];
+      return Promise.resolve(["appdb"]);
     },
-    readVersion: async () => {
+    readVersion: () => {
       calls.push("readVersion");
-      return "18.0";
+      return Promise.resolve("18.0");
     },
   };
 
