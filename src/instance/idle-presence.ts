@@ -298,7 +298,8 @@ export class IdlePresence {
     }
     this.#sendCellPing();
     const daemonBuild = buildInfoProvider();
-    const daemonBuildChanged = daemonBuild.commit !== this.#lastDaemonBuildCommit;
+    const daemonBuildChanged =
+      daemonBuild.commit !== this.#lastDaemonBuildCommit;
 
     const presence = this.#collectPresenceSnapshot();
     const serialized = this.#serializePresenceSnapshot(presence);
