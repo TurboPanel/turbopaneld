@@ -39,6 +39,7 @@
     "dev": "deno run --watch --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env main.ts",
     "bootstrap-orchestration": "deno run --allow-net --allow-read --allow-write --allow-run --allow-env scripts/bootstrap-orchestration.ts",
     "check:layout": "deno run --allow-read --allow-run=git scripts/check-production-layout.ts",
+    "check:vocabulary": "deno run --allow-read scripts/check-vocabulary.ts",
     // -A is deliberate: per-test `permissions:` blocks can only reduce from the
     // process grant. Narrower task grants would silently break ping (sys:hostname),
     // stop-environment (run), and client.test.ts permission blocks. Do not weaken

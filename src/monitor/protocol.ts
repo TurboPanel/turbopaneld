@@ -86,7 +86,7 @@ export type MonitorMetricSample = {
   load?: number;
 };
 
-export type DaemonAgentInfo = {
+export type DaemonBuildInfo = {
   commit: string;
   buildId: string;
   builtAt?: string;
@@ -103,7 +103,7 @@ export type MonitorSyncMessage = {
   resources: MonitorResourceState[];
   events?: MonitorEvent[];
   protocolVersion: typeof MONITOR_PROTOCOL_VERSION;
-  agent?: DaemonAgentInfo;
+  daemonBuild?: DaemonBuildInfo;
 };
 
 export type MonitorHeartbeatMessage = {
@@ -115,7 +115,7 @@ export type MonitorHeartbeatMessage = {
   instance: MonitorInstanceSummary;
   resources?: MonitorResourceState[];
   events?: MonitorEvent[];
-  agent?: DaemonAgentInfo;
+  daemonBuild?: DaemonBuildInfo;
 };
 
 export type MonitorTransitionMessage = {
@@ -204,17 +204,17 @@ function isMonitorInstanceSummary(
   return isRecord(value);
 }
 
-function parseDaemonAgentInfo(value: unknown): DaemonAgentInfo | undefined {
+function parseDaemonBuildInfo(value: unknown): DaemonBuildInfo | undefined {
   if (!isRecord(value)) return undefined;
   if (!isString(value.commit) || value.commit.length === 0) return undefined;
   if (!isString(value.buildId) || value.buildId.length === 0) return undefined;
-  const agent: DaemonAgentInfo = {
+  const daemonBuild: DaemonBuildInfo = {
     commit: value.commit,
     buildId: value.buildId,
   };
-  if (isString(value.builtAt)) agent.builtAt = value.builtAt;
-  if (isString(value.channel)) agent.channel = value.channel;
-  return agent;
+  if (isString(value.builtAt)) daemonBuild.builtAt = value.builtAt;
+  if (isString(value.channel)) daemonBuild.channel = value.channel;
+  return daemonBuild;
 }
 
 type MonitorDaemonBase = {
@@ -260,7 +260,7 @@ function parseMonitorSync(
   const events = optionalEvents(value.events);
   if (events === null) return null;
   if (value.protocolVersion !== MONITOR_PROTOCOL_VERSION) return null;
-  const agent = parseDaemonAgentInfo(value.agent);
+  const daemonBuild = parseDaemonBuildInfo(value.daemonBuild);
   return {
     type: "monitor.sync",
     from: "daemon",
@@ -269,7 +269,7 @@ function parseMonitorSync(
     resources: value.resources,
     events,
     protocolVersion: MONITOR_PROTOCOL_VERSION,
-    ...(agent ? { agent } : {}),
+    ...(daemonBuild ? { daemonBuild } : {}),
   };
 }
 
@@ -283,7 +283,7 @@ function parseMonitorHeartbeat(
   if (resources === null) return null;
   const events = optionalEvents(value.events);
   if (events === null) return null;
-  const agent = parseDaemonAgentInfo(value.agent);
+  const daemonBuild = parseDaemonBuildInfo(value.daemonBuild);
   return {
     type: "monitor.heartbeat",
     from: "daemon",
@@ -291,7 +291,7 @@ function parseMonitorHeartbeat(
     instance: value.instance,
     resources,
     events,
-    ...(agent ? { agent } : {}),
+    ...(daemonBuild ? { daemonBuild } : {}),
   };
 }
 

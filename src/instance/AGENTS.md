@@ -25,7 +25,7 @@ stays deferred until opt-in on both runtimes.
 
 `IdlePresence` runs per open socket:
 
-- Sends `{ type: "hello", at, agent, hostname?, machineKey?, os?, timeSync?,
+- Sends `{ type: "hello", at, daemonBuild, hostname?, machineKey?, os?, timeSync?,
   addresses? }` once on attach. `machineKey` is a derived, non-reversible
   HMAC of `/etc/machine-id` (`src/host/machine-key.ts`) — warmed on the
   connect path before hello. Host OS comes from `/etc/os-release` (+
@@ -48,8 +48,8 @@ stays deferred until opt-in on both runtimes.
   check interval (default), `IdlePresence` allows ~5s of `setInterval` skew so
   early ticks still send — otherwise early fires were skipped and Redis coalesce
   could false-demote a live socket.
-- Sends app-level `{ type: "heartbeat", at, agent?, timeSync?, addresses? }`
-  when the build agent commit changed **or** when `timeSync` / `addresses`
+- Sends app-level `{ type: "heartbeat", at, daemonBuild?, timeSync?, addresses? }`
+  when the daemon build commit changed **or** when `timeSync` / `addresses`
   differ from the snapshot seeded on hello (change-detected, still cadence-bound
   to the ~60s idle tick). Do **not** put OS on heartbeat. Offline self-heal
   (Postgres `connected: false` while the socket is still live) is handled by the

@@ -24,7 +24,7 @@ function openMockSocket(): MockWebSocket {
   return socket;
 }
 
-function makeAgent(commit: string): BuildInfo {
+function makeDaemonBuild(commit: string): BuildInfo {
   return {
     commit,
     buildId: `build-${commit}`,
@@ -66,7 +66,7 @@ const FULL_HOST: HostHelloIdentity = {
 
 test("IdlePresence hello omits optional host fields when absent", () => {
   const restore = installIdlePresenceProviders({
-    getBuildInfo: () => makeAgent("abc1234"),
+    getBuildInfo: () => makeDaemonBuild("abc1234"),
     getHostHelloIdentity: () => EMPTY_HOST,
     collectPresenceSnapshot: () => ({
       timeSync: makeTimeSync("UTC"),
@@ -85,7 +85,7 @@ test("IdlePresence hello omits optional host fields when absent", () => {
     const hello = hellos[0] as Record<string, unknown>;
     assertEquals(hello.type, "hello");
     assertExists(hello.at);
-    assertEquals(hello.agent, makeAgent("abc1234"));
+    assertEquals(hello.daemonBuild, makeDaemonBuild("abc1234"));
     assertEquals("hostname" in hello, false);
     assertEquals("machineKey" in hello, false);
     assertEquals("os" in hello, false);
@@ -99,7 +99,7 @@ test("IdlePresence hello omits optional host fields when absent", () => {
 
 test("IdlePresence hello includes optional host fields when present", () => {
   const restore = installIdlePresenceProviders({
-    getBuildInfo: () => makeAgent("abc1234"),
+    getBuildInfo: () => makeDaemonBuild("abc1234"),
     getHostHelloIdentity: () => FULL_HOST,
     collectPresenceSnapshot: () => ({
       timeSync: makeTimeSync("America/Chicago"),
@@ -131,7 +131,7 @@ test({
   name: "IdlePresence sends byte-identical cell ping after silence tick",
   fn: async () => {
     const restore = installIdlePresenceProviders({
-      getBuildInfo: () => makeAgent("abc1234"),
+      getBuildInfo: () => makeDaemonBuild("abc1234"),
       getHostHelloIdentity: () => EMPTY_HOST,
       collectPresenceSnapshot: () => ({
         timeSync: makeTimeSync("UTC"),
@@ -165,7 +165,7 @@ test({
     "IdlePresence equal min/check interval still pings when setInterval fires early",
   fn: async () => {
     const restore = installIdlePresenceProviders({
-      getBuildInfo: () => makeAgent("abc1234"),
+      getBuildInfo: () => makeDaemonBuild("abc1234"),
       getHostHelloIdentity: () => EMPTY_HOST,
       collectPresenceSnapshot: () => ({
         timeSync: makeTimeSync("UTC"),
@@ -196,11 +196,11 @@ test({
 });
 
 test({
-  name: "IdlePresence emits heartbeat on agent commit change without os",
+  name: "IdlePresence emits heartbeat on daemon build commit change without os",
   fn: async () => {
-    let agent = makeAgent("commit-a");
+    let daemonBuild = makeDaemonBuild("commit-a");
     const restore = installIdlePresenceProviders({
-      getBuildInfo: () => agent,
+      getBuildInfo: () => daemonBuild,
       getHostHelloIdentity: () => FULL_HOST,
       collectPresenceSnapshot: () => ({
         timeSync: makeTimeSync("UTC"),
@@ -210,19 +210,19 @@ test({
     const idleCheckIntervalMs = 15;
     const socket = openMockSocket();
     const presence = new IdlePresence({
-      serverId: "srv-hb-agent",
+      serverId: "srv-hb-build",
       idleCheckIntervalMs,
       idleThresholdMs: idleCheckIntervalMs,
       staleConnectionMs: 60_000,
     });
     try {
       presence.attach(socket as unknown as WebSocket);
-      agent = makeAgent("commit-b");
+      daemonBuild = makeDaemonBuild("commit-b");
       await sleep(idleCheckIntervalMs + 25);
       const heartbeats = framesOfType(socket, "heartbeat");
       assertEquals(heartbeats.length, 1);
       const heartbeat = heartbeats[0] as Record<string, unknown>;
-      assertEquals(heartbeat.agent, makeAgent("commit-b"));
+      assertEquals(heartbeat.daemonBuild, makeDaemonBuild("commit-b"));
       assertEquals("os" in heartbeat, false);
       assertEquals("timeSync" in heartbeat, false);
       assertEquals("addresses" in heartbeat, false);
@@ -238,7 +238,7 @@ test({
   fn: async () => {
     let timeSync = makeTimeSync("UTC");
     const restore = installIdlePresenceProviders({
-      getBuildInfo: () => makeAgent("abc1234"),
+      getBuildInfo: () => makeDaemonBuild("abc1234"),
       getHostHelloIdentity: () => FULL_HOST,
       collectPresenceSnapshot: () => ({
         timeSync,
@@ -262,7 +262,7 @@ test({
       const heartbeat = heartbeats[0] as Record<string, unknown>;
       assertEquals(heartbeat.timeSync, makeTimeSync("America/New_York"));
       assertEquals("os" in heartbeat, false);
-      assertEquals("agent" in heartbeat, false);
+      assertEquals("daemonBuild" in heartbeat, false);
     } finally {
       presence.detach();
       restore();
@@ -275,7 +275,7 @@ test({
   fn: async () => {
     let addresses = makeAddresses("203.0.113.10");
     const restore = installIdlePresenceProviders({
-      getBuildInfo: () => makeAgent("abc1234"),
+      getBuildInfo: () => makeDaemonBuild("abc1234"),
       getHostHelloIdentity: () => FULL_HOST,
       collectPresenceSnapshot: () => ({
         timeSync: makeTimeSync("UTC"),
@@ -299,7 +299,7 @@ test({
       const heartbeat = heartbeats[0] as Record<string, unknown>;
       assertEquals(heartbeat.addresses, makeAddresses("203.0.113.99"));
       assertEquals("os" in heartbeat, false);
-      assertEquals("agent" in heartbeat, false);
+      assertEquals("daemonBuild" in heartbeat, false);
     } finally {
       presence.detach();
       restore();
@@ -311,7 +311,7 @@ test({
   name: "IdlePresence onMaxAge fires once and skips ping on recycle tick",
   fn: async () => {
     const restore = installIdlePresenceProviders({
-      getBuildInfo: () => makeAgent("abc1234"),
+      getBuildInfo: () => makeDaemonBuild("abc1234"),
       getHostHelloIdentity: () => EMPTY_HOST,
       collectPresenceSnapshot: () => ({
         timeSync: makeTimeSync("UTC"),

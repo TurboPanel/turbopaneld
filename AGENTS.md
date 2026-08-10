@@ -1,6 +1,6 @@
 # AGENTS.md
 
-TurboPanel **daemon** — Ansible-driven node agent; connects to the instance over
+TurboPanel **daemon** — Ansible-driven host daemon; connects to the instance over
 HTTPS/WSS (or Unix socket when co-located).
 
 ## Documentation discipline

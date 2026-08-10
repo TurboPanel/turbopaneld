@@ -658,7 +658,7 @@ it({
       const afterAttach = parseSentFrames(sentFrames);
       assertEquals(afterAttach.length, 1);
       assertEquals(afterAttach[0]?.type, "hello");
-      assertExists(afterAttach[0]?.agent);
+      assertExists(afterAttach[0]?.daemonBuild);
 
       await new Promise((resolve) =>
         setTimeout(resolve, idleCheckIntervalMs + 20)
@@ -835,8 +835,8 @@ it({
         frame.type === "hello"
       );
       assertExists(hello);
-      const agent = hello.agent as { commit?: string } | undefined;
-      assertExists(agent?.commit);
+      const daemonBuild = hello.daemonBuild as { commit?: string } | undefined;
+      assertExists(daemonBuild?.commit);
       socket.close(1000, "done");
     } finally {
       client.stop();

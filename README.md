@@ -1,6 +1,6 @@
 # TurboPanel Daemon
 
-**Node agent for every TurboPanel-managed host** — Ansible orchestration, authenticated control-plane presence, deploy/runtime, and host metrics.
+**Host daemon for every TurboPanel-managed host** — Ansible orchestration, authenticated control-plane presence, deploy/runtime, and host metrics.
 
 [![Release](https://img.shields.io/github/v/release/turbopanel/turbopaneld?label=release)](https://github.com/turbopanel/turbopaneld/releases)
 [![License: AGPL-3.0-only](https://img.shields.io/badge/License-AGPL--3.0--only-blue.svg)](./LICENSE)
@@ -106,7 +106,7 @@ curl -fsSL dev.turbopanel.sh | sh
 
 That clones `~/daemon` (and sibling repos), runs the daemon from source via Deno, and converges the dev overlay. Details: [Local development](https://turbopanel.io/docs/getting-started/development?utm_source=github-daemon-readme).
 
-Agent conventions and path model: [AGENTS.md](./AGENTS.md).
+Maintainer conventions and path model: [AGENTS.md](./AGENTS.md).
 
 ## License
 

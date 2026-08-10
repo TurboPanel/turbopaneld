@@ -65,6 +65,9 @@ jobs:
       - name: Check production layout contract
         run: deno task check:layout
 
+      - name: Check vocabulary (no daemon-as-agent phrasing)
+        run: deno task check:vocabulary
+
       - name: Test with coverage
         run: deno task test:coverage
 

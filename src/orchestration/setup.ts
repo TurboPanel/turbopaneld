@@ -91,7 +91,7 @@ function shouldRunDaemonConverge(): boolean {
  *
  * Ensures uv/Python/ansible toolchains (idempotent, stamped where possible).
  * For managed-node daemons (TURBOPANEL_INSTANCE_URL set), also runs the
- * lightweight `daemon-converge.yml` (sockets/logs/prereqs) so the agent host
+ * lightweight `daemon-converge.yml` (sockets/logs/prereqs) so the daemon host
  * is ready. Co-located dev stack converge (instance/UI/Caddy) is driven
  * explicitly by the dev console / "Start dev environment", not automatically
  * on daemon process restart — restarting the daemon must not restart or

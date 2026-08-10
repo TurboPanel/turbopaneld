@@ -130,7 +130,7 @@ export class IdlePresence {
   #lastActivityAt = Date.now();
   #lastInboundAt = Date.now();
   #lastPresenceSendAt = 0;
-  #lastAgentCommit: string | undefined;
+  #lastDaemonBuildCommit: string | undefined;
   #lastPresenceSnapshot: string | undefined;
   #staleReported = false;
   #connectedAtMs = Date.now();
@@ -235,8 +235,8 @@ export class IdlePresence {
     const ws = this.#ws;
     if (ws?.readyState !== WebSocket.OPEN) return;
 
-    const agent = buildInfoProvider();
-    this.#lastAgentCommit = agent.commit;
+    const daemonBuild = buildInfoProvider();
+    this.#lastDaemonBuildCommit = daemonBuild.commit;
     const host = hostHelloIdentityProvider();
     const presence = this.#collectPresenceSnapshot();
     this.#lastPresenceSnapshot = this.#serializePresenceSnapshot(presence);
@@ -245,7 +245,7 @@ export class IdlePresence {
       ws.send(JSON.stringify({
         type: "hello",
         at: new Date().toISOString(),
-        agent,
+        daemonBuild,
         ...(host.hostname ? { hostname: host.hostname } : {}),
         ...(host.machineKey ? { machineKey: host.machineKey } : {}),
         ...(host.os ? { os: host.os } : {}),
@@ -267,7 +267,7 @@ export class IdlePresence {
    *    liveness signal for a hibernating Durable Object; see
    *    `cell/offline-sweep.ts`). Answered by `setWebSocketAutoResponse` at
    *    the runtime level without waking the DO.
-   * 2. The app-level heartbeat — sent when the build agent commit changed
+   * 2. The app-level heartbeat — sent when the daemon build commit changed
    *    since the last hello/heartbeat, **or** when `timeSync` / `addresses`
    *    changed since the last presence snapshot (change-detected, cadence-bound).
    *
@@ -277,7 +277,7 @@ export class IdlePresence {
    *
    * Only `minPresenceIntervalMs` spacing applies to the cell ping. The
    * heartbeat is not gated behind idle detection so a busy connection still
-   * gets ping cadence; `#sendHello` seeds `#lastAgentCommit` and
+   * gets ping cadence; `#sendHello` seeds `#lastDaemonBuildCommit` and
    * `#lastPresenceSnapshot` on attach so the first post-attach tick sends
    * ping only unless presence fields changed.
    */
@@ -297,16 +297,16 @@ export class IdlePresence {
       return;
     }
     this.#sendCellPing();
-    const agent = buildInfoProvider();
-    const agentChanged = agent.commit !== this.#lastAgentCommit;
+    const daemonBuild = buildInfoProvider();
+    const daemonBuildChanged = daemonBuild.commit !== this.#lastDaemonBuildCommit;
 
     const presence = this.#collectPresenceSnapshot();
     const serialized = this.#serializePresenceSnapshot(presence);
     const presenceChanged = serialized !== this.#lastPresenceSnapshot;
 
-    if (agentChanged || presenceChanged) {
+    if (daemonBuildChanged || presenceChanged) {
       this.#sendHeartbeat({
-        agent: agentChanged ? agent : undefined,
+        daemonBuild: daemonBuildChanged ? daemonBuild : undefined,
         timeSync: presenceChanged ? presence.timeSync : undefined,
         addresses: presenceChanged ? presence.addresses : undefined,
       });
@@ -333,7 +333,7 @@ export class IdlePresence {
   }
 
   #sendHeartbeat(fields: {
-    agent?: BuildInfo;
+    daemonBuild?: BuildInfo;
     timeSync?: HostTimeSync;
     addresses?: ServerAddresses;
   }): void {
@@ -343,16 +343,16 @@ export class IdlePresence {
     const payload: {
       type: "heartbeat";
       at: string;
-      agent?: BuildInfo;
+      daemonBuild?: BuildInfo;
       timeSync?: HostTimeSync;
       addresses?: ServerAddresses;
     } = {
       type: "heartbeat",
       at: new Date().toISOString(),
     };
-    if (fields.agent) {
-      payload.agent = fields.agent;
-      this.#lastAgentCommit = fields.agent.commit;
+    if (fields.daemonBuild) {
+      payload.daemonBuild = fields.daemonBuild;
+      this.#lastDaemonBuildCommit = fields.daemonBuild.commit;
     }
     if (fields.timeSync) payload.timeSync = fields.timeSync;
     if (fields.addresses) payload.addresses = fields.addresses;
