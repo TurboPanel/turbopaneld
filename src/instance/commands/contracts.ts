@@ -266,12 +266,72 @@ export type EnvironmentDeployIngressService = {
   containerName: string;
 };
 
+/**
+ * Must stay in sync with the instance canonical
+ * `EnvironmentDeployComposeFileRole`.
+ */
+export type EnvironmentDeployComposeFileRole =
+  | "project"
+  | "environment"
+  | "platform";
+
+/**
+ * Must stay in sync with the instance canonical
+ * `EnvironmentDeployComposeFileSource`.
+ */
+export type EnvironmentDeployComposeFileSource = "inline" | "repository";
+
+/**
+ * Must stay in sync with the instance canonical
+ * `EnvironmentDeployComposeFile`. Array order is exactly the daemon
+ * `docker compose -f` order — never sort.
+ */
+export type EnvironmentDeployComposeFile = {
+  filename: string;
+  role: EnvironmentDeployComposeFileRole;
+  source?: EnvironmentDeployComposeFileSource;
+  /**
+   * Must stay in sync with the instance canonical
+   * `EnvironmentDeployComposeFile.path` — repo-relative original location
+   * when `source: 'repository'`. Populated once repository-pinned compose
+   * files are supported; unused today.
+   */
+  path?: string;
+  content: string;
+};
+
+/** Must stay in sync with the instance canonical `COMPOSE_FILE_NAME_RE`. */
+const COMPOSE_FILE_NAME_RE = /^[A-Za-z0-9._-]+\.ya?ml$/;
+
+const DEPLOY_COMPOSE_FILE_ROLES = new Set<EnvironmentDeployComposeFileRole>([
+  "project",
+  "environment",
+  "platform",
+]);
+
+const DEPLOY_COMPOSE_FILE_SOURCES = new Set<
+  EnvironmentDeployComposeFileSource
+>([
+  "inline",
+  "repository",
+]);
+
 export type EnvironmentDeployPayload = {
   environmentId: string;
   projectId: string;
   organizationId: string;
   projectName: string;
+  /**
+   * Required pre-merged runtime YAML (legacy / fallback). Prefer
+   * `composeFiles` when present — must stay required so older command rows
+   * and the current write path always have a single-file body.
+   */
   composeYaml: string;
+  /**
+   * Ordered compose file chain for multi-file deploys. Must stay in sync with
+   * the instance canonical `EnvironmentDeployCommandPayload.composeFiles`.
+   */
+  composeFiles?: EnvironmentDeployComposeFile[];
   hostings: EnvironmentDeployHosting[];
   traditionalWebSites?: EnvironmentDeployTraditionalWebSite[];
   /**
@@ -1621,6 +1681,17 @@ function parseOptionalMaterialArray<T>(
   return value.map(parseEntry);
 }
 
+function parseOptionalBoolean(
+  value: unknown,
+  fieldName: string,
+): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "boolean") {
+    throw new TypeError(`${fieldName} must be a boolean`);
+  }
+  return value;
+}
+
 const DOCKER_EXTERNAL_NETWORK_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 
 function parseDockerExternalNetworkName(value: unknown): string {
@@ -1665,6 +1736,93 @@ function parseManagedNetworkServices(value: unknown): string[] | undefined {
   }
   const names = value.map(parseManagedNetworkServiceName);
   return [...new Set(names)].sort((a, b) => a.localeCompare(b));
+}
+
+function parseEnvironmentDeployComposeFileEntry(
+  entry: unknown,
+): EnvironmentDeployComposeFile {
+  if (!isRecord(entry)) {
+    throw new TypeError("Invalid environment deploy payload");
+  }
+  if (
+    typeof entry.filename !== "string" ||
+    !COMPOSE_FILE_NAME_RE.test(entry.filename) ||
+    entry.filename.includes("..")
+  ) {
+    throw new TypeError("Invalid environment deploy payload");
+  }
+  if (
+    typeof entry.role !== "string" ||
+    !DEPLOY_COMPOSE_FILE_ROLES.has(
+      entry.role as EnvironmentDeployComposeFileRole,
+    )
+  ) {
+    throw new TypeError("Invalid environment deploy payload");
+  }
+  if (typeof entry.content !== "string" || entry.content.length === 0) {
+    throw new TypeError("Invalid environment deploy payload");
+  }
+  const file: EnvironmentDeployComposeFile = {
+    filename: entry.filename,
+    role: entry.role as EnvironmentDeployComposeFileRole,
+    content: entry.content,
+  };
+  if (entry.source !== undefined) {
+    if (
+      typeof entry.source !== "string" ||
+      !DEPLOY_COMPOSE_FILE_SOURCES.has(
+        entry.source as EnvironmentDeployComposeFileSource,
+      )
+    ) {
+      throw new TypeError("Invalid environment deploy payload");
+    }
+    file.source = entry.source as EnvironmentDeployComposeFileSource;
+  }
+  if (entry.path !== undefined) {
+    if (
+      typeof entry.path !== "string" ||
+      entry.path.length === 0 ||
+      entry.path.includes("..") ||
+      entry.path.startsWith("/")
+    ) {
+      throw new TypeError("Invalid environment deploy payload");
+    }
+    file.path = entry.path;
+  }
+  return file;
+}
+
+/**
+ * Must stay in sync with the instance canonical `parseDeployComposeFiles`.
+ * Never sorts — order is the daemon `-f` order.
+ */
+function parseEnvironmentDeployComposeFiles(
+  value: unknown,
+): EnvironmentDeployComposeFile[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new TypeError("Invalid environment deploy payload");
+  }
+  const files = value.map(parseEnvironmentDeployComposeFileEntry);
+  const seen = new Set<string>();
+  let platformCount = 0;
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i]!;
+    if (seen.has(file.filename)) {
+      throw new TypeError("Invalid environment deploy payload");
+    }
+    seen.add(file.filename);
+    if (file.role === "platform") {
+      platformCount += 1;
+      if (i !== files.length - 1) {
+        throw new TypeError("Invalid environment deploy payload");
+      }
+    }
+  }
+  if (platformCount > 1) {
+    throw new TypeError("Invalid environment deploy payload");
+  }
+  return files;
 }
 
 const DEPLOY_INGRESS_UUID_RE =
@@ -1795,13 +1953,8 @@ export function parseEnvironmentDeployPayload(
   const managedNetworkServices = parseManagedNetworkServices(
     value.managedNetworkServices,
   );
-  let noCache: boolean | undefined;
-  if (value.noCache !== undefined) {
-    if (typeof value.noCache !== "boolean") {
-      throw new TypeError("noCache must be a boolean");
-    }
-    noCache = value.noCache;
-  }
+  const composeFiles = parseEnvironmentDeployComposeFiles(value.composeFiles);
+  const noCache = parseOptionalBoolean(value.noCache, "noCache");
 
   return {
     environmentId: parseNonEmptyString(value, "environmentId"),
@@ -1810,6 +1963,7 @@ export function parseEnvironmentDeployPayload(
     projectName: parseNonEmptyString(value, "projectName"),
     composeYaml: parseNonEmptyString(value, "composeYaml"),
     hostings: hostings.map(parseHosting),
+    ...(composeFiles === undefined ? {} : { composeFiles }),
     ...(traditionalWebSites === undefined ? {} : { traditionalWebSites }),
     ...(ingressServices === undefined ? {} : { ingressServices }),
     ...(dockerExternalNetworks === undefined ? {} : { dockerExternalNetworks }),

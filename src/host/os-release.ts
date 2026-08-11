@@ -1,3 +1,4 @@
+import { type HostInventory, readHostInventory } from "./host-inventory.ts";
 import { cachedMachineKey } from "./machine-key.ts";
 
 /** OS families we may report; keep in sync with instance `ServerOsFamily`. */
@@ -37,6 +38,8 @@ export type HostHelloIdentity = {
   hostname?: string;
   machineKey?: string;
   os?: HostOsMetadata;
+  /** Capacity facts (cpu/mem/swap totals) for fleet inventory + load bars. */
+  inventory?: HostInventory;
 };
 
 const OS_RELEASE_PATH = "/etc/os-release";
@@ -254,6 +257,8 @@ export function getHostHelloIdentity(): HostHelloIdentity {
   if (machineKey) identity.machineKey = machineKey;
   const os = readOsRelease();
   if (os) identity.os = os;
+  const inventory = readHostInventory();
+  if (inventory) identity.inventory = inventory;
   return identity;
 }
 

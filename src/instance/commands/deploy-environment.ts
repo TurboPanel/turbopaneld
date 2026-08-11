@@ -1,14 +1,37 @@
-import { join } from "@std/path";
-import { applySecretVariablesToCompose } from "../../deploy/apply-deploy-variables.ts";
-import { applyStorageVolumesToCompose } from "../../deploy/apply-storage-volumes.ts";
-import { injectHostingLabels } from "../../deploy/compose-labels.ts";
+import { buildSecretVariablesFragment } from "../../deploy/apply-deploy-variables.ts";
+import { buildStorageVolumesFragment } from "../../deploy/apply-storage-volumes.ts";
+import { buildHostingLabelsFragment } from "../../deploy/compose-labels.ts";
+import {
+  composeBasename,
+  composeFileArgs,
+  deploymentDir as resolveDeploymentDir,
+  LEGACY_COMPOSE_FILENAME,
+  pruneStaleComposeLayerFiles,
+  publishStagedComposeChain,
+  removeComposeStageDir,
+  resetComposeStageDir,
+  writeComposeFileManifest,
+  writeComposeLayerFiles,
+} from "../../deploy/compose-files.ts";
+import {
+  mergeComposeOverlayFragments,
+  writeDaemonComposeLayer,
+} from "../../deploy/compose-overlay.ts";
 import {
   parseComposePsEntries,
   readComposePsContainer,
 } from "../../deploy/compose-ps.ts";
-import { composeHasContainerServices } from "../../deploy/compose-services.ts";
-import { runDocker } from "../../deploy/docker-cli.ts";
-import { ensureDocker } from "../../deploy/ensure-docker.ts";
+import {
+  composeFilesHaveContainerServices,
+  resolveComposeModel,
+  validateComposeConfig,
+} from "../../deploy/compose-services.ts";
+import {
+  type DockerCliResult,
+  runDocker as defaultRunDocker,
+  type RunDockerOptions,
+} from "../../deploy/docker-cli.ts";
+import { ensureDocker as defaultEnsureDocker } from "../../deploy/ensure-docker.ts";
 import { ensureSystemPrincipals } from "../../deploy/ensure-principal.ts";
 import {
   buildTcpUdpIngressEntries,
@@ -32,15 +55,16 @@ import {
   runPostDeployHooks,
 } from "../../deploy/run-deploy-hooks.ts";
 import { applyTraditionalWebSites } from "../../deploy/traditional-web.ts";
-import { ensureExternalDockerNetworks } from "../../deploy/ensure-docker-networks.ts";
+import { ensureExternalDockerNetworks as defaultEnsureExternalDockerNetworks } from "../../deploy/ensure-docker-networks.ts";
 import { ensureManagedIngressNetwork } from "../../managed/networks.ts";
 import {
-  injectTraditionalWebDockerReachability,
+  buildTraditionalWebReachabilityFragment,
   resolveDockerHostGatewayAddress,
 } from "../../deploy/traditional-web-docker.ts";
 import { logInfo } from "../../logger.ts";
 import { resolveLayout } from "../../paths/layout.ts";
 import {
+  type EnvironmentDeployComposeFile,
   type EnvironmentDeployContainer,
   type EnvironmentDeployHosting,
   type EnvironmentDeployIngressService,
@@ -55,6 +79,11 @@ import type { LayoutPaths } from "../../paths/layout.ts";
 const SAFE_PATH_ID_RE = /^[A-Za-z0-9_-]+$/;
 const COMPOSE_PROJECT_RE = /^[a-z0-9][a-z0-9_-]*$/;
 
+type RunDockerFn = (
+  args: string[],
+  options?: RunDockerOptions,
+) => Promise<DockerCliResult>;
+
 /**
  * Best-effort `docker compose ps --format json` after a successful compose up.
  * Never throws. Returns `null` when collection fails (non-authoritative — omit
@@ -64,12 +93,12 @@ const COMPOSE_PROJECT_RE = /^[a-z0-9][a-z0-9_-]*$/;
 async function collectDeployedContainers(
   projectName: string,
   hostings: EnvironmentDeployHosting[],
+  composePaths: readonly string[],
+  run: RunDockerFn,
 ): Promise<EnvironmentDeployContainer[] | null> {
   try {
-    const result = await runDocker([
-      "compose",
-      "-p",
-      projectName,
+    const result = await run([
+      ...composeFileArgs(projectName, composePaths),
       "ps",
       "--format",
       "json",
@@ -119,11 +148,12 @@ async function collectDeployedContainers(
 async function collectServiceIngressContainer(
   ingress: EnvironmentDeployIngressService,
   layout: LayoutPaths,
+  run: RunDockerFn,
 ): Promise<EnvironmentDeployContainer | null> {
   try {
     const composePath = serviceIngressComposePath(layout, ingress.serviceId);
     const project = serviceIngressProject(ingress.serviceId);
-    const result = await runDocker([
+    const result = await run([
       "compose",
       "-p",
       project,
@@ -173,48 +203,22 @@ function assertSafeDeploymentIdentifiers(
   }
 }
 
-async function composeUp(
-  projectName: string,
-  composePath: string,
-): Promise<void> {
-  const result = await runDocker([
-    "compose",
-    "-p",
-    projectName,
-    "-f",
-    composePath,
-    "up",
-    "-d",
-    "--remove-orphans",
-  ]);
-  if (!result.success) {
-    throw new Error(result.stderr || "Docker Compose deployment failed");
-  }
-}
-
-async function composeBuildNoCache(
-  projectName: string,
-  composePath: string,
-): Promise<void> {
-  const result = await runDocker([
-    "compose",
-    "-p",
-    projectName,
-    "-f",
-    composePath,
-    "build",
-    "--no-cache",
-    "--pull",
-  ]);
-  if (!result.success) {
-    throw new Error(
-      result.stderr || "Docker Compose cacheless build failed",
-    );
-  }
-}
-
 export type EnvironmentDeployDeps = {
   decryptSecrets?: DecryptSecretsFn;
+  /** Test seam — defaults to {@link defaultRunDocker}. */
+  runDocker?: RunDockerFn;
+  /**
+   * Test seam — defaults to {@link defaultEnsureDocker}. Avoids real Docker/
+   * Ansible install on hermetic suite paths that still exercise compose.
+   */
+  ensureDocker?: () => Promise<void>;
+  /**
+   * Test seam — defaults to {@link defaultEnsureExternalDockerNetworks}.
+   * When omitted, the default uses `runDocker` from these deps.
+   */
+  ensureExternalDockerNetworks?: (
+    names: readonly string[],
+  ) => Promise<void>;
 };
 
 /**
@@ -249,6 +253,7 @@ async function ensureDeployIngress(
   containerHostings: EnvironmentDeployHosting[],
   allHostings: readonly EnvironmentDeployHosting[],
   ingressServices: readonly EnvironmentDeployIngressService[],
+  ensureDockerFn: () => Promise<void>,
 ): Promise<void> {
   const activeIngressServiceIds = new Set(
     ingressServices.map((ingress) => ingress.serviceId),
@@ -268,7 +273,7 @@ async function ensureDeployIngress(
     await ensureHostingCaddyRuntime(layout);
     return;
   }
-  await ensureDocker();
+  await ensureDockerFn();
 
   // Shared loopback Traefik only when something HTTP actually needs it —
   // bare nginx/workload deploys must not create the platform `-in` proxy.
@@ -336,54 +341,22 @@ async function resolveDeployMountPaths(
   );
 }
 
-/** Applies secret variables, storage volumes, and (for mixed deploys)
- * traditional-web Docker-reachability injection to the compose document.
- * Returns the resolved Docker host-gateway bind address, gated to non-null
- * only when the deploy actually mixes container + traditional-web services. */
-async function resolveDeployComposeYaml(
-  parsedPayload: EnvironmentDeployPayload,
-  hasContainers: boolean,
-  mountPaths: Map<string, string>,
-  traditionalWebSites: EnvironmentDeployTraditionalWebSite[],
-  decryptSecrets: DecryptSecretsFn | undefined,
-): Promise<{ composeYaml: string; dockerBindAddress: string | null }> {
-  let composeYaml = parsedPayload.composeYaml;
-  const variableMaterial = parsedPayload.variableMaterial ?? [];
-  const storageMaterial = parsedPayload.storageMaterial ?? [];
-
-  if (hasContainers && variableMaterial.length > 0) {
-    if (!decryptSecrets) {
-      throw new Error(
-        "Variable material present but secrets decrypt is unavailable",
-      );
-    }
-    composeYaml = await applySecretVariablesToCompose(
-      composeYaml,
-      variableMaterial,
-      decryptSecrets,
-    );
+/**
+ * Payload compose layers when present; otherwise a one-element legacy chain
+ * from `composeYaml` written as `docker-compose.yml`.
+ */
+export function resolveDeployComposeFiles(
+  payload: EnvironmentDeployPayload,
+): EnvironmentDeployComposeFile[] {
+  if (payload.composeFiles && payload.composeFiles.length > 0) {
+    return payload.composeFiles;
   }
-
-  if (hasContainers && storageMaterial.length > 0) {
-    composeYaml = applyStorageVolumesToCompose(
-      composeYaml,
-      storageMaterial,
-      mountPaths,
-    );
-  }
-
-  const mixedTraditionalAndContainers = hasContainers &&
-    traditionalWebSites.length > 0;
-  if (!mixedTraditionalAndContainers) {
-    return { composeYaml, dockerBindAddress: null };
-  }
-
-  const dockerBindAddress = await resolveDockerHostGatewayAddress();
-  composeYaml = injectTraditionalWebDockerReachability(
-    composeYaml,
-    traditionalWebSites,
-  );
-  return { composeYaml, dockerBindAddress };
+  return [{
+    filename: LEGACY_COMPOSE_FILENAME,
+    role: "project",
+    source: "inline",
+    content: payload.composeYaml,
+  }];
 }
 
 async function applyDeployTraditionalWebSites(
@@ -398,67 +371,208 @@ async function applyDeployTraditionalWebSites(
   });
 }
 
-/** Labels + writes the compose file, runs deploy hooks, ensures external
- * networks, and brings the project up. Returns the labeled service names. */
-async function deployContainerServices(
+async function buildDaemonOverlayFragment(
   parsedPayload: EnvironmentDeployPayload,
-  composeYaml: string,
   containerHostings: EnvironmentDeployHosting[],
-  composePath: string,
-  deploymentDir: string,
-): Promise<string[]> {
-  const labeledCompose = injectHostingLabels({
-    ...parsedPayload,
-    composeYaml,
-    hostings: containerHostings,
-  });
-  await Deno.writeTextFile(composePath, labeledCompose.composeYaml, {
-    mode: 0o640,
-  });
+  traditionalWebSites: EnvironmentDeployTraditionalWebSite[],
+  mountPaths: Map<string, string>,
+  resolved: Awaited<ReturnType<typeof resolveComposeModel>>,
+  decryptSecrets: DecryptSecretsFn | undefined,
+): Promise<ReturnType<typeof mergeComposeOverlayFragments>> {
+  const variableMaterial = parsedPayload.variableMaterial ?? [];
+  const storageMaterial = parsedPayload.storageMaterial ?? [];
 
-  const serviceHooks = parsedPayload.serviceHooks ?? [];
-  if (serviceHooks.length > 0) {
-    await runDeployServiceHooks(serviceHooks, {
-      projectName: parsedPayload.projectName,
-      composePath,
-      deploymentDir,
-    });
-  }
-
-  const externalNetworks = parsedPayload.dockerExternalNetworks ?? [];
-  if (externalNetworks.length > 0) {
-    await ensureExternalDockerNetworks(externalNetworks);
-  }
-
-  const managedNetworkServices = parsedPayload.managedNetworkServices ?? [];
-  if (managedNetworkServices.length > 0) {
-    await ensureManagedIngressNetwork();
-  }
-
-  if (parsedPayload.noCache === true) {
-    logInfo(
-      "commands",
-      `cacheless rebuild for compose project ${parsedPayload.projectName}`,
+  let secretsFragment = {};
+  if (variableMaterial.length > 0) {
+    if (!decryptSecrets) {
+      throw new Error(
+        "Variable material present but secrets decrypt is unavailable",
+      );
+    }
+    secretsFragment = await buildSecretVariablesFragment(
+      variableMaterial,
+      decryptSecrets,
+      resolved,
     );
-    await composeBuildNoCache(parsedPayload.projectName, composePath);
   }
 
-  await composeUp(parsedPayload.projectName, composePath);
+  const storageFragment = buildStorageVolumesFragment(
+    storageMaterial,
+    mountPaths,
+    resolved,
+  );
 
-  if (serviceHooks.length > 0) {
-    await runPostDeployHooks(serviceHooks, deploymentDir);
-  }
+  const traditionalFragment = traditionalWebSites.length > 0
+    ? buildTraditionalWebReachabilityFragment(traditionalWebSites, resolved)
+    : {};
 
-  return labeledCompose.services;
+  const labelsFragment = buildHostingLabelsFragment({
+    payload: parsedPayload,
+    hostings: containerHostings,
+    resolved,
+  });
+
+  // Match historical injection order: secrets → storage → TW reachability → labels.
+  return mergeComposeOverlayFragments([
+    secretsFragment,
+    storageFragment,
+    traditionalFragment,
+    labelsFragment,
+  ]);
 }
 
-/** Persists an empty compose marker so stop/idempotency paths stay consistent
- * for traditional-web-only deploys (no container services to label/deploy). */
+type DeployContainerServicesRunDeps = {
+  run: RunDockerFn;
+  decryptSecrets: DecryptSecretsFn | undefined;
+  ensureExternalNetworks: (names: readonly string[]) => Promise<void>;
+};
+
+/**
+ * Labels + writes layers into a stage dir, validates Docker config/overlay,
+ * publishes the authoritative live chain (manifest + prune), then runs deploy
+ * hooks / external networks / compose up. A failure before publish leaves the
+ * previous live manifest and its referenced files intact.
+ */
+async function deployContainerServices(
+  parsedPayload: EnvironmentDeployPayload,
+  files: EnvironmentDeployComposeFile[],
+  containerHostings: EnvironmentDeployHosting[],
+  traditionalWebSites: EnvironmentDeployTraditionalWebSite[],
+  mountPaths: Map<string, string>,
+  deploymentDir: string,
+  runDeps: DeployContainerServicesRunDeps,
+): Promise<{ serviceNames: string[]; composePaths: string[] }> {
+  const { run, decryptSecrets, ensureExternalNetworks } = runDeps;
+  const stageDir = await resetComposeStageDir(deploymentDir);
+  try {
+    const userPaths = await writeComposeLayerFiles(
+      stageDir,
+      files.map((file) => ({ filename: file.filename, content: file.content })),
+    );
+
+    const resolved = await resolveComposeModel(
+      parsedPayload.projectName,
+      userPaths,
+      run,
+    );
+
+    const fragment = await buildDaemonOverlayFragment(
+      parsedPayload,
+      containerHostings,
+      traditionalWebSites,
+      mountPaths,
+      resolved,
+      decryptSecrets,
+    );
+
+    const daemonPath = await writeDaemonComposeLayer(stageDir, fragment);
+    const stagedChain = daemonPath === null
+      ? [...userPaths]
+      : [...userPaths, daemonPath];
+    const basenames = stagedChain.map((path) => composeBasename(path));
+
+    if (resolved.serviceNames.length === 0) {
+      const livePaths = await publishStagedComposeChain(
+        deploymentDir,
+        stageDir,
+        basenames,
+      );
+      logInfo(
+        "commands",
+        `environment.deploy resolved zero services project=${parsedPayload.projectName}; skipping compose up`,
+      );
+      return { serviceNames: [], composePaths: livePaths };
+    }
+
+    // Validate against the staged chain before touching the live directory.
+    await validateComposeConfig(parsedPayload.projectName, stagedChain, run);
+
+    // Publish is the cutover: new manifest becomes authoritative, stale live
+    // layers (including prior daemon overlay) are pruned only here.
+    const chain = await publishStagedComposeChain(
+      deploymentDir,
+      stageDir,
+      basenames,
+    );
+
+    const serviceHooks = parsedPayload.serviceHooks ?? [];
+    if (serviceHooks.length > 0) {
+      await runDeployServiceHooks(serviceHooks, {
+        projectName: parsedPayload.projectName,
+        composePaths: chain,
+        deploymentDir,
+        runDocker: run,
+      });
+    }
+
+    const externalNetworks = parsedPayload.dockerExternalNetworks ?? [];
+    if (externalNetworks.length > 0) {
+      await ensureExternalNetworks(externalNetworks);
+    }
+
+    const managedNetworkServices = parsedPayload.managedNetworkServices ?? [];
+    if (managedNetworkServices.length > 0) {
+      await ensureManagedIngressNetwork(run);
+    }
+
+    if (parsedPayload.noCache === true) {
+      logInfo(
+        "commands",
+        `cacheless rebuild for compose project ${parsedPayload.projectName}`,
+      );
+      const build = await run([
+        ...composeFileArgs(parsedPayload.projectName, chain),
+        "build",
+        "--no-cache",
+        "--pull",
+      ]);
+      if (!build.success) {
+        throw new Error(
+          build.stderr || "Docker Compose cacheless build failed",
+        );
+      }
+    }
+
+    const up = await run([
+      ...composeFileArgs(parsedPayload.projectName, chain),
+      "up",
+      "-d",
+      "--remove-orphans",
+    ]);
+    if (!up.success) {
+      throw new Error(up.stderr || "Docker Compose deployment failed");
+    }
+
+    if (serviceHooks.length > 0) {
+      await runPostDeployHooks(serviceHooks, deploymentDir);
+    }
+
+    return {
+      serviceNames: [...resolved.serviceNames].sort((a, b) =>
+        a.localeCompare(b)
+      ),
+      composePaths: chain,
+    };
+  } finally {
+    await removeComposeStageDir(deploymentDir);
+  }
+}
+
+/** Persists layer files + manifest so stop/lifecycle stay consistent for
+ * traditional-web-only deploys (no daemon layer, no Docker calls). */
 async function writeDeployComposeMarker(
-  composePath: string,
-  composeYaml: string,
+  deploymentDir: string,
+  files: EnvironmentDeployComposeFile[],
 ): Promise<string[]> {
-  await Deno.writeTextFile(composePath, composeYaml, { mode: 0o640 });
+  // Write first, then commit the manifest, then prune — so a failed rewrite
+  // cannot delete files still referenced by an older manifest.
+  const userPaths = await writeComposeLayerFiles(
+    deploymentDir,
+    files.map((file) => ({ filename: file.filename, content: file.content })),
+  );
+  const basenames = userPaths.map((path) => composeBasename(path));
+  await writeComposeFileManifest(deploymentDir, basenames);
+  await pruneStaleComposeLayerFiles(deploymentDir, new Set(basenames));
   return [];
 }
 
@@ -543,12 +657,20 @@ export async function handleEnvironmentDeploy(
   const parsedPayload = parseEnvironmentDeployPayload(payload);
   assertSafeDeploymentIdentifiers(parsedPayload);
   const layout = resolveLayout(Deno.env.toObject());
+  const run = deps?.runDocker ?? defaultRunDocker;
+  const ensureDockerFn = deps?.ensureDocker ?? defaultEnsureDocker;
+  const ensureExternalNetworks = deps?.ensureExternalDockerNetworks ??
+    ((names: readonly string[]) =>
+      defaultEnsureExternalDockerNetworks(names, run));
 
   const traditionalWebSites = parsedPayload.traditionalWebSites ?? [];
   const traditionalNames = new Set(
     traditionalWebSites.map((site) => site.composeServiceName),
   );
-  const hasContainers = composeHasContainerServices(parsedPayload.composeYaml);
+  const files = resolveDeployComposeFiles(parsedPayload);
+  const hasContainers = composeFilesHaveContainerServices(
+    files.map((file) => file.content),
+  );
   const containerHostings = parsedPayload.hostings.filter(
     (hosting) => !traditionalNames.has(hosting.composeServiceName),
   );
@@ -561,11 +683,11 @@ export async function handleEnvironmentDeploy(
     containerHostings,
     parsedPayload.hostings,
     ingressServices,
+    ensureDockerFn,
   );
 
-  const deploymentDir = join(
-    layout.stateDir,
-    "deployments",
+  const deploymentDir = resolveDeploymentDir(
+    layout,
     parsedPayload.environmentId,
   );
   await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
@@ -580,13 +702,11 @@ export async function handleEnvironmentDeploy(
     deps?.decryptSecrets,
   );
 
-  const { composeYaml, dockerBindAddress } = await resolveDeployComposeYaml(
-    parsedPayload,
-    hasContainers,
-    mountPaths,
-    traditionalWebSites,
-    deps?.decryptSecrets,
-  );
+  const mixedTraditionalAndContainers = hasContainers &&
+    traditionalWebSites.length > 0;
+  const dockerBindAddress = mixedTraditionalAndContainers
+    ? await resolveDockerHostGatewayAddress()
+    : null;
 
   await applyDeployTraditionalWebSites(
     layout,
@@ -595,16 +715,23 @@ export async function handleEnvironmentDeploy(
     dockerBindAddress,
   );
 
-  const composePath = join(deploymentDir, "docker-compose.yml");
-  const labeledServices = hasContainers
-    ? await deployContainerServices(
+  let labeledServices: string[] = [];
+  let composePathsForCollect: string[] = [];
+  if (hasContainers) {
+    const deployed = await deployContainerServices(
       parsedPayload,
-      composeYaml,
+      files,
       containerHostings,
-      composePath,
+      mixedTraditionalAndContainers ? traditionalWebSites : [],
+      mountPaths,
       deploymentDir,
-    )
-    : await writeDeployComposeMarker(composePath, composeYaml);
+      { run, decryptSecrets: deps?.decryptSecrets, ensureExternalNetworks },
+    );
+    labeledServices = deployed.serviceNames;
+    composePathsForCollect = deployed.composePaths;
+  } else {
+    labeledServices = await writeDeployComposeMarker(deploymentDir, files);
+  }
 
   const hostnameTls = await materializeDeployTls(
     layout,
@@ -618,6 +745,8 @@ export async function handleEnvironmentDeploy(
     ? await collectDeployedContainers(
       parsedPayload.projectName,
       containerHostings,
+      composePathsForCollect,
+      run,
     )
     : [];
 
@@ -626,6 +755,7 @@ export async function handleEnvironmentDeploy(
       const ingressContainer = await collectServiceIngressContainer(
         ingress,
         layout,
+        run,
       );
       if (ingressContainer) containers.push(ingressContainer);
     }

@@ -6,7 +6,8 @@
  * ports bound on the docker bridge address.
  */
 
-import { parse, stringify } from "yaml";
+import type { ComposeOverlayFragment } from "./compose-overlay.ts";
+import type { ResolvedComposeModel } from "./compose-services.ts";
 
 // Docker's default docker0 bridge gateway when `ip addr` lookup fails.
 const DEFAULT_DOCKER_GATEWAY = "172.17.0.1"; // NOSONAR typescript:S1313 — Docker default bridge gateway fallback, not a reachable public host
@@ -20,10 +21,6 @@ export type TraditionalWebDockerSite = {
   composeServiceName: string;
   listenPort: number;
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function isValidIpv4(value: string): boolean {
   const parts = value.split(".");
@@ -76,53 +73,15 @@ export function buildTraditionalWebEndpointMap(
   return endpoints;
 }
 
-function mergeExtraHosts(service: Record<string, unknown>): void {
-  const existing = service.extra_hosts;
-  const hosts: string[] = [];
-  if (Array.isArray(existing)) {
-    for (const entry of existing) {
-      if (typeof entry === "string" && entry.length > 0) hosts.push(entry);
-    }
-  }
-  if (!hosts.includes(HOST_DOCKER_INTERNAL)) {
-    hosts.push(HOST_DOCKER_INTERNAL);
-  }
-  service.extra_hosts = hosts;
-}
-
-function mergeEnvironment(
-  service: Record<string, unknown>,
-  envEntries: Record<string, string>,
-): void {
-  const existing = service.environment;
-  if (Array.isArray(existing)) {
-    for (const [key, value] of Object.entries(envEntries)) {
-      existing.push(`${key}=${value}`);
-    }
-    service.environment = existing;
-    return;
-  }
-  if (isRecord(existing)) {
-    service.environment = { ...existing, ...envEntries };
-    return;
-  }
-  service.environment = { ...envEntries };
-}
-
 /**
- * Patch runtime compose so every container service can dial traditional-web
- * sites on the host (`host.docker.internal:<listenPort>`).
+ * Daemon-overlay fragment so every resolved container service can dial
+ * traditional-web sites on the host (`host.docker.internal:<listenPort>`).
  */
-export function injectTraditionalWebDockerReachability(
-  composeYaml: string,
+export function buildTraditionalWebReachabilityFragment(
   sites: readonly TraditionalWebDockerSite[],
-): string {
-  if (sites.length === 0) return composeYaml;
-
-  const parsed: unknown = parse(composeYaml);
-  if (!isRecord(parsed) || !isRecord(parsed.services)) {
-    throw new Error("Compose YAML must define a services object");
-  }
+  resolved: ResolvedComposeModel,
+): ComposeOverlayFragment {
+  if (sites.length === 0 || resolved.serviceNames.length === 0) return {};
 
   const endpoints = buildTraditionalWebEndpointMap(sites);
   const envEntries: Record<string, string> = {
@@ -133,11 +92,12 @@ export function injectTraditionalWebDockerReachability(
       endpoints[site.composeServiceName] ?? "";
   }
 
-  for (const service of Object.values(parsed.services)) {
-    if (!isRecord(service)) continue;
-    mergeExtraHosts(service);
-    mergeEnvironment(service, envEntries);
+  const services: Record<string, Record<string, unknown>> = {};
+  for (const name of resolved.serviceNames) {
+    services[name] = {
+      extra_hosts: [HOST_DOCKER_INTERNAL],
+      environment: { ...envEntries },
+    };
   }
-
-  return stringify(parsed);
+  return { services };
 }

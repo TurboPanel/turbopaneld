@@ -249,6 +249,7 @@ export class IdlePresence {
         ...(host.hostname ? { hostname: host.hostname } : {}),
         ...(host.machineKey ? { machineKey: host.machineKey } : {}),
         ...(host.os ? { os: host.os } : {}),
+        ...(host.inventory ? { inventory: host.inventory } : {}),
         timeSync: presence.timeSync,
         addresses: presence.addresses,
       }));

@@ -72,13 +72,14 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../insta
    pre-created volume (not a `<project>_<name>` orphan); `docker_volume`
    entries may omit `destinationPath` when the volume is only compose-declared
    (no service-mount append).
-7. Write runtime compose under
-   `<stateDir>/deployments/<environmentId>/docker-compose.yml` with Traefik
-   labels (`src/deploy/compose-labels.ts`) — proxy middleware for
-   `stripPrefix`, `gzip`/`brotli` compress; hosting Caddy respects
-   `forceHttps` per hostname (`ingress.ts`). HTTP hostings that share a hostname
-   are merged into one Caddy site with `handle` / path matchers (`pathPrefix`);
-   Traefik routers already used `pathPrefix` via compose labels.
+7. Write the ordered compose file chain under
+   `<stateDir>/deployments/<environmentId>/` (see **Multi-file compose chain**
+   below) — Traefik labels (`src/deploy/compose-labels.ts`) land in the
+   daemon-authored final layer: proxy middleware for `stripPrefix`,
+   `gzip`/`brotli` compress; hosting Caddy respects `forceHttps` per hostname
+   (`ingress.ts`). HTTP hostings that share a hostname are merged into one
+   Caddy site with `handle` / path matchers (`pathPrefix`); Traefik routers
+   already used `pathPrefix` via compose labels.
 8. Run pre-deploy hooks (`serviceHooks[]`: optional `build --no-cache`, shell
    preDeployCommand). When the payload sets `noCache: true`, run
    `docker compose build --no-cache --pull` for the whole project, then
@@ -106,6 +107,17 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../insta
    `serviceId` from `payload.hostings`) is included in the command result when
    collection succeeds; a `ps`/parse failure never fails an otherwise-successful
    deploy.
+
+## Multi-file compose chain (`-f` order)
+
+`environment.deploy` writes and runs each layer as a **separate file** rather than merging everything into one `docker-compose.yml` before writing. `src/deploy/compose-files.ts` owns the path/argv/manifest helpers; `resolveDeployComposeFiles` (`deploy-environment.ts`) takes the payload's ordered `composeFiles[]` when present, or falls back to a single-element legacy chain (`{ filename: 'docker-compose.yml', role: 'project', source: 'inline', content: payload.composeYaml }`) for pre-`composeFiles` command rows.
+
+- **Staged write + validated cutover:** each deploy resets `<deploymentDir>/.compose-stage/`, writes the payload's user layers (`writeComposeLayerFiles`) there, resolves the merged Docker Compose model against them (services/networks/volumes needed to build labels/secrets/storage fragments), builds the daemon overlay fragment (below), writes it as the stage's final layer, then runs `docker compose config` validation against the **staged** chain. Only after validation succeeds does `publishStagedComposeChain` copy the staged basenames into the live deployment dir, write the authoritative `compose-files.json` manifest, and prune any stale `*.yml`/`*.yaml` files not in the new chain (never touches the manifest itself or non-compose files). A failed redeploy therefore leaves the previous live chain and manifest completely intact.
+- **Deployment-dir layout:** `<stateDir>/deployments/<environmentId>/<filename>` for every layer (user-supplied `filename`s from the payload, validated against `COMPOSE_FILE_NAME_RE` and re-checked daemon-side via `assertSafeComposeFilename` as defense in depth against a hand-crafted command row), plus the daemon-authored overlay at the fixed name `docker-compose.turbopanel.daemon.yml` (`DAEMON_COMPOSE_FILENAME`), plus the manifest at `compose-files.json` (`COMPOSE_MANIFEST_FILENAME`, `{ version, files: string[] }` of ordered basenames only — never absolute paths). All compose/manifest files are written mode `0640` (`writeComposeFileSecure` force-chmods after write since truncate-in-place does not narrow an existing more-permissive mode).
+- **Daemon-authored final layer:** `buildDaemonOverlayFragment` merges, in this fixed order, the secret-variables fragment, storage bind/volume-mount fragment, traditional-web ⇄ Docker reachability fragment (`extra_hosts` + `TURBOPANEL_TRADITIONAL_WEB_*` env), and hosting Traefik-label fragment (`mergeComposeOverlayFragments` in `compose-overlay.ts` — key-disjoint per fragment in practice; array-valued keys like `volumes`/`extra_hosts` concat-with-dedup, scalars let the later fragment win). The rendered fragment (`renderComposeOverlay`) is appended as the chain's last file when non-empty (`writeDaemonComposeLayer`) so it always overrides — Compose Spec `-f` semantics mean the last file wins — every user-authored layer; when the fragment is empty (nothing to inject), any stale overlay file from a previous deploy is removed instead of writing an empty layer.
+- **`-f` argv:** `composeFileArgs(projectName, paths)` builds `compose -p <project> -f <p1> -f <p2> …` in the exact order given — every `docker compose` invocation (`config` validation, `build`, `up`, `lifecycle` start/stop/restart, `stop`'s `down`) uses this helper so the daemon never re-derives or re-sorts the chain by hand.
+- **Lifecycle / stop rebuild the identical chain:** `lifecycle-environment.ts` and `stop-environment.ts` both call `resolveDeployedComposePaths(deploymentDir)`, which reads `compose-files.json` via `readComposeFileManifest` — returns `null` **only when the manifest file is absent**, falling back to the single legacy `docker-compose.yml` for pre-`composeFiles` deployments. When the manifest **exists** but is corrupt, unsafe, or lists missing layer files, it throws `ComposeManifestError` instead of silently using only `docker-compose.yml` (a partial chain while multi-file layers remain on disk). This guarantees `lifecycle`/`stop` always run `docker compose` against exactly the files that were actually applied — never a re-derived or partially-stale set.
+- **Local service preflight is tag-aware:** `composeHasContainerServices` / `composeFilesHaveContainerServices` parse `!reset` / `!override` so the container-services gate before Docker does not fail solely because of Compose Spec tags; parse failures are treated as "may have services" (docker compose `config` remains authoritative).
 
 ## Raw TCP/UDP port hosting (non-HTTP docker services)
 
@@ -165,8 +177,10 @@ get a per-service Traefik project or an `ingressServices[]` entry.
 `environment.stop` (command router →
 `src/instance/commands/stop-environment.ts`):
 
-1. `docker compose -p <projectName> -f <stateDir>/deployments/<environmentId>/docker-compose.yml down --remove-orphans --volumes`
-   when the compose file exists (idempotent no-op when missing).
+1. `docker compose -p <projectName> -f <p1> -f <p2> … down --remove-orphans --volumes`
+   against the manifest-resolved chain (`resolveDeployedComposePaths`) —
+   idempotent no-op when neither a manifest nor the legacy compose file
+   exists.
 2. Remove `/etc/turbopanel/hosting/sites/<environmentId>.caddy` via
    `removeHostingCaddySite` and best-effort reload hosting Caddy; remove
    traditional-web sites.
@@ -179,10 +193,10 @@ get a per-service Traefik project or an `ingressServices[]` entry.
 `environment.lifecycle` (command router →
 `src/instance/commands/lifecycle-environment.ts`):
 
-1. Require
-   `<stateDir>/deployments/<environmentId>/docker-compose.yml` — missing
-   compose **fails** with a deploy-first message (unlike idempotent stop).
-2. `docker compose -p <projectName> -f <composePath> <start|stop|restart>` —
+1. Require a manifest- or legacy-resolved compose chain
+   (`resolveDeployedComposePaths`) — missing compose **fails** with a
+   deploy-first message (unlike idempotent stop).
+2. `docker compose -p <projectName> -f <p1> -f <p2> … <start|stop|restart>` —
    never `down`, `--volumes`, or `--remove-orphans`.
 3. Best-effort apply the same action to each per-service Traefik project for
    this environment (`readEnvironmentTcpUdpServiceIds` →
@@ -201,7 +215,9 @@ Helpers: `src/deploy/ensure-docker.ts`, `src/deploy/ingress.ts`,
 `src/deploy/materialize-storage.ts`, `src/deploy/apply-storage-volumes.ts`,
 `src/deploy/run-deploy-hooks.ts`, `src/deploy/ensure-principal.ts`,
 `src/deploy/traditional-web.ts`, `src/deploy/traditional-web-docker.ts`,
-`src/deploy/ensure-docker-networks.ts`, `src/deploy/compose-ps.ts`.
+`src/deploy/ensure-docker-networks.ts`, `src/deploy/compose-ps.ts`,
+`src/deploy/compose-files.ts` (multi-file path/argv/manifest helpers),
+`src/deploy/compose-overlay.ts` (daemon-authored overlay fragment merge).
 
 ## Shared HTTP ingress identity
 

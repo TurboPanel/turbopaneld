@@ -62,6 +62,11 @@ const FULL_HOST: HostHelloIdentity = {
     prettyName: "Debian GNU/Linux 13 (trixie)",
     arch: "aarch64",
   },
+  inventory: {
+    cpuCores: 4,
+    memoryTotalBytes: 16_384 * 1024 * 1024,
+    swapTotalBytes: 0,
+  },
 };
 
 test("IdlePresence hello omits optional host fields when absent", () => {
@@ -89,6 +94,7 @@ test("IdlePresence hello omits optional host fields when absent", () => {
     assertEquals("hostname" in hello, false);
     assertEquals("machineKey" in hello, false);
     assertEquals("os" in hello, false);
+    assertEquals("inventory" in hello, false);
     assertEquals(hello.timeSync, makeTimeSync("UTC"));
     assertEquals(hello.addresses, makeAddresses("203.0.113.10"));
   } finally {
@@ -119,6 +125,7 @@ test("IdlePresence hello includes optional host fields when present", () => {
     assertEquals(hello.hostname, FULL_HOST.hostname);
     assertEquals(hello.machineKey, FULL_HOST.machineKey);
     assertEquals(hello.os, FULL_HOST.os);
+    assertEquals(hello.inventory, FULL_HOST.inventory);
     assertEquals(hello.timeSync, makeTimeSync("America/Chicago"));
     assertEquals(hello.addresses, makeAddresses("203.0.113.20"));
   } finally {

@@ -1,6 +1,7 @@
-import { parse, stringify } from "yaml";
 import type { EnvironmentDeployPayload } from "../instance/commands/contracts.ts";
 import { MANAGED_INGRESS_NETWORK } from "../managed/networks.ts";
+import type { ComposeOverlayFragment } from "./compose-overlay.ts";
+import type { ResolvedComposeModel } from "./compose-services.ts";
 import {
   LABEL_ENVIRONMENT,
   LABEL_PROJECT,
@@ -10,12 +11,6 @@ import {
 
 const INGRESS_NETWORK = "turbopanel-ingress";
 const ROUTER_ID_RE = /^[A-Za-z0-9_-]+$/;
-
-type ComposeService = Record<string, unknown>;
-type ComposeDocument = Record<string, unknown> & {
-  services?: Record<string, ComposeService>;
-  networks?: Record<string, unknown>;
-};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -37,99 +32,49 @@ function addLabel(
   labels[key] = value;
 }
 
-function scalarLabelValue(labelValue: unknown): string {
-  if (typeof labelValue === "string") return labelValue;
-  if (typeof labelValue === "number" || typeof labelValue === "boolean") {
-    return String(labelValue);
-  }
-  if (labelValue === null || labelValue === undefined) return "";
-  throw new TypeError("Compose label values must be strings or scalars");
-}
-
-function normalizeLabels(value: unknown): Record<string, string> {
-  if (value === undefined) return {};
-  if (isRecord(value)) {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, labelValue]) => [
-        key,
-        scalarLabelValue(labelValue),
-      ]),
+function networkNamesFromService(
+  service: Record<string, unknown>,
+): string[] {
+  const networks = service.networks;
+  if (networks === undefined) return [];
+  if (Array.isArray(networks)) {
+    return networks.filter((entry): entry is string =>
+      typeof entry === "string" && entry.length > 0
     );
   }
-  if (Array.isArray(value)) {
-    const labels: Record<string, string> = {};
-    for (const entry of value) {
-      if (typeof entry !== "string") {
-        throw new TypeError("Compose labels must be strings or an object");
-      }
-      const separator = entry.indexOf("=");
-      if (separator === -1) {
-        labels[entry] = "";
-      } else {
-        labels[entry.slice(0, separator)] = entry.slice(separator + 1);
-      }
-    }
-    return labels;
-  }
-  throw new Error("Compose labels must be strings or an object");
-}
-
-function attachComposeNetwork(
-  service: ComposeService,
-  networkName: string,
-): void {
-  const networks = service.networks;
-  if (networks === undefined) {
-    service.networks = [networkName];
-    return;
-  }
-  if (Array.isArray(networks)) {
-    if (!networks.includes(networkName)) {
-      networks.push(networkName);
-    }
-    return;
-  }
   if (isRecord(networks)) {
-    networks[networkName] ??= {};
-    return;
+    return Object.keys(networks);
   }
-  throw new Error("Compose service networks must be an array or object");
-}
-
-function attachIngressNetwork(service: ComposeService): void {
-  attachComposeNetwork(service, INGRESS_NETWORK);
+  return [];
 }
 
 /**
- * Attach the daemon's shared managed-ingress network
- * (`turbopanel-managed`) to every compose service that owns a
- * managed-database binding, so the ProxySQL container-name endpoint
- * resolved by the instance (`resolveBindingEndpoint`) is dial-able. Mirrors
- * {@link attachIngressNetwork} but for a platform-managed (never
- * operator-registered) network.
+ * Union of resolved service networks plus platform network names (list form
+ * so Compose does not have to merge a bare platform list over a mapping).
  */
-function injectManagedNetworkAttachment(
-  compose: ComposeDocument,
-  payload: EnvironmentDeployPayload,
-): void {
-  const serviceNames = payload.managedNetworkServices ?? [];
-  if (serviceNames.length === 0) return;
-
-  const services = compose.services!;
-  for (const composeServiceName of serviceNames) {
-    const service = services[composeServiceName];
-    if (!isRecord(service)) {
-      throw new Error(`Compose service not found: ${composeServiceName}`);
+function unionServiceNetworks(
+  resolvedService: Record<string, unknown>,
+  existing: unknown,
+  platformNetwork: string,
+): string[] {
+  const names: string[] = [];
+  const add = (name: string) => {
+    if (!names.includes(name)) names.push(name);
+  };
+  for (const name of networkNamesFromService(resolvedService)) {
+    add(name);
+  }
+  if (Array.isArray(existing)) {
+    for (const entry of existing) {
+      if (typeof entry === "string" && entry.length > 0) add(entry);
     }
-    attachComposeNetwork(service, MANAGED_INGRESS_NETWORK);
+  } else if (isRecord(existing)) {
+    for (const name of Object.keys(existing)) {
+      add(name);
+    }
   }
-
-  const networks = compose.networks ?? {};
-  if (!isRecord(networks)) {
-    throw new TypeError("Compose networks must be an object");
-  }
-  networks[MANAGED_INGRESS_NETWORK] = { external: true };
-  compose.networks = networks;
+  add(platformNetwork);
+  return names;
 }
 
 function buildRouterRule(hostnames: string[], pathPrefix?: string): string {
@@ -141,14 +86,6 @@ function buildRouterRule(hostnames: string[], pathPrefix?: string): string {
     throw new Error("hostings[].pathPrefix contains an unsupported character");
   }
   return `(${hostRule}) && PathPrefix(\`${pathPrefix}\`)`;
-}
-
-function parseCompose(composeYaml: string): ComposeDocument {
-  const document = parse(composeYaml);
-  if (!isRecord(document) || !isRecord(document.services)) {
-    throw new Error("Compose YAML must define a services object");
-  }
-  return document as ComposeDocument;
 }
 
 function applyProxyMiddlewareLabels(
@@ -270,23 +207,59 @@ function applyTcpUdpHostingLabels(
   }
 }
 
-export function injectHostingLabels(payload: EnvironmentDeployPayload): {
-  composeYaml: string;
-  services: string[];
-} {
-  const compose = parseCompose(payload.composeYaml);
-  const services = compose.services!;
+function requireResolvedService(
+  resolved: ResolvedComposeModel,
+  composeServiceName: string,
+): Record<string, unknown> {
+  const service = resolved.services[composeServiceName];
+  if (!isRecord(service)) {
+    throw new Error(`Compose service not found: ${composeServiceName}`);
+  }
+  return service;
+}
 
-  for (const hosting of payload.hostings) {
+function serviceLabels(
+  services: Record<string, Record<string, unknown>>,
+  name: string,
+): Record<string, string> {
+  const existing = services[name]?.labels;
+  if (isRecord(existing)) {
+    const labels: Record<string, string> = {};
+    for (const [key, value] of Object.entries(existing)) {
+      if (typeof value === "string") labels[key] = value;
+    }
+    return labels;
+  }
+  return {};
+}
+
+/**
+ * Platform label / network attachment fragment for Traefik hostings and
+ * managed-ingress network attachment. Emits only daemon-authored fields.
+ */
+export function buildHostingLabelsFragment(input: {
+  payload: EnvironmentDeployPayload;
+  hostings: EnvironmentDeployPayload["hostings"];
+  resolved: ResolvedComposeModel;
+}): ComposeOverlayFragment {
+  const { payload, hostings, resolved } = input;
+  const services: Record<string, Record<string, unknown>> = {};
+  const networks: Record<string, unknown> = {};
+
+  for (const hosting of hostings) {
     assertRouterId(hosting.hostingId, "hostings[].hostingId");
-    const service = services[hosting.composeServiceName];
-    if (!isRecord(service)) {
-      throw new Error(
-        `Compose service not found: ${hosting.composeServiceName}`,
-      );
+    const resolvedService = requireResolvedService(
+      resolved,
+      hosting.composeServiceName,
+    );
+    const name = hosting.composeServiceName;
+    if (!services[name]) {
+      services[name] = {
+        networks: networkNamesFromService(resolvedService),
+      };
     }
 
-    const labels = normalizeLabels(service.labels);
+    const labels = serviceLabels(services, name);
     addLabel(labels, "traefik.enable", "true");
     addLabel(labels, "traefik.docker.network", INGRESS_NETWORK);
     if (hosting.protocol === "tcp" || hosting.protocol === "udp") {
@@ -300,25 +273,50 @@ export function injectHostingLabels(payload: EnvironmentDeployPayload): {
     addLabel(labels, LABEL_PROJECT, payload.projectId);
     addLabel(labels, LABEL_ENVIRONMENT, payload.environmentId);
     addLabel(labels, LABEL_SERVICE_ID, hosting.serviceId);
-    service.labels = labels;
-    attachIngressNetwork(service);
+
+    services[name] = {
+      ...services[name],
+      labels,
+      networks: unionServiceNetworks(
+        resolvedService,
+        services[name]?.networks,
+        INGRESS_NETWORK,
+      ),
+    };
   }
 
   // Only declare the external ingress network when something actually routes
   // through it — bare container deploys must not require Traefik/network.
-  if (payload.hostings.length > 0) {
-    const networks = compose.networks ?? {};
-    if (!isRecord(networks)) {
-      throw new TypeError("Compose networks must be an object");
-    }
+  if (hostings.length > 0) {
     networks[INGRESS_NETWORK] = { external: true };
-    compose.networks = networks;
   }
 
-  injectManagedNetworkAttachment(compose, payload);
+  const managedNames = payload.managedNetworkServices ?? [];
+  for (const composeServiceName of managedNames) {
+    const resolvedService = requireResolvedService(
+      resolved,
+      composeServiceName,
+    );
+    if (!services[composeServiceName]) {
+      services[composeServiceName] = {
+        networks: networkNamesFromService(resolvedService),
+      };
+    }
+    services[composeServiceName] = {
+      ...services[composeServiceName],
+      networks: unionServiceNetworks(
+        resolvedService,
+        services[composeServiceName]?.networks,
+        MANAGED_INGRESS_NETWORK,
+      ),
+    };
+  }
+  if (managedNames.length > 0) {
+    networks[MANAGED_INGRESS_NETWORK] = { external: true };
+  }
 
-  return {
-    composeYaml: stringify(compose),
-    services: Object.keys(services).sort((a, b) => a.localeCompare(b)),
-  };
+  const fragment: ComposeOverlayFragment = {};
+  if (Object.keys(services).length > 0) fragment.services = services;
+  if (Object.keys(networks).length > 0) fragment.networks = networks;
+  return fragment;
 }

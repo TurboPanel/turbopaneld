@@ -1,37 +1,9 @@
-import { parse, stringify } from "yaml";
 import type { EnvironmentDeployStorageMaterial } from "../instance/commands/contracts.ts";
-
-type ComposeService = Record<string, unknown>;
-type ComposeDocument = Record<string, unknown> & {
-  services: Record<string, ComposeService>;
-  volumes?: Record<string, unknown>;
-};
+import type { ComposeOverlayFragment } from "./compose-overlay.ts";
+import type { ResolvedComposeModel } from "./compose-services.ts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function parseComposeDocument(composeYaml: string): ComposeDocument {
-  const parsed: unknown = parse(composeYaml);
-  if (!isRecord(parsed)) {
-    throw new Error("Compose YAML must be an object");
-  }
-  if (!isRecord(parsed.services)) {
-    throw new Error("Compose YAML must define a services object");
-  }
-  return parsed as ComposeDocument;
-}
-
-function appendServiceVolume(
-  service: ComposeService,
-  mount: Record<string, unknown>,
-): void {
-  const existing = service.volumes;
-  if (Array.isArray(existing)) {
-    service.volumes = [...existing, mount];
-    return;
-  }
-  service.volumes = [mount];
 }
 
 function requireMountPath(
@@ -46,20 +18,6 @@ function requireMountPath(
   return path;
 }
 
-function requireComposeService(
-  services: Record<string, ComposeService>,
-  composeServiceName: string,
-  storageId: string,
-): ComposeService {
-  const service = services[composeServiceName];
-  if (!isRecord(service)) {
-    throw new Error(
-      `Compose service ${composeServiceName} not found for storage ${storageId}`,
-    );
-  }
-  return service;
-}
-
 function requireComposeServiceName(
   entry: EnvironmentDeployStorageMaterial,
 ): string {
@@ -71,11 +29,35 @@ function requireComposeServiceName(
   return entry.composeServiceName;
 }
 
+function requireResolvedService(
+  resolved: ResolvedComposeModel,
+  composeServiceName: string,
+  storageId: string,
+): void {
+  if (!isRecord(resolved.services[composeServiceName])) {
+    throw new Error(
+      `Compose service ${composeServiceName} not found for storage ${storageId}`,
+    );
+  }
+}
+
+function appendServiceVolume(
+  services: Record<string, Record<string, unknown>>,
+  composeServiceName: string,
+  mount: Record<string, unknown>,
+): void {
+  const existing = services[composeServiceName] ?? {};
+  const volumes = Array.isArray(existing.volumes) ? [...existing.volumes] : [];
+  volumes.push(mount);
+  services[composeServiceName] = { ...existing, volumes };
+}
+
 function applyDockerVolumeEntry(
-  services: Record<string, ComposeService>,
+  services: Record<string, Record<string, unknown>>,
   topVolumes: Record<string, unknown>,
   entry: EnvironmentDeployStorageMaterial,
   mountPaths: Map<string, string>,
+  resolved: ResolvedComposeModel,
 ): void {
   const volumeName = entry.volumeName && entry.volumeName.length > 0
     ? entry.volumeName
@@ -92,12 +74,8 @@ function applyDockerVolumeEntry(
   // there is no destinationPath (or no composeServiceName).
   if (!entry.destinationPath || !entry.composeServiceName) return;
 
-  const service = requireComposeService(
-    services,
-    entry.composeServiceName,
-    entry.storageId,
-  );
-  appendServiceVolume(service, {
+  requireResolvedService(resolved, entry.composeServiceName, entry.storageId);
+  appendServiceVolume(services, entry.composeServiceName, {
     type: "volume",
     source: volumeName,
     target: entry.destinationPath,
@@ -105,55 +83,51 @@ function applyDockerVolumeEntry(
 }
 
 function applyBindMountEntry(
-  services: Record<string, ComposeService>,
+  services: Record<string, Record<string, unknown>>,
   entry: EnvironmentDeployStorageMaterial,
   mountPaths: Map<string, string>,
+  resolved: ResolvedComposeModel,
 ): void {
   const composeServiceName = requireComposeServiceName(entry);
-  const service = requireComposeService(
-    services,
-    composeServiceName,
-    entry.storageId,
-  );
+  requireResolvedService(resolved, composeServiceName, entry.storageId);
   const hostPath = requireMountPath(mountPaths, entry.storageId, "host path");
-  appendServiceVolume(service, {
+  appendServiceVolume(services, composeServiceName, {
     type: "bind",
     source: hostPath,
     target: entry.destinationPath,
   });
 }
 
-function applyStorageEntry(
-  services: Record<string, ComposeService>,
-  topVolumes: Record<string, unknown>,
-  entry: EnvironmentDeployStorageMaterial,
-  mountPaths: Map<string, string>,
-): void {
-  if (entry.kind === "docker_volume") {
-    applyDockerVolumeEntry(services, topVolumes, entry, mountPaths);
-    return;
-  }
-  applyBindMountEntry(services, entry, mountPaths);
-}
-
 /**
- * Patch resolved host/volume paths into compose services before `compose up`.
+ * Storage volume / bind-mount fragment for the daemon overlay before
+ * `compose up`.
  */
-export function applyStorageVolumesToCompose(
-  composeYaml: string,
+export function buildStorageVolumesFragment(
   entries: EnvironmentDeployStorageMaterial[],
   mountPaths: Map<string, string>,
-): string {
-  const parsed = parseComposeDocument(composeYaml);
-  const topVolumes = isRecord(parsed.volumes) ? { ...parsed.volumes } : {};
+  resolved: ResolvedComposeModel,
+): ComposeOverlayFragment {
+  if (entries.length === 0) return {};
+
+  const services: Record<string, Record<string, unknown>> = {};
+  const topVolumes: Record<string, unknown> = {};
 
   for (const entry of entries) {
-    applyStorageEntry(parsed.services, topVolumes, entry, mountPaths);
+    if (entry.kind === "docker_volume") {
+      applyDockerVolumeEntry(
+        services,
+        topVolumes,
+        entry,
+        mountPaths,
+        resolved,
+      );
+    } else {
+      applyBindMountEntry(services, entry, mountPaths, resolved);
+    }
   }
 
-  if (Object.keys(topVolumes).length > 0) {
-    parsed.volumes = topVolumes;
-  }
-
-  return stringify(parsed);
+  const fragment: ComposeOverlayFragment = {};
+  if (Object.keys(services).length > 0) fragment.services = services;
+  if (Object.keys(topVolumes).length > 0) fragment.volumes = topVolumes;
+  return fragment;
 }

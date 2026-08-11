@@ -76,6 +76,306 @@ test("environment.deploy hosting fixture round-trips bindAddress", () => {
   assertEquals(payload.hostings[0]?.bindAddress, "203.0.113.10");
 });
 
+test("environment.deploy composeFiles round-trips and preserves order", () => {
+  const composeFiles = [
+    {
+      filename: "docker-compose.yml",
+      role: "project" as const,
+      content: "services:\n  web:\n    image: nginx\n",
+    },
+    {
+      filename: "docker-compose.prod.yml",
+      role: "environment" as const,
+      source: "inline" as const,
+      content: "services:\n  web:\n    restart: always\n",
+    },
+    {
+      filename: "docker-compose.turbopanel.yml",
+      role: "platform" as const,
+      content: "services:\n  web:\n    container_name: abc\n",
+    },
+  ];
+  const payload = parseEnvironmentDeployPayload({
+    environmentId: "env-1",
+    projectId: "proj-1",
+    organizationId: "org-1",
+    projectName: "demo",
+    composeYaml: "services: {}\n",
+    hostings: [],
+    composeFiles,
+  });
+  assertEquals(payload.composeFiles, composeFiles);
+  assertEquals(
+    payload.composeFiles?.map((f) => f.filename),
+    [
+      "docker-compose.yml",
+      "docker-compose.prod.yml",
+      "docker-compose.turbopanel.yml",
+    ],
+  );
+});
+
+test("environment.deploy rejects invalid composeFiles", () => {
+  const base = {
+    environmentId: "env-1",
+    projectId: "proj-1",
+    organizationId: "org-1",
+    projectName: "demo",
+    composeYaml: "services: {}\n",
+    hostings: [] as unknown[],
+  };
+  assertThrows(
+    () => parseEnvironmentDeployPayload({ ...base, composeFiles: [] }),
+    TypeError,
+    "Invalid environment deploy payload",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...base,
+        composeFiles: [
+          { filename: "../evil.yml", role: "project", content: "x" },
+        ],
+      }),
+    TypeError,
+    "Invalid environment deploy payload",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...base,
+        composeFiles: [
+          { filename: "nested/file.yml", role: "project", content: "x" },
+        ],
+      }),
+    TypeError,
+    "Invalid environment deploy payload",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...base,
+        composeFiles: [
+          { filename: "compose.txt", role: "project", content: "x" },
+        ],
+      }),
+    TypeError,
+    "Invalid environment deploy payload",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...base,
+        composeFiles: [
+          { filename: "docker-compose.yml", role: "project", content: "a" },
+          {
+            filename: "docker-compose.yml",
+            role: "environment",
+            content: "b",
+          },
+        ],
+      }),
+    TypeError,
+    "Invalid environment deploy payload",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...base,
+        composeFiles: [
+          { filename: "docker-compose.yml", role: "unknown", content: "a" },
+        ],
+      }),
+    TypeError,
+    "Invalid environment deploy payload",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...base,
+        composeFiles: [
+          {
+            filename: "docker-compose.yml",
+            role: "project",
+            source: "git",
+            content: "a",
+          },
+        ],
+      }),
+    TypeError,
+    "Invalid environment deploy payload",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...base,
+        composeFiles: [
+          { filename: "docker-compose.yml", role: "project", content: "" },
+        ],
+      }),
+    TypeError,
+    "Invalid environment deploy payload",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...base,
+        composeFiles: [
+          {
+            filename: "docker-compose.turbopanel.yml",
+            role: "platform",
+            content: "p",
+          },
+          { filename: "docker-compose.yml", role: "project", content: "a" },
+        ],
+      }),
+    TypeError,
+    "Invalid environment deploy payload",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...base,
+        composeFiles: [
+          { filename: "docker-compose.yml", role: "project", content: "a" },
+          {
+            filename: "docker-compose.platform.yml",
+            role: "platform",
+            content: "p1",
+          },
+          {
+            filename: "docker-compose.turbopanel.yml",
+            role: "platform",
+            content: "p2",
+          },
+        ],
+      }),
+    TypeError,
+    "Invalid environment deploy payload",
+  );
+});
+
+test("environment.deploy omits composeFiles when absent (legacy)", () => {
+  const payload = parseEnvironmentDeployPayload({
+    environmentId: "env-1",
+    projectId: "proj-1",
+    organizationId: "org-1",
+    projectName: "demo",
+    composeYaml: "services: {}\n",
+    hostings: [],
+  });
+  assertEquals(payload.composeFiles, undefined);
+});
+
+test("environment.deploy composeFiles accepts repository source with a valid path", () => {
+  const base = {
+    environmentId: "env-1",
+    projectId: "proj-1",
+    organizationId: "org-1",
+    projectName: "demo",
+    composeYaml: "services: {}\n",
+    hostings: [] as unknown[],
+  };
+  const payload = parseEnvironmentDeployPayload({
+    ...base,
+    composeFiles: [
+      {
+        filename: "docker-compose.yml",
+        role: "project",
+        source: "repository",
+        path: "deploy/docker-compose.yml",
+        content: "services:\n  web:\n    image: nginx\n",
+      },
+    ],
+  });
+  assertEquals(payload.composeFiles?.[0]?.source, "repository");
+  assertEquals(payload.composeFiles?.[0]?.path, "deploy/docker-compose.yml");
+});
+
+test("environment.deploy composeFiles rejects a path with traversal or a leading slash", () => {
+  const base = {
+    environmentId: "env-1",
+    projectId: "proj-1",
+    organizationId: "org-1",
+    projectName: "demo",
+    composeYaml: "services: {}\n",
+    hostings: [] as unknown[],
+  };
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...base,
+        composeFiles: [
+          {
+            filename: "docker-compose.yml",
+            role: "project",
+            source: "repository",
+            path: "../evil/docker-compose.yml",
+            content: "a",
+          },
+        ],
+      }),
+    TypeError,
+    "Invalid environment deploy payload",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...base,
+        composeFiles: [
+          {
+            filename: "docker-compose.yml",
+            role: "project",
+            source: "repository",
+            path: "/etc/docker-compose.yml",
+            content: "a",
+          },
+        ],
+      }),
+    TypeError,
+    "Invalid environment deploy payload",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...base,
+        composeFiles: [
+          {
+            filename: "docker-compose.yml",
+            role: "project",
+            source: "repository",
+            path: "",
+            content: "a",
+          },
+        ],
+      }),
+    TypeError,
+    "Invalid environment deploy payload",
+  );
+});
+
+test("EnvironmentDeployComposeFile shape stays structurally identical to the instance canonical type (including path)", () => {
+  const composeFiles = [
+    {
+      filename: "docker-compose.yml",
+      role: "project" as const,
+      source: "repository" as const,
+      path: "deploy/docker-compose.yml",
+      content: "services:\n  web:\n    image: nginx\n",
+    },
+  ];
+  const payload = parseEnvironmentDeployPayload({
+    environmentId: "env-1",
+    projectId: "proj-1",
+    organizationId: "org-1",
+    projectName: "demo",
+    composeYaml: "services: {}\n",
+    hostings: [],
+    composeFiles,
+  });
+  assertEquals(payload.composeFiles, composeFiles);
+});
+
 test("environment.deploy hosting fixture round-trips tcp protocol and ports", () => {
   const payload = parseEnvironmentDeployPayload({
     environmentId: "env-1",

@@ -5,7 +5,11 @@
  * tcp/udp claim files — that remains `environment.stop`.
  */
 
-import { join } from "@std/path";
+import {
+  composeFileArgs,
+  deploymentDir as resolveDeploymentDir,
+  resolveDeployedComposePaths,
+} from "../../deploy/compose-files.ts";
 import {
   parseComposePsEntries,
   readComposePsContainer,
@@ -104,16 +108,12 @@ async function applyIngressLifecycle(
  */
 async function collectLifecycleContainers(
   projectName: string,
-  composePath: string,
+  composePaths: readonly string[],
   run: RunDockerFn,
 ): Promise<EnvironmentDeployContainer[] | undefined> {
   try {
     const result = await run([
-      "compose",
-      "-p",
-      projectName,
-      "-f",
-      composePath,
+      ...composeFileArgs(projectName, composePaths),
       "ps",
       "-a",
       "--format",
@@ -160,25 +160,20 @@ export async function handleEnvironmentLifecycle(
   const run = deps?.runDocker ?? defaultRunDocker;
   const layout = resolveLayout(Deno.env.toObject());
 
-  const deploymentDir = join(
-    layout.stateDir,
-    "deployments",
+  const deploymentDir = resolveDeploymentDir(
+    layout,
     parsedPayload.environmentId,
   );
-  const composePath = join(deploymentDir, "docker-compose.yml");
+  const composePaths = await resolveDeployedComposePaths(deploymentDir);
 
-  if (!(await composeFileExists(composePath))) {
+  if (composePaths === null) {
     throw new Error(
       `environment ${parsedPayload.environmentId} is not deployed on this server yet — deploy it first`,
     );
   }
 
   const result = await run([
-    "compose",
-    "-p",
-    parsedPayload.projectName,
-    "-f",
-    composePath,
+    ...composeFileArgs(parsedPayload.projectName, composePaths),
     parsedPayload.action,
   ]);
   if (!result.success) {
@@ -199,7 +194,7 @@ export async function handleEnvironmentLifecycle(
 
   const containers = await collectLifecycleContainers(
     parsedPayload.projectName,
-    composePath,
+    composePaths,
     run,
   );
 

@@ -25,19 +25,23 @@ stays deferred until opt-in on both runtimes.
 
 `IdlePresence` runs per open socket:
 
-- Sends `{ type: "hello", at, daemonBuild, hostname?, machineKey?, os?, timeSync?,
-  addresses? }` once on attach. `machineKey` is a derived, non-reversible
-  HMAC of `/etc/machine-id` (`src/host/machine-key.ts`) — warmed on the
-  connect path before hello. Host OS comes from `/etc/os-release` (+
-  `/etc/debian_version`, `/etc/rpi-issue`) via `src/host/os-release.ts`
-  (`getHostHelloIdentity()`). Prefer dotted point-release
-  (`DEBIAN_VERSION_FULL` / `debian_version`, e.g. `13.5`) over bare
-  `VERSION_ID`. Raspberry Pi OS / Raspbian set `variant: "raspberry-pi-os"`
-  (`ID=raspbian` or `/etc/rpi-issue` present — 64-bit Pi OS still reports
-  `ID=debian`). Time sync facts come from `src/host/time-sync.ts`
-  (`timedatectl` + `/etc/systemd/timesyncd.conf`); addresses from
-  `collectServerAddresses()` (`src/server-addresses.ts`). The instance
-  persists `os` on `server.metadata.os` and exposes `osDisplay` / `osLogo` on
+- Sends `{ type: "hello", at, daemonBuild, hostname?, machineKey?, os?,
+  inventory?, timeSync?, addresses? }` once on attach. `machineKey` is a
+  derived, non-reversible HMAC of `/etc/machine-id` (`src/host/machine-key.ts`)
+  — warmed on the connect path before hello. Host OS comes from
+  `/etc/os-release` (+ `/etc/debian_version`, `/etc/rpi-issue`) via
+  `src/host/os-release.ts` (`getHostHelloIdentity()`). Prefer dotted
+  point-release (`DEBIAN_VERSION_FULL` / `debian_version`, e.g. `13.5`) over
+  bare `VERSION_ID`. Raspberry Pi OS / Raspbian set
+  `variant: "raspberry-pi-os"` (`ID=raspbian` or `/etc/rpi-issue` present —
+  64-bit Pi OS still reports `ID=debian`). **Host inventory** (static
+  capacity: `cpuCores`, `memoryTotalBytes`, `swapTotalBytes`) comes from
+  `/proc/stat` + `/proc/meminfo` via `src/host/host-inventory.ts` — process-
+  cached; sent on hello only (not heartbeat). Time sync facts come from
+  `src/host/time-sync.ts` (`timedatectl` + `/etc/systemd/timesyncd.conf`);
+  addresses from `collectServerAddresses()` (`src/server-addresses.ts`). The
+  instance persists `os` on `server.metadata.os` and `inventory` on
+  `server.metadata.inventory`, and exposes them on
   `GET /api/client/v1/servers`. All new hello fields stay optional for
   back-compat.
 - After **~60 s** of inbound silence (`IDLE_PRESENCE_MS`), sends the wire

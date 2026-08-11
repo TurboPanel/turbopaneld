@@ -1,61 +1,10 @@
-import { parse, stringify } from "yaml";
 import type { DecryptSecretsFn } from "./materialize-tls.ts";
 import type { EnvironmentDeployVariableMaterial } from "../instance/commands/contracts.ts";
-
-type ComposeService = Record<string, unknown>;
-type ComposeDocument = Record<string, unknown> & {
-  services?: Record<string, ComposeService>;
-};
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+import type { ComposeOverlayFragment } from "./compose-overlay.ts";
+import type { ResolvedComposeModel } from "./compose-services.ts";
 
 function escapeLiteralComposeValue(value: string): string {
   return value.replaceAll("$", "$$$$");
-}
-
-function readStringEnvMap(value: unknown): Record<string, string> {
-  if (!isRecord(value)) return {};
-  const out: Record<string, string> = {};
-  for (const [key, envValue] of Object.entries(value)) {
-    if (typeof envValue === "string") out[key] = envValue;
-  }
-  return out;
-}
-
-function mergeBuildArgs(
-  service: ComposeService,
-  args: Record<string, string>,
-): void {
-  if (Object.keys(args).length === 0) return;
-  const build = isRecord(service.build) ? { ...service.build } : {};
-  const existing = readStringEnvMap(build.args);
-  build.args = { ...existing, ...args };
-  service.build = build;
-}
-
-function applyEntryToService(
-  service: ComposeService,
-  entry: EnvironmentDeployVariableMaterial,
-  formatted: string,
-): void {
-  if (entry.forRuntime) {
-    const env = readStringEnvMap(service.environment);
-    env[entry.key] = formatted;
-    service.environment = env;
-  }
-  if (entry.forBuild) {
-    mergeBuildArgs(service, { [entry.key]: formatted });
-  }
-}
-
-function parseComposeDocument(composeYaml: string): ComposeDocument {
-  const document = parse(composeYaml);
-  if (!isRecord(document) || !isRecord(document.services)) {
-    throw new Error("Compose YAML must define a services object");
-  }
-  return document as ComposeDocument;
 }
 
 function requireDecryptedPlaintext(
@@ -75,38 +24,72 @@ function formatVariableValue(
   return entry.isLiteral ? escapeLiteralComposeValue(plaintext) : plaintext;
 }
 
-function applyEntryToServices(
-  services: Record<string, ComposeService>,
+function ensureService(
+  services: Record<string, Record<string, unknown>>,
+  name: string,
+): Record<string, unknown> {
+  const existing = services[name] ?? {};
+  services[name] = existing;
+  return existing;
+}
+
+function applyEntryToServiceStub(
+  service: Record<string, unknown>,
   entry: EnvironmentDeployVariableMaterial,
   formatted: string,
 ): void {
+  if (entry.forRuntime) {
+    const env = (typeof service.environment === "object" &&
+        service.environment !== null &&
+        !Array.isArray(service.environment))
+      ? { ...(service.environment as Record<string, string>) }
+      : {};
+    env[entry.key] = formatted;
+    service.environment = env;
+  }
+  if (entry.forBuild) {
+    const build = (typeof service.build === "object" &&
+        service.build !== null &&
+        !Array.isArray(service.build))
+      ? { ...(service.build as Record<string, unknown>) }
+      : {};
+    const args = (typeof build.args === "object" &&
+        build.args !== null &&
+        !Array.isArray(build.args))
+      ? { ...(build.args as Record<string, string>) }
+      : {};
+    args[entry.key] = formatted;
+    build.args = args;
+    service.build = build;
+  }
+}
+
+function targetServiceNames(
+  entry: EnvironmentDeployVariableMaterial,
+  resolved: ResolvedComposeModel,
+): string[] {
   if (entry.composeServiceName) {
-    const service = services[entry.composeServiceName];
-    if (!isRecord(service)) {
+    if (!resolved.services[entry.composeServiceName]) {
       throw new Error(
         `Compose service ${entry.composeServiceName} not found for variable ${entry.key}`,
       );
     }
-    applyEntryToService(service, entry, formatted);
-    return;
+    return [entry.composeServiceName];
   }
-
-  for (const service of Object.values(services)) {
-    if (isRecord(service)) {
-      applyEntryToService(service, entry, formatted);
-    }
-  }
+  return resolved.serviceNames;
 }
 
-export async function applySecretVariablesToCompose(
-  composeYaml: string,
+/**
+ * Decrypt variable material once and emit environment / build.args patches
+ * for the daemon overlay. Plaintext never reaches a log line.
+ */
+export async function buildSecretVariablesFragment(
   material: EnvironmentDeployVariableMaterial[],
   decryptSecrets: DecryptSecretsFn,
-): Promise<string> {
-  if (material.length === 0) return composeYaml;
+  resolved: ResolvedComposeModel,
+): Promise<ComposeOverlayFragment> {
+  if (material.length === 0) return {};
 
-  const document = parseComposeDocument(composeYaml);
-  const services = document.services as Record<string, ComposeService>;
   const plaintexts = await decryptSecrets(
     material.map((entry) => entry.valueEnvelope),
   );
@@ -114,15 +97,15 @@ export async function applySecretVariablesToCompose(
     throw new Error("secrets/decrypt returned unexpected length");
   }
 
+  const services: Record<string, Record<string, unknown>> = {};
   for (let i = 0; i < material.length; i += 1) {
     const entry = material[i]!;
     const plaintext = requireDecryptedPlaintext(entry, plaintexts[i]);
-    applyEntryToServices(
-      services,
-      entry,
-      formatVariableValue(entry, plaintext),
-    );
+    const formatted = formatVariableValue(entry, plaintext);
+    for (const name of targetServiceNames(entry, resolved)) {
+      applyEntryToServiceStub(ensureService(services, name), entry, formatted);
+    }
   }
 
-  return stringify(document);
+  return Object.keys(services).length > 0 ? { services } : {};
 }

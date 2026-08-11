@@ -1,7 +1,7 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import {
   buildTraditionalWebEndpointMap,
-  injectTraditionalWebDockerReachability,
+  buildTraditionalWebReachabilityFragment,
   TRADITIONAL_WEB_ENDPOINTS_ENV,
   traditionalWebEnvKeyForService,
 } from "./traditional-web-docker.ts";
@@ -22,15 +22,27 @@ test("traditionalWebEnvKeyForService sanitizes compose service names", () => {
   );
 });
 
-test("injectTraditionalWebDockerReachability adds extra_hosts and env URLs", () => {
-  const out = injectTraditionalWebDockerReachability(
-    "services:\n  api:\n    image: node:22\n",
+test("buildTraditionalWebReachabilityFragment adds extra_hosts and env URLs", () => {
+  const fragment = buildTraditionalWebReachabilityFragment(
     [{ composeServiceName: "static", listenPort: 18080 }],
+    {
+      serviceNames: ["api"],
+      services: { api: { image: "node:22" } },
+    },
   );
-  assertStringIncludes(out, "host.docker.internal:host-gateway");
-  assertStringIncludes(out, `${TRADITIONAL_WEB_ENDPOINTS_ENV}:`);
-  assertStringIncludes(out, traditionalWebEnvKeyForService("static"));
-  assertStringIncludes(out, "http://host.docker.internal:18080");
+  const service = fragment.services?.api as {
+    extra_hosts: string[];
+    environment: Record<string, string>;
+  };
+  assertEquals(service.extra_hosts, ["host.docker.internal:host-gateway"]);
+  assertStringIncludes(
+    service.environment[TRADITIONAL_WEB_ENDPOINTS_ENV] ?? "",
+    "18080",
+  );
+  assertEquals(
+    service.environment[traditionalWebEnvKeyForService("static")],
+    "http://host.docker.internal:18080",
+  );
 });
 
 test("buildTraditionalWebEndpointMap keys by compose service name", () => {

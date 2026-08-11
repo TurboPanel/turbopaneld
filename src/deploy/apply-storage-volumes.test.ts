@@ -1,17 +1,16 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
-import { applyStorageVolumesToCompose } from "./apply-storage-volumes.ts";
+import { buildStorageVolumesFragment } from "./apply-storage-volumes.ts";
+import type { ResolvedComposeModel } from "./compose-services.ts";
 
-describe("applyStorageVolumesToCompose", () => {
-  it("patches bind mounts and docker volumes into compose services", () => {
-    const composeYaml = [
-      "services:",
-      "  web:",
-      "    image: nginx:latest",
-    ].join("\n");
+const webResolved: ResolvedComposeModel = {
+  serviceNames: ["web"],
+  services: { web: { image: "nginx:latest" } },
+};
 
-    const patched = applyStorageVolumesToCompose(
-      composeYaml,
+describe("buildStorageVolumesFragment", () => {
+  it("patches bind mounts and docker volumes into services fragment", () => {
+    const fragment = buildStorageVolumesFragment(
       [
         {
           storageId: "st-bind",
@@ -35,29 +34,30 @@ describe("applyStorageVolumesToCompose", () => {
         ["st-bind", "/var/lib/tp/data"],
         ["st-vol", "tp-00000000-cache"],
       ]),
+      webResolved,
     );
 
-    assertEquals(patched.includes("/var/lib/tp/data"), true);
-    assertEquals(patched.includes("/data"), true);
-    assertEquals(patched.includes("tp-00000000-cache"), true);
-    assertEquals(patched.includes("/cache"), true);
-    assertEquals(patched.includes("external: true"), true);
+    assertEquals(fragment.services?.web?.volumes, [
+      {
+        type: "bind",
+        source: "/var/lib/tp/data",
+        target: "/data",
+      },
+      {
+        type: "volume",
+        source: "tp-00000000-cache",
+        target: "/cache",
+      },
+    ]);
+    assertEquals(fragment.volumes?.["tp-00000000-cache"], {
+      name: "tp-00000000-cache",
+      external: true,
+    });
   });
 
   it("emits external:true for docker_volume and skips mount without destinationPath", () => {
-    const composeYaml = [
-      "services:",
-      "  web:",
-      "    image: nginx:latest",
-      "    volumes:",
-      "      - data:/data",
-      "volumes:",
-      "  data: {}",
-    ].join("\n");
-
     const volumeId = "01936b3e-8c7a-7b2d-a1f0-123456789abc";
-    const patched = applyStorageVolumesToCompose(
-      composeYaml,
+    const fragment = buildStorageVolumesFragment(
       [
         {
           storageId: volumeId,
@@ -68,19 +68,20 @@ describe("applyStorageVolumesToCompose", () => {
         },
       ],
       new Map([[volumeId, volumeId]]),
+      webResolved,
     );
 
-    assertEquals(patched.includes("external: true"), true);
-    assertEquals(patched.includes(`name: ${volumeId}`), true);
-    // No service mount append — compose already references the volume.
-    assertEquals(patched.includes("target:"), false);
+    assertEquals(fragment.volumes?.[volumeId], {
+      name: volumeId,
+      external: true,
+    });
+    assertEquals(fragment.services, undefined);
   });
 
   it("throws when compose service is missing", () => {
     assertThrows(
       () =>
-        applyStorageVolumesToCompose(
-          "services:\n  web:\n    image: nginx:latest",
+        buildStorageVolumesFragment(
           [{
             storageId: "st1",
             kind: "bind_mount",
@@ -90,6 +91,7 @@ describe("applyStorageVolumesToCompose", () => {
             serverId: "srv",
           }],
           new Map([["st1", "/host/data"]]),
+          webResolved,
         ),
       Error,
       "Compose service missing not found",

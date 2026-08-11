@@ -1,5 +1,13 @@
-import { join } from "@std/path";
-import { runDocker } from "../../deploy/docker-cli.ts";
+import {
+  composeFileArgs,
+  deploymentDir as resolveDeploymentDir,
+  resolveDeployedComposePaths,
+} from "../../deploy/compose-files.ts";
+import {
+  type DockerCliResult,
+  runDocker as defaultRunDocker,
+  type RunDockerOptions,
+} from "../../deploy/docker-cli.ts";
 import {
   removeEnvironmentTcpUdpServiceIngress,
   removeHostingCaddySite,
@@ -16,6 +24,16 @@ import {
 const SAFE_PATH_ID_RE = /^[A-Za-z0-9_-]+$/;
 const COMPOSE_PROJECT_RE = /^[a-z0-9][a-z0-9_-]*$/;
 
+type RunDockerFn = (
+  args: string[],
+  options?: RunDockerOptions,
+) => Promise<DockerCliResult>;
+
+export type EnvironmentStopHandlerDeps = {
+  /** Test seam — defaults to {@link defaultRunDocker}. */
+  runDocker?: RunDockerFn;
+};
+
 function assertSafeStopIdentifiers(payload: EnvironmentStopPayload): void {
   if (!SAFE_PATH_ID_RE.test(payload.environmentId)) {
     throw new Error("environmentId contains unsupported characters");
@@ -25,26 +43,13 @@ function assertSafeStopIdentifiers(payload: EnvironmentStopPayload): void {
   }
 }
 
-async function composeFileExists(composePath: string): Promise<boolean> {
-  try {
-    const stat = await Deno.stat(composePath);
-    return stat.isFile;
-  } catch (err) {
-    if (err instanceof Deno.errors.NotFound) return false;
-    throw err;
-  }
-}
-
 async function composeDown(
   projectName: string,
-  composePath: string,
+  composePaths: readonly string[],
+  run: RunDockerFn,
 ): Promise<void> {
-  const result = await runDocker([
-    "compose",
-    "-p",
-    projectName,
-    "-f",
-    composePath,
+  const result = await run([
+    ...composeFileArgs(projectName, composePaths),
     "down",
     "--remove-orphans",
     "--volumes",
@@ -61,21 +66,22 @@ async function composeDown(
 export async function handleEnvironmentStop(
   payload: EnvironmentStopPayload,
   daemonReceivedAt: string,
+  deps?: EnvironmentStopHandlerDeps,
 ): Promise<EnvironmentStopResult> {
   const parsedPayload = parseEnvironmentStopPayload(payload);
   assertSafeStopIdentifiers(parsedPayload);
+  const run = deps?.runDocker ?? defaultRunDocker;
   const layout = resolveLayout(Deno.env.toObject());
 
-  const deploymentDir = join(
-    layout.stateDir,
-    "deployments",
+  const deploymentDir = resolveDeploymentDir(
+    layout,
     parsedPayload.environmentId,
   );
-  const composePath = join(deploymentDir, "docker-compose.yml");
-  const hasCompose = await composeFileExists(composePath);
+  const composePaths = await resolveDeployedComposePaths(deploymentDir);
+  const hasCompose = composePaths !== null;
 
   if (hasCompose) {
-    await composeDown(parsedPayload.projectName, composePath);
+    await composeDown(parsedPayload.projectName, composePaths, run);
   } else {
     // Already torn down — still clear hosting site and report empty containers.
     logInfo(

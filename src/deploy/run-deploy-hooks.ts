@@ -1,8 +1,18 @@
 import type { EnvironmentDeployServiceHook } from "../instance/commands/contracts.ts";
-import { runDocker } from "./docker-cli.ts";
+import {
+  type DockerCliResult,
+  runDocker as defaultRunDocker,
+  type RunDockerOptions,
+} from "./docker-cli.ts";
+import { composeFileArgs } from "./compose-files.ts";
 
 const decoder = new TextDecoder();
 const HOOK_TIMEOUT_MS = 300_000;
+
+type RunDockerFn = (
+  args: string[],
+  options?: RunDockerOptions,
+) => Promise<DockerCliResult>;
 
 async function runShellHook(
   command: string,
@@ -40,18 +50,16 @@ export async function runDeployServiceHooks(
   hooks: EnvironmentDeployServiceHook[],
   params: {
     projectName: string;
-    composePath: string;
+    composePaths: string[];
     deploymentDir: string;
+    runDocker?: RunDockerFn;
   },
 ): Promise<void> {
+  const run = params.runDocker ?? defaultRunDocker;
   for (const hook of hooks) {
     if (hook.buildDisableCache) {
-      const build = await runDocker([
-        "compose",
-        "-p",
-        params.projectName,
-        "-f",
-        params.composePath,
+      const build = await run([
+        ...composeFileArgs(params.projectName, params.composePaths),
         "build",
         "--no-cache",
         hook.composeServiceName,

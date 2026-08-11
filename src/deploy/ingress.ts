@@ -338,7 +338,7 @@ export function serviceIngressComposePath(
  *
  * Joins {@link INGRESS_NETWORK}, constrains the Docker provider to
  * `com.turbopanel.service=<serviceId>` **and** `com.turbopanel.raw-port=true`
- * (stamped by `injectHostingLabels` only on services that publish tcp/udp),
+ * (stamped by `buildHostingLabelsFragment` only on services that publish tcp/udp),
  * and emits only that service's tcp/udp entrypoints + published ports.
  * HTTP routers on mixed-hosting services are pinned to `web,websecure`, which
  * this Traefik does not define — so HTTP config stays on shared loopback Traefik.

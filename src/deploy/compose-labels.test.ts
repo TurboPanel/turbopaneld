@@ -1,6 +1,6 @@
 import { assertEquals, assertThrows } from "@std/assert";
-import { parse } from "yaml";
-import { injectHostingLabels } from "./compose-labels.ts";
+import { buildHostingLabelsFragment } from "./compose-labels.ts";
+import type { ResolvedComposeModel } from "./compose-services.ts";
 import {
   type EnvironmentDeployPayload,
   parseEnvironmentDeployPayload,
@@ -14,6 +14,15 @@ import {
  */
 const test = Deno.test.bind(Deno);
 
+function resolvedFromServices(
+  services: Record<string, Record<string, unknown>>,
+): ResolvedComposeModel {
+  return {
+    services,
+    serviceNames: Object.keys(services).sort((a, b) => a.localeCompare(b)),
+  };
+}
+
 const payload: EnvironmentDeployPayload = {
   environmentId: "env_123",
   projectId: "project_123",
@@ -22,8 +31,6 @@ const payload: EnvironmentDeployPayload = {
   composeYaml: `services:
   app:
     image: nginx:alpine
-    labels:
-      existing.label: preserved
 `,
   hostings: [{
     hostingId: "hosting_123",
@@ -35,15 +42,18 @@ const payload: EnvironmentDeployPayload = {
   }],
 };
 
-test("injectHostingLabels configures Traefik and ingress network", () => {
-  const result = injectHostingLabels(payload);
-  const compose = parse(result.composeYaml) as {
-    services: { app: { labels: Record<string, string>; networks: string[] } };
-    networks: { "turbopanel-ingress": { external: boolean } };
-  };
-  const labels = compose.services.app.labels;
+const appResolved = resolvedFromServices({
+  app: { image: "nginx:alpine" },
+});
 
-  assertEquals(result.services, ["app"]);
+test("buildHostingLabelsFragment configures Traefik and ingress network", () => {
+  const fragment = buildHostingLabelsFragment({
+    payload,
+    hostings: payload.hostings,
+    resolved: appResolved,
+  });
+  const labels = fragment.services?.app?.labels as Record<string, string>;
+
   assertEquals(labels["traefik.enable"], "true");
   assertEquals(labels["traefik.docker.network"], "turbopanel-ingress");
   assertEquals(
@@ -60,8 +70,13 @@ test("injectHostingLabels configures Traefik and ingress network", () => {
   );
   assertEquals(labels["com.turbopanel.project"], "project_123");
   assertEquals(labels["com.turbopanel.raw-port"], undefined);
-  assertEquals(compose.services.app.networks, ["turbopanel-ingress"]);
-  assertEquals(compose.networks["turbopanel-ingress"].external, true);
+  assertEquals(fragment.services?.app?.networks, ["turbopanel-ingress"]);
+  assertEquals(
+    (fragment.networks as Record<string, { external: boolean }>)[
+      "turbopanel-ingress"
+    ].external,
+    true,
+  );
 });
 
 test("parseEnvironmentDeployPayload rejects invalid hosting routes", () => {
@@ -73,41 +88,6 @@ test("parseEnvironmentDeployPayload rejects invalid hosting routes", () => {
       }),
     TypeError,
   );
-});
-
-test("injectHostingLabels rejects nested object label values", () => {
-  assertThrows(
-    () =>
-      injectHostingLabels({
-        ...payload,
-        composeYaml: `services:
-  app:
-    image: nginx:alpine
-    labels:
-      nested: { oops: true }
-`,
-      }),
-    TypeError,
-    "Compose label values must be strings or scalars",
-  );
-});
-
-test("injectHostingLabels stringifies scalar label values", () => {
-  const result = injectHostingLabels({
-    ...payload,
-    composeYaml: `services:
-  app:
-    image: nginx:alpine
-    labels:
-      numeric: 42
-      flag: true
-`,
-  });
-  const compose = parse(result.composeYaml) as {
-    services: { app: { labels: Record<string, string> } };
-  };
-  assertEquals(compose.services.app.labels.numeric, "42");
-  assertEquals(compose.services.app.labels.flag, "true");
 });
 
 const tcpUdpPayload: EnvironmentDeployPayload = {
@@ -130,14 +110,18 @@ const tcpUdpPayload: EnvironmentDeployPayload = {
   }],
 };
 
-test("injectHostingLabels configures a tcp router+service per published port, no hostname rule", () => {
-  const result = injectHostingLabels(tcpUdpPayload);
-  const compose = parse(result.composeYaml) as {
-    services: { db: { labels: Record<string, string>; networks: string[] } };
-  };
-  const labels = compose.services.db.labels;
+const dbResolved = resolvedFromServices({
+  db: { image: "postgres:16" },
+});
 
-  assertEquals(result.services, ["db"]);
+test("buildHostingLabelsFragment configures a tcp router+service per published port, no hostname rule", () => {
+  const fragment = buildHostingLabelsFragment({
+    payload: tcpUdpPayload,
+    hostings: tcpUdpPayload.hostings,
+    resolved: dbResolved,
+  });
+  const labels = fragment.services?.db?.labels as Record<string, string>;
+
   assertEquals(labels["traefik.enable"], "true");
   assertEquals(
     labels["traefik.tcp.routers.hosting_db-5432.entrypoints"],
@@ -153,22 +137,27 @@ test("injectHostingLabels configures a tcp router+service per published port, no
   );
   assertEquals(labels["traefik.http.routers.hosting_db-5432.rule"], undefined);
   assertEquals(labels["com.turbopanel.raw-port"], "true");
-  assertEquals(compose.services.db.networks, ["turbopanel-ingress"]);
+  assertEquals(fragment.services?.db?.networks, ["turbopanel-ingress"]);
 });
 
-test("injectHostingLabels configures a udp router+service with no rule label", () => {
-  const result = injectHostingLabels({
-    ...tcpUdpPayload,
+test("buildHostingLabelsFragment configures a udp router+service with no rule label", () => {
+  const fragment = buildHostingLabelsFragment({
+    payload: {
+      ...tcpUdpPayload,
+      hostings: [{
+        ...tcpUdpPayload.hostings[0],
+        protocol: "udp",
+        ports: [{ published: 5300, target: 53 }],
+      }],
+    },
     hostings: [{
       ...tcpUdpPayload.hostings[0],
       protocol: "udp",
       ports: [{ published: 5300, target: 53 }],
     }],
+    resolved: dbResolved,
   });
-  const compose = parse(result.composeYaml) as {
-    services: { db: { labels: Record<string, string> } };
-  };
-  const labels = compose.services.db.labels;
+  const labels = fragment.services?.db?.labels as Record<string, string>;
   assertEquals(
     labels["traefik.udp.routers.hosting_db-5300.entrypoints"],
     "udp5300",
@@ -180,28 +169,45 @@ test("injectHostingLabels configures a udp router+service with no rule label", (
   assertEquals(labels["traefik.udp.routers.hosting_db-5300.rule"], undefined);
 });
 
-test("injectHostingLabels rejects a tcp/udp hosting with empty ports", () => {
+test("buildHostingLabelsFragment rejects a tcp/udp hosting with empty ports", () => {
   assertThrows(
     () =>
-      injectHostingLabels({
-        ...tcpUdpPayload,
+      buildHostingLabelsFragment({
+        payload: tcpUdpPayload,
         hostings: [{ ...tcpUdpPayload.hostings[0], ports: undefined }],
+        resolved: dbResolved,
       }),
     Error,
     "ports must not be empty",
   );
 });
 
-test("injectHostingLabels stamps raw-port on tcp/udp and pins HTTP entrypoints on mixed services", () => {
-  const result = injectHostingLabels({
-    environmentId: "env_123",
-    projectId: "project_123",
-    organizationId: "org_123",
-    projectName: "web_app",
-    composeYaml: `services:
-  app:
-    image: nginx:alpine
-`,
+test("buildHostingLabelsFragment stamps raw-port on tcp/udp and pins HTTP entrypoints on mixed services", () => {
+  const fragment = buildHostingLabelsFragment({
+    payload: {
+      environmentId: "env_123",
+      projectId: "project_123",
+      organizationId: "org_123",
+      projectName: "web_app",
+      composeYaml: `services:\n  app:\n    image: nginx:alpine\n`,
+      hostings: [
+        {
+          hostingId: "hosting_http",
+          serviceId: "service_mixed",
+          composeServiceName: "app",
+          hostnames: ["app.example.test"],
+          targetPort: 8080,
+        },
+        {
+          hostingId: "hosting_tcp",
+          serviceId: "service_mixed",
+          composeServiceName: "app",
+          hostnames: [],
+          protocol: "tcp",
+          ports: [{ published: 5432, target: 5432 }],
+        },
+      ],
+    },
     hostings: [
       {
         hostingId: "hosting_http",
@@ -219,17 +225,12 @@ test("injectHostingLabels stamps raw-port on tcp/udp and pins HTTP entrypoints o
         ports: [{ published: 5432, target: 5432 }],
       },
     ],
+    resolved: appResolved,
   });
-  const compose = parse(result.composeYaml) as {
-    services: { app: { labels: Record<string, string> } };
-  };
-  const labels = compose.services.app.labels;
+  const labels = fragment.services?.app?.labels as Record<string, string>;
 
-  // Per-service Traefik selects only raw-port containers.
   assertEquals(labels["com.turbopanel.raw-port"], "true");
   assertEquals(labels["com.turbopanel.service"], "service_mixed");
-
-  // HTTP stays on shared loopback Traefik entrypoints.
   assertEquals(
     labels["traefik.http.routers.hosting_http.entrypoints"],
     "web,websecure",
@@ -238,8 +239,6 @@ test("injectHostingLabels stamps raw-port on tcp/udp and pins HTTP entrypoints o
     labels["traefik.http.routers.hosting_http.rule"],
     "Host(`app.example.test`)",
   );
-
-  // TCP routers keep their dedicated entrypoints (not web/websecure).
   assertEquals(
     labels["traefik.tcp.routers.hosting_tcp-5432.entrypoints"],
     "tcp5432",
@@ -250,83 +249,116 @@ test("injectHostingLabels stamps raw-port on tcp/udp and pins HTTP entrypoints o
   );
 });
 
-test("injectHostingLabels does not stamp raw-port on HTTP-only services", () => {
-  const result = injectHostingLabels(payload);
-  const compose = parse(result.composeYaml) as {
-    services: { app: { labels: Record<string, string> } };
-  };
+test("buildHostingLabelsFragment does not stamp raw-port on HTTP-only services", () => {
+  const fragment = buildHostingLabelsFragment({
+    payload,
+    hostings: payload.hostings,
+    resolved: appResolved,
+  });
+  const labels = fragment.services?.app?.labels as Record<string, string>;
+  assertEquals(labels["com.turbopanel.raw-port"], undefined);
   assertEquals(
-    compose.services.app.labels["com.turbopanel.raw-port"],
-    undefined,
-  );
-  assertEquals(
-    compose.services.app.labels["traefik.http.routers.hosting_123.entrypoints"],
+    labels["traefik.http.routers.hosting_123.entrypoints"],
     "web,websecure",
   );
 });
 
-test("injectHostingLabels without hostings leaves services free of ingress network", () => {
-  const result = injectHostingLabels({
-    ...payload,
+test("buildHostingLabelsFragment without hostings leaves services free of ingress network", () => {
+  const fragment = buildHostingLabelsFragment({
+    payload,
     hostings: [],
+    resolved: appResolved,
   });
-  const compose = parse(result.composeYaml) as {
-    services: { app: { labels?: Record<string, string>; networks?: string[] } };
-    networks?: Record<string, unknown>;
-  };
-  assertEquals(compose.services.app.labels?.["traefik.enable"], undefined);
-  assertEquals(compose.services.app.networks, undefined);
-  assertEquals(compose.networks?.["turbopanel-ingress"], undefined);
+  assertEquals(fragment.services, undefined);
+  assertEquals(fragment.networks, undefined);
 });
 
-test("injectHostingLabels attaches turbopanel-managed to managedNetworkServices", () => {
-  const result = injectHostingLabels({
-    ...payload,
+test("buildHostingLabelsFragment attaches turbopanel-managed to managedNetworkServices", () => {
+  const fragment = buildHostingLabelsFragment({
+    payload: {
+      ...payload,
+      hostings: [],
+      managedNetworkServices: ["app"],
+    },
     hostings: [],
-    managedNetworkServices: ["app"],
+    resolved: appResolved,
   });
-  const compose = parse(result.composeYaml) as {
-    services: { app: { networks?: string[] } };
-    networks?: { "turbopanel-managed"?: { external: boolean } };
-  };
-  assertEquals(compose.services.app.networks, ["turbopanel-managed"]);
-  assertEquals(compose.networks?.["turbopanel-managed"]?.external, true);
+  assertEquals(fragment.services?.app?.networks, ["turbopanel-managed"]);
+  assertEquals(
+    (fragment.networks as Record<string, { external: boolean }>)[
+      "turbopanel-managed"
+    ]?.external,
+    true,
+  );
 });
 
-test("injectHostingLabels merges ingress and managed networks on the same service", () => {
-  const result = injectHostingLabels({
-    ...payload,
-    managedNetworkServices: ["app"],
+test("buildHostingLabelsFragment merges ingress and managed networks on the same service", () => {
+  const fragment = buildHostingLabelsFragment({
+    payload: {
+      ...payload,
+      managedNetworkServices: ["app"],
+    },
+    hostings: payload.hostings,
+    resolved: appResolved,
   });
-  const compose = parse(result.composeYaml) as {
-    services: { app: { networks?: string[] } };
-    networks?: Record<string, { external: boolean }>;
-  };
-  assertEquals(compose.services.app.networks, [
+  assertEquals(fragment.services?.app?.networks, [
     "turbopanel-ingress",
     "turbopanel-managed",
   ]);
-  assertEquals(compose.networks?.["turbopanel-ingress"]?.external, true);
-  assertEquals(compose.networks?.["turbopanel-managed"]?.external, true);
+  assertEquals(
+    (fragment.networks as Record<string, { external: boolean }>)[
+      "turbopanel-ingress"
+    ]?.external,
+    true,
+  );
+  assertEquals(
+    (fragment.networks as Record<string, { external: boolean }>)[
+      "turbopanel-managed"
+    ]?.external,
+    true,
+  );
 });
 
-test("injectHostingLabels rejects an unknown managedNetworkServices entry", () => {
+test("buildHostingLabelsFragment rejects an unknown managedNetworkServices entry", () => {
   assertThrows(
     () =>
-      injectHostingLabels({
-        ...payload,
+      buildHostingLabelsFragment({
+        payload: {
+          ...payload,
+          hostings: [],
+          managedNetworkServices: ["does-not-exist"],
+        },
         hostings: [],
-        managedNetworkServices: ["does-not-exist"],
+        resolved: appResolved,
       }),
     Error,
     "Compose service not found: does-not-exist",
   );
 });
 
-test("injectHostingLabels leaves compose untouched when managedNetworkServices is absent", () => {
-  const result = injectHostingLabels({ ...payload, hostings: [] });
-  const compose = parse(result.composeYaml) as {
-    networks?: Record<string, unknown>;
-  };
-  assertEquals(compose.networks?.["turbopanel-managed"], undefined);
+test("buildHostingLabelsFragment leaves network free when managedNetworkServices is absent", () => {
+  const fragment = buildHostingLabelsFragment({
+    payload: { ...payload, hostings: [] },
+    hostings: [],
+    resolved: appResolved,
+  });
+  assertEquals(fragment.networks?.["turbopanel-managed"], undefined);
+});
+
+test("buildHostingLabelsFragment unions resolved service networks with platform network", () => {
+  const fragment = buildHostingLabelsFragment({
+    payload,
+    hostings: payload.hostings,
+    resolved: resolvedFromServices({
+      app: {
+        image: "nginx:alpine",
+        networks: { frontend: {}, backend: {} },
+      },
+    }),
+  });
+  assertEquals(fragment.services?.app?.networks, [
+    "frontend",
+    "backend",
+    "turbopanel-ingress",
+  ]);
 });
