@@ -57,7 +57,7 @@ function basePayload(
         username: "postgres",
         role: "root",
         databases: ["postgres"],
-        password: "denc.server.key.1.payload",
+        password: "tpdaemon.v1.server.key.payload",
       },
     ],
     memberId: "00000000-0000-4000-8000-0000000000a1",

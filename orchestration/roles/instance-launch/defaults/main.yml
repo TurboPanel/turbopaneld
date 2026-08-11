@@ -21,6 +21,8 @@ turbopanel_config_dir: /etc/turbopanel
 # Secret-bearing runtime env lives under the config dir — never in the git checkout.
 turbopanel_instance_runtime_env: "{{ turbopanel_config_dir }}/instance/runtime.env"
 turbopanel_instance_runtime_dev_vars: "{{ turbopanel_config_dir }}/instance/runtime.dev-vars"
+# Opt-in via extra-var; ordinary converges must never rotate the instance secret keyring.
+turbopanel_instance_secret_rotate: false
 turbopanel_install_root: /opt/turbopanel
 turbopanel_ssh_dir: "{{ turbopanel_install_root }}/.ssh"
 turbopanel_github_key: "{{ turbopanel_ssh_dir }}/github_ed25519"
@@ -32,7 +34,10 @@ turbopanel_run_dir: /run/turbopanel
 turbopanel_vendor_dir: "{{ turbopanel_install_root }}/vendor"
 turbopanel_node: "{{ turbopanel_vendor_dir }}/node/current/bin/node"
 turbopanel_deno: "{{ turbopanel_vendor_dir }}/deno/current/deno"
-turbopanel_runtime_path: "{{ turbopanel_vendor_dir }}/node/current/bin:{{ turbopanel_vendor_dir }}/deno/current:{{ turbopanel_vendor_dir }}/caddy/current:/usr/bin:/bin"
+turbopanel_runtime_path: >-
+  {{ turbopanel_vendor_dir }}/node/current/bin:{{
+  turbopanel_vendor_dir }}/deno/current:{{
+  turbopanel_vendor_dir }}/caddy/current:/usr/bin:/bin
 # Source checkouts: co-located dev uses the dev user's home; managed installs use
 # the FHS lib tree.
 turbopanel_daemon_dir: "{{ (turbopanel_dev_root ~ '/daemon') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/daemon') }}"
@@ -69,7 +74,10 @@ drizzle_studio_port: 4983
 turbopanel_ui_mode: static
 # Co-located (turbopanel_dev_user set) loads the development Caddyfile from the
 # turbopanel/dev overlay; managed/production uses the instance checkout Caddyfile.
-turbopanel_caddyfile: "{{ (turbopanel_dev_root ~ '/dev/orchestration/Caddyfile') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_instance_dir ~ '/Caddyfile') }}"
+turbopanel_caddyfile: >-
+  {{ (turbopanel_dev_root ~ '/dev/orchestration/Caddyfile') if
+  (turbopanel_dev_user | default('') | length > 0) else
+  (turbopanel_instance_dir ~ '/Caddyfile') }}
 # "source" runs deno run src/deno.ts; "compiled" exec's dist/turbopanel-instance.
 turbopanel_instance_run_mode: source
 turbopanel_instance_binary: "{{ turbopanel_instance_dir }}/dist/turbopanel-instance"

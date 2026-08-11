@@ -120,7 +120,7 @@ async function materializeHostPathEntry(
 }
 
 function isEncryptedEnvelope(envelope: string): boolean {
-  return envelope.startsWith("denc.") || envelope.startsWith("enc.");
+  return envelope.startsWith("tpdaemon.") || envelope.startsWith("tpsecret.");
 }
 
 async function decryptEntryContents(

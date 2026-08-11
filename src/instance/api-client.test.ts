@@ -138,7 +138,7 @@ test({
       });
       await client.getJwks();
       await client.sendHostMetrics({ cpu: 1 });
-      await client.decryptSecrets(["denc.x"]);
+      await client.decryptSecrets(["tpdaemon.v1.x"]);
 
       const byPath = Object.fromEntries(
         captures.map((c) => [c.pathSuffix, c]),
@@ -217,7 +217,7 @@ test({
 
       tokenCalls = 0;
       tokens.length = 0;
-      await client.decryptSecrets(["denc.a"]);
+      await client.decryptSecrets(["tpdaemon.v1.a"]);
       assertEquals(decryptHits, 1);
       assertEquals(tokenCalls, 1);
       assertEquals(tokens, ["initial"]);
@@ -417,7 +417,7 @@ test({
           client.decryptSecrets(
             Array.from(
               { length: MAX_SECRETS_DECRYPT_BATCH + 1 },
-              () => "denc.x",
+              () => "tpdaemon.v1.x",
             ),
           ),
         DaemonApiError,

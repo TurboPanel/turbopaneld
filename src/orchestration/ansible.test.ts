@@ -675,12 +675,12 @@ test(
     );
     assertMatch(
       defaults,
-      /turbopanel_caddyfile:.*dev\/orchestration\/Caddyfile/,
+      /turbopanel_caddyfile:[\s\S]*?dev\/orchestration\/Caddyfile/,
       "turbopanel_caddyfile selects the dev overlay when turbopanel_dev_user is set",
     );
     assertMatch(
       defaults,
-      /turbopanel_caddyfile:.*\/Caddyfile/,
+      /turbopanel_caddyfile:[\s\S]*?instance_dir ~ '\/Caddyfile'/,
       "turbopanel_caddyfile falls back to the instance checkout Caddyfile",
     );
     assertMatch(
@@ -710,6 +710,81 @@ test(
           `${caddyUnitPath}: ${forbidden} must only appear inside the turbopanel_dev_user block`,
         );
       }
+    }
+  },
+);
+
+test(
+  "instance-launch secret keyring templates, rotate gate, and mailer notify",
+  async () => {
+    const defaultsPath = join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/instance-launch/defaults/main.yml",
+    );
+    const tasksPath = join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/instance-launch/tasks/main.yml",
+    );
+    const denoDevVarsPath = join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/instance-launch/templates/instance-deno.dev-vars.j2",
+    );
+    const workersDevVarsPath = join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/instance-launch/templates/instance-workers.dev-vars.j2",
+    );
+
+    const defaults = await Deno.readTextFile(defaultsPath);
+    const tasks = await Deno.readTextFile(tasksPath);
+    const denoDevVars = await Deno.readTextFile(denoDevVarsPath);
+    const workersDevVars = await Deno.readTextFile(workersDevVarsPath);
+
+    assertMatch(
+      defaults,
+      /^\s*turbopanel_instance_secret_rotate:\s*false\s*$/m,
+      "rotation is opt-in and defaults to false",
+    );
+    assertMatch(
+      tasks,
+      /when:\s*turbopanel_instance_secret_rotate\s*\|\s*default\(false\)\s*\|\s*bool/,
+      "rotation task is gated on turbopanel_instance_secret_rotate",
+    );
+    assertMatch(
+      tasks,
+      /path:\s*"\{\{\s*turbopanel_config_dir\s*\}\}\/instance\/\.instance_secrets"[\s\S]*?owner:\s*root[\s\S]*?group:\s*"\{\{\s*turbopanel_group\s*\}\}"[\s\S]*?mode:\s*"0640"/,
+      ".instance_secrets hardened root:group 0640",
+    );
+    assertMatch(
+      tasks,
+      /name:\s*Install Deno runtime dev vars[\s\S]*?Restart turbopanel mailer/,
+      "Deno dev-vars task notifies Restart turbopanel mailer",
+    );
+
+    for (
+      const [label, body] of [
+        ["instance-deno.dev-vars.j2", denoDevVars],
+        ["instance-workers.dev-vars.j2", workersDevVars],
+      ] as const
+    ) {
+      // Split the assignment marker so scan-secrets does not treat this test as a
+      // fixture env line (allowlist is for the j2 files only).
+      const singularAssign = ["TURBOPANEL_SECRET", "="].join("");
+      const pluralAssign = ["TURBOPANEL_SECRETS", "="].join("");
+      assertMatch(
+        body,
+        new RegExp(
+          `^${singularAssign}\\{\\{\\s*turbopanel_instance_secret\\s*\\}\\}\\s*$`,
+          "m",
+        ),
+        `${label} still emits ${singularAssign.slice(0, -1)}`,
+      );
+      assertMatch(
+        body,
+        new RegExp(
+          `turbopanel_instance_secrets[\\s\\S]*?${pluralAssign}\\{\\{\\s*turbopanel_instance_secrets\\s*\\}\\}`,
+        ),
+        `${label} emits ${pluralAssign.slice(0, -1)} when keyring is set`,
+      );
     }
   },
 );

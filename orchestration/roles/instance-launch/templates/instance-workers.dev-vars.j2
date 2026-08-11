@@ -1,4 +1,8 @@
 TURBOPANEL_SECRET={{ turbopanel_instance_secret }}
+{# Singular is the decrypt-only legacy fallback; first keyring entry is current/signing. #}
+{% if turbopanel_instance_secrets | default('') | trim | length > 0 %}
+TURBOPANEL_SECRETS={{ turbopanel_instance_secrets }}
+{% endif %}
 TURBOPANEL_IS_SIGNUP_ENABLED=1
 {% if turbopanel_dev_user | length > 0 %}
 TURBOPANEL_UI_CORS_ORIGINS={{ website_cors_origins }}

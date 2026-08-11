@@ -78,7 +78,7 @@ test("materializeProxySqlTlsMaterial decrypts and writes PEMs with modes", async
       {
         certificatePem:
           "-----BEGIN CERTIFICATE-----\nLEAF\n-----END CERTIFICATE-----\n",
-        privateKeyEnvelope: "denc.server.KEYID.ciphertext",
+        privateKeyEnvelope: "tpdaemon.v1.server.KEYID.ciphertext",
         caCertPem:
           "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n",
       },
@@ -88,7 +88,7 @@ test("materializeProxySqlTlsMaterial decrypts and writes PEMs with modes", async
       },
     );
 
-    assertEquals(calls, [["denc.server.KEYID.ciphertext"]]);
+    assertEquals(calls, [["tpdaemon.v1.server.KEYID.ciphertext"]]);
 
     const fullchain = join(targetDir, "fullchain.pem");
     const privkey = join(targetDir, "privkey.pem");
@@ -113,7 +113,7 @@ test("materializeProxySqlTlsMaterial decrypts and writes PEMs with modes", async
       {
         certificatePem:
           "-----BEGIN CERTIFICATE-----\nLEAF2\n-----END CERTIFICATE-----\n",
-        privateKeyEnvelope: "denc.server.KEYID.ciphertext2",
+        privateKeyEnvelope: "tpdaemon.v1.server.KEYID.ciphertext2",
         caCertPem:
           "-----BEGIN CERTIFICATE-----\nCA2\n-----END CERTIFICATE-----\n",
       },
@@ -136,7 +136,7 @@ test("materializeManagedProxySqlTlsMaterial rewrites engine leaf after chmod rea
     const material = {
       certificatePem:
         "-----BEGIN CERTIFICATE-----\nLEAF\n-----END CERTIFICATE-----\n",
-      privateKeyEnvelope: "denc.server.KEYID.ciphertext",
+      privateKeyEnvelope: "tpdaemon.v1.server.KEYID.ciphertext",
       caCertPem:
         "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n",
     };
@@ -178,7 +178,7 @@ test("materializeProxySqlTlsMaterial fails when decrypt returns empty", async ()
           {
             certificatePem:
               "-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----\n",
-            privateKeyEnvelope: "denc.x",
+            privateKeyEnvelope: "tpdaemon.v1.x",
             caCertPem:
               "-----BEGIN CERTIFICATE-----\nY\n-----END CERTIFICATE-----\n",
           },

@@ -140,7 +140,7 @@ export class DaemonApiClient {
   }
 
   /**
-   * Batch-decrypt daemon-recipient sealed envelopes (`denc.…`).
+   * Batch-decrypt daemon-recipient sealed envelopes (`tpdaemon.…`).
    * Returns one plaintext (or null) per input ciphertext, in order.
    */
   async decryptSecrets(ciphertexts: string[]): Promise<(string | null)[]> {

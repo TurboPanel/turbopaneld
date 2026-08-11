@@ -1,6 +1,6 @@
 # Tenant deploy & hosting ingress — AGENTS.md
 
-The `environment.deploy` / `environment.lifecycle` / `environment.stop` command handlers: Docker Compose bring-up with Traefik labels, hosting Caddy (`:80`/`:443`, distinct from control-plane Caddy), org TLS materialization from `denc` envelopes, non-destructive start/stop/restart, and best-effort container reporting.
+The `environment.deploy` / `environment.lifecycle` / `environment.stop` command handlers: Docker Compose bring-up with Traefik labels, hosting Caddy (`:80`/`:443`, distinct from control-plane Caddy), org TLS materialization from `tpdaemon` envelopes, non-destructive start/stop/restart, and best-effort container reporting.
 
 **Managed engines are a separate path** (`../managed/AGENTS.md`): platform-owned
 compose + config under `<stateDir>/managed/<managedId>/`, native ports only, no
@@ -87,7 +87,7 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../insta
 9. When the payload includes `tlsMaterial[]`, materialize org certs under
    `layout.tlsDir` (`/etc/turbopanel/tls/<tlsId>/fullchain.pem` + `privkey.pem`,
    modes `0640`/`0600`) via `materializeTlsCertificates`
-   (`src/deploy/materialize-tls.ts`). Private keys arrive as `denc`
+   (`src/deploy/materialize-tls.ts`). Private keys arrive as `tpdaemon`
    envelopes — decrypt only through `POST /api/daemon/v1/secrets/decrypt`
    (daemon JWT); never log plaintext.
 10. Refresh hosting Caddy config under `/etc/turbopanel/hosting/`

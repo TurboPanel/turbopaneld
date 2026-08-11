@@ -128,7 +128,7 @@ export type EnvironmentDeployHostingProxy = {
 export type EnvironmentDeployTlsMaterial = {
   tlsId: string;
   certificatePem: string;
-  /** Daemon-recipient sealed private key (`denc.…`). */
+  /** Daemon-recipient sealed private key (`tpdaemon.…`). */
   privateKeyEnvelope: string;
 };
 
@@ -458,7 +458,7 @@ export type ManagedApplyCredential = {
   role: "root" | "user" | "replication";
   databases: string[];
   privileges?: string[];
-  /** Daemon-recipient sealed password (`denc.…`). */
+  /** Daemon-recipient sealed password (`tpdaemon.…`). */
   password: string;
 };
 
@@ -497,7 +497,7 @@ export type ManagedApplyTlsMaterial = {
 
 /**
  * Org-CA-signed leaf material for managed frontend (ProxySQL) TLS.
- * Private key is a daemon-recipient `denc` envelope; cert + CA PEM are plain.
+ * Private key is a daemon-recipient `tpdaemon` envelope; cert + CA PEM are plain.
  * Must stay in sync with the instance canonical `managed.apply` shape.
  */
 export type ManagedApplyOrgTlsMaterial = {
@@ -680,7 +680,7 @@ export type ProxySqlBackendPayload = {
 export type ProxySqlUserPayload = {
   username: string;
   role: "root" | "user";
-  /** Daemon-recipient sealed password (`denc.…`) for ProxySQL frontend auth. */
+  /** Daemon-recipient sealed password (`tpdaemon.…`) for ProxySQL frontend auth. */
   password: string;
   defaultDatabase?: string;
 };
@@ -2018,7 +2018,7 @@ function isManagedImageAllowed(engine: string, image: string): boolean {
   return allowed.includes(image);
 }
 
-const DAEMON_ENVELOPE_PREFIX = "denc.";
+const DAEMON_ENVELOPE_PREFIX = "tpdaemon.";
 const MANAGED_CONFIG_MODES = new Set(["0640", "0600"]);
 const MANAGED_LIFECYCLE_ACTIONS = new Set(["start", "stop", "restart"]);
 const MANAGED_EXPOSURE_PROTOCOLS = new Set(["tcp", "udp", "http"]);
@@ -3567,7 +3567,7 @@ function parseProxySqlUserPayload(value: unknown): ProxySqlUserPayload {
     !isSafeUsername(value.username) ||
     (value.role !== "root" && value.role !== "user") ||
     typeof value.password !== "string" ||
-    !value.password.startsWith("denc.")
+    !value.password.startsWith(DAEMON_ENVELOPE_PREFIX)
   ) {
     throw new TypeError("Invalid managed.ingress.reconcile user");
   }

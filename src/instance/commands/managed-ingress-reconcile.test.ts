@@ -45,7 +45,7 @@ function basePayload(
     orgTlsMaterial: {
       certificatePem:
         "-----BEGIN CERTIFICATE-----\nLEAF\n-----END CERTIFICATE-----\n",
-      privateKeyEnvelope: "denc.server.key.ciphertext",
+      privateKeyEnvelope: "tpdaemon.v1.server.key.ciphertext",
       caCertPem: "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n",
     },
     clusters: [
@@ -66,7 +66,7 @@ function basePayload(
           },
         ],
         users: [
-          { username: "app", role: "user", password: "denc.app-pass" },
+          { username: "app", role: "user", password: "tpdaemon.v1.app-pass" },
         ],
       },
     ],
@@ -101,9 +101,9 @@ function decryptSecretsEcho(
 ): Promise<(string | null)[]> {
   return Promise.resolve(
     ciphertexts.map((c) =>
-      c === "denc.server.key.ciphertext"
+      c === "tpdaemon.v1.server.key.ciphertext"
         ? "-----BEGIN PRIVATE KEY-----\nKEY\n-----END PRIVATE KEY-----\n"
-        : c.replace(/^denc\./, "")
+        : c.replace(/^tpdaemon./, "")
     ),
   );
 }

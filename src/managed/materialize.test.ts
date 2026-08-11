@@ -54,7 +54,7 @@ function basePayload(
         username: "postgres",
         role: "root",
         databases: ["postgres"],
-        password: "denc.server.key.1.payload",
+        password: "tpdaemon.v1.server.key.payload",
       },
     ],
     memberId: "00000000-0000-4000-8000-0000000000a1",
@@ -165,7 +165,7 @@ test("materializeManagedState writes orgTlsMaterial under tls/proxysql before no
     const payload = basePayload({
       orgTlsMaterial: {
         certificatePem: leafPem,
-        privateKeyEnvelope: "denc.server.key.1.payload",
+        privateKeyEnvelope: "tpdaemon.v1.server.key.payload",
         caCertPem: caPem,
       },
     });
@@ -179,7 +179,7 @@ test("materializeManagedState writes orgTlsMaterial under tls/proxysql before no
       },
     );
 
-    assertEquals(decryptCalls, [["denc.server.key.1.payload"]]);
+    assertEquals(decryptCalls, [["tpdaemon.v1.server.key.payload"]]);
 
     const fullchain = join(managedRoot, "tls/proxysql/fullchain.pem");
     const privkey = join(managedRoot, "tls/proxysql/privkey.pem");

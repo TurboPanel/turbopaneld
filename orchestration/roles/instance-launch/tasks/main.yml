@@ -245,6 +245,9 @@
     group: "{{ turbopanel_group }}"
     mode: "0750"
 
+# Never delete or regenerate .instance_secret; it is the permanent decrypt-only v1
+# (parseSecretsEnv folds TURBOPANEL_SECRET as version 1). Rotation only prepends
+# to .instance_secrets (v2+).
 - name: Ensure instance signing secret exists
   ansible.builtin.shell:
     cmd: |
@@ -267,6 +270,73 @@
     owner: root
     group: "{{ turbopanel_group }}"
     mode: "0640"
+
+# Opt-in rotation: prepend max(existing ∪ {1})+1 so the first rotate is v2 and
+# never collides with the folded legacy v1 from .instance_secret.
+- name: Rotate instance signing secret keyring
+  when: turbopanel_instance_secret_rotate | default(false) | bool
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      f='{{ turbopanel_config_dir }}/instance/.instance_secrets'
+      prev=""
+      if [ -f "$f" ]; then
+        prev=$(tr -d '\n\r' < "$f" || true)
+        # shellcheck disable=SC2001
+        prev=$(printf '%s' "$prev" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+      fi
+      max=1
+      if [ -n "$prev" ]; then
+        max=$(printf '%s' "$prev" | awk -F, '{
+          m=1
+          for (i=1; i<=NF; i++) {
+            split($i, a, ":")
+            v=a[1]+0
+            if (v > m) m=v
+          }
+          print m
+        }')
+      fi
+      new_ver=$((max + 1))
+      new_val=$({{ turbopanel_node }} \
+        {{ turbopanel_instance_dir }}/scripts/generate-secret.mjs)
+      dir=$(dirname "$f")
+      umask 077
+      tmp=$(mktemp -p "$dir" .instance_secrets.XXXXXX)
+      if [ -n "$prev" ]; then
+        printf '%s\n' "${new_ver}:${new_val},${prev}" > "$tmp"
+      else
+        printf '%s\n' "${new_ver}:${new_val}" > "$tmp"
+      fi
+      mv "$tmp" "$f"
+      echo rotated
+    executable: /bin/bash
+  register: _instance_secrets_rotate
+  changed_when: "'rotated' in _instance_secrets_rotate.stdout"
+
+# root:turbopanel_group 0640 — console (dev user / group) and Ansible can read
+# for Local-Console HMAC; secret value is also injected into runtime.dev-vars.
+- name: Harden instance signing secret keyring ownership
+  ansible.builtin.file:
+    path: "{{ turbopanel_config_dir }}/instance/.instance_secrets"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+  failed_when: false
+
+- name: Read instance signing secret keyring
+  ansible.builtin.slurp:
+    src: "{{ turbopanel_config_dir }}/instance/.instance_secrets"
+  register: _instance_secrets_raw
+  failed_when: false
+
+- name: Set instance signing secret keyring fact
+  ansible.builtin.set_fact:
+    turbopanel_instance_secrets: "{{ _instance_secrets_raw.content | b64decode | trim }}"
+  when:
+    - _instance_secrets_raw.content is defined
+    - (_instance_secrets_raw.content | b64decode | trim | length) > 0
+  no_log: true
 
 - name: Read instance signing secret
   ansible.builtin.slurp:
@@ -371,6 +441,7 @@
   notify:
     - Reload systemd for instance units
     - Restart turbopanel instance
+    - Restart turbopanel mailer
 
 - name: Apply instance database migrations
   ansible.builtin.import_tasks: instance-migrate.yml
