@@ -7,6 +7,7 @@ import {
   dropDatabaseSql,
   dropPhysicalSlotSql,
   dropRoleSql,
+  ensureProxySqlMonitorRoleSql,
   grantDatabaseSql,
   listManagedSlotsSql,
   primaryReplicationStatusSql,
@@ -47,6 +48,14 @@ test("createOrAlterRoleSql is idempotent via pg_roles check", () => {
   assertEquals(sql.includes('ALTER ROLE "app"'), true);
   assertEquals(sql.includes("'s3cret'"), true);
   assertEquals(sql.includes("; DROP"), false);
+});
+
+test("ensureProxySqlMonitorRoleSql grants pg_monitor without superuser", () => {
+  const sql = ensureProxySqlMonitorRoleSql("tp_monitor", "mon-s3cret");
+  assertEquals(sql.includes('CREATE ROLE "tp_monitor"'), true);
+  assertEquals(sql.includes('GRANT pg_monitor TO "tp_monitor"'), true);
+  assertEquals(sql.includes("NOSUPERUSER"), true);
+  assertEquals(/\bSUPERUSER\b/.test(sql), false);
 });
 
 test("createDatabaseSql and dropDatabaseSql", () => {

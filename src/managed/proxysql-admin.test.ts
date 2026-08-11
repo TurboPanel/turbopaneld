@@ -7,10 +7,14 @@ import { resolveLayout } from "../paths/layout.ts";
 import { createTempLayout } from "../testing/temp-layout.ts";
 import {
   applyProxySqlAdminStatements,
+  loadProxySqlAdminCredentials,
+  loadProxySqlMonitorCredentials,
   parseProxySqlAdminCnf,
+  parseProxySqlMonitorCnf,
   PROXYSQL_ADMIN_DEFAULTS_PATH,
+  PROXYSQL_MONITOR_USERNAME,
 } from "./proxysql-admin.ts";
-import { proxysqlAdminCnfPath } from "./paths.ts";
+import { proxysqlAdminCnfPath, proxysqlMonitorCnfPath } from "./paths.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -28,8 +32,91 @@ test("parseProxySqlAdminCnf reads [client] user/password", () => {
   assertEquals(creds.password, "s3cret");
 });
 
+test("parseProxySqlMonitorCnf reads [client] user/password", () => {
+  const creds = parseProxySqlMonitorCnf(
+    "[client]\nuser=tp_monitor\npassword=mon-pass\n",
+  );
+  assertEquals(creds.user, "tp_monitor");
+  assertEquals(creds.password, "mon-pass");
+});
+
+test("PROXYSQL_MONITOR_USERNAME is the stable host monitor login", () => {
+  assertEquals(PROXYSQL_MONITOR_USERNAME, "tp_monitor");
+});
+
 test("PROXYSQL_ADMIN_DEFAULTS_PATH is the compose-mounted admin.cnf path", () => {
   assertEquals(PROXYSQL_ADMIN_DEFAULTS_PATH, "/etc/proxysql-admin.cnf");
+});
+
+test("loadProxySqlMonitorCredentials returns null when monitor.cnf is missing", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    await Deno.mkdir(layout.configDir + "/proxysql", {
+      recursive: true,
+      mode: 0o750,
+    });
+    const creds = await loadProxySqlMonitorCredentials(layout);
+    assertEquals(creds, null);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("loadProxySqlMonitorCredentials reads monitor.cnf", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    await Deno.mkdir(layout.configDir + "/proxysql", {
+      recursive: true,
+      mode: 0o750,
+    });
+    await Deno.writeTextFile(
+      proxysqlMonitorCnfPath(layout),
+      "[client]\nuser=tp_monitor\npassword=mon-s3cret\n",
+      { mode: 0o600 },
+    );
+    const creds = await loadProxySqlMonitorCredentials(layout);
+    assertEquals(creds, { user: "tp_monitor", password: "mon-s3cret" });
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("loadProxySqlAdminCredentials rejects directory scar at admin.cnf path", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    await Deno.mkdir(proxysqlAdminCnfPath(layout), {
+      recursive: true,
+      mode: 0o755,
+    });
+    await assertRejects(
+      () => loadProxySqlAdminCredentials(layout),
+      TypeError,
+      "directory",
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("loadProxySqlAdminCredentials rejects missing admin.cnf", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    await Deno.mkdir(layout.configDir + "/proxysql", {
+      recursive: true,
+      mode: 0o750,
+    });
+    await assertRejects(
+      () => loadProxySqlAdminCredentials(layout),
+      TypeError,
+      "missing",
+    );
+  } finally {
+    await fixture.cleanup();
+  }
 });
 
 test("applyProxySqlAdminStatements uses mounted defaults path (not host temp)", async () => {
@@ -68,6 +155,9 @@ test("applyProxySqlAdminStatements uses mounted defaults path (not host temp)", 
     const call = calls[0]!;
     assertEquals(call.args.includes("exec"), true);
     assertEquals(call.args.includes("-i"), true);
+    // defaults-extra-file must precede host/port options for libmysqlclient.
+    const mysqlIdx = call.args.indexOf("mysql");
+    assertEquals(call.args[mysqlIdx + 1], `--defaults-extra-file=${PROXYSQL_ADMIN_DEFAULTS_PATH}`);
     assertStringIncludes(
       call.args.join(" "),
       `--defaults-extra-file=${PROXYSQL_ADMIN_DEFAULTS_PATH}`,

@@ -507,7 +507,7 @@ test("system.reconcile payload parser round-trips and rejects invalid shapes", (
   );
 });
 
-test("system.reconcile payload parser accepts the widened database/queue/analytics component keys with system role and bare serviceId containerName", () => {
+test("system.reconcile payload parser accepts database/queue/analytics with system role and bare serviceId containerName", () => {
   const serviceId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
   for (const component of ["database", "queue", "analytics"] as const) {
     assertEquals(
@@ -534,6 +534,33 @@ test("system.reconcile payload parser accepts the widened database/queue/analyti
       },
     );
   }
+});
+
+test("system.reconcile payload parser accepts managed-ingress with system role and <serviceId>-sql containerName", () => {
+  const serviceId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  assertEquals(
+    parseSystemReconcilePayload({
+      environmentId: "11111111-2222-3333-4444-555555555555",
+      components: [
+        {
+          component: "managed-ingress",
+          serviceId,
+          composeServiceName: "proxysql",
+          containerName: `${serviceId}-sql`,
+          role: "system",
+          desired: "present",
+        },
+      ],
+    }).components[0],
+    {
+      component: "managed-ingress",
+      serviceId,
+      composeServiceName: "proxysql",
+      containerName: `${serviceId}-sql`,
+      role: "system",
+      desired: "present",
+    },
+  );
 });
 
 test("system.reconcile payload parser rejects role/containerName mismatches across the system/ingress split", () => {
@@ -586,6 +613,44 @@ test("system.reconcile payload parser rejects role/containerName mismatches acro
             component: "database",
             serviceId,
             composeServiceName: "database",
+            containerName: `${serviceId}-in`,
+            role: "system",
+            desired: "present",
+          },
+        ],
+      }),
+    TypeError,
+    "Invalid system.reconcile payload",
+  );
+  // managed-ingress requires `<serviceId>-sql` — bare serviceId is rejected.
+  assertThrows(
+    () =>
+      parseSystemReconcilePayload({
+        environmentId: "11111111-2222-3333-4444-555555555555",
+        components: [
+          {
+            component: "managed-ingress",
+            serviceId,
+            composeServiceName: "proxysql",
+            containerName: serviceId,
+            role: "system",
+            desired: "present",
+          },
+        ],
+      }),
+    TypeError,
+    "Invalid system.reconcile payload",
+  );
+  // managed-ingress with Traefik `-in` containerName is rejected.
+  assertThrows(
+    () =>
+      parseSystemReconcilePayload({
+        environmentId: "11111111-2222-3333-4444-555555555555",
+        components: [
+          {
+            component: "managed-ingress",
+            serviceId,
+            composeServiceName: "proxysql",
             containerName: `${serviceId}-in`,
             role: "system",
             desired: "present",

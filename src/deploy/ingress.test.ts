@@ -28,9 +28,11 @@ import {
 } from "./ingress.ts";
 import {
   assertSafeSystemIngressIdentity,
+  PROXYSQL_COMPOSE_SERVICE_NAME,
   readSystemComponentDescriptor,
   SHARED_TRAEFIK_COMPOSE_SERVICE_NAME,
   SYSTEM_HOSTING_INGRESS_COMPONENT,
+  SYSTEM_MANAGED_INGRESS_COMPONENT,
   writeSystemComponentDescriptor,
 } from "./system-component.ts";
 import { resolveLayout } from "../paths/layout.ts";
@@ -67,6 +69,15 @@ const SYSTEM_INGRESS_IDENTITY = {
   composeServiceName: SHARED_TRAEFIK_COMPOSE_SERVICE_NAME,
   containerName: "00000000-0000-4000-8000-0000000000bb-in",
   role: "ingress",
+} as const;
+
+const MANAGED_INGRESS_SERVICE_ID = "00000000-0000-4000-8000-0000000000cc";
+const MANAGED_INGRESS_IDENTITY = {
+  component: SYSTEM_MANAGED_INGRESS_COMPONENT,
+  serviceId: MANAGED_INGRESS_SERVICE_ID,
+  composeServiceName: PROXYSQL_COMPOSE_SERVICE_NAME,
+  containerName: `${MANAGED_INGRESS_SERVICE_ID}-sql`,
+  role: "system",
 } as const;
 
 test("traefikCompose publishes loopback ports with proxy protocol and TLS", () => {
@@ -201,6 +212,28 @@ test("assertSafeSystemIngressIdentity rejects unsafe or mismatched identity", ()
       }),
     Error,
     "is not allowlisted",
+  );
+});
+
+test("assertSafeSystemIngressIdentity accepts managed-ingress <serviceId>-sql and rejects bare / -in names", () => {
+  assertSafeSystemIngressIdentity({ ...MANAGED_INGRESS_IDENTITY });
+  assertThrows(
+    () =>
+      assertSafeSystemIngressIdentity({
+        ...MANAGED_INGRESS_IDENTITY,
+        containerName: MANAGED_INGRESS_SERVICE_ID,
+      }),
+    Error,
+    "system managed-ingress containerName must equal <serviceId>-sql",
+  );
+  assertThrows(
+    () =>
+      assertSafeSystemIngressIdentity({
+        ...MANAGED_INGRESS_IDENTITY,
+        containerName: `${MANAGED_INGRESS_SERVICE_ID}-in`,
+      }),
+    Error,
+    "system managed-ingress containerName must equal <serviceId>-sql",
   );
 });
 

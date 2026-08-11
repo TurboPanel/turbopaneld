@@ -17,6 +17,8 @@ mysql_variables=
     ssl_p2s_cert="/var/lib/proxysql/certs/fullchain.pem"
     ssl_p2s_key="/var/lib/proxysql/certs/privkey.pem"
     ssl_p2s_ca="/var/lib/proxysql/certs/ca.pem"
+    monitor_username="{{ proxysql_monitor_user }}"
+    monitor_password="{{ _proxysql_monitor_password }}"
 }
 
 pgsql_variables=
@@ -26,4 +28,7 @@ pgsql_variables=
     ssl_p2s_cert="/var/lib/proxysql/certs/fullchain.pem"
     ssl_p2s_key="/var/lib/proxysql/certs/privkey.pem"
     ssl_p2s_ca="/var/lib/proxysql/certs/ca.pem"
+    monitor_username="{{ proxysql_monitor_user }}"
+    monitor_password="{{ _proxysql_monitor_password }}"
+    monitor_dbname="postgres"
 }

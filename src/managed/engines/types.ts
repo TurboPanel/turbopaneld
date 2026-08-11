@@ -37,6 +37,14 @@ export type ManagedEngineRuntime = {
     ctx: ManagedEngineContext,
     credentials: ManagedApplyCredential[],
   ): Promise<string[]>;
+  /**
+   * Optional: host-wide ProxySQL health-check principal (from `monitor.cnf`).
+   * Primary/writable members only — physical standbys receive the role via WAL.
+   */
+  ensureProxySqlMonitor?(
+    ctx: ManagedEngineContext,
+    credentials: { user: string; password: string },
+  ): Promise<void>;
   applyDatabases(
     ctx: ManagedEngineContext,
     ops: ManagedApplyDatabaseOp[],

@@ -16,6 +16,9 @@ proxysql_mysql_port: 3306
 proxysql_container_uid: 999
 proxysql_container_gid: 999
 proxysql_admin_user: admin
+# Host-wide ProxySQL → backend health-check principal (all engines on this host).
+# Password lives only in monitor.cnf; never in Ansible facts after seed.
+proxysql_monitor_user: tp_monitor
 # Network for managed engines + ProxySQL
 proxysql_managed_network: turbopanel-managed
 turbopanel_config_dir: /etc/turbopanel  # noqa: var-naming[no-role-prefix]

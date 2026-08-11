@@ -33,7 +33,7 @@ import { handleManagedIngressReconcile } from "./managed-ingress-reconcile.ts";
 const test = Deno.test.bind(Deno);
 
 const SERVER_ID = "11111111-1111-4111-8111-111111111111";
-const CONTAINER_NAME = "22222222-2222-4222-8222-222222222222";
+const PROXYSQL_SERVICE_ID = "22222222-2222-4222-8222-222222222222";
 const MANAGED_ID = "33333333-3333-4333-8333-333333333333";
 const MEMBER_ID = "44444444-4444-4444-8444-444444444444";
 
@@ -79,9 +79,9 @@ async function seedFixture(fixture: TempLayoutFixture): Promise<void> {
   const layout = resolveLayout(fixture.env);
   await writeSystemComponentDescriptor(layout, {
     component: SYSTEM_MANAGED_INGRESS_COMPONENT,
-    serviceId: CONTAINER_NAME,
+    serviceId: PROXYSQL_SERVICE_ID,
     composeServiceName: "proxysql",
-    containerName: CONTAINER_NAME,
+    containerName: `${PROXYSQL_SERVICE_ID}-sql`,
     role: "system",
   });
   await Deno.mkdir(proxysqlConfigDir(layout), { recursive: true });

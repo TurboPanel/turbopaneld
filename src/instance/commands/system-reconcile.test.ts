@@ -588,7 +588,7 @@ function proxysqlPayload(): {
         component: SYSTEM_MANAGED_INGRESS_COMPONENT,
         serviceId: PROXYSQL_SERVICE_ID,
         composeServiceName: "proxysql",
-        containerName: PROXYSQL_SERVICE_ID,
+        containerName: `${PROXYSQL_SERVICE_ID}-sql`,
         role: "system",
         desired: "present",
       },
@@ -650,7 +650,7 @@ test({
           component: SYSTEM_MANAGED_INGRESS_COMPONENT,
           serviceId: PROXYSQL_SERVICE_ID,
           composeServiceName: "proxysql",
-          containerName: PROXYSQL_SERVICE_ID,
+          containerName: `${PROXYSQL_SERVICE_ID}-sql`,
           role: "system",
         };
 

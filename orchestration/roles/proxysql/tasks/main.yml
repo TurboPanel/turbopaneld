@@ -71,12 +71,35 @@
     access_time: preserve
   when: not _proxysql_owned_marker.stat.exists
 
+# Docker bind-mount scars: when admin.cnf / proxysql.cnf were missing and
+# compose up ran first, Docker creates empty *directories* as the mount
+# targets. Those are not regular files and must be removed before we can
+# seed credentials / static config. `stat.exists` alone is true for dirs,
+# and `test -s` also fails open on non-empty directories — never treat a
+# directory as a prepared host config file.
+- name: Stat ProxySQL admin.cnf path
+  ansible.builtin.stat:
+    path: "{{ proxysql_config_dir }}/admin.cnf"
+  register: _proxysql_admin_stat
+
+- name: Remove Docker bind-mount scar directory for admin.cnf
+  ansible.builtin.file:
+    path: "{{ proxysql_config_dir }}/admin.cnf"
+    state: absent
+  when:
+    - _proxysql_admin_stat.stat.exists | default(false)
+    - _proxysql_admin_stat.stat.isdir | default(false)
+
 - name: Generate ProxySQL admin credentials (idempotent)
   ansible.builtin.shell:
     cmd: |
       set -euo pipefail
       f='{{ proxysql_config_dir }}/admin.cnf'
-      if [ ! -s "$f" ]; then
+      # Require a non-empty regular file; remove stray dirs from bind scars.
+      if [ -d "$f" ]; then
+        rm -rf "$f"
+      fi
+      if [ ! -f "$f" ] || [ ! -s "$f" ]; then
         pass="$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 32)"
         umask 077
         printf '%s\n' '[client]' "user={{ proxysql_admin_user }}" "password=${pass}" > "$f"
@@ -92,6 +115,50 @@
 - name: Ensure ProxySQL admin.cnf is group-readable for the daemon
   ansible.builtin.file:
     path: "{{ proxysql_config_dir }}/admin.cnf"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+  no_log: true
+
+# Same scar pattern as admin.cnf — Docker creates a directory when compose
+# bind-mounts a missing monitor.cnf path.
+- name: Stat ProxySQL monitor.cnf path
+  ansible.builtin.stat:
+    path: "{{ proxysql_config_dir }}/monitor.cnf"
+  register: _proxysql_monitor_stat
+
+- name: Remove Docker bind-mount scar directory for monitor.cnf
+  ansible.builtin.file:
+    path: "{{ proxysql_config_dir }}/monitor.cnf"
+    state: absent
+  when:
+    - _proxysql_monitor_stat.stat.exists | default(false)
+    - _proxysql_monitor_stat.stat.isdir | default(false)
+
+- name: Generate ProxySQL backend monitor credentials (idempotent)
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      f='{{ proxysql_config_dir }}/monitor.cnf'
+      if [ -d "$f" ]; then
+        rm -rf "$f"
+      fi
+      if [ ! -f "$f" ] || [ ! -s "$f" ]; then
+        pass="$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 32)"
+        umask 077
+        printf '%s\n' '[client]' "user={{ proxysql_monitor_user }}" "password=${pass}" > "$f"
+        chmod 0640 "$f"
+        chown root:{{ turbopanel_group }} "$f"
+        echo created
+      fi
+    executable: /bin/bash
+  register: proxysql_monitor_gen
+  changed_when: "'created' in proxysql_monitor_gen.stdout"
+  no_log: true
+
+- name: Ensure ProxySQL monitor.cnf is group-readable for the daemon
+  ansible.builtin.file:
+    path: "{{ proxysql_config_dir }}/monitor.cnf"
     owner: root
     group: "{{ turbopanel_group }}"
     mode: "0640"
@@ -117,7 +184,40 @@
       }}
   no_log: true
 
+- name: Read ProxySQL monitor credentials
+  ansible.builtin.slurp:
+    src: "{{ proxysql_config_dir }}/monitor.cnf"
+  register: proxysql_monitor_raw
+  no_log: true
+
+- name: Parse ProxySQL monitor password from monitor.cnf
+  ansible.builtin.set_fact:
+    _proxysql_monitor_password: >-
+      {{
+        (
+          proxysql_monitor_raw.content | b64decode
+        ).splitlines()
+         | select('match', '^password=')
+         | map('regex_replace', '^password=', '')
+         | first
+         | default('')
+      }}
+  no_log: true
+
 - name: Check whether base proxysql.cnf already exists
+  ansible.builtin.stat:
+    path: "{{ proxysql_config_dir }}/proxysql.cnf"
+  register: _proxysql_cnf_stat
+
+- name: Remove Docker bind-mount scar directory for proxysql.cnf
+  ansible.builtin.file:
+    path: "{{ proxysql_config_dir }}/proxysql.cnf"
+    state: absent
+  when:
+    - _proxysql_cnf_stat.stat.exists | default(false)
+    - _proxysql_cnf_stat.stat.isdir | default(false)
+
+- name: Re-stat proxysql.cnf after scar cleanup
   ansible.builtin.stat:
     path: "{{ proxysql_config_dir }}/proxysql.cnf"
   register: _proxysql_cnf_stat
@@ -130,7 +230,7 @@
     group: "{{ turbopanel_group }}"
     mode: "0660"
     force: false
-  when: not _proxysql_cnf_stat.stat.exists
+  when: not (_proxysql_cnf_stat.stat.isreg | default(false))
   no_log: true
 
 - name: Ensure existing proxysql.cnf is group-writable for the daemon
@@ -139,7 +239,7 @@
     owner: root
     group: "{{ turbopanel_group }}"
     mode: "0660"
-  when: _proxysql_cnf_stat.stat.exists
+  when: _proxysql_cnf_stat.stat.isreg | default(false)
 
 - name: Install ProxySQL readiness wait script
   ansible.builtin.template:

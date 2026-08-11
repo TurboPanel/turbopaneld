@@ -78,7 +78,7 @@ function parseNormalized(
   return doc;
 }
 
-test("normalizeManagedCompose preserves config/tls mounts and forces image", () => {
+test("normalizeManagedCompose rewrites nested config/tls mounts that Docker cannot start", () => {
   const withTls = basePayload({
     composeYaml: [
       "services:",
@@ -109,7 +109,17 @@ test("normalizeManagedCompose preserves config/tls mounts and forces image", () 
     "01936b3e-aaaa-bbbb-cccc-123456789abc-1",
   );
   const volumes = service.volumes as string[];
-  assertEquals(volumes.includes("./config:/etc/postgresql:ro"), true);
+  assertEquals(volumes.includes("./config:/etc/postgresql:ro"), false);
+  assertEquals(
+    volumes.includes(
+      "./config/postgresql.conf:/etc/postgresql/postgresql.conf:ro",
+    ),
+    true,
+  );
+  assertEquals(
+    volumes.includes("./config/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro"),
+    true,
+  );
   assertEquals(volumes.includes("./tls:/etc/postgresql/tls:ro"), true);
   assertEquals(volumes.includes("pgdata:/var/lib/postgresql"), true);
 });

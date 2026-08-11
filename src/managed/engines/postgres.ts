@@ -17,6 +17,7 @@ import {
   dropDatabaseSql,
   dropPhysicalSlotSql,
   dropRoleSql,
+  ensureProxySqlMonitorRoleSql,
   grantDatabaseSql,
   isInRecoverySql,
   listManagedSlotsSql,
@@ -441,6 +442,20 @@ export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
       applied.push(credential.username);
     }
     return applied;
+  },
+
+  /**
+   * Host-wide ProxySQL health-check role (`tp_monitor`). Primary only —
+   * physical standbys get the role via WAL.
+   */
+  async ensureProxySqlMonitor(
+    ctx: ManagedEngineContext,
+    credentials: { user: string; password: string },
+  ): Promise<void> {
+    await runPsql(
+      ctx,
+      ensureProxySqlMonitorRoleSql(credentials.user, credentials.password),
+    );
   },
 
   async applyDatabases(

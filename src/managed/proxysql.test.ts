@@ -2,7 +2,12 @@
  * Host-free unit coverage for shared ProxySQL compose / config generation.
  */
 
-import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
+import {
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
 import { join } from "@std/path";
 import {
   assertNoFrontendUserConflict,
@@ -33,7 +38,7 @@ const DESCRIPTOR: SystemComponentDescriptor = {
   component: SYSTEM_MANAGED_INGRESS_COMPONENT,
   serviceId: "00000000-0000-4000-8000-0000000000aa",
   composeServiceName: "proxysql",
-  containerName: "00000000-0000-4000-8000-0000000000aa",
+  containerName: "00000000-0000-4000-8000-0000000000aa-sql",
   role: "system",
 };
 
@@ -73,6 +78,7 @@ test("proxysqlCompose without descriptor stays anonymous", () => {
 test("proxysqlCompose with descriptor emits identity + system labels", () => {
   const compose = proxysqlCompose(DESCRIPTOR);
   assertStringIncludes(compose, `container_name: ${DESCRIPTOR.containerName}`);
+  assertEquals(DESCRIPTOR.containerName.endsWith("-sql"), true);
   assertStringIncludes(compose, "component: managed-ingress");
   assertStringIncludes(
     compose,
@@ -257,6 +263,35 @@ test("renderProxySqlConfig preserves admin credentials when provided", () => {
     { user: "admin", password: "admin-s3cret" },
   );
   assertStringIncludes(cnf, 'admin_credentials="admin:admin-s3cret"');
+});
+
+test("renderProxySqlConfig embeds monitor credentials in mysql and pgsql variables", () => {
+  const cnf = renderProxySqlConfig(
+    {
+      bindAddress: "0.0.0.0",
+      clusters: [clusterDesired()],
+    },
+    { user: "admin", password: "admin-s3cret" },
+    { user: "tp_monitor", password: "mon-s3cret" },
+  );
+  assertStringIncludes(cnf, 'monitor_username="tp_monitor"');
+  assertStringIncludes(cnf, 'monitor_password="mon-s3cret"');
+  assertStringIncludes(cnf, 'monitor_dbname="postgres"');
+});
+
+test("buildProxySqlAdminStatements sets monitor variables when provided", () => {
+  const statements = buildProxySqlAdminStatements(
+    {
+      bindAddress: "0.0.0.0",
+      clusters: [clusterDesired()],
+    },
+    { monitor: { user: "tp_monitor", password: "mon-s3cret" } },
+  );
+  const joined = statements.join("\n");
+  assertStringIncludes(joined, "SET pgsql-monitor_username='tp_monitor'");
+  assertStringIncludes(joined, "SET pgsql-monitor_password='mon-s3cret'");
+  assertStringIncludes(joined, "SET mysql-monitor_username='tp_monitor'");
+  assertStringIncludes(joined, "LOAD PGSQL VARIABLES TO RUNTIME");
 });
 
 test("proxysqlCompose mounts admin.cnf at the admin defaults path", () => {
@@ -478,6 +513,21 @@ test("writeProxySqlConfigAtomic validates before commit", async () => {
     const path = join(root, "proxysql.cnf");
     await writeProxySqlConfigAtomic(path, "admin_variables=\n{\n}");
     assertEquals(await Deno.readTextFile(path), "admin_variables=\n{\n}");
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("writeProxySqlConfigAtomic rejects Docker bind-mount scar directory", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-proxysql-scar-" });
+  try {
+    const path = join(root, "proxysql.cnf");
+    await Deno.mkdir(path, { recursive: true });
+    await assertRejects(
+      () => writeProxySqlConfigAtomic(path, "admin_variables=\n{\n}"),
+      TypeError,
+      "directory",
+    );
   } finally {
     await Deno.remove(root, { recursive: true });
   }

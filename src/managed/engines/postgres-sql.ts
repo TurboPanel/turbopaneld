@@ -55,6 +55,24 @@ export function createOrAlterRoleSql(
   ].join("\n");
 }
 
+/**
+ * ProxySQL backend monitor principal — LOGIN + {@link pg_monitor} (not
+ * superuser). Same host-wide username on every primary; replicas receive the
+ * role via physical WAL.
+ */
+export function ensureProxySqlMonitorRoleSql(
+  username: string,
+  password: string,
+): string {
+  return [
+    createOrAlterRoleSql(username, password, {
+      login: true,
+      superuser: false,
+    }),
+    `GRANT pg_monitor TO ${quoteIdentifier(username)};`,
+  ].join("\n");
+}
+
 export function dropRoleSql(username: string): string {
   const ident = quoteIdentifier(username);
   return `DROP ROLE IF EXISTS ${ident};`;

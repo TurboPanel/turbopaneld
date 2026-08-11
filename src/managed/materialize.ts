@@ -133,19 +133,23 @@ export async function normalizeManagedFileOwnership(
   // re-apply with writefile Permission denied.
   // 0640 → root:<engineGroup>; 0600 → <engineUser>:<engineGroup>.
   // dirs → keep owner, set group to <engineGroup>, mode 0750.
+  // Exclude `tls/proxysql/` — those PEMs are daemon-rewritten on every apply
+  // (org-CA leaf for ProxySQL), not engine-bind-mounted material.
+  // prune/find escapes: String.raw keeps `\(` / `\)` for the shell script.
+  const pruneTlsProxySql = String.raw`\( -path "/managed/tls/proxysql" -o -path "/managed/tls/proxysql/*" \) -prune -o`;
   const script = [
     "set -eu",
     `USER_NAME=${shellSingleQuote(containerUser)}`,
     `GROUP_NAME=${shellSingleQuote(containerGroup)}`,
     "for TREE in /managed/config /managed/tls; do",
     '  [ -d "$TREE" ] || continue',
-    '  find "$TREE" -type f -perm 640 -exec chown "root:$GROUP_NAME" {} +',
-    '  find "$TREE" -type f -perm 640 -exec chmod 0640 {} +',
-    '  find "$TREE" -type f -perm 600 -exec chown "$USER_NAME:$GROUP_NAME" {} +',
-    '  find "$TREE" -type f -perm 600 -exec chmod 0600 {} +',
+    `  find "$TREE" ${pruneTlsProxySql} -type f -perm 640 -exec chown "root:$GROUP_NAME" {} +`,
+    `  find "$TREE" ${pruneTlsProxySql} -type f -perm 640 -exec chmod 0640 {} +`,
+    `  find "$TREE" ${pruneTlsProxySql} -type f -perm 600 -exec chown "$USER_NAME:$GROUP_NAME" {} +`,
+    `  find "$TREE" ${pruneTlsProxySql} -type f -perm 600 -exec chmod 0600 {} +`,
     // Group-only chown keeps the daemon UID as owner for re-apply writes.
-    '  find "$TREE" -type d -exec chown ":$GROUP_NAME" {} +',
-    '  find "$TREE" -type d -exec chmod 0750 {} +',
+    `  find "$TREE" ${pruneTlsProxySql} -type d -exec chown ":$GROUP_NAME" {} +`,
+    `  find "$TREE" ${pruneTlsProxySql} -type d -exec chmod 0750 {} +`,
     "done",
   ].join("\n");
 

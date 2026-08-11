@@ -11,6 +11,7 @@ import {
   assertSafeIdentityShape,
   ingressContainerName,
   type IngressIdentity,
+  managedIngressContainerName,
 } from "./ingress-identity.ts";
 
 /** Shared HTTP Traefik system component key. */
@@ -113,6 +114,49 @@ export function systemComponentContract(
   return SYSTEM_COMPONENT_CONTRACTS[component];
 }
 
+/**
+ * Expected `containerName` for a system component — mirrors instance
+ * `expectedSystemComponentContainerName` in `src/lib/commands/schemas.ts`.
+ *
+ * | component | expected `containerName` |
+ * | --- | --- |
+ * | `hosting-ingress` | `<serviceId>-in` |
+ * | `managed-ingress` | `<serviceId>-sql` |
+ * | `database` / `queue` / `analytics` | bare `serviceId` |
+ */
+export function expectedSystemComponentContainerName(
+  component: SystemComponentKey,
+  serviceId: string,
+): string {
+  switch (component) {
+    case SYSTEM_HOSTING_INGRESS_COMPONENT:
+      return ingressContainerName(serviceId);
+    case SYSTEM_MANAGED_INGRESS_COMPONENT:
+      return managedIngressContainerName(serviceId);
+    case "database":
+    case "queue":
+    case "analytics":
+      return serviceId;
+  }
+}
+
+function systemComponentContainerNameMismatchMessage(
+  component: SystemComponentKey,
+): string {
+  switch (component) {
+    case SYSTEM_HOSTING_INGRESS_COMPONENT:
+      return "ingress containerName must equal <serviceId>-in";
+    case SYSTEM_MANAGED_INGRESS_COMPONENT:
+      return "system managed-ingress containerName must equal <serviceId>-sql";
+    case "database":
+    case "queue":
+    case "analytics":
+      return `system ${
+        SYSTEM_COMPONENT_CONTRACTS[component].role
+      } containerName must equal <serviceId>`;
+  }
+}
+
 /** Persisted descriptor for a platform-owned system component. */
 export type SystemComponentDescriptor = {
   component: SystemComponentKey;
@@ -137,9 +181,10 @@ export function systemComponentDescriptorPath(
  * - `composeServiceName` matches the contract's compose service key —
  *   renaming it would orphan the running container in its compose project.
  * - `role` matches the contract's role.
- * - `containerName` matches the role-aware naming rule: `ingress` →
- *   `<serviceId>-in`; `service` / `system` → `<serviceId>` (bare, matching
- *   `containerNameFromService` at `instanceCount: 1`).
+ * - `containerName` matches the per-component naming rule:
+ *   `hosting-ingress` → `<serviceId>-in`; `managed-ingress` →
+ *   `<serviceId>-sql`; `database` / `queue` / `analytics` → bare
+ *   `serviceId`.
  */
 export function assertSafeSystemIngressIdentity(
   descriptor: SystemComponentDescriptor,
@@ -166,14 +211,13 @@ export function assertSafeSystemIngressIdentity(
       `system component '${descriptor.component}' role must be '${contract.role}'`,
     );
   }
-  const expectedContainerName = contract.role === "ingress"
-    ? ingressContainerName(descriptor.serviceId)
-    : descriptor.serviceId;
+  const expectedContainerName = expectedSystemComponentContainerName(
+    descriptor.component,
+    descriptor.serviceId,
+  );
   if (descriptor.containerName !== expectedContainerName) {
     throw new Error(
-      contract.role === "ingress"
-        ? "ingress containerName must equal <serviceId>-in"
-        : `system ${contract.role} containerName must equal <serviceId>`,
+      systemComponentContainerNameMismatchMessage(descriptor.component),
     );
   }
 }

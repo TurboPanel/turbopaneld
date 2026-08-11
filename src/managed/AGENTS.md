@@ -102,10 +102,11 @@ listeners and routes to engine members on `turbopanel-managed`.
 | TLS | Frontend/backend TLS uses org-CA material under `configDir/proxysql/tls/` (and per-engine copies under `tls/proxysql/` for materialize). Engines still use self-signed `tlsMaterial` for their own listener when requested |
 | Desired state | Whole-server command `managed.ingress.reconcile` carries `bindAddress` + `clusters[]` (backends + users); **not** embedded on each `managed.apply` |
 | Admin apply | `proxysql-admin.ts` loads `admin.cnf`, mounts it into a throwaway client or uses stdin; SQL LOAD/SAVE — credentials never argv/logs |
+| Backend monitor | Host-wide principal in `configDir/proxysql/monitor.cnf` (`tp_monitor` + random password). Written into `mysql_variables`/`pgsql_variables` and SET on reconcile. Each **primary** `managed.apply` creates the role (`GRANT pg_monitor` / MySQL PROCESS+REPLICATION CLIENT). **Never** leave ProxySQL defaults (`monitor`/`monitor`) — they spam engine logs and never authenticate |
 | Cold start | Full `proxysql.cnf` (static + dynamic tables) is rewritten so reboot/`compose up` restores routing without a live admin session |
-| Static vs dynamic | Static section = datadir, admin_variables, mysql_variables, pgsql_variables (interfaces + `have_ssl` + cert paths). Dynamic = `mysql_*` / `pgsql_*` servers, users, query_rules. Listener/static changes require container restart; user/backend changes prefer admin interface only |
-| Inventory | System component `managed-ingress` / project `turbopanel-proxysql`; self-heal via `system.reconcile` → `proxysql` (distinct from inspect-only `database`/`queue`/`analytics`) |
-| Host prep | Ansible role `proxysql` + playbook `proxysql-setup.yml` (`runProxySqlSetup`) — dirs, admin.cnf, initial static cnf when absent, wait-ready, `turbopanel-proxysql-stack.service`, network. **Never** daemon compose contents |
+| Static vs dynamic | Static section = datadir, admin_variables, mysql_variables, pgsql_variables (interfaces + `have_ssl` + cert paths + monitor_*). Dynamic = `mysql_*` / `pgsql_*` servers, users, query_rules. Listener/static changes require container restart; user/backend changes prefer admin interface only |
+| Inventory | System component `managed-ingress` / project `turbopanel-proxysql`; container name `<serviceId>-sql`; self-heal via `system.reconcile` → `proxysql` (distinct from inspect-only `database`/`queue`/`analytics`) |
+| Host prep | Ansible role `proxysql` + playbook `proxysql-setup.yml` (`runProxySqlSetup`; also on co-located `instance-dev-install`) — dirs, admin.cnf, **monitor.cnf**, initial static cnf when absent, wait-ready, `turbopanel-proxysql-stack.service`, network. Removes bind-mount **directory** scars at `admin.cnf`/`proxysql.cnf`/`monitor.cnf` before seed. **Never** daemon compose contents. Reconcile refuses compose up if admin/config paths are missing or not regular files |
 
 Username frontend namespace is **server-wide** across every cluster hosted on that
 org's servers: `ManagedFrontendUserConflictError` when the same login would map
@@ -116,9 +117,11 @@ before enqueue (see `instance/src/lib/managed/AGENTS.md` → Login namespace).
 
 1. **Container names from the instance.** The instance supplies engine
    `containerName` (`<service.id>-N`). There is **no** per-managed Traefik /
-   `-in` ingress row on the engine service for ProxySQL path. ProxySQL identity
-   (when provisioned into the system workspace) uses system-component
-   allocation (`managed-ingress`), not engine ordinal slots.
+   `-in` ingress row on the engine service for ProxySQL path. ProxySQL
+   system-component identity is `<serviceId>-sql`
+   (`managedIngressContainerNameFromService` on the instance) — distinct from
+   engine ordinal names and from tenant Traefik `-in`. Allocation still uses
+   the `managed-ingress` system component, not engine ordinal slots.
    `assertSafeManagedIdentifiers` guards Docker names with the
    hyphen-permitting regex (do not reuse `SAFE_VOLUME_NAME_RE`). Container
    resolution (`containers.ts`) still keys off `Service` / `State`, never
@@ -152,7 +155,9 @@ before enqueue (see `instance/src/lib/managed/AGENTS.md` → Login namespace).
    throwaway `docker run --user 0` of the engine image to `chown`/`chmod`
    **only** the bind-mounted trees (`config/`, `tls/`) — never
    `docker-compose.yml`, the short-lived `.env`, or `backups/` (those stay
-   daemon-owned so re-apply can rewrite them). Owner/group names come from
+   daemon-owned so re-apply can rewrite them). **`tls/proxysql/` is pruned**
+   from that chown (daemon rewrites those PEMs on every apply; root:engine
+   ownership left them Permission denied). Owner/group names come from
    the engine runtime descriptor — never hardcoded in shared code. Modes:
    `0640` → `root:<engineGroup>`; `0600` → `<engineUser>:<engineGroup>`;
    directories keep the daemon UID as owner but take `<engineGroup>` + `0750`.

@@ -225,6 +225,11 @@ export function assertNoFrontendUserConflict(
  * Compose document for the shared ProxySQL project
  * ({@link PROXYSQL_PROJECT}).
  *
+ * When `identity` is provided, `container_name` / `x-turbopanel` use the
+ * instance-allocated managed-ingress name (`<serviceId>-sql`) — distinct
+ * from tenant Traefik (`<serviceId>-in`) and bare-uuid system-stack rows
+ * (`database` / `queue` / `analytics`).
+ *
  * `bindAddress` controls only the **host publish** of the 5432/3306
  * listeners — `null` (the safe default) omits both `ports:` entries
  * entirely, so the frontend is reachable exclusively via
@@ -362,7 +367,9 @@ function renderUserRows(
     for (const user of cluster.users) {
       if (seen.has(user.username)) continue;
       seen.add(user.username);
-      const defaultSchema = user.defaultDatabase
+      // ProxySQL 3.0.x `pgsql_users` has no default_schema column (MySQL users
+      // still accept it). Only emit the field for mysql family.
+      const defaultSchema = family === "mysql" && user.defaultDatabase
         ? ` default_schema="${
           escapeProxySqlConfigString(user.defaultDatabase)
         }"`
@@ -472,12 +479,23 @@ function renderProtocolFamilySection(
  */
 export function renderProxySqlStaticConfig(
   adminCredentials?: { user: string; password: string } | null,
+  monitorCredentials?: { user: string; password: string } | null,
 ): string {
   const adminCredLine = adminCredentials
     ? `    admin_credentials="${
       escapeProxySqlConfigString(adminCredentials.user)
     }:${escapeProxySqlConfigString(adminCredentials.password)}"`
     : null;
+  const monitorLines = monitorCredentials
+    ? [
+      `    monitor_username="${
+        escapeProxySqlConfigString(monitorCredentials.user)
+      }"`,
+      `    monitor_password="${
+        escapeProxySqlConfigString(monitorCredentials.password)
+      }"`,
+    ]
+    : [];
   const lines = [
     'datadir="/var/lib/proxysql"',
     "",
@@ -494,6 +512,7 @@ export function renderProxySqlStaticConfig(
     `    ssl_p2s_cert="${TLS_FULLCHAIN_PATH}"`,
     `    ssl_p2s_key="${TLS_PRIVKEY_PATH}"`,
     `    ssl_p2s_ca="${TLS_CA_PATH}"`,
+    ...monitorLines,
     "}",
     "",
     "pgsql_variables=",
@@ -503,6 +522,8 @@ export function renderProxySqlStaticConfig(
     `    ssl_p2s_cert="${TLS_FULLCHAIN_PATH}"`,
     `    ssl_p2s_key="${TLS_PRIVKEY_PATH}"`,
     `    ssl_p2s_ca="${TLS_CA_PATH}"`,
+    ...monitorLines,
+    ...(monitorCredentials ? ['    monitor_dbname="postgres"'] : []),
     "}",
     "",
   ];
@@ -548,9 +569,10 @@ export function staticConfigSectionChanged(
 export function renderProxySqlConfig(
   desired: ProxySqlDesiredState,
   adminCredentials?: { user: string; password: string } | null,
+  monitorCredentials?: { user: string; password: string } | null,
 ): string {
   const lines = [
-    renderProxySqlStaticConfig(adminCredentials),
+    renderProxySqlStaticConfig(adminCredentials, monitorCredentials),
   ];
   if (clusterUsesMysql(desired.clusters)) {
     lines.push(
@@ -613,7 +635,7 @@ function renderAdminUserStatements(
     for (const user of cluster.users) {
       if (seen.has(user.username)) continue;
       seen.add(user.username);
-      if (user.defaultDatabase) {
+      if (family === "mysql" && user.defaultDatabase) {
         statements.push(
           `INSERT INTO ${table} (username,password,default_hostgroup,active,default_schema) VALUES ('${
             escapeSqlString(user.username)
@@ -679,9 +701,15 @@ function renderAdminQueryRuleStatements(
  * Empty families still get DELETE + LOAD/SAVE so destroying the last MySQL
  * (or Postgres) cluster does not leave stale 3306/5432 users/backends active
  * while the other family remains.
+ *
+ * Optional `monitor` credentials update mysql-/pgsql-monitor_* without a
+ * container restart (also written into the static cnf for cold start).
  */
 export function buildProxySqlAdminStatements(
   desired: ProxySqlDesiredState,
+  options?: {
+    monitor?: { user: string; password: string } | null;
+  },
 ): string[] {
   const statements: string[] = [];
   for (const family of ["mysql", "pgsql"] as const) {
@@ -689,6 +717,22 @@ export function buildProxySqlAdminStatements(
       ...renderAdminServerStatements(family, desired.clusters),
       ...renderAdminUserStatements(family, desired.clusters),
       ...renderAdminQueryRuleStatements(family, desired.clusters),
+    );
+  }
+  const monitor = options?.monitor;
+  if (monitor) {
+    const user = escapeSqlString(monitor.user);
+    const password = escapeSqlString(monitor.password);
+    statements.push(
+      `SET mysql-monitor_username='${user}'`,
+      `SET mysql-monitor_password='${password}'`,
+      "LOAD MYSQL VARIABLES TO RUNTIME",
+      "SAVE MYSQL VARIABLES TO DISK",
+      `SET pgsql-monitor_username='${user}'`,
+      `SET pgsql-monitor_password='${password}'`,
+      "SET pgsql-monitor_dbname='postgres'",
+      "LOAD PGSQL VARIABLES TO RUNTIME",
+      "SAVE PGSQL VARIABLES TO DISK",
     );
   }
   return statements;
@@ -700,6 +744,16 @@ export async function writeProxySqlConfigAtomic(
 ): Promise<void> {
   const dir = join(path, "..");
   await Deno.mkdir(dir, { recursive: true, mode: 0o750 });
+  try {
+    const existing = await Deno.stat(path);
+    if (existing.isDirectory) {
+      throw new TypeError(
+        `proxysql config path is a directory (Docker bind-mount scar): ${path}`,
+      );
+    }
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
   const tmpPath = join(dir, `.${crypto.randomUUID()}.tmp`);
   await Deno.writeTextFile(tmpPath, contents, { mode: 0o640 });
   try {
@@ -741,6 +795,9 @@ export type InspectProxySqlDeps = {
 
 /**
  * Best-effort observe the shared ProxySQL container.
+ *
+ * Matches the instance-allocated identity (`containerName` =
+ * `<serviceId>-sql`) plus system labels — not a bare-uuid name.
  *
  * Returns `undefined` when Docker/`ps` fails, `null` when absent, or the
  * matching labelled row when present.

@@ -283,7 +283,42 @@ function ensureServiceVolumeMounts(
     );
     if (!already) mounts.push(mount);
   }
-  service.volumes = mounts;
+  service.volumes = unnestPostgresConfigTlsMounts(mounts);
+}
+
+/**
+ * Rewrite the nested `./config` + `./tls` bind pair that Docker cannot start.
+ *
+ * Binding `./config` onto `/etc/postgresql:ro` then nested
+ * `./tls:/etc/postgresql/tls:ro` fails at runc (`mkdirat … tls: read-only
+ * file system`). Prefer file mounts for conf + separate tls directory mount.
+ */
+export function unnestPostgresConfigTlsMounts(
+  mounts: readonly string[],
+): string[] {
+  const hasConfigDir = mounts.some((m) =>
+    m === "./config:/etc/postgresql:ro" || m.startsWith("./config:/etc/postgresql:")
+  );
+  const hasNestedTls = mounts.some((m) =>
+    m.startsWith("./tls:/etc/postgresql/tls")
+  );
+  if (!hasConfigDir || !hasNestedTls) return [...mounts];
+
+  const rewritten: string[] = [];
+  for (const mount of mounts) {
+    if (
+      mount === "./config:/etc/postgresql:ro" ||
+      mount.startsWith("./config:/etc/postgresql:")
+    ) {
+      rewritten.push(
+        "./config/postgresql.conf:/etc/postgresql/postgresql.conf:ro",
+        "./config/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro",
+      );
+      continue;
+    }
+    rewritten.push(mount);
+  }
+  return rewritten;
 }
 
 export type NormalizedManagedCompose = {

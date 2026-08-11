@@ -275,10 +275,13 @@ exists on the server (or the ingress was already observed after first start)
 — bare enroll / enable-hosting must not pull Traefik.
 
 For ProxySQL / `managed-ingress`, the descriptor + compose identity live with
-`SYSTEM_COMPONENT_CONTRACTS.managed-ingress` (`selfHeal: "proxysql"`); runtime
-files under `configDir/proxysql/` are written by `managed.ingress.reconcile`
-and optionally re-started by `system.reconcile`. Host dirs and the
-`turbopanel-proxysql-stack` unit are Ansible-owned (`proxysql` role).
+`SYSTEM_COMPONENT_CONTRACTS.managed-ingress` (`selfHeal: "proxysql"`);
+`containerName` = `<serviceId>-sql` (not bare uuid, not `-in`). Self-host
+stack components (`database` / `queue` / `analytics`) stay bare-`serviceId`.
+Runtime files under `configDir/proxysql/` are written by
+`managed.ingress.reconcile` and optionally re-started by `system.reconcile`.
+Host dirs and the `turbopanel-proxysql-stack` unit are Ansible-owned
+(`proxysql` role).
 
 **System stack (`turbopanel-system`) is inspect-only:**
 `inspectSystemStackContainer` (`src/deploy/system-stack.ts`) reports

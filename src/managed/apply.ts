@@ -32,6 +32,7 @@ import {
   managedComposeProject,
   managedEnvFilePath,
 } from "./paths.ts";
+import { loadProxySqlMonitorCredentials } from "./proxysql-admin.ts";
 
 type DecryptSecretsFn = (ciphertexts: string[]) => Promise<(string | null)[]>;
 
@@ -273,6 +274,14 @@ export async function applyManagedEngineState(
 
   const appliedUsers = await engine.applyCredentials(ctx, credentials);
   await dropManagedUsers(ctx, engine, payload, appliedUsers);
+  if (engine.ensureProxySqlMonitor) {
+    const monitor = await loadProxySqlMonitorCredentials(
+      resolveLayout(Deno.env.toObject()),
+    );
+    if (monitor) {
+      await engine.ensureProxySqlMonitor(ctx, monitor);
+    }
+  }
   const appliedDatabases = payload.databases
     ? await engine.applyDatabases(ctx, payload.databases)
     : [];

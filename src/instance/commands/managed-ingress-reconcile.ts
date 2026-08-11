@@ -23,7 +23,9 @@ import { type LayoutPaths, resolveLayout } from "../../paths/layout.ts";
 import { ensureManagedIngressNetwork } from "../../managed/networks.ts";
 import {
   applyProxySqlAdminStatements,
+  assertProxySqlHostRegularFile,
   loadProxySqlAdminCredentials,
+  loadProxySqlMonitorCredentials,
 } from "../../managed/proxysql-admin.ts";
 import {
   assertNoFrontendUserConflict,
@@ -39,6 +41,7 @@ import {
 import { materializeProxySqlTlsMaterial } from "../../managed/tls.ts";
 import {
   PROXYSQL_PROJECT,
+  proxysqlAdminCnfPath,
   proxysqlComposePath,
   proxysqlConfigPath,
   proxysqlTlsDir,
@@ -144,6 +147,16 @@ async function ensureProxySqlComposeUp(
     /\/docker-compose\.yml$/,
     "",
   );
+  // Refuse compose up when admin.cnf / proxysql.cnf are missing or Docker
+  // bind-mount scar directories — compose would recreate empty dirs as mounts.
+  await assertProxySqlHostRegularFile(
+    proxysqlAdminCnfPath(layout),
+    "proxysql admin.cnf",
+  );
+  await assertProxySqlHostRegularFile(
+    proxysqlConfigPath(layout),
+    "proxysql.cnf",
+  );
   await Deno.mkdir(configDir, { recursive: true, mode: 0o750 });
   await Deno.writeTextFile(composePath, composeYaml, { mode: 0o640 });
   const up = await run([
@@ -210,10 +223,15 @@ export async function handleManagedIngressReconcile(
   );
 
   const adminCredentials = await loadProxySqlAdminCredentials(layout);
+  const monitorCredentials = await loadProxySqlMonitorCredentials(layout);
   const bindAddress = desired.bindAddress;
   const composePath = proxysqlComposePath(layout);
   const configPath = proxysqlConfigPath(layout);
-  const nextConfig = renderProxySqlConfig(desired, adminCredentials);
+  const nextConfig = renderProxySqlConfig(
+    desired,
+    adminCredentials,
+    monitorCredentials,
+  );
   const previousConfig = await readPreviousConfig(configPath);
   const previousComposeText = await readPreviousConfig(composePath);
   // ProxySQL's internal `interfaces=` line is now a fixed constant (see
@@ -245,7 +263,9 @@ export async function handleManagedIngressReconcile(
     throw new Error("managed-ingress descriptor is missing");
   }
 
-  const statements = buildProxySqlAdminStatements(desired);
+  const statements = buildProxySqlAdminStatements(desired, {
+    monitor: monitorCredentials,
+  });
   await applyProxySqlAdminStatements(statements, {
     runDocker: run,
     layout,

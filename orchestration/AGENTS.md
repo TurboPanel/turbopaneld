@@ -73,7 +73,15 @@ Shared **managed-database ingress** on every host that will run managed
 engines. Host prerequisites only — **not** a full stack bring-up of compose
 content. Meta-depends on the `docker` role. Standalone playbook:
 `playbooks/proxysql-setup.yml` (invoked by daemon `runProxySqlSetup` after
-`ensureGalaxyDockerRole`).
+`ensureGalaxyDockerRole`). Co-located dev installs the role via
+`instance-dev-install` / `dev-converge-manifest.json` (after `system-compose`).
+
+**Docker bind-mount scars:** if `admin.cnf` or `proxysql.cnf` were missing when
+the daemon first ran `compose up`, Docker creates empty **directories** at those
+paths. The role removes directory scars before seeding files; shell creation
+requires a real non-empty regular file (`-f` + `-s`), not merely `test -s`
+(which stays false for empty dirs but also never recreates a non-empty dir).
+The daemon refuses compose up / config write while those paths are directories.
 
 **Division of labour**
 

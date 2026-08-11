@@ -72,6 +72,23 @@ export function createOrAlterAccountSql(
 }
 
 /**
+ * ProxySQL backend monitor account on the managed Docker network host.
+ * USAGE + PROCESS + REPLICATION CLIENT cover connect / read_only probes.
+ */
+export function ensureProxySqlMonitorAccountSql(
+  username: string,
+  password: string,
+): string {
+  const account = accountAt(username, MANAGED_DOCKER_NETWORK_HOST);
+  const lit = quoteLiteral(password);
+  return [
+    `CREATE USER IF NOT EXISTS ${account} IDENTIFIED BY ${lit};`,
+    `ALTER USER ${account} IDENTIFIED BY ${lit};`,
+    `GRANT USAGE, PROCESS, REPLICATION CLIENT ON *.* TO ${account};`,
+  ].join("\n");
+}
+
+/**
  * Drop an account across host variants. Drops managed-network + localhost
  * plus any explicit peer hosts.
  */

@@ -5,6 +5,7 @@ import {
   createOrAlterAccountSql,
   dropAccountSql,
   dropDatabaseSql,
+  ensureProxySqlMonitorAccountSql,
   ensureReplicationAccountSql,
   grantDatabaseSql,
   grantReplicationSql,
@@ -70,6 +71,13 @@ test("ensureReplicationAccountSql creates one account per peer host", () => {
   assertEquals(sql.includes("`tp_repl`@'203.0.113.20'"), true);
   assertEquals(sql.includes("`tp_repl`@'203.0.113.21'"), true);
   assertEquals(sql.includes("FLUSH PRIVILEGES"), true);
+});
+
+test("ensureProxySqlMonitorAccountSql is scoped to managed network", () => {
+  const sql = ensureProxySqlMonitorAccountSql("tp_monitor", "mon-s3cret");
+  assertEquals(sql.includes("`tp_monitor`@'172.16.0.0/255.240.0.0'"), true);
+  assertEquals(sql.includes("PROCESS"), true);
+  assertEquals(sql.includes("REPLICATION CLIENT"), true);
 });
 
 test("dropAccountSql covers managed network and localhost", () => {

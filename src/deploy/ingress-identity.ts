@@ -17,6 +17,12 @@ const CONTAINER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/;
  */
 export const INGRESS_CONTAINER_NAME_SUFFIX = "-in";
 
+/**
+ * Managed-ingress (ProxySQL) container-name suffix — mirrors instance
+ * `src/lib/naming.ts` `MANAGED_INGRESS_CONTAINER_NAME_SUFFIX`.
+ */
+export const MANAGED_INGRESS_CONTAINER_NAME_SUFFIX = "-sql";
+
 /** Instance-allocated identity for a Traefik ingress container. */
 export type IngressIdentity = {
   serviceId: string;
@@ -30,13 +36,21 @@ export function ingressContainerName(serviceId: string): string {
 }
 
 /**
+ * Build `<serviceId>-sql` — shared ProxySQL managed-ingress container name.
+ * Mirrors instance `managedIngressContainerNameFromService`.
+ */
+export function managedIngressContainerName(serviceId: string): string {
+  return `${serviceId}${MANAGED_INGRESS_CONTAINER_NAME_SUFFIX}`;
+}
+
+/**
  * Validate the UUID / safe-name shape of an identity before interpolating
  * into compose YAML — everything except the ingress-specific
  * `<serviceId>-in` container-name suffix rule.
  *
  * Shared by {@link assertSafeIngressIdentity} (ingress role) and the
- * per-component system contract in `system-component.ts` (service/system
- * role, where `containerName === serviceId` instead).
+ * per-component system contract in `system-component.ts` (`-sql` for
+ * `managed-ingress`, bare `serviceId` for `database`/`queue`/`analytics`).
  */
 export function assertSafeIdentityShape(identity: IngressIdentity): void {
   if (!SAFE_FILE_ID_RE.test(identity.serviceId)) {

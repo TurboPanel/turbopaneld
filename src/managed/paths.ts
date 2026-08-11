@@ -54,6 +54,11 @@ export function proxysqlAdminCnfPath(layout: LayoutPaths): string {
   return join(proxysqlConfigDir(layout), "admin.cnf");
 }
 
+/** Host-wide ProxySQL → engine health-check credentials (`tp_monitor`). */
+export function proxysqlMonitorCnfPath(layout: LayoutPaths): string {
+  return join(proxysqlConfigDir(layout), "monitor.cnf");
+}
+
 export function managedDir(layout: LayoutPaths, managedId: string): string {
   return join(layout.stateDir, "managed", managedId);
 }

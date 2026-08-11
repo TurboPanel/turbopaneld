@@ -16,6 +16,7 @@ import {
   createDatabaseSql,
   dropAccountSql,
   dropDatabaseSql,
+  ensureProxySqlMonitorAccountSql,
   ensureReplicationAccountSql,
   grantDatabaseSql,
   grantRootSql,
@@ -468,6 +469,16 @@ export const mariadbManagedEngineRuntime: ManagedEngineRuntime = {
       applied.push(credential.username);
     }
     return applied;
+  },
+
+  async ensureProxySqlMonitor(
+    ctx: ManagedEngineContext,
+    credentials: { user: string; password: string },
+  ): Promise<void> {
+    await runMariadb(
+      ctx,
+      ensureProxySqlMonitorAccountSql(credentials.user, credentials.password),
+    );
   },
 
   async applyDatabases(
