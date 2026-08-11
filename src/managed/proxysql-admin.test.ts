@@ -157,7 +157,10 @@ test("applyProxySqlAdminStatements uses mounted defaults path (not host temp)", 
     assertEquals(call.args.includes("-i"), true);
     // defaults-extra-file must precede host/port options for libmysqlclient.
     const mysqlIdx = call.args.indexOf("mysql");
-    assertEquals(call.args[mysqlIdx + 1], `--defaults-extra-file=${PROXYSQL_ADMIN_DEFAULTS_PATH}`);
+    assertEquals(
+      call.args[mysqlIdx + 1],
+      `--defaults-extra-file=${PROXYSQL_ADMIN_DEFAULTS_PATH}`,
+    );
     assertStringIncludes(
       call.args.join(" "),
       `--defaults-extra-file=${PROXYSQL_ADMIN_DEFAULTS_PATH}`,

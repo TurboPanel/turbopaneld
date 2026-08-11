@@ -29,7 +29,6 @@ export type ProxySqlMonitorCredentials = ProxySqlAdminCredentials; // NOSONAR ty
  */
 export const PROXYSQL_MONITOR_USERNAME = "tp_monitor";
 
-
 export type ProxySqlAdminDeps = {
   runDocker?: (
     args: string[],

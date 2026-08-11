@@ -137,8 +137,7 @@ test("materializeManagedProxySqlTlsMaterial rewrites engine leaf after chmod rea
       certificatePem:
         "-----BEGIN CERTIFICATE-----\nLEAF\n-----END CERTIFICATE-----\n",
       privateKeyEnvelope: "tpdaemon.v1.server.KEYID.ciphertext",
-      caCertPem:
-        "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n",
+      caCertPem: "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n",
     };
     const decrypt = () => Promise.resolve([privatePem]);
 

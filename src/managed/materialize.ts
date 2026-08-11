@@ -136,7 +136,8 @@ export async function normalizeManagedFileOwnership(
   // Exclude `tls/proxysql/` — those PEMs are daemon-rewritten on every apply
   // (org-CA leaf for ProxySQL), not engine-bind-mounted material.
   // prune/find escapes: String.raw keeps `\(` / `\)` for the shell script.
-  const pruneTlsProxySql = String.raw`\( -path "/managed/tls/proxysql" -o -path "/managed/tls/proxysql/*" \) -prune -o`;
+  const pruneTlsProxySql = String
+    .raw`\( -path "/managed/tls/proxysql" -o -path "/managed/tls/proxysql/*" \) -prune -o`;
   const script = [
     "set -eu",
     `USER_NAME=${shellSingleQuote(containerUser)}`,

@@ -297,7 +297,8 @@ export function unnestPostgresConfigTlsMounts(
   mounts: readonly string[],
 ): string[] {
   const hasConfigDir = mounts.some((m) =>
-    m === "./config:/etc/postgresql:ro" || m.startsWith("./config:/etc/postgresql:")
+    m === "./config:/etc/postgresql:ro" ||
+    m.startsWith("./config:/etc/postgresql:")
   );
   const hasNestedTls = mounts.some((m) =>
     m.startsWith("./tls:/etc/postgresql/tls")
