@@ -284,6 +284,36 @@ test("system component descriptor round-trips and rejects corrupt state", async 
   }
 });
 
+test("readSystemComponentDescriptor migrates legacy bare managed-ingress containerName", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    const serviceId = MANAGED_INGRESS_SERVICE_ID;
+    const systemDir = join(layout.stateDir, "system");
+    await Deno.mkdir(systemDir, { recursive: true });
+    await Deno.writeTextFile(
+      join(systemDir, "managed-ingress.json"),
+      JSON.stringify({
+        component: "managed-ingress",
+        serviceId,
+        composeServiceName: "proxysql",
+        containerName: serviceId,
+        role: "system",
+      }),
+    );
+    const loaded = await readSystemComponentDescriptor(
+      layout,
+      "managed-ingress",
+    );
+    assertEquals(loaded?.containerName, `${serviceId}-sql`);
+    const onDisk = JSON.parse(
+      await Deno.readTextFile(join(systemDir, "managed-ingress.json")),
+    ) as { containerName: string };
+    assertEquals(onDisk.containerName, `${serviceId}-sql`);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("caddyTraefikUpstream http hop uses h2c and PROXY v2", () => {
   const upstream = caddyTraefikUpstream("http");
   assertStringIncludes(upstream, "127.0.0.1:7080");

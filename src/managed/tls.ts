@@ -41,6 +41,25 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
+/**
+ * Unlink then create so re-apply can rewrite files owned by root after
+ * ownership normalization (same pattern as config materialize).
+ * Deno.writeTextFile alone fails with Permission denied on root:engine 0640.
+ */
+async function rewriteTlsFile(
+  path: string,
+  contents: string,
+  mode: number,
+): Promise<void> {
+  try {
+    await Deno.remove(path);
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+  await Deno.writeTextFile(path, contents);
+  await Deno.chmod(path, mode);
+}
+
 async function opensslPresent(): Promise<boolean> {
   try {
     const stat = await Deno.stat(OPENSSL_BIN);
@@ -146,15 +165,9 @@ export async function materializeProxySqlTlsMaterial(
   const privkeyPath = join(targetDir, PRIVKEY_NAME);
   const caPath = join(targetDir, CA_NAME);
 
-  await Deno.writeTextFile(fullchainPath, material.certificatePem, {
-    mode: CERT_MODE,
-  });
-  await Deno.writeTextFile(privkeyPath, privateKeyPem, { mode: KEY_MODE });
-  await Deno.writeTextFile(caPath, material.caCertPem, { mode: CERT_MODE });
-
-  await Deno.chmod(fullchainPath, CERT_MODE);
-  await Deno.chmod(privkeyPath, KEY_MODE);
-  await Deno.chmod(caPath, CERT_MODE);
+  await rewriteTlsFile(fullchainPath, material.certificatePem, CERT_MODE);
+  await rewriteTlsFile(privkeyPath, privateKeyPem, KEY_MODE);
+  await rewriteTlsFile(caPath, material.caCertPem, CERT_MODE);
 }
 
 /**
@@ -185,14 +198,9 @@ export async function materializeManagedProxySqlTlsMaterial(
   const fullchainPath = join(dir, FULLCHAIN_NAME);
   const privkeyPath = join(dir, PRIVKEY_NAME);
   const caPath = join(dir, CA_NAME);
-  await Deno.writeTextFile(fullchainPath, material.certificatePem, {
-    mode: CERT_MODE,
-  });
-  await Deno.writeTextFile(privkeyPath, privateKeyPem, { mode: KEY_MODE });
-  await Deno.writeTextFile(caPath, material.caCertPem, { mode: CERT_MODE });
-  await Deno.chmod(fullchainPath, CERT_MODE);
-  await Deno.chmod(privkeyPath, KEY_MODE);
-  await Deno.chmod(caPath, CERT_MODE);
+  await rewriteTlsFile(fullchainPath, material.certificatePem, CERT_MODE);
+  await rewriteTlsFile(privkeyPath, privateKeyPem, KEY_MODE);
+  await rewriteTlsFile(caPath, material.caCertPem, CERT_MODE);
 
   // Mirror org-CA leaf to engine listener paths (verify-full primary_conninfo
   // + ProxySQL backend SSL).
@@ -201,16 +209,9 @@ export async function materializeManagedProxySqlTlsMaterial(
   const certPath = join(tlsDir, "server.crt");
   const keyPath = join(tlsDir, "server.key");
   const engineCaPath = join(tlsDir, "ca.crt");
-  await Deno.writeTextFile(certPath, material.certificatePem, {
-    mode: CERT_MODE,
-  });
-  await Deno.writeTextFile(keyPath, privateKeyPem, { mode: KEY_MODE });
-  await Deno.writeTextFile(engineCaPath, material.caCertPem, {
-    mode: CERT_MODE,
-  });
-  await Deno.chmod(certPath, CERT_MODE);
-  await Deno.chmod(keyPath, KEY_MODE);
-  await Deno.chmod(engineCaPath, CERT_MODE);
+  await rewriteTlsFile(certPath, material.certificatePem, CERT_MODE);
+  await rewriteTlsFile(keyPath, privateKeyPem, KEY_MODE);
+  await rewriteTlsFile(engineCaPath, material.caCertPem, CERT_MODE);
 }
 
 /**

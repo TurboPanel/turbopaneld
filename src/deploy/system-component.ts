@@ -326,8 +326,22 @@ export async function readSystemComponentDescriptor(
       `corrupt system component descriptor ${component}.json: expected a system component descriptor`,
     );
   }
+
+  // Legacy managed-ingress rows used bare serviceId as containerName before
+  // the `<serviceId>-sql` contract. Rewrite in place so reconcile can proceed
+  // without a manual descriptor edit (compose recreates the ProxySQL name).
+  const legacyBareManagedIngress = parsed.component ===
+      SYSTEM_MANAGED_INGRESS_COMPONENT &&
+    parsed.containerName === parsed.serviceId;
+  const descriptor: SystemComponentDescriptor = legacyBareManagedIngress
+    ? {
+      ...parsed,
+      containerName: managedIngressContainerName(parsed.serviceId),
+    }
+    : parsed;
+
   try {
-    assertSafeSystemIngressIdentity(parsed);
+    assertSafeSystemIngressIdentity(descriptor);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(
@@ -335,5 +349,8 @@ export async function readSystemComponentDescriptor(
       { cause: err },
     );
   }
-  return parsed;
+  if (legacyBareManagedIngress) {
+    await writeSystemComponentDescriptor(layout, descriptor);
+  }
+  return descriptor;
 }

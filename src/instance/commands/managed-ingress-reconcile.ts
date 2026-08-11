@@ -236,24 +236,30 @@ export async function handleManagedIngressReconcile(
   const previousComposeText = await readPreviousConfig(composePath);
   // ProxySQL's internal `interfaces=` line is now a fixed constant (see
   // `CONTAINER_LISTEN_ADDRESS` in proxysql.ts), so a bindAddress-only change
-  // (public <-> private, or a different published address) no longer shows
-  // up in `staticConfigSectionChanged` — it only ever changes the compose
-  // `ports:` publish. Detect that independently so toggling exposure still
-  // triggers `compose up` and actually applies/removes the host publish.
+  // (public <-> private, or a different published address) only changes the
+  // compose `ports:` publish — caught by full nextComposeText comparison
+  // below (along with container_name renames).
   const previousBindAddress = previousComposeText === null
     ? null
     : readPublishedBindAddressFromCompose(previousComposeText);
-  const restartNeeded = previousComposeText === null ||
-    staticConfigSectionChanged(previousConfig, nextConfig) ||
-    previousBindAddress !== bindAddress;
 
   await writeProxySqlConfigAtomic(configPath, nextConfig);
+
+  // Compose identity (container_name / publish bind) and static cnf changes
+  // need compose up. Comparing rendered compose catches legacy bare
+  // containerName → `<serviceId>-sql` renames that static cnf never sees.
+  const nextComposeText = proxysqlCompose(descriptor, bindAddress);
+  const composeNeedsUp = previousComposeText === null ||
+    previousComposeText.trimEnd() !== nextComposeText.trimEnd();
+  const restartNeeded = composeNeedsUp ||
+    staticConfigSectionChanged(previousConfig, nextConfig) ||
+    previousBindAddress !== bindAddress;
 
   if (restartNeeded) {
     await ensureProxySqlComposeUp(
       layout,
       composePath,
-      proxysqlCompose(descriptor, bindAddress),
+      nextComposeText,
       run,
     );
   }

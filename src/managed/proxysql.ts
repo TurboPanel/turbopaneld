@@ -433,30 +433,20 @@ function renderQueryRuleRows(
   return rows;
 }
 
+/**
+ * Dynamic tables only for one protocol family.
+ *
+ * Static listeners / TLS / monitor_* already come from
+ * {@link renderProxySqlStaticConfig}. Re-emitting `${family}_variables` here
+ * produced a second block on disk that overwrote monitor credentials on
+ * cold start (ProxySQL defaults → user `monitor`) and left engines spamming
+ * `Role "monitor" does not exist` / non-SSL rejects.
+ */
 function renderProtocolFamilySection(
   family: "mysql" | "pgsql",
   clusters: readonly ProxySqlClusterDesired[],
 ): string[] {
-  const ifacePort = family === "mysql" ? MYSQL_PORT : PGSQL_PORT;
-  const lines = [
-    `${family}_variables=`,
-    "{",
-    // ProxySQL's own listen socket always binds every interface *inside its
-    // own container network namespace* — independent of whether
-    // `proxysqlCompose` publishes that port to the host at all. A host/public
-    // IP is not a local interface inside the container, so binding to one
-    // here would both fail to start and make the listener unreachable from
-    // sibling containers on `MANAGED_INGRESS_NETWORK` even when it did bind.
-    // Host-level exposure is controlled exclusively by the compose `ports:`
-    // publish (see `ProxySqlDesiredState.bindAddress` / `proxysqlCompose`).
-    `    interfaces="${CONTAINER_LISTEN_ADDRESS}:${ifacePort}"`,
-    "    have_ssl=1",
-    `    ssl_p2s_cert="${TLS_FULLCHAIN_PATH}"`,
-    `    ssl_p2s_key="${TLS_PRIVKEY_PATH}"`,
-    `    ssl_p2s_ca="${TLS_CA_PATH}"`,
-    "}",
-    "",
-  ];
+  const lines: string[] = [];
 
   const serverRows = renderServerRows(family, clusters);
   lines.push(`${family}_servers =`, "(", ...serverRows, ")", "");

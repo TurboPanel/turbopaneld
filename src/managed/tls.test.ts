@@ -6,6 +6,7 @@ import { assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import {
   ensureManagedSelfSignedCert,
+  materializeManagedProxySqlTlsMaterial,
   materializeProxySqlTlsMaterial,
 } from "./tls.ts";
 
@@ -125,6 +126,45 @@ test("materializeProxySqlTlsMaterial decrypts and writes PEMs with modes", async
       await Deno.readTextFile(fullchain),
       "-----BEGIN CERTIFICATE-----\nLEAF2\n-----END CERTIFICATE-----\n",
     );
+  });
+});
+
+test("materializeManagedProxySqlTlsMaterial rewrites engine leaf after chmod read-only", async () => {
+  await withTempDir(async (managedDir) => {
+    const privatePem =
+      "-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----\n";
+    const material = {
+      certificatePem:
+        "-----BEGIN CERTIFICATE-----\nLEAF\n-----END CERTIFICATE-----\n",
+      privateKeyEnvelope: "denc.server.KEYID.ciphertext",
+      caCertPem:
+        "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n",
+    };
+    const decrypt = () => Promise.resolve([privatePem]);
+
+    await materializeManagedProxySqlTlsMaterial(managedDir, material, decrypt);
+
+    const certPath = join(managedDir, "tls/server.crt");
+    // After normalize, engine PEMs are root:<group> 0640 — daemon cannot
+    // open for write. Simulate by making the file unwritable (parent remains
+    // writable so unlink-then-create still works).
+    await Deno.chmod(certPath, 0o440);
+
+    await materializeManagedProxySqlTlsMaterial(
+      managedDir,
+      {
+        ...material,
+        certificatePem:
+          "-----BEGIN CERTIFICATE-----\nLEAF2\n-----END CERTIFICATE-----\n",
+      },
+      decrypt,
+    );
+
+    assertEquals(
+      await Deno.readTextFile(certPath),
+      "-----BEGIN CERTIFICATE-----\nLEAF2\n-----END CERTIFICATE-----\n",
+    );
+    assertEquals(await fileMode(certPath), 0o640);
   });
 });
 

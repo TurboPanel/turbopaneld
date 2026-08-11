@@ -78,26 +78,27 @@ export function dropRoleSql(username: string): string {
   return `DROP ROLE IF EXISTS ${ident};`;
 }
 
+/**
+ * CREATE DATABASE must not run inside a DO/function block (Postgres error
+ * "CREATE DATABASE cannot be executed from a function"). Callers check
+ * existence first via {@link databaseExistsSql}, then run this top-level.
+ */
 export function createDatabaseSql(
   name: string,
   owner?: string,
 ): string {
-  // Re-validate via quote helpers; format(%I) keeps EXECUTE injection-safe.
-  quoteIdentifier(name);
-  if (owner !== undefined) quoteIdentifier(owner);
-  const dbLit = quoteLiteral(name);
-  const createExpr = owner === undefined
-    ? `format('CREATE DATABASE %I', ${dbLit})`
-    : `format('CREATE DATABASE %I OWNER %I', ${dbLit}, ${quoteLiteral(owner)})`;
-  return [
-    `DO $turbopanel$`,
-    `BEGIN`,
-    `  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_database WHERE datname = ${dbLit}) THEN`,
-    `    EXECUTE ${createExpr};`,
-    `  END IF;`,
-    `END`,
-    `$turbopanel$;`,
-  ].join("\n");
+  const ident = quoteIdentifier(name);
+  if (owner === undefined) {
+    return `CREATE DATABASE ${ident};`;
+  }
+  return `CREATE DATABASE ${ident} OWNER ${quoteIdentifier(owner)};`;
+}
+
+/** Existence probe (tuples-only friendly) for the apply path. */
+export function databaseExistsSql(name: string): string {
+  return `SELECT 1 FROM pg_catalog.pg_database WHERE datname = ${
+    quoteLiteral(name)
+  };`;
 }
 
 export function dropDatabaseSql(name: string): string {

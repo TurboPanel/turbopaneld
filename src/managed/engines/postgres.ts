@@ -14,6 +14,7 @@ import {
   createOrAlterRoleSql,
   createPhysicalSlotSql,
   createReplicationRoleSql,
+  databaseExistsSql,
   dropDatabaseSql,
   dropPhysicalSlotSql,
   dropRoleSql,
@@ -465,7 +466,11 @@ export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
     const applied: string[] = [];
     for (const op of ops) {
       if (op.action === "create") {
-        await runPsql(ctx, createDatabaseSql(op.name));
+        // CREATE DATABASE cannot run inside PL/pgSQL; check then create.
+        const existing = await parsePsqlRows(ctx, databaseExistsSql(op.name));
+        if (existing.length === 0) {
+          await runPsql(ctx, createDatabaseSql(op.name));
+        }
       } else {
         await runPsql(ctx, dropDatabaseSql(op.name));
       }

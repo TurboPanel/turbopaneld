@@ -4,6 +4,7 @@ import {
   createOrAlterRoleSql,
   createPhysicalSlotSql,
   createReplicationRoleSql,
+  databaseExistsSql,
   dropDatabaseSql,
   dropPhysicalSlotSql,
   dropRoleSql,
@@ -59,9 +60,14 @@ test("ensureProxySqlMonitorRoleSql grants pg_monitor without superuser", () => {
 });
 
 test("createDatabaseSql and dropDatabaseSql", () => {
+  // Top-level only — CREATE DATABASE is illegal inside DO/function blocks.
   const create = createDatabaseSql("appdb", "app");
-  assertEquals(create.includes("pg_catalog.pg_database"), true);
-  assertEquals(create.includes("format('CREATE DATABASE %I OWNER %I'"), true);
+  assertEquals(create.includes("DO $"), false);
+  assertEquals(create.includes('CREATE DATABASE "appdb" OWNER "app"'), true);
+  assertEquals(
+    databaseExistsSql("appdb").includes("pg_catalog.pg_database"),
+    true,
+  );
   const drop = dropDatabaseSql("appdb");
   assertEquals(drop.includes('DROP DATABASE IF EXISTS "appdb"'), true);
   assertEquals(dropRoleSql("app").includes('DROP ROLE IF EXISTS "app"'), true);

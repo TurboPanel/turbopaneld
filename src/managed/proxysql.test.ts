@@ -277,6 +277,17 @@ test("renderProxySqlConfig embeds monitor credentials in mysql and pgsql variabl
   assertStringIncludes(cnf, 'monitor_username="tp_monitor"');
   assertStringIncludes(cnf, 'monitor_password="mon-s3cret"');
   assertStringIncludes(cnf, 'monitor_dbname="postgres"');
+  // Dynamic section must not re-emit pgsql_variables (wipes monitor on load).
+  assertEquals(
+    cnf.split("pgsql_variables=").length - 1,
+    1,
+    "exactly one pgsql_variables block (static only)",
+  );
+  assertEquals(
+    cnf.split("mysql_variables=").length - 1,
+    1,
+    "exactly one mysql_variables block (static only)",
+  );
 });
 
 test("buildProxySqlAdminStatements sets monitor variables when provided", () => {
