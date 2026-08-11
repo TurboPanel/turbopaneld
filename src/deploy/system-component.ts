@@ -62,13 +62,13 @@ export type SystemComponentSelfHeal =
 
 /**
  * Per-component contract: which compose project/service it lives in, its
- * container role (`service` / `ingress` / `system`), and the self-heal
+ * container role (`service` / `ingress` / `turbopanel`), and the self-heal
  * strategy used by `system.reconcile`.
  */
 export type SystemComponentContract = {
   project: string;
   composeServiceName: string;
-  role: "service" | "ingress" | "system";
+  role: "service" | "ingress" | "turbopanel";
   selfHeal: SystemComponentSelfHeal;
 };
 
@@ -85,25 +85,25 @@ export const SYSTEM_COMPONENT_CONTRACTS: Record<
   [SYSTEM_MANAGED_INGRESS_COMPONENT]: {
     project: PROXYSQL_PROJECT,
     composeServiceName: PROXYSQL_COMPOSE_SERVICE_NAME,
-    role: "system",
+    role: "turbopanel",
     selfHeal: "proxysql",
   },
   database: {
     project: SYSTEM_STACK_PROJECT,
     composeServiceName: "database",
-    role: "system",
+    role: "turbopanel",
     selfHeal: "none",
   },
   queue: {
     project: SYSTEM_STACK_PROJECT,
     composeServiceName: "queue",
-    role: "system",
+    role: "turbopanel",
     selfHeal: "none",
   },
   analytics: {
     project: SYSTEM_STACK_PROJECT,
     composeServiceName: "analytics",
-    role: "system",
+    role: "turbopanel",
     selfHeal: "none",
   },
 };
@@ -163,7 +163,7 @@ export type SystemComponentDescriptor = {
   serviceId: string;
   composeServiceName: string;
   containerName: string;
-  role: "service" | "ingress" | "system";
+  role: "service" | "ingress" | "turbopanel";
 };
 
 export function systemComponentDescriptorPath(
@@ -252,7 +252,7 @@ export function isValidSystemComponentDescriptor(
   if (
     record.role !== "service" &&
     record.role !== "ingress" &&
-    record.role !== "system"
+    record.role !== "turbopanel"
   ) {
     return false;
   }

@@ -824,7 +824,7 @@ export async function inspectProxySqlContainer(
     }
 
     for (const entry of parseComposePsEntries(result.stdout)) {
-      const row = readComposePsContainer(entry, "system");
+      const row = readComposePsContainer(entry, "turbopanel");
       if (row === null) continue;
       if (row.composeServiceName !== descriptor.composeServiceName) continue;
       if (row.containerName !== descriptor.containerName) continue;
@@ -832,7 +832,7 @@ export async function inspectProxySqlContainer(
       return {
         ...row,
         serviceId: descriptor.serviceId,
-        role: "system",
+        role: "turbopanel",
       };
     }
     return null;

@@ -310,7 +310,7 @@ export type EnvironmentDeployContainer = {
    * Workload / ingress / platform role — required on the wire.
    * Must be `"service"`, `"ingress"`, or `"system"`.
    */
-  role: "service" | "ingress" | "system";
+  role: "service" | "ingress" | "turbopanel";
 };
 
 export type EnvironmentDeployResult = {
@@ -381,13 +381,13 @@ export type SystemReconcileAction = "reconcile" | "restart" | "stop";
  */
 export const SYSTEM_COMPONENT_ROLES: Record<
   SystemComponentKey,
-  "service" | "ingress" | "system"
+  "service" | "ingress" | "turbopanel"
 > = {
   "hosting-ingress": "ingress",
-  "managed-ingress": "system",
-  database: "system",
-  queue: "system",
-  analytics: "system",
+  "managed-ingress": "turbopanel",
+  database: "turbopanel",
+  queue: "turbopanel",
+  analytics: "turbopanel",
 };
 
 /**
@@ -399,7 +399,7 @@ export type SystemComponentDescriptorPayload = {
   serviceId: string;
   composeServiceName: string;
   containerName: string;
-  role: "service" | "ingress" | "system";
+  role: "service" | "ingress" | "turbopanel";
   desired: "present" | "absent";
 };
 
@@ -1921,7 +1921,7 @@ function parseSystemReconcileComponent(
     serviceId,
     composeServiceName,
     containerName,
-    role: role as "service" | "ingress" | "system",
+    role: role as "service" | "ingress" | "turbopanel",
     desired: desired as "present" | "absent",
   };
 }
@@ -3209,7 +3209,7 @@ function parseDeployContainerEntry(
   if (
     entry.role !== "service" &&
     entry.role !== "ingress" &&
-    entry.role !== "system"
+    entry.role !== "turbopanel"
   ) {
     return undefined;
   }

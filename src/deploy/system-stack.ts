@@ -6,7 +6,7 @@
  * deploys, starts, or restarts this stack — it is Ansible/Ops-managed. This
  * module only observes already-running containers so `system.reconcile` can
  * report status alongside the persisted identity descriptor. Adoption requires
- * `turbopanel.role=system` on the compose-ps row.
+ * `turbopanel.role=turbopanel` on the compose-ps row.
  */
 
 import { join } from "@std/path";
@@ -51,7 +51,7 @@ export type InspectSystemStackDeps = {
 
 /**
  * True when the compose-ps row carries the allowlisted platform labels for
- * this system component (`turbopanel.role=system`,
+ * this system component (`turbopanel.role=turbopanel`,
  * `com.turbopanel.system.component=<component>`). Unlabelled / legacy rows
  * fail — the daemon never adopts a system container by name heuristic alone.
  */
@@ -129,14 +129,14 @@ export async function inspectSystemStackContainer(
     }
     const entries = parseComposePsEntries(result.stdout);
     for (const entry of entries) {
-      const row = readComposePsContainer(entry, "system");
+      const row = readComposePsContainer(entry, "turbopanel");
       if (row === null) continue;
       if (row.composeServiceName !== descriptor.composeServiceName) continue;
       if (!hasSystemStackLabels(entry, descriptor.component)) continue;
       return {
         ...row,
         serviceId: descriptor.serviceId,
-        role: "system",
+        role: "turbopanel",
       };
     }
     return null;

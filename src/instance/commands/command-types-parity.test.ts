@@ -519,7 +519,7 @@ test("system.reconcile payload parser accepts database/queue/analytics with syst
             serviceId,
             composeServiceName: component,
             containerName: serviceId,
-            role: "system",
+            role: "turbopanel",
             desired: "present",
           },
         ],
@@ -529,7 +529,7 @@ test("system.reconcile payload parser accepts database/queue/analytics with syst
         serviceId,
         composeServiceName: component,
         containerName: serviceId,
-        role: "system",
+        role: "turbopanel",
         desired: "present",
       },
     );
@@ -547,7 +547,7 @@ test("system.reconcile payload parser accepts managed-ingress with system role a
           serviceId,
           composeServiceName: "proxysql",
           containerName: `${serviceId}-sql`,
-          role: "system",
+          role: "turbopanel",
           desired: "present",
         },
       ],
@@ -557,7 +557,7 @@ test("system.reconcile payload parser accepts managed-ingress with system role a
       serviceId,
       composeServiceName: "proxysql",
       containerName: `${serviceId}-sql`,
-      role: "system",
+      role: "turbopanel",
       desired: "present",
     },
   );
@@ -584,7 +584,7 @@ test("system.reconcile payload parser rejects role/containerName mismatches acro
     TypeError,
     "Invalid system.reconcile payload",
   );
-  // database must be role: "system" — declaring "ingress" is rejected.
+  // database must be role: "turbopanel" — declaring "ingress" is rejected.
   assertThrows(
     () =>
       parseSystemReconcilePayload({
@@ -603,7 +603,7 @@ test("system.reconcile payload parser rejects role/containerName mismatches acro
     TypeError,
     "Invalid system.reconcile payload",
   );
-  // database with role: "system" but an ingress-shaped containerName is rejected.
+  // database with role: "turbopanel" but an ingress-shaped containerName is rejected.
   assertThrows(
     () =>
       parseSystemReconcilePayload({
@@ -614,7 +614,7 @@ test("system.reconcile payload parser rejects role/containerName mismatches acro
             serviceId,
             composeServiceName: "database",
             containerName: `${serviceId}-in`,
-            role: "system",
+            role: "turbopanel",
             desired: "present",
           },
         ],
@@ -633,7 +633,7 @@ test("system.reconcile payload parser rejects role/containerName mismatches acro
             serviceId,
             composeServiceName: "proxysql",
             containerName: serviceId,
-            role: "system",
+            role: "turbopanel",
             desired: "present",
           },
         ],
@@ -652,7 +652,7 @@ test("system.reconcile payload parser rejects role/containerName mismatches acro
             serviceId,
             composeServiceName: "proxysql",
             containerName: `${serviceId}-in`,
-            role: "system",
+            role: "turbopanel",
             desired: "present",
           },
         ],

@@ -39,7 +39,7 @@ const DESCRIPTOR: SystemComponentDescriptor = {
   serviceId: "00000000-0000-4000-8000-0000000000aa",
   composeServiceName: "proxysql",
   containerName: "00000000-0000-4000-8000-0000000000aa-sql",
-  role: "system",
+  role: "turbopanel",
 };
 
 function clusterDesired(
@@ -84,7 +84,7 @@ test("proxysqlCompose with descriptor emits identity + system labels", () => {
     compose,
     'com.turbopanel.system.component: "managed-ingress"',
   );
-  assertStringIncludes(compose, "turbopanel.role: system");
+  assertStringIncludes(compose, "turbopanel.role: turbopanel");
 });
 
 test("formatProxySqlBindHost brackets IPv6 and validates bind", () => {

@@ -77,7 +77,7 @@ const MANAGED_INGRESS_IDENTITY = {
   serviceId: MANAGED_INGRESS_SERVICE_ID,
   composeServiceName: PROXYSQL_COMPOSE_SERVICE_NAME,
   containerName: `${MANAGED_INGRESS_SERVICE_ID}-sql`,
-  role: "system",
+  role: "turbopanel",
 } as const;
 
 test("traefikCompose publishes loopback ports with proxy protocol and TLS", () => {
@@ -297,7 +297,7 @@ test("readSystemComponentDescriptor migrates legacy bare managed-ingress contain
         serviceId,
         composeServiceName: "proxysql",
         containerName: serviceId,
-        role: "system",
+        role: "turbopanel",
       }),
     );
     const loaded = await readSystemComponentDescriptor(

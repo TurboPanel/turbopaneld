@@ -318,7 +318,7 @@ same play and:
 
 **Labels:** every service in the Compose file carries **only**
 `com.turbopanel.system.component: <database|queue|analytics>` and
-`turbopanel.role: system` — never `com.turbopanel.service`, `traefik.enable`, or
+`turbopanel.role: turbopanel` — never `com.turbopanel.service`, `traefik.enable`, or
 `com.turbopanel.raw-port` (those identify *tenant* deploy containers; see
 `../src/deploy/system-component.ts` / `../src/deploy/labels.ts`).
 

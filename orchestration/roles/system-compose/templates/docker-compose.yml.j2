@@ -8,7 +8,7 @@
 # Analytics Engine replace them — see ../../instance/AGENTS.md).
 #
 # Labels intentionally carry ONLY `com.turbopanel.system.component` +
-# `turbopanel.role: system` — never `com.turbopanel.service`, `traefik.enable`,
+# `turbopanel.role: turbopanel` — never `com.turbopanel.service`, `traefik.enable`,
 # or `com.turbopanel.raw-port` (those identify *tenant* deploy containers; see
 # ../../../src/deploy/system-component.ts and ../../../src/deploy/labels.ts).
 name: {{ system_compose_project_name }}
@@ -35,7 +35,7 @@ services:
 {% endif %}
     labels:
       com.turbopanel.system.component: database
-      turbopanel.role: system
+      turbopanel.role: turbopanel
 {% endif %}
 {% if _system_compose_queue_active %}
   queue:
@@ -59,7 +59,7 @@ services:
 {% endif %}
     labels:
       com.turbopanel.system.component: queue
-      turbopanel.role: system
+      turbopanel.role: turbopanel
 {% endif %}
 {% if _system_compose_analytics_active %}
   analytics:
@@ -84,7 +84,7 @@ services:
       - "127.0.0.1:{{ clickhouse_http_port }}:8123"
     labels:
       com.turbopanel.system.component: analytics
-      turbopanel.role: system
+      turbopanel.role: turbopanel
 {% endif %}
 
 networks:

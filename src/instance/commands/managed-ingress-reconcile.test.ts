@@ -82,7 +82,7 @@ async function seedFixture(fixture: TempLayoutFixture): Promise<void> {
     serviceId: PROXYSQL_SERVICE_ID,
     composeServiceName: "proxysql",
     containerName: `${PROXYSQL_SERVICE_ID}-sql`,
-    role: "system",
+    role: "turbopanel",
   });
   await Deno.mkdir(proxysqlConfigDir(layout), { recursive: true });
   await Deno.writeTextFile(

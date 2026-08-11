@@ -54,7 +54,7 @@ function databaseComponent(
     serviceId: DATABASE_SERVICE_ID,
     composeServiceName: "database",
     containerName: DATABASE_SERVICE_ID,
-    role: "system",
+    role: "turbopanel",
     desired,
   };
 }
@@ -488,7 +488,7 @@ test({
                 containerId: "db-cid-1",
                 containerName: descriptor.containerName,
                 status: "running",
-                role: "system",
+                role: "turbopanel",
               });
             },
           },
@@ -499,14 +499,14 @@ test({
         assertEquals(inspectSystemStackCalls, 1);
         assertEquals(result.containers?.length, 1);
         assertEquals(result.containers?.[0]?.containerId, "db-cid-1");
-        assertEquals(result.containers?.[0]?.role, "system");
+        assertEquals(result.containers?.[0]?.role, "turbopanel");
 
         const descriptor = await readSystemComponentDescriptor(
           resolveLayout(Deno.env.toObject()),
           "database",
         );
         assertEquals(descriptor?.serviceId, DATABASE_SERVICE_ID);
-        assertEquals(descriptor?.role, "system");
+        assertEquals(descriptor?.role, "turbopanel");
       });
     });
   },
@@ -589,7 +589,7 @@ function proxysqlPayload(): {
         serviceId: PROXYSQL_SERVICE_ID,
         composeServiceName: "proxysql",
         containerName: `${PROXYSQL_SERVICE_ID}-sql`,
-        role: "system",
+        role: "turbopanel",
         desired: "present",
       },
     ],
@@ -651,7 +651,7 @@ test({
           serviceId: PROXYSQL_SERVICE_ID,
           composeServiceName: "proxysql",
           containerName: `${PROXYSQL_SERVICE_ID}-sql`,
-          role: "system",
+          role: "turbopanel",
         };
 
         // Simulate a prior `managed.ingress.reconcile` that explicitly

@@ -47,7 +47,7 @@ export function parseComposePsEntries(
  */
 export function readComposePsContainer(
   entry: Record<string, unknown>,
-  role: "service" | "ingress" | "system",
+  role: "service" | "ingress" | "turbopanel",
 ): EnvironmentDeployContainer | null {
   const containerId = entry.ID;
   const containerName = entry.Name;

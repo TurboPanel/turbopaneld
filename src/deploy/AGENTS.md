@@ -238,7 +238,7 @@ Traefik and from managed-engine ProxySQL:
 
 Adoption for hosting-ingress and system-stack rows requires the documented
 labels (`turbopanel.role`, `com.turbopanel.system.component`, …) — see below.
-ProxySQL uses `role: system` + `com.turbopanel.system.component=managed-ingress`
+ProxySQL uses `role: turbopanel` + `com.turbopanel.system.component=managed-ingress`
 when identity is stamped.
 
 Descriptor path: `<stateDir>/system/hosting-ingress.json`
@@ -287,7 +287,7 @@ Host dirs and the `turbopanel-proxysql-stack` unit are Ansible-owned
 `inspectSystemStackContainer` (`src/deploy/system-stack.ts`) reports
 `docker compose ps` identity/status (`selfHealAllowed: false` for
 `database` / `queue` / `analytics`). Adoption requires labels
-`turbopanel.role=system` + `com.turbopanel.system.component=<database|queue|analytics>`
+`turbopanel.role=turbopanel` + `com.turbopanel.system.component=<database|queue|analytics>`
 — **never** `com.turbopanel.service` (tenant/system Traefik identity) and
 **never** `traefik.enable`. A missing `turbopanel-system` compose file is
 authoritative absence (`null`).
