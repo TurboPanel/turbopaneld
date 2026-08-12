@@ -293,17 +293,14 @@ Sonar-way **80% new-code** floor.
 `new TypeError()` for shape assertions — both under TypeScript style
 (SonarQube) above; do not restate them here.
 
-**Pre-commit** (`.githooks/pre-commit`): `scripts/scan-secrets.sh` first (never
-skippable), then `deno task fmt:check`, `deno task lint`, and a host-free test
-subset (`deno test -A src/instance/ src/metrics/collector/ src/testing/`). Warm
-`deno task test` measured ≈**11s** (three runs: 12.1 / 10.5 / 11.1) — over the
-~5s hook budget, so the full suite stays in `verify.yml`. Set
-`TURBOPANEL_SKIP_HOOK_TESTS` (any non-empty value) to skip fmt/lint/tests after
-the secret scan; the hook also exits 0 with a notice when neither host nor
-vendored Deno is executable. The dev console’s daemon install
-(`cloneOrUpdateRepo` in `../dev/src/lib/platform-install.ts`) sets
-`core.hooksPath=.githooks` after a successful clone or update when
-`.githooks/pre-commit` exists. Production `scripts/run.sh` never wires hooks.
+**Pre-commit** (`.githooks/pre-commit`): `scripts/scan-secrets.sh` only (never
+skippable). Fmt/lint/tests are **temporarily disabled** in the hook until the
+toolchain can run inside the Vagrant guest (host VirtFS checkouts often lack a
+usable Deno tree). CI `verify.yml` still owns fmt/lint and the full suite. The
+dev console’s daemon install (`cloneOrUpdateRepo` in
+`../dev/src/lib/platform-install.ts`) sets `core.hooksPath=.githooks` after a
+successful clone or update when `.githooks/pre-commit` exists. Production
+`scripts/run.sh` never wires hooks.
 
 **Shared test helpers:** new tests must consume the helpers in `src/testing/`
 (`fake-websocket.ts`, `fake-clock.ts`, `temp-layout.ts`, `fake-instance-api.ts`,
@@ -315,7 +312,7 @@ from production code.
 
 | Stage | dev | daemon | Rationale |
 | ----- | --- | ------ | --------- |
-| pre-commit | scan-secrets → `pnpm typecheck` → `pnpm test` | scan-secrets → `fmt:check` → `lint` → tests | fast local feedback |
+| pre-commit | scan-secrets only (tests deferred) | scan-secrets only (tests deferred) | secret scan on commit; suites in CI / guest |
 | PR → `trunk` | `verify.yml` | `verify.yml` | blocks merge |
 | push `trunk` | `verify.yml` | `verify.yml`; `publish` job `needs: verify` | nothing compiles from failing code |
 | promote → canary/rc/release | n/a | **artifact integrity only** (S3 sha256/size + CDN fetch) | no new code enters after publish |
