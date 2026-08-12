@@ -33,6 +33,14 @@ handlers/templates, env vars, and internal identifiers (`redis_*`, `rabbitmq_*`,
 cache/queue roles use neutral wording where practical so labels read cleanly
 even outside the sanitizer.
 
+**Apple Silicon VM note:** `runtimeEnv()` sets `OPENSSL_armcap=0` so ansible's
+cryptography wheel does not SIGILL when the hypervisor advertises SVE2 without
+implementing it (UTM/Parallels). See root `AGENTS.md`.
+
+**Debian dash:** `ansibleEnv()` sets `ANSIBLE_EXECUTABLE=/bin/bash` because
+Debian `/bin/sh` is dash and rejects `set -o pipefail` in role `shell:`
+snippets. See root `AGENTS.md`.
+
 **Logs:** when the presenter is **inactive** (normal daemon converge /
 `daemon.log`), structured logs keep full vendor detail. When the presenter is
 **active**, stdout/stderr show the scrubbed rolling view; `daemon.log` is not

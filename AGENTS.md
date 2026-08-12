@@ -147,8 +147,9 @@ appears.
 **Ansible home (no root pollution):** `ansibleEnv()` /
 `devOrchestrationAnsibleEnv()` set `ANSIBLE_HOME` to `/tmp/turbopanel-ansible`
 (alongside `ANSIBLE_LOCAL_TEMP` under `vendor/uv/cache/ansible-tmp`). Galaxy
-download cache is disposable scratch — installed roles/collections live under
-FHS (`share/orchestration/roles`, `vendor/ansible/galaxy-collections`). Managed
+download cache is disposable scratch — first-party roles live under FHS
+`share/orchestration/roles`; Galaxy collections/roles live under
+`vendor/ansible/galaxy-collections` and `vendor/ansible/galaxy-roles`. Managed
 `run.sh` + `daemon-install.yml` remove `/tmp/turbopanel-ansible` and any
 accidental `/root/.ansible` after install. Runtime orchestration runs as
 `tp` (dev: the current dev user).
@@ -165,17 +166,37 @@ accidental `/root/.ansible` after install. Runtime orchestration runs as
 postgres|rabbitmq|clickhouse setup), so fresh daemon installs and pre-Docker
 hosts skip that download. First-party
 roles (e.g. `docker`, which wraps Galaxy via `include_role`) stay in git;
-Galaxy install trees (`geerlingguy.docker/`, …) are gitignored. Do not vend
-them into the repo — Sonar would scan third-party `mode: 0644`/`0755` as false
-vulnerabilities, and release hosts reinstall collections at bootstrap and the
-Docker role on first Docker use. Keep that tree out of ansible-lint / the
-Ansible IDE extension: `exclude_paths` in repo-root + `orchestration/.ansible-lint`,
-`files.exclude` in `.vscode` / `dev.code-workspace`, and after Galaxy install
+Galaxy install trees land under `vendor/ansible/galaxy-roles/` (never the
+checkout `orchestration/roles/` tree — that path is a Vagrant VirtFS mount and
+is not guest-writable). Do not vend them into the repo — Sonar would scan
+third-party `mode: 0644`/`0755` as false vulnerabilities, and release hosts
+reinstall collections at bootstrap and the Docker role on first Docker use.
+Keep leftover checkout copies out of ansible-lint / the Ansible IDE extension:
+`exclude_paths` in repo-root + `orchestration/.ansible-lint`, `files.exclude`
+in `.vscode` / `dev.code-workspace`, and after Galaxy install
 `ensureGalaxyDockerRole` rewrites each present layout's nested `.ansible-lint`
 (`geerlingguy.docker/` and `geerlingguy/docker/`) with a near-total
 `skip_list` (and removes upstream `.yamllint`) so opening files under the role
 — including `tasks/docker-*.yml` — is quiet. Path exclusions only apply to
 discovery, not explicitly opened files.
+
+**Apple Silicon VMs (UTM / Parallels) + ansible cryptography:** hypervisors often
+advertise SVE2 in the guest without implementing it. cryptography 47+ ships
+OpenSSL that probes those features at import and **SIGILL**s (`ansible-playbook
+--version` exits 132). Orchestration `runtimeEnv()` and shell
+`scripts/lib/runtime-paths.sh` always set `OPENSSL_armcap=0` so OpenSSL skips
+ARM CPU probing (harmless on real aarch64 and x86_64). The Vagrant guest profile
+exports the same for interactive shells. Shell wrappers that invoke ansible under
+`sudo` must source `runtime-paths.sh` (or export the var explicitly) because
+`sudo` resets the user environment.
+
+**Debian `/bin/sh` is dash:** `ansible.builtin.shell` defaults to `/bin/sh`.
+Dash rejects `set -o pipefail` (`set: Illegal option -o pipefail`), which is
+how cache/Deno/Caddy/… install snippets start — the task then fails with
+“non-zero return code” before curl/dpkg run. Runtime `ansible.cfg` sets
+`executable = /bin/bash`, and `ansibleEnv()` / `devOrchestrationAnsibleEnv()`
+export `ANSIBLE_EXECUTABLE=/bin/bash`. Keep those in step; do not drop
+`pipefail` from bash snippets that actually pipe (password generators).
 
 **`instance-dev-install --if-needed`:** `scripts/run-orchestration-action.ts`
 accepts an `--if-needed` flag on `instance-dev-install`. When set, it calls

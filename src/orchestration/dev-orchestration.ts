@@ -1,6 +1,12 @@
 import { join } from "@std/path";
 import { readEnv, resolveDevRoot } from "../paths/layout.ts";
-import { ANSIBLE_HOME, ANSIBLE_LOCAL_TMP, GALAXY_ROLES_DIR } from "./paths.ts";
+import {
+  ANSIBLE_HOME,
+  ANSIBLE_LOCAL_TMP,
+  ANSIBLE_SHELL_EXECUTABLE,
+  GALAXY_ROLES_DIR,
+  GALAXY_VENDOR_ROLES_DIR,
+} from "./paths.ts";
 
 /** Dev overlay playbook + roles live under `<dev checkout>/orchestration`. */
 export const DEV_ORCHESTRATION_SUBDIR = join("dev", "orchestration");
@@ -144,18 +150,22 @@ export function resolveDevConvergeRoleDir(
  * production roles: Ansible resolves each role name left-to-right, so a dev
  * overlay role (`instance-dev-prereqs`, `dev-shell-path`, `dev-permissions`, `dev-host-access`)
  * wins, and every other role in the manifest falls through to the daemon home
- * checkout's `orchestration/roles`. This overrides the relative `roles_path` in
- * the dev overlay `ansible.cfg`. Keep the ordering in step with the manifest's
- * `devRoles`/`roles` split and {@link resolveDevConvergeRoleDir}.
+ * checkout's `orchestration/roles`. Galaxy roles (`geerlingguy.docker`) live
+ * under {@link GALAXY_VENDOR_ROLES_DIR} (vendor, not the VirtFS checkout).
+ * This overrides the relative `roles_path` in the dev overlay `ansible.cfg`.
+ * Keep the ordering in step with the manifest's `devRoles`/`roles` split and
+ * {@link resolveDevConvergeRoleDir}.
  */
 export function devOrchestrationAnsibleEnv(
   layout: DevOrchestrationLayout,
 ): Record<string, string> {
   return {
     ANSIBLE_CONFIG: layout.ansibleCfgPath,
+    ANSIBLE_EXECUTABLE: ANSIBLE_SHELL_EXECUTABLE,
     ANSIBLE_HOME,
     ANSIBLE_LOCAL_TEMP: ANSIBLE_LOCAL_TMP,
-    ANSIBLE_ROLES_PATH: `${layout.devRolesDir}:${layout.daemonRolesDir}`,
+    ANSIBLE_ROLES_PATH:
+      `${layout.devRolesDir}:${layout.daemonRolesDir}:${GALAXY_VENDOR_ROLES_DIR}`,
   };
 }
 

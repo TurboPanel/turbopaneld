@@ -4,7 +4,7 @@ import {
   GALAXY_COLLECTIONS_DIR,
   GALAXY_DOCKER_REQUIREMENTS_FILE,
   GALAXY_REQUIREMENTS_FILE,
-  GALAXY_ROLES_DIR,
+  GALAXY_VENDOR_ROLES_DIR,
   PYTHON_VERSION,
   REQUIREMENTS_FILE,
   RUNTIMES_DIR,
@@ -98,5 +98,5 @@ export async function writeGalaxyDockerStamp(stamp: string): Promise<void> {
 
 /** True when the pinned geerlingguy.docker Galaxy role is present on disk. */
 export async function galaxyDockerRolePresent(): Promise<boolean> {
-  return await fileExists(join(GALAXY_ROLES_DIR, "geerlingguy.docker"));
+  return await fileExists(join(GALAXY_VENDOR_ROLES_DIR, "geerlingguy.docker"));
 }

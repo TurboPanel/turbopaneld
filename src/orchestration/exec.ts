@@ -47,6 +47,11 @@ export interface RunResult {
  * Pins uv's python-install and cache directories inside the runtime folder and
  * prepends the runtime bin dir to PATH so bare `uv` / `uvx` invocations resolve to
  * the vendored binary.
+ *
+ * Also sets `OPENSSL_armcap=0` so ansible-core's cryptography wheel does not
+ * SIGILL on Apple Silicon hypervisors (UTM/Parallels/etc.) that advertise SVE2
+ * in the guest without implementing it — OpenSSL 3.x in cryptography 47+ probes
+ * those features at import time. Harmless on real aarch64 hardware and x86_64.
  */
 export function runtimeEnv(
   extra?: Record<string, string>,
@@ -62,6 +67,8 @@ export function runtimeEnv(
     UV_NO_MODIFY_PATH: "1",
     // Allow uv to fetch managed pythons; explicit so behavior is obvious.
     UV_PYTHON_DOWNLOADS: "automatic",
+    // Disable OpenSSL ARM CPU-feature probing (SVE/SVE2) — see JSDoc above.
+    OPENSSL_armcap: "0",
     ...extra,
   };
 }

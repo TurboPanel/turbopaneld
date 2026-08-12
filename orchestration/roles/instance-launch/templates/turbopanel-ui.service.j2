@@ -15,6 +15,10 @@ Environment=XDG_CONFIG_HOME={{ turbopanel_ui_config_dir }}
 Environment=PATH={{ turbopanel_runtime_path }}
 Environment=BROWSER=none
 Environment=COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+# Skip Expo auto-TS setup: it writes .gitignore / expo-env.d.ts / .expo/types
+# into the checkout. Vagrant VirtFS is Mac-owned (not guest-writable), and a
+# systemd unit should not mutate git metadata on bare metal either.
+Environment=EXPO_NO_TYPESCRIPT_SETUP=1
 # Do not set CI=1 — Expo/Metro disable Fast Refresh (hot=false) in CI mode.
 # Invoke expo/bin/cli via node — pnpm may leave node_modules/.bin unlinked after a
 # partial install, and `pnpm exec` prompts to purge node_modules when HOME differs.

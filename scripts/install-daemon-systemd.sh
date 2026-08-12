@@ -55,9 +55,13 @@ trap 'rm -f "$VARS_FILE"' EXIT
 } > "$VARS_FILE"
 
 mkdir -p "$ANSIBLE_HOME_DIR"
+# OPENSSL_armcap is exported by runtime-paths.sh (Apple Silicon VM SVE2 workaround).
+# ANSIBLE_EXECUTABLE: Debian /bin/sh is dash (`set -o pipefail` is illegal).
 ANSIBLE_CONFIG="$ANSIBLE_CFG" \
+ANSIBLE_EXECUTABLE="${ANSIBLE_EXECUTABLE:-/bin/bash}" \
 ANSIBLE_HOME="$ANSIBLE_HOME_DIR" \
 ANSIBLE_LOCAL_TEMP="$ANSIBLE_LOCAL_TMP" \
+OPENSSL_armcap="${OPENSSL_armcap:-0}" \
 "$ANSIBLE_PLAYBOOK" \
   -i localhost, \
   -c local \

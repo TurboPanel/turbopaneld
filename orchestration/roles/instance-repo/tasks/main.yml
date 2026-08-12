@@ -44,10 +44,20 @@
     path: "{{ turbopanel_instance_dir }}/node_modules"
   register: _instance_modules
 
-# Speed: only run the slow install when node_modules is absent. Developers
+# Vagrant VirtFS provisioner creates an empty guest-local node_modules symlink
+# before converge, so "directory exists" is not an install. Probe drizzle-kit
+# (migrate) the same way ui-repo probes expo and website-repo probes next.
+- name: Check instance drizzle-kit
+  ansible.builtin.stat:
+    path: "{{ turbopanel_instance_dir }}/node_modules/drizzle-kit/bin.cjs"
+  register: _instance_drizzle_kit
+
+# Speed: skip the slow install when drizzle-kit is already present. Developers
 # re-run `pnpm install` manually after changing dependencies.
 - name: Install instance dependencies
-  when: not _instance_modules.stat.exists
+  when: >-
+    not _instance_modules.stat.exists
+    or not _instance_drizzle_kit.stat.exists
   ansible.builtin.command:
     argv: [pnpm, install, --frozen-lockfile]
     chdir: "{{ turbopanel_instance_dir }}"

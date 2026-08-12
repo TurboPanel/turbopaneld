@@ -327,6 +327,15 @@ test("systemd units and docker wrappers bind the expected identity variables", a
     "turbopanel-caddy.service Group",
   );
 
+  const uiUnit = await readRole(
+    "roles/instance-launch/templates/turbopanel-ui.service.j2",
+  );
+  assertMatch(
+    uiUnit,
+    /EXPO_NO_TYPESCRIPT_SETUP=1/,
+    "turbopanel-ui.service skips Expo checkout writes",
+  );
+
   const redisUnit = await readRole(
     "roles/redis/templates/turbopanel-redis.service.j2",
   );

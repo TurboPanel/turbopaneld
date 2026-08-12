@@ -103,7 +103,18 @@ export const GALAXY_DOCKER_REQUIREMENTS_FILE = join(
   ORCHESTRATION_DIR,
   "requirements-docker.yml",
 );
+/** First-party Ansible roles in the orchestration checkout (not Galaxy). */
 export const GALAXY_ROLES_DIR = join(ORCHESTRATION_DIR, "roles");
+/**
+ * Galaxy-installed roles (`geerlingguy.docker`, …). Under vendor — never the
+ * checkout `roles/` tree — so Vagrant VirtFS mounts (host-owned, guest-unwritable)
+ * and production FHS stay consistent with {@link GALAXY_COLLECTIONS_DIR}.
+ */
+export const GALAXY_VENDOR_ROLES_DIR = join(
+  RUNTIMES_DIR,
+  "ansible",
+  "galaxy-roles",
+);
 export const GALAXY_COLLECTIONS_DIR = join(
   RUNTIMES_DIR,
   "ansible",
@@ -117,13 +128,21 @@ export const ANSIBLE_LOCAL_TMP = join(CACHE_DIR, "ansible-tmp");
  */
 export const ANSIBLE_HOME = "/tmp/turbopanel-ansible"; // NOSONAR typescript:S5443 — disposable ephemeral cache; durable content uses FHS GALAXY_* paths
 export const ANSIBLE_CFG = join(ORCHESTRATION_DIR, "ansible.cfg");
+/**
+ * `ansible.builtin.shell` default is `/bin/sh`. Debian `/bin/sh` is dash,
+ * which rejects `set -o pipefail` used by role install snippets (cache, Deno,
+ * Caddy, …). Force bash — present on Debian, matches the bash wrappers.
+ */
+export const ANSIBLE_SHELL_EXECUTABLE = "/bin/bash";
 
 /** Ansible env vars for playbook and galaxy bootstrap invocations. */
 export function ansibleEnv(): Record<string, string> {
   return {
     ANSIBLE_CONFIG: ANSIBLE_CFG,
+    ANSIBLE_EXECUTABLE: ANSIBLE_SHELL_EXECUTABLE,
     ANSIBLE_HOME,
     ANSIBLE_LOCAL_TEMP: ANSIBLE_LOCAL_TMP,
+    ANSIBLE_ROLES_PATH: `${GALAXY_ROLES_DIR}:${GALAXY_VENDOR_ROLES_DIR}`,
   };
 }
 

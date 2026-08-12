@@ -19,6 +19,7 @@ import {
   DENO_RUNTIME_DIR,
   DENO_VERSION,
   GALAXY_COLLECTIONS_DIR,
+  GALAXY_VENDOR_ROLES_DIR,
   ORCHESTRATION_DIR,
   PYTHON_CURRENT_DIR,
   PYTHON_RUNTIME_DIR,
@@ -455,6 +456,11 @@ test("module-level orchestration constants match active layout", () => {
     GALAXY_COLLECTIONS_DIR,
     join(layout.runtimesDir, "ansible", "galaxy-collections"),
     "GALAXY_COLLECTIONS_DIR",
+  );
+  assertEquals(
+    GALAXY_VENDOR_ROLES_DIR,
+    join(layout.runtimesDir, "ansible", "galaxy-roles"),
+    "GALAXY_VENDOR_ROLES_DIR",
   );
   assertEquals(
     ANSIBLE_LOCAL_TMP,

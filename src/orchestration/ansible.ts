@@ -46,7 +46,7 @@ import {
   GALAXY_COLLECTIONS_DIR,
   GALAXY_DOCKER_REQUIREMENTS_FILE,
   GALAXY_REQUIREMENTS_FILE,
-  GALAXY_ROLES_DIR,
+  GALAXY_VENDOR_ROLES_DIR,
   LOCALHOST_PLAYBOOK,
   ORCHESTRATION_DIR,
   POSTGRES_PLAYBOOK,
@@ -195,7 +195,8 @@ async function installAnsiblePackages(): Promise<void> {
 async function verifyAnsibleInstall(): Promise<void> {
   if (!(await ansiblePlaybookWorks())) {
     throw new Error(
-      "ansible install verification failed: ansible-playbook not runnable",
+      "ansible install verification failed: ansible-playbook not runnable " +
+        "(on Apple Silicon VMs, missing OPENSSL_armcap=0 usually means cryptography SIGILL)",
     );
   }
   if (!(await ansibleLintWorks())) {
@@ -398,8 +399,8 @@ skip_list:
  */
 function galaxyDockerRoleDirCandidates(): string[] {
   return [
-    join(GALAXY_ROLES_DIR, "geerlingguy.docker"),
-    join(GALAXY_ROLES_DIR, "geerlingguy", "docker"),
+    join(GALAXY_VENDOR_ROLES_DIR, "geerlingguy.docker"),
+    join(GALAXY_VENDOR_ROLES_DIR, "geerlingguy", "docker"),
   ];
 }
 
@@ -463,6 +464,7 @@ export async function ensureGalaxyDockerRole(): Promise<void> {
   const galaxyBin = join(VENV_BIN_DIR, "ansible-galaxy");
   const galaxyRun = galaxyBootstrapRunContext();
   await Deno.mkdir(ANSIBLE_HOME, { recursive: true });
+  await Deno.mkdir(GALAXY_VENDOR_ROLES_DIR, { recursive: true });
 
   logInfo(
     "orchestration",
@@ -478,7 +480,7 @@ export async function ensureGalaxyDockerRole(): Promise<void> {
           "-r",
           GALAXY_DOCKER_REQUIREMENTS_FILE,
           "-p",
-          GALAXY_ROLES_DIR,
+          GALAXY_VENDOR_ROLES_DIR,
         ],
         {
           level: "INFO",

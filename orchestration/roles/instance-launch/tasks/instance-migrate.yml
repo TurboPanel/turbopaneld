@@ -30,7 +30,10 @@
   become: true
   become_user: "{{ turbopanel_user }}"
   environment:
-    HOME: "{{ turbopanel_install_root }}"
+    # pnpm reads ~/.config/pnpm (storeDir). Co-located dev must use the
+    # dev-user home, not /opt/turbopanel — a mismatched HOME makes pnpm
+    # treat the Vagrant node_modules symlink as foreign and skip or purge.
+    HOME: "{{ turbopanel_dev_root if (turbopanel_dev_user | default('') | length > 0) else turbopanel_install_root }}"
     PATH: "{{ turbopanel_runtime_path }}"
     TURBOPANEL_DATABASE_URL: "{{ _instance_migrate_database_url }}"
     CI: "true"

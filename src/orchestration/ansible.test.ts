@@ -18,9 +18,12 @@ import {
   ANSIBLE_CFG,
   ANSIBLE_PLAYBOOK_BIN,
   ANSIBLE_PLAYBOOK_CWD,
+  ANSIBLE_SHELL_EXECUTABLE,
   ansibleEnv,
   DAEMON_ROOT,
   GALAXY_COLLECTIONS_DIR,
+  GALAXY_ROLES_DIR,
+  GALAXY_VENDOR_ROLES_DIR,
   RABBITMQ_PLAYBOOK,
   REDIS_PLAYBOOK,
 } from "./paths.ts";
@@ -128,6 +131,16 @@ test("checked-in ansible.cfg defines vendored collections_path", async () => {
     );
     assertMatch(
       cfg,
+      /roles_path\s*=\s*[^\n]*galaxy-roles/,
+      `roles_path galaxy-roles in ${cfgPath}`,
+    );
+    assertMatch(
+      cfg,
+      /^executable\s*=\s*\/bin\/bash\s*$/m,
+      `executable /bin/bash in ${cfgPath} (Debian /bin/sh is dash)`,
+    );
+    assertMatch(
+      cfg,
       /\/usr\/share\/ansible\/collections/,
       `system fallback collections_path in ${cfgPath}`,
     );
@@ -143,6 +156,17 @@ test("checked-in ansible.cfg defines vendored collections_path", async () => {
       );
     }
   }
+});
+
+test("cache install shell uses bash (Debian dash rejects pipefail)", async () => {
+  const tasks = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/redis/tasks/main.yml"),
+  );
+  assertMatch(
+    tasks,
+    /executable:\s*\/bin\/bash/,
+    "redis install executable",
+  );
 });
 
 test(
@@ -388,12 +412,24 @@ test("ansibleEnv pins ANSIBLE_HOME under /tmp without overriding collections_pat
       `expected ANSIBLE_CONFIG=${ANSIBLE_CFG}, got ${env.ANSIBLE_CONFIG}`,
     );
   }
+  if (env.ANSIBLE_EXECUTABLE !== ANSIBLE_SHELL_EXECUTABLE) {
+    throw new Error(
+      `expected ANSIBLE_EXECUTABLE=${ANSIBLE_SHELL_EXECUTABLE}, got ${env.ANSIBLE_EXECUTABLE}`,
+    );
+  }
   if (env.ANSIBLE_HOME !== "/tmp/turbopanel-ansible") {
     throw new Error(
       `expected ANSIBLE_HOME=/tmp/turbopanel-ansible, got ${env.ANSIBLE_HOME}`,
     );
   }
   assertNotIn(env, "ANSIBLE_COLLECTIONS_PATH", "ansibleEnv");
+  if (
+    env.ANSIBLE_ROLES_PATH !== `${GALAXY_ROLES_DIR}:${GALAXY_VENDOR_ROLES_DIR}`
+  ) {
+    throw new Error(
+      `expected ANSIBLE_ROLES_PATH=${GALAXY_ROLES_DIR}:${GALAXY_VENDOR_ROLES_DIR}, got ${env.ANSIBLE_ROLES_PATH}`,
+    );
+  }
 });
 
 test("devOrchestrationAnsibleEnv selects overlay config without collections override", async () => {
@@ -408,7 +444,19 @@ test("devOrchestrationAnsibleEnv selects overlay config without collections over
         `expected ANSIBLE_CONFIG=${layout.ansibleCfgPath}, got ${env.ANSIBLE_CONFIG}`,
       );
     }
+    if (env.ANSIBLE_EXECUTABLE !== ANSIBLE_SHELL_EXECUTABLE) {
+      throw new Error(
+        `expected ANSIBLE_EXECUTABLE=${ANSIBLE_SHELL_EXECUTABLE}, got ${env.ANSIBLE_EXECUTABLE}`,
+      );
+    }
     assertNotIn(env, "ANSIBLE_COLLECTIONS_PATH", "devOrchestrationAnsibleEnv");
+    const expectedRolesPath =
+      `${layout.devRolesDir}:${layout.daemonRolesDir}:${GALAXY_VENDOR_ROLES_DIR}`;
+    if (env.ANSIBLE_ROLES_PATH !== expectedRolesPath) {
+      throw new Error(
+        `expected ANSIBLE_ROLES_PATH=${expectedRolesPath}, got ${env.ANSIBLE_ROLES_PATH}`,
+      );
+    }
   } finally {
     await Deno.remove(fixtureRoot, { recursive: true });
   }
@@ -424,6 +472,11 @@ test("galaxyBootstrapRunContext matches playbook ansible contract", () => {
   if (ctx.env.ANSIBLE_CONFIG !== ANSIBLE_CFG) {
     throw new Error(
       `expected ANSIBLE_CONFIG=${ANSIBLE_CFG}, got ${ctx.env.ANSIBLE_CONFIG}`,
+    );
+  }
+  if (ctx.env.ANSIBLE_EXECUTABLE !== ANSIBLE_SHELL_EXECUTABLE) {
+    throw new Error(
+      `expected ANSIBLE_EXECUTABLE=${ANSIBLE_SHELL_EXECUTABLE}, got ${ctx.env.ANSIBLE_EXECUTABLE}`,
     );
   }
   if (ctx.env.ANSIBLE_HOME !== "/tmp/turbopanel-ansible") {
@@ -488,8 +541,8 @@ test("galaxy docker lint neutralize silences third-party ansible-lint", () => {
       "yaml",
       "offline: true",
       'Deno.remove(join(roleDir, ".yamllint"))',
-      'join(GALAXY_ROLES_DIR, "geerlingguy.docker")',
-      'join(GALAXY_ROLES_DIR, "geerlingguy", "docker")',
+      'join(GALAXY_VENDOR_ROLES_DIR, "geerlingguy.docker")',
+      'join(GALAXY_VENDOR_ROLES_DIR, "geerlingguy", "docker")',
     ]
   ) {
     if (!source.includes(needle)) {
@@ -612,6 +665,11 @@ test("galaxy collections install target matches cfg vendored path default", () =
       `expected GALAXY_COLLECTIONS_DIR to end with ${VENDORED_COLLECTIONS_MARKER}, got ${GALAXY_COLLECTIONS_DIR}`,
     );
   }
+  if (!GALAXY_VENDOR_ROLES_DIR.endsWith("galaxy-roles")) {
+    throw new Error(
+      `expected GALAXY_VENDOR_ROLES_DIR to end with galaxy-roles, got ${GALAXY_VENDOR_ROLES_DIR}`,
+    );
+  }
 });
 
 test("setup playbook paths keep internal redis and rabbitmq identifiers", () => {
@@ -652,6 +710,36 @@ test("converge setup status lines sanitize vendor tokens when presenter is activ
     presenter.dispose();
     setActiveInstallPresenter(null);
   }
+});
+
+test("instance-repo install probes drizzle-kit not an empty node_modules symlink", async () => {
+  const tasks = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/instance-repo/tasks/main.yml"),
+  );
+  assertMatch(
+    tasks,
+    /node_modules\/drizzle-kit\/bin\.cjs/,
+    "instance-repo probes drizzle-kit",
+  );
+  assertMatch(
+    tasks,
+    /not _instance_drizzle_kit\.stat\.exists/,
+    "instance-repo installs when drizzle-kit is missing",
+  );
+});
+
+test("instance-migrate uses the dev-user HOME for pnpm", async () => {
+  const tasks = await Deno.readTextFile(
+    join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/instance-launch/tasks/instance-migrate.yml",
+    ),
+  );
+  assertMatch(
+    tasks,
+    /HOME: "{{ turbopanel_dev_root if \(turbopanel_dev_user/,
+    "instance-migrate HOME follows the co-located dev user",
+  );
 });
 
 test(

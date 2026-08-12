@@ -83,6 +83,7 @@
     install -m 0750 "$TMP/extract/usr/bin/redis-server" "$DEST/redis-server"
     rm -rf "$TMP"
   args:
+    executable: /bin/bash
     creates: "{{ turbopanel_vendor_dir }}/redis/{{ redis_version }}/bin/redis-server"
 
 - name: Harden cache binary permissions
