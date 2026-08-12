@@ -35,8 +35,9 @@ stays deferred until opt-in on both runtimes.
   bare `VERSION_ID`. Raspberry Pi OS / Raspbian set
   `variant: "raspberry-pi-os"` (`ID=raspbian` or `/etc/rpi-issue` present —
   64-bit Pi OS still reports `ID=debian`). **Host inventory** (static
-  capacity: `cpuCores`, `memoryTotalBytes`, `swapTotalBytes`) comes from
-  `/proc/stat` + `/proc/meminfo` via `src/host/host-inventory.ts` — process-
+  capacity: `cpuCores` (physical), `cpuThreads` (logical / for load
+  bars), `memoryTotalBytes`, `swapTotalBytes`) comes from `/proc/stat` +
+  `/proc/cpuinfo` + `/proc/meminfo` via `src/host/host-inventory.ts` — process-
   cached; sent on hello only (not heartbeat). Time sync facts come from
   `src/host/time-sync.ts` (`timedatectl` + `/etc/systemd/timesyncd.conf`);
   addresses from `collectServerAddresses()` (`src/server-addresses.ts`). The

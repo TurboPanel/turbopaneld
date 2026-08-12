@@ -64,6 +64,7 @@ const FULL_HOST: HostHelloIdentity = {
   },
   inventory: {
     cpuCores: 4,
+    cpuThreads: 4,
     memoryTotalBytes: 16_384 * 1024 * 1024,
     swapTotalBytes: 0,
   },

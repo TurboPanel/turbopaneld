@@ -5,6 +5,7 @@ import {
   buildWireguardApplyExtraArgs,
   galaxyBootstrapRunContext,
   mergeTimeSyncApplyWithHostState,
+  parseGalaxyDockerRoleVersion,
 } from "./ansible.ts";
 import {
   DEV_CONVERGE_MANIFEST_FILE,
@@ -518,6 +519,60 @@ test("requirements-docker.yml pins geerlingguy.docker to an exact version", asyn
   if (/version:\s*">=/.test(requirements)) {
     throw new Error(
       "requirements-docker.yml must not use ranged role versions",
+    );
+  }
+});
+
+test("parseGalaxyDockerRoleVersion reads the requirements-docker pin", async () => {
+  const requirements = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "requirements-docker.yml"),
+  );
+  const version = parseGalaxyDockerRoleVersion(requirements);
+  assertMatch(version, /^\d+\.\d+\.\d+$/, "geerlingguy.docker version pin");
+  try {
+    parseGalaxyDockerRoleVersion("roles: []\n");
+    throw new Error("expected TypeError for missing pin");
+  } catch (err) {
+    if (!(err instanceof TypeError)) {
+      throw err;
+    }
+  }
+});
+
+test("ensureGalaxyDockerRole downloads via codeload, not ansible-galaxy role install", () => {
+  const source = Deno.readTextFileSync(
+    join(DAEMON_ROOT, "src", "orchestration", "ansible.ts"),
+  );
+  const start = source.indexOf(
+    "async function installGalaxyDockerRoleFromArchive",
+  );
+  const end = source.indexOf("export async function runLocalhostTest", start);
+  if (start < 0 || end < 0) {
+    throw new Error(
+      "could not locate installGalaxyDockerRoleFromArchive / runLocalhostTest",
+    );
+  }
+  const dockerInstall = source.slice(start, end);
+  if (!dockerInstall.includes("galaxyDockerRoleCodeloadUrl")) {
+    throw new Error(
+      "ensureGalaxyDockerRole must download via galaxyDockerRoleCodeloadUrl",
+    );
+  }
+  if (/"role"\s*,\s*"install"/.test(dockerInstall)) {
+    throw new Error(
+      "ensureGalaxyDockerRole must not call ansible-galaxy role install",
+    );
+  }
+  if (/github\.com\/.+\/archive\//.test(dockerInstall)) {
+    throw new Error(
+      "ensureGalaxyDockerRole must not use github.com/.../archive URLs",
+    );
+  }
+  // Staging must share a filesystem with the final path — /tmp → /opt rename
+  // fails with EXDEV on typical Vagrant guests.
+  if (!dockerInstall.includes("dir: GALAXY_VENDOR_ROLES_DIR")) {
+    throw new Error(
+      "galaxy docker role staging must use makeTempDir({ dir: GALAXY_VENDOR_ROLES_DIR })",
     );
   }
 });

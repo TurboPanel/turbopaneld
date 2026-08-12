@@ -103,6 +103,19 @@ export const GALAXY_DOCKER_REQUIREMENTS_FILE = join(
   ORCHESTRATION_DIR,
   "requirements-docker.yml",
 );
+/**
+ * Upstream GitHub repo for the pinned geerlingguy.docker Galaxy role.
+ * ansible-galaxy resolves classic roles via `github.com/.../archive/*.tar.gz`,
+ * which intermittently returns 503 from GitHub's edge; {@link ensureGalaxyDockerRole}
+ * downloads the same tag via codeload instead (see {@link galaxyDockerRoleCodeloadUrl}).
+ */
+export const GALAXY_DOCKER_ROLE_GITHUB_REPO =
+  "geerlingguy/ansible-role-docker";
+
+/** Codeload archive URL for a pinned geerlingguy.docker role tag. */
+export function galaxyDockerRoleCodeloadUrl(version: string): string {
+  return `https://codeload.github.com/${GALAXY_DOCKER_ROLE_GITHUB_REPO}/tar.gz/refs/tags/${version}`;
+}
 /** First-party Ansible roles in the orchestration checkout (not Galaxy). */
 export const GALAXY_ROLES_DIR = join(ORCHESTRATION_DIR, "roles");
 /**

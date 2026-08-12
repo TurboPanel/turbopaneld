@@ -20,6 +20,7 @@ import {
   DENO_VERSION,
   GALAXY_COLLECTIONS_DIR,
   GALAXY_VENDOR_ROLES_DIR,
+  galaxyDockerRoleCodeloadUrl,
   ORCHESTRATION_DIR,
   PYTHON_CURRENT_DIR,
   PYTHON_RUNTIME_DIR,
@@ -461,6 +462,11 @@ test("module-level orchestration constants match active layout", () => {
     GALAXY_VENDOR_ROLES_DIR,
     join(layout.runtimesDir, "ansible", "galaxy-roles"),
     "GALAXY_VENDOR_ROLES_DIR",
+  );
+  assertEquals(
+    galaxyDockerRoleCodeloadUrl("8.0.0"),
+    "https://codeload.github.com/geerlingguy/ansible-role-docker/tar.gz/refs/tags/8.0.0",
+    "galaxyDockerRoleCodeloadUrl",
   );
   assertEquals(
     ANSIBLE_LOCAL_TMP,

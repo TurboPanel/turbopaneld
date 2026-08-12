@@ -164,7 +164,13 @@ accidental `/root/.ansible` after install. Runtime orchestration runs as
 (`runDockerSetup` / co-located dev converge via
 `scripts/run-orchestration-action.ts` `instance-dev-install` /
 postgres|rabbitmq|clickhouse setup), so fresh daemon installs and pre-Docker
-hosts skip that download. First-party
+hosts skip that download. **Install path:** `ensureGalaxyDockerRole` reads the
+version pin from `requirements-docker.yml` and downloads the matching tag via
+**codeload.github.com** (`galaxyDockerRoleCodeloadUrl`) into
+`vendor/ansible/galaxy-roles/geerlingguy.docker` — it does **not** call
+`ansible-galaxy role install`, which resolves classic roles through
+`github.com/.../archive/*.tar.gz` and intermittently fails with edge 503s.
+First-party
 roles (e.g. `docker`, which wraps Galaxy via `include_role`) stay in git;
 Galaxy install trees land under `vendor/ansible/galaxy-roles/` (never the
 checkout `orchestration/roles/` tree — that path is a Vagrant VirtFS mount and

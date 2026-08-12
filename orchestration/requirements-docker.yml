@@ -2,6 +2,10 @@
 # Ansible Galaxy roles needed only when installing Docker Engine.
 # Installed on demand by ensureGalaxyDockerRole() — not during bootstrap —
 # so daemon-only / pre-Docker hosts skip this download.
+#
+# Pin only (name + version). Install does NOT call `ansible-galaxy role install`
+# against Galaxy's default github.com/.../archive/*.tar.gz URL (flaky 503s);
+# TypeScript downloads the matching tag via codeload.github.com instead.
 roles:
   - name: geerlingguy.docker
     version: "8.0.0"

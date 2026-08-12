@@ -47,6 +47,7 @@ import {
   GALAXY_DOCKER_REQUIREMENTS_FILE,
   GALAXY_REQUIREMENTS_FILE,
   GALAXY_VENDOR_ROLES_DIR,
+  galaxyDockerRoleCodeloadUrl,
   LOCALHOST_PLAYBOOK,
   ORCHESTRATION_DIR,
   POSTGRES_PLAYBOOK,
@@ -437,11 +438,97 @@ async function neutralizeGalaxyDockerLintConfig(): Promise<void> {
 }
 
 /**
+ * Parse the exact geerlingguy.docker version pin from requirements-docker.yml.
+ */
+export function parseGalaxyDockerRoleVersion(requirementsYaml: string): string {
+  const match =
+    /name:\s*geerlingguy\.docker\b[\s\S]*?version:\s*"(\d+\.\d+\.\d+)"/
+      .exec(requirementsYaml);
+  if (!match?.[1]) {
+    throw new TypeError(
+      "requirements-docker.yml must pin geerlingguy.docker to an exact version",
+    );
+  }
+  return match[1];
+}
+
+/** Per-request timeout for Galaxy role archive fetches. */
+const GALAXY_DOCKER_FETCH_TIMEOUT_MS = 30_000;
+/** Total attempts (including the first) before giving up on the role archive. */
+const GALAXY_DOCKER_FETCH_ATTEMPTS = 4;
+
+async function fetchGalaxyDockerArchive(url: string): Promise<Uint8Array> {
+  return await withRetry(async () => {
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(GALAXY_DOCKER_FETCH_TIMEOUT_MS),
+    });
+    if (!res.ok) {
+      await res.body?.cancel();
+      throw new Error(
+        `Failed to download ${url}: ${res.status} ${res.statusText}`,
+      );
+    }
+    return new Uint8Array(await res.arrayBuffer());
+  }, { label: "download galaxy docker role archive", attempts: GALAXY_DOCKER_FETCH_ATTEMPTS });
+}
+
+/**
+ * Install a downloaded role tarball under {@link GALAXY_VENDOR_ROLES_DIR} as
+ * `geerlingguy.docker` (Galaxy layout). Archive root is
+ * `ansible-role-docker-<version>/`.
+ *
+ * Staging lives under the vendor roles dir (same filesystem as the final
+ * path) so `rename` cannot hit EXDEV when `/tmp` and `/opt` are different
+ * mounts — common on Vagrant guests.
+ */
+async function installGalaxyDockerRoleFromArchive(
+  archiveBytes: Uint8Array,
+  version: string,
+): Promise<void> {
+  await Deno.mkdir(GALAXY_VENDOR_ROLES_DIR, { recursive: true });
+  const tmpDir = await Deno.makeTempDir({
+    dir: GALAXY_VENDOR_ROLES_DIR,
+    prefix: ".tmp-galaxy-docker-",
+  });
+  try {
+    const archivePath = join(tmpDir, `ansible-role-docker-${version}.tar.gz`);
+    await Deno.writeFile(archivePath, archiveBytes);
+    await runLogged("tar", ["-xzf", archivePath, "-C", tmpDir], {
+      level: "DEBUG",
+      component: logComponent("ansible-galaxy"),
+    });
+
+    const extracted = join(tmpDir, `ansible-role-docker-${version}`);
+    if (!(await fileExists(extracted))) {
+      throw new Error(
+        `galaxy docker role archive missing expected root ${extracted}`,
+      );
+    }
+
+    const dest = join(GALAXY_VENDOR_ROLES_DIR, "geerlingguy.docker");
+    try {
+      await Deno.remove(dest, { recursive: true });
+    } catch (err) {
+      if (!(err instanceof Deno.errors.NotFound)) {
+        throw err;
+      }
+    }
+    await Deno.rename(extracted, dest);
+  } finally {
+    await Deno.remove(tmpDir, { recursive: true }).catch(() => {});
+  }
+}
+
+/**
  * Install the pinned geerlingguy.docker Galaxy role when a host needs Docker.
  *
  * Called from docker-using entry points (`runDockerSetup`, co-located dev
  * converge, postgres/rabbitmq setup) — never from orchestration bootstrap —
  * so daemon install skips this download until a container workload appears.
+ *
+ * Downloads the tagged archive from codeload.github.com (not
+ * `ansible-galaxy role install`, which hits flaky `github.com/.../archive`
+ * URLs). The version pin still lives in {@link GALAXY_DOCKER_REQUIREMENTS_FILE}.
  */
 export async function ensureGalaxyDockerRole(): Promise<void> {
   if (!(await ansiblePlaybookWorks())) {
@@ -461,35 +548,21 @@ export async function ensureGalaxyDockerRole(): Promise<void> {
     return;
   }
 
-  const galaxyBin = join(VENV_BIN_DIR, "ansible-galaxy");
-  const galaxyRun = galaxyBootstrapRunContext();
   await Deno.mkdir(ANSIBLE_HOME, { recursive: true });
   await Deno.mkdir(GALAXY_VENDOR_ROLES_DIR, { recursive: true });
+
+  const requirementsYaml = await Deno.readTextFile(
+    GALAXY_DOCKER_REQUIREMENTS_FILE,
+  );
+  const version = parseGalaxyDockerRoleVersion(requirementsYaml);
+  const url = galaxyDockerRoleCodeloadUrl(version);
 
   logInfo(
     "orchestration",
     `installing galaxy docker role from ${GALAXY_DOCKER_REQUIREMENTS_FILE}`,
   );
-  await withRetry(
-    () =>
-      runLogged(
-        galaxyBin,
-        [
-          "role",
-          "install",
-          "-r",
-          GALAXY_DOCKER_REQUIREMENTS_FILE,
-          "-p",
-          GALAXY_VENDOR_ROLES_DIR,
-        ],
-        {
-          level: "INFO",
-          component: logComponent("ansible-galaxy"),
-          ...galaxyRun,
-        },
-      ),
-    { label: "install galaxy docker role", attempts: 3 },
-  );
+  const archiveBytes = await fetchGalaxyDockerArchive(url);
+  await installGalaxyDockerRoleFromArchive(archiveBytes, version);
   logInfo("orchestration", "galaxy docker role ready");
   await neutralizeGalaxyDockerLintConfig();
   await writeGalaxyDockerStamp(stamp);
