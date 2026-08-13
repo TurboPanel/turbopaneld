@@ -1,6 +1,7 @@
 import { assertEquals } from "@std/assert";
 import { join } from "@std/path";
-import { upsertPublicUrlsInEnv } from "./public-urls-env.ts";
+import { PROD_INSTANCE_DIR_DEFAULT } from "../paths/layout.ts";
+import { resolveInstanceDir, upsertPublicUrlsInEnv } from "./public-urls-apply.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -9,6 +10,49 @@ import { upsertPublicUrlsInEnv } from "./public-urls-env.ts";
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
 const test = Deno.test.bind(Deno);
+
+test("resolveInstanceDir uses INSTANCE_REPO checkout in development", () => {
+  assertEquals(
+    resolveInstanceDir({
+      TURBOPANEL_MODE: "development",
+      TURBOPANEL_DEV_ROOT: "/home/dev",
+      TURBOPANEL_INSTANCE_REPO: "/home/dev/instance",
+    }),
+    "/home/dev/instance",
+  );
+});
+
+test("resolveInstanceDir falls back to <devRoot>/instance in development", () => {
+  assertEquals(
+    resolveInstanceDir({
+      TURBOPANEL_MODE: "development",
+      TURBOPANEL_DEV_ROOT: "/home/dev",
+    }),
+    "/home/dev/instance",
+  );
+});
+
+test("resolveInstanceDir uses FHS lib path when not co-located", () => {
+  assertEquals(
+    resolveInstanceDir({
+      // No DEV_USER / INSTANCE_REPO / MODE=development → managed FHS tree.
+      HOME: "/root",
+      TURBOPANEL_DEV_ROOT: undefined,
+    }),
+    PROD_INSTANCE_DIR_DEFAULT,
+  );
+});
+
+test("resolveInstanceDir honors TURBOPANEL_INSTANCE_DIR override", () => {
+  assertEquals(
+    resolveInstanceDir({
+      TURBOPANEL_MODE: "development",
+      TURBOPANEL_INSTANCE_DIR: "/custom/instance/",
+      TURBOPANEL_INSTANCE_REPO: "/home/dev/instance",
+    }),
+    "/custom/instance",
+  );
+});
 
 async function listEnvTmpFiles(dir: string): Promise<string[]> {
   const found: string[] = [];

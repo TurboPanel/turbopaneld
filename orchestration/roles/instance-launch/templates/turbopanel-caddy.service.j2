@@ -30,6 +30,9 @@ Environment=TURBOPANEL_DAEMON_REPO={{ turbopanel_daemon_dir }}
 Environment=GOMAXPROCS=1
 ExecStart={{ turbopanel_vendor_dir }}/caddy/current/caddy run --config {{ turbopanel_caddyfile }} --adapter caddyfile
 ExecReload={{ turbopanel_vendor_dir }}/caddy/current/caddy reload --config {{ turbopanel_caddyfile }} --adapter caddyfile
+# Rescue path when reload fails: cap stop so cert-apply cannot hang on Caddy's
+# eternal grace shutdown (admin should be localhost-only so reload usually works).
+TimeoutStopSec=20
 Restart=always
 RestartSec=2
 CPUQuota=100%

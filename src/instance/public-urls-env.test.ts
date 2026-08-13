@@ -120,3 +120,49 @@ test("resolveInstanceConfigDir and runtime env path compose layout", () => {
     join(layout.instanceConfigDir, "runtime.env"),
   );
 });
+
+test({
+  name:
+    "upsertPublicUrlsInEnv falls back to sudo install when config dir is not writable",
+  permissions: { read: true, write: true, run: ["sudo"] },
+  fn: async () => {
+    const tmpDir = await Deno.makeTempDir({ prefix: "tp-public-urls-ro-" });
+    const configDir = join(tmpDir, "instance");
+    const runtimeEnvPath = join(configDir, "runtime.env");
+    await Deno.mkdir(configDir, { recursive: true, mode: 0o750 });
+    await Deno.writeTextFile(runtimeEnvPath, "KEEP=1\n", { mode: 0o640 });
+    // Drop directory write so the unprivileged .write-tmp path hits EACCES —
+    // mirrors /etc/turbopanel/instance (root:group 0750).
+    await Deno.chmod(configDir, 0o550);
+
+    const sudoProbe = await new Deno.Command("sudo", {
+      args: ["-n", "true"],
+      stdout: "null",
+      stderr: "null",
+    }).output();
+    if (!sudoProbe.success) {
+      await Deno.chmod(configDir, 0o750);
+      await Deno.remove(tmpDir, { recursive: true });
+      return;
+    }
+
+    try {
+      await upsertPublicUrlsInEnv(["https://ro.example"], { runtimeEnvPath });
+      // Restore write so we can read/assert/cleanup as the test user.
+      await Deno.chmod(configDir, 0o750);
+      const content = await Deno.readTextFile(runtimeEnvPath);
+      assertEquals(content.includes("KEEP=1"), true);
+      assertEquals(
+        content.includes("TURBOPANEL_PUBLIC_URLS=https://ro.example"),
+        true,
+      );
+    } finally {
+      try {
+        await Deno.chmod(configDir, 0o750);
+      } catch {
+        // already restored or removed
+      }
+      await Deno.remove(tmpDir, { recursive: true });
+    }
+  },
+});

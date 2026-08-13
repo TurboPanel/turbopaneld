@@ -36,6 +36,20 @@ async function readEnvFileMeta(envPath: string): Promise<EnvFileMeta | null> {
   }
 }
 
+async function runSudo(args: string[]): Promise<void> {
+  const result = await new Deno.Command("sudo", {
+    args: ["-n", ...args],
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  if (!result.success) {
+    throw new Error(
+      new TextDecoder().decode(result.stderr).trim() ||
+        `sudo ${args.join(" ")} failed`,
+    );
+  }
+}
+
 async function chownFileOwner(
   path: string,
   uid: number,
@@ -47,17 +61,7 @@ async function chownFileOwner(
   } catch (err) {
     if (!(err instanceof Deno.errors.PermissionDenied)) throw err;
   }
-  const result = await new Deno.Command("sudo", {
-    args: ["chown", `${uid}:${gid}`, path],
-    stdout: "piped",
-    stderr: "piped",
-  }).output();
-  if (!result.success) {
-    throw new Error(
-      new TextDecoder().decode(result.stderr).trim() ||
-        `sudo chown ${uid}:${gid} failed for ${path}`,
-    );
-  }
+  await runSudo(["chown", `${uid}:${gid}`, path]);
 }
 
 async function ensureWriteTmpDir(configDir: string): Promise<string> {
@@ -75,7 +79,48 @@ async function removeTempFile(path: string | null): Promise<void> {
   }
 }
 
-async function writeEnvFileAtomic(
+function modeOctal(mode: number): string {
+  return (mode & 0o777).toString(8).padStart(4, "0");
+}
+
+/**
+ * Instance config (`/etc/turbopanel/instance`) is intentionally root:group
+ * mode 0750 so secret files stay non-group-writable. The daemon therefore
+ * cannot create `.write-tmp` there — stage in /tmp and `sudo install`.
+ */
+async function writeEnvFilePrivileged(
+  envPath: string,
+  content: string,
+  meta: EnvFileMeta | null,
+): Promise<void> {
+  const configDir = dirname(envPath);
+  const mode = meta?.mode ?? DEFAULT_ENV_MODE;
+  await runSudo(["install", "-d", "-m", "0750", configDir]);
+
+  const staging = await Deno.makeTempFile({ prefix: "tp-runtime-env-" });
+  try {
+    await Deno.writeTextFile(staging, content);
+    const installArgs = ["install", "-m", modeOctal(mode)];
+    if (meta?.uid !== undefined && meta?.gid !== undefined) {
+      installArgs.push("-o", String(meta.uid), "-g", String(meta.gid));
+    } else {
+      try {
+        const parent = await Deno.stat(configDir);
+        if (parent.gid !== undefined) {
+          installArgs.push("-o", "0", "-g", String(parent.gid));
+        }
+      } catch {
+        // install as root (sudo) with default group
+      }
+    }
+    installArgs.push(staging, envPath);
+    await runSudo(installArgs);
+  } finally {
+    await removeTempFile(staging);
+  }
+}
+
+async function writeEnvFileUnprivileged(
   envPath: string,
   content: string,
   meta: EnvFileMeta | null,
@@ -95,6 +140,19 @@ async function writeEnvFileAtomic(
     tmpCreated = null;
   } finally {
     await removeTempFile(tmpCreated);
+  }
+}
+
+async function writeEnvFileAtomic(
+  envPath: string,
+  content: string,
+  meta: EnvFileMeta | null,
+): Promise<void> {
+  try {
+    await writeEnvFileUnprivileged(envPath, content, meta);
+  } catch (err) {
+    if (!(err instanceof Deno.errors.PermissionDenied)) throw err;
+    await writeEnvFilePrivileged(envPath, content, meta);
   }
 }
 
