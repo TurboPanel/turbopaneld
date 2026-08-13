@@ -160,11 +160,13 @@ function optionalDevServiceFlag(
 function optionalDevServiceExtraArgs(): string[] {
   return [
     "-e",
-    `turbopanel_optional_dbstudio=${optionalDevServiceFlag("TURBOPANEL_OPTIONAL_DBSTUDIO", true)}`,
+    `turbopanel_optional_dbstudio=${optionalDevServiceFlag("TURBOPANEL_OPTIONAL_DBSTUDIO", false)}`,
     "-e",
     `turbopanel_optional_ui=${optionalDevServiceFlag("TURBOPANEL_OPTIONAL_UI", true)}`,
     "-e",
     `turbopanel_optional_website=${optionalDevServiceFlag("TURBOPANEL_OPTIONAL_WEBSITE", true)}`,
+    "-e",
+    `turbopanel_optional_mailpit=${optionalDevServiceFlag("TURBOPANEL_OPTIONAL_MAILPIT", true)}`,
     "-e",
     `turbopanel_optional_redis_insight=${optionalDevServiceFlag("TURBOPANEL_OPTIONAL_REDIS_INSIGHT", false)}`,
     "-e",

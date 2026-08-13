@@ -118,5 +118,5 @@
   ansible.builtin.systemd:
     name: "{{ mailpit_service_name }}"
     daemon_reload: true
-    enabled: true
-    state: started
+    enabled: "{{ turbopanel_optional_mailpit | default(true) | bool }}"
+    state: "{{ 'started' if (turbopanel_optional_mailpit | default(true) | bool) else 'stopped' }}"

@@ -291,7 +291,7 @@ export type EnvironmentDeployTraditionalWebSite = {
   webEnv?: Record<string, string>;
   php?: EnvironmentDeployHostingPhp;
   /**
-   * When set (from a project principal ↔ service assignment), the site tree
+   * When set (from a project principal ↔ service steward), the site tree
    * is owned by this principal and Apache php-fpm workers run as that user.
    */
   principal?: EnvironmentDeployTraditionalWebPrincipal;

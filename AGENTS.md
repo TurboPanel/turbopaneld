@@ -216,7 +216,10 @@ The [dev](https://github.com/turbopanel/dev) console threads this as
 `installDevEnvironment(..., mode)` with `mode: "if-needed" | "force"` —
 `"if-needed"` only for the post-daemon-install chain; `"force"` (and
 `TURBOPANEL_FORCE_CONVERGE=1`) for Developer → Converge / re-converge and
-legacy reset/provisioner callers.
+legacy reset/provisioner callers. Optional co-located tooling
+(`TURBOPANEL_OPTIONAL_*` → `turbopanel_optional_*`) starts Drizzle Studio,
+Mailpit, Expo UI, website, Redis Insight, and Tabix only when selected; units
+are still installed so the TUI can enable them later.
 
 ## Project metadata
 

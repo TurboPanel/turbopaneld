@@ -115,9 +115,10 @@ export function devConvergeEnvMaterial(): string {
     `ui_mode=${uiMode}`,
     `instance_run_mode=${instanceRunMode}`,
     `instance_runtime=${instanceRuntime}`,
-    `optional_dbstudio=${optionalFlag("TURBOPANEL_OPTIONAL_DBSTUDIO", true)}`,
+    `optional_dbstudio=${optionalFlag("TURBOPANEL_OPTIONAL_DBSTUDIO", false)}`,
     `optional_ui=${optionalFlag("TURBOPANEL_OPTIONAL_UI", true)}`,
     `optional_website=${optionalFlag("TURBOPANEL_OPTIONAL_WEBSITE", true)}`,
+    `optional_mailpit=${optionalFlag("TURBOPANEL_OPTIONAL_MAILPIT", true)}`,
     `optional_redis_insight=${optionalFlag("TURBOPANEL_OPTIONAL_REDIS_INSIGHT", false)}`,
     `optional_tabix=${optionalFlag("TURBOPANEL_OPTIONAL_TABIX", false)}`,
   ].join("\n");

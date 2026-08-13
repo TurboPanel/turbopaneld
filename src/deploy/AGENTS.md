@@ -396,7 +396,7 @@ Docker Compose. The daemon:
    `public`; writes a placeholder `index.html` when empty). Merged hosting
    `webEnv` / `php` hints land in `<site>/.turbopanel/hosting.env` and
    `php.json`. When `traditionalWebSites[].principal` is set (from a project
-   principal ↔ service assignment), the site tree is `chown`ed to
+   principal ↔ service steward), the site tree is `chown`ed to
    `principal:engineGroup` (`site_user:tpnginx` / `tpapache` / `tpols`) with
    `u=rwX,g=rX` + setgid dirs so the engine can read while the principal owns
    writes. Without a pin, ownership stays the engine user (previous default).

@@ -456,7 +456,7 @@
 - name: Ensure Drizzle Studio service desired state
   when:
     - turbopanel_ui_mode == 'dev'
-    - turbopanel_optional_dbstudio | default(true) | bool
+    - turbopanel_optional_dbstudio | default(false) | bool
   ansible.builtin.systemd:
     name: "{{ dbstudio_service_name }}"
     daemon_reload: true
@@ -466,7 +466,7 @@
 - name: Stop and disable Drizzle Studio when optional off
   when:
     - turbopanel_ui_mode == 'dev'
-    - not (turbopanel_optional_dbstudio | default(true) | bool)
+    - not (turbopanel_optional_dbstudio | default(false) | bool)
   ansible.builtin.systemd:
     name: "{{ dbstudio_service_name }}"
     state: stopped
