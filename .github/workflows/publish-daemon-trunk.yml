@@ -84,8 +84,8 @@ jobs:
       - name: Install Deno
         uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
-          # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.4).
-          deno-version: "2.9.4"
+          # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.5).
+          deno-version: "2.9.5"
 
       - name: Install zstd
         run: sudo apt-get update -qq && sudo apt-get install -y -qq zstd

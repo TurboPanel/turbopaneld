@@ -426,7 +426,7 @@ tp_probe_native_daemon() {
 TP_HOST_LOCAL_ARTIFACTS=".git .github logs cloudflared"
 
 # Keep in sync with orchestration/roles/deno-runtime/defaults/main.yml.
-TP_DENO_VERSION="2.9.4"
+TP_DENO_VERSION="2.9.5"
 
 # Install Deno into the runtimes tree (idempotent), mirroring uv/ansible/cloudflared:
 #   $RUNTIMES_DIR/deno/$TP_DENO_VERSION/deno  plus `current` and `bin/deno` symlinks.

@@ -49,8 +49,8 @@ jobs:
       - name: Install Deno
         uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
-          # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.4).
-          deno-version: "2.9.4"
+          # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.5).
+          deno-version: "2.9.5"
           cache: true
 
       - name: Format check
@@ -72,7 +72,7 @@ jobs:
         run: deno task test:coverage
 
       - name: Normalize LCOV SF paths for SonarCloud
-        # Deno 2.9.4 on GitHub Actions emits absolute SF:/home/runner/work/...
+        # Deno 2.9.5 on GitHub Actions emits absolute SF:/home/runner/work/...
         # paths; SonarCloud needs repo-relative SF:src/... Resolve against the
         # checkout root, then assert nothing absolute remains.
         run: |
