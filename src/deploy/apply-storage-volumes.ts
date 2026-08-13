@@ -8,25 +8,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function requireMountPath(
   mountPaths: Map<string, string>,
-  storageId: string,
+  locationId: string,
   label: string,
 ): string {
-  const path = mountPaths.get(storageId);
+  const path = mountPaths.get(locationId);
   if (!path) {
-    throw new Error(`Missing ${label} for storage ${storageId}`);
+    throw new Error(`Missing ${label} for location ${locationId}`);
   }
   return path;
-}
-
-function requireComposeServiceName(
-  entry: EnvironmentDeployStorageMaterial,
-): string {
-  if (!entry.composeServiceName) {
-    throw new Error(
-      `Storage ${entry.storageId} requires composeServiceName for ${entry.kind}`,
-    );
-  }
-  return entry.composeServiceName;
 }
 
 function requireResolvedService(
@@ -52,6 +41,33 @@ function appendServiceVolume(
   services[composeServiceName] = { ...existing, volumes };
 }
 
+function applyMounts(
+  services: Record<string, Record<string, unknown>>,
+  entry: EnvironmentDeployStorageMaterial,
+  source: string,
+  type: "volume" | "bind",
+  resolved: ResolvedComposeModel,
+): void {
+  for (const mount of entry.mounts) {
+    if (!mount.composeServiceName) continue;
+    requireResolvedService(resolved, mount.composeServiceName, entry.storageId);
+    const spec: Record<string, unknown> = {
+      type,
+      source,
+      target: mount.destinationPath,
+    };
+    if (mount.readOnly) spec.read_only = true;
+    if (
+      type === "volume" &&
+      typeof mount.subpath === "string" &&
+      mount.subpath.length > 0
+    ) {
+      spec.volume = { subpath: mount.subpath };
+    }
+    appendServiceVolume(services, mount.composeServiceName, spec);
+  }
+}
+
 function applyDockerVolumeEntry(
   services: Record<string, Record<string, unknown>>,
   topVolumes: Record<string, unknown>,
@@ -63,7 +79,7 @@ function applyDockerVolumeEntry(
     ? entry.volumeName
     : requireMountPath(
       mountPaths,
-      entry.storageId,
+      entry.locationId,
       "docker volume path",
     );
   // Point compose at the pre-created volume (do not let Compose invent
@@ -71,15 +87,9 @@ function applyDockerVolumeEntry(
   topVolumes[volumeName] = { name: volumeName, external: true };
 
   // Compose-declared volumes already have service mounts; skip append when
-  // there is no destinationPath (or no composeServiceName).
-  if (!entry.destinationPath || !entry.composeServiceName) return;
-
-  requireResolvedService(resolved, entry.composeServiceName, entry.storageId);
-  appendServiceVolume(services, entry.composeServiceName, {
-    type: "volume",
-    source: volumeName,
-    target: entry.destinationPath,
-  });
+  // the payload has no mount rows.
+  if (entry.mounts.length === 0) return;
+  applyMounts(services, entry, volumeName, "volume", resolved);
 }
 
 function applyBindMountEntry(
@@ -88,14 +98,9 @@ function applyBindMountEntry(
   mountPaths: Map<string, string>,
   resolved: ResolvedComposeModel,
 ): void {
-  const composeServiceName = requireComposeServiceName(entry);
-  requireResolvedService(resolved, composeServiceName, entry.storageId);
-  const hostPath = requireMountPath(mountPaths, entry.storageId, "host path");
-  appendServiceVolume(services, composeServiceName, {
-    type: "bind",
-    source: hostPath,
-    target: entry.destinationPath,
-  });
+  if (entry.mounts.length === 0) return;
+  const hostPath = requireMountPath(mountPaths, entry.locationId, "host path");
+  applyMounts(services, entry, hostPath, "bind", resolved);
 }
 
 /**
@@ -113,7 +118,7 @@ export function buildStorageVolumesFragment(
   const topVolumes: Record<string, unknown> = {};
 
   for (const entry of entries) {
-    if (entry.kind === "docker_volume") {
+    if (entry.kind === "volume" || entry.provider === "docker") {
       applyDockerVolumeEntry(
         services,
         topVolumes,

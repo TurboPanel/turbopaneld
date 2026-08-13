@@ -56,25 +56,24 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../insta
    of mutating that account. Shell is still reconciled via `usermod -s`;
    never `usermod -m` / `-d`. Directory creation uses `sudo -n install -d`
    so a non-root daemon can write under `/srv`.
-5. When `storageMaterial[]` is present, materialize paths under
-   `<stateDir>/storage/<organizationId>/<storageId>/` (`materialize-storage.ts`);
-   `docker volume create` for `docker_volume` kinds using instance-supplied
-   **`volumeName`** when present (else legacy `tp-<org8>-<name>`); optional
-   `chown` when a principal is linked. The instance owns Docker volume naming.
-   Principal-owned `bind_mount` entries arrive with an instance-derived
-   `sourcePath` of `/srv/users/<username>/volumes/<storageId>` (explicit
-   operator paths still win); those paths are created via the same sudo-backed
-   helper.
+5. When `storageMaterial[]` is present, materialize each **location** under
+   `<stateDir>/storage/<organizationId>/<storageId>/<locationId>/data`
+   (`materializeLocation` in `materialize-storage.ts`); `docker volume create`
+   for `kind=volume` + `provider=docker` using instance-supplied **`volumeName`**
+   (the storage UUID; else legacy `tp-<org8>-<name>`). Optional `chown` when a
+   principal is linked. The instance owns Docker volume naming. Path-provider
+   directory/file entries arrive with `sourcePath` — principal-owned defaults
+   are `/srv/users/<username>/volumes/<storageId>` (explicit operator paths
+   still win). Never write under `/var/lib/docker/volumes`.
 6. Decrypt `variableMaterial[]` via `POST /api/daemon/v1/secrets/decrypt` and
    write Compose standalone secret files under
    `<runDir>/deployments/<projectId>/<environmentId>/secrets/` (`secret-runtime.ts`,
    mode `0600`, dir `0700`). Write the payload `.env` (non-secrets only, `0640`)
-   next to staged `compose.yaml`. Patch storage bind/volume mounts
+   next to staged `compose.yaml`. Overlay mounts from each entry's **`mounts[]`**
    (`apply-storage-volumes.ts`) — docker volumes emit
    `volumes.<name> = { name, external: true }` so Compose mounts the
-   pre-created volume (not a `<project>_<name>` orphan); `docker_volume`
-   entries may omit `destinationPath` when the volume is only compose-declared
-   (no service-mount append).
+   pre-created volume (not a `<project>_<name>` orphan); entries may have an
+   empty `mounts[]` when the volume is only compose-declared.
 7. Write compiled `compose.yaml` plus `.env` plus `deployment.json` under
    `<stateDir>/deployments/<projectId>/<environmentId>/` (see **Compiled
    compose publish** below). Daemon overlay fragments (storage,

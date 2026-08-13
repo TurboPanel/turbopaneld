@@ -14,25 +14,33 @@ describe("buildStorageVolumesFragment", () => {
       [
         {
           storageId: "st-bind",
-          kind: "bind_mount",
+          locationId: "loc-bind",
+          kind: "directory",
           name: "data",
-          destinationPath: "/data",
-          composeServiceName: "web",
+          provider: "path",
           serverId: "srv",
+          mounts: [{
+            composeServiceName: "web",
+            destinationPath: "/data",
+          }],
         },
         {
           storageId: "st-vol",
-          kind: "docker_volume",
+          locationId: "loc-vol",
+          kind: "volume",
           name: "cache",
-          destinationPath: "/cache",
-          composeServiceName: "web",
+          provider: "docker",
           serverId: "srv",
           volumeName: "tp-00000000-cache",
+          mounts: [{
+            composeServiceName: "web",
+            destinationPath: "/cache",
+          }],
         },
       ],
       new Map([
-        ["st-bind", "/var/lib/tp/data"],
-        ["st-vol", "tp-00000000-cache"],
+        ["loc-bind", "/var/lib/tp/data"],
+        ["loc-vol", "tp-00000000-cache"],
       ]),
       webResolved,
     );
@@ -55,19 +63,22 @@ describe("buildStorageVolumesFragment", () => {
     });
   });
 
-  it("emits external:true for docker_volume and skips mount without destinationPath", () => {
+  it("emits external:true for docker volumes and skips overlay when mounts are empty", () => {
     const volumeId = "01936b3e-8c7a-7b2d-a1f0-123456789abc";
     const fragment = buildStorageVolumesFragment(
       [
         {
           storageId: volumeId,
-          kind: "docker_volume",
+          locationId: "loc-vol",
+          kind: "volume",
           name: "data",
+          provider: "docker",
           serverId: "srv",
           volumeName: volumeId,
+          mounts: [],
         },
       ],
-      new Map([[volumeId, volumeId]]),
+      new Map([["loc-vol", volumeId]]),
       webResolved,
     );
 
@@ -84,13 +95,17 @@ describe("buildStorageVolumesFragment", () => {
         buildStorageVolumesFragment(
           [{
             storageId: "st1",
-            kind: "bind_mount",
+            locationId: "loc1",
+            kind: "directory",
             name: "data",
-            destinationPath: "/data",
-            composeServiceName: "missing",
+            provider: "path",
             serverId: "srv",
+            mounts: [{
+              composeServiceName: "missing",
+              destinationPath: "/data",
+            }],
           }],
-          new Map([["st1", "/host/data"]]),
+          new Map([["loc1", "/host/data"]]),
           webResolved,
         ),
       Error,

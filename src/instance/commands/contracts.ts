@@ -221,25 +221,31 @@ export type EnvironmentDeployVariableMaterial = {
   valueEnvelope: string;
 };
 
+export type EnvironmentDeployStorageMount = {
+  serviceId?: string;
+  composeServiceName?: string;
+  destinationPath: string;
+  subpath?: string;
+  readOnly?: boolean;
+};
+
 export type EnvironmentDeployStorageMaterial = {
   storageId: string;
-  kind: "docker_volume" | "bind_mount" | "file" | "directory";
+  locationId: string;
+  kind: "volume" | "directory" | "file";
   name: string;
+  provider: "docker" | "path";
   sourcePath?: string;
   /**
-   * Mount target inside the container. Required for bind/file/directory;
-   * optional for `docker_volume` when the volume is only declared in compose.
-   */
-  destinationPath?: string;
-  /**
-   * On-host Docker volume name. Required for `docker_volume` rows.
+   * On-host Docker volume name. Required when `provider` is `docker`.
    */
   volumeName?: string;
   principalId?: string;
-  serviceId?: string;
-  composeServiceName?: string;
   serverId: string;
   contentEnvelope?: string;
+  managed?: boolean;
+  externalName?: string;
+  mounts: EnvironmentDeployStorageMount[];
 };
 
 /**
@@ -1699,6 +1705,22 @@ function parseOptionalEnvFile(value: unknown): string | undefined {
 
 const DOCKER_RESOURCE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/;
 
+function parseStorageMount(value: unknown): EnvironmentDeployStorageMount {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid environment deploy storageMaterial mount");
+  }
+  const mount: EnvironmentDeployStorageMount = {
+    destinationPath: parseNonEmptyString(value, "destinationPath"),
+  };
+  if (typeof value.serviceId === "string") mount.serviceId = value.serviceId;
+  if (typeof value.composeServiceName === "string") {
+    mount.composeServiceName = value.composeServiceName;
+  }
+  if (typeof value.subpath === "string") mount.subpath = value.subpath;
+  if (value.readOnly === true) mount.readOnly = true;
+  return mount;
+}
+
 function parseStorageMaterial(
   value: unknown,
 ): EnvironmentDeployStorageMaterial {
@@ -1709,21 +1731,26 @@ function parseStorageMaterial(
     value,
     "kind",
   ) as EnvironmentDeployStorageMaterial["kind"];
+  const provider = parseNonEmptyString(
+    value,
+    "provider",
+  ) as EnvironmentDeployStorageMaterial["provider"];
+  if (
+    (kind !== "volume" && kind !== "directory" && kind !== "file") ||
+    (provider !== "docker" && provider !== "path")
+  ) {
+    throw new TypeError("Invalid environment deploy storageMaterial entry");
+  }
   const material: EnvironmentDeployStorageMaterial = {
     storageId: parseNonEmptyString(value, "storageId"),
+    locationId: parseNonEmptyString(value, "locationId"),
     kind,
     name: parseNonEmptyString(value, "name"),
+    provider,
     serverId: parseNonEmptyString(value, "serverId"),
+    mounts: Array.isArray(value.mounts) ? value.mounts.map(parseStorageMount) : [],
   };
-  if (kind !== "docker_volume") {
-    material.destinationPath = parseNonEmptyString(value, "destinationPath");
-  } else if (
-    typeof value.destinationPath === "string" &&
-    value.destinationPath.length > 0
-  ) {
-    material.destinationPath = value.destinationPath;
-  }
-  if (kind === "docker_volume") {
+  if (provider === "docker") {
     const volumeName = parseNonEmptyString(value, "volumeName");
     if (!DOCKER_RESOURCE_NAME_RE.test(volumeName)) {
       throw new TypeError(
@@ -1738,12 +1765,14 @@ function parseStorageMaterial(
   if (typeof value.principalId === "string") {
     material.principalId = value.principalId;
   }
-  if (typeof value.serviceId === "string") material.serviceId = value.serviceId;
-  if (typeof value.composeServiceName === "string") {
-    material.composeServiceName = value.composeServiceName;
-  }
   if (typeof value.contentEnvelope === "string") {
     material.contentEnvelope = value.contentEnvelope;
+  }
+  if (value.managed === true || value.managed === false) {
+    material.managed = value.managed;
+  }
+  if (typeof value.externalName === "string") {
+    material.externalName = value.externalName;
   }
   return material;
 }

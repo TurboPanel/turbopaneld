@@ -376,7 +376,12 @@ excluded from release packaging (`package-daemon-release.sh` /
   Compose standalone secret files under `/run/turbopanel/deployments/…/secrets/`
   and a non-secret `.env` next to `compose.yaml`. After JWT, it rehydrates
   those `/run` files (`POST /api/daemon/v1/deployments/secrets/rehydrate` then
-  `/secrets/decrypt`) and `compose up -d`.
+  `/secrets/decrypt`) and `compose up -d`. `environment.deploy` `storageMaterial[]`
+  is location-aware: host paths are
+  `<stateDir>/storage/<orgId>/<storageId>/<locationId>/data`. Overlay mounts come
+  from each entry's `mounts[]`. TurboFabric `server.fabric.reconcile` still
+  carries `networks: [{ name, subnet }]` — the Postgres table is `segment`
+  (renamed from `bridge`); the wire payload is unchanged.
 
 ## Subsystem docs (nested `AGENTS.md`)
 

@@ -75,7 +75,7 @@ async function materializeDockerVolume(
 ): Promise<string> {
   if (!entry.volumeName || entry.volumeName.length === 0) {
     throw new Error(
-      `docker_volume ${entry.storageId} missing volumeName`,
+      `volume ${entry.storageId} missing volumeName`,
     );
   }
   const volumeName = entry.volumeName;
@@ -97,23 +97,17 @@ async function materializeHostPathEntry(
   let hostPath = entry.sourcePath ?? baseDir;
 
   if (entry.kind === "directory") {
-    await materializeDirectory(hostPath, ownership);
-  } else if (entry.kind === "file") {
-    hostPath = await materializeFile(baseDir, entry, ownership, fileContent);
-  } else if (entry.kind === "bind_mount") {
     if (ownership) {
-      // Sudo-backed create so parents under principal-owned 0750 trees exist.
       await ensureDirectoryOwnedByPrincipal(
         hostPath,
         ownership.username,
         principalUnixGroupName(ownership.username),
       );
     } else {
-      await ensureParentDirectory(hostPath);
-      await Deno.mkdir(hostPath, { recursive: true, mode: 0o750 }).catch(() => {
-        // Path may already exist as a file mount point.
-      });
+      await materializeDirectory(hostPath, ownership);
     }
+  } else if (entry.kind === "file") {
+    hostPath = await materializeFile(baseDir, entry, ownership, fileContent);
   }
 
   return hostPath;
@@ -159,6 +153,37 @@ function resolveEntryFileContent(
   return decrypted;
 }
 
+/**
+ * Materialize one physical copy. Later `storage.location.ensure` can call this
+ * without going through `environment.deploy`.
+ */
+export async function materializeLocation(
+  layout: LayoutPaths,
+  organizationId: string,
+  entry: EnvironmentDeployStorageMaterial,
+  ownership: EnvironmentDeployPrincipalMaterial | undefined,
+  fileContent: string,
+): Promise<string> {
+  const baseDir = storageHostPath(
+    layout,
+    organizationId,
+    entry.storageId,
+    entry.locationId,
+  );
+  await Deno.mkdir(baseDir, { recursive: true, mode: 0o750 });
+
+  if (entry.kind === "volume" || entry.provider === "docker") {
+    return await materializeDockerVolume(entry);
+  }
+
+  return await materializeHostPathEntry(
+    baseDir,
+    entry,
+    ownership,
+    fileContent,
+  );
+}
+
 export async function materializeStorageEntries(
   layout: LayoutPaths,
   organizationId: string,
@@ -172,29 +197,14 @@ export async function materializeStorageEntries(
 
   for (let i = 0; i < entries.length; i += 1) {
     const entry = entries[i]!;
-    const baseDir = join(
-      layout.stateDir,
-      STORAGE_ROOT,
+    const hostPath = await materializeLocation(
+      layout,
       organizationId,
-      entry.storageId,
-    );
-    await Deno.mkdir(baseDir, { recursive: true, mode: 0o750 });
-
-    if (entry.kind === "docker_volume") {
-      mountPaths.set(
-        entry.storageId,
-        await materializeDockerVolume(entry),
-      );
-      continue;
-    }
-
-    const hostPath = await materializeHostPathEntry(
-      baseDir,
       entry,
       resolveOwnership(entry, principalMap),
       resolveEntryFileContent(entry, decryptedContents[i]),
     );
-    mountPaths.set(entry.storageId, hostPath);
+    mountPaths.set(entry.locationId, hostPath);
   }
 
   return mountPaths;
@@ -204,6 +214,14 @@ export function storageHostPath(
   layout: LayoutPaths,
   organizationId: string,
   storageId: string,
+  locationId: string,
 ): string {
-  return join(layout.stateDir, STORAGE_ROOT, organizationId, storageId);
+  return join(
+    layout.stateDir,
+    STORAGE_ROOT,
+    organizationId,
+    storageId,
+    locationId,
+    "data",
+  );
 }

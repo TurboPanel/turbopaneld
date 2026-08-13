@@ -401,7 +401,7 @@ test("environment.deploy hosting fixture round-trips tcp protocol and ports", ()
   assertEquals(payload.hostings[0]?.ports, [{ published: 5432, target: 5432 }]);
 });
 
-test("environment.deploy storageMaterial accepts docker_volume without destinationPath", () => {
+test("environment.deploy storageMaterial accepts volume without mounts", () => {
   const volumeId = "01936b3e-8c7a-7b2d-a1f0-123456789abc";
   const payload = parseEnvironmentDeployPayload({
     environmentId: "env-1",
@@ -413,15 +413,18 @@ test("environment.deploy storageMaterial accepts docker_volume without destinati
     storageMaterial: [
       {
         storageId: volumeId,
-        kind: "docker_volume",
+        locationId: "loc-1",
+        kind: "volume",
         name: "data",
+        provider: "docker",
         serverId: "srv-1",
         volumeName: volumeId,
+        mounts: [],
       },
     ],
   });
   assertEquals(payload.storageMaterial?.[0]?.volumeName, volumeId);
-  assertEquals(payload.storageMaterial?.[0]?.destinationPath, undefined);
+  assertEquals(payload.storageMaterial?.[0]?.mounts, []);
 });
 
 test("environment.deploy storageMaterial rejects invalid volumeName", () => {
@@ -437,10 +440,13 @@ test("environment.deploy storageMaterial rejects invalid volumeName", () => {
         storageMaterial: [
           {
             storageId: "st1",
-            kind: "docker_volume",
+            locationId: "loc1",
+            kind: "volume",
             name: "data",
+            provider: "docker",
             serverId: "srv-1",
             volumeName: "-bad",
+            mounts: [],
           },
         ],
       }),
