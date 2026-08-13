@@ -1,8 +1,9 @@
 import {
   composeFileArgs,
-  deploymentDir as resolveDeploymentDir,
   resolveDeployedComposePaths,
+  resolveEnvironmentDeploymentDir,
 } from "../../deploy/compose-files.ts";
+import { removeSecretTree } from "../../deploy/secret-runtime.ts";
 import {
   type DockerCliResult,
   runDocker as defaultRunDocker,
@@ -37,6 +38,9 @@ export type EnvironmentStopHandlerDeps = {
 function assertSafeStopIdentifiers(payload: EnvironmentStopPayload): void {
   if (!SAFE_PATH_ID_RE.test(payload.environmentId)) {
     throw new Error("environmentId contains unsupported characters");
+  }
+  if (!SAFE_PATH_ID_RE.test(payload.projectId)) {
+    throw new Error("projectId contains unsupported characters");
   }
   if (!COMPOSE_PROJECT_RE.test(payload.projectName)) {
     throw new Error("projectName must be a valid Docker Compose project name");
@@ -73,8 +77,9 @@ export async function handleEnvironmentStop(
   const run = deps?.runDocker ?? defaultRunDocker;
   const layout = resolveLayout(Deno.env.toObject());
 
-  const deploymentDir = resolveDeploymentDir(
+  const deploymentDir = await resolveEnvironmentDeploymentDir(
     layout,
+    parsedPayload.projectId,
     parsedPayload.environmentId,
   );
   const composePaths = await resolveDeployedComposePaths(deploymentDir);
@@ -109,6 +114,12 @@ export async function handleEnvironmentStop(
       throw err;
     }
   }
+
+  await removeSecretTree(
+    layout,
+    parsedPayload.projectId,
+    parsedPayload.environmentId,
+  );
 
   const summary = hasCompose
     ? `Stopped environment ${parsedPayload.environmentId}`

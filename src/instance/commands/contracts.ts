@@ -10,6 +10,7 @@ export const COMMAND_TYPES = [
   "server.reboot",
   "server.timezone.set",
   "server.wireguard.apply",
+  "server.fabric.reconcile",
   "environment.deploy",
   "environment.lifecycle",
   "environment.stop",
@@ -116,6 +117,47 @@ export type WireguardApplyResult = {
   listenPort?: number;
   applied: boolean;
   summary?: string;
+};
+
+/** Must stay in sync with the instance canonical `server.fabric.reconcile` shape. */
+export type FabricReconcilePeer = {
+  publicKey: string;
+  endpoint?: string;
+  allowedIPs: string[];
+};
+
+/** Must stay in sync with the instance canonical `server.fabric.reconcile` shape. */
+export type FabricReconcileNetwork = {
+  name: string;
+  subnet: string;
+};
+
+/** Must stay in sync with the instance canonical `server.fabric.reconcile` shape. */
+export type FabricReconcileDisabledPayload = {
+  enabled: false;
+};
+
+/** Must stay in sync with the instance canonical `server.fabric.reconcile` shape. */
+export type FabricReconcileEnabledPayload = {
+  enabled: true;
+  fabricId?: string;
+  listenPort?: number;
+  address: string;
+  prefix: string;
+  peers: FabricReconcilePeer[];
+  networks?: FabricReconcileNetwork[];
+};
+
+/** Must stay in sync with the instance canonical `server.fabric.reconcile` shape. */
+export type FabricReconcilePayload =
+  | FabricReconcileDisabledPayload
+  | FabricReconcileEnabledPayload;
+
+/** Must stay in sync with the instance canonical `server.fabric.reconcile` shape. */
+export type FabricReconcileResult = {
+  summary: string;
+  publicKey?: string;
+  skipped?: boolean;
 };
 
 export type EnvironmentDeployHostingProxy = {
@@ -273,7 +315,8 @@ export type EnvironmentDeployIngressService = {
 export type EnvironmentDeployComposeFileRole =
   | "project"
   | "environment"
-  | "platform";
+  | "platform"
+  | "runtime";
 
 /**
  * Must stay in sync with the instance canonical
@@ -303,10 +346,21 @@ export type EnvironmentDeployComposeFile = {
 /** Must stay in sync with the instance canonical `COMPOSE_FILE_NAME_RE`. */
 const COMPOSE_FILE_NAME_RE = /^[A-Za-z0-9._-]+\.ya?ml$/;
 
+export type EnvironmentDeploySecretPlanEntry = {
+  key: string;
+  composeServiceName: string;
+  source: string;
+  target: string;
+  relativePath: string;
+  forBuild: boolean;
+  forRuntime: boolean;
+};
+
 const DEPLOY_COMPOSE_FILE_ROLES = new Set<EnvironmentDeployComposeFileRole>([
   "project",
   "environment",
   "platform",
+  "runtime",
 ]);
 
 const DEPLOY_COMPOSE_FILE_SOURCES = new Set<
@@ -328,10 +382,15 @@ export type EnvironmentDeployPayload = {
    */
   composeYaml: string;
   /**
-   * Ordered compose file chain for multi-file deploys. Must stay in sync with
-   * the instance canonical `EnvironmentDeployCommandPayload.composeFiles`.
+   * Compose files the daemon writes. New deploys send a single
+   * `{ filename: 'compose.yaml', role: 'runtime' }` entry. Older queued
+   * commands may still carry a project → environment → platform chain.
    */
   composeFiles?: EnvironmentDeployComposeFile[];
+  generation?: number;
+  desiredHash?: string;
+  serverId?: string;
+  replicaCounts?: Record<string, number>;
   hostings: EnvironmentDeployHosting[];
   traditionalWebSites?: EnvironmentDeployTraditionalWebSite[];
   /**
@@ -354,6 +413,8 @@ export type EnvironmentDeployPayload = {
   noCache?: boolean;
   tlsMaterial?: EnvironmentDeployTlsMaterial[];
   variableMaterial?: EnvironmentDeployVariableMaterial[];
+  envFile?: string;
+  secretPlan?: EnvironmentDeploySecretPlanEntry[];
   storageMaterial?: EnvironmentDeployStorageMaterial[];
   principalMaterial?: EnvironmentDeployPrincipalMaterial[];
   serviceHooks?: EnvironmentDeployServiceHook[];
@@ -1218,6 +1279,152 @@ export function parseWireguardApplyPayload(
   return payload;
 }
 
+const FABRIC_DOCKER_NETWORK_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+
+function parseFabricUuid(value: unknown, field: string): string {
+  if (typeof value !== "string" || !WIREGUARD_UUID_RE.test(value)) {
+    throw new TypeError(`Invalid fabric ${field}`);
+  }
+  return value;
+}
+
+function parseFabricPeerEntry(value: unknown): FabricReconcilePeer {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("Invalid fabric peer entry");
+  }
+  const record = value as Record<string, unknown>;
+  const publicKey = record.publicKey;
+  if (typeof publicKey !== "string" || !isValidWireguardPublicKey(publicKey)) {
+    throw new TypeError("Invalid fabric peer publicKey");
+  }
+  if (!Array.isArray(record.allowedIPs) || record.allowedIPs.length === 0) {
+    throw new TypeError("Invalid fabric peer allowedIPs");
+  }
+  const allowedIPs: string[] = [];
+  for (const entry of record.allowedIPs) {
+    if (!isValidWireguardAllowedIp(entry)) {
+      throw new TypeError("Invalid fabric peer allowedIPs");
+    }
+    allowedIPs.push((entry as string).trim());
+  }
+  const peer: FabricReconcilePeer = { publicKey, allowedIPs };
+  if (record.endpoint !== undefined) {
+    if (
+      typeof record.endpoint !== "string" ||
+      !isValidWireguardEndpoint(record.endpoint)
+    ) {
+      throw new TypeError("Invalid fabric peer endpoint");
+    }
+    peer.endpoint = record.endpoint;
+  }
+  return peer;
+}
+
+function parseFabricNetworkEntry(value: unknown): FabricReconcileNetwork {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("Invalid fabric network entry");
+  }
+  const record = value as Record<string, unknown>;
+  const name = record.name;
+  if (typeof name !== "string" || !FABRIC_DOCKER_NETWORK_NAME_RE.test(name)) {
+    throw new TypeError("Invalid fabric network name");
+  }
+  const subnet = record.subnet;
+  if (typeof subnet !== "string" || !isValidWireguardAllowedIp(subnet)) {
+    throw new TypeError("Invalid fabric network subnet");
+  }
+  return { name, subnet: subnet.trim() };
+}
+
+function parseEnabledFabricPayload(
+  record: Record<string, unknown>,
+): FabricReconcileEnabledPayload {
+  const address = record.address;
+  if (typeof address !== "string" || !isValidWireguardAllowedIp(address)) {
+    throw new TypeError("Invalid fabric address");
+  }
+  const prefix = record.prefix;
+  if (typeof prefix !== "string" || !isValidWireguardAllowedIp(prefix)) {
+    throw new TypeError("Invalid fabric prefix");
+  }
+  if (!Array.isArray(record.peers)) {
+    throw new TypeError("Invalid fabric peers");
+  }
+  const payload: FabricReconcileEnabledPayload = {
+    enabled: true,
+    address: address.trim(),
+    prefix: prefix.trim(),
+    peers: record.peers.map(parseFabricPeerEntry),
+  };
+  if (record.fabricId !== undefined) {
+    payload.fabricId = parseFabricUuid(record.fabricId, "fabricId");
+  }
+  if (record.listenPort !== undefined) {
+    if (!isValidWireguardListenPort(record.listenPort)) {
+      throw new TypeError("Invalid fabric listenPort");
+    }
+    payload.listenPort = record.listenPort;
+  }
+  if (record.networks !== undefined) {
+    if (!Array.isArray(record.networks)) {
+      throw new TypeError("Invalid fabric networks");
+    }
+    payload.networks = record.networks.map(parseFabricNetworkEntry);
+  }
+  return payload;
+}
+
+/** Must stay in sync with the instance canonical `server.fabric.reconcile` validator. */
+export function parseFabricReconcilePayload(
+  value: unknown,
+): FabricReconcilePayload {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("Invalid fabric reconcile payload");
+  }
+  const record = value as Record<string, unknown>;
+  if (typeof record.enabled !== "boolean") {
+    throw new TypeError("Invalid fabric enabled");
+  }
+  if (!record.enabled) {
+    return { enabled: false };
+  }
+  return parseEnabledFabricPayload(record);
+}
+
+/** Must stay in sync with the instance canonical `server.fabric.reconcile` validator. */
+export function parseFabricReconcileResult(
+  value: unknown,
+): FabricReconcileResult {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("Invalid fabric reconcile result");
+  }
+  const record = value as Record<string, unknown>;
+  const summary = record.summary;
+  if (typeof summary !== "string" || summary.length === 0) {
+    throw new TypeError("Invalid fabric reconcile result summary");
+  }
+  const result: FabricReconcileResult = { summary };
+  if (record.skipped !== undefined) {
+    if (typeof record.skipped !== "boolean") {
+      throw new TypeError("Invalid fabric reconcile result skipped");
+    }
+    result.skipped = record.skipped;
+  }
+  if (record.publicKey !== undefined) {
+    if (
+      typeof record.publicKey !== "string" ||
+      !isValidWireguardPublicKey(record.publicKey)
+    ) {
+      throw new TypeError("Invalid fabric reconcile result publicKey");
+    }
+    result.publicKey = record.publicKey;
+  }
+  if (result.skipped !== true && result.publicKey === undefined) {
+    throw new TypeError("Invalid fabric reconcile result publicKey");
+  }
+  return result;
+}
+
 function parseNonEmptyString(
   record: Record<string, unknown>,
   key: string,
@@ -1443,6 +1650,51 @@ function parseVariableMaterial(
     isLiteral: value.isLiteral === true,
     valueEnvelope: parseNonEmptyString(value, "valueEnvelope"),
   };
+}
+
+const SECRET_PLAN_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const MAX_DEPLOY_ENV_FILE_CHARS = 1_048_576;
+
+function parseSecretPlanEntry(
+  value: unknown,
+): EnvironmentDeploySecretPlanEntry {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid environment deploy secretPlan entry");
+  }
+  const relativePath = parseNonEmptyString(value, "relativePath");
+  if (
+    relativePath.includes("/") ||
+    relativePath.includes("\\") ||
+    relativePath.includes("..") ||
+    !SECRET_PLAN_NAME_RE.test(relativePath)
+  ) {
+    throw new TypeError("Invalid environment deploy secretPlan relativePath");
+  }
+  const source = parseNonEmptyString(value, "source");
+  const target = parseNonEmptyString(value, "target");
+  if (!SECRET_PLAN_NAME_RE.test(source) || !SECRET_PLAN_NAME_RE.test(target)) {
+    throw new TypeError("Invalid environment deploy secretPlan source/target");
+  }
+  return {
+    key: parseNonEmptyString(value, "key"),
+    composeServiceName: parseNonEmptyString(value, "composeServiceName"),
+    source,
+    target,
+    relativePath,
+    forBuild: value.forBuild === true,
+    forRuntime: value.forRuntime !== false,
+  };
+}
+
+function parseOptionalEnvFile(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") {
+    throw new TypeError("envFile must be a string");
+  }
+  if (value.length > MAX_DEPLOY_ENV_FILE_CHARS) {
+    throw new TypeError("envFile exceeds maximum length");
+  }
+  return value;
 }
 
 const DOCKER_RESOURCE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/;
@@ -1692,6 +1944,58 @@ function parseOptionalBoolean(
   return value;
 }
 
+const DESIRED_HASH_RE = /^[0-9a-f]{64}$/;
+const DEPLOY_SERVER_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function parseOptionalGeneration(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new TypeError("Invalid environment deploy payload");
+  }
+  return value;
+}
+
+function parseOptionalDesiredHash(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !DESIRED_HASH_RE.test(value)) {
+    throw new TypeError("Invalid environment deploy payload");
+  }
+  return value;
+}
+
+function parseOptionalDeployServerId(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !DEPLOY_SERVER_ID_RE.test(value)) {
+    throw new TypeError("Invalid environment deploy payload");
+  }
+  return value;
+}
+
+function parseReplicaCounts(
+  value: unknown,
+): Record<string, number> | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError("Invalid environment deploy payload");
+  }
+  const out: Record<string, number> = {};
+  for (
+    const [name, count] of Object.entries(value as Record<string, unknown>)
+  ) {
+    if (
+      name.length === 0 ||
+      typeof count !== "number" ||
+      !Number.isInteger(count) ||
+      count < 1
+    ) {
+      throw new TypeError("Invalid environment deploy payload");
+    }
+    out[name] = count;
+  }
+  return out;
+}
+
 const DOCKER_EXTERNAL_NETWORK_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 
 function parseDockerExternalNetworkName(value: unknown): string {
@@ -1921,6 +2225,12 @@ export function parseEnvironmentDeployPayload(
     "variableMaterial",
     parseVariableMaterial,
   );
+  const envFile = parseOptionalEnvFile(value.envFile);
+  const secretPlan = parseOptionalMaterialArray(
+    value.secretPlan,
+    "secretPlan",
+    parseSecretPlanEntry,
+  );
   const storageMaterial = parseOptionalMaterialArray(
     value.storageMaterial,
     "storageMaterial",
@@ -1955,6 +2265,10 @@ export function parseEnvironmentDeployPayload(
   );
   const composeFiles = parseEnvironmentDeployComposeFiles(value.composeFiles);
   const noCache = parseOptionalBoolean(value.noCache, "noCache");
+  const generation = parseOptionalGeneration(value.generation);
+  const desiredHash = parseOptionalDesiredHash(value.desiredHash);
+  const serverId = parseOptionalDeployServerId(value.serverId);
+  const replicaCounts = parseReplicaCounts(value.replicaCounts);
 
   return {
     environmentId: parseNonEmptyString(value, "environmentId"),
@@ -1971,9 +2285,15 @@ export function parseEnvironmentDeployPayload(
     ...(noCache === undefined ? {} : { noCache }),
     ...(tlsMaterial === undefined ? {} : { tlsMaterial }),
     ...(variableMaterial === undefined ? {} : { variableMaterial }),
+    ...(envFile === undefined ? {} : { envFile }),
+    ...(secretPlan === undefined ? {} : { secretPlan }),
     ...(storageMaterial === undefined ? {} : { storageMaterial }),
     ...(principalMaterial === undefined ? {} : { principalMaterial }),
     ...(serviceHooks === undefined ? {} : { serviceHooks }),
+    ...(generation === undefined ? {} : { generation }),
+    ...(desiredHash === undefined ? {} : { desiredHash }),
+    ...(serverId === undefined ? {} : { serverId }),
+    ...(replicaCounts === undefined ? {} : { replicaCounts }),
   };
 }
 

@@ -414,6 +414,31 @@ export function resolveLayout(
 }
 
 /**
+ * TurboFabric generated-state root (`<daemonStateDir>/network/`).
+ * Private key lives at `wireguard/private.key` (mode 0600); reconcilable
+ * facts at `state.json`. Never under `runDir`.
+ */
+export function fabricNetworkDir(
+  layout: Pick<LayoutPaths, "daemonStateDir">,
+): string {
+  return join(layout.daemonStateDir, "network");
+}
+
+/** Host WireGuard private key for interface `tp0`. */
+export function fabricPrivateKeyPath(
+  layout: Pick<LayoutPaths, "daemonStateDir">,
+): string {
+  return join(fabricNetworkDir(layout), "wireguard", "private.key");
+}
+
+/** Reconcilable TurboFabric facts (public key, address, peers, networks). */
+export function fabricStatePath(
+  layout: Pick<LayoutPaths, "daemonStateDir">,
+): string {
+  return join(fabricNetworkDir(layout), "state.json");
+}
+
+/**
  * Absolute path to the daemon install root.
  *
  * Prefer `TURBOPANEL_DAEMON_ROOT`, then a resolvable checkout tree, then the

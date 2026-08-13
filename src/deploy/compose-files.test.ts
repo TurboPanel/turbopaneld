@@ -6,10 +6,16 @@ import {
   composeFileArgs,
   ComposeManifestError,
   DAEMON_COMPOSE_FILENAME,
+  DEPLOYMENT_MANIFEST_FILENAME,
+  environmentDeploymentDir,
   LEGACY_COMPOSE_FILENAME,
   pruneStaleComposeLayerFiles,
+  publishStagedRuntimeCompose,
   readComposeFileManifest,
+  resetComposeStageDir,
   resolveDeployedComposePaths,
+  resolveEnvironmentDeploymentDir,
+  RUNTIME_COMPOSE_FILENAME,
   writeComposeFileManifest,
   writeComposeFileSecure,
   writeComposeLayerFiles,
@@ -302,4 +308,108 @@ test("composeHasContainerServices is tag-aware for !reset / !override", () => {
     ]),
     true,
   );
+});
+
+test({
+  name: "resolveDeployedComposePaths prefers compiled compose.yaml",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    const dir = await Deno.makeTempDir({ prefix: "tp-compose-runtime-" });
+    try {
+      const runtime = join(dir, RUNTIME_COMPOSE_FILENAME);
+      await Deno.writeTextFile(runtime, "services:\n  web: {}\n");
+      await Deno.writeTextFile(
+        join(dir, LEGACY_COMPOSE_FILENAME),
+        "services: {}\n",
+      );
+      assertEquals(await resolveDeployedComposePaths(dir), [runtime]);
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+});
+
+test({
+  name:
+    "resolveEnvironmentDeploymentDir prefers the compiled tree then the pre-cutover path",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-compose-layout-" });
+    const layout = { stateDir: join(root, "state") };
+    const projectId = "proj-1";
+    const environmentId = "env-1";
+    try {
+      const next = environmentDeploymentDir(layout, projectId, environmentId);
+      assertEquals(
+        await resolveEnvironmentDeploymentDir(layout, projectId, environmentId),
+        next,
+      );
+
+      const legacy = join(layout.stateDir, "deployments", environmentId);
+      await Deno.mkdir(legacy, { recursive: true });
+      await Deno.writeTextFile(
+        join(legacy, LEGACY_COMPOSE_FILENAME),
+        "services: {}\n",
+      );
+      assertEquals(
+        await resolveEnvironmentDeploymentDir(layout, projectId, environmentId),
+        legacy,
+      );
+
+      await Deno.mkdir(next, { recursive: true });
+      await Deno.writeTextFile(
+        join(next, RUNTIME_COMPOSE_FILENAME),
+        "services: {}\n",
+      );
+      assertEquals(
+        await resolveEnvironmentDeploymentDir(layout, projectId, environmentId),
+        next,
+      );
+    } finally {
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});
+
+test({
+  name:
+    "publishStagedRuntimeCompose writes compose.yaml + deployment.json and prunes layered files",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    const dir = await Deno.makeTempDir({ prefix: "tp-compose-publish-" });
+    try {
+      await Deno.writeTextFile(
+        join(dir, "docker-compose.project.yml"),
+        "services: {}\n",
+      );
+      await writeComposeFileManifest(dir, ["docker-compose.project.yml"]);
+      const stageDir = await resetComposeStageDir(dir);
+      await writeComposeFileSecure(
+        join(stageDir, RUNTIME_COMPOSE_FILENAME),
+        "services:\n  web:\n    image: nginx:alpine\n",
+      );
+      const live = await publishStagedRuntimeCompose(dir, stageDir, {
+        version: 2,
+        projectId: "proj-1",
+        environmentId: "env-1",
+        serverId: "server-1",
+        generation: 1,
+        projectName: "demo",
+        composeSha256: "a".repeat(64),
+        services: { web: { replicas: 1 } },
+      });
+      assertEquals(live, [join(dir, RUNTIME_COMPOSE_FILENAME)]);
+      await Deno.stat(join(dir, DEPLOYMENT_MANIFEST_FILENAME));
+      await assertRejects(
+        () => Deno.stat(join(dir, "docker-compose.project.yml")),
+        Deno.errors.NotFound,
+      );
+      await assertRejects(
+        () => Deno.stat(join(dir, COMPOSE_MANIFEST_FILENAME)),
+        Deno.errors.NotFound,
+      );
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
 });

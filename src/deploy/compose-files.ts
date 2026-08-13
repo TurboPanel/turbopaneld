@@ -1,9 +1,10 @@
 /**
- * Compose multi-file path, argv, and deployment-dir manifest helpers.
+ * Compose file path, argv, and deployment-dir helpers.
  *
- * User layers from `environment.deploy` are written under the deployment dir;
- * the ordered basenames (including the optional daemon overlay) are persisted
- * so lifecycle/stop rebuild the same `docker compose -f` chain.
+ * Compiled deploys write `compose.yaml` + `deployment.json` under
+ * `<stateDir>/deployments/<projectId>/<environmentId>/`. Lifecycle/stop prefer
+ * that tree and fall back to the pre-cutover `deployments/<environmentId>/`
+ * layout until the next deploy republishes.
  */
 
 import { basename, join } from "@std/path";
@@ -11,9 +12,12 @@ import { logInfo } from "../logger.ts";
 
 export const DAEMON_COMPOSE_FILENAME = "docker-compose.turbopanel.daemon.yml";
 export const LEGACY_COMPOSE_FILENAME = "docker-compose.yml";
+export const RUNTIME_COMPOSE_FILENAME = "compose.yaml";
+export const COMPOSE_ENV_FILENAME = ".env";
 export const COMPOSE_MANIFEST_FILENAME = "compose-files.json";
+export const DEPLOYMENT_MANIFEST_FILENAME = "deployment.json";
 /** Staging subdir under a deployment for transactional chain replacement. */
-export const COMPOSE_STAGE_DIRNAME = ".compose-stage";
+export const COMPOSE_STAGE_DIRNAME = ".staging";
 
 /** Required mode for compose layers, daemon overlay, and the manifest. */
 export const COMPOSE_FILE_MODE = 0o640;
@@ -68,12 +72,277 @@ export function composeFileArgs(
   return args;
 }
 
-/** `<stateDir>/deployments/<environmentId>`. */
-export function deploymentDir(
+/** `<stateDir>/deployments/<environmentId>` (pre-compiler layout). */
+export function legacyDeploymentDir(
   layout: { stateDir: string },
   environmentId: string,
 ): string {
   return join(layout.stateDir, "deployments", environmentId);
+}
+
+/** `<stateDir>/deployments/<projectId>/<environmentId>`. */
+export function environmentDeploymentDir(
+  layout: { stateDir: string },
+  projectId: string,
+  environmentId: string,
+): string {
+  return join(layout.stateDir, "deployments", projectId, environmentId);
+}
+
+/** @deprecated Prefer {@link environmentDeploymentDir} / {@link resolveEnvironmentDeploymentDir}. */
+export function deploymentDir(
+  layout: { stateDir: string },
+  environmentId: string,
+): string {
+  return legacyDeploymentDir(layout, environmentId);
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    const stat = await Deno.stat(path);
+    return stat.isFile;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return false;
+    throw err;
+  }
+}
+
+async function dirLooksDeployed(dir: string): Promise<boolean> {
+  for (
+    const name of [
+      DEPLOYMENT_MANIFEST_FILENAME,
+      RUNTIME_COMPOSE_FILENAME,
+      COMPOSE_MANIFEST_FILENAME,
+      LEGACY_COMPOSE_FILENAME,
+    ]
+  ) {
+    if (await fileExists(join(dir, name))) return true;
+  }
+  return false;
+}
+
+/**
+ * Prefer the compiled layout; fall back to the pre-cutover
+ * `deployments/<environmentId>/` tree until the next deploy republishes.
+ */
+export async function resolveEnvironmentDeploymentDir(
+  layout: { stateDir: string },
+  projectId: string,
+  environmentId: string,
+): Promise<string> {
+  const next = environmentDeploymentDir(layout, projectId, environmentId);
+  const legacy = legacyDeploymentDir(layout, environmentId);
+  if (await dirLooksDeployed(next)) return next;
+  if (await dirLooksDeployed(legacy)) return legacy;
+  return next;
+}
+
+export type DeploymentManifestSecret = {
+  source: string;
+  target: string;
+  relativePath: string;
+  composeServiceName: string;
+  forBuild: boolean;
+  key?: string;
+  forRuntime?: boolean;
+};
+
+export type DeploymentManifestV2 = {
+  version: 2;
+  projectId: string;
+  environmentId: string;
+  serverId: string;
+  generation: number;
+  projectName: string;
+  composeSha256: string;
+  services: Record<string, { replicas: number }>;
+  /** Host secret files (no plaintext). Absent on pre-secrets manifests. */
+  secrets?: DeploymentManifestSecret[];
+};
+
+function isDeploymentManifestV2(
+  value: unknown,
+): value is DeploymentManifestV2 {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  if (record.version !== 2) return false;
+  if (typeof record.projectId !== "string" || record.projectId.length === 0) {
+    return false;
+  }
+  if (
+    typeof record.environmentId !== "string" ||
+    record.environmentId.length === 0
+  ) {
+    return false;
+  }
+  if (typeof record.serverId !== "string") return false;
+  if (typeof record.generation !== "number" || record.generation < 0) {
+    return false;
+  }
+  if (typeof record.projectName !== "string" || record.projectName.length === 0) {
+    return false;
+  }
+  if (
+    typeof record.composeSha256 !== "string" ||
+    !/^[0-9a-f]{64}$/.test(record.composeSha256)
+  ) {
+    return false;
+  }
+  if (
+    typeof record.services !== "object" ||
+    record.services === null ||
+    Array.isArray(record.services)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+const SECRET_PLAN_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+function parseManifestSecret(
+  value: unknown,
+): DeploymentManifestSecret | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.source !== "string" ||
+    typeof record.target !== "string" ||
+    typeof record.relativePath !== "string" ||
+    typeof record.composeServiceName !== "string"
+  ) {
+    return null;
+  }
+  if (
+    record.relativePath.includes("/") ||
+    record.relativePath.includes("\\") ||
+    record.relativePath.includes("..") ||
+    !SECRET_PLAN_NAME_RE.test(record.relativePath)
+  ) {
+    return null;
+  }
+  const entry: DeploymentManifestSecret = {
+    source: record.source,
+    target: record.target,
+    relativePath: record.relativePath,
+    composeServiceName: record.composeServiceName,
+    forBuild: record.forBuild === true,
+  };
+  if (typeof record.key === "string" && record.key.length > 0) {
+    entry.key = record.key;
+  }
+  if (typeof record.forRuntime === "boolean") {
+    entry.forRuntime = record.forRuntime;
+  }
+  return entry;
+}
+
+function parseManifestSecrets(value: unknown): DeploymentManifestSecret[] {
+  if (!Array.isArray(value)) return [];
+  const out: DeploymentManifestSecret[] = [];
+  for (const item of value) {
+    const parsed = parseManifestSecret(item);
+    if (parsed) out.push(parsed);
+  }
+  return out;
+}
+
+export async function writeDeploymentManifest(
+  dir: string,
+  manifest: DeploymentManifestV2,
+): Promise<void> {
+  const body = JSON.stringify(manifest, null, 2) + "\n";
+  await writeComposeFileSecure(join(dir, DEPLOYMENT_MANIFEST_FILENAME), body);
+}
+
+export async function readDeploymentManifest(
+  dir: string,
+): Promise<DeploymentManifestV2 | null> {
+  const path = join(dir, DEPLOYMENT_MANIFEST_FILENAME);
+  let text: string;
+  try {
+    text = await Deno.readTextFile(path);
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return null;
+    throw err;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!isDeploymentManifestV2(parsed)) return null;
+  const secrets = parseManifestSecrets(
+    (parsed as unknown as Record<string, unknown>).secrets,
+  );
+  return secrets.length > 0 ? { ...parsed, secrets } : parsed;
+}
+
+export type LocalDeploymentManifest = {
+  dir: string;
+  manifest: DeploymentManifestV2;
+};
+
+/**
+ * Scan `<stateDir>/deployments/` for version-2 `deployment.json` files
+ * (compiled `<projectId>/<environmentId>/` trees and leftover single-level
+ * dirs).
+ */
+export async function listLocalDeploymentManifests(
+  layout: { stateDir: string },
+): Promise<LocalDeploymentManifest[]> {
+  const root = join(layout.stateDir, "deployments");
+  const out: LocalDeploymentManifest[] = [];
+  let projectEntries: Deno.DirEntry[];
+  try {
+    projectEntries = [];
+    for await (const entry of Deno.readDir(root)) {
+      projectEntries.push(entry);
+    }
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return [];
+    throw err;
+  }
+
+  for (const projectEntry of projectEntries) {
+    if (!projectEntry.isDirectory) continue;
+    if (projectEntry.name === COMPOSE_STAGE_DIRNAME) continue;
+    const projectDir = join(root, projectEntry.name);
+    const direct = await readDeploymentManifest(projectDir);
+    if (direct) out.push({ dir: projectDir, manifest: direct });
+    try {
+      for await (const envEntry of Deno.readDir(projectDir)) {
+        if (!envEntry.isDirectory) continue;
+        if (envEntry.name === COMPOSE_STAGE_DIRNAME) continue;
+        const envDir = join(projectDir, envEntry.name);
+        const manifest = await readDeploymentManifest(envDir);
+        if (manifest) out.push({ dir: envDir, manifest });
+      }
+    } catch (err) {
+      if (!(err instanceof Deno.errors.NotFound)) throw err;
+    }
+  }
+  return out;
+}
+
+export async function writeComposeEnvFile(
+  dir: string,
+  content: string,
+): Promise<void> {
+  await writeComposeFileSecure(join(dir, COMPOSE_ENV_FILENAME), content);
+}
+
+export async function removeComposeEnvFile(dir: string): Promise<void> {
+  try {
+    await Deno.remove(join(dir, COMPOSE_ENV_FILENAME));
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
 }
 
 export type ComposeLayerWrite = {
@@ -148,6 +417,32 @@ export async function publishStagedComposeChain(
   await writeComposeFileManifest(deploymentDir, basenames);
   await pruneStaleComposeLayerFiles(deploymentDir, new Set(basenames));
   return livePaths;
+}
+
+/**
+ * Publish a single compiled `compose.yaml` plus `deployment.json`, then prune
+ * leftover layered compose files and the v1 `compose-files.json` manifest.
+ */
+export async function publishStagedRuntimeCompose(
+  deploymentDir: string,
+  stageDir: string,
+  manifest: DeploymentManifestV2,
+): Promise<string[]> {
+  const staged = join(stageDir, RUNTIME_COMPOSE_FILENAME);
+  const live = join(deploymentDir, RUNTIME_COMPOSE_FILENAME);
+  const content = await Deno.readTextFile(staged);
+  await writeComposeFileSecure(live, content);
+  await writeDeploymentManifest(deploymentDir, manifest);
+  await pruneStaleComposeLayerFiles(
+    deploymentDir,
+    new Set([RUNTIME_COMPOSE_FILENAME]),
+  );
+  try {
+    await Deno.remove(join(deploymentDir, COMPOSE_MANIFEST_FILENAME));
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+  return [live];
 }
 
 /** Recreate an empty compose stage directory under `deploymentDir`. */
@@ -319,16 +614,14 @@ export async function readComposeFileManifest(
 export async function resolveDeployedComposePaths(
   dir: string,
 ): Promise<string[] | null> {
+  const runtime = join(dir, RUNTIME_COMPOSE_FILENAME);
+  if (await fileExists(runtime)) return [runtime];
+
   const fromManifest = await readComposeFileManifest(dir);
   if (fromManifest !== null) return fromManifest;
 
   const legacy = join(dir, LEGACY_COMPOSE_FILENAME);
-  try {
-    const stat = await Deno.stat(legacy);
-    if (stat.isFile) return [legacy];
-  } catch (err) {
-    if (!(err instanceof Deno.errors.NotFound)) throw err;
-  }
+  if (await fileExists(legacy)) return [legacy];
   return null;
 }
 

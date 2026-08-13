@@ -44,6 +44,7 @@ import {
   DEV_DAEMON_STATE_DIR_DEFAULT,
   DEV_INSTANCE_DIR_DEFAULT,
   DEV_RUNTIMES_DIR_DEFAULT,
+  fabricNetworkDir,
   PROD_BIN_DIR_DEFAULT,
   PROD_CONFIG_DIR_DEFAULT,
   PROD_DAEMON_ROOT_DEFAULT,
@@ -342,6 +343,11 @@ test("layout env overrides apply in development mode", () => {
   assertEquals(layout.runDir, "/custom/run", "runDir");
   assertEquals(layout.stateDir, "/custom/state", "stateDir");
   assertEquals(layout.daemonStateDir, "/custom/state", "daemonStateDir");
+  assertEquals(
+    fabricNetworkDir(layout),
+    "/custom/state/network",
+    "fabricNetworkDir",
+  );
   assertEquals(
     layout.instanceCaPath,
     "/custom/config/instance-ca.pem",

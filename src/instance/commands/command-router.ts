@@ -10,6 +10,7 @@ import {
   parseEnvironmentDeployPayload,
   parseEnvironmentLifecyclePayload,
   parseEnvironmentStopPayload,
+  parseFabricReconcilePayload,
   parseHostnamePayload,
   parseManagedApplyPayload,
   parseManagedBackupPayload,
@@ -36,6 +37,7 @@ import { handleManagedLifecycle } from "../../managed/lifecycle.ts";
 import { handleManagedPromote } from "../../managed/promote.ts";
 import { handleManagedIngressReconcile } from "./managed-ingress-reconcile.ts";
 import { handleEnvironmentLifecycle } from "./lifecycle-environment.ts";
+import { parseRehydrateDeploymentResults } from "../../deploy/rehydrate-deployments.ts";
 import { handleEnvironmentStop } from "./stop-environment.ts";
 import { handleSystemReconcile } from "./system-reconcile.ts";
 import { handleHostname } from "./hostname.ts";
@@ -43,11 +45,28 @@ import { handleNtp } from "./ntp.ts";
 import { handlePing } from "./ping.ts";
 import { handleReboot } from "./reboot.ts";
 import { handleTimezone } from "./timezone.ts";
+import { handleFabricReconcile } from "./fabric.ts";
 import { handleWireguardApply } from "./wireguard.ts";
 
 export interface CommandRouterDeps {
   /** Decrypt tpdaemon envelopes via POST /api/daemon/v1/secrets/decrypt. */
   decryptSecrets?: (ciphertexts: string[]) => Promise<(string | null)[]>;
+  /** Fetch last-applied secret plans + envelopes for boot/lifecycle rehydrate. */
+  rehydrateDeploymentSecrets?: (
+    deployments: ReadonlyArray<{
+      projectId: string;
+      environmentId: string;
+      generation?: number;
+    }>,
+  ) => Promise<
+    Array<{
+      projectId: string;
+      environmentId: string;
+      generation: number;
+      secretPlan: unknown;
+      variableMaterial: unknown;
+    }>
+  >;
 }
 
 function sanitizeError(value: unknown, maxLen = 500): string {
@@ -124,6 +143,13 @@ export async function handleCommandDispatch(
         daemonRespondedAt = new Date().toISOString();
         break;
       }
+      case "server.fabric.reconcile": {
+        const payload = parseFabricReconcilePayload(message.payload);
+        result = await handleFabricReconcile(payload, daemonReceivedAt);
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
       case "server.reboot": {
         parseRebootPayload(message.payload);
         result = await handleReboot(
@@ -145,7 +171,15 @@ export async function handleCommandDispatch(
       }
       case "environment.lifecycle": {
         const payload = parseEnvironmentLifecyclePayload(message.payload);
-        result = await handleEnvironmentLifecycle(payload, daemonReceivedAt);
+        result = await handleEnvironmentLifecycle(payload, daemonReceivedAt, {
+          decryptSecrets: deps?.decryptSecrets,
+          rehydrateDeploymentSecrets: deps?.rehydrateDeploymentSecrets
+            ? async (deployments) =>
+              parseRehydrateDeploymentResults(
+                await deps.rehydrateDeploymentSecrets!(deployments),
+              )
+            : undefined,
+        });
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;

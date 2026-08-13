@@ -4,6 +4,7 @@ import { DAEMON_COMPOSE_FILENAME } from "./compose-files.ts";
 import {
   isEmptyFragment,
   mergeComposeOverlayFragments,
+  mergeOverlayIntoComposeYaml,
   writeDaemonComposeLayer,
 } from "./compose-overlay.ts";
 
@@ -59,6 +60,26 @@ test("isEmptyFragment detects empty overlay", () => {
   assertEquals(
     isEmptyFragment({ services: { web: { image: "nginx" } } }),
     false,
+  );
+});
+
+test("mergeOverlayIntoComposeYaml merges overlay and preserves other keys", () => {
+  const merged = mergeOverlayIntoComposeYaml(
+    "name: demo\nservices:\n  web:\n    image: nginx:alpine\n",
+    {
+      services: {
+        web: { environment: { K: "v" } },
+      },
+      networks: { "turbopanel-managed": { external: true } },
+    },
+  );
+  assertEquals(merged.includes("name: demo"), true);
+  assertEquals(merged.includes("image: nginx:alpine"), true);
+  assertEquals(merged.includes("K: v"), true);
+  assertEquals(merged.includes("turbopanel-managed"), true);
+  assertEquals(
+    mergeOverlayIntoComposeYaml("services:\n  web: {}\n", {}),
+    "services:\n  web: {}\n",
   );
 });
 

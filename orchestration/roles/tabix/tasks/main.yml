@@ -251,5 +251,5 @@
   ansible.builtin.systemd:
     name: "{{ tabix_service_name }}"
     daemon_reload: true
-    enabled: true
-    state: started
+    enabled: "{{ turbopanel_optional_tabix | default(false) | bool }}"
+    state: "{{ 'started' if (turbopanel_optional_tabix | default(false) | bool) else 'stopped' }}"

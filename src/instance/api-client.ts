@@ -180,6 +180,71 @@ export class DaemonApiClient {
     );
   }
 
+  /**
+   * Fetch last-applied secret plans plus tpdaemon envelopes for local
+   * deployments. Plaintext never appears in this response.
+   */
+  async rehydrateDeploymentSecrets(
+    deployments: ReadonlyArray<{
+      projectId: string;
+      environmentId: string;
+      generation?: number;
+    }>,
+  ): Promise<
+    Array<{
+      projectId: string;
+      environmentId: string;
+      generation: number;
+      secretPlan: unknown;
+      variableMaterial: unknown;
+    }>
+  > {
+    if (deployments.length === 0) return [];
+    const body = await this.#requestJson<{
+      ok?: boolean;
+      deployments?: unknown;
+    }>(
+      "/api/daemon/v1/deployments/secrets/rehydrate",
+      {
+        method: "POST",
+        body: JSON.stringify({ deployments }),
+      },
+      { auth: true },
+    );
+    if (!Array.isArray(body.deployments)) {
+      throw new DaemonApiError(500, "Invalid secrets/rehydrate response");
+    }
+    const out: Array<{
+      projectId: string;
+      environmentId: string;
+      generation: number;
+      secretPlan: unknown;
+      variableMaterial: unknown;
+    }> = [];
+    for (const entry of body.deployments) {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+        continue;
+      }
+      const record = entry as Record<string, unknown>;
+      if (
+        typeof record.projectId !== "string" ||
+        typeof record.environmentId !== "string"
+      ) {
+        continue;
+      }
+      out.push({
+        projectId: record.projectId,
+        environmentId: record.environmentId,
+        generation: typeof record.generation === "number"
+          ? record.generation
+          : 0,
+        secretPlan: record.secretPlan,
+        variableMaterial: record.variableMaterial,
+      });
+    }
+    return out;
+  }
+
   async #requestJson<T>(
     path: string,
     init: RequestInit,

@@ -1,21 +1,26 @@
-import { buildSecretVariablesFragment } from "../../deploy/apply-deploy-variables.ts";
 import { buildStorageVolumesFragment } from "../../deploy/apply-storage-volumes.ts";
 import { buildHostingLabelsFragment } from "../../deploy/compose-labels.ts";
+import { encodeHex } from "@std/encoding/hex";
+import { join } from "@std/path";
 import {
-  composeBasename,
   composeFileArgs,
-  deploymentDir as resolveDeploymentDir,
-  LEGACY_COMPOSE_FILENAME,
+  environmentDeploymentDir,
+  legacyDeploymentDir,
   pruneStaleComposeLayerFiles,
-  publishStagedComposeChain,
+  publishStagedRuntimeCompose,
+  removeComposeEnvFile,
   removeComposeStageDir,
   resetComposeStageDir,
-  writeComposeFileManifest,
-  writeComposeLayerFiles,
+  RUNTIME_COMPOSE_FILENAME,
+  writeComposeEnvFile,
+  writeComposeFileSecure,
+  writeDeploymentManifest,
+  type DeploymentManifestSecret,
+  type DeploymentManifestV2,
 } from "../../deploy/compose-files.ts";
 import {
   mergeComposeOverlayFragments,
-  writeDaemonComposeLayer,
+  mergeOverlayIntoComposeYaml,
 } from "../../deploy/compose-overlay.ts";
 import {
   parseComposePsEntries,
@@ -62,7 +67,10 @@ import {
   resolveDockerHostGatewayAddress,
 } from "../../deploy/traditional-web-docker.ts";
 import { logInfo } from "../../logger.ts";
-import { resolveLayout } from "../../paths/layout.ts";
+import {
+  materializeSecretFiles,
+  rewriteComposeSecretFilePaths,
+} from "../../deploy/secret-runtime.ts";
 import {
   type EnvironmentDeployComposeFile,
   type EnvironmentDeployContainer,
@@ -74,7 +82,7 @@ import {
   type EnvironmentDeployTraditionalWebSite,
   parseEnvironmentDeployPayload,
 } from "./contracts.ts";
-import type { LayoutPaths } from "../../paths/layout.ts";
+import { resolveLayout, type LayoutPaths } from "../../paths/layout.ts";
 
 const SAFE_PATH_ID_RE = /^[A-Za-z0-9_-]+$/;
 const COMPOSE_PROJECT_RE = /^[a-z0-9][a-z0-9_-]*$/;
@@ -197,6 +205,9 @@ function assertSafeDeploymentIdentifiers(
 ): void {
   if (!SAFE_PATH_ID_RE.test(payload.environmentId)) {
     throw new Error("environmentId contains unsupported characters");
+  }
+  if (!SAFE_PATH_ID_RE.test(payload.projectId)) {
+    throw new Error("projectId contains unsupported characters");
   }
   if (!COMPOSE_PROJECT_RE.test(payload.projectName)) {
     throw new Error("projectName must be a valid Docker Compose project name");
@@ -342,8 +353,8 @@ async function resolveDeployMountPaths(
 }
 
 /**
- * Payload compose layers when present; otherwise a one-element legacy chain
- * from `composeYaml` written as `docker-compose.yml`.
+ * Payload compose files when present; otherwise a single compiled
+ * `compose.yaml` from `composeYaml`.
  */
 export function resolveDeployComposeFiles(
   payload: EnvironmentDeployPayload,
@@ -352,11 +363,95 @@ export function resolveDeployComposeFiles(
     return payload.composeFiles;
   }
   return [{
-    filename: LEGACY_COMPOSE_FILENAME,
-    role: "project",
+    filename: RUNTIME_COMPOSE_FILENAME,
+    role: "runtime",
     source: "inline",
     content: payload.composeYaml,
   }];
+}
+
+function resolveRuntimeComposeYaml(
+  payload: EnvironmentDeployPayload,
+  files: readonly EnvironmentDeployComposeFile[],
+): string {
+  const runtime = files.find((file) =>
+    file.role === "runtime" && file.filename === RUNTIME_COMPOSE_FILENAME
+  );
+  if (runtime) return runtime.content;
+  if (files.length === 1) return files[0]!.content;
+  return payload.composeYaml;
+}
+
+async function sha256HexUtf8(content: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(content),
+  );
+  return encodeHex(new Uint8Array(digest));
+}
+
+function replicaCountsForManifest(
+  payload: EnvironmentDeployPayload,
+  serviceNames: readonly string[],
+): Record<string, { replicas: number }> {
+  const counts = payload.replicaCounts ?? {};
+  const services: Record<string, { replicas: number }> = {};
+  for (const name of serviceNames) {
+    const replicas = counts[name];
+    services[name] = {
+      replicas: typeof replicas === "number" && replicas >= 1 ? replicas : 1,
+    };
+  }
+  for (const [name, replicas] of Object.entries(counts)) {
+    if (name in services) continue;
+    if (replicas >= 1) services[name] = { replicas };
+  }
+  return services;
+}
+
+async function buildDeploymentManifest(
+  payload: EnvironmentDeployPayload,
+  composeYaml: string,
+  serviceNames: readonly string[],
+): Promise<DeploymentManifestV2> {
+  const secrets = secretPlanToManifest(payload.secretPlan ?? []);
+  return {
+    version: 2,
+    projectId: payload.projectId,
+    environmentId: payload.environmentId,
+    serverId: payload.serverId ?? "",
+    generation: payload.generation ?? 0,
+    projectName: payload.projectName,
+    composeSha256: await sha256HexUtf8(composeYaml),
+    services: replicaCountsForManifest(payload, serviceNames),
+    ...(secrets.length > 0 ? { secrets } : {}),
+  };
+}
+
+function secretPlanToManifest(
+  plan: EnvironmentDeployPayload["secretPlan"],
+): DeploymentManifestSecret[] {
+  if (!plan || plan.length === 0) return [];
+  return plan.map((entry) => ({
+    source: entry.source,
+    target: entry.target,
+    relativePath: entry.relativePath,
+    composeServiceName: entry.composeServiceName,
+    forBuild: entry.forBuild,
+    key: entry.key,
+    forRuntime: entry.forRuntime,
+  }));
+}
+
+async function persistComposeEnvFile(
+  dir: string,
+  envFile: string | undefined,
+): Promise<void> {
+  if (envFile && envFile.length > 0) {
+    await writeComposeEnvFile(dir, envFile);
+    return;
+  }
+  await removeComposeEnvFile(dir);
 }
 
 async function applyDeployTraditionalWebSites(
@@ -371,30 +466,14 @@ async function applyDeployTraditionalWebSites(
   });
 }
 
-async function buildDaemonOverlayFragment(
+function buildDaemonOverlayFragment(
   parsedPayload: EnvironmentDeployPayload,
   containerHostings: EnvironmentDeployHosting[],
   traditionalWebSites: EnvironmentDeployTraditionalWebSite[],
   mountPaths: Map<string, string>,
   resolved: Awaited<ReturnType<typeof resolveComposeModel>>,
-  decryptSecrets: DecryptSecretsFn | undefined,
-): Promise<ReturnType<typeof mergeComposeOverlayFragments>> {
-  const variableMaterial = parsedPayload.variableMaterial ?? [];
+): ReturnType<typeof mergeComposeOverlayFragments> {
   const storageMaterial = parsedPayload.storageMaterial ?? [];
-
-  let secretsFragment = {};
-  if (variableMaterial.length > 0) {
-    if (!decryptSecrets) {
-      throw new Error(
-        "Variable material present but secrets decrypt is unavailable",
-      );
-    }
-    secretsFragment = await buildSecretVariablesFragment(
-      variableMaterial,
-      decryptSecrets,
-      resolved,
-    );
-  }
 
   const storageFragment = buildStorageVolumesFragment(
     storageMaterial,
@@ -412,9 +491,7 @@ async function buildDaemonOverlayFragment(
     resolved,
   });
 
-  // Match historical injection order: secrets → storage → TW reachability → labels.
   return mergeComposeOverlayFragments([
-    secretsFragment,
     storageFragment,
     traditionalFragment,
     labelsFragment,
@@ -427,13 +504,49 @@ type DeployContainerServicesRunDeps = {
   ensureExternalNetworks: (names: readonly string[]) => Promise<void>;
 };
 
+async function materializeDeploySecrets(
+  layout: LayoutPaths,
+  payload: EnvironmentDeployPayload,
+  decryptSecrets: DecryptSecretsFn | undefined,
+): Promise<void> {
+  const plan = payload.secretPlan ?? [];
+  if (plan.length === 0) return;
+  if (!decryptSecrets) {
+    throw new Error("Secret plan present but secrets decrypt is unavailable");
+  }
+  await materializeSecretFiles(
+    layout,
+    payload.projectId,
+    payload.environmentId,
+    plan,
+    payload.variableMaterial ?? [],
+    decryptSecrets,
+  );
+}
+
+function applySecretFilePaths(
+  yaml: string,
+  layout: LayoutPaths,
+  payload: EnvironmentDeployPayload,
+): string {
+  return rewriteComposeSecretFilePaths(
+    yaml,
+    layout,
+    payload.projectId,
+    payload.environmentId,
+    payload.secretPlan ?? [],
+  );
+}
+
 /**
- * Labels + writes layers into a stage dir, validates Docker config/overlay,
- * publishes the authoritative live chain (manifest + prune), then runs deploy
- * hooks / external networks / compose up. A failure before publish leaves the
- * previous live manifest and its referenced files intact.
+ * Writes one compiled `compose.yaml` (daemon overlay merged in), validates
+ * Docker config, publishes `compose.yaml` + `deployment.json` + `.env`, then
+ * runs deploy hooks / external networks / compose up. Secret files under
+ * `/run` are written before `config`/`up`. A failure before publish leaves
+ * the previous live files intact.
  */
 async function deployContainerServices(
+  layout: LayoutPaths,
   parsedPayload: EnvironmentDeployPayload,
   files: EnvironmentDeployComposeFile[],
   containerHostings: EnvironmentDeployHosting[],
@@ -445,38 +558,52 @@ async function deployContainerServices(
   const { run, decryptSecrets, ensureExternalNetworks } = runDeps;
   const stageDir = await resetComposeStageDir(deploymentDir);
   try {
-    const userPaths = await writeComposeLayerFiles(
-      stageDir,
-      files.map((file) => ({ filename: file.filename, content: file.content })),
+    const stagedPath = join(stageDir, RUNTIME_COMPOSE_FILENAME);
+    let yaml = applySecretFilePaths(
+      resolveRuntimeComposeYaml(parsedPayload, files),
+      layout,
+      parsedPayload,
     );
+    await writeComposeFileSecure(stagedPath, yaml);
+    await persistComposeEnvFile(stageDir, parsedPayload.envFile);
+    await materializeDeploySecrets(layout, parsedPayload, decryptSecrets);
 
     const resolved = await resolveComposeModel(
       parsedPayload.projectName,
-      userPaths,
+      [stagedPath],
       run,
     );
 
-    const fragment = await buildDaemonOverlayFragment(
+    const fragment = buildDaemonOverlayFragment(
       parsedPayload,
       containerHostings,
       traditionalWebSites,
       mountPaths,
       resolved,
-      decryptSecrets,
+    );
+    yaml = applySecretFilePaths(
+      mergeOverlayIntoComposeYaml(yaml, fragment),
+      layout,
+      parsedPayload,
+    );
+    await writeComposeFileSecure(stagedPath, yaml);
+
+    const labeledServices = [...resolved.serviceNames].sort((a, b) =>
+      a.localeCompare(b)
+    );
+    const manifest = await buildDeploymentManifest(
+      parsedPayload,
+      yaml,
+      labeledServices,
     );
 
-    const daemonPath = await writeDaemonComposeLayer(stageDir, fragment);
-    const stagedChain = daemonPath === null
-      ? [...userPaths]
-      : [...userPaths, daemonPath];
-    const basenames = stagedChain.map((path) => composeBasename(path));
-
     if (resolved.serviceNames.length === 0) {
-      const livePaths = await publishStagedComposeChain(
+      const livePaths = await publishStagedRuntimeCompose(
         deploymentDir,
         stageDir,
-        basenames,
+        manifest,
       );
+      await persistComposeEnvFile(deploymentDir, parsedPayload.envFile);
       logInfo(
         "commands",
         `environment.deploy resolved zero services project=${parsedPayload.projectName}; skipping compose up`,
@@ -484,16 +611,14 @@ async function deployContainerServices(
       return { serviceNames: [], composePaths: livePaths };
     }
 
-    // Validate against the staged chain before touching the live directory.
-    await validateComposeConfig(parsedPayload.projectName, stagedChain, run);
+    await validateComposeConfig(parsedPayload.projectName, [stagedPath], run);
 
-    // Publish is the cutover: new manifest becomes authoritative, stale live
-    // layers (including prior daemon overlay) are pruned only here.
-    const chain = await publishStagedComposeChain(
+    const chain = await publishStagedRuntimeCompose(
       deploymentDir,
       stageDir,
-      basenames,
+      manifest,
     );
+    await persistComposeEnvFile(deploymentDir, parsedPayload.envFile);
 
     const serviceHooks = parsedPayload.serviceHooks ?? [];
     if (serviceHooks.length > 0) {
@@ -548,9 +673,7 @@ async function deployContainerServices(
     }
 
     return {
-      serviceNames: [...resolved.serviceNames].sort((a, b) =>
-        a.localeCompare(b)
-      ),
+      serviceNames: labeledServices,
       composePaths: chain,
     };
   } finally {
@@ -558,21 +681,27 @@ async function deployContainerServices(
   }
 }
 
-/** Persists layer files + manifest so stop/lifecycle stay consistent for
- * traditional-web-only deploys (no daemon layer, no Docker calls). */
+/** Persists compiled `compose.yaml` + `deployment.json` for traditional-web-only
+ * deploys (no Docker compose up). */
 async function writeDeployComposeMarker(
-  deploymentDir: string,
+  parsedPayload: EnvironmentDeployPayload,
   files: EnvironmentDeployComposeFile[],
+  deploymentDir: string,
 ): Promise<string[]> {
-  // Write first, then commit the manifest, then prune — so a failed rewrite
-  // cannot delete files still referenced by an older manifest.
-  const userPaths = await writeComposeLayerFiles(
-    deploymentDir,
-    files.map((file) => ({ filename: file.filename, content: file.content })),
+  const yaml = resolveRuntimeComposeYaml(parsedPayload, files);
+  await writeComposeFileSecure(
+    join(deploymentDir, RUNTIME_COMPOSE_FILENAME),
+    yaml,
   );
-  const basenames = userPaths.map((path) => composeBasename(path));
-  await writeComposeFileManifest(deploymentDir, basenames);
-  await pruneStaleComposeLayerFiles(deploymentDir, new Set(basenames));
+  await persistComposeEnvFile(deploymentDir, parsedPayload.envFile);
+  await writeDeploymentManifest(
+    deploymentDir,
+    await buildDeploymentManifest(parsedPayload, yaml, []),
+  );
+  await pruneStaleComposeLayerFiles(
+    deploymentDir,
+    new Set([RUNTIME_COMPOSE_FILENAME]),
+  );
   return [];
 }
 
@@ -686,8 +815,9 @@ export async function handleEnvironmentDeploy(
     ensureDockerFn,
   );
 
-  const deploymentDir = resolveDeploymentDir(
+  const deploymentDir = environmentDeploymentDir(
     layout,
+    parsedPayload.projectId,
     parsedPayload.environmentId,
   );
   await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
@@ -719,6 +849,7 @@ export async function handleEnvironmentDeploy(
   let composePathsForCollect: string[] = [];
   if (hasContainers) {
     const deployed = await deployContainerServices(
+      layout,
       parsedPayload,
       files,
       containerHostings,
@@ -730,7 +861,11 @@ export async function handleEnvironmentDeploy(
     labeledServices = deployed.serviceNames;
     composePathsForCollect = deployed.composePaths;
   } else {
-    labeledServices = await writeDeployComposeMarker(deploymentDir, files);
+    labeledServices = await writeDeployComposeMarker(
+      parsedPayload,
+      files,
+      deploymentDir,
+    );
   }
 
   const hostnameTls = await materializeDeployTls(
@@ -765,6 +900,20 @@ export async function handleEnvironmentDeploy(
     "commands",
     `environment.deploy completed project=${parsedPayload.projectName} received=${daemonReceivedAt}`,
   );
+
+  const legacyDir = legacyDeploymentDir(layout, parsedPayload.environmentId);
+  if (legacyDir !== deploymentDir) {
+    try {
+      await Deno.remove(legacyDir, { recursive: true });
+    } catch (err) {
+      if (!(err instanceof Deno.errors.NotFound)) {
+        logInfo(
+          "commands",
+          `environment.deploy leftover pre-cutover dir env=${parsedPayload.environmentId}`,
+        );
+      }
+    }
+  }
 
   return shapeEnvironmentDeployResult({
     projectName: parsedPayload.projectName,

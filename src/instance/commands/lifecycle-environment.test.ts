@@ -5,6 +5,9 @@ import {
   COMPOSE_MANIFEST_FILENAME,
   DAEMON_COMPOSE_FILENAME,
   LEGACY_COMPOSE_FILENAME,
+  RUNTIME_COMPOSE_FILENAME,
+  writeDeploymentManifest,
+  writeComposeFileSecure,
 } from "../../deploy/compose-files.ts";
 import { handleEnvironmentLifecycle } from "./lifecycle-environment.ts";
 
@@ -383,6 +386,94 @@ test({
         Deno.env.delete("TURBOPANEL_CONFIG_DIR");
       } else {
         Deno.env.set("TURBOPANEL_CONFIG_DIR", previous.TURBOPANEL_CONFIG_DIR);
+      }
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});
+
+test({
+  name: "handleEnvironmentLifecycle start fails when planned secret files are missing",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-life-secrets-" });
+    const previous = {
+      TURBOPANEL_STATE_DIR: Deno.env.get("TURBOPANEL_STATE_DIR"),
+      TURBOPANEL_CONFIG_DIR: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
+      TURBOPANEL_RUN_DIR: Deno.env.get("TURBOPANEL_RUN_DIR"),
+    };
+    const stateDir = join(root, "state");
+    Deno.env.set("TURBOPANEL_STATE_DIR", stateDir);
+    Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
+    Deno.env.set("TURBOPANEL_RUN_DIR", join(root, "run"));
+
+    const environmentId = "envlife02";
+    const projectId = "proj-1";
+    const deploymentDir = join(stateDir, "deployments", projectId, environmentId);
+    await Deno.mkdir(deploymentDir, { recursive: true });
+    await writeComposeFileSecure(
+      join(deploymentDir, RUNTIME_COMPOSE_FILENAME),
+      "services:\n  web:\n    image: nginx\n",
+    );
+    await writeDeploymentManifest(deploymentDir, {
+      version: 2,
+      projectId,
+      environmentId,
+      serverId: "srv-1",
+      generation: 1,
+      projectName: "tp-demo-envlife2",
+      composeSha256: "b".repeat(64),
+      services: { web: { replicas: 1 } },
+      secrets: [{
+        source: "web_token",
+        target: "TOKEN",
+        relativePath: "web--TOKEN",
+        composeServiceName: "web",
+        forBuild: false,
+        key: "TOKEN",
+        forRuntime: true,
+      }],
+    });
+
+    try {
+      await assertRejects(
+        () =>
+          handleEnvironmentLifecycle(
+            {
+              environmentId,
+              projectId,
+              projectName: "tp-demo-envlife2",
+              action: "start",
+            },
+            new Date().toISOString(),
+            {
+              runDocker: () =>
+                Promise.resolve({
+                  success: true,
+                  stdout: "[]",
+                  stderr: "",
+                  code: 0,
+                }),
+            },
+          ),
+        Error,
+        "secret files missing",
+      );
+    } finally {
+      if (previous.TURBOPANEL_STATE_DIR === undefined) {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+      } else {
+        Deno.env.set("TURBOPANEL_STATE_DIR", previous.TURBOPANEL_STATE_DIR);
+      }
+      if (previous.TURBOPANEL_CONFIG_DIR === undefined) {
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      } else {
+        Deno.env.set("TURBOPANEL_CONFIG_DIR", previous.TURBOPANEL_CONFIG_DIR);
+      }
+      if (previous.TURBOPANEL_RUN_DIR === undefined) {
+        Deno.env.delete("TURBOPANEL_RUN_DIR");
+      } else {
+        Deno.env.set("TURBOPANEL_RUN_DIR", previous.TURBOPANEL_RUN_DIR);
       }
       await Deno.remove(root, { recursive: true });
     }

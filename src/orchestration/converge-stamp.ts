@@ -100,6 +100,14 @@ export function devConvergeEnvMaterial(): string {
       ? "workers"
       : "deno";
 
+  const optionalFlag = (key: string, fallback: boolean): string => {
+    const raw = Deno.env.get(key)?.trim().toLowerCase();
+    if (!raw) return fallback ? "true" : "false";
+    if (raw === "true" || raw === "1" || raw === "yes") return "true";
+    if (raw === "false" || raw === "0" || raw === "no") return "false";
+    return fallback ? "true" : "false";
+  };
+
   return [
     `dev_user=${devUser}`,
     `dev_uid=${devUid}`,
@@ -107,6 +115,11 @@ export function devConvergeEnvMaterial(): string {
     `ui_mode=${uiMode}`,
     `instance_run_mode=${instanceRunMode}`,
     `instance_runtime=${instanceRuntime}`,
+    `optional_dbstudio=${optionalFlag("TURBOPANEL_OPTIONAL_DBSTUDIO", true)}`,
+    `optional_ui=${optionalFlag("TURBOPANEL_OPTIONAL_UI", true)}`,
+    `optional_website=${optionalFlag("TURBOPANEL_OPTIONAL_WEBSITE", true)}`,
+    `optional_redis_insight=${optionalFlag("TURBOPANEL_OPTIONAL_REDIS_INSIGHT", false)}`,
+    `optional_tabix=${optionalFlag("TURBOPANEL_OPTIONAL_TABIX", false)}`,
   ].join("\n");
 }
 

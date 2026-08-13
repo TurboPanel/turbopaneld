@@ -7,9 +7,15 @@
 
 import {
   composeFileArgs,
-  deploymentDir as resolveDeploymentDir,
+  readDeploymentManifest,
   resolveDeployedComposePaths,
+  resolveEnvironmentDeploymentDir,
 } from "../../deploy/compose-files.ts";
+import {
+  ensureDeploymentSecretFiles,
+  type RehydrateDeploymentSecretsFn,
+} from "../../deploy/rehydrate-deployments.ts";
+import type { DecryptSecretsFn } from "../../deploy/materialize-tls.ts";
 import {
   parseComposePsEntries,
   readComposePsContainer,
@@ -44,6 +50,8 @@ type RunDockerFn = (
 export type EnvironmentLifecycleHandlerDeps = {
   /** Test seam — defaults to {@link defaultRunDocker}. */
   runDocker?: RunDockerFn;
+  decryptSecrets?: DecryptSecretsFn;
+  rehydrateDeploymentSecrets?: RehydrateDeploymentSecretsFn;
 };
 
 function assertSafeLifecycleIdentifiers(
@@ -51,6 +59,9 @@ function assertSafeLifecycleIdentifiers(
 ): void {
   if (!SAFE_PATH_ID_RE.test(payload.environmentId)) {
     throw new Error("environmentId contains unsupported characters");
+  }
+  if (!SAFE_PATH_ID_RE.test(payload.projectId)) {
+    throw new Error("projectId contains unsupported characters");
   }
   if (!COMPOSE_PROJECT_RE.test(payload.projectName)) {
     throw new Error("projectName must be a valid Docker Compose project name");
@@ -160,8 +171,9 @@ export async function handleEnvironmentLifecycle(
   const run = deps?.runDocker ?? defaultRunDocker;
   const layout = resolveLayout(Deno.env.toObject());
 
-  const deploymentDir = resolveDeploymentDir(
+  const deploymentDir = await resolveEnvironmentDeploymentDir(
     layout,
+    parsedPayload.projectId,
     parsedPayload.environmentId,
   );
   const composePaths = await resolveDeployedComposePaths(deploymentDir);
@@ -170,6 +182,22 @@ export async function handleEnvironmentLifecycle(
     throw new Error(
       `environment ${parsedPayload.environmentId} is not deployed on this server yet — deploy it first`,
     );
+  }
+
+  if (parsedPayload.action === "start" || parsedPayload.action === "restart") {
+    const manifest = await readDeploymentManifest(deploymentDir);
+    const plan = manifest?.secrets ?? [];
+    if (plan.length > 0) {
+      await ensureDeploymentSecretFiles({
+        layout,
+        projectId: parsedPayload.projectId,
+        environmentId: parsedPayload.environmentId,
+        generation: manifest?.generation,
+        decryptSecrets: deps?.decryptSecrets,
+        rehydrate: deps?.rehydrateDeploymentSecrets,
+        plan,
+      });
+    }
   }
 
   const result = await run([

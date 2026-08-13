@@ -147,6 +147,38 @@ export function devOwnershipPlaybookExtraArgs(
   return args;
 }
 
+function optionalDevServiceFlag(
+  envKey: string,
+  defaultValue: boolean,
+): boolean {
+  const raw = Deno.env.get(envKey)?.trim().toLowerCase();
+  if (!raw) {
+    return defaultValue;
+  }
+  if (raw === "true" || raw === "1" || raw === "yes") {
+    return true;
+  }
+  if (raw === "false" || raw === "0" || raw === "no") {
+    return false;
+  }
+  return defaultValue;
+}
+
+function optionalDevServiceExtraArgs(): string[] {
+  return [
+    "-e",
+    `turbopanel_optional_dbstudio=${optionalDevServiceFlag("TURBOPANEL_OPTIONAL_DBSTUDIO", true)}`,
+    "-e",
+    `turbopanel_optional_ui=${optionalDevServiceFlag("TURBOPANEL_OPTIONAL_UI", true)}`,
+    "-e",
+    `turbopanel_optional_website=${optionalDevServiceFlag("TURBOPANEL_OPTIONAL_WEBSITE", true)}`,
+    "-e",
+    `turbopanel_optional_redis_insight=${optionalDevServiceFlag("TURBOPANEL_OPTIONAL_REDIS_INSIGHT", false)}`,
+    "-e",
+    `turbopanel_optional_tabix=${optionalDevServiceFlag("TURBOPANEL_OPTIONAL_TABIX", false)}`,
+  ];
+}
+
 function devInstanceExtraArgs(): string[] {
   const uiMode = Deno.env.get("TURBOPANEL_UI_MODE") === "static"
     ? "static"
@@ -170,6 +202,7 @@ function devInstanceExtraArgs(): string[] {
     `turbopanel_instance_run_mode=${instanceRunMode}`,
     "-e",
     `turbopanel_instance_runtime=${instanceRuntime}`,
+    ...optionalDevServiceExtraArgs(),
     ...(instanceRuntime === "workers"
       ? ["-e", "postgres_expose_port=true"]
       : []),

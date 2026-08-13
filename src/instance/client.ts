@@ -31,6 +31,12 @@ import {
 import { type DaemonKeyFile, loadDaemonKeyFile } from "../crypto/keys.ts";
 import { readMachineKey } from "../host/machine-key.ts";
 import { DaemonApiClient, DaemonApiError } from "./api-client.ts";
+import {
+  parseRehydrateDeploymentResults,
+  rehydrateLocalDeployments,
+} from "../deploy/rehydrate-deployments.ts";
+import { runDocker as defaultRunDocker } from "../deploy/docker-cli.ts";
+import { resolveLayout } from "../paths/layout.ts";
 import { classifyConnectFailure } from "./connect-failure.ts";
 import { DaemonJwksClient } from "./jwks-client.ts";
 import { DaemonTokenManager } from "./token-manager.ts";
@@ -317,6 +323,8 @@ export class InstanceClient {
   #tokenServerId: string | undefined;
   #tokenKeyId: string | undefined;
   #forceEnrollPending = false;
+  #didCompleteSecretsRehydrate = false;
+  #secretsRehydrateInFlight = false;
   #parked = false;
   #parkedReason: string | undefined;
   #parkedBackoffMs = PARKED_BACKOFF_MIN_MS;
@@ -891,6 +899,7 @@ export class InstanceClient {
     this.#metricsScheduler?.attach((sample) =>
       this.#apiClient?.sendHostMetrics(sample) ?? Promise.resolve()
     );
+    this.#rehydrateDeploymentSecretsAfterConnect();
 
     ws.onmessage = (event) => {
       this.#idlePresence?.noteInboundActivity();
@@ -977,6 +986,35 @@ export class InstanceClient {
     this.#metricsSchedulerServerId = rebound.serverId;
   }
 
+  #rehydrateDeploymentSecretsAfterConnect(): void {
+    if (this.#secretsRehydrateInFlight || !this.#apiClient) return;
+    this.#secretsRehydrateInFlight = true;
+    const apiClient = this.#apiClient;
+    const composeUp = this.#didCompleteSecretsRehydrate
+      ? "if-missing"
+      : "always";
+    rehydrateLocalDeployments({
+      layout: resolveLayout(Deno.env.toObject()),
+      decryptSecrets: (ciphertexts) => apiClient.decryptSecrets(ciphertexts),
+      rehydrate: async (deployments) =>
+        parseRehydrateDeploymentResults(
+          await apiClient.rehydrateDeploymentSecrets(deployments),
+        ),
+      runDocker: defaultRunDocker,
+      composeUp,
+    }).then(() => {
+      this.#didCompleteSecretsRehydrate = true;
+    }).catch((err) => {
+      logWarn(
+        "instance",
+        "deployment secret rehydrate failed:",
+        sanitizeForLog(err),
+      );
+    }).finally(() => {
+      this.#secretsRehydrateInFlight = false;
+    });
+  }
+
   // Identity is established locally (enrollment + server.id) and confirmed via
   // verified JWT `sub` in DaemonTokenManager — no socket message adopts serverId.
   #handleMessage(message: DaemonMessage, ws: WebSocket): void {
@@ -1003,6 +1041,10 @@ export class InstanceClient {
         handleCommandDispatch(message, ws, {
           decryptSecrets: this.#apiClient
             ? (ciphertexts) => this.#apiClient!.decryptSecrets(ciphertexts)
+            : undefined,
+          rehydrateDeploymentSecrets: this.#apiClient
+            ? (deployments) =>
+              this.#apiClient!.rehydrateDeploymentSecrets(deployments)
             : undefined,
         }).catch((err) => {
           logWarn(

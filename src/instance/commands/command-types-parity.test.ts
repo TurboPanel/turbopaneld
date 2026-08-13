@@ -7,6 +7,7 @@ import {
   parseEnvironmentDeployPayload,
   parseEnvironmentLifecyclePayload,
   parseEnvironmentStopPayload,
+  parseFabricReconcilePayload,
   parseManagedApplyPayload,
   parseManagedApplyResult,
   parseManagedBackupPayload,
@@ -39,6 +40,7 @@ const INSTANCE_COMMAND_TYPES = [
   "server.reboot",
   "server.timezone.set",
   "server.wireguard.apply",
+  "server.fabric.reconcile",
   "environment.deploy",
   "environment.lifecycle",
   "environment.stop",
@@ -667,6 +669,29 @@ test("environment.deploy rejects non-boolean noCache", () => {
   );
 });
 
+test("environment.deploy round-trips envFile and secretPlan", () => {
+  const payload = parseEnvironmentDeployPayload({
+    environmentId: "env-1",
+    projectId: "proj-1",
+    organizationId: "org-1",
+    projectName: "demo",
+    composeYaml: "services:\n  web:\n    image: nginx\n",
+    hostings: [],
+    envFile: "web__PORT=3000\n",
+    secretPlan: [{
+      key: "TOKEN",
+      composeServiceName: "web",
+      source: "web_token",
+      target: "TOKEN",
+      relativePath: "web--TOKEN",
+      forBuild: false,
+      forRuntime: true,
+    }],
+  });
+  assertEquals(payload.envFile, "web__PORT=3000\n");
+  assertEquals(payload.secretPlan?.[0]?.source, "web_token");
+});
+
 test("environment.stop payload parser round-trips", () => {
   assertEquals(
     parseEnvironmentStopPayload({
@@ -1013,6 +1038,34 @@ test("server.wireguard.apply fixture round-trips", () => {
     ],
   });
   assertEquals(payload.address, "203.0.113.10/32");
+  assertEquals(payload.peers[0]?.endpoint, "203.0.113.1:51820");
+});
+
+test("server.fabric.reconcile fixture round-trips", () => {
+  const payload = parseFabricReconcilePayload({
+    enabled: true,
+    fabricId: "550e8400-e29b-41d4-a716-446655440000",
+    address: "10.250.0.11/32",
+    prefix: "10.192.0.0/16",
+    peers: [
+      {
+        publicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        allowedIPs: ["10.250.0.12/32", "10.193.0.0/16"],
+        endpoint: "203.0.113.1:51820",
+      },
+    ],
+    networks: [
+      {
+        name: "tpn_550e8400-e29b-41d4-a716-446655440000",
+        subnet: "10.192.11.0/24",
+      },
+    ],
+  });
+  assertEquals(payload.enabled, true);
+  if (!payload.enabled) {
+    throw new TypeError("expected enabled fabric payload");
+  }
+  assertEquals(payload.address, "10.250.0.11/32");
   assertEquals(payload.peers[0]?.endpoint, "203.0.113.1:51820");
 });
 

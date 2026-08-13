@@ -4,9 +4,11 @@ import type { DockerCliResult } from "../../deploy/docker-cli.ts";
 import {
   COMPOSE_MANIFEST_FILENAME,
   COMPOSE_STAGE_DIRNAME,
+  COMPOSE_ENV_FILENAME,
   DAEMON_COMPOSE_FILENAME,
-  LEGACY_COMPOSE_FILENAME,
+  DEPLOYMENT_MANIFEST_FILENAME,
   resolveDeployedComposePaths,
+  RUNTIME_COMPOSE_FILENAME,
   writeComposeFileManifest,
   writeComposeFileSecure,
 } from "../../deploy/compose-files.ts";
@@ -88,6 +90,25 @@ test("handleEnvironmentDeploy rejects unsupported environmentId characters", asy
   );
 });
 
+test("handleEnvironmentDeploy rejects unsupported projectId characters", async () => {
+  await assertRejects(
+    () =>
+      handleEnvironmentDeploy(
+        {
+          environmentId: "env-1",
+          projectId: "bad/id",
+          organizationId: "org-1",
+          projectName: "demo",
+          composeYaml: "services: {}\n",
+          hostings: [],
+        },
+        new Date().toISOString(),
+      ),
+    Error,
+    "projectId contains unsupported characters",
+  );
+});
+
 test("handleEnvironmentDeploy rejects invalid Docker Compose projectName", async () => {
   await assertRejects(
     () =>
@@ -153,7 +174,7 @@ function argvStagePaths(argv: string[]): string[] {
 
 test({
   name:
-    "handleEnvironmentDeploy multi-file chain writes layers, manifesto, daemon layer, and ordered -f argv",
+    "handleEnvironmentDeploy publishes compose.yaml + deployment.json and merges overlay into that file",
   permissions: { env: true, read: true, write: true, run: true },
   fn: async () => {
     const root = await Deno.makeTempDir({ prefix: "tp-deploy-chain-" });
@@ -167,16 +188,24 @@ test({
     Deno.env.set("TURBOPANEL_CONFIG_DIR", configDir);
 
     const environmentId = "envdeploy1";
+    const projectId = "proj-1";
     const projectName = "tp-demo-envdeploy";
-    const deploymentDir = join(stateDir, "deployments", environmentId);
+    const deploymentDir = join(stateDir, "deployments", projectId, environmentId);
     await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
-    // Stale layer from a prior deploy should be pruned after successful publish.
     await Deno.writeTextFile(
       join(deploymentDir, "docker-compose.old.yml"),
       "services: {}\n",
       { mode: 0o640 },
     );
+    const legacyDir = join(stateDir, "deployments", environmentId);
+    await Deno.mkdir(legacyDir, { recursive: true, mode: 0o750 });
+    await Deno.writeTextFile(
+      join(legacyDir, "docker-compose.yml"),
+      "services: {}\n",
+      { mode: 0o640 },
+    );
 
+    const runtimeYaml = "services:\n  web:\n    image: nginx:alpine\n";
     const calls: string[][] = [];
     const fakeRunDocker = (
       args: string[],
@@ -218,26 +247,21 @@ test({
       await handleEnvironmentDeploy(
         {
           environmentId,
-          projectId: "proj-1",
+          projectId,
           organizationId: "org-1",
           projectName,
-          composeYaml: "services:\n  web:\n    image: nginx:alpine\n",
-          composeFiles: [
-            {
-              filename: "docker-compose.project.yml",
-              role: "project",
-              source: "inline",
-              content: "services:\n  web:\n    image: nginx:alpine\n",
-            },
-            {
-              filename: "docker-compose.env.yml",
-              role: "environment",
-              source: "inline",
-              content: "services:\n  web:\n    environment:\n      E: '1'\n",
-            },
-          ],
+          composeYaml: runtimeYaml,
+          composeFiles: [{
+            filename: RUNTIME_COMPOSE_FILENAME,
+            role: "runtime",
+            source: "inline",
+            content: runtimeYaml,
+          }],
+          generation: 3,
+          desiredHash: "a".repeat(64),
+          serverId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          replicaCounts: { web: 2 },
           hostings: [],
-          // Non-empty daemon fragment so the generated layer is last in the chain.
           managedNetworkServices: ["web"],
           noCache: true,
         },
@@ -245,127 +269,114 @@ test({
         { runDocker: fakeRunDocker, ...hermeticDeployDeps },
       );
 
-      const projectLayer = join(deploymentDir, "docker-compose.project.yml");
-      const envLayer = join(deploymentDir, "docker-compose.env.yml");
-      const daemonLayer = join(deploymentDir, DAEMON_COMPOSE_FILENAME);
-      const projectStat = await Deno.stat(projectLayer);
-      assertEquals(projectStat.mode! & 0o777, 0o640);
-      const daemonStat = await Deno.stat(daemonLayer);
-      assertEquals(daemonStat.mode! & 0o777, 0o640);
+      const runtimePath = join(deploymentDir, RUNTIME_COMPOSE_FILENAME);
+      const runtimeStat = await Deno.stat(runtimePath);
+      assertEquals(runtimeStat.mode! & 0o777, 0o640);
+      const published = await Deno.readTextFile(runtimePath);
+      assertEquals(published.includes("image: nginx:alpine"), true);
+      assertEquals(published.includes("turbopanel-managed"), true);
+      await assertRejects(
+        () => Deno.stat(join(deploymentDir, DAEMON_COMPOSE_FILENAME)),
+        Deno.errors.NotFound,
+      );
       await assertRejects(
         () => Deno.stat(join(deploymentDir, "docker-compose.old.yml")),
         Deno.errors.NotFound,
       );
-      // Staging directory must not linger after a successful deploy.
+      await assertRejects(
+        () => Deno.stat(join(deploymentDir, COMPOSE_MANIFEST_FILENAME)),
+        Deno.errors.NotFound,
+      );
       await assertRejects(
         () => Deno.stat(join(deploymentDir, COMPOSE_STAGE_DIRNAME)),
         Deno.errors.NotFound,
       );
+      await assertRejects(
+        () => Deno.stat(legacyDir),
+        Deno.errors.NotFound,
+      );
 
       const manifest = JSON.parse(
-        await Deno.readTextFile(join(deploymentDir, COMPOSE_MANIFEST_FILENAME)),
-      ) as { version: number; files: string[] };
-      assertEquals(manifest.version, 1);
-      assertEquals(manifest.files, [
-        "docker-compose.project.yml",
-        "docker-compose.env.yml",
-        DAEMON_COMPOSE_FILENAME,
-      ]);
+        await Deno.readTextFile(
+          join(deploymentDir, DEPLOYMENT_MANIFEST_FILENAME),
+        ),
+      ) as {
+        version: number;
+        projectId: string;
+        environmentId: string;
+        serverId: string;
+        generation: number;
+        projectName: string;
+        composeSha256: string;
+        services: Record<string, { replicas: number }>;
+      };
+      assertEquals(manifest.version, 2);
+      assertEquals(manifest.projectId, projectId);
+      assertEquals(manifest.environmentId, environmentId);
+      assertEquals(manifest.serverId, "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+      assertEquals(manifest.generation, 3);
+      assertEquals(manifest.projectName, projectName);
+      assertEquals(manifest.composeSha256.length, 64);
+      assertEquals(manifest.services, { web: { replicas: 2 } });
 
-      const fullChain = [projectLayer, envLayer, daemonLayer];
-      // Pre-publish resolve/validate use the staged chain.
+      const liveChain = [runtimePath];
       const configJsonCall = calls.find((argv) =>
         argv.includes("config") && argv.includes("--format")
       );
       assertEquals(configJsonCall !== undefined, true);
-      const stagedUserPaths = argvStagePaths(configJsonCall!);
-      assertEquals(stagedUserPaths.length, 2);
-      assertEquals(
-        stagedUserPaths[0]!.endsWith("/docker-compose.project.yml"),
-        true,
-      );
-      assertEquals(
-        stagedUserPaths[1]!.endsWith("/docker-compose.env.yml"),
-        true,
-      );
+      const stagedPaths = argvStagePaths(configJsonCall!);
+      assertEquals(stagedPaths.length, 1);
+      assertEquals(stagedPaths[0]!.endsWith(`/${RUNTIME_COMPOSE_FILENAME}`), true);
 
       const configQCall = calls.find((argv) =>
         argv.includes("config") && argv.includes("-q")
       );
       assertEquals(configQCall !== undefined, true);
-      const stagedFull = argvStagePaths(configQCall!);
-      assertEquals(stagedFull.length, 3);
-      assertEquals(
-        stagedFull[2]!.endsWith(`/${DAEMON_COMPOSE_FILENAME}`),
-        true,
-      );
+      assertEquals(argvStagePaths(configQCall!).length, 1);
 
       const buildCall = calls.find((argv) =>
         argv.includes("build") && argv.includes("--no-cache") &&
         argv.includes("--pull")
       );
       assertEquals(buildCall !== undefined, true);
-      // Post-publish build/up/ps use the live deployment paths.
-      assertEquals(argvHasOrderedPaths(buildCall!, fullChain), true);
+      assertEquals(argvHasOrderedPaths(buildCall!, liveChain), true);
 
       const upCall = calls.find((argv) =>
         argv.includes("up") && argv.includes("--remove-orphans")
       );
       assertEquals(upCall !== undefined, true);
-      assertEquals(argvHasOrderedPaths(upCall!, fullChain), true);
+      assertEquals(argvHasOrderedPaths(upCall!, liveChain), true);
 
       const psCall = calls.find((argv) => argv.includes("ps"));
       assertEquals(psCall !== undefined, true);
-      assertEquals(argvHasOrderedPaths(psCall!, fullChain), true);
+      assertEquals(argvHasOrderedPaths(psCall!, liveChain), true);
 
-      // network inspect for managed ingress must go through the fake seam.
       const networkInspect = calls.find((argv) =>
         argv[0] === "network" && argv[1] === "inspect"
       );
       assertEquals(networkInspect !== undefined, true);
 
-      // Second deploy renames layers — prior env overlay must be pruned.
       calls.length = 0;
       await handleEnvironmentDeploy(
         {
           environmentId,
-          projectId: "proj-1",
+          projectId,
           organizationId: "org-1",
           projectName,
-          composeYaml: "services:\n  web:\n    image: nginx:alpine\n",
-          composeFiles: [
-            {
-              filename: "docker-compose.project.yml",
-              role: "project",
-              source: "inline",
-              content: "services:\n  web:\n    image: nginx:alpine\n",
-            },
-            {
-              filename: "docker-compose.staging.yml",
-              role: "environment",
-              source: "inline",
-              content: "services:\n  web:\n    environment:\n      E: '2'\n",
-            },
-          ],
+          composeYaml: runtimeYaml,
+          composeFiles: [{
+            filename: RUNTIME_COMPOSE_FILENAME,
+            role: "runtime",
+            source: "inline",
+            content: runtimeYaml,
+          }],
           hostings: [],
           managedNetworkServices: ["web"],
         },
         new Date().toISOString(),
         { runDocker: fakeRunDocker, ...hermeticDeployDeps },
       );
-      await assertRejects(
-        () => Deno.stat(envLayer),
-        Deno.errors.NotFound,
-      );
-      await Deno.stat(join(deploymentDir, "docker-compose.staging.yml"));
-      const secondManifest = JSON.parse(
-        await Deno.readTextFile(join(deploymentDir, COMPOSE_MANIFEST_FILENAME)),
-      ) as { files: string[] };
-      assertEquals(secondManifest.files, [
-        "docker-compose.project.yml",
-        "docker-compose.staging.yml",
-        DAEMON_COMPOSE_FILENAME,
-      ]);
+      await Deno.stat(runtimePath);
       const secondBuild = calls.find((argv) =>
         argv.includes("build") && argv.includes("--no-cache")
       );
@@ -388,7 +399,7 @@ test({
 
 test({
   name:
-    "handleEnvironmentDeploy legacy composeYaml produces one-element user chain on disk",
+    "handleEnvironmentDeploy composeYaml-only payload writes compose.yaml + deployment.json",
   permissions: { env: true, read: true, write: true, run: true },
   fn: async () => {
     const root = await Deno.makeTempDir({ prefix: "tp-deploy-legacy-" });
@@ -399,8 +410,15 @@ test({
     Deno.env.set("TURBOPANEL_STATE_DIR", join(root, "state"));
     Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
     const environmentId = "envlegacy1";
+    const projectId = "proj-1";
     const projectName = "tp-demo-envlegacy";
-    const deploymentDir = join(root, "state", "deployments", environmentId);
+    const deploymentDir = join(
+      root,
+      "state",
+      "deployments",
+      projectId,
+      environmentId,
+    );
 
     const calls: string[][] = [];
     const fakeRunDocker = (
@@ -427,7 +445,7 @@ test({
       await handleEnvironmentDeploy(
         {
           environmentId,
-          projectId: "proj-1",
+          projectId,
           organizationId: "org-1",
           projectName,
           composeYaml: "services:\n  web:\n    image: nginx:alpine\n",
@@ -437,12 +455,15 @@ test({
         { runDocker: fakeRunDocker, ...hermeticDeployDeps },
       );
 
-      const legacyPath = join(deploymentDir, LEGACY_COMPOSE_FILENAME);
-      await Deno.stat(legacyPath);
+      const runtimePath = join(deploymentDir, RUNTIME_COMPOSE_FILENAME);
+      await Deno.stat(runtimePath);
       const manifest = JSON.parse(
-        await Deno.readTextFile(join(deploymentDir, COMPOSE_MANIFEST_FILENAME)),
-      ) as { files: string[] };
-      assertEquals(manifest.files, [LEGACY_COMPOSE_FILENAME]);
+        await Deno.readTextFile(
+          join(deploymentDir, DEPLOYMENT_MANIFEST_FILENAME),
+        ),
+      ) as { version: number; services: Record<string, { replicas: number }> };
+      assertEquals(manifest.version, 2);
+      assertEquals(manifest.services, { web: { replicas: 1 } });
 
       const buildCall = calls.find((argv) =>
         argv.includes("build") && argv.includes("--no-cache")
@@ -451,7 +472,7 @@ test({
 
       const upCall = calls.find((argv) => argv.includes("up"));
       assertEquals(upCall !== undefined, true);
-      assertEquals(argvHasOrderedPaths(upCall!, [legacyPath]), true);
+      assertEquals(argvHasOrderedPaths(upCall!, [runtimePath]), true);
     } finally {
       if (previous.TURBOPANEL_STATE_DIR === undefined) {
         Deno.env.delete("TURBOPANEL_STATE_DIR");
@@ -633,7 +654,7 @@ test({
 
 test({
   name:
-    "handleEnvironmentDeploy accepts composeFiles overlay with !reset / !override tags",
+    "queued multi-file composeFiles still publish a single compiled compose.yaml from composeYaml",
   permissions: { env: true, read: true, write: true, run: true },
   fn: async () => {
     const root = await Deno.makeTempDir({ prefix: "tp-deploy-tags-" });
@@ -647,8 +668,11 @@ test({
     Deno.env.set("TURBOPANEL_CONFIG_DIR", configDir);
 
     const environmentId = "envdeploytags";
+    const projectId = "proj-1";
     const projectName = "tp-demo-envtags";
-    const deploymentDir = join(stateDir, "deployments", environmentId);
+    const deploymentDir = join(stateDir, "deployments", projectId, environmentId);
+    const compiled =
+      "services:\n  web:\n    image: nginx:alpine\n    ports:\n      - \"9000:80\"\n";
 
     const calls: string[][] = [];
     const fakeRunDocker = (
@@ -687,21 +711,14 @@ test({
       });
     };
 
-    const envOverlay = `services:
-  web:
-    environment: !reset null
-    ports: !override
-      - "9000:80"
-`;
-
     try {
       const result = await handleEnvironmentDeploy(
         {
           environmentId,
-          projectId: "proj-1",
+          projectId,
           organizationId: "org-1",
           projectName,
-          composeYaml: "services:\n  web:\n    image: nginx:alpine\n",
+          composeYaml: compiled,
           composeFiles: [
             {
               filename: "docker-compose.project.yml",
@@ -714,7 +731,7 @@ test({
               filename: "docker-compose.env.yml",
               role: "environment",
               source: "inline",
-              content: envOverlay,
+              content: "services:\n  web:\n    ports:\n      - \"9000:80\"\n",
             },
           ],
           hostings: [],
@@ -723,24 +740,27 @@ test({
         { runDocker: fakeRunDocker, ...hermeticDeployDeps },
       );
 
-      // Local preflight must detect container services despite Compose tags.
       assertEquals(result.summary.includes(environmentId), true);
-      await Deno.stat(join(deploymentDir, "docker-compose.project.yml"));
-      await Deno.stat(join(deploymentDir, "docker-compose.env.yml"));
-      const envOnDisk = await Deno.readTextFile(
-        join(deploymentDir, "docker-compose.env.yml"),
+      const runtimePath = join(deploymentDir, RUNTIME_COMPOSE_FILENAME);
+      const onDisk = await Deno.readTextFile(runtimePath);
+      assertEquals(onDisk.includes("9000:80"), true);
+      await assertRejects(
+        () => Deno.stat(join(deploymentDir, "docker-compose.project.yml")),
+        Deno.errors.NotFound,
       );
-      assertEquals(envOnDisk.includes("!reset"), true);
-      assertEquals(envOnDisk.includes("!override"), true);
+      await assertRejects(
+        () => Deno.stat(join(deploymentDir, "docker-compose.env.yml")),
+        Deno.errors.NotFound,
+      );
 
       const configCall = calls.find((argv) =>
         argv.includes("config") && argv.includes("--format")
       );
       assertEquals(configCall !== undefined, true);
-      // Must have taken the container path (config against staged multi-file chain).
-      assertEquals(argvStagePaths(configCall!).length >= 2, true);
+      assertEquals(argvStagePaths(configCall!).length, 1);
       const upCall = calls.find((argv) => argv.includes("up"));
       assertEquals(upCall !== undefined, true);
+      assertEquals(argvHasOrderedPaths(upCall!, [runtimePath]), true);
     } finally {
       if (previous.TURBOPANEL_STATE_DIR === undefined) {
         Deno.env.delete("TURBOPANEL_STATE_DIR");
@@ -756,3 +776,152 @@ test({
     }
   },
 });
+
+test({
+  name:
+    "handleEnvironmentDeploy writes .env and /run secret files without secret bytes in compose.yaml",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-deploy-secrets-" });
+    const previous = {
+      TURBOPANEL_STATE_DIR: Deno.env.get("TURBOPANEL_STATE_DIR"),
+      TURBOPANEL_CONFIG_DIR: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
+      TURBOPANEL_RUN_DIR: Deno.env.get("TURBOPANEL_RUN_DIR"),
+    };
+    const stateDir = join(root, "state");
+    const configDir = join(root, "config");
+    const runDir = join(root, "run");
+    Deno.env.set("TURBOPANEL_STATE_DIR", stateDir);
+    Deno.env.set("TURBOPANEL_CONFIG_DIR", configDir);
+    Deno.env.set("TURBOPANEL_RUN_DIR", runDir);
+
+    const environmentId = "envsecret1";
+    const projectId = "proj-1";
+    const projectName = "tp-demo-envsecret";
+    const secretValue = "super-secret-value";
+    const runtimeYaml = `secrets:
+  web_token:
+    file: /run/turbopanel/deployments/${projectId}/${environmentId}/secrets/web--TOKEN
+services:
+  web:
+    image: nginx:alpine
+    environment:
+      PORT: \${web__PORT}
+      TOKEN_FILE: /run/secrets/TOKEN
+    secrets:
+      - source: web_token
+        target: TOKEN
+`;
+
+    const fakeRunDocker = (
+      args: string[],
+    ): Promise<DockerCliResult> => {
+      if (args.includes("config") && args.includes("--format")) {
+        return Promise.resolve({
+          success: true,
+          stdout: fakeConfigJson({ web: { image: "nginx:alpine" } }),
+          stderr: "",
+          code: 0,
+        });
+      }
+      return Promise.resolve({
+        success: true,
+        stdout: args.includes("ps") ? "[]" : "",
+        stderr: "",
+        code: 0,
+      });
+    };
+
+    try {
+      await handleEnvironmentDeploy(
+        {
+          environmentId,
+          projectId,
+          organizationId: "org-1",
+          projectName,
+          composeYaml: runtimeYaml,
+          composeFiles: [{
+            filename: RUNTIME_COMPOSE_FILENAME,
+            role: "runtime",
+            source: "inline",
+            content: runtimeYaml,
+          }],
+          hostings: [],
+          envFile: "web__PORT=3000\n",
+          secretPlan: [{
+            key: "TOKEN",
+            composeServiceName: "web",
+            source: "web_token",
+            target: "TOKEN",
+            relativePath: "web--TOKEN",
+            forBuild: false,
+            forRuntime: true,
+          }],
+          variableMaterial: [{
+            key: "TOKEN",
+            composeServiceName: "web",
+            forBuild: false,
+            forRuntime: true,
+            isLiteral: false,
+            valueEnvelope: "tpdaemon.v1.x",
+          }],
+        },
+        new Date().toISOString(),
+        {
+          runDocker: fakeRunDocker,
+          decryptSecrets: () => Promise.resolve([secretValue]),
+          ...hermeticDeployDeps,
+        },
+      );
+
+      const deploymentDir = join(
+        stateDir,
+        "deployments",
+        projectId,
+        environmentId,
+      );
+      const composeText = await Deno.readTextFile(
+        join(deploymentDir, RUNTIME_COMPOSE_FILENAME),
+      );
+      const envText = await Deno.readTextFile(
+        join(deploymentDir, COMPOSE_ENV_FILENAME),
+      );
+      const secretPath = join(
+        runDir,
+        "deployments",
+        projectId,
+        environmentId,
+        "secrets",
+        "web--TOKEN",
+      );
+      assertEquals(composeText.includes(secretValue), false);
+      assertEquals(envText.includes(secretValue), false);
+      assertEquals(envText.includes("web__PORT=3000"), true);
+      assertEquals(composeText.includes(secretPath), true);
+      assertEquals(await Deno.readTextFile(secretPath), secretValue);
+      assertEquals((await Deno.stat(secretPath)).mode! & 0o777, 0o600);
+      const manifest = JSON.parse(
+        await Deno.readTextFile(join(deploymentDir, DEPLOYMENT_MANIFEST_FILENAME)),
+      ) as { secrets?: Array<{ relativePath: string }> };
+      assertEquals(manifest.secrets?.[0]?.relativePath, "web--TOKEN");
+    } finally {
+      if (previous.TURBOPANEL_STATE_DIR === undefined) {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+      } else {
+        Deno.env.set("TURBOPANEL_STATE_DIR", previous.TURBOPANEL_STATE_DIR);
+      }
+      if (previous.TURBOPANEL_CONFIG_DIR === undefined) {
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      } else {
+        Deno.env.set("TURBOPANEL_CONFIG_DIR", previous.TURBOPANEL_CONFIG_DIR);
+      }
+      if (previous.TURBOPANEL_RUN_DIR === undefined) {
+        Deno.env.delete("TURBOPANEL_RUN_DIR");
+      } else {
+        Deno.env.set("TURBOPANEL_RUN_DIR", previous.TURBOPANEL_RUN_DIR);
+      }
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});
+

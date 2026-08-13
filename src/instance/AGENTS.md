@@ -148,6 +148,15 @@ locally (enrollment + persisted `server.id`) and confirmed via the verified JWT
 `sub`; no WebSocket message adopts `serverId` (see the guard comment in
 `client.ts` `#handleMessage`).
 
+**Deployment secret rehydrate:** `/run` is tmpfs, so Compose secret files vanish
+across reboot. After a JWT session is available, `InstanceClient` fire-and-forgets
+`rehydrateLocalDeployments` (`src/deploy/rehydrate-deployments.ts`):
+`POST /api/daemon/v1/deployments/secrets/rehydrate` (plan + `tpdaemon` envelopes)
+then existing `/secrets/decrypt`, write `/run` files, then `docker compose up -d`.
+First connect always runs compose up; reconnect only if planned files are missing.
+Not on heartbeats. Command `environment.lifecycle` start/restart uses the same
+helper when files are absent.
+
 Related files: `src/instance/jwks-client.ts`; `getJwks()` / `JwksDocument` on
 `src/instance/api-client.ts`.
 

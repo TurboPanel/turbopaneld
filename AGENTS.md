@@ -356,12 +356,24 @@ excluded from release packaging (`package-daemon-release.sh` /
   (`runWireguardApply` in `src/orchestration/ansible.ts`); interface private keys
   and decrypted peer preshared keys live under `<daemonStateDir>/wireguard/` at
   mode `0600` (PSK files under `psk/`, deleted after apply) and never appear in
-  Ansible `-e` extra-vars or leave the host. **`environment.deploy`** may carry
+  Ansible `-e` extra-vars or leave the host. **`server.fabric.reconcile`**
+  (TurboFabric) is additive and opt-in: `enabled: false` is a successful no-op
+  (no `tp0`, no key, no WireGuard requirement). When enabled, the daemon
+  ensures interface `tp0`, persists the private key at
+  `<daemonStateDir>/network/wireguard/private.key` (mode `0600`, via
+  `fabricNetworkDir`), syncs peers with `wg syncconf`, creates listed Docker
+  routed-bridge networks, and hangs a `TP-FORWARD` chain off `DOCKER-USER`.
+  **`environment.deploy`** may carry
   `traditionalWebSites[]` for host-native nginx/Apache/OpenLiteSpeed sites
   (compose `serviceKind: traditional-web`); engines are vendored under
   `/opt/turbopanel/vendor/{nginx,apache,openlitespeed}` and Apache PHP via
   vendored php-fpm under `/opt/turbopanel/vendor/php/` — see
   `src/deploy/AGENTS.md` and `orchestration/AGENTS.md`.
+  Secret values never land in durable `compose.yaml`: the daemon writes
+  Compose standalone secret files under `/run/turbopanel/deployments/…/secrets/`
+  and a non-secret `.env` next to `compose.yaml`. After JWT, it rehydrates
+  those `/run` files (`POST /api/daemon/v1/deployments/secrets/rehydrate` then
+  `/secrets/decrypt`) and `compose up -d`.
 
 ## Subsystem docs (nested `AGENTS.md`)
 

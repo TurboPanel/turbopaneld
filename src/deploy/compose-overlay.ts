@@ -1,13 +1,14 @@
 /**
- * Daemon-authored compose overlay fragments merged into a final generated
- * layer (`docker-compose.turbopanel.daemon.yml`).
+ * Daemon-authored compose overlay fragments merged into compiled `compose.yaml`.
  *
- * Fragments are mostly key-disjoint; merge only has to reconcile two fragments
- * touching the same service (e.g. labels + secrets).
+ * Overlay is storage mounts, Traefik labels, and traditional-web reachability
+ * only — never secret values. Fragments are mostly key-disjoint; merge only
+ * has to reconcile two fragments touching the same service (e.g. labels +
+ * storage).
  */
 
+import { parse, stringify } from "yaml";
 import { join } from "@std/path";
-import { stringify } from "yaml";
 import {
   DAEMON_COMPOSE_FILENAME,
   writeComposeFileSecure,
@@ -141,10 +142,38 @@ export function renderComposeOverlay(
 }
 
 /**
+ * Merge overlay fragments into a compiled runtime compose YAML document.
+ * Top-level keys other than services/networks/volumes are preserved.
+ */
+export function mergeOverlayIntoComposeYaml(
+  baseYaml: string,
+  fragment: ComposeOverlayFragment,
+): string {
+  if (isEmptyFragment(fragment)) return baseYaml;
+  const parsed: unknown = parse(baseYaml);
+  const base = isPlainObject(parsed) ? parsed : {};
+  const merged = mergeComposeOverlayFragments([
+    {
+      ...(isPlainObject(base.services)
+        ? {
+          services: base.services as Record<string, Record<string, unknown>>,
+        }
+        : {}),
+      ...(isPlainObject(base.networks) ? { networks: base.networks } : {}),
+      ...(isPlainObject(base.volumes) ? { volumes: base.volumes } : {}),
+    },
+    fragment,
+  ]);
+  const out: Record<string, unknown> = { ...base };
+  if (merged.services) out.services = merged.services;
+  if (merged.networks) out.networks = merged.networks;
+  if (merged.volumes) out.volumes = merged.volumes;
+  return stringify(out);
+}
+
+/**
  * Write the daemon overlay at mode `0640`, or remove a stale file when the
  * fragment is empty. Returns the absolute path or `null`.
- *
- * May contain decrypted secret values — never log the contents.
  */
 export async function writeDaemonComposeLayer(
   dir: string,
