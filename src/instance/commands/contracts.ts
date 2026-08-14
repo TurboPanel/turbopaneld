@@ -3263,7 +3263,7 @@ function parseManagedApplyOrgTlsMaterial(
 /**
  * Must stay in sync with the instance canonical validator
  * (`DOCKER_RESOURCE_NAME_RE` / `isValidDockerResourceName` in
- * `instance/src/lib/naming.ts`).
+ * `turbopanel/src/lib/naming.ts`).
  */
 const SAFE_CONTAINER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/;
 

@@ -47,7 +47,7 @@ stays deferred until opt-in on both runtimes.
   back-compat.
 - After **~60 s** of inbound silence (`IDLE_PRESENCE_MS`), sends the wire
   **`{"type":"ping"}`** cell ping (must match `DAEMON_CELL_PING` in
-  `instance/src/daemon/cell/protocol.ts`). On Workers the DO answers via
+  `turbopanel/src/daemon/cell/protocol.ts`). On Workers the DO answers via
   `setWebSocketAutoResponse` without waking the object; on self-hosted Redis the
   same ping updates cell `lastSeenAt`. When the min-presence interval equals the
   check interval (default), `IdlePresence` allows ~5s of `setInterval` skew so
@@ -74,7 +74,7 @@ stays deferred until opt-in on both runtimes.
   `#checkStaleConnection` (`staleConnectionMs`). This daemon-side cap is the
   **primary lifetime enforcer** now that the instance no longer wakes healthy
   DOs each minute (AE-driven offline sweep). Cost rules:
-  **`../instance/AGENTS.md`** (Daemon Cell) — do not duplicate DO pricing here.
+  **`../turbopanel/AGENTS.md`** (Daemon Cell) — do not duplicate DO pricing here.
 
 **Heartbeat vs metrics:** ping/`heartbeat` (above) = liveness only. Host metrics
 are a separate completed measurement interval — see `../metrics/AGENTS.md`.
@@ -117,7 +117,7 @@ install a fresh registration key (Add Server) or point TURBOPANEL_INSTANCE_URL
 at the correct control plane, then the daemon auto-recovers`.
 `token-manager.ts` skips its 2 s session-refresh retry on a `permanent` first
 error (no double challenge+session per cycle). Status → action table:
-**`../instance/AGENTS.md`** (Daemon key authentication — do-not-retry-soon
+**`../turbopanel/AGENTS.md`** (Daemon key authentication — do-not-retry-soon
 table).
 
 **Single-daemon guarantee:** only one live cell attachment per server. Runtime
@@ -127,7 +127,7 @@ backstop is the instance cell's **single-writer lease** on attach
 adds a **flock** on `/run/turbopanel/daemon.lock` so a second
 `turbopaneld.service` cannot start. Manual `deno task start/dev` bypasses flock
 (dev-only). Canonical cell semantics, DO/SQLite billing, and cost rules:
-**`../instance/AGENTS.md`** (Daemon Cell) — do not duplicate DO pricing here.
+**`../turbopanel/AGENTS.md`** (Daemon Cell) — do not duplicate DO pricing here.
 
 ### JWKS verification
 
@@ -214,13 +214,13 @@ downloads over HTTPS). Four valid configurations:
 | Path                                 | CA trust                                                                                                                                                                                     | SAN requirement                                                                                                                                                                                                                                                                                                                                                                                                               |
 | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Plaintext HTTP dev control plane** | none — no CA is fetched, stored, or configured (`run.sh` skips the CA-fetch block and omits `turbopanel_instance_ca`; `createInstanceHttpClient` short-circuits before any CA/cert handling) | none — there is no TLS handshake; the daemon dials `ws://`/`http://` directly                                                                                                                                                                                                                                                                                                                                                 |
-| **Self-signed (self-hosted)**        | Daemon trusts the downloaded platform CA (`TURBOPANEL_INSTANCE_CA`, fetched from `GET /api/daemon/v1/instance/ca`)                                                                           | The leaf cert **must** include the hostname the daemon dials. SANs are derived from the configured public URL(s) — `TURBOPANEL_PUBLIC_URL` / `TURBOPANEL_BASE_URL` / `TURBOPANEL_INSTANCE_URL` and `TURBOPANEL_TLS_EXTRA_SANS` (see `../instance/scripts/generate-self-signed-cert.mjs`). Never hardcode the hostname.                                                                                                        |
+| **Self-signed (self-hosted)**        | Daemon trusts the downloaded platform CA (`TURBOPANEL_INSTANCE_CA`, fetched from `GET /api/daemon/v1/instance/ca`)                                                                           | The leaf cert **must** include the hostname the daemon dials. SANs are derived from the configured public URL(s) — `TURBOPANEL_PUBLIC_URL` / `TURBOPANEL_BASE_URL` / `TURBOPANEL_INSTANCE_URL` and `TURBOPANEL_TLS_EXTRA_SANS` (see `../turbopanel/scripts/generate-self-signed-cert.mjs`). Never hardcode the hostname.                                                                                                        |
 | **Let's Encrypt**                    | Publicly-valid → daemon uses the **system trust store** (ship **no** `TURBOPANEL_INSTANCE_CA`)                                                                                               | The real cert already covers the public hostname.                                                                                                                                                                                                                                                                                                                                                                             |
 | **Cloudflare tunnel / proxy**        | Cloudflare's edge cert is publicly-valid → **system trust**                                                                                                                                  | Daemon dials the public Cloudflare hostname, which the edge cert already covers. **Caveat:** behind a tunnel the instance cannot auto-discover its own public hostname (cloudflared dials out), so the reachable URL(s) must be **declared by the operator** (admin surface / `TURBOPANEL_PUBLIC_URL`), not auto-detected. The self-signed origin leg (cloudflared → local Caddy) is separate from what the daemon validates. |
 
 The plaintext HTTP path targets the **dev overlay** Caddyfile at
 `../dev/orchestration/Caddyfile` (`:8880`, always on when that file is loaded —
-see **`../dev/AGENTS.md`**). The production `../instance/Caddyfile` has no
+see **`../dev/AGENTS.md`**). The production `../turbopanel/Caddyfile` has no
 plaintext listener. The daemon refuses `TURBOPANEL_INSTANCE_URL=http://…`
 unless `TURBOPANEL_DEV_HTTP_CONTROL_PLANE=1` is set (client-side gate for
 dialing a development control plane — never valid on managed/production

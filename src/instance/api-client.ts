@@ -18,7 +18,7 @@ export class DaemonApiError extends Error {
 
 /**
  * Client-side mirrors of the instance `/secrets/decrypt` limits (see
- * `instance/src/daemon/api-routes.ts`). Enforced before sending so a daemon-side
+ * `turbopanel/src/daemon/api-routes.ts`). Enforced before sending so a daemon-side
  * bug fails locally instead of stressing the instance with an oversized batch.
  */
 export const MAX_SECRETS_DECRYPT_BATCH = 100;

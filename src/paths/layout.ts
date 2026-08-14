@@ -42,7 +42,7 @@ export const PROD_INSTANCE_DIR_DEFAULT = join(PROD_LIB_DIR_DEFAULT, "instance");
  * Development source-repo root.
  *
  * In development the *source* repos (the daemon checkout, and its siblings) live
- * under this root — the daemon checkout resolves to `<devRoot>/daemon`. Defaults
+ * under this root — the daemon checkout resolves to `<devRoot>/turbopaneld`. Defaults
  * to the dev user's home (`$HOME`); override with `TURBOPANEL_DEV_ROOT`. Every
  * *mutable* dir (config/state/log/runtimes/run, instance install root) does NOT
  * use this root — it resolves to the same production FHS paths, owned by the dev
@@ -73,11 +73,11 @@ export function resolveDevRoot(
 }
 
 /**
- * Development daemon checkout default (`<devRoot>/daemon`) when no tree is
+ * Development daemon checkout default (`<devRoot>/turbopaneld`) when no tree is
  * resolvable. Keep the export name — tests and `orchestration/paths.ts`
  * re-export it, and `resolveDevRoot({})` reproduces it deterministically.
  */
-export const DEV_DAEMON_ROOT_DEFAULT = join(DEV_ROOT_DEFAULT, "daemon");
+export const DEV_DAEMON_ROOT_DEFAULT = join(DEV_ROOT_DEFAULT, "turbopaneld");
 
 /**
  * Development mutable-dir defaults.
@@ -217,7 +217,7 @@ export function detectInstallMode(
       // cwd unavailable in some embedded contexts
     }
 
-    if (hasDaemonCheckout(join(resolveDevRoot(env), "daemon"))) {
+    if (hasDaemonCheckout(join(resolveDevRoot(env), "turbopaneld"))) {
       return "development";
     }
   }
@@ -230,7 +230,7 @@ export function defaultDaemonRootForMode(
   env: Record<string, string | undefined> = {},
 ): string {
   return mode === "development"
-    ? join(resolveDevRoot(env), "daemon")
+    ? join(resolveDevRoot(env), "turbopaneld")
     : PROD_DAEMON_ROOT_DEFAULT;
 }
 
@@ -341,7 +341,7 @@ export function resolveLayout(
               return fromMeta;
             }
             if (hasDaemonCheckout(Deno.cwd())) return Deno.cwd();
-            const devDaemonRoot = join(resolveDevRoot(env), "daemon");
+            const devDaemonRoot = join(resolveDevRoot(env), "turbopaneld");
             if (hasDaemonCheckout(devDaemonRoot)) {
               return devDaemonRoot;
             }

@@ -23,7 +23,7 @@ Environment=TURBOPANEL_UI_MODE={{ turbopanel_ui_mode }}
 {% if turbopanel_dev_user | length > 0 and turbopanel_ui_mode == 'dev' %}
 # Explicit opt-in for the dev-only developer surface (fleet/diagnostics/shell/
 # dev-sync/tunnel + /ws/developer). Never emitted on managed/production hosts or
-# after switching to a static production build. See ../instance src/dev-mode.ts
+# after switching to a static production build. See ../turbopanel src/dev-mode.ts
 # (isExplicitDevelopmentMode) — the surface fails closed without this flag.
 Environment=TURBOPANEL_DEV_SURFACE=1
 {% endif %}
@@ -70,7 +70,11 @@ ExecStart={{ turbopanel_instance_dir }}/scripts/workers-serve.sh
 ExecStart={{ turbopanel_instance_binary }}
 {% else %}
 {# Deno 2.9+ treats Unix-domain connect as --allow-net (not --allow-read). #}
-ExecStart={{ turbopanel_deno }} run --allow-env --allow-sys=networkInterfaces,hostname --allow-read={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_daemon_state_dir }} --allow-write={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_daemon_state_dir }} --allow-net=127.0.0.1:{{ drizzle_studio_port | default(4983) }},127.0.0.1:{{ rabbitmq_amqp_port }},127.0.0.1:{{ mailpit_smtp_port | default(1025) }},127.0.0.1:{{ clickhouse_http_port | default(8123) }},dl.trbp.nl:443,unix:{{ turbopanel_run_dir }}/instance.sock,unix:{{ postgres_socket_dir }}/.s.PGSQL.5432,unix:{{ redis_socket_path }} --allow-run=git,systemctl,tar,sudo,/usr/bin/sudo,/bin/sh,mkfifo,/usr/bin/mkfifo,pamtester,/usr/bin/pamtester,{{ turbopanel_node }},{{ turbopanel_deno }} src/deno.ts
+{% if turbopanel_dev_user | length > 0 and turbopanel_ui_mode == 'dev' %}
+ExecStart={{ turbopanel_deno }} run --allow-env --allow-sys=networkInterfaces,hostname --allow-read={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_daemon_state_dir }} --allow-write={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_daemon_state_dir }} --allow-net=127.0.0.1:{{ drizzle_studio_port | default(4983) }},127.0.0.1:{{ rabbitmq_amqp_port }},127.0.0.1:{{ mailpit_smtp_port | default(1025) }},127.0.0.1:{{ clickhouse_http_port | default(8123) }},dl.trbp.nl:443,unix:{{ turbopanel_run_dir }}/instance.sock,unix:{{ postgres_socket_dir }}/.s.PGSQL.5432,unix:{{ redis_socket_path }} --allow-run=git,systemctl,tar,sudo,/usr/bin/sudo,/bin/sh,mkfifo,/usr/bin/mkfifo,pamtester,/usr/bin/pamtester,{{ turbopanel_node }},{{ turbopanel_deno }} src/deno-dev.ts
+{% else %}
+ExecStart={{ turbopanel_deno }} run --allow-env --allow-sys=networkInterfaces,hostname --allow-read={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_daemon_state_dir }} --allow-write={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_daemon_state_dir }} --allow-net=127.0.0.1:{{ rabbitmq_amqp_port }},127.0.0.1:{{ clickhouse_http_port | default(8123) }},dl.trbp.nl:443,unix:{{ turbopanel_run_dir }}/instance.sock,unix:{{ postgres_socket_dir }}/.s.PGSQL.5432,unix:{{ redis_socket_path }} --allow-run=sudo,/usr/bin/sudo,/bin/sh,pamtester,/usr/bin/pamtester src/deno.ts
+{% endif %}
 {% endif %}
 Restart=always
 RestartSec=2

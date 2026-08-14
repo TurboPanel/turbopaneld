@@ -17,11 +17,15 @@ import {
 import { collectServerAddresses } from "../server-addresses.ts";
 import { collectManagedLogs } from "../managed/logs.ts";
 import {
-  applyDevSyncTarball,
   type DevSyncState,
+  MANAGED_DEV_SYNC_REFUSED_REASON,
   newDevSyncState,
   resolveDevSyncSourceRoot,
-} from "../dev-sync-apply.ts";
+} from "../dev-sync-resolve.ts";
+import {
+  type DevSyncApplyFn,
+  getCheckoutDevSyncApply,
+} from "./dev-sync-runtime.ts";
 import { applyPublicUrls } from "./public-urls-apply.ts";
 import { writeInstanceTunnelToken } from "../tunnels.ts";
 import {
@@ -178,6 +182,11 @@ export interface InstanceClientOptions {
   onMessage?: (message: DaemonMessage) => void;
   /** When set, enables host metrics on the daemon WebSocket. */
   metricsCollectorFactory?: () => MetricsCollector;
+  /**
+   * Checkout-sync unpack implementation. Production compile never supplies this;
+   * source `main.ts` registers it via `enableCheckoutDevSync`.
+   */
+  applyDevSyncTarball?: DevSyncApplyFn;
 }
 
 export const DEFAULT_INITIAL_BACKOFF_MS = 2_000;
@@ -339,11 +348,14 @@ export class InstanceClient {
   /** Server id the current metrics scheduler was bound for (not `#tokenServerId`). */
   #metricsSchedulerServerId: string | undefined;
   readonly #metricsCollectorFactory?: () => MetricsCollector;
+  readonly #applyDevSyncTarball?: DevSyncApplyFn;
   #updateInstallInProgress = false;
 
   constructor(options: InstanceClientOptions = {}) {
     this.#config = options.config ?? resolveInstanceConfig();
     this.#httpClient = options.httpClient;
+    this.#applyDevSyncTarball = options.applyDevSyncTarball ??
+      getCheckoutDevSyncApply();
     this.#initialBackoffMs = normalizeReconnectDelayMs(
       options.reconnectDelayMs,
     );
@@ -1111,7 +1123,12 @@ export class InstanceClient {
     // Gate the transfer up front: only daemons with a real checkout-backed
     // execution mode accept source-sync. Managed / compiled / JS-fallback
     // installs refuse immediately instead of buffering a full tarball just
-    // to fail at dev-sync-end.
+    // to fail at dev-sync-end. The unpack implementation is absent from
+    // production compile unless checkout-sync was explicitly enabled.
+    if (!this.#applyDevSyncTarball) {
+      this.#refuseDevSync(message.id, MANAGED_DEV_SYNC_REFUSED_REASON, ws);
+      return;
+    }
     const source = resolveDevSyncSourceRoot();
     if (!source.ok) {
       this.#refuseDevSync(message.id, source.reason, ws);
@@ -1161,9 +1178,13 @@ export class InstanceClient {
     let error: string | undefined;
     try {
       if (!state) throw new Error("no dev-sync in progress for this id");
+      const apply = this.#applyDevSyncTarball;
+      if (!apply) {
+        throw new Error(MANAGED_DEV_SYNC_REFUSED_REASON);
+      }
       const base64 = state.chunks.join("");
       const bytes = decodeBase64(base64);
-      await applyDevSyncTarball(bytes);
+      await apply(bytes);
 
       const restarted = await restartDaemonService();
       if (!restarted) {

@@ -495,7 +495,7 @@ export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
   /**
    * Per-database dumps only (`-Fc` custom format). `pg_dumpall` (whole
    * instance) is a documented future seam — see
-   * `instance/src/lib/managed/AGENTS.md`.
+   * `turbopanel/src/lib/managed/AGENTS.md`.
    */
   backup: postgresBackupRuntime,
   replication: postgresReplicationRuntime,

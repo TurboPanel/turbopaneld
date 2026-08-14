@@ -7,7 +7,7 @@
  * (`<checkout>/scripts/`) and resolves every path through the daemon's own
  * layout-aware modules (`src/orchestration/paths.ts`, `src/paths/layout.ts`). It
  * therefore works whether the checkout is the co-located dev tree under the dev
- * user's home (`<home>/daemon`) or the FHS install root — it never names a
+ * user's home (`<home>/turbopaneld`) or the FHS install root — it never names a
  * `/opt/turbopanel/platform` tree.
  *
  * Co-located dev converge (`instance-dev-install`) resolves the playbook + dev

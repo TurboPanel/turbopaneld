@@ -7,7 +7,7 @@ access for managed engines is **one shared ProxySQL** per server
 (`turbopanel-proxysql`), not per-service Traefik.
 
 Root context: `../../AGENTS.md`. Instance engine specs:
-`../../../instance/src/lib/managed/AGENTS.md`. Command contracts:
+`../../../turbopanel/src/lib/managed/AGENTS.md`. Command contracts:
 `../instance/commands/contracts.ts`. Host prerequisites:
 `../../orchestration/AGENTS.md` → **ProxySQL (`proxysql`)**.
 
@@ -112,7 +112,7 @@ listeners and routes to engine members on `turbopanel-managed`.
 Username frontend namespace is **server-wide** across every cluster hosted on that
 org's servers: `ManagedFrontendUserConflictError` when the same login would map
 to two managed ids. The instance enforces the same org-owner login uniqueness
-before enqueue (see `instance/src/lib/managed/AGENTS.md` → Login namespace).
+before enqueue (see `turbopanel/src/lib/managed/AGENTS.md` → Login namespace).
 
 ## Rules
 
@@ -184,7 +184,7 @@ before enqueue (see `instance/src/lib/managed/AGENTS.md` → Login namespace).
    (a separate SUPERUSER/grant, not a rename of the connection identity).
    Never assume the payload's root credential username equals
    `ctx.rootUsername`. Canonical contract:
-   `../../instance/src/lib/managed/AGENTS.md` → "Managed root username".
+   `../../turbopanel/src/lib/managed/AGENTS.md` → "Managed root username".
 10. **Backup/restore (`backup.ts`).** Optional per engine via
    `ManagedEngineRuntime.backup` (`ManagedBackupNotSupportedError` when absent).
    - **Stream, never buffer.** Dump stdout pipes to a `<backupId>.<ext>.part`

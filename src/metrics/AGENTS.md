@@ -2,7 +2,7 @@
 
 Fire-and-forget host-metrics collection (async `/proc` + `statfs` reads, **no** per-interval subprocesses) and scheduling, sent via `POST /api/daemon/v1/metrics`. The 20-metric order is an external storage contract mirrored (not build-coupled) with the instance.
 
-Root context: `../../AGENTS.md`. Instance-side storage/query/caching: `../../../instance/src/daemon/metrics/AGENTS.md`. Cross-repo `../<repo>/…` links are relative to the repo root.
+Root context: `../../AGENTS.md`. Instance-side storage/query/caching: `../../../turbopanel/src/daemon/metrics/AGENTS.md`. Cross-repo `../<repo>/…` links are relative to the repo root.
 
 ### Host metrics
 
@@ -15,7 +15,7 @@ fire-and-forget). Protocol v1 request body:
 ```
 
 Contract mirrored (not build-coupled) in `src/metrics/contract.ts` ↔
-`../instance/src/daemon/metrics/contract.ts` (`METRICS_SCHEMA_VERSION = 1`). The
+`../turbopanel/src/daemon/metrics/contract.ts` (`METRICS_SCHEMA_VERSION = 1`). The
 20-metric ordered list (`HOST_METRIC_KEYS`: `cpuUsagePercent` … `uptimeSeconds`)
 is an **external storage contract** — positional AE doubles and ClickHouse
 columns depend on this order.
@@ -56,7 +56,7 @@ ClickHouse raw TTL). Server metrics are always on — there is no instance-side
 enable/disable gate; the daemon always collects and emits host metrics
 fire-and-forget, and the instance always persists when a backend is configured.
 ClickHouse connection vars and `CLICKHOUSE_VERSION` pin: see **ClickHouse**
-below and **`../instance/AGENTS.md`** (Server metrics).
+below and **`../turbopanel/AGENTS.md`** (Server metrics).
 
 **Local validation:** fixture-driven tests under `src/metrics/` (no live `/proc`
 required):

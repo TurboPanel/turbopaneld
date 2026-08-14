@@ -14,7 +14,7 @@ import {
 const test = Deno.test.bind(Deno);
 
 /**
- * Parity contract with `instance/src/lib/machine-key.test.ts` — same namespace
+ * Parity contract with `turbopanel/src/lib/machine-key.test.ts` — same namespace
  * literal and pinned (fixture machine id → hex) vector. Drift between the two
  * copies breaks enroll/auth across the daemon ↔ instance boundary.
  */

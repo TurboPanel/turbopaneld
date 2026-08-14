@@ -106,7 +106,7 @@ Contributor workflow uses the [TurboPanel Development Environment](https://githu
 curl -fsSL dev.turbopanel.sh | sh
 ```
 
-That clones `~/daemon` (and sibling repos), runs the daemon from source via Deno, and converges the dev overlay. Details: [Local development](https://turbopanel.io/docs/getting-started/development?utm_source=github-daemon-readme).
+That clones `~/turbopaneld` (and sibling repos), runs the daemon from source via Deno, and converges the dev overlay. Details: [Local development](https://turbopanel.io/docs/getting-started/development?utm_source=github-daemon-readme).
 
 Maintainer conventions and path model: [AGENTS.md](./AGENTS.md).
 

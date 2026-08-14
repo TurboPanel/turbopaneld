@@ -22,8 +22,8 @@
     turbopanel_dev_root: "{{ ansible_env.HOME }}"
     turbopanel_lib_dir: "{{ turbopanel_install_root }}/lib"
     turbopanel_vendor_dir: "{{ turbopanel_install_root }}/vendor"
-    turbopanel_daemon_dir: "{{ (turbopanel_dev_root ~ '/daemon') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/daemon') }}"
-    turbopanel_instance_dir: "{{ (turbopanel_dev_root ~ '/instance') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/instance') }}"
+    turbopanel_daemon_dir: "{{ (turbopanel_dev_root ~ '/turbopaneld') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/daemon') }}"
+    turbopanel_instance_dir: "{{ (turbopanel_dev_root ~ '/turbopanel') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/instance') }}"
     turbopanel_ui_dir: "{{ (turbopanel_dev_root ~ '/ui') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/ui') }}"
     turbopanel_instance_runtime: deno
     instance_start: true

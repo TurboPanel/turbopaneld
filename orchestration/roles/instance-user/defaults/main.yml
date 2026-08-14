@@ -30,7 +30,7 @@ turbopanel_lib_dir: "{{ turbopanel_install_root }}/lib"
 # Instance user's home = source checkout: co-located dev uses the dev user's home;
 # managed installs use the FHS lib tree. Only consumed by the managed-guarded user
 # task below, but kept dev-consistent so it never leaks a /platform path.
-turbopanel_instance_dir: "{{ (turbopanel_dev_root ~ '/instance') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/instance') }}"
+turbopanel_instance_dir: "{{ (turbopanel_dev_root ~ '/turbopanel') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/instance') }}"
 instance_service_name: turbopanel-instance
 caddy_service_name: turbopanel-caddy
 ui_service_name: turbopanel-ui

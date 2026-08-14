@@ -18,7 +18,7 @@ turbopanel_vendor_dir: "{{ turbopanel_install_root }}/vendor"
 # Co-located dev checkout root (source mode) lives under the dev user's home.
 # Managed installs do not use this as a source tree — they run from
 # bin/turbopaneld or bin/turbopaneld.js.
-turbopanel_daemon_dir: "{{ (turbopanel_dev_root ~ '/daemon') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/daemon') }}"
+turbopanel_daemon_dir: "{{ (turbopanel_dev_root ~ '/turbopaneld') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/daemon') }}"
 turbopanel_orchestration_dir: "{{ turbopanel_daemon_dir }}/orchestration"
 turbopanel_daemon_workdir: "{{ turbopanel_daemon_dir }}"
 turbopanel_daemon_deno_bin: "{{ turbopanel_vendor_dir }}/deno/bin/deno"

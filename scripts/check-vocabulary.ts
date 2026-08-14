@@ -12,7 +12,7 @@
  *
  * This is a companion guard to `scripts/check-production-layout.ts`, not a
  * replacement — keep the forbidden-phrase list and allowlist in sync with
- * the sibling checks in `../instance/scripts/check-vocabulary.mjs` and
+ * the sibling checks in `../turbopanel/scripts/check-vocabulary.mjs` and
  * `../website/scripts/check-vocabulary.mjs`.
  *
  * Run: `deno task check:vocabulary`.

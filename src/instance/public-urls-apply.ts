@@ -28,7 +28,7 @@ function isCoLocatedDev(
  * Instance source tree for cert generation (`scripts/` + `certs/`).
  *
  * Co-located development uses the checkout (`TURBOPANEL_INSTANCE_REPO` or
- * `<devRoot>/instance`). {@link resolveLayout}.instanceDir stays on the FHS
+ * `<devRoot>/turbopanel`). {@link resolveLayout}.instanceDir stays on the FHS
  * stub (`/opt/turbopanel/lib/instance`) for mutable install layout — that path
  * has no generate script, so public-urls apply must not use it in dev.
  */
@@ -46,7 +46,7 @@ export function resolveInstanceDir(
   }
 
   if (isCoLocatedDev(env)) {
-    return join(resolveDevRoot(env), "instance");
+    return join(resolveDevRoot(env), "turbopanel");
   }
 
   return resolveLayout(env).instanceDir;

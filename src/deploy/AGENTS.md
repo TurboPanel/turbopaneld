@@ -8,7 +8,7 @@ hosting Caddy, no tenant Traefik/`turbopanel-ingress`, no user compose merge,
 shared ProxySQL frontend (`turbopanel-proxysql` / `managed-ingress`). Do not
 route `managed.*` commands through this deploy stack.
 
-Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../instance/src/lib/commands/AGENTS.md`. Cross-repo `../<repo>/…` links are relative to the repo root.
+Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbopanel/src/lib/commands/AGENTS.md`. Cross-repo `../<repo>/…` links are relative to the repo root.
 
 ## Tenant Docker Compose deploy + hosting ingress
 

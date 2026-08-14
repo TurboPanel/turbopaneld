@@ -11,7 +11,7 @@ CADDY_BIN="$TURBOPANEL_RUNTIMES_DIR/caddy/current/caddy"
 
 if [ ! -s "$DAEMON_BINARY" ]; then
 	echo "serve-update.sh: $DAEMON_BINARY not found or empty" >&2
-	echo "run the daemon-build role (or deno task compile) to produce dist/turbopaneld first" >&2
+	echo "run deno task compile or deno task release:dev to produce dist/turbopaneld first" >&2
 	exit 1
 fi
 

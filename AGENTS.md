@@ -8,7 +8,7 @@ HTTPS/WSS (or Unix socket when co-located).
 **Keep this file current.** When you learn something durable about daemon ↔
 instance contracts — WS presence, reconnect behavior, command handlers,
 orchestration — add or update a note here in the same PR/session as the code
-change. Cross-repo cell/cost rules live in `../instance/AGENTS.md` (Daemon Cell
+change. Cross-repo cell/cost rules live in `../turbopanel/AGENTS.md` (Daemon Cell
 section); link there instead of duplicating DO hibernation detail.
 
 ### TypeScript style (SonarQube)
@@ -44,7 +44,7 @@ section); link there instead of duplicating DO hibernation detail.
   ```
 
   When adding a new Deno test file, add this alias from the start. Applied to
-  every existing Deno test file in this repo and `../instance`.
+  every existing Deno test file in this repo and `../turbopanel`.
 
 ### Ansible style (SonarQube)
 
@@ -67,11 +67,11 @@ env-overridable (`TURBOPANEL_HOME`, `TURBOPANEL_BIN_DIR`, `TURBOPANEL_LIB_DIR`,
 `src/orchestration/paths.ts` and `src/instance/paths.ts` derive their constants
 from `resolveLayout` — do **not** hardcode absolute paths in runtime code;
 add/extend a layout field instead. The development default checkout root is
-`<devRoot>/daemon` (from `TURBOPANEL_DEV_ROOT` / `$HOME`); production runtime
+`<devRoot>/turbopaneld` (from `TURBOPANEL_DEV_ROOT` / `$HOME`); production runtime
 code must never name the retired `/opt/turbopanel/platform` token — the layout
 module and CI guard are the only places allowed to reference it.
 
-**Production (managed / FHS)** — compiled release, no source checkout. The daemon runs as **`tp:tp`** (UID/GID 9999); per-service accounts (`tpctrl`, `tpcache`, `tpdata`, `tpqueue`, `tpmetrics`, `tpcaddy`) are listed in **`../instance/AGENTS.md`** (Production UID/GID allocation):
+**Production (managed / FHS)** — compiled release, no source checkout. The daemon runs as **`tp:tp`** (UID/GID 9999); per-service accounts (`tpctrl`, `tpcache`, `tpdata`, `tpqueue`, `tpmetrics`, `tpcaddy`) are listed in **`../turbopanel/AGENTS.md`** (Production UID/GID allocation):
 
 | Purpose                                                           | Path                                  |
 | ----------------------------------------------------------------- | ------------------------------------- |
@@ -98,7 +98,7 @@ send an optional operator override, which must clear the `tp*` service band
 
 | Purpose                          | Path                                                                               |
 | -------------------------------- | ---------------------------------------------------------------------------------- |
-| Daemon checkout / install root   | `<TURBOPANEL_DEV_ROOT or $HOME>/daemon`                                            |
+| Daemon checkout / install root   | `<TURBOPANEL_DEV_ROOT or $HOME>/turbopaneld`                                            |
 | Orchestration assets             | `<checkout>/orchestration` (prod roles); overlay in `<dev checkout>/orchestration` |
 | Vendored runtimes                | `/opt/turbopanel/vendor`                                                           |
 | Daemon env file                  | `/etc/turbopanel/daemon.env`                                                       |
@@ -115,7 +115,7 @@ services (Postgres, RabbitMQ, and ClickHouse consolidated under the single
 below — plus standalone Redis, Mailpit, Tabix — `turbopanel-tabix`), all run as
 the **current dev user**. Production managed installs keep the dedicated
 service users `tp`, `tpctrl`, `tpcache`, `tpdata`, `tpqueue`, `tpmetrics`, and
-`tpcaddy` — see **`../instance/AGENTS.md`** (Production UID/GID allocation).
+`tpcaddy` — see **`../turbopanel/AGENTS.md`** (Production UID/GID allocation).
 
 **Deno version pin:** `DENO_VERSION` (`src/orchestration/paths.ts`) =
 **`2.9.5`**. Keep it in step with `deno_version` in

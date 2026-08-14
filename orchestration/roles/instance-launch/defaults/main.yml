@@ -40,8 +40,8 @@ turbopanel_runtime_path: >-
   turbopanel_vendor_dir }}/caddy/current:/usr/bin:/bin
 # Source checkouts: co-located dev uses the dev user's home; managed installs use
 # the FHS lib tree.
-turbopanel_daemon_dir: "{{ (turbopanel_dev_root ~ '/daemon') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/daemon') }}"
-turbopanel_instance_dir: "{{ (turbopanel_dev_root ~ '/instance') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/instance') }}"
+turbopanel_daemon_dir: "{{ (turbopanel_dev_root ~ '/turbopaneld') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/daemon') }}"
+turbopanel_instance_dir: "{{ (turbopanel_dev_root ~ '/turbopanel') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/instance') }}"
 turbopanel_ui_dir: "{{ (turbopanel_dev_root ~ '/ui') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/ui') }}"
 turbopanel_website_dir: "{{ (turbopanel_dev_root ~ '/website') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/website') }}"
 # Per-service runtime state (HOME / XDG dirs): always FHS state under
@@ -78,7 +78,8 @@ turbopanel_caddyfile: >-
   {{ (turbopanel_dev_root ~ '/dev/orchestration/Caddyfile') if
   (turbopanel_dev_user | default('') | length > 0) else
   (turbopanel_instance_dir ~ '/Caddyfile') }}
-# "source" runs deno run src/deno.ts; "compiled" exec's dist/turbopanel-instance.
+# "source" runs deno run src/deno-dev.ts when the developer surface is on,
+# otherwise src/deno.ts; "compiled" exec's dist/turbopanel-instance.
 turbopanel_instance_run_mode: source
 turbopanel_instance_binary: "{{ turbopanel_instance_dir }}/dist/turbopanel-instance"
 # "deno" runs turbopanel-instance via systemd; "workers" expects manual wrangler dev.

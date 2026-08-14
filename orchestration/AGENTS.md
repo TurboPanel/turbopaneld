@@ -325,7 +325,7 @@ other Compose project — they have no `container` row, and their health/restart
 surface is the server **Control** tab / system-component control API on the
 instance, not a container table. Rationale for why those four stay host-native
 (PAM, `systemctl`/`git` update access, socket uid/gid, unix-socket
-permissions) is canonical in `../../instance/AGENTS.md` → "Self-host system
+permissions) is canonical in `../../turbopanel/AGENTS.md` → "Self-host system
 inventory" — do not duplicate it here.
 
 ### ClickHouse (self-hosted analytics)
@@ -341,7 +341,7 @@ system-log `DROP TABLE` cleanup live in `roles/clickhouse/tasks/bootstrap.yml`,
 ready (they need `docker exec` against a running container, so they cannot run
 from the trimmed config-only role itself).
 
-Instance-side ClickHouse metrics store + schema/query contract: `../../instance/src/daemon/metrics/AGENTS.md`.
+Instance-side ClickHouse metrics store + schema/query contract: `../../turbopanel/src/daemon/metrics/AGENTS.md`.
 
 | Path / resource                                                                          | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -427,7 +427,7 @@ The Deno/compiled `turbopanel-instance.service` loads `runtime.env` then
 `runtime.dev-vars` via `EnvironmentFile=` so the process sees the full
 ClickHouse + metrics config. Default:
 `TURBOPANEL_SERVER_METRICS_RETENTION_DAYS=90` (metrics are always on — no
-enable/disable env). Schema/query contract: **`../instance/AGENTS.md`** (Server
+enable/disable env). Schema/query contract: **`../turbopanel/AGENTS.md`** (Server
 metrics — ClickHouse).
 
 **Workers runtime dev vars:** `instance-workers.dev-vars.j2` injects

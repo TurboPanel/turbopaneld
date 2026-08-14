@@ -25,7 +25,7 @@
     turbopanel_dev_gid: ""
     turbopanel_dev_root: ""
     turbopanel_vendor_dir: "{{ turbopanel_install_root }}/vendor"
-    turbopanel_daemon_dir: "{{ (turbopanel_dev_root ~ '/daemon') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_install_root ~ '/lib/daemon') }}"
+    turbopanel_daemon_dir: "{{ (turbopanel_dev_root ~ '/turbopaneld') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_install_root ~ '/lib/daemon') }}"
     turbopanel_orchestration_dir: "{{ turbopanel_daemon_dir }}/orchestration"
     turbopanel_daemon_workdir: "{{ turbopanel_daemon_dir }}"
     turbopanel_config_dir: /etc/turbopanel

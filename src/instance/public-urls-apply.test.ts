@@ -16,19 +16,19 @@ test("resolveInstanceDir uses INSTANCE_REPO checkout in development", () => {
     resolveInstanceDir({
       TURBOPANEL_MODE: "development",
       TURBOPANEL_DEV_ROOT: "/home/dev",
-      TURBOPANEL_INSTANCE_REPO: "/home/dev/instance",
+      TURBOPANEL_INSTANCE_REPO: "/home/dev/turbopanel",
     }),
-    "/home/dev/instance",
+    "/home/dev/turbopanel",
   );
 });
 
-test("resolveInstanceDir falls back to <devRoot>/instance in development", () => {
+test("resolveInstanceDir falls back to <devRoot>/turbopanel in development", () => {
   assertEquals(
     resolveInstanceDir({
       TURBOPANEL_MODE: "development",
       TURBOPANEL_DEV_ROOT: "/home/dev",
     }),
-    "/home/dev/instance",
+    "/home/dev/turbopanel",
   );
 });
 
@@ -48,7 +48,7 @@ test("resolveInstanceDir honors TURBOPANEL_INSTANCE_DIR override", () => {
     resolveInstanceDir({
       TURBOPANEL_MODE: "development",
       TURBOPANEL_INSTANCE_DIR: "/custom/instance/",
-      TURBOPANEL_INSTANCE_REPO: "/home/dev/instance",
+      TURBOPANEL_INSTANCE_REPO: "/home/dev/turbopanel",
     }),
     "/custom/instance",
   );
@@ -66,7 +66,7 @@ async function listEnvTmpFiles(dir: string): Promise<string[]> {
 
 test("upsertPublicUrlsInEnv writes public URLs to protected runtime env", async () => {
   const root = await Deno.makeTempDir({ prefix: "tp-public-urls-" });
-  const checkoutDir = join(root, "checkout", "instance");
+  const checkoutDir = join(root, "checkout", "turbopanel");
   const configDir = join(root, "config", "instance");
   const runtimeEnvPath = join(configDir, "runtime.env");
   await Deno.mkdir(checkoutDir, { recursive: true });
@@ -90,7 +90,7 @@ test("upsertPublicUrlsInEnv writes public URLs to protected runtime env", async 
 
 test("upsertPublicUrlsInEnv removes temp files when rename fails", async () => {
   const root = await Deno.makeTempDir({ prefix: "tp-public-urls-fail-" });
-  const checkoutDir = join(root, "checkout", "instance");
+  const checkoutDir = join(root, "checkout", "turbopanel");
   const configDir = join(root, "config", "instance");
   const runtimeEnvPath = join(configDir, "runtime.env");
   await Deno.mkdir(checkoutDir, { recursive: true });

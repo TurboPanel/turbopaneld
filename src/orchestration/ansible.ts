@@ -144,7 +144,7 @@ export function devOwnershipPlaybookExtraArgs(
   if (devUser) args.push("-e", `turbopanel_dev_user=${devUser}`);
   if (devUid) args.push("-e", `turbopanel_dev_uid=${devUid}`);
   if (devGid) args.push("-e", `turbopanel_dev_gid=${devGid}`);
-  // Ansible instance-certs defaults compute `<dev_root>/instance` when
+  // Ansible instance-certs defaults compute `<dev_root>/turbopanel` when
   // turbopanel_dev_user is set; pass the root so HOME/certs stay aligned.
   if (devRoot) args.push("-e", `turbopanel_dev_root=${devRoot}`);
   return args;

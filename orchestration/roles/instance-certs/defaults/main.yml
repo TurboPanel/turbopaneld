@@ -14,7 +14,7 @@ turbopanel_deno: "{{ turbopanel_vendor_dir }}/deno/current/deno"
 turbopanel_runtime_path: "{{ turbopanel_vendor_dir }}/node/current/bin:{{ turbopanel_vendor_dir }}/deno/current:{{ turbopanel_vendor_dir }}/caddy/current:/usr/bin:/bin"
 # Source checkout: co-located dev uses the dev user's home; managed installs use
 # the FHS lib tree.
-turbopanel_instance_dir: "{{ (turbopanel_dev_root ~ '/instance') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/instance') }}"
+turbopanel_instance_dir: "{{ (turbopanel_dev_root ~ '/turbopanel') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/instance') }}"
 turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
 instance_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tpctrl' }}"
 turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
