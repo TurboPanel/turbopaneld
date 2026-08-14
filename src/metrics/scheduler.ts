@@ -6,12 +6,14 @@
  * the cell ping. Emits fire-and-forget via the injected sink (authenticated
  * HTTP), not the daemon WebSocket.
  *
- * Interval cadence is independent of collect latency: the steady timer is armed
- * when the jittered first tick fires, not after the first collect completes.
- * Overlapping ticks are dropped (metrics is disposable) so the stateful
- * collector is never used concurrently and sent sequences stay monotonic.
- * Attach-scoped generation tokens ignore stale in-flight emits across
- * detach/reconnect.
+ * Interval cadence is independent of collect latency: the first sample fires
+ * immediately on attach (so a newly registered host, including the co-located
+ * self-hosted daemon, populates gauges without waiting), a short primed tick
+ * then sends rate metrics, and the steady timer is armed on that primed tick
+ * — not after collect completion. Overlapping ticks are dropped (metrics is
+ * disposable) so the stateful collector is never used concurrently and sent
+ * sequences stay monotonic. Attach-scoped generation tokens ignore stale
+ * in-flight emits across detach/reconnect.
  */
 import { logInfo, logWarn, sanitizeForLog } from "../logger.ts";
 import type { MetricsCollector } from "./collector/index.ts";
@@ -20,8 +22,15 @@ import type { MetricsCollector } from "./collector/index.ts";
 export const METRICS_INTERVAL_MS = 60_000;
 
 /**
+ * Delay before the second (rate-primed) sample on a fresh attach.
+ * CPU / disk / net rates need two snapshots; this is well under
+ * {@link METRICS_INTERVAL_MS} so first usable stats land in seconds.
+ */
+export const METRICS_PRIME_MS = 2_000;
+
+/**
  * Phase-only jitter bound (well under {@link METRICS_INTERVAL_MS}).
- * Shifts when the first sample fires per serverId; does not change cadence, so
+ * Shifts the primed second sample per serverId; does not change cadence, so
  * chart resolution stays one sample per interval.
  */
 export const METRICS_JITTER_MAX_MS = 5_000;
@@ -56,6 +65,8 @@ export type MetricsSchedulerOptions = {
   collectorFactory: () => MetricsCollector;
   intervalMs?: number;
   jitterMaxMs?: number;
+  /** Override {@link METRICS_PRIME_MS} (tests). `0` skips the primed tick. */
+  primeMs?: number;
   now?: () => number;
   setIntervalFn?: typeof setInterval;
   clearIntervalFn?: typeof clearInterval;
@@ -115,6 +126,7 @@ export class MetricsScheduler {
   readonly #collectorFactory: () => MetricsCollector;
   readonly #intervalMs: number;
   readonly #jitterMaxMs: number;
+  readonly #primeMs: number;
   readonly #now: () => number;
   readonly #setIntervalFn: typeof setInterval;
   readonly #clearIntervalFn: typeof clearInterval;
@@ -144,6 +156,7 @@ export class MetricsScheduler {
     this.#collectorFactory = options.collectorFactory;
     this.#intervalMs = options.intervalMs ?? METRICS_INTERVAL_MS;
     this.#jitterMaxMs = options.jitterMaxMs ?? METRICS_JITTER_MAX_MS;
+    this.#primeMs = options.primeMs ?? METRICS_PRIME_MS;
     this.#now = options.now ?? Date.now;
     this.#setIntervalFn = options.setIntervalFn ?? setInterval;
     this.#clearIntervalFn = options.clearIntervalFn ?? clearInterval;
@@ -194,14 +207,30 @@ export class MetricsScheduler {
     this.#collector = collector;
     this.#unsupportedStopped = false;
 
-    const jitterMs = deterministicJitterMs(this.#serverId, this.#jitterMaxMs);
+    // Fire on the next timer turn (0 ms) so a newly registered host — including
+    // the co-located self-hosted daemon — POSTs gauges immediately. The primed
+    // follow-up then fills rate metrics; the 60 s interval arms on that tick.
     this.#firstTimer = this.#setTimeoutFn(() => {
       this.#firstTimer = undefined;
-      // Arm the steady interval immediately so cadence tracks the jittered
-      // schedule, not first-collect completion latency.
+      void this.#emit(generation, send);
+      this.#schedulePrimedCadence(generation, send);
+    }, 0);
+  }
+
+  #schedulePrimedCadence(generation: number, send: MetricsSink): void {
+    if (generation !== this.#attachGeneration) return;
+    if (this.#unsupportedStopped || this.#send !== send) return;
+    const delayMs = this.#primeMs +
+      deterministicJitterMs(this.#serverId, this.#jitterMaxMs);
+    if (delayMs <= 0) {
+      this.#armInterval(generation, send);
+      return;
+    }
+    this.#firstTimer = this.#setTimeoutFn(() => {
+      this.#firstTimer = undefined;
       void this.#emit(generation, send);
       this.#armInterval(generation, send);
-    }, jitterMs);
+    }, delayMs);
   }
 
   #armInterval(generation: number, send: MetricsSink): void {

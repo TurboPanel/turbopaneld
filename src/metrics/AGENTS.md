@@ -22,19 +22,23 @@ columns depend on this order.
 
 **Scheduling** (`src/metrics/scheduler.ts`): `MetricsScheduler` takes an
 injected `MetricsSink` (`attach(send)`) rather than the raw `WebSocket` — the WS
-keeps only commands/outbox + the cell ping. One sample ~every **60 s**
-(`METRICS_INTERVAL_MS`) while connected; deterministic per-`serverId` phase
-jitter ≤**5 s** (`METRICS_JITTER_MAX_MS`, FNV‑1a — does not change query
-resolution). Monotonic process-local `sequence` resets on daemon restart (not
-persisted). Fire-and-forget, disposable — no acks, retries, or outbox. Never
-blocks startup, connect, liveness, command dispatch, shutdown, or reconnect.
-Factory/collect/send failures are rate-limited (`METRICS_LOG_RATE_LIMIT_MS` = 5
-min) and must not tear down the socket. Overlapping ticks are dropped; the
-steady interval arms when the jittered first tick fires (not after first-collect
-completion). Attach-scoped generation ignores stale in-flight emits across
-detach/reconnect. Scheduler rebinding tracks `#metricsSchedulerServerId`
-separately from `#tokenServerId` so jitter stays tied to the authenticated
-server after identity recovery.
+keeps only commands/outbox + the cell ping. On attach (first registration and
+every reconnect, including the co-located self-hosted daemon) the first sample
+POSTs immediately so gauges (load / memory / disk / uptime) populate without
+waiting. A primed second sample **2 s** later (`METRICS_PRIME_MS`) plus
+deterministic per-`serverId` phase jitter ≤**5 s** (`METRICS_JITTER_MAX_MS`,
+FNV‑1a) fills CPU / disk / net rates (two-snapshot deltas). Steady cadence is
+then one sample ~every **60 s** (`METRICS_INTERVAL_MS`); jitter does not change
+query resolution. Monotonic process-local `sequence` resets on daemon restart
+(not persisted). Fire-and-forget, disposable — no acks, retries, or outbox.
+Never blocks startup, connect, liveness, command dispatch, shutdown, or
+reconnect. Factory/collect/send failures are rate-limited
+(`METRICS_LOG_RATE_LIMIT_MS` = 5 min) and must not tear down the socket.
+Overlapping ticks are dropped; the steady interval arms when the primed tick
+fires (not after first-collect completion). Attach-scoped generation ignores
+stale in-flight emits across detach/reconnect. Scheduler rebinding tracks
+`#metricsSchedulerServerId` separately from `#tokenServerId` so jitter stays
+tied to the authenticated server after identity recovery.
 
 **Collector** (`src/metrics/collector/`): async reads only — **no subprocesses
 per interval** (no `top`/`vmstat`/`iostat`/`free`/`df`/`ps`/`sar`). Sources:

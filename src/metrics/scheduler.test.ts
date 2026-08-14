@@ -11,6 +11,7 @@ import {
   deterministicJitterMs,
   METRICS_INTERVAL_MS,
   METRICS_JITTER_MAX_MS,
+  METRICS_PRIME_MS,
   MetricsScheduler,
   type MetricsSink,
   rebindMetricsScheduler,
@@ -277,6 +278,7 @@ function makeScheduler(options: {
   collectorFactory: () => MetricsCollector;
   intervalMs?: number;
   jitterMaxMs?: number;
+  primeMs?: number;
   logRateLimitMs?: number;
   onLog?: (level: "info" | "warn", message: string) => void;
 }): MetricsScheduler {
@@ -285,6 +287,7 @@ function makeScheduler(options: {
     collectorFactory: options.collectorFactory,
     intervalMs: options.intervalMs ?? 1_000,
     jitterMaxMs: options.jitterMaxMs ?? 0,
+    primeMs: options.primeMs ?? 0,
     now: options.clock.now,
     setTimeoutFn: options.clock.setTimeoutFn as unknown as typeof setTimeout,
     clearTimeoutFn: options.clock
@@ -298,7 +301,7 @@ function makeScheduler(options: {
   });
 }
 
-it("MetricsScheduler emits metrics frame after jittered first tick", async () => {
+it("MetricsScheduler emits first metrics frame immediately on attach", async () => {
   const clock = new FakeClock();
   const sent: unknown[] = [];
   const scheduler = makeScheduler({
@@ -308,13 +311,10 @@ it("MetricsScheduler emits metrics frame after jittered first tick", async () =>
       createFakeCollector((sequence) => supportedSample(sequence)),
   });
 
-  const expectedJitter = deterministicJitterMs("server-a", 50);
   scheduler.attach(capturingSink(sent));
-
-  await clock.advance(expectedJitter - 1);
   assertEquals(sent.length, 0);
 
-  await clock.advance(1);
+  await clock.advance(0);
   const frames = parseMetricsFrames(sent);
   assertEquals(frames.length, 1);
   assertEquals(frames[0].type, "metrics");
@@ -358,30 +358,39 @@ it("deterministicJitterMs is bounded, stable, and spreads across ids", () => {
 
   // Default production interval remains the chart cadence.
   assertEquals(METRICS_INTERVAL_MS, 60_000);
+  assertEquals(METRICS_PRIME_MS, 2_000);
 });
 
-it("MetricsScheduler first emit is scheduled at deterministic jitter offset", async () => {
+it("MetricsScheduler primed second sample waits primeMs plus jitter", async () => {
   const clock = new FakeClock();
   const sent: unknown[] = [];
   const serverId = "jitter-server";
   const jitterMaxMs = 200;
-  const expected = deterministicJitterMs(serverId, jitterMaxMs);
+  const primeMs = 50;
+  const expected = primeMs + deterministicJitterMs(serverId, jitterMaxMs);
 
   const scheduler = makeScheduler({
     serverId,
     clock,
     jitterMaxMs,
+    primeMs,
     collectorFactory: () =>
       createFakeCollector((sequence) => supportedSample(sequence)),
   });
 
-  assertEquals(scheduler.jitterMs(), expected);
+  assertEquals(
+    scheduler.jitterMs(),
+    deterministicJitterMs(serverId, jitterMaxMs),
+  );
   scheduler.attach(capturingSink(sent));
 
-  await clock.advance(expected - 1);
-  assertEquals(sent.length, 0);
-  await clock.advance(1);
+  await clock.advance(0);
   assertEquals(parseMetricsFrames(sent).length, 1);
+
+  await clock.advance(expected - 1);
+  assertEquals(parseMetricsFrames(sent).length, 1);
+  await clock.advance(1);
+  assertEquals(parseMetricsFrames(sent).length, 2);
 });
 
 it("MetricsScheduler sequence increases across ticks and survives detach→attach", async () => {
@@ -816,6 +825,7 @@ it("rebindMetricsScheduler updates serverId and preserves sequence", async () =>
     schedulerOptions: {
       intervalMs: 1_000,
       jitterMaxMs: METRICS_JITTER_MAX_MS,
+      primeMs: 0,
       now: clock.now,
       setTimeoutFn: clock.setTimeoutFn as unknown as typeof setTimeout,
       clearTimeoutFn: clock.clearTimeoutFn as unknown as typeof clearTimeout,
@@ -832,9 +842,7 @@ it("rebindMetricsScheduler updates serverId and preserves sequence", async () =>
 
   const sent1: unknown[] = [];
   first.scheduler.attach(capturingSink(sent1));
-  await clock.advance(
-    deterministicJitterMs("server-old", METRICS_JITTER_MAX_MS),
-  );
+  await clock.advance(0);
   assertEquals(parseMetricsFrames(sent1)[0].sequence, 1);
 
   // Simulate tokenServerId already equal to the new id (the reuse bug condition).
@@ -859,9 +867,42 @@ it("rebindMetricsScheduler updates serverId and preserves sequence", async () =>
 
   const sent2: unknown[] = [];
   rebound.scheduler.attach(capturingSink(sent2));
-  await clock.advance(
-    deterministicJitterMs("server-new", METRICS_JITTER_MAX_MS),
-  );
+  await clock.advance(0);
   // Process-local sequence continues after identity rebind.
   assertEquals(parseMetricsFrames(sent2)[0].sequence, 2);
+});
+
+it({
+  name:
+    "MetricsScheduler primed tick fills rate metrics after immediate first sample",
+  ignore: Deno.build.os !== "linux",
+  fn: async () => {
+    const clock = new FakeClock();
+    const intervalMs = 10_000;
+    const primeMs = 80;
+    const factory = createFixtureCollectorFactory();
+    const scheduler = makeScheduler({
+      clock,
+      intervalMs,
+      primeMs,
+      jitterMaxMs: 0,
+      collectorFactory: factory,
+    });
+
+    const sent: unknown[] = [];
+    scheduler.attach(capturingSink(sent));
+    await clock.advance(0);
+    const first = parseMetricsFrames(sent);
+    assertEquals(first.length, 1);
+    assertEquals(first[0].metrics.cpuUsagePercent, null);
+    assertEquals(first[0].metrics.memoryUsedPercent !== null, true);
+
+    await clock.advance(primeMs - 1);
+    assertEquals(parseMetricsFrames(sent).length, 1);
+    await clock.advance(1);
+    const primed = parseMetricsFrames(sent);
+    assertEquals(primed.length, 2);
+    assertEquals(typeof primed[1].metrics.cpuUsagePercent, "number");
+    assertEquals(primed[1].metrics.cpuUsagePercent !== null, true);
+  },
 });

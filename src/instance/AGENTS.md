@@ -79,7 +79,9 @@ stays deferred until opt-in on both runtimes.
 **Heartbeat vs metrics:** ping/`heartbeat` (above) = liveness only. Host metrics
 are a separate completed measurement interval — see `../metrics/AGENTS.md`.
 `MetricsScheduler` is independent of `IdlePresence` (neither suppresses the
-other).
+other). The first metrics POST fires as soon as the socket opens (including
+the co-located self-hosted daemon) so overview stats are not gated on the 60 s
+cadence.
 
 **Reconnect jitter:** `InstanceClient` reconnects with **full-jitter** backoff
 in `[initialBackoffMs, currentBackoffMs]` (defaults 2 s → 30 s cap, doubling on
