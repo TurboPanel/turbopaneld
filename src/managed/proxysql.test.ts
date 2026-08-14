@@ -23,6 +23,7 @@ import {
   staticConfigSectionChanged,
   writeProxySqlConfigAtomic,
 } from "./proxysql.ts";
+import { reservedManagedIngressAddress } from "./ingress-cidr.ts";
 import type { SystemComponentDescriptor } from "../deploy/system-component.ts";
 import { SYSTEM_MANAGED_INGRESS_COMPONENT } from "../deploy/system-component.ts";
 
@@ -65,6 +66,15 @@ function clusterDesired(
     ...overrides,
   };
 }
+
+test("reservedManagedIngressAddress pins the last usable host", () => {
+  assertEquals(
+    reservedManagedIngressAddress("203.0.113.0/24"),
+    "203.0.113.254",
+  );
+  assertEquals(reservedManagedIngressAddress("198.51.100.0/31"), null);
+  assertEquals(reservedManagedIngressAddress("not-a-cidr"), null);
+});
 
 test("proxysqlCompose without descriptor stays anonymous", () => {
   const compose = proxysqlCompose();
@@ -115,6 +125,62 @@ test("proxysqlCompose with no bindAddress argument also defaults to no publish",
   const compose = proxysqlCompose(DESCRIPTOR);
   assertEquals(compose.includes(":5432:5432"), false);
   assertEquals(compose.includes(":3306:3306"), false);
+});
+
+test("proxysqlCompose attaches external spanning segment networks", () => {
+  const compose = proxysqlCompose(DESCRIPTOR, null, [
+    {
+      name: "tpn_00000000-0000-4000-8000-0000000000cc",
+      subnet: "203.0.113.0/24",
+    },
+    {
+      name: "tpn_00000000-0000-4000-8000-0000000000dd",
+      subnet: "198.51.100.0/24",
+    },
+  ]);
+  assertStringIncludes(compose, "      turbopanel-managed: {}");
+  assertStringIncludes(
+    compose,
+    "      tpn_00000000-0000-4000-8000-0000000000cc:",
+  );
+  assertStringIncludes(compose, '        ipv4_address: "203.0.113.254"');
+  assertStringIncludes(
+    compose,
+    "      tpn_00000000-0000-4000-8000-0000000000dd:",
+  );
+  assertStringIncludes(compose, '        ipv4_address: "198.51.100.254"');
+  assertStringIncludes(
+    compose,
+    "  tpn_00000000-0000-4000-8000-0000000000cc:",
+  );
+  assertStringIncludes(
+    compose,
+    "  tpn_00000000-0000-4000-8000-0000000000dd:",
+  );
+  assertStringIncludes(compose, "    external: true");
+  assertEquals(compose.includes("driver:"), false);
+  assertEquals(compose.includes("      - turbopanel-managed"), false);
+  assertEquals(
+    compose.includes("      - tpn_00000000-0000-4000-8000-0000000000cc"),
+    false,
+  );
+});
+
+test("proxysqlCompose rejects invalid spanning segment subnets", () => {
+  assertThrows(
+    () =>
+      proxysqlCompose(DESCRIPTOR, null, [
+        { name: "tpn_bad", subnet: "not-a-cidr" },
+      ]),
+    TypeError,
+  );
+  assertThrows(
+    () =>
+      proxysqlCompose(DESCRIPTOR, null, [
+        { name: "tpn_narrow", subnet: "203.0.113.0/31" },
+      ]),
+    TypeError,
+  );
 });
 
 test("proxysqlCompose publishes only on the intended address for public/datacenter exposure", () => {

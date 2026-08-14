@@ -16,7 +16,11 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export function requireHttpsUrl(url: string, fieldName: string): void {
+export function requireHttpsUrl(
+  url: string,
+  fieldName: string,
+  allowHttp = false,
+): void {
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -25,14 +29,15 @@ export function requireHttpsUrl(url: string, fieldName: string): void {
       `${fieldName} must be a valid absolute URL`,
     );
   }
-  if (parsed.protocol !== "https:") {
-    throw new MalformedManifestError(`${fieldName} must use HTTPS`);
-  }
+  if (parsed.protocol === "https:") return;
+  if (allowHttp && parsed.protocol === "http:") return;
+  throw new MalformedManifestError(`${fieldName} must use HTTPS`);
 }
 
 export function validateArtifactEntry(
   entry: unknown,
   fieldName: string,
+  allowHttp = false,
 ): ArtifactEntry {
   if (!isObject(entry)) {
     throw new MalformedManifestError(`${fieldName} must be an object`);
@@ -43,7 +48,7 @@ export function validateArtifactEntry(
       `${fieldName} missing or invalid field: url`,
     );
   }
-  requireHttpsUrl(entry.url, `${fieldName}.url`);
+  requireHttpsUrl(entry.url, `${fieldName}.url`, allowHttp);
 
   if (typeof entry.sha256 !== "string" || !SHA256_HEX_RE.test(entry.sha256)) {
     throw new MalformedManifestError(
@@ -65,7 +70,10 @@ export function validateArtifactEntry(
 
 const LINUX_ARCHES: LinuxArch[] = ["linux-amd64", "linux-arm64"];
 
-export function validateBinaryArtifacts(entry: unknown): BinaryArtifacts {
+export function validateBinaryArtifacts(
+  entry: unknown,
+  allowHttp = false,
+): BinaryArtifacts {
   if (!isObject(entry)) {
     throw new MalformedManifestError(
       "channel.json binaryArtifacts must be an object",
@@ -77,12 +85,16 @@ export function validateBinaryArtifacts(entry: unknown): BinaryArtifacts {
     artifacts[arch] = validateArtifactEntry(
       entry[arch],
       `channel.json binaryArtifacts.${arch}`,
+      allowHttp,
     );
   }
   return artifacts;
 }
 
-export function parseRootCatalog(raw: unknown): RootCatalog {
+export function parseRootCatalog(
+  raw: unknown,
+  allowHttp = false,
+): RootCatalog {
   if (!isObject(raw)) {
     throw new MalformedManifestError("channels.json root must be an object");
   }
@@ -125,13 +137,17 @@ export function parseRootCatalog(raw: unknown): RootCatalog {
     requireHttpsUrl(
       channelEntry.manifestUrl,
       `channels.json channel ${channelName}.manifestUrl`,
+      allowHttp,
     );
   }
 
   return catalog;
 }
 
-export function parseChannelManifest(raw: unknown): ChannelManifest {
+export function parseChannelManifest(
+  raw: unknown,
+  allowHttp = false,
+): ChannelManifest {
   if (!isObject(raw)) {
     throw new MalformedManifestError("channel.json root must be an object");
   }
@@ -172,14 +188,19 @@ export function parseChannelManifest(raw: unknown): ChannelManifest {
     );
   }
 
-  const binaryArtifacts = validateBinaryArtifacts(raw.binaryArtifacts);
+  const binaryArtifacts = validateBinaryArtifacts(
+    raw.binaryArtifacts,
+    allowHttp,
+  );
   const jsFallbackArtifact = validateArtifactEntry(
     raw.jsFallbackArtifact,
     "channel.json jsFallbackArtifact",
+    allowHttp,
   );
   const orchestrationArtifact = validateArtifactEntry(
     raw.orchestrationArtifact,
     "channel.json orchestrationArtifact",
+    allowHttp,
   );
 
   return {

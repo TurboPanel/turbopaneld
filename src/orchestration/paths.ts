@@ -109,8 +109,7 @@ export const GALAXY_DOCKER_REQUIREMENTS_FILE = join(
  * which intermittently returns 503 from GitHub's edge; {@link ensureGalaxyDockerRole}
  * downloads the same tag via codeload instead (see {@link galaxyDockerRoleCodeloadUrl}).
  */
-export const GALAXY_DOCKER_ROLE_GITHUB_REPO =
-  "geerlingguy/ansible-role-docker";
+export const GALAXY_DOCKER_ROLE_GITHUB_REPO = "geerlingguy/ansible-role-docker";
 
 /** Codeload archive URL for a pinned geerlingguy.docker role tag. */
 export function galaxyDockerRoleCodeloadUrl(version: string): string {
@@ -238,11 +237,6 @@ export const TIME_SYNC_APPLY_PLAYBOOK = join(
   ORCHESTRATION_DIR,
   "playbooks",
   "time-sync-apply.yml",
-);
-export const WIREGUARD_APPLY_PLAYBOOK = join(
-  ORCHESTRATION_DIR,
-  "playbooks",
-  "wireguard-apply.yml",
 );
 export const TRADITIONAL_WEB_APPLY_PLAYBOOK = join(
   ORCHESTRATION_DIR,

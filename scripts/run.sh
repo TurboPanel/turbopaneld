@@ -2,13 +2,15 @@
 # TurboPanel daemon bootstrap — single entrypoint served at turbopanel.sh.
 # Co-located dev Caddy serves the same script at /run.sh.
 #
-# Fetches split release artifacts from the channel manifest at
-# https://dl.trbp.nl/channels.json (host-arch native binary + orchestration tree;
-# JS bundle when the native binary cannot execute on this host), installs the
-# production FHS layout (bin/turbopaneld, optional bin/turbopaneld.js,
-# share/orchestration/), probes native binary executability, bootstraps
-# orchestration runtimes, and runs daemon-install.yml via Ansible
-# (turbopaneld.service — native or Deno JS runtime; see AGENTS.md).
+# Fetches split release artifacts from the channel manifest
+# (https://dl.trbp.nl/channels.json by default, or $TURBOPANEL_DL_BASE/channels.json
+# on a development overlay so remote servers never hit the public CDN):
+# host-arch native binary + orchestration tree, plus the JS bundle when the
+# native binary cannot execute on this host. Installs the production FHS layout
+# (bin/turbopaneld, optional bin/turbopaneld.js, share/orchestration/), probes
+# native binary executability, bootstraps orchestration runtimes, and runs
+# daemon-install.yml via Ansible (turbopaneld.service — native or Deno JS
+# runtime; see AGENTS.md).
 #
 # Config: /etc/turbopanel  State: /var/lib/turbopanel  Runtime: /run/turbopanel
 #
@@ -16,7 +18,8 @@
 #
 # Typical install (production):
 #   curl -fsSL turbopanel.sh | TURBOPANEL_LICENSE=<b64> sh
-# Optional: TURBOPANEL_HOST, TURBOPANEL_INSECURE_TLS=1, TURBOPANEL_UPDATE_CHANNEL.
+# Optional: TURBOPANEL_HOST, TURBOPANEL_INSECURE_TLS=1, TURBOPANEL_UPDATE_CHANNEL,
+# TURBOPANEL_DL_BASE (dev overlay catalog; never falls back to the public CDN).
 # Flags (--license, --host, …) remain supported for scripts and sudo re-exec.
 #
 # Manifest and release helpers below must stay in sync with scripts/lib/release-artifacts.sh.
@@ -40,6 +43,48 @@ tp_release_curl() {
   else
     printf '%s' "$TP_CURL_FETCH"
   fi
+}
+
+# Overlay artifact downloads (TURBOPANEL_DL_BASE) follow the *instance* TLS
+# policy: -k only when TURBOPANEL_INSECURE_TLS is set (platform CA). Public
+# tunnel TLS uses the system store. CDN downloads still use tp_release_curl.
+tp_artifact_curl() {
+  if [ -z "${TURBOPANEL_DL_BASE:-}" ]; then
+    tp_release_curl
+    return 0
+  fi
+  case "${TURBOPANEL_DL_BASE}" in
+    http://*)
+      printf '%s' "$TP_CURL_FETCH"
+      return 0
+      ;;
+  esac
+  if [ "${INSECURE_TLS:-false}" = true ]; then
+    printf '%s' "$TP_CURL_FETCH_INSECURE"
+  else
+    printf '%s' "$TP_CURL_FETCH"
+  fi
+}
+
+tp_join_url() {
+  _base="$1"
+  _ref="$2"
+  case "$_ref" in
+    http://*|https://*)
+      printf '%s' "$_ref"
+      return 0
+      ;;
+  esac
+  python3 -c 'import sys; from urllib.parse import urljoin; print(urljoin(sys.argv[1], sys.argv[2]))' \
+    "$_base" "$_ref"
+}
+
+tp_strip_trailing_slashes() {
+  _value="$1"
+  while [ -n "$_value" ] && [ "${_value%/}" != "$_value" ]; do
+    _value="${_value%/}"
+  done
+  printf '%s' "$_value"
 }
 
 tp_prod_home() { printf '/opt/turbopanel'; }
@@ -172,13 +217,22 @@ tp_download_verified_artifact() {
 
   case "$_url" in
     https://*) ;;
+    http://*)
+      case "${TURBOPANEL_DL_BASE:-}" in
+        http://*) ;;
+        *)
+          echo "run.sh: release URL must use HTTPS: $_url" >&2
+          return 1
+          ;;
+      esac
+      ;;
     *)
       echo "run.sh: release URL must use HTTPS: $_url" >&2
       return 1
       ;;
   esac
 
-  _curl="$(tp_release_curl)"
+  _curl="$(tp_artifact_curl)"
   _fetch_url="$(tp_release_download_url "$_url")"
   _attempt=1
   _max_attempts=5
@@ -489,10 +543,20 @@ PY
 
 tp_fetch_channel_manifest() {
   _channel="${TURBOPANEL_UPDATE_CHANNEL:-trunk}"
-  _curl="$(tp_release_curl)"
+  _dl_base="${TURBOPANEL_DL_BASE:-}"
+  if [ -n "$_dl_base" ]; then
+    _catalog_url="${_dl_base}/channels.json"
+    _curl="$(tp_artifact_curl)"
+  else
+    _catalog_url="https://dl.trbp.nl/channels.json"
+    _curl="$(tp_release_curl)"
+  fi
 
   _channels_json=""
-  if ! _channels_json="$($_curl "https://dl.trbp.nl/channels.json" 2>/dev/null)"; then
+  if ! _channels_json="$($_curl "$_catalog_url" 2>/dev/null)"; then
+    if [ -n "$_dl_base" ]; then
+      echo "run.sh: overlay catalog missing at ${_catalog_url} — rebuild the daemon on the development host" >&2
+    fi
     return 1
   fi
 
@@ -500,6 +564,9 @@ tp_fetch_channel_manifest() {
   _manifest_url="$(printf '%s' "$_channels_oneline" | grep -o "\"${_channel}\"[^}]*manifestUrl\":\"[^\"]*\"" | sed 's/.*manifestUrl":"//' | tr -d '"')"
   if [ -z "$_manifest_url" ]; then
     return 1
+  fi
+  if [ -n "$_dl_base" ]; then
+    _manifest_url="$(tp_join_url "$_catalog_url" "$_manifest_url")" || return 1
   fi
 
   _manifest_json=""
@@ -509,6 +576,12 @@ tp_fetch_channel_manifest() {
 
   if ! tp_resolve_channel_manifest "$_manifest_json"; then
     return 1
+  fi
+
+  if [ -n "$_dl_base" ]; then
+    _binary_artifact_url="$(tp_join_url "$_manifest_url" "$_binary_artifact_url")" || return 1
+    _js_fallback_artifact_url="$(tp_join_url "$_manifest_url" "$_js_fallback_artifact_url")" || return 1
+    _orchestration_artifact_url="$(tp_join_url "$_manifest_url" "$_orchestration_artifact_url")" || return 1
   fi
 
   return 0
@@ -530,6 +603,7 @@ tp_print_header() {
 
 LICENSE=""
 HOST_URL=""
+DL_BASE=""
 INSTANCE_CA=""
 TUNNEL_TOKEN=""
 INSECURE_TLS=false
@@ -543,6 +617,9 @@ while [ $# -gt 0 ]; do
     --host)
       [ $# -ge 2 ] || { tp_print_error "--host requires an argument"; exit 1; }
       HOST_URL="$2"; shift 2 ;;
+    --dl-base)
+      [ $# -ge 2 ] || { tp_print_error "--dl-base requires an argument"; exit 1; }
+      DL_BASE="$2"; shift 2 ;;
     --instance-ca)
       [ $# -ge 2 ] || { tp_print_error "--instance-ca requires an argument"; exit 1; }
       INSTANCE_CA="$2"; shift 2 ;;
@@ -566,6 +643,11 @@ done
 # Explicit flags win when both are set (sudo re-exec always uses flags).
 [ -n "$LICENSE" ] || LICENSE="${TURBOPANEL_LICENSE:-}"
 [ -n "$HOST_URL" ] || HOST_URL="${TURBOPANEL_HOST:-}"
+[ -n "$DL_BASE" ] || DL_BASE="${TURBOPANEL_DL_BASE:-}"
+DL_BASE="$(tp_strip_trailing_slashes "$DL_BASE")"
+if [ -n "$DL_BASE" ]; then
+  export TURBOPANEL_DL_BASE="$DL_BASE"
+fi
 case "${TURBOPANEL_INSECURE_TLS:-}" in
   1|true|TRUE|yes|YES) INSECURE_TLS=true ;;
   *)
@@ -602,13 +684,18 @@ if ! tp_is_root; then
   if [ "$_sudo_rc" -ne 0 ]; then
     tp_install_privilege_denied sudo_failed
   fi
-  if [ -n "$HOST_URL" ]; then
-    _REEXEC_SCRIPT_URL="${HOST_URL%/}"
+  if [ -n "$DL_BASE" ]; then
+    if [ -z "$HOST_URL" ]; then
+      tp_print_error "TURBOPANEL_DL_BASE requires TURBOPANEL_HOST (or --host)"
+      exit 1
+    fi
+    _REEXEC_SCRIPT_URL="${HOST_URL%/}/run.sh"
   else
     _REEXEC_SCRIPT_URL="https://turbopanel.sh"
   fi
   set -- --license "$LICENSE"
   [ -n "$HOST_URL" ] && set -- "$@" --host "$HOST_URL"
+  [ -n "$DL_BASE" ] && set -- "$@" --dl-base "$DL_BASE"
   [ -n "$INSTANCE_CA" ] && set -- "$@" --instance-ca "$INSTANCE_CA"
   [ -n "$TUNNEL_TOKEN" ] && set -- "$@" --tunnel-token "$TUNNEL_TOKEN"
   [ "$INSECURE_TLS" = true ] && set -- "$@" --insecure-tls
@@ -846,6 +933,9 @@ trap 'rm -f "$VARS_FILE"' EXIT
       ;;
   esac
   printf 'turbopanel_update_channel: %s\n' "${TURBOPANEL_UPDATE_CHANNEL:-trunk}"
+  if [ -n "$DL_BASE" ]; then
+    printf 'turbopanel_dl_base: %s\n' "$DL_BASE"
+  fi
   if [ -n "$TUNNEL_TOKEN" ]; then
     printf 'turbopanel_tunnel_token: %s\n' "$TUNNEL_TOKEN"
   fi

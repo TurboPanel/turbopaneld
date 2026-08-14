@@ -1,7 +1,13 @@
 import type { UpdateChannelConfig } from "./config.ts";
 import { MalformedManifestError, MissingChannelError } from "./errors.ts";
 import type { LinuxArch, UpdateInfo } from "./types.ts";
-import { DL_BASE_URL, rootCatalogUrl } from "./urls.ts";
+import {
+  absolutizeChannelManifestJson,
+  absolutizeRootCatalogJson,
+  catalogAllowsHttp,
+  resolveDlBase,
+  rootCatalogUrl,
+} from "./urls.ts";
 import { parseChannelManifest, parseRootCatalog } from "./validate.ts";
 
 function resolveLinuxArch(): LinuxArch {
@@ -19,15 +25,21 @@ function resolveLinuxArch(): LinuxArch {
 
 export async function resolveUpdate(
   config: UpdateChannelConfig,
+  env: Record<string, string | undefined> = Deno.env.toObject(),
 ): Promise<UpdateInfo> {
-  const catalogResponse = await fetch(rootCatalogUrl(DL_BASE_URL));
+  const catalogUrl = rootCatalogUrl(resolveDlBase(env));
+  const allowHttp = catalogAllowsHttp(catalogUrl);
+  const catalogResponse = await fetch(catalogUrl);
   if (!catalogResponse.ok) {
     throw new MalformedManifestError(
       `Failed to fetch channels.json: HTTP ${catalogResponse.status}`,
     );
   }
 
-  const catalog = parseRootCatalog(await catalogResponse.json());
+  const catalog = parseRootCatalog(
+    absolutizeRootCatalogJson(await catalogResponse.json(), catalogUrl),
+    allowHttp,
+  );
 
   const channelEntry = catalog.channels[config.channel];
   if (
@@ -40,14 +52,18 @@ export async function resolveUpdate(
     );
   }
 
-  const manifestResponse = await fetch(channelEntry.manifestUrl);
+  const manifestUrl = channelEntry.manifestUrl;
+  const manifestResponse = await fetch(manifestUrl);
   if (!manifestResponse.ok) {
     throw new MalformedManifestError(
       `Failed to fetch channel manifest: HTTP ${manifestResponse.status}`,
     );
   }
 
-  const manifest = parseChannelManifest(await manifestResponse.json());
+  const manifest = parseChannelManifest(
+    absolutizeChannelManifestJson(await manifestResponse.json(), manifestUrl),
+    allowHttp,
+  );
 
   const arch = resolveLinuxArch();
   const binaryArtifact = manifest.binaryArtifacts[arch];

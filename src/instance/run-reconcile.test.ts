@@ -60,6 +60,36 @@ test("resolveRunScriptUrl uses instance host for plaintext dev overlay", () => {
   );
 });
 
+test("resolveRunScriptUrl uses instance /run.sh when overlay dlBase is set", () => {
+  assertEquals(
+    resolveRunScriptUrl({
+      kind: "url",
+      baseUrl: "https://turbopanel.dev",
+      wsBaseUrl: "wss://turbopanel.dev",
+    }, { dlBase: "https://turbopanel.dev/downloads/daemon" }),
+    "https://turbopanel.dev/run.sh",
+  );
+});
+
+test("buildRunReconcileArgs passes --dl-base for overlay catalogs", () => {
+  assertEquals(
+    buildRunReconcileArgs({
+      licenseArg: "abc",
+      instanceUrl: "https://turbopanel.dev",
+      dlBase: "https://turbopanel.dev/downloads/daemon",
+    }),
+    [
+      "--license",
+      "abc",
+      "--host",
+      "https://turbopanel.dev",
+      "--dl-base",
+      "https://turbopanel.dev/downloads/daemon",
+      "--no-start",
+    ],
+  );
+});
+
 test("buildRunReconcileArgs omits --host for production", () => {
   assertEquals(
     buildRunReconcileArgs({

@@ -27,16 +27,20 @@ export function encodeLicenseArg(
 /**
  * Resolve where reconcile downloads `run.sh` from.
  *
- * Production and self-hosted instances never serve `/run.sh` (the production
- * Caddyfile has no such route). Only the **dev overlay** Caddyfile
- * (`:8880` plaintext HTTP) serves the daemon checkout's installer — use that
- * host path exclusively when dialing a plaintext HTTP control plane. All other
- * targets (managed Workers, self-hosted HTTPS) curl the CDN.
+ * Production Caddy never serves `/run.sh` — managed installs curl the CDN.
+ * The **dev overlay** Caddyfile serves the checkout installer at `/run.sh` on
+ * both plaintext `:8880` and HTTPS `:8443` (and whatever public origin a
+ * Cloudflare tunnel forwards). Use the instance host when dialing plaintext
+ * HTTP **or** when `TURBOPANEL_DL_BASE` is set so overlay updates never hit
+ * the public CDN.
  */
-export function resolveRunScriptUrl(config: InstanceConfig): string {
+export function resolveRunScriptUrl(
+  config: InstanceConfig,
+  opts: { dlBase?: string } = {},
+): string {
   if (config.kind === "url") {
     const base = stripTrailingSlashes(config.baseUrl);
-    if (isPlaintextHttpUrl(base)) {
+    if (isPlaintextHttpUrl(base) || opts.dlBase?.trim()) {
       return `${base}${RUN_SCRIPT_PATH}`;
     }
   }
@@ -66,12 +70,17 @@ export function buildRunReconcileArgs(options: {
   instanceUrl?: string;
   instanceCaPath?: string;
   insecureTls?: boolean;
+  dlBase?: string;
 }): string[] {
   const args = ["--license", options.licenseArg];
   const trimmedUrl = options.instanceUrl?.trim();
   const instanceUrl = trimmedUrl ? stripTrailingSlashes(trimmedUrl) : undefined;
   if (instanceUrl && instanceUrl !== PRODUCTION_CONTROL_PLANE) {
     args.push("--host", instanceUrl);
+  }
+  const dlBase = options.dlBase?.trim();
+  if (dlBase) {
+    args.push("--dl-base", stripTrailingSlashes(dlBase));
   }
   if (!isPlaintextHttpUrl(instanceUrl)) {
     const caPath = options.instanceCaPath?.trim();
@@ -143,6 +152,10 @@ export async function executeRunReconcile(options: {
   const channel = options.channel?.trim();
   if (channel) {
     env.TURBOPANEL_UPDATE_CHANNEL = channel;
+  }
+  const dlBase = env.TURBOPANEL_DL_BASE?.trim();
+  if (dlBase) {
+    env.TURBOPANEL_DL_BASE = dlBase;
   }
 
   const reconcileCwd = resolveReconcileCwd();

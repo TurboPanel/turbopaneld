@@ -82,6 +82,7 @@ export class DockerMonitor {
   #containers: ContainerSummary[] = [];
   #inspects = new Map<string, ContainerInspect>();
   readonly #listeners = new Set<(change: DockerMonitorChange) => void>();
+  readonly #reachabilityListeners = new Set<(reachable: boolean) => void>();
   #eventsBackoffMs = 1_000;
   #reconcileBackoffMs: number;
   #pollBackoffMs: number;
@@ -116,12 +117,28 @@ export class DockerMonitor {
     return this.#readyPromise;
   }
 
+  /**
+   * Subscribe to Docker socket reachability transitions (`false` when the
+   * socket drops, `true` when it returns). The initial `null → true` boot
+   * probe does not fire — that path is owned by daemon startup.
+   */
+  subscribeReachability(
+    listener: (reachable: boolean) => void,
+  ): () => void {
+    this.#reachabilityListeners.add(listener);
+    return () => {
+      this.#reachabilityListeners.delete(listener);
+    };
+  }
+
   /** Mark Docker reachable; log only when transitioning from unavailable. */
   #markDockerReachable(): void {
-    if (this.#dockerReachable === false) {
+    const becameReachable = this.#dockerReachable === false;
+    if (becameReachable) {
       logInfo("docker-monitor", "Docker socket is now reachable");
     }
     this.#dockerReachable = true;
+    if (becameReachable) this.#notifyReachability(true);
   }
 
   /**
@@ -138,6 +155,7 @@ export class DockerMonitor {
       );
     }
     this.#dockerReachable = false;
+    if (transitioned) this.#notifyReachability(false);
     return transitioned;
   }
 
@@ -409,6 +427,16 @@ export class DockerMonitor {
         listener(change);
       } catch (err) {
         logWarn("docker-monitor", "listener failed:", err);
+      }
+    }
+  }
+
+  #notifyReachability(reachable: boolean): void {
+    for (const listener of this.#reachabilityListeners) {
+      try {
+        listener(reachable);
+      } catch (err) {
+        logWarn("docker-monitor", "reachability listener failed:", err);
       }
     }
   }

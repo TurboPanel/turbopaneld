@@ -337,3 +337,44 @@ test("a permanently failing events stream never leaks more than one poll-fallbac
 
   assertEquals(maxConcurrentCalls, 1);
 });
+
+test("reachability listeners fire when Docker returns after being unavailable", async () => {
+  const client = new MockDockerClient();
+  client.containers = [makeSummary()];
+  client.inspects.set(CONTAINER_ID, makeInspect());
+
+  let listShouldFail = false;
+  const originalList = client.listContainers;
+  client.listContainers = async (all: boolean) => {
+    if (listShouldFail) {
+      throw new Error("Connection refused (os error 111)");
+    }
+    return await originalList(all);
+  };
+
+  const monitor = createMonitor(client, 50);
+  const events: boolean[] = [];
+  monitor.subscribeReachability((reachable) => {
+    events.push(reachable);
+  });
+
+  const controller = new AbortController();
+  monitor.start(controller.signal);
+  await monitor.waitUntilReady();
+  assertEquals(events, []);
+
+  listShouldFail = true;
+  await waitFor(
+    "docker unavailable",
+    () => events.includes(false) ? true : undefined,
+  );
+
+  listShouldFail = false;
+  await waitFor(
+    "docker reachable again",
+    () => events.includes(true) ? true : undefined,
+  );
+
+  assertEquals(events[0], false);
+  controller.abort();
+});

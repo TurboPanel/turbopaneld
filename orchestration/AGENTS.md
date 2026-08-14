@@ -20,52 +20,27 @@ stringify them). `timesyncd.conf` is `root:<systemd-timesync|root>` mode
   is gated on `turbopanel_ntp_enabled | bool` so a disable + config change does
   not restart/start timesyncd after `timedatectl set-ntp false`.
 
-### WireGuard (`wireguard`)
+### TurboFabric (`server.fabric.reconcile`)
 
-First-party role (no Galaxy deps) that installs `wireguard-tools`, templates
-`/etc/wireguard/<interface>.conf` at mode **`0600`** with **`no_log: true`**, and
-enables `wg-quick@<interface>` via systemd. The interface **private key never
-travels through Ansible extra-vars** — the template reads
-`wireguard_private_key_file` via `lookup('ansible.builtin.file', …)`.
-Command-driven apply playbook: `playbooks/wireguard-apply.yml` (invoked by daemon
-`server.wireguard.apply` via `runWireguardApply`). Extra-vars are passed as **one
-JSON `-e` object** so `wireguard_peers` stays a list and
-`wireguard_configure` / `wireguard_ip_forward` / `wireguard_manage_forwarding`
-stay booleans. Set `wireguard_configure: false` for a package-only run (tools
-install without bouncing the tunnel). The restart handler is gated on
-`wireguard_configure | bool`. Peer `AllowedIPs` is a multi-CIDR list
-(`join(', ')`) so site-to-site gateways can advertise datacenter LAN CIDRs
-alongside host routes.
-
-**Forwarding sysctls are host-wide, not per-interface** —
-`net.ipv4.ip_forward` / `net.ipv6.conf.all.forwarding` apply to the whole
-host, but a single host can run multiple managed WireGuard interfaces (one
-per VPN) with independent gateway roles. The role itself only reconciles
-whatever single boolean it is given (`wireguard_ip_forward`) and only when
-`wireguard_manage_forwarding | bool` is true — it has no cross-interface
-knowledge. The daemon (`src/instance/commands/wireguard.ts`) owns the
-cross-interface union: it persists a per-interface forwarding requirement in
-`forwarding-state.json` under the WireGuard state dir, recomputes the `OR`
-across every interface it has ever applied on this host on every
-`handleWireguardApply` call, and passes that union (never just the current
-call's own interface) as `wireguard_ip_forward` alongside
-`wireguard_manage_forwarding: true`. This is why demoting one gateway
-interface correctly leaves the sysctl **enabled** when a sibling VPN
-interface on the same host is still a gateway, and correctly disables it once
-none are. The stamp-match fast path in `handleWireguardApply` additionally
-checks the interface's *recorded* forwarding requirement (not just its
-WireGuard config stamp) before skipping, so a stale/missing forwarding-state
-entry cannot leave the host sysctl wrong indefinitely.
-`ensureWireguardTools()`'s bootstrap/tools-only call omits both
-`enableIpForwarding` and `manageForwarding` (defaulting to `false` in the
-extra-vars builder) so a call with no host-wide interface knowledge never
-resets the current sysctl state. The role writes both sysctls via
-`ansible.posix.sysctl` to `/etc/sysctl.d/99-turbopanel-wireguard.conf`.
-**No NAT/masquerade is configured** — the operator must ensure the
-datacenter LAN has a return route to the gateway for site traffic.
-`wireguard-tools` is also listed in `daemon-prereqs` on managed hosts.
-**Not** wired into `daemon-converge.yml` (command-driven only, like
-`time-sync-apply`).
+There is **no** Ansible WireGuard apply role. The daemon
+(`src/instance/commands/fabric.ts`) owns the org mesh on interface `tp0`:
+mode-`0600` private key and `tp0.conf` under `<daemonStateDir>/network/wireguard/`,
+`wg syncconf`, `wg-quick@tp0` for reboot durability, `/etc/sysctl.d/99-turbopanel-fabric.conf`
+(`net.ipv4.ip_forward=1`), Docker routed-bridge networks, and `TP-FORWARD` off
+`DOCKER-USER`. `{ enabled: false }` is a teardown. Peer PSKs are decrypted into
+mode-`0600` files under `wireguard/psk/`, inlined into `tp0.conf`, then deleted
+— they never appear in logs. `wireguard-tools` is listed in `daemon-prereqs`
+on managed hosts — **the only Ansible-side prerequisite**. There is **no**
+`wireguard` role and **no** `wireguard-apply.yml` playbook; do not re-add
+either. Default MTU is **1420** on `tp0` and each routed bridge
+(payload-overridable). **Preflight** verifies `wg` / `ip` / `iptables` /
+`docker` (presence *and* invocability, direct or `sudo -n`) before mutating
+anything. The durable interface unit, `/etc/wireguard/tp0.conf`, and the
+`sysctl.d` drop-in are **daemon-written**. Daemon start restores from
+`state.json` and re-installs `TP-FORWARD` (dockerd can rebuild `DOCKER-USER`).
+Deploy-time `fabricNetworks[]` is the belt-and-braces bridge path alongside
+command-driven reconcile and boot restore. **Not** wired into
+`daemon-converge.yml` (command-driven, plus boot restore).
 
 ### ProxySQL (`proxysql`)
 

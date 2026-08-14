@@ -392,3 +392,71 @@ function pathsInOrder(argv: string[], paths: string[]): boolean {
   }
   return false;
 }
+
+test({
+  name:
+    "handleEnvironmentStop removes fabric networks after compose down and ignores reclaim errors",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-stop-fabric-net-" });
+    const previous = {
+      TURBOPANEL_STATE_DIR: Deno.env.get("TURBOPANEL_STATE_DIR"),
+      TURBOPANEL_CONFIG_DIR: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
+    };
+    const stateDir = join(root, "state");
+    Deno.env.set("TURBOPANEL_STATE_DIR", stateDir);
+    Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
+
+    const environmentId = "envstopfn";
+    const projectName = "tp-demo-envstopfn";
+    const deploymentDir = join(stateDir, "deployments", environmentId);
+    await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
+    await Deno.writeTextFile(
+      join(deploymentDir, "compose.yaml"),
+      "services:\n  web: {}\n",
+    );
+
+    const events: string[] = [];
+    try {
+      const result = await handleEnvironmentStop(
+        {
+          environmentId,
+          projectId: "proj-1",
+          projectName,
+          fabricNetworks: ["tpn_gone"],
+        },
+        new Date().toISOString(),
+        {
+          runDocker: (args): Promise<DockerCliResult> => {
+            if (args.includes("down")) events.push("down");
+            return Promise.resolve({
+              success: true,
+              stdout: "",
+              stderr: "",
+              code: 0,
+            });
+          },
+          removeFabricNetworks: (names) => {
+            events.push(`remove:${names.join(",")}`);
+            return Promise.reject(new Error("network not found"));
+          },
+        },
+      );
+      assertEquals(result.summary.includes("Stopped"), true);
+      assertEquals(events, ["down", "remove:tpn_gone"]);
+    } finally {
+      if (previous.TURBOPANEL_STATE_DIR === undefined) {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+      } else {
+        Deno.env.set("TURBOPANEL_STATE_DIR", previous.TURBOPANEL_STATE_DIR);
+      }
+      if (previous.TURBOPANEL_CONFIG_DIR === undefined) {
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      } else {
+        Deno.env.set("TURBOPANEL_CONFIG_DIR", previous.TURBOPANEL_CONFIG_DIR);
+      }
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});
+

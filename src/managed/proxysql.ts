@@ -33,6 +33,7 @@ import {
 import type { EnvironmentDeployContainer } from "../instance/commands/contracts.ts";
 import { logInfo } from "../logger.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
+import { reservedManagedIngressAddress } from "./ingress-cidr.ts";
 import { MANAGED_INGRESS_NETWORK } from "./networks.ts";
 import {
   PROXYSQL_PROJECT,
@@ -78,7 +79,7 @@ export type ProxySqlBackendDesired = {
   readEligible: boolean;
   address: string;
   port: number;
-  transport: "local" | "datacenter" | "vpn";
+  transport: "local" | "datacenter" | "fabric";
 };
 
 export type ProxySqlUserDesired = {
@@ -111,6 +112,8 @@ export type ProxySqlDesiredState = {
    */
   bindAddress: string | null;
   clusters: ProxySqlClusterDesired[];
+  /** External `tpn_*` spanning segments this frontend joins as a platform attachment. */
+  segments?: Array<{ name: string; subnet: string }>;
 };
 
 export class ManagedFrontendUserConflictError extends Error {
@@ -221,6 +224,54 @@ export function assertNoFrontendUserConflict(
   }
 }
 
+function uniqueSegmentsByName(
+  segments: ReadonlyArray<{ name: string; subnet: string }>,
+): Array<{ name: string; subnet: string }> {
+  const sorted = [...segments].sort((a, b) => a.name.localeCompare(b.name));
+  const seen = new Set<string>();
+  const unique: Array<{ name: string; subnet: string }> = [];
+  for (const row of sorted) {
+    if (seen.has(row.name)) continue;
+    seen.add(row.name);
+    unique.push(row);
+  }
+  return unique;
+}
+
+function ipv4AddressForSegment(name: string, subnet: string): string {
+  const address = reservedManagedIngressAddress(subnet);
+  if (!address) {
+    throw new TypeError(
+      `invalid managed-ingress segment subnet for ${name}: ${subnet}`,
+    );
+  }
+  return address;
+}
+
+function renderProxySqlServiceNetworks(
+  segments: ReadonlyArray<{ name: string; subnet: string }>,
+): string[] {
+  const lines = [`      ${MANAGED_INGRESS_NETWORK}: {}`];
+  for (const row of segments) {
+    const address = ipv4AddressForSegment(row.name, row.subnet);
+    lines.push(
+      `      ${row.name}:`,
+      `        ipv4_address: ${quoteYamlScalar(address)}`,
+    );
+  }
+  return lines;
+}
+
+function renderProxySqlTopLevelNetworks(
+  segments: ReadonlyArray<{ name: string; subnet: string }>,
+): string[] {
+  return [
+    `  ${MANAGED_INGRESS_NETWORK}:`,
+    "    external: true",
+    ...segments.flatMap((row) => [`  ${row.name}:`, "    external: true"]),
+  ];
+}
+
 /**
  * Compose document for the shared ProxySQL project
  * ({@link PROXYSQL_PROJECT}).
@@ -241,6 +292,7 @@ export function assertNoFrontendUserConflict(
 export function proxysqlCompose(
   identity?: SystemComponentDescriptor | null,
   bindAddress: string | null = null,
+  segments: ReadonlyArray<{ name: string; subnet: string }> = [],
 ): string {
   if (bindAddress !== null) assertValidProxySqlBindAddress(bindAddress);
 
@@ -268,6 +320,10 @@ export function proxysqlCompose(
       `      - ${formatAdminPublishedPort()}`,
     ];
 
+  const uniqueSegments = uniqueSegmentsByName(segments);
+  const serviceNetworkLines = renderProxySqlServiceNetworks(uniqueSegments);
+  const topLevelNetworkLines = renderProxySqlTopLevelNetworks(uniqueSegments);
+
   const lines = [
     "services:",
     `  ${PROXYSQL_COMPOSE_SERVICE_NAME}:`,
@@ -283,14 +339,13 @@ export function proxysqlCompose(
     "      - proxysql-data:/var/lib/proxysql",
     ...labelLines,
     "    networks:",
-    `      - ${MANAGED_INGRESS_NETWORK}`,
+    ...serviceNetworkLines,
     "",
     "volumes:",
     "  proxysql-data:",
     "",
     "networks:",
-    `  ${MANAGED_INGRESS_NETWORK}:`,
-    "    external: true",
+    ...topLevelNetworkLines,
     "",
   ];
   return lines.join("\n");

@@ -14,8 +14,12 @@ import {
   removeHostingCaddySite,
 } from "../../deploy/ingress.ts";
 import { removeTraditionalWebSites } from "../../deploy/traditional-web.ts";
-import { logInfo } from "../../logger.ts";
-import { resolveLayout } from "../../paths/layout.ts";
+import { logInfo, logWarn } from "../../logger.ts";
+import { fabricNetworkDir, resolveLayout } from "../../paths/layout.ts";
+import {
+  pruneFabricStateNetworks,
+  removeFabricDockerNetworks,
+} from "./fabric.ts";
 import {
   type EnvironmentStopPayload,
   type EnvironmentStopResult,
@@ -33,6 +37,8 @@ type RunDockerFn = (
 export type EnvironmentStopHandlerDeps = {
   /** Test seam — defaults to {@link defaultRunDocker}. */
   runDocker?: RunDockerFn;
+  /** Test seam — defaults to {@link removeFabricDockerNetworks}. */
+  removeFabricNetworks?: (names: readonly string[]) => Promise<void>;
 };
 
 function assertSafeStopIdentifiers(payload: EnvironmentStopPayload): void {
@@ -93,6 +99,26 @@ export async function handleEnvironmentStop(
       "commands",
       `environment.stop compose missing project=${parsedPayload.projectName} env=${parsedPayload.environmentId}; treating as already stopped`,
     );
+  }
+
+  const fabricNetworks = parsedPayload.fabricNetworks ?? [];
+  if (fabricNetworks.length > 0) {
+    try {
+      const removeNetworks = deps?.removeFabricNetworks ??
+        removeFabricDockerNetworks;
+      await removeNetworks(fabricNetworks);
+      await pruneFabricStateNetworks(
+        fabricNetworkDir(layout),
+        fabricNetworks,
+      );
+    } catch (err) {
+      logWarn(
+        "commands",
+        `environment.stop fabric network reclaim failed env=${parsedPayload.environmentId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 
   await removeHostingCaddySite(layout, parsedPayload.environmentId);

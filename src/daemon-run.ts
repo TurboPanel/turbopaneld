@@ -5,6 +5,10 @@ import {
   DockerMonitor,
 } from "./docker/index.ts";
 import { connectInstance } from "./instance/client.ts";
+import {
+  reinstallFabricForwardingIfEnabled,
+  restoreFabricFromPersistedState,
+} from "./instance/commands/fabric.ts";
 import { logInfo, logWarn } from "./logger.ts";
 import { createSentinel, type SentinelOptions } from "./monitor/index.ts";
 import {
@@ -18,6 +22,11 @@ import { startTunnels } from "./tunnels.ts";
 logInfo("daemon", "starting up");
 
 const orchestrationReady = await initOrchestration();
+
+if (orchestrationReady) {
+  await restoreFabricFromPersistedState();
+  await reinstallFabricForwardingIfEnabled();
+}
 
 const abort = new AbortController();
 let shuttingDown = false;
@@ -37,7 +46,12 @@ if (orchestrationReady && shouldEnableDockerIntegration()) {
         "Docker socket not reachable yet — monitor will retry on each poll",
       );
     }
-    sentinelOptions.dockerMonitor = new DockerMonitor(dockerClient);
+    const dockerMonitor = new DockerMonitor(dockerClient);
+    dockerMonitor.subscribeReachability((reachable) => {
+      if (!reachable) return;
+      void reinstallFabricForwardingIfEnabled();
+    });
+    sentinelOptions.dockerMonitor = dockerMonitor;
   } else {
     logInfo(
       "docker",

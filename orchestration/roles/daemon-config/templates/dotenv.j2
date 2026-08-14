@@ -15,3 +15,6 @@ TURBOPANEL_SERVICE_NAME={{ turbopanel_service_name | default('turbopaneld') }}
 TURBOPANEL_INSTANCE_CA={{ turbopanel_instance_ca }}
 {% endif %}
 TURBOPANEL_UPDATE_CHANNEL={{ turbopanel_update_channel | default('trunk') }}
+{% if turbopanel_dl_base | default('') | length > 0 %}
+TURBOPANEL_DL_BASE={{ turbopanel_dl_base }}
+{% endif %}

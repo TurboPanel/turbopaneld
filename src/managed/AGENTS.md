@@ -19,7 +19,7 @@ Root context: `../../AGENTS.md`. Instance engine specs:
 | `compose.ts` | Platform compose normalization (image, volumes, resources); always joins `turbopanel-managed`; optional private-listener-only `ports:` (rejects all other publishes / Traefik labels) |
 | `materialize.ts` | Write `config/` verbatim; optional engine self-signed TLS + `orgTlsMaterial` → `tls/server.*` + `tls/proxysql/`; ownership normalization via throwaway container (skips `backups/`). Standby replication passwords are **not** written under `auth/`. |
 | `tls.ts` | Engine self-signed cert generation; org-CA materialization for engine leaf + ProxySQL; standby passfile materialization |
-| `networks.ts` | Ensure Docker network `turbopanel-managed` (engines + ProxySQL) |
+| `networks.ts` | Ensure Docker network `turbopanel-managed` (engines + ProxySQL) **and** attach ProxySQL to consumer `tpn_*` spanning segments |
 | `proxysql.ts` | Shared ProxySQL compose + durable `proxysql.cnf` generation, static-section diffing, inspect/start/stop/restart |
 | `proxysql-admin.ts` | Runtime admin apply via `docker exec` + `admin.cnf` (`[client]` secrets never on argv/logs) |
 | `containers.ts` | Shared `docker compose ps` collection + running-container resolution used by `apply.ts` and `backup.ts` |
@@ -107,6 +107,7 @@ listeners and routes to engine members on `turbopanel-managed`.
 | Static vs dynamic | Static section = datadir, admin_variables, mysql_variables, pgsql_variables (interfaces + `have_ssl` + cert paths + monitor_*). Dynamic = `mysql_*` / `pgsql_*` servers, users, query_rules. Listener/static changes require container restart; user/backend changes prefer admin interface only |
 | Inventory | System component `managed-ingress` / project `turbopanel-proxysql`; container name `<serviceId>-sql`; self-heal via `system.reconcile` → `proxysql` (distinct from inspect-only `database`/`queue`/`analytics`) |
 | Host prep | Ansible role `proxysql` + playbook `proxysql-setup.yml` (`runProxySqlSetup`; also on co-located `instance-dev-install`) — dirs, admin.cnf, **monitor.cnf**, initial static cnf when absent, wait-ready, `turbopanel-proxysql-stack.service`, network. Removes bind-mount **directory** scars at `admin.cnf`/`proxysql.cnf`/`monitor.cnf` before seed. **Never** daemon compose contents. Reconcile refuses compose up if admin/config paths are missing or not regular files |
+| Spanning segments | ProxySQL still joins `turbopanel-managed` plus each consumer `tpn_*` as `external: true`. Segment attachments pin `ipv4_address` to the reserved last-usable host (`reservedManagedIngressAddress`) so remote bindings can `extra_hosts` that address |
 
 Username frontend namespace is **server-wide** across every cluster hosted on that
 org's servers: `ManagedFrontendUserConflictError` when the same login would map
@@ -129,15 +130,17 @@ before enqueue (see `instance/src/lib/managed/AGENTS.md` → Login namespace).
 2. **Native port, never remapped; published only via private listener.**
    Normalized engine compose never emits arbitrary `ports:`. Multi-member
    clusters may publish **one** engine port bound exclusively to the member's
-   private datacenter/VPN address at the instance-allocated
-   `managed_member.private_port` — that private listener is the single
+   datacenter or fabric (`tp0` relay) address at the instance-allocated
+   `private_port` — that private listener is the single
    cross-host path for both streaming replication and remote ProxySQL
    backends. Loopback and `0.0.0.0` binds are rejected. Single-member
    clusters still publish nothing; client traffic enters only via shared
    ProxySQL (`5432` / `3306`).
 3. **Always join `turbopanel-managed`.** Every managed engine container joins
    that network whether or not frontend exposure is enabled, so ProxySQL can
-   reach it and so multi-member replication paths stay consistent.
+   reach it and so multi-member replication paths stay consistent. That is
+   **not** exclusive: ProxySQL still joins `turbopanel-managed` **plus** each
+   consumer `tpn_*` spanning segment (see ProxySQL table → Spanning segments).
 4. **Config is verbatim.** The daemon does **not** rebuild `postgresql.conf`
    (or peer engine files). The instance engine spec is the single source of
    truth for base + operator snippet + `ssl = on`. Re-apply **unlinks then
@@ -205,7 +208,7 @@ Physical / GTID streaming is **engine → engine**, never through ProxySQL.
 | Path | Postgres | MySQL / MariaDB |
 | --- | --- | --- |
 | Co-resident | Peers by `containerName` on `turbopanel-managed` | same |
-| Cross-host | Private listener (`private_port` on member IP) | same |
+| Cross-host | Private listener (`private_port` on the transport ladder: `local` co-resident container name → `fabric` relay address over `tp0` → `datacenter` private address) | same |
 | Config | Instance owns `postgresql.conf` + `pg_hba.conf` | Instance owns `my.cnf` + `initdb/00-turbopanel.sql` (socket-auth platform admin — keeps SQL/`backup.ts` credential-free) |
 | Slots / disk hazard | Physical slots + orphan drop on `ensurePrimary` | **No slots** — bounded `binlog_expire_logs_seconds` in platform `my.cnf` |
 | Bootstrap | `bootstrapStandby` **before** compose up seeds via `pg_basebackup -R` | Probe only before compose up (uninit → `seeded` deferred; marker → `already_standby`; datadir without marker → `needs_resync`). Actual seed in **`configureStandby`** after compose up (logical dump + `CHANGE REPLICATION SOURCE` / MariaDB `CHANGE MASTER` + GTID) |

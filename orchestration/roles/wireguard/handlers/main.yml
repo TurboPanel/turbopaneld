@@ -1,6 +1,0 @@
----
-- name: Restart wg-quick interface
-  ansible.builtin.systemd:
-    name: "wg-quick@{{ wireguard_interface }}"
-    state: restarted
-  when: wireguard_configure | bool

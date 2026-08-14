@@ -341,6 +341,16 @@ gitignored `public/` at deploy time so the script stays a single source of truth
 excluded from release packaging (`package-daemon-release.sh` /
 `bundle-orchestration.sh` stage from `orchestration/` and `dist/.build` only).
 
+**Overlay catalog (`TURBOPANEL_DL_BASE`):** co-located development Caddy serves
+`/run.sh` and `/downloads/daemon/*` from the daemon checkout. Remote servers
+installed through that overlay receive `TURBOPANEL_DL_BASE=<origin>/downloads/daemon`
+(persisted in `daemon.env`) and must **never** fall back to `https://dl.trbp.nl`.
+Catalog URLs in `dist/channels.json` / `dist/manifest.json` are relative so the
+same files work behind LAN HTTPS, plaintext `:8880`, and a Cloudflare tunnel.
+`run.sh --insecure-tls` still only relaxes the platform-CA instance legs;
+public :443 TLS (tunnel) uses the system store. Rebuild the overlay with
+`deno task release:dev` (dev console **Rebuild daemon and upgrade connected servers**).
+
 ### Host facts + command handlers (time sync)
 
 - **Host OS** — `src/host/os-release.ts` (process-cached; attached once on hello).
@@ -354,24 +364,40 @@ excluded from release packaging (`package-daemon-release.sh` /
   (volumes, deployment dir, and hosting Caddy sites untouched). Timezone
   / NTP apply through Ansible role `time-sync` + playbook `time-sync-apply.yml`
   (`runTimeSyncApply`); contracts in `contracts.ts` must match the instance
-  canonical `server.timezone.set` / `server.ntp.set` shapes. **`server.wireguard.apply`**
-  applies org VPN meshes via the `wireguard` role + `wireguard-apply.yml`
-  (`runWireguardApply` in `src/orchestration/ansible.ts`); interface private keys
-  and decrypted peer preshared keys live under `<daemonStateDir>/wireguard/` at
-  mode `0600` (PSK files under `psk/`, deleted after apply) and never appear in
-  Ansible `-e` extra-vars or leave the host. **`server.fabric.reconcile`**
-  (TurboFabric) is additive and opt-in: `enabled: false` is a successful no-op
-  (no `tp0`, no key, no WireGuard requirement). When enabled, the daemon
-  ensures interface `tp0`, persists the private key at
-  `<daemonStateDir>/network/wireguard/private.key` (mode `0600`, via
-  `fabricNetworkDir`), syncs peers with `wg syncconf`, creates listed Docker
-  routed-bridge networks, and hangs a `TP-FORWARD` chain off `DOCKER-USER`.
+  canonical `server.timezone.set` / `server.ntp.set` shapes. **`server.fabric.reconcile`**
+  (TurboFabric) is the org WireGuard mesh on interface `tp0`. `{ enabled: false }`
+  tears down `tp0`, routed bridges, `TP-FORWARD`, keys, and local state — not a
+  no-op. The daemon owns apply (no Ansible round-trip): it persists the private
+  key at `<daemonStateDir>/network/wireguard/private.key` (mode `0600`, via
+  `fabricNetworkDir`), writes mode-0600 `tp0.conf` (PSK plaintext inlined, temp
+  `psk/` files deleted after apply), `wg syncconf`, enables `wg-quick@tp0` for
+  reboot durability, writes `/etc/sysctl.d/99-turbopanel-fabric.conf`, creates
+  listed Docker routed-bridge networks, and hangs a `TP-FORWARD` chain off
+  `DOCKER-USER`. Reconcile is authoritative over `state.json.networks`: bridges
+  present in the previous state but absent from the incoming payload are
+  removed (best-effort; missing / active-endpoint errors are logged). Durable
+  `tp0.conf` stays in `wg-quick` format (`Address`);
+  `wg syncconf` is fed a stripped `wg setconf` config. Daemon start restores
+  from `state.json` and re-installs `TP-FORWARD`, **reusing PSK plaintext from
+  durable `tp0.conf`** (do not rewrite peers with an empty PSK map). `TP-FORWARD`
+  ACCEPTs same-subnet bridge traffic and bidirectional forwarding between local
+  `networks[].subnet` and remote peer prefixes (non-`/32` allowed IPs). The
+  Docker monitor also reinstalls that jump when dockerd becomes reachable again
+  after a restart (dockerd can rebuild `DOCKER-USER`). `wireguard-tools` stays in
+  `daemon-prereqs`. Default fabric MTU is **1420** on `tp0` and every routed
+  bridge (payload-overridable). **Preflight** verifies `wg` / `ip` / `iptables`
+  / `docker` (presence *and* invocability, direct or `sudo -n`) before mutating
+  anything and fails with an actionable message rather than `wg genkey failed`.
   **`environment.deploy`** may carry
   `traditionalWebSites[]` for host-native nginx/Apache/OpenLiteSpeed sites
   (compose `serviceKind: traditional-web`); engines are vendored under
   `/opt/turbopanel/vendor/{nginx,apache,openlitespeed}` and Apache PHP via
   vendored php-fpm under `/opt/turbopanel/vendor/php/` — see
   `src/deploy/AGENTS.md` and `orchestration/AGENTS.md`.
+  The deploy payload may also carry **`fabricNetworks[]`** (`{ name, subnet,
+  gateway?, mtu? }`) which the daemon ensures as routed bridges **before**
+  `compose up`; `environment.stop` carries `fabricNetworks: string[]` (names)
+  and removes those bridges + prunes them from `state.json`.
   Secret values never land in durable `compose.yaml`: the daemon writes
   Compose standalone secret files under `/run/turbopanel/deployments/…/secrets/`
   and a non-secret `.env` next to `compose.yaml`. After JWT, it rehydrates
@@ -379,9 +405,12 @@ excluded from release packaging (`package-daemon-release.sh` /
   `/secrets/decrypt`) and `compose up -d`. `environment.deploy` `storageMaterial[]`
   is location-aware: host paths are
   `<stateDir>/storage/<orgId>/<storageId>/<locationId>/data`. Overlay mounts come
-  from each entry's `mounts[]`. TurboFabric `server.fabric.reconcile` still
-  carries `networks: [{ name, subnet }]` — the Postgres table is `segment`
-  (renamed from `bridge`); the wire payload is unchanged.
+  from each entry's `mounts[]`. TurboFabric `server.fabric.reconcile`
+  `networks[]` entries carry optional `mtu` / `gateway`; the enabled payload
+  carries top-level `mtu` plus per-peer `presharedKeyEnvelope` / `keepalive`;
+  the **result** carries observed `peers[]` (`publicKey`, `lastHandshakeAt`,
+  `transferRx/Tx`) so the UI can show a half-converged mesh. The Postgres table
+  is `segment` (renamed from `bridge`).
 
 ## Subsystem docs (nested `AGENTS.md`)
 

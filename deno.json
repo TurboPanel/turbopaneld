@@ -57,7 +57,8 @@
     "compile:linux-arm64": "deno compile --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env --target aarch64-unknown-linux-gnu -o dist/.build/turbopaneld-linux-arm64 main.ts",
     "compile:all": "deno task compile:linux-amd64 && deno task compile:linux-arm64 && deno task bundle:js && deno task bundle:orchestration && deno task package:release",
     "package:release": "bash scripts/package-daemon-release.sh",
-    "release:package": "deno task compile:all"
+    "release:package": "deno task compile:all",
+    "release:dev": "deno run --allow-read --allow-write --allow-run --allow-env scripts/release-dev-overlay.ts"
   },
   "compilerOptions": {
     "lib": ["deno.window", "deno.unstable"]

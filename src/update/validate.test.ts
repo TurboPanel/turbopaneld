@@ -23,6 +23,14 @@ test("requireHttpsUrl rejects non-HTTPS URLs", () => {
   );
 });
 
+test("requireHttpsUrl allows HTTP when overlay catalogs opt in", () => {
+  requireHttpsUrl(
+    "http://studio.lan:8880/downloads/daemon/turbopaneld-amd64.tar.zst",
+    "artifact.url",
+    true,
+  );
+});
+
 test("validateArtifactEntry requires HTTPS url, sha256, and positive size", () => {
   assertEquals(
     validateArtifactEntry({

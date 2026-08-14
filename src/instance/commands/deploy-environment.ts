@@ -4,6 +4,8 @@ import { encodeHex } from "@std/encoding/hex";
 import { join } from "@std/path";
 import {
   composeFileArgs,
+  type DeploymentManifestSecret,
+  type DeploymentManifestV2,
   environmentDeploymentDir,
   legacyDeploymentDir,
   pruneStaleComposeLayerFiles,
@@ -15,8 +17,6 @@ import {
   writeComposeEnvFile,
   writeComposeFileSecure,
   writeDeploymentManifest,
-  type DeploymentManifestSecret,
-  type DeploymentManifestV2,
 } from "../../deploy/compose-files.ts";
 import {
   mergeComposeOverlayFragments,
@@ -61,6 +61,10 @@ import {
 } from "../../deploy/run-deploy-hooks.ts";
 import { applyTraditionalWebSites } from "../../deploy/traditional-web.ts";
 import { ensureExternalDockerNetworks as defaultEnsureExternalDockerNetworks } from "../../deploy/ensure-docker-networks.ts";
+import {
+  ensureFabricDockerNetworks as defaultEnsureFabricDockerNetworks,
+  FABRIC_DEFAULT_MTU,
+} from "./fabric.ts";
 import { ensureManagedIngressNetwork } from "../../managed/networks.ts";
 import {
   buildTraditionalWebReachabilityFragment,
@@ -74,6 +78,7 @@ import {
 import {
   type EnvironmentDeployComposeFile,
   type EnvironmentDeployContainer,
+  type EnvironmentDeployFabricNetwork,
   type EnvironmentDeployHosting,
   type EnvironmentDeployIngressService,
   type EnvironmentDeployPayload,
@@ -82,7 +87,7 @@ import {
   type EnvironmentDeployTraditionalWebSite,
   parseEnvironmentDeployPayload,
 } from "./contracts.ts";
-import { resolveLayout, type LayoutPaths } from "../../paths/layout.ts";
+import { type LayoutPaths, resolveLayout } from "../../paths/layout.ts";
 
 const SAFE_PATH_ID_RE = /^[A-Za-z0-9_-]+$/;
 const COMPOSE_PROJECT_RE = /^[a-z0-9][a-z0-9_-]*$/;
@@ -229,6 +234,15 @@ export type EnvironmentDeployDeps = {
    */
   ensureExternalDockerNetworks?: (
     names: readonly string[],
+  ) => Promise<void>;
+  /**
+   * Test seam — defaults to {@link defaultEnsureFabricDockerNetworks}.
+   * Deploy self-ensures routed fabric bridges so compose up does not depend
+   * on `server.fabric.reconcile` having landed first.
+   */
+  ensureFabricDockerNetworks?: (
+    networks: readonly EnvironmentDeployFabricNetwork[],
+    defaultMtu: number,
   ) => Promise<void>;
 };
 
@@ -498,10 +512,21 @@ function buildDaemonOverlayFragment(
   ]);
 }
 
-type DeployContainerServicesRunDeps = {
+type DeployContainerServicesInput = {
+  layout: LayoutPaths;
+  parsedPayload: EnvironmentDeployPayload;
+  files: EnvironmentDeployComposeFile[];
+  containerHostings: EnvironmentDeployHosting[];
+  traditionalWebSites: EnvironmentDeployTraditionalWebSite[];
+  mountPaths: Map<string, string>;
+  deploymentDir: string;
   run: RunDockerFn;
   decryptSecrets: DecryptSecretsFn | undefined;
   ensureExternalNetworks: (names: readonly string[]) => Promise<void>;
+  ensureFabricDockerNetworks: (
+    networks: readonly EnvironmentDeployFabricNetwork[],
+    defaultMtu: number,
+  ) => Promise<void>;
 };
 
 async function materializeDeploySecrets(
@@ -546,16 +571,21 @@ function applySecretFilePaths(
  * the previous live files intact.
  */
 async function deployContainerServices(
-  layout: LayoutPaths,
-  parsedPayload: EnvironmentDeployPayload,
-  files: EnvironmentDeployComposeFile[],
-  containerHostings: EnvironmentDeployHosting[],
-  traditionalWebSites: EnvironmentDeployTraditionalWebSite[],
-  mountPaths: Map<string, string>,
-  deploymentDir: string,
-  runDeps: DeployContainerServicesRunDeps,
+  input: DeployContainerServicesInput,
 ): Promise<{ serviceNames: string[]; composePaths: string[] }> {
-  const { run, decryptSecrets, ensureExternalNetworks } = runDeps;
+  const {
+    layout,
+    parsedPayload,
+    files,
+    containerHostings,
+    traditionalWebSites,
+    mountPaths,
+    deploymentDir,
+    run,
+    decryptSecrets,
+    ensureExternalNetworks,
+    ensureFabricDockerNetworks,
+  } = input;
   const stageDir = await resetComposeStageDir(deploymentDir);
   try {
     const stagedPath = join(stageDir, RUNTIME_COMPOSE_FILENAME);
@@ -633,6 +663,13 @@ async function deployContainerServices(
     const externalNetworks = parsedPayload.dockerExternalNetworks ?? [];
     if (externalNetworks.length > 0) {
       await ensureExternalNetworks(externalNetworks);
+    }
+
+    const fabricNetworks = parsedPayload.fabricNetworks ?? [];
+    if (fabricNetworks.length > 0) {
+      // Belt-and-braces for the race between reconcile and deploy: a deploy
+      // must never depend on `server.fabric.reconcile` having landed first.
+      await ensureFabricDockerNetworks(fabricNetworks, FABRIC_DEFAULT_MTU);
     }
 
     const managedNetworkServices = parsedPayload.managedNetworkServices ?? [];
@@ -778,6 +815,103 @@ export function shapeEnvironmentDeployResult(input: {
   };
 }
 
+function resolveEnvironmentDeployRuntime(deps?: EnvironmentDeployDeps): {
+  run: RunDockerFn;
+  decryptSecrets: DecryptSecretsFn | undefined;
+  ensureDockerFn: () => Promise<void>;
+  ensureExternalNetworks: (names: readonly string[]) => Promise<void>;
+  ensureFabricDockerNetworks: NonNullable<
+    EnvironmentDeployDeps["ensureFabricDockerNetworks"]
+  >;
+} {
+  const run = deps?.runDocker ?? defaultRunDocker;
+  return {
+    run,
+    decryptSecrets: deps?.decryptSecrets,
+    ensureDockerFn: deps?.ensureDocker ?? defaultEnsureDocker,
+    ensureExternalNetworks: deps?.ensureExternalDockerNetworks ??
+      ((names: readonly string[]) =>
+        defaultEnsureExternalDockerNetworks(names, run)),
+    ensureFabricDockerNetworks: deps?.ensureFabricDockerNetworks ??
+      defaultEnsureFabricDockerNetworks,
+  };
+}
+
+async function resolveTraditionalWebDockerBindAddress(
+  hasContainers: boolean,
+  traditionalWebSites: readonly EnvironmentDeployTraditionalWebSite[],
+): Promise<string | null> {
+  if (!hasContainers || traditionalWebSites.length === 0) return null;
+  return await resolveDockerHostGatewayAddress();
+}
+
+async function publishDeployedCompose(
+  input: DeployContainerServicesInput & { hasContainers: boolean },
+): Promise<{ labeledServices: string[]; composePaths: string[] }> {
+  if (!input.hasContainers) {
+    const labeledServices = await writeDeployComposeMarker(
+      input.parsedPayload,
+      input.files,
+      input.deploymentDir,
+    );
+    return { labeledServices, composePaths: [] };
+  }
+  const deployed = await deployContainerServices(input);
+  return {
+    labeledServices: deployed.serviceNames,
+    composePaths: deployed.composePaths,
+  };
+}
+
+async function collectEnvironmentDeployContainers(input: {
+  hasContainers: boolean;
+  projectName: string;
+  containerHostings: EnvironmentDeployHosting[];
+  composePaths: readonly string[];
+  ingressServices: readonly EnvironmentDeployIngressService[];
+  layout: LayoutPaths;
+  run: RunDockerFn;
+}): Promise<EnvironmentDeployContainer[] | null> {
+  const containers = input.hasContainers
+    ? await collectDeployedContainers(
+      input.projectName,
+      input.containerHostings,
+      input.composePaths,
+      input.run,
+    )
+    : [];
+  if (containers === null || input.ingressServices.length === 0) {
+    return containers;
+  }
+  for (const ingress of input.ingressServices) {
+    const ingressContainer = await collectServiceIngressContainer(
+      ingress,
+      input.layout,
+      input.run,
+    );
+    if (ingressContainer) containers.push(ingressContainer);
+  }
+  return containers;
+}
+
+async function removeLegacyDeploymentDir(
+  layout: LayoutPaths,
+  environmentId: string,
+  deploymentDir: string,
+): Promise<void> {
+  const legacyDir = legacyDeploymentDir(layout, environmentId);
+  if (legacyDir === deploymentDir) return;
+  try {
+    await Deno.remove(legacyDir, { recursive: true });
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return;
+    logInfo(
+      "commands",
+      `environment.deploy leftover pre-cutover dir env=${environmentId}`,
+    );
+  }
+}
+
 export async function handleEnvironmentDeploy(
   payload: EnvironmentDeployPayload,
   daemonReceivedAt: string,
@@ -786,11 +920,7 @@ export async function handleEnvironmentDeploy(
   const parsedPayload = parseEnvironmentDeployPayload(payload);
   assertSafeDeploymentIdentifiers(parsedPayload);
   const layout = resolveLayout(Deno.env.toObject());
-  const run = deps?.runDocker ?? defaultRunDocker;
-  const ensureDockerFn = deps?.ensureDocker ?? defaultEnsureDocker;
-  const ensureExternalNetworks = deps?.ensureExternalDockerNetworks ??
-    ((names: readonly string[]) =>
-      defaultEnsureExternalDockerNetworks(names, run));
+  const runtime = resolveEnvironmentDeployRuntime(deps);
 
   const traditionalWebSites = parsedPayload.traditionalWebSites ?? [];
   const traditionalNames = new Set(
@@ -812,7 +942,7 @@ export async function handleEnvironmentDeploy(
     containerHostings,
     parsedPayload.hostings,
     ingressServices,
-    ensureDockerFn,
+    runtime.ensureDockerFn,
   );
 
   const deploymentDir = environmentDeploymentDir(
@@ -829,96 +959,67 @@ export async function handleEnvironmentDeploy(
     layout,
     parsedPayload,
     principalMaterial,
-    deps?.decryptSecrets,
+    runtime.decryptSecrets,
   );
-
-  const mixedTraditionalAndContainers = hasContainers &&
-    traditionalWebSites.length > 0;
-  const dockerBindAddress = mixedTraditionalAndContainers
-    ? await resolveDockerHostGatewayAddress()
-    : null;
 
   await applyDeployTraditionalWebSites(
     layout,
     parsedPayload.environmentId,
     traditionalWebSites,
-    dockerBindAddress,
+    await resolveTraditionalWebDockerBindAddress(
+      hasContainers,
+      traditionalWebSites,
+    ),
   );
 
-  let labeledServices: string[] = [];
-  let composePathsForCollect: string[] = [];
-  if (hasContainers) {
-    const deployed = await deployContainerServices(
-      layout,
-      parsedPayload,
-      files,
-      containerHostings,
-      mixedTraditionalAndContainers ? traditionalWebSites : [],
-      mountPaths,
-      deploymentDir,
-      { run, decryptSecrets: deps?.decryptSecrets, ensureExternalNetworks },
-    );
-    labeledServices = deployed.serviceNames;
-    composePathsForCollect = deployed.composePaths;
-  } else {
-    labeledServices = await writeDeployComposeMarker(
-      parsedPayload,
-      files,
-      deploymentDir,
-    );
-  }
+  const published = await publishDeployedCompose({
+    hasContainers,
+    layout,
+    parsedPayload,
+    files,
+    containerHostings,
+    traditionalWebSites,
+    mountPaths,
+    deploymentDir,
+    run: runtime.run,
+    decryptSecrets: runtime.decryptSecrets,
+    ensureExternalNetworks: runtime.ensureExternalNetworks,
+    ensureFabricDockerNetworks: runtime.ensureFabricDockerNetworks,
+  });
 
   const hostnameTls = await materializeDeployTls(
     layout,
     parsedPayload,
-    deps?.decryptSecrets,
+    runtime.decryptSecrets,
   );
 
   await rewriteHostingCaddySites(layout, parsedPayload, hostnameTls);
 
-  const containers: EnvironmentDeployContainer[] | null = hasContainers
-    ? await collectDeployedContainers(
-      parsedPayload.projectName,
-      containerHostings,
-      composePathsForCollect,
-      run,
-    )
-    : [];
-
-  if (containers !== null && ingressServices.length > 0) {
-    for (const ingress of ingressServices) {
-      const ingressContainer = await collectServiceIngressContainer(
-        ingress,
-        layout,
-        run,
-      );
-      if (ingressContainer) containers.push(ingressContainer);
-    }
-  }
+  const containers = await collectEnvironmentDeployContainers({
+    hasContainers,
+    projectName: parsedPayload.projectName,
+    containerHostings,
+    composePaths: published.composePaths,
+    ingressServices,
+    layout,
+    run: runtime.run,
+  });
 
   logInfo(
     "commands",
     `environment.deploy completed project=${parsedPayload.projectName} received=${daemonReceivedAt}`,
   );
 
-  const legacyDir = legacyDeploymentDir(layout, parsedPayload.environmentId);
-  if (legacyDir !== deploymentDir) {
-    try {
-      await Deno.remove(legacyDir, { recursive: true });
-    } catch (err) {
-      if (!(err instanceof Deno.errors.NotFound)) {
-        logInfo(
-          "commands",
-          `environment.deploy leftover pre-cutover dir env=${parsedPayload.environmentId}`,
-        );
-      }
-    }
-  }
+  await removeLegacyDeploymentDir(
+    layout,
+    parsedPayload.environmentId,
+    deploymentDir,
+  );
 
   return shapeEnvironmentDeployResult({
     projectName: parsedPayload.projectName,
     environmentId: parsedPayload.environmentId,
-    labeledServices,
+    labeledServices: published.labeledServices,
     traditionalWebSites,
     containers,
   });

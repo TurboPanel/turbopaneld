@@ -2,9 +2,9 @@ import { assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import type { DockerCliResult } from "../../deploy/docker-cli.ts";
 import {
+  COMPOSE_ENV_FILENAME,
   COMPOSE_MANIFEST_FILENAME,
   COMPOSE_STAGE_DIRNAME,
-  COMPOSE_ENV_FILENAME,
   DAEMON_COMPOSE_FILENAME,
   DEPLOYMENT_MANIFEST_FILENAME,
   resolveDeployedComposePaths,
@@ -36,6 +36,7 @@ const test = Deno.test.bind(Deno);
 const hermeticDeployDeps = {
   ensureDocker: () => Promise.resolve(),
   ensureExternalDockerNetworks: () => Promise.resolve(),
+  ensureFabricDockerNetworks: () => Promise.resolve(),
 };
 
 test("containerHostingsNeedSharedHttpIngress requires HTTP hostnames", () => {
@@ -190,7 +191,12 @@ test({
     const environmentId = "envdeploy1";
     const projectId = "proj-1";
     const projectName = "tp-demo-envdeploy";
-    const deploymentDir = join(stateDir, "deployments", projectId, environmentId);
+    const deploymentDir = join(
+      stateDir,
+      "deployments",
+      projectId,
+      environmentId,
+    );
     await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
     await Deno.writeTextFile(
       join(deploymentDir, "docker-compose.old.yml"),
@@ -326,7 +332,10 @@ test({
       assertEquals(configJsonCall !== undefined, true);
       const stagedPaths = argvStagePaths(configJsonCall!);
       assertEquals(stagedPaths.length, 1);
-      assertEquals(stagedPaths[0]!.endsWith(`/${RUNTIME_COMPOSE_FILENAME}`), true);
+      assertEquals(
+        stagedPaths[0]!.endsWith(`/${RUNTIME_COMPOSE_FILENAME}`),
+        true,
+      );
 
       const configQCall = calls.find((argv) =>
         argv.includes("config") && argv.includes("-q")
@@ -670,9 +679,14 @@ test({
     const environmentId = "envdeploytags";
     const projectId = "proj-1";
     const projectName = "tp-demo-envtags";
-    const deploymentDir = join(stateDir, "deployments", projectId, environmentId);
+    const deploymentDir = join(
+      stateDir,
+      "deployments",
+      projectId,
+      environmentId,
+    );
     const compiled =
-      "services:\n  web:\n    image: nginx:alpine\n    ports:\n      - \"9000:80\"\n";
+      'services:\n  web:\n    image: nginx:alpine\n    ports:\n      - "9000:80"\n';
 
     const calls: string[][] = [];
     const fakeRunDocker = (
@@ -731,7 +745,7 @@ test({
               filename: "docker-compose.env.yml",
               role: "environment",
               source: "inline",
-              content: "services:\n  web:\n    ports:\n      - \"9000:80\"\n",
+              content: 'services:\n  web:\n    ports:\n      - "9000:80"\n',
             },
           ],
           hostings: [],
@@ -901,7 +915,9 @@ services:
       assertEquals(await Deno.readTextFile(secretPath), secretValue);
       assertEquals((await Deno.stat(secretPath)).mode! & 0o777, 0o600);
       const manifest = JSON.parse(
-        await Deno.readTextFile(join(deploymentDir, DEPLOYMENT_MANIFEST_FILENAME)),
+        await Deno.readTextFile(
+          join(deploymentDir, DEPLOYMENT_MANIFEST_FILENAME),
+        ),
       ) as { secrets?: Array<{ relativePath: string }> };
       assertEquals(manifest.secrets?.[0]?.relativePath, "web--TOKEN");
     } finally {
@@ -925,3 +941,164 @@ services:
   },
 });
 
+test({
+  name:
+    "handleEnvironmentDeploy ensures fabricNetworks before compose up and skips when empty",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-deploy-fabric-" });
+    const previous = {
+      TURBOPANEL_STATE_DIR: Deno.env.get("TURBOPANEL_STATE_DIR"),
+      TURBOPANEL_CONFIG_DIR: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
+    };
+    const stateDir = join(root, "state");
+    const configDir = join(root, "config");
+    Deno.env.set("TURBOPANEL_STATE_DIR", stateDir);
+    Deno.env.set("TURBOPANEL_CONFIG_DIR", configDir);
+
+    const environmentId = "envfabric1";
+    const projectId = "proj-1";
+    const projectName = "tp-demo-fabric";
+    const deploymentDir = join(
+      stateDir,
+      "deployments",
+      projectId,
+      environmentId,
+    );
+    await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
+
+    const runtimeYaml = "services:\n  web:\n    image: nginx:alpine\n";
+    const fabricNetworks = [{
+      name: "tpn_net1",
+      subnet: "203.0.113.0/24",
+      mtu: 1420,
+      gateway: "203.0.113.1",
+    }];
+    const events: string[] = [];
+    const ensureCalls: Array<{
+      networks: Array<{
+        name: string;
+        subnet: string;
+        mtu?: number;
+        gateway?: string;
+      }>;
+      defaultMtu: number;
+    }> = [];
+    const fakeRunDocker = (
+      args: string[],
+    ): Promise<DockerCliResult> => {
+      if (args.includes("up")) events.push("compose-up");
+      if (args.includes("config") && args.includes("--format")) {
+        return Promise.resolve({
+          success: true,
+          stdout: fakeConfigJson({ web: { image: "nginx:alpine" } }),
+          stderr: "",
+          code: 0,
+        });
+      }
+      return Promise.resolve({
+        success: true,
+        stdout: args.includes("ps") ? "[]" : "",
+        stderr: "",
+        code: 0,
+      });
+    };
+
+    const basePayload = {
+      environmentId,
+      projectId,
+      organizationId: "org-1",
+      projectName,
+      composeYaml: runtimeYaml,
+      composeFiles: [{
+        filename: RUNTIME_COMPOSE_FILENAME,
+        role: "runtime" as const,
+        source: "inline" as const,
+        content: runtimeYaml,
+      }],
+      hostings: [] as [],
+    };
+
+    try {
+      await handleEnvironmentDeploy(
+        { ...basePayload, fabricNetworks },
+        new Date().toISOString(),
+        {
+          runDocker: fakeRunDocker,
+          ...hermeticDeployDeps,
+          ensureFabricDockerNetworks: (networks, defaultMtu) => {
+            events.push("ensure-fabric");
+            ensureCalls.push({
+              networks: [...networks],
+              defaultMtu,
+            });
+            return Promise.resolve();
+          },
+        },
+      );
+
+      assertEquals(ensureCalls.length, 1);
+      assertEquals(ensureCalls[0]?.networks, fabricNetworks);
+      assertEquals(ensureCalls[0]?.defaultMtu, 1420);
+      assertEquals(
+        events.indexOf("ensure-fabric") < events.indexOf("compose-up"),
+        true,
+      );
+
+      events.length = 0;
+      ensureCalls.length = 0;
+      await handleEnvironmentDeploy(
+        basePayload,
+        new Date().toISOString(),
+        {
+          runDocker: fakeRunDocker,
+          ...hermeticDeployDeps,
+          ensureFabricDockerNetworks: (networks, defaultMtu) => {
+            events.push("ensure-fabric");
+            ensureCalls.push({
+              networks: [...networks],
+              defaultMtu,
+            });
+            return Promise.resolve();
+          },
+        },
+      );
+      assertEquals(ensureCalls.length, 0);
+      assertEquals(events.includes("ensure-fabric"), false);
+      assertEquals(events.includes("compose-up"), true);
+
+      events.length = 0;
+      ensureCalls.length = 0;
+      await handleEnvironmentDeploy(
+        { ...basePayload, fabricNetworks: [] },
+        new Date().toISOString(),
+        {
+          runDocker: fakeRunDocker,
+          ...hermeticDeployDeps,
+          ensureFabricDockerNetworks: (networks, defaultMtu) => {
+            events.push("ensure-fabric");
+            ensureCalls.push({
+              networks: [...networks],
+              defaultMtu,
+            });
+            return Promise.resolve();
+          },
+        },
+      );
+      assertEquals(ensureCalls.length, 0);
+      assertEquals(events.includes("ensure-fabric"), false);
+    } finally {
+      if (previous.TURBOPANEL_STATE_DIR === undefined) {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+      } else {
+        Deno.env.set("TURBOPANEL_STATE_DIR", previous.TURBOPANEL_STATE_DIR);
+      }
+      if (previous.TURBOPANEL_CONFIG_DIR === undefined) {
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      } else {
+        Deno.env.set("TURBOPANEL_CONFIG_DIR", previous.TURBOPANEL_CONFIG_DIR);
+      }
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});

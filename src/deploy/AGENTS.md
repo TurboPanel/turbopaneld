@@ -81,18 +81,22 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../insta
    file before publish — **not** secrets. HTTP hostings that share a hostname are merged into one
    Caddy site with `handle` / path matchers (`pathPrefix`); Traefik routers
    already used `pathPrefix` via compose labels.
-8. Run pre-deploy hooks (`serviceHooks[]`: optional `build --no-cache`, shell
+8. Ensure payload `fabricNetworks[]` as routed bridges with the given subnet/MTU
+   (`ensureFabricDockerNetworks` in `src/instance/commands/fabric.ts`, default
+   MTU 1420) **before** compose up. This reuses the fabric creation path, **not**
+   `ensure-docker-networks.ts` (which creates plain bridges).
+9. Run pre-deploy hooks (`serviceHooks[]`: optional `build --no-cache`, shell
    preDeployCommand). When the payload sets `noCache: true`, run
    `docker compose build --no-cache --pull` for the whole project, then
    `docker compose up -d --remove-orphans`, then post-deploy hooks
    (`run-deploy-hooks.ts`).
-9. When the payload includes `tlsMaterial[]`, materialize org certs under
+10. When the payload includes `tlsMaterial[]`, materialize org certs under
    `layout.tlsDir` (`/etc/turbopanel/tls/<tlsId>/fullchain.pem` + `privkey.pem`,
    modes `0640`/`0600`) via `materializeTlsCertificates`
    (`src/deploy/materialize-tls.ts`). Private keys arrive as `tpdaemon`
    envelopes — decrypt only through `POST /api/daemon/v1/secrets/decrypt`
    (daemon JWT); never log plaintext.
-10. Refresh hosting Caddy config under `/etc/turbopanel/hosting/`
+11. Refresh hosting Caddy config under `/etc/turbopanel/hosting/`
    (`auto_https off` always). Per-hostname site blocks use
    `tls <fullchain> <privkey>` when a resolved `tlsId` was materialized;
    otherwise `tls internal`. When `hostings[].bindAddress` is set, both the
@@ -103,7 +107,7 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../insta
    private `ip` (`scope = 'datacenter'` on the target server), or **local**
    loopback `127.0.0.1`. Unit `turbopanel-hosting-caddy.service` when sudo
    allows. **Distinct** from control-plane Caddy (`:8443`).
-11. Best-effort `docker compose ps --format json` — per-container identity/status
+12. Best-effort `docker compose ps --format json` — per-container identity/status
    (`containerId`, `containerName`, `composeServiceName`, `status`, optional
    `serviceId` from `payload.hostings`) is included in the command result when
    collection succeeds; a `ps`/parse failure never fails an otherwise-successful
@@ -238,13 +242,16 @@ get a per-service Traefik project or an `ingressServices[]` entry.
    against `resolveDeployedComposePaths` (compiled `compose.yaml`, else v1
    manifest, else legacy `docker-compose.yml`) — idempotent no-op when no
    compose file exists.
-2. Remove `/etc/turbopanel/hosting/sites/<environmentId>.caddy` via
+2. Best-effort `docker network rm` for payload `fabricNetworks[]` (`tpn_*`)
+   then prune those names from `state.json` so boot re-reconcile does not
+   recreate them. Missing / active-endpoint errors must not fail the stop.
+3. Remove `/etc/turbopanel/hosting/sites/<environmentId>.caddy` via
    `removeHostingCaddySite` and best-effort reload hosting Caddy; remove
    traditional-web sites.
-3. Tear down per-service tcp/udp ingress via
+4. Tear down per-service tcp/udp ingress via
    `removeEnvironmentTcpUdpServiceIngress` (payload ∪ environment index).
-4. Delete the deployment directory.
-5. Return authoritative `containers: []` so the instance clears Postgres
+5. Delete the deployment directory.
+6. Return authoritative `containers: []` so the instance clears Postgres
    container pins.
 
 `environment.lifecycle` (command router →
@@ -436,6 +443,12 @@ traditional-web **before** `docker compose up`, and (3) patches compose with
 registered in the org network table (`kind: docker`, `options.dockerNetworkName`)
 for the deploy server. Payload `dockerExternalNetworks[]` is ensured with
 `docker network create` before compose up (`ensure-docker-networks.ts`).
+**`fabricNetworks[]` is a disjoint set:** platform-owned `tpn_*` routed bridges
+derived from `segment` rows (`{ name, subnet, gateway?, mtu? }`), never
+operator-registered. Requiring a registry row would make every spanning deploy
+fail — `tpn_*` is allocated by the compiler. The daemon ensures them via
+`ensureFabricDockerNetworks` (fabric.ts routed-bridge path) as a belt-and-braces
+path if `server.fabric.reconcile` lands stale.
 
 `environment.stop` removes nginx, Apache, php-fpm pool, and OpenLiteSpeed site
 fragments/vhost dirs (best-effort reload/regenerate) in addition to compose
@@ -447,9 +460,7 @@ under `<configDir>/openlitespeed/sites/` on each apply/remove (no
 (parity with nginx).
 
 Future seams (not MVP): multi-version PHP side-by-side, OLS/nginx PHP,
-multi-server service placement, swarm-style replicas, ACME issuance on the
-daemon. WireGuard mesh apply is handled by `server.wireguard.apply` — see
-`src/instance/commands/wireguard.ts` and `../../orchestration/AGENTS.md`
-(WireGuard). **TurboFabric** (`server.fabric.reconcile`) is additive: opt-in
-`tp0` under `<daemonStateDir>/network/` (`fabricNetworkDir`); it does not
-replace org VPN apply. See `src/instance/commands/fabric.ts`.
+swarm-style replicas, ACME issuance on the daemon. TurboFabric **is** the
+single org mesh (`server.fabric.reconcile` — see `src/instance/commands/fabric.ts`
+and `../../orchestration/AGENTS.md`). `{ enabled: false }` is a teardown; the
+daemon owns apply (no Ansible apply playbook).

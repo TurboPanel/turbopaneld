@@ -24,7 +24,6 @@ import {
   parseRebootPayload,
   parseSystemReconcilePayload,
   parseTimezoneSetPayload,
-  parseWireguardApplyPayload,
 } from "./contracts.ts";
 import { handleEnvironmentDeploy } from "./deploy-environment.ts";
 import { handleManagedApply } from "../../managed/apply.ts";
@@ -46,7 +45,6 @@ import { handlePing } from "./ping.ts";
 import { handleReboot } from "./reboot.ts";
 import { handleTimezone } from "./timezone.ts";
 import { handleFabricReconcile } from "./fabric.ts";
-import { handleWireguardApply } from "./wireguard.ts";
 
 export interface CommandRouterDeps {
   /** Decrypt tpdaemon envelopes via POST /api/daemon/v1/secrets/decrypt. */
@@ -134,18 +132,11 @@ export async function handleCommandDispatch(
         daemonRespondedAt = new Date().toISOString();
         break;
       }
-      case "server.wireguard.apply": {
-        const payload = parseWireguardApplyPayload(message.payload);
-        result = await handleWireguardApply(payload, daemonReceivedAt, {
-          decryptSecrets: deps?.decryptSecrets,
-        });
-        ok = true;
-        daemonRespondedAt = new Date().toISOString();
-        break;
-      }
       case "server.fabric.reconcile": {
         const payload = parseFabricReconcilePayload(message.payload);
-        result = await handleFabricReconcile(payload, daemonReceivedAt);
+        result = await handleFabricReconcile(payload, daemonReceivedAt, {
+          decryptSecrets: deps?.decryptSecrets,
+        });
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;

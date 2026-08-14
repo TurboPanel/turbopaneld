@@ -8,12 +8,14 @@ import {
   parseEnvironmentLifecyclePayload,
   parseEnvironmentStopPayload,
   parseFabricReconcilePayload,
+  parseFabricReconcileResult,
   parseManagedApplyPayload,
   parseManagedApplyResult,
   parseManagedBackupPayload,
   parseManagedBackupResult,
   parseManagedDestroyPayload,
   parseManagedDestroyResult,
+  parseManagedIngressReconcilePayload,
   parseManagedLifecyclePayload,
   parseManagedLifecycleResult,
   parseManagedPromotePayload,
@@ -21,7 +23,6 @@ import {
   parseManagedRestorePayload,
   parseManagedRestoreResult,
   parseSystemReconcilePayload,
-  parseWireguardApplyPayload,
 } from "./contracts.ts";
 
 /**
@@ -39,7 +40,6 @@ const INSTANCE_COMMAND_TYPES = [
   "server.ntp.set",
   "server.reboot",
   "server.timezone.set",
-  "server.wireguard.apply",
   "server.fabric.reconcile",
   "environment.deploy",
   "environment.lifecycle",
@@ -592,6 +592,79 @@ test("environment.deploy principalMaterial rejects non-integer uid", () => {
   );
 });
 
+test("environment.deploy round-trips fabricNetworks and rejects invalid entries", () => {
+  const payload = parseEnvironmentDeployPayload({
+    environmentId: "env-1",
+    projectId: "proj-1",
+    organizationId: "org-1",
+    projectName: "demo",
+    composeYaml: "services:\n  web:\n    image: nginx\n",
+    hostings: [],
+    fabricNetworks: [
+      {
+        name: "tpn_net1",
+        subnet: "203.0.113.0/24",
+        mtu: 1420,
+        gateway: "203.0.113.1",
+      },
+    ],
+  });
+  assertEquals(payload.fabricNetworks, [
+    {
+      name: "tpn_net1",
+      subnet: "203.0.113.0/24",
+      mtu: 1420,
+      gateway: "203.0.113.1",
+    },
+  ]);
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        environmentId: "env-1",
+        projectId: "proj-1",
+        organizationId: "org-1",
+        projectName: "demo",
+        composeYaml: "services:\n  web:\n    image: nginx\n",
+        hostings: [],
+        fabricNetworks: [{ name: "-bad", subnet: "203.0.113.0/24" }],
+      }),
+    TypeError,
+    "Invalid fabricNetworks name",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        environmentId: "env-1",
+        projectId: "proj-1",
+        organizationId: "org-1",
+        projectName: "demo",
+        composeYaml: "services:\n  web:\n    image: nginx\n",
+        hostings: [],
+        fabricNetworks: [{ name: "tpn_net1", subnet: "not-a-cidr" }],
+      }),
+    TypeError,
+    "Invalid fabricNetworks subnet",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        environmentId: "env-1",
+        projectId: "proj-1",
+        organizationId: "org-1",
+        projectName: "demo",
+        composeYaml: "services:\n  web:\n    image: nginx\n",
+        hostings: [],
+        fabricNetworks: [{
+          name: "tpn_net1",
+          subnet: "203.0.113.0/24",
+          mtu: 1279,
+        }],
+      }),
+    TypeError,
+    "Invalid fabricNetworks mtu",
+  );
+});
+
 test("environment.deploy round-trips dockerExternalNetworks and serviceHooks", () => {
   const payload = parseEnvironmentDeployPayload({
     environmentId: "env-1",
@@ -711,6 +784,20 @@ test("environment.stop payload parser round-trips", () => {
       projectName: "tp-demo",
     },
   );
+  assertEquals(
+    parseEnvironmentStopPayload({
+      environmentId: "env-1",
+      projectId: "proj-1",
+      projectName: "tp-demo",
+      fabricNetworks: ["tpn_net1"],
+    }),
+    {
+      environmentId: "env-1",
+      projectId: "proj-1",
+      projectName: "tp-demo",
+      fabricNetworks: ["tpn_net1"],
+    },
+  );
   assertThrows(
     () => parseEnvironmentStopPayload(null),
     TypeError,
@@ -720,6 +807,17 @@ test("environment.stop payload parser round-trips", () => {
     () => parseEnvironmentStopPayload({ environmentId: "env-1" }),
     TypeError,
     "projectId must be a non-empty string",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentStopPayload({
+        environmentId: "env-1",
+        projectId: "proj-1",
+        projectName: "tp-demo",
+        fabricNetworks: ["bridge_net1"],
+      }),
+    TypeError,
+    "Invalid environment.stop fabricNetworks name",
   );
 });
 
@@ -1027,43 +1125,28 @@ test("command wire message types carry required shape fields", () => {
   assertEquals(outcome.ok, true);
 });
 
-test("server.wireguard.apply fixture round-trips", () => {
-  const payload = parseWireguardApplyPayload({
-    vpnId: "550e8400-e29b-41d4-a716-446655440000",
-    peerId: "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
-    interfaceName: "tpwg550e8400",
-    address: "203.0.113.10/32",
-    listenPort: 51820,
-    peers: [
-      {
-        peerId: "6ba7b811-9dad-11d1-80b4-00c04fd430c8",
-        publicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-        allowedIps: ["203.0.113.11/32"],
-        endpoint: "203.0.113.1:51820",
-      },
-    ],
-  });
-  assertEquals(payload.address, "203.0.113.10/32");
-  assertEquals(payload.peers[0]?.endpoint, "203.0.113.1:51820");
-});
-
 test("server.fabric.reconcile fixture round-trips", () => {
   const payload = parseFabricReconcilePayload({
     enabled: true,
     fabricId: "550e8400-e29b-41d4-a716-446655440000",
     address: "10.250.0.11/32",
     prefix: "10.192.0.0/16",
+    mtu: 1420,
     peers: [
       {
         publicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
         allowedIPs: ["10.250.0.12/32", "10.193.0.0/16"],
         endpoint: "203.0.113.1:51820",
+        keepalive: 25,
+        presharedKeyEnvelope: "tpdaemon.v1.server.key.payload",
       },
     ],
     networks: [
       {
         name: "tpn_550e8400-e29b-41d4-a716-446655440000",
         subnet: "10.192.11.0/24",
+        mtu: 1420,
+        gateway: "10.192.11.1",
       },
     ],
   });
@@ -1072,7 +1155,35 @@ test("server.fabric.reconcile fixture round-trips", () => {
     throw new TypeError("expected enabled fabric payload");
   }
   assertEquals(payload.address, "10.250.0.11/32");
-  assertEquals(payload.peers[0]?.endpoint, "203.0.113.1:51820");
+  assertEquals(payload.mtu, 1420);
+  assertEquals(payload.peers[0]?.keepalive, 25);
+  assertEquals(
+    payload.peers[0]?.presharedKeyEnvelope,
+    "tpdaemon.v1.server.key.payload",
+  );
+  assertEquals(payload.networks?.[0]?.gateway, "10.192.11.1");
+  const result = parseFabricReconcileResult({
+    summary: "TurboFabric reconciled",
+    publicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    peers: [
+      {
+        publicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        lastHandshakeAt: "2020-01-01T00:00:00.000Z",
+        transferRx: 1,
+        transferTx: 2,
+      },
+    ],
+  });
+  assertEquals(result.peers?.[0]?.transferTx, 2);
+});
+
+test("server.fabric.reconcile disable result is summary-only", () => {
+  const result = parseFabricReconcileResult({
+    summary: "TurboFabric torn down",
+  });
+  assertEquals(result, { summary: "TurboFabric torn down" });
+  assertEquals("publicKey" in result, false);
+  assertEquals(result.skipped, undefined);
 });
 
 const VALID_MANAGED_APPLY = {
@@ -1885,4 +1996,118 @@ test("managed.promote payload and result round-trip", () => {
   });
   assertEquals(result.promotedMemberId, payload.memberId);
   assertEquals(result.demoted, true);
+});
+
+test("managed.apply round-trips a fabric peer and rejects vpn", () => {
+  const payload = parseManagedApplyPayload({
+    ...VALID_MANAGED_APPLY,
+    peers: [
+      {
+        memberId: "00000000-0000-4000-8000-0000000000a2",
+        role: "replica",
+        readEligible: true,
+        address: "203.0.113.51",
+        port: 45002,
+        transport: "fabric",
+      },
+    ],
+  });
+  assertEquals(payload.peers[0]?.transport, "fabric");
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        peers: [
+          {
+            memberId: "00000000-0000-4000-8000-0000000000a2",
+            role: "replica",
+            readEligible: true,
+            address: "203.0.113.51",
+            port: 45002,
+            transport: "vpn",
+          },
+        ],
+      }),
+    TypeError,
+  );
+});
+
+const VALID_MANAGED_INGRESS_RECONCILE = {
+  serverId: "00000000-0000-4000-8000-0000000000ab",
+  bindAddress: "203.0.113.10",
+  orgTlsMaterial: {
+    certificatePem:
+      "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+    privateKeyEnvelope: "tpdaemon.v1.server.key.payload",
+    caCertPem:
+      "-----BEGIN CERTIFICATE-----\nMIICaaaa\n-----END CERTIFICATE-----\n",
+  },
+  clusters: [
+    {
+      managedId: "00000000-0000-4000-8000-000000000001",
+      engine: "postgres",
+      protocolPort: 5432,
+      writerHostgroup: 0,
+      readerHostgroup: 1,
+      backends: [
+        {
+          memberId: "00000000-0000-4000-8000-0000000000aa",
+          role: "primary",
+          readEligible: true,
+          address: "203.0.113.20",
+          port: 5432,
+          transport: "local",
+        },
+      ],
+      users: [
+        {
+          username: "app",
+          role: "user",
+          password: "tpdaemon.v1.server.key.payload",
+          defaultDatabase: "app",
+        },
+      ],
+    },
+  ],
+} as const;
+
+test("managed.ingress.reconcile round-trips fabric backends and segments", () => {
+  const netId = "00000000-0000-4000-8000-0000000000cc";
+  const payload = parseManagedIngressReconcilePayload({
+    ...VALID_MANAGED_INGRESS_RECONCILE,
+    clusters: [
+      {
+        ...VALID_MANAGED_INGRESS_RECONCILE.clusters[0],
+        backends: [
+          {
+            ...VALID_MANAGED_INGRESS_RECONCILE.clusters[0].backends[0],
+            transport: "fabric",
+          },
+        ],
+      },
+    ],
+    segments: [{ name: `tpn_${netId}`, subnet: "203.0.113.0/24" }],
+  });
+  assertEquals(payload.clusters[0]?.backends[0]?.transport, "fabric");
+  assertEquals(payload.segments, [
+    { name: `tpn_${netId}`, subnet: "203.0.113.0/24" },
+  ]);
+  assertThrows(
+    () =>
+      parseManagedIngressReconcilePayload({
+        ...VALID_MANAGED_INGRESS_RECONCILE,
+        clusters: [
+          {
+            ...VALID_MANAGED_INGRESS_RECONCILE.clusters[0],
+            backends: [
+              {
+                ...VALID_MANAGED_INGRESS_RECONCILE.clusters[0].backends[0],
+                transport: "vpn",
+              },
+            ],
+          },
+        ],
+      }),
+    TypeError,
+  );
 });

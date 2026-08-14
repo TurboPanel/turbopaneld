@@ -1,5 +1,8 @@
 import { restartDaemonService } from "./restart-daemon-service.ts";
-import { handleCommandDispatch } from "./commands/command-router.ts";
+import {
+  type CommandRouterDeps,
+  handleCommandDispatch,
+} from "./commands/command-router.ts";
 import {
   createInstanceHttpClient,
   describeInstance,
@@ -54,9 +57,11 @@ import {
   downloadRunScript,
   encodeLicenseArg,
   executeRunReconcile,
+  isPlaintextHttpUrl,
   resolveBootstrapInsecureTls,
   resolveRunScriptUrl,
 } from "./run-reconcile.ts";
+import { installOriginNeedsInsecureTls } from "./install-tls.ts";
 
 type DaemonMessage =
   | { type: "echo"; payload: unknown; at: string }
@@ -1024,35 +1029,13 @@ export class InstanceClient {
         // operator-driven via the developer upgrade button / dev-sync push.
         break;
       case "echo":
-        logDebug(
-          "instance",
-          "echo from instance:",
-          sanitizeForLog(message.payload),
-        );
-        ws.send(JSON.stringify(
-          {
-            type: "echo",
-            payload: { received: message.payload, from: "daemon" },
-            at: new Date().toISOString(),
-          } satisfies DaemonMessage,
-        ));
+        this.#echoMessage(message, ws);
         break;
       case "command-dispatch":
-        handleCommandDispatch(message, ws, {
-          decryptSecrets: this.#apiClient
-            ? (ciphertexts) => this.#apiClient!.decryptSecrets(ciphertexts)
-            : undefined,
-          rehydrateDeploymentSecrets: this.#apiClient
-            ? (deployments) =>
-              this.#apiClient!.rehydrateDeploymentSecrets(deployments)
-            : undefined,
-        }).catch((err) => {
-          logWarn(
-            "instance",
-            "command-dispatch handler failed:",
-            sanitizeForLog(err),
-          );
-        });
+        this.#runSocketHandler(
+          "command-dispatch",
+          handleCommandDispatch(message, ws, this.#commandRouterDeps()),
+        );
         break;
       case "addresses-request":
         this.#collectAddresses(message, ws);
@@ -1060,60 +1043,95 @@ export class InstanceClient {
       case "managed-logs-request":
         this.#collectManagedLogs(message, ws);
         break;
-      case "dev-sync-begin": {
-        // Gate the transfer up front: only daemons with a real checkout-backed
-        // execution mode accept source-sync. Managed / compiled / JS-fallback
-        // installs refuse immediately instead of buffering a full tarball just
-        // to fail at dev-sync-end.
-        const source = resolveDevSyncSourceRoot();
-        if (!source.ok) {
-          this.#refuseDevSync(message.id, source.reason, ws);
-          break;
-        }
-        this.#devSync.set(message.id, newDevSyncState(message.totalChunks));
+      case "dev-sync-begin":
+        this.#beginDevSync(message, ws);
         break;
-      }
-      case "dev-sync-chunk": {
-        const state = this.#devSync.get(message.id);
-        if (state) state.chunks[message.index] = message.data;
+      case "dev-sync-chunk":
+        this.#bufferDevSyncChunk(message);
         break;
-      }
       case "dev-sync-end":
-        // Already refused at begin — swallow the trailing end so we don't send a
-        // second dev-sync-result for the same transfer.
-        if (this.#devSyncRefused.delete(message.id)) break;
-        this.#applyDevSync(message.id, ws).catch((err) => {
-          logWarn(
-            "instance",
-            "dev-sync handler failed:",
-            sanitizeForLog(err),
-          );
-        });
+        this.#endDevSync(message.id, ws);
         break;
       case "tunnel-token":
-        this.#applyTunnelToken(message, ws).catch((err) => {
-          logWarn(
-            "instance",
-            "tunnel-token handler failed:",
-            sanitizeForLog(err),
-          );
-        });
+        this.#runSocketHandler(
+          "tunnel-token",
+          this.#applyTunnelToken(message, ws),
+        );
         break;
       case "public-urls-update":
-        this.#applyPublicUrls(message, ws).catch((err) => {
-          logWarn(
-            "instance",
-            "public-urls-update handler failed:",
-            sanitizeForLog(err),
-          );
-        });
+        this.#runSocketHandler(
+          "public-urls-update",
+          this.#applyPublicUrls(message, ws),
+        );
         break;
       case "update":
-        void this.#applyUpdate(message, ws).catch((err) => {
-          logWarn("instance", "update handler failed:", sanitizeForLog(err));
-        });
+        this.#runSocketHandler("update", this.#applyUpdate(message, ws));
         break;
     }
+  }
+
+  #runSocketHandler(label: string, work: Promise<void>): void {
+    void work.catch((err) => {
+      logWarn("instance", `${label} handler failed:`, sanitizeForLog(err));
+    });
+  }
+
+  #commandRouterDeps(): CommandRouterDeps | undefined {
+    const apiClient = this.#apiClient;
+    if (!apiClient) return undefined;
+    return {
+      decryptSecrets: (ciphertexts) => apiClient.decryptSecrets(ciphertexts),
+      rehydrateDeploymentSecrets: (deployments) =>
+        apiClient.rehydrateDeploymentSecrets(deployments),
+    };
+  }
+
+  #echoMessage(
+    message: Extract<DaemonMessage, { type: "echo" }>,
+    ws: WebSocket,
+  ): void {
+    logDebug(
+      "instance",
+      "echo from instance:",
+      sanitizeForLog(message.payload),
+    );
+    ws.send(JSON.stringify(
+      {
+        type: "echo",
+        payload: { received: message.payload, from: "daemon" },
+        at: new Date().toISOString(),
+      } satisfies DaemonMessage,
+    ));
+  }
+
+  #beginDevSync(
+    message: Extract<DaemonMessage, { type: "dev-sync-begin" }>,
+    ws: WebSocket,
+  ): void {
+    // Gate the transfer up front: only daemons with a real checkout-backed
+    // execution mode accept source-sync. Managed / compiled / JS-fallback
+    // installs refuse immediately instead of buffering a full tarball just
+    // to fail at dev-sync-end.
+    const source = resolveDevSyncSourceRoot();
+    if (!source.ok) {
+      this.#refuseDevSync(message.id, source.reason, ws);
+      return;
+    }
+    this.#devSync.set(message.id, newDevSyncState(message.totalChunks));
+  }
+
+  #bufferDevSyncChunk(
+    message: Extract<DaemonMessage, { type: "dev-sync-chunk" }>,
+  ): void {
+    const state = this.#devSync.get(message.id);
+    if (state) state.chunks[message.index] = message.data;
+  }
+
+  #endDevSync(id: string, ws: WebSocket): void {
+    // Already refused at begin — swallow the trailing end so we don't send a
+    // second dev-sync-result for the same transfer.
+    if (this.#devSyncRefused.delete(id)) return;
+    this.#runSocketHandler("dev-sync", this.#applyDevSync(id, ws));
   }
 
   /**
@@ -1255,8 +1273,13 @@ export class InstanceClient {
     const env = Deno.env.toObject();
     const instanceUrl = env.TURBOPANEL_INSTANCE_URL?.trim();
     const instanceCaPath = resolveInstanceCaPath(env);
-    const runScriptUrl = resolveRunScriptUrl(this.#config);
-    const insecureTls = resolveBootstrapInsecureTls({
+    const dlBase = env.TURBOPANEL_DL_BASE?.trim();
+    const runScriptUrl = resolveRunScriptUrl(this.#config, { dlBase });
+    const publicTls = Boolean(
+      instanceUrl && !installOriginNeedsInsecureTls(instanceUrl) &&
+        !isPlaintextHttpUrl(instanceUrl),
+    );
+    const insecureTls = publicTls ? false : resolveBootstrapInsecureTls({
       releaseTlsInsecure: env.TURBOPANEL_RELEASE_TLS_INSECURE,
       runScriptUrl,
       instanceCaPath,
@@ -1268,8 +1291,9 @@ export class InstanceClient {
     const reconcileArgs = buildRunReconcileArgs({
       licenseArg,
       instanceUrl,
-      instanceCaPath,
+      instanceCaPath: publicTls ? undefined : instanceCaPath,
       insecureTls,
+      dlBase,
     });
 
     logInfo(
@@ -1280,7 +1304,7 @@ export class InstanceClient {
 
     const script = await downloadRunScript(runScriptUrl, {
       insecureTls,
-      caPath: insecureTls ? undefined : instanceCaPath,
+      caPath: (insecureTls || publicTls) ? undefined : instanceCaPath,
     });
     await executeRunReconcile({
       script,

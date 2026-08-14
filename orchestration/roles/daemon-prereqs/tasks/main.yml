@@ -6,7 +6,7 @@
 # Minimal host-base boundary:
 #   - curl/ca-certificates/tar/python3-minimal: release download + vendor zip extraction
 #   - git/gnupg/unzip/xz-utils/zstd: orchestration/Ansible/Docker roles on managed hosts
-#   - wireguard-tools: VPN mesh apply (`server.wireguard.apply`) on managed hosts
+#   - wireguard-tools: TurboFabric mesh (`server.fabric.reconcile`) on managed hosts
 #   - openssl: managed-engine self-signed TLS material (`managed.apply`)
 #   - pamtester: instance install PAM gate (production)
 #

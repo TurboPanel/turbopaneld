@@ -9,7 +9,6 @@ export const COMMAND_TYPES = [
   "server.ntp.set",
   "server.reboot",
   "server.timezone.set",
-  "server.wireguard.apply",
   "server.fabric.reconcile",
   "environment.deploy",
   "environment.lifecycle",
@@ -88,51 +87,29 @@ export type NtpSetResult = {
   summary?: string;
 };
 
-/** Must stay in sync with the instance canonical `server.wireguard.apply` shape. */
-export type WireguardApplyPeer = {
-  peerId: string;
-  publicKey: string;
-  allowedIps: string[];
-  endpoint?: string;
-  persistentKeepalive?: number;
-  presharedKeyEnvelope?: string;
-};
-
-/** Must stay in sync with the instance canonical `server.wireguard.apply` shape. */
-export type WireguardApplyPayload = {
-  vpnId: string;
-  peerId: string;
-  interfaceName: string;
-  address: string;
-  listenPort?: number;
-  /** When true, enable host IP forwarding (primary gateway). */
-  enableIpForwarding?: boolean;
-  peers: WireguardApplyPeer[];
-};
-
-/** Must stay in sync with the instance canonical `server.wireguard.apply` shape. */
-export type WireguardApplyResult = {
-  interfaceName: string;
-  publicKey: string;
-  listenPort?: number;
-  applied: boolean;
-  summary?: string;
-};
-
 /** Must stay in sync with the instance canonical `server.fabric.reconcile` shape. */
 export type FabricReconcilePeer = {
   publicKey: string;
   endpoint?: string;
   allowedIPs: string[];
+  /** Daemon-recipient sealed PSK (`tpdaemon.…`). */
+  presharedKeyEnvelope?: string;
+  keepalive?: number;
 };
 
 /** Must stay in sync with the instance canonical `server.fabric.reconcile` shape. */
 export type FabricReconcileNetwork = {
   name: string;
   subnet: string;
+  mtu?: number;
+  gateway?: string;
 };
 
-/** Must stay in sync with the instance canonical `server.fabric.reconcile` shape. */
+/**
+ * Must stay in sync with the instance canonical `server.fabric.reconcile` shape.
+ * `{ enabled: false }` is a **tear down** (`tp0`, routed bridges, `TP-FORWARD`,
+ * keys, state) — not a no-op.
+ */
 export type FabricReconcileDisabledPayload = {
   enabled: false;
 };
@@ -142,6 +119,7 @@ export type FabricReconcileEnabledPayload = {
   enabled: true;
   fabricId?: string;
   listenPort?: number;
+  mtu?: number;
   address: string;
   prefix: string;
   peers: FabricReconcilePeer[];
@@ -153,11 +131,22 @@ export type FabricReconcilePayload =
   | FabricReconcileDisabledPayload
   | FabricReconcileEnabledPayload;
 
-/** Must stay in sync with the instance canonical `server.fabric.reconcile` shape. */
+export type FabricReconcileObservedPeer = {
+  publicKey: string;
+  lastHandshakeAt?: string;
+  transferRx?: number;
+  transferTx?: number;
+};
+
+/**
+ * Must stay in sync with the instance canonical `server.fabric.reconcile` shape.
+ * Enable returns `publicKey`; `{ enabled: false }` teardown is summary-only.
+ */
 export type FabricReconcileResult = {
   summary: string;
   publicKey?: string;
   skipped?: boolean;
+  peers?: FabricReconcileObservedPeer[];
 };
 
 export type EnvironmentDeployHostingProxy = {
@@ -376,6 +365,13 @@ const DEPLOY_COMPOSE_FILE_SOURCES = new Set<
   "repository",
 ]);
 
+export type EnvironmentDeployFabricNetwork = {
+  name: string;
+  subnet: string;
+  mtu?: number;
+  gateway?: string;
+};
+
 export type EnvironmentDeployPayload = {
   environmentId: string;
   projectId: string;
@@ -405,6 +401,13 @@ export type EnvironmentDeployPayload = {
    */
   ingressServices?: EnvironmentDeployIngressService[];
   dockerExternalNetworks?: string[];
+  /**
+   * Routed TurboFabric Docker bridges (`tpn_*`) this host participates in for
+   * this environment's spanning networks. Self-ensured before compose up so
+   * deploy does not race `server.fabric.reconcile`. Disjoint from
+   * `dockerExternalNetworks` — never operator-registered.
+   */
+  fabricNetworks?: EnvironmentDeployFabricNetwork[];
   /**
    * Compose service names that must join the shared managed-ingress network
    * (`turbopanel-managed`) so a managed-database binding endpoint (a
@@ -453,6 +456,12 @@ export type EnvironmentStopPayload = {
   projectName: string;
   /** Service ids whose per-service tcp/udp Traefik projects should be torn down. */
   ingressServices?: Array<{ serviceId: string }>;
+  /**
+   * Host-side compose-network reclaim (`tpn_*` Docker bridges). The instance
+   * has already dropped the DB rows, so this is the only remaining copy of
+   * those names for this host.
+   */
+  fabricNetworks?: string[];
 };
 
 export type EnvironmentStopResult = {
@@ -639,7 +648,7 @@ export type ManagedApplyPeer = {
   role: "primary" | "replica";
   readEligible: boolean;
   address: string;
-  transport: "local" | "datacenter" | "vpn";
+  transport: "local" | "datacenter" | "fabric";
   port: number;
   containerName?: string;
 };
@@ -800,7 +809,7 @@ export type ProxySqlBackendPayload = {
   readEligible: boolean;
   address: string;
   port: number;
-  transport: "local" | "datacenter" | "vpn";
+  transport: "local" | "datacenter" | "fabric";
 };
 
 /** Must stay in sync with the instance canonical `managed.ingress.reconcile` shape. */
@@ -829,6 +838,7 @@ export type ManagedIngressReconcilePayload = {
   bindAddress?: string;
   orgTlsMaterial: ManagedApplyOrgTlsMaterial;
   clusters: ProxySqlClusterPayload[];
+  segments?: Array<{ name: string; subnet: string }>;
 };
 
 /** Must stay in sync with the instance canonical `managed.ingress.reconcile` shape. */
@@ -1098,31 +1108,9 @@ export function parseNtpSetPayload(value: unknown): NtpSetPayload {
   return payload;
 }
 
-/** Must stay in sync with the instance canonical `src/lib/commands/wireguard.ts`. */
-export const WIREGUARD_INTERFACE_MAX_LENGTH = 15;
-
-const WIREGUARD_INTERFACE_RE = /^[a-z0-9_-]{1,15}$/;
 const WIREGUARD_PUBLIC_KEY_RE = /^[A-Za-z0-9+/]{43}=$/;
 
-/** Must stay in sync with the instance canonical `src/lib/commands/wireguard.ts`. */
-export function isValidWireguardInterfaceName(value: unknown): boolean {
-  if (typeof value !== "string") return false;
-  if (value.length === 0 || value.length > WIREGUARD_INTERFACE_MAX_LENGTH) {
-    return false;
-  }
-  return WIREGUARD_INTERFACE_RE.test(value);
-}
-
-/** Must stay in sync with the instance canonical `src/lib/commands/wireguard.ts`. */
-export function assertValidWireguardInterfaceName(
-  value: unknown,
-): asserts value is string {
-  if (!isValidWireguardInterfaceName(value)) {
-    throw new Error("Invalid WireGuard interface name");
-  }
-}
-
-/** Must stay in sync with the instance canonical `src/lib/commands/wireguard.ts`. */
+/** WireGuard public-key encoding used by TurboFabric peer identities. */
 export function isValidWireguardPublicKey(value: unknown): boolean {
   if (typeof value !== "string") return false;
   if (/\s/.test(value)) return false;
@@ -1130,13 +1118,11 @@ export function isValidWireguardPublicKey(value: unknown): boolean {
   return WIREGUARD_PUBLIC_KEY_RE.test(value);
 }
 
-/** Must stay in sync with the instance canonical `src/lib/commands/wireguard.ts`. */
 export function isValidWireguardListenPort(value: unknown): value is number {
   if (typeof value !== "number" || !Number.isInteger(value)) return false;
   return value >= 1 && value <= 65_535;
 }
 
-/** Must stay in sync with the instance canonical `src/lib/commands/wireguard.ts`. */
 export function isValidWireguardAllowedIp(value: unknown): boolean {
   if (typeof value !== "string") return false;
   const trimmed = value.trim();
@@ -1152,7 +1138,6 @@ export function isValidWireguardAllowedIp(value: unknown): boolean {
   return false;
 }
 
-/** Must stay in sync with the instance canonical `src/lib/commands/wireguard.ts`. */
 export function isValidWireguardEndpoint(value: unknown): boolean {
   if (typeof value !== "string") return false;
   if (value.length === 0 || value.length > 255) return false;
@@ -1180,115 +1165,36 @@ export function isValidWireguardEndpoint(value: unknown): boolean {
 const WIREGUARD_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function parseWireguardUuid(value: unknown, field: string): string {
+const FABRIC_DOCKER_NETWORK_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+const FABRIC_MTU_MIN = 1280;
+const FABRIC_MTU_MAX = 9000;
+
+function parseFabricUuid(value: unknown, field: string): string {
   if (typeof value !== "string" || !WIREGUARD_UUID_RE.test(value)) {
-    throw new Error(`Invalid wireguard ${field}`);
+    throw new TypeError(`Invalid fabric ${field}`);
   }
   return value;
 }
 
-function parseWireguardPeerEntry(value: unknown): WireguardApplyPeer {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Invalid wireguard peer entry");
-  }
-  const record = value as Record<string, unknown>;
-  const peerId = parseWireguardUuid(record.peerId, "peerId");
-  const publicKey = record.publicKey;
-  if (typeof publicKey !== "string" || !isValidWireguardPublicKey(publicKey)) {
-    throw new Error("Invalid wireguard peer publicKey");
-  }
-  if (!Array.isArray(record.allowedIps) || record.allowedIps.length === 0) {
-    throw new Error("Invalid wireguard peer allowedIps");
-  }
-  const allowedIps: string[] = [];
-  for (const entry of record.allowedIps) {
-    if (!isValidWireguardAllowedIp(entry)) {
-      throw new Error("Invalid wireguard peer allowedIps");
-    }
-    allowedIps.push((entry as string).trim());
-  }
-  const material: WireguardApplyPeer = { peerId, publicKey, allowedIps };
-  if (record.endpoint !== undefined) {
-    if (
-      typeof record.endpoint !== "string" ||
-      !isValidWireguardEndpoint(record.endpoint)
-    ) {
-      throw new Error("Invalid wireguard peer endpoint");
-    }
-    material.endpoint = record.endpoint;
-  }
-  if (record.persistentKeepalive !== undefined) {
-    if (
-      typeof record.persistentKeepalive !== "number" ||
-      !Number.isInteger(record.persistentKeepalive) ||
-      record.persistentKeepalive < 0 ||
-      record.persistentKeepalive > 65535
-    ) {
-      throw new Error("Invalid wireguard peer persistentKeepalive");
-    }
-    material.persistentKeepalive = record.persistentKeepalive;
-  }
-  if (record.presharedKeyEnvelope !== undefined) {
-    if (
-      typeof record.presharedKeyEnvelope !== "string" ||
-      record.presharedKeyEnvelope.length === 0
-    ) {
-      throw new Error("Invalid wireguard peer presharedKeyEnvelope");
-    }
-    material.presharedKeyEnvelope = record.presharedKeyEnvelope;
-  }
-  return material;
-}
-
-/** Must stay in sync with the instance canonical `server.wireguard.apply` validator. */
-export function parseWireguardApplyPayload(
-  value: unknown,
-): WireguardApplyPayload {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Invalid wireguard apply payload");
-  }
-  const record = value as Record<string, unknown>;
-  const vpnId = parseWireguardUuid(record.vpnId, "vpnId");
-  const peerId = parseWireguardUuid(record.peerId, "peerId");
-  assertValidWireguardInterfaceName(record.interfaceName);
-  const address = record.address;
+function parseFabricKeepalive(value: unknown): number {
   if (
-    typeof address !== "string" ||
-    address.length === 0 ||
-    !isValidWireguardAllowedIp(address)
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < 1 ||
+    value > 65_535
   ) {
-    throw new Error("Invalid wireguard apply address");
+    throw new TypeError("Invalid fabric peer keepalive");
   }
-  if (!Array.isArray(record.peers)) {
-    throw new TypeError("Invalid wireguard apply peers");
-  }
-  const peers = record.peers.map(parseWireguardPeerEntry);
-  const payload: WireguardApplyPayload = {
-    vpnId,
-    peerId,
-    interfaceName: record.interfaceName as string,
-    address: address.trim(),
-    peers,
-  };
-  if (record.listenPort !== undefined) {
-    if (!isValidWireguardListenPort(record.listenPort)) {
-      throw new Error("Invalid wireguard apply listenPort");
-    }
-    payload.listenPort = record.listenPort;
-  }
-  if (record.enableIpForwarding !== undefined) {
-    if (typeof record.enableIpForwarding !== "boolean") {
-      throw new TypeError("Invalid wireguard apply enableIpForwarding");
-    }
-    payload.enableIpForwarding = record.enableIpForwarding;
-  }
-  return payload;
+  return value;
 }
 
-const FABRIC_DOCKER_NETWORK_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
-
-function parseFabricUuid(value: unknown, field: string): string {
-  if (typeof value !== "string" || !WIREGUARD_UUID_RE.test(value)) {
+function parseFabricMtu(value: unknown, field: string): number {
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < FABRIC_MTU_MIN ||
+    value > FABRIC_MTU_MAX
+  ) {
     throw new TypeError(`Invalid fabric ${field}`);
   }
   return value;
@@ -1323,7 +1229,44 @@ function parseFabricPeerEntry(value: unknown): FabricReconcilePeer {
     }
     peer.endpoint = record.endpoint;
   }
+  if (record.presharedKeyEnvelope !== undefined) {
+    if (
+      typeof record.presharedKeyEnvelope !== "string" ||
+      !record.presharedKeyEnvelope.startsWith(DAEMON_ENVELOPE_PREFIX)
+    ) {
+      throw new TypeError("Invalid fabric peer presharedKeyEnvelope");
+    }
+    peer.presharedKeyEnvelope = record.presharedKeyEnvelope;
+  }
+  if (record.keepalive !== undefined) {
+    peer.keepalive = parseFabricKeepalive(record.keepalive);
+  }
   return peer;
+}
+
+function parseManagedIngressSegment(
+  value: unknown,
+): { name: string; subnet: string } {
+  const network = parseFabricNetworkEntry(value);
+  if (!network.name.startsWith("tpn_")) {
+    throw new TypeError("Invalid managed.ingress.reconcile segment name");
+  }
+  return { name: network.name, subnet: network.subnet };
+}
+
+function parseManagedIngressSegments(
+  value: unknown,
+): Array<{ name: string; subnet: string }> {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new TypeError("Invalid managed.ingress.reconcile segments");
+  }
+  const byName = new Map<string, { name: string; subnet: string }>();
+  for (const entry of value) {
+    const parsed = parseManagedIngressSegment(entry);
+    byName.set(parsed.name, parsed);
+  }
+  return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
 function parseFabricNetworkEntry(value: unknown): FabricReconcileNetwork {
@@ -1339,7 +1282,19 @@ function parseFabricNetworkEntry(value: unknown): FabricReconcileNetwork {
   if (typeof subnet !== "string" || !isValidWireguardAllowedIp(subnet)) {
     throw new TypeError("Invalid fabric network subnet");
   }
-  return { name, subnet: subnet.trim() };
+  const network: FabricReconcileNetwork = { name, subnet: subnet.trim() };
+  if (record.mtu !== undefined) {
+    network.mtu = parseFabricMtu(record.mtu, "network mtu");
+  }
+  if (record.gateway !== undefined) {
+    if (
+      typeof record.gateway !== "string" || !isValidIpv4Literal(record.gateway)
+    ) {
+      throw new TypeError("Invalid fabric network gateway");
+    }
+    network.gateway = record.gateway;
+  }
+  return network;
 }
 
 function parseEnabledFabricPayload(
@@ -1370,6 +1325,9 @@ function parseEnabledFabricPayload(
       throw new TypeError("Invalid fabric listenPort");
     }
     payload.listenPort = record.listenPort;
+  }
+  if (record.mtu !== undefined) {
+    payload.mtu = parseFabricMtu(record.mtu, "mtu");
   }
   if (record.networks !== undefined) {
     if (!Array.isArray(record.networks)) {
@@ -1425,10 +1383,56 @@ export function parseFabricReconcileResult(
     }
     result.publicKey = record.publicKey;
   }
-  if (result.skipped !== true && result.publicKey === undefined) {
-    throw new TypeError("Invalid fabric reconcile result publicKey");
+  if (record.peers !== undefined) {
+    if (!Array.isArray(record.peers)) {
+      throw new TypeError("Invalid fabric reconcile result peers");
+    }
+    result.peers = record.peers.map(parseFabricObservedPeer);
   }
   return result;
+}
+
+function parseNonNegativeInteger(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new TypeError(`Invalid fabric reconcile result ${field}`);
+  }
+  return value;
+}
+
+function parseFabricObservedPeer(value: unknown): FabricReconcileObservedPeer {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("Invalid fabric reconcile result peer");
+  }
+  const record = value as Record<string, unknown>;
+  const publicKey = record.publicKey;
+  if (typeof publicKey !== "string" || !isValidWireguardPublicKey(publicKey)) {
+    throw new TypeError("Invalid fabric reconcile result peer publicKey");
+  }
+  const peer: FabricReconcileObservedPeer = { publicKey };
+  if (record.lastHandshakeAt !== undefined) {
+    if (
+      typeof record.lastHandshakeAt !== "string" ||
+      !isIsoTimestamp(record.lastHandshakeAt)
+    ) {
+      throw new TypeError(
+        "Invalid fabric reconcile result peer lastHandshakeAt",
+      );
+    }
+    peer.lastHandshakeAt = record.lastHandshakeAt;
+  }
+  if (record.transferRx !== undefined) {
+    peer.transferRx = parseNonNegativeInteger(
+      record.transferRx,
+      "peer transferRx",
+    );
+  }
+  if (record.transferTx !== undefined) {
+    peer.transferTx = parseNonNegativeInteger(
+      record.transferTx,
+      "peer transferTx",
+    );
+  }
+  return peer;
 }
 
 function parseNonEmptyString(
@@ -1748,7 +1752,9 @@ function parseStorageMaterial(
     name: parseNonEmptyString(value, "name"),
     provider,
     serverId: parseNonEmptyString(value, "serverId"),
-    mounts: Array.isArray(value.mounts) ? value.mounts.map(parseStorageMount) : [],
+    mounts: Array.isArray(value.mounts)
+      ? value.mounts.map(parseStorageMount)
+      : [],
   };
   if (provider === "docker") {
     const volumeName = parseNonEmptyString(value, "volumeName");
@@ -2050,6 +2056,61 @@ function parseOptionalStringArray(
   return [...new Set(names)].sort((a, b) => a.localeCompare(b));
 }
 
+function parseDeployFabricNetworkEntry(
+  value: unknown,
+): EnvironmentDeployFabricNetwork {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("fabricNetworks must be an array of objects");
+  }
+  const record = value as Record<string, unknown>;
+  const name = record.name;
+  if (
+    typeof name !== "string" || !FABRIC_DOCKER_NETWORK_NAME_RE.test(name.trim())
+  ) {
+    throw new TypeError("Invalid fabricNetworks name");
+  }
+  const subnet = record.subnet;
+  if (typeof subnet !== "string" || !isValidWireguardAllowedIp(subnet.trim())) {
+    throw new TypeError("Invalid fabricNetworks subnet");
+  }
+  const network: EnvironmentDeployFabricNetwork = {
+    name: name.trim(),
+    subnet: subnet.trim(),
+  };
+  if (record.mtu !== undefined) {
+    if (
+      typeof record.mtu !== "number" ||
+      !Number.isInteger(record.mtu) ||
+      record.mtu < FABRIC_MTU_MIN ||
+      record.mtu > FABRIC_MTU_MAX
+    ) {
+      throw new TypeError("Invalid fabricNetworks mtu");
+    }
+    network.mtu = record.mtu;
+  }
+  if (record.gateway !== undefined) {
+    if (
+      typeof record.gateway !== "string" ||
+      (!isValidIpv4Literal(record.gateway) &&
+        !isValidIpv6Literal(record.gateway))
+    ) {
+      throw new TypeError("Invalid fabricNetworks gateway");
+    }
+    network.gateway = record.gateway;
+  }
+  return network;
+}
+
+function parseDeployFabricNetworks(
+  value: unknown,
+): EnvironmentDeployFabricNetwork[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw new TypeError("fabricNetworks must be an array");
+  }
+  return value.map(parseDeployFabricNetworkEntry);
+}
+
 function parseManagedNetworkServiceName(value: unknown): string {
   if (
     typeof value !== "string" ||
@@ -2232,6 +2293,18 @@ function parseStopIngressService(value: unknown): { serviceId: string } {
   return { serviceId: value.serviceId };
 }
 
+/** Copy own properties whose values are not `undefined` (omit absent optionals). */
+function definedProps<T extends object>(fields: T): Partial<T> {
+  const out: Partial<T> = {};
+  for (const key of Object.keys(fields) as Array<keyof T>) {
+    const value = fields[key];
+    if (value !== undefined) {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
 export function parseEnvironmentDeployPayload(
   value: unknown,
 ): EnvironmentDeployPayload {
@@ -2244,61 +2317,6 @@ export function parseEnvironmentDeployPayload(
     throw new TypeError("hostings must be an array");
   }
 
-  const tlsMaterial = parseOptionalMaterialArray(
-    value.tlsMaterial,
-    "tlsMaterial",
-    parseTlsMaterial,
-  );
-  const variableMaterial = parseOptionalMaterialArray(
-    value.variableMaterial,
-    "variableMaterial",
-    parseVariableMaterial,
-  );
-  const envFile = parseOptionalEnvFile(value.envFile);
-  const secretPlan = parseOptionalMaterialArray(
-    value.secretPlan,
-    "secretPlan",
-    parseSecretPlanEntry,
-  );
-  const storageMaterial = parseOptionalMaterialArray(
-    value.storageMaterial,
-    "storageMaterial",
-    parseStorageMaterial,
-  );
-  const principalMaterial = parseOptionalMaterialArray(
-    value.principalMaterial,
-    "principalMaterial",
-    parsePrincipalMaterial,
-  );
-  const serviceHooks = parseOptionalMaterialArray(
-    value.serviceHooks,
-    "serviceHooks",
-    parseServiceHook,
-  );
-  const traditionalWebSites = parseOptionalMaterialArray(
-    value.traditionalWebSites,
-    "traditionalWebSites",
-    parseTraditionalWebSite,
-  );
-  const ingressServices = parseOptionalMaterialArray(
-    value.ingressServices,
-    "ingressServices",
-    parseDeployIngressService,
-  );
-  const dockerExternalNetworks = parseOptionalStringArray(
-    value.dockerExternalNetworks,
-    "dockerExternalNetworks",
-  );
-  const managedNetworkServices = parseManagedNetworkServices(
-    value.managedNetworkServices,
-  );
-  const composeFiles = parseEnvironmentDeployComposeFiles(value.composeFiles);
-  const noCache = parseOptionalBoolean(value.noCache, "noCache");
-  const generation = parseOptionalGeneration(value.generation);
-  const desiredHash = parseOptionalDesiredHash(value.desiredHash);
-  const serverId = parseOptionalDeployServerId(value.serverId);
-  const replicaCounts = parseReplicaCounts(value.replicaCounts);
-
   return {
     environmentId: parseNonEmptyString(value, "environmentId"),
     projectId: parseNonEmptyString(value, "projectId"),
@@ -2306,24 +2324,83 @@ export function parseEnvironmentDeployPayload(
     projectName: parseNonEmptyString(value, "projectName"),
     composeYaml: parseNonEmptyString(value, "composeYaml"),
     hostings: hostings.map(parseHosting),
-    ...(composeFiles === undefined ? {} : { composeFiles }),
-    ...(traditionalWebSites === undefined ? {} : { traditionalWebSites }),
-    ...(ingressServices === undefined ? {} : { ingressServices }),
-    ...(dockerExternalNetworks === undefined ? {} : { dockerExternalNetworks }),
-    ...(managedNetworkServices === undefined ? {} : { managedNetworkServices }),
-    ...(noCache === undefined ? {} : { noCache }),
-    ...(tlsMaterial === undefined ? {} : { tlsMaterial }),
-    ...(variableMaterial === undefined ? {} : { variableMaterial }),
-    ...(envFile === undefined ? {} : { envFile }),
-    ...(secretPlan === undefined ? {} : { secretPlan }),
-    ...(storageMaterial === undefined ? {} : { storageMaterial }),
-    ...(principalMaterial === undefined ? {} : { principalMaterial }),
-    ...(serviceHooks === undefined ? {} : { serviceHooks }),
-    ...(generation === undefined ? {} : { generation }),
-    ...(desiredHash === undefined ? {} : { desiredHash }),
-    ...(serverId === undefined ? {} : { serverId }),
-    ...(replicaCounts === undefined ? {} : { replicaCounts }),
+    ...definedProps({
+      composeFiles: parseEnvironmentDeployComposeFiles(value.composeFiles),
+      traditionalWebSites: parseOptionalMaterialArray(
+        value.traditionalWebSites,
+        "traditionalWebSites",
+        parseTraditionalWebSite,
+      ),
+      ingressServices: parseOptionalMaterialArray(
+        value.ingressServices,
+        "ingressServices",
+        parseDeployIngressService,
+      ),
+      dockerExternalNetworks: parseOptionalStringArray(
+        value.dockerExternalNetworks,
+        "dockerExternalNetworks",
+      ),
+      fabricNetworks: parseDeployFabricNetworks(value.fabricNetworks),
+      managedNetworkServices: parseManagedNetworkServices(
+        value.managedNetworkServices,
+      ),
+      noCache: parseOptionalBoolean(value.noCache, "noCache"),
+      tlsMaterial: parseOptionalMaterialArray(
+        value.tlsMaterial,
+        "tlsMaterial",
+        parseTlsMaterial,
+      ),
+      variableMaterial: parseOptionalMaterialArray(
+        value.variableMaterial,
+        "variableMaterial",
+        parseVariableMaterial,
+      ),
+      envFile: parseOptionalEnvFile(value.envFile),
+      secretPlan: parseOptionalMaterialArray(
+        value.secretPlan,
+        "secretPlan",
+        parseSecretPlanEntry,
+      ),
+      storageMaterial: parseOptionalMaterialArray(
+        value.storageMaterial,
+        "storageMaterial",
+        parseStorageMaterial,
+      ),
+      principalMaterial: parseOptionalMaterialArray(
+        value.principalMaterial,
+        "principalMaterial",
+        parsePrincipalMaterial,
+      ),
+      serviceHooks: parseOptionalMaterialArray(
+        value.serviceHooks,
+        "serviceHooks",
+        parseServiceHook,
+      ),
+      generation: parseOptionalGeneration(value.generation),
+      desiredHash: parseOptionalDesiredHash(value.desiredHash),
+      serverId: parseOptionalDeployServerId(value.serverId),
+      replicaCounts: parseReplicaCounts(value.replicaCounts),
+    }),
   };
+}
+
+function parseStopFabricNetworks(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw new TypeError("fabricNetworks must be an array");
+  }
+  const out: string[] = [];
+  for (const entry of value) {
+    if (
+      typeof entry !== "string" ||
+      !entry.startsWith("tpn_") ||
+      !FABRIC_DOCKER_NETWORK_NAME_RE.test(entry)
+    ) {
+      throw new TypeError("Invalid environment.stop fabricNetworks name");
+    }
+    out.push(entry);
+  }
+  return out;
 }
 
 export function parseEnvironmentStopPayload(
@@ -2337,11 +2414,13 @@ export function parseEnvironmentStopPayload(
     "ingressServices",
     parseStopIngressService,
   );
+  const fabricNetworks = parseStopFabricNetworks(value.fabricNetworks);
   return {
     environmentId: parseNonEmptyString(value, "environmentId"),
     projectId: parseNonEmptyString(value, "projectId"),
     projectName: parseNonEmptyString(value, "projectName"),
     ...(ingressServices === undefined ? {} : { ingressServices }),
+    ...(fabricNetworks === undefined ? {} : { fabricNetworks }),
   };
 }
 
@@ -2527,7 +2606,7 @@ const MANAGED_LIFECYCLE_ACTIONS = new Set(["start", "stop", "restart"]);
 const MANAGED_EXPOSURE_PROTOCOLS = new Set(["tcp", "udp", "http"]);
 const MANAGED_CREDENTIAL_ROLES = new Set(["root", "user", "replication"]);
 const MANAGED_MEMBER_ROLES = new Set(["primary", "replica"]);
-const MANAGED_PEER_TRANSPORTS = new Set(["local", "datacenter", "vpn"]);
+const MANAGED_PEER_TRANSPORTS = new Set(["local", "datacenter", "fabric"]);
 const MANAGED_REPLICATION_ROLES = new Set(["primary", "standby"]);
 const MANAGED_REPLICATION_STATES = new Set([
   "streaming",
@@ -4047,7 +4126,7 @@ function parseProxySqlBackendPayload(value: unknown): ProxySqlBackendPayload {
     !isValidPortNumber(value.port) ||
     (value.transport !== "local" &&
       value.transport !== "datacenter" &&
-      value.transport !== "vpn")
+      value.transport !== "fabric")
   ) {
     throw new TypeError("Invalid managed.ingress.reconcile backend");
   }
@@ -4171,6 +4250,9 @@ export function parseManagedIngressReconcilePayload(
       throw new TypeError("Invalid managed.ingress.reconcile bindAddress");
     }
     payload.bindAddress = value.bindAddress;
+  }
+  if (value.segments !== undefined) {
+    payload.segments = parseManagedIngressSegments(value.segments);
   }
   return payload;
 }

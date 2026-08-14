@@ -130,6 +130,9 @@ function assertNoForbiddenInterpolation(document: ComposeDocument): void {
 }
 
 function attachManagedIngressNetwork(service: ComposeService): void {
+  // Engines stay on `turbopanel-managed` only — a tenant-environment bridge
+  // must never carry a managed engine (isolation + blast radius). Cross-host
+  // reach is the single private listener bound to `tp0` / datacenter.
   const networks = service.networks;
   if (networks === undefined) {
     service.networks = [MANAGED_INGRESS_NETWORK];

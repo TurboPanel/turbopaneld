@@ -88,6 +88,9 @@ function desiredStateFromPayload(
           : {}),
       })),
     })),
+    ...(payload.segments && payload.segments.length > 0
+      ? { segments: payload.segments }
+      : {}),
   };
 }
 
@@ -125,7 +128,11 @@ async function decryptProxySqlUserPasswords(
     const { clusterIndex, userIndex } = slot[i]!;
     clusters[clusterIndex]!.users[userIndex]!.password = plain;
   }
-  return { bindAddress: desired.bindAddress, clusters };
+  return {
+    bindAddress: desired.bindAddress,
+    clusters,
+    ...(desired.segments ? { segments: desired.segments } : {}),
+  };
 }
 
 async function readPreviousConfig(path: string): Promise<string | null> {
@@ -248,9 +255,13 @@ export async function handleManagedIngressReconcile(
   // Compose identity (container_name / publish bind) and static cnf changes
   // need compose up. Comparing rendered compose catches legacy bare
   // containerName → `<serviceId>-sql` renames that static cnf never sees.
-  const nextComposeText = proxysqlCompose(descriptor, bindAddress);
-  const composeNeedsUp = previousComposeText === null ||
-    previousComposeText.trimEnd() !== nextComposeText.trimEnd();
+  const nextComposeText = proxysqlCompose(
+    descriptor,
+    bindAddress,
+    desired.segments ?? [],
+  );
+  const composeNeedsUp =
+    previousComposeText?.trimEnd() !== nextComposeText.trimEnd();
   const restartNeeded = composeNeedsUp ||
     staticConfigSectionChanged(previousConfig, nextConfig) ||
     previousBindAddress !== bindAddress;

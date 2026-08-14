@@ -62,7 +62,6 @@ import {
   UV_BIN,
   VENV_BIN_DIR,
   VENV_DIR,
-  WIREGUARD_APPLY_PLAYBOOK,
 } from "./paths.ts";
 
 async function fileExists(path: string): Promise<boolean> {
@@ -171,17 +170,29 @@ function optionalDevServiceFlag(
 function optionalDevServiceExtraArgs(): string[] {
   return [
     "-e",
-    `turbopanel_optional_dbstudio=${optionalDevServiceFlag("TURBOPANEL_OPTIONAL_DBSTUDIO", false)}`,
+    `turbopanel_optional_dbstudio=${
+      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_DBSTUDIO", false)
+    }`,
     "-e",
-    `turbopanel_optional_ui=${optionalDevServiceFlag("TURBOPANEL_OPTIONAL_UI", true)}`,
+    `turbopanel_optional_ui=${
+      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_UI", true)
+    }`,
     "-e",
-    `turbopanel_optional_website=${optionalDevServiceFlag("TURBOPANEL_OPTIONAL_WEBSITE", true)}`,
+    `turbopanel_optional_website=${
+      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_WEBSITE", true)
+    }`,
     "-e",
-    `turbopanel_optional_mailpit=${optionalDevServiceFlag("TURBOPANEL_OPTIONAL_MAILPIT", true)}`,
+    `turbopanel_optional_mailpit=${
+      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_MAILPIT", true)
+    }`,
     "-e",
-    `turbopanel_optional_redis_insight=${optionalDevServiceFlag("TURBOPANEL_OPTIONAL_REDIS_INSIGHT", false)}`,
+    `turbopanel_optional_redis_insight=${
+      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_REDIS_INSIGHT", false)
+    }`,
     "-e",
-    `turbopanel_optional_tabix=${optionalDevServiceFlag("TURBOPANEL_OPTIONAL_TABIX", false)}`,
+    `turbopanel_optional_tabix=${
+      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_TABIX", false)
+    }`,
   ];
 }
 
@@ -508,7 +519,10 @@ async function fetchGalaxyDockerArchive(url: string): Promise<Uint8Array> {
       );
     }
     return new Uint8Array(await res.arrayBuffer());
-  }, { label: "download galaxy docker role archive", attempts: GALAXY_DOCKER_FETCH_ATTEMPTS });
+  }, {
+    label: "download galaxy docker role archive",
+    attempts: GALAXY_DOCKER_FETCH_ATTEMPTS,
+  });
 }
 
 /**
@@ -769,82 +783,6 @@ export async function runTimeSyncApply(
     );
   }
   logInfo("orchestration", "time-sync-apply complete");
-  return { summary: collector.build() };
-}
-
-export type WireguardApplyPeerOpts = {
-  publicKey: string;
-  allowedIps: string[];
-  endpoint?: string;
-  persistentKeepalive?: number;
-  /** Path to a mode-0600 file containing the plaintext PSK — never pass plaintext via -e. */
-  presharedKeyFile?: string;
-};
-
-export type WireguardApplyOpts = {
-  interfaceName: string;
-  address: string;
-  privateKeyFile: string;
-  listenPort?: number;
-  peers: WireguardApplyPeerOpts[];
-  configure?: boolean;
-  /**
-   * Desired host-wide sysctl forwarding state — the OR across every managed
-   * WireGuard interface on this host, computed by the daemon (never just
-   * this one interface's own gateway role). Only meaningful alongside
-   * `manageForwarding: true`.
-   */
-  enableIpForwarding?: boolean;
-  /**
-   * When true, reconcile `net.ipv4.ip_forward` / `net.ipv6.conf.all.forwarding`
-   * to match `enableIpForwarding` on this run. Bootstrap/tools-only runs must
-   * omit this (leave current sysctl state untouched) since they have no
-   * host-wide interface knowledge.
-   */
-  manageForwarding?: boolean;
-};
-
-export function buildWireguardApplyExtraArgs(
-  opts: WireguardApplyOpts,
-): string[] {
-  const extra: Record<string, unknown> = {
-    wireguard_interface: opts.interfaceName,
-    wireguard_address: opts.address,
-    wireguard_private_key_file: opts.privateKeyFile,
-    wireguard_peers: opts.peers,
-    wireguard_configure: opts.configure !== false,
-    wireguard_ip_forward: opts.enableIpForwarding === true,
-    wireguard_manage_forwarding: opts.manageForwarding === true,
-  };
-  if (opts.listenPort !== undefined) {
-    // Stringify so Jinja length/emptiness checks work (numeric | length fails).
-    extra.wireguard_listen_port = String(opts.listenPort);
-  }
-  return ["-e", JSON.stringify(extra)];
-}
-
-export async function runWireguardApply(
-  opts: WireguardApplyOpts,
-  onEvent?: AnsibleEventHandler,
-): Promise<{ summary: string }> {
-  logInfo("orchestration", "running wireguard-apply playbook");
-  const collector = new AnsibleRunSummaryCollector();
-  const eventHandler: AnsibleEventHandler = (event) => {
-    collector.handleEvent(event);
-    onEvent?.(event);
-  };
-  const args = buildWireguardApplyExtraArgs(opts);
-  try {
-    await runLocalPlaybook(WIREGUARD_APPLY_PLAYBOOK, args, eventHandler);
-  } catch {
-    const summary = collector.build();
-    throw new Error(
-      summary.length > 0
-        ? `wireguard-apply playbook failed: ${summary}`
-        : "wireguard-apply playbook failed",
-    );
-  }
-  logInfo("orchestration", "wireguard-apply complete");
   return { summary: collector.build() };
 }
 

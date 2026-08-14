@@ -101,7 +101,8 @@ for _entry in "$DIST"/*; do
 	case "$_base" in
 		turbopaneld-amd64.tar.zst | turbopaneld-arm64.tar.zst | \
 		turbopaneld-*-amd64.tar.zst | turbopaneld-*-arm64.tar.zst | \
-		turbopaneld.js*.tar.zst | orchestration.tar.zst | orchestration-*.tar.zst) ;;
+		turbopaneld.js*.tar.zst | orchestration.tar.zst | orchestration-*.tar.zst | \
+		channels.json | manifest.json) ;;
 		*) rm -rf "$_entry" ;;
 	esac
 done

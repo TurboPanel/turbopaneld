@@ -17,7 +17,7 @@ On each enrolled server, `turbopaneld`:
 
 - Maintains an authenticated WebSocket to the control plane (`/ws/daemon/v1`)
 - Runs Ansible playbooks to install runtimes, Docker, Caddy, databases, and application stacks
-- Executes correlated commands (deploy, stop, ping, hostname, reboot, timezone, NTP, WireGuard, managed engines)
+- Executes correlated commands (deploy, stop, ping, hostname, reboot, timezone, NTP, TurboFabric, managed engines)
 - Collects and reports host metrics (`/proc`-based, 20-metric contract)
 - Applies dev-sync tarballs and tunnel tokens when co-located with a developer control plane
 
@@ -42,7 +42,7 @@ Remote daemons dial the public control-plane URL. Co-located daemons on the cont
 | Service user | `tp:tp` (UID/GID **9999**) |
 | systemd unit | `turbopaneld.service` |
 | Sudo | Passwordless sudo for Ansible orchestration tasks |
-| State | `/var/lib/turbopanel` (license, keys, wireguard material) |
+| State | `/var/lib/turbopanel` (license, keys, fabric material) |
 | Config | `/etc/turbopanel/daemon.env` |
 | Logs | `/var/log/turbopanel/daemon.log`, `daemon.err.log` |
 
