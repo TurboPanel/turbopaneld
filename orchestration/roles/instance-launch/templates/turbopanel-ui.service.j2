@@ -20,6 +20,8 @@ Environment=COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 # systemd unit should not mutate git metadata on bare metal either.
 Environment=EXPO_NO_TYPESCRIPT_SETUP=1
 # Do not set CI=1 — Expo/Metro disable Fast Refresh (hot=false) in CI mode.
+# VirtioFS/9p host writes never notify inotify; metro.config.js enables poll
+# watch when /proc/mounts shows those types (TURBOPANEL_METRO_POLL=0 disables).
 # Invoke expo/bin/cli via node — pnpm may leave node_modules/.bin unlinked after a
 # partial install, and `pnpm exec` prompts to purge node_modules when HOME differs.
 # Runtime state (Expo, pnpm XDG dirs) lives under {{ turbopanel_ui_runtime_dir }} (gitignored).
