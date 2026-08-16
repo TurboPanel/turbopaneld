@@ -67,9 +67,9 @@ test("hostOsFromFields maps Debian os-release with point release", () => {
     family: "linux",
     id: "debian",
     version: "13.5",
-    versionCodename: "trixie",
+    codename: "trixie",
     prettyName: "Debian GNU/Linux 13 (trixie)",
-    arch: "aarch64",
+    architecture: "aarch64",
   });
 });
 
@@ -107,15 +107,15 @@ test("hostOsFromFields marks debian+rpi-issue as raspberry-pi-os", () => {
     id: "debian",
     variant: "raspberry-pi-os",
     version: "12.11",
-    versionCodename: "bookworm",
+    codename: "bookworm",
     prettyName: "Debian GNU/Linux 12 (bookworm)",
-    arch: "aarch64",
+    architecture: "aarch64",
   });
 });
 
 test("hostOsFromFields falls back to Deno.build.os when fields empty", () => {
   const os = hostOsFromFields({}, { os: "linux", arch: "x86_64" });
-  assertEquals(os, { family: "linux", arch: "x86_64" });
+  assertEquals(os, { family: "linux", architecture: "x86_64" });
 });
 
 test("hostOsFromFields returns undefined for unknown non-linux build", () => {

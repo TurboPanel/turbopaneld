@@ -350,13 +350,18 @@ same files work behind LAN HTTPS, plaintext `:8880`, and a Cloudflare tunnel.
 `run.sh --insecure-tls` still only relaxes the platform-CA instance legs;
 public :443 TLS (tunnel) uses the system store. Rebuild the overlay with
 `deno task release:dev` (dev console **Rebuild daemon and upgrade connected servers**).
+Each `release:dev` stamps overlay `commit` as `<7-char-sha>+<unix-seconds>`
+(baked into the binaries **and** the catalog). Remotes skip reconcile when
+`getBuildInfo().commit` already matches the catalog; a plain git SHA would
+make **U** a no-op until HEAD moves. Production `release` still uses the real
+git SHA.
 
 ### Host facts + command handlers (time sync)
 
 - **Host OS** — `src/host/os-release.ts` (process-cached; attached once on hello).
 - **Time sync** — `src/host/time-sync.ts` (cache-light `timedatectl show`,
   with `timedatectl status` + `/etc/timezone` fallbacks, plus `timesyncd.conf`
-  read; carried on hello and change-detected heartbeats with `addresses` from
+  read; carried on hello and change-detected heartbeats with `ips` from
   `src/server-addresses.ts`).
 - **Commands** — `server.hostname.set`, `server.reboot`, `server.timezone.set`,
   `server.ntp.set` (and deploy/lifecycle/stop/ping) via `src/instance/commands/`.
@@ -418,7 +423,7 @@ Large subsystems live in focused `AGENTS.md` files next to their code — Cursor
 
 | Subsystem | Read before editing | Covers |
 |---|---|---|
-| **Instance client** | `src/instance/AGENTS.md` | WSS / Unix-socket connection, idle presence + heartbeats (`timeSync`/`addresses`), reconnect / parked backoff, JWKS JWT verification, daemon TLS trust model |
+| **Instance client** | `src/instance/AGENTS.md` | WSS / Unix-socket connection, idle presence + heartbeats (`timeSync`/`ips`), reconnect / parked backoff, JWKS JWT verification, daemon TLS trust model |
 | **Host metrics (collector)** | `src/metrics/AGENTS.md` | `/proc`-based collection + scheduling, `POST /api/daemon/v1/metrics`, 20-metric contract |
 | **Tenant deploy & hosting ingress** | `src/deploy/AGENTS.md` | `environment.deploy` / `.lifecycle` / `.stop`, Docker Compose + Traefik, hosting Caddy, TLS materialization |
 | **Managed engines (daemon runtime)** | `src/managed/AGENTS.md` | `managed.apply` / `.lifecycle` / `.destroy`, `managed.ingress.reconcile` (shared ProxySQL `turbopanel-proxysql` on network `turbopanel-managed`), engine registry (Postgres first); separate from tenant deploy |

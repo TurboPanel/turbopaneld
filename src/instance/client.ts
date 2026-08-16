@@ -14,7 +14,10 @@ import {
   resolveServerIdentityDir,
   resolveServerKeyPath,
 } from "./paths.ts";
-import { collectServerAddresses } from "../server-addresses.ts";
+import {
+  collectServerIps,
+  type ServerReportedIp,
+} from "../server-addresses.ts";
 import { collectManagedLogs } from "../managed/logs.ts";
 import {
   type DevSyncState,
@@ -74,12 +77,7 @@ type DaemonMessage =
   | {
     type: "addresses-result";
     id: string;
-    addresses: {
-      privateIpv4: string[];
-      privateIpv6: string[];
-      publicIpv4: string[];
-      publicIpv6: string[];
-    };
+    ips: ServerReportedIp[];
     at: string;
   }
   | {
@@ -1404,30 +1402,22 @@ export class InstanceClient {
     message: Extract<DaemonMessage, { type: "addresses-request" }>,
     ws: WebSocket,
   ): void {
-    let addresses: Extract<
-      DaemonMessage,
-      { type: "addresses-result" }
-    >["addresses"];
+    let ips: ServerReportedIp[];
     try {
-      addresses = collectServerAddresses();
+      ips = collectServerIps();
     } catch (err) {
       logWarn(
         "instance",
         "collect addresses failed:",
         sanitizeForLog(err),
       );
-      addresses = {
-        privateIpv4: [],
-        privateIpv6: [],
-        publicIpv4: [],
-        publicIpv6: [],
-      };
+      ips = [];
     }
 
     const result: DaemonMessage = {
       type: "addresses-result",
       id: message.id,
-      addresses,
+      ips,
       at: new Date().toISOString(),
     };
 

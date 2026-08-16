@@ -1,4 +1,4 @@
-import { type HostInventory, readHostInventory } from "./host-inventory.ts";
+import { type HostResources, readHostResources } from "./host-inventory.ts";
 import { cachedMachineKey } from "./machine-key.ts";
 
 /** OS families we may report; keep in sync with instance `ServerOsFamily`. */
@@ -27,11 +27,11 @@ export type HostOsMetadata = {
   /** Prefer `DEBIAN_VERSION_FULL` / `/etc/debian_version` (e.g. `"13.5"`). */
   version?: string;
   /** `VERSION_CODENAME` (e.g. `"trixie"`). */
-  versionCodename?: string;
+  codename?: string;
   /** Raw `PRETTY_NAME` from os-release. */
   prettyName?: string;
   /** e.g. `"arm64"`, `"x86_64"`. */
-  arch?: string;
+  architecture?: string;
 };
 
 export type HostHelloIdentity = {
@@ -39,7 +39,7 @@ export type HostHelloIdentity = {
   machineKey?: string;
   os?: HostOsMetadata;
   /** Capacity facts (cpu/mem/swap totals) for fleet inventory + load bars. */
-  inventory?: HostInventory;
+  resources?: HostResources;
 };
 
 const OS_RELEASE_PATH = "/etc/os-release";
@@ -203,11 +203,11 @@ export function hostOsFromFields(
   const version = resolveOsVersion(fields, extras.debianVersionFile);
   if (version) os.version = version;
   const codename = fields.VERSION_CODENAME?.trim();
-  if (codename) os.versionCodename = codename;
+  if (codename) os.codename = codename;
   const prettyName = fields.PRETTY_NAME?.trim();
   if (prettyName) os.prettyName = prettyName;
-  const arch = build.arch?.trim();
-  if (arch) os.arch = arch;
+  const architecture = build.arch?.trim();
+  if (architecture) os.architecture = architecture;
   return os;
 }
 
@@ -229,7 +229,7 @@ export function readOsRelease(
       const family = mapDenoOsFamily(Deno.build.os);
       if (!family) return undefined;
       const fallback: HostOsMetadata = { family };
-      if (Deno.build.arch) fallback.arch = Deno.build.arch;
+      if (Deno.build.arch) fallback.architecture = Deno.build.arch;
       return fallback;
     })();
 
@@ -257,8 +257,8 @@ export function getHostHelloIdentity(): HostHelloIdentity {
   if (machineKey) identity.machineKey = machineKey;
   const os = readOsRelease();
   if (os) identity.os = os;
-  const inventory = readHostInventory();
-  if (inventory) identity.inventory = inventory;
+  const resources = readHostResources();
+  if (resources) identity.resources = resources;
   return identity;
 }
 

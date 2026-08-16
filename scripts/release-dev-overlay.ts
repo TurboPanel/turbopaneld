@@ -2,9 +2,11 @@
  * Stamp `src/build-info.ts`, compile overlay artifacts, write the local
  * channel catalog, then restore `build-info.ts` so the checkout stays clean.
  *
- * Remote servers compare `getBuildInfo().commit` (production BUILD_INFO baked
- * into the binary) against the overlay catalog — both must use the same
- * 7-character git short SHA.
+ * Remote servers skip `#reconcileToLatestUpdate` when baked
+ * `getBuildInfo().commit` equals the overlay catalog commit. A plain 7-char
+ * git SHA never changes until HEAD moves, so **U** would no-op after the first
+ * overlay of that commit. Stamp `<sha>+<unix-seconds>` (and matching `buildId`)
+ * so each `release:dev` is a new identity remotes will actually install.
  */
 import { dirname, fromFileUrl, join } from "@std/path";
 import { writeDevChannelCatalog } from "./write-dev-channel-catalog.ts";
@@ -52,11 +54,13 @@ async function runCompileAll(): Promise<void> {
   }
 }
 
-const commit = await gitShortSha();
+const sha = await gitShortSha();
+const builtAt = new Date();
+const commit = `${sha}+${Math.floor(builtAt.getTime() / 1000)}`;
 const identity = {
   commit,
   buildId: `dev-${commit}`,
-  builtAt: new Date().toISOString(),
+  builtAt: builtAt.toISOString(),
 };
 
 const original = await Deno.readTextFile(BUILD_INFO_PATH);

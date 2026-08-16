@@ -1,31 +1,140 @@
 /**
- * Static host capacity facts for hello inventory (cores / threads / memory / swap).
+ * Static host capacity facts for hello resources (CPU / memory / swap).
  * Loaded once per process — not per-tick metrics.
  */
 
-export type HostInventory = {
+export type HostCpuResources = {
+  /** CPU model name from `/proc/cpuinfo` (`model name`). */
+  name?: string;
+  /** e.g. `"x86_64"`, `"aarch64"` from Deno.build.arch. */
+  architecture?: string;
+  /** Distinct `physical id` count (sockets). */
+  socketCount?: number;
   /**
    * Physical core count from `/proc/cpuinfo` topology (`physical id` +
    * `core id` unique pairs). When topology is absent, equals
-   * {@link cpuThreads}.
+   * {@link threadCount}.
    */
-  cpuCores?: number;
+  coreCount?: number;
   /**
    * Logical CPU / thread count from `/proc/stat` `cpuN` lines (online vCPUs).
-   * Used for load-average normalization (`load / cpuThreads`).
+   * Used for load-average normalization (`load / threadCount`).
    */
-  cpuThreads?: number;
-  memoryTotalBytes?: number;
-  swapTotalBytes?: number;
+  threadCount?: number;
+};
+
+export type HostResources = {
+  cpu?: HostCpuResources;
+  memory?: { totalBytes?: number };
+  swap?: { totalBytes?: number };
 };
 
 const PROC_STAT = "/proc/stat";
 const PROC_MEMINFO = "/proc/meminfo";
 const PROC_CPUINFO = "/proc/cpuinfo";
 const MEMINFO_LINE = /^(\w+):\s+(\d+)\s+kB/;
-const CPUINFO_FIELD = /^([^\t:]+)\s*:\s*(.*)$/;
 
-let cached: HostInventory | null | undefined;
+type CpuinfoField = { key: string; value: string };
+
+/** Linear parse of `/proc/cpuinfo` `key : value` lines (no regex backtracking). */
+function parseCpuinfoField(line: string): CpuinfoField | undefined {
+  const colon = line.indexOf(":");
+  if (colon <= 0) return undefined;
+  const key = line.slice(0, colon).trim();
+  if (!key) return undefined;
+  return { key, value: line.slice(colon + 1).trim() };
+}
+
+type CpuinfoProcessorBlock = {
+  physicalId: string;
+  coreId?: string;
+  cpuCoresField?: number;
+};
+
+type CpuinfoWalkState = {
+  physicalId: string;
+  coreId: string | undefined;
+  cpuCoresField: number | undefined;
+  sawProcessor: boolean;
+};
+
+function emptyCpuinfoWalkState(): CpuinfoWalkState {
+  return {
+    physicalId: "0",
+    coreId: undefined,
+    cpuCoresField: undefined,
+    sawProcessor: false,
+  };
+}
+
+function applyCpuinfoField(
+  state: CpuinfoWalkState,
+  field: CpuinfoField,
+): void {
+  if (field.key === "physical id") {
+    state.physicalId = field.value;
+    return;
+  }
+  if (field.key === "core id") {
+    state.coreId = field.value;
+    return;
+  }
+  if (field.key !== "cpu cores") return;
+  const n = Number(field.value);
+  if (Number.isInteger(n) && n > 0) state.cpuCoresField = n;
+}
+
+/**
+ * Walk `/proc/cpuinfo` processor blocks. Calls `onBlock` when a blank line or
+ * a new `processor` key ends the previous block.
+ */
+function forEachCpuinfoProcessor(
+  cpuinfoText: string,
+  onBlock: (block: CpuinfoProcessorBlock) => void,
+): void {
+  const state = emptyCpuinfoWalkState();
+
+  const flush = () => {
+    if (!state.sawProcessor) return;
+    onBlock({
+      physicalId: state.physicalId,
+      coreId: state.coreId,
+      cpuCoresField: state.cpuCoresField,
+    });
+  };
+
+  const beginProcessor = () => {
+    flush();
+    state.physicalId = "0";
+    state.coreId = undefined;
+    state.sawProcessor = true;
+  };
+
+  const endBlank = () => {
+    flush();
+    state.physicalId = "0";
+    state.coreId = undefined;
+    state.sawProcessor = false;
+  };
+
+  for (const raw of cpuinfoText.split("\n")) {
+    const line = raw.trimEnd();
+    if (line === "") {
+      endBlank();
+      continue;
+    }
+    const field = parseCpuinfoField(line);
+    if (!field) continue;
+    if (field.key === "processor") {
+      beginProcessor();
+      continue;
+    }
+    if (state.sawProcessor) applyCpuinfoField(state, field);
+  }
+  flush();
+}
+
+let cached: HostResources | null | undefined;
 
 function readProcFile(path: string): string | undefined {
   try {
@@ -65,47 +174,16 @@ export function countCpuThreads(statText: string): number {
  */
 export function countPhysicalCpuCores(cpuinfoText: string): number {
   const pairs = new Set<string>();
-  let physicalId = "0";
-  let coreId: string | undefined;
-  let cpuCoresField: number | undefined;
   const physicalIds = new Set<string>();
-  let sawProcessor = false;
+  let cpuCoresField: number | undefined;
 
-  const flush = () => {
-    if (!sawProcessor) return;
-    physicalIds.add(physicalId);
-    if (coreId !== undefined) pairs.add(`${physicalId}:${coreId}`);
-  };
-
-  for (const raw of cpuinfoText.split("\n")) {
-    const line = raw.trimEnd();
-    if (line === "") {
-      flush();
-      physicalId = "0";
-      coreId = undefined;
-      sawProcessor = false;
-      continue;
+  forEachCpuinfoProcessor(cpuinfoText, (block) => {
+    physicalIds.add(block.physicalId);
+    if (block.coreId !== undefined) {
+      pairs.add(`${block.physicalId}:${block.coreId}`);
     }
-    const match = CPUINFO_FIELD.exec(line);
-    if (!match) continue;
-    const key = match[1]!.trim();
-    const value = match[2]!.trim();
-    if (key === "processor") {
-      flush();
-      physicalId = "0";
-      coreId = undefined;
-      sawProcessor = true;
-      continue;
-    }
-    if (!sawProcessor) continue;
-    if (key === "physical id") physicalId = value;
-    else if (key === "core id") coreId = value;
-    else if (key === "cpu cores") {
-      const n = Number(value);
-      if (Number.isInteger(n) && n > 0) cpuCoresField = n;
-    }
-  }
-  flush();
+    if (block.cpuCoresField !== undefined) cpuCoresField = block.cpuCoresField;
+  });
 
   if (pairs.size > 0) return pairs.size;
   if (cpuCoresField !== undefined && physicalIds.size > 0) {
@@ -114,9 +192,28 @@ export function countPhysicalCpuCores(cpuinfoText: string): number {
   return 0;
 }
 
+/** Distinct socket count from `/proc/cpuinfo` `physical id` fields. */
+export function countCpuSockets(cpuinfoText: string): number {
+  const physicalIds = new Set<string>();
+  forEachCpuinfoProcessor(cpuinfoText, (block) => {
+    physicalIds.add(block.physicalId);
+  });
+  return physicalIds.size;
+}
+
+/** First non-empty `model name` from `/proc/cpuinfo`. */
+export function readCpuModelName(cpuinfoText: string): string | undefined {
+  for (const raw of cpuinfoText.split("\n")) {
+    const field = parseCpuinfoField(raw.trimEnd());
+    if (field?.key !== "model name") continue;
+    if (field.value) return field.value;
+  }
+  return undefined;
+}
+
 export function parseMeminfoTotals(
   text: string,
-): Pick<HostInventory, "memoryTotalBytes" | "swapTotalBytes"> {
+): { memoryTotalBytes?: number; swapTotalBytes?: number } {
   let memoryTotalBytes: number | undefined;
   let swapTotalBytes: number | undefined;
 
@@ -129,59 +226,97 @@ export function parseMeminfoTotals(
     if (match[1] === "SwapTotal") swapTotalBytes = kb * 1024;
   }
 
-  const out: Pick<HostInventory, "memoryTotalBytes" | "swapTotalBytes"> = {};
+  const out: { memoryTotalBytes?: number; swapTotalBytes?: number } = {};
   if (memoryTotalBytes !== undefined) out.memoryTotalBytes = memoryTotalBytes;
   // SwapTotal 0 is a real host fact (no swap configured).
   if (swapTotalBytes !== undefined) out.swapTotalBytes = swapTotalBytes;
   return out;
 }
 
-/** Build inventory from raw /proc texts (testable). */
-export function hostInventoryFromProc(
+function hasCpuFields(cpu: HostCpuResources): boolean {
+  return Object.keys(cpu).length > 0;
+}
+
+function applyCpuinfoToResources(
+  cpu: HostCpuResources,
+  cpuinfoText: string,
+): void {
+  const physical = countPhysicalCpuCores(cpuinfoText);
+  if (physical > 0) cpu.coreCount = physical;
+  const sockets = countCpuSockets(cpuinfoText);
+  if (sockets > 0) cpu.socketCount = sockets;
+  const name = readCpuModelName(cpuinfoText);
+  if (name) cpu.name = name;
+}
+
+function fillCpuTopologyDefaults(cpu: HostCpuResources): void {
+  // No topology (some VMs) → treat each online CPU as one core.
+  if (cpu.coreCount === undefined && cpu.threadCount !== undefined) {
+    cpu.coreCount = cpu.threadCount;
+  }
+  if (cpu.socketCount === undefined && cpu.coreCount !== undefined) {
+    cpu.socketCount = 1;
+  }
+}
+
+function applyMeminfoToResources(
+  resources: HostResources,
+  memText: string,
+): void {
+  const totals = parseMeminfoTotals(memText);
+  if (totals.memoryTotalBytes !== undefined) {
+    resources.memory = { totalBytes: totals.memoryTotalBytes };
+  }
+  if (totals.swapTotalBytes !== undefined) {
+    resources.swap = { totalBytes: totals.swapTotalBytes };
+  }
+}
+
+/** Build resources from raw /proc texts (testable). */
+export function hostResourcesFromProc(
   statText: string | undefined,
   memText: string | undefined,
   cpuinfoText?: string | undefined,
-): HostInventory | undefined {
-  const inventory: HostInventory = {};
+  architecture?: string,
+): HostResources | undefined {
+  const resources: HostResources = {};
+  const cpu: HostCpuResources = {};
+
+  if (architecture?.trim()) cpu.architecture = architecture.trim();
 
   if (statText) {
     const threads = countCpuThreads(statText);
-    if (threads > 0) inventory.cpuThreads = threads;
+    if (threads > 0) cpu.threadCount = threads;
   }
-  if (cpuinfoText) {
-    const physical = countPhysicalCpuCores(cpuinfoText);
-    if (physical > 0) inventory.cpuCores = physical;
-  }
-  // No topology (some VMs) → treat each online CPU as one core.
-  if (inventory.cpuCores === undefined && inventory.cpuThreads !== undefined) {
-    inventory.cpuCores = inventory.cpuThreads;
-  }
-  if (memText) {
-    Object.assign(inventory, parseMeminfoTotals(memText));
-  }
+  if (cpuinfoText) applyCpuinfoToResources(cpu, cpuinfoText);
+  fillCpuTopologyDefaults(cpu);
+  if (hasCpuFields(cpu)) resources.cpu = cpu;
 
-  return Object.keys(inventory).length > 0 ? inventory : undefined;
+  if (memText) applyMeminfoToResources(resources, memText);
+
+  return Object.keys(resources).length > 0 ? resources : undefined;
 }
 
 /**
  * Host capacity from `/proc` — process-cached after first successful read.
  * Safe under restricted read permissions (falls back to `cat`).
  */
-export function readHostInventory(): HostInventory | undefined {
+export function readHostResources(): HostResources | undefined {
   if (cached !== undefined) {
     return cached ?? undefined;
   }
 
-  const inventory = hostInventoryFromProc(
+  const resources = hostResourcesFromProc(
     readProcFile(PROC_STAT),
     readProcFile(PROC_MEMINFO),
     readProcFile(PROC_CPUINFO),
+    Deno.build.arch,
   );
-  cached = inventory ?? null;
-  return inventory;
+  cached = resources ?? null;
+  return resources;
 }
 
 /** Test helper — clear process cache between fixture cases. */
-export function resetHostInventoryCacheForTests(): void {
+export function resetHostResourcesCacheForTests(): void {
   cached = undefined;
 }

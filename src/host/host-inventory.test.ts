@@ -1,11 +1,13 @@
 import { assertEquals } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
 import {
+  countCpuSockets,
   countCpuThreads,
   countPhysicalCpuCores,
-  hostInventoryFromProc,
+  hostResourcesFromProc,
   parseMeminfoTotals,
-  resetHostInventoryCacheForTests,
+  readCpuModelName,
+  resetHostResourcesCacheForTests,
 } from "./host-inventory.ts";
 
 describe("host-inventory", () => {
@@ -69,6 +71,33 @@ describe("host-inventory", () => {
     );
   });
 
+  it("countCpuSockets counts distinct physical ids", () => {
+    const text = [
+      "processor\t: 0",
+      "physical id\t: 0",
+      "",
+      "processor\t: 1",
+      "physical id\t: 1",
+      "",
+    ].join("\n");
+    assertEquals(countCpuSockets(text), 2);
+  });
+
+  it("readCpuModelName returns first model name", () => {
+    const text = [
+      "processor\t: 0",
+      "model name\t: Intel(R) Core(TM) i7-9700 CPU @ 3.00GHz",
+      "",
+      "processor\t: 1",
+      "model name\t: Intel(R) Core(TM) i7-9700 CPU @ 3.00GHz",
+      "",
+    ].join("\n");
+    assertEquals(
+      readCpuModelName(text),
+      "Intel(R) Core(TM) i7-9700 CPU @ 3.00GHz",
+    );
+  });
+
   it("parseMeminfoTotals reads MemTotal and SwapTotal", () => {
     const text = [
       "MemTotal:       16384000 kB",
@@ -93,56 +122,72 @@ describe("host-inventory", () => {
     });
   });
 
-  it("hostInventoryFromProc merges cores, threads, and memory", () => {
-    resetHostInventoryCacheForTests();
+  it("hostResourcesFromProc merges cores, threads, and memory", () => {
+    resetHostResourcesCacheForTests();
     const cpuinfo = [
       "processor\t: 0",
+      "model name\t: Fake CPU",
       "physical id\t: 0",
       "core id\t\t: 0",
       "cpu cores\t: 2",
       "",
       "processor\t: 1",
+      "model name\t: Fake CPU",
       "physical id\t: 0",
       "core id\t\t: 0",
       "cpu cores\t: 2",
       "",
       "processor\t: 2",
+      "model name\t: Fake CPU",
       "physical id\t: 0",
       "core id\t\t: 1",
       "cpu cores\t: 2",
       "",
       "processor\t: 3",
+      "model name\t: Fake CPU",
       "physical id\t: 0",
       "core id\t\t: 1",
       "cpu cores\t: 2",
       "",
     ].join("\n");
-    const inventory = hostInventoryFromProc(
+    const resources = hostResourcesFromProc(
       "cpu  0 0 0 0\ncpu0 0 0 0 0\ncpu1 0 0 0 0\ncpu2 0 0 0 0\ncpu3 0 0 0 0\n",
       "MemTotal: 4096000 kB\nSwapTotal: 0 kB\n",
       cpuinfo,
+      "x86_64",
     );
-    assertEquals(inventory, {
-      cpuCores: 2,
-      cpuThreads: 4,
-      memoryTotalBytes: 4096000 * 1024,
-      swapTotalBytes: 0,
+    assertEquals(resources, {
+      cpu: {
+        name: "Fake CPU",
+        architecture: "x86_64",
+        socketCount: 1,
+        coreCount: 2,
+        threadCount: 4,
+      },
+      memory: { totalBytes: 4096000 * 1024 },
+      swap: { totalBytes: 0 },
     });
   });
 
-  it("hostInventoryFromProc equates cores to threads without topology", () => {
+  it("hostResourcesFromProc equates cores to threads without topology", () => {
     assertEquals(
-      hostInventoryFromProc(
+      hostResourcesFromProc(
         "cpu  0\ncpu0 0\ncpu1 0\n",
         undefined,
         "processor\t: 0\n",
       ),
-      { cpuCores: 2, cpuThreads: 2 },
+      {
+        cpu: {
+          socketCount: 1,
+          coreCount: 2,
+          threadCount: 2,
+        },
+      },
     );
   });
 
-  it("hostInventoryFromProc returns undefined when empty", () => {
-    assertEquals(hostInventoryFromProc(undefined, undefined), undefined);
-    assertEquals(hostInventoryFromProc("", "bogus"), undefined);
+  it("hostResourcesFromProc returns undefined when empty", () => {
+    assertEquals(hostResourcesFromProc(undefined, undefined), undefined);
+    assertEquals(hostResourcesFromProc("", "bogus"), undefined);
   });
 });

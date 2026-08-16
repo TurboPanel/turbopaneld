@@ -6,8 +6,8 @@ import {
 import { type HostTimeSync, readTimeSync } from "../host/time-sync.ts";
 import { logInfo, logWarn, sanitizeForLog } from "../logger.ts";
 import {
-  collectServerAddresses,
-  type ServerAddresses,
+  collectServerIps,
+  type ServerReportedIp,
 } from "../server-addresses.ts";
 
 export const IDLE_PRESENCE_MS = 60_000;
@@ -54,7 +54,7 @@ export type IdlePresenceOptions = {
 
 type PresenceSnapshot = {
   timeSync: HostTimeSync;
-  addresses: ServerAddresses;
+  ips: ServerReportedIp[];
 };
 
 type BuildInfoProvider = () => BuildInfo;
@@ -64,7 +64,7 @@ type PresenceSnapshotProvider = () => PresenceSnapshot;
 function defaultPresenceSnapshot(): PresenceSnapshot {
   return {
     timeSync: readTimeSync(),
-    addresses: collectServerAddresses(),
+    ips: collectServerIps(),
   };
 }
 
@@ -249,9 +249,9 @@ export class IdlePresence {
         ...(host.hostname ? { hostname: host.hostname } : {}),
         ...(host.machineKey ? { machineKey: host.machineKey } : {}),
         ...(host.os ? { os: host.os } : {}),
-        ...(host.inventory ? { inventory: host.inventory } : {}),
+        ...(host.resources ? { resources: host.resources } : {}),
         timeSync: presence.timeSync,
-        addresses: presence.addresses,
+        ips: presence.ips,
       }));
       this.#lastActivityAt = Date.now();
     } catch (err) {
@@ -269,7 +269,7 @@ export class IdlePresence {
    *    `cell/offline-sweep.ts`). Answered by `setWebSocketAutoResponse` at
    *    the runtime level without waking the DO.
    * 2. The app-level heartbeat — sent when the daemon build commit changed
-   *    since the last hello/heartbeat, **or** when `timeSync` / `addresses`
+   *    since the last hello/heartbeat, **or** when `timeSync` / `ips`
    *    changed since the last presence snapshot (change-detected, cadence-bound).
    *
    * Offline self-heal (Postgres `connected: false` while the socket is still
@@ -310,7 +310,7 @@ export class IdlePresence {
       this.#sendHeartbeat({
         daemonBuild: daemonBuildChanged ? daemonBuild : undefined,
         timeSync: presenceChanged ? presence.timeSync : undefined,
-        addresses: presenceChanged ? presence.addresses : undefined,
+        ips: presenceChanged ? presence.ips : undefined,
       });
       if (presenceChanged) {
         this.#lastPresenceSnapshot = serialized;
@@ -337,7 +337,7 @@ export class IdlePresence {
   #sendHeartbeat(fields: {
     daemonBuild?: BuildInfo;
     timeSync?: HostTimeSync;
-    addresses?: ServerAddresses;
+    ips?: ServerReportedIp[];
   }): void {
     const ws = this.#ws;
     if (ws?.readyState !== WebSocket.OPEN) return;
@@ -347,7 +347,7 @@ export class IdlePresence {
       at: string;
       daemonBuild?: BuildInfo;
       timeSync?: HostTimeSync;
-      addresses?: ServerAddresses;
+      ips?: ServerReportedIp[];
     } = {
       type: "heartbeat",
       at: new Date().toISOString(),
@@ -357,7 +357,7 @@ export class IdlePresence {
       this.#lastDaemonBuildCommit = fields.daemonBuild.commit;
     }
     if (fields.timeSync) payload.timeSync = fields.timeSync;
-    if (fields.addresses) payload.addresses = fields.addresses;
+    if (fields.ips) payload.ips = fields.ips;
 
     try {
       ws.send(JSON.stringify(payload));

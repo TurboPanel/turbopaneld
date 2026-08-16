@@ -117,10 +117,12 @@ async function gitShortSha(): Promise<string> {
 }
 
 if (import.meta.main) {
-  const commit = await gitShortSha();
+  const sha = await gitShortSha();
+  const builtAt = new Date();
+  const commit = `${sha}+${Math.floor(builtAt.getTime() / 1000)}`;
   await writeDevChannelCatalog({
     commit,
     buildId: `dev-${commit}`,
-    builtAt: new Date().toISOString(),
+    builtAt: builtAt.toISOString(),
   });
 }

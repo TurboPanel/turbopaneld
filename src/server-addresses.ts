@@ -1,8 +1,11 @@
-export type ServerAddresses = {
-  privateIpv4: string[];
-  privateIpv6: string[];
-  publicIpv4: string[];
-  publicIpv6: string[];
+export type ServerReportedIpScope = "private" | "public";
+
+export type ServerReportedIp = {
+  address: string;
+  version: 4 | 6;
+  scope: ServerReportedIpScope;
+  /** Interface CIDR when known (host form `address/prefix` is fine). */
+  cidr?: string;
 };
 
 function isLoopbackIpv4(address: string): boolean {
@@ -104,29 +107,114 @@ function isPublicIpv6(address: string): boolean {
   return first === "2" || first === "3";
 }
 
-export function collectServerAddresses(): ServerAddresses {
-  const privateIpv4 = new Set<string>();
-  const privateIpv6 = new Set<string>();
-  const publicIpv4 = new Set<string>();
-  const publicIpv6 = new Set<string>();
+function ipv4PrefixFromNetmask(netmask: string): number | null {
+  const octets = parseIpv4Octets(netmask);
+  if (!octets) return null;
+  const value =
+    (octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3];
+  let bits = 0;
+  let seenZero = false;
+  for (let i = 31; i >= 0; i--) {
+    const bit = (value >>> i) & 1;
+    if (bit === 1) {
+      if (seenZero) return null;
+      bits += 1;
+      continue;
+    }
+    seenZero = true;
+  }
+  return bits;
+}
+
+function prefixFromInterface(addr: Deno.NetworkInterfaceInfo): number | null {
+  const cidr = addr.cidr;
+  if (typeof cidr === "string") {
+    const slash = cidr.lastIndexOf("/");
+    if (slash > 0) {
+      const prefix = Number(cidr.slice(slash + 1));
+      const max = addr.family === "IPv4" ? 32 : 128;
+      if (Number.isInteger(prefix) && prefix >= 0 && prefix <= max) {
+        return prefix;
+      }
+    }
+  }
+  if (addr.family === "IPv4" && typeof addr.netmask === "string") {
+    return ipv4PrefixFromNetmask(addr.netmask);
+  }
+  return null;
+}
+
+function cidrForAddress(
+  address: string,
+  addr: Deno.NetworkInterfaceInfo,
+): string | undefined {
+  const prefix = prefixFromInterface(addr);
+  if (prefix === null) return undefined;
+  return `${address}/${prefix}`;
+}
+
+function rememberIp(
+  byAddress: Map<string, ServerReportedIp>,
+  entry: ServerReportedIp,
+): void {
+  const existing = byAddress.get(entry.address);
+  if (!existing) {
+    byAddress.set(entry.address, entry);
+    return;
+  }
+  // Prefer an entry that carries a CIDR when we learn one later.
+  if (!existing.cidr && entry.cidr) {
+    byAddress.set(entry.address, entry);
+  }
+}
+
+function buildReportedIp(
+  address: string,
+  version: 4 | 6,
+  scope: ServerReportedIpScope,
+  addr: Deno.NetworkInterfaceInfo,
+): ServerReportedIp {
+  const entry: ServerReportedIp = { address, version, scope };
+  const cidr = cidrForAddress(address, addr);
+  if (cidr) entry.cidr = cidr;
+  return entry;
+}
+
+export function collectServerIps(): ServerReportedIp[] {
+  const byAddress = new Map<string, ServerReportedIp>();
 
   for (const addr of Deno.networkInterfaces()) {
     if (!isPhysicalInterface(addr.name)) continue;
 
     if (addr.family === "IPv4") {
-      if (isPrivateIpv4(addr.address)) privateIpv4.add(addr.address);
-      else if (isPublicIpv4(addr.address)) publicIpv4.add(addr.address);
+      if (isPrivateIpv4(addr.address)) {
+        rememberIp(
+          byAddress,
+          buildReportedIp(addr.address, 4, "private", addr),
+        );
+      } else if (isPublicIpv4(addr.address)) {
+        rememberIp(
+          byAddress,
+          buildReportedIp(addr.address, 4, "public", addr),
+        );
+      }
       continue;
     }
 
-    if (isPrivateIpv6(addr.address)) privateIpv6.add(addr.address);
-    else if (isPublicIpv6(addr.address)) publicIpv6.add(addr.address);
+    if (isPrivateIpv6(addr.address)) {
+      rememberIp(
+        byAddress,
+        buildReportedIp(addr.address, 6, "private", addr),
+      );
+    } else if (isPublicIpv6(addr.address)) {
+      rememberIp(
+        byAddress,
+        buildReportedIp(addr.address, 6, "public", addr),
+      );
+    }
   }
 
-  return {
-    privateIpv4: [...privateIpv4].sort((a, b) => a.localeCompare(b)),
-    privateIpv6: [...privateIpv6].sort((a, b) => a.localeCompare(b)),
-    publicIpv4: [...publicIpv4].sort((a, b) => a.localeCompare(b)),
-    publicIpv6: [...publicIpv6].sort((a, b) => a.localeCompare(b)),
-  };
+  return [...byAddress.values()].sort((a, b) =>
+    a.address.localeCompare(b.address)
+  );
 }

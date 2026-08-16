@@ -2,7 +2,7 @@ import { assert, assertEquals, assertExists } from "@std/assert";
 import type { BuildInfo } from "../build-info.ts";
 import type { HostHelloIdentity } from "../host/os-release.ts";
 import type { HostTimeSync } from "../host/time-sync.ts";
-import type { ServerAddresses } from "../server-addresses.ts";
+import type { ServerReportedIp } from "../server-addresses.ts";
 import { framesOfType, MockWebSocket } from "../testing/fake-websocket.ts";
 import { IdlePresence, installIdlePresenceProviders } from "./idle-presence.ts";
 
@@ -42,13 +42,16 @@ function makeTimeSync(timezone: string): HostTimeSync {
   };
 }
 
-function makeAddresses(publicIpv4: string): ServerAddresses {
-  return {
-    privateIpv4: ["10.0.0.2"],
-    privateIpv6: [],
-    publicIpv4: [publicIpv4],
-    publicIpv6: [],
-  };
+function makeIps(publicIpv4: string): ServerReportedIp[] {
+  return [
+    {
+      address: "10.0.0.2",
+      version: 4,
+      scope: "private",
+      cidr: "10.0.0.2/24",
+    },
+    { address: publicIpv4, version: 4, scope: "public" },
+  ];
 }
 
 const EMPTY_HOST: HostHelloIdentity = {};
@@ -60,13 +63,16 @@ const FULL_HOST: HostHelloIdentity = {
     id: "debian",
     version: "13.5",
     prettyName: "Debian GNU/Linux 13 (trixie)",
-    arch: "aarch64",
+    architecture: "aarch64",
   },
-  inventory: {
-    cpuCores: 4,
-    cpuThreads: 4,
-    memoryTotalBytes: 16_384 * 1024 * 1024,
-    swapTotalBytes: 0,
+  resources: {
+    cpu: {
+      coreCount: 4,
+      threadCount: 4,
+      socketCount: 1,
+    },
+    memory: { totalBytes: 16_384 * 1024 * 1024 },
+    swap: { totalBytes: 0 },
   },
 };
 
@@ -76,7 +82,7 @@ test("IdlePresence hello omits optional host fields when absent", () => {
     getHostHelloIdentity: () => EMPTY_HOST,
     collectPresenceSnapshot: () => ({
       timeSync: makeTimeSync("UTC"),
-      addresses: makeAddresses("203.0.113.10"),
+      ips: makeIps("203.0.113.10"),
     }),
   });
   const socket = openMockSocket();
@@ -95,9 +101,9 @@ test("IdlePresence hello omits optional host fields when absent", () => {
     assertEquals("hostname" in hello, false);
     assertEquals("machineKey" in hello, false);
     assertEquals("os" in hello, false);
-    assertEquals("inventory" in hello, false);
+    assertEquals("resources" in hello, false);
     assertEquals(hello.timeSync, makeTimeSync("UTC"));
-    assertEquals(hello.addresses, makeAddresses("203.0.113.10"));
+    assertEquals(hello.ips, makeIps("203.0.113.10"));
   } finally {
     presence.detach();
     restore();
@@ -110,7 +116,7 @@ test("IdlePresence hello includes optional host fields when present", () => {
     getHostHelloIdentity: () => FULL_HOST,
     collectPresenceSnapshot: () => ({
       timeSync: makeTimeSync("America/Chicago"),
-      addresses: makeAddresses("203.0.113.20"),
+      ips: makeIps("203.0.113.20"),
     }),
   });
   const socket = openMockSocket();
@@ -126,9 +132,9 @@ test("IdlePresence hello includes optional host fields when present", () => {
     assertEquals(hello.hostname, FULL_HOST.hostname);
     assertEquals(hello.machineKey, FULL_HOST.machineKey);
     assertEquals(hello.os, FULL_HOST.os);
-    assertEquals(hello.inventory, FULL_HOST.inventory);
+    assertEquals(hello.resources, FULL_HOST.resources);
     assertEquals(hello.timeSync, makeTimeSync("America/Chicago"));
-    assertEquals(hello.addresses, makeAddresses("203.0.113.20"));
+    assertEquals(hello.ips, makeIps("203.0.113.20"));
   } finally {
     presence.detach();
     restore();
@@ -143,7 +149,7 @@ test({
       getHostHelloIdentity: () => EMPTY_HOST,
       collectPresenceSnapshot: () => ({
         timeSync: makeTimeSync("UTC"),
-        addresses: makeAddresses("203.0.113.10"),
+        ips: makeIps("203.0.113.10"),
       }),
     });
     const idleCheckIntervalMs = 15;
@@ -177,7 +183,7 @@ test({
       getHostHelloIdentity: () => EMPTY_HOST,
       collectPresenceSnapshot: () => ({
         timeSync: makeTimeSync("UTC"),
-        addresses: makeAddresses("203.0.113.10"),
+        ips: makeIps("203.0.113.10"),
       }),
     });
     const idleCheckIntervalMs = 12;
@@ -212,7 +218,7 @@ test({
       getHostHelloIdentity: () => FULL_HOST,
       collectPresenceSnapshot: () => ({
         timeSync: makeTimeSync("UTC"),
-        addresses: makeAddresses("203.0.113.10"),
+        ips: makeIps("203.0.113.10"),
       }),
     });
     const idleCheckIntervalMs = 15;
@@ -233,7 +239,7 @@ test({
       assertEquals(heartbeat.daemonBuild, makeDaemonBuild("commit-b"));
       assertEquals("os" in heartbeat, false);
       assertEquals("timeSync" in heartbeat, false);
-      assertEquals("addresses" in heartbeat, false);
+      assertEquals("ips" in heartbeat, false);
     } finally {
       presence.detach();
       restore();
@@ -250,7 +256,7 @@ test({
       getHostHelloIdentity: () => FULL_HOST,
       collectPresenceSnapshot: () => ({
         timeSync,
-        addresses: makeAddresses("203.0.113.10"),
+        ips: makeIps("203.0.113.10"),
       }),
     });
     const idleCheckIntervalMs = 15;
@@ -279,15 +285,15 @@ test({
 });
 
 test({
-  name: "IdlePresence emits heartbeat on addresses change without os",
+  name: "IdlePresence emits heartbeat on ips change without os",
   fn: async () => {
-    let addresses = makeAddresses("203.0.113.10");
+    let ips = makeIps("203.0.113.10");
     const restore = installIdlePresenceProviders({
       getBuildInfo: () => makeDaemonBuild("abc1234"),
       getHostHelloIdentity: () => FULL_HOST,
       collectPresenceSnapshot: () => ({
         timeSync: makeTimeSync("UTC"),
-        addresses,
+        ips,
       }),
     });
     const idleCheckIntervalMs = 15;
@@ -300,12 +306,12 @@ test({
     });
     try {
       presence.attach(socket as unknown as WebSocket);
-      addresses = makeAddresses("203.0.113.99");
+      ips = makeIps("203.0.113.99");
       await sleep(idleCheckIntervalMs + 25);
       const heartbeats = framesOfType(socket, "heartbeat");
       assertEquals(heartbeats.length, 1);
       const heartbeat = heartbeats[0] as Record<string, unknown>;
-      assertEquals(heartbeat.addresses, makeAddresses("203.0.113.99"));
+      assertEquals(heartbeat.ips, makeIps("203.0.113.99"));
       assertEquals("os" in heartbeat, false);
       assertEquals("daemonBuild" in heartbeat, false);
     } finally {
@@ -323,7 +329,7 @@ test({
       getHostHelloIdentity: () => EMPTY_HOST,
       collectPresenceSnapshot: () => ({
         timeSync: makeTimeSync("UTC"),
-        addresses: makeAddresses("203.0.113.10"),
+        ips: makeIps("203.0.113.10"),
       }),
     });
     const idleCheckIntervalMs = 40;
