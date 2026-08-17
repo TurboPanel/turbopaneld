@@ -31,3 +31,4 @@ orchestration/.ansible/
 # Isolated Workers deploy tooling (Node/wrangler only).
 workers/turbopanel-sh/public/
 workers/turbopanel-sh/node_modules/
+.DS_Store
