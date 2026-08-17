@@ -1,4 +1,5 @@
 import { type BuildInfo, getBuildInfo } from "../build-info.ts";
+import { type HostDockerMetadata, readDocker } from "../host/docker.ts";
 import {
   getHostHelloIdentity,
   type HostHelloIdentity,
@@ -55,6 +56,8 @@ export type IdlePresenceOptions = {
 type PresenceSnapshot = {
   timeSync: HostTimeSync;
   ips: ServerReportedIp[];
+  /** Present only when the Docker CLI is installed. */
+  docker?: HostDockerMetadata;
 };
 
 type BuildInfoProvider = () => BuildInfo;
@@ -62,9 +65,11 @@ type HostHelloIdentityProvider = () => HostHelloIdentity;
 type PresenceSnapshotProvider = () => PresenceSnapshot;
 
 function defaultPresenceSnapshot(): PresenceSnapshot {
+  const docker = readDocker();
   return {
     timeSync: readTimeSync(),
     ips: collectServerIps(),
+    ...(docker ? { docker } : {}),
   };
 }
 
@@ -252,6 +257,7 @@ export class IdlePresence {
         ...(host.resources ? { resources: host.resources } : {}),
         timeSync: presence.timeSync,
         ips: presence.ips,
+        ...(presence.docker ? { docker: presence.docker } : {}),
       }));
       this.#lastActivityAt = Date.now();
     } catch (err) {
@@ -269,8 +275,9 @@ export class IdlePresence {
    *    `cell/offline-sweep.ts`). Answered by `setWebSocketAutoResponse` at
    *    the runtime level without waking the DO.
    * 2. The app-level heartbeat — sent when the daemon build commit changed
-   *    since the last hello/heartbeat, **or** when `timeSync` / `ips`
-   *    changed since the last presence snapshot (change-detected, cadence-bound).
+   *    since the last hello/heartbeat, **or** when `timeSync` / `ips` /
+   *    `docker` changed since the last presence snapshot (change-detected,
+   *    cadence-bound).
    *
    * Offline self-heal (Postgres `connected: false` while the socket is still
    * live) is handled by the instance offline-sweep cron re-projecting online
@@ -311,6 +318,7 @@ export class IdlePresence {
         daemonBuild: daemonBuildChanged ? daemonBuild : undefined,
         timeSync: presenceChanged ? presence.timeSync : undefined,
         ips: presenceChanged ? presence.ips : undefined,
+        docker: presenceChanged ? presence.docker : undefined,
       });
       if (presenceChanged) {
         this.#lastPresenceSnapshot = serialized;
@@ -338,6 +346,7 @@ export class IdlePresence {
     daemonBuild?: BuildInfo;
     timeSync?: HostTimeSync;
     ips?: ServerReportedIp[];
+    docker?: HostDockerMetadata;
   }): void {
     const ws = this.#ws;
     if (ws?.readyState !== WebSocket.OPEN) return;
@@ -348,6 +357,7 @@ export class IdlePresence {
       daemonBuild?: BuildInfo;
       timeSync?: HostTimeSync;
       ips?: ServerReportedIp[];
+      docker?: HostDockerMetadata;
     } = {
       type: "heartbeat",
       at: new Date().toISOString(),
@@ -358,6 +368,7 @@ export class IdlePresence {
     }
     if (fields.timeSync) payload.timeSync = fields.timeSync;
     if (fields.ips) payload.ips = fields.ips;
+    if (fields.docker) payload.docker = fields.docker;
 
     try {
       ws.send(JSON.stringify(payload));

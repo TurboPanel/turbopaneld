@@ -104,6 +104,7 @@ test("IdlePresence hello omits optional host fields when absent", () => {
     assertEquals("resources" in hello, false);
     assertEquals(hello.timeSync, makeTimeSync("UTC"));
     assertEquals(hello.ips, makeIps("203.0.113.10"));
+    assertEquals("docker" in hello, false);
   } finally {
     presence.detach();
     restore();
@@ -117,6 +118,7 @@ test("IdlePresence hello includes optional host fields when present", () => {
     collectPresenceSnapshot: () => ({
       timeSync: makeTimeSync("America/Chicago"),
       ips: makeIps("203.0.113.20"),
+      docker: { version: "28.3.3", composeVersion: "2.39.1" },
     }),
   });
   const socket = openMockSocket();
@@ -135,6 +137,7 @@ test("IdlePresence hello includes optional host fields when present", () => {
     assertEquals(hello.resources, FULL_HOST.resources);
     assertEquals(hello.timeSync, makeTimeSync("America/Chicago"));
     assertEquals(hello.ips, makeIps("203.0.113.20"));
+    assertEquals(hello.docker, { version: "28.3.3", composeVersion: "2.39.1" });
   } finally {
     presence.detach();
     restore();
@@ -312,6 +315,46 @@ test({
       assertEquals(heartbeats.length, 1);
       const heartbeat = heartbeats[0] as Record<string, unknown>;
       assertEquals(heartbeat.ips, makeIps("203.0.113.99"));
+      assertEquals("os" in heartbeat, false);
+      assertEquals("daemonBuild" in heartbeat, false);
+    } finally {
+      presence.detach();
+      restore();
+    }
+  },
+});
+
+test({
+  name: "IdlePresence emits heartbeat when docker appears after hello",
+  fn: async () => {
+    let docker: { version: string; composeVersion: string } | undefined;
+    const restore = installIdlePresenceProviders({
+      getBuildInfo: () => makeDaemonBuild("abc1234"),
+      getHostHelloIdentity: () => FULL_HOST,
+      collectPresenceSnapshot: () => ({
+        timeSync: makeTimeSync("UTC"),
+        ips: makeIps("203.0.113.10"),
+        ...(docker ? { docker } : {}),
+      }),
+    });
+    const idleCheckIntervalMs = 15;
+    const socket = openMockSocket();
+    const presence = new IdlePresence({
+      serverId: "srv-hb-docker",
+      idleCheckIntervalMs,
+      idleThresholdMs: idleCheckIntervalMs,
+      staleConnectionMs: 60_000,
+    });
+    try {
+      presence.attach(socket as unknown as WebSocket);
+      const hello = framesOfType(socket, "hello")[0] as Record<string, unknown>;
+      assertEquals("docker" in hello, false);
+      docker = { version: "28.3.3", composeVersion: "2.39.1" };
+      await sleep(idleCheckIntervalMs + 25);
+      const heartbeats = framesOfType(socket, "heartbeat");
+      assertEquals(heartbeats.length, 1);
+      const heartbeat = heartbeats[0] as Record<string, unknown>;
+      assertEquals(heartbeat.docker, docker);
       assertEquals("os" in heartbeat, false);
       assertEquals("daemonBuild" in heartbeat, false);
     } finally {

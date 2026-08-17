@@ -363,6 +363,9 @@ git SHA.
   with `timedatectl status` + `/etc/timezone` fallbacks, plus `timesyncd.conf`
   read; carried on hello and change-detected heartbeats with `ips` from
   `src/server-addresses.ts`).
+- **Docker** — `src/host/docker.ts` (cache-light `docker --version` +
+  `docker compose version`; `server.metadata.docker` is omitted when the CLI
+  is not installed; carried on hello and change-detected heartbeats).
 - **Commands** — `server.hostname.set`, `server.reboot`, `server.timezone.set`,
   `server.ntp.set` (and deploy/lifecycle/stop/ping) via `src/instance/commands/`.
   `environment.lifecycle` is non-destructive `compose start|stop|restart`
@@ -423,7 +426,7 @@ Large subsystems live in focused `AGENTS.md` files next to their code — Cursor
 
 | Subsystem | Read before editing | Covers |
 |---|---|---|
-| **Instance client** | `src/instance/AGENTS.md` | WSS / Unix-socket connection, idle presence + heartbeats (`timeSync`/`ips`), reconnect / parked backoff, JWKS JWT verification, daemon TLS trust model |
+| **Instance client** | `src/instance/AGENTS.md` | WSS / Unix-socket connection, idle presence + heartbeats (`timeSync`/`ips`/`docker`), reconnect / parked backoff, JWKS JWT verification, daemon TLS trust model |
 | **Host metrics (collector)** | `src/metrics/AGENTS.md` | `/proc`-based collection + scheduling, `POST /api/daemon/v1/metrics`, 20-metric contract |
 | **Tenant deploy & hosting ingress** | `src/deploy/AGENTS.md` | `environment.deploy` / `.lifecycle` / `.stop`, Docker Compose + Traefik, hosting Caddy, TLS materialization |
 | **Managed engines (daemon runtime)** | `src/managed/AGENTS.md` | `managed.apply` / `.lifecycle` / `.destroy`, `managed.ingress.reconcile` (shared ProxySQL `turbopanel-proxysql` on network `turbopanel-managed`), engine registry (Postgres first); separate from tenant deploy |

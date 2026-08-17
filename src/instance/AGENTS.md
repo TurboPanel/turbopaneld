@@ -26,7 +26,7 @@ stays deferred until opt-in on both runtimes.
 `IdlePresence` runs per open socket:
 
 - Sends `{ type: "hello", at, daemonBuild, hostname?, machineKey?, os?,
-  resources?, timeSync?, ips? }` once on attach. `machineKey` is a
+  resources?, timeSync?, ips?, docker? }` once on attach. `machineKey` is a
   derived, non-reversible HMAC of `/etc/machine-id` (`src/host/machine-key.ts`)
   — warmed on the connect path before hello. Host OS comes from
   `/etc/os-release` (+ `/etc/debian_version`, `/etc/rpi-issue`) via
@@ -42,8 +42,13 @@ stays deferred until opt-in on both runtimes.
   (not heartbeat). Time sync facts come from
   `src/host/time-sync.ts` (`timedatectl` + `/etc/systemd/timesyncd.conf`);
   IPs from `collectServerIps()` (`src/server-addresses.ts`) as
-  `{ address, version, scope, cidr? }[]` (public + private). The instance
-  persists `os` / `resources` / `ips` on `server.metadata` and exposes them on
+  `{ address, version, scope, cidr? }[]` (public + private). **Docker**
+  (`src/host/docker.ts`) is omitted unless `/usr/bin/docker` is installed:
+  `{ version, composeVersion? }` from `docker --version` and
+  `docker compose version` (plugin). When Docker is later installed on an
+  already-connected host, the next change-detected heartbeat carries it.
+  The instance persists `os` / `resources` / `ips` / `docker` on
+  `server.metadata` and exposes them on
   `GET /api/client/v1/servers`. All new hello fields stay optional for
   back-compat. The instance maps current `ips[]`/`resources` and the pre-rename
   `addresses` object / `inventory` block so remotes that have not rebuilt yet
@@ -56,10 +61,11 @@ stays deferred until opt-in on both runtimes.
   check interval (default), `IdlePresence` allows ~5s of `setInterval` skew so
   early ticks still send — otherwise early fires were skipped and Redis coalesce
   could false-demote a live socket.
-- Sends app-level `{ type: "heartbeat", at, daemonBuild?, timeSync?, ips? }`
-  when the daemon build commit changed **or** when `timeSync` / `ips`
-  differ from the snapshot seeded on hello (change-detected, still cadence-bound
-  to the ~60s idle tick). Do **not** put OS on heartbeat. Offline self-heal
+- Sends app-level `{ type: "heartbeat", at, daemonBuild?, timeSync?, ips?, docker? }`
+  when the daemon build commit changed **or** when `timeSync` / `ips` /
+  `docker` differ from the snapshot seeded on hello (change-detected, still
+  cadence-bound to the ~60s idle tick). Do **not** put OS on heartbeat. Offline
+  self-heal
   (Postgres `connected: false` while the socket is still live) is handled by the
   instance **offline-sweep cron** re-projecting online via `onDaemonConnected`
   — not by a periodic daemon heartbeat.
