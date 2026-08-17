@@ -102,11 +102,16 @@ Report vulnerabilities: [turbopanel.io/security](https://turbopanel.io/security?
 
 Contributor workflow uses the [TurboPanel Development Environment](https://github.com/turbopanel/dev) — **not** the production installer above.
 
+Clone the six sibling repos (including this one), then from the `dev` checkout:
+
 ```sh
-curl -fsSL dev.turbopanel.sh | sh
+vagrant up
+vagrant ssh
+# inside guest:
+cd ~/dev && ./console
 ```
 
-That clones `~/turbopaneld` (and sibling repos), runs the daemon from source via Deno, and converges the dev overlay. Details: [Local development](https://turbopanel.io/docs/getting-started/development?utm_source=github-daemon-readme).
+That boots the Vagrant guest with sibling checkouts mounted, runs the daemon from source via Deno, and converges the dev overlay. Details: [Local development](https://turbopanel.io/docs/getting-started/development?utm_source=github-daemon-readme).
 
 Maintainer conventions and path model: [AGENTS.md](./AGENTS.md).
 
