@@ -335,6 +335,11 @@ test("systemd units and docker wrappers bind the expected identity variables", a
     /EXPO_NO_TYPESCRIPT_SETUP=1/,
     "turbopanel-ui.service skips Expo checkout writes",
   );
+  assertMatch(
+    uiUnit,
+    /start --web --host localhost --port \{\{\s*expo_port\s*\}\}/,
+    "turbopanel-ui.service binds Expo on loopback for Caddy and Vagrant tunnels",
+  );
 
   const redisUnit = await readRole(
     "roles/redis/templates/turbopanel-redis.service.j2",

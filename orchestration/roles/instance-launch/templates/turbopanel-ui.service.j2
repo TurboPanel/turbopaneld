@@ -25,9 +25,12 @@ Environment=EXPO_NO_TYPESCRIPT_SETUP=1
 # Invoke expo/bin/cli via node — pnpm may leave node_modules/.bin unlinked after a
 # partial install, and `pnpm exec` prompts to purge node_modules when HOME differs.
 # Runtime state (Expo, pnpm XDG dirs) lives under {{ turbopanel_ui_runtime_dir }} (gitignored).
+# Bind loopback: Caddy reverse_proxies 127.0.0.1:{{ expo_port }}, and Vagrant
+# SSH tunnels use guest_ip 127.0.0.1 (not the libvirt DHCP NIC). `--host lan`
+# inside a VM advertises that unreachable NAT address.
 StandardOutput=append:{{ ui_log_dir }}/ui.log
 StandardError=append:{{ ui_log_dir }}/ui.err.log
-ExecStart={{ turbopanel_node }} {{ turbopanel_ui_dir }}/node_modules/expo/bin/cli start --web --port {{ expo_port }}
+ExecStart={{ turbopanel_node }} {{ turbopanel_ui_dir }}/node_modules/expo/bin/cli start --web --host localhost --port {{ expo_port }}
 Restart=always
 RestartSec=3
 
