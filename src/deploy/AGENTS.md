@@ -157,10 +157,13 @@ falls back to compiling from deprecated `composeYaml`.
   After JWT session, `rehydrateLocalDeployments` (`rehydrate-deployments.ts`)
   calls `POST /api/daemon/v1/deployments/secrets/rehydrate`, decrypts via
   `/secrets/decrypt`, rewrites files, then `docker compose up -d` (first
-  connect always; reconnect only if planned files are missing). Lifecycle
-  `start`/`restart` rehydrate first when files are absent. `environment.stop`
-  deletes the `/run` tree. Build secrets belong on Compose `build.secrets`,
-  not `build.args`.
+  connect always; reconnect only if planned files are missing). The instance
+  omits material when the daemon's `deployment.json` generation does not match
+  `deployment.desiredGeneration`; the daemon also refuses to materialize or
+  `compose up` when the returned generation differs from the local manifest.
+  Lifecycle `start`/`restart` rehydrate first when files are absent.
+  `environment.stop` deletes the `/run` tree. Build secrets belong on Compose
+  `build.secrets`, not `build.args`.
 - **`-f` argv:** `composeFileArgs(projectName, paths)` builds
   `compose -p <project> -f <p1> …` — today a single compiled `compose.yaml`.
   Every `docker compose` invocation (`config` validation, `build`, `up`,

@@ -8,10 +8,10 @@
 import { logInfo, logWarn, sanitizeForLog } from "../logger.ts";
 import {
   composeFileArgs,
-  listLocalDeploymentManifests,
-  resolveDeployedComposePaths,
   type DeploymentManifestSecret,
+  listLocalDeploymentManifests,
   type LocalDeploymentManifest,
+  resolveDeployedComposePaths,
 } from "./compose-files.ts";
 import {
   materializeSecretFiles,
@@ -89,10 +89,23 @@ function deploymentKey(projectId: string, environmentId: string): string {
   return `${projectId}/${environmentId}`;
 }
 
+function remoteMatchesLocalGeneration(
+  localGeneration: number,
+  remote: RehydrateDeploymentResult | undefined,
+): boolean {
+  return remote?.generation === localGeneration;
+}
+
+function manifestSecretPlan(
+  local: LocalDeploymentManifest,
+): readonly DeploymentManifestSecret[] {
+  return local.manifest.secrets ?? [];
+}
+
 function planFromManifest(
   secrets: readonly DeploymentManifestSecret[] | undefined,
 ): EnvironmentDeploySecretPlanEntry[] {
-  if (!secrets || secrets.length === 0) return [];
+  if (!secrets?.length) return [];
   const out: EnvironmentDeploySecretPlanEntry[] = [];
   for (const entry of secrets) {
     if (!entry.key) continue;
@@ -157,11 +170,21 @@ export async function ensureDeploymentSecretFiles(params: {
   const results = await params.rehydrate([{
     projectId: params.projectId,
     environmentId: params.environmentId,
-    ...(params.generation === undefined ? {} : { generation: params.generation }),
+    ...(params.generation === undefined
+      ? {}
+      : { generation: params.generation }),
   }]);
   const row = results[0];
   if (!row) {
     throw new Error("secret rehydrate returned no plan for this deployment");
+  }
+  if (
+    params.generation !== undefined &&
+    row.generation !== params.generation
+  ) {
+    throw new Error(
+      "secret rehydrate generation mismatch; refusing to start with mismatched secret material",
+    );
   }
   await materializeSecretFiles(
     params.layout,
@@ -184,6 +207,153 @@ export async function ensureDeploymentSecretFiles(params: {
   }
 }
 
+async function listDeploymentsNeedingSecretFiles(
+  layout: LayoutPaths,
+  locals: readonly LocalDeploymentManifest[],
+): Promise<LocalDeploymentManifest[]> {
+  const needingFiles: LocalDeploymentManifest[] = [];
+  for (const local of locals) {
+    const plan = manifestSecretPlan(local);
+    if (plan.length === 0) continue;
+    if (
+      await plannedSecretsMissing(
+        layout,
+        local.manifest.projectId,
+        local.manifest.environmentId,
+        plan,
+      )
+    ) {
+      needingFiles.push(local);
+    }
+  }
+  return needingFiles;
+}
+
+function rehydrateRefsFor(
+  targets: readonly LocalDeploymentManifest[],
+): RehydrateDeploymentRef[] {
+  return targets
+    .filter((local) => manifestSecretPlan(local).length > 0)
+    .map((local) => ({
+      projectId: local.manifest.projectId,
+      environmentId: local.manifest.environmentId,
+      generation: local.manifest.generation,
+    }));
+}
+
+async function fetchRehydrateByKey(
+  refs: readonly RehydrateDeploymentRef[],
+  rehydrate: RehydrateDeploymentSecretsFn,
+): Promise<Map<string, RehydrateDeploymentResult>> {
+  if (refs.length === 0) return new Map();
+  try {
+    const results = await rehydrate(refs);
+    return new Map(
+      results.map((row) => [
+        deploymentKey(row.projectId, row.environmentId),
+        row,
+      ]),
+    );
+  } catch (err) {
+    logWarn(
+      "deploy",
+      `deployment secret rehydrate request failed: ${sanitizeForLog(err)}`,
+    );
+    return new Map();
+  }
+}
+
+function warnGenerationMismatch(
+  local: LocalDeploymentManifest,
+  remote: RehydrateDeploymentResult | undefined,
+): void {
+  logWarn(
+    "deploy",
+    `secret rehydrate generation mismatch env=${local.manifest.environmentId} ` +
+      `local=${local.manifest.generation} remote=${
+        remote?.generation ?? "none"
+      }; ` +
+      `refusing to materialize or start with mismatched secret material`,
+  );
+}
+
+async function materializeRemoteSecrets(
+  params: {
+    layout: LayoutPaths;
+    decryptSecrets: DecryptSecretsFn;
+  },
+  local: LocalDeploymentManifest,
+  remote: RehydrateDeploymentResult,
+  plan: readonly EnvironmentDeploySecretPlanEntry[],
+): Promise<boolean> {
+  try {
+    await materializeSecretFiles(
+      params.layout,
+      local.manifest.projectId,
+      local.manifest.environmentId,
+      plan,
+      remote.variableMaterial,
+      params.decryptSecrets,
+      { requireAll: false },
+    );
+    return true;
+  } catch (err) {
+    logWarn(
+      "deploy",
+      `secret file write failed env=${local.manifest.environmentId}: ${
+        sanitizeForLog(err)
+      }`,
+    );
+    return false;
+  }
+}
+
+function shouldComposeUpAfterRehydrate(
+  composeUp: "always" | "if-missing",
+  missing: boolean,
+): boolean {
+  return composeUp === "always" || missing;
+}
+
+async function rehydrateOneLocalDeployment(
+  params: {
+    layout: LayoutPaths;
+    decryptSecrets: DecryptSecretsFn;
+    runDocker: RunDockerFn;
+    composeUp: "always" | "if-missing";
+  },
+  local: LocalDeploymentManifest,
+  remote: RehydrateDeploymentResult | undefined,
+): Promise<void> {
+  const plannedSecrets = manifestSecretPlan(local).length > 0;
+  if (
+    plannedSecrets &&
+    !remoteMatchesLocalGeneration(local.manifest.generation, remote)
+  ) {
+    warnGenerationMismatch(local, remote);
+    return;
+  }
+  const plan = remote?.secretPlan ?? planFromManifest(local.manifest.secrets);
+  if (plan.length > 0 && remote) {
+    const wrote = await materializeRemoteSecrets(params, local, remote, plan);
+    if (!wrote) return;
+  }
+
+  const missing = plan.length > 0 &&
+    await plannedSecretsMissing(
+      params.layout,
+      local.manifest.projectId,
+      local.manifest.environmentId,
+      plan,
+    );
+  if (!shouldComposeUpAfterRehydrate(params.composeUp, missing)) return;
+  logInfo(
+    "deploy",
+    `rehydrate compose up project=${local.manifest.projectName} env=${local.manifest.environmentId}`,
+  );
+  await composeUpDeployment(local, params.runDocker);
+}
+
 export async function rehydrateLocalDeployments(params: {
   layout: LayoutPaths;
   decryptSecrets: DecryptSecretsFn;
@@ -194,96 +364,29 @@ export async function rehydrateLocalDeployments(params: {
   const locals = await listLocalDeploymentManifests(params.layout);
   if (locals.length === 0) return;
 
-  const needingFiles: LocalDeploymentManifest[] = [];
-  for (const local of locals) {
-    const plan = local.manifest.secrets ?? [];
-    if (plan.length === 0) continue;
-    if (
-      await plannedSecretsMissing(
-        params.layout,
-        local.manifest.projectId,
-        local.manifest.environmentId,
-        plan,
-      )
-    ) {
-      needingFiles.push(local);
-    }
-  }
-
+  const needingFiles = await listDeploymentsNeedingSecretFiles(
+    params.layout,
+    locals,
+  );
   if (params.composeUp === "if-missing" && needingFiles.length === 0) {
     return;
   }
 
   const targets = params.composeUp === "if-missing" ? needingFiles : locals;
-  const refs = targets
-    .filter((local) => (local.manifest.secrets ?? []).length > 0)
-    .map((local) => ({
-      projectId: local.manifest.projectId,
-      environmentId: local.manifest.environmentId,
-      generation: local.manifest.generation,
-    }));
-
-  let byKey = new Map<string, RehydrateDeploymentResult>();
-  if (refs.length > 0) {
-    try {
-      const results = await params.rehydrate(refs);
-      byKey = new Map(
-        results.map((row) => [
-          deploymentKey(row.projectId, row.environmentId),
-          row,
-        ]),
-      );
-    } catch (err) {
-      logWarn(
-        "deploy",
-        `deployment secret rehydrate request failed: ${sanitizeForLog(err)}`,
-      );
-    }
-  }
-
+  const byKey = await fetchRehydrateByKey(
+    rehydrateRefsFor(targets),
+    params.rehydrate,
+  );
   for (const local of targets) {
-    const key = deploymentKey(
-      local.manifest.projectId,
-      local.manifest.environmentId,
-    );
-    const remote = byKey.get(key);
-    const plan = remote?.secretPlan ?? planFromManifest(local.manifest.secrets);
-    if (plan.length > 0 && remote) {
-      try {
-        await materializeSecretFiles(
-          params.layout,
+    await rehydrateOneLocalDeployment(
+      params,
+      local,
+      byKey.get(
+        deploymentKey(
           local.manifest.projectId,
           local.manifest.environmentId,
-          plan,
-          remote.variableMaterial,
-          params.decryptSecrets,
-          { requireAll: false },
-        );
-      } catch (err) {
-        logWarn(
-          "deploy",
-          `secret file write failed env=${local.manifest.environmentId}: ${
-            sanitizeForLog(err)
-          }`,
-        );
-        continue;
-      }
-    }
-
-    const missing = plan.length > 0 &&
-      await plannedSecretsMissing(
-        params.layout,
-        local.manifest.projectId,
-        local.manifest.environmentId,
-        plan,
-      );
-    if (params.composeUp === "if-missing" && !missing) continue;
-    if (params.composeUp === "always" || missing) {
-      logInfo(
-        "deploy",
-        `rehydrate compose up project=${local.manifest.projectName} env=${local.manifest.environmentId}`,
-      );
-      await composeUpDeployment(local, params.runDocker);
-    }
+        ),
+      ),
+    );
   }
 }
