@@ -19,6 +19,10 @@ Environment=COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 # into the checkout. Vagrant VirtFS is Mac-owned (not guest-writable), and a
 # systemd unit should not mutate git metadata on bare metal either.
 Environment=EXPO_NO_TYPESCRIPT_SETUP=1
+# Node 24's default listen("localhost") binds [::1] only. Caddy reverse_proxies
+# 127.0.0.1:{{ expo_port }} and Vagrant SSH tunnels use guest_ip 127.0.0.1, so
+# force IPv4-first DNS or the UI spinner never reaches Metro.
+Environment=NODE_OPTIONS=--dns-result-order=ipv4first
 # Do not set CI=1 — Expo/Metro disable Fast Refresh (hot=false) in CI mode.
 # VirtioFS/9p host writes never notify inotify; metro.config.js enables poll
 # watch when /proc/mounts shows those types (TURBOPANEL_METRO_POLL=0 disables).

@@ -1,4 +1,9 @@
 {
+  "deno.enable": true,
+  "deno.lint": true,
+  "deno.config": "./deno.json",
+  "typescript.validate.enable": false,
+  "javascript.validate.enable": false,
   "ansible.config.path": "${workspaceFolder}/ansible.cfg",
   "ansible.ansible.path": "/opt/turbopanel/vendor/ansible/current/bin/ansible",
   "ansible.python.interpreterPath": "/opt/turbopanel/vendor/ansible/current/bin/python3",

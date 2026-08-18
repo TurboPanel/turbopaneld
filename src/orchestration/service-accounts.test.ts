@@ -337,6 +337,11 @@ test("systemd units and docker wrappers bind the expected identity variables", a
   );
   assertMatch(
     uiUnit,
+    /NODE_OPTIONS=--dns-result-order=ipv4first/,
+    "turbopanel-ui.service forces IPv4 localhost so Caddy can reach Metro",
+  );
+  assertMatch(
+    uiUnit,
     /start --web --host localhost --port \{\{\s*expo_port\s*\}\}/,
     "turbopanel-ui.service binds Expo on loopback for Caddy and Vagrant tunnels",
   );

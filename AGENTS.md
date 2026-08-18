@@ -302,6 +302,13 @@ Sonar-way **80% new-code** floor.
 `new TypeError()` for shape assertions — both under TypeScript style
 (SonarQube) above; do not restate them here.
 
+**Editor:** this repo has no `tsconfig.json`. Folder `.vscode/settings.json`
+sets `deno.enable` and turns off the built-in TypeScript/JavaScript validators
+so Cursor/VS Code does not report `Cannot find name 'Deno'` / missing `@std/*`
+on Deno sources. Install **Deno** (`denoland.vscode-deno`); the sibling
+`dev` folder keeps `deno.enable: false` (Node console). Typecheck with
+`deno task check` / `deno task test`, not `tsc`.
+
 **Pre-commit** (`.githooks/pre-commit`): `scripts/scan-secrets.sh` only (never
 skippable). Fmt/lint/tests are **temporarily disabled** in the hook until the
 toolchain can run inside the Vagrant guest (host VirtFS checkouts often lack a
