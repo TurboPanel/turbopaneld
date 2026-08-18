@@ -387,9 +387,15 @@ git SHA.
   `tp0.conf` stays in `wg-quick` format (`Address`);
   `wg syncconf` is fed a stripped `wg setconf` config. Daemon start restores
   from `state.json` and re-installs `TP-FORWARD`, **reusing PSK plaintext from
-  durable `tp0.conf`** (do not rewrite peers with an empty PSK map). `TP-FORWARD`
+  durable `tp0.conf`** (do not rewrite peers with an empty PSK map).   `TP-FORWARD`
   ACCEPTs same-subnet bridge traffic and bidirectional forwarding between local
-  `networks[].subnet` and remote peer prefixes (non-`/32` allowed IPs). The
+  `networks[].subnet` and remote peer prefixes (non-`/32` allowed IPs).   Gateway
+  `advertisedCidrs` now defaults to the datacenter's IPv4 subnets; a
+  **non-empty** stored `advertisedCidrs` is an operator override used
+  verbatim. IPv6 is excluded because `TP-FORWARD` is installed with
+  `iptables` only in `src/instance/commands/fabric.ts` (routed bridges use
+  `com.docker.network.bridge.gateway_mode_ipv4=routed`; no `ip6tables` path)
+  — operators may still add IPv6 ranges explicitly. The
   Docker monitor also reinstalls that jump when dockerd becomes reachable again
   after a restart (dockerd can rebuild `DOCKER-USER`). `wireguard-tools` stays in
   `daemon-prereqs`. Default fabric MTU is **1420** on `tp0` and every routed

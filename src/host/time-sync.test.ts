@@ -1,6 +1,7 @@
 import { assertEquals } from "@std/assert";
 import {
   parseEtcTimezone,
+  parseShowTimesyncLastSyncedAt,
   parseTimedatectlShow,
   parseTimedatectlStatus,
   parseTimesyncdConf,
@@ -106,4 +107,12 @@ FallbackNTP=time.cloudflare.com
 
 test("parseTimesyncdConf returns empty servers when unset", () => {
   assertEquals(parseTimesyncdConf("[Time]\n"), { ntpServers: [] });
+});
+
+test("parseShowTimesyncLastSyncedAt reads LastSyncTimestamp", () => {
+  assertEquals(
+    parseShowTimesyncLastSyncedAt("LastSyncTimestamp=2026-08-17T20:00:00Z\n"),
+    "2026-08-17T20:00:00.000Z",
+  );
+  assertEquals(parseShowTimesyncLastSyncedAt("LastSyncTimestamp=n/a\n"), undefined);
 });

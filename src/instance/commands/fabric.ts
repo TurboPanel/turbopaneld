@@ -39,6 +39,8 @@ export const FABRIC_DEFAULT_MTU = 1420;
 
 const FABRIC_FORWARD_CHAIN = "TP-FORWARD";
 const DOCKER_USER_CHAIN = "DOCKER-USER";
+// Forwarding is IPv4-only today (`iptables`, no `ip6tables` path), which is
+// why the control plane never auto-advertises IPv6 datacenter subnets.
 const DOCKER_ROUTED_BRIDGE_OPT =
   "com.docker.network.bridge.gateway_mode_ipv4=routed";
 const DOCKER_MTU_OPT_KEY = "com.docker.network.driver.mtu";

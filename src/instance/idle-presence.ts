@@ -10,6 +10,7 @@ import {
   collectServerIps,
   type ServerReportedIp,
 } from "../server-addresses.ts";
+import type { HostResources } from "../host/host-inventory.ts";
 
 export const IDLE_PRESENCE_MS = 60_000;
 
@@ -247,6 +248,10 @@ export class IdlePresence {
     this.#lastPresenceSnapshot = this.#serializePresenceSnapshot(presence);
 
     try {
+      const resources: HostResources = {
+        ...(host.resources ?? {}),
+        ips: presence.ips,
+      };
       ws.send(JSON.stringify({
         type: "hello",
         at: new Date().toISOString(),
@@ -254,9 +259,8 @@ export class IdlePresence {
         ...(host.hostname ? { hostname: host.hostname } : {}),
         ...(host.machineKey ? { machineKey: host.machineKey } : {}),
         ...(host.os ? { os: host.os } : {}),
-        ...(host.resources ? { resources: host.resources } : {}),
+        resources,
         timeSync: presence.timeSync,
-        ips: presence.ips,
         ...(presence.docker ? { docker: presence.docker } : {}),
       }));
       this.#lastActivityAt = Date.now();
@@ -275,7 +279,7 @@ export class IdlePresence {
    *    `cell/offline-sweep.ts`). Answered by `setWebSocketAutoResponse` at
    *    the runtime level without waking the DO.
    * 2. The app-level heartbeat — sent when the daemon build commit changed
-   *    since the last hello/heartbeat, **or** when `timeSync` / `ips` /
+   *    since the last hello/heartbeat, **or** when `timeSync` / `resources.ips` /
    *    `docker` changed since the last presence snapshot (change-detected,
    *    cadence-bound).
    *
@@ -317,7 +321,7 @@ export class IdlePresence {
       this.#sendHeartbeat({
         daemonBuild: daemonBuildChanged ? daemonBuild : undefined,
         timeSync: presenceChanged ? presence.timeSync : undefined,
-        ips: presenceChanged ? presence.ips : undefined,
+        resources: presenceChanged ? { ips: presence.ips } : undefined,
         docker: presenceChanged ? presence.docker : undefined,
       });
       if (presenceChanged) {
@@ -345,7 +349,7 @@ export class IdlePresence {
   #sendHeartbeat(fields: {
     daemonBuild?: BuildInfo;
     timeSync?: HostTimeSync;
-    ips?: ServerReportedIp[];
+    resources?: HostResources;
     docker?: HostDockerMetadata;
   }): void {
     const ws = this.#ws;
@@ -356,7 +360,7 @@ export class IdlePresence {
       at: string;
       daemonBuild?: BuildInfo;
       timeSync?: HostTimeSync;
-      ips?: ServerReportedIp[];
+      resources?: HostResources;
       docker?: HostDockerMetadata;
     } = {
       type: "heartbeat",
@@ -367,7 +371,7 @@ export class IdlePresence {
       this.#lastDaemonBuildCommit = fields.daemonBuild.commit;
     }
     if (fields.timeSync) payload.timeSync = fields.timeSync;
-    if (fields.ips) payload.ips = fields.ips;
+    if (fields.resources) payload.resources = fields.resources;
     if (fields.docker) payload.docker = fields.docker;
 
     try {

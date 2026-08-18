@@ -6,6 +6,8 @@ export type ServerReportedIp = {
   scope: ServerReportedIpScope;
   /** Interface CIDR when known (host form `address/prefix` is fine). */
   cidr?: string;
+  /** Host interface name (e.g. `eth0`, `enp1s0`). */
+  interface?: string;
 };
 
 function isLoopbackIpv4(address: string): boolean {
@@ -177,6 +179,8 @@ function buildReportedIp(
   const entry: ServerReportedIp = { address, version, scope };
   const cidr = cidrForAddress(address, addr);
   if (cidr) entry.cidr = cidr;
+  const iface = addr.name.trim();
+  if (iface.length > 0 && iface.length <= 64) entry.interface = iface;
   return entry;
 }
 

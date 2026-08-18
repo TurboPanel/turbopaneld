@@ -66,11 +66,12 @@ const FULL_HOST: HostHelloIdentity = {
     architecture: "aarch64",
   },
   resources: {
-    cpu: {
-      coreCount: 4,
-      threadCount: 4,
-      socketCount: 1,
-    },
+    cpus: [
+      {
+        cores: { total: 4 },
+        threads: { total: 4 },
+      },
+    ],
     memory: { totalBytes: 16_384 * 1024 * 1024 },
     swap: { totalBytes: 0 },
   },
@@ -101,9 +102,9 @@ test("IdlePresence hello omits optional host fields when absent", () => {
     assertEquals("hostname" in hello, false);
     assertEquals("machineKey" in hello, false);
     assertEquals("os" in hello, false);
-    assertEquals("resources" in hello, false);
+    assertEquals(hello.resources, { ips: makeIps("203.0.113.10") });
     assertEquals(hello.timeSync, makeTimeSync("UTC"));
-    assertEquals(hello.ips, makeIps("203.0.113.10"));
+    assertEquals("ips" in hello, false);
     assertEquals("docker" in hello, false);
   } finally {
     presence.detach();
@@ -134,9 +135,12 @@ test("IdlePresence hello includes optional host fields when present", () => {
     assertEquals(hello.hostname, FULL_HOST.hostname);
     assertEquals(hello.machineKey, FULL_HOST.machineKey);
     assertEquals(hello.os, FULL_HOST.os);
-    assertEquals(hello.resources, FULL_HOST.resources);
+    assertEquals(hello.resources, {
+      ...FULL_HOST.resources,
+      ips: makeIps("203.0.113.20"),
+    });
     assertEquals(hello.timeSync, makeTimeSync("America/Chicago"));
-    assertEquals(hello.ips, makeIps("203.0.113.20"));
+    assertEquals("ips" in hello, false);
     assertEquals(hello.docker, { version: "28.3.3", composeVersion: "2.39.1" });
   } finally {
     presence.detach();
@@ -314,7 +318,8 @@ test({
       const heartbeats = framesOfType(socket, "heartbeat");
       assertEquals(heartbeats.length, 1);
       const heartbeat = heartbeats[0] as Record<string, unknown>;
-      assertEquals(heartbeat.ips, makeIps("203.0.113.99"));
+      assertEquals(heartbeat.resources, { ips: makeIps("203.0.113.99") });
+      assertEquals("ips" in heartbeat, false);
       assertEquals("os" in heartbeat, false);
       assertEquals("daemonBuild" in heartbeat, false);
     } finally {

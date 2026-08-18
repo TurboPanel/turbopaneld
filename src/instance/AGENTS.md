@@ -26,7 +26,7 @@ stays deferred until opt-in on both runtimes.
 `IdlePresence` runs per open socket:
 
 - Sends `{ type: "hello", at, daemonBuild, hostname?, machineKey?, os?,
-  resources?, timeSync?, ips?, docker? }` once on attach. `machineKey` is a
+  resources?, timeSync?, docker? }` once on attach. `machineKey` is a
   derived, non-reversible HMAC of `/etc/machine-id` (`src/host/machine-key.ts`)
   — warmed on the connect path before hello. Host OS comes from
   `/etc/os-release` (+ `/etc/debian_version`, `/etc/rpi-issue`) via
@@ -34,24 +34,26 @@ stays deferred until opt-in on both runtimes.
   point-release (`DEBIAN_VERSION_FULL` / `debian_version`, e.g. `13.5`) over
   bare `VERSION_ID`. Raspberry Pi OS / Raspbian set
   `variant: "raspberry-pi-os"` (`ID=raspbian` or `/etc/rpi-issue` present —
-  64-bit Pi OS still reports `ID=debian`). **Host resources** (static
-  capacity under `resources.cpu` / `memory` / `swap`: `coreCount`,
-  `threadCount`, `socketCount`, optional CPU `name` / `architecture`,
-  `totalBytes`) come from `/proc/stat` + `/proc/cpuinfo` + `/proc/meminfo`
-  via `src/host/host-inventory.ts` — process-cached; sent on hello only
-  (not heartbeat). Time sync facts come from
-  `src/host/time-sync.ts` (`timedatectl` + `/etc/systemd/timesyncd.conf`);
-  IPs from `collectServerIps()` (`src/server-addresses.ts`) as
-  `{ address, version, scope, cidr? }[]` (public + private). **Docker**
+  64-bit Pi OS still reports `ID=debian`).   **Host resources** (static
+  capacity under `resources.cpus[]` / `gpus[]` / `memory` / `swap`: per-socket
+  `vendorId` / `name` / `cores` / `threads` / `cache` / `speedMhz` / `turboMhz`,
+  GPU identity + memory, `totalBytes`, plus `resources.ips`) come from `/proc/stat` + `/proc/cpuinfo` + `/proc/meminfo`
+  + `/sys` (cpufreq, cache, DRM) via `src/host/host-inventory.ts` (process-cached; cpus/gpus/mem/swap on hello only)
+  and `collectServerIps()` (`src/server-addresses.ts`) as
+  `{ address, version, scope, cidr?, interface? }[]` (public + private; `interface`
+  is the NIC name). Time sync facts come from
+  `src/host/time-sync.ts` (`timedatectl` + `/etc/systemd/timesyncd.conf` +
+  optional `lastSyncedAt` from `/run/systemd/timesync/synchronized`).
+  **Docker**
   (`src/host/docker.ts`) is omitted unless `/usr/bin/docker` is installed:
   `{ version, composeVersion? }` from `docker --version` and
   `docker compose version` (plugin). When Docker is later installed on an
   already-connected host, the next change-detected heartbeat carries it.
-  The instance persists `os` / `resources` / `ips` / `docker` on
-  `server.metadata` and exposes them on
+  The instance persists OS / timezone / NTP on dedicated `server` columns and
+  `resources` / `docker` on `server.metadata`, and exposes them on
   `GET /api/client/v1/servers`. All new hello fields stay optional for
-  back-compat. The instance maps current `ips[]`/`resources` and the pre-rename
-  `addresses` object / `inventory` block so remotes that have not rebuilt yet
+  back-compat. The instance maps current `resources.ips`/`resources` and the pre-rename
+  top-level `ips` / `addresses` object / `inventory` block so remotes that have not rebuilt yet
   still persist private IPs and capacity.
 - After **~60 s** of inbound silence (`IDLE_PRESENCE_MS`), sends the wire
   **`{"type":"ping"}`** cell ping (must match `DAEMON_CELL_PING` in
@@ -61,10 +63,10 @@ stays deferred until opt-in on both runtimes.
   check interval (default), `IdlePresence` allows ~5s of `setInterval` skew so
   early ticks still send — otherwise early fires were skipped and Redis coalesce
   could false-demote a live socket.
-- Sends app-level `{ type: "heartbeat", at, daemonBuild?, timeSync?, ips?, docker? }`
-  when the daemon build commit changed **or** when `timeSync` / `ips` /
+- Sends app-level `{ type: "heartbeat", at, daemonBuild?, timeSync?, resources?, docker? }`
+  when the daemon build commit changed **or** when `timeSync` / `resources.ips` /
   `docker` differ from the snapshot seeded on hello (change-detected, still
-  cadence-bound to the ~60s idle tick). Do **not** put OS on heartbeat. Offline
+  cadence-bound to the ~60s idle tick). Do **not** put OS or cpus/gpus/mem/swap on heartbeat. Offline
   self-heal
   (Postgres `connected: false` while the socket is still live) is handled by the
   instance **offline-sweep cron** re-projecting online via `onDaemonConnected`

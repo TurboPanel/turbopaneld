@@ -11,10 +11,13 @@ export type HostTimeSync = {
   ntpSynced?: boolean;
   ntpServers: string[];
   fallbackNtpServers?: string[];
+  /** Last successful NTP sync when known. */
+  lastSyncedAt?: string;
 };
 
 const TIMESYNCD_CONF_PATH = "/etc/systemd/timesyncd.conf";
 const ETC_TIMEZONE_PATH = "/etc/timezone";
+const TIMESYNC_SYNCHRONIZED_PATH = "/run/systemd/timesync/synchronized";
 
 function readTextFile(path: string): string | undefined {
   try {
@@ -283,6 +286,46 @@ function readConfiguredServers(): {
   };
 }
 
+function readSynchronizedFileMtime(): string | undefined {
+  try {
+    const st = Deno.statSync(TIMESYNC_SYNCHRONIZED_PATH);
+    if (st.mtime) return st.mtime.toISOString();
+  } catch {
+    // fall through to timedatectl
+  }
+  return undefined;
+}
+
+/**
+ * Parse a last-sync stamp from `timedatectl show-timesync` KEY=VALUE output.
+ * Exported for fixture tests.
+ */
+export function parseShowTimesyncLastSyncedAt(text: string): string | undefined {
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    const eq = trimmed.indexOf("=");
+    if (eq <= 0) continue;
+    const key = trimmed.slice(0, eq).trim();
+    if (key !== "LastSyncTimestamp" && key !== "LastMessageTimestamp") {
+      continue;
+    }
+    const value = trimmed.slice(eq + 1).trim();
+    if (!value || value === "n/a" || value === "0") continue;
+    const ms = Date.parse(value);
+    if (!Number.isNaN(ms)) return new Date(ms).toISOString();
+  }
+  return undefined;
+}
+
+function readLastSyncedAt(ntpSynced: boolean | undefined): string | undefined {
+  if (ntpSynced === false) return undefined;
+  const fromFile = readSynchronizedFileMtime();
+  if (fromFile) return fromFile;
+  const showTimesync = spawnText("timedatectl", ["show-timesync"]);
+  if (!showTimesync) return undefined;
+  return parseShowTimesyncLastSyncedAt(showTimesync);
+}
+
 /** Read current host timezone + NTP state (no process-lifetime cache). */
 export function readTimeSync(): HostTimeSync {
   const show = readTimedatectlShow();
@@ -303,6 +346,7 @@ export function readTimeSync(): HostTimeSync {
   timezone ??= readEtcTimezone();
 
   const servers = readConfiguredServers();
+  const lastSyncedAt = readLastSyncedAt(ntpSynced);
   return {
     ...(timezone ? { timezone } : {}),
     ...(ntpEnabled !== undefined ? { ntpEnabled } : {}),
@@ -311,5 +355,6 @@ export function readTimeSync(): HostTimeSync {
     ...(servers.fallbackNtpServers
       ? { fallbackNtpServers: servers.fallbackNtpServers }
       : {}),
+    ...(lastSyncedAt ? { lastSyncedAt } : {}),
   };
 }

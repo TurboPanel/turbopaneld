@@ -46,8 +46,8 @@ test("collectServerIps classifies private/public IPv4 and skips virtual NICS", (
     ],
     () => {
       assertEquals(collectServerIps(), [
-        { address: "10.0.0.5", version: 4, scope: "private" },
-        { address: "203.0.113.9", version: 4, scope: "public" },
+        { address: "10.0.0.5", version: 4, scope: "private", interface: "eth0" },
+        { address: "203.0.113.9", version: 4, scope: "public", interface: "eth0" },
       ]);
     },
   );
@@ -82,18 +82,21 @@ test("collectServerIps records the interface CIDR when known", () => {
           version: 4,
           scope: "private",
           cidr: "10.0.0.5/24",
+          interface: "eth0",
         },
         {
           address: "192.168.1.10",
           version: 4,
           scope: "private",
           cidr: "192.168.1.10/24",
+          interface: "eth0",
         },
         {
           address: "203.0.113.9",
           version: 4,
           scope: "public",
           cidr: "203.0.113.9/24",
+          interface: "eth0",
         },
       ]);
     },
