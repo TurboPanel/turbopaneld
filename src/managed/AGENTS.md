@@ -20,6 +20,7 @@ Root context: `../../AGENTS.md`. Instance engine specs:
 | `materialize.ts` | Write `config/` verbatim; optional engine self-signed TLS + `orgTlsMaterial` → `tls/server.*` + `tls/proxysql/`; ownership normalization via throwaway container (skips `backups/`). Standby replication passwords are **not** written under `auth/`. |
 | `tls.ts` | Engine self-signed cert generation; org-CA materialization for engine leaf + ProxySQL; standby passfile materialization |
 | `networks.ts` | Ensure Docker network `turbopanel-managed` (engines + ProxySQL) **and** attach ProxySQL to consumer `tpn_*` spanning segments |
+| `firewall.ts` | Best-effort idempotent `iptables` scoping for a **public** private listener: `TP-MANAGED-PUB` off `DOCKER-USER`, per-cluster `TP-MGD-<id>` chain matching the pre-DNAT publish via `conntrack --ctorigdst/--ctorigdstport`, ACCEPT known peers then DROP; no-op without a public IPv4 listener or known peers; never blocks apply/destroy |
 | `proxysql.ts` | Shared ProxySQL compose + durable `proxysql.cnf` generation, static-section diffing, inspect/start/stop/restart |
 | `proxysql-admin.ts` | Runtime admin apply via `docker exec` + `admin.cnf` (`[client]` secrets never on argv/logs) |
 | `containers.ts` | Shared `docker compose ps` collection + running-container resolution used by `apply.ts` and `backup.ts` |
@@ -97,10 +98,10 @@ listeners and routes to engine members on `turbopanel-managed`.
 
 | Piece | Detail |
 | --- | --- |
-| Image pin | `proxysql/proxysql:3.0.2` (`PROXYSQL_IMAGE`) — **do not loosen** without reviewing **GHSA-58ww-865x-grpr** (pre-auth heap overflow on first-packet path, ProxySQL 3.0.x, May 2026) |
-| Listeners | Published `5432` (pgsql) and `3306` (mysql) on the instance-resolved `bindAddress`; admin on `127.0.0.1:6032` only |
+| Image pin | `proxysql/proxysql:3.0.9` (`PROXYSQL_IMAGE`) — **do not loosen** without reviewing **CVE-2026-48773** (pre-auth first-packet heap overflow) and **CVE-2026-48772** (PROXY-protocol-v1 `client_addr` ACL bypass); both fixed in 3.0.9 |
+| Listeners | Published `15432` (pgsql) and `16306` (mysql) on the instance-resolved `bindAddress`; admin on `127.0.0.1:6032` only |
 | TLS | Frontend/backend TLS uses org-CA material under `configDir/proxysql/tls/` (and per-engine copies under `tls/proxysql/` for materialize). Engines still use self-signed `tlsMaterial` for their own listener when requested |
-| Desired state | Whole-server command `managed.ingress.reconcile` carries `bindAddress` + `clusters[]` (backends + users); **not** embedded on each `managed.apply` |
+| Desired state | Whole-server command `managed.ingress.reconcile` carries `bindAddress` + `clusters[]` (backends + users); **not** embedded on each `managed.apply`. Empty `clusters[]` tears the stack down (`compose down --remove-orphans`) without TLS materialization |
 | Admin apply | `proxysql-admin.ts` loads `admin.cnf`, mounts it into a throwaway client or uses stdin; SQL LOAD/SAVE — credentials never argv/logs |
 | Backend monitor | Host-wide principal in `configDir/proxysql/monitor.cnf` (`tp_monitor` + random password). Written into `mysql_variables`/`pgsql_variables` and SET on reconcile. Each **primary** `managed.apply` creates the role (`GRANT pg_monitor` / MySQL PROCESS+REPLICATION CLIENT). **Never** leave ProxySQL defaults (`monitor`/`monitor`) — they spam engine logs and never authenticate |
 | Cold start | Full `proxysql.cnf` (static + dynamic tables) is rewritten so reboot/`compose up` restores routing without a live admin session |
@@ -130,12 +131,19 @@ before enqueue (see `turbopanel/src/lib/managed/AGENTS.md` → Login namespace).
 2. **Native port, never remapped; published only via private listener.**
    Normalized engine compose never emits arbitrary `ports:`. Multi-member
    clusters may publish **one** engine port bound exclusively to the member's
-   datacenter or fabric (`tp0` relay) address at the instance-allocated
-   `private_port` — that private listener is the single
+   datacenter, fabric (`tp0` relay), **or public** address at the
+   instance-allocated `private_port` — that private listener is the single
    cross-host path for both streaming replication and remote ProxySQL
    backends. Loopback and `0.0.0.0` binds are rejected. Single-member
    clusters still publish nothing; client traffic enters only via shared
-   ProxySQL (`5432` / `3306`).
+   ProxySQL (`15432` / `16306`).
+   A **public** bind (`privateListener.transport === 'public'`) is mandatorily
+   TLS-only: `assertPublicPrivateListenerTls` (exported from `compose.ts`, run
+   first in `apply.ts` and again during compose normalization) refuses the
+   listener unless `orgTlsMaterial` is present, so `tls/server.crt` + `ca.crt`
+   always land before the publish exists. `firewall.ts` then scopes that
+   publish to the known peer address(es) — still never `0.0.0.0`, and never a
+   broad fallback when no stable peer address is known.
 3. **Always join `turbopanel-managed`.** Every managed engine container joins
    that network whether or not frontend exposure is enabled, so ProxySQL can
    reach it and so multi-member replication paths stay consistent. That is
@@ -208,7 +216,7 @@ Physical / GTID streaming is **engine → engine**, never through ProxySQL.
 | Path | Postgres | MySQL / MariaDB |
 | --- | --- | --- |
 | Co-resident | Peers by `containerName` on `turbopanel-managed` | same |
-| Cross-host | Private listener (`private_port` on the transport ladder: `local` co-resident container name → `fabric` relay address over `tp0` → `datacenter` private address) | same |
+| Cross-host | Private listener (`private_port` on the transport ladder: `local` co-resident container name → `fabric` relay address over `tp0` → `datacenter` private address → `public` address, org-CA TLS mandatory + iptables-scoped) | same (`REQUIRE SSL` on the replication grant) |
 | Config | Instance owns `postgresql.conf` + `pg_hba.conf` | Instance owns `my.cnf` + `initdb/00-turbopanel.sql` (socket-auth platform admin — keeps SQL/`backup.ts` credential-free) |
 | Slots / disk hazard | Physical slots + orphan drop on `ensurePrimary` | **No slots** — bounded `binlog_expire_logs_seconds` in platform `my.cnf` |
 | Bootstrap | `bootstrapStandby` **before** compose up seeds via `pg_basebackup -R` | Probe only before compose up (uninit → `seeded` deferred; marker → `already_standby`; datadir without marker → `needs_resync`). Actual seed in **`configureStandby`** after compose up (logical dump + `CHANGE REPLICATION SOURCE` / MariaDB `CHANGE MASTER` + GTID) |

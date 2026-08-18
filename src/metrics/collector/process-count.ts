@@ -5,11 +5,14 @@
  * threads) and over `/proc/stat` `processes` (cumulative fork counter).
  *
  * Async (`Deno.readDir`) so metrics does not block the WebSocket event loop.
+ * Optional `procDir` is for host-free tests with a fixture directory tree.
  */
-export async function countProcessesInProc(): Promise<number | null> {
+export async function countProcessesInProc(
+  procDir = "/proc",
+): Promise<number | null> {
   try {
     let count = 0;
-    for await (const entry of Deno.readDir("/proc")) {
+    for await (const entry of Deno.readDir(procDir)) {
       if (!entry.isDirectory) continue;
       if (/^\d+$/.test(entry.name)) count++;
     }

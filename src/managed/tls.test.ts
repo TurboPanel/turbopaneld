@@ -8,6 +8,7 @@ import {
   ensureManagedSelfSignedCert,
   materializeManagedProxySqlTlsMaterial,
   materializeProxySqlTlsMaterial,
+  materializeStandbyPassfile,
 } from "./tls.ts";
 
 /**
@@ -187,4 +188,147 @@ test("materializeProxySqlTlsMaterial fails when decrypt returns empty", async ()
       "failed to decrypt ProxySQL private key envelope",
     );
   });
+});
+
+test("materializeProxySqlTlsMaterial rejects missing certificate or CA PEM", async () => {
+  await withTempDir(async (managedDir) => {
+    const targetDir = join(managedDir, "tls", "proxysql");
+    await assertRejects(
+      () =>
+        materializeProxySqlTlsMaterial(
+          targetDir,
+          {
+            certificatePem: "",
+            privateKeyEnvelope: "tpdaemon.v1.x",
+            caCertPem:
+              "-----BEGIN CERTIFICATE-----\nY\n-----END CERTIFICATE-----\n",
+          },
+          () => Promise.resolve(["-----BEGIN PRIVATE KEY-----\nK\n-----END PRIVATE KEY-----\n"]),
+        ),
+      Error,
+      "ProxySQL TLS material missing certificate or CA PEM",
+    );
+  });
+});
+
+test("materializeManagedProxySqlTlsMaterial rejects missing CA PEM", async () => {
+  await withTempDir(async (managedDir) => {
+    await assertRejects(
+      () =>
+        materializeManagedProxySqlTlsMaterial(
+          managedDir,
+          {
+            certificatePem:
+              "-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----\n",
+            privateKeyEnvelope: "tpdaemon.v1.x",
+            caCertPem: "",
+          },
+          () => Promise.resolve(["-----BEGIN PRIVATE KEY-----\nK\n-----END PRIVATE KEY-----\n"]),
+        ),
+      Error,
+      "ProxySQL TLS material missing certificate or CA PEM",
+    );
+  });
+});
+
+test("ensureManagedSelfSignedCert rejects non-selfSigned requests", async () => {
+  await withTempDir(async (managedDir) => {
+    await assertRejects(
+      () =>
+        ensureManagedSelfSignedCert(managedDir, {
+          selfSigned: false as unknown as true,
+          commonName: "managed-postgres",
+          certPath: "tls/server.crt",
+          keyPath: "tls/server.key",
+        }),
+      Error,
+      "managed tlsMaterial must set selfSigned: true",
+    );
+  });
+});
+
+test("materializeStandbyPassfile escapes colons in IPv6 hosts", async () => {
+  await withTempDir(async (managedDir) => {
+    await materializeStandbyPassfile(managedDir, {
+      host: "203.0.113.10",
+      port: 5432,
+      username: "tp_repl",
+      password: "s3cret:pass",
+    });
+    const pgpass = await Deno.readTextFile(join(managedDir, "auth/pgpass"));
+    assertEquals(pgpass.includes("203.0.113.10:5432:*:tp_repl:s3cret\\:pass"), true);
+    assertEquals((await Deno.stat(join(managedDir, "auth/pgpass"))).mode! & 0o777, 0o600);
+  });
+});
+
+test("ensureManagedSelfSignedCert rejects missing openssl binary", async () => {
+  const originalStat = Deno.stat.bind(Deno);
+  Deno.stat = (path: string | URL) => {
+    if (String(path) === "/usr/bin/openssl") {
+      return Promise.reject(new Deno.errors.NotFound());
+    }
+    return originalStat(path);
+  };
+  try {
+    await withTempDir(async (managedDir) => {
+      await assertRejects(
+        () =>
+          ensureManagedSelfSignedCert(managedDir, {
+            selfSigned: true,
+            commonName: "managed-postgres",
+            certPath: "tls/server.crt",
+            keyPath: "tls/server.key",
+          }),
+        Error,
+        "openssl is required for managed TLS",
+      );
+    });
+  } finally {
+    Deno.stat = originalStat;
+  }
+});
+
+test("ensureManagedSelfSignedCert surfaces openssl generation failures", async () => {
+  const originalStat = Deno.stat.bind(Deno);
+  const OriginalCommand = Deno.Command;
+  Deno.stat = (path: string | URL) => {
+    if (String(path) === "/usr/bin/openssl") {
+      return Promise.resolve({
+        isFile: true,
+        isDirectory: false,
+        isSymlink: false,
+      } as Deno.FileInfo);
+    }
+    return originalStat(path);
+  };
+  Deno.Command = class FakeCommand {
+    constructor(_path: string, _options?: Deno.CommandOptions) {}
+
+    output() {
+      return Promise.resolve({
+        success: false,
+        code: 1,
+        stdout: new Uint8Array(),
+        stderr: new TextEncoder().encode("key generation failed"),
+      });
+    }
+  } as unknown as typeof Deno.Command;
+  try {
+    await withTempDir(async (managedDir) => {
+      await assertRejects(
+        () =>
+          ensureManagedSelfSignedCert(managedDir, {
+            selfSigned: true,
+            commonName: "managed-postgres",
+            certPath: "tls/server.crt",
+            keyPath: "tls/server.key",
+          }),
+        Error,
+        "openssl failed to generate managed TLS material",
+      );
+    });
+  } finally {
+    Deno.Command = OriginalCommand;
+    Deno.stat = originalStat;
+  }
 });

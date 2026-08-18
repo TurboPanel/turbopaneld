@@ -136,13 +136,17 @@ export function grantRootSql(
   } WITH GRANT OPTION;`;
 }
 
+/**
+ * `REQUIRE SSL` binds TLS to the account itself, so the server rejects a
+ * plaintext replication login even if a standby omits `MASTER_SSL = 1`.
+ */
 export function grantReplicationSql(
   username: string,
   host: string,
 ): string {
   return `GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO ${
     accountAt(username, host)
-  };`;
+  } REQUIRE SSL;`;
 }
 
 export function ensureReplicationAccountSql(

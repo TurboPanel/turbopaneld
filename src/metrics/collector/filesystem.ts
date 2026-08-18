@@ -1,15 +1,27 @@
 import { statfs } from "node:fs/promises";
 import type { DiskCapacityGauges } from "./types.ts";
 
+export type StatfsLike = {
+  blocks: number;
+  bfree: number;
+  bavail: number;
+  bsize: number;
+};
+
 /**
  * Root filesystem capacity via async `statfs` — no subprocess (`df`).
  * Returns `null` when unsupported or on error.
+ *
+ * Optional `io.statfs` remaps the node `statfs` call for host-free tests of
+ * invalid / zero-capacity shapes.
  */
 export async function readRootFilesystemCapacity(
   path = "/",
+  io?: { statfs?: (path: string) => Promise<StatfsLike> | StatfsLike },
 ): Promise<DiskCapacityGauges | null> {
   try {
-    const stat = await statfs(path);
+    const probe = io?.statfs ?? statfs;
+    const stat = await probe(path);
     const blocks = Number(stat.blocks);
     const bfree = Number(stat.bfree);
     const bavail = Number(stat.bavail);

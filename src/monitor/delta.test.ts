@@ -119,3 +119,48 @@ test("buildSync establishes authoritative baseline after sequence gap", () => {
   assert(resync.sequence > gapHeartbeat.sequence);
   assertEquals(resync.payload.resources?.length, 2);
 });
+
+test("buildHeartbeat marks removed resources offline", () => {
+  const tracker = createMonitorDeltaTracker();
+  tracker.seedTracked([resource("container:a", "healthy")]);
+  tracker.registerPendingDelivery(1, [resource("container:a", "healthy")]);
+  tracker.applyAck(1);
+
+  const bundle = tracker.buildHeartbeat({}, []);
+  assertEquals(bundle.payload.resources?.[0]?.status, "offline");
+  assertEquals(bundle.payload.events?.[0]?.reason, "removed");
+});
+
+test("applyAck ignores stale or untracked accepted sequences", () => {
+  const tracker = createMonitorDeltaTracker();
+  tracker.seedTracked([resource("container:a", "healthy")]);
+  tracker.applyAck(0);
+  tracker.applyAck(5);
+  assertEquals(tracker.getSequence(), 0);
+});
+
+test("confirmDelivery registers and acks a pending delivery", () => {
+  const tracker = createMonitorDeltaTracker();
+  const first = tracker.buildSync({}, [resource("container:a", "healthy")]);
+  tracker.confirmDelivery(first.sequence, first.resourcesAfter);
+
+  const heartbeat = tracker.buildHeartbeat({}, [
+    resource("container:a", "healthy"),
+  ]);
+  assertEquals(heartbeat.payload.resources, undefined);
+});
+
+test("buildTransition returns null when status is unchanged", () => {
+  const tracker = createMonitorDeltaTracker();
+  const next = resource("container:a", "healthy");
+  tracker.seedTracked([next]);
+  assertEquals(tracker.buildTransition(next.resourceKey, next, [next]), null);
+});
+
+test("buildTransition discovers resources absent from the baseline", () => {
+  const tracker = createMonitorDeltaTracker();
+  const next = resource("container:new", "starting");
+  const bundle = tracker.buildTransition(next.resourceKey, next, [next]);
+  assertExists(bundle);
+  assertEquals(bundle!.payload.events[0]?.reason, "discovered");
+});

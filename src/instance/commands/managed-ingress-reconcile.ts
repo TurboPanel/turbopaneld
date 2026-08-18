@@ -197,6 +197,52 @@ function collectAppliedBackends(desired: ProxySqlDesiredState): string[] {
   return [...backends].sort((a, b) => a.localeCompare(b));
 }
 
+function emptyIngressResult(
+  serverId: string,
+): ManagedIngressReconcileResult {
+  return {
+    summary: `managed ingress torn down for server ${serverId}`,
+    appliedUsers: [],
+    appliedBackends: [],
+    restarted: false,
+    containers: [],
+  };
+}
+
+async function tearDownProxySqlStack(
+  layout: LayoutPaths,
+  serverId: string,
+  daemonReceivedAt: string,
+  run: RunDockerFn,
+): Promise<ManagedIngressReconcileResult> {
+  const composePath = proxysqlComposePath(layout);
+  const previousComposeText = await readPreviousConfig(composePath);
+  if (previousComposeText === null) {
+    logInfo(
+      "commands",
+      `managed.ingress.reconcile teardown skipped (no compose) serverId=${serverId} received=${daemonReceivedAt}`,
+    );
+    return emptyIngressResult(serverId);
+  }
+  const down = await run([
+    "compose",
+    "-p",
+    PROXYSQL_PROJECT,
+    "-f",
+    composePath,
+    "down",
+    "--remove-orphans",
+  ]);
+  if (!down.success) {
+    throw new Error(down.stderr || "proxysql compose down failed");
+  }
+  logInfo(
+    "commands",
+    `managed.ingress.reconcile teardown completed serverId=${serverId} received=${daemonReceivedAt}`,
+  );
+  return emptyIngressResult(serverId);
+}
+
 export async function handleManagedIngressReconcile(
   payload: ManagedIngressReconcilePayload,
   daemonReceivedAt: string,
@@ -207,8 +253,20 @@ export async function handleManagedIngressReconcile(
   const run = deps?.runDocker ?? defaultRunDocker;
   const ensureDockerFn = deps?.ensureDocker ?? defaultEnsureDocker;
 
+  if (parsed.clusters.length === 0) {
+    return await tearDownProxySqlStack(
+      layout,
+      parsed.serverId,
+      daemonReceivedAt,
+      run,
+    );
+  }
+
   if (!deps?.decryptSecrets) {
     throw new Error("managed.ingress.reconcile requires decryptSecrets");
+  }
+  if (!parsed.orgTlsMaterial) {
+    throw new Error("managed.ingress.reconcile requires orgTlsMaterial");
   }
 
   let desired = desiredStateFromPayload(parsed);

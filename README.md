@@ -3,9 +3,9 @@
 **Host daemon for every TurboPanel-managed host** — Ansible orchestration, authenticated control-plane presence, deploy/runtime, and host metrics.
 
 [![Release](https://img.shields.io/github/v/release/turbopanel/turbopaneld?label=release)](https://github.com/turbopanel/turbopaneld/releases)
-[![License: AGPL-3.0-only](https://img.shields.io/badge/License-AGPL--3.0--only-blue.svg)](./LICENSE)
-[![Docs](https://img.shields.io/badge/docs-daemon%20setup-3366cc)](https://turbopanel.io/docs/deployment/daemon-setup)
-[![Status: Private alpha](https://img.shields.io/badge/status-private%20alpha-3dd68c)](https://turbopanel.io/roadmap)
+[![Quality Gate](https://sonarcloud.io/api/project_badges/measure?project=turbopanel_turbopaneld&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=turbopanel_turbopaneld)
+[![Coverage](https://sonarcloud.io/api/project_badges/measure?project=turbopanel_turbopaneld&metric=coverage)](https://sonarcloud.io/component_measures?id=turbopanel_turbopaneld&metric=coverage)
+[![Code Smells](https://sonarcloud.io/api/project_badges/measure?project=turbopanel_turbopaneld&metric=code_smells)](https://sonarcloud.io/project/issues?id=turbopanel_turbopaneld&resolved=false&types=CODE_SMELL)
 
 GitHub: [turbopanel/turbopaneld](https://github.com/turbopanel/turbopaneld). Package name: `turbopaneld`.
 

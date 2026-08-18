@@ -49,6 +49,27 @@ function isLoopbackOrUnspecified(address: string): boolean {
 }
 
 /**
+ * A public private-listener bind is only acceptable behind org-CA TLS: the
+ * engine must present the org leaf and verify peers against the org CA. Refuse
+ * before any state is written rather than exposing a plaintext listener.
+ *
+ * Callers run this early in `managed.apply` and again from
+ * `normalizeManagedCompose` so the publish can never be emitted without the
+ * material that materializes `tls/server.crt` + `tls/ca.crt`.
+ */
+export function assertPublicPrivateListenerTls(
+  payload: ManagedApplyPayload,
+): void {
+  if (
+    payload.privateListener?.transport === "public" && !payload.orgTlsMaterial
+  ) {
+    throw new Error(
+      "managed compose public privateListener requires orgTlsMaterial",
+    );
+  }
+}
+
+/**
  * Private listener publishes one engine port on a concrete private address.
  * Loopback / unspecified binds are rejected — engines never publish on 0.0.0.0
  * or host loopback.
@@ -354,7 +375,8 @@ export function normalizeManagedCompose(
 
   if (payload.privateListener) {
     const { address, port } = payload.privateListener;
-    // Single deliberate publish: private address only (never loopback/unspecified).
+    assertPublicPrivateListenerTls(payload);
+    // Single deliberate publish: one concrete address (never loopback/unspecified).
     assertPrivateListener(address, port);
     service.ports = [`${address}:${port}:${payload.containerPort}`];
   }

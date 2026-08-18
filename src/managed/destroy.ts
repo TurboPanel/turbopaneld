@@ -13,6 +13,7 @@ import {
 } from "../deploy/docker-cli.ts";
 import { logInfo, sanitizeForLog } from "../logger.ts";
 import { resolveLayout } from "../paths/layout.ts";
+import { removeManagedPublicFirewallBestEffort } from "./firewall.ts";
 import {
   managedComposeProject,
   managedDir,
@@ -78,6 +79,8 @@ export async function handleManagedDestroy(
       );
     }
   }
+
+  await removeManagedPublicFirewallBestEffort(payload.managedId);
 
   try {
     await Deno.remove(root, { recursive: true });

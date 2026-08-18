@@ -22,6 +22,7 @@ import {
   GALAXY_VENDOR_ROLES_DIR,
   galaxyDockerRoleCodeloadUrl,
   ORCHESTRATION_DIR,
+  ORCHESTRATION_LAYOUT,
   PYTHON_CURRENT_DIR,
   PYTHON_RUNTIME_DIR,
   PYTHON_VERSION,
@@ -379,11 +380,7 @@ test("layout env overrides apply in production mode", () => {
 });
 
 test("module-level orchestration constants match active layout", () => {
-  const layout = resolveLayout({
-    TURBOPANEL_DAEMON_ROOT: readEnv("TURBOPANEL_DAEMON_ROOT"),
-    TURBOPANEL_RUNTIMES_DIR: readEnv("TURBOPANEL_RUNTIMES_DIR"),
-    TURBOPANEL_ORCHESTRATION_DIR: readEnv("TURBOPANEL_ORCHESTRATION_DIR"),
-  });
+  const layout = ORCHESTRATION_LAYOUT;
   assertEquals(
     DAEMON_ROOT,
     resolveDaemonRoot({

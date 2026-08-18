@@ -265,16 +265,20 @@ compile toolchain).
   the checkout prefix to repo-relative `SF:src/...` before upload. The
   project uses the built-in **Sonar way** quality gate, which fails when
   **coverage on new code is below 80%** (`new_coverage` LT 80); the scan waits
-  on the gate (`sonar.qualitygate.wait=true`). When `SONAR_TOKEN` is unset the
-  require/scan steps soft-fail / skip (`continue-on-error`) so fmt/lint/tests
-  still gate PRs and trunk publish — wire the secret on the repo/org to enforce
-  the Sonar gate. Sibling repos (`instance`, `ui`, `website`) have no Actions
-  Sonar step; they rely on SonarCloud **Automatic Analysis**
-  (`.sonarcloud.properties`) instead. Coverage exclusions include
+  on the gate (`sonar.qualitygate.wait=true`). Same-repo PRs and trunk
+  **require** `SONAR_TOKEN` (hard fail); fork PRs skip the scan so fmt/lint/tests
+  still gate. Quality gate failure fails verify (and therefore trunk
+  `publish`, which `needs: verify`). After switching from Automatic Analysis,
+  reset **New Code** (Administration → New Code) so the baseline is not months
+  of uncovered history. Sibling `turbopanel` / `ui` also use CI-based analysis;
+  `website` still uses Automatic Analysis. Coverage exclusions include
   `**/*.test.ts`, `src/testing/**`, `src/build-info.ts`, `dist/**`,
-  `publish/**`, the Galaxy Docker role tree, and `workers/**`. The
-  `denoS2187` issue-ignore (`typescript:S2187` on `**/*.test.ts`) remains —
-  LCOV import does not replace that false-positive suppression.
+  `publish/**`, the Galaxy Docker role tree, and `workers/**`.
+  **`sonar.sources` / `sonar.tests` / `sonar.test.inclusions`** must stay set
+  (`src` + `orchestration` + `scripts` + `main.ts`; tests = `**/*.test.ts` and
+  `src/testing/**`). The `denoS2187` issue-ignore (`typescript:S2187` on
+  `**/*.test.ts`) remains — LCOV import does not replace that false-positive
+  suppression.
 - `src/orchestration/paths.test.ts` — production/dev default trees, env
   overrides, and the `DENO_VERSION` ↔ role pin
   (`deno test src/orchestration/paths.test.ts`).
@@ -380,7 +384,11 @@ git SHA.
   / NTP apply through Ansible role `time-sync` + playbook `time-sync-apply.yml`
   (`runTimeSyncApply`); contracts in `contracts.ts` must match the instance
   canonical `server.timezone.set` / `server.ntp.set` shapes. **`server.fabric.reconcile`**
-  (TurboFabric) is the org WireGuard mesh on interface `tp0`. `{ enabled: false }`
+  (TurboFabric) is the org WireGuard mesh on interface `tp0`. Six-state path
+  contract (`direct_lan` / `direct_public` / `direct_nat` / `gateway` /
+  `relay` / `unreachable`) is documented at
+  https://turbopanel.io/docs/architecture/turbofabric-path-model — no daemon
+  behavior change in this slice. `{ enabled: false }`
   tears down `tp0`, routed bridges, `TP-FORWARD`, keys, and local state — not a
   no-op. The daemon owns apply (no Ansible round-trip): it persists the private
   key at `<daemonStateDir>/network/wireguard/private.key` (mode `0600`, via
@@ -429,8 +437,15 @@ git SHA.
   from each entry's `mounts[]`. TurboFabric `server.fabric.reconcile`
   `networks[]` entries carry optional `mtu` / `gateway`; the enabled payload
   carries top-level `mtu` plus per-peer `presharedKeyEnvelope` / `keepalive`;
-  the **result** carries observed `peers[]` (`publicKey`, `lastHandshakeAt`,
-  `transferRx/Tx`) so the UI can show a half-converged mesh. The Postgres table
+  the **result** carries observed `peers[]` (`publicKey`, optional kernel
+  `endpoint`, handshake-derived `health` `healthy`/`stale`/`never`,
+  `lastHandshakeAt`, `transferRx/Tx`) so the UI can show a half-converged mesh.
+  Path probes are kernel-only (`wg set … endpoint` + `wg show dump`); the daemon
+  never opens a userspace STUN socket. A probe succeeds only on a handshake
+  newer than both the pre-probe value and the probe start; failed probes restore
+  the durable endpoint and keepalive from `state.json` then `tp0.conf` (clearing
+  keepalive when the durable peer has none). `wg set` failures exclude that
+  candidate from the returned observations. The Postgres table
   is `segment` (renamed from `bridge`).
 
 ## Subsystem docs (nested `AGENTS.md`)

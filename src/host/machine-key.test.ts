@@ -1,6 +1,8 @@
 import { assertEquals } from "@std/assert";
 import {
+  cachedMachineKey,
   deriveMachineKey,
+  readMachineKey,
   resetMachineKeyCacheForTests,
   TURBOPANEL_MACHINE_ID_NAMESPACE,
 } from "./machine-key.ts";
@@ -52,4 +54,44 @@ test("deriveMachineKey normalizes trim + lowercase before HMAC", async () => {
     `  ${FIXTURE_MACHINE_ID.toUpperCase()}  `,
   );
   assertEquals(upper, PINNED_MACHINE_KEY);
+});
+
+test({
+  name:
+    "readMachineKey derives from a fixture path without warming the default cache",
+  permissions: { read: true, write: true },
+  async fn() {
+    resetMachineKeyCacheForTests();
+    assertEquals(cachedMachineKey(), undefined);
+
+    const dir = await Deno.makeTempDir({ prefix: "tp-machine-key-" });
+    try {
+      const path = `${dir}/machine-id`;
+      await Deno.writeTextFile(path, `${FIXTURE_MACHINE_ID}\n`);
+      const key = await readMachineKey(path);
+      assertEquals(key, PINNED_MACHINE_KEY);
+      // Custom path must not pollute the process cache used by hello.
+      assertEquals(cachedMachineKey(), undefined);
+
+      const emptyPath = `${dir}/empty-id`;
+      await Deno.writeTextFile(emptyPath, "   \n");
+      assertEquals(await readMachineKey(emptyPath), undefined);
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+      resetMachineKeyCacheForTests();
+    }
+  },
+});
+
+test({
+  name: "readMachineKey returns undefined for a missing fixture path",
+  permissions: { read: true },
+  async fn() {
+    resetMachineKeyCacheForTests();
+    assertEquals(
+      await readMachineKey("/no/such/turbopanel-machine-id"),
+      undefined,
+    );
+    resetMachineKeyCacheForTests();
+  },
 });

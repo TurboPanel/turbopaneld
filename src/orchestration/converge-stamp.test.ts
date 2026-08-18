@@ -1,13 +1,15 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
-import { dirname } from "@std/path";
+import { dirname, join } from "@std/path";
 import {
   computeDevConvergeStamp,
   describeDevConvergeDecision,
+  devConvergeEnvMaterial,
   emitDevConvergeSkippedIfNeeded,
   resolveDevConvergeStampFile,
   shouldSkipDevConverge,
   writeDevConvergeStamp,
 } from "./converge-stamp.ts";
+import { DEV_CONVERGE_MANIFEST_FILE } from "./dev-orchestration.ts";
 import {
   type TempLayoutFixture,
   withTempLayout,
@@ -24,14 +26,41 @@ const test = Deno.test.bind(Deno);
 /** Real host stamp path — tests must never read or write this. */
 const REAL_HOST_STAMP_PREFIX = "/opt/turbopanel/vendor";
 
+async function seedDevOrchestrationTree(root: string): Promise<void> {
+  await Deno.mkdir(join(root, "roles", "dev-only"), { recursive: true });
+  await Deno.writeTextFile(
+    join(root, "roles", "dev-only", "tasks.yml"),
+    "- name: stub dev task\n  debug:\n    msg: hello\n",
+  );
+  await Deno.writeTextFile(
+    join(root, DEV_CONVERGE_MANIFEST_FILE),
+    JSON.stringify({
+      playbook: "playbook.yml",
+      roles: ["stub-shared"],
+      devRoles: ["dev-only"],
+    }),
+  );
+  await Deno.writeTextFile(
+    join(root, "playbook.yml"),
+    "---\n- hosts: localhost\n  gather_facts: false\n",
+  );
+  await Deno.writeTextFile(join(root, "ansible.cfg"), "[defaults]\n");
+}
+
 function applyFixtureEnv(
   fixture: TempLayoutFixture,
+  devOrchestrationDir: string,
 ): () => void {
   const previous = new Map<string, string | undefined>();
   for (const [key, value] of Object.entries(fixture.env)) {
     previous.set(key, Deno.env.get(key));
     Deno.env.set(key, value);
   }
+  previous.set(
+    "TURBOPANEL_DEV_ORCHESTRATION_DIR",
+    Deno.env.get("TURBOPANEL_DEV_ORCHESTRATION_DIR"),
+  );
+  Deno.env.set("TURBOPANEL_DEV_ORCHESTRATION_DIR", devOrchestrationDir);
   const previousForce = Deno.env.get("TURBOPANEL_FORCE_CONVERGE");
   previous.set("TURBOPANEL_FORCE_CONVERGE", previousForce);
   Deno.env.delete("TURBOPANEL_FORCE_CONVERGE");
@@ -51,7 +80,9 @@ async function withIsolatedStamp(
   fn: (stampFile: string, fixture: TempLayoutFixture) => Promise<void>,
 ): Promise<void> {
   await withTempLayout(async (fixture) => {
-    const restoreEnv = applyFixtureEnv(fixture);
+    const devOrchestrationDir = join(fixture.dirs.configDir, "dev-orchestration");
+    await seedDevOrchestrationTree(devOrchestrationDir);
+    const restoreEnv = applyFixtureEnv(fixture, devOrchestrationDir);
     try {
       const stampFile = resolveDevConvergeStampFile();
       if (!stampFile.startsWith(fixture.dirs.runtimesDir)) {
@@ -184,4 +215,68 @@ test("emitDevConvergeSkippedIfNeeded does not emit when stamp is missing", async
     assertEquals(skipped, false);
     assertEquals(emitted, []);
   });
+});
+
+test("devConvergeEnvMaterial captures dev-only extra-vars with defaults", () => {
+  const previous = new Map<string, string | undefined>();
+  for (const key of [
+    "TURBOPANEL_DEV_USER",
+    "TURBOPANEL_DEV_UID",
+    "TURBOPANEL_DEV_GID",
+    "TURBOPANEL_UI_MODE",
+    "TURBOPANEL_INSTANCE_RUN_MODE",
+    "TURBOPANEL_INSTANCE_RUNTIME",
+    "TURBOPANEL_OPTIONAL_DBSTUDIO",
+    "TURBOPANEL_OPTIONAL_UI",
+  ]) {
+    previous.set(key, Deno.env.get(key));
+    Deno.env.delete(key);
+  }
+  try {
+    const material = devConvergeEnvMaterial();
+    assertStringIncludes(material, "ui_mode=dev");
+    assertStringIncludes(material, "instance_run_mode=source");
+    assertStringIncludes(material, "instance_runtime=deno");
+    assertStringIncludes(material, "optional_ui=true");
+    assertStringIncludes(material, "optional_dbstudio=false");
+  } finally {
+    for (const [key, value] of previous.entries()) {
+      if (value === undefined) {
+        Deno.env.delete(key);
+      } else {
+        Deno.env.set(key, value);
+      }
+    }
+  }
+});
+
+test("devConvergeEnvMaterial honors explicit static and workers overrides", () => {
+  const previous = new Map<string, string | undefined>();
+  for (const key of [
+    "TURBOPANEL_UI_MODE",
+    "TURBOPANEL_INSTANCE_RUN_MODE",
+    "TURBOPANEL_INSTANCE_RUNTIME",
+    "TURBOPANEL_OPTIONAL_TABIX",
+  ]) {
+    previous.set(key, Deno.env.get(key));
+  }
+  Deno.env.set("TURBOPANEL_UI_MODE", "static");
+  Deno.env.set("TURBOPANEL_INSTANCE_RUN_MODE", "compiled");
+  Deno.env.set("TURBOPANEL_INSTANCE_RUNTIME", "workers");
+  Deno.env.set("TURBOPANEL_OPTIONAL_TABIX", "yes");
+  try {
+    const material = devConvergeEnvMaterial();
+    assertStringIncludes(material, "ui_mode=static");
+    assertStringIncludes(material, "instance_run_mode=compiled");
+    assertStringIncludes(material, "instance_runtime=workers");
+    assertStringIncludes(material, "optional_tabix=true");
+  } finally {
+    for (const [key, value] of previous.entries()) {
+      if (value === undefined) {
+        Deno.env.delete(key);
+      } else {
+        Deno.env.set(key, value);
+      }
+    }
+  }
 });

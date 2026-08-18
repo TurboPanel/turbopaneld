@@ -7,7 +7,16 @@
  */
 
 import type { EnvironmentDeployContainer } from "../instance/commands/contracts.ts";
-import { runDocker } from "../deploy/docker-cli.ts";
+import {
+  type DockerCliResult,
+  runDocker as defaultRunDocker,
+  type RunDockerOptions,
+} from "../deploy/docker-cli.ts";
+
+type RunDockerFn = (
+  args: string[],
+  options?: RunDockerOptions,
+) => Promise<DockerCliResult>;
 import { logInfo } from "../logger.ts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -50,9 +59,10 @@ function parseComposePsEntries(stdout: string): Record<string, unknown>[] {
 export async function collectManagedContainers(
   project: string,
   redact: (text: string) => string = (text) => text,
+  run: RunDockerFn = defaultRunDocker,
 ): Promise<EnvironmentDeployContainer[] | undefined> {
   try {
-    const result = await runDocker([
+    const result = await run([
       "compose",
       "-p",
       project,
@@ -163,8 +173,9 @@ export async function collectManagedContainersForService(
   project: string,
   serviceId: string,
   redact: (text: string) => string = (text) => text,
+  run: RunDockerFn = defaultRunDocker,
 ): Promise<EnvironmentDeployContainer[] | undefined> {
-  const containers = await collectManagedContainers(project, redact);
+  const containers = await collectManagedContainers(project, redact, run);
   if (containers === undefined) return undefined;
   return containers.map((row) => ({
     ...row,
@@ -209,6 +220,7 @@ export async function collectManagedMemberHealth(
     role: "primary" | "replica";
     redact?: (text: string) => string;
   },
+  run: RunDockerFn = defaultRunDocker,
 ): Promise<{
   containers: EnvironmentDeployContainer[] | undefined;
   member?: {
@@ -223,7 +235,7 @@ export async function collectManagedMemberHealth(
     };
   };
 }> {
-  const containers = await collectManagedContainers(project, params.redact);
+  const containers = await collectManagedContainers(project, params.redact, run);
   if (!containers || !engine.replication) {
     return { containers };
   }
@@ -239,7 +251,7 @@ export async function collectManagedMemberHealth(
         rootUsername: engine.rootUsername,
         defaultDatabase: engine.defaultDatabase,
         exec: async (argv, input) => {
-          const result = await runDocker(
+          const result = await run(
             ["exec", "-i", containerId, ...argv],
             input === undefined ? undefined : { input },
           );

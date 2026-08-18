@@ -362,3 +362,87 @@ test("buildHostingLabelsFragment unions resolved service networks with platform 
     "turbopanel-ingress",
   ]);
 });
+
+test("buildHostingLabelsFragment unions list-form networks and proxy middlewares", () => {
+  const fragment = buildHostingLabelsFragment({
+    payload: {
+      ...payload,
+      hostings: [{
+        ...payload.hostings[0],
+        pathPrefix: undefined,
+        proxy: {
+          stripPrefix: "/api",
+          gzip: true,
+          brotli: true,
+        },
+      }],
+    },
+    hostings: [{
+      ...payload.hostings[0],
+      pathPrefix: undefined,
+      proxy: {
+        stripPrefix: "/api",
+        gzip: true,
+        brotli: true,
+      },
+    }],
+    resolved: resolvedFromServices({
+      app: {
+        image: "nginx:alpine",
+        networks: ["frontend", "", 12],
+      },
+    }),
+  });
+  const labels = fragment.services?.app?.labels as Record<string, string>;
+  assertEquals(fragment.services?.app?.networks, [
+    "frontend",
+    "turbopanel-ingress",
+  ]);
+  assertEquals(
+    labels["traefik.http.routers.hosting_123.rule"],
+    "Host(`app.example.test`) || Host(`www.example.test`)",
+  );
+  assertEquals(
+    labels["traefik.http.middlewares.hosting_123-strip.stripprefix.prefixes"],
+    "/api",
+  );
+  assertEquals(
+    labels["traefik.http.middlewares.hosting_123-compress.compress"],
+    "true",
+  );
+  assertEquals(
+    labels[
+      "traefik.http.middlewares.hosting_123-compress.compress.encodings"
+    ],
+    "gzip,br",
+  );
+});
+
+test("buildHostingLabelsFragment rejects unsafe router ids and pathPrefix", () => {
+  assertThrows(
+    () =>
+      buildHostingLabelsFragment({
+        payload,
+        hostings: [{
+          ...payload.hostings[0],
+          hostingId: "bad.id",
+        }],
+        resolved: appResolved,
+      }),
+    Error,
+    "must contain only letters, digits, hyphens, and underscores",
+  );
+  assertThrows(
+    () =>
+      buildHostingLabelsFragment({
+        payload,
+        hostings: [{
+          ...payload.hostings[0],
+          pathPrefix: "/api`x",
+        }],
+        resolved: appResolved,
+      }),
+    Error,
+    "unsupported character",
+  );
+});

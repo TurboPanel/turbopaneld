@@ -13,18 +13,24 @@ import {
 import {
   computeFabricApplyStamp,
   FABRIC_DEFAULT_MTU,
+  FABRIC_HANDSHAKE_HEALTHY_MS,
   FABRIC_INTERFACE_NAME,
+  classifyPeerHandshakeHealth,
   fabricCrossSubnetForwardPairs,
   fabricOwnedPeerPrefixes,
   type FabricRunFn,
   type FabricRunResult,
+  handleFabricPathProbe,
   handleFabricReconcile,
+  isFreshProbeHandshake,
   parsePeerPresharedKeysFromWgConf,
+  parseWgDumpPeers,
   reinstallFabricForwardingIfEnabled,
   resetFabricTestOverrides,
   restoreFabricFromPersistedState,
   setFabricNetworkDirForTests,
   setFabricRunForTests,
+  setFabricEnableIpForwardingForTests,
   setFabricSkipRealSyscallsForTests,
 } from "./fabric.ts";
 
@@ -38,6 +44,7 @@ const test = Deno.test.bind(Deno);
 
 const WG_PUBKEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 const WG_PUBKEY_B = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=";
+const WG_PUBKEY_C = "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE=";
 const WG_PRIVKEY = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC=";
 const WG_PSK = "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD=";
 const FABRIC_ID = "550e8400-e29b-41d4-a716-446655440000";
@@ -53,11 +60,15 @@ function fail(stderr: string): FabricRunResult {
   return { success: false, code: 1, stdout: "", stderr };
 }
 
-function dumpStdout(): string {
+function dumpStdoutWith(endpoint: string, handshakeUnix: number): string {
   return [
     `${WG_PRIVKEY}\t${WG_PUBKEY}\t51820\toff`,
-    `${WG_PUBKEY_B}\t(none)\t203.0.113.1:51820\t10.250.0.12/32\t${HANDSHAKE_UNIX}\t100\t200\t25`,
+    `${WG_PUBKEY_B}\t(none)\t${endpoint}\t10.250.0.12/32\t${handshakeUnix}\t100\t200\t25`,
   ].join("\n");
+}
+
+function dumpStdout(): string {
+  return dumpStdoutWith("203.0.113.1:51820", HANDSHAKE_UNIX);
 }
 
 function enabledPayload(): Record<string, unknown> {
@@ -866,3 +877,647 @@ test("reconcile prunes a docker network dropped from desired state", async () =>
     },
   );
 });
+
+function iptablesCheckKey(args: string[]): string {
+  if (args[0] === "-I" && args[2] === "1") {
+    return [args[1], ...args.slice(3)].join(" ");
+  }
+  return args.slice(1).join(" ");
+}
+
+function trackingIptablesExtras(): (
+  cmd: string,
+  args: string[],
+) => FabricRunResult | null {
+  const rules = new Set<string>();
+  return (cmd, args) => {
+    if (cmd !== "iptables") return null;
+    if (args[0] === "-N") return null;
+    const key = iptablesCheckKey(args);
+    if (args[0] === "-C") {
+      return rules.has(key) ? ok() : fail("No chain/target/match by that name");
+    }
+    if (args[0] === "-A" || args[0] === "-I") {
+      rules.add(key);
+      return ok();
+    }
+    if (args[0] === "-D") {
+      rules.delete(key);
+      return ok();
+    }
+    return null;
+  };
+}
+
+test("gateway payload installs tp0 transit ACCEPT and member installs DROP", async () => {
+  await withFabricDir("tp-fabric-gw-fwd-", async (_networkDir, invocations) => {
+    const parsed = parseFabricReconcilePayload({
+      ...enabledPayload(),
+      gateway: true,
+    });
+    if (!parsed.enabled) throw new TypeError("expected enabled fabric payload");
+    await handleFabricReconcile(parsed, new Date().toISOString());
+    const joined = invocations.join("\n");
+    assertEquals(
+      joined.includes("iptables -A TP-FORWARD -i tp0 -o tp0 -j ACCEPT"),
+      true,
+    );
+    assertEquals(
+      joined.includes("iptables -I TP-FORWARD 1 -i tp0 -o tp0 -j DROP"),
+      false,
+    );
+  });
+  await withFabricDir("tp-fabric-mem-fwd-", async (_networkDir, invocations) => {
+    const parsed = parseFabricReconcilePayload(enabledPayload());
+    if (!parsed.enabled) throw new TypeError("expected enabled fabric payload");
+    await handleFabricReconcile(parsed, new Date().toISOString());
+    const joined = invocations.join("\n");
+    assertEquals(
+      joined.includes("iptables -I TP-FORWARD 1 -i tp0 -o tp0 -j DROP"),
+      true,
+    );
+    assertEquals(
+      joined.includes("iptables -A TP-FORWARD -i tp0 -o tp0 -j ACCEPT"),
+      false,
+    );
+  });
+});
+
+test("gateway to member flip removes ACCEPT and inserts DROP", async () => {
+  const extras = trackingIptablesExtras();
+  await withFabricDir(
+    "tp-fabric-gw-flip-",
+    async (_networkDir, invocations) => {
+      const gatewayParsed = parseFabricReconcilePayload({
+        ...enabledPayload(),
+        gateway: true,
+      });
+      if (!gatewayParsed.enabled) {
+        throw new TypeError("expected enabled fabric payload");
+      }
+      await handleFabricReconcile(gatewayParsed, new Date().toISOString());
+      invocations.length = 0;
+      const memberParsed = parseFabricReconcilePayload({
+        ...enabledPayload(),
+        gateway: false,
+      });
+      if (!memberParsed.enabled) {
+        throw new TypeError("expected enabled fabric payload");
+      }
+      await handleFabricReconcile(memberParsed, new Date().toISOString());
+      const joined = invocations.join("\n");
+      assertEquals(
+        joined.includes("iptables -D TP-FORWARD -i tp0 -o tp0 -j ACCEPT"),
+        true,
+      );
+      assertEquals(
+        joined.includes("iptables -I TP-FORWARD 1 -i tp0 -o tp0 -j DROP"),
+        true,
+      );
+    },
+    extras,
+  );
+});
+
+test("member to gateway flip removes DROP and inserts ACCEPT", async () => {
+  const extras = trackingIptablesExtras();
+  await withFabricDir(
+    "tp-fabric-mem-flip-",
+    async (_networkDir, invocations) => {
+      const memberParsed = parseFabricReconcilePayload({
+        ...enabledPayload(),
+        gateway: false,
+      });
+      if (!memberParsed.enabled) {
+        throw new TypeError("expected enabled fabric payload");
+      }
+      await handleFabricReconcile(memberParsed, new Date().toISOString());
+      invocations.length = 0;
+      const gatewayParsed = parseFabricReconcilePayload({
+        ...enabledPayload(),
+        gateway: true,
+      });
+      if (!gatewayParsed.enabled) {
+        throw new TypeError("expected enabled fabric payload");
+      }
+      await handleFabricReconcile(gatewayParsed, new Date().toISOString());
+      const joined = invocations.join("\n");
+      assertEquals(
+        joined.includes("iptables -D TP-FORWARD -i tp0 -o tp0 -j DROP"),
+        true,
+      );
+      assertEquals(
+        joined.includes("iptables -A TP-FORWARD -i tp0 -o tp0 -j ACCEPT"),
+        true,
+      );
+    },
+    extras,
+  );
+});
+
+test("state.json round-trips the gateway flag", async () => {
+  await withFabricDir("tp-fabric-gw-state-", async (networkDir) => {
+    const parsed = parseFabricReconcilePayload({
+      ...enabledPayload(),
+      gateway: true,
+    });
+    if (!parsed.enabled) throw new TypeError("expected enabled fabric payload");
+    await handleFabricReconcile(parsed, new Date().toISOString());
+    const state = JSON.parse(
+      await Deno.readTextFile(join(networkDir, "state.json")),
+    ) as { gateway?: boolean };
+    assertEquals(state.gateway, true);
+  });
+});
+
+test("apply-stamp fast path re-applies when gateway role changes", async () => {
+  await withFabricDir("tp-fabric-gw-stamp-", async (_networkDir, invocations) => {
+    const memberParsed = parseFabricReconcilePayload({
+      ...enabledPayload(),
+      gateway: false,
+    });
+    if (!memberParsed.enabled) {
+      throw new TypeError("expected enabled fabric payload");
+    }
+    const first = await handleFabricReconcile(
+      memberParsed,
+      new Date().toISOString(),
+    );
+    assertEquals(first.skipped, undefined);
+    invocations.length = 0;
+    const gatewayParsed = parseFabricReconcilePayload({
+      ...enabledPayload(),
+      gateway: true,
+    });
+    if (!gatewayParsed.enabled) {
+      throw new TypeError("expected enabled fabric payload");
+    }
+    const second = await handleFabricReconcile(
+      gatewayParsed,
+      new Date().toISOString(),
+    );
+    assertEquals(second.skipped, undefined);
+    assertEquals(
+      invocations.some((line) => line.includes("wg syncconf tp0")),
+      true,
+    );
+  });
+});
+
+test("route-ownership transition drops the old direct peer from tp0.conf", async () => {
+  await withFabricDir("tp-fabric-route-own-", async (networkDir) => {
+    const direct = parseFabricReconcilePayload({
+      ...enabledPayload(),
+      peers: [
+        {
+          publicKey: WG_PUBKEY_B,
+          endpoint: "203.0.113.1:51820",
+          allowedIPs: ["10.250.0.12/32", "10.193.0.0/16"],
+          keepalive: 25,
+        },
+        {
+          publicKey: WG_PUBKEY_C,
+          endpoint: "203.0.113.2:51820",
+          allowedIPs: ["10.250.0.13/32", "10.194.0.0/16"],
+          keepalive: 25,
+        },
+      ],
+    });
+    if (!direct.enabled) throw new TypeError("expected enabled fabric payload");
+    await handleFabricReconcile(direct, new Date().toISOString());
+    const before = await Deno.readTextFile(
+      join(networkDir, "wireguard", "tp0.conf"),
+    );
+    assertEquals(before.includes(`PublicKey = ${WG_PUBKEY_C}`), true);
+    const routed = parseFabricReconcilePayload({
+      ...enabledPayload(),
+      peers: [
+        {
+          publicKey: WG_PUBKEY_B,
+          endpoint: "203.0.113.1:51820",
+          allowedIPs: [
+            "10.250.0.12/32",
+            "10.193.0.0/16",
+            "10.250.0.13/32",
+            "10.194.0.0/16",
+          ],
+          keepalive: 25,
+          pathKind: "gateway",
+          viaServerId: "550e8400-e29b-41d4-a716-446655440001",
+        },
+      ],
+    });
+    if (!routed.enabled) throw new TypeError("expected enabled fabric payload");
+    await handleFabricReconcile(routed, new Date().toISOString());
+    const after = await Deno.readTextFile(
+      join(networkDir, "wireguard", "tp0.conf"),
+    );
+    assertEquals(after.includes(`PublicKey = ${WG_PUBKEY_B}`), true);
+    assertEquals(after.includes(`PublicKey = ${WG_PUBKEY_C}`), false);
+    assertEquals(after.includes("10.250.0.13/32"), true);
+    assertEquals(after.includes("10.194.0.0/16"), true);
+  });
+});
+
+function dumpPeerLine(opts: {
+  publicKey: string;
+  endpoint: string;
+  handshake: number;
+}): string {
+  return [
+    opts.publicKey,
+    "(none)",
+    opts.endpoint,
+    "10.250.0.12/32",
+    String(opts.handshake),
+    "100",
+    "200",
+    "25",
+  ].join("\t");
+}
+
+test("parseWgDumpPeers reads kernel endpoint and skips none or malformed", () => {
+  const peers = parseWgDumpPeers([
+    `${WG_PRIVKEY}\t${WG_PUBKEY}\t51820\toff`,
+    dumpPeerLine({
+      publicKey: WG_PUBKEY_B,
+      endpoint: "203.0.113.1:51820",
+      handshake: HANDSHAKE_UNIX,
+    }),
+    dumpPeerLine({
+      publicKey: WG_PUBKEY_C,
+      endpoint: "(none)",
+      handshake: 0,
+    }),
+    dumpPeerLine({
+      publicKey: "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF=",
+      endpoint: "not-an-endpoint",
+      handshake: 0,
+    }),
+  ].join("\n"));
+  assertEquals(peers.length, 3);
+  assertEquals(peers[0]?.publicKey, WG_PUBKEY_B);
+  assertEquals(peers[0]?.endpoint, "203.0.113.1:51820");
+  assertEquals(peers[1]?.publicKey, WG_PUBKEY_C);
+  assertEquals(peers[1]?.endpoint, undefined);
+  assertEquals(peers[2]?.endpoint, undefined);
+});
+
+test("classifyPeerHandshakeHealth maps missing, fresh, and aged handshakes", () => {
+  const now = Date.parse("2026-08-18T18:00:00.000Z");
+  assertEquals(classifyPeerHandshakeHealth(undefined, now), "never");
+  assertEquals(
+    classifyPeerHandshakeHealth(
+      new Date(now - FABRIC_HANDSHAKE_HEALTHY_MS).toISOString(),
+      now,
+    ),
+    "healthy",
+  );
+  assertEquals(
+    classifyPeerHandshakeHealth(
+      new Date(now - FABRIC_HANDSHAKE_HEALTHY_MS - 1).toISOString(),
+      now,
+    ),
+    "stale",
+  );
+});
+
+test("handleFabricPathProbe collect-only returns dump health", async () => {
+  await withFabricDir("tp-fabric-paths-collect-", async () => {
+    const paths = await handleFabricPathProbe({
+      id: "req-1",
+      fabricId: FABRIC_ID,
+      probeMs: 0,
+      candidates: [],
+      at: new Date().toISOString(),
+    });
+    assertEquals(paths[0]?.publicKey, WG_PUBKEY_B);
+    assertEquals(paths[0]?.endpoint, "203.0.113.1:51820");
+    assertEquals(paths[0]?.health, "stale");
+  });
+});
+
+test("handleFabricPathProbe applies candidates then restores after a failed handshake", async () => {
+  await withFabricDir("tp-fabric-paths-probe-", async (networkDir, invocations) => {
+    const payload = parseFabricReconcilePayload(enabledPayload());
+    if (!payload.enabled) throw new TypeError("expected enabled fabric payload");
+    await handleFabricReconcile(payload, new Date().toISOString());
+    const stampPath = join(networkDir, "apply.stamp");
+    const stampBefore = await Deno.readTextFile(stampPath);
+
+    invocations.length = 0;
+    const paths = await handleFabricPathProbe({
+      id: "req-2",
+      fabricId: FABRIC_ID,
+      probeMs: 0,
+      candidates: [{
+        publicKey: WG_PUBKEY_B,
+        endpoints: ["203.0.113.50:48172"],
+      }],
+      at: new Date().toISOString(),
+    });
+    assertEquals(paths[0]?.health === "healthy", false);
+    const joined = invocations.join("\n");
+    assertEquals(
+      joined.includes(
+        `wg set ${FABRIC_INTERFACE_NAME} peer ${WG_PUBKEY_B} endpoint 203.0.113.50:48172 persistent-keepalive 25`,
+      ),
+      true,
+    );
+    assertEquals(
+      joined.includes(
+        `wg set ${FABRIC_INTERFACE_NAME} peer ${WG_PUBKEY_B} endpoint 203.0.113.1:51820 persistent-keepalive 25`,
+      ),
+      true,
+    );
+    const stampAfter = await Deno.readTextFile(stampPath);
+    assertEquals(stampAfter, stampBefore);
+  });
+});
+
+test("isFreshProbeHandshake requires a handshake newer than the previous value and probe start", () => {
+  const start = Date.parse("2026-08-18T18:00:00.000Z");
+  const previous = new Date(start - 10_000).toISOString();
+  assertEquals(
+    isFreshProbeHandshake(previous, previous, start),
+    false,
+  );
+  assertEquals(
+    isFreshProbeHandshake(
+      previous,
+      new Date(start).toISOString(),
+      start,
+    ),
+    false,
+  );
+  assertEquals(
+    isFreshProbeHandshake(
+      previous,
+      new Date(start + 1).toISOString(),
+      start,
+    ),
+    true,
+  );
+});
+
+test("handleFabricPathProbe does not treat a recent pre-probe handshake as success", async () => {
+  const recentUnix = Math.floor(Date.now() / 1000) - 10;
+  await withFabricDir(
+    "tp-fabric-paths-stale-healthy-",
+    async (_networkDir, invocations) => {
+      const payload = parseFabricReconcilePayload(enabledPayload());
+      if (!payload.enabled) {
+        throw new TypeError("expected enabled fabric payload");
+      }
+      await handleFabricReconcile(payload, new Date().toISOString());
+      invocations.length = 0;
+      const paths = await handleFabricPathProbe({
+        id: "req-recent",
+        fabricId: FABRIC_ID,
+        probeMs: 0,
+        candidates: [{
+          publicKey: WG_PUBKEY_B,
+          endpoints: ["203.0.113.50:48172"],
+        }],
+        at: new Date().toISOString(),
+      });
+      assertEquals(paths[0]?.publicKey, WG_PUBKEY_B);
+      assertEquals(paths[0]?.health, "never");
+      const joined = invocations.join("\n");
+      assertEquals(
+        joined.includes(
+          `wg set ${FABRIC_INTERFACE_NAME} peer ${WG_PUBKEY_B} endpoint 203.0.113.50:48172 persistent-keepalive 25`,
+        ),
+        true,
+      );
+      assertEquals(
+        joined.includes(
+          `wg set ${FABRIC_INTERFACE_NAME} peer ${WG_PUBKEY_B} endpoint 203.0.113.1:51820 persistent-keepalive 25`,
+        ),
+        true,
+      );
+    },
+    (_cmd, args) => {
+      if (_cmd === "wg" && args[0] === "show" && args[2] === "dump") {
+        return ok(dumpStdoutWith("203.0.113.1:51820", recentUnix));
+      }
+      return null;
+    },
+  );
+});
+
+test("handleFabricPathProbe restores the durable endpoint and clears keepalive", async () => {
+  const recentUnix = Math.floor(Date.now() / 1000) - 5;
+  await withFabricDir(
+    "tp-fabric-paths-restore-ka-",
+    async (networkDir, invocations) => {
+      await Deno.writeTextFile(
+        join(networkDir, "state.json"),
+        JSON.stringify({
+          publicKey: WG_PUBKEY,
+          address: "10.250.0.11/32",
+          prefix: "10.192.0.0/16",
+          peers: [{
+            publicKey: WG_PUBKEY_B,
+            endpoint: "203.0.113.1:51820",
+            allowedIPs: ["10.250.0.12/32"],
+          }],
+          networks: [],
+        }),
+      );
+      const paths = await handleFabricPathProbe({
+        id: "req-restore",
+        fabricId: FABRIC_ID,
+        probeMs: 0,
+        candidates: [{
+          publicKey: WG_PUBKEY_B,
+          endpoints: ["203.0.113.50:48172"],
+        }],
+        at: new Date().toISOString(),
+      });
+      assertEquals(paths[0]?.health, "never");
+      const joined = invocations.join("\n");
+      assertEquals(
+        joined.includes(
+          `wg set ${FABRIC_INTERFACE_NAME} peer ${WG_PUBKEY_B} endpoint 203.0.113.1:51820 persistent-keepalive 0`,
+        ),
+        true,
+      );
+      assertEquals(
+        joined.includes(
+          `wg set ${FABRIC_INTERFACE_NAME} peer ${WG_PUBKEY_B} endpoint 198.51.100.9:51820 persistent-keepalive 25`,
+        ),
+        false,
+      );
+    },
+    (_cmd, args) => {
+      if (_cmd === "wg" && args[0] === "show" && args[2] === "dump") {
+        return ok(dumpStdoutWith("198.51.100.9:51820", recentUnix));
+      }
+      return null;
+    },
+  );
+});
+
+test("handleFabricPathProbe excludes a candidate when wg set fails", async () => {
+  await withFabricDir(
+    "tp-fabric-paths-set-fail-",
+    async (_networkDir, invocations) => {
+      const paths = await handleFabricPathProbe({
+        id: "req-fail",
+        fabricId: FABRIC_ID,
+        probeMs: 0,
+        candidates: [{
+          publicKey: WG_PUBKEY_B,
+          endpoints: ["203.0.113.50:48172"],
+        }],
+        at: new Date().toISOString(),
+      });
+      assertEquals(paths.some((row) => row.publicKey === WG_PUBKEY_B), false);
+      const joined = invocations.join("\n");
+      assertEquals(
+        joined.includes(
+          `wg set ${FABRIC_INTERFACE_NAME} peer ${WG_PUBKEY_B} endpoint 203.0.113.1:51820`,
+        ),
+        false,
+      );
+    },
+    (cmd, args) => {
+      if (
+        cmd === "wg" && args[0] === "set" &&
+        args.includes("203.0.113.50:48172")
+      ) {
+        return fail("Unable to modify peer");
+      }
+      return null;
+    },
+  );
+});
+
+test("fabricOwnedPeerPrefixes ignores malformed CIDR tokens", () => {
+  assertEquals(
+    fabricOwnedPeerPrefixes([
+      { allowedIPs: ["not-a-cidr", "10.0.0.0/32", "10.0.0.0/33", "bad"] },
+    ]),
+    [],
+  );
+  assertEquals(
+    fabricCrossSubnetForwardPairs(["10.192.11.0/24"], ["10.192.11.0/24"]),
+    [],
+  );
+});
+
+test("handleFabricReconcile uses injectable IPv4 forwarding hook", async () => {
+  let forwardingCalls = 0;
+  await withFabricDir("tp-fabric-forward-hook-", async () => {
+    setFabricEnableIpForwardingForTests(async () => {
+      await Promise.resolve();
+      forwardingCalls += 1;
+    });
+    const parsed = parseFabricReconcilePayload(enabledPayload());
+    if (!parsed.enabled) {
+      throw new TypeError("expected enabled fabric payload");
+    }
+    await handleFabricReconcile(parsed, new Date().toISOString());
+    assertEquals(forwardingCalls, 1);
+  });
+});
+
+test("handleFabricReconcile falls back when sysctl -p fails", async () => {
+  await withFabricDir(
+    "tp-fabric-sysctl-fallback-",
+    async (_networkDir, invocations) => {
+      const parsed = parseFabricReconcilePayload(enabledPayload());
+      if (!parsed.enabled) {
+        throw new TypeError("expected enabled fabric payload");
+      }
+      await handleFabricReconcile(parsed, new Date().toISOString());
+      assertEquals(
+        invocations.some((line) =>
+          line.includes("sysctl -w net.ipv4.ip_forward=1")
+        ),
+        true,
+      );
+    },
+    (cmd, args) => {
+      if (cmd === "sysctl" && args[0] === "-p") {
+        return fail("drop-in apply failed");
+      }
+      return null;
+    },
+  );
+});
+
+test("handleFabricReconcile requires decryptSecrets when PSK envelopes are present", async () => {
+  await withFabricDir("tp-fabric-psk-missing-decrypt-", async () => {
+    const parsed = parseFabricReconcilePayload({
+      ...enabledPayload(),
+      peers: [{
+        publicKey: WG_PUBKEY_B,
+        endpoint: "203.0.113.1:51820",
+        allowedIPs: ["10.250.0.12/32"],
+        presharedKeyEnvelope: "tpdaemon.v1.psk",
+      }],
+    });
+    if (!parsed.enabled) {
+      throw new TypeError("expected enabled fabric payload");
+    }
+    await assertRejects(
+      () => handleFabricReconcile(parsed, new Date().toISOString()),
+      Error,
+      "TurboFabric preshared keys present but secrets decrypt is unavailable",
+    );
+  });
+});
+
+test("handleFabricReconcile rejects failed PSK decrypt", async () => {
+  await withFabricDir("tp-fabric-psk-fail-", async () => {
+    const parsed = parseFabricReconcilePayload({
+      ...enabledPayload(),
+      peers: [{
+        publicKey: WG_PUBKEY_B,
+        endpoint: "203.0.113.1:51820",
+        allowedIPs: ["10.250.0.12/32"],
+        presharedKeyEnvelope: "tpdaemon.v1.psk",
+      }],
+    });
+    if (!parsed.enabled) {
+      throw new TypeError("expected enabled fabric payload");
+    }
+    await assertRejects(
+      () =>
+        handleFabricReconcile(parsed, new Date().toISOString(), {
+          decryptSecrets: async () => {
+            await Promise.resolve();
+            return [null];
+          },
+        }),
+      Error,
+      "Failed to decrypt TurboFabric preshared key",
+    );
+  });
+});
+
+test("handleFabricReconcile surfaces wg syncconf failures", async () => {
+  await withFabricDir(
+    "tp-fabric-sync-fail-",
+    async () => {
+      const parsed = parseFabricReconcilePayload(enabledPayload());
+      if (!parsed.enabled) {
+        throw new TypeError("expected enabled fabric payload");
+      }
+      await assertRejects(
+        () => handleFabricReconcile(parsed, new Date().toISOString()),
+        Error,
+        "wg syncconf failed",
+      );
+    },
+    (cmd, args) => {
+      if (cmd === "wg" && args[0] === "syncconf") {
+        return fail("wg syncconf failed");
+      }
+      return null;
+    },
+  );
+});
+

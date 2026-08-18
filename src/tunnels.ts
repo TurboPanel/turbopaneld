@@ -20,16 +20,63 @@ interface TunnelConfig {
 
 const CLOUDFLARE_TUNNELS_ENABLED = false;
 
+/** Injected hooks for host-free unit tests. Production leaves this unset. */
+export type TunnelsTestHooks = {
+  enabled?: boolean;
+  tunnelsDir?: string;
+  ensureCloudflared?: () => Promise<string>;
+  /** Override the 5s restart backoff (tests use 0). */
+  delay?: (ms: number) => Promise<void>;
+  /**
+   * Replace `Deno.Command` spawn for one tunnel run. Resolves with the process
+   * exit code; should respect `signal` abort.
+   */
+  runTunnel?: (
+    bin: string,
+    args: string[],
+    signal: AbortSignal,
+  ) => Promise<{ code: number }>;
+};
+
+let testHooks: TunnelsTestHooks | null = null;
+
+/** Test-only: override tunnels runtime hooks. Pass `null` to reset. */
+export function setTunnelsTestHooks(hooks: TunnelsTestHooks | null): void {
+  testHooks = hooks;
+}
+
+/** Test-only: clear parent/run abort state between suites. */
+export function resetTunnelsRuntimeForTests(): void {
+  parentSignal = null;
+  runAbort?.abort();
+  runAbort = null;
+}
+
+function tunnelsEnabled(): boolean {
+  return testHooks?.enabled ?? CLOUDFLARE_TUNNELS_ENABLED;
+}
+
+function resolveTunnelsDir(): string {
+  return testHooks?.tunnelsDir ?? TUNNELS_DIR;
+}
+
+async function resolveCloudflaredBin(): Promise<string> {
+  if (testHooks?.ensureCloudflared) return await testHooks.ensureCloudflared();
+  return await ensureCloudflared();
+}
+
 function delay(ms: number): Promise<void> {
+  if (testHooks?.delay) return testHooks.delay(ms);
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function readTunnelConfigs(): Promise<TunnelConfig[]> {
   const configs: TunnelConfig[] = [];
+  const dir = resolveTunnelsDir();
   try {
-    for await (const entry of Deno.readDir(TUNNELS_DIR)) {
+    for await (const entry of Deno.readDir(dir)) {
       if (!entry.isFile || !entry.name.endsWith(".token")) continue;
-      const token = (await Deno.readTextFile(join(TUNNELS_DIR, entry.name)))
+      const token = (await Deno.readTextFile(join(dir, entry.name)))
         .trim();
       if (!token) {
         logWarn("tunnels", `${entry.name} is empty; skipping`);
@@ -51,24 +98,37 @@ function superviseTunnel(
   void (async () => {
     while (!signal.aborted) {
       logInfo("tunnels", `starting tunnel "${config.name}"`);
-      const command = new Deno.Command(bin, {
-        args: ["--no-autoupdate", "tunnel", "run", "--token", config.token],
-        stdout: "inherit",
-        stderr: "inherit",
-      });
-      const child = command.spawn();
+      const args = [
+        "--no-autoupdate",
+        "tunnel",
+        "run",
+        "--token",
+        config.token,
+      ];
 
-      const onAbort = () => {
-        try {
-          child.kill("SIGTERM");
-        } catch {
-          // already exited
-        }
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
+      let status: { code: number };
+      if (testHooks?.runTunnel) {
+        status = await testHooks.runTunnel(bin, args, signal);
+      } else {
+        const command = new Deno.Command(bin, {
+          args,
+          stdout: "inherit",
+          stderr: "inherit",
+        });
+        const child = command.spawn();
 
-      const status = await child.status;
-      signal.removeEventListener("abort", onAbort);
+        const onAbort = () => {
+          try {
+            child.kill("SIGTERM");
+          } catch {
+            // already exited
+          }
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+
+        status = await child.status;
+        signal.removeEventListener("abort", onAbort);
+      }
 
       if (signal.aborted) break;
       logWarn(
@@ -97,15 +157,16 @@ async function launchTunnels(): Promise<void> {
   runAbort = ac;
   parentSignal.addEventListener("abort", () => ac.abort(), { once: true });
 
+  const dir = resolveTunnelsDir();
   const configs = await readTunnelConfigs();
   if (configs.length === 0) {
-    logInfo("tunnels", `no tunnel tokens in ${TUNNELS_DIR}; skipping`);
+    logInfo("tunnels", `no tunnel tokens in ${dir}; skipping`);
     return;
   }
 
   let bin: string;
   try {
-    bin = await ensureCloudflared();
+    bin = await resolveCloudflaredBin();
   } catch (err) {
     logError(
       "tunnels",
@@ -128,7 +189,7 @@ async function launchTunnels(): Promise<void> {
  * installed.
  */
 export async function startTunnels(signal: AbortSignal): Promise<void> {
-  if (!CLOUDFLARE_TUNNELS_ENABLED) {
+  if (!tunnelsEnabled()) {
     logInfo("tunnels", "Cloudflare tunnels disabled; skipping");
     return;
   }
@@ -144,14 +205,15 @@ export async function startTunnels(signal: AbortSignal): Promise<void> {
  * An empty token removes the tunnel.
  */
 export async function writeInstanceTunnelToken(token: string): Promise<void> {
-  if (!CLOUDFLARE_TUNNELS_ENABLED) {
+  if (!tunnelsEnabled()) {
     logInfo("tunnels", "Cloudflare tunnels disabled; ignoring tunnel token");
     return;
   }
 
   const trimmed = token.trim();
-  await Deno.mkdir(TUNNELS_DIR, { recursive: true });
-  const path = join(TUNNELS_DIR, `${INSTANCE_TUNNEL_NAME}.token`);
+  const dir = resolveTunnelsDir();
+  await Deno.mkdir(dir, { recursive: true });
+  const path = join(dir, `${INSTANCE_TUNNEL_NAME}.token`);
 
   if (!trimmed) {
     await Deno.remove(path).catch(() => {});

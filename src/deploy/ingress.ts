@@ -97,7 +97,7 @@ export class TcpUdpPortConflictError extends Error {
  * Protocol ports reserved for the shared ProxySQL managed-ingress listeners.
  * Tenant raw `tcp`/`udp` hostings must not claim these.
  */
-export const PROXYSQL_RESERVED_PUBLISHED_PORTS = new Set([5432, 3306]);
+export const PROXYSQL_RESERVED_PUBLISHED_PORTS = new Set([15432, 16306]);
 
 /** Raised when a tenant claim tries to take a ProxySQL listener port. */
 export class TcpUdpPortReservedError extends Error {
@@ -138,7 +138,29 @@ type CommandResult = {
   stderr: string;
 };
 
-async function run(
+/** Injectable host command runner (sudo/systemctl) for host-free unit tests. */
+export type IngressHostCommandFn = (
+  command: string,
+  args: string[],
+) => Promise<CommandResult>;
+
+let hostCommandOverride: IngressHostCommandFn | undefined;
+
+/**
+ * Test-only injection for hosting Caddy install/reload sudo paths.
+ * Returns a restore function that clears the override.
+ */
+export function setIngressHostCommandForTest(
+  fn?: IngressHostCommandFn,
+): () => void {
+  const previous = hostCommandOverride;
+  hostCommandOverride = fn;
+  return () => {
+    hostCommandOverride = previous;
+  };
+}
+
+async function runDefault(
   command: string,
   args: string[],
 ): Promise<CommandResult> {
@@ -154,19 +176,37 @@ async function run(
   };
 }
 
+async function run(
+  command: string,
+  args: string[],
+): Promise<CommandResult> {
+  const impl = hostCommandOverride ?? runDefault;
+  return await impl(command, args);
+}
+
 function commandError(action: string, result: CommandResult): Error {
   return new Error(result.stderr || `${action} failed`);
 }
 
-async function ensureIngressNetwork(): Promise<void> {
-  const inspect = await defaultRunDocker([
+type RunDockerFn = (
+  args: string[],
+  options?: RunDockerOptions,
+) => Promise<DockerCliResult>;
+
+/** Optional test seams for {@link inspectHostingIngressContainer}. */
+export type InspectHostingIngressDeps = {
+  runDocker?: RunDockerFn;
+};
+
+async function ensureIngressNetwork(run: RunDockerFn = defaultRunDocker): Promise<void> {
+  const inspect = await run([
     "network",
     "inspect",
     INGRESS_NETWORK,
   ]);
   if (inspect.success) return;
 
-  const create = await defaultRunDocker(["network", "create", INGRESS_NETWORK]);
+  const create = await run(["network", "create", INGRESS_NETWORK]);
   if (!create.success) {
     throw commandError("Creating ingress Docker network", create);
   }
@@ -489,11 +529,20 @@ export async function ensureHostingCaddyRuntime(
   await installAndStartCaddy(unitSource);
 }
 
+/** Optional test seams for {@link ensureHostingIngress}. */
+export type EnsureHostingIngressDeps = {
+  runDocker?: RunDockerFn;
+  /** When set, skips binary/unit install (host-free tests). */
+  ensureHostingCaddyRuntime?: (layout: LayoutPaths) => Promise<void>;
+};
+
 /** Ensure the shared HTTP-only Traefik + hosting Caddy runtime. */
 export async function ensureHostingIngress(
   layout: LayoutPaths,
+  deps?: EnsureHostingIngressDeps,
 ): Promise<void> {
-  await ensureIngressNetwork();
+  const run = deps?.runDocker ?? defaultRunDocker;
+  await ensureIngressNetwork(run);
 
   const ingressDir = hostingIngressDir(layout);
   await Deno.mkdir(ingressDir, { recursive: true, mode: 0o750 });
@@ -517,7 +566,7 @@ export async function ensureHostingIngress(
   await Deno.writeTextFile(composePath, traefikCompose(descriptor), {
     mode: 0o640,
   });
-  const composeUp = await defaultRunDocker([
+  const composeUp = await run([
     "compose",
     "-p",
     HOSTING_INGRESS_PROJECT,
@@ -531,18 +580,10 @@ export async function ensureHostingIngress(
     throw commandError("Starting Traefik ingress", composeUp);
   }
 
-  await ensureHostingCaddyRuntime(layout);
+  const ensureCaddy = deps?.ensureHostingCaddyRuntime ??
+    ensureHostingCaddyRuntime;
+  await ensureCaddy(layout);
 }
-
-type RunDockerFn = (
-  args: string[],
-  options?: RunDockerOptions,
-) => Promise<DockerCliResult>;
-
-/** Optional test seams for {@link inspectHostingIngressContainer}. */
-export type InspectHostingIngressDeps = {
-  runDocker?: RunDockerFn;
-};
 
 /**
  * True when the compose-ps row carries the allowlisted platform labels for
@@ -650,6 +691,11 @@ export async function inspectHostingIngressContainer(
   }
 }
 
+/** Optional test seams for {@link ensureServiceIngress}. */
+export type EnsureServiceIngressDeps = {
+  runDocker?: RunDockerFn;
+};
+
 /**
  * Ensure this service's Traefik is running with its own entrypoint set.
  * Writes compose under `<stateDir>/ingress/services/<serviceId>/`.
@@ -659,11 +705,13 @@ export async function ensureServiceIngress(
   serviceId: string,
   entries: readonly TcpUdpIngressEntry[],
   identity: ServiceIngressIdentity,
+  deps?: EnsureServiceIngressDeps,
 ): Promise<void> {
   if (identity.serviceId !== serviceId) {
     throw new Error("ingress identity serviceId mismatch");
   }
-  await ensureIngressNetwork();
+  const run = deps?.runDocker ?? defaultRunDocker;
+  await ensureIngressNetwork(run);
 
   const ingressDir = serviceIngressDir(layout, serviceId);
   await Deno.mkdir(ingressDir, { recursive: true, mode: 0o750 });
@@ -674,7 +722,7 @@ export async function ensureServiceIngress(
     { mode: 0o640 },
   );
   const project = serviceIngressProject(serviceId);
-  const composeUp = await defaultRunDocker([
+  const composeUp = await run([
     "compose",
     "-p",
     project,
@@ -689,6 +737,11 @@ export async function ensureServiceIngress(
   }
 }
 
+/** Optional test seams for {@link removeServiceIngress}. */
+export type RemoveServiceIngressDeps = {
+  runDocker?: RunDockerFn;
+};
+
 /**
  * Best-effort `docker compose down` for this service's Traefik project, then
  * remove the per-service ingress compose directory.
@@ -696,10 +749,12 @@ export async function ensureServiceIngress(
 export async function removeServiceIngress(
   layout: LayoutPaths,
   serviceId: string,
+  deps?: RemoveServiceIngressDeps,
 ): Promise<void> {
   if (!SAFE_FILE_ID_RE.test(serviceId)) {
     throw new Error("serviceId contains unsupported characters");
   }
+  const run = deps?.runDocker ?? defaultRunDocker;
   const project = serviceIngressProject(serviceId);
   const composePath = serviceIngressComposePath(layout, serviceId);
   const ingressDir = serviceIngressDir(layout, serviceId);
@@ -710,7 +765,7 @@ export async function removeServiceIngress(
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) throw err;
   }
-  const down = await defaultRunDocker(args);
+  const down = await run(args);
   if (!down.success) {
     logWarn(
       "deploy",

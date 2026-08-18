@@ -79,13 +79,98 @@ export type HostInventoryExtras = {
   gpus?: HostGpu[];
 };
 
-const PROC_STAT = "/proc/stat";
-const PROC_MEMINFO = "/proc/meminfo";
-const PROC_CPUINFO = "/proc/cpuinfo";
-const SYS_CPU = "/sys/devices/system/cpu";
-const SYS_DRM = "/sys/class/drm";
+/**
+ * Optional filesystem / command seams for host-free {@link readHostResources}
+ * tests. Production callers omit this and use real `/proc` + `/sys`.
+ */
+export type HostInventoryIo = {
+  /** Root that contains `stat` / `meminfo` / `cpuinfo` / `driver/…`. */
+  procRoot?: string;
+  /** Root that contains `devices/system/cpu` and `class/drm`. */
+  sysRoot?: string;
+  readTextFile?: (path: string) => string | undefined;
+  readDirSync?: (path: string) => Iterable<{ name: string }>;
+  /**
+   * Optional nvidia-smi CSV (`pci.bus_id,memory.total` MiB). When omitted,
+   * production spawns `nvidia-smi`; tests typically return fixture text or
+   * `undefined` to skip the spawn.
+   */
+  nvidiaSmiCsv?: () => string | undefined;
+  /**
+   * Override the `cat` fallback used by the default reader after
+   * `Deno.readTextFileSync` fails (host-free coverage of that path).
+   */
+  runCat?: (path: string) => { code: number; stdout: Uint8Array };
+  architecture?: string;
+};
+
+const DEFAULT_PROC_ROOT = "/proc";
+const DEFAULT_SYS_ROOT = "/sys";
 const MEMINFO_LINE = /^(\w+):\s+(\d+)\s+kB/;
 const DRM_CARD = /^card(\d+)$/;
+
+type InventoryLayout = {
+  procStat: string;
+  procMeminfo: string;
+  procCpuinfo: string;
+  sysCpu: string;
+  sysDrm: string;
+  sysCpuCore: string;
+  sysCpuAtom: string;
+  sysCpuLowpower: string;
+  nvidiaGpuInfo: (slot: string) => string;
+  readTextFile: (path: string) => string | undefined;
+  readDirSync: (path: string) => Iterable<{ name: string }>;
+  nvidiaSmiCsv?: () => string | undefined;
+  architecture: string;
+};
+
+function defaultReadTextFile(
+  path: string,
+  runCat?: (path: string) => { code: number; stdout: Uint8Array },
+): string | undefined {
+  try {
+    return Deno.readTextFileSync(path);
+  } catch {
+    // Deno 2 may block /proc under scoped --allow-read; fall back to cat.
+  }
+
+  try {
+    const { code, stdout } = runCat
+      ? runCat(path)
+      : new Deno.Command("cat", {
+        args: [path],
+        stdout: "piped",
+        stderr: "null",
+      }).outputSync();
+    if (code !== 0) return undefined;
+    return new TextDecoder().decode(stdout);
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveInventoryLayout(io?: HostInventoryIo): InventoryLayout {
+  const procRoot = io?.procRoot ?? DEFAULT_PROC_ROOT;
+  const sysRoot = io?.sysRoot ?? DEFAULT_SYS_ROOT;
+  return {
+    procStat: `${procRoot}/stat`,
+    procMeminfo: `${procRoot}/meminfo`,
+    procCpuinfo: `${procRoot}/cpuinfo`,
+    sysCpu: `${sysRoot}/devices/system/cpu`,
+    sysDrm: `${sysRoot}/class/drm`,
+    sysCpuCore: `${sysRoot}/devices/cpu_core/cpus`,
+    sysCpuAtom: `${sysRoot}/devices/cpu_atom/cpus`,
+    sysCpuLowpower: `${sysRoot}/devices/cpu_lowpower/cpus`,
+    nvidiaGpuInfo: (slot) =>
+      `${procRoot}/driver/nvidia/gpus/${slot}/information`,
+    readTextFile: io?.readTextFile ??
+      ((path) => defaultReadTextFile(path, io?.runCat)),
+    readDirSync: io?.readDirSync ?? ((path) => Deno.readDirSync(path)),
+    nvidiaSmiCsv: io?.nvidiaSmiCsv,
+    architecture: io?.architecture ?? Deno.build.arch,
+  };
+}
 
 type CpuinfoField = { key: string; value: string };
 
@@ -242,26 +327,6 @@ function forEachCpuinfoProcessor(
 }
 
 let cached: HostResources | null | undefined;
-
-function readProcFile(path: string): string | undefined {
-  try {
-    return Deno.readTextFileSync(path);
-  } catch {
-    // Deno 2 may block /proc under scoped --allow-read; fall back to cat.
-  }
-
-  try {
-    const { code, stdout } = new Deno.Command("cat", {
-      args: [path],
-      stdout: "piped",
-      stderr: "null",
-    }).outputSync();
-    if (code !== 0) return undefined;
-    return new TextDecoder().decode(stdout);
-  } catch {
-    return undefined;
-  }
-}
 
 /** Count online logical CPUs from aggregate `/proc/stat` `cpuN` lines. */
 export function countCpuThreads(statText: string): number {
@@ -721,21 +786,25 @@ export function hostResourcesFromProc(
 ): HostResources | undefined {
   const resources: HostResources = {};
   const cpus = hostCpusFromProc(statText, cpuinfoText, architecture, extras);
-  if (cpus && cpus.some(hasCpuSocketFields)) resources.cpus = cpus;
+  if (cpus?.some(hasCpuSocketFields)) resources.cpus = cpus;
   if (extras?.gpus && extras.gpus.length > 0) resources.gpus = extras.gpus;
   if (memText) applyMeminfoToResources(resources, memText);
   return Object.keys(resources).length > 0 ? resources : undefined;
 }
 
-function readCpuCacheFromSysfs(cpuIndex: number): HostCpuCache | undefined {
+function readCpuCacheFromSysfs(
+  layout: InventoryLayout,
+  cpuIndex: number,
+): HostCpuCache | undefined {
   const cache: HostCpuCache = {};
   for (let index = 0; index < 8; index++) {
-    const dir = `${SYS_CPU}/cpu${cpuIndex}/cache/index${index}`;
-    const levelText = readProcFile(`${dir}/level`);
+    const dir = `${layout.sysCpu}/cpu${cpuIndex}/cache/index${index}`;
+    const levelText = layout.readTextFile(`${dir}/level`);
     if (!levelText) continue;
     const level = Number(levelText.trim());
-    const type = (readProcFile(`${dir}/type`) ?? "").trim().toLowerCase();
-    const size = parseSizeToBytes(readProcFile(`${dir}/size`) ?? "");
+    const type = (layout.readTextFile(`${dir}/type`) ?? "").trim()
+      .toLowerCase();
+    const size = parseSizeToBytes(layout.readTextFile(`${dir}/size`) ?? "");
     if (!Number.isInteger(level) || size === undefined) continue;
     applyCacheIndex(cache, level, type, size);
   }
@@ -779,11 +848,12 @@ function fillL1Sum(cache: HostCpuCache): void {
 }
 
 function readCpuFreqFromSysfs(
+  layout: InventoryLayout,
   cpuIndex: number,
 ): { speedMhz?: number; turboMhz?: number } | undefined {
-  const dir = `${SYS_CPU}/cpu${cpuIndex}/cpufreq`;
-  const speedMhz = khzTextToMhz(readProcFile(`${dir}/base_frequency`));
-  const turboMhz = khzTextToMhz(readProcFile(`${dir}/cpuinfo_max_freq`));
+  const dir = `${layout.sysCpu}/cpu${cpuIndex}/cpufreq`;
+  const speedMhz = khzTextToMhz(layout.readTextFile(`${dir}/base_frequency`));
+  const turboMhz = khzTextToMhz(layout.readTextFile(`${dir}/cpuinfo_max_freq`));
   if (speedMhz === undefined && turboMhz === undefined) return undefined;
   const out: { speedMhz?: number; turboMhz?: number } = {};
   if (speedMhz !== undefined) out.speedMhz = speedMhz;
@@ -791,10 +861,10 @@ function readCpuFreqFromSysfs(
   return out;
 }
 
-function listDrmCardIndexes(): number[] {
+function listDrmCardIndexes(layout: InventoryLayout): number[] {
   try {
     const indexes: number[] = [];
-    for (const entry of Deno.readDirSync(SYS_DRM)) {
+    for (const entry of layout.readDirSync(layout.sysDrm)) {
       const match = DRM_CARD.exec(entry.name);
       if (!match) continue;
       indexes.push(Number(match[1]));
@@ -805,13 +875,15 @@ function listDrmCardIndexes(): number[] {
   }
 }
 
-function stripPciHexPrefix(value: string): string {
+/** Strip a leading `0x` from PCI id strings (exported for fixture tests). */
+export function stripPciHexPrefix(value: string): string {
   const trimmed = value.trim().toLowerCase();
   if (trimmed.startsWith("0x")) return trimmed.slice(2);
   return trimmed;
 }
 
-function parseUeventMap(text: string | undefined): Map<string, string> {
+/** Parse KEY=VALUE uevent text into a map (exported for fixture tests). */
+export function parseUeventMap(text: string | undefined): Map<string, string> {
   const map = new Map<string, string>();
   if (!text) return map;
   for (const raw of text.split("\n")) {
@@ -822,8 +894,11 @@ function parseUeventMap(text: string | undefined): Map<string, string> {
   return map;
 }
 
-function nvidiaModelForSlot(slot: string): string | undefined {
-  const text = readProcFile(`/proc/driver/nvidia/gpus/${slot}/information`);
+function nvidiaModelForSlot(
+  layout: InventoryLayout,
+  slot: string,
+): string | undefined {
+  const text = layout.readTextFile(layout.nvidiaGpuInfo(slot));
   if (!text) return undefined;
   for (const raw of text.split("\n")) {
     const field = parseCpuinfoField(raw.trimEnd());
@@ -833,7 +908,11 @@ function nvidiaModelForSlot(slot: string): string | undefined {
   return undefined;
 }
 
-function normalizePciSlot(slot: string): string {
+/**
+ * Normalize nvidia-smi `pci.bus_id` domains to a 4-hex-digit prefix
+ * (exported for fixture tests).
+ */
+export function normalizePciSlot(slot: string): string {
   const trimmed = slot.trim();
   const colon = trimmed.indexOf(":");
   if (colon <= 0) return trimmed;
@@ -843,8 +922,33 @@ function normalizePciSlot(slot: string): string {
   return `${domain.slice(-4)}${rest}`;
 }
 
-function readNvidiaMemoryMiBBySlot(): Map<string, number> {
+/**
+ * Parse nvidia-smi CSV (`pci.bus_id,memory.total` MiB) into slot → bytes
+ * (exported for fixture tests).
+ */
+export function parseNvidiaSmiMemoryCsv(text: string): Map<string, number> {
   const map = new Map<string, number>();
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    const comma = line.indexOf(",");
+    if (comma <= 0) continue;
+    const slot = normalizePciSlot(line.slice(0, comma).trim());
+    const mib = Number(line.slice(comma + 1).trim());
+    if (!slot || !Number.isFinite(mib) || mib <= 0) continue;
+    map.set(slot, Math.round(mib * 1024 * 1024));
+  }
+  return map;
+}
+
+function readNvidiaMemoryMiBBySlot(
+  layout: InventoryLayout,
+): Map<string, number> {
+  if (layout.nvidiaSmiCsv) {
+    const csv = layout.nvidiaSmiCsv();
+    if (csv === undefined) return new Map();
+    return parseNvidiaSmiMemoryCsv(csv);
+  }
   try {
     const { code, stdout } = new Deno.Command("nvidia-smi", {
       args: [
@@ -854,49 +958,41 @@ function readNvidiaMemoryMiBBySlot(): Map<string, number> {
       stdout: "piped",
       stderr: "null",
     }).outputSync();
-    if (code !== 0) return map;
-    const text = new TextDecoder().decode(stdout);
-    for (const raw of text.split("\n")) {
-      const line = raw.trim();
-      if (!line) continue;
-      const comma = line.indexOf(",");
-      if (comma <= 0) continue;
-      const slot = normalizePciSlot(line.slice(0, comma).trim());
-      const mib = Number(line.slice(comma + 1).trim());
-      if (!slot || !Number.isFinite(mib) || mib <= 0) continue;
-      map.set(slot, Math.round(mib * 1024 * 1024));
-    }
+    if (code !== 0) return new Map();
+    return parseNvidiaSmiMemoryCsv(new TextDecoder().decode(stdout));
   } catch {
     // nvidia-smi is optional (AMD / Intel / no NVIDIA driver).
+    return new Map();
   }
-  return map;
 }
 
 function gpuNameFromDevice(
+  layout: InventoryLayout,
   deviceDir: string,
   slot: string | undefined,
   vendorId: string | undefined,
   deviceId: string | undefined,
 ): string | undefined {
   if (slot) {
-    const nvidia = nvidiaModelForSlot(slot);
+    const nvidia = nvidiaModelForSlot(layout, slot);
     if (nvidia) return nvidia;
   }
-  const marketing = readProcFile(`${deviceDir}/marketing_name`)?.trim();
+  const marketing = layout.readTextFile(`${deviceDir}/marketing_name`)?.trim();
   if (marketing) return marketing;
-  const product = readProcFile(`${deviceDir}/product_name`)?.trim();
+  const product = layout.readTextFile(`${deviceDir}/product_name`)?.trim();
   if (product) return product;
   if (vendorId && deviceId) return `${vendorId} ${deviceId}`;
   return undefined;
 }
 
 function gpuMemoryBytes(
+  layout: InventoryLayout,
   deviceDir: string,
   slot: string | undefined,
   nvidiaMemory: Map<string, number>,
 ): number | undefined {
   const amd = parseSizeToBytes(
-    readProcFile(`${deviceDir}/mem_info_vram_total`) ?? "",
+    layout.readTextFile(`${deviceDir}/mem_info_vram_total`) ?? "",
   );
   if (amd !== undefined && amd > 0) return amd;
   if (!slot) return undefined;
@@ -904,14 +1000,15 @@ function gpuMemoryBytes(
 }
 
 function readGpuFromCard(
+  layout: InventoryLayout,
   cardIndex: number,
   nvidiaMemory: Map<string, number>,
 ): HostGpu | undefined {
-  const deviceDir = `${SYS_DRM}/card${cardIndex}/device`;
-  const vendorRaw = readProcFile(`${deviceDir}/vendor`)?.trim();
-  const deviceRaw = readProcFile(`${deviceDir}/device`)?.trim();
+  const deviceDir = `${layout.sysDrm}/card${cardIndex}/device`;
+  const vendorRaw = layout.readTextFile(`${deviceDir}/vendor`)?.trim();
+  const deviceRaw = layout.readTextFile(`${deviceDir}/device`)?.trim();
   if (!vendorRaw && !deviceRaw) return undefined;
-  const uevent = parseUeventMap(readProcFile(`${deviceDir}/uevent`));
+  const uevent = parseUeventMap(layout.readTextFile(`${deviceDir}/uevent`));
   const slot = uevent.get("PCI_SLOT_NAME");
   const driver = uevent.get("DRIVER");
   const gpu: HostGpu = {};
@@ -923,28 +1020,28 @@ function readGpuFromCard(
       stripPciHexPrefix(deviceRaw)
     }`;
   }
-  const name = gpuNameFromDevice(deviceDir, slot, vendorRaw, deviceRaw);
+  const name = gpuNameFromDevice(layout, deviceDir, slot, vendorRaw, deviceRaw);
   if (name) gpu.name = name;
-  const memoryBytes = gpuMemoryBytes(deviceDir, slot, nvidiaMemory);
+  const memoryBytes = gpuMemoryBytes(layout, deviceDir, slot, nvidiaMemory);
   if (memoryBytes !== undefined) gpu.memoryBytes = memoryBytes;
   return Object.keys(gpu).length > 0 ? gpu : undefined;
 }
 
-function readHostGpus(): HostGpu[] | undefined {
-  const cards = listDrmCardIndexes();
+function readHostGpus(layout: InventoryLayout): HostGpu[] | undefined {
+  const cards = listDrmCardIndexes(layout);
   if (cards.length === 0) return undefined;
-  const nvidiaMemory = readNvidiaMemoryMiBBySlot();
+  const nvidiaMemory = readNvidiaMemoryMiBBySlot(layout);
   const gpus: HostGpu[] = [];
   for (const index of cards) {
-    const gpu = readGpuFromCard(index, nvidiaMemory);
+    const gpu = readGpuFromCard(layout, index, nvidiaMemory);
     if (gpu) gpus.push(gpu);
   }
   return gpus.length > 0 ? gpus : undefined;
 }
 
-function combinedECpusList(): string | undefined {
-  const atom = readProcFile("/sys/devices/cpu_atom/cpus");
-  const lowpower = readProcFile("/sys/devices/cpu_lowpower/cpus");
+function combinedECpusList(layout: InventoryLayout): string | undefined {
+  const atom = layout.readTextFile(layout.sysCpuAtom);
+  const lowpower = layout.readTextFile(layout.sysCpuLowpower);
   const combined = new Set<number>();
   for (const text of [atom, lowpower]) {
     if (!text) continue;
@@ -954,16 +1051,16 @@ function combinedECpusList(): string | undefined {
   return [...combined].sort((a, b) => a - b).join(",");
 }
 
-function readLiveInventoryExtras(): HostInventoryExtras {
+function readLiveInventoryExtras(layout: InventoryLayout): HostInventoryExtras {
   const extras: HostInventoryExtras = {
-    cacheForCpu: readCpuCacheFromSysfs,
-    freqForCpu: readCpuFreqFromSysfs,
+    cacheForCpu: (cpuIndex) => readCpuCacheFromSysfs(layout, cpuIndex),
+    freqForCpu: (cpuIndex) => readCpuFreqFromSysfs(layout, cpuIndex),
   };
-  const pCpus = readProcFile("/sys/devices/cpu_core/cpus");
+  const pCpus = layout.readTextFile(layout.sysCpuCore);
   if (pCpus !== undefined) extras.pCpus = pCpus;
-  const eCpus = combinedECpusList();
+  const eCpus = combinedECpusList(layout);
   if (eCpus !== undefined) extras.eCpus = eCpus;
-  const gpus = readHostGpus();
+  const gpus = readHostGpus(layout);
   if (gpus) extras.gpus = gpus;
   return extras;
 }
@@ -971,20 +1068,28 @@ function readLiveInventoryExtras(): HostInventoryExtras {
 /**
  * Host capacity from `/proc` + `/sys` — process-cached after first successful
  * read. Safe under restricted read permissions (falls back to `cat`).
+ *
+ * Optional `io` remaps proc/sys roots (and nvidia-smi) for host-free tests;
+ * injected reads are never written into the process cache.
  */
-export function readHostResources(): HostResources | undefined {
-  if (cached !== undefined) {
+export function readHostResources(
+  io?: HostInventoryIo,
+): HostResources | undefined {
+  if (!io && cached !== undefined) {
     return cached ?? undefined;
   }
 
+  const layout = resolveInventoryLayout(io);
   const resources = hostResourcesFromProc(
-    readProcFile(PROC_STAT),
-    readProcFile(PROC_MEMINFO),
-    readProcFile(PROC_CPUINFO),
-    Deno.build.arch,
-    readLiveInventoryExtras(),
+    layout.readTextFile(layout.procStat),
+    layout.readTextFile(layout.procMeminfo),
+    layout.readTextFile(layout.procCpuinfo),
+    layout.architecture,
+    readLiveInventoryExtras(layout),
   );
-  cached = resources ?? null;
+  if (!io) {
+    cached = resources ?? null;
+  }
   return resources;
 }
 

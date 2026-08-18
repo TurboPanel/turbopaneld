@@ -1,6 +1,8 @@
 .env
 logs/
-coverage/
+# Deno V8 profiles + HTML/LCOV (`deno test --coverage=…`). Official task uses
+# coverage/; scoped local runs may write coverage-commands/ and similar.
+coverage*/
 
 # Python bytecode (e.g. scripts/extract-deno-zip.py)
 __pycache__/

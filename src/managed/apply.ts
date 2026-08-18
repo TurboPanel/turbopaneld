@@ -8,11 +8,16 @@ import type {
   ManagedApplyPayload,
   ManagedApplyResult,
 } from "../instance/commands/contracts.ts";
-import { ensureDocker } from "../deploy/ensure-docker.ts";
-import { runDocker } from "../deploy/docker-cli.ts";
+import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts";
+import {
+  type DockerCliResult,
+  runDocker as defaultRunDocker,
+  type RunDockerOptions,
+} from "../deploy/docker-cli.ts";
 import { logInfo, sanitizeForLog } from "../logger.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import {
+  assertPublicPrivateListenerTls,
   MANAGED_ROOT_PASSWORD_VAR,
   normalizeManagedCompose,
 } from "./compose.ts";
@@ -21,6 +26,7 @@ import {
   resolveEngineContainerId,
 } from "./containers.ts";
 import { getManagedEngineRuntime } from "./engines/index.ts";
+import { reconcileManagedPublicFirewallBestEffort } from "./firewall.ts";
 import type { ManagedEngineContext } from "./engines/types.ts";
 import {
   materializeManagedState,
@@ -35,9 +41,17 @@ import {
 import { loadProxySqlMonitorCredentials } from "./proxysql-admin.ts";
 
 type DecryptSecretsFn = (ciphertexts: string[]) => Promise<(string | null)[]>;
+type RunDockerFn = (
+  args: string[],
+  options?: RunDockerOptions,
+) => Promise<DockerCliResult>;
 
 export type ManagedApplyHandlerDeps = {
   decryptSecrets?: DecryptSecretsFn;
+  /** Test seam — defaults to {@link defaultRunDocker}. */
+  runDocker?: RunDockerFn;
+  /** Test seam — defaults to {@link defaultEnsureDocker}. */
+  ensureDocker?: () => Promise<void>;
 };
 
 function redactSecrets(text: string, plaintexts: readonly string[]): string {
@@ -81,9 +95,10 @@ async function decryptCredentialPasswords(
 function buildEngineExec(
   containerId: string,
   redact: (text: string) => string,
+  run: RunDockerFn,
 ): ManagedEngineContext["exec"] {
   return async (argv, input) => {
-    const result = await runDocker(
+    const result = await run(
       ["exec", "-i", containerId, ...argv],
       input === undefined ? undefined : { input },
     );
@@ -172,6 +187,7 @@ async function composeUpManagedEngine(
   composeYaml: string,
   rootCredential: ManagedApplyCredential,
   redact: (text: string) => string,
+  run: RunDockerFn,
 ): Promise<string> {
   const composePath = managedComposePath(layout, payload.managedId);
   const envPath = managedEnvFilePath(layout, payload.managedId);
@@ -186,7 +202,7 @@ async function composeUpManagedEngine(
       0o600,
     );
 
-    const up = await runDocker([
+    const up = await run([
       "compose",
       "--env-file",
       envPath,
@@ -343,9 +359,10 @@ function buildManagedApplyResult(
 async function returnStandbyNeedsResync(
   payload: ManagedApplyPayload,
   redact: (text: string) => string,
+  run: RunDockerFn,
 ): Promise<ManagedApplyResult> {
   const project = managedComposeProject(payload.managedId);
-  const stop = await runDocker(["compose", "-p", project, "stop"]);
+  const stop = await run(["compose", "-p", project, "stop"]);
   if (!stop.success) {
     logInfo(
       "managed",
@@ -420,8 +437,13 @@ export async function handleManagedApply(
   deps?: ManagedApplyHandlerDeps,
 ): Promise<ManagedApplyResult> {
   assertSafeManagedIdentifiers(payload);
+  // Fail before any state is materialized: a public listener without org-CA
+  // material must never reach materialize/compose up.
+  assertPublicPrivateListenerTls(payload);
   const layout = resolveLayout(Deno.env.toObject());
   const engine = getManagedEngineRuntime(payload.engine);
+  const run = deps?.runDocker ?? defaultRunDocker;
+  const ensureDocker = deps?.ensureDocker ?? defaultEnsureDocker;
 
   await ensureDocker();
 
@@ -435,6 +457,7 @@ export async function handleManagedApply(
     managedRoot,
     engine.containerUser,
     engine.containerGroup,
+    run,
   );
 
   const { decrypted, redact, rootCredential } =
@@ -463,7 +486,7 @@ export async function handleManagedApply(
         containerUser: engine.containerUser,
         containerGroup: engine.containerGroup,
         runDocker: async (argv, options) => {
-          const result = await runDocker(argv, options);
+          const result = await run(argv, options);
           return {
             success: result.success,
             stdout: result.stdout,
@@ -480,7 +503,7 @@ export async function handleManagedApply(
       },
     );
     if (boot === "needs_resync") {
-      return await returnStandbyNeedsResync(payload, redact);
+      return await returnStandbyNeedsResync(payload, redact, run);
     }
   }
 
@@ -491,9 +514,13 @@ export async function handleManagedApply(
     composeYaml,
     rootCredential,
     redact,
+    run,
   );
 
-  const engineContainers = await collectManagedContainers(project, redact);
+  // Scope the public listener once the publish exists; never blocks apply.
+  await reconcileManagedPublicFirewallBestEffort(payload);
+
+  const engineContainers = await collectManagedContainers(project, redact, run);
   const containerId = resolveEngineContainerId(
     engineContainers,
     composeServiceName,
@@ -504,7 +531,7 @@ export async function handleManagedApply(
     composeServiceName,
     rootUsername: engine.rootUsername,
     defaultDatabase: engine.defaultDatabase,
-    exec: buildEngineExec(containerId, redact),
+    exec: buildEngineExec(containerId, redact, run),
   };
 
   try {

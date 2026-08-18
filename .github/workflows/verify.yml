@@ -1,5 +1,9 @@
 name: Verify
 
+# Tests + LCOV first, then Sonar quality gate. If Sonar fails, the workflow
+# stops (no further jobs). Automatic Analysis must stay off
+# (Administration → Analysis Method).
+
 on:
   workflow_call:
     secrets:
@@ -29,20 +33,16 @@ jobs:
           # Full history for SonarCloud new-code / blame (shallow clones skew the gate).
           fetch-depth: 0
 
-      # Fork PRs cannot receive repository secrets — skip Sonar there.
-      # Same-repo PRs / workflow_call should have SONAR_TOKEN for CI-based
-      # Sonar + LCOV import. Until the secret is wired on turbopanel/turbopaneld,
-      # fail this step visibly but continue (fmt/lint/tests must still gate).
-      # Instance/ui/website do not run Sonar in Actions — they use SonarCloud
-      # Automatic Analysis via .sonarcloud.properties (no SONAR_TOKEN).
+      # Fork PRs cannot receive repository secrets — skip the require there so
+      # fmt/lint/tests still gate. Same-repo PRs / workflow_call / trunk must
+      # have SONAR_TOKEN (hard fail, same as turbopanel/turbopanel).
       - name: Require SONAR_TOKEN for trusted verification
         if: >-
           github.event_name != 'pull_request'
           || github.event.pull_request.head.repo.full_name == github.repository
-        continue-on-error: true
         run: |
           if [ -z "$SONAR_TOKEN" ]; then
-            echo "::error::SONAR_TOKEN is missing — SonarCloud CI scan will be skipped. Add the secret on turbopanel/turbopaneld (or org) to enforce quality gate + LCOV import. Fork PRs may omit it."
+            echo "::error::SONAR_TOKEN is missing — add the secret on turbopanel/turbopaneld (or org)."
             exit 1
           fi
 
@@ -114,12 +114,11 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      # Coverage import needs CI-based analysis (Automatic Analysis must be off
-      # for turbopanel_turbopaneld). Skipped when SONAR_TOKEN is empty (forks, or
-      # until the secret is configured — see soft-fail require step above).
-      - name: SonarCloud scan
+      # Coverage import needs CI-based analysis (Automatic Analysis must stay
+      # off for turbopanel_turbopaneld). Skipped only when SONAR_TOKEN is empty
+      # (fork PRs). Quality gate failure fails this job.
+      - name: SonarQube Scan
         if: env.SONAR_TOKEN != ''
-        continue-on-error: true
         uses: SonarSource/sonarqube-scan-action@22918119ff8e1ca75a623e15c8296b6ea4fbe28f # v8.2.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

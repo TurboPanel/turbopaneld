@@ -426,3 +426,123 @@ test({
     }
   },
 });
+
+test({
+  name: "IdlePresence lastActivityAt and send-failure / closed-socket guards",
+  fn: async () => {
+    const idleCheckIntervalMs = 30;
+
+    // Hello send failure on attach.
+    {
+      const restore = installIdlePresenceProviders({
+        getBuildInfo: () => makeDaemonBuild("abc1234"),
+        getHostHelloIdentity: () => EMPTY_HOST,
+        collectPresenceSnapshot: () => ({
+          timeSync: makeTimeSync("UTC"),
+          ips: makeIps("203.0.113.10"),
+        }),
+      });
+      const socket = openMockSocket();
+      socket.send = () => {
+        throw new Error("hello send failed");
+      };
+      const presence = new IdlePresence({
+        serverId: "srv-hello-fail",
+        idleCheckIntervalMs,
+        idleThresholdMs: idleCheckIntervalMs,
+        staleConnectionMs: 60_000,
+      });
+      try {
+        presence.attach(socket as unknown as WebSocket);
+        assertEquals(typeof presence.lastActivityAt, "number");
+      } finally {
+        presence.detach();
+        restore();
+      }
+    }
+
+    // Cell ping + heartbeat send failures after attach.
+    {
+      const restore = installIdlePresenceProviders({
+        getBuildInfo: () => makeDaemonBuild("abc1234"),
+        getHostHelloIdentity: () => EMPTY_HOST,
+        collectPresenceSnapshot: () => ({
+          timeSync: makeTimeSync("UTC"),
+          ips: makeIps("203.0.113.10"),
+        }),
+      });
+      const socket = openMockSocket();
+      const presence = new IdlePresence({
+        serverId: "srv-ping-fail",
+        idleCheckIntervalMs,
+        idleThresholdMs: idleCheckIntervalMs,
+        minPresenceIntervalMs: idleCheckIntervalMs,
+        staleConnectionMs: 60_000,
+        maxConnectionAgeMs: 60_000,
+      });
+      try {
+        presence.attach(socket as unknown as WebSocket);
+        const before = presence.lastActivityAt;
+        presence.touchActivity();
+        assertEquals(presence.lastActivityAt >= before, true);
+
+        let sendCount = 0;
+        socket.send = () => {
+          sendCount += 1;
+          throw new Error("presence send failed");
+        };
+        // Change build + presence so heartbeat is attempted after ping.
+        restore();
+        const restore2 = installIdlePresenceProviders({
+          getBuildInfo: () => makeDaemonBuild("changed1"),
+          getHostHelloIdentity: () => EMPTY_HOST,
+          collectPresenceSnapshot: () => ({
+            timeSync: makeTimeSync("America/Chicago"),
+            ips: makeIps("203.0.113.99"),
+          }),
+        });
+        try {
+          await sleep(idleCheckIntervalMs + 25);
+          assertEquals(sendCount >= 1, true);
+        } finally {
+          restore2();
+        }
+      } finally {
+        presence.detach();
+      }
+    }
+
+    // Closed socket: max-age / hello early-return (no throw from onMaxAge).
+    {
+      const restore = installIdlePresenceProviders({
+        getBuildInfo: () => makeDaemonBuild("abc1234"),
+        getHostHelloIdentity: () => EMPTY_HOST,
+        collectPresenceSnapshot: () => ({
+          timeSync: makeTimeSync("UTC"),
+          ips: makeIps("203.0.113.10"),
+        }),
+      });
+      const socket = openMockSocket();
+      Object.defineProperty(socket, "readyState", {
+        configurable: true,
+        get: () => MockWebSocket.CLOSED,
+      });
+      const presence = new IdlePresence({
+        serverId: "srv-closed",
+        idleCheckIntervalMs,
+        idleThresholdMs: idleCheckIntervalMs,
+        maxConnectionAgeMs: 1,
+        onMaxAge: () => {
+          throw new Error("onMaxAge must not fire when socket is closed");
+        },
+      });
+      try {
+        presence.attach(socket as unknown as WebSocket);
+        await sleep(idleCheckIntervalMs + 15);
+      } finally {
+        presence.detach();
+        restore();
+      }
+    }
+  },
+});

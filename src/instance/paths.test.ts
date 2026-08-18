@@ -279,3 +279,109 @@ test("deno transition: cleared URL key restores socket mode", () => {
     );
   }
 });
+
+test("resolveInstanceSocket prefers TURBOPANEL_SOCKET override", () => {
+  assertEquals(
+    resolveInstanceSocket({
+      TURBOPANEL_SOCKET: "/custom/instance.sock",
+      TURBOPANEL_SOCKET_DIR: "/ignored",
+    }),
+    "/custom/instance.sock",
+  );
+});
+
+test("resolveInstanceConfig rejects non-http instance URL schemes", () => {
+  let threw = false;
+  try {
+    resolveInstanceConfig({
+      TURBOPANEL_INSTANCE_URL: "ftp://panel.example.com",
+    });
+  } catch (err) {
+    threw = true;
+    if (!(err instanceof Error)) {
+      throw new TypeError("expected Error for invalid scheme");
+    }
+    assertEquals(
+      err.message.includes("must start with http:// or https://"),
+      true,
+    );
+  }
+  assertEquals(threw, true);
+});
+
+test("resolveServerIdentityDir uses cwd when orchestration is skipped", () => {
+  const dir = resolveServerIdentityDir({
+    TURBOPANEL_SKIP_ORCHESTRATION: "1",
+  });
+  assertEquals(dir, Deno.cwd());
+});
+
+test("resolveInstanceCaPath ignores stale TURBOPANEL_INSTANCE_CA path", () => {
+  const path = resolveInstanceCaPath({
+    TURBOPANEL_INSTANCE_CA: "/tmp/missing-turbopanel-ca.pem",
+  });
+  assertEquals(path, undefined);
+});
+
+test("createInstanceHttpClient builds unix and public-TLS clients", async () => {
+  const sock = await createInstanceHttpClient({
+    kind: "socket",
+    socketPath: "/tmp/turbopanel-test.sock",
+  });
+  if (!sock) {
+    throw new TypeError("expected unix HttpClient");
+  }
+  sock.close();
+
+  const publicTls = await createInstanceHttpClient({
+    kind: "url",
+    baseUrl: "https://203.0.113.10",
+    wsBaseUrl: "wss://203.0.113.10",
+  });
+  assertEquals(publicTls, undefined);
+});
+
+test("createInstanceHttpClient trusts a readable platform CA PEM", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-ca-" });
+  const keyPath = `${dir}/key.pem`;
+  const certPath = `${dir}/cert.pem`;
+  try {
+    const gen = await new Deno.Command("openssl", {
+      args: [
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-keyout",
+        keyPath,
+        "-out",
+        certPath,
+        "-days",
+        "1",
+        "-subj",
+        "/CN=turbopanel-test",
+      ],
+      stdout: "null",
+      stderr: "piped",
+    }).output();
+    if (!gen.success) {
+      // Hosts without openssl skip this branch coverage.
+      return;
+    }
+    const withCa = await createInstanceHttpClient(
+      {
+        kind: "url",
+        baseUrl: "https://203.0.113.10",
+        wsBaseUrl: "wss://203.0.113.10",
+      },
+      { caCertPath: certPath },
+    );
+    if (!withCa) {
+      throw new TypeError("expected HttpClient with platform CA");
+    }
+    withCa.close();
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});

@@ -1,10 +1,20 @@
 import { getBuildInfo } from "../../build-info.ts";
-import { readOsRelease } from "../../host/os-release.ts";
+import { type HostOsMetadata, readOsRelease } from "../../host/os-release.ts";
 import {
   type HostMetricsDimensions,
   METRICS_SCHEMA_VERSION,
 } from "../contract.ts";
 import { readProcFile } from "./proc-read.ts";
+
+/** Optional seams for host-free `resolveDimensions` tests. */
+export type ResolveDimensionsDeps = {
+  readOsRelease?: () => HostOsMetadata | undefined;
+  readProcFile?: (
+    path: string,
+  ) => Promise<string | undefined> | string | undefined;
+  getBuildInfo?: () => { commit: string };
+  build?: { os: string; arch: string };
+};
 
 /**
  * Resolve static host dimensions for each metrics sample.
@@ -12,16 +22,22 @@ import { readProcFile } from "./proc-read.ts";
  * `runtimeMode` is intentionally unset on the daemon — deployment mode is an
  * adapter/instance concern filled in upstream when needed.
  */
-export async function resolveDimensions(): Promise<HostMetricsDimensions> {
-  const osRelease = readOsRelease();
-  const kernelRelease =
-    (await readProcFile("/proc/sys/kernel/osrelease"))?.trim() ?? "";
+export async function resolveDimensions(
+  deps: ResolveDimensionsDeps = {},
+): Promise<HostMetricsDimensions> {
+  const osRelease = (deps.readOsRelease ?? readOsRelease)();
+  const kernelRaw = await (deps.readProcFile ?? readProcFile)(
+    "/proc/sys/kernel/osrelease",
+  );
+  const kernelRelease = kernelRaw?.trim() ?? "";
+  const build = deps.build ?? Deno.build;
+  const commit = (deps.getBuildInfo ?? getBuildInfo)().commit;
 
   return {
     schemaVersion: METRICS_SCHEMA_VERSION,
-    daemonVersion: getBuildInfo().commit,
-    operatingSystem: osRelease?.prettyName ?? Deno.build.os,
-    architecture: Deno.build.arch,
+    daemonVersion: commit,
+    operatingSystem: osRelease?.prettyName ?? build.os,
+    architecture: build.arch,
     kernelRelease,
   };
 }

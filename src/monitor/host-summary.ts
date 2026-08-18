@@ -5,6 +5,13 @@ type CpuSnapshot = {
   idle: number;
 };
 
+/** Optional IO overrides for host-free unit tests. */
+export type HostSummarySources = {
+  readProcFile?: (path: string) => string | undefined;
+  /** Return df -kP text, or `undefined` to simulate collect failure. */
+  readDfOutput?: () => Promise<string | undefined>;
+};
+
 function readProcFile(path: string): string | undefined {
   try {
     return Deno.readTextFileSync(path);
@@ -99,10 +106,39 @@ function parseUptime(text: string): number | undefined {
   return Number.isFinite(seconds) ? Math.floor(seconds) : undefined;
 }
 
-async function collectDiskSummary(): Promise<
-  MonitorInstanceSummary["disk"] | undefined
-> {
+/** Parse `df -kP` stdout into a disk summary (exported for edge-case tests). */
+export function parseDfOutput(
+  text: string,
+): MonitorInstanceSummary["disk"] | undefined {
+  const lines = text.trim().split("\n");
+  if (lines.length < 2) return undefined;
+
+  const parts = lines[1].trim().split(/\s+/);
+  if (parts.length < 4) return undefined;
+
+  const totalBytes = Number(parts[1]) * 1024;
+  const usedBytes = Number(parts[2]) * 1024;
+  if (!Number.isFinite(totalBytes) || !Number.isFinite(usedBytes)) {
+    return undefined;
+  }
+
+  const usagePercent = totalBytes > 0
+    ? Math.round((usedBytes / totalBytes) * 1000) / 10
+    : undefined;
+
+  return { usedBytes, totalBytes, usagePercent };
+}
+
+async function collectDiskSummary(
+  readDfOutput?: () => Promise<string | undefined>,
+): Promise<MonitorInstanceSummary["disk"] | undefined> {
   try {
+    if (readDfOutput) {
+      const text = await readDfOutput();
+      if (text === undefined) return undefined;
+      return parseDfOutput(text);
+    }
+
     const command = new Deno.Command("df", {
       args: ["-kP", "/"],
       stdout: "piped",
@@ -112,23 +148,7 @@ async function collectDiskSummary(): Promise<
     if (code !== 0) return undefined;
 
     const text = new TextDecoder().decode(stdout);
-    const lines = text.trim().split("\n");
-    if (lines.length < 2) return undefined;
-
-    const parts = lines[1].trim().split(/\s+/);
-    if (parts.length < 4) return undefined;
-
-    const totalBytes = Number(parts[1]) * 1024;
-    const usedBytes = Number(parts[2]) * 1024;
-    if (!Number.isFinite(totalBytes) || !Number.isFinite(usedBytes)) {
-      return undefined;
-    }
-
-    const usagePercent = totalBytes > 0
-      ? Math.round((usedBytes / totalBytes) * 1000) / 10
-      : undefined;
-
-    return { usedBytes, totalBytes, usagePercent };
+    return parseDfOutput(text);
   } catch {
     return undefined;
   }
@@ -163,39 +183,42 @@ export type HostSummaryCollector = {
   collect(): Promise<MonitorInstanceSummary>;
 };
 
-export function createHostSummaryCollector(): HostSummaryCollector {
+export function createHostSummaryCollector(
+  sources: HostSummarySources = {},
+): HostSummaryCollector {
   let previousCpu: CpuSnapshot | undefined;
+  const readProc = sources.readProcFile ?? readProcFile;
 
   return {
     async collect(): Promise<MonitorInstanceSummary> {
       const summary: MonitorInstanceSummary = {};
 
-      const statText = readProcFile("/proc/stat");
+      const statText = readProc("/proc/stat");
       if (statText) {
         previousCpu = applyCpuSummary(summary, statText, previousCpu);
       }
 
-      const memText = readProcFile("/proc/meminfo");
+      const memText = readProc("/proc/meminfo");
       if (memText) {
         summary.memory = parseMeminfo(memText);
       }
 
-      const loadText = readProcFile("/proc/loadavg");
+      const loadText = readProc("/proc/loadavg");
       if (loadText) {
         summary.load = parseLoadavg(loadText);
       }
 
-      const uptimeText = readProcFile("/proc/uptime");
+      const uptimeText = readProc("/proc/uptime");
       if (uptimeText) {
         summary.uptimeSeconds = parseUptime(uptimeText);
       }
 
-      const bootId = readProcFile("/proc/sys/kernel/random/boot_id");
+      const bootId = readProc("/proc/sys/kernel/random/boot_id");
       if (bootId) {
         summary.bootId = bootId.trim();
       }
 
-      summary.disk = await collectDiskSummary();
+      summary.disk = await collectDiskSummary(sources.readDfOutput);
 
       return summary;
     },

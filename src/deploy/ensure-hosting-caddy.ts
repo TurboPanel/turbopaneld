@@ -7,7 +7,7 @@
 
 import { dirname, join } from "@std/path";
 import { logInfo, logWarn } from "../logger.ts";
-import { runCaddySetup } from "../orchestration/ansible.ts";
+import { runCaddySetup as defaultRunCaddySetup } from "../orchestration/ansible.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 
 /** Keep in step with orchestration/roles/caddy/defaults/main.yml */
@@ -30,14 +30,14 @@ async function caddyBinaryPresent(path: string): Promise<boolean> {
   }
 }
 
-function resolveCaddyArch(): "arm64" | "amd64" {
+function resolveCaddyArchDefault(): "arm64" | "amd64" {
   const arch = Deno.build.arch;
   if (arch === "aarch64") return "arm64";
   if (arch === "x86_64") return "amd64";
   throw new Error(`Unsupported CPU architecture for hosting Caddy: ${arch}`);
 }
 
-async function run(
+async function runDefault(
   command: string,
   args: string[],
   opts: { cwd?: string } = {},
@@ -55,12 +55,28 @@ async function run(
   };
 }
 
+/** Optional test seams for {@link ensureHostingCaddy}. */
+export type EnsureHostingCaddyDeps = {
+  runCaddySetup?: () => Promise<void>;
+  runCommand?: (
+    command: string,
+    args: string[],
+    opts?: { cwd?: string },
+  ) => Promise<{ success: boolean; stderr: string }>;
+  resolveArch?: () => "arm64" | "amd64";
+};
+
 /**
  * Direct download into the vendor tree (no Ansible). Used when the caddy-setup
  * playbook is missing on older managed orchestration trees, or Ansible fails.
  */
-async function downloadHostingCaddy(runtimesDir: string): Promise<void> {
-  const arch = resolveCaddyArch();
+async function downloadHostingCaddy(
+  runtimesDir: string,
+  deps: Required<
+    Pick<EnsureHostingCaddyDeps, "runCommand" | "resolveArch">
+  >,
+): Promise<void> {
+  const arch = deps.resolveArch();
   const versionDir = join(runtimesDir, "caddy", HOSTING_CADDY_VERSION);
   const binPath = join(versionDir, "caddy");
   const currentLink = join(runtimesDir, "caddy", "current");
@@ -72,11 +88,16 @@ async function downloadHostingCaddy(runtimesDir: string): Promise<void> {
   try {
     const tarball = join(tmp, asset);
     logInfo("deploy", `downloading hosting Caddy ${HOSTING_CADDY_VERSION}`);
-    const curl = await run("/usr/bin/curl", ["-fsSL", "-o", tarball, url]);
+    const curl = await deps.runCommand("/usr/bin/curl", [
+      "-fsSL",
+      "-o",
+      tarball,
+      url,
+    ]);
     if (!curl.success) {
       throw new Error(`curl failed: ${curl.stderr || "download error"}`);
     }
-    const tar = await run("/usr/bin/tar", [
+    const tar = await deps.runCommand("/usr/bin/tar", [
       "-xzf",
       tarball,
       "-C",
@@ -102,7 +123,7 @@ async function downloadHostingCaddy(runtimesDir: string): Promise<void> {
     // Best-effort ownership for managed hosts (root:turbopanel). May fail
     // without sudo — binary is still runnable by the daemon user when owned by
     // that user (typical after a direct download as turbopanel/dev).
-    const chown = await run("sudo", [
+    const chown = await deps.runCommand("sudo", [
       "-n",
       "chown",
       "root:turbopanel",
@@ -127,12 +148,19 @@ async function downloadHostingCaddy(runtimesDir: string): Promise<void> {
 /**
  * Ensure `<runtimesDir>/caddy/current/caddy` exists for hosting ingress.
  */
-export async function ensureHostingCaddy(layout: LayoutPaths): Promise<string> {
+export async function ensureHostingCaddy(
+  layout: LayoutPaths,
+  deps?: EnsureHostingCaddyDeps,
+): Promise<string> {
+  const runSetup = deps?.runCaddySetup ?? defaultRunCaddySetup;
+  const runCommand = deps?.runCommand ?? runDefault;
+  const resolveArch = deps?.resolveArch ?? resolveCaddyArchDefault;
+
   const caddy = caddyBinaryPath(layout.runtimesDir);
   if (await caddyBinaryPresent(caddy)) return caddy;
 
   try {
-    await runCaddySetup();
+    await runSetup();
   } catch (err) {
     logWarn(
       "deploy",
@@ -144,7 +172,7 @@ export async function ensureHostingCaddy(layout: LayoutPaths): Promise<string> {
 
   if (await caddyBinaryPresent(caddy)) return caddy;
 
-  await downloadHostingCaddy(layout.runtimesDir);
+  await downloadHostingCaddy(layout.runtimesDir, { runCommand, resolveArch });
 
   if (await caddyBinaryPresent(caddy)) return caddy;
 

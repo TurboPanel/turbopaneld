@@ -16,6 +16,7 @@ import {
   resolveApachePhpVersion,
   resolveTraditionalWebSiteOwnership,
   traditionalWebEngineUnixUser,
+  traditionalWebSiteDir,
 } from "./traditional-web.ts";
 import { caddyHttpUpstream, siteSnippet } from "./ingress.ts";
 import { resolveLayout } from "../paths/layout.ts";
@@ -155,6 +156,8 @@ test("phpFpmPoolConfig runs workers as assigned principal", () => {
 
 test("resolveTraditionalWebSiteOwnership prefers principal over engine user", () => {
   assertEquals(traditionalWebEngineUnixUser("nginx"), "tpnginx");
+  assertEquals(traditionalWebEngineUnixUser("apache"), "tpapache");
+  assertEquals(traditionalWebEngineUnixUser("openlitespeed"), "tpols");
   assertEquals(
     resolveTraditionalWebSiteOwnership({
       composeServiceName: "static",
@@ -177,6 +180,33 @@ test("resolveTraditionalWebSiteOwnership prefers principal over engine user", ()
     }),
     { user: "site_user", group: "tpnginx" },
   );
+  assertThrows(
+    () =>
+      resolveTraditionalWebSiteOwnership({
+        composeServiceName: "static",
+        engine: "apache",
+        root: "public",
+        listenPort: 18080,
+        principal: {
+          principalId: "00000000-0000-4000-8000-000000000099",
+          username: "bad user",
+        },
+      }),
+    Error,
+    "principal username is unsafe",
+  );
+});
+
+test("traditionalWebSiteDir nests under stateDir/sites", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    assertEquals(
+      traditionalWebSiteDir(layout, "env-1", "marketing"),
+      `${layout.stateDir}/sites/env-1/marketing`,
+    );
+  } finally {
+    await cleanup();
+  }
 });
 
 test("phpFpmPoolId and phpFpmSocketPath are stable under layout.runDir", async () => {

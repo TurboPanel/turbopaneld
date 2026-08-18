@@ -37,7 +37,8 @@ export interface RunBootstrapOrchestrationOptions {
   present?: boolean;
 }
 
-function resolveFailureMessage(err: unknown): string {
+/** Map a thrown value to a sanitized installer failure line (exported for tests). */
+export function resolveFailureMessage(err: unknown): string {
   let raw: string;
   if (err instanceof Error) {
     raw = err.message;

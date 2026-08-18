@@ -32,6 +32,45 @@ const decoder = new TextDecoder();
 
 export type TraditionalWebApplySite = EnvironmentDeployTraditionalWebSite;
 
+/** Injectable command runner for host-free apply/remove tests. */
+export type TraditionalWebRunResult = {
+  success: boolean;
+  stdout: string;
+  stderr: string;
+};
+
+export type TraditionalWebRunFn = (
+  command: string,
+  args: string[],
+) => Promise<TraditionalWebRunResult>;
+
+/** Injectable Ansible playbook runner for host-free apply tests. */
+export type TraditionalWebPlaybookFn = (
+  playbookPath: string,
+  label: string,
+  extraArgs?: string[],
+) => Promise<void>;
+
+type TraditionalWebIo = {
+  run: TraditionalWebRunFn;
+  runPlaybook: TraditionalWebPlaybookFn;
+};
+
+let activeIo: TraditionalWebIo | undefined;
+
+async function withTraditionalWebIo<T>(
+  io: TraditionalWebIo | undefined,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const previous = activeIo;
+  activeIo = io;
+  try {
+    return await fn();
+  } finally {
+    activeIo = previous;
+  }
+}
+
 /** Engine service account for the FHS vendor tree (web-service-user role). */
 export function traditionalWebEngineUnixUser(
   engine: TraditionalWebApplySite["engine"],
@@ -78,10 +117,10 @@ function assertSafeRoot(value: string): void {
   }
 }
 
-async function run(
+async function runDefault(
   command: string,
   args: string[],
-): Promise<{ success: boolean; stderr: string; stdout: string }> {
+): Promise<TraditionalWebRunResult> {
   const result = await new Deno.Command(command, {
     args,
     stdin: "null",
@@ -93,6 +132,14 @@ async function run(
     stderr: decoder.decode(result.stderr).trim(),
     stdout: decoder.decode(result.stdout).trim(),
   };
+}
+
+async function run(
+  command: string,
+  args: string[],
+): Promise<TraditionalWebRunResult> {
+  const impl = activeIo?.run ?? runDefault;
+  return await impl(command, args);
 }
 
 export function traditionalWebSiteDir(
@@ -882,7 +929,7 @@ async function removePrefixedConfFiles(
   return removed;
 }
 
-async function runTraditionalWebPlaybook(
+async function runTraditionalWebPlaybookDefault(
   playbookPath: string,
   label: string,
   extraArgs: string[] = [],
@@ -901,6 +948,15 @@ async function runTraditionalWebPlaybook(
     }
     throw err;
   }
+}
+
+async function runTraditionalWebPlaybook(
+  playbookPath: string,
+  label: string,
+  extraArgs: string[] = [],
+): Promise<void> {
+  const impl = activeIo?.runPlaybook ?? runTraditionalWebPlaybookDefault;
+  await impl(playbookPath, label, extraArgs);
 }
 
 function assertTraditionalWebSite(site: TraditionalWebApplySite): void {
@@ -975,7 +1031,26 @@ async function chownWebTree(
 export type ApplyTraditionalWebOpts = {
   /** When set, vhosts also listen on the docker bridge for container reachability. */
   dockerBindAddress?: string | null;
+  /** Test seam: host command runner (sudo install / reload / chown). */
+  run?: TraditionalWebRunFn;
+  /** Test seam: Ansible playbook runner (vendor nginx/apache/OLS). */
+  runPlaybook?: TraditionalWebPlaybookFn;
 };
+
+/** Optional test seams for {@link removeTraditionalWebSites}. */
+export type RemoveTraditionalWebDeps = {
+  run?: TraditionalWebRunFn;
+};
+
+function resolveTraditionalWebIo(
+  opts?: Readonly<{ run?: TraditionalWebRunFn; runPlaybook?: TraditionalWebPlaybookFn }>,
+): TraditionalWebIo | undefined {
+  if (!opts?.run && !opts?.runPlaybook) return undefined;
+  return {
+    run: opts.run ?? runDefault,
+    runPlaybook: opts.runPlaybook ?? runTraditionalWebPlaybookDefault,
+  };
+}
 
 type TraditionalWebSitesDirs = {
   nginx: string;
@@ -1216,53 +1291,55 @@ export async function applyTraditionalWebSites(
 ): Promise<{ applied: string[] }> {
   if (sites.length === 0) return { applied: [] };
 
-  assertSafeId(environmentId, "environmentId");
-  for (const site of sites) {
-    assertTraditionalWebSite(site);
-  }
+  return await withTraditionalWebIo(resolveTraditionalWebIo(opts), async () => {
+    assertSafeId(environmentId, "environmentId");
+    for (const site of sites) {
+      assertTraditionalWebSite(site);
+    }
 
-  const needs = resolveTraditionalWebEngineNeeds(sites);
-  // Validate PHP series conflicts / pin before compiling or writing pools.
-  if (needs.phpFpm) {
-    resolveApachePhpVersion(sites);
-  }
+    const needs = resolveTraditionalWebEngineNeeds(sites);
+    // Validate PHP series conflicts / pin before compiling or writing pools.
+    if (needs.phpFpm) {
+      resolveApachePhpVersion(sites);
+    }
 
-  await installTraditionalWebEngines(needs);
+    await installTraditionalWebEngines(needs);
 
-  const sitesDirs: TraditionalWebSitesDirs = {
-    nginx: join(layout.configDir, "nginx", "sites"),
-    apache: join(layout.configDir, "apache", "sites"),
-    openlitespeed: join(layout.configDir, "openlitespeed", "sites"),
-  };
-  await ensureTraditionalWebDirs(layout, needs, sitesDirs);
+    const sitesDirs: TraditionalWebSitesDirs = {
+      nginx: join(layout.configDir, "nginx", "sites"),
+      apache: join(layout.configDir, "apache", "sites"),
+      openlitespeed: join(layout.configDir, "openlitespeed", "sites"),
+    };
+    await ensureTraditionalWebDirs(layout, needs, sitesDirs);
 
-  const dockerBind = opts?.dockerBindAddress ?? null;
-  const applied: string[] = [];
-  let appliedPhpFpm = false;
-  for (const site of sites) {
-    const result = await applyOneTraditionalWebSite(
+    const dockerBind = opts?.dockerBindAddress ?? null;
+    const applied: string[] = [];
+    let appliedPhpFpm = false;
+    for (const site of sites) {
+      const result = await applyOneTraditionalWebSite(
+        layout,
+        environmentId,
+        site,
+        sitesDirs,
+        dockerBind,
+      );
+      if (result.appliedPhpFpm) appliedPhpFpm = true;
+      applied.push(site.composeServiceName);
+    }
+
+    await reloadTraditionalWebEngines(
       layout,
-      environmentId,
-      site,
-      sitesDirs,
-      dockerBind,
+      needs,
+      appliedPhpFpm,
+      sitesDirs.openlitespeed,
     );
-    if (result.appliedPhpFpm) appliedPhpFpm = true;
-    applied.push(site.composeServiceName);
-  }
 
-  await reloadTraditionalWebEngines(
-    layout,
-    needs,
-    appliedPhpFpm,
-    sitesDirs.openlitespeed,
-  );
-
-  logInfo(
-    "deploy",
-    `traditional-web applied env=${environmentId} sites=${applied.join(",")}`,
-  );
-  return { applied };
+    logInfo(
+      "deploy",
+      `traditional-web applied env=${environmentId} sites=${applied.join(",")}`,
+    );
+    return { applied };
+  });
 }
 
 /** Remove nginx site configs for an environment; returns count removed. */
@@ -1366,31 +1443,34 @@ async function tryReloadAfterSiteRemoval(
 export async function removeTraditionalWebSites(
   layout: LayoutPaths,
   environmentId: string,
+  deps?: RemoveTraditionalWebDeps,
 ): Promise<void> {
-  assertSafeId(environmentId, "environmentId");
-  const nginxRemoved = await removeNginxTraditionalWebSites(
-    layout,
-    environmentId,
-  );
-  const apacheRemoved = await removeApacheTraditionalWebSites(
-    layout,
-    environmentId,
-  );
-  const openlitespeedRemoved = await removeOpenLiteSpeedTraditionalWebSites(
-    layout,
-    environmentId,
-  );
+  await withTraditionalWebIo(resolveTraditionalWebIo(deps), async () => {
+    assertSafeId(environmentId, "environmentId");
+    const nginxRemoved = await removeNginxTraditionalWebSites(
+      layout,
+      environmentId,
+    );
+    const apacheRemoved = await removeApacheTraditionalWebSites(
+      layout,
+      environmentId,
+    );
+    const openlitespeedRemoved = await removeOpenLiteSpeedTraditionalWebSites(
+      layout,
+      environmentId,
+    );
 
-  if (nginxRemoved > 0) {
-    await tryReloadAfterSiteRemoval("nginx", () => reloadNginx(layout));
-  }
-  if (apacheRemoved.poolsRemoved > 0) {
-    await tryReloadAfterSiteRemoval("php-fpm", () => reloadPhpFpm(layout));
-  }
-  if (apacheRemoved.sitesRemoved > 0) {
-    await tryReloadAfterSiteRemoval("apache", () => reloadApache(layout));
-  }
-  if (openlitespeedRemoved > 0) {
-    await tryReloadAfterSiteRemoval("OpenLiteSpeed", reloadOpenLiteSpeed);
-  }
+    if (nginxRemoved > 0) {
+      await tryReloadAfterSiteRemoval("nginx", () => reloadNginx(layout));
+    }
+    if (apacheRemoved.poolsRemoved > 0) {
+      await tryReloadAfterSiteRemoval("php-fpm", () => reloadPhpFpm(layout));
+    }
+    if (apacheRemoved.sitesRemoved > 0) {
+      await tryReloadAfterSiteRemoval("apache", () => reloadApache(layout));
+    }
+    if (openlitespeedRemoved > 0) {
+      await tryReloadAfterSiteRemoval("OpenLiteSpeed", reloadOpenLiteSpeed);
+    }
+  });
 }

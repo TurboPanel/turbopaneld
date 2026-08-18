@@ -57,6 +57,70 @@ test({
 });
 
 test({
+  name: "handleReboot logs failed executor without throwing",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    setRebootExecutorForTests(() =>
+      Promise.resolve({
+        success: false,
+        stderr: "permission denied\r\nline2\tfail",
+      }));
+    try {
+      const result = await handleReboot({}, new Date().toISOString());
+      assertEquals(result, { scheduled: true });
+      await new Promise((resolve) =>
+        setTimeout(resolve, REBOOT_HANDOFF_DELAY_MS + 100)
+      );
+    } finally {
+      setRebootExecutorForTests(null);
+    }
+  },
+});
+
+test({
+  name: "handleReboot default executor invokes sudo systemctl reboot",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const originalCommand = Deno.Command;
+    const calls: string[][] = [];
+    try {
+      Deno.Command = class {
+        #args: string[];
+        constructor(cmd: string, opts: Deno.CommandOptions) {
+          if (cmd !== "sudo") {
+            throw new TypeError(`unexpected command: ${cmd}`);
+          }
+          this.#args = (opts.args ?? []) as string[];
+          calls.push([...this.#args]);
+        }
+        output() {
+          return Promise.resolve({
+            success: true,
+            code: 0,
+            stdout: new Uint8Array(),
+            stderr: new Uint8Array(),
+          });
+        }
+      } as unknown as typeof Deno.Command;
+
+      setRebootExecutorForTests(null);
+      const result = await handleReboot({}, new Date().toISOString());
+      assertEquals(result, { scheduled: true });
+      assertEquals(calls, []);
+      await new Promise((resolve) =>
+        setTimeout(resolve, REBOOT_HANDOFF_DELAY_MS + 100)
+      );
+      assertEquals(calls, [["-n", "systemctl", "reboot"]]);
+    } finally {
+      Deno.Command = originalCommand;
+      setRebootExecutorForTests(null);
+    }
+  },
+});
+
+test({
   name: "handleReboot rejects invalid payload",
   fn: async () => {
     setRebootExecutorForTests(() =>

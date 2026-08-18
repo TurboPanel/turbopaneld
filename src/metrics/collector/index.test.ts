@@ -1,12 +1,18 @@
 import { assertEquals } from "@std/assert";
 import { createMetricsCollector } from "./index.ts";
-import { it } from "@std/testing/bdd";
 
-it({
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno);
+
+test({
   name: "createMetricsCollector returns supported on linux with injected deps",
-  // Live OS gate: fixture-driven linux path only runs on linux hosts.
   ignore: Deno.build.os !== "linux",
-  fn: async () => {
+  async fn() {
     const collector = createMetricsCollector({
       readProcFile: () => undefined,
       statfs: () => null,
@@ -25,16 +31,38 @@ it({
   },
 });
 
-it({
-  name: "createMetricsCollector returns unsupported on non-linux",
-  // Live OS gate: unsupported_os path only runs off linux.
-  ignore: Deno.build.os === "linux",
-  fn: async () => {
-    const collector = createMetricsCollector();
-    const result = await collector.collect({ sequence: 0 });
-    assertEquals(result.supported, false);
-    if (!result.supported) {
-      assertEquals(result.reason, `unsupported_os:${Deno.build.os}`);
+test("createMetricsCollector returns unsupported on non-linux via options.os", async () => {
+  const collector = createMetricsCollector(undefined, { os: "darwin" });
+  const result = await collector.collect({ sequence: 0 });
+  assertEquals(result.supported, false);
+  if (!result.supported) {
+    assertEquals(result.reason, "unsupported_os:darwin");
+  }
+});
+
+test({
+  name:
+    "createMetricsCollector merges default statfs when other deps are overridden",
+  ignore: Deno.build.os !== "linux",
+  async fn() {
+    const collector = createMetricsCollector({
+      readProcFile: () => undefined,
+      now: () => 1_000,
+      countProcesses: () => 7,
+      resolveDimensions: () => ({
+        schemaVersion: 1,
+        daemonVersion: "test",
+        operatingSystem: "linux",
+        architecture: "x86_64",
+        kernelRelease: "fixture",
+      }),
+    });
+    const result = await collector.collect({ sequence: 1 });
+    assertEquals(result.supported, true);
+    if (!result.supported) return;
+    const disk = result.sample.metrics.diskUsedPercent;
+    if (disk !== null && typeof disk !== "number") {
+      throw new TypeError("diskUsedPercent must be a number when present");
     }
   },
 });

@@ -325,3 +325,65 @@ it("empty sub or kid claim returns invalid", async () => {
     }
   }
 });
+
+it("malformed tokens and JWKS entries return invalid or skip", async () => {
+  const { encodeBase64Url } = await import("@std/encoding/base64url");
+  const { kid, privateKey, jwks } = await createTestSigningKey();
+  const { client } = makeClient({
+    keys: [
+      ...jwks.keys,
+      { kty: "RSA" } as JsonWebKey,
+      { kty: "OKP", crv: "Ed25519", x: "abc" } as JsonWebKey,
+      { kty: "OKP", crv: "Ed25519", x: "abc", kid: "" } as JsonWebKey & {
+        kid: string;
+      },
+    ],
+  });
+
+  const badParts = await client.verifyInstanceJwt("only.two");
+  if (badParts.ok || badParts.reason !== "invalid") {
+    throw new Error("expected invalid for non-three-part token");
+  }
+
+  const badHeader = await client.verifyInstanceJwt("%%%..sig");
+  if (badHeader.ok || badHeader.reason !== "invalid") {
+    throw new Error("expected invalid for undecodable header");
+  }
+
+  const encoder = new TextEncoder();
+  const hs256 = [
+    encodeBase64Url(encoder.encode(JSON.stringify({ alg: "HS256", kid }))),
+    encodeBase64Url(encoder.encode(JSON.stringify({
+      iss: "turbopanel",
+      aud: "turbopanel-daemon-api",
+      typ: "daemon",
+      exp: Math.floor(Date.now() / 1000) + 60,
+      sub: "s",
+      kid: "k",
+    }))),
+    "sig",
+  ].join(".");
+  const wrongAlg = await client.verifyInstanceJwt(hs256);
+  if (wrongAlg.ok || wrongAlg.reason !== "invalid") {
+    throw new Error("expected invalid for non-EdDSA alg");
+  }
+
+  const badPayload = [
+    encodeBase64Url(encoder.encode(JSON.stringify({ alg: "EdDSA", kid }))),
+    "%%%",
+    "sig",
+  ].join(".");
+  const payload = await client.verifyInstanceJwt(badPayload);
+  if (payload.ok || payload.reason !== "invalid") {
+    throw new Error("expected invalid for undecodable payload");
+  }
+
+  const valid = await signInstanceJwt(privateKey, kid, {
+    sub: "server-1",
+    kid: "daemon-key-1",
+  });
+  const ok = await client.verifyInstanceJwt(valid);
+  if (!ok.ok) {
+    throw new Error("expected valid token still verifies with mixed JWKS");
+  }
+});

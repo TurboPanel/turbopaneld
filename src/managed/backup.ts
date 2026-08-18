@@ -20,7 +20,7 @@ import type {
   ManagedRestorePayload,
   ManagedRestoreResult,
 } from "../instance/commands/contracts.ts";
-import { ensureDocker } from "../deploy/ensure-docker.ts";
+import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts";
 import { spawnDockerStreaming } from "../deploy/docker-cli.ts";
 import { sanitizeForLog } from "../logger.ts";
 import { resolveLayout } from "../paths/layout.ts";
@@ -54,6 +54,7 @@ function formatPipeError(err: unknown): string {
 /** Overridable for tests so they can exercise path/mode/prune/checksum logic without Docker. */
 export type ManagedBackupHandlerDeps = {
   now?: () => Date;
+  ensureDocker?: () => Promise<void>;
   resolveContainer?: (
     project: string,
   ) => Promise<EnvironmentDeployContainer>;
@@ -66,6 +67,7 @@ export type ManagedBackupHandlerDeps = {
 
 export type ManagedRestoreHandlerDeps = {
   now?: () => Date;
+  ensureDocker?: () => Promise<void>;
   resolveContainer?: (
     project: string,
   ) => Promise<EnvironmentDeployContainer>;
@@ -274,8 +276,9 @@ async function pruneBackupArtifacts(
  * context — `exec` is never invoked for backup/restore (the dump/restore
  * process itself is spawned directly so its stdout/stdin can stream), but a
  * stub keeps this a real `ManagedEngineContext` rather than an unsafe cast.
+ * Exported for unit tests that assert the stub rejects.
  */
-function buildEngineContext(
+export function buildEngineContext(
   container: EnvironmentDeployContainer,
   rootUsername: string,
   defaultDatabase: string,
@@ -338,6 +341,7 @@ export async function handleManagedBackup(
     };
   }
 
+  const ensureDocker = deps?.ensureDocker ?? defaultEnsureDocker;
   await ensureDocker();
 
   const dir = managedBackupsDir(layout, payload.managedId);
@@ -459,6 +463,7 @@ export async function handleManagedRestore(
     throw new Error("managed.restore checksum mismatch — refusing to restore");
   }
 
+  const ensureDocker = deps?.ensureDocker ?? defaultEnsureDocker;
   await ensureDocker();
 
   const project = managedComposeProject(payload.managedId);

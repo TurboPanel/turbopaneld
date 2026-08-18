@@ -32,6 +32,7 @@ import {
   ensureProxySqlIngress,
   inspectProxySqlContainer,
   readCurrentProxySqlBindAddress,
+  readCurrentProxySqlSegmentAttachments,
   restartProxySqlIngress,
   stopProxySqlIngress,
 } from "../../managed/proxysql.ts";
@@ -273,11 +274,19 @@ async function reconcileOneComponent(params: {
         const preservedBindAddress = await readCurrentProxySqlBindAddress(
           layout,
         );
+        // Same reasoning for consumer spanning networks: rewriting compose
+        // without the previously-rendered `tpn_*` attachments (and their
+        // reserved addresses) would detach every remote binding until the
+        // control plane happened to reconcile again.
+        const preservedSegments = await readCurrentProxySqlSegmentAttachments(
+          layout,
+        );
         await ensureProxySqlIngress(
           layout,
           descriptor,
           run,
           preservedBindAddress,
+          preservedSegments,
         );
         if (action === "restart") {
           await restartProxySqlIngress(layout, run);

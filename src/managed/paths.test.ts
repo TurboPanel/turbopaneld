@@ -3,8 +3,20 @@ import {
   assertSafeManagedIdentifiers,
   managedBackupArtifactPath,
   managedBackupsDir,
+  managedComposePath,
   managedComposeProject,
+  managedConfigDir,
   managedDir,
+  managedEnvFilePath,
+  managedTlsDir,
+  proxysqlAdminCnfPath,
+  proxysqlComposePath,
+  proxysqlConfigDir,
+  proxysqlConfigPath,
+  proxysqlDataDir,
+  proxysqlMonitorCnfPath,
+  proxysqlProject,
+  proxysqlTlsDir,
   resolveManagedRelativePath,
 } from "./paths.ts";
 
@@ -101,11 +113,8 @@ test("resolveManagedRelativePath refuses absolute and parent paths", () => {
 });
 
 test("managedDir and compose project naming", () => {
-  const layout = { stateDir: "/var/lib/turbopanel" } as Parameters<
-    typeof managedDir
-  >[0];
   assertEquals(
-    managedDir(layout, "abc"),
+    managedDir(LAYOUT, "abc"),
     "/var/lib/turbopanel/managed/abc",
   );
   assertEquals(
@@ -114,25 +123,131 @@ test("managedDir and compose project naming", () => {
   );
 });
 
-test("managedBackupsDir and managedBackupArtifactPath", () => {
-  const layout = { stateDir: "/var/lib/turbopanel" } as Parameters<
-    typeof managedDir
-  >[0];
+const LAYOUT = {
+  configDir: "/etc/turbopanel",
+  stateDir: "/var/lib/turbopanel",
+} as Parameters<typeof managedDir>[0];
+
+test("proxysql and managed path helpers join under config/state", () => {
+  assertEquals(proxysqlProject(), "turbopanel-proxysql");
   assertEquals(
-    managedBackupsDir(layout, "abc"),
+    proxysqlConfigDir(LAYOUT),
+    "/etc/turbopanel/proxysql",
+  );
+  assertEquals(
+    proxysqlComposePath(LAYOUT),
+    "/etc/turbopanel/proxysql/docker-compose.yml",
+  );
+  assertEquals(
+    proxysqlConfigPath(LAYOUT),
+    "/etc/turbopanel/proxysql/proxysql.cnf",
+  );
+  assertEquals(proxysqlTlsDir(LAYOUT), "/etc/turbopanel/proxysql/tls");
+  assertEquals(proxysqlDataDir(LAYOUT), "/var/lib/turbopanel/proxysql");
+  assertEquals(
+    proxysqlAdminCnfPath(LAYOUT),
+    "/etc/turbopanel/proxysql/admin.cnf",
+  );
+  assertEquals(
+    proxysqlMonitorCnfPath(LAYOUT),
+    "/etc/turbopanel/proxysql/monitor.cnf",
+  );
+  assertEquals(
+    managedComposePath(LAYOUT, "abc"),
+    "/var/lib/turbopanel/managed/abc/docker-compose.yml",
+  );
+  assertEquals(
+    managedConfigDir(LAYOUT, "abc"),
+    "/var/lib/turbopanel/managed/abc/config",
+  );
+  assertEquals(
+    managedTlsDir(LAYOUT, "abc"),
+    "/var/lib/turbopanel/managed/abc/tls",
+  );
+  assertEquals(
+    managedEnvFilePath(LAYOUT, "abc"),
+    "/var/lib/turbopanel/managed/abc/.env",
+  );
+});
+
+test("resolveManagedRelativePath rejects empty, metachar, and bad segments", () => {
+  assertThrows(
+    () => resolveManagedRelativePath("/tmp/managed", ""),
+    Error,
+    "invalid",
+  );
+  assertThrows(
+    () => resolveManagedRelativePath("/tmp/managed", "a".repeat(256)),
+    Error,
+    "invalid",
+  );
+  assertThrows(
+    () => resolveManagedRelativePath("/tmp/managed", "foo;rm"),
+    Error,
+    "unsupported characters",
+  );
+  assertThrows(
+    () => resolveManagedRelativePath("/tmp/managed", "foo/./bar"),
+    Error,
+    "invalid",
+  );
+});
+
+test("assertSafeManagedIdentifiers rejects environmentId and volume names", () => {
+  assertThrows(
+    () =>
+      assertSafeManagedIdentifiers({
+        managedId: "ok-id",
+        environmentId: "../escape",
+        projectName: "tp-managed-pg",
+        containerName: "ok-name-1",
+        volumes: [],
+      }),
+    Error,
+    "environmentId",
+  );
+  assertThrows(
+    () =>
+      assertSafeManagedIdentifiers({
+        managedId: "ok-id",
+        environmentId: "env1",
+        projectName: "",
+        containerName: "ok-name-1",
+        volumes: [],
+      }),
+    Error,
+    "projectName",
+  );
+  assertThrows(
+    () =>
+      assertSafeManagedIdentifiers({
+        managedId: "ok-id",
+        environmentId: "env1",
+        projectName: "tp-managed-pg",
+        containerName: "ok-name-1",
+        volumes: [{ name: "bad-name", target: "/data" }],
+      }),
+    Error,
+    "volume name",
+  );
+});
+
+test("managedBackupsDir and managedBackupArtifactPath", () => {
+  assertEquals(
+    managedBackupsDir(LAYOUT, "abc"),
     "/var/lib/turbopanel/managed/abc/backups",
   );
   assertEquals(
-    managedBackupArtifactPath(layout, "abc", "bk_1", "dump"),
+    managedBackupArtifactPath(LAYOUT, "abc", "bk_1", "dump"),
     "/var/lib/turbopanel/managed/abc/backups/bk_1.dump",
   );
   assertThrows(
-    () => managedBackupArtifactPath(layout, "abc", "../escape", "dump"),
+    () => managedBackupArtifactPath(LAYOUT, "abc", "../escape", "dump"),
     Error,
     "backupId",
   );
   assertThrows(
-    () => managedBackupArtifactPath(layout, "abc", "bk_1", "sh"),
+    () => managedBackupArtifactPath(LAYOUT, "abc", "bk_1", "sh"),
     Error,
     "extension",
   );

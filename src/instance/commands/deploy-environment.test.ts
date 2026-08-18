@@ -15,8 +15,11 @@ import {
 import { handleEnvironmentLifecycle } from "./lifecycle-environment.ts";
 import { handleEnvironmentStop } from "./stop-environment.ts";
 import {
+  buildDeployServiceNames,
+  buildDeploySummary,
   containerHostingsNeedSharedHttpIngress,
   handleEnvironmentDeploy,
+  resolveDeployComposeFiles,
   shapeEnvironmentDeployResult,
 } from "./deploy-environment.ts";
 
@@ -144,6 +147,209 @@ test("shapeEnvironmentDeployResult matches container-free success contract", () 
     containers: [],
   });
   assertEquals("services" in result, false);
+});
+
+test("resolveDeployComposeFiles prefers composeFiles over composeYaml fallback", () => {
+  const files = [{
+    filename: "compose.yaml",
+    role: "runtime" as const,
+    source: "inline" as const,
+    content: "services:\n  web:\n    image: nginx\n",
+  }];
+  assertEquals(
+    resolveDeployComposeFiles({
+      environmentId: "env-1",
+      projectId: "proj-1",
+      organizationId: "org-1",
+      projectName: "tp-demo",
+      composeYaml: "services: {}\n",
+      composeFiles: files,
+      hostings: [],
+    }),
+    files,
+  );
+  const fallback = resolveDeployComposeFiles({
+    environmentId: "env-1",
+    projectId: "proj-1",
+    organizationId: "org-1",
+    projectName: "tp-demo",
+    composeYaml: "services:\n  api:\n    image: alpine\n",
+    hostings: [],
+  });
+  assertEquals(fallback.length, 1);
+  assertEquals(fallback[0]?.role, "runtime");
+  assertEquals(fallback[0]?.content.includes("api"), true);
+});
+
+test("buildDeploySummary and buildDeployServiceNames include traditional-web sites", () => {
+  const traditionalWebSites = [{
+    composeServiceName: "static",
+    engine: "nginx" as const,
+    root: "/var/www/html",
+    listenPort: 8080,
+  }];
+  assertEquals(
+    buildDeploySummary("env-2", ["web"], traditionalWebSites),
+    "Deployed 1 container service(s) + 1 traditional-web site(s) for environment env-2",
+  );
+  assertEquals(
+    buildDeployServiceNames(["web"], traditionalWebSites),
+    ["static", "web"],
+  );
+});
+
+test("shapeEnvironmentDeployResult omits containers when collection failed", () => {
+  const result = shapeEnvironmentDeployResult({
+    projectName: "demo",
+    environmentId: "env-3",
+    labeledServices: ["web"],
+    traditionalWebSites: [],
+    containers: null,
+  });
+  assertEquals(result.summary, "Deployed 1 container service(s) for environment env-3");
+  assertEquals(result.services, ["web"]);
+  assertEquals("containers" in result, false);
+});
+
+test("handleEnvironmentDeploy rejects secret plan when decrypt is unavailable", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-deploy-secret-" });
+  const previous = {
+    TURBOPANEL_STATE_DIR: Deno.env.get("TURBOPANEL_STATE_DIR"),
+    TURBOPANEL_CONFIG_DIR: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
+  };
+  Deno.env.set("TURBOPANEL_STATE_DIR", join(root, "state"));
+  Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
+  try {
+    await assertRejects(
+      () =>
+        handleEnvironmentDeploy(
+          {
+            environmentId: "env-1",
+            projectId: "proj-1",
+            organizationId: "org-1",
+            projectName: "tp-demo-secret",
+            composeYaml: "services:\n  web:\n    image: nginx\n",
+            hostings: [],
+            secretPlan: [{
+              key: "TOKEN",
+              composeServiceName: "web",
+              source: "web_token",
+              target: "TOKEN",
+              relativePath: "web--TOKEN",
+              forBuild: false,
+              forRuntime: true,
+            }],
+          },
+          new Date().toISOString(),
+          hermeticDeployDeps,
+        ),
+      Error,
+      "Secret plan present but secrets decrypt is unavailable",
+    );
+  } finally {
+    if (previous.TURBOPANEL_STATE_DIR === undefined) {
+      Deno.env.delete("TURBOPANEL_STATE_DIR");
+    } else {
+      Deno.env.set("TURBOPANEL_STATE_DIR", previous.TURBOPANEL_STATE_DIR);
+    }
+    if (previous.TURBOPANEL_CONFIG_DIR === undefined) {
+      Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+    } else {
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", previous.TURBOPANEL_CONFIG_DIR);
+    }
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test({
+  name:
+    "handleEnvironmentDeploy omits containers from result when compose ps fails",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-deploy-ps-fail-" });
+    const previous = {
+      TURBOPANEL_STATE_DIR: Deno.env.get("TURBOPANEL_STATE_DIR"),
+      TURBOPANEL_CONFIG_DIR: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
+    };
+    const stateDir = join(root, "state");
+    Deno.env.set("TURBOPANEL_STATE_DIR", stateDir);
+    Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
+
+    const environmentId = "envpsfail1";
+    const projectId = "proj-1";
+    const projectName = "tp-demo-psfail";
+    const deploymentDir = join(
+      stateDir,
+      "deployments",
+      projectId,
+      environmentId,
+    );
+    await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
+
+    const runtimeYaml = "services:\n  web:\n    image: nginx:alpine\n";
+    const fakeRunDocker = (args: string[]): Promise<DockerCliResult> => {
+      if (args.includes("config") && args.includes("--format")) {
+        return Promise.resolve({
+          success: true,
+          stdout: fakeConfigJson({ web: { image: "nginx:alpine" } }),
+          stderr: "",
+          code: 0,
+        });
+      }
+      if (args.includes("config") && args.includes("-q")) {
+        return Promise.resolve({
+          success: true,
+          stdout: "",
+          stderr: "",
+          code: 0,
+        });
+      }
+      if (args.includes("ps")) {
+        return Promise.resolve({
+          success: false,
+          stdout: "",
+          stderr: "compose ps unavailable",
+          code: 1,
+        });
+      }
+      return Promise.resolve({
+        success: true,
+        stdout: "",
+        stderr: "",
+        code: 0,
+      });
+    };
+
+    try {
+      const result = await handleEnvironmentDeploy(
+        {
+          environmentId,
+          projectId,
+          organizationId: "org-1",
+          projectName,
+          composeYaml: runtimeYaml,
+          hostings: [],
+        },
+        new Date().toISOString(),
+        { runDocker: fakeRunDocker, ...hermeticDeployDeps },
+      );
+      assertEquals(result.projectName, projectName);
+      assertEquals("containers" in result, false);
+      assertEquals(result.services?.includes("web"), true);
+    } finally {
+      if (previous.TURBOPANEL_STATE_DIR === undefined) {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+      } else {
+        Deno.env.set("TURBOPANEL_STATE_DIR", previous.TURBOPANEL_STATE_DIR);
+      }
+      if (previous.TURBOPANEL_CONFIG_DIR === undefined) {
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      } else {
+        Deno.env.set("TURBOPANEL_CONFIG_DIR", previous.TURBOPANEL_CONFIG_DIR);
+      }
+      await Deno.remove(root, { recursive: true });
+    }
+  },
 });
 
 function fakeConfigJson(services: Record<string, unknown>): string {
@@ -1087,6 +1293,222 @@ test({
       );
       assertEquals(ensureCalls.length, 0);
       assertEquals(events.includes("ensure-fabric"), false);
+    } finally {
+      if (previous.TURBOPANEL_STATE_DIR === undefined) {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+      } else {
+        Deno.env.set("TURBOPANEL_STATE_DIR", previous.TURBOPANEL_STATE_DIR);
+      }
+      if (previous.TURBOPANEL_CONFIG_DIR === undefined) {
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      } else {
+        Deno.env.set("TURBOPANEL_CONFIG_DIR", previous.TURBOPANEL_CONFIG_DIR);
+      }
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentDeploy returns collected containers when compose ps succeeds",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-deploy-ps-ok-" });
+    const previous = {
+      TURBOPANEL_STATE_DIR: Deno.env.get("TURBOPANEL_STATE_DIR"),
+      TURBOPANEL_CONFIG_DIR: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
+    };
+    const stateDir = join(root, "state");
+    Deno.env.set("TURBOPANEL_STATE_DIR", stateDir);
+    Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
+
+    const environmentId = "envpsok1";
+    const projectId = "proj-1";
+    const projectName = "tp-demo-psok";
+    const deploymentDir = join(
+      stateDir,
+      "deployments",
+      projectId,
+      environmentId,
+    );
+    await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
+
+    const runtimeYaml = "services:\n  web:\n    image: nginx:alpine\n";
+    const psJson = JSON.stringify([
+      { ID: "bad-row" },
+      {
+        ID: "abc123",
+        Name: `${projectName}-web-1`,
+        Service: "web",
+        State: "running",
+      },
+    ]);
+    const serviceId = "00000000-0000-4000-8000-0000000000ee";
+    const ingressPsJson = JSON.stringify([{
+      ID: "ingress123",
+      Name: `${serviceId}-in`,
+      Service: "traefik",
+      State: "running",
+    }]);
+    const fakeRunDocker = (args: string[]): Promise<DockerCliResult> => {
+      if (args.includes("config") && args.includes("--format")) {
+        return Promise.resolve({
+          success: true,
+          stdout: fakeConfigJson({ web: { image: "nginx:alpine" } }),
+          stderr: "",
+          code: 0,
+        });
+      }
+      if (args.includes("config") && args.includes("-q")) {
+        return Promise.resolve({
+          success: true,
+          stdout: "",
+          stderr: "",
+          code: 0,
+        });
+      }
+      if (args.includes("ps")) {
+        if (args.some((arg) => arg.startsWith("turbopanel-ingress-"))) {
+          return Promise.resolve({
+            success: true,
+            stdout: ingressPsJson,
+            stderr: "",
+            code: 0,
+          });
+        }
+        return Promise.resolve({
+          success: true,
+          stdout: psJson,
+          stderr: "",
+          code: 0,
+        });
+      }
+      return Promise.resolve({
+        success: true,
+        stdout: "",
+        stderr: "",
+        code: 0,
+      });
+    };
+
+    try {
+      const result = await handleEnvironmentDeploy(
+        {
+          environmentId,
+          projectId,
+          organizationId: "org-1",
+          projectName,
+          composeYaml: runtimeYaml,
+          hostings: [{
+            hostingId: "h1",
+            serviceId: "s1",
+            composeServiceName: "web",
+            hostnames: [],
+            protocol: "tcp",
+            ports: [{ published: 8080, target: 80 }],
+          }],
+          ingressServices: [{
+            serviceId,
+            composeServiceName: "web",
+            containerName: `${serviceId}-in`,
+          }],
+        },
+        new Date().toISOString(),
+        { runDocker: fakeRunDocker, ...hermeticDeployDeps },
+      );
+      assertEquals(result.projectName, projectName);
+      assertEquals(Array.isArray(result.containers), true);
+      assertEquals(result.containers?.length, 2);
+      assertEquals(result.containers?.[0]?.serviceId, "s1");
+      assertEquals(result.containers?.[0]?.composeServiceName, "web");
+      assertEquals(result.containers?.[0]?.containerId, "abc123");
+      assertEquals(result.containers?.[1]?.role, "ingress");
+      assertEquals(result.containers?.[1]?.serviceId, serviceId);
+    } finally {
+      if (previous.TURBOPANEL_STATE_DIR === undefined) {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+      } else {
+        Deno.env.set("TURBOPANEL_STATE_DIR", previous.TURBOPANEL_STATE_DIR);
+      }
+      if (previous.TURBOPANEL_CONFIG_DIR === undefined) {
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      } else {
+        Deno.env.set("TURBOPANEL_CONFIG_DIR", previous.TURBOPANEL_CONFIG_DIR);
+      }
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});
+
+test({
+  name: "handleEnvironmentDeploy omits containers when compose ps throws",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-deploy-ps-throw-" });
+    const previous = {
+      TURBOPANEL_STATE_DIR: Deno.env.get("TURBOPANEL_STATE_DIR"),
+      TURBOPANEL_CONFIG_DIR: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
+    };
+    const stateDir = join(root, "state");
+    Deno.env.set("TURBOPANEL_STATE_DIR", stateDir);
+    Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
+
+    const environmentId = "envpsthrow1";
+    const projectId = "proj-1";
+    const projectName = "tp-demo-psthrow";
+    const deploymentDir = join(
+      stateDir,
+      "deployments",
+      projectId,
+      environmentId,
+    );
+    await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
+
+    const runtimeYaml = "services:\n  web:\n    image: nginx:alpine\n";
+    const fakeRunDocker = (args: string[]): Promise<DockerCliResult> => {
+      if (args.includes("config") && args.includes("--format")) {
+        return Promise.resolve({
+          success: true,
+          stdout: fakeConfigJson({ web: { image: "nginx:alpine" } }),
+          stderr: "",
+          code: 0,
+        });
+      }
+      if (args.includes("config") && args.includes("-q")) {
+        return Promise.resolve({
+          success: true,
+          stdout: "",
+          stderr: "",
+          code: 0,
+        });
+      }
+      if (args.includes("ps")) {
+        throw new Error("compose ps exploded");
+      }
+      return Promise.resolve({
+        success: true,
+        stdout: "",
+        stderr: "",
+        code: 0,
+      });
+    };
+
+    try {
+      const result = await handleEnvironmentDeploy(
+        {
+          environmentId,
+          projectId,
+          organizationId: "org-1",
+          projectName,
+          composeYaml: runtimeYaml,
+          hostings: [],
+        },
+        new Date().toISOString(),
+        { runDocker: fakeRunDocker, ...hermeticDeployDeps },
+      );
+      assertEquals(result.projectName, projectName);
+      assertEquals("containers" in result, false);
     } finally {
       if (previous.TURBOPANEL_STATE_DIR === undefined) {
         Deno.env.delete("TURBOPANEL_STATE_DIR");

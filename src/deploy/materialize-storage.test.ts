@@ -1,6 +1,7 @@
 import { assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import type { LayoutPaths } from "../paths/layout.ts";
+import { setDockerCliIoForTest } from "./docker-cli.ts";
 import {
   materializeLocation,
   materializeStorageEntries,
@@ -80,10 +81,13 @@ test("materializeStorageEntries keys mount paths by locationId and writes files"
     if (filePath === undefined) {
       throw new TypeError("expected mount path for loc-file");
     }
-    assertEquals(filePath, join(
-      storageHostPath(layout, "org-1", "stor-file", "loc-file"),
-      "notes.txt",
-    ));
+    assertEquals(
+      filePath,
+      join(
+        storageHostPath(layout, "org-1", "stor-file", "loc-file"),
+        "notes.txt",
+      ),
+    );
     assertEquals(await Deno.readTextFile(filePath), "hello");
   });
 });
@@ -109,6 +113,200 @@ test("materializeLocation rejects docker volumes without volumeName", async () =
         ),
       Error,
       "missing volumeName",
+    );
+  });
+});
+
+test("materializeLocation creates docker volume via runDocker", async () => {
+  await withTempLayout(async (layout) => {
+    const calls: string[][] = [];
+    const restore = setDockerCliIoForTest({
+      runRaw: (_command, args) => {
+        calls.push([...args]);
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: "",
+          stderr: "",
+        });
+      },
+    });
+    try {
+      const name = await materializeLocation(
+        layout,
+        "org-1",
+        {
+          storageId: "stor-vol",
+          locationId: "loc-vol",
+          kind: "volume",
+          name: "data",
+          provider: "docker",
+          volumeName: "tp-00000000-cache",
+          serverId: "srv",
+          mounts: [],
+        },
+        undefined,
+        "",
+      );
+      assertEquals(name, "tp-00000000-cache");
+      assertEquals(calls[0], ["volume", "create", "tp-00000000-cache"]);
+    } finally {
+      restore();
+    }
+  });
+});
+
+test("materializeLocation surfaces docker volume create failure", async () => {
+  await withTempLayout(async (layout) => {
+    const restore = setDockerCliIoForTest({
+      runRaw: () =>
+        Promise.resolve({
+          success: false,
+          code: 1,
+          stdout: "",
+          stderr: "volume exists",
+        }),
+    });
+    try {
+      await assertRejects(
+        () =>
+          materializeLocation(
+            layout,
+            "org-1",
+            {
+              storageId: "stor-vol",
+              locationId: "loc-vol",
+              kind: "volume",
+              name: "data",
+              provider: "docker",
+              volumeName: "tp-dup",
+              serverId: "srv",
+              mounts: [],
+            },
+            undefined,
+            "",
+          ),
+        Error,
+        "volume exists",
+      );
+    } finally {
+      restore();
+    }
+  });
+});
+
+test("materializeStorageEntries decrypts tpdaemon envelopes", async () => {
+  await withTempLayout(async (layout) => {
+    const paths = await materializeStorageEntries(
+      layout,
+      "org-1",
+      [
+        {
+          storageId: "stor-sec",
+          locationId: "loc-sec",
+          kind: "file",
+          name: "secret.txt",
+          provider: "path",
+          serverId: "srv",
+          contentEnvelope: "tpdaemon.v1.ciphertext",
+          mounts: [],
+        },
+      ],
+      undefined,
+      (envelopes) => {
+        assertEquals(envelopes, ["tpdaemon.v1.ciphertext"]);
+        return Promise.resolve(["decrypted-body"]);
+      },
+    );
+    const filePath = paths.get("loc-sec");
+    if (filePath === undefined) {
+      throw new TypeError("expected mount path for loc-sec");
+    }
+    assertEquals(await Deno.readTextFile(filePath), "decrypted-body");
+  });
+});
+
+test("materializeStorageEntries requires decrypt when envelopes are present", async () => {
+  await withTempLayout(async (layout) => {
+    await assertRejects(
+      () =>
+        materializeStorageEntries(layout, "org-1", [
+          {
+            storageId: "stor-sec",
+            locationId: "loc-sec",
+            kind: "file",
+            name: "secret.txt",
+            provider: "path",
+            serverId: "srv",
+            contentEnvelope: "tpsecret.v1.x",
+            mounts: [],
+          },
+        ]),
+      Error,
+      "secrets decrypt is unavailable",
+    );
+  });
+});
+
+test("materializeStorageEntries rejects decrypt length mismatch", async () => {
+  await withTempLayout(async (layout) => {
+    await assertRejects(
+      () =>
+        materializeStorageEntries(
+          layout,
+          "org-1",
+          [
+            {
+              storageId: "stor-sec",
+              locationId: "loc-sec",
+              kind: "file",
+              name: "secret.txt",
+              provider: "path",
+              serverId: "srv",
+              contentEnvelope: "tpdaemon.v1.x",
+              mounts: [],
+            },
+          ],
+          undefined,
+          () => Promise.resolve([]),
+        ),
+      Error,
+      "unexpected length",
+    );
+  });
+});
+
+test("materializeStorageEntries ignores unresolved principalId", async () => {
+  await withTempLayout(async (layout) => {
+    const paths = await materializeStorageEntries(
+      layout,
+      "org-1",
+      [
+        {
+          storageId: "stor-dir",
+          locationId: "loc-dir",
+          kind: "directory",
+          name: "data",
+          provider: "path",
+          serverId: "srv",
+          principalId: "missing-principal",
+          mounts: [],
+        },
+      ],
+      [
+        {
+          principalId: "other-id",
+          username: "siteuser",
+        },
+      ],
+    );
+    const hostPath = paths.get("loc-dir");
+    if (hostPath === undefined) {
+      throw new TypeError("expected mount path");
+    }
+    assertEquals(
+      hostPath,
+      storageHostPath(layout, "org-1", "stor-dir", "loc-dir"),
     );
   });
 });

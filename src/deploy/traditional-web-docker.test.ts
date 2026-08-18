@@ -2,6 +2,7 @@ import { assertEquals, assertStringIncludes } from "@std/assert";
 import {
   buildTraditionalWebEndpointMap,
   buildTraditionalWebReachabilityFragment,
+  resolveDockerHostGatewayAddress,
   TRADITIONAL_WEB_ENDPOINTS_ENV,
   traditionalWebEnvKeyForService,
 } from "./traditional-web-docker.ts";
@@ -20,6 +21,51 @@ test("traditionalWebEnvKeyForService sanitizes compose service names", () => {
     traditionalWebEnvKeyForService("my-app"),
     "TURBOPANEL_TRADITIONAL_WEB_MY_APP_URL",
   );
+  assertEquals(
+    traditionalWebEnvKeyForService("9frontend"),
+    "TURBOPANEL_TRADITIONAL_WEB__9FRONTEND_URL",
+  );
+});
+
+test("buildTraditionalWebReachabilityFragment is empty without sites or services", () => {
+  assertEquals(
+    buildTraditionalWebReachabilityFragment(
+      [],
+      { serviceNames: ["api"], services: { api: { image: "node:22" } } },
+    ),
+    {},
+  );
+  assertEquals(
+    buildTraditionalWebReachabilityFragment(
+      [{ composeServiceName: "static", listenPort: 18080 }],
+      { serviceNames: [], services: {} },
+    ),
+    {},
+  );
+});
+
+test({
+  name: "resolveDockerHostGatewayAddress prefers a valid TURBOPANEL_DOCKER_HOST_GATEWAY",
+  permissions: { env: true, run: ["ip"] },
+  fn: async () => {
+    const previous = Deno.env.get("TURBOPANEL_DOCKER_HOST_GATEWAY");
+    try {
+      Deno.env.set("TURBOPANEL_DOCKER_HOST_GATEWAY", "203.0.113.50");
+      assertEquals(await resolveDockerHostGatewayAddress(), "203.0.113.50");
+
+      Deno.env.set("TURBOPANEL_DOCKER_HOST_GATEWAY", "not-an-ip");
+      const fallback = await resolveDockerHostGatewayAddress();
+      // Invalid override falls through to ip/docker0 or the Docker default.
+      assertEquals(typeof fallback, "string");
+      assertEquals(fallback.includes("."), true);
+    } finally {
+      if (previous === undefined) {
+        Deno.env.delete("TURBOPANEL_DOCKER_HOST_GATEWAY");
+      } else {
+        Deno.env.set("TURBOPANEL_DOCKER_HOST_GATEWAY", previous);
+      }
+    }
+  },
 });
 
 test("buildTraditionalWebReachabilityFragment adds extra_hosts and env URLs", () => {

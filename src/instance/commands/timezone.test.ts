@@ -136,3 +136,73 @@ test({
     }
   },
 });
+
+test({
+  name: "handleTimezone omits summary when ansible apply returns empty",
+  fn: async () => {
+    const {
+      handleTimezone,
+      setAnsibleAvailabilityCheckForTests,
+      setTimeSyncApplyForTests,
+      setTimeSyncReaderForTests,
+    } = await import("./timezone.ts");
+
+    setAnsibleAvailabilityCheckForTests(() => Promise.resolve(true));
+    setTimeSyncApplyForTests(async () => {
+      await Promise.resolve();
+      return { summary: "" };
+    });
+    setTimeSyncReaderForTests(() => ({
+      timezone: "America/Chicago",
+      ntpEnabled: true,
+      ntpServers: ["203.0.113.10"],
+      fallbackNtpServers: [],
+    }));
+    try {
+      const result = await handleTimezone(
+        { timezone: "America/Chicago" },
+        new Date().toISOString(),
+      );
+      assertEquals(result, { timezone: "America/Chicago" });
+      assertEquals("summary" in result, false);
+    } finally {
+      setAnsibleAvailabilityCheckForTests(null);
+      setTimeSyncApplyForTests(null);
+      setTimeSyncReaderForTests(null);
+    }
+  },
+});
+
+test({
+  name: "handleTimezone falls back to payload timezone when host omits it",
+  fn: async () => {
+    const {
+      handleTimezone,
+      setAnsibleAvailabilityCheckForTests,
+      setTimeSyncApplyForTests,
+      setTimeSyncReaderForTests,
+    } = await import("./timezone.ts");
+
+    setAnsibleAvailabilityCheckForTests(() => Promise.resolve(true));
+    setTimeSyncApplyForTests(async () => {
+      await Promise.resolve();
+      return { summary: "applied" };
+    });
+    setTimeSyncReaderForTests(() => ({
+      ntpEnabled: true,
+      ntpServers: ["203.0.113.10"],
+      fallbackNtpServers: [],
+    }));
+    try {
+      const result = await handleTimezone(
+        { timezone: "Europe/Berlin" },
+        new Date().toISOString(),
+      );
+      assertEquals(result.timezone, "Europe/Berlin");
+    } finally {
+      setAnsibleAvailabilityCheckForTests(null);
+      setTimeSyncApplyForTests(null);
+      setTimeSyncReaderForTests(null);
+    }
+  },
+});

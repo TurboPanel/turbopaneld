@@ -2,8 +2,10 @@ import { assertEquals, assertThrows } from "@std/assert";
 import { parse } from "yaml";
 import type { ManagedApplyPayload } from "../instance/commands/contracts.ts";
 import {
+  assertPublicPrivateListenerTls,
   MANAGED_ROOT_PASSWORD_VAR,
   normalizeManagedCompose,
+  unnestPostgresConfigTlsMounts,
 } from "./compose.ts";
 import { MANAGED_INGRESS_NETWORK } from "./networks.ts";
 
@@ -200,6 +202,43 @@ test("normalizeManagedCompose emits privateListener ports only", () => {
   );
 });
 
+test("normalizeManagedCompose refuses a public privateListener without org TLS", () => {
+  assertThrows(
+    () =>
+      normalizeManagedCompose(
+        basePayload({
+          privateListener: {
+            address: "203.0.113.50",
+            port: 45001,
+            transport: "public",
+          },
+        }),
+      ),
+    Error,
+    "public privateListener requires orgTlsMaterial",
+  );
+});
+
+test("normalizeManagedCompose publishes a public privateListener with org TLS", () => {
+  const doc = parseNormalized(
+    basePayload({
+      privateListener: {
+        address: "203.0.113.50",
+        port: 45001,
+        transport: "public",
+      },
+      orgTlsMaterial: {
+        certificatePem: "-----BEGIN CERTIFICATE-----\nleaf\n",
+        privateKeyEnvelope: "tpdaemon.v1.server.key.payload",
+        caCertPem: "-----BEGIN CERTIFICATE-----\nca\n",
+      },
+    }),
+  );
+  const service = (doc.services as Record<string, Record<string, unknown>>)
+    .postgres!;
+  assertEquals(service.ports, ["203.0.113.50:45001:5432"]);
+});
+
 test("normalizeManagedCompose applies dockerOptions and rejects denylist keys", () => {
   const doc = parseNormalized(
     basePayload({
@@ -282,6 +321,194 @@ test("normalizeManagedCompose rejects unknown interpolation tokens", () => {
       ),
     Error,
     "managed compose permits only",
+  );
+});
+
+test("unnestPostgresConfigTlsMounts is a no-op without nested tls", () => {
+  const mounts = ["pgdata:/var/lib/postgresql"];
+  assertEquals(unnestPostgresConfigTlsMounts(mounts), mounts);
+});
+
+test("assertPublicPrivateListenerTls rejects public listener without org TLS", () => {
+  assertThrows(
+    () =>
+      assertPublicPrivateListenerTls(basePayload({
+        privateListener: {
+          address: "203.0.113.50",
+          port: 45001,
+          transport: "public",
+        },
+      })),
+    Error,
+    "orgTlsMaterial",
+  );
+});
+
+test("normalizeManagedCompose rejects invalid privateListener binds", () => {
+  assertThrows(
+    () =>
+      normalizeManagedCompose(
+        basePayload({
+          privateListener: { address: "not-an-ip", port: 45001 },
+        }),
+      ),
+    Error,
+    "not a valid IP",
+  );
+  assertThrows(
+    () =>
+      normalizeManagedCompose(
+        basePayload({
+          privateListener: { address: "0.0.0.0", port: 45001 },
+        }),
+      ),
+    Error,
+    "loopback or unspecified",
+  );
+  assertThrows(
+    () =>
+      normalizeManagedCompose(
+        basePayload({
+          privateListener: { address: "203.0.113.50", port: 70_000 },
+        }),
+      ),
+    Error,
+    "port out of range",
+  );
+  assertThrows(
+    () =>
+      normalizeManagedCompose(
+        basePayload({
+          privateListener: { address: "::1", port: 45001 },
+        }),
+      ),
+    Error,
+    "loopback or unspecified",
+  );
+});
+
+test("normalizeManagedCompose merges array-form environment from dockerOptions", () => {
+  const doc = parseNormalized(
+    basePayload({
+      composeYaml: [
+        "services:",
+        "  postgres:",
+        "    image: postgres:18-alpine",
+        "    environment:",
+        "      - EXISTING=yes",
+        "      - BARE",
+      ].join("\n"),
+      dockerOptions: { extraEnv: { ADDED: "1" } },
+    }),
+  );
+  const env = (doc.services as Record<string, Record<string, unknown>>)
+    .postgres!.environment as Record<string, string>;
+  assertEquals(env.EXISTING, "yes");
+  assertEquals(env.BARE, "");
+  assertEquals(env.ADDED, "1");
+});
+
+test("normalizeManagedCompose attaches managed network to array and object forms", () => {
+  const arrayNetworks = parseNormalized(
+    basePayload({
+      composeYaml: [
+        "services:",
+        "  postgres:",
+        "    image: postgres:18-alpine",
+        "    networks:",
+        "      - other-net",
+      ].join("\n"),
+    }),
+  );
+  const arrayService =
+    (arrayNetworks.services as Record<string, Record<string, unknown>>)
+      .postgres!;
+  assertEquals(
+    (arrayService.networks as string[]).includes(MANAGED_INGRESS_NETWORK),
+    true,
+  );
+
+  const objectNetworks = parseNormalized(
+    basePayload({
+      composeYaml: [
+        "services:",
+        "  postgres:",
+        "    image: postgres:18-alpine",
+        "    networks:",
+        "      other-net: {}",
+      ].join("\n"),
+    }),
+  );
+  const objectService =
+    (objectNetworks.services as Record<string, Record<string, unknown>>)
+      .postgres!;
+  const nets = objectService.networks as Record<string, unknown>;
+  assertEquals(nets[MANAGED_INGRESS_NETWORK] !== undefined, true);
+});
+
+test("normalizeManagedCompose rejects malformed compose documents", () => {
+  assertThrows(
+    () => normalizeManagedCompose(basePayload({ composeYaml: "volumes: {}" })),
+    Error,
+    "services object",
+  );
+  assertThrows(
+    () =>
+      normalizeManagedCompose(
+        basePayload({
+          composeYaml: [
+            "services:",
+            "  a:",
+            "    image: postgres:18-alpine",
+            "  b:",
+            "    image: postgres:18-alpine",
+          ].join("\n"),
+        }),
+      ),
+    Error,
+    "exactly one service",
+  );
+  assertThrows(
+    () =>
+      normalizeManagedCompose(
+        basePayload({
+          composeYaml: [
+            "services:",
+            "  postgres:",
+            "    build: .",
+          ].join("\n"),
+        }),
+      ),
+    Error,
+    "must not declare build",
+  );
+  assertThrows(
+    () =>
+      normalizeManagedCompose(
+        basePayload({
+          composeYaml: [
+            "services:",
+            "  postgres: null",
+          ].join("\n"),
+        }),
+      ),
+    Error,
+    "service must be an object",
+  );
+  assertThrows(
+    () =>
+      normalizeManagedCompose(
+        basePayload({
+          composeYaml: [
+            "services:",
+            "  postgres:",
+            "    image: postgres:18-alpine",
+            "    networks: bridge",
+          ].join("\n"),
+        }),
+      ),
+    Error,
+    "networks must be an array or object",
   );
 });
 

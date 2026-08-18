@@ -67,6 +67,37 @@ export interface CommandRouterDeps {
   >;
 }
 
+/** Test-only handler overrides — host-free router dispatch without Docker/Ansible. */
+export type CommandRouterHandlerOverrides = {
+  handleEnvironmentDeploy?: typeof handleEnvironmentDeploy;
+  handleManagedApply?: typeof handleManagedApply;
+  handleManagedLifecycle?: typeof handleManagedLifecycle;
+  handleManagedDestroy?: typeof handleManagedDestroy;
+  handleManagedPromote?: typeof handleManagedPromote;
+  handleManagedBackup?: typeof handleManagedBackup;
+  handleManagedRestore?: typeof handleManagedRestore;
+  handleManagedIngressReconcile?: typeof handleManagedIngressReconcile;
+  handleSystemReconcile?: typeof handleSystemReconcile;
+};
+
+let commandRouterHandlerOverrides: CommandRouterHandlerOverrides | null = null;
+
+export function setCommandRouterHandlersForTests(
+  overrides: CommandRouterHandlerOverrides | null,
+): void {
+  commandRouterHandlerOverrides = overrides;
+}
+
+function pickCommandRouterHandler<K extends keyof CommandRouterHandlerOverrides>(
+  key: K,
+  fallback: NonNullable<CommandRouterHandlerOverrides[K]>,
+): NonNullable<CommandRouterHandlerOverrides[K]> {
+  const override = commandRouterHandlerOverrides?.[key];
+  return (override ?? fallback) as NonNullable<
+    CommandRouterHandlerOverrides[K]
+  >;
+}
+
 function sanitizeError(value: unknown, maxLen = 500): string {
   const text = sanitizeForLog(value);
   return text.length > maxLen ? text.slice(0, maxLen) : text;
@@ -153,7 +184,10 @@ export async function handleCommandDispatch(
       }
       case "environment.deploy": {
         const payload = parseEnvironmentDeployPayload(message.payload);
-        result = await handleEnvironmentDeploy(payload, daemonReceivedAt, {
+        result = await pickCommandRouterHandler(
+          "handleEnvironmentDeploy",
+          handleEnvironmentDeploy,
+        )(payload, daemonReceivedAt, {
           decryptSecrets: deps?.decryptSecrets,
         });
         ok = true;
@@ -184,7 +218,10 @@ export async function handleCommandDispatch(
       }
       case "managed.apply": {
         const payload = parseManagedApplyPayload(message.payload);
-        result = await handleManagedApply(payload, daemonReceivedAt, {
+        result = await pickCommandRouterHandler(
+          "handleManagedApply",
+          handleManagedApply,
+        )(payload, daemonReceivedAt, {
           decryptSecrets: deps?.decryptSecrets,
         });
         ok = true;
@@ -193,7 +230,10 @@ export async function handleCommandDispatch(
       }
       case "managed.lifecycle": {
         const payload = parseManagedLifecyclePayload(message.payload);
-        result = await handleManagedLifecycle(payload, daemonReceivedAt, {
+        result = await pickCommandRouterHandler(
+          "handleManagedLifecycle",
+          handleManagedLifecycle,
+        )(payload, daemonReceivedAt, {
           decryptSecrets: deps?.decryptSecrets,
         });
         ok = true;
@@ -202,7 +242,10 @@ export async function handleCommandDispatch(
       }
       case "managed.destroy": {
         const payload = parseManagedDestroyPayload(message.payload);
-        result = await handleManagedDestroy(payload, daemonReceivedAt, {
+        result = await pickCommandRouterHandler(
+          "handleManagedDestroy",
+          handleManagedDestroy,
+        )(payload, daemonReceivedAt, {
           decryptSecrets: deps?.decryptSecrets,
         });
         ok = true;
@@ -211,7 +254,10 @@ export async function handleCommandDispatch(
       }
       case "managed.promote": {
         const payload = parseManagedPromotePayload(message.payload);
-        result = await handleManagedPromote(payload, daemonReceivedAt, {
+        result = await pickCommandRouterHandler(
+          "handleManagedPromote",
+          handleManagedPromote,
+        )(payload, daemonReceivedAt, {
           decryptSecrets: deps?.decryptSecrets,
         });
         ok = true;
@@ -222,21 +268,30 @@ export async function handleCommandDispatch(
         // No credential envelopes on this command — backups/restores run
         // through the already-running engine container via `docker exec`.
         const payload = parseManagedBackupPayload(message.payload);
-        result = await handleManagedBackup(payload, daemonReceivedAt);
+        result = await pickCommandRouterHandler(
+          "handleManagedBackup",
+          handleManagedBackup,
+        )(payload, daemonReceivedAt);
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;
       }
       case "managed.restore": {
         const payload = parseManagedRestorePayload(message.payload);
-        result = await handleManagedRestore(payload, daemonReceivedAt);
+        result = await pickCommandRouterHandler(
+          "handleManagedRestore",
+          handleManagedRestore,
+        )(payload, daemonReceivedAt);
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;
       }
       case "managed.ingress.reconcile": {
         const payload = parseManagedIngressReconcilePayload(message.payload);
-        result = await handleManagedIngressReconcile(
+        result = await pickCommandRouterHandler(
+          "handleManagedIngressReconcile",
+          handleManagedIngressReconcile,
+        )(
           payload,
           daemonReceivedAt,
           { decryptSecrets: deps?.decryptSecrets },
@@ -247,7 +302,10 @@ export async function handleCommandDispatch(
       }
       case "system.reconcile": {
         const payload = parseSystemReconcilePayload(message.payload);
-        result = await handleSystemReconcile(payload, daemonReceivedAt);
+        result = await pickCommandRouterHandler(
+          "handleSystemReconcile",
+          handleSystemReconcile,
+        )(payload, daemonReceivedAt);
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;

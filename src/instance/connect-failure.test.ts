@@ -149,3 +149,9 @@ it("temporaryAuthFailure returns temporary-auth kind", () => {
   assertEquals(temporaryAuthFailure("stale jwt").kind, "temporary-auth");
   assertEquals(temporaryAuthFailure("stale jwt").reason, "stale jwt");
 });
+
+it("classifies non-Error throwables as transient network failures", () => {
+  const classified = classifyConnectFailure("socket reset");
+  assertEquals(classified.kind, "transient");
+  assertEquals(classified.reason, "network or transport failure");
+});

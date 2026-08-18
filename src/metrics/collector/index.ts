@@ -69,12 +69,20 @@ class UnsupportedMetricsCollector implements MetricsCollector {
   }
 }
 
+/**
+ * Build the platform metrics collector.
+ *
+ * Optional `options.os` overrides `Deno.build.os` so host-free tests can
+ * exercise the unsupported-OS path without leaving Linux.
+ */
 export function createMetricsCollector(
   deps?: Partial<CollectorDeps>,
+  options?: { os?: string },
 ): MetricsCollector {
-  if (Deno.build.os !== "linux") {
+  const os = options?.os ?? Deno.build.os;
+  if (os !== "linux") {
     return new UnsupportedMetricsCollector(
-      `unsupported_os:${Deno.build.os}`,
+      `unsupported_os:${os}`,
     );
   }
 

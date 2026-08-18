@@ -8,7 +8,7 @@
  * renderers (see `../../managed/proxysql.test.ts` for those).
  */
 
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import type { DockerCliResult } from "../../deploy/docker-cli.ts";
 import {
   SYSTEM_MANAGED_INGRESS_COMPONENT,
@@ -140,6 +140,8 @@ test({
           null,
         );
         // No public port mapping at all — only the loopback admin port.
+        assertEquals(composeText.includes(":15432:15432"), false);
+        assertEquals(composeText.includes(":16306:16306"), false);
         assertEquals(composeText.includes(":5432:5432"), false);
         assertEquals(composeText.includes(":3306:3306"), false);
       } finally {
@@ -187,7 +189,7 @@ test({
           readPublishedBindAddressFromCompose(composeText),
           "203.0.113.5",
         );
-        assertEquals(composeText.includes('"0.0.0.0:5432:5432"'), false);
+        assertEquals(composeText.includes('"0.0.0.0:15432:15432"'), false);
       } finally {
         Deno.env.delete("TURBOPANEL_STATE_DIR");
         Deno.env.delete("TURBOPANEL_CONFIG_DIR");
@@ -243,6 +245,329 @@ test({
           },
         );
         assertEquals(third.restarted, false);
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name: "handleManagedIngressReconcile requires decryptSecrets",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedFixture(fixture);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        await assertRejects(
+          () =>
+            handleManagedIngressReconcile(
+              basePayload(),
+              new Date().toISOString(),
+              { runDocker: fakeRun(), ensureDocker: () => Promise.resolve() },
+            ),
+          Error,
+          "managed.ingress.reconcile requires decryptSecrets",
+        );
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name: "handleManagedIngressReconcile rejects decryptSecrets length mismatch",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedFixture(fixture);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        await assertRejects(
+          () =>
+            handleManagedIngressReconcile(
+              basePayload(),
+              new Date().toISOString(),
+              {
+                runDocker: fakeRun(),
+                ensureDocker: () => Promise.resolve(),
+                decryptSecrets: () => Promise.resolve([]),
+              },
+            ),
+          Error,
+          "decryptSecrets returned unexpected length",
+        );
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name: "handleManagedIngressReconcile rejects empty decrypted user passwords",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedFixture(fixture);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        await assertRejects(
+          () =>
+            handleManagedIngressReconcile(
+              basePayload(),
+              new Date().toISOString(),
+              {
+                runDocker: fakeRun(),
+                ensureDocker: () => Promise.resolve(),
+                decryptSecrets: () => Promise.resolve([null]),
+              },
+            ),
+          Error,
+          "failed to decrypt ProxySQL frontend user password",
+        );
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name: "handleManagedIngressReconcile surfaces proxysql compose up failures",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedFixture(fixture);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        await assertRejects(
+          () =>
+            handleManagedIngressReconcile(
+              basePayload(),
+              new Date().toISOString(),
+              {
+                runDocker: (args) => {
+                  if (args.includes("up")) {
+                    return Promise.resolve({
+                      success: false,
+                      stdout: "",
+                      stderr: "compose up exploded",
+                      code: 1,
+                    });
+                  }
+                  return fakeRun()(args);
+                },
+                ensureDocker: () => Promise.resolve(),
+                decryptSecrets: decryptSecretsEcho,
+              },
+            ),
+          Error,
+          "compose up exploded",
+        );
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name: "handleManagedIngressReconcile with no cluster users skips password decrypt",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedFixture(fixture);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        let decryptCalls = 0;
+        const payload = basePayload();
+        payload.clusters[0]!.users = [];
+        const result = await handleManagedIngressReconcile(
+          payload,
+          new Date().toISOString(),
+          {
+            runDocker: fakeRun(),
+            ensureDocker: () => Promise.resolve(),
+            decryptSecrets: (ciphertexts) => {
+              decryptCalls += 1;
+              return decryptSecretsEcho(ciphertexts);
+            },
+          },
+        );
+        assertEquals(result.appliedUsers, []);
+        assertEquals(decryptCalls, 1);
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name: "handleManagedIngressReconcile omits containers when compose ps fails",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedFixture(fixture);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        const result = await handleManagedIngressReconcile(
+          basePayload(),
+          new Date().toISOString(),
+          {
+            runDocker: (args) => {
+              if (args.includes("ps")) {
+                return Promise.resolve({
+                  success: false,
+                  stdout: "",
+                  stderr: "ps failed",
+                  code: 1,
+                });
+              }
+              return fakeRun()(args);
+            },
+            ensureDocker: () => Promise.resolve(),
+            decryptSecrets: decryptSecretsEcho,
+          },
+        );
+        assertEquals(result.restarted, true);
+        assertEquals("containers" in result, false);
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name: "handleManagedIngressReconcile returns empty containers when inspect finds no row",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedFixture(fixture);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        const result = await handleManagedIngressReconcile(
+          basePayload(),
+          new Date().toISOString(),
+          {
+            runDocker: (args) => {
+              if (args.includes("ps")) {
+                return Promise.resolve({
+                  success: true,
+                  stdout: "[]",
+                  stderr: "",
+                  code: 0,
+                });
+              }
+              return fakeRun()(args);
+            },
+            ensureDocker: () => Promise.resolve(),
+            decryptSecrets: decryptSecretsEcho,
+          },
+        );
+        assertEquals(result.containers, []);
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "empty clusters tears the stack down without TLS or admin statements",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedFixture(fixture);
+      const layout = resolveLayout(fixture.env);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        await Deno.writeTextFile(
+          proxysqlComposePath(layout),
+          'services:\n  proxysql:\n    image: proxysql/proxysql:3.0.2\n',
+        );
+        const dockerArgs: string[][] = [];
+        let decryptCalls = 0;
+        const result = await handleManagedIngressReconcile(
+          { serverId: SERVER_ID, clusters: [] },
+          new Date().toISOString(),
+          {
+            runDocker: (args) => {
+              dockerArgs.push([...args]);
+              return fakeRun()(args);
+            },
+            ensureDocker: () => Promise.resolve(),
+            decryptSecrets: (ciphertexts) => {
+              decryptCalls += 1;
+              return decryptSecretsEcho(ciphertexts);
+            },
+          },
+        );
+        assertEquals(result.appliedUsers, []);
+        assertEquals(result.appliedBackends, []);
+        assertEquals(result.restarted, false);
+        assertEquals(result.containers, []);
+        assertEquals(decryptCalls, 0);
+        const down = dockerArgs.find((args) => args.includes("down"));
+        assertEquals(down?.includes("--remove-orphans"), true);
+        assertEquals(
+          dockerArgs.some((args) => args.includes("exec")),
+          false,
+        );
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name: "empty clusters is a no-op when no compose file exists",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedFixture(fixture);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        const dockerArgs: string[][] = [];
+        const result = await handleManagedIngressReconcile(
+          { serverId: SERVER_ID, clusters: [] },
+          new Date().toISOString(),
+          {
+            runDocker: (args) => {
+              dockerArgs.push([...args]);
+              return fakeRun()(args);
+            },
+          },
+        );
+        assertEquals(result.appliedUsers, []);
+        assertEquals(result.appliedBackends, []);
+        assertEquals(result.restarted, false);
+        assertEquals(result.containers, []);
+        assertEquals(dockerArgs.length, 0);
       } finally {
         Deno.env.delete("TURBOPANEL_STATE_DIR");
         Deno.env.delete("TURBOPANEL_CONFIG_DIR");

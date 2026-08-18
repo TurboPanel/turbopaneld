@@ -311,20 +311,54 @@ test("executeRunReconcile chdir survives daemon directory swap", async () => {
   const daemonDir = join(tmp, "daemon");
   await Deno.mkdir(daemonDir, { recursive: true });
   const originalCwd = Deno.cwd();
+  const originalCommand = Deno.Command;
+  let spawnCwd: string | undefined;
+  let spawnEnv: Record<string, string> | undefined;
   try {
     Deno.chdir(daemonDir);
 
-    const swapScript = [
-      "#!/bin/sh",
-      `mkdir -p "${tmp}/staging"`,
-      `echo x > "${tmp}/staging/main.ts"`,
-      `mv "${daemonDir}" "${daemonDir}.old"`,
-      `mv "${tmp}/staging" "${daemonDir}"`,
-      `rm -rf "${daemonDir}.old"`,
-      "exit 0",
-    ].join("\n");
+    Deno.Command = class {
+      constructor(_cmd: string, opts: Deno.CommandOptions) {
+        spawnCwd = typeof opts.cwd === "string" ? opts.cwd : undefined;
+        spawnEnv = opts.env as Record<string, string> | undefined;
+      }
 
-    await executeRunReconcile({ script: swapScript, args: [] });
+      spawn() {
+        // Mimic run.sh replacing the checkout while reconcile cwd is elsewhere.
+        Deno.renameSync(daemonDir, `${daemonDir}.old`);
+        Deno.mkdirSync(daemonDir, { recursive: true });
+        Deno.writeTextFileSync(join(daemonDir, "main.ts"), "x\n");
+        Deno.removeSync(`${daemonDir}.old`, { recursive: true });
+        return {
+          stdin: {
+            getWriter() {
+              return {
+                write() {
+                  return Promise.resolve();
+                },
+                close() {
+                  return Promise.resolve();
+                },
+              };
+            },
+          },
+          output() {
+            return Promise.resolve({
+              success: true,
+              code: 0,
+              stdout: new Uint8Array(),
+              stderr: new Uint8Array(),
+            });
+          },
+        };
+      }
+    } as unknown as typeof Deno.Command;
+
+    await executeRunReconcile({
+      script: "#!/bin/sh\nexit 0",
+      args: [],
+      channel: "trunk",
+    });
 
     const cwdAfter = Deno.cwd();
     if (cwdAfter === daemonDir) {
@@ -332,9 +366,11 @@ test("executeRunReconcile chdir survives daemon directory swap", async () => {
         `expected cwd to move off deleted daemon dir, still ${cwdAfter}`,
       );
     }
+    assertEquals(spawnCwd === daemonDir, false);
+    assertEquals(spawnEnv?.TURBOPANEL_UPDATE_CHANNEL, "trunk");
   } finally {
+    Deno.Command = originalCommand;
     Deno.chdir(originalCwd);
-    // Directory swap can leave an unremovable tree; never hang on sudo.
     await Deno.remove(tmp, { recursive: true }).catch((err) => {
       if (
         err instanceof Deno.errors.PermissionDenied ||
@@ -344,5 +380,324 @@ test("executeRunReconcile chdir survives daemon directory swap", async () => {
       }
       console.warn(`cleanup ${tmp}:`, err);
     });
+  }
+});
+
+test("executeRunReconcile reports sudo failure stderr", async () => {
+  const originalCommand = Deno.Command;
+  try {
+    Deno.Command = class {
+      constructor(_cmd: string, _opts: Deno.CommandOptions) {}
+      spawn() {
+        return {
+          stdin: {
+            getWriter() {
+              return {
+                write() {
+                  return Promise.resolve();
+                },
+                close() {
+                  return Promise.resolve();
+                },
+              };
+            },
+          },
+          output() {
+            return Promise.resolve({
+              success: false,
+              code: 1,
+              stdout: new Uint8Array(),
+              stderr: new TextEncoder().encode("reconcile blew up\n"),
+            });
+          },
+        };
+      }
+    } as unknown as typeof Deno.Command;
+
+    let message = "";
+    try {
+      await executeRunReconcile({ script: "#!/bin/sh\n", args: [] });
+    } catch (err) {
+      if (!(err instanceof Error)) {
+        throw new TypeError("expected Error");
+      }
+      message = err.message;
+    }
+    assertEquals(message, "reconcile blew up");
+  } finally {
+    Deno.Command = originalCommand;
+  }
+});
+
+test("resolveBootstrapInsecureTls honors releaseTlsInsecure for HTTPS", () => {
+  assertEquals(
+    resolveBootstrapInsecureTls({
+      releaseTlsInsecure: "1",
+      runScriptUrl: CDN_RUN_SCRIPT,
+    }),
+    true,
+  );
+  assertEquals(
+    resolveBootstrapInsecureTls({
+      releaseTlsInsecure: "1",
+      runScriptUrl: "https://huey.lan:8443/run.sh",
+      instanceCaPath: "/etc/turbopanel/instance-ca.pem",
+    }),
+    true,
+  );
+});
+
+test("downloadRunScript uses -k for insecure HTTPS", async () => {
+  const originalCommand = Deno.Command;
+  let capturedArgs: string[] | undefined;
+  try {
+    Deno.Command = class {
+      constructor(_cmd: string, opts: Deno.CommandOptions) {
+        capturedArgs = opts.args as string[];
+      }
+      output() {
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: new TextEncoder().encode("#!/bin/sh\necho ok"),
+          stderr: new Uint8Array(),
+        });
+      }
+    } as typeof Deno.Command;
+    await downloadRunScript("https://huey.lan:8443/run.sh", {
+      insecureTls: true,
+    });
+    assertEquals(capturedArgs, ["-fsSL", "-k", "https://huey.lan:8443/run.sh"]);
+  } finally {
+    Deno.Command = originalCommand;
+  }
+});
+
+test("downloadRunScript uses --cacert when platform CA is provided", async () => {
+  const originalCommand = Deno.Command;
+  let capturedArgs: string[] | undefined;
+  try {
+    Deno.Command = class {
+      constructor(_cmd: string, opts: Deno.CommandOptions) {
+        capturedArgs = opts.args as string[];
+      }
+      output() {
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: new TextEncoder().encode("#!/bin/sh\necho ok"),
+          stderr: new Uint8Array(),
+        });
+      }
+    } as typeof Deno.Command;
+    await downloadRunScript("https://huey.lan:8443/run.sh", {
+      caPath: "/etc/turbopanel/instance-ca.pem",
+    });
+    assertEquals(capturedArgs, [
+      "-fsSL",
+      "--cacert",
+      "/etc/turbopanel/instance-ca.pem",
+      "https://huey.lan:8443/run.sh",
+    ]);
+  } finally {
+    Deno.Command = originalCommand;
+  }
+});
+
+test("downloadRunScript accepts legacy boolean insecureTls option", async () => {
+  const originalCommand = Deno.Command;
+  let capturedArgs: string[] | undefined;
+  try {
+    Deno.Command = class {
+      constructor(_cmd: string, opts: Deno.CommandOptions) {
+        capturedArgs = opts.args as string[];
+      }
+      output() {
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: new TextEncoder().encode("#!/bin/sh\necho ok"),
+          stderr: new Uint8Array(),
+        });
+      }
+    } as typeof Deno.Command;
+    await downloadRunScript("https://huey.lan:8443/run.sh", true);
+    assertEquals(capturedArgs, ["-fsSL", "-k", "https://huey.lan:8443/run.sh"]);
+  } finally {
+    Deno.Command = originalCommand;
+  }
+});
+
+test("downloadRunScript surfaces curl stderr on failure", async () => {
+  const originalCommand = Deno.Command;
+  try {
+    Deno.Command = class {
+      constructor(_cmd: string, _opts: Deno.CommandOptions) {}
+      output() {
+        return Promise.resolve({
+          success: false,
+          code: 22,
+          stdout: new Uint8Array(),
+          stderr: new TextEncoder().encode("curl: (22) HTTP 404\n"),
+        });
+      }
+    } as typeof Deno.Command;
+    let message = "";
+    try {
+      await downloadRunScript("https://huey.lan:8443/run.sh");
+    } catch (err) {
+      if (!(err instanceof Error)) {
+        throw new TypeError("expected Error");
+      }
+      message = err.message;
+    }
+    assertEquals(message.includes("curl: (22)"), true);
+  } finally {
+    Deno.Command = originalCommand;
+  }
+});
+
+test("downloadRunScript rejects empty script body", async () => {
+  const originalCommand = Deno.Command;
+  try {
+    Deno.Command = class {
+      constructor(_cmd: string, _opts: Deno.CommandOptions) {}
+      output() {
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: new TextEncoder().encode("   \n"),
+          stderr: new Uint8Array(),
+        });
+      }
+    } as typeof Deno.Command;
+    let message = "";
+    try {
+      await downloadRunScript("https://huey.lan:8443/run.sh");
+    } catch (err) {
+      if (!(err instanceof Error)) {
+        throw new TypeError("expected Error");
+      }
+      message = err.message;
+    }
+    assertEquals(message.includes("empty run script"), true);
+  } finally {
+    Deno.Command = originalCommand;
+  }
+});
+
+test("executeRunReconcile preserves trimmed TURBOPANEL_DL_BASE", async () => {
+  const originalCommand = Deno.Command;
+  const originalDlBase = Deno.env.get("TURBOPANEL_DL_BASE");
+  let capturedEnv: Record<string, string> | undefined;
+  try {
+    Deno.env.set(
+      "TURBOPANEL_DL_BASE",
+      "  https://overlay.example/downloads/daemon  ",
+    );
+    Deno.Command = class {
+      constructor(_cmd: string, opts: Deno.CommandOptions) {
+        capturedEnv = opts.env as Record<string, string> | undefined;
+      }
+      spawn() {
+        return {
+          stdin: {
+            getWriter() {
+              return {
+                write() {
+                  return Promise.resolve();
+                },
+                close() {
+                  return Promise.resolve();
+                },
+              };
+            },
+          },
+          output() {
+            return Promise.resolve({
+              success: true,
+              code: 0,
+              stdout: new Uint8Array(),
+              stderr: new Uint8Array(),
+            });
+          },
+        };
+      }
+    } as unknown as typeof Deno.Command;
+
+    await executeRunReconcile({
+      script: "#!/bin/sh\nexit 0",
+      args: [],
+    });
+    assertEquals(
+      capturedEnv?.TURBOPANEL_DL_BASE,
+      "https://overlay.example/downloads/daemon",
+    );
+  } finally {
+    Deno.Command = originalCommand;
+    if (originalDlBase === undefined) Deno.env.delete("TURBOPANEL_DL_BASE");
+    else Deno.env.set("TURBOPANEL_DL_BASE", originalDlBase);
+  }
+});
+
+test("executeRunReconcile falls back cwd when primary chdir fails", async () => {
+  const originalCommand = Deno.Command;
+  const originalChdir = Deno.chdir;
+  const originalStatSync = Deno.statSync;
+  const chdirTargets: string[] = [];
+  try {
+    Deno.statSync = ((path: string | URL) => {
+      if (String(path) === "/opt/turbopanel") {
+        return { isDirectory: true } as Deno.FileInfo;
+      }
+      return originalStatSync.call(Deno, path);
+    }) as typeof Deno.statSync;
+    Deno.chdir = ((path: string | URL) => {
+      const target = String(path);
+      chdirTargets.push(target);
+      if (target === "/opt/turbopanel") {
+        throw new Deno.errors.PermissionDenied("mocked chdir");
+      }
+      // Host-free: do not mutate the real process cwd.
+    }) as typeof Deno.chdir;
+
+    Deno.Command = class {
+      constructor(_cmd: string, _opts: Deno.CommandOptions) {}
+      spawn() {
+        return {
+          stdin: {
+            getWriter() {
+              return {
+                write() {
+                  return Promise.resolve();
+                },
+                close() {
+                  return Promise.resolve();
+                },
+              };
+            },
+          },
+          output() {
+            return Promise.resolve({
+              success: true,
+              code: 0,
+              stdout: new Uint8Array(),
+              stderr: new Uint8Array(),
+            });
+          },
+        };
+      }
+    } as unknown as typeof Deno.Command;
+
+    await executeRunReconcile({
+      script: "#!/bin/sh\nexit 0",
+      args: [],
+    });
+    assertEquals(chdirTargets.includes("/opt/turbopanel"), true);
+    assertEquals(chdirTargets.includes("/"), true);
+  } finally {
+    Deno.Command = originalCommand;
+    Deno.chdir = originalChdir;
+    Deno.statSync = originalStatSync;
   }
 });

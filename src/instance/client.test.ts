@@ -2,15 +2,20 @@ import { type DaemonApiClient, DaemonApiError } from "./api-client.ts";
 import { it } from "@std/testing/bdd";
 import { join } from "@std/path";
 import { assert, assertEquals, assertExists, assertRejects } from "@std/assert";
+import { encodeBase64 } from "@std/encoding/base64";
 import {
+  connectInstance,
   DEFAULT_INITIAL_BACKOFF_MS,
   DEFAULT_MAX_BACKOFF_MS,
   fullJitterMs,
+  installClientTestHooks,
   installClientTimeSource,
   InstanceClient,
   normalizeReconnectDelayMs,
   PARKED_BACKOFF_MIN_MS,
+  readKeyId,
   STABLE_SESSION_MS,
+  writeKeyId,
 } from "./client.ts";
 import { generateDaemonKeypair, saveDaemonKeyFile } from "../crypto/keys.ts";
 import { enrollDaemon } from "./enroll.ts";
@@ -23,8 +28,10 @@ import {
   createTestSigningKey,
   enrollResponse,
   flushMicrotasks,
+  framesOfType,
   installTrackingWebSocket,
   jwksResponse as scriptedJwksResponse,
+  lastFrameOfType,
   MockWebSocket,
   parseJsonBody,
   sessionResponse,
@@ -3150,6 +3157,2111 @@ it({
       setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
       setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
       await Deno.remove(tempDir, { recursive: true });
+    }
+  },
+});
+
+it({
+  name: "InstanceClient REST helpers cover health readiness version connections",
+  permissions: { net: true },
+  fn: async () => {
+    const api = createFakeInstanceApi();
+    const restore = api.install();
+    try {
+      const client = new InstanceClient({
+        config: {
+          kind: "url",
+          baseUrl: "https://instance.test",
+          wsBaseUrl: "wss://instance.test",
+        },
+      });
+      assertEquals(client.target, "https://instance.test");
+      assertEquals(client.config.kind, "url");
+
+      let healthMode: "ok" | "fail" = "ok";
+      api.script("/api/health", () => {
+        if (healthMode === "ok") {
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        return new Response("nope", { status: 503 });
+      });
+      assertEquals(await client.fetchHealth(), { ok: true });
+      healthMode = "fail";
+      await assertRejects(() => client.fetchHealth());
+
+      let readinessMode:
+        | "ready"
+        | "needs-install"
+        | "error"
+        | "not-json" = "ready";
+      api.script("/api/daemon/v1/readiness", () => {
+        if (readinessMode === "ready") {
+          return new Response(
+            JSON.stringify({ ok: true, ready: true }),
+            { status: 200 },
+          );
+        }
+        if (readinessMode === "needs-install") {
+          return new Response(
+            JSON.stringify({ ok: true, ready: false, needsInstall: true }),
+            { status: 503 },
+          );
+        }
+        if (readinessMode === "error") {
+          return new Response(
+            JSON.stringify({ error: "readiness down" }),
+            { status: 500 },
+          );
+        }
+        return new Response("not-json", { status: 200 });
+      });
+      assertEquals(await client.fetchDaemonReadiness(), {
+        ok: true,
+        ready: true,
+      });
+      readinessMode = "needs-install";
+      assertEquals(await client.fetchDaemonReadiness(), {
+        ok: true,
+        ready: false,
+        needsInstall: true,
+      });
+      readinessMode = "error";
+      const readinessErr = await assertRejects(
+        () => client.fetchDaemonReadiness(),
+      );
+      assertEquals(
+        readinessErr instanceof Error &&
+          readinessErr.message === "readiness down",
+        true,
+      );
+      readinessMode = "not-json";
+      await assertRejects(() => client.fetchDaemonReadiness());
+
+      let versionMode: "ok" | "fail" = "ok";
+      api.script("/api/daemon/v1/version", () => {
+        if (versionMode === "ok") {
+          return new Response(
+            JSON.stringify({ commit: "abc", branch: "trunk" }),
+            { status: 200 },
+          );
+        }
+        return new Response("x", { status: 404 });
+      });
+      assertEquals(await client.fetchVersion(), {
+        commit: "abc",
+        branch: "trunk",
+      });
+      versionMode = "fail";
+      await assertRejects(() => client.fetchVersion());
+
+      let connectionsMode: "ok" | "fail" = "ok";
+      api.script("/api/developer/v1/daemon/connections", () => {
+        if (connectionsMode === "ok") {
+          return new Response(
+            JSON.stringify({
+              connections: [{ id: "c1", connectedAt: "2020-01-01T00:00:00Z" }],
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response("x", { status: 500 });
+      });
+      assertEquals(await client.fetchConnections(), {
+        connections: [{ id: "c1", connectedAt: "2020-01-01T00:00:00Z" }],
+      });
+      connectionsMode = "fail";
+      await assertRejects(() => client.fetchConnections());
+    } finally {
+      restore();
+    }
+  },
+});
+
+it({
+  name: "writeKeyId and readKeyId round-trip and skip blank ids",
+  permissions: { env: true, read: true, write: true },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", fixture.dirs.stateDir);
+      try {
+        await writeKeyId("  ");
+        assertEquals(await readKeyId(), undefined);
+
+        await writeKeyId("kid-persist");
+        assertEquals(await readKeyId(), "kid-persist");
+
+        await Deno.writeTextFile(
+          join(fixture.dirs.stateDir, "server-key-id"),
+          "   \n",
+        );
+        assertEquals(await readKeyId(), undefined);
+
+        await Deno.remove(join(fixture.dirs.stateDir, "server-key-id"));
+        assertEquals(await readKeyId(), undefined);
+
+        // Unreadable key path → writeKeyId logs and swallows.
+        await Deno.mkdir(join(fixture.dirs.stateDir, "server-key-id"), {
+          recursive: true,
+        });
+        await writeKeyId("kid-fail");
+      } finally {
+        Deno.env.delete("TURBOPANEL_DAEMON_STATE_DIR");
+      }
+    });
+  },
+});
+
+it({
+  name: "connected client handles inbound message fan-out host-free",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  fn: async () => {
+    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const originalDaemonRoot = Deno.env.get("TURBOPANEL_DAEMON_ROOT");
+    const originalDevInstance = Deno.env.get("TURBOPANEL_DEV_INSTANCE");
+    const { sockets, restore: restoreWebSocket } = installTrackingWebSocket();
+    let restoreFetch: (() => void) | undefined;
+    const received: unknown[] = [];
+    let applyCalls = 0;
+
+    try {
+      const { signing, authToken, enroll } = await prepareVerifiedAuth();
+      const api = createFakeInstanceApi();
+      api.script(
+        "/api/health",
+        () => new Response(JSON.stringify({ ok: true }), { status: 200 }),
+      );
+      api.script(
+        "/api/daemon/v1/jwks.json",
+        () => scriptedJwksResponse(signing),
+      );
+      api.script("/api/daemon/v1/auth/challenge", () =>
+        challengeResponse({
+          challengeId: "auth-challenge",
+          nonce: "auth-nonce",
+        }));
+      api.script("/api/daemon/v1/enroll", () => enrollResponse(enroll));
+      api.script(
+        "/api/daemon/v1/auth/session",
+        () => sessionResponse({ token: authToken }),
+      );
+      api.script(
+        "/api/daemon/v1/secrets/decrypt",
+        () =>
+          new Response(JSON.stringify({ plaintexts: [] }), { status: 200 }),
+      );
+      api.script(
+        "/api/daemon/v1/deployments/secrets/rehydrate",
+        () =>
+          new Response(JSON.stringify({ deployments: [] }), { status: 200 }),
+      );
+      restoreFetch = api.install();
+
+      await withTempLayout(async (fixture) => {
+        const tempDir = fixture.dirs.stateDir;
+        Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", tempDir);
+        Deno.env.set("TURBOPANEL_FORCE_ENROLL", "1");
+        Deno.env.delete("TURBOPANEL_DEV_INSTANCE");
+        const checkout = join(tempDir, "checkout");
+        await Deno.mkdir(checkout, { recursive: true });
+        await Deno.writeTextFile(join(checkout, "main.ts"), "export {}\n");
+        Deno.env.set("TURBOPANEL_DAEMON_ROOT", checkout);
+        await Deno.writeTextFile(`${tempDir}/license.id`, "license-123\n");
+        await Deno.writeTextFile(`${tempDir}/license.token`, "token-abc\n");
+
+        const client = new InstanceClient({
+          config: {
+            kind: "url",
+            baseUrl: "https://instance.test",
+            wsBaseUrl: "wss://instance.test",
+          },
+          httpClient: {} as Deno.HttpClient,
+          onMessage: (message) => {
+            received.push(message);
+          },
+          applyDevSyncTarball: (bytes) => {
+            applyCalls += 1;
+            assertEquals(bytes.length > 0, true);
+            return Promise.resolve();
+          },
+        });
+
+        try {
+          client.start();
+          client.start(); // idempotent
+          const socket = await waitFor("fan-out websocket", () => sockets.at(0));
+          assertExists(socket.options);
+          socket.open();
+          await flushMicrotasks();
+
+          client.send({
+            type: "echo",
+            payload: { ping: true },
+            at: new Date().toISOString(),
+          });
+
+          socket.receive("not-json");
+          socket.receive({
+            type: "version",
+            commit: "abc",
+            branch: "trunk",
+            at: new Date().toISOString(),
+          });
+          socket.receive({
+            type: "echo",
+            payload: { hello: "world" },
+            at: new Date().toISOString(),
+          });
+          socket.receive({
+            type: "addresses-request",
+            id: "addr-1",
+            at: new Date().toISOString(),
+          });
+          socket.receive({
+            type: "managed-logs-request",
+            id: "logs-1",
+            managedId: "00000000-0000-4000-8000-000000000001",
+            tail: 20,
+            at: new Date().toISOString(),
+          });
+          socket.receive({
+            type: "fabric-paths-request",
+            id: "fabric-1",
+            fabricId: "00000000-0000-4000-8000-000000000002",
+            probeMs: 1,
+            candidates: [{
+              publicKey: "pk",
+              endpoints: ["203.0.113.10:51820"],
+            }],
+            at: new Date().toISOString(),
+          });
+          socket.receive({
+            type: "command-dispatch",
+            id: "cmd-1",
+            commandId: "00000000-0000-4000-8000-000000000003",
+            commandType: "daemon.ping",
+            payload: {},
+            at: new Date().toISOString(),
+          });
+          socket.receive({
+            type: "tunnel-token",
+            id: "tun-1",
+            token: "cf-tunnel-token",
+            at: new Date().toISOString(),
+          });
+          socket.receive({
+            type: "public-urls-update",
+            id: "urls-1",
+            urls: ["https://203.0.113.50"],
+            at: new Date().toISOString(),
+          });
+          socket.receive({
+            type: "update",
+            id: "upd-1",
+            channel: "!!!invalid!!!",
+            at: new Date().toISOString(),
+          });
+
+          // Managed refuse path: second client without applyDevSync.
+          // On this client, begin → chunk → end should apply.
+          socket.receive({
+            type: "dev-sync-begin",
+            id: "sync-1",
+            totalChunks: 1,
+            totalBytes: 4,
+            at: new Date().toISOString(),
+          });
+          socket.receive({
+            type: "dev-sync-chunk",
+            id: "sync-1",
+            index: 0,
+            data: encodeBase64(new TextEncoder().encode("tgz!")),
+            at: new Date().toISOString(),
+          });
+          socket.receive({
+            type: "dev-sync-end",
+            id: "sync-1",
+            at: new Date().toISOString(),
+          });
+
+          await waitFor(
+            "addresses-result",
+            () =>
+              lastFrameOfType(socket, "addresses-result") ? true : undefined,
+          );
+          await waitFor(
+            "managed-logs-result",
+            () =>
+              lastFrameOfType(socket, "managed-logs-result")
+                ? true
+                : undefined,
+          );
+          await waitFor(
+            "fabric-paths-result",
+            () =>
+              lastFrameOfType(socket, "fabric-paths-result")
+                ? true
+                : undefined,
+          );
+          await waitFor(
+            "tunnel-token-result",
+            () =>
+              lastFrameOfType(socket, "tunnel-token-result")
+                ? true
+                : undefined,
+          );
+          await waitFor(
+            "public-urls-update-result",
+            () =>
+              lastFrameOfType(socket, "public-urls-update-result")
+                ? true
+                : undefined,
+          );
+          await waitFor(
+            "update-result",
+            () => lastFrameOfType(socket, "update-result") ? true : undefined,
+          );
+          await waitFor(
+            "dev-sync-result",
+            () => lastFrameOfType(socket, "dev-sync-result") ? true : undefined,
+            5_000,
+          );
+
+          assert(framesOfType(socket, "echo").length >= 1);
+          assert(received.some((m) =>
+            typeof m === "object" && m !== null &&
+            (m as { type?: string }).type === "version"
+          ));
+          assertEquals(applyCalls >= 1, true);
+
+          let sendThrew = false;
+          try {
+            const closed = new InstanceClient({
+              config: {
+                kind: "url",
+                baseUrl: "https://instance.test",
+                wsBaseUrl: "wss://instance.test",
+              },
+            });
+            closed.send({
+              type: "echo",
+              payload: {},
+              at: new Date().toISOString(),
+            });
+          } catch (err) {
+            sendThrew = err instanceof Error &&
+              err.message.includes("not connected");
+          }
+          assertEquals(sendThrew, true);
+        } finally {
+          client.stop();
+        }
+      });
+    } finally {
+      restoreFetch?.();
+      restoreWebSocket();
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+      setOptionalEnv("TURBOPANEL_DAEMON_ROOT", originalDaemonRoot);
+      setOptionalEnv("TURBOPANEL_DEV_INSTANCE", originalDevInstance);
+    }
+  },
+});
+
+it({
+  name: "dev-sync-begin without checkout apply refuses transfer",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  fn: async () => {
+    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const { sockets, restore: restoreWebSocket } = installTrackingWebSocket();
+    let restoreFetch: (() => void) | undefined;
+    try {
+      const { signing, authToken, enroll } = await prepareVerifiedAuth();
+      const api = createFakeInstanceApi();
+      api.script(
+        "/api/health",
+        () => new Response(JSON.stringify({ ok: true }), { status: 200 }),
+      );
+      api.script(
+        "/api/daemon/v1/jwks.json",
+        () => scriptedJwksResponse(signing),
+      );
+      api.script("/api/daemon/v1/auth/challenge", () => challengeResponse());
+      api.script("/api/daemon/v1/enroll", () => enrollResponse(enroll));
+      api.script(
+        "/api/daemon/v1/auth/session",
+        () => sessionResponse({ token: authToken }),
+      );
+      restoreFetch = api.install();
+
+      await withTempLayout(async (fixture) => {
+        Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", fixture.dirs.stateDir);
+        Deno.env.set("TURBOPANEL_FORCE_ENROLL", "1");
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.id`,
+          "license-123\n",
+        );
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.token`,
+          "token-abc\n",
+        );
+
+        // Explicit undefined forces managed refuse (Object.hasOwn path).
+        const client = new InstanceClient({
+          config: {
+            kind: "url",
+            baseUrl: "https://instance.test",
+            wsBaseUrl: "wss://instance.test",
+          },
+          applyDevSyncTarball: undefined,
+        });
+
+        try {
+          client.start();
+          const socket = await waitFor(
+            "refuse websocket",
+            () => sockets.at(0),
+          );
+          socket.open();
+          await flushMicrotasks();
+          socket.receive({
+            type: "dev-sync-begin",
+            id: "sync-refuse",
+            totalChunks: 1,
+            totalBytes: 1,
+            at: new Date().toISOString(),
+          });
+          const refused = await waitFor(
+            "refused result",
+            () => lastFrameOfType(socket, "dev-sync-result") as
+              | { ok?: boolean; error?: string }
+              | undefined,
+          );
+          assertEquals(refused.ok, false);
+          assertEquals(typeof refused.error, "string");
+
+          socket.receive({
+            type: "dev-sync-end",
+            id: "sync-refuse",
+            at: new Date().toISOString(),
+          });
+          await flushMicrotasks();
+          assertEquals(framesOfType(socket, "dev-sync-result").length, 1);
+        } finally {
+          client.stop();
+        }
+      });
+    } finally {
+      restoreFetch?.();
+      restoreWebSocket();
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+    }
+  },
+});
+
+it({
+  name: "colocated socket client requires readiness before connect",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const clock = createFakeClock({ now: 2_500_000 });
+    // Do not patch Date.now — waitFor uses wall Date.now for timeouts.
+    const restoreClientTime = installClientTimeSource({
+      now: () => clock.now(),
+      delay: (ms) => clock.delay(ms),
+    });
+    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const { sockets, restore: restoreWebSocket } = installTrackingWebSocket();
+    let restoreFetch: (() => void) | undefined;
+    let readinessHits = 0;
+    try {
+      const { signing, authToken, enroll } = await prepareVerifiedAuth();
+      const api = createFakeInstanceApi();
+      api.script("/api/daemon/v1/readiness", () => {
+        readinessHits += 1;
+        if (readinessHits === 1) {
+          return new Response(
+            JSON.stringify({ ok: true, ready: false, needsInstall: true }),
+            { status: 503 },
+          );
+        }
+        return new Response(
+          JSON.stringify({ ok: true, ready: true }),
+          { status: 200 },
+        );
+      });
+      api.script(
+        "/api/daemon/v1/jwks.json",
+        () => scriptedJwksResponse(signing),
+      );
+      api.script("/api/daemon/v1/auth/challenge", () => challengeResponse());
+      api.script("/api/daemon/v1/enroll", () => enrollResponse(enroll));
+      api.script(
+        "/api/daemon/v1/auth/session",
+        () => sessionResponse({ token: authToken }),
+      );
+      restoreFetch = api.install();
+
+      await withTempLayout(async (fixture) => {
+        Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", fixture.dirs.stateDir);
+        Deno.env.set("TURBOPANEL_FORCE_ENROLL", "1");
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.id`,
+          "license-123\n",
+        );
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.token`,
+          "token-abc\n",
+        );
+
+        const client = new InstanceClient({
+          config: {
+            kind: "socket",
+            socketPath: "/tmp/turbopanel-test-instance.sock",
+          },
+          reconnectDelayMs: DEFAULT_INITIAL_BACKOFF_MS,
+        });
+
+        try {
+          client.start();
+          // First attempt: not ready → reconnect; drive fake backoff.
+          const started = performance.now();
+          while (sockets.length < 1 && performance.now() - started < 3_000) {
+            await clock.advance(DEFAULT_INITIAL_BACKOFF_MS);
+            await flushMicrotasks();
+            await new Promise((resolve) => setTimeout(resolve, 1));
+          }
+          const socket = await waitFor(
+            "socket-mode websocket",
+            () => sockets.at(0),
+            5_000,
+          );
+          assertEquals(client.target.startsWith("unix://"), true);
+          socket.open();
+          await flushMicrotasks();
+          socket.close(1000, "done");
+          assertEquals(readinessHits >= 2, true);
+        } finally {
+          client.stop();
+        }
+      });
+    } finally {
+      restoreFetch?.();
+      restoreWebSocket();
+      restoreClientTime();
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+    }
+  },
+});
+
+it({
+  name: "connectInstance waits for remote health then starts",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const clock = createFakeClock({ now: 2_000_000 });
+    const restoreClientTime = installClientTimeSource({
+      now: () => clock.now(),
+      delay: (ms) => clock.delay(ms),
+    });
+    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const { sockets, restore: restoreWebSocket } = installTrackingWebSocket();
+    let restoreFetch: (() => void) | undefined;
+    let healthHits = 0;
+    try {
+      const { signing, authToken, enroll } = await prepareVerifiedAuth();
+      const api = createFakeInstanceApi();
+      api.script("/api/health", () => {
+        healthHits += 1;
+        if (healthHits < 2) {
+          return new Response("down", { status: 503 });
+        }
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      });
+      api.script(
+        "/api/daemon/v1/jwks.json",
+        () => scriptedJwksResponse(signing),
+      );
+      api.script("/api/daemon/v1/auth/challenge", () => challengeResponse());
+      api.script("/api/daemon/v1/enroll", () => enrollResponse(enroll));
+      api.script(
+        "/api/daemon/v1/auth/session",
+        () => sessionResponse({ token: authToken }),
+      );
+      restoreFetch = api.install();
+
+      await withTempLayout(async (fixture) => {
+        Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", fixture.dirs.stateDir);
+        Deno.env.set("TURBOPANEL_FORCE_ENROLL", "1");
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.id`,
+          "license-123\n",
+        );
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.token`,
+          "token-abc\n",
+        );
+
+        let resolved: InstanceClient | undefined;
+        const pending = connectInstance({
+          config: {
+            kind: "url",
+            baseUrl: "https://instance.test",
+            wsBaseUrl: "wss://instance.test",
+          },
+          reconnectDelayMs: DEFAULT_INITIAL_BACKOFF_MS,
+        }).then((client) => {
+          resolved = client;
+          return client;
+        });
+
+        const started = performance.now();
+        while (!resolved && performance.now() - started < 3_000) {
+          await clock.advance(DEFAULT_INITIAL_BACKOFF_MS);
+          await flushMicrotasks();
+          await new Promise((resolve) => setTimeout(resolve, 1));
+        }
+        const client = await pending;
+        try {
+          const socket = await waitFor(
+            "connectInstance websocket",
+            () => sockets.at(0),
+          );
+          socket.open();
+          assertEquals(healthHits >= 2, true);
+          socket.close(1000, "done");
+        } finally {
+          client.stop();
+        }
+      });
+    } finally {
+      restoreFetch?.();
+      restoreWebSocket();
+      restoreClientTime();
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+    }
+  },
+});
+
+it({
+  name: "connectInstance waits for colocated readiness then starts",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const clock = createFakeClock({ now: 3_000_000 });
+    const restoreClientTime = installClientTimeSource({
+      now: () => clock.now(),
+      delay: (ms) => clock.delay(ms),
+    });
+    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const { sockets, restore: restoreWebSocket } = installTrackingWebSocket();
+    let restoreFetch: (() => void) | undefined;
+    let readinessHits = 0;
+    try {
+      const { signing, authToken, enroll } = await prepareVerifiedAuth();
+      const api = createFakeInstanceApi();
+      api.script("/api/daemon/v1/readiness", () => {
+        readinessHits += 1;
+        if (readinessHits < 2) {
+          return new Response(
+            JSON.stringify({ ok: true, ready: false }),
+            { status: 503 },
+          );
+        }
+        return new Response(
+          JSON.stringify({ ok: true, ready: true }),
+          { status: 200 },
+        );
+      });
+      api.script(
+        "/api/daemon/v1/jwks.json",
+        () => scriptedJwksResponse(signing),
+      );
+      api.script("/api/daemon/v1/auth/challenge", () => challengeResponse());
+      api.script("/api/daemon/v1/enroll", () => enrollResponse(enroll));
+      api.script(
+        "/api/daemon/v1/auth/session",
+        () => sessionResponse({ token: authToken }),
+      );
+      restoreFetch = api.install();
+
+      await withTempLayout(async (fixture) => {
+        Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", fixture.dirs.stateDir);
+        Deno.env.set("TURBOPANEL_FORCE_ENROLL", "1");
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.id`,
+          "license-123\n",
+        );
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.token`,
+          "token-abc\n",
+        );
+
+        let resolved: InstanceClient | undefined;
+        const pending = connectInstance({
+          config: {
+            kind: "socket",
+            socketPath: "/tmp/turbopanel-connect-instance.sock",
+          },
+          // Skip Deno.createHttpClient(unix) — host-free fetch is mocked.
+          httpClient: {} as Deno.HttpClient,
+          reconnectDelayMs: DEFAULT_INITIAL_BACKOFF_MS,
+        }).then((client) => {
+          resolved = client;
+          return client;
+        });
+
+        const started = performance.now();
+        while (!resolved && performance.now() - started < 3_000) {
+          await clock.advance(DEFAULT_INITIAL_BACKOFF_MS);
+          await flushMicrotasks();
+          await new Promise((resolve) => setTimeout(resolve, 1));
+        }
+        const client = await pending;
+        try {
+          const socket = await waitFor(
+            "colocated connectInstance websocket",
+            () => sockets.at(0),
+          );
+          socket.open();
+          assertEquals(readinessHits >= 2, true);
+          socket.close(1000, "done");
+        } finally {
+          client.stop();
+        }
+      });
+    } finally {
+      restoreFetch?.();
+      restoreWebSocket();
+      restoreClientTime();
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+    }
+  },
+});
+
+it({
+  name: "websocket error and close-before-open then park on server-row-missing",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const clock = createFakeClock({ now: 4_000_000 });
+    const restoreClientTime = installClientTimeSource({
+      now: () => clock.now(),
+      delay: (ms) => clock.delay(ms),
+    });
+    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const { sockets, restore: restoreWebSocket } = installTrackingWebSocket();
+    let restoreFetch: (() => void) | undefined;
+    try {
+      const { signing, authToken, enroll } = await prepareVerifiedAuth();
+      const api = createFakeInstanceApi();
+      api.script(
+        "/api/health",
+        () => new Response(JSON.stringify({ ok: true }), { status: 200 }),
+      );
+      api.script(
+        "/api/daemon/v1/jwks.json",
+        () => scriptedJwksResponse(signing),
+      );
+      api.script("/api/daemon/v1/auth/challenge", () => challengeResponse());
+      api.script("/api/daemon/v1/enroll", () => enrollResponse(enroll));
+      api.script(
+        "/api/daemon/v1/auth/session",
+        () => sessionResponse({ token: authToken }),
+      );
+      restoreFetch = api.install();
+
+      await withTempLayout(async (fixture) => {
+        Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", fixture.dirs.stateDir);
+        Deno.env.set("TURBOPANEL_FORCE_ENROLL", "1");
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.id`,
+          "license-123\n",
+        );
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.token`,
+          "token-abc\n",
+        );
+
+        const client = new InstanceClient({
+          config: {
+            kind: "url",
+            baseUrl: "https://instance.test",
+            wsBaseUrl: "wss://instance.test",
+          },
+          reconnectDelayMs: DEFAULT_INITIAL_BACKOFF_MS,
+        });
+
+        try {
+          client.start();
+          const first = await waitFor("first ws", () => sockets.at(0));
+          first.fail("upgrade rejected");
+
+          const startedSecond = performance.now();
+          while (sockets.length < 2 && performance.now() - startedSecond < 3_000) {
+            await clock.advance(DEFAULT_INITIAL_BACKOFF_MS);
+            await flushMicrotasks();
+            await new Promise((resolve) => setTimeout(resolve, 1));
+          }
+          const second = await waitFor(
+            "second ws after fail",
+            () => sockets.at(1),
+            5_000,
+          );
+          second.close(1000, "before open");
+
+          const startedThird = performance.now();
+          while (sockets.length < 3 && performance.now() - startedThird < 3_000) {
+            await clock.advance(DEFAULT_INITIAL_BACKOFF_MS);
+            await flushMicrotasks();
+            await new Promise((resolve) => setTimeout(resolve, 1));
+          }
+          const third = await waitFor(
+            "third ws after close-before-open",
+            () => sockets.at(2),
+            5_000,
+          );
+          third.open();
+          await flushMicrotasks();
+          // Permanent park — no fourth connect attempt.
+          closeWithCode(third, 4401, "server row missing");
+          await flushMicrotasks();
+          await clock.advance(DEFAULT_INITIAL_BACKOFF_MS);
+          await flushMicrotasks();
+          assertEquals(sockets.length, 3);
+        } finally {
+          client.stop();
+        }
+      });
+    } finally {
+      restoreFetch?.();
+      restoreWebSocket();
+      restoreClientTime();
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+    }
+  },
+});
+
+it({
+  name: "blank license files and empty key id force re-enroll path",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  fn: async () => {
+    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const { sockets, restore: restoreWebSocket } = installTrackingWebSocket();
+    let restoreFetch: (() => void) | undefined;
+    try {
+      const { signing, authToken, enroll } = await prepareVerifiedAuth();
+      const api = createFakeInstanceApi();
+      api.script(
+        "/api/health",
+        () => new Response(JSON.stringify({ ok: true }), { status: 200 }),
+      );
+      api.script(
+        "/api/daemon/v1/jwks.json",
+        () => scriptedJwksResponse(signing),
+      );
+      api.script("/api/daemon/v1/auth/challenge", () => challengeResponse());
+      api.script("/api/daemon/v1/enroll", () => enrollResponse(enroll));
+      api.script(
+        "/api/daemon/v1/auth/session",
+        () => sessionResponse({ token: authToken }),
+      );
+      restoreFetch = api.install();
+
+      await withTempLayout(async (fixture) => {
+        const tempDir = fixture.dirs.stateDir;
+        Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", tempDir);
+        await seedDaemonIdentity(tempDir, enroll);
+        await Deno.writeTextFile(`${tempDir}/server-key-id`, "  \n");
+        await Deno.writeTextFile(`${tempDir}/license.id`, "\n");
+        await Deno.writeTextFile(`${tempDir}/license.token`, "\n");
+
+        const client = new InstanceClient({
+          config: {
+            kind: "url",
+            baseUrl: "https://instance.test",
+            wsBaseUrl: "wss://instance.test",
+          },
+          reconnectDelayMs: DEFAULT_INITIAL_BACKOFF_MS,
+        });
+
+        try {
+          client.start();
+          // Missing usable license → permanent park (missing license credentials).
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          assertEquals(sockets.length, 0);
+        } finally {
+          client.stop();
+        }
+      });
+    } finally {
+      restoreFetch?.();
+      restoreWebSocket();
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+    }
+  },
+});
+
+it({
+  name:
+    "colocated reconnect polls readiness when instance is unreachable during restart",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const clock = createFakeClock({ now: 5_000_000 });
+    const restoreClientTime = installClientTimeSource({
+      now: () => clock.now(),
+      delay: (ms) => clock.delay(ms),
+    });
+    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const { sockets, restore: restoreWebSocket } = installTrackingWebSocket();
+    let restoreFetch: (() => void) | undefined;
+    let readinessHits = 0;
+    try {
+      const { signing, authToken, enroll } = await prepareVerifiedAuth();
+      const api = createFakeInstanceApi();
+      api.script("/api/daemon/v1/readiness", () => {
+        readinessHits += 1;
+        // First connect: ready. After stable session + reconnect: throw twice
+        // (instance down during systemd restart), then recover.
+        if (readinessHits === 1) {
+          return new Response(
+            JSON.stringify({ ok: true, ready: true }),
+            { status: 200 },
+          );
+        }
+        if (readinessHits <= 3) {
+          return new Response("bad gateway", { status: 502 });
+        }
+        return new Response(
+          JSON.stringify({ ok: true, ready: true }),
+          { status: 200 },
+        );
+      });
+      api.script(
+        "/api/daemon/v1/jwks.json",
+        () => scriptedJwksResponse(signing),
+      );
+      api.script("/api/daemon/v1/auth/challenge", () => challengeResponse());
+      api.script("/api/daemon/v1/enroll", () => enrollResponse(enroll));
+      api.script(
+        "/api/daemon/v1/auth/session",
+        () => sessionResponse({ token: authToken }),
+      );
+      restoreFetch = api.install();
+
+      await withTempLayout(async (fixture) => {
+        Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", fixture.dirs.stateDir);
+        Deno.env.set("TURBOPANEL_FORCE_ENROLL", "1");
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.id`,
+          "license-123\n",
+        );
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.token`,
+          "token-abc\n",
+        );
+
+        const client = new InstanceClient({
+          config: {
+            kind: "socket",
+            socketPath: "/tmp/turbopanel-restart-wait.sock",
+          },
+          httpClient: {} as Deno.HttpClient,
+          reconnectDelayMs: DEFAULT_INITIAL_BACKOFF_MS,
+        });
+
+        try {
+          client.start();
+          const first = await waitFor(
+            "first colocated socket",
+            () => sockets.at(0),
+            5_000,
+          );
+          first.open();
+          await flushMicrotasks();
+          // hadStableSession flips true on open; close to force reconnect.
+          first.close(1000, "simulate instance restart");
+          await flushMicrotasks();
+
+          const wallStart = performance.now();
+          while (sockets.length < 2 && performance.now() - wallStart < 5_000) {
+            // Reconnect backoff + readiness poll jitter (≤ INSTALL_READINESS_POLL_MS).
+            await clock.advance(DEFAULT_INITIAL_BACKOFF_MS);
+            await flushMicrotasks();
+            await new Promise((resolve) => setTimeout(resolve, 1));
+          }
+          const second = await waitFor(
+            "colocated socket after restart poll",
+            () => sockets.at(1),
+            5_000,
+          );
+          second.open();
+          await flushMicrotasks();
+          assertEquals(readinessHits >= 4, true);
+          second.close(1000, "done");
+        } finally {
+          client.stop();
+        }
+      });
+    } finally {
+      restoreFetch?.();
+      restoreWebSocket();
+      restoreClientTime();
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+    }
+  },
+});
+
+it({
+  name: "connectInstance keeps polling when colocated readiness fetch throws",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const clock = createFakeClock({ now: 6_000_000 });
+    const restoreClientTime = installClientTimeSource({
+      now: () => clock.now(),
+      delay: (ms) => clock.delay(ms),
+    });
+    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const { sockets, restore: restoreWebSocket } = installTrackingWebSocket();
+    let restoreFetch: (() => void) | undefined;
+    let readinessHits = 0;
+    try {
+      const { signing, authToken, enroll } = await prepareVerifiedAuth();
+      const api = createFakeInstanceApi();
+      api.script("/api/daemon/v1/readiness", () => {
+        readinessHits += 1;
+        if (readinessHits === 1) {
+          // Non-JSON body → fetchDaemonReadiness throws (unreachable).
+          return new Response("not json", { status: 503 });
+        }
+        return new Response(
+          JSON.stringify({ ok: true, ready: true }),
+          { status: 200 },
+        );
+      });
+      api.script(
+        "/api/daemon/v1/jwks.json",
+        () => scriptedJwksResponse(signing),
+      );
+      api.script("/api/daemon/v1/auth/challenge", () => challengeResponse());
+      api.script("/api/daemon/v1/enroll", () => enrollResponse(enroll));
+      api.script(
+        "/api/daemon/v1/auth/session",
+        () => sessionResponse({ token: authToken }),
+      );
+      restoreFetch = api.install();
+
+      await withTempLayout(async (fixture) => {
+        Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", fixture.dirs.stateDir);
+        Deno.env.set("TURBOPANEL_FORCE_ENROLL", "1");
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.id`,
+          "license-123\n",
+        );
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.token`,
+          "token-abc\n",
+        );
+
+        let resolved: InstanceClient | undefined;
+        const pending = connectInstance({
+          config: {
+            kind: "socket",
+            socketPath: "/tmp/turbopanel-readiness-throw.sock",
+          },
+          httpClient: {} as Deno.HttpClient,
+          reconnectDelayMs: DEFAULT_INITIAL_BACKOFF_MS,
+        }).then((client) => {
+          resolved = client;
+          return client;
+        });
+
+        const started = performance.now();
+        while (!resolved && performance.now() - started < 3_000) {
+          await clock.advance(DEFAULT_INITIAL_BACKOFF_MS);
+          await flushMicrotasks();
+          await new Promise((resolve) => setTimeout(resolve, 1));
+        }
+        const client = await pending;
+        try {
+          const socket = await waitFor(
+            "connectInstance after readiness throw",
+            () => sockets.at(0),
+          );
+          socket.open();
+          assertEquals(readinessHits >= 2, true);
+          socket.close(1000, "done");
+        } finally {
+          client.stop();
+        }
+      });
+    } finally {
+      restoreFetch?.();
+      restoreWebSocket();
+      restoreClientTime();
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+    }
+  },
+});
+
+async function startConnectedClient(
+  options: {
+    applyDevSyncTarball?:
+      | ((bytes: Uint8Array) => Promise<void>)
+      | undefined;
+    forceApplyOwned?: boolean;
+  } = {},
+): Promise<{
+  client: InstanceClient;
+  socket: MockWebSocket;
+  restore: () => void;
+}> {
+  const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+  const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+  const originalDevInstance = Deno.env.get("TURBOPANEL_DEV_INSTANCE");
+  const originalDaemonRoot = Deno.env.get("TURBOPANEL_DAEMON_ROOT");
+  const originalInstanceUrl = Deno.env.get("TURBOPANEL_INSTANCE_URL");
+  const { sockets, restore: restoreWebSocket } = installTrackingWebSocket();
+  const { signing, authToken, enroll } = await prepareVerifiedAuth();
+  const api = createFakeInstanceApi();
+  api.script(
+    "/api/health",
+    () => new Response(JSON.stringify({ ok: true }), { status: 200 }),
+  );
+  api.script("/api/daemon/v1/jwks.json", () => scriptedJwksResponse(signing));
+  api.script("/api/daemon/v1/auth/challenge", () => challengeResponse());
+  api.script("/api/daemon/v1/enroll", () => enrollResponse(enroll));
+  api.script(
+    "/api/daemon/v1/auth/session",
+    () => sessionResponse({ token: authToken }),
+  );
+  api.script(
+    "/api/daemon/v1/secrets/decrypt",
+    () => new Response(JSON.stringify({ plaintexts: [] }), { status: 200 }),
+  );
+  api.script(
+    "/api/daemon/v1/deployments/secrets/rehydrate",
+    () => new Response(JSON.stringify({ deployments: [] }), { status: 200 }),
+  );
+  const restoreFetch = api.install();
+
+  const fixture = await Deno.makeTempDir({ prefix: "tp-client-connected-" });
+  Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", fixture);
+  Deno.env.set("TURBOPANEL_FORCE_ENROLL", "1");
+  Deno.env.delete("TURBOPANEL_DEV_INSTANCE");
+  await Deno.writeTextFile(`${fixture}/license.id`, "license-123\n");
+  await Deno.writeTextFile(`${fixture}/license.token`, "token-abc\n");
+
+  const clientOpts: ConstructorParameters<typeof InstanceClient>[0] = {
+    config: {
+      kind: "url",
+      baseUrl: "https://instance.test",
+      wsBaseUrl: "wss://instance.test",
+    },
+    httpClient: {} as Deno.HttpClient,
+  };
+  if (options.forceApplyOwned || options.applyDevSyncTarball !== undefined) {
+    clientOpts.applyDevSyncTarball = options.applyDevSyncTarball;
+  }
+
+  const client = new InstanceClient(clientOpts);
+  client.start();
+  const socket = await waitFor("connected socket", () => sockets.at(0), 5_000);
+  socket.open();
+  await flushMicrotasks();
+
+  return {
+    client,
+    socket,
+    restore: () => {
+      client.stop();
+      restoreFetch();
+      restoreWebSocket();
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+      setOptionalEnv("TURBOPANEL_DEV_INSTANCE", originalDevInstance);
+      setOptionalEnv("TURBOPANEL_DAEMON_ROOT", originalDaemonRoot);
+      setOptionalEnv("TURBOPANEL_INSTANCE_URL", originalInstanceUrl);
+      Deno.removeSync(fixture, { recursive: true });
+    },
+  };
+}
+
+it({
+  name:
+    "connected client covers update/tunnel/rehydrate/dev-sync edge paths host-free",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    let restartCalls = 0;
+    let releaseUpdate: (() => void) | undefined;
+    const updateGate = new Promise<void>((resolve) => {
+      releaseUpdate = resolve;
+    });
+    let rehydrateCalls = 0;
+
+    const restoreHooks = installClientTestHooks({
+      updateResultHandoffDelayMs: 0,
+      restartDaemonService: () => {
+        restartCalls += 1;
+        // First update restart fails; later (dev-sync) also fails once.
+        return Promise.resolve(restartCalls > 2);
+      },
+      resolveUpdate: (_config) =>
+        Promise.resolve({
+          channel: "trunk",
+          buildId: "build-new",
+          commit: "deadbeef",
+          builtAt: "2026-08-18T00:00:00Z",
+          binaryArtifact: {
+            url: "https://dl.example/daemon.tar.zst",
+            sha256: "a".repeat(64),
+            size: 1,
+          },
+          jsFallbackArtifact: {
+            url: "https://dl.example/daemon.js.tar.zst",
+            sha256: "b".repeat(64),
+            size: 1,
+          },
+          orchestrationArtifact: {
+            url: "https://dl.example/orch.tar.zst",
+            sha256: "c".repeat(64),
+            size: 1,
+          },
+          downloadUrl: "https://dl.example/daemon.tar.zst",
+        }),
+      getBuildInfo: () => ({
+        commit: "oldcommit",
+        buildId: "dev-old",
+        builtAt: "2026-08-01T00:00:00Z",
+        channel: "trunk",
+      }),
+      downloadRunScript: () => Promise.resolve("#!/bin/sh\nexit 0\n"),
+      executeRunReconcile: async () => {
+        // Hold the first update so a concurrent update hits in-progress.
+        if (releaseUpdate) await updateGate;
+      },
+      collectServerIps: () => {
+        throw new Error("ips unavailable");
+      },
+      handleFabricPathProbe: () => Promise.reject(new Error("wg probe failed")),
+      writeInstanceTunnelToken: () =>
+        Promise.reject(new Error("tunnel write failed")),
+      applyPublicUrls: () => Promise.resolve(),
+      rehydrateLocalDeployments: () => {
+        rehydrateCalls += 1;
+        if (rehydrateCalls === 1) {
+          return Promise.reject(new Error("rehydrate blew up"));
+        }
+        return Promise.resolve();
+      },
+    });
+
+    const { socket, restore } = await startConnectedClient({
+      applyDevSyncTarball: () => Promise.resolve(),
+      forceApplyOwned: true,
+    });
+
+    try {
+      // Concurrent updates → second is rejected as in-progress.
+      socket.receive({
+        type: "update",
+        id: "upd-a",
+        at: new Date().toISOString(),
+      });
+      await flushMicrotasks();
+      socket.receive({
+        type: "update",
+        id: "upd-b",
+        at: new Date().toISOString(),
+      });
+      const inProgress = await waitFor(
+        "update already in progress",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string; error?: string }).id === "upd-b" &&
+            String((f as { error?: string }).error ?? "").includes(
+              "already in progress",
+            )
+          ),
+      );
+      assertExists(inProgress);
+      releaseUpdate?.();
+      const firstDone = await waitFor(
+        "first update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-a"
+          ) as { ok?: boolean } | undefined,
+      );
+      assertEquals(firstDone.ok, true);
+      await flushMicrotasks();
+      assertEquals(restartCalls >= 1, true);
+
+      // Already-on-current-commit short-circuit.
+      const restoreAlready = installClientTestHooks({
+        getBuildInfo: () => ({
+          commit: "deadbeef",
+          buildId: "dev-deadbeef",
+          builtAt: "2026-08-01T00:00:00Z",
+          channel: "trunk",
+        }),
+        resolveUpdate: () =>
+          Promise.resolve({
+            channel: "trunk",
+            buildId: "build-new",
+            commit: "deadbeef",
+            builtAt: "2026-08-18T00:00:00Z",
+            binaryArtifact: {
+              url: "https://dl.example/daemon.tar.zst",
+              sha256: "a".repeat(64),
+              size: 1,
+            },
+            jsFallbackArtifact: {
+              url: "https://dl.example/daemon.js.tar.zst",
+              sha256: "b".repeat(64),
+              size: 1,
+            },
+            orchestrationArtifact: {
+              url: "https://dl.example/orch.tar.zst",
+              sha256: "c".repeat(64),
+              size: 1,
+            },
+            downloadUrl: "https://dl.example/daemon.tar.zst",
+          }),
+      });
+      try {
+        socket.receive({
+          type: "update",
+          id: "upd-same",
+          channel: "trunk",
+          at: new Date().toISOString(),
+        });
+        const same = await waitFor(
+          "already current update-result",
+          () =>
+            framesOfType(socket, "update-result").find((f) =>
+              (f as { id?: string }).id === "upd-same"
+            ) as { ok?: boolean } | undefined,
+        );
+        assertEquals(same.ok, true);
+      } finally {
+        restoreAlready();
+      }
+
+      // Missing license during reconcile.
+      const licenseIdPath = `${Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR")}/license.id`;
+      await Deno.remove(licenseIdPath);
+      const restoreMissingLic = installClientTestHooks({
+        getBuildInfo: () => ({
+          commit: "aaa",
+          buildId: "dev-aaa",
+          builtAt: "2026-08-01T00:00:00Z",
+          channel: "trunk",
+        }),
+        resolveUpdate: () =>
+          Promise.resolve({
+            channel: "trunk",
+            buildId: "build-bbb",
+            commit: "bbb",
+            builtAt: "2026-08-18T00:00:00Z",
+            binaryArtifact: {
+              url: "https://dl.example/daemon.tar.zst",
+              sha256: "a".repeat(64),
+              size: 1,
+            },
+            jsFallbackArtifact: {
+              url: "https://dl.example/daemon.js.tar.zst",
+              sha256: "b".repeat(64),
+              size: 1,
+            },
+            orchestrationArtifact: {
+              url: "https://dl.example/orch.tar.zst",
+              sha256: "c".repeat(64),
+              size: 1,
+            },
+            downloadUrl: "https://dl.example/daemon.tar.zst",
+          }),
+      });
+      try {
+        socket.receive({
+          type: "update",
+          id: "upd-nolic",
+          at: new Date().toISOString(),
+        });
+        const noLic = await waitFor(
+          "missing license update-result",
+          () =>
+            framesOfType(socket, "update-result").find((f) =>
+              (f as { id?: string }).id === "upd-nolic"
+            ) as { ok?: boolean; error?: string } | undefined,
+        );
+        assertEquals(noLic.ok, false);
+        assertEquals(
+          String(noLic.error ?? "").includes("license credentials missing"),
+          true,
+        );
+      } finally {
+        restoreMissingLic();
+        await Deno.writeTextFile(licenseIdPath, "license-123\n");
+      }
+
+      socket.receive({
+        type: "tunnel-token",
+        id: "tun-fail",
+        token: "tok",
+        at: new Date().toISOString(),
+      });
+      const tun = await waitFor(
+        "tunnel fail result",
+        () =>
+          framesOfType(socket, "tunnel-token-result").find((f) =>
+            (f as { id?: string }).id === "tun-fail"
+          ) as { ok?: boolean; error?: string } | undefined,
+      );
+      assertEquals(tun.ok, false);
+      assertEquals(String(tun.error ?? "").includes("tunnel write failed"), true);
+
+      socket.receive({
+        type: "public-urls-update",
+        id: "urls-ok",
+        urls: ["https://203.0.113.50"],
+        at: new Date().toISOString(),
+      });
+      const urls = await waitFor(
+        "public urls ok",
+        () =>
+          framesOfType(socket, "public-urls-update-result").find((f) =>
+            (f as { id?: string }).id === "urls-ok"
+          ) as { ok?: boolean } | undefined,
+      );
+      assertEquals(urls.ok, true);
+
+      socket.receive({
+        type: "addresses-request",
+        id: "addr-fail",
+        at: new Date().toISOString(),
+      });
+      const addr = await waitFor(
+        "addresses empty on fail",
+        () =>
+          framesOfType(socket, "addresses-result").find((f) =>
+            (f as { id?: string }).id === "addr-fail"
+          ) as { ips?: unknown[] } | undefined,
+      );
+      assertEquals(addr.ips, []);
+
+      socket.receive({
+        type: "fabric-paths-request",
+        id: "fab-fail",
+        fabricId: "00000000-0000-4000-8000-000000000099",
+        probeMs: 1,
+        candidates: [{
+          publicKey: "pk",
+          endpoints: ["203.0.113.10:51820"],
+        }],
+        at: new Date().toISOString(),
+      });
+      const fab = await waitFor(
+        "fabric fail result",
+        () =>
+          framesOfType(socket, "fabric-paths-result").find((f) =>
+            (f as { id?: string }).id === "fab-fail"
+          ) as { error?: string; paths?: unknown[] } | undefined,
+      );
+      assertEquals(String(fab.error ?? "").includes("wg probe failed"), true);
+      assertEquals(fab.paths, []);
+
+      // Dev-sync end without begin → handler error path.
+      socket.receive({
+        type: "dev-sync-end",
+        id: "missing-begin",
+        at: new Date().toISOString(),
+      });
+      const missing = await waitFor(
+        "dev-sync missing state",
+        () =>
+          framesOfType(socket, "dev-sync-result").find((f) =>
+            (f as { id?: string }).id === "missing-begin"
+          ) as { ok?: boolean; error?: string } | undefined,
+      );
+      assertEquals(missing.ok, false);
+      assertEquals(
+        String(missing.error ?? "").includes("no dev-sync in progress"),
+        true,
+      );
+
+      // Dev-sync apply + restart failure.
+      socket.receive({
+        type: "dev-sync-begin",
+        id: "sync-restart-fail",
+        totalChunks: 1,
+        totalBytes: 4,
+        at: new Date().toISOString(),
+      });
+      socket.receive({
+        type: "dev-sync-chunk",
+        id: "sync-restart-fail",
+        index: 0,
+        data: encodeBase64(new TextEncoder().encode("tgz!")),
+        at: new Date().toISOString(),
+      });
+      socket.receive({
+        type: "dev-sync-end",
+        id: "sync-restart-fail",
+        at: new Date().toISOString(),
+      });
+      const syncFail = await waitFor(
+        "dev-sync restart fail",
+        () =>
+          framesOfType(socket, "dev-sync-result").find((f) =>
+            (f as { id?: string }).id === "sync-restart-fail"
+          ) as { ok?: boolean; error?: string } | undefined,
+      );
+      assertEquals(syncFail.ok, false);
+      assertEquals(
+        String(syncFail.error ?? "").includes("daemon restart failed"),
+        true,
+      );
+
+      // Apply present but colocated refuse via TURBOPANEL_DEV_INSTANCE.
+      Deno.env.set("TURBOPANEL_DEV_INSTANCE", "1");
+      socket.receive({
+        type: "dev-sync-begin",
+        id: "sync-colocated",
+        totalChunks: 1,
+        totalBytes: 1,
+        at: new Date().toISOString(),
+      });
+      const colocatedRefuse = await waitFor(
+        "colocated refuse",
+        () =>
+          framesOfType(socket, "dev-sync-result").find((f) =>
+            (f as { id?: string }).id === "sync-colocated"
+          ) as { ok?: boolean; error?: string } | undefined,
+      );
+      assertEquals(colocatedRefuse.ok, false);
+      assertEquals(
+        String(colocatedRefuse.error ?? "").includes("co-located"),
+        true,
+      );
+      Deno.env.delete("TURBOPANEL_DEV_INSTANCE");
+
+      assertEquals(rehydrateCalls >= 1, true);
+    } finally {
+      restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
+  name: "connect loop unexpected exit is logged via start catch",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    let delayCount = 0;
+    const restoreTime = installClientTimeSource({
+      delay: (_ms) => {
+        delayCount += 1;
+        if (delayCount >= 1) {
+          return Promise.reject(new Error("injected reconnect delay failure"));
+        }
+        return Promise.resolve();
+      },
+    });
+    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const { sockets, restore: restoreWebSocket } = installTrackingWebSocket();
+    let restoreFetch: (() => void) | undefined;
+    try {
+      const { signing, authToken, enroll } = await prepareVerifiedAuth();
+      const api = createFakeInstanceApi();
+      api.script(
+        "/api/health",
+        () => new Response(JSON.stringify({ ok: true }), { status: 200 }),
+      );
+      api.script(
+        "/api/daemon/v1/jwks.json",
+        () => scriptedJwksResponse(signing),
+      );
+      api.script("/api/daemon/v1/auth/challenge", () => challengeResponse());
+      api.script("/api/daemon/v1/enroll", () => enrollResponse(enroll));
+      api.script(
+        "/api/daemon/v1/auth/session",
+        () => sessionResponse({ token: authToken }),
+      );
+      restoreFetch = api.install();
+
+      await withTempLayout(async (fixture) => {
+        Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", fixture.dirs.stateDir);
+        Deno.env.set("TURBOPANEL_FORCE_ENROLL", "1");
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.id`,
+          "license-123\n",
+        );
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.token`,
+          "token-abc\n",
+        );
+
+        const client = new InstanceClient({
+          config: {
+            kind: "url",
+            baseUrl: "https://instance.test",
+            wsBaseUrl: "wss://instance.test",
+          },
+          reconnectDelayMs: DEFAULT_INITIAL_BACKOFF_MS,
+        });
+        try {
+          client.start();
+          const socket = await waitFor("loop-exit ws", () => sockets.at(0));
+          socket.open();
+          await flushMicrotasks();
+          socket.close(1000, "done");
+          // Reconnect delay rejects → start().catch logs unexpected exit.
+          await flushMicrotasks();
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          assertEquals(delayCount >= 1, true);
+        } finally {
+          client.stop();
+        }
+      });
+    } finally {
+      restoreFetch?.();
+      restoreWebSocket();
+      restoreTime();
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+    }
+  },
+});
+
+it({
+  name: "update reconcile uses public-tls path without cacert when instance URL is public HTTPS",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const downloadOpts: unknown[] = [];
+    const restoreHooks = installClientTestHooks({
+      updateResultHandoffDelayMs: 0,
+      restartDaemonService: () => Promise.resolve(true),
+      getBuildInfo: () => ({
+        commit: "old",
+        buildId: "dev-old",
+        builtAt: "2026-08-01T00:00:00Z",
+        channel: "trunk",
+      }),
+      resolveUpdate: () =>
+        Promise.resolve({
+          channel: "trunk",
+          buildId: "build-new",
+          commit: "newnew1",
+          builtAt: "2026-08-18T00:00:00Z",
+          binaryArtifact: {
+            url: "https://dl.example/daemon.tar.zst",
+            sha256: "a".repeat(64),
+            size: 1,
+          },
+          jsFallbackArtifact: {
+            url: "https://dl.example/daemon.js.tar.zst",
+            sha256: "b".repeat(64),
+            size: 1,
+          },
+          orchestrationArtifact: {
+            url: "https://dl.example/orch.tar.zst",
+            sha256: "c".repeat(64),
+            size: 1,
+          },
+          downloadUrl: "https://dl.example/daemon.tar.zst",
+        }),
+      downloadRunScript: (_url, opts) => {
+        downloadOpts.push(opts);
+        return Promise.resolve("#!/bin/sh\n");
+      },
+      executeRunReconcile: () => Promise.resolve(),
+    });
+    const originalInstanceUrl = Deno.env.get("TURBOPANEL_INSTANCE_URL");
+    Deno.env.set("TURBOPANEL_INSTANCE_URL", "https://turbopanel.app");
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "update",
+        id: "upd-public",
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "public tls update",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-public"
+          ) as { ok?: boolean } | undefined,
+      );
+      assertEquals(result.ok, true);
+      assertEquals(downloadOpts.length >= 1, true);
+      const opts = downloadOpts[0] as { caPath?: string; insecureTls?: boolean };
+      assertEquals(opts.caPath, undefined);
+      assertEquals(opts.insecureTls, false);
+    } finally {
+      restore();
+      restoreHooks();
+      setOptionalEnv("TURBOPANEL_INSTANCE_URL", originalInstanceUrl);
+    }
+  },
+});
+
+it({
+  name:
+    "connected client covers successful dev-sync, handler catch, and command-dispatch deps",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    let appliedBytes = 0;
+    const restoreHooks = installClientTestHooks({
+      restartDaemonService: () => Promise.resolve(true),
+      // Leave rehydrateLocalDeployments real so apiClient getToken path runs.
+    });
+
+    const { client: _client, socket, restore } = await startConnectedClient({
+      applyDevSyncTarball: (bytes) => {
+        appliedBytes = bytes.byteLength;
+        return Promise.resolve();
+      },
+      forceApplyOwned: true,
+    });
+
+    try {
+      // Successful apply + restart → ok: true (covers applyDevSync success).
+      socket.receive({
+        type: "dev-sync-begin",
+        id: "sync-ok",
+        totalChunks: 1,
+        totalBytes: 4,
+        at: new Date().toISOString(),
+      });
+      socket.receive({
+        type: "dev-sync-chunk",
+        id: "sync-ok",
+        index: 0,
+        data: encodeBase64(new TextEncoder().encode("ok!!")),
+        at: new Date().toISOString(),
+      });
+      socket.receive({
+        type: "dev-sync-end",
+        id: "sync-ok",
+        at: new Date().toISOString(),
+      });
+      const syncOk = await waitFor(
+        "successful dev-sync-result",
+        () =>
+          framesOfType(socket, "dev-sync-result").find((f) =>
+            (f as { id?: string }).id === "sync-ok"
+          ) as { ok?: boolean } | undefined,
+      );
+      assertEquals(syncOk.ok, true);
+      assertEquals(appliedBytes >= 1, true);
+
+      // command-dispatch exercises #commandRouterDeps (+ ping handler).
+      socket.receive({
+        type: "command-dispatch",
+        id: "cmd-ping",
+        commandId: "00000000-0000-4000-8000-000000000099",
+        commandType: "daemon.ping",
+        payload: {},
+        at: new Date().toISOString(),
+      });
+      await waitFor(
+        "command-result",
+        () =>
+          framesOfType(socket, "command-result").find((f) =>
+            (f as { id?: string }).id === "cmd-ping"
+          ) ??
+            framesOfType(socket, "command-ack").find((f) =>
+              (f as { id?: string }).id === "cmd-ping"
+            ),
+      );
+
+      // Make ws.send throw on the tunnel-token-result so #runSocketHandler catch fires.
+      const originalSend = socket.send.bind(socket);
+      socket.send = (data: string) => {
+        if (data.includes('"tunnel-token-result"')) {
+          throw new Error("injected send failure");
+        }
+        return originalSend(data);
+      };
+      socket.receive({
+        type: "tunnel-token",
+        id: "tun-catch",
+        token: "token-for-catch",
+        at: new Date().toISOString(),
+      });
+      await flushMicrotasks();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    } finally {
+      restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
+  name: "parked connect loop exits when stopped during parked wait",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    let releaseParkDelay: (() => void) | undefined;
+    const parkGate = new Promise<void>((resolve) => {
+      releaseParkDelay = resolve;
+    });
+    const restoreTime = installClientTimeSource({
+      delay: () => parkGate,
+    });
+    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const { restore: restoreWebSocket } = installTrackingWebSocket();
+    let restoreFetch: (() => void) | undefined;
+    try {
+      const { signing } = await prepareVerifiedAuth();
+      const api = createFakeInstanceApi();
+      api.script(
+        "/api/health",
+        () => new Response(JSON.stringify({ ok: true }), { status: 200 }),
+      );
+      api.script(
+        "/api/daemon/v1/jwks.json",
+        () => scriptedJwksResponse(signing),
+      );
+      api.script(
+        "/api/daemon/v1/auth/challenge",
+        () =>
+          new Response(JSON.stringify({ error: "Server key not found" }), {
+            status: 404,
+          }),
+      );
+      api.script(
+        "/api/daemon/v1/enroll",
+        () =>
+          new Response(JSON.stringify({ error: "Invalid license" }), {
+            status: 401,
+          }),
+      );
+      restoreFetch = api.install();
+
+      await withTempLayout(async (fixture) => {
+        Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", fixture.dirs.stateDir);
+        Deno.env.delete("TURBOPANEL_FORCE_ENROLL");
+        await seedDaemonIdentity(fixture.dirs.stateDir, {
+          serverId: "srv-1",
+          keyId: "kid-1",
+        });
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.id`,
+          "license-123\n",
+        );
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.token`,
+          "token-abc\n",
+        );
+
+        const client = new InstanceClient({
+          config: {
+            kind: "url",
+            baseUrl: "https://instance.test",
+            wsBaseUrl: "wss://instance.test",
+          },
+        });
+        try {
+          client.start();
+          // Wait until parked backoff delay is awaiting our gate.
+          await flushMicrotasks();
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          client.stop();
+          releaseParkDelay?.();
+          await flushMicrotasks();
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        } finally {
+          client.stop();
+          releaseParkDelay?.();
+        }
+      });
+    } finally {
+      restoreFetch?.();
+      restoreWebSocket();
+      restoreTime();
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+    }
+  },
+});
+
+it({
+  name: "incomplete enroll identity fails connect bootstrap",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const { sockets, restore: restoreWebSocket } = installTrackingWebSocket();
+    let restoreFetch: (() => void) | undefined;
+    try {
+      const { signing } = await prepareVerifiedAuth();
+      const api = createFakeInstanceApi();
+      api.script(
+        "/api/health",
+        () => new Response(JSON.stringify({ ok: true }), { status: 200 }),
+      );
+      api.script(
+        "/api/daemon/v1/jwks.json",
+        () => scriptedJwksResponse(signing),
+      );
+      api.script("/api/daemon/v1/auth/challenge", () => challengeResponse());
+      api.script(
+        "/api/daemon/v1/enroll",
+        () =>
+          new Response(JSON.stringify({ serverId: "", keyId: "kid-1" }), {
+            status: 200,
+          }),
+      );
+      restoreFetch = api.install();
+
+      await withTempLayout(async (fixture) => {
+        Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", fixture.dirs.stateDir);
+        Deno.env.set("TURBOPANEL_FORCE_ENROLL", "1");
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.id`,
+          "license-123\n",
+        );
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.token`,
+          "token-abc\n",
+        );
+
+        const client = new InstanceClient({
+          config: {
+            kind: "url",
+            baseUrl: "https://instance.test",
+            wsBaseUrl: "wss://instance.test",
+          },
+          reconnectDelayMs: DEFAULT_INITIAL_BACKOFF_MS,
+        });
+        try {
+          client.start();
+          await flushMicrotasks();
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          // Incomplete serverId after enroll → bootstrap throws before WS open.
+          assertEquals(sockets.length, 0);
+        } finally {
+          client.stop();
+        }
+      });
+    } finally {
+      restoreFetch?.();
+      restoreWebSocket();
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
     }
   },
 });

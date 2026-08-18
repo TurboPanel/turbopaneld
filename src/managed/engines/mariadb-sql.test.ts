@@ -4,6 +4,7 @@ import {
   createClientAccountSql,
   ensureReplicationAccountSql,
   grantDatabaseSql,
+  grantReplicationSql,
   quoteIdentifier,
   quoteLiteral,
 } from "./mariadb-sql.ts";
@@ -32,6 +33,11 @@ test("privilege and replication dialect is MariaDB-shaped", () => {
   );
   const repl = ensureReplicationAccountSql("tp_repl", "x", ["203.0.113.5"]);
   assertEquals(repl.includes("`tp_repl`@'203.0.113.5'"), true);
+  // Server-side TLS enforcement, independent of what the standby requests.
+  assertEquals(repl.includes("REQUIRE SSL"), true);
+  const replGrant = grantReplicationSql("tp_repl", "203.0.113.5");
+  assertEquals(replGrant.includes("REPLICATION SLAVE"), true);
+  assertEquals(replGrant.includes("REQUIRE SSL"), true);
 
   const change = changeReplicationSourceSql({
     host: "203.0.113.10",

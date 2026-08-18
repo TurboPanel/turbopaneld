@@ -1139,6 +1139,8 @@ test("server.fabric.reconcile fixture round-trips", () => {
         endpoint: "203.0.113.1:51820",
         keepalive: 25,
         presharedKeyEnvelope: "tpdaemon.v1.server.key.payload",
+        pathKind: "gateway",
+        viaServerId: "550e8400-e29b-41d4-a716-446655440001",
       },
     ],
     networks: [
@@ -1149,6 +1151,7 @@ test("server.fabric.reconcile fixture round-trips", () => {
         gateway: "10.192.11.1",
       },
     ],
+    gateway: true,
   });
   assertEquals(payload.enabled, true);
   if (!payload.enabled) {
@@ -1161,6 +1164,12 @@ test("server.fabric.reconcile fixture round-trips", () => {
     payload.peers[0]?.presharedKeyEnvelope,
     "tpdaemon.v1.server.key.payload",
   );
+  assertEquals(payload.peers[0]?.pathKind, "gateway");
+  assertEquals(
+    payload.peers[0]?.viaServerId,
+    "550e8400-e29b-41d4-a716-446655440001",
+  );
+  assertEquals(payload.gateway, true);
   assertEquals(payload.networks?.[0]?.gateway, "10.192.11.1");
   const result = parseFabricReconcileResult({
     summary: "TurboFabric reconciled",
@@ -1171,6 +1180,8 @@ test("server.fabric.reconcile fixture round-trips", () => {
         lastHandshakeAt: "2020-01-01T00:00:00.000Z",
         transferRx: 1,
         transferTx: 2,
+        endpoint: "203.0.113.50:48172",
+        health: "healthy",
       },
     ],
   });
@@ -1946,6 +1957,37 @@ test("managed.apply admits privateListener, peers, and replication blocks", () =
   assertEquals(payload.credentials.some((c) => c.role === "replication"), true);
 });
 
+test("managed.apply privateListener transport is optional and transport-validated", () => {
+  const untagged = parseManagedApplyPayload({
+    ...VALID_MANAGED_APPLY,
+    privateListener: { address: "203.0.113.50", port: 45001 },
+  });
+  assertEquals(untagged.privateListener?.transport, undefined);
+
+  const tagged = parseManagedApplyPayload({
+    ...VALID_MANAGED_APPLY,
+    privateListener: {
+      address: "203.0.113.50",
+      port: 45001,
+      transport: "public",
+    },
+  });
+  assertEquals(tagged.privateListener?.transport, "public");
+
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        privateListener: {
+          address: "203.0.113.50",
+          port: 45001,
+          transport: "carrier-pigeon",
+        },
+      }),
+    Error,
+  );
+});
+
 test("managed.apply rejects loopback privateListener", () => {
   assertThrows(
     () =>
@@ -2013,6 +2055,22 @@ test("managed.apply round-trips a fabric peer and rejects vpn", () => {
     ],
   });
   assertEquals(payload.peers[0]?.transport, "fabric");
+  assertEquals(
+    parseManagedApplyPayload({
+      ...VALID_MANAGED_APPLY,
+      peers: [
+        {
+          memberId: "00000000-0000-4000-8000-0000000000a2",
+          role: "replica",
+          readEligible: true,
+          address: "203.0.113.51",
+          port: 45002,
+          transport: "public",
+        },
+      ],
+    }).peers[0]?.transport,
+    "public",
+  );
   assertThrows(
     () =>
       parseManagedApplyPayload({
@@ -2089,6 +2147,23 @@ test("managed.ingress.reconcile round-trips fabric backends and segments", () =>
     segments: [{ name: `tpn_${netId}`, subnet: "203.0.113.0/24" }],
   });
   assertEquals(payload.clusters[0]?.backends[0]?.transport, "fabric");
+  assertEquals(
+    parseManagedIngressReconcilePayload({
+      ...VALID_MANAGED_INGRESS_RECONCILE,
+      clusters: [
+        {
+          ...VALID_MANAGED_INGRESS_RECONCILE.clusters[0],
+          backends: [
+            {
+              ...VALID_MANAGED_INGRESS_RECONCILE.clusters[0].backends[0],
+              transport: "public",
+            },
+          ],
+        },
+      ],
+    }).clusters[0]?.backends[0]?.transport,
+    "public",
+  );
   assertEquals(payload.segments, [
     { name: `tpn_${netId}`, subnet: "203.0.113.0/24" },
   ]);
@@ -2110,4 +2185,22 @@ test("managed.ingress.reconcile round-trips fabric backends and segments", () =>
       }),
     TypeError,
   );
+  assertEquals(
+    parseManagedIngressReconcilePayload({
+      ...VALID_MANAGED_INGRESS_RECONCILE,
+      clusters: [
+        {
+          ...VALID_MANAGED_INGRESS_RECONCILE.clusters[0],
+          protocolPort: 15432,
+        },
+      ],
+    }).clusters[0]?.protocolPort,
+    15432,
+  );
+  const teardown = parseManagedIngressReconcilePayload({
+    serverId: VALID_MANAGED_INGRESS_RECONCILE.serverId,
+    clusters: [],
+  });
+  assertEquals(teardown.clusters, []);
+  assertEquals(teardown.orgTlsMaterial, undefined);
 });

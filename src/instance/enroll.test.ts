@@ -205,3 +205,75 @@ test({
     });
   },
 });
+
+test({
+  name: "enrollDaemon treats blank server.id as absent",
+  permissions: { env: true, net: true, read: true, write: true },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await Deno.writeTextFile(join(fixture.dirs.stateDir, "server.id"), "  \n");
+      const api = createFakeInstanceApi();
+      const restore = api.install();
+      let enrollBody: unknown;
+      try {
+        api.script("/api/daemon/v1/auth/challenge", () => challengeResponse());
+        api.script("/api/daemon/v1/enroll", async (init) => {
+          enrollBody = await parseJsonBody(init);
+          return enrollResponse({ serverId: "srv-blank", keyId: "kid-blank" });
+        });
+        const client = new DaemonApiClient({
+          config: INSTANCE_CONFIG,
+          getToken: () => Promise.resolve("unused"),
+        });
+        await enrollDaemon({
+          apiClient: client,
+          machineKey: undefined,
+          hostname: "host-1",
+          licenseId: "lic-1",
+          licenseToken: "tok-1",
+          stateDir: fixture.dirs.stateDir,
+        });
+        assertEquals(
+          (enrollBody as { serverId?: string }).serverId,
+          undefined,
+        );
+      } finally {
+        restore();
+      }
+    });
+  },
+});
+
+test({
+  name: "enrollDaemon surfaces non-NotFound server.id read errors",
+  permissions: { env: true, net: true, read: true, write: true },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await Deno.mkdir(join(fixture.dirs.stateDir, "server.id"), {
+        recursive: true,
+      });
+      const api = createFakeInstanceApi();
+      const restore = api.install();
+      try {
+        api.script("/api/daemon/v1/auth/challenge", () => challengeResponse());
+        const client = new DaemonApiClient({
+          config: INSTANCE_CONFIG,
+          getToken: () => Promise.resolve("unused"),
+        });
+        await assertRejects(
+          () =>
+            enrollDaemon({
+              apiClient: client,
+              machineKey: "mk",
+              hostname: "host-1",
+              licenseId: "lic-1",
+              licenseToken: "tok-1",
+              stateDir: fixture.dirs.stateDir,
+            }),
+        );
+      } finally {
+        restore();
+      }
+    });
+  },
+});

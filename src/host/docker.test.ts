@@ -60,3 +60,75 @@ test("hostDockerFromVersions omits the area when nothing is installed", () => {
 test("readDocker returns undefined when the docker binary is missing", () => {
   assertEquals(readDocker("/no/such/docker"), undefined);
 });
+
+test("parseDockerCliVersion rejects oversized or invalid tokens", () => {
+  assertEquals(parseDockerCliVersion(`v${"a".repeat(80)}`), undefined);
+  assertEquals(parseDockerCliVersion("Docker version bad version!"), undefined);
+});
+
+test({
+  name: "readDocker probes a stub docker binary for CLI and compose versions",
+  permissions: { read: true, write: true, run: true },
+  fn() {
+    const dir = Deno.makeTempDirSync({ prefix: "tp-docker-stub-" });
+    const bin = `${dir}/docker`;
+    try {
+      Deno.writeTextFileSync(
+        bin,
+        String.raw`#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "Docker version 28.3.3, build abc"
+  exit 0
+fi
+if [ "$1" = "compose" ] && [ "$2" = "version" ] && [ "$3" = "--short" ]; then
+  echo "2.39.1"
+  exit 0
+fi
+exit 1
+`,
+      );
+      Deno.chmodSync(bin, 0o750);
+      assertEquals(readDocker(bin), {
+        version: "28.3.3",
+        composeVersion: "2.39.1",
+      });
+    } finally {
+      Deno.removeSync(dir, { recursive: true });
+    }
+  },
+});
+
+test({
+  name: "readDocker falls back to long compose banner when --short is empty",
+  permissions: { read: true, write: true, run: true },
+  fn() {
+    const dir = Deno.makeTempDirSync({ prefix: "tp-docker-compose-" });
+    const bin = `${dir}/docker`;
+    try {
+      Deno.writeTextFileSync(
+        bin,
+        String.raw`#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "Docker version 27.0.0, build xyz"
+  exit 0
+fi
+if [ "$1" = "compose" ] && [ "$2" = "version" ] && [ "$3" = "--short" ]; then
+  exit 1
+fi
+if [ "$1" = "compose" ] && [ "$2" = "version" ]; then
+  echo "Docker Compose version v2.30.0"
+  exit 0
+fi
+exit 1
+`,
+      );
+      Deno.chmodSync(bin, 0o750);
+      assertEquals(readDocker(bin), {
+        version: "27.0.0",
+        composeVersion: "2.30.0",
+      });
+    } finally {
+      Deno.removeSync(dir, { recursive: true });
+    }
+  },
+});

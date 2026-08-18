@@ -75,12 +75,20 @@ export async function deriveMachineKey(
 /**
  * Read `/etc/machine-id`, derive the machine key, and memoize at module scope.
  * Call this on the connect path before the sync hello getter runs.
+ *
+ * Optional `path` is for host-free tests with a fixture file; only the default
+ * path is process-cached.
  */
-export async function readMachineKey(): Promise<string | undefined> {
-  if (cachedKey !== null) return cachedKey;
-  const raw = readTextFile(MACHINE_ID_PATH) ?? "";
-  cachedKey = (await deriveMachineKey(raw)) ?? undefined;
-  return cachedKey;
+export async function readMachineKey(
+  path: string = MACHINE_ID_PATH,
+): Promise<string | undefined> {
+  if (path === MACHINE_ID_PATH && cachedKey !== null) return cachedKey;
+  const raw = readTextFile(path) ?? "";
+  const derived = (await deriveMachineKey(raw)) ?? undefined;
+  if (path === MACHINE_ID_PATH) {
+    cachedKey = derived;
+  }
+  return derived;
 }
 
 /** Sync accessor — returns only the memoized value (undefined until warmed). */

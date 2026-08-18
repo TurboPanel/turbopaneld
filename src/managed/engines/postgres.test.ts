@@ -14,9 +14,10 @@
  * assuming it is the connection identity.
  */
 
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import type { ManagedApplyCredential } from "../../instance/commands/contracts.ts";
 import { getManagedEngineRuntime } from "./index.ts";
+import { postgresManagedEngineRuntime } from "./postgres.ts";
 import type { ManagedEngineContext, ManagedEngineExec } from "./types.ts";
 
 /**
@@ -146,4 +147,245 @@ test("backup dump/restore argv always target the stable platform admin regardles
   assertEquals(dumpArgv, ["pg_dump", "-Fc", "-U", "postgres", "-d", "appdb"]);
   assertEquals(restoreArgv.includes("-U"), true);
   assertEquals(restoreArgv[restoreArgv.indexOf("-U") + 1], "postgres");
+});
+
+function standbyReplicationSpec() {
+  return {
+    username: "tp_repl",
+    password: "repl-pass",
+    primary: {
+      host: "managed-00000000-0000-4000-8000-000000000001",
+      hostaddr: "203.0.113.10",
+      port: 5432,
+    },
+    slotName: "tp_member_1",
+  };
+}
+
+test("postgres ensurePrimary creates slots and drops unmanaged ones", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.ensurePrimary) {
+    throw new TypeError("expected postgres ensurePrimary");
+  }
+  const { exec, calls } = recordingExec();
+  const slotLister: ManagedEngineExec = async (argv, input) => {
+    if (input?.includes("SELECT slot_name FROM pg_catalog.pg_replication_slots")) {
+      return {
+        success: true,
+        stdout: "tp_member_1\tphysical\norphan_slot\tphysical\n",
+        stderr: "",
+      };
+    }
+    return (await exec(argv, input));
+  };
+  await replication.ensurePrimary(buildContext(slotLister), {
+    username: "tp_repl",
+    password: "repl-pass",
+    desiredSlots: ["tp_member_1"],
+  });
+  assertEquals(calls.some((c) => c.input?.includes("orphan_slot")), true);
+});
+
+test("postgres bootstrapStandby returns already_standby when signal exists", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.bootstrapStandby) {
+    throw new TypeError("expected postgres bootstrapStandby");
+  }
+  const boot = await replication.bootstrapStandby(
+    {
+      managedId: "pg-boot",
+      image: "postgres:18-alpine",
+      volumes: [{ name: "vol", target: "/var/lib/postgresql" }],
+      stateDir: "/tmp/pg",
+      containerUser: "postgres",
+      containerGroup: "postgres",
+      runDocker: (args) => {
+        const joined = args.join(" ");
+        if (joined.includes("PG_VERSION")) {
+          return Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 });
+        }
+        if (joined.includes("standby.signal")) {
+          return Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 });
+        }
+        return Promise.resolve({ success: false, stdout: "", stderr: "", code: 1 });
+      },
+    },
+    standbyReplicationSpec(),
+  );
+  assertEquals(boot, "already_standby");
+});
+
+test("postgres bootstrapStandby returns needs_resync without standby signal", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.bootstrapStandby) {
+    throw new TypeError("expected postgres bootstrapStandby");
+  }
+  const boot = await replication.bootstrapStandby(
+    {
+      managedId: "pg-boot",
+      image: "postgres:18-alpine",
+      volumes: [{ name: "vol", target: "/var/lib/postgresql" }],
+      stateDir: "/tmp/pg",
+      containerUser: "postgres",
+      containerGroup: "postgres",
+      runDocker: (args) => {
+        const joined = args.join(" ");
+        if (joined.includes("PG_VERSION")) {
+          return Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 });
+        }
+        if (joined.includes("standby.signal")) {
+          return Promise.resolve({ success: false, stdout: "", stderr: "", code: 1 });
+        }
+        return Promise.resolve({ success: false, stdout: "", stderr: "", code: 1 });
+      },
+    },
+    standbyReplicationSpec(),
+  );
+  assertEquals(boot, "needs_resync");
+});
+
+test("postgres bootstrapStandby seeds empty volume via pg_basebackup", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.bootstrapStandby) {
+    throw new TypeError("expected postgres bootstrapStandby");
+  }
+  const stateDir = await Deno.makeTempDir({ prefix: "pg-boot-" });
+  try {
+    const dockerCalls: string[][] = [];
+    const boot = await replication.bootstrapStandby(
+      {
+        managedId: "pg-boot",
+        image: "postgres:18-alpine",
+        volumes: [{ name: "vol", target: "/var/lib/postgresql" }],
+        stateDir,
+        containerUser: "postgres",
+        containerGroup: "postgres",
+        runDocker: (args) => {
+          dockerCalls.push([...args]);
+          const joined = args.join(" ");
+          if (joined.includes("PG_VERSION")) {
+            return Promise.resolve({ success: false, stdout: "", stderr: "", code: 1 });
+          }
+          if (joined.includes("pg_basebackup")) {
+            return Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 });
+          }
+          return Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 });
+        },
+      },
+      standbyReplicationSpec(),
+    );
+    assertEquals(boot, "seeded");
+    assertEquals(dockerCalls.some((args) => args.includes("pg_basebackup")), true);
+    const envExists = await Deno.stat(`${stateDir}/.basebackup-env`).then(() => false).catch(
+      () => true,
+    );
+    assertEquals(envExists, true);
+  } finally {
+    await Deno.remove(stateDir, { recursive: true });
+  }
+});
+
+test("postgres bootstrapStandby throws when pg_basebackup fails", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.bootstrapStandby) {
+    throw new TypeError("expected postgres bootstrapStandby");
+  }
+  const stateDir = await Deno.makeTempDir({ prefix: "pg-boot-fail-" });
+  try {
+    await assertRejects(
+      () =>
+        replication.bootstrapStandby!(
+          {
+            managedId: "pg-boot",
+            image: "postgres:18-alpine",
+            volumes: [{ name: "vol", target: "/var/lib/postgresql" }],
+            stateDir,
+            containerUser: "postgres",
+            containerGroup: "postgres",
+            runDocker: (args) => {
+              const joined = args.join(" ");
+              if (joined.includes("PG_VERSION")) {
+                return Promise.resolve({ success: false, stdout: "", stderr: "", code: 1 });
+              }
+              if (joined.includes("pg_basebackup")) {
+                return Promise.resolve({
+                  success: false,
+                  stdout: "",
+                  stderr: "basebackup failed",
+                  code: 1,
+                });
+              }
+              return Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 });
+            },
+          },
+          standbyReplicationSpec(),
+        ),
+      Error,
+      "pg_basebackup failed",
+    );
+  } finally {
+    await Deno.remove(stateDir, { recursive: true });
+  }
+});
+
+test("postgres promote leaves recovery on first writable check", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.promote) {
+    throw new TypeError("expected postgres promote");
+  }
+  let recoveryChecks = 0;
+  const exec: ManagedEngineExec = (_argv, input) => {
+    if (input?.includes("pg_promote")) {
+      return Promise.resolve({ success: true, stdout: "", stderr: "" });
+    }
+    if (input?.includes("pg_is_in_recovery")) {
+      recoveryChecks++;
+      const stdout = recoveryChecks >= 2 ? "f\n" : "t\n";
+      return Promise.resolve({ success: true, stdout, stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await replication.promote(buildContext(exec));
+  assertEquals(recoveryChecks >= 2, true);
+});
+
+test("postgres readHealth reports primary replication rows", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.readHealth) {
+    throw new TypeError("expected postgres readHealth");
+  }
+  const exec: ManagedEngineExec = (_argv, input) => {
+    if (input?.includes("pg_stat_replication")) {
+      return Promise.resolve({
+        success: true,
+        stdout: "streaming\t8192\n",
+        stderr: "",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  const health = await replication.readHealth(buildContext(exec), "primary");
+  assertEquals(health.state, "streaming");
+  assertEquals(health.lagBytes, 8192);
+});
+
+test("postgres readHealth reports standby lag fields", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.readHealth) {
+    throw new TypeError("expected postgres readHealth");
+  }
+  const exec: ManagedEngineExec = (_argv, input) => {
+    if (input?.includes("pg_stat_wal_receiver")) {
+      return Promise.resolve({
+        success: true,
+        stdout: "streaming\t4096\t2\n",
+        stderr: "",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  const health = await replication.readHealth(buildContext(exec), "standby");
+  assertEquals(health.state, "streaming");
+  assertEquals(health.lagBytes, 4096);
+  assertEquals(health.lagSeconds, 2);
 });

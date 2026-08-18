@@ -2,6 +2,7 @@ import { assertEquals } from "@std/assert";
 import {
   hostOsFromFields,
   parseOsReleaseText,
+  readOsRelease,
   resetHostOsCacheForTests,
   resolveOsVersion,
 } from "./os-release.ts";
@@ -123,4 +124,94 @@ test("hostOsFromFields returns undefined for unknown non-linux build", () => {
     hostOsFromFields({}, { os: "sunos", arch: "x86_64" }),
     undefined,
   );
+});
+
+test("hostOsFromFields maps darwin / freebsd / windows families from ID", () => {
+  assertEquals(
+    hostOsFromFields({ ID: "darwin" }, { os: "linux", arch: "arm64" })?.family,
+    "darwin",
+  );
+  assertEquals(
+    hostOsFromFields({ ID_LIKE: "freebsd" }, { os: "linux", arch: "x86_64" })
+      ?.family,
+    "freebsd",
+  );
+  assertEquals(
+    hostOsFromFields({ ID: "msys" }, { os: "linux", arch: "x86_64" })?.family,
+    "windows",
+  );
+});
+
+test("hostOsFromFields maps Deno build families when os-release is empty", () => {
+  assertEquals(
+    hostOsFromFields({}, { os: "darwin", arch: "arm64" }),
+    { family: "darwin", architecture: "arm64" },
+  );
+  assertEquals(
+    hostOsFromFields({}, { os: "freebsd", arch: "x86_64" }),
+    { family: "freebsd", architecture: "x86_64" },
+  );
+  assertEquals(
+    hostOsFromFields({}, { os: "windows", arch: "x86_64" }),
+    { family: "windows", architecture: "x86_64" },
+  );
+});
+
+test("parseOsReleaseText skips lines without a key=value pair", () => {
+  assertEquals(
+    parseOsReleaseText("NOEQUALS\n=novalue\nID=debian\n").ID,
+    "debian",
+  );
+});
+
+test("resolveOsVersion keeps VERSION_ID when debian_version is a suite name only", () => {
+  assertEquals(resolveOsVersion({}, "trixie/sid\n"), undefined);
+  assertEquals(resolveOsVersion({ VERSION_ID: "13" }, undefined), "13");
+});
+
+test({
+  name: "readOsRelease parses a fixture path without caching the default path",
+  permissions: { read: true, write: true },
+  fn() {
+    resetHostOsCacheForTests();
+    const dir = Deno.makeTempDirSync({ prefix: "tp-os-release-" });
+    try {
+      const path = `${dir}/os-release`;
+      Deno.writeTextFileSync(
+        path,
+        [
+          'PRETTY_NAME="Debian GNU/Linux 13 (trixie)"',
+          "ID=debian",
+          "VERSION_ID=13",
+          "VERSION_CODENAME=trixie",
+          "DEBIAN_VERSION_FULL=13.5",
+        ].join("\n"),
+      );
+      const os = readOsRelease(path);
+      assertEquals(os?.id, "debian");
+      assertEquals(os?.version, "13.5");
+      assertEquals(os?.codename, "trixie");
+      assertEquals(os?.prettyName, "Debian GNU/Linux 13 (trixie)");
+      assertEquals(os?.family, "linux");
+    } finally {
+      Deno.removeSync(dir, { recursive: true });
+      resetHostOsCacheForTests();
+    }
+  },
+});
+
+test({
+  name:
+    "readOsRelease falls back to Deno.build when the fixture path is missing",
+  permissions: { read: true },
+  fn() {
+    resetHostOsCacheForTests();
+    const os = readOsRelease("/no/such/turbopanel-os-release");
+    if (Deno.build.os === "linux") {
+      assertEquals(os?.family, "linux");
+    } else if (os) {
+      assertEquals(typeof os.family, "string");
+    }
+    resetHostOsCacheForTests();
+  },
 });

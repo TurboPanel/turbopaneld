@@ -2,7 +2,7 @@
  * Host-free coverage for ProxySQL admin interface apply helpers.
  */
 
-import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
+import { assertEquals, assertRejects, assertStringIncludes, assertThrows } from "@std/assert";
 import { resolveLayout } from "../paths/layout.ts";
 import { createTempLayout } from "../testing/temp-layout.ts";
 import {
@@ -10,6 +10,7 @@ import {
   loadProxySqlAdminCredentials,
   loadProxySqlMonitorCredentials,
   parseProxySqlAdminCnf,
+  parseProxySqlClientCnf,
   parseProxySqlMonitorCnf,
   PROXYSQL_ADMIN_DEFAULTS_PATH,
   PROXYSQL_MONITOR_USERNAME,
@@ -229,6 +230,79 @@ test("applyProxySqlAdminStatements redacts password on failure", async () => {
         }),
       Error,
     );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("parseProxySqlClientCnf ignores comments and non-client sections", () => {
+  const creds = parseProxySqlClientCnf(
+    "; comment\n[monitor]\nuser=ignored\npassword=ignored\n[client]\nuser=admin\npassword=secret\n",
+  );
+  assertEquals(creds, { user: "admin", password: "secret" });
+});
+
+test("parseProxySqlClientCnf rejects missing password", () => {
+  assertThrows(
+    () => parseProxySqlClientCnf("[client]\nuser=admin\n"),
+    TypeError,
+    "missing [client] user/password",
+  );
+});
+
+test("loadProxySqlMonitorCredentials rejects monitor.cnf directory scar", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    await Deno.mkdir(proxysqlMonitorCnfPath(layout), { recursive: true });
+    await assertRejects(
+      () => loadProxySqlMonitorCredentials(layout),
+      TypeError,
+      "monitor.cnf is a directory",
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("applyProxySqlAdminStatements requires layout and containerName", async () => {
+  await assertRejects(
+    () => applyProxySqlAdminStatements(["SELECT 1"], {}),
+    TypeError,
+    "requires layout",
+  );
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    await assertRejects(
+      () => applyProxySqlAdminStatements(["SELECT 1"], { layout }),
+      TypeError,
+      "requires containerName",
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("applyProxySqlAdminStatements is a no-op for empty statement lists", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    let called = false;
+    await applyProxySqlAdminStatements([], {
+      layout,
+      containerName: "proxysql-test",
+      runDocker: () => {
+        called = true;
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: "",
+          stderr: "",
+        });
+      },
+    });
+    assertEquals(called, false);
   } finally {
     await fixture.cleanup();
   }

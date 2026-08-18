@@ -21,12 +21,14 @@ import { logInfo, logWarn } from "../../logger.ts";
 import { runDocker } from "../../deploy/docker-cli.ts";
 import { fabricNetworkDir, resolveLayout } from "../../paths/layout.ts";
 import {
+  type FabricPeerHealth,
   type FabricReconcileEnabledPayload,
   type FabricReconcileNetwork,
   type FabricReconcileObservedPeer,
   type FabricReconcilePayload,
   type FabricReconcilePeer,
   type FabricReconcileResult,
+  isValidWireguardEndpoint,
   isValidWireguardPublicKey,
   parseFabricReconcilePayload,
 } from "./contracts.ts";
@@ -49,6 +51,10 @@ const FABRIC_SYSCTL_CONTENTS = "net.ipv4.ip_forward=1\n";
 const WG_QUICK_UNIT = `wg-quick@${FABRIC_INTERFACE_NAME}`;
 const WG_QUICK_CONF_PATH = `/etc/wireguard/${FABRIC_INTERFACE_NAME}.conf`;
 const PREFLIGHT_TIMEOUT_MS = 5_000;
+/** ~3× `PersistentKeepalive = 25` — handshake inside this window is healthy. */
+export const FABRIC_HANDSHAKE_HEALTHY_MS = 75_000;
+const FABRIC_PROBE_KEEPALIVE = 25;
+const WG_DUMP_ENDPOINT_NONE = "(none)";
 
 export type FabricRunResult = {
   success: boolean;
@@ -82,6 +88,7 @@ type FabricStateJson = {
   prefix: string;
   listenPort?: number;
   mtu?: number;
+  gateway?: boolean;
   peers: FabricStatePeerJson[];
   networks: FabricReconcileNetwork[];
 };
@@ -756,6 +763,48 @@ async function ensureIptablesRule(
   }
 }
 
+async function removeIptablesRuleBestEffort(checkArgs: string[]): Promise<void> {
+  const exists = await runHost("iptables", ["-C", ...checkArgs]);
+  if (!exists.success) return;
+  const removed = await runHost("iptables", ["-D", ...checkArgs]);
+  if (!removed.success && !isMissingIptablesText(removed)) {
+    logWarn(
+      "commands",
+      `TurboFabric iptables -D failed: ${removed.stderr || "unknown error"}`,
+    );
+  }
+}
+
+const TP0_TRANSIT_MATCH = [
+  FABRIC_FORWARD_CHAIN,
+  "-i",
+  FABRIC_INTERFACE_NAME,
+  "-o",
+  FABRIC_INTERFACE_NAME,
+] as const;
+
+async function reconcileTp0Transit(gateway: boolean): Promise<void> {
+  const acceptMatch = [...TP0_TRANSIT_MATCH, "-j", "ACCEPT"];
+  const dropMatch = [...TP0_TRANSIT_MATCH, "-j", "DROP"];
+  if (gateway) {
+    await removeIptablesRuleBestEffort(dropMatch);
+    await ensureIptablesRule(acceptMatch, ["-A", ...acceptMatch]);
+    return;
+  }
+  await removeIptablesRuleBestEffort(acceptMatch);
+  await ensureIptablesRule(dropMatch, [
+    "-I",
+    FABRIC_FORWARD_CHAIN,
+    "1",
+    "-i",
+    FABRIC_INTERFACE_NAME,
+    "-o",
+    FABRIC_INTERFACE_NAME,
+    "-j",
+    "DROP",
+  ]);
+}
+
 /** TurboFabric-owned container prefixes: skip host `/32`s. */
 export function fabricOwnedPeerPrefixes(
   peers: readonly { allowedIPs: readonly string[] }[],
@@ -804,6 +853,7 @@ async function ensureForwardAccept(
 async function reconcileFabricForwarding(
   networks: readonly FabricReconcileNetwork[],
   peers: readonly { allowedIPs: readonly string[] }[] = [],
+  gateway = false,
 ): Promise<void> {
   await ensureIptablesChain(FABRIC_FORWARD_CHAIN);
   await ensureIptablesRule(
@@ -843,6 +893,7 @@ async function reconcileFabricForwarding(
   ) {
     await ensureForwardAccept(pair.source, pair.dest);
   }
+  await reconcileTp0Transit(gateway);
 }
 
 /** Parse `[Peer]` `PublicKey` / `PresharedKey` pairs from durable wg-quick conf. */
@@ -1000,6 +1051,9 @@ function parseFabricStateJson(raw: string): FabricStateJson | null {
     if (typeof record.mtu === "number") {
       state.mtu = record.mtu;
     }
+    if (typeof record.gateway === "boolean") {
+      state.gateway = record.gateway;
+    }
     return state;
   } catch {
     return null;
@@ -1056,6 +1110,7 @@ async function writeFabricState(
   };
   if (payload.listenPort !== undefined) state.listenPort = payload.listenPort;
   if (payload.mtu !== undefined) state.mtu = payload.mtu;
+  if (payload.gateway !== undefined) state.gateway = payload.gateway;
   await writeFabricStateJson(networkDir, state);
 }
 
@@ -1099,28 +1154,83 @@ function enabledPayloadFromState(
   };
   if (state.listenPort !== undefined) payload.listenPort = state.listenPort;
   if (state.mtu !== undefined) payload.mtu = state.mtu;
+  if (state.gateway !== undefined) payload.gateway = state.gateway;
   return payload;
 }
 
-function parseWgDumpPeers(stdout: string): FabricReconcileObservedPeer[] {
+/**
+ * Handshake age → peer health. No handshake is `never`; inside
+ * {@link FABRIC_HANDSHAKE_HEALTHY_MS} is `healthy`; otherwise `stale`.
+ */
+export function classifyPeerHandshakeHealth(
+  lastHandshakeAt: string | undefined,
+  nowMs: number,
+): FabricPeerHealth {
+  if (!lastHandshakeAt) return "never";
+  const at = Date.parse(lastHandshakeAt);
+  if (!Number.isFinite(at)) return "never";
+  if (nowMs - at <= FABRIC_HANDSHAKE_HEALTHY_MS) return "healthy";
+  return "stale";
+}
+
+function dumpEndpointOrAbsent(raw: string | undefined): string | undefined {
+  if (!raw || raw === WG_DUMP_ENDPOINT_NONE) return undefined;
+  if (!isValidWireguardEndpoint(raw)) return undefined;
+  return raw;
+}
+
+function dumpUnixSecondsIsoOrAbsent(
+  raw: string | undefined,
+): string | undefined {
+  const seconds = Number.parseInt(raw ?? "0", 10);
+  if (!Number.isFinite(seconds) || seconds <= 0) return undefined;
+  return new Date(seconds * 1000).toISOString();
+}
+
+function dumpNonNegativeIntOrAbsent(
+  raw: string | undefined,
+): number | undefined {
+  const n = Number.parseInt(raw ?? "0", 10);
+  if (!Number.isFinite(n) || n < 0) return undefined;
+  return n;
+}
+
+function parseWgDumpPeerLine(
+  line: string,
+): FabricReconcileObservedPeer | undefined {
+  const fields = line.trim().split("\t");
+  if (fields.length < 8) return undefined;
+  const publicKey = fields[0];
+  if (!publicKey || !isValidWireguardPublicKey(publicKey)) return undefined;
+  const peer: FabricReconcileObservedPeer = { publicKey };
+  const endpoint = dumpEndpointOrAbsent(fields[2]);
+  if (endpoint) peer.endpoint = endpoint;
+  const lastHandshakeAt = dumpUnixSecondsIsoOrAbsent(fields[4]);
+  if (lastHandshakeAt) peer.lastHandshakeAt = lastHandshakeAt;
+  const rx = dumpNonNegativeIntOrAbsent(fields[5]);
+  if (rx !== undefined) peer.transferRx = rx;
+  const tx = dumpNonNegativeIntOrAbsent(fields[6]);
+  if (tx !== undefined) peer.transferTx = tx;
+  return peer;
+}
+
+export function parseWgDumpPeers(stdout: string): FabricReconcileObservedPeer[] {
   const peers: FabricReconcileObservedPeer[] = [];
   for (const line of stdout.split("\n")) {
-    const fields = line.trim().split("\t");
-    if (fields.length < 8) continue;
-    const publicKey = fields[0];
-    if (!publicKey || !isValidWireguardPublicKey(publicKey)) continue;
-    const peer: FabricReconcileObservedPeer = { publicKey };
-    const handshake = Number.parseInt(fields[4] ?? "0", 10);
-    if (Number.isFinite(handshake) && handshake > 0) {
-      peer.lastHandshakeAt = new Date(handshake * 1000).toISOString();
-    }
-    const rx = Number.parseInt(fields[5] ?? "0", 10);
-    if (Number.isFinite(rx) && rx >= 0) peer.transferRx = rx;
-    const tx = Number.parseInt(fields[6] ?? "0", 10);
-    if (Number.isFinite(tx) && tx >= 0) peer.transferTx = tx;
-    peers.push(peer);
+    const peer = parseWgDumpPeerLine(line);
+    if (peer) peers.push(peer);
   }
   return peers;
+}
+
+function stampObservedPeerHealth(
+  peers: FabricReconcileObservedPeer[],
+  nowMs = Date.now(),
+): FabricReconcileObservedPeer[] {
+  return peers.map((peer) => ({
+    ...peer,
+    health: classifyPeerHandshakeHealth(peer.lastHandshakeAt, nowMs),
+  }));
 }
 
 async function collectFabricPeerState(): Promise<
@@ -1128,7 +1238,7 @@ async function collectFabricPeerState(): Promise<
 > {
   const dump = await runHost("wg", ["show", FABRIC_INTERFACE_NAME, "dump"]);
   if (!dump.success) return [];
-  return parseWgDumpPeers(dump.stdout);
+  return stampObservedPeerHealth(parseWgDumpPeers(dump.stdout));
 }
 
 async function wgShowInterface(): Promise<boolean> {
@@ -1316,7 +1426,11 @@ async function applyEnabledFabric(
     .map((network) => network.name)
     .filter((name) => !desired.has(name));
   await removeFabricDockerNetworks(stale);
-  await reconcileFabricForwarding(payload.networks ?? [], payload.peers);
+  await reconcileFabricForwarding(
+    payload.networks ?? [],
+    payload.peers,
+    payload.gateway === true,
+  );
 }
 
 async function handleFabricEnable(
@@ -1392,7 +1506,11 @@ export async function reinstallFabricForwardingIfEnabled(): Promise<void> {
   const state = await readFabricState(resolveNetworkDir());
   if (!state) return;
   try {
-    await reconcileFabricForwarding(state.networks, state.peers);
+    await reconcileFabricForwarding(
+      state.networks,
+      state.peers,
+      state.gateway === true,
+    );
   } catch (err) {
     logWarn(
       "commands",
@@ -1426,7 +1544,11 @@ export async function restoreFabricFromPersistedState(): Promise<void> {
     }
     await ensureWgQuickUnit();
     await ensureFabricDockerNetworks(payload.networks ?? [], mtu);
-    await reconcileFabricForwarding(payload.networks ?? [], payload.peers);
+    await reconcileFabricForwarding(
+      payload.networks ?? [],
+      payload.peers,
+      payload.gateway === true,
+    );
     logInfo(
       "commands",
       `TurboFabric restored from state iface=${FABRIC_INTERFACE_NAME} pubkey=${state.publicKey}`,
@@ -1439,6 +1561,286 @@ export async function restoreFabricFromPersistedState(): Promise<void> {
       }`,
     );
   }
+}
+
+export type FabricPathProbeCandidate = {
+  publicKey: string;
+  endpoints: string[];
+};
+
+export type FabricPathProbeMessage = {
+  id: string;
+  fabricId: string;
+  probeMs: number;
+  candidates: FabricPathProbeCandidate[];
+  at: string;
+};
+
+export type FabricPathObservation = {
+  publicKey: string;
+  endpoint?: string;
+  lastHandshakeAt?: string;
+  health: FabricPeerHealth;
+  latencyMs?: number;
+};
+
+function observedPeerToPath(
+  peer: FabricReconcileObservedPeer,
+): FabricPathObservation {
+  const health = peer.health ??
+    classifyPeerHandshakeHealth(peer.lastHandshakeAt, Date.now());
+  const path: FabricPathObservation = { publicKey: peer.publicKey, health };
+  if (peer.endpoint) path.endpoint = peer.endpoint;
+  if (peer.lastHandshakeAt) path.lastHandshakeAt = peer.lastHandshakeAt;
+  return path;
+}
+
+async function sleepProbeMs(probeMs: number): Promise<void> {
+  if (!Number.isFinite(probeMs) || probeMs <= 0) return;
+  await new Promise((resolve) => setTimeout(resolve, probeMs));
+}
+
+type DurablePeerRestore = {
+  endpoint?: string;
+  keepalive?: number;
+};
+
+function parseDurablePeersFromWgConf(
+  conf: string,
+): Map<string, DurablePeerRestore> {
+  const result = new Map<string, DurablePeerRestore>();
+  let publicKey: string | undefined;
+  let endpoint: string | undefined;
+  let keepalive: number | undefined;
+  const flush = () => {
+    if (publicKey) {
+      const peer: DurablePeerRestore = {};
+      if (endpoint) peer.endpoint = endpoint;
+      if (keepalive !== undefined) peer.keepalive = keepalive;
+      result.set(publicKey, peer);
+    }
+    publicKey = undefined;
+    endpoint = undefined;
+    keepalive = undefined;
+  };
+  for (const rawLine of conf.split("\n")) {
+    const trimmed = rawLine.trim();
+    if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+      flush();
+      continue;
+    }
+    const eq = trimmed.indexOf("=");
+    if (eq <= 0) continue;
+    const key = trimmed.slice(0, eq).trim().toLowerCase();
+    const value = trimmed.slice(eq + 1).trim();
+    if (key === "publickey") publicKey = value;
+    if (key === "endpoint") endpoint = value;
+    if (key === "persistentkeepalive") {
+      const parsed = Number.parseInt(value, 10);
+      if (Number.isInteger(parsed)) keepalive = parsed;
+    }
+  }
+  flush();
+  return result;
+}
+
+async function loadConfPeerRestores(
+  networkDir: string,
+): Promise<Map<string, DurablePeerRestore>> {
+  for (const path of [wgConfPath(networkDir), WG_QUICK_CONF_PATH]) {
+    try {
+      const parsed = parseDurablePeersFromWgConf(
+        await Deno.readTextFile(path),
+      );
+      if (parsed.size > 0) return parsed;
+    } catch (err) {
+      if (!(err instanceof Deno.errors.NotFound)) throw err;
+    }
+  }
+  return new Map();
+}
+
+function handshakeAtMs(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : undefined;
+}
+
+/** Fresh handshake after the candidate was applied — not a leftover pre-probe one. */
+export function isFreshProbeHandshake(
+  previousHandshakeAt: string | undefined,
+  observedHandshakeAt: string | undefined,
+  probeStartedAtMs: number,
+): boolean {
+  const observedMs = handshakeAtMs(observedHandshakeAt);
+  if (observedMs === undefined) return false;
+  if (observedMs <= probeStartedAtMs) return false;
+  const previousMs = handshakeAtMs(previousHandshakeAt);
+  if (previousMs !== undefined && observedMs <= previousMs) return false;
+  return true;
+}
+
+function restorePeerEndpoint(
+  publicKey: string,
+  state: FabricStateJson | null,
+  confPeers: ReadonlyMap<string, DurablePeerRestore>,
+  liveEndpoint: string | undefined,
+): { endpoint: string; keepalive: number } | null {
+  const statePeer = state?.peers.find((peer) => peer.publicKey === publicKey);
+  if (statePeer?.endpoint) {
+    return {
+      endpoint: statePeer.endpoint,
+      keepalive: statePeer.keepalive ?? 0,
+    };
+  }
+  const confPeer = confPeers.get(publicKey);
+  if (confPeer?.endpoint) {
+    return {
+      endpoint: confPeer.endpoint,
+      keepalive: confPeer.keepalive ?? 0,
+    };
+  }
+  if (liveEndpoint) return { endpoint: liveEndpoint, keepalive: 0 };
+  return null;
+}
+
+async function applyPeerEndpoint(
+  publicKey: string,
+  endpoint: string,
+  keepalive: number,
+): Promise<boolean> {
+  const result = await runHost("wg", [
+    "set",
+    FABRIC_INTERFACE_NAME,
+    "peer",
+    publicKey,
+    "endpoint",
+    endpoint,
+    "persistent-keepalive",
+    String(keepalive),
+  ]);
+  if (result.success) return true;
+  logWarn(
+    "commands",
+    `TurboFabric path probe wg set failed for ${publicKey}: ${
+      result.stderr || result.stdout || `exit ${result.code}`
+    }`,
+  );
+  return false;
+}
+
+async function applyProbeCandidates(
+  candidates: readonly FabricPathProbeCandidate[],
+): Promise<{ appliedKeys: Set<string>; failedApplyKeys: Set<string> }> {
+  const appliedKeys = new Set<string>();
+  const failedApplyKeys = new Set<string>();
+  for (const candidate of candidates) {
+    if (!isValidWireguardPublicKey(candidate.publicKey)) continue;
+    let applied = false;
+    for (const endpoint of candidate.endpoints) {
+      if (!isValidWireguardEndpoint(endpoint)) continue;
+      if (
+        await applyPeerEndpoint(
+          candidate.publicKey,
+          endpoint,
+          FABRIC_PROBE_KEEPALIVE,
+        )
+      ) {
+        applied = true;
+      }
+    }
+    if (applied) appliedKeys.add(candidate.publicKey);
+    else failedApplyKeys.add(candidate.publicKey);
+  }
+  return { appliedKeys, failedApplyKeys };
+}
+
+function successfulProbeKeys(
+  appliedKeys: ReadonlySet<string>,
+  previousHandshakeByKey: ReadonlyMap<string, string | undefined>,
+  afterByKey: ReadonlyMap<string, FabricReconcileObservedPeer>,
+  probeStartedAtMs: number,
+): Set<string> {
+  const successful = new Set<string>();
+  for (const publicKey of appliedKeys) {
+    const observed = afterByKey.get(publicKey);
+    if (
+      isFreshProbeHandshake(
+        previousHandshakeByKey.get(publicKey),
+        observed?.lastHandshakeAt,
+        probeStartedAtMs,
+      )
+    ) {
+      successful.add(publicKey);
+    }
+  }
+  return successful;
+}
+
+/**
+ * Control-plane-initiated path observation. Empty `candidates` is collect-only.
+ * Probes never write `tp0.conf`, `state.json`, or `apply.stamp`. A candidate
+ * succeeds only on a handshake newer than both the pre-probe value and the
+ * probe start. Failed probes restore the durable endpoint/keepalive from
+ * `state.json` then `tp0.conf` before the pre-probe live value, clearing
+ * keepalive when the durable peer has none.
+ */
+export async function handleFabricPathProbe(
+  message: FabricPathProbeMessage,
+): Promise<FabricPathObservation[]> {
+  if (message.candidates.length === 0) {
+    const current = await collectFabricPeerState();
+    return current.map(observedPeerToPath);
+  }
+
+  const networkDir = resolveNetworkDir();
+  const before = await collectFabricPeerState();
+  const previousHandshakeByKey = new Map<string, string | undefined>();
+  const liveEndpointByKey = new Map<string, string>();
+  for (const peer of before) {
+    previousHandshakeByKey.set(peer.publicKey, peer.lastHandshakeAt);
+    if (peer.endpoint) liveEndpointByKey.set(peer.publicKey, peer.endpoint);
+  }
+  const state = await readFabricState(networkDir);
+  const confPeers = await loadConfPeerRestores(networkDir);
+  const probeStartedAtMs = Date.now();
+  const { appliedKeys, failedApplyKeys } = await applyProbeCandidates(
+    message.candidates,
+  );
+
+  await sleepProbeMs(message.probeMs);
+  const after = await collectFabricPeerState();
+  const afterByKey = new Map(after.map((peer) => [peer.publicKey, peer]));
+  const successfulKeys = successfulProbeKeys(
+    appliedKeys,
+    previousHandshakeByKey,
+    afterByKey,
+    probeStartedAtMs,
+  );
+
+  for (const publicKey of appliedKeys) {
+    if (successfulKeys.has(publicKey)) continue;
+    const restore = restorePeerEndpoint(
+      publicKey,
+      state,
+      confPeers,
+      liveEndpointByKey.get(publicKey),
+    );
+    if (!restore) continue;
+    await applyPeerEndpoint(publicKey, restore.endpoint, restore.keepalive);
+  }
+
+  const restored = await collectFabricPeerState();
+  const observations: FabricPathObservation[] = [];
+  for (const peer of restored) {
+    if (failedApplyKeys.has(peer.publicKey)) continue;
+    const path = observedPeerToPath(peer);
+    if (appliedKeys.has(peer.publicKey) && !successfulKeys.has(peer.publicKey)) {
+      path.health = "never";
+    }
+    observations.push(path);
+  }
+  return observations;
 }
 
 export async function handleFabricReconcile(

@@ -1,5 +1,6 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import {
+  changeReplicationSourceSql,
   createClientAccountSql,
   createDatabaseSql,
   createOrAlterAccountSql,
@@ -10,9 +11,15 @@ import {
   grantDatabaseSql,
   grantReplicationSql,
   grantRootSql,
+  isWritableSql,
   MANAGED_DOCKER_NETWORK_HOST,
+  promoteSql,
+  quoteAccount,
   quoteIdentifier,
   quoteLiteral,
+  showReplicaStatusSql,
+  standbyReplicationStatusSql,
+  versionSql,
 } from "./mysql-sql.ts";
 import { mysqlManagedEngineRuntime } from "./mysql.ts";
 
@@ -57,10 +64,10 @@ test("account and privilege SQL uses managed-network netmask scoping", () => {
     true,
   );
   assertEquals(grantRootSql("root").includes("*.*"), true);
-  assertEquals(
-    grantReplicationSql("repl", "203.0.113.20").includes("REPLICATION SLAVE"),
-    true,
-  );
+  const replGrant = grantReplicationSql("repl", "203.0.113.20");
+  assertEquals(replGrant.includes("REPLICATION SLAVE"), true);
+  // Server-side TLS enforcement, independent of what the standby requests.
+  assertEquals(replGrant.includes("REQUIRE SSL"), true);
 });
 
 test("ensureReplicationAccountSql creates one account per peer host", () => {
@@ -70,6 +77,7 @@ test("ensureReplicationAccountSql creates one account per peer host", () => {
   ]);
   assertEquals(sql.includes("`tp_repl`@'203.0.113.20'"), true);
   assertEquals(sql.includes("`tp_repl`@'203.0.113.21'"), true);
+  assertEquals(sql.includes("REQUIRE SSL"), true);
   assertEquals(sql.includes("FLUSH PRIVILEGES"), true);
 });
 
@@ -125,6 +133,47 @@ test("dumpArgv rejects system schemas and validates identifiers", () => {
     Error,
   );
   assertThrows(() => backup.dumpArgv(ctx, { database: "has-dash" }), Error);
+});
+
+test("quoteIdentifier rejects empty identifiers", () => {
+  assertThrows(() => quoteIdentifier(""), Error);
+});
+
+test("quoteAccount uses account max length", () => {
+  assertEquals(quoteAccount("app_user"), "`app_user`");
+  assertThrows(() => quoteAccount("a".repeat(33)), Error);
+});
+
+test("grantDatabaseSql covers read-write privilege", () => {
+  const grant = grantDatabaseSql("appdb", "app", "read-write");
+  assertEquals(grant.includes("CREATE TEMPORARY TABLES"), true);
+  assertEquals(grant.includes("ALTER ROUTINE"), true);
+  assertEquals(grant.includes("WITH GRANT OPTION"), false);
+});
+
+test("ensureReplicationAccountSql falls back to managed network when peers empty", () => {
+  const sql = ensureReplicationAccountSql("tp_repl", "s3cret", []);
+  assertEquals(sql.includes("`tp_repl`@'172.16.0.0/255.240.0.0'"), true);
+  assertEquals(sql.includes("REQUIRE SSL"), true);
+  assertEquals(sql.includes("FLUSH PRIVILEGES"), true);
+});
+
+test("replication and status SQL builders", () => {
+  assertEquals(promoteSql().includes("STOP REPLICA"), true);
+  assertEquals(isWritableSql().includes("read_only"), true);
+  assertEquals(showReplicaStatusSql(), "SHOW REPLICA STATUS;");
+  assertEquals(versionSql(), "SELECT VERSION();");
+  const standby = standbyReplicationStatusSql();
+  assertEquals(standby.includes("Replica_IO_Running"), true);
+  assertEquals(standby.includes("lag_seconds"), true);
+  const change = changeReplicationSourceSql({
+    host: "203.0.113.50",
+    port: 3306,
+    username: "repl",
+    password: "s3cret",
+  });
+  assertEquals(change.includes("SOURCE_SSL = 1"), true);
+  assertEquals(change.includes("START REPLICA"), true);
 });
 
 test("runtime defaultDatabase is a non-system application schema", () => {

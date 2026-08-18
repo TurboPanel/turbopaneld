@@ -25,12 +25,62 @@ export type RunDockerOptions = {
   input?: string;
 };
 
+export type DockerCliRunRawFn = (
+  command: string,
+  args: string[],
+  options?: RunDockerOptions,
+) => Promise<DockerCliResult>;
+
+/** Optional I/O override for host-free unit tests (never call real docker). */
+export type DockerCliIo = {
+  runRaw?: DockerCliRunRawFn;
+  /**
+   * When `runRaw` is unset, {@link runRawDefault} / probe use this instead of
+   * `/usr/bin/docker` (host-free spawn coverage via `/bin/true` / `/bin/cat`).
+   */
+  dockerBin?: string;
+  /**
+   * When set, {@link spawnDockerStreaming} uses this instead of
+   * `Deno.Command.spawn` (binary dump path — never decode into a string).
+   */
+  spawnStreaming?: (
+    bin: string,
+    args: string[],
+    options?: SpawnDockerStreamingOptions,
+  ) => Promise<Deno.ChildProcess>;
+};
+
+let ioOverride: DockerCliIo | undefined;
+
+/**
+ * Test-only injection for {@link runDocker} / {@link resolveDockerInvocation}.
+ * Returns a restore function that clears the override and invocation cache.
+ */
+export function setDockerCliIoForTest(io?: DockerCliIo): () => void {
+  const previous = ioOverride;
+  ioOverride = io;
+  clearDockerInvocationCache();
+  return () => {
+    ioOverride = previous;
+    clearDockerInvocationCache();
+  };
+}
+
+function resolvedDockerBin(): string {
+  return ioOverride?.dockerBin ?? DOCKER_BIN;
+}
+
+function clearDockerInvocationCache(): void {
+  cachedInvocation = undefined;
+  cachedInvocationPromise = undefined;
+}
+
 function isDockerSocketPermissionError(stderr: string): boolean {
   const lower = stderr.toLowerCase();
   return lower.includes("permission denied") && lower.includes("docker");
 }
 
-async function runRaw(
+async function runRawDefault(
   command: string,
   args: string[],
   options?: RunDockerOptions,
@@ -47,7 +97,7 @@ async function runRaw(
     if (hasInput) {
       const writer = child.stdin.getWriter();
       try {
-        await writer.write(new TextEncoder().encode(options.input));
+        await writer.write(new TextEncoder().encode(options?.input ?? ""));
       } finally {
         await writer.close();
       }
@@ -69,6 +119,15 @@ async function runRaw(
       stderr: `spawn failed: ${message}`,
     };
   }
+}
+
+async function runRaw(
+  command: string,
+  args: string[],
+  options?: RunDockerOptions,
+): Promise<DockerCliResult> {
+  const impl = ioOverride?.runRaw ?? runRawDefault;
+  return await impl(command, args, options);
 }
 
 async function currentUsername(): Promise<string> {
@@ -98,7 +157,7 @@ async function runDockerWithFreshGroups(
       "-u",
       user,
       "--",
-      DOCKER_BIN,
+      resolvedDockerBin(),
       ...args,
     ],
     options,
@@ -117,7 +176,7 @@ export async function runDocker(
   args: string[],
   options?: RunDockerOptions,
 ): Promise<DockerCliResult> {
-  const direct = await runRaw(DOCKER_BIN, args, options);
+  const direct = await runRaw(resolvedDockerBin(), args, options);
   if (direct.success || !isDockerSocketPermissionError(direct.stderr)) {
     return direct;
   }
@@ -129,7 +188,7 @@ export async function runDocker(
     success: false,
     code: refreshed.code || direct.code,
     stdout: refreshed.stdout || direct.stdout,
-    stderr: refreshed.stderr || direct.stderr,
+    stderr: direct.stderr || refreshed.stderr,
   };
 }
 
@@ -152,16 +211,17 @@ let cachedInvocation: DockerInvocation | undefined;
 let cachedInvocationPromise: Promise<DockerInvocation> | undefined;
 
 async function probeDockerInvocation(): Promise<DockerInvocation> {
-  const direct = await runRaw(DOCKER_BIN, [
+  const dockerBin = resolvedDockerBin();
+  const direct = await runRaw(dockerBin, [
     "version",
     "--format",
     "{{.Server.Version}}",
   ]);
   if (direct.success || !isDockerSocketPermissionError(direct.stderr)) {
-    return { bin: DOCKER_BIN, prefixArgs: [] };
+    return { bin: dockerBin, prefixArgs: [] };
   }
   const user = await currentUsername();
-  return { bin: SUDO_BIN, prefixArgs: ["-n", "-u", user, "--", DOCKER_BIN] };
+  return { bin: SUDO_BIN, prefixArgs: ["-n", "-u", user, "--", dockerBin] };
 }
 
 /**
@@ -201,8 +261,13 @@ export async function spawnDockerStreaming(
   options?: SpawnDockerStreamingOptions,
 ): Promise<Deno.ChildProcess> {
   const invocation = await resolveDockerInvocation();
+  const fullArgs = [...invocation.prefixArgs, ...args];
+  const spawnOverride = ioOverride?.spawnStreaming;
+  if (spawnOverride) {
+    return await spawnOverride(invocation.bin, fullArgs, options);
+  }
   return new Deno.Command(invocation.bin, {
-    args: [...invocation.prefixArgs, ...args],
+    args: fullArgs,
     stdin: options?.stdin ?? "null",
     stdout: options?.stdout ?? "piped",
     stderr: "piped",

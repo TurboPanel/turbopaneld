@@ -83,3 +83,55 @@ test({
     }
   },
 });
+
+test({
+  name: "handleHostname applies hostname and returns observed hostname",
+  fn: async () => {
+    const {
+      handleHostname,
+      setAnsibleAvailabilityCheckForTests,
+      setRunSetHostnameForTests,
+    } = await import("./hostname.ts");
+
+    setAnsibleAvailabilityCheckForTests(() => Promise.resolve(true));
+    setRunSetHostnameForTests(() => Promise.resolve({ summary: "hostname-ok" }));
+    try {
+      const result = await handleHostname(
+        { hostname: "web-01" },
+        new Date().toISOString(),
+      );
+      assertEquals(typeof result.observedHostname, "string");
+      assertEquals(result.observedHostname.length > 0, true);
+      assertEquals(result.summary, "hostname-ok");
+    } finally {
+      setAnsibleAvailabilityCheckForTests(null);
+      setRunSetHostnameForTests(null);
+    }
+  },
+});
+
+test({
+  name: "handleHostname omits summary when ansible apply returns empty",
+  fn: async () => {
+    const {
+      handleHostname,
+      setAnsibleAvailabilityCheckForTests,
+      setRunSetHostnameForTests,
+    } = await import("./hostname.ts");
+
+    setAnsibleAvailabilityCheckForTests(() => Promise.resolve(true));
+    setRunSetHostnameForTests(() => Promise.resolve({ summary: "" }));
+    try {
+      const result = await handleHostname(
+        { hostname: "web-01" },
+        new Date().toISOString(),
+      );
+      assertEquals(typeof result.observedHostname, "string");
+      assertEquals(result.observedHostname.length > 0, true);
+      assertEquals("summary" in result, false);
+    } finally {
+      setAnsibleAvailabilityCheckForTests(null);
+      setRunSetHostnameForTests(null);
+    }
+  },
+});

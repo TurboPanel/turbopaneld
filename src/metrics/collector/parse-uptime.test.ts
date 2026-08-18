@@ -15,3 +15,7 @@ it("parseUptime returns integer seconds from first field", () => {
 it("parseUptime returns null for empty input", () => {
   assertEquals(parseUptime(""), null);
 });
+
+it("parseUptime returns null for non-numeric input", () => {
+  assertEquals(parseUptime("not-a-number 1.0"), null);
+});

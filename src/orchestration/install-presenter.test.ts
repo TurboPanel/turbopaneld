@@ -287,3 +287,161 @@ test("installer success path emits only presenter output without trailing struct
     "structured log leaked:\n" + out,
   );
 });
+
+test("InstallPresenter TTY mode renders spinner and status window", async () => {
+  const stdout = captureWriteStream(Deno.stdout);
+  const presenter = new InstallPresenter(true);
+
+  presenter.beginStep("Installing cache");
+  presenter.pushStatus("cache service started");
+  presenter.pushStatus("queue service started");
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  presenter.completeStep(true, "cache ready");
+  presenter.dispose();
+
+  stdout.restore();
+  const out = stdout.text();
+  assertMatch(out, /▸/);
+  assertMatch(out, /cache service started/);
+  assertMatch(out, /cache ready/);
+});
+
+test("InstallPresenter TTY mode re-renders when status window overflows", () => {
+  const stdout = captureWriteStream(Deno.stdout);
+  const presenter = new InstallPresenter(true);
+
+  presenter.beginStep("Rolling status");
+  for (let i = 1; i <= 6; i++) {
+    presenter.pushStatus(`progress line ${i}`);
+  }
+  presenter.completeStep(true, "done");
+  presenter.dispose();
+
+  stdout.restore();
+  const out = stdout.text();
+  assertMatch(out, /progress line 6/);
+  assertMatch(out, /progress line 2/);
+});
+
+test("InstallPresenter TTY fail writes colored outcome to stderr", () => {
+  const stdout = captureWriteStream(Deno.stdout);
+  const stderr = captureWriteStream(Deno.stderr);
+  const presenter = new InstallPresenter(true);
+
+  presenter.beginStep("Provisioning");
+  presenter.pushDetail("root cause detail");
+  presenter.fail("provisioning failed");
+
+  stdout.restore();
+  stderr.restore();
+  assertMatch(stderr.text(), /provisioning failed/);
+  assertMatch(stderr.text(), /root cause detail/);
+});
+
+test("InstallPresenter inactive push and fail paths are no-ops or direct", () => {
+  const stderr = captureWriteStream(Deno.stderr);
+  const presenter = new InstallPresenter(false);
+
+  presenter.pushDetail("ignored detail");
+  presenter.pushStatus("ignored status");
+  presenter.completeStep(true, "ignored complete");
+  presenter.fail("standalone failure");
+
+  stderr.restore();
+  assertMatch(stderr.text(), /✗ standalone failure/);
+});
+
+test("InstallPresenter drops empty sanitized push lines and caps detail tail", () => {
+  const stdout = captureWriteStream(Deno.stdout);
+  const stderr = captureWriteStream(Deno.stderr);
+  const presenter = new InstallPresenter(false);
+
+  presenter.beginStep("Detail overflow");
+  presenter.pushDetail("   ");
+  presenter.pushStatus("\n\t");
+  for (let i = 0; i < 90; i++) {
+    presenter.pushDetail(`detail line ${i}`);
+  }
+  presenter.fail("overflow failed");
+
+  stdout.restore();
+  stderr.restore();
+  const err = stderr.text();
+  assertMatch(err, /overflow failed/);
+  // Oldest detail lines are dropped once DETAIL_TAIL_MAX (80) is exceeded.
+  assertEquals(err.includes("detail line 0"), false);
+  assertMatch(err, /detail line 89/);
+});
+
+test("InstallPresenter TTY beginStep installs SIGINT handler once", () => {
+  const added: Array<() => void> = [];
+  const originalAdd = Deno.addSignalListener;
+  const originalRemove = Deno.removeSignalListener;
+  const originalExit = Deno.exit;
+  let exitCode: number | undefined;
+
+  Deno.addSignalListener = ((signal, handler) => {
+    if (signal !== "SIGINT") {
+      originalAdd.call(Deno, signal, handler);
+      return;
+    }
+    added.push(handler as () => void);
+  }) as typeof Deno.addSignalListener;
+  Deno.removeSignalListener = ((signal, handler) => {
+    if (signal !== "SIGINT") {
+      originalRemove.call(Deno, signal, handler);
+    }
+  }) as typeof Deno.removeSignalListener;
+  Deno.exit = ((code?: number) => {
+    exitCode = code ?? 0;
+    throw new Error("Deno.exit stub");
+  }) as typeof Deno.exit;
+
+  const stdout = captureWriteStream(Deno.stdout);
+  try {
+    const presenter = new InstallPresenter(true);
+    presenter.beginStep("SIGINT step");
+    presenter.beginStep("SIGINT step again");
+    assertEquals(added.length, 1);
+
+    try {
+      added[0]!();
+    } catch (err) {
+      if (!(err instanceof Error) || err.message !== "Deno.exit stub") {
+        throw err;
+      }
+    }
+    assertEquals(exitCode, 130);
+    presenter.dispose();
+  } finally {
+    stdout.restore();
+    Deno.addSignalListener = originalAdd;
+    Deno.removeSignalListener = originalRemove;
+    Deno.exit = originalExit;
+  }
+});
+
+test("InstallPresenter fail with empty detail tail skips stderr tail", () => {
+  const stderr = captureWriteStream(Deno.stderr);
+  const presenter = new InstallPresenter(false);
+
+  presenter.beginStep("Step");
+  presenter.fail("failed without tail");
+
+  stderr.restore();
+  const err = stderr.text();
+  assertMatch(err, /✗ failed without tail/);
+  assertEquals(err.trim().split("\n").length, 1);
+});
+
+test("InstallPresenter TTY success uses colored checkmark", () => {
+  const stdout = captureWriteStream(Deno.stdout);
+  const presenter = new InstallPresenter(true);
+
+  presenter.beginStep("Step");
+  presenter.completeStep(true, "ok");
+  presenter.dispose();
+
+  stdout.restore();
+  assertMatch(stdout.text(), /ok/);
+});

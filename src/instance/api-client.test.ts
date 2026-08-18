@@ -440,3 +440,160 @@ test({
     }
   },
 });
+
+test({
+  name: "decryptSecrets maps non-string plaintexts to null and rejects bad shape",
+  permissions: { net: true },
+  fn: async () => {
+    const api = createFakeInstanceApi();
+    const restore = api.install();
+    try {
+      let mode: "ok" | "bad" = "ok";
+      api.script("/api/daemon/v1/secrets/decrypt", () => {
+        if (mode === "ok") {
+          return new Response(JSON.stringify({ plaintexts: ["ok", 12, null] }), {
+            status: 200,
+          });
+        }
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      });
+      const client = new DaemonApiClient({
+        config: INSTANCE_CONFIG,
+        getToken: () => Promise.resolve("tok"),
+      });
+      assertEquals(await client.decryptSecrets(["a", "b", "c"]), [
+        "ok",
+        null,
+        null,
+      ]);
+
+      mode = "bad";
+      const bad = await assertRejects(
+        () => client.decryptSecrets(["x"]),
+        DaemonApiError,
+      );
+      assertEquals(bad.status, 500);
+      assertEquals(bad.message, "Invalid secrets/decrypt response");
+    } finally {
+      restore();
+    }
+  },
+});
+
+test({
+  name: "rehydrateDeploymentSecrets parses rows and skips malformed entries",
+  permissions: { net: true },
+  fn: async () => {
+    const api = createFakeInstanceApi();
+    const restore = api.install();
+    try {
+      const client = new DaemonApiClient({
+        config: INSTANCE_CONFIG,
+        getToken: () => Promise.resolve("tok"),
+      });
+      assertEquals(await client.rehydrateDeploymentSecrets([]), []);
+
+      let mode: "rows" | "bad" = "rows";
+      api.script("/api/daemon/v1/deployments/secrets/rehydrate", () => {
+        if (mode === "rows") {
+          return new Response(
+            JSON.stringify({
+              deployments: [
+                {
+                  projectId: "p1",
+                  environmentId: "e1",
+                  generation: 3,
+                  secretPlan: { a: 1 },
+                  variableMaterial: { b: 2 },
+                },
+                { projectId: "p2", environmentId: "e2" },
+                null,
+                "skip",
+                { projectId: 1, environmentId: "e3" },
+                { projectId: "p3" },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      });
+      const rows = await client.rehydrateDeploymentSecrets([
+        { projectId: "p1", environmentId: "e1", generation: 3 },
+      ]);
+      assertEquals(rows, [
+        {
+          projectId: "p1",
+          environmentId: "e1",
+          generation: 3,
+          secretPlan: { a: 1 },
+          variableMaterial: { b: 2 },
+        },
+        {
+          projectId: "p2",
+          environmentId: "e2",
+          generation: 0,
+          secretPlan: undefined,
+          variableMaterial: undefined,
+        },
+      ]);
+
+      mode = "bad";
+      const bad = await assertRejects(
+        () =>
+          client.rehydrateDeploymentSecrets([
+            { projectId: "p", environmentId: "e" },
+          ]),
+        DaemonApiError,
+      );
+      assertEquals(bad.status, 500);
+      assertEquals(bad.message, "Invalid secrets/rehydrate response");
+    } finally {
+      restore();
+    }
+  },
+});
+
+test({
+  name: "DaemonApiClient maps non-JSON and missing error body to HTTP status",
+  permissions: { net: true },
+  fn: async () => {
+    const api = createFakeInstanceApi();
+    const restore = api.install();
+    try {
+      let mode: "not-json" | "plain-502" | "blank-error" = "not-json";
+      api.script("/api/daemon/v1/jwks.json", () => {
+        if (mode === "not-json") {
+          return new Response("not-json", { status: 200 });
+        }
+        if (mode === "plain-502") {
+          return new Response("nope", { status: 502 });
+        }
+        return new Response(JSON.stringify({ error: "   " }), { status: 503 });
+      });
+      const client = new DaemonApiClient({
+        config: INSTANCE_CONFIG,
+        getToken: () => Promise.resolve("tok"),
+      });
+      const invalidJson = await assertRejects(
+        () => client.getJwks(),
+        DaemonApiError,
+      );
+      assertEquals(invalidJson.message, "Invalid JSON response");
+
+      mode = "plain-502";
+      const plain = await assertRejects(() => client.getJwks(), DaemonApiError);
+      assertEquals(plain.status, 502);
+      assertEquals(plain.message, "HTTP 502");
+
+      mode = "blank-error";
+      const blank = await assertRejects(
+        () => client.getJwks(),
+        DaemonApiError,
+      );
+      assertEquals(blank.message, "HTTP 503");
+    } finally {
+      restore();
+    }
+  },
+});

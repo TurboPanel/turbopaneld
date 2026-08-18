@@ -2,7 +2,7 @@
  * Shared ProxySQL managed ingress — compose + config generation.
  *
  * One per-server `turbopanel-proxysql` compose project terminates TLS on
- * `5432` / `3306` and routes to managed engine members on
+ * `15432` / `16306` and routes to managed engine members on
  * {@link MANAGED_INGRESS_NETWORK}. Runtime users/servers/rules are applied
  * through the admin interface; the on-disk `proxysql.cnf` is the durable
  * cold-start source of truth.
@@ -41,12 +41,19 @@ import {
   proxysqlConfigDir,
 } from "./paths.ts";
 
-/** Pinned 3.0.x — do not loosen without reviewing GHSA-58ww-865x-grpr. */
-export const PROXYSQL_IMAGE = "proxysql/proxysql:3.0.2";
+/**
+ * Pinned 3.0.9 — fixes CVE-2026-48773 (pre-auth first-packet heap overflow)
+ * and CVE-2026-48772 (PROXY-protocol-v1 `client_addr` ACL bypass).
+ */
+export const PROXYSQL_IMAGE = "proxysql/proxysql:3.0.9";
 
 export const ADMIN_PORT = 6032;
-export const PGSQL_PORT = 5432;
-export const MYSQL_PORT = 3306;
+export const PGSQL_PORT = 15432;
+export const MYSQL_PORT = 16306;
+
+/** Legacy client listeners accepted on the wire for control-plane skew. */
+const LEGACY_PGSQL_PORT = 5432;
+const LEGACY_MYSQL_PORT = 3306;
 
 /**
  * ProxySQL's listen address *inside its own container network namespace* —
@@ -79,7 +86,7 @@ export type ProxySqlBackendDesired = {
   readEligible: boolean;
   address: string;
   port: number;
-  transport: "local" | "datacenter" | "fabric";
+  transport: "local" | "datacenter" | "fabric" | "public";
 };
 
 export type ProxySqlUserDesired = {
@@ -93,7 +100,7 @@ export type ProxySqlUserDesired = {
 export type ProxySqlClusterDesired = {
   managedId: string;
   engine: string;
-  protocolPort: 5432 | 3306;
+  protocolPort: 5432 | 3306 | 15432 | 16306;
   writerHostgroup: number;
   readerHostgroup: number;
   backends: ProxySqlBackendDesired[];
@@ -103,7 +110,7 @@ export type ProxySqlClusterDesired = {
 export type ProxySqlDesiredState = {
   /**
    * Host/interface the shared ProxySQL compose project **publishes** its
-   * 5432/3306 listeners on — `null` means "publish nothing" (frontend stays
+   * 15432/16306 listeners on — `null` means "publish nothing" (frontend stays
    * reachable only via {@link MANAGED_INGRESS_NETWORK}, never the host).
    * Never conflate this with ProxySQL's *internal* container listen address
    * (always `0.0.0.0` — see {@link renderProtocolFamilySection}); those are
@@ -162,6 +169,31 @@ function formatPublishedPort(bind: string, containerPort: number): string {
   return quoteYamlScalar(`${host}:${containerPort}:${containerPort}`);
 }
 
+const COMPOSE_PORT_LINE_PREFIX = '- "';
+
+function unbracketComposeHost(host: string): string {
+  if (host.startsWith("[") && host.endsWith("]")) return host.slice(1, -1);
+  return host;
+}
+
+/** Parse a quoted compose `ports:` mapping that ends with `marker`, or `null`. */
+function publishedBindHostFromPortLine(
+  line: string,
+  marker: string,
+): string | null {
+  if (!line.endsWith(marker)) return null;
+  const withoutPrefix = line.slice(COMPOSE_PORT_LINE_PREFIX.length);
+  const host = withoutPrefix.slice(0, withoutPrefix.length - marker.length);
+  if (host.length === 0) return null;
+  const unbracketed = unbracketComposeHost(host);
+  try {
+    assertValidProxySqlBindAddress(unbracketed);
+  } catch {
+    return null;
+  }
+  return unbracketed;
+}
+
 /**
  * Recover the previously-published `bindAddress` (or `null` when the
  * frontend was not published to the host at all) from an on-disk
@@ -175,22 +207,19 @@ function formatPublishedPort(bind: string, containerPort: number): string {
 export function readPublishedBindAddressFromCompose(
   composeText: string,
 ): string | null {
-  const marker = `:${PGSQL_PORT}:${PGSQL_PORT}"`;
+  const markers = [
+    `:${PGSQL_PORT}:${PGSQL_PORT}"`,
+    `:${MYSQL_PORT}:${MYSQL_PORT}"`,
+    `:${LEGACY_PGSQL_PORT}:${LEGACY_PGSQL_PORT}"`,
+    `:${LEGACY_MYSQL_PORT}:${LEGACY_MYSQL_PORT}"`,
+  ];
   for (const rawLine of composeText.split("\n")) {
     const line = rawLine.trim();
-    if (!line.startsWith('- "') || !line.endsWith(marker)) continue;
-    const withoutPrefix = line.slice('- "'.length);
-    const host = withoutPrefix.slice(0, withoutPrefix.length - marker.length);
-    if (host.length === 0) continue;
-    const unbracketed = host.startsWith("[") && host.endsWith("]")
-      ? host.slice(1, -1)
-      : host;
-    try {
-      assertValidProxySqlBindAddress(unbracketed);
-    } catch {
-      continue;
+    if (!line.startsWith(COMPOSE_PORT_LINE_PREFIX)) continue;
+    for (const marker of markers) {
+      const host = publishedBindHostFromPortLine(line, marker);
+      if (host !== null) return host;
     }
-    return unbracketed;
   }
   return null;
 }
@@ -248,27 +277,143 @@ function ipv4AddressForSegment(name: string, subnet: string): string {
   return address;
 }
 
-function renderProxySqlServiceNetworks(
+/**
+ * A rendered spanning-segment attachment: network name plus the already
+ * resolved reserved host address. Desired state arrives as
+ * `{ name, subnet }`; the self-heal path recovers the attachment straight
+ * from the on-disk compose file, where only the pinned address survives (see
+ * {@link readSegmentAttachmentsFromCompose}).
+ */
+export type ProxySqlSegmentAttachment = {
+  name: string;
+  ipv4Address: string;
+};
+
+/** Resolve desired `{ name, subnet }` segments to pinned attachments. */
+export function segmentAttachmentsFromDesired(
   segments: ReadonlyArray<{ name: string; subnet: string }>,
+): ProxySqlSegmentAttachment[] {
+  return uniqueSegmentsByName(segments).map((row) => ({
+    name: row.name,
+    ipv4Address: ipv4AddressForSegment(row.name, row.subnet),
+  }));
+}
+
+function uniqueAttachmentsByName(
+  attachments: ReadonlyArray<ProxySqlSegmentAttachment>,
+): ProxySqlSegmentAttachment[] {
+  const sorted = [...attachments].sort((a, b) => a.name.localeCompare(b.name));
+  const seen = new Set<string>();
+  const unique: ProxySqlSegmentAttachment[] = [];
+  for (const row of sorted) {
+    if (seen.has(row.name)) continue;
+    seen.add(row.name);
+    unique.push(row);
+  }
+  return unique;
+}
+
+const SERVICE_NETWORKS_HEADER = "    networks:";
+const IPV4_ADDRESS_KEY = "ipv4_address:";
+const SERVICE_NETWORK_LINE_PREFIX = "      ";
+
+function unquoteYamlScalar(value: string): string {
+  if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
+    return value
+      .slice(1, -1)
+      .replaceAll(String.raw`\"`, '"')
+      .replaceAll(String.raw`\\`, "\\");
+  }
+  return value;
+}
+
+function attachmentFromIpv4Line(
+  pendingName: string | null,
+  nested: string,
+): ProxySqlSegmentAttachment | null {
+  if (pendingName === null || !nested.startsWith(IPV4_ADDRESS_KEY)) return null;
+  const address = unquoteYamlScalar(
+    nested.slice(IPV4_ADDRESS_KEY.length).trim(),
+  );
+  try {
+    assertValidBindAddress(address);
+  } catch {
+    return null;
+  }
+  return { name: pendingName, ipv4Address: address };
+}
+
+/**
+ * `name:` with nothing after it opens an attachment block whose
+ * `ipv4_address` lands on the following line.
+ */
+function pendingAttachmentNameFromNetworkLine(body: string): string | null {
+  const colon = body.indexOf(":");
+  if (colon <= 0) return null;
+  const name = body.slice(0, colon);
+  if (name === MANAGED_INGRESS_NETWORK) return null;
+  if (body.slice(colon + 1).trim().length === 0) return name;
+  return null;
+}
+
+/**
+ * Recover the `tpn_*` spanning attachments a previous
+ * `managed.ingress.reconcile` rendered into `docker-compose.yml`.
+ *
+ * The self-heal path (`system.reconcile` → `proxysql`) has no fresh desired
+ * state in hand, so rewriting compose from the descriptor alone would drop
+ * every consumer segment (and its reserved host address) and cut remote
+ * bindings until the control plane happened to reconcile again. Only the
+ * pinned `ipv4_address` survives on disk — the source subnet does not — so
+ * attachments are preserved verbatim rather than re-derived. Returns `[]`
+ * for compose text it cannot confidently parse, mirroring
+ * {@link readPublishedBindAddressFromCompose}.
+ */
+export function readSegmentAttachmentsFromCompose(
+  composeText: string,
+): ProxySqlSegmentAttachment[] {
+  const lines = composeText.split("\n");
+  const start = lines.indexOf(SERVICE_NETWORKS_HEADER);
+  if (start === -1) return [];
+
+  const attachments: ProxySqlSegmentAttachment[] = [];
+  let pendingName: string | null = null;
+  for (let index = start + 1; index < lines.length; index++) {
+    const line = lines[index]!;
+    if (!line.startsWith(SERVICE_NETWORK_LINE_PREFIX)) break;
+    const body = line.slice(SERVICE_NETWORK_LINE_PREFIX.length);
+
+    if (body.startsWith(" ")) {
+      const attachment = attachmentFromIpv4Line(pendingName, body.trim());
+      if (attachment !== null) attachments.push(attachment);
+      continue;
+    }
+
+    pendingName = pendingAttachmentNameFromNetworkLine(body);
+  }
+  return uniqueAttachmentsByName(attachments);
+}
+
+function renderProxySqlServiceNetworks(
+  attachments: ReadonlyArray<ProxySqlSegmentAttachment>,
 ): string[] {
   const lines = [`      ${MANAGED_INGRESS_NETWORK}: {}`];
-  for (const row of segments) {
-    const address = ipv4AddressForSegment(row.name, row.subnet);
+  for (const row of attachments) {
     lines.push(
       `      ${row.name}:`,
-      `        ipv4_address: ${quoteYamlScalar(address)}`,
+      `        ipv4_address: ${quoteYamlScalar(row.ipv4Address)}`,
     );
   }
   return lines;
 }
 
 function renderProxySqlTopLevelNetworks(
-  segments: ReadonlyArray<{ name: string; subnet: string }>,
+  attachments: ReadonlyArray<ProxySqlSegmentAttachment>,
 ): string[] {
   return [
     `  ${MANAGED_INGRESS_NETWORK}:`,
     "    external: true",
-    ...segments.flatMap((row) => [`  ${row.name}:`, "    external: true"]),
+    ...attachments.flatMap((row) => [`  ${row.name}:`, "    external: true"]),
   ];
 }
 
@@ -293,6 +438,23 @@ export function proxysqlCompose(
   identity?: SystemComponentDescriptor | null,
   bindAddress: string | null = null,
   segments: ReadonlyArray<{ name: string; subnet: string }> = [],
+): string {
+  return proxysqlComposeWithAttachments(
+    identity,
+    bindAddress,
+    segmentAttachmentsFromDesired(segments),
+  );
+}
+
+/**
+ * Same document as {@link proxysqlCompose}, but from already-pinned segment
+ * attachments. The self-heal path uses this to round-trip attachments read
+ * back out of the previous compose file, where the source subnet is gone.
+ */
+export function proxysqlComposeWithAttachments(
+  identity?: SystemComponentDescriptor | null,
+  bindAddress: string | null = null,
+  attachments: ReadonlyArray<ProxySqlSegmentAttachment> = [],
 ): string {
   if (bindAddress !== null) assertValidProxySqlBindAddress(bindAddress);
 
@@ -320,9 +482,11 @@ export function proxysqlCompose(
       `      - ${formatAdminPublishedPort()}`,
     ];
 
-  const uniqueSegments = uniqueSegmentsByName(segments);
-  const serviceNetworkLines = renderProxySqlServiceNetworks(uniqueSegments);
-  const topLevelNetworkLines = renderProxySqlTopLevelNetworks(uniqueSegments);
+  const uniqueAttachments = uniqueAttachmentsByName(attachments);
+  const serviceNetworkLines = renderProxySqlServiceNetworks(uniqueAttachments);
+  const topLevelNetworkLines = renderProxySqlTopLevelNetworks(
+    uniqueAttachments,
+  );
 
   const lines = [
     "services:",
@@ -359,16 +523,31 @@ function escapeSqlString(value: string): string {
   return value.replaceAll("'", "''");
 }
 
+function protocolFamilyForPort(
+  port: number,
+): "pgsql" | "mysql" | null {
+  if (port === PGSQL_PORT || port === LEGACY_PGSQL_PORT) return "pgsql";
+  if (port === MYSQL_PORT || port === LEGACY_MYSQL_PORT) return "mysql";
+  return null;
+}
+
+function clusterMatchesFamily(
+  cluster: ProxySqlClusterDesired,
+  family: "mysql" | "pgsql",
+): boolean {
+  return protocolFamilyForPort(cluster.protocolPort) === family;
+}
+
 function clusterUsesMysql(
   clusters: readonly ProxySqlClusterDesired[],
 ): boolean {
-  return clusters.some((cluster) => cluster.protocolPort === MYSQL_PORT);
+  return clusters.some((cluster) => clusterMatchesFamily(cluster, "mysql"));
 }
 
 function clusterUsesPgsql(
   clusters: readonly ProxySqlClusterDesired[],
 ): boolean {
-  return clusters.some((cluster) => cluster.protocolPort === PGSQL_PORT);
+  return clusters.some((cluster) => clusterMatchesFamily(cluster, "pgsql"));
 }
 
 function backendHostgroup(
@@ -387,13 +566,7 @@ function renderServerRows(
 ): string[] {
   const rows: string[] = [];
   for (const cluster of clusters) {
-    const port = cluster.protocolPort;
-    if (
-      (family === "mysql" && port !== MYSQL_PORT) ||
-      (family === "pgsql" && port !== PGSQL_PORT)
-    ) {
-      continue;
-    }
+    if (!clusterMatchesFamily(cluster, family)) continue;
     for (const backend of cluster.backends) {
       rows.push(
         `    { hostgroup_id=${backendHostgroup(cluster, backend)} hostname="${
@@ -412,13 +585,7 @@ function renderUserRows(
   const rows: string[] = [];
   const seen = new Set<string>();
   for (const cluster of clusters) {
-    const port = cluster.protocolPort;
-    if (
-      (family === "mysql" && port !== MYSQL_PORT) ||
-      (family === "pgsql" && port !== PGSQL_PORT)
-    ) {
-      continue;
-    }
+    if (!clusterMatchesFamily(cluster, family)) continue;
     for (const user of cluster.users) {
       if (seen.has(user.username)) continue;
       seen.add(user.username);
@@ -468,13 +635,7 @@ function renderQueryRuleRows(
   const rows: string[] = [];
   let ruleId = 1;
   for (const cluster of clusters) {
-    const port = cluster.protocolPort;
-    if (
-      (family === "mysql" && port !== MYSQL_PORT) ||
-      (family === "pgsql" && port !== PGSQL_PORT)
-    ) {
-      continue;
-    }
+    if (!clusterMatchesFamily(cluster, family)) continue;
     if (!clusterHasReadEligibleReplica(cluster)) continue;
     for (const username of sortedClusterUsernames(cluster)) {
       rows.push(
@@ -639,13 +800,7 @@ function renderAdminServerStatements(
   const table = `${family}_servers`;
   const statements = [`DELETE FROM ${table}`];
   for (const cluster of clusters) {
-    const port = cluster.protocolPort;
-    if (
-      (family === "mysql" && port !== MYSQL_PORT) ||
-      (family === "pgsql" && port !== PGSQL_PORT)
-    ) {
-      continue;
-    }
+    if (!clusterMatchesFamily(cluster, family)) continue;
     for (const backend of cluster.backends) {
       statements.push(
         `INSERT INTO ${table} (hostgroup_id,hostname,port,use_ssl) VALUES (${
@@ -670,13 +825,7 @@ function renderAdminUserStatements(
   const statements = [`DELETE FROM ${table}`];
   const seen = new Set<string>();
   for (const cluster of clusters) {
-    const port = cluster.protocolPort;
-    if (
-      (family === "mysql" && port !== MYSQL_PORT) ||
-      (family === "pgsql" && port !== PGSQL_PORT)
-    ) {
-      continue;
-    }
+    if (!clusterMatchesFamily(cluster, family)) continue;
     for (const user of cluster.users) {
       if (seen.has(user.username)) continue;
       seen.add(user.username);
@@ -715,13 +864,7 @@ function renderAdminQueryRuleStatements(
   const statements = [`DELETE FROM ${table}`];
   let ruleId = 1;
   for (const cluster of clusters) {
-    const port = cluster.protocolPort;
-    if (
-      (family === "mysql" && port !== MYSQL_PORT) ||
-      (family === "pgsql" && port !== PGSQL_PORT)
-    ) {
-      continue;
-    }
+    if (!clusterMatchesFamily(cluster, family)) continue;
     if (!clusterHasReadEligibleReplica(cluster)) continue;
     for (const username of sortedClusterUsernames(cluster)) {
       statements.push(
@@ -905,19 +1048,23 @@ export async function inspectProxySqlContainer(
  * {@link ProxySqlDesiredState.bindAddress}) so a caller that does not have an
  * explicit, currently-desired bind (e.g. a self-heal path with no fresh
  * `managed.ingress.reconcile` payload in hand) can never accidentally
- * republish the frontend on every interface.
+ * republish the frontend on every interface. `segmentAttachments` follows the
+ * same rule for consumer spanning networks: pass the previously-rendered
+ * attachments (see {@link readCurrentProxySqlSegmentAttachments}) so a
+ * self-heal does not silently detach remote bindings.
  */
 export async function ensureProxySqlIngress(
   layout: LayoutPaths,
   descriptor: SystemComponentDescriptor,
   run: RunDockerFn = defaultRunDocker,
   bindAddress: string | null = null,
+  segmentAttachments: ReadonlyArray<ProxySqlSegmentAttachment> = [],
 ): Promise<void> {
   const composePath = proxysqlComposePath(layout);
   await Deno.mkdir(proxysqlConfigDir(layout), { recursive: true, mode: 0o750 });
   await Deno.writeTextFile(
     composePath,
-    proxysqlCompose(descriptor, bindAddress),
+    proxysqlComposeWithAttachments(descriptor, bindAddress, segmentAttachments),
     { mode: 0o640 },
   );
   const up = await run([
@@ -949,6 +1096,24 @@ export async function readCurrentProxySqlBindAddress(
     return readPublishedBindAddressFromCompose(text);
   } catch (err) {
     if (err instanceof Deno.errors.NotFound) return null;
+    throw err;
+  }
+}
+
+/**
+ * Best-effort read of the `tpn_*` spanning attachments already rendered into
+ * the on-disk compose file (`[]` when absent). See
+ * {@link readSegmentAttachmentsFromCompose} for why the self-heal path must
+ * round-trip these instead of rewriting compose without them.
+ */
+export async function readCurrentProxySqlSegmentAttachments(
+  layout: LayoutPaths,
+): Promise<ProxySqlSegmentAttachment[]> {
+  try {
+    const text = await Deno.readTextFile(proxysqlComposePath(layout));
+    return readSegmentAttachmentsFromCompose(text);
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return [];
     throw err;
   }
 }

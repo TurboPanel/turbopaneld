@@ -106,3 +106,132 @@ test("resourceKey is stable across calls for the same container ID", () => {
   assertEquals(first.resourceKey, second.resourceKey);
   assertEquals(first.resourceKey, "container:abc123def456");
 });
+
+test("normalizeContainer prefers summary name, labels, and inspect ports", () => {
+  const state = normalizeContainer({
+    summary: summary({
+      Id: "abc123def4567890",
+      Names: ["/web"],
+      Labels: {
+        "com.turbopanel.project": "proj-1",
+        "com.turbopanel.service": "svc-1",
+      },
+      Ports: [{ IP: "203.0.113.10", PrivatePort: 80, PublicPort: 8080, Type: "tcp" }],
+      Image: "nginx:alpine",
+      State: "restarting",
+    }),
+  });
+  assertEquals(state.name, "web");
+  assertEquals(state.projectId, "proj-1");
+  assertEquals(state.serviceId, "svc-1");
+  assertEquals(state.image, "nginx:alpine");
+  assertEquals(state.status, "starting");
+  assertEquals(state.ports?.[0], "203.0.113.10:8080->80/tcp");
+});
+
+test("normalizeContainer formats inspect NetworkSettings ports", () => {
+  const state = normalizeContainer({
+    inspect: inspect({
+      Id: "abc123def4567890",
+      Name: "/api",
+      RestartCount: 2,
+      Config: {
+        Image: "api:1",
+        Labels: { "com.turbopanel.project": "p2" },
+      },
+      NetworkSettings: {
+        Ports: {
+          "80/tcp": [{ HostIp: "0.0.0.0", HostPort: "8080" }],
+          "443/tcp": null,
+          "53/udp": [],
+        },
+      },
+      State: {
+        Status: "created",
+        StartedAt: "2026-01-01T00:00:00Z",
+        FinishedAt: "0001-01-01T00:00:00Z",
+      },
+    }),
+  });
+  assertEquals(state.name, "api");
+  assertEquals(state.restartCount, 2);
+  assertEquals(state.image, "api:1");
+  assertEquals(state.projectId, "p2");
+  assertEquals(state.ports?.[0], "0.0.0.0:8080->80/tcp");
+  assertEquals(state.updatedAt, "2026-01-01T00:00:00Z");
+});
+
+test("deriveContainerStatus covers remaining docker and event branches", () => {
+  assertEquals(
+    deriveContainerStatus({
+      inspect: inspect({ Id: "1", State: { Status: "running" } }),
+    }),
+    "healthy",
+  );
+  assertEquals(
+    deriveContainerStatus({
+      inspect: inspect({
+        Id: "2",
+        State: { Status: "exited", ExitCode: 1 },
+      }),
+    }),
+    "failed",
+  );
+  assertEquals(
+    deriveContainerStatus({
+      inspect: inspect({ Id: "3", State: { Status: "weird" } }),
+    }),
+    "unknown",
+  );
+  assertEquals(
+    deriveContainerStatus({
+      inspect: inspect({
+        Id: "4",
+        State: { Status: "running", Health: { Status: "bogus" } },
+      }),
+    }),
+    "healthy",
+  );
+  assertEquals(
+    deriveContainerStatus({
+      event: {
+        Action: "die",
+        Type: "container",
+        Actor: { ID: "5" },
+      },
+    }),
+    "unknown",
+  );
+  assertEquals(
+    deriveContainerStatus({
+      event: {
+        Action: "oom: killed",
+        Type: "container",
+        Actor: { ID: "6" },
+      },
+    }),
+    "unknown",
+  );
+  assertEquals(
+    deriveContainerStatus({
+      event: {
+        Action: "health_status: healthy",
+        Type: "container",
+        Actor: { ID: "7" },
+        time: 1_700_000_000,
+      },
+    }),
+    "healthy",
+  );
+
+  const fromEvent = normalizeContainer({
+    event: {
+      Action: "health_status: starting",
+      Type: "container",
+      Actor: { ID: "abcdef1234567890" },
+      time: 1_700_000_000,
+    },
+  });
+  assertEquals(fromEvent.status, "starting");
+  assertEquals(fromEvent.updatedAt, new Date(1_700_000_000 * 1000).toISOString());
+});

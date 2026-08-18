@@ -88,6 +88,13 @@ export type NtpSetResult = {
 };
 
 /** Must stay in sync with the instance canonical `server.fabric.reconcile` shape. */
+export type FabricReconcilePeerPathKind =
+  | "direct_lan"
+  | "direct_public"
+  | "direct_nat"
+  | "gateway";
+
+/** Must stay in sync with the instance canonical `server.fabric.reconcile` shape. */
 export type FabricReconcilePeer = {
   publicKey: string;
   endpoint?: string;
@@ -95,6 +102,8 @@ export type FabricReconcilePeer = {
   /** Daemon-recipient sealed PSK (`tpdaemon.…`). */
   presharedKeyEnvelope?: string;
   keepalive?: number;
+  pathKind?: FabricReconcilePeerPathKind;
+  viaServerId?: string;
 };
 
 /** Must stay in sync with the instance canonical `server.fabric.reconcile` shape. */
@@ -124,6 +133,7 @@ export type FabricReconcileEnabledPayload = {
   prefix: string;
   peers: FabricReconcilePeer[];
   networks?: FabricReconcileNetwork[];
+  gateway?: boolean;
 };
 
 /** Must stay in sync with the instance canonical `server.fabric.reconcile` shape. */
@@ -131,11 +141,21 @@ export type FabricReconcilePayload =
   | FabricReconcileDisabledPayload
   | FabricReconcileEnabledPayload;
 
+export type FabricPeerHealth = "healthy" | "stale" | "never";
+
+const FABRIC_PEER_HEALTH = new Set<FabricPeerHealth>([
+  "healthy",
+  "stale",
+  "never",
+]);
+
 export type FabricReconcileObservedPeer = {
   publicKey: string;
   lastHandshakeAt?: string;
   transferRx?: number;
   transferTx?: number;
+  endpoint?: string;
+  health?: FabricPeerHealth;
 };
 
 /**
@@ -648,7 +668,11 @@ export type ManagedApplyPeer = {
   role: "primary" | "replica";
   readEligible: boolean;
   address: string;
-  transport: "local" | "datacenter" | "fabric";
+  /**
+   * `public` is accepted on the wire this phase; daemon org-CA TLS
+   * enforcement for a public listener is a later phase.
+   */
+  transport: "local" | "datacenter" | "fabric" | "public";
   port: number;
   containerName?: string;
 };
@@ -657,6 +681,13 @@ export type ManagedApplyPeer = {
 export type ManagedApplyPrivateListener = {
   address: string;
   port: number;
+  /**
+   * Reachability class of `address`. Optional for back-compat with control
+   * planes and queued commands from before this field existed (omitted = not
+   * public). `public` obliges this daemon to refuse the listener without
+   * org-CA TLS material.
+   */
+  transport?: "local" | "datacenter" | "fabric" | "public";
 };
 
 /** Must stay in sync with the instance canonical `managed.apply` shape. */
@@ -809,7 +840,11 @@ export type ProxySqlBackendPayload = {
   readEligible: boolean;
   address: string;
   port: number;
-  transport: "local" | "datacenter" | "fabric";
+  /**
+   * `public` is accepted on the wire this phase; daemon org-CA TLS
+   * enforcement for a public listener is a later phase.
+   */
+  transport: "local" | "datacenter" | "fabric" | "public";
 };
 
 /** Must stay in sync with the instance canonical `managed.ingress.reconcile` shape. */
@@ -821,11 +856,25 @@ export type ProxySqlUserPayload = {
   defaultDatabase?: string;
 };
 
+/** New listeners 15432/16306; legacy 5432/3306 accepted for control-plane skew. */
+export type ManagedIngressProtocolPort = 5432 | 3306 | 15432 | 16306;
+
+function isManagedIngressProtocolPort(
+  value: unknown,
+): value is ManagedIngressProtocolPort {
+  return (
+    value === 5432 ||
+    value === 3306 ||
+    value === 15432 ||
+    value === 16306
+  );
+}
+
 /** Must stay in sync with the instance canonical `managed.ingress.reconcile` shape. */
 export type ProxySqlClusterPayload = {
   managedId: string;
   engine: string;
-  protocolPort: 5432 | 3306;
+  protocolPort: ManagedIngressProtocolPort;
   writerHostgroup: number;
   readerHostgroup: number;
   backends: ProxySqlBackendPayload[];
@@ -836,7 +885,8 @@ export type ProxySqlClusterPayload = {
 export type ManagedIngressReconcilePayload = {
   serverId: string;
   bindAddress?: string;
-  orgTlsMaterial: ManagedApplyOrgTlsMaterial;
+  /** Omitted on empty-cluster teardown so it does not need a CA round trip. */
+  orgTlsMaterial?: ManagedApplyOrgTlsMaterial;
   clusters: ProxySqlClusterPayload[];
   segments?: Array<{ name: string; subnet: string }>;
 };
@@ -1200,6 +1250,23 @@ function parseFabricMtu(value: unknown, field: string): number {
   return value;
 }
 
+const FABRIC_PEER_PATH_KINDS = new Set<FabricReconcilePeerPathKind>([
+  "direct_lan",
+  "direct_public",
+  "direct_nat",
+  "gateway",
+]);
+
+function parseFabricPeerPathKind(value: unknown): FabricReconcilePeerPathKind {
+  if (
+    typeof value !== "string" ||
+    !FABRIC_PEER_PATH_KINDS.has(value as FabricReconcilePeerPathKind)
+  ) {
+    throw new TypeError("Invalid fabric peer pathKind");
+  }
+  return value as FabricReconcilePeerPathKind;
+}
+
 function parseFabricPeerEntry(value: unknown): FabricReconcilePeer {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError("Invalid fabric peer entry");
@@ -1240,6 +1307,12 @@ function parseFabricPeerEntry(value: unknown): FabricReconcilePeer {
   }
   if (record.keepalive !== undefined) {
     peer.keepalive = parseFabricKeepalive(record.keepalive);
+  }
+  if (record.pathKind !== undefined) {
+    peer.pathKind = parseFabricPeerPathKind(record.pathKind);
+  }
+  if (record.viaServerId !== undefined) {
+    peer.viaServerId = parseFabricUuid(record.viaServerId, "peer viaServerId");
   }
   return peer;
 }
@@ -1334,6 +1407,12 @@ function parseEnabledFabricPayload(
       throw new TypeError("Invalid fabric networks");
     }
     payload.networks = record.networks.map(parseFabricNetworkEntry);
+  }
+  if (record.gateway !== undefined) {
+    if (typeof record.gateway !== "boolean") {
+      throw new TypeError("Invalid fabric gateway");
+    }
+    payload.gateway = record.gateway;
   }
   return payload;
 }
@@ -1431,6 +1510,24 @@ function parseFabricObservedPeer(value: unknown): FabricReconcileObservedPeer {
       record.transferTx,
       "peer transferTx",
     );
+  }
+  if (record.endpoint !== undefined) {
+    if (
+      typeof record.endpoint !== "string" ||
+      !isValidWireguardEndpoint(record.endpoint)
+    ) {
+      throw new TypeError("Invalid fabric reconcile result peer endpoint");
+    }
+    peer.endpoint = record.endpoint;
+  }
+  if (record.health !== undefined) {
+    if (
+      typeof record.health !== "string" ||
+      !FABRIC_PEER_HEALTH.has(record.health as FabricPeerHealth)
+    ) {
+      throw new TypeError("Invalid fabric reconcile result peer health");
+    }
+    peer.health = record.health as FabricPeerHealth;
   }
   return peer;
 }
@@ -2606,7 +2703,7 @@ const MANAGED_LIFECYCLE_ACTIONS = new Set(["start", "stop", "restart"]);
 const MANAGED_EXPOSURE_PROTOCOLS = new Set(["tcp", "udp", "http"]);
 const MANAGED_CREDENTIAL_ROLES = new Set(["root", "user", "replication"]);
 const MANAGED_MEMBER_ROLES = new Set(["primary", "replica"]);
-const MANAGED_PEER_TRANSPORTS = new Set(["local", "datacenter", "fabric"]);
+const MANAGED_PEER_TRANSPORTS = new Set(["local", "datacenter", "fabric", "public"]);
 const MANAGED_REPLICATION_ROLES = new Set(["primary", "standby"]);
 const MANAGED_REPLICATION_STATES = new Set([
   "streaming",
@@ -3347,7 +3444,21 @@ function parseManagedApplyPrivateListener(
   ) {
     throw new TypeError("Invalid managed.apply privateListener");
   }
-  return { address: value.address, port: value.port };
+  const listener: ManagedApplyPrivateListener = {
+    address: value.address,
+    port: value.port,
+  };
+  if (value.transport !== undefined) {
+    if (
+      typeof value.transport !== "string" ||
+      !MANAGED_PEER_TRANSPORTS.has(value.transport)
+    ) {
+      throw new TypeError("Invalid managed.apply privateListener");
+    }
+    listener.transport = value
+      .transport as ManagedApplyPrivateListener["transport"];
+  }
+  return listener;
 }
 
 function parseReplicationSlotName(value: unknown): string | undefined {
@@ -4124,9 +4235,7 @@ function parseProxySqlBackendPayload(value: unknown): ProxySqlBackendPayload {
     typeof value.address !== "string" ||
     value.address.length === 0 ||
     !isValidPortNumber(value.port) ||
-    (value.transport !== "local" &&
-      value.transport !== "datacenter" &&
-      value.transport !== "fabric")
+    !MANAGED_PEER_TRANSPORTS.has(value.transport as string)
   ) {
     throw new TypeError("Invalid managed.ingress.reconcile backend");
   }
@@ -4136,7 +4245,7 @@ function parseProxySqlBackendPayload(value: unknown): ProxySqlBackendPayload {
     readEligible: value.readEligible,
     address: value.address,
     port: value.port,
-    transport: value.transport,
+    transport: value.transport as ProxySqlBackendPayload["transport"],
   };
 }
 
@@ -4190,7 +4299,7 @@ function parseProxySqlClusterPayload(value: unknown): ProxySqlClusterPayload {
     !SAFE_BACKUP_ID_RE.test(value.managedId) ||
     typeof value.engine !== "string" ||
     !isManagedEngineCode(value.engine) ||
-    (value.protocolPort !== 5432 && value.protocolPort !== 3306) ||
+    !isManagedIngressProtocolPort(value.protocolPort) ||
     !isValidHostgroupId(value.writerHostgroup) ||
     !isValidHostgroupId(value.readerHostgroup) ||
     !Array.isArray(value.backends) ||
@@ -4235,9 +4344,13 @@ export function parseManagedIngressReconcilePayload(
   }
   const payload: ManagedIngressReconcilePayload = {
     serverId: value.serverId,
-    orgTlsMaterial: parseManagedIngressOrgTlsMaterial(value.orgTlsMaterial),
     clusters: value.clusters.map(parseProxySqlClusterPayload),
   };
+  if (value.orgTlsMaterial !== undefined) {
+    payload.orgTlsMaterial = parseManagedIngressOrgTlsMaterial(
+      value.orgTlsMaterial,
+    );
+  }
   if (value.bindAddress !== undefined) {
     if (
       typeof value.bindAddress !== "string" ||

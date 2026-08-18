@@ -8,7 +8,11 @@
  */
 
 import type { ManagedApplyPayload } from "../instance/commands/contracts.ts";
-import { runDocker } from "../deploy/docker-cli.ts";
+import {
+  type DockerCliResult,
+  runDocker as defaultRunDocker,
+  type RunDockerOptions,
+} from "../deploy/docker-cli.ts";
 import { sanitizeForLog } from "../logger.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import {
@@ -25,6 +29,11 @@ import {
 const DIR_MODE = 0o750;
 const MODE_0640 = 0o640;
 const MODE_0600 = 0o600;
+
+type RunDockerFn = (
+  args: string[],
+  options?: RunDockerOptions,
+) => Promise<DockerCliResult>;
 
 function parseMode(mode: "0640" | "0600"): number {
   return mode === "0600" ? MODE_0600 : MODE_0640;
@@ -125,6 +134,7 @@ export async function normalizeManagedFileOwnership(
   managedRoot: string,
   containerUser: string,
   containerGroup: string,
+  run: RunDockerFn = defaultRunDocker,
 ): Promise<void> {
   // Shell script runs as root inside a throwaway engine image.
   // Scope to bind-mounted trees only (`config/`, `tls/`) — never
@@ -154,7 +164,7 @@ export async function normalizeManagedFileOwnership(
     "done",
   ].join("\n");
 
-  const result = await runDocker([
+  const result = await run([
     "run",
     "--rm",
     "--user",

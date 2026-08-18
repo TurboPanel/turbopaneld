@@ -266,3 +266,39 @@ test({
     }
   },
 });
+
+test({
+  name: "handleNtp omits optional fields when host state is sparse",
+  fn: async () => {
+    const {
+      handleNtp,
+      setAnsibleAvailabilityCheckForTests,
+      setTimeSyncApplyForTests,
+      setTimeSyncReaderForTests,
+    } = await import("./ntp.ts");
+
+    setAnsibleAvailabilityCheckForTests(() => Promise.resolve(true));
+    setTimeSyncApplyForTests(async () => {
+      await Promise.resolve();
+      return { summary: "" };
+    });
+    setTimeSyncReaderForTests(() => ({
+      ntpServers: ["203.0.113.10"],
+    }));
+    try {
+      const result = await handleNtp(
+        { servers: ["203.0.113.10"] },
+        new Date().toISOString(),
+      );
+      assertEquals(result, { ntpServers: ["203.0.113.10"] });
+      assertEquals("ntpEnabled" in result, false);
+      assertEquals("ntpSynced" in result, false);
+      assertEquals("fallbackNtpServers" in result, false);
+      assertEquals("summary" in result, false);
+    } finally {
+      setAnsibleAvailabilityCheckForTests(null);
+      setTimeSyncApplyForTests(null);
+      setTimeSyncReaderForTests(null);
+    }
+  },
+});

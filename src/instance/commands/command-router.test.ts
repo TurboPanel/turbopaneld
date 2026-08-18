@@ -336,3 +336,537 @@ test({
     }
   },
 });
+
+test({
+  name: "handleCommandDispatch acks then returns hostname outcome",
+  permissions: { env: true, sys: ["hostname"], read: true },
+  fn: async () => {
+    const { handleCommandDispatch } = await import("./command-router.ts");
+    const {
+      setAnsibleAvailabilityCheckForTests,
+      setRunSetHostnameForTests,
+    } = await import("./hostname.ts");
+
+    setAnsibleAvailabilityCheckForTests(() => Promise.resolve(true));
+    setRunSetHostnameForTests(() => Promise.resolve({ summary: "host-ok" }));
+    try {
+      const ws = new MockWebSocket() as unknown as WebSocket;
+      const message: CommandDispatchMessage = {
+        type: "command-dispatch",
+        id: "req-host",
+        commandId: "cmd-host",
+        commandType: "server.hostname.set",
+        payload: { hostname: "web-01" },
+        at: new Date().toISOString(),
+      };
+
+      await handleCommandDispatch(message, ws);
+
+      const frames = parseFrames((ws as unknown as MockWebSocket).sentFrames);
+      assertEquals(frames.length, 2);
+      assertEquals(frames[1]?.ok, true);
+      const result = frames[1]?.result as Record<string, unknown>;
+      assertEquals(result.summary, "host-ok");
+      assertEquals(typeof result.observedHostname, "string");
+    } finally {
+      setAnsibleAvailabilityCheckForTests(null);
+      setRunSetHostnameForTests(null);
+    }
+  },
+});
+
+test({
+  name: "handleCommandDispatch truncates sanitized handler errors",
+  permissions: { env: true, sys: ["hostname"], read: true },
+  fn: async () => {
+    const { handleCommandDispatch } = await import("./command-router.ts");
+    const {
+      setAnsibleAvailabilityCheckForTests,
+      setRunSetHostnameForTests,
+    } = await import("./hostname.ts");
+
+    setAnsibleAvailabilityCheckForTests(() => Promise.resolve(true));
+    setRunSetHostnameForTests(() =>
+      Promise.reject(new Error("x".repeat(600)))
+    );
+    try {
+      const ws = new MockWebSocket() as unknown as WebSocket;
+      const message: CommandDispatchMessage = {
+        type: "command-dispatch",
+        id: "req-host-err",
+        commandId: "cmd-host-err",
+        commandType: "server.hostname.set",
+        payload: { hostname: "web-01" },
+        at: new Date().toISOString(),
+      };
+
+      await handleCommandDispatch(message, ws);
+
+      const frames = parseFrames((ws as unknown as MockWebSocket).sentFrames);
+      assertEquals(frames[1]?.ok, false);
+      const error = String(frames[1]?.error);
+      assertEquals(error.length, 500);
+      assertEquals(error.includes("\n"), false);
+    } finally {
+      setAnsibleAvailabilityCheckForTests(null);
+      setRunSetHostnameForTests(null);
+    }
+  },
+});
+
+test({
+  name: "handleCommandDispatch skips outcome when websocket is not open",
+  permissions: { env: true, sys: ["hostname"], read: true },
+  fn: async () => {
+    const { handleCommandDispatch } = await import("./command-router.ts");
+    const ws = new MockWebSocket() as unknown as MockWebSocket;
+    ws.readyState = 0;
+    const message: CommandDispatchMessage = {
+      type: "command-dispatch",
+      id: "req-closed",
+      commandId: "cmd-closed",
+      commandType: "daemon.ping",
+      payload: {},
+      at: new Date().toISOString(),
+    };
+
+    await handleCommandDispatch(message, ws as unknown as WebSocket);
+
+    assertEquals(ws.sentFrames.length, 0);
+  },
+});
+
+test({
+  name: "handleCommandDispatch routes environment.stop to idempotent handler",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const { join } = await import("@std/path");
+    const { handleCommandDispatch } = await import("./command-router.ts");
+    const root = await Deno.makeTempDir({ prefix: "tp-router-stop-" });
+    const previous = {
+      TURBOPANEL_STATE_DIR: Deno.env.get("TURBOPANEL_STATE_DIR"),
+      TURBOPANEL_CONFIG_DIR: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
+    };
+    Deno.env.set("TURBOPANEL_STATE_DIR", join(root, "state"));
+    Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
+
+    try {
+      const ws = new MockWebSocket() as unknown as WebSocket;
+      const message: CommandDispatchMessage = {
+        type: "command-dispatch",
+        id: "req-stop",
+        commandId: "cmd-stop",
+        commandType: "environment.stop",
+        payload: {
+          environmentId: "envrouter1",
+          projectId: "proj-1",
+          projectName: "tp-demo-envrouter",
+        },
+        at: new Date().toISOString(),
+      };
+
+      await handleCommandDispatch(message, ws);
+
+      const frames = parseFrames((ws as unknown as MockWebSocket).sentFrames);
+      assertEquals(frames[1]?.ok, true);
+      const result = frames[1]?.result as Record<string, unknown>;
+      assertEquals(String(result.summary).includes("already stopped"), true);
+    } finally {
+      if (previous.TURBOPANEL_STATE_DIR === undefined) {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+      } else {
+        Deno.env.set("TURBOPANEL_STATE_DIR", previous.TURBOPANEL_STATE_DIR);
+      }
+      if (previous.TURBOPANEL_CONFIG_DIR === undefined) {
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      } else {
+        Deno.env.set("TURBOPANEL_CONFIG_DIR", previous.TURBOPANEL_CONFIG_DIR);
+      }
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});
+
+test({
+  name: "handleCommandDispatch routes server.fabric.reconcile tear-down",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const { handleCommandDispatch } = await import("./command-router.ts");
+    const {
+      resetFabricTestOverrides,
+      setFabricNetworkDirForTests,
+      setFabricRunForTests,
+      setFabricSkipRealSyscallsForTests,
+    } = await import("./fabric.ts");
+
+    const networkDir = await Deno.makeTempDir({ prefix: "tp-router-fabric-" });
+    const invocations: string[] = [];
+    setFabricNetworkDirForTests(networkDir);
+    setFabricSkipRealSyscallsForTests(true);
+    setFabricRunForTests((cmd, args) => {
+      invocations.push(`${cmd} ${args.join(" ")}`);
+      return Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 });
+    });
+
+    try {
+      const ws = new MockWebSocket() as unknown as WebSocket;
+      const message: CommandDispatchMessage = {
+        type: "command-dispatch",
+        id: "req-fabric",
+        commandId: "cmd-fabric",
+        commandType: "server.fabric.reconcile",
+        payload: { enabled: false },
+        at: new Date().toISOString(),
+      };
+
+      await handleCommandDispatch(message, ws);
+
+      const frames = parseFrames((ws as unknown as MockWebSocket).sentFrames);
+      assertEquals(frames[1]?.ok, true);
+      const result = frames[1]?.result as Record<string, unknown>;
+      assertEquals(result.summary, "TurboFabric torn down");
+      assertEquals(
+        invocations.some((line) => line.includes("ip link delete tp0")),
+        true,
+      );
+    } finally {
+      resetFabricTestOverrides();
+      await Deno.remove(networkDir, { recursive: true });
+    }
+  },
+});
+
+test({
+  name: "handleCommandDispatch routes environment.lifecycle compose stop",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const { join } = await import("@std/path");
+    const { handleCommandDispatch } = await import("./command-router.ts");
+    const root = await Deno.makeTempDir({ prefix: "tp-router-life-" });
+    const previous = {
+      TURBOPANEL_STATE_DIR: Deno.env.get("TURBOPANEL_STATE_DIR"),
+      TURBOPANEL_CONFIG_DIR: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
+    };
+    const stateDir = join(root, "state");
+    Deno.env.set("TURBOPANEL_STATE_DIR", stateDir);
+    Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
+
+    const environmentId = "envrouter2";
+    const projectName = "tp-demo-envrouter2";
+    const deploymentDir = join(stateDir, "deployments", environmentId);
+    await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
+    await Deno.writeTextFile(
+      join(deploymentDir, "docker-compose.yml"),
+      "services: {}\n",
+      { mode: 0o640 },
+    );
+
+    try {
+      const ws = new MockWebSocket() as unknown as WebSocket;
+      const message: CommandDispatchMessage = {
+        type: "command-dispatch",
+        id: "req-life",
+        commandId: "cmd-life",
+        commandType: "environment.lifecycle",
+        payload: {
+          environmentId,
+          projectId: "proj-1",
+          projectName,
+          action: "stop",
+        },
+        at: new Date().toISOString(),
+      };
+
+      await handleCommandDispatch(message, ws);
+
+      const frames = parseFrames((ws as unknown as MockWebSocket).sentFrames);
+      assertEquals(frames[1]?.ok, true);
+      const result = frames[1]?.result as Record<string, unknown>;
+      assertEquals(result.projectName, projectName);
+      assertEquals(
+        String(result.summary).includes("Lifecycle stop"),
+        true,
+      );
+    } finally {
+      if (previous.TURBOPANEL_STATE_DIR === undefined) {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+      } else {
+        Deno.env.set("TURBOPANEL_STATE_DIR", previous.TURBOPANEL_STATE_DIR);
+      }
+      if (previous.TURBOPANEL_CONFIG_DIR === undefined) {
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      } else {
+        Deno.env.set("TURBOPANEL_CONFIG_DIR", previous.TURBOPANEL_CONFIG_DIR);
+      }
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});
+
+const ROUTER_STUB_MANAGED_APPLY = {
+  managedId: "00000000-0000-4000-8000-000000000001",
+  environmentId: "00000000-0000-4000-8000-000000000002",
+  engine: "postgres",
+  projectName: "tp-managed-pg",
+  containerName: "01936b3e-aaaa-bbbb-cccc-123456789abc-1",
+  image: "docker.io/library/postgres:18-alpine",
+  containerPort: 5432,
+  composeYaml: "services:\n  postgres:\n    image: postgres:18-alpine\n",
+  configFiles: [
+    {
+      path: "postgresql.conf",
+      contents: "listen_addresses = '*'\n",
+      mode: "0640",
+    },
+  ],
+  volumes: [{ name: "pgdata", target: "/var/lib/postgresql" }],
+  exposure: { enabled: false, protocol: "tcp" },
+  credentials: [{
+    principalId: "00000000-0000-4000-8000-000000000003",
+    username: "postgres",
+    role: "root",
+    databases: ["postgres"],
+    password: "tpdaemon.v1.server.key.payload",
+  }],
+  memberId: "00000000-0000-4000-8000-0000000000a1",
+  memberRole: "primary",
+  memberOrdinal: 1,
+  readEligible: false,
+  peers: [],
+} as const;
+
+const ROUTER_STUB_MANAGED_INGRESS = {
+  serverId: "00000000-0000-4000-8000-0000000000ab",
+  bindAddress: "203.0.113.10",
+  orgTlsMaterial: {
+    certificatePem:
+      "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+    privateKeyEnvelope: "tpdaemon.v1.server.key.payload",
+    caCertPem:
+      "-----BEGIN CERTIFICATE-----\nMIICaaaa\n-----END CERTIFICATE-----\n",
+  },
+  clusters: [],
+} as const;
+
+const ROUTER_STUB_SYSTEM_RECONCILE = {
+  environmentId: "11111111-2222-3333-4444-555555555555",
+  action: "restart",
+  components: [{
+    component: "hosting-ingress",
+    serviceId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    composeServiceName: "traefik",
+    containerName: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee-in",
+    role: "ingress",
+    desired: "present",
+  }],
+} as const;
+
+async function dispatchWithStubHandler(
+  commandType: string,
+  payload: unknown,
+  stubResult: unknown,
+  handlerKey:
+    | "handleEnvironmentDeploy"
+    | "handleManagedApply"
+    | "handleManagedLifecycle"
+    | "handleManagedDestroy"
+    | "handleManagedPromote"
+    | "handleManagedBackup"
+    | "handleManagedRestore"
+    | "handleManagedIngressReconcile"
+    | "handleSystemReconcile",
+): Promise<Record<string, unknown>> {
+  const { handleCommandDispatch, setCommandRouterHandlersForTests } =
+    await import("./command-router.ts");
+  setCommandRouterHandlersForTests({
+    [handlerKey]: () => Promise.resolve(stubResult),
+  });
+  try {
+    const ws = new MockWebSocket() as unknown as WebSocket;
+    const message: CommandDispatchMessage = {
+      type: "command-dispatch",
+      id: `req-${commandType}`,
+      commandId: `cmd-${commandType}`,
+      commandType,
+      payload,
+      at: new Date().toISOString(),
+    };
+    await handleCommandDispatch(message, ws);
+    const frames = parseFrames((ws as unknown as MockWebSocket).sentFrames);
+    assertEquals(frames[0]?.type, "command-ack");
+    assertEquals(frames[1]?.type, "command-outcome");
+    assertEquals(frames[1]?.ok, true);
+    return frames[1]!;
+  } finally {
+    setCommandRouterHandlersForTests(null);
+  }
+}
+
+test({
+  name: "handleCommandDispatch routes environment.deploy through stub handler",
+  permissions: { env: true, read: true },
+  fn: async () => {
+    const outcome = await dispatchWithStubHandler(
+      "environment.deploy",
+      {
+        environmentId: "env-1",
+        projectId: "proj-1",
+        organizationId: "org-1",
+        projectName: "tp-demo-router",
+        composeYaml: "services: {}\n",
+        hostings: [],
+      },
+      { projectName: "tp-demo-router", summary: "stub deploy" },
+      "handleEnvironmentDeploy",
+    );
+    const result = outcome.result as Record<string, unknown>;
+    assertEquals(result.summary, "stub deploy");
+  },
+});
+
+test({
+  name: "handleCommandDispatch routes managed.apply through stub handler",
+  permissions: { env: true, read: true },
+  fn: async () => {
+    const outcome = await dispatchWithStubHandler(
+      "managed.apply",
+      ROUTER_STUB_MANAGED_APPLY,
+      { host: "203.0.113.10", port: 5432 },
+      "handleManagedApply",
+    );
+    const result = outcome.result as Record<string, unknown>;
+    assertEquals(result.host, "203.0.113.10");
+  },
+});
+
+test({
+  name: "handleCommandDispatch routes managed.lifecycle through stub handler",
+  permissions: { env: true, read: true },
+  fn: async () => {
+    const outcome = await dispatchWithStubHandler(
+      "managed.lifecycle",
+      { managedId: "00000000-0000-4000-8000-000000000001", action: "stop" },
+      { summary: "managed stopped" },
+      "handleManagedLifecycle",
+    );
+    const result = outcome.result as Record<string, unknown>;
+    assertEquals(result.summary, "managed stopped");
+  },
+});
+
+test({
+  name: "handleCommandDispatch routes managed.destroy through stub handler",
+  permissions: { env: true, read: true },
+  fn: async () => {
+    const outcome = await dispatchWithStubHandler(
+      "managed.destroy",
+      {
+        managedId: "00000000-0000-4000-8000-000000000001",
+        removeVolumes: true,
+      },
+      { summary: "managed destroyed" },
+      "handleManagedDestroy",
+    );
+    const result = outcome.result as Record<string, unknown>;
+    assertEquals(result.summary, "managed destroyed");
+  },
+});
+
+test({
+  name: "handleCommandDispatch routes managed.promote through stub handler",
+  permissions: { env: true, read: true },
+  fn: async () => {
+    const outcome = await dispatchWithStubHandler(
+      "managed.promote",
+      {
+        managedId: "00000000-0000-4000-8000-000000000001",
+        memberId: "00000000-0000-4000-8000-0000000000a2",
+      },
+      { status: "ready", role: "primary" },
+      "handleManagedPromote",
+    );
+    const result = outcome.result as Record<string, unknown>;
+    assertEquals(result.role, "primary");
+  },
+});
+
+test({
+  name: "handleCommandDispatch routes managed.backup through stub handler",
+  permissions: { env: true, read: true },
+  fn: async () => {
+    const outcome = await dispatchWithStubHandler(
+      "managed.backup",
+      {
+        managedId: "00000000-0000-4000-8000-000000000001",
+        engine: "postgres",
+        action: "create",
+        backupId: "bk_1700000000000",
+        artifactExtension: "dump",
+        scope: "database",
+        database: "appdb",
+      },
+      { backupId: "bk_1700000000000" },
+      "handleManagedBackup",
+    );
+    const result = outcome.result as Record<string, unknown>;
+    assertEquals(result.backupId, "bk_1700000000000");
+  },
+});
+
+test({
+  name: "handleCommandDispatch routes managed.restore through stub handler",
+  permissions: { env: true, read: true },
+  fn: async () => {
+    const outcome = await dispatchWithStubHandler(
+      "managed.restore",
+      {
+        managedId: "00000000-0000-4000-8000-000000000001",
+        engine: "postgres",
+        backupId: "bk_1700000000000",
+        artifactExtension: "dump",
+        database: "appdb",
+        checksum: "c".repeat(64),
+      },
+      { backupId: "bk_1700000000000" },
+      "handleManagedRestore",
+    );
+    const result = outcome.result as Record<string, unknown>;
+    assertEquals(result.backupId, "bk_1700000000000");
+  },
+});
+
+test({
+  name:
+    "handleCommandDispatch routes managed.ingress.reconcile through stub handler",
+  permissions: { env: true, read: true },
+  fn: async () => {
+    const outcome = await dispatchWithStubHandler(
+      "managed.ingress.reconcile",
+      ROUTER_STUB_MANAGED_INGRESS,
+      {
+        summary: "ingress reconciled",
+        appliedUsers: [],
+        appliedBackends: [],
+        restarted: false,
+      },
+      "handleManagedIngressReconcile",
+    );
+    const result = outcome.result as Record<string, unknown>;
+    assertEquals(result.summary, "ingress reconciled");
+  },
+});
+
+test({
+  name: "handleCommandDispatch routes system.reconcile through stub handler",
+  permissions: { env: true, read: true },
+  fn: async () => {
+    const outcome = await dispatchWithStubHandler(
+      "system.reconcile",
+      ROUTER_STUB_SYSTEM_RECONCILE,
+      { summary: "system reconciled" },
+      "handleSystemReconcile",
+    );
+    const result = outcome.result as Record<string, unknown>;
+    assertEquals(result.summary, "system reconciled");
+  },
+});

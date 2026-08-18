@@ -2,7 +2,10 @@ import { assertEquals, assertRejects } from "@std/assert";
 import type { LayoutPaths } from "../paths/layout.ts";
 import {
   DEFAULT_PRINCIPAL_SHELL,
+  ensureDirectoryOwnedByPrincipal,
   ensureSystemPrincipals,
+  parseGroupGid,
+  parsePasswdHomeShell,
   type PrincipalEnsureSpec,
   principalUnixGroupName,
   type RunFn,
@@ -386,4 +389,284 @@ test("ensureSystemPrincipals rejects home with .. segment", async () => {
     Error,
     "Invalid principal home",
   );
+});
+
+test("ensureDirectoryOwnedByPrincipal chowns when mkdir succeeds", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-principal-dir-" });
+  const path = `${root}/owned`;
+  const calls: Array<{ command: string; args: string[] }> = [];
+  try {
+    await ensureDirectoryOwnedByPrincipal(
+      path,
+      "appuser",
+      "appuser-grp",
+      (command, args) => {
+        calls.push({ command, args: [...args] });
+        return Promise.resolve({ success: true, stdout: "", stderr: "" });
+      },
+    );
+    const st = await Deno.stat(path);
+    assertEquals(st.isDirectory, true);
+    assertEquals(
+      calls.some((c) =>
+        c.command === "sudo" && c.args.includes("chown") &&
+        c.args.includes("appuser:appuser-grp")
+      ),
+      true,
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("ensureDirectoryOwnedByPrincipal throws when chown fails", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-principal-chown-" });
+  const path = `${root}/owned`;
+  try {
+    await assertRejects(
+      () =>
+        ensureDirectoryOwnedByPrincipal(
+          path,
+          "appuser",
+          "appuser-grp",
+          (command, args) => {
+            if (command === "sudo" && args.includes("chown")) {
+              return Promise.resolve({
+                success: false,
+                stdout: "",
+                stderr: "chown denied",
+              });
+            }
+            return Promise.resolve({ success: true, stdout: "", stderr: "" });
+          },
+        ),
+      Error,
+      "chown denied",
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("parsePasswdHomeShell and parseGroupGid reject malformed lines", () => {
+  assertEquals(parsePasswdHomeShell("too:few"), null);
+  assertEquals(
+    parsePasswdHomeShell("u:x:notint:1000::/home/u:/bin/sh"),
+    null,
+  );
+  assertEquals(
+    parsePasswdHomeShell("u:x:1000:1000:::/bin/sh"),
+    null,
+  );
+  assertEquals(
+    parsePasswdHomeShell("u:x:1000:1000::/home/u:"),
+    null,
+  );
+  assertEquals(parseGroupGid("nogid"), null);
+  assertEquals(parseGroupGid("g:x:notint:"), null);
+  assertEquals(parseGroupGid("g:x:42:"), 42);
+});
+
+test("ensureSystemPrincipals fails when group entry cannot be parsed with gid override", async () => {
+  const { run } = captureRun({
+    getentGroup: { success: true, stdout: "appuser-grp:x:broken:", stderr: "" },
+  });
+  await assertRejects(
+    () =>
+      ensureSystemPrincipals(stubLayout(), [{
+        ...baseSpec,
+        gid: 2000,
+        home: defaultHome,
+      }], run),
+    Error,
+    "Failed to parse group entry",
+  );
+});
+
+test("ensureSystemPrincipals fails when groupadd fails", async () => {
+  const run: RunFn = (command, args) => {
+    if (command === "getent") {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    if (command === "sudo" && args.includes("groupadd")) {
+      return Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr: "groupadd denied",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await assertRejects(
+    () =>
+      ensureSystemPrincipals(stubLayout(), [{
+        ...baseSpec,
+        home: defaultHome,
+      }], run),
+    Error,
+    "groupadd denied",
+  );
+});
+
+test("ensureSystemPrincipals fails when useradd fails", async () => {
+  const run: RunFn = (command, args) => {
+    if (command === "getent" && args[0] === "group") {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    if (command === "getent" && args[0] === "passwd") {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    if (command === "sudo" && args.includes("useradd")) {
+      return Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr: "useradd denied",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await assertRejects(
+    () =>
+      ensureSystemPrincipals(stubLayout(), [{
+        ...baseSpec,
+        home: defaultHome,
+      }], run),
+    Error,
+    "useradd denied",
+  );
+});
+
+test("ensureSystemPrincipals fails when existing passwd line is unparsable", async () => {
+  const { run } = captureRun({
+    getentGroup: {
+      success: true,
+      stdout: "appuser-grp:x:1000:",
+      stderr: "",
+    },
+    getentPasswd: {
+      success: true,
+      stdout: "appuser:x:bad:bad::/srv/users/appuser:/bin/bash",
+      stderr: "",
+    },
+  });
+  await assertRejects(
+    () =>
+      ensureSystemPrincipals(stubLayout(), [{
+        ...baseSpec,
+        home: defaultHome,
+      }], run),
+    Error,
+    "Failed to parse passwd entry",
+  );
+});
+
+test("ensureSystemPrincipals fails when usermod -s fails", async () => {
+  const run: RunFn = (command, args) => {
+    if (command === "getent" && args[0] === "group") {
+      return Promise.resolve({
+        success: true,
+        stdout: "appuser-grp:x:1000:",
+        stderr: "",
+      });
+    }
+    if (command === "getent" && args[0] === "passwd") {
+      return Promise.resolve({
+        success: true,
+        stdout: `appuser:x:1000:1000::${defaultHome}:/bin/false`,
+        stderr: "",
+      });
+    }
+    if (command === "sudo" && args.includes("usermod")) {
+      return Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr: "usermod denied",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await assertRejects(
+    () =>
+      ensureSystemPrincipals(stubLayout(), [{
+        ...baseSpec,
+        home: defaultHome,
+        shell: "/bin/bash",
+      }], run),
+    Error,
+    "usermod denied",
+  );
+});
+
+test("ensureDirectoryOwnedByPrincipal falls back to sudo install -d when mkdir fails", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-principal-mkdir-" });
+  const blockedParent = `${root}/blocked`;
+  await Deno.mkdir(blockedParent, { mode: 0o500 });
+  const path = `${blockedParent}/child`;
+  const calls: Array<{ command: string; args: string[] }> = [];
+  try {
+    await Deno.chmod(blockedParent, 0o000);
+    await ensureDirectoryOwnedByPrincipal(
+      path,
+      "appuser",
+      "appuser-grp",
+      (command, args) => {
+        calls.push({ command, args: [...args] });
+        return Promise.resolve({ success: true, stdout: "", stderr: "" });
+      },
+    );
+    assertEquals(
+      calls.some((c) =>
+        c.command === "sudo" && c.args.includes("install") &&
+        c.args.includes("-d")
+      ),
+      true,
+    );
+  } finally {
+    try {
+      await Deno.chmod(blockedParent, 0o755);
+    } catch {
+      // best-effort
+    }
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("ensureDirectoryOwnedByPrincipal throws when sudo install -d fails", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-principal-install-fail-" });
+  const blockedParent = `${root}/blocked`;
+  await Deno.mkdir(blockedParent, { mode: 0o500 });
+  const path = `${blockedParent}/child`;
+  try {
+    await Deno.chmod(blockedParent, 0o000);
+    await assertRejects(
+      () =>
+        ensureDirectoryOwnedByPrincipal(
+          path,
+          "appuser",
+          "appuser-grp",
+          (command, args) => {
+            if (
+              command === "sudo" && args.includes("install") &&
+              args.includes("-d")
+            ) {
+              return Promise.resolve({
+                success: false,
+                stdout: "",
+                stderr: "install -d denied",
+              });
+            }
+            return Promise.resolve({ success: true, stdout: "", stderr: "" });
+          },
+        ),
+      Error,
+      "install -d denied",
+    );
+  } finally {
+    try {
+      await Deno.chmod(blockedParent, 0o755);
+    } catch {
+      // best-effort
+    }
+    await Deno.remove(root, { recursive: true });
+  }
 });

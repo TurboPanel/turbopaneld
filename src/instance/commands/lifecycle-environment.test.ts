@@ -9,6 +9,12 @@ import {
   writeDeploymentManifest,
   writeComposeFileSecure,
 } from "../../deploy/compose-files.ts";
+import {
+  cleanupStaleTcpUdpServiceIngress,
+  serviceIngressDir,
+  syncTcpUdpIngressEntries,
+} from "../../deploy/ingress.ts";
+import { resolveLayout } from "../../paths/layout.ts";
 import { handleEnvironmentLifecycle } from "./lifecycle-environment.ts";
 
 /**
@@ -474,6 +480,267 @@ test({
         Deno.env.delete("TURBOPANEL_RUN_DIR");
       } else {
         Deno.env.set("TURBOPANEL_RUN_DIR", previous.TURBOPANEL_RUN_DIR);
+      }
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});
+
+test({
+  name: "handleEnvironmentLifecycle rejects unsafe identifiers",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await assertRejects(
+      () =>
+        handleEnvironmentLifecycle(
+          {
+            environmentId: "../escape",
+            projectId: "proj-1",
+            projectName: "tp-demo-envlife0",
+            action: "stop",
+          },
+          new Date().toISOString(),
+        ),
+      Error,
+      "environmentId contains unsupported characters",
+    );
+    await assertRejects(
+      () =>
+        handleEnvironmentLifecycle(
+          {
+            environmentId: "envlife05",
+            projectId: "proj-1",
+            projectName: "INVALID",
+            action: "stop",
+          },
+          new Date().toISOString(),
+        ),
+      Error,
+      "projectName must be a valid Docker Compose project name",
+    );
+  },
+});
+
+test({
+  name: "handleEnvironmentLifecycle surfaces compose action failures",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-lifecycle-fail-" });
+    const previous = {
+      TURBOPANEL_STATE_DIR: Deno.env.get("TURBOPANEL_STATE_DIR"),
+      TURBOPANEL_CONFIG_DIR: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
+    };
+    const stateDir = join(root, "state");
+    Deno.env.set("TURBOPANEL_STATE_DIR", stateDir);
+    Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
+
+    const environmentId = "envlife06";
+    const projectName = "tp-demo-envlife6";
+    const deploymentDir = join(stateDir, "deployments", environmentId);
+    await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
+    await Deno.writeTextFile(
+      join(deploymentDir, "docker-compose.yml"),
+      "services: {}\n",
+      { mode: 0o640 },
+    );
+
+    try {
+      await assertRejects(
+        () =>
+          handleEnvironmentLifecycle(
+            {
+              environmentId,
+              projectId: "proj-1",
+              projectName,
+              action: "start",
+            },
+            new Date().toISOString(),
+            {
+              runDocker: () =>
+                Promise.resolve({
+                  success: false,
+                  stdout: "",
+                  stderr: "compose start failed",
+                  code: 1,
+                }),
+            },
+          ),
+        Error,
+        "compose start failed",
+      );
+    } finally {
+      if (previous.TURBOPANEL_STATE_DIR === undefined) {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+      } else {
+        Deno.env.set("TURBOPANEL_STATE_DIR", previous.TURBOPANEL_STATE_DIR);
+      }
+      if (previous.TURBOPANEL_CONFIG_DIR === undefined) {
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      } else {
+        Deno.env.set("TURBOPANEL_CONFIG_DIR", previous.TURBOPANEL_CONFIG_DIR);
+      }
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});
+
+test({
+  name: "handleEnvironmentLifecycle omits containers when compose ps fails",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-lifecycle-ps-" });
+    const previous = {
+      TURBOPANEL_STATE_DIR: Deno.env.get("TURBOPANEL_STATE_DIR"),
+      TURBOPANEL_CONFIG_DIR: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
+    };
+    const stateDir = join(root, "state");
+    Deno.env.set("TURBOPANEL_STATE_DIR", stateDir);
+    Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
+
+    const environmentId = "envlife07";
+    const projectName = "tp-demo-envlife7";
+    const deploymentDir = join(stateDir, "deployments", environmentId);
+    await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
+    await Deno.writeTextFile(
+      join(deploymentDir, "docker-compose.yml"),
+      "services: {}\n",
+      { mode: 0o640 },
+    );
+
+    try {
+      const result = await handleEnvironmentLifecycle(
+        {
+          environmentId,
+          projectId: "proj-1",
+          projectName,
+          action: "stop",
+        },
+        new Date().toISOString(),
+        {
+          runDocker: (args) => {
+            if (args.includes("ps")) {
+              return Promise.resolve({
+                success: false,
+                stdout: "",
+                stderr: "ps failed",
+                code: 1,
+              });
+            }
+            return Promise.resolve({
+              success: true,
+              stdout: "",
+              stderr: "",
+              code: 0,
+            });
+          },
+        },
+      );
+      assertEquals(result.containers, undefined);
+    } finally {
+      if (previous.TURBOPANEL_STATE_DIR === undefined) {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+      } else {
+        Deno.env.set("TURBOPANEL_STATE_DIR", previous.TURBOPANEL_STATE_DIR);
+      }
+      if (previous.TURBOPANEL_CONFIG_DIR === undefined) {
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      } else {
+        Deno.env.set("TURBOPANEL_CONFIG_DIR", previous.TURBOPANEL_CONFIG_DIR);
+      }
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});
+
+test({
+  name: "handleEnvironmentLifecycle logs ingress compose failures without failing",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-lifecycle-ing-" });
+    const previous = {
+      TURBOPANEL_STATE_DIR: Deno.env.get("TURBOPANEL_STATE_DIR"),
+      TURBOPANEL_CONFIG_DIR: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
+    };
+    const stateDir = join(root, "state");
+    const configDir = join(root, "config");
+    Deno.env.set("TURBOPANEL_STATE_DIR", stateDir);
+    Deno.env.set("TURBOPANEL_CONFIG_DIR", configDir);
+
+    const environmentId = "envlife08";
+    const projectName = "tp-demo-envlife8";
+    const serviceId = "00000000-0000-4000-8000-0000000000ee";
+    const deploymentDir = join(stateDir, "deployments", environmentId);
+    await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
+    await Deno.writeTextFile(
+      join(deploymentDir, "docker-compose.yml"),
+      "services: {}\n",
+      { mode: 0o640 },
+    );
+
+    const layout = resolveLayout(
+      {
+        TURBOPANEL_STATE_DIR: stateDir,
+        TURBOPANEL_CONFIG_DIR: configDir,
+      },
+      { skipDiscovery: true, forceMode: "production" },
+    );
+    await syncTcpUdpIngressEntries(layout, serviceId, [
+      { hostingId: "h-tcp", protocol: "tcp", publishedPort: 15433 },
+    ]);
+    const ingressDir = serviceIngressDir(layout, serviceId);
+    await Deno.mkdir(ingressDir, { recursive: true, mode: 0o750 });
+    await Deno.writeTextFile(
+      join(ingressDir, "docker-compose.yml"),
+      "services: {}\n",
+      { mode: 0o640 },
+    );
+    await cleanupStaleTcpUdpServiceIngress(
+      layout,
+      environmentId,
+      new Set([serviceId]),
+      new Set([serviceId]),
+    );
+
+    try {
+      const result = await handleEnvironmentLifecycle(
+        {
+          environmentId,
+          projectId: "proj-1",
+          projectName,
+          action: "stop",
+        },
+        new Date().toISOString(),
+        {
+          runDocker: (args) => {
+            const ingressProject = `turbopanel-ingress-${serviceId}`;
+            if (args.includes(ingressProject) && args.includes("stop")) {
+              return Promise.resolve({
+                success: false,
+                stdout: "",
+                stderr: "ingress stop failed",
+                code: 1,
+              });
+            }
+            return Promise.resolve({
+              success: true,
+              stdout: args.includes("ps") ? "[]" : "",
+              stderr: "",
+              code: 0,
+            });
+          },
+        },
+      );
+      assertEquals(result.projectName, projectName);
+    } finally {
+      if (previous.TURBOPANEL_STATE_DIR === undefined) {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+      } else {
+        Deno.env.set("TURBOPANEL_STATE_DIR", previous.TURBOPANEL_STATE_DIR);
+      }
+      if (previous.TURBOPANEL_CONFIG_DIR === undefined) {
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      } else {
+        Deno.env.set("TURBOPANEL_CONFIG_DIR", previous.TURBOPANEL_CONFIG_DIR);
       }
       await Deno.remove(root, { recursive: true });
     }

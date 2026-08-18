@@ -12,17 +12,29 @@ import { join } from "@std/path";
 import {
   assertNoFrontendUserConflict,
   buildProxySqlAdminStatements,
+  ensureProxySqlIngress,
+  extractStaticProxySqlConfigSection,
   formatProxySqlBindHost,
+  inspectProxySqlContainer,
   ManagedFrontendUserConflictError,
   PROXYSQL_IMAGE,
+  PGSQL_PORT,
+  MYSQL_PORT,
   proxysqlCompose,
+  proxysqlComposeWithAttachments,
   type ProxySqlDesiredState,
   readCurrentProxySqlBindAddress,
+  readCurrentProxySqlSegmentAttachments,
   readPublishedBindAddressFromCompose,
+  readSegmentAttachmentsFromCompose,
   renderProxySqlConfig,
+  restartProxySqlIngress,
   staticConfigSectionChanged,
+  stopProxySqlIngress,
   writeProxySqlConfigAtomic,
 } from "./proxysql.ts";
+import { resolveLayout } from "../paths/layout.ts";
+import { createTempLayout } from "../testing/temp-layout.ts";
 import { reservedManagedIngressAddress } from "./ingress-cidr.ts";
 import type { SystemComponentDescriptor } from "../deploy/system-component.ts";
 import { SYSTEM_MANAGED_INGRESS_COMPONENT } from "../deploy/system-component.ts";
@@ -49,7 +61,7 @@ function clusterDesired(
   return {
     managedId: "m1",
     engine: "postgres",
-    protocolPort: 5432,
+    protocolPort: 15432,
     writerHostgroup: 0,
     readerHostgroup: 1,
     backends: [
@@ -106,14 +118,16 @@ test("formatProxySqlBindHost brackets IPv6 and validates bind", () => {
 
 test("proxysqlCompose publishes bind-aware listener ports", () => {
   const compose = proxysqlCompose(null, "2001:db8::10");
-  assertStringIncludes(compose, '"[2001:db8::10]:5432:5432"');
-  assertStringIncludes(compose, '"[2001:db8::10]:3306:3306"');
+  assertStringIncludes(compose, '"[2001:db8::10]:15432:15432"');
+  assertStringIncludes(compose, '"[2001:db8::10]:16306:16306"');
 });
 
 test("proxysqlCompose omits published db ports entirely when bindAddress is null", () => {
   // Regression coverage: exposure disabled everywhere must never fall back to
   // publishing on every interface. Only the loopback-only admin port remains.
   const compose = proxysqlCompose(DESCRIPTOR, null);
+  assertEquals(compose.includes(`:${PGSQL_PORT}:${PGSQL_PORT}`), false);
+  assertEquals(compose.includes(`:${MYSQL_PORT}:${MYSQL_PORT}`), false);
   assertEquals(compose.includes(`:${5432}:${5432}`), false);
   assertEquals(compose.includes(`:${3306}:${3306}`), false);
   assertStringIncludes(compose, '"127.0.0.1:6032:6032"');
@@ -123,6 +137,8 @@ test("proxysqlCompose omits published db ports entirely when bindAddress is null
 
 test("proxysqlCompose with no bindAddress argument also defaults to no publish", () => {
   const compose = proxysqlCompose(DESCRIPTOR);
+  assertEquals(compose.includes(":15432:15432"), false);
+  assertEquals(compose.includes(":16306:16306"), false);
   assertEquals(compose.includes(":5432:5432"), false);
   assertEquals(compose.includes(":3306:3306"), false);
 });
@@ -166,6 +182,93 @@ test("proxysqlCompose attaches external spanning segment networks", () => {
   );
 });
 
+test("readSegmentAttachmentsFromCompose round-trips rendered spanning attachments", () => {
+  const compose = proxysqlCompose(DESCRIPTOR, "203.0.113.5", [
+    {
+      name: "tpn_00000000-0000-4000-8000-0000000000dd",
+      subnet: "198.51.100.0/24",
+    },
+    {
+      name: "tpn_00000000-0000-4000-8000-0000000000cc",
+      subnet: "203.0.113.0/24",
+    },
+  ]);
+  assertEquals(readSegmentAttachmentsFromCompose(compose), [
+    {
+      name: "tpn_00000000-0000-4000-8000-0000000000cc",
+      ipv4Address: "203.0.113.254",
+    },
+    {
+      name: "tpn_00000000-0000-4000-8000-0000000000dd",
+      ipv4Address: "198.51.100.254",
+    },
+  ]);
+  // The always-present shared ingress network is not a spanning attachment.
+  assertEquals(
+    readSegmentAttachmentsFromCompose(proxysqlCompose(DESCRIPTOR, null)),
+    [],
+  );
+  assertEquals(readSegmentAttachmentsFromCompose(""), []);
+});
+
+test("proxysqlComposeWithAttachments renders pinned attachments verbatim", () => {
+  // The self-heal path only recovers `ipv4_address` from disk — the source
+  // subnet is gone — so attachments must render without re-deriving it.
+  const compose = proxysqlComposeWithAttachments(DESCRIPTOR, null, [
+    {
+      name: "tpn_00000000-0000-4000-8000-0000000000cc",
+      ipv4Address: "10.90.1.254",
+    },
+  ]);
+  assertStringIncludes(
+    compose,
+    "      tpn_00000000-0000-4000-8000-0000000000cc:",
+  );
+  assertStringIncludes(compose, '        ipv4_address: "10.90.1.254"');
+  assertStringIncludes(
+    compose,
+    "  tpn_00000000-0000-4000-8000-0000000000cc:\n    external: true",
+  );
+});
+
+test("ensureProxySqlIngress preserves passed segment attachments in the written compose", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    await ensureProxySqlIngress(layout, DESCRIPTOR, () => Promise.resolve({
+      success: true,
+      stdout: "",
+      stderr: "",
+      code: 0,
+    }), null, [
+      {
+        name: "tpn_00000000-0000-4000-8000-0000000000cc",
+        ipv4Address: "10.90.1.254",
+      },
+    ]);
+    assertEquals(await readCurrentProxySqlSegmentAttachments(layout), [
+      {
+        name: "tpn_00000000-0000-4000-8000-0000000000cc",
+        ipv4Address: "10.90.1.254",
+      },
+    ]);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("readCurrentProxySqlSegmentAttachments returns empty when compose has never been written", async () => {
+  const fixture = await createTempLayout();
+  try {
+    assertEquals(
+      await readCurrentProxySqlSegmentAttachments(resolveLayout(fixture.env)),
+      [],
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("proxysqlCompose rejects invalid spanning segment subnets", () => {
   assertThrows(
     () =>
@@ -185,11 +288,11 @@ test("proxysqlCompose rejects invalid spanning segment subnets", () => {
 
 test("proxysqlCompose publishes only on the intended address for public/datacenter exposure", () => {
   const compose = proxysqlCompose(DESCRIPTOR, "203.0.113.5");
-  assertStringIncludes(compose, '"203.0.113.5:5432:5432"');
-  assertStringIncludes(compose, '"203.0.113.5:3306:3306"');
+  assertStringIncludes(compose, '"203.0.113.5:15432:15432"');
+  assertStringIncludes(compose, '"203.0.113.5:16306:16306"');
   // Never accidentally widen to all-interfaces alongside the intended bind.
-  assertEquals(compose.includes('"0.0.0.0:5432:5432"'), false);
-  assertEquals(compose.includes('"0.0.0.0:3306:3306"'), false);
+  assertEquals(compose.includes('"0.0.0.0:15432:15432"'), false);
+  assertEquals(compose.includes('"0.0.0.0:16306:16306"'), false);
 });
 
 test("renderProxySqlConfig keeps ProxySQL's internal listener on every interface regardless of the publish bind", () => {
@@ -207,8 +310,8 @@ test("renderProxySqlConfig keeps ProxySQL's internal listener on every interface
     clusters: [clusterDesired()],
   });
   for (const cnf of [privateCnf, publicCnf]) {
-    assertStringIncludes(cnf, 'interfaces="0.0.0.0:5432"');
-    assertEquals(cnf.includes('interfaces="203.0.113.5:5432"'), false);
+    assertStringIncludes(cnf, 'interfaces="0.0.0.0:15432"');
+    assertEquals(cnf.includes('interfaces="203.0.113.5:15432"'), false);
   }
 });
 
@@ -607,5 +710,262 @@ test("writeProxySqlConfigAtomic rejects Docker bind-mount scar directory", async
     );
   } finally {
     await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("writeProxySqlConfigAtomic rejects whitespace-only config before commit", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-proxysql-empty-" });
+  try {
+    const path = join(root, "proxysql.cnf");
+    await assertRejects(
+      () => writeProxySqlConfigAtomic(path, "   \n"),
+      Error,
+      "empty before commit",
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("readPublishedBindAddressFromCompose skips invalid host literals", () => {
+  const compose = [
+    '      - "not-a-bind:5432:5432"',
+    '      - "203.0.113.5:5432:5432"',
+  ].join("\n");
+  assertEquals(readPublishedBindAddressFromCompose(compose), "203.0.113.5");
+});
+
+test("readPublishedBindAddressFromCompose recovers new 15432 publish markers", () => {
+  const compose = [
+    '      - "203.0.113.9:15432:15432"',
+  ].join("\n");
+  assertEquals(readPublishedBindAddressFromCompose(compose), "203.0.113.9");
+});
+
+test("legacy and new protocolPort values route into the same family", () => {
+  const pgsqlLegacy = renderProxySqlConfig({
+    bindAddress: null,
+    clusters: [clusterDesired({ protocolPort: 5432 })],
+  });
+  const pgsqlNew = renderProxySqlConfig({
+    bindAddress: null,
+    clusters: [clusterDesired({ protocolPort: 15432 })],
+  });
+  assertStringIncludes(pgsqlLegacy, "pgsql_servers");
+  assertStringIncludes(pgsqlNew, "pgsql_servers");
+  assertEquals(pgsqlLegacy.includes("mysql_servers"), false);
+  assertEquals(pgsqlNew.includes("mysql_servers"), false);
+
+  const mysqlLegacy = renderProxySqlConfig({
+    bindAddress: null,
+    clusters: [clusterDesired({ engine: "mysql", protocolPort: 3306 })],
+  });
+  const mysqlNew = renderProxySqlConfig({
+    bindAddress: null,
+    clusters: [clusterDesired({ engine: "mysql", protocolPort: 16306 })],
+  });
+  assertStringIncludes(mysqlLegacy, "mysql_servers");
+  assertStringIncludes(mysqlNew, "mysql_servers");
+  assertEquals(mysqlLegacy.includes("pgsql_servers"), false);
+  assertEquals(mysqlNew.includes("pgsql_servers"), false);
+});
+
+test("legacy published 5432 compose text differs from current render so compose up is required", () => {
+  const next = proxysqlCompose(DESCRIPTOR, "203.0.113.5");
+  const previous = next
+    .replaceAll(":15432:15432", ":5432:5432")
+    .replaceAll(":16306:16306", ":3306:3306");
+  assertEquals(previous.trimEnd() !== next.trimEnd(), true);
+  assertStringIncludes(previous, ":5432:5432");
+  assertStringIncludes(next, ":15432:15432");
+});
+
+test("proxysqlCompose pins spanning segments to reserved ingress addresses", () => {
+  const compose = proxysqlCompose(DESCRIPTOR, "203.0.113.5", [
+    { name: "tpn_env_a", subnet: "203.0.113.0/24" },
+    { name: "tpn_env_a", subnet: "203.0.113.0/24" },
+    { name: "tpn_env_b", subnet: "198.51.100.0/24" },
+  ]);
+  assertStringIncludes(compose, "tpn_env_a:");
+  assertStringIncludes(compose, '"203.0.113.254"');
+  assertStringIncludes(compose, "tpn_env_b:");
+  assertStringIncludes(compose, '"198.51.100.254"');
+});
+
+test("renderProxySqlConfig includes mysql family and default_schema users", () => {
+  const cnf = renderProxySqlConfig({
+    bindAddress: "0.0.0.0",
+    clusters: [
+      clusterDesired({
+        engine: "mysql",
+        protocolPort: 3306,
+        users: [
+          {
+            username: "app",
+            role: "user",
+            password: "pw",
+            defaultDatabase: "appdb",
+          },
+        ],
+      }),
+    ],
+  });
+  assertStringIncludes(cnf, "mysql_servers");
+  assertStringIncludes(cnf, "mysql_users");
+  assertStringIncludes(cnf, 'default_schema="appdb"');
+});
+
+test("extractStaticProxySqlConfigSection strips dynamic tables", () => {
+  const full = renderProxySqlConfig({
+    bindAddress: null,
+    clusters: [clusterDesired()],
+  });
+  const staticOnly = extractStaticProxySqlConfigSection(full);
+  assertEquals(staticOnly.includes("pgsql_servers"), false);
+  assertEquals(staticOnly.includes("admin_variables"), true);
+  assertEquals(staticConfigSectionChanged(null, full), true);
+});
+
+test("inspectProxySqlContainer returns null when compose file is absent", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    const row = await inspectProxySqlContainer(layout, DESCRIPTOR, {
+      runDocker: () => Promise.reject(new TypeError("docker must not run")),
+    });
+    assertEquals(row, null);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("inspectProxySqlContainer matches labelled managed-ingress row", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    await ensureProxySqlIngress(layout, DESCRIPTOR, () => Promise.resolve({
+      success: true,
+      stdout: "",
+      stderr: "",
+      code: 0,
+    }));
+    const ps = JSON.stringify([
+      {
+        ID: "abc",
+        Name: DESCRIPTOR.containerName,
+        Service: DESCRIPTOR.composeServiceName,
+        State: "running",
+        Labels: {
+          "turbopanel.role": "turbopanel",
+          "com.turbopanel.system.component": "managed-ingress",
+        },
+      },
+    ]);
+    const row = await inspectProxySqlContainer(layout, DESCRIPTOR, {
+      runDocker: (args) => {
+        if (args.includes("ps")) return Promise.resolve({
+          success: true,
+          stdout: ps,
+          stderr: "",
+          code: 0,
+        });
+        return Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 });
+      },
+    });
+    assertEquals(row?.containerName, DESCRIPTOR.containerName);
+    assertEquals(row?.role, "turbopanel");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("inspectProxySqlContainer returns undefined when compose ps fails", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    await ensureProxySqlIngress(layout, DESCRIPTOR, () => Promise.resolve({
+      success: true,
+      stdout: "",
+      stderr: "",
+      code: 0,
+    }));
+    const row = await inspectProxySqlContainer(layout, DESCRIPTOR, {
+      runDocker: () =>
+        Promise.resolve({
+          success: false,
+          stdout: "",
+          stderr: "permission denied",
+          code: 1,
+        }),
+    });
+    assertEquals(row, undefined);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("readCurrentProxySqlBindAddress round-trips published bind", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    await ensureProxySqlIngress(layout, DESCRIPTOR, () => Promise.resolve({
+      success: true,
+      stdout: "",
+      stderr: "",
+      code: 0,
+    }), "203.0.113.8");
+    assertEquals(
+      await readCurrentProxySqlBindAddress(layout),
+      "203.0.113.8",
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("stopProxySqlIngress is a no-op when compose file is missing", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    let called = false;
+    await stopProxySqlIngress(layout, () => {
+      called = true;
+      return Promise.resolve({
+        success: true,
+        stdout: "",
+        stderr: "",
+        code: 0,
+      });
+    });
+    assertEquals(called, false);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("restartProxySqlIngress throws when compose restart fails", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    await ensureProxySqlIngress(layout, DESCRIPTOR, () => Promise.resolve({
+      success: true,
+      stdout: "",
+      stderr: "",
+      code: 0,
+    }));
+    await assertRejects(
+      () =>
+        restartProxySqlIngress(layout, () =>
+          Promise.resolve({
+            success: false,
+            stdout: "",
+            stderr: "restart denied",
+            code: 1,
+          })),
+      Error,
+      "restart denied",
+    );
+  } finally {
+    await fixture.cleanup();
   }
 });

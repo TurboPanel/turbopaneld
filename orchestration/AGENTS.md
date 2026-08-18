@@ -80,13 +80,13 @@ The daemon refuses compose up / config write while those paths are directories.
 | Network `turbopanel-managed` | bridge | Engines + ProxySQL (never tenant `turbopanel-ingress`) |
 | Unit `turbopanel-proxysql-stack.service` | `0640` | Reboot durability once compose exists |
 
-**Image pin:** `proxysql_image: proxysql/proxysql:3.0.2`. Must not be loosened
-without reviewing **GHSA-58ww-865x-grpr** (pre-auth heap overflow on the
-first-packet path affecting ProxySQL **3.0.x** listeners, May 2026 advisory).
-Keep in step with daemon `PROXYSQL_IMAGE` in `src/managed/proxysql.ts`.
+**Image pin:** `proxysql_image: proxysql/proxysql:3.0.9`. Must not be loosened
+without reviewing **CVE-2026-48773** (pre-auth first-packet heap overflow) and
+**CVE-2026-48772** (PROXY-protocol-v1 `client_addr` ACL bypass); both fixed in
+3.0.9. Keep in step with daemon `PROXYSQL_IMAGE` in `src/managed/proxysql.ts`.
 
-**Ports (defaults):** admin `6032` (loopback), pgsql frontend `5432`, mysql
-frontend `3306`. These published frontend ports are reserved against tenant
+**Ports (defaults):** admin `6032` (loopback), pgsql frontend `15432`, mysql
+frontend `16306`. These published frontend ports are reserved against tenant
 raw TCP hostings (`PROXYSQL_RESERVED_PUBLISHED_PORTS`).
 
 **Installer vocabulary:** component/status token `proxysql` → **ingress** (see

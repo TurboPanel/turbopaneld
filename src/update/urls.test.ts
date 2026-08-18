@@ -43,6 +43,7 @@ test("catalogAllowsHttp is true only for http: catalog URLs", () => {
     catalogAllowsHttp("https://turbopanel.dev/downloads/daemon/channels.json"),
     false,
   );
+  assertEquals(catalogAllowsHttp("not a url"), false);
 });
 
 test("resolveMaybeRelativeUrl resolves overlay-relative catalog paths", () => {
@@ -69,6 +70,19 @@ test("absolutizeRootCatalogJson rewrites relative manifestUrl", () => {
     rewritten.channels.trunk.manifestUrl,
     "https://turbopanel.dev/downloads/daemon/manifest.json",
   );
+
+  assertEquals(absolutizeRootCatalogJson(null, "https://x/"), null);
+  assertEquals(
+    absolutizeRootCatalogJson({ schema: 1 }, "https://x/channels.json"),
+    { schema: 1 },
+  );
+  const passthrough = absolutizeRootCatalogJson({
+    schema: 1,
+    channels: { trunk: "bad" },
+  }, "https://x/channels.json") as {
+    channels: { trunk: string };
+  };
+  assertEquals(passthrough.channels.trunk, "bad");
 });
 
 test("absolutizeChannelManifestJson rewrites relative artifact urls", () => {
@@ -107,4 +121,13 @@ test("absolutizeChannelManifestJson rewrites relative artifact urls", () => {
     rewritten.binaryArtifacts["linux-amd64"].url,
     "https://turbopanel.dev/downloads/daemon/turbopaneld-amd64.tar.zst",
   );
+
+  assertEquals(absolutizeChannelManifestJson(null, "https://x/"), null);
+  const withoutBinary = absolutizeChannelManifestJson({
+    jsFallbackArtifact: { sha256: "aa", size: 1 },
+    orchestrationArtifact: 12,
+    binaryArtifacts: "nope",
+  }, "https://x/manifest.json") as Record<string, unknown>;
+  assertEquals(withoutBinary.binaryArtifacts, "nope");
+  assertEquals(withoutBinary.orchestrationArtifact, 12);
 });

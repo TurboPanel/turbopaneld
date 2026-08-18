@@ -19,6 +19,7 @@ import {
   type ServerReportedIp,
 } from "../server-addresses.ts";
 import { collectManagedLogs } from "../managed/logs.ts";
+import { handleFabricPathProbe } from "./commands/fabric.ts";
 import {
   type DevSyncState,
   MANAGED_DEV_SYNC_REFUSED_REASON,
@@ -91,6 +92,27 @@ type DaemonMessage =
     type: "managed-logs-result";
     id: string;
     logs: string;
+    error?: string;
+    at: string;
+  }
+  | {
+    type: "fabric-paths-request";
+    id: string;
+    fabricId: string;
+    probeMs: number;
+    candidates: Array<{ publicKey: string; endpoints: string[] }>;
+    at: string;
+  }
+  | {
+    type: "fabric-paths-result";
+    id: string;
+    paths: Array<{
+      publicKey: string;
+      endpoint?: string;
+      lastHandshakeAt?: string;
+      health: "healthy" | "stale" | "never";
+      latencyMs?: number;
+    }>;
     error?: string;
     at: string;
   }
@@ -352,8 +374,9 @@ export class InstanceClient {
   constructor(options: InstanceClientOptions = {}) {
     this.#config = options.config ?? resolveInstanceConfig();
     this.#httpClient = options.httpClient;
-    this.#applyDevSyncTarball = options.applyDevSyncTarball ??
-      getCheckoutDevSyncApply();
+    this.#applyDevSyncTarball = Object.hasOwn(options, "applyDevSyncTarball")
+      ? options.applyDevSyncTarball
+      : getCheckoutDevSyncApply();
     this.#initialBackoffMs = normalizeReconnectDelayMs(
       options.reconnectDelayMs,
     );
@@ -1008,7 +1031,7 @@ export class InstanceClient {
     const composeUp = this.#didCompleteSecretsRehydrate
       ? "if-missing"
       : "always";
-    rehydrateLocalDeployments({
+    clientTestHooks.rehydrateLocalDeployments({
       layout: resolveLayout(Deno.env.toObject()),
       decryptSecrets: (ciphertexts) => apiClient.decryptSecrets(ciphertexts),
       rehydrate: async (deployments) =>
@@ -1052,6 +1075,9 @@ export class InstanceClient {
         break;
       case "managed-logs-request":
         this.#collectManagedLogs(message, ws);
+        break;
+      case "fabric-paths-request":
+        this.#collectFabricPaths(message, ws);
         break;
       case "dev-sync-begin":
         this.#beginDevSync(message, ws);
@@ -1184,7 +1210,7 @@ export class InstanceClient {
       const bytes = decodeBase64(base64);
       await apply(bytes);
 
-      const restarted = await restartDaemonService();
+      const restarted = await clientTestHooks.restartDaemonService();
       if (!restarted) {
         throw new Error("dev-sync unpack succeeded but daemon restart failed");
       }
@@ -1211,7 +1237,7 @@ export class InstanceClient {
     let ok = false;
     let error: string | undefined;
     try {
-      await writeInstanceTunnelToken(message.token);
+      await clientTestHooks.writeInstanceTunnelToken(message.token);
       ok = true;
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
@@ -1235,7 +1261,7 @@ export class InstanceClient {
     let ok = false;
     let error: string | undefined;
     try {
-      await applyPublicUrls(message.urls);
+      await clientTestHooks.applyPublicUrls(message.urls);
       ok = true;
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
@@ -1272,8 +1298,8 @@ export class InstanceClient {
   async #reconcileToLatestUpdate(
     config: ReturnType<typeof resolveUpdateChannelConfig>,
   ): Promise<boolean> {
-    const updateInfo = await resolveUpdate(config);
-    if (getBuildInfo().commit === updateInfo.commit) {
+    const updateInfo = await clientTestHooks.resolveUpdate(config);
+    if (clientTestHooks.getBuildInfo().commit === updateInfo.commit) {
       logInfo(
         "update",
         "already on current commit",
@@ -1321,11 +1347,11 @@ export class InstanceClient {
       sanitizeForLog(runScriptUrl),
     );
 
-    const script = await downloadRunScript(runScriptUrl, {
+    const script = await clientTestHooks.downloadRunScript(runScriptUrl, {
       insecureTls,
       caPath: (insecureTls || publicTls) ? undefined : instanceCaPath,
     });
-    await executeRunReconcile({
+    await clientTestHooks.executeRunReconcile({
       script,
       args: reconcileArgs,
       channel: config.channel,
@@ -1384,9 +1410,9 @@ export class InstanceClient {
     // instance can persist update-result before this process is replaced.
     if (ok && shouldRestart) {
       await new Promise((resolve) =>
-        setTimeout(resolve, UPDATE_RESULT_HANDOFF_DELAY_MS)
+        setTimeout(resolve, clientTestHooks.updateResultHandoffDelayMs)
       );
-      const restarted = await restartDaemonService();
+      const restarted = await clientTestHooks.restartDaemonService();
       if (!restarted) {
         logWarn(
           "update",
@@ -1404,7 +1430,7 @@ export class InstanceClient {
   ): void {
     let ips: ServerReportedIp[];
     try {
-      ips = collectServerIps();
+      ips = clientTestHooks.collectServerIps();
     } catch (err) {
       logWarn(
         "instance",
@@ -1464,6 +1490,46 @@ export class InstanceClient {
       ws.send(JSON.stringify(result));
     }
   }
+
+  #collectFabricPaths(
+    message: Extract<DaemonMessage, { type: "fabric-paths-request" }>,
+    ws: WebSocket,
+  ): void {
+    void this.#collectFabricPathsAsync(message, ws);
+  }
+
+  async #collectFabricPathsAsync(
+    message: Extract<DaemonMessage, { type: "fabric-paths-request" }>,
+    ws: WebSocket,
+  ): Promise<void> {
+    let paths: Extract<
+      DaemonMessage,
+      { type: "fabric-paths-result" }
+    >["paths"] = [];
+    let error: string | undefined;
+    try {
+      paths = await clientTestHooks.handleFabricPathProbe(message);
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+      logWarn(
+        "instance",
+        "collect fabric paths failed:",
+        sanitizeForLog(err),
+      );
+    }
+
+    const result: DaemonMessage = {
+      type: "fabric-paths-result",
+      id: message.id,
+      paths,
+      ...(error === undefined ? {} : { error }),
+      at: new Date().toISOString(),
+    };
+
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(result));
+    }
+  }
 }
 
 let nowFn: () => number = () => Date.now();
@@ -1493,6 +1559,49 @@ export function installClientTimeSource(source: {
   return () => {
     nowFn = previousNow;
     delayFn = previousDelay;
+  };
+}
+
+type ClientTestHooks = {
+  restartDaemonService: typeof restartDaemonService;
+  resolveUpdate: typeof resolveUpdate;
+  getBuildInfo: typeof getBuildInfo;
+  downloadRunScript: typeof downloadRunScript;
+  executeRunReconcile: typeof executeRunReconcile;
+  collectServerIps: typeof collectServerIps;
+  handleFabricPathProbe: typeof handleFabricPathProbe;
+  writeInstanceTunnelToken: typeof writeInstanceTunnelToken;
+  applyPublicUrls: typeof applyPublicUrls;
+  rehydrateLocalDeployments: typeof rehydrateLocalDeployments;
+  /** Override UPDATE_RESULT_HANDOFF_DELAY_MS for host-free update tests. */
+  updateResultHandoffDelayMs: number;
+};
+
+let clientTestHooks: ClientTestHooks = {
+  restartDaemonService,
+  resolveUpdate,
+  getBuildInfo,
+  downloadRunScript,
+  executeRunReconcile,
+  collectServerIps,
+  handleFabricPathProbe,
+  writeInstanceTunnelToken,
+  applyPublicUrls,
+  rehydrateLocalDeployments,
+  updateResultHandoffDelayMs: UPDATE_RESULT_HANDOFF_DELAY_MS,
+};
+
+/**
+ * Test-only leaf-dep injection for update / tunnel / rehydrate / probe paths.
+ * Returns a restore function. Production defaults are the real module exports.
+ */
+export function installClientTestHooks(
+  source: Partial<ClientTestHooks>,
+): () => void {
+  const previous = clientTestHooks;
+  clientTestHooks = { ...previous, ...source };
+  return () => {
+    clientTestHooks = previous;
   };
 }
 

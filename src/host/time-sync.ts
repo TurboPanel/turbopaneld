@@ -19,7 +19,10 @@ const TIMESYNCD_CONF_PATH = "/etc/systemd/timesyncd.conf";
 const ETC_TIMEZONE_PATH = "/etc/timezone";
 const TIMESYNC_SYNCHRONIZED_PATH = "/run/systemd/timesync/synchronized";
 
-function readTextFile(path: string): string | undefined {
+function readTextFile(
+  path: string,
+  runCat?: (path: string) => { code: number; stdout: Uint8Array },
+): string | undefined {
   try {
     return Deno.readTextFileSync(path);
   } catch {
@@ -27,11 +30,13 @@ function readTextFile(path: string): string | undefined {
   }
 
   try {
-    const { code, stdout } = new Deno.Command("cat", {
-      args: [path],
-      stdout: "piped",
-      stderr: "null",
-    }).outputSync();
+    const { code, stdout } = runCat
+      ? runCat(path)
+      : new Deno.Command("cat", {
+        args: [path],
+        stdout: "piped",
+        stderr: "null",
+      }).outputSync();
     if (code !== 0) return undefined;
     return new TextDecoder().decode(stdout);
   } catch {
@@ -235,35 +240,73 @@ export function parseTimesyncdConf(text: string): {
   };
 }
 
-function readTimedatectlShow(): ReturnType<typeof parseTimedatectlShow> {
-  const text = spawnText("timedatectl", ["show"]);
+/** Optional I/O seams for host-free `readTimeSync` tests. */
+export type TimeSyncIo = {
+  spawnText?: (cmd: string, args: string[]) => string | undefined;
+  readTextFile?: (path: string) => string | undefined;
+  synchronizedFileMtime?: () => string | undefined;
+  /** Injected `cat` fallback when {@link Deno.readTextFileSync} fails. */
+  runCat?: (path: string) => { code: number; stdout: Uint8Array };
+  /** Override `/etc/systemd/timesyncd.conf` for host-free default-reader tests. */
+  timesyncdConfPath?: string;
+  /** Override `/etc/timezone` for host-free default-reader tests. */
+  etcTimezonePath?: string;
+  /** Override `/run/systemd/timesync/synchronized` for mtime probes. */
+  synchronizedPath?: string;
+};
+
+function resolveSpawn(
+  io: TimeSyncIo | undefined,
+): (cmd: string, args: string[]) => string | undefined {
+  return io?.spawnText ?? spawnText;
+}
+
+function resolveReadText(
+  io: TimeSyncIo | undefined,
+): (path: string) => string | undefined {
+  return io?.readTextFile ?? ((path) => readTextFile(path, io?.runCat));
+}
+
+function readTimedatectlShow(
+  spawn: (cmd: string, args: string[]) => string | undefined,
+): ReturnType<typeof parseTimedatectlShow> {
+  const text = spawn("timedatectl", ["show"]);
   if (!text) return {};
   return parseTimedatectlShow(text);
 }
 
-function readTimedatectlStatus(): ReturnType<typeof parseTimedatectlStatus> {
-  const text = spawnText("timedatectl", ["status"]);
+function readTimedatectlStatus(
+  spawn: (cmd: string, args: string[]) => string | undefined,
+): ReturnType<typeof parseTimedatectlStatus> {
+  const text = spawn("timedatectl", ["status"]);
   if (!text) return {};
   return parseTimedatectlStatus(text);
 }
 
-function readEtcTimezone(): string | undefined {
-  const text = readTextFile(ETC_TIMEZONE_PATH);
+function readEtcTimezone(
+  read: (path: string) => string | undefined,
+  timezonePath: string,
+): string | undefined {
+  const text = read(timezonePath);
   if (!text) return undefined;
   return parseEtcTimezone(text);
 }
 
-function readConfiguredServers(): {
+function readConfiguredServers(
+  read: (path: string) => string | undefined,
+  spawn: (cmd: string, args: string[]) => string | undefined,
+  confPath: string,
+): {
   ntpServers: string[];
   fallbackNtpServers?: string[];
 } {
-  const confText = readTextFile(TIMESYNCD_CONF_PATH);
+  const confText = read(confPath);
   if (confText) {
     return parseTimesyncdConf(confText);
   }
 
   // Fall back to timedatectl show-timesync when the conf file is unreadable.
-  const showTimesync = spawnText("timedatectl", ["show-timesync"]);
+  const showTimesync = spawn("timedatectl", ["show-timesync"]);
   if (!showTimesync) return { ntpServers: [] };
   const fields: Record<string, string> = {};
   for (const line of showTimesync.split("\n")) {
@@ -286,9 +329,11 @@ function readConfiguredServers(): {
   };
 }
 
-function readSynchronizedFileMtime(): string | undefined {
+function readSynchronizedFileMtime(
+  path = TIMESYNC_SYNCHRONIZED_PATH,
+): string | undefined {
   try {
-    const st = Deno.statSync(TIMESYNC_SYNCHRONIZED_PATH);
+    const st = Deno.statSync(path);
     if (st.mtime) return st.mtime.toISOString();
   } catch {
     // fall through to timedatectl
@@ -300,7 +345,9 @@ function readSynchronizedFileMtime(): string | undefined {
  * Parse a last-sync stamp from `timedatectl show-timesync` KEY=VALUE output.
  * Exported for fixture tests.
  */
-export function parseShowTimesyncLastSyncedAt(text: string): string | undefined {
+export function parseShowTimesyncLastSyncedAt(
+  text: string,
+): string | undefined {
   for (const line of text.split("\n")) {
     const trimmed = line.trim();
     const eq = trimmed.indexOf("=");
@@ -317,18 +364,33 @@ export function parseShowTimesyncLastSyncedAt(text: string): string | undefined 
   return undefined;
 }
 
-function readLastSyncedAt(ntpSynced: boolean | undefined): string | undefined {
+function readLastSyncedAt(
+  ntpSynced: boolean | undefined,
+  spawn: (cmd: string, args: string[]) => string | undefined,
+  synchronizedFileMtime: () => string | undefined,
+): string | undefined {
   if (ntpSynced === false) return undefined;
-  const fromFile = readSynchronizedFileMtime();
+  const fromFile = synchronizedFileMtime();
   if (fromFile) return fromFile;
-  const showTimesync = spawnText("timedatectl", ["show-timesync"]);
+  const showTimesync = spawn("timedatectl", ["show-timesync"]);
   if (!showTimesync) return undefined;
   return parseShowTimesyncLastSyncedAt(showTimesync);
 }
 
-/** Read current host timezone + NTP state (no process-lifetime cache). */
-export function readTimeSync(): HostTimeSync {
-  const show = readTimedatectlShow();
+/**
+ * Read current host timezone + NTP state (no process-lifetime cache).
+ * Optional `io` injects spawn/file readers for host-free tests.
+ */
+export function readTimeSync(io?: TimeSyncIo): HostTimeSync {
+  const spawn = resolveSpawn(io);
+  const read = resolveReadText(io);
+  const synchronizedPath = io?.synchronizedPath ?? TIMESYNC_SYNCHRONIZED_PATH;
+  const synchronizedFileMtime = io?.synchronizedFileMtime ??
+    (() => readSynchronizedFileMtime(synchronizedPath));
+  const timezonePath = io?.etcTimezonePath ?? ETC_TIMEZONE_PATH;
+  const confPath = io?.timesyncdConfPath ?? TIMESYNCD_CONF_PATH;
+
+  const show = readTimedatectlShow(spawn);
   let timezone = show.timezone;
   let ntpEnabled = show.ntpEnabled;
   let ntpSynced = show.ntpSynced;
@@ -337,16 +399,20 @@ export function readTimeSync(): HostTimeSync {
     ntpEnabled === undefined ||
     ntpSynced === undefined;
   if (showIncomplete) {
-    const status = readTimedatectlStatus();
+    const status = readTimedatectlStatus(spawn);
     timezone ??= status.timezone;
     ntpEnabled ??= status.ntpEnabled;
     ntpSynced ??= status.ntpSynced;
   }
 
-  timezone ??= readEtcTimezone();
+  timezone ??= readEtcTimezone(read, timezonePath);
 
-  const servers = readConfiguredServers();
-  const lastSyncedAt = readLastSyncedAt(ntpSynced);
+  const servers = readConfiguredServers(read, spawn, confPath);
+  const lastSyncedAt = readLastSyncedAt(
+    ntpSynced,
+    spawn,
+    synchronizedFileMtime,
+  );
   return {
     ...(timezone ? { timezone } : {}),
     ...(ntpEnabled !== undefined ? { ntpEnabled } : {}),

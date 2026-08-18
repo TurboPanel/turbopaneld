@@ -105,7 +105,7 @@ export async function handleManagedLifecycle(
       memberId: payload.memberId,
       role: "primary",
       redact: (text) => sanitizeForLog(text),
-    });
+    }, run);
     const containers = collected.containers ?? [];
     const status = statusFromContainers(containers);
     return {
@@ -116,7 +116,7 @@ export async function handleManagedLifecycle(
   }
 
   const containers =
-    (await collectManagedContainers(project, (text) => sanitizeForLog(text))) ??
+    (await collectManagedContainers(project, (text) => sanitizeForLog(text), run)) ??
       [];
   const status = statusFromContainers(containers);
   return {

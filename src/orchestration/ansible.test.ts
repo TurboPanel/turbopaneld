@@ -2,6 +2,7 @@ import { join } from "@std/path";
 import { assertEquals } from "@std/assert";
 import {
   buildTimeSyncApplyExtraArgs,
+  devOwnershipPlaybookExtraArgs,
   galaxyBootstrapRunContext,
   mergeTimeSyncApplyWithHostState,
   parseGalaxyDockerRoleVersion,
@@ -1098,4 +1099,26 @@ test("traditional-web apply playbooks vendor engines (never apt nginx/apache2)",
     phpFpmUnit.includes("turbopanel_vendor_dir }}/php/current"),
     true,
   );
+});
+
+test("devOwnershipPlaybookExtraArgs emits user uid gid and root", () => {
+  assertEquals(
+    devOwnershipPlaybookExtraArgs({
+      TURBOPANEL_DEV_USER: "vagrant",
+      TURBOPANEL_DEV_UID: "1000",
+      TURBOPANEL_DEV_GID: "1000",
+      TURBOPANEL_DEV_ROOT: "/home/vagrant",
+    }),
+    [
+      "-e",
+      "turbopanel_dev_user=vagrant",
+      "-e",
+      "turbopanel_dev_uid=1000",
+      "-e",
+      "turbopanel_dev_gid=1000",
+      "-e",
+      "turbopanel_dev_root=/home/vagrant",
+    ],
+  );
+  assertEquals(devOwnershipPlaybookExtraArgs({}), []);
 });

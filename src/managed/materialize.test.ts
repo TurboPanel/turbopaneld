@@ -1,8 +1,12 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import type { ManagedApplyPayload } from "../instance/commands/contracts.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
-import { materializeManagedState } from "./materialize.ts";
+import type { DockerCliResult } from "../deploy/docker-cli.ts";
+import {
+  materializeManagedState,
+  normalizeManagedFileOwnership,
+} from "./materialize.ts";
 import { managedConfigDir, managedTlsDir } from "./paths.ts";
 import { ensureManagedSelfSignedCert } from "./tls.ts";
 
@@ -192,4 +196,90 @@ test("materializeManagedState writes orgTlsMaterial under tls/proxysql before no
     assertEquals((await Deno.stat(privkey)).mode! & 0o777, 0o600);
     assertEquals((await Deno.stat(ca)).mode! & 0o777, 0o640);
   });
+});
+
+test("materializeManagedState requires decryptSecrets when orgTlsMaterial is present", async () => {
+  await withTempLayout(async (layout) => {
+    const payload = basePayload({
+      orgTlsMaterial: {
+        certificatePem: "-----BEGIN CERTIFICATE-----\nORG\n-----END CERTIFICATE-----\n",
+        privateKeyEnvelope: "tpdaemon.v1.server.key.payload",
+        caCertPem: "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n",
+      },
+    });
+    await assertRejects(
+      () => materializeManagedState(layout, payload),
+      Error,
+      "orgTlsMaterial requires decryptSecrets",
+    );
+  });
+});
+
+test("materializeManagedState writes nested config paths under config/", async () => {
+  await withTempLayout(async (layout) => {
+    const payload = basePayload({
+      configFiles: [
+        {
+          path: "conf.d/99-custom.conf",
+          contents: "custom = on\n",
+          mode: "0600",
+        },
+      ],
+    });
+    const managedRoot = await materializeManagedState(layout, payload);
+    const nested = join(managedRoot, "config/conf.d/99-custom.conf");
+    assertEquals(await Deno.readTextFile(nested), "custom = on\n");
+    assertEquals((await Deno.stat(nested)).mode! & 0o777, 0o600);
+  });
+});
+
+test("normalizeManagedFileOwnership runs ownership script in a throwaway engine container", async () => {
+  const calls: string[][] = [];
+  const result: DockerCliResult = {
+    success: true,
+    stdout: "",
+    stderr: "",
+    code: 0,
+  };
+  await normalizeManagedFileOwnership(
+    "postgres:18-alpine",
+    "/var/lib/turbopanel/managed/managed1",
+    "postgres",
+    "postgres",
+    (args) => {
+      calls.push([...args]);
+      return Promise.resolve(result);
+    },
+  );
+  assertEquals(calls.length, 1);
+  assertEquals(calls[0]?.includes("postgres:18-alpine"), true);
+  assertEquals(
+    calls[0]?.includes("/var/lib/turbopanel/managed/managed1:/managed"),
+    true,
+  );
+  assertEquals(
+    calls[0]?.some((part) => part.includes("chown")),
+    true,
+  );
+});
+
+test("normalizeManagedFileOwnership throws when docker run fails", async () => {
+  await assertRejects(
+    () =>
+      normalizeManagedFileOwnership(
+        "postgres:18-alpine",
+        "/var/lib/turbopanel/managed/managed1",
+        "postgres",
+        "postgres",
+        () =>
+          Promise.resolve({
+            success: false,
+            stdout: "",
+            stderr: "chown failed",
+            code: 1,
+          }),
+      ),
+    Error,
+    "chown failed",
+  );
 });

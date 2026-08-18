@@ -152,3 +152,61 @@ test("primary applyManagedEngineState still mutates credentials/databases", asyn
     "readVersion",
   ]);
 });
+
+test("standby applyManagedEngineState runs configureStandby when replication credential exists", async () => {
+  const calls: string[] = [];
+  const credentials: ManagedApplyCredential[] = [
+    {
+      principalId: "p1",
+      username: "root",
+      role: "root",
+      databases: ["appdb"],
+      password: "secret",
+    },
+    {
+      principalId: "p2",
+      username: "tp_repl",
+      role: "replication",
+      databases: [],
+      password: "repl-secret",
+    },
+  ];
+  const payload = {
+    engine: "mysql",
+    memberOrdinal: 2,
+    replication: {
+      role: "standby",
+      username: "tp_repl",
+      primary: { host: "primary", hostaddr: "203.0.113.10", port: 3306 },
+    },
+  } as unknown as ManagedApplyPayload;
+
+  const engine = {
+    rootUsername: "root",
+    waitReady: () => {
+      calls.push("waitReady");
+      return Promise.resolve();
+    },
+    readVersion: () => {
+      calls.push("readVersion");
+      return Promise.resolve("8.4.0");
+    },
+    replication: {
+      configureStandby: () => {
+        calls.push("configureStandby");
+        return Promise.resolve();
+      },
+    },
+  };
+
+  const state = await applyManagedEngineState(
+    {} as never,
+    engine as never,
+    payload,
+    credentials,
+  );
+
+  assertEquals(state.appliedUsers, []);
+  assertEquals(state.engineVersion, "8.4.0");
+  assertEquals(calls, ["waitReady", "configureStandby", "readVersion"]);
+});

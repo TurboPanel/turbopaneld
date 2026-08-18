@@ -1,16 +1,16 @@
 ---
-# Image pin must not be loosened without reviewing GHSA-58ww-865x-grpr
-# (pre-auth heap overflow on first-packet path affecting ProxySQL 3.0.x
-# listeners, May 2026 advisory). Use a patched 3.0.x only.
-proxysql_image: proxysql/proxysql:3.0.2
+# Image pin must not be loosened without reviewing CVE-2026-48773
+# (pre-auth first-packet heap overflow) and CVE-2026-48772 (PROXY-protocol-v1
+# client_addr ACL bypass). Both are fixed in ProxySQL 3.0.9.
+proxysql_image: proxysql/proxysql:3.0.9
 proxysql_project_name: turbopanel-proxysql
 proxysql_config_dir: "{{ turbopanel_config_dir }}/proxysql"
 proxysql_tls_dir: "{{ proxysql_config_dir }}/tls"
 proxysql_data_dir: "{{ turbopanel_state_dir }}/proxysql"
 proxysql_service_name: turbopanel-proxysql-stack
 proxysql_admin_port: 6032
-proxysql_pgsql_port: 5432
-proxysql_mysql_port: 3306
+proxysql_pgsql_port: 15432
+proxysql_mysql_port: 16306
 # Runtime uid/gid for image — ProxySQL official image often runs as 999 or 2;
 # use 999:999 for datadir pre-own (document if adjustable).
 proxysql_container_uid: 999

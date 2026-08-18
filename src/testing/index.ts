@@ -25,6 +25,18 @@ export {
 } from "./temp-layout.ts";
 
 export {
+  buildCloudflaredFixtureBinary,
+  buildGalaxyDockerFixtureArchive,
+  buildUvFixtureArchive,
+  createOrchestrationRuntimeFixture,
+  type OrchestrationRuntimeFixture,
+  type OrchestrationSeedOptions,
+  ORCHESTRATION_RUNTIME_ENV_KEYS,
+  seedDevOrchestrationOverlay,
+  withOrchestrationRuntime,
+} from "./orchestration-fixtures.ts";
+
+export {
   challengeResponse,
   createFakeInstanceApi,
   enrollResponse,

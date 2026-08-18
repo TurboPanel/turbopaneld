@@ -1,10 +1,14 @@
 import { assertEquals, assertThrows } from "@std/assert";
-import { MalformedManifestError } from "./errors.ts";
+import {
+  MalformedManifestError,
+  UnsupportedSchemaVersionError,
+} from "./errors.ts";
 import {
   parseChannelManifest,
   parseRootCatalog,
   requireHttpsUrl,
   validateArtifactEntry,
+  validateBinaryArtifacts,
 } from "./validate.ts";
 
 /**
@@ -20,6 +24,14 @@ test("requireHttpsUrl rejects non-HTTPS URLs", () => {
     () => requireHttpsUrl("http://example.com/file.tar.zst", "artifact.url"),
     MalformedManifestError,
     "must use HTTPS",
+  );
+});
+
+test("requireHttpsUrl rejects invalid absolute URLs", () => {
+  assertThrows(
+    () => requireHttpsUrl("not a url", "artifact.url"),
+    MalformedManifestError,
+    "must be a valid absolute URL",
   );
 });
 
@@ -43,6 +55,23 @@ test("validateArtifactEntry requires HTTPS url, sha256, and positive size", () =
       sha256: "a".repeat(64),
       size: 123,
     },
+  );
+
+  assertThrows(
+    () => validateArtifactEntry("x", "artifacts.linux-amd64"),
+    MalformedManifestError,
+    "must be an object",
+  );
+
+  assertThrows(
+    () =>
+      validateArtifactEntry({
+        url: "  ",
+        sha256: "a".repeat(64),
+        size: 123,
+      }, "artifacts.linux-amd64"),
+    MalformedManifestError,
+    "missing or invalid field: url",
   );
 
   assertThrows(
@@ -79,7 +108,79 @@ test("validateArtifactEntry requires HTTPS url, sha256, and positive size", () =
   );
 });
 
-test("parseRootCatalog validates manifestUrl is HTTPS", () => {
+test("validateBinaryArtifacts requires both linux arches", () => {
+  assertThrows(
+    () => validateBinaryArtifacts(null),
+    MalformedManifestError,
+    "binaryArtifacts must be an object",
+  );
+
+  assertThrows(
+    () =>
+      validateBinaryArtifacts({
+        "linux-amd64": {
+          url: "https://dl.trbp.nl/a.tar.zst",
+          sha256: "a".repeat(64),
+          size: 1,
+        },
+      }),
+    MalformedManifestError,
+    "binaryArtifacts.linux-arm64",
+  );
+});
+
+test("parseRootCatalog validates shape and schema", () => {
+  assertThrows(
+    () => parseRootCatalog(null),
+    MalformedManifestError,
+    "channels.json root must be an object",
+  );
+  assertThrows(
+    () => parseRootCatalog({ defaultChannel: "trunk", channels: {} }),
+    MalformedManifestError,
+    "missing or invalid field: schema",
+  );
+  assertThrows(
+    () =>
+      parseRootCatalog({
+        schema: 2,
+        defaultChannel: "trunk",
+        channels: {},
+      }),
+    UnsupportedSchemaVersionError,
+    "Unsupported channels.json schema",
+  );
+  assertThrows(
+    () =>
+      parseRootCatalog({
+        schema: 1,
+        channels: {},
+      }),
+    MalformedManifestError,
+    "missing or invalid field: defaultChannel",
+  );
+  assertThrows(
+    () =>
+      parseRootCatalog({
+        schema: 1,
+        defaultChannel: "trunk",
+        channels: "nope",
+      }),
+    MalformedManifestError,
+    "missing or invalid field: channels",
+  );
+  assertThrows(
+    () =>
+      parseRootCatalog({
+        schema: 1,
+        defaultChannel: "trunk",
+        channels: {
+          trunk: { manifestUrl: "" },
+        },
+      }),
+    MalformedManifestError,
+    "missing or invalid manifestUrl",
+  );
   assertThrows(
     () =>
       parseRootCatalog({
@@ -93,6 +194,21 @@ test("parseRootCatalog validates manifestUrl is HTTPS", () => {
       }),
     MalformedManifestError,
     "must use HTTPS",
+  );
+
+  const catalog = parseRootCatalog({
+    schema: 1,
+    defaultChannel: "trunk",
+    channels: {
+      trunk: {
+        manifestUrl: "https://dl.trbp.nl/channels/trunk/manifest.json",
+      },
+    },
+  });
+  assertEquals(catalog.defaultChannel, "trunk");
+  assertEquals(
+    catalog.channels.trunk.manifestUrl,
+    "https://dl.trbp.nl/channels/trunk/manifest.json",
   );
 });
 
@@ -133,4 +249,73 @@ test("parseChannelManifest validates artifact entries", () => {
   assertEquals(manifest.binaryArtifacts["linux-amd64"].size, 123);
   assertEquals(manifest.jsFallbackArtifact.size, 345);
   assertEquals(manifest.orchestrationArtifact.size, 456);
+});
+
+test("parseChannelManifest rejects malformed roots and missing fields", () => {
+  assertThrows(
+    () => parseChannelManifest([]),
+    MalformedManifestError,
+    "channel.json root must be an object",
+  );
+  assertThrows(
+    () => parseChannelManifest({ channel: "trunk" }),
+    MalformedManifestError,
+    "missing or invalid field: schema",
+  );
+  assertThrows(
+    () =>
+      parseChannelManifest({
+        schema: 9,
+        channel: "trunk",
+        commit: "x",
+        buildId: "y",
+        builtAt: "z",
+      }),
+    UnsupportedSchemaVersionError,
+    "Unsupported channel.json schema",
+  );
+  assertThrows(
+    () =>
+      parseChannelManifest({
+        schema: 1,
+        commit: "x",
+        buildId: "y",
+        builtAt: "z",
+      }),
+    MalformedManifestError,
+    "missing or invalid field: channel",
+  );
+  assertThrows(
+    () =>
+      parseChannelManifest({
+        schema: 1,
+        channel: "trunk",
+        buildId: "y",
+        builtAt: "z",
+      }),
+    MalformedManifestError,
+    "missing or invalid field: commit",
+  );
+  assertThrows(
+    () =>
+      parseChannelManifest({
+        schema: 1,
+        channel: "trunk",
+        commit: "x",
+        builtAt: "z",
+      }),
+    MalformedManifestError,
+    "missing or invalid field: buildId",
+  );
+  assertThrows(
+    () =>
+      parseChannelManifest({
+        schema: 1,
+        channel: "trunk",
+        commit: "x",
+        buildId: "y",
+      }),
+    MalformedManifestError,
+    "missing or invalid field: builtAt",
+  );
 });

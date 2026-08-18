@@ -6,14 +6,21 @@ import {
 } from "./contracts.ts";
 
 type AnsibleAvailabilityCheck = () => Promise<boolean>;
+type RunSetHostname = (hostname: string) => Promise<{ summary: string }>;
 
 let ansibleAvailabilityCheckOverride: AnsibleAvailabilityCheck | null = null;
+let runSetHostnameOverride: RunSetHostname | null = null;
 
 /** Test-only override; pass `null` to restore the default check. */
 export function setAnsibleAvailabilityCheckForTests(
   check: AnsibleAvailabilityCheck | null,
 ): void {
   ansibleAvailabilityCheckOverride = check;
+}
+
+/** Test-only override; pass `null` to restore the default runner. */
+export function setRunSetHostnameForTests(runner: RunSetHostname | null): void {
+  runSetHostnameOverride = runner;
 }
 
 async function isAnsibleRuntimeAvailable(): Promise<boolean> {
@@ -24,6 +31,16 @@ async function isAnsibleRuntimeAvailable(): Promise<boolean> {
     "../../orchestration/ansible.ts"
   );
   return ansiblePlaybookWorks();
+}
+
+async function runSetHostname(hostname: string): Promise<{ summary: string }> {
+  if (runSetHostnameOverride) {
+    return runSetHostnameOverride(hostname);
+  }
+  const { runSetHostname: runDefault } = await import(
+    "../../orchestration/ansible.ts"
+  );
+  return runDefault(hostname);
 }
 
 export async function handleHostname(
@@ -37,7 +54,6 @@ export async function handleHostname(
   }
 
   logInfo("commands", `setting hostname to ${payload.hostname}`);
-  const { runSetHostname } = await import("../../orchestration/ansible.ts");
   const { summary } = await runSetHostname(payload.hostname);
 
   const observedHostname = Deno.hostname();

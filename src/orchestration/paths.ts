@@ -28,6 +28,9 @@ const layoutEnv = {
 
 const layout = resolveLayout(layoutEnv);
 
+/** Frozen layout snapshot backing module-level path constants (import-time env). */
+export const ORCHESTRATION_LAYOUT = layout;
+
 /** Default managed install layout for the active install mode. */
 export const DEFAULT_DAEMON_ROOT = layout.daemonRootDefault;
 

@@ -6,9 +6,18 @@
  * results stay bounded summaries — logs never ride `command-outcome`.
  */
 
-import { runDocker } from "../deploy/docker-cli.ts";
+import {
+  type DockerCliResult,
+  runDocker as defaultRunDocker,
+  type RunDockerOptions,
+} from "../deploy/docker-cli.ts";
 import { sanitizeForLog } from "../logger.ts";
 import { managedComposeProject, SAFE_MANAGED_ID_RE } from "./paths.ts";
+
+type RunDockerFn = (
+  args: string[],
+  options?: RunDockerOptions,
+) => Promise<DockerCliResult>;
 
 const DEFAULT_TAIL = 200;
 const MAX_TAIL = 2_000;
@@ -25,6 +34,7 @@ export type CollectManagedLogsOptions = {
 export async function collectManagedLogs(
   managedId: string,
   options?: CollectManagedLogsOptions,
+  run: RunDockerFn = defaultRunDocker,
 ): Promise<string> {
   if (!SAFE_MANAGED_ID_RE.test(managedId)) {
     throw new Error("managedId contains unsupported characters");
@@ -33,7 +43,7 @@ export async function collectManagedLogs(
   const tail = Math.min(Math.max(1, Math.floor(rawTail)), MAX_TAIL);
   const project = managedComposeProject(managedId);
 
-  const result = await runDocker([
+  const result = await run([
     "compose",
     "-p",
     project,

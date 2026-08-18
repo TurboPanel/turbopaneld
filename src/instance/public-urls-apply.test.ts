@@ -1,7 +1,13 @@
 import { assertEquals } from "@std/assert";
 import { join } from "@std/path";
+import { INSTANCE_CERTS_APPLY_PLAYBOOK } from "../orchestration/paths.ts";
 import { PROD_INSTANCE_DIR_DEFAULT } from "../paths/layout.ts";
-import { resolveInstanceDir, upsertPublicUrlsInEnv } from "./public-urls-apply.ts";
+import {
+  applyPublicUrls,
+  resolveInstanceDir,
+  runInstanceCertsApply,
+  upsertPublicUrlsInEnv,
+} from "./public-urls-apply.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -51,6 +57,35 @@ test("resolveInstanceDir honors TURBOPANEL_INSTANCE_DIR override", () => {
       TURBOPANEL_INSTANCE_REPO: "/home/dev/turbopanel",
     }),
     "/custom/instance",
+  );
+});
+
+test("resolveInstanceDir treats TURBOPANEL_DEV_USER as co-located", () => {
+  assertEquals(
+    resolveInstanceDir({
+      TURBOPANEL_DEV_USER: "dev",
+      TURBOPANEL_DEV_ROOT: "/home/dev",
+    }),
+    "/home/dev/turbopanel",
+  );
+});
+
+test("resolveInstanceDir treats TURBOPANEL_DEV_INSTANCE=1 as co-located", () => {
+  assertEquals(
+    resolveInstanceDir({
+      TURBOPANEL_DEV_INSTANCE: "1",
+      TURBOPANEL_DEV_ROOT: "/home/dev",
+    }),
+    "/home/dev/turbopanel",
+  );
+});
+
+test("resolveInstanceDir strips repeated trailing slashes including root-only", () => {
+  assertEquals(
+    resolveInstanceDir({
+      TURBOPANEL_INSTANCE_DIR: "////",
+    }),
+    "/",
   );
 });
 
@@ -121,4 +156,92 @@ test("upsertPublicUrlsInEnv removes temp files when rename fails", async () => {
   } finally {
     await Deno.remove(root, { recursive: true });
   }
+});
+
+test({
+  name: "runInstanceCertsApply builds playbook extras via stubbed runPlaybook",
+  permissions: { env: true },
+  fn: async () => {
+    const originalDevUser = Deno.env.get("TURBOPANEL_DEV_USER");
+    const originalDevRoot = Deno.env.get("TURBOPANEL_DEV_ROOT");
+    Deno.env.set("TURBOPANEL_DEV_USER", "dev");
+    Deno.env.set("TURBOPANEL_DEV_ROOT", "/home/dev");
+    const calls: Array<{ playbook: string; args: string[] }> = [];
+    try {
+      await runInstanceCertsApply("/home/dev/turbopanel", [
+        "https://a.example",
+        "https://b.example",
+      ], {
+        runPlaybook: (playbook, extraArgs = []) => {
+          calls.push({ playbook, args: [...extraArgs] });
+          return Promise.resolve();
+        },
+      });
+      assertEquals(calls.length, 1);
+      assertEquals(calls[0]!.playbook, INSTANCE_CERTS_APPLY_PLAYBOOK);
+      assertEquals(
+        calls[0]!.args.includes("turbopanel_instance_dir=/home/dev/turbopanel"),
+        true,
+      );
+      assertEquals(
+        calls[0]!.args.includes(
+          "turbopanel_public_urls=https://a.example,https://b.example",
+        ),
+        true,
+      );
+      assertEquals(
+        calls[0]!.args.includes("turbopanel_dev_user=dev"),
+        true,
+      );
+    } finally {
+      if (originalDevUser === undefined) Deno.env.delete("TURBOPANEL_DEV_USER");
+      else Deno.env.set("TURBOPANEL_DEV_USER", originalDevUser);
+      if (originalDevRoot === undefined) Deno.env.delete("TURBOPANEL_DEV_ROOT");
+      else Deno.env.set("TURBOPANEL_DEV_ROOT", originalDevRoot);
+    }
+  },
+});
+
+test({
+  name: "applyPublicUrls upserts env then invokes certs apply stub",
+  permissions: { read: true, write: true, env: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-apply-urls-" });
+    const originalConfigDir = Deno.env.get("TURBOPANEL_CONFIG_DIR");
+    const originalInstanceDir = Deno.env.get("TURBOPANEL_INSTANCE_DIR");
+    Deno.env.set("TURBOPANEL_INSTANCE_DIR", join(root, "instance-src"));
+    Deno.env.set("TURBOPANEL_CONFIG_DIR", root);
+    await Deno.mkdir(join(root, "instance"), { recursive: true });
+
+    const certCalls: Array<{ dir: string; urls: string[] }> = [];
+    try {
+      await applyPublicUrls(["https://apply.example"], {
+        runCertsApply: (instanceDir, urls) => {
+          certCalls.push({ dir: instanceDir, urls: [...urls] });
+          return Promise.resolve();
+        },
+      });
+      const expectedEnv = join(root, "instance", "runtime.env");
+      const content = await Deno.readTextFile(expectedEnv);
+      assertEquals(
+        content.includes("TURBOPANEL_PUBLIC_URLS=https://apply.example"),
+        true,
+      );
+      assertEquals(certCalls.length, 1);
+      assertEquals(certCalls[0]!.dir, join(root, "instance-src"));
+      assertEquals(certCalls[0]!.urls, ["https://apply.example"]);
+    } finally {
+      if (originalConfigDir === undefined) {
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      } else {
+        Deno.env.set("TURBOPANEL_CONFIG_DIR", originalConfigDir);
+      }
+      if (originalInstanceDir === undefined) {
+        Deno.env.delete("TURBOPANEL_INSTANCE_DIR");
+      } else {
+        Deno.env.set("TURBOPANEL_INSTANCE_DIR", originalInstanceDir);
+      }
+      await Deno.remove(root, { recursive: true });
+    }
+  },
 });

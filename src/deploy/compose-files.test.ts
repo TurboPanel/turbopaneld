@@ -2,20 +2,27 @@ import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { join } from "@std/path";
 import {
   assertSafeComposeFilename,
+  composeBasename,
   COMPOSE_MANIFEST_FILENAME,
   composeFileArgs,
   ComposeManifestError,
   DAEMON_COMPOSE_FILENAME,
+  deploymentDir,
   DEPLOYMENT_MANIFEST_FILENAME,
   environmentDeploymentDir,
   LEGACY_COMPOSE_FILENAME,
   pruneStaleComposeLayerFiles,
+  publishStagedComposeChain,
   publishStagedRuntimeCompose,
   readComposeFileManifest,
+  readDeploymentManifest,
+  removeComposeEnvFile,
+  removeComposeStageDir,
   resetComposeStageDir,
   resolveDeployedComposePaths,
   resolveEnvironmentDeploymentDir,
   RUNTIME_COMPOSE_FILENAME,
+  writeComposeEnvFile,
   writeComposeFileManifest,
   writeComposeFileSecure,
   writeComposeLayerFiles,
@@ -52,6 +59,14 @@ test("composeFileArgs orders -f flags for each path", () => {
 
 test("composeFileArgs throws on empty paths", () => {
   assertThrows(() => composeFileArgs("proj", []), Error, "must not be empty");
+});
+
+test("composeBasename and deploymentDir helpers", () => {
+  assertEquals(composeBasename("/a/b/compose.yaml"), "compose.yaml");
+  assertEquals(
+    deploymentDir({ stateDir: "/var/lib/turbopanel" }, "env-1"),
+    "/var/lib/turbopanel/deployments/env-1",
+  );
 });
 
 test("assertSafeComposeFilename rejects traversal and non-yml names", () => {
@@ -407,6 +422,145 @@ test({
       await assertRejects(
         () => Deno.stat(join(dir, COMPOSE_MANIFEST_FILENAME)),
         Deno.errors.NotFound,
+      );
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+});
+
+test({
+  name:
+    "readDeploymentManifest round-trips secrets and rejects invalid manifests",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    const dir = await Deno.makeTempDir({ prefix: "tp-deploy-manifest-" });
+    try {
+      assertEquals(await readDeploymentManifest(dir), null);
+
+      await Deno.writeTextFile(
+        join(dir, DEPLOYMENT_MANIFEST_FILENAME),
+        JSON.stringify({
+          version: 2,
+          projectId: "proj-1",
+          environmentId: "env-1",
+          serverId: "server-1",
+          generation: 2,
+          projectName: "demo",
+          composeSha256: "b".repeat(64),
+          services: { web: { replicas: 1 } },
+          secrets: [
+            {
+              source: "web_token",
+              target: "TOKEN",
+              relativePath: "web--TOKEN",
+              composeServiceName: "web",
+              forBuild: false,
+              key: "TOKEN",
+              forRuntime: true,
+            },
+            {
+              source: "x",
+              target: "Y",
+              relativePath: "../evil",
+              composeServiceName: "web",
+              forBuild: true,
+            },
+            { not: "a-secret" },
+          ],
+        }) + "\n",
+      );
+      const manifest = await readDeploymentManifest(dir);
+      assertEquals(manifest?.secrets?.length, 1);
+      assertEquals(manifest?.secrets?.[0]?.relativePath, "web--TOKEN");
+
+      await Deno.writeTextFile(
+        join(dir, DEPLOYMENT_MANIFEST_FILENAME),
+        "{not-json",
+      );
+      assertEquals(await readDeploymentManifest(dir), null);
+
+      await Deno.writeTextFile(
+        join(dir, DEPLOYMENT_MANIFEST_FILENAME),
+        JSON.stringify({
+          version: 1,
+          projectId: "proj-1",
+          environmentId: "env-1",
+          serverId: "server-1",
+          generation: 0,
+          projectName: "demo",
+          composeSha256: "c".repeat(64),
+          services: {},
+        }),
+      );
+      assertEquals(await readDeploymentManifest(dir), null);
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+});
+
+test({
+  name: "writeComposeEnvFile and removeComposeEnvFile are idempotent",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    const dir = await Deno.makeTempDir({ prefix: "tp-compose-env-" });
+    try {
+      await writeComposeEnvFile(dir, "FOO=bar\n");
+      assertEquals(await Deno.readTextFile(join(dir, ".env")), "FOO=bar\n");
+      await removeComposeEnvFile(dir);
+      await removeComposeEnvFile(dir);
+      await assertRejects(
+        () => Deno.stat(join(dir, ".env")),
+        Deno.errors.NotFound,
+      );
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+});
+
+test({
+  name: "publishStagedComposeChain copies layers and writes the v1 manifest",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    const dir = await Deno.makeTempDir({ prefix: "tp-compose-chain-" });
+    try {
+      const stageDir = await resetComposeStageDir(dir);
+      await writeComposeFileSecure(
+        join(stageDir, "docker-compose.project.yml"),
+        "services:\n  web:\n    image: nginx\n",
+      );
+      await writeComposeFileSecure(
+        join(stageDir, "docker-compose.env.yml"),
+        "services:\n  web:\n    environment:\n      FOO: bar\n",
+      );
+      await Deno.writeTextFile(join(dir, "stale.yml"), "services: {}\n");
+      const live = await publishStagedComposeChain(dir, stageDir, [
+        "docker-compose.project.yml",
+        "docker-compose.env.yml",
+      ]);
+      assertEquals(live.length, 2);
+      assertEquals(
+        await readComposeFileManifest(dir),
+        [
+          join(dir, "docker-compose.project.yml"),
+          join(dir, "docker-compose.env.yml"),
+        ],
+      );
+      await assertRejects(
+        () => Deno.stat(join(dir, "stale.yml")),
+        Deno.errors.NotFound,
+      );
+      await removeComposeStageDir(dir);
+      await assertRejects(
+        () => Deno.stat(join(dir, ".staging")),
+        Deno.errors.NotFound,
+      );
+      await assertRejects(
+        () => publishStagedComposeChain(dir, stageDir, []),
+        Error,
+        "must not be empty",
       );
     } finally {
       await Deno.remove(dir, { recursive: true });

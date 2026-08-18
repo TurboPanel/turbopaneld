@@ -61,6 +61,9 @@ export {
 export async function runInstanceCertsApply(
   instanceDir: string,
   urls: string[],
+  deps: {
+    runPlaybook?: typeof runLocalPlaybook;
+  } = {},
 ): Promise<void> {
   const args = [
     "-e",
@@ -69,11 +72,18 @@ export async function runInstanceCertsApply(
     `turbopanel_public_urls=${urls.join(",")}`,
     ...devOwnershipPlaybookExtraArgs(),
   ];
-  await runLocalPlaybook(INSTANCE_CERTS_APPLY_PLAYBOOK, args);
+  const runPlaybook = deps.runPlaybook ?? runLocalPlaybook;
+  await runPlaybook(INSTANCE_CERTS_APPLY_PLAYBOOK, args);
 }
 
-export async function applyPublicUrls(urls: string[]): Promise<void> {
+export async function applyPublicUrls(
+  urls: string[],
+  deps: {
+    runCertsApply?: typeof runInstanceCertsApply;
+  } = {},
+): Promise<void> {
   const instanceDir = resolveInstanceDir();
   await upsertPublicUrlsInEnv(urls);
-  await runInstanceCertsApply(instanceDir, urls);
+  const runCerts = deps.runCertsApply ?? runInstanceCertsApply;
+  await runCerts(instanceDir, urls);
 }
