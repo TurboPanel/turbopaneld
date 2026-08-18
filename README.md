@@ -108,7 +108,7 @@ Clone the six sibling repos (including this one), then from the `dev` checkout:
 vagrant up
 vagrant ssh
 # inside guest:
-cd ~/dev && ./console
+dev/console
 ```
 
 That boots the Vagrant guest with sibling checkouts mounted, runs the daemon from source via Deno, and converges the dev overlay. Details: [Local development](https://turbopanel.io/docs/getting-started/development?utm_source=github-daemon-readme).
