@@ -46,8 +46,8 @@ tp_release_curl() {
 }
 
 # Overlay artifact downloads (TURBOPANEL_DL_BASE) follow the *instance* TLS
-# policy: -k only when TURBOPANEL_INSECURE_TLS is set (platform CA). Public
-# tunnel TLS uses the system store. CDN downloads still use tp_release_curl.
+# policy: platform CA via --cacert when available, else -k when INSECURE_TLS is
+# set. Public tunnel TLS uses the system store. CDN downloads use tp_release_curl.
 tp_artifact_curl() {
   if [ -z "${TURBOPANEL_DL_BASE:-}" ]; then
     tp_release_curl
@@ -63,9 +63,21 @@ tp_artifact_curl() {
   esac
   if [ "${INSECURE_TLS:-false}" = true ]; then
     printf '%s' "$TP_CURL_FETCH_INSECURE"
-  else
-    printf '%s' "$TP_CURL_FETCH"
+    return 0
   fi
+  _cacert=""
+  if [ -n "${INSTANCE_CA:-}" ] && [ -f "$INSTANCE_CA" ]; then
+    _cacert="$INSTANCE_CA"
+  elif [ -n "${CA_PATH:-}" ] && [ -f "$CA_PATH" ]; then
+    _cacert="$CA_PATH"
+  elif [ -f "/etc/turbopanel/instance-ca.pem" ]; then
+    _cacert="/etc/turbopanel/instance-ca.pem"
+  fi
+  if [ -n "$_cacert" ]; then
+    printf 'curl -fsSL --cacert %s' "$_cacert"
+    return 0
+  fi
+  printf '%s' "$TP_CURL_FETCH"
 }
 
 tp_join_url() {

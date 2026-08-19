@@ -23,10 +23,10 @@ Environment=CADDY_HTTP_PORT={{ caddy_http_port }}
 Environment=TURBOPANEL_INSTANCE_RUNTIME={{ turbopanel_instance_runtime | default('deno') }}
 Environment=WRANGLER_DEV_PORT={{ wrangler_dev_port | default(18787) }}
 Environment=TURBOPANEL_UI_MODE={{ turbopanel_ui_mode }}
-Environment=EXPO_PORT={{ expo_port }}
 Environment=TURBOPANEL_DEV_ORCHESTRATION_DIR={{ turbopanel_dev_root }}/dev/orchestration
-{% if turbopanel_ui_mode == 'dev' %}
 Environment=TURBOPANEL_DAEMON_REPO={{ turbopanel_daemon_dir }}
+{% if turbopanel_ui_mode == 'dev' %}
+Environment=EXPO_PORT={{ expo_port }}
 {% endif %}
 {% endif %}
 Environment=GOMAXPROCS=1
