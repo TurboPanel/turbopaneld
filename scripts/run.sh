@@ -58,6 +58,8 @@ tp_artifact_curl() {
       printf '%s' "$TP_CURL_FETCH"
       return 0
       ;;
+    *)
+      ;;
   esac
   if [ "${INSECURE_TLS:-false}" = true ]; then
     printf '%s' "$TP_CURL_FETCH_INSECURE"
@@ -73,6 +75,8 @@ tp_join_url() {
     http://*|https://*)
       printf '%s' "$_ref"
       return 0
+      ;;
+    *)
       ;;
   esac
   python3 -c 'import sys; from urllib.parse import urljoin; print(urljoin(sys.argv[1], sys.argv[2]))' \
