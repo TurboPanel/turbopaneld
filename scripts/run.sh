@@ -45,6 +45,48 @@ tp_release_curl() {
   fi
 }
 
+tp_ca_fingerprint() {
+  openssl x509 -in "$1" -noout -fingerprint -sha256 2>/dev/null | sed 's/^.*=//'
+}
+
+tp_ca_parses() {
+  openssl x509 -in "$1" -noout >/dev/null 2>&1
+}
+
+# Capture curl's %{http_code} independently of curl's exit status.
+# `curl ... || echo 000` concatenates onto an already-printed code (commonly
+# producing 000000) so the CA-fetch `000)` retry never runs and leaf checks
+# can treat a TLS/transport failure as success.
+tp_curl_http_code() {
+  if _tp_http_code=$("$@"); then
+    printf '%s' "$_tp_http_code"
+  else
+    printf '%s' "000"
+  fi
+}
+
+tp_ca_validates_leaf() {
+  _code=$(tp_curl_http_code curl -sSL --cacert "$1" -o /dev/null -w '%{http_code}' "${HOST_URL%/}/api/health")
+  case "$_code" in
+    000) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+tp_install_instance_ca() {
+  _old_fp=""
+  if [ -f "$CA_PATH" ]; then
+    _old_fp="$(tp_ca_fingerprint "$CA_PATH")"
+  fi
+  install -m 0640 "$1" "$CA_PATH"
+  _new_fp="$(tp_ca_fingerprint "$CA_PATH")"
+  if [ -n "$_old_fp" ]; then
+    tp_print_ok "Instance CA downloaded (was ${_old_fp}; now ${_new_fp})"
+  else
+    tp_print_ok "Instance CA downloaded (${_new_fp})"
+  fi
+}
+
 # Overlay artifact downloads (TURBOPANEL_DL_BASE) follow the *instance* TLS
 # policy: platform CA via --cacert when available, else -k when INSECURE_TLS is
 # set. Public tunnel TLS uses the system store. CDN downloads use tp_release_curl.
@@ -827,17 +869,38 @@ else
       _ca_tmp="$(mktemp)"
       _ca_http_code=""
       # shellcheck disable=SC2086
-      _ca_http_code=$($_curl_base -o "$_ca_tmp" -w '%{http_code}' "${HOST_URL%/}/api/daemon/v1/instance/ca" || echo "000")
+      _ca_http_code=$(tp_curl_http_code $_curl_base -o "$_ca_tmp" -w '%{http_code}' "${HOST_URL%/}/api/daemon/v1/instance/ca")
       case "$_ca_http_code" in
         200)
-          install -m 0640 "$_ca_tmp" "$CA_PATH"
-          tp_print_ok "Instance CA downloaded"
+          tp_install_instance_ca "$_ca_tmp"
           ;;
         404)
           # Workers production and other publicly-trusted control planes have no
           # platform CA — the daemon uses the system trust store instead.
           tp_print_step "–" "No platform CA (public TLS — using system trust store)"
           rm -f "$CA_PATH"
+          ;;
+        000)
+          if [ -f "$CA_PATH" ]; then
+            _old_fp="$(tp_ca_fingerprint "$CA_PATH")"
+            _ca_retry="$(mktemp)"
+            # Unpinned fetch of the CA document only; acceptance is gated below.
+            _ca_retry_code=$(tp_curl_http_code curl -sSLk -o "$_ca_retry" -w '%{http_code}' "${HOST_URL%/}/api/daemon/v1/instance/ca")
+            if [ "$_ca_retry_code" = "200" ] && tp_ca_parses "$_ca_retry" && tp_ca_validates_leaf "$_ca_retry"; then
+              tp_install_instance_ca "$_ca_retry"
+            else
+              _new_fp=""
+              if [ -f "$_ca_retry" ]; then
+                _new_fp="$(tp_ca_fingerprint "$_ca_retry")"
+              fi
+              tp_print_error "platform CA changed and could not be verified (existing ${_old_fp:-unknown}; fetched ${_new_fp:-unknown})"
+              rm -f "$_ca_tmp" "$_ca_retry"
+              exit 1
+            fi
+            rm -f "$_ca_retry"
+          else
+            tp_print_step "~" "Could not download instance CA (HTTP ${_ca_http_code}) — keeping existing CA if present"
+          fi
           ;;
         *)
           tp_print_step "~" "Could not download instance CA (HTTP ${_ca_http_code}) — keeping existing CA if present"
@@ -945,6 +1008,10 @@ trap 'rm -f "$VARS_FILE"' EXIT
     *)
       if [ -f "$CA_PATH" ]; then
         printf 'turbopanel_instance_ca: %s\n' "$CA_PATH"
+        _ca_fp="$(openssl x509 -in "$CA_PATH" -noout -fingerprint -sha256 2>/dev/null | sed 's/^.*=//' | tr 'A-F' 'a-f' | tr -d ':')"
+        if [ -n "$_ca_fp" ]; then
+          printf 'turbopanel_instance_ca_fingerprint: %s\n' "$_ca_fp"
+        fi
       fi
       ;;
   esac

@@ -193,6 +193,10 @@ test({
         calls[0]!.args.includes("turbopanel_dev_user=dev"),
         true,
       );
+      assertEquals(
+        calls[0]!.args.join(" ").includes("TURBOPANEL_TLS_CA_ROTATE"),
+        false,
+      );
     } finally {
       if (originalDevUser === undefined) Deno.env.delete("TURBOPANEL_DEV_USER");
       else Deno.env.set("TURBOPANEL_DEV_USER", originalDevUser);

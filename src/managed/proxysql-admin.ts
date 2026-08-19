@@ -125,6 +125,27 @@ export async function assertProxySqlHostRegularFile(
 }
 
 /**
+ * True when Ansible host prep has seeded regular `admin.cnf` and `monitor.cnf`.
+ * A missing file or Docker bind-mount directory scar both mean prep is needed.
+ */
+async function isRegularFile(path: string): Promise<boolean> {
+  try {
+    const info = await Deno.stat(path);
+    return info.isFile;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return false;
+    throw err;
+  }
+}
+
+export async function proxySqlHostPrepPresent(
+  layout: LayoutPaths,
+): Promise<boolean> {
+  return (await isRegularFile(proxysqlAdminCnfPath(layout))) &&
+    (await isRegularFile(proxysqlMonitorCnfPath(layout)));
+}
+
+/**
  * Load admin credentials from the host-side `admin.cnf` (for durable cnf render).
  */
 export async function loadProxySqlAdminCredentials(

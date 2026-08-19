@@ -55,6 +55,26 @@ it("classifies stale-identity errors", async () => {
   );
 });
 
+it("classifies tls-trust errors before transient fallthrough", () => {
+  const tlsCases: unknown[] = [
+    new Error("invalid peer certificate: UnknownIssuer"),
+    new Error("invalid peer certificate: NotValidForName"),
+    new Error("invalid peer certificate: CertExpired"),
+    new Error("UnknownIssuer"),
+  ];
+  for (const err of tlsCases) {
+    assertEquals(
+      classifyConnectFailure(err).kind,
+      "tls-trust",
+      `expected tls-trust for ${String(err)}`,
+    );
+  }
+  assertEquals(
+    classifyConnectFailure(new DaemonApiError(400, "UnknownIssuer")).kind,
+    "transient",
+  );
+});
+
 it("classifies transient errors", () => {
   const transientCases: unknown[] = [
     new DaemonApiError(503, "Service Unavailable"),

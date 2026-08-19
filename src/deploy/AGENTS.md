@@ -20,7 +20,8 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    `sudo -n -u <self> -- docker …` when the socket is permission-denied so the
    first deploy after group membership still works without a daemon restart
    (`sg docker` fails for `/usr/sbin/nologin` service accounts with "This
-   account is currently not available").
+   account is currently not available"). If that still cannot open the socket,
+   `runDocker` tries `sudo -n -- docker …` (`tp` has `NOPASSWD:ALL`).
 2. Bootstrap Traefik on Docker network `turbopanel-ingress` **only when the
    deploy has at least one container HTTP hosting with hostnames** (shared
    loopback entrypoints `127.0.0.1:7080` / `127.0.0.1:7443`, PROXY protocol,

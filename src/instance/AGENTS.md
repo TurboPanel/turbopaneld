@@ -105,11 +105,15 @@ maps enroll/session failures to `transient` (network, `>=500`, `429`,
 `400 Invalid or expired challenge` → normal full-jitter reconnect),
 `temporary-auth` (reserved — close-code / stale-JWT refresh path, e.g. `4401` →
 refresh, no identity clear), `stale-identity` (`404 Server key not found`,
-`400 Server key mismatch` → recover + re-enroll), or `permanent`
+`400 Server key mismatch` → recover + re-enroll), `tls-trust`
+(Deno/rustls chain/SAN/expiry: `invalid peer certificate`, `UnknownIssuer`,
+`NotValidForName`, `CertExpired` — **park**, not a silent 30 s loop), or
+`permanent`
 (`401 Invalid license`, `400 License already consumed or invalid`,
 `400 License is inactive`, `400 Server key is inactive`,
 `403 Invalid signature`, `409 Fingerprint already exists`, and the local
-`missing license credentials for enrollment` → **park**). On `permanent`,
+`missing license credentials for enrollment` → **park**). On `permanent` or
+`tls-trust`,
 `InstanceClient` enters `#enterParkedState` instead of `#increaseBackoff` —
 full-jitter backoff in `[PARKED_BACKOFF_MIN_MS, PARKED_BACKOFF_MAX_MS]`
 (**5 min → 1 h**, vs the transient `DEFAULT_MAX_BACKOFF_MS` 30 s ceiling) with
@@ -128,6 +132,10 @@ the normal identity path; forced re-enroll after restart still requires
 log: `daemon control-plane permanently rejected enrollment (<reason>); parked —
 install a fresh registration key (Add Server) or point TURBOPANEL_INSTANCE_URL
 at the correct control plane, then the daemon auto-recovers`.
+`tls-trust` parks with a distinct greppable log naming the dialed host, the
+resolved CA path, the local CA fingerprint, and recovery (`run.sh` with
+`--instance-ca` / `--insecure-tls`). Unpark for `tls-trust` uses the parked
+backoff only (re-read CA on the next attempt — does **not** force re-enroll).
 `token-manager.ts` skips its 2 s session-refresh retry on a `permanent` first
 error (no double challenge+session per cycle). Status → action table:
 **`../turbopanel/AGENTS.md`** (Daemon key authentication — do-not-retry-soon
@@ -227,7 +235,7 @@ downloads over HTTPS). Four valid configurations:
 | Path                                 | CA trust                                                                                                                                                                                     | SAN requirement                                                                                                                                                                                                                                                                                                                                                                                                               |
 | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Plaintext HTTP dev control plane** | none — no CA is fetched, stored, or configured (`run.sh` skips the CA-fetch block and omits `turbopanel_instance_ca`; `createInstanceHttpClient` short-circuits before any CA/cert handling) | none — there is no TLS handshake; the daemon dials `ws://`/`http://` directly                                                                                                                                                                                                                                                                                                                                                 |
-| **Self-signed (self-hosted)**        | Daemon trusts the downloaded platform CA (`TURBOPANEL_INSTANCE_CA`, fetched from `GET /api/daemon/v1/instance/ca`)                                                                           | The leaf cert **must** include the hostname the daemon dials. SANs are derived from the configured public URL(s) — `TURBOPANEL_PUBLIC_URL` / `TURBOPANEL_BASE_URL` / `TURBOPANEL_INSTANCE_URL` and `TURBOPANEL_TLS_EXTRA_SANS` (see `../turbopanel/scripts/generate-self-signed-cert.mjs`). Never hardcode the hostname.                                                                                                        |
+| **Self-signed (self-hosted)**        | Daemon trusts the downloaded **platform CA bundle** (`TURBOPANEL_INSTANCE_CA` → `/etc/turbopanel/instance-ca.pem`, fetched from `GET /api/daemon/v1/instance/ca`). The instance stores the current root plus retired overlap PEMs under `/var/lib/turbopanel/tls/` (`ca.crt`, `ca.key`, `ca-bundle.pem`) — not the replaceable checkout. Distinct from the org TLS library. | The leaf cert **must** include the hostname the daemon dials. SANs are derived from the configured public URL(s) — `TURBOPANEL_PUBLIC_URL` / `TURBOPANEL_BASE_URL` / `TURBOPANEL_INSTANCE_URL` and `TURBOPANEL_TLS_EXTRA_SANS` (see `../turbopanel/scripts/generate-self-signed-cert.mjs`). Never hardcode the hostname.                                                                                                        |
 | **Let's Encrypt**                    | Publicly-valid → daemon uses the **system trust store** (ship **no** `TURBOPANEL_INSTANCE_CA`)                                                                                               | The real cert already covers the public hostname.                                                                                                                                                                                                                                                                                                                                                                             |
 | **Cloudflare tunnel / proxy**        | Cloudflare's edge cert is publicly-valid → **system trust**                                                                                                                                  | Daemon dials the public Cloudflare hostname, which the edge cert already covers. **Caveat:** behind a tunnel the instance cannot auto-discover its own public hostname (cloudflared dials out), so the reachable URL(s) must be **declared by the operator** (admin surface / `TURBOPANEL_PUBLIC_URL`), not auto-detected. The self-signed origin leg (cloudflared → local Caddy) is separate from what the daemon validates. |
 
@@ -246,5 +254,17 @@ write the flag.
 
 Note: `Deno.createHttpClient({ caCerts })` **adds** to the system roots (does
 not replace them), so configuring the platform CA does not break validation of
-publicly-trusted certs.
+publicly-trusted certs. `createHttpClientFromCaPath` splits
+`instance-ca.pem` into every `BEGIN CERTIFICATE` block and passes **all** of
+them as `caCerts`. Each reconnect re-reads the file (mtime+size cache);
+`server.tls.trust.reconcile` writes the bundle atomically to the same path
+`resolveInstanceCaPath` uses (`TURBOPANEL_INSTANCE_CA` when that file exists,
+else the canonical layout `instance-ca.pem`) then invalidates
+that cache so the next connect (or an immediate reconnect) uses the overlap
+window **before** the old root is retired. Public-URL apply / CA rotate fans
+the command out over the existing WSS session. `run.sh` still pins
+`--cacert` first; on HTTP `000` with an existing CA it retries **once**
+unpinned, then installs only if the fetched PEM parses as a CA **and**
+validates the live leaf. `TURBOPANEL_INSTANCE_CA_FINGERPRINT` in `daemon.env`
+is the expected first-cert fingerprint for startup mismatch logs.
 

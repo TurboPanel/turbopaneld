@@ -3,6 +3,10 @@ import { assertEquals } from "@std/assert";
 import {
   CANONICAL_INSTANCE_CA_PATH,
   createInstanceHttpClient,
+  fingerprintPemCertificate,
+  invalidatePlatformCaHttpClient,
+  normalizeCaFingerprint,
+  splitPemBundle,
   DEFAULT_SOCKET_DIR,
   fetchWithPlatformCa,
   resolveInstanceCaPath,
@@ -437,4 +441,42 @@ test("fetchWithPlatformCa passes HttpClient when platform CA is configured", asy
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
+});
+
+const SAMPLE_CERT_A = `-----BEGIN CERTIFICATE-----
+MIIBozCCAQ2gAwIBAgIUAAAAAAAAAAAAAAAAAAAAAAAAAAEwDQYJKoZIhvcNAQEL
+BQAwEDEOMAwGA1UEAwwFdGVzdDEwHhcNMjQwMTAxMDAwMDAwWhcNMjUwMTAxMDAw
+MDAwWjAQMQ4wDAYDVQQDDAV0ZXN0MTANBgkqhkiG9w0BAQsFAAOCAQ0AMIIBCAKB
+AQD/////////////////////////////////////
+-----END CERTIFICATE-----
+`;
+
+const SAMPLE_CERT_B = `-----BEGIN CERTIFICATE-----
+MIIBozCCAQ2gAwIBAgIUAAAAAAAAAAAAAAAAAAAAAAAAAAIwDQYJKoZIhvcNAQEL
+BQAwEDEOMAwGA1UEAwwFdGVzdDIwHhcNMjQwMTAxMDAwMDAwWhcNMjUwMTAxMDAw
+MDAwWjAQMQ4wDAYDVQQDDAV0ZXN0MjANBgkqhkiG9w0BAQsFAAOCAQ0AMIIBCAKB
+AQD/////////////////////////////////////
+-----END CERTIFICATE-----
+`;
+
+test("splitPemBundle extracts every CERTIFICATE block", () => {
+  const blocks = splitPemBundle(`${SAMPLE_CERT_A}\n${SAMPLE_CERT_B}`);
+  assertEquals(blocks.length, 2);
+  assertEquals(blocks[0]?.includes("dGVzdDE"), true);
+  assertEquals(blocks[1]?.includes("dGVzdDI"), true);
+  assertEquals(splitPemBundle("not a pem").length, 0);
+});
+
+test("fingerprintPemCertificate hashes the first cert DER", async () => {
+  const first = await fingerprintPemCertificate(SAMPLE_CERT_A);
+  const bundled = await fingerprintPemCertificate(
+    `${SAMPLE_CERT_A}\n${SAMPLE_CERT_B}`,
+  );
+  assertEquals(first.length, 64);
+  assertEquals(bundled, first);
+  assertEquals(normalizeCaFingerprint("AB:CD"), "abcd");
+});
+
+test("invalidatePlatformCaHttpClient drops the mtime cache", () => {
+  invalidatePlatformCaHttpClient();
 });

@@ -377,9 +377,15 @@
     - Reload systemd for instance units
     - Restart turbopanel instance
 
-- name: Read platform CA for Workers daemon trust endpoint
+- name: Stat durable platform CA bundle
+  ansible.builtin.stat:
+    path: "{{ turbopanel_state_dir }}/tls/ca-bundle.pem"
+  register: _instance_ca_bundle_stat
+  when: (turbopanel_instance_runtime | default('deno')) == 'workers'
+
+- name: Read platform CA bundle for Workers daemon trust endpoint
   ansible.builtin.slurp:
-    src: "{{ turbopanel_instance_dir }}/certs/ca.crt"
+    src: "{{ (turbopanel_state_dir ~ '/tls/ca-bundle.pem') if (_instance_ca_bundle_stat.stat.exists | default(false)) else (turbopanel_state_dir ~ '/tls/ca.crt') }}"
   register: _instance_ca_raw
   when: (turbopanel_instance_runtime | default('deno')) == 'workers'
 

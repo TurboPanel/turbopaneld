@@ -2,6 +2,16 @@
 # Generates the platform CA + server leaf via the instance repo's node script.
 # The script is self-idempotent: it regenerates the leaf only when interface
 # addresses or SANs change, so running it on every converge is cheap.
+# The CA is durable under turbopanel_instance_ca_dir; this role never passes
+# TURBOPANEL_TLS_CA_ROTATE (leaf-only apply / converge).
+- name: Ensure durable platform CA directory exists
+  ansible.builtin.file:
+    path: "{{ turbopanel_instance_ca_dir }}"
+    state: directory
+    owner: "{{ instance_certs_owner if (turbopanel_dev_user | default('') | length > 0) else 'root' }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
 - name: Ensure instance certs directory exists for cert generation
   ansible.builtin.file:
     path: "{{ turbopanel_instance_dir }}/certs"
@@ -22,6 +32,10 @@
   environment:
     HOME: "{{ turbopanel_dev_root if (turbopanel_dev_user | default('') | length > 0) else turbopanel_instance_dir }}"
     PATH: "{{ turbopanel_runtime_path }}"
+    TURBOPANEL_STATE_DIR: "{{ turbopanel_state_dir }}"
+    TURBOPANEL_TLS_CA: "{{ turbopanel_instance_ca_dir }}/ca.crt"
+    TURBOPANEL_TLS_CA_KEY: "{{ turbopanel_instance_ca_dir }}/ca.key"
+    TURBOPANEL_TLS_CA_BUNDLE: "{{ turbopanel_instance_ca_dir }}/ca-bundle.pem"
     TURBOPANEL_TLS_EXTRA_SANS: "{{ turbopanel_tls_extra_sans | default('', true) }}"
     TURBOPANEL_PUBLIC_URLS: "{{ turbopanel_public_urls | default('', true) }}"
   changed_when: false
@@ -32,5 +46,12 @@
   ansible.builtin.file:
     path: "{{ turbopanel_instance_dir }}/certs/self-signed.key"
     owner: "{{ instance_certs_owner }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+
+- name: Harden platform CA key ownership
+  ansible.builtin.file:
+    path: "{{ turbopanel_instance_ca_dir }}/ca.key"
+    owner: "{{ instance_certs_owner if (turbopanel_dev_user | default('') | length > 0) else 'root' }}"
     group: "{{ turbopanel_group }}"
     mode: "0640"

@@ -10,6 +10,7 @@ export const COMMAND_TYPES = [
   "server.reboot",
   "server.timezone.set",
   "server.fabric.reconcile",
+  "server.tls.trust.reconcile",
   "environment.deploy",
   "environment.lifecycle",
   "environment.stop",
@@ -87,6 +88,19 @@ export type NtpSetResult = {
   ntpServers: string[];
   fallbackNtpServers?: string[];
   summary?: string;
+};
+
+/** Must stay in sync with the instance canonical `server.tls.trust.reconcile` shape. */
+export type TlsTrustReconcilePayload = {
+  bundlePem: string;
+  fingerprint: string;
+  allowRemoval?: boolean;
+};
+
+/** Must stay in sync with the instance canonical `server.tls.trust.reconcile` shape. */
+export type TlsTrustReconcileResult = {
+  applied: boolean;
+  fingerprint: string;
 };
 
 /** Must stay in sync with the instance canonical `server.fabric.reconcile` shape. */
@@ -1251,6 +1265,51 @@ export function parseTimezoneSetPayload(value: unknown): TimezoneSetPayload {
   }
   assertValidTimezone(timezone);
   return { timezone };
+}
+
+export function parseTlsTrustReconcilePayload(
+  value: unknown,
+): TlsTrustReconcilePayload {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Invalid tls trust reconcile payload");
+  }
+  const record = value as Record<string, unknown>;
+  const bundlePem = record.bundlePem;
+  const fingerprint = record.fingerprint;
+  if (typeof bundlePem !== "string" || bundlePem.trim().length === 0) {
+    throw new Error("bundlePem must be a non-empty PEM string");
+  }
+  if (typeof fingerprint !== "string" || fingerprint.trim().length === 0) {
+    throw new Error("fingerprint must be a non-empty string");
+  }
+  if (!bundlePem.includes("BEGIN CERTIFICATE")) {
+    throw new Error("bundlePem must contain at least one certificate");
+  }
+  const payload: TlsTrustReconcilePayload = { bundlePem, fingerprint };
+  if (record.allowRemoval !== undefined) {
+    if (typeof record.allowRemoval !== "boolean") {
+      throw new TypeError("allowRemoval must be a boolean");
+    }
+    payload.allowRemoval = record.allowRemoval;
+  }
+  return payload;
+}
+
+export function parseTlsTrustReconcileResult(
+  value: unknown,
+): TlsTrustReconcileResult {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Invalid tls trust reconcile result");
+  }
+  const record = value as Record<string, unknown>;
+  if (typeof record.applied !== "boolean") {
+    throw new TypeError("applied must be a boolean");
+  }
+  const fingerprint = record.fingerprint;
+  if (typeof fingerprint !== "string" || fingerprint.trim().length === 0) {
+    throw new Error("fingerprint must be a non-empty string");
+  }
+  return { applied: record.applied, fingerprint };
 }
 
 function parseOptionalNtpServerList(

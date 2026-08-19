@@ -7,6 +7,8 @@ import type {
   ManagedApplyCredential,
   ManagedApplyPayload,
 } from "../instance/commands/contracts.ts";
+import { resolveLayout } from "../paths/layout.ts";
+import { withTempLayout } from "../testing/temp-layout.ts";
 import { applyManagedEngineState, buildNeedsResyncMember } from "./apply.ts";
 
 /**
@@ -151,6 +153,102 @@ test("primary applyManagedEngineState still mutates credentials/databases", asyn
     "applyDatabases",
     "readVersion",
   ]);
+});
+
+test("primary applyManagedEngineState runs host prep then ensures ProxySQL monitor", async () => {
+  await withTempLayout(async (fixture) => {
+    const prior: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(fixture.env)) {
+      prior[key] = Deno.env.get(key);
+      Deno.env.set(key, value);
+    }
+    try {
+      const calls: string[] = [];
+      const credentials: ManagedApplyCredential[] = [
+        {
+          principalId: "p1",
+          username: "postgres",
+          role: "root",
+          databases: ["postgres"],
+          password: "secret",
+        },
+      ];
+      const payload = {
+        engine: "postgres",
+        databases: [{ action: "create", name: "appdb" }],
+        replication: {
+          role: "primary",
+          username: "tp_repl",
+          desiredSlots: ["tp_member_2"],
+        },
+      } as unknown as ManagedApplyPayload;
+
+      const engine = {
+        rootUsername: "postgres",
+        waitReady: () => {
+          calls.push("waitReady");
+          return Promise.resolve();
+        },
+        applyCredentials: () => {
+          calls.push("applyCredentials");
+          return Promise.resolve(["postgres"]);
+        },
+        applyDatabases: () => {
+          calls.push("applyDatabases");
+          return Promise.resolve(["appdb"]);
+        },
+        ensureProxySqlMonitor: (
+          _ctx: unknown,
+          creds: { user: string },
+        ) => {
+          calls.push(`ensure:${creds.user}`);
+          return Promise.resolve();
+        },
+        readVersion: () => {
+          calls.push("readVersion");
+          return Promise.resolve("18.0");
+        },
+      };
+
+      await applyManagedEngineState(
+        {} as never,
+        engine as never,
+        payload,
+        credentials,
+        {
+          runHostPrep: async () => {
+            calls.push("hostPrep");
+            const layout = resolveLayout(Deno.env.toObject());
+            await Deno.mkdir(`${layout.configDir}/proxysql`, {
+              recursive: true,
+            });
+            await Deno.writeTextFile(
+              `${layout.configDir}/proxysql/admin.cnf`,
+              "[client]\nuser=admin\npassword=admin-secret\n",
+            );
+            await Deno.writeTextFile(
+              `${layout.configDir}/proxysql/monitor.cnf`,
+              "[client]\nuser=tp_monitor\npassword=mon-s3cret\n",
+            );
+          },
+        },
+      );
+
+      assertEquals(calls, [
+        "waitReady",
+        "applyCredentials",
+        "hostPrep",
+        "ensure:tp_monitor",
+        "applyDatabases",
+        "readVersion",
+      ]);
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) Deno.env.delete(key);
+        else Deno.env.set(key, value);
+      }
+    }
+  });
 });
 
 test("standby applyManagedEngineState runs configureStandby when replication credential exists", async () => {

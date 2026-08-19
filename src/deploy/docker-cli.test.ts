@@ -89,6 +89,77 @@ test("runDocker retries via sudo -n -u self on docker.sock permission denied", a
   }
 });
 
+test("runDocker retries via sudo -n root when self-refresh still cannot open the socket", async () => {
+  const calls: Array<{ command: string; args: string[] }> = [];
+  const restore = setDockerCliIoForTest({
+    runRaw: (command, args) => {
+      calls.push({ command, args: [...args] });
+      if (command === "/usr/bin/docker") {
+        return Promise.resolve(
+          fail(
+            "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock",
+          ),
+        );
+      }
+      if (command === "/usr/bin/sudo" && args[0] === "-n" && args[1] === "-u") {
+        return Promise.resolve(
+          fail(
+            "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock",
+          ),
+        );
+      }
+      if (command === "/usr/bin/sudo" && args[0] === "-n" && args[1] === "--") {
+        return Promise.resolve(ok("27.1.0"));
+      }
+      return Promise.resolve(fail(`unexpected ${command}`));
+    },
+  });
+  const previousUser = Deno.env.get("USER");
+  Deno.env.set("USER", "tp");
+  try {
+    const result = await runDocker(["compose", "up", "-d"]);
+    assertEquals(result.success, true);
+    assertEquals(result.stdout, "27.1.0");
+    assertEquals(calls[2]?.command, "/usr/bin/sudo");
+    assertEquals(calls[2]?.args.slice(0, 3), ["-n", "--", "/usr/bin/docker"]);
+  } finally {
+    if (previousUser === undefined) Deno.env.delete("USER");
+    else Deno.env.set("USER", previousUser);
+    restore();
+  }
+});
+
+test("runDocker retries sudo when socket permission is on stdout", async () => {
+  const restore = setDockerCliIoForTest({
+    runRaw: (command) => {
+      if (command === "/usr/bin/docker") {
+        return Promise.resolve({
+          success: false,
+          code: 1,
+          stdout:
+            "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock",
+          stderr: "",
+        });
+      }
+      if (command === "/usr/bin/sudo") {
+        return Promise.resolve(ok("24.0.0"));
+      }
+      return Promise.resolve(fail(`unexpected ${command}`));
+    },
+  });
+  const previousUser = Deno.env.get("USER");
+  Deno.env.set("USER", "tp");
+  try {
+    const result = await runDocker(["ps"]);
+    assertEquals(result.success, true);
+    assertEquals(result.stdout, "24.0.0");
+  } finally {
+    if (previousUser === undefined) Deno.env.delete("USER");
+    else Deno.env.set("USER", previousUser);
+    restore();
+  }
+});
+
 test("runDocker prefers original stderr when sudo refresh also fails", async () => {
   const restore = setDockerCliIoForTest({
     runRaw: (command) => {

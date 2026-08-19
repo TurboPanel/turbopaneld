@@ -7,8 +7,8 @@ TURBOPANEL_IS_SIGNUP_ENABLED=1
 {% if turbopanel_dev_user | length > 0 %}
 TURBOPANEL_UI_CORS_ORIGINS={{ website_cors_origins }}
 {% endif %}
-# Platform CA (base64) so /api/daemon/v1/instance/ca can serve it to remote
-# daemons; the Workers runtime has no filesystem to read certs/ca.crt.
+# Platform CA bundle (base64) so /api/daemon/v1/instance/ca can serve it to remote
+# daemons; the Workers runtime has no filesystem to read the durable CA bundle.
 TURBOPANEL_TLS_CA_PEM_B64={{ turbopanel_instance_ca_pem_b64 | default('') }}
 {% if turbopanel_dev_user | length > 0 %}
 # Co-located dev: deliver signup/OTP email through local Mailpit (HTTP API).

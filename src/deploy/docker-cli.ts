@@ -7,6 +7,11 @@
  * install works. (`sg docker` is unsuitable: service accounts use
  * `/usr/sbin/nologin`, and `sg` then fails with "This account is currently not
  * available.")
+ *
+ * If the self-refresh still cannot reach the socket (user not in `docker`, or
+ * the socket is root-only), fall back to `sudo -n -- docker …`. Managed hosts
+ * grant `tp` passwordless sudo (`NOPASSWD:ALL`); that path reaches dockerd
+ * without waiting for a daemon restart.
  */
 
 const decoder = new TextDecoder();
@@ -75,9 +80,18 @@ function clearDockerInvocationCache(): void {
   cachedInvocationPromise = undefined;
 }
 
-function isDockerSocketPermissionError(stderr: string): boolean {
-  const lower = stderr.toLowerCase();
+function isDockerSocketPermissionError(text: string): boolean {
+  const lower = text.toLowerCase();
   return lower.includes("permission denied") && lower.includes("docker");
+}
+
+/** True when docker CLI reported a socket permission error on stdout or stderr. */
+export function dockerOutputLooksLikeSocketPermission(
+  stdout: string,
+  stderr: string,
+): boolean {
+  return isDockerSocketPermissionError(stderr) ||
+    isDockerSocketPermissionError(stdout);
 }
 
 async function runRawDefault(
@@ -164,10 +178,35 @@ async function runDockerWithFreshGroups(
   );
 }
 
+/** Last-resort: passwordless root docker when the daemon user cannot open the socket. */
+async function runDockerAsRoot(
+  args: string[],
+  options?: RunDockerOptions,
+): Promise<DockerCliResult> {
+  return await runRaw(
+    SUDO_BIN,
+    ["-n", "--", resolvedDockerBin(), ...args],
+    options,
+  );
+}
+
+function preferOriginalSocketError(
+  direct: DockerCliResult,
+  fallback: DockerCliResult,
+): DockerCliResult {
+  return {
+    success: false,
+    code: fallback.code || direct.code,
+    stdout: fallback.stdout || direct.stdout,
+    stderr: direct.stderr || fallback.stderr,
+  };
+}
+
 /**
  * Run `/usr/bin/docker …args`, retrying via `sudo -n -u <self>` when the
  * socket is permission-denied (stale process credentials after group
- * membership change).
+ * membership change), then `sudo -n -- docker` when that still cannot open
+ * the socket.
  *
  * Optional `options.input` is piped to stdin so secrets/SQL never appear on
  * argv. Do not pass secrets via environment — the sudo fallback would drop it.
@@ -177,19 +216,20 @@ export async function runDocker(
   options?: RunDockerOptions,
 ): Promise<DockerCliResult> {
   const direct = await runRaw(resolvedDockerBin(), args, options);
-  if (direct.success || !isDockerSocketPermissionError(direct.stderr)) {
+  if (
+    direct.success ||
+    !dockerOutputLooksLikeSocketPermission(direct.stdout, direct.stderr)
+  ) {
     return direct;
   }
 
   const refreshed = await runDockerWithFreshGroups(args, options);
   if (refreshed.success) return refreshed;
-  // Prefer the original docker.sock error when the refresh path also fails.
-  return {
-    success: false,
-    code: refreshed.code || direct.code,
-    stdout: refreshed.stdout || direct.stdout,
-    stderr: direct.stderr || refreshed.stderr,
-  };
+
+  const asRoot = await runDockerAsRoot(args, options);
+  if (asRoot.success) return asRoot;
+  // Prefer the original docker.sock error when both sudo paths also fail.
+  return preferOriginalSocketError(direct, asRoot);
 }
 
 /** True when `docker version` can talk to the Engine API. */
@@ -217,7 +257,10 @@ async function probeDockerInvocation(): Promise<DockerInvocation> {
     "--format",
     "{{.Server.Version}}",
   ]);
-  if (direct.success || !isDockerSocketPermissionError(direct.stderr)) {
+  if (
+    direct.success ||
+    !dockerOutputLooksLikeSocketPermission(direct.stdout, direct.stderr)
+  ) {
     return { bin: dockerBin, prefixArgs: [] };
   }
   const user = await currentUsername();

@@ -23,3 +23,6 @@ turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') 
 instance_certs_owner: "{{ turbopanel_user if (turbopanel_dev_user | default('') | length > 0) else instance_user }}"
 turbopanel_public_urls: ""
 turbopanel_tls_extra_sans: ""
+# Durable platform CA (not the replaceable instance checkout).
+turbopanel_state_dir: /var/lib/turbopanel
+turbopanel_instance_ca_dir: "{{ turbopanel_state_dir }}/tls"

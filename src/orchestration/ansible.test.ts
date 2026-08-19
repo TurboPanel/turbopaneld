@@ -1132,3 +1132,32 @@ test("devOwnershipPlaybookExtraArgs emits user uid gid and root", () => {
   );
   assertEquals(devOwnershipPlaybookExtraArgs({}), []);
 });
+
+test("instance-certs apply never passes a platform CA rotate flag", async () => {
+  const playbook = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "playbooks/instance-certs-apply.yml"),
+  );
+  const tasks = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/instance-certs/tasks/main.yml"),
+  );
+  const defaults = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/instance-certs/defaults/main.yml"),
+  );
+  assertEquals(
+    playbook.includes("TURBOPANEL_TLS_CA_ROTATE"),
+    false,
+    "instance-certs-apply.yml must not rotate the platform CA",
+  );
+  assertEquals(
+    tasks.includes("TURBOPANEL_TLS_CA_ROTATE:"),
+    false,
+    "instance-certs role must not pass TURBOPANEL_TLS_CA_ROTATE",
+  );
+  assertMatch(
+    defaults,
+    /turbopanel_instance_ca_dir:\s*"\{\{\s*turbopanel_state_dir\s*\}\}\/tls"/,
+    "durable platform CA dir",
+  );
+  assertMatch(tasks, /TURBOPANEL_TLS_CA:/, "pass TURBOPANEL_TLS_CA");
+  assertMatch(tasks, /TURBOPANEL_TLS_CA_BUNDLE:/, "pass TURBOPANEL_TLS_CA_BUNDLE");
+});

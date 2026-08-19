@@ -194,14 +194,104 @@ export interface InstanceHttpClientOptions {
   env?: Record<string, string | undefined>;
 }
 
-/** Build an HTTP client that trusts the platform CA PEM when a path is provided. */
+const PEM_CERT_BEGIN = "-----BEGIN CERTIFICATE-----";
+const PEM_CERT_END = "-----END CERTIFICATE-----";
+
+/** Split a PEM file into individual CERTIFICATE blocks (current first). */
+export function splitPemBundle(pem: string): string[] {
+  const normalized = pem.replaceAll("\r\n", "\n");
+  const blocks: string[] = [];
+  let searchFrom = 0;
+  while (searchFrom < normalized.length) {
+    const begin = normalized.indexOf(PEM_CERT_BEGIN, searchFrom);
+    if (begin < 0) break;
+    const end = normalized.indexOf(PEM_CERT_END, begin + PEM_CERT_BEGIN.length);
+    if (end < 0) break;
+    const blockEnd = end + PEM_CERT_END.length;
+    blocks.push(`${normalized.slice(begin, blockEnd).trim()}\n`);
+    searchFrom = blockEnd;
+  }
+  return blocks;
+}
+
+function pemBodyToDer(block: string): Uint8Array {
+  const begin = block.indexOf(PEM_CERT_BEGIN);
+  const end = block.indexOf(PEM_CERT_END, begin + PEM_CERT_BEGIN.length);
+  const b64 = block
+    .slice(begin + PEM_CERT_BEGIN.length, end)
+    .replaceAll(/\s+/g, "");
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.codePointAt(i) ?? 0;
+  }
+  return bytes;
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
+    "",
+  );
+}
+
+/** SHA-256 fingerprint (lowercase hex, no colons) of the first CERTIFICATE in a PEM bundle. */
+export async function fingerprintPemCertificate(pem: string): Promise<string> {
+  const blocks = splitPemBundle(pem);
+  const first = blocks[0];
+  if (!first) {
+    throw new Error("PEM bundle contains no certificates");
+  }
+  const der = pemBodyToDer(first);
+  const copy = new Uint8Array(der.length);
+  copy.set(der);
+  const digest = await crypto.subtle.digest("SHA-256", copy);
+  return bytesToHex(new Uint8Array(digest));
+}
+
+export function normalizeCaFingerprint(value: string): string {
+  return value.trim().toLowerCase().replaceAll(":", "").replaceAll(" ", "");
+}
+
+type PlatformCaHttpClientCache = {
+  path: string;
+  mtimeMs: number;
+  size: number;
+  client: Deno.HttpClient;
+};
+
+let platformCaHttpClientCache: PlatformCaHttpClientCache | undefined;
+
+/** Drop the cached HTTP client so the next connect re-reads the CA bundle. */
+export function invalidatePlatformCaHttpClient(): void {
+  platformCaHttpClientCache = undefined;
+}
+
+/** Build an HTTP client that trusts every certificate in the platform CA PEM bundle. */
 export async function createHttpClientFromCaPath(
   caCertPath: string | undefined,
 ): Promise<Deno.HttpClient | undefined> {
   const trimmed = caCertPath?.trim();
   if (!trimmed) return undefined;
-  const cert = await Deno.readTextFile(trimmed);
-  return Deno.createHttpClient({ caCerts: [cert] });
+  const stat = await Deno.stat(trimmed);
+  const mtimeMs = stat.mtime?.getTime() ?? 0;
+  const size = stat.size;
+  const cached = platformCaHttpClientCache;
+  if (
+    cached &&
+    cached.path === trimmed &&
+    cached.mtimeMs === mtimeMs &&
+    cached.size === size
+  ) {
+    return cached.client;
+  }
+  const pem = await Deno.readTextFile(trimmed);
+  const certs = splitPemBundle(pem);
+  if (certs.length === 0) {
+    throw new Error(`platform CA PEM at ${trimmed} contains no certificates`);
+  }
+  const client = Deno.createHttpClient({ caCerts: certs });
+  platformCaHttpClientCache = { path: trimmed, mtimeMs, size, client };
+  return client;
 }
 
 /**

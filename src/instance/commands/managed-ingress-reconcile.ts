@@ -26,7 +26,9 @@ import {
   assertProxySqlHostRegularFile,
   loadProxySqlAdminCredentials,
   loadProxySqlMonitorCredentials,
+  proxySqlHostPrepPresent,
 } from "../../managed/proxysql-admin.ts";
+import { runProxySqlSetup } from "../../orchestration/ansible.ts";
 import {
   assertManagedIngressPortsBindable,
   assertNoFrontendUserConflict,
@@ -62,6 +64,8 @@ export type ManagedIngressReconcileHandlerDeps = {
   decryptSecrets?: DecryptSecretsFn;
   runDocker?: RunDockerFn;
   ensureDocker?: () => Promise<void>;
+  /** Test seam — defaults to {@link runProxySqlSetup}. */
+  runHostPrep?: () => Promise<void>;
   /** Test seam for the listener-port preflight (defaults to a real bind probe). */
   probeHostPort?: ProbeHostPortFn;
 };
@@ -290,6 +294,7 @@ export async function handleManagedIngressReconcile(
   const layout = resolveLayout(Deno.env.toObject());
   const run = deps?.runDocker ?? defaultRunDocker;
   const ensureDockerFn = deps?.ensureDocker ?? defaultEnsureDocker;
+  const runHostPrep = deps?.runHostPrep ?? runProxySqlSetup;
 
   if (parsed.clusters.length === 0) {
     return await tearDownProxySqlStack(
@@ -298,6 +303,10 @@ export async function handleManagedIngressReconcile(
       daemonReceivedAt,
       run,
     );
+  }
+
+  if (!(await proxySqlHostPrepPresent(layout))) {
+    await runHostPrep();
   }
 
   if (!deps?.decryptSecrets) {

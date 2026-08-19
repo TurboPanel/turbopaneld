@@ -26,6 +26,7 @@ import {
   parseRebootPayload,
   parseSystemReconcilePayload,
   parseTimezoneSetPayload,
+  parseTlsTrustReconcilePayload,
 } from "./contracts.ts";
 import { handleEnvironmentDeploy } from "./deploy-environment.ts";
 import { handleManagedApply } from "../../managed/apply.ts";
@@ -48,6 +49,7 @@ import { handleNtp } from "./ntp.ts";
 import { handlePing } from "./ping.ts";
 import { handleReboot } from "./reboot.ts";
 import { handleTimezone } from "./timezone.ts";
+import { handleTlsTrust } from "./tls-trust.ts";
 import { handleFabricReconcile } from "./fabric.ts";
 
 export interface CommandRouterDeps {
@@ -176,6 +178,13 @@ export async function handleCommandDispatch(
         result = await handleFabricReconcile(payload, daemonReceivedAt, {
           decryptSecrets: deps?.decryptSecrets,
         });
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
+      case "server.tls.trust.reconcile": {
+        const payload = parseTlsTrustReconcilePayload(message.payload);
+        result = await handleTlsTrust(payload, daemonReceivedAt);
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;

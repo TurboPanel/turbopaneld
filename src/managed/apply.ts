@@ -11,11 +11,16 @@ import type {
 import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts";
 import {
   type DockerCliResult,
+  dockerOutputLooksLikeSocketPermission,
   runDocker as defaultRunDocker,
   type RunDockerOptions,
 } from "../deploy/docker-cli.ts";
 import { logInfo, sanitizeForLog } from "../logger.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
+import {
+  runDockerSetup as defaultRunDockerSetup,
+  runProxySqlSetup,
+} from "../orchestration/ansible.ts";
 import {
   assertPublicPrivateListenerTls,
   MANAGED_ROOT_PASSWORD_VAR,
@@ -38,7 +43,10 @@ import {
   managedComposeProject,
   managedEnvFilePath,
 } from "./paths.ts";
-import { loadProxySqlMonitorCredentials } from "./proxysql-admin.ts";
+import {
+  loadProxySqlMonitorCredentials,
+  proxySqlHostPrepPresent,
+} from "./proxysql-admin.ts";
 
 type DecryptSecretsFn = (ciphertexts: string[]) => Promise<(string | null)[]>;
 type RunDockerFn = (
@@ -52,6 +60,10 @@ export type ManagedApplyHandlerDeps = {
   runDocker?: RunDockerFn;
   /** Test seam — defaults to {@link defaultEnsureDocker}. */
   ensureDocker?: () => Promise<void>;
+  /** Test seam — defaults to {@link defaultRunDockerSetup}. */
+  runDockerSetup?: () => Promise<void>;
+  /** Test seam — defaults to {@link runProxySqlSetup}. */
+  runHostPrep?: () => Promise<void>;
 };
 
 function redactSecrets(text: string, plaintexts: readonly string[]): string {
@@ -181,6 +193,22 @@ async function rewriteDaemonOwnedFile(
   await Deno.chmod(path, mode);
 }
 
+async function composeUpWithDockerRetry(
+  run: RunDockerFn,
+  args: string[],
+  runDockerSetup: () => Promise<void>,
+): Promise<DockerCliResult> {
+  const first = await run(args);
+  if (
+    first.success ||
+    !dockerOutputLooksLikeSocketPermission(first.stdout, first.stderr)
+  ) {
+    return first;
+  }
+  await runDockerSetup();
+  return await run(args);
+}
+
 async function composeUpManagedEngine(
   layout: LayoutPaths,
   payload: ManagedApplyPayload,
@@ -188,6 +216,7 @@ async function composeUpManagedEngine(
   rootCredential: ManagedApplyCredential,
   redact: (text: string) => string,
   run: RunDockerFn,
+  runDockerSetup: () => Promise<void>,
 ): Promise<string> {
   const composePath = managedComposePath(layout, payload.managedId);
   const envPath = managedEnvFilePath(layout, payload.managedId);
@@ -202,18 +231,22 @@ async function composeUpManagedEngine(
       0o600,
     );
 
-    const up = await run([
-      "compose",
-      "--env-file",
-      envPath,
-      "-p",
-      project,
-      "-f",
-      composePath,
-      "up",
-      "-d",
-      "--remove-orphans",
-    ]);
+    const up = await composeUpWithDockerRetry(
+      run,
+      [
+        "compose",
+        "--env-file",
+        envPath,
+        "-p",
+        project,
+        "-f",
+        composePath,
+        "up",
+        "-d",
+        "--remove-orphans",
+      ],
+      runDockerSetup,
+    );
     if (!up.success) {
       throw new Error(
         `managed.apply compose up failed: ${
@@ -259,6 +292,7 @@ export async function applyManagedEngineState(
   engine: ReturnType<typeof getManagedEngineRuntime>,
   payload: ManagedApplyPayload,
   credentials: ManagedApplyCredential[],
+  deps?: { runHostPrep?: () => Promise<void> },
 ): Promise<
   {
     appliedUsers: string[];
@@ -291,11 +325,68 @@ export async function applyManagedEngineState(
   const appliedUsers = await engine.applyCredentials(ctx, credentials);
   await dropManagedUsers(ctx, engine, payload, appliedUsers);
   if (engine.ensureProxySqlMonitor) {
-    const monitor = await loadProxySqlMonitorCredentials(
-      resolveLayout(Deno.env.toObject()),
-    );
+    const layout = resolveLayout(Deno.env.toObject());
+    const prepPresent = await proxySqlHostPrepPresent(layout);
+    let ranHostPrep = false;
+    if (!prepPresent && deps?.runHostPrep) {
+      await deps.runHostPrep();
+      ranHostPrep = true;
+    }
+    const monitor = await loadProxySqlMonitorCredentials(layout);
+    const prepPresentAfter = await proxySqlHostPrepPresent(layout);
+    // #region agent log
+    fetch("http://localhost:7928/ingest/ca9ed83a-836b-44e5-96a8-2a946923e182", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Debug-Session-Id": "323212",
+      },
+      body: JSON.stringify({
+        sessionId: "323212",
+        runId: "monitor-fix",
+        hypothesisId: "M1",
+        location: "apply.ts:applyManagedEngineState",
+        message: "proxysql monitor ensure",
+        data: {
+          prepPresent,
+          ranHostPrep,
+          prepPresentAfter,
+          monitorLoaded: monitor !== null,
+          monitorUser: monitor?.user ?? null,
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
     if (monitor) {
       await engine.ensureProxySqlMonitor(ctx, monitor);
+      logInfo("managed", "managed.apply ensured ProxySQL monitor role");
+      // #region agent log
+      fetch(
+        "http://localhost:7928/ingest/ca9ed83a-836b-44e5-96a8-2a946923e182",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Debug-Session-Id": "323212",
+          },
+          body: JSON.stringify({
+            sessionId: "323212",
+            runId: "monitor-fix",
+            hypothesisId: "M4",
+            location: "apply.ts:applyManagedEngineState:ensured",
+            message: "proxysql monitor role sql applied",
+            data: { monitorUser: monitor.user },
+            timestamp: Date.now(),
+          }),
+        },
+      ).catch(() => {});
+      // #endregion
+    } else {
+      logInfo(
+        "managed",
+        "managed.apply skipped ProxySQL monitor role (monitor.cnf missing)",
+      );
     }
   }
   const appliedDatabases = payload.databases
@@ -444,6 +535,8 @@ export async function handleManagedApply(
   const engine = getManagedEngineRuntime(payload.engine);
   const run = deps?.runDocker ?? defaultRunDocker;
   const ensureDocker = deps?.ensureDocker ?? defaultEnsureDocker;
+  const runDockerSetup = deps?.runDockerSetup ?? defaultRunDockerSetup;
+  const runHostPrep = deps?.runHostPrep ?? runProxySqlSetup;
 
   await ensureDocker();
 
@@ -515,6 +608,7 @@ export async function handleManagedApply(
     rootCredential,
     redact,
     run,
+    runDockerSetup,
   );
 
   // Scope the public listener once the publish exists; never blocks apply.
@@ -540,6 +634,7 @@ export async function handleManagedApply(
       engine,
       payload,
       decrypted.credentials,
+      { runHostPrep },
     );
 
     const member = await collectMemberHealth(

@@ -45,6 +45,7 @@ const INSTANCE_COMMAND_TYPES = [
   "server.reboot",
   "server.timezone.set",
   "server.fabric.reconcile",
+  "server.tls.trust.reconcile",
   "environment.deploy",
   "environment.lifecycle",
   "environment.stop",

@@ -19,6 +19,7 @@ import {
   parseProxySqlMonitorCnf,
   PROXYSQL_ADMIN_DEFAULTS_PATH,
   PROXYSQL_MONITOR_USERNAME,
+  proxySqlHostPrepPresent,
 } from "./proxysql-admin.ts";
 import { proxysqlAdminCnfPath, proxysqlMonitorCnfPath } from "./paths.ts";
 
@@ -102,6 +103,38 @@ test("loadProxySqlAdminCredentials rejects directory scar at admin.cnf path", as
       TypeError,
       "directory",
     );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("proxySqlHostPrepPresent is false until admin.cnf and monitor.cnf are regular files", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    assertEquals(await proxySqlHostPrepPresent(layout), false);
+    await Deno.mkdir(proxysqlAdminCnfPath(layout), {
+      recursive: true,
+      mode: 0o755,
+    });
+    assertEquals(await proxySqlHostPrepPresent(layout), false);
+    await Deno.remove(proxysqlAdminCnfPath(layout));
+    await Deno.mkdir(layout.configDir + "/proxysql", {
+      recursive: true,
+      mode: 0o750,
+    });
+    await Deno.writeTextFile(
+      proxysqlAdminCnfPath(layout),
+      "[client]\nuser=admin\npassword=admin\n",
+      { mode: 0o600 },
+    );
+    assertEquals(await proxySqlHostPrepPresent(layout), false);
+    await Deno.writeTextFile(
+      proxysqlMonitorCnfPath(layout),
+      "[client]\nuser=tp_monitor\npassword=mon-pass\n",
+      { mode: 0o600 },
+    );
+    assertEquals(await proxySqlHostPrepPresent(layout), true);
   } finally {
     await fixture.cleanup();
   }

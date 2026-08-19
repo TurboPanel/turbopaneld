@@ -6,9 +6,11 @@ import {
 import {
   createInstanceHttpClient,
   describeInstance,
+  fingerprintPemCertificate,
   type InstanceConfig,
   instanceUrl,
   instanceWebSocketUrl,
+  normalizeCaFingerprint,
   resolveInstanceCaPath,
   resolveInstanceConfig,
   resolveServerIdentityDir,
@@ -345,7 +347,8 @@ export async function clearDaemonKeyState(stateDir: string): Promise<void> {
 
 export class InstanceClient {
   readonly #config: InstanceConfig;
-  readonly #httpClient: Deno.HttpClient | undefined;
+  #httpClient: Deno.HttpClient | undefined;
+  readonly #httpClientPinned: boolean;
   readonly #initialBackoffMs: number;
   readonly #maxBackoffMs: number;
   readonly #onMessage?: (message: DaemonMessage) => void;
@@ -368,6 +371,7 @@ export class InstanceClient {
   #secretsRehydrateInFlight = false;
   #parked = false;
   #parkedReason: string | undefined;
+  #parkedKind: "permanent" | "tls-trust" | undefined;
   #parkedBackoffMs = PARKED_BACKOFF_MIN_MS;
   #licenseStamp: string | undefined;
   #idlePresence: IdlePresence | undefined;
@@ -382,6 +386,7 @@ export class InstanceClient {
   constructor(options: InstanceClientOptions = {}) {
     this.#config = options.config ?? resolveInstanceConfig();
     this.#httpClient = options.httpClient;
+    this.#httpClientPinned = options.httpClient !== undefined;
     this.#applyDevSyncTarball = Object.hasOwn(options, "applyDevSyncTarball")
       ? options.applyDevSyncTarball
       : getCheckoutDevSyncApply();
@@ -400,6 +405,44 @@ export class InstanceClient {
 
   get target(): string {
     return describeInstance(this.#config);
+  }
+
+  /** Re-read the platform CA bundle (mtime+size cached) unless tests pinned a client. */
+  async refreshPlatformCaClient(): Promise<void> {
+    if (this.#httpClientPinned) return;
+    const env = Deno.env.toObject();
+    const caCertPath = resolveInstanceCaPath(env);
+    const next = await createInstanceHttpClient(this.#config, {
+      caCertPath,
+      env,
+    });
+    if (next !== this.#httpClient) {
+      this.#httpClient = next;
+      this.#tokenManager = undefined;
+      this.#jwksClient = undefined;
+      this.#apiClient = undefined;
+    }
+    await this.#logCaFingerprintMismatch(caCertPath, env);
+  }
+
+  async #logCaFingerprintMismatch(
+    caCertPath: string | undefined,
+    env: Record<string, string | undefined>,
+  ): Promise<void> {
+    const expected = env.TURBOPANEL_INSTANCE_CA_FINGERPRINT?.trim();
+    if (!expected || !caCertPath) return;
+    try {
+      const pem = await Deno.readTextFile(caCertPath);
+      const actual = await fingerprintPemCertificate(pem);
+      if (normalizeCaFingerprint(expected) !== actual) {
+        logWarn(
+          "instance",
+          `tls-trust: expected CA fingerprint ${expected} but ${caCertPath} is ${actual}`,
+        );
+      }
+    } catch {
+      // Handshake classification reports unreadable CA material.
+    }
   }
 
   #fetchInit(
@@ -614,7 +657,9 @@ export class InstanceClient {
     this.#metricsScheduler?.detach();
     const classified = classifyConnectFailure(err);
     if (classified.kind === "permanent") {
-      await this.#enterParkedState(classified.reason);
+      await this.#enterParkedState(classified.reason, "permanent");
+    } else if (classified.kind === "tls-trust") {
+      await this.#enterParkedState(classified.reason, "tls-trust");
     } else {
       this.#increaseBackoff();
     }
@@ -633,11 +678,33 @@ export class InstanceClient {
     ).join("");
   }
 
-  async #enterParkedState(reason: string): Promise<void> {
+  async #enterParkedState(
+    reason: string,
+    kind: "permanent" | "tls-trust" = "permanent",
+  ): Promise<void> {
     this.#parked = true;
     this.#parkedReason = reason;
+    this.#parkedKind = kind;
     this.#forceEnrollPending = false;
     this.#licenseStamp = await this.#readLicenseStamp();
+    if (kind === "tls-trust") {
+      const caPath = resolveInstanceCaPath() ?? "(none)";
+      let fingerprint = "(unreadable)";
+      try {
+        if (caPath !== "(none)") {
+          fingerprint = await fingerprintPemCertificate(
+            await Deno.readTextFile(caPath),
+          );
+        }
+      } catch {
+        fingerprint = "(unreadable)";
+      }
+      logError(
+        "instance",
+        `tls-trust: platform CA does not validate the control plane (host=${sanitizeForLog(this.target)} caPath=${caPath} fingerprint=${fingerprint}); parked — re-run the installer with --instance-ca or --insecure-tls`,
+      );
+      return;
+    }
     logError(
       "instance",
       `daemon control-plane permanently rejected enrollment (${reason}); parked — install a fresh registration key (Add Server) or point TURBOPANEL_INSTANCE_URL at the correct control plane, then the daemon auto-recovers`,
@@ -657,6 +724,7 @@ export class InstanceClient {
   }
 
   async #shouldUnpark(): Promise<boolean> {
+    if (this.#parkedKind === "tls-trust") return true;
     if (isTruthyFlag(Deno.env.get("TURBOPANEL_FORCE_ENROLL"))) return true;
     const stamp = await this.#readLicenseStamp();
     return stamp !== this.#licenseStamp;
@@ -664,14 +732,20 @@ export class InstanceClient {
 
   #unpark(): void {
     const reason = this.#parkedReason ?? "unknown";
+    const kind = this.#parkedKind;
     this.#parked = false;
     this.#parkedReason = undefined;
+    this.#parkedKind = undefined;
     this.#parkedBackoffMs = PARKED_BACKOFF_MIN_MS;
     this.#resetBackoff();
-    this.#forceEnrollPending = true;
+    if (kind !== "tls-trust") {
+      this.#forceEnrollPending = true;
+    }
     logDebug(
       "instance",
-      `unparking after permanent rejection (${reason}); retrying enrollment`,
+      kind === "tls-trust"
+        ? `unparking after tls-trust failure (${reason}); retrying with a fresh CA read`
+        : `unparking after permanent rejection (${reason}); retrying enrollment`,
     );
   }
 
@@ -833,6 +907,7 @@ export class InstanceClient {
   }
 
   async #connectOnce(): Promise<void> {
+    await this.refreshPlatformCaClient();
     await this.#waitForConnectPreconditions();
 
     // Do not close the active socket here: by the time #connectOnce() is called
@@ -1730,17 +1805,13 @@ export async function connectInstance(
 ): Promise<InstanceClient> {
   const initialBackoffMs = normalizeReconnectDelayMs(options.reconnectDelayMs);
   const config = options.config ?? resolveInstanceConfig();
-  const env = Deno.env.toObject();
-  const caCertPath = resolveInstanceCaPath(env);
-  const httpClient = options.httpClient ??
-    await createInstanceHttpClient(config, { caCertPath });
 
   const client = new InstanceClient({
     ...options,
     config,
-    httpClient,
     reconnectDelayMs: initialBackoffMs,
   });
+  await client.refreshPlatformCaClient();
 
   const socketMode = isColocatedSocketMode(config);
 

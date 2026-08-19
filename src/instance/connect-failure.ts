@@ -4,7 +4,8 @@ export type ConnectFailureClass =
   | "transient"
   | "temporary-auth"
   | "stale-identity"
-  | "permanent";
+  | "permanent"
+  | "tls-trust";
 
 export type ClassifiedConnectFailure = {
   kind: ConnectFailureClass;
@@ -98,6 +99,20 @@ function failureReason(err: unknown): string {
   return "network or transport failure";
 }
 
+const TLS_TRUST_ERROR_NEEDLES = [
+  "invalid peer certificate",
+  "unknownissuer",
+  "notvalidforname",
+  "certexpired",
+] as const;
+
+function isTlsTrustFailure(err: unknown): boolean {
+  if (err instanceof DaemonApiError) return false;
+  const text = err instanceof Error ? err.message : String(err);
+  const lowered = text.toLowerCase();
+  return TLS_TRUST_ERROR_NEEDLES.some((needle) => lowered.includes(needle));
+}
+
 /**
  * Classify a connect-path throwable for reconnect policy.
  *
@@ -112,6 +127,9 @@ export function classifyConnectFailure(
   }
   if (isClassifierStaleIdentity(err)) {
     return { kind: "stale-identity", reason: failureReason(err) };
+  }
+  if (isTlsTrustFailure(err)) {
+    return { kind: "tls-trust", reason: failureReason(err) };
   }
   return { kind: "transient", reason: failureReason(err) };
 }

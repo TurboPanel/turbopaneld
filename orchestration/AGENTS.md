@@ -48,7 +48,8 @@ Shared **managed-database ingress** on every host that will run managed
 engines. Host prerequisites only — **not** a full stack bring-up of compose
 content. Meta-depends on the `docker` role. Standalone playbook:
 `playbooks/proxysql-setup.yml` (invoked by daemon `runProxySqlSetup` after
-`ensureGalaxyDockerRole`). Co-located dev installs the role via
+`ensureGalaxyDockerRole`, including **lazily from `managed.ingress.reconcile`**
+when host `admin.cnf` is missing). Co-located dev also installs the role via
 `instance-dev-install` / `dev-converge-manifest.json` (after `system-compose`).
 
 **Docker bind-mount scars:** if `admin.cnf` or `proxysql.cnf` were missing when

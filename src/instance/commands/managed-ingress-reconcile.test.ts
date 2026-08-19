@@ -89,6 +89,10 @@ async function seedFixture(fixture: TempLayoutFixture): Promise<void> {
     `${proxysqlConfigDir(layout)}/admin.cnf`,
     "[client]\nuser=admin\npassword=admin-secret\n",
   );
+  await Deno.writeTextFile(
+    `${proxysqlConfigDir(layout)}/monitor.cnf`,
+    "[client]\nuser=tp_monitor\npassword=mon-secret\n",
+  );
 }
 
 function fakeRun(): (args: string[]) => Promise<DockerCliResult> {
@@ -569,6 +573,87 @@ test({
         assertEquals(result.restarted, false);
         assertEquals(result.containers, []);
         assertEquals(dockerArgs.length, 0);
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleManagedIngressReconcile runs host prep when admin.cnf is missing",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env);
+      await writeSystemComponentDescriptor(layout, {
+        component: SYSTEM_MANAGED_INGRESS_COMPONENT,
+        serviceId: PROXYSQL_SERVICE_ID,
+        composeServiceName: "proxysql",
+        containerName: `${PROXYSQL_SERVICE_ID}-sql`,
+        role: "turbopanel",
+      });
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      let hostPrepCalls = 0;
+      try {
+        const result = await handleManagedIngressReconcile(
+          basePayload(),
+          new Date().toISOString(),
+          {
+            runDocker: fakeRun(),
+            decryptSecrets: decryptSecretsEcho,
+            ensureDocker: () => Promise.resolve(),
+            runHostPrep: async () => {
+              hostPrepCalls += 1;
+              await Deno.mkdir(proxysqlConfigDir(layout), { recursive: true });
+              await Deno.writeTextFile(
+                `${proxysqlConfigDir(layout)}/admin.cnf`,
+                "[client]\nuser=admin\npassword=admin-secret\n",
+              );
+              await Deno.writeTextFile(
+                `${proxysqlConfigDir(layout)}/monitor.cnf`,
+                "[client]\nuser=tp_monitor\npassword=mon-secret\n",
+              );
+            },
+          },
+        );
+        assertEquals(hostPrepCalls, 1);
+        assertEquals(result.restarted, true);
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name: "handleManagedIngressReconcile skips host prep when admin.cnf exists",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedFixture(fixture);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      let hostPrepCalls = 0;
+      try {
+        await handleManagedIngressReconcile(
+          basePayload(),
+          new Date().toISOString(),
+          {
+            runDocker: fakeRun(),
+            decryptSecrets: decryptSecretsEcho,
+            ensureDocker: () => Promise.resolve(),
+            runHostPrep: () => {
+              hostPrepCalls += 1;
+              return Promise.resolve();
+            },
+          },
+        );
+        assertEquals(hostPrepCalls, 0);
       } finally {
         Deno.env.delete("TURBOPANEL_STATE_DIR");
         Deno.env.delete("TURBOPANEL_CONFIG_DIR");
