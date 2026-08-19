@@ -1344,26 +1344,98 @@ test("managed.apply admits every catalog series and variant", () => {
     image: string;
     username: string;
   }> = [
-    { engine: "postgres", image: "docker.io/library/postgres:18-alpine", username: "postgres" },
-    { engine: "postgres", image: "docker.io/library/postgres:18", username: "postgres" },
-    { engine: "postgres", image: "docker.io/library/postgres:17-alpine", username: "postgres" },
-    { engine: "postgres", image: "docker.io/library/postgres:17", username: "postgres" },
-    { engine: "postgres", image: "docker.io/library/postgres:16-alpine", username: "postgres" },
-    { engine: "postgres", image: "docker.io/library/postgres:16", username: "postgres" },
-    { engine: "postgres", image: "docker.io/library/postgres:15-alpine", username: "postgres" },
-    { engine: "postgres", image: "docker.io/library/postgres:15", username: "postgres" },
+    {
+      engine: "postgres",
+      image: "docker.io/library/postgres:18-alpine",
+      username: "postgres",
+    },
+    {
+      engine: "postgres",
+      image: "docker.io/library/postgres:18",
+      username: "postgres",
+    },
+    {
+      engine: "postgres",
+      image: "docker.io/library/postgres:17-alpine",
+      username: "postgres",
+    },
+    {
+      engine: "postgres",
+      image: "docker.io/library/postgres:17",
+      username: "postgres",
+    },
+    {
+      engine: "postgres",
+      image: "docker.io/library/postgres:16-alpine",
+      username: "postgres",
+    },
+    {
+      engine: "postgres",
+      image: "docker.io/library/postgres:16",
+      username: "postgres",
+    },
+    {
+      engine: "postgres",
+      image: "docker.io/library/postgres:15-alpine",
+      username: "postgres",
+    },
+    {
+      engine: "postgres",
+      image: "docker.io/library/postgres:15",
+      username: "postgres",
+    },
     { engine: "mysql", image: "docker.io/library/mysql:9.7", username: "root" },
-    { engine: "mysql", image: "docker.io/library/mysql:9.7-oraclelinux9", username: "root" },
+    {
+      engine: "mysql",
+      image: "docker.io/library/mysql:9.7-oraclelinux9",
+      username: "root",
+    },
     { engine: "mysql", image: "docker.io/library/mysql:8.4", username: "root" },
-    { engine: "mysql", image: "docker.io/library/mysql:8.4-oraclelinux9", username: "root" },
-    { engine: "mariadb", image: "docker.io/library/mariadb:12.3", username: "root" },
-    { engine: "mariadb", image: "docker.io/library/mariadb:12.3-ubi", username: "root" },
-    { engine: "mariadb", image: "docker.io/library/mariadb:11.8", username: "root" },
-    { engine: "mariadb", image: "docker.io/library/mariadb:11.8-ubi", username: "root" },
-    { engine: "mariadb", image: "docker.io/library/mariadb:11.4", username: "root" },
-    { engine: "mariadb", image: "docker.io/library/mariadb:11.4-ubi", username: "root" },
-    { engine: "mariadb", image: "docker.io/library/mariadb:10.11", username: "root" },
-    { engine: "mariadb", image: "docker.io/library/mariadb:10.11-ubi", username: "root" },
+    {
+      engine: "mysql",
+      image: "docker.io/library/mysql:8.4-oraclelinux9",
+      username: "root",
+    },
+    {
+      engine: "mariadb",
+      image: "docker.io/library/mariadb:12.3",
+      username: "root",
+    },
+    {
+      engine: "mariadb",
+      image: "docker.io/library/mariadb:12.3-ubi",
+      username: "root",
+    },
+    {
+      engine: "mariadb",
+      image: "docker.io/library/mariadb:11.8",
+      username: "root",
+    },
+    {
+      engine: "mariadb",
+      image: "docker.io/library/mariadb:11.8-ubi",
+      username: "root",
+    },
+    {
+      engine: "mariadb",
+      image: "docker.io/library/mariadb:11.4",
+      username: "root",
+    },
+    {
+      engine: "mariadb",
+      image: "docker.io/library/mariadb:11.4-ubi",
+      username: "root",
+    },
+    {
+      engine: "mariadb",
+      image: "docker.io/library/mariadb:10.11",
+      username: "root",
+    },
+    {
+      engine: "mariadb",
+      image: "docker.io/library/mariadb:10.11-ubi",
+      username: "root",
+    },
   ];
   for (const row of catalog) {
     assertEquals(

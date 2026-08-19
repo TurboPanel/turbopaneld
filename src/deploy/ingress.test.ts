@@ -799,7 +799,10 @@ test("syncTcpUdpIngressEntries rejects org-overridden ProxySQL listener ports", 
 
 test("buildProxysqlReservedPublishedPorts unions defaults with effective org ports", () => {
   assertEquals(
-    [...buildProxysqlReservedPublishedPorts({ postgres: 18_432, mysqlFamily: 18_306 })].sort(
+    [...buildProxysqlReservedPublishedPorts({
+      postgres: 18_432,
+      mysqlFamily: 18_306,
+    })].sort(
       (a, b) => a - b,
     ),
     [15_432, 16_306, 18_306, 18_432, 33_001, 33_002],

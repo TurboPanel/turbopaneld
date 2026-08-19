@@ -1046,12 +1046,16 @@ test("compose publishes organization-configured listener ports", () => {
 
 test("compose falls back to the platform default listener ports", () => {
   const explicit = proxysqlCompose(
-    DESCRIPTOR, ["203.0.113.5"],
+    DESCRIPTOR,
+    ["203.0.113.5"],
     [],
     DEFAULT_PROXYSQL_LISTENER_PORTS,
   );
   assertEquals(proxysqlCompose(DESCRIPTOR, ["203.0.113.5"]), explicit);
-  assertEquals(proxysqlCompose(DESCRIPTOR, ["203.0.113.5"], [], null), explicit);
+  assertEquals(
+    proxysqlCompose(DESCRIPTOR, ["203.0.113.5"], [], null),
+    explicit,
+  );
   assertStringIncludes(explicit, `:${PGSQL_PORT}:${PGSQL_PORT}`);
   assertStringIncludes(explicit, `:${MYSQL_PORT}:${MYSQL_PORT}`);
 });

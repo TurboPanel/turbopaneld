@@ -35,8 +35,8 @@ import {
   ORCHESTRATOR_PROJECT,
   orchestratorApiCnfPath,
   orchestratorComposePath,
-  orchestratorConfPath,
   orchestratorConfigDir,
+  orchestratorConfPath,
   orchestratorDataDir,
   orchestratorRaftCnfPath,
   orchestratorTlsDir,
@@ -122,7 +122,8 @@ export function renderOrchestratorConf(input: OrchestratorConfInput): string {
   const conf: Record<string, unknown> = {
     Debug: false,
     ListenAddress: `:${input.raft.httpPort}`,
-    HTTPAdvertise: `http://${input.raft.advertiseAddress}:${input.raft.httpPort}`,
+    HTTPAdvertise:
+      `http://${input.raft.advertiseAddress}:${input.raft.httpPort}`,
     BackendDB: "sqlite",
     SQLite3DataFile: "/var/lib/orchestrator/orchestrator.sqlite3",
     MySQLTopologyUser: input.topologyUser,
@@ -184,7 +185,9 @@ export function orchestratorCompose(
     }`,
     "    volumes:",
     "      - orchestrator-data:/var/lib/orchestrator",
-    `      - ${quoteYamlScalar(join(".", "orchestrator.conf.json"))}:/etc/orchestrator.conf.json:ro`,
+    `      - ${
+      quoteYamlScalar(join(".", "orchestrator.conf.json"))
+    }:/etc/orchestrator.conf.json:ro`,
     `      - ${quoteYamlScalar(join(".", "tls"))}:/etc/orchestrator/tls:ro`,
     "    networks:",
     `      - ${MANAGED_INGRESS_NETWORK}`,
@@ -298,7 +301,10 @@ export async function ensureOrchestratorStack(
 ): Promise<boolean> {
   const configDir = orchestratorConfigDir(layout);
   await Deno.mkdir(configDir, { recursive: true, mode: 0o750 });
-  await Deno.mkdir(orchestratorTlsDir(layout), { recursive: true, mode: 0o750 });
+  await Deno.mkdir(orchestratorTlsDir(layout), {
+    recursive: true,
+    mode: 0o750,
+  });
   await Deno.mkdir(orchestratorDataDir(layout), {
     recursive: true,
     mode: 0o750,

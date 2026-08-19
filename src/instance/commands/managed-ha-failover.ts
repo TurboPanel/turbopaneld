@@ -12,9 +12,7 @@ import type {
 } from "./contracts.ts";
 import { parseManagedHaFailoverPayload } from "./contracts.ts";
 import { handleManagedPromote } from "../../managed/promote.ts";
-import {
-  applyProxySqlAdminStatements,
-} from "../../managed/proxysql-admin.ts";
+import { applyProxySqlAdminStatements } from "../../managed/proxysql-admin.ts";
 import { buildProxySqlDrainStatements } from "../../managed/proxysql.ts";
 import {
   hostPrepPresent,
@@ -147,7 +145,9 @@ async function recoverWithOrchestrator(
   } catch (error) {
     logWarn(
       "commands",
-      `managed.ha.failover orchestrator recover failed managedId=${payload.managedId}: ${recoverFailureMessage(error)}`,
+      `managed.ha.failover orchestrator recover failed managedId=${payload.managedId}: ${
+        recoverFailureMessage(error)
+      }`,
     );
     return await promoteWithoutOrchestrator(
       payload,

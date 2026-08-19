@@ -4839,7 +4839,9 @@ export function parseManagedHaReconcilePayload(
   ) {
     throw new TypeError("Invalid managed.ha.reconcile payload");
   }
-  const raft = value.raft === null ? null : parseManagedHaRaftConfig(value.raft);
+  const raft = value.raft === null
+    ? null
+    : parseManagedHaRaftConfig(value.raft);
   const orgTlsMaterial = parseManagedApplyOrgTlsMaterial(value.orgTlsMaterial);
   const payload: ManagedHaReconcilePayload = {
     serverId: value.serverId,

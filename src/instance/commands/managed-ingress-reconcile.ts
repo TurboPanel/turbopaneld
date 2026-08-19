@@ -163,7 +163,10 @@ async function decryptProxySqlUserPasswords(
 }
 
 /** Order-insensitive: publishing the same set of addresses needs no restart. */
-function sameBindAddresses(a: readonly string[], b: readonly string[]): boolean {
+function sameBindAddresses(
+  a: readonly string[],
+  b: readonly string[],
+): boolean {
   if (a.length !== b.length) return false;
   const left = [...a].sort((x, y) => x.localeCompare(y));
   const right = [...b].sort((x, y) => x.localeCompare(y));

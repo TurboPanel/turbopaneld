@@ -39,13 +39,11 @@ import {
 } from "../../managed/orchestrator.ts";
 import {
   discoverInstance,
+  type OrchestratorApiDeps,
   registerCandidate,
   setClusterAlias,
-  type OrchestratorApiDeps,
 } from "../../managed/orchestrator-api.ts";
-import {
-  orchestratorTlsDir,
-} from "../../managed/paths.ts";
+import { orchestratorTlsDir } from "../../managed/paths.ts";
 import { runOrchestratorSetup } from "../../orchestration/ansible.ts";
 
 type RunDockerFn = (
