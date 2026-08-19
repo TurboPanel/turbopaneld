@@ -92,6 +92,30 @@ raw TCP hostings (`PROXYSQL_RESERVED_PUBLISHED_PORTS`).
 **Installer vocabulary:** component/status token `proxysql` → **ingress** (see
 `src/orchestration/presentation.ts`).
 
+### Orchestrator (`orchestrator`)
+
+Host prerequisites for the **per-organization** Orchestrator Raft group
+(`managed-ha`). Host prep only — **not** a full stack bring-up of compose
+content. Meta-depends on the `docker` role. Standalone playbook:
+`playbooks/orchestrator-setup.yml` (invoked by daemon `runOrchestratorSetup`
+after `ensureGalaxyDockerRole`). Co-located dev installs the role via
+`instance-dev-install` / `dev-converge-manifest.json` (after `proxysql`).
+
+**Division of labour**
+
+| Owner | Responsibility |
+| --- | --- |
+| Ansible (`orchestrator` role) | Config/tls/data dirs `0770`, `api.cnf` + `raft.cnf` mode `0600` owned by `turbopanel_user`, `wait-ready.sh`, `turbopanel-orchestrator-stack.service`, join Docker network `turbopanel-managed` |
+| Daemon (`src/managed/orchestrator.ts`, `managed.ha.reconcile`) | Write `docker-compose.yml` + `orchestrator.conf.json` (`Recover: false`, empty `RecoverMasterClusterFilters`), HTTP loopback `127.0.0.1:33001:33001`, Raft published on advertise address only (`33002`) |
+| Systemd unit | `Type=oneshot` `RemainAfterExit`; **if compose file exists** → `docker compose up -d` + wait-ready; **if compose not yet written** → no-op success |
+
+**Image pin:** `ghcr.io/proxysql/orchestrator:v4.30.2`. Internal ports **33001**
+(HTTP) / **33002** (Raft). Never publish `0.0.0.0`. Avoid 6032/6132/45000–45999
+(and 15432/16306). Servers that host only remote `read`/DR replicas do not join
+Raft.
+
+**Installer vocabulary:** component/status token `orchestrator` → **HA**.
+
 ### Web-service user (`web-service-user`)
 
 Tenant/daemon-host web servers (nginx, Apache, OpenLiteSpeed, LiteSpeed enterprise) run under dedicated **99xx** system accounts — distinct from control-plane **tpcaddy(9993)**. The `web-service-user` role provisions **only** the group + system user (no package install). **Not** wired into `daemon-converge.yml`; traditional-web apply playbooks `include_role` it on demand when a traditional-web site is deployed, then vendor the matching engine role.

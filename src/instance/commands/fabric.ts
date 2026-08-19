@@ -763,7 +763,9 @@ async function ensureIptablesRule(
   }
 }
 
-async function removeIptablesRuleBestEffort(checkArgs: string[]): Promise<void> {
+async function removeIptablesRuleBestEffort(
+  checkArgs: string[],
+): Promise<void> {
   const exists = await runHost("iptables", ["-C", ...checkArgs]);
   if (!exists.success) return;
   const removed = await runHost("iptables", ["-D", ...checkArgs]);
@@ -1214,7 +1216,9 @@ function parseWgDumpPeerLine(
   return peer;
 }
 
-export function parseWgDumpPeers(stdout: string): FabricReconcileObservedPeer[] {
+export function parseWgDumpPeers(
+  stdout: string,
+): FabricReconcileObservedPeer[] {
   const peers: FabricReconcileObservedPeer[] = [];
   for (const line of stdout.split("\n")) {
     const peer = parseWgDumpPeerLine(line);
@@ -1835,7 +1839,9 @@ export async function handleFabricPathProbe(
   for (const peer of restored) {
     if (failedApplyKeys.has(peer.publicKey)) continue;
     const path = observedPeerToPath(peer);
-    if (appliedKeys.has(peer.publicKey) && !successfulKeys.has(peer.publicKey)) {
+    if (
+      appliedKeys.has(peer.publicKey) && !successfulKeys.has(peer.publicKey)
+    ) {
       path.health = "never";
     }
     observations.push(path);

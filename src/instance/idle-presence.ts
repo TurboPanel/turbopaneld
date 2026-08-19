@@ -248,10 +248,9 @@ export class IdlePresence {
     this.#lastPresenceSnapshot = this.#serializePresenceSnapshot(presence);
 
     try {
-      const resources: HostResources = {
-        ...(host.resources ?? {}),
-        ips: presence.ips,
-      };
+      const resources: HostResources = host.resources
+        ? { ...host.resources, ips: presence.ips }
+        : { ips: presence.ips };
       ws.send(JSON.stringify({
         type: "hello",
         at: new Date().toISOString(),

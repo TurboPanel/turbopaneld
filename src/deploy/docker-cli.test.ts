@@ -33,7 +33,11 @@ test("runDocker succeeds on direct /usr/bin/docker without sudo", async () => {
     },
   });
   try {
-    const result = await runDocker(["version", "--format", "{{.Server.Version}}"]);
+    const result = await runDocker([
+      "version",
+      "--format",
+      "{{.Server.Version}}",
+    ]);
     assertEquals(result.success, true);
     assertEquals(result.stdout, "24.0.0");
     assertEquals(calls.length, 1);
@@ -51,7 +55,9 @@ test("runDocker retries via sudo -n -u self on docker.sock permission denied", a
       calls.push({ command, args: [...args] });
       if (command === "/usr/bin/docker") {
         return Promise.resolve(
-          fail("permission denied while trying to connect to the Docker daemon socket"),
+          fail(
+            "permission denied while trying to connect to the Docker daemon socket",
+          ),
         );
       }
       if (command === "/usr/bin/sudo") {
@@ -88,7 +94,10 @@ test("runDocker prefers original stderr when sudo refresh also fails", async () 
     runRaw: (command) => {
       if (command === "/usr/bin/docker") {
         return Promise.resolve(
-          fail("permission denied while trying to connect to the Docker daemon socket", 1),
+          fail(
+            "permission denied while trying to connect to the Docker daemon socket",
+            1,
+          ),
         );
       }
       return Promise.resolve(fail("sudo: a password is required", 1));
@@ -172,7 +181,9 @@ test("resolveDockerInvocation caches direct bin then sudo prefix after permissio
     runRaw: (command) => {
       if (command === "/usr/bin/docker") {
         return Promise.resolve(
-          fail("Got permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock"),
+          fail(
+            "Got permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock",
+          ),
         );
       }
       return Promise.resolve(fail(`unexpected ${command}`));
@@ -245,7 +256,9 @@ test("runDocker resolves username via id when USER and LOGNAME are unset", async
       calls.push({ command, args: [...args] });
       if (command === "/usr/bin/docker") {
         return Promise.resolve(
-          fail("permission denied while trying to connect to the Docker daemon socket"),
+          fail(
+            "permission denied while trying to connect to the Docker daemon socket",
+          ),
         );
       }
       if (command === "/usr/bin/id") {
@@ -283,7 +296,9 @@ test("runDocker throws when username cannot be resolved for sudo refresh", async
     runRaw: (command) => {
       if (command === "/usr/bin/docker") {
         return Promise.resolve(
-          fail("permission denied while trying to connect to the Docker daemon socket"),
+          fail(
+            "permission denied while trying to connect to the Docker daemon socket",
+          ),
         );
       }
       if (command === "/usr/bin/id") {

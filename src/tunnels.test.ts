@@ -398,7 +398,10 @@ test("startTunnels logs non-Error ensureCloudflared failures", async () => {
   });
 });
 
-async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs = 2_000,
+): Promise<void> {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     if (predicate()) return;

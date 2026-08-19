@@ -386,9 +386,7 @@ test({
     } = await import("./hostname.ts");
 
     setAnsibleAvailabilityCheckForTests(() => Promise.resolve(true));
-    setRunSetHostnameForTests(() =>
-      Promise.reject(new Error("x".repeat(600)))
-    );
+    setRunSetHostnameForTests(() => Promise.reject(new Error("x".repeat(600))));
     try {
       const ws = new MockWebSocket() as unknown as WebSocket;
       const message: CommandDispatchMessage = {
@@ -505,7 +503,12 @@ test({
     setFabricSkipRealSyscallsForTests(true);
     setFabricRunForTests((cmd, args) => {
       invocations.push(`${cmd} ${args.join(" ")}`);
-      return Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 });
+      return Promise.resolve({
+        success: true,
+        stdout: "",
+        stderr: "",
+        code: 0,
+      });
     });
 
     try {
@@ -648,6 +651,25 @@ const ROUTER_STUB_MANAGED_INGRESS = {
   clusters: [],
 } as const;
 
+const ROUTER_STUB_MANAGED_HA = {
+  serverId: "00000000-0000-4000-8000-0000000000ab",
+  desired: "absent",
+  raft: null,
+  clusters: [],
+  identity: {
+    serviceId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    composeServiceName: "orchestrator",
+    containerName: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee-ha",
+  },
+} as const;
+
+const ROUTER_STUB_MANAGED_HA_FAILOVER = {
+  managedId: "00000000-0000-4000-8000-000000000001",
+  sourceMemberId: "00000000-0000-4000-8000-000000000002",
+  targetMemberId: "00000000-0000-4000-8000-000000000003",
+  phase: "drain",
+} as const;
+
 const ROUTER_STUB_SYSTEM_RECONCILE = {
   environmentId: "11111111-2222-3333-4444-555555555555",
   action: "restart",
@@ -674,6 +696,8 @@ async function dispatchWithStubHandler(
     | "handleManagedBackup"
     | "handleManagedRestore"
     | "handleManagedIngressReconcile"
+    | "handleManagedHaReconcile"
+    | "handleManagedHaFailover"
     | "handleSystemReconcile",
 ): Promise<Record<string, unknown>> {
   const { handleCommandDispatch, setCommandRouterHandlersForTests } =
@@ -853,6 +877,41 @@ test({
     );
     const result = outcome.result as Record<string, unknown>;
     assertEquals(result.summary, "ingress reconciled");
+  },
+});
+
+test({
+  name:
+    "handleCommandDispatch routes managed.ha.reconcile through stub handler",
+  permissions: { env: true, read: true },
+  fn: async () => {
+    const outcome = await dispatchWithStubHandler(
+      "managed.ha.reconcile",
+      ROUTER_STUB_MANAGED_HA,
+      {
+        summary: "ha reconciled",
+        registeredClusters: [],
+        restarted: false,
+      },
+      "handleManagedHaReconcile",
+    );
+    const result = outcome.result as Record<string, unknown>;
+    assertEquals(result.summary, "ha reconciled");
+  },
+});
+
+test({
+  name: "handleCommandDispatch routes managed.ha.failover through stub handler",
+  permissions: { env: true, read: true },
+  fn: async () => {
+    const outcome = await dispatchWithStubHandler(
+      "managed.ha.failover",
+      ROUTER_STUB_MANAGED_HA_FAILOVER,
+      { summary: "drained writer", phase: "drain" },
+      "handleManagedHaFailover",
+    );
+    const result = outcome.result as Record<string, unknown>;
+    assertEquals(result.phase, "drain");
   },
 });
 

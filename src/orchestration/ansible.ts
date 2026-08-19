@@ -50,6 +50,7 @@ import {
   galaxyDockerRoleCodeloadUrl,
   LOCALHOST_PLAYBOOK,
   ORCHESTRATION_DIR,
+  ORCHESTRATOR_PLAYBOOK,
   POSTGRES_PLAYBOOK,
   PROXYSQL_PLAYBOOK,
   PYTHON_VERSION,
@@ -958,6 +959,20 @@ export async function runProxySqlSetup(
   logInfo("orchestration", "running proxysql-setup playbook");
   await runLocalPlaybook(PROXYSQL_PLAYBOOK, [], onEvent);
   logInfo("orchestration", "proxysql-setup complete");
+}
+
+/**
+ * Host prerequisites for per-org Orchestrator (dirs, API/raft secrets,
+ * systemd unit, turbopanel-managed network). Compose is daemon-written
+ * later via managed.ha.reconcile.
+ */
+export async function runOrchestratorSetup(
+  onEvent?: AnsibleEventHandler,
+): Promise<void> {
+  await ensureGalaxyDockerRole();
+  logInfo("orchestration", "running orchestrator-setup playbook");
+  await runLocalPlaybook(ORCHESTRATOR_PLAYBOOK, [], onEvent);
+  logInfo("orchestration", "orchestrator-setup complete");
 }
 
 /** Build and install Redis under runtimes/redis/current. */

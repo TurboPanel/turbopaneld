@@ -16,7 +16,7 @@ import {
 } from "../../deploy/system-component.ts";
 import { resolveLayout } from "../../paths/layout.ts";
 import { proxysqlComposePath, proxysqlConfigDir } from "../../managed/paths.ts";
-import { readPublishedBindAddressFromCompose } from "../../managed/proxysql.ts";
+import { readPublishedBindAddressesFromCompose } from "../../managed/proxysql.ts";
 import {
   type TempLayoutFixture,
   withTempLayout,
@@ -38,7 +38,7 @@ const MANAGED_ID = "33333333-3333-4333-8333-333333333333";
 const MEMBER_ID = "44444444-4444-4444-8444-444444444444";
 
 function basePayload(
-  bindAddress?: string,
+  ...bindAddresses: string[]
 ): ManagedIngressReconcilePayload {
   const payload: ManagedIngressReconcilePayload = {
     serverId: SERVER_ID,
@@ -71,7 +71,7 @@ function basePayload(
       },
     ],
   };
-  if (bindAddress !== undefined) payload.bindAddress = bindAddress;
+  if (bindAddresses.length > 0) payload.bindAddresses = bindAddresses;
   return payload;
 }
 
@@ -110,7 +110,7 @@ function decryptSecretsEcho(
 
 test({
   name:
-    "handleManagedIngressReconcile with no bindAddress never publishes ProxySQL to the host",
+    "handleManagedIngressReconcile with no bindAddresses never publishes ProxySQL to the host",
   permissions: { env: true, read: true, write: true, run: false },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -136,8 +136,8 @@ test({
           proxysqlComposePath(layout),
         );
         assertEquals(
-          readPublishedBindAddressFromCompose(composeText),
-          null,
+          readPublishedBindAddressesFromCompose(composeText),
+          [],
         );
         // No public port mapping at all — only the loopback admin port.
         assertEquals(composeText.includes(":15432:15432"), false);
@@ -186,8 +186,8 @@ test({
           proxysqlComposePath(layout),
         );
         assertEquals(
-          readPublishedBindAddressFromCompose(composeText),
-          "203.0.113.5",
+          readPublishedBindAddressesFromCompose(composeText),
+          ["203.0.113.5"],
         );
         assertEquals(composeText.includes('"0.0.0.0:15432:15432"'), false);
       } finally {
@@ -200,7 +200,7 @@ test({
 
 test({
   name:
-    "handleManagedIngressReconcile detects a bindAddress-only change and restarts even though the static cnf section is unchanged",
+    "handleManagedIngressReconcile detects a bind-only change and restarts even though the static cnf section is unchanged",
   permissions: { env: true, read: true, write: true, run: false },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -384,7 +384,8 @@ test({
 });
 
 test({
-  name: "handleManagedIngressReconcile with no cluster users skips password decrypt",
+  name:
+    "handleManagedIngressReconcile with no cluster users skips password decrypt",
   permissions: { env: true, read: true, write: true, run: false },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -456,7 +457,8 @@ test({
 });
 
 test({
-  name: "handleManagedIngressReconcile returns empty containers when inspect finds no row",
+  name:
+    "handleManagedIngressReconcile returns empty containers when inspect finds no row",
   permissions: { env: true, read: true, write: true, run: false },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -493,8 +495,7 @@ test({
 });
 
 test({
-  name:
-    "empty clusters tears the stack down without TLS or admin statements",
+  name: "empty clusters tears the stack down without TLS or admin statements",
   permissions: { env: true, read: true, write: true, run: false },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -505,7 +506,7 @@ test({
       try {
         await Deno.writeTextFile(
           proxysqlComposePath(layout),
-          'services:\n  proxysql:\n    image: proxysql/proxysql:3.0.2\n',
+          "services:\n  proxysql:\n    image: proxysql/proxysql:3.0.2\n",
         );
         const dockerArgs: string[][] = [];
         let decryptCalls = 0;

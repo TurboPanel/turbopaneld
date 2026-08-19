@@ -46,8 +46,18 @@ test("collectServerIps classifies private/public IPv4 and skips virtual NICS", (
     ],
     () => {
       assertEquals(collectServerIps(), [
-        { address: "10.0.0.5", version: 4, scope: "private", interface: "eth0" },
-        { address: "203.0.113.9", version: 4, scope: "public", interface: "eth0" },
+        {
+          address: "10.0.0.5",
+          version: 4,
+          scope: "private",
+          interface: "eth0",
+        },
+        {
+          address: "203.0.113.9",
+          version: 4,
+          scope: "public",
+          interface: "eth0",
+        },
       ]);
     },
   );

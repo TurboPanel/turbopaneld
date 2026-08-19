@@ -105,7 +105,9 @@ test("InstallEventPresenter summarizes playbook stats recap", () => {
     events.onEvent(event);
   });
   assertEquals(
-    lines.some((line) => line.includes("orchestration applied (3 steps, 1 changes)")),
+    lines.some((line) =>
+      line.includes("orchestration applied (3 steps, 1 changes)")
+    ),
     true,
   );
 });

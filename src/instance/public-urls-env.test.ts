@@ -210,7 +210,9 @@ test({
   name: "upsertPublicUrlsInEnv sudo failure surfaces stderr",
   permissions: { read: true, write: true },
   fn: async () => {
-    const tmpDir = await Deno.makeTempDir({ prefix: "tp-public-urls-sudo-fail-" });
+    const tmpDir = await Deno.makeTempDir({
+      prefix: "tp-public-urls-sudo-fail-",
+    });
     const configDir = join(tmpDir, "instance");
     const runtimeEnvPath = join(configDir, "runtime.env");
     await Deno.mkdir(configDir, { recursive: true });
@@ -234,7 +236,9 @@ test({
       data: string | ReadableStream<string>,
       options?: Deno.WriteFileOptions,
     ) => {
-      if (String(path).includes(".write-tmp") || String(path).includes("/write-")) {
+      if (
+        String(path).includes(".write-tmp") || String(path).includes("/write-")
+      ) {
         return Promise.reject(
           new Deno.errors.PermissionDenied("mocked"),
         );
@@ -262,8 +266,7 @@ test({
 });
 
 test({
-  name:
-    "upsertPublicUrlsInEnv falls back to sudo chown on PermissionDenied",
+  name: "upsertPublicUrlsInEnv falls back to sudo chown on PermissionDenied",
   permissions: { read: true, write: true },
   fn: async () => {
     const tmpDir = await Deno.makeTempDir({ prefix: "tp-public-urls-chown-" });
@@ -306,7 +309,9 @@ test({
       )) as typeof Deno.chown;
 
     try {
-      await upsertPublicUrlsInEnv(["https://chown.example"], { runtimeEnvPath });
+      await upsertPublicUrlsInEnv(["https://chown.example"], {
+        runtimeEnvPath,
+      });
       assertEquals(sudoArgLists.length >= 1, true);
       const chownCall = sudoArgLists.find((args) =>
         args[0] === "-n" && args[1] === "chown"
@@ -335,7 +340,9 @@ test({
   name: "upsertPublicUrlsInEnv rethrows non-PermissionDenied chown errors",
   permissions: { read: true, write: true },
   fn: async () => {
-    const tmpDir = await Deno.makeTempDir({ prefix: "tp-public-urls-chown-err-" });
+    const tmpDir = await Deno.makeTempDir({
+      prefix: "tp-public-urls-chown-err-",
+    });
     const configDir = join(tmpDir, "instance");
     const runtimeEnvPath = join(configDir, "runtime.env");
     await Deno.mkdir(configDir, { recursive: true });
@@ -367,7 +374,9 @@ test({
     "upsertPublicUrlsInEnv privileged install derives parent gid when meta lacks owner",
   permissions: { read: true, write: true },
   fn: async () => {
-    const tmpDir = await Deno.makeTempDir({ prefix: "tp-public-urls-priv-gid-" });
+    const tmpDir = await Deno.makeTempDir({
+      prefix: "tp-public-urls-priv-gid-",
+    });
     const configDir = join(tmpDir, "instance");
     const runtimeEnvPath = join(configDir, "runtime.env");
     await Deno.mkdir(configDir, { recursive: true, mode: 0o750 });
@@ -462,7 +471,9 @@ test({
   name: "upsertPublicUrlsInEnv rethrows non-PermissionDenied write errors",
   permissions: { read: true, write: true },
   fn: async () => {
-    const tmpDir = await Deno.makeTempDir({ prefix: "tp-public-urls-write-err-" });
+    const tmpDir = await Deno.makeTempDir({
+      prefix: "tp-public-urls-write-err-",
+    });
     const runtimeEnvPath = join(tmpDir, "runtime.env");
 
     const originalWriteTextFile = Deno.writeTextFile;
@@ -471,7 +482,9 @@ test({
       data: string | ReadableStream<string>,
       options?: Deno.WriteFileOptions,
     ) => {
-      if (String(path).includes(".write-tmp") || String(path).includes("/write-")) {
+      if (
+        String(path).includes(".write-tmp") || String(path).includes("/write-")
+      ) {
         return Promise.reject(new Error("disk full"));
       }
       return originalWriteTextFile.call(Deno, path, data, options);
@@ -498,7 +511,9 @@ test({
   name: "upsertPublicUrlsInEnv tolerates missing uid/gid on existing env meta",
   permissions: { read: true, write: true },
   fn: async () => {
-    const tmpDir = await Deno.makeTempDir({ prefix: "tp-public-urls-null-uid-" });
+    const tmpDir = await Deno.makeTempDir({
+      prefix: "tp-public-urls-null-uid-",
+    });
     const runtimeEnvPath = join(tmpDir, "runtime.env");
     await Deno.writeTextFile(runtimeEnvPath, "KEEP=1\n", { mode: 0o640 });
 
@@ -553,7 +568,9 @@ test({
   name: "upsertPublicUrlsInEnv rethrows unexpected stat errors on existing env",
   permissions: { read: true, write: true },
   fn: async () => {
-    const tmpDir = await Deno.makeTempDir({ prefix: "tp-public-urls-stat-err-" });
+    const tmpDir = await Deno.makeTempDir({
+      prefix: "tp-public-urls-stat-err-",
+    });
     const runtimeEnvPath = join(tmpDir, "runtime.env");
     await Deno.writeTextFile(runtimeEnvPath, "KEEP=1\n");
 
@@ -587,7 +604,9 @@ test({
     "upsertPublicUrlsInEnv privileged install tolerates parent stat failure",
   permissions: { read: true, write: true },
   fn: async () => {
-    const tmpDir = await Deno.makeTempDir({ prefix: "tp-public-urls-parent-stat-" });
+    const tmpDir = await Deno.makeTempDir({
+      prefix: "tp-public-urls-parent-stat-",
+    });
     const configDir = join(tmpDir, "instance");
     const runtimeEnvPath = join(configDir, "runtime.env");
     await Deno.mkdir(configDir, { recursive: true, mode: 0o750 });

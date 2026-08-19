@@ -48,6 +48,12 @@ import {
 export const PROXYSQL_IMAGE = "proxysql/proxysql:3.0.9";
 
 export const ADMIN_PORT = 6032;
+
+/**
+ * Platform-default managed client listeners. The organization may override
+ * both through `ManagedIngressReconcileCommandPayload.listenerPorts`; these
+ * remain the fallback when a payload predates that field.
+ */
 export const PGSQL_PORT = 15432;
 export const MYSQL_PORT = 16306;
 
@@ -55,12 +61,36 @@ export const MYSQL_PORT = 16306;
 const LEGACY_PGSQL_PORT = 5432;
 const LEGACY_MYSQL_PORT = 3306;
 
+/** Which protocol module a cluster (and therefore its listener) belongs to. */
+export type ProxySqlProtocolFamily = "pgsql" | "mysql";
+
+/**
+ * The two client listeners this ProxySQL binds. MariaDB deliberately shares
+ * the MySQL listener — ProxySQL speaks one MySQL-family protocol — while
+ * PostgreSQL needs its own protocol module and therefore its own port.
+ */
+export type ProxySqlListenerPorts = {
+  pgsql: number;
+  mysql: number;
+};
+
+export const DEFAULT_PROXYSQL_LISTENER_PORTS: ProxySqlListenerPorts = {
+  pgsql: PGSQL_PORT,
+  mysql: MYSQL_PORT,
+};
+
+function resolveListenerPorts(
+  ports?: ProxySqlListenerPorts | null,
+): ProxySqlListenerPorts {
+  return ports ?? DEFAULT_PROXYSQL_LISTENER_PORTS;
+}
+
 /**
  * ProxySQL's listen address *inside its own container network namespace* —
  * always all-interfaces so both a host publish (compose `ports:`) and
  * sibling containers on {@link MANAGED_INGRESS_NETWORK} (bindings with no
  * host publish at all) can reach it. This is never the same knob as
- * {@link ProxySqlDesiredState.bindAddress}, which only decides whether/where
+ * {@link ProxySqlDesiredState.bindAddresses}, which only decides whether/where
  * compose *publishes* that already-listening port to the host.
  */
 const CONTAINER_LISTEN_ADDRESS = "0.0.0.0";
@@ -89,35 +119,92 @@ export type ProxySqlBackendDesired = {
   transport: "local" | "datacenter" | "fabric" | "public";
 };
 
+/**
+ * Which hostgroup a frontend login defaults to. `read-write` reaches the
+ * current primary; `read-only` reaches read-eligible replicas only. The
+ * instance refuses to *create* a `read-only` login for a cluster with no
+ * read-eligible member, but an operator may later clear read eligibility on
+ * every replica — such a login then has no ONLINE reader backend, which is the
+ * honest outcome rather than silently falling back to the primary.
+ */
+export type ProxySqlConnectionRole = "read-write" | "read-only";
+
 export type ProxySqlUserDesired = {
   username: string;
   role: "root" | "user";
   /** Plaintext after decryptSecrets — never log. */
   password: string;
   defaultDatabase?: string;
+  /** Absent means `read-write`. */
+  connectionRole?: ProxySqlConnectionRole;
 };
 
 export type ProxySqlClusterDesired = {
   managedId: string;
   engine: string;
-  protocolPort: 5432 | 3306 | 15432 | 16306;
+  /**
+   * Client listener this cluster is reached on — one of the two ports in
+   * {@link ProxySqlDesiredState.listenerPorts}. Organization-configurable, so
+   * never infer the protocol module from its value; see {@link family}.
+   */
+  protocolPort: number;
+  /**
+   * Protocol module this cluster belongs to. The instance always sends it;
+   * absent payloads fall back to the engine name (and then to the platform
+   * default ports) in {@link protocolFamilyForCluster}.
+   */
+  family?: ProxySqlProtocolFamily;
   writerHostgroup: number;
   readerHostgroup: number;
   backends: ProxySqlBackendDesired[];
   users: ProxySqlUserDesired[];
+  /**
+   * Opt-in `^SELECT` read splitting for read-write logins. Off unless the
+   * operator enables it: a blanket regex split silently changes read-after-write
+   * and locking-read semantics for an application that never asked for it, so
+   * the safe default is that a read-write login stays on the primary and reads
+   * only leave it through a dedicated `read-only` login.
+   */
+  autoReadSplit?: boolean;
+  /**
+   * Refuse unencrypted **client** sessions for every login of this cluster —
+   * the instance sets it when the effective `ManagedSslMode` is `require` /
+   * `verify-ca` / `verify-full`. Rendered as `use_ssl=1` on the
+   * `mysql_users` / `pgsql_users` row, which is ProxySQL's per-user frontend
+   * TLS switch. Absent/false leaves TLS *available* (the listener always has
+   * cert material) but optional, so `disable` / `allow` / `prefer` clients
+   * still connect.
+   *
+   * Independent of backend TLS: ProxySQL always dials engines with
+   * `use_ssl=1` (see {@link renderServerRows}) because engines only publish
+   * TLS-required rules (`hostssl` / `REQUIRE SSL`).
+   */
+  requireTls?: boolean;
 };
 
 export type ProxySqlDesiredState = {
   /**
-   * Host/interface the shared ProxySQL compose project **publishes** its
-   * 15432/16306 listeners on — `null` means "publish nothing" (frontend stays
+   * Every host/interface the shared ProxySQL compose project **publishes** its
+   * client listeners on — `[]` means "publish nothing" (frontend stays
    * reachable only via {@link MANAGED_INGRESS_NETWORK}, never the host).
+   *
+   * More than one entry when the instance resolved distinct interfaces for the
+   * enabled access scopes (a datacenter private IP *and* a TurboFabric `tp0`
+   * address, say): one address per scope, because those are different IPs on the
+   * same host and ranking them would silently strand every client on the scope
+   * that lost. `0.0.0.0` arrives as a single entry covering all interfaces.
+   *
    * Never conflate this with ProxySQL's *internal* container listen address
    * (always `0.0.0.0` — see {@link renderProtocolFamilySection}); those are
-   * independent concerns. See `proxysqlCompose` for how `null` omits the
+   * independent concerns. See `proxysqlCompose` for how `[]` omits the
    * published port lines entirely.
    */
-  bindAddress: string | null;
+  bindAddresses: string[];
+  /**
+   * Organization-resolved client listener ports. Absent means the platform
+   * defaults ({@link DEFAULT_PROXYSQL_LISTENER_PORTS}).
+   */
+  listenerPorts?: ProxySqlListenerPorts;
   clusters: ProxySqlClusterDesired[];
   /** External `tpn_*` spanning segments this frontend joins as a platform attachment. */
   segments?: Array<{ name: string; subnet: string }>;
@@ -171,57 +258,170 @@ function formatPublishedPort(bind: string, containerPort: number): string {
 
 const COMPOSE_PORT_LINE_PREFIX = '- "';
 
+/**
+ * `- "<host>:<hostPort>:<containerPort>"`. Host may be a bracketed IPv6
+ * literal, so anchor on the two trailing numeric fields rather than splitting
+ * on every colon.
+ */
+const COMPOSE_PORT_LINE_PATTERN =
+  /^- "(?<host>.+):(?<hostPort>\d+):(?<containerPort>\d+)"$/;
+
 function unbracketComposeHost(host: string): string {
   if (host.startsWith("[") && host.endsWith("]")) return host.slice(1, -1);
   return host;
 }
 
-/** Parse a quoted compose `ports:` mapping that ends with `marker`, or `null`. */
-function publishedBindHostFromPortLine(
+/**
+ * Parse a quoted compose `ports:` mapping into its bind host and port. Returns
+ * `null` for anything that is not a 1:1 published mapping with a bind address
+ * we would ourselves have written. Port-agnostic on purpose: the client
+ * listener ports are organization-configurable, so this must round-trip a
+ * compose file written with any of them.
+ */
+function publishedPortMapping(
   line: string,
-  marker: string,
-): string | null {
-  if (!line.endsWith(marker)) return null;
-  const withoutPrefix = line.slice(COMPOSE_PORT_LINE_PREFIX.length);
-  const host = withoutPrefix.slice(0, withoutPrefix.length - marker.length);
+): { host: string; port: number } | null {
+  const match = COMPOSE_PORT_LINE_PATTERN.exec(line);
+  if (!match?.groups) return null;
+  const port = Number(match.groups.containerPort);
+  if (Number(match.groups.hostPort) !== port) return null;
+  const host = unbracketComposeHost(match.groups.host);
   if (host.length === 0) return null;
-  const unbracketed = unbracketComposeHost(host);
   try {
-    assertValidProxySqlBindAddress(unbracketed);
+    assertValidProxySqlBindAddress(host);
   } catch {
     return null;
   }
-  return unbracketed;
+  return { host, port };
 }
 
-/**
- * Recover the previously-published `bindAddress` (or `null` when the
- * frontend was not published to the host at all) from an on-disk
- * `docker-compose.yml` produced by {@link proxysqlCompose}. Used by the
- * system-reconcile self-heal path so restarting/recreating the ProxySQL
- * container without a fresh `managed.ingress.reconcile` payload in hand
- * preserves the last explicitly-desired bind instead of guessing — and,
- * crucially, never *widens* exposure by assuming `0.0.0.0`. Returns `null`
- * (safe/private) for any compose text it cannot confidently parse.
- */
-export function readPublishedBindAddressFromCompose(
+/** Every 1:1 published client-listener mapping, admin port excluded. */
+function clientPortMappings(
   composeText: string,
-): string | null {
-  const markers = [
-    `:${PGSQL_PORT}:${PGSQL_PORT}"`,
-    `:${MYSQL_PORT}:${MYSQL_PORT}"`,
-    `:${LEGACY_PGSQL_PORT}:${LEGACY_PGSQL_PORT}"`,
-    `:${LEGACY_MYSQL_PORT}:${LEGACY_MYSQL_PORT}"`,
-  ];
+): Array<{ host: string; port: number }> {
+  const mappings: Array<{ host: string; port: number }> = [];
   for (const rawLine of composeText.split("\n")) {
     const line = rawLine.trim();
     if (!line.startsWith(COMPOSE_PORT_LINE_PREFIX)) continue;
-    for (const marker of markers) {
-      const host = publishedBindHostFromPortLine(line, marker);
-      if (host !== null) return host;
+    const mapping = publishedPortMapping(line);
+    // The admin listener is always published to loopback regardless of the
+    // client bind, so it must never answer "what bind did we last desire?".
+    if (mapping === null || mapping.port === ADMIN_PORT) continue;
+    mappings.push(mapping);
+  }
+  return mappings;
+}
+
+/**
+ * Recover the previously-published bind addresses (`[]` when the frontend was
+ * not published to the host at all) from an on-disk
+ * `docker-compose.yml` produced by {@link proxysqlCompose}. Used by the
+ * system-reconcile self-heal path so restarting/recreating the ProxySQL
+ * container without a fresh `managed.ingress.reconcile` payload in hand
+ * preserves the last explicitly-desired binds instead of guessing — and,
+ * crucially, never *widens* exposure by assuming `0.0.0.0`. Returns `[]`
+ * (safe/private) for any compose text it cannot confidently parse.
+ */
+export function readPublishedBindAddressesFromCompose(
+  composeText: string,
+): string[] {
+  const addresses: string[] = [];
+  for (const mapping of clientPortMappings(composeText)) {
+    if (!addresses.includes(mapping.host)) addresses.push(mapping.host);
+  }
+  return addresses;
+}
+
+/**
+ * Recover the client listener ports from an on-disk compose file, `null` when
+ * the frontend was not published (nothing to recover) or the file predates
+ * configurable ports. Self-heal must round-trip these for the same reason it
+ * round-trips the bind address: rewriting compose with the platform defaults
+ * would silently move an organization's configured listeners.
+ *
+ * Compose renders PostgreSQL first *within each bind address*, so the first two
+ * mappings — not the port values — identify the families.
+ */
+export function readPublishedListenerPortsFromCompose(
+  composeText: string,
+): ProxySqlListenerPorts | null {
+  const mappings = clientPortMappings(composeText);
+  if (mappings.length < 2) return null;
+  return { pgsql: mappings[0]!.port, mysql: mappings[1]!.port };
+}
+
+export class ManagedIngressPortInUseError extends Error {
+  readonly kind = "managed_ingress_port_in_use" as const;
+
+  constructor(
+    readonly family: ProxySqlProtocolFamily,
+    readonly port: number,
+    readonly bindAddress: string,
+  ) {
+    super(
+      `managed ${family} ingress port ${port} is already in use on ${bindAddress}`,
+    );
+    this.name = "ManagedIngressPortInUseError";
+  }
+}
+
+/** Probe whether we could bind `port` on `bindAddress` right now. */
+export type ProbeHostPortFn = (
+  bindAddress: string,
+  port: number,
+) => Promise<boolean>;
+
+const defaultProbeHostPort: ProbeHostPortFn = async (bindAddress, port) => {
+  // Deno.listen is synchronous but the seam is async so callers can inject a
+  // probe; await keeps both shapes identical.
+  await Promise.resolve();
+  try {
+    // `0.0.0.0` binds a wildcard; a conflicting listener on a specific
+    // interface still fails here, which is the conservative answer we want.
+    const listener = Deno.listen({ hostname: bindAddress, port });
+    listener.close();
+    return true;
+  } catch (err) {
+    if (err instanceof Deno.errors.AddrInUse) return false;
+    // Anything else (permission, unavailable address) is not a port conflict —
+    // let compose surface the real failure rather than blocking reconcile.
+    return true;
+  }
+};
+
+/**
+ * Refuse to disturb a running frontend for a port we cannot actually bind.
+ *
+ * Only ports we are *newly* claiming are probed on each address: the ones this
+ * ProxySQL already publishes are held by our own container, so probing them
+ * would always report a conflict. `previous` is the port set recovered from the
+ * on-disk compose file (`null` when the frontend was not published).
+ *
+ * Throws {@link ManagedIngressPortInUseError} before any compose write, so a
+ * mistyped organization port leaves the existing listeners serving traffic.
+ */
+export async function assertManagedIngressPortsBindable(
+  bindAddresses: readonly string[],
+  next: ProxySqlListenerPorts,
+  previous: ProxySqlListenerPorts | null,
+  probe: ProbeHostPortFn = defaultProbeHostPort,
+): Promise<void> {
+  // No host publish means no host port to collide with.
+  if (bindAddresses.length === 0) return;
+  const held = previous === null
+    ? new Set<number>()
+    : new Set([previous.pgsql, previous.mysql]);
+  const families: Array<[ProxySqlProtocolFamily, number]> = [
+    ["pgsql", next.pgsql],
+    ["mysql", next.mysql],
+  ];
+  for (const bindAddress of bindAddresses) {
+    for (const [family, port] of families) {
+      if (held.has(port)) continue;
+      if (await probe(bindAddress, port)) continue;
+      throw new ManagedIngressPortInUseError(family, port, bindAddress);
     }
   }
-  return null;
 }
 
 function formatAdminPublishedPort(): string {
@@ -426,23 +626,26 @@ function renderProxySqlTopLevelNetworks(
  * from tenant Traefik (`<serviceId>-in`) and bare-uuid system-stack rows
  * (`database` / `queue` / `analytics`).
  *
- * `bindAddress` controls only the **host publish** of the 5432/3306
- * listeners — `null` (the safe default) omits both `ports:` entries
+ * `bindAddresses` controls only the **host publish** of the client
+ * listeners — `[]` (the safe default) omits those `ports:` entries
  * entirely, so the frontend is reachable exclusively via
  * {@link MANAGED_INGRESS_NETWORK} (co-located compose services with a
- * binding) and never from the host or the public internet. Pass an explicit
- * bind (from enabled cluster exposure) to additionally publish on that
- * address. The admin port always publishes to `127.0.0.1` only, regardless.
+ * binding) and never from the host or the public internet. Pass the addresses
+ * resolved from enabled cluster exposure to additionally publish on each of
+ * them; both protocol listeners are published per address. The admin port
+ * always publishes to `127.0.0.1` only, regardless.
  */
 export function proxysqlCompose(
   identity?: SystemComponentDescriptor | null,
-  bindAddress: string | null = null,
+  bindAddresses: readonly string[] = [],
   segments: ReadonlyArray<{ name: string; subnet: string }> = [],
+  listenerPorts?: ProxySqlListenerPorts | null,
 ): string {
   return proxysqlComposeWithAttachments(
     identity,
-    bindAddress,
+    bindAddresses,
     segmentAttachmentsFromDesired(segments),
+    listenerPorts,
   );
 }
 
@@ -453,10 +656,16 @@ export function proxysqlCompose(
  */
 export function proxysqlComposeWithAttachments(
   identity?: SystemComponentDescriptor | null,
-  bindAddress: string | null = null,
+  bindAddresses: readonly string[] = [],
   attachments: ReadonlyArray<ProxySqlSegmentAttachment> = [],
+  listenerPorts?: ProxySqlListenerPorts | null,
 ): string {
-  if (bindAddress !== null) assertValidProxySqlBindAddress(bindAddress);
+  const binds: string[] = [];
+  for (const address of bindAddresses) {
+    assertValidProxySqlBindAddress(address);
+    if (!binds.includes(address)) binds.push(address);
+  }
+  const ports = resolveListenerPorts(listenerPorts);
 
   const identityLines = identity === undefined || identity === null ? [] : [
     `    container_name: ${identity.containerName}`,
@@ -474,13 +683,15 @@ export function proxysqlComposeWithAttachments(
     }`,
   ];
 
-  const publishedPortLines = bindAddress === null
-    ? [`      - ${formatAdminPublishedPort()}`]
-    : [
-      `      - ${formatPublishedPort(bindAddress, PGSQL_PORT)}`,
-      `      - ${formatPublishedPort(bindAddress, MYSQL_PORT)}`,
-      `      - ${formatAdminPublishedPort()}`,
-    ];
+  const publishedPortLines = [
+    // PostgreSQL first within each address — `readPublishedListenerPortsFromCompose`
+    // reads the family back out by mapping order.
+    ...binds.flatMap((bind) => [
+      `      - ${formatPublishedPort(bind, ports.pgsql)}`,
+      `      - ${formatPublishedPort(bind, ports.mysql)}`,
+    ]),
+    `      - ${formatAdminPublishedPort()}`,
+  ];
 
   const uniqueAttachments = uniqueAttachmentsByName(attachments);
   const serviceNetworkLines = renderProxySqlServiceNetworks(uniqueAttachments);
@@ -523,19 +734,57 @@ function escapeSqlString(value: string): string {
   return value.replaceAll("'", "''");
 }
 
+/** Drain a backend from writer/reader pools on this host's ProxySQL. */
+export function buildProxySqlDrainStatements(
+  hostname: string,
+  port: number,
+): string[] {
+  const host = escapeSqlString(hostname);
+  return [
+    `UPDATE mysql_servers SET status='OFFLINE_SOFT' WHERE hostname='${host}' AND port=${port}`,
+    `UPDATE pgsql_servers SET status='OFFLINE_SOFT' WHERE hostname='${host}' AND port=${port}`,
+    "LOAD MYSQL SERVERS TO RUNTIME",
+    "LOAD PGSQL SERVERS TO RUNTIME",
+    "SAVE MYSQL SERVERS TO DISK",
+    "SAVE PGSQL SERVERS TO DISK",
+  ];
+}
+
 function protocolFamilyForPort(
   port: number,
-): "pgsql" | "mysql" | null {
+): ProxySqlProtocolFamily | null {
   if (port === PGSQL_PORT || port === LEGACY_PGSQL_PORT) return "pgsql";
   if (port === MYSQL_PORT || port === LEGACY_MYSQL_PORT) return "mysql";
   return null;
 }
 
+function protocolFamilyForEngine(
+  engine: string,
+): ProxySqlProtocolFamily | null {
+  if (engine === "postgres") return "pgsql";
+  if (engine === "mysql" || engine === "mariadb") return "mysql";
+  return null;
+}
+
+/**
+ * Resolve which protocol module a cluster belongs to, most trustworthy source
+ * first: the explicit `family` the instance sends, then the engine name, then
+ * (only for payloads predating both) the platform-default port map. Once ports
+ * are organization-configurable the port number alone cannot answer this — an
+ * org may well move PostgreSQL to a port that used to mean MySQL.
+ */
+export function protocolFamilyForCluster(
+  cluster: ProxySqlClusterDesired,
+): ProxySqlProtocolFamily | null {
+  return cluster.family ?? protocolFamilyForEngine(cluster.engine) ??
+    protocolFamilyForPort(cluster.protocolPort);
+}
+
 function clusterMatchesFamily(
   cluster: ProxySqlClusterDesired,
-  family: "mysql" | "pgsql",
+  family: ProxySqlProtocolFamily,
 ): boolean {
-  return protocolFamilyForPort(cluster.protocolPort) === family;
+  return protocolFamilyForCluster(cluster) === family;
 }
 
 function clusterUsesMysql(
@@ -550,14 +799,28 @@ function clusterUsesPgsql(
   return clusters.some((cluster) => clusterMatchesFamily(cluster, "pgsql"));
 }
 
-function backendHostgroup(
+/**
+ * Where a member sits in the client-facing hostgroups, and whether it may
+ * receive new client connections there.
+ *
+ * The writer hostgroup is the **primary only**. A replica that is not
+ * read-eligible is still rendered — so ProxySQL's monitor keeps health and
+ * lag readings for it, and a later promotion only has to flip its status —
+ * but as `OFFLINE_SOFT` in the reader hostgroup, which takes no new
+ * connections. Putting such a replica in the writer hostgroup (as this did
+ * previously) let ProxySQL balance client writes onto a read-only standby.
+ */
+function backendPlacement(
   cluster: ProxySqlClusterDesired,
   backend: ProxySqlBackendDesired,
-): number {
-  if (backend.role === "primary") return cluster.writerHostgroup;
-  return backend.readEligible
-    ? cluster.readerHostgroup
-    : cluster.writerHostgroup;
+): { hostgroup: number; status: "ONLINE" | "OFFLINE_SOFT" } {
+  if (backend.role === "primary") {
+    return { hostgroup: cluster.writerHostgroup, status: "ONLINE" };
+  }
+  return {
+    hostgroup: cluster.readerHostgroup,
+    status: backend.readEligible ? "ONLINE" : "OFFLINE_SOFT",
+  };
 }
 
 function renderServerRows(
@@ -568,14 +831,28 @@ function renderServerRows(
   for (const cluster of clusters) {
     if (!clusterMatchesFamily(cluster, family)) continue;
     for (const backend of cluster.backends) {
+      const placement = backendPlacement(cluster, backend);
       rows.push(
-        `    { hostgroup_id=${backendHostgroup(cluster, backend)} hostname="${
+        `    { hostgroup_id=${placement.hostgroup} hostname="${
           escapeProxySqlConfigString(backend.address)
-        }" port=${backend.port} use_ssl=1 }`,
+        }" port=${backend.port} use_ssl=1 status="${placement.status}" }`,
       );
     }
   }
   return rows;
+}
+
+/**
+ * A `read-only` login defaults to the reader hostgroup; everything else
+ * defaults to the writer hostgroup (the primary).
+ */
+function userDefaultHostgroup(
+  cluster: ProxySqlClusterDesired,
+  user: ProxySqlUserDesired,
+): number {
+  return user.connectionRole === "read-only"
+    ? cluster.readerHostgroup
+    : cluster.writerHostgroup;
 }
 
 function renderUserRows(
@@ -601,7 +878,9 @@ function renderUserRows(
           escapeProxySqlConfigString(user.username)
         }" password="${
           escapeProxySqlConfigString(user.password)
-        }" default_hostgroup=${cluster.writerHostgroup} active=1${defaultSchema} }`,
+        }" default_hostgroup=${
+          userDefaultHostgroup(cluster, user)
+        } active=1 use_ssl=${cluster.requireTls ? 1 : 0}${defaultSchema} }`,
       );
     }
   }
@@ -616,10 +895,26 @@ function clusterHasReadEligibleReplica(
   );
 }
 
-function sortedClusterUsernames(
+/**
+ * Read-split rules are emitted only when the operator opted in *and* there is
+ * somewhere online to send those SELECTs.
+ */
+function clusterEmitsReadSplitRules(
+  cluster: ProxySqlClusterDesired,
+): boolean {
+  return cluster.autoReadSplit === true &&
+    clusterHasReadEligibleReplica(cluster);
+}
+
+/**
+ * Read-write logins only — a `read-only` login already defaults to the reader
+ * hostgroup, so a rule for it would be redundant.
+ */
+function sortedReadSplitUsernames(
   cluster: ProxySqlClusterDesired,
 ): string[] {
   return cluster.users
+    .filter((user) => user.connectionRole !== "read-only")
     .map((user) => user.username)
     .sort((a, b) => a.localeCompare(b));
 }
@@ -636,8 +931,8 @@ function renderQueryRuleRows(
   let ruleId = 1;
   for (const cluster of clusters) {
     if (!clusterMatchesFamily(cluster, family)) continue;
-    if (!clusterHasReadEligibleReplica(cluster)) continue;
-    for (const username of sortedClusterUsernames(cluster)) {
+    if (!clusterEmitsReadSplitRules(cluster)) continue;
+    for (const username of sortedReadSplitUsernames(cluster)) {
       rows.push(
         `    { rule_id=${ruleId} active=1 username="${
           escapeProxySqlConfigString(username)
@@ -681,12 +976,14 @@ function renderProtocolFamilySection(
  * tables. The `interfaces=` lines always bind every interface inside
  * ProxySQL's own container namespace (see {@link CONTAINER_LISTEN_ADDRESS});
  * host-level exposure is a separate, compose-level publish decision (see
- * {@link ProxySqlDesiredState.bindAddress}).
+ * {@link ProxySqlDesiredState.bindAddresses}).
  */
 export function renderProxySqlStaticConfig(
   adminCredentials?: { user: string; password: string } | null,
   monitorCredentials?: { user: string; password: string } | null,
+  listenerPorts?: ProxySqlListenerPorts | null,
 ): string {
+  const ports = resolveListenerPorts(listenerPorts);
   const adminCredLine = adminCredentials
     ? `    admin_credentials="${
       escapeProxySqlConfigString(adminCredentials.user)
@@ -713,7 +1010,7 @@ export function renderProxySqlStaticConfig(
     "",
     "mysql_variables=",
     "{",
-    `    interfaces="${CONTAINER_LISTEN_ADDRESS}:${MYSQL_PORT}"`,
+    `    interfaces="${CONTAINER_LISTEN_ADDRESS}:${ports.mysql}"`,
     "    have_ssl=1",
     `    ssl_p2s_cert="${TLS_FULLCHAIN_PATH}"`,
     `    ssl_p2s_key="${TLS_PRIVKEY_PATH}"`,
@@ -723,7 +1020,7 @@ export function renderProxySqlStaticConfig(
     "",
     "pgsql_variables=",
     "{",
-    `    interfaces="${CONTAINER_LISTEN_ADDRESS}:${PGSQL_PORT}"`,
+    `    interfaces="${CONTAINER_LISTEN_ADDRESS}:${ports.pgsql}"`,
     "    have_ssl=1",
     `    ssl_p2s_cert="${TLS_FULLCHAIN_PATH}"`,
     `    ssl_p2s_key="${TLS_PRIVKEY_PATH}"`,
@@ -778,7 +1075,11 @@ export function renderProxySqlConfig(
   monitorCredentials?: { user: string; password: string } | null,
 ): string {
   const lines = [
-    renderProxySqlStaticConfig(adminCredentials, monitorCredentials),
+    renderProxySqlStaticConfig(
+      adminCredentials,
+      monitorCredentials,
+      desired.listenerPorts,
+    ),
   ];
   if (clusterUsesMysql(desired.clusters)) {
     lines.push(
@@ -802,10 +1103,11 @@ function renderAdminServerStatements(
   for (const cluster of clusters) {
     if (!clusterMatchesFamily(cluster, family)) continue;
     for (const backend of cluster.backends) {
+      const placement = backendPlacement(cluster, backend);
       statements.push(
-        `INSERT INTO ${table} (hostgroup_id,hostname,port,use_ssl) VALUES (${
-          backendHostgroup(cluster, backend)
-        },'${escapeSqlString(backend.address)}',${backend.port},1)`,
+        `INSERT INTO ${table} (hostgroup_id,hostname,port,use_ssl,status) VALUES (${placement.hostgroup},'${
+          escapeSqlString(backend.address)
+        }',${backend.port},1,'${placement.status}')`,
       );
     }
   }
@@ -815,6 +1117,29 @@ function renderAdminServerStatements(
     `SAVE ${upper} SERVERS TO DISK`,
   );
   return statements;
+}
+
+/**
+ * ProxySQL 3.0.x `pgsql_users` has no default_schema column (MySQL users
+ * still accept it). Only emit the field for mysql family.
+ */
+function renderAdminUserInsert(
+  family: "mysql" | "pgsql",
+  table: string,
+  cluster: ProxySqlClusterDesired,
+  user: ProxySqlUserDesired,
+): string {
+  const defaultHostgroup = userDefaultHostgroup(cluster, user);
+  const useSsl = cluster.requireTls ? 1 : 0;
+  const username = escapeSqlString(user.username);
+  const password = escapeSqlString(user.password);
+  const columns = "username,password,default_hostgroup,active,use_ssl";
+  const values = `'${username}','${password}',${defaultHostgroup},1,${useSsl}`;
+  if (family === "mysql" && user.defaultDatabase) {
+    const schema = escapeSqlString(user.defaultDatabase);
+    return `INSERT INTO ${table} (${columns},default_schema) VALUES (${values},'${schema}')`;
+  }
+  return `INSERT INTO ${table} (${columns}) VALUES (${values})`;
 }
 
 function renderAdminUserStatements(
@@ -829,23 +1154,7 @@ function renderAdminUserStatements(
     for (const user of cluster.users) {
       if (seen.has(user.username)) continue;
       seen.add(user.username);
-      if (family === "mysql" && user.defaultDatabase) {
-        statements.push(
-          `INSERT INTO ${table} (username,password,default_hostgroup,active,default_schema) VALUES ('${
-            escapeSqlString(user.username)
-          }','${
-            escapeSqlString(user.password)
-          }',${cluster.writerHostgroup},1,'${
-            escapeSqlString(user.defaultDatabase)
-          }')`,
-        );
-      } else {
-        statements.push(
-          `INSERT INTO ${table} (username,password,default_hostgroup,active) VALUES ('${
-            escapeSqlString(user.username)
-          }','${escapeSqlString(user.password)}',${cluster.writerHostgroup},1)`,
-        );
-      }
+      statements.push(renderAdminUserInsert(family, table, cluster, user));
     }
   }
   const upper = family.toUpperCase();
@@ -865,8 +1174,8 @@ function renderAdminQueryRuleStatements(
   let ruleId = 1;
   for (const cluster of clusters) {
     if (!clusterMatchesFamily(cluster, family)) continue;
-    if (!clusterHasReadEligibleReplica(cluster)) continue;
-    for (const username of sortedClusterUsernames(cluster)) {
+    if (!clusterEmitsReadSplitRules(cluster)) continue;
+    for (const username of sortedReadSplitUsernames(cluster)) {
       statements.push(
         `INSERT INTO ${table} (rule_id,active,username,match_pattern,destination_hostgroup,apply) VALUES (${ruleId},1,'${
           escapeSqlString(username)
@@ -1044,8 +1353,8 @@ export async function inspectProxySqlContainer(
 /**
  * Write identity-bearing compose and bring the shared ProxySQL project up.
  *
- * `bindAddress` defaults to `null` (no host publish at all — see
- * {@link ProxySqlDesiredState.bindAddress}) so a caller that does not have an
+ * `bindAddresses` defaults to `[]` (no host publish at all — see
+ * {@link ProxySqlDesiredState.bindAddresses}) so a caller that does not have an
  * explicit, currently-desired bind (e.g. a self-heal path with no fresh
  * `managed.ingress.reconcile` payload in hand) can never accidentally
  * republish the frontend on every interface. `segmentAttachments` follows the
@@ -1057,14 +1366,20 @@ export async function ensureProxySqlIngress(
   layout: LayoutPaths,
   descriptor: SystemComponentDescriptor,
   run: RunDockerFn = defaultRunDocker,
-  bindAddress: string | null = null,
+  bindAddresses: readonly string[] = [],
   segmentAttachments: ReadonlyArray<ProxySqlSegmentAttachment> = [],
+  listenerPorts?: ProxySqlListenerPorts | null,
 ): Promise<void> {
   const composePath = proxysqlComposePath(layout);
   await Deno.mkdir(proxysqlConfigDir(layout), { recursive: true, mode: 0o750 });
   await Deno.writeTextFile(
     composePath,
-    proxysqlComposeWithAttachments(descriptor, bindAddress, segmentAttachments),
+    proxysqlComposeWithAttachments(
+      descriptor,
+      bindAddresses,
+      segmentAttachments,
+      listenerPorts,
+    ),
     { mode: 0o640 },
   );
   const up = await run([
@@ -1083,17 +1398,35 @@ export async function ensureProxySqlIngress(
 }
 
 /**
- * Best-effort read of the currently-published `bindAddress` from the on-disk
- * compose file (`null` when absent or not yet published). See
- * {@link readPublishedBindAddressFromCompose} for why the self-heal path
+ * Best-effort read of the currently-published bind addresses from the on-disk
+ * compose file (`[]` when absent or not yet published). See
+ * {@link readPublishedBindAddressesFromCompose} for why the self-heal path
  * uses this instead of a hardcoded default.
  */
-export async function readCurrentProxySqlBindAddress(
+export async function readCurrentProxySqlBindAddresses(
   layout: LayoutPaths,
-): Promise<string | null> {
+): Promise<string[]> {
   try {
     const text = await Deno.readTextFile(proxysqlComposePath(layout));
-    return readPublishedBindAddressFromCompose(text);
+    return readPublishedBindAddressesFromCompose(text);
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return [];
+    throw err;
+  }
+}
+
+/**
+ * Best-effort read of the client listener ports already rendered into the
+ * on-disk compose file (`null` when absent / not published). See
+ * {@link readPublishedListenerPortsFromCompose} for why the self-heal path
+ * must round-trip these instead of falling back to the platform defaults.
+ */
+export async function readCurrentProxySqlListenerPorts(
+  layout: LayoutPaths,
+): Promise<ProxySqlListenerPorts | null> {
+  try {
+    const text = await Deno.readTextFile(proxysqlComposePath(layout));
+    return readPublishedListenerPortsFromCompose(text);
   } catch (err) {
     if (err instanceof Deno.errors.NotFound) return null;
     throw err;

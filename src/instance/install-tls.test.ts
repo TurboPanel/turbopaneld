@@ -41,7 +41,10 @@ test("installOriginNeedsInsecureTls flags RFC1918 and loopback IPv4 on 443", () 
 
 test("installOriginNeedsInsecureTls flags loopback and ULA IPv6 on 443", () => {
   assertEquals(installOriginNeedsInsecureTls("https://[::1]"), true);
-  assertEquals(installOriginNeedsInsecureTls("https://[0:0:0:0:0:0:0:1]"), true);
+  assertEquals(
+    installOriginNeedsInsecureTls("https://[0:0:0:0:0:0:0:1]"),
+    true,
+  );
   assertEquals(installOriginNeedsInsecureTls("https://[fe80::1]"), true);
   assertEquals(installOriginNeedsInsecureTls("https://[fc00::1]"), true);
   assertEquals(installOriginNeedsInsecureTls("https://[fd12::1]"), true);

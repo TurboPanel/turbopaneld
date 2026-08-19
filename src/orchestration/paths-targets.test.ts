@@ -2,10 +2,10 @@ import { assertEquals } from "@std/assert";
 import {
   CLOUDFLARED_VERSION,
   cloudflaredBin,
-  cloudflaredDownloadUrl,
   cloudflaredDir,
-  galaxyDockerRoleCodeloadUrl,
+  cloudflaredDownloadUrl,
   GALAXY_DOCKER_ROLE_GITHUB_REPO,
+  galaxyDockerRoleCodeloadUrl,
   resolveCloudflaredAsset,
   resolveUvTarget,
   UV_VERSION,

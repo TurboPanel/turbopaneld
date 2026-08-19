@@ -2,7 +2,12 @@
  * Host-free coverage for ProxySQL admin interface apply helpers.
  */
 
-import { assertEquals, assertRejects, assertStringIncludes, assertThrows } from "@std/assert";
+import {
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
 import { resolveLayout } from "../paths/layout.ts";
 import { createTempLayout } from "../testing/temp-layout.ts";
 import {

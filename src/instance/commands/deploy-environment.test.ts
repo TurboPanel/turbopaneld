@@ -206,7 +206,10 @@ test("shapeEnvironmentDeployResult omits containers when collection failed", () 
     traditionalWebSites: [],
     containers: null,
   });
-  assertEquals(result.summary, "Deployed 1 container service(s) for environment env-3");
+  assertEquals(
+    result.summary,
+    "Deployed 1 container service(s) for environment env-3",
+  );
   assertEquals(result.services, ["web"]);
   assertEquals("containers" in result, false);
 });

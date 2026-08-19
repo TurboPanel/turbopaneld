@@ -9,6 +9,7 @@ import {
   readSystemComponentDescriptor,
   SHARED_TRAEFIK_COMPOSE_SERVICE_NAME,
   SYSTEM_HOSTING_INGRESS_COMPONENT,
+  SYSTEM_MANAGED_HA_COMPONENT,
   SYSTEM_MANAGED_INGRESS_COMPONENT,
   SYSTEM_STACK_PROJECT,
   systemComponentContract,
@@ -30,12 +31,20 @@ test("systemComponentContract returns per-component selfHeal and project", () =>
     "hosting-ingress",
   );
   assertEquals(
-    systemComponentContract(SYSTEM_MANAGED_INGRESS_COMPONENT).composeServiceName,
+    systemComponentContract(SYSTEM_MANAGED_INGRESS_COMPONENT)
+      .composeServiceName,
     PROXYSQL_COMPOSE_SERVICE_NAME,
   );
-  assertEquals(systemComponentContract("database").project, SYSTEM_STACK_PROJECT);
+  assertEquals(
+    systemComponentContract("database").project,
+    SYSTEM_STACK_PROJECT,
+  );
   assertEquals(systemComponentContract("queue").selfHeal, "none");
   assertEquals(systemComponentContract("analytics").role, "turbopanel");
+  assertEquals(
+    systemComponentContract(SYSTEM_MANAGED_HA_COMPONENT).selfHeal,
+    "orchestrator",
+  );
 });
 
 test("expectedSystemComponentContainerName covers every allowlisted key", () => {
@@ -55,10 +64,20 @@ test("expectedSystemComponentContainerName covers every allowlisted key", () => 
     `${serviceId}-sql`,
   );
   assertEquals(
+    expectedSystemComponentContainerName(
+      SYSTEM_MANAGED_HA_COMPONENT,
+      serviceId,
+    ),
+    `${serviceId}-ha`,
+  );
+  assertEquals(
     expectedSystemComponentContainerName("database", serviceId),
     serviceId,
   );
-  assertEquals(expectedSystemComponentContainerName("queue", serviceId), serviceId);
+  assertEquals(
+    expectedSystemComponentContainerName("queue", serviceId),
+    serviceId,
+  );
   assertEquals(
     expectedSystemComponentContainerName("analytics", serviceId),
     serviceId,

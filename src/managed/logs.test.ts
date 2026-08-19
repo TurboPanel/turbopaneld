@@ -20,7 +20,8 @@ function fail(stderr: string): DockerCliResult {
 
 test("collectManagedLogs rejects unsafe managedId", async () => {
   await assertRejects(
-    () => collectManagedLogs("../escape", undefined, () => Promise.resolve(ok(""))),
+    () =>
+      collectManagedLogs("../escape", undefined, () => Promise.resolve(ok(""))),
     Error,
     "unsupported characters",
   );

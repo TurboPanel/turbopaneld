@@ -311,9 +311,12 @@ Traefik and from managed-engine ProxySQL:
 2. **Tenant raw TCP/UDP Traefik** — still **per tenant service** under
    `ingress/services/<serviceId>/` for docker-compose hostings with
    `protocol: tcp|udp`. **Do not** fold tenant raw ports into ProxySQL.
-   Ports `15432` / `16306` are reserved for the shared ProxySQL listeners
-   (`PROXYSQL_RESERVED_PUBLISHED_PORTS`); tenant claims colliding on those
-   published ports are rejected daemon-side.
+   Ports `15432` / `16306` are always reserved for the shared ProxySQL
+   platform-default listeners (`PROXYSQL_RESERVED_PUBLISHED_PORTS`); when
+   `environment.deploy` carries the server-owner org's effective
+   `listenerPorts`, tenant claims on those overrides are rejected too.
+   Tenant claims colliding on any reserved published port are rejected
+   daemon-side.
 3. **Managed-engine ProxySQL** (`managed-ingress`) — one per server,
    `proxysql/proxysql:3.0.9`, project `turbopanel-proxysql`. Desired state is
    whole-server `managed.ingress.reconcile` (not embedded on `managed.apply`).

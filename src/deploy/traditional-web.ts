@@ -1043,7 +1043,9 @@ export type RemoveTraditionalWebDeps = {
 };
 
 function resolveTraditionalWebIo(
-  opts?: Readonly<{ run?: TraditionalWebRunFn; runPlaybook?: TraditionalWebPlaybookFn }>,
+  opts?: Readonly<
+    { run?: TraditionalWebRunFn; runPlaybook?: TraditionalWebPlaybookFn }
+  >,
 ): TraditionalWebIo | undefined {
   if (!opts?.run && !opts?.runPlaybook) return undefined;
   return {

@@ -30,13 +30,11 @@ function readTextFile(
   }
 
   try {
-    const { code, stdout } = runCat
-      ? runCat(path)
-      : new Deno.Command("cat", {
-        args: [path],
-        stdout: "piped",
-        stderr: "null",
-      }).outputSync();
+    const { code, stdout } = runCat ? runCat(path) : new Deno.Command("cat", {
+      args: [path],
+      stdout: "piped",
+      stderr: "null",
+    }).outputSync();
     if (code !== 0) return undefined;
     return new TextDecoder().decode(stdout);
   } catch {

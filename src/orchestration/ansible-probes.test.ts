@@ -3,9 +3,9 @@ import { afterAll, beforeAll, describe, it } from "@std/testing/bdd";
 import {
   applyOrchestrationEnv,
   createOrchestrationRuntimeFixture,
+  type OrchestrationRuntimeFixture,
   restoreOrchestrationEnv,
   snapshotOrchestrationEnv,
-  type OrchestrationRuntimeFixture,
 } from "../testing/orchestration-fixtures.ts";
 
 describe("ansible binary probes", () => {

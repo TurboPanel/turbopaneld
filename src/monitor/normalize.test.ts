@@ -116,7 +116,12 @@ test("normalizeContainer prefers summary name, labels, and inspect ports", () =>
         "com.turbopanel.project": "proj-1",
         "com.turbopanel.service": "svc-1",
       },
-      Ports: [{ IP: "203.0.113.10", PrivatePort: 80, PublicPort: 8080, Type: "tcp" }],
+      Ports: [{
+        IP: "203.0.113.10",
+        PrivatePort: 80,
+        PublicPort: 8080,
+        Type: "tcp",
+      }],
       Image: "nginx:alpine",
       State: "restarting",
     }),
@@ -233,5 +238,8 @@ test("deriveContainerStatus covers remaining docker and event branches", () => {
     },
   });
   assertEquals(fromEvent.status, "starting");
-  assertEquals(fromEvent.updatedAt, new Date(1_700_000_000 * 1000).toISOString());
+  assertEquals(
+    fromEvent.updatedAt,
+    new Date(1_700_000_000 * 1000).toISOString(),
+  );
 });

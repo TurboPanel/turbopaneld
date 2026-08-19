@@ -17,8 +17,10 @@ import {
 const test = Deno.test.bind(Deno);
 
 const TLS_ID = "00000000-0000-4000-8000-0000000000aa";
-const CERT_PEM = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
-const KEY_PEM = "-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----\n";
+const CERT_PEM =
+  "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
+const KEY_PEM =
+  "-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----\n";
 
 test({
   name: "materializeTlsCertificates writes PEMs and returns written tlsIds",

@@ -1,8 +1,8 @@
 import { assertEquals } from "@std/assert";
 import {
   getActiveInstallPresenter,
-  isInstallPresenterActive,
   InstallerPresentedFailure,
+  isInstallPresenterActive,
   setActiveInstallPresenter,
 } from "./install-presenter-context.ts";
 import { InstallPresenter } from "./install-presenter.ts";

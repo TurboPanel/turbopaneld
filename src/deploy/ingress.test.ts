@@ -9,12 +9,14 @@ import {
   assertSafeHostingPathPrefix,
   assertValidBindAddress,
   buildCaddyHostnameRoutes,
+  buildProxysqlReservedPublishedPorts,
   buildTcpUdpIngressEntries,
   caddyfile,
   caddyHttpUpstream,
   caddyTraefikUpstream,
   cleanupStaleTcpUdpServiceIngress,
   collectTcpUdpIngressEntries,
+  ensureHostingCaddyRuntime,
   ensureHostingIngress,
   ensureServiceIngress,
   formatCaddyPathMatcher,
@@ -24,22 +26,21 @@ import {
   listPersistedTcpUdpServiceIds,
   readEnvironmentTcpUdpServiceIds,
   removeEnvironmentTcpUdpServiceIngress,
+  removeHostingCaddySite,
   removeServiceIngress,
   removeTcpUdpIngressEntries,
+  rewriteHostingCaddySites,
   serviceIngressComposePath,
   serviceIngressDir,
   serviceIngressProject,
   serviceTraefikCompose,
+  setIngressHostCommandForTest,
   siteSnippet,
   sortCaddySiteRoutes,
   syncTcpUdpIngressEntries,
   TcpUdpPortConflictError,
   TcpUdpPortReservedError,
   traefikCompose,
-  ensureHostingCaddyRuntime,
-  rewriteHostingCaddySites,
-  removeHostingCaddySite,
-  setIngressHostCommandForTest,
 } from "./ingress.ts";
 import type { DockerCliResult } from "./docker-cli.ts";
 import {
@@ -750,6 +751,61 @@ test("syncTcpUdpIngressEntries rejects ports reserved for ProxySQL managed liste
   }
 });
 
+test("syncTcpUdpIngressEntries rejects org-overridden ProxySQL listener ports", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const listenerPorts = { postgres: 18_432, mysqlFamily: 18_306 };
+  try {
+    await assertRejects(
+      () =>
+        syncTcpUdpIngressEntries(
+          layout,
+          "svc-a",
+          [{ hostingId: "h1", protocol: "tcp", publishedPort: 18_432 }],
+          listenerPorts,
+        ),
+      TcpUdpPortReservedError,
+    );
+    await assertRejects(
+      () =>
+        syncTcpUdpIngressEntries(
+          layout,
+          "svc-b",
+          [{ hostingId: "h2", protocol: "tcp", publishedPort: 18_306 }],
+          listenerPorts,
+        ),
+      TcpUdpPortReservedError,
+    );
+    // Platform defaults stay reserved alongside org overrides.
+    await assertRejects(
+      () =>
+        syncTcpUdpIngressEntries(
+          layout,
+          "svc-c",
+          [{ hostingId: "h3", protocol: "tcp", publishedPort: 15_432 }],
+          listenerPorts,
+        ),
+      TcpUdpPortReservedError,
+    );
+    await syncTcpUdpIngressEntries(
+      layout,
+      "svc-d",
+      [{ hostingId: "h4", protocol: "tcp", publishedPort: 17_432 }],
+      listenerPorts,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("buildProxysqlReservedPublishedPorts unions defaults with effective org ports", () => {
+  assertEquals(
+    [...buildProxysqlReservedPublishedPorts({ postgres: 18_432, mysqlFamily: 18_306 })].sort(
+      (a, b) => a - b,
+    ),
+    [15_432, 16_306, 18_306, 18_432, 33_001, 33_002],
+  );
+});
+
 test("syncTcpUdpIngressEntries serializes concurrent same-port claims — only one commits", async () => {
   const { layout, cleanup } = await makeTestLayout();
   try {
@@ -1284,7 +1340,10 @@ test("ensureHostingCaddyRuntime writes unit and attempts install via host comman
   try {
     await ensureHostingCaddyRuntime(layout);
     const caddyfilePath = join(layout.configDir, "hosting", "Caddyfile");
-    assertStringIncludes(await Deno.readTextFile(caddyfilePath), "auto_https off");
+    assertStringIncludes(
+      await Deno.readTextFile(caddyfilePath),
+      "auto_https off",
+    );
     assertEquals(hostCalls.some((c) => c.args.includes("install")), true);
     assertEquals(hostCalls.some((c) => c.args.includes("enable")), true);
   } finally {
@@ -1521,7 +1580,9 @@ test("inspectHostingIngressContainer skips mismatched or unlabelled rows", async
     assertEquals(
       await inspectHostingIngressContainer(layout, {
         runDocker: () =>
-          Promise.resolve(fakeDockerOk(JSON.stringify([wrongName, unlabelled]))),
+          Promise.resolve(
+            fakeDockerOk(JSON.stringify([wrongName, unlabelled])),
+          ),
       }),
       null,
     );
@@ -1936,7 +1997,11 @@ test("collectTcpUdpIngressEntries rejects invalid entry shapes in array", async 
 
     await Deno.writeTextFile(
       join(dir, "00000000-0000-4000-8000-0000000000de.json"),
-      JSON.stringify([null, { hostingId: "h1", protocol: "tcp", publishedPort: 0 }]),
+      JSON.stringify([null, {
+        hostingId: "h1",
+        protocol: "tcp",
+        publishedPort: 0,
+      }]),
     );
     await assertRejects(
       () => collectTcpUdpIngressEntries(layout),

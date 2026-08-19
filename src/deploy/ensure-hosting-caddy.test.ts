@@ -4,8 +4,8 @@ import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import {
   ensureHostingCaddy,
-  HOSTING_CADDY_VERSION,
   type EnsureHostingCaddyDeps,
+  HOSTING_CADDY_VERSION,
 } from "./ensure-hosting-caddy.ts";
 
 /**

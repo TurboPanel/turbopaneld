@@ -271,15 +271,30 @@ export function containerHostingsNeedSharedHttpIngress(
  * so a later `environment.stop` does not depend on current hostings to find
  * stale claim files / Traefik projects.
  */
+type EnsureDeployIngressParams = {
+  layout: LayoutPaths;
+  environmentId: string;
+  hasContainers: boolean;
+  containerHostings: EnvironmentDeployHosting[];
+  allHostings: readonly EnvironmentDeployHosting[];
+  ingressServices: readonly EnvironmentDeployIngressService[];
+  ensureDockerFn: () => Promise<void>;
+  listenerPorts?: EnvironmentDeployPayload["listenerPorts"];
+};
+
 async function ensureDeployIngress(
-  layout: LayoutPaths,
-  environmentId: string,
-  hasContainers: boolean,
-  containerHostings: EnvironmentDeployHosting[],
-  allHostings: readonly EnvironmentDeployHosting[],
-  ingressServices: readonly EnvironmentDeployIngressService[],
-  ensureDockerFn: () => Promise<void>,
+  params: EnsureDeployIngressParams,
 ): Promise<void> {
+  const {
+    layout,
+    environmentId,
+    hasContainers,
+    containerHostings,
+    allHostings,
+    ingressServices,
+    ensureDockerFn,
+    listenerPorts,
+  } = params;
   const activeIngressServiceIds = new Set(
     ingressServices.map((ingress) => ingress.serviceId),
   );
@@ -322,6 +337,7 @@ async function ensureDeployIngress(
       layout,
       ingress.serviceId,
       entries,
+      listenerPorts,
     );
     await ensureServiceIngress(layout, ingress.serviceId, ownEntries, {
       serviceId: ingress.serviceId,
@@ -935,15 +951,16 @@ export async function handleEnvironmentDeploy(
   );
 
   const ingressServices = parsedPayload.ingressServices ?? [];
-  await ensureDeployIngress(
+  await ensureDeployIngress({
     layout,
-    parsedPayload.environmentId,
+    environmentId: parsedPayload.environmentId,
     hasContainers,
     containerHostings,
-    parsedPayload.hostings,
+    allHostings: parsedPayload.hostings,
     ingressServices,
-    runtime.ensureDockerFn,
-  );
+    ensureDockerFn: runtime.ensureDockerFn,
+    listenerPorts: parsedPayload.listenerPorts,
+  });
 
   const deploymentDir = environmentDeploymentDir(
     layout,

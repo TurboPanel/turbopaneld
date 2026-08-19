@@ -3162,7 +3162,8 @@ it({
 });
 
 it({
-  name: "InstanceClient REST helpers cover health readiness version connections",
+  name:
+    "InstanceClient REST helpers cover health readiness version connections",
   permissions: { net: true },
   fn: async () => {
     const api = createFakeInstanceApi();
@@ -3352,8 +3353,7 @@ it({
       );
       api.script(
         "/api/daemon/v1/secrets/decrypt",
-        () =>
-          new Response(JSON.stringify({ plaintexts: [] }), { status: 200 }),
+        () => new Response(JSON.stringify({ plaintexts: [] }), { status: 200 }),
       );
       api.script(
         "/api/daemon/v1/deployments/secrets/rehydrate",
@@ -3394,7 +3394,10 @@ it({
         try {
           client.start();
           client.start(); // idempotent
-          const socket = await waitFor("fan-out websocket", () => sockets.at(0));
+          const socket = await waitFor(
+            "fan-out websocket",
+            () => sockets.at(0),
+          );
           assertExists(socket.options);
           socket.open();
           await flushMicrotasks();
@@ -3497,23 +3500,17 @@ it({
           await waitFor(
             "managed-logs-result",
             () =>
-              lastFrameOfType(socket, "managed-logs-result")
-                ? true
-                : undefined,
+              lastFrameOfType(socket, "managed-logs-result") ? true : undefined,
           );
           await waitFor(
             "fabric-paths-result",
             () =>
-              lastFrameOfType(socket, "fabric-paths-result")
-                ? true
-                : undefined,
+              lastFrameOfType(socket, "fabric-paths-result") ? true : undefined,
           );
           await waitFor(
             "tunnel-token-result",
             () =>
-              lastFrameOfType(socket, "tunnel-token-result")
-                ? true
-                : undefined,
+              lastFrameOfType(socket, "tunnel-token-result") ? true : undefined,
           );
           await waitFor(
             "public-urls-update-result",
@@ -3644,9 +3641,10 @@ it({
           });
           const refused = await waitFor(
             "refused result",
-            () => lastFrameOfType(socket, "dev-sync-result") as
-              | { ok?: boolean; error?: string }
-              | undefined,
+            () =>
+              lastFrameOfType(socket, "dev-sync-result") as
+                | { ok?: boolean; error?: string }
+                | undefined,
           );
           assertEquals(refused.ok, false);
           assertEquals(typeof refused.error, "string");
@@ -4041,7 +4039,9 @@ it({
           first.fail("upgrade rejected");
 
           const startedSecond = performance.now();
-          while (sockets.length < 2 && performance.now() - startedSecond < 3_000) {
+          while (
+            sockets.length < 2 && performance.now() - startedSecond < 3_000
+          ) {
             await clock.advance(DEFAULT_INITIAL_BACKOFF_MS);
             await flushMicrotasks();
             await new Promise((resolve) => setTimeout(resolve, 1));
@@ -4054,7 +4054,9 @@ it({
           second.close(1000, "before open");
 
           const startedThird = performance.now();
-          while (sockets.length < 3 && performance.now() - startedThird < 3_000) {
+          while (
+            sockets.length < 3 && performance.now() - startedThird < 3_000
+          ) {
             await clock.advance(DEFAULT_INITIAL_BACKOFF_MS);
             await flushMicrotasks();
             await new Promise((resolve) => setTimeout(resolve, 1));
@@ -4623,7 +4625,9 @@ it({
       }
 
       // Missing license during reconcile.
-      const licenseIdPath = `${Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR")}/license.id`;
+      const licenseIdPath = `${
+        Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR")
+      }/license.id`;
       await Deno.remove(licenseIdPath);
       const restoreMissingLic = installClientTestHooks({
         getBuildInfo: () => ({
@@ -4693,7 +4697,10 @@ it({
           ) as { ok?: boolean; error?: string } | undefined,
       );
       assertEquals(tun.ok, false);
-      assertEquals(String(tun.error ?? "").includes("tunnel write failed"), true);
+      assertEquals(
+        String(tun.error ?? "").includes("tunnel write failed"),
+        true,
+      );
 
       socket.receive({
         type: "public-urls-update",
@@ -4917,7 +4924,8 @@ it({
 });
 
 it({
-  name: "update reconcile uses public-tls path without cacert when instance URL is public HTTPS",
+  name:
+    "update reconcile uses public-tls path without cacert when instance URL is public HTTPS",
   permissions: {
     env: true,
     read: true,
@@ -4984,7 +4992,10 @@ it({
       );
       assertEquals(result.ok, true);
       assertEquals(downloadOpts.length >= 1, true);
-      const opts = downloadOpts[0] as { caPath?: string; insecureTls?: boolean };
+      const opts = downloadOpts[0] as {
+        caPath?: string;
+        insecureTls?: boolean;
+      };
       assertEquals(opts.caPath, undefined);
       assertEquals(opts.insecureTls, false);
     } finally {

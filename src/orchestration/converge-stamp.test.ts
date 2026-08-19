@@ -80,7 +80,10 @@ async function withIsolatedStamp(
   fn: (stampFile: string, fixture: TempLayoutFixture) => Promise<void>,
 ): Promise<void> {
   await withTempLayout(async (fixture) => {
-    const devOrchestrationDir = join(fixture.dirs.configDir, "dev-orchestration");
+    const devOrchestrationDir = join(
+      fixture.dirs.configDir,
+      "dev-orchestration",
+    );
     await seedDevOrchestrationTree(devOrchestrationDir);
     const restoreEnv = applyFixtureEnv(fixture, devOrchestrationDir);
     try {
@@ -219,16 +222,18 @@ test("emitDevConvergeSkippedIfNeeded does not emit when stamp is missing", async
 
 test("devConvergeEnvMaterial captures dev-only extra-vars with defaults", () => {
   const previous = new Map<string, string | undefined>();
-  for (const key of [
-    "TURBOPANEL_DEV_USER",
-    "TURBOPANEL_DEV_UID",
-    "TURBOPANEL_DEV_GID",
-    "TURBOPANEL_UI_MODE",
-    "TURBOPANEL_INSTANCE_RUN_MODE",
-    "TURBOPANEL_INSTANCE_RUNTIME",
-    "TURBOPANEL_OPTIONAL_DBSTUDIO",
-    "TURBOPANEL_OPTIONAL_UI",
-  ]) {
+  for (
+    const key of [
+      "TURBOPANEL_DEV_USER",
+      "TURBOPANEL_DEV_UID",
+      "TURBOPANEL_DEV_GID",
+      "TURBOPANEL_UI_MODE",
+      "TURBOPANEL_INSTANCE_RUN_MODE",
+      "TURBOPANEL_INSTANCE_RUNTIME",
+      "TURBOPANEL_OPTIONAL_DBSTUDIO",
+      "TURBOPANEL_OPTIONAL_UI",
+    ]
+  ) {
     previous.set(key, Deno.env.get(key));
     Deno.env.delete(key);
   }
@@ -252,12 +257,14 @@ test("devConvergeEnvMaterial captures dev-only extra-vars with defaults", () => 
 
 test("devConvergeEnvMaterial honors explicit static and workers overrides", () => {
   const previous = new Map<string, string | undefined>();
-  for (const key of [
-    "TURBOPANEL_UI_MODE",
-    "TURBOPANEL_INSTANCE_RUN_MODE",
-    "TURBOPANEL_INSTANCE_RUNTIME",
-    "TURBOPANEL_OPTIONAL_TABIX",
-  ]) {
+  for (
+    const key of [
+      "TURBOPANEL_UI_MODE",
+      "TURBOPANEL_INSTANCE_RUN_MODE",
+      "TURBOPANEL_INSTANCE_RUNTIME",
+      "TURBOPANEL_OPTIONAL_TABIX",
+    ]
+  ) {
     previous.set(key, Deno.env.get(key));
   }
   Deno.env.set("TURBOPANEL_UI_MODE", "static");

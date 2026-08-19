@@ -312,7 +312,8 @@ test({
 });
 
 test({
-  name: "rehydrateLocalDeployments if-missing skips when secret files already present",
+  name:
+    "rehydrateLocalDeployments if-missing skips when secret files already present",
   permissions: { read: true, write: true },
   fn: async () => {
     const root = await Deno.makeTempDir({ prefix: "tp-rehydrate-if-missing-" });
@@ -458,22 +459,24 @@ test({
 });
 
 test("parseRehydrateDeploymentResults drops invalid rows", () => {
-  const parsed = parseRehydrateDeploymentResults([
-    {
-      projectId: "proj-1",
-      environmentId: "env-1",
-      generation: 1,
-      secretPlan: "nope",
-      variableMaterial: [],
-    },
-    {
-      projectId: "proj-ok",
-      environmentId: "env-ok",
-      generation: 2,
-      secretPlan: [],
-      variableMaterial: [],
-    },
-  ] as Parameters<typeof parseRehydrateDeploymentResults>[0]);
+  const parsed = parseRehydrateDeploymentResults(
+    [
+      {
+        projectId: "proj-1",
+        environmentId: "env-1",
+        generation: 1,
+        secretPlan: "nope",
+        variableMaterial: [],
+      },
+      {
+        projectId: "proj-ok",
+        environmentId: "env-ok",
+        generation: 2,
+        secretPlan: [],
+        variableMaterial: [],
+      },
+    ] as Parameters<typeof parseRehydrateDeploymentResults>[0],
+  );
   assertEquals(parsed.length, 1);
   assertEquals(parsed[0]?.projectId, "proj-ok");
 });
@@ -624,10 +627,13 @@ test({
 });
 
 test({
-  name: "ensureDeploymentSecretFiles throws when files still missing after rehydrate",
+  name:
+    "ensureDeploymentSecretFiles throws when files still missing after rehydrate",
   permissions: { read: true, write: true },
   fn: async () => {
-    const root = await Deno.makeTempDir({ prefix: "tp-rehydrate-still-missing-" });
+    const root = await Deno.makeTempDir({
+      prefix: "tp-rehydrate-still-missing-",
+    });
     try {
       const { layout } = await writeSecretDeployment(root, 1);
       await assertRejects(
@@ -798,10 +804,13 @@ test({
 });
 
 test({
-  name: "rehydrateLocalDeployments uses planFromManifest when remote omits secretPlan",
+  name:
+    "rehydrateLocalDeployments uses planFromManifest when remote omits secretPlan",
   permissions: { read: true, write: true },
   fn: async () => {
-    const root = await Deno.makeTempDir({ prefix: "tp-rehydrate-manifest-plan-" });
+    const root = await Deno.makeTempDir({
+      prefix: "tp-rehydrate-manifest-plan-",
+    });
     try {
       const stateDir = join(root, "state");
       const runDir = join(root, "run");

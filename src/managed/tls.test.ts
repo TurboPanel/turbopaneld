@@ -203,7 +203,10 @@ test("materializeProxySqlTlsMaterial rejects missing certificate or CA PEM", asy
             caCertPem:
               "-----BEGIN CERTIFICATE-----\nY\n-----END CERTIFICATE-----\n",
           },
-          () => Promise.resolve(["-----BEGIN PRIVATE KEY-----\nK\n-----END PRIVATE KEY-----\n"]),
+          () =>
+            Promise.resolve([
+              "-----BEGIN PRIVATE KEY-----\nK\n-----END PRIVATE KEY-----\n",
+            ]),
         ),
       Error,
       "ProxySQL TLS material missing certificate or CA PEM",
@@ -223,7 +226,10 @@ test("materializeManagedProxySqlTlsMaterial rejects missing CA PEM", async () =>
             privateKeyEnvelope: "tpdaemon.v1.x",
             caCertPem: "",
           },
-          () => Promise.resolve(["-----BEGIN PRIVATE KEY-----\nK\n-----END PRIVATE KEY-----\n"]),
+          () =>
+            Promise.resolve([
+              "-----BEGIN PRIVATE KEY-----\nK\n-----END PRIVATE KEY-----\n",
+            ]),
         ),
       Error,
       "ProxySQL TLS material missing certificate or CA PEM",
@@ -256,8 +262,14 @@ test("materializeStandbyPassfile escapes colons in IPv6 hosts", async () => {
       password: "s3cret:pass",
     });
     const pgpass = await Deno.readTextFile(join(managedDir, "auth/pgpass"));
-    assertEquals(pgpass.includes("203.0.113.10:5432:*:tp_repl:s3cret\\:pass"), true);
-    assertEquals((await Deno.stat(join(managedDir, "auth/pgpass"))).mode! & 0o777, 0o600);
+    assertEquals(
+      pgpass.includes("203.0.113.10:5432:*:tp_repl:s3cret\\:pass"),
+      true,
+    );
+    assertEquals(
+      (await Deno.stat(join(managedDir, "auth/pgpass"))).mode! & 0o777,
+      0o600,
+    );
   });
 });
 

@@ -15,6 +15,8 @@ import {
   parseManagedApplyPayload,
   parseManagedBackupPayload,
   parseManagedDestroyPayload,
+  parseManagedHaFailoverPayload,
+  parseManagedHaReconcilePayload,
   parseManagedIngressReconcilePayload,
   parseManagedLifecyclePayload,
   parseManagedPromotePayload,
@@ -34,6 +36,8 @@ import {
 import { handleManagedDestroy } from "../../managed/destroy.ts";
 import { handleManagedLifecycle } from "../../managed/lifecycle.ts";
 import { handleManagedPromote } from "../../managed/promote.ts";
+import { handleManagedHaFailover } from "./managed-ha-failover.ts";
+import { handleManagedHaReconcile } from "./managed-ha-reconcile.ts";
 import { handleManagedIngressReconcile } from "./managed-ingress-reconcile.ts";
 import { handleEnvironmentLifecycle } from "./lifecycle-environment.ts";
 import { parseRehydrateDeploymentResults } from "../../deploy/rehydrate-deployments.ts";
@@ -77,6 +81,8 @@ export type CommandRouterHandlerOverrides = {
   handleManagedBackup?: typeof handleManagedBackup;
   handleManagedRestore?: typeof handleManagedRestore;
   handleManagedIngressReconcile?: typeof handleManagedIngressReconcile;
+  handleManagedHaReconcile?: typeof handleManagedHaReconcile;
+  handleManagedHaFailover?: typeof handleManagedHaFailover;
   handleSystemReconcile?: typeof handleSystemReconcile;
 };
 
@@ -88,7 +94,9 @@ export function setCommandRouterHandlersForTests(
   commandRouterHandlerOverrides = overrides;
 }
 
-function pickCommandRouterHandler<K extends keyof CommandRouterHandlerOverrides>(
+function pickCommandRouterHandler<
+  K extends keyof CommandRouterHandlerOverrides,
+>(
   key: K,
   fallback: NonNullable<CommandRouterHandlerOverrides[K]>,
 ): NonNullable<CommandRouterHandlerOverrides[K]> {
@@ -291,6 +299,34 @@ export async function handleCommandDispatch(
         result = await pickCommandRouterHandler(
           "handleManagedIngressReconcile",
           handleManagedIngressReconcile,
+        )(
+          payload,
+          daemonReceivedAt,
+          { decryptSecrets: deps?.decryptSecrets },
+        );
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
+      case "managed.ha.reconcile": {
+        const payload = parseManagedHaReconcilePayload(message.payload);
+        result = await pickCommandRouterHandler(
+          "handleManagedHaReconcile",
+          handleManagedHaReconcile,
+        )(
+          payload,
+          daemonReceivedAt,
+          { decryptSecrets: deps?.decryptSecrets },
+        );
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
+      case "managed.ha.failover": {
+        const payload = parseManagedHaFailoverPayload(message.payload);
+        result = await pickCommandRouterHandler(
+          "handleManagedHaFailover",
+          handleManagedHaFailover,
         )(
           payload,
           daemonReceivedAt,

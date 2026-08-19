@@ -264,7 +264,12 @@ test("removeTraditionalWebSites removes nginx/apache/ols configs via mocked sudo
 
     for (
       const path of [
-        join(layout.configDir, "nginx", "sites", `tp-${environmentId}-www.conf`),
+        join(
+          layout.configDir,
+          "nginx",
+          "sites",
+          `tp-${environmentId}-www.conf`,
+        ),
         join(
           layout.configDir,
           "apache",

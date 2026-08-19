@@ -23,6 +23,12 @@ export const INGRESS_CONTAINER_NAME_SUFFIX = "-in";
  */
 export const MANAGED_INGRESS_CONTAINER_NAME_SUFFIX = "-sql";
 
+/**
+ * Managed-HA (Orchestrator) container-name suffix — mirrors instance
+ * `src/lib/naming.ts` `MANAGED_HA_CONTAINER_NAME_SUFFIX`.
+ */
+export const MANAGED_HA_CONTAINER_NAME_SUFFIX = "-ha";
+
 /** Instance-allocated identity for a Traefik ingress container. */
 export type IngressIdentity = {
   serviceId: string;
@@ -41,6 +47,14 @@ export function ingressContainerName(serviceId: string): string {
  */
 export function managedIngressContainerName(serviceId: string): string {
   return `${serviceId}${MANAGED_INGRESS_CONTAINER_NAME_SUFFIX}`;
+}
+
+/**
+ * Build `<serviceId>-ha` — shared Orchestrator managed-ha container name.
+ * Mirrors instance `managedHaContainerNameFromService`.
+ */
+export function managedHaContainerName(serviceId: string): string {
+  return `${serviceId}${MANAGED_HA_CONTAINER_NAME_SUFFIX}`;
 }
 
 /**

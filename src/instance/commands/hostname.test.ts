@@ -94,7 +94,9 @@ test({
     } = await import("./hostname.ts");
 
     setAnsibleAvailabilityCheckForTests(() => Promise.resolve(true));
-    setRunSetHostnameForTests(() => Promise.resolve({ summary: "hostname-ok" }));
+    setRunSetHostnameForTests(() =>
+      Promise.resolve({ summary: "hostname-ok" })
+    );
     try {
       const result = await handleHostname(
         { hostname: "web-01" },

@@ -84,8 +84,7 @@ test("resolveUpdate fetches catalog + manifest and picks host arch artifact", as
         defaultChannel: "trunk",
         channels: {
           trunk: {
-            manifestUrl:
-              "https://dl.trbp.nl/channels/trunk/manifest.json",
+            manifestUrl: "https://dl.trbp.nl/channels/trunk/manifest.json",
           },
         },
       });
@@ -106,7 +105,7 @@ test("resolveUpdate fetches catalog + manifest and picks host arch artifact", as
     assertEquals(info.buildId, "build-1");
     assertEquals(
       info.downloadUrl ===
-          info.binaryArtifact.url,
+        info.binaryArtifact.url,
       true,
     );
     assertEquals(info.jsFallbackArtifact.size, 300);
@@ -142,8 +141,7 @@ test("resolveUpdate throws MissingChannelError for absent catalog channels", asy
         defaultChannel: "trunk",
         channels: {
           trunk: {
-            manifestUrl:
-              "https://dl.trbp.nl/channels/trunk/manifest.json",
+            manifestUrl: "https://dl.trbp.nl/channels/trunk/manifest.json",
           },
         },
       });
@@ -169,8 +167,7 @@ test("resolveUpdate throws when channel manifest HTTP status is not ok", async (
         defaultChannel: "trunk",
         channels: {
           trunk: {
-            manifestUrl:
-              "https://dl.trbp.nl/channels/trunk/manifest.json",
+            manifestUrl: "https://dl.trbp.nl/channels/trunk/manifest.json",
           },
         },
       });

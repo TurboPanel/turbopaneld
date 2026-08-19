@@ -181,7 +181,9 @@ function isDeploymentManifestV2(
   if (typeof record.generation !== "number" || record.generation < 0) {
     return false;
   }
-  if (typeof record.projectName !== "string" || record.projectName.length === 0) {
+  if (
+    typeof record.projectName !== "string" || record.projectName.length === 0
+  ) {
     return false;
   }
   if (
@@ -288,6 +290,46 @@ export type LocalDeploymentManifest = {
   manifest: DeploymentManifestV2;
 };
 
+/** `null` when `path` does not exist; rethrows any other `readDir` error. */
+async function readDirEntries(
+  path: string,
+): Promise<Deno.DirEntry[] | null> {
+  try {
+    const entries: Deno.DirEntry[] = [];
+    for await (const entry of Deno.readDir(path)) {
+      entries.push(entry);
+    }
+    return entries;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return null;
+    throw err;
+  }
+}
+
+function isDeploymentTreeDir(entry: Deno.DirEntry): boolean {
+  return entry.isDirectory && entry.name !== COMPOSE_STAGE_DIRNAME;
+}
+
+async function pushLocalManifest(
+  out: LocalDeploymentManifest[],
+  dir: string,
+): Promise<void> {
+  const manifest = await readDeploymentManifest(dir);
+  if (manifest) out.push({ dir, manifest });
+}
+
+async function collectNestedEnvironmentManifests(
+  projectDir: string,
+  out: LocalDeploymentManifest[],
+): Promise<void> {
+  const envEntries = await readDirEntries(projectDir);
+  if (!envEntries) return;
+  for (const envEntry of envEntries) {
+    if (!isDeploymentTreeDir(envEntry)) continue;
+    await pushLocalManifest(out, join(projectDir, envEntry.name));
+  }
+}
+
 /**
  * Scan `<stateDir>/deployments/` for version-2 `deployment.json` files
  * (compiled `<projectId>/<environmentId>/` trees and leftover single-level
@@ -298,34 +340,14 @@ export async function listLocalDeploymentManifests(
 ): Promise<LocalDeploymentManifest[]> {
   const root = join(layout.stateDir, "deployments");
   const out: LocalDeploymentManifest[] = [];
-  let projectEntries: Deno.DirEntry[];
-  try {
-    projectEntries = [];
-    for await (const entry of Deno.readDir(root)) {
-      projectEntries.push(entry);
-    }
-  } catch (err) {
-    if (err instanceof Deno.errors.NotFound) return [];
-    throw err;
-  }
+  const projectEntries = await readDirEntries(root);
+  if (!projectEntries) return [];
 
   for (const projectEntry of projectEntries) {
-    if (!projectEntry.isDirectory) continue;
-    if (projectEntry.name === COMPOSE_STAGE_DIRNAME) continue;
+    if (!isDeploymentTreeDir(projectEntry)) continue;
     const projectDir = join(root, projectEntry.name);
-    const direct = await readDeploymentManifest(projectDir);
-    if (direct) out.push({ dir: projectDir, manifest: direct });
-    try {
-      for await (const envEntry of Deno.readDir(projectDir)) {
-        if (!envEntry.isDirectory) continue;
-        if (envEntry.name === COMPOSE_STAGE_DIRNAME) continue;
-        const envDir = join(projectDir, envEntry.name);
-        const manifest = await readDeploymentManifest(envDir);
-        if (manifest) out.push({ dir: envDir, manifest });
-      }
-    } catch (err) {
-      if (!(err instanceof Deno.errors.NotFound)) throw err;
-    }
+    await pushLocalManifest(out, projectDir);
+    await collectNestedEnvironmentManifests(projectDir, out);
   }
   return out;
 }

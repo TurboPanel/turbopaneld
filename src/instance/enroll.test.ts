@@ -211,7 +211,10 @@ test({
   permissions: { env: true, net: true, read: true, write: true },
   fn: async () => {
     await withTempLayout(async (fixture) => {
-      await Deno.writeTextFile(join(fixture.dirs.stateDir, "server.id"), "  \n");
+      await Deno.writeTextFile(
+        join(fixture.dirs.stateDir, "server.id"),
+        "  \n",
+      );
       const api = createFakeInstanceApi();
       const restore = api.install();
       let enrollBody: unknown;

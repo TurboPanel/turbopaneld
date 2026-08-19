@@ -70,6 +70,7 @@ import {
   resolveRunScriptUrl,
 } from "./run-reconcile.ts";
 import { installOriginNeedsInsecureTls } from "./install-tls.ts";
+import { ManagedHaObserver } from "./ha-observe.ts";
 
 type DaemonMessage =
   | { type: "echo"; payload: unknown; at: string }
@@ -93,6 +94,12 @@ type DaemonMessage =
     id: string;
     logs: string;
     error?: string;
+    at: string;
+  }
+  | {
+    type: "managed-ha-event";
+    managedId: string;
+    sourceMemberId?: string;
     at: string;
   }
   | {
@@ -364,6 +371,7 @@ export class InstanceClient {
   #parkedBackoffMs = PARKED_BACKOFF_MIN_MS;
   #licenseStamp: string | undefined;
   #idlePresence: IdlePresence | undefined;
+  #haObserver: ManagedHaObserver | undefined;
   #metricsScheduler: MetricsScheduler | undefined;
   /** Server id the current metrics scheduler was bound for (not `#tokenServerId`). */
   #metricsSchedulerServerId: string | undefined;
@@ -531,6 +539,8 @@ export class InstanceClient {
     this.#stopped = true;
     this.#idlePresence?.detach();
     this.#idlePresence = undefined;
+    this.#haObserver?.detach();
+    this.#haObserver = undefined;
     this.#metricsScheduler?.detach();
     this.#metricsScheduler = undefined;
     this.#metricsSchedulerServerId = undefined;
@@ -600,6 +610,7 @@ export class InstanceClient {
     );
     this.#closeActiveSocket();
     this.#idlePresence?.detach();
+    this.#haObserver?.detach();
     this.#metricsScheduler?.detach();
     const classified = classifyConnectFailure(err);
     if (classified.kind === "permanent") {
@@ -934,6 +945,8 @@ export class InstanceClient {
     this.#hadStableSession = true;
     const connectedAt = now();
     this.#idlePresence?.attach(ws);
+    this.#ensureHaObserver();
+    this.#haObserver?.attach();
     this.#metricsScheduler?.attach((sample) =>
       this.#apiClient?.sendHostMetrics(sample) ?? Promise.resolve()
     );
@@ -966,6 +979,7 @@ export class InstanceClient {
       }
       if (this.#ws === ws) this.#ws = undefined;
       this.#idlePresence?.detach();
+      this.#haObserver?.detach();
       this.#metricsScheduler?.detach();
     };
 
@@ -992,6 +1006,16 @@ export class InstanceClient {
     } else {
       this.#increaseBackoff();
     }
+  }
+
+  #ensureHaObserver(): void {
+    if (this.#haObserver) return;
+    this.#haObserver = new ManagedHaObserver({
+      send: (message) => {
+        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return;
+        this.#ws.send(JSON.stringify(message));
+      },
+    });
   }
 
   #ensureIdlePresence(serverId: string): void {

@@ -5,11 +5,11 @@ import {
   applyOrchestrationEnv,
   buildGalaxyDockerFixtureArchive,
   createOrchestrationRuntimeFixture,
+  type OrchestrationRuntimeFixture,
   restoreOrchestrationEnv,
   runtimePaths,
   snapshotOrchestrationEnv,
   writeOrchestrationBootstrapStamps,
-  type OrchestrationRuntimeFixture,
 } from "../testing/orchestration-fixtures.ts";
 
 describe("ansible runtime with stubbed binaries", () => {
@@ -86,6 +86,7 @@ describe("ansible runtime with stubbed binaries", () => {
     await ansible.runCaddySetup();
     await ansible.runPostgresSetup();
     await ansible.runProxySqlSetup();
+    await ansible.runOrchestratorSetup();
     await ansible.runRabbitmqSetup();
     await ansible.runBuildToggle({
       uiMode: "static",
@@ -253,12 +254,16 @@ describe("ansible runtime with stubbed binaries", () => {
     const { galaxyVendorRolesDir, galaxyDockerStampFile } = runtimePaths(
       fixture.runtimesDir,
     );
-    await Deno.remove(galaxyVendorRolesDir, { recursive: true }).catch(() => {});
+    await Deno.remove(galaxyVendorRolesDir, { recursive: true }).catch(
+      () => {},
+    );
     await Deno.remove(galaxyDockerStampFile).catch(() => {});
 
     const originalFetch = globalThis.fetch;
     globalThis.fetch = () =>
-      Promise.resolve(new Response("nope", { status: 503, statusText: "Unavailable" }));
+      Promise.resolve(
+        new Response("nope", { status: 503, statusText: "Unavailable" }),
+      );
     try {
       await assertRejects(
         () => ansible.ensureGalaxyDockerRole(),
@@ -269,7 +274,9 @@ describe("ansible runtime with stubbed binaries", () => {
       globalThis.fetch = originalFetch;
     }
 
-    await Deno.remove(galaxyVendorRolesDir, { recursive: true }).catch(() => {});
+    await Deno.remove(galaxyVendorRolesDir, { recursive: true }).catch(
+      () => {},
+    );
     await Deno.remove(galaxyDockerStampFile).catch(() => {});
     const wrongArchive = await buildGalaxyDockerFixtureArchive("9.9.9");
     globalThis.fetch = () =>

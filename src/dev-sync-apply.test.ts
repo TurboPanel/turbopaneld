@@ -99,7 +99,7 @@ async function createCheckoutFixture(): Promise<CheckoutFixture> {
     ".git/HEAD": "ref: refs/heads/trunk\n",
     "logs/daemon.log": "old log line\n",
     ".github/workflows/ci.yml": "name: ci\n",
-    "cloudflared/token.json": "{\"token\":\"host\"}\n",
+    "cloudflared/token.json": '{"token":"host"}\n',
   });
   return {
     parent,
@@ -221,8 +221,9 @@ test("applyDevSyncTarball refuses the co-located development daemon", async () =
   try {
     await assertRejects(
       async () =>
-        await withEnvMap({ TURBOPANEL_DEV_INSTANCE: "1" }, async () =>
-          await applyDevSyncTarball(new Uint8Array([0x1f]))
+        await withEnvMap(
+          { TURBOPANEL_DEV_INSTANCE: "1" },
+          async () => await applyDevSyncTarball(new Uint8Array([0x1f])),
         ),
       Error,
       COLOCATED_DEV_SYNC_REFUSED_REASON,
@@ -272,7 +273,9 @@ test("applyDevSyncTarball replaces checkout and preserves host-local artifacts",
 
     const main = await Deno.readTextFile(join(fixture.daemonRoot, "main.ts"));
     assertEquals(main, "// synced checkout\n");
-    const newFile = await Deno.readTextFile(join(fixture.daemonRoot, "src/new.ts"));
+    const newFile = await Deno.readTextFile(
+      join(fixture.daemonRoot, "src/new.ts"),
+    );
     assertEquals(newFile, "export const v = 1;\n");
 
     let staleExists = true;
@@ -289,7 +292,9 @@ test("applyDevSyncTarball replaces checkout and preserves host-local artifacts",
     }
     const head = await Deno.readTextFile(join(fixture.daemonRoot, ".git/HEAD"));
     assertEquals(head, "ref: refs/heads/trunk\n");
-    const log = await Deno.readTextFile(join(fixture.daemonRoot, "logs/daemon.log"));
+    const log = await Deno.readTextFile(
+      join(fixture.daemonRoot, "logs/daemon.log"),
+    );
     assertEquals(log, "old log line\n");
 
     let shippedExists = true;
@@ -340,7 +345,8 @@ test("applyDevSyncTarball rejects tarballs that fail extraction", async () => {
         await withEnvMap({
           TURBOPANEL_DEV_INSTANCE: undefined,
           TURBOPANEL_DAEMON_ROOT: fixture.daemonRoot,
-        }, async () => await applyDevSyncTarball(new Uint8Array([0x00, 0x01, 0x02]))),
+        }, async () =>
+          await applyDevSyncTarball(new Uint8Array([0x00, 0x01, 0x02]))),
       Error,
       "tar extract failed: bogus archive",
     );

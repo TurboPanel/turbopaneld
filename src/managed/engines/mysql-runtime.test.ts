@@ -169,13 +169,34 @@ test("mysql bootstrapStandby returns needs_resync when datadir exists without ma
       containerGroup: "mysql",
       runDocker: (args) => {
         const joined = args.join(" ");
-        if (joined.includes("test") && joined.includes("-d") && joined.includes("/mysql")) {
-          return Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 });
+        if (
+          joined.includes("test") && joined.includes("-d") &&
+          joined.includes("/mysql")
+        ) {
+          return Promise.resolve({
+            success: true,
+            stdout: "",
+            stderr: "",
+            code: 0,
+          });
         }
-        if (joined.includes("test") && joined.includes("-f") && joined.includes(STANDBY_MARKER)) {
-          return Promise.resolve({ success: false, stdout: "", stderr: "", code: 1 });
+        if (
+          joined.includes("test") && joined.includes("-f") &&
+          joined.includes(STANDBY_MARKER)
+        ) {
+          return Promise.resolve({
+            success: false,
+            stdout: "",
+            stderr: "",
+            code: 1,
+          });
         }
-        return Promise.resolve({ success: false, stdout: "", stderr: "", code: 1 });
+        return Promise.resolve({
+          success: false,
+          stdout: "",
+          stderr: "",
+          code: 1,
+        });
       },
     },
     {
@@ -194,7 +215,8 @@ test("mysql backup refuses system schema identifiers", () => {
   }
   const ctx = buildContext(recordingExec().exec);
   assertThrows(
-    () => mysqlManagedEngineRuntime.backup!.dumpArgv(ctx, { database: "mysql" }),
+    () =>
+      mysqlManagedEngineRuntime.backup!.dumpArgv(ctx, { database: "mysql" }),
     Error,
     "refusing mysql system schema",
   );
@@ -223,10 +245,17 @@ function standbyReplicationSpec() {
 function bootstrapRunDocker(
   datadirExists: boolean,
   markerExists: boolean,
-): (args: string[]) => Promise<{ success: boolean; stdout: string; stderr: string; code: number }> {
+): (
+  args: string[],
+) => Promise<
+  { success: boolean; stdout: string; stderr: string; code: number }
+> {
   return (args) => {
     const joined = args.join(" ");
-    if (joined.includes("test") && joined.includes("-d") && joined.includes("/mysql")) {
+    if (
+      joined.includes("test") && joined.includes("-d") &&
+      joined.includes("/mysql")
+    ) {
       return Promise.resolve({
         success: datadirExists,
         stdout: "",
@@ -234,7 +263,10 @@ function bootstrapRunDocker(
         code: datadirExists ? 0 : 1,
       });
     }
-    if (joined.includes("test") && joined.includes("-f") && joined.includes(STANDBY_MARKER)) {
+    if (
+      joined.includes("test") && joined.includes("-f") &&
+      joined.includes(STANDBY_MARKER)
+    ) {
       return Promise.resolve({
         success: markerExists,
         stdout: "",
@@ -299,7 +331,10 @@ test("mysql configureStandby skips when standby marker already exists", async ()
     }
     return Promise.reject(new TypeError("unexpected exec when marker present"));
   };
-  await replication.configureStandby(buildContext(exec), standbyReplicationSpec());
+  await replication.configureStandby(
+    buildContext(exec),
+    standbyReplicationSpec(),
+  );
   assertEquals(execCalls, 1);
 });
 
@@ -321,7 +356,10 @@ test("mysql configureStandby seeds replication and writes marker", async () => {
   );
   assertEquals(calls.some((c) => c.argv[0] === "sh"), true);
   assertEquals(calls.some((c) => c.input?.includes("203.0.113.50")), true);
-  assertEquals(calls.some((c) => c.argv.some((part) => part.includes("touch"))), true);
+  assertEquals(
+    calls.some((c) => c.argv.some((part) => part.includes("touch"))),
+    true,
+  );
 });
 
 test("mysql configureStandby throws when seed script fails", async () => {
@@ -334,12 +372,20 @@ test("mysql configureStandby throws when seed script fails", async () => {
       return Promise.resolve({ success: false, stdout: "", stderr: "" });
     }
     if (argv[0] === "sh") {
-      return Promise.resolve({ success: false, stdout: "", stderr: "seed boom" });
+      return Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr: "seed boom",
+      });
     }
     return Promise.resolve({ success: true, stdout: "", stderr: "" });
   };
   await assertRejects(
-    () => replication.configureStandby!(buildContext(exec), standbyReplicationSpec()),
+    () =>
+      replication.configureStandby!(
+        buildContext(exec),
+        standbyReplicationSpec(),
+      ),
     Error,
     "configureStandby seed failed",
   );
@@ -373,7 +419,11 @@ test("mysql readHealth parses standby replica status", async () => {
   }
   const exec: ManagedEngineExec = (argv) => {
     if (argv.includes("-E")) {
-      return Promise.resolve({ success: true, stdout: HEALTHY_VERTICAL, stderr: "" });
+      return Promise.resolve({
+        success: true,
+        stdout: HEALTHY_VERTICAL,
+        stderr: "",
+      });
     }
     return Promise.resolve({ success: true, stdout: "", stderr: "" });
   };
@@ -508,7 +558,11 @@ test("mysql configureStandby throws when marker write fails", async () => {
     return Promise.resolve({ success: true, stdout: "", stderr: "" });
   };
   await assertRejects(
-    () => replication.configureStandby!(buildContext(exec), standbyReplicationSpec()),
+    () =>
+      replication.configureStandby!(
+        buildContext(exec),
+        standbyReplicationSpec(),
+      ),
     Error,
     "configureStandby marker failed",
   );
@@ -533,7 +587,9 @@ test("mysql applyDatabases drops databases and ensures ProxySQL monitor", async 
 test("mysql readVersion returns undefined when version query fails", async () => {
   const exec: ManagedEngineExec = () =>
     Promise.resolve({ success: false, stdout: "", stderr: "denied" });
-  const version = await mysqlManagedEngineRuntime.readVersion(buildContext(exec));
+  const version = await mysqlManagedEngineRuntime.readVersion(
+    buildContext(exec),
+  );
   assertEquals(version, undefined);
 });
 

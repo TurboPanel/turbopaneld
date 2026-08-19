@@ -665,7 +665,7 @@ test({
           layout,
           descriptor,
           fakeRunOk(),
-          "203.0.113.9",
+          ["203.0.113.9"],
         );
 
         await handleSystemReconcile(
@@ -747,7 +747,7 @@ async function reconcileWithTwoSegments(bindAddress?: string): Promise<void> {
       { name: SEGMENT_B, subnet: "10.90.2.0/24" },
     ],
   };
-  if (bindAddress !== undefined) payload.bindAddress = bindAddress;
+  if (bindAddress !== undefined) payload.bindAddresses = [bindAddress];
 
   await handleManagedIngressReconcile(payload, new Date().toISOString(), {
     runDocker: fakeRunOk(),
@@ -766,9 +766,15 @@ async function reconcileWithTwoSegments(bindAddress?: string): Promise<void> {
 function assertSegmentsPreserved(composeText: string): void {
   // Service-level attachments, with the reserved (last-usable) host address.
   assertEquals(composeText.includes(`      ${SEGMENT_A}:`), true);
-  assertEquals(composeText.includes('        ipv4_address: "10.90.1.254"'), true);
+  assertEquals(
+    composeText.includes('        ipv4_address: "10.90.1.254"'),
+    true,
+  );
   assertEquals(composeText.includes(`      ${SEGMENT_B}:`), true);
-  assertEquals(composeText.includes('        ipv4_address: "10.90.2.254"'), true);
+  assertEquals(
+    composeText.includes('        ipv4_address: "10.90.2.254"'),
+    true,
+  );
   // Top-level external network declarations.
   assertEquals(composeText.includes(`  ${SEGMENT_A}:`), true);
   assertEquals(composeText.includes(`  ${SEGMENT_B}:`), true);
@@ -852,7 +858,7 @@ test({
           containerName: `${PROXYSQL_SERVICE_ID}-sql`,
           role: "turbopanel",
         };
-        await ensureProxySqlIngress(layout, descriptor, fakeRunOk(), null);
+        await ensureProxySqlIngress(layout, descriptor, fakeRunOk(), []);
 
         const dockerArgs: string[][] = [];
         await handleSystemReconcile(
@@ -958,7 +964,8 @@ test({
 });
 
 test({
-  name: "handleSystemReconcile action=restart surfaces compose restart failures",
+  name:
+    "handleSystemReconcile action=restart surfaces compose restart failures",
   permissions: { env: true, read: true, write: true },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -1016,7 +1023,8 @@ test({
 });
 
 test({
-  name: "handleSystemReconcile action=stop with missing compose file is a no-op",
+  name:
+    "handleSystemReconcile action=stop with missing compose file is a no-op",
   permissions: { env: true, read: true, write: true },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -1052,7 +1060,8 @@ test({
 });
 
 test({
-  name: "handleSystemReconcile proxysql action=stop invokes proxysql compose stop",
+  name:
+    "handleSystemReconcile proxysql action=stop invokes proxysql compose stop",
   permissions: { env: true, read: true, write: true },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -1065,7 +1074,7 @@ test({
           containerName: `${PROXYSQL_SERVICE_ID}-sql`,
           role: "turbopanel",
         };
-        await ensureProxySqlIngress(layout, descriptor, fakeRunOk(), null);
+        await ensureProxySqlIngress(layout, descriptor, fakeRunOk(), []);
 
         const dockerArgs: string[][] = [];
         const result = await handleSystemReconcile(

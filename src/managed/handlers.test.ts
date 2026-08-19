@@ -174,7 +174,8 @@ test("handleManagedLifecycle throws when compose action fails", async () => {
           { managedId, action: "start" },
           new Date().toISOString(),
           {
-            runDocker: () => Promise.resolve(dockerFail("compose start failed")),
+            runDocker: () =>
+              Promise.resolve(dockerFail("compose start failed")),
           },
         ),
       Error,

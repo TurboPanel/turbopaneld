@@ -5,9 +5,9 @@ import {
   applyOrchestrationEnv,
   buildCloudflaredFixtureBinary,
   createOrchestrationRuntimeFixture,
+  type OrchestrationRuntimeFixture,
   restoreOrchestrationEnv,
   snapshotOrchestrationEnv,
-  type OrchestrationRuntimeFixture,
 } from "../testing/orchestration-fixtures.ts";
 
 describe("ensureCloudflared", () => {
@@ -35,7 +35,9 @@ describe("ensureCloudflared", () => {
   it("skips download when the pinned version is already installed", async () => {
     const bin = paths.cloudflaredBin();
     await Deno.mkdir(paths.cloudflaredDir(), { recursive: true });
-    const bytes = await buildCloudflaredFixtureBinary(paths.CLOUDFLARED_VERSION);
+    const bytes = await buildCloudflaredFixtureBinary(
+      paths.CLOUDFLARED_VERSION,
+    );
     await Deno.writeFile(bin, bytes);
     await Deno.chmod(bin, 0o755);
 
@@ -48,7 +50,9 @@ describe("ensureCloudflared", () => {
     await Deno.remove(bin).catch(() => {});
 
     const asset = paths.resolveCloudflaredAsset();
-    const bytes = await buildCloudflaredFixtureBinary(paths.CLOUDFLARED_VERSION);
+    const bytes = await buildCloudflaredFixtureBinary(
+      paths.CLOUDFLARED_VERSION,
+    );
     const url = paths.cloudflaredDownloadUrl(asset);
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (input) => {
@@ -126,7 +130,9 @@ describe("ensureCloudflared", () => {
   it("repoints current symlink after install", async () => {
     const bin = paths.cloudflaredBin();
     await Deno.mkdir(paths.cloudflaredDir(), { recursive: true });
-    const bytes = await buildCloudflaredFixtureBinary(paths.CLOUDFLARED_VERSION);
+    const bytes = await buildCloudflaredFixtureBinary(
+      paths.CLOUDFLARED_VERSION,
+    );
     await Deno.writeFile(bin, bytes);
     await Deno.chmod(bin, 0o755);
     await Deno.remove(paths.CLOUDFLARED_CURRENT_DIR).catch(() => {});
@@ -140,7 +146,9 @@ describe("ensureCloudflared", () => {
   it("warns and continues when current is a non-empty directory", async () => {
     const bin = paths.cloudflaredBin();
     await Deno.mkdir(paths.cloudflaredDir(), { recursive: true });
-    const bytes = await buildCloudflaredFixtureBinary(paths.CLOUDFLARED_VERSION);
+    const bytes = await buildCloudflaredFixtureBinary(
+      paths.CLOUDFLARED_VERSION,
+    );
     await Deno.writeFile(bin, bytes);
     await Deno.chmod(bin, 0o755);
 
@@ -158,7 +166,9 @@ describe("ensureCloudflared", () => {
   it("warns when creating the current symlink fails", async () => {
     const bin = paths.cloudflaredBin();
     await Deno.mkdir(paths.cloudflaredDir(), { recursive: true });
-    const bytes = await buildCloudflaredFixtureBinary(paths.CLOUDFLARED_VERSION);
+    const bytes = await buildCloudflaredFixtureBinary(
+      paths.CLOUDFLARED_VERSION,
+    );
     await Deno.writeFile(bin, bytes);
     await Deno.chmod(bin, 0o755);
     await Deno.remove(paths.CLOUDFLARED_CURRENT_DIR, { recursive: true })

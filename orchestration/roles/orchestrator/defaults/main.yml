@@ -1,0 +1,18 @@
+---
+orchestrator_image: ghcr.io/proxysql/orchestrator:v4.30.2
+orchestrator_project_name: turbopanel-orchestrator
+orchestrator_config_dir: "{{ turbopanel_config_dir }}/orchestrator"
+orchestrator_tls_dir: "{{ orchestrator_config_dir }}/tls"
+orchestrator_data_dir: "{{ turbopanel_state_dir }}/orchestrator"
+orchestrator_service_name: turbopanel-orchestrator-stack
+orchestrator_http_port: 33001
+orchestrator_raft_port: 33002
+orchestrator_api_user: admin
+orchestrator_managed_network: turbopanel-managed
+turbopanel_config_dir: /etc/turbopanel  # noqa: var-naming[no-role-prefix]
+turbopanel_state_dir: /var/lib/turbopanel  # noqa: var-naming[no-role-prefix]
+turbopanel_dev_user: ""  # noqa: var-naming[no-role-prefix]
+turbopanel_group: >-  # noqa: var-naming[no-role-prefix]
+  {{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}
+turbopanel_user: >-  # noqa: var-naming[no-role-prefix]
+  {{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}

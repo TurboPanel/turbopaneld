@@ -266,10 +266,16 @@ test("handleManagedApply standby needs_resync returns early without compose up",
           if (args[0] === "run" && args.includes("0")) {
             return Promise.resolve(dockerOk());
           }
-          if (args[0] === "run" && args.includes("test") && args.some((part) => part.includes("PG_VERSION"))) {
+          if (
+            args[0] === "run" && args.includes("test") &&
+            args.some((part) => part.includes("PG_VERSION"))
+          ) {
             return Promise.resolve(dockerOk());
           }
-          if (args[0] === "run" && args.includes("test") && args.some((part) => part.includes("standby.signal"))) {
+          if (
+            args[0] === "run" && args.includes("test") &&
+            args.some((part) => part.includes("standby.signal"))
+          ) {
             return Promise.resolve(dockerFail("missing"));
           }
           if (args[0] === "compose" && args.includes("stop")) {
@@ -351,9 +357,7 @@ function primaryMysqlRun(
     if (args.includes("mysqladmin")) return Promise.resolve(dockerOk());
     if (args.includes("mysql")) {
       const eIdx = args.indexOf("-e");
-      const sql = eIdx >= 0
-        ? (args[eIdx + 1] ?? "")
-        : (options?.input ?? "");
+      const sql = eIdx >= 0 ? (args[eIdx + 1] ?? "") : (options?.input ?? "");
       if (sql.includes("VERSION")) {
         return Promise.resolve(dockerOk("8.4.0\n"));
       }

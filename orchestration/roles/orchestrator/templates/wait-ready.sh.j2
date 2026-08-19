@@ -1,0 +1,41 @@
+#!/bin/sh
+# Wait for the Orchestrator HTTP listener on 127.0.0.1:{{ orchestrator_http_port }}.
+#
+# The oneshot unit runs this after `docker compose up` so operators know the
+# local HA API accepts connections. When compose has not been written yet the
+# unit never reaches this script (ExecStart short-circuits).
+set -eu
+
+max_attempts=60
+sleep_seconds=2
+http_port={{ orchestrator_http_port }}
+compose_file="{{ orchestrator_config_dir }}/docker-compose.yml"
+project="{{ orchestrator_project_name }}"
+
+wait_for() {
+  i=0
+  while ! "$@" >/dev/null 2>&1; do
+    i=$((i + 1))
+    if [ "$i" -ge "$max_attempts" ]; then
+      return 1
+    fi
+    sleep "$sleep_seconds"
+  done
+}
+
+probe_tcp() {
+  if command -v bash >/dev/null 2>&1; then
+    bash -c "true </dev/tcp/127.0.0.1/${http_port}"
+  else
+    return 1
+  fi
+}
+
+if [ -f "$compose_file" ] && command -v docker >/dev/null 2>&1; then
+  if /usr/bin/docker compose -p "$project" -f "$compose_file" ps --status running -q 2>/dev/null | grep -q .; then
+    wait_for /usr/bin/docker compose -p "$project" -f "$compose_file" exec -T orchestrator \
+      bash -c "true </dev/tcp/127.0.0.1/${http_port}" && exit 0
+  fi
+fi
+
+wait_for probe_tcp

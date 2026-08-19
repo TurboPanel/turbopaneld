@@ -24,7 +24,10 @@ Root context: `../../AGENTS.md`. Instance engine specs:
 | `proxysql.ts` | Shared ProxySQL compose + durable `proxysql.cnf` generation, static-section diffing, inspect/start/stop/restart |
 | `proxysql-admin.ts` | Runtime admin apply via `docker exec` + `admin.cnf` (`[client]` secrets never on argv/logs) |
 | `containers.ts` | Shared `docker compose ps` collection + running-container resolution used by `apply.ts` and `backup.ts` |
-| `apply.ts` / `lifecycle.ts` / `destroy.ts` / `promote.ts` | Engine command handlers (wired from `command-router.ts`); apply/destroy do **not** bring up per-service Traefik; promote is operator-only |
+| `apply.ts` / `lifecycle.ts` / `destroy.ts` / `promote.ts` | Engine command handlers (wired from `command-router.ts`); apply/destroy do **not** bring up per-service Traefik; `managed.promote` is the engine promote step after TurboPanel fencing |
+| `orchestrator.ts` / `orchestrator-api.ts` | Per-org Orchestrator compose (`turbopanel-orchestrator`) + local HTTP (`:33001`); `Recover: false`; Raft `:33002` on advertise address only |
+| `../instance/commands/managed-ha-reconcile.ts` / `managed-ha-failover.ts` | `managed.ha.reconcile` (whole-server HA stack) + `managed.ha.failover` (`drain` / `recover`). Designated Orchestrator recover-to; on HTTP/API failure **or** absent stack, falls back to `managed.promote` so fencing is not stranded. `Recover: false` stays — TurboPanel picks the candidate. `Future:` fail-closed HA lease when Raft is unreachable. |
+| `../instance/ha-observe.ts` | Poll local Orchestrator `/api/problems`; emit unsolicited `managed-ha-event` |
 | `backup.ts` | `managed.backup` (`create`/`delete`) + `managed.restore` — streamed dump/restore, checksum, prune |
 | `logs.ts` | Bounded `compose logs`; cell `managed-logs-request` / `managed-logs-result` (not a command) |
 | `engines/` | Per-engine runtime registry (`postgres`, `mysql`, `mariadb`); optional `dropUsers` / `backup` / `replication` (+ optional `configureStandby` for SQL-configured standbys) |
@@ -99,9 +102,9 @@ listeners and routes to engine members on `turbopanel-managed`.
 | Piece | Detail |
 | --- | --- |
 | Image pin | `proxysql/proxysql:3.0.9` (`PROXYSQL_IMAGE`) — **do not loosen** without reviewing **CVE-2026-48773** (pre-auth first-packet heap overflow) and **CVE-2026-48772** (PROXY-protocol-v1 `client_addr` ACL bypass); both fixed in 3.0.9 |
-| Listeners | Published `15432` (pgsql) and `16306` (mysql) on the instance-resolved `bindAddress`; admin on `127.0.0.1:6032` only |
-| TLS | Frontend/backend TLS uses org-CA material under `configDir/proxysql/tls/` (and per-engine copies under `tls/proxysql/` for materialize). Engines still use self-signed `tlsMaterial` for their own listener when requested |
-| Desired state | Whole-server command `managed.ingress.reconcile` carries `bindAddress` + `clusters[]` (backends + users); **not** embedded on each `managed.apply`. Empty `clusters[]` tears the stack down (`compose down --remove-orphans`) without TLS materialization |
+| Listeners | Published pgsql + mysql client ports on the instance-resolved `bindAddress` — numbers come from `listenerPorts` on the command (default `15432` / `16306`), see **Configurable listener ports** below; admin on `127.0.0.1:6032` only |
+| TLS | Frontend/backend TLS uses org-CA material under `configDir/proxysql/tls/` (and per-engine copies under `tls/proxysql/` for materialize). Engines still use self-signed `tlsMaterial` for their own listener when requested. Whether a *client* may stay plaintext is per-cluster `requireTls` — see **Frontend TLS enforcement** below |
+| Desired state | Whole-server command `managed.ingress.reconcile` carries `bindAddress` + `listenerPorts` + `clusters[]` (backends + users); **not** embedded on each `managed.apply`. Empty `clusters[]` tears the stack down (`compose down --remove-orphans`) without TLS materialization |
 | Admin apply | `proxysql-admin.ts` loads `admin.cnf`, mounts it into a throwaway client or uses stdin; SQL LOAD/SAVE — credentials never argv/logs |
 | Backend monitor | Host-wide principal in `configDir/proxysql/monitor.cnf` (`tp_monitor` + random password). Written into `mysql_variables`/`pgsql_variables` and SET on reconcile. Each **primary** `managed.apply` creates the role (`GRANT pg_monitor` / MySQL PROCESS+REPLICATION CLIENT). **Never** leave ProxySQL defaults (`monitor`/`monitor`) — they spam engine logs and never authenticate |
 | Cold start | Full `proxysql.cnf` (static + dynamic tables) is rewritten so reboot/`compose up` restores routing without a live admin session |
@@ -110,10 +113,85 @@ listeners and routes to engine members on `turbopanel-managed`.
 | Host prep | Ansible role `proxysql` + playbook `proxysql-setup.yml` (`runProxySqlSetup`; also on co-located `instance-dev-install`) — dirs, admin.cnf, **monitor.cnf**, initial static cnf when absent, wait-ready, `turbopanel-proxysql-stack.service`, network. Removes bind-mount **directory** scars at `admin.cnf`/`proxysql.cnf`/`monitor.cnf` before seed. **Never** daemon compose contents. Reconcile refuses compose up if admin/config paths are missing or not regular files |
 | Spanning segments | ProxySQL still joins `turbopanel-managed` plus each consumer `tpn_*` as `external: true`. Segment attachments pin `ipv4_address` to the reserved last-usable host (`reservedManagedIngressAddress`) so remote bindings can `extra_hosts` that address |
 
+### Configurable listener ports
+
+Client listener ports are operator-configurable per organization on the instance
+side, so the daemon must treat them as data:
+
+- **Never derive protocol family from a port number.** Each cluster carries
+  `family` (`'pgsql' | 'mysql'`) and the reconcile handler uses it directly; the
+  port is only a bind target. A port-derived family silently mis-sorts clusters
+  the moment an operator picks their own numbers.
+- **Compose parse/render is port-agnostic.** `readPublishedBindAddressFromCompose`
+  / `readPublishedListenerPortsFromCompose` match the generic
+  `host:port:port` shape instead of looking for `15432` / `16306`, so a
+  bind-address or port recovered from an existing stack survives a port change.
+- **Self-heal round-trips the ports.** `system.reconcile` → `proxysql` reads the
+  current ports off disk and re-renders with them; it must not fall back to the
+  platform defaults, or a heal would silently move an operator's listeners.
+- **Preflight the host before any compose write.**
+  `assertManagedIngressPortsBindable` probes each *new* port with a real
+  `Deno.listen` and fails the command with an actionable message. Ports already
+  published by the running ProxySQL are skipped — otherwise every reconcile
+  would report a conflict with itself. This runs *before* the compose write so a
+  collision with an unrelated host service leaves the existing ingress
+  untouched instead of taking it down mid-change.
+- **Validation matches the instance exactly** (`isManagedIngressProtocolPort` in
+  `contracts.ts`): `1024`–`65535`, not `6032` / `6132`, not `45000`–`45999`. A
+  looser daemon check would accept a payload the control plane considers
+  invalid, which is how a half-configured ingress happens. Canonical rules:
+  `turbopanel/src/lib/managed/AGENTS.md` → **Client listener ports**.
+
+### Hostgroup placement and read routing
+
+`backendPlacement` (`proxysql.ts`) decides where each backend row lands, and it
+is deliberately **not** a writer/reader split on `readEligible`:
+
+| Backend | Hostgroup | Status |
+| --- | --- | --- |
+| `role: 'primary'` | writer | `ONLINE` |
+| replica, `readEligible: true` | reader | `ONLINE` |
+| replica, `readEligible: false` | reader | **`OFFLINE_SOFT`** |
+
+A non-read-eligible replica is a monitored standby, so it must never sit in the
+writer hostgroup (that would send it client **writes** while the real primary is
+alive). It stays in the reader hostgroup as `OFFLINE_SOFT` — ProxySQL keeps
+monitoring it for promotion but routes no traffic to it.
+
+Frontend `default_hostgroup` comes from each user's `connectionRole`
+(`userDefaultHostgroup`): absent / `read-write` → writer, `read-only` → reader.
+`^SELECT` query rules are emitted **only** when the cluster sets
+`autoReadSplit: true` **and** has at least one read-eligible replica
+(`clusterEmitsReadSplitRules`), and then only for `read-write` logins
+(`sortedReadSplitUsernames`) — read-only logins already default to the reader
+hostgroup. Do not reintroduce automatic read-split from `readEligible` alone; a
+blanket regex breaks read-after-write and locking reads for applications that
+never opted in. Canonical policy: `turbopanel/src/lib/managed/AGENTS.md` →
+**Client routing**.
+
 Username frontend namespace is **server-wide** across every cluster hosted on that
 org's servers: `ManagedFrontendUserConflictError` when the same login would map
 to two managed ids. The instance enforces the same org-owner login uniqueness
 before enqueue (see `turbopanel/src/lib/managed/AGENTS.md` → Login namespace).
+
+### Frontend TLS enforcement
+
+Cluster `requireTls` on `managed.ingress.reconcile` renders `use_ssl` on that
+cluster's `mysql_users` / `pgsql_users` rows (`renderUserRows` /
+`buildProxySqlAdminStatements`) — ProxySQL's per-user `REQUIRE SSL`: an encrypted
+socket, no client certificate. Absent/false leaves TLS *available* (the listener
+always has cert material) but optional.
+
+**Backend TLS is unconditional and unrelated.** Server rows are always
+`use_ssl=1` because engines only publish TLS-required rules (`hostssl` /
+`REQUIRE SSL`). Never derive one from the other.
+
+The daemon does **not** know about SSL modes. The instance resolves the
+`ManagedSslMode` three-layer chain (service → org default → `require`) and sends
+only the boolean; certificate *verification* (`verify-ca` / `verify-full`) is a
+client-side behavior the instance renders into DSNs, and there is nothing for
+ProxySQL to enforce. Canonical policy:
+`turbopanel/src/lib/managed/AGENTS.md` → **Client TLS (SSL mode)**.
 
 ## Rules
 
@@ -135,8 +213,8 @@ before enqueue (see `turbopanel/src/lib/managed/AGENTS.md` → Login namespace).
    instance-allocated `private_port` — that private listener is the single
    cross-host path for both streaming replication and remote ProxySQL
    backends. Loopback and `0.0.0.0` binds are rejected. Single-member
-   clusters still publish nothing; client traffic enters only via shared
-   ProxySQL (`15432` / `16306`).
+   clusters still publish nothing; client traffic enters only via the shared
+   ProxySQL client listeners.
    A **public** bind (`privateListener.transport === 'public'`) is mandatorily
    TLS-only: `assertPublicPrivateListenerTls` (exported from `compose.ts`, run
    first in `apply.ts` and again during compose normalization) refuses the
@@ -174,6 +252,21 @@ before enqueue (see `turbopanel/src/lib/managed/AGENTS.md` → Login namespace).
    directories keep the daemon UID as owner but take `<engineGroup>` + `0750`.
 7. **Engine extension.** One file under `engines/` implementing
    `ManagedEngineRuntime` + one registry entry in `engines/index.ts`.
+7a. **Engine image allowlist is a mirror, not a policy.**
+   `MANAGED_ALLOWED_IMAGES_BY_ENGINE` in
+   `../instance/commands/contracts.ts` is the last stop before Docker runs a
+   `managed.apply` image, so it must stay byte-identical to the instance release
+   catalog (`../../turbopanel/src/lib/managed/releases.ts`) — including its
+   ordering (default series first, default variant first). Adding or retiring a
+   series is a three-repo change (instance catalog, this mirror, UI
+   `ui/src/lib/managed-releases.ts`); `command-types-parity.test.ts` pins this
+   copy. Do not add a series here that the instance will not create, and never
+   relax the check to a prefix/regex match — an EOL major (MySQL 8.0) must stay
+   unrunnable even if a forged or replayed payload names it. Engines with no
+   catalog entry (`redis` / `clickhouse`) are intentionally unrestricted.
+   A cluster's series is immutable after create (instance
+   `managed_series_immutable`), so the daemon never sees an in-place major swap;
+   variant-only changes are ordinary re-applies.
 8. **Tenant isolation.** Never import or mutate tenant Traefik / hosting
    Caddy state from this package beyond shared helpers (`assertValidBindAddress`,
    `runDocker`). Tenant raw TCP/UDP Traefik remains `src/deploy/ingress.ts`.
@@ -222,5 +315,5 @@ Physical / GTID streaming is **engine → engine**, never through ProxySQL.
 | Bootstrap | `bootstrapStandby` **before** compose up seeds via `pg_basebackup -R` | Probe only before compose up (uninit → `seeded` deferred; marker → `already_standby`; datadir without marker → `needs_resync`). Actual seed in **`configureStandby`** after compose up (logical dump + `CHANGE REPLICATION SOURCE` / MariaDB `CHANGE MASTER` + GTID) |
 | Credentials | Short-lived `0600` env-file for basebackup | Short-lived `0600` defaults file over exec stdin (never `-p` / never `MYSQL_PWD`) |
 | Standby SQL | not used (config-file primary_conninfo) | Optional `configureStandby` hook — replication channel setup is not user-data mutation |
-| Promote | Operator only — no auto-failover | same (`STOP REPLICA` / `STOP SLAVE` + clear read_only) |
+| Promote | Operator switchover, DR route, or TurboPanel-gated auto-failover after fence (Orchestrator designated recover-to, else `managed.promote` fallback) | same (`STOP REPLICA` / `STOP SLAVE` + clear read_only) |
 | Health | `streaming` requires active WAL receiver | `streaming` requires both IO + SQL threads running |

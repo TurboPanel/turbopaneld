@@ -98,6 +98,8 @@ test("relabelComponent maps vendor components to neutral labels", () => {
   assertEquals(relabelComponent("orchestration"), "orchestration");
   assertEquals(relabelComponent("installer"), "installer");
   assertEquals(relabelComponent("daemon"), "daemon");
+  assertEquals(relabelComponent("proxysql"), "ingress");
+  assertEquals(relabelComponent("orchestrator"), "HA");
 });
 
 test("relabelComponent output contains no forbidden tokens", () => {
@@ -109,6 +111,7 @@ test("relabelComponent output contains no forbidden tokens", () => {
     "uv",
     "python",
     "proxysql",
+    "orchestrator",
   ];
   for (const component of inputs) {
     assertNoForbiddenTokens(
@@ -133,6 +136,7 @@ test("sanitizeStatusLine scrubs vendor tokens case-insensitively", () => {
     ["Python environment ready", "runtime environment ready"],
     ["galaxy roles installed", "orchestration roles installed"],
     ["proxysql setup complete", "ingress setup complete"],
+    ["orchestrator raft ready", "HA raft ready"],
   ];
 
   for (const [input, expected] of samples) {

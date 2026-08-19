@@ -1,0 +1,154 @@
+# Host prerequisites for the per-org Orchestrator Raft group (managed-ha).
+#
+# Ansible owns: config/tls/data dirs, api.cnf + raft.cnf (0600), wait-ready.sh,
+# turbopanel-orchestrator-stack unit, turbopanel-managed Docker network.
+#
+# The daemon owns docker-compose.yml and orchestrator.conf.json under
+# {{ orchestrator_config_dir }} on managed.ha.reconcile. Do not write compose
+# content here.
+
+- name: Ensure Orchestrator config directory exists
+  ansible.builtin.file:
+    path: "{{ orchestrator_config_dir }}"
+    state: directory
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0770"
+
+- name: Ensure Orchestrator TLS directory exists
+  ansible.builtin.file:
+    path: "{{ orchestrator_tls_dir }}"
+    state: directory
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0770"
+
+- name: Ensure Orchestrator data directory exists
+  ansible.builtin.file:
+    path: "{{ orchestrator_data_dir }}"
+    state: directory
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0770"
+
+- name: Stat Orchestrator api.cnf path
+  ansible.builtin.stat:
+    path: "{{ orchestrator_config_dir }}/api.cnf"
+  register: _orchestrator_api_stat
+
+- name: Remove Docker bind-mount scar directory for api.cnf
+  ansible.builtin.file:
+    path: "{{ orchestrator_config_dir }}/api.cnf"
+    state: absent
+  when:
+    - _orchestrator_api_stat.stat.exists | default(false)
+    - _orchestrator_api_stat.stat.isdir | default(false)
+
+- name: Generate Orchestrator API credentials (idempotent)
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      f='{{ orchestrator_config_dir }}/api.cnf'
+      if [ -d "$f" ]; then
+        rm -rf "$f"
+      fi
+      if [ ! -f "$f" ] || [ ! -s "$f" ]; then
+        pass="$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 32)"
+        umask 077
+        printf '%s\n' '[client]' "user={{ orchestrator_api_user }}" "password=${pass}" > "$f"
+        chmod 0600 "$f"
+        chown {{ turbopanel_user }}:{{ turbopanel_group }} "$f"
+        echo created
+      fi
+    executable: /bin/bash
+  register: orchestrator_api_gen
+  changed_when: "'created' in orchestrator_api_gen.stdout"
+  no_log: true
+
+- name: Ensure Orchestrator api.cnf is owner-private for the daemon
+  ansible.builtin.file:
+    path: "{{ orchestrator_config_dir }}/api.cnf"
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0600"
+  no_log: true
+
+- name: Stat Orchestrator raft.cnf path
+  ansible.builtin.stat:
+    path: "{{ orchestrator_config_dir }}/raft.cnf"
+  register: _orchestrator_raft_stat
+
+- name: Remove Docker bind-mount scar directory for raft.cnf
+  ansible.builtin.file:
+    path: "{{ orchestrator_config_dir }}/raft.cnf"
+    state: absent
+  when:
+    - _orchestrator_raft_stat.stat.exists | default(false)
+    - _orchestrator_raft_stat.stat.isdir | default(false)
+
+- name: Generate Orchestrator Raft auth token (idempotent)
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      f='{{ orchestrator_config_dir }}/raft.cnf'
+      if [ -d "$f" ]; then
+        rm -rf "$f"
+      fi
+      if [ ! -f "$f" ] || [ ! -s "$f" ]; then
+        pass="$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 32)"
+        umask 077
+        printf '%s\n' '[client]' "user=raft" "password=${pass}" > "$f"
+        chmod 0600 "$f"
+        chown {{ turbopanel_user }}:{{ turbopanel_group }} "$f"
+        echo created
+      fi
+    executable: /bin/bash
+  register: orchestrator_raft_gen
+  changed_when: "'created' in orchestrator_raft_gen.stdout"
+  no_log: true
+
+- name: Ensure Orchestrator raft.cnf is owner-private for the daemon
+  ansible.builtin.file:
+    path: "{{ orchestrator_config_dir }}/raft.cnf"
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0600"
+  no_log: true
+
+- name: Install Orchestrator readiness wait script
+  ansible.builtin.template:
+    src: wait-ready.sh.j2
+    dest: "{{ orchestrator_config_dir }}/wait-ready.sh"
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Install turbopanel-orchestrator-stack systemd unit
+  ansible.builtin.template:
+    src: turbopanel-orchestrator-stack.service.j2
+    dest: "/etc/systemd/system/{{ orchestrator_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0640"
+
+- name: Ensure turbopanel-managed Docker network exists
+  ansible.builtin.command:
+    argv:
+      - docker
+      - network
+      - create
+      - --driver
+      - bridge
+      - "{{ orchestrator_managed_network }}"
+  register: _orchestrator_network_create
+  changed_when: _orchestrator_network_create.rc == 0
+  failed_when: >-
+    _orchestrator_network_create.rc != 0
+    and ('already exists' not in (_orchestrator_network_create.stderr | default('')))
+
+- name: Ensure turbopanel-orchestrator-stack systemd unit is enabled and started
+  ansible.builtin.systemd:
+    name: "{{ orchestrator_service_name }}"
+    daemon_reload: true
+    enabled: true
+    state: started

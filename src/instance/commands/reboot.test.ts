@@ -65,7 +65,8 @@ test({
       Promise.resolve({
         success: false,
         stderr: "permission denied\r\nline2\tfail",
-      }));
+      })
+    );
     try {
       const result = await handleReboot({}, new Date().toISOString());
       assertEquals(result, { scheduled: true });

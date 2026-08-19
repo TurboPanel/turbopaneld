@@ -45,7 +45,8 @@ test("buildTraditionalWebReachabilityFragment is empty without sites or services
 });
 
 test({
-  name: "resolveDockerHostGatewayAddress prefers a valid TURBOPANEL_DOCKER_HOST_GATEWAY",
+  name:
+    "resolveDockerHostGatewayAddress prefers a valid TURBOPANEL_DOCKER_HOST_GATEWAY",
   permissions: { env: true, run: ["ip"] },
   fn: async () => {
     const previous = Deno.env.get("TURBOPANEL_DOCKER_HOST_GATEWAY");

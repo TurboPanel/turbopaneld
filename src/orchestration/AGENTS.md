@@ -17,7 +17,7 @@ free-text status lines pass through `relabelComponent()` /
 `sanitizeStatusLine()` while the presenter is active
 (`src/orchestration/presentation.ts`). Common mappings: `ansible` /
 `ansible-galaxy` / `galaxy` → **orchestration**; `redis` → **cache**; `rabbitmq`
-/ `rabbit mq` → **queue**; `proxysql` → **ingress**; `uv` / `python` /
+/ `rabbit mq` → **queue**; `proxysql` → **ingress**; `orchestrator` → **HA**; `uv` / `python` /
 `cpython` → **runtime**. Ansible
 JSONL events (`logAnsibleEvent` / `InstallEventPresenter`) and orchestration
 `logInfo` lines (`runRedisSetup`, `runRabbitmqSetup`, `runPostgresSetup`,

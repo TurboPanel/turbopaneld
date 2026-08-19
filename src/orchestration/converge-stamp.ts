@@ -119,7 +119,9 @@ export function devConvergeEnvMaterial(): string {
     `optional_ui=${optionalFlag("TURBOPANEL_OPTIONAL_UI", true)}`,
     `optional_website=${optionalFlag("TURBOPANEL_OPTIONAL_WEBSITE", true)}`,
     `optional_mailpit=${optionalFlag("TURBOPANEL_OPTIONAL_MAILPIT", true)}`,
-    `optional_redis_insight=${optionalFlag("TURBOPANEL_OPTIONAL_REDIS_INSIGHT", false)}`,
+    `optional_redis_insight=${
+      optionalFlag("TURBOPANEL_OPTIONAL_REDIS_INSIGHT", false)
+    }`,
     `optional_tabix=${optionalFlag("TURBOPANEL_OPTIONAL_TABIX", false)}`,
   ].join("\n");
 }

@@ -442,7 +442,8 @@ test({
 });
 
 test({
-  name: "decryptSecrets maps non-string plaintexts to null and rejects bad shape",
+  name:
+    "decryptSecrets maps non-string plaintexts to null and rejects bad shape",
   permissions: { net: true },
   fn: async () => {
     const api = createFakeInstanceApi();
@@ -451,9 +452,12 @@ test({
       let mode: "ok" | "bad" = "ok";
       api.script("/api/daemon/v1/secrets/decrypt", () => {
         if (mode === "ok") {
-          return new Response(JSON.stringify({ plaintexts: ["ok", 12, null] }), {
-            status: 200,
-          });
+          return new Response(
+            JSON.stringify({ plaintexts: ["ok", 12, null] }),
+            {
+              status: 200,
+            },
+          );
         }
         return new Response(JSON.stringify({ ok: true }), { status: 200 });
       });

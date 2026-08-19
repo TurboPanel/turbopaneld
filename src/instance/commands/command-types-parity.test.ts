@@ -15,6 +15,10 @@ import {
   parseManagedBackupResult,
   parseManagedDestroyPayload,
   parseManagedDestroyResult,
+  parseManagedHaFailoverPayload,
+  parseManagedHaFailoverResult,
+  parseManagedHaReconcilePayload,
+  parseManagedHaReconcileResult,
   parseManagedIngressReconcilePayload,
   parseManagedLifecyclePayload,
   parseManagedLifecycleResult,
@@ -51,6 +55,8 @@ const INSTANCE_COMMAND_TYPES = [
   "managed.restore",
   "managed.promote",
   "managed.ingress.reconcile",
+  "managed.ha.reconcile",
+  "managed.ha.failover",
   "system.reconcile",
 ] as const;
 
@@ -1249,19 +1255,29 @@ test("managed.apply fixture round-trips", () => {
 });
 
 test("managed.apply enforces the engine image allowlist", () => {
-  // Mirrors the instance settings-parser allowlist
-  // (`src/lib/managed/settings.ts`) so a forged/replayed command payload
-  // cannot smuggle an unsupported or EOL image past this last daemon-side
-  // check before Docker runs it.
+  // Mirrors the instance release catalog
+  // (`src/lib/managed/releases.ts`, surfaced through
+  // `src/lib/managed/settings.ts`) so a forged/replayed command payload cannot
+  // smuggle an unsupported or EOL image past this last daemon-side check
+  // before Docker runs it.
   assertEquals(
     parseManagedApplyPayload(VALID_MANAGED_APPLY).image,
     "docker.io/library/postgres:18-alpine",
   );
+  // Every catalog series is accepted, not just the default.
+  assertEquals(
+    parseManagedApplyPayload({
+      ...VALID_MANAGED_APPLY,
+      image: "docker.io/library/postgres:15-alpine",
+    }).image,
+    "docker.io/library/postgres:15-alpine",
+  );
+  // Below the catalog floor (PostgreSQL 15) stays rejected.
   assertThrows(
     () =>
       parseManagedApplyPayload({
         ...VALID_MANAGED_APPLY,
-        image: "docker.io/library/postgres:17",
+        image: "docker.io/library/postgres:14-alpine",
       }),
     TypeError,
     "Invalid managed.apply payload",
@@ -1289,6 +1305,21 @@ test("managed.apply enforces the engine image allowlist", () => {
     }).image,
     "docker.io/library/mysql:9.7",
   );
+  // MySQL 8.0 went EOL in April 2026 and is absent from the catalog.
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        engine: "mysql",
+        image: "docker.io/library/mysql:8.0",
+        credentials: [{
+          ...VALID_MANAGED_APPLY.credentials[0],
+          username: "root",
+        }],
+      }),
+    TypeError,
+    "Invalid managed.apply payload",
+  );
   assertThrows(
     () =>
       parseManagedApplyPayload({
@@ -1303,6 +1334,51 @@ test("managed.apply enforces the engine image allowlist", () => {
     TypeError,
     "Invalid managed.apply payload",
   );
+});
+
+test("managed.apply admits every catalog series and variant", () => {
+  // Pin the daemon allowlist to the instance release catalog so adding
+  // PostgreSQL 19 later is a three-repo change, not a silent daemon skip.
+  const catalog: ReadonlyArray<{
+    engine: "postgres" | "mysql" | "mariadb";
+    image: string;
+    username: string;
+  }> = [
+    { engine: "postgres", image: "docker.io/library/postgres:18-alpine", username: "postgres" },
+    { engine: "postgres", image: "docker.io/library/postgres:18", username: "postgres" },
+    { engine: "postgres", image: "docker.io/library/postgres:17-alpine", username: "postgres" },
+    { engine: "postgres", image: "docker.io/library/postgres:17", username: "postgres" },
+    { engine: "postgres", image: "docker.io/library/postgres:16-alpine", username: "postgres" },
+    { engine: "postgres", image: "docker.io/library/postgres:16", username: "postgres" },
+    { engine: "postgres", image: "docker.io/library/postgres:15-alpine", username: "postgres" },
+    { engine: "postgres", image: "docker.io/library/postgres:15", username: "postgres" },
+    { engine: "mysql", image: "docker.io/library/mysql:9.7", username: "root" },
+    { engine: "mysql", image: "docker.io/library/mysql:9.7-oraclelinux9", username: "root" },
+    { engine: "mysql", image: "docker.io/library/mysql:8.4", username: "root" },
+    { engine: "mysql", image: "docker.io/library/mysql:8.4-oraclelinux9", username: "root" },
+    { engine: "mariadb", image: "docker.io/library/mariadb:12.3", username: "root" },
+    { engine: "mariadb", image: "docker.io/library/mariadb:12.3-ubi", username: "root" },
+    { engine: "mariadb", image: "docker.io/library/mariadb:11.8", username: "root" },
+    { engine: "mariadb", image: "docker.io/library/mariadb:11.8-ubi", username: "root" },
+    { engine: "mariadb", image: "docker.io/library/mariadb:11.4", username: "root" },
+    { engine: "mariadb", image: "docker.io/library/mariadb:11.4-ubi", username: "root" },
+    { engine: "mariadb", image: "docker.io/library/mariadb:10.11", username: "root" },
+    { engine: "mariadb", image: "docker.io/library/mariadb:10.11-ubi", username: "root" },
+  ];
+  for (const row of catalog) {
+    assertEquals(
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        engine: row.engine,
+        image: row.image,
+        credentials: [{
+          ...VALID_MANAGED_APPLY.credentials[0],
+          username: row.username,
+        }],
+      }).image,
+      row.image,
+    );
+  }
 });
 
 test("managed.apply requires no Traefik ingress — ProxySQL is out of band", () => {
@@ -2092,7 +2168,7 @@ test("managed.apply round-trips a fabric peer and rejects vpn", () => {
 
 const VALID_MANAGED_INGRESS_RECONCILE = {
   serverId: "00000000-0000-4000-8000-0000000000ab",
-  bindAddress: "203.0.113.10",
+  bindAddresses: ["203.0.113.10"],
   orgTlsMaterial: {
     certificatePem:
       "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
@@ -2203,4 +2279,282 @@ test("managed.ingress.reconcile round-trips fabric backends and segments", () =>
   });
   assertEquals(teardown.clusters, []);
   assertEquals(teardown.orgTlsMaterial, undefined);
+});
+
+test("managed.ingress.reconcile round-trips connectionRole and autoReadSplit", () => {
+  const base = VALID_MANAGED_INGRESS_RECONCILE.clusters[0];
+  const payload = parseManagedIngressReconcilePayload({
+    ...VALID_MANAGED_INGRESS_RECONCILE,
+    clusters: [
+      {
+        ...base,
+        autoReadSplit: true,
+        users: [
+          { ...base.users[0], connectionRole: "read-only" },
+          {
+            username: "rw",
+            role: "user",
+            password: "tpdaemon.v1.server.key.payload",
+            connectionRole: "read-write",
+          },
+        ],
+      },
+    ],
+  });
+  assertEquals(payload.clusters[0]?.autoReadSplit, true);
+  assertEquals(payload.clusters[0]?.users[0]?.connectionRole, "read-only");
+  assertEquals(payload.clusters[0]?.users[1]?.connectionRole, "read-write");
+
+  const defaults = parseManagedIngressReconcilePayload(
+    VALID_MANAGED_INGRESS_RECONCILE,
+  );
+  assertEquals(defaults.clusters[0]?.autoReadSplit, undefined);
+  assertEquals(defaults.clusters[0]?.users[0]?.connectionRole, undefined);
+
+  assertThrows(
+    () =>
+      parseManagedIngressReconcilePayload({
+        ...VALID_MANAGED_INGRESS_RECONCILE,
+        clusters: [{ ...base, autoReadSplit: "yes" }],
+      }),
+    TypeError,
+    "cluster autoReadSplit",
+  );
+  assertThrows(
+    () =>
+      parseManagedIngressReconcilePayload({
+        ...VALID_MANAGED_INGRESS_RECONCILE,
+        clusters: [
+          {
+            ...base,
+            users: [{ ...base.users[0], connectionRole: "writer" }],
+          },
+        ],
+      }),
+    TypeError,
+    "user connectionRole",
+  );
+});
+
+test("managed.ingress.reconcile round-trips the requireTls frontend policy", () => {
+  const base = VALID_MANAGED_INGRESS_RECONCILE.clusters[0];
+  assertEquals(
+    parseManagedIngressReconcilePayload({
+      ...VALID_MANAGED_INGRESS_RECONCILE,
+      clusters: [{ ...base, requireTls: true }],
+    }).clusters[0]?.requireTls,
+    true,
+  );
+  // Absent means "TLS available but optional" — never coerce it to a boolean.
+  assertEquals(
+    parseManagedIngressReconcilePayload(VALID_MANAGED_INGRESS_RECONCILE)
+      .clusters[0]?.requireTls,
+    undefined,
+  );
+  assertThrows(
+    () =>
+      parseManagedIngressReconcilePayload({
+        ...VALID_MANAGED_INGRESS_RECONCILE,
+        clusters: [{ ...base, requireTls: "require" }],
+      }),
+    TypeError,
+    "cluster requireTls",
+  );
+});
+
+test("managed.ingress.reconcile round-trips the explicit cluster family", () => {
+  const base = VALID_MANAGED_INGRESS_RECONCILE.clusters[0];
+  assertEquals(
+    parseManagedIngressReconcilePayload({
+      ...VALID_MANAGED_INGRESS_RECONCILE,
+      clusters: [{ ...base, family: "pgsql" }],
+    }).clusters[0]?.family,
+    "pgsql",
+  );
+  assertEquals(
+    parseManagedIngressReconcilePayload({
+      ...VALID_MANAGED_INGRESS_RECONCILE,
+      clusters: [{ ...base, engine: "mariadb", family: "mysql" }],
+    }).clusters[0]?.family,
+    "mysql",
+  );
+  // Absent on an older control plane: the daemon falls back to the engine.
+  assertEquals(
+    parseManagedIngressReconcilePayload(VALID_MANAGED_INGRESS_RECONCILE)
+      .clusters[0]?.family,
+    undefined,
+  );
+  assertThrows(
+    () =>
+      parseManagedIngressReconcilePayload({
+        ...VALID_MANAGED_INGRESS_RECONCILE,
+        clusters: [{ ...base, family: "postgres" }],
+      }),
+    TypeError,
+    "cluster family",
+  );
+});
+
+test("managed.ingress.reconcile round-trips organization listener ports", () => {
+  assertEquals(
+    parseManagedIngressReconcilePayload({
+      ...VALID_MANAGED_INGRESS_RECONCILE,
+      listenerPorts: { postgres: 18432, mysqlFamily: 18306 },
+    }).listenerPorts,
+    { postgres: 18432, mysqlFamily: 18306 },
+  );
+  // Absent: the daemon uses the platform defaults.
+  assertEquals(
+    parseManagedIngressReconcilePayload(VALID_MANAGED_INGRESS_RECONCILE)
+      .listenerPorts,
+    undefined,
+  );
+
+  for (
+    const bad of [
+      { postgres: 18432 },
+      { postgres: 18432, mysqlFamily: 80 },
+      { postgres: 6032, mysqlFamily: 18306 },
+      { postgres: 45_100, mysqlFamily: 18306 },
+      // Both protocol modules on one port would leave ProxySQL half-bound.
+      { postgres: 18432, mysqlFamily: 18432 },
+      { postgres: "18432", mysqlFamily: 18306 },
+      [],
+      "18432",
+    ]
+  ) {
+    assertThrows(
+      () =>
+        parseManagedIngressReconcilePayload({
+          ...VALID_MANAGED_INGRESS_RECONCILE,
+          listenerPorts: bad,
+        }),
+      TypeError,
+      "listenerPorts",
+    );
+  }
+});
+
+test("managed.ha.reconcile round-trips identity and teardown", () => {
+  const serviceId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  const payload = parseManagedHaReconcilePayload({
+    serverId: "00000000-0000-4000-8000-0000000000ab",
+    desired: "absent",
+    raft: null,
+    clusters: [],
+    identity: {
+      serviceId,
+      composeServiceName: "orchestrator",
+      containerName: `${serviceId}-ha`,
+    },
+  });
+  assertEquals(payload.desired, "absent");
+  assertEquals(payload.raft, null);
+  assertEquals(payload.identity.containerName, `${serviceId}-ha`);
+});
+
+test("managed.ha.reconcile round-trips raft peers and cluster members", () => {
+  const serviceId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  const managedId = "00000000-0000-4000-8000-000000000001";
+  const payload = parseManagedHaReconcilePayload({
+    serverId: "00000000-0000-4000-8000-0000000000ab",
+    desired: "present",
+    raft: {
+      nodeId: "00000000-0000-4000-8000-0000000000ab",
+      advertiseAddress: "203.0.113.10",
+      httpPort: 33001,
+      raftPort: 33002,
+      peers: [{
+        nodeId: "00000000-0000-4000-8000-0000000000cd",
+        address: "203.0.113.11",
+        raftPort: 33002,
+        httpPort: 33001,
+      }],
+    },
+    clusters: [{
+      managedId,
+      clusterAlias: managedId,
+      engine: "postgres",
+      members: [{
+        memberId: "00000000-0000-4000-8000-0000000000a1",
+        role: "primary",
+        replicaClass: null,
+        host: "db-1",
+        port: 5432,
+        promotionRule: "prefer",
+      }],
+      replicationUsername: "tp_repl",
+      replicationPasswordEnvelope: "tpdaemon.v1.server.key.payload",
+    }],
+    identity: {
+      serviceId,
+      composeServiceName: "orchestrator",
+      containerName: `${serviceId}-ha`,
+    },
+  });
+  assertEquals(payload.raft?.advertiseAddress, "203.0.113.10");
+  assertEquals(payload.clusters[0]?.members[0]?.promotionRule, "prefer");
+});
+
+test("managed.ha.failover round-trips drain and recover hosts", () => {
+  const drain = parseManagedHaFailoverPayload({
+    managedId: "00000000-0000-4000-8000-000000000001",
+    sourceMemberId: "00000000-0000-4000-8000-000000000002",
+    targetMemberId: "00000000-0000-4000-8000-000000000003",
+    engine: "postgres",
+    phase: "drain",
+    sourceHost: "db-1",
+    sourcePort: 5432,
+  });
+  assertEquals(drain.phase, "drain");
+  assertEquals(drain.sourceHost, "db-1");
+  const recover = parseManagedHaFailoverPayload({
+    managedId: "00000000-0000-4000-8000-000000000001",
+    sourceMemberId: "00000000-0000-4000-8000-000000000002",
+    targetMemberId: "00000000-0000-4000-8000-000000000003",
+    phase: "recover",
+    sourceHost: "203.0.113.10",
+    sourcePort: 5432,
+    targetHost: "203.0.113.11",
+    targetPort: 5432,
+  });
+  assertEquals(recover.phase, "recover");
+  assertEquals(recover.targetHost, "203.0.113.11");
+});
+
+test("managed.ha.reconcile and failover result parsers reject invalid shapes", () => {
+  assertEquals(
+    parseManagedHaReconcileResult({
+      summary: "ok",
+      registeredClusters: [],
+      restarted: false,
+    }).restarted,
+    false,
+  );
+  assertThrows(
+    () =>
+      parseManagedHaReconcileResult({
+        summary: "ok",
+        registeredClusters: [],
+        restarted: "yes",
+      }),
+    TypeError,
+    "Invalid managed.ha.reconcile result",
+  );
+  assertEquals(
+    parseManagedHaFailoverResult({
+      summary: "ok",
+      phase: "drain",
+    }).phase,
+    "drain",
+  );
+  assertThrows(
+    () =>
+      parseManagedHaFailoverResult({
+        summary: "ok",
+        phase: "fence",
+      }),
+    TypeError,
+    "Invalid managed.ha.failover result",
+  );
 });

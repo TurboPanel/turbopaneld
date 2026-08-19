@@ -1,0 +1,18 @@
+[Unit]
+Description=TurboPanel managed HA (Orchestrator)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/bin/sh -c '/usr/bin/docker network inspect {{ orchestrator_managed_network }} >/dev/null 2>&1 || /usr/bin/docker network create {{ orchestrator_managed_network }}'
+# Compose is daemon-written under configDir/orchestrator. Before the first
+# managed.ha.reconcile there is no docker-compose.yml — exit 0 so the unit
+# can enable on a fresh host without failing converge.
+ExecStart=/bin/sh -c 'if [ -f {{ orchestrator_config_dir }}/docker-compose.yml ]; then /usr/bin/docker compose -p {{ orchestrator_project_name }} -f {{ orchestrator_config_dir }}/docker-compose.yml up -d --remove-orphans; else echo "orchestrator compose not yet provisioned; skipping up"; fi'
+ExecStart=/bin/sh -c 'if [ -f {{ orchestrator_config_dir }}/docker-compose.yml ]; then {{ orchestrator_config_dir }}/wait-ready.sh; fi'
+ExecStop=/bin/sh -c 'if [ -f {{ orchestrator_config_dir }}/docker-compose.yml ]; then /usr/bin/docker compose -p {{ orchestrator_project_name }} -f {{ orchestrator_config_dir }}/docker-compose.yml down; fi'
+
+[Install]
+WantedBy=multi-user.target

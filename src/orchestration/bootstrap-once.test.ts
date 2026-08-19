@@ -4,10 +4,10 @@ import { afterAll, beforeAll, describe, it } from "@std/testing/bdd";
 import {
   applyOrchestrationEnv,
   createOrchestrationRuntimeFixture,
+  type OrchestrationRuntimeFixture,
   restoreOrchestrationEnv,
   snapshotOrchestrationEnv,
   writeOrchestrationBootstrapStamps,
-  type OrchestrationRuntimeFixture,
 } from "../testing/orchestration-fixtures.ts";
 import { InstallerPresentedFailure } from "./install-presenter-context.ts";
 

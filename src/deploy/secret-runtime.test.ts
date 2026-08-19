@@ -18,7 +18,8 @@ import {
 const test = Deno.test.bind(Deno);
 
 test({
-  name: "writeSecretFiles creates 0600 files and plannedSecretsMissing detects gaps",
+  name:
+    "writeSecretFiles creates 0600 files and plannedSecretsMissing detects gaps",
   permissions: { read: true, write: true },
   fn: async () => {
     const root = await Deno.makeTempDir({ prefix: "tp-secret-runtime-" });
@@ -65,7 +66,8 @@ test({
 });
 
 test({
-  name: "materializeSecretFiles decrypts and does not require leftover material when requireAll is false",
+  name:
+    "materializeSecretFiles decrypts and does not require leftover material when requireAll is false",
   permissions: { read: true, write: true },
   fn: async () => {
     const root = await Deno.makeTempDir({ prefix: "tp-secret-mat-" });

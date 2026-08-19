@@ -1,0 +1,19 @@
+---
+galaxy_info:
+  role_name: orchestrator
+  author: turbopanel
+  license: AGPL-3.0
+  description: >
+    Host prerequisites for the per-organization Orchestrator Raft group
+    (config dirs, API/raft secrets, wait-ready, turbopanel-orchestrator-stack
+    systemd unit, turbopanel-managed network). Does not write
+    docker-compose.yml — the daemon owns that file under
+    configDir/orchestrator after managed.ha.reconcile.
+  min_ansible_version: "2.20"
+  platforms:
+    - name: Debian
+      versions:
+        - trixie
+
+dependencies:
+  - role: docker

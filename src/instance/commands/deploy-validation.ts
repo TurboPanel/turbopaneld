@@ -162,7 +162,7 @@ export function validateDeployHostings(
   return validateDeployHostnameRouting(hostings);
 }
 
-export function validateDeployStorageMaterial(
+function validateStorageKindAndProvider(
   entry: EnvironmentDeployStorageMaterial,
 ): string | null {
   if (!STORAGE_KINDS.has(entry.kind)) {
@@ -177,17 +177,25 @@ export function validateDeployStorageMaterial(
   if (entry.kind !== "volume" && entry.provider !== "path") {
     return `storage ${entry.storageId} ${entry.kind} kind requires path provider`;
   }
-  if (entry.provider === "docker") {
-    if (
-      typeof entry.volumeName !== "string" ||
-      entry.volumeName.length === 0
-    ) {
-      return `storage ${entry.storageId} missing volumeName`;
-    }
-    if (!DOCKER_RESOURCE_NAME_RE.test(entry.volumeName)) {
-      return `storage ${entry.storageId} has invalid volumeName`;
-    }
+  return null;
+}
+
+function validateDockerVolumeName(
+  entry: EnvironmentDeployStorageMaterial,
+): string | null {
+  if (entry.provider !== "docker") return null;
+  if (typeof entry.volumeName !== "string" || entry.volumeName.length === 0) {
+    return `storage ${entry.storageId} missing volumeName`;
   }
+  if (!DOCKER_RESOURCE_NAME_RE.test(entry.volumeName)) {
+    return `storage ${entry.storageId} has invalid volumeName`;
+  }
+  return null;
+}
+
+function validateStorageMounts(
+  entry: EnvironmentDeployStorageMaterial,
+): string | null {
   for (const mount of entry.mounts) {
     if (!mount.destinationPath) {
       return `storage ${entry.storageId} mount missing destinationPath`;
@@ -197,6 +205,16 @@ export function validateDeployStorageMaterial(
     }
   }
   return null;
+}
+
+export function validateDeployStorageMaterial(
+  entry: EnvironmentDeployStorageMaterial,
+): string | null {
+  return (
+    validateStorageKindAndProvider(entry) ??
+      validateDockerVolumeName(entry) ??
+      validateStorageMounts(entry)
+  );
 }
 
 export function validateDeployStorageMaterialList(

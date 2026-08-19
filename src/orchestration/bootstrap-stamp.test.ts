@@ -67,7 +67,9 @@ test("readBootstrapStamp returns null when stamp file is absent", async () => {
     return;
   }
   if (typeof stamp !== "string" || stamp.length === 0) {
-    throw new TypeError("readBootstrapStamp must return null or a non-empty string");
+    throw new TypeError(
+      "readBootstrapStamp must return null or a non-empty string",
+    );
   }
 });
 

@@ -235,7 +235,11 @@ export async function collectManagedMemberHealth(
     };
   };
 }> {
-  const containers = await collectManagedContainers(project, params.redact, run);
+  const containers = await collectManagedContainers(
+    project,
+    params.redact,
+    run,
+  );
   if (!containers || !engine.replication) {
     return { containers };
   }

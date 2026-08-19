@@ -4,11 +4,11 @@ import { resolveDevSyncSourceRoot } from "./dev-sync-resolve.ts";
 
 export {
   COLOCATED_DEV_SYNC_REFUSED_REASON,
+  type DevSyncSourceRoot,
+  type DevSyncState,
   MANAGED_DEV_SYNC_REFUSED_REASON,
   newDevSyncState,
   resolveDevSyncSourceRoot,
-  type DevSyncSourceRoot,
-  type DevSyncState,
 } from "./dev-sync-resolve.ts";
 
 /**

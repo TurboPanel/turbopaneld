@@ -107,7 +107,7 @@ export function framesOfType(
 export function lastFrameOfType(
   socket: MockWebSocket,
   type: string,
-): unknown | undefined {
+): unknown {
   const frames = framesOfType(socket, type);
   return frames.at(-1);
 }

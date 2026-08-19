@@ -2,15 +2,17 @@ import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { join } from "@std/path";
 import {
   assertSafeComposeFilename,
-  composeBasename,
   COMPOSE_MANIFEST_FILENAME,
+  COMPOSE_STAGE_DIRNAME,
+  composeBasename,
   composeFileArgs,
   ComposeManifestError,
   DAEMON_COMPOSE_FILENAME,
-  deploymentDir,
   DEPLOYMENT_MANIFEST_FILENAME,
+  deploymentDir,
   environmentDeploymentDir,
   LEGACY_COMPOSE_FILENAME,
+  listLocalDeploymentManifests,
   pruneStaleComposeLayerFiles,
   publishStagedComposeChain,
   publishStagedRuntimeCompose,
@@ -26,6 +28,7 @@ import {
   writeComposeFileManifest,
   writeComposeFileSecure,
   writeComposeLayerFiles,
+  writeDeploymentManifest,
 } from "./compose-files.ts";
 import {
   composeFilesHaveContainerServices,
@@ -496,6 +499,85 @@ test({
       assertEquals(await readDeploymentManifest(dir), null);
     } finally {
       await Deno.remove(dir, { recursive: true });
+    }
+  },
+});
+
+test({
+  name:
+    "listLocalDeploymentManifests walks nested trees, leftovers, and skips staging",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    const stateDir = await Deno.makeTempDir({ prefix: "tp-list-manifests-" });
+    const sample = (
+      projectId: string,
+      environmentId: string,
+    ): Parameters<typeof writeDeploymentManifest>[1] => ({
+      version: 2,
+      projectId,
+      environmentId,
+      serverId: "srv-1",
+      generation: 1,
+      projectName: "demo",
+      composeSha256: "a".repeat(64),
+      services: { web: { replicas: 1 } },
+    });
+    try {
+      assertEquals(await listLocalDeploymentManifests({ stateDir }), []);
+
+      const nestedDir = join(stateDir, "deployments", "proj-1", "env-1");
+      const leftoverDir = join(stateDir, "deployments", "legacy-env");
+      const stagingDir = join(
+        stateDir,
+        "deployments",
+        COMPOSE_STAGE_DIRNAME,
+      );
+      const nestedStaging = join(
+        stateDir,
+        "deployments",
+        "proj-1",
+        COMPOSE_STAGE_DIRNAME,
+      );
+      await Deno.mkdir(nestedDir, { recursive: true });
+      await Deno.mkdir(leftoverDir, { recursive: true });
+      await Deno.mkdir(stagingDir, { recursive: true });
+      await Deno.mkdir(nestedStaging, { recursive: true });
+      await Deno.writeTextFile(
+        join(stateDir, "deployments", "notes.txt"),
+        "not a deployment\n",
+      );
+      await writeDeploymentManifest(nestedDir, sample("proj-1", "env-1"));
+      await writeDeploymentManifest(
+        leftoverDir,
+        sample("legacy", "legacy-env"),
+      );
+      await writeDeploymentManifest(
+        stagingDir,
+        sample("staged", "should-skip"),
+      );
+      await writeDeploymentManifest(
+        nestedStaging,
+        sample("nested-staged", "should-skip"),
+      );
+
+      const listed = await listLocalDeploymentManifests({ stateDir });
+      const dirs = listed.map((row) => row.dir).sort((a, b) =>
+        a.localeCompare(b)
+      );
+      assertEquals(
+        dirs,
+        [leftoverDir, nestedDir].sort((a, b) => a.localeCompare(b)),
+      );
+      assertEquals(
+        listed.find((row) => row.dir === nestedDir)?.manifest.environmentId,
+        "env-1",
+      );
+      assertEquals(
+        listed.find((row) => row.dir === leftoverDir)?.manifest.projectId,
+        "legacy",
+      );
+    } finally {
+      await Deno.remove(stateDir, { recursive: true });
     }
   },
 });

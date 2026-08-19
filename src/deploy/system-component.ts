@@ -11,6 +11,7 @@ import {
   assertSafeIdentityShape,
   ingressContainerName,
   type IngressIdentity,
+  managedHaContainerName,
   managedIngressContainerName,
 } from "./ingress-identity.ts";
 
@@ -20,10 +21,14 @@ export const SYSTEM_HOSTING_INGRESS_COMPONENT = "hosting-ingress";
 /** Shared ProxySQL (managed DB) ingress system component key. */
 export const SYSTEM_MANAGED_INGRESS_COMPONENT = "managed-ingress";
 
+/** Per-org Orchestrator Raft group (managed HA) system component key. */
+export const SYSTEM_MANAGED_HA_COMPONENT = "managed-ha";
+
 /** Allowlisted system component keys — never an arbitrary wire string. */
 export type SystemComponentKey =
   | typeof SYSTEM_HOSTING_INGRESS_COMPONENT
   | typeof SYSTEM_MANAGED_INGRESS_COMPONENT
+  | typeof SYSTEM_MANAGED_HA_COMPONENT
   | "database"
   | "queue"
   | "analytics";
@@ -37,27 +42,36 @@ export const SHARED_TRAEFIK_COMPOSE_SERVICE_NAME = "traefik";
 /** Compose service key inside project `turbopanel-proxysql`. */
 export const PROXYSQL_COMPOSE_SERVICE_NAME = "proxysql";
 
+/** Compose service key inside project `turbopanel-orchestrator`. */
+export const ORCHESTRATOR_COMPOSE_SERVICE_NAME = "orchestrator";
+
 /** Compose project name for the production system stack (database/queue/analytics). */
 export const SYSTEM_STACK_PROJECT = "turbopanel-system";
 
 /** Compose project name for the shared ProxySQL managed ingress. */
 export const PROXYSQL_PROJECT = "turbopanel-proxysql";
 
+/** Compose project name for the per-org Orchestrator Raft group. */
+export const ORCHESTRATOR_PROJECT = "turbopanel-orchestrator";
+
 const SYSTEM_COMPONENT_KEYS = new Set<string>([
   SYSTEM_HOSTING_INGRESS_COMPONENT,
   SYSTEM_MANAGED_INGRESS_COMPONENT,
+  SYSTEM_MANAGED_HA_COMPONENT,
   "database",
   "queue",
   "analytics",
 ]);
 
 /**
- * Per-component self-heal dispatch. `hosting-ingress` and `proxysql` are
- * self-healing; `database` / `queue` / `analytics` are inspect-only.
+ * Per-component self-heal dispatch. `hosting-ingress`, `proxysql`, and
+ * `orchestrator` are self-healing; `database` / `queue` / `analytics` are
+ * inspect-only.
  */
 export type SystemComponentSelfHeal =
   | "hosting-ingress"
   | "proxysql"
+  | "orchestrator"
   | "none";
 
 /**
@@ -87,6 +101,12 @@ export const SYSTEM_COMPONENT_CONTRACTS: Record<
     composeServiceName: PROXYSQL_COMPOSE_SERVICE_NAME,
     role: "turbopanel",
     selfHeal: "proxysql",
+  },
+  [SYSTEM_MANAGED_HA_COMPONENT]: {
+    project: ORCHESTRATOR_PROJECT,
+    composeServiceName: ORCHESTRATOR_COMPOSE_SERVICE_NAME,
+    role: "turbopanel",
+    selfHeal: "orchestrator",
   },
   database: {
     project: SYSTEM_STACK_PROJECT,
@@ -122,6 +142,7 @@ export function systemComponentContract(
  * | --- | --- |
  * | `hosting-ingress` | `<serviceId>-in` |
  * | `managed-ingress` | `<serviceId>-sql` |
+ * | `managed-ha` | `<serviceId>-ha` |
  * | `database` / `queue` / `analytics` | bare `serviceId` |
  */
 export function expectedSystemComponentContainerName(
@@ -133,6 +154,8 @@ export function expectedSystemComponentContainerName(
       return ingressContainerName(serviceId);
     case SYSTEM_MANAGED_INGRESS_COMPONENT:
       return managedIngressContainerName(serviceId);
+    case SYSTEM_MANAGED_HA_COMPONENT:
+      return managedHaContainerName(serviceId);
     case "database":
     case "queue":
     case "analytics":
@@ -148,6 +171,8 @@ function systemComponentContainerNameMismatchMessage(
       return "ingress containerName must equal <serviceId>-in";
     case SYSTEM_MANAGED_INGRESS_COMPONENT:
       return "system managed-ingress containerName must equal <serviceId>-sql";
+    case SYSTEM_MANAGED_HA_COMPONENT:
+      return "system managed-ha containerName must equal <serviceId>-ha";
     case "database":
     case "queue":
     case "analytics":
@@ -183,8 +208,8 @@ export function systemComponentDescriptorPath(
  * - `role` matches the contract's role.
  * - `containerName` matches the per-component naming rule:
  *   `hosting-ingress` → `<serviceId>-in`; `managed-ingress` →
- *   `<serviceId>-sql`; `database` / `queue` / `analytics` → bare
- *   `serviceId`.
+ *   `<serviceId>-sql`; `managed-ha` → `<serviceId>-ha`;
+ *   `database` / `queue` / `analytics` → bare `serviceId`.
  */
 export function assertSafeSystemIngressIdentity(
   descriptor: SystemComponentDescriptor,

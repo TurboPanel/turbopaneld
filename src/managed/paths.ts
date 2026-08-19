@@ -26,6 +26,9 @@ const SAFE_CONTAINER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/;
 
 export const PROXYSQL_PROJECT = "turbopanel-proxysql";
 
+/** Compose project for the per-org Orchestrator Raft group. */
+export const ORCHESTRATOR_PROJECT = "turbopanel-orchestrator";
+
 export function proxysqlProject(): string {
   return PROXYSQL_PROJECT;
 }
@@ -57,6 +60,38 @@ export function proxysqlAdminCnfPath(layout: LayoutPaths): string {
 /** Host-wide ProxySQL → engine health-check credentials (`tp_monitor`). */
 export function proxysqlMonitorCnfPath(layout: LayoutPaths): string {
   return join(proxysqlConfigDir(layout), "monitor.cnf");
+}
+
+export function orchestratorProject(): string {
+  return ORCHESTRATOR_PROJECT;
+}
+
+export function orchestratorConfigDir(layout: LayoutPaths): string {
+  return join(layout.configDir, "orchestrator");
+}
+
+export function orchestratorComposePath(layout: LayoutPaths): string {
+  return join(orchestratorConfigDir(layout), "docker-compose.yml");
+}
+
+export function orchestratorConfPath(layout: LayoutPaths): string {
+  return join(orchestratorConfigDir(layout), "orchestrator.conf.json");
+}
+
+export function orchestratorApiCnfPath(layout: LayoutPaths): string {
+  return join(orchestratorConfigDir(layout), "api.cnf");
+}
+
+export function orchestratorRaftCnfPath(layout: LayoutPaths): string {
+  return join(orchestratorConfigDir(layout), "raft.cnf");
+}
+
+export function orchestratorTlsDir(layout: LayoutPaths): string {
+  return join(orchestratorConfigDir(layout), "tls");
+}
+
+export function orchestratorDataDir(layout: LayoutPaths): string {
+  return join(layout.stateDir, "orchestrator");
 }
 
 export function managedDir(layout: LayoutPaths, managedId: string): string {

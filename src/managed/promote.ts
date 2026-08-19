@@ -1,8 +1,10 @@
 /**
- * Operator-triggered promotion of a streaming standby to primary.
+ * Engine promotion of a streaming standby to primary.
  *
  * Never contacts the old primary (that host is fenced by a separate
- * `managed.lifecycle stop`). No timers, watchdogs, or automatic failover.
+ * `managed.lifecycle stop` / ProxySQL drain). TurboPanel automatic failover
+ * and Orchestrator recover-fallback also land here after fencing; this module
+ * does not elect a candidate.
  */
 
 import type {

@@ -202,9 +202,11 @@ test("materializeManagedState requires decryptSecrets when orgTlsMaterial is pre
   await withTempLayout(async (layout) => {
     const payload = basePayload({
       orgTlsMaterial: {
-        certificatePem: "-----BEGIN CERTIFICATE-----\nORG\n-----END CERTIFICATE-----\n",
+        certificatePem:
+          "-----BEGIN CERTIFICATE-----\nORG\n-----END CERTIFICATE-----\n",
         privateKeyEnvelope: "tpdaemon.v1.server.key.payload",
-        caCertPem: "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n",
+        caCertPem:
+          "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n",
       },
     });
     await assertRejects(

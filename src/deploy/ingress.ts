@@ -94,10 +94,33 @@ export class TcpUdpPortConflictError extends Error {
 }
 
 /**
- * Protocol ports reserved for the shared ProxySQL managed-ingress listeners.
- * Tenant raw `tcp`/`udp` hostings must not claim these.
+ * Platform-default ProxySQL client listener ports. Always reserved even when an
+ * org overrides its effective listeners — tenant raw `tcp`/`udp` hostings must
+ * not claim these or the org-specific overrides carried on `environment.deploy`.
  */
 export const PROXYSQL_RESERVED_PUBLISHED_PORTS = new Set([15432, 16306]);
+
+/** Orchestrator HTTP/Raft — never claimed by tenant raw TCP/UDP hostings. */
+export const MANAGED_HA_RESERVED_PUBLISHED_PORTS = new Set([33001, 33002]);
+
+/** Effective org listener ports echoed on `environment.deploy` when known. */
+export type ProxysqlListenerPortsInput = {
+  postgres: number;
+  mysqlFamily: number;
+};
+
+/** Platform defaults plus effective org listener ports when supplied. */
+export function buildProxysqlReservedPublishedPorts(
+  listenerPorts?: ProxysqlListenerPortsInput | null,
+): ReadonlySet<number> {
+  const reserved = new Set(PROXYSQL_RESERVED_PUBLISHED_PORTS);
+  for (const port of MANAGED_HA_RESERVED_PUBLISHED_PORTS) reserved.add(port);
+  if (listenerPorts) {
+    reserved.add(listenerPorts.postgres);
+    reserved.add(listenerPorts.mysqlFamily);
+  }
+  return reserved;
+}
 
 /** Raised when a tenant claim tries to take a ProxySQL listener port. */
 export class TcpUdpPortReservedError extends Error {
@@ -106,7 +129,7 @@ export class TcpUdpPortReservedError extends Error {
     readonly publishedPort: number,
   ) {
     super(
-      `${protocol} port ${publishedPort} is reserved for managed database ingress (ProxySQL)`,
+      `${protocol} port ${publishedPort} is reserved for managed database ingress`,
     );
     this.name = "TcpUdpPortReservedError";
   }
@@ -198,7 +221,9 @@ export type InspectHostingIngressDeps = {
   runDocker?: RunDockerFn;
 };
 
-async function ensureIngressNetwork(run: RunDockerFn = defaultRunDocker): Promise<void> {
+async function ensureIngressNetwork(
+  run: RunDockerFn = defaultRunDocker,
+): Promise<void> {
   const inspect = await run([
     "network",
     "inspect",
@@ -1524,6 +1549,7 @@ async function syncTcpUdpIngressEntriesLocked(
   layout: LayoutPaths,
   serviceId: string,
   entries: readonly TcpUdpIngressEntry[],
+  reservedPublishedPorts: ReadonlySet<number>,
 ): Promise<TcpUdpIngressEntry[]> {
   const dir = tcpUdpStateDir(layout);
   await Deno.mkdir(dir, { recursive: true, mode: 0o750 });
@@ -1532,7 +1558,7 @@ async function syncTcpUdpIngressEntriesLocked(
   for (const entry of entries) {
     if (
       entry.protocol === "tcp" &&
-      PROXYSQL_RESERVED_PUBLISHED_PORTS.has(entry.publishedPort)
+      reservedPublishedPorts.has(entry.publishedPort)
     ) {
       throw new TcpUdpPortReservedError(entry.protocol, entry.publishedPort);
     }
@@ -1574,9 +1600,18 @@ export function syncTcpUdpIngressEntries(
   layout: LayoutPaths,
   serviceId: string,
   entries: readonly TcpUdpIngressEntry[],
+  listenerPorts?: ProxysqlListenerPortsInput | null,
 ): Promise<TcpUdpIngressEntry[]> {
+  const reservedPublishedPorts = buildProxysqlReservedPublishedPorts(
+    listenerPorts,
+  );
   return withTcpUdpIngressLock(() =>
-    syncTcpUdpIngressEntriesLocked(layout, serviceId, entries)
+    syncTcpUdpIngressEntriesLocked(
+      layout,
+      serviceId,
+      entries,
+      reservedPublishedPorts,
+    )
   );
 }
 

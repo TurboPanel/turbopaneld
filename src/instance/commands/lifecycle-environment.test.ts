@@ -6,8 +6,8 @@ import {
   DAEMON_COMPOSE_FILENAME,
   LEGACY_COMPOSE_FILENAME,
   RUNTIME_COMPOSE_FILENAME,
-  writeDeploymentManifest,
   writeComposeFileSecure,
+  writeDeploymentManifest,
 } from "../../deploy/compose-files.ts";
 import {
   cleanupStaleTcpUdpServiceIngress,
@@ -399,7 +399,8 @@ test({
 });
 
 test({
-  name: "handleEnvironmentLifecycle start fails when planned secret files are missing",
+  name:
+    "handleEnvironmentLifecycle start fails when planned secret files are missing",
   permissions: { env: true, read: true, write: true, run: true },
   fn: async () => {
     const root = await Deno.makeTempDir({ prefix: "tp-life-secrets-" });
@@ -415,7 +416,12 @@ test({
 
     const environmentId = "envlife02";
     const projectId = "proj-1";
-    const deploymentDir = join(stateDir, "deployments", projectId, environmentId);
+    const deploymentDir = join(
+      stateDir,
+      "deployments",
+      projectId,
+      environmentId,
+    );
     await Deno.mkdir(deploymentDir, { recursive: true });
     await writeComposeFileSecure(
       join(deploymentDir, RUNTIME_COMPOSE_FILENAME),
@@ -653,7 +659,8 @@ test({
 });
 
 test({
-  name: "handleEnvironmentLifecycle logs ingress compose failures without failing",
+  name:
+    "handleEnvironmentLifecycle logs ingress compose failures without failing",
   permissions: { env: true, read: true, write: true, run: true },
   fn: async () => {
     const root = await Deno.makeTempDir({ prefix: "tp-lifecycle-ing-" });

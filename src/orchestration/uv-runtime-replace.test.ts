@@ -5,9 +5,9 @@ import {
   applyOrchestrationEnv,
   buildUvFixtureArchive,
   createOrchestrationRuntimeFixture,
+  type OrchestrationRuntimeFixture,
   restoreOrchestrationEnv,
   snapshotOrchestrationEnv,
-  type OrchestrationRuntimeFixture,
 } from "../testing/orchestration-fixtures.ts";
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {

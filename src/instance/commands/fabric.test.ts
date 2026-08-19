@@ -11,11 +11,11 @@ import {
   parseFabricReconcileResult,
 } from "./contracts.ts";
 import {
+  classifyPeerHandshakeHealth,
   computeFabricApplyStamp,
   FABRIC_DEFAULT_MTU,
   FABRIC_HANDSHAKE_HEALTHY_MS,
   FABRIC_INTERFACE_NAME,
-  classifyPeerHandshakeHealth,
   fabricCrossSubnetForwardPairs,
   fabricOwnedPeerPrefixes,
   type FabricRunFn,
@@ -28,9 +28,9 @@ import {
   reinstallFabricForwardingIfEnabled,
   resetFabricTestOverrides,
   restoreFabricFromPersistedState,
+  setFabricEnableIpForwardingForTests,
   setFabricNetworkDirForTests,
   setFabricRunForTests,
-  setFabricEnableIpForwardingForTests,
   setFabricSkipRealSyscallsForTests,
 } from "./fabric.ts";
 
@@ -927,20 +927,27 @@ test("gateway payload installs tp0 transit ACCEPT and member installs DROP", asy
       false,
     );
   });
-  await withFabricDir("tp-fabric-mem-fwd-", async (_networkDir, invocations) => {
-    const parsed = parseFabricReconcilePayload(enabledPayload());
-    if (!parsed.enabled) throw new TypeError("expected enabled fabric payload");
-    await handleFabricReconcile(parsed, new Date().toISOString());
-    const joined = invocations.join("\n");
-    assertEquals(
-      joined.includes("iptables -I TP-FORWARD 1 -i tp0 -o tp0 -j DROP"),
-      true,
-    );
-    assertEquals(
-      joined.includes("iptables -A TP-FORWARD -i tp0 -o tp0 -j ACCEPT"),
-      false,
-    );
-  });
+  await withFabricDir(
+    "tp-fabric-mem-fwd-",
+    async (_networkDir, invocations) => {
+      const parsed = parseFabricReconcilePayload(enabledPayload());
+      if (!parsed.enabled) {
+        throw new TypeError(
+          "expected enabled fabric payload",
+        );
+      }
+      await handleFabricReconcile(parsed, new Date().toISOString());
+      const joined = invocations.join("\n");
+      assertEquals(
+        joined.includes("iptables -I TP-FORWARD 1 -i tp0 -o tp0 -j DROP"),
+        true,
+      );
+      assertEquals(
+        joined.includes("iptables -A TP-FORWARD -i tp0 -o tp0 -j ACCEPT"),
+        false,
+      );
+    },
+  );
 });
 
 test("gateway to member flip removes ACCEPT and inserts DROP", async () => {
@@ -1031,37 +1038,40 @@ test("state.json round-trips the gateway flag", async () => {
 });
 
 test("apply-stamp fast path re-applies when gateway role changes", async () => {
-  await withFabricDir("tp-fabric-gw-stamp-", async (_networkDir, invocations) => {
-    const memberParsed = parseFabricReconcilePayload({
-      ...enabledPayload(),
-      gateway: false,
-    });
-    if (!memberParsed.enabled) {
-      throw new TypeError("expected enabled fabric payload");
-    }
-    const first = await handleFabricReconcile(
-      memberParsed,
-      new Date().toISOString(),
-    );
-    assertEquals(first.skipped, undefined);
-    invocations.length = 0;
-    const gatewayParsed = parseFabricReconcilePayload({
-      ...enabledPayload(),
-      gateway: true,
-    });
-    if (!gatewayParsed.enabled) {
-      throw new TypeError("expected enabled fabric payload");
-    }
-    const second = await handleFabricReconcile(
-      gatewayParsed,
-      new Date().toISOString(),
-    );
-    assertEquals(second.skipped, undefined);
-    assertEquals(
-      invocations.some((line) => line.includes("wg syncconf tp0")),
-      true,
-    );
-  });
+  await withFabricDir(
+    "tp-fabric-gw-stamp-",
+    async (_networkDir, invocations) => {
+      const memberParsed = parseFabricReconcilePayload({
+        ...enabledPayload(),
+        gateway: false,
+      });
+      if (!memberParsed.enabled) {
+        throw new TypeError("expected enabled fabric payload");
+      }
+      const first = await handleFabricReconcile(
+        memberParsed,
+        new Date().toISOString(),
+      );
+      assertEquals(first.skipped, undefined);
+      invocations.length = 0;
+      const gatewayParsed = parseFabricReconcilePayload({
+        ...enabledPayload(),
+        gateway: true,
+      });
+      if (!gatewayParsed.enabled) {
+        throw new TypeError("expected enabled fabric payload");
+      }
+      const second = await handleFabricReconcile(
+        gatewayParsed,
+        new Date().toISOString(),
+      );
+      assertEquals(second.skipped, undefined);
+      assertEquals(
+        invocations.some((line) => line.includes("wg syncconf tp0")),
+        true,
+      );
+    },
+  );
 });
 
 test("route-ownership transition drops the old direct peer from tp0.conf", async () => {
@@ -1198,41 +1208,48 @@ test("handleFabricPathProbe collect-only returns dump health", async () => {
 });
 
 test("handleFabricPathProbe applies candidates then restores after a failed handshake", async () => {
-  await withFabricDir("tp-fabric-paths-probe-", async (networkDir, invocations) => {
-    const payload = parseFabricReconcilePayload(enabledPayload());
-    if (!payload.enabled) throw new TypeError("expected enabled fabric payload");
-    await handleFabricReconcile(payload, new Date().toISOString());
-    const stampPath = join(networkDir, "apply.stamp");
-    const stampBefore = await Deno.readTextFile(stampPath);
+  await withFabricDir(
+    "tp-fabric-paths-probe-",
+    async (networkDir, invocations) => {
+      const payload = parseFabricReconcilePayload(enabledPayload());
+      if (!payload.enabled) {
+        throw new TypeError(
+          "expected enabled fabric payload",
+        );
+      }
+      await handleFabricReconcile(payload, new Date().toISOString());
+      const stampPath = join(networkDir, "apply.stamp");
+      const stampBefore = await Deno.readTextFile(stampPath);
 
-    invocations.length = 0;
-    const paths = await handleFabricPathProbe({
-      id: "req-2",
-      fabricId: FABRIC_ID,
-      probeMs: 0,
-      candidates: [{
-        publicKey: WG_PUBKEY_B,
-        endpoints: ["203.0.113.50:48172"],
-      }],
-      at: new Date().toISOString(),
-    });
-    assertEquals(paths[0]?.health === "healthy", false);
-    const joined = invocations.join("\n");
-    assertEquals(
-      joined.includes(
-        `wg set ${FABRIC_INTERFACE_NAME} peer ${WG_PUBKEY_B} endpoint 203.0.113.50:48172 persistent-keepalive 25`,
-      ),
-      true,
-    );
-    assertEquals(
-      joined.includes(
-        `wg set ${FABRIC_INTERFACE_NAME} peer ${WG_PUBKEY_B} endpoint 203.0.113.1:51820 persistent-keepalive 25`,
-      ),
-      true,
-    );
-    const stampAfter = await Deno.readTextFile(stampPath);
-    assertEquals(stampAfter, stampBefore);
-  });
+      invocations.length = 0;
+      const paths = await handleFabricPathProbe({
+        id: "req-2",
+        fabricId: FABRIC_ID,
+        probeMs: 0,
+        candidates: [{
+          publicKey: WG_PUBKEY_B,
+          endpoints: ["203.0.113.50:48172"],
+        }],
+        at: new Date().toISOString(),
+      });
+      assertEquals(paths[0]?.health === "healthy", false);
+      const joined = invocations.join("\n");
+      assertEquals(
+        joined.includes(
+          `wg set ${FABRIC_INTERFACE_NAME} peer ${WG_PUBKEY_B} endpoint 203.0.113.50:48172 persistent-keepalive 25`,
+        ),
+        true,
+      );
+      assertEquals(
+        joined.includes(
+          `wg set ${FABRIC_INTERFACE_NAME} peer ${WG_PUBKEY_B} endpoint 203.0.113.1:51820 persistent-keepalive 25`,
+        ),
+        true,
+      );
+      const stampAfter = await Deno.readTextFile(stampPath);
+      assertEquals(stampAfter, stampBefore);
+    },
+  );
 });
 
 test("isFreshProbeHandshake requires a handshake newer than the previous value and probe start", () => {
@@ -1520,4 +1537,3 @@ test("handleFabricReconcile surfaces wg syncconf failures", async () => {
     },
   );
 });
-

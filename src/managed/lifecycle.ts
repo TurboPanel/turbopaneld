@@ -115,9 +115,12 @@ export async function handleManagedLifecycle(
     };
   }
 
-  const containers =
-    (await collectManagedContainers(project, (text) => sanitizeForLog(text), run)) ??
-      [];
+  const containers = (await collectManagedContainers(
+    project,
+    (text) => sanitizeForLog(text),
+    run,
+  )) ??
+    [];
   const status = statusFromContainers(containers);
   return {
     status,

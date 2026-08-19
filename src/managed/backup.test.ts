@@ -985,9 +985,13 @@ test("handleManagedBackup prune skips non-files, wrong extensions, and unsafe id
     );
     await Deno.mkdir(dir, { recursive: true, mode: 0o750 });
     await Deno.mkdir(join(dir, "subdir"), { recursive: true });
-    await Deno.writeFile(join(dir, "notes.txt"), new TextEncoder().encode("x"), {
-      mode: 0o600,
-    });
+    await Deno.writeFile(
+      join(dir, "notes.txt"),
+      new TextEncoder().encode("x"),
+      {
+        mode: 0o600,
+      },
+    );
     await Deno.writeFile(join(dir, ".dump"), new TextEncoder().encode("x"), {
       mode: 0o600,
     });

@@ -4,10 +4,7 @@
  */
 
 import { dirname, join } from "@std/path";
-import {
-  createTempLayout,
-  type TempLayoutFixture,
-} from "./temp-layout.ts";
+import { createTempLayout, type TempLayoutFixture } from "./temp-layout.ts";
 
 const REPO_ROOT = join(new URL("../..", import.meta.url).pathname);
 const CHECKOUT_ORCHESTRATION = join(REPO_ROOT, "orchestration");
@@ -225,6 +222,7 @@ export async function seedOrchestrationTree(
       "caddy-setup.yml",
       "postgres-setup.yml",
       "proxysql-setup.yml",
+      "orchestrator-setup.yml",
       "redis-setup.yml",
       "rabbitmq-setup.yml",
       "clickhouse-setup.yml",
@@ -326,7 +324,10 @@ export async function createOrchestrationRuntimeFixture(
   opts: OrchestrationSeedOptions = {},
 ): Promise<OrchestrationRuntimeFixture> {
   const layout = await createTempLayout();
-  const orchestrationDir = join(layout.dirs.runtimesDir, "orchestration-fixture");
+  const orchestrationDir = join(
+    layout.dirs.runtimesDir,
+    "orchestration-fixture",
+  );
   await seedOrchestrationTree(orchestrationDir);
 
   const env: Record<string, string> = {
@@ -414,7 +415,10 @@ case "$1" in
 esac
 exit 0
 `;
-  const path = join(await Deno.makeTempDir({ prefix: "tp-cloudflared-" }), "cf");
+  const path = join(
+    await Deno.makeTempDir({ prefix: "tp-cloudflared-" }),
+    "cf",
+  );
   await writeExecutable(path, script);
   try {
     return await Deno.readFile(path);

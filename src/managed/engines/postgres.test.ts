@@ -169,7 +169,9 @@ test("postgres ensurePrimary creates slots and drops unmanaged ones", async () =
   }
   const { exec, calls } = recordingExec();
   const slotLister: ManagedEngineExec = async (argv, input) => {
-    if (input?.includes("SELECT slot_name FROM pg_catalog.pg_replication_slots")) {
+    if (
+      input?.includes("SELECT slot_name FROM pg_catalog.pg_replication_slots")
+    ) {
       return {
         success: true,
         stdout: "tp_member_1\tphysical\norphan_slot\tphysical\n",
@@ -202,12 +204,27 @@ test("postgres bootstrapStandby returns already_standby when signal exists", asy
       runDocker: (args) => {
         const joined = args.join(" ");
         if (joined.includes("PG_VERSION")) {
-          return Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 });
+          return Promise.resolve({
+            success: true,
+            stdout: "",
+            stderr: "",
+            code: 0,
+          });
         }
         if (joined.includes("standby.signal")) {
-          return Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 });
+          return Promise.resolve({
+            success: true,
+            stdout: "",
+            stderr: "",
+            code: 0,
+          });
         }
-        return Promise.resolve({ success: false, stdout: "", stderr: "", code: 1 });
+        return Promise.resolve({
+          success: false,
+          stdout: "",
+          stderr: "",
+          code: 1,
+        });
       },
     },
     standbyReplicationSpec(),
@@ -231,12 +248,27 @@ test("postgres bootstrapStandby returns needs_resync without standby signal", as
       runDocker: (args) => {
         const joined = args.join(" ");
         if (joined.includes("PG_VERSION")) {
-          return Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 });
+          return Promise.resolve({
+            success: true,
+            stdout: "",
+            stderr: "",
+            code: 0,
+          });
         }
         if (joined.includes("standby.signal")) {
-          return Promise.resolve({ success: false, stdout: "", stderr: "", code: 1 });
+          return Promise.resolve({
+            success: false,
+            stdout: "",
+            stderr: "",
+            code: 1,
+          });
         }
-        return Promise.resolve({ success: false, stdout: "", stderr: "", code: 1 });
+        return Promise.resolve({
+          success: false,
+          stdout: "",
+          stderr: "",
+          code: 1,
+        });
       },
     },
     standbyReplicationSpec(),
@@ -264,19 +296,39 @@ test("postgres bootstrapStandby seeds empty volume via pg_basebackup", async () 
           dockerCalls.push([...args]);
           const joined = args.join(" ");
           if (joined.includes("PG_VERSION")) {
-            return Promise.resolve({ success: false, stdout: "", stderr: "", code: 1 });
+            return Promise.resolve({
+              success: false,
+              stdout: "",
+              stderr: "",
+              code: 1,
+            });
           }
           if (joined.includes("pg_basebackup")) {
-            return Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 });
+            return Promise.resolve({
+              success: true,
+              stdout: "",
+              stderr: "",
+              code: 0,
+            });
           }
-          return Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 });
+          return Promise.resolve({
+            success: true,
+            stdout: "",
+            stderr: "",
+            code: 0,
+          });
         },
       },
       standbyReplicationSpec(),
     );
     assertEquals(boot, "seeded");
-    assertEquals(dockerCalls.some((args) => args.includes("pg_basebackup")), true);
-    const envExists = await Deno.stat(`${stateDir}/.basebackup-env`).then(() => false).catch(
+    assertEquals(
+      dockerCalls.some((args) => args.includes("pg_basebackup")),
+      true,
+    );
+    const envExists = await Deno.stat(`${stateDir}/.basebackup-env`).then(() =>
+      false
+    ).catch(
       () => true,
     );
     assertEquals(envExists, true);
@@ -305,7 +357,12 @@ test("postgres bootstrapStandby throws when pg_basebackup fails", async () => {
             runDocker: (args) => {
               const joined = args.join(" ");
               if (joined.includes("PG_VERSION")) {
-                return Promise.resolve({ success: false, stdout: "", stderr: "", code: 1 });
+                return Promise.resolve({
+                  success: false,
+                  stdout: "",
+                  stderr: "",
+                  code: 1,
+                });
               }
               if (joined.includes("pg_basebackup")) {
                 return Promise.resolve({
@@ -315,7 +372,12 @@ test("postgres bootstrapStandby throws when pg_basebackup fails", async () => {
                   code: 1,
                 });
               }
-              return Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 });
+              return Promise.resolve({
+                success: true,
+                stdout: "",
+                stderr: "",
+                code: 0,
+              });
             },
           },
           standbyReplicationSpec(),

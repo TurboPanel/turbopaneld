@@ -7,9 +7,9 @@ import type {
 import {
   normalizeDeployPathPrefix,
   pathPrefixHasUnsupportedCharacters,
-  validateDeployHostnameRouting,
   validateDeployHostingEntry,
   validateDeployHostings,
+  validateDeployHostnameRouting,
   validateDeployPathPrefix,
   validateDeployStorageMaterial,
   validateDeployStorageMaterialList,
@@ -195,9 +195,11 @@ describe("daemon deploy-validation parity", () => {
       "storage stor-1 mount missing destinationPath",
     );
     assertEquals(
-      validateDeployStorageMaterial(storage({ mounts: [{
-        destinationPath: "/data",
-      }] })),
+      validateDeployStorageMaterial(storage({
+        mounts: [{
+          destinationPath: "/data",
+        }],
+      })),
       "storage stor-1 missing composeServiceName for mount",
     );
     assertEquals(validateDeployStorageMaterial(storage()), null);
@@ -205,10 +207,13 @@ describe("daemon deploy-validation parity", () => {
 
   it("validates storage material lists", () => {
     assertEquals(
-      validateDeployStorageMaterialList([storage(), storage({
-        storageId: "stor-2",
-        volumeName: "tp-other",
-      })]),
+      validateDeployStorageMaterialList([
+        storage(),
+        storage({
+          storageId: "stor-2",
+          volumeName: "tp-other",
+        }),
+      ]),
       null,
     );
     assertEquals(

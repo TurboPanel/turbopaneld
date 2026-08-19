@@ -9,7 +9,9 @@ import { assert } from "@std/assert";
 const test = Deno.test.bind(Deno);
 
 test("production client does not import the checkout-sync unpack path", async () => {
-  const client = await Deno.readTextFile(new URL("./client.ts", import.meta.url));
+  const client = await Deno.readTextFile(
+    new URL("./client.ts", import.meta.url),
+  );
   assert(
     !client.includes("dev-sync-apply.ts"),
     "instance/client.ts must not import src/dev-sync-apply.ts",
@@ -30,7 +32,9 @@ test("production compile entry does not enable checkout-sync unpack", async () =
 });
 
 test("source main.ts enables checkout-sync unpack", async () => {
-  const entry = await Deno.readTextFile(new URL("../../main.ts", import.meta.url));
+  const entry = await Deno.readTextFile(
+    new URL("../../main.ts", import.meta.url),
+  );
   assert(entry.includes("applyDevSyncTarball"));
   assert(entry.includes("enableCheckoutDevSync"));
 });

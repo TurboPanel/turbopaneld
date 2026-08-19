@@ -112,8 +112,8 @@ function isPublicIpv6(address: string): boolean {
 function ipv4PrefixFromNetmask(netmask: string): number | null {
   const octets = parseIpv4Octets(netmask);
   if (!octets) return null;
-  const value =
-    (octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3];
+  const value = (octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) |
+    octets[3];
   let bits = 0;
   let seenZero = false;
   for (let i = 31; i >= 0; i--) {

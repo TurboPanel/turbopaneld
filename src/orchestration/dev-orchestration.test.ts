@@ -74,7 +74,9 @@ test("resolveDevOrchestrationDir honors TURBOPANEL_DEV_ORCHESTRATION_DIR overrid
     try {
       assertEquals(resolveDevOrchestrationDir(), devRoot);
       assertEquals(
-        resolveDevOrchestrationDir({ TURBOPANEL_DEV_ORCHESTRATION_DIR: devRoot }),
+        resolveDevOrchestrationDir({
+          TURBOPANEL_DEV_ORCHESTRATION_DIR: devRoot,
+        }),
         devRoot,
       );
     } finally {

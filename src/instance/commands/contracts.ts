@@ -20,6 +20,8 @@ export const COMMAND_TYPES = [
   "managed.restore",
   "managed.promote",
   "managed.ingress.reconcile",
+  "managed.ha.reconcile",
+  "managed.ha.failover",
   "system.reconcile",
 ] as const;
 
@@ -447,6 +449,12 @@ export type EnvironmentDeployPayload = {
   storageMaterial?: EnvironmentDeployStorageMaterial[];
   principalMaterial?: EnvironmentDeployPrincipalMaterial[];
   serviceHooks?: EnvironmentDeployServiceHook[];
+  /**
+   * Server-owner org effective ProxySQL client listener ports. When present,
+   * tenant tcp/udp ingress must also reserve these in addition to the platform
+   * defaults (`15432` / `16306`).
+   */
+  listenerPorts?: ManagedIngressListenerPortsPayload;
 };
 
 export type EnvironmentDeployContainer = {
@@ -520,6 +528,7 @@ export type EnvironmentLifecycleResult = {
 export type SystemComponentKey =
   | "hosting-ingress"
   | "managed-ingress"
+  | "managed-ha"
   | "database"
   | "queue"
   | "analytics";
@@ -541,6 +550,7 @@ export const SYSTEM_COMPONENT_ROLES: Record<
 > = {
   "hosting-ingress": "ingress",
   "managed-ingress": "turbopanel",
+  "managed-ha": "turbopanel",
   database: "turbopanel",
   queue: "turbopanel",
   analytics: "turbopanel",
@@ -847,6 +857,12 @@ export type ProxySqlBackendPayload = {
   transport: "local" | "datacenter" | "fabric" | "public";
 };
 
+/**
+ * Which hostgroup a frontend login defaults to. Must stay in sync with the
+ * instance canonical `ManagedConnectionRole`.
+ */
+export type ProxySqlConnectionRolePayload = "read-write" | "read-only";
+
 /** Must stay in sync with the instance canonical `managed.ingress.reconcile` shape. */
 export type ProxySqlUserPayload = {
   username: string;
@@ -854,39 +870,94 @@ export type ProxySqlUserPayload = {
   /** Daemon-recipient sealed password (`tpdaemon.…`) for ProxySQL frontend auth. */
   password: string;
   defaultDatabase?: string;
+  /** Absent means `read-write` (control-plane skew). */
+  connectionRole?: ProxySqlConnectionRolePayload;
 };
 
-/** New listeners 15432/16306; legacy 5432/3306 accepted for control-plane skew. */
-export type ManagedIngressProtocolPort = 5432 | 3306 | 15432 | 16306;
+/** Must stay in sync with the instance canonical `MANAGED_INGRESS_PORT_MIN/MAX`. */
+const MANAGED_INGRESS_PORT_MIN = 1024;
+const MANAGED_INGRESS_PORT_MAX = 65_535;
 
-function isManagedIngressProtocolPort(
-  value: unknown,
-): value is ManagedIngressProtocolPort {
-  return (
-    value === 5432 ||
-    value === 3306 ||
-    value === 15432 ||
-    value === 16306
-  );
+/** Legacy listeners the instance may still send during control-plane skew. */
+const LEGACY_INGRESS_PORTS = new Set([5432, 3306]);
+
+/**
+ * Ports a client listener may never take, mirroring the instance validator.
+ * Re-checked here rather than trusted: publishing a client listener on
+ * ProxySQL's admin interface or inside the member private-listener allocation
+ * would break the ingress this very command is meant to converge.
+ */
+const RESERVED_ADMIN_PORTS = new Set([6032, 6132]);
+const MANAGED_PRIVATE_PORT_MIN = 45_000;
+const MANAGED_PRIVATE_PORT_MAX = 45_999;
+
+function isManagedIngressProtocolPort(value: unknown): value is number {
+  if (typeof value !== "number" || !Number.isInteger(value)) return false;
+  if (RESERVED_ADMIN_PORTS.has(value)) return false;
+  if (value >= MANAGED_PRIVATE_PORT_MIN && value <= MANAGED_PRIVATE_PORT_MAX) {
+    return false;
+  }
+  if (LEGACY_INGRESS_PORTS.has(value)) return true;
+  return value >= MANAGED_INGRESS_PORT_MIN && value <= MANAGED_INGRESS_PORT_MAX;
 }
+
+/** Must stay in sync with the instance canonical `ManagedIngressFamily`. */
+export type ManagedIngressFamilyPayload = "pgsql" | "mysql";
+
+function isManagedIngressFamily(
+  value: unknown,
+): value is ManagedIngressFamilyPayload {
+  return value === "pgsql" || value === "mysql";
+}
+
+/** Must stay in sync with the instance canonical `ManagedIngressPorts`. */
+export type ManagedIngressListenerPortsPayload = {
+  postgres: number;
+  mysqlFamily: number;
+};
 
 /** Must stay in sync with the instance canonical `managed.ingress.reconcile` shape. */
 export type ProxySqlClusterPayload = {
   managedId: string;
   engine: string;
-  protocolPort: ManagedIngressProtocolPort;
+  protocolPort: number;
+  /**
+   * Protocol module this cluster is served by. Explicit because a configurable
+   * port no longer identifies the family; absent payloads fall back to the
+   * engine name.
+   */
+  family?: ManagedIngressFamilyPayload;
   writerHostgroup: number;
   readerHostgroup: number;
   backends: ProxySqlBackendPayload[];
   users: ProxySqlUserPayload[];
+  /** Opt-in `^SELECT` splitting for read-write logins; absent means off. */
+  autoReadSplit?: boolean;
+  /**
+   * Refuse unencrypted client sessions for every login of this cluster
+   * (effective SSL mode `require` / `verify-ca` / `verify-full`); absent means
+   * TLS stays available but optional. Backend TLS is unconditional.
+   */
+  requireTls?: boolean;
 };
 
 /** Must stay in sync with the instance canonical `managed.ingress.reconcile` shape. */
 export type ManagedIngressReconcilePayload = {
   serverId: string;
-  bindAddress?: string;
+  /**
+   * Every host address the client listeners publish on. More than one entry
+   * when the instance resolved distinct interfaces for the enabled access
+   * scopes (datacenter private IP plus TurboFabric `tp0`, say); absent or empty
+   * means no host publish at all.
+   */
+  bindAddresses?: string[];
   /** Omitted on empty-cluster teardown so it does not need a CA round trip. */
   orgTlsMaterial?: ManagedApplyOrgTlsMaterial;
+  /**
+   * Organization-resolved client listener ports for both protocol modules.
+   * Absent means the platform defaults (control-plane skew).
+   */
+  listenerPorts?: ManagedIngressListenerPortsPayload;
   clusters: ProxySqlClusterPayload[];
   segments?: Array<{ name: string; subnet: string }>;
 };
@@ -898,6 +969,85 @@ export type ManagedIngressReconcileResult = {
   appliedBackends: string[];
   restarted: boolean;
   containers?: EnvironmentDeployContainer[];
+};
+
+export type ManagedHaReconcileDesired = "present" | "absent";
+
+export type HaPromotionRule = "prefer" | "must_not";
+
+export type ManagedHaRaftPeer = {
+  nodeId: string;
+  address: string;
+  raftPort: number;
+  httpPort: number;
+};
+
+export type ManagedHaRaftConfig = {
+  nodeId: string;
+  httpPort: number;
+  raftPort: number;
+  advertiseAddress: string;
+  peers: ManagedHaRaftPeer[];
+};
+
+export type ManagedHaClusterMember = {
+  memberId: string;
+  role: "primary" | "replica";
+  replicaClass: "failover" | "read" | null;
+  promotionRule: HaPromotionRule;
+  host: string;
+  port: number;
+  containerName?: string;
+};
+
+export type ManagedHaCluster = {
+  managedId: string;
+  engine: ManagedEngineCode;
+  clusterAlias: string;
+  members: ManagedHaClusterMember[];
+  replicationUsername: string;
+  replicationPasswordEnvelope: string;
+};
+
+/** Must stay in sync with the instance canonical `managed.ha.reconcile` shape. */
+export type ManagedHaReconcilePayload = {
+  serverId: string;
+  desired: ManagedHaReconcileDesired;
+  raft: ManagedHaRaftConfig | null;
+  clusters: ManagedHaCluster[];
+  identity: {
+    serviceId: string;
+    composeServiceName: string;
+    containerName: string;
+  };
+  orgTlsMaterial?: ManagedApplyOrgTlsMaterial;
+};
+
+export type ManagedHaReconcileResult = {
+  summary: string;
+  registeredClusters: string[];
+  restarted: boolean;
+  containers?: EnvironmentDeployContainer[];
+};
+
+export type ManagedHaFailoverPhase = "drain" | "recover";
+
+/** Must stay in sync with the instance canonical `managed.ha.failover` shape. */
+export type ManagedHaFailoverPayload = {
+  managedId: string;
+  sourceMemberId: string;
+  targetMemberId: string;
+  engine?: ManagedEngineCode;
+  phase: ManagedHaFailoverPhase;
+  sourceHost?: string;
+  sourcePort?: number;
+  targetHost?: string;
+  targetPort?: number;
+};
+
+export type ManagedHaFailoverResult = {
+  summary: string;
+  phase: ManagedHaFailoverPhase;
 };
 
 /** Must stay in sync with the instance canonical version in src/lib/commands/hostname.ts */
@@ -2324,6 +2474,8 @@ const DEPLOY_INGRESS_CONTAINER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/;
 const INGRESS_CONTAINER_NAME_SUFFIX = "-in";
 /** Mirrors instance `src/lib/naming.ts` `MANAGED_INGRESS_CONTAINER_NAME_SUFFIX`. */
 const MANAGED_INGRESS_CONTAINER_NAME_SUFFIX = "-sql";
+/** Mirrors instance `src/lib/naming.ts` `MANAGED_HA_CONTAINER_NAME_SUFFIX`. */
+const MANAGED_HA_CONTAINER_NAME_SUFFIX = "-ha";
 
 /**
  * Per-component expected container name for `system.reconcile` — mirrors
@@ -2339,6 +2491,8 @@ function expectedSystemComponentContainerName(
       return `${serviceId}${INGRESS_CONTAINER_NAME_SUFFIX}`;
     case "managed-ingress":
       return `${serviceId}${MANAGED_INGRESS_CONTAINER_NAME_SUFFIX}`;
+    case "managed-ha":
+      return `${serviceId}${MANAGED_HA_CONTAINER_NAME_SUFFIX}`;
     case "database":
     case "queue":
     case "analytics":
@@ -2473,6 +2627,9 @@ export function parseEnvironmentDeployPayload(
         "serviceHooks",
         parseServiceHook,
       ),
+      listenerPorts: value.listenerPorts === undefined
+        ? undefined
+        : parseManagedIngressListenerPorts(value.listenerPorts),
       generation: parseOptionalGeneration(value.generation),
       desiredHash: parseOptionalDesiredHash(value.desiredHash),
       serverId: parseOptionalDeployServerId(value.serverId),
@@ -2545,6 +2702,7 @@ export function parseEnvironmentLifecyclePayload(
 const SYSTEM_COMPONENT_KEYS = new Set([
   "hosting-ingress",
   "managed-ingress",
+  "managed-ha",
   "database",
   "queue",
   "analytics",
@@ -2663,30 +2821,51 @@ const MAX_MANAGED_IMAGE_LENGTH = 256;
 
 /**
  * Approved managed-engine image references — must stay byte-for-byte in sync
- * with `POSTGRES_ALLOWED_IMAGES` / `MYSQL_ALLOWED_IMAGES` /
- * `MARIADB_ALLOWED_IMAGES` in the instance repo's
- * `src/lib/managed/settings.ts`. The instance settings parser and the
- * `managed.apply` command payload parser both enforce this list; this daemon
- * mirror is the last stop before a payload reaches Docker, so a forged,
- * replayed, or otherwise-bypassed command still cannot run an unsupported or
- * EOL major version. Neither MySQL nor MariaDB publish an official
- * Alpine-based image, so both allowlists use the Docker Official Image's
- * default Debian-based tag, with the vendor-published Oracle Linux (MySQL) /
- * UBI (MariaDB) variant as the documented alternative; PostgreSQL's official
- * Alpine variant stays the default for its smaller footprint.
+ * with the instance repo's release catalog
+ * (`MANAGED_ENGINE_RELEASES` in `src/lib/managed/releases.ts`, surfaced as
+ * `POSTGRES_ALLOWED_IMAGES` / `MYSQL_ALLOWED_IMAGES` /
+ * `MARIADB_ALLOWED_IMAGES`) and with the UI mirror
+ * (`ui/src/lib/managed-releases.ts`). Ordering is catalog order: default
+ * series first, default variant first.
+ *
+ * The instance settings parser and the `managed.apply` command payload parser
+ * both enforce this list; this daemon mirror is the last stop before a payload
+ * reaches Docker, so a forged, replayed, or otherwise-bypassed command still
+ * cannot run an unsupported or EOL major version (MySQL 8.0 went EOL in April
+ * 2026 and is deliberately absent).
+ *
+ * Neither MySQL nor MariaDB publish an official Alpine-based image, so both
+ * default to the Docker Official Image's Debian-based tag with the
+ * vendor-published Oracle Linux (MySQL) / UBI (MariaDB) variant as the
+ * alternative; PostgreSQL's official Alpine variant stays the default for its
+ * smaller footprint.
  */
 const MANAGED_ALLOWED_IMAGES_BY_ENGINE: Record<string, readonly string[]> = {
   postgres: [
     "docker.io/library/postgres:18-alpine",
     "docker.io/library/postgres:18",
+    "docker.io/library/postgres:17-alpine",
+    "docker.io/library/postgres:17",
+    "docker.io/library/postgres:16-alpine",
+    "docker.io/library/postgres:16",
+    "docker.io/library/postgres:15-alpine",
+    "docker.io/library/postgres:15",
   ],
   mysql: [
     "docker.io/library/mysql:9.7",
     "docker.io/library/mysql:9.7-oraclelinux9",
+    "docker.io/library/mysql:8.4",
+    "docker.io/library/mysql:8.4-oraclelinux9",
   ],
   mariadb: [
     "docker.io/library/mariadb:12.3",
     "docker.io/library/mariadb:12.3-ubi",
+    "docker.io/library/mariadb:11.8",
+    "docker.io/library/mariadb:11.8-ubi",
+    "docker.io/library/mariadb:11.4",
+    "docker.io/library/mariadb:11.4-ubi",
+    "docker.io/library/mariadb:10.11",
+    "docker.io/library/mariadb:10.11-ubi",
   ],
 };
 
@@ -2703,7 +2882,12 @@ const MANAGED_LIFECYCLE_ACTIONS = new Set(["start", "stop", "restart"]);
 const MANAGED_EXPOSURE_PROTOCOLS = new Set(["tcp", "udp", "http"]);
 const MANAGED_CREDENTIAL_ROLES = new Set(["root", "user", "replication"]);
 const MANAGED_MEMBER_ROLES = new Set(["primary", "replica"]);
-const MANAGED_PEER_TRANSPORTS = new Set(["local", "datacenter", "fabric", "public"]);
+const MANAGED_PEER_TRANSPORTS = new Set([
+  "local",
+  "datacenter",
+  "fabric",
+  "public",
+]);
 const MANAGED_REPLICATION_ROLES = new Set(["primary", "standby"]);
 const MANAGED_REPLICATION_STATES = new Set([
   "streaming",
@@ -4278,6 +4462,17 @@ function parseProxySqlUserPayload(value: unknown): ProxySqlUserPayload {
     }
     user.defaultDatabase = value.defaultDatabase;
   }
+  if (value.connectionRole !== undefined) {
+    if (
+      value.connectionRole !== "read-write" &&
+      value.connectionRole !== "read-only"
+    ) {
+      throw new TypeError(
+        "Invalid managed.ingress.reconcile user connectionRole",
+      );
+    }
+    user.connectionRole = value.connectionRole;
+  }
   return user;
 }
 
@@ -4307,7 +4502,25 @@ function parseProxySqlClusterPayload(value: unknown): ProxySqlClusterPayload {
   ) {
     throw new TypeError("Invalid managed.ingress.reconcile cluster");
   }
-  return {
+  if (
+    value.autoReadSplit !== undefined &&
+    typeof value.autoReadSplit !== "boolean"
+  ) {
+    throw new TypeError(
+      "Invalid managed.ingress.reconcile cluster autoReadSplit",
+    );
+  }
+  if (
+    value.requireTls !== undefined && typeof value.requireTls !== "boolean"
+  ) {
+    throw new TypeError(
+      "Invalid managed.ingress.reconcile cluster requireTls",
+    );
+  }
+  if (value.family !== undefined && !isManagedIngressFamily(value.family)) {
+    throw new TypeError("Invalid managed.ingress.reconcile cluster family");
+  }
+  const cluster: ProxySqlClusterPayload = {
     managedId: value.managedId,
     engine: value.engine,
     protocolPort: value.protocolPort,
@@ -4316,6 +4529,54 @@ function parseProxySqlClusterPayload(value: unknown): ProxySqlClusterPayload {
     backends: value.backends.map(parseProxySqlBackendPayload),
     users: value.users.map(parseProxySqlUserPayload),
   };
+  if (value.family !== undefined) cluster.family = value.family;
+  if (value.autoReadSplit !== undefined) {
+    cluster.autoReadSplit = value.autoReadSplit;
+  }
+  if (value.requireTls !== undefined) {
+    cluster.requireTls = value.requireTls;
+  }
+  return cluster;
+}
+
+/** Must stay in sync with the instance canonical listener-ports validator. */
+function isManagedIngressBindAddress(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  return isValidIpv4Literal(value) ||
+    isValidIpv6Literal(value) ||
+    value === "0.0.0.0" ||
+    value === "::" ||
+    value === "::0"; // NOSONAR typescript:S1313 — IPv6 all-interfaces bind synonym (::0 == ::), not a reachable host
+}
+
+function parseManagedIngressBindAddresses(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    throw new TypeError("Invalid managed.ingress.reconcile bindAddresses");
+  }
+  const addresses: string[] = [];
+  for (const entry of value) {
+    if (!isManagedIngressBindAddress(entry)) {
+      throw new TypeError("Invalid managed.ingress.reconcile bindAddresses");
+    }
+    if (!addresses.includes(entry)) addresses.push(entry);
+  }
+  return addresses;
+}
+
+function parseManagedIngressListenerPorts(
+  value: unknown,
+): ManagedIngressListenerPortsPayload {
+  if (
+    !isRecord(value) ||
+    !isManagedIngressProtocolPort(value.postgres) ||
+    !isManagedIngressProtocolPort(value.mysqlFamily) ||
+    // One port cannot serve two protocol modules — ProxySQL would bind only
+    // one of them and the other family would silently be unreachable.
+    value.postgres === value.mysqlFamily
+  ) {
+    throw new TypeError("Invalid managed.ingress.reconcile listenerPorts");
+  }
+  return { postgres: value.postgres, mysqlFamily: value.mysqlFamily };
 }
 
 function parseManagedIngressOrgTlsMaterial(
@@ -4351,18 +4612,15 @@ export function parseManagedIngressReconcilePayload(
       value.orgTlsMaterial,
     );
   }
-  if (value.bindAddress !== undefined) {
-    if (
-      typeof value.bindAddress !== "string" ||
-      (!isValidIpv4Literal(value.bindAddress) &&
-        !isValidIpv6Literal(value.bindAddress) &&
-        value.bindAddress !== "0.0.0.0" &&
-        value.bindAddress !== "::" &&
-        value.bindAddress !== "::0") // NOSONAR typescript:S1313 — IPv6 all-interfaces bind synonym (::0 == ::), not a reachable host
-    ) {
-      throw new TypeError("Invalid managed.ingress.reconcile bindAddress");
-    }
-    payload.bindAddress = value.bindAddress;
+  if (value.listenerPorts !== undefined) {
+    payload.listenerPorts = parseManagedIngressListenerPorts(
+      value.listenerPorts,
+    );
+  }
+  if (value.bindAddresses !== undefined) {
+    payload.bindAddresses = parseManagedIngressBindAddresses(
+      value.bindAddresses,
+    );
   }
   if (value.segments !== undefined) {
     payload.segments = parseManagedIngressSegments(value.segments);
@@ -4412,4 +4670,316 @@ export function parseManagedIngressReconcileResult(
     result.containers = parsedContainers;
   }
   return result;
+}
+
+const HA_PROMOTION_RULES = new Set(["prefer", "must_not"]);
+const HA_FAILOVER_PHASES = new Set(["drain", "recover"]);
+const MAX_HA_CLUSTERS = 64;
+const MAX_HA_MEMBERS = 32;
+const MAX_HA_PEERS = 32;
+
+function parseManagedHaIdentity(
+  value: unknown,
+): ManagedHaReconcilePayload["identity"] {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid managed.ha.reconcile identity");
+  }
+  if (
+    typeof value.serviceId !== "string" ||
+    !MANAGED_APPLY_UUID_RE.test(value.serviceId) ||
+    typeof value.composeServiceName !== "string" ||
+    value.composeServiceName.length === 0 ||
+    typeof value.containerName !== "string" ||
+    value.containerName !==
+      `${value.serviceId}${MANAGED_HA_CONTAINER_NAME_SUFFIX}`
+  ) {
+    throw new TypeError("Invalid managed.ha.reconcile identity");
+  }
+  return {
+    serviceId: value.serviceId,
+    composeServiceName: value.composeServiceName,
+    containerName: value.containerName,
+  };
+}
+
+function isHaAdvertiseAddress(value: string): boolean {
+  return isValidIpv4Literal(value) || isValidIpv6Literal(value);
+}
+
+function parseManagedHaRaftPeer(value: unknown): ManagedHaRaftPeer {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid managed.ha.reconcile raft peer");
+  }
+  if (
+    typeof value.nodeId !== "string" ||
+    !MANAGED_APPLY_UUID_RE.test(value.nodeId) ||
+    typeof value.address !== "string" ||
+    !isHaAdvertiseAddress(value.address) ||
+    !isValidPortNumber(value.raftPort) ||
+    !isValidPortNumber(value.httpPort)
+  ) {
+    throw new TypeError("Invalid managed.ha.reconcile raft peer");
+  }
+  return {
+    nodeId: value.nodeId,
+    address: value.address,
+    raftPort: value.raftPort,
+    httpPort: value.httpPort,
+  };
+}
+
+function parseManagedHaRaftConfig(value: unknown): ManagedHaRaftConfig {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid managed.ha.reconcile raft");
+  }
+  if (
+    typeof value.nodeId !== "string" ||
+    !MANAGED_APPLY_UUID_RE.test(value.nodeId) ||
+    !isValidPortNumber(value.httpPort) ||
+    !isValidPortNumber(value.raftPort) ||
+    typeof value.advertiseAddress !== "string" ||
+    !isHaAdvertiseAddress(value.advertiseAddress) ||
+    !Array.isArray(value.peers) ||
+    value.peers.length > MAX_HA_PEERS
+  ) {
+    throw new TypeError("Invalid managed.ha.reconcile raft");
+  }
+  return {
+    nodeId: value.nodeId,
+    httpPort: value.httpPort,
+    raftPort: value.raftPort,
+    advertiseAddress: value.advertiseAddress,
+    peers: value.peers.map(parseManagedHaRaftPeer),
+  };
+}
+
+function parseManagedHaClusterMember(value: unknown): ManagedHaClusterMember {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid managed.ha.reconcile cluster member");
+  }
+  if (
+    typeof value.memberId !== "string" ||
+    !MANAGED_APPLY_UUID_RE.test(value.memberId) ||
+    (value.role !== "primary" && value.role !== "replica") ||
+    (value.replicaClass !== "failover" &&
+      value.replicaClass !== "read" &&
+      value.replicaClass !== null) ||
+    !HA_PROMOTION_RULES.has(value.promotionRule as string) ||
+    typeof value.host !== "string" ||
+    value.host.length === 0 ||
+    !isValidPortNumber(value.port)
+  ) {
+    throw new TypeError("Invalid managed.ha.reconcile cluster member");
+  }
+  const member: ManagedHaClusterMember = {
+    memberId: value.memberId,
+    role: value.role,
+    replicaClass: value.replicaClass,
+    promotionRule: value.promotionRule as HaPromotionRule,
+    host: value.host,
+    port: value.port,
+  };
+  if (value.containerName !== undefined) {
+    if (
+      typeof value.containerName !== "string" ||
+      !SAFE_CONTAINER_NAME_RE.test(value.containerName)
+    ) {
+      throw new TypeError("Invalid managed.ha.reconcile cluster member");
+    }
+    member.containerName = value.containerName;
+  }
+  return member;
+}
+
+function parseManagedHaCluster(value: unknown): ManagedHaCluster {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid managed.ha.reconcile cluster");
+  }
+  if (
+    typeof value.managedId !== "string" ||
+    !SAFE_BACKUP_ID_RE.test(value.managedId) ||
+    typeof value.engine !== "string" ||
+    !isManagedEngineCode(value.engine) ||
+    typeof value.clusterAlias !== "string" ||
+    value.clusterAlias.length === 0 ||
+    value.clusterAlias.length > 128 ||
+    !Array.isArray(value.members) ||
+    value.members.length === 0 ||
+    value.members.length > MAX_HA_MEMBERS ||
+    typeof value.replicationUsername !== "string" ||
+    !isSafeUsername(value.replicationUsername) ||
+    typeof value.replicationPasswordEnvelope !== "string" ||
+    !value.replicationPasswordEnvelope.startsWith(DAEMON_ENVELOPE_PREFIX)
+  ) {
+    throw new TypeError("Invalid managed.ha.reconcile cluster");
+  }
+  return {
+    managedId: value.managedId,
+    engine: value.engine,
+    clusterAlias: value.clusterAlias,
+    members: value.members.map(parseManagedHaClusterMember),
+    replicationUsername: value.replicationUsername,
+    replicationPasswordEnvelope: value.replicationPasswordEnvelope,
+  };
+}
+
+/** Must stay in sync with the instance canonical `managed.ha.reconcile` validator. */
+export function parseManagedHaReconcilePayload(
+  value: unknown,
+): ManagedHaReconcilePayload {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid managed.ha.reconcile payload");
+  }
+  if (
+    typeof value.serverId !== "string" ||
+    !MANAGED_APPLY_UUID_RE.test(value.serverId) ||
+    (value.desired !== "present" && value.desired !== "absent") ||
+    !Array.isArray(value.clusters) ||
+    value.clusters.length > MAX_HA_CLUSTERS
+  ) {
+    throw new TypeError("Invalid managed.ha.reconcile payload");
+  }
+  const raft = value.raft === null ? null : parseManagedHaRaftConfig(value.raft);
+  const orgTlsMaterial = parseManagedApplyOrgTlsMaterial(value.orgTlsMaterial);
+  const payload: ManagedHaReconcilePayload = {
+    serverId: value.serverId,
+    desired: value.desired,
+    raft,
+    clusters: value.clusters.map(parseManagedHaCluster),
+    identity: parseManagedHaIdentity(value.identity),
+  };
+  if (orgTlsMaterial !== undefined) {
+    payload.orgTlsMaterial = orgTlsMaterial;
+  }
+  return payload;
+}
+
+/** Must stay in sync with the instance canonical `managed.ha.reconcile` result parser. */
+export function parseManagedHaReconcileResult(
+  value: unknown,
+): ManagedHaReconcileResult {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid managed.ha.reconcile result");
+  }
+  if (
+    typeof value.summary !== "string" ||
+    !Array.isArray(value.registeredClusters) ||
+    !value.registeredClusters.every((entry) =>
+      typeof entry === "string" && SAFE_BACKUP_ID_RE.test(entry)
+    ) ||
+    typeof value.restarted !== "boolean"
+  ) {
+    throw new TypeError("Invalid managed.ha.reconcile result");
+  }
+  const result: ManagedHaReconcileResult = {
+    summary: value.summary,
+    registeredClusters: value.registeredClusters as string[],
+    restarted: value.restarted,
+  };
+  if (value.containers !== undefined) {
+    if (!Array.isArray(value.containers)) {
+      throw new TypeError("Invalid managed.ha.reconcile result containers");
+    }
+    const parsedContainers = parseDeployContainers(value.containers);
+    if (parsedContainers?.length !== value.containers.length) {
+      throw new TypeError("Invalid managed.ha.reconcile result containers");
+    }
+    result.containers = parsedContainers;
+  }
+  return result;
+}
+
+const MANAGED_HA_FAILOVER_PAYLOAD_ERROR = "Invalid managed.ha.failover payload";
+
+function assertManagedHaFailoverPayloadShape(
+  value: Record<string, unknown>,
+): asserts value is Record<string, unknown> & {
+  managedId: string;
+  sourceMemberId: string;
+  targetMemberId: string;
+  phase: string;
+} {
+  if (
+    typeof value.managedId !== "string" ||
+    !SAFE_BACKUP_ID_RE.test(value.managedId) ||
+    typeof value.sourceMemberId !== "string" ||
+    !MANAGED_APPLY_UUID_RE.test(value.sourceMemberId) ||
+    typeof value.targetMemberId !== "string" ||
+    !MANAGED_APPLY_UUID_RE.test(value.targetMemberId) ||
+    !HA_FAILOVER_PHASES.has(value.phase as string)
+  ) {
+    throw new TypeError(MANAGED_HA_FAILOVER_PAYLOAD_ERROR);
+  }
+}
+
+function parseOptionalManagedHaEngine(
+  value: unknown,
+): ManagedEngineCode | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !isManagedEngineCode(value)) {
+    throw new TypeError(MANAGED_HA_FAILOVER_PAYLOAD_ERROR);
+  }
+  return value;
+}
+
+function parseOptionalManagedHaHost(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.length === 0) {
+    throw new TypeError(MANAGED_HA_FAILOVER_PAYLOAD_ERROR);
+  }
+  return value;
+}
+
+function parseOptionalManagedHaPort(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (!isValidPortNumber(value)) {
+    throw new TypeError(MANAGED_HA_FAILOVER_PAYLOAD_ERROR);
+  }
+  return value;
+}
+
+/** Must stay in sync with the instance canonical `managed.ha.failover` validator. */
+export function parseManagedHaFailoverPayload(
+  value: unknown,
+): ManagedHaFailoverPayload {
+  if (!isRecord(value)) {
+    throw new TypeError(MANAGED_HA_FAILOVER_PAYLOAD_ERROR);
+  }
+  assertManagedHaFailoverPayloadShape(value);
+  const payload: ManagedHaFailoverPayload = {
+    managedId: value.managedId,
+    sourceMemberId: value.sourceMemberId,
+    targetMemberId: value.targetMemberId,
+    phase: value.phase as ManagedHaFailoverPhase,
+  };
+  const engine = parseOptionalManagedHaEngine(value.engine);
+  if (engine !== undefined) payload.engine = engine;
+  const sourceHost = parseOptionalManagedHaHost(value.sourceHost);
+  if (sourceHost !== undefined) payload.sourceHost = sourceHost;
+  const sourcePort = parseOptionalManagedHaPort(value.sourcePort);
+  if (sourcePort !== undefined) payload.sourcePort = sourcePort;
+  const targetHost = parseOptionalManagedHaHost(value.targetHost);
+  if (targetHost !== undefined) payload.targetHost = targetHost;
+  const targetPort = parseOptionalManagedHaPort(value.targetPort);
+  if (targetPort !== undefined) payload.targetPort = targetPort;
+  return payload;
+}
+
+/** Must stay in sync with the instance canonical `managed.ha.failover` result parser. */
+export function parseManagedHaFailoverResult(
+  value: unknown,
+): ManagedHaFailoverResult {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid managed.ha.failover result");
+  }
+  if (
+    typeof value.summary !== "string" ||
+    !HA_FAILOVER_PHASES.has(value.phase as string)
+  ) {
+    throw new TypeError("Invalid managed.ha.failover result");
+  }
+  return {
+    summary: value.summary,
+    phase: value.phase as ManagedHaFailoverPhase,
+  };
 }

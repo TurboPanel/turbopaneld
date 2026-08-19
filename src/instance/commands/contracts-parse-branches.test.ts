@@ -3,6 +3,7 @@ import {
   assertValidHostname,
   assertValidNtpServer,
   assertValidTimezone,
+  HOSTNAME_MAX_LENGTH,
   isValidHostname,
   isValidIpv4Literal,
   isValidIpv6Literal,
@@ -12,12 +13,13 @@ import {
   isValidWireguardEndpoint,
   isValidWireguardListenPort,
   isValidWireguardPublicKey,
-  HOSTNAME_MAX_LENGTH,
   parseEnvironmentStopPayload,
   parseFabricReconcilePayload,
   parseFabricReconcileResult,
   parseHostnamePayload,
   parseManagedDestroyResult,
+  parseManagedHaFailoverResult,
+  parseManagedHaReconcileResult,
   parseManagedIngressReconcileResult,
   parseManagedLifecycleResult,
   parseManagedReplicationHealth,
@@ -46,7 +48,11 @@ test("parsePingPayload accepts an empty object and rejects non-objects", () => {
 
 test("parseRebootPayload accepts an empty object and rejects non-objects", () => {
   assertEquals(parseRebootPayload({}), {});
-  assertThrows(() => parseRebootPayload(undefined), Error, "Invalid reboot payload");
+  assertThrows(
+    () => parseRebootPayload(undefined),
+    Error,
+    "Invalid reboot payload",
+  );
 });
 
 test("isValidHostname and assertValidHostname reject hostile values", () => {
@@ -407,5 +413,27 @@ test("parseManagedIngressReconcileResult accepts optional containers", () => {
       }],
     }).containers?.length,
     1,
+  );
+});
+
+test("parseManagedHaReconcileResult and parseManagedHaFailoverResult reject invalid shapes", () => {
+  assertThrows(
+    () =>
+      parseManagedHaReconcileResult({
+        summary: "ok",
+        registeredClusters: [],
+        restarted: "yes",
+      }),
+    TypeError,
+    "Invalid managed.ha.reconcile result",
+  );
+  assertThrows(
+    () =>
+      parseManagedHaFailoverResult({
+        summary: "ok",
+        phase: "promote",
+      }),
+    TypeError,
+    "Invalid managed.ha.failover result",
   );
 });

@@ -28,12 +28,16 @@ import {
   loadProxySqlMonitorCredentials,
 } from "../../managed/proxysql-admin.ts";
 import {
+  assertManagedIngressPortsBindable,
   assertNoFrontendUserConflict,
   buildProxySqlAdminStatements,
+  DEFAULT_PROXYSQL_LISTENER_PORTS,
   inspectProxySqlContainer,
+  type ProbeHostPortFn,
   proxysqlCompose,
   type ProxySqlDesiredState,
-  readPublishedBindAddressFromCompose,
+  readPublishedBindAddressesFromCompose,
+  readPublishedListenerPortsFromCompose,
   renderProxySqlConfig,
   staticConfigSectionChanged,
   writeProxySqlConfigAtomic,
@@ -58,23 +62,36 @@ export type ManagedIngressReconcileHandlerDeps = {
   decryptSecrets?: DecryptSecretsFn;
   runDocker?: RunDockerFn;
   ensureDocker?: () => Promise<void>;
+  /** Test seam for the listener-port preflight (defaults to a real bind probe). */
+  probeHostPort?: ProbeHostPortFn;
 };
 
 function desiredStateFromPayload(
   payload: ManagedIngressReconcilePayload,
 ): ProxySqlDesiredState {
   return {
-    // A missing `bindAddress` means "no cluster currently wants public/
-    // datacenter exposure" (see instance `ingress-desired.ts`
-    // `unionExposureBind`) — it must never be widened to "publish on every
-    // interface". `null` here means the shared frontend is reachable only
-    // via `MANAGED_INGRESS_NETWORK` (bindings from co-located compose
-    // services), never the host. See `ProxySqlDesiredState.bindAddress`.
-    bindAddress: payload.bindAddress ?? null,
+    // Missing/empty `bindAddresses` means "no cluster currently wants an access
+    // scope that reaches the host" (see instance `ingress-desired.ts`
+    // `decideIngressBindScopes`) — it must never be widened to "publish on every
+    // interface". `[]` here means the shared frontend is reachable only via
+    // `MANAGED_INGRESS_NETWORK` (bindings from co-located compose services),
+    // never the host. See `ProxySqlDesiredState.bindAddresses`.
+    bindAddresses: payload.bindAddresses ?? [],
+    // Absent means the control plane predates configurable ports; the renderer
+    // then falls back to DEFAULT_PROXYSQL_LISTENER_PORTS.
+    ...(payload.listenerPorts
+      ? {
+        listenerPorts: {
+          pgsql: payload.listenerPorts.postgres,
+          mysql: payload.listenerPorts.mysqlFamily,
+        },
+      }
+      : {}),
     clusters: payload.clusters.map((cluster) => ({
       managedId: cluster.managedId,
       engine: cluster.engine,
       protocolPort: cluster.protocolPort,
+      ...(cluster.family !== undefined ? { family: cluster.family } : {}),
       writerHostgroup: cluster.writerHostgroup,
       readerHostgroup: cluster.readerHostgroup,
       backends: cluster.backends.map((backend) => ({ ...backend })),
@@ -86,7 +103,16 @@ function desiredStateFromPayload(
         ...(user.defaultDatabase !== undefined
           ? { defaultDatabase: user.defaultDatabase }
           : {}),
+        ...(user.connectionRole !== undefined
+          ? { connectionRole: user.connectionRole }
+          : {}),
       })),
+      ...(cluster.autoReadSplit !== undefined
+        ? { autoReadSplit: cluster.autoReadSplit }
+        : {}),
+      ...(cluster.requireTls !== undefined
+        ? { requireTls: cluster.requireTls }
+        : {}),
     })),
     ...(payload.segments && payload.segments.length > 0
       ? { segments: payload.segments }
@@ -129,10 +155,19 @@ async function decryptProxySqlUserPasswords(
     clusters[clusterIndex]!.users[userIndex]!.password = plain;
   }
   return {
-    bindAddress: desired.bindAddress,
+    bindAddresses: desired.bindAddresses,
+    ...(desired.listenerPorts ? { listenerPorts: desired.listenerPorts } : {}),
     clusters,
     ...(desired.segments ? { segments: desired.segments } : {}),
   };
+}
+
+/** Order-insensitive: publishing the same set of addresses needs no restart. */
+function sameBindAddresses(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  const left = [...a].sort((x, y) => x.localeCompare(y));
+  const right = [...b].sort((x, y) => x.localeCompare(y));
+  return left.every((value, index) => value === right[index]);
 }
 
 async function readPreviousConfig(path: string): Promise<string | null> {
@@ -289,7 +324,7 @@ export async function handleManagedIngressReconcile(
 
   const adminCredentials = await loadProxySqlAdminCredentials(layout);
   const monitorCredentials = await loadProxySqlMonitorCredentials(layout);
-  const bindAddress = desired.bindAddress;
+  const bindAddresses = desired.bindAddresses;
   const composePath = proxysqlComposePath(layout);
   const configPath = proxysqlConfigPath(layout);
   const nextConfig = renderProxySqlConfig(
@@ -300,13 +335,26 @@ export async function handleManagedIngressReconcile(
   const previousConfig = await readPreviousConfig(configPath);
   const previousComposeText = await readPreviousConfig(composePath);
   // ProxySQL's internal `interfaces=` line is now a fixed constant (see
-  // `CONTAINER_LISTEN_ADDRESS` in proxysql.ts), so a bindAddress-only change
-  // (public <-> private, or a different published address) only changes the
-  // compose `ports:` publish — caught by full nextComposeText comparison
-  // below (along with container_name renames).
-  const previousBindAddress = previousComposeText === null
+  // `CONTAINER_LISTEN_ADDRESS` in proxysql.ts), so a bind-only change
+  // (public <-> private, a different address, or gaining/losing a second scope)
+  // only changes the compose `ports:` publish — caught by full nextComposeText
+  // comparison below (along with container_name renames).
+  const previousBindAddresses = previousComposeText === null
+    ? []
+    : readPublishedBindAddressesFromCompose(previousComposeText);
+  const previousListenerPorts = previousComposeText === null
     ? null
-    : readPublishedBindAddressFromCompose(previousComposeText);
+    : readPublishedListenerPortsFromCompose(previousComposeText);
+
+  // Preflight before the first write: an organization port that something else
+  // on this host already owns must fail while the current frontend is still
+  // serving, not after `compose up` has torn it down.
+  await assertManagedIngressPortsBindable(
+    bindAddresses,
+    desired.listenerPorts ?? DEFAULT_PROXYSQL_LISTENER_PORTS,
+    previousListenerPorts,
+    deps?.probeHostPort,
+  );
 
   await writeProxySqlConfigAtomic(configPath, nextConfig);
 
@@ -315,14 +363,15 @@ export async function handleManagedIngressReconcile(
   // containerName → `<serviceId>-sql` renames that static cnf never sees.
   const nextComposeText = proxysqlCompose(
     descriptor,
-    bindAddress,
+    bindAddresses,
     desired.segments ?? [],
+    desired.listenerPorts,
   );
   const composeNeedsUp =
     previousComposeText?.trimEnd() !== nextComposeText.trimEnd();
   const restartNeeded = composeNeedsUp ||
     staticConfigSectionChanged(previousConfig, nextConfig) ||
-    previousBindAddress !== bindAddress;
+    !sameBindAddresses(previousBindAddresses, bindAddresses);
 
   if (restartNeeded) {
     await ensureProxySqlComposeUp(

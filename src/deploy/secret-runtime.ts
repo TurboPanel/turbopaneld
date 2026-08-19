@@ -5,8 +5,10 @@
 import { dirname, join } from "@std/path";
 import { parse, stringify } from "yaml";
 import type { DecryptSecretsFn } from "./materialize-tls.ts";
-import type { EnvironmentDeploySecretPlanEntry } from "../instance/commands/contracts.ts";
-import type { EnvironmentDeployVariableMaterial } from "../instance/commands/contracts.ts";
+import type {
+  EnvironmentDeploySecretPlanEntry,
+  EnvironmentDeployVariableMaterial,
+} from "../instance/commands/contracts.ts";
 
 export const SECRET_FILE_MODE = 0o600;
 export const SECRET_DIR_MODE = 0o700;
@@ -72,7 +74,11 @@ export async function plannedSecretsMissing(
   return false;
 }
 
-async function writeFileAtomic(path: string, content: string, mode: number): Promise<void> {
+async function writeFileAtomic(
+  path: string,
+  content: string,
+  mode: number,
+): Promise<void> {
   const dir = dirname(path);
   await Deno.mkdir(dir, { recursive: true, mode: SECRET_DIR_MODE });
   try {
@@ -167,6 +173,45 @@ async function decryptEnvelopes(
   return out;
 }
 
+function indexDecryptedMaterial(
+  material: readonly EnvironmentDeployVariableMaterial[],
+  plaintexts: readonly (string | null)[],
+  requireAll: boolean,
+): Map<string, string> {
+  const byKey = new Map<string, string>();
+  for (let i = 0; i < material.length; i += 1) {
+    const entry = material[i]!;
+    const plaintext = plaintexts[i];
+    if (plaintext === null || plaintext === undefined) {
+      if (requireAll) {
+        throw new Error(`Failed to decrypt secret variable ${entry.key}`);
+      }
+      continue;
+    }
+    byKey.set(plaintextKey(entry), plaintext);
+  }
+  return byKey;
+}
+
+function collectSecretFiles(
+  plan: readonly EnvironmentDeploySecretPlanEntry[],
+  byKey: ReadonlyMap<string, string>,
+  requireAll: boolean,
+): Array<{ relativePath: string; plaintext: string }> {
+  const files: Array<{ relativePath: string; plaintext: string }> = [];
+  for (const entry of plan) {
+    const plaintext = byKey.get(`${entry.composeServiceName}::${entry.key}`);
+    if (plaintext === undefined) {
+      if (requireAll) {
+        throw new Error(`No decrypted material for secret ${entry.key}`);
+      }
+      continue;
+    }
+    files.push({ relativePath: entry.relativePath, plaintext });
+  }
+  return files;
+}
+
 /**
  * Decrypt variable material and write `/run` secret files. Does not merge
  * plaintext into compose YAML.
@@ -192,29 +237,11 @@ export async function materializeSecretFiles(
     decryptSecrets,
     material.map((entry) => entry.valueEnvelope),
   );
-  const byKey = new Map<string, string>();
-  for (let i = 0; i < material.length; i += 1) {
-    const entry = material[i]!;
-    const plaintext = plaintexts[i];
-    if (plaintext === null || plaintext === undefined) {
-      if (requireAll) {
-        throw new Error(`Failed to decrypt secret variable ${entry.key}`);
-      }
-      continue;
-    }
-    byKey.set(plaintextKey(entry), plaintext);
-  }
-  const files: Array<{ relativePath: string; plaintext: string }> = [];
-  for (const entry of plan) {
-    const plaintext = byKey.get(`${entry.composeServiceName}::${entry.key}`);
-    if (plaintext === undefined) {
-      if (requireAll) {
-        throw new Error(`No decrypted material for secret ${entry.key}`);
-      }
-      continue;
-    }
-    files.push({ relativePath: entry.relativePath, plaintext });
-  }
+  const files = collectSecretFiles(
+    plan,
+    indexDecryptedMaterial(material, plaintexts, requireAll),
+    requireAll,
+  );
   if (files.length === 0) return;
   await writeSecretFiles(layout, projectId, environmentId, files);
 }
