@@ -1,3 +1,4 @@
+import { fetchWithPlatformCa } from "../instance/paths.ts";
 import type { UpdateChannelConfig } from "./config.ts";
 import { MalformedManifestError, MissingChannelError } from "./errors.ts";
 import type { LinuxArch, UpdateInfo } from "./types.ts";
@@ -9,6 +10,33 @@ import {
   rootCatalogUrl,
 } from "./urls.ts";
 import { parseChannelManifest, parseRootCatalog } from "./validate.ts";
+
+function describeFetchError(context: string, err: unknown): MalformedManifestError {
+  if (err instanceof Error) {
+    const cause = err.cause instanceof Error
+      ? err.cause.message
+      : typeof err.cause === "string"
+      ? err.cause
+      : "";
+    const detail = err.message === "fetch failed" && cause
+      ? `${err.message} (${cause})`
+      : err.message;
+    return new MalformedManifestError(`${context}: ${detail}`);
+  }
+  return new MalformedManifestError(`${context}: ${String(err)}`);
+}
+
+async function trustedFetch(
+  url: string,
+  env: Record<string, string | undefined>,
+  context: string,
+): Promise<Response> {
+  try {
+    return await fetchWithPlatformCa(url, env);
+  } catch (err) {
+    throw describeFetchError(context, err);
+  }
+}
 
 function resolveLinuxArch(): LinuxArch {
   switch (Deno.build.arch) {
@@ -29,7 +57,11 @@ export async function resolveUpdate(
 ): Promise<UpdateInfo> {
   const catalogUrl = rootCatalogUrl(resolveDlBase(env));
   const allowHttp = catalogAllowsHttp(catalogUrl);
-  const catalogResponse = await fetch(catalogUrl);
+  const catalogResponse = await trustedFetch(
+    catalogUrl,
+    env,
+    "Failed to fetch channels.json",
+  );
   if (!catalogResponse.ok) {
     throw new MalformedManifestError(
       `Failed to fetch channels.json: HTTP ${catalogResponse.status}`,
@@ -53,7 +85,11 @@ export async function resolveUpdate(
   }
 
   const manifestUrl = channelEntry.manifestUrl;
-  const manifestResponse = await fetch(manifestUrl);
+  const manifestResponse = await trustedFetch(
+    manifestUrl,
+    env,
+    "Failed to fetch channel manifest",
+  );
   if (!manifestResponse.ok) {
     throw new MalformedManifestError(
       `Failed to fetch channel manifest: HTTP ${manifestResponse.status}`,

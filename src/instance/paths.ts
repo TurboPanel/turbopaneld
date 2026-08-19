@@ -194,6 +194,34 @@ export interface InstanceHttpClientOptions {
   env?: Record<string, string | undefined>;
 }
 
+/** Build an HTTP client that trusts the platform CA PEM when a path is provided. */
+export async function createHttpClientFromCaPath(
+  caCertPath: string | undefined,
+): Promise<Deno.HttpClient | undefined> {
+  const trimmed = caCertPath?.trim();
+  if (!trimmed) return undefined;
+  const cert = await Deno.readTextFile(trimmed);
+  return Deno.createHttpClient({ caCerts: [cert] });
+}
+
+/**
+ * `fetch` that trusts the platform CA when `resolveInstanceCaPath` finds one.
+ *
+ * Overlay catalogs (`TURBOPANEL_DL_BASE`) are served over the same TLS trust
+ * model as the instance API — self-hosted daemons must not use bare `fetch`.
+ */
+export async function fetchWithPlatformCa(
+  url: string,
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+  init?: RequestInit,
+): Promise<Response> {
+  const client = await createHttpClientFromCaPath(resolveInstanceCaPath(env));
+  if (client) {
+    return fetch(url, { ...init, client });
+  }
+  return fetch(url, init);
+}
+
 /**
  * Build the HTTP client used for both REST and the WebSocket upgrade.
  *
@@ -231,10 +259,5 @@ export async function createInstanceHttpClient(
     return undefined;
   }
 
-  if (options.caCertPath) {
-    const cert = await Deno.readTextFile(options.caCertPath);
-    return Deno.createHttpClient({ caCerts: [cert] });
-  }
-
-  return undefined;
+  return createHttpClientFromCaPath(options.caCertPath);
 }

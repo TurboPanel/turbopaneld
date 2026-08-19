@@ -52,19 +52,22 @@ function channelManifest() {
 }
 
 function installFetch(
-  handler: (url: string) => Response | Promise<Response>,
+  handler: (
+    url: string,
+    init?: RequestInit & { client?: Deno.HttpClient },
+  ) => Response | Promise<Response>,
 ): () => void {
   const original = globalThis.fetch;
   Object.defineProperty(globalThis, "fetch", {
     configurable: true,
     writable: true,
-    value: (input: RequestInfo | URL) => {
+    value: (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string"
         ? input
         : input instanceof URL
         ? input.href
         : input.url;
-      return Promise.resolve(handler(url));
+      return Promise.resolve(handler(url, init));
     },
   });
   return () => {
@@ -225,6 +228,24 @@ test("resolveUpdate allows http overlay catalogs via TURBOPANEL_DL_BASE", async 
     );
     assertEquals(info.commit, "abc1234");
     assertEquals(info.downloadUrl.includes("203.0.113.10"), true);
+  } finally {
+    restore();
+  }
+});
+
+test("resolveUpdate surfaces fetch cause in MalformedManifestError", async () => {
+  const restore = installFetch(() => {
+    throw new TypeError("fetch failed", {
+      cause: new Error("certificate verify failed"),
+    });
+  });
+
+  try {
+    await assertRejects(
+      () => resolveUpdate({ app: "daemon", channel: "trunk" }, {}),
+      MalformedManifestError,
+      "Failed to fetch channels.json: fetch failed (certificate verify failed)",
+    );
   } finally {
     restore();
   }

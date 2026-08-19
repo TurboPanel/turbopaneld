@@ -4,6 +4,7 @@ import {
   CANONICAL_INSTANCE_CA_PATH,
   createInstanceHttpClient,
   DEFAULT_SOCKET_DIR,
+  fetchWithPlatformCa,
   resolveInstanceCaPath,
   resolveInstanceConfig,
   resolveInstanceSocket,
@@ -381,6 +382,58 @@ test("createInstanceHttpClient trusts a readable platform CA PEM", async () => {
       throw new TypeError("expected HttpClient with platform CA");
     }
     withCa.close();
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("fetchWithPlatformCa passes HttpClient when platform CA is configured", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-fetch-ca-" });
+  const keyPath = `${dir}/key.pem`;
+  const certPath = `${dir}/cert.pem`;
+  try {
+    const gen = await new Deno.Command("openssl", {
+      args: [
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-keyout",
+        keyPath,
+        "-out",
+        certPath,
+        "-days",
+        "1",
+        "-subj",
+        "/CN=turbopanel-test",
+      ],
+      stdout: "null",
+      stderr: "piped",
+    }).output();
+    if (!gen.success) return;
+
+    let sawClient = false;
+    const original = globalThis.fetch;
+    globalThis.fetch = (input, init) => {
+      const requestInit = init as RequestInit & { client?: Deno.HttpClient };
+      if (requestInit?.client) sawClient = true;
+      const url = typeof input === "string"
+        ? input
+        : input instanceof URL
+        ? input.href
+        : input.url;
+      return Promise.resolve(new Response(url));
+    };
+
+    try {
+      await fetchWithPlatformCa("https://203.0.113.10/channels.json", {
+        TURBOPANEL_INSTANCE_CA: certPath,
+      });
+      assertEquals(sawClient, true);
+    } finally {
+      globalThis.fetch = original;
+    }
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
