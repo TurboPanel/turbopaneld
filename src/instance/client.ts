@@ -1669,11 +1669,22 @@ async function waitForColocatedReadiness(
   }
 }
 
+function describeHealthCheckFailure(err: unknown): string {
+  if (!(err instanceof Error)) return sanitizeForLog(err);
+  const msg = err.message;
+  if (/certificate|tls|ssl|NotValidForName|UnknownIssuer|invalid peer/i.test(msg)) {
+    return `${msg} — ensure the control plane leaf cert SAN includes the ` +
+      "hostname in TURBOPANEL_INSTANCE_URL (Admin → Public URLs → Save & Apply)";
+  }
+  return msg;
+}
+
 async function waitForRemoteHealth(
   client: InstanceClient,
   initialBackoffMs: number,
 ): Promise<void> {
   let waitingLogged = false;
+  let failureCount = 0;
   let backoffMs = initialBackoffMs;
 
   while (true) {
@@ -1685,7 +1696,9 @@ async function waitForRemoteHealth(
         sanitizeForLog(client.target),
       );
       break;
-    } catch {
+    } catch (err) {
+      failureCount += 1;
+      const detail = describeHealthCheckFailure(err);
       if (!waitingLogged) {
         logInfo(
           "instance",
@@ -1693,6 +1706,18 @@ async function waitForRemoteHealth(
           sanitizeForLog(client.target),
         );
         waitingLogged = true;
+      }
+      if (failureCount === 1 || failureCount % 10 === 0) {
+        logInfo(
+          "instance",
+          "health check failed (retrying):",
+          sanitizeForLog(detail),
+        );
+        logWarn(
+          "instance",
+          "health check failed (retrying):",
+          sanitizeForLog(detail),
+        );
       }
       await delay(fullJitterMs(initialBackoffMs, backoffMs));
       backoffMs = nextBackoffMs(backoffMs, DEFAULT_MAX_BACKOFF_MS);

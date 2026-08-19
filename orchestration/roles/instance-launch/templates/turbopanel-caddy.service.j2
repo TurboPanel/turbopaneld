@@ -13,6 +13,8 @@ Environment=XDG_DATA_HOME={{ turbopanel_caddy_runtime_dir }}/share
 Environment=XDG_STATE_HOME={{ turbopanel_caddy_runtime_dir }}/state
 Environment=XDG_CONFIG_HOME={{ turbopanel_caddy_config_dir }}
 Environment=CADDY_PORT={{ caddy_port }}
+Environment=CADDY_TLS_CERT={{ turbopanel_instance_dir }}/certs/self-signed.crt
+Environment=CADDY_TLS_KEY={{ turbopanel_instance_dir }}/certs/self-signed.key
 Environment=TURBOPANEL_RUN_DIR={{ turbopanel_run_dir }}
 Environment=TURBOPANEL_SOCKET_DIAL={{ (turbopanel_run_dir ~ '/instance.sock') | regex_replace('^/+', '') }}
 Environment=TURBOPANEL_UI_ROOT={{ turbopanel_ui_dist_dir }}

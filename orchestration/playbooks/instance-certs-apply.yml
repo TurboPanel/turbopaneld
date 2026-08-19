@@ -2,7 +2,8 @@
 # Targeted cert regeneration + Caddy reload.
 # Invoked by the daemon public-urls-apply handler after writing TURBOPANEL_PUBLIC_URLS
 # to {{ turbopanel_config_dir }}/instance/runtime.env. Runs instance-certs only (cheap, idempotent) then reloads
-# turbopanel-caddy so the new leaf cert is served immediately.
+# turbopanel-caddy so the new leaf cert is served immediately. Restart (not
+# reload) so Caddy re-reads the leaf PEM from disk after in-place regeneration.
 # CA is preserved across runs; only the leaf is regenerated when SANs change.
 #
 # Caddy MUST NOT auto-provision certs (auto_https off in Caddyfile is mandatory).
@@ -16,14 +17,7 @@
   roles:
     - role: instance-certs
   post_tasks:
-    - name: Reload turbopanel-caddy to serve updated leaf cert
-      block:
-        - name: Reload turbopanel-caddy to serve updated leaf cert
-          ansible.builtin.systemd:
-            name: turbopanel-caddy
-            state: reloaded
-      rescue:
-        - name: Restart turbopanel-caddy when reload is unsupported or failed
-          ansible.builtin.systemd:
-            name: turbopanel-caddy
-            state: restarted
+    - name: Restart turbopanel-caddy to serve updated leaf cert
+      ansible.builtin.systemd:
+        name: turbopanel-caddy
+        state: restarted

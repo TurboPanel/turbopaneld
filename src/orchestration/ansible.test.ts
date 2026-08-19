@@ -835,6 +835,16 @@ test(
       /--config \{\{\s*turbopanel_caddyfile\s*\}\}/,
       "caddy unit uses turbopanel_caddyfile",
     );
+    assertMatch(
+      caddyUnit,
+      /Environment=CADDY_TLS_CERT=\{\{\s*turbopanel_instance_dir\s*\}\}\/certs\/self-signed\.crt/,
+      "caddy unit pins leaf cert to instance checkout (not Caddyfile-relative ./certs)",
+    );
+    assertMatch(
+      caddyUnit,
+      /Environment=CADDY_TLS_KEY=\{\{\s*turbopanel_instance_dir\s*\}\}\/certs\/self-signed\.key/,
+      "caddy unit pins leaf key to instance checkout",
+    );
     if (caddyUnit.includes("TURBOPANEL_DEV_HTTP_CONTROL_PLANE")) {
       throw new Error(
         `${caddyUnitPath}: Caddy unit must not set TURBOPANEL_DEV_HTTP_CONTROL_PLANE (client-only flag)`,
