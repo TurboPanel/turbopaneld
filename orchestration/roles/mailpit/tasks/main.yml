@@ -76,7 +76,7 @@
       - "--name"
       - "{{ mailpit_container_name }}"
       - "--restart"
-      - unless-stopped
+      - "{{ 'unless-stopped' if (turbopanel_optional_mailpit | default(true) | bool) else 'no' }}"
       - "-d"
       - "--network"
       - "{{ turbopanel_docker_network }}"
@@ -92,6 +92,12 @@
   ansible.builtin.command:
     cmd: "{{ _mailpit_docker_run_args | join(' ') }}"
   when: not _mailpit_container_exists | bool
+  register: _mailpit_created
+
+- name: Mark mailpit container present after provisioning
+  ansible.builtin.set_fact:
+    _mailpit_container_exists: true
+  when: _mailpit_created is defined and not (_mailpit_created.skipped | default(false))
 
 - name: Install mailpit wrapper start script
   ansible.builtin.template:
@@ -104,7 +110,28 @@
 - name: Ensure mailpit container is running and ready
   ansible.builtin.command:
     cmd: "{{ turbopanel_config_dir }}/mailpit/wrapper-start.sh"
+  when: turbopanel_optional_mailpit | default(true) | bool
   changed_when: false
+
+- name: Disable mailpit container restart policy when optional off
+  ansible.builtin.command:
+    argv: [docker, update, "--restart=no", "{{ mailpit_container_name }}"]
+  when:
+    - not (turbopanel_optional_mailpit | default(true) | bool)
+    - _mailpit_container_exists | default(false) | bool
+  register: _mailpit_restart_disabled
+  changed_when: _mailpit_restart_disabled.rc == 0
+  failed_when: false
+
+- name: Stop mailpit container when optional off
+  ansible.builtin.command:
+    argv: [docker, stop, "{{ mailpit_container_name }}"]
+  when:
+    - not (turbopanel_optional_mailpit | default(true) | bool)
+    - _mailpit_container_exists | default(false) | bool
+  register: _mailpit_stopped
+  changed_when: _mailpit_stopped.rc == 0
+  failed_when: false
 
 - name: Install Mailpit systemd unit
   ansible.builtin.template:

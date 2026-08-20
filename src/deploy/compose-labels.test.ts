@@ -28,10 +28,14 @@ const payload: EnvironmentDeployPayload = {
   projectId: "project_123",
   organizationId: "org_123",
   projectName: "web_app",
-  composeYaml: `services:
+  composeFiles: [{
+    filename: "compose.yaml",
+    role: "runtime",
+    content: `services:
   app:
     image: nginx:alpine
 `,
+  }],
   hostings: [{
     hostingId: "hosting_123",
     serviceId: "service_123",
@@ -95,10 +99,14 @@ const tcpUdpPayload: EnvironmentDeployPayload = {
   projectId: "project_123",
   organizationId: "org_123",
   projectName: "web_app",
-  composeYaml: `services:
+  composeFiles: [{
+    filename: "compose.yaml",
+    role: "runtime",
+    content: `services:
   db:
     image: postgres:16
 `,
+  }],
   hostings: [{
     hostingId: "hosting_db",
     serviceId: "service_db",
@@ -189,7 +197,11 @@ test("buildHostingLabelsFragment stamps raw-port on tcp/udp and pins HTTP entryp
       projectId: "project_123",
       organizationId: "org_123",
       projectName: "web_app",
-      composeYaml: `services:\n  app:\n    image: nginx:alpine\n`,
+      composeFiles: [{
+        filename: "compose.yaml",
+        role: "runtime",
+        content: `services:\n  app:\n    image: nginx:alpine\n`,
+      }],
       hostings: [
         {
           hostingId: "hosting_http",

@@ -119,7 +119,11 @@ test("mariadb waitReady retries ping via defaults-extra-file after 1045", async 
           "mariadb-admin: connect to server at 'localhost' failed\nerror: 'Access denied for user 'root'@'localhost' (using password: NO)'",
       });
     }
-    return Promise.resolve({ success: true, stdout: "mysqld is alive", stderr: "" });
+    return Promise.resolve({
+      success: true,
+      stdout: "mysqld is alive",
+      stderr: "",
+    });
   };
   await mariadbManagedEngineRuntime.waitReady({
     ...buildContext(exec),
@@ -154,9 +158,9 @@ test("mariadb applyCredentials creates root and app users via socket", async () 
     credentials,
   );
   assertEquals(applied, ["root", "app_user"]);
-  const rootSql = calls.find((c) =>
-    c.input?.includes("IDENTIFIED VIA unix_socket")
-  )?.input ?? "";
+  const rootSql =
+    calls.find((c) => c.input?.includes("IDENTIFIED VIA unix_socket"))?.input ??
+      "";
   assertEquals(rootSql.includes("IDENTIFIED VIA unix_socket"), true);
   assertEquals(
     /ALTER USER `root`@'localhost' IDENTIFIED BY/.test(rootSql),

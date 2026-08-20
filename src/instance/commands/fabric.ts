@@ -319,6 +319,19 @@ function wgConfPath(networkDir: string): string {
   return join(networkDir, "wireguard", `${FABRIC_INTERFACE_NAME}.conf`);
 }
 
+function durableWgConfPaths(networkDir: string): string[] {
+  const paths = [wgConfPath(networkDir)];
+  // Tests never touch host `/etc/wireguard/tp0.conf` (mode 0600, often
+  // unreadable to the test user, and would leak live fabric state).
+  if (!skipRealSyscalls) paths.push(WG_QUICK_CONF_PATH);
+  return paths;
+}
+
+function isMissingWgConfError(err: unknown): boolean {
+  return err instanceof Deno.errors.NotFound ||
+    err instanceof Deno.errors.PermissionDenied;
+}
+
 function applyStampPath(networkDir: string): string {
   return join(networkDir, "apply.stamp");
 }
@@ -930,14 +943,14 @@ export function parsePeerPresharedKeysFromWgConf(
 async function loadPersistedPeerPresharedKeys(
   networkDir: string,
 ): Promise<Map<string, string>> {
-  for (const path of [wgConfPath(networkDir), WG_QUICK_CONF_PATH]) {
+  for (const path of durableWgConfPaths(networkDir)) {
     try {
       const parsed = parsePeerPresharedKeysFromWgConf(
         await Deno.readTextFile(path),
       );
       if (parsed.size > 0) return parsed;
     } catch (err) {
-      if (!(err instanceof Deno.errors.NotFound)) throw err;
+      if (!isMissingWgConfError(err)) throw err;
     }
   }
   return new Map();
@@ -1651,14 +1664,14 @@ function parseDurablePeersFromWgConf(
 async function loadConfPeerRestores(
   networkDir: string,
 ): Promise<Map<string, DurablePeerRestore>> {
-  for (const path of [wgConfPath(networkDir), WG_QUICK_CONF_PATH]) {
+  for (const path of durableWgConfPaths(networkDir)) {
     try {
       const parsed = parseDurablePeersFromWgConf(
         await Deno.readTextFile(path),
       );
       if (parsed.size > 0) return parsed;
     } catch (err) {
-      if (!(err instanceof Deno.errors.NotFound)) throw err;
+      if (!isMissingWgConfError(err)) throw err;
     }
   }
   return new Map();

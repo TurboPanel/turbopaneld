@@ -414,17 +414,10 @@ export type EnvironmentDeployPayload = {
   organizationId: string;
   projectName: string;
   /**
-   * Required pre-merged runtime YAML (legacy / fallback). Prefer
-   * `composeFiles` when present — must stay required so older command rows
-   * and the current write path always have a single-file body.
+   * Compiled runtime snapshot the daemon writes as
+   * `{ filename: 'compose.yaml', role: 'runtime' }`.
    */
-  composeYaml: string;
-  /**
-   * Compose files the daemon writes. New deploys send a single
-   * `{ filename: 'compose.yaml', role: 'runtime' }` entry. Older queued
-   * commands may still carry a project → environment → platform chain.
-   */
-  composeFiles?: EnvironmentDeployComposeFile[];
+  composeFiles: EnvironmentDeployComposeFile[];
   generation?: number;
   desiredHash?: string;
   serverId?: string;
@@ -2530,31 +2523,15 @@ function parseEnvironmentDeployComposeFileEntry(
  */
 function parseEnvironmentDeployComposeFiles(
   value: unknown,
-): EnvironmentDeployComposeFile[] | undefined {
-  if (value === undefined) return undefined;
-  if (!Array.isArray(value) || value.length === 0) {
+): EnvironmentDeployComposeFile[] {
+  if (!Array.isArray(value) || value.length !== 1) {
     throw new TypeError("Invalid environment deploy payload");
   }
-  const files = value.map(parseEnvironmentDeployComposeFileEntry);
-  const seen = new Set<string>();
-  let platformCount = 0;
-  for (let i = 0; i < files.length; i++) {
-    const file = files[i]!;
-    if (seen.has(file.filename)) {
-      throw new TypeError("Invalid environment deploy payload");
-    }
-    seen.add(file.filename);
-    if (file.role === "platform") {
-      platformCount += 1;
-      if (i !== files.length - 1) {
-        throw new TypeError("Invalid environment deploy payload");
-      }
-    }
-  }
-  if (platformCount > 1) {
+  const file = parseEnvironmentDeployComposeFileEntry(value[0]);
+  if (file.role !== "runtime" || file.filename !== "compose.yaml") {
     throw new TypeError("Invalid environment deploy payload");
   }
-  return files;
+  return [file];
 }
 
 const DEPLOY_INGRESS_UUID_RE =
@@ -2664,10 +2641,9 @@ export function parseEnvironmentDeployPayload(
     projectId: parseNonEmptyString(value, "projectId"),
     organizationId: parseNonEmptyString(value, "organizationId"),
     projectName: parseNonEmptyString(value, "projectName"),
-    composeYaml: parseNonEmptyString(value, "composeYaml"),
+    composeFiles: parseEnvironmentDeployComposeFiles(value.composeFiles),
     hostings: hostings.map(parseHosting),
     ...definedProps({
-      composeFiles: parseEnvironmentDeployComposeFiles(value.composeFiles),
       traditionalWebSites: parseOptionalMaterialArray(
         value.traditionalWebSites,
         "traditionalWebSites",

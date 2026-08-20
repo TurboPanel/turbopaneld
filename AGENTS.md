@@ -230,7 +230,7 @@ GitHub repository:
 package name: `turbopaneld` (`deno.json`), aligned with the repo slug and the
 compiled `/opt/turbopanel/bin/turbopaneld` binary.
 
-**Public naming:** **TurboPanel Daemon** → [turbopanel/turbopaneld](https://github.com/turbopanel/turbopaneld); internal term `daemon`. **License:** AGPL-3.0-only ([`LICENSE`](./LICENSE), `deno.json`). **Maturity:** **Private alpha**. README is product-facing; AGENTS.md is maintainer-facing.
+**Public naming:** **TurboPanel Daemon** → [turbopanel/turbopaneld](https://github.com/turbopanel/turbopaneld); internal term `daemon`. **License:** AGPL-3.0-only ([`LICENSE`](./LICENSE), `deno.json`). Trademarks are not granted by the software license ([`TRADEMARKS.md`](./TRADEMARKS.md)). Contributions require the [CLA](https://github.com/turbopanel/.github/blob/trunk/CLA.md). **Maturity:** **Private alpha**. README is product-facing; AGENTS.md is maintainer-facing.
 
 **Host-base prerequisite boundary:** TurboPanel-managed vendors (uv, Python,
 Ansible venv, Deno, Node, Caddy, Redis, cloudflared) install under `vendor` via
@@ -307,6 +307,17 @@ Sonar-way **80% new-code** floor.
 **Test style:** use the mandatory `const test = Deno.test.bind(Deno);` alias and
 `new TypeError()` for shape assertions — both under TypeScript style
 (SonarQube) above; do not restate them here.
+
+**Where to run tests:** host VirtFS checkouts lack a usable Deno tree. Run
+suites **inside the Vagrant guest** from the host `dev` checkout:
+
+```bash
+vagrant ssh -c 'export PATH="/opt/turbopanel/vendor/deno/current:$PATH"; cd ~/turbopaneld && deno task test'
+```
+
+Interactive `vagrant ssh` then `cd ~/turbopaneld` also works. Canonical
+detail: `../dev/AGENTS.md` → Testing. Do not run `deno task test` on the
+host.
 
 **Editor:** this repo has no `tsconfig.json`. Folder `.vscode/settings.json`
 sets `deno.enable` and turns off the built-in TypeScript/JavaScript validators

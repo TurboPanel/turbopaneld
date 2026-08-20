@@ -128,7 +128,10 @@ test("installAuthSocketPluginSql is MySQL INSTALL PLUGIN without IF NOT EXISTS",
   const sql = installAuthSocketPluginSql();
   assertEquals(sql.includes("INSTALL PLUGIN auth_socket"), true);
   assertEquals(sql.includes("IF NOT EXISTS"), false);
-  assertEquals(authSocketPluginPresentSql().includes("INFORMATION_SCHEMA.PLUGINS"), true);
+  assertEquals(
+    authSocketPluginPresentSql().includes("INFORMATION_SCHEMA.PLUGINS"),
+    true,
+  );
 });
 
 test("databases use utf8mb4", () => {

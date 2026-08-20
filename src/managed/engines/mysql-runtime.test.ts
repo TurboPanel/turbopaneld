@@ -152,7 +152,11 @@ test("mysql waitReady retries ping when mysqladmin exits 0 on 1045", async () =>
           "mysqladmin: connect to server at 'localhost' failed\nerror: 'Access denied for user 'root'@'localhost' (using password: NO)'",
       });
     }
-    return Promise.resolve({ success: true, stdout: "mysqld is alive", stderr: "" });
+    return Promise.resolve({
+      success: true,
+      stdout: "mysqld is alive",
+      stderr: "",
+    });
   };
   await mysqlManagedEngineRuntime.waitReady({
     ...buildContext(exec),
@@ -189,9 +193,9 @@ test("mysql applyCredentials creates root and app users via socket mysql", async
   assertEquals(applied, ["root", "app_user"]);
   assertEquals(calls.every((c) => c.argv.includes("--protocol=socket")), true);
   assertEquals(calls.some((c) => c.input?.includes("app_user")), true);
-  const rootSql = calls.find((c) =>
-    c.input?.includes("IDENTIFIED WITH auth_socket")
-  )?.input ?? "";
+  const rootSql =
+    calls.find((c) => c.input?.includes("IDENTIFIED WITH auth_socket"))
+      ?.input ?? "";
   assertEquals(rootSql.includes("IDENTIFIED WITH auth_socket"), true);
   assertEquals(rootSql.includes("INSTALL PLUGIN"), false);
   assertEquals(

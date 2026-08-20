@@ -118,13 +118,12 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
 
 `environment.deploy` publishes a **single compiled** `compose.yaml` (overlay
 already merged) plus `.env` (non-secrets) plus `deployment.json` under
-`<stateDir>/deployments/<projectId>/<environmentId>/`. Lifecycle/stop prefer
-that tree and fall back to the pre-cutover `deployments/<environmentId>/`
-layout until the next deploy republishes. `src/deploy/compose-files.ts` owns
-the path/argv/manifest helpers; `resolveDeployComposeFiles`
-(`deploy-environment.ts`) takes the payload's ordered `composeFiles[]` when
-present (the instance compiler emits a `role: 'runtime'` `compose.yaml`), or
-falls back to compiling from deprecated `composeYaml`.
+`<stateDir>/deployments/<projectId>/<environmentId>/`. Lifecycle/stop resolve
+that tree. `src/deploy/compose-files.ts` owns the path/argv/manifest helpers;
+`resolveDeployComposeFiles` (`deploy-environment.ts`) takes the payload's
+`composeFiles[]` — the instance compiler emits a single
+`{ filename: 'compose.yaml', role: 'runtime', source: 'inline', content }`
+entry. There is no `composeYaml` fallback on `environment.deploy`.
 
 - **Staged write + validated cutover:** each deploy resets
   `<deploymentDir>/.staging/`, writes the compiled YAML there, resolves the
@@ -133,7 +132,7 @@ falls back to compiling from deprecated `composeYaml`.
   runs `docker compose config` against the staged file. Only after validation
   succeeds does `publishStagedRuntimeCompose` copy `compose.yaml` into the live
   deployment dir, write `deployment.json`, and prune leftover layered
-  `*.yml`/`*.yaml` plus the v1 `compose-files.json` manifest. A failed
+  `*.yml`/`*.yaml`. A failed
   redeploy therefore leaves the previous live files intact.
 - **Deployment-dir layout:**
   `<stateDir>/deployments/<projectId>/<environmentId>/compose.yaml` +
@@ -170,11 +169,8 @@ falls back to compiling from deprecated `composeYaml`.
   Every `docker compose` invocation (`config` validation, `build`, `up`,
   lifecycle start/stop/restart, stop's `down`) uses this helper.
 - **Lifecycle / stop:** `lifecycle-environment.ts` and `stop-environment.ts`
-  call `resolveEnvironmentDeploymentDir` (compiled tree, else legacy
-  `deployments/<environmentId>/`) then `resolveDeployedComposePaths`, which
-  prefers `compose.yaml`, else a present v1 `compose-files.json` manifest,
-  else legacy `docker-compose.yml`. A present-but-invalid v1 manifest throws
-  `ComposeManifestError` instead of silently using only `docker-compose.yml`.
+  call `resolveEnvironmentDeploymentDir` then `resolveDeployedComposePaths`,
+  which reads the compiled `compose.yaml`.
   Lifecycle `start`/`restart` call `ensureDeploymentSecretFiles` when
   `deployment.json` lists `secrets[]`. Stop also `rm -rf`s the matching
   `/run/.../secrets` tree.
@@ -429,7 +425,7 @@ Docker Compose. The daemon:
 6. Rewrites hosting Caddy so hostnames for those services
    `reverse_proxy 127.0.0.1:<listenPort>` instead of Traefik.
 7. Skips Docker/Traefik entirely when the payload has **no** container services
-   (`composeYaml` is `services: {}`) — still ensures hosting Caddy via
+   (`compose.yaml` is `services: {}`) — still ensures hosting Caddy via
    `ensureHostingCaddyRuntime`.
 
 All three engines (plus php-fpm for Apache PHP) are vendored under

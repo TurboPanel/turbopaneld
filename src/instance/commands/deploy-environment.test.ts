@@ -3,14 +3,10 @@ import { join } from "@std/path";
 import type { DockerCliResult } from "../../deploy/docker-cli.ts";
 import {
   COMPOSE_ENV_FILENAME,
-  COMPOSE_MANIFEST_FILENAME,
   COMPOSE_STAGE_DIRNAME,
-  DAEMON_COMPOSE_FILENAME,
   DEPLOYMENT_MANIFEST_FILENAME,
   resolveDeployedComposePaths,
   RUNTIME_COMPOSE_FILENAME,
-  writeComposeFileManifest,
-  writeComposeFileSecure,
 } from "../../deploy/compose-files.ts";
 import { handleEnvironmentLifecycle } from "./lifecycle-environment.ts";
 import { handleEnvironmentStop } from "./stop-environment.ts";
@@ -84,7 +80,7 @@ test("handleEnvironmentDeploy rejects unsupported environmentId characters", asy
           projectId: "proj-1",
           organizationId: "org-1",
           projectName: "demo",
-          composeYaml: "services: {}\n",
+          composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services: {}\n" }],
           hostings: [],
         },
         new Date().toISOString(),
@@ -103,7 +99,7 @@ test("handleEnvironmentDeploy rejects unsupported projectId characters", async (
           projectId: "bad/id",
           organizationId: "org-1",
           projectName: "demo",
-          composeYaml: "services: {}\n",
+          composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services: {}\n" }],
           hostings: [],
         },
         new Date().toISOString(),
@@ -122,7 +118,7 @@ test("handleEnvironmentDeploy rejects invalid Docker Compose projectName", async
           projectId: "proj-1",
           organizationId: "org-1",
           projectName: "BadName",
-          composeYaml: "services: {}\n",
+          composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services: {}\n" }],
           hostings: [],
         },
         new Date().toISOString(),
@@ -149,7 +145,7 @@ test("shapeEnvironmentDeployResult matches container-free success contract", () 
   assertEquals("services" in result, false);
 });
 
-test("resolveDeployComposeFiles prefers composeFiles over composeYaml fallback", () => {
+test("resolveDeployComposeFiles returns payload composeFiles", () => {
   const files = [{
     filename: "compose.yaml",
     role: "runtime" as const,
@@ -162,23 +158,11 @@ test("resolveDeployComposeFiles prefers composeFiles over composeYaml fallback",
       projectId: "proj-1",
       organizationId: "org-1",
       projectName: "tp-demo",
-      composeYaml: "services: {}\n",
       composeFiles: files,
       hostings: [],
     }),
     files,
   );
-  const fallback = resolveDeployComposeFiles({
-    environmentId: "env-1",
-    projectId: "proj-1",
-    organizationId: "org-1",
-    projectName: "tp-demo",
-    composeYaml: "services:\n  api:\n    image: alpine\n",
-    hostings: [],
-  });
-  assertEquals(fallback.length, 1);
-  assertEquals(fallback[0]?.role, "runtime");
-  assertEquals(fallback[0]?.content.includes("api"), true);
 });
 
 test("buildDeploySummary and buildDeployServiceNames include traditional-web sites", () => {
@@ -231,7 +215,7 @@ test("handleEnvironmentDeploy rejects secret plan when decrypt is unavailable", 
             projectId: "proj-1",
             organizationId: "org-1",
             projectName: "tp-demo-secret",
-            composeYaml: "services:\n  web:\n    image: nginx\n",
+            composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services:\n  web:\n    image: nginx\n" }],
             hostings: [],
             secretPlan: [{
               key: "TOKEN",
@@ -330,7 +314,7 @@ test({
           projectId,
           organizationId: "org-1",
           projectName,
-          composeYaml: runtimeYaml,
+          composeFiles: [{ filename: RUNTIME_COMPOSE_FILENAME, role: "runtime", source: "inline", content: runtimeYaml }],
           hostings: [],
         },
         new Date().toISOString(),
@@ -412,13 +396,6 @@ test({
       "services: {}\n",
       { mode: 0o640 },
     );
-    const legacyDir = join(stateDir, "deployments", environmentId);
-    await Deno.mkdir(legacyDir, { recursive: true, mode: 0o750 });
-    await Deno.writeTextFile(
-      join(legacyDir, "docker-compose.yml"),
-      "services: {}\n",
-      { mode: 0o640 },
-    );
 
     const runtimeYaml = "services:\n  web:\n    image: nginx:alpine\n";
     const calls: string[][] = [];
@@ -465,8 +442,7 @@ test({
           projectId,
           organizationId: "org-1",
           projectName,
-          composeYaml: runtimeYaml,
-          composeFiles: [{
+                    composeFiles: [{
             filename: RUNTIME_COMPOSE_FILENAME,
             role: "runtime",
             source: "inline",
@@ -491,23 +467,11 @@ test({
       assertEquals(published.includes("image: nginx:alpine"), true);
       assertEquals(published.includes("turbopanel-managed"), true);
       await assertRejects(
-        () => Deno.stat(join(deploymentDir, DAEMON_COMPOSE_FILENAME)),
-        Deno.errors.NotFound,
-      );
-      await assertRejects(
         () => Deno.stat(join(deploymentDir, "docker-compose.old.yml")),
         Deno.errors.NotFound,
       );
       await assertRejects(
-        () => Deno.stat(join(deploymentDir, COMPOSE_MANIFEST_FILENAME)),
-        Deno.errors.NotFound,
-      );
-      await assertRejects(
         () => Deno.stat(join(deploymentDir, COMPOSE_STAGE_DIRNAME)),
-        Deno.errors.NotFound,
-      );
-      await assertRejects(
-        () => Deno.stat(legacyDir),
         Deno.errors.NotFound,
       );
 
@@ -581,8 +545,7 @@ test({
           projectId,
           organizationId: "org-1",
           projectName,
-          composeYaml: runtimeYaml,
-          composeFiles: [{
+                    composeFiles: [{
             filename: RUNTIME_COMPOSE_FILENAME,
             role: "runtime",
             source: "inline",
@@ -617,7 +580,7 @@ test({
 
 test({
   name:
-    "handleEnvironmentDeploy composeYaml-only payload writes compose.yaml + deployment.json",
+    "handleEnvironmentDeploy composeFiles payload writes compose.yaml + deployment.json",
   permissions: { env: true, read: true, write: true, run: true },
   fn: async () => {
     const root = await Deno.makeTempDir({ prefix: "tp-deploy-legacy-" });
@@ -666,7 +629,12 @@ test({
           projectId,
           organizationId: "org-1",
           projectName,
-          composeYaml: "services:\n  web:\n    image: nginx:alpine\n",
+          composeFiles: [{
+            filename: RUNTIME_COMPOSE_FILENAME,
+            role: "runtime",
+            source: "inline",
+            content: "services:\n  web:\n    image: nginx:alpine\n",
+          }],
           hostings: [],
         },
         new Date().toISOString(),
@@ -709,7 +677,7 @@ test({
 
 test({
   name:
-    "failed redeploy with renamed layers leaves prior manifest chain resolvable for lifecycle/stop",
+    "failed redeploy leaves prior compose.yaml resolvable for lifecycle/stop",
   permissions: { env: true, read: true, write: true, run: true },
   fn: async () => {
     const root = await Deno.makeTempDir({ prefix: "tp-deploy-txn-" });
@@ -723,30 +691,24 @@ test({
     Deno.env.set("TURBOPANEL_CONFIG_DIR", configDir);
 
     const environmentId = "envtxfail1";
+    const projectId = "proj-1";
     const projectName = "tp-demo-envtxfail";
-    const deploymentDir = join(stateDir, "deployments", environmentId);
+    const deploymentDir = join(
+      stateDir,
+      "deployments",
+      projectId,
+      environmentId,
+    );
     await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
 
-    const projectLayer = "docker-compose.project.yml";
-    const envLayer = "docker-compose.env.yml";
-    const priorFiles = [projectLayer, envLayer, DAEMON_COMPOSE_FILENAME];
     const priorContent =
       "services:\n  web:\n    image: nginx:alpine\n    environment:\n      E: prior\n";
-    for (const name of priorFiles) {
-      await writeComposeFileSecure(
-        join(deploymentDir, name),
-        name === DAEMON_COMPOSE_FILENAME
-          ? "networks:\n  turbopanel-managed:\n    external: true\n"
-          : priorContent,
-      );
-    }
-    await writeComposeFileManifest(deploymentDir, priorFiles);
-    const priorChain = priorFiles.map((name) => join(deploymentDir, name));
+    const priorPath = join(deploymentDir, RUNTIME_COMPOSE_FILENAME);
+    await Deno.writeTextFile(priorPath, priorContent, { mode: 0o640 });
 
     const failingRunDocker = (
       _args: string[],
     ): Promise<DockerCliResult> => {
-      // Fail resolveComposeModel (`docker compose config --format json`).
       return Promise.resolve({
         success: false,
         stdout: "",
@@ -761,26 +723,16 @@ test({
           handleEnvironmentDeploy(
             {
               environmentId,
-              projectId: "proj-1",
+              projectId,
               organizationId: "org-1",
               projectName,
-              composeYaml: "services:\n  web:\n    image: nginx:alpine\n",
-              composeFiles: [
-                {
-                  filename: "docker-compose.project.yml",
-                  role: "project",
-                  source: "inline",
-                  content: "services:\n  web:\n    image: nginx:alpine\n",
-                },
-                {
-                  // Renamed environment layer vs prior manifest.
-                  filename: "docker-compose.staging.yml",
-                  role: "environment",
-                  source: "inline",
-                  content:
-                    "services:\n  web:\n    environment:\n      E: '2'\n",
-                },
-              ],
+              composeFiles: [{
+                filename: RUNTIME_COMPOSE_FILENAME,
+                role: "runtime",
+                source: "inline",
+                content:
+                  "services:\n  web:\n    image: nginx:alpine\n    environment:\n      E: '2'\n",
+              }],
               hostings: [],
               managedNetworkServices: ["web"],
             },
@@ -791,22 +743,14 @@ test({
         "forced resolveComposeModel failure",
       );
 
-      // Prior live files must still exist (not pruned by the failed redeploy).
-      for (const abs of priorChain) {
-        await Deno.stat(abs);
-      }
-      // Renamed layer must not appear live until publish.
-      await assertRejects(
-        () => Deno.stat(join(deploymentDir, "docker-compose.staging.yml")),
-        Deno.errors.NotFound,
-      );
+      assertEquals(await Deno.readTextFile(priorPath), priorContent);
       await assertRejects(
         () => Deno.stat(join(deploymentDir, COMPOSE_STAGE_DIRNAME)),
         Deno.errors.NotFound,
       );
 
       const resolved = await resolveDeployedComposePaths(deploymentDir);
-      assertEquals(resolved, priorChain);
+      assertEquals(resolved, [priorPath]);
 
       const lifeCalls: string[][] = [];
       const lifeRun = (args: string[]): Promise<DockerCliResult> => {
@@ -821,7 +765,7 @@ test({
       await handleEnvironmentLifecycle(
         {
           environmentId,
-          projectId: "proj-1",
+          projectId,
           projectName,
           action: "restart",
         },
@@ -830,7 +774,7 @@ test({
       );
       const restartCall = lifeCalls.find((argv) => argv.includes("restart"));
       assertEquals(restartCall !== undefined, true);
-      assertEquals(argvHasOrderedPaths(restartCall!, priorChain), true);
+      assertEquals(argvHasOrderedPaths(restartCall!, [priorPath]), true);
 
       const stopCalls: string[][] = [];
       const stopRun = (args: string[]): Promise<DockerCliResult> => {
@@ -845,7 +789,7 @@ test({
       await handleEnvironmentStop(
         {
           environmentId,
-          projectId: "proj-1",
+          projectId,
           projectName,
         },
         new Date().toISOString(),
@@ -853,7 +797,7 @@ test({
       );
       const downCall = stopCalls.find((argv) => argv.includes("down"));
       assertEquals(downCall !== undefined, true);
-      assertEquals(argvHasOrderedPaths(downCall!, priorChain), true);
+      assertEquals(argvHasOrderedPaths(downCall!, [priorPath]), true);
     } finally {
       if (previous.TURBOPANEL_STATE_DIR === undefined) {
         Deno.env.delete("TURBOPANEL_STATE_DIR");
@@ -872,7 +816,7 @@ test({
 
 test({
   name:
-    "queued multi-file composeFiles still publish a single compiled compose.yaml from composeYaml",
+    "handleEnvironmentDeploy publishes runtime compose.yaml from composeFiles snapshot",
   permissions: { env: true, read: true, write: true, run: true },
   fn: async () => {
     const root = await Deno.makeTempDir({ prefix: "tp-deploy-tags-" });
@@ -941,22 +885,12 @@ test({
           projectId,
           organizationId: "org-1",
           projectName,
-          composeYaml: compiled,
-          composeFiles: [
-            {
-              filename: "docker-compose.project.yml",
-              role: "project",
-              source: "inline",
-              content:
-                "services:\n  web:\n    image: nginx:alpine\n    environment:\n      FOO: '1'\n    ports:\n      - '80:80'\n",
-            },
-            {
-              filename: "docker-compose.env.yml",
-              role: "environment",
-              source: "inline",
-              content: 'services:\n  web:\n    ports:\n      - "9000:80"\n',
-            },
-          ],
+          composeFiles: [{
+            filename: RUNTIME_COMPOSE_FILENAME,
+            role: "runtime",
+            source: "inline",
+            content: compiled,
+          }],
           hostings: [],
         },
         new Date().toISOString(),
@@ -1062,8 +996,7 @@ services:
           projectId,
           organizationId: "org-1",
           projectName,
-          composeYaml: runtimeYaml,
-          composeFiles: [{
+                    composeFiles: [{
             filename: RUNTIME_COMPOSE_FILENAME,
             role: "runtime",
             source: "inline",
@@ -1218,8 +1151,7 @@ test({
       projectId,
       organizationId: "org-1",
       projectName,
-      composeYaml: runtimeYaml,
-      composeFiles: [{
+            composeFiles: [{
         filename: RUNTIME_COMPOSE_FILENAME,
         role: "runtime" as const,
         source: "inline" as const,
@@ -1402,7 +1334,7 @@ test({
           projectId,
           organizationId: "org-1",
           projectName,
-          composeYaml: runtimeYaml,
+          composeFiles: [{ filename: RUNTIME_COMPOSE_FILENAME, role: "runtime", source: "inline", content: runtimeYaml }],
           hostings: [{
             hostingId: "h1",
             serviceId: "s1",
@@ -1504,7 +1436,7 @@ test({
           projectId,
           organizationId: "org-1",
           projectName,
-          composeYaml: runtimeYaml,
+          composeFiles: [{ filename: RUNTIME_COMPOSE_FILENAME, role: "runtime", source: "inline", content: runtimeYaml }],
           hostings: [],
         },
         new Date().toISOString(),

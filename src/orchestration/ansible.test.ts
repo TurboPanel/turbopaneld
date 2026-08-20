@@ -923,24 +923,19 @@ test(
         ["instance-workers.dev-vars.j2", workersDevVars],
       ] as const
     ) {
-      // Split the assignment marker so scan-secrets does not treat this test as a
-      // fixture env line (allowlist is for the j2 files only).
-      const singularAssign = ["TURBOPANEL_SECRET", "="].join("");
       const pluralAssign = ["TURBOPANEL_SECRETS", "="].join("");
       assertMatch(
         body,
         new RegExp(
-          `^${singularAssign}\\{\\{\\s*turbopanel_instance_secret\\s*\\}\\}\\s*$`,
+          `^${pluralAssign}\\{\\{\\s*turbopanel_instance_secrets\\s*\\}\\}\\s*$`,
           "m",
         ),
-        `${label} still emits ${singularAssign.slice(0, -1)}`,
-      );
-      assertMatch(
-        body,
-        new RegExp(
-          `turbopanel_instance_secrets[\\s\\S]*?${pluralAssign}\\{\\{\\s*turbopanel_instance_secrets\\s*\\}\\}`,
-        ),
         `${label} emits ${pluralAssign.slice(0, -1)} when keyring is set`,
+      );
+      assertEquals(
+        /(?:^|\n)TURBOPANEL_SECRET=/.test(body),
+        false,
+        `${label} must not emit legacy TURBOPANEL_SECRET`,
       );
     }
   },
@@ -1159,5 +1154,9 @@ test("instance-certs apply never passes a platform CA rotate flag", async () => 
     "durable platform CA dir",
   );
   assertMatch(tasks, /TURBOPANEL_TLS_CA:/, "pass TURBOPANEL_TLS_CA");
-  assertMatch(tasks, /TURBOPANEL_TLS_CA_BUNDLE:/, "pass TURBOPANEL_TLS_CA_BUNDLE");
+  assertMatch(
+    tasks,
+    /TURBOPANEL_TLS_CA_BUNDLE:/,
+    "pass TURBOPANEL_TLS_CA_BUNDLE",
+  );
 });

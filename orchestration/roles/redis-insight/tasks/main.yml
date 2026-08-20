@@ -82,7 +82,7 @@
       - "--name"
       - "{{ redis_insight_bridge_container_name }}"
       - "--restart"
-      - unless-stopped
+      - "{{ 'unless-stopped' if (turbopanel_optional_redis_insight | default(false) | bool) else 'no' }}"
       - "-d"
       - "--network"
       - "{{ turbopanel_docker_network }}"
@@ -100,6 +100,12 @@
   ansible.builtin.command:
     cmd: "{{ _redis_insight_bridge_docker_run_args | join(' ') }}"
   when: not _redis_insight_bridge_container_exists | bool
+  register: _redis_insight_bridge_created
+
+- name: Mark redis-insight bridge container present after provisioning
+  ansible.builtin.set_fact:
+    _redis_insight_bridge_container_exists: true
+  when: _redis_insight_bridge_created is defined and not (_redis_insight_bridge_created.skipped | default(false))
 
 - name: Inspect redis-insight container
   ansible.builtin.command:
@@ -159,7 +165,7 @@
       - "--name"
       - "{{ redis_insight_container_name }}"
       - "--restart"
-      - unless-stopped
+      - "{{ 'unless-stopped' if (turbopanel_optional_redis_insight | default(false) | bool) else 'no' }}"
       - "-d"
       - "--network"
       - "{{ turbopanel_docker_network }}"
@@ -185,6 +191,12 @@
   ansible.builtin.command:
     cmd: "{{ _redis_insight_docker_run_args | join(' ') }}"
   when: not _redis_insight_container_exists | bool
+  register: _redis_insight_created
+
+- name: Mark redis-insight container present after provisioning
+  ansible.builtin.set_fact:
+    _redis_insight_container_exists: true
+  when: _redis_insight_created is defined and not (_redis_insight_created.skipped | default(false))
 
 - name: Install redis-insight wrapper start script
   ansible.builtin.template:
@@ -197,7 +209,48 @@
 - name: Ensure redis-insight container is running and ready
   ansible.builtin.command:
     cmd: "{{ turbopanel_config_dir }}/redis-insight/wrapper-start.sh"
+  when: turbopanel_optional_redis_insight | default(false) | bool
   changed_when: false
+
+- name: Disable redis-insight bridge container restart policy when optional off
+  ansible.builtin.command:
+    argv: [docker, update, "--restart=no", "{{ redis_insight_bridge_container_name }}"]
+  when:
+    - not (turbopanel_optional_redis_insight | default(false) | bool)
+    - _redis_insight_bridge_container_exists | default(false) | bool
+  register: _redis_insight_bridge_restart_disabled
+  changed_when: _redis_insight_bridge_restart_disabled.rc == 0
+  failed_when: false
+
+- name: Stop redis-insight bridge container when optional off
+  ansible.builtin.command:
+    argv: [docker, stop, "{{ redis_insight_bridge_container_name }}"]
+  when:
+    - not (turbopanel_optional_redis_insight | default(false) | bool)
+    - _redis_insight_bridge_container_exists | default(false) | bool
+  register: _redis_insight_bridge_stopped
+  changed_when: _redis_insight_bridge_stopped.rc == 0
+  failed_when: false
+
+- name: Disable redis-insight container restart policy when optional off
+  ansible.builtin.command:
+    argv: [docker, update, "--restart=no", "{{ redis_insight_container_name }}"]
+  when:
+    - not (turbopanel_optional_redis_insight | default(false) | bool)
+    - _redis_insight_container_exists | default(false) | bool
+  register: _redis_insight_restart_disabled
+  changed_when: _redis_insight_restart_disabled.rc == 0
+  failed_when: false
+
+- name: Stop redis-insight container when optional off
+  ansible.builtin.command:
+    argv: [docker, stop, "{{ redis_insight_container_name }}"]
+  when:
+    - not (turbopanel_optional_redis_insight | default(false) | bool)
+    - _redis_insight_container_exists | default(false) | bool
+  register: _redis_insight_stopped
+  changed_when: _redis_insight_stopped.rc == 0
+  failed_when: false
 
 - name: Install Redis Insight systemd unit
   ansible.builtin.template:

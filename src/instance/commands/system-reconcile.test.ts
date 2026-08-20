@@ -8,7 +8,11 @@ import {
   writeSystemComponentDescriptor,
 } from "../../deploy/system-component.ts";
 import { ensureProxySqlIngress } from "../../managed/proxysql.ts";
-import { proxysqlComposePath, proxysqlConfigDir } from "../../managed/paths.ts";
+import {
+  proxysqlComposePath,
+  proxysqlConfigDir,
+  proxysqlMonitorCnfPath,
+} from "../../managed/paths.ts";
 import { resolveLayout } from "../../paths/layout.ts";
 import {
   type TempLayoutFixture,
@@ -710,6 +714,10 @@ async function reconcileWithTwoSegments(bindAddress?: string): Promise<void> {
   await Deno.writeTextFile(
     `${proxysqlConfigDir(layout)}/admin.cnf`,
     "[client]\nuser=admin\npassword=admin-secret\n",
+  );
+  await Deno.writeTextFile(
+    proxysqlMonitorCnfPath(layout),
+    "[client]\nuser=tp_monitor\npassword=monitor-secret\n",
   );
 
   const payload: ManagedIngressReconcilePayload = {

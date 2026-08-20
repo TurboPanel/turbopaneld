@@ -1,10 +1,6 @@
 # Managed by instance-launch (Deno runtime). Lives under platform config, not the git checkout.
 # Shared with Workers so session cookies and daemon JWTs survive runtime toggles.
-TURBOPANEL_SECRET={{ turbopanel_instance_secret }}
-{# Singular is the decrypt-only legacy fallback; first keyring entry is current/signing. #}
-{% if turbopanel_instance_secrets | default('') | trim | length > 0 %}
 TURBOPANEL_SECRETS={{ turbopanel_instance_secrets }}
-{% endif %}
 {% if turbopanel_clickhouse_password is defined %}
 TURBOPANEL_CLICKHOUSE_PASSWORD={{ turbopanel_clickhouse_password }}
 {% endif %}

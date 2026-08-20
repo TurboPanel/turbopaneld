@@ -555,11 +555,12 @@ test({
     Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
 
     const environmentId = "envrouter2";
+    const projectId = "proj-1";
     const projectName = "tp-demo-envrouter2";
-    const deploymentDir = join(stateDir, "deployments", environmentId);
+    const deploymentDir = join(stateDir, "deployments", projectId, environmentId);
     await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
     await Deno.writeTextFile(
-      join(deploymentDir, "docker-compose.yml"),
+      join(deploymentDir, "compose.yaml"),
       "services: {}\n",
       { mode: 0o640 },
     );
@@ -737,7 +738,7 @@ test({
         projectId: "proj-1",
         organizationId: "org-1",
         projectName: "tp-demo-router",
-        composeYaml: "services: {}\n",
+        composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services: {}\n" }],
         hostings: [],
       },
       { projectName: "tp-demo-router", summary: "stub deploy" },

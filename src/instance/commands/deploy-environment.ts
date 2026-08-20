@@ -7,7 +7,6 @@ import {
   type DeploymentManifestSecret,
   type DeploymentManifestV2,
   environmentDeploymentDir,
-  legacyDeploymentDir,
   pruneStaleComposeLayerFiles,
   publishStagedRuntimeCompose,
   removeComposeEnvFile,
@@ -383,25 +382,15 @@ async function resolveDeployMountPaths(
 }
 
 /**
- * Payload compose files when present; otherwise a single compiled
- * `compose.yaml` from `composeYaml`.
+ * Compiled runtime `compose.yaml` from the required `composeFiles` snapshot.
  */
 export function resolveDeployComposeFiles(
   payload: EnvironmentDeployPayload,
 ): EnvironmentDeployComposeFile[] {
-  if (payload.composeFiles && payload.composeFiles.length > 0) {
-    return payload.composeFiles;
-  }
-  return [{
-    filename: RUNTIME_COMPOSE_FILENAME,
-    role: "runtime",
-    source: "inline",
-    content: payload.composeYaml,
-  }];
+  return payload.composeFiles;
 }
 
 function resolveRuntimeComposeYaml(
-  payload: EnvironmentDeployPayload,
   files: readonly EnvironmentDeployComposeFile[],
 ): string {
   const runtime = files.find((file) =>
@@ -409,7 +398,7 @@ function resolveRuntimeComposeYaml(
   );
   if (runtime) return runtime.content;
   if (files.length === 1) return files[0]!.content;
-  return payload.composeYaml;
+  throw new Error("composeFiles must include role runtime compose.yaml");
 }
 
 async function sha256HexUtf8(content: string): Promise<string> {
@@ -606,7 +595,7 @@ async function deployContainerServices(
   try {
     const stagedPath = join(stageDir, RUNTIME_COMPOSE_FILENAME);
     let yaml = applySecretFilePaths(
-      resolveRuntimeComposeYaml(parsedPayload, files),
+      resolveRuntimeComposeYaml(files),
       layout,
       parsedPayload,
     );
@@ -741,7 +730,7 @@ async function writeDeployComposeMarker(
   files: EnvironmentDeployComposeFile[],
   deploymentDir: string,
 ): Promise<string[]> {
-  const yaml = resolveRuntimeComposeYaml(parsedPayload, files);
+  const yaml = resolveRuntimeComposeYaml(files);
   await writeComposeFileSecure(
     join(deploymentDir, RUNTIME_COMPOSE_FILENAME),
     yaml,
@@ -910,24 +899,6 @@ async function collectEnvironmentDeployContainers(input: {
   return containers;
 }
 
-async function removeLegacyDeploymentDir(
-  layout: LayoutPaths,
-  environmentId: string,
-  deploymentDir: string,
-): Promise<void> {
-  const legacyDir = legacyDeploymentDir(layout, environmentId);
-  if (legacyDir === deploymentDir) return;
-  try {
-    await Deno.remove(legacyDir, { recursive: true });
-  } catch (err) {
-    if (err instanceof Deno.errors.NotFound) return;
-    logInfo(
-      "commands",
-      `environment.deploy leftover pre-cutover dir env=${environmentId}`,
-    );
-  }
-}
-
 export async function handleEnvironmentDeploy(
   payload: EnvironmentDeployPayload,
   daemonReceivedAt: string,
@@ -1025,12 +996,6 @@ export async function handleEnvironmentDeploy(
   logInfo(
     "commands",
     `environment.deploy completed project=${parsedPayload.projectName} received=${daemonReceivedAt}`,
-  );
-
-  await removeLegacyDeploymentDir(
-    layout,
-    parsedPayload.environmentId,
-    deploymentDir,
   );
 
   return shapeEnvironmentDeployResult({

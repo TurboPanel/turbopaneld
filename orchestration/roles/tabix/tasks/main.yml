@@ -209,7 +209,7 @@
       - "--name"
       - "{{ tabix_container_name }}"
       - "--restart"
-      - unless-stopped
+      - "{{ 'unless-stopped' if (turbopanel_optional_tabix | default(false) | bool) else 'no' }}"
       - "-d"
       - "--network"
       - "{{ turbopanel_docker_network }}"
@@ -225,6 +225,12 @@
   ansible.builtin.command:
     cmd: "{{ _tabix_docker_run_args | join(' ') }}"
   when: not _tabix_container_exists | bool
+  register: _tabix_created
+
+- name: Mark tabix container present after provisioning
+  ansible.builtin.set_fact:
+    _tabix_container_exists: true
+  when: _tabix_created is defined and not (_tabix_created.skipped | default(false))
 
 - name: Install tabix wrapper start script
   ansible.builtin.template:
@@ -237,7 +243,28 @@
 - name: Ensure tabix container is running and ready
   ansible.builtin.command:
     cmd: "{{ turbopanel_config_dir }}/tabix/wrapper-start.sh"
+  when: turbopanel_optional_tabix | default(false) | bool
   changed_when: false
+
+- name: Disable tabix container restart policy when optional off
+  ansible.builtin.command:
+    argv: [docker, update, "--restart=no", "{{ tabix_container_name }}"]
+  when:
+    - not (turbopanel_optional_tabix | default(false) | bool)
+    - _tabix_container_exists | default(false) | bool
+  register: _tabix_restart_disabled
+  changed_when: _tabix_restart_disabled.rc == 0
+  failed_when: false
+
+- name: Stop tabix container when optional off
+  ansible.builtin.command:
+    argv: [docker, stop, "{{ tabix_container_name }}"]
+  when:
+    - not (turbopanel_optional_tabix | default(false) | bool)
+    - _tabix_container_exists | default(false) | bool
+  register: _tabix_stopped
+  changed_when: _tabix_stopped.rc == 0
+  failed_when: false
 
 - name: Install Tabix systemd unit
   ansible.builtin.template:

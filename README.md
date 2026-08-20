@@ -113,10 +113,12 @@ dev/console
 
 That boots the Vagrant guest with sibling checkouts mounted, runs the daemon from source via Deno, and converges the dev overlay. Details: [Local development](https://turbopanel.io/docs/getting-started/development?utm_source=github-daemon-readme).
 
-Maintainer conventions and path model: [AGENTS.md](./AGENTS.md).
+Maintainer conventions and path model: [AGENTS.md](./AGENTS.md). Pull requests are accepted under the [Contributor License Agreement](https://github.com/turbopanel/.github/blob/trunk/CLA.md).
 
 ## License
 
 TurboPanel Daemon is licensed under the [GNU Affero General Public License v3.0 only (AGPL-3.0-only)](./LICENSE).
 
-Copyright (C) 2025 TurboPanel contributors
+The TurboPanel name and logos are trademarks. See [TRADEMARKS.md](./TRADEMARKS.md).
+
+Copyright (C) 2025-2026 TurboPanel contributors

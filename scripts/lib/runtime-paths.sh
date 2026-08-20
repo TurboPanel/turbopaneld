@@ -12,7 +12,7 @@ export TURBOPANEL_HOME TURBOPANEL_RUNTIMES_DIR RUNTIMES_DIR
 # the shared paths lib so sudo/root ansible wrappers inherit it even when the
 # caller profile is stripped (sudo env_reset).
 _TP_OPENSSL_ARMCAP=$(printenv OPENSSL_armcap 2>/dev/null || true)
-[ -n "$_TP_OPENSSL_ARMCAP" ] || _TP_OPENSSL_ARMCAP=0
+_TP_OPENSSL_ARMCAP=${_TP_OPENSSL_ARMCAP:-0}
 set -- "$(printf 'OPENSSL_armcap=%s' "$_TP_OPENSSL_ARMCAP")"
 export "$@"
 unset _TP_OPENSSL_ARMCAP

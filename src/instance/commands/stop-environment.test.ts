@@ -1,11 +1,7 @@
 import { assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import type { DockerCliResult } from "../../deploy/docker-cli.ts";
-import {
-  COMPOSE_MANIFEST_FILENAME,
-  DAEMON_COMPOSE_FILENAME,
-  LEGACY_COMPOSE_FILENAME,
-} from "../../deploy/compose-files.ts";
+import { RUNTIME_COMPOSE_FILENAME } from "../../deploy/compose-files.ts";
 import {
   cleanupStaleTcpUdpServiceIngress,
   listPersistedTcpUdpServiceIds,
@@ -159,10 +155,10 @@ test({
 
 test({
   name:
-    "handleEnvironmentStop uses manifest chain for down --remove-orphans --volumes and deletes deployment dir",
+    "handleEnvironmentStop downs compose.yaml with --remove-orphans --volumes and deletes deployment dir",
   permissions: { env: true, read: true, write: true, run: true },
   fn: async () => {
-    const root = await Deno.makeTempDir({ prefix: "tp-stop-manifest-" });
+    const root = await Deno.makeTempDir({ prefix: "tp-stop-runtime-" });
     const previous = {
       TURBOPANEL_STATE_DIR: Deno.env.get("TURBOPANEL_STATE_DIR"),
       TURBOPANEL_CONFIG_DIR: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
@@ -173,19 +169,10 @@ test({
 
     const environmentId = "envstop01";
     const projectName = "tp-demo-envstop1";
-    const deploymentDir = join(stateDir, "deployments", environmentId);
+    const deploymentDir = join(stateDir, "deployments", "proj-1", environmentId);
     await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
-    const projectPath = join(deploymentDir, "docker-compose.project.yml");
-    const daemonPath = join(deploymentDir, DAEMON_COMPOSE_FILENAME);
-    await Deno.writeTextFile(projectPath, "services:\n  web: {}\n");
-    await Deno.writeTextFile(daemonPath, "services:\n  web: {}\n");
-    await Deno.writeTextFile(
-      join(deploymentDir, COMPOSE_MANIFEST_FILENAME),
-      JSON.stringify({
-        version: 1,
-        files: ["docker-compose.project.yml", DAEMON_COMPOSE_FILENAME],
-      }),
-    );
+    const composePath = join(deploymentDir, RUNTIME_COMPOSE_FILENAME);
+    await Deno.writeTextFile(composePath, "services:\n  web: {}\n");
 
     const calls: string[][] = [];
     try {
@@ -214,158 +201,8 @@ test({
       assertEquals(downCall !== undefined, true);
       assertEquals(downCall!.includes("--remove-orphans"), true);
       assertEquals(downCall!.includes("--volumes"), true);
-      assertEquals(pathsInOrder(downCall!, [projectPath, daemonPath]), true);
+      assertEquals(pathsInOrder(downCall!, [composePath]), true);
       await assertRejects(() => Deno.stat(deploymentDir), Deno.errors.NotFound);
-    } finally {
-      if (previous.TURBOPANEL_STATE_DIR === undefined) {
-        Deno.env.delete("TURBOPANEL_STATE_DIR");
-      } else {
-        Deno.env.set("TURBOPANEL_STATE_DIR", previous.TURBOPANEL_STATE_DIR);
-      }
-      if (previous.TURBOPANEL_CONFIG_DIR === undefined) {
-        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
-      } else {
-        Deno.env.set("TURBOPANEL_CONFIG_DIR", previous.TURBOPANEL_CONFIG_DIR);
-      }
-      await Deno.remove(root, { recursive: true }).catch(() => undefined);
-    }
-  },
-});
-
-test({
-  name:
-    "handleEnvironmentStop legacy single-file path downs docker-compose.yml via chain",
-  permissions: { env: true, read: true, write: true, run: true },
-  fn: async () => {
-    const root = await Deno.makeTempDir({ prefix: "tp-stop-legacy-" });
-    const previous = {
-      TURBOPANEL_STATE_DIR: Deno.env.get("TURBOPANEL_STATE_DIR"),
-      TURBOPANEL_CONFIG_DIR: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
-    };
-    const stateDir = join(root, "state");
-    Deno.env.set("TURBOPANEL_STATE_DIR", stateDir);
-    Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
-    const environmentId = "envstop02";
-    const projectName = "tp-demo-envstop2";
-    const deploymentDir = join(stateDir, "deployments", environmentId);
-    await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
-    const legacy = join(deploymentDir, LEGACY_COMPOSE_FILENAME);
-    await Deno.writeTextFile(legacy, "services: {}\n");
-
-    const calls: string[][] = [];
-    try {
-      await handleEnvironmentStop(
-        {
-          environmentId,
-          projectId: "proj-1",
-          projectName,
-        },
-        new Date().toISOString(),
-        {
-          runDocker: (args) => {
-            calls.push([...args]);
-            return Promise.resolve({
-              success: true,
-              stdout: "",
-              stderr: "",
-              code: 0,
-            });
-          },
-        },
-      );
-      const downCall = calls.find((argv) => argv.includes("down"));
-      assertEquals(pathsInOrder(downCall!, [legacy]), true);
-      await assertRejects(() => Deno.stat(deploymentDir), Deno.errors.NotFound);
-    } finally {
-      if (previous.TURBOPANEL_STATE_DIR === undefined) {
-        Deno.env.delete("TURBOPANEL_STATE_DIR");
-      } else {
-        Deno.env.set("TURBOPANEL_STATE_DIR", previous.TURBOPANEL_STATE_DIR);
-      }
-      if (previous.TURBOPANEL_CONFIG_DIR === undefined) {
-        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
-      } else {
-        Deno.env.set("TURBOPANEL_CONFIG_DIR", previous.TURBOPANEL_CONFIG_DIR);
-      }
-      await Deno.remove(root, { recursive: true }).catch(() => undefined);
-    }
-  },
-});
-
-test({
-  name:
-    "handleEnvironmentStop refuses corrupt or incomplete manifest even when docker-compose.yml exists (no partial chain)",
-  permissions: { env: true, read: true, write: true, run: true },
-  fn: async () => {
-    const root = await Deno.makeTempDir({ prefix: "tp-stop-corrupt-" });
-    const previous = {
-      TURBOPANEL_STATE_DIR: Deno.env.get("TURBOPANEL_STATE_DIR"),
-      TURBOPANEL_CONFIG_DIR: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
-    };
-    const stateDir = join(root, "state");
-    Deno.env.set("TURBOPANEL_STATE_DIR", stateDir);
-    Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
-    const environmentId = "envstop03";
-    const projectName = "tp-demo-envstop3";
-    const deploymentDir = join(stateDir, "deployments", environmentId);
-    await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
-    await Deno.writeTextFile(
-      join(deploymentDir, LEGACY_COMPOSE_FILENAME),
-      "services:\n  web: {}\n",
-    );
-
-    const calls: string[][] = [];
-    const runDocker = (args: string[]): Promise<DockerCliResult> => {
-      calls.push([...args]);
-      return Promise.resolve({
-        success: true,
-        stdout: "",
-        stderr: "",
-        code: 0,
-      });
-    };
-    const payload = {
-      environmentId,
-      projectId: "proj-1",
-      projectName,
-    };
-
-    try {
-      await Deno.writeTextFile(
-        join(deploymentDir, COMPOSE_MANIFEST_FILENAME),
-        "{not-json",
-      );
-      await assertRejects(
-        () =>
-          handleEnvironmentStop(
-            payload,
-            new Date().toISOString(),
-            { runDocker },
-          ),
-        Error,
-        "compose-files.json",
-      );
-
-      await Deno.writeTextFile(
-        join(deploymentDir, COMPOSE_MANIFEST_FILENAME),
-        JSON.stringify({
-          version: 1,
-          files: ["docker-compose.project.yml", "docker-compose.env.yml"],
-        }),
-      );
-      await assertRejects(
-        () =>
-          handleEnvironmentStop(
-            payload,
-            new Date().toISOString(),
-            { runDocker },
-          ),
-        Error,
-        "missing layer file",
-      );
-      assertEquals(calls.length, 0);
-      // Deployment dir must remain — stop did not partially tear down.
-      await Deno.stat(deploymentDir);
     } finally {
       if (previous.TURBOPANEL_STATE_DIR === undefined) {
         Deno.env.delete("TURBOPANEL_STATE_DIR");
@@ -409,7 +246,7 @@ test({
 
     const environmentId = "envstopfn";
     const projectName = "tp-demo-envstopfn";
-    const deploymentDir = join(stateDir, "deployments", environmentId);
+    const deploymentDir = join(stateDir, "deployments", "proj-1", environmentId);
     await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
     await Deno.writeTextFile(
       join(deploymentDir, "compose.yaml"),

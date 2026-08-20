@@ -233,7 +233,9 @@ async function ensureAuthSocketPlugin(
   const text = `${result.stderr}\n${result.stdout}`;
   if (text.includes("already exists")) return;
   throw new Error(
-    `mysql failed: ${sanitizeForLog(result.stderr || result.stdout || "unknown")}`,
+    `mysql failed: ${
+      sanitizeForLog(result.stderr || result.stdout || "unknown")
+    }`,
   );
 }
 

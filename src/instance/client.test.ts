@@ -3736,6 +3736,8 @@ it({
             kind: "socket",
             socketPath: "/tmp/turbopanel-test-instance.sock",
           },
+          // Skip Deno.createHttpClient(unix) — host-free fetch is mocked.
+          httpClient: {} as Deno.HttpClient,
           reconnectDelayMs: DEFAULT_INITIAL_BACKOFF_MS,
         });
 

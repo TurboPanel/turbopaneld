@@ -701,7 +701,9 @@ export class InstanceClient {
       }
       logError(
         "instance",
-        `tls-trust: platform CA does not validate the control plane (host=${sanitizeForLog(this.target)} caPath=${caPath} fingerprint=${fingerprint}); parked — re-run the installer with --instance-ca or --insecure-tls`,
+        `tls-trust: platform CA does not validate the control plane (host=${
+          sanitizeForLog(this.target)
+        } caPath=${caPath} fingerprint=${fingerprint}); parked — re-run the installer with --instance-ca or --insecure-tls`,
       );
       return;
     }
@@ -1747,7 +1749,9 @@ async function waitForColocatedReadiness(
 function describeHealthCheckFailure(err: unknown): string {
   if (!(err instanceof Error)) return sanitizeForLog(err);
   const msg = err.message;
-  if (/certificate|tls|ssl|NotValidForName|UnknownIssuer|invalid peer/i.test(msg)) {
+  if (
+    /certificate|tls|ssl|NotValidForName|UnknownIssuer|invalid peer/i.test(msg)
+  ) {
     return `${msg} — ensure the control plane leaf cert SAN includes the ` +
       "hostname in TURBOPANEL_INSTANCE_URL (Admin → Public URLs → Save & Apply)";
   }

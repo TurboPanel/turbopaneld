@@ -11,13 +11,22 @@ import {
 } from "./urls.ts";
 import { parseChannelManifest, parseRootCatalog } from "./validate.ts";
 
-function describeFetchError(context: string, err: unknown): MalformedManifestError {
+function formatFetchErrorCause(cause: unknown): string {
+  if (cause instanceof Error) {
+    return cause.message;
+  }
+  if (typeof cause === "string") {
+    return cause;
+  }
+  return "";
+}
+
+function describeFetchError(
+  context: string,
+  err: unknown,
+): MalformedManifestError {
   if (err instanceof Error) {
-    const cause = err.cause instanceof Error
-      ? err.cause.message
-      : typeof err.cause === "string"
-      ? err.cause
-      : "";
+    const cause = formatFetchErrorCause(err.cause);
     const detail = err.message === "fetch failed" && cause
       ? `${err.message} (${cause})`
       : err.message;

@@ -526,7 +526,7 @@ test("buildCaddyHostnameRoutes groups hostings by hostname", () => {
     projectId: "proj-1",
     organizationId: "org-1",
     projectName: "tp-demo",
-    composeYaml: "services: {}",
+    composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services: {}" }],
     hostings: [
       {
         hostingId: "h1",
@@ -1243,7 +1243,7 @@ test("rewriteHostingCaddySites writes site snippet and best-effort reloads", asy
       projectId: "proj-1",
       organizationId: "org-1",
       projectName: "demo",
-      composeYaml: "services: {}",
+      composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services: {}" }],
       hostings: [
         {
           hostingId: "h1",
@@ -1280,7 +1280,7 @@ test("rewriteHostingCaddySites rejects unsafe environmentId", async () => {
           projectId: "proj-1",
           organizationId: "org-1",
           projectName: "demo",
-          composeYaml: "services: {}",
+          composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services: {}" }],
           hostings: [],
         }),
       Error,
@@ -1774,7 +1774,7 @@ test("buildCaddyHostnameRoutes skips tcp and empty hostnames", () => {
     projectId: "proj-1",
     organizationId: "org-1",
     projectName: "demo",
-    composeYaml: "services: {}",
+    composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services: {}" }],
     hostings: [
       {
         hostingId: "tcp",
@@ -1924,7 +1924,7 @@ test("buildCaddyHostnameRoutes drops empty and slash-only pathPrefix", () => {
     projectId: "proj-1",
     organizationId: "org-1",
     projectName: "demo",
-    composeYaml: "services: {}",
+    composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services: {}" }],
     hostings: [
       {
         hostingId: "h1",

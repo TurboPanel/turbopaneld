@@ -252,15 +252,13 @@ the instance config dir (never in the git checkout):
 
 | Path | Owner / mode | Purpose |
 | --- | --- | --- |
-| `…/instance/.instance_secret` | `root:{{ turbopanel_group }}` `0640` | Legacy singular key; generated once, **never rewritten or deleted** by converge; folded as decrypt-only `v1` |
 | `…/instance/.instance_secrets` | `root:{{ turbopanel_group }}` `0640` | Versioned keyring, `<version>:<value>` comma-separated, highest/current first |
 
 Slurped into the `turbopanel_instance_secrets` fact and templated as
 `TURBOPANEL_SECRETS=` into both `instance-deno.dev-vars.j2` /
-`instance-workers.dev-vars.j2` alongside the singular assignment. Rotation is
+`instance-workers.dev-vars.j2`. Rotation is
 opt-in via `turbopanel_instance_secret_rotate` (default `false`): prepends
-`max(existing ∪ {1}) + 1` so the first rotate is `v2` and cannot collide with
-the folded legacy key, and writes atomically.
+`max(existing ∪ {1}) + 1` so the first rotate is `v2`, and writes atomically.
 `src/orchestration/ansible.test.ts` pins the default, the gate expression, the
 ownership/mode, and the templated env lines.
 

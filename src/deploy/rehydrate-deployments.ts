@@ -61,7 +61,11 @@ export function parseRehydrateDeploymentResults(
         projectId: row.projectId,
         organizationId: "rehydrate",
         projectName: "rehydrate",
-        composeYaml: "services: {}\n",
+        composeFiles: [{
+          filename: "compose.yaml",
+          role: "runtime",
+          content: "services: {}\n",
+        }],
         hostings: [],
         secretPlan: row.secretPlan,
         variableMaterial: row.variableMaterial,

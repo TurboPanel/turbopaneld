@@ -9,10 +9,10 @@ User={{ instance_user }}
 Group={{ turbopanel_group }}
 WorkingDirectory={{ turbopanel_instance_dir }}
 Environment=HOME={{ turbopanel_instance_runtime_dir }}
-{# Load runtime.env + runtime.dev-vars so the mailer sees TURBOPANEL_SECRET and
-   TURBOPANEL_SECRETS and can derive the data-encryption keyring for DB-backed
-   email secrets (MAILGUN_API_KEY / SMTP_PASS). Placed before the explicit
-   Environment= lines below so the mailer-specific overrides still win. #}
+{# Load runtime.env + runtime.dev-vars so the mailer sees TURBOPANEL_SECRETS and
+   can derive the data-encryption keyring for DB-backed email secrets
+   (MAILGUN_API_KEY / SMTP_PASS). Placed before the explicit Environment=
+   lines below so the mailer-specific overrides still win. #}
 EnvironmentFile=-{{ turbopanel_instance_runtime_env }}
 EnvironmentFile=-{{ turbopanel_instance_runtime_dev_vars }}
 {% if turbopanel_amqp_url is defined %}

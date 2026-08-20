@@ -3,17 +3,17 @@ import { assertEquals } from "@std/assert";
 import {
   CANONICAL_INSTANCE_CA_PATH,
   createInstanceHttpClient,
+  DEFAULT_SOCKET_DIR,
+  fetchWithPlatformCa,
   fingerprintPemCertificate,
   invalidatePlatformCaHttpClient,
   normalizeCaFingerprint,
-  splitPemBundle,
-  DEFAULT_SOCKET_DIR,
-  fetchWithPlatformCa,
   resolveInstanceCaPath,
   resolveInstanceConfig,
   resolveInstanceSocket,
   resolveServerIdentityDir,
   resolveServerKeyPath,
+  splitPemBundle,
 } from "./paths.ts";
 import {
   DEV_CONFIG_DIR_DEFAULT,
