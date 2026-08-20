@@ -2,7 +2,7 @@
  * Shared ProxySQL managed ingress — compose + config generation.
  *
  * One per-server `turbopanel-proxysql` compose project terminates TLS on
- * `15432` / `16306` and routes to managed engine members on
+ * `15432` / `13306` and routes to managed engine members on
  * {@link MANAGED_INGRESS_NETWORK}. Runtime users/servers/rules are applied
  * through the admin interface; the on-disk `proxysql.cnf` is the durable
  * cold-start source of truth.
@@ -55,7 +55,7 @@ export const ADMIN_PORT = 6032;
  * remain the fallback when a payload predates that field.
  */
 export const PGSQL_PORT = 15432;
-export const MYSQL_PORT = 16306;
+export const MYSQL_PORT = 13306;
 
 /** Legacy client listeners accepted on the wire for control-plane skew. */
 const LEGACY_PGSQL_PORT = 5432;

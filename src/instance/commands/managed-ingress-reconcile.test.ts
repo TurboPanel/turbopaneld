@@ -181,7 +181,7 @@ test({
         );
         // No public port mapping at all — only the loopback admin port.
         assertEquals(composeText.includes(":15432:15432"), false);
-        assertEquals(composeText.includes(":16306:16306"), false);
+        assertEquals(composeText.includes(":13306:13306"), false);
         assertEquals(composeText.includes(":5432:5432"), false);
         assertEquals(composeText.includes(":3306:3306"), false);
       } finally {

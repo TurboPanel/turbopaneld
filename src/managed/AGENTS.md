@@ -103,7 +103,7 @@ listeners and routes to engine members on `turbopanel-managed`.
 | Piece | Detail |
 | --- | --- |
 | Image pin | `proxysql/proxysql:3.0.9` (`PROXYSQL_IMAGE`) — **do not loosen** without reviewing **CVE-2026-48773** (pre-auth first-packet heap overflow) and **CVE-2026-48772** (PROXY-protocol-v1 `client_addr` ACL bypass); both fixed in 3.0.9 |
-| Listeners | Published pgsql + mysql client ports on the instance-resolved `bindAddress` — numbers come from `listenerPorts` on the command (default `15432` / `16306`), see **Configurable listener ports** below; admin on `127.0.0.1:6032` only |
+| Listeners | Published pgsql + mysql client ports on the instance-resolved `bindAddress` — numbers come from `listenerPorts` on the command (default `15432` / `13306`), see **Configurable listener ports** below; admin on `127.0.0.1:6032` only |
 | TLS | Frontend/backend TLS uses **Organization CA** material under `configDir/proxysql/tls/` (and per-engine copies under `tls/proxysql/` for materialize). `ca.pem` / `tls/ca.crt` are the concatenated active+retired trust bundle (`orgTlsMaterial.caCertPem`; ProxySQL `ssl_ca` and Postgres `ssl_ca_file` accept multi-PEM). The daemon's **Platform CA** (`/etc/turbopanel/instance-ca.pem`) is unrelated and never used for ProxySQL/engine leaves. Engines still use self-signed `tlsMaterial` for their own listener when requested. Whether a *client* may stay plaintext is per-cluster `requireTls` — see **Frontend TLS enforcement** below |
 | Desired state | Whole-server command `managed.ingress.reconcile` carries `identity` `{ serviceId, composeServiceName, containerName }` (same persist pattern as `managed.ha.reconcile`) + `bindAddress` + `listenerPorts` + `clusters[]` (backends + users); **not** embedded on each `managed.apply`. Empty `clusters[]` tears the stack down (`compose down --remove-orphans`) without TLS materialization, **leaving yaml/cnf on disk**. The next non-empty reconcile must `compose up` when the container is absent even if those files are unchanged — a single remaining cluster is not a reason to skip ProxySQL. Remote daemon-only hosts often never receive `system.reconcile`, so ingress must persist the descriptor from the payload (or recover `container_name` / `serviceId` from an existing compose file) rather than requiring `<stateDir>/system/managed-ingress.json` up front |
 | Admin apply | `proxysql-admin.ts` loads `admin.cnf`, mounts it into a throwaway client or uses stdin; SQL LOAD/SAVE — credentials never argv/logs |
@@ -125,7 +125,7 @@ side, so the daemon must treat them as data:
   the moment an operator picks their own numbers.
 - **Compose parse/render is port-agnostic.** `readPublishedBindAddressFromCompose`
   / `readPublishedListenerPortsFromCompose` match the generic
-  `host:port:port` shape instead of looking for `15432` / `16306`, so a
+  `host:port:port` shape instead of looking for `15432` / `13306`, so a
   bind-address or port recovered from an existing stack survives a port change.
 - **Self-heal round-trips the ports.** `system.reconcile` → `proxysql` reads the
   current ports off disk and re-renders with them; it must not fall back to the

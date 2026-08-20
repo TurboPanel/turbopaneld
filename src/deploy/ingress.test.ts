@@ -746,7 +746,7 @@ test("syncTcpUdpIngressEntries rejects ports reserved for ProxySQL managed liste
     await assertRejects(
       () =>
         syncTcpUdpIngressEntries(layout, "svc-b", [
-          { hostingId: "h2", protocol: "tcp", publishedPort: 16306 },
+          { hostingId: "h2", protocol: "tcp", publishedPort: 13306 },
         ]),
       TcpUdpPortReservedError,
     );
@@ -809,7 +809,7 @@ test("buildProxysqlReservedPublishedPorts unions defaults with effective org por
     })].sort(
       (a, b) => a - b,
     ),
-    [15_432, 16_306, 18_306, 18_432, 33_001, 33_002],
+    [13_306, 15_432, 18_306, 18_432, 33_001, 33_002],
   );
 });
 

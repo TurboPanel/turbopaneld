@@ -87,7 +87,7 @@ without reviewing **CVE-2026-48773** (pre-auth first-packet heap overflow) and
 3.0.9. Keep in step with daemon `PROXYSQL_IMAGE` in `src/managed/proxysql.ts`.
 
 **Ports (defaults):** admin `6032` (loopback), pgsql frontend `15432`, mysql
-frontend `16306`. These published frontend ports are reserved against tenant
+frontend `13306`. These published frontend ports are reserved against tenant
 raw TCP hostings (`PROXYSQL_RESERVED_PUBLISHED_PORTS`).
 
 **Installer vocabulary:** component/status token `proxysql` → **ingress** (see
@@ -112,7 +112,7 @@ after `ensureGalaxyDockerRole`). Co-located dev installs the role via
 
 **Image pin:** `ghcr.io/proxysql/orchestrator:v4.30.2`. Internal ports **33001**
 (HTTP) / **33002** (Raft). Never publish `0.0.0.0`. Avoid 6032/6132/45000–45999
-(and 15432/16306). Servers that host only remote `read`/DR replicas do not join
+(and 15432/13306). Servers that host only remote `read`/DR replicas do not join
 Raft.
 
 **Installer vocabulary:** component/status token `orchestrator` → **HA**.

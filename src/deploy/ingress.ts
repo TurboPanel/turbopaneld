@@ -98,7 +98,7 @@ export class TcpUdpPortConflictError extends Error {
  * org overrides its effective listeners — tenant raw `tcp`/`udp` hostings must
  * not claim these or the org-specific overrides carried on `environment.deploy`.
  */
-export const PROXYSQL_RESERVED_PUBLISHED_PORTS = new Set([15432, 16306]);
+export const PROXYSQL_RESERVED_PUBLISHED_PORTS = new Set([15432, 13306]);
 
 /** Orchestrator HTTP/Raft — never claimed by tenant raw TCP/UDP hostings. */
 export const MANAGED_HA_RESERVED_PUBLISHED_PORTS = new Set([33001, 33002]);

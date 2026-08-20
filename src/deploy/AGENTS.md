@@ -308,7 +308,7 @@ Traefik and from managed-engine ProxySQL:
 2. **Tenant raw TCP/UDP Traefik** — still **per tenant service** under
    `ingress/services/<serviceId>/` for docker-compose hostings with
    `protocol: tcp|udp`. **Do not** fold tenant raw ports into ProxySQL.
-   Ports `15432` / `16306` are always reserved for the shared ProxySQL
+   Ports `15432` / `13306` are always reserved for the shared ProxySQL
    platform-default listeners (`PROXYSQL_RESERVED_PUBLISHED_PORTS`); when
    `environment.deploy` carries the server-owner org's effective
    `listenerPorts`, tenant claims on those overrides are rejected too.

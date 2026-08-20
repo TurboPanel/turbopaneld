@@ -459,7 +459,7 @@ export type EnvironmentDeployPayload = {
   /**
    * Server-owner org effective ProxySQL client listener ports. When present,
    * tenant tcp/udp ingress must also reserve these in addition to the platform
-   * defaults (`15432` / `16306`).
+   * defaults (`15432` / `13306`).
    */
   listenerPorts?: ManagedIngressListenerPortsPayload;
 };

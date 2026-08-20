@@ -10,7 +10,7 @@ proxysql_data_dir: "{{ turbopanel_state_dir }}/proxysql"
 proxysql_service_name: turbopanel-proxysql-stack
 proxysql_admin_port: 6032
 proxysql_pgsql_port: 15432
-proxysql_mysql_port: 16306
+proxysql_mysql_port: 13306
 # Runtime uid/gid for image — ProxySQL official image often runs as 999 or 2;
 # use 999:999 for datadir pre-own (document if adjustable).
 proxysql_container_uid: 999

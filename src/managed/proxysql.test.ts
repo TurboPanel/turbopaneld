@@ -146,7 +146,7 @@ test("formatProxySqlBindHost brackets IPv6 and validates bind", () => {
 test("proxysqlCompose publishes bind-aware listener ports", () => {
   const compose = proxysqlCompose(null, ["2001:db8::10"]);
   assertStringIncludes(compose, '"[2001:db8::10]:15432:15432"');
-  assertStringIncludes(compose, '"[2001:db8::10]:16306:16306"');
+  assertStringIncludes(compose, '"[2001:db8::10]:13306:13306"');
 });
 
 test("proxysqlCompose omits published db ports entirely when bindAddresses is empty", () => {
@@ -165,7 +165,7 @@ test("proxysqlCompose omits published db ports entirely when bindAddresses is em
 test("proxysqlCompose with no bindAddresses argument also defaults to no publish", () => {
   const compose = proxysqlCompose(DESCRIPTOR);
   assertEquals(compose.includes(":15432:15432"), false);
-  assertEquals(compose.includes(":16306:16306"), false);
+  assertEquals(compose.includes(":13306:13306"), false);
   assertEquals(compose.includes(":5432:5432"), false);
   assertEquals(compose.includes(":3306:3306"), false);
 });
@@ -323,10 +323,10 @@ test("proxysqlCompose rejects invalid spanning segment subnets", () => {
 test("proxysqlCompose publishes only on the intended address for public/datacenter exposure", () => {
   const compose = proxysqlCompose(DESCRIPTOR, ["203.0.113.5"]);
   assertStringIncludes(compose, '"203.0.113.5:15432:15432"');
-  assertStringIncludes(compose, '"203.0.113.5:16306:16306"');
+  assertStringIncludes(compose, '"203.0.113.5:13306:13306"');
   // Never accidentally widen to all-interfaces alongside the intended bind.
   assertEquals(compose.includes('"0.0.0.0:15432:15432"'), false);
-  assertEquals(compose.includes('"0.0.0.0:16306:16306"'), false);
+  assertEquals(compose.includes('"0.0.0.0:13306:13306"'), false);
 });
 
 test("renderProxySqlConfig keeps ProxySQL's internal listener on every interface regardless of the publish bind", () => {
@@ -1014,7 +1014,7 @@ test("legacy and new protocolPort values route into the same family", () => {
   });
   const mysqlNew = renderProxySqlConfig({
     bindAddresses: [],
-    clusters: [clusterDesired({ engine: "mysql", protocolPort: 16306 })],
+    clusters: [clusterDesired({ engine: "mysql", protocolPort: 13306 })],
   });
   assertStringIncludes(mysqlLegacy, "mysql_servers");
   assertStringIncludes(mysqlNew, "mysql_servers");
@@ -1052,7 +1052,7 @@ test("protocolFamilyForCluster prefers the payload family, then engine, then por
   assertEquals(
     protocolFamilyForCluster(clusterDesired({
       engine: "mysql",
-      protocolPort: 16306,
+      protocolPort: 13306,
       family: "pgsql",
     })),
     "pgsql",
@@ -1067,7 +1067,7 @@ test("protocolFamilyForCluster prefers the payload family, then engine, then por
   // Unknown engine and no family: fall back to the port.
   assertEquals(
     protocolFamilyForCluster(
-      clusterDesired({ engine: "percona", protocolPort: 16306 }),
+      clusterDesired({ engine: "percona", protocolPort: 13306 }),
     ),
     "mysql",
   );
@@ -1089,7 +1089,7 @@ test("compose publishes organization-configured listener ports", () => {
   // Admin stays loopback-only on its fixed port.
   assertStringIncludes(compose, '"127.0.0.1:6032:6032"');
   assertEquals(compose.includes(":15432:15432"), false);
-  assertEquals(compose.includes(":16306:16306"), false);
+  assertEquals(compose.includes(":13306:13306"), false);
 });
 
 test("compose falls back to the platform default listener ports", () => {
@@ -1187,8 +1187,8 @@ test("port preflight only probes ports the current frontend does not already hol
   // Unchanged ports: nothing to probe, because ProxySQL itself is the listener.
   await assertManagedIngressPortsBindable(
     ["203.0.113.5"],
-    { pgsql: 15432, mysql: 16306 },
-    { pgsql: 15432, mysql: 16306 },
+    { pgsql: 15432, mysql: 13306 },
+    { pgsql: 15432, mysql: 13306 },
     probe,
   );
   assertEquals(probed, []);
@@ -1196,8 +1196,8 @@ test("port preflight only probes ports the current frontend does not already hol
   // Only Postgres moved.
   await assertManagedIngressPortsBindable(
     ["203.0.113.5"],
-    { pgsql: 18432, mysql: 16306 },
-    { pgsql: 15432, mysql: 16306 },
+    { pgsql: 18432, mysql: 13306 },
+    { pgsql: 15432, mysql: 13306 },
     probe,
   );
   assertEquals(probed, [18432]);
@@ -1206,8 +1206,8 @@ test("port preflight only probes ports the current frontend does not already hol
   probed.length = 0;
   await assertManagedIngressPortsBindable(
     ["203.0.113.5"],
-    { pgsql: 16306, mysql: 15432 },
-    { pgsql: 15432, mysql: 16306 },
+    { pgsql: 13306, mysql: 15432 },
+    { pgsql: 15432, mysql: 13306 },
     probe,
   );
   assertEquals(probed, []);
@@ -1216,11 +1216,11 @@ test("port preflight only probes ports the current frontend does not already hol
   probed.length = 0;
   await assertManagedIngressPortsBindable(
     ["203.0.113.5"],
-    { pgsql: 15432, mysql: 16306 },
+    { pgsql: 15432, mysql: 13306 },
     null,
     probe,
   );
-  assertEquals(probed, [15432, 16306]);
+  assertEquals(probed, [15432, 13306]);
 });
 
 test("port preflight skips probing entirely when the frontend is not published", async () => {
@@ -1242,8 +1242,8 @@ test("port preflight refuses a port an unrelated host listener already owns", as
     () =>
       assertManagedIngressPortsBindable(
         ["203.0.113.5"],
-        { pgsql: 5432, mysql: 16306 },
-        { pgsql: 15432, mysql: 16306 },
+        { pgsql: 5432, mysql: 13306 },
+        { pgsql: 15432, mysql: 13306 },
         (_host, port) => Promise.resolve(port !== 5432),
       ),
     ManagedIngressPortInUseError,
@@ -1259,7 +1259,7 @@ test("legacy published 5432 compose text differs from current render so compose 
   const next = proxysqlCompose(DESCRIPTOR, ["203.0.113.5"]);
   const previous = next
     .replaceAll(":15432:15432", ":5432:5432")
-    .replaceAll(":16306:16306", ":3306:3306");
+    .replaceAll(":13306:13306", ":3306:3306");
   assertEquals(previous.trimEnd() !== next.trimEnd(), true);
   assertStringIncludes(previous, ":5432:5432");
   assertStringIncludes(next, ":15432:15432");
