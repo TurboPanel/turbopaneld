@@ -82,7 +82,12 @@ test({
 
     const environmentId = "envlife01";
     const projectName = "tp-demo-envlife0";
-    const deploymentDir = join(stateDir, "deployments", "proj-1", environmentId);
+    const deploymentDir = join(
+      stateDir,
+      "deployments",
+      "proj-1",
+      environmentId,
+    );
     await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
     const composePath = join(deploymentDir, RUNTIME_COMPOSE_FILENAME);
     await Deno.writeTextFile(composePath, "services: {}\n", { mode: 0o640 });
@@ -305,7 +310,12 @@ test({
 
     const environmentId = "envlife06";
     const projectName = "tp-demo-envlife6";
-    const deploymentDir = join(stateDir, "deployments", "proj-1", environmentId);
+    const deploymentDir = join(
+      stateDir,
+      "deployments",
+      "proj-1",
+      environmentId,
+    );
     await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
     await Deno.writeTextFile(
       join(deploymentDir, RUNTIME_COMPOSE_FILENAME),
@@ -368,7 +378,12 @@ test({
 
     const environmentId = "envlife07";
     const projectName = "tp-demo-envlife7";
-    const deploymentDir = join(stateDir, "deployments", "proj-1", environmentId);
+    const deploymentDir = join(
+      stateDir,
+      "deployments",
+      "proj-1",
+      environmentId,
+    );
     await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
     await Deno.writeTextFile(
       join(deploymentDir, RUNTIME_COMPOSE_FILENAME),
@@ -439,7 +454,12 @@ test({
     const environmentId = "envlife08";
     const projectName = "tp-demo-envlife8";
     const serviceId = "00000000-0000-4000-8000-0000000000ee";
-    const deploymentDir = join(stateDir, "deployments", "proj-1", environmentId);
+    const deploymentDir = join(
+      stateDir,
+      "deployments",
+      "proj-1",
+      environmentId,
+    );
     await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
     await Deno.writeTextFile(
       join(deploymentDir, RUNTIME_COMPOSE_FILENAME),

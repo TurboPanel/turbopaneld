@@ -80,7 +80,11 @@ test("handleEnvironmentDeploy rejects unsupported environmentId characters", asy
           projectId: "proj-1",
           organizationId: "org-1",
           projectName: "demo",
-          composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services: {}\n" }],
+          composeFiles: [{
+            filename: "compose.yaml",
+            role: "runtime",
+            content: "services: {}\n",
+          }],
           hostings: [],
         },
         new Date().toISOString(),
@@ -99,7 +103,11 @@ test("handleEnvironmentDeploy rejects unsupported projectId characters", async (
           projectId: "bad/id",
           organizationId: "org-1",
           projectName: "demo",
-          composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services: {}\n" }],
+          composeFiles: [{
+            filename: "compose.yaml",
+            role: "runtime",
+            content: "services: {}\n",
+          }],
           hostings: [],
         },
         new Date().toISOString(),
@@ -118,7 +126,11 @@ test("handleEnvironmentDeploy rejects invalid Docker Compose projectName", async
           projectId: "proj-1",
           organizationId: "org-1",
           projectName: "BadName",
-          composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services: {}\n" }],
+          composeFiles: [{
+            filename: "compose.yaml",
+            role: "runtime",
+            content: "services: {}\n",
+          }],
           hostings: [],
         },
         new Date().toISOString(),
@@ -215,7 +227,11 @@ test("handleEnvironmentDeploy rejects secret plan when decrypt is unavailable", 
             projectId: "proj-1",
             organizationId: "org-1",
             projectName: "tp-demo-secret",
-            composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services:\n  web:\n    image: nginx\n" }],
+            composeFiles: [{
+              filename: "compose.yaml",
+              role: "runtime",
+              content: "services:\n  web:\n    image: nginx\n",
+            }],
             hostings: [],
             secretPlan: [{
               key: "TOKEN",
@@ -314,7 +330,12 @@ test({
           projectId,
           organizationId: "org-1",
           projectName,
-          composeFiles: [{ filename: RUNTIME_COMPOSE_FILENAME, role: "runtime", source: "inline", content: runtimeYaml }],
+          composeFiles: [{
+            filename: RUNTIME_COMPOSE_FILENAME,
+            role: "runtime",
+            source: "inline",
+            content: runtimeYaml,
+          }],
           hostings: [],
         },
         new Date().toISOString(),
@@ -442,7 +463,7 @@ test({
           projectId,
           organizationId: "org-1",
           projectName,
-                    composeFiles: [{
+          composeFiles: [{
             filename: RUNTIME_COMPOSE_FILENAME,
             role: "runtime",
             source: "inline",
@@ -545,7 +566,7 @@ test({
           projectId,
           organizationId: "org-1",
           projectName,
-                    composeFiles: [{
+          composeFiles: [{
             filename: RUNTIME_COMPOSE_FILENAME,
             role: "runtime",
             source: "inline",
@@ -996,7 +1017,7 @@ services:
           projectId,
           organizationId: "org-1",
           projectName,
-                    composeFiles: [{
+          composeFiles: [{
             filename: RUNTIME_COMPOSE_FILENAME,
             role: "runtime",
             source: "inline",
@@ -1151,7 +1172,7 @@ test({
       projectId,
       organizationId: "org-1",
       projectName,
-            composeFiles: [{
+      composeFiles: [{
         filename: RUNTIME_COMPOSE_FILENAME,
         role: "runtime" as const,
         source: "inline" as const,
@@ -1334,7 +1355,12 @@ test({
           projectId,
           organizationId: "org-1",
           projectName,
-          composeFiles: [{ filename: RUNTIME_COMPOSE_FILENAME, role: "runtime", source: "inline", content: runtimeYaml }],
+          composeFiles: [{
+            filename: RUNTIME_COMPOSE_FILENAME,
+            role: "runtime",
+            source: "inline",
+            content: runtimeYaml,
+          }],
           hostings: [{
             hostingId: "h1",
             serviceId: "s1",
@@ -1436,7 +1462,12 @@ test({
           projectId,
           organizationId: "org-1",
           projectName,
-          composeFiles: [{ filename: RUNTIME_COMPOSE_FILENAME, role: "runtime", source: "inline", content: runtimeYaml }],
+          composeFiles: [{
+            filename: RUNTIME_COMPOSE_FILENAME,
+            role: "runtime",
+            source: "inline",
+            content: runtimeYaml,
+          }],
           hostings: [],
         },
         new Date().toISOString(),

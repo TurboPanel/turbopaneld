@@ -169,7 +169,12 @@ test({
 
     const environmentId = "envstop01";
     const projectName = "tp-demo-envstop1";
-    const deploymentDir = join(stateDir, "deployments", "proj-1", environmentId);
+    const deploymentDir = join(
+      stateDir,
+      "deployments",
+      "proj-1",
+      environmentId,
+    );
     await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
     const composePath = join(deploymentDir, RUNTIME_COMPOSE_FILENAME);
     await Deno.writeTextFile(composePath, "services:\n  web: {}\n");
@@ -246,7 +251,12 @@ test({
 
     const environmentId = "envstopfn";
     const projectName = "tp-demo-envstopfn";
-    const deploymentDir = join(stateDir, "deployments", "proj-1", environmentId);
+    const deploymentDir = join(
+      stateDir,
+      "deployments",
+      "proj-1",
+      environmentId,
+    );
     await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
     await Deno.writeTextFile(
       join(deploymentDir, "compose.yaml"),

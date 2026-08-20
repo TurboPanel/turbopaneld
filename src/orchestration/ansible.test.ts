@@ -1160,3 +1160,59 @@ test("instance-certs apply never passes a platform CA rotate flag", async () => 
     "pass TURBOPANEL_TLS_CA_BUNDLE",
   );
 });
+
+test("docker-backed optional roles gate readiness and stop disabled containers", async () => {
+  const roles = [
+    {
+      role: "mailpit",
+      optionalVar: "turbopanel_optional_mailpit",
+      containers: ["mailpit_container_name"],
+    },
+    {
+      role: "tabix",
+      optionalVar: "turbopanel_optional_tabix",
+      containers: ["tabix_container_name"],
+    },
+    {
+      role: "redis-insight",
+      optionalVar: "turbopanel_optional_redis_insight",
+      containers: [
+        "redis_insight_bridge_container_name",
+        "redis_insight_container_name",
+      ],
+    },
+  ] as const;
+
+  for (const { role, optionalVar, containers } of roles) {
+    const tasks = await Deno.readTextFile(
+      join(CHECKOUT_ORCHESTRATION_DIR, `roles/${role}/tasks/main.yml`),
+    );
+    assertEquals(
+      tasks.includes(`when: ${optionalVar}`),
+      true,
+      `${role}: gate wrapper-start on ${optionalVar}`,
+    );
+    assertEquals(
+      tasks.includes("wrapper-start.sh"),
+      true,
+      `${role}: install wrapper-start.sh`,
+    );
+    assertEquals(
+      tasks.includes('argv: [docker, update, "--restart=no"'),
+      true,
+      `${role}: disable restart when optional off`,
+    );
+    assertEquals(
+      tasks.includes("argv: [docker, stop,"),
+      true,
+      `${role}: stop container when optional off`,
+    );
+    for (const container of containers) {
+      assertEquals(
+        tasks.includes(`"{{ ${container} }}"`),
+        true,
+        `${role}: reference ${container}`,
+      );
+    }
+  }
+});

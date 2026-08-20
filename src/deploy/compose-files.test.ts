@@ -71,7 +71,10 @@ describe("compose-files", () => {
       await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
       const stageDir = await resetComposeStageDir(deploymentDir);
       const yaml = "services:\n  web:\n    image: nginx\n";
-      await writeComposeFileSecure(join(stageDir, RUNTIME_COMPOSE_FILENAME), yaml);
+      await writeComposeFileSecure(
+        join(stageDir, RUNTIME_COMPOSE_FILENAME),
+        yaml,
+      );
       const manifest = {
         version: 2 as const,
         projectId: "proj-1",

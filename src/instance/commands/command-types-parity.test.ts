@@ -71,7 +71,11 @@ test("environment.deploy hosting fixture round-trips bindAddress", () => {
     projectId: "proj-1",
     organizationId: "org-1",
     projectName: "demo",
-    composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services:\n  web:\n    image: nginx\n" }],
+    composeFiles: [{
+      filename: "compose.yaml",
+      role: "runtime",
+      content: "services:\n  web:\n    image: nginx\n",
+    }],
     hostings: [
       {
         hostingId: "h1",
@@ -108,7 +112,11 @@ test("environment.deploy rejects invalid composeFiles", () => {
     projectId: "proj-1",
     organizationId: "org-1",
     projectName: "demo",
-    composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services: {}\n" }],
+    composeFiles: [{
+      filename: "compose.yaml",
+      role: "runtime",
+      content: "services: {}\n",
+    }],
     hostings: [] as unknown[],
   };
   assertThrows(
@@ -283,7 +291,11 @@ test("environment.deploy composeFiles rejects a path with traversal or a leading
     projectId: "proj-1",
     organizationId: "org-1",
     projectName: "demo",
-    composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services: {}\n" }],
+    composeFiles: [{
+      filename: "compose.yaml",
+      role: "runtime",
+      content: "services: {}\n",
+    }],
     hostings: [] as unknown[],
   };
   assertThrows(
@@ -364,7 +376,11 @@ test("environment.deploy hosting fixture round-trips tcp protocol and ports", ()
     projectId: "proj-1",
     organizationId: "org-1",
     projectName: "demo",
-    composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services:\n  db:\n    image: postgres\n" }],
+    composeFiles: [{
+      filename: "compose.yaml",
+      role: "runtime",
+      content: "services:\n  db:\n    image: postgres\n",
+    }],
     hostings: [
       {
         hostingId: "h2",
@@ -388,7 +404,11 @@ test("environment.deploy storageMaterial accepts volume without mounts", () => {
     projectId: "proj-1",
     organizationId: "org-1",
     projectName: "demo",
-    composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services:\n  web:\n    image: nginx\n" }],
+    composeFiles: [{
+      filename: "compose.yaml",
+      role: "runtime",
+      content: "services:\n  web:\n    image: nginx\n",
+    }],
     hostings: [],
     storageMaterial: [
       {
@@ -415,7 +435,11 @@ test("environment.deploy storageMaterial rejects invalid volumeName", () => {
         projectId: "proj-1",
         organizationId: "org-1",
         projectName: "demo",
-        composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services: {}\n" }],
+        composeFiles: [{
+          filename: "compose.yaml",
+          role: "runtime",
+          content: "services: {}\n",
+        }],
         hostings: [],
         storageMaterial: [
           {
@@ -441,7 +465,11 @@ test("environment.deploy traditionalWebSites fixture round-trips", () => {
     projectId: "proj-1",
     organizationId: "org-1",
     projectName: "demo",
-    composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services: {}\n" }],
+    composeFiles: [{
+      filename: "compose.yaml",
+      role: "runtime",
+      content: "services: {}\n",
+    }],
     hostings: [
       {
         hostingId: "h1",
@@ -477,7 +505,11 @@ test("environment.deploy principalMaterial round-trips without uid/gid", () => {
     projectId: "proj-1",
     organizationId: "org-1",
     projectName: "demo",
-    composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services: {}\n" }],
+    composeFiles: [{
+      filename: "compose.yaml",
+      role: "runtime",
+      content: "services: {}\n",
+    }],
     hostings: [],
     principalMaterial: [
       {
@@ -503,7 +535,11 @@ test("environment.deploy principalMaterial round-trips with uid/gid", () => {
     projectId: "proj-1",
     organizationId: "org-1",
     projectName: "demo",
-    composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services: {}\n" }],
+    composeFiles: [{
+      filename: "compose.yaml",
+      role: "runtime",
+      content: "services: {}\n",
+    }],
     hostings: [],
     principalMaterial: [
       {
@@ -532,7 +568,11 @@ test("environment.deploy principalMaterial rejects negative uid", () => {
         projectId: "proj-1",
         organizationId: "org-1",
         projectName: "demo",
-        composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services: {}\n" }],
+        composeFiles: [{
+          filename: "compose.yaml",
+          role: "runtime",
+          content: "services: {}\n",
+        }],
         hostings: [],
         principalMaterial: [
           {
@@ -556,7 +596,11 @@ test("environment.deploy principalMaterial rejects non-integer uid", () => {
         projectId: "proj-1",
         organizationId: "org-1",
         projectName: "demo",
-        composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services: {}\n" }],
+        composeFiles: [{
+          filename: "compose.yaml",
+          role: "runtime",
+          content: "services: {}\n",
+        }],
         hostings: [],
         principalMaterial: [
           {
@@ -578,7 +622,11 @@ test("environment.deploy round-trips fabricNetworks and rejects invalid entries"
     projectId: "proj-1",
     organizationId: "org-1",
     projectName: "demo",
-    composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services:\n  web:\n    image: nginx\n" }],
+    composeFiles: [{
+      filename: "compose.yaml",
+      role: "runtime",
+      content: "services:\n  web:\n    image: nginx\n",
+    }],
     hostings: [],
     fabricNetworks: [
       {
@@ -604,7 +652,11 @@ test("environment.deploy round-trips fabricNetworks and rejects invalid entries"
         projectId: "proj-1",
         organizationId: "org-1",
         projectName: "demo",
-        composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services:\n  web:\n    image: nginx\n" }],
+        composeFiles: [{
+          filename: "compose.yaml",
+          role: "runtime",
+          content: "services:\n  web:\n    image: nginx\n",
+        }],
         hostings: [],
         fabricNetworks: [{ name: "-bad", subnet: "203.0.113.0/24" }],
       }),
@@ -618,7 +670,11 @@ test("environment.deploy round-trips fabricNetworks and rejects invalid entries"
         projectId: "proj-1",
         organizationId: "org-1",
         projectName: "demo",
-        composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services:\n  web:\n    image: nginx\n" }],
+        composeFiles: [{
+          filename: "compose.yaml",
+          role: "runtime",
+          content: "services:\n  web:\n    image: nginx\n",
+        }],
         hostings: [],
         fabricNetworks: [{ name: "tpn_net1", subnet: "not-a-cidr" }],
       }),
@@ -632,7 +688,11 @@ test("environment.deploy round-trips fabricNetworks and rejects invalid entries"
         projectId: "proj-1",
         organizationId: "org-1",
         projectName: "demo",
-        composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services:\n  web:\n    image: nginx\n" }],
+        composeFiles: [{
+          filename: "compose.yaml",
+          role: "runtime",
+          content: "services:\n  web:\n    image: nginx\n",
+        }],
         hostings: [],
         fabricNetworks: [{
           name: "tpn_net1",
@@ -651,7 +711,11 @@ test("environment.deploy round-trips dockerExternalNetworks and serviceHooks", (
     projectId: "proj-1",
     organizationId: "org-1",
     projectName: "demo",
-    composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services:\n  web:\n    image: nginx\n" }],
+    composeFiles: [{
+      filename: "compose.yaml",
+      role: "runtime",
+      content: "services:\n  web:\n    image: nginx\n",
+    }],
     hostings: [],
     dockerExternalNetworks: ["org-net-a"],
     serviceHooks: [
@@ -676,7 +740,11 @@ test("environment.deploy round-trips managedNetworkServices and rejects hostile 
     projectId: "proj-1",
     organizationId: "org-1",
     projectName: "demo",
-    composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services:\n  app:\n    image: nginx\n" }],
+    composeFiles: [{
+      filename: "compose.yaml",
+      role: "runtime",
+      content: "services:\n  app:\n    image: nginx\n",
+    }],
     hostings: [],
     managedNetworkServices: ["app", "app"],
   });
@@ -689,7 +757,11 @@ test("environment.deploy round-trips managedNetworkServices and rejects hostile 
         projectId: "proj-1",
         organizationId: "org-1",
         projectName: "demo",
-        composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services:\n  app:\n    image: nginx\n" }],
+        composeFiles: [{
+          filename: "compose.yaml",
+          role: "runtime",
+          content: "services:\n  app:\n    image: nginx\n",
+        }],
         hostings: [],
         managedNetworkServices: ["bad;name"],
       }),
@@ -704,7 +776,11 @@ test("environment.deploy round-trips noCache", () => {
     projectId: "proj-1",
     organizationId: "org-1",
     projectName: "demo",
-    composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services:\n  web:\n    image: nginx\n" }],
+    composeFiles: [{
+      filename: "compose.yaml",
+      role: "runtime",
+      content: "services:\n  web:\n    image: nginx\n",
+    }],
     hostings: [],
     noCache: true,
   });
@@ -719,7 +795,11 @@ test("environment.deploy rejects non-boolean noCache", () => {
         projectId: "proj-1",
         organizationId: "org-1",
         projectName: "demo",
-        composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services:\n  web:\n    image: nginx\n" }],
+        composeFiles: [{
+          filename: "compose.yaml",
+          role: "runtime",
+          content: "services:\n  web:\n    image: nginx\n",
+        }],
         hostings: [],
         noCache: "yes",
       }),
@@ -734,7 +814,11 @@ test("environment.deploy round-trips envFile and secretPlan", () => {
     projectId: "proj-1",
     organizationId: "org-1",
     projectName: "demo",
-    composeFiles: [{ filename: "compose.yaml", role: "runtime", content: "services:\n  web:\n    image: nginx\n" }],
+    composeFiles: [{
+      filename: "compose.yaml",
+      role: "runtime",
+      content: "services:\n  web:\n    image: nginx\n",
+    }],
     hostings: [],
     envFile: "web__PORT=3000\n",
     secretPlan: [{
