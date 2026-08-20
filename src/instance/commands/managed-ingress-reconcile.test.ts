@@ -331,9 +331,7 @@ test({
         );
         assertEquals(second.restarted, true);
         assertEquals(
-          dockerArgs.some((args) =>
-            args.includes("up") && args.includes("-d")
-          ),
+          dockerArgs.some((args) => args.includes("up") && args.includes("-d")),
           true,
         );
       } finally {

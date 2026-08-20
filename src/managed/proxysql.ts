@@ -830,9 +830,7 @@ function backendPlacement(
  * and a trailing record without a comma are both valid.
  */
 function withLibconfigRecordCommas(rows: readonly string[]): string[] {
-  return rows.map((row, index) =>
-    index < rows.length - 1 ? `${row},` : row
-  );
+  return rows.map((row, index) => index < rows.length - 1 ? `${row},` : row);
 }
 
 function renderServerRows(
