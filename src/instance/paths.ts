@@ -349,5 +349,5 @@ export async function createInstanceHttpClient(
     return undefined;
   }
 
-  return createHttpClientFromCaPath(options.caCertPath);
+  return await createHttpClientFromCaPath(options.caCertPath);
 }
