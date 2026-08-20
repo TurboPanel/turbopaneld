@@ -823,6 +823,18 @@ function backendPlacement(
   };
 }
 
+/**
+ * ProxySQL `proxysql.cnf` is libconfig. Adjacent `{...}` records in a list
+ * must be comma-separated — a second postgres cluster (or a replica row)
+ * without commas is `Parse error` and the container crash-loops. Empty lists
+ * and a trailing record without a comma are both valid.
+ */
+function withLibconfigRecordCommas(rows: readonly string[]): string[] {
+  return rows.map((row, index) =>
+    index < rows.length - 1 ? `${row},` : row
+  );
+}
+
 function renderServerRows(
   family: "mysql" | "pgsql",
   clusters: readonly ProxySqlClusterDesired[],
@@ -960,13 +972,31 @@ function renderProtocolFamilySection(
   const lines: string[] = [];
 
   const serverRows = renderServerRows(family, clusters);
-  lines.push(`${family}_servers =`, "(", ...serverRows, ")", "");
+  lines.push(
+    `${family}_servers =`,
+    "(",
+    ...withLibconfigRecordCommas(serverRows),
+    ")",
+    "",
+  );
 
   const userRows = renderUserRows(family, clusters);
-  lines.push(`${family}_users =`, "(", ...userRows, ")", "");
+  lines.push(
+    `${family}_users =`,
+    "(",
+    ...withLibconfigRecordCommas(userRows),
+    ")",
+    "",
+  );
 
   const ruleRows = renderQueryRuleRows(family, clusters);
-  lines.push(`${family}_query_rules =`, "(", ...ruleRows, ")", "");
+  lines.push(
+    `${family}_query_rules =`,
+    "(",
+    ...withLibconfigRecordCommas(ruleRows),
+    ")",
+    "",
+  );
 
   return lines;
 }

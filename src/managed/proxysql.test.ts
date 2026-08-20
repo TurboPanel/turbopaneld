@@ -576,6 +576,54 @@ const PRIMARY_AND_READER_BACKENDS: ProxySqlBackendDesired[] = [
   },
 ];
 
+test("libconfig server/user lists comma-separate adjacent records", () => {
+  const cnf = renderProxySqlConfig({
+    bindAddresses: [],
+    clusters: [
+      clusterDesired({
+        backends: PRIMARY_AND_READER_BACKENDS,
+        users: [
+          { username: "app", role: "user", password: "s3cret-app" },
+          { username: "ro", role: "user", password: "s3cret-ro" },
+        ],
+      }),
+      clusterDesired({
+        managedId: "m2",
+        writerHostgroup: 2,
+        readerHostgroup: 3,
+        backends: [
+          {
+            memberId: "mb3",
+            role: "primary",
+            readEligible: false,
+            address: "engine-2",
+            port: 5432,
+            transport: "local",
+          },
+        ],
+        users: [{ username: "app2", role: "user", password: "s3cret-app2" }],
+      }),
+    ],
+  });
+  // ProxySQL libconfig: a second `{...}` without a comma is `Parse error` and
+  // crash-loops the container. Trailing commas after the last record are not
+  // required (and some ProxySQL builds reject them).
+  assertStringIncludes(
+    cnf,
+    '    { hostgroup_id=0 hostname="writer" port=5432 use_ssl=1 status="ONLINE" },\n' +
+      '    { hostgroup_id=1 hostname="reader" port=5432 use_ssl=1 status="ONLINE" },\n' +
+      '    { hostgroup_id=2 hostname="engine-2" port=5432 use_ssl=1 status="ONLINE" }',
+  );
+  assertStringIncludes(
+    cnf,
+    '    { username="app" password="s3cret-app" default_hostgroup=0 active=1 use_ssl=0 },\n' +
+      '    { username="ro" password="s3cret-ro" default_hostgroup=0 active=1 use_ssl=0 },\n' +
+      '    { username="app2" password="s3cret-app2" default_hostgroup=2 active=1 use_ssl=0 }',
+  );
+  assertEquals(cnf.includes("} ,"), false);
+  assertEquals(cnf.includes("},\n)"), false);
+});
+
 test("a read-eligible replica alone does not split reads off the primary", () => {
   const cnf = renderProxySqlConfig({
     bindAddresses: ["0.0.0.0"],

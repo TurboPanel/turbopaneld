@@ -190,6 +190,21 @@ async function readPreviousConfig(path: string): Promise<string | null> {
   }
 }
 
+/**
+ * Empty-cluster teardown is `compose down` and leaves the yaml/cnf on disk.
+ * File-diff restart detection then treats the next non-empty reconcile as a
+ * no-op, so a single remaining (or newly created) cluster never comes back.
+ * Inspect failure (`undefined`) is not treated as down — do not compose-up
+ * just because `ps` could not run.
+ */
+function proxysqlStackNeedsComposeUp(
+  observed: EnvironmentDeployContainer | null | undefined,
+): boolean {
+  if (observed === undefined) return false;
+  if (observed === null) return true;
+  return observed.status !== "running";
+}
+
 async function ensureProxySqlComposeUp(
   layout: LayoutPaths,
   composePath: string,
@@ -440,9 +455,15 @@ export async function handleManagedIngressReconcile(
   );
   const composeNeedsUp =
     previousComposeText?.trimEnd() !== nextComposeText.trimEnd();
-  const restartNeeded = composeNeedsUp ||
+  let restartNeeded = composeNeedsUp ||
     staticConfigSectionChanged(previousConfig, nextConfig) ||
     !sameBindAddresses(previousBindAddresses, bindAddresses);
+  if (!restartNeeded) {
+    const current = await inspectProxySqlContainer(layout, descriptor, {
+      runDocker: run,
+    });
+    restartNeeded = proxysqlStackNeedsComposeUp(current);
+  }
 
   if (restartNeeded) {
     await ensureProxySqlComposeUp(

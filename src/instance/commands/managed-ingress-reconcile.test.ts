@@ -106,6 +106,36 @@ function fakeRun(): (args: string[]) => Promise<DockerCliResult> {
     Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 });
 }
 
+function runningProxySqlPsStdout(): string {
+  return JSON.stringify({
+    ID: "proxysql-cid",
+    Name: `${PROXYSQL_SERVICE_ID}-sql`,
+    Service: "proxysql",
+    State: "running",
+    Labels: {
+      "turbopanel.role": "turbopanel",
+      "com.turbopanel.system.component": "managed-ingress",
+    },
+  });
+}
+
+/** `compose ps` reports the allocated ProxySQL container as running. */
+function fakeRunWithRunningProxySql(): (
+  args: string[],
+) => Promise<DockerCliResult> {
+  return (args) => {
+    if (args.includes("ps")) {
+      return Promise.resolve({
+        success: true,
+        stdout: runningProxySqlPsStdout(),
+        stderr: "",
+        code: 0,
+      });
+    }
+    return fakeRun()(args);
+  };
+}
+
 function decryptSecretsEcho(
   ciphertexts: string[],
 ): Promise<(string | null)[]> {
@@ -244,9 +274,37 @@ test({
         assertEquals(second.restarted, true);
 
         // Re-applying the exact same desired state a third time must not
-        // spuriously restart.
+        // spuriously restart when the container is already running.
         const third = await handleManagedIngressReconcile(
           basePayload("203.0.113.5"),
+          new Date().toISOString(),
+          {
+            runDocker: fakeRunWithRunningProxySql(),
+            decryptSecrets: decryptSecretsEcho,
+            ensureDocker: () => Promise.resolve(),
+          },
+        );
+        assertEquals(third.restarted, false);
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleManagedIngressReconcile compose-ups after teardown when yaml/cnf are unchanged",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedFixture(fixture);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        const first = await handleManagedIngressReconcile(
+          basePayload(),
           new Date().toISOString(),
           {
             runDocker: fakeRun(),
@@ -254,7 +312,30 @@ test({
             ensureDocker: () => Promise.resolve(),
           },
         );
-        assertEquals(third.restarted, false);
+        assertEquals(first.restarted, true);
+
+        // Same files on disk, container gone (`compose down` leftover) — must
+        // `compose up` even though file-diff restart detection is a no-op.
+        const dockerArgs: string[][] = [];
+        const second = await handleManagedIngressReconcile(
+          basePayload(),
+          new Date().toISOString(),
+          {
+            runDocker: (args) => {
+              dockerArgs.push([...args]);
+              return fakeRun()(args);
+            },
+            decryptSecrets: decryptSecretsEcho,
+            ensureDocker: () => Promise.resolve(),
+          },
+        );
+        assertEquals(second.restarted, true);
+        assertEquals(
+          dockerArgs.some((args) =>
+            args.includes("up") && args.includes("-d")
+          ),
+          true,
+        );
       } finally {
         Deno.env.delete("TURBOPANEL_STATE_DIR");
         Deno.env.delete("TURBOPANEL_CONFIG_DIR");
