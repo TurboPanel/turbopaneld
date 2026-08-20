@@ -2352,6 +2352,33 @@ test("managed.ingress.reconcile round-trips fabric backends and segments", () =>
   });
   assertEquals(teardown.clusters, []);
   assertEquals(teardown.orgTlsMaterial, undefined);
+  assertEquals(teardown.identity, undefined);
+});
+
+test("managed.ingress.reconcile round-trips ProxySQL identity", () => {
+  const serviceId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const payload = parseManagedIngressReconcilePayload({
+    ...VALID_MANAGED_INGRESS_RECONCILE,
+    identity: {
+      serviceId,
+      composeServiceName: "proxysql",
+      containerName: `${serviceId}-sql`,
+    },
+  });
+  assertEquals(payload.identity?.containerName, `${serviceId}-sql`);
+  assertThrows(
+    () =>
+      parseManagedIngressReconcilePayload({
+        ...VALID_MANAGED_INGRESS_RECONCILE,
+        identity: {
+          serviceId,
+          composeServiceName: "proxysql",
+          containerName: serviceId,
+        },
+      }),
+    TypeError,
+    "Invalid managed.ingress.reconcile identity",
+  );
 });
 
 test("managed.ingress.reconcile round-trips connectionRole and autoReadSplit", () => {

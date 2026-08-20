@@ -111,6 +111,58 @@ test("mysql waitReady succeeds on first mysqladmin ping", async () => {
   assertEquals(calls[0]!.argv.includes("ping"), true);
 });
 
+test("mysql waitReady retries mysqladmin ping via defaults-extra-file after 1045", async () => {
+  const calls: RecordedExec[] = [];
+  let n = 0;
+  const exec: ManagedEngineExec = (argv, input) => {
+    calls.push({ argv: [...argv], input });
+    n += 1;
+    if (n === 1) {
+      return Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr:
+          "ERROR 1045 (28000): Access denied for user 'root'@'localhost' (using password: NO)",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await mysqlManagedEngineRuntime.waitReady({
+    ...buildContext(exec),
+    socketPassword: "root-pass",
+  });
+  assertEquals(calls.length, 2);
+  assertEquals(calls[1]!.argv[0], "sh");
+  assertEquals(calls[1]!.argv.includes("mysqladmin"), true);
+  assertEquals(calls[1]!.input?.includes("[client]"), true);
+  assertEquals(calls[1]!.input?.includes("password=root-pass"), true);
+});
+
+test("mysql waitReady retries ping when mysqladmin exits 0 on 1045", async () => {
+  const calls: RecordedExec[] = [];
+  let n = 0;
+  const exec: ManagedEngineExec = (argv, input) => {
+    calls.push({ argv: [...argv], input });
+    n += 1;
+    if (n === 1) {
+      return Promise.resolve({
+        success: true,
+        stdout: "",
+        stderr:
+          "mysqladmin: connect to server at 'localhost' failed\nerror: 'Access denied for user 'root'@'localhost' (using password: NO)'",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "mysqld is alive", stderr: "" });
+  };
+  await mysqlManagedEngineRuntime.waitReady({
+    ...buildContext(exec),
+    socketPassword: "root-pass",
+  });
+  assertEquals(calls.length, 2);
+  assertEquals(calls[1]!.argv[0], "sh");
+  assertEquals(calls[1]!.input?.includes("password=root-pass"), true);
+});
+
 test("mysql applyCredentials creates root and app users via socket mysql", async () => {
   const { exec, calls } = recordingExec();
   const credentials: ManagedApplyCredential[] = [
@@ -137,6 +189,15 @@ test("mysql applyCredentials creates root and app users via socket mysql", async
   assertEquals(applied, ["root", "app_user"]);
   assertEquals(calls.every((c) => c.argv.includes("--protocol=socket")), true);
   assertEquals(calls.some((c) => c.input?.includes("app_user")), true);
+  const rootSql = calls.find((c) =>
+    c.input?.includes("IDENTIFIED WITH auth_socket")
+  )?.input ?? "";
+  assertEquals(rootSql.includes("IDENTIFIED WITH auth_socket"), true);
+  assertEquals(rootSql.includes("INSTALL PLUGIN"), false);
+  assertEquals(
+    /ALTER USER `root`@'localhost' IDENTIFIED BY/.test(rootSql),
+    false,
+  );
 });
 
 test("mysql dropUsers skips the platform root username", async () => {

@@ -10,6 +10,7 @@ Root context: `../../AGENTS.md`. Instance engine specs:
 `../../../turbopanel/src/lib/managed/AGENTS.md`. Command contracts:
 `../instance/commands/contracts.ts`. Host prerequisites:
 `../../orchestration/AGENTS.md` → **ProxySQL (`proxysql`)**.
+Certificate authorities: `../../../turbopanel/src/lib/tls/AGENTS.md`.
 
 ## Module map
 
@@ -24,7 +25,7 @@ Root context: `../../AGENTS.md`. Instance engine specs:
 | `proxysql.ts` | Shared ProxySQL compose + durable `proxysql.cnf` generation, static-section diffing, inspect/start/stop/restart |
 | `proxysql-admin.ts` | Runtime admin apply via `docker exec` + `admin.cnf` (`[client]` secrets never on argv/logs) |
 | `containers.ts` | Shared `docker compose ps` collection + running-container resolution used by `apply.ts` and `backup.ts` |
-| `apply.ts` / `lifecycle.ts` / `destroy.ts` / `promote.ts` | Engine command handlers (wired from `command-router.ts`); apply/destroy do **not** bring up per-service Traefik; `managed.promote` is the engine promote step after TurboPanel fencing |
+| `apply.ts` / `lifecycle.ts` / `destroy.ts` / `promote.ts` | Engine command handlers (wired from `command-router.ts`); apply/destroy do **not** bring up per-service Traefik; `managed.promote` is the engine promote step after TurboPanel fencing. **`managed.destroy` always `compose -p turbopanel-managed-<id> down`** (even if the state dir is missing), then `docker ps -aq --filter label=com.docker.compose.project=…` and `docker rm -f` leftovers; compose down failure is **not** success while labeled containers remain. No `-f` (same interpolation rule as lifecycle). |
 | `orchestrator.ts` / `orchestrator-api.ts` | Per-org Orchestrator compose (`turbopanel-orchestrator`) + local HTTP (`:33001`); `Recover: false`; Raft `:33002` on advertise address only |
 | `../instance/commands/managed-ha-reconcile.ts` / `managed-ha-failover.ts` | `managed.ha.reconcile` (whole-server HA stack) + `managed.ha.failover` (`drain` / `recover`). Designated Orchestrator recover-to; on HTTP/API failure **or** absent stack, falls back to `managed.promote` so fencing is not stranded. `Recover: false` stays — TurboPanel picks the candidate. `Future:` fail-closed HA lease when Raft is unreachable. |
 | `../instance/ha-observe.ts` | Poll local Orchestrator `/api/problems`; emit unsolicited `managed-ha-event` |
@@ -32,8 +33,8 @@ Root context: `../../AGENTS.md`. Instance engine specs:
 | `logs.ts` | Bounded `compose logs`; cell `managed-logs-request` / `managed-logs-result` (not a command) |
 | `engines/` | Per-engine runtime registry (`postgres`, `mysql`, `mariadb`); optional `dropUsers` / `backup` / `replication` (+ optional `configureStandby` for SQL-configured standbys) |
 | `engines/postgres.ts` + `postgres-sql.ts` | Postgres runtime + pure SQL builders |
-| `engines/mysql.ts` + `mysql-sql.ts` | MySQL runtime + pure SQL builders (GTID, auth_socket platform admin keeps `backup.ts` credential-free) |
-| `engines/mariadb.ts` + `mariadb-sql.ts` | MariaDB runtime + **own** dialect (not a MySQL alias; `MASTER_USE_GTID=slave_pos`, `mariadb-dump --gtid`) |
+| `engines/mysql.ts` + `mysql-sql.ts` | MySQL runtime + pure SQL builders (GTID, auth_socket platform admin keeps `backup.ts` credential-free). Root apply creates the password account on the managed Docker network only and re-asserts `root@localhost` `auth_socket`; it never `IDENTIFIED BY` on localhost. When socket auth is missing, waitReady/apply retry via a short-lived 0600 defaults-extra-file (never `-p` / `MYSQL_PWD`) |
+| `engines/mariadb.ts` + `mariadb-sql.ts` | MariaDB runtime + **own** dialect (not a MySQL alias; `MASTER_USE_GTID=slave_pos`, `mariadb-dump --gtid`). Root apply creates the password account on the managed Docker network only and re-asserts `root@localhost` `unix_socket`; it never `IDENTIFIED BY` on localhost. When socket auth is missing, waitReady/apply retry via a short-lived 0600 defaults-extra-file (never `-p` / `MYSQL_PWD`) |
 
 ## State tree
 
@@ -103,8 +104,8 @@ listeners and routes to engine members on `turbopanel-managed`.
 | --- | --- |
 | Image pin | `proxysql/proxysql:3.0.9` (`PROXYSQL_IMAGE`) — **do not loosen** without reviewing **CVE-2026-48773** (pre-auth first-packet heap overflow) and **CVE-2026-48772** (PROXY-protocol-v1 `client_addr` ACL bypass); both fixed in 3.0.9 |
 | Listeners | Published pgsql + mysql client ports on the instance-resolved `bindAddress` — numbers come from `listenerPorts` on the command (default `15432` / `16306`), see **Configurable listener ports** below; admin on `127.0.0.1:6032` only |
-| TLS | Frontend/backend TLS uses org-CA material under `configDir/proxysql/tls/` (and per-engine copies under `tls/proxysql/` for materialize). Engines still use self-signed `tlsMaterial` for their own listener when requested. Whether a *client* may stay plaintext is per-cluster `requireTls` — see **Frontend TLS enforcement** below |
-| Desired state | Whole-server command `managed.ingress.reconcile` carries `bindAddress` + `listenerPorts` + `clusters[]` (backends + users); **not** embedded on each `managed.apply`. Empty `clusters[]` tears the stack down (`compose down --remove-orphans`) without TLS materialization |
+| TLS | Frontend/backend TLS uses **Organization CA** material under `configDir/proxysql/tls/` (and per-engine copies under `tls/proxysql/` for materialize). `ca.pem` / `tls/ca.crt` are the concatenated active+retired trust bundle (`orgTlsMaterial.caCertPem`; ProxySQL `ssl_ca` and Postgres `ssl_ca_file` accept multi-PEM). The daemon's **Platform CA** (`/etc/turbopanel/instance-ca.pem`) is unrelated and never used for ProxySQL/engine leaves. Engines still use self-signed `tlsMaterial` for their own listener when requested. Whether a *client* may stay plaintext is per-cluster `requireTls` — see **Frontend TLS enforcement** below |
+| Desired state | Whole-server command `managed.ingress.reconcile` carries `identity` `{ serviceId, composeServiceName, containerName }` (same persist pattern as `managed.ha.reconcile`) + `bindAddress` + `listenerPorts` + `clusters[]` (backends + users); **not** embedded on each `managed.apply`. Empty `clusters[]` tears the stack down (`compose down --remove-orphans`) without TLS materialization. Remote daemon-only hosts often never receive `system.reconcile`, so ingress must persist the descriptor from the payload (or recover `container_name` / `serviceId` from an existing compose file) rather than requiring `<stateDir>/system/managed-ingress.json` up front |
 | Admin apply | `proxysql-admin.ts` loads `admin.cnf`, mounts it into a throwaway client or uses stdin; SQL LOAD/SAVE — credentials never argv/logs |
 | Backend monitor | Host-wide principal in `configDir/proxysql/monitor.cnf` (`tp_monitor` + random password). Written into `mysql_variables`/`pgsql_variables` and SET on reconcile. Each **primary** `managed.apply` creates the role (`GRANT pg_monitor` / MySQL PROCESS+REPLICATION CLIENT) after the same lazy `runProxySqlSetup` as ingress when `admin.cnf`/`monitor.cnf` are missing — otherwise first provision races (ProxySQL gets the password, Postgres never gets the role). **Never** leave ProxySQL defaults (`monitor`/`monitor`) — they spam engine logs and never authenticate |
 | Cold start | Full `proxysql.cnf` (static + dynamic tables) is rewritten so reboot/`compose up` restores routing without a live admin session |
@@ -176,6 +177,10 @@ before enqueue (see `turbopanel/src/lib/managed/AGENTS.md` → Login namespace).
 
 ### Frontend TLS enforcement
 
+Frontend/backend leaves use **Organization CA** material. The daemon's
+**Platform CA** (`/etc/turbopanel/instance-ca.pem`) is unrelated and never used
+for ProxySQL/engine leaves.
+
 Cluster `requireTls` on `managed.ingress.reconcile` renders `use_ssl` on that
 cluster's `mysql_users` / `pgsql_users` rows (`renderUserRows` /
 `buildProxySqlAdminStatements`) — ProxySQL's per-user `REQUIRE SSL`: an encrypted
@@ -216,10 +221,10 @@ ProxySQL to enforce. Canonical policy:
    clusters still publish nothing; client traffic enters only via the shared
    ProxySQL client listeners.
    A **public** bind (`privateListener.transport === 'public'`) is mandatorily
-   TLS-only: `assertPublicPrivateListenerTls` (exported from `compose.ts`, run
-   first in `apply.ts` and again during compose normalization) refuses the
-   listener unless `orgTlsMaterial` is present, so `tls/server.crt` + `ca.crt`
-   always land before the publish exists. `firewall.ts` then scopes that
+   **Organization CA** TLS-only: `assertPublicPrivateListenerTls` (exported from
+   `compose.ts`, run first in `apply.ts` and again during compose normalization)
+   refuses the listener unless `orgTlsMaterial` is present, so `tls/server.crt` +
+   `ca.crt` (Organization CA material) always land before the publish exists. `firewall.ts` then scopes that
    publish to the known peer address(es) — still never `0.0.0.0`, and never a
    broad fallback when no stable peer address is known.
 3. **Always join `turbopanel-managed`.** Every managed engine container joins
@@ -309,7 +314,7 @@ Physical / GTID streaming is **engine → engine**, never through ProxySQL.
 | Path | Postgres | MySQL / MariaDB |
 | --- | --- | --- |
 | Co-resident | Peers by `containerName` on `turbopanel-managed` | same |
-| Cross-host | Private listener (`private_port` on the transport ladder: `local` co-resident container name → `fabric` relay address over `tp0` → `datacenter` private address → `public` address, org-CA TLS mandatory + iptables-scoped) | same (`REQUIRE SSL` on the replication grant) |
+| Cross-host | Private listener (`private_port` on the transport ladder: `local` co-resident container name → `fabric` relay address over `tp0` → `datacenter` private address → `public` address, **Organization CA** TLS mandatory + iptables-scoped) | same (`REQUIRE SSL` on the replication grant) |
 | Config | Instance owns `postgresql.conf` + `pg_hba.conf` | Instance owns `my.cnf` + `initdb/00-turbopanel.sql` (socket-auth platform admin — keeps SQL/`backup.ts` credential-free) |
 | Slots / disk hazard | Physical slots + orphan drop on `ensurePrimary` | **No slots** — bounded `binlog_expire_logs_seconds` in platform `my.cnf` |
 | Bootstrap | `bootstrapStandby` **before** compose up seeds via `pg_basebackup -R` | Probe only before compose up (uninit → `seeded` deferred; marker → `already_standby`; datadir without marker → `needs_resync`). Actual seed in **`configureStandby`** after compose up (logical dump + `CHANGE REPLICATION SOURCE` / MariaDB `CHANGE MASTER` + GTID) |

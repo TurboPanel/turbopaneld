@@ -2,9 +2,12 @@ import { assertEquals, assertThrows } from "@std/assert";
 import {
   changeReplicationSourceSql,
   createClientAccountSql,
+  createNetworkAccountSql,
   ensureReplicationAccountSql,
+  ensureSocketAdminSql,
   grantDatabaseSql,
   grantReplicationSql,
+  MANAGED_DOCKER_NETWORK_HOST,
   quoteIdentifier,
   quoteLiteral,
 } from "./mariadb-sql.ts";
@@ -68,6 +71,23 @@ test("createClientAccountSql and dumpArgv system-schema rejection", () => {
   assertEquals(argv[0], "mariadb-dump");
   assertEquals(argv.includes("--gtid"), true);
   assertThrows(() => backup.dumpArgv(ctx, { database: "sys" }), Error);
+});
+
+test("createNetworkAccountSql is managed-network only", () => {
+  const sql = createNetworkAccountSql("root", "x");
+  assertEquals(sql.includes(MANAGED_DOCKER_NETWORK_HOST), true);
+  assertEquals(sql.includes("localhost"), false);
+  assertEquals(sql.includes("IDENTIFIED BY"), true);
+});
+
+test("ensureSocketAdminSql uses unix_socket on localhost only", () => {
+  const sql = ensureSocketAdminSql();
+  assertEquals(sql.includes("IDENTIFIED VIA unix_socket"), true);
+  assertEquals(sql.includes("`root`@'localhost'"), true);
+  assertEquals(sql.includes("`mysql`@'localhost'"), true);
+  assertEquals(sql.includes("IDENTIFIED BY"), false);
+  assertEquals(sql.includes(MANAGED_DOCKER_NETWORK_HOST), false);
+  assertEquals(sql.includes("INSTALL PLUGIN"), false);
 });
 
 test("runtime defaultDatabase is a non-system application schema", () => {

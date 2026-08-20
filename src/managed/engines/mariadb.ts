@@ -14,10 +14,12 @@ import {
   changeReplicationSourceSql,
   createClientAccountSql,
   createDatabaseSql,
+  createNetworkAccountSql,
   dropAccountSql,
   dropDatabaseSql,
   ensureProxySqlMonitorAccountSql,
   ensureReplicationAccountSql,
+  ensureSocketAdminSql,
   grantDatabaseSql,
   grantRootSql,
   isWritableSql,
@@ -77,16 +79,93 @@ const mariadbBackupRuntime: ManagedEngineBackupRuntime = {
 
 const READY_POLL_MS = 1_000;
 const READY_TIMEOUT_MS = 120_000;
+const MARIADB_SQL_STDIN_MARK = "__TP_SQL__";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isDeniedWithoutPassword(text: string): boolean {
+  return text.includes("Access denied") &&
+    text.includes("using password: NO");
+}
+
+function clientDefaultsBody(username: string, password: string): string {
+  return `[client]\nuser=${username}\npassword=${password}\n`;
+}
+
+function mariadbDefaultsOnlyScript(): string {
+  return [
+    "set -e",
+    "tmp=$(mktemp)",
+    "trap 'rm -f \"$tmp\"' EXIT INT TERM HUP",
+    'chmod 600 "$tmp"',
+    'cat > "$tmp"',
+    "client=$1",
+    "shift",
+    'exec "$client" --defaults-extra-file="$tmp" "$@"',
+  ].join("\n");
+}
+
+function mariadbDefaultsSqlScript(): string {
+  return [
+    "set -e",
+    "tmp=$(mktemp)",
+    "sqlf=$(mktemp)",
+    'trap \'rm -f "$tmp" "$sqlf"\' EXIT INT TERM HUP',
+    'chmod 600 "$tmp" "$sqlf"',
+    ': > "$tmp"',
+    `while IFS= read -r line || [ -n "$line" ]; do`,
+    `  if [ "$line" = "${MARIADB_SQL_STDIN_MARK}" ]; then`,
+    '    cat > "$sqlf"',
+    "    break",
+    "  fi",
+    String.raw`  printf '%s\n' "$line" >> "$tmp"`,
+    "done",
+    'mariadb --defaults-extra-file="$tmp" --protocol=socket -u "$1" < "$sqlf"',
+  ].join("\n");
+}
+
+async function execMariadbWithDefaults(
+  ctx: ManagedEngineContext,
+  argv: string[],
+  input: string | undefined,
+  password: string,
+): Promise<{ success: boolean; stdout: string; stderr: string }> {
+  const defaults = clientDefaultsBody(ctx.rootUsername, password);
+  if (input !== undefined) {
+    return await ctx.exec(
+      ["sh", "-c", mariadbDefaultsSqlScript(), "tp-mariadb", ctx.rootUsername],
+      `${defaults}${MARIADB_SQL_STDIN_MARK}\n${input}`,
+    );
+  }
+  return await ctx.exec(
+    ["sh", "-c", mariadbDefaultsOnlyScript(), "tp-mariadb", ...argv],
+    defaults,
+  );
+}
+
+async function execMariadb(
+  ctx: ManagedEngineContext,
+  argv: string[],
+  input?: string,
+): Promise<{ success: boolean; stdout: string; stderr: string }> {
+  const first = await ctx.exec(argv, input);
+  const text = `${first.stderr}\n${first.stdout}`;
+  const deniedNoPassword = isDeniedWithoutPassword(text);
+  // mariadb-admin ping exits 0 even on 1045 (server alive). That is not ready.
+  if (first.success && !deniedNoPassword) return first;
+  const password = ctx.socketPassword;
+  if (!password || !deniedNoPassword) return first;
+  return await execMariadbWithDefaults(ctx, argv, input, password);
 }
 
 async function runMariadb(
   ctx: ManagedEngineContext,
   sql: string,
 ): Promise<void> {
-  const result = await ctx.exec(
+  const result = await execMariadb(
+    ctx,
     ["mariadb", "--protocol=socket", "-u", ctx.rootUsername],
     sql,
   );
@@ -103,7 +182,8 @@ async function runMariadbQuery(
   ctx: ManagedEngineContext,
   sql: string,
 ): Promise<string> {
-  const result = await ctx.exec(
+  const result = await execMariadb(
+    ctx,
     [
       "mariadb",
       "--protocol=socket",
@@ -134,7 +214,8 @@ async function runMariadbStatusQuery(
   ctx: ManagedEngineContext,
   sql: string,
 ): Promise<string> {
-  const result = await ctx.exec(
+  const result = await execMariadb(
+    ctx,
     [
       "mariadb",
       "--protocol=socket",
@@ -170,8 +251,9 @@ async function applyOneCredential(
     await runMariadb(
       ctx,
       [
-        createClientAccountSql(credential.username, credential.password),
+        createNetworkAccountSql(credential.username, credential.password),
         grantRootSql(credential.username),
+        ensureSocketAdminSql(),
         "FLUSH PRIVILEGES;",
       ].join("\n"),
     );
@@ -431,7 +513,7 @@ export const mariadbManagedEngineRuntime: ManagedEngineRuntime = {
     const deadline = Date.now() + READY_TIMEOUT_MS;
     let lastError = "mariadb-admin ping did not succeed";
     while (Date.now() < deadline) {
-      const result = await ctx.exec([
+      const result = await execMariadb(ctx, [
         "mariadb-admin",
         "ping",
         "--protocol=socket",

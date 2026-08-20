@@ -676,9 +676,13 @@ export type ManagedApplyTlsMaterial = {
 };
 
 /**
- * Org-CA-signed leaf material for managed frontend (ProxySQL) TLS.
- * Private key is a daemon-recipient `tpdaemon` envelope; cert + CA PEM are plain.
- * Must stay in sync with the instance canonical `managed.apply` shape.
+ * Leaf signed by the Organization CA of the server-owner organization for
+ * managed frontend (ProxySQL) TLS. `certificatePem` is that leaf; `caCertPem`
+ * is the concatenated active+retired Organization CA trust bundle (not a lone
+ * active PEM) — explicitly not the Platform CA / `instance-ca.pem`. Multi-PEM
+ * is accepted by ProxySQL `ssl_ca` and Postgres `ssl_ca_file`. Private key is a
+ * daemon-recipient `tpdaemon` envelope; cert + trust bundle are plain. Must
+ * stay in sync with the instance canonical `managed.apply` shape.
  */
 export type ManagedApplyOrgTlsMaterial = {
   certificatePem: string;
@@ -776,7 +780,13 @@ export type ManagedApplyPayload = {
   dropUsers?: string[];
   /** When set, daemon generates a self-signed cert under managed state `tls/`. */
   tlsMaterial?: ManagedApplyTlsMaterial;
-  /** Org-CA leaf + CA PEM for ProxySQL-facing files under `tls/proxysql/`. */
+  /**
+   * Organization CA leaf + Organization CA trust bundle for ProxySQL-facing
+   * files under `tls/proxysql/`. `caCertPem` is the concatenated
+   * active+retired Organization CA PEMs of the server-owner organization —
+   * not the Platform CA / `instance-ca.pem`. Multi-PEM is accepted by ProxySQL
+   * `ssl_ca` and Postgres `ssl_ca_file`.
+   */
   orgTlsMaterial?: ManagedApplyOrgTlsMaterial;
 };
 
@@ -965,7 +975,13 @@ export type ManagedIngressReconcilePayload = {
    * means no host publish at all.
    */
   bindAddresses?: string[];
-  /** Omitted on empty-cluster teardown so it does not need a CA round trip. */
+  /**
+   * Organization CA leaf + Organization CA trust bundle. `caCertPem` is the
+   * concatenated active+retired Organization CA PEMs of the server-owner
+   * organization — not the Platform CA / `instance-ca.pem`. Multi-PEM is
+   * accepted by ProxySQL `ssl_ca` and Postgres `ssl_ca_file`. Omitted on
+   * empty-cluster teardown so it does not need an Organization CA round trip.
+   */
   orgTlsMaterial?: ManagedApplyOrgTlsMaterial;
   /**
    * Organization-resolved client listener ports for both protocol modules.
@@ -974,6 +990,16 @@ export type ManagedIngressReconcilePayload = {
   listenerPorts?: ManagedIngressListenerPortsPayload;
   clusters: ProxySqlClusterPayload[];
   segments?: Array<{ name: string; subnet: string }>;
+  /**
+   * ProxySQL system-component identity. Present on apply so remote hosts can
+   * persist `<stateDir>/system/managed-ingress.json` without a prior
+   * `system.reconcile`. Omitted on empty-cluster teardown.
+   */
+  identity?: {
+    serviceId: string;
+    composeServiceName: string;
+    containerName: string;
+  };
 };
 
 /** Must stay in sync with the instance canonical `managed.ingress.reconcile` shape. */
@@ -1034,6 +1060,12 @@ export type ManagedHaReconcilePayload = {
     composeServiceName: string;
     containerName: string;
   };
+  /**
+   * Organization CA leaf + Organization CA trust bundle. `caCertPem` is the
+   * concatenated active+retired Organization CA PEMs of the server-owner
+   * organization — not the Platform CA / `instance-ca.pem`. Multi-PEM is
+   * accepted by ProxySQL `ssl_ca` and Postgres `ssl_ca_file`.
+   */
   orgTlsMaterial?: ManagedApplyOrgTlsMaterial;
 };
 
@@ -4648,6 +4680,29 @@ function parseManagedIngressOrgTlsMaterial(
   return parsed;
 }
 
+function parseManagedIngressIdentity(
+  value: unknown,
+): NonNullable<ManagedIngressReconcilePayload["identity"]> {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid managed.ingress.reconcile identity");
+  }
+  if (
+    typeof value.serviceId !== "string" ||
+    !MANAGED_APPLY_UUID_RE.test(value.serviceId) ||
+    value.composeServiceName !== "proxysql" ||
+    typeof value.containerName !== "string" ||
+    value.containerName !==
+      `${value.serviceId}${MANAGED_INGRESS_CONTAINER_NAME_SUFFIX}`
+  ) {
+    throw new TypeError("Invalid managed.ingress.reconcile identity");
+  }
+  return {
+    serviceId: value.serviceId,
+    composeServiceName: value.composeServiceName,
+    containerName: value.containerName,
+  };
+}
+
 /** Must stay in sync with the instance canonical `managed.ingress.reconcile` validator. */
 export function parseManagedIngressReconcilePayload(
   value: unknown,
@@ -4683,6 +4738,9 @@ export function parseManagedIngressReconcilePayload(
   }
   if (value.segments !== undefined) {
     payload.segments = parseManagedIngressSegments(value.segments);
+  }
+  if (value.identity !== undefined) {
+    payload.identity = parseManagedIngressIdentity(value.identity);
   }
   return payload;
 }

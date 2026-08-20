@@ -2,9 +2,14 @@
  * Managed-engine TLS materialization.
  *
  * - `ensureManagedSelfSignedCert` — host openssl self-signed for the engine leg.
- * - `materializeProxySqlTlsMaterial` — org-CA-signed leaf + CA write for the
- *   ProxySQL-facing frontend (decrypt envelopes via the same secrets path as
- *   tenant deploy TLS materialization).
+ * - `materializeProxySqlTlsMaterial` — Organization-CA-signed leaf + Organization
+ *   CA write for the ProxySQL-facing frontend (decrypt envelopes via the same
+ *   secrets path as tenant deploy TLS materialization).
+ *
+ * `orgTlsMaterial.caCertPem` is the concatenated active+retired **Organization
+ * CA** trust bundle (ProxySQL `ssl_ca` / Postgres `ssl_ca_file` accept
+ * multi-PEM). This module never reads or writes
+ * `/etc/turbopanel/instance-ca.pem` (**Platform CA**).
  */
 
 import { join } from "@std/path";
@@ -139,9 +144,11 @@ function dirnameOf(path: string): string {
 }
 
 /**
- * Decrypt org-CA leaf material and write ProxySQL-facing PEMs under
+ * Decrypt Organization CA leaf material and write ProxySQL-facing PEMs under
  * `targetDir/{fullchain.pem,privkey.pem,ca.pem}` (modes `0640` / `0600` /
- * `0640`). Idempotent re-apply overwrites.
+ * `0640`), where `ca.pem` is the concatenated active+retired **Organization
+ * CA** trust bundle. Idempotent re-apply overwrites. Never reads or writes
+ * `/etc/turbopanel/instance-ca.pem` (**Platform CA**).
  */
 export async function materializeProxySqlTlsMaterial(
   targetDir: string,
@@ -172,9 +179,11 @@ export async function materializeProxySqlTlsMaterial(
 
 /**
  * Engine-local ProxySQL TLS material under `<managedDir>/tls/proxysql/`.
- * Also mirrors the org-CA leaf into `tls/server.{crt,key}` + `tls/ca.crt` so
- * the engine listener can serve `verify-full` for ProxySQL backends and
- * streaming replication.
+ * Additionally mirrors to `tls/server.crt` / `tls/server.key` / `tls/ca.crt`,
+ * where `tls/ca.crt` is the concatenated active+retired **Organization CA**
+ * trust bundle used for engine-listener and replication `verify-full`.
+ * `/etc/turbopanel/instance-ca.pem` (**Platform CA**) is never read or written
+ * by this module. Filenames stay unchanged.
  */
 export async function materializeManagedProxySqlTlsMaterial(
   managedDir: string,
@@ -202,8 +211,8 @@ export async function materializeManagedProxySqlTlsMaterial(
   await rewriteTlsFile(privkeyPath, privateKeyPem, KEY_MODE);
   await rewriteTlsFile(caPath, material.caCertPem, CERT_MODE);
 
-  // Mirror org-CA leaf to engine listener paths (verify-full primary_conninfo
-  // + ProxySQL backend SSL).
+  // Mirror Organization CA leaf to engine listener paths (verify-full
+  // primary_conninfo + ProxySQL backend SSL).
   const tlsDir = resolveManagedRelativePath(managedDir, "tls");
   await Deno.mkdir(tlsDir, { recursive: true, mode: DIR_MODE });
   const certPath = join(tlsDir, "server.crt");

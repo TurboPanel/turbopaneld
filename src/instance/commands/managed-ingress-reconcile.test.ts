@@ -11,6 +11,7 @@
 import { assertEquals, assertRejects } from "@std/assert";
 import type { DockerCliResult } from "../../deploy/docker-cli.ts";
 import {
+  readSystemComponentDescriptor,
   SYSTEM_MANAGED_INGRESS_COMPONENT,
   writeSystemComponentDescriptor,
 } from "../../deploy/system-component.ts";
@@ -42,6 +43,11 @@ function basePayload(
 ): ManagedIngressReconcilePayload {
   const payload: ManagedIngressReconcilePayload = {
     serverId: SERVER_ID,
+    identity: {
+      serviceId: PROXYSQL_SERVICE_ID,
+      composeServiceName: "proxysql",
+      containerName: `${PROXYSQL_SERVICE_ID}-sql`,
+    },
     orgTlsMaterial: {
       certificatePem:
         "-----BEGIN CERTIFICATE-----\nLEAF\n-----END CERTIFICATE-----\n",
@@ -654,6 +660,62 @@ test({
           },
         );
         assertEquals(hostPrepCalls, 0);
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleManagedIngressReconcile persists payload identity when the descriptor file is missing",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env);
+      await Deno.mkdir(proxysqlConfigDir(layout), { recursive: true });
+      await Deno.writeTextFile(
+        `${proxysqlConfigDir(layout)}/admin.cnf`,
+        "[client]\nuser=admin\npassword=admin-secret\n",
+      );
+      await Deno.writeTextFile(
+        `${proxysqlConfigDir(layout)}/monitor.cnf`,
+        "[client]\nuser=tp_monitor\npassword=mon-secret\n",
+      );
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        const before = await readSystemComponentDescriptor(
+          layout,
+          SYSTEM_MANAGED_INGRESS_COMPONENT,
+        );
+        assertEquals(before, null);
+
+        const result = await handleManagedIngressReconcile(
+          basePayload(),
+          new Date().toISOString(),
+          {
+            runDocker: fakeRun(),
+            decryptSecrets: decryptSecretsEcho,
+            ensureDocker: () => Promise.resolve(),
+          },
+        );
+        assertEquals(result.restarted, true);
+
+        const stored = await readSystemComponentDescriptor(
+          layout,
+          SYSTEM_MANAGED_INGRESS_COMPONENT,
+        );
+        assertEquals(stored?.containerName, `${PROXYSQL_SERVICE_ID}-sql`);
+        const composeText = await Deno.readTextFile(
+          proxysqlComposePath(layout),
+        );
+        assertEquals(
+          composeText.includes(`container_name: ${PROXYSQL_SERVICE_ID}-sql`),
+          true,
+        );
       } finally {
         Deno.env.delete("TURBOPANEL_STATE_DIR");
         Deno.env.delete("TURBOPANEL_CONFIG_DIR");

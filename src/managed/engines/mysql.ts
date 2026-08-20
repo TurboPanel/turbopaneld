@@ -12,15 +12,19 @@ import type {
 } from "../../instance/commands/contracts.ts";
 import { sanitizeForLog } from "../../logger.ts";
 import {
+  authSocketPluginPresentSql,
   changeReplicationSourceSql,
   createClientAccountSql,
   createDatabaseSql,
+  createNetworkAccountSql,
   dropAccountSql,
   dropDatabaseSql,
   ensureProxySqlMonitorAccountSql,
   ensureReplicationAccountSql,
+  ensureSocketAdminSql,
   grantDatabaseSql,
   grantRootSql,
+  installAuthSocketPluginSql,
   isWritableSql,
   type ManagedDatabasePrivilege,
   promoteSql,
@@ -83,16 +87,98 @@ const mysqlBackupRuntime: ManagedEngineBackupRuntime = {
 
 const READY_POLL_MS = 1_000;
 const READY_TIMEOUT_MS = 120_000;
+const MYSQL_SQL_STDIN_MARK = "__TP_SQL__";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isMysqlDeniedWithoutPassword(text: string): boolean {
+  return text.includes("Access denied") &&
+    text.includes("using password: NO");
+}
+
+function mysqlClientDefaultsBody(username: string, password: string): string {
+  return `[client]\nuser=${username}\npassword=${password}\n`;
+}
+
+/** Read a `[client]` defaults file from stdin, then exec remaining argv. */
+function mysqlDefaultsOnlyScript(): string {
+  return [
+    "set -e",
+    "tmp=$(mktemp)",
+    "trap 'rm -f \"$tmp\"' EXIT INT TERM HUP",
+    'chmod 600 "$tmp"',
+    'cat > "$tmp"',
+    "client=$1",
+    "shift",
+    'exec "$client" --defaults-extra-file="$tmp" "$@"',
+  ].join("\n");
+}
+
+/**
+ * Stdin is defaults, then {@link MYSQL_SQL_STDIN_MARK}, then SQL. Password
+ * never lands on argv / `MYSQL_PWD`.
+ */
+function mysqlDefaultsSqlScript(): string {
+  return [
+    "set -e",
+    "tmp=$(mktemp)",
+    "sqlf=$(mktemp)",
+    'trap \'rm -f "$tmp" "$sqlf"\' EXIT INT TERM HUP',
+    'chmod 600 "$tmp" "$sqlf"',
+    ': > "$tmp"',
+    `while IFS= read -r line || [ -n "$line" ]; do`,
+    `  if [ "$line" = "${MYSQL_SQL_STDIN_MARK}" ]; then`,
+    '    cat > "$sqlf"',
+    "    break",
+    "  fi",
+    String.raw`  printf '%s\n' "$line" >> "$tmp"`,
+    "done",
+    'mysql --defaults-extra-file="$tmp" --protocol=socket -u "$1" < "$sqlf"',
+  ].join("\n");
+}
+
+async function execMysqlWithDefaults(
+  ctx: ManagedEngineContext,
+  argv: string[],
+  input: string | undefined,
+  password: string,
+): Promise<{ success: boolean; stdout: string; stderr: string }> {
+  const defaults = mysqlClientDefaultsBody(ctx.rootUsername, password);
+  if (input !== undefined) {
+    return await ctx.exec(
+      ["sh", "-c", mysqlDefaultsSqlScript(), "tp-mysql", ctx.rootUsername],
+      `${defaults}${MYSQL_SQL_STDIN_MARK}\n${input}`,
+    );
+  }
+  return await ctx.exec(
+    ["sh", "-c", mysqlDefaultsOnlyScript(), "tp-mysql", ...argv],
+    defaults,
+  );
+}
+
+async function execMysql(
+  ctx: ManagedEngineContext,
+  argv: string[],
+  input?: string,
+): Promise<{ success: boolean; stdout: string; stderr: string }> {
+  const first = await ctx.exec(argv, input);
+  const text = `${first.stderr}\n${first.stdout}`;
+  const deniedNoPassword = isMysqlDeniedWithoutPassword(text);
+  // mysqladmin ping exits 0 even on 1045 (server alive). That is not ready.
+  if (first.success && !deniedNoPassword) return first;
+  const password = ctx.socketPassword;
+  if (!password || !deniedNoPassword) return first;
+  return await execMysqlWithDefaults(ctx, argv, input, password);
 }
 
 async function runMysql(
   ctx: ManagedEngineContext,
   sql: string,
 ): Promise<void> {
-  const result = await ctx.exec(
+  const result = await execMysql(
+    ctx,
     ["mysql", "--protocol=socket", "-u", ctx.rootUsername],
     sql,
   );
@@ -109,7 +195,8 @@ async function runMysqlQuery(
   ctx: ManagedEngineContext,
   sql: string,
 ): Promise<string> {
-  const result = await ctx.exec(
+  const result = await execMysql(
+    ctx,
     [
       "mysql",
       "--protocol=socket",
@@ -131,6 +218,25 @@ async function runMysqlQuery(
   return result.stdout;
 }
 
+async function ensureAuthSocketPlugin(
+  ctx: ManagedEngineContext,
+): Promise<void> {
+  const installed = (await runMysqlQuery(ctx, authSocketPluginPresentSql()))
+    .trim();
+  if (installed.length > 0) return;
+  const result = await execMysql(
+    ctx,
+    ["mysql", "--protocol=socket", "-u", ctx.rootUsername],
+    installAuthSocketPluginSql(),
+  );
+  if (result.success) return;
+  const text = `${result.stderr}\n${result.stdout}`;
+  if (text.includes("already exists")) return;
+  throw new Error(
+    `mysql failed: ${sanitizeForLog(result.stderr || result.stdout || "unknown")}`,
+  );
+}
+
 /**
  * Vertical (`-E`) status output so {@link parseShowReplicaStatus} can map
  * `Key: Value` lines. Batch (`-N -B`) returns a headerless TSV row, which
@@ -140,7 +246,8 @@ async function runMysqlStatusQuery(
   ctx: ManagedEngineContext,
   sql: string,
 ): Promise<string> {
-  const result = await ctx.exec(
+  const result = await execMysql(
+    ctx,
     [
       "mysql",
       "--protocol=socket",
@@ -173,11 +280,13 @@ async function applyOneCredential(
   credential: ManagedApplyCredential,
 ): Promise<void> {
   if (credential.role === "root") {
+    await ensureAuthSocketPlugin(ctx);
     await runMysql(
       ctx,
       [
-        createClientAccountSql(credential.username, credential.password),
+        createNetworkAccountSql(credential.username, credential.password),
         grantRootSql(credential.username),
+        ensureSocketAdminSql(),
         "FLUSH PRIVILEGES;",
       ].join("\n"),
     );
@@ -448,14 +557,16 @@ export const mysqlManagedEngineRuntime: ManagedEngineRuntime = {
     const deadline = Date.now() + READY_TIMEOUT_MS;
     let lastError = "mysqladmin ping did not succeed";
     while (Date.now() < deadline) {
-      const result = await ctx.exec([
+      const result = await execMysql(ctx, [
         "mysqladmin",
         "ping",
         "--protocol=socket",
         "-u",
         ctx.rootUsername,
       ]);
-      if (result.success) return;
+      if (result.success) {
+        return;
+      }
       lastError = result.stderr || result.stdout || lastError;
       await sleep(READY_POLL_MS);
     }

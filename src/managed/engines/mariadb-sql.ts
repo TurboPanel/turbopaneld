@@ -181,6 +181,38 @@ export function createClientAccountSql(
   ].join("\n");
 }
 
+/**
+ * Password account on the managed Docker network only — never `localhost`.
+ * Platform `root@localhost` stays `unix_socket` for credential-free docker exec.
+ */
+export function createNetworkAccountSql(
+  username: string,
+  password: string,
+): string {
+  return createOrAlterAccountSql(
+    username,
+    password,
+    MANAGED_DOCKER_NETWORK_HOST,
+  );
+}
+
+/**
+ * Repair / ensure socket-auth platform admins after a password bootstrap.
+ * MariaDB ships `unix_socket` built-in — no INSTALL PLUGIN.
+ */
+export function ensureSocketAdminSql(osUser: string = "mysql"): string {
+  const rootAccount = accountAt("root", "localhost");
+  const osAccount = accountAt(osUser, "localhost");
+  return [
+    `CREATE USER IF NOT EXISTS ${rootAccount} IDENTIFIED VIA unix_socket;`,
+    `ALTER USER ${rootAccount} IDENTIFIED VIA unix_socket;`,
+    `GRANT ALL PRIVILEGES ON *.* TO ${rootAccount} WITH GRANT OPTION;`,
+    `CREATE USER IF NOT EXISTS ${osAccount} IDENTIFIED VIA unix_socket;`,
+    `ALTER USER ${osAccount} IDENTIFIED VIA unix_socket;`,
+    `GRANT ALL PRIVILEGES ON *.* TO ${osAccount} WITH GRANT OPTION;`,
+  ].join("\n");
+}
+
 export function promoteSql(): string {
   return [
     "STOP SLAVE;",

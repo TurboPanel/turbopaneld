@@ -23,6 +23,13 @@ export type ManagedEngineContext = {
   rootUsername: string;
   defaultDatabase: string;
   exec: ManagedEngineExec;
+  /**
+   * Decrypted platform root password. MySQL/MariaDB waitReady/apply use it
+   * only when socket auth is missing (volumes whose initdb never installed
+   * auth_socket / unix_socket). Never logged; never passed as `-p` /
+   * `MYSQL_PWD`.
+   */
+  socketPassword?: string;
 };
 
 export type ManagedEngineRuntime = {

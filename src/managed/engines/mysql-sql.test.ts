@@ -1,16 +1,20 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import {
+  authSocketPluginPresentSql,
   changeReplicationSourceSql,
   createClientAccountSql,
   createDatabaseSql,
+  createNetworkAccountSql,
   createOrAlterAccountSql,
   dropAccountSql,
   dropDatabaseSql,
   ensureProxySqlMonitorAccountSql,
   ensureReplicationAccountSql,
+  ensureSocketAdminSql,
   grantDatabaseSql,
   grantReplicationSql,
   grantRootSql,
+  installAuthSocketPluginSql,
   isWritableSql,
   MANAGED_DOCKER_NETWORK_HOST,
   promoteSql,
@@ -100,6 +104,31 @@ test("createClientAccountSql covers network and localhost", () => {
   assertEquals(sql.includes(MANAGED_DOCKER_NETWORK_HOST), true);
   assertEquals(sql.includes("172.%"), false);
   assertEquals(sql.includes("localhost"), true);
+});
+
+test("createNetworkAccountSql is managed-network only", () => {
+  const sql = createNetworkAccountSql("root", "x");
+  assertEquals(sql.includes(MANAGED_DOCKER_NETWORK_HOST), true);
+  assertEquals(sql.includes("localhost"), false);
+  assertEquals(sql.includes("IDENTIFIED BY"), true);
+});
+
+test("ensureSocketAdminSql installs auth_socket on localhost only", () => {
+  const sql = ensureSocketAdminSql();
+  assertEquals(sql.includes("auth_socket"), true);
+  assertEquals(sql.includes("`root`@'localhost'"), true);
+  assertEquals(sql.includes("`mysql`@'localhost'"), true);
+  assertEquals(sql.includes("IDENTIFIED BY"), false);
+  assertEquals(sql.includes(MANAGED_DOCKER_NETWORK_HOST), false);
+  assertEquals(sql.includes("INSTALL PLUGIN"), false);
+  assertEquals(sql.includes("IF NOT EXISTS auth_socket"), false);
+});
+
+test("installAuthSocketPluginSql is MySQL INSTALL PLUGIN without IF NOT EXISTS", () => {
+  const sql = installAuthSocketPluginSql();
+  assertEquals(sql.includes("INSTALL PLUGIN auth_socket"), true);
+  assertEquals(sql.includes("IF NOT EXISTS"), false);
+  assertEquals(authSocketPluginPresentSql().includes("INFORMATION_SCHEMA.PLUGINS"), true);
 });
 
 test("databases use utf8mb4", () => {

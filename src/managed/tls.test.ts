@@ -35,6 +35,10 @@ async function fileMode(path: string): Promise<number> {
   return (stat.mode ?? 0) & 0o777;
 }
 
+/** Concatenated active+retired Organization CA PEMs (no extra whitespace). */
+const MULTI_PEM_CA_BUNDLE =
+  "-----BEGIN CERTIFICATE-----\nACTIVECA\n-----END CERTIFICATE-----\n-----BEGIN CERTIFICATE-----\nRETIREDCA\n-----END CERTIFICATE-----\n";
+
 test("ensureManagedSelfSignedCert writes cert/key once and is idempotent", async () => {
   if (
     !(await Deno.stat("/usr/bin/openssl").then(() => true).catch(() => false))
@@ -127,6 +131,56 @@ test("materializeProxySqlTlsMaterial decrypts and writes PEMs with modes", async
       await Deno.readTextFile(fullchain),
       "-----BEGIN CERTIFICATE-----\nLEAF2\n-----END CERTIFICATE-----\n",
     );
+  });
+});
+
+test("materializeProxySqlTlsMaterial writes a multi-PEM CA bundle to ca.pem verbatim", async () => {
+  await withTempDir(async (managedDir) => {
+    const targetDir = join(managedDir, "tls", "proxysql");
+    const privatePem =
+      "-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----\n";
+    await materializeProxySqlTlsMaterial(
+      targetDir,
+      {
+        certificatePem:
+          "-----BEGIN CERTIFICATE-----\nLEAF\n-----END CERTIFICATE-----\n",
+        privateKeyEnvelope: "tpdaemon.v1.server.KEYID.ciphertext",
+        caCertPem: MULTI_PEM_CA_BUNDLE,
+      },
+      () => Promise.resolve([privatePem]),
+    );
+
+    const written = await Deno.readTextFile(join(targetDir, "ca.pem"));
+    assertEquals(written, MULTI_PEM_CA_BUNDLE);
+    assertEquals(written.split("BEGIN CERTIFICATE").length - 1, 2);
+    assertEquals(written.includes("ACTIVECA"), true);
+    assertEquals(written.includes("RETIREDCA"), true);
+  });
+});
+
+test("materializeManagedProxySqlTlsMaterial writes a multi-PEM CA bundle to ca.pem and ca.crt verbatim", async () => {
+  await withTempDir(async (managedDir) => {
+    const privatePem =
+      "-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----\n";
+    await materializeManagedProxySqlTlsMaterial(
+      managedDir,
+      {
+        certificatePem:
+          "-----BEGIN CERTIFICATE-----\nLEAF\n-----END CERTIFICATE-----\n",
+        privateKeyEnvelope: "tpdaemon.v1.server.KEYID.ciphertext",
+        caCertPem: MULTI_PEM_CA_BUNDLE,
+      },
+      () => Promise.resolve([privatePem]),
+    );
+
+    const proxysqlCa = await Deno.readTextFile(
+      join(managedDir, "tls/proxysql/ca.pem"),
+    );
+    const engineCa = await Deno.readTextFile(join(managedDir, "tls/ca.crt"));
+    assertEquals(proxysqlCa, MULTI_PEM_CA_BUNDLE);
+    assertEquals(engineCa, MULTI_PEM_CA_BUNDLE);
+    assertEquals(proxysqlCa.split("BEGIN CERTIFICATE").length - 1, 2);
+    assertEquals(engineCa.split("BEGIN CERTIFICATE").length - 1, 2);
   });
 });
 

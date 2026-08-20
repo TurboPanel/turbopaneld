@@ -194,6 +194,48 @@ export function createClientAccountSql(
   ].join("\n");
 }
 
+/**
+ * Password account on the managed Docker network only — never `localhost`.
+ * Platform `root@localhost` stays `auth_socket` for credential-free docker exec.
+ */
+export function createNetworkAccountSql(
+  username: string,
+  password: string,
+): string {
+  return createOrAlterAccountSql(
+    username,
+    password,
+    MANAGED_DOCKER_NETWORK_HOST,
+  );
+}
+
+/**
+ * Repair / ensure socket-auth platform admins after a password bootstrap.
+ * Safe to re-run; does not embed credentials. The daemon installs
+ * `auth_socket` first — MySQL has no `INSTALL PLUGIN IF NOT EXISTS`.
+ */
+export function ensureSocketAdminSql(osUser: string = "mysql"): string {
+  const rootAccount = accountAt("root", "localhost");
+  const osAccount = accountAt(osUser, "localhost");
+  return [
+    `CREATE USER IF NOT EXISTS ${rootAccount} IDENTIFIED WITH auth_socket;`,
+    `ALTER USER ${rootAccount} IDENTIFIED WITH auth_socket;`,
+    `GRANT ALL PRIVILEGES ON *.* TO ${rootAccount} WITH GRANT OPTION;`,
+    `CREATE USER IF NOT EXISTS ${osAccount} IDENTIFIED WITH auth_socket;`,
+    `ALTER USER ${osAccount} IDENTIFIED WITH auth_socket;`,
+    `GRANT ALL PRIVILEGES ON *.* TO ${osAccount} WITH GRANT OPTION;`,
+  ].join("\n");
+}
+
+/** MySQL 8+/9 `INSTALL PLUGIN` — no `IF NOT EXISTS` (that is MariaDB-only). */
+export function installAuthSocketPluginSql(): string {
+  return "INSTALL PLUGIN auth_socket SONAME 'auth_socket.so';";
+}
+
+export function authSocketPluginPresentSql(): string {
+  return "SELECT PLUGIN_NAME FROM INFORMATION_SCHEMA.PLUGINS WHERE PLUGIN_NAME = 'auth_socket'";
+}
+
 export function promoteSql(): string {
   return [
     "STOP REPLICA;",

@@ -1,5 +1,8 @@
 /**
- * Managed engine destroy: compose down + optional volumes + state dir removal.
+ * Managed engine destroy: compose down + leftover container sweep + state dir
+ * removal. Compose down is project-scoped only (no `-f`) so interpolation of
+ * the removed `TURBOPANEL_MANAGED_ROOT_PASSWORD` env-file cannot fail the
+ * teardown — same rule as lifecycle.
  */
 
 import type {
@@ -32,6 +35,9 @@ export type ManagedDestroyHandlerDeps = {
   runDocker?: RunDockerFn;
 };
 
+const COMPOSE_PROJECT_LABEL = "com.docker.compose.project";
+const SAFE_CONTAINER_ID_RE = /^[a-f0-9]{12,64}$/i;
+
 async function pathExists(path: string): Promise<boolean> {
   try {
     await Deno.stat(path);
@@ -39,6 +45,87 @@ async function pathExists(path: string): Promise<boolean> {
   } catch (err) {
     if (err instanceof Deno.errors.NotFound) return false;
     throw err;
+  }
+}
+
+function parseContainerIds(stdout: string): string[] {
+  return stdout
+    .trim()
+    .split(/\s+/)
+    .filter((id) => SAFE_CONTAINER_ID_RE.test(id));
+}
+
+async function listComposeProjectContainerIds(
+  run: RunDockerFn,
+  project: string,
+): Promise<string[] | null> {
+  const listed = await run([
+    "ps",
+    "-aq",
+    "--filter",
+    `label=${COMPOSE_PROJECT_LABEL}=${project}`,
+  ]);
+  if (!listed.success) return null;
+  return parseContainerIds(listed.stdout);
+}
+
+async function forceRemoveContainers(
+  run: RunDockerFn,
+  ids: string[],
+): Promise<boolean> {
+  if (ids.length === 0) return true;
+  const removed = await run(["rm", "-f", ...ids]);
+  return removed.success;
+}
+
+async function tearDownManagedCompose(
+  run: RunDockerFn,
+  project: string,
+  removeVolumes: boolean,
+): Promise<void> {
+  const downArgs = ["compose", "-p", project, "down", "--remove-orphans"];
+  if (removeVolumes) downArgs.push("--volumes");
+  const down = await run(downArgs);
+  if (!down.success) {
+    logInfo(
+      "managed",
+      `managed.destroy compose down failed project=${project}: ${
+        sanitizeForLog(down.stderr || "compose down failed")
+      }`,
+    );
+  }
+
+  let remaining = await listComposeProjectContainerIds(run, project);
+  if (remaining === null) {
+    if (!down.success) {
+      throw new Error(
+        `managed.destroy compose down failed: ${
+          sanitizeForLog(down.stderr || "compose down failed")
+        }`,
+      );
+    }
+    return;
+  }
+  if (remaining.length > 0) {
+    await forceRemoveContainers(run, remaining);
+    remaining = await listComposeProjectContainerIds(run, project) ?? remaining;
+  }
+  if (remaining.length > 0) {
+    throw new Error(
+      `managed.destroy left ${remaining.length} container(s) for project ${project}`,
+    );
+  }
+}
+
+async function removeManagedStateDir(root: string): Promise<void> {
+  try {
+    await Deno.remove(root, { recursive: true });
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) {
+      throw new TypeError(
+        `failed to remove managed state dir: ${sanitizeForLog(err)}`,
+      );
+    }
   }
 }
 
@@ -55,48 +142,17 @@ export async function handleManagedDestroy(
   const layout = resolveLayout(Deno.env.toObject());
   const root = managedDir(layout, payload.managedId);
   const project = managedComposeProject(payload.managedId);
-  const exists = await pathExists(root);
+  const existed = await pathExists(root);
 
-  if (exists) {
-    const args = [
-      "compose",
-      "-p",
-      project,
-      "down",
-      "--remove-orphans",
-    ];
-    if (payload.removeVolumes) {
-      args.push("--volumes");
-    }
-    const down = await run(args);
-    if (!down.success) {
-      // Idempotent when the project was never brought up.
-      logInfo(
-        "managed",
-        `managed.destroy compose down soft-failed project=${project}: ${
-          sanitizeForLog(down.stderr || "compose down failed")
-        }`,
-      );
-    }
-  }
-
+  await tearDownManagedCompose(run, project, payload.removeVolumes);
   await removeManagedPublicFirewallBestEffort(payload.managedId);
-
-  try {
-    await Deno.remove(root, { recursive: true });
-  } catch (err) {
-    if (!(err instanceof Deno.errors.NotFound)) {
-      throw new TypeError(
-        `failed to remove managed state dir: ${sanitizeForLog(err)}`,
-      );
-    }
-  }
+  await removeManagedStateDir(root);
 
   return {
     status: "stopped",
     containers: [],
-    summary: exists
+    summary: existed
       ? "managed service destroyed"
-      : "managed state absent — idempotent no-op",
+      : "managed state absent — containers swept",
   };
 }

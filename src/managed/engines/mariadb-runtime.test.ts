@@ -105,6 +105,31 @@ test("mariadb waitReady succeeds on first mariadb-admin ping", async () => {
   assertEquals(calls[0]!.argv.includes("ping"), true);
 });
 
+test("mariadb waitReady retries ping via defaults-extra-file after 1045", async () => {
+  const calls: RecordedExec[] = [];
+  let n = 0;
+  const exec: ManagedEngineExec = (argv, input) => {
+    calls.push({ argv: [...argv], input });
+    n += 1;
+    if (n === 1) {
+      return Promise.resolve({
+        success: true,
+        stdout: "",
+        stderr:
+          "mariadb-admin: connect to server at 'localhost' failed\nerror: 'Access denied for user 'root'@'localhost' (using password: NO)'",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "mysqld is alive", stderr: "" });
+  };
+  await mariadbManagedEngineRuntime.waitReady({
+    ...buildContext(exec),
+    socketPassword: "root-pass",
+  });
+  assertEquals(calls.length, 2);
+  assertEquals(calls[1]!.argv[0], "sh");
+  assertEquals(calls[1]!.input?.includes("password=root-pass"), true);
+});
+
 test("mariadb applyCredentials creates root and app users via socket", async () => {
   const { exec, calls } = recordingExec();
   const credentials: ManagedApplyCredential[] = [
@@ -129,7 +154,14 @@ test("mariadb applyCredentials creates root and app users via socket", async () 
     credentials,
   );
   assertEquals(applied, ["root", "app_user"]);
-  assertEquals(calls.every((c) => c.argv.includes("--protocol=socket")), true);
+  const rootSql = calls.find((c) =>
+    c.input?.includes("IDENTIFIED VIA unix_socket")
+  )?.input ?? "";
+  assertEquals(rootSql.includes("IDENTIFIED VIA unix_socket"), true);
+  assertEquals(
+    /ALTER USER `root`@'localhost' IDENTIFIED BY/.test(rootSql),
+    false,
+  );
 });
 
 test("mariadb dropUsers skips the platform root username", async () => {

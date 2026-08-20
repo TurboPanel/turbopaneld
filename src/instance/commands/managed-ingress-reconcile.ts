@@ -15,9 +15,13 @@ import {
 } from "../../deploy/docker-cli.ts";
 import { ensureDocker as defaultEnsureDocker } from "../../deploy/ensure-docker.ts";
 import {
+  PROXYSQL_COMPOSE_SERVICE_NAME,
   readSystemComponentDescriptor,
   SYSTEM_MANAGED_INGRESS_COMPONENT,
+  type SystemComponentDescriptor,
+  writeSystemComponentDescriptor,
 } from "../../deploy/system-component.ts";
+import { managedIngressContainerName } from "../../deploy/ingress-identity.ts";
 import { logInfo } from "../../logger.ts";
 import { type LayoutPaths, resolveLayout } from "../../paths/layout.ts";
 import { ensureManagedIngressNetwork } from "../../managed/networks.ts";
@@ -285,6 +289,61 @@ async function tearDownProxySqlStack(
   return emptyIngressResult(serverId);
 }
 
+async function persistManagedIngressIdentity(
+  layout: LayoutPaths,
+  identity: NonNullable<ManagedIngressReconcilePayload["identity"]>,
+): Promise<SystemComponentDescriptor> {
+  const descriptor: SystemComponentDescriptor = {
+    component: SYSTEM_MANAGED_INGRESS_COMPONENT,
+    serviceId: identity.serviceId,
+    composeServiceName: identity.composeServiceName,
+    containerName: identity.containerName,
+    role: "turbopanel",
+  };
+  await writeSystemComponentDescriptor(layout, descriptor);
+  return descriptor;
+}
+
+function identityFromComposeText(
+  text: string | null,
+): SystemComponentDescriptor | null {
+  if (text === null || text.length === 0) return null;
+  const nameMatch = /^[ \t]*container_name:[ \t]+(\S+)/m.exec(text);
+  const idMatch = /^[ \t]*serviceId:[ \t]+([0-9a-f-]{36})/m.exec(text);
+  if (!nameMatch?.[1] || !idMatch?.[1]) return null;
+  const serviceId = idMatch[1];
+  const containerName = nameMatch[1];
+  if (containerName !== managedIngressContainerName(serviceId)) return null;
+  return {
+    component: SYSTEM_MANAGED_INGRESS_COMPONENT,
+    serviceId,
+    composeServiceName: PROXYSQL_COMPOSE_SERVICE_NAME,
+    containerName,
+    role: "turbopanel",
+  };
+}
+
+async function resolveManagedIngressDescriptor(
+  layout: LayoutPaths,
+  identity: ManagedIngressReconcilePayload["identity"] | undefined,
+  previousComposeText: string | null,
+): Promise<SystemComponentDescriptor> {
+  if (identity) {
+    return await persistManagedIngressIdentity(layout, identity);
+  }
+  const existing = await readSystemComponentDescriptor(
+    layout,
+    SYSTEM_MANAGED_INGRESS_COMPONENT,
+  );
+  if (existing) return existing;
+  const fromCompose = identityFromComposeText(previousComposeText);
+  if (fromCompose) {
+    await writeSystemComponentDescriptor(layout, fromCompose);
+    return fromCompose;
+  }
+  throw new Error("managed-ingress descriptor is missing");
+}
+
 export async function handleManagedIngressReconcile(
   payload: ManagedIngressReconcilePayload,
   daemonReceivedAt: string,
@@ -329,11 +388,6 @@ export async function handleManagedIngressReconcile(
   await ensureDockerFn();
   await ensureManagedIngressNetwork(run);
 
-  const descriptor = await readSystemComponentDescriptor(
-    layout,
-    SYSTEM_MANAGED_INGRESS_COMPONENT,
-  );
-
   const adminCredentials = await loadProxySqlAdminCredentials(layout);
   const monitorCredentials = await loadProxySqlMonitorCredentials(layout);
   const bindAddresses = desired.bindAddresses;
@@ -346,6 +400,11 @@ export async function handleManagedIngressReconcile(
   );
   const previousConfig = await readPreviousConfig(configPath);
   const previousComposeText = await readPreviousConfig(composePath);
+  const descriptor = await resolveManagedIngressDescriptor(
+    layout,
+    parsed.identity,
+    previousComposeText,
+  );
   // ProxySQL's internal `interfaces=` line is now a fixed constant (see
   // `CONTAINER_LISTEN_ADDRESS` in proxysql.ts), so a bind-only change
   // (public <-> private, a different address, or gaining/losing a second scope)
@@ -394,10 +453,7 @@ export async function handleManagedIngressReconcile(
     );
   }
 
-  const containerName = descriptor?.containerName;
-  if (!containerName) {
-    throw new Error("managed-ingress descriptor is missing");
-  }
+  const containerName = descriptor.containerName;
 
   const statements = buildProxySqlAdminStatements(desired, {
     monitor: monitorCredentials,
@@ -409,17 +465,15 @@ export async function handleManagedIngressReconcile(
   });
 
   let containers: EnvironmentDeployContainer[] | undefined;
-  if (descriptor) {
-    const observed = await inspectProxySqlContainer(layout, descriptor, {
-      runDocker: run,
-    });
-    if (observed === undefined) {
-      containers = undefined;
-    } else if (observed !== null) {
-      containers = [observed];
-    } else {
-      containers = [];
-    }
+  const observed = await inspectProxySqlContainer(layout, descriptor, {
+    runDocker: run,
+  });
+  if (observed === undefined) {
+    containers = undefined;
+  } else if (observed !== null) {
+    containers = [observed];
+  } else {
+    containers = [];
   }
 
   logInfo(

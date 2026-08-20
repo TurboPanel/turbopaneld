@@ -215,19 +215,49 @@ test("handleManagedLifecycle with memberId returns member health when replicatio
   });
 });
 
-test("handleManagedDestroy is idempotent when state dir is missing", async () => {
+function mockDestroyDocker(options?: {
+  down?: DockerCliResult;
+  psStdout?: string[];
+  rm?: DockerCliResult;
+}): (args: string[]) => Promise<DockerCliResult> {
+  let psIndex = 0;
+  return (args) => {
+    if (args.includes("down")) {
+      return Promise.resolve(options?.down ?? dockerOk());
+    }
+    if (args[0] === "ps") {
+      const stdout = options?.psStdout?.[psIndex] ?? "";
+      psIndex += 1;
+      return Promise.resolve(dockerOk(stdout));
+    }
+    if (args[0] === "rm") {
+      return Promise.resolve(options?.rm ?? dockerOk());
+    }
+    return Promise.resolve(dockerOk());
+  };
+}
+
+test("handleManagedDestroy sweeps containers when state dir is missing", async () => {
   const managedId = `noop-destroy-${crypto.randomUUID()}`;
   const prior = Deno.env.get("TURBOPANEL_STATE_DIR");
   const tmp = await Deno.makeTempDir({ prefix: "tp-managed-destroy-" });
   Deno.env.set("TURBOPANEL_STATE_DIR", tmp);
   try {
+    const calls: string[][] = [];
     const result = await handleManagedDestroy(
       { managedId, removeVolumes: false },
       new Date().toISOString(),
+      {
+        runDocker: (args) => {
+          calls.push([...args]);
+          return mockDestroyDocker()(args);
+        },
+      },
     );
     assertEquals(result.status, "stopped");
     assertEquals(result.containers, []);
-    assertEquals(result.summary?.includes("idempotent"), true);
+    assertEquals(result.summary?.includes("containers swept"), true);
+    assertEquals(calls.some((args) => args.includes("down")), true);
     try {
       await Deno.stat(join(tmp, "managed", managedId));
       throw new TypeError("managed dir should not exist");
@@ -263,7 +293,7 @@ test("handleManagedDestroy runs compose down with volumes and removes state", as
       {
         runDocker: (args) => {
           calls.push([...args]);
-          return Promise.resolve(dockerOk());
+          return mockDestroyDocker()(args);
         },
       },
     );
@@ -284,14 +314,17 @@ test("handleManagedDestroy runs compose down with volumes and removes state", as
   });
 });
 
-test("handleManagedDestroy soft-fails compose down but still removes state", async () => {
+test("handleManagedDestroy succeeds when compose down fails but no containers remain", async () => {
   const managedId = "managed_destroy_soft_fail";
   await withManagedStateDir(managedId, async (root) => {
     const result = await handleManagedDestroy(
       { managedId, removeVolumes: false },
       new Date().toISOString(),
       {
-        runDocker: () => Promise.resolve(dockerFail("project not found")),
+        runDocker: mockDestroyDocker({
+          down: dockerFail("project not found"),
+          psStdout: [""],
+        }),
       },
     );
 
@@ -304,5 +337,51 @@ test("handleManagedDestroy soft-fails compose down but still removes state", asy
       else throw err;
     }
     assertEquals(sawNotFound, true);
+  });
+});
+
+test("handleManagedDestroy force-removes leftover compose project containers", async () => {
+  const managedId = "managed_destroy_leftovers";
+  await withManagedStateDir(managedId, async () => {
+    const calls: string[][] = [];
+    const docker = mockDestroyDocker({
+      psStdout: ["abc123def456", ""],
+    });
+    const result = await handleManagedDestroy(
+      { managedId, removeVolumes: true },
+      new Date().toISOString(),
+      {
+        runDocker: (args) => {
+          calls.push([...args]);
+          return docker(args);
+        },
+      },
+    );
+    assertEquals(result.summary, "managed service destroyed");
+    assertEquals(
+      calls.some((args) => args[0] === "rm" && args.includes("abc123def456")),
+      true,
+    );
+  });
+});
+
+test("handleManagedDestroy fails when leftover containers cannot be removed", async () => {
+  const managedId = "managed_destroy_stuck";
+  await withManagedStateDir(managedId, async () => {
+    await assertRejects(
+      () =>
+        handleManagedDestroy(
+          { managedId, removeVolumes: false },
+          new Date().toISOString(),
+          {
+            runDocker: mockDestroyDocker({
+              psStdout: ["abc123def456", "abc123def456"],
+              rm: dockerFail("busy"),
+            }),
+          },
+        ),
+      Error,
+      "left 1 container",
+    );
   });
 });

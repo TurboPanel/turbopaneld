@@ -81,7 +81,7 @@ module and CI guard are the only places allowed to reference it.
 | Static UI export                                                  | `/opt/turbopanel/share/ui`            |
 | Vendored runtimes (node/deno/caddy/uv/python/ansible/cloudflared) | `/opt/turbopanel/vendor`              |
 | Daemon install root (`daemonRootDefault`)                         | `/opt/turbopanel/lib/daemon`          |
-| Config (`daemon.env`, `instance-ca.pem`)                          | `/etc/turbopanel`                     |
+| Config (`daemon.env`, `instance-ca.pem` — **Platform CA** bundle fetched from the control plane; no Organization CA material is ever stored there) | `/etc/turbopanel`                     |
 | Persistent identity (license, `server.id`, keys, tunnels)         | `/var/lib/turbopanel`                 |
 | Tenant principal homes (`principalHomeRoot`)                      | `/srv/users/<username>`               |
 | Logs                                                              | `/var/log/turbopanel`                 |
@@ -90,7 +90,9 @@ module and CI guard are the only places allowed to reference it.
 The **host** allocates UID/GID via `useradd`/`groupadd`. The control plane may
 send an optional operator override, which must clear the `tp*` service band
 **9989–9999**. Homes are keyed on the username. Override the home root with
-`TURBOPANEL_PRINCIPAL_HOME_ROOT` (`layout.principalHomeRoot`).
+`TURBOPANEL_PRINCIPAL_HOME_ROOT` (`layout.principalHomeRoot`). **Platform CA**
+vs **Organization CA** (two-CA distinction):
+`../turbopanel/src/lib/tls/AGENTS.md`.
 
 **Development (co-located checkout)** — `./console` from
 [turbopanel/dev](https://github.com/turbopanel/dev) runs the daemon from source

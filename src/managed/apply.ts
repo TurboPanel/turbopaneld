@@ -327,61 +327,13 @@ export async function applyManagedEngineState(
   if (engine.ensureProxySqlMonitor) {
     const layout = resolveLayout(Deno.env.toObject());
     const prepPresent = await proxySqlHostPrepPresent(layout);
-    let ranHostPrep = false;
     if (!prepPresent && deps?.runHostPrep) {
       await deps.runHostPrep();
-      ranHostPrep = true;
     }
     const monitor = await loadProxySqlMonitorCredentials(layout);
-    const prepPresentAfter = await proxySqlHostPrepPresent(layout);
-    // #region agent log
-    fetch("http://localhost:7928/ingest/ca9ed83a-836b-44e5-96a8-2a946923e182", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Debug-Session-Id": "323212",
-      },
-      body: JSON.stringify({
-        sessionId: "323212",
-        runId: "monitor-fix",
-        hypothesisId: "M1",
-        location: "apply.ts:applyManagedEngineState",
-        message: "proxysql monitor ensure",
-        data: {
-          prepPresent,
-          ranHostPrep,
-          prepPresentAfter,
-          monitorLoaded: monitor !== null,
-          monitorUser: monitor?.user ?? null,
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
     if (monitor) {
       await engine.ensureProxySqlMonitor(ctx, monitor);
       logInfo("managed", "managed.apply ensured ProxySQL monitor role");
-      // #region agent log
-      fetch(
-        "http://localhost:7928/ingest/ca9ed83a-836b-44e5-96a8-2a946923e182",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Debug-Session-Id": "323212",
-          },
-          body: JSON.stringify({
-            sessionId: "323212",
-            runId: "monitor-fix",
-            hypothesisId: "M4",
-            location: "apply.ts:applyManagedEngineState:ensured",
-            message: "proxysql monitor role sql applied",
-            data: { monitorUser: monitor.user },
-            timestamp: Date.now(),
-          }),
-        },
-      ).catch(() => {});
-      // #endregion
     } else {
       logInfo(
         "managed",
@@ -626,6 +578,9 @@ export async function handleManagedApply(
     rootUsername: engine.rootUsername,
     defaultDatabase: engine.defaultDatabase,
     exec: buildEngineExec(containerId, redact, run),
+    ...(payload.engine === "mysql" || payload.engine === "mariadb"
+      ? { socketPassword: rootCredential.password }
+      : {}),
   };
 
   try {
