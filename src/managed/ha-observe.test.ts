@@ -21,7 +21,7 @@ test("ManagedHaObserver emits managed-ha-event once per DeadPrimary alias", asyn
     send: (message) => {
       sent.push({ type: message.type, managedId: message.managedId });
     },
-    isHostPrepPresent: () => Promise.resolve(true),
+    isStackPresent: () => Promise.resolve(true),
     api: {
       credentials: { user: "admin", password: "x" },
       fetch: () =>
@@ -43,7 +43,7 @@ test("ManagedHaObserver ignores read-replica aliases that are not UUIDs", async 
     send: (message) => {
       sent.push({ type: message.type, managedId: message.managedId });
     },
-    isHostPrepPresent: () => Promise.resolve(true),
+    isStackPresent: () => Promise.resolve(true),
     api: {
       credentials: { user: "admin", password: "x" },
       fetch: () =>
@@ -60,4 +60,21 @@ test("ManagedHaObserver ignores read-replica aliases that are not UUIDs", async 
   });
   await observer.poll();
   assertEquals(sent.length, 0);
+});
+
+test("ManagedHaObserver skips poll when orchestrator stack is absent", async () => {
+  let fetchCalled = false;
+  const observer = new ManagedHaObserver({
+    send: () => {},
+    isStackPresent: () => Promise.resolve(false),
+    api: {
+      credentials: { user: "admin", password: "x" },
+      fetch: () => {
+        fetchCalled = true;
+        return Promise.resolve(new Response("[]", { status: 200 }));
+      },
+    },
+  });
+  await observer.poll();
+  assertEquals(fetchCalled, false);
 });

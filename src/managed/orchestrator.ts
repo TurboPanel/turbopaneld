@@ -384,3 +384,16 @@ export async function hostPrepPresent(layout: LayoutPaths): Promise<boolean> {
     throw err;
   }
 }
+
+/** True once `managed.ha.reconcile` has written the daemon-owned compose file. */
+export async function orchestratorStackPresent(
+  layout: LayoutPaths,
+): Promise<boolean> {
+  try {
+    await Deno.stat(orchestratorComposePath(layout));
+    return true;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return false;
+    throw err;
+  }
+}

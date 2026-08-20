@@ -8,8 +8,8 @@
 import { logInfo, logWarn, sanitizeForLog } from "../logger.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import {
-  hostPrepPresent,
   loadOrchestratorApiCredentials,
+  orchestratorStackPresent,
 } from "../managed/orchestrator.ts";
 import {
   isDeadPrimaryProblem,
@@ -33,7 +33,8 @@ export type ManagedHaObserverOptions = {
   now?: () => string;
   send: (message: ManagedHaEventMessage) => void;
   api?: OrchestratorApiDeps;
-  isHostPrepPresent?: () => Promise<boolean>;
+  /** Test seam — defaults to {@link orchestratorStackPresent}. */
+  isStackPresent?: () => Promise<boolean>;
 };
 
 export class ManagedHaObserver {
@@ -41,7 +42,7 @@ export class ManagedHaObserver {
   readonly #now: () => string;
   readonly #send: (message: ManagedHaEventMessage) => void;
   readonly #api: OrchestratorApiDeps | undefined;
-  readonly #isHostPrepPresent: () => Promise<boolean>;
+  readonly #isStackPresent: () => Promise<boolean>;
   readonly #emitted = new Set<string>();
   #timer: ReturnType<typeof setInterval> | undefined;
 
@@ -50,8 +51,8 @@ export class ManagedHaObserver {
     this.#now = options.now ?? (() => new Date().toISOString());
     this.#send = options.send;
     this.#api = options.api;
-    this.#isHostPrepPresent = options.isHostPrepPresent ??
-      (() => hostPrepPresent(resolveLayout()));
+    this.#isStackPresent = options.isStackPresent ??
+      (() => orchestratorStackPresent(resolveLayout()));
   }
 
   attach(): void {
@@ -70,7 +71,7 @@ export class ManagedHaObserver {
 
   async poll(): Promise<void> {
     try {
-      if (!(await this.#isHostPrepPresent())) return;
+      if (!(await this.#isStackPresent())) return;
       const credentials = this.#api?.credentials ??
         await loadOrchestratorApiCredentials(resolveLayout());
       const problems = await listOrchestratorProblems({
