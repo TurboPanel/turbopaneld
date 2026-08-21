@@ -49,14 +49,39 @@ function networkNamesFromService(
 }
 
 /**
- * Union of resolved service networks plus platform network names (list form
- * so Compose does not have to merge a bare platform list over a mapping).
+ * Per-network options the compiled service already declares (notably the
+ * friendly-name `aliases` the instance emits when it renames a container to
+ * the service UUID). The overlay is folded into the compiled YAML **in
+ * process** (`mergeOverlayIntoComposeYaml`), where a list overlay over a
+ * mapping base is a type mismatch and the later fragment wins — a bare
+ * platform list here deletes the aliases outright.
+ */
+function networkOptionsFromService(
+  service: Record<string, unknown>,
+): Map<string, Record<string, unknown>> {
+  const options = new Map<string, Record<string, unknown>>();
+  const networks = service.networks;
+  if (!isRecord(networks)) return options;
+  for (const [name, value] of Object.entries(networks)) {
+    if (isRecord(value) && Object.keys(value).length > 0) {
+      options.set(name, { ...value });
+    }
+  }
+  return options;
+}
+
+/**
+ * Union of resolved service networks plus platform network names.
+ *
+ * List form (so Compose does not have to merge a bare platform list over a
+ * mapping) unless the compiled service carries per-network options — then the
+ * union stays a mapping and those options ride along.
  */
 function unionServiceNetworks(
   resolvedService: Record<string, unknown>,
   existing: unknown,
   platformNetwork: string,
-): string[] {
+): string[] | Record<string, unknown> {
   const names: string[] = [];
   const add = (name: string) => {
     if (!names.includes(name)) names.push(name);
@@ -74,7 +99,22 @@ function unionServiceNetworks(
     }
   }
   add(platformNetwork);
-  return names;
+
+  const options = networkOptionsFromService(resolvedService);
+  if (isRecord(existing)) {
+    for (const [name, value] of Object.entries(existing)) {
+      if (isRecord(value) && Object.keys(value).length > 0) {
+        options.set(name, { ...(options.get(name) ?? {}), ...value });
+      }
+    }
+  }
+  if (options.size === 0) return names;
+
+  const mapping: Record<string, unknown> = {};
+  for (const name of names) {
+    mapping[name] = options.get(name) ?? {};
+  }
+  return mapping;
 }
 
 function buildRouterRule(hostnames: string[], pathPrefix?: string): string {

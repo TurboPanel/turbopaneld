@@ -458,3 +458,23 @@ test("buildHostingLabelsFragment rejects unsafe router ids and pathPrefix", () =
     "unsupported character",
   );
 });
+
+test("buildHostingLabelsFragment keeps friendly-name aliases in the network union", () => {
+  const fragment = buildHostingLabelsFragment({
+    payload,
+    hostings: payload.hostings,
+    resolved: resolvedFromServices({
+      app: {
+        image: "nginx:alpine",
+        container_name: "01a025f1-850c-705d-a7c2-1833d01cda9f",
+        networks: { default: { aliases: ["adminer"] } },
+      },
+    }),
+  });
+  // Mapping form (not a bare list) so `-f compose.yaml -f daemon.yaml` merges
+  // the alias instead of replacing it with an option-less platform list.
+  assertEquals(fragment.services?.app?.networks, {
+    default: { aliases: ["adminer"] },
+    "turbopanel-ingress": {},
+  });
+});

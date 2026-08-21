@@ -131,6 +131,7 @@ export async function handleEnvironmentStop(
     layout,
     parsedPayload.environmentId,
     (parsedPayload.ingressServices ?? []).map((ingress) => ingress.serviceId),
+    { runDocker: run },
   );
 
   try {

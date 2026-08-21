@@ -31,9 +31,12 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    `<stateDir>/system/hosting-ingress.json` is present,
    `ensureHostingIngress` passes that descriptor into `traefikCompose()` so
    the shared container gets allocated `container_name` /
-   `x-turbopanel` / labels; when absent (or corrupt — logged and ignored),
-   the anonymous pre-identity shape is written for the fresh pre-provision
-   state (descriptor not yet written by `system.reconcile`) so tenant deploys
+   `x-turbopanel` / labels. Tenant HTTP `environment.deploy` may write that
+   descriptor first from payload `hostingIngress` (`persistHostingIngressIdentity`)
+   so the first hostname deploy is not anonymous `turbopanel-ingress-traefik-1`.
+   When absent (or corrupt — logged and ignored),
+   the anonymous pre-identity shape is written for older payloads that omit
+   `hostingIngress` and have not yet run `system.reconcile`, so tenant deploys
    cannot orphan an allocated inventory row by rewriting anonymous compose
    over an identity-bearing Traefik.
 3. Ensure vendored hosting Caddy (`ensureHostingCaddy` — Ansible `caddy-setup`
@@ -149,7 +152,12 @@ entry. There is no `composeYaml` fallback on `environment.deploy`.
   (`mergeComposeOverlayFragments` in `compose-overlay.ts`). The merged
   fragment is folded into the compiled YAML before publish — not a separate
   `docker-compose.turbopanel.daemon.yml` layer. Secrets are **not** overlay
-  fragments.
+  fragments. Because that fold is an in-process record merge (**not**
+  `docker compose -f a -f b`), a list value over a mapping value is a type
+  mismatch where the later fragment wins outright: the hosting/managed
+  network union emits **mapping** form whenever the compiled service declares
+  per-network options, or it would delete the instance's friendly-name
+  `aliases` (see `unionServiceNetworks`).
 - **Secrets:** durable `compose.yaml` must not be the long-term secret store.
   Compiled YAML references Compose standalone `secrets.file` paths under
   `/run/turbopanel/deployments/<projectId>/<environmentId>/secrets/` (mode
@@ -231,7 +239,15 @@ get a per-service Traefik project or an `ingressServices[]` entry.
   `removeServiceIngress` + `removeTcpUdpIngressEntries` for each and clears
   the index. Payload alone is not teardown truth — a hosting deleted or
   flipped to HTTP before stop still cleans stale Traefik. Shared HTTP
-  Traefik is left alone (tcp/udp no longer live there).
+  Traefik is left alone here (tcp/udp no longer live there); the control
+  plane retires it separately with `system.reconcile` `action: 'stop'` once
+  the last hostname hosting leaves the server (project / environment delete).
+- **Docker seam**: every ingress helper takes `{ runDocker }` and the deploy /
+  stop handlers thread their injected `runDocker` into `ensureHostingIngress`,
+  `ensureServiceIngress`, `cleanupStaleTcpUdpServiceIngress` and
+  `removeEnvironmentTcpUdpServiceIngress`. Leaving one unthreaded makes the
+  default CLI run for real — tests with a fake `runDocker` then start actual
+  Traefik containers on the host and leave them behind.
 - Extraction: `buildTcpUdpIngressEntries` maps each `tcp`/`udp` hosting's
   `ports[]` to one `TcpUdpIngressEntry` (with that hosting's `bindAddress`).
 
@@ -340,10 +356,11 @@ must stay `traefik`, `containerName` = `<serviceId>-in`). When present,
 `turbopanel.role=ingress`, `com.turbopanel.system.component=hosting-ingress`,
 `com.turbopanel.service=<serviceId>` — **never** `traefik.enable`, HTTP router
 labels, or `com.turbopanel.raw-port` (so tenant Traefik providers stay blind to
-it). `ensureHostingIngress` reads the descriptor on every deploy; a missing
-file is the normal pre-provision path (before `system.reconcile` writes
-identity); a corrupt file logs a warning and falls back to the anonymous YAML
-so tenant deploys still succeed. `inspectHostingIngressContainer` best-effort
+it). `ensureHostingIngress` reads the descriptor on every deploy. HTTP tenant
+deploys write it from `hostingIngress` before that call when the payload
+includes identity; a missing file remains the fallback for older payloads
+(before `system.reconcile` writes identity). A corrupt file logs a warning
+and falls back to the anonymous YAML so tenant deploys still succeed. `inspectHostingIngressContainer` best-effort
 returns the observed container in `EnvironmentDeployContainer` shape
 (`role: ingress`); compose-ps failure returns `undefined` (omit `containers`),
 absence returns `null`. A missing compose file is authoritative absence

@@ -10,11 +10,15 @@ import {
 } from "../../deploy/compose-files.ts";
 import { handleEnvironmentLifecycle } from "./lifecycle-environment.ts";
 import { handleEnvironmentStop } from "./stop-environment.ts";
+import { createTempLayout } from "../../testing/temp-layout.ts";
+import { resolveLayout } from "../../paths/layout.ts";
+import { readSystemComponentDescriptor } from "../../deploy/system-component.ts";
 import {
   buildDeployServiceNames,
   buildDeploySummary,
   containerHostingsNeedSharedHttpIngress,
   handleEnvironmentDeploy,
+  persistHostingIngressIdentity,
   resolveDeployComposeFiles,
   shapeEnvironmentDeployResult,
 } from "./deploy-environment.ts";
@@ -69,6 +73,50 @@ test("containerHostingsNeedSharedHttpIngress requires HTTP hostnames", () => {
     }]),
     true,
   );
+});
+
+test("persistHostingIngressIdentity writes hosting-ingress.json", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env, {
+      skipDiscovery: true,
+      forceMode: "production",
+    });
+    const serviceId = "00000000-0000-4000-8000-0000000000aa";
+    await persistHostingIngressIdentity(layout, {
+      serviceId,
+      composeServiceName: "traefik",
+      containerName: `${serviceId}-in`,
+    });
+    const loaded = await readSystemComponentDescriptor(
+      layout,
+      "hosting-ingress",
+    );
+    assertEquals(loaded?.serviceId, serviceId);
+    assertEquals(loaded?.composeServiceName, "traefik");
+    assertEquals(loaded?.containerName, `${serviceId}-in`);
+    assertEquals(loaded?.role, "ingress");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("persistHostingIngressIdentity no-ops when identity is omitted", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env, {
+      skipDiscovery: true,
+      forceMode: "production",
+    });
+    await persistHostingIngressIdentity(layout);
+    const loaded = await readSystemComponentDescriptor(
+      layout,
+      "hosting-ingress",
+    );
+    assertEquals(loaded, null);
+  } finally {
+    await fixture.cleanup();
+  }
 });
 
 test("handleEnvironmentDeploy rejects unsupported environmentId characters", async () => {
@@ -1307,7 +1355,9 @@ test({
       Service: "traefik",
       State: "running",
     }]);
+    const dockerCalls: string[][] = [];
     const fakeRunDocker = (args: string[]): Promise<DockerCliResult> => {
+      dockerCalls.push([...args]);
       if (args.includes("config") && args.includes("--format")) {
         return Promise.resolve({
           success: true,
@@ -1386,6 +1436,15 @@ test({
       assertEquals(result.containers?.[0]?.containerId, "abc123");
       assertEquals(result.containers?.[1]?.role, "ingress");
       assertEquals(result.containers?.[1]?.serviceId, serviceId);
+      // Per-service Traefik must go through the injected seam — an unthreaded
+      // `runDocker` here starts a real ingress container on the test host.
+      assertEquals(
+        dockerCalls.some((args) =>
+          args.includes("up") &&
+          args.includes(`turbopanel-ingress-${serviceId}`)
+        ),
+        true,
+      );
     } finally {
       if (previous.TURBOPANEL_STATE_DIR === undefined) {
         Deno.env.delete("TURBOPANEL_STATE_DIR");

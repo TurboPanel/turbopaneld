@@ -66,6 +66,10 @@ import {
 } from "./fabric.ts";
 import { ensureManagedIngressNetwork } from "../../managed/networks.ts";
 import {
+  SYSTEM_HOSTING_INGRESS_COMPONENT,
+  writeSystemComponentDescriptor,
+} from "../../deploy/system-component.ts";
+import {
   buildTraditionalWebReachabilityFragment,
   resolveDockerHostGatewayAddress,
 } from "../../deploy/traditional-web-docker.ts";
@@ -260,6 +264,28 @@ export function containerHostingsNeedSharedHttpIngress(
   return false;
 }
 
+/**
+ * Persist the shared HTTP Traefik identity from an `environment.deploy`
+ * payload so {@link ensureHostingIngress} emits `container_name: <serviceId>-in`
+ * instead of Compose's default `turbopanel-ingress-traefik-1`.
+ *
+ * No-op when the field is omitted (older payloads still fall back to a
+ * descriptor written by `system.reconcile`, or anonymous Traefik).
+ */
+export async function persistHostingIngressIdentity(
+  layout: LayoutPaths,
+  hostingIngress?: EnvironmentDeployIngressService,
+): Promise<void> {
+  if (!hostingIngress) return;
+  await writeSystemComponentDescriptor(layout, {
+    component: SYSTEM_HOSTING_INGRESS_COMPONENT,
+    serviceId: hostingIngress.serviceId,
+    composeServiceName: hostingIngress.composeServiceName,
+    containerName: hostingIngress.containerName,
+    role: "ingress",
+  });
+}
+
 /** Sets up Traefik/Docker ingress for container deploys, or the hosting-Caddy-only
  * runtime for traditional-web-only environments. Shared Traefik is HTTP-only and
  * starts only when an HTTP hosting actually routes hostnames; per-service
@@ -277,7 +303,10 @@ type EnsureDeployIngressParams = {
   containerHostings: EnvironmentDeployHosting[];
   allHostings: readonly EnvironmentDeployHosting[];
   ingressServices: readonly EnvironmentDeployIngressService[];
+  hostingIngress?: EnvironmentDeployIngressService;
   ensureDockerFn: () => Promise<void>;
+  /** Docker CLI seam — must reach every ingress helper so tests never touch real Docker. */
+  runDocker: RunDockerFn;
   listenerPorts?: EnvironmentDeployPayload["listenerPorts"];
 };
 
@@ -291,7 +320,9 @@ async function ensureDeployIngress(
     containerHostings,
     allHostings,
     ingressServices,
+    hostingIngress,
     ensureDockerFn,
+    runDocker,
     listenerPorts,
   } = params;
   const activeIngressServiceIds = new Set(
@@ -308,6 +339,7 @@ async function ensureDeployIngress(
       environmentId,
       environmentServiceIds,
       activeIngressServiceIds,
+      { runDocker },
     );
     await ensureHostingCaddyRuntime(layout);
     return;
@@ -317,7 +349,8 @@ async function ensureDeployIngress(
   // Shared loopback Traefik only when something HTTP actually needs it —
   // bare nginx/workload deploys must not create the platform `-in` proxy.
   if (containerHostingsNeedSharedHttpIngress(containerHostings)) {
-    await ensureHostingIngress(layout);
+    await persistHostingIngressIdentity(layout, hostingIngress);
+    await ensureHostingIngress(layout, { runDocker });
   }
 
   await cleanupStaleTcpUdpServiceIngress(
@@ -325,6 +358,7 @@ async function ensureDeployIngress(
     environmentId,
     environmentServiceIds,
     activeIngressServiceIds,
+    { runDocker },
   );
 
   for (const ingress of ingressServices) {
@@ -338,11 +372,17 @@ async function ensureDeployIngress(
       entries,
       listenerPorts,
     );
-    await ensureServiceIngress(layout, ingress.serviceId, ownEntries, {
-      serviceId: ingress.serviceId,
-      composeServiceName: ingress.composeServiceName,
-      containerName: ingress.containerName,
-    });
+    await ensureServiceIngress(
+      layout,
+      ingress.serviceId,
+      ownEntries,
+      {
+        serviceId: ingress.serviceId,
+        composeServiceName: ingress.composeServiceName,
+        containerName: ingress.containerName,
+      },
+      { runDocker },
+    );
   }
 }
 
@@ -929,7 +969,9 @@ export async function handleEnvironmentDeploy(
     containerHostings,
     allHostings: parsedPayload.hostings,
     ingressServices,
+    hostingIngress: parsedPayload.hostingIngress,
     ensureDockerFn: runtime.ensureDockerFn,
+    runDocker: runtime.run,
     listenerPorts: parsedPayload.listenerPorts,
   });
 

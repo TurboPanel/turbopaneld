@@ -106,6 +106,58 @@ test("environment.deploy composeFiles round-trips runtime snapshot", () => {
   assertEquals(payload.composeFiles, composeFiles);
 });
 
+test("environment.deploy hostingIngress round-trips shared Traefik identity", () => {
+  const serviceId = "00000000-0000-4000-8000-0000000000aa";
+  const payload = parseEnvironmentDeployPayload({
+    environmentId: "env-1",
+    projectId: "proj-1",
+    organizationId: "org-1",
+    projectName: "demo",
+    composeFiles: [{
+      filename: "compose.yaml",
+      role: "runtime",
+      content: "services:\n  web:\n    image: nginx\n",
+    }],
+    hostings: [],
+    hostingIngress: {
+      serviceId,
+      composeServiceName: "traefik",
+      containerName: `${serviceId}-in`,
+    },
+  });
+  assertEquals(payload.hostingIngress, {
+    serviceId,
+    composeServiceName: "traefik",
+    containerName: `${serviceId}-in`,
+  });
+});
+
+test("environment.deploy rejects hostingIngress that is not traefik", () => {
+  const serviceId = "00000000-0000-4000-8000-0000000000aa";
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        environmentId: "env-1",
+        projectId: "proj-1",
+        organizationId: "org-1",
+        projectName: "demo",
+        composeFiles: [{
+          filename: "compose.yaml",
+          role: "runtime",
+          content: "services:\n  web:\n    image: nginx\n",
+        }],
+        hostings: [],
+        hostingIngress: {
+          serviceId,
+          composeServiceName: "web",
+          containerName: `${serviceId}-in`,
+        },
+      }),
+    TypeError,
+    "Invalid environment.deploy hostingIngress",
+  );
+});
+
 test("environment.deploy rejects invalid composeFiles", () => {
   const base = {
     environmentId: "env-1",

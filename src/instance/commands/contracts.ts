@@ -429,6 +429,13 @@ export type EnvironmentDeployPayload = {
    * `tcp`/`udp` port. HTTP hostings never appear here.
    */
   ingressServices?: EnvironmentDeployIngressService[];
+  /**
+   * Shared HTTP loopback Traefik identity (`turbopanel-ingress` / compose
+   * service `traefik`). Present when this deploy routes HTTP hostnames.
+   * `containerName` must equal `<serviceId>-in` (platform hosting-ingress
+   * service, not a tenant compose service).
+   */
+  hostingIngress?: EnvironmentDeployIngressService;
   dockerExternalNetworks?: string[];
   /**
    * Routed TurboFabric Docker bridges (`tpn_*`) this host participates in for
@@ -2597,6 +2604,25 @@ function parseDeployIngressService(
   };
 }
 
+/** Must match instance SYSTEM_TRAEFIK_COMPOSE_SERVICE_NAME / SHARED_TRAEFIK_COMPOSE_SERVICE_NAME. */
+const SHARED_HTTP_TRAEFIK_COMPOSE_SERVICE_NAME = "traefik";
+
+function parseDeployHostingIngress(
+  value: unknown,
+): EnvironmentDeployIngressService | undefined {
+  if (value === undefined) return undefined;
+  let entry: EnvironmentDeployIngressService;
+  try {
+    entry = parseDeployIngressService(value);
+  } catch (cause) {
+    throw new TypeError("Invalid environment.deploy hostingIngress", { cause });
+  }
+  if (entry.composeServiceName !== SHARED_HTTP_TRAEFIK_COMPOSE_SERVICE_NAME) {
+    throw new TypeError("Invalid environment.deploy hostingIngress");
+  }
+  return entry;
+}
+
 function parseStopIngressService(value: unknown): { serviceId: string } {
   if (!isRecord(value)) {
     throw new TypeError("Invalid environment.stop ingressServices entry");
@@ -2652,6 +2678,7 @@ export function parseEnvironmentDeployPayload(
         "ingressServices",
         parseDeployIngressService,
       ),
+      hostingIngress: parseDeployHostingIngress(value.hostingIngress),
       dockerExternalNetworks: parseOptionalStringArray(
         value.dockerExternalNetworks,
         "dockerExternalNetworks",

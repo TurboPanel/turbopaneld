@@ -1485,6 +1485,7 @@ export async function removeEnvironmentTcpUdpServiceIngress(
   layout: LayoutPaths,
   environmentId: string,
   payloadServiceIds: readonly string[] = [],
+  deps?: RemoveServiceIngressDeps,
 ): Promise<string[]> {
   const fromIndex = await readEnvironmentTcpUdpServiceIds(
     layout,
@@ -1493,7 +1494,7 @@ export async function removeEnvironmentTcpUdpServiceIngress(
   const serviceIds = new Set<string>([...fromIndex, ...payloadServiceIds]);
   const removed: string[] = [];
   for (const serviceId of [...serviceIds].sort((a, b) => a.localeCompare(b))) {
-    await removeServiceIngress(layout, serviceId);
+    await removeServiceIngress(layout, serviceId, deps);
     await removeTcpUdpIngressEntries(layout, serviceId);
     removed.push(serviceId);
   }
@@ -1516,6 +1517,7 @@ export async function cleanupStaleTcpUdpServiceIngress(
   environmentId: string,
   environmentServiceIds: ReadonlySet<string>,
   activeIngressServiceIds: ReadonlySet<string>,
+  deps?: RemoveServiceIngressDeps,
 ): Promise<string[]> {
   const previousFromIndex = await readEnvironmentTcpUdpServiceIds(
     layout,
@@ -1531,7 +1533,7 @@ export async function cleanupStaleTcpUdpServiceIngress(
   for (const serviceId of [...candidates].sort((a, b) => a.localeCompare(b))) {
     if (activeIngressServiceIds.has(serviceId)) continue;
     if (persisted.includes(serviceId)) {
-      await removeServiceIngress(layout, serviceId);
+      await removeServiceIngress(layout, serviceId, deps);
       await removeTcpUdpIngressEntries(layout, serviceId);
     }
     removed.push(serviceId);

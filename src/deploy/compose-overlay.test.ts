@@ -1,5 +1,6 @@
 import { assertEquals } from "@std/assert";
 import { join } from "@std/path";
+import { parse } from "yaml";
 import { DAEMON_COMPOSE_FILENAME } from "./compose-files.ts";
 import {
   isEmptyFragment,
@@ -117,4 +118,62 @@ test({
       await Deno.remove(dir, { recursive: true });
     }
   },
+});
+
+test("mergeOverlayIntoComposeYaml keeps service network aliases under a mapping overlay", () => {
+  const base = [
+    "services:",
+    "  adminer:",
+    "    image: adminer:latest",
+    "    container_name: 01a025f1-850c-705d-a7c2-1833d01cda9f",
+    "    networks:",
+    "      default:",
+    "        aliases:",
+    "          - adminer",
+    "",
+  ].join("\n");
+
+  const merged = mergeOverlayIntoComposeYaml(base, {
+    services: {
+      adminer: {
+        labels: { "traefik.enable": "true" },
+        networks: { default: {}, "turbopanel-ingress": {} },
+      },
+    },
+  });
+
+  const parsed = parse(merged) as {
+    services: Record<string, { networks: Record<string, unknown> }>;
+  };
+  assertEquals(parsed.services.adminer.networks, {
+    default: { aliases: ["adminer"] },
+    "turbopanel-ingress": {},
+  });
+});
+
+test("mergeOverlayIntoComposeYaml drops aliases when the overlay uses list form", () => {
+  // Documents why `unionServiceNetworks` emits mapping form: list over mapping
+  // is a type mismatch and the later fragment wins outright.
+  const base = [
+    "services:",
+    "  adminer:",
+    "    image: adminer:latest",
+    "    networks:",
+    "      default:",
+    "        aliases:",
+    "          - adminer",
+    "",
+  ].join("\n");
+
+  const merged = mergeOverlayIntoComposeYaml(base, {
+    services: { adminer: { networks: ["default", "turbopanel-ingress"] } },
+  });
+
+  const parsed = parse(merged) as {
+    services: Record<string, { networks: unknown }>;
+  };
+  assertEquals(parsed.services.adminer.networks, [
+    "default",
+    "turbopanel-ingress",
+  ]);
 });
