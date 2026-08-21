@@ -1029,7 +1029,7 @@ test("system.reconcile payload parser accepts database/queue/analytics with syst
   }
 });
 
-test("system.reconcile payload parser accepts managed-ingress with system role and <serviceId>-sql containerName", () => {
+test("system.reconcile payload parser accepts managed-ingress with ingress role and <serviceId>-in containerName", () => {
   const serviceId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
   assertEquals(
     parseSystemReconcilePayload({
@@ -1039,8 +1039,8 @@ test("system.reconcile payload parser accepts managed-ingress with system role a
           component: "managed-ingress",
           serviceId,
           composeServiceName: "proxysql",
-          containerName: `${serviceId}-sql`,
-          role: "turbopanel",
+          containerName: `${serviceId}-in`,
+          role: "ingress",
           desired: "present",
         },
       ],
@@ -1049,8 +1049,8 @@ test("system.reconcile payload parser accepts managed-ingress with system role a
       component: "managed-ingress",
       serviceId,
       composeServiceName: "proxysql",
-      containerName: `${serviceId}-sql`,
-      role: "turbopanel",
+      containerName: `${serviceId}-in`,
+      role: "ingress",
       desired: "present",
     },
   );
@@ -1115,7 +1115,7 @@ test("system.reconcile payload parser rejects role/containerName mismatches acro
     TypeError,
     "Invalid system.reconcile payload",
   );
-  // managed-ingress requires `<serviceId>-sql` — bare serviceId is rejected.
+  // managed-ingress requires `<serviceId>-in` — bare serviceId is rejected.
   assertThrows(
     () =>
       parseSystemReconcilePayload({
@@ -1126,7 +1126,7 @@ test("system.reconcile payload parser rejects role/containerName mismatches acro
             serviceId,
             composeServiceName: "proxysql",
             containerName: serviceId,
-            role: "turbopanel",
+            role: "ingress",
             desired: "present",
           },
         ],
@@ -1134,7 +1134,7 @@ test("system.reconcile payload parser rejects role/containerName mismatches acro
     TypeError,
     "Invalid system.reconcile payload",
   );
-  // managed-ingress with Traefik `-in` containerName is rejected.
+  // managed-ingress requires `<serviceId>-in` — the managed-ha `-ha` form is rejected.
   assertThrows(
     () =>
       parseSystemReconcilePayload({
@@ -1144,8 +1144,8 @@ test("system.reconcile payload parser rejects role/containerName mismatches acro
             component: "managed-ingress",
             serviceId,
             composeServiceName: "proxysql",
-            containerName: `${serviceId}-in`,
-            role: "turbopanel",
+            containerName: `${serviceId}-ha`,
+            role: "ingress",
             desired: "present",
           },
         ],
@@ -2418,10 +2418,10 @@ test("managed.ingress.reconcile round-trips ProxySQL identity", () => {
     identity: {
       serviceId,
       composeServiceName: "proxysql",
-      containerName: `${serviceId}-sql`,
+      containerName: `${serviceId}-in`,
     },
   });
-  assertEquals(payload.identity?.containerName, `${serviceId}-sql`);
+  assertEquals(payload.identity?.containerName, `${serviceId}-in`);
   assertThrows(
     () =>
       parseManagedIngressReconcilePayload({

@@ -12,7 +12,7 @@ import { join } from "@std/path";
 import { assertValidBindAddress } from "../deploy/ingress.ts";
 import {
   LABEL_ROLE,
-  LABEL_ROLE_SYSTEM,
+  LABEL_ROLE_INGRESS,
   LABEL_SYSTEM_COMPONENT,
 } from "../deploy/labels.ts";
 import {
@@ -622,8 +622,10 @@ function renderProxySqlTopLevelNetworks(
  * ({@link PROXYSQL_PROJECT}).
  *
  * When `identity` is provided, `container_name` / `x-turbopanel` use the
- * instance-allocated managed-ingress name (`<serviceId>-sql`) — distinct
- * from tenant Traefik (`<serviceId>-in`) and bare-uuid system-stack rows
+ * instance-allocated managed-ingress name (`<serviceId>-in`). Distinction
+ * from tenant Traefik (same suffix) is the compose project
+ * (`turbopanel-proxysql`) plus the `com.turbopanel.system.component`
+ * label — not the suffix. Bare-uuid names remain for system-stack rows
  * (`database` / `queue` / `analytics`).
  *
  * `bindAddresses` controls only the **host publish** of the client
@@ -677,7 +679,7 @@ export function proxysqlComposeWithAttachments(
   ];
   const labelLines = identity === undefined || identity === null ? [] : [
     "    labels:",
-    `      ${LABEL_ROLE}: ${LABEL_ROLE_SYSTEM}`,
+    `      ${LABEL_ROLE}: ${LABEL_ROLE_INGRESS}`,
     `      ${LABEL_SYSTEM_COMPONENT}: ${
       quoteYamlScalar(SYSTEM_MANAGED_INGRESS_COMPONENT)
     }`,
@@ -1308,7 +1310,7 @@ function hasProxySqlLabels(
 ): boolean {
   const labels = readComposePsLabels(entry);
   return (
-    labels[LABEL_ROLE] === LABEL_ROLE_SYSTEM &&
+    labels[LABEL_ROLE] === LABEL_ROLE_INGRESS &&
     labels[LABEL_SYSTEM_COMPONENT] === SYSTEM_MANAGED_INGRESS_COMPONENT
   );
 }
@@ -1322,7 +1324,7 @@ export type InspectProxySqlDeps = {
  * Best-effort observe the shared ProxySQL container.
  *
  * Matches the instance-allocated identity (`containerName` =
- * `<serviceId>-sql`) plus system labels — not a bare-uuid name.
+ * `<serviceId>-in`) plus system labels — not a bare-uuid name.
  *
  * Returns `undefined` when Docker/`ps` fails, `null` when absent, or the
  * matching labelled row when present.
@@ -1359,7 +1361,7 @@ export async function inspectProxySqlContainer(
     }
 
     for (const entry of parseComposePsEntries(result.stdout)) {
-      const row = readComposePsContainer(entry, "turbopanel");
+      const row = readComposePsContainer(entry, "ingress");
       if (row === null) continue;
       if (row.composeServiceName !== descriptor.composeServiceName) continue;
       if (row.containerName !== descriptor.containerName) continue;
@@ -1367,7 +1369,7 @@ export async function inspectProxySqlContainer(
       return {
         ...row,
         serviceId: descriptor.serviceId,
-        role: "turbopanel",
+        role: "ingress",
       };
     }
     return null;

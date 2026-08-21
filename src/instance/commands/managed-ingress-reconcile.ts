@@ -15,13 +15,14 @@ import {
 } from "../../deploy/docker-cli.ts";
 import { ensureDocker as defaultEnsureDocker } from "../../deploy/ensure-docker.ts";
 import {
+  isRecoverableManagedIngressContainerName,
   PROXYSQL_COMPOSE_SERVICE_NAME,
   readSystemComponentDescriptor,
   SYSTEM_MANAGED_INGRESS_COMPONENT,
   type SystemComponentDescriptor,
   writeSystemComponentDescriptor,
 } from "../../deploy/system-component.ts";
-import { managedIngressContainerName } from "../../deploy/ingress-identity.ts";
+import { ingressContainerName } from "../../deploy/ingress-identity.ts";
 import { logInfo } from "../../logger.ts";
 import { type LayoutPaths, resolveLayout } from "../../paths/layout.ts";
 import { ensureManagedIngressNetwork } from "../../managed/networks.ts";
@@ -313,7 +314,7 @@ async function persistManagedIngressIdentity(
     serviceId: identity.serviceId,
     composeServiceName: identity.composeServiceName,
     containerName: identity.containerName,
-    role: "turbopanel",
+    role: "ingress",
   };
   await writeSystemComponentDescriptor(layout, descriptor);
   return descriptor;
@@ -328,13 +329,17 @@ function identityFromComposeText(
   if (!nameMatch?.[1] || !idMatch?.[1]) return null;
   const serviceId = idMatch[1];
   const containerName = nameMatch[1];
-  if (containerName !== managedIngressContainerName(serviceId)) return null;
+  // Recover retired ProxySQL names (`<serviceId>-sql` or bare serviceId)
+  // into the current `-in` / `role: ingress` descriptor.
+  if (!isRecoverableManagedIngressContainerName(serviceId, containerName)) {
+    return null;
+  }
   return {
     component: SYSTEM_MANAGED_INGRESS_COMPONENT,
     serviceId,
     composeServiceName: PROXYSQL_COMPOSE_SERVICE_NAME,
-    containerName,
-    role: "turbopanel",
+    containerName: ingressContainerName(serviceId),
+    role: "ingress",
   };
 }
 
@@ -445,8 +450,8 @@ export async function handleManagedIngressReconcile(
   await writeProxySqlConfigAtomic(configPath, nextConfig);
 
   // Compose identity (container_name / publish bind) and static cnf changes
-  // need compose up. Comparing rendered compose catches legacy bare
-  // containerName → `<serviceId>-sql` renames that static cnf never sees.
+  // need compose up. Comparing rendered compose catches containerName
+  // → `<serviceId>-in` changes that static cnf never sees.
   const nextComposeText = proxysqlCompose(
     descriptor,
     bindAddresses,

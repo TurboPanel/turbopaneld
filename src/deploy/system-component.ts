@@ -12,7 +12,6 @@ import {
   ingressContainerName,
   type IngressIdentity,
   managedHaContainerName,
-  managedIngressContainerName,
 } from "./ingress-identity.ts";
 
 /** Shared HTTP Traefik system component key. */
@@ -99,7 +98,7 @@ export const SYSTEM_COMPONENT_CONTRACTS: Record<
   [SYSTEM_MANAGED_INGRESS_COMPONENT]: {
     project: PROXYSQL_PROJECT,
     composeServiceName: PROXYSQL_COMPOSE_SERVICE_NAME,
-    role: "turbopanel",
+    role: "ingress",
     selfHeal: "proxysql",
   },
   [SYSTEM_MANAGED_HA_COMPONENT]: {
@@ -141,7 +140,7 @@ export function systemComponentContract(
  * | component | expected `containerName` |
  * | --- | --- |
  * | `hosting-ingress` | `<serviceId>-in` |
- * | `managed-ingress` | `<serviceId>-sql` |
+ * | `managed-ingress` | `<serviceId>-in` |
  * | `managed-ha` | `<serviceId>-ha` |
  * | `database` / `queue` / `analytics` | bare `serviceId` |
  */
@@ -153,7 +152,7 @@ export function expectedSystemComponentContainerName(
     case SYSTEM_HOSTING_INGRESS_COMPONENT:
       return ingressContainerName(serviceId);
     case SYSTEM_MANAGED_INGRESS_COMPONENT:
-      return managedIngressContainerName(serviceId);
+      return ingressContainerName(serviceId);
     case SYSTEM_MANAGED_HA_COMPONENT:
       return managedHaContainerName(serviceId);
     case "database":
@@ -170,7 +169,7 @@ function systemComponentContainerNameMismatchMessage(
     case SYSTEM_HOSTING_INGRESS_COMPONENT:
       return "ingress containerName must equal <serviceId>-in";
     case SYSTEM_MANAGED_INGRESS_COMPONENT:
-      return "system managed-ingress containerName must equal <serviceId>-sql";
+      return "system managed-ingress containerName must equal <serviceId>-in";
     case SYSTEM_MANAGED_HA_COMPONENT:
       return "system managed-ha containerName must equal <serviceId>-ha";
     case "database":
@@ -207,8 +206,8 @@ export function systemComponentDescriptorPath(
  *   renaming it would orphan the running container in its compose project.
  * - `role` matches the contract's role.
  * - `containerName` matches the per-component naming rule:
- *   `hosting-ingress` → `<serviceId>-in`; `managed-ingress` →
- *   `<serviceId>-sql`; `managed-ha` → `<serviceId>-ha`;
+ *   `hosting-ingress` / `managed-ingress` → `<serviceId>-in`;
+ *   `managed-ha` → `<serviceId>-ha`;
  *   `database` / `queue` / `analytics` → bare `serviceId`.
  */
 export function assertSafeSystemIngressIdentity(
@@ -245,6 +244,54 @@ export function assertSafeSystemIngressIdentity(
       systemComponentContainerNameMismatchMessage(descriptor.component),
     );
   }
+}
+
+/** Retired ProxySQL container-name suffix before the shared `-in` contract. */
+const LEGACY_MANAGED_INGRESS_CONTAINER_NAME_SUFFIX = "-sql";
+
+function legacyManagedIngressContainerName(serviceId: string): string {
+  return `${serviceId}${LEGACY_MANAGED_INGRESS_CONTAINER_NAME_SUFFIX}`;
+}
+
+/**
+ * True when a persisted managed-ingress identity is the pre-`-in` shape:
+ * `role: turbopanel` plus either `<serviceId>-sql` or bare `serviceId`.
+ */
+function isLegacyManagedIngressDescriptor(
+  descriptor: SystemComponentDescriptor,
+): boolean {
+  if (descriptor.component !== SYSTEM_MANAGED_INGRESS_COMPONENT) return false;
+  if (descriptor.role !== "turbopanel") return false;
+  return descriptor.containerName === descriptor.serviceId ||
+    descriptor.containerName ===
+      legacyManagedIngressContainerName(descriptor.serviceId);
+}
+
+/**
+ * Rewrite a legacy managed-ingress descriptor to `role: ingress` and
+ * `<serviceId>-in`. Callers must validate and persist the result.
+ */
+function migrateLegacyManagedIngressDescriptor(
+  descriptor: SystemComponentDescriptor,
+): SystemComponentDescriptor {
+  return {
+    ...descriptor,
+    role: "ingress",
+    containerName: ingressContainerName(descriptor.serviceId),
+  };
+}
+
+/**
+ * True when a ProxySQL compose `container_name` is the current `-in`
+ * identity or a retired managed-ingress name that can be recovered.
+ */
+export function isRecoverableManagedIngressContainerName(
+  serviceId: string,
+  containerName: string,
+): boolean {
+  return containerName === ingressContainerName(serviceId) ||
+    containerName === serviceId ||
+    containerName === legacyManagedIngressContainerName(serviceId);
 }
 
 /** Shape-validate one persisted descriptor — mirrors TcpUdp entry guards. */
@@ -323,7 +370,9 @@ export async function writeSystemComponentDescriptor(
  * Returns `null` when the file is absent. Throws a clear
  * `corrupt system component descriptor …` error on invalid JSON or failed
  * shape/identity validation — nothing malformed is handed to the YAML
- * generator.
+ * generator. Managed-ingress files that still carry `role: turbopanel`
+ * with `<serviceId>-sql` or bare `serviceId` are rewritten to
+ * `role: ingress` / `<serviceId>-in` before return.
  */
 export async function readSystemComponentDescriptor(
   layout: LayoutPaths,
@@ -352,18 +401,15 @@ export async function readSystemComponentDescriptor(
     );
   }
 
-  // Legacy managed-ingress rows used bare serviceId as containerName before
-  // the `<serviceId>-sql` contract. Rewrite in place so reconcile can proceed
-  // without a manual descriptor edit (compose recreates the ProxySQL name).
-  const legacyBareManagedIngress = parsed.component ===
-      SYSTEM_MANAGED_INGRESS_COMPONENT &&
-    parsed.containerName === parsed.serviceId;
-  const descriptor: SystemComponentDescriptor = legacyBareManagedIngress
-    ? {
-      ...parsed,
-      containerName: managedIngressContainerName(parsed.serviceId),
-    }
-    : parsed;
+  // Legacy managed-ingress rows used `role: turbopanel` with either
+  // `<serviceId>-sql` or bare `serviceId` before the shared `-in` /
+  // `role: ingress` contract. Rewrite in place so drain/reconcile can
+  // proceed without a manual descriptor edit (compose recreates the name).
+  const legacyManagedIngress = isLegacyManagedIngressDescriptor(parsed);
+  let descriptor: SystemComponentDescriptor = parsed;
+  if (legacyManagedIngress) {
+    descriptor = migrateLegacyManagedIngressDescriptor(parsed);
+  }
 
   try {
     assertSafeSystemIngressIdentity(descriptor);
@@ -374,7 +420,7 @@ export async function readSystemComponentDescriptor(
       { cause: err },
     );
   }
-  if (legacyBareManagedIngress) {
+  if (legacyManagedIngress) {
     await writeSystemComponentDescriptor(layout, descriptor);
   }
   return descriptor;

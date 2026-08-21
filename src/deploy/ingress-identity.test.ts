@@ -4,8 +4,7 @@ import {
   assertSafeIngressIdentity,
   INGRESS_CONTAINER_NAME_SUFFIX,
   ingressContainerName,
-  MANAGED_INGRESS_CONTAINER_NAME_SUFFIX,
-  managedIngressContainerName,
+  managedHaContainerName,
 } from "./ingress-identity.ts";
 
 /**
@@ -21,11 +20,6 @@ const SERVICE_ID = "00000000-0000-4000-8000-0000000000aa";
 test("ingressContainerName appends the -in suffix", () => {
   assertEquals(INGRESS_CONTAINER_NAME_SUFFIX, "-in");
   assertEquals(ingressContainerName(SERVICE_ID), `${SERVICE_ID}-in`);
-});
-
-test("managedIngressContainerName appends the -sql suffix", () => {
-  assertEquals(MANAGED_INGRESS_CONTAINER_NAME_SUFFIX, "-sql");
-  assertEquals(managedIngressContainerName(SERVICE_ID), `${SERVICE_ID}-sql`);
 });
 
 test("assertSafeIdentityShape accepts a valid UUID identity", () => {
@@ -120,7 +114,7 @@ test("assertSafeIngressIdentity requires containerName equal to <serviceId>-in",
       assertSafeIngressIdentity({
         serviceId: SERVICE_ID,
         composeServiceName: "traefik",
-        containerName: managedIngressContainerName(SERVICE_ID),
+        containerName: managedHaContainerName(SERVICE_ID),
       }),
     Error,
     "ingress containerName must equal <serviceId>-in",

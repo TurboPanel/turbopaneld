@@ -546,8 +546,8 @@ export type SystemReconcileAction = "reconcile" | "restart" | "stop";
 /**
  * Must stay in sync with the instance canonical `SYSTEM_COMPONENT_ROLES`
  * role per system component. Container names are per-component (not
- * role-derived): `hosting-ingress` → `<serviceId>-in`, `managed-ingress`
- * → `<serviceId>-sql`, self-host stack → bare `serviceId` — see
+ * role-derived): `hosting-ingress` / `managed-ingress` → `<serviceId>-in`,
+ * self-host stack → bare `serviceId` — see
  * `expectedSystemComponentContainerName` below / instance
  * `expectedSystemComponentContainerName`.
  */
@@ -556,7 +556,7 @@ export const SYSTEM_COMPONENT_ROLES: Record<
   "service" | "ingress" | "turbopanel"
 > = {
   "hosting-ingress": "ingress",
-  "managed-ingress": "turbopanel",
+  "managed-ingress": "ingress",
   "managed-ha": "turbopanel",
   database: "turbopanel",
   queue: "turbopanel",
@@ -2540,8 +2540,6 @@ const DEPLOY_INGRESS_COMPOSE_NAME_RE = /^[A-Za-z0-9 ._-]+$/;
 const DEPLOY_INGRESS_CONTAINER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/;
 /** Mirrors instance `src/lib/naming.ts` `INGRESS_CONTAINER_NAME_SUFFIX`. */
 const INGRESS_CONTAINER_NAME_SUFFIX = "-in";
-/** Mirrors instance `src/lib/naming.ts` `MANAGED_INGRESS_CONTAINER_NAME_SUFFIX`. */
-const MANAGED_INGRESS_CONTAINER_NAME_SUFFIX = "-sql";
 /** Mirrors instance `src/lib/naming.ts` `MANAGED_HA_CONTAINER_NAME_SUFFIX`. */
 const MANAGED_HA_CONTAINER_NAME_SUFFIX = "-ha";
 
@@ -2558,7 +2556,7 @@ function expectedSystemComponentContainerName(
     case "hosting-ingress":
       return `${serviceId}${INGRESS_CONTAINER_NAME_SUFFIX}`;
     case "managed-ingress":
-      return `${serviceId}${MANAGED_INGRESS_CONTAINER_NAME_SUFFIX}`;
+      return `${serviceId}${INGRESS_CONTAINER_NAME_SUFFIX}`;
     case "managed-ha":
       return `${serviceId}${MANAGED_HA_CONTAINER_NAME_SUFFIX}`;
     case "database":
@@ -2833,7 +2831,7 @@ function parseSystemReconcileComponent(
 /**
  * Must stay in sync with the instance canonical `system.reconcile`
  * validator — including per-component container names via
- * `expectedSystemComponentContainerName` (`-in` / `-sql` / bare).
+ * `expectedSystemComponentContainerName` (`-in` / `-ha` / bare).
  */
 export function parseSystemReconcilePayload(
   value: unknown,
@@ -4668,7 +4666,7 @@ function parseManagedIngressIdentity(
     value.composeServiceName !== "proxysql" ||
     typeof value.containerName !== "string" ||
     value.containerName !==
-      `${value.serviceId}${MANAGED_INGRESS_CONTAINER_NAME_SUFFIX}`
+      `${value.serviceId}${INGRESS_CONTAINER_NAME_SUFFIX}`
   ) {
     throw new TypeError("Invalid managed.ingress.reconcile identity");
   }

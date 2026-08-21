@@ -46,7 +46,7 @@ function basePayload(
     identity: {
       serviceId: PROXYSQL_SERVICE_ID,
       composeServiceName: "proxysql",
-      containerName: `${PROXYSQL_SERVICE_ID}-sql`,
+      containerName: `${PROXYSQL_SERVICE_ID}-in`,
     },
     orgTlsMaterial: {
       certificatePem:
@@ -87,8 +87,8 @@ async function seedFixture(fixture: TempLayoutFixture): Promise<void> {
     component: SYSTEM_MANAGED_INGRESS_COMPONENT,
     serviceId: PROXYSQL_SERVICE_ID,
     composeServiceName: "proxysql",
-    containerName: `${PROXYSQL_SERVICE_ID}-sql`,
-    role: "turbopanel",
+    containerName: `${PROXYSQL_SERVICE_ID}-in`,
+    role: "ingress",
   });
   await Deno.mkdir(proxysqlConfigDir(layout), { recursive: true });
   await Deno.writeTextFile(
@@ -109,11 +109,11 @@ function fakeRun(): (args: string[]) => Promise<DockerCliResult> {
 function runningProxySqlPsStdout(): string {
   return JSON.stringify({
     ID: "proxysql-cid",
-    Name: `${PROXYSQL_SERVICE_ID}-sql`,
+    Name: `${PROXYSQL_SERVICE_ID}-in`,
     Service: "proxysql",
     State: "running",
     Labels: {
-      "turbopanel.role": "turbopanel",
+      "turbopanel.role": "ingress",
       "com.turbopanel.system.component": "managed-ingress",
     },
   });
@@ -677,8 +677,8 @@ test({
         component: SYSTEM_MANAGED_INGRESS_COMPONENT,
         serviceId: PROXYSQL_SERVICE_ID,
         composeServiceName: "proxysql",
-        containerName: `${PROXYSQL_SERVICE_ID}-sql`,
-        role: "turbopanel",
+        containerName: `${PROXYSQL_SERVICE_ID}-in`,
+        role: "ingress",
       });
       Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
       Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
@@ -787,13 +787,134 @@ test({
           layout,
           SYSTEM_MANAGED_INGRESS_COMPONENT,
         );
-        assertEquals(stored?.containerName, `${PROXYSQL_SERVICE_ID}-sql`);
+        assertEquals(stored?.containerName, `${PROXYSQL_SERVICE_ID}-in`);
         const composeText = await Deno.readTextFile(
           proxysqlComposePath(layout),
         );
         assertEquals(
-          composeText.includes(`container_name: ${PROXYSQL_SERVICE_ID}-sql`),
+          composeText.includes(`container_name: ${PROXYSQL_SERVICE_ID}-in`),
           true,
+        );
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+function payloadWithoutIdentity(): ManagedIngressReconcilePayload {
+  const payload = basePayload();
+  delete payload.identity;
+  return payload;
+}
+
+async function seedProxySqlHostPrep(
+  layout: ReturnType<typeof resolveLayout>,
+): Promise<void> {
+  await Deno.mkdir(proxysqlConfigDir(layout), { recursive: true });
+  await Deno.writeTextFile(
+    `${proxysqlConfigDir(layout)}/admin.cnf`,
+    "[client]\nuser=admin\npassword=admin-secret\n",
+  );
+  await Deno.writeTextFile(
+    `${proxysqlConfigDir(layout)}/monitor.cnf`,
+    "[client]\nuser=tp_monitor\npassword=mon-secret\n",
+  );
+}
+
+function legacyProxySqlCompose(containerName: string): string {
+  return [
+    "services:",
+    "  proxysql:",
+    `    container_name: ${containerName}`,
+    "    x-turbopanel:",
+    `      serviceId: ${PROXYSQL_SERVICE_ID}`,
+  ].join("\n") + "\n";
+}
+
+test({
+  name:
+    "handleManagedIngressReconcile recovers legacy ProxySQL compose identity when the descriptor is missing",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    const recoverableNames = [
+      `${PROXYSQL_SERVICE_ID}-in`,
+      `${PROXYSQL_SERVICE_ID}-sql`,
+      PROXYSQL_SERVICE_ID,
+    ];
+    for (const containerName of recoverableNames) {
+      await withTempLayout(async (fixture) => {
+        const layout = resolveLayout(fixture.env);
+        await seedProxySqlHostPrep(layout);
+        await Deno.writeTextFile(
+          proxysqlComposePath(layout),
+          legacyProxySqlCompose(containerName),
+        );
+        Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+        Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+        try {
+          const result = await handleManagedIngressReconcile(
+            payloadWithoutIdentity(),
+            new Date().toISOString(),
+            {
+              runDocker: fakeRun(),
+              decryptSecrets: decryptSecretsEcho,
+              ensureDocker: () => Promise.resolve(),
+            },
+          );
+          assertEquals(result.restarted, true);
+
+          const stored = await readSystemComponentDescriptor(
+            layout,
+            SYSTEM_MANAGED_INGRESS_COMPONENT,
+          );
+          assertEquals(stored?.containerName, `${PROXYSQL_SERVICE_ID}-in`);
+          assertEquals(stored?.role, "ingress");
+          const composeText = await Deno.readTextFile(
+            proxysqlComposePath(layout),
+          );
+          assertEquals(
+            composeText.includes(`container_name: ${PROXYSQL_SERVICE_ID}-in`),
+            true,
+          );
+        } finally {
+          Deno.env.delete("TURBOPANEL_STATE_DIR");
+          Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+        }
+      });
+    }
+  },
+});
+
+test({
+  name:
+    "handleManagedIngressReconcile rejects unrecognized compose identity when the descriptor is missing",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env);
+      await seedProxySqlHostPrep(layout);
+      await Deno.writeTextFile(
+        proxysqlComposePath(layout),
+        legacyProxySqlCompose(`${PROXYSQL_SERVICE_ID}-ha`),
+      );
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        await assertRejects(
+          () =>
+            handleManagedIngressReconcile(
+              payloadWithoutIdentity(),
+              new Date().toISOString(),
+              {
+                runDocker: fakeRun(),
+                decryptSecrets: decryptSecretsEcho,
+                ensureDocker: () => Promise.resolve(),
+              },
+            ),
+          Error,
+          "managed-ingress descriptor is missing",
         );
       } finally {
         Deno.env.delete("TURBOPANEL_STATE_DIR");

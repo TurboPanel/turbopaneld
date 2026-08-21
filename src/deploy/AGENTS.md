@@ -326,8 +326,11 @@ Traefik and from managed-engine ProxySQL:
 
 Adoption for hosting-ingress and system-stack rows requires the documented
 labels (`turbopanel.role`, `com.turbopanel.system.component`, …) — see below.
-ProxySQL uses `role: turbopanel` + `com.turbopanel.system.component=managed-ingress`
-when identity is stamped.
+ProxySQL uses `role: ingress` + `com.turbopanel.system.component=managed-ingress`
+when identity is stamped. Shared HTTP Traefik and ProxySQL now stamp the **same**
+`turbopanel.role` value, so the distinguishing adoption key is
+`com.turbopanel.system.component` (`hosting-ingress` vs `managed-ingress`) —
+never the role label alone.
 
 Descriptor path: `<stateDir>/system/hosting-ingress.json`
 (`SystemComponentDescriptor`: `component`, `serviceId`, `composeServiceName`
@@ -364,8 +367,13 @@ exists on the server (or the ingress was already observed after first start)
 
 For ProxySQL / `managed-ingress`, the descriptor + compose identity live with
 `SYSTEM_COMPONENT_CONTRACTS.managed-ingress` (`selfHeal: "proxysql"`);
-`containerName` = `<serviceId>-sql` (not bare uuid, not `-in`). Self-host
-stack components (`database` / `queue` / `analytics`) stay bare-`serviceId`.
+`containerName` = `<serviceId>-in`. `readSystemComponentDescriptor` migrates
+on-disk `role: turbopanel` rows that still use `<serviceId>-sql` or bare
+`serviceId` to `role: ingress` / `<serviceId>-in` and rewrites the file.
+`managed.ingress.reconcile` does the same recovery from an existing ProxySQL
+compose file when the payload has no identity. Self-host stack components
+(`database` / `queue` / `analytics`) stay bare-`serviceId`. `managed-ha`
+keeps `-ha`.
 Runtime files under `configDir/proxysql/` are written by
 `managed.ingress.reconcile` and optionally re-started by `system.reconcile`.
 Host dirs and the `turbopanel-proxysql-stack` unit are Ansible-owned

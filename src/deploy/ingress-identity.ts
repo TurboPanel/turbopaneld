@@ -18,12 +18,6 @@ const CONTAINER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/;
 export const INGRESS_CONTAINER_NAME_SUFFIX = "-in";
 
 /**
- * Managed-ingress (ProxySQL) container-name suffix — mirrors instance
- * `src/lib/naming.ts` `MANAGED_INGRESS_CONTAINER_NAME_SUFFIX`.
- */
-export const MANAGED_INGRESS_CONTAINER_NAME_SUFFIX = "-sql";
-
-/**
  * Managed-HA (Orchestrator) container-name suffix — mirrors instance
  * `src/lib/naming.ts` `MANAGED_HA_CONTAINER_NAME_SUFFIX`.
  */
@@ -42,14 +36,6 @@ export function ingressContainerName(serviceId: string): string {
 }
 
 /**
- * Build `<serviceId>-sql` — shared ProxySQL managed-ingress container name.
- * Mirrors instance `managedIngressContainerNameFromService`.
- */
-export function managedIngressContainerName(serviceId: string): string {
-  return `${serviceId}${MANAGED_INGRESS_CONTAINER_NAME_SUFFIX}`;
-}
-
-/**
  * Build `<serviceId>-ha` — shared Orchestrator managed-ha container name.
  * Mirrors instance `managedHaContainerNameFromService`.
  */
@@ -63,8 +49,9 @@ export function managedHaContainerName(serviceId: string): string {
  * `<serviceId>-in` container-name suffix rule.
  *
  * Shared by {@link assertSafeIngressIdentity} (ingress role) and the
- * per-component system contract in `system-component.ts` (`-sql` for
- * `managed-ingress`, bare `serviceId` for `database`/`queue`/`analytics`).
+ * per-component system contract in `system-component.ts` (`-in` for
+ * `hosting-ingress` / `managed-ingress`, bare `serviceId` for
+ * `database`/`queue`/`analytics`).
  */
 export function assertSafeIdentityShape(identity: IngressIdentity): void {
   if (!SAFE_FILE_ID_RE.test(identity.serviceId)) {
@@ -96,6 +83,7 @@ export function assertSafeIdentityShape(identity: IngressIdentity): void {
 /**
  * Validate an ingress identity before interpolating into compose YAML.
  *
+ * Used by the tenant/hosting Traefik path and the shared ProxySQL frontend.
  * Rejects non-UUID `serviceId`, unsafe compose/container names, and any
  * `containerName` that is not exactly `<serviceId>-in`.
  */

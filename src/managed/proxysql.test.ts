@@ -58,8 +58,8 @@ const DESCRIPTOR: SystemComponentDescriptor = {
   component: SYSTEM_MANAGED_INGRESS_COMPONENT,
   serviceId: "00000000-0000-4000-8000-0000000000aa",
   composeServiceName: "proxysql",
-  containerName: "00000000-0000-4000-8000-0000000000aa-sql",
-  role: "turbopanel",
+  containerName: "00000000-0000-4000-8000-0000000000aa-in",
+  role: "ingress",
 };
 
 function clusterDesired(
@@ -127,13 +127,13 @@ test("proxysqlCompose without descriptor stays anonymous", () => {
 test("proxysqlCompose with descriptor emits identity + system labels", () => {
   const compose = proxysqlCompose(DESCRIPTOR);
   assertStringIncludes(compose, `container_name: ${DESCRIPTOR.containerName}`);
-  assertEquals(DESCRIPTOR.containerName.endsWith("-sql"), true);
+  assertEquals(DESCRIPTOR.containerName.endsWith("-in"), true);
   assertStringIncludes(compose, "component: managed-ingress");
   assertStringIncludes(
     compose,
     'com.turbopanel.system.component: "managed-ingress"',
   );
-  assertStringIncludes(compose, "turbopanel.role: turbopanel");
+  assertStringIncludes(compose, "turbopanel.role: ingress");
 });
 
 test("formatProxySqlBindHost brackets IPv6 and validates bind", () => {
@@ -1342,7 +1342,7 @@ test("inspectProxySqlContainer matches labelled managed-ingress row", async () =
         Service: DESCRIPTOR.composeServiceName,
         State: "running",
         Labels: {
-          "turbopanel.role": "turbopanel",
+          "turbopanel.role": "ingress",
           "com.turbopanel.system.component": "managed-ingress",
         },
       },
@@ -1366,7 +1366,7 @@ test("inspectProxySqlContainer matches labelled managed-ingress row", async () =
       },
     });
     assertEquals(row?.containerName, DESCRIPTOR.containerName);
-    assertEquals(row?.role, "turbopanel");
+    assertEquals(row?.role, "ingress");
   } finally {
     await fixture.cleanup();
   }

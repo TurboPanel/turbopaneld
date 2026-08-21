@@ -597,8 +597,8 @@ function proxysqlPayload(): {
         component: SYSTEM_MANAGED_INGRESS_COMPONENT,
         serviceId: PROXYSQL_SERVICE_ID,
         composeServiceName: "proxysql",
-        containerName: `${PROXYSQL_SERVICE_ID}-sql`,
-        role: "turbopanel",
+        containerName: `${PROXYSQL_SERVICE_ID}-in`,
+        role: "ingress",
         desired: "present",
       },
     ],
@@ -659,8 +659,8 @@ test({
           component: SYSTEM_MANAGED_INGRESS_COMPONENT,
           serviceId: PROXYSQL_SERVICE_ID,
           composeServiceName: "proxysql",
-          containerName: `${PROXYSQL_SERVICE_ID}-sql`,
-          role: "turbopanel",
+          containerName: `${PROXYSQL_SERVICE_ID}-in`,
+          role: "ingress",
         };
 
         // Simulate a prior `managed.ingress.reconcile` that explicitly
@@ -707,8 +707,8 @@ async function reconcileWithTwoSegments(bindAddress?: string): Promise<void> {
     component: SYSTEM_MANAGED_INGRESS_COMPONENT,
     serviceId: PROXYSQL_SERVICE_ID,
     composeServiceName: "proxysql",
-    containerName: `${PROXYSQL_SERVICE_ID}-sql`,
-    role: "turbopanel",
+    containerName: `${PROXYSQL_SERVICE_ID}-in`,
+    role: "ingress",
   });
   await Deno.mkdir(proxysqlConfigDir(layout), { recursive: true });
   await Deno.writeTextFile(
@@ -863,8 +863,8 @@ test({
           component: SYSTEM_MANAGED_INGRESS_COMPONENT,
           serviceId: PROXYSQL_SERVICE_ID,
           composeServiceName: "proxysql",
-          containerName: `${PROXYSQL_SERVICE_ID}-sql`,
-          role: "turbopanel",
+          containerName: `${PROXYSQL_SERVICE_ID}-in`,
+          role: "ingress",
         };
         await ensureProxySqlIngress(layout, descriptor, fakeRunOk(), []);
 
@@ -878,8 +878,8 @@ test({
                 component: SYSTEM_MANAGED_INGRESS_COMPONENT,
                 serviceId: PROXYSQL_SERVICE_ID,
                 composeServiceName: "proxysql",
-                containerName: `${PROXYSQL_SERVICE_ID}-sql`,
-                role: "turbopanel",
+                containerName: `${PROXYSQL_SERVICE_ID}-in`,
+                role: "ingress",
                 desired: "present",
               },
             ],
@@ -896,9 +896,9 @@ test({
                 serviceId: PROXYSQL_SERVICE_ID,
                 composeServiceName: "proxysql",
                 containerId: "proxysql-cid",
-                containerName: `${PROXYSQL_SERVICE_ID}-sql`,
+                containerName: `${PROXYSQL_SERVICE_ID}-in`,
                 status: "running",
-                role: "turbopanel",
+                role: "ingress",
               }),
           },
         );
@@ -1079,8 +1079,8 @@ test({
           component: SYSTEM_MANAGED_INGRESS_COMPONENT,
           serviceId: PROXYSQL_SERVICE_ID,
           composeServiceName: "proxysql",
-          containerName: `${PROXYSQL_SERVICE_ID}-sql`,
-          role: "turbopanel",
+          containerName: `${PROXYSQL_SERVICE_ID}-in`,
+          role: "ingress",
         };
         await ensureProxySqlIngress(layout, descriptor, fakeRunOk(), []);
 
@@ -1094,8 +1094,8 @@ test({
                 component: SYSTEM_MANAGED_INGRESS_COMPONENT,
                 serviceId: PROXYSQL_SERVICE_ID,
                 composeServiceName: "proxysql",
-                containerName: `${PROXYSQL_SERVICE_ID}-sql`,
-                role: "turbopanel",
+                containerName: `${PROXYSQL_SERVICE_ID}-in`,
+                role: "ingress",
                 desired: "absent",
               },
             ],

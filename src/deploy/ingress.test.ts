@@ -99,8 +99,8 @@ const MANAGED_INGRESS_IDENTITY = {
   component: SYSTEM_MANAGED_INGRESS_COMPONENT,
   serviceId: MANAGED_INGRESS_SERVICE_ID,
   composeServiceName: PROXYSQL_COMPOSE_SERVICE_NAME,
-  containerName: `${MANAGED_INGRESS_SERVICE_ID}-sql`,
-  role: "turbopanel",
+  containerName: `${MANAGED_INGRESS_SERVICE_ID}-in`,
+  role: "ingress",
 } as const;
 
 test("hostingIngressDir and compose path nest under stateDir/ingress", async () => {
@@ -276,7 +276,7 @@ test("assertSafeSystemIngressIdentity rejects unsafe or mismatched identity", ()
   );
 });
 
-test("assertSafeSystemIngressIdentity accepts managed-ingress <serviceId>-sql and rejects bare / -in names", () => {
+test("assertSafeSystemIngressIdentity accepts managed-ingress <serviceId>-in and rejects bare / -ha names", () => {
   assertSafeSystemIngressIdentity({ ...MANAGED_INGRESS_IDENTITY });
   assertThrows(
     () =>
@@ -285,16 +285,16 @@ test("assertSafeSystemIngressIdentity accepts managed-ingress <serviceId>-sql an
         containerName: MANAGED_INGRESS_SERVICE_ID,
       }),
     Error,
-    "system managed-ingress containerName must equal <serviceId>-sql",
+    "system managed-ingress containerName must equal <serviceId>-in",
   );
   assertThrows(
     () =>
       assertSafeSystemIngressIdentity({
         ...MANAGED_INGRESS_IDENTITY,
-        containerName: `${MANAGED_INGRESS_SERVICE_ID}-in`,
+        containerName: `${MANAGED_INGRESS_SERVICE_ID}-ha`,
       }),
     Error,
-    "system managed-ingress containerName must equal <serviceId>-sql",
+    "system managed-ingress containerName must equal <serviceId>-in",
   );
 });
 
@@ -345,31 +345,36 @@ test("system component descriptor round-trips and rejects corrupt state", async 
   }
 });
 
-test("readSystemComponentDescriptor migrates legacy bare managed-ingress containerName", async () => {
+test("readSystemComponentDescriptor migrates legacy managed-ingress identity", async () => {
   const { layout, cleanup } = await makeTestLayout();
   try {
     const serviceId = MANAGED_INGRESS_SERVICE_ID;
     const systemDir = join(layout.stateDir, "system");
     await Deno.mkdir(systemDir, { recursive: true });
-    await Deno.writeTextFile(
-      join(systemDir, "managed-ingress.json"),
-      JSON.stringify({
-        component: "managed-ingress",
-        serviceId,
-        composeServiceName: "proxysql",
-        containerName: serviceId,
-        role: "turbopanel",
-      }),
-    );
-    const loaded = await readSystemComponentDescriptor(
-      layout,
-      "managed-ingress",
-    );
-    assertEquals(loaded?.containerName, `${serviceId}-sql`);
-    const onDisk = JSON.parse(
-      await Deno.readTextFile(join(systemDir, "managed-ingress.json")),
-    ) as { containerName: string };
-    assertEquals(onDisk.containerName, `${serviceId}-sql`);
+    const legacyNames = [serviceId, `${serviceId}-sql`];
+    for (const containerName of legacyNames) {
+      await Deno.writeTextFile(
+        join(systemDir, "managed-ingress.json"),
+        JSON.stringify({
+          component: "managed-ingress",
+          serviceId,
+          composeServiceName: "proxysql",
+          containerName,
+          role: "turbopanel",
+        }),
+      );
+      const loaded = await readSystemComponentDescriptor(
+        layout,
+        "managed-ingress",
+      );
+      assertEquals(loaded?.containerName, `${serviceId}-in`);
+      assertEquals(loaded?.role, "ingress");
+      const onDisk = JSON.parse(
+        await Deno.readTextFile(join(systemDir, "managed-ingress.json")),
+      ) as { containerName: string; role: string };
+      assertEquals(onDisk.containerName, `${serviceId}-in`);
+      assertEquals(onDisk.role, "ingress");
+    }
   } finally {
     await cleanup();
   }
