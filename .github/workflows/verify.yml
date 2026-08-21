@@ -35,14 +35,14 @@ jobs:
 
       # Fork PRs cannot receive repository secrets — skip the require there so
       # fmt/lint/tests still gate. Same-repo PRs / workflow_call / trunk must
-      # have SONAR_TOKEN (hard fail, same as turbopanel/turbopanel).
+      # have SONAR_TOKEN (hard fail, same as TurboPanel/turbopanel).
       - name: Require SONAR_TOKEN for trusted verification
         if: >-
           github.event_name != 'pull_request'
           || github.event.pull_request.head.repo.full_name == github.repository
         run: |
           if [ -z "$SONAR_TOKEN" ]; then
-            echo "::error::SONAR_TOKEN is missing — add the secret on turbopanel/turbopaneld (or org)."
+            echo "::error::SONAR_TOKEN is missing — add the secret on TurboPanel/turbopaneld (or org)."
             exit 1
           fi
 

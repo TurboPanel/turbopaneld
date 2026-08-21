@@ -2,12 +2,12 @@
 
 **Host daemon for every TurboPanel-managed host** — Ansible orchestration, authenticated control-plane presence, deploy/runtime, and host metrics.
 
-[![Release](https://img.shields.io/github/v/release/turbopanel/turbopaneld?label=release)](https://github.com/turbopanel/turbopaneld/releases)
+[![Release](https://img.shields.io/github/v/release/TurboPanel/turbopaneld?label=release)](https://github.com/TurboPanel/turbopaneld/releases)
 [![Quality Gate](https://sonarcloud.io/api/project_badges/measure?project=turbopanel_turbopaneld&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=turbopanel_turbopaneld)
 [![Coverage](https://sonarcloud.io/api/project_badges/measure?project=turbopanel_turbopaneld&metric=coverage)](https://sonarcloud.io/component_measures?id=turbopanel_turbopaneld&metric=coverage)
 [![Code Smells](https://sonarcloud.io/api/project_badges/measure?project=turbopanel_turbopaneld&metric=code_smells)](https://sonarcloud.io/project/issues?id=turbopanel_turbopaneld&resolved=false&types=CODE_SMELL)
 
-GitHub: [turbopanel/turbopaneld](https://github.com/turbopanel/turbopaneld). Package name: `turbopaneld`.
+GitHub: [TurboPanel/turbopaneld](https://github.com/TurboPanel/turbopaneld). Package name: `turbopaneld`.
 
 > **Private alpha** — Neither TurboPanel High Availability nor self-hosted is publicly available yet. The production install steps below describe the target flow as we work toward a beta release; see the [roadmap](https://turbopanel.io/roadmap) for progress.
 
@@ -96,11 +96,11 @@ tail -f /var/log/turbopanel/daemon.log
 
 ## Security
 
-Report vulnerabilities: [turbopanel.io/security](https://turbopanel.io/security?utm_source=github-daemon-readme) · [Private reporting](https://github.com/turbopanel/turbopaneld/security/advisories/new)
+Report vulnerabilities: [turbopanel.io/security](https://turbopanel.io/security?utm_source=github-daemon-readme) · [Private reporting](https://github.com/TurboPanel/turbopaneld/security/advisories/new)
 
 ## Developing the daemon
 
-Contributor workflow uses the [TurboPanel Development Environment](https://github.com/turbopanel/dev) — **not** the production installer above.
+Contributor workflow uses the [TurboPanel Development Environment](https://github.com/TurboPanel/dev) — **not** the production installer above.
 
 Clone the six sibling repos (including this one), then from the `dev` checkout:
 
@@ -113,7 +113,7 @@ dev/console
 
 That boots the Vagrant guest with sibling checkouts mounted, runs the daemon from source via Deno, and converges the dev overlay. Details: [Local development](https://turbopanel.io/docs/getting-started/development?utm_source=github-daemon-readme).
 
-Maintainer conventions and path model: [AGENTS.md](./AGENTS.md). Pull requests are accepted under the [Contributor License Agreement](https://github.com/turbopanel/.github/blob/trunk/CLA.md).
+Maintainer conventions and path model: [AGENTS.md](./AGENTS.md). Pull requests are accepted under the [Contributor License Agreement](https://github.com/TurboPanel/.github/blob/trunk/CLA.md).
 
 ## License
 

@@ -70,11 +70,11 @@ const DAEMON_ENV_PATH = join(
 );
 
 const SSH_REPO_URLS = {
-  instance: "git@github.com:turbopanel/turbopanel.git",
-  ui: "git@github.com:turbopanel/ui.git",
-  website: "git@github.com:turbopanel/website.git",
-  github: "git@github.com:turbopanel/.github.git",
-  daemon: "git@github.com:turbopanel/turbopaneld.git",
+  instance: "git@github.com:TurboPanel/turbopanel.git",
+  ui: "git@github.com:TurboPanel/ui.git",
+  website: "git@github.com:TurboPanel/website.git",
+  github: "git@github.com:TurboPanel/.github.git",
+  daemon: "git@github.com:TurboPanel/turbopaneld.git",
 } as const;
 
 function applyDaemonEnvToProcess(): void {

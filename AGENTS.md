@@ -95,7 +95,7 @@ vs **Organization CA** (two-CA distinction):
 `../turbopanel/src/lib/tls/AGENTS.md`.
 
 **Development (co-located checkout)** — `./console` from
-[turbopanel/dev](https://github.com/turbopanel/dev) runs the daemon from source
+[TurboPanel/dev](https://github.com/TurboPanel/dev) runs the daemon from source
 (`deno run main.ts`); all mutable paths are **dev-user-owned**:
 
 | Purpose                          | Path                                                                               |
@@ -123,7 +123,7 @@ service users `tp`, `tpctrl`, `tpcache`, `tpdata`, `tpqueue`, `tpmetrics`, and
 **`2.9.5`**. Keep it in step with `deno_version` in
 `orchestration/roles/deno-runtime/defaults/main.yml`, `TP_DENO_VERSION` in
 `scripts/run.sh`, and `DENO_VERSION` in
-[turbopanel/dev](https://github.com/turbopanel/dev) `src/lib/paths.ts` (dev
+[TurboPanel/dev](https://github.com/TurboPanel/dev) `src/lib/paths.ts` (dev
 console bootstrap fallback + status label). `src/orchestration/paths.test.ts`
 pins the const to the role default.
 
@@ -133,7 +133,7 @@ pins the const to the role default.
 (`…/node/current/bin/node`), `turbopanel_deno` (`…/deno/current/deno`), and
 `turbopanel_runtime_path` (colon-separated PATH prefix for systemd/Ansible
 tasks). Node **24.17.0** is pinned in `node-runtime/defaults/main.yml` — keep in
-step with `NODE_VERSION` in [turbopanel/dev](https://github.com/turbopanel/dev)
+step with `NODE_VERSION` in [TurboPanel/dev](https://github.com/TurboPanel/dev)
 `scripts/lib/paths.sh`. The vendored runtime root is defined once in
 `src/paths/layout.ts` (`resolveRuntimesDir()` / `PROD_RUNTIME_DIR_DEFAULT`);
 shell helpers live in `scripts/lib/runtime-paths.sh`.
@@ -214,7 +214,7 @@ single `dev_converge_skipped` JSONL event and exits **before**
 `ensureAnsible` / `ensureGalaxyDockerRole` / the playbook run. Unflagged
 invocations (and any flow with `TURBOPANEL_FORCE_CONVERGE=1` set) behave
 exactly as before via `shouldSkipDevConverge()` / `forceConvergeRequested()`.
-The [dev](https://github.com/turbopanel/dev) console threads this as
+The [dev](https://github.com/TurboPanel/dev) console threads this as
 `installDevEnvironment(..., mode)` with `mode: "if-needed" | "force"` —
 `"if-needed"` only for the post-daemon-install chain; `"force"` (and
 `TURBOPANEL_FORCE_CONVERGE=1`) for Developer → Converge / re-converge and
@@ -226,11 +226,11 @@ are still installed so the TUI can enable them later.
 ## Project metadata
 
 GitHub repository:
-[turbopanel/turbopaneld](https://github.com/turbopanel/turbopaneld). Deno
+[TurboPanel/turbopaneld](https://github.com/TurboPanel/turbopaneld). Deno
 package name: `turbopaneld` (`deno.json`), aligned with the repo slug and the
 compiled `/opt/turbopanel/bin/turbopaneld` binary.
 
-**Public naming:** **TurboPanel Daemon** → [turbopanel/turbopaneld](https://github.com/turbopanel/turbopaneld); internal term `daemon`. **License:** AGPL-3.0-only ([`LICENSE`](./LICENSE), `deno.json`). Trademarks are not granted by the software license ([`TRADEMARKS.md`](./TRADEMARKS.md)). Contributions require the [CLA](https://github.com/turbopanel/.github/blob/trunk/CLA.md). **Maturity:** **Private alpha**. README is product-facing; AGENTS.md is maintainer-facing.
+**Public naming:** **TurboPanel Daemon** → [TurboPanel/turbopaneld](https://github.com/TurboPanel/turbopaneld); internal term `daemon`. **License:** AGPL-3.0-only ([`LICENSE`](./LICENSE), `deno.json`). Trademarks are not granted by the software license ([`TRADEMARKS.md`](./TRADEMARKS.md)). Contributions require the [CLA](https://github.com/TurboPanel/.github/blob/trunk/CLA.md). **Maturity:** **Private alpha**. README is product-facing; AGENTS.md is maintainer-facing.
 
 **Host-base prerequisite boundary:** TurboPanel-managed vendors (uv, Python,
 Ansible venv, Deno, Node, Caddy, Redis, cloudflared) install under `vendor` via

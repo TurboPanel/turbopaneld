@@ -16,5 +16,5 @@ turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') |
 turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
 # Source checkout: co-located dev uses the dev user's home; managed installs use lib.
 turbopanel_website_dir: "{{ (turbopanel_dev_root ~ '/website') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/website') }}"
-website_repo_url: https://github.com/turbopanel/website
+website_repo_url: https://github.com/TurboPanel/website
 website_branch: trunk
