@@ -363,6 +363,29 @@ test(
 );
 
 test(
+  "clickhouse container_logs bootstrap enables nullable sorting keys",
+  async () => {
+    const tasksPath = join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/clickhouse/tasks/bootstrap.yml",
+    );
+    const tasks = await Deno.readTextFile(tasksPath);
+    const required = [
+      "CREATE TABLE IF NOT EXISTS {{ clickhouse_database }}.container_logs",
+      "ORDER BY (organization_id, server_id, service_id, timestamp)",
+      "SETTINGS allow_nullable_key = 1;",
+    ];
+    for (const fragment of required) {
+      if (!tasks.includes(fragment)) {
+        throw new Error(
+          `${tasksPath}: container_logs DDL missing ${fragment}`,
+        );
+      }
+    }
+  },
+);
+
+test(
   "clickhouse system-log DROP cleanup stays aligned with config.xml remove list",
   async () => {
     const configPath = join(

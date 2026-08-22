@@ -21,12 +21,14 @@
 
 # Container-log storage surface. The schema contract is owned by
 # turbopanel/src/lib/container-logs/clickhouse/schema.ts — keep the column list,
-# engine, PARTITION BY, ORDER BY and TTL in sync with
+# engine, PARTITION BY, ORDER BY, TTL and SETTINGS in sync with
 # buildContainerLogSchemaStatements() there. Creating it here means a freshly
 # converged install has the table before any application traffic arrives,
 # instead of waiting for the instance's first lazy ensureSchema() call. Both
 # paths are idempotent (CREATE TABLE IF NOT EXISTS + ALTER ... MODIFY TTL), so
 # whichever runs first wins and the other reconciles.
+# `service_id` is Nullable(UUID) in the ORDER BY; ClickHouse 26.x rejects that
+# unless MergeTree `allow_nullable_key = 1` is set on CREATE.
 - name: Create or reconcile container_logs table (idempotent)
   args:
     executable: /bin/bash
@@ -46,7 +48,8 @@
     ) ENGINE = MergeTree
     PARTITION BY toYYYYMM(timestamp)
     ORDER BY (organization_id, server_id, service_id, timestamp)
-    TTL timestamp + INTERVAL {{ clickhouse_container_logs_retention_days }} DAY DELETE;
+    TTL timestamp + INTERVAL {{ clickhouse_container_logs_retention_days }} DAY DELETE
+    SETTINGS allow_nullable_key = 1;
     ALTER TABLE {{ clickhouse_database }}.container_logs
       MODIFY TTL timestamp + INTERVAL {{ clickhouse_container_logs_retention_days }} DAY DELETE;
     EOSQL

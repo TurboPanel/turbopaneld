@@ -369,7 +369,10 @@ Instance-side ClickHouse metrics store + schema/query contract: `../../turbopane
 Instance-side container-log store (table `container_logs`, same database and
 same `turbopanel_app` user): `../../turbopanel/src/lib/container-logs/AGENTS.md`.
 The `turbopanel_app` grant below is already `<database>.*`-scoped, so that
-table needs **no** change to this role — no new grant, no new bootstrap SQL.
+table needs **no** new grant. The CREATE in `tasks/bootstrap.yml` must stay
+in lockstep with `schema.ts`, including `SETTINGS allow_nullable_key = 1`
+(`service_id` is nullable in the ORDER BY; ClickHouse 26.x rejects the table
+without it).
 
 | Path / resource                                                                          | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
