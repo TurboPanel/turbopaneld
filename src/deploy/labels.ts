@@ -48,3 +48,16 @@ export const LABEL_ROLE_SYSTEM = "turbopanel";
 
 /** @deprecated Prefer {@link LABEL_ROLE_SYSTEM} (value is now `turbopanel`). */
 export const LABEL_ROLE_TURBOPANEL = LABEL_ROLE_SYSTEM;
+
+/**
+ * Docker Compose's own identity labels, stamped by Compose itself on every
+ * container it creates.
+ *
+ * These are how an observed container is matched back to the deployment that
+ * owns it (the `deployment.json` under `<stateDir>/deployments`): the compose
+ * project name identifies the deployment, the compose service name keys into
+ * the manifest's `serviceIds`. Compose owns them, so they cannot be re-stamped by
+ * a tenant's own `labels:` block the way `com.turbopanel.*` values could be.
+ */
+export const LABEL_COMPOSE_PROJECT = "com.docker.compose.project";
+export const LABEL_COMPOSE_SERVICE = "com.docker.compose.service";

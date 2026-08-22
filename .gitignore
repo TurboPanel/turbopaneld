@@ -1,5 +1,6 @@
 .env
-logs/
+# Runtime log output at the repo root only — never the `src/logs/` module.
+/logs/
 # Deno V8 profiles + HTML/LCOV (`deno test --coverage=…`). Official task uses
 # coverage/; scoped local runs may write coverage-commands/ and similar.
 coverage*/

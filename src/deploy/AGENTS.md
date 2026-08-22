@@ -22,6 +22,9 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    (`sg docker` fails for `/usr/sbin/nologin` service accounts with "This
    account is currently not available"). If that still cannot open the socket,
    `runDocker` tries `sudo -n -- docker …` (`tp` has `NOPASSWD:ALL`).
+   `resolveDockerInvocation()` probes the **same ladder** up front (direct →
+   `sudo -n -u <self>` → `sudo -n --`) so the streamed path has identical
+   Docker access.
 2. Bootstrap Traefik on Docker network `turbopanel-ingress` **only when the
    deploy has at least one container HTTP hosting with hostnames** (shared
    loopback entrypoints `127.0.0.1:7080` / `127.0.0.1:7443`, PROXY protocol,
@@ -117,6 +120,89 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    collection succeeds; a `ps`/parse failure never fails an otherwise-successful
    deploy.
 
+## Streamed transcript capture (execution logs)
+
+Deploy / lifecycle / stop / `managed.apply` stream their Docker + hook output
+line-by-line to the control plane while the command is still running. The
+buffered `DockerCliResult` and the bounded WS `command-outcome` `result` are
+unchanged — the transcript is a **separate, never load-bearing** channel.
+
+- **Streaming seam** — `runDockerStreamed(args, { onLine })`
+  (`src/deploy/docker-cli.ts`) tees stdout/stderr per line while still buffering
+  both into the same `DockerCliResult` `runDocker` returns. It resolves the
+  docker invocation once via `resolveDockerInvocation()` (a streaming spawn
+  cannot buffer-then-retry the sudo fallback mid-stream, so the probe walks the
+  full direct → `sudo -n -u <self>` → `sudo -n --` ladder). `createStreamedRunner(runDockerOverride?)`
+  picks it, or replays a buffered test seam through `onLine`, so host-free
+  suites exercise the transcript path without spawning docker. Deploy shell
+  hooks (`run-deploy-hooks.ts`) stream their own stdout/stderr the same way.
+- **Sink** — handlers take an optional `logSink?: CommandOutputSink` in their
+  existing deps object (`EnvironmentDeployDeps`,
+  `EnvironmentLifecycleHandlerDeps`, `EnvironmentStopHandlerDeps`,
+  `ManagedApplyHandlerDeps`); the default is a **no-op sink**, so every existing
+  caller and test is unchanged. `command-router.ts` builds the real sink once
+  per command execution from the dispatch envelope's own `id` and calls
+  `logSink.finalize()` in a `finally` beside the `command-outcome` send.
+- **Redaction before spool** — the deny-set is built from values this command
+  actually decrypted: the `decryptSecrets` seam is wrapped by
+  `captureDecryptedSecrets` (`src/logs/capture.ts`), so variable material,
+  principal passwords, and TLS private keys all join it; `managed.apply` also
+  adds its credential plaintexts. Every line is `replaceAll`-scrubbed to `***`
+  and stripped of log-injection control characters **before** it is written to
+  disk — plaintext never reaches the spool file. Never a generic
+  secret-scanning heuristic. Deny-set construction (`normalizeDenySet`) keeps
+  each plaintext **exactly** as decrypted *and* expands multiline material into
+  its individual lines, so a PEM private key is scrubbed even though the sink
+  sees one line at a time. `managed/apply.ts`'s error `redactSecrets` shares
+  the same deny-set construction via `redactPlaintexts`
+  (`src/logs/redactor.ts`).
+- **Failure summaries** — a thrown error message is usually raw process
+  stdout/stderr and lands in persisted command history, which the per-line
+  transcript redaction never reaches. Every handler runs it through
+  `logSink.redactSummary(...)` (`CommandOutputSink`, `src/logs/contracts.ts`)
+  before throwing, and `command-router.ts` redacts once more when building
+  `command-outcome.error`. The no-op sink redacts too — a daemon without an
+  upload transport must not be the configuration that leaks plaintext — and
+  `run-deploy-hooks.ts` falls back to the process-wide deny-set when no
+  redactor is passed.
+- **Spool path** — `<stateDir>/spool/execution-logs/<commandId>.log`
+  (`commandLogSpoolDir(layout)` in `src/paths/layout.ts`), file mode `0600`
+  under a `0700` dir, NDJSON `CommandOutputEvent` per line with a monotonic
+  `sequence`. The file is the durability source of truth; the in-memory buffer
+  is only a batching cache.
+- **Phases** — lines are tagged with the deploy step they belong to: `prepare`,
+  `pull`, `build`, `pre-deploy`, `compose-up`, `health`, `post-deploy`, plus
+  `hooks`, `managed-apply`, `lifecycle-start` / `lifecycle-stop` /
+  `lifecycle-restart`, and `stop` (`COMMAND_LOG_PHASES` in
+  `src/logs/contracts.ts`).
+- **Wire format** — the ingest contract counts **chunks**, not lines: `seq` is
+  zero-based and gap-free per command (the first upload is always `seq = 0`),
+  and `bytes` is standard base64 of the chunk's raw UTF-8 transcript bytes.
+  `MAX_COMMAND_LOG_CHUNK_BYTES` is enforced against the **decoded** size, the
+  same value `turbopanel/src/daemon/execution-log-ingest.ts` measures. The
+  NDJSON `sequence` stays a per-line spool-file concern and never goes on the
+  wire.
+- **Upload cadence** — batched to `POST /api/daemon/v1/commands/:commandId/log`
+  (`DaemonApiClient.sendCommandLogChunk`) when the buffer reaches ~64 KB or
+  ~750 ms, and once more on `finalize()`. Retry uses capped backoff; a chunk
+  that still cannot be delivered is warned and dropped — an upload failure must
+  never change a command outcome.
+- **Truncation** — past `MAX_COMMAND_LOG_BYTES` (2 MiB per command) a single
+  `... transcript truncated ...` marker line is uploaded and no further chunks
+  are sent for that command; spooling stops too, so the on-disk file cannot
+  grow past the cap. The transcript counts as sealed **only when the marker was
+  acked** — a marker that could not be delivered is unacked work, so the spool
+  file is kept for the orphan sweep.
+- **Orphan sweep** — a fully-acked spool file is deleted by `finalize()`; one
+  left behind by a crash or a failed upload is best-effort re-uploaded and
+  deleted (`src/logs/orphan-sweep.ts`, called from `src/instance/client.ts`).
+  It runs **once per daemon process**, not on every reconnect, and skips any
+  spool file a live sink still owns (`isActiveSpoolPath` in
+  `src/logs/spool.ts`) — handlers outlive socket lifetime, so a sweep must
+  never touch an in-flight transcript. A leftover file is replayed whole as
+  chunk `seq = 0`: the control plane treats a seq below its `nextSeq` as an
+  idempotent no-op, while a higher one would be rejected as a gap.
+
 ## Compiled compose publish
 
 `environment.deploy` publishes a **single compiled** `compose.yaml` (overlay
@@ -142,7 +228,9 @@ entry. There is no `composeYaml` fallback on `environment.deploy`.
   `.env` (non-secrets, `0640`) +
   `deployment.json` (`DEPLOYMENT_MANIFEST_FILENAME`, version 2: project /
   environment / server ids, generation, project name, compose sha256, replica
-  counts, optional `secrets[]` plan). All compose/manifest files are written mode `0640`
+  counts, optional `secrets[]` plan, optional `serviceIds` map — compose service
+  name → service UUID, which is what lets the container-log collector resolve
+  identity from deployment state instead of live container labels). All compose/manifest files are written mode `0640`
   (`writeComposeFileSecure` force-chmods after write since truncate-in-place
   does not narrow an existing more-permissive mode).
 - **Daemon overlay:** `buildDaemonOverlayFragment` merges, in this fixed

@@ -21,10 +21,17 @@ import {
   readComposePsContainer,
 } from "../../deploy/compose-ps.ts";
 import {
+  createStreamedRunner,
   type DockerCliResult,
   runDocker as defaultRunDocker,
   type RunDockerOptions,
 } from "../../deploy/docker-cli.ts";
+import { captureDecryptedSecrets } from "../../logs/capture.ts";
+import {
+  type CommandOutputSink,
+  createNoopCommandOutputSink,
+  lifecyclePhase,
+} from "../../logs/contracts.ts";
 import {
   readEnvironmentTcpUdpServiceIds,
   serviceIngressComposePath,
@@ -50,6 +57,8 @@ type RunDockerFn = (
 export type EnvironmentLifecycleHandlerDeps = {
   /** Test seam — defaults to {@link defaultRunDocker}. */
   runDocker?: RunDockerFn;
+  /** Execution-log transcript sink (`src/logs/`); defaults to a no-op sink. */
+  logSink?: CommandOutputSink;
   decryptSecrets?: DecryptSecretsFn;
   rehydrateDeploymentSecrets?: RehydrateDeploymentSecretsFn;
 };
@@ -169,9 +178,13 @@ export async function handleEnvironmentLifecycle(
   const parsedPayload = parseEnvironmentLifecyclePayload(payload);
   assertSafeLifecycleIdentifiers(parsedPayload);
   const run = deps?.runDocker ?? defaultRunDocker;
+  const runStreamed = createStreamedRunner(deps?.runDocker);
+  const logSink = deps?.logSink ?? createNoopCommandOutputSink();
+  logSink.setPhase(lifecyclePhase(parsedPayload.action));
+  const decryptSecrets = captureDecryptedSecrets(deps?.decryptSecrets, logSink);
   const layout = resolveLayout(Deno.env.toObject());
 
-  const deploymentDir = await resolveEnvironmentDeploymentDir(
+  const deploymentDir = resolveEnvironmentDeploymentDir(
     layout,
     parsedPayload.projectId,
     parsedPayload.environmentId,
@@ -193,20 +206,28 @@ export async function handleEnvironmentLifecycle(
         projectId: parsedPayload.projectId,
         environmentId: parsedPayload.environmentId,
         generation: manifest?.generation,
-        decryptSecrets: deps?.decryptSecrets,
+        decryptSecrets,
         rehydrate: deps?.rehydrateDeploymentSecrets,
         plan,
       });
     }
   }
 
-  const result = await run([
+  const result = await runStreamed([
     ...composeFileArgs(parsedPayload.projectName, composePaths),
     parsedPayload.action,
-  ]);
+  ], {
+    onLine: (event) => logSink.onLine(event.stream, event.line),
+  });
   if (!result.success) {
+    // Redact before sanitizing: the deny-set matches raw plaintext, and
+    // sanitizeForLog would otherwise rewrite the newlines a multiline secret
+    // (a PEM body) is matched on.
     throw new Error(
-      sanitizeForLog(result.stderr || `compose ${parsedPayload.action} failed`),
+      sanitizeForLog(
+        logSink.redactSummary(result.stderr) ||
+          `compose ${parsedPayload.action} failed`,
+      ),
     );
   }
 

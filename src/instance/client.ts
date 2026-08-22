@@ -50,6 +50,13 @@ import {
 } from "../deploy/rehydrate-deployments.ts";
 import { runDocker as defaultRunDocker } from "../deploy/docker-cli.ts";
 import { resolveLayout } from "../paths/layout.ts";
+import { sweepOrphanCommandLogs } from "../logs/orphan-sweep.ts";
+import type { ContainerLogBatchEvent } from "../logs/container-log-contracts.ts";
+import {
+  isContainerLogCollectionEnabled,
+  startContainerLogCollection,
+  stopContainerLogCollection,
+} from "../logs/container-collector.ts";
 import { classifyConnectFailure } from "./connect-failure.ts";
 import { DaemonJwksClient } from "./jwks-client.ts";
 import { DaemonTokenManager } from "./token-manager.ts";
@@ -185,6 +192,16 @@ type DaemonMessage =
     commandType: string;
     payload: unknown;
     at: string;
+  }
+  | {
+    /**
+     * Control-plane acknowledgement of a `hello` / `heartbeat`. Carries the
+     * owning organization's opt-in flags so the daemon can start or stop
+     * container log collection without a new command type or a restart.
+     */
+    type: "presence-ack";
+    at: string;
+    containerLogsEnabled?: boolean;
   }
   | {
     type: "command-ack";
@@ -367,6 +384,8 @@ export class InstanceClient {
   #tokenServerId: string | undefined;
   #tokenKeyId: string | undefined;
   #forceEnrollPending = false;
+  /** Orphan transcript sweep runs once per process, never on reconnect. */
+  #orphanSweepStarted = false;
   #didCompleteSecretsRehydrate = false;
   #secretsRehydrateInFlight = false;
   #parked = false;
@@ -379,6 +398,8 @@ export class InstanceClient {
   #metricsScheduler: MetricsScheduler | undefined;
   /** Server id the current metrics scheduler was bound for (not `#tokenServerId`). */
   #metricsSchedulerServerId: string | undefined;
+  /** Last org-level container-logs opt-in seen on a presence ack. */
+  #containerLogsEnabled = false;
   readonly #metricsCollectorFactory?: () => MetricsCollector;
   readonly #applyDevSyncTarball?: DevSyncApplyFn;
   #updateInstallInProgress = false;
@@ -893,6 +914,17 @@ export class InstanceClient {
     this.#apiClient = apiClient;
     this.#tokenServerId = serverId;
     this.#tokenKeyId = keyId;
+
+    // Best-effort: re-upload transcripts spooled before a crash/restart. Once
+    // per process only — `#ensureAuthClients` also runs on reconnect, and a
+    // long-running command may still own its spool file by then.
+    if (!this.#orphanSweepStarted) {
+      this.#orphanSweepStarted = true;
+      void sweepOrphanCommandLogs({
+        send: (params) => apiClient.sendCommandLogChunk(params),
+        layout: resolveLayout(Deno.env.toObject()),
+      });
+    }
   }
 
   async #recoverFromStaleIdentity(stateDir: string): Promise<void> {
@@ -1058,6 +1090,12 @@ export class InstanceClient {
       this.#idlePresence?.detach();
       this.#haObserver?.detach();
       this.#metricsScheduler?.detach();
+      // Container log collection deliberately survives the socket. Tearing it
+      // down here dropped every line a container printed during the outage —
+      // the tails would be re-attached with no cursor on the next presence ack
+      // — and reconnects are exactly the case retention has to survive. The
+      // collector holds its batches while `readyToSend()` is false and ships
+      // them once the transport is back; only an org toggle stops it.
     };
 
     const closeEvent = await new Promise<CloseEvent>((resolve) => {
@@ -1204,7 +1242,71 @@ export class InstanceClient {
       case "update":
         this.#runSocketHandler("update", this.#applyUpdate(message, ws));
         break;
+      case "presence-ack":
+        this.#applyContainerLogsFlag(message.containerLogsEnabled === true);
+        break;
     }
+  }
+
+  /**
+   * Apply the org-level container-logs opt-in from a presence ack.
+   *
+   * The steady state is free: an unchanged flag whose collector is already in
+   * the state it asks for returns immediately, so the value riding every ack
+   * (including the idle refresh heartbeat's) costs nothing. It still
+   * *re-converges* rather than trusting the remembered flag alone — the
+   * collector can have stopped for its own reasons — and
+   * `startContainerLogCollection` is idempotent per server id as a second line
+   * of defence. Never throws into the socket handler: container output is
+   * disposable telemetry.
+   */
+  #applyContainerLogsFlag(enabled: boolean): void {
+    const unchanged = this.#containerLogsEnabled === enabled;
+    this.#containerLogsEnabled = enabled;
+    const serverId = this.#tokenServerId;
+    if (!enabled || !serverId || !this.#apiClient) {
+      if (unchanged && !isContainerLogCollectionEnabled()) return;
+      this.#runSocketHandler(
+        "container-logs-stop",
+        stopContainerLogCollection(),
+      );
+      return;
+    }
+    // Already collecting for this server: the flag rides every presence ack,
+    // so the steady state must cost nothing. `startContainerLogCollection` is
+    // idempotent per server id, but skipping it keeps the log line quiet too.
+    if (unchanged && isContainerLogCollectionEnabled()) return;
+    try {
+      startContainerLogCollection({
+        serverId,
+        layout: resolveLayout(Deno.env.toObject()),
+        // Late-bound on purpose: the collector outlives any one socket and any
+        // one API client (a CA refresh rebuilds it), so it must never capture
+        // the instance it was started with.
+        send: (events) => this.#sendContainerLogBatch(events),
+        readyToSend: () =>
+          this.#apiClient !== undefined &&
+          this.#ws?.readyState === WebSocket.OPEN,
+      });
+      logInfo("instance", "container log collection enabled");
+    } catch (err) {
+      logWarn(
+        "instance",
+        "container log collection failed to start:",
+        sanitizeForLog(err),
+      );
+    }
+  }
+
+  /** Ship one batch on whatever API client is current right now. */
+  #sendContainerLogBatch(
+    events: readonly ContainerLogBatchEvent[],
+  ): Promise<void> {
+    const apiClient = this.#apiClient;
+    if (!apiClient) {
+      return Promise.reject(new Error("daemon api client unavailable"));
+    }
+    return apiClient.sendContainerLogBatch(events);
   }
 
   #runSocketHandler(label: string, work: Promise<void>): void {
@@ -1220,6 +1322,7 @@ export class InstanceClient {
       decryptSecrets: (ciphertexts) => apiClient.decryptSecrets(ciphertexts),
       rehydrateDeploymentSecrets: (deployments) =>
         apiClient.rehydrateDeploymentSecrets(deployments),
+      sendCommandLogChunk: (params) => apiClient.sendCommandLogChunk(params),
     };
   }
 

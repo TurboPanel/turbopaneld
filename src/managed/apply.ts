@@ -10,11 +10,20 @@ import type {
 } from "../instance/commands/contracts.ts";
 import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts";
 import {
+  createStreamedRunner,
   type DockerCliResult,
   dockerOutputLooksLikeSocketPermission,
   runDocker as defaultRunDocker,
   type RunDockerOptions,
+  type RunDockerStreamedFn,
 } from "../deploy/docker-cli.ts";
+import { captureDecryptedSecrets } from "../logs/capture.ts";
+import {
+  COMMAND_LOG_PHASES,
+  type CommandOutputSink,
+  createNoopCommandOutputSink,
+} from "../logs/contracts.ts";
+import { redactPlaintexts } from "../logs/redactor.ts";
 import { logInfo, sanitizeForLog } from "../logger.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import {
@@ -56,6 +65,8 @@ type RunDockerFn = (
 
 export type ManagedApplyHandlerDeps = {
   decryptSecrets?: DecryptSecretsFn;
+  /** Execution-log transcript sink (`src/logs/`); defaults to a no-op sink. */
+  logSink?: CommandOutputSink;
   /** Test seam — defaults to {@link defaultRunDocker}. */
   runDocker?: RunDockerFn;
   /** Test seam — defaults to {@link defaultEnsureDocker}. */
@@ -66,13 +77,12 @@ export type ManagedApplyHandlerDeps = {
   runHostPrep?: () => Promise<void>;
 };
 
+/**
+ * Error/log redaction over the same deny-set the transcript redactor uses
+ * (`src/logs/redactor.ts`) — one deny-set construction, two output paths.
+ */
 function redactSecrets(text: string, plaintexts: readonly string[]): string {
-  let out = text;
-  for (const secret of plaintexts) {
-    if (secret.length === 0) continue;
-    out = out.replaceAll(secret, "***");
-  }
-  return sanitizeForLog(out);
+  return sanitizeForLog(redactPlaintexts(text, plaintexts));
 }
 
 async function decryptCredentialPasswords(
@@ -209,15 +219,27 @@ async function composeUpWithDockerRetry(
   return await run(args);
 }
 
-async function composeUpManagedEngine(
-  layout: LayoutPaths,
-  payload: ManagedApplyPayload,
-  composeYaml: string,
-  rootCredential: ManagedApplyCredential,
-  redact: (text: string) => string,
-  run: RunDockerFn,
-  runDockerSetup: () => Promise<void>,
-): Promise<string> {
+type ComposeUpManagedEngineArgs = {
+  layout: LayoutPaths;
+  payload: ManagedApplyPayload;
+  composeYaml: string;
+  rootCredential: ManagedApplyCredential;
+  redact: (text: string) => string;
+  runDockerSetup: () => Promise<void>;
+  logSink: CommandOutputSink;
+  runStreamed: RunDockerStreamedFn;
+};
+
+async function composeUpManagedEngine({
+  layout,
+  payload,
+  composeYaml,
+  rootCredential,
+  redact,
+  runDockerSetup,
+  logSink,
+  runStreamed,
+}: ComposeUpManagedEngineArgs): Promise<string> {
   const composePath = managedComposePath(layout, payload.managedId);
   const envPath = managedEnvFilePath(layout, payload.managedId);
   const project = managedComposeProject(payload.managedId);
@@ -231,8 +253,12 @@ async function composeUpManagedEngine(
       0o600,
     );
 
+    logSink.setPhase(COMMAND_LOG_PHASES.MANAGED_APPLY);
     const up = await composeUpWithDockerRetry(
-      run,
+      (args) =>
+        runStreamed(args, {
+          onLine: (event) => logSink.onLine(event.stream, event.line),
+        }),
       [
         "compose",
         "--env-file",
@@ -486,6 +512,9 @@ export async function handleManagedApply(
   const layout = resolveLayout(Deno.env.toObject());
   const engine = getManagedEngineRuntime(payload.engine);
   const run = deps?.runDocker ?? defaultRunDocker;
+  const runStreamed = createStreamedRunner(deps?.runDocker);
+  const logSink = deps?.logSink ?? createNoopCommandOutputSink();
+  logSink.setPhase(COMMAND_LOG_PHASES.MANAGED_APPLY);
   const ensureDocker = deps?.ensureDocker ?? defaultEnsureDocker;
   const runDockerSetup = deps?.runDockerSetup ?? defaultRunDockerSetup;
   const runHostPrep = deps?.runHostPrep ?? runProxySqlSetup;
@@ -495,7 +524,8 @@ export async function handleManagedApply(
   const managedRoot = await materializeManagedState(
     layout,
     payload,
-    deps?.decryptSecrets,
+    // Everything this apply decrypts joins the transcript deny-set.
+    captureDecryptedSecrets(deps?.decryptSecrets, logSink),
   );
   await normalizeManagedFileOwnership(
     payload.image,
@@ -507,6 +537,8 @@ export async function handleManagedApply(
 
   const { decrypted, redact, rootCredential } =
     await requireDecryptedCredentials(payload, deps);
+  // Same deny-set for the bounded WS error text and the streamed transcript.
+  logSink.addSecrets(decrypted.plaintexts);
 
   // Standby bootstrap must run before compose up (empty volume → avoid dual primary).
   if (
@@ -553,15 +585,16 @@ export async function handleManagedApply(
   }
 
   const { composeYaml, composeServiceName } = normalizeManagedCompose(payload);
-  const project = await composeUpManagedEngine(
+  const project = await composeUpManagedEngine({
     layout,
     payload,
     composeYaml,
     rootCredential,
     redact,
-    run,
     runDockerSetup,
-  );
+    logSink,
+    runStreamed,
+  });
 
   // Scope the public listener once the publish exists; never blocks apply.
   await reconcileManagedPublicFirewallBestEffort(payload);

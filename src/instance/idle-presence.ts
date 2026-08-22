@@ -15,6 +15,24 @@ import type { HostResources } from "../host/host-inventory.ts";
 export const IDLE_PRESENCE_MS = 60_000;
 
 /**
+ * Floor cadence for the app-level `heartbeat`, independent of change detection.
+ *
+ * Heartbeats are otherwise only sent when a presence fact moved, and the
+ * control plane answers presence frames — and only presence frames — with
+ * `presence-ack`. That ack is how a daemon learns the organization flipped
+ * `containerLogsEnabled` (see `turbopanel/src/daemon/container-logs-presence.ts`).
+ * On an idle connection nothing changes for hours, so without this floor a
+ * toggle would not reach the daemon until some unrelated fact (an IP, a Docker
+ * version, a daemon build) happened to move — collection stuck on or off in
+ * the meantime. The raw cell ping cannot carry it: on the Workers transport it
+ * is answered by `setWebSocketAutoResponse` without ever waking the cell.
+ *
+ * Five minutes is the convergence bound for an otherwise-silent daemon, at one
+ * extra presence frame (and one projection query) per daemon per five minutes.
+ */
+export const PRESENCE_REFRESH_MS = 5 * 60_000;
+
+/**
  * Hard lifetime cap for a single daemon↔instance WebSocket. Mirrors the
  * instance's `MAX_WS_CONNECTION_AGE_MS` (`src/daemon/cell/socket-health.ts`).
  * Post AE-driven sweep, this daemon-side recycle is the primary enforcer of
@@ -29,6 +47,12 @@ export type IdlePresenceOptions = {
   serverId: string;
   /** Override for tests; defaults to {@link IDLE_PRESENCE_MS}. */
   idleCheckIntervalMs?: number;
+  /**
+   * Floor cadence for the app-level heartbeat even with nothing to report;
+   * defaults to {@link PRESENCE_REFRESH_MS}. See that constant for why an idle
+   * connection still has to ask.
+   */
+  presenceRefreshIntervalMs?: number;
   idleThresholdMs?: number;
   /** Minimum spacing between routine cell pings; defaults to {@link idleCheckIntervalMs}. */
   minPresenceIntervalMs?: number;
@@ -126,6 +150,7 @@ export class IdlePresence {
   readonly #idleCheckIntervalMs: number;
   readonly #idleThresholdMs: number;
   readonly #minPresenceIntervalMs: number;
+  readonly #presenceRefreshIntervalMs: number;
   readonly #staleConnectionMs: number;
   readonly #onStaleConnection: (() => void) | undefined;
   readonly #maxConnectionAgeMs: number;
@@ -136,6 +161,8 @@ export class IdlePresence {
   #lastActivityAt = Date.now();
   #lastInboundAt = Date.now();
   #lastPresenceSendAt = 0;
+  /** Last app-level presence frame (`hello` or `heartbeat`) sent on this socket. */
+  #lastPresenceFrameAt = 0;
   #lastDaemonBuildCommit: string | undefined;
   #lastPresenceSnapshot: string | undefined;
   #staleReported = false;
@@ -147,6 +174,8 @@ export class IdlePresence {
     this.#idleThresholdMs = options.idleThresholdMs ?? IDLE_PRESENCE_MS;
     this.#minPresenceIntervalMs = options.minPresenceIntervalMs ??
       this.#idleCheckIntervalMs;
+    this.#presenceRefreshIntervalMs = options.presenceRefreshIntervalMs ??
+      PRESENCE_REFRESH_MS;
     this.#staleConnectionMs = options.staleConnectionMs ??
       this.#idleThresholdMs * 3;
     this.#onStaleConnection = options.onStaleConnection;
@@ -179,6 +208,7 @@ export class IdlePresence {
     this.#staleReported = false;
     this.#connectedAtMs = Date.now();
     this.#maxAgeReported = false;
+    this.#lastPresenceFrameAt = 0;
     this.#sendHello();
     this.#idleTimer = setInterval(() => {
       if (this.#checkMaxConnectionAge()) return;
@@ -263,6 +293,7 @@ export class IdlePresence {
         ...(presence.docker ? { docker: presence.docker } : {}),
       }));
       this.#lastActivityAt = Date.now();
+      this.#lastPresenceFrameAt = this.#lastActivityAt;
     } catch (err) {
       logWarn("instance", "hello send failed:", sanitizeForLog(err));
     }
@@ -280,7 +311,10 @@ export class IdlePresence {
    * 2. The app-level heartbeat — sent when the daemon build commit changed
    *    since the last hello/heartbeat, **or** when `timeSync` / `resources.ips` /
    *    `docker` changed since the last presence snapshot (change-detected,
-   *    cadence-bound).
+   *    cadence-bound), **or** when no presence frame has gone out for
+   *    {@link PRESENCE_REFRESH_MS}. That last case is the only thing that
+   *    converges org-level opt-in flags (`presence-ack`) on a connection where
+   *    nothing else ever changes — see {@link PRESENCE_REFRESH_MS}.
    *
    * Offline self-heal (Postgres `connected: false` while the socket is still
    * live) is handled by the instance offline-sweep cron re-projecting online
@@ -316,7 +350,13 @@ export class IdlePresence {
     const serialized = this.#serializePresenceSnapshot(presence);
     const presenceChanged = serialized !== this.#lastPresenceSnapshot;
 
-    if (daemonBuildChanged || presenceChanged) {
+    // Nothing moved *and* the connection is inside its refresh window: stay
+    // silent. Otherwise ask, so the ack can carry a flag that changed
+    // control-plane side while this daemon had nothing to say.
+    const refreshDue = this.#lastPresenceFrameAt === 0 ||
+      Date.now() - this.#lastPresenceFrameAt >= this.#presenceRefreshIntervalMs;
+
+    if (daemonBuildChanged || presenceChanged || refreshDue) {
       this.#sendHeartbeat({
         daemonBuild: daemonBuildChanged ? daemonBuild : undefined,
         timeSync: presenceChanged ? presence.timeSync : undefined,
@@ -376,6 +416,7 @@ export class IdlePresence {
     try {
       ws.send(JSON.stringify(payload));
       this.#lastActivityAt = Date.now();
+      this.#lastPresenceFrameAt = this.#lastActivityAt;
     } catch (err) {
       logWarn("instance", "heartbeat send failed:", sanitizeForLog(err));
     }

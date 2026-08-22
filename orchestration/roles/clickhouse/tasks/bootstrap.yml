@@ -19,6 +19,40 @@
   no_log: true
   changed_when: false
 
+# Container-log storage surface. The schema contract is owned by
+# turbopanel/src/lib/container-logs/clickhouse/schema.ts — keep the column list,
+# engine, PARTITION BY, ORDER BY and TTL in sync with
+# buildContainerLogSchemaStatements() there. Creating it here means a freshly
+# converged install has the table before any application traffic arrives,
+# instead of waiting for the instance's first lazy ensureSchema() call. Both
+# paths are idempotent (CREATE TABLE IF NOT EXISTS + ALTER ... MODIFY TTL), so
+# whichever runs first wins and the other reconciles.
+- name: Create or reconcile container_logs table (idempotent)
+  args:
+    executable: /bin/bash
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker exec -i {{ clickhouse_container_name }} clickhouse-client \
+      --user default --password '{{ _clickhouse_admin_password }}' --multiquery <<EOSQL
+    CREATE TABLE IF NOT EXISTS {{ clickhouse_database }}.container_logs (
+        timestamp DateTime64(3, 'UTC'),
+        organization_id UUID,
+        server_id UUID,
+        environment_id Nullable(UUID),
+        service_id Nullable(UUID),
+        container_id String,
+        stream LowCardinality(String),
+        message String CODEC(ZSTD)
+    ) ENGINE = MergeTree
+    PARTITION BY toYYYYMM(timestamp)
+    ORDER BY (organization_id, server_id, service_id, timestamp)
+    TTL timestamp + INTERVAL {{ clickhouse_container_logs_retention_days }} DAY DELETE;
+    ALTER TABLE {{ clickhouse_database }}.container_logs
+      MODIFY TTL timestamp + INTERVAL {{ clickhouse_container_logs_retention_days }} DAY DELETE;
+    EOSQL
+  no_log: true
+  changed_when: false
+
 # Disabling system *_log in config.d stops new writes but does not drop tables
 # that already exist from a prior run — those keep flush/merge scheduler threads
 # alive. Drop every remove="remove" log from config.xml.j2 (keep lists aligned;

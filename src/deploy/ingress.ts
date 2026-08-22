@@ -44,6 +44,15 @@ const TRAEFIK_IMAGE = "traefik:v3.6.6";
 const TRAEFIK_LOOPBACK = "127.0.0.1";
 const TRAEFIK_HTTP_PORT = 7080;
 const TRAEFIK_HTTPS_PORT = 7443;
+/**
+ * Dedicated admin endpoint for the hosting Caddy.
+ *
+ * Caddy defaults to `127.0.0.1:2019`, which the co-located dev panel Caddy
+ * (`orchestration/Caddyfile`) already binds. Without an explicit override the
+ * hosting unit crash-loops on "address already in use" on every dev box.
+ * `ExecReload` must dial the same address (see {@link caddyUnit}).
+ */
+const HOSTING_CADDY_ADMIN_ADDR = "127.0.0.1:2029";
 const SAFE_FILE_ID_RE = /^[A-Za-z0-9_-]+$/;
 const decoder = new TextDecoder();
 
@@ -452,9 +461,20 @@ export function serviceTraefikCompose(
   return lines.join("\n");
 }
 
+/** Caddy storage root (internal CA + leaf certs) for the hosting unit. */
+export function hostingCaddyDataDir(layout: LayoutPaths): string {
+  return join(layout.stateDir, "hosting-caddy");
+}
+
 export function caddyfile(configDir: string): string {
+  // `disable_redirects`, not `off`: every site snippet writes its own
+  // `http://<host>` redirect block, but `off` also disables certificate
+  // management — `tls internal` sites then fail the handshake with no leaf
+  // cert ever issued. Public ACME stays unreachable because siteSnippet always
+  // pins either a materialized cert pair or `tls internal`.
   return `{
-  auto_https off
+  admin ${HOSTING_CADDY_ADMIN_ADDR}
+  auto_https disable_redirects
   servers {
     protocols h1 h2 h3
   }
@@ -466,6 +486,10 @@ import ${join(configDir, "hosting", "sites", "*.caddy")}
 function caddyUnit(layout: LayoutPaths): string {
   const caddy = join(layout.runtimesDir, "caddy", "current", "caddy");
   const configDir = join(layout.configDir, "hosting");
+  // systemd gives the unit no $HOME, so Caddy would fall back to `./caddy`
+  // under WorkingDirectory — i.e. internal-CA roots and leaf certs written
+  // into the config tree. Pin storage to the state dir instead.
+  const dataDir = hostingCaddyDataDir(layout);
   return `[Unit]
 Description=TurboPanel hosting Caddy ingress
 After=network-online.target docker.service
@@ -473,13 +497,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+Environment=XDG_DATA_HOME=${dataDir}
 WorkingDirectory=${configDir}
 ExecStart=${caddy} run --config ${
     join(configDir, "Caddyfile")
   } --adapter caddyfile
 ExecReload=${caddy} reload --config ${
     join(configDir, "Caddyfile")
-  } --adapter caddyfile
+  } --adapter caddyfile --address ${HOSTING_CADDY_ADMIN_ADDR}
 Restart=always
 RestartSec=2
 
@@ -531,6 +556,10 @@ export async function ensureHostingCaddyRuntime(
   layout: LayoutPaths,
 ): Promise<void> {
   await ensureHostingCaddy(layout);
+  await Deno.mkdir(hostingCaddyDataDir(layout), {
+    recursive: true,
+    mode: 0o750,
+  });
   const hostingDir = join(layout.configDir, "hosting");
   const sitesDir = join(hostingDir, "sites");
   await Deno.mkdir(sitesDir, { recursive: true, mode: 0o750 });

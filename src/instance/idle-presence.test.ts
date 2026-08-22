@@ -546,3 +546,81 @@ test({
     }
   },
 });
+
+test({
+  name:
+    "IdlePresence sends a refresh heartbeat on an idle connection so acks keep coming",
+  fn: async () => {
+    // Nothing about this host changes: same build, same timeSync, same ips,
+    // no docker. Without the refresh floor the daemon would send only the raw
+    // cell ping — which no transport answers with `presence-ack` — and an org
+    // toggle would never reach it. See PRESENCE_REFRESH_MS.
+    const restore = installIdlePresenceProviders({
+      getBuildInfo: () => makeDaemonBuild("abc1234"),
+      getHostHelloIdentity: () => EMPTY_HOST,
+      collectPresenceSnapshot: () => ({
+        timeSync: makeTimeSync("UTC"),
+        ips: makeIps("203.0.113.10"),
+      }),
+    });
+    const idleCheckIntervalMs = 15;
+    const socket = openMockSocket();
+    const presence = new IdlePresence({
+      serverId: "srv-refresh",
+      idleCheckIntervalMs,
+      idleThresholdMs: idleCheckIntervalMs,
+      presenceRefreshIntervalMs: 1,
+      staleConnectionMs: 60_000,
+    });
+    try {
+      presence.attach(socket as unknown as WebSocket);
+      await sleep(idleCheckIntervalMs + 25);
+      const heartbeats = framesOfType(socket, "heartbeat");
+      assert(
+        heartbeats.length >= 1,
+        "an idle connection must still ask for a presence ack",
+      );
+      const heartbeat = heartbeats[0] as Record<string, unknown>;
+      // A refresh carries no facts — it exists purely to be acked.
+      assertEquals("daemonBuild" in heartbeat, false);
+      assertEquals("timeSync" in heartbeat, false);
+      assertEquals("resources" in heartbeat, false);
+      assertEquals("docker" in heartbeat, false);
+    } finally {
+      presence.detach();
+      restore();
+    }
+  },
+});
+
+test({
+  name: "IdlePresence stays quiet inside its refresh window",
+  fn: async () => {
+    const restore = installIdlePresenceProviders({
+      getBuildInfo: () => makeDaemonBuild("abc1234"),
+      getHostHelloIdentity: () => EMPTY_HOST,
+      collectPresenceSnapshot: () => ({
+        timeSync: makeTimeSync("UTC"),
+        ips: makeIps("203.0.113.10"),
+      }),
+    });
+    const idleCheckIntervalMs = 15;
+    const socket = openMockSocket();
+    const presence = new IdlePresence({
+      serverId: "srv-quiet",
+      idleCheckIntervalMs,
+      idleThresholdMs: idleCheckIntervalMs,
+      presenceRefreshIntervalMs: 600_000,
+      staleConnectionMs: 60_000,
+    });
+    try {
+      presence.attach(socket as unknown as WebSocket);
+      await sleep(idleCheckIntervalMs + 25);
+      assertEquals(framesOfType(socket, "heartbeat").length, 0);
+      assert(socket.sentFrames.includes('{"type":"ping"}'));
+    } finally {
+      presence.detach();
+      restore();
+    }
+  },
+});

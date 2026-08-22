@@ -31,10 +31,18 @@ import {
   validateComposeConfig,
 } from "../../deploy/compose-services.ts";
 import {
+  createStreamedRunner,
   type DockerCliResult,
   runDocker as defaultRunDocker,
   type RunDockerOptions,
+  type RunDockerStreamedFn,
 } from "../../deploy/docker-cli.ts";
+import { captureDecryptedSecrets } from "../../logs/capture.ts";
+import {
+  COMMAND_LOG_PHASES,
+  type CommandOutputSink,
+  createNoopCommandOutputSink,
+} from "../../logs/contracts.ts";
 import { ensureDocker as defaultEnsureDocker } from "../../deploy/ensure-docker.ts";
 import { ensureSystemPrincipals } from "../../deploy/ensure-principal.ts";
 import {
@@ -224,6 +232,11 @@ function assertSafeDeploymentIdentifiers(
 
 export type EnvironmentDeployDeps = {
   decryptSecrets?: DecryptSecretsFn;
+  /**
+   * Execution-log transcript sink (`src/logs/`). Optional everywhere — the
+   * default no-op sink keeps existing callers and tests unchanged.
+   */
+  logSink?: CommandOutputSink;
   /** Test seam — defaults to {@link defaultRunDocker}. */
   runDocker?: RunDockerFn;
   /**
@@ -468,12 +481,29 @@ function replicaCountsForManifest(
   return services;
 }
 
+/**
+ * Compose service name → TurboPanel service UUID, as the deploy payload
+ * declared it. Persisted so the container-log collector can resolve service
+ * identity from deployment state instead of a live container label.
+ */
+function serviceIdsForManifest(
+  payload: EnvironmentDeployPayload,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const hosting of payload.hostings ?? []) {
+    if (!hosting.composeServiceName || !hosting.serviceId) continue;
+    out[hosting.composeServiceName] = hosting.serviceId;
+  }
+  return out;
+}
+
 async function buildDeploymentManifest(
   payload: EnvironmentDeployPayload,
   composeYaml: string,
   serviceNames: readonly string[],
 ): Promise<DeploymentManifestV2> {
   const secrets = secretPlanToManifest(payload.secretPlan ?? []);
+  const serviceIds = serviceIdsForManifest(payload);
   return {
     version: 2,
     projectId: payload.projectId,
@@ -484,6 +514,7 @@ async function buildDeploymentManifest(
     composeSha256: await sha256HexUtf8(composeYaml),
     services: replicaCountsForManifest(payload, serviceNames),
     ...(secrets.length > 0 ? { secrets } : {}),
+    ...(Object.keys(serviceIds).length > 0 ? { serviceIds } : {}),
   };
 }
 
@@ -566,6 +597,8 @@ type DeployContainerServicesInput = {
   mountPaths: Map<string, string>;
   deploymentDir: string;
   run: RunDockerFn;
+  runStreamed: RunDockerStreamedFn;
+  logSink: CommandOutputSink;
   decryptSecrets: DecryptSecretsFn | undefined;
   ensureExternalNetworks: (names: readonly string[]) => Promise<void>;
   ensureFabricDockerNetworks: (
@@ -627,10 +660,14 @@ async function deployContainerServices(
     mountPaths,
     deploymentDir,
     run,
+    runStreamed,
+    logSink,
     decryptSecrets,
     ensureExternalNetworks,
     ensureFabricDockerNetworks,
   } = input;
+  const onLine = (event: { stream: "stdout" | "stderr"; line: string }) =>
+    logSink.onLine(event.stream, event.line);
   const stageDir = await resetComposeStageDir(deploymentDir);
   try {
     const stagedPath = join(stageDir, RUNTIME_COMPOSE_FILENAME);
@@ -697,11 +734,14 @@ async function deployContainerServices(
 
     const serviceHooks = parsedPayload.serviceHooks ?? [];
     if (serviceHooks.length > 0) {
+      logSink.setPhase(COMMAND_LOG_PHASES.PRE_DEPLOY);
       await runDeployServiceHooks(serviceHooks, {
         projectName: parsedPayload.projectName,
         composePaths: chain,
         deploymentDir,
         runDocker: run,
+        onOutput: (stream, line) => logSink.onLine(stream, line),
+        redactSummary: (text) => logSink.redactSummary(text),
       });
     }
 
@@ -727,31 +767,44 @@ async function deployContainerServices(
         "commands",
         `cacheless rebuild for compose project ${parsedPayload.projectName}`,
       );
-      const build = await run([
+      logSink.setPhase(COMMAND_LOG_PHASES.BUILD);
+      const build = await runStreamed([
         ...composeFileArgs(parsedPayload.projectName, chain),
         "build",
         "--no-cache",
         "--pull",
-      ]);
+      ], { onLine });
       if (!build.success) {
+        // Docker echoes build args and failing command output verbatim —
+        // redact against the sink's deny-set before it becomes a summary.
         throw new Error(
-          build.stderr || "Docker Compose cacheless build failed",
+          logSink.redactSummary(build.stderr) ||
+            "Docker Compose cacheless build failed",
         );
       }
     }
 
-    const up = await run([
+    logSink.setPhase(COMMAND_LOG_PHASES.COMPOSE_UP);
+    const up = await runStreamed([
       ...composeFileArgs(parsedPayload.projectName, chain),
       "up",
       "-d",
       "--remove-orphans",
-    ]);
+    ], { onLine });
     if (!up.success) {
-      throw new Error(up.stderr || "Docker Compose deployment failed");
+      throw new Error(
+        logSink.redactSummary(up.stderr) || "Docker Compose deployment failed",
+      );
     }
 
     if (serviceHooks.length > 0) {
-      await runPostDeployHooks(serviceHooks, deploymentDir);
+      logSink.setPhase(COMMAND_LOG_PHASES.POST_DEPLOY);
+      await runPostDeployHooks(
+        serviceHooks,
+        deploymentDir,
+        (stream, line) => logSink.onLine(stream, line),
+        (text) => logSink.redactSummary(text),
+      );
     }
 
     return {
@@ -862,6 +915,8 @@ export function shapeEnvironmentDeployResult(input: {
 
 function resolveEnvironmentDeployRuntime(deps?: EnvironmentDeployDeps): {
   run: RunDockerFn;
+  runStreamed: RunDockerStreamedFn;
+  logSink: CommandOutputSink;
   decryptSecrets: DecryptSecretsFn | undefined;
   ensureDockerFn: () => Promise<void>;
   ensureExternalNetworks: (names: readonly string[]) => Promise<void>;
@@ -870,9 +925,14 @@ function resolveEnvironmentDeployRuntime(deps?: EnvironmentDeployDeps): {
   >;
 } {
   const run = deps?.runDocker ?? defaultRunDocker;
+  const logSink = deps?.logSink ?? createNoopCommandOutputSink();
   return {
     run,
-    decryptSecrets: deps?.decryptSecrets,
+    runStreamed: createStreamedRunner(deps?.runDocker),
+    logSink,
+    // Every plaintext this deploy decrypts (variable material, principal
+    // passwords, TLS private keys) joins the transcript redaction deny-set.
+    decryptSecrets: captureDecryptedSecrets(deps?.decryptSecrets, logSink),
     ensureDockerFn: deps?.ensureDocker ?? defaultEnsureDocker,
     ensureExternalNetworks: deps?.ensureExternalDockerNetworks ??
       ((names: readonly string[]) =>
@@ -962,6 +1022,7 @@ export async function handleEnvironmentDeploy(
   );
 
   const ingressServices = parsedPayload.ingressServices ?? [];
+  runtime.logSink.setPhase(COMMAND_LOG_PHASES.PREPARE);
   await ensureDeployIngress({
     layout,
     environmentId: parsedPayload.environmentId,
@@ -1012,6 +1073,8 @@ export async function handleEnvironmentDeploy(
     mountPaths,
     deploymentDir,
     run: runtime.run,
+    runStreamed: runtime.runStreamed,
+    logSink: runtime.logSink,
     decryptSecrets: runtime.decryptSecrets,
     ensureExternalNetworks: runtime.ensureExternalNetworks,
     ensureFabricDockerNetworks: runtime.ensureFabricDockerNetworks,
@@ -1025,6 +1088,7 @@ export async function handleEnvironmentDeploy(
 
   await rewriteHostingCaddySites(layout, parsedPayload, hostnameTls);
 
+  runtime.logSink.setPhase(COMMAND_LOG_PHASES.HEALTH);
   const containers = await collectEnvironmentDeployContainers({
     hasContainers,
     projectName: parsedPayload.projectName,

@@ -397,10 +397,18 @@ test("caddyTraefikUpstream https hop uses TLS skip-verify and PROXY v2", () => {
   assertStringIncludes(upstream, "keepalive off");
 });
 
-test("caddyfile disables auto_https and advertises h1 h2 h3", () => {
+test("caddyfile disables auto_https redirects and advertises h1 h2 h3", () => {
   const config = caddyfile(CONFIG_DIR);
-  assertStringIncludes(config, "auto_https off");
+  // Redirects only — `auto_https off` would also kill `tls internal` issuance.
+  assertStringIncludes(config, "auto_https disable_redirects");
   assertStringIncludes(config, "protocols h1 h2 h3");
+});
+
+test("caddyfile pins an admin endpoint off Caddy's default 2019", () => {
+  // The co-located dev panel Caddy owns 127.0.0.1:2019; sharing it makes the
+  // hosting unit crash-loop with "address already in use".
+  const config = caddyfile(CONFIG_DIR);
+  assertStringIncludes(config, "admin 127.0.0.1:2029");
 });
 
 test("siteSnippet without bindAddress matches baseline forceHttps output", () => {
@@ -1362,7 +1370,7 @@ test("ensureHostingCaddyRuntime writes unit and attempts install via host comman
     const caddyfilePath = join(layout.configDir, "hosting", "Caddyfile");
     assertStringIncludes(
       await Deno.readTextFile(caddyfilePath),
-      "auto_https off",
+      "auto_https disable_redirects",
     );
     assertEquals(hostCalls.some((c) => c.args.includes("install")), true);
     assertEquals(hostCalls.some((c) => c.args.includes("enable")), true);

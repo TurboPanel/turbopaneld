@@ -424,6 +424,19 @@ export function fabricNetworkDir(
   return join(layout.daemonStateDir, "network");
 }
 
+/**
+ * Command execution-log spool root (`<daemonStateDir>/spool/execution-logs/`).
+ *
+ * One `<commandId>.log` per in-flight command (mode 0600 under a 0700 dir);
+ * the file is the durability source of truth until the chunk is acked by the
+ * control plane, and an orphan sweep re-uploads leftovers after a crash.
+ */
+export function commandLogSpoolDir(
+  layout: Pick<LayoutPaths, "daemonStateDir">,
+): string {
+  return join(layout.daemonStateDir, "spool", "execution-logs");
+}
+
 /** Host WireGuard private key for interface `tp0`. */
 export function fabricPrivateKeyPath(
   layout: Pick<LayoutPaths, "daemonStateDir">,

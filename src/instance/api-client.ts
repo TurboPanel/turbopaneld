@@ -1,4 +1,9 @@
+import { encodeBase64 } from "@std/encoding/base64";
 import { type InstanceConfig, instanceUrl } from "./paths.ts";
+import {
+  type ContainerLogBatchEvent,
+  MAX_CONTAINER_LOG_INGEST_BATCH,
+} from "../logs/container-log-contracts.ts";
 
 export interface DaemonApiClientOptions {
   config: InstanceConfig;
@@ -23,6 +28,39 @@ export class DaemonApiError extends Error {
  */
 export const MAX_SECRETS_DECRYPT_BATCH = 100;
 export const MAX_SECRETS_DECRYPT_CIPHERTEXT_CHARS = 16 * 1024;
+
+/**
+ * Client-side mirrors of the instance `POST /api/daemon/v1/commands/:commandId/log`
+ * limits. Enforced before sending so an oversized transcript chunk fails
+ * locally instead of being rejected by the control plane.
+ *
+ * The cap is on the **decoded** payload — the control plane
+ * (`turbopanel/src/daemon/execution-log-ingest.ts`) measures the base64-decoded
+ * byte length, and a UTF-8 transcript is routinely longer in bytes than in
+ * JavaScript string units.
+ */
+export const MAX_COMMAND_LOG_CHUNK_BYTES = 256 * 1024;
+
+/** Command ids are opaque control-plane ids — never interpolate anything else into the path. */
+const COMMAND_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+
+export interface CommandLogChunkRequest {
+  /** Control-plane command id from the dispatch envelope. */
+  commandId: string;
+  /** Zero-based, gap-free chunk sequence for this command. */
+  seq: number;
+  /**
+   * Newline-delimited, already-redacted transcript text. Encoded as UTF-8 and
+   * base64'd on the wire — the field name is the contract's, the value here is
+   * plain text.
+   */
+  bytes: string;
+}
+
+export interface CommandLogChunkResponse {
+  /** Next sequence the control plane expects for this command. */
+  nextSeq: number;
+}
 
 export interface DaemonChallengeResponse {
   challengeId: string;
@@ -135,6 +173,68 @@ export class DaemonApiClient {
     await this.#request(
       "/api/daemon/v1/metrics",
       { method: "POST", body: JSON.stringify(sample) },
+      { auth: true },
+    );
+  }
+
+  /**
+   * Append one already-redacted transcript chunk to a command's execution log
+   * (`POST /api/daemon/v1/commands/:commandId/log`).
+   *
+   * The caller (`src/logs/uploader.ts`) is responsible for retry/backoff and
+   * for never letting a failure escape into the command outcome — this method
+   * does not swallow errors.
+   */
+  async sendCommandLogChunk(
+    params: CommandLogChunkRequest,
+  ): Promise<CommandLogChunkResponse> {
+    if (!COMMAND_ID_RE.test(params.commandId)) {
+      throw new DaemonApiError(400, "invalid commandId");
+    }
+    const encoded = new TextEncoder().encode(params.bytes);
+    if (encoded.byteLength > MAX_COMMAND_LOG_CHUNK_BYTES) {
+      throw new DaemonApiError(
+        400,
+        `log chunk exceeds ${MAX_COMMAND_LOG_CHUNK_BYTES} bytes`,
+      );
+    }
+    const body = await this.#requestJson<{ nextSeq?: unknown }>(
+      `/api/daemon/v1/commands/${encodeURIComponent(params.commandId)}/log`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          seq: params.seq,
+          bytes: encodeBase64(encoded),
+        }),
+      },
+      { auth: true },
+    );
+    return {
+      nextSeq: typeof body.nextSeq === "number" ? body.nextSeq : params.seq + 1,
+    };
+  }
+
+  /**
+   * Ship one already-redacted, already-batched group of container log lines
+   * (`POST /api/daemon/v1/logs/containers`).
+   *
+   * Fire-and-forget at the call site: `src/logs/container-collector.ts` counts
+   * and drops a batch it cannot deliver. This method does not swallow errors,
+   * and refuses an oversized batch locally rather than stressing the instance.
+   */
+  async sendContainerLogBatch(
+    events: readonly ContainerLogBatchEvent[],
+  ): Promise<void> {
+    if (events.length === 0) return;
+    if (events.length > MAX_CONTAINER_LOG_INGEST_BATCH) {
+      throw new DaemonApiError(
+        400,
+        `container log batch exceeds ${MAX_CONTAINER_LOG_INGEST_BATCH} events`,
+      );
+    }
+    await this.#request(
+      "/api/daemon/v1/logs/containers",
+      { method: "POST", body: JSON.stringify({ events }) },
       { auth: true },
     );
   }

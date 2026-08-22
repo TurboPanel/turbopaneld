@@ -5,10 +5,17 @@ import {
 } from "../../deploy/compose-files.ts";
 import { removeSecretTree } from "../../deploy/secret-runtime.ts";
 import {
+  createStreamedRunner,
   type DockerCliResult,
   runDocker as defaultRunDocker,
   type RunDockerOptions,
+  type RunDockerStreamedFn,
 } from "../../deploy/docker-cli.ts";
+import {
+  COMMAND_LOG_PHASES,
+  type CommandOutputSink,
+  createNoopCommandOutputSink,
+} from "../../logs/contracts.ts";
 import {
   removeEnvironmentTcpUdpServiceIngress,
   removeHostingCaddySite,
@@ -37,6 +44,8 @@ type RunDockerFn = (
 export type EnvironmentStopHandlerDeps = {
   /** Test seam — defaults to {@link defaultRunDocker}. */
   runDocker?: RunDockerFn;
+  /** Execution-log transcript sink (`src/logs/`); defaults to a no-op sink. */
+  logSink?: CommandOutputSink;
   /** Test seam — defaults to {@link removeFabricDockerNetworks}. */
   removeFabricNetworks?: (names: readonly string[]) => Promise<void>;
 };
@@ -56,16 +65,21 @@ function assertSafeStopIdentifiers(payload: EnvironmentStopPayload): void {
 async function composeDown(
   projectName: string,
   composePaths: readonly string[],
-  run: RunDockerFn,
+  runStreamed: RunDockerStreamedFn,
+  logSink: CommandOutputSink,
 ): Promise<void> {
-  const result = await run([
+  const result = await runStreamed([
     ...composeFileArgs(projectName, composePaths),
     "down",
     "--remove-orphans",
     "--volumes",
-  ]);
+  ], {
+    onLine: (event) => logSink.onLine(event.stream, event.line),
+  });
   if (!result.success) {
-    throw new Error(result.stderr || "Docker Compose stop failed");
+    throw new Error(
+      logSink.redactSummary(result.stderr) || "Docker Compose stop failed",
+    );
   }
 }
 
@@ -81,9 +95,12 @@ export async function handleEnvironmentStop(
   const parsedPayload = parseEnvironmentStopPayload(payload);
   assertSafeStopIdentifiers(parsedPayload);
   const run = deps?.runDocker ?? defaultRunDocker;
+  const runStreamed = createStreamedRunner(deps?.runDocker);
+  const logSink = deps?.logSink ?? createNoopCommandOutputSink();
+  logSink.setPhase(COMMAND_LOG_PHASES.STOP);
   const layout = resolveLayout(Deno.env.toObject());
 
-  const deploymentDir = await resolveEnvironmentDeploymentDir(
+  const deploymentDir = resolveEnvironmentDeploymentDir(
     layout,
     parsedPayload.projectId,
     parsedPayload.environmentId,
@@ -92,7 +109,12 @@ export async function handleEnvironmentStop(
   const hasCompose = composePaths !== null;
 
   if (hasCompose) {
-    await composeDown(parsedPayload.projectName, composePaths, run);
+    await composeDown(
+      parsedPayload.projectName,
+      composePaths,
+      runStreamed,
+      logSink,
+    );
   } else {
     // Already torn down — still clear hosting site and report empty containers.
     logInfo(

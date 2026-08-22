@@ -1,7 +1,10 @@
 import { assertEquals, assertRejects } from "@std/assert";
 import {
   challengeResponse,
+  commandLogChunkResponse,
   createFakeInstanceApi,
+  decodeCommandLogChunkBody,
+  type DecodedCommandLogChunk,
   enrollResponse,
   jwksResponse,
   permanentAuthErrorResponse,
@@ -14,6 +17,7 @@ import { createTestSigningKey } from "../testing/jwks-test-helpers.ts";
 import {
   DaemonApiClient,
   DaemonApiError,
+  MAX_COMMAND_LOG_CHUNK_BYTES,
   MAX_SECRETS_DECRYPT_BATCH,
   MAX_SECRETS_DECRYPT_CIPHERTEXT_CHARS,
 } from "./api-client.ts";
@@ -596,6 +600,90 @@ test({
         DaemonApiError,
       );
       assertEquals(blank.message, "HTTP 503");
+    } finally {
+      restore();
+    }
+  },
+});
+
+test({
+  name: "sendCommandLogChunk base64-encodes UTF-8 transcript bytes from seq 0",
+  fn: async () => {
+    const bodies: DecodedCommandLogChunk[] = [];
+    const api = createFakeInstanceApi();
+    api.script("/log", async (init) => {
+      bodies.push(await decodeCommandLogChunkBody(init));
+      return commandLogChunkResponse({ nextSeq: bodies.length });
+    });
+    const restore = api.install();
+    try {
+      const client = new DaemonApiClient({
+        config: INSTANCE_CONFIG,
+        getToken: () => Promise.resolve("tok"),
+      });
+      // Multi-byte on purpose: the wire value must decode back to these exact
+      // bytes, not to a lossy per-code-unit transliteration.
+      const transcript = 'built ✓ — "café" 🚀\n';
+      const first = await client.sendCommandLogChunk({
+        commandId: "cmd-1",
+        seq: 0,
+        bytes: transcript,
+      });
+
+      assertEquals(first.nextSeq, 1);
+      assertEquals(bodies.length, 1);
+      assertEquals(bodies[0]?.seq, 0);
+      assertEquals(bodies[0]?.text, transcript);
+      assertEquals(
+        bodies[0]?.byteLength,
+        new TextEncoder().encode(transcript).byteLength,
+      );
+
+      const second = await client.sendCommandLogChunk({
+        commandId: "cmd-1",
+        seq: 1,
+        bytes: "next\n",
+      });
+      assertEquals(second.nextSeq, 2);
+      assertEquals(bodies[1]?.seq, 1);
+      assertEquals(bodies[1]?.text, "next\n");
+    } finally {
+      restore();
+    }
+  },
+});
+
+test({
+  name: "sendCommandLogChunk caps on decoded byte length, not string length",
+  fn: async () => {
+    const api = createFakeInstanceApi();
+    api.script("/log", () => commandLogChunkResponse());
+    const restore = api.install();
+    try {
+      const client = new DaemonApiClient({
+        config: INSTANCE_CONFIG,
+        getToken: () => Promise.resolve("tok"),
+      });
+      // Three UTF-8 bytes per character: comfortably under the cap as a
+      // JavaScript string, over it once encoded.
+      const chars = Math.ceil(MAX_COMMAND_LOG_CHUNK_BYTES / 3) + 1;
+      const oversized = "✓".repeat(chars);
+      assertEquals(oversized.length < MAX_COMMAND_LOG_CHUNK_BYTES, true);
+
+      const rejected = await assertRejects(
+        () =>
+          client.sendCommandLogChunk({
+            commandId: "cmd-1",
+            seq: 0,
+            bytes: oversized,
+          }),
+        DaemonApiError,
+      );
+      assertEquals(rejected.status, 400);
+      assertEquals(
+        rejected.message,
+        `log chunk exceeds ${MAX_COMMAND_LOG_CHUNK_BYTES} bytes`,
+      );
     } finally {
       restore();
     }

@@ -103,6 +103,17 @@ export type DeploymentManifestV2 = {
   services: Record<string, { replicas: number }>;
   /** Host secret files (no plaintext). Absent on pre-secrets manifests. */
   secrets?: DeploymentManifestSecret[];
+  /**
+   * Compose service name → TurboPanel service UUID, for every compose service
+   * the deploy payload named a service for.
+   *
+   * This is the daemon's authoritative copy of container identity: the
+   * container-log collector resolves `serviceId` from here rather than from a
+   * live `com.turbopanel.service` label, which can drift, be stripped, or be
+   * re-stamped by anything that touches the container outside the deployment
+   * pipeline. Absent on pre-`serviceIds` manifests.
+   */
+  serviceIds?: Record<string, string>;
 };
 
 function isDeploymentManifestV2(
@@ -188,6 +199,20 @@ function parseManifestSecret(
   return entry;
 }
 
+/** Accept only `composeServiceName → non-empty string` pairs. */
+function parseManifestServiceIds(value: unknown): Record<string, string> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return {};
+  }
+  const out: Record<string, string> = {};
+  for (const [name, serviceId] of Object.entries(value)) {
+    if (name.length === 0) continue;
+    if (typeof serviceId !== "string" || serviceId.length === 0) continue;
+    out[name] = serviceId;
+  }
+  return out;
+}
+
 function parseManifestSecrets(value: unknown): DeploymentManifestSecret[] {
   if (!Array.isArray(value)) return [];
   const out: DeploymentManifestSecret[] = [];
@@ -224,10 +249,14 @@ export async function readDeploymentManifest(
     return null;
   }
   if (!isDeploymentManifestV2(parsed)) return null;
-  const secrets = parseManifestSecrets(
-    (parsed as unknown as Record<string, unknown>).secrets,
-  );
-  return secrets.length > 0 ? { ...parsed, secrets } : parsed;
+  const record = parsed as unknown as Record<string, unknown>;
+  const secrets = parseManifestSecrets(record.secrets);
+  const serviceIds = parseManifestServiceIds(record.serviceIds);
+  return {
+    ...parsed,
+    ...(secrets.length > 0 ? { secrets } : {}),
+    ...(Object.keys(serviceIds).length > 0 ? { serviceIds } : {}),
+  };
 }
 
 export type LocalDeploymentManifest = {

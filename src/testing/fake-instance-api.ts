@@ -5,6 +5,7 @@
  * api-client.ts endpoints and connect-failure.ts classifier pairs.
  */
 
+import { decodeBase64 } from "@std/encoding/base64";
 import { DaemonApiError } from "../instance/api-client.ts";
 import type { TestSigningMaterial } from "./jwks-test-helpers.ts";
 
@@ -89,6 +90,61 @@ export function sessionResponse(
     expiresAt: overrides.expiresAt ??
       new Date(Date.now() + 900_000).toISOString(),
   });
+}
+
+/**
+ * Scripted `POST /api/daemon/v1/commands/:commandId/log` ack.
+ * Match it with the `/log` path suffix in {@link createFakeInstanceApi}.
+ *
+ * The default ack is `nextSeq: 1` — the answer to the contract's first chunk,
+ * `seq: 0`.
+ */
+export function commandLogChunkResponse(
+  overrides: { nextSeq?: number } = {},
+): Response {
+  return jsonResponse({ ok: true, nextSeq: overrides.nextSeq ?? 1 });
+}
+
+/** One `{ seq, bytes }` chunk as the control plane sees it after decoding. */
+export type DecodedCommandLogChunk = {
+  seq: number;
+  /** Base64-decoded, UTF-8 transcript text — byte-identical to what was spooled. */
+  text: string;
+  /** Decoded payload size, the value the ingest cap is measured against. */
+  byteLength: number;
+};
+
+/**
+ * Parse a `/log` request body the way `execution-log-ingest.ts` does: `seq` is
+ * a zero-based chunk counter and `bytes` is standard base64 of the raw UTF-8
+ * transcript. Throws when either field violates the contract, so a daemon-side
+ * regression fails the test rather than silently shipping raw text.
+ */
+export async function decodeCommandLogChunkBody(
+  init?: RequestInit,
+): Promise<DecodedCommandLogChunk> {
+  const body = await parseJsonBody(init) as { seq?: unknown; bytes?: unknown };
+  if (!Number.isInteger(body.seq) || (body.seq as number) < 0) {
+    throw new TypeError(`seq must be a non-negative integer: ${String(body.seq)}`);
+  }
+  if (typeof body.bytes !== "string") {
+    throw new TypeError("bytes must be a base64 string");
+  }
+  let decoded: Uint8Array;
+  try {
+    decoded = decodeBase64(body.bytes);
+  } catch (error) {
+    throw new TypeError(
+      `bytes must be base64: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+  return {
+    seq: body.seq as number,
+    text: new TextDecoder().decode(decoded),
+    byteLength: decoded.byteLength,
+  };
 }
 
 export function jwksResponse(signing: TestSigningMaterial): Response {

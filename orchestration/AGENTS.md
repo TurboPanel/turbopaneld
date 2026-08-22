@@ -366,6 +366,11 @@ from the trimmed config-only role itself).
 
 Instance-side ClickHouse metrics store + schema/query contract: `../../turbopanel/src/daemon/metrics/AGENTS.md`.
 
+Instance-side container-log store (table `container_logs`, same database and
+same `turbopanel_app` user): `../../turbopanel/src/lib/container-logs/AGENTS.md`.
+The `turbopanel_app` grant below is already `<database>.*`-scoped, so that
+table needs **no** change to this role — no new grant, no new bootstrap SQL.
+
 | Path / resource                                                                          | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Docker image `clickhouse/clickhouse-server:{{ clickhouse_version }}`                     | ClickHouse server (no vendored binaries); referenced by the `analytics` service in the shared `turbopanel-system` Compose file (`system-compose` role)                                                                                                                                                                                                                                                                                                          |
@@ -431,7 +436,9 @@ scoped to database `turbopanel_metrics`.
 `CREATE VIEW`, `ALTER`, and `SHOW` on `turbopanel_metrics.*` — enough for
 instance-owned `ensureSchema()` (`CREATE TABLE IF NOT EXISTS` plus
 `MODIFY SETTING` / `MODIFY TTL`) and metrics reads/writes. No `DROP` or
-`TRUNCATE`.
+`TRUNCATE`. The wildcard is `<database>.*`, not per-table, so
+instance-owned tables added later — `container_logs` is the first — are covered
+with no playbook change.
 
 **Converge wiring:** co-located dev installs ClickHouse via the dev-repo
 `<dev checkout>/orchestration/dev-converge-manifest.json` (role `clickhouse`,
