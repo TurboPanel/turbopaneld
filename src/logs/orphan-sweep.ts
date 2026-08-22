@@ -92,9 +92,9 @@ async function resendOrphanSpool(
   } catch (err) {
     logWarn(
       "logs",
-      `orphan transcript resend failed command=${
-        sanitizeForLog(commandId)
-      }: ${sanitizeForLog(err)}`,
+      `orphan transcript resend failed command=${sanitizeForLog(commandId)}: ${
+        sanitizeForLog(err)
+      }`,
     );
     return "failed";
   }

@@ -8,8 +8,8 @@ import { DaemonApiClient } from "../instance/api-client.ts";
 import {
   commandLogChunkResponse,
   createFakeInstanceApi,
-  type DecodedCommandLogChunk,
   decodeCommandLogChunkBody,
+  type DecodedCommandLogChunk,
 } from "../testing/fake-instance-api.ts";
 
 /**

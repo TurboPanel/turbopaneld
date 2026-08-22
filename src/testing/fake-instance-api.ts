@@ -125,7 +125,9 @@ export async function decodeCommandLogChunkBody(
 ): Promise<DecodedCommandLogChunk> {
   const body = await parseJsonBody(init) as { seq?: unknown; bytes?: unknown };
   if (!Number.isInteger(body.seq) || (body.seq as number) < 0) {
-    throw new TypeError(`seq must be a non-negative integer: ${String(body.seq)}`);
+    throw new TypeError(
+      `seq must be a non-negative integer: ${String(body.seq)}`,
+    );
   }
   if (typeof body.bytes !== "string") {
     throw new TypeError("bytes must be a base64 string");
