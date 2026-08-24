@@ -132,7 +132,7 @@ pins the const to the role default.
 `node-runtime`, `deno-runtime`, `caddy`). Consumers resolve `turbopanel_node`
 (`…/node/current/bin/node`), `turbopanel_deno` (`…/deno/current/deno`), and
 `turbopanel_runtime_path` (colon-separated PATH prefix for systemd/Ansible
-tasks). Node **24.17.0** is pinned in `node-runtime/defaults/main.yml` — keep in
+tasks). Node **26.7.0** is pinned in `node-runtime/defaults/main.yml` — keep in
 step with `NODE_VERSION` in [TurboPanel/dev](https://github.com/TurboPanel/dev)
 `scripts/lib/paths.sh`. The vendored runtime root is defined once in
 `src/paths/layout.ts` (`resolveRuntimesDir()` / `PROD_RUNTIME_DIR_DEFAULT`);

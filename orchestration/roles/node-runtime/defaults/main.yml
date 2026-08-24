@@ -3,7 +3,7 @@
 turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/vendor"
 # Node is needed for the instance's cert generation script and to build/run the
 # Expo UI in development. Must match turbopanel-dev scripts/lib/paths.sh NODE_VERSION.
-node_version: "24.17.0"
+node_version: "26.7.0"
 turbopanel_node: "{{ turbopanel_vendor_dir }}/node/current/bin/node"
 turbopanel_deno: "{{ turbopanel_vendor_dir }}/deno/current/deno"
 turbopanel_runtime_path: "{{ turbopanel_vendor_dir }}/node/current/bin:{{ turbopanel_vendor_dir }}/deno/current:{{ turbopanel_vendor_dir }}/caddy/current:/usr/bin:/bin"
