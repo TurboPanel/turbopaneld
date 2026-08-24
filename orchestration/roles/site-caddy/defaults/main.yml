@@ -1,0 +1,31 @@
+---
+# The **site** Caddy: a second, unprivileged Caddy process that serves tenant
+# sites on loopback high ports. It is not the edge Caddy (root, public :80/:443,
+# owns the internal CA and every tenant leaf key) and not the control-plane
+# Caddy (tpcaddy/9993, provisioned by instance-user).
+#
+# Why a separate process rather than serving sites from the edge: the edge runs
+# as root and rewrites its site files with a best-effort reload whose failure is
+# only logged — no validate, no staged swap, no rollback. That is fine for
+# `reverse_proxy` one-liners; it is not acceptable for tenant document roots and
+# PHP handlers. Running sites in their own unprivileged unit puts them through
+# the same staged `.tpnew`/`.tpprev` transaction every other engine gets, and
+# keeps the loopback listen port that containers reach via
+# `host.docker.internal:<port>`.
+#
+# The binary itself is vendored by the sibling `caddy` role — one binary, two
+# processes, no second download.
+turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/vendor"  # noqa: var-naming[no-role-prefix]
+
+# Must match `web_service_user_map.caddy` in the web-service-user role and
+# `siteEngineUnixUser` in src/deploy/site.ts.
+site_caddy_service_user: tpcaddysite
+site_caddy_service_group: tpcaddysite
+
+# Admin endpoint. 2019 is the dev control-plane Caddy and 2029 is the edge one;
+# a collision here crash-loops this unit, so keep all three distinct.
+site_caddy_admin_addr: "127.0.0.1:2039"
+
+turbopanel_config_dir: "/etc/turbopanel"  # noqa: var-naming[no-role-prefix]
+turbopanel_log_dir: "/var/log/turbopanel"  # noqa: var-naming[no-role-prefix]
+turbopanel_state_dir: "/var/lib/turbopanel"  # noqa: var-naming[no-role-prefix]

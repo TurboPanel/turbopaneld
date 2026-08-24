@@ -1,0 +1,15 @@
+# Managed by TurboPanel — do not edit by hand.
+# Per-site blocks live in {{ turbopanel_config_dir }}/caddy/sites/*.conf
+# (written by the daemon site apply path).
+{
+	admin {{ site_caddy_admin_addr }}
+	# This process never terminates TLS — the edge Caddy does, and forwards
+	# here over loopback. `auto_https off` (not `disable_redirects`) keeps it
+	# from trying to issue certificates for site blocks.
+	auto_https off
+}
+
+# An import whose glob matches nothing is an ERROR, not an empty set, so
+# `caddy validate` would fail on a host with no sites yet. 00-empty.conf keeps
+# the glob non-empty; the daemon's `tp-<envId>-` prefix sweep leaves it alone.
+import {{ turbopanel_config_dir }}/caddy/sites/*.conf

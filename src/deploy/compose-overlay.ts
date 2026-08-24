@@ -1,7 +1,7 @@
 /**
  * Daemon-authored compose overlay fragments merged into compiled `compose.yaml`.
  *
- * Overlay is storage mounts, Traefik labels, and traditional-web reachability
+ * Overlay is storage mounts, Traefik labels, and site reachability
  * only — never secret values. Fragments are mostly key-disjoint; merge only
  * has to reconcile two fragments touching the same service (e.g. labels +
  * storage).

@@ -22,7 +22,7 @@
  * {@link RELEASE_PUBLISHED_MODE}.
  *
  * Path shapes come from `src/paths/layout.ts` (`siteRoot` / `siteReleasesDir` /
- * `siteCurrentSymlink` / `siteSharedDir`) so the next phase's traditional-web
+ * `siteCurrentSymlink` / `siteSharedDir`) so the next phase's site
  * serving change addresses exactly the same tree. Directory creation goes
  * through `ensureDirectoryWithOwner` / `ensureDirectoryOwnedByPrincipal` — the
  * one `sudo -n install -d` seam in `../ensure-principal.ts`. This module never

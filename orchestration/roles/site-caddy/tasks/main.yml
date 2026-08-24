@@ -1,0 +1,92 @@
+---
+# Config, unit, and state for the unprivileged per-site Caddy. The binary is
+# vendored by the sibling `caddy` role; the identity by web-service-user.
+# Per-site blocks under sites/ are written by src/deploy/site.ts, not here.
+- name: Assert vendored Caddy binary is present
+  ansible.builtin.stat:
+    path: "{{ turbopanel_vendor_dir }}/caddy/current/caddy"
+  register: _site_caddy_binary
+
+- name: Fail when the Caddy binary was not vendored
+  ansible.builtin.assert:
+    that:
+      - _site_caddy_binary.stat.exists
+    fail_msg: >-
+      Vendored Caddy binary missing at
+      {{ turbopanel_vendor_dir }}/caddy/current/caddy — include the `caddy`
+      role before this one.
+
+- name: Ensure FHS site-Caddy config directories
+  ansible.builtin.file:
+    path: "{{ turbopanel_config_dir }}/caddy/{{ item }}"
+    state: directory
+    owner: root
+    group: "{{ site_caddy_service_group }}"
+    mode: "0750"
+  loop:
+    - ""
+    - sites
+
+- name: Ensure site-Caddy log directory
+  ansible.builtin.file:
+    path: "{{ turbopanel_log_dir }}/site-caddy"
+    state: directory
+    owner: "{{ site_caddy_service_user }}"
+    group: "{{ site_caddy_service_group }}"
+    mode: "0750"
+
+# XDG_DATA_HOME / XDG_CONFIG_HOME from the unit point here.
+- name: Ensure site-Caddy state directory
+  ansible.builtin.file:
+    path: "{{ turbopanel_state_dir }}/site-caddy"
+    state: directory
+    owner: "{{ site_caddy_service_user }}"
+    group: "{{ site_caddy_service_group }}"
+    mode: "0750"
+
+# Must exist before the main Caddyfile is validated: a zero-match import glob
+# is an error in Caddy, so a host with no sites yet would fail every config
+# test without this file.
+- name: Install empty-glob placeholder site block
+  ansible.builtin.template:
+    src: 00-empty.conf.j2
+    dest: "{{ turbopanel_config_dir }}/caddy/sites/00-empty.conf"
+    owner: root
+    group: "{{ site_caddy_service_group }}"
+    mode: "0640"
+
+- name: Install site-Caddy main Caddyfile
+  ansible.builtin.template:
+    src: Caddyfile.j2
+    dest: "{{ turbopanel_config_dir }}/caddy/Caddyfile"
+    owner: root
+    group: "{{ site_caddy_service_group }}"
+    mode: "0640"
+  register: _site_caddy_config
+
+- name: Install turbopanel-site-caddy systemd unit
+  ansible.builtin.template:
+    src: turbopanel-site-caddy.service.j2
+    dest: /etc/systemd/system/turbopanel-site-caddy.service
+    owner: root
+    group: root
+    mode: "0640"
+  register: _site_caddy_unit
+
+- name: Reload systemd after site-Caddy unit change
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: _site_caddy_unit.changed # noqa: no-handler
+
+- name: Ensure turbopanel-site-caddy is enabled and started
+  ansible.builtin.systemd:
+    name: turbopanel-site-caddy
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Restart site-Caddy after main config or unit change
+  ansible.builtin.systemd:
+    name: turbopanel-site-caddy
+    state: restarted
+  when: _site_caddy_config.changed or _site_caddy_unit.changed

@@ -30,7 +30,7 @@
  * ({@link prepareNativeAppBuildOutput}). Which service is a native app comes
  * from `payload.nativeAppServices[]` — this module never re-derives it, and it
  * never rewrites the payload: acting on `staticExport` (running the service on
- * the traditional-web static lane instead of a systemd unit) belongs to the
+ * the site static lane instead of a systemd unit) belongs to the
  * deploy handler that owns both lanes.
  */
 
@@ -122,7 +122,7 @@ export type AppliedRelease = {
   /**
    * True when the build turned out to be a statically exported Next site
    * (`output: 'export'`). The deploy handler moves such a service off
-   * `nativeAppServices[]` and onto the traditional-web static lane — there is no
+   * `nativeAppServices[]` and onto the site static lane — there is no
    * server process to supervise, so no systemd unit is generated for it.
    */
   staticExport: boolean;

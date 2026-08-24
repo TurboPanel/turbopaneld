@@ -1,0 +1,20 @@
+[Unit]
+Description=TurboPanel site Caddy (per-site hosting on loopback)
+After=network.target
+
+[Service]
+Type=simple
+User={{ site_caddy_service_user }}
+Group={{ site_caddy_service_group }}
+# Caddy writes its data (certificate cache, even with auto_https off) under
+# $XDG_DATA_HOME. Pin it so neither the unit nor a `sudo -u` config test falls
+# back to a home directory this account does not own.
+Environment=XDG_DATA_HOME={{ turbopanel_state_dir }}/site-caddy
+Environment=XDG_CONFIG_HOME={{ turbopanel_state_dir }}/site-caddy
+ExecStart={{ turbopanel_vendor_dir }}/caddy/current/caddy run --config {{ turbopanel_config_dir }}/caddy/Caddyfile --adapter caddyfile
+ExecReload={{ turbopanel_vendor_dir }}/caddy/current/caddy reload --config {{ turbopanel_config_dir }}/caddy/Caddyfile --adapter caddyfile --address {{ site_caddy_admin_addr }}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

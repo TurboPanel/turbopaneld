@@ -20,7 +20,7 @@
     path: "{{ node_app_root }}/{{ node_app_series }}"
     state: directory
     owner: root
-    group: "{{ node_app_group }}"
+    group: "tpnode{{ node_app_series | regex_replace('^([0-9]+).*$', '\\1') }}"
     mode: "0750"
 
 - name: Install tenant Node series into the vendor tree
@@ -60,12 +60,12 @@
 
     # Unconditional, not folded into the install branch above: `cp -a` preserves
     # the upstream tarball's world-readable 0755, *and* a host vendored before
-    # this tree moved to `root:{{ node_app_group }}` still carries the old
+    # this tree moved to its per-series group still carries the old
     # ownership on a release the branch above skips as already installed. Both
     # converge here. `X` keeps the execute bit on directories and on what was
     # already executable, so `bin/node` stays runnable without making every lib
     # file executable too.
-    chown -R "root:{{ node_app_group }}" "$DEST"
+    chown -R "root:tpnode{{ node_app_series | regex_replace('^([0-9]+).*$', '\\1') }}" "$DEST"
     chmod -R u=rwX,g=rX,o= "$DEST"
 
     # Tenant units exec `<series>/current/bin/node`; the unit text must stay

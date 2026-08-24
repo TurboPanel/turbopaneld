@@ -132,6 +132,31 @@ test("environment.deploy hostingIngress round-trips shared Traefik identity", ()
   });
 });
 
+test("environment.deploy rejects the pre-rename traditionalWebSites key", () => {
+  // Unknown keys are ignored here, so without this guard an old control plane
+  // would parse zero sites: stale vhosts keep serving on loopback while hosting
+  // Caddy finds no loopback entry and routes the hostname to Traefik. That is a
+  // 502 with the old content still live, on a deploy that reported success.
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        environmentId: "env-1",
+        projectId: "proj-1",
+        organizationId: "org-1",
+        projectName: "demo",
+        composeFiles: [{
+          filename: "compose.yaml",
+          role: "runtime",
+          content: "services: {}\n",
+        }],
+        hostings: [],
+        traditionalWebSites: [],
+      }),
+    TypeError,
+    "traditionalWebSites was renamed to sites",
+  );
+});
+
 test("environment.deploy rejects hostingIngress that is not traefik", () => {
   const serviceId = "00000000-0000-4000-8000-0000000000aa";
   assertThrows(
@@ -511,7 +536,7 @@ test("environment.deploy storageMaterial rejects invalid volumeName", () => {
   );
 });
 
-test("environment.deploy traditionalWebSites fixture round-trips", () => {
+test("environment.deploy sites fixture round-trips", () => {
   const payload = parseEnvironmentDeployPayload({
     environmentId: "env-1",
     projectId: "proj-1",
@@ -530,7 +555,7 @@ test("environment.deploy traditionalWebSites fixture round-trips", () => {
         hostnames: ["site.example.com"],
       },
     ],
-    traditionalWebSites: [
+    sites: [
       {
         composeServiceName: "site",
         engine: "nginx",
@@ -543,10 +568,10 @@ test("environment.deploy traditionalWebSites fixture round-trips", () => {
       },
     ],
   });
-  assertEquals(payload.traditionalWebSites?.[0]?.engine, "nginx");
-  assertEquals(payload.traditionalWebSites?.[0]?.listenPort, 18080);
+  assertEquals(payload.sites?.[0]?.engine, "nginx");
+  assertEquals(payload.sites?.[0]?.listenPort, 18080);
   assertEquals(
-    payload.traditionalWebSites?.[0]?.principal?.username,
+    payload.sites?.[0]?.principal?.username,
     "site_user",
   );
 });

@@ -3,6 +3,7 @@ import type { LayoutPaths } from "../paths/layout.ts";
 import {
   DEFAULT_PRINCIPAL_SHELL,
   ensureDirectoryOwnedByPrincipal,
+  ensurePrincipalRuntimeGroups,
   ensureSystemPrincipals,
   parseGroupGid,
   parsePasswdHomeShell,
@@ -669,4 +670,126 @@ test("ensureDirectoryOwnedByPrincipal throws when sudo install -d fails", async 
     }
     await Deno.remove(root, { recursive: true });
   }
+});
+
+/** Runner that answers `id -nG` with a fixed group set and records mutations. */
+function runtimeGroupRun(current: string[]): {
+  run: RunFn;
+  calls: Array<{ command: string; args: string[] }>;
+} {
+  const calls: Array<{ command: string; args: string[] }> = [];
+  const run: RunFn = (command, args) => {
+    calls.push({ command, args });
+    if (command === "id") {
+      return Promise.resolve({
+        success: true,
+        stdout: current.join(" "),
+        stderr: "",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  return { run, calls };
+}
+
+function groupMutations(
+  calls: Array<{ command: string; args: string[] }>,
+): string[][] {
+  return calls
+    .filter((c) => c.args.includes("usermod") || c.args.includes("gpasswd"))
+    .map((c) => c.args);
+}
+
+test("ensurePrincipalRuntimeGroups adds only the missing groups", async () => {
+  const { run, calls } = runtimeGroupRun(["appuser-grp", "tpphp84"]);
+  await ensurePrincipalRuntimeGroups(
+    "appuser",
+    new Set(["tpphp84", "tpnode24"]),
+    run,
+  );
+  assertEquals(groupMutations(calls), [
+    ["-n", "usermod", "-aG", "tpnode24", "appuser"],
+  ]);
+});
+
+test("ensurePrincipalRuntimeGroups revokes a group that is no longer granted", async () => {
+  // The whole reason this function exists: `usermod -aG` can only add, so a
+  // principal that once deployed a Node app could execute Node forever.
+  const { run, calls } = runtimeGroupRun(["appuser-grp", "tpnode24"]);
+  await ensurePrincipalRuntimeGroups("appuser", new Set(["tpphp84"]), run);
+  assertEquals(groupMutations(calls), [
+    ["-n", "usermod", "-aG", "tpphp84", "appuser"],
+    ["-n", "gpasswd", "-d", "appuser", "tpnode24"],
+  ]);
+});
+
+test("ensurePrincipalRuntimeGroups never touches a group outside the registry", async () => {
+  // Containment is what makes revocation safe. `<username>-grp` is the
+  // principal's primary group, `tp` is the panel's own, `tpnginx` is an engine
+  // account joined for release reads, and `ops` is something an operator added
+  // by hand. None of them are entitlements, so none may be stripped.
+  const { run, calls } = runtimeGroupRun([
+    "appuser-grp",
+    "tp",
+    "tpnginx",
+    "ops",
+    "tpnode24",
+  ]);
+  await ensurePrincipalRuntimeGroups("appuser", new Set(), run);
+  assertEquals(groupMutations(calls), [
+    ["-n", "gpasswd", "-d", "appuser", "tpnode24"],
+  ]);
+});
+
+test("ensurePrincipalRuntimeGroups rejects a group the registry does not define", async () => {
+  const { run } = runtimeGroupRun([]);
+  await assertRejects(
+    () => ensurePrincipalRuntimeGroups("appuser", new Set(["tpevil"]), run),
+    Error,
+    "unknown runtime entitlement group",
+  );
+});
+
+test("ensurePrincipalRuntimeGroups tolerates a host missing the group", async () => {
+  // A host provisioned some other way may legitimately not have the group yet;
+  // the unit's own health probe is what catches an unreachable runtime. A
+  // failed *revoke* stays loud, since a lingering entitlement is a real risk.
+  const calls: Array<{ command: string; args: string[] }> = [];
+  const run: RunFn = (command, args) => {
+    calls.push({ command, args });
+    if (command === "id") {
+      return Promise.resolve({
+        success: true,
+        stdout: "appuser-grp",
+        stderr: "",
+      });
+    }
+    return Promise.resolve({
+      success: false,
+      stdout: "",
+      stderr: "group tpnode24 does not exist",
+    });
+  };
+  await ensurePrincipalRuntimeGroups("appuser", new Set(["tpnode24"]), run);
+  assertEquals(groupMutations(calls).length, 1);
+});
+
+test("ensureSystemPrincipals grants the runtimes its spec carries", async () => {
+  const { run, calls } = captureRun({});
+  await ensureSystemPrincipals(
+    stubLayout(),
+    [{
+      principalId: "pr-1",
+      username: "appuser",
+      runtimes: [
+        { runtime: "php", series: "8.4" },
+        { runtime: "node", series: "24.17.0" },
+      ],
+    }],
+    run,
+  );
+  const added = calls
+    .filter((c) => c.args.includes("usermod") && c.args.includes("-aG"))
+    .map((c) => c.args[3]);
+  assertEquals(added.sort(), ["tpnode24", "tpphp84"]);
 });

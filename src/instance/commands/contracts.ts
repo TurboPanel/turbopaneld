@@ -279,6 +279,12 @@ export type EnvironmentDeployStorageMaterial = {
  * The host allocates UID/GID via `useradd`/`groupadd` unless the control plane
  * sends an explicit operator override (`uid`/`gid`).
  */
+/** One runtime series a principal is entitled to execute. */
+export type EnvironmentDeployPrincipalRuntime = {
+  runtime: string;
+  series: string;
+};
+
 export type EnvironmentDeployPrincipalMaterial = {
   principalId: string;
   username: string;
@@ -286,6 +292,13 @@ export type EnvironmentDeployPrincipalMaterial = {
   gid?: number;
   home?: string;
   shell?: string;
+  /**
+   * The **effective** entitlement set — explicit operator grants plus what this
+   * principal's services imply — resolved control-plane side. The daemon
+   * reconciles unix group membership from it (adding *and revoking*); it never
+   * derives entitlements itself, because a derived grant can only ever add.
+   */
+  runtimes?: EnvironmentDeployPrincipalRuntime[];
 };
 
 export type EnvironmentDeployServiceHook = {
@@ -297,26 +310,30 @@ export type EnvironmentDeployServiceHook = {
 
 export type EnvironmentDeployHostingPhp = {
   version?: string;
-  memoryLimit?: string;
-  maxExecutionTime?: number;
+  /** Validated `php_admin_value` directives, rendered to strings upstream. */
+  settings?: Record<string, string>;
+  /** Validated php-fpm pool directives (`pm`, `pm.max_children`, …). */
+  pool?: Record<string, string>;
+  /** Opt-in extensions, on top of the always-installed baseline. */
+  extensions?: string[];
 };
 
 /**
- * Project principal that owns a traditional-web site tree on the host.
+ * Project principal that owns a site tree on the host.
  * `ensureSystemPrincipals` creates the Linux user before apply; document
  * roots are owned by this user with the engine group for read access.
  * UID/GID are optional operator overrides — the host allocates otherwise.
  */
-export type EnvironmentDeployTraditionalWebPrincipal = {
+export type EnvironmentDeploySitePrincipal = {
   principalId: string;
   username: string;
   uid?: number;
   gid?: number;
 };
 
-export type EnvironmentDeployTraditionalWebSite = {
+export type EnvironmentDeploySite = {
   composeServiceName: string;
-  engine: "apache" | "nginx" | "openlitespeed";
+  engine: "caddy" | "apache" | "nginx" | "openlitespeed";
   root: string;
   listenPort: number;
   webEnv?: Record<string, string>;
@@ -325,7 +342,7 @@ export type EnvironmentDeployTraditionalWebSite = {
    * When set (from a project principal ↔ service steward), the site tree
    * is owned by this principal and Apache php-fpm workers run as that user.
    */
-  principal?: EnvironmentDeployTraditionalWebPrincipal;
+  principal?: EnvironmentDeploySitePrincipal;
 };
 
 /**
@@ -341,7 +358,7 @@ export type EnvironmentDeployTraditionalWebSite = {
  * runtime compose as `services.<name>.image`. `outputDirectory` is meaningless
  * for `railpack` and is ignored rather than rejected, so a stale value left by
  * a mode switch still parses. `kind: 'static'` is reserved for the
- * traditional-web release phase and is not produced today.
+ * site release phase and is not produced today.
  */
 export type EnvironmentDeploySourceBuild = {
   kind: "native" | "static" | "railpack";
@@ -454,7 +471,7 @@ export type EnvironmentDeploySource = {
    *
    * A rollback is not a second command type: it rides the ordinary
    * `environment.deploy` payload so every downstream stage (compose apply,
-   * ingress, TLS, retention, `deployment.json`, the native/traditional-web
+   * ingress, TLS, retention, `deployment.json`, the native/site
    * promote hooks) keeps working unchanged. When set, the apply path skips
    * fetch and build entirely and cuts `current` over to
    * `releases/<rollbackToReleaseId>` — which means `cloneUrl`, `ref`,
@@ -463,7 +480,7 @@ export type EnvironmentDeploySource = {
    * `releaseId`, since it becomes a path segment.
    */
   rollbackToReleaseId?: string;
-  principal?: EnvironmentDeployTraditionalWebPrincipal;
+  principal?: EnvironmentDeploySitePrincipal;
   build: EnvironmentDeploySourceBuild;
 };
 
@@ -562,7 +579,7 @@ export type EnvironmentDeployPayload = {
   serverId?: string;
   replicaCounts?: Record<string, number>;
   hostings: EnvironmentDeployHosting[];
-  traditionalWebSites?: EnvironmentDeployTraditionalWebSite[];
+  sites?: EnvironmentDeploySite[];
   /**
    * Host-supervised native apps (`x-turbopanel.serviceKind: node`). Applied
    * after the releases are promoted — see `../../deploy/native/`.
@@ -570,7 +587,7 @@ export type EnvironmentDeployPayload = {
   nativeAppServices?: EnvironmentDeployNativeAppService[];
   /**
    * Git-backed releases to check out, build, and promote before the
-   * compose/traditional-web apply steps run. One entry per compose service
+   * compose/site apply steps run. One entry per compose service
    * carrying `x-turbopanel.source`.
    */
   sourceMaterial?: EnvironmentDeploySource[];
@@ -680,7 +697,7 @@ export type EnvironmentStopPayload = {
    * Per-service release trees (`<principalHome>/sites/<serviceId>`) to reclaim.
    *
    * Generic on purpose — this is the same tree the Git release engine publishes
-   * into and native apps run out of, not a traditional-web
+   * into and native apps run out of, not a site
    * detail. Like `fabricNetworks`, the instance has already dropped the rows
    * that named these, so the payload is the only remaining copy for this host.
    */
@@ -2081,7 +2098,7 @@ function parseHostingProxy(
   return Object.keys(proxy).length === 0 ? undefined : proxy;
 }
 
-/** Shared by `parseHostingWeb` / `parseTraditionalWebSite` for `env`/`webEnv` maps. */
+/** Shared by `parseHostingWeb` / `parseSite` for `env`/`webEnv` maps. */
 function parseStringRecord(value: unknown): Record<string, string> | undefined {
   if (!isRecord(value)) return undefined;
   const result: Record<string, string> = {};
@@ -2091,21 +2108,27 @@ function parseStringRecord(value: unknown): Record<string, string> | undefined {
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
-/** Shared by `parseHostingWeb` / `parseTraditionalWebSite` for the `php` sub-object. */
+/** Shared by `parseHostingWeb` / `parseSite` for the `php` sub-object. */
 function parseHostingPhp(
   value: unknown,
 ): EnvironmentDeployHostingPhp | undefined {
   if (!isRecord(value)) return undefined;
   const php: EnvironmentDeployHostingPhp = {};
   if (typeof value.version === "string") php.version = value.version;
-  if (typeof value.memoryLimit === "string") {
-    php.memoryLimit = value.memoryLimit;
+  for (const field of ["settings", "pool"] as const) {
+    const raw = value[field];
+    if (!isRecord(raw)) continue;
+    const kept: Record<string, string> = {};
+    for (const [key, entry] of Object.entries(raw)) {
+      if (typeof entry === "string") kept[key] = entry;
+    }
+    if (Object.keys(kept).length > 0) php[field] = kept;
   }
-  if (
-    typeof value.maxExecutionTime === "number" &&
-    Number.isInteger(value.maxExecutionTime)
-  ) {
-    php.maxExecutionTime = value.maxExecutionTime;
+  if (Array.isArray(value.extensions)) {
+    const names = value.extensions.filter((n): n is string =>
+      typeof n === "string"
+    );
+    if (names.length > 0) php.extensions = names;
   }
   return Object.keys(php).length > 0 ? php : undefined;
 }
@@ -2315,9 +2338,24 @@ function isValidAbsolutePrincipalPath(value: string): boolean {
   return true;
 }
 
+/**
+ * Closed list, duplicated here on purpose: this module is deliberately
+ * import-free so the wire contract has no dependencies. Keep in step with
+ * `ALLOWED_PRINCIPAL_SHELLS` in `../../deploy/ensure-principal.ts`, which is the
+ * enforcing copy.
+ */
+const ALLOWED_PRINCIPAL_SHELLS: readonly string[] = [
+  "/usr/sbin/nologin",
+  "/sbin/nologin",
+  "/bin/false",
+  "/bin/sh",
+  "/bin/bash",
+];
+
 function isValidPrincipalShellPath(value: string): boolean {
   if (!isValidAbsolutePrincipalPath(value)) return false;
-  return PRINCIPAL_SHELL_RE.test(value);
+  if (!PRINCIPAL_SHELL_RE.test(value)) return false;
+  return ALLOWED_PRINCIPAL_SHELLS.includes(value);
 }
 
 const PRINCIPAL_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
@@ -2340,6 +2378,9 @@ function parseOptionalPrincipalId(
   }
   return value;
 }
+
+/** `8.4` or `24` — the exec boundary a group protects, not a patch pin. */
+const RUNTIME_SERIES_RE = /^\d{1,3}(\.\d{1,3})?$/;
 
 function parsePrincipalMaterial(
   value: unknown,
@@ -2375,6 +2416,27 @@ function parsePrincipalMaterial(
     }
     material.shell = value.shell;
   }
+  if (value.runtimes !== undefined) {
+    // Rejected rather than dropped: this is a grant, and silently discarding a
+    // malformed one would revoke every entitlement the principal should hold.
+    if (!Array.isArray(value.runtimes)) {
+      throw new TypeError(
+        "Invalid environment deploy principalMaterial runtimes",
+      );
+    }
+    material.runtimes = value.runtimes.map((entry) => {
+      if (
+        !isRecord(entry) ||
+        typeof entry.runtime !== "string" ||
+        !RUNTIME_SERIES_RE.test(String(entry.series))
+      ) {
+        throw new TypeError(
+          "Invalid environment deploy principalMaterial runtimes entry",
+        );
+      }
+      return { runtime: entry.runtime, series: String(entry.series) };
+    });
+  }
   return material;
 }
 
@@ -2395,57 +2457,58 @@ function parseServiceHook(value: unknown): EnvironmentDeployServiceHook {
   return hook;
 }
 
-const TRADITIONAL_WEB_ENGINES = new Set([
+const SITE_ENGINES = new Set([
+  "caddy",
   "apache",
   "nginx",
   "openlitespeed",
 ]);
 
-function parseTraditionalWebEngine(
+function parseSiteEngine(
   value: unknown,
-): EnvironmentDeployTraditionalWebSite["engine"] {
-  if (typeof value !== "string" || !TRADITIONAL_WEB_ENGINES.has(value)) {
-    throw new TypeError("Invalid traditionalWebSites entry");
+): EnvironmentDeploySite["engine"] {
+  if (typeof value !== "string" || !SITE_ENGINES.has(value)) {
+    throw new TypeError("Invalid sites entry");
   }
-  return value as EnvironmentDeployTraditionalWebSite["engine"];
+  return value as EnvironmentDeploySite["engine"];
 }
 
-function parseTraditionalWebListenPort(value: unknown): number {
+function parseSiteListenPort(value: unknown): number {
   if (
     typeof value !== "number" ||
     !Number.isInteger(value) ||
     value < 1024 ||
     value > 65_535
   ) {
-    throw new TypeError("Invalid traditionalWebSites entry");
+    throw new TypeError("Invalid sites entry");
   }
   return value;
 }
 
-function parseTraditionalWebOptionalId(value: unknown): number | undefined {
+function parseSiteOptionalId(value: unknown): number | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
-    throw new TypeError("Invalid traditionalWebSites.principal entry");
+    throw new TypeError("Invalid sites.principal entry");
   }
   return value;
 }
 
-function parseTraditionalWebPrincipal(
+function parseSitePrincipal(
   value: unknown,
-): EnvironmentDeployTraditionalWebPrincipal | undefined {
+): EnvironmentDeploySitePrincipal | undefined {
   if (value === undefined) return undefined;
   if (!isRecord(value)) {
-    throw new TypeError("Invalid traditionalWebSites.principal entry");
+    throw new TypeError("Invalid sites.principal entry");
   }
   if (
     typeof value.principalId !== "string" ||
     value.principalId.length === 0 ||
     !isValidPrincipalUsername(value.username)
   ) {
-    throw new TypeError("Invalid traditionalWebSites.principal entry");
+    throw new TypeError("Invalid sites.principal entry");
   }
-  const uid = parseTraditionalWebOptionalId(value.uid);
-  const gid = parseTraditionalWebOptionalId(value.gid);
+  const uid = parseSiteOptionalId(value.uid);
+  const gid = parseSiteOptionalId(value.gid);
   return {
     principalId: value.principalId,
     username: value.username,
@@ -2541,7 +2604,7 @@ function parseNativeAppService(
   const app: EnvironmentDeployNativeAppService = {
     composeServiceName: parseNonEmptyString(value, "composeServiceName"),
     serviceId: value.serviceId,
-    listenPort: parseTraditionalWebListenPort(value.listenPort),
+    listenPort: parseSiteListenPort(value.listenPort),
     framework: value.framework as EnvironmentDeployNativeFramework,
   };
   if (value.nodeVersion !== undefined) {
@@ -2560,23 +2623,23 @@ function parseNativeAppService(
   return app;
 }
 
-function parseTraditionalWebSite(
+function parseSite(
   value: unknown,
-): EnvironmentDeployTraditionalWebSite {
+): EnvironmentDeploySite {
   if (!isRecord(value)) {
-    throw new TypeError("Invalid traditionalWebSites entry");
+    throw new TypeError("Invalid sites entry");
   }
-  const site: EnvironmentDeployTraditionalWebSite = {
+  const site: EnvironmentDeploySite = {
     composeServiceName: parseNonEmptyString(value, "composeServiceName"),
-    engine: parseTraditionalWebEngine(value.engine),
+    engine: parseSiteEngine(value.engine),
     root: parseNonEmptyString(value, "root"),
-    listenPort: parseTraditionalWebListenPort(value.listenPort),
+    listenPort: parseSiteListenPort(value.listenPort),
   };
   const webEnv = parseStringRecord(value.webEnv);
   if (webEnv) site.webEnv = webEnv;
   const php = parseHostingPhp(value.php);
   if (php) site.php = php;
-  const principal = parseTraditionalWebPrincipal(value.principal);
+  const principal = parseSitePrincipal(value.principal);
   if (principal) site.principal = principal;
   return site;
 }
@@ -2829,7 +2892,7 @@ function parseDeploySourceEntry(value: unknown): EnvironmentDeploySource {
     credentialKind: parseSourceCredentialKind(value.credentialKind),
     credentialUsername: parseSourceCredentialUsername(value.credentialUsername),
     rollbackToReleaseId: parseRollbackToReleaseId(value.rollbackToReleaseId),
-    principal: parseTraditionalWebPrincipal(value.principal) ?? undefined,
+    principal: parseSitePrincipal(value.principal) ?? undefined,
   });
 }
 
@@ -3199,6 +3262,17 @@ export function parseEnvironmentDeployPayload(
     throw new TypeError("hostings must be an array");
   }
 
+  // `traditionalWebSites` was renamed to `sites`. Unknown keys are otherwise
+  // ignored here, so an old control plane would parse **zero** sites: stale
+  // vhosts would keep serving on loopback while hosting Caddy, finding no
+  // loopback entry, routed the hostname to Traefik — a 502 with the old content
+  // still live, and a deploy that reported success. Fail the command instead.
+  if (value.traditionalWebSites !== undefined) {
+    throw new TypeError(
+      "traditionalWebSites was renamed to sites; upgrade the control plane",
+    );
+  }
+
   return {
     environmentId: parseNonEmptyString(value, "environmentId"),
     projectId: parseNonEmptyString(value, "projectId"),
@@ -3207,10 +3281,10 @@ export function parseEnvironmentDeployPayload(
     composeFiles: parseEnvironmentDeployComposeFiles(value.composeFiles),
     hostings: hostings.map(parseHosting),
     ...definedProps({
-      traditionalWebSites: parseOptionalMaterialArray(
-        value.traditionalWebSites,
-        "traditionalWebSites",
-        parseTraditionalWebSite,
+      sites: parseOptionalMaterialArray(
+        value.sites,
+        "sites",
+        parseSite,
       ),
       nativeAppServices: parseOptionalMaterialArray(
         value.nativeAppServices,

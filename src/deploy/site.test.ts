@@ -1,6 +1,8 @@
 import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import {
   apacheSiteConfig,
+  caddySiteConfig,
+  DEFAULT_PHP_SERIES,
   defaultIndexHtml,
   formatHostingEnvFile,
   nginxSiteConfig,
@@ -13,16 +15,15 @@ import {
   phpFpmPoolAdminDirectives,
   phpFpmPoolConfig,
   phpFpmPoolId,
+  phpFpmPoolOverrides,
   phpFpmSocketPath,
-  PINNED_LSPHP_SERIES,
-  PINNED_PHP_FPM_SERIES,
-  resolveApachePhpVersion,
-  resolvePhpFpmSeries,
-  resolveTraditionalWebSiteOwnership,
-  type TraditionalWebApplySite,
-  traditionalWebEngineUnixUser,
-  traditionalWebSiteDir,
-} from "./traditional-web.ts";
+  phpSeriesForDeploy,
+  resolveSiteOwnership,
+  resolveSitePhpSeries,
+  type SiteApplySpec,
+  siteDir,
+  siteEngineUnixUser,
+} from "./site.ts";
 import { caddyHttpUpstream, siteSnippet } from "./ingress.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
@@ -30,7 +31,7 @@ import type { LayoutPaths } from "../paths/layout.ts";
 async function makeTestLayout(): Promise<
   { layout: LayoutPaths; cleanup: () => Promise<void> }
 > {
-  const root = await Deno.makeTempDir({ prefix: "tp-traditional-web-test-" });
+  const root = await Deno.makeTempDir({ prefix: "tp-site-test-" });
   const layout = resolveLayout(
     {
       TURBOPANEL_STATE_DIR: `${root}/state`,
@@ -50,6 +51,112 @@ async function makeTestLayout(): Promise<
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
 const test = Deno.test.bind(Deno);
+
+test("caddySiteConfig uses a port-only address with an explicit bind", () => {
+  const conf = caddySiteConfig(
+    {
+      composeServiceName: "site",
+      engine: "caddy",
+      root: "public",
+      listenPort: 18080,
+    },
+    "/var/lib/turbopanel/sites/env/site/public",
+  );
+  // Port-only, never `http://127.0.0.1:18080` — a host-qualified address makes
+  // Caddy match the Host header, and the edge Caddy forwards the ORIGINAL
+  // public Host, so a host-qualified block would 404 every real request.
+  assertStringIncludes(conf, ":18080 {");
+  assertEquals(conf.includes("http://127.0.0.1"), false);
+  assertStringIncludes(conf, "bind 127.0.0.1 ::1");
+  assertStringIncludes(
+    conf,
+    "root * /var/lib/turbopanel/sites/env/site/public",
+  );
+  assertStringIncludes(conf, "file_server");
+  // No directory listing by default.
+  assertEquals(conf.includes("browse"), false);
+  // Static site: no FPM handler at all.
+  assertEquals(conf.includes("php_fastcgi"), false);
+});
+
+test("caddySiteConfig binds the docker bridge when asked", () => {
+  const conf = caddySiteConfig(
+    {
+      composeServiceName: "site",
+      engine: "caddy",
+      root: "public",
+      listenPort: 18080,
+    },
+    "/srv/users/appuser/sites/svc/current/public",
+    "172.17.0.1",
+  );
+  assertStringIncludes(conf, "bind 127.0.0.1 ::1 172.17.0.1");
+});
+
+test("caddySiteConfig hands PHP to the site's own fpm socket", () => {
+  const socket = "/run/turbopanel/php/tp-env-phpapp.sock";
+  const conf = caddySiteConfig(
+    {
+      composeServiceName: "phpapp",
+      engine: "caddy",
+      root: "public",
+      listenPort: 18081,
+      webEnv: { APP_ENV: "production" },
+      php: { version: "8.4", settings: { memory_limit: "256M" } },
+    },
+    "/var/lib/turbopanel/sites/env/phpapp/public",
+    null,
+    { phpFpmSocket: socket },
+  );
+  // `unix/` + an absolute path is a literal double slash. Getting this wrong
+  // silently 502s every PHP request.
+  assertStringIncludes(conf, `php_fastcgi unix/${socket}`);
+  assertStringIncludes(conf, 'env APP_ENV "production"');
+});
+
+test("caddySiteConfig drops a webEnv value Caddy would reinterpret", () => {
+  const conf = caddySiteConfig(
+    {
+      composeServiceName: "phpapp",
+      engine: "caddy",
+      root: "public",
+      listenPort: 18081,
+      // Caddyfile substitutes {...} inside quoted strings, so this is config
+      // injection, not a quoting problem. Validate then drop — never escape.
+      webEnv: { SAFE: "ok", EVIL: "{env.HOME}", BREAK: 'a"b' },
+      php: { version: "8.4" },
+    },
+    "/var/lib/turbopanel/sites/env/phpapp/public",
+    null,
+    { phpFpmSocket: "/run/turbopanel/php/tp-env-phpapp.sock" },
+  );
+  assertStringIncludes(conf, 'env SAFE "ok"');
+  assertEquals(conf.includes("EVIL"), false);
+  assertEquals(conf.includes("BREAK"), false);
+});
+
+test("caddySiteConfig refuses a PHP site with no fpm socket", () => {
+  assertThrows(
+    () =>
+      caddySiteConfig(
+        {
+          composeServiceName: "phpapp",
+          engine: "caddy",
+          root: "public",
+          listenPort: 18081,
+          php: { version: "8.4" },
+        },
+        "/var/lib/turbopanel/sites/env/phpapp/public",
+      ),
+    Error,
+    "missing phpFpmSocket",
+  );
+});
+
+test("siteEngineUnixUser maps caddy to its own service account", () => {
+  // Not tpcaddy (9993, the control-plane Caddy) and not the root edge Caddy.
+  assertEquals(siteEngineUnixUser("caddy"), "tpcaddysite");
+});
 
 test("nginxSiteConfig listens on loopback only", () => {
   const conf = nginxSiteConfig(
@@ -75,7 +182,10 @@ test("apacheSiteConfig listens on loopback and proxies PHP to php-fpm", () => {
       root: "public",
       listenPort: 18081,
       webEnv: { APP_ENV: "production" },
-      php: { version: "8.4", memoryLimit: "256M", maxExecutionTime: 30 },
+      php: {
+        version: "8.4",
+        settings: { memory_limit: "256M", max_execution_time: "30" },
+      },
     },
     "/var/lib/turbopanel/sites/env/phpapp/public",
     { phpFpmSocket: socket },
@@ -92,21 +202,84 @@ test("apacheSiteConfig listens on loopback and proxies PHP to php-fpm", () => {
   }
 });
 
-test("phpFpmPoolAdminDirectives ignores unsafe memory values", () => {
+test("phpFpmPoolAdminDirectives drops what it cannot vouch for", () => {
+  // The security property, asserted directly: a value the daemon has not
+  // validated is DROPPED, never escaped. Both render targets are line-oriented
+  // and unquoted, so a dropped value has no escaping bug to have.
   assertEquals(
-    phpFpmPoolAdminDirectives({ memoryLimit: "256M; rm -rf /" }),
+    phpFpmPoolAdminDirectives({
+      settings: { memory_limit: "256M\nevil = 1" },
+    }),
     [],
   );
-  assertEquals(phpFpmPoolAdminDirectives({ memoryLimit: "512M" }), [
-    "php_admin_value[memory_limit] = 512M",
-  ]);
+  // An unknown directive never renders, however well-formed it looks.
   assertEquals(
-    phpFpmPoolAdminDirectives({ memoryLimit: "256M", maxExecutionTime: 30 }),
+    phpFpmPoolAdminDirectives({ settings: { open_basedir: "/" } }),
+    [],
+  );
+  assertEquals(
+    phpFpmPoolAdminDirectives({ settings: { error_log: "/tmp/x" } }),
+    [],
+  );
+  assertEquals(
+    phpFpmPoolAdminDirectives({ settings: { memory_limit: "512M" } }),
+    ["php_admin_value[memory_limit] = 512M"],
+  );
+  // Rendered in stable key order so an unchanged site produces byte-identical
+  // config and therefore no reload.
+  assertEquals(
+    phpFpmPoolAdminDirectives({
+      settings: { memory_limit: "256M", max_execution_time: "30" },
+    }),
     [
-      "php_admin_value[memory_limit] = 256M",
       "php_admin_value[max_execution_time] = 30",
+      "php_admin_value[memory_limit] = 256M",
     ],
   );
+});
+
+test("phpFpmPoolOverrides gates pool tuning and drops the rest", () => {
+  assertEquals(
+    phpFpmPoolOverrides({ pool: { pm: "static", "pm.max_children": "8" } }),
+    [{ key: "pm", value: "static" }, { key: "pm.max_children", value: "8" }],
+  );
+  // Platform-owned pool fields are unreachable from compose.
+  assertEquals(phpFpmPoolOverrides({ pool: { user: "root" } }), []);
+  assertEquals(phpFpmPoolOverrides({ pool: { listen: "/tmp/x.sock" } }), []);
+  assertEquals(phpFpmPoolOverrides({ pool: { clear_env: "no" } }), []);
+  assertEquals(phpFpmPoolOverrides(undefined), []);
+});
+
+test("phpFpmPoolConfig applies pool tuning and drops ondemand-only keys", () => {
+  const base = {
+    composeServiceName: "phpapp",
+    engine: "apache" as const,
+    root: "public",
+    listenPort: 18081,
+  };
+  const defaults = phpFpmPoolConfig(
+    "env1",
+    { ...base, php: { version: "8.4" } },
+    "/srv/root",
+    "/run/turbopanel/php/8.4/tp-env1-phpapp.sock",
+  );
+  assertStringIncludes(defaults, "pm = ondemand");
+  assertStringIncludes(defaults, "pm.process_idle_timeout = 30s");
+
+  const tuned = phpFpmPoolConfig(
+    "env1",
+    {
+      ...base,
+      php: { version: "8.4", pool: { pm: "static", "pm.max_children": "8" } },
+    },
+    "/srv/root",
+    "/run/turbopanel/php/8.4/tp-env1-phpapp.sock",
+  );
+  assertStringIncludes(tuned, "pm = static");
+  assertStringIncludes(tuned, "pm.max_children = 8");
+  // php-fpm refuses to start when this ondemand-only directive is present
+  // under another pm mode, so overriding pm has to drop it.
+  assertEquals(tuned.includes("pm.process_idle_timeout"), false);
 });
 
 test("phpFpmPoolConfig emits per-site socket and admin values", () => {
@@ -117,7 +290,10 @@ test("phpFpmPoolConfig emits per-site socket and admin values", () => {
       engine: "apache",
       root: "public",
       listenPort: 18081,
-      php: { version: "8.4", memoryLimit: "256M", maxExecutionTime: 30 },
+      php: {
+        version: "8.4",
+        settings: { memory_limit: "256M", max_execution_time: "30" },
+      },
     },
     "/var/lib/turbopanel/sites/env1/phpapp/public",
     "/run/turbopanel/php/tp-env1-phpapp.sock",
@@ -159,12 +335,12 @@ test("phpFpmPoolConfig runs workers as assigned principal", () => {
   assertStringIncludes(conf, "listen.group = tpapache");
 });
 
-test("resolveTraditionalWebSiteOwnership prefers principal over engine user", () => {
-  assertEquals(traditionalWebEngineUnixUser("nginx"), "tpnginx");
-  assertEquals(traditionalWebEngineUnixUser("apache"), "tpapache");
-  assertEquals(traditionalWebEngineUnixUser("openlitespeed"), "tpols");
+test("resolveSiteOwnership prefers principal over engine user", () => {
+  assertEquals(siteEngineUnixUser("nginx"), "tpnginx");
+  assertEquals(siteEngineUnixUser("apache"), "tpapache");
+  assertEquals(siteEngineUnixUser("openlitespeed"), "tpols");
   assertEquals(
-    resolveTraditionalWebSiteOwnership({
+    resolveSiteOwnership({
       composeServiceName: "static",
       engine: "nginx",
       root: "public",
@@ -173,7 +349,7 @@ test("resolveTraditionalWebSiteOwnership prefers principal over engine user", ()
     { user: "tpnginx", group: "tpnginx" },
   );
   assertEquals(
-    resolveTraditionalWebSiteOwnership({
+    resolveSiteOwnership({
       composeServiceName: "static",
       engine: "nginx",
       root: "public",
@@ -187,7 +363,7 @@ test("resolveTraditionalWebSiteOwnership prefers principal over engine user", ()
   );
   assertThrows(
     () =>
-      resolveTraditionalWebSiteOwnership({
+      resolveSiteOwnership({
         composeServiceName: "static",
         engine: "apache",
         root: "public",
@@ -202,11 +378,11 @@ test("resolveTraditionalWebSiteOwnership prefers principal over engine user", ()
   );
 });
 
-test("traditionalWebSiteDir nests under stateDir/sites", async () => {
+test("siteDir nests under stateDir/sites", async () => {
   const { layout, cleanup } = await makeTestLayout();
   try {
     assertEquals(
-      traditionalWebSiteDir(layout, "env-1", "marketing"),
+      siteDir(layout, "env-1", "marketing"),
       `${layout.stateDir}/sites/env-1/marketing`,
     );
   } finally {
@@ -218,75 +394,18 @@ test("phpFpmPoolId and phpFpmSocketPath are stable under layout.runDir", async (
   const { layout, cleanup } = await makeTestLayout();
   try {
     assertEquals(phpFpmPoolId("env1", "app"), "tp-env1-app");
+    // Series-scoped: co-installed masters each own their own socket dir.
     assertEquals(
-      phpFpmSocketPath(layout, "env1", "app"),
-      `${layout.runDir}/php/tp-env1-app.sock`,
+      phpFpmSocketPath(layout, "8.4", "env1", "app"),
+      `${layout.runDir}/php/8.4/tp-env1-app.sock`,
+    );
+    assertEquals(
+      phpFpmSocketPath(layout, "8.3", "env1", "app"),
+      `${layout.runDir}/php/8.3/tp-env1-app.sock`,
     );
   } finally {
     await cleanup();
   }
-});
-
-test("resolveApachePhpVersion returns a single version or throws on conflict", () => {
-  assertEquals(
-    resolveApachePhpVersion([
-      {
-        composeServiceName: "a",
-        engine: "apache",
-        root: "public",
-        listenPort: 18080,
-        php: { version: "8.4" },
-      },
-    ]),
-    "8.4",
-  );
-  assertEquals(
-    resolveApachePhpVersion([
-      {
-        composeServiceName: "a",
-        engine: "apache",
-        root: "public",
-        listenPort: 18080,
-        php: { memoryLimit: "128M" },
-      },
-    ]),
-    PINNED_PHP_FPM_SERIES,
-  );
-  assertThrows(
-    () =>
-      resolveApachePhpVersion([
-        {
-          composeServiceName: "a",
-          engine: "apache",
-          root: "public",
-          listenPort: 18080,
-          php: { version: "8.3" },
-        },
-        {
-          composeServiceName: "b",
-          engine: "apache",
-          root: "public",
-          listenPort: 18081,
-          php: { version: "8.4" },
-        },
-      ]),
-    Error,
-    "conflicting PHP versions",
-  );
-  assertThrows(
-    () =>
-      resolveApachePhpVersion([
-        {
-          composeServiceName: "a",
-          engine: "apache",
-          root: "public",
-          listenPort: 18080,
-          php: { version: "8.3" },
-        },
-      ]),
-    Error,
-    "is not vendored",
-  );
 });
 
 test("formatHostingEnvFile sorts keys and escapes quotes", () => {
@@ -391,7 +510,7 @@ test("openlitespeedMainConfig assembles a single httpd_config.conf from fragment
   }
 });
 
-test("defaultIndexHtml labels each traditional-web engine", () => {
+test("defaultIndexHtml labels each site engine", () => {
   assertStringIncludes(defaultIndexHtml("site", "nginx"), "nginx");
   assertStringIncludes(defaultIndexHtml("site", "apache"), "Apache");
   assertStringIncludes(
@@ -411,19 +530,19 @@ test("siteSnippet with http upstream proxies to nginx listen port", () => {
   );
   assertStringIncludes(snippet, "reverse_proxy 127.0.0.1:18080");
   if (snippet.includes("7080") || snippet.includes("7443")) {
-    throw new Error("traditional-web upstream must not use Traefik ports");
+    throw new Error("site upstream must not use Traefik ports");
   }
 });
 
 test("nginxSiteConfig hands .php to this site's own php-fpm socket", () => {
-  const socket = "/run/turbopanel/php/tp-env-phpapp.sock";
+  const socket = "/run/turbopanel/php/8.4/tp-env-phpapp.sock";
   const conf = nginxSiteConfig(
     {
       composeServiceName: "phpapp",
       engine: "nginx",
       root: "public",
       listenPort: 18080,
-      php: { version: "8.4", memoryLimit: "256M" },
+      php: { version: "8.4", settings: { memory_limit: "256M" } },
     },
     "/var/lib/turbopanel/sites/env/phpapp/public",
     null,
@@ -455,7 +574,7 @@ test("nginxSiteConfig inlines fastcgi params when no vendored file is named", ()
     },
     "/var/lib/turbopanel/sites/env/phpapp/public",
     null,
-    { phpFpmSocket: "/run/turbopanel/php/tp-env-phpapp.sock" },
+    { phpFpmSocket: "/run/turbopanel/php/8.4/tp-env-phpapp.sock" },
   );
   assertStringIncludes(conf, "fastcgi_param REQUEST_METHOD $request_method;");
   if (conf.includes("include ")) {
@@ -506,57 +625,74 @@ test("phpFpmPoolConfig owns the listen socket with the serving engine", () => {
       php: { version: "8.4" },
     },
     "/var/lib/turbopanel/sites/env1/phpapp/public",
-    "/run/turbopanel/php/tp-env1-phpapp.sock",
+    "/run/turbopanel/php/8.4/tp-env1-phpapp.sock",
   );
   assertStringIncludes(conf, "user = tpnginx");
   assertStringIncludes(conf, "listen.owner = tpnginx");
   assertStringIncludes(conf, "listen.group = tpnginx");
 });
 
-test("resolvePhpFpmSeries pins one series across every engine", () => {
+test("resolveSitePhpSeries selects per site, defaulting when unnamed", () => {
+  const site = (php?: Record<string, unknown>) => ({
+    composeServiceName: "site",
+    engine: "nginx" as const,
+    root: "public",
+    listenPort: 18080,
+    ...(php ? { php } : {}),
+  });
+  // No PHP at all.
+  assertEquals(resolveSitePhpSeries(site()), undefined);
+  // PHP with no version named falls back to the default series.
   assertEquals(
-    resolvePhpFpmSeries([
+    resolveSitePhpSeries(site({ settings: { memory_limit: "128M" } })),
+    DEFAULT_PHP_SERIES,
+  );
+  // An explicit version is honored — it is a selector now, not an assertion.
+  assertEquals(resolveSitePhpSeries(site({ version: "8.3" })), "8.3");
+  // Still a wire-integrity check: the series becomes a path segment, a package
+  // name, and a systemd instance name.
+  assertThrows(
+    () => resolveSitePhpSeries(site({ version: "not-a-version" })),
+    Error,
+    "site PHP version is invalid",
+  );
+});
+
+test("phpSeriesForDeploy collects every distinct series, sorted", () => {
+  // Two sites on different series is now a supported deploy, not a conflict.
+  assertEquals(
+    phpSeriesForDeploy([
       {
-        composeServiceName: "site",
-        engine: "nginx",
+        composeServiceName: "legacy",
+        engine: "apache",
         root: "public",
         listenPort: 18080,
+        php: { version: "8.3" },
+      },
+      {
+        composeServiceName: "modern",
+        engine: "nginx",
+        root: "public",
+        listenPort: 18081,
         php: { version: "8.4" },
       },
       {
         composeServiceName: "ols",
         engine: "openlitespeed",
         root: "public",
-        listenPort: 18081,
-        php: { memoryLimit: "128M" },
+        listenPort: 18082,
+        php: { settings: { memory_limit: "128M" } },
+      },
+      {
+        composeServiceName: "static",
+        engine: "caddy",
+        root: "public",
+        listenPort: 18083,
       },
     ]),
-    PINNED_PHP_FPM_SERIES,
+    ["8.3", "8.4"],
   );
-  // The lsphp pin is the same value by design — one PHP version per host.
-  assertEquals(PINNED_LSPHP_SERIES, PINNED_PHP_FPM_SERIES);
-  assertEquals(resolvePhpFpmSeries([]), undefined);
-  assertThrows(
-    () =>
-      resolvePhpFpmSeries([
-        {
-          composeServiceName: "site",
-          engine: "nginx",
-          root: "public",
-          listenPort: 18080,
-          php: { version: "8.3" },
-        },
-        {
-          composeServiceName: "ols",
-          engine: "openlitespeed",
-          root: "public",
-          listenPort: 18081,
-          php: { version: "8.4" },
-        },
-      ]),
-    Error,
-    "conflicting PHP versions",
-  );
+  assertEquals(phpSeriesForDeploy([]), []);
 });
 
 test("openlitespeedVhostConfig runs PHP through a suEXEC LSAPI processor", () => {
@@ -605,7 +741,7 @@ test("openlitespeedLsphpBinaryPath addresses the vendored series", async () => {
     );
     assertEquals(
       openlitespeedLsphpBinaryPath(layout),
-      openlitespeedLsphpBinaryPath(layout, PINNED_LSPHP_SERIES),
+      openlitespeedLsphpBinaryPath(layout, DEFAULT_PHP_SERIES),
     );
   } finally {
     await cleanup();
@@ -613,7 +749,7 @@ test("openlitespeedLsphpBinaryPath addresses the vendored series", async () => {
 });
 
 test("openlitespeedSiteFragment scopes a PHP vhost to the principal identity", () => {
-  const site: TraditionalWebApplySite = {
+  const site: SiteApplySpec = {
     composeServiceName: "phpapp",
     engine: "openlitespeed",
     root: "public",
@@ -646,7 +782,7 @@ test("openlitespeedSiteFragment scopes a PHP vhost to the principal identity", (
 });
 
 test("openlitespeedSiteFragment enables scripts only for a PHP site", () => {
-  const site: TraditionalWebApplySite = {
+  const site: SiteApplySpec = {
     composeServiceName: "site",
     engine: "openlitespeed",
     root: "public",

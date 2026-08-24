@@ -1,9 +1,9 @@
 ---
 # Vendor Apache httpd from ASF source + php-fpm from official PHP source
-# (never distro apt packages) + tpapache identity for traditional-web deploy.
+# (never distro apt packages) + tpapache identity for site deploy.
 # Site vhosts and per-site php-fpm pools are written by the daemon TypeScript
 # apply path under /etc/turbopanel/apache/sites/ and /etc/turbopanel/php/pools/.
-- name: TurboPanel traditional-web prerequisites (apache + php-fpm)
+- name: TurboPanel site prerequisites (apache + php-fpm)
   hosts: localhost
   connection: local
   become: true

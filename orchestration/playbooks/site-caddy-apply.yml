@@ -1,0 +1,44 @@
+---
+# Vendor Caddy (never a distro apt package) + php-fpm from the sury repo when a
+# Caddy site needs PHP + tpcaddysite identity for site deploy.
+# Per-site blocks and per-site php-fpm pools are written by the daemon
+# TypeScript apply path after this playbook, under /etc/turbopanel/caddy/sites/
+# and /etc/turbopanel/php/pools/.
+- name: TurboPanel site prerequisites (Caddy)
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Provision site-Caddy service identity
+      ansible.builtin.include_role:
+        name: web-service-user
+      vars:
+        web_service_key: caddy
+
+    - name: Vendor Caddy binary
+      ansible.builtin.include_role:
+        name: caddy
+
+    - name: Configure the per-site Caddy (FHS config, unit, state)
+      ansible.builtin.include_role:
+        name: site-caddy
+
+    # php-fpm's own service account is tpapache regardless of which engine
+    # consumes its sockets. On a Caddy-only host that account would not
+    # otherwise exist, so provision it before the role runs — the per-site
+    # pools Caddy talks to still run as the site principal and listen on a
+    # tpcaddysite-owned socket.
+    - name: Provision php-fpm service identity
+      when: turbopanel_php_fpm_install | default(false) | bool
+      ansible.builtin.include_role:
+        name: web-service-user
+      vars:
+        web_service_key: apache
+
+    # Daemon passes turbopanel_php_fpm_install=true when any Caddy site carries
+    # hosting web.php hints; a static-only Caddy host skips PHP entirely.
+    - name: Install php-fpm + FHS config/log/pools
+      when: turbopanel_php_fpm_install | default(false) | bool
+      ansible.builtin.include_role:
+        name: php-fpm

@@ -210,7 +210,7 @@ const NEXT_PUBLIC_DIR = "public";
  *
  * A statically exported Next build emits a complete, server-free site here.
  * There is no `server.js` and no runtime to supervise, so this is the signal
- * that the release belongs on the traditional-web **static** lane rather than
+ * that the release belongs on the site **static** lane rather than
  * on the native systemd one.
  */
 export const NEXT_EXPORT_DIR = "out";
@@ -266,7 +266,7 @@ export type NativeAppBuildOutput = {
   standaloneOutput: boolean;
   /**
    * True when the build emitted `output: 'export'` static files instead of a
-   * server. The caller moves the service onto the traditional-web static lane
+   * server. The caller moves the service onto the site static lane
    * and generates **no** systemd unit for it — a static export has no process
    * to supervise, so a native unit would be a unit that can never come up.
    */
@@ -284,7 +284,7 @@ export type NativeAppBuildOutput = {
  * When the build instead emitted `output: 'export'` (an `out/` tree with an
  * `index.html` and no standalone server), that subtree is published as the
  * release **and** flagged `staticExport`. There is no server process in a
- * static export, so the caller hands the service to the traditional-web static
+ * static export, so the caller hands the service to the site static
  * lane instead of generating a systemd unit for it; the operator does not have
  * to re-declare `serviceKind` to get a working deploy. `out/` at the release
  * root is what lets the generated vhost serve `current` directly.
@@ -304,7 +304,7 @@ export async function prepareNativeAppBuildOutput(
     if (await hasNextStaticExport(context.workingDir)) {
       context.onOutput?.(
         "stdout",
-        "detected a statically exported Next.js build — publishing out/ as the release and serving it on the traditional-web static lane (no app process is started)",
+        "detected a statically exported Next.js build — publishing out/ as the release and serving it on the site static lane (no app process is started)",
       );
       return {
         outputDirectory: NEXT_EXPORT_DIR,

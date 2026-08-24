@@ -20,7 +20,7 @@ import {
   removeEnvironmentTcpUdpServiceIngress,
   removeHostingCaddySite,
 } from "../../deploy/ingress.ts";
-import { removeTraditionalWebSites } from "../../deploy/traditional-web.ts";
+import { removeSites } from "../../deploy/site.ts";
 import { removeNativeAppServices } from "../../deploy/native/apply-native-apps.ts";
 import { logInfo, logWarn } from "../../logger.ts";
 import {
@@ -67,7 +67,7 @@ export type EnvironmentStopHandlerDeps = {
  *
  * Generic on purpose: this is the tree the Git release engine publishes into
  * (`releases/`, `current`, `shared/`) and the one native apps run out of — not
- * a traditional-web artifact. It is root-owned by design, so
+ * a site artifact. It is root-owned by design, so
  * the daemon cannot unlink it itself; removal goes through the same privileged
  * runner the release engine uses to seal and prune.
  *
@@ -226,7 +226,7 @@ export async function handleEnvironmentStop(
   }
 
   await removeHostingCaddySite(layout, parsedPayload.environmentId);
-  await removeTraditionalWebSites(layout, parsedPayload.environmentId);
+  await removeSites(layout, parsedPayload.environmentId);
   // Disable + remove the generated app units before the release trees they run
   // out of are reclaimed, so systemd never restarts a unit whose
   // `WorkingDirectory` has just been deleted. The per-principal slice is

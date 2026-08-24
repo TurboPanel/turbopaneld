@@ -1,0 +1,14 @@
+---
+# Creates the unix groups that mean "this principal may execute this runtime
+# series", from the shared registry at orchestration/runtime-registry.json —
+# the same file the daemon imports in src/runtime/registry.ts, so group names
+# and gids cannot drift between the two.
+#
+# Callers set:
+#   runtime_entitlement_runtime: php | node
+#   runtime_entitlement_series:  ["8.4", "8.3"]   (series to ensure groups for)
+runtime_entitlement_runtime: ""
+runtime_entitlement_series: []
+
+turbopanel_install_root: /opt/turbopanel  # noqa: var-naming[no-role-prefix]
+turbopanel_vendor_dir: "{{ turbopanel_install_root }}/vendor"  # noqa: var-naming[no-role-prefix]

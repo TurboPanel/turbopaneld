@@ -4,12 +4,20 @@
 # when a web server is installed (include_role on demand); daemon-converge does
 # not create these accounts.
 #
-# Callers pass web_service_key (nginx/apache/openlitespeed/litespeed) to resolve
+# Callers pass web_service_key (caddy/nginx/apache/openlitespeed/litespeed) to resolve
 # user/group/uid/gid from the map, or set web_service_user/web_service_uid/
 # web_service_group/web_service_gid explicitly.
 web_service_key: ""
 
 web_service_user_map:
+  # Site Caddy — the unprivileged per-site server. NOT the control-plane Caddy
+  # (tpcaddy/9993 via instance-user) and NOT the root edge Caddy that owns
+  # public :80/:443. 9988 is taken by tpnodeapp, so this is the next free slot.
+  caddy:
+    user: tpcaddysite
+    uid: 9987
+    group: tpcaddysite
+    gid: 9987
   nginx:
     user: tpnginx
     uid: 9992

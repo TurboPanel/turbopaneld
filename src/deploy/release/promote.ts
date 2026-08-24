@@ -60,7 +60,7 @@ async function statOrNull(path: string): Promise<Deno.FileInfo | null> {
  *
  * Caller-supplied so callers can swap in a real check. The native runtime
  * probes the started process *after* promote (`../native/`), because a process
- * cannot be started out of a tree that is not yet published; the traditional-web
+ * cannot be started out of a tree that is not yet published; the site
  * path probes the document root. It must throw to reject the release.
  */
 export type ReleaseHealthProbe = (releaseDir: string) => Promise<void>;
@@ -167,7 +167,7 @@ export const RELEASE_SHARED_LINK_TARGET = join("..", "..", "shared");
  * Create the `shared` symlink at the top of a staged release.
  *
  * Generic on purpose — every release-backed service reaches its writable state
- * through the same `current/shared` path, so the traditional-web serving path
+ * through the same `current/shared` path, so the site serving path
  * (PHP `open_basedir`, uploads) and the native runtime (`../native/`) do not
  * each invent their own convention, and the *content* of a generated vhost never has
  * to change when a promote swaps `current`.
@@ -245,7 +245,7 @@ export async function readCurrentReleaseId(
  * What *is* reused is the health-probe contract {@link promoteRelease} honors —
  * the native runtime still has to start its unit against the target release and
  * answer on its port before the swap counts (`../native/`), while the
- * traditional-web lane needs no probe at all because the swap is nothing but a
+ * site lane needs no probe at all because the swap is nothing but a
  * symlink move.
  *
  * A missing target directory is an **error**, not a skip: "the release you

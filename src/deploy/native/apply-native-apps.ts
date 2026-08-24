@@ -1,7 +1,7 @@
 /**
  * Supervise native (`serviceKind: node`) apps with generated systemd units.
  *
- * The shape is deliberately the traditional-web one (`../traditional-web.ts`):
+ * The shape is deliberately the site one (`../site.ts`):
  * an injectable IO seam so the whole path is testable without a host, render a
  * candidate, compare it against what is installed through a privileged `cmp`,
  * install **only** when the bytes differ, and `daemon-reload` only when a file
@@ -48,9 +48,7 @@ import type {
 import { resolveReleasePaths } from "../release/release-layout.ts";
 import { swapCurrentSymlink } from "../release/promote.ts";
 import type { RunFn, RunResult } from "../ensure-principal.ts";
-import { ensureSupplementaryGroupMembership } from "../ensure-principal.ts";
 import {
-  NATIVE_APP_RUNTIME_GROUP,
   nativeAppConfigDir,
   nativeAppStagedFilePrefix,
   nativeAppStagedPath,
@@ -90,7 +88,7 @@ export type NativeAppSleepFn = (ms: number) => Promise<void>;
 
 /**
  * The Git release tree one native app runs out of, resolved by the caller from
- * `sourceMaterial[]` — the same binding shape traditional-web uses, so this
+ * `sourceMaterial[]` — the same binding shape site uses, so this
  * module never re-derives the compose-service → principal mapping.
  */
 export type NativeAppRelease = {
@@ -135,7 +133,7 @@ async function runDefault(command: string, args: string[]): Promise<RunResult> {
 }
 
 /**
- * Same "missing playbook is not a deploy failure" rule the traditional-web
+ * Same "missing playbook is not a deploy failure" rule the site
  * engine install uses: a host whose orchestration assets were not shipped is
  * assumed to have the runtime installed some other way, rather than being
  * refused a deploy it might well be able to serve.
@@ -228,7 +226,7 @@ async function removeStagedFile(path: string): Promise<void> {
  * True when `installedPath` already holds exactly the staged bytes.
  *
  * Compared through the privileged runner rather than `Deno.readTextFile` for
- * the same reason the traditional-web path does it: `/etc/systemd/system` is
+ * the same reason the site path does it: `/etc/systemd/system` is
  * root-owned and the daemon is not root, so a direct read would fail and report
  * "changed" on every single deploy — the churn this exists to prevent. A `cmp`
  * that cannot answer reports **changed**, so the worst case is a redundant
@@ -532,50 +530,6 @@ async function ensureNativeAppRuntime(
 }
 
 /**
- * Join every principal in this deploy to the tenant Node runtime group.
- *
- * `ExecStart` is `<vendor>/node-app/<series>/current/bin/node`, and systemd
- * `execve()`s it *after* dropping to `User=`, so the principal itself needs
- * read + traverse on that tree. The tree is `root:tpnodeapp 0750` rather than
- * world-readable, and `/opt/turbopanel` + `vendor/` grant the same group
- * traverse-only through an ACL — so without this membership the unit fails to
- * start with `status=203/EXEC`.
- *
- * `usermod -aG` is idempotent, and this runs before the units are installed:
- * the group has to be in the account's credentials before systemd forks the
- * service, not after.
- *
- * Best-effort per principal, deliberately: `ensureNativeAppRuntime` above
- * already treats a host with no orchestration assets as "runtime installed some
- * other way", and on such a host the group may legitimately not exist. Failing
- * the whole deploy here would refuse a deploy the host can serve — the unit's
- * own health probe is what catches a genuinely unreachable runtime.
- */
-async function ensureNativeAppRuntimeGroupMembership(
-  io: NativeAppIo,
-  bindings: NativeAppBindings,
-): Promise<void> {
-  const usernames = new Set<string>();
-  for (const binding of bindings.values()) usernames.add(binding.username);
-  for (const username of [...usernames].sort((a, b) => a.localeCompare(b))) {
-    try {
-      await ensureSupplementaryGroupMembership(
-        username,
-        NATIVE_APP_RUNTIME_GROUP,
-        io.run,
-      );
-    } catch (err) {
-      logWarn(
-        "deploy",
-        `could not add ${username} to ${NATIVE_APP_RUNTIME_GROUP}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    }
-  }
-}
-
-/**
  * Apply every native app in one deploy.
  *
  * Apps with no binding are skipped loudly rather than failed, matching the
@@ -596,7 +550,6 @@ export async function applyNativeAppServices(
 
   const io = resolveIo(opts);
   await ensureNativeAppRuntime(io, apps);
-  await ensureNativeAppRuntimeGroupMembership(io, opts.bindings);
   await Deno.mkdir(nativeAppConfigDir(layout), {
     recursive: true,
     mode: 0o750,
@@ -791,7 +744,7 @@ export async function removeNativeAppServices(
  * in this payload.
  *
  * Built from `sourceMaterial[]` on **every** deploy (not only when a release was
- * freshly promoted) for the same reason the traditional-web bindings are: a
+ * freshly promoted) for the same reason the site bindings are: a
  * redeploy that does not move the source still has to render a unit pointing at
  * `current`.
  */

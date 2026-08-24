@@ -3,7 +3,7 @@ galaxy_info:
   author: turbopanel
   description: >-
     Vendor a pinned OpenLiteSpeed binary release into the shared runtimes
-    directory (never a distro package) for traditional-web static hosting.
+    directory (never a distro package) for site static hosting.
     Requires 64-bit Linux (aarch64 or x86_64). Identity (tpols) is provisioned
     separately via the web-service-user role.
   license: AGPL-3.0

@@ -1,5 +1,5 @@
 /**
- * Let Docker Compose services reach traditional-web vhosts on the host.
+ * Let Docker Compose services reach site vhosts on the host.
  *
  * Public ingress stays on loopback → hosting Caddy. Containers use
  * `host.docker.internal:host-gateway` and env URLs pointed at the same listen
@@ -14,10 +14,9 @@ const DEFAULT_DOCKER_GATEWAY = "172.17.0.1"; // NOSONAR typescript:S1313 — Doc
 const HOST_DOCKER_INTERNAL = "host.docker.internal:host-gateway";
 const decoder = new TextDecoder();
 
-export const TRADITIONAL_WEB_ENDPOINTS_ENV =
-  "TURBOPANEL_TRADITIONAL_WEB_ENDPOINTS";
+export const SITE_ENDPOINTS_ENV = "TURBOPANEL_SITE_ENDPOINTS";
 
-export type TraditionalWebDockerSite = {
+export type SiteDockerEndpoint = {
   composeServiceName: string;
   listenPort: number;
 };
@@ -51,19 +50,19 @@ export async function resolveDockerHostGatewayAddress(): Promise<string> {
   return DEFAULT_DOCKER_GATEWAY;
 }
 
-/** `TURBOPANEL_TRADITIONAL_WEB_<SERVICE>_URL` suffix from compose service name. */
-export function traditionalWebEnvKeyForService(
+/** `TURBOPANEL_SITE_<SERVICE>_URL` suffix from compose service name. */
+export function siteEnvKeyForService(
   composeServiceName: string,
 ): string {
   let sanitized = composeServiceName.replaceAll(/\W/g, "_");
   if (/^\d/.test(sanitized)) {
     sanitized = `_${sanitized}`;
   }
-  return `TURBOPANEL_TRADITIONAL_WEB_${sanitized.toUpperCase()}_URL`;
+  return `TURBOPANEL_SITE_${sanitized.toUpperCase()}_URL`;
 }
 
-export function buildTraditionalWebEndpointMap(
-  sites: readonly TraditionalWebDockerSite[],
+export function buildSiteEndpointMap(
+  sites: readonly SiteDockerEndpoint[],
 ): Record<string, string> {
   const endpoints: Record<string, string> = {};
   for (const site of sites) {
@@ -75,20 +74,20 @@ export function buildTraditionalWebEndpointMap(
 
 /**
  * Daemon-overlay fragment so every resolved container service can dial
- * traditional-web sites on the host (`host.docker.internal:<listenPort>`).
+ * sites on the host (`host.docker.internal:<listenPort>`).
  */
-export function buildTraditionalWebReachabilityFragment(
-  sites: readonly TraditionalWebDockerSite[],
+export function buildSiteReachabilityFragment(
+  sites: readonly SiteDockerEndpoint[],
   resolved: ResolvedComposeModel,
 ): ComposeOverlayFragment {
   if (sites.length === 0 || resolved.serviceNames.length === 0) return {};
 
-  const endpoints = buildTraditionalWebEndpointMap(sites);
+  const endpoints = buildSiteEndpointMap(sites);
   const envEntries: Record<string, string> = {
-    [TRADITIONAL_WEB_ENDPOINTS_ENV]: JSON.stringify(endpoints),
+    [SITE_ENDPOINTS_ENV]: JSON.stringify(endpoints),
   };
   for (const site of sites) {
-    envEntries[traditionalWebEnvKeyForService(site.composeServiceName)] =
+    envEntries[siteEnvKeyForService(site.composeServiceName)] =
       endpoints[site.composeServiceName] ?? "";
   }
 

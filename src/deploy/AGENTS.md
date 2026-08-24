@@ -84,7 +84,7 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
 7. Write compiled `compose.yaml` plus `.env` plus `deployment.json` under
    `<stateDir>/deployments/<projectId>/<environmentId>/` (see **Compiled
    compose publish** below). Daemon overlay fragments (storage,
-   traditional-web reachability, Traefik labels) are merged into that single
+   site reachability, Traefik labels) are merged into that single
    file before publish — **not** secrets. HTTP hostings that share a hostname are merged into one
    Caddy site with `handle` / path matchers (`pathPrefix`); Traefik routers
    already used `pathPrefix` via compose labels.
@@ -160,7 +160,7 @@ variable the build command can inherit — the env carries only the *paths*, and
 allow-list.
 
 **Layout** (path helpers live in `src/paths/layout.ts` — `siteRoot`,
-`siteReleasesDir`, `siteCurrentSymlink`, `siteSharedDir` — so the traditional-web
+`siteReleasesDir`, `siteCurrentSymlink`, `siteSharedDir` — so the site
 serving change in the next phase addresses the same tree without restating it):
 
 ```
@@ -178,7 +178,7 @@ serving change in the next phase addresses the same tree without restating it):
 Every published release carries a relative **`shared` symlink** at its root
 (`promoteRelease` → `linkReleaseSharedDir`), so `current/shared` is a stable
 writable path for *any* release-backed service. That is generic on purpose: the
-traditional-web serving path pins PHP `open_basedir` to it, and the
+site serving path pins PHP `open_basedir` to it, and the
 native runtime relies on the same convention rather than inventing a
 second one. A build that ships its own `shared` entry is replaced — the link is
 part of the layout contract, not payload.
@@ -212,7 +212,7 @@ the control plane, not guessed on the host.
 `rollbackToReleaseId` takes a separate branch at the top of `applyOneRelease`
 (`rollbackOneRelease`). It is deliberately **not** a new command type: it rides
 the ordinary `environment.deploy` payload, so compose apply, ingress, TLS,
-retention, `deployment.json`, and the native / traditional-web promote hooks all
+retention, `deployment.json`, and the native / site promote hooks all
 keep working unchanged, and the generation-supersede rule still applies. That
 branch skips `ensureReleaseTree`, the scratch dir, checkout, and build entirely
 — `ensureReleaseTree` in particular would `install -d` the sealed release back
@@ -274,19 +274,19 @@ trusted to name a safe path. A service that is still sourced keeps its tree even
 if its principal changed: reclaiming it would delete live `shared/` state.
 Best-effort per entry, like the rest of retention.
 
-**Traditional-web sites now serve out of `current`.** `deploy-environment.ts`
+**Sites now serve out of `current`.** `deploy-environment.ts`
 builds a `composeServiceName → { serviceId, username }` map from
 `sourceMaterial[]` (`deployReleaseBindings`, resolving `serviceId` through the
 same {@link resolveReleaseServiceId} rule) and hands it to
-`applyTraditionalWebSites`, which is why `applySourceReleases` runs *before* the
-traditional-web apply. The map is rebuilt on **every** deploy, not only when a
+`applySites`, which is why `applySourceReleases` runs *before* the
+site apply. The map is rebuilt on **every** deploy, not only when a
 release was freshly promoted — a redeploy that does not touch the source still
 has to point the document root at `current`. Process supervision from
 `x-turbopanel.source.startCommand` — now carried on
 `EnvironmentDeploySourceBuild` — belongs to the native runtime instead; see the
 Native Node/Next runtime section.
 
-**Release-tree cleanup is generic, not traditional-web-specific.**
+**Release-tree cleanup is generic, not site-specific.**
 `environment.stop` carries `siteReleases[]` (`{ serviceId, username }`) and
 removes `<principalHome>/sites/<serviceId>` recursively through the privileged
 runner — the tree is root-owned, so the daemon cannot unlink it itself. Removal
@@ -310,13 +310,13 @@ record written by that same deploy no longer names it.
 
 A source binding may set `x-turbopanel.source.buildKind: railpack`, which
 deploy-prepare passes straight through as `sourceMaterial[].build.kind`. That is
-the **fourth deploy pattern** on this host, alongside compose, traditional-web,
+the **fourth deploy pattern** on this host, alongside compose, site,
 and native app — and the four differ only in what a release *is*:
 
 | pattern | what a release is | how it runs |
 | --- | --- | --- |
 | compose | nothing (no source) | `docker compose up` on the authored image/build |
-| traditional-web | a promoted directory | a host engine vhost serves `current` |
+| site | a promoted directory | a host engine vhost serves `current` |
 | native app | a promoted directory | a generated systemd unit runs out of `current` |
 | **Railpack** | **an OCI image tag** | `docker compose up` on that tag |
 
@@ -367,7 +367,7 @@ hosting Caddy, storage mounts, and `docker compose ps` container reporting all
 go on treating the service as the ordinary container it is. A Railpack service
 is **not** host-native and never appears in `hostNativeComposeServiceNames()` /
 `resolveHostNativeLanes` — it stays `serviceKind: container` and never enters
-`traditionalWebSites[]` / `nativeAppServices[]`.
+`sites[]` / `nativeAppServices[]`.
 
 **Rollback** rides the existing `rollbackToReleaseId` field with no new command
 type. Which root holds the target release identifies its lane: the record root
@@ -520,8 +520,8 @@ entry. There is no `composeYaml` fallback on `environment.deploy`.
   does not narrow an existing more-permissive mode).
 - **Daemon overlay:** `buildDaemonOverlayFragment` merges, in this fixed
   order, the storage bind/volume-mount fragment,
-  traditional-web ⇄ Docker reachability fragment (`extra_hosts` +
-  `TURBOPANEL_TRADITIONAL_WEB_*` env), and hosting Traefik-label fragment
+  site ⇄ Docker reachability fragment (`extra_hosts` +
+  `TURBOPANEL_SITE_*` env), and hosting Traefik-label fragment
   (`mergeComposeOverlayFragments` in `compose-overlay.ts`). The merged
   fragment is folded into the compiled YAML before publish — not a separate
   `docker-compose.turbopanel.daemon.yml` layer. Secrets are **not** overlay
@@ -636,7 +636,7 @@ get a per-service Traefik project or an `ingressServices[]` entry.
    recreate them. Missing / active-endpoint errors must not fail the stop.
 3. Remove `/etc/turbopanel/hosting/sites/<environmentId>.caddy` via
    `removeHostingCaddySite` and best-effort reload hosting Caddy; remove
-   traditional-web sites.
+   sites.
 4. Tear down per-service tcp/udp ingress via
    `removeEnvironmentTcpUdpServiceIngress` (payload ∪ environment index).
 5. Delete the deployment directory.
@@ -668,14 +668,14 @@ Helpers: `src/deploy/ensure-docker.ts`, `src/deploy/ingress.ts`,
 `src/deploy/ensure-hosting-caddy.ts`,
 `src/deploy/materialize-storage.ts`, `src/deploy/apply-storage-volumes.ts`,
 `src/deploy/run-deploy-hooks.ts`, `src/deploy/ensure-principal.ts`,
-`src/deploy/traditional-web.ts`, `src/deploy/traditional-web-docker.ts`,
+`src/deploy/site.ts`, `src/deploy/site-docker.ts`,
 `src/deploy/ensure-docker-networks.ts`, `src/deploy/compose-ps.ts`,
 `src/deploy/compose-files.ts` (compiled `compose.yaml` + `.env` + `deployment.json`
 publish; legacy layered-chain read fallback),
 `src/deploy/secret-runtime.ts` (host `/run` secret files),
 `src/deploy/rehydrate-deployments.ts` (boot/reconnect/lifecycle rehydrate),
 `src/deploy/compose-overlay.ts` (daemon overlay fragment merge into the
-compiled YAML — storage / Traefik / traditional-web only).
+compiled YAML — storage / Traefik / site only).
 
 ## Shared HTTP ingress identity
 
@@ -798,7 +798,7 @@ isolation, and the unit is written so that difference is honest rather than
 nominal — see the hardening set below.
 
 `applyNativeAppServices` runs after `applySourceReleases` and after the
-traditional-web apply, because a unit's `WorkingDirectory` must resolve before
+site apply, because a unit's `WorkingDirectory` must resolve before
 the unit starts. Per app:
 
 1. Vendor the tenant Node runtimes on first use —
@@ -849,7 +849,7 @@ writes nothing, reloads nothing, and only restarts.
 **The staged directory is the per-environment index.** `environment.lifecycle`
 and `environment.stop` find this environment's units by listing
 `<configDir>/node-apps/` for the `tp-<environmentId>-` prefix, exactly as the
-traditional-web remove path does — no second bookkeeping file that could drift
+site remove path does — no second bookkeeping file that could drift
 from what is actually installed.
 
 **Hardening.** Each unit runs as the principal (`User=<username>`,
@@ -896,7 +896,7 @@ standalone server — there is no process to supervise, and a systemd unit for i
 would be a unit that can never answer its health probe. So `out/` is published
 as the release payload and the build reports `staticExport`;
 `deploy-environment.ts`'s `resolveHostNativeLanes` then moves that service onto
-the **traditional-web static lane** (nginx, document root `current`, same
+the **site static lane** (nginx, document root `current`, same
 loopback port) and generates **no** unit for it. The hostname routing, the port,
 and the release tree are unchanged — only the thing serving them differs. The
 payload itself is never rewritten and the operator is not asked to re-declare
@@ -941,14 +941,14 @@ a service in the runtime compose, so a hosting that names one has no compose
 service to attach a Traefik label to — passing it to the overlay builder aborts
 the deploy with `Compose service not found` before anything starts.
 `hostNativeComposeServiceNames()` is the single definition of that set
-(`traditionalWebSites[]` ∪ `nativeAppServices[]`), and `containerHostings` is its
+(`sites[]` ∪ `nativeAppServices[]`), and `containerHostings` is its
 complement; shared/per-service Traefik ingress, `buildHostingLabelsFragment`,
 and deployed-container collection all take the complement.
 
 **Hosting Caddy is the deliberate exception** — it treats the two host-native
-lanes identically, because a traditional-web vhost and a native app are both a
+lanes identically, because a site vhost and a native app are both a
 process on `127.0.0.1:<port>`, so `buildCaddyHostnameRoutes` builds one loopback
-map from `traditionalWebSites[]` **and** `nativeAppServices[]` straight off the
+map from `sites[]` **and** `nativeAppServices[]` straight off the
 payload. Both lanes also allocate
 out of **one** shared port ledger on the instance side, or a site and an app
 could be handed the same port and whichever bound second would die with no
@@ -963,37 +963,38 @@ The per-principal **slice is deliberately left behind**: other environments of
 the same account still reference it, and an unreferenced slice costs nothing.
 
 Transcript phases are unchanged — `fetch` / `build` / `release-promote` already
-bracket this the way they bracket a traditional-web release.
+bracket this the way they bracket a site release.
 
-## Traditional web (nginx + apache + OpenLiteSpeed)
+## Sites (nginx, Apache, OpenLiteSpeed)
 
-When `environment.deploy` carries `traditionalWebSites[]` (compose services with
-`x-turbopanel.serviceKind: traditional-web`), those services are **not** in
+When `environment.deploy` carries `sites[]` (compose services with
+`x-turbopanel.serviceKind: site`), those services are **not** in
 Docker Compose. The daemon:
 
-1. Runs `playbooks/traditional-web-apply.yml` (vendor `nginx` role +
+1. Runs `playbooks/site-nginx-apply.yml` (vendor `nginx` role +
    `web-service-user` for `tpnginx`) when any site uses `engine: nginx`. When
    an nginx site carries hosting `web.php` hints the same playbook also vendors
    **php-fpm** (`turbopanel_php_fpm_install=true`) — the Apache playbook never
-   runs on an nginx-only host, so vendoring cannot live there. The vhost gets a
+   runs on an nginx-only host, so the install cannot live there. The vhost gets a
    `location ~ \.php$` with `fastcgi_pass unix:<socket>`, guarded by
    `try_files $uri =404` so a request for a missing `.php` is never handed to
    FPM, and `include <configDir>/nginx/fastcgi_params` (installed by the nginx
    role) with `SCRIPT_FILENAME` set after it.
-2. Runs `playbooks/traditional-web-apache-apply.yml` (vendor `apache` role +
+2. Runs `playbooks/site-apache-apply.yml` (vendor `apache` role +
    `tpapache`) when any site uses `engine: apache`, likewise vendoring
-   **php-fpm** on `turbopanel_php_fpm_install=true`. Apache vhosts
+   **php-fpm** on `turbopanel_php_fpm_install=true` (installed from sury, not
+   vendored — see the end of this section). Apache vhosts
    `SetHandler "proxy:unix:…|fcgi://localhost/"` (mod_proxy_fcgi — **never**
    mod_php).
 
    Both engines share the pool layout: per-site FPM pools under
    `<configDir>/php/pools/tp-<environmentId>-<service>.conf` honoring
-   `memoryLimit` / `maxExecutionTime` via `php_admin_value[…]`. A pool is keyed
+   validated `php.settings` via `php_admin_value[…]`. A pool is keyed
    by environment + compose service, so it belongs to exactly one site and
    therefore one engine — which is why `listen.owner`/`listen.group` simply
    follow `site.engine` (`tpapache` or `tpnginx`) with no shared-socket
    ownership to negotiate. Metadata still lands in `.turbopanel/php.json`.
-3. Runs `playbooks/traditional-web-openlitespeed-apply.yml` (vendor
+3. Runs `playbooks/site-openlitespeed-apply.yml` (vendor
    `openlitespeed` + `tpols`) when any site uses `engine: openlitespeed`, plus
    vendored **lsphp** on `turbopanel_lsphp_install=true` when an OLS site wants
    PHP. OpenLiteSpeed does not use php-fpm: `openlitespeedVhostConfig` gives the
@@ -1005,19 +1006,45 @@ Docker Compose. The daemon:
    `php_admin_value <key> <value>`, and the site fragment flips
    `enableScript 1`.
 
-   **One PHP series per host, across all three engines.** `resolvePhpFpmSeries`
-   validates every PHP site regardless of engine: conflicting versions fail the
-   deploy, and only the pinned series (`PINNED_PHP_FPM_SERIES` /
-   `PINNED_LSPHP_SERIES` / `php_fpm_series` / `openlitespeed_lsphp_series`,
-   currently **8.4**) is accepted. `php-fpm` and `lsphp` are different binaries
-   from different sources; the single version string is a product rule, and the
-   one resolved value selects both pins.
+   **Several PHP series can run side by side.** `resolveSitePhpSeries` picks per
+   site (`web.php.version`, else `DEFAULT_PHP_SERIES`), and
+   `phpSeriesForDeploy` collects the distinct set a deploy needs. A php-fpm
+   master is one binary, so each series is a separate systemd instance —
+   `turbopanel-php-fpm@<series>` — owning its own config, pool glob, pidfile,
+   and socket directory:
+
+   ```
+   /etc/turbopanel/php/<series>/{php-fpm.conf,pools/,conf.d/}
+   /var/log/turbopanel/php/<series>/
+   /run/turbopanel/php/<series>/{php-fpm.pid,<poolId>.sock}
+   ```
+
+   A site on 8.3 therefore never touches the 8.4 master serving everything
+   else: `SiteStagedConfigs.phpFpm` is keyed by series and only the masters that
+   actually changed get rolled out. Moving a site between series changes its
+   socket path, which is correct and free — the engine's unchanged-content check
+   notices and reloads only that engine.
+
+   **The install path is additive.** `installSiteEngines` passes
+   `php_fpm_versions` (and `openlitespeed_lsphp_versions`) the way native apps
+   pass `node_app_versions`, and the roles install what they are handed and
+   never remove a series they were not asked about — the payload describes one
+   environment, but the host serves many. Retiring a series belongs to the
+   *removal* path: `removeSites` sweeps every installed series' pools and
+   `disableIdlePhpSeries` disables a master whose pool directory holds nothing
+   but the bootstrap `default.conf`. Packages stay installed; uninstalling is a
+   fleet decision.
+
+   `php-fpm` and `lsphp` remain different binaries from different sources, but a
+   series string means the same thing to both, so one value still selects both.
+   OLS has no per-series reload granularity — per-vhost series selection works,
+   but the server restarts as a whole.
 4. Materializes document roots under
    `<stateDir>/sites/<environmentId>/<composeServiceName>/<root>/` (default
    `public`; writes a placeholder `index.html` when empty) — **unless the
    service is release-backed**, see below. Merged hosting
    `webEnv` / `php` hints land in `<site>/.turbopanel/hosting.env` and
-   `php.json`. When `traditionalWebSites[].principal` is set (from a project
+   `php.json`. When `sites[].principal` is set (from a project
    principal ↔ service steward), the site tree is `chown`ed to
    `principal:engineGroup` (`site_user:tpnginx` / `tpapache` / `tpols`) with
    `u=rwX,g=rX` + setgid dirs so the engine can read while the principal owns
@@ -1029,8 +1056,8 @@ Docker Compose. The daemon:
    `extprocessor`, **and** as the vhost's own `user`/`group` (`setUIDMode 0`) in
    the aggregated `httpd_config.conf`, so suEXEC covers everything the vhost
    runs rather than the external processor alone. Multiple principals on one
-   traditional-web service are rejected at deploy-prepare
-   (`traditional_web_principal_ambiguous`).
+   site service are rejected at deploy-prepare
+   (`site_principal_ambiguous`).
 5. Installs loopback-only vhosts under FHS config — nginx
    `<configDir>/nginx/sites/tp-<environmentId>-<service>.conf`, Apache
    `<configDir>/apache/sites/…`, OpenLiteSpeed fragments +
@@ -1048,7 +1075,7 @@ Docker Compose. The daemon:
 
    That whole sequence — render, stage-if-changed, swap, config-test, reload,
    validate — lives behind one interface in
-   **`traditional-web/engine-driver.ts`**, which is the single place a new
+   **`site/engine-driver.ts`**, which is the single place a new
    engine plugs in. Per-engine differences are data on the driver, not branches
    at the call site: `stageSiteConfig` (privileged `sudo -n install` for
    nginx/Apache; a daemon-owned write for OpenLiteSpeed fragments, which have to
@@ -1059,7 +1086,7 @@ Docker Compose. The daemon:
    it owns.
 
    **Safe rollout.** A rendered config never lands on its live path
-   unvalidated. `rolloutTraditionalWebConfigs` stages each candidate at
+   unvalidated. `rolloutSiteConfigs` stages each candidate at
    `<path>.tpnew` (same directory, so the swap is an atomic same-filesystem
    rename; not matching the `*.conf` glob the engines include, so the engine
    cannot see it yet) and snapshots the bytes currently live to `<path>.tpprev`.
@@ -1076,22 +1103,29 @@ Docker Compose. The daemon:
    fragment, so the earliest instant an engine-native test can see a candidate
    is right after the swap. The `<path>.tpprev` snapshot is what makes that
    swap safe; regression coverage for both failure paths lives in
-   `traditional-web-apply.test.ts`.
+   `site-apply.test.ts`.
 6. Rewrites hosting Caddy so hostnames for those services
    `reverse_proxy 127.0.0.1:<listenPort>` instead of Traefik.
 7. Skips Docker/Traefik entirely when the payload has **no** container services
    (`compose.yaml` is `services: {}`) — still ensures hosting Caddy via
    `ensureHostingCaddyRuntime`.
 
-All three engines — plus php-fpm for nginx/Apache PHP and `lsphp` for
-OpenLiteSpeed PHP — are vendored under
+All three engines — plus `lsphp` for OpenLiteSpeed PHP — are vendored under
 `/opt/turbopanel/vendor/<tool>/<version>/` with a `current` symlink (`lsphp`
 adds a series level: `vendor/lsphp/<series>/<version>/`) — **never** distro apt
-packages. See `../../orchestration/AGENTS.md` (Tenant/daemon-host
-web servers).
+packages.
+
+**php-fpm is the deliberate exception.** It is installed from Ondřej Surý's
+Debian repo (`packages.sury.org/php`) rather than vendored, because tracking CVE
+fixes across two dozen extension libraries by hand is not a burden worth taking
+on for an interpreter. TurboPanel still owns its runtime: sury's own
+`php8.4-fpm.service` is masked and `turbopanel-php-fpm.service` runs the
+packaged binary against `/etc/turbopanel/php/php-fpm.conf` and the same
+`pools/` directory as before, so nothing in this file's paths changed. See
+`../../orchestration/AGENTS.md` (Tenant/daemon-host web servers).
 
 **Release-backed sites (`sourceMaterial[]`).** When the deploy carries a Git
-source for a traditional-web compose service, that site's document root resolves
+source for a site compose service, that site's document root resolves
 to `<principalHome>/sites/<serviceId>/current/<root>` instead of the daemon-owned
 state dir. `current` is a stable *name*, so the generated vhost content is
 byte-identical across releases — only the (already atomic) promote changes what
@@ -1133,7 +1167,7 @@ root-owned `0550` by design:
   `opcache.revalidate_path = 0` reuses the cached resolution of the unresolved
   include path, so it never re-stats at all. Since an ordinary promote
   deliberately does **not** reload php-fpm, the mitigation is per-pool config:
-  `RELEASE_SYMLINK_SWAP_PHP_DIRECTIVES` in `traditional-web.ts` emits
+  `RELEASE_SYMLINK_SWAP_PHP_DIRECTIVES` in `site.ts` emits
   `php_admin_value[realpath_cache_ttl] = 0`,
   `php_admin_value[opcache.revalidate_path] = 1`,
   `php_admin_value[opcache.validate_timestamps] = 1`, and
@@ -1146,14 +1180,14 @@ root-owned `0550` by design:
 
 Sites with no `sourceMaterial[]` entry are untouched by all of the above.
 
-**Mixed Docker + traditional-web:** when an environment deploy includes both
-container services and `traditionalWebSites[]`, the daemon (1) binds each
-traditional-web vhost on loopback (for hosting Caddy) and on the docker bridge
+**Mixed Docker + site:** when an environment deploy includes both
+container services and `sites[]`, the daemon (1) binds each
+site vhost on loopback (for hosting Caddy) and on the docker bridge
 address (`docker0`, override `TURBOPANEL_DOCKER_HOST_GATEWAY`), (2) applies
-traditional-web **before** `docker compose up`, and (3) patches compose with
+site **before** `docker compose up`, and (3) patches compose with
 `extra_hosts: host.docker.internal:host-gateway` plus
-`TURBOPANEL_TRADITIONAL_WEB_<SERVICE>_URL` and
-`TURBOPANEL_TRADITIONAL_WEB_ENDPOINTS` JSON env on every container service.
+`TURBOPANEL_SITE_<SERVICE>_URL` and
+`TURBOPANEL_SITE_ENDPOINTS` JSON env on every container service.
 
 **External Docker networks:** compose `networks.*.external: true` names must be
 registered in the org network table (`kind: docker`, `options.dockerNetworkName`)
@@ -1171,7 +1205,7 @@ path if `server.fabric.reconcile` lands stale.
 first sweeps them all and the second finds none), and OpenLiteSpeed site
 fragments/vhost dirs (best-effort reload/regenerate) in addition to compose
 down + hosting Caddy site removal. It also reclaims `siteReleases[]` — the
-per-service release trees — but that step is **generic**, not a traditional-web
+per-service release trees — but that step is **generic**, not a site
 concern: it is the same tree the Git release engine publishes into and native
 apps run out of. See the Git-backed releases section.
 
@@ -1179,7 +1213,7 @@ apps run out of. See the Git-backed releases section.
 under `<configDir>/openlitespeed/sites/` on each apply/remove (no
 `sites-enabled` convention). PHP context lives inside the per-site
 `vhosts/<name>/vhconf.conf` and fragment that removal already deletes, so
-`removeOpenLiteSpeedTraditionalWebSites` needs no PHP-specific step. `web.env`
+`removeOpenLiteSpeedSites` needs no PHP-specific step. `web.env`
 hints remain unapplied for OLS (Apache-only `SetEnv`) — PHP parity did not
 change that.
 

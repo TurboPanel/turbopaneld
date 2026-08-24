@@ -431,11 +431,25 @@ git SHA.
   / `docker` (presence *and* invocability, direct or `sudo -n`) before mutating
   anything and fails with an actionable message rather than `wg genkey failed`.
   **`environment.deploy`** may carry
-  `traditionalWebSites[]` for host-native nginx/Apache/OpenLiteSpeed sites
-  (compose `serviceKind: traditional-web`); engines are vendored under
-  `/opt/turbopanel/vendor/{nginx,apache,openlitespeed}` and Apache PHP via
-  vendored php-fpm under `/opt/turbopanel/vendor/php/` — see
+  `sites[]` for host-native nginx/Apache/OpenLiteSpeed sites
+  (compose `serviceKind: site`); engines are vendored under
+  `/opt/turbopanel/vendor/{nginx,apache,openlitespeed}`. nginx/Apache PHP is the
+  one exception to vendoring: php-fpm comes from the sury Debian repo, run under
+  `turbopanel-php-fpm.service` against TurboPanel's own config — see
   `src/deploy/AGENTS.md` and `orchestration/AGENTS.md`.
+  **Runtime inventory** rides the presence snapshot (`src/host/runtimes.ts` →
+  `idle-presence.ts`), not a command: `COMMAND_TYPES` is a downward rail with no
+  request/response shape, while presence is already change-detected and sent on
+  hello and on change. It reports installed PHP series (from
+  `/usr/sbin/php-fpm<series>`, the binary a master actually needs), their
+  extensions (from `mods-available`, a readdir rather than a fork per series),
+  and vendored tenant Node / lsphp series — each area omitted entirely when
+  empty, the same discipline `docker` follows. A vendored series is only
+  reported once its `current` symlink resolves, so a half-vendored tree is never
+  advertised as runnable. The control plane stores it in `server.metadata.runtimes`
+  and gates on it at prepare: an unsupported series is a hard error before
+  queueing, a supported-but-absent one is a warning because the deploy installs
+  it, and **no report at all means unknown, never absent**.
   The deploy payload may also carry **`fabricNetworks[]`** (`{ name, subnet,
   gateway?, mtu? }`) which the daemon ensures as routed bridges **before**
   `compose up`; `environment.stop` carries `fabricNetworks: string[]` (names)

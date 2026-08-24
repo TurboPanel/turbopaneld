@@ -202,7 +202,7 @@ test("shapeEnvironmentDeployResult matches container-free success contract", () 
     projectName: "demo",
     environmentId: "env-1",
     labeledServices: [],
-    traditionalWebSites: [],
+    sites: [],
     containers: [],
   });
 
@@ -234,19 +234,19 @@ test("resolveDeployComposeFiles returns payload composeFiles", () => {
   );
 });
 
-test("buildDeploySummary and buildDeployServiceNames include traditional-web sites", () => {
-  const traditionalWebSites = [{
+test("buildDeploySummary and buildDeployServiceNames include sites", () => {
+  const sites = [{
     composeServiceName: "static",
     engine: "nginx" as const,
     root: "/var/www/html",
     listenPort: 8080,
   }];
   assertEquals(
-    buildDeploySummary("env-2", ["web"], traditionalWebSites),
-    "Deployed 1 container service(s) + 1 traditional-web site(s) for environment env-2",
+    buildDeploySummary("env-2", ["web"], sites),
+    "Deployed 1 container service(s) + 1 site(s) for environment env-2",
   );
   assertEquals(
-    buildDeployServiceNames(["web"], traditionalWebSites),
+    buildDeployServiceNames(["web"], sites),
     ["static", "web"],
   );
 });
@@ -256,7 +256,7 @@ test("shapeEnvironmentDeployResult omits containers when collection failed", () 
     projectName: "demo",
     environmentId: "env-3",
     labeledServices: ["web"],
-    traditionalWebSites: [],
+    sites: [],
     containers: null,
   });
   assertEquals(
@@ -1725,7 +1725,7 @@ test({
 // which is the selection rule this handler delegates to.
 
 // ---------------------------------------------------------------------------
-// Mixed lanes: an environment can carry Docker services, traditional-web sites,
+// Mixed lanes: an environment can carry Docker services, sites,
 // and native apps at once. Only the Docker ones may reach a container-only
 // path — a hosting for a host-native service has no compose service to hang a
 // Traefik label on, and passing it to the overlay builder used to abort the
@@ -1781,7 +1781,7 @@ function mixedLanePayload(): EnvironmentDeployPayload {
 test("hostNativeComposeServiceNames covers both host-native lanes", () => {
   const names = hostNativeComposeServiceNames({
     ...mixedLanePayload(),
-    traditionalWebSites: [{
+    sites: [{
       composeServiceName: "legacy",
       engine: "nginx",
       root: "public",
@@ -1923,16 +1923,17 @@ function appliedRelease(overrides: Partial<AppliedRelease>): AppliedRelease {
   };
 }
 
-test("a statically exported build moves to the traditional-web static lane", () => {
+test("a statically exported build moves to the site static lane", () => {
   const lanes = resolveHostNativeLanes(exportedPayload(), [
     appliedRelease({ staticExport: true }),
   ]);
 
   // Nothing is left on the native lane, so no unit can be generated for it.
   assertEquals(lanes.nativeAppServices, []);
-  assertEquals(lanes.traditionalWebSites, [{
+  assertEquals(lanes.sites, [{
     composeServiceName: "web",
-    engine: "nginx",
+    // Static files and no PHP: Caddy needs no FPM socket and no vhost tuning.
+    engine: "caddy",
     // The export tree *is* the release root (`out/` was published as it).
     root: ".",
     listenPort: EXPORTED_APP.listenPort,
@@ -1945,7 +1946,7 @@ test("a server build stays on the native lane", () => {
     appliedRelease({ standaloneOutput: true }),
   ]);
   assertEquals(lanes.nativeAppServices, [EXPORTED_APP]);
-  assertEquals(lanes.traditionalWebSites, []);
+  assertEquals(lanes.sites, []);
 });
 
 test({

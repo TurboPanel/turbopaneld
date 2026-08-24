@@ -69,10 +69,7 @@ import {
   runDeployServiceHooks,
   runPostDeployHooks,
 } from "../../deploy/run-deploy-hooks.ts";
-import {
-  applyTraditionalWebSites,
-  type TraditionalWebSiteRelease,
-} from "../../deploy/traditional-web.ts";
+import { applySites, type SiteRelease } from "../../deploy/site.ts";
 import {
   type AppliedRelease,
   applySourceReleases,
@@ -100,9 +97,9 @@ import {
   writeSystemComponentDescriptor,
 } from "../../deploy/system-component.ts";
 import {
-  buildTraditionalWebReachabilityFragment,
+  buildSiteReachabilityFragment,
   resolveDockerHostGatewayAddress,
-} from "../../deploy/traditional-web-docker.ts";
+} from "../../deploy/site-docker.ts";
 import { logInfo } from "../../logger.ts";
 import {
   materializeSecretFiles,
@@ -119,8 +116,8 @@ import {
   type EnvironmentDeployPrincipalMaterial,
   type EnvironmentDeployResult,
   type EnvironmentDeployResultRelease,
+  type EnvironmentDeploySite,
   type EnvironmentDeploySource,
-  type EnvironmentDeployTraditionalWebSite,
   parseEnvironmentDeployPayload,
 } from "./contracts.ts";
 import { type LayoutPaths, resolveLayout } from "../../paths/layout.ts";
@@ -339,7 +336,7 @@ export async function persistHostingIngressIdentity(
 }
 
 /** Sets up Traefik/Docker ingress for container deploys, or the hosting-Caddy-only
- * runtime for traditional-web-only environments. Shared Traefik is HTTP-only and
+ * runtime for site-only environments. Shared Traefik is HTTP-only and
  * starts only when an HTTP hosting actually routes hostnames; per-service
  * Traefik projects handle tcp/udp via `ingressServices[]`.
  *
@@ -385,7 +382,7 @@ async function ensureDeployIngress(
   );
 
   if (!hasContainers) {
-    // Traditional-web-only: hosting Caddy without Traefik/Docker.
+    // Sites only: hosting Caddy without Traefik/Docker.
     await cleanupStaleTcpUdpServiceIngress(
       layout,
       environmentId,
@@ -481,6 +478,9 @@ async function ensureDeployPrincipals(
       ...(principal.gid === undefined ? {} : { gid: principal.gid }),
       ...(principal.home === undefined ? {} : { home: principal.home }),
       ...(principal.shell === undefined ? {} : { shell: principal.shell }),
+      ...(principal.runtimes === undefined
+        ? {}
+        : { runtimes: principal.runtimes }),
     })),
   );
 }
@@ -680,8 +680,8 @@ function deployResultReleases(
  */
 function deployReleaseBindings(
   payload: EnvironmentDeployPayload,
-): Map<string, TraditionalWebSiteRelease> {
-  const bindings = new Map<string, TraditionalWebSiteRelease>();
+): Map<string, SiteRelease> {
+  const bindings = new Map<string, SiteRelease>();
   for (const entry of payload.sourceMaterial ?? []) {
     const principal = entry.principal;
     if (!principal) continue;
@@ -696,7 +696,7 @@ function deployReleaseBindings(
 /**
  * Compose service names this deploy runs **outside** Docker.
  *
- * Both host-native lanes belong here: a traditional-web vhost and a native
+ * Both host-native lanes belong here: a site vhost and a native
  * `serviceKind: node` app are each a process on `127.0.0.1:<port>`, and neither
  * has a compose service in the runtime file (`compose-files.ts` strips them
  * before `docker compose config` ever sees them). Every container-only path —
@@ -710,9 +710,7 @@ export function hostNativeComposeServiceNames(
   payload: EnvironmentDeployPayload,
 ): Set<string> {
   return new Set([
-    ...(payload.traditionalWebSites ?? []).map((site) =>
-      site.composeServiceName
-    ),
+    ...(payload.sites ?? []).map((site) => site.composeServiceName),
     ...(payload.nativeAppServices ?? []).map((app) => app.composeServiceName),
   ]);
 }
@@ -735,7 +733,7 @@ function releasePrincipalForService(
  * exported Next site (`output: 'export'`) has **no server process**: the release
  * is a directory of files. Supervising it with a systemd unit would install a
  * unit that can never answer its health probe, so it moves to the
- * traditional-web static lane instead — served straight out of the release
+ * site static lane instead — served straight out of the release
  * `current` symlink on the same loopback port hosting Caddy was already going
  * to proxy to. That keeps the hostname routing, the port, and the release tree
  * identical; only the thing that serves them changes.
@@ -749,10 +747,10 @@ export function resolveHostNativeLanes(
   payload: EnvironmentDeployPayload,
   appliedReleases: readonly AppliedRelease[],
 ): {
-  traditionalWebSites: EnvironmentDeployTraditionalWebSite[];
+  sites: EnvironmentDeploySite[];
   nativeAppServices: EnvironmentDeployNativeAppService[];
 } {
-  const declaredSites = payload.traditionalWebSites ?? [];
+  const declaredSites = payload.sites ?? [];
   const declaredApps = payload.nativeAppServices ?? [];
   const staticExports = new Set(
     appliedReleases
@@ -761,12 +759,12 @@ export function resolveHostNativeLanes(
   );
   if (staticExports.size === 0) {
     return {
-      traditionalWebSites: [...declaredSites],
+      sites: [...declaredSites],
       nativeAppServices: [...declaredApps],
     };
   }
 
-  const traditionalWebSites = [...declaredSites];
+  const sites = [...declaredSites];
   const nativeAppServices: EnvironmentDeployNativeAppService[] = [];
   for (const app of declaredApps) {
     if (!staticExports.has(app.composeServiceName)) {
@@ -777,10 +775,11 @@ export function resolveHostNativeLanes(
       payload,
       app.composeServiceName,
     );
-    traditionalWebSites.push({
+    sites.push({
       composeServiceName: app.composeServiceName,
-      // Static files, so the lightest of the three engines and no PHP pool.
-      engine: "nginx",
+      // Static files and no PHP pool, so Caddy: `root` + `file_server` with
+      // nothing to configure, and no FPM socket to keep in step.
+      engine: "caddy",
       // The export tree *is* the release root — `prepareNativeAppBuildOutput`
       // published `out/` as the release payload, so the document root is
       // `current` itself.
@@ -789,7 +788,7 @@ export function resolveHostNativeLanes(
       ...(principal === undefined ? {} : { principal }),
     });
   }
-  return { traditionalWebSites, nativeAppServices };
+  return { sites, nativeAppServices };
 }
 
 /** `serviceId`s this payload still carries a `sourceMaterial[]` entry for. */
@@ -904,15 +903,15 @@ async function persistComposeEnvFile(
   await removeComposeEnvFile(dir);
 }
 
-async function applyDeployTraditionalWebSites(
+async function applyDeploySites(
   layout: LayoutPaths,
   environmentId: string,
-  traditionalWebSites: EnvironmentDeployTraditionalWebSite[],
+  sites: EnvironmentDeploySite[],
   dockerBindAddress: string | null,
-  releaseBindings: ReadonlyMap<string, TraditionalWebSiteRelease>,
+  releaseBindings: ReadonlyMap<string, SiteRelease>,
 ): Promise<void> {
-  if (traditionalWebSites.length === 0) return;
-  await applyTraditionalWebSites(layout, environmentId, traditionalWebSites, {
+  if (sites.length === 0) return;
+  await applySites(layout, environmentId, sites, {
     dockerBindAddress,
     releaseBindings,
   });
@@ -921,7 +920,7 @@ async function applyDeployTraditionalWebSites(
 /**
  * Supervise this deploy's native (`serviceKind: node`) apps.
  *
- * Runs after `applySourceReleases` and the traditional-web apply, for the same
+ * Runs after `applySourceReleases` and the site apply, for the same
  * reason the latter does: `<principalHome>/sites/<serviceId>/current` must
  * already resolve before a unit's `WorkingDirectory` points at it.
  */
@@ -948,7 +947,7 @@ async function applyDeployNativeApps(
 function buildDaemonOverlayFragment(
   parsedPayload: EnvironmentDeployPayload,
   containerHostings: EnvironmentDeployHosting[],
-  traditionalWebSites: EnvironmentDeployTraditionalWebSite[],
+  sites: EnvironmentDeploySite[],
   mountPaths: Map<string, string>,
   resolved: Awaited<ReturnType<typeof resolveComposeModel>>,
 ): ReturnType<typeof mergeComposeOverlayFragments> {
@@ -960,8 +959,8 @@ function buildDaemonOverlayFragment(
     resolved,
   );
 
-  const traditionalFragment = traditionalWebSites.length > 0
-    ? buildTraditionalWebReachabilityFragment(traditionalWebSites, resolved)
+  const siteFragment = sites.length > 0
+    ? buildSiteReachabilityFragment(sites, resolved)
     : {};
 
   const labelsFragment = buildHostingLabelsFragment({
@@ -972,7 +971,7 @@ function buildDaemonOverlayFragment(
 
   return mergeComposeOverlayFragments([
     storageFragment,
-    traditionalFragment,
+    siteFragment,
     labelsFragment,
   ]);
 }
@@ -984,7 +983,7 @@ type DeployContainerServicesInput = {
   appliedReleases: readonly AppliedRelease[];
   files: EnvironmentDeployComposeFile[];
   containerHostings: EnvironmentDeployHosting[];
-  traditionalWebSites: EnvironmentDeployTraditionalWebSite[];
+  sites: EnvironmentDeploySite[];
   mountPaths: Map<string, string>;
   deploymentDir: string;
   run: RunDockerFn;
@@ -1048,7 +1047,7 @@ async function deployContainerServices(
     appliedReleases,
     files,
     containerHostings,
-    traditionalWebSites,
+    sites,
     mountPaths,
     deploymentDir,
     run,
@@ -1088,7 +1087,7 @@ async function deployContainerServices(
     const fragment = buildDaemonOverlayFragment(
       parsedPayload,
       containerHostings,
-      traditionalWebSites,
+      sites,
       mountPaths,
       resolved,
     );
@@ -1216,7 +1215,7 @@ async function deployContainerServices(
   }
 }
 
-/** Persists compiled `compose.yaml` + `deployment.json` for traditional-web-only
+/** Persists compiled `compose.yaml` + `deployment.json` for site-only
  * deploys (no Docker compose up). */
 async function writeDeployComposeMarker(
   parsedPayload: EnvironmentDeployPayload,
@@ -1261,14 +1260,14 @@ async function materializeDeployTls(
 export function buildDeploySummary(
   environmentId: string,
   labeledServices: string[],
-  traditionalWebSites: EnvironmentDeployTraditionalWebSite[],
+  sites: EnvironmentDeploySite[],
 ): string {
-  const traditionalCount = traditionalWebSites.length;
+  const siteCount = sites.length;
   const summaryParts = [
     `Deployed ${labeledServices.length} container service(s)`,
   ];
-  if (traditionalCount > 0) {
-    summaryParts.push(`${traditionalCount} traditional-web site(s)`);
+  if (siteCount > 0) {
+    summaryParts.push(`${siteCount} site(s)`);
   }
   return `${summaryParts.join(" + ")} for environment ${environmentId}`;
 }
@@ -1276,11 +1275,11 @@ export function buildDeploySummary(
 /** Pure result-shaping helper — exported for hermetic contract tests. */
 export function buildDeployServiceNames(
   labeledServices: string[],
-  traditionalWebSites: EnvironmentDeployTraditionalWebSite[],
+  sites: EnvironmentDeploySite[],
 ): string[] {
   return [
     ...labeledServices,
-    ...traditionalWebSites.map((site) => site.composeServiceName),
+    ...sites.map((site) => site.composeServiceName),
   ].sort((a, b) => a.localeCompare(b));
 }
 
@@ -1292,7 +1291,7 @@ export function shapeEnvironmentDeployResult(input: {
   projectName: string;
   environmentId: string;
   labeledServices: string[];
-  traditionalWebSites: EnvironmentDeployTraditionalWebSite[];
+  sites: EnvironmentDeploySite[];
   containers: EnvironmentDeployContainer[] | null;
   /** Git-backed releases this deploy applied, in payload order. */
   releases?: readonly EnvironmentDeployResultRelease[];
@@ -1300,11 +1299,11 @@ export function shapeEnvironmentDeployResult(input: {
   const summary = buildDeploySummary(
     input.environmentId,
     input.labeledServices,
-    input.traditionalWebSites,
+    input.sites,
   );
   const serviceNames = buildDeployServiceNames(
     input.labeledServices,
-    input.traditionalWebSites,
+    input.sites,
   );
   return {
     projectName: input.projectName,
@@ -1352,11 +1351,11 @@ function resolveEnvironmentDeployRuntime(deps?: EnvironmentDeployDeps): {
   };
 }
 
-async function resolveTraditionalWebDockerBindAddress(
+async function resolveSiteDockerBindAddress(
   hasContainers: boolean,
-  traditionalWebSites: readonly EnvironmentDeployTraditionalWebSite[],
+  sites: readonly EnvironmentDeploySite[],
 ): Promise<string | null> {
-  if (!hasContainers || traditionalWebSites.length === 0) return null;
+  if (!hasContainers || sites.length === 0) return null;
   return await resolveDockerHostGatewayAddress();
 }
 
@@ -1425,7 +1424,7 @@ export async function handleEnvironmentDeploy(
     files.map((file) => file.content),
   );
   // Container-only paths get container hostings only. Both host-native lanes
-  // are stripped from the runtime compose, so a hosting for a traditional-web
+  // are stripped from the runtime compose, so a hosting for a site
   // site *or* a native app has no compose service to attach a Traefik label to.
   const hostNativeNames = hostNativeComposeServiceNames(parsedPayload);
   const containerHostings = parsedPayload.hostings.filter(
@@ -1460,9 +1459,9 @@ export async function handleEnvironmentDeploy(
     deployPrincipalSpecs(parsedPayload, principalMaterial),
   );
 
-  // Git-backed releases run before the compose / traditional-web apply steps,
+  // Git-backed releases run before the compose / site apply steps,
   // so `<principalHome>/sites/<serviceId>/current` already resolves by the time
-  // the traditional-web apply below points a document root at it.
+  // the site apply below points a document root at it.
   const appliedReleases = await applySourceReleases(layout, parsedPayload, {
     logSink: runtime.logSink,
     decryptSecrets: runtime.decryptSecrets,
@@ -1481,7 +1480,7 @@ export async function handleEnvironmentDeploy(
   // Which host-native lane each service ends up on can only be decided once the
   // releases are built: a `serviceKind: node` service that turned out to be a
   // static export is served as files, not supervised as a process.
-  const { traditionalWebSites, nativeAppServices } = resolveHostNativeLanes(
+  const { sites, nativeAppServices } = resolveHostNativeLanes(
     parsedPayload,
     appliedReleases,
   );
@@ -1493,13 +1492,13 @@ export async function handleEnvironmentDeploy(
     runtime.decryptSecrets,
   );
 
-  await applyDeployTraditionalWebSites(
+  await applyDeploySites(
     layout,
     parsedPayload.environmentId,
-    traditionalWebSites,
-    await resolveTraditionalWebDockerBindAddress(
+    sites,
+    await resolveSiteDockerBindAddress(
       hasContainers,
-      traditionalWebSites,
+      sites,
     ),
     deployReleaseBindings(parsedPayload),
   );
@@ -1524,7 +1523,7 @@ export async function handleEnvironmentDeploy(
     appliedReleases,
     files,
     containerHostings,
-    traditionalWebSites,
+    sites,
     mountPaths,
     deploymentDir,
     run: runtime.run,
@@ -1563,7 +1562,7 @@ export async function handleEnvironmentDeploy(
     projectName: parsedPayload.projectName,
     environmentId: parsedPayload.environmentId,
     labeledServices: published.labeledServices,
-    traditionalWebSites,
+    sites,
     containers,
     releases: deployResultReleases(appliedReleases),
   });

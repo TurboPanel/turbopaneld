@@ -3,7 +3,7 @@
  *
  * Nothing here touches the host: `apply-native-apps.ts` owns every write, and
  * keeps the same "render candidate → diff → install only when the bytes changed
- * → reload only what changed" discipline the traditional-web vhost path uses.
+ * → reload only what changed" discipline the site vhost path uses.
  * Keeping the rendering pure is what makes that discipline testable — a promote
  * that only moved `current` must produce byte-identical unit text, because
  * `WorkingDirectory` points at the stable `current` symlink rather than at a
@@ -18,6 +18,7 @@ import {
   siteSharedDir,
 } from "../../paths/layout.ts";
 import { principalUnixGroupName } from "../ensure-principal.ts";
+import { runtimeGroup } from "../../runtime/registry.ts";
 import type { EnvironmentDeployNativeAppService } from "../../instance/commands/contracts.ts";
 
 /**
@@ -68,17 +69,23 @@ export function nativeAppRuntimeRoot(
 }
 
 /**
- * Unix group that grants read + traverse on the vendored tenant Node tree.
+ * Unix group that grants read + traverse on one vendored tenant Node series.
  *
- * The tree is `root:tpnodeapp 0750` and lives under `/opt/turbopanel/vendor`,
- * which stays `tp:tp 0750` and is opened to this group by a traverse-only ACL
- * (`node-app-runtime` role). Tenant principals are deliberately not in `tp` —
- * that is the panel's own group — and each has only its own `<username>-grp`,
- * so this group exists purely to say "may execute the vendored tenant Node".
- * A principal joins it when its first native app is deployed; membership
- * confers nothing else.
+ * Per **series** (`tpnode24`), not one group for the whole tree: a group here
+ * means "may execute this runtime series", and the series is what the operator
+ * grants. `<vendor>/node-app/<series>/` is `root:<group> 0750`, and
+ * `/opt/turbopanel` + `vendor/` stay `tp:tp 0750` with traverse-only ACLs, so a
+ * principal can reach its own series without listing either parent or seeing
+ * another series it was not granted.
+ *
+ * Membership is reconciled by `ensurePrincipalRuntimeGroups` during principal
+ * materialization — which runs before any unit is installed, because systemd
+ * resolves supplementary groups at `execve` and a unit started too early dies
+ * `203/EXEC`.
  */
-export const NATIVE_APP_RUNTIME_GROUP = "tpnodeapp";
+export function nativeAppRuntimeGroup(nodeVersion: string): string | undefined {
+  return runtimeGroup("node", nodeVersion);
+}
 
 /** The series one app runs on: its own pin, else {@link DEFAULT_NATIVE_APP_NODE_VERSION}. */
 export function resolveNativeAppNodeVersion(
@@ -138,7 +145,7 @@ export function principalSlicePath(
  * Staged candidate paths under `<configDir>/node-apps/`.
  *
  * The staged name carries the environment id (`tp-<environmentId>-…`) for the
- * same reason traditional-web site files do: the directory listing *is* the
+ * same reason site files do: the directory listing *is* the
  * per-environment index, so `environment.lifecycle` and `environment.stop` can
  * find this environment's units without a second bookkeeping file that could
  * drift from reality.

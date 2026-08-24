@@ -1,12 +1,12 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import {
-  buildTraditionalWebEndpointMap,
-  buildTraditionalWebReachabilityFragment,
+  buildSiteEndpointMap,
+  buildSiteReachabilityFragment,
   resolveDockerHostGatewayAddress,
-  TRADITIONAL_WEB_ENDPOINTS_ENV,
-  traditionalWebEnvKeyForService,
-} from "./traditional-web-docker.ts";
-import { apacheSiteConfig, nginxSiteConfig } from "./traditional-web.ts";
+  SITE_ENDPOINTS_ENV,
+  siteEnvKeyForService,
+} from "./site-docker.ts";
+import { apacheSiteConfig, nginxSiteConfig } from "./site.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -16,27 +16,27 @@ import { apacheSiteConfig, nginxSiteConfig } from "./traditional-web.ts";
  */
 const test = Deno.test.bind(Deno);
 
-test("traditionalWebEnvKeyForService sanitizes compose service names", () => {
+test("siteEnvKeyForService sanitizes compose service names", () => {
   assertEquals(
-    traditionalWebEnvKeyForService("my-app"),
-    "TURBOPANEL_TRADITIONAL_WEB_MY_APP_URL",
+    siteEnvKeyForService("my-app"),
+    "TURBOPANEL_SITE_MY_APP_URL",
   );
   assertEquals(
-    traditionalWebEnvKeyForService("9frontend"),
-    "TURBOPANEL_TRADITIONAL_WEB__9FRONTEND_URL",
+    siteEnvKeyForService("9frontend"),
+    "TURBOPANEL_SITE__9FRONTEND_URL",
   );
 });
 
-test("buildTraditionalWebReachabilityFragment is empty without sites or services", () => {
+test("buildSiteReachabilityFragment is empty without sites or services", () => {
   assertEquals(
-    buildTraditionalWebReachabilityFragment(
+    buildSiteReachabilityFragment(
       [],
       { serviceNames: ["api"], services: { api: { image: "node:22" } } },
     ),
     {},
   );
   assertEquals(
-    buildTraditionalWebReachabilityFragment(
+    buildSiteReachabilityFragment(
       [{ composeServiceName: "static", listenPort: 18080 }],
       { serviceNames: [], services: {} },
     ),
@@ -69,8 +69,8 @@ test({
   },
 });
 
-test("buildTraditionalWebReachabilityFragment adds extra_hosts and env URLs", () => {
-  const fragment = buildTraditionalWebReachabilityFragment(
+test("buildSiteReachabilityFragment adds extra_hosts and env URLs", () => {
+  const fragment = buildSiteReachabilityFragment(
     [{ composeServiceName: "static", listenPort: 18080 }],
     {
       serviceNames: ["api"],
@@ -83,18 +83,18 @@ test("buildTraditionalWebReachabilityFragment adds extra_hosts and env URLs", ()
   };
   assertEquals(service.extra_hosts, ["host.docker.internal:host-gateway"]);
   assertStringIncludes(
-    service.environment[TRADITIONAL_WEB_ENDPOINTS_ENV] ?? "",
+    service.environment[SITE_ENDPOINTS_ENV] ?? "",
     "18080",
   );
   assertEquals(
-    service.environment[traditionalWebEnvKeyForService("static")],
+    service.environment[siteEnvKeyForService("static")],
     "http://host.docker.internal:18080",
   );
 });
 
-test("buildTraditionalWebEndpointMap keys by compose service name", () => {
+test("buildSiteEndpointMap keys by compose service name", () => {
   assertEquals(
-    buildTraditionalWebEndpointMap([
+    buildSiteEndpointMap([
       { composeServiceName: "a", listenPort: 18080 },
       { composeServiceName: "b", listenPort: 18081 },
     ]),

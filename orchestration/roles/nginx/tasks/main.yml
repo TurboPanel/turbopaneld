@@ -6,11 +6,11 @@
 #
 # Config/logs/state live under FHS (`/etc|/var/log|/var/lib|/run/turbopanel/nginx`)
 # so version upgrades do not lose site fragments written by
-# `src/deploy/traditional-web.ts`.
+# `src/deploy/site.ts`.
 #
 # PHP is the sibling `php-fpm` role (shared with Apache): nginx sites reach
 # their own per-site pool over a unix socket via `fastcgi_pass`, using the
-# `fastcgi_params` file installed below. `traditional-web-apply.yml` includes
+# `fastcgi_params` file installed below. `site-nginx-apply.yml` includes
 # that role when the daemon reports an nginx site with `web.php` hints.
 - name: Assert supported CPU architecture
   ansible.builtin.assert:

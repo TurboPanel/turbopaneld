@@ -440,7 +440,7 @@ export function commandLogSpoolDir(
 /**
  * Per-service release tree root: `<principalHomeRoot>/<username>/sites/<serviceId>`.
  *
- * Generic on purpose — the Git-backed release engine and the traditional-web
+ * Generic on purpose — the Git-backed release engine and the site
  * serving path both address the same tree, so neither hardcodes the layout.
  * Under it: `releases/<releaseId>` (immutable published builds), `current`
  * (symlink to the live release), and `shared` (writable state that survives a

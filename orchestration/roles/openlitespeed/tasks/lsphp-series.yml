@@ -1,0 +1,87 @@
+---
+# One vendored lsphp series. Layout is `vendor/lsphp/<series>/<version>/` plus a
+# `<series>/current` symlink, so a patch bump is a defaults edit and the
+# generated vhosts never change.
+- name: Assert the lsphp series is known
+  ansible.builtin.assert:
+    that:
+      - lsphp_series in openlitespeed_lsphp_series_map
+    fail_msg: >-
+      No lsphp packages defined for PHP {{ lsphp_series }}. Known:
+      {{ openlitespeed_lsphp_series_map.keys() | list | join(', ') }}.
+
+- name: Resolve lsphp package data for this series
+  ansible.builtin.set_fact:
+    _lsphp: "{{ openlitespeed_lsphp_series_map[lsphp_series] }}"
+    _lsphp_deb_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
+    _lsphp_group: "tpphp{{ lsphp_series | replace('.', '') }}"
+
+- name: Check vendored lsphp binary ({{ lsphp_series }})
+  ansible.builtin.stat:
+    path: "{{ turbopanel_vendor_dir }}/lsphp/{{ lsphp_series }}/{{ _lsphp.version }}/bin/lsphp"
+  register: _lsphp_pinned
+
+- name: Extract lsphp packages into runtimes directory ({{ lsphp_series }})
+  when: not _lsphp_pinned.stat.exists
+  ansible.builtin.shell: |
+    set -euo pipefail
+    DEST="{{ turbopanel_vendor_dir }}/lsphp/{{ lsphp_series }}/{{ _lsphp.version }}"
+    TMP="$(mktemp -d)"
+    trap 'rm -rf "$TMP"' EXIT
+
+    for PKG in {{ _lsphp.packages | join(' ') }}; do
+      URL="{{ openlitespeed_lsphp_repo_base }}/{{ _lsphp.pkg }}/${PKG}_{{ _lsphp.deb_version }}_{{ _lsphp_deb_arch }}.deb"
+      curl -fsSL -o "$TMP/${PKG}.deb" "$URL"
+      # All packages unpack into one tree; later ones only add extensions.
+      dpkg-deb -x "$TMP/${PKG}.deb" "$TMP/extract"
+    done
+
+    install -d "$DEST"
+    cp -a "$TMP/extract/usr/local/lsws/{{ _lsphp.pkg }}/." "$DEST/"
+  args:
+    creates: "{{ turbopanel_vendor_dir }}/lsphp/{{ lsphp_series }}/{{ _lsphp.version }}/bin/lsphp"
+
+# Entitlement group for this PHP series, shared with php-fpm: one grant means
+# "may execute PHP <series> here", whichever engine serves the site.
+- name: Ensure the PHP entitlement group for lsphp ({{ lsphp_series }})
+  ansible.builtin.include_role:
+    name: runtime-entitlement
+  vars:
+    runtime_entitlement_runtime: php
+    runtime_entitlement_series: ["{{ lsphp_series }}"]
+
+# `root:tp 0750` was wrong, not merely tight: OpenLiteSpeed suEXEC drops to the
+# site principal and *then* `execve`s lsphp, and tenant principals are
+# deliberately never in `tp` — so a principal-pinned OLS PHP vhost could not
+# spawn its LSAPI processor at all. The series entitlement group is the identity
+# that actually needs exec here.
+- name: Scope the lsphp tree to its PHP entitlement group ({{ lsphp_series }})
+  ansible.builtin.file:
+    path: "{{ turbopanel_vendor_dir }}/lsphp/{{ lsphp_series }}/{{ _lsphp.version }}"
+    owner: root
+    group: "{{ _lsphp_group }}"
+    mode: "0750"
+    recurse: true
+
+- name: Keep the lsphp binary executable by the entitlement group only ({{ lsphp_series }})
+  ansible.builtin.file:
+    path: "{{ turbopanel_vendor_dir }}/lsphp/{{ lsphp_series }}/{{ _lsphp.version }}/bin/lsphp"
+    owner: root
+    group: "{{ _lsphp_group }}"
+    mode: "0750"
+
+# The parent holds every series, so it belongs to no single series' group.
+- name: Grant the PHP entitlement group traversal of the lsphp tree ({{ lsphp_series }})
+  ansible.posix.acl:
+    path: "{{ turbopanel_vendor_dir }}/lsphp"
+    etype: group
+    entity: "{{ _lsphp_group }}"
+    permissions: x
+    state: present
+
+- name: Point lsphp current symlink at the pinned version ({{ lsphp_series }})
+  ansible.builtin.file:
+    src: "{{ turbopanel_vendor_dir }}/lsphp/{{ lsphp_series }}/{{ _lsphp.version }}"
+    dest: "{{ turbopanel_vendor_dir }}/lsphp/{{ lsphp_series }}/current"
+    state: link
+    force: true

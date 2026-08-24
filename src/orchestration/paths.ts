@@ -251,20 +251,25 @@ export const TIME_SYNC_APPLY_PLAYBOOK = join(
   "playbooks",
   "time-sync-apply.yml",
 );
-export const TRADITIONAL_WEB_APPLY_PLAYBOOK = join(
+export const SITE_CADDY_APPLY_PLAYBOOK = join(
   ORCHESTRATION_DIR,
   "playbooks",
-  "traditional-web-apply.yml",
+  "site-caddy-apply.yml",
 );
-export const TRADITIONAL_WEB_APACHE_APPLY_PLAYBOOK = join(
+export const SITE_NGINX_APPLY_PLAYBOOK = join(
   ORCHESTRATION_DIR,
   "playbooks",
-  "traditional-web-apache-apply.yml",
+  "site-nginx-apply.yml",
 );
-export const TRADITIONAL_WEB_OPENLITESPEED_APPLY_PLAYBOOK = join(
+export const SITE_APACHE_APPLY_PLAYBOOK = join(
   ORCHESTRATION_DIR,
   "playbooks",
-  "traditional-web-openlitespeed-apply.yml",
+  "site-apache-apply.yml",
+);
+export const SITE_OPENLITESPEED_APPLY_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  "playbooks",
+  "site-openlitespeed-apply.yml",
 );
 /**
  * Vendors the **tenant** Node release for native `serviceKind: node` apps.

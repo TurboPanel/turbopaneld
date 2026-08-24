@@ -559,7 +559,7 @@ test("buildCaddyHostnameRoutes groups hostings by hostname", () => {
         pathPrefix: "/php",
       },
     ],
-    traditionalWebSites: [
+    sites: [
       {
         composeServiceName: "static",
         engine: "nginx",

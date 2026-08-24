@@ -945,7 +945,7 @@ export function caddyHttpUpstream(host: string, port: number): string {
   if (!Number.isInteger(port) || port < 1 || port > 65_535) {
     throw new Error(`upstream port is invalid: ${port}`);
   }
-  // Loopback-only hosts for traditional-web; reject other hosts to keep
+  // Loopback-only hosts for site; reject other hosts to keep
   // Caddyfile interpolation safe.
   if (host !== "127.0.0.1" && host !== "::1") {
     throw new Error(`upstream host is not allowed: ${host}`);
@@ -1053,7 +1053,7 @@ ${httpsHandlers}
 /**
  * Where a hostname's traffic goes.
  *
- * A loopback upstream covers **both** host-native lanes: a traditional-web
+ * A loopback upstream covers **both** host-native lanes: a site
  * vhost and a native `node` app are indistinguishable from Caddy's side — each
  * is a process listening on 127.0.0.1 on a port the control plane allocated out
  * of one shared ledger. Everything else goes to Traefik, which fronts the
@@ -1122,7 +1122,7 @@ export function buildCaddyHostnameRoutes(
   payload: EnvironmentDeployPayload,
 ): Map<string, HostnameSite> {
   const loopbackByService = new Map<string, { listenPort: number }>([
-    ...(payload.traditionalWebSites ?? []).map((
+    ...(payload.sites ?? []).map((
       site,
     ) => [site.composeServiceName, site] as const),
     ...(payload.nativeAppServices ?? []).map((

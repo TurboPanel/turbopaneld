@@ -1,0 +1,31 @@
+[Unit]
+# Templated per PHP series: `%i` is the series (e.g. 8.4). A php-fpm master is
+# one binary, so co-installed series cannot share a unit — each instance owns
+# its own config, pool glob, pidfile, and socket directory.
+Description=TurboPanel php-fpm %i (site PHP for Caddy, nginx, and Apache)
+After=network.target
+# sury's own unit for this series is masked by the role; this keeps systemd from
+# ever running both masters against the same sockets if someone unmasks it.
+Conflicts=php%i-fpm.service
+
+[Service]
+Type=forking
+# Master starts as root so it can open FHS config/logs, then pool workers run
+# as User/Group from each pool (the site principal, else tpapache). Matches the
+# turbopanel-apache model.
+PIDFile={{ turbopanel_run_dir }}/php/%i/php-fpm.pid
+# Leading ':' keeps the interpreter's compiled-in scan dir
+# (/etc/php/%i/fpm/conf.d, where sury's packages register every extension) and
+# appends ours after it, so 99-turbopanel.ini overrides sury's defaults without
+# unloading a single extension. Dropping the ':' would leave the interpreter
+# with no extensions at all.
+Environment=PHP_INI_SCAN_DIR=:{{ turbopanel_config_dir }}/php/%i/conf.d
+ExecStartPre=/usr/bin/install -d -o {{ php_fpm_service_user }} -g {{ turbopanel_group }} -m 0750 {{ turbopanel_run_dir }}/php/%i
+ExecStart=/usr/sbin/php-fpm%i --fpm-config {{ turbopanel_config_dir }}/php/%i/php-fpm.conf --pid {{ turbopanel_run_dir }}/php/%i/php-fpm.pid
+ExecReload=/bin/kill -USR2 $MAINPID
+ExecStop=/bin/kill -QUIT $MAINPID
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

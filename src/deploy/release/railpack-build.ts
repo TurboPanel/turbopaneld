@@ -2,7 +2,7 @@
  * The Railpack build lane: turn a checkout into an OCI image instead of a
  * promoted directory tree.
  *
- * This is a **fourth deploy pattern** sitting beside compose, traditional-web,
+ * This is a **fourth deploy pattern** sitting beside compose, site,
  * and native app — but deliberately not a fourth orchestration path. What it
  * produces is an ordinary local image tag; `deploy-environment.ts` writes that
  * tag into the compiled runtime compose as `services.<name>.image` and every

@@ -1,9 +1,9 @@
-; Bootstrap pool so php-fpm can start before any traditional-web site pools exist.
+; Bootstrap pool so php-fpm can start before any site pools exist.
 ; Site traffic uses per-site sockets under the same run directory — not this one.
 [default]
 user = {{ php_fpm_service_user }}
 group = {{ php_fpm_service_group }}
-listen = {{ turbopanel_run_dir }}/php/default.sock
+listen = {{ turbopanel_run_dir }}/php/{{ php_fpm_series_item }}/default.sock
 listen.owner = {{ php_fpm_service_user }}
 listen.group = {{ php_fpm_service_group }}
 listen.mode = 0660

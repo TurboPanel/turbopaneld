@@ -1,0 +1,171 @@
+---
+# Everything scoped to ONE PHP series. Looped from main.yml with
+# `loop_var: php_fpm_series_item`, which the templates also read.
+
+# Re-validated inside the loop: the series becomes a path segment, an apt
+# package name, AND a systemd instance name.
+- name: Validate the PHP series
+  ansible.builtin.assert:
+    that:
+      - php_fpm_series_item is match('^[0-9]{1,2}\.[0-9]{1,2}$')
+    fail_msg: >-
+      Invalid PHP series '{{ php_fpm_series_item }}'. Expected major.minor,
+      e.g. '8.4'.
+
+# Baseline extensions always, plus whatever sites on THIS series opted into.
+# Union, not intersection: extensions are host-global per series (`extension=`
+# is PHP_INI_SYSTEM and there is no per-pool loading), so one site opting in
+# loads it for every site on that series. Additive by construction — apt
+# installs are idempotent and nothing here uninstalls, so the set accumulates
+# across deploys the way `node_app_versions` does.
+- name: Install php-fpm and extensions from sury ({{ php_fpm_series_item }})
+  ansible.builtin.apt:
+    name: >-
+      {{
+        (['php' ~ php_fpm_series_item ~ '-fpm', 'php' ~ php_fpm_series_item ~ '-cli']
+          + ((php_fpm_baseline_extensions
+              + (php_fpm_extensions[php_fpm_series_item] | default([])))
+             | unique | sort
+             | map('regex_replace', '^', 'php' ~ php_fpm_series_item ~ '-')
+             | list))
+        | map('regex_replace', '$', '=' ~ php_fpm_apt_version if (php_fpm_apt_version | length > 0) else '')
+        | list
+      }}
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  register: _php_fpm_packages
+
+# sury ships its own unit reading /etc/php/<series>/fpm/. TurboPanel runs the
+# same binary under its own instance, so the packaged one is masked rather than
+# merely disabled — an apt upgrade re-enables a disabled unit.
+- name: Stop and mask sury's own php-fpm unit ({{ php_fpm_series_item }})
+  ansible.builtin.systemd:
+    name: "php{{ php_fpm_series_item }}-fpm.service"
+    state: stopped
+    enabled: false
+    masked: true
+  failed_when: false
+
+- name: Ensure the PHP entitlement group ({{ php_fpm_series_item }})
+  ansible.builtin.include_role:
+    name: runtime-entitlement
+  vars:
+    runtime_entitlement_runtime: php
+    runtime_entitlement_series: ["{{ php_fpm_series_item }}"]
+
+# dpkg-statoverride, not a bare `file:` chmod: apt would reset the mode on every
+# php<series>-* upgrade, and these binaries must not be world-executable.
+#
+# The group is the per-series entitlement group, not `tp`. That is what makes
+# "only a principal granted PHP 8.4 can run PHP 8.4" true at the kernel rather
+# than by convention — and it is why the groups are per series in the first
+# place: one shared group would let a grant for 8.4 also unlock 8.3.
+- name: Restrict php binaries to the PHP entitlement group ({{ php_fpm_series_item }})
+  ansible.builtin.command:
+    argv:
+      - dpkg-statoverride
+      - "--force-statoverride-add"
+      - "--update"
+      - "--add"
+      - root
+      - "tpphp{{ php_fpm_series_item | replace('.', '') }}"
+      - "0750"
+      - "{{ item }}"
+  loop:
+    - "/usr/sbin/php-fpm{{ php_fpm_series_item }}"
+    - "/usr/bin/php{{ php_fpm_series_item }}"
+  register: _php_statoverride
+  changed_when: _php_statoverride.rc == 0
+  failed_when: false
+
+- name: Ensure FHS PHP config directories ({{ php_fpm_series_item }})
+  ansible.builtin.file:
+    path: "{{ turbopanel_config_dir }}/php/{{ php_fpm_series_item }}/{{ item }}"
+    state: directory
+    owner: root
+    group: "{{ php_fpm_service_group }}"
+    mode: "0750"
+  loop:
+    - ""
+    - pools
+    - conf.d
+
+- name: Ensure PHP log directory ({{ php_fpm_series_item }})
+  ansible.builtin.file:
+    path: "{{ turbopanel_log_dir }}/php/{{ php_fpm_series_item }}"
+    state: directory
+    owner: "{{ php_fpm_service_user }}"
+    group: "{{ php_fpm_service_group }}"
+    mode: "0750"
+
+- name: Ensure PHP log files exist ({{ php_fpm_series_item }})
+  ansible.builtin.file:
+    path: "{{ turbopanel_log_dir }}/php/{{ php_fpm_series_item }}/{{ item }}"
+    state: touch
+    owner: "{{ php_fpm_service_user }}"
+    group: "{{ php_fpm_service_group }}"
+    mode: "0640"
+    modification_time: preserve
+    access_time: preserve
+  loop:
+    - php-fpm.log
+    - php-error.log
+
+# Group `tp`, not `tpapache`: per-site sockets in here are owned by whichever
+# engine consumes them (tpcaddysite / tpnginx / tpapache), so a directory
+# grouped to one engine would stop the others traversing to their own socket.
+# Keep in step with `ExecStartPre` in the unit template.
+- name: Ensure PHP runtime directory ({{ php_fpm_series_item }})
+  ansible.builtin.file:
+    path: "{{ turbopanel_run_dir }}/php/{{ php_fpm_series_item }}"
+    state: directory
+    owner: "{{ php_fpm_service_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
+- name: Install TurboPanel php.ini overlay ({{ php_fpm_series_item }})
+  ansible.builtin.template:
+    src: 99-turbopanel.ini.j2
+    dest: "{{ turbopanel_config_dir }}/php/{{ php_fpm_series_item }}/conf.d/99-turbopanel.ini"
+    owner: root
+    group: "{{ php_fpm_service_group }}"
+    mode: "0640"
+  register: _php_ini_overlay
+
+- name: Install TurboPanel php-fpm main config ({{ php_fpm_series_item }})
+  ansible.builtin.template:
+    src: php-fpm.conf.j2
+    dest: "{{ turbopanel_config_dir }}/php/{{ php_fpm_series_item }}/php-fpm.conf"
+    owner: root
+    group: "{{ php_fpm_service_group }}"
+    mode: "0640"
+  register: _php_fpm_conf
+
+- name: Install bootstrap default php-fpm pool ({{ php_fpm_series_item }})
+  ansible.builtin.template:
+    src: default-pool.conf.j2
+    dest: "{{ turbopanel_config_dir }}/php/{{ php_fpm_series_item }}/pools/default.conf"
+    owner: root
+    group: "{{ php_fpm_service_group }}"
+    mode: "0640"
+  register: _php_fpm_default_pool
+
+- name: Ensure turbopanel-php-fpm@{{ php_fpm_series_item }} is enabled and started
+  ansible.builtin.systemd:
+    name: "turbopanel-php-fpm@{{ php_fpm_series_item }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+
+# A restart, not the daemon's USR2 reload path: php-fpm re-reads pools on USR2
+# but not php.ini scan-dir changes, and a newly installed extension registers a
+# conf.d/*.ini the master only picks up on start. Scoped to this instance, so
+# other series keep serving.
+- name: Restart turbopanel-php-fpm@{{ php_fpm_series_item }} after config or package change
+  ansible.builtin.systemd:
+    name: "turbopanel-php-fpm@{{ php_fpm_series_item }}"
+    state: restarted
+  when: >-
+    _php_ini_overlay.changed or _php_fpm_conf.changed
+    or _php_fpm_default_pool.changed or _php_fpm_packages.changed

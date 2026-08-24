@@ -1,0 +1,98 @@
+{
+  "$comment": [
+    "Single source of truth for runtime entitlements. Read by BOTH the daemon",
+    "(src/runtime/registry.ts, via a JSON import) and Ansible (include_vars in",
+    "the runtime-entitlement role) \u2014 same bytes, so the two cannot drift.",
+    "",
+    "A group here means exactly one thing: 'this principal may execute this",
+    "runtime series on this host'. Groups are per (runtime, series), not per",
+    "runtime: co-installed PHP versions are distinct binaries, so a single",
+    "tpphp group would mean granting 8.4 also grants 8.3 with whatever CVEs",
+    "another tenant's app is pinned to.",
+    "",
+    "gids are hand-assigned, never computed from the version string \u2014 that",
+    "breaks the day 8.10 exists. Band 9900-9979 is reserved for entitlement",
+    "groups; 9980-9999 is the service-identity band (web-service-user, tp,",
+    "tpnodeapp, tpcaddysite). src/orchestration/service-accounts.test.ts",
+    "enforces global uniqueness across both."
+  ],
+  "version": 1,
+  "gidBand": {
+    "min": 9900,
+    "max": 9979
+  },
+  "runtimes": {
+    "php": {
+      "seriesKey": "major.minor",
+      "default": "8.4",
+      "series": {
+        "8.3": {
+          "group": "tpphp83",
+          "gid": 9901
+        },
+        "8.4": {
+          "group": "tpphp84",
+          "gid": 9902
+        }
+      },
+      "$comment": [
+        "One group spans both PHP flavors: tpphp84 owns /usr/sbin/php-fpm8.4,",
+        "/usr/bin/php8.4, AND vendor/lsphp/8.4/current/bin/lsphp. Semantically",
+        "'may execute PHP 8.4 here', whichever engine serves the site."
+      ],
+      "baselineExtensions": [
+        "bcmath",
+        "curl",
+        "gd",
+        "mbstring",
+        "mysql",
+        "opcache",
+        "sqlite3",
+        "xml",
+        "zip"
+      ],
+      "optionalExtensions": [
+        "apcu",
+        "bz2",
+        "gmp",
+        "igbinary",
+        "imagick",
+        "intl",
+        "ldap",
+        "memcached",
+        "msgpack",
+        "pgsql",
+        "redis",
+        "snmp",
+        "soap",
+        "tidy",
+        "yaml",
+        "zstd"
+      ],
+      "$extensionsComment": [
+        "Extensions are host-global per series: sury registers them in",
+        "/etc/php/<series>/mods-available and `extension=` is PHP_INI_SYSTEM, so",
+        "there is no per-pool loading. Requests therefore resolve by UNION across",
+        "every site on a series \u2014 site A gets `intl` because site B asked for it.",
+        "That is the honest constraint, and it is exactly why the list is closed.",
+        "",
+        "Excluded on purpose: xdebug (source disclosure + severe perf cost), ffi,",
+        "pcntl. Add only with a reason written down."
+      ]
+    },
+    "node": {
+      "seriesKey": "major",
+      "default": "24",
+      "series": {
+        "22": {
+          "group": "tpnode22",
+          "gid": 9921
+        },
+        "24": {
+          "group": "tpnode24",
+          "gid": 9923
+        }
+      }
+    }
+  }
+}

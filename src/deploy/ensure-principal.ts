@@ -1,5 +1,11 @@
 import { join } from "@std/path";
+import { logWarn } from "../logger.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
+import {
+  allRuntimeGroups,
+  isRuntimeName,
+  runtimeGroup,
+} from "../runtime/registry.ts";
 
 export type PrincipalEnsureSpec = {
   principalId: string;
@@ -8,9 +14,34 @@ export type PrincipalEnsureSpec = {
   gid?: number;
   home?: string;
   shell?: string;
+  /**
+   * Runtimes this principal may execute, as `{ runtime, series }` pairs. The
+   * **effective** set (explicit operator grants plus what its services imply),
+   * resolved control-plane side — the daemon reconciles, it does not derive.
+   */
+  runtimes?: readonly { runtime: string; series: string }[];
 };
 
 export const DEFAULT_PRINCIPAL_SHELL = "/usr/sbin/nologin";
+
+/**
+ * Shells a principal may be given. The daemon re-validates rather than trusting
+ * the wire: `shell` reaches `useradd -s` / `usermod -s`, and
+ * {@link ensurePrincipalUser} will reconcile an **adopted** account's shell to
+ * whatever it is handed — so a control plane that was compromised, out of date,
+ * or simply wrong could otherwise repoint an existing account at any executable.
+ *
+ * Keep in step with `ALLOWED_PRINCIPAL_SHELLS` in the instance's
+ * `src/lib/principal-options.ts` and the wire validator in
+ * `../instance/commands/contracts.ts`.
+ */
+export const ALLOWED_PRINCIPAL_SHELLS: readonly string[] = [
+  "/usr/sbin/nologin",
+  "/sbin/nologin",
+  "/bin/false",
+  "/bin/sh",
+  "/bin/bash",
+];
 
 const PRINCIPAL_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
 /**
@@ -297,6 +328,9 @@ export async function ensureSystemPrincipals(
       principal.shell ?? DEFAULT_PRINCIPAL_SHELL,
       "shell",
     );
+    if (!ALLOWED_PRINCIPAL_SHELLS.includes(shell)) {
+      throw new TypeError(`Principal shell is not allowed: ${shell}`);
+    }
 
     await ensureDir(layout.principalHomeRoot, "0755", "root:root", runFn);
     await ensurePrincipalGroup(principal, groupName, runFn);
@@ -307,7 +341,33 @@ export async function ensureSystemPrincipals(
       groupName,
       runFn,
     );
+    // Runs here, before any unit is installed or pool staged: systemd resolves
+    // supplementary groups at `execve`, so a unit started before its principal
+    // joined the runtime group dies `203/EXEC`.
+    await ensurePrincipalRuntimeGroups(
+      principal.username,
+      resolveRuntimeGroups(principal.runtimes),
+      runFn,
+    );
   }
+}
+
+/**
+ * Map `{ runtime, series }` pairs to entitlement group names, dropping any the
+ * registry does not know. Dropping rather than throwing keeps a newer control
+ * plane from failing every deploy on an older host that simply has not learned
+ * about a series yet — the site's own version gate is what reports that.
+ */
+function resolveRuntimeGroups(
+  runtimes: PrincipalEnsureSpec["runtimes"],
+): Set<string> {
+  const groups = new Set<string>();
+  for (const entry of runtimes ?? []) {
+    if (!isRuntimeName(entry.runtime)) continue;
+    const group = runtimeGroup(entry.runtime, entry.series);
+    if (group) groups.add(group);
+  }
+  return groups;
 }
 
 /**
@@ -331,6 +391,96 @@ export async function ensureSupplementaryGroupMembership(
     throw new Error(
       result.stderr || `Failed to add ${user} to group ${groupName}`,
     );
+  }
+}
+
+/**
+ * Supplementary groups a user currently holds. Empty on failure — the caller
+ * treats "cannot read" as "nothing to reconcile" rather than guessing.
+ */
+export async function userSupplementaryGroups(
+  user: string,
+  runFn: RunFn = runDefault,
+): Promise<Set<string>> {
+  const result = await runFn("id", ["-nG", user]);
+  if (!result.success) return new Set();
+  return new Set(result.stdout.split(/\s+/).filter((g) => g.length > 0));
+}
+
+/**
+ * Remove `user` from a supplementary group (`gpasswd -d`).
+ *
+ * Only ever called for names in {@link allRuntimeGroups}; see
+ * {@link ensurePrincipalRuntimeGroups} for why that containment matters.
+ */
+async function removeSupplementaryGroupMembership(
+  user: string,
+  groupName: string,
+  runFn: RunFn = runDefault,
+): Promise<void> {
+  const result = await runFn("sudo", ["-n", "gpasswd", "-d", user, groupName]);
+  if (!result.success) {
+    throw new Error(
+      result.stderr || `Failed to remove ${user} from group ${groupName}`,
+    );
+  }
+}
+
+/**
+ * Reconcile which runtimes a principal may execute.
+ *
+ * A runtime entitlement is a **unix group**, because that is the only form the
+ * kernel enforces at `execve` time. Anything derived only into a generated
+ * systemd unit or an FPM pool is invisible to an interactive shell or a cron
+ * job — both of which run as the principal and are exactly the cases the group
+ * has to cover.
+ *
+ * **Revocation is the reason this exists.** `usermod -aG` alone can only ever
+ * add, so a principal that once deployed a Node app could execute Node forever.
+ * Stale membership is dropped here — but **only** for group names the registry
+ * defines. That containment is what makes revoking safe: `<username>-grp`,
+ * `tp`, an engine group, and anything an operator added by hand are never
+ * touched, no matter what the wire asks for.
+ *
+ * Adds are best-effort and logged (a host provisioned some other way may
+ * legitimately not have the group yet, and the unit's own health probe is what
+ * catches a genuinely unreachable runtime). A failed **revoke** is loud: an
+ * entitlement that silently outlives its grant is a security problem, not an
+ * inconvenience.
+ */
+export async function ensurePrincipalRuntimeGroups(
+  username: string,
+  desiredGroups: ReadonlySet<string>,
+  runFn: RunFn = runDefault,
+): Promise<void> {
+  const registryGroups = allRuntimeGroups();
+  for (const group of desiredGroups) {
+    if (!registryGroups.has(group)) {
+      throw new Error(`unknown runtime entitlement group: ${group}`);
+    }
+  }
+  const current = await userSupplementaryGroups(username, runFn);
+  const sorted = (values: Iterable<string>) =>
+    [...values].sort((a, b) => a.localeCompare(b));
+
+  for (const group of sorted(desiredGroups)) {
+    if (current.has(group)) continue;
+    try {
+      await ensureSupplementaryGroupMembership(username, group, runFn);
+    } catch (err) {
+      logWarn(
+        "deploy",
+        `could not add ${username} to ${group}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  for (const group of sorted(current)) {
+    // Never touch a group outside the registry, even if it looks like ours.
+    if (!registryGroups.has(group) || desiredGroups.has(group)) continue;
+    await removeSupplementaryGroupMembership(username, group, runFn);
   }
 }
 

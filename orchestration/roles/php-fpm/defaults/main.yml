@@ -1,24 +1,86 @@
 ---
-# Runtimes always live under the FHS vendor tree (dev shares it with prod).
+# php-fpm comes from Ondřej Surý's Debian repo (packages.sury.org/php), not a
+# source build and not Debian's own php packages. Sury is the upstream every
+# official Debian PHP package descends from, and it is the only source that
+# ships co-installable `phpX.Y-*` builds with the full extension set already
+# compiled and maintained.
+#
+# This is a deliberate exception to the "vendor it under /opt/turbopanel" rule
+# that governs nginx / Apache / OpenLiteSpeed / Caddy: those are long-lived
+# daemons TurboPanel supervises, while php-fpm is an interpreter whose security
+# posture depends on tracking distro CVE fixes across dozens of extensions.
+# OpenLiteSpeed's `lsphp` is unaffected — it still vendors from
+# rpms.litespeedtech.com (see the `openlitespeed` role).
+#
+# TurboPanel still owns the *runtime*: our own systemd unit, our own
+# php-fpm.conf, and our own pool directory. Only the binaries and extensions
+# come from apt.
 turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/vendor"  # noqa: var-naming[no-role-prefix]
-# Official PHP source build into vendor — never apt install php-fpm / libapache2-mod-php.
-# Series (major.minor) is what hosting `web.php.version` requests; patch is the pin.
-php_fpm_version: "8.4.23"
-php_fpm_series: "8.4"
-php_fpm_url: "https://www.php.net/distributions/php-{{ php_fpm_version }}.tar.xz"
+
+# Series (major.minor) is what hosting `web.php.version` requests and what every
+# package name below is built from. The default must stay in step with
+# `DEFAULT_PHP_SERIES` in src/deploy/site.ts.
+php_fpm_default_series: "8.4"
+# Series to install on this run. The daemon overrides this with the distinct
+# series the deploy's PHP sites declared; a manual run gets the default.
+#
+# **Additive**: this role installs what it is handed and never removes a series
+# it was not asked about — the host serves many environments, but one payload
+# describes one. Retiring a series happens on the removal path.
+php_fpm_versions: ["{{ php_fpm_default_series }}"]
+# Back-compat alias for callers that still pass a single series.
+php_fpm_series: "{{ php_fpm_default_series }}"
+# Optional exact apt pin (e.g. "8.4.14-1+0~20251120.1+debian13~1.gbp1a2b3c").
+# Empty means "latest 8.4.x sury publishes". Pin it to freeze a fleet.
+php_fpm_apt_version: ""
+
+# Sury repo wiring. The keyring ships as its own .deb so the trust root is
+# packaged and upgradable rather than a loose file dropped by curl.
+php_fpm_sury_keyring_url: "https://packages.sury.org/debsuryorg-archive-keyring.deb"
+php_fpm_sury_keyring_path: "/usr/share/keyrings/debsuryorg-archive-keyring.gpg"
+php_fpm_sury_repo_url: "https://packages.sury.org/php"
+php_fpm_sury_suite: "{{ ansible_distribution_release }}"
+
+# Extensions. This list is parity with the flags the previous source build
+# compiled in (--enable-mbstring --enable-bcmath --enable-gd --with-pdo-mysql
+# --with-mysqli --with-pdo-sqlite --with-zip --with-curl --enable-opcache, plus
+# libxml2). openssl and zlib are in php8.4-common and need no package.
+# Baseline: installed on every series whether or not a site asked. Parity with
+# the flags the previous source build compiled in (--enable-mbstring
+# --enable-bcmath --enable-gd --with-pdo-mysql --with-mysqli --with-pdo-sqlite
+# --with-zip --with-curl --enable-opcache, plus libxml2). Keep in step with
+# `baselineExtensions` in orchestration/runtime-registry.json.
+php_fpm_baseline_extensions:
+  - bcmath
+  - curl
+  - gd
+  - mbstring
+  - mysql
+  - opcache
+  - sqlite3
+  - xml
+  - zip
+# Opt-in extensions per series, e.g. {"8.4": ["intl", "redis"]}. The daemon
+# passes the union across every site on that series.
+php_fpm_extensions: {}
+
 turbopanel_dev_user: ""  # noqa: var-naming[no-role-prefix]
 turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"  # noqa: var-naming[no-role-prefix]
 
 # php-fpm's own identity (FPM master, bootstrap pool, FHS config/log dirs).
 # Must match web-service-user's apache entry — provisioned by
-# traditional-web-apache-apply, and by traditional-web-apply on an nginx-only
+# site-apache-apply, and by site-apply on an nginx-only
 # host that needs PHP. Per-site pools override user/group with the site
 # principal and listen on a socket owned by the engine that consumes it.
 php_fpm_service_user: tpapache
 php_fpm_service_group: tpapache
 
-# FHS mutable paths — config/logs/state stay outside the versioned vendor tree.
-# Per-site pool fragments are written by src/deploy/traditional-web.ts under pools/.
+# Paths sury's packages install to are derived per series inside series.yml and
+# from `%i` in the unit template — there is no single-series variable for them,
+# because a host can run several masters at once.
+
+# FHS mutable paths — config/logs/state stay outside anything apt manages.
+# Per-site pool fragments are written by src/deploy/site.ts under pools/.
 turbopanel_config_dir: "/etc/turbopanel"  # noqa: var-naming[no-role-prefix]
 turbopanel_log_dir: "/var/log/turbopanel"  # noqa: var-naming[no-role-prefix]
 turbopanel_state_dir: "/var/lib/turbopanel"  # noqa: var-naming[no-role-prefix]

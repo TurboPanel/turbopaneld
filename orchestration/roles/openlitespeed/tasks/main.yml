@@ -4,16 +4,16 @@
 # apt repos, downloads unsigned lsphp/admin_php binaries from
 # litespeedtech.com, and provisions a web admin GUI we do not use). We keep
 # only the plain HTTP server binary + control script + modules needed for
-# traditional-web hosting; the bundled admin panel stays out.
+# site hosting; the bundled admin panel stays out.
 #
 # PHP is vendored separately as `lsphp` (LSAPI), and only when the daemon passes
 # `turbopanel_lsphp_install: true` — OpenLiteSpeed runs PHP as a per-vhost
 # external processor under suEXEC rather than through a shared php-fpm pool, so
 # there is no pool identity to provision here; the vhost's `extUser`/`extGroup`
-# come from the site principal (`src/deploy/traditional-web.ts`).
+# come from the site principal (`src/deploy/site.ts`).
 #
 # `conf/` inside the versioned tree is replaced with a symlink to the FHS
-# config dir so `src/deploy/traditional-web.ts` can own httpd_config.conf /
+# config dir so `src/deploy/site.ts` can own httpd_config.conf /
 # per-site vhost configs the same way it owns nginx/apache site files,
 # without that content living inside (and being lost across) vendor
 # version upgrades.
@@ -150,49 +150,14 @@
 # bump is a defaults edit and the generated vhosts never change.
 - name: Vendor lsphp (LSAPI PHP) for OpenLiteSpeed vhosts
   when: turbopanel_lsphp_install | default(false) | bool
-  block:
-    - name: Resolve lsphp .deb architecture
-      ansible.builtin.set_fact:
-        openlitespeed_lsphp_deb_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
-
-    - name: Check vendored lsphp binary
-      ansible.builtin.stat:
-        path: "{{ turbopanel_vendor_dir }}/lsphp/{{ openlitespeed_lsphp_series }}/{{ openlitespeed_lsphp_version }}/bin/lsphp"
-      register: _lsphp_pinned
-
-    - name: Extract lsphp packages into runtimes directory
-      when: not _lsphp_pinned.stat.exists
-      ansible.builtin.shell: |
-        set -euo pipefail
-        DEST="{{ turbopanel_vendor_dir }}/lsphp/{{ openlitespeed_lsphp_series }}/{{ openlitespeed_lsphp_version }}"
-        TMP="$(mktemp -d)"
-        trap 'rm -rf "$TMP"' EXIT
-
-        for PKG in {{ openlitespeed_lsphp_packages | join(' ') }}; do
-          URL="{{ openlitespeed_lsphp_repo_base }}/{{ openlitespeed_lsphp_pkg }}/${PKG}_{{ openlitespeed_lsphp_deb_version }}_{{ openlitespeed_lsphp_deb_arch }}.deb"
-          curl -fsSL -o "$TMP/${PKG}.deb" "$URL"
-          # All packages unpack into one tree; later ones only add extensions.
-          dpkg-deb -x "$TMP/${PKG}.deb" "$TMP/extract"
-        done
-
-        install -d "$DEST"
-        cp -a "$TMP/extract/usr/local/lsws/{{ openlitespeed_lsphp_pkg }}/." "$DEST/"
-      args:
-        creates: "{{ turbopanel_vendor_dir }}/lsphp/{{ openlitespeed_lsphp_series }}/{{ openlitespeed_lsphp_version }}/bin/lsphp"
-
-    - name: Harden lsphp binary permissions
-      ansible.builtin.file:
-        path: "{{ turbopanel_vendor_dir }}/lsphp/{{ openlitespeed_lsphp_series }}/{{ openlitespeed_lsphp_version }}/bin/lsphp"
-        owner: root
-        group: "{{ turbopanel_group }}"
-        mode: "0750"
-
-    - name: Point lsphp current symlink at pinned version
-      ansible.builtin.file:
-        src: "{{ turbopanel_vendor_dir }}/lsphp/{{ openlitespeed_lsphp_series }}/{{ openlitespeed_lsphp_version }}"
-        dest: "{{ turbopanel_vendor_dir }}/lsphp/{{ openlitespeed_lsphp_series }}/current"
-        state: link
-        force: true
+  ansible.builtin.include_tasks: lsphp-series.yml
+  loop: >-
+    {{
+      openlitespeed_lsphp_versions
+      | map('trim') | reject('equalto', '') | unique | list
+    }}
+  loop_control:
+    loop_var: lsphp_series
 
 - name: Ensure FHS config dir for OpenLiteSpeed (vhosts sub-dir)
   ansible.builtin.file:

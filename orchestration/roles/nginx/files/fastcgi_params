@@ -1,5 +1,5 @@
 # Managed by TurboPanel — do not edit by hand.
-# Included by per-site PHP vhosts written by src/deploy/traditional-web.ts.
+# Included by per-site PHP vhosts written by src/deploy/site.ts.
 # SCRIPT_FILENAME and PATH_INFO are deliberately NOT set here: the vhost sets
 # them after this include so a site's own document root always wins.
 

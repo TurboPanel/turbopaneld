@@ -20,6 +20,7 @@ import {
   collectServerIps,
   type ServerReportedIp,
 } from "../server-addresses.ts";
+import { readRemoteFiles } from "../deploy/release/read-remote-files.ts";
 import { collectManagedLogs } from "../managed/logs.ts";
 import { handleFabricPathProbe } from "./commands/fabric.ts";
 import {
@@ -96,6 +97,35 @@ type DaemonMessage =
     id: string;
     managedId: string;
     tail: number;
+    at: string;
+  }
+  | {
+    type: "repo-read-request";
+    id: string;
+    cloneUrl: string;
+    ref: string;
+    paths: string[];
+    listPath?: string;
+    maxBytesPerFile: number;
+    credential?: string;
+    credentialKind?: string;
+    credentialUsername?: string;
+    at: string;
+  }
+  | {
+    type: "repo-read-result";
+    id: string;
+    ok: boolean;
+    commitSha?: string;
+    files?: {
+      path: string;
+      found: boolean;
+      content?: string;
+      bytes?: number;
+      reason?: string;
+    }[];
+    entries?: { path: string; kind: string }[];
+    error?: string;
     at: string;
   }
   | {
@@ -1215,6 +1245,9 @@ export class InstanceClient {
       case "managed-logs-request":
         this.#collectManagedLogs(message, ws);
         break;
+      case "repo-read-request":
+        this.#readRepository(message, ws);
+        break;
       case "fabric-paths-request":
         this.#collectFabricPaths(message, ws);
         break;
@@ -1692,6 +1725,83 @@ export class InstanceClient {
 
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(result));
+    }
+  }
+
+  #readRepository(
+    message: Extract<DaemonMessage, { type: "repo-read-request" }>,
+    ws: WebSocket,
+  ): void {
+    void this.#readRepositoryAsync(message, ws);
+  }
+
+  /**
+   * Read files from a repository the control plane cannot reach itself.
+   *
+   * Answers on the same correlated request channel managed logs use — this is
+   * interactive and read-only, so it is deliberately not a command: a command
+   * row per read would pollute the append-only ledger that backs deploy
+   * history.
+   */
+  async #readRepositoryAsync(
+    message: Extract<DaemonMessage, { type: "repo-read-request" }>,
+    ws: WebSocket,
+  ): Promise<void> {
+    let payload: DaemonMessage;
+    try {
+      // Sealed `tpdaemon.…` envelope, unsealed through the same API path every
+      // deploy secret uses — the daemon never holds a long-lived key.
+      let credential: string | undefined;
+      if (message.credential !== undefined) {
+        const apiClient = this.#apiClient;
+        if (!apiClient) throw new Error("api client unavailable");
+        const [plaintext] = await apiClient.decryptSecrets([
+          message.credential,
+        ]);
+        credential = typeof plaintext === "string" ? plaintext : undefined;
+      }
+      const kind = message.credentialKind === "ssh_key" ? "ssh_key" : "token";
+      const result = await readRemoteFiles({
+        cloneUrl: message.cloneUrl,
+        ref: message.ref,
+        paths: message.paths,
+        ...(message.listPath === undefined
+          ? {}
+          : { listPath: message.listPath }),
+        maxBytesPerFile: message.maxBytesPerFile,
+        ...(credential === undefined
+          ? {}
+          : { credential, credentialKind: kind }),
+        ...(message.credentialUsername === undefined
+          ? {}
+          : { credentialUsername: message.credentialUsername }),
+      });
+      payload = {
+        type: "repo-read-result",
+        id: message.id,
+        ok: true,
+        commitSha: result.commitSha,
+        files: result.files,
+        entries: result.entries,
+        at: new Date().toISOString(),
+      };
+    } catch (err) {
+      logWarn("instance", "repository read failed:", sanitizeForLog(err));
+      payload = {
+        type: "repo-read-result",
+        id: message.id,
+        ok: false,
+        // Sanitized: a git error can echo the clone URL, which for an HTTPS
+        // token lane carries the credential in userinfo.
+        error: sanitizeForLog(
+          err instanceof Error ? err.message : String(err),
+        ),
+        at: new Date().toISOString(),
+      };
+    }
+
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(payload));
     }
   }
 

@@ -6,7 +6,7 @@
 # resulting binary tree is TurboPanel-owned under the FHS vendor tree.
 #
 # Config/logs/state live under FHS so version upgrades do not lose site
-# fragments written by `src/deploy/traditional-web.ts`. PHP is not built into
+# fragments written by `src/deploy/site.ts`. PHP is not built into
 # httpd — the sibling `php-fpm` role vendors php-fpm; site configs use
 # mod_proxy_fcgi (loaded in httpd.conf).
 - name: Assert supported CPU architecture

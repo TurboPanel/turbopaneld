@@ -98,6 +98,11 @@ const ACCOUNTS: AccountEntry[] = [
 ];
 
 const WEB_SERVICE_ACCOUNTS = [
+  // Site Caddy. Distinct from tpcaddy(9993), which is the control-plane Caddy
+  // provisioned by instance-user, and from the root edge Caddy on :80/:443.
+  // 9988 is tpnodeapp, so 9987 is the next free slot in the 99xx block — the
+  // "globally unique" test below is what enforces that.
+  { key: "caddy", account: "tpcaddysite", id: 9987 },
   { key: "nginx", account: "tpnginx", id: 9992 },
   { key: "apache", account: "tpapache", id: 9991 },
   { key: "openlitespeed", account: "tpols", id: 9990 },
@@ -264,9 +269,33 @@ test("converge and web-service account ids are globally unique", async () => {
   );
   const webServiceMap = parseWebServiceUserMap(webServiceDefaults);
 
+  // Runtime entitlement gids share the same numeric space as service accounts,
+  // so they belong in the same uniqueness check — a collision between, say,
+  // tpnode24 and a service account would silently hand a tenant an identity.
+  const registry = JSON.parse(
+    await Deno.readTextFile(
+      join(CHECKOUT_ORCHESTRATION_DIR, "runtime-registry.json"),
+    ),
+  ) as {
+    gidBand: { min: number; max: number };
+    runtimes: Record<string, { series: Record<string, { gid: number }> }>;
+  };
+  const entitlementIds = Object.values(registry.runtimes).flatMap((runtime) =>
+    Object.values(runtime.series).map((entry) => entry.gid)
+  );
+
+  // The two bands must not overlap: 9900-9979 entitlements, 9980+ identities.
+  for (const id of entitlementIds) {
+    if (id < registry.gidBand.min || id > registry.gidBand.max) {
+      throw new Error(
+        `runtime entitlement gid ${id} is outside the declared band ${registry.gidBand.min}-${registry.gidBand.max}`,
+      );
+    }
+  }
+
   const convergeIds = ACCOUNTS.map((entry) => entry.id);
   const webIds = Object.values(webServiceMap).map((entry) => entry.uid);
-  const ids = [...convergeIds, ...webIds];
+  const ids = [...convergeIds, ...webIds, ...entitlementIds];
 
   const seen = new Set<number>();
   const collisions: number[] = [];

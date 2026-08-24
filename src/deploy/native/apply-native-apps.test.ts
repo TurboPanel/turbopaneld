@@ -15,8 +15,8 @@ import {
 } from "./apply-native-apps.ts";
 import {
   DEFAULT_NATIVE_APP_NODE_VERSION,
-  NATIVE_APP_RUNTIME_GROUP,
   nativeAppNodeBinary,
+  nativeAppRuntimeGroup,
   nativeAppUnitName,
   nativeAppUnitPath,
   principalSliceContent,
@@ -728,7 +728,7 @@ function usermodCalls(mock: RunMock): string[][] {
     .map((call) => call.args);
 }
 
-test("every principal joins the tenant Node runtime group before its unit starts", async () => {
+test("native apply no longer grants runtime groups itself", async () => {
   const host = await makeTestHost();
   const mock = createRunMock();
   try {
@@ -739,72 +739,23 @@ test("every principal joins the tenant Node runtime group before its unit starts
       applyOpts(host, mock),
     );
 
-    // The membership has to be in place before systemd forks the service:
-    // `ExecStart` is exec'd as the principal, and the vendored Node tree is
-    // reachable only through this group.
-    assertEquals(usermodCalls(mock), [[
-      "-n",
-      "usermod",
-      "-aG",
-      NATIVE_APP_RUNTIME_GROUP,
-      USERNAME,
-    ]]);
-    const [usermod] = callIndexes(mock, (args) => args.includes("usermod"));
-    const [start] = callIndexes(
-      mock,
-      (args) => args.includes("systemctl") && args.includes("enable"),
-    );
-    assertEquals(typeof usermod, "number");
-    assertEquals(typeof start, "number");
-    assertEquals((usermod ?? 0) < (start ?? 0), true);
+    // Entitlement moved to `ensurePrincipalRuntimeGroups`, which runs during
+    // principal materialization — before releases and before any unit is
+    // installed. Keeping a second grant here would be a second source of truth
+    // that can only ever add, never revoke.
+    assertEquals(usermodCalls(mock), []);
   } finally {
     await host.cleanup();
   }
 });
 
-test("two apps of one principal join the runtime group once", async () => {
-  const host = await makeTestHost();
-  const mock = createRunMock();
-  try {
-    await applyNativeAppServices(
-      host.layout,
-      ENVIRONMENT_ID,
-      [makeApp(), makeApp({ composeServiceName: "api", serviceId: "svc-api" })],
-      {
-        ...applyOpts(host, mock),
-        bindings: new Map([
-          ["web", { username: USERNAME, previousReleaseId: null }],
-          ["api", { username: USERNAME, previousReleaseId: null }],
-        ]),
-      },
-    );
-
-    assertEquals(usermodCalls(mock).length, 1);
-  } finally {
-    await host.cleanup();
-  }
-});
-
-test("a host that cannot grant the runtime group still deploys", async () => {
-  const host = await makeTestHost();
-  const mock = createRunMock();
-  const run: RunFn = (command, args) =>
-    args.includes("usermod")
-      ? Promise.resolve(fail("group tpnodeapp does not exist"))
-      : mock.run(command, args);
-  try {
-    // `ensureNativeAppRuntime` already treats a host with no orchestration
-    // assets as "runtime installed some other way"; refusing the deploy here
-    // would reject a host that can serve it.
-    const result = await applyNativeAppServices(
-      host.layout,
-      ENVIRONMENT_ID,
-      [makeApp()],
-      { ...applyOpts(host, mock), run },
-    );
-
-    assertEquals(result.applied, ["web"]);
-  } finally {
-    await host.cleanup();
-  }
+test("nativeAppRuntimeGroup resolves the per-series entitlement group", () => {
+  // Per series, not one group for the whole tree: granting Node 24 must not
+  // also grant Node 22.
+  assertEquals(nativeAppRuntimeGroup("24"), "tpnode24");
+  assertEquals(nativeAppRuntimeGroup("24.17.0"), "tpnode24");
+  assertEquals(nativeAppRuntimeGroup("22"), "tpnode22");
+  // An unknown series has no group rather than an invented name — a name that
+  // does not exist would fail `usermod` far from the cause.
+  assertEquals(nativeAppRuntimeGroup("18"), undefined);
 });

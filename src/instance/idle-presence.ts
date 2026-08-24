@@ -1,6 +1,10 @@
 import { type BuildInfo, getBuildInfo } from "../build-info.ts";
 import { type HostDockerMetadata, readDocker } from "../host/docker.ts";
 import {
+  type HostRuntimeMetadata,
+  readHostRuntimes,
+} from "../host/runtimes.ts";
+import {
   getHostHelloIdentity,
   type HostHelloIdentity,
 } from "../host/os-release.ts";
@@ -83,6 +87,15 @@ type PresenceSnapshot = {
   ips: ServerReportedIp[];
   /** Present only when the Docker CLI is installed. */
   docker?: HostDockerMetadata;
+  /**
+   * Runtimes installed on this host (PHP series, tenant Node, lsphp).
+   *
+   * Rides the existing change-detection rather than a new command: the control
+   * plane needs this to validate a requested PHP series *before* queueing a
+   * deploy, and presence is already the channel that answers "what is true
+   * about this host right now".
+   */
+  runtimes?: HostRuntimeMetadata;
 };
 
 type BuildInfoProvider = () => BuildInfo;
@@ -91,10 +104,12 @@ type PresenceSnapshotProvider = () => PresenceSnapshot;
 
 function defaultPresenceSnapshot(): PresenceSnapshot {
   const docker = readDocker();
+  const runtimes = readHostRuntimes();
   return {
     timeSync: readTimeSync(),
     ips: collectServerIps(),
     ...(docker ? { docker } : {}),
+    ...(runtimes ? { runtimes } : {}),
   };
 }
 
@@ -291,6 +306,7 @@ export class IdlePresence {
         resources,
         timeSync: presence.timeSync,
         ...(presence.docker ? { docker: presence.docker } : {}),
+        ...(presence.runtimes ? { runtimes: presence.runtimes } : {}),
       }));
       this.#lastActivityAt = Date.now();
       this.#lastPresenceFrameAt = this.#lastActivityAt;
@@ -362,6 +378,7 @@ export class IdlePresence {
         timeSync: presenceChanged ? presence.timeSync : undefined,
         resources: presenceChanged ? { ips: presence.ips } : undefined,
         docker: presenceChanged ? presence.docker : undefined,
+        runtimes: presenceChanged ? presence.runtimes : undefined,
       });
       if (presenceChanged) {
         this.#lastPresenceSnapshot = serialized;
@@ -390,6 +407,7 @@ export class IdlePresence {
     timeSync?: HostTimeSync;
     resources?: HostResources;
     docker?: HostDockerMetadata;
+    runtimes?: HostRuntimeMetadata;
   }): void {
     const ws = this.#ws;
     if (ws?.readyState !== WebSocket.OPEN) return;
@@ -401,6 +419,7 @@ export class IdlePresence {
       timeSync?: HostTimeSync;
       resources?: HostResources;
       docker?: HostDockerMetadata;
+      runtimes?: HostRuntimeMetadata;
     } = {
       type: "heartbeat",
       at: new Date().toISOString(),
@@ -412,6 +431,7 @@ export class IdlePresence {
     if (fields.timeSync) payload.timeSync = fields.timeSync;
     if (fields.resources) payload.resources = fields.resources;
     if (fields.docker) payload.docker = fields.docker;
+    if (fields.runtimes) payload.runtimes = fields.runtimes;
 
     try {
       ws.send(JSON.stringify(payload));

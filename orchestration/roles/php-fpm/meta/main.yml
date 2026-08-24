@@ -2,10 +2,13 @@
 galaxy_info:
   author: turbopanel
   description: >-
-    Build a pinned PHP + php-fpm release from official source into the shared
-    runtimes directory (never a distro apt install) for traditional-web Apache
-    PHP via proxy_fcgi. Requires 64-bit Linux (aarch64 or x86_64). Identity
-    (tpapache) is provisioned separately via the web-service-user role.
+    Install php-fpm and its extensions from Ondrej Sury's Debian repo
+    (packages.sury.org/php) for site nginx and Apache PHP via
+    proxy_fcgi / fastcgi_pass. Sury's own unit is masked; TurboPanel runs the
+    packaged binary under turbopanel-php-fpm@<series> against its own
+    php-fpm.conf and /etc/turbopanel/php/pools/. Requires 64-bit Linux (aarch64
+    or x86_64). Identity (tpapache) is provisioned separately via the
+    web-service-user role.
   license: AGPL-3.0
   min_ansible_version: "2.14"
   platforms:

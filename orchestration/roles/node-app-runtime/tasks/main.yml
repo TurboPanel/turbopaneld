@@ -30,40 +30,39 @@
     update_cache: true
     cache_valid_time: 3600
 
-- name: Ensure the tenant Node runtime group
-  ansible.builtin.group:
-    name: "{{ node_app_group }}"
-    gid: "{{ node_app_gid }}"
-    state: present
-    system: true
+# Creates one group per requested series and grants each traverse-only access
+# to /opt/turbopanel and vendor/. Group names and gids live in the shared
+# registry so this role and the daemon cannot disagree about them.
+- name: Ensure per-series tenant Node entitlement groups
+  ansible.builtin.include_role:
+    name: runtime-entitlement
+  vars:
+    runtime_entitlement_runtime: node
+    runtime_entitlement_series: "{{ node_app_requested_versions }}"
 
-# The tree itself is group-owned by the runtime group (0750, below), but a
-# principal still has to *reach* it: `/opt/turbopanel` and its `vendor/` are
-# `tp:tp 0750` and must stay that way. `--x` for the runtime group, granted as
-# an ACL entry, opens traversal of those two directories without granting a
-# listing and without touching the mode. `default:` is deliberately not set —
-# the grant applies to these two directories only, never to their other
-# children (the panel's own runtimes).
-- name: Grant the tenant Node runtime group traversal to the vendor tree
-  ansible.posix.acl:
-    path: "{{ item }}"
-    etype: group
-    entity: "{{ node_app_group }}"
-    permissions: x
-    state: present
-  loop:
-    - "{{ turbopanel_install_root }}"
-    - "{{ turbopanel_vendor_dir }}"
 
 # Before vendoring: `vendor-series.yml` writes into this directory, so it has to
 # exist and carry the right group first.
-- name: Ensure the tenant Node tree is reachable by the runtime group
+# The parent holds every series, so it cannot belong to any one series' group.
+# It stays `tp:tp 0750` and each entitlement group gets traverse-only through an
+# ACL — a principal reaches its own series without being able to list which
+# other series exist.
+- name: Ensure the tenant Node tree root
   ansible.builtin.file:
     path: "{{ node_app_root }}"
     state: directory
     owner: root
-    group: "{{ node_app_group }}"
+    group: "{{ turbopanel_group | default('tp') }}"
     mode: "0750"
+
+- name: Grant each Node entitlement group traversal of the tenant Node tree
+  ansible.posix.acl:
+    path: "{{ node_app_root }}"
+    etype: group
+    entity: "tpnode{{ item | regex_replace('^([0-9]+).*$', '\\1') }}"
+    permissions: x
+    state: present
+  loop: "{{ node_app_requested_versions }}"
 
 - name: Vendor each requested tenant Node series
   ansible.builtin.include_tasks: vendor-series.yml

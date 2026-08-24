@@ -1,5 +1,5 @@
 /**
- * Host-native traditional-web deploy (nginx + apache + OpenLiteSpeed).
+ * Host-native site deploy (nginx + apache + OpenLiteSpeed).
  *
  * Installs web servers on demand — all three engines are vendored under the
  * FHS runtime tree (`vendor/<tool>/<version>/` + `current`, never distro apt
@@ -7,15 +7,17 @@
  * loopback vhosts under `/etc/turbopanel/{nginx,apache,openlitespeed}/`, and
  * reloads the matching `turbopanel-*` systemd unit. Every engine's
  * render → install → config-test → reload sequence runs behind one interface
- * (`traditional-web/engine-driver.ts`) — the single place a new engine plugs in.
+ * (`site/engine-driver.ts`) — the single place a new engine plugs in.
  *
- * **PHP on all three engines.** nginx and Apache share vendored php-fpm
- * (`vendor/php/…`): one pool per site, reached through `fastcgi_pass` and
- * `mod_proxy_fcgi` respectively — never mod_php or distro php-fpm packages.
+ * **PHP on all three engines.** nginx and Apache share one php-fpm master,
+ * installed from the sury Debian repo but run under `turbopanel-php-fpm@<series>`
+ * against TurboPanel's own config: one pool per site, reached through
+ * `fastcgi_pass` and `mod_proxy_fcgi` respectively — never mod_php, and never
+ * sury's own unit, which the role masks.
  * OpenLiteSpeed instead runs its own vendored `lsphp` (`vendor/lsphp/…`) as a
  * per-vhost LSAPI external processor under suEXEC, which is the OLS-native
  * model: the process *is* the isolation boundary, so there is no shared pool to
- * own. Either way hosting `web.php` (version / memory / maxExecutionTime)
+ * own. Either way the service's `x-turbopanel.php` (version / settings / pool)
  * becomes per-site admin values, and exactly one PHP series is pinned per host
  * across all three engines.
  *
@@ -45,45 +47,48 @@ import { logInfo, logWarn } from "../logger.ts";
 import { runLocalPlaybook } from "../orchestration/ansible.ts";
 import {
   ORCHESTRATION_DIR,
-  TRADITIONAL_WEB_APACHE_APPLY_PLAYBOOK,
-  TRADITIONAL_WEB_APPLY_PLAYBOOK,
-  TRADITIONAL_WEB_OPENLITESPEED_APPLY_PLAYBOOK,
+  SITE_APACHE_APPLY_PLAYBOOK,
+  SITE_CADDY_APPLY_PLAYBOOK,
+  SITE_NGINX_APPLY_PLAYBOOK,
+  SITE_OPENLITESPEED_APPLY_PLAYBOOK,
 } from "../orchestration/paths.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
+import { isAllowedExtension } from "../runtime/registry.ts";
 import {
   principalHomePath,
   siteCurrentSymlink,
   siteRoot,
   siteSharedDir,
 } from "../paths/layout.ts";
-import type { EnvironmentDeployTraditionalWebSite } from "../instance/commands/contracts.ts";
+import type { EnvironmentDeploySite } from "../instance/commands/contracts.ts";
 import {
   ensureEngineGroupMembership,
   principalUnixGroupName,
 } from "./ensure-principal.ts";
 import {
+  DEFAULT_PHP_FPM_SERIES,
   ownedConfigFileMatches as ownedConfigFileMatchesVia,
-  PHP_FPM_DRIVER,
+  phpFpmDriver,
   removeStagedFile,
-  rolloutTraditionalWebConfigs,
+  rolloutSiteConfigs,
+  SITE_ENGINE_DRIVERS,
+  SITE_ENGINE_ORDER,
   stageOwnedConfigFile as stageOwnedConfigFileVia,
-  TRADITIONAL_WEB_ENGINE_DRIVERS,
-  TRADITIONAL_WEB_ENGINE_ORDER,
   writeOwnedConfigFile as writeOwnedConfigFileVia,
-} from "./traditional-web/engine-driver.ts";
+} from "./site/engine-driver.ts";
 import type {
+  SiteRunFn,
+  SiteRunResult,
+  SiteValidationTarget,
   StagedConfigWrite,
-  TraditionalWebRunFn,
-  TraditionalWebRunResult,
-  TraditionalWebValidationTarget,
-} from "./traditional-web/engine-driver.ts";
+} from "./site/engine-driver.ts";
 
 const SAFE_ID_RE = /^[A-Za-z0-9_-]+$/;
 const SAFE_ROOT_RE = /^[A-Za-z0-9._/-]+$/;
 const PRINCIPAL_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
 const decoder = new TextDecoder();
 
-export type TraditionalWebApplySite = EnvironmentDeployTraditionalWebSite;
+export type SiteApplySpec = EnvironmentDeploySite;
 
 /**
  * The Git release tree one compose service serves from.
@@ -92,39 +97,39 @@ export type TraditionalWebApplySite = EnvironmentDeployTraditionalWebSite;
  * release engine used to publish the tree), so this module never re-derives the
  * mapping — it only addresses the tree it is handed.
  */
-export type TraditionalWebSiteRelease = {
+export type SiteRelease = {
   serviceId: string;
   username: string;
 };
 
 /** Compose service name → its release tree, for the sites in one deploy. */
-export type TraditionalWebReleaseBindings = ReadonlyMap<
+export type SiteReleaseBindings = ReadonlyMap<
   string,
-  TraditionalWebSiteRelease
+  SiteRelease
 >;
 
 /**
  * Injectable command runner for host-free apply/remove tests — defined with the
  * engine drivers, since every privileged step here goes through one of them.
  */
-export type { TraditionalWebRunFn, TraditionalWebRunResult };
+export type { SiteRunFn, SiteRunResult };
 
 /** Injectable Ansible playbook runner for host-free apply tests. */
-export type TraditionalWebPlaybookFn = (
+export type SitePlaybookFn = (
   playbookPath: string,
   label: string,
   extraArgs?: string[],
 ) => Promise<void>;
 
-type TraditionalWebIo = {
-  run: TraditionalWebRunFn;
-  runPlaybook: TraditionalWebPlaybookFn;
+type SiteIo = {
+  run: SiteRunFn;
+  runPlaybook: SitePlaybookFn;
 };
 
-let activeIo: TraditionalWebIo | undefined;
+let activeIo: SiteIo | undefined;
 
-async function withTraditionalWebIo<T>(
-  io: TraditionalWebIo | undefined,
+async function withSiteIo<T>(
+  io: SiteIo | undefined,
   fn: () => Promise<T>,
 ): Promise<T> {
   const previous = activeIo;
@@ -137,9 +142,10 @@ async function withTraditionalWebIo<T>(
 }
 
 /** Engine service account for the FHS vendor tree (web-service-user role). */
-export function traditionalWebEngineUnixUser(
-  engine: TraditionalWebApplySite["engine"],
+export function siteEngineUnixUser(
+  engine: SiteApplySpec["engine"],
 ): string {
+  if (engine === "caddy") return "tpcaddysite";
   if (engine === "nginx") return "tpnginx";
   if (engine === "apache") return "tpapache";
   return "tpols";
@@ -150,15 +156,15 @@ export function traditionalWebEngineUnixUser(
  * group-read so nginx/apache/OLS can serve. Without a principal pin, the
  * engine user owns the tree (previous default).
  */
-export function resolveTraditionalWebSiteOwnership(
-  site: TraditionalWebApplySite,
+export function resolveSiteOwnership(
+  site: SiteApplySpec,
 ): { user: string; group: string } {
-  const engineUser = traditionalWebEngineUnixUser(site.engine);
+  const engineUser = siteEngineUnixUser(site.engine);
   const principal = site.principal;
   if (!principal) return { user: engineUser, group: engineUser };
   if (!PRINCIPAL_USERNAME_RE.test(principal.username)) {
     throw new Error(
-      `traditional-web principal username is unsafe: ${principal.username}`,
+      `site principal username is unsafe: ${principal.username}`,
     );
   }
   return { user: principal.username, group: engineUser };
@@ -178,14 +184,14 @@ function assertSafeRoot(value: string): void {
     trimmed.includes("..") ||
     !SAFE_ROOT_RE.test(trimmed)
   ) {
-    throw new Error(`traditional-web root is unsafe: ${value}`);
+    throw new Error(`site root is unsafe: ${value}`);
   }
 }
 
 async function runDefault(
   command: string,
   args: string[],
-): Promise<TraditionalWebRunResult> {
+): Promise<SiteRunResult> {
   const result = await new Deno.Command(command, {
     args,
     stdin: "null",
@@ -202,12 +208,12 @@ async function runDefault(
 async function run(
   command: string,
   args: string[],
-): Promise<TraditionalWebRunResult> {
+): Promise<SiteRunResult> {
   const impl = activeIo?.run ?? runDefault;
   return await impl(command, args);
 }
 
-export function traditionalWebSiteDir(
+export function siteDir(
   layout: LayoutPaths,
   environmentId: string,
   composeServiceName: string,
@@ -228,7 +234,7 @@ export function traditionalWebSiteDir(
  * `hosting.env` / `php.json` are per-deploy facts that must survive a promote
  * and must not be mistaken for shipped payload.
  */
-export function traditionalWebHostingMetadataDir(
+export function siteMetadataDir(
   principalHome: string,
   serviceId: string,
 ): string {
@@ -242,11 +248,11 @@ export function traditionalWebHostingMetadataDir(
  * `current` segment is a stable *name*, so a promote never invalidates a
  * generated vhost. Otherwise the legacy daemon-owned tree, unchanged.
  */
-export function resolveTraditionalWebDocumentRoot(
+export function resolveSiteDocumentRoot(
   layout: LayoutPaths,
   environmentId: string,
-  site: TraditionalWebApplySite,
-  release?: TraditionalWebSiteRelease,
+  site: SiteApplySpec,
+  release?: SiteRelease,
 ): string {
   if (release) {
     return join(
@@ -258,7 +264,7 @@ export function resolveTraditionalWebDocumentRoot(
     );
   }
   return join(
-    traditionalWebSiteDir(layout, environmentId, site.composeServiceName),
+    siteDir(layout, environmentId, site.composeServiceName),
     site.root,
   );
 }
@@ -327,6 +333,74 @@ function buildNginxPhpLocation(
   return lines.join("\n");
 }
 
+export type CaddySiteConfigOpts = Readonly<{
+  /** Absolute unix socket path for `php_fastcgi` when the site needs PHP. */
+  phpFpmSocket?: string | null;
+}>;
+
+/**
+ * Reject a `webEnv` value Caddy would reinterpret rather than escaping it.
+ *
+ * Caddyfile performs placeholder substitution on `{...}` **inside** quoted
+ * strings, so a value containing braces is a config-injection surface, not a
+ * quoting problem. Same doctrine as {@link phpAdminValues}: validate, then
+ * drop — never escape, never interpolate.
+ */
+function isSafeCaddyEnvValue(value: string): boolean {
+  return !/[{}"\\\r\n]/.test(value);
+}
+
+/**
+ * A site block for the **site** Caddy (loopback high port), not the edge one.
+ *
+ * The address is port-only (`:18081`) and never host-qualified: a
+ * host-qualified address makes Caddy match on the `Host` header, and the edge
+ * Caddy forwards the original public Host — so `http://127.0.0.1:18081 { }`
+ * would 404 every real request. `bind` is what restricts the listener.
+ */
+export function caddySiteConfig(
+  site: SiteApplySpec,
+  documentRoot: string,
+  dockerBindAddress?: string | null,
+  opts?: CaddySiteConfigOpts,
+): string {
+  const phpFpmSocket = opts?.phpFpmSocket ?? null;
+  const needsPhp = siteNeedsPhp(site);
+  if (needsPhp && !phpFpmSocket) {
+    throw new Error(
+      `site caddy PHP site ${site.composeServiceName} is missing phpFpmSocket`,
+    );
+  }
+  const binds = ["127.0.0.1", "::1"];
+  if (dockerBindAddress) binds.push(dockerBindAddress);
+  const lines = [
+    `:${site.listenPort} {`,
+    `  bind ${binds.join(" ")}`,
+    `  root * ${documentRoot}`,
+    "  encode zstd gzip",
+  ];
+  if (needsPhp && phpFpmSocket) {
+    // `unix/` + an absolute path is a literal double slash. `php_fastcgi` also
+    // brings its own file-existence matcher, which closes the
+    // non-existent-`.php`-passthrough hole nginx has to guard by hand.
+    const env = Object.entries(site.webEnv ?? {})
+      .filter(([key, value]) =>
+        isSafeCaddyEnvValue(key) && isSafeCaddyEnvValue(value)
+      )
+      .sort(([a], [b]) => a.localeCompare(b));
+    if (env.length > 0) {
+      lines.push(`  php_fastcgi unix/${phpFpmSocket} {`);
+      for (const [key, value] of env) lines.push(`    env ${key} "${value}"`);
+      lines.push("  }");
+    } else {
+      lines.push(`  php_fastcgi unix/${phpFpmSocket}`);
+    }
+  }
+  // No `browse`: a directory listing is not a default worth shipping.
+  lines.push("  file_server", "}", "");
+  return lines.join("\n");
+}
+
 export type NginxSiteConfigOpts = Readonly<{
   /** Absolute unix socket path for `fastcgi_pass` when the site needs PHP. */
   phpFpmSocket?: string | null;
@@ -335,7 +409,7 @@ export type NginxSiteConfigOpts = Readonly<{
 }>;
 
 export function nginxSiteConfig(
-  site: TraditionalWebApplySite,
+  site: SiteApplySpec,
   documentRoot: string,
   dockerBindAddress?: string | null,
   opts?: NginxSiteConfigOpts,
@@ -347,7 +421,7 @@ export function nginxSiteConfig(
   const needsPhp = siteNeedsPhp(site);
   if (needsPhp && !phpFpmSocket) {
     throw new Error(
-      `traditional-web nginx PHP site ${site.composeServiceName} is missing phpFpmSocket`,
+      `site nginx PHP site ${site.composeServiceName} is missing phpFpmSocket`,
     );
   }
   const indexFiles = needsPhp ? "index.php index.html" : "index.html";
@@ -374,26 +448,21 @@ const PHP_MEMORY_RE = /^\d+[KMG]?$/i;
 const PHP_VERSION_RE = /^\d+\.\d+$/;
 
 /**
- * Hosting `web.php.version` series pin — must match `php_fpm_series` in
- * `orchestration/roles/php-fpm/defaults/main.yml`.
- */
-export const PINNED_PHP_FPM_SERIES = "8.4";
-
-/**
- * OpenLiteSpeed's LSAPI PHP series pin — must match `openlitespeed_lsphp_series`
- * in `orchestration/roles/openlitespeed/defaults/main.yml`.
+ * Series a PHP site gets when it names none.
  *
- * `lsphp` and `php-fpm` are different binaries vendored from different sources,
- * but the rule is one PHP version per host across every engine, so the two pins
- * move together and {@link resolvePhpFpmSeries} validates against one value.
+ * A **default**, no longer a pin: several series can be installed side by side,
+ * and `resolveSitePhpSeries` picks per site. `lsphp` (vendored from
+ * rpms.litespeedtech.com) and `php-fpm` (installed from packages.sury.org) are
+ * different binaries from different sources, but a series string means the same
+ * thing to both, so one value covers every engine.
  */
-export const PINNED_LSPHP_SERIES = PINNED_PHP_FPM_SERIES;
+export const DEFAULT_PHP_SERIES = DEFAULT_PHP_FPM_SERIES;
 
-function siteNeedsPhp(site: TraditionalWebApplySite): boolean {
+function siteNeedsPhp(site: SiteApplySpec): boolean {
   return site.php !== undefined && Object.keys(site.php).length > 0;
 }
 
-/** Stable pool / socket basename for one nginx/Apache traditional-web PHP site. */
+/** Stable pool / socket basename for one nginx/Apache site PHP site. */
 export function phpFpmPoolId(
   environmentId: string,
   composeServiceName: string,
@@ -401,14 +470,25 @@ export function phpFpmPoolId(
   return `tp-${environmentId}-${composeServiceName}`;
 }
 
+/**
+ * `<runDir>/php/<series>/<poolId>.sock`.
+ *
+ * Series-scoped because a php-fpm master is one binary: co-installed series run
+ * as separate `turbopanel-php-fpm@<series>` instances, each owning its own pool
+ * glob, pidfile, and socket directory. Moving a site between series therefore
+ * changes this path — which is correct, and free: the engine's config
+ * change-detection notices and reloads only that engine.
+ */
 export function phpFpmSocketPath(
   layout: LayoutPaths,
+  series: string,
   environmentId: string,
   composeServiceName: string,
 ): string {
   return join(
     layout.runDir,
     "php",
+    series,
     `${phpFpmPoolId(environmentId, composeServiceName)}.sock`,
   );
 }
@@ -425,7 +505,7 @@ const PHP_OPEN_BASEDIR_TMP = "/tmp"; // NOSONAR typescript:S5443 — an open_bas
  * that are **already running**.
  *
  * An ordinary release promote deliberately does not reload php-fpm (see
- * `reloadTraditionalWebEngines`), and the vhost/pool paths deliberately keep the
+ * `reloadSiteEngines`), and the vhost/pool paths deliberately keep the
  * stable `current` name. Left alone, PHP would keep serving the previous release
  * out of two caches after the promote:
  *
@@ -485,27 +565,26 @@ export type PhpAdminValue = Readonly<{ key: string; value: string }>;
  * {@link RELEASE_SYMLINK_SWAP_PHP_VALUES}.
  *
  * Anything that fails validation is **dropped**, not escaped: these values land
- * in a config file the web server parses, so a `memoryLimit` of
+ * in a config file the web server parses, so a `memory_limit` of
  * `"256M; rm -rf /"` must never round-trip in any syntax.
  */
 export function phpAdminValues(
-  php: NonNullable<TraditionalWebApplySite["php"]>,
+  php: NonNullable<SiteApplySpec["php"]>,
   opts?: PhpFpmPoolAdminOpts,
 ): PhpAdminValue[] {
   const values: PhpAdminValue[] = [];
-  const memoryLimit = php.memoryLimit?.trim();
-  if (memoryLimit && PHP_MEMORY_RE.test(memoryLimit)) {
-    values.push({ key: "memory_limit", value: memoryLimit });
-  }
-  if (
-    typeof php.maxExecutionTime === "number" &&
-    Number.isInteger(php.maxExecutionTime) &&
-    php.maxExecutionTime > 0
-  ) {
-    values.push({
-      key: "max_execution_time",
-      value: String(php.maxExecutionTime),
-    });
+  // Re-validated at the wire boundary rather than trusted: the control plane
+  // renders these from its own table, but the daemon must never interpolate a
+  // value it has not checked itself. Same doctrine either way — validate, then
+  // *drop*; never escape. Both render targets are line-oriented and unquoted,
+  // so a dropped value has no escaping bug to have.
+  for (const key of Object.keys(php.settings ?? {}).sort()) {
+    const raw = php.settings?.[key];
+    if (!isSettablePhpDirective(key) || typeof raw !== "string") continue;
+    const value = raw.trim();
+    if (value.length === 0 || value.length > 512) continue;
+    if (/[\r\n]/.test(value)) continue;
+    values.push({ key, value });
   }
   const openBasedir = opts?.openBasedir;
   if (openBasedir && openBasedir.length > 0) {
@@ -517,6 +596,81 @@ export function phpAdminValues(
   return values;
 }
 
+/**
+ * Directives an operator may set, mirroring `PHP_SETTINGS` in the instance's
+ * `src/lib/php-settings.ts`.
+ *
+ * Deliberately absent, and the reasons matter: `open_basedir` is computed from
+ * the release layout (an operator value would undo release confinement),
+ * `error_log` must stay platform-owned so the log pipeline finds it, and
+ * `extension` / `zend_extension` would double-load opcache and abort startup.
+ */
+const SETTABLE_PHP_DIRECTIVES: ReadonlySet<string> = new Set([
+  "memory_limit",
+  "upload_max_filesize",
+  "post_max_size",
+  "max_execution_time",
+  "max_input_time",
+  "max_input_vars",
+  "max_file_uploads",
+  "default_socket_timeout",
+  "session.gc_maxlifetime",
+  "display_errors",
+  "display_startup_errors",
+  "log_errors",
+  "allow_url_fopen",
+  "file_uploads",
+  "expose_php",
+  "short_open_tag",
+  "session.cookie_secure",
+  "session.cookie_httponly",
+  "session.use_strict_mode",
+  "opcache.enable",
+  "error_reporting",
+  "session.cookie_samesite",
+  "date.timezone",
+  "disable_functions",
+  "session.name",
+]);
+
+function isSettablePhpDirective(key: string): boolean {
+  return SETTABLE_PHP_DIRECTIVES.has(key);
+}
+
+/** Pool directives (not `php_admin_value`) an operator may tune. */
+const SETTABLE_PHP_POOL_DIRECTIVES: ReadonlySet<string> = new Set([
+  "pm",
+  "pm.max_children",
+  "pm.start_servers",
+  "pm.min_spare_servers",
+  "pm.max_spare_servers",
+  "pm.max_requests",
+  "pm.process_idle_timeout",
+  "request_terminate_timeout",
+]);
+
+/**
+ * Operator pool overrides, re-validated here. Everything else in the pool —
+ * `user`, `group`, `listen*`, `chdir`, `clear_env` — is platform-owned and
+ * cannot be reached from compose.
+ */
+export function phpFpmPoolOverrides(
+  php: SiteApplySpec["php"],
+): Array<{ key: string; value: string }> {
+  const out: Array<{ key: string; value: string }> = [];
+  for (const key of Object.keys(php?.pool ?? {}).sort()) {
+    const raw = php?.pool?.[key];
+    if (!SETTABLE_PHP_POOL_DIRECTIVES.has(key) || typeof raw !== "string") {
+      continue;
+    }
+    const value = raw.trim();
+    if (value.length === 0 || value.length > 64) continue;
+    if (!/^[A-Za-z0-9._-]+$/.test(value)) continue;
+    out.push({ key, value });
+  }
+  return out;
+}
+
 function formatPhpFpmAdminValue(value: PhpAdminValue): string {
   return `php_admin_value[${value.key}] = ${value.value}`;
 }
@@ -526,7 +680,7 @@ function formatPhpFpmAdminValue(value: PhpAdminValue): string {
  * (Apache `php_admin_value` is mod_php-only and is not used.)
  */
 export function phpFpmPoolAdminDirectives(
-  php: NonNullable<TraditionalWebApplySite["php"]>,
+  php: NonNullable<SiteApplySpec["php"]>,
   opts?: PhpFpmPoolAdminOpts,
 ): string[] {
   return phpAdminValues(php, opts).map(formatPhpFpmAdminValue);
@@ -540,7 +694,7 @@ export function phpFpmPoolAdminDirectives(
  */
 export function releasePhpOpenBasedir(
   layout: LayoutPaths,
-  release: TraditionalWebSiteRelease,
+  release: SiteRelease,
   documentRoot: string,
 ): string[] {
   return [
@@ -565,44 +719,70 @@ export function releasePhpOpenBasedir(
  *
  * Returns `undefined` when no site on this host asks for PHP at all.
  */
-export function resolvePhpFpmSeries(
-  sites: readonly TraditionalWebApplySite[],
+export function resolveSitePhpSeries(
+  site: SiteApplySpec,
 ): string | undefined {
-  const versions = new Set<string>();
-  for (const site of sites) {
-    if (!siteNeedsPhp(site)) continue;
-    const version = site.php?.version?.trim();
-    if (!version) continue;
-    if (!PHP_VERSION_RE.test(version)) {
-      throw new Error(
-        `traditional-web PHP version is invalid: ${version}`,
-      );
-    }
-    versions.add(version);
+  if (!siteNeedsPhp(site)) return undefined;
+  const version = site.php?.version?.trim();
+  if (!version) return DEFAULT_PHP_FPM_SERIES;
+  // Wire-integrity check, not a policy assertion: the series becomes a path
+  // segment, a package name, and a systemd instance name.
+  if (!PHP_VERSION_RE.test(version)) {
+    throw new Error(`site PHP version is invalid: ${version}`);
   }
-  if (versions.size > 1) {
-    const listed = [...versions].sort((a, b) => a.localeCompare(b)).join(", ");
-    throw new Error(
-      `traditional-web sites request conflicting PHP versions (${listed}); only one PHP series can be vendored per host`,
-    );
-  }
-  const resolved = [...versions][0];
-  if (resolved !== undefined && resolved !== PINNED_PHP_FPM_SERIES) {
-    throw new Error(
-      `traditional-web PHP ${resolved} is not vendored; host pin is ${PINNED_PHP_FPM_SERIES}`,
-    );
-  }
-  if (resolved !== undefined) return resolved;
-  return sites.some((site) => siteNeedsPhp(site))
-    ? PINNED_PHP_FPM_SERIES
-    : undefined;
+  return version;
 }
 
 /**
- * @deprecated Apache-scoped name kept for callers that predate nginx/OLS PHP.
- * Use {@link resolvePhpFpmSeries}, which covers all three engines.
+ * Distinct PHP series this deploy needs installed, sorted.
+ *
+ * Mirrors `nativeAppNodeVersions`: the host serves many environments, so the
+ * install path is **additive** — it may never remove a series it was not asked
+ * about. Retiring one is a removal-path decision (see `removeSites`), never a
+ * side effect of deploying an environment that happens not to use it.
  */
-export const resolveApachePhpVersion = resolvePhpFpmSeries;
+/**
+ * Opt-in extensions this deploy needs, grouped by series.
+ *
+ * **Union, never intersection** — and that is a real constraint, not a
+ * simplification. `extension=` is `PHP_INI_SYSTEM`, sury registers extensions
+ * in `/etc/php/<series>/mods-available`, and `dl()` is long dead, so there is
+ * no per-pool extension loading: site A gets `intl` because site B on the same
+ * series asked for it. Scoping is only possible in the *disable* direction, via
+ * `php.settings` (e.g. `opcache.enable`).
+ */
+export function phpExtensionsForDeploy(
+  sites: readonly SiteApplySpec[],
+): Record<string, string[]> {
+  const bySeries = new Map<string, Set<string>>();
+  for (const site of sites) {
+    const series = resolveSitePhpSeries(site);
+    if (!series) continue;
+    const wanted = site.php?.extensions ?? [];
+    const set = bySeries.get(series) ?? new Set<string>();
+    for (const name of wanted) {
+      // Re-checked against the registry: the name becomes an apt package.
+      if (isAllowedExtension("php", name)) set.add(name);
+    }
+    bySeries.set(series, set);
+  }
+  const out: Record<string, string[]> = {};
+  for (const [series, set] of bySeries) out[series] = [...set].sort();
+  return out;
+}
+
+export function phpSeriesForDeploy(
+  sites: readonly SiteApplySpec[],
+): string[] {
+  const series = new Set<string>();
+  for (const site of sites) {
+    const resolved = resolveSitePhpSeries(site);
+    if (resolved) series.add(resolved);
+  }
+  return [...series].sort((a, b) =>
+    a.localeCompare(b, undefined, { numeric: true })
+  );
+}
 
 function buildApachePhpBlock(phpFpmSocket: string | null): string {
   if (!phpFpmSocket) {
@@ -631,7 +811,7 @@ function buildApachePhpBlock(phpFpmSocket: string | null): string {
  */
 export function phpFpmPoolConfig(
   environmentId: string,
-  site: TraditionalWebApplySite,
+  site: SiteApplySpec,
   documentRoot: string,
   socketPath: string,
   opts?: PhpFpmPoolAdminOpts,
@@ -640,13 +820,29 @@ export function phpFpmPoolConfig(
   const adminLines = site.php ? phpFpmPoolAdminDirectives(site.php, opts) : [];
   const adminBlock = adminLines.length > 0 ? `\n${adminLines.join("\n")}` : "";
   // Validates principal username shape when pinned (same gate as site chown).
-  resolveTraditionalWebSiteOwnership(site);
-  const engineUser = traditionalWebEngineUnixUser(site.engine);
+  resolveSiteOwnership(site);
+  const engineUser = siteEngineUnixUser(site.engine);
   const poolUser = site.principal?.username ?? engineUser;
   const poolGroup = site.principal
     ? principalUnixGroupName(site.principal.username)
     : engineUser;
-  return `; TurboPanel traditional-web ${site.composeServiceName}
+  // Platform defaults, overridable per site. `ondemand` keeps an idle site off
+  // the host entirely, which matters when one box serves many.
+  const tuning = new Map<string, string>([
+    ["pm", "ondemand"],
+    ["pm.max_children", "20"],
+    ["pm.process_idle_timeout", "30s"],
+  ]);
+  for (const { key, value } of phpFpmPoolOverrides(site.php)) {
+    tuning.set(key, value);
+  }
+  // `pm.process_idle_timeout` is an ondemand-only directive; php-fpm refuses to
+  // start if it is present under another pm mode.
+  if (tuning.get("pm") !== "ondemand") tuning.delete("pm.process_idle_timeout");
+  const poolTuning = [...tuning]
+    .map(([key, value]) => `${key} = ${value}\n`)
+    .join("");
+  return `; TurboPanel site ${site.composeServiceName}
 [${poolId}]
 user = ${poolUser}
 group = ${poolGroup}
@@ -654,10 +850,7 @@ listen = ${socketPath}
 listen.owner = ${engineUser}
 listen.group = ${engineUser}
 listen.mode = 0660
-pm = ondemand
-pm.max_children = 20
-pm.process_idle_timeout = 30s
-chdir = ${documentRoot}
+${poolTuning}chdir = ${documentRoot}
 catch_workers_output = yes
 decorate_workers_output = no
 clear_env = no${adminBlock}
@@ -671,7 +864,7 @@ export type ApacheSiteConfigOpts = Readonly<{
 }>;
 
 export function apacheSiteConfig(
-  site: TraditionalWebApplySite,
+  site: SiteApplySpec,
   documentRoot: string,
   opts?: ApacheSiteConfigOpts,
 ): string {
@@ -679,7 +872,7 @@ export function apacheSiteConfig(
   const phpFpmSocket = opts?.phpFpmSocket ?? null;
   if (siteNeedsPhp(site) && !phpFpmSocket) {
     throw new Error(
-      `traditional-web Apache PHP site ${site.composeServiceName} is missing phpFpmSocket`,
+      `site Apache PHP site ${site.composeServiceName} is missing phpFpmSocket`,
     );
   }
 
@@ -706,7 +899,7 @@ export function apacheSiteConfig(
     vhostAddrs.push(`${dockerBindAddress}:${site.listenPort}`);
   }
 
-  return `# TurboPanel traditional-web ${site.composeServiceName}
+  return `# TurboPanel site ${site.composeServiceName}
 Listen 127.0.0.1:${site.listenPort}${dockerListen}
 <VirtualHost ${vhostAddrs.join(" ")}>
   ServerName localhost
@@ -740,7 +933,7 @@ export function openlitespeedSiteName(
 /** Vendored `lsphp` for one PHP series (`vendor/lsphp/<series>/current/`). */
 export function openlitespeedLsphpBinaryPath(
   layout: LayoutPaths,
-  series: string = PINNED_LSPHP_SERIES,
+  series: string = DEFAULT_PHP_SERIES,
 ): string {
   return join(layout.runtimesDir, "lsphp", series, "current", "bin", "lsphp");
 }
@@ -847,7 +1040,7 @@ function openlitespeedVhostIdentityLines(
  */
 export function openlitespeedSiteFragment(
   environmentId: string,
-  site: TraditionalWebApplySite,
+  site: SiteApplySpec,
   vhConfigPath: string,
   documentRoot: string,
   dockerBindAddress?: string | null,
@@ -940,7 +1133,7 @@ context / {
  * Full `httpd_config.conf` — TurboPanel owns this file entirely (same FHS
  * ownership model as vendored nginx/apache main configs). `fragments` are
  * the current set of per-site `virtualHost`/`listener` blocks from every
- * environment with an OpenLiteSpeed traditional-web site on this host.
+ * environment with an OpenLiteSpeed site on this host.
  */
 export function openlitespeedMainConfig(
   layout: LayoutPaths,
@@ -1012,7 +1205,7 @@ export function formatHostingEnvFile(env: Record<string, string>): string {
 
 /** `hosting.env` / `php.json` contents, or `null` when the site declares neither. */
 function hostingWebMetadataFiles(
-  site: TraditionalWebApplySite,
+  site: SiteApplySpec,
 ): Array<{ name: string; contents: string }> {
   const files: Array<{ name: string; contents: string }> = [];
   if (site.webEnv !== undefined && Object.keys(site.webEnv).length > 0) {
@@ -1033,7 +1226,7 @@ function hostingWebMetadataFiles(
 /** Legacy (daemon-owned) site tree: metadata lives under `<base>/.turbopanel/`. */
 async function writeHostingWebMetadata(
   siteBase: string,
-  site: TraditionalWebApplySite,
+  site: SiteApplySpec,
 ): Promise<void> {
   const files = hostingWebMetadataFiles(site);
   if (files.length === 0) return;
@@ -1059,14 +1252,14 @@ async function writeHostingWebMetadata(
 async function writeReleaseHostingWebMetadata(
   layout: LayoutPaths,
   environmentId: string,
-  site: TraditionalWebApplySite,
-  release: TraditionalWebSiteRelease,
+  site: SiteApplySpec,
+  release: SiteRelease,
 ): Promise<void> {
   const files = hostingWebMetadataFiles(site);
   if (files.length === 0) return;
 
   const group = principalUnixGroupName(release.username);
-  const metaDir = traditionalWebHostingMetadataDir(
+  const metaDir = siteMetadataDir(
     principalHomePath(layout, release.username),
     release.serviceId,
   );
@@ -1088,7 +1281,7 @@ async function writeReleaseHostingWebMetadata(
     );
   }
 
-  const stagingDir = traditionalWebSiteDir(
+  const stagingDir = siteDir(
     layout,
     environmentId,
     site.composeServiceName,
@@ -1125,10 +1318,11 @@ async function writeReleaseHostingWebMetadata(
   }
 }
 
-const TRADITIONAL_WEB_ENGINE_LABELS: Record<
-  EnvironmentDeployTraditionalWebSite["engine"],
+const SITE_ENGINE_LABELS: Record<
+  EnvironmentDeploySite["engine"],
   string
 > = {
+  caddy: "Caddy",
   nginx: "nginx",
   apache: "Apache",
   openlitespeed: "OpenLiteSpeed",
@@ -1136,9 +1330,9 @@ const TRADITIONAL_WEB_ENGINE_LABELS: Record<
 
 export function defaultIndexHtml(
   composeServiceName: string,
-  engine: EnvironmentDeployTraditionalWebSite["engine"] = "nginx",
+  engine: EnvironmentDeploySite["engine"] = "nginx",
 ): string {
-  const engineLabel = TRADITIONAL_WEB_ENGINE_LABELS[engine];
+  const engineLabel = SITE_ENGINE_LABELS[engine];
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -1147,7 +1341,7 @@ export function defaultIndexHtml(
   </head>
   <body>
     <h1>${composeServiceName}</h1>
-    <p>TurboPanel traditional-web (${engineLabel}) site is ready.</p>
+    <p>TurboPanel site (${engineLabel}) site is ready.</p>
   </body>
 </html>
 `;
@@ -1156,7 +1350,7 @@ export function defaultIndexHtml(
 async function ensureDocumentRoot(
   documentRoot: string,
   composeServiceName: string,
-  engine: EnvironmentDeployTraditionalWebSite["engine"],
+  engine: EnvironmentDeploySite["engine"],
 ): Promise<void> {
   await Deno.mkdir(documentRoot, { recursive: true, mode: 0o750 });
   const indexPath = join(documentRoot, "index.html");
@@ -1196,24 +1390,24 @@ async function statOrNull(path: string): Promise<Deno.FileInfo | null> {
  */
 async function assertReleaseDocumentRoot(
   documentRoot: string,
-  site: TraditionalWebApplySite,
+  site: SiteApplySpec,
 ): Promise<void> {
   const stat = await statOrNull(documentRoot);
   if (stat === null) {
     throw new Error(
-      `traditional-web release document root missing for ${site.composeServiceName}: ${documentRoot} (no promoted release, or the build did not emit "${site.root}")`,
+      `site release document root missing for ${site.composeServiceName}: ${documentRoot} (no promoted release, or the build did not emit "${site.root}")`,
     );
   }
   if (!stat.isDirectory) {
     throw new Error(
-      `traditional-web release document root is not a directory for ${site.composeServiceName}: ${documentRoot}`,
+      `site release document root is not a directory for ${site.composeServiceName}: ${documentRoot}`,
     );
   }
 }
 
 /**
  * `run`-bound views of the staging discipline in
- * `traditional-web/engine-driver.ts`. The rules (stage to `<path>.tmp`, compare
+ * `site/engine-driver.ts`. The rules (stage to `<path>.tmp`, compare
  * with `sudo -n cmp -s`, install only on a difference) live there so every
  * engine shares one copy; these exist so the rest of this module keeps calling
  * them without threading the injected runner through every call site.
@@ -1238,7 +1432,7 @@ async function writeOwnedConfigFile(
  *
  * Everything an apply renders goes through this: the swap, the config-test,
  * the reload, the post-reload HTTP probe, and the restore-on-failure all
- * happen together in `rolloutTraditionalWebConfigs`, so nothing reaches a live
+ * happen together in `rolloutSiteConfigs`, so nothing reaches a live
  * path until the whole engine's candidate set is ready to be validated.
  */
 async function stageOwnedConfigFile(
@@ -1249,12 +1443,16 @@ async function stageOwnedConfigFile(
   return await stageOwnedConfigFileVia(run, configPath, contents, group);
 }
 
-function phpFpmPoolsDir(layout: LayoutPaths): string {
-  return join(layout.configDir, "php", "pools");
+/** `<configDir>/php/<series>/pools/` — one glob per FPM master. */
+function phpFpmPoolsDir(layout: LayoutPaths, series: string): string {
+  return join(layout.configDir, "php", series, "pools");
 }
 
-async function reloadPhpFpm(layout: LayoutPaths): Promise<void> {
-  await PHP_FPM_DRIVER.reload(run, layout);
+async function reloadPhpFpm(
+  layout: LayoutPaths,
+  series: string,
+): Promise<void> {
+  await phpFpmDriver(series).reload(run, layout);
 }
 
 async function ensureOpenLiteSpeedDir(path: string): Promise<void> {
@@ -1399,7 +1597,7 @@ async function removePrefixedConfFiles(
   return removed;
 }
 
-async function runTraditionalWebPlaybookDefault(
+async function runSitePlaybookDefault(
   playbookPath: string,
   label: string,
   extraArgs: string[] = [],
@@ -1420,24 +1618,20 @@ async function runTraditionalWebPlaybookDefault(
   }
 }
 
-async function runTraditionalWebPlaybook(
+async function runSitePlaybook(
   playbookPath: string,
   label: string,
   extraArgs: string[] = [],
 ): Promise<void> {
-  const impl = activeIo?.runPlaybook ?? runTraditionalWebPlaybookDefault;
+  const impl = activeIo?.runPlaybook ?? runSitePlaybookDefault;
   await impl(playbookPath, label, extraArgs);
 }
 
-function assertTraditionalWebSite(site: TraditionalWebApplySite): void {
+function assertSite(site: SiteApplySpec): void {
   assertSafeId(site.composeServiceName, "composeServiceName");
   assertSafeRoot(site.root);
-  if (
-    site.engine !== "nginx" &&
-    site.engine !== "apache" &&
-    site.engine !== "openlitespeed"
-  ) {
-    throw new Error(`traditional-web engine "${site.engine}" is not supported`);
+  if (!(site.engine in SITE_ENGINE_DRIVERS)) {
+    throw new Error(`site engine "${site.engine}" is not supported`);
   }
   if (
     !Number.isInteger(site.listenPort) ||
@@ -1445,12 +1639,12 @@ function assertTraditionalWebSite(site: TraditionalWebApplySite): void {
     site.listenPort > 65_535
   ) {
     throw new Error(
-      `traditional-web listenPort is invalid: ${site.listenPort}`,
+      `site listenPort is invalid: ${site.listenPort}`,
     );
   }
   if (site.principal) {
     // Validates username shape used by chown / php-fpm pool user lines.
-    resolveTraditionalWebSiteOwnership(site);
+    resolveSiteOwnership(site);
   }
 }
 
@@ -1505,15 +1699,15 @@ async function chownWebTree(
  * the app process write access to the code it is running.
  */
 async function applySiteTreeOwnership(
-  site: TraditionalWebApplySite,
-  paths: TraditionalWebSitePaths,
+  site: SiteApplySpec,
+  paths: SitePaths,
 ): Promise<void> {
   if (paths.release) return;
-  const ownership = resolveTraditionalWebSiteOwnership(site);
+  const ownership = resolveSiteOwnership(site);
   await chownWebTree(paths.base, ownership.user, ownership.group);
 }
 
-export type ApplyTraditionalWebOpts = {
+export type ApplySiteOpts = {
   /** When set, vhosts also listen on the docker bridge for container reachability. */
   dockerBindAddress?: string | null;
   /**
@@ -1521,31 +1715,32 @@ export type ApplyTraditionalWebOpts = {
    * `sourceMaterial[]` entry for. A site with no entry here keeps the legacy
    * daemon-owned document root and ownership handling unchanged.
    */
-  releaseBindings?: TraditionalWebReleaseBindings;
+  releaseBindings?: SiteReleaseBindings;
   /** Test seam: host command runner (sudo install / reload / chown). */
-  run?: TraditionalWebRunFn;
+  run?: SiteRunFn;
   /** Test seam: Ansible playbook runner (vendor nginx/apache/OLS). */
-  runPlaybook?: TraditionalWebPlaybookFn;
+  runPlaybook?: SitePlaybookFn;
 };
 
-/** Optional test seams for {@link removeTraditionalWebSites}. */
-export type RemoveTraditionalWebDeps = {
-  run?: TraditionalWebRunFn;
+/** Optional test seams for {@link removeSites}. */
+export type RemoveSiteDeps = {
+  run?: SiteRunFn;
 };
 
-function resolveTraditionalWebIo(
+function resolveSiteIo(
   opts?: Readonly<
-    { run?: TraditionalWebRunFn; runPlaybook?: TraditionalWebPlaybookFn }
+    { run?: SiteRunFn; runPlaybook?: SitePlaybookFn }
   >,
-): TraditionalWebIo | undefined {
+): SiteIo | undefined {
   if (!opts?.run && !opts?.runPlaybook) return undefined;
   return {
     run: opts.run ?? runDefault,
-    runPlaybook: opts.runPlaybook ?? runTraditionalWebPlaybookDefault,
+    runPlaybook: opts.runPlaybook ?? runSitePlaybookDefault,
   };
 }
 
-type TraditionalWebSitesDirs = {
+type SiteConfigDirs = {
+  caddy: string;
   nginx: string;
   apache: string;
   openlitespeed: string;
@@ -1556,12 +1751,17 @@ type TraditionalWebSitesDirs = {
  * actually changed" and for "this engine's service account joined a principal
  * group", which are the only two reasons to reload or restart anything.
  */
-type TraditionalWebEngineSet = Set<TraditionalWebApplySite["engine"]>;
+type SiteEngineSet = Set<SiteApplySpec["engine"]>;
 
-/** Engines that reach PHP through a vendored php-fpm pool (not LSAPI). */
-type PhpFpmEngine = "nginx" | "apache";
+/**
+ * Engines that reach PHP through a php-fpm pool (not LSAPI). Caddy's
+ * `php_fastcgi` talks to the same socket nginx's `fastcgi_pass` does, so it
+ * joins this lane rather than needing anything of its own.
+ */
+type PhpFpmEngine = "caddy" | "nginx" | "apache";
 
-type TraditionalWebEngineNeeds = {
+type SiteEngineNeeds = {
+  caddy: boolean;
   nginx: boolean;
   apache: boolean;
   openlitespeed: boolean;
@@ -1577,17 +1777,21 @@ type TraditionalWebEngineNeeds = {
   openlitespeedLsphp: boolean;
 };
 
-function resolveTraditionalWebEngineNeeds(
-  sites: readonly TraditionalWebApplySite[],
-): TraditionalWebEngineNeeds {
+function resolveSiteEngineNeeds(
+  sites: readonly SiteApplySpec[],
+): SiteEngineNeeds {
   const phpFpmEngines = new Set<PhpFpmEngine>();
   for (const site of sites) {
     if (!siteNeedsPhp(site)) continue;
-    if (site.engine === "nginx" || site.engine === "apache") {
+    if (
+      site.engine === "caddy" || site.engine === "nginx" ||
+      site.engine === "apache"
+    ) {
       phpFpmEngines.add(site.engine);
     }
   }
   return {
+    caddy: sites.some((site) => site.engine === "caddy"),
     nginx: sites.some((site) => site.engine === "nginx"),
     apache: sites.some((site) => site.engine === "apache"),
     openlitespeed: sites.some((site) => site.engine === "openlitespeed"),
@@ -1599,52 +1803,83 @@ function resolveTraditionalWebEngineNeeds(
   };
 }
 
-async function installTraditionalWebEngines(
-  needs: TraditionalWebEngineNeeds,
+/**
+ * `phpSeries` is the distinct set this deploy needs. The role only ever
+ * *installs* what it is handed — it must not remove a series it was not asked
+ * about, because the host serves many environments and this payload describes
+ * one. Same additive contract as `node_app_versions`.
+ */
+async function installSiteEngines(
+  needs: SiteEngineNeeds,
+  phpSeries: readonly string[],
+  phpExtensions: Record<string, string[]>,
 ): Promise<void> {
+  if (needs.caddy) {
+    await runSitePlaybook(
+      SITE_CADDY_APPLY_PLAYBOOK,
+      "site-caddy-apply (vendor caddy + php-fpm + identity)",
+      [
+        "-e",
+        JSON.stringify({
+          turbopanel_php_fpm_install: needs.phpFpmEngines.has("caddy"),
+          php_fpm_versions: phpSeries,
+          php_fpm_extensions: phpExtensions,
+        }),
+      ],
+    );
+  }
   if (needs.nginx) {
-    await runTraditionalWebPlaybook(
-      TRADITIONAL_WEB_APPLY_PLAYBOOK,
-      "traditional-web-apply (vendor nginx + php-fpm + identity)",
+    await runSitePlaybook(
+      SITE_NGINX_APPLY_PLAYBOOK,
+      "site-apply (vendor nginx + php-fpm + identity)",
       [
         "-e",
         JSON.stringify({
           turbopanel_php_fpm_install: needs.phpFpmEngines.has("nginx"),
+          php_fpm_versions: phpSeries,
+          php_fpm_extensions: phpExtensions,
         }),
       ],
     );
   }
   if (needs.apache) {
-    await runTraditionalWebPlaybook(
-      TRADITIONAL_WEB_APACHE_APPLY_PLAYBOOK,
-      "traditional-web-apache-apply (vendor httpd + php-fpm + identity)",
+    await runSitePlaybook(
+      SITE_APACHE_APPLY_PLAYBOOK,
+      "site-apache-apply (vendor httpd + php-fpm + identity)",
       [
         "-e",
         JSON.stringify({
           turbopanel_php_fpm_install: needs.phpFpmEngines.has("apache"),
+          php_fpm_versions: phpSeries,
+          php_fpm_extensions: phpExtensions,
         }),
       ],
     );
   }
   if (needs.openlitespeed) {
-    await runTraditionalWebPlaybook(
-      TRADITIONAL_WEB_OPENLITESPEED_APPLY_PLAYBOOK,
-      "traditional-web-openlitespeed-apply (vendor + lsphp + identity)",
+    await runSitePlaybook(
+      SITE_OPENLITESPEED_APPLY_PLAYBOOK,
+      "site-openlitespeed-apply (vendor + lsphp + identity)",
       [
         "-e",
         JSON.stringify({
           turbopanel_lsphp_install: needs.openlitespeedLsphp,
+          openlitespeed_lsphp_versions: phpSeries,
         }),
       ],
     );
   }
 }
 
-async function ensureTraditionalWebDirs(
+async function ensureSiteConfigDirs(
   layout: LayoutPaths,
-  needs: TraditionalWebEngineNeeds,
-  sitesDirs: TraditionalWebSitesDirs,
+  needs: SiteEngineNeeds,
+  sitesDirs: SiteConfigDirs,
+  phpSeries: readonly string[],
 ): Promise<void> {
+  if (needs.caddy) {
+    await Deno.mkdir(sitesDirs.caddy, { recursive: true, mode: 0o750 });
+  }
   if (needs.nginx) {
     await Deno.mkdir(sitesDirs.nginx, { recursive: true, mode: 0o750 });
   }
@@ -1655,30 +1890,43 @@ async function ensureTraditionalWebDirs(
     await Deno.mkdir(sitesDirs.openlitespeed, { recursive: true, mode: 0o750 });
   }
   if (needs.phpFpm) {
-    await Deno.mkdir(phpFpmPoolsDir(layout), { recursive: true, mode: 0o750 });
+    for (const series of phpSeries) {
+      await Deno.mkdir(phpFpmPoolsDir(layout, series), {
+        recursive: true,
+        mode: 0o750,
+      });
+    }
   }
 }
 
 /** Candidate configs one apply staged, grouped by what reloads them. */
-type TraditionalWebStagedConfigs = {
-  phpFpm: StagedConfigWrite[];
+type SiteStagedConfigs = {
+  /** Keyed by PHP series: only the masters that changed get reloaded. */
+  phpFpm: Map<string, StagedConfigWrite[]>;
+  caddy: StagedConfigWrite[];
   nginx: StagedConfigWrite[];
   apache: StagedConfigWrite[];
   openlitespeed: StagedConfigWrite[];
 };
 
-function emptyStagedConfigs(): TraditionalWebStagedConfigs {
-  return { phpFpm: [], nginx: [], apache: [], openlitespeed: [] };
+function emptyStagedConfigs(): SiteStagedConfigs {
+  return {
+    phpFpm: new Map(),
+    caddy: [],
+    nginx: [],
+    apache: [],
+    openlitespeed: [],
+  };
 }
 
 /** Loopback endpoints each engine has to answer on once it is back. */
-type TraditionalWebValidationTargets = Record<
-  TraditionalWebApplySite["engine"],
-  TraditionalWebValidationTarget[]
+type SiteValidationTargets = Record<
+  SiteApplySpec["engine"],
+  SiteValidationTarget[]
 >;
 
-function emptyValidationTargets(): TraditionalWebValidationTargets {
-  return { nginx: [], apache: [], openlitespeed: [] };
+function emptyValidationTargets(): SiteValidationTargets {
+  return { caddy: [], nginx: [], apache: [], openlitespeed: [] };
 }
 
 /**
@@ -1689,14 +1937,14 @@ function emptyValidationTargets(): TraditionalWebValidationTargets {
  * already byte-identical and the whole swap/config-test/reload sequence is
  * skipped.
  */
-type TraditionalWebReloadPlan = Readonly<{
-  needs: TraditionalWebEngineNeeds;
+type SiteReloadPlan = Readonly<{
+  needs: SiteEngineNeeds;
   /** Candidates waiting to be swapped in, per unit. */
-  staged: TraditionalWebStagedConfigs;
+  staged: SiteStagedConfigs;
   /** Engines that newly joined a principal group (restart, not reload). */
-  restartEngines: ReadonlySet<TraditionalWebApplySite["engine"]>;
+  restartEngines: ReadonlySet<SiteApplySpec["engine"]>;
   /** Post-reload HTTP probes, per engine. */
-  validationTargets: TraditionalWebValidationTargets;
+  validationTargets: SiteValidationTargets;
   openlitespeedSitesDir: string;
 }>;
 
@@ -1705,8 +1953,8 @@ type TraditionalWebReloadPlan = Readonly<{
  * its config changed or its group membership newly requires a restart.
  */
 function engineNeedsReload(
-  engine: TraditionalWebApplySite["engine"],
-  plan: TraditionalWebReloadPlan,
+  engine: SiteApplySpec["engine"],
+  plan: SiteReloadPlan,
 ): boolean {
   if (!plan.needs[engine]) return false;
   return plan.staged[engine].length > 0 || plan.restartEngines.has(engine);
@@ -1723,29 +1971,35 @@ function engineNeedsReload(
  *
  * Returns the units actually reloaded/restarted, for the apply log line.
  */
-async function reloadTraditionalWebEngines(
+async function reloadSiteEngines(
   layout: LayoutPaths,
-  plan: TraditionalWebReloadPlan,
+  plan: SiteReloadPlan,
 ): Promise<string[]> {
   const touched: string[] = [];
   // Roll php-fpm out first so its sockets exist before nginx/Apache config-test
   // the `fastcgi_pass` / `proxy:unix:` lines that point at them.
-  if (plan.staged.phpFpm.length > 0) {
-    await rolloutTraditionalWebConfigs({
+  for (
+    const series of [...plan.staged.phpFpm.keys()].sort((a, b) =>
+      a.localeCompare(b, undefined, { numeric: true })
+    )
+  ) {
+    const staged = plan.staged.phpFpm.get(series) ?? [];
+    if (staged.length === 0) continue;
+    await rolloutSiteConfigs({
       run,
       layout,
-      target: PHP_FPM_DRIVER,
+      target: phpFpmDriver(series),
       restart: false,
-      staged: plan.staged.phpFpm,
+      staged,
     });
-    touched.push("php-fpm");
+    touched.push(`php-fpm ${series}`);
   }
-  for (const engine of TRADITIONAL_WEB_ENGINE_ORDER) {
+  for (const engine of SITE_ENGINE_ORDER) {
     if (!engineNeedsReload(engine, plan)) continue;
-    await rolloutTraditionalWebConfigs({
+    await rolloutSiteConfigs({
       run,
       layout,
-      target: TRADITIONAL_WEB_ENGINE_DRIVERS[engine],
+      target: SITE_ENGINE_DRIVERS[engine],
       restart: plan.restartEngines.has(engine),
       staged: plan.staged[engine],
       validationTargets: plan.validationTargets[engine],
@@ -1764,22 +2018,24 @@ async function reloadTraditionalWebEngines(
   return touched;
 }
 
-type TraditionalWebSitePaths = {
+type SitePaths = {
   /** Daemon-owned legacy site dir — also the staging area for owned writes. */
   base: string;
   documentRoot: string;
   sitesDir: string;
   configName: string;
   /** Set when this site serves out of a Git release tree. */
-  release?: TraditionalWebSiteRelease;
+  release?: SiteRelease;
 };
 
 /** What one site's apply staged — the only two reasons anything reloads. */
-type ApplyTraditionalWebSiteResult = {
+type ApplySiteResult = {
   /** Candidate engine configs for this site, in dependency order. */
   staged: StagedConfigWrite[];
   /** Candidate php-fpm pool — the only reason to reload FPM. */
   phpFpmStaged: StagedConfigWrite[];
+  /** Series that owns `phpFpmStaged`, when the site runs PHP. */
+  phpSeries?: string;
 };
 
 /**
@@ -1788,7 +2044,7 @@ type ApplyTraditionalWebSiteResult = {
  */
 function sitePhpAdminOpts(
   layout: LayoutPaths,
-  paths: TraditionalWebSitePaths,
+  paths: SitePaths,
 ): PhpFpmPoolAdminOpts | undefined {
   if (!paths.release) return undefined;
   return {
@@ -1812,12 +2068,13 @@ function sitePhpAdminOpts(
 async function applyPhpFpmPool(
   layout: LayoutPaths,
   environmentId: string,
-  site: TraditionalWebApplySite,
-  paths: TraditionalWebSitePaths,
+  site: SiteApplySpec,
+  paths: SitePaths,
   socketPath: string,
+  series: string,
 ): Promise<StagedConfigWrite | null> {
   const poolPath = join(
-    phpFpmPoolsDir(layout),
+    phpFpmPoolsDir(layout, series),
     `${phpFpmPoolId(environmentId, site.composeServiceName)}.conf`,
   );
   const poolContents = phpFpmPoolConfig(
@@ -1830,7 +2087,7 @@ async function applyPhpFpmPool(
   return await stageOwnedConfigFile(
     poolPath,
     poolContents,
-    traditionalWebEngineUnixUser(site.engine),
+    siteEngineUnixUser(site.engine),
   );
 }
 
@@ -1841,61 +2098,131 @@ function stagedList(
   return staged.filter((entry): entry is StagedConfigWrite => entry !== null);
 }
 
+async function applyCaddySite(
+  layout: LayoutPaths,
+  environmentId: string,
+  site: SiteApplySpec,
+  paths: SitePaths,
+  dockerBind: string | null,
+): Promise<ApplySiteResult> {
+  // Live include dir is FHS `/etc/turbopanel/caddy/sites/` (the site Caddy's
+  // main Caddyfile imports this glob).
+  const phpSeries = resolveSitePhpSeries(site);
+  const phpFpmSocket = phpSeries
+    ? phpFpmSocketPath(
+      layout,
+      phpSeries,
+      environmentId,
+      site.composeServiceName,
+    )
+    : null;
+  const phpFpmStaged = phpSeries && phpFpmSocket
+    ? await applyPhpFpmPool(
+      layout,
+      environmentId,
+      site,
+      paths,
+      phpFpmSocket,
+      phpSeries,
+    )
+    : null;
+  const configPath = join(paths.sitesDir, paths.configName);
+  const contents = caddySiteConfig(site, paths.documentRoot, dockerBind, {
+    phpFpmSocket,
+  });
+  const staged = await SITE_ENGINE_DRIVERS.caddy
+    .stageSiteConfig(run, configPath, contents);
+  await applySiteTreeOwnership(site, paths);
+  return {
+    staged: stagedList(staged),
+    phpFpmStaged: stagedList(phpFpmStaged),
+    ...(phpSeries ? { phpSeries } : {}),
+  };
+}
+
 async function applyNginxSite(
   layout: LayoutPaths,
   environmentId: string,
-  site: TraditionalWebApplySite,
-  paths: TraditionalWebSitePaths,
+  site: SiteApplySpec,
+  paths: SitePaths,
   dockerBind: string | null,
-): Promise<ApplyTraditionalWebSiteResult> {
+): Promise<ApplySiteResult> {
   // Live include dir is FHS `/etc/turbopanel/nginx/sites/` (main nginx.conf
   // Include's this path) — no distro sites-enabled / a2ensite equivalent.
-  const phpFpmSocket = siteNeedsPhp(site)
-    ? phpFpmSocketPath(layout, environmentId, site.composeServiceName)
+  const phpSeries = resolveSitePhpSeries(site);
+  const phpFpmSocket = phpSeries
+    ? phpFpmSocketPath(
+      layout,
+      phpSeries,
+      environmentId,
+      site.composeServiceName,
+    )
     : null;
-  const phpFpmStaged = phpFpmSocket
-    ? await applyPhpFpmPool(layout, environmentId, site, paths, phpFpmSocket)
+  const phpFpmStaged = phpSeries && phpFpmSocket
+    ? await applyPhpFpmPool(
+      layout,
+      environmentId,
+      site,
+      paths,
+      phpFpmSocket,
+      phpSeries,
+    )
     : null;
   const configPath = join(paths.sitesDir, paths.configName);
   const contents = nginxSiteConfig(site, paths.documentRoot, dockerBind, {
     phpFpmSocket,
     fastcgiParamsPath: nginxFastcgiParamsPath(layout),
   });
-  const staged = await TRADITIONAL_WEB_ENGINE_DRIVERS.nginx
+  const staged = await SITE_ENGINE_DRIVERS.nginx
     .stageSiteConfig(run, configPath, contents);
   await applySiteTreeOwnership(site, paths);
   return {
     staged: stagedList(staged),
     phpFpmStaged: stagedList(phpFpmStaged),
+    ...(phpSeries ? { phpSeries } : {}),
   };
 }
 
 async function applyApacheSite(
   layout: LayoutPaths,
   environmentId: string,
-  site: TraditionalWebApplySite,
-  paths: TraditionalWebSitePaths,
+  site: SiteApplySpec,
+  paths: SitePaths,
   dockerBind: string | null,
-): Promise<ApplyTraditionalWebSiteResult> {
+): Promise<ApplySiteResult> {
   // Live include dir is FHS `/etc/turbopanel/apache/sites/` (main httpd.conf
   // IncludeOptional's this path) — no distro a2ensite.
-  const phpFpmSocket = siteNeedsPhp(site)
-    ? phpFpmSocketPath(layout, environmentId, site.composeServiceName)
+  const phpSeries = resolveSitePhpSeries(site);
+  const phpFpmSocket = phpSeries
+    ? phpFpmSocketPath(
+      layout,
+      phpSeries,
+      environmentId,
+      site.composeServiceName,
+    )
     : null;
-  const phpFpmStaged = phpFpmSocket
-    ? await applyPhpFpmPool(layout, environmentId, site, paths, phpFpmSocket)
+  const phpFpmStaged = phpSeries && phpFpmSocket
+    ? await applyPhpFpmPool(
+      layout,
+      environmentId,
+      site,
+      paths,
+      phpFpmSocket,
+      phpSeries,
+    )
     : null;
   const configPath = join(paths.sitesDir, paths.configName);
   const contents = apacheSiteConfig(site, paths.documentRoot, {
     dockerBindAddress: dockerBind,
     phpFpmSocket,
   });
-  const staged = await TRADITIONAL_WEB_ENGINE_DRIVERS.apache
+  const staged = await SITE_ENGINE_DRIVERS.apache
     .stageSiteConfig(run, configPath, contents);
   await applySiteTreeOwnership(site, paths);
   return {
     staged: stagedList(staged),
     phpFpmStaged: stagedList(phpFpmStaged),
+    ...(phpSeries ? { phpSeries } : {}),
   };
 }
 
@@ -1909,16 +2236,19 @@ async function applyApacheSite(
  */
 function resolveOpenLiteSpeedVhostPhp(
   layout: LayoutPaths,
-  site: TraditionalWebApplySite,
-  paths: TraditionalWebSitePaths,
+  site: SiteApplySpec,
+  paths: SitePaths,
   olsSiteName: string,
-  phpSeries: string,
 ): OpenLiteSpeedVhostPhpOpts | undefined {
   if (!site.php || !siteNeedsPhp(site)) return undefined;
-  const engineUser = traditionalWebEngineUnixUser(site.engine);
+  const engineUser = siteEngineUnixUser(site.engine);
   return {
     processorName: openlitespeedLsapiProcessorName(olsSiteName),
-    lsphpPath: openlitespeedLsphpBinaryPath(layout, phpSeries),
+    // Per vhost, so two OLS sites on one host can run different series.
+    lsphpPath: openlitespeedLsphpBinaryPath(
+      layout,
+      resolveSitePhpSeries(site) ?? DEFAULT_PHP_SERIES,
+    ),
     user: site.principal?.username ?? engineUser,
     group: site.principal
       ? principalUnixGroupName(site.principal.username)
@@ -1931,22 +2261,15 @@ function resolveOpenLiteSpeedVhostPhp(
 async function applyOpenLiteSpeedSite(
   layout: LayoutPaths,
   environmentId: string,
-  site: TraditionalWebApplySite,
-  paths: TraditionalWebSitePaths,
+  site: SiteApplySpec,
+  paths: SitePaths,
   dockerBind: string | null,
-  phpSeries: string,
-): Promise<ApplyTraditionalWebSiteResult> {
+): Promise<ApplySiteResult> {
   const olsName = openlitespeedSiteName(environmentId, site.composeServiceName);
   const vhostDir = join(openlitespeedVhostsDir(layout), olsName);
   const vhConfigPath = join(vhostDir, "vhconf.conf");
   await ensureOpenLiteSpeedDir(vhostDir);
-  const php = resolveOpenLiteSpeedVhostPhp(
-    layout,
-    site,
-    paths,
-    olsName,
-    phpSeries,
-  );
+  const php = resolveOpenLiteSpeedVhostPhp(layout, site, paths, olsName);
   const vhostStaged = await stageOwnedConfigFile(
     vhConfigPath,
     openlitespeedVhostConfig(php),
@@ -1965,7 +2288,7 @@ async function applyOpenLiteSpeedSite(
       : { php: true, identity: { user: php.user, group: php.group } },
   );
   const fragmentPath = join(paths.sitesDir, paths.configName);
-  const fragmentStaged = await TRADITIONAL_WEB_ENGINE_DRIVERS.openlitespeed
+  const fragmentStaged = await SITE_ENGINE_DRIVERS.openlitespeed
     .stageSiteConfig(run, fragmentPath, fragment);
   await applySiteTreeOwnership(site, paths);
   // lsphp runs out of the vendored tree, not a shared FPM pool, so an OLS PHP
@@ -1993,10 +2316,10 @@ async function userSupplementaryGroups(user: string): Promise<Set<string>> {
  * caller escalates to a restart for that engine only.
  */
 async function ensureEngineCanReadRelease(
-  site: TraditionalWebApplySite,
-  release: TraditionalWebSiteRelease,
+  site: SiteApplySpec,
+  release: SiteRelease,
 ): Promise<boolean> {
-  const engineUser = traditionalWebEngineUnixUser(site.engine);
+  const engineUser = siteEngineUnixUser(site.engine);
   const group = principalUnixGroupName(release.username);
   const existing = await userSupplementaryGroups(engineUser);
   if (existing.has(group)) return false;
@@ -2004,33 +2327,32 @@ async function ensureEngineCanReadRelease(
   return true;
 }
 
-type ApplyOneTraditionalWebSiteResult = ApplyTraditionalWebSiteResult & {
+type ApplyOneSiteResult = ApplySiteResult & {
   /** Engine whose group membership changed — needs a restart, not a reload. */
-  restartEngine?: TraditionalWebApplySite["engine"];
+  restartEngine?: SiteApplySpec["engine"];
 };
 
-async function applyOneTraditionalWebSite(
+async function applyOneSite(
   layout: LayoutPaths,
   environmentId: string,
-  site: TraditionalWebApplySite,
-  sitesDirs: TraditionalWebSitesDirs,
+  site: SiteApplySpec,
+  sitesDirs: SiteConfigDirs,
   dockerBind: string | null,
-  phpSeries: string,
-  release?: TraditionalWebSiteRelease,
-): Promise<ApplyOneTraditionalWebSiteResult> {
-  const base = traditionalWebSiteDir(
+  release?: SiteRelease,
+): Promise<ApplyOneSiteResult> {
+  const base = siteDir(
     layout,
     environmentId,
     site.composeServiceName,
   );
-  const documentRoot = resolveTraditionalWebDocumentRoot(
+  const documentRoot = resolveSiteDocumentRoot(
     layout,
     environmentId,
     site,
     release,
   );
 
-  let restartEngine: TraditionalWebApplySite["engine"] | undefined;
+  let restartEngine: SiteApplySpec["engine"] | undefined;
   if (release) {
     // The release engine owns the tree; assert it, never create or seed it.
     await assertReleaseDocumentRoot(documentRoot, site);
@@ -2056,6 +2378,16 @@ async function applyOneTraditionalWebSite(
   };
   const restart = restartEngine === undefined ? {} : { restartEngine };
 
+  if (site.engine === "caddy") {
+    const applied = await applyCaddySite(
+      layout,
+      environmentId,
+      site,
+      { ...pathBase, sitesDir: sitesDirs.caddy },
+      dockerBind,
+    );
+    return { ...applied, ...restart };
+  }
   if (site.engine === "nginx") {
     const applied = await applyNginxSite(
       layout,
@@ -2082,13 +2414,12 @@ async function applyOneTraditionalWebSite(
     site,
     { ...pathBase, sitesDir: sitesDirs.openlitespeed },
     dockerBind,
-    phpSeries,
   );
   return { ...applied, ...restart };
 }
 
 /**
- * Apply traditional-web sites for one environment (nginx, Apache, and/or
+ * Apply sites for one environment (nginx, Apache, and/or
  * OpenLiteSpeed — all three serve PHP).
  *
  * Sites named by `opts.releaseBindings` serve out of their Git release tree
@@ -2096,51 +2427,64 @@ async function applyOneTraditionalWebSite(
  * the daemon-owned tree, placeholder `index.html`, and principal chown exactly
  * as before.
  */
-export async function applyTraditionalWebSites(
+export async function applySites(
   layout: LayoutPaths,
   environmentId: string,
-  sites: readonly TraditionalWebApplySite[],
-  opts?: ApplyTraditionalWebOpts,
+  sites: readonly SiteApplySpec[],
+  opts?: ApplySiteOpts,
 ): Promise<{ applied: string[] }> {
   if (sites.length === 0) return { applied: [] };
 
-  return await withTraditionalWebIo(resolveTraditionalWebIo(opts), async () => {
+  return await withSiteIo(resolveSiteIo(opts), async () => {
     assertSafeId(environmentId, "environmentId");
     for (const site of sites) {
-      assertTraditionalWebSite(site);
+      assertSite(site);
     }
 
-    const needs = resolveTraditionalWebEngineNeeds(sites);
-    // Validate PHP series conflicts / pin before vendoring or writing anything:
-    // one series per host feeds both the php-fpm and the lsphp pin.
-    const phpSeries = resolvePhpFpmSeries(sites) ?? PINNED_PHP_FPM_SERIES;
+    const needs = resolveSiteEngineNeeds(sites);
+    // Validate every site's series before vendoring or writing anything, so a
+    // bad version fails the deploy rather than half-applying.
+    for (const site of sites) resolveSitePhpSeries(site);
 
-    await installTraditionalWebEngines(needs);
+    await installSiteEngines(
+      needs,
+      phpSeriesForDeploy(sites),
+      phpExtensionsForDeploy(sites),
+    );
 
-    const sitesDirs: TraditionalWebSitesDirs = {
+    const sitesDirs: SiteConfigDirs = {
+      caddy: join(layout.configDir, "caddy", "sites"),
       nginx: join(layout.configDir, "nginx", "sites"),
       apache: join(layout.configDir, "apache", "sites"),
       openlitespeed: join(layout.configDir, "openlitespeed", "sites"),
     };
-    await ensureTraditionalWebDirs(layout, needs, sitesDirs);
+    await ensureSiteConfigDirs(
+      layout,
+      needs,
+      sitesDirs,
+      phpSeriesForDeploy(sites),
+    );
 
     const dockerBind = opts?.dockerBindAddress ?? null;
     const releaseBindings = opts?.releaseBindings;
     const applied: string[] = [];
-    const restartEngines: TraditionalWebEngineSet = new Set();
+    const restartEngines: SiteEngineSet = new Set();
     const staged = emptyStagedConfigs();
     const validationTargets = emptyValidationTargets();
     for (const site of sites) {
-      const result = await applyOneTraditionalWebSite(
+      const result = await applyOneSite(
         layout,
         environmentId,
         site,
         sitesDirs,
         dockerBind,
-        phpSeries,
         releaseBindings?.get(site.composeServiceName),
       );
-      staged.phpFpm.push(...result.phpFpmStaged);
+      if (result.phpSeries && result.phpFpmStaged.length > 0) {
+        const forSeries = staged.phpFpm.get(result.phpSeries) ?? [];
+        forSeries.push(...result.phpFpmStaged);
+        staged.phpFpm.set(result.phpSeries, forSeries);
+      }
       staged[site.engine].push(...result.staged);
       if (result.restartEngine) restartEngines.add(result.restartEngine);
       // Probed after the reload: the site has to still answer on its own
@@ -2152,7 +2496,7 @@ export async function applyTraditionalWebSites(
       applied.push(site.composeServiceName);
     }
 
-    const reloaded = await reloadTraditionalWebEngines(layout, {
+    const reloaded = await reloadSiteEngines(layout, {
       needs,
       staged,
       restartEngines,
@@ -2164,18 +2508,20 @@ export async function applyTraditionalWebSites(
     // moved `current` — say so, or a skipped reload looks like a lost step.
     logInfo(
       "deploy",
-      `traditional-web applied env=${environmentId} sites=${
-        applied.join(",")
-      } reloaded=${reloaded.join(",") || "none (config unchanged)"}`,
+      `site applied env=${environmentId} sites=${applied.join(",")} reloaded=${
+        reloaded.join(",") || "none (config unchanged)"
+      }`,
     );
     return { applied };
   });
 }
 
 /** What one engine's removal pass took off this host. */
-type RemovedTraditionalWebSites = {
+type RemovedSites = {
   sitesRemoved: number;
   poolsRemoved: number;
+  /** PHP series this removal actually touched — what has to be reloaded. */
+  touchedSeries: Set<string>;
 };
 
 /**
@@ -2192,19 +2538,81 @@ async function removePhpFpmEngineSites(
   layout: LayoutPaths,
   environmentId: string,
   engine: PhpFpmEngine,
-): Promise<RemovedTraditionalWebSites> {
+): Promise<RemovedSites> {
   const prefix = `tp-${environmentId}-`;
   const sitesDir = join(layout.configDir, engine, "sites");
-  const poolsDir = phpFpmPoolsDir(layout);
   const sitesRemoved = await removePrefixedConfFiles(sitesDir, prefix, engine);
-  const poolsRemoved = await removePrefixedConfFiles(
-    poolsDir,
-    prefix,
-    "php-fpm pool",
-  );
   await removeStagingPrefixedFiles(sitesDir, prefix);
-  await removeStagingPrefixedFiles(poolsDir, prefix);
-  return { sitesRemoved, poolsRemoved };
+
+  // Sweep every installed series, not just the default: the environment being
+  // torn down may have pinned any of them, and this function is called once per
+  // engine while pools live under `<configDir>/php/<series>/pools/`.
+  let poolsRemoved = 0;
+  const touchedSeries = new Set<string>();
+  for (const series of await installedPhpSeries(layout)) {
+    const poolsDir = phpFpmPoolsDir(layout, series);
+    const removed = await removePrefixedConfFiles(
+      poolsDir,
+      prefix,
+      `php-fpm ${series} pool`,
+    );
+    await removeStagingPrefixedFiles(poolsDir, prefix);
+    if (removed > 0) touchedSeries.add(series);
+    poolsRemoved += removed;
+  }
+  return { sitesRemoved, poolsRemoved, touchedSeries };
+}
+
+/**
+ * PHP series with a config tree on this host.
+ *
+ * Read from disk rather than the registry: the host is the authority on what is
+ * actually installed, and a series removed from the registry must still be
+ * swept on teardown.
+ */
+async function installedPhpSeries(layout: LayoutPaths): Promise<string[]> {
+  const root = join(layout.configDir, "php");
+  const series: string[] = [];
+  try {
+    for await (const entry of Deno.readDir(root)) {
+      if (entry.isDirectory && PHP_VERSION_RE.test(entry.name)) {
+        series.push(entry.name);
+      }
+    }
+  } catch {
+    return [];
+  }
+  return series.sort((a, b) =>
+    a.localeCompare(b, undefined, { numeric: true })
+  );
+}
+
+/**
+ * Disable a series' master once nothing on the host uses it.
+ *
+ * Retiring a series is a **removal-path** decision, never a side effect of an
+ * install: the deploy payload describes one environment, but the host serves
+ * many. Packages stay installed — uninstalling is a fleet decision.
+ */
+async function disableIdlePhpSeries(
+  layout: LayoutPaths,
+  series: string,
+): Promise<void> {
+  const poolsDir = phpFpmPoolsDir(layout, series);
+  try {
+    for await (const entry of Deno.readDir(poolsDir)) {
+      // `default.conf` is the bootstrap pool the role installs; anything else
+      // means a site still runs on this series.
+      if (entry.isFile && entry.name !== "default.conf") return;
+    }
+  } catch {
+    return;
+  }
+  const unit = phpFpmDriver(series).unit;
+  const stop = await run("sudo", ["-n", "systemctl", "disable", "--now", unit]);
+  if (!stop.success) {
+    logWarn("deploy", `could not disable idle ${unit}: ${stop.stderr}`);
+  }
 }
 
 /** Remove an OpenLiteSpeed vhost dir; best-effort (missing dir is not an error). */
@@ -2223,7 +2631,7 @@ async function tryRemoveOpenLiteSpeedVhostDir(vhostDir: string): Promise<void> {
  * regenerate the aggregated main config from whatever sites remain across
  * all environments on this host. Returns count removed.
  */
-async function removeOpenLiteSpeedTraditionalWebSites(
+async function removeOpenLiteSpeedSites(
   layout: LayoutPaths,
   environmentId: string,
 ): Promise<number> {
@@ -2270,13 +2678,18 @@ async function tryReloadAfterSiteRemoval(
 }
 
 /** Remove nginx/apache/OpenLiteSpeed site configs for an environment (best-effort reload). */
-export async function removeTraditionalWebSites(
+export async function removeSites(
   layout: LayoutPaths,
   environmentId: string,
-  deps?: RemoveTraditionalWebDeps,
+  deps?: RemoveSiteDeps,
 ): Promise<void> {
-  await withTraditionalWebIo(resolveTraditionalWebIo(deps), async () => {
+  await withSiteIo(resolveSiteIo(deps), async () => {
     assertSafeId(environmentId, "environmentId");
+    const caddyRemoved = await removePhpFpmEngineSites(
+      layout,
+      environmentId,
+      "caddy",
+    );
     const nginxRemoved = await removePhpFpmEngineSites(
       layout,
       environmentId,
@@ -2287,25 +2700,39 @@ export async function removeTraditionalWebSites(
       environmentId,
       "apache",
     );
-    const openlitespeedRemoved = await removeOpenLiteSpeedTraditionalWebSites(
+    const openlitespeedRemoved = await removeOpenLiteSpeedSites(
       layout,
       environmentId,
     );
 
-    // php-fpm first, so neither engine config-tests against a socket whose pool
-    // has just been deleted.
-    if (nginxRemoved.poolsRemoved + apacheRemoved.poolsRemoved > 0) {
-      await tryReloadAfterSiteRemoval("php-fpm", () => reloadPhpFpm(layout));
+    // php-fpm first, so no engine config-tests against a socket whose pool has
+    // just been deleted. Only the series that lost a pool are touched.
+    const touchedSeries = new Set<string>([
+      ...caddyRemoved.touchedSeries,
+      ...nginxRemoved.touchedSeries,
+      ...apacheRemoved.touchedSeries,
+    ]);
+    for (
+      const series of [...touchedSeries].sort((a, b) =>
+        a.localeCompare(b, undefined, { numeric: true })
+      )
+    ) {
+      await tryReloadAfterSiteRemoval(
+        `php-fpm ${series}`,
+        () => reloadPhpFpm(layout, series),
+      );
+      await disableIdlePhpSeries(layout, series);
     }
     for (
       const [engine, removed] of [
+        ["caddy", caddyRemoved.sitesRemoved],
         ["nginx", nginxRemoved.sitesRemoved],
         ["apache", apacheRemoved.sitesRemoved],
         ["openlitespeed", openlitespeedRemoved],
       ] as const
     ) {
       if (removed === 0) continue;
-      const driver = TRADITIONAL_WEB_ENGINE_DRIVERS[engine];
+      const driver = SITE_ENGINE_DRIVERS[engine];
       await tryReloadAfterSiteRemoval(
         driver.label,
         () => driver.reload(run, layout, false),

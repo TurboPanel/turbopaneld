@@ -17,17 +17,19 @@ node_app_default_version: "24"
 node_app_versions: ["{{ node_app_default_version }}"]
 node_app_root: "{{ turbopanel_vendor_dir }}/node-app"
 
-# Dedicated group whose *only* meaning is "may execute the vendored tenant Node
-# runtime". Tenant principals each have their own `<username>-grp` and are
-# deliberately not in `tp` (that is the panel's own group), so there is no
-# existing group that covers them — and world bits are not an option on a tree
-# reached through `/opt/turbopanel`. The daemon adds a principal to this group
-# when it deploys that principal's first native app
-# (`ensureNativeAppRuntimeGroupMembership` in
-# `src/deploy/native/apply-native-apps.ts`); membership grants read+traverse on
-# this tree and nothing else.
-node_app_group: tpnodeapp
-node_app_gid: 9988
+# Entitlement groups come from the shared registry
+# (`orchestration/runtime-registry.json`) via the `runtime-entitlement` role,
+# and are per **series** — `tpnode24`, not one `tpnodeapp` for the whole tree.
+#
+# A group means "may execute this runtime series". One group for every series
+# would mean granting Node 24 also grants Node 22, which defeats the point of
+# co-installing them. Tenant principals each have only their own
+# `<username>-grp` and are deliberately not in `tp` (the panel's own group), and
+# world bits are not an option on a tree reached through `/opt/turbopanel`.
+#
+# Membership is reconciled per principal by the daemon
+# (`ensurePrincipalRuntimeGroups` in `src/deploy/ensure-principal.ts`), which
+# both grants and **revokes** — this role only creates the groups.
 # `/opt/turbopanel` and `/opt/turbopanel/vendor` stay `tp:tp 0750` — they hold
 # the panel's own runtimes. The runtime group is granted traverse-only there
 # through a POSIX ACL rather than by loosening the mode, so a tenant principal

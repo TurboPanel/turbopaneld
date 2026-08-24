@@ -1,10 +1,10 @@
 ---
 # Vendor nginx (never a distro apt package) + php-fpm from official PHP source
-# when an nginx site needs PHP + tpnginx identity for traditional-web deploy.
+# when an nginx site needs PHP + tpnginx identity for site deploy.
 # Site vhosts and per-site php-fpm pools are written by the daemon TypeScript
 # apply path after this playbook under /etc/turbopanel/nginx/sites/ and
 # /etc/turbopanel/php/pools/.
-- name: TurboPanel traditional-web prerequisites (nginx)
+- name: TurboPanel site prerequisites (nginx)
   hosts: localhost
   connection: local
   become: true

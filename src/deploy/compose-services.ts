@@ -83,7 +83,7 @@ const COMPOSE_CUSTOM_TAGS: Array<ScalarTag | CollectionTag> = [
  * Tag-aware for `!reset` / `!override`. On parse failure the heuristic is
  * non-fatal and returns `true` so a local parser quirk never blocks a deploy
  * that docker compose config may still accept — empty `services: {}` always
- * parses, so traditional-web-only is unaffected.
+ * parses, so site-only is unaffected.
  */
 export function composeHasContainerServices(composeYaml: string): boolean {
   try {
@@ -98,7 +98,7 @@ export function composeHasContainerServices(composeYaml: string): boolean {
 
 /**
  * Pre-Docker gate: true when any layer declares at least one service under
- * `services`. Preserves traditional-web-only deploys (`services: {}`).
+ * `services`. Preserves site-only deploys (`services: {}`).
  */
 export function composeFilesHaveContainerServices(
   contents: readonly string[],

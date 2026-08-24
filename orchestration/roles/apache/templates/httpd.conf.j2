@@ -1,6 +1,6 @@
 # Managed by TurboPanel — do not edit by hand.
 # Site vhosts live in {{ turbopanel_config_dir }}/apache/sites/*.conf
-# (written by the daemon traditional-web apply path).
+# (written by the daemon site apply path).
 
 ServerRoot "{{ turbopanel_vendor_dir }}/apache/current"
 PidFile "{{ turbopanel_run_dir }}/apache/httpd.pid"
@@ -44,7 +44,7 @@ DocumentRoot "{{ turbopanel_state_dir }}/apache/empty"
     Require all denied
 </Directory>
 
-# Hosting Caddy owns public :80/:443. Traditional-web vhosts Listen on
+# Hosting Caddy owns public :80/:443. Site vhosts Listen on
 # loopback (and optionally docker-bridge) high ports only.
 #
 # Apache refuses to start with zero Listen sockets, so keep a bootstrap

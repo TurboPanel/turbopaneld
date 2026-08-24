@@ -1,12 +1,12 @@
 ; Managed by TurboPanel — do not edit by hand.
-; Per-site pools live in {{ turbopanel_config_dir }}/php/pools/*.conf
-; (written by the daemon traditional-web apply path).
+; Per-site pools live in {{ turbopanel_config_dir }}/php/{{ php_fpm_series_item }}/pools/*.conf
+; (written by the daemon site apply path).
 
 [global]
-pid = {{ turbopanel_run_dir }}/php/php-fpm.pid
-error_log = {{ turbopanel_log_dir }}/php/php-fpm.log
+pid = {{ turbopanel_run_dir }}/php/{{ php_fpm_series_item }}/php-fpm.pid
+error_log = {{ turbopanel_log_dir }}/php/{{ php_fpm_series_item }}/php-fpm.log
 syslog.facility = daemon
-syslog.ident = turbopanel-php-fpm
+syslog.ident = turbopanel-php-fpm-{{ php_fpm_series_item }}
 log_level = notice
 daemonize = yes
-include = {{ turbopanel_config_dir }}/php/pools/*.conf
+include = {{ turbopanel_config_dir }}/php/{{ php_fpm_series_item }}/pools/*.conf

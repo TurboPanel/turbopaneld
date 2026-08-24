@@ -17,28 +17,33 @@ openlitespeed_service_group: tpols
 # would add their apt repo, and never the vendor install.sh.
 #
 # OpenLiteSpeed does not use php-fpm: each vhost execs its own `lsphp` under
-# suEXEC. The *series* must still stay in step with `php_fpm_series` and
-# `PINNED_LSPHP_SERIES` in `../src/deploy/traditional-web.ts` — one PHP version
-# per host across all three engines is a product rule, not a technical one.
-# Only vendored when the daemon passes `turbopanel_lsphp_install: true`.
-openlitespeed_lsphp_series: "8.4"
-openlitespeed_lsphp_version: "8.4.13"
-# Pool directory + package basename (litespeedtech drops the dot from the series).
-openlitespeed_lsphp_pkg: "lsphp84"
-openlitespeed_lsphp_deb_version: "8.4.13-1+bookworm"
+# suEXEC. Several series can be vendored side by side — `vendor/lsphp/<series>/`
+# already had the right shape — and the daemon passes the distinct series a
+# deploy declared. Only vendored when `turbopanel_lsphp_install: true`.
+#
+# Per-series data lives in a map because a series needs more than a version
+# string here: the role builds a `.deb` URL from the package basename and the
+# deb version, and litespeedtech drops the dot from the series in both.
+openlitespeed_lsphp_default_series: "8.4"
+openlitespeed_lsphp_versions: ["{{ openlitespeed_lsphp_default_series }}"]
 openlitespeed_lsphp_repo_base: "https://rpms.litespeedtech.com/debian/pool/main/l"
-# The interpreter plus the extensions a hosting PHP site is expected to have.
-# All ship from the same source package pool at the same version pin.
-openlitespeed_lsphp_packages:
-  - lsphp84
-  - lsphp84-common
-  - lsphp84-mysql
-  - lsphp84-opcache
-  - lsphp84-curl
+openlitespeed_lsphp_series_map:
+  "8.3":
+    version: "8.3.26"
+    pkg: lsphp83
+    deb_version: "8.3.26-1+bookworm"
+    packages: [lsphp83, lsphp83-common, lsphp83-mysql, lsphp83-opcache, lsphp83-curl]
+  "8.4":
+    version: "8.4.13"
+    pkg: lsphp84
+    deb_version: "8.4.13-1+bookworm"
+    packages: [lsphp84, lsphp84-common, lsphp84-mysql, lsphp84-opcache, lsphp84-curl]
+# Back-compat alias for callers that still pass a single series.
+openlitespeed_lsphp_series: "{{ openlitespeed_lsphp_default_series }}"
 
 # FHS mutable paths — decoupled from the vendored (read-mostly) tree via
 # symlinks so `current` can be repointed at a new version without losing
-# config/logs. Daemon TypeScript (src/deploy/traditional-web.ts) owns the
+# config/logs. Daemon TypeScript (src/deploy/site.ts) owns the
 # actual file contents under turbopanel_config_dir/openlitespeed.
 turbopanel_config_dir: "/etc/turbopanel"  # noqa: var-naming[no-role-prefix]
 turbopanel_log_dir: "/var/log/turbopanel"  # noqa: var-naming[no-role-prefix]

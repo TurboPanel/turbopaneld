@@ -1,0 +1,53 @@
+---
+- name: Load the shared runtime registry
+  ansible.builtin.include_vars:
+    file: "{{ role_path }}/../../runtime-registry.json"
+    name: runtime_registry
+
+- name: Assert the caller named a known runtime
+  ansible.builtin.assert:
+    that:
+      - runtime_entitlement_runtime in runtime_registry.runtimes
+    fail_msg: >-
+      Unknown runtime '{{ runtime_entitlement_runtime }}'. Known:
+      {{ runtime_registry.runtimes.keys() | list | join(', ') }}.
+
+# Series the registry does not define get no group. Skipping rather than
+# inventing a name keeps a host from creating groups the daemon will never ask
+# for — the daemon drops unknown series the same way.
+- name: Resolve entitlement groups for the requested series
+  ansible.builtin.set_fact:
+    _runtime_entitlement_groups: >-
+      {{
+        runtime_entitlement_series
+        | map('extract', runtime_registry.runtimes[runtime_entitlement_runtime].series)
+        | select('defined')
+        | select('truthy')
+        | list
+      }}
+
+- name: Ensure each runtime entitlement group
+  ansible.builtin.group:
+    name: "{{ item.group }}"
+    gid: "{{ item.gid }}"
+    state: present
+    system: true
+  loop: "{{ _runtime_entitlement_groups }}"
+  loop_control:
+    label: "{{ item.group }} ({{ item.gid }})"
+
+# `/opt/turbopanel` and `vendor/` stay `tp:tp 0750` — they hold the panel's own
+# runtimes. Traversal is granted as an ACL entry rather than by loosening the
+# mode, so a principal can reach its own runtime without being able to list
+# either parent. `default:` is deliberately unset: the grant covers these two
+# directories only, never their other children.
+- name: Grant each entitlement group traversal of the vendor tree
+  ansible.posix.acl:
+    path: "{{ item.0 }}"
+    etype: group
+    entity: "{{ item.1.group }}"
+    permissions: x
+    state: present
+  loop: "{{ [turbopanel_install_root, turbopanel_vendor_dir] | product(_runtime_entitlement_groups) | list }}"
+  loop_control:
+    label: "{{ item.0 }} -> {{ item.1.group }}"

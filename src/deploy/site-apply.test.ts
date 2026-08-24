@@ -3,15 +3,15 @@ import { dirname, join } from "@std/path";
 import { resolveLayout } from "../paths/layout.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import {
-  applyTraditionalWebSites,
+  applySites,
   RELEASE_SYMLINK_SWAP_PHP_DIRECTIVES,
-  removeTraditionalWebSites,
-  type TraditionalWebApplySite,
-  type TraditionalWebPlaybookFn,
-  type TraditionalWebRunFn,
-  type TraditionalWebRunResult,
-  type TraditionalWebSiteRelease,
-} from "./traditional-web.ts";
+  removeSites,
+  type SiteApplySpec,
+  type SitePlaybookFn,
+  type SiteRelease,
+  type SiteRunFn,
+  type SiteRunResult,
+} from "./site.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -24,7 +24,7 @@ const test = Deno.test.bind(Deno);
 async function makeTestLayout(): Promise<
   { layout: LayoutPaths; root: string; cleanup: () => Promise<void> }
 > {
-  const root = await Deno.makeTempDir({ prefix: "tp-traditional-web-io-" });
+  const root = await Deno.makeTempDir({ prefix: "tp-site-io-" });
   const layout = resolveLayout(
     {
       TURBOPANEL_STATE_DIR: `${root}/state`,
@@ -43,11 +43,11 @@ async function makeTestLayout(): Promise<
   };
 }
 
-function ok(): TraditionalWebRunResult {
+function ok(): SiteRunResult {
   return { success: true, stdout: "", stderr: "" };
 }
 
-function fail(stderr: string): TraditionalWebRunResult {
+function fail(stderr: string): SiteRunResult {
   return { success: false, stdout: "", stderr };
 }
 
@@ -72,12 +72,12 @@ async function filesMatch(a: string, b: string): Promise<boolean> {
  * deletes; `curl` answers 200 so post-reload validation passes; everything
  * else succeeds.
  */
-function createTraditionalWebRunMock(): {
-  run: TraditionalWebRunFn;
+function createSiteRunMock(): {
+  run: SiteRunFn;
   calls: Array<{ command: string; args: string[] }>;
 } {
   const calls: Array<{ command: string; args: string[] }> = [];
-  const run: TraditionalWebRunFn = async (command, args) => {
+  const run: SiteRunFn = async (command, args) => {
     calls.push({ command, args: [...args] });
     if (command === "curl") return { success: true, stdout: "200", stderr: "" };
     if (command !== "sudo") return ok();
@@ -175,7 +175,7 @@ async function listConfigDirEntries(dir: string): Promise<string[]> {
 }
 
 function capturePlaybooks(): {
-  runPlaybook: TraditionalWebPlaybookFn;
+  runPlaybook: SitePlaybookFn;
   labels: string[];
   /** Extra `-e` vars per playbook label — which runtimes the daemon asked for. */
   extraVars: Array<{ label: string; vars: Record<string, unknown> }>;
@@ -204,44 +204,47 @@ function playbookVars(
   return extraVars.find((entry) => entry.label.includes(engine))?.vars;
 }
 
-const nginxSite: TraditionalWebApplySite = {
+const nginxSite: SiteApplySpec = {
   composeServiceName: "www",
   engine: "nginx",
   root: "public",
   listenPort: 18080,
 };
 
-const apachePhpSite: TraditionalWebApplySite = {
+const apachePhpSite: SiteApplySpec = {
   composeServiceName: "phpapp",
   engine: "apache",
   root: "public",
   listenPort: 18081,
-  php: { version: "8.4", memoryLimit: "128M", maxExecutionTime: 30 },
+  php: {
+    version: "8.4",
+    settings: { memory_limit: "128M", max_execution_time: "30" },
+  },
 };
 
-const olsSite: TraditionalWebApplySite = {
+const olsSite: SiteApplySpec = {
   composeServiceName: "static",
   engine: "openlitespeed",
   root: "html",
   listenPort: 18082,
 };
 
-test("applyTraditionalWebSites empty list is a no-op", async () => {
+test("applySites empty list is a no-op", async () => {
   const { layout, cleanup } = await makeTestLayout();
   try {
-    const result = await applyTraditionalWebSites(layout, "env1", []);
+    const result = await applySites(layout, "env1", []);
     assertEquals(result, { applied: [] });
   } finally {
     await cleanup();
   }
 });
 
-test("applyTraditionalWebSites nginx with mocked Ansible/Docker sudo install", async () => {
+test("applySites nginx with mocked Ansible/Docker sudo install", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const { run, calls } = createTraditionalWebRunMock();
+  const { run, calls } = createSiteRunMock();
   const { runPlaybook, labels } = capturePlaybooks();
   try {
-    const result = await applyTraditionalWebSites(layout, "env1", [nginxSite], {
+    const result = await applySites(layout, "env1", [nginxSite], {
       run,
       runPlaybook,
       dockerBindAddress: "203.0.113.10",
@@ -276,12 +279,12 @@ test("applyTraditionalWebSites nginx with mocked Ansible/Docker sudo install", a
   }
 });
 
-test("applyTraditionalWebSites apache+php writes pool and site config", async () => {
+test("applySites apache+php writes pool and site config", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const { run } = createTraditionalWebRunMock();
+  const { run } = createSiteRunMock();
   const { runPlaybook, labels } = capturePlaybooks();
   try {
-    const result = await applyTraditionalWebSites(
+    const result = await applySites(
       layout,
       "env2",
       [apachePhpSite],
@@ -297,7 +300,7 @@ test("applyTraditionalWebSites apache+php writes pool and site config", async ()
     assertStringIncludes(siteConf, "proxy:unix:");
 
     const poolConf = await Deno.readTextFile(
-      join(layout.configDir, "php", "pools", "tp-env2-phpapp.conf"),
+      join(layout.configDir, "php", "8.4", "pools", "tp-env2-phpapp.conf"),
     );
     assertStringIncludes(poolConf, "[tp-env2-phpapp]");
   } finally {
@@ -305,12 +308,12 @@ test("applyTraditionalWebSites apache+php writes pool and site config", async ()
   }
 });
 
-test("applyTraditionalWebSites openlitespeed installs vhost + fragment", async () => {
+test("applySites openlitespeed installs vhost + fragment", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const { run } = createTraditionalWebRunMock();
+  const { run } = createSiteRunMock();
   const { runPlaybook, labels } = capturePlaybooks();
   try {
-    const result = await applyTraditionalWebSites(layout, "env3", [olsSite], {
+    const result = await applySites(layout, "env3", [olsSite], {
       run,
       runPlaybook,
     });
@@ -331,12 +334,12 @@ test("applyTraditionalWebSites openlitespeed installs vhost + fragment", async (
   }
 });
 
-test("applyTraditionalWebSites applies nginx+apache+ols together", async () => {
+test("applySites applies nginx+apache+ols together", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const { run } = createTraditionalWebRunMock();
+  const { run } = createSiteRunMock();
   const { runPlaybook, labels } = capturePlaybooks();
   try {
-    const result = await applyTraditionalWebSites(
+    const result = await applySites(
       layout,
       "env4",
       [nginxSite, apachePhpSite, olsSite],
@@ -349,20 +352,20 @@ test("applyTraditionalWebSites applies nginx+apache+ols together", async () => {
   }
 });
 
-test("removeTraditionalWebSites removes nginx/apache/ols configs via mocked sudo", async () => {
+test("removeSites removes nginx/apache/ols configs via mocked sudo", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const { run } = createTraditionalWebRunMock();
+  const { run } = createSiteRunMock();
   const { runPlaybook } = capturePlaybooks();
   const environmentId = "envrm";
   try {
-    await applyTraditionalWebSites(
+    await applySites(
       layout,
       environmentId,
       [nginxSite, apachePhpSite, olsSite],
       { run, runPlaybook },
     );
 
-    await removeTraditionalWebSites(layout, environmentId, { run });
+    await removeSites(layout, environmentId, { run });
 
     for (
       const path of [
@@ -402,13 +405,13 @@ test("removeTraditionalWebSites removes nginx/apache/ols configs via mocked sudo
   }
 });
 
-test("applyTraditionalWebSites rejects unsafe environmentId", async () => {
+test("applySites rejects unsafe environmentId", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const { run } = createTraditionalWebRunMock();
+  const { run } = createSiteRunMock();
   try {
     await assertRejects(
       () =>
-        applyTraditionalWebSites(layout, "../evil", [nginxSite], {
+        applySites(layout, "../evil", [nginxSite], {
           run,
           runPlaybook: () => Promise.resolve(),
         }),
@@ -420,12 +423,12 @@ test("applyTraditionalWebSites rejects unsafe environmentId", async () => {
   }
 });
 
-test("applyTraditionalWebSites writes webEnv metadata and reloads nginx via start fallback", async () => {
+test("applySites writes webEnv metadata and reloads nginx via start fallback", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const { runPlaybook } = capturePlaybooks();
   const calls: Array<{ command: string; args: string[] }> = [];
-  const base = createTraditionalWebRunMock();
-  const run: TraditionalWebRunFn = async (command, args) => {
+  const base = createSiteRunMock();
+  const run: SiteRunFn = async (command, args) => {
     calls.push({ command, args: [...args] });
     if (
       args.includes("reload") && args.includes("turbopanel-nginx")
@@ -435,7 +438,7 @@ test("applyTraditionalWebSites writes webEnv metadata and reloads nginx via star
     return await base.run(command, args);
   };
   try {
-    const result = await applyTraditionalWebSites(
+    const result = await applySites(
       layout,
       "envmeta",
       [
@@ -468,11 +471,11 @@ test("applyTraditionalWebSites writes webEnv metadata and reloads nginx via star
   }
 });
 
-test("applyTraditionalWebSites fails when nginx -t fails", async () => {
+test("applySites fails when nginx -t fails", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const { runPlaybook } = capturePlaybooks();
-  const base = createTraditionalWebRunMock();
-  const run: TraditionalWebRunFn = async (command, args) => {
+  const base = createSiteRunMock();
+  const run: SiteRunFn = async (command, args) => {
     if (args.includes("-t") && args.includes("-c")) {
       return { success: false, stdout: "", stderr: "nginx config bad" };
     }
@@ -481,7 +484,7 @@ test("applyTraditionalWebSites fails when nginx -t fails", async () => {
   try {
     await assertRejects(
       () =>
-        applyTraditionalWebSites(layout, "envfail", [nginxSite], {
+        applySites(layout, "envfail", [nginxSite], {
           run,
           runPlaybook,
         }),
@@ -493,11 +496,11 @@ test("applyTraditionalWebSites fails when nginx -t fails", async () => {
   }
 });
 
-test("applyTraditionalWebSites fails when apache reload and start both fail", async () => {
+test("applySites fails when apache reload and start both fail", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const { runPlaybook } = capturePlaybooks();
-  const base = createTraditionalWebRunMock();
-  const run: TraditionalWebRunFn = async (command, args) => {
+  const base = createSiteRunMock();
+  const run: SiteRunFn = async (command, args) => {
     if (args.includes("reload") && args.includes("turbopanel-apache")) {
       return { success: false, stdout: "", stderr: "reload failed" };
     }
@@ -509,7 +512,7 @@ test("applyTraditionalWebSites fails when apache reload and start both fail", as
   try {
     await assertRejects(
       () =>
-        applyTraditionalWebSites(layout, "envapache", [apachePhpSite], {
+        applySites(layout, "envapache", [apachePhpSite], {
           run,
           runPlaybook,
         }),
@@ -521,13 +524,13 @@ test("applyTraditionalWebSites fails when apache reload and start both fail", as
   }
 });
 
-test("applyTraditionalWebSites rejects unsafe document root", async () => {
+test("applySites rejects unsafe document root", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const { run } = createTraditionalWebRunMock();
+  const { run } = createSiteRunMock();
   try {
     await assertRejects(
       () =>
-        applyTraditionalWebSites(
+        applySites(
           layout,
           "envroot",
           [{ ...nginxSite, root: "../escape" }],
@@ -537,7 +540,7 @@ test("applyTraditionalWebSites rejects unsafe document root", async () => {
           },
         ),
       Error,
-      "traditional-web root is unsafe",
+      "site root is unsafe",
     );
   } finally {
     await cleanup();
@@ -552,14 +555,14 @@ const RELEASE_USERNAME = "appuser";
 const RELEASE_SERVICE_ID = "svc-1";
 const RELEASE_GROUP = `${RELEASE_USERNAME}-grp`;
 
-const releaseBinding: TraditionalWebSiteRelease = {
+const releaseBinding: SiteRelease = {
   serviceId: RELEASE_SERVICE_ID,
   username: RELEASE_USERNAME,
 };
 
 function releaseBindingsFor(
   ...composeServiceNames: readonly string[]
-): Map<string, TraditionalWebSiteRelease> {
+): Map<string, SiteRelease> {
   return new Map(
     composeServiceNames.map((name) => [name, releaseBinding]),
   );
@@ -608,9 +611,9 @@ async function seedRelease(
 
 /** Wrap the sudo mock so `id -nG <user>` reports `groups` for that user. */
 function withGroupMembership(
-  base: TraditionalWebRunFn,
+  base: SiteRunFn,
   groupsByUser: Readonly<Record<string, readonly string[]>>,
-): TraditionalWebRunFn {
+): SiteRunFn {
   return async (command, args) => {
     if (command === "id" && args[0] === "-nG") {
       const user = args[1] ?? "";
@@ -669,15 +672,15 @@ function systemctlActions(
   return actions;
 }
 
-test("applyTraditionalWebSites serves a release-backed nginx site from current/", async () => {
+test("applySites serves a release-backed nginx site from current/", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const mock = createTraditionalWebRunMock();
+  const mock = createSiteRunMock();
   const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
   const { runPlaybook } = capturePlaybooks();
   try {
     await seedRelease(layout, "rel-1", "public", "<h1>release one</h1>");
 
-    const result = await applyTraditionalWebSites(layout, "envrel", [
+    const result = await applySites(layout, "envrel", [
       nginxSite,
     ], {
       run,
@@ -723,15 +726,15 @@ test("applyTraditionalWebSites serves a release-backed nginx site from current/"
   }
 });
 
-test("applyTraditionalWebSites writes release hosting metadata beside the release", async () => {
+test("applySites writes release hosting metadata beside the release", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const mock = createTraditionalWebRunMock();
+  const mock = createSiteRunMock();
   const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
   const { runPlaybook } = capturePlaybooks();
   try {
     await seedRelease(layout, "rel-1", "public", "<h1>one</h1>");
 
-    await applyTraditionalWebSites(layout, "envmeta2", [
+    await applySites(layout, "envmeta2", [
       { ...nginxSite, webEnv: { FOO: 'bar"baz' } },
     ], {
       run,
@@ -765,9 +768,9 @@ test("applyTraditionalWebSites writes release hosting metadata beside the releas
   }
 });
 
-test("applyTraditionalWebSites is byte-identical across a release promote", async () => {
+test("applySites is byte-identical across a release promote", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const mock = createTraditionalWebRunMock();
+  const mock = createSiteRunMock();
   // Already a member: a redeploy must not restart the engine again.
   const run = withGroupMembership(mock.run, {
     tpnginx: ["tpnginx", RELEASE_GROUP],
@@ -781,7 +784,7 @@ test("applyTraditionalWebSites is byte-identical across a release promote", asyn
   );
   try {
     await seedRelease(layout, "rel-1", "public", "<h1>one</h1>");
-    await applyTraditionalWebSites(layout, "envswap", [nginxSite], {
+    await applySites(layout, "envswap", [nginxSite], {
       run,
       runPlaybook,
       releaseBindings: releaseBindingsFor("www"),
@@ -792,7 +795,7 @@ test("applyTraditionalWebSites is byte-identical across a release promote", asyn
 
     // Second promote swaps `current` to a different release directory.
     await seedRelease(layout, "rel-2", "public", "<h1>two</h1>");
-    await applyTraditionalWebSites(layout, "envswap", [nginxSite], {
+    await applySites(layout, "envswap", [nginxSite], {
       run,
       runPlaybook,
       releaseBindings: releaseBindingsFor("www"),
@@ -822,16 +825,16 @@ test("applyTraditionalWebSites is byte-identical across a release promote", asyn
   }
 });
 
-test("applyTraditionalWebSites reloads again once release-backed config changes", async () => {
+test("applySites reloads again once release-backed config changes", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const mock = createTraditionalWebRunMock();
+  const mock = createSiteRunMock();
   const run = withGroupMembership(mock.run, {
     tpnginx: ["tpnginx", RELEASE_GROUP],
   });
   const { runPlaybook } = capturePlaybooks();
   try {
     await seedRelease(layout, "rel-1", "public", "<h1>one</h1>");
-    await applyTraditionalWebSites(layout, "envport", [nginxSite], {
+    await applySites(layout, "envport", [nginxSite], {
       run,
       runPlaybook,
       releaseBindings: releaseBindingsFor("www"),
@@ -840,7 +843,7 @@ test("applyTraditionalWebSites reloads again once release-backed config changes"
 
     // A different listen port is a real vhost change — the skip is content
     // based, not "release-backed sites never reload".
-    await applyTraditionalWebSites(layout, "envport", [{
+    await applySites(layout, "envport", [{
       ...nginxSite,
       listenPort: 18099,
     }], {
@@ -863,9 +866,9 @@ test("applyTraditionalWebSites reloads again once release-backed config changes"
   }
 });
 
-test("applyTraditionalWebSites serves the last good release after a failed build", async () => {
+test("applySites serves the last good release after a failed build", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const mock = createTraditionalWebRunMock();
+  const mock = createSiteRunMock();
   const run = withGroupMembership(mock.run, {
     tpnginx: ["tpnginx", RELEASE_GROUP],
   });
@@ -875,7 +878,7 @@ test("applyTraditionalWebSites serves the last good release after a failed build
     // at the previous release and the staged directory is gone.
     await seedRelease(layout, "rel-1", "public", "<h1>last good</h1>");
 
-    const result = await applyTraditionalWebSites(layout, "envfail2", [
+    const result = await applySites(layout, "envfail2", [
       nginxSite,
     ], {
       run,
@@ -895,15 +898,15 @@ test("applyTraditionalWebSites serves the last good release after a failed build
   }
 });
 
-test("applyTraditionalWebSites fails loudly when no release has been promoted", async () => {
+test("applySites fails loudly when no release has been promoted", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const mock = createTraditionalWebRunMock();
+  const mock = createSiteRunMock();
   const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
   const { runPlaybook } = capturePlaybooks();
   try {
     await assertRejects(
       () =>
-        applyTraditionalWebSites(layout, "envnorel", [nginxSite], {
+        applySites(layout, "envnorel", [nginxSite], {
           run,
           runPlaybook,
           releaseBindings: releaseBindingsFor("www"),
@@ -924,22 +927,22 @@ test("applyTraditionalWebSites fails loudly when no release has been promoted", 
   }
 });
 
-test("applyTraditionalWebSites confines a release-backed PHP pool with open_basedir", async () => {
+test("applySites confines a release-backed PHP pool with open_basedir", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const mock = createTraditionalWebRunMock();
+  const mock = createSiteRunMock();
   const run = withGroupMembership(mock.run, { tpapache: ["tpapache"] });
   const { runPlaybook } = capturePlaybooks();
   try {
     await seedRelease(layout, "rel-1", "public", "<?php echo 1;");
 
-    await applyTraditionalWebSites(layout, "envphp", [apachePhpSite], {
+    await applySites(layout, "envphp", [apachePhpSite], {
       run,
       runPlaybook,
       releaseBindings: releaseBindingsFor("phpapp"),
     });
 
     const poolConf = await Deno.readTextFile(
-      join(layout.configDir, "php", "pools", "tp-envphp-phpapp.conf"),
+      join(layout.configDir, "php", "8.4", "pools", "tp-envphp-phpapp.conf"),
     );
     const documentRoot = join(siteTreeRoot(layout), "current", "public");
     const sharedDir = join(siteTreeRoot(layout), "shared");
@@ -962,7 +965,9 @@ test("applyTraditionalWebSites confines a release-backed PHP pool with open_base
 
     // php-fpm workers run as the principal, which owns the group already.
     assertEquals(
-      systemctlActions(mock.calls, "turbopanel-php-fpm").includes("restart"),
+      systemctlActions(mock.calls, "turbopanel-php-fpm@8.4").includes(
+        "restart",
+      ),
       false,
     );
   } finally {
@@ -970,12 +975,12 @@ test("applyTraditionalWebSites confines a release-backed PHP pool with open_base
   }
 });
 
-test("applyTraditionalWebSites leaves a legacy PHP pool on baseline caching", async () => {
+test("applySites leaves a legacy PHP pool on baseline caching", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const { run } = createTraditionalWebRunMock();
+  const { run } = createSiteRunMock();
   const { runPlaybook } = capturePlaybooks();
   try {
-    await applyTraditionalWebSites(layout, "envphpleg", [apachePhpSite], {
+    await applySites(layout, "envphpleg", [apachePhpSite], {
       run,
       runPlaybook,
     });
@@ -983,7 +988,7 @@ test("applyTraditionalWebSites leaves a legacy PHP pool on baseline caching", as
     // No symlink to outrun: a daemon-owned root keeps the vendored php.ini
     // opcache/realpath defaults rather than paying for a per-request stat.
     const poolConf = await Deno.readTextFile(
-      join(layout.configDir, "php", "pools", "tp-envphpleg-phpapp.conf"),
+      join(layout.configDir, "php", "8.4", "pools", "tp-envphpleg-phpapp.conf"),
     );
     for (const directive of RELEASE_SYMLINK_SWAP_PHP_DIRECTIVES) {
       assertEquals(poolConf.includes(directive), false);
@@ -994,16 +999,16 @@ test("applyTraditionalWebSites leaves a legacy PHP pool on baseline caching", as
   }
 });
 
-test("applyTraditionalWebSites skips the php-fpm reload on a release promote", async () => {
+test("applySites skips the php-fpm reload on a release promote", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const mock = createTraditionalWebRunMock();
+  const mock = createSiteRunMock();
   const run = withGroupMembership(mock.run, {
     tpapache: ["tpapache", RELEASE_GROUP],
   });
   const { runPlaybook } = capturePlaybooks();
   try {
     await seedRelease(layout, "rel-1", "public", "<?php echo 1;");
-    await applyTraditionalWebSites(layout, "envphpswap", [apachePhpSite], {
+    await applySites(layout, "envphpswap", [apachePhpSite], {
       run,
       runPlaybook,
       releaseBindings: releaseBindingsFor("phpapp"),
@@ -1011,7 +1016,7 @@ test("applyTraditionalWebSites skips the php-fpm reload on a release promote", a
     const firstApplyCalls = mock.calls.length;
 
     await seedRelease(layout, "rel-2", "public", "<?php echo 2;");
-    await applyTraditionalWebSites(layout, "envphpswap", [apachePhpSite], {
+    await applySites(layout, "envphpswap", [apachePhpSite], {
       run,
       runPlaybook,
       releaseBindings: releaseBindingsFor("phpapp"),
@@ -1033,14 +1038,14 @@ test("applyTraditionalWebSites skips the php-fpm reload on a release promote", a
   }
 });
 
-test("applyTraditionalWebSites keeps legacy behavior for a source-less site", async () => {
+test("applySites keeps legacy behavior for a source-less site", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const mock = createTraditionalWebRunMock();
+  const mock = createSiteRunMock();
   const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
   const { runPlaybook } = capturePlaybooks();
   try {
     // A binding for a *different* compose service must not leak onto this one.
-    const result = await applyTraditionalWebSites(layout, "envlegacy", [
+    const result = await applySites(layout, "envlegacy", [
       { ...nginxSite, webEnv: { FOO: "bar" } },
     ], {
       run,
@@ -1077,28 +1082,223 @@ test("applyTraditionalWebSites keeps legacy behavior for a source-less site", as
   }
 });
 
-const nginxPhpSite: TraditionalWebApplySite = {
+const nginxPhpSite: SiteApplySpec = {
   composeServiceName: "phpsite",
   engine: "nginx",
   root: "public",
   listenPort: 18083,
-  php: { version: "8.4", memoryLimit: "192M" },
+  php: { version: "8.4", settings: { memory_limit: "192M" } },
 };
 
-const olsPhpSite: TraditionalWebApplySite = {
+const olsPhpSite: SiteApplySpec = {
   composeServiceName: "olsphp",
   engine: "openlitespeed",
   root: "public",
   listenPort: 18084,
-  php: { version: "8.4", memoryLimit: "192M" },
+  php: { version: "8.4", settings: { memory_limit: "192M" } },
 };
 
-test("applyTraditionalWebSites nginx+php vendors php-fpm and writes its pool", async () => {
+const caddySite: SiteApplySpec = {
+  composeServiceName: "static",
+  engine: "caddy",
+  root: "public",
+  listenPort: 18085,
+};
+
+const caddyPhpSite: SiteApplySpec = {
+  composeServiceName: "wp",
+  engine: "caddy",
+  root: "public",
+  listenPort: 18086,
+  php: { version: "8.4", settings: { memory_limit: "256M" } },
+};
+
+test("applySites caddy writes a site block and reloads the site Caddy", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const { run, calls } = createTraditionalWebRunMock();
+  const { run, calls } = createSiteRunMock();
   const { runPlaybook, extraVars } = capturePlaybooks();
   try {
-    await applyTraditionalWebSites(layout, "envnginxphp", [nginxPhpSite], {
+    await applySites(layout, "envcaddy", [caddySite], { run, runPlaybook });
+
+    // A static Caddy site needs no PHP at all.
+    assertEquals(playbookVars(extraVars, "caddy"), {
+      turbopanel_php_fpm_install: false,
+      php_fpm_versions: [],
+      php_fpm_extensions: {},
+    });
+
+    const conf = await Deno.readTextFile(
+      join(layout.configDir, "caddy", "sites", "tp-envcaddy-static.conf"),
+    );
+    assertStringIncludes(conf, ":18085 {");
+    assertStringIncludes(conf, "file_server");
+
+    // Same transaction as every other engine: validate before reload.
+    assertEquals(
+      calls.some((c) =>
+        c.args.includes("validate") && c.args.includes("--adapter")
+      ),
+      true,
+    );
+    assertEquals(
+      systemctlActions(calls, "turbopanel-site-caddy").length > 0,
+      true,
+    );
+    // The site Caddy is a separate unit from the edge one.
+    assertEquals(systemctlActions(calls, "turbopanel-hosting-caddy"), []);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("applySites caddy+php installs php-fpm and reloads it before Caddy", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run, calls } = createSiteRunMock();
+  const { runPlaybook, extraVars } = capturePlaybooks();
+  try {
+    await applySites(layout, "envcaddyphp", [caddyPhpSite], {
+      run,
+      runPlaybook,
+    });
+
+    // php-fpm has to come from the *caddy* playbook: on a Caddy-only host
+    // neither the nginx nor the Apache playbook ever runs.
+    assertEquals(playbookVars(extraVars, "caddy"), {
+      turbopanel_php_fpm_install: true,
+      php_fpm_versions: ["8.4"],
+      php_fpm_extensions: { "8.4": [] },
+    });
+
+    const pool = await Deno.readTextFile(
+      join(layout.configDir, "php", "8.4", "pools", "tp-envcaddyphp-wp.conf"),
+    );
+    assertStringIncludes(pool, "[tp-envcaddyphp-wp]");
+    // The socket is owned by whichever engine consumes it.
+    assertStringIncludes(pool, "listen.owner = tpcaddysite");
+
+    const conf = await Deno.readTextFile(
+      join(layout.configDir, "caddy", "sites", "tp-envcaddyphp-wp.conf"),
+    );
+    assertStringIncludes(
+      conf,
+      `php_fastcgi unix/${layout.runDir}/php/8.4/tp-envcaddyphp-wp.sock`,
+    );
+
+    // php-fpm reloads first so the socket exists when `caddy validate` runs.
+    const units = calls
+      .filter((c) => c.args.includes("systemctl"))
+      .map((c) => c.args.at(-1));
+    assertEquals(
+      units.indexOf("turbopanel-php-fpm@8.4") <
+        units.indexOf("turbopanel-site-caddy"),
+      true,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("applySites runs two PHP series side by side", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run, calls } = createSiteRunMock();
+  const { runPlaybook, extraVars } = capturePlaybooks();
+  try {
+    await applySites(layout, "envmulti", [
+      {
+        composeServiceName: "legacy",
+        engine: "apache",
+        root: "public",
+        listenPort: 18090,
+        php: { version: "8.3" },
+      },
+      {
+        composeServiceName: "modern",
+        engine: "nginx",
+        root: "public",
+        listenPort: 18091,
+        php: { version: "8.4" },
+      },
+    ], { run, runPlaybook });
+
+    // Both series cross the Ansible seam; the role installs, never removes.
+    assertEquals(playbookVars(extraVars, "nginx")?.php_fpm_versions, [
+      "8.3",
+      "8.4",
+    ]);
+
+    // Distinct pools, distinct sockets, distinct config trees.
+    const legacyPool = await Deno.readTextFile(
+      join(layout.configDir, "php", "8.3", "pools", "tp-envmulti-legacy.conf"),
+    );
+    assertStringIncludes(legacyPool, `${layout.runDir}/php/8.3/`);
+    const modernPool = await Deno.readTextFile(
+      join(layout.configDir, "php", "8.4", "pools", "tp-envmulti-modern.conf"),
+    );
+    assertStringIncludes(modernPool, `${layout.runDir}/php/8.4/`);
+
+    const nginxConf = await Deno.readTextFile(
+      join(layout.configDir, "nginx", "sites", "tp-envmulti-modern.conf"),
+    );
+    assertStringIncludes(
+      nginxConf,
+      `fastcgi_pass unix:${layout.runDir}/php/8.4/tp-envmulti-modern.sock;`,
+    );
+
+    // One systemd instance per series — a master is one binary.
+    assertEquals(
+      systemctlActions(calls, "turbopanel-php-fpm@8.3").length > 0,
+      true,
+    );
+    assertEquals(
+      systemctlActions(calls, "turbopanel-php-fpm@8.4").length > 0,
+      true,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("applySites reloads only the series a deploy touched", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    // Establish both series on the host.
+    const first = createSiteRunMock();
+    await applySites(layout, "envA", [{
+      composeServiceName: "legacy",
+      engine: "apache",
+      root: "public",
+      listenPort: 18092,
+      php: { version: "8.3" },
+    }], { run: first.run, runPlaybook });
+
+    // A second environment on 8.4 must not disturb the 8.3 master serving the
+    // first — that is the whole point of one instance per series.
+    const second = createSiteRunMock();
+    await applySites(layout, "envB", [{
+      composeServiceName: "modern",
+      engine: "nginx",
+      root: "public",
+      listenPort: 18093,
+      php: { version: "8.4" },
+    }], { run: second.run, runPlaybook });
+
+    assertEquals(systemctlActions(second.calls, "turbopanel-php-fpm@8.3"), []);
+    assertEquals(
+      systemctlActions(second.calls, "turbopanel-php-fpm@8.4").length > 0,
+      true,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("applySites nginx+php vendors php-fpm and writes its pool", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run, calls } = createSiteRunMock();
+  const { runPlaybook, extraVars } = capturePlaybooks();
+  try {
+    await applySites(layout, "envnginxphp", [nginxPhpSite], {
       run,
       runPlaybook,
     });
@@ -1107,10 +1307,18 @@ test("applyTraditionalWebSites nginx+php vendors php-fpm and writes its pool", a
     // runs on an nginx-only host.
     assertEquals(playbookVars(extraVars, "nginx"), {
       turbopanel_php_fpm_install: true,
+      php_fpm_versions: ["8.4"],
+      php_fpm_extensions: { "8.4": [] },
     });
 
     const pool = await Deno.readTextFile(
-      join(layout.configDir, "php", "pools", "tp-envnginxphp-phpsite.conf"),
+      join(
+        layout.configDir,
+        "php",
+        "8.4",
+        "pools",
+        "tp-envnginxphp-phpsite.conf",
+      ),
     );
     assertStringIncludes(pool, "[tp-envnginxphp-phpsite]");
     assertStringIncludes(pool, "listen.owner = tpnginx");
@@ -1121,7 +1329,19 @@ test("applyTraditionalWebSites nginx+php vendors php-fpm and writes its pool", a
     );
     assertStringIncludes(
       conf,
-      `fastcgi_pass unix:${layout.runDir}/php/tp-envnginxphp-phpsite.sock;`,
+      `fastcgi_pass unix:${layout.runDir}/php/8.4/tp-envnginxphp-phpsite.sock;`,
+    );
+
+    // php-fpm is installed from sury, so its config test must exec the apt
+    // binary. The vendored `<runtimesDir>/php/current/sbin/php-fpm` path this
+    // replaced no longer exists, and an ENOENT here fails the config test and
+    // rolls the whole apply back.
+    assertEquals(
+      calls.some(
+        (c) =>
+          c.args.includes("/usr/sbin/php-fpm8.4") && c.args.includes("--test"),
+      ),
+      true,
     );
 
     // php-fpm reloads before nginx so `nginx -t` finds the socket it names.
@@ -1129,7 +1349,8 @@ test("applyTraditionalWebSites nginx+php vendors php-fpm and writes its pool", a
       .filter((c) => c.args.includes("systemctl"))
       .map((c) => c.args.at(-1));
     assertEquals(
-      units.indexOf("turbopanel-php-fpm") < units.indexOf("turbopanel-nginx"),
+      units.indexOf("turbopanel-php-fpm@8.4") <
+        units.indexOf("turbopanel-nginx"),
       true,
     );
   } finally {
@@ -1137,18 +1358,19 @@ test("applyTraditionalWebSites nginx+php vendors php-fpm and writes its pool", a
   }
 });
 
-test("applyTraditionalWebSites openlitespeed+php vendors lsphp and wires LSAPI", async () => {
+test("applySites openlitespeed+php vendors lsphp and wires LSAPI", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const { run, calls } = createTraditionalWebRunMock();
+  const { run, calls } = createSiteRunMock();
   const { runPlaybook, extraVars } = capturePlaybooks();
   try {
-    await applyTraditionalWebSites(layout, "envols", [olsPhpSite], {
+    await applySites(layout, "envols", [olsPhpSite], {
       run,
       runPlaybook,
     });
 
     assertEquals(playbookVars(extraVars, "openlitespeed"), {
       turbopanel_lsphp_install: true,
+      openlitespeed_lsphp_versions: ["8.4"],
     });
 
     const vhost = await Deno.readTextFile(
@@ -1179,38 +1401,39 @@ test("applyTraditionalWebSites openlitespeed+php vendors lsphp and wires LSAPI",
     assertStringIncludes(fragment, "enableScript              1");
 
     // No php-fpm anywhere: OLS runs its own lsphp.
-    assertEquals(systemctlActions(calls, "turbopanel-php-fpm"), []);
+    assertEquals(systemctlActions(calls, "turbopanel-php-fpm@8.4"), []);
   } finally {
     await cleanup();
   }
 });
 
-test("removeTraditionalWebSites drops nginx pools and reloads php-fpm", async () => {
+test("removeSites drops nginx pools and reloads php-fpm", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const { run } = createTraditionalWebRunMock();
+  const { run } = createSiteRunMock();
   const { runPlaybook } = capturePlaybooks();
   try {
-    await applyTraditionalWebSites(layout, "envrm", [nginxPhpSite], {
+    await applySites(layout, "envrm", [nginxPhpSite], {
       run,
       runPlaybook,
     });
     const poolPath = join(
       layout.configDir,
       "php",
+      "8.4",
       "pools",
       "tp-envrm-phpsite.conf",
     );
     await Deno.stat(poolPath);
 
-    const remove = createTraditionalWebRunMock();
-    await removeTraditionalWebSites(layout, "envrm", { run: remove.run });
+    const remove = createSiteRunMock();
+    await removeSites(layout, "envrm", { run: remove.run });
 
     await assertRejects(
       () => Deno.stat(poolPath),
       Deno.errors.NotFound,
     );
     assertEquals(
-      systemctlActions(remove.calls, "turbopanel-php-fpm").length > 0,
+      systemctlActions(remove.calls, "turbopanel-php-fpm@8.4").length > 0,
       true,
     );
   } finally {
@@ -1223,14 +1446,14 @@ test("removeTraditionalWebSites drops nginx pools and reloads php-fpm", async ()
 // unable to answer — must never survive on disk.
 // ---------------------------------------------------------------------------
 
-test("applyTraditionalWebSites restores the previous config when nginx -t fails", async () => {
+test("applySites restores the previous config when nginx -t fails", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const { runPlaybook } = capturePlaybooks();
-  const base = createTraditionalWebRunMock();
+  const base = createSiteRunMock();
   const sitesDir = join(layout.configDir, "nginx", "sites");
   const confPath = join(sitesDir, "tp-envroll-www.conf");
   let rejectConfigTest = false;
-  const run: TraditionalWebRunFn = async (command, args) => {
+  const run: SiteRunFn = async (command, args) => {
     if (
       rejectConfigTest && args.includes("-t") && args.includes("-c")
     ) {
@@ -1239,7 +1462,7 @@ test("applyTraditionalWebSites restores the previous config when nginx -t fails"
     return await base.run(command, args);
   };
   try {
-    await applyTraditionalWebSites(layout, "envroll", [nginxSite], {
+    await applySites(layout, "envroll", [nginxSite], {
       run,
       runPlaybook,
     });
@@ -1250,7 +1473,7 @@ test("applyTraditionalWebSites restores the previous config when nginx -t fails"
     rejectConfigTest = true;
     await assertRejects(
       () =>
-        applyTraditionalWebSites(layout, "envroll", [{
+        applySites(layout, "envroll", [{
           ...nginxSite,
           listenPort: 18099,
         }], { run, runPlaybook }),
@@ -1267,11 +1490,11 @@ test("applyTraditionalWebSites restores the previous config when nginx -t fails"
   }
 });
 
-test("applyTraditionalWebSites leaves no config behind when the first apply fails its config test", async () => {
+test("applySites leaves no config behind when the first apply fails its config test", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const { runPlaybook } = capturePlaybooks();
-  const base = createTraditionalWebRunMock();
-  const run: TraditionalWebRunFn = async (command, args) => {
+  const base = createSiteRunMock();
+  const run: SiteRunFn = async (command, args) => {
     if (args.includes("-t") && args.includes("-c")) {
       return fail("nginx: [emerg] invalid vhost");
     }
@@ -1280,7 +1503,7 @@ test("applyTraditionalWebSites leaves no config behind when the first apply fail
   try {
     await assertRejects(
       () =>
-        applyTraditionalWebSites(layout, "envnew", [nginxSite], {
+        applySites(layout, "envnew", [nginxSite], {
           run,
           runPlaybook,
         }),
@@ -1299,21 +1522,21 @@ test("applyTraditionalWebSites leaves no config behind when the first apply fail
   }
 });
 
-test("applyTraditionalWebSites restores the previous config when the reloaded engine stops answering", async () => {
+test("applySites restores the previous config when the reloaded engine stops answering", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const { runPlaybook } = capturePlaybooks();
-  const base = createTraditionalWebRunMock();
+  const base = createSiteRunMock();
   const sitesDir = join(layout.configDir, "nginx", "sites");
   const confPath = join(sitesDir, "tp-envprobe-www.conf");
   let breakValidation = false;
-  const run: TraditionalWebRunFn = async (command, args) => {
+  const run: SiteRunFn = async (command, args) => {
     if (breakValidation && command === "curl") {
       return { success: true, stdout: "502", stderr: "" };
     }
     return await base.run(command, args);
   };
   try {
-    await applyTraditionalWebSites(layout, "envprobe", [nginxSite], {
+    await applySites(layout, "envprobe", [nginxSite], {
       run,
       runPlaybook,
     });
@@ -1323,7 +1546,7 @@ test("applyTraditionalWebSites restores the previous config when the reloaded en
     breakValidation = true;
     await assertRejects(
       () =>
-        applyTraditionalWebSites(layout, "envprobe", [{
+        applySites(layout, "envprobe", [{
           ...nginxSite,
           listenPort: 18099,
         }], { run, runPlaybook }),
@@ -1340,10 +1563,10 @@ test("applyTraditionalWebSites restores the previous config when the reloaded en
   }
 });
 
-test("applyTraditionalWebSites fails when openlitespeed -t rejects the config", async () => {
+test("applySites fails when openlitespeed -t rejects the config", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const { runPlaybook } = capturePlaybooks();
-  const base = createTraditionalWebRunMock();
+  const base = createSiteRunMock();
   const olsBinary = join(
     layout.runtimesDir,
     "openlitespeed",
@@ -1351,7 +1574,7 @@ test("applyTraditionalWebSites fails when openlitespeed -t rejects the config", 
     "bin",
     "openlitespeed",
   );
-  const run: TraditionalWebRunFn = async (command, args) => {
+  const run: SiteRunFn = async (command, args) => {
     if (args.includes(olsBinary) && args.includes("-t")) {
       return fail("[config] invalid virtual host");
     }
@@ -1362,7 +1585,7 @@ test("applyTraditionalWebSites fails when openlitespeed -t rejects the config", 
     // downtime — it gets the same engine-native gate nginx and Apache do.
     await assertRejects(
       () =>
-        applyTraditionalWebSites(layout, "envolsbad", [olsSite], {
+        applySites(layout, "envolsbad", [olsSite], {
           run,
           runPlaybook,
         }),
@@ -1390,21 +1613,21 @@ test("applyTraditionalWebSites fails when openlitespeed -t rejects the config", 
   }
 });
 
-const olsPrincipalPhpSite: TraditionalWebApplySite = {
+const olsPrincipalPhpSite: SiteApplySpec = {
   composeServiceName: "olsowned",
   engine: "openlitespeed",
   root: "public",
   listenPort: 18085,
-  php: { version: "8.4", memoryLimit: "128M" },
+  php: { version: "8.4", settings: { memory_limit: "128M" } },
   principal: { principalId: "prin-1", username: "siteowner" },
 };
 
-test("applyTraditionalWebSites scopes an OpenLiteSpeed PHP vhost to its principal", async () => {
+test("applySites scopes an OpenLiteSpeed PHP vhost to its principal", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const { run } = createTraditionalWebRunMock();
+  const { run } = createSiteRunMock();
   const { runPlaybook } = capturePlaybooks();
   try {
-    await applyTraditionalWebSites(layout, "envolsown", [olsPrincipalPhpSite], {
+    await applySites(layout, "envolsown", [olsPrincipalPhpSite], {
       run,
       runPlaybook,
     });

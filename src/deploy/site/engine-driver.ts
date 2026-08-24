@@ -1,5 +1,5 @@
 /**
- * The single place a traditional-web engine plugs in.
+ * The single place a site engine plugs in.
  *
  * nginx, Apache, and OpenLiteSpeed all follow the same sequence on every
  * apply — render a per-site config, stage it **only when its bytes changed**,
@@ -22,7 +22,7 @@
  *
  * ## Safe rollout
  *
- * {@link rolloutTraditionalWebConfigs} is the transaction every apply goes
+ * {@link rolloutSiteConfigs} is the transaction every apply goes
  * through. A rendered config is never written straight to its live path:
  *
  * 1. **Stage.** The candidate lands at `<path>.tpnew` — same directory, so the
@@ -54,24 +54,25 @@ import { join } from "@std/path";
 import { logWarn } from "../../logger.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 
-/** Engines that can serve a traditional-web site. */
-export type TraditionalWebEngineId = "nginx" | "apache" | "openlitespeed";
+/** Engines that can serve a site. */
+export type SiteEngineId = "caddy" | "nginx" | "apache" | "openlitespeed";
 
-/** Reload order: php-fpm first (see `reloadTraditionalWebEngines`), then these. */
-export const TRADITIONAL_WEB_ENGINE_ORDER: readonly TraditionalWebEngineId[] =
-  Object.freeze(["nginx", "apache", "openlitespeed"] as const);
+/** Reload order: php-fpm first (see `reloadSiteEngines`), then these. */
+export const SITE_ENGINE_ORDER: readonly SiteEngineId[] = Object.freeze(
+  ["caddy", "nginx", "apache", "openlitespeed"] as const,
+);
 
 /** Injectable command runner for host-free apply/remove tests. */
-export type TraditionalWebRunResult = {
+export type SiteRunResult = {
   success: boolean;
   stdout: string;
   stderr: string;
 };
 
-export type TraditionalWebRunFn = (
+export type SiteRunFn = (
   command: string,
   args: string[],
-) => Promise<TraditionalWebRunResult>;
+) => Promise<SiteRunResult>;
 
 /**
  * Suffix of the rendered candidate. Deliberately not `.conf`: every engine's
@@ -103,7 +104,7 @@ export async function removeStagedFile(path: string): Promise<void> {
  * reports **changed**, so the worst case is the previous always-rewrite path.
  */
 export async function ownedConfigFileMatches(
-  run: TraditionalWebRunFn,
+  run: SiteRunFn,
   stagedPath: string,
   configPath: string,
 ): Promise<boolean> {
@@ -163,7 +164,7 @@ export type StagedConfigWrite = {
  * OpenLiteSpeed main config *after* fragments have already been deleted.
  */
 export async function writeOwnedConfigFile(
-  run: TraditionalWebRunFn,
+  run: SiteRunFn,
   configPath: string,
   contents: string,
   group: string,
@@ -204,7 +205,7 @@ export async function writeOwnedConfigFile(
  * bytes currently live (if any) are snapshotted to `<configPath>.tpprev`.
  */
 export async function stageOwnedConfigFile(
-  run: TraditionalWebRunFn,
+  run: SiteRunFn,
   configPath: string,
   contents: string,
   group: string,
@@ -283,7 +284,7 @@ export async function stageDaemonConfigFile(
 
 /** Atomically swap one staged candidate into its live path. */
 export async function publishStagedConfig(
-  run: TraditionalWebRunFn,
+  run: SiteRunFn,
   staged: StagedConfigWrite,
 ): Promise<void> {
   if (staged.kind === "daemon") {
@@ -306,7 +307,7 @@ export async function publishStagedConfig(
 
 /** Drop the candidate/snapshot temp files; leftovers are not a deploy error. */
 async function discardStagedArtifacts(
-  run: TraditionalWebRunFn,
+  run: SiteRunFn,
   staged: StagedConfigWrite,
 ): Promise<void> {
   const leftovers = [staged.candidatePath];
@@ -322,7 +323,7 @@ async function discardStagedArtifacts(
 
 /** Keep a published swap: only the temp candidate/snapshot are cleaned up. */
 export async function commitStagedConfig(
-  run: TraditionalWebRunFn,
+  run: SiteRunFn,
   staged: StagedConfigWrite,
 ): Promise<void> {
   await discardStagedArtifacts(run, staged);
@@ -333,7 +334,7 @@ export async function commitStagedConfig(
  * the site was new — and clean up the temp files either way.
  */
 export async function restoreStagedConfig(
-  run: TraditionalWebRunFn,
+  run: SiteRunFn,
   staged: StagedConfigWrite,
 ): Promise<void> {
   if (staged.published) {
@@ -370,7 +371,7 @@ export async function restoreStagedConfig(
  * only just gained group access to.
  */
 export async function systemctlReloadOrStart(
-  run: TraditionalWebRunFn,
+  run: SiteRunFn,
   unit: string,
   restart: boolean,
   label = unit,
@@ -394,7 +395,7 @@ export async function systemctlReloadOrStart(
 }
 
 /** One loopback endpoint a reloaded engine has to answer on. */
-export type TraditionalWebValidationTarget = Readonly<{
+export type SiteValidationTarget = Readonly<{
   /** Compose service the URL belongs to — used in the failure message. */
   label: string;
   /** Loopback URL to probe, e.g. `http://127.0.0.1:18080/`. */
@@ -416,10 +417,10 @@ const VALIDATION_ATTEMPTS = 3;
  * prerequisite for the vendoring playbooks) so an apply stays testable without
  * a live listener.
  */
-export async function validateTraditionalWebEndpoints(
-  run: TraditionalWebRunFn,
+export async function validateSiteEndpoints(
+  run: SiteRunFn,
   label: string,
-  targets: readonly TraditionalWebValidationTarget[],
+  targets: readonly SiteValidationTarget[],
 ): Promise<void> {
   for (const target of targets) {
     let failure = "no response";
@@ -455,8 +456,8 @@ export async function validateTraditionalWebEndpoints(
 }
 
 /** One engine's render → stage → swap → test → reload behavior. */
-export type TraditionalWebEngineDriver = {
-  readonly engine: TraditionalWebEngineId;
+export type SiteEngineDriver = {
+  readonly engine: SiteEngineId;
   /** Human label for logs and error messages. */
   readonly label: string;
   /** systemd unit this engine is reloaded through. */
@@ -471,15 +472,15 @@ export type TraditionalWebEngineDriver = {
    * are already correct.
    */
   stageSiteConfig(
-    run: TraditionalWebRunFn,
+    run: SiteRunFn,
     path: string,
     contents: string,
   ): Promise<StagedConfigWrite | null>;
   /** Validate what is on disk before handing it to systemd. */
-  configTest(run: TraditionalWebRunFn, layout: LayoutPaths): Promise<void>;
+  configTest(run: SiteRunFn, layout: LayoutPaths): Promise<void>;
   /** config-test, then reload (or restart) the unit. */
   reload(
-    run: TraditionalWebRunFn,
+    run: SiteRunFn,
     layout: LayoutPaths,
     restart: boolean,
   ): Promise<void>;
@@ -519,15 +520,60 @@ function openlitespeedMainConfigPath(layout: LayoutPaths): string {
   return join(layout.configDir, "openlitespeed", "httpd_config.conf");
 }
 
-function phpFpmBinaryPath(layout: LayoutPaths): string {
-  return join(layout.runtimesDir, "php", "current", "sbin", "php-fpm");
+/**
+ * php-fpm series pin. Must match `php_fpm_series` in
+ * `orchestration/roles/php-fpm/defaults/main.yml`, and is re-exported as
+ * `DEFAULT_PHP_SERIES` from `../site.ts` so there is one literal. It is a
+ * default, not a pin: several series co-install and `resolveSitePhpSeries`
+ * picks per site.
+ */
+export const DEFAULT_PHP_FPM_SERIES = "8.4";
+
+/**
+ * php-fpm is installed from the sury Debian repo, not vendored — so the binary
+ * lives at an apt path, one per co-installed series, and never under
+ * `runtimesDir`. Taking the series as a parameter (rather than reading the pin
+ * here) is what lets a caller test one series' master without touching another.
+ */
+function phpFpmBinaryPath(series: string): string {
+  return `/usr/sbin/php-fpm${series}`;
 }
 
-function phpFpmMainConfigPath(layout: LayoutPaths): string {
-  return join(layout.configDir, "php", "php-fpm.conf");
+function phpFpmMainConfigPath(layout: LayoutPaths, series: string): string {
+  return join(layout.configDir, "php", series, "php-fpm.conf");
 }
 
-export const NGINX_DRIVER: TraditionalWebEngineDriver = {
+/**
+ * The **site** Caddy — a second, unprivileged Caddy process, distinct from the
+ * edge Caddy that owns public `:80`/`:443`.
+ *
+ * Same binary, two processes. The edge one runs as root, owns the internal CA
+ * and every tenant leaf key, and writes its site files with a bare write plus a
+ * best-effort reload whose failure is only logged — acceptable for
+ * `reverse_proxy` one-liners, not for tenant document roots and PHP handlers.
+ * Serving sites from a separate unprivileged unit puts them through the same
+ * staged `.tpnew`/`.tpprev` transaction every other engine gets, and keeps the
+ * loopback `listenPort` that `site-docker.ts` hands containers as
+ * `host.docker.internal:<port>`.
+ */
+function siteCaddyBinaryPath(layout: LayoutPaths): string {
+  return join(layout.runtimesDir, "caddy", "current", "caddy");
+}
+
+function siteCaddyMainConfigPath(layout: LayoutPaths): string {
+  return join(layout.configDir, "caddy", "Caddyfile");
+}
+
+/**
+ * Caddy writes its own data (certificate cache, even with `auto_https off`)
+ * under `$XDG_DATA_HOME`. Pin it so a `sudo -u` validate never falls back to a
+ * home directory `tpcaddysite` does not own.
+ */
+function siteCaddyDataDir(layout: LayoutPaths): string {
+  return join(layout.stateDir, "site-caddy");
+}
+
+export const NGINX_DRIVER: SiteEngineDriver = {
   engine: "nginx",
   label: "nginx",
   unit: "turbopanel-nginx",
@@ -559,7 +605,7 @@ export const NGINX_DRIVER: TraditionalWebEngineDriver = {
   },
 };
 
-export const APACHE_DRIVER: TraditionalWebEngineDriver = {
+export const APACHE_DRIVER: SiteEngineDriver = {
   engine: "apache",
   label: "apache",
   unit: "turbopanel-apache",
@@ -585,7 +631,7 @@ export const APACHE_DRIVER: TraditionalWebEngineDriver = {
   },
 };
 
-export const OPENLITESPEED_DRIVER: TraditionalWebEngineDriver = {
+export const OPENLITESPEED_DRIVER: SiteEngineDriver = {
   engine: "openlitespeed",
   label: "OpenLiteSpeed",
   unit: "turbopanel-openlitespeed",
@@ -625,16 +671,54 @@ export const OPENLITESPEED_DRIVER: TraditionalWebEngineDriver = {
   },
 };
 
-export const TRADITIONAL_WEB_ENGINE_DRIVERS: Readonly<
-  Record<TraditionalWebEngineId, TraditionalWebEngineDriver>
+export const CADDY_DRIVER: SiteEngineDriver = {
+  engine: "caddy",
+  label: "Caddy",
+  unit: "turbopanel-site-caddy",
+  configGroup: "tpcaddysite",
+  stageSiteConfig(run, path, contents) {
+    return stageOwnedConfigFile(run, path, contents, "tpcaddysite");
+  },
+  async configTest(run, layout) {
+    // `caddy validate` parses the main Caddyfile *and* everything it imports,
+    // and exits without binding a port — the property this interface requires
+    // of every engine's test. Run it as the unit's own account so any path it
+    // resolves is one the service can actually reach.
+    const test = await run("sudo", [
+      "-n",
+      "-u",
+      "tpcaddysite",
+      "--",
+      "env",
+      `XDG_DATA_HOME=${siteCaddyDataDir(layout)}`,
+      siteCaddyBinaryPath(layout),
+      "validate",
+      "--adapter",
+      "caddyfile",
+      "--config",
+      siteCaddyMainConfigPath(layout),
+    ]);
+    if (!test.success) {
+      throw new Error(test.stderr || "caddy validate failed");
+    }
+  },
+  async reload(run, layout, restart) {
+    await this.configTest(run, layout);
+    await systemctlReloadOrStart(run, this.unit, restart, this.label);
+  },
+};
+
+export const SITE_ENGINE_DRIVERS: Readonly<
+  Record<SiteEngineId, SiteEngineDriver>
 > = Object.freeze({
+  caddy: CADDY_DRIVER,
   nginx: NGINX_DRIVER,
   apache: APACHE_DRIVER,
   openlitespeed: OPENLITESPEED_DRIVER,
 });
 
 /**
- * php-fpm's own test-then-reload step. Not a {@link TraditionalWebEngineDriver}
+ * php-fpm's own test-then-reload step. Not a {@link SiteEngineDriver}
  * — it serves no port and owns no site config — but the same shape, and it is
  * always reloaded *before* the engines so their config-tests find live sockets.
  *
@@ -642,48 +726,64 @@ export const TRADITIONAL_WEB_ENGINE_DRIVERS: Readonly<
  * *principal*, which owns the release group already; only the engine service
  * accounts have to join it.
  */
-export const PHP_FPM_DRIVER = Object.freeze({
-  label: "php-fpm",
-  unit: "turbopanel-php-fpm",
-  async configTest(
-    run: TraditionalWebRunFn,
-    layout: LayoutPaths,
-  ): Promise<void> {
-    const test = await run("sudo", [
-      "-n",
-      phpFpmBinaryPath(layout),
-      "--fpm-config",
-      phpFpmMainConfigPath(layout),
-      "--test",
-    ]);
-    if (!test.success) {
-      throw new Error(test.stderr || "php-fpm --test failed");
-    }
-  },
-  async reload(run: TraditionalWebRunFn, layout: LayoutPaths): Promise<void> {
-    await PHP_FPM_DRIVER.configTest(run, layout);
-    await systemctlReloadOrStart(run, PHP_FPM_DRIVER.unit, false);
-  },
-});
-
-/** The subset of a driver {@link rolloutTraditionalWebConfigs} needs. */
-export type TraditionalWebRolloutUnit = {
-  readonly label: string;
-  readonly unit: string;
-  configTest(run: TraditionalWebRunFn, layout: LayoutPaths): Promise<void>;
+/**
+ * One php-fpm master, for one series.
+ *
+ * A factory rather than a constant because a master is one binary: co-installed
+ * series run as separate `turbopanel-php-fpm@<series>` instances, each with its
+ * own config, pool glob, pidfile, and socket directory. Rolling out a site on
+ * 8.3 must not touch the 8.4 master serving everything else.
+ */
+export type PhpFpmDriver = SiteRolloutUnit & {
+  reload(run: SiteRunFn, layout: LayoutPaths): Promise<void>;
 };
 
-export type TraditionalWebRolloutOpts = {
-  run: TraditionalWebRunFn;
+export function phpFpmDriver(series: string): PhpFpmDriver {
+  const unit = `turbopanel-php-fpm@${series}`;
+  const driver: PhpFpmDriver = {
+    label: `php-fpm ${series}`,
+    unit,
+    async configTest(run: SiteRunFn, layout: LayoutPaths): Promise<void> {
+      const test = await run("sudo", [
+        "-n",
+        phpFpmBinaryPath(series),
+        "--fpm-config",
+        phpFpmMainConfigPath(layout, series),
+        "--test",
+      ]);
+      if (!test.success) {
+        throw new Error(test.stderr || `php-fpm ${series} --test failed`);
+      }
+    },
+    async reload(run: SiteRunFn, layout: LayoutPaths): Promise<void> {
+      await driver.configTest(run, layout);
+      // Never restarted for group membership: FPM workers run as the
+      // *principal*, which owns the release group already — only the engine
+      // service accounts have to join it.
+      await systemctlReloadOrStart(run, unit, false, driver.label);
+    },
+  };
+  return driver;
+}
+
+/** The subset of a driver {@link rolloutSiteConfigs} needs. */
+export type SiteRolloutUnit = {
+  readonly label: string;
+  readonly unit: string;
+  configTest(run: SiteRunFn, layout: LayoutPaths): Promise<void>;
+};
+
+export type SiteRolloutOpts = {
+  run: SiteRunFn;
   layout: LayoutPaths;
   /** Engine (or php-fpm) being rolled out. */
-  target: TraditionalWebRolloutUnit;
+  target: SiteRolloutUnit;
   /** Restart instead of reload — new supplementary group membership. */
   restart: boolean;
   /** Candidates to swap in, in dependency order. */
   staged: readonly StagedConfigWrite[];
   /** Loopback endpoints that must answer once the unit is back. */
-  validationTargets?: readonly TraditionalWebValidationTarget[];
+  validationTargets?: readonly SiteValidationTarget[];
   /**
    * Runs once every staged candidate above is live, before the config-test.
    * OpenLiteSpeed uses it to regenerate `httpd_config.conf` from the fragments
@@ -699,8 +799,8 @@ export type TraditionalWebRolloutOpts = {
  * here, and a rollback that cannot re-test or re-reload must not replace that
  * error with its own.
  */
-async function rollbackTraditionalWebConfigs(
-  opts: TraditionalWebRolloutOpts,
+async function rollbackSiteConfigs(
+  opts: SiteRolloutOpts,
   published: readonly StagedConfigWrite[],
 ): Promise<void> {
   for (const staged of published) {
@@ -740,8 +840,8 @@ async function rollbackTraditionalWebConfigs(
  * every engine here tests a main config and its includes, never a lone
  * fragment. The snapshot taken at staging time is what makes the swap safe.
  */
-export async function rolloutTraditionalWebConfigs(
-  opts: TraditionalWebRolloutOpts,
+export async function rolloutSiteConfigs(
+  opts: SiteRolloutOpts,
 ): Promise<void> {
   const published: StagedConfigWrite[] = [];
   try {
@@ -761,13 +861,13 @@ export async function rolloutTraditionalWebConfigs(
       opts.restart,
       opts.target.label,
     );
-    await validateTraditionalWebEndpoints(
+    await validateSiteEndpoints(
       opts.run,
       opts.target.label,
       opts.validationTargets ?? [],
     );
   } catch (err) {
-    await rollbackTraditionalWebConfigs(opts, published);
+    await rollbackSiteConfigs(opts, published);
     throw err;
   }
   for (const staged of published) {

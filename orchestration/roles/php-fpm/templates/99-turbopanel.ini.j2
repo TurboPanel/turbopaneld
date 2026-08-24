@@ -1,5 +1,13 @@
-; Managed by TurboPanel — baseline php.ini for vendored php-fpm.
-; Per-site overrides use php_admin_value in pool fragments under pools/.
+; Managed by TurboPanel — php.ini overlay for sury-packaged php-fpm.
+;
+; Loaded last via PHP_INI_SCAN_DIR in turbopanel-php-fpm@<series>, after sury's
+; own /etc/php/{{ php_fpm_series_item }}/fpm/php.ini and its conf.d/*.ini (which is
+; what loads every extension). Values here win over sury's defaults; per-site
+; php_admin_value in pool fragments under pools/ wins over both.
+;
+; Do NOT re-declare the opcache zend_extension below — sury's 10-opcache.ini
+; already loads it, and a second load aborts startup with
+; "Cannot load Zend OPcache".
 
 [PHP]
 engine = On
@@ -18,7 +26,7 @@ error_reporting = E_ALL & ~E_DEPRECATED & ~E_STRICT
 display_errors = Off
 display_startup_errors = Off
 log_errors = On
-error_log = {{ turbopanel_log_dir }}/php/php-error.log
+error_log = {{ turbopanel_log_dir }}/php/{{ php_fpm_series_item }}/php-error.log
 variables_order = "GPCS"
 request_order = "GP"
 register_argc_argv = Off
@@ -45,10 +53,9 @@ default_socket_timeout = 60
 ;
 ; Rather than weaken the baseline for every site, TurboPanel overrides all three
 ; per pool, and only for release-backed pools, via
-; `RELEASE_SYMLINK_SWAP_PHP_DIRECTIVES` in `src/deploy/traditional-web.ts`
+; `RELEASE_SYMLINK_SWAP_PHP_DIRECTIVES` in `src/deploy/site.ts`
 ; (`realpath_cache_ttl = 0`, `opcache.revalidate_path = 1`,
 ; `opcache.validate_timestamps = 1`, `opcache.revalidate_freq = 0`).
-zend_extension = opcache
 opcache.enable = 1
 opcache.enable_cli = 0
 opcache.memory_consumption = 128

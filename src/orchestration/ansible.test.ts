@@ -1030,23 +1030,31 @@ test("buildTimeSyncApplyExtraArgs preserves native list and boolean types", () =
   assertEquals(buildTimeSyncApplyExtraArgs({}), []);
 });
 
-test("traditional-web apply playbooks vendor engines (never apt nginx/apache2)", async () => {
+test("site apply playbooks vendor engines (never apt nginx/apache2)", async () => {
   const nginxPlaybook = await Deno.readTextFile(
-    join(CHECKOUT_ORCHESTRATION_DIR, "playbooks/traditional-web-apply.yml"),
+    join(CHECKOUT_ORCHESTRATION_DIR, "playbooks/site-nginx-apply.yml"),
   );
   const apachePlaybook = await Deno.readTextFile(
     join(
       CHECKOUT_ORCHESTRATION_DIR,
-      "playbooks/traditional-web-apache-apply.yml",
+      "playbooks/site-apache-apply.yml",
     ),
   );
   const olsPlaybook = await Deno.readTextFile(
     join(
       CHECKOUT_ORCHESTRATION_DIR,
-      "playbooks/traditional-web-openlitespeed-apply.yml",
+      "playbooks/site-openlitespeed-apply.yml",
     ),
   );
+  const caddyPlaybook = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "playbooks/site-caddy-apply.yml"),
+  );
 
+  // The site Caddy reuses the already-vendored binary: one download, two
+  // processes. It must NOT provision the control-plane Caddy identity.
+  assertEquals(caddyPlaybook.includes("name: caddy"), true);
+  assertEquals(caddyPlaybook.includes("name: site-caddy"), true);
+  assertEquals(caddyPlaybook.includes("web_service_key: caddy"), true);
   assertEquals(nginxPlaybook.includes("name: nginx"), true);
   assertEquals(apachePlaybook.includes("name: apache"), true);
   assertEquals(apachePlaybook.includes("name: php-fpm"), true);
@@ -1058,23 +1066,24 @@ test("traditional-web apply playbooks vendor engines (never apt nginx/apache2)",
       ["nginx", nginxPlaybook],
       ["apache", apachePlaybook],
       ["openlitespeed", olsPlaybook],
+      ["caddy", caddyPlaybook],
     ] as const
   ) {
     if (/ansible\.builtin\.apt:/.test(body)) {
       throw new Error(
-        `traditional-web ${label} playbook must not apt-install packages`,
+        `site ${label} playbook must not apt-install packages`,
       );
     }
     if (
       /\bname:\s*nginx\b/.test(body) && label === "nginx" && /apt:/.test(body)
     ) {
       throw new Error(
-        "traditional-web nginx playbook must not apt install nginx",
+        "site nginx playbook must not apt install nginx",
       );
     }
     if (body.includes("apache2") || body.includes("libapache2-mod-php")) {
       throw new Error(
-        `traditional-web ${label} playbook must not reference distro apache2 packages`,
+        `site ${label} playbook must not reference distro apache2 packages`,
       );
     }
   }
@@ -1090,12 +1099,125 @@ test("traditional-web apply playbooks vendor engines (never apt nginx/apache2)",
   );
   assertMatch(nginxDefaults, /nginx_version:\s*"1\.\d+\.\d+"/, "nginx pin");
   assertMatch(apacheDefaults, /apache_version:\s*"2\.\d+\.\d+"/, "apache pin");
+  // php-fpm is the one component that is NOT vendored: it comes from Ondrej
+  // Sury's Debian repo. So the series is the pin (there is no source-build
+  // patch version), and the repo wiring must stay deb822 + Signed-By.
   assertMatch(
     phpFpmDefaults,
-    /php_fpm_version:\s*"8\.\d+\.\d+"/,
-    "php-fpm pin",
+    /php_fpm_default_series:\s*"8\.\d+"/,
+    "php-fpm default series",
   );
-  assertMatch(phpFpmDefaults, /php_fpm_series:\s*"8\.\d+"/, "php-fpm series");
+  // A list, not a pin: several series install side by side and the daemon
+  // overrides this with the distinct series a deploy declared.
+  assertMatch(
+    phpFpmDefaults,
+    /php_fpm_versions:\s*\[/,
+    "php-fpm series list",
+  );
+
+  const phpFpmSeriesTasks = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/php-fpm/tasks/series.yml"),
+  );
+  // Re-validated inside the loop: the series is a path segment, a package
+  // name, AND a systemd instance name.
+  assertEquals(phpFpmSeriesTasks.includes("Validate the PHP series"), true);
+  // The exec gate is the per-series entitlement group, never `tp`.
+  assertEquals(
+    phpFpmSeriesTasks.includes(
+      "tpphp{{ php_fpm_series_item | replace('.', '') }}",
+    ),
+    true,
+  );
+
+  assertMatch(
+    phpFpmDefaults,
+    /php_fpm_sury_repo_url:\s*"https:\/\/packages\.sury\.org\/php"/,
+    "php-fpm sury repo",
+  );
+  assertEquals(phpFpmDefaults.includes("php_fpm_version:"), false);
+
+  const phpFpmTasks = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/php-fpm/tasks/main.yml"),
+  );
+  // apt-key and one-line `[signed-by=]` sources are both deprecated.
+  assertEquals(phpFpmTasks.includes("apt_key"), false);
+  assertEquals(phpFpmTasks.includes("sury-php.sources"), true);
+  // Sury ships its own unit; TurboPanel runs the same binary under its own.
+  // Masked, not merely disabled — an apt upgrade re-enables a disabled unit.
+  // Masking is per series now — sury ships one unit per phpX.Y-fpm package.
+  assertMatch(
+    phpFpmSeriesTasks,
+    /masked:\s*true/,
+    "sury unit masked per series",
+  );
+
+  // Additive install: a deploy that declares 8.4 must not stop 8.3, so the old
+  // "disable every other series" task must stay gone.
+  assertEquals(phpFpmTasks.includes("php8.3-fpm"), false);
+  assertEquals(
+    phpFpmTasks.includes("Remove obsolete single-series php-fpm layout"),
+    true,
+  );
+
+  // The site Caddy is a distinct identity from tpcaddy (9993, control plane)
+  // and from the root edge Caddy that owns public :80/:443.
+  const webUserDefaults = await Deno.readTextFile(
+    join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/web-service-user/defaults/main.yml",
+    ),
+  );
+  assertMatch(
+    webUserDefaults,
+    /caddy:\n\s+user: tpcaddysite/,
+    "site caddy user",
+  );
+  assertEquals(webUserDefaults.includes("uid: 9987"), true);
+  // 9988 belongs to tpnodeapp; reusing it would collide.
+  assertEquals(webUserDefaults.includes("uid: 9988"), false);
+
+  const siteCaddyUnit = await Deno.readTextFile(
+    join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/site-caddy/templates/turbopanel-site-caddy.service.j2",
+    ),
+  );
+  assertEquals(
+    siteCaddyUnit.includes("User={{ site_caddy_service_user }}"),
+    true,
+  );
+  // Caddy writes its cert cache under $XDG_DATA_HOME even with auto_https off;
+  // pin it so neither the unit nor a `sudo -u` validate falls back to a home
+  // this account does not own.
+  assertEquals(siteCaddyUnit.includes("XDG_DATA_HOME="), true);
+  // It runs the already-vendored binary — one download, two processes.
+  assertEquals(
+    siteCaddyUnit.includes("{{ turbopanel_vendor_dir }}/caddy/current/caddy"),
+    true,
+  );
+
+  const siteCaddyDefaults = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/site-caddy/defaults/main.yml"),
+  );
+  assertMatch(
+    siteCaddyDefaults,
+    /site_caddy_service_user:\s*tpcaddysite/,
+    "site caddy service user",
+  );
+  // Three Caddy admin endpoints now exist (2019 dev control plane, 2029 edge,
+  // 2039 sites); a collision crash-loops the unit.
+  assertMatch(
+    siteCaddyDefaults,
+    /site_caddy_admin_addr:\s*"127\.0\.0\.1:2039"/,
+    "site caddy admin port",
+  );
+
+  // A zero-match import glob is an error in Caddy, so the placeholder has to
+  // exist or every `caddy validate` fails on a host with no sites yet.
+  const siteCaddyTasks = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/site-caddy/tasks/main.yml"),
+  );
+  assertEquals(siteCaddyTasks.includes("00-empty.conf"), true);
 
   const nginxUnit = await Deno.readTextFile(
     join(
@@ -1112,7 +1234,7 @@ test("traditional-web apply playbooks vendor engines (never apt nginx/apache2)",
   const phpFpmUnit = await Deno.readTextFile(
     join(
       CHECKOUT_ORCHESTRATION_DIR,
-      "roles/php-fpm/templates/turbopanel-php-fpm.service.j2",
+      "roles/php-fpm/templates/turbopanel-php-fpm@.service.j2",
     ),
   );
   assertEquals(
@@ -1123,8 +1245,19 @@ test("traditional-web apply playbooks vendor engines (never apt nginx/apache2)",
     apacheUnit.includes("turbopanel_vendor_dir }}/apache/current"),
     true,
   );
+  // php-fpm is installed from sury, so the unit execs the apt binary, not a
+  // vendored tree. Keep this in step with `phpFpmBinaryPath` in
+  // `../deploy/site/engine-driver.ts`, which builds the same path for the
+  // config test.
+  assertEquals(phpFpmUnit.includes("turbopanel_vendor_dir }}/php/"), false);
+  // `%i` is the systemd instance = the PHP series. One template, one master
+  // per co-installed series.
+  assertEquals(phpFpmUnit.includes("/usr/sbin/php-fpm%i"), true);
+  assertEquals(phpFpmUnit.includes("Conflicts=php%i-fpm.service"), true);
+  // The leading colon keeps sury's own conf.d (where every extension
+  // registers) and appends ours after it. Without it PHP loads no extensions.
   assertEquals(
-    phpFpmUnit.includes("turbopanel_vendor_dir }}/php/current"),
+    phpFpmUnit.includes("PHP_INI_SCAN_DIR=:"),
     true,
   );
 });
