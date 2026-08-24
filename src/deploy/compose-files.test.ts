@@ -128,6 +128,100 @@ describe("compose-files", () => {
     }
   });
 
+  it("manifest releases[] round-trip carries release, source, and commit", async () => {
+    const tmp = await Deno.makeTempDir({ prefix: "tp-" });
+    try {
+      const layout = resolveLayout({ TURBOPANEL_STATE_DIR: tmp });
+      const deploymentDir = environmentDeploymentDir(layout, "proj-1", "env-1");
+      await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
+      const manifest = {
+        version: 2 as const,
+        projectId: "proj-1",
+        environmentId: "env-1",
+        serverId: "srv-1",
+        generation: 3,
+        projectName: "demo",
+        composeSha256: "c".repeat(64),
+        services: {},
+        releases: [{
+          composeServiceName: "web",
+          serviceId: "svc-1",
+          releaseId: "rel-1",
+          sourceId: "src-1",
+          commitSha: "a".repeat(40),
+          ref: "main",
+        }],
+      };
+      await writeDeploymentManifest(deploymentDir, manifest);
+      assertEquals(await readDeploymentManifest(deploymentDir), manifest);
+    } finally {
+      await Deno.remove(tmp, { recursive: true });
+    }
+  });
+
+  it("manifest releases[] round-trip carries the owning principal", async () => {
+    const tmp = await Deno.makeTempDir({ prefix: "tp-" });
+    try {
+      const layout = resolveLayout({ TURBOPANEL_STATE_DIR: tmp });
+      const deploymentDir = environmentDeploymentDir(layout, "proj-1", "env-1");
+      await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
+      // `username` is what lets a *later* deploy still address the tree of a
+      // service that has since been removed from the compose.
+      const manifest = {
+        version: 2 as const,
+        projectId: "proj-1",
+        environmentId: "env-1",
+        serverId: "srv-1",
+        generation: 4,
+        projectName: "demo",
+        composeSha256: "e".repeat(64),
+        services: {},
+        releases: [{
+          composeServiceName: "web",
+          serviceId: "svc-1",
+          releaseId: "rel-1",
+          sourceId: "src-1",
+          commitSha: "a".repeat(40),
+          username: "appuser",
+        }],
+      };
+      await writeDeploymentManifest(deploymentDir, manifest);
+      assertEquals(await readDeploymentManifest(deploymentDir), manifest);
+    } finally {
+      await Deno.remove(tmp, { recursive: true });
+    }
+  });
+
+  it("readDeploymentManifest drops a half-identified release row", async () => {
+    const tmp = await Deno.makeTempDir({ prefix: "tp-" });
+    try {
+      const layout = resolveLayout({ TURBOPANEL_STATE_DIR: tmp });
+      const deploymentDir = environmentDeploymentDir(layout, "proj-1", "env-1");
+      await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
+      // A manifest whose release row names a service and nothing else.
+      await writeComposeFileSecure(
+        join(deploymentDir, "deployment.json"),
+        JSON.stringify({
+          version: 2,
+          projectId: "proj-1",
+          environmentId: "env-1",
+          serverId: "srv-1",
+          generation: 1,
+          projectName: "demo",
+          composeSha256: "d".repeat(64),
+          services: {},
+          releases: [{ composeServiceName: "web" }],
+        }),
+      );
+      const read = await readDeploymentManifest(deploymentDir);
+      // Parsed, and the half-identified row is dropped rather than trusted.
+      assertEquals(read?.generation, 1);
+      assertEquals(read?.releases, undefined);
+    } finally {
+      await Deno.remove(tmp, { recursive: true });
+    }
+  });
+
   it("readDeploymentManifest returns null when manifest is missing", async () => {
     const tmp = await Deno.makeTempDir({ prefix: "tp-" });
     try {

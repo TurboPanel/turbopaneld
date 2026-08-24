@@ -32,6 +32,22 @@ allow_url_include = Off
 default_socket_timeout = 60
 
 [opcache]
+; Baseline caching for legacy (daemon-owned) document roots, whose path never
+; contains a symlink that moves under a running worker.
+;
+; Release-backed sites serve from `<siteRoot>/current/<root>` and an ordinary
+; promote only moves `current` — deliberately without a php-fpm reload. These
+; two values would then let workers keep serving the *previous* release:
+; `revalidate_freq = 2` delays the timestamp check, and the default
+; `opcache.revalidate_path = 0` reuses the cached resolution of the unresolved
+; include path so the moved link is never noticed at all. The realpath cache
+; (`realpath_cache_ttl`, 120s by default) hides the swap the same way.
+;
+; Rather than weaken the baseline for every site, TurboPanel overrides all three
+; per pool, and only for release-backed pools, via
+; `RELEASE_SYMLINK_SWAP_PHP_DIRECTIVES` in `src/deploy/traditional-web.ts`
+; (`realpath_cache_ttl = 0`, `opcache.revalidate_path = 1`,
+; `opcache.validate_timestamps = 1`, `opcache.revalidate_freq = 0`).
 zend_extension = opcache
 opcache.enable = 1
 opcache.enable_cli = 0

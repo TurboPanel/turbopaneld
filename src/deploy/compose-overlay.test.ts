@@ -3,6 +3,7 @@ import { join } from "@std/path";
 import { parse } from "yaml";
 import { DAEMON_COMPOSE_FILENAME } from "./compose-files.ts";
 import {
+  applyRailpackImagesToComposeYaml,
   isEmptyFragment,
   mergeComposeOverlayFragments,
   mergeOverlayIntoComposeYaml,
@@ -176,4 +177,42 @@ test("mergeOverlayIntoComposeYaml drops aliases when the overlay uses list form"
     "default",
     "turbopanel-ingress",
   ]);
+});
+
+test("applyRailpackImagesToComposeYaml sets the built image and drops build", () => {
+  const yaml = `services:
+  api:
+    build:
+      context: .
+    ports:
+      - "3000:3000"
+  cache:
+    image: redis:7
+`;
+  const out = parse(
+    applyRailpackImagesToComposeYaml(
+      yaml,
+      new Map([["api", "turbopanel-app/api:rel-1"]]),
+    ),
+  ) as {
+    services: Record<string, Record<string, unknown>>;
+  };
+  assertEquals(out.services.api.image, "turbopanel-app/api:rel-1");
+  assertEquals("build" in out.services.api, false);
+  // Untouched services keep everything, including their own authored image.
+  assertEquals(out.services.api.ports, ["3000:3000"]);
+  assertEquals(out.services.cache.image, "redis:7");
+});
+
+test("applyRailpackImagesToComposeYaml is a no-op without railpack services", () => {
+  const yaml = "services:\n  cache:\n    image: redis:7\n";
+  assertEquals(applyRailpackImagesToComposeYaml(yaml, new Map()), yaml);
+  // A named service the compile step already stripped is ignored, not an error.
+  assertEquals(
+    applyRailpackImagesToComposeYaml(
+      yaml,
+      new Map([["gone", "turbopanel-app/gone:rel-1"]]),
+    ),
+    yaml,
+  );
 });

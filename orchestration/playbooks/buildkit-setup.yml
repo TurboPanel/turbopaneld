@@ -1,0 +1,18 @@
+# On-demand BuildKit + Railpack for the Railpack build lane (environment.deploy).
+# Installed only when a deploy actually asks for `build.kind: railpack` — never
+# from daemon-converge or instance-dev-install, matching the on-demand contract
+# docker-setup.yml and caddy-setup.yml already follow.
+#
+# Three things are vendored under `<install root>/vendor`, not two: `buildctl`,
+# `buildkitd`, and — as a local OCI image layout — the Railpack BuildKit gateway
+# **frontend**, alongside the `railpack` CLI. Vendoring the frontend is what
+# keeps a deploy free of registry egress and pins build output to bytes this
+# host already holds; see the role's frontend tasks for why the mutable
+# upstream tag is not an acceptable deploy-time dependency.
+- name: Ensure BuildKit and Railpack build runtimes are installed
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+  roles:
+    - role: buildkit

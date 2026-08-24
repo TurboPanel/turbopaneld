@@ -1,7 +1,9 @@
 ---
-# Vendor nginx (never a distro apt package) + tpnginx identity for
-# traditional-web deploy. Site vhosts are written by the daemon TypeScript
-# apply path after this playbook under /etc/turbopanel/nginx/sites/.
+# Vendor nginx (never a distro apt package) + php-fpm from official PHP source
+# when an nginx site needs PHP + tpnginx identity for traditional-web deploy.
+# Site vhosts and per-site php-fpm pools are written by the daemon TypeScript
+# apply path after this playbook under /etc/turbopanel/nginx/sites/ and
+# /etc/turbopanel/php/pools/.
 - name: TurboPanel traditional-web prerequisites (nginx)
   hosts: localhost
   connection: local
@@ -17,3 +19,23 @@
     - name: Vendor nginx binary + FHS config/log/state dirs
       ansible.builtin.include_role:
         name: nginx
+
+    # php-fpm's own service account is tpapache regardless of which engine
+    # consumes its sockets (the FPM master, its bootstrap pool, and the FHS
+    # config/log dirs are all owned by it). On an nginx-only host that account
+    # would not otherwise exist, so provision it before the role runs — the
+    # per-site pools nginx talks to still run as the site principal and listen
+    # on a tpnginx-owned socket.
+    - name: Provision php-fpm service identity
+      when: turbopanel_php_fpm_install | default(false) | bool
+      ansible.builtin.include_role:
+        name: web-service-user
+      vars:
+        web_service_key: apache
+
+    # Daemon passes turbopanel_php_fpm_install=true when any nginx site
+    # carries hosting web.php hints; static-only nginx skips the PHP build.
+    - name: Vendor php-fpm binary + FHS config/log/pools
+      when: turbopanel_php_fpm_install | default(false) | bool
+      ansible.builtin.include_role:
+        name: php-fpm

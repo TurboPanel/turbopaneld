@@ -119,6 +119,28 @@ export function parseGroupGid(groupLine: string): number | null {
   return gid;
 }
 
+/**
+ * Privileged directory creation — the single `sudo -n install -d` seam.
+ *
+ * Exported so callers that need a directory the principal must **not** own
+ * (a root-owned `releases/`, for instance) reuse this rather than inventing a
+ * second privileged mkdir. `owner` is `user` or `user:group`; both accept
+ * numeric ids, which is how a caller names the daemon's own account without
+ * knowing its username.
+ *
+ * `install -d` is idempotent and also *repairs*: an existing directory is
+ * re-chowned and re-chmoded to the requested owner and mode, so a tree created
+ * by an older layout converges on the next deploy.
+ */
+export async function ensureDirectoryWithOwner(
+  path: string,
+  mode: string,
+  owner: string,
+  runFn: RunFn = runDefault,
+): Promise<void> {
+  await ensureDir(path, mode, owner, runFn);
+}
+
 async function ensureDir(
   path: string,
   mode: string,
@@ -286,6 +308,47 @@ export async function ensureSystemPrincipals(
       runFn,
     );
   }
+}
+
+/**
+ * Add `user` as a **supplementary** member of `groupName` (`usermod -aG`).
+ *
+ * `-a` is load-bearing — without it `usermod -G` *replaces* the account's
+ * supplementary groups, which would silently strip the account of every other
+ * group it had already joined.
+ *
+ * Callers decide whether membership actually changed (and therefore whether a
+ * service needs a restart rather than a reload); this stays a thin command
+ * wrapper like its siblings in this module.
+ */
+export async function ensureSupplementaryGroupMembership(
+  user: string,
+  groupName: string,
+  runFn: RunFn = runDefault,
+): Promise<void> {
+  const result = await runFn("sudo", ["-n", "usermod", "-aG", groupName, user]);
+  if (!result.success) {
+    throw new Error(
+      result.stderr || `Failed to add ${user} to group ${groupName}`,
+    );
+  }
+}
+
+/**
+ * Let a web engine read one principal's published releases.
+ *
+ * A published release is root-owned, group `<username>-grp`, mode `0550` — the
+ * group bit is the only way anything other than root reads it, and re-chowning
+ * an immutable tree to a serving engine would defeat the point. So the engine
+ * service account (`tpnginx` / `tpapache` / `tpols`) joins the principal's own
+ * group instead: read + traverse, never write.
+ */
+export function ensureEngineGroupMembership(
+  user: string,
+  groupName: string,
+  runFn: RunFn = runDefault,
+): Promise<void> {
+  return ensureSupplementaryGroupMembership(user, groupName, runFn);
 }
 
 export async function ensureDirectoryOwnedByPrincipal(

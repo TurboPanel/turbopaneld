@@ -1,0 +1,20 @@
+---
+# Runtimes always live under the FHS vendor tree (dev shares it with prod).
+turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/vendor"  # noqa: var-naming[no-role-prefix]
+# Pinned to match BUILDKIT_VERSION / RAILPACK_VERSION in
+# src/deploy/release/railpack-build.ts. Bumping either here without bumping it
+# there leaves the daemon looking for a version directory that was not vendored.
+buildkit_version: "0.27.0"
+railpack_version: "0.9.0"
+# The Railpack BuildKit gateway frontend is vendored as a local OCI image layout
+# rather than resolved from the registry at deploy time. Keep in step with
+# RAILPACK_FRONTEND_VERSION in src/deploy/release/railpack-build.ts.
+railpack_frontend_version: "0.9.0"
+railpack_frontend_image: "ghcr.io/railwayapp/railpack-frontend"
+# Optional upstream pin. Empty means "resolve the tag once, at install time, and
+# then never look at the registry again" — the vendored bytes are the pin from
+# that point on. Set it to a `sha256:…` manifest digest to make the *fetch*
+# immutable as well, which is what a rebuild-from-scratch audit wants.
+railpack_frontend_source_digest: ""
+turbopanel_dev_user: ""  # noqa: var-naming[no-role-prefix]
+turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"  # noqa: var-naming[no-role-prefix]

@@ -38,6 +38,7 @@ import {
   ANSIBLE_PLAYBOOK_CWD,
   ansibleEnv,
   BUILD_TOGGLE_PLAYBOOK,
+  BUILDKIT_PLAYBOOK,
   CADDY_PLAYBOOK,
   DAEMON_CONVERGE_PLAYBOOK,
   DAEMON_LOGS_PLAYBOOK,
@@ -935,6 +936,25 @@ export async function runCaddySetup(
   logInfo("orchestration", "running caddy-setup playbook");
   await runLocalPlaybook(CADDY_PLAYBOOK, devInstanceExtraArgs(), onEvent);
   logInfo("orchestration", "caddy-setup complete");
+}
+
+/**
+ * Vendor BuildKit + Railpack for the Railpack build lane.
+ *
+ * Called on demand from `ensureBuildkitRailpack` when a deploy asks for
+ * `build.kind: railpack`, never from `daemon-converge` or
+ * `instance-dev-install` — a host that never builds an image from source should
+ * not carry a build daemon. `ensureGalaxyDockerRole()` runs first because the
+ * built image is loaded into the local Docker image store, so the container
+ * runtime has to be there before this is worth installing.
+ */
+export async function runBuildkitSetup(
+  onEvent?: AnsibleEventHandler,
+): Promise<void> {
+  await ensureGalaxyDockerRole();
+  logInfo("orchestration", "running buildkit-setup playbook");
+  await runLocalPlaybook(BUILDKIT_PLAYBOOK, devInstanceExtraArgs(), onEvent);
+  logInfo("orchestration", "buildkit-setup complete");
 }
 
 /** Run PostgreSQL 18 in Docker (daemon-only hosts). */

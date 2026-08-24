@@ -2,6 +2,11 @@
 # Vendor OpenLiteSpeed (never a distro package) + tpols identity for
 # traditional-web deploy. Per-site httpd_config.conf / vhost configs are
 # written by the daemon TypeScript apply path after this playbook runs.
+#
+# The daemon passes turbopanel_lsphp_install=true when any OpenLiteSpeed site
+# carries hosting web.php hints; the role then also vendors `lsphp` (LSAPI PHP)
+# under vendor/lsphp/<series>/. A static-only host never downloads it. Mirrors
+# turbopanel_php_fpm_install in the nginx/apache apply playbooks.
 - name: TurboPanel traditional-web prerequisites (OpenLiteSpeed)
   hosts: localhost
   connection: local

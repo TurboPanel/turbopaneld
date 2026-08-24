@@ -306,3 +306,113 @@ test({
     }
   },
 });
+
+test({
+  name:
+    "handleEnvironmentStop reclaims per-service release trees through the privileged runner",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-stop-releases-" });
+    const previous = {
+      TURBOPANEL_STATE_DIR: Deno.env.get("TURBOPANEL_STATE_DIR"),
+      TURBOPANEL_CONFIG_DIR: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
+      TURBOPANEL_PRINCIPAL_HOME_ROOT: Deno.env.get(
+        "TURBOPANEL_PRINCIPAL_HOME_ROOT",
+      ),
+    };
+    Deno.env.set("TURBOPANEL_STATE_DIR", join(root, "state"));
+    Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
+    Deno.env.set("TURBOPANEL_PRINCIPAL_HOME_ROOT", join(root, "srv", "users"));
+
+    // The tree is root-owned by design, so removal cannot use Deno.remove.
+    const removed: string[] = [];
+    const siteDir = join(root, "srv", "users", "appuser", "sites", "svc-1");
+    await Deno.mkdir(join(siteDir, "releases", "rel-1"), { recursive: true });
+
+    try {
+      const result = await handleEnvironmentStop(
+        {
+          environmentId: "envrel0001",
+          projectId: "proj-1",
+          projectName: "tp-demo-envrel000",
+          siteReleases: [{ serviceId: "svc-1", username: "appuser" }],
+        },
+        new Date().toISOString(),
+        {
+          runPrivileged: async (command, args) => {
+            const path = args.at(-1);
+            if (command === "sudo" && args.includes("rm") && path) {
+              removed.push(path);
+              await Deno.remove(path, { recursive: true });
+            }
+            return { success: true, stdout: "", stderr: "" };
+          },
+        },
+      );
+      assertEquals(result.containers, []);
+      assertEquals(removed, [siteDir]);
+      await assertRejects(() => Deno.stat(siteDir), Deno.errors.NotFound);
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) Deno.env.delete(key);
+        else Deno.env.set(key, value);
+      }
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentStop keeps stopping when a release tree refuses to go",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-stop-releases-err-" });
+    const previous = {
+      TURBOPANEL_STATE_DIR: Deno.env.get("TURBOPANEL_STATE_DIR"),
+      TURBOPANEL_CONFIG_DIR: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
+      TURBOPANEL_PRINCIPAL_HOME_ROOT: Deno.env.get(
+        "TURBOPANEL_PRINCIPAL_HOME_ROOT",
+      ),
+    };
+    Deno.env.set("TURBOPANEL_STATE_DIR", join(root, "state"));
+    Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
+    Deno.env.set("TURBOPANEL_PRINCIPAL_HOME_ROOT", join(root, "srv", "users"));
+
+    const attempted: string[] = [];
+    try {
+      // Best effort per entry: the first failure must not skip the second.
+      const result = await handleEnvironmentStop(
+        {
+          environmentId: "envrel0002",
+          projectId: "proj-1",
+          projectName: "tp-demo-envrel000",
+          siteReleases: [
+            { serviceId: "svc-1", username: "appuser" },
+            { serviceId: "svc-2", username: "appuser" },
+          ],
+        },
+        new Date().toISOString(),
+        {
+          runPrivileged: (_command, args) => {
+            const path = args.at(-1) ?? "";
+            attempted.push(path);
+            return Promise.resolve({
+              success: false,
+              stdout: "",
+              stderr: "device busy",
+            });
+          },
+        },
+      );
+      assertEquals(result.containers, []);
+      assertEquals(attempted.length, 2);
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) Deno.env.delete(key);
+        else Deno.env.set(key, value);
+      }
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});

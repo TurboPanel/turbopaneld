@@ -150,12 +150,22 @@
     - php-fpm.log
     - php-error.log
 
+# Group `tp`, not `tpapache`: per-site sockets in here are owned by whichever
+# engine consumes them (tpapache for an Apache site, tpnginx for an nginx one),
+# so a directory grouped to one engine would stop the other traversing to its
+# own socket. `tp` is the shared group every engine account joins
+# (`web-service-user`), which covers both without any world bit. The php-fpm
+# master runs as root and creates the sockets; access control is on the socket
+# files themselves (0660, per-engine owner) — the directory only needs to be
+# traversable. Keep in step with `ExecStartPre` in
+# `templates/turbopanel-php-fpm.service.j2`, which recreates this directory on
+# every start.
 - name: Ensure PHP runtime directory (pidfile + sockets)
   ansible.builtin.file:
     path: "{{ turbopanel_run_dir }}/php"
     state: directory
     owner: "{{ php_fpm_service_user }}"
-    group: "{{ php_fpm_service_group }}"
+    group: "{{ turbopanel_group }}"
     mode: "0750"
 
 - name: Install TurboPanel php.ini

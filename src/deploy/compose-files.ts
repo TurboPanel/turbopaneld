@@ -92,6 +92,55 @@ export type DeploymentManifestSecret = {
   forRuntime?: boolean;
 };
 
+/**
+ * One source-backed release this deployment applied.
+ *
+ * Recorded at the **environment** level (not only inside the release tree)
+ * because that is the layer reboot and reconnect actually read:
+ * `readDeploymentManifest()` is what `environment.lifecycle` and
+ * `rehydrate-deployments.ts` consult when the control plane is unreachable, and
+ * without this they know which containers to start but not which release or
+ * commit is behind them. `.turbopanel/release.json` answers the same question
+ * per release directory; this answers it per environment, which is what
+ * lifecycle and (later) rollback need.
+ */
+export type DeploymentManifestRelease = {
+  /** Compose service key the release was built for. */
+  composeServiceName: string;
+  /** TurboPanel service UUID, or the compose key when the payload named none. */
+  serviceId: string;
+  /** Release directory name under `sites/<serviceId>/releases/`. */
+  releaseId: string;
+  /** `source` row the release was resolved from. */
+  sourceId: string;
+  /**
+   * The commit this release is actually serving.
+   *
+   * For a fresh release that is what the checkout resolved to; for a rollback it
+   * is the commit read back out of the promoted release's own manifest, not the
+   * placeholder the payload carried. The host's durable record therefore names
+   * the code that is running, which is the whole point of keeping it here.
+   */
+  commitSha: string;
+  /** Commit subject / author, when the source provider resolved them. */
+  commitMessage?: string;
+  commitAuthor?: string;
+  /** Ref the commit was resolved from, when the payload carried one. */
+  ref?: string;
+  /**
+   * Principal the release tree lives under
+   * (`<principalHomeRoot>/<username>/sites/<serviceId>`).
+   *
+   * Recorded so a **later** deploy can still address the tree of a service that
+   * has since been removed from the compose: once the payload no longer carries
+   * a `sourceMaterial[]` entry for it there is nothing left to derive the owning
+   * home from, and the whole tree would be orphaned on disk. Absent on
+   * pre-`username` manifests and on entries the payload named no principal for
+   * (those never had a tree published), so readers must treat it as optional.
+   */
+  username?: string;
+};
+
 export type DeploymentManifestV2 = {
   version: 2;
   projectId: string;
@@ -114,6 +163,13 @@ export type DeploymentManifestV2 = {
    * pipeline. Absent on pre-`serviceIds` manifests.
    */
   serviceIds?: Record<string, string>;
+  /**
+   * Source-backed releases applied by this deploy, one entry per
+   * `sourceMaterial[]` entry. Absent on pre-`releases` manifests **and** on
+   * every deploy that has no Git-backed service, so readers must treat it as
+   * optional rather than as evidence the deploy predates the field.
+   */
+  releases?: DeploymentManifestRelease[];
 };
 
 function isDeploymentManifestV2(
@@ -213,6 +269,70 @@ function parseManifestServiceIds(value: unknown): Record<string, string> {
   return out;
 }
 
+/**
+ * Accept only fully-identified release rows.
+ *
+ * A partial row is dropped rather than repaired: half a release identity is
+ * worse than none for the lifecycle paths that will read this — they must be
+ * able to trust that an entry names a real release directory and commit.
+ */
+function parseManifestRelease(
+  value: unknown,
+): DeploymentManifestRelease | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  for (
+    const key of [
+      "composeServiceName",
+      "serviceId",
+      "releaseId",
+      "sourceId",
+      "commitSha",
+    ]
+  ) {
+    const field = record[key];
+    if (typeof field !== "string" || field.length === 0) return null;
+  }
+  const entry: DeploymentManifestRelease = {
+    composeServiceName: record.composeServiceName as string,
+    serviceId: record.serviceId as string,
+    releaseId: record.releaseId as string,
+    sourceId: record.sourceId as string,
+    commitSha: record.commitSha as string,
+  };
+  if (typeof record.ref === "string" && record.ref.length > 0) {
+    entry.ref = record.ref;
+  }
+  // Display-only, and absent on every manifest written before it was recorded —
+  // a missing one is not a reason to drop an otherwise-valid release row.
+  if (
+    typeof record.commitMessage === "string" && record.commitMessage.length > 0
+  ) {
+    entry.commitMessage = record.commitMessage;
+  }
+  if (
+    typeof record.commitAuthor === "string" && record.commitAuthor.length > 0
+  ) {
+    entry.commitAuthor = record.commitAuthor;
+  }
+  if (typeof record.username === "string" && record.username.length > 0) {
+    entry.username = record.username;
+  }
+  return entry;
+}
+
+function parseManifestReleases(value: unknown): DeploymentManifestRelease[] {
+  if (!Array.isArray(value)) return [];
+  const out: DeploymentManifestRelease[] = [];
+  for (const item of value) {
+    const parsed = parseManifestRelease(item);
+    if (parsed) out.push(parsed);
+  }
+  return out;
+}
+
 function parseManifestSecrets(value: unknown): DeploymentManifestSecret[] {
   if (!Array.isArray(value)) return [];
   const out: DeploymentManifestSecret[] = [];
@@ -252,10 +372,26 @@ export async function readDeploymentManifest(
   const record = parsed as unknown as Record<string, unknown>;
   const secrets = parseManifestSecrets(record.secrets);
   const serviceIds = parseManifestServiceIds(record.serviceIds);
+  // Older manifests carry no `releases` at all; that is a normal read, not a
+  // rejected one — the field stays absent and every existing reader is
+  // unaffected.
+  const releases = parseManifestReleases(record.releases);
+  // Rebuilt field by field rather than spread from `parsed`: the optional
+  // arrays/maps must be the *parsed* ones, and spreading the raw document would
+  // let an unvalidated `secrets` / `serviceIds` / `releases` survive whenever
+  // parsing dropped every entry.
   return {
-    ...parsed,
+    version: 2,
+    projectId: parsed.projectId,
+    environmentId: parsed.environmentId,
+    serverId: parsed.serverId,
+    generation: parsed.generation,
+    projectName: parsed.projectName,
+    composeSha256: parsed.composeSha256,
+    services: parsed.services,
     ...(secrets.length > 0 ? { secrets } : {}),
     ...(Object.keys(serviceIds).length > 0 ? { serviceIds } : {}),
+    ...(releases.length > 0 ? { releases } : {}),
   };
 }
 

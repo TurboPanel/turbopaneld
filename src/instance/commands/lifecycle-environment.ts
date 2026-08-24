@@ -1,8 +1,14 @@
 /**
  * Non-destructive environment lifecycle: compose start | stop | restart.
  *
- * Never tears down volumes, the deployment directory, hosting Caddy sites, or
- * tcp/udp claim files — that remains `environment.stop`.
+ * Covers both workload lanes: Docker Compose services **and** the generated
+ * `turbopanel-app-<serviceId>` units that supervise native (`serviceKind:
+ * node`) apps. Leaving the units running while their compose siblings stopped
+ * would make "stop this environment" a half-truth.
+ *
+ * Never tears down volumes, the deployment directory, hosting Caddy sites,
+ * tcp/udp claim files, or the app unit files themselves — that remains
+ * `environment.stop`.
  */
 
 import {
@@ -37,6 +43,7 @@ import {
   serviceIngressComposePath,
   serviceIngressProject,
 } from "../../deploy/ingress.ts";
+import { applyNativeAppLifecycle } from "../../deploy/native/apply-native-apps.ts";
 import { logInfo, sanitizeForLog } from "../../logger.ts";
 import { resolveLayout } from "../../paths/layout.ts";
 import {
@@ -240,6 +247,23 @@ export async function handleEnvironmentLifecycle(
     parsedPayload.action,
     run,
   );
+
+  // Native app units follow the same action. Best-effort per unit for the same
+  // reason ingress is: one wedged unit must not fail the whole lifecycle
+  // command and leave the compose half in an inconsistent state.
+  const nativeUnits = await applyNativeAppLifecycle(
+    layout,
+    parsedPayload.environmentId,
+    parsedPayload.action,
+  );
+  if (nativeUnits.length > 0) {
+    logInfo(
+      "commands",
+      `environment.lifecycle ${parsedPayload.action} native units=${
+        nativeUnits.join(",")
+      }`,
+    );
+  }
 
   const containers = await collectLifecycleContainers(
     parsedPayload.projectName,

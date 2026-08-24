@@ -11,6 +11,31 @@ turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') 
 openlitespeed_service_user: tpols
 openlitespeed_service_group: tpols
 
+# LSAPI PHP (`lsphp`) for OpenLiteSpeed vhosts. Vendored the same way the base
+# server is: extracted with `dpkg-deb -x` from litespeedtech's own Debian pool
+# (same pattern as the nginx/redis roles) — never `apt install lsphp*`, which
+# would add their apt repo, and never the vendor install.sh.
+#
+# OpenLiteSpeed does not use php-fpm: each vhost execs its own `lsphp` under
+# suEXEC. The *series* must still stay in step with `php_fpm_series` and
+# `PINNED_LSPHP_SERIES` in `../src/deploy/traditional-web.ts` — one PHP version
+# per host across all three engines is a product rule, not a technical one.
+# Only vendored when the daemon passes `turbopanel_lsphp_install: true`.
+openlitespeed_lsphp_series: "8.4"
+openlitespeed_lsphp_version: "8.4.13"
+# Pool directory + package basename (litespeedtech drops the dot from the series).
+openlitespeed_lsphp_pkg: "lsphp84"
+openlitespeed_lsphp_deb_version: "8.4.13-1+bookworm"
+openlitespeed_lsphp_repo_base: "https://rpms.litespeedtech.com/debian/pool/main/l"
+# The interpreter plus the extensions a hosting PHP site is expected to have.
+# All ship from the same source package pool at the same version pin.
+openlitespeed_lsphp_packages:
+  - lsphp84
+  - lsphp84-common
+  - lsphp84-mysql
+  - lsphp84-opcache
+  - lsphp84-curl
+
 # FHS mutable paths — decoupled from the vendored (read-mostly) tree via
 # symlinks so `current` can be repointed at a new version without losing
 # config/logs. Daemon TypeScript (src/deploy/traditional-web.ts) owns the

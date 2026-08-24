@@ -2766,3 +2766,61 @@ test("managed.ha.reconcile and failover result parsers reject invalid shapes", (
     "Invalid managed.ha.failover result",
   );
 });
+
+const DEPLOY_BASE = {
+  environmentId: "env-1",
+  projectId: "proj-1",
+  organizationId: "org-1",
+  projectName: "demo",
+  composeFiles: [{
+    filename: "compose.yaml",
+    role: "runtime" as const,
+    content: "services:\n  web:\n    image: nginx\n",
+  }],
+  hostings: [],
+};
+
+const SOURCE_ENTRY = {
+  sourceId: "00000000-0000-4000-8000-000000000001",
+  composeServiceName: "web",
+  provider: "gitlab",
+  cloneUrl: "https://gitlab.test/acme/app.git",
+  ref: "main",
+  commitSha: "0123456789abcdef0123456789abcdef01234567",
+  releaseId: "rel-1",
+  credential: "tpdaemon.sealed",
+  credentialKind: "token",
+  build: { kind: "native" },
+};
+
+test("environment.deploy sourceMaterial round-trips the HTTPS credential username", () => {
+  const payload = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    sourceMaterial: [{ ...SOURCE_ENTRY, credentialUsername: "oauth2" }],
+  });
+  assertEquals(payload.sourceMaterial?.[0]?.credentialUsername, "oauth2");
+
+  // Absent stays absent: the checkout falls back to its own default rather
+  // than receiving one the control plane never stated.
+  const bare = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    sourceMaterial: [{ ...SOURCE_ENTRY }],
+  });
+  assertEquals(bare.sourceMaterial?.[0]?.credentialUsername, undefined);
+});
+
+test("environment.deploy rejects a credentialUsername the askpass script cannot hold", () => {
+  for (
+    const bad of ["", "oauth2\nUsername", "oauth2\u0000", "x".repeat(201), 7]
+  ) {
+    assertThrows(
+      () =>
+        parseEnvironmentDeployPayload({
+          ...DEPLOY_BASE,
+          sourceMaterial: [{ ...SOURCE_ENTRY, credentialUsername: bad }],
+        }),
+      TypeError,
+      "Invalid sourceMaterial credentialUsername",
+    );
+  }
+});

@@ -37,7 +37,11 @@ export interface CommandOutputEvent {
 export const COMMAND_LOG_PHASES = {
   PREPARE: "prepare",
   PULL: "pull",
+  /** Git checkout for a source-backed release (`src/deploy/release/`). */
+  FETCH: "fetch",
   BUILD: "build",
+  /** Staging + atomic `current` swap for a source-backed release. */
+  RELEASE_PROMOTE: "release-promote",
   PRE_DEPLOY: "pre-deploy",
   COMPOSE_UP: "compose-up",
   HEALTH: "health",

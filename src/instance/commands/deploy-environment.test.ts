@@ -18,10 +18,19 @@ import {
   buildDeploySummary,
   containerHostingsNeedSharedHttpIngress,
   handleEnvironmentDeploy,
+  hostNativeComposeServiceNames,
   persistHostingIngressIdentity,
   resolveDeployComposeFiles,
+  resolveHostNativeLanes,
   shapeEnvironmentDeployResult,
 } from "./deploy-environment.ts";
+import { applyNativeAppServices } from "../../deploy/native/apply-native-apps.ts";
+import { nativeAppUnitPath } from "../../deploy/native/unit.ts";
+import type { AppliedRelease } from "../../deploy/release/apply-source-releases.ts";
+import type {
+  EnvironmentDeployNativeAppService,
+  EnvironmentDeployPayload,
+} from "./contracts.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -1546,6 +1555,439 @@ test({
         Deno.env.set("TURBOPANEL_CONFIG_DIR", previous.TURBOPANEL_CONFIG_DIR);
       }
       await Deno.remove(root, { recursive: true });
+    }
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Whole-tree reclaim: a service that had a release tree and then lost its
+// source must not leave `<principalHome>/sites/<serviceId>` behind. Per-release
+// retention only walks services the deploy is still publishing, so the previous
+// `deployment.json` is the only record that still names the removed one.
+// ---------------------------------------------------------------------------
+
+/** Env keys the reclaim path reads, restored by {@link withReclaimEnv}. */
+const RECLAIM_ENV_KEYS = [
+  "TURBOPANEL_STATE_DIR",
+  "TURBOPANEL_CONFIG_DIR",
+  "TURBOPANEL_PRINCIPAL_HOME_ROOT",
+] as const;
+
+async function withReclaimEnv(
+  fn: (dirs: { stateDir: string; principalHomeRoot: string }) => Promise<void>,
+): Promise<void> {
+  const root = await Deno.makeTempDir({ prefix: "tp-deploy-reclaim-" });
+  const previous = new Map(
+    RECLAIM_ENV_KEYS.map((key) => [key, Deno.env.get(key)]),
+  );
+  const stateDir = join(root, "state");
+  const principalHomeRoot = join(root, "srv", "users");
+  Deno.env.set("TURBOPANEL_STATE_DIR", stateDir);
+  Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
+  Deno.env.set("TURBOPANEL_PRINCIPAL_HOME_ROOT", principalHomeRoot);
+  try {
+    await fn({ stateDir, principalHomeRoot });
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) Deno.env.delete(key);
+      else Deno.env.set(key, value);
+    }
+    await Deno.remove(root, { recursive: true });
+  }
+}
+
+/** The `deployment.json` a previous release-backed deploy would have left. */
+async function seedPreviousReleaseManifest(
+  deploymentDir: string,
+  releases: unknown[],
+): Promise<void> {
+  await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
+  await Deno.writeTextFile(
+    join(deploymentDir, DEPLOYMENT_MANIFEST_FILENAME),
+    JSON.stringify({
+      version: 2,
+      projectId: "proj-1",
+      environmentId: "envreclaim1",
+      serverId: "srv-1",
+      generation: 1,
+      projectName: "tp-demo-reclaim",
+      composeSha256: "a".repeat(64),
+      services: {},
+      releases,
+    }),
+    { mode: 0o640 },
+  );
+}
+
+function captureSudo(): {
+  runPrivileged: (
+    command: string,
+    args: string[],
+  ) => Promise<{ success: boolean; stdout: string; stderr: string }>;
+  calls: Array<{ command: string; args: string[] }>;
+} {
+  const calls: Array<{ command: string; args: string[] }> = [];
+  return {
+    calls,
+    runPrivileged: (command, args) => {
+      calls.push({ command, args: [...args] });
+      return Promise.resolve({ success: true, stdout: "", stderr: "" });
+    },
+  };
+}
+
+/** Enough of the compose CLI for a one-service deploy that never starts it. */
+const fakeReclaimRunDocker = (args: string[]): Promise<DockerCliResult> => {
+  if (args.includes("config") && args.includes("--format")) {
+    return Promise.resolve({
+      success: true,
+      stdout: fakeConfigJson({ web: { image: "nginx:alpine" } }),
+      stderr: "",
+      code: 0,
+    });
+  }
+  if (args.includes("ps")) {
+    return Promise.resolve({
+      success: true,
+      stdout: "[]",
+      stderr: "",
+      code: 0,
+    });
+  }
+  return Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 });
+};
+
+const RECLAIM_RELEASE_ROW = {
+  composeServiceName: "web",
+  serviceId: "svc-gone",
+  releaseId: "rel-1",
+  sourceId: "src-1",
+  commitSha: "a".repeat(40),
+  username: "appuser",
+};
+
+test({
+  name:
+    "handleEnvironmentDeploy reclaims the release tree of a service removed from the compose",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withReclaimEnv(async ({ stateDir, principalHomeRoot }) => {
+      const environmentId = "envreclaim1";
+      const deploymentDir = join(
+        stateDir,
+        "deployments",
+        "proj-1",
+        environmentId,
+      );
+      await seedPreviousReleaseManifest(deploymentDir, [RECLAIM_RELEASE_ROW]);
+      const sudo = captureSudo();
+
+      // The redeploy carries no `sourceMaterial[]` at all — the service is gone
+      // from the compose, so nothing in the payload names its tree.
+      await handleEnvironmentDeploy(
+        {
+          environmentId,
+          projectId: "proj-1",
+          organizationId: "org-1",
+          projectName: "tp-demo-reclaim",
+          composeFiles: [{
+            filename: RUNTIME_COMPOSE_FILENAME,
+            role: "runtime",
+            source: "inline",
+            content: "services:\n  web:\n    image: nginx:alpine\n",
+          }],
+          hostings: [],
+        },
+        new Date().toISOString(),
+        {
+          ...hermeticDeployDeps,
+          runDocker: fakeReclaimRunDocker,
+          runPrivileged: sudo.runPrivileged,
+        },
+      );
+
+      assertEquals(sudo.calls, [{
+        command: "sudo",
+        args: [
+          "-n",
+          "rm",
+          "-rf",
+          "--",
+          join(principalHomeRoot, "appuser", "sites", "svc-gone"),
+        ],
+      }]);
+    });
+  },
+});
+
+// The "still sourced → tree kept" side is covered without a real clone in
+// `src/deploy/release/retention-reclaim.test.ts` (`releaseTreesToReclaim`),
+// which is the selection rule this handler delegates to.
+
+// ---------------------------------------------------------------------------
+// Mixed lanes: an environment can carry Docker services, traditional-web sites,
+// and native apps at once. Only the Docker ones may reach a container-only
+// path — a hosting for a host-native service has no compose service to hang a
+// Traefik label on, and passing it to the overlay builder used to abort the
+// deploy before a single app started.
+// ---------------------------------------------------------------------------
+
+const MIXED_ENVIRONMENT_ID = "envmixed1";
+
+/** Payload with one container service and one *hosted* native Node app. */
+function mixedLanePayload(): EnvironmentDeployPayload {
+  return {
+    environmentId: MIXED_ENVIRONMENT_ID,
+    projectId: "proj-mixed",
+    organizationId: "org-1",
+    projectName: "tp-demo-mixed",
+    composeFiles: [{
+      filename: RUNTIME_COMPOSE_FILENAME,
+      role: "runtime",
+      source: "inline",
+      // `web` is a native app: the instance already stripped it from the
+      // runtime compose, so only `api` is a compose service here.
+      content: "services:\n  api:\n    image: nginx:alpine\n",
+    }],
+    hostings: [
+      {
+        hostingId: "11111111-1111-4111-8111-111111111111",
+        serviceId: "22222222-2222-4222-8222-222222222222",
+        composeServiceName: "api",
+        // A raw-port hosting: per-service Traefik covers it, so the container
+        // side alone never needs the shared HTTP proxy. The *only* thing that
+        // could pull the shared proxy into this deploy is the native app's
+        // hosting leaking into `containerHostings`.
+        hostnames: [],
+        protocol: "tcp",
+        ports: [{ published: 15432, target: 5432 }],
+      },
+      {
+        hostingId: "33333333-3333-4333-8333-333333333333",
+        serviceId: "44444444-4444-4444-8444-444444444444",
+        composeServiceName: "web",
+        hostnames: ["web.example.test"],
+      },
+    ],
+    nativeAppServices: [{
+      composeServiceName: "web",
+      serviceId: "svcweb",
+      listenPort: 18300,
+      framework: "next",
+    }],
+  } as unknown as EnvironmentDeployPayload;
+}
+
+test("hostNativeComposeServiceNames covers both host-native lanes", () => {
+  const names = hostNativeComposeServiceNames({
+    ...mixedLanePayload(),
+    traditionalWebSites: [{
+      composeServiceName: "legacy",
+      engine: "nginx",
+      root: "public",
+      listenPort: 18400,
+    }],
+  } as unknown as EnvironmentDeployPayload);
+  assertEquals([...names].sort((a, b) => a.localeCompare(b)), [
+    "legacy",
+    "web",
+  ]);
+});
+
+test({
+  name:
+    "handleEnvironmentDeploy deploys a container service alongside a hosted native app",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withReclaimEnv(async ({ stateDir }) => {
+      const composeArgv: string[][] = [];
+      const runDocker = (args: string[]): Promise<DockerCliResult> => {
+        composeArgv.push([...args]);
+        if (args.includes("config") && args.includes("--format")) {
+          // Only `api` resolves — `web` is not a compose service at all, which
+          // is exactly why it must never reach the label overlay.
+          return Promise.resolve({
+            success: true,
+            stdout: fakeConfigJson({ api: { image: "nginx:alpine" } }),
+            stderr: "",
+            code: 0,
+          });
+        }
+        if (args.includes("ps")) {
+          return Promise.resolve({
+            success: true,
+            stdout: "[]",
+            stderr: "",
+            code: 0,
+          });
+        }
+        return Promise.resolve({
+          success: true,
+          stdout: "",
+          stderr: "",
+          code: 0,
+        });
+      };
+
+      const result = await handleEnvironmentDeploy(
+        mixedLanePayload(),
+        new Date().toISOString(),
+        {
+          ...hermeticDeployDeps,
+          runDocker,
+          runPrivileged: captureSudo().runPrivileged,
+          // Host-free native apply: no systemd, no ansible-playbook.
+          nativeAppIo: {
+            run: () =>
+              Promise.resolve({ success: true, stdout: "", stderr: "" }),
+            runPlaybook: () => Promise.resolve(),
+            probe: () => Promise.resolve(true),
+            sleep: () => Promise.resolve(),
+            systemdUnitDir: join(stateDir, "systemd"),
+          },
+        },
+      );
+
+      // The deploy completed instead of aborting on "Compose service not found".
+      assertEquals(result.projectName, "tp-demo-mixed");
+      assertEquals(result.services, ["api"]);
+
+      // The published overlay labels only the container service.
+      const composePath = join(
+        stateDir,
+        "deployments",
+        "proj-mixed",
+        MIXED_ENVIRONMENT_ID,
+        RUNTIME_COMPOSE_FILENAME,
+      );
+      const compose = await Deno.readTextFile(composePath);
+      assertEquals(compose.includes("traefik.enable"), true);
+      // No router was generated for the native app's hostname.
+      assertEquals(compose.includes("web.example.test"), false);
+
+      // Hosting Caddy is what actually routes the native app, and it was
+      // rewritten with the app's loopback port rather than a Traefik upstream.
+      const caddySite = await Deno.readTextFile(
+        join(
+          Deno.env.get("TURBOPANEL_CONFIG_DIR")!,
+          "hosting",
+          "sites",
+          `${MIXED_ENVIRONMENT_ID}.caddy`,
+        ),
+      );
+      assertEquals(caddySite.includes("127.0.0.1:18300"), true);
+    });
+  },
+});
+
+// ---------------------------------------------------------------------------
+// A `next export` build has no server process, so it leaves the native lane
+// entirely rather than being supervised by a unit that could never come up.
+// ---------------------------------------------------------------------------
+
+const EXPORTED_APP: EnvironmentDeployNativeAppService = {
+  composeServiceName: "web",
+  serviceId: "svcweb",
+  listenPort: 18300,
+  framework: "next",
+};
+
+function exportedPayload(): EnvironmentDeployPayload {
+  return {
+    ...mixedLanePayload(),
+    sourceMaterial: [{
+      sourceId: "src-1",
+      composeServiceName: "web",
+      provider: "github",
+      cloneUrl: "https://example.test/repo.git",
+      ref: "main",
+      commitSha: "a".repeat(40),
+      releaseId: "rel-1",
+      principal: { principalId: "pr-1", username: "appuser" },
+      build: { kind: "native" },
+    }],
+  } as unknown as EnvironmentDeployPayload;
+}
+
+function appliedRelease(overrides: Partial<AppliedRelease>): AppliedRelease {
+  return {
+    composeServiceName: "web",
+    serviceId: "svcweb",
+    releaseId: "rel-1",
+    commitSha: "a".repeat(40),
+    releaseDir: "/tmp/rel-1",
+    previousReleaseId: null,
+    standaloneOutput: false,
+    staticExport: false,
+    ...overrides,
+  };
+}
+
+test("a statically exported build moves to the traditional-web static lane", () => {
+  const lanes = resolveHostNativeLanes(exportedPayload(), [
+    appliedRelease({ staticExport: true }),
+  ]);
+
+  // Nothing is left on the native lane, so no unit can be generated for it.
+  assertEquals(lanes.nativeAppServices, []);
+  assertEquals(lanes.traditionalWebSites, [{
+    composeServiceName: "web",
+    engine: "nginx",
+    // The export tree *is* the release root (`out/` was published as it).
+    root: ".",
+    listenPort: EXPORTED_APP.listenPort,
+    principal: { principalId: "pr-1", username: "appuser" },
+  }]);
+});
+
+test("a server build stays on the native lane", () => {
+  const lanes = resolveHostNativeLanes(exportedPayload(), [
+    appliedRelease({ standaloneOutput: true }),
+  ]);
+  assertEquals(lanes.nativeAppServices, [EXPORTED_APP]);
+  assertEquals(lanes.traditionalWebSites, []);
+});
+
+test({
+  name: "no systemd unit is generated for an exported Next.js app",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const fixture = await createTempLayout();
+    const unitDir = await Deno.makeTempDir({ prefix: "tp-export-units-" });
+    try {
+      const layout = resolveLayout(fixture.env, {
+        skipDiscovery: true,
+        forceMode: "production",
+      });
+      const lanes = resolveHostNativeLanes(exportedPayload(), [
+        appliedRelease({ staticExport: true }),
+      ]);
+
+      const result = await applyNativeAppServices(
+        layout,
+        MIXED_ENVIRONMENT_ID,
+        lanes.nativeAppServices,
+        {
+          bindings: new Map([[
+            "web",
+            { username: "appuser", previousReleaseId: null },
+          ]]),
+          run: () => Promise.resolve({ success: true, stdout: "", stderr: "" }),
+          runPlaybook: () => Promise.resolve(),
+          probe: () => Promise.resolve(true),
+          sleep: () => Promise.resolve(),
+          systemdUnitDir: unitDir,
+        },
+      );
+
+      assertEquals(result.applied, []);
+      await assertRejects(
+        () => Deno.stat(nativeAppUnitPath(EXPORTED_APP.serviceId, unitDir)),
+        Deno.errors.NotFound,
+      );
+    } finally {
+      await Deno.remove(unitDir, { recursive: true });
+      await fixture.cleanup();
     }
   },
 });

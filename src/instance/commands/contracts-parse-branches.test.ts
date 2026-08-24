@@ -308,6 +308,53 @@ test("parseEnvironmentStopPayload rejects invalid fabric network names", () => {
   );
 });
 
+test("parseEnvironmentStopPayload round-trips siteReleases", () => {
+  assertEquals(
+    parseEnvironmentStopPayload({
+      environmentId: "env-1",
+      projectId: "proj-1",
+      projectName: "tp-demo",
+      siteReleases: [{ serviceId: "svc-1", username: "appuser" }],
+    }).siteReleases,
+    [{ serviceId: "svc-1", username: "appuser" }],
+  );
+  // Absent stays absent — an old instance never sends the field.
+  assertEquals(
+    parseEnvironmentStopPayload({
+      environmentId: "env-1",
+      projectId: "proj-1",
+      projectName: "tp-demo",
+    }).siteReleases,
+    undefined,
+  );
+});
+
+test("parseEnvironmentStopPayload rejects unsafe siteReleases path segments", () => {
+  // Both fields become path segments on the host; neither may traverse.
+  assertThrows(
+    () =>
+      parseEnvironmentStopPayload({
+        environmentId: "env-1",
+        projectId: "proj-1",
+        projectName: "tp-demo",
+        siteReleases: [{ serviceId: "../etc", username: "appuser" }],
+      }),
+    TypeError,
+    "Invalid environment.stop siteReleases serviceId",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentStopPayload({
+        environmentId: "env-1",
+        projectId: "proj-1",
+        projectName: "tp-demo",
+        siteReleases: [{ serviceId: "svc-1", username: "../root" }],
+      }),
+    TypeError,
+    "Invalid environment.stop siteReleases username",
+  );
+});
+
 test("parseManagedReplicationHealth is lenient and preserves optional lag fields", () => {
   assertEquals(parseManagedReplicationHealth(undefined), undefined);
   assertEquals(parseManagedReplicationHealth("bad"), undefined);

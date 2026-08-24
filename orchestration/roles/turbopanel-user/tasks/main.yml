@@ -57,14 +57,26 @@
 # when later roles (esp. daemon-launch) start the turbopaneld unit, the
 # daemon process (running as tp) can write its uv cache and managed
 # pythons without permission errors.
-- name: Ensure turbopanel owns the runtimes tree
+#
+# Scoped to those three subtrees, **not** to `{{ turbopanel_vendor_dir }}` as a
+# whole: a blanket recurse also rewrites every vendored runtime a later role
+# installed with a deliberately different identity. `vendor/node-app/` is the
+# one that breaks — it is `root:tpnodeapp 0750` so tenant principals (who are
+# not, and must not be, in `tp`) can execute it, and every converge would
+# silently hand it back to `tp:tp` and leave tenant apps unable to exec their
+# Node. Bootstrap only ever writes uv/python/ansible, so nothing else needs it.
+- name: Ensure turbopanel owns the bootstrap-populated runtimes
   ansible.builtin.file:
-    path: "{{ turbopanel_vendor_dir }}"
+    path: "{{ item }}"
     state: directory
     owner: "{{ turbopanel_user }}"
     group: "{{ turbopanel_group }}"
     recurse: true
     mode: "0750"
+  loop:
+    - "{{ turbopanel_vendor_dir }}/uv"
+    - "{{ turbopanel_vendor_dir }}/python"
+    - "{{ turbopanel_vendor_dir }}/ansible"
 
 - name: Grant passwordless sudo for orchestration
   ansible.builtin.copy:

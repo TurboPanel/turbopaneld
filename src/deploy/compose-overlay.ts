@@ -172,6 +172,44 @@ export function mergeOverlayIntoComposeYaml(
 }
 
 /**
+ * Point Railpack-built services at the image the release engine produced.
+ *
+ * Not an overlay fragment, because this has to **remove** as well as add: a
+ * service whose image is minted at deploy time may carry an authored `build:`
+ * (or a placeholder `image:`) that `docker compose config` would otherwise act
+ * on, and merging can only ever add keys. Applying it as a pre-processing pass
+ * on the same compose document — before validation, before the daemon overlay —
+ * is what keeps the Railpack lane from becoming a second orchestration path:
+ * everything downstream (Traefik labels, hosting Caddy, storage mounts,
+ * `compose ps` reporting) sees an ordinary container service with an `image`.
+ *
+ * Services named in the map but absent from the document are ignored; a
+ * Railpack service the compile step stripped is not an error to raise here.
+ */
+export function applyRailpackImagesToComposeYaml(
+  baseYaml: string,
+  images: ReadonlyMap<string, string>,
+): string {
+  if (images.size === 0) return baseYaml;
+  const parsed: unknown = parse(baseYaml);
+  if (!isPlainObject(parsed)) return baseYaml;
+  const services = parsed.services;
+  if (!isPlainObject(services)) return baseYaml;
+
+  let changed = false;
+  const nextServices: Record<string, unknown> = { ...services };
+  for (const [name, imageTag] of images) {
+    const service = nextServices[name];
+    if (!isPlainObject(service)) continue;
+    const { build: _dropped, ...rest } = service;
+    nextServices[name] = { ...rest, image: imageTag };
+    changed = true;
+  }
+  if (!changed) return baseYaml;
+  return stringify({ ...parsed, services: nextServices });
+}
+
+/**
  * Write the daemon overlay at mode `0640`, or remove a stale file when the
  * fragment is empty. Returns the absolute path or `null`.
  */

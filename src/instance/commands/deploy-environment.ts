@@ -4,11 +4,13 @@ import { encodeHex } from "@std/encoding/hex";
 import { join } from "@std/path";
 import {
   composeFileArgs,
+  type DeploymentManifestRelease,
   type DeploymentManifestSecret,
   type DeploymentManifestV2,
   environmentDeploymentDir,
   pruneStaleComposeLayerFiles,
   publishStagedRuntimeCompose,
+  readDeploymentManifest,
   removeComposeEnvFile,
   removeComposeStageDir,
   resetComposeStageDir,
@@ -18,6 +20,7 @@ import {
   writeDeploymentManifest,
 } from "../../deploy/compose-files.ts";
 import {
+  applyRailpackImagesToComposeYaml,
   mergeComposeOverlayFragments,
   mergeOverlayIntoComposeYaml,
 } from "../../deploy/compose-overlay.ts";
@@ -66,7 +69,26 @@ import {
   runDeployServiceHooks,
   runPostDeployHooks,
 } from "../../deploy/run-deploy-hooks.ts";
-import { applyTraditionalWebSites } from "../../deploy/traditional-web.ts";
+import {
+  applyTraditionalWebSites,
+  type TraditionalWebSiteRelease,
+} from "../../deploy/traditional-web.ts";
+import {
+  type AppliedRelease,
+  applySourceReleases,
+  resolveReleaseServiceId,
+} from "../../deploy/release/apply-source-releases.ts";
+import {
+  applyNativeAppServices,
+  type ApplyNativeAppsOpts,
+  nativeAppBindingsFromPayload,
+} from "../../deploy/native/apply-native-apps.ts";
+import {
+  reclaimRemovedReleaseTrees,
+  type ReleaseTreeRef,
+} from "../../deploy/release/retention.ts";
+import { runPrivileged as defaultRunPrivileged } from "../../deploy/release/release-layout.ts";
+import type { RunFn } from "../../deploy/ensure-principal.ts";
 import { ensureExternalDockerNetworks as defaultEnsureExternalDockerNetworks } from "../../deploy/ensure-docker-networks.ts";
 import {
   ensureFabricDockerNetworks as defaultEnsureFabricDockerNetworks,
@@ -92,9 +114,12 @@ import {
   type EnvironmentDeployFabricNetwork,
   type EnvironmentDeployHosting,
   type EnvironmentDeployIngressService,
+  type EnvironmentDeployNativeAppService,
   type EnvironmentDeployPayload,
   type EnvironmentDeployPrincipalMaterial,
   type EnvironmentDeployResult,
+  type EnvironmentDeployResultRelease,
+  type EnvironmentDeploySource,
   type EnvironmentDeployTraditionalWebSite,
   parseEnvironmentDeployPayload,
 } from "./contracts.ts";
@@ -260,6 +285,20 @@ export type EnvironmentDeployDeps = {
     networks: readonly EnvironmentDeployFabricNetwork[],
     defaultMtu: number,
   ) => Promise<void>;
+  /**
+   * Test seam — privileged `sudo -n …` runner used to reclaim the release trees
+   * of services that lost their source. Defaults to {@link runPrivileged}.
+   */
+  runPrivileged?: RunFn;
+  /**
+   * Test seam — the native-app apply's own IO (privileged runner, Ansible,
+   * loopback probe, sleep, systemd unit dir). Omitted in production, where each
+   * one falls back to the real implementation inside
+   * {@link applyNativeAppServices}. It exists so a **mixed** deploy — containers
+   * alongside a hosted native app — can be exercised end to end without systemd
+   * or a real `ansible-playbook` run.
+   */
+  nativeAppIo?: Omit<ApplyNativeAppsOpts, "bindings">;
 };
 
 /**
@@ -399,6 +438,35 @@ async function ensureDeployIngress(
   }
 }
 
+/**
+ * Principals this deploy must exist on the host: `principalMaterial[]` plus any
+ * principal only named by a `sourceMaterial[]` entry.
+ *
+ * A Git-backed release publishes into `<principalHome>/sites/…`, so its owner
+ * has to be created before the release engine runs — even when nothing else in
+ * the payload references that principal.
+ */
+function deployPrincipalSpecs(
+  parsedPayload: EnvironmentDeployPayload,
+  principalMaterial: EnvironmentDeployPrincipalMaterial[],
+): EnvironmentDeployPrincipalMaterial[] {
+  const byId = new Map<string, EnvironmentDeployPrincipalMaterial>();
+  for (const principal of principalMaterial) {
+    byId.set(principal.principalId, principal);
+  }
+  for (const entry of parsedPayload.sourceMaterial ?? []) {
+    const principal = entry.principal;
+    if (!principal || byId.has(principal.principalId)) continue;
+    byId.set(principal.principalId, {
+      principalId: principal.principalId,
+      username: principal.username,
+      ...(principal.uid === undefined ? {} : { uid: principal.uid }),
+      ...(principal.gid === undefined ? {} : { gid: principal.gid }),
+    });
+  }
+  return [...byId.values()];
+}
+
 async function ensureDeployPrincipals(
   layout: LayoutPaths,
   principalMaterial: EnvironmentDeployPrincipalMaterial[],
@@ -497,13 +565,304 @@ function serviceIdsForManifest(
   return out;
 }
 
+/**
+ * `sourceMaterial[]` → durable per-service release rows.
+ *
+ * Written at the environment level so the host keeps its own record of which
+ * release and commit each Git-backed service is on. `deployment.json` is what
+ * the reboot / reconnect paths read (`environment.lifecycle`,
+ * `rehydrate-deployments.ts`); without these rows they can restart the stack but
+ * cannot say what code it is running once the control plane is unreachable.
+ *
+ * `serviceId` is resolved the same way the release engine resolves the release
+ * directory segment ({@link resolveReleaseServiceId}), so the recorded identity
+ * addresses the tree that was actually published.
+ *
+ * **The commit comes from the release engine, not the payload, whenever the
+ * engine ran.** On a rollback the payload's `commitSha` is a stored copy the
+ * control plane sent along; the authority is the promoted release's own
+ * manifest, which {@link applySourceReleases} already read back. Preferring the
+ * applied result keeps `deployment.json` from claiming a rolled-back service is
+ * serving a commit it is not. The payload remains the fallback for entries the
+ * engine skipped (no owning principal) and for the marker-only write path, which
+ * publishes the manifest without running the engine at all.
+ */
+function releasesForManifest(
+  payload: EnvironmentDeployPayload,
+  applied: readonly AppliedRelease[] = [],
+): DeploymentManifestRelease[] {
+  const appliedByService = new Map(
+    applied.map((entry) => [entry.composeServiceName, entry]),
+  );
+  const out: DeploymentManifestRelease[] = [];
+  for (const entry of payload.sourceMaterial ?? []) {
+    const result = appliedByService.get(entry.composeServiceName);
+    const commitSha = result?.commitSha ?? entry.commitSha;
+    const commitMessage = result?.commitMessage ?? entry.commitMessage;
+    const commitAuthor = result?.commitAuthor ?? entry.commitAuthor;
+    out.push({
+      composeServiceName: entry.composeServiceName,
+      serviceId: result?.serviceId ??
+        resolveReleaseServiceId(payload, entry.composeServiceName),
+      // A rollback's live release is the one it promoted, not the id the
+      // control plane would have allocated for a fresh build.
+      releaseId: result?.releaseId ?? entry.rollbackToReleaseId ??
+        entry.releaseId,
+      sourceId: entry.sourceId,
+      commitSha,
+      ...(commitMessage === undefined ? {} : { commitMessage }),
+      ...(commitAuthor === undefined ? {} : { commitAuthor }),
+      ...(entry.ref.length > 0 ? { ref: entry.ref } : {}),
+      ...(entry.principal ? { username: entry.principal.username } : {}),
+    });
+  }
+  return out;
+}
+
+/**
+ * Compose service name → the image a Railpack release built for it.
+ *
+ * Only entries that actually produced an image are in the map, so a deploy with
+ * no Railpack services yields an empty map and
+ * {@link applyRailpackImagesToComposeYaml} is a no-op. Rollbacks are included:
+ * `applySourceReleases` reads the tag back off the target release's manifest,
+ * so restoring a Railpack release is the same "write this tag into compose"
+ * operation a fresh build is.
+ */
+function railpackImagesByService(
+  applied: readonly AppliedRelease[],
+): Map<string, string> {
+  const images = new Map<string, string>();
+  for (const release of applied) {
+    if (!release.imageTag) continue;
+    images.set(release.composeServiceName, release.imageTag);
+  }
+  return images;
+}
+
+/**
+ * `AppliedRelease[]` → the release rows the command result carries.
+ *
+ * The control plane's release-history and rollback surface reads this instead
+ * of asking the host again. It is deliberately generic across both lanes: a
+ * native release reports its commit, a Railpack release additionally reports
+ * the image tag and the pinned frontend / plan versions that produced it,
+ * because "which directory" is not an identity a Railpack release has.
+ */
+function deployResultReleases(
+  applied: readonly AppliedRelease[],
+): EnvironmentDeployResultRelease[] {
+  return applied.map((release) => ({
+    composeServiceName: release.composeServiceName,
+    serviceId: release.serviceId,
+    releaseId: release.releaseId,
+    commitSha: release.commitSha,
+    ...(release.imageTag === undefined ? {} : { imageTag: release.imageTag }),
+    ...(release.railpackFrontendVersion === undefined
+      ? {}
+      : { railpackFrontendVersion: release.railpackFrontendVersion }),
+    ...(release.railpackPlanVersion === undefined
+      ? {}
+      : { railpackPlanVersion: release.railpackPlanVersion }),
+  }));
+}
+
+/**
+ * Compose service name → the release tree it serves from.
+ *
+ * Built from `sourceMaterial[]` on **every** deploy, not only when a release was
+ * freshly promoted: a redeploy that does not touch the source still has to point
+ * the document root at `current`, or the site would silently fall back to the
+ * empty daemon-owned tree. `serviceId` resolves the same way the release engine
+ * resolved it ({@link resolveReleaseServiceId}), so this addresses the tree that
+ * was actually published. Entries with no principal are skipped for the same
+ * reason the release engine skips them — there is no home to serve out of.
+ */
+function deployReleaseBindings(
+  payload: EnvironmentDeployPayload,
+): Map<string, TraditionalWebSiteRelease> {
+  const bindings = new Map<string, TraditionalWebSiteRelease>();
+  for (const entry of payload.sourceMaterial ?? []) {
+    const principal = entry.principal;
+    if (!principal) continue;
+    bindings.set(entry.composeServiceName, {
+      serviceId: resolveReleaseServiceId(payload, entry.composeServiceName),
+      username: principal.username,
+    });
+  }
+  return bindings;
+}
+
+/**
+ * Compose service names this deploy runs **outside** Docker.
+ *
+ * Both host-native lanes belong here: a traditional-web vhost and a native
+ * `serviceKind: node` app are each a process on `127.0.0.1:<port>`, and neither
+ * has a compose service in the runtime file (`compose-files.ts` strips them
+ * before `docker compose config` ever sees them). Every container-only path —
+ * shared/per-service Traefik ingress, the Traefik label overlay, deployed
+ * container collection — has to be handed the *complement* of this set, or it
+ * would look up a compose service that does not exist and fail the whole deploy
+ * before a single app starts. Hosting **Caddy** is the deliberate exception: it
+ * routes hostnames to both lanes and reads them straight off the payload.
+ */
+export function hostNativeComposeServiceNames(
+  payload: EnvironmentDeployPayload,
+): Set<string> {
+  return new Set([
+    ...(payload.traditionalWebSites ?? []).map((site) =>
+      site.composeServiceName
+    ),
+    ...(payload.nativeAppServices ?? []).map((app) => app.composeServiceName),
+  ]);
+}
+
+/** The `sourceMaterial[]` principal for one compose service, when it has one. */
+function releasePrincipalForService(
+  payload: EnvironmentDeployPayload,
+  composeServiceName: string,
+): EnvironmentDeploySource["principal"] {
+  return (payload.sourceMaterial ?? []).find(
+    (entry) => entry.composeServiceName === composeServiceName,
+  )?.principal;
+}
+
+/**
+ * Split the host-native services into the lane each one actually belongs on,
+ * now that the releases have been built.
+ *
+ * A `serviceKind: node` service whose build turned out to be a statically
+ * exported Next site (`output: 'export'`) has **no server process**: the release
+ * is a directory of files. Supervising it with a systemd unit would install a
+ * unit that can never answer its health probe, so it moves to the
+ * traditional-web static lane instead — served straight out of the release
+ * `current` symlink on the same loopback port hosting Caddy was already going
+ * to proxy to. That keeps the hostname routing, the port, and the release tree
+ * identical; only the thing that serves them changes.
+ *
+ * The decision is made here rather than in the release engine because this is
+ * the layer that owns both lanes. The payload itself is never rewritten, and
+ * the operator is not asked to re-declare `serviceKind` to get a working
+ * deploy.
+ */
+export function resolveHostNativeLanes(
+  payload: EnvironmentDeployPayload,
+  appliedReleases: readonly AppliedRelease[],
+): {
+  traditionalWebSites: EnvironmentDeployTraditionalWebSite[];
+  nativeAppServices: EnvironmentDeployNativeAppService[];
+} {
+  const declaredSites = payload.traditionalWebSites ?? [];
+  const declaredApps = payload.nativeAppServices ?? [];
+  const staticExports = new Set(
+    appliedReleases
+      .filter((release) => release.staticExport)
+      .map((release) => release.composeServiceName),
+  );
+  if (staticExports.size === 0) {
+    return {
+      traditionalWebSites: [...declaredSites],
+      nativeAppServices: [...declaredApps],
+    };
+  }
+
+  const traditionalWebSites = [...declaredSites];
+  const nativeAppServices: EnvironmentDeployNativeAppService[] = [];
+  for (const app of declaredApps) {
+    if (!staticExports.has(app.composeServiceName)) {
+      nativeAppServices.push(app);
+      continue;
+    }
+    const principal = releasePrincipalForService(
+      payload,
+      app.composeServiceName,
+    );
+    traditionalWebSites.push({
+      composeServiceName: app.composeServiceName,
+      // Static files, so the lightest of the three engines and no PHP pool.
+      engine: "nginx",
+      // The export tree *is* the release root — `prepareNativeAppBuildOutput`
+      // published `out/` as the release payload, so the document root is
+      // `current` itself.
+      root: ".",
+      listenPort: app.listenPort,
+      ...(principal === undefined ? {} : { principal }),
+    });
+  }
+  return { traditionalWebSites, nativeAppServices };
+}
+
+/** `serviceId`s this payload still carries a `sourceMaterial[]` entry for. */
+function currentReleaseServiceIds(
+  payload: EnvironmentDeployPayload,
+): Set<string> {
+  const ids = new Set<string>();
+  for (const entry of payload.sourceMaterial ?? []) {
+    ids.add(resolveReleaseServiceId(payload, entry.composeServiceName));
+  }
+  return ids;
+}
+
+/**
+ * Release trees the **previous** deploy of this environment published, read
+ * back from its own `deployment.json`.
+ *
+ * This is the only durable record of a service that has since been dropped from
+ * the compose: the payload in hand describes what the environment looks like
+ * now, so a removed service is by definition absent from it. Rows with no
+ * recorded principal are skipped — those never had a tree published.
+ */
+async function previousReleaseTrees(
+  deploymentDir: string,
+): Promise<ReleaseTreeRef[]> {
+  const manifest = await readDeploymentManifest(deploymentDir);
+  const out: ReleaseTreeRef[] = [];
+  for (const release of manifest?.releases ?? []) {
+    if (!release.username) continue;
+    out.push({ serviceId: release.serviceId, username: release.username });
+  }
+  return out;
+}
+
+/**
+ * Reclaim `<principalHome>/sites/<serviceId>` for every service that had a
+ * release tree last deploy and no longer declares a source.
+ *
+ * Runs after the release engine so a tree this deploy is still publishing into
+ * is never a candidate, and before the manifest is rewritten — once
+ * `deployment.json` carries the new `releases[]`, the removed service is gone
+ * from the host's record too.
+ */
+async function reclaimRemovedServiceReleaseTrees(
+  layout: LayoutPaths,
+  payload: EnvironmentDeployPayload,
+  deploymentDir: string,
+  logSink: CommandOutputSink,
+  runFn: RunFn,
+): Promise<void> {
+  const previous = await previousReleaseTrees(deploymentDir);
+  if (previous.length === 0) return;
+  const removed = await reclaimRemovedReleaseTrees({
+    layout,
+    previous,
+    currentServiceIds: currentReleaseServiceIds(payload),
+    runFn,
+    onOutput: (stream, line) => logSink.onLine(stream, line),
+  });
+  for (const path of removed) {
+    logSink.onLine("stdout", `reclaimed removed service release tree ${path}`);
+  }
+}
+
 async function buildDeploymentManifest(
   payload: EnvironmentDeployPayload,
   composeYaml: string,
   serviceNames: readonly string[],
+  appliedReleases: readonly AppliedRelease[] = [],
 ): Promise<DeploymentManifestV2> {
   const secrets = secretPlanToManifest(payload.secretPlan ?? []);
   const serviceIds = serviceIdsForManifest(payload);
+  const releases = releasesForManifest(payload, appliedReleases);
   return {
     version: 2,
     projectId: payload.projectId,
@@ -515,6 +874,7 @@ async function buildDeploymentManifest(
     services: replicaCountsForManifest(payload, serviceNames),
     ...(secrets.length > 0 ? { secrets } : {}),
     ...(Object.keys(serviceIds).length > 0 ? { serviceIds } : {}),
+    ...(releases.length > 0 ? { releases } : {}),
   };
 }
 
@@ -549,10 +909,39 @@ async function applyDeployTraditionalWebSites(
   environmentId: string,
   traditionalWebSites: EnvironmentDeployTraditionalWebSite[],
   dockerBindAddress: string | null,
+  releaseBindings: ReadonlyMap<string, TraditionalWebSiteRelease>,
 ): Promise<void> {
   if (traditionalWebSites.length === 0) return;
   await applyTraditionalWebSites(layout, environmentId, traditionalWebSites, {
     dockerBindAddress,
+    releaseBindings,
+  });
+}
+
+/**
+ * Supervise this deploy's native (`serviceKind: node`) apps.
+ *
+ * Runs after `applySourceReleases` and the traditional-web apply, for the same
+ * reason the latter does: `<principalHome>/sites/<serviceId>/current` must
+ * already resolve before a unit's `WorkingDirectory` points at it.
+ */
+async function applyDeployNativeApps(
+  layout: LayoutPaths,
+  parsedPayload: EnvironmentDeployPayload,
+  apps: readonly EnvironmentDeployNativeAppService[],
+  applied: readonly AppliedRelease[],
+  io?: Omit<ApplyNativeAppsOpts, "bindings">,
+): Promise<void> {
+  if (apps.length === 0) return;
+  const previousReleaseByService = new Map<string, string | null>(
+    applied.map((entry) => [entry.composeServiceName, entry.previousReleaseId]),
+  );
+  await applyNativeAppServices(layout, parsedPayload.environmentId, apps, {
+    ...io,
+    bindings: nativeAppBindingsFromPayload(
+      parsedPayload,
+      previousReleaseByService,
+    ),
   });
 }
 
@@ -591,6 +980,8 @@ function buildDaemonOverlayFragment(
 type DeployContainerServicesInput = {
   layout: LayoutPaths;
   parsedPayload: EnvironmentDeployPayload;
+  /** What the release engine actually promoted, for `deployment.json`. */
+  appliedReleases: readonly AppliedRelease[];
   files: EnvironmentDeployComposeFile[];
   containerHostings: EnvironmentDeployHosting[];
   traditionalWebSites: EnvironmentDeployTraditionalWebSite[];
@@ -654,6 +1045,7 @@ async function deployContainerServices(
   const {
     layout,
     parsedPayload,
+    appliedReleases,
     files,
     containerHostings,
     traditionalWebSites,
@@ -672,7 +1064,14 @@ async function deployContainerServices(
   try {
     const stagedPath = join(stageDir, RUNTIME_COMPOSE_FILENAME);
     let yaml = applySecretFilePaths(
-      resolveRuntimeComposeYaml(files),
+      // Railpack-built services get their `image` here, before anything reads
+      // the document: `docker compose config` below would otherwise validate a
+      // service whose image does not exist yet (or act on an authored `build:`
+      // that the Railpack lane has already superseded).
+      applyRailpackImagesToComposeYaml(
+        resolveRuntimeComposeYaml(files),
+        railpackImagesByService(appliedReleases),
+      ),
       layout,
       parsedPayload,
     );
@@ -707,6 +1106,7 @@ async function deployContainerServices(
       parsedPayload,
       yaml,
       labeledServices,
+      appliedReleases,
     );
 
     if (resolved.serviceNames.length === 0) {
@@ -822,6 +1222,7 @@ async function writeDeployComposeMarker(
   parsedPayload: EnvironmentDeployPayload,
   files: EnvironmentDeployComposeFile[],
   deploymentDir: string,
+  appliedReleases: readonly AppliedRelease[] = [],
 ): Promise<string[]> {
   const yaml = resolveRuntimeComposeYaml(files);
   await writeComposeFileSecure(
@@ -831,7 +1232,7 @@ async function writeDeployComposeMarker(
   await persistComposeEnvFile(deploymentDir, parsedPayload.envFile);
   await writeDeploymentManifest(
     deploymentDir,
-    await buildDeploymentManifest(parsedPayload, yaml, []),
+    await buildDeploymentManifest(parsedPayload, yaml, [], appliedReleases),
   );
   await pruneStaleComposeLayerFiles(
     deploymentDir,
@@ -893,6 +1294,8 @@ export function shapeEnvironmentDeployResult(input: {
   labeledServices: string[];
   traditionalWebSites: EnvironmentDeployTraditionalWebSite[];
   containers: EnvironmentDeployContainer[] | null;
+  /** Git-backed releases this deploy applied, in payload order. */
+  releases?: readonly EnvironmentDeployResultRelease[];
 }): EnvironmentDeployResult {
   const summary = buildDeploySummary(
     input.environmentId,
@@ -910,6 +1313,11 @@ export function shapeEnvironmentDeployResult(input: {
     // Include `containers: []` when collection succeeded with no rows; omit the
     // field entirely when collection failed (non-authoritative).
     ...(input.containers === null ? {} : { containers: input.containers }),
+    // Omitted rather than empty when nothing Git-backed was applied — an
+    // environment with no sources should not grow a release array.
+    ...(input.releases && input.releases.length > 0
+      ? { releases: [...input.releases] }
+      : {}),
   };
 }
 
@@ -923,6 +1331,7 @@ function resolveEnvironmentDeployRuntime(deps?: EnvironmentDeployDeps): {
   ensureFabricDockerNetworks: NonNullable<
     EnvironmentDeployDeps["ensureFabricDockerNetworks"]
   >;
+  runPrivileged: RunFn;
 } {
   const run = deps?.runDocker ?? defaultRunDocker;
   const logSink = deps?.logSink ?? createNoopCommandOutputSink();
@@ -939,6 +1348,7 @@ function resolveEnvironmentDeployRuntime(deps?: EnvironmentDeployDeps): {
         defaultEnsureExternalDockerNetworks(names, run)),
     ensureFabricDockerNetworks: deps?.ensureFabricDockerNetworks ??
       defaultEnsureFabricDockerNetworks,
+    runPrivileged: deps?.runPrivileged ?? defaultRunPrivileged,
   };
 }
 
@@ -958,6 +1368,7 @@ async function publishDeployedCompose(
       input.parsedPayload,
       input.files,
       input.deploymentDir,
+      input.appliedReleases,
     );
     return { labeledServices, composePaths: [] };
   }
@@ -1009,16 +1420,16 @@ export async function handleEnvironmentDeploy(
   const layout = resolveLayout(Deno.env.toObject());
   const runtime = resolveEnvironmentDeployRuntime(deps);
 
-  const traditionalWebSites = parsedPayload.traditionalWebSites ?? [];
-  const traditionalNames = new Set(
-    traditionalWebSites.map((site) => site.composeServiceName),
-  );
   const files = resolveDeployComposeFiles(parsedPayload);
   const hasContainers = composeFilesHaveContainerServices(
     files.map((file) => file.content),
   );
+  // Container-only paths get container hostings only. Both host-native lanes
+  // are stripped from the runtime compose, so a hosting for a traditional-web
+  // site *or* a native app has no compose service to attach a Traefik label to.
+  const hostNativeNames = hostNativeComposeServiceNames(parsedPayload);
   const containerHostings = parsedPayload.hostings.filter(
-    (hosting) => !traditionalNames.has(hosting.composeServiceName),
+    (hosting) => !hostNativeNames.has(hosting.composeServiceName),
   );
 
   const ingressServices = parsedPayload.ingressServices ?? [];
@@ -1044,7 +1455,36 @@ export async function handleEnvironmentDeploy(
   await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
 
   const principalMaterial = parsedPayload.principalMaterial ?? [];
-  await ensureDeployPrincipals(layout, principalMaterial);
+  await ensureDeployPrincipals(
+    layout,
+    deployPrincipalSpecs(parsedPayload, principalMaterial),
+  );
+
+  // Git-backed releases run before the compose / traditional-web apply steps,
+  // so `<principalHome>/sites/<serviceId>/current` already resolves by the time
+  // the traditional-web apply below points a document root at it.
+  const appliedReleases = await applySourceReleases(layout, parsedPayload, {
+    logSink: runtime.logSink,
+    decryptSecrets: runtime.decryptSecrets,
+  });
+  // Whole-tree cleanup for services that lost their source since last deploy —
+  // per-release retention only ever walks services still being published.
+  await reclaimRemovedServiceReleaseTrees(
+    layout,
+    parsedPayload,
+    deploymentDir,
+    runtime.logSink,
+    runtime.runPrivileged,
+  );
+  runtime.logSink.setPhase(COMMAND_LOG_PHASES.PREPARE);
+
+  // Which host-native lane each service ends up on can only be decided once the
+  // releases are built: a `serviceKind: node` service that turned out to be a
+  // static export is served as files, not supervised as a process.
+  const { traditionalWebSites, nativeAppServices } = resolveHostNativeLanes(
+    parsedPayload,
+    appliedReleases,
+  );
 
   const mountPaths = await resolveDeployMountPaths(
     layout,
@@ -1061,12 +1501,27 @@ export async function handleEnvironmentDeploy(
       hasContainers,
       traditionalWebSites,
     ),
+    deployReleaseBindings(parsedPayload),
   );
+
+  // Native apps come last of the host-native lanes: the release is promoted and
+  // the vhost tree is settled, so a unit that fails its health probe fails only
+  // itself and rolls its own `current` back.
+  runtime.logSink.setPhase(COMMAND_LOG_PHASES.RELEASE_PROMOTE);
+  await applyDeployNativeApps(
+    layout,
+    parsedPayload,
+    nativeAppServices,
+    appliedReleases,
+    deps?.nativeAppIo,
+  );
+  runtime.logSink.setPhase(COMMAND_LOG_PHASES.PREPARE);
 
   const published = await publishDeployedCompose({
     hasContainers,
     layout,
     parsedPayload,
+    appliedReleases,
     files,
     containerHostings,
     traditionalWebSites,
@@ -1110,5 +1565,6 @@ export async function handleEnvironmentDeploy(
     labeledServices: published.labeledServices,
     traditionalWebSites,
     containers,
+    releases: deployResultReleases(appliedReleases),
   });
 }

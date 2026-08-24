@@ -9,8 +9,11 @@ php_fpm_url: "https://www.php.net/distributions/php-{{ php_fpm_version }}.tar.xz
 turbopanel_dev_user: ""  # noqa: var-naming[no-role-prefix]
 turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"  # noqa: var-naming[no-role-prefix]
 
-# Runs as tpapache so document roots + Apache proxy_fcgi unix sockets share an identity
-# (must match web-service-user's apache entry — provisioned by traditional-web-apache-apply).
+# php-fpm's own identity (FPM master, bootstrap pool, FHS config/log dirs).
+# Must match web-service-user's apache entry — provisioned by
+# traditional-web-apache-apply, and by traditional-web-apply on an nginx-only
+# host that needs PHP. Per-site pools override user/group with the site
+# principal and listen on a socket owned by the engine that consumes it.
 php_fpm_service_user: tpapache
 php_fpm_service_group: tpapache
 

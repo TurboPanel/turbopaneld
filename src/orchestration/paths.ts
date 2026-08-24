@@ -181,6 +181,11 @@ export const CADDY_PLAYBOOK = join(
   "playbooks",
   "caddy-setup.yml",
 );
+export const BUILDKIT_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  "playbooks",
+  "buildkit-setup.yml",
+);
 export const POSTGRES_PLAYBOOK = join(
   ORCHESTRATION_DIR,
   "playbooks",
@@ -260,6 +265,17 @@ export const TRADITIONAL_WEB_OPENLITESPEED_APPLY_PLAYBOOK = join(
   ORCHESTRATION_DIR,
   "playbooks",
   "traditional-web-openlitespeed-apply.yml",
+);
+/**
+ * Vendors the **tenant** Node release for native `serviceKind: node` apps.
+ * Deliberately separate from the `node-runtime` role that vendors the
+ * instance's own Node: bumping the runtime tenants execute must not perturb the
+ * toolchain the panel itself runs on.
+ */
+export const NODE_APP_RUNTIME_APPLY_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  "playbooks",
+  "node-app-runtime-apply.yml",
 );
 export const DAEMON_INSTALL_PLAYBOOK = join(
   ORCHESTRATION_DIR,

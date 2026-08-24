@@ -1,0 +1,158 @@
+---
+- name: Assert supported CPU architecture
+  ansible.builtin.assert:
+    that:
+      - ansible_architecture in ['aarch64', 'x86_64']
+    fail_msg: >-
+      Unsupported CPU architecture '{{ ansible_architecture }}'.
+      TurboPanel supports 64-bit Linux only: aarch64 (arm64), x86_64 (amd64).
+
+- name: Resolve BuildKit release architecture
+  ansible.builtin.set_fact:
+    buildkit_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
+
+- name: Check vendored buildctl binary
+  ansible.builtin.stat:
+    path: "{{ turbopanel_vendor_dir }}/buildkit/{{ buildkit_version }}/buildctl"
+  register: _buildkit_pinned
+
+- name: Install BuildKit into runtimes directory
+  when: not _buildkit_pinned.stat.exists
+  ansible.builtin.shell: |
+    set -euo pipefail
+    BK_VER="{{ buildkit_version }}"
+    BK_ARCH="{{ buildkit_arch }}"
+    TMP="$(mktemp -d)"
+    ASSET="buildkit-v${BK_VER}.linux-${BK_ARCH}.tar.gz"
+    curl -fsSL -o "$TMP/$ASSET" \
+      "https://github.com/moby/buildkit/releases/download/v${BK_VER}/${ASSET}"
+    tar -xzf "$TMP/$ASSET" -C "$TMP"
+    install -d "{{ turbopanel_vendor_dir }}/buildkit/${BK_VER}"
+    install -m 0750 "$TMP/bin/buildctl" "{{ turbopanel_vendor_dir }}/buildkit/${BK_VER}/buildctl"
+    install -m 0750 "$TMP/bin/buildkitd" "{{ turbopanel_vendor_dir }}/buildkit/${BK_VER}/buildkitd"
+    rm -rf "$TMP"
+  args:
+    creates: "{{ turbopanel_vendor_dir }}/buildkit/{{ buildkit_version }}/buildctl"
+
+- name: Harden BuildKit binary permissions
+  ansible.builtin.file:
+    path: "{{ turbopanel_vendor_dir }}/buildkit/{{ buildkit_version }}/{{ item }}"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+  loop:
+    - buildctl
+    - buildkitd
+
+- name: Point BuildKit current symlink at pinned version
+  ansible.builtin.file:
+    src: "{{ turbopanel_vendor_dir }}/buildkit/{{ buildkit_version }}"
+    dest: "{{ turbopanel_vendor_dir }}/buildkit/current"
+    state: link
+    force: true
+
+- name: Check vendored railpack binary
+  ansible.builtin.stat:
+    path: "{{ turbopanel_vendor_dir }}/railpack/{{ railpack_version }}/railpack"
+  register: _railpack_pinned
+
+- name: Install Railpack into runtimes directory
+  when: not _railpack_pinned.stat.exists
+  ansible.builtin.shell: |
+    set -euo pipefail
+    RP_VER="{{ railpack_version }}"
+    RP_ARCH="{{ buildkit_arch }}"
+    TMP="$(mktemp -d)"
+    ASSET="railpack-v${RP_VER}-linux-${RP_ARCH}.tar.gz"
+    curl -fsSL -o "$TMP/$ASSET" \
+      "https://github.com/railwayapp/railpack/releases/download/v${RP_VER}/${ASSET}"
+    tar -xzf "$TMP/$ASSET" -C "$TMP"
+    install -d "{{ turbopanel_vendor_dir }}/railpack/${RP_VER}"
+    install -m 0750 "$TMP/railpack" "{{ turbopanel_vendor_dir }}/railpack/${RP_VER}/railpack"
+    rm -rf "$TMP"
+  args:
+    creates: "{{ turbopanel_vendor_dir }}/railpack/{{ railpack_version }}/railpack"
+
+- name: Harden Railpack binary permissions
+  ansible.builtin.file:
+    path: "{{ turbopanel_vendor_dir }}/railpack/{{ railpack_version }}/railpack"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
+- name: Point Railpack current symlink at pinned version
+  ansible.builtin.file:
+    src: "{{ turbopanel_vendor_dir }}/railpack/{{ railpack_version }}"
+    dest: "{{ turbopanel_vendor_dir }}/railpack/current"
+    state: link
+    force: true
+
+# --- Railpack BuildKit gateway frontend -------------------------------------
+#
+# The frontend is an OCI image, but it is *vendored* exactly like the two
+# binaries above rather than resolved by BuildKit at deploy time. Both reasons
+# are requirements rather than optimizations:
+#
+# - **Broad compatibility.** A host that can deploy must not also need live
+#   registry egress every time a Railpack service builds. Once this role has
+#   run, the build lane touches nothing outside `{{ turbopanel_vendor_dir }}`.
+# - **Reproducibility.** `ghcr.io/railwayapp/railpack-frontend:<tag>` is a
+#   mutable tag. Two releases recorded with the same `railpackFrontendVersion`
+#   must have been produced by the same frontend bytes, which is only true when
+#   the bytes are the thing kept. The layout's own manifest digest is written to
+#   `digest` and is what `buildctl` addresses
+#   (`--oci-layout … --opt source=oci-layout://…@sha256:…`), so a repointed
+#   upstream tag cannot change build output on a host that already vendored it.
+- name: Check vendored Railpack frontend image layout
+  ansible.builtin.stat:
+    path: "{{ turbopanel_vendor_dir }}/railpack-frontend/{{ railpack_frontend_version }}/digest"
+  register: _railpack_frontend_pinned
+
+- name: Vendor the Railpack BuildKit frontend as a local OCI layout
+  when: not _railpack_frontend_pinned.stat.exists
+  ansible.builtin.shell:
+    executable: /bin/bash
+    creates: "{{ turbopanel_vendor_dir }}/railpack-frontend/{{ railpack_frontend_version }}/digest"
+    cmd: |
+      set -euo pipefail
+      DEST="{{ turbopanel_vendor_dir }}/railpack-frontend/{{ railpack_frontend_version }}"
+      SRC_DIGEST="{{ railpack_frontend_source_digest }}"
+      if [ -n "$SRC_DIGEST" ]; then
+        REF="{{ railpack_frontend_image }}@${SRC_DIGEST}"
+      else
+        REF="{{ railpack_frontend_image }}:{{ railpack_frontend_version }}"
+      fi
+      TMP="$(mktemp -d)"
+      trap 'rm -rf "$TMP"' EXIT
+      docker pull "$REF"
+      # `docker save` emits an OCI image layout (oci-layout / index.json /
+      # blobs) for the host platform only — exactly the single-platform layout
+      # BuildKit's gateway loader wants.
+      docker save "$REF" -o "$TMP/frontend.tar"
+      mkdir -p "$TMP/image"
+      tar -xf "$TMP/frontend.tar" -C "$TMP/image"
+      DIGEST="$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1]))["manifests"]; sys.exit("frontend layout is not single-platform") if len(m)!=1 else print(m[0]["digest"])' "$TMP/image/index.json")"
+      install -d "$DEST"
+      rm -rf "$DEST/image"
+      cp -a "$TMP/image" "$DEST/image"
+      # Provenance beside the bytes: which upstream reference produced this
+      # layout, and which manifest inside it the build addresses.
+      printf '%s\n' "$REF" > "$DEST/source"
+      printf '%s\n' "$DIGEST" > "$DEST/digest"
+
+- name: Harden vendored Railpack frontend permissions
+  ansible.builtin.file:
+    path: "{{ turbopanel_vendor_dir }}/railpack-frontend/{{ railpack_frontend_version }}"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    # Symbolic so blob files stay non-executable while the layout directories
+    # stay traversable.
+    mode: "u=rwX,g=rX,o="
+    recurse: true
+
+- name: Point Railpack frontend current symlink at pinned version
+  ansible.builtin.file:
+    src: "{{ turbopanel_vendor_dir }}/railpack-frontend/{{ railpack_frontend_version }}"
+    dest: "{{ turbopanel_vendor_dir }}/railpack-frontend/current"
+    state: link
+    force: true

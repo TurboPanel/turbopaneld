@@ -1,0 +1,72 @@
+---
+- name: Assert supported CPU architecture
+  ansible.builtin.assert:
+    that:
+      - ansible_architecture in ['aarch64', 'x86_64']
+    fail_msg: >-
+      Unsupported CPU architecture '{{ ansible_architecture }}'.
+      TurboPanel supports 64-bit Linux only: aarch64 (arm64), x86_64 (amd64).
+
+- name: Resolve Node release architecture
+  ansible.builtin.set_fact:
+    node_app_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'x64' }}"
+
+# The daemon may pass the same series twice (two apps, one pin) and may pass an
+# empty list on a deploy whose apps were all skipped; normalize both here rather
+# than in every task below.
+- name: Normalize the requested tenant Node series
+  ansible.builtin.set_fact:
+    node_app_requested_versions: >-
+      {{ (node_app_versions | default([node_app_default_version]))
+         | map('string') | map('trim') | reject('equalto', '')
+         | unique | list or [node_app_default_version] }}
+
+# setfacl, for the traverse-only grants below. Present on most Debian images
+# but only Priority: optional, so a minimal host can be missing it.
+- name: Ensure ACL tooling is present
+  ansible.builtin.apt:
+    name: acl
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Ensure the tenant Node runtime group
+  ansible.builtin.group:
+    name: "{{ node_app_group }}"
+    gid: "{{ node_app_gid }}"
+    state: present
+    system: true
+
+# The tree itself is group-owned by the runtime group (0750, below), but a
+# principal still has to *reach* it: `/opt/turbopanel` and its `vendor/` are
+# `tp:tp 0750` and must stay that way. `--x` for the runtime group, granted as
+# an ACL entry, opens traversal of those two directories without granting a
+# listing and without touching the mode. `default:` is deliberately not set —
+# the grant applies to these two directories only, never to their other
+# children (the panel's own runtimes).
+- name: Grant the tenant Node runtime group traversal to the vendor tree
+  ansible.posix.acl:
+    path: "{{ item }}"
+    etype: group
+    entity: "{{ node_app_group }}"
+    permissions: x
+    state: present
+  loop:
+    - "{{ turbopanel_install_root }}"
+    - "{{ turbopanel_vendor_dir }}"
+
+# Before vendoring: `vendor-series.yml` writes into this directory, so it has to
+# exist and carry the right group first.
+- name: Ensure the tenant Node tree is reachable by the runtime group
+  ansible.builtin.file:
+    path: "{{ node_app_root }}"
+    state: directory
+    owner: root
+    group: "{{ node_app_group }}"
+    mode: "0750"
+
+- name: Vendor each requested tenant Node series
+  ansible.builtin.include_tasks: vendor-series.yml
+  loop: "{{ node_app_requested_versions }}"
+  loop_control:
+    loop_var: node_app_series

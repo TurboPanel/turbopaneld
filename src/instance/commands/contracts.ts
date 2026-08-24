@@ -329,6 +329,145 @@ export type EnvironmentDeployTraditionalWebSite = {
 };
 
 /**
+ * How the daemon turns a Git checkout into a runnable release. Mirrors
+ * instance `EnvironmentDeploySourceBuild`.
+ *
+ * `env` is a **non-secret** build-time map only — build secrets ride
+ * `variableMaterial[]` / `secretPlan[]`.
+ *
+ * `native` checks out, builds, and promotes a directory release. `railpack`
+ * builds an OCI image with Railpack + BuildKit instead: nothing is promoted, no
+ * `current` symlink moves, and the resulting image tag is written back into
+ * runtime compose as `services.<name>.image`. `outputDirectory` is meaningless
+ * for `railpack` and is ignored rather than rejected, so a stale value left by
+ * a mode switch still parses. `kind: 'static'` is reserved for the
+ * traditional-web release phase and is not produced today.
+ */
+export type EnvironmentDeploySourceBuild = {
+  kind: "native" | "static" | "railpack";
+  installCommand?: string;
+  buildCommand?: string;
+  /**
+   * Process a `nativeAppServices[]` unit runs out of the promoted release.
+   * Non-secret, validated like the other commands. Omitted means the framework
+   * default (`.next/standalone/server.js`, else `server.js`).
+   */
+  startCommand?: string;
+  outputDirectory?: string;
+  env?: Record<string, string>;
+};
+
+/** Runtime family for a native app — mirrors instance `x-turbopanel.framework`. */
+export type EnvironmentDeployNativeFramework = "auto" | "node" | "next";
+
+/**
+ * One host-supervised native app. Mirrors instance
+ * `EnvironmentDeployNativeAppService`.
+ *
+ * The release itself arrives on the ordinary `sourceMaterial[]` lane; this row
+ * only says how the promoted `current` tree is run — the loopback port hosting
+ * Caddy proxies to, and the runtime family. `serviceId` is the release-tree
+ * directory segment the release engine published under.
+ */
+export type EnvironmentDeployNativeAppService = {
+  composeServiceName: string;
+  serviceId: string;
+  listenPort: number;
+  framework: EnvironmentDeployNativeFramework;
+  nodeVersion?: string;
+  /** Per-app unit ceiling: `cpus` → `CPUQuota`, `memoryBytes` → `MemoryMax`. */
+  resources?: { cpus?: number; memoryBytes?: number };
+  /**
+   * Effective org/server ceiling for the owning principal — repeated on every
+   * app of that principal. Becomes `turbopanel-<username>.slice`, so per-app
+   * limits cannot add up past the account total.
+   */
+  accountLimits?: { cpus?: number; memoryBytes?: number; tasksMax?: number };
+};
+
+/**
+ * One Git-backed release to check out, build, and promote. Mirrors instance
+ * `EnvironmentDeploySource`.
+ *
+ * `cloneUrl` is credential-free by contract — the clone credential arrives as
+ * a daemon-sealed (`tpdaemon.…`) envelope in `credential` and is injected via
+ * a private askpass file, never argv or the URL. An HTTPS credential may also
+ * carry `credentialUsername`, the basic-auth user to answer with; it is opaque
+ * here, so no provider-specific rule leaks into the daemon.
+ *
+ * `releaseId` becomes a directory name under
+ * `<principalHome>/sites/<serviceId>/releases/`, so it is validated as a safe
+ * id (no path separators).
+ */
+/**
+ * Auth shape of a clone credential. Mirrors instance
+ * `EnvironmentDeploySourceCredentialKind`.
+ */
+export type EnvironmentDeploySourceCredentialKind = "token" | "ssh_key";
+
+export type EnvironmentDeploySource = {
+  sourceId: string;
+  composeServiceName: string;
+  /**
+   * Which control-plane provider resolved this entry. Informational only — the
+   * daemon never branches on it; `cloneUrl`, `credential`, and `credentialKind`
+   * are everything a checkout needs.
+   */
+  provider: "github" | "gitlab" | "git";
+  cloneUrl: string;
+  ref: string;
+  /**
+   * Commit to build. For `provider: 'git'` this currently equals `ref` —
+   * remote SHA resolution for generic SSH lands with `ls-remote`.
+   */
+  commitSha: string;
+  /**
+   * Commit subject and author for the release surface. Non-secret display
+   * metadata resolved by the control plane alongside `commitSha`; the daemon
+   * only records it (release manifest, `deployment.json`) so the host keeps a
+   * self-contained answer to "what is this release" once the control plane is
+   * unreachable. Optional — a provider that cannot resolve them omits them.
+   */
+  commitMessage?: string;
+  commitAuthor?: string;
+  subdirectory?: string;
+  credential?: string;
+  /**
+   * How `credential` reaches git: an HTTPS `token` through the private askpass
+   * helper, or an `ssh_key` private key materialized as a temporary identity
+   * file for an `ssh://…` / `git@host:path` clone. Absent means `token` — a
+   * pre-`credentialKind` payload keeps its old behavior.
+   */
+  credentialKind?: EnvironmentDeploySourceCredentialKind;
+  /**
+   * HTTPS basic-auth **user** for `credential` when `credentialKind` is
+   * `token`. Opaque: the control plane's provider decides it and the checkout
+   * prints it for git's `Username` prompt without inspecting it, which is what
+   * keeps the credential contract one username/password pair instead of a
+   * per-provider branch here. Absent means the host default. Ignored for
+   * `ssh_key`, where publickey auth has no username prompt.
+   */
+  credentialUsername?: string;
+  releaseId: string;
+  /**
+   * Promote an **already-published** release instead of building a new one.
+   *
+   * A rollback is not a second command type: it rides the ordinary
+   * `environment.deploy` payload so every downstream stage (compose apply,
+   * ingress, TLS, retention, `deployment.json`, the native/traditional-web
+   * promote hooks) keeps working unchanged. When set, the apply path skips
+   * fetch and build entirely and cuts `current` over to
+   * `releases/<rollbackToReleaseId>` — which means `cloneUrl`, `ref`,
+   * `commitSha`, `credential`, and `build` are still carried for wire-shape
+   * stability but are **ignored**. Validated with the same safe-id rule as
+   * `releaseId`, since it becomes a path segment.
+   */
+  rollbackToReleaseId?: string;
+  principal?: EnvironmentDeployTraditionalWebPrincipal;
+  build: EnvironmentDeploySourceBuild;
+};
+
+/**
  * Per-service Traefik for tenant tcp/udp — mirrors instance
  * `EnvironmentDeployIngressService`. `containerName` must equal
  * `<serviceId>-in`.
@@ -425,6 +564,17 @@ export type EnvironmentDeployPayload = {
   hostings: EnvironmentDeployHosting[];
   traditionalWebSites?: EnvironmentDeployTraditionalWebSite[];
   /**
+   * Host-supervised native apps (`x-turbopanel.serviceKind: node`). Applied
+   * after the releases are promoted — see `../../deploy/native/`.
+   */
+  nativeAppServices?: EnvironmentDeployNativeAppService[];
+  /**
+   * Git-backed releases to check out, build, and promote before the
+   * compose/traditional-web apply steps run. One entry per compose service
+   * carrying `x-turbopanel.source`.
+   */
+  sourceMaterial?: EnvironmentDeploySource[];
+  /**
    * Per-service Traefik projects for services that publish at least one
    * `tcp`/`udp` port. HTTP hostings never appear here.
    */
@@ -485,11 +635,33 @@ export type EnvironmentDeployContainer = {
   role: "service" | "ingress" | "turbopanel";
 };
 
+/**
+ * One Git-backed release this deploy put live, as reported back to the control
+ * plane.
+ *
+ * Enough for the release-history / rollback surface to name a release without
+ * a second round trip to the host. A **Railpack** release has no promoted
+ * directory and no commit-backed tree to point at, so its identity on that
+ * surface is the image tag plus the pinned tools that produced it; a native
+ * release simply omits those three fields.
+ */
+export type EnvironmentDeployResultRelease = {
+  composeServiceName: string;
+  serviceId: string;
+  releaseId: string;
+  commitSha: string;
+  imageTag?: string;
+  railpackFrontendVersion?: string;
+  railpackPlanVersion?: string;
+};
+
 export type EnvironmentDeployResult = {
   projectName: string;
   summary: string;
   services?: string[];
   containers?: EnvironmentDeployContainer[];
+  /** Git-backed releases this deploy applied; omitted when there were none. */
+  releases?: EnvironmentDeployResultRelease[];
 };
 
 export type EnvironmentStopPayload = {
@@ -504,6 +676,15 @@ export type EnvironmentStopPayload = {
    * those names for this host.
    */
   fabricNetworks?: string[];
+  /**
+   * Per-service release trees (`<principalHome>/sites/<serviceId>`) to reclaim.
+   *
+   * Generic on purpose — this is the same tree the Git release engine publishes
+   * into and native apps run out of, not a traditional-web
+   * detail. Like `fabricNetworks`, the instance has already dropped the rows
+   * that named these, so the payload is the only remaining copy for this host.
+   */
+  siteReleases?: Array<{ serviceId: string; username: string }>;
 };
 
 export type EnvironmentStopResult = {
@@ -2273,6 +2454,112 @@ function parseTraditionalWebPrincipal(
   };
 }
 
+const NATIVE_APP_FRAMEWORKS = new Set(["auto", "node", "next"]);
+
+/** Same shape as the instance parser — a range or tag is not a pin. */
+const NATIVE_APP_NODE_VERSION_RE = /^\d{1,3}(\.\d{1,3}){0,2}$/;
+
+/**
+ * Same rule the release engine applies to a release directory name, restated
+ * here so a `serviceId` can never smuggle a path separator into the unit's
+ * `WorkingDirectory`.
+ */
+const NATIVE_APP_SERVICE_ID_RE = /^[0-9A-Za-z][0-9A-Za-z_-]{0,63}$/;
+
+function parseNativeAppPositiveNumber(
+  value: unknown,
+  field: string,
+): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new TypeError(`Invalid nativeAppServices ${field}`);
+  }
+  return value;
+}
+
+function parseNativeAppResources(
+  value: unknown,
+): EnvironmentDeployNativeAppService["resources"] | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid nativeAppServices resources");
+  }
+  const cpus = parseNativeAppPositiveNumber(value.cpus, "resources.cpus");
+  const memoryBytes = parseNativeAppPositiveNumber(
+    value.memoryBytes,
+    "resources.memoryBytes",
+  );
+  if (cpus === undefined && memoryBytes === undefined) return undefined;
+  return {
+    ...(cpus === undefined ? {} : { cpus }),
+    ...(memoryBytes === undefined ? {} : { memoryBytes }),
+  };
+}
+
+function parseNativeAppAccountLimits(
+  value: unknown,
+): EnvironmentDeployNativeAppService["accountLimits"] | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid nativeAppServices accountLimits");
+  }
+  const cpus = parseNativeAppPositiveNumber(value.cpus, "accountLimits.cpus");
+  const memoryBytes = parseNativeAppPositiveNumber(
+    value.memoryBytes,
+    "accountLimits.memoryBytes",
+  );
+  const tasksMax = parseNativeAppPositiveNumber(
+    value.tasksMax,
+    "accountLimits.tasksMax",
+  );
+  if (
+    cpus === undefined && memoryBytes === undefined && tasksMax === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    ...(cpus === undefined ? {} : { cpus }),
+    ...(memoryBytes === undefined ? {} : { memoryBytes }),
+    ...(tasksMax === undefined ? {} : { tasksMax }),
+  };
+}
+
+function parseNativeAppService(
+  value: unknown,
+): EnvironmentDeployNativeAppService {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid nativeAppServices entry");
+  }
+  if (
+    typeof value.serviceId !== "string" ||
+    !NATIVE_APP_SERVICE_ID_RE.test(value.serviceId) ||
+    typeof value.framework !== "string" ||
+    !NATIVE_APP_FRAMEWORKS.has(value.framework)
+  ) {
+    throw new TypeError("Invalid nativeAppServices entry");
+  }
+  const app: EnvironmentDeployNativeAppService = {
+    composeServiceName: parseNonEmptyString(value, "composeServiceName"),
+    serviceId: value.serviceId,
+    listenPort: parseTraditionalWebListenPort(value.listenPort),
+    framework: value.framework as EnvironmentDeployNativeFramework,
+  };
+  if (value.nodeVersion !== undefined) {
+    if (
+      typeof value.nodeVersion !== "string" ||
+      !NATIVE_APP_NODE_VERSION_RE.test(value.nodeVersion)
+    ) {
+      throw new TypeError("Invalid nativeAppServices nodeVersion");
+    }
+    app.nodeVersion = value.nodeVersion;
+  }
+  const resources = parseNativeAppResources(value.resources);
+  if (resources) app.resources = resources;
+  const accountLimits = parseNativeAppAccountLimits(value.accountLimits);
+  if (accountLimits) app.accountLimits = accountLimits;
+  return app;
+}
+
 function parseTraditionalWebSite(
   value: unknown,
 ): EnvironmentDeployTraditionalWebSite {
@@ -2292,6 +2579,258 @@ function parseTraditionalWebSite(
   const principal = parseTraditionalWebPrincipal(value.principal);
   if (principal) site.principal = principal;
   return site;
+}
+
+/**
+ * Directory name for a release under the host release tree. Narrower than a
+ * UUID/ULID charset union so neither form can smuggle a path separator, a
+ * leading dash, or a dot segment into a filesystem path. Mirrors instance
+ * `SOURCE_RELEASE_ID_RE`.
+ */
+const SOURCE_RELEASE_ID_RE = /^[0-9A-Za-z][0-9A-Za-z_-]{0,63}$/;
+
+/** Git ref / commit-ish — mirrors instance `SOURCE_REF_RE`. */
+const SOURCE_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/;
+
+const SOURCE_PROVIDERS = new Set(["github", "gitlab", "git"]);
+const SOURCE_BUILD_KINDS = new Set(["native", "static", "railpack"]);
+
+/** Cap mirrors compose `SOURCE_COMMAND_MAX_LENGTH`. */
+const MAX_SOURCE_COMMAND_CHARS = 1000;
+const MAX_SOURCE_CLONE_URL_CHARS = 2048;
+
+function isValidSourceRef(value: unknown): value is string {
+  return typeof value === "string" &&
+    !value.includes("..") &&
+    SOURCE_REF_RE.test(value);
+}
+
+/**
+ * Relative path without `..`, absolute prefix, or NUL — the same rule
+ * compose `isSafeRoot` applies, restated here (mirrors instance
+ * `isSafeSourceSubdirectory`).
+ */
+function isSafeSourceSubdirectory(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  if (value.length === 0 || value.length > 200) return false;
+  if (value.startsWith("/") || value.startsWith("\\")) return false;
+  if (value.includes("..") || value.includes("\0")) return false;
+  return /^[A-Za-z0-9._/-]+$/.test(value);
+}
+
+/**
+ * Reject a clone URL carrying inline credentials — a `user:pass@host` URL
+ * would leak into argv, `git remote -v`, and every transcript line git echoes.
+ */
+function isCredentialFreeCloneUrl(value: string): boolean {
+  if (value.startsWith("https://") || value.startsWith("ssh://")) {
+    const authority = value.slice(value.indexOf("://") + 3).split("/")[0] ?? "";
+    return !authority.includes("@");
+  }
+  return /^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:/.test(value);
+}
+
+function parseSourceBuildCommand(
+  value: unknown,
+  field: string,
+): string | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > MAX_SOURCE_COMMAND_CHARS ||
+    value.includes("\0")
+  ) {
+    throw new TypeError(`Invalid sourceMaterial build ${field}`);
+  }
+  return value;
+}
+
+function parseDeploySourceBuild(
+  value: unknown,
+): EnvironmentDeploySourceBuild {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid sourceMaterial build");
+  }
+  if (typeof value.kind !== "string" || !SOURCE_BUILD_KINDS.has(value.kind)) {
+    throw new TypeError("Invalid sourceMaterial build kind");
+  }
+  const build: EnvironmentDeploySourceBuild = {
+    kind: value.kind as EnvironmentDeploySourceBuild["kind"],
+  };
+  const installCommand = parseSourceBuildCommand(
+    value.installCommand,
+    "installCommand",
+  );
+  if (installCommand !== undefined) build.installCommand = installCommand;
+  const buildCommand = parseSourceBuildCommand(
+    value.buildCommand,
+    "buildCommand",
+  );
+  if (buildCommand !== undefined) build.buildCommand = buildCommand;
+  const startCommand = parseSourceBuildCommand(
+    value.startCommand,
+    "startCommand",
+  );
+  if (startCommand !== undefined) build.startCommand = startCommand;
+  if (value.outputDirectory !== undefined) {
+    if (!isSafeSourceSubdirectory(value.outputDirectory)) {
+      throw new TypeError("Invalid sourceMaterial build outputDirectory");
+    }
+    build.outputDirectory = value.outputDirectory;
+  }
+  const env = parseStringRecord(value.env);
+  if (env) build.env = env;
+  return build;
+}
+
+/**
+ * Longest commit subject / author the daemon will record. The control plane
+ * already caps these; re-capping here keeps a hand-built payload from writing
+ * an unbounded string into `deployment.json`.
+ */
+const MAX_COMMIT_METADATA_CHARS = 300;
+
+/** Cap for the HTTPS basic-auth user carried with a token credential. */
+const MAX_CREDENTIAL_USERNAME_CHARS = 200;
+
+/**
+ * HTTPS basic-auth user for a token credential.
+ *
+ * This is printed into a `0600` shell askpass helper, so control characters —
+ * a newline most of all — are refused rather than escaped: the field carries a
+ * provider-chosen literal like `oauth2`, and nothing legitimate needs one.
+ */
+function isValidCredentialUsername(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= MAX_CREDENTIAL_USERNAME_CHARS &&
+    // deno-lint-ignore no-control-regex
+    !/[\u0000-\u001f\u007f]/.test(value)
+  );
+}
+
+/** Trimmed, bounded, single-line display metadata — `undefined` when unusable. */
+function parseCommitMetadataField(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.replace(/[\r\n]+/g, " ").trim();
+  if (trimmed.length === 0) return undefined;
+  return trimmed.length > MAX_COMMIT_METADATA_CHARS
+    ? trimmed.slice(0, MAX_COMMIT_METADATA_CHARS)
+    : trimmed;
+}
+
+/**
+ * Drop keys whose value is `undefined`, so an absent optional wire field stays
+ * absent rather than travelling as an explicit `undefined`.
+ *
+ * Kept local rather than imported from `src/optional-fields.ts` for the same
+ * reason {@link expectedSystemComponentContainerName} is: this contracts leaf
+ * mirrors the instance wire shapes and depends on nothing else in the tree.
+ */
+function definedFields<T extends Record<string, unknown>>(fields: T): T {
+  return Object.fromEntries(
+    Object.entries(fields).filter(([, value]) => value !== undefined),
+  ) as T;
+}
+
+/** `subdirectory`, validated as a safe relative path. `undefined` when absent. */
+function parseSourceSubdirectory(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (!isSafeSourceSubdirectory(value)) {
+    throw new TypeError("Invalid sourceMaterial subdirectory");
+  }
+  return value;
+}
+
+/** The sealed clone credential, opaque here beyond being a non-empty string. */
+function parseSourceCredential(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.length === 0) {
+    throw new TypeError("Invalid sourceMaterial credential");
+  }
+  return value;
+}
+
+/** Which of the two credential lanes this entry travels on. */
+function parseSourceCredentialKind(
+  value: unknown,
+): EnvironmentDeploySource["credentialKind"] {
+  if (value === undefined) return undefined;
+  if (value !== "token" && value !== "ssh_key") {
+    throw new TypeError("Invalid sourceMaterial credentialKind");
+  }
+  return value;
+}
+
+/** The username half of an HTTPS credential, when the provider named one. */
+function parseSourceCredentialUsername(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (!isValidCredentialUsername(value)) {
+    throw new TypeError("Invalid sourceMaterial credentialUsername");
+  }
+  return value;
+}
+
+/**
+ * Same rule as `releaseId`: this becomes a directory segment under `releases/`,
+ * so it must not be able to carry a separator or a dot segment.
+ */
+function parseRollbackToReleaseId(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !SOURCE_RELEASE_ID_RE.test(value)) {
+    throw new TypeError("Invalid sourceMaterial rollbackToReleaseId");
+  }
+  return value;
+}
+
+function parseDeploySourceEntry(value: unknown): EnvironmentDeploySource {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid sourceMaterial entry");
+  }
+  if (
+    typeof value.provider !== "string" || !SOURCE_PROVIDERS.has(value.provider)
+  ) {
+    throw new TypeError("Invalid sourceMaterial provider");
+  }
+  const cloneUrl = parseNonEmptyString(value, "cloneUrl");
+  if (
+    cloneUrl.length > MAX_SOURCE_CLONE_URL_CHARS ||
+    /\s/.test(cloneUrl) ||
+    !isCredentialFreeCloneUrl(cloneUrl)
+  ) {
+    throw new TypeError("Invalid sourceMaterial cloneUrl");
+  }
+  if (!isValidSourceRef(value.ref) || !isValidSourceRef(value.commitSha)) {
+    throw new TypeError("Invalid sourceMaterial ref/commitSha");
+  }
+  const releaseId = parseNonEmptyString(value, "releaseId");
+  if (!SOURCE_RELEASE_ID_RE.test(releaseId)) {
+    throw new TypeError("Invalid sourceMaterial releaseId");
+  }
+  return definedFields({
+    sourceId: parseNonEmptyString(value, "sourceId"),
+    composeServiceName: parseNonEmptyString(value, "composeServiceName"),
+    provider: value.provider as EnvironmentDeploySource["provider"],
+    cloneUrl,
+    ref: value.ref,
+    commitSha: value.commitSha,
+    releaseId,
+    build: parseDeploySourceBuild(value.build),
+    subdirectory: parseSourceSubdirectory(value.subdirectory),
+    // Display metadata: bounded and non-empty, but never a path segment or a
+    // shell word, so the shape rules that guard `releaseId` do not apply. An
+    // over-long or blank value is dropped rather than failing the deploy — a
+    // commit caption is not worth refusing to ship a build over.
+    commitMessage: parseCommitMetadataField(value.commitMessage),
+    commitAuthor: parseCommitMetadataField(value.commitAuthor),
+    credential: parseSourceCredential(value.credential),
+    credentialKind: parseSourceCredentialKind(value.credentialKind),
+    credentialUsername: parseSourceCredentialUsername(value.credentialUsername),
+    rollbackToReleaseId: parseRollbackToReleaseId(value.rollbackToReleaseId),
+    principal: parseTraditionalWebPrincipal(value.principal) ?? undefined,
+  });
 }
 
 function parseOptionalMaterialArray<T>(
@@ -2673,6 +3212,16 @@ export function parseEnvironmentDeployPayload(
         "traditionalWebSites",
         parseTraditionalWebSite,
       ),
+      nativeAppServices: parseOptionalMaterialArray(
+        value.nativeAppServices,
+        "nativeAppServices",
+        parseNativeAppService,
+      ),
+      sourceMaterial: parseOptionalMaterialArray(
+        value.sourceMaterial,
+        "sourceMaterial",
+        parseDeploySourceEntry,
+      ),
       ingressServices: parseOptionalMaterialArray(
         value.ingressServices,
         "ingressServices",
@@ -2730,6 +3279,31 @@ export function parseEnvironmentDeployPayload(
   };
 }
 
+/** Same charset the release layout enforces before any path join. */
+const STOP_SITE_RELEASE_SERVICE_ID_RE = /^[0-9A-Za-z][0-9A-Za-z_-]{0,63}$/;
+const STOP_SITE_RELEASE_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]{0,27}$/;
+
+function parseStopSiteRelease(
+  value: unknown,
+): { serviceId: string; username: string } {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid environment.stop siteReleases entry");
+  }
+  if (
+    typeof value.serviceId !== "string" ||
+    !STOP_SITE_RELEASE_SERVICE_ID_RE.test(value.serviceId)
+  ) {
+    throw new TypeError("Invalid environment.stop siteReleases serviceId");
+  }
+  if (
+    typeof value.username !== "string" ||
+    !STOP_SITE_RELEASE_USERNAME_RE.test(value.username)
+  ) {
+    throw new TypeError("Invalid environment.stop siteReleases username");
+  }
+  return { serviceId: value.serviceId, username: value.username };
+}
+
 function parseStopFabricNetworks(value: unknown): string[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value)) {
@@ -2761,12 +3335,18 @@ export function parseEnvironmentStopPayload(
     parseStopIngressService,
   );
   const fabricNetworks = parseStopFabricNetworks(value.fabricNetworks);
+  const siteReleases = parseOptionalMaterialArray(
+    value.siteReleases,
+    "siteReleases",
+    parseStopSiteRelease,
+  );
   return {
     environmentId: parseNonEmptyString(value, "environmentId"),
     projectId: parseNonEmptyString(value, "projectId"),
     projectName: parseNonEmptyString(value, "projectName"),
     ...(ingressServices === undefined ? {} : { ingressServices }),
     ...(fabricNetworks === undefined ? {} : { fabricNetworks }),
+    ...(siteReleases === undefined ? {} : { siteReleases }),
   };
 }
 

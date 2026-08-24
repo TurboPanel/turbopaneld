@@ -1,0 +1,35 @@
+---
+# Runtimes always live under the FHS vendor tree (dev shares it with prod).
+turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/vendor"
+# Node executed by *tenant* apps (`x-turbopanel.serviceKind: node`). Pinned
+# separately from `node-runtime`'s `node_version`, which is the instance's own
+# toolchain: bumping what tenants run must never move the panel's Node, and a
+# panel upgrade must never silently restart every tenant app on a new runtime.
+#
+# A **series** ("24", "24.17", "24.17.0"), not necessarily a patch pin — the
+# same shape `nativeAppServices[].nodeVersion` accepts on the wire. The role
+# resolves the newest upstream release inside the series and points
+# `<node_app_root>/<series>/current` at it, so a security release lands without
+# a config change and without rewriting a single systemd unit.
+node_app_default_version: "24"
+# Series to vendor on this run. The daemon overrides this with the distinct
+# versions the deploy's native apps declared; a manual run gets the default.
+node_app_versions: ["{{ node_app_default_version }}"]
+node_app_root: "{{ turbopanel_vendor_dir }}/node-app"
+
+# Dedicated group whose *only* meaning is "may execute the vendored tenant Node
+# runtime". Tenant principals each have their own `<username>-grp` and are
+# deliberately not in `tp` (that is the panel's own group), so there is no
+# existing group that covers them — and world bits are not an option on a tree
+# reached through `/opt/turbopanel`. The daemon adds a principal to this group
+# when it deploys that principal's first native app
+# (`ensureNativeAppRuntimeGroupMembership` in
+# `src/deploy/native/apply-native-apps.ts`); membership grants read+traverse on
+# this tree and nothing else.
+node_app_group: tpnodeapp
+node_app_gid: 9988
+# `/opt/turbopanel` and `/opt/turbopanel/vendor` stay `tp:tp 0750` — they hold
+# the panel's own runtimes. The runtime group is granted traverse-only there
+# through a POSIX ACL rather than by loosening the mode, so a tenant principal
+# can reach `node-app/` without being able to list either parent.
+turbopanel_install_root: /opt/turbopanel  # noqa: var-naming[no-role-prefix]

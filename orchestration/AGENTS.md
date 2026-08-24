@@ -147,9 +147,20 @@ nginx|apache2|openlitespeed`. Apply playbooks:
 
 | Engine | Playbook | Role | Systemd unit |
 | ------ | -------- | ---- | ------------ |
-| nginx | `traditional-web-apply.yml` | `nginx` | `turbopanel-nginx` |
+| nginx | `traditional-web-apply.yml` | `nginx` (+ `php-fpm` when PHP) | `turbopanel-nginx` (+ `turbopanel-php-fpm`) |
 | apache | `traditional-web-apache-apply.yml` | `apache` (+ `php-fpm` when PHP) | `turbopanel-apache` (+ `turbopanel-php-fpm`) |
-| openlitespeed | `traditional-web-openlitespeed-apply.yml` | `openlitespeed` | `turbopanel-openlitespeed` |
+| openlitespeed | `traditional-web-openlitespeed-apply.yml` | `openlitespeed` (+ vendored `lsphp` when PHP) | `turbopanel-openlitespeed` |
+
+**PHP is available on all three engines, by two different mechanisms.** nginx
+and Apache share the `php-fpm` role: each site gets its own pool, reached over a
+unix socket (`fastcgi_pass` / `mod_proxy_fcgi`). Both apply playbooks include
+that role on `turbopanel_php_fpm_install: true`, so an **nginx-only** host with
+PHP vendors php-fpm from `traditional-web-apply.yml` — the Apache playbook never
+runs there. OpenLiteSpeed does not use php-fpm at all: its `openlitespeed` role
+vendors `lsphp` on `turbopanel_lsphp_install: true`, and each vhost execs its
+own LSAPI process under suEXEC. One PHP **series** is pinned per host across all
+three (`php_fpm_series` = `openlitespeed_lsphp_series` = `PINNED_PHP_FPM_SERIES`);
+conflicting site versions fail deploy validation.
 
 Site fragments live under `/etc/turbopanel/{nginx,apache,openlitespeed}/sites/`
 (and php-fpm pools under `/etc/turbopanel/php/pools/`) — daemon TypeScript owns
@@ -170,6 +181,14 @@ config is templated to `/etc/turbopanel/nginx/nginx.conf` and
 are under `/var/lib|/var/log|/run/turbopanel/nginx/`. Driven by
 **`turbopanel-nginx.service`** (runs as `tpnginx`; high-port vhosts only —
 hosting Caddy owns `:80`/`:443`).
+
+The role also installs a static `fastcgi_params` (`roles/nginx/files/`) to
+`/etc/turbopanel/nginx/fastcgi_params`. Generated PHP vhosts `include` it by
+absolute path and then set `SCRIPT_FILENAME` / `PATH_INFO` themselves, so a
+site's own document root always wins. PHP itself is the sibling `php-fpm` role
+below — `traditional-web-apply.yml` includes it (and provisions the `tpapache`
+account php-fpm's master runs as) when the daemon passes
+`turbopanel_php_fpm_install: true`.
 
 ### Apache (`apache`)
 
@@ -200,15 +219,29 @@ exists). Compile-time apt deps only (`build-essential`, `libssl-dev`,
 | ---- | ----- | ---- | ------- |
 | `/etc/turbopanel/php/` | `root:tpapache` | `0750` | `php.ini`, `php-fpm.conf`, `conf.d/`, per-site `pools/*.conf` |
 | `/var/log/turbopanel/php/` | `tpapache:tpapache` | `0750` | `php-fpm.log` / `php-error.log` |
-| `/run/turbopanel/php/` | `tpapache:tpapache` | `0750` | pidfile + unix sockets |
+| `/run/turbopanel/php/` | `tpapache:tp` | `0750` | pidfile + unix sockets |
 
-Driven by **`turbopanel-php-fpm.service`**. Workers run as **tpapache** (same
-identity as Apache — provisioned by `web-service-user` before this role).
-`traditional-web-apache-apply` includes this role only when the daemon passes
-`turbopanel_php_fpm_install: true` (Apache sites with `web.php` hints).
-Daemon TypeScript writes per-site pools and reloads the unit before Apache
-so `proxy:unix:…|fcgi://localhost/` sockets exist. One series per host for
-now (multi-version side-by-side is a future seam).
+Driven by **`turbopanel-php-fpm.service`**. The FPM master, its bootstrap pool,
+and the FHS config/log dirs are owned by **tpapache** (provisioned by
+`web-service-user` before this role) — that stays true on an nginx-only host,
+which is why `traditional-web-apply.yml` provisions the `apache` identity before
+including this role. **Per-site** pools override that: workers run as the site
+principal, and the listen socket is owned by whichever engine consumes it
+(`tpapache` for an Apache site, `tpnginx` for an nginx one). `/run/turbopanel/php/`
+is therefore grouped to **`tp`**, not `tpapache` — `tp` is the shared group every
+engine account joins (`web-service-user`), so `0750` is traversable by both
+engines with no world bit. The master runs as root and creates the sockets;
+access control is on the sockets themselves (`0660`, per-engine owner). The
+unit's `ExecStartPre=/usr/bin/install -d` recreates this directory on every
+start and must stay in step with the role task.
+
+Both `traditional-web-apply` (nginx) and `traditional-web-apache-apply` include
+this role when the daemon passes `turbopanel_php_fpm_install: true` (that
+engine has a site with `web.php` hints). Daemon TypeScript writes per-site pools
+and reloads the unit **before** either engine, so `fastcgi_pass unix:…` /
+`proxy:unix:…|fcgi://localhost/` sockets exist when the engine config-tests. One
+series per host (multi-version side-by-side is a future seam); OpenLiteSpeed
+sites do not appear here at all — see `lsphp` below.
 
 ### OpenLiteSpeed (`openlitespeed`)
 
@@ -244,6 +277,36 @@ itself, mirroring `traditional-web-apache-apply`. Daemon-side config
 generation (per-site `virtualHost`/`listener` fragments aggregated into the
 single `httpd_config.conf`, `vhconf.conf` per vhost) lives in
 `../src/deploy/traditional-web.ts` — see `../src/deploy/AGENTS.md`.
+
+#### `lsphp` (LSAPI PHP)
+
+OpenLiteSpeed does **not** use php-fpm. Its PHP model is a per-vhost LSAPI
+external processor: each vhost execs its own `lsphp` under suEXEC
+(`extUser`/`extGroup` = the site principal, else `tpols`), so the process is the
+isolation boundary rather than a shared pool. The role vendors it only when the
+daemon passes `turbopanel_lsphp_install: true` — a static-only host never
+downloads a PHP interpreter.
+
+Same vendoring discipline as everything else here: the pinned
+`lsphp<pkg-series>` Debian packages are pulled from litespeedtech's own pool
+(`openlitespeed_lsphp_repo_base`) and extracted with `dpkg-deb -x` — **never**
+`apt install lsphp*` (which would add their apt repo) and never the vendor
+`install.sh`. Layout follows the `vendor/<tool>/<version>/` + `current`
+convention, with the series as an extra level so a patch bump never changes a
+generated vhost:
+
+| Path | Owner | Mode | Purpose |
+| ---- | ----- | ---- | ------- |
+| `{{ turbopanel_vendor_dir }}/lsphp/<series>/<version>/` | `root:tp` | `0750` | extracted `bin/lsphp` + `lib/` extensions |
+| `{{ turbopanel_vendor_dir }}/lsphp/<series>/current` | symlink | — | what generated `extprocessor path` lines point at |
+| `{{ turbopanel_vendor_dir }}/openlitespeed/<version>/tmp/lshttpd/` | `tpols:tpols` | `0750` | `uds://tmp/lshttpd/<name>.sock` LSAPI sockets |
+
+`openlitespeed_lsphp_series` must stay in step with `php_fpm_series` and
+`PINNED_LSPHP_SERIES` / `PINNED_PHP_FPM_SERIES` in
+`../src/deploy/traditional-web.ts`: different binaries, one PHP version per
+host. Hosting `web.php` hints land in the vhost's `phpIniOverride{}` block as
+`php_admin_value <key> <value>` — the OLS spelling of what an FPM pool writes as
+`php_admin_value[<key>] = <value>`.
 
 ### instance-launch secret keyring
 

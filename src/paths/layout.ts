@@ -437,6 +437,57 @@ export function commandLogSpoolDir(
   return join(layout.daemonStateDir, "spool", "execution-logs");
 }
 
+/**
+ * Per-service release tree root: `<principalHomeRoot>/<username>/sites/<serviceId>`.
+ *
+ * Generic on purpose — the Git-backed release engine and the traditional-web
+ * serving path both address the same tree, so neither hardcodes the layout.
+ * Under it: `releases/<releaseId>` (immutable published builds), `current`
+ * (symlink to the live release), and `shared` (writable state that survives a
+ * promote).
+ */
+export function siteRoot(principalHome: string, serviceId: string): string {
+  return join(principalHome, "sites", serviceId);
+}
+
+/** `<siteRoot>/releases` — one immutable directory per published release. */
+export function siteReleasesDir(
+  principalHome: string,
+  serviceId: string,
+): string {
+  return join(siteRoot(principalHome, serviceId), "releases");
+}
+
+/**
+ * `<siteRoot>/current` — symlink to the live release. Swapped atomically by a
+ * `rename()` over a freshly created symlink; never rewritten in place.
+ */
+export function siteCurrentSymlink(
+  principalHome: string,
+  serviceId: string,
+): string {
+  return join(siteRoot(principalHome, serviceId), "current");
+}
+
+/**
+ * `<siteRoot>/shared` — writable state (uploads, caches, logs) shared across
+ * releases. The only writable path in the tree once a release is published.
+ */
+export function siteSharedDir(
+  principalHome: string,
+  serviceId: string,
+): string {
+  return join(siteRoot(principalHome, serviceId), "shared");
+}
+
+/** Principal home for `username` under the layout's principal home root. */
+export function principalHomePath(
+  layout: Pick<LayoutPaths, "principalHomeRoot">,
+  username: string,
+): string {
+  return join(layout.principalHomeRoot, username);
+}
+
 /** Host WireGuard private key for interface `tp0`. */
 export function fabricPrivateKeyPath(
   layout: Pick<LayoutPaths, "daemonStateDir">,

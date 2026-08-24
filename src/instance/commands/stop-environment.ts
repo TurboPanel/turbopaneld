@@ -21,8 +21,17 @@ import {
   removeHostingCaddySite,
 } from "../../deploy/ingress.ts";
 import { removeTraditionalWebSites } from "../../deploy/traditional-web.ts";
+import { removeNativeAppServices } from "../../deploy/native/apply-native-apps.ts";
 import { logInfo, logWarn } from "../../logger.ts";
-import { fabricNetworkDir, resolveLayout } from "../../paths/layout.ts";
+import {
+  fabricNetworkDir,
+  type LayoutPaths,
+  principalHomePath,
+  resolveLayout,
+  siteRoot,
+} from "../../paths/layout.ts";
+import type { RunFn } from "../../deploy/ensure-principal.ts";
+import { runPrivileged } from "../../deploy/release/release-layout.ts";
 import {
   pruneFabricStateNetworks,
   removeFabricDockerNetworks,
@@ -48,7 +57,79 @@ export type EnvironmentStopHandlerDeps = {
   logSink?: CommandOutputSink;
   /** Test seam — defaults to {@link removeFabricDockerNetworks}. */
   removeFabricNetworks?: (names: readonly string[]) => Promise<void>;
+  /** Test seam — privileged `sudo -n …` runner for release-tree removal. */
+  runPrivileged?: RunFn;
 };
+
+/**
+ * Reclaim `<principalHome>/sites/<serviceId>` for every service the payload
+ * names.
+ *
+ * Generic on purpose: this is the tree the Git release engine publishes into
+ * (`releases/`, `current`, `shared/`) and the one native apps run out of — not
+ * a traditional-web artifact. It is root-owned by design, so
+ * the daemon cannot unlink it itself; removal goes through the same privileged
+ * runner the release engine uses to seal and prune.
+ *
+ * Best-effort per entry, matching the rest of this handler: a stop must still
+ * tear the stack down when one leftover tree refuses to go.
+ */
+async function removeEnvironmentSiteReleases(
+  layout: LayoutPaths,
+  environmentId: string,
+  siteReleases: ReadonlyArray<{ serviceId: string; username: string }>,
+  runFn: RunFn,
+): Promise<void> {
+  for (const entry of siteReleases) {
+    const path = siteRoot(
+      principalHomePath(layout, entry.username),
+      entry.serviceId,
+    );
+    try {
+      const result = await runFn("sudo", ["-n", "rm", "-rf", "--", path]);
+      if (!result.success) {
+        logWarn(
+          "commands",
+          `environment.stop site release reclaim failed env=${environmentId} path=${path}: ${result.stderr}`,
+        );
+      }
+    } catch (err) {
+      logWarn(
+        "commands",
+        `environment.stop site release reclaim failed env=${environmentId} path=${path}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+}
+
+/**
+ * Remove this environment's native app units. Best-effort, like every other
+ * reclaim step here: a stop must still tear the stack down when one leftover
+ * unit refuses to go.
+ */
+async function removeEnvironmentNativeApps(
+  layout: LayoutPaths,
+  environmentId: string,
+): Promise<void> {
+  try {
+    const removed = await removeNativeAppServices(layout, environmentId);
+    if (removed > 0) {
+      logInfo(
+        "commands",
+        `environment.stop removed ${removed} native app unit(s) env=${environmentId}`,
+      );
+    }
+  } catch (err) {
+    logWarn(
+      "commands",
+      `environment.stop native app teardown failed env=${environmentId}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
 
 function assertSafeStopIdentifiers(payload: EnvironmentStopPayload): void {
   if (!SAFE_PATH_ID_RE.test(payload.environmentId)) {
@@ -84,8 +165,9 @@ async function composeDown(
 }
 
 /**
- * Tear down a deployed environment stack (compose down + volumes + hosting site).
- * Idempotent when the compose file is already gone.
+ * Tear down a deployed environment stack (compose down + volumes + hosting site
+ * + per-service release trees). Idempotent when the compose file is already
+ * gone.
  */
 export async function handleEnvironmentStop(
   payload: EnvironmentStopPayload,
@@ -145,6 +227,18 @@ export async function handleEnvironmentStop(
 
   await removeHostingCaddySite(layout, parsedPayload.environmentId);
   await removeTraditionalWebSites(layout, parsedPayload.environmentId);
+  // Disable + remove the generated app units before the release trees they run
+  // out of are reclaimed, so systemd never restarts a unit whose
+  // `WorkingDirectory` has just been deleted. The per-principal slice is
+  // deliberately left behind — other environments of the same account still
+  // reference it.
+  await removeEnvironmentNativeApps(layout, parsedPayload.environmentId);
+  await removeEnvironmentSiteReleases(
+    layout,
+    parsedPayload.environmentId,
+    parsedPayload.siteReleases ?? [],
+    deps?.runPrivileged ?? runPrivileged,
+  );
 
   // Union payload ingressServices with daemon-persisted environment index so
   // a hosting deleted (or flipped to HTTP) before stop still tears down the

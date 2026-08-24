@@ -1050,13 +1050,22 @@ ${httpsHandlers}
   return httpBlock + httpsBlock;
 }
 
+/**
+ * Where a hostname's traffic goes.
+ *
+ * A loopback upstream covers **both** host-native lanes: a traditional-web
+ * vhost and a native `node` app are indistinguishable from Caddy's side — each
+ * is a process listening on 127.0.0.1 on a port the control plane allocated out
+ * of one shared ledger. Everything else goes to Traefik, which fronts the
+ * Docker containers.
+ */
 function resolveHostingUpstream(
   hosting: EnvironmentDeployHosting,
-  traditionalByService: Map<string, { listenPort: number }>,
+  loopbackByService: Map<string, { listenPort: number }>,
 ): CaddyUpstream {
-  const traditional = traditionalByService.get(hosting.composeServiceName);
-  if (traditional) {
-    return { kind: "http", host: "127.0.0.1", port: traditional.listenPort };
+  const loopback = loopbackByService.get(hosting.composeServiceName);
+  if (loopback) {
+    return { kind: "http", host: "127.0.0.1", port: loopback.listenPort };
   }
   return DEFAULT_TRAEFIK_UPSTREAM;
 }
@@ -1072,9 +1081,9 @@ function normalizePathPrefixFromHosting(
 
 function buildCaddySiteRoute(
   hosting: EnvironmentDeployHosting,
-  traditionalByService: Map<string, { listenPort: number }>,
+  loopbackByService: Map<string, { listenPort: number }>,
 ): CaddySiteRoute {
-  const upstream = resolveHostingUpstream(hosting, traditionalByService);
+  const upstream = resolveHostingUpstream(hosting, loopbackByService);
   const pathPrefix = normalizePathPrefixFromHosting(hosting.pathPrefix);
   const stripPrefix = hosting.proxy?.stripPrefix;
   return {
@@ -1112,12 +1121,14 @@ function mergeHostingIntoHostnameSite(
 export function buildCaddyHostnameRoutes(
   payload: EnvironmentDeployPayload,
 ): Map<string, HostnameSite> {
-  const traditionalByService = new Map(
-    (payload.traditionalWebSites ?? []).map((site) => [
-      site.composeServiceName,
+  const loopbackByService = new Map<string, { listenPort: number }>([
+    ...(payload.traditionalWebSites ?? []).map((
       site,
-    ]),
-  );
+    ) => [site.composeServiceName, site] as const),
+    ...(payload.nativeAppServices ?? []).map((
+      app,
+    ) => [app.composeServiceName, app] as const),
+  ]);
 
   const byHostname = new Map<string, HostnameSite>();
 
@@ -1125,7 +1136,7 @@ export function buildCaddyHostnameRoutes(
     if ((hosting.protocol ?? "http") !== "http") continue;
     if (hosting.hostnames.length === 0) continue;
 
-    const route = buildCaddySiteRoute(hosting, traditionalByService);
+    const route = buildCaddySiteRoute(hosting, loopbackByService);
     for (const hostname of hosting.hostnames) {
       const site = getOrCreateHostnameSite(byHostname, hostname);
       mergeHostingIntoHostnameSite(site, hosting, route);
