@@ -739,6 +739,34 @@ test("DENO_VERSION matches TP_DENO_VERSION in scripts/run.sh", () => {
   assertEquals(match[1], DENO_VERSION, "TP_DENO_VERSION in run.sh");
 });
 
+test("node-runtime installs corepack with vendored npm before enabling pnpm", () => {
+  const tasks = Deno.readTextFileSync(
+    join(
+      fromMeta,
+      "orchestration",
+      "roles",
+      "node-runtime",
+      "tasks",
+      "main.yml",
+    ),
+  );
+  const npmIdx = tasks.indexOf("current/bin/npm");
+  const enableIdx = tasks.indexOf("- enable");
+  if (npmIdx < 0) {
+    throw new TypeError(
+      "node-runtime must npm-install corepack (Node 25+ no longer ships it)",
+    );
+  }
+  if (enableIdx < 0 || enableIdx < npmIdx) {
+    throw new TypeError(
+      "node-runtime must install corepack before corepack enable",
+    );
+  }
+  if (!tasks.includes("\n      - corepack\n")) {
+    throw new TypeError("node-runtime must pass corepack to npm install -g");
+  }
+});
+
 test("CLICKHOUSE_VERSION matches the clickhouse Ansible role default", () => {
   const roleDefaults = join(
     fromMeta,

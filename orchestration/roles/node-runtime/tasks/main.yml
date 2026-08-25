@@ -58,6 +58,24 @@
     state: link
     force: true
 
+# Node 25+ dropped the bundled corepack binary. Install the standalone npm
+# package into the versioned prefix (current is a symlink) so packageManager
+# still provisions pnpm.
+- name: Install corepack (Node 25+ no longer ships it)
+  ansible.builtin.command:
+    argv:
+      - "{{ turbopanel_vendor_dir }}/node/current/bin/npm"
+      - install
+      - --global
+      - --prefix
+      - "{{ turbopanel_vendor_dir }}/node/{{ node_version }}"
+      - --no-fund
+      - --no-audit
+      - corepack
+    creates: "{{ turbopanel_vendor_dir }}/node/current/bin/corepack"
+  environment:
+    PATH: "{{ turbopanel_runtime_path }}"
+
 - name: Enable pnpm via corepack
   ansible.builtin.command:
     argv:

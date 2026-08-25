@@ -2,9 +2,10 @@
 galaxy_info:
   author: turbopanel
   description: >-
-    Install a pinned Node.js runtime (and pnpm via corepack) under the
-    turbopanel runtimes tree (vendor/node) for the cert tooling and Expo UI.
-    Requires 64-bit Linux (aarch64 or x86_64).
+    Install a pinned Node.js runtime (and pnpm via corepack; Node 25+ no
+    longer ships corepack, so the role installs it with vendored npm) under
+    the turbopanel runtimes tree (vendor/node) for the cert tooling and Expo
+    UI. Requires 64-bit Linux (aarch64 or x86_64).
   license: AGPL-3.0
   min_ansible_version: "2.14"
   platforms:

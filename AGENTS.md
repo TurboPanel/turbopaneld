@@ -134,7 +134,9 @@ pins the const to the role default.
 `turbopanel_runtime_path` (colon-separated PATH prefix for systemd/Ansible
 tasks). Node **26.7.0** is pinned in `node-runtime/defaults/main.yml` — keep in
 step with `NODE_VERSION` in [TurboPanel/dev](https://github.com/TurboPanel/dev)
-`scripts/lib/paths.sh`. The vendored runtime root is defined once in
+`scripts/lib/paths.sh`. Node 25+ no longer ships Corepack; the `node-runtime`
+role installs it with vendored `npm install -g corepack` into the versioned
+prefix, then `corepack enable pnpm`. The vendored runtime root is defined once in
 `src/paths/layout.ts` (`resolveRuntimesDir()` / `PROD_RUNTIME_DIR_DEFAULT`);
 shell helpers live in `scripts/lib/runtime-paths.sh`.
 
