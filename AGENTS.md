@@ -322,20 +322,25 @@ detail: `../dev/AGENTS.md` → Testing. Do not run `deno task test` on the
 host.
 
 **Editor:** this repo has no `tsconfig.json`. Folder `.vscode/settings.json`
-sets `deno.enable` and turns off the built-in TypeScript/JavaScript validators
-so Cursor/VS Code does not report `Cannot find name 'Deno'` / missing `@std/*`
-on Deno sources. Install **Deno** (`denoland.vscode-deno`); the sibling
-`dev` folder keeps `deno.enable: false` (Node console). Typecheck with
-`deno task check` / `deno task test`, not `tsc`.
+sets `deno.enable`, Deno as the default formatter for TS/JS/JSON, and
+format-on-save so `deno fmt` matches CI before a commit. It also turns off
+the built-in TypeScript/JavaScript validators so Cursor/VS Code does not
+report `Cannot find name 'Deno'` / missing `@std/*` on Deno sources. Install
+**Deno** (`denoland.vscode-deno`); the sibling `dev` folder keeps
+`deno.enable: false` (Node console). Typecheck with `deno task check` /
+`deno task test`, not `tsc`.
 
-**Pre-commit** (`.githooks/pre-commit`): `scripts/scan-secrets.sh` only (never
-skippable). Fmt/lint/tests are **temporarily disabled** in the hook until the
-toolchain can run inside the Vagrant guest (host VirtFS checkouts often lack a
-usable Deno tree). CI `verify.yml` still owns fmt/lint and the full suite. The
-dev console’s daemon install (`cloneOrUpdateRepo` in
-`../dev/src/lib/platform-install.ts`) sets `core.hooksPath=.githooks` after a
-successful clone or update when `.githooks/pre-commit` exists. Production
-`scripts/run.sh` never wires hooks.
+**Pre-commit** (`.githooks/pre-commit`): `scripts/scan-secrets.sh` is never
+skippable. The hook then runs `deno fmt` and restages files already in the
+commit so the index cannot stay unformatted. Deno is resolved in this order:
+PATH, `/opt/turbopanel/vendor/deno/current/deno`, then
+`vagrant ssh -c '… cd ~/turbopaneld && deno fmt'` from the sibling
+`dev` checkout (same guest command as Testing below). Lint/tests stay
+deferred. Set `TURBOPANEL_SKIP_HOOK_TESTS=1` to skip fmt only (secret scan
+still runs; CI `fmt:check` still gates). The dev console’s daemon install
+(`cloneOrUpdateRepo` in `../dev/src/lib/platform-install.ts`) sets
+`core.hooksPath=.githooks` after a successful clone or update when
+`.githooks/pre-commit` exists. Production `scripts/run.sh` never wires hooks.
 
 **Shared test helpers:** new tests must consume the helpers in `src/testing/`
 (`fake-websocket.ts`, `fake-clock.ts`, `temp-layout.ts`, `fake-instance-api.ts`,
@@ -347,7 +352,7 @@ from production code.
 
 | Stage | dev | daemon | Rationale |
 | ----- | --- | ------ | --------- |
-| pre-commit | scan-secrets only (tests deferred) | scan-secrets only (tests deferred) | secret scan on commit; suites in CI / guest |
+| pre-commit | scan-secrets only (tests deferred) | scan-secrets + `deno fmt` (lint/tests deferred) | secret scan always; daemon fmt via host Deno or `vagrant ssh`; suites in CI / guest |
 | PR → `trunk` | `verify.yml` | `verify.yml` | blocks merge |
 | push `trunk` | `verify.yml` | `verify.yml`; `publish` job `needs: verify` | nothing compiles from failing code |
 | promote → canary/rc/release | n/a | **artifact integrity only** (S3 sha256/size + CDN fetch) | no new code enters after publish |

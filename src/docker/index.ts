@@ -1,10 +1,10 @@
 export {
   type ContainerInspect,
   type ContainerSummary,
-  type DockerClientOptions,
-  type DockerFetch,
   DockerClient,
+  type DockerClientOptions,
   type DockerEvent,
+  type DockerFetch,
   isStreamAbortError,
   parseEventLines,
   resolveDockerSocket,

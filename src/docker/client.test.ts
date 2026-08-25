@@ -1,15 +1,11 @@
-import {
-  assertEquals,
-  assertRejects,
-  assertThrows,
-} from "@std/assert";
+import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import {
   DOCKER_HTTP_ORIGIN,
   DockerClient,
+  type DockerEvent,
   isStreamAbortError,
   parseEventLines,
   resolveDockerSocket,
-  type DockerEvent,
 } from "./client.ts";
 
 /**
@@ -52,11 +48,17 @@ test("isStreamAbortError covers abort and BadResource", () => {
   aborted.abort();
   assertEquals(isStreamAbortError(new Error("other"), aborted.signal), true);
   assertEquals(
-    isStreamAbortError(new DOMException("Aborted", "AbortError"), new AbortController().signal),
+    isStreamAbortError(
+      new DOMException("Aborted", "AbortError"),
+      new AbortController().signal,
+    ),
     true,
   );
   assertEquals(
-    isStreamAbortError(new Deno.errors.BadResource(), new AbortController().signal),
+    isStreamAbortError(
+      new Deno.errors.BadResource(),
+      new AbortController().signal,
+    ),
     true,
   );
   assertEquals(
@@ -96,7 +98,16 @@ test("DockerClient listContainers encodes all and throws on HTTP error", async (
   const client = new DockerClient(undefined, {
     fetchImpl: (url) => {
       seen.push(url);
-      return Promise.resolve(jsonResponse([{ Id: "c1", Names: ["/a"], Image: "img", State: "running", Status: "Up", Ports: [] }]));
+      return Promise.resolve(
+        jsonResponse([{
+          Id: "c1",
+          Names: ["/a"],
+          Image: "img",
+          State: "running",
+          Status: "Up",
+          Ports: [],
+        }]),
+      );
     },
   });
   const rows = await client.listContainers(true);
@@ -165,7 +176,10 @@ test("DockerClient start and stop treat 304 as success", async () => {
   await client.stopContainer("c1", 12);
   assertEquals(urls.includes("POST http://docker/containers/c1/start"), true);
   assertEquals(urls.includes("POST http://docker/containers/c1/stop"), true);
-  assertEquals(urls.includes("POST http://docker/containers/c1/stop?t=12"), true);
+  assertEquals(
+    urls.includes("POST http://docker/containers/c1/stop?t=12"),
+    true,
+  );
   client.close();
 });
 

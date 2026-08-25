@@ -519,7 +519,9 @@ test("collector flushes when buffered bytes hit the flushBytes cap", async () =>
     tail: (params) => {
       emitter = params.onLine;
       return new Promise<void>((resolve) => {
-        params.signal.addEventListener("abort", () => resolve(), { once: true });
+        params.signal.addEventListener("abort", () => resolve(), {
+          once: true,
+        });
       });
     },
     send: (events) => {
@@ -585,7 +587,9 @@ test("reconcile swallows discovery failures and updates existing targets", async
     tail: (params) => {
       emitter = params.onLine;
       return new Promise<void>((resolve) => {
-        params.signal.addEventListener("abort", () => resolve(), { once: true });
+        params.signal.addEventListener("abort", () => resolve(), {
+          once: true,
+        });
       });
     },
     send: (events) => {
@@ -614,7 +618,10 @@ test("reconcile swallows discovery failures and updates existing targets", async
 
   await collector.flush();
   await collector.stop();
-  assertEquals(batches[0]?.[0]?.serviceId, "33333333-3333-4333-8333-333333333333");
+  assertEquals(
+    batches[0]?.[0]?.serviceId,
+    "33333333-3333-4333-8333-333333333333",
+  );
 });
 
 test("constructor without layout or discover throws", () => {
@@ -715,7 +722,9 @@ test("start/stopContainerLogCollection manages the process-wide collector", asyn
     discover: () => Promise.resolve([TARGET]),
     tail: (params) =>
       new Promise<void>((resolve) => {
-        params.signal.addEventListener("abort", () => resolve(), { once: true });
+        params.signal.addEventListener("abort", () => resolve(), {
+          once: true,
+        });
       }),
     send: (events) => {
       batches.push([...events]);
@@ -745,7 +754,9 @@ test("start/stopContainerLogCollection manages the process-wide collector", asyn
     discover: () => Promise.resolve([]),
     tail: (params) =>
       new Promise<void>((resolve) => {
-        params.signal.addEventListener("abort", () => resolve(), { once: true });
+        params.signal.addEventListener("abort", () => resolve(), {
+          once: true,
+        });
       }),
     send: () => Promise.resolve(),
     setIntervalFn: (() => 0) as unknown as typeof setInterval,
@@ -768,7 +779,10 @@ test("a non-timestamped line stamps the event from the injectable clock", async 
   emit()("stdout", "plain without stamp");
   await collector.flush();
   await collector.stop();
-  assertEquals(batches[0]?.[0]?.timestamp, new Date(1_700_000_000_000).toISOString());
+  assertEquals(
+    batches[0]?.[0]?.timestamp,
+    new Date(1_700_000_000_000).toISOString(),
+  );
   assertEquals(batches[0]?.[0]?.message, "plain without stamp");
 });
 
@@ -796,7 +810,9 @@ test("tail retry re-attaches after the child exits while still running", async (
         });
       }
       return new Promise<void>((resolve) => {
-        params.signal.addEventListener("abort", () => resolve(), { once: true });
+        params.signal.addEventListener("abort", () => resolve(), {
+          once: true,
+        });
       });
     },
     send: (events) => {

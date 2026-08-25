@@ -115,10 +115,11 @@ export class DockerClient {
       return;
     }
     const path = socketPath ?? resolveDockerSocket();
-    const create = options.createHttpClient ?? ((unixPath: string) =>
-      Deno.createHttpClient({
-        proxy: { transport: "unix", path: unixPath },
-      }));
+    const create = options.createHttpClient ??
+      ((unixPath: string) =>
+        Deno.createHttpClient({
+          proxy: { transport: "unix", path: unixPath },
+        }));
     this.#httpClient = create(path);
   }
 

@@ -32,7 +32,9 @@ export function parseBuildToggleArgs(
   }
 
   if (instanceRunMode !== "source" && instanceRunMode !== "compiled") {
-    throw new TypeError("Missing or invalid --instance-run-mode=source|compiled");
+    throw new TypeError(
+      "Missing or invalid --instance-run-mode=source|compiled",
+    );
   }
 
   return { uiMode, instanceRunMode, forceBuild };

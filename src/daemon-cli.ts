@@ -1,4 +1,4 @@
-import { getBuildInfo, type BuildInfo } from "./build-info.ts";
+import { type BuildInfo, getBuildInfo } from "./build-info.ts";
 import { sanitizeForLog } from "./logger.ts";
 import { runBootstrapOrchestration } from "./orchestration/bootstrap-once.ts";
 import { InstallerPresentedFailure } from "./orchestration/install-presenter-context.ts";

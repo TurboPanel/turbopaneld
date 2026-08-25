@@ -54,8 +54,9 @@ export async function generateChannelManifest(options: {
   writeTextFile?: (path: string, json: string) => Promise<void>;
   writeStdout?: (json: string) => Promise<void>;
 }): Promise<ChannelManifest> {
-  const artifactBase =
-    `${options.dlBaseUrl ?? "https://dl.trbp.nl"}/channels/trunk/daemon`;
+  const artifactBase = `${
+    options.dlBaseUrl ?? "https://dl.trbp.nl"
+  }/channels/trunk/daemon`;
 
   const binaryAmd64 = await artifactFromPublishFile(
     options.publishDir,
@@ -106,8 +107,11 @@ export async function generateChannelManifest(options: {
       json,
     );
   } else {
-    await (options.writeStdout ?? ((body: string) =>
-      Deno.stdout.write(new TextEncoder().encode(body)).then(() => undefined)))(
+    await (options.writeStdout ??
+      ((body: string) =>
+        Deno.stdout.write(new TextEncoder().encode(body)).then(() =>
+          undefined
+        )))(
         json,
       );
   }

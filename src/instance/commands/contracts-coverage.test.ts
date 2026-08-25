@@ -400,7 +400,8 @@ test("parseEnvironmentDeployPayload round-trips variableMaterial flags and ingre
     }],
     tlsMaterial: [{
       tlsId: "tls-1",
-      certificatePem: "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----",
+      certificatePem:
+        "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----",
       privateKeyEnvelope: TP_ENVELOPE,
     }],
   });

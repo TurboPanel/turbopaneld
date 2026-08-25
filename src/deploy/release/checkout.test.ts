@@ -7,9 +7,9 @@ import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import {
   checkoutRelease,
-  type GitRunResult,
-  type GitRunner,
   gitEnvironment,
+  type GitRunner,
+  type GitRunResult,
   removeCheckoutCredentialFiles,
   writeCheckoutCredentialFiles,
 } from "./checkout.ts";
@@ -206,7 +206,9 @@ test("checkoutRelease unlinks credential files even when clone fails", async () 
 });
 
 test("checkoutRelease throws when the pinned-commit fetch fails", async () => {
-  const scratchDir = await Deno.makeTempDir({ prefix: "tp-checkout-fetchfail-" });
+  const scratchDir = await Deno.makeTempDir({
+    prefix: "tp-checkout-fetchfail-",
+  });
   try {
     const { run } = scriptedGit([
       () => ({ success: true, stdout: "", stderr: "" }),

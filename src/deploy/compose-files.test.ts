@@ -7,8 +7,8 @@ import {
   composeFileArgs,
   environmentDeploymentDir,
   listLocalDeploymentManifests,
-  publishStagedRuntimeCompose,
   pruneStaleComposeLayerFiles,
+  publishStagedRuntimeCompose,
   readDeploymentManifest,
   removeComposeEnvFile,
   removeComposeStageDir,
@@ -280,7 +280,10 @@ describe("compose-files", () => {
   });
 
   it("composeBasename returns the leaf name", () => {
-    assertEquals(composeBasename("/var/lib/turbopanel/deployments/x/compose.yaml"), "compose.yaml");
+    assertEquals(
+      composeBasename("/var/lib/turbopanel/deployments/x/compose.yaml"),
+      "compose.yaml",
+    );
   });
 
   it("writeComposeEnvFile and removeComposeEnvFile round-trip", async () => {
@@ -308,7 +311,10 @@ describe("compose-files", () => {
       await Deno.writeTextFile(join(tmp, "notes.txt"), "keep\n");
       await Deno.mkdir(join(tmp, "subdir"));
       await pruneStaleComposeLayerFiles(tmp, new Set(["compose.yaml"]));
-      assertEquals(await Deno.readTextFile(join(tmp, "compose.yaml")), "services: {}\n");
+      assertEquals(
+        await Deno.readTextFile(join(tmp, "compose.yaml")),
+        "services: {}\n",
+      );
       assertEquals(await Deno.readTextFile(join(tmp, "notes.txt")), "keep\n");
       await assertRejects(
         () => Deno.stat(join(tmp, "legacy.yml")),

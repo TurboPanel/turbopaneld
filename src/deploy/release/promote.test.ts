@@ -3,16 +3,12 @@
  * record. Shared-link promote cases live in `promote-shared-link.test.ts`.
  */
 
-import {
-  assertEquals,
-  assertRejects,
-  assertStringIncludes,
-} from "@std/assert";
+import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import type { RunFn } from "../ensure-principal.ts";
 import {
-  type ReleaseManifestV1,
   readReleaseManifest,
+  type ReleaseManifestV1,
 } from "./deployment-json.ts";
 import {
   RELEASE_METADATA_DIRNAME,
@@ -172,7 +168,10 @@ test("swapCurrentSymlink is atomic and readCurrentReleaseId follows it", async (
     assertEquals(await readCurrentReleaseId(paths), null);
     await swapCurrentSymlink(paths);
     assertEquals(await readCurrentReleaseId(paths), "rel-1");
-    assertEquals(await Deno.readLink(paths.currentLink), join("releases", "rel-1"));
+    assertEquals(
+      await Deno.readLink(paths.currentLink),
+      join("releases", "rel-1"),
+    );
 
     // A second swap to a newer release replaces the link atomically.
     const next = resolveReleasePaths(

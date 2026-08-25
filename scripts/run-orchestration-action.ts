@@ -35,8 +35,8 @@ import {
   writeDevConvergeStamp,
 } from "../src/orchestration/converge-stamp.ts";
 import {
-  type DevOrchestrationLayout,
   devOrchestrationAnsibleEnv,
+  type DevOrchestrationLayout,
   requireDevOrchestrationLayout,
 } from "../src/orchestration/dev-orchestration.ts";
 import {

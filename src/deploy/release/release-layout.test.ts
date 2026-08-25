@@ -126,7 +126,11 @@ test("assertSafeReleaseId and assertSafeServiceId reject path-like ids", () => {
   assertEquals(assertSafeReleaseId("rel-1"), "rel-1");
   assertEquals(assertSafeServiceId("svc_1"), "svc_1");
   assertThrows(() => assertSafeReleaseId("../etc"), Error, "unsafe releaseId");
-  assertThrows(() => assertSafeServiceId(""), Error, "unsafe release serviceId");
+  assertThrows(
+    () => assertSafeServiceId(""),
+    Error,
+    "unsafe release serviceId",
+  );
   assertThrows(
     () => assertSafeReleaseId("a".repeat(65)),
     Error,
@@ -224,7 +228,12 @@ test("sealPublishedRelease throws when chown or chmod fails", async () => {
       stderr: args.includes("chown") ? "chown failed" : "chmod failed",
     });
   await assertRejects(
-    () => sealPublishedRelease("/var/lib/turbopanel/releases/rel", "appuser", runFail),
+    () =>
+      sealPublishedRelease(
+        "/var/lib/turbopanel/releases/rel",
+        "appuser",
+        runFail,
+      ),
     Error,
     "chown failed",
   );

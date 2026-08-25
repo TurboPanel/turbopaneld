@@ -21,7 +21,7 @@
  */
 
 import { logInfo } from "../../logger.ts";
-import { resolveLayout, type LayoutPaths } from "../../paths/layout.ts";
+import { type LayoutPaths, resolveLayout } from "../../paths/layout.ts";
 import {
   ensureSystemPrincipals,
   type PrincipalEnsureSpec,

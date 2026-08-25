@@ -45,8 +45,9 @@ function fakeConfigJson(services: Record<string, unknown>): string {
 }
 
 async function withDeployEnv(
-  fn: (dirs: { stateDir: string; configDir: string; runDir: string }) =>
-    Promise<void>,
+  fn: (
+    dirs: { stateDir: string; configDir: string; runDir: string },
+  ) => Promise<void>,
 ): Promise<void> {
   const fixture = await createTempLayout();
   const previous = new Map(
@@ -276,14 +277,17 @@ test("resolveRuntimeComposeYaml rejects multi-file snapshots without runtime", (
   } catch (error) {
     assertEquals(
       error instanceof Error &&
-        error.message.includes("composeFiles must include role runtime compose.yaml"),
+        error.message.includes(
+          "composeFiles must include role runtime compose.yaml",
+        ),
       true,
     );
   }
 });
 
 test({
-  name: "handleEnvironmentDeploy skips compose up when config resolves zero services",
+  name:
+    "handleEnvironmentDeploy skips compose up when config resolves zero services",
   permissions: { env: true, read: true, write: true, run: true },
   fn: async () => {
     await withDeployEnv(async ({ stateDir }) => {
@@ -406,7 +410,8 @@ test({
 });
 
 test({
-  name: "handleEnvironmentDeploy rejects tlsMaterial when decrypt is unavailable",
+  name:
+    "handleEnvironmentDeploy rejects tlsMaterial when decrypt is unavailable",
   permissions: { env: true, read: true, write: true, run: true },
   fn: async () => {
     await withDeployEnv(async () => {
@@ -443,7 +448,8 @@ test({
               hostings: [],
               tlsMaterial: [{
                 tlsId: "00000000-0000-4000-8000-000000000001",
-                certificatePem: "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+                certificatePem:
+                  "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
                 privateKeyEnvelope: "tpdaemon.v1.key",
               }],
             },
@@ -458,7 +464,8 @@ test({
 });
 
 test({
-  name: "handleEnvironmentDeploy ensures external docker networks before compose up",
+  name:
+    "handleEnvironmentDeploy ensures external docker networks before compose up",
   permissions: { env: true, read: true, write: true, run: true },
   fn: async () => {
     await withDeployEnv(async () => {
@@ -531,11 +538,17 @@ test({
         environmentId,
         RUNTIME_COMPOSE_FILENAME,
       );
-      await Deno.mkdir(join(stateDir, "deployments", projectId, environmentId), {
-        recursive: true,
-        mode: 0o750,
-      });
-      await Deno.writeTextFile(priorPath, "services:\n  web:\n    image: nginx:alpine\n");
+      await Deno.mkdir(
+        join(stateDir, "deployments", projectId, environmentId),
+        {
+          recursive: true,
+          mode: 0o750,
+        },
+      );
+      await Deno.writeTextFile(
+        priorPath,
+        "services:\n  web:\n    image: nginx:alpine\n",
+      );
 
       const fakeRunDocker = (args: string[]): Promise<DockerCliResult> => {
         if (args.includes("build") && args.includes("--no-cache")) {

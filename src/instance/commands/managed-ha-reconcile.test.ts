@@ -13,8 +13,8 @@ import { resolveLayout } from "../../paths/layout.ts";
 import {
   orchestratorApiCnfPath,
   orchestratorComposePath,
-  orchestratorConfPath,
   orchestratorConfigDir,
+  orchestratorConfPath,
   orchestratorRaftCnfPath,
 } from "../../managed/paths.ts";
 import {
@@ -154,7 +154,9 @@ function decryptSecretsEcho(
 ): Promise<(string | null)[]> {
   return Promise.resolve(
     ciphertexts.map((c) =>
-      c === "tpdaemon.v1.repl-pass" ? "repl-plaintext" : c.replace(/^tpdaemon\./, "")
+      c === "tpdaemon.v1.repl-pass"
+        ? "repl-plaintext"
+        : c.replace(/^tpdaemon\./, "")
     ),
   );
 }
@@ -196,7 +198,8 @@ test({
 });
 
 test({
-  name: "handleManagedHaReconcile writes Recover:false config and registers clusters",
+  name:
+    "handleManagedHaReconcile writes Recover:false config and registers clusters",
   permissions: { env: true, read: true, write: true, run: false },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -223,7 +226,10 @@ test({
         assertEquals(result.restarted, true);
         assertEquals(result.registeredClusters, [MANAGED_ID]);
         assertEquals(result.containers?.length, 1);
-        assertEquals(apiCalls.some((url) => url.includes("/api/discover/db-1/5432")), true);
+        assertEquals(
+          apiCalls.some((url) => url.includes("/api/discover/db-1/5432")),
+          true,
+        );
         assertEquals(
           apiCalls.some((url) =>
             url.includes("/api/register-candidate/db-1/5432/prefer")
@@ -245,7 +251,8 @@ test({
 });
 
 test({
-  name: "handleManagedHaReconcile reports no restart when stack files are unchanged",
+  name:
+    "handleManagedHaReconcile reports no restart when stack files are unchanged",
   permissions: { env: true, read: true, write: true, run: false },
   fn: async () => {
     await withTempLayout(async (fixture) => {

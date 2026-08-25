@@ -4,11 +4,11 @@ import {
   discoverInstance,
   isDeadPrimaryProblem,
   listOrchestratorProblems,
+  type OrchestratorHttpFn,
   parseOrchestratorProblems,
   recoverToCandidate,
   registerCandidate,
   setClusterAlias,
-  type OrchestratorHttpFn,
 } from "./orchestrator-api.ts";
 
 /**
@@ -156,8 +156,7 @@ test("listOrchestratorProblems parses the problems payload", async () => {
 
 test("discoverInstance surfaces HTTP failures", async () => {
   await assertRejects(
-    () =>
-      discoverInstance({ host: "db-1", port: 5432 }, { fetch: errorFetch }),
+    () => discoverInstance({ host: "db-1", port: 5432 }, { fetch: errorFetch }),
     Error,
     "orchestrator /api/discover/db-1/5432 failed: HTTP 503",
   );

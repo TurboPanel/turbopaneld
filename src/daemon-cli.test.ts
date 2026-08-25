@@ -1,9 +1,9 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import { InstallerPresentedFailure } from "./orchestration/install-presenter-context.ts";
 import {
+  type DaemonCliIo,
   maybeRunDaemonCli,
   parseInstallerFlags,
-  type DaemonCliIo,
 } from "./daemon-cli.ts";
 
 /**
@@ -149,13 +149,15 @@ test("parseInstallerFlags exits on --start values that are not true/false", () =
 });
 
 test("parseInstallerFlags exits when a value is missing", () => {
-  for (const flag of [
-    "--instance-url",
-    "--instance-ca",
-    "--tunnel-token",
-    "--vars-file",
-    "--start",
-  ]) {
+  for (
+    const flag of [
+      "--instance-url",
+      "--instance-ca",
+      "--tunnel-token",
+      "--vars-file",
+      "--start",
+    ]
+  ) {
     const { io, exits, errors } = captureIo();
     assertThrows(
       () => parseInstallerFlags([flag], io),

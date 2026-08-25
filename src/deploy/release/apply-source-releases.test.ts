@@ -92,7 +92,9 @@ function baseSource(
   };
 }
 
-function layoutFromFixture(fixture: Awaited<ReturnType<typeof createTempLayout>>) {
+function layoutFromFixture(
+  fixture: Awaited<ReturnType<typeof createTempLayout>>,
+) {
   const principalHomeRoot = join(fixture.dirs.stateDir, "principal-homes");
   return resolveLayout({
     ...fixture.env,
@@ -109,13 +111,15 @@ async function mkdirReleaseTree(
     releaseDir: string;
   },
 ): Promise<void> {
-  for (const dir of [
-    paths.sitesDir,
-    paths.siteDir,
-    paths.releasesDir,
-    paths.sharedDir,
-    paths.releaseDir,
-  ]) {
+  for (
+    const dir of [
+      paths.sitesDir,
+      paths.siteDir,
+      paths.releasesDir,
+      paths.sharedDir,
+      paths.releaseDir,
+    ]
+  ) {
     await Deno.mkdir(dir, { recursive: true });
   }
 }
@@ -190,7 +194,9 @@ test("applySourceReleases skips principal-less native entries with a transcript 
       assertEquals(
         log.lines.some((line) =>
           line.stream === "stderr" &&
-          line.message.includes("release skipped for api: no project principal assigned")
+          line.message.includes(
+            "release skipped for api: no project principal assigned",
+          )
         ),
         true,
       );
@@ -227,7 +233,12 @@ test("applySourceReleases promotes native releases with injected checkout/build/
             baseSource({
               composeServiceName: "web",
               releaseId: "rel-new",
-              principal: { principalId: "pr-1", username: "appuser", uid: 2000, gid: 2001 },
+              principal: {
+                principalId: "pr-1",
+                username: "appuser",
+                uid: 2000,
+                gid: 2001,
+              },
             }),
           ],
           nativeAppServices: [{
@@ -347,7 +358,12 @@ test("applySourceReleases removes scratch dir after a failed native promote", as
                 baseSource({
                   composeServiceName: "web",
                   releaseId: "rel-fail",
-                  principal: { principalId: "pr-1", username: "appuser", uid: 2000, gid: 2001 },
+                  principal: {
+                    principalId: "pr-1",
+                    username: "appuser",
+                    uid: 2000,
+                    gid: 2001,
+                  },
                 }),
               ],
             }),
@@ -397,7 +413,12 @@ test("applySourceReleases rejects clone credentials when decrypt is unavailable"
               sourceMaterial: [
                 baseSource({
                   credential: "tpdaemon.sealed",
-                  principal: { principalId: "pr-1", username: "appuser", uid: 2000, gid: 2001 },
+                  principal: {
+                    principalId: "pr-1",
+                    username: "appuser",
+                    uid: 2000,
+                    gid: 2001,
+                  },
                 }),
               ],
             }),
@@ -430,7 +451,12 @@ test("applySourceReleases rejects empty decrypted clone credentials", async () =
               sourceMaterial: [
                 baseSource({
                   credential: "tpdaemon.sealed",
-                  principal: { principalId: "pr-1", username: "appuser", uid: 2000, gid: 2001 },
+                  principal: {
+                    principalId: "pr-1",
+                    username: "appuser",
+                    uid: 2000,
+                    gid: 2001,
+                  },
                 }),
               ],
             }),
@@ -491,7 +517,12 @@ test("applySourceReleases rolls back native releases without fetch or build", as
               releaseId: "rel-new",
               rollbackToReleaseId: "rel-old",
               commitSha: "wire-placeholder",
-              principal: { principalId: "pr-1", username: "appuser", uid: 2000, gid: 2001 },
+              principal: {
+                principalId: "pr-1",
+                username: "appuser",
+                uid: 2000,
+                gid: 2001,
+              },
             }),
           ],
         }),
@@ -500,7 +531,10 @@ test("applySourceReleases rolls back native releases without fetch or build", as
           decryptSecrets: undefined,
           checkoutReleaseFn: () => {
             checkoutCalled = true;
-            return Promise.resolve({ workingDir: "/tmp/nope", commitSha: "nope" });
+            return Promise.resolve({
+              workingDir: "/tmp/nope",
+              commitSha: "nope",
+            });
           },
           runReleaseBuildFn: () => {
             buildCalled = true;
@@ -553,7 +587,12 @@ test("applySourceReleases fails rollback when the target release is missing", as
               sourceMaterial: [
                 baseSource({
                   rollbackToReleaseId: "rel-missing",
-                  principal: { principalId: "pr-1", username: "appuser", uid: 2000, gid: 2001 },
+                  principal: {
+                    principalId: "pr-1",
+                    username: "appuser",
+                    uid: 2000,
+                    gid: 2001,
+                  },
                 }),
               ],
             }),
@@ -645,7 +684,9 @@ test("applySourceReleases rolls back railpack releases from daemon record manife
       assertEquals(row.commitSha, "rail-commit");
       assertEquals(row.railpackFrontendVersion, "0.2.0");
       assertEquals(
-        log.lines.some((line) => line.message.includes("(image turbopanel-app")),
+        log.lines.some((line) =>
+          line.message.includes("(image turbopanel-app")
+        ),
         true,
       );
     } finally {
@@ -761,7 +802,12 @@ test("applySourceReleases propagates staticExport from native app build shaping"
           sourceMaterial: [
             baseSource({
               releaseId: "rel-static",
-              principal: { principalId: "pr-2", username: "siteuser", uid: 2100, gid: 2101 },
+              principal: {
+                principalId: "pr-2",
+                username: "siteuser",
+                uid: 2100,
+                gid: 2101,
+              },
             }),
           ],
           nativeAppServices: [{

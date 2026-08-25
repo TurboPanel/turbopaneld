@@ -295,10 +295,11 @@ async function rollbackOneRelease(
     };
   }
 
-  const releaseDir = await (deps.promoteExistingReleaseFn ?? promoteExistingRelease)({
-    paths,
-    releaseId: params.releaseId,
-  });
+  const releaseDir =
+    await (deps.promoteExistingReleaseFn ?? promoteExistingRelease)({
+      paths,
+      releaseId: params.releaseId,
+    });
   const manifest = await readReleaseManifest(releaseDir);
   logSink.onLine(
     "stdout",
@@ -362,7 +363,9 @@ async function applyRailpackRelease(
   const { deps, onOutput, serviceId } = params;
   const { logSink } = deps;
 
-  const tools = await (deps.ensureBuildkitRailpackFn ?? ensureBuildkitRailpack)(layout);
+  const tools = await (deps.ensureBuildkitRailpackFn ?? ensureBuildkitRailpack)(
+    layout,
+  );
   const imageTag = railpackImageTag(serviceId, entry.releaseId);
   const built = await (deps.runRailpackBuildFn ?? runRailpackBuild)({
     build: entry.build,
@@ -399,7 +402,11 @@ async function applyRailpackRelease(
     railpackFrontendVersion: built.railpackFrontendVersion,
     railpackPlanVersion: built.railpackPlanVersion,
   };
-  const releaseDir = await (deps.recordRailpackReleaseFn ?? recordRailpackRelease)({ paths, manifest });
+  const releaseDir =
+    await (deps.recordRailpackReleaseFn ?? recordRailpackRelease)({
+      paths,
+      manifest,
+    });
   logSink.onLine(
     "stdout",
     `built release ${entry.releaseId} (${params.commitSha}) for ${entry.composeServiceName} as ${built.imageTag}`,
@@ -526,7 +533,9 @@ async function buildRailpackRelease(
   const { deps, onOutput, serviceId } = params;
   const { logSink } = deps;
 
-  await (deps.ensureDaemonReleaseRecordDirFn ?? ensureDaemonReleaseRecordDir)(paths);
+  await (deps.ensureDaemonReleaseRecordDirFn ?? ensureDaemonReleaseRecordDir)(
+    paths,
+  );
   await resetReleaseScratchDir(paths);
   try {
     logSink.setPhase(COMMAND_LOG_PHASES.FETCH);
@@ -566,7 +575,11 @@ async function buildNativeRelease(
   const { deps, onOutput, serviceId, username } = params;
   const { logSink } = deps;
 
-  await (deps.ensureReleaseTreeFn ?? ensureReleaseTree)(paths, username, deps.runFn);
+  await (deps.ensureReleaseTreeFn ?? ensureReleaseTree)(
+    paths,
+    username,
+    deps.runFn,
+  );
   await resetReleaseScratchDir(paths);
   try {
     logSink.setPhase(COMMAND_LOG_PHASES.FETCH);
@@ -585,11 +598,12 @@ async function buildNativeRelease(
     // payload is, and second-guessing that would make the field a suggestion.
     const nativeApp = nativeAppForService(payload, entry.composeServiceName);
     const nativeOutput = nativeApp && entry.build.outputDirectory === undefined
-      ? await (deps.prepareNativeAppBuildOutputFn ?? prepareNativeAppBuildOutput)({
-        framework: nativeApp.framework,
-        workingDir: buildWorkingDir,
-        onOutput,
-      })
+      ? await (deps.prepareNativeAppBuildOutputFn ??
+        prepareNativeAppBuildOutput)({
+          framework: nativeApp.framework,
+          workingDir: buildWorkingDir,
+          onOutput,
+        })
       : {
         standaloneOutput: false as boolean,
         staticExport: false as boolean,
@@ -614,16 +628,18 @@ async function buildNativeRelease(
       standaloneOutput: nativeOutput.standaloneOutput,
       staticExport: nativeOutput.staticExport,
     });
-    const releaseDir = await (deps.promoteReleaseFn ?? promoteRelease)(definedFields({
-      paths,
-      workingDir: checkout.workingDir,
-      username,
-      manifest,
-      subdirectory: entry.subdirectory,
-      outputDirectory: entry.build.outputDirectory ??
-        nativeOutput.outputDirectory,
-      runFn: deps.runFn,
-    }));
+    const releaseDir = await (deps.promoteReleaseFn ?? promoteRelease)(
+      definedFields({
+        paths,
+        workingDir: checkout.workingDir,
+        username,
+        manifest,
+        subdirectory: entry.subdirectory,
+        outputDirectory: entry.build.outputDirectory ??
+          nativeOutput.outputDirectory,
+        runFn: deps.runFn,
+      }),
+    );
     logSink.onLine(
       "stdout",
       `promoted release ${entry.releaseId} (${checkout.commitSha}) for ${entry.composeServiceName}`,

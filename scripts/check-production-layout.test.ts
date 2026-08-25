@@ -71,15 +71,24 @@ test("assertProductionLayout accepts the canonical tree and flags leaks", () => 
       home: "/wrong",
     }),
   );
-  assertEquals(leaks.some((line) => line.includes("orchestrationDir leaked")), true);
+  assertEquals(
+    leaks.some((line) => line.includes("orchestrationDir leaked")),
+    true,
+  );
   assertEquals(leaks.some((line) => line.includes("instanceDir leaked")), true);
-  assertEquals(leaks.some((line) => line.includes("daemonRootDefault leaked")), true);
+  assertEquals(
+    leaks.some((line) => line.includes("daemonRootDefault leaked")),
+    true,
+  );
   assertEquals(leaks.some((line) => line.startsWith("layout home:")), true);
 });
 
 test("assertDaemonUnitLock requires the runtime_socket_dir token", () => {
   const ok: string[] = [];
-  assertDaemonUnitLock(ok, "ExecStartPre=flock {{ runtime_socket_dir }}/daemon.lock");
+  assertDaemonUnitLock(
+    ok,
+    "ExecStartPre=flock {{ runtime_socket_dir }}/daemon.lock",
+  );
   assertEquals(ok, []);
 
   const hardcoded: string[] = [];
@@ -92,7 +101,10 @@ test("assertDaemonUnitLock requires the runtime_socket_dir token", () => {
 });
 
 test("isSkippedPath matches Galaxy docker role trees", () => {
-  assertEquals(isSkippedPath("orchestration/roles/geerlingguy.docker/tasks"), true);
+  assertEquals(
+    isSkippedPath("orchestration/roles/geerlingguy.docker/tasks"),
+    true,
+  );
   assertEquals(isSkippedPath("roles/geerlingguy/docker/tasks"), true);
   assertEquals(isSkippedPath("src/paths/layout.ts"), false);
 });

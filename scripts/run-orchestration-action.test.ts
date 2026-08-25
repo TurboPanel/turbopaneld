@@ -4,19 +4,15 @@
  * Ansible / Galaxy / playbook streaming are injected — nothing here may spawn
  * ansible-playbook or touch the real `/opt/turbopanel` stamp tree.
  */
-import {
-  assertEquals,
-  assertRejects,
-  assertStringIncludes,
-} from "@std/assert";
+import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import {
   applyDaemonEnvToProcess,
-  type OrchestrationActionDeps,
   devInstanceExtraArgs,
   dispatchOrchestrationAction,
   optionalDevServiceExtraArgs,
   optionalDevServiceFlag,
+  type OrchestrationActionDeps,
   PLAYBOOKS_NEEDING_DOCKER_GALAXY,
   resolveDaemonEnvPath,
   runBuildToggle,
@@ -223,7 +219,10 @@ test("devInstanceExtraArgs includes SSH repo urls and workers postgres expose", 
       TURBOPANEL_DEV_ROOT: "/home/vagrant",
     }),
   );
-  assertStringIncludes(args.join(" "), "git@github.com:TurboPanel/turbopanel.git");
+  assertStringIncludes(
+    args.join(" "),
+    "git@github.com:TurboPanel/turbopanel.git",
+  );
   assertEquals(args.includes("turbopanel_dev_user=vagrant"), true);
   assertEquals(args.includes("turbopanel_ui_mode=static"), true);
   assertEquals(args.includes("turbopanel_instance_run_mode=compiled"), true);
@@ -323,7 +322,9 @@ test("instance-dev-install runs ansible + galaxy + playbook + stamp when needed"
   ]);
   assertEquals(rec.playbookInvocations[0]?.bin, "/tmp/ansible-playbook");
   assertEquals(
-    rec.playbookInvocations[0]?.args.includes("/tmp/dev-orchestration/playbook.yml"),
+    rec.playbookInvocations[0]?.args.includes(
+      "/tmp/dev-orchestration/playbook.yml",
+    ),
     true,
   );
 });
@@ -367,7 +368,9 @@ test("playbook requires a path and fetches Galaxy only for docker playbooks", as
   await runPlaybook("redis-setup.yml", ["-e", "x=1"], rec.deps);
   assertEquals(rec.galaxyCalls, 0);
   assertEquals(
-    rec.playbookInvocations[0]?.args.includes("/tmp/orch/playbooks/redis-setup.yml"),
+    rec.playbookInvocations[0]?.args.includes(
+      "/tmp/orch/playbooks/redis-setup.yml",
+    ),
     true,
   );
   assertEquals(rec.playbookInvocations[0]?.args.includes("-e"), true);
@@ -377,7 +380,10 @@ test("playbook requires a path and fetches Galaxy only for docker playbooks", as
   assertEquals(dockerRec.galaxyCalls, 1);
   assertEquals(PLAYBOOKS_NEEDING_DOCKER_GALAXY.has("postgres-setup.yml"), true);
   assertEquals(PLAYBOOKS_NEEDING_DOCKER_GALAXY.has("rabbitmq-setup.yml"), true);
-  assertEquals(PLAYBOOKS_NEEDING_DOCKER_GALAXY.has("clickhouse-setup.yml"), true);
+  assertEquals(
+    PLAYBOOKS_NEEDING_DOCKER_GALAXY.has("clickhouse-setup.yml"),
+    true,
+  );
 });
 
 test("dispatchOrchestrationAction routes known actions and rejects unknown", async () => {

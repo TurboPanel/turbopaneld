@@ -11,7 +11,7 @@ const test = Deno.test.bind(Deno);
 
 test("stampBuildInfo replaces commit, buildId, and builtAt", () => {
   const source = [
-    'export const BUILD_INFO = {',
+    "export const BUILD_INFO = {",
     '  commit: "oldsha",',
     '  buildId: "old-build",',
     '  builtAt: "2020-01-01T00:00:00.000Z",',

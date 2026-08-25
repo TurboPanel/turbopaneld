@@ -76,12 +76,14 @@ test("artifactFromPublishFile hashes a file and rejects empty or missing", async
 test("generateChannelManifest writes a file or stdout", async () => {
   const dir = await Deno.makeTempDir({ prefix: "tp-manifest-all-" });
   try {
-    for (const name of [
-      "turbopaneld-amd64.tar.zst",
-      "turbopaneld-arm64.tar.zst",
-      "turbopaneld.js.tar.zst",
-      "orchestration.tar.zst",
-    ]) {
+    for (
+      const name of [
+        "turbopaneld-amd64.tar.zst",
+        "turbopaneld-arm64.tar.zst",
+        "turbopaneld.js.tar.zst",
+        "orchestration.tar.zst",
+      ]
+    ) {
       await Deno.writeFile(join(dir, name), new Uint8Array([7, 8, 9]));
     }
     const written: string[] = [];

@@ -7,8 +7,8 @@ import { assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import {
   readReleaseManifest,
-  type ReleaseManifestV1,
   releaseManifestPath,
+  type ReleaseManifestV1,
   writeReleaseManifest,
 } from "./deployment-json.ts";
 import { RELEASE_METADATA_DIRNAME } from "./release-layout.ts";

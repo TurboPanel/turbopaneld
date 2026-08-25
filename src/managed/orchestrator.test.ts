@@ -21,9 +21,9 @@ import {
   loadOrchestratorRaftToken,
   MANAGED_HA_HTTP_PORT,
   MANAGED_HA_RAFT_PORT,
+  ORCHESTRATOR_IMAGE,
   orchestratorCompose,
   orchestratorStackPresent,
-  ORCHESTRATOR_IMAGE,
   renderOrchestratorConf,
   restartOrchestratorStack,
   stopOrchestratorStack,
@@ -31,8 +31,8 @@ import {
 import {
   orchestratorApiCnfPath,
   orchestratorComposePath,
-  orchestratorConfPath,
   orchestratorConfigDir,
+  orchestratorConfPath,
   orchestratorRaftCnfPath,
 } from "./paths.ts";
 

@@ -64,7 +64,10 @@ export async function writeDevChannelCatalog(
   const binaryAmd64 = await artifactFromDist(ARTIFACTS["linux-amd64"], distDir);
   const binaryArm64 = await artifactFromDist(ARTIFACTS["linux-arm64"], distDir);
   const jsFallback = await artifactFromDist(ARTIFACTS.jsFallback, distDir);
-  const orchestration = await artifactFromDist(ARTIFACTS.orchestration, distDir);
+  const orchestration = await artifactFromDist(
+    ARTIFACTS.orchestration,
+    distDir,
+  );
 
   const manifest: ChannelManifest = {
     schema: 1,

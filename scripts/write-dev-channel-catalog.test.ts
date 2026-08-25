@@ -1,8 +1,8 @@
 import { assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import {
-  ARTIFACTS,
   artifactFromDist,
+  ARTIFACTS,
   writeDevChannelCatalog,
 } from "./write-dev-channel-catalog.ts";
 
@@ -50,10 +50,17 @@ test("writeDevChannelCatalog writes relative catalog files", async () => {
       buildId: "dev-abc1234+1",
       builtAt: "2026-01-01T00:00:00.000Z",
     }, dir);
-    const manifest = JSON.parse(await Deno.readTextFile(join(dir, "manifest.json")));
-    const catalog = JSON.parse(await Deno.readTextFile(join(dir, "channels.json")));
+    const manifest = JSON.parse(
+      await Deno.readTextFile(join(dir, "manifest.json")),
+    );
+    const catalog = JSON.parse(
+      await Deno.readTextFile(join(dir, "channels.json")),
+    );
     assertEquals(manifest.commit, "abc1234+1");
-    assertEquals(manifest.binaryArtifacts["linux-amd64"].url, "./turbopaneld-amd64.tar.zst");
+    assertEquals(
+      manifest.binaryArtifacts["linux-amd64"].url,
+      "./turbopaneld-amd64.tar.zst",
+    );
     assertEquals(catalog.defaultChannel, "trunk");
     assertEquals(catalog.channels.trunk.manifestUrl, "./manifest.json");
   } finally {

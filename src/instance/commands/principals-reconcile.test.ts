@@ -20,7 +20,10 @@ const LAYOUT = { principalHomeRoot: "/srv/users" } as LayoutPaths;
 
 test("handlePrincipalsReconcile maps optional fields and defaults ssh keys", async () => {
   const ensured: PrincipalEnsureSpec[][] = [];
-  const sshCalls: { principals: readonly PrincipalSshSpec[]; paths?: SshApplyPaths }[] = [];
+  const sshCalls: {
+    principals: readonly PrincipalSshSpec[];
+    paths?: SshApplyPaths;
+  }[] = [];
   const ssh: SshApplyResult = {
     changedPrincipals: ["alice"],
     removedPrincipals: ["bob"],

@@ -26,10 +26,10 @@
  */
 import { join, relative } from "@std/path";
 import {
+  type LayoutPaths,
   PROD_RUNTIME_DIR_DEFAULT,
   resolveLayout,
   resolveRuntimesDir,
-  type LayoutPaths,
 } from "../src/paths/layout.ts";
 
 const repoRoot = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
@@ -74,29 +74,74 @@ export function assertProductionLayout(
   recordLayoutMismatch(failures, "home", prod.home, "/opt/turbopanel");
   recordLayoutMismatch(failures, "binDir", prod.binDir, "/opt/turbopanel/bin");
   recordLayoutMismatch(failures, "libDir", prod.libDir, "/opt/turbopanel/lib");
-  recordLayoutMismatch(failures, "runtimeDir", prod.runtimeDir, "/opt/turbopanel/vendor");
-  recordLayoutMismatch(failures, "runtimesDir", prod.runtimesDir, "/opt/turbopanel/vendor");
-  recordLayoutMismatch(failures, "shareDir", prod.shareDir, "/opt/turbopanel/share");
-  recordLayoutMismatch(failures, "uiDir", prod.uiDir, "/opt/turbopanel/share/ui");
+  recordLayoutMismatch(
+    failures,
+    "runtimeDir",
+    prod.runtimeDir,
+    "/opt/turbopanel/vendor",
+  );
+  recordLayoutMismatch(
+    failures,
+    "runtimesDir",
+    prod.runtimesDir,
+    "/opt/turbopanel/vendor",
+  );
+  recordLayoutMismatch(
+    failures,
+    "shareDir",
+    prod.shareDir,
+    "/opt/turbopanel/share",
+  );
+  recordLayoutMismatch(
+    failures,
+    "uiDir",
+    prod.uiDir,
+    "/opt/turbopanel/share/ui",
+  );
   recordLayoutMismatch(
     failures,
     "orchestrationDir",
     prod.orchestrationDir,
     "/opt/turbopanel/share/orchestration",
   );
-  recordLayoutMismatch(failures, "configDir", prod.configDir, "/etc/turbopanel");
-  recordLayoutMismatch(failures, "stateDir", prod.stateDir, "/var/lib/turbopanel");
-  recordLayoutMismatch(failures, "daemonStateDir", prod.daemonStateDir, "/var/lib/turbopanel");
+  recordLayoutMismatch(
+    failures,
+    "configDir",
+    prod.configDir,
+    "/etc/turbopanel",
+  );
+  recordLayoutMismatch(
+    failures,
+    "stateDir",
+    prod.stateDir,
+    "/var/lib/turbopanel",
+  );
+  recordLayoutMismatch(
+    failures,
+    "daemonStateDir",
+    prod.daemonStateDir,
+    "/var/lib/turbopanel",
+  );
   recordLayoutMismatch(failures, "logDir", prod.logDir, "/var/log/turbopanel");
   recordLayoutMismatch(failures, "runDir", prod.runDir, "/run/turbopanel");
-  recordLayoutMismatch(failures, "principalHomeRoot", prod.principalHomeRoot, "/srv/users");
+  recordLayoutMismatch(
+    failures,
+    "principalHomeRoot",
+    prod.principalHomeRoot,
+    "/srv/users",
+  );
   recordLayoutMismatch(
     failures,
     "daemonRootDefault",
     prod.daemonRootDefault,
     "/opt/turbopanel/lib/daemon",
   );
-  recordLayoutMismatch(failures, "instanceDir", prod.instanceDir, "/opt/turbopanel/lib/instance");
+  recordLayoutMismatch(
+    failures,
+    "instanceDir",
+    prod.instanceDir,
+    "/opt/turbopanel/lib/instance",
+  );
 
   recordLayoutMismatch(
     failures,
@@ -131,7 +176,8 @@ export function assertProductionLayout(
 }
 
 const HARDCODED_DAEMON_LOCK = /\/run\/turbopanel\/daemon\.lock/;
-const RUNTIME_SOCKET_DIR_LOCK = /\{\{\s*runtime_socket_dir\s*\}\}\/daemon\.lock/;
+const RUNTIME_SOCKET_DIR_LOCK =
+  /\{\{\s*runtime_socket_dir\s*\}\}\/daemon\.lock/;
 
 export function assertDaemonUnitLock(
   failures: string[],

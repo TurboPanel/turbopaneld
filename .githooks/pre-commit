@@ -5,7 +5,79 @@ ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 # Secret scan is never skippable.
 "$ROOT/scripts/scan-secrets.sh"
 
-# Future: re-enable fmt/lint/tests once the toolchain runs inside the Vagrant guest
-# (host checkouts share VirtFS with the VM and often lack a usable Deno tree).
-echo "pre-commit: fmt/lint/tests disabled — secret scan only" >&2
-exit 0
+# lint/tests stay deferred until they can run inside the Vagrant guest.
+# deno fmt only needs a Deno binary. Prefer PATH / vendored current; otherwise
+# format inside the sibling-dev guest (same command as AGENTS.md Testing).
+if [ "${TURBOPANEL_SKIP_HOOK_TESTS:-}" = 1 ]; then
+  echo "pre-commit: fmt skipped (TURBOPANEL_SKIP_HOOK_TESTS=1) — CI still runs deno task fmt:check" >&2
+  exit 0
+fi
+
+tp_precommit_deno() {
+  if command -v deno >/dev/null 2>&1; then
+    command -v deno
+    return 0
+  fi
+  if [ -x /opt/turbopanel/vendor/deno/current/deno ]; then
+    printf '%s\n' /opt/turbopanel/vendor/deno/current/deno
+    return 0
+  fi
+  return 1
+}
+
+tp_precommit_dev_checkout() {
+  if [ -n "${TURBOPANEL_DEV_CHECKOUT:-}" ] &&
+    [ -f "$TURBOPANEL_DEV_CHECKOUT/Vagrantfile" ]; then
+    printf '%s\n' "$TURBOPANEL_DEV_CHECKOUT"
+    return 0
+  fi
+  if [ -f "$ROOT/../dev/Vagrantfile" ]; then
+    CDPATH= cd -- "$ROOT/../dev" && pwd
+    return 0
+  fi
+  _home_dev="${TURBOPANEL_DEV_ROOT:-$HOME}/dev"
+  if [ -f "$_home_dev/Vagrantfile" ]; then
+    printf '%s\n' "$_home_dev"
+    return 0
+  fi
+  return 1
+}
+
+tp_precommit_vagrant_fmt() {
+  if ! command -v vagrant >/dev/null 2>&1; then
+    return 1
+  fi
+  _dev=$(tp_precommit_dev_checkout) || return 1
+  echo "pre-commit: no host Deno — running deno fmt via vagrant ssh ($_dev)" >&2
+  (
+    CDPATH= cd -- "$_dev" || exit 1
+    vagrant ssh -c 'export PATH="/opt/turbopanel/vendor/deno/current:$PATH"; cd ~/turbopaneld && deno fmt'
+  )
+}
+
+tp_precommit_fmt() {
+  if DENO="$(tp_precommit_deno)"; then
+    "$DENO" fmt
+    return 0
+  fi
+  if tp_precommit_vagrant_fmt; then
+    return 0
+  fi
+  echo "pre-commit: deno not found on this host, and vagrant ssh fmt failed" >&2
+  echo "pre-commit: install Deno 2.9.5, converge vendor Deno, or vagrant up from the sibling dev checkout" >&2
+  echo "pre-commit: CI runs deno task fmt:check; unformatted files fail verify" >&2
+  return 1
+}
+
+cd "$ROOT"
+# Apply fmt (same rules as CI) and restage files already in this commit so the
+# index cannot stay on the unformatted copy.
+staged="$(git diff --cached --name-only --diff-filter=ACM || true)"
+tp_precommit_fmt
+if [ -n "$staged" ]; then
+  printf '%s\n' "$staged" | while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    [ -e "$file" ] || continue
+    git add -- "$file"
+  done
+fi
