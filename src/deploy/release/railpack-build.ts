@@ -185,14 +185,17 @@ export function railpackImageTag(
   serviceId: string,
   releaseId: string,
 ): string {
-  const repository = serviceId
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^[^a-z0-9]+/, "")
-    .replace(/[^a-z0-9]+$/, "");
-  if (repository.length === 0) {
+  const folded = serviceId.toLowerCase().replace(/[^a-z0-9._-]+/g, "-");
+  // Sliced between the first and last alphanumeric rather than trimmed with a
+  // `[^a-z0-9]+$` anchor, which backtracks super-linearly over a long run of
+  // separators.
+  const alnum = [...folded.matchAll(/[a-z0-9]/g)];
+  const first = alnum[0]?.index;
+  const last = alnum.at(-1)?.index;
+  if (first === undefined || last === undefined) {
     throw new Error(`serviceId has no usable image repository: ${serviceId}`);
   }
+  const repository = folded.slice(first, last + 1);
   return `${RAILPACK_IMAGE_NAMESPACE}/${repository}:${releaseId}`;
 }
 

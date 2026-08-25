@@ -70,7 +70,7 @@ export const RUNTIME_GID_BAND = Object.freeze({
 
 /** Runtime names the registry knows, sorted. */
 export const RUNTIME_NAMES: readonly RuntimeName[] = Object.freeze(
-  Object.keys(RUNTIMES).sort() as RuntimeName[],
+  (Object.keys(RUNTIMES) as RuntimeName[]).sort((a, b) => a.localeCompare(b)),
 );
 
 export function isRuntimeName(value: string): value is RuntimeName {

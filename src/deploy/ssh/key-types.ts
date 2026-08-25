@@ -33,7 +33,7 @@ export const ALLOWED_SSH_KEY_TYPES: readonly string[] = Object.freeze([
 const CANONICAL_SSH_KEY_RE = new RegExp(
   `^(?:${
     ALLOWED_SSH_KEY_TYPES.map((type) =>
-      type.replaceAll(/[.*+?^${}()|[\]\\@]/g, "\\$&")
+      type.replaceAll(/[.*+?^${}()|[\]\\@]/g, String.raw`\$&`)
     ).join("|")
   }) [A-Za-z0-9+/]+={0,2}$`,
 );

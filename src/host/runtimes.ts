@@ -15,7 +15,9 @@
  */
 
 import { readEnv, resolveRuntimesDir } from "../paths/layout.ts";
-import { RUNTIME_GID_BAND } from "../runtime/registry.ts";
+
+/** Re-exported so the registry's band stays one definition. */
+export { RUNTIME_GID_BAND as RUNTIME_ENTITLEMENT_GID_BAND } from "../runtime/registry.ts";
 
 export type HostRuntimeMetadata = {
   /** php-fpm series installed from sury, e.g. `["8.3", "8.4"]`. */
@@ -93,7 +95,9 @@ export function parsePhpExtensionsFromModsAvailable(
     const base = name.slice(0, -4).toLowerCase();
     if (EXTENSION_RE.test(base)) extensions.push(base);
   }
-  return [...new Set(extensions)].sort().slice(0, MAX_EXTENSIONS);
+  return [...new Set(extensions)]
+    .sort((a, b) => a.localeCompare(b))
+    .slice(0, MAX_EXTENSIONS);
 }
 
 /** Vendored series directories that actually resolved a `current` symlink. */
@@ -106,10 +110,11 @@ function vendoredSeries(root: string): string[] {
 }
 
 export function readHostRuntimes(
-  vendorDir = resolveRuntimesDir({
-    TURBOPANEL_RUNTIMES_DIR: readEnv("TURBOPANEL_RUNTIMES_DIR"),
-  }),
+  vendorDir?: string,
 ): HostRuntimeMetadata | undefined {
+  const resolvedVendorDir = vendorDir ?? resolveRuntimesDir({
+    TURBOPANEL_RUNTIMES_DIR: readEnv("TURBOPANEL_RUNTIMES_DIR"),
+  });
   const meta: HostRuntimeMetadata = {};
 
   const phpSeries = parsePhpSeriesFromBinaries(readDirNames("/usr/sbin"));
@@ -127,14 +132,11 @@ export function readHostRuntimes(
     };
   }
 
-  const nodeSeries = vendoredSeries(`${vendorDir}/node-app`);
+  const nodeSeries = vendoredSeries(`${resolvedVendorDir}/node-app`);
   if (nodeSeries.length > 0) meta.node = { series: nodeSeries };
 
-  const lsphpSeries = vendoredSeries(`${vendorDir}/lsphp`);
+  const lsphpSeries = vendoredSeries(`${resolvedVendorDir}/lsphp`);
   if (lsphpSeries.length > 0) meta.lsphp = { series: lsphpSeries };
 
   return Object.keys(meta).length > 0 ? meta : undefined;
 }
-
-/** Re-exported so the registry's band stays one definition. */
-export const RUNTIME_ENTITLEMENT_GID_BAND = RUNTIME_GID_BAND;

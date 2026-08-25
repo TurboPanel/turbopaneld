@@ -615,7 +615,11 @@ export function phpAdminValues(
   // value it has not checked itself. Same doctrine either way — validate, then
   // *drop*; never escape. Both render targets are line-oriented and unquoted,
   // so a dropped value has no escaping bug to have.
-  for (const key of Object.keys(php.settings ?? {}).sort()) {
+  for (
+    const key of Object.keys(php.settings ?? {}).sort((a, b) =>
+      a.localeCompare(b)
+    )
+  ) {
     const raw = php.settings?.[key];
     if (!isSettablePhpDirective(key) || typeof raw !== "string") continue;
     const value = raw.trim();
@@ -695,7 +699,9 @@ export function phpFpmPoolOverrides(
   php: SiteApplySpec["php"],
 ): Array<{ key: string; value: string }> {
   const out: Array<{ key: string; value: string }> = [];
-  for (const key of Object.keys(php?.pool ?? {}).sort()) {
+  for (
+    const key of Object.keys(php?.pool ?? {}).sort((a, b) => a.localeCompare(b))
+  ) {
     const raw = php?.pool?.[key];
     if (!SETTABLE_PHP_POOL_DIRECTIVES.has(key) || typeof raw !== "string") {
       continue;
@@ -804,7 +810,9 @@ export function phpExtensionsForDeploy(
     bySeries.set(series, set);
   }
   const out: Record<string, string[]> = {};
-  for (const [series, set] of bySeries) out[series] = [...set].sort();
+  for (const [series, set] of bySeries) {
+    out[series] = [...set].sort((a, b) => a.localeCompare(b));
+  }
   return out;
 }
 

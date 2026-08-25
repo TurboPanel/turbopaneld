@@ -234,9 +234,11 @@ async function reconcileKeyFiles(
     "install",
     "-d",
     "-m",
-    // 0755, and every parent root-owned: `sshd` with `StrictModes` on refuses
+    // 0750, and every parent root-owned: `sshd` with `StrictModes` on refuses
     // an `AuthorizedKeysFile` whose path is group- or world-writable.
-    "0755",
+    // Traversal for the authenticating account is an ACL on tpsftp/tpshell
+    // (principal-access role), not a world bit.
+    "0750",
     "-o",
     "root",
     "-g",

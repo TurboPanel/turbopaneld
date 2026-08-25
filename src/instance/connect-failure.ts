@@ -1,4 +1,5 @@
 import { DaemonApiError } from "./api-client.ts";
+import { errorText } from "../logger.ts";
 
 export type ConnectFailureClass =
   | "transient"
@@ -108,8 +109,7 @@ const TLS_TRUST_ERROR_NEEDLES = [
 
 function isTlsTrustFailure(err: unknown): boolean {
   if (err instanceof DaemonApiError) return false;
-  const text = err instanceof Error ? err.message : String(err);
-  const lowered = text.toLowerCase();
+  const lowered = errorText(err).toLowerCase();
   return TLS_TRUST_ERROR_NEEDLES.some((needle) => lowered.includes(needle));
 }
 

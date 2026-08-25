@@ -49,7 +49,10 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
 4. When `principalMaterial[]` is present, ensure Linux users/groups on the host
    (`ensureSystemPrincipals` in `src/deploy/ensure-principal.ts`). Homes live
    under `layout.principalHomeRoot` (default `/srv/users/<username>`):
-   home `0750`, `.ssh` `0700` (reserved for `authorized_keys`), and `volumes`
+   the home root is `0750` root:root plus an `other:x` ACL (traverse
+   without list — a `0751` world bit trips `ansible:S2612`, and `0755`
+   would let a tenant `ls` every account). home `0750`, `.ssh` `0700`
+   (reserved for `authorized_keys`), and `volumes`
    `0750`, all owned `username:<username>-grp`. UID/GID are host-assigned
    unless an explicit operator override arrives on the payload. Username max
    length is **28** so `<username>-grp` fits the Linux 32-char group-name
@@ -1277,9 +1280,9 @@ the calling account and execs the real binary.
 
 **It grants nothing.** The enforcement is the kernel's at `execve`, against
 `/usr/bin/php<series>` being `root:tpphp<SS> 0750` (the `dpkg-statoverride` the
-php-fpm role applies). A tenant who ignores the wrapper and runs
-`/usr/bin/php8.3` directly gets `EACCES` unless entitled, exactly as if it did
-not exist. No sudo, no setuid — `src/orchestration/php-dispatcher.test.ts`
+php-fpm role applies). The wrapper itself is `root:root 0750` with an execute
+ACL per entitled series group — same answer as running `/usr/bin/php8.3`
+directly. No sudo, no setuid — `src/orchestration/php-dispatcher.test.ts`
 asserts both.
 
 **It is not a diversion.** `/usr/local/bin` precedes `/usr/bin` in Debian's
@@ -1357,7 +1360,8 @@ assertable in CI.
 
 **Key files are root-owned and live outside the home.**
 `/etc/ssh/turbopanel/authorized_keys/<username>`, `root:root 0644`, with every
-parent `root:root 0755` because `sshd` with `StrictModes` refuses a
+parent `root:root 0750` plus traverse-only ACLs on `tpsftp` / `tpshell`
+because `sshd` opens the file as the account and `StrictModes` refuses a
 group-writable path. The obvious location — `~/.ssh/authorized_keys` — is
 principal-*writable*, so a tenant could add keys the panel cannot see and
 panel-side revocation would stop meaning anything. The trade-off (a tenant

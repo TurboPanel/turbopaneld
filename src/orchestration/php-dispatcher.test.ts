@@ -43,7 +43,11 @@ test("the dispatcher grants nothing and needs no privilege", async () => {
   const install = /dest: \/usr\/local\/bin\/php\n(?:.*\n)*?\s*mode: "(\d+)"/
     .exec(tasks);
   assert(install, "dispatcher install task must set an explicit mode");
-  assertEquals(install[1], "0755");
+  assertEquals(install[1], "0750");
+  // World-exec is how an unentitled caller would reach the friendly error;
+  // entitled accounts get there through the per-series ACL instead.
+  assertStringIncludes(tasks, "ansible.posix.acl:");
+  assertStringIncludes(tasks, "path: /usr/local/bin/php");
 });
 
 test("the dispatcher only ever selects a series the caller already holds", async () => {
@@ -93,8 +97,8 @@ test("per-account pins are root-writable only", async () => {
   const tasks = await Deno.readTextFile(PHP_FPM_TASKS);
   const pins = /php\/pins"\n(?:.*\n)*?\s*mode: "(\d+)"/.exec(tasks);
   assert(pins, "the pin directory must set an explicit mode");
-  // World-readable so the dispatcher can read it as the tenant; not writable,
-  // or one tenant could change another's default series.
-  assertEquals(pins[1], "0755");
+  // `/etc/turbopanel` is already 0750, so a world bit here never reached a
+  // tenant. Not writable, or one tenant could change another's default series.
+  assertEquals(pins[1], "0750");
   assertStringIncludes(tasks, "owner: root");
 });

@@ -1,4 +1,4 @@
-import { sanitizeForLog } from "../../logger.ts";
+import { errorText, sanitizeForLog } from "../../logger.ts";
 import type {
   CommandAckMessage,
   CommandDispatchMessage,
@@ -160,8 +160,7 @@ function sanitizeOutcomeError(
   value: unknown,
   logSink: CommandOutputSink,
 ): string {
-  const text = value instanceof Error ? value.message : String(value);
-  return sanitizeError(logSink.redactSummary(text));
+  return sanitizeError(logSink.redactSummary(errorText(value)));
 }
 
 function sendOutcome(

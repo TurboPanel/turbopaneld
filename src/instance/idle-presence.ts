@@ -342,21 +342,37 @@ export class IdlePresence {
    * `#lastPresenceSnapshot` on attach so the first post-attach tick sends
    * ping only unless presence fields changed.
    */
-  #maybeSendPresence(): void {
-    // When minPresenceIntervalMs equals the check interval (production default),
-    // setInterval can fire a few ms early and the old `< min` guard skipped the
-    // ping entirely — every-other-tick gaps then raced Redis coalesce past the
-    // 150s offline sweep. Allow ~5s skew in that equal-interval case. When the
-    // caller sets a *larger* min interval (tests / burst control), honor it fully.
+  /**
+   * When minPresenceIntervalMs equals the check interval (production default),
+   * setInterval can fire a few ms early and the old `< min` guard skipped the
+   * ping entirely — every-other-tick gaps then raced Redis coalesce past the
+   * 150s offline sweep. Allow ~5s skew in that equal-interval case. When the
+   * caller sets a *larger* min interval (tests / burst control), honor it fully.
+   */
+  #presencePingDue(): boolean {
+    if (this.#lastPresenceSendAt <= 0) return true;
     const skipBelowMs = this.#minPresenceIntervalMs > this.#idleCheckIntervalMs
       ? this.#minPresenceIntervalMs
       : Math.max(0, this.#minPresenceIntervalMs - 5_000);
-    if (
-      this.#lastPresenceSendAt > 0 &&
-      Date.now() - this.#lastPresenceSendAt < skipBelowMs
-    ) {
-      return;
-    }
+    return Date.now() - this.#lastPresenceSendAt >= skipBelowMs;
+  }
+
+  /** `undefined` for either half means "this one did not move; omit it". */
+  #sendPresenceHeartbeat(
+    daemonBuild: BuildInfo | undefined,
+    presence: PresenceSnapshot | undefined,
+  ): void {
+    this.#sendHeartbeat({
+      daemonBuild,
+      timeSync: presence?.timeSync,
+      resources: presence && { ips: presence.ips },
+      docker: presence?.docker,
+      runtimes: presence?.runtimes,
+    });
+  }
+
+  #maybeSendPresence(): void {
+    if (!this.#presencePingDue()) return;
     this.#sendCellPing();
     const daemonBuild = buildInfoProvider();
     const daemonBuildChanged =
@@ -373,13 +389,10 @@ export class IdlePresence {
       Date.now() - this.#lastPresenceFrameAt >= this.#presenceRefreshIntervalMs;
 
     if (daemonBuildChanged || presenceChanged || refreshDue) {
-      this.#sendHeartbeat({
-        daemonBuild: daemonBuildChanged ? daemonBuild : undefined,
-        timeSync: presenceChanged ? presence.timeSync : undefined,
-        resources: presenceChanged ? { ips: presence.ips } : undefined,
-        docker: presenceChanged ? presence.docker : undefined,
-        runtimes: presenceChanged ? presence.runtimes : undefined,
-      });
+      this.#sendPresenceHeartbeat(
+        daemonBuildChanged ? daemonBuild : undefined,
+        presenceChanged ? presence : undefined,
+      );
       if (presenceChanged) {
         this.#lastPresenceSnapshot = serialized;
       }

@@ -1142,6 +1142,38 @@ test("site apply playbooks vendor engines (never apt nginx/apache2)", async () =
   // apt-key and one-line `[signed-by=]` sources are both deprecated.
   assertEquals(phpFpmTasks.includes("apt_key"), false);
   assertEquals(phpFpmTasks.includes("sury-php.sources"), true);
+  // Apt reads the list as root; a tenant does not need it.
+  assertMatch(
+    phpFpmTasks,
+    /sury-php\.sources\n(?:.*\n)*?\s*mode: "0640"/,
+    "sury sources mode",
+  );
+
+  const principalAccessTasks = await Deno.readTextFile(
+    join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/principal-access/tasks/main.yml",
+    ),
+  );
+  // sshd opens AuthorizedKeysFile as the account; traversal is an ACL, not a
+  // world bit. The home root is the same pair: 0750 plus other:x (traverse
+  // without list), never a 0751 world bit that trips ansible:S2612.
+  assertMatch(
+    principalAccessTasks,
+    /mode: "0750"\n\s+loop:\n\s+- "{{ principal_access_keys_dir \| dirname }}"/,
+    "authorized_keys directory mode",
+  );
+  assertEquals(principalAccessTasks.includes("ansible.posix.acl:"), true);
+  assertEquals(
+    principalAccessTasks.includes('mode: "0751"'),
+    false,
+    "principal home root must not use a world bit",
+  );
+  assertMatch(
+    principalAccessTasks,
+    /Tighten the principal home root[\s\S]*?mode: "0750"[\s\S]*?etype: other\n\s+permissions: x/,
+    "principal home root traverse-only ACL",
+  );
   // Sury ships its own unit; TurboPanel runs the same binary under its own.
   // Masked, not merely disabled — an apt upgrade re-enables a disabled unit.
   // Masking is per series now — sury ships one unit per phpX.Y-fpm package.

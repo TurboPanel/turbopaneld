@@ -46,11 +46,14 @@ tp_release_curl() {
 }
 
 tp_ca_fingerprint() {
-  openssl x509 -in "$1" -noout -fingerprint -sha256 2>/dev/null | sed 's/^.*=//'
+  _fp_path="$1"
+  openssl x509 -in "$_fp_path" -noout -fingerprint -sha256 2>/dev/null |
+    sed 's/^.*=//'
 }
 
 tp_ca_parses() {
-  openssl x509 -in "$1" -noout >/dev/null 2>&1
+  _parse_path="$1"
+  openssl x509 -in "$_parse_path" -noout >/dev/null 2>&1
 }
 
 # Capture curl's %{http_code} independently of curl's exit status.
@@ -66,7 +69,8 @@ tp_curl_http_code() {
 }
 
 tp_ca_validates_leaf() {
-  _code=$(tp_curl_http_code curl -sSL --cacert "$1" -o /dev/null -w '%{http_code}' "${HOST_URL%/}/api/health")
+  _leaf_ca="$1"
+  _code=$(tp_curl_http_code curl -sSL --cacert "$_leaf_ca" -o /dev/null -w '%{http_code}' "${HOST_URL%/}/api/health")
   case "$_code" in
     000) return 1 ;;
     *) return 0 ;;
@@ -74,11 +78,12 @@ tp_ca_validates_leaf() {
 }
 
 tp_install_instance_ca() {
+  _new_ca="$1"
   _old_fp=""
   if [ -f "$CA_PATH" ]; then
     _old_fp="$(tp_ca_fingerprint "$CA_PATH")"
   fi
-  install -m 0640 "$1" "$CA_PATH"
+  install -m 0640 "$_new_ca" "$CA_PATH"
   _new_fp="$(tp_ca_fingerprint "$CA_PATH")"
   if [ -n "$_old_fp" ]; then
     tp_print_ok "Instance CA downloaded (was ${_old_fp}; now ${_new_fp})"

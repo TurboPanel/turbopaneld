@@ -211,6 +211,13 @@ test("a managed account's key file is root-owned 0644 and holds its keys", async
     // `sshd` with StrictModes refuses a group- or world-writable key file.
     assertEquals(host.modes.get(path), "0644");
 
+    const mkdir = host.calls.find((call) =>
+      call.args.includes("install") && call.args.includes("-d") &&
+      call.args.at(-1) === host.keysDir
+    );
+    assert(mkdir);
+    assertEquals(mkdir.args[mkdir.args.indexOf("-m") + 1], "0750");
+
     const install = host.calls.find((call) =>
       call.args.includes("install") && call.args.at(-1) === path
     );

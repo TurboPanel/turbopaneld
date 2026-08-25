@@ -61,6 +61,9 @@ export function cronTimerPath(
   return `${unitDir}/${cronUnitName(identity)}.timer`;
 }
 
+/** systemd replaceAll insertion: a backslash plus the matched `"` or `\`. */
+const SYSTEMD_QUOTE_ESCAPE = String.raw`\$&`;
+
 /**
  * Quote one `ExecStart` argument.
  *
@@ -73,7 +76,7 @@ export function cronTimerPath(
  * left cannot terminate the directive.
  */
 function quoteExecArg(arg: string): string {
-  return `"${arg.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+  return `"${arg.replaceAll(/["\\]/g, SYSTEMD_QUOTE_ESCAPE)}"`;
 }
 
 export type CronUnitOpts = {

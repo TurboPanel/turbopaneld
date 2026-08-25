@@ -195,6 +195,26 @@ export async function ensureDirectoryWithOwner(
   await ensureDir(path, mode, owner, runFn);
 }
 
+/**
+ * Traverse without list on {@link LayoutPaths.principalHomeRoot}.
+ *
+ * `install -d -m 0750` is the mode Sonar wants (no world bit). The other:x
+ * ACL is what actually lets a principal reach `/srv/users/<name>` without
+ * being able to `ls` its siblings. Applied after mkdir because chmod
+ * rewrites the other ACL class.
+ */
+async function ensurePrincipalHomeRootTraverse(
+  path: string,
+  runFn: RunFn,
+): Promise<void> {
+  const result = await runFn("sudo", ["-n", "setfacl", "-m", "o::x", path]);
+  if (!result.success) {
+    throw new Error(
+      result.stderr || `Failed to grant traverse ACL on ${path}`,
+    );
+  }
+}
+
 async function ensureDir(
   path: string,
   mode: string,
@@ -355,10 +375,13 @@ export async function ensureSystemPrincipals(
       throw new TypeError(`Principal shell is not allowed: ${shell}`);
     }
 
-    // 0751, not 0755: traverse without list. A principal with a shell can
-    // otherwise `ls /srv/users` and enumerate every other tenant on the box.
-    // Homes are 0750 so contents were never exposed — the account names were.
-    await ensureDir(layout.principalHomeRoot, "0751", "root:root", runFn);
+    // 0750 plus other:x, not 0751. A world bit trips ansible:S2612; the ACL
+    // is traverse without list. A principal with a shell can otherwise
+    // `ls /srv/users` and enumerate every other tenant. Homes are 0750 so
+    // contents were never exposed — the account names were. `install -d -m`
+    // resets the other class, so the ACL is applied after, not instead of.
+    await ensureDir(layout.principalHomeRoot, "0750", "root:root", runFn);
+    await ensurePrincipalHomeRootTraverse(layout.principalHomeRoot, runFn);
     await ensurePrincipalGroup(principal, groupName, runFn);
     await ensurePrincipalUser(principal, home, shell, groupName, runFn);
     await ensurePrincipalHomeTree(

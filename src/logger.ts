@@ -58,25 +58,36 @@ export function stripLogInjection(text: string): string {
   return text.replaceAll("\n", "_").replaceAll("\r", "_").replaceAll("\t", "_");
 }
 
-export function sanitizeForLog(value: unknown): string {
-  if (value instanceof Error) return stripLogInjection(value.message);
-  if (typeof value === "string") return stripLogInjection(value);
+/**
+ * `unknown` (typically a caught throw) rendered as text.
+ *
+ * Deliberately not `String(value)`: a thrown plain object stringifies to
+ * `[object Object]`, which loses the only detail the catch site had. One
+ * definition so every call site renders the same shape.
+ */
+export function errorText(value: unknown): string {
+  if (value instanceof Error) return value.message;
+  if (typeof value === "string") return value;
   if (
     typeof value === "number" ||
     typeof value === "boolean" ||
     typeof value === "bigint"
   ) {
-    return stripLogInjection(value.toString());
+    return value.toString();
   }
   if (value === null) return "null";
   if (value === undefined) return "undefined";
   try {
     const json = JSON.stringify(value);
-    if (typeof json === "string") return stripLogInjection(json);
+    if (typeof json === "string") return json;
   } catch {
     // circular or otherwise unserializable
   }
   return "[unserializable]";
+}
+
+export function sanitizeForLog(value: unknown): string {
+  return stripLogInjection(errorText(value));
 }
 
 function formatParts(parts: unknown[]): string {

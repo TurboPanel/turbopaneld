@@ -1,4 +1,5 @@
 import { fetchWithPlatformCa } from "../instance/paths.ts";
+import { errorText } from "../logger.ts";
 import type { UpdateChannelConfig } from "./config.ts";
 import { MalformedManifestError, MissingChannelError } from "./errors.ts";
 import type { LinuxArch, UpdateInfo } from "./types.ts";
@@ -32,7 +33,7 @@ function describeFetchError(
       : err.message;
     return new MalformedManifestError(`${context}: ${detail}`);
   }
-  return new MalformedManifestError(`${context}: ${String(err)}`);
+  return new MalformedManifestError(`${context}: ${errorText(err)}`);
 }
 
 async function trustedFetch(

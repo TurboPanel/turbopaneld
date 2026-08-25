@@ -20,7 +20,8 @@
 import { isCanonicalSshPublicKey } from "./key-types.ts";
 
 /**
- * Root of the panel-managed key files. `root:root 0755`.
+ * Root of the panel-managed key files. `root:root 0750` plus traverse ACLs
+ * for `tpsftp` / `tpshell` (sshd opens the file as the account).
  *
  * Every helper takes it as a defaulted argument rather than reading this
  * constant directly, so host-free tests can write into a temp tree without an

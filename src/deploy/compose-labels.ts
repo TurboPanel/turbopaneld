@@ -77,11 +77,12 @@ function networkOptionsFromService(
  * mapping) unless the compiled service carries per-network options — then the
  * union stays a mapping and those options ride along.
  */
-function unionServiceNetworks(
+/** Compiled-service order first, then whatever the existing block already named. */
+function unionNetworkNames(
   resolvedService: Record<string, unknown>,
   existing: unknown,
   platformNetwork: string,
-): string[] | Record<string, unknown> {
+): string[] {
   const names: string[] = [];
   const add = (name: string) => {
     if (!names.includes(name)) names.push(name);
@@ -99,15 +100,31 @@ function unionServiceNetworks(
     }
   }
   add(platformNetwork);
+  return names;
+}
 
+/** Compiled-service options, overlaid by the existing block's own per-network keys. */
+function unionNetworkOptions(
+  resolvedService: Record<string, unknown>,
+  existing: unknown,
+): Map<string, Record<string, unknown>> {
   const options = networkOptionsFromService(resolvedService);
-  if (isRecord(existing)) {
-    for (const [name, value] of Object.entries(existing)) {
-      if (isRecord(value) && Object.keys(value).length > 0) {
-        options.set(name, { ...(options.get(name) ?? {}), ...value });
-      }
+  if (!isRecord(existing)) return options;
+  for (const [name, value] of Object.entries(existing)) {
+    if (isRecord(value) && Object.keys(value).length > 0) {
+      options.set(name, { ...options.get(name), ...value });
     }
   }
+  return options;
+}
+
+function unionServiceNetworks(
+  resolvedService: Record<string, unknown>,
+  existing: unknown,
+  platformNetwork: string,
+): string[] | Record<string, unknown> {
+  const names = unionNetworkNames(resolvedService, existing, platformNetwork);
+  const options = unionNetworkOptions(resolvedService, existing);
   if (options.size === 0) return names;
 
   const mapping: Record<string, unknown> = {};

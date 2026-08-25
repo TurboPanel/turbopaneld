@@ -887,6 +887,37 @@ test("the principal home root is traverse-only, not listable", async () => {
   );
   assert(mkdir);
   // 0755 would let any tenant with a shell `ls /srv/users` and enumerate every
-  // other account on the box.
-  assertEquals(mkdir.args[mkdir.args.indexOf("-m") + 1], "0751");
+  // other account on the box. 0751 is the same contract but a world bit that
+  // trips ansible:S2612 — traverse is an other:x ACL instead.
+  assertEquals(mkdir.args[mkdir.args.indexOf("-m") + 1], "0750");
+  const acl = calls.find((c) =>
+    c.args.includes("setfacl") && c.args.at(-1) === layout.principalHomeRoot
+  );
+  assert(acl);
+  assertEquals(acl.args.includes("o::x"), true);
+});
+
+test("a failed home-root traverse ACL fails the principal ensure", async () => {
+  const layout = stubLayout();
+  const { run } = captureRun({});
+  const failing: RunFn = (command, args) => {
+    if (args.includes("setfacl")) {
+      return Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr: "",
+      });
+    }
+    return run(command, args);
+  };
+  await assertRejects(
+    () =>
+      ensureSystemPrincipals(
+        layout,
+        [{ principalId: "pr-1", username: "appuser" }],
+        failing,
+      ),
+    Error,
+    "Failed to grant traverse ACL",
+  );
 });

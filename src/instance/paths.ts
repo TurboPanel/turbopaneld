@@ -277,8 +277,7 @@ export async function createHttpClientFromCaPath(
   const size = stat.size;
   const cached = platformCaHttpClientCache;
   if (
-    cached &&
-    cached.path === trimmed &&
+    cached?.path === trimmed &&
     cached.mtimeMs === mtimeMs &&
     cached.size === size
   ) {

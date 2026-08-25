@@ -40,7 +40,9 @@
   ansible.builtin.get_url:
     url: "{{ php_fpm_sury_keyring_url }}"
     dest: /tmp/debsuryorg-archive-keyring.deb
-    mode: "0644"
+    # Only `apt` (root) ever opens this staging copy, and /tmp is world-writable
+    # and shared, so it is never readable by anyone else while it sits there.
+    mode: "0600"
   register: _sury_keyring_download
 
 - name: Install sury archive keyring
@@ -60,7 +62,9 @@
     dest: /etc/apt/sources.list.d/sury-php.sources
     owner: root
     group: root
-    mode: "0644"
+    # Apt only reads this as root. The list names a public repo and its
+    # packaged trust root — no secret — but a tenant does not need to read it.
+    mode: "0640"
     content: |
       Types: deb
       URIs: {{ php_fpm_sury_repo_url }}
@@ -140,17 +144,47 @@
     dest: /usr/local/bin/php
     owner: root
     group: root
-    mode: "0755"
+    # 0750, not 0755. The wrapper grants nothing — the interpreter it execs is
+    # already 0750 and the kernel rechecks that at execve. Entitled accounts
+    # reach this file through the ACL below; everyone else gets the same EACCES
+    # `/usr/bin/php<series>` already returns.
+    mode: "0750"
 
-# Root-owned per-account series pins. The directory is world-readable because
-# the dispatcher reads it as the tenant; it is root-*writable* only, so a tenant
-# cannot pin itself to a series it was never granted. (It could not use one
-# anyway — the dispatcher only ever selects from what the account holds — but
-# a writable pin would let one tenant change another's default.)
+- name: Resolve PHP entitlement groups for dispatcher access
+  ansible.builtin.set_fact:
+    _php_shell_access_groups: >-
+      {{
+        php_fpm_versions
+        | map('trim')
+        | reject('equalto', '')
+        | unique
+        | list
+        | map('extract', runtime_registry.runtimes.php.series)
+        | select('defined')
+        | select('truthy')
+        | list
+      }}
+
+- name: Grant PHP entitlement groups execute on the dispatcher
+  ansible.posix.acl:
+    path: /usr/local/bin/php
+    etype: group
+    entity: "{{ item.group }}"
+    permissions: rx
+    state: present
+  loop: "{{ _php_shell_access_groups }}"
+  loop_control:
+    label: "{{ item.group }}"
+  when: _php_shell_access_groups | length > 0
+
+# Root-owned per-account series pins. `/etc/turbopanel` is already 0750, so a
+# world bit here never reached a tenant. Root-writable only: a tenant must not
+# be able to author or alter a pin (and could not use an ungranted series
+# anyway — the dispatcher only selects from what the account holds).
 - name: Ensure the PHP pin directory
   ansible.builtin.file:
     path: "{{ turbopanel_config_dir }}/php/pins"
     state: directory
     owner: root
     group: root
-    mode: "0755"
+    mode: "0750"

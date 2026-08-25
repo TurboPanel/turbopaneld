@@ -1600,7 +1600,7 @@ export function parsePrincipalsReconcilePayload(
     throw new Error("Invalid principals reconcile payload");
   }
   if (!Array.isArray(value.principals)) {
-    throw new Error("principals must be an array");
+    throw new TypeError("principals must be an array");
   }
   const principals = value.principals.map(parsePrincipalMaterial);
   const seen = new Set<string>();
@@ -2236,13 +2236,8 @@ function parseHostingPhp(
   const php: EnvironmentDeployHostingPhp = {};
   if (typeof value.version === "string") php.version = value.version;
   for (const field of ["settings", "pool"] as const) {
-    const raw = value[field];
-    if (!isRecord(raw)) continue;
-    const kept: Record<string, string> = {};
-    for (const [key, entry] of Object.entries(raw)) {
-      if (typeof entry === "string") kept[key] = entry;
-    }
-    if (Object.keys(kept).length > 0) php[field] = kept;
+    const kept = parseStringRecord(value[field]);
+    if (kept) php[field] = kept;
   }
   if (Array.isArray(value.extensions)) {
     const names = value.extensions.filter((n): n is string =>
@@ -2464,18 +2459,18 @@ function isValidAbsolutePrincipalPath(value: string): boolean {
  * `ALLOWED_PRINCIPAL_SHELLS` in `../../deploy/ensure-principal.ts`, which is the
  * enforcing copy.
  */
-const ALLOWED_PRINCIPAL_SHELLS: readonly string[] = [
+const ALLOWED_PRINCIPAL_SHELLS: ReadonlySet<string> = new Set([
   "/usr/sbin/nologin",
   "/sbin/nologin",
   "/bin/false",
   "/bin/sh",
   "/bin/bash",
-];
+]);
 
 function isValidPrincipalShellPath(value: string): boolean {
   if (!isValidAbsolutePrincipalPath(value)) return false;
   if (!PRINCIPAL_SHELL_RE.test(value)) return false;
-  return ALLOWED_PRINCIPAL_SHELLS.includes(value);
+  return ALLOWED_PRINCIPAL_SHELLS.has(value);
 }
 
 const PRINCIPAL_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
@@ -2502,6 +2497,83 @@ function parseOptionalPrincipalId(
 /** `8.4` or `24` — the exec boundary a group protects, not a patch pin. */
 const RUNTIME_SERIES_RE = /^\d{1,3}(\.\d{1,3})?$/;
 
+/** Optional string field with its own validator, so the caller stays flat. */
+function parsePrincipalOptionalString(
+  value: unknown,
+  field: string,
+  isValid: (candidate: string) => boolean,
+): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !isValid(value)) {
+    throw new TypeError(
+      `Invalid environment deploy principalMaterial ${field}`,
+    );
+  }
+  return value;
+}
+
+/**
+ * `series` is a version label, not a number: the control plane may render `8.4`
+ * as either JSON form, so a numeric one is normalized rather than stringified
+ * blind — an object would otherwise reach the regex as `[object Object]`.
+ */
+function parsePrincipalRuntimeSeries(value: unknown): string {
+  const series = typeof value === "number" ? value.toString() : value;
+  if (typeof series !== "string" || !RUNTIME_SERIES_RE.test(series)) {
+    throw new TypeError(
+      "Invalid environment deploy principalMaterial runtimes entry",
+    );
+  }
+  return series;
+}
+
+/**
+ * Rejected rather than dropped: this is a grant, and silently discarding a
+ * malformed one would revoke every entitlement the principal should hold.
+ */
+function parsePrincipalRuntimes(
+  value: unknown,
+): EnvironmentDeployPrincipalRuntime[] {
+  if (!Array.isArray(value)) {
+    throw new TypeError(
+      "Invalid environment deploy principalMaterial runtimes",
+    );
+  }
+  return value.map((entry) => {
+    if (!isRecord(entry) || typeof entry.runtime !== "string") {
+      throw new TypeError(
+        "Invalid environment deploy principalMaterial runtimes entry",
+      );
+    }
+    return {
+      runtime: entry.runtime,
+      series: parsePrincipalRuntimeSeries(entry.series),
+    };
+  });
+}
+
+/**
+ * Rejected rather than dropped, for the same reason `runtimes` is: dropping a
+ * malformed grant silently revokes the login it describes.
+ */
+function parsePrincipalStringList(
+  value: unknown,
+  pattern: RegExp,
+  field: string,
+): string[] {
+  if (
+    !Array.isArray(value) ||
+    !value.every((entry): entry is string =>
+      typeof entry === "string" && pattern.test(entry)
+    )
+  ) {
+    throw new TypeError(
+      `Invalid environment deploy principalMaterial ${field}`,
+    );
+  }
+  return [...value];
+}
+
 function parsePrincipalMaterial(
   value: unknown,
 ): EnvironmentDeployPrincipalMaterial {
@@ -2519,74 +2591,37 @@ function parsePrincipalMaterial(
     ...(uid === undefined ? {} : { uid }),
     ...(gid === undefined ? {} : { gid }),
   };
-  if (value.home !== undefined) {
-    if (
-      typeof value.home !== "string" ||
-      !isValidAbsolutePrincipalPath(value.home)
-    ) {
-      throw new TypeError("Invalid environment deploy principalMaterial home");
-    }
-    material.home = value.home;
-  }
-  if (value.shell !== undefined) {
-    if (
-      typeof value.shell !== "string" || !isValidPrincipalShellPath(value.shell)
-    ) {
-      throw new TypeError("Invalid environment deploy principalMaterial shell");
-    }
-    material.shell = value.shell;
-  }
+  const home = parsePrincipalOptionalString(
+    value.home,
+    "home",
+    isValidAbsolutePrincipalPath,
+  );
+  if (home !== undefined) material.home = home;
+  const shell = parsePrincipalOptionalString(
+    value.shell,
+    "shell",
+    isValidPrincipalShellPath,
+  );
+  if (shell !== undefined) material.shell = shell;
   if (value.runtimes !== undefined) {
-    // Rejected rather than dropped: this is a grant, and silently discarding a
-    // malformed one would revoke every entitlement the principal should hold.
-    if (!Array.isArray(value.runtimes)) {
-      throw new TypeError(
-        "Invalid environment deploy principalMaterial runtimes",
-      );
-    }
-    material.runtimes = value.runtimes.map((entry) => {
-      if (
-        !isRecord(entry) ||
-        typeof entry.runtime !== "string" ||
-        !RUNTIME_SERIES_RE.test(String(entry.series))
-      ) {
-        throw new TypeError(
-          "Invalid environment deploy principalMaterial runtimes entry",
-        );
-      }
-      return { runtime: entry.runtime, series: String(entry.series) };
-    });
+    material.runtimes = parsePrincipalRuntimes(value.runtimes);
   }
   if (value.accessGroups !== undefined) {
-    // Rejected rather than dropped, for the same reason `runtimes` is: dropping
-    // a malformed grant silently revokes the login it describes.
-    if (
-      !Array.isArray(value.accessGroups) ||
-      !value.accessGroups.every((entry) =>
-        typeof entry === "string" && ACCESS_GROUP_RE.test(entry)
-      )
-    ) {
-      throw new TypeError(
-        "Invalid environment deploy principalMaterial accessGroups",
-      );
-    }
-    material.accessGroups = [...value.accessGroups];
+    material.accessGroups = parsePrincipalStringList(
+      value.accessGroups,
+      ACCESS_GROUP_RE,
+      "accessGroups",
+    );
   }
   if (value.sshKeys !== undefined) {
-    if (
-      !Array.isArray(value.sshKeys) ||
-      !value.sshKeys.every((entry) =>
-        typeof entry === "string" && CANONICAL_SSH_KEY_RE.test(entry)
-      )
-    ) {
-      // The daemon re-validates rather than trusting the wire: these lines land
-      // in a file `sshd` authenticates against, and the control plane being
-      // out of date or compromised is exactly the case a second gate is for.
-      throw new TypeError(
-        "Invalid environment deploy principalMaterial sshKeys",
-      );
-    }
-    material.sshKeys = [...value.sshKeys];
+    // The daemon re-validates rather than trusting the wire: these lines land
+    // in a file `sshd` authenticates against, and the control plane being out
+    // of date or compromised is exactly the case a second gate is for.
+    material.sshKeys = parsePrincipalStringList(
+      value.sshKeys,
+      CANONICAL_SSH_KEY_RE,
+      "sshKeys",
+    );
   }
   return material;
 }
@@ -2848,7 +2883,7 @@ const CRON_JOB_NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
  * two answers to one question. This only ensures nothing structural (a newline,
  * a directive separator) can reach a unit file.
  */
-const ON_CALENDAR_RE = /^[A-Za-z0-9 ,.:*\/-]{1,200}$/;
+const ON_CALENDAR_RE = /^[A-Za-z0-9 ,.:*/-]{1,200}$/;
 /** Mirrors instance `MAX_CRON_JOBS_PER_SERVICE`. */
 const MAX_CRON_JOBS = 20;
 

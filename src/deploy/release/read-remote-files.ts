@@ -93,6 +93,115 @@ function isSafeRepoPath(path: string): boolean {
   return /^[A-Za-z0-9._/-]+$/.test(path);
 }
 
+/** Everything the per-path helpers need from an opened bare fetch. */
+type RepoReadContext = {
+  scratchDir: string;
+  env: Record<string, string>;
+  signal: AbortSignal;
+};
+
+/**
+ * `--filter=blob:none` needs server-side partial-clone support. The fallback is
+ * explicit rather than silent: without it, a server that does not advertise the
+ * filter fails the whole read for no good reason.
+ */
+async function fetchRef(ctx: RepoReadContext, ref: string): Promise<void> {
+  let fetched = await runGit(
+    ["fetch", "--depth", "1", "--filter=blob:none", "origin", ref],
+    ctx.scratchDir,
+    ctx.env,
+    ctx.signal,
+  );
+  if (!fetched.success) {
+    fetched = await runGit(
+      ["fetch", "--depth", "1", "origin", ref],
+      ctx.scratchDir,
+      ctx.env,
+      ctx.signal,
+    );
+  }
+  if (!fetched.success) throw new Error(fetched.stderr || "git fetch failed");
+}
+
+async function readOneFile(
+  ctx: RepoReadContext,
+  path: string,
+  maxBytes: number,
+): Promise<RemoteFileEntry> {
+  if (!isSafeRepoPath(path)) return { path, found: false, reason: "not_found" };
+  // Ask for the size first so an oversized blob is never materialized.
+  const size = await runGit(
+    ["cat-file", "-s", `FETCH_HEAD:${path}`],
+    ctx.scratchDir,
+    ctx.env,
+    ctx.signal,
+  );
+  if (!size.success) return { path, found: false, reason: "not_found" };
+  const bytes = Number.parseInt(
+    new TextDecoder().decode(size.stdout).trim(),
+    10,
+  );
+  if (Number.isFinite(bytes) && bytes > maxBytes) {
+    return { path, found: false, reason: "too_large" };
+  }
+  const blob = await runGit(
+    ["cat-file", "-p", `FETCH_HEAD:${path}`],
+    ctx.scratchDir,
+    ctx.env,
+    ctx.signal,
+  );
+  if (!blob.success) return { path, found: false, reason: "not_found" };
+  if (blob.stdout.includes(0)) return { path, found: false, reason: "binary" };
+  return {
+    path,
+    found: true,
+    content: new TextDecoder().decode(blob.stdout),
+    bytes: blob.stdout.byteLength,
+  };
+}
+
+async function listTree(
+  ctx: RepoReadContext,
+  listPath: string,
+): Promise<RemoteTreeEntry[]> {
+  const dir = listPath === "" ? "" : `${listPath}/`;
+  if (dir !== "" && !isSafeRepoPath(listPath)) return [];
+  const tree = await runGit(
+    ["ls-tree", "--name-only", "-z", `FETCH_HEAD:${dir}`],
+    ctx.scratchDir,
+    ctx.env,
+    ctx.signal,
+  );
+  if (!tree.success) return [];
+  const entries: RemoteTreeEntry[] = [];
+  for (const name of new TextDecoder().decode(tree.stdout).split("\0")) {
+    if (name.length === 0) continue;
+    // `ls-tree` on `rev:dir/` yields names relative to that dir.
+    entries.push({ path: `${dir}${name}`, kind: "file" });
+  }
+  return entries;
+}
+
+/** Best effort per file; the scratch dir removal is the real guarantee. */
+async function discardScratch(
+  scratchDir: string,
+  credentialPaths: readonly (string | null | undefined)[],
+): Promise<void> {
+  for (const path of credentialPaths) {
+    if (!path) continue;
+    try {
+      await Deno.remove(path);
+    } catch {
+      // Best effort: the scratch dir removal below is the real guarantee.
+    }
+  }
+  try {
+    await Deno.remove(scratchDir, { recursive: true });
+  } catch {
+    // Nothing to do; the object store lives only here.
+  }
+}
+
 export async function readRemoteFiles(
   params: ReadRemoteFilesParams,
   scratchRoot = "/tmp",
@@ -120,145 +229,59 @@ export async function readRemoteFiles(
       ? {}
       : { credentialUsername: params.credentialUsername }),
   });
-  const env = gitEnvironment(credentialFiles, scratchDir);
+  const ctx: RepoReadContext = {
+    scratchDir,
+    env: gitEnvironment(credentialFiles, scratchDir),
+    signal: controller.signal,
+  };
 
   try {
     const init = await runGit(
       ["init", "--bare", "-q"],
-      scratchDir,
-      env,
-      controller.signal,
+      ctx.scratchDir,
+      ctx.env,
+      ctx.signal,
     );
     if (!init.success) throw new Error(init.stderr || "git init failed");
 
     const remote = await runGit(
       ["remote", "add", "origin", params.cloneUrl],
-      scratchDir,
-      env,
-      controller.signal,
+      ctx.scratchDir,
+      ctx.env,
+      ctx.signal,
     );
     if (!remote.success) {
       throw new Error(remote.stderr || "git remote add failed");
     }
 
-    // `--filter=blob:none` needs server-side partial-clone support. The
-    // fallback is explicit rather than silent: without it, a server that does
-    // not advertise the filter fails the whole read for no good reason.
-    let fetched = await runGit(
-      ["fetch", "--depth", "1", "--filter=blob:none", "origin", params.ref],
-      scratchDir,
-      env,
-      controller.signal,
-    );
-    if (!fetched.success) {
-      fetched = await runGit(
-        ["fetch", "--depth", "1", "origin", params.ref],
-        scratchDir,
-        env,
-        controller.signal,
-      );
-    }
-    if (!fetched.success) throw new Error(fetched.stderr || "git fetch failed");
+    await fetchRef(ctx, params.ref);
 
     const head = await runGit(
       ["rev-parse", "FETCH_HEAD"],
-      scratchDir,
-      env,
-      controller.signal,
+      ctx.scratchDir,
+      ctx.env,
+      ctx.signal,
     );
     if (!head.success) throw new Error(head.stderr || "git rev-parse failed");
     const commitSha = new TextDecoder().decode(head.stdout).trim();
 
     const files: RemoteFileEntry[] = [];
     for (const path of params.paths) {
-      if (!isSafeRepoPath(path)) {
-        files.push({ path, found: false, reason: "not_found" });
-        continue;
-      }
-      // Ask for the size first so an oversized blob is never materialized.
-      const size = await runGit(
-        ["cat-file", "-s", `FETCH_HEAD:${path}`],
-        scratchDir,
-        env,
-        controller.signal,
-      );
-      if (!size.success) {
-        files.push({ path, found: false, reason: "not_found" });
-        continue;
-      }
-      const bytes = Number.parseInt(
-        new TextDecoder().decode(size.stdout).trim(),
-        10,
-      );
-      if (Number.isFinite(bytes) && bytes > params.maxBytesPerFile) {
-        files.push({ path, found: false, reason: "too_large" });
-        continue;
-      }
-      const blob = await runGit(
-        ["cat-file", "-p", `FETCH_HEAD:${path}`],
-        scratchDir,
-        env,
-        controller.signal,
-      );
-      if (!blob.success) {
-        files.push({ path, found: false, reason: "not_found" });
-        continue;
-      }
-      if (blob.stdout.includes(0)) {
-        files.push({ path, found: false, reason: "binary" });
-        continue;
-      }
-      files.push({
-        path,
-        found: true,
-        content: new TextDecoder().decode(blob.stdout),
-        bytes: blob.stdout.byteLength,
-      });
+      files.push(await readOneFile(ctx, path, params.maxBytesPerFile));
     }
 
-    const entries: RemoteTreeEntry[] = [];
-    if (params.listPath !== undefined) {
-      const dir = params.listPath === "" ? "" : `${params.listPath}/`;
-      if (dir === "" || isSafeRepoPath(params.listPath)) {
-        const tree = await runGit(
-          ["ls-tree", "--name-only", "-z", `FETCH_HEAD:${dir}`],
-          scratchDir,
-          env,
-          controller.signal,
-        );
-        if (tree.success) {
-          const listed = new TextDecoder().decode(tree.stdout).split("\0");
-          for (const name of listed) {
-            if (name.length === 0) continue;
-            // `ls-tree` on `rev:dir/` yields names relative to that dir.
-            entries.push({ path: `${dir}${name}`, kind: "file" });
-          }
-        }
-      }
-    }
+    const entries = params.listPath === undefined
+      ? []
+      : await listTree(ctx, params.listPath);
 
     return { commitSha, files, entries };
   } finally {
     clearTimeout(timeout);
-    for (
-      const path of [
-        credentialFiles.askpassPath,
-        credentialFiles.sshKeyPath,
-        credentialFiles.knownHostsPath,
-      ]
-    ) {
-      if (!path) continue;
-      try {
-        await Deno.remove(path);
-      } catch {
-        // Best effort: the scratch dir removal below is the real guarantee.
-      }
-    }
-    try {
-      await Deno.remove(scratchDir, { recursive: true });
-    } catch {
-      // Nothing to do; the object store lives only here.
-    }
+    await discardScratch(scratchDir, [
+      credentialFiles.askpassPath,
+      credentialFiles.sshKeyPath,
+      credentialFiles.knownHostsPath,
+    ]);
   }
 }
 
