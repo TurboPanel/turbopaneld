@@ -72,9 +72,11 @@ import {
 } from "../../deploy/run-deploy-hooks.ts";
 import {
   applySites,
+  resolveSiteDocumentRoot,
   type SiteManagedDirectory,
   type SiteRelease,
 } from "../../deploy/site.ts";
+import { applyCronJobs, type CronApplySpec } from "../../deploy/cron/apply.ts";
 import {
   type AppliedRelease,
   applySourceReleases,
@@ -979,6 +981,58 @@ async function persistComposeEnvFile(
   await removeComposeEnvFile(dir);
 }
 
+/**
+ * Scheduled jobs for this environment's sites.
+ *
+ * Resolves each job's account and working directory from the same bindings the
+ * site apply used, rather than re-deriving them — two derivations from one
+ * input is how a timer ends up running in a tree the vhost does not serve.
+ *
+ * Always called, even with no jobs: the apply's removal sweep is what retires a
+ * timer the operator deleted from compose, and skipping it when the payload
+ * declares none would leave those firing forever.
+ */
+async function applyDeployCronJobs(
+  layout: LayoutPaths,
+  parsedPayload: EnvironmentDeployPayload,
+  sites: readonly EnvironmentDeploySite[],
+  releaseBindings: ReadonlyMap<string, SiteRelease>,
+  managedBindings: ReadonlyMap<string, SiteManagedDirectory>,
+): Promise<void> {
+  const specs: CronApplySpec[] = [];
+  for (const site of sites) {
+    const principal = site.principal;
+    // The wire contract already refuses jobs without a principal; this keeps
+    // the type honest rather than re-reporting it.
+    if (!site.cron || site.cron.length === 0 || !principal) continue;
+    specs.push({
+      composeServiceName: site.composeServiceName,
+      username: principal.username,
+      workingDirectory: resolveSiteDocumentRoot(
+        layout,
+        parsedPayload.environmentId,
+        site,
+        releaseBindings.get(site.composeServiceName),
+        managedBindings.get(site.composeServiceName),
+      ),
+      jobs: site.cron,
+    });
+  }
+  try {
+    await applyCronJobs(layout, parsedPayload.environmentId, specs);
+  } catch (err) {
+    // Warn, do not fail. A broken timer is a real problem and a bad reason to
+    // refuse to publish an application that is otherwise ready — and the
+    // transcript is where the operator sees it.
+    logWarn(
+      "deploy",
+      `cron could not be applied: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
 async function applyDeploySites(
   layout: LayoutPaths,
   environmentId: string,
@@ -1571,6 +1625,10 @@ export async function handleEnvironmentDeploy(
   );
 
   const siteReleaseBindings = deployReleaseBindings(parsedPayload);
+  const siteManagedBindings = deployManagedDirectoryBindings(
+    parsedPayload,
+    siteReleaseBindings,
+  );
   await applyDeploySites(
     layout,
     parsedPayload.environmentId,
@@ -1580,7 +1638,19 @@ export async function handleEnvironmentDeploy(
       sites,
     ),
     siteReleaseBindings,
-    deployManagedDirectoryBindings(parsedPayload, siteReleaseBindings),
+    siteManagedBindings,
+  );
+
+  // After the site apply, because a job's WorkingDirectory is the document root
+  // the apply just settled — and a timer pointed at a tree that does not exist
+  // yet fails on its first firing rather than at deploy, which is the worst
+  // place to find out.
+  await applyDeployCronJobs(
+    layout,
+    parsedPayload,
+    sites,
+    siteReleaseBindings,
+    siteManagedBindings,
   );
 
   // Native apps come last of the host-native lanes: the release is promoted and

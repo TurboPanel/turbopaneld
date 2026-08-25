@@ -389,6 +389,24 @@ export type EnvironmentDeploySitePrincipal = {
  */
 export type EnvironmentDeploySiteSourceKind = "release" | "managed-directory";
 
+/**
+ * One scheduled job, already translated.
+ *
+ * `schedule` is a systemd `OnCalendar` value, not a cron expression: the
+ * control plane owns the translation (`lib/cron.ts`) because cron and systemd
+ * disagree about what restricting both day fields means, and that disagreement
+ * has to be refused in one place rather than re-derived here. `command` is
+ * argv — systemd runs it directly, so there is no shell and nothing to quote.
+ */
+export type EnvironmentDeployCronJob = {
+  /** Unit-name segment, unique within the service. */
+  name: string;
+  /** systemd `OnCalendar` value. */
+  schedule: string;
+  /** argv; `command[0]` is an absolute path. */
+  command: string[];
+};
+
 export type EnvironmentDeploySite = {
   composeServiceName: string;
   engine: "caddy" | "apache" | "nginx" | "openlitespeed";
@@ -396,6 +414,11 @@ export type EnvironmentDeploySite = {
   listenPort: number;
   /** Omitted means `release`, which is the behavior every existing site had. */
   sourceKind?: EnvironmentDeploySiteSourceKind;
+  /**
+   * Scheduled jobs, run as this site's principal out of its document root.
+   * Requires `principal`: a timer with no `User=` would run as root.
+   */
+  cron?: EnvironmentDeployCronJob[];
   webEnv?: Record<string, string>;
   php?: EnvironmentDeployHostingPhp;
   /**
@@ -2787,6 +2810,8 @@ function parseSite(
   };
   const sourceKind = parseSiteSourceKind(value.sourceKind);
   if (sourceKind) site.sourceKind = sourceKind;
+  const cron = parseCronJobs(value.cron, `sites.${site.composeServiceName}`);
+  if (cron) site.cron = cron;
   const webEnv = parseStringRecord(value.webEnv);
   if (webEnv) site.webEnv = webEnv;
   const php = parseHostingPhp(value.php);
@@ -2797,6 +2822,14 @@ function parseSite(
   // there is no account to write into it and nobody the tree could belong to.
   // Rejected rather than silently falling back to the daemon-owned tree, which
   // would look like it worked and be unreachable over SFTP.
+  // A timer with no `User=` runs as root. Refused rather than defaulted: there
+  // is no safe account to guess, and running a tenant's job as root because a
+  // field was missing is not a failure mode to leave open.
+  if (site.cron && site.cron.length > 0 && !site.principal) {
+    throw new TypeError(
+      `sites.${site.composeServiceName}: scheduled jobs require a principal to run as`,
+    );
+  }
   if (site.sourceKind === "managed-directory" && !site.principal) {
     throw new TypeError(
       `sites.${site.composeServiceName}: a managed-directory site requires a principal`,
@@ -2806,6 +2839,54 @@ function parseSite(
 }
 
 const SITE_SOURCE_KINDS = new Set(["release", "managed-directory"]);
+
+/** Unit-name segment; mirrors instance `CRON_JOB_NAME_RE`. */
+const CRON_JOB_NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+/**
+ * `OnCalendar` charset. Deliberately not a calendar parser — systemd is the
+ * authority on what it accepts, and re-implementing its grammar here would give
+ * two answers to one question. This only ensures nothing structural (a newline,
+ * a directive separator) can reach a unit file.
+ */
+const ON_CALENDAR_RE = /^[A-Za-z0-9 ,.:*\/-]{1,200}$/;
+/** Mirrors instance `MAX_CRON_JOBS_PER_SERVICE`. */
+const MAX_CRON_JOBS = 20;
+
+function parseCronJobs(
+  value: unknown,
+  label: string,
+): EnvironmentDeployCronJob[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > MAX_CRON_JOBS) {
+    throw new TypeError(`Invalid ${label} cron`);
+  }
+  const seen = new Set<string>();
+  return value.map((raw) => {
+    if (
+      !isRecord(raw) ||
+      typeof raw.name !== "string" || !CRON_JOB_NAME_RE.test(raw.name) ||
+      typeof raw.schedule !== "string" || !ON_CALENDAR_RE.test(raw.schedule) ||
+      !Array.isArray(raw.command) || raw.command.length === 0 ||
+      !raw.command.every((arg) =>
+        typeof arg === "string" && arg.length > 0 && arg.length <= 512 &&
+        !/[\0\n\r]/.test(arg)
+      ) ||
+      !(raw.command[0] as string).startsWith("/")
+    ) {
+      throw new TypeError(`Invalid ${label} cron entry`);
+    }
+    if (seen.has(raw.name)) {
+      // Two jobs under one name would render one unit and silently lose a job.
+      throw new TypeError(`Duplicate ${label} cron job: ${raw.name}`);
+    }
+    seen.add(raw.name);
+    return {
+      name: raw.name,
+      schedule: raw.schedule,
+      command: [...raw.command] as string[],
+    };
+  });
+}
 
 function parseSiteSourceKind(
   value: unknown,
