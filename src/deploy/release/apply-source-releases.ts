@@ -198,6 +198,28 @@ export type ApplySourceReleasesDeps = {
   runFn?: RunFn;
   /** ISO timestamp stamped on each release manifest. */
   now?: () => string;
+  /** Test seam — defaults to {@link checkoutRelease}. */
+  checkoutReleaseFn?: typeof checkoutRelease;
+  /** Test seam — defaults to {@link runReleaseBuild}. */
+  runReleaseBuildFn?: typeof runReleaseBuild;
+  /** Test seam — defaults to {@link prepareNativeAppBuildOutput}. */
+  prepareNativeAppBuildOutputFn?: typeof prepareNativeAppBuildOutput;
+  /** Test seam — defaults to {@link promoteRelease}. */
+  promoteReleaseFn?: typeof promoteRelease;
+  /** Test seam — defaults to {@link promoteExistingRelease}. */
+  promoteExistingReleaseFn?: typeof promoteExistingRelease;
+  /** Test seam — defaults to {@link pruneReleases}. */
+  pruneReleasesFn?: typeof pruneReleases;
+  /** Test seam — defaults to {@link recordRailpackRelease}. */
+  recordRailpackReleaseFn?: typeof recordRailpackRelease;
+  /** Test seam — defaults to {@link runRailpackBuild}. */
+  runRailpackBuildFn?: typeof runRailpackBuild;
+  /** Test seam — defaults to {@link ensureBuildkitRailpack}. */
+  ensureBuildkitRailpackFn?: typeof ensureBuildkitRailpack;
+  /** Test seam — defaults to {@link ensureReleaseTree}. */
+  ensureReleaseTreeFn?: typeof ensureReleaseTree;
+  /** Test seam — defaults to {@link ensureDaemonReleaseRecordDir}. */
+  ensureDaemonReleaseRecordDirFn?: typeof ensureDaemonReleaseRecordDir;
 };
 
 /**
@@ -224,9 +246,10 @@ async function rollbackOneRelease(
     serviceId: string;
     releaseId: string;
     logSink: CommandOutputSink;
+    deps: ApplySourceReleasesDeps;
   },
 ): Promise<AppliedRelease> {
-  const { logSink } = params;
+  const { logSink, deps } = params;
   logSink.setPhase(COMMAND_LOG_PHASES.RELEASE_PROMOTE);
   const previousReleaseId = await readCurrentReleaseId(paths);
 
@@ -272,7 +295,7 @@ async function rollbackOneRelease(
     };
   }
 
-  const releaseDir = await promoteExistingRelease({
+  const releaseDir = await (deps.promoteExistingReleaseFn ?? promoteExistingRelease)({
     paths,
     releaseId: params.releaseId,
   });
@@ -339,9 +362,9 @@ async function applyRailpackRelease(
   const { deps, onOutput, serviceId } = params;
   const { logSink } = deps;
 
-  const tools = await ensureBuildkitRailpack(layout);
+  const tools = await (deps.ensureBuildkitRailpackFn ?? ensureBuildkitRailpack)(layout);
   const imageTag = railpackImageTag(serviceId, entry.releaseId);
-  const built = await runRailpackBuild({
+  const built = await (deps.runRailpackBuildFn ?? runRailpackBuild)({
     build: entry.build,
     workingDir: params.buildWorkingDir,
     scratchDir: paths.scratchDir,
@@ -376,13 +399,13 @@ async function applyRailpackRelease(
     railpackFrontendVersion: built.railpackFrontendVersion,
     railpackPlanVersion: built.railpackPlanVersion,
   };
-  const releaseDir = await recordRailpackRelease({ paths, manifest });
+  const releaseDir = await (deps.recordRailpackReleaseFn ?? recordRailpackRelease)({ paths, manifest });
   logSink.onLine(
     "stdout",
     `built release ${entry.releaseId} (${params.commitSha}) for ${entry.composeServiceName} as ${built.imageTag}`,
   );
 
-  const pruned = await pruneReleases({
+  const pruned = await (deps.pruneReleasesFn ?? pruneReleases)({
     paths,
     onOutput,
     ...(deps.runFn === undefined ? {} : { runFn: deps.runFn }),
@@ -456,7 +479,7 @@ async function checkoutForEntry(
     entry.credential,
     deps.decryptSecrets,
   );
-  return await checkoutRelease(definedFields({
+  return await (deps.checkoutReleaseFn ?? checkoutRelease)(definedFields({
     cloneUrl: entry.cloneUrl,
     ref: entry.ref,
     commitSha: entry.commitSha,
@@ -503,7 +526,7 @@ async function buildRailpackRelease(
   const { deps, onOutput, serviceId } = params;
   const { logSink } = deps;
 
-  await ensureDaemonReleaseRecordDir(paths);
+  await (deps.ensureDaemonReleaseRecordDirFn ?? ensureDaemonReleaseRecordDir)(paths);
   await resetReleaseScratchDir(paths);
   try {
     logSink.setPhase(COMMAND_LOG_PHASES.FETCH);
@@ -543,7 +566,7 @@ async function buildNativeRelease(
   const { deps, onOutput, serviceId, username } = params;
   const { logSink } = deps;
 
-  await ensureReleaseTree(paths, username, deps.runFn);
+  await (deps.ensureReleaseTreeFn ?? ensureReleaseTree)(paths, username, deps.runFn);
   await resetReleaseScratchDir(paths);
   try {
     logSink.setPhase(COMMAND_LOG_PHASES.FETCH);
@@ -551,7 +574,7 @@ async function buildNativeRelease(
 
     logSink.setPhase(COMMAND_LOG_PHASES.BUILD);
     const buildWorkingDir = buildWorkingDirFor(entry, checkout.workingDir);
-    await runReleaseBuild({
+    await (deps.runReleaseBuildFn ?? runReleaseBuild)({
       build: entry.build,
       workingDir: buildWorkingDir,
       onOutput,
@@ -562,7 +585,7 @@ async function buildNativeRelease(
     // payload is, and second-guessing that would make the field a suggestion.
     const nativeApp = nativeAppForService(payload, entry.composeServiceName);
     const nativeOutput = nativeApp && entry.build.outputDirectory === undefined
-      ? await prepareNativeAppBuildOutput({
+      ? await (deps.prepareNativeAppBuildOutputFn ?? prepareNativeAppBuildOutput)({
         framework: nativeApp.framework,
         workingDir: buildWorkingDir,
         onOutput,
@@ -591,7 +614,7 @@ async function buildNativeRelease(
       standaloneOutput: nativeOutput.standaloneOutput,
       staticExport: nativeOutput.staticExport,
     });
-    const releaseDir = await promoteRelease(definedFields({
+    const releaseDir = await (deps.promoteReleaseFn ?? promoteRelease)(definedFields({
       paths,
       workingDir: checkout.workingDir,
       username,
@@ -606,7 +629,7 @@ async function buildNativeRelease(
       `promoted release ${entry.releaseId} (${checkout.commitSha}) for ${entry.composeServiceName}`,
     );
 
-    const pruned = await pruneReleases(definedFields({
+    const pruned = await (deps.pruneReleasesFn ?? pruneReleases)(definedFields({
       paths,
       onOutput,
       runFn: deps.runFn,
@@ -701,6 +724,7 @@ async function applyOneRelease(
       serviceId,
       releaseId: entry.rollbackToReleaseId,
       logSink,
+      deps,
     });
   }
 

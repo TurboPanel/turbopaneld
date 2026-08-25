@@ -99,3 +99,45 @@ test("managed.ha.failover recover falls back to promote when the HA stack is abs
   assertEquals(promoteCalls.length, 1);
   assertEquals(result.summary.includes("without Orchestrator"), true);
 });
+
+test("managed.ha.failover drain invokes drain helper for source endpoint", async () => {
+  const drainCalls: Array<{ host: string; port: number }> = [];
+  const result = await handleManagedHaFailover(
+    {
+      ...RECOVER_PAYLOAD,
+      phase: "drain",
+    },
+    "2026-08-19T12:00:00.000Z",
+    {
+      drain: (hostname, port) => {
+        drainCalls.push({ host: hostname, port });
+        return Promise.resolve();
+      },
+    },
+  );
+  assertEquals(drainCalls, [{ host: "203.0.113.10", port: 5432 }]);
+  assertEquals(result.phase, "drain");
+  assertEquals(result.summary.includes("drained writer"), true);
+});
+
+test("managed.ha.failover recover falls back when endpoints are incomplete", async () => {
+  const promoteCalls: unknown[] = [];
+  const result = await handleManagedHaFailover(
+    {
+      managedId: RECOVER_PAYLOAD.managedId,
+      sourceMemberId: RECOVER_PAYLOAD.sourceMemberId,
+      targetMemberId: RECOVER_PAYLOAD.targetMemberId,
+      phase: "recover",
+      sourceHost: "203.0.113.10",
+      sourcePort: 5432,
+    },
+    "2026-08-19T12:00:00.000Z",
+    {
+      haPresent: () => Promise.resolve(true),
+      recover: () => Promise.reject(new Error("should not run")),
+      promote: promoteStub(promoteCalls),
+    },
+  );
+  assertEquals(promoteCalls.length, 1);
+  assertEquals(result.summary.includes("without Orchestrator"), true);
+});

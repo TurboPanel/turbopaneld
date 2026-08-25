@@ -1,9 +1,12 @@
 #!/usr/bin/env -S deno run --allow-env --allow-read --allow-write --allow-run
 import { runBuildToggle } from "../src/orchestration/ansible.ts";
 
-function parseArg(name: string): string | undefined {
+export function parseArg(
+  name: string,
+  args: string[] = Deno.args,
+): string | undefined {
   const prefix = `--${name}=`;
-  for (const arg of Deno.args) {
+  for (const arg of args) {
     if (arg.startsWith(prefix)) {
       return arg.slice(prefix.length);
     }
@@ -11,22 +14,38 @@ function parseArg(name: string): string | undefined {
   return undefined;
 }
 
-const uiMode = parseArg("ui-mode");
-const instanceRunMode = parseArg("instance-run-mode");
-const forceBuild = parseArg("force-build") === "true";
+export type BuildToggleCliArgs = {
+  uiMode: "dev" | "static";
+  instanceRunMode: "source" | "compiled";
+  forceBuild: boolean;
+};
 
-if (uiMode !== "dev" && uiMode !== "static") {
-  console.error("Missing or invalid --ui-mode=dev|static");
-  Deno.exit(1);
+export function parseBuildToggleArgs(
+  args: string[] = Deno.args,
+): BuildToggleCliArgs {
+  const uiMode = parseArg("ui-mode", args);
+  const instanceRunMode = parseArg("instance-run-mode", args);
+  const forceBuild = parseArg("force-build", args) === "true";
+
+  if (uiMode !== "dev" && uiMode !== "static") {
+    throw new TypeError("Missing or invalid --ui-mode=dev|static");
+  }
+
+  if (instanceRunMode !== "source" && instanceRunMode !== "compiled") {
+    throw new TypeError("Missing or invalid --instance-run-mode=source|compiled");
+  }
+
+  return { uiMode, instanceRunMode, forceBuild };
 }
 
-if (instanceRunMode !== "source" && instanceRunMode !== "compiled") {
-  console.error("Missing or invalid --instance-run-mode=source|compiled");
-  Deno.exit(1);
+if (import.meta.main) {
+  try {
+    const parsed = parseBuildToggleArgs();
+    await runBuildToggle(parsed);
+  } catch (error) {
+    console.error(
+      error instanceof Error ? error.message : String(error),
+    );
+    Deno.exit(1);
+  }
 }
-
-await runBuildToggle({
-  uiMode,
-  instanceRunMode,
-  forceBuild,
-});

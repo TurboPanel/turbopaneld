@@ -1,10 +1,21 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { join } from "@std/path";
 import type { RunFn } from "../ensure-principal.ts";
 import {
+  assertSafeReleaseId,
+  assertSafeServiceId,
+  ensureDaemonReleaseRecordDir,
   ensureReleaseTree,
   RELEASE_DIR_MODE,
+  RELEASE_PUBLISHED_MODE,
+  RELEASE_RECORDS_DIRNAME,
   RELEASE_STAGING_MODE,
+  removePublishedRelease,
+  removeReleaseScratchDir,
+  resetReleaseScratchDir,
+  resolveDaemonReleasePaths,
   resolveReleasePaths,
+  sealPublishedRelease,
 } from "./release-layout.ts";
 
 /**
@@ -106,6 +117,136 @@ test("ensureReleaseTree hands shared/ to the principal", async () => {
         install?.owner === "appuser",
       true,
     );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("assertSafeReleaseId and assertSafeServiceId reject path-like ids", () => {
+  assertEquals(assertSafeReleaseId("rel-1"), "rel-1");
+  assertEquals(assertSafeServiceId("svc_1"), "svc_1");
+  assertThrows(() => assertSafeReleaseId("../etc"), Error, "unsafe releaseId");
+  assertThrows(() => assertSafeServiceId(""), Error, "unsafe release serviceId");
+  assertThrows(
+    () => assertSafeReleaseId("a".repeat(65)),
+    Error,
+    "unsafe releaseId",
+  );
+});
+
+test("resolveReleasePaths puts scratch under daemon state, not the principal home", () => {
+  const paths = resolveReleasePaths(
+    { principalHomeRoot: "/srv/users", daemonStateDir: "/var/lib/tp" },
+    { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+  );
+  assertEquals(paths.principalHome, "/srv/users/appuser");
+  assertEquals(paths.siteDir, "/srv/users/appuser/sites/svc-1");
+  assertEquals(
+    paths.releaseDir,
+    "/srv/users/appuser/sites/svc-1/releases/rel-1",
+  );
+  assertEquals(paths.scratchDir, "/var/lib/tp/release-build/svc-1/rel-1");
+  assertEquals(paths.scratchDir.startsWith(paths.principalHome), false);
+});
+
+test("resolveDaemonReleasePaths uses the release-records root", () => {
+  const paths = resolveDaemonReleasePaths(
+    { daemonStateDir: "/var/lib/tp" },
+    { serviceId: "svc-1", releaseId: "rel-1" },
+  );
+  assertEquals(
+    paths.principalHome,
+    join("/var/lib/tp", RELEASE_RECORDS_DIRNAME),
+  );
+  assertEquals(
+    paths.releaseDir,
+    join(
+      "/var/lib/tp",
+      RELEASE_RECORDS_DIRNAME,
+      "sites",
+      "svc-1",
+      "releases",
+      "rel-1",
+    ),
+  );
+  assertEquals(paths.scratchDir, "/var/lib/tp/release-build/svc-1/rel-1");
+});
+
+test("ensureDaemonReleaseRecordDir creates the tree without sudo", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-daemon-records-" });
+  try {
+    const paths = resolveDaemonReleasePaths(
+      { daemonStateDir: join(root, "state") },
+      { serviceId: "svc-1", releaseId: "rel-1" },
+    );
+    await ensureDaemonReleaseRecordDir(paths);
+    const stat = await Deno.stat(paths.releaseDir);
+    assertEquals(stat.isDirectory, true);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("sealPublishedRelease and removePublishedRelease go through the privileged runner", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-seal-" });
+  const paths = stubPaths(root);
+  const { run, calls } = captureRun();
+  try {
+    await Deno.mkdir(paths.releaseDir, { recursive: true });
+    await sealPublishedRelease(paths.releaseDir, "appuser", run);
+    assertEquals(calls[0]?.args, [
+      "-n",
+      "chown",
+      "-R",
+      "root:appuser-grp",
+      paths.releaseDir,
+    ]);
+    assertEquals(calls[1]?.args, [
+      "-n",
+      "chmod",
+      RELEASE_PUBLISHED_MODE.toString(8).padStart(4, "0"),
+      paths.releaseDir,
+    ]);
+
+    calls.length = 0;
+    await removePublishedRelease(paths.releaseDir, run);
+    assertEquals(calls[0]?.args, ["-n", "rm", "-rf", "--", paths.releaseDir]);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("sealPublishedRelease throws when chown or chmod fails", async () => {
+  const runFail: RunFn = (_command, args) =>
+    Promise.resolve({
+      success: false,
+      stdout: "",
+      stderr: args.includes("chown") ? "chown failed" : "chmod failed",
+    });
+  await assertRejects(
+    () => sealPublishedRelease("/var/lib/turbopanel/releases/rel", "appuser", runFail),
+    Error,
+    "chown failed",
+  );
+});
+
+test("resetReleaseScratchDir recreates an empty 0700 directory", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-scratch-" });
+  const paths = stubPaths(root);
+  try {
+    await Deno.mkdir(paths.scratchDir, { recursive: true });
+    await Deno.writeTextFile(join(paths.scratchDir, "stale"), "x");
+    const dir = await resetReleaseScratchDir(paths);
+    assertEquals(dir, paths.scratchDir);
+    try {
+      await Deno.stat(join(paths.scratchDir, "stale"));
+      throw new TypeError("stale file should be gone");
+    } catch (err) {
+      if (!(err instanceof Deno.errors.NotFound)) throw err;
+    }
+    await removeReleaseScratchDir(paths);
+    // Missing scratch is a no-op.
+    await removeReleaseScratchDir(paths);
   } finally {
     await Deno.remove(root, { recursive: true });
   }

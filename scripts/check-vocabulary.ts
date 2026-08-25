@@ -21,13 +21,11 @@ import { relative } from "@std/path";
 
 const repoRoot = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
-const failures: string[] = [];
-
 // --- Forbidden daemon-as-agent phrases --------------------------------------
 // Exact phrases, matched case-insensitively as substrings. Extend this list
 // as new daemon-as-agent regressions are found; keep the three repo copies
 // (daemon/instance/website) aligned.
-const FORBIDDEN_PHRASES = [
+export const FORBIDDEN_PHRASES = [
   "turbopanel agent",
   "node agent",
   "agent host",
@@ -39,7 +37,7 @@ const FORBIDDEN_PHRASES = [
 // --- Allowlist: lines that must never be flagged, even if a forbidden ------
 // phrase substring appears (defensive — none of the phrases above currently
 // collide with these, but keep the guard broad-list-safe as it grows).
-const ALLOWLIST_LINE_PATTERNS: RegExp[] = [
+export const ALLOWLIST_LINE_PATTERNS: RegExp[] = [
   /user-agent/i, // HTTP User-Agent header
   /\.agents\/skills/i, // installed agent-skill packs
   /^\s*#+\s*agent\b/i, // AGENTS.md coding-agent policy headings (e.g. "### Agent policy")
@@ -69,7 +67,7 @@ const SKIP_FILENAMES = new Set([
 ]);
 
 /** Untracked/vendored build outputs and skill packs that must not be scanned. */
-function isSkippedPath(rel: string): boolean {
+export function isSkippedPath(rel: string): boolean {
   // Galaxy docker: geerlingguy.docker/ or geerlingguy/docker/
   if (/(^|\/)roles\/geerlingguy([./]|$)/.test(rel)) return true;
   if (/(^|\/)\.agents\/skills(\/|$)/.test(rel)) return true;
@@ -95,19 +93,20 @@ async function* walk(dir: string): AsyncGenerator<string> {
   }
 }
 
-function isAllowlisted(line: string): boolean {
+export function isAllowlisted(line: string): boolean {
   return ALLOWLIST_LINE_PATTERNS.some((pattern) => pattern.test(line));
 }
 
-for await (const file of walk(repoRoot)) {
-  if (!SCAN_EXTENSIONS.test(file)) continue;
-  const rel = relative(repoRoot, file);
-  const text = await Deno.readTextFile(file);
+export function collectVocabularyFailures(
+  rel: string,
+  text: string,
+): string[] {
+  const failures: string[] = [];
   const lines = text.split("\n");
   const lowerLines = lines.map((line) => line.toLowerCase());
 
   lowerLines.forEach((lower, i) => {
-    if (isAllowlisted(lines[i])) return;
+    if (isAllowlisted(lines[i] ?? "")) return;
     for (const phrase of FORBIDDEN_PHRASES) {
       if (lower.includes(phrase)) {
         failures.push(
@@ -116,18 +115,29 @@ for await (const file of walk(repoRoot)) {
       }
     }
   });
+  return failures;
 }
 
-if (failures.length > 0) {
-  console.error("Vocabulary check failed:\n");
-  for (const failure of failures) {
-    console.error(`  ✗ ${failure}`);
+if (import.meta.main) {
+  const failures: string[] = [];
+  for await (const file of walk(repoRoot)) {
+    if (!SCAN_EXTENSIONS.test(file)) continue;
+    const rel = relative(repoRoot, file);
+    const text = await Deno.readTextFile(file);
+    failures.push(...collectVocabularyFailures(rel, text));
   }
-  console.error(
-    `\n${failures.length} problem(s) found. The daemon is a "daemon" / "host daemon" / "turbopaneld", never an "agent". ` +
-      "Update the allowlist in this script (and the instance/website copies) if this is a legitimate coding-agent or third-party reference.",
-  );
-  Deno.exit(1);
-}
 
-console.log("Vocabulary check passed: no daemon-as-agent phrasing found.");
+  if (failures.length > 0) {
+    console.error("Vocabulary check failed:\n");
+    for (const failure of failures) {
+      console.error(`  ✗ ${failure}`);
+    }
+    console.error(
+      `\n${failures.length} problem(s) found. The daemon is a "daemon" / "host daemon" / "turbopaneld", never an "agent". ` +
+        "Update the allowlist in this script (and the instance/website copies) if this is a legitimate coding-agent or third-party reference.",
+    );
+    Deno.exit(1);
+  }
+
+  console.log("Vocabulary check passed: no daemon-as-agent phrasing found.");
+}

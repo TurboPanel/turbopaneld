@@ -134,7 +134,7 @@ export async function handleManagedHaReconcile(
   deps?: ManagedHaReconcileHandlerDeps,
 ): Promise<ManagedHaReconcileResult> {
   const payload = parseManagedHaReconcilePayload(rawPayload);
-  const layout = resolveLayout();
+  const layout = resolveLayout(Deno.env.toObject());
   const run = deps?.runDocker ?? defaultRunDocker;
   const ensureDocker = deps?.ensureDocker ?? defaultEnsureDocker;
   const runHostPrep = deps?.runHostPrep ?? runOrchestratorSetup;

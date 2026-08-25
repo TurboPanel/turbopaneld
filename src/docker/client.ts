@@ -72,13 +72,16 @@ export type DockerEvent = {
   from?: string;
 };
 
-function isStreamAbortError(error: unknown, signal: AbortSignal): boolean {
+export function isStreamAbortError(
+  error: unknown,
+  signal: AbortSignal,
+): boolean {
   if (signal.aborted) return true;
   if (error instanceof DOMException && error.name === "AbortError") return true;
   return error instanceof Deno.errors.BadResource;
 }
 
-function* parseEventLines(lines: string[]): Generator<DockerEvent> {
+export function* parseEventLines(lines: string[]): Generator<DockerEvent> {
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -90,15 +93,33 @@ function* parseEventLines(lines: string[]): Generator<DockerEvent> {
   }
 }
 
+/** Host-free fetch seam so tests never need a live Docker socket. */
+export type DockerFetch = (
+  input: string,
+  init?: RequestInit,
+) => Promise<Response>;
+
+export type DockerClientOptions = {
+  fetchImpl?: DockerFetch;
+  createHttpClient?: (socketPath: string) => Deno.HttpClient;
+};
+
 export class DockerClient {
-  readonly #httpClient: Deno.HttpClient;
+  readonly #httpClient: Deno.HttpClient | undefined;
+  readonly #fetchImpl: DockerFetch | undefined;
   #closed = false;
 
-  constructor(socketPath?: string) {
+  constructor(socketPath?: string, options: DockerClientOptions = {}) {
+    this.#fetchImpl = options.fetchImpl;
+    if (this.#fetchImpl && !options.createHttpClient) {
+      return;
+    }
     const path = socketPath ?? resolveDockerSocket();
-    this.#httpClient = Deno.createHttpClient({
-      proxy: { transport: "unix", path },
-    });
+    const create = options.createHttpClient ?? ((unixPath: string) =>
+      Deno.createHttpClient({
+        proxy: { transport: "unix", path: unixPath },
+      }));
+    this.#httpClient = create(path);
   }
 
   async ping(): Promise<boolean> {
@@ -224,6 +245,9 @@ export class DockerClient {
       return;
     }
     this.#closed = true;
+    if (!this.#httpClient) {
+      return;
+    }
     try {
       this.#httpClient.close();
     } catch (error) {
@@ -235,7 +259,11 @@ export class DockerClient {
 
   #fetch(path: string, init: RequestInit = {}): Promise<Response> {
     const normalized = path.startsWith("/") ? path : `/${path}`;
-    return fetch(`${DOCKER_HTTP_ORIGIN}${normalized}`, {
+    const url = `${DOCKER_HTTP_ORIGIN}${normalized}`;
+    if (this.#fetchImpl) {
+      return this.#fetchImpl(url, init);
+    }
+    return fetch(url, {
       ...init,
       client: this.#httpClient,
     });

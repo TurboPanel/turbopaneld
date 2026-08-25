@@ -10,7 +10,9 @@ import type {
 import {
   applyNativeAppLifecycle,
   applyNativeAppServices,
+  listEnvironmentNativeAppServiceIds,
   nativeAppBindingsFromPayload,
+  nativeAppNodeVersions,
   removeNativeAppServices,
 } from "./apply-native-apps.ts";
 import {
@@ -758,4 +760,190 @@ test("nativeAppRuntimeGroup resolves the per-series entitlement group", () => {
   // An unknown series has no group rather than an invented name — a name that
   // does not exist would fail `usermod` far from the cause.
   assertEquals(nativeAppRuntimeGroup("18"), undefined);
+});
+
+test("applyNativeAppServices with an empty list is a no-op", async () => {
+  const host = await makeTestHost();
+  try {
+    const result = await applyNativeAppServices(
+      host.layout,
+      ENVIRONMENT_ID,
+      [],
+      applyOpts(host, createRunMock()),
+    );
+    assertEquals(result, { applied: [] });
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("applyNativeAppServices skips apps without a principal binding", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  try {
+    const result = await applyNativeAppServices(
+      host.layout,
+      ENVIRONMENT_ID,
+      [makeApp()],
+      {
+        ...applyOpts(host, mock),
+        bindings: new Map(),
+      },
+    );
+    assertEquals(result, { applied: [] });
+    assertEquals(mock.systemctl("enable").length, 0);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("applyNativeAppServices fails when daemon-reload fails after a unit change", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  const originalRun = mock.run;
+  mock.run = async (command, args) => {
+    if (args.includes("daemon-reload")) {
+      return fail("reload refused");
+    }
+    return await originalRun(command, args);
+  };
+  try {
+    const error = await assertRejects(
+      () =>
+        applyNativeAppServices(
+          host.layout,
+          ENVIRONMENT_ID,
+          [makeApp()],
+          applyOpts(host, mock),
+        ),
+      Error,
+    );
+    assertStringIncludes(error.message, "reload refused");
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("listEnvironmentNativeAppServiceIds reads staged unit filenames", async () => {
+  const host = await makeTestHost();
+  try {
+    await applyNativeAppServices(
+      host.layout,
+      ENVIRONMENT_ID,
+      [
+        makeApp(),
+        makeApp({
+          composeServiceName: "api",
+          serviceId: "svc-api",
+          listenPort: 18101,
+        }),
+      ],
+      {
+        ...applyOpts(host, createRunMock()),
+        bindings: new Map([
+          ["web", { username: USERNAME, previousReleaseId: null }],
+          ["api", { username: USERNAME, previousReleaseId: null }],
+        ]),
+      },
+    );
+    const ids = await listEnvironmentNativeAppServiceIds(
+      host.layout,
+      ENVIRONMENT_ID,
+    );
+    assertEquals(ids, ["svc-api", "svc-web"]);
+    assertEquals(
+      await listEnvironmentNativeAppServiceIds(host.layout, "missing-env"),
+      [],
+    );
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("applyNativeAppLifecycle continues when one unit refuses the action", async () => {
+  const host = await makeTestHost();
+  try {
+    await applyNativeAppServices(
+      host.layout,
+      ENVIRONMENT_ID,
+      [
+        makeApp(),
+        makeApp({
+          composeServiceName: "api",
+          serviceId: "svc-api",
+          listenPort: 18101,
+        }),
+      ],
+      {
+        ...applyOpts(host, createRunMock()),
+        bindings: new Map([
+          ["web", { username: USERNAME, previousReleaseId: null }],
+          ["api", { username: USERNAME, previousReleaseId: null }],
+        ]),
+      },
+    );
+
+    const mock = createRunMock();
+    const originalRun = mock.run;
+    mock.run = async (command, args) => {
+      if (
+        args.includes("stop") &&
+        args.includes(nativeAppUnitName("svc-web"))
+      ) {
+        return fail("unit busy");
+      }
+      return await originalRun(command, args);
+    };
+    const touched = await applyNativeAppLifecycle(
+      host.layout,
+      ENVIRONMENT_ID,
+      "stop",
+      { run: mock.run },
+    );
+    assertEquals(touched, [nativeAppUnitName("svc-api")]);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("removeNativeAppServices is a no-op when nothing is staged", async () => {
+  const host = await makeTestHost();
+  try {
+    assertEquals(
+      await removeNativeAppServices(host.layout, ENVIRONMENT_ID, {
+        run: createRunMock().run,
+        systemdUnitDir: host.unitDir,
+      }),
+      0,
+    );
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("nativeAppNodeVersions deduplicates and sorts series pins", () => {
+  assertEquals(DEFAULT_NATIVE_APP_NODE_VERSION, "24");
+  assertEquals(
+    nativeAppNodeVersions([
+      makeApp({ nodeVersion: "24" }),
+      makeApp({
+        composeServiceName: "api",
+        serviceId: "svc-api",
+        listenPort: 18101,
+        nodeVersion: "22",
+      }),
+      makeApp({
+        composeServiceName: "worker",
+        serviceId: "svc-worker",
+        listenPort: 18102,
+        nodeVersion: "24",
+      }),
+      makeApp({
+        composeServiceName: "default",
+        serviceId: "svc-default",
+        listenPort: 18103,
+      }),
+    ]),
+    ["22", "24"],
+  );
 });

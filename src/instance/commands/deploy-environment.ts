@@ -555,7 +555,7 @@ export function resolveDeployComposeFiles(
   return payload.composeFiles;
 }
 
-function resolveRuntimeComposeYaml(
+export function resolveRuntimeComposeYaml(
   files: readonly EnvironmentDeployComposeFile[],
 ): string {
   const runtime = files.find((file) =>

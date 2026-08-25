@@ -35,6 +35,7 @@ import {
   writeDevConvergeStamp,
 } from "../src/orchestration/converge-stamp.ts";
 import {
+  type DevOrchestrationLayout,
   devOrchestrationAnsibleEnv,
   requireDevOrchestrationLayout,
 } from "../src/orchestration/dev-orchestration.ts";
@@ -47,7 +48,7 @@ import {
 import { readEnv, resolveDevRoot, resolveLayout } from "../src/paths/layout.ts";
 
 /** Playbooks that include the docker role (or a role with a docker meta-dep). */
-const PLAYBOOKS_NEEDING_DOCKER_GALAXY = new Set([
+export const PLAYBOOKS_NEEDING_DOCKER_GALAXY = new Set([
   "docker-setup.yml",
   "postgres-setup.yml",
   "rabbitmq-setup.yml",
@@ -61,13 +62,19 @@ const PLAYBOOKS_NEEDING_DOCKER_GALAXY = new Set([
  * process env (`TURBOPANEL_UI_MODE`, `TURBOPANEL_INSTANCE_RUN_MODE`,
  * `TURBOPANEL_INSTANCE_RUNTIME`). Dev-identity vars come pre-set from the console.
  */
-const DAEMON_ENV_PATH = join(
-  resolveLayout({
-    TURBOPANEL_CONFIG_DIR: readEnv("TURBOPANEL_CONFIG_DIR"),
-    TURBOPANEL_DAEMON_ROOT: readEnv("TURBOPANEL_DAEMON_ROOT"),
-  }).configDir,
-  "daemon.env",
-);
+export function resolveDaemonEnvPath(
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+): string {
+  return join(
+    resolveLayout({
+      TURBOPANEL_CONFIG_DIR: env.TURBOPANEL_CONFIG_DIR ??
+        readEnv("TURBOPANEL_CONFIG_DIR"),
+      TURBOPANEL_DAEMON_ROOT: env.TURBOPANEL_DAEMON_ROOT ??
+        readEnv("TURBOPANEL_DAEMON_ROOT"),
+    }).configDir,
+    "daemon.env",
+  );
+}
 
 const SSH_REPO_URLS = {
   instance: "git@github.com:TurboPanel/turbopanel.git",
@@ -77,10 +84,16 @@ const SSH_REPO_URLS = {
   daemon: "git@github.com:TurboPanel/turbopaneld.git",
 } as const;
 
-function applyDaemonEnvToProcess(): void {
+/**
+ * Hoist unset keys from `daemon.env` into the process env so playbook extra-vars
+ * see the same runtime toggles as a systemd-started daemon.
+ */
+export function applyDaemonEnvToProcess(
+  envPath: string = resolveDaemonEnvPath(),
+): void {
   let content = "";
   try {
-    content = Deno.readTextFileSync(DAEMON_ENV_PATH);
+    content = Deno.readTextFileSync(envPath);
   } catch {
     return;
   }
@@ -92,14 +105,12 @@ function applyDaemonEnvToProcess(): void {
   }
 }
 
-applyDaemonEnvToProcess();
-
 /**
  * Drop bulky host payloads (especially `ansible_facts` from Gathering Facts)
  * before writing JSONL for the TUI. Full facts can be 100KB+ per event and
  * stall Ink while the console JSON.parses them on the main thread.
  */
-function slimAnsibleEvent(event: unknown): unknown {
+export function slimAnsibleEvent(event: unknown): unknown {
   if (typeof event !== "object" || event === null) {
     return event;
   }
@@ -129,7 +140,7 @@ function slimAnsibleEvent(event: unknown): unknown {
   return { ...record, hosts: slimHosts };
 }
 
-function emitEvent(event: unknown): void {
+export function emitEvent(event: unknown): void {
   console.log(JSON.stringify(slimAnsibleEvent(event)));
 }
 
@@ -140,11 +151,12 @@ function usage(): never {
   Deno.exit(2);
 }
 
-function optionalDevServiceFlag(
+export function optionalDevServiceFlag(
   envKey: string,
   defaultValue: boolean,
+  env: { get(key: string): string | undefined } = Deno.env,
 ): boolean {
-  const raw = Deno.env.get(envKey)?.trim().toLowerCase();
+  const raw = env.get(envKey)?.trim().toLowerCase();
   if (!raw) {
     return defaultValue;
   }
@@ -157,50 +169,53 @@ function optionalDevServiceFlag(
   return defaultValue;
 }
 
-function optionalDevServiceExtraArgs(): string[] {
+export function optionalDevServiceExtraArgs(
+  env: { get(key: string): string | undefined } = Deno.env,
+): string[] {
   return [
     "-e",
     `turbopanel_optional_dbstudio=${
-      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_DBSTUDIO", false)
+      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_DBSTUDIO", false, env)
     }`,
     "-e",
     `turbopanel_optional_ui=${
-      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_UI", true)
+      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_UI", true, env)
     }`,
     "-e",
     `turbopanel_optional_website=${
-      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_WEBSITE", true)
+      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_WEBSITE", true, env)
     }`,
     "-e",
     `turbopanel_optional_mailpit=${
-      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_MAILPIT", true)
+      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_MAILPIT", true, env)
     }`,
     "-e",
     `turbopanel_optional_redis_insight=${
-      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_REDIS_INSIGHT", false)
+      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_REDIS_INSIGHT", false, env)
     }`,
     "-e",
     `turbopanel_optional_tabix=${
-      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_TABIX", false)
+      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_TABIX", false, env)
     }`,
   ];
 }
 
-function devInstanceExtraArgs(): string[] {
-  const devUser = Deno.env.get("TURBOPANEL_DEV_USER");
-  const devUid = Deno.env.get("TURBOPANEL_DEV_UID");
-  const devGid = Deno.env.get("TURBOPANEL_DEV_GID");
-  const uiMode = Deno.env.get("TURBOPANEL_UI_MODE") === "static"
-    ? "static"
-    : "dev";
-  const instanceRunMode =
-    Deno.env.get("TURBOPANEL_INSTANCE_RUN_MODE") === "compiled"
-      ? "compiled"
-      : "source";
-  const instanceRuntime =
-    Deno.env.get("TURBOPANEL_INSTANCE_RUNTIME") === "workers"
-      ? "workers"
-      : "deno";
+export function devInstanceExtraArgs(
+  env: {
+    get(key: string): string | undefined;
+    toObject(): { [index: string]: string };
+  } = Deno.env,
+): string[] {
+  const devUser = env.get("TURBOPANEL_DEV_USER");
+  const devUid = env.get("TURBOPANEL_DEV_UID");
+  const devGid = env.get("TURBOPANEL_DEV_GID");
+  const uiMode = env.get("TURBOPANEL_UI_MODE") === "static" ? "static" : "dev";
+  const instanceRunMode = env.get("TURBOPANEL_INSTANCE_RUN_MODE") === "compiled"
+    ? "compiled"
+    : "source";
+  const instanceRuntime = env.get("TURBOPANEL_INSTANCE_RUNTIME") === "workers"
+    ? "workers"
+    : "deno";
 
   const args: string[] = [
     "-e",
@@ -216,7 +231,7 @@ function devInstanceExtraArgs(): string[] {
   if (devUid) args.push("-e", `turbopanel_dev_uid=${devUid}`);
   if (devGid) args.push("-e", `turbopanel_dev_gid=${devGid}`);
   if (devUser) {
-    const devRoot = resolveDevRoot(Deno.env.toObject());
+    const devRoot = resolveDevRoot(env.toObject());
     args.push("-e", `turbopanel_dev_root=${devRoot}`);
   }
   args.push(
@@ -226,7 +241,7 @@ function devInstanceExtraArgs(): string[] {
     `turbopanel_instance_run_mode=${instanceRunMode}`,
     "-e",
     `turbopanel_instance_runtime=${instanceRuntime}`,
-    ...optionalDevServiceExtraArgs(),
+    ...optionalDevServiceExtraArgs(env),
   );
   if (instanceRuntime === "workers") {
     args.push("-e", "postgres_expose_port=true");
@@ -234,31 +249,71 @@ function devInstanceExtraArgs(): string[] {
   return args;
 }
 
-async function runInstanceDevInstall(ifNeeded: boolean): Promise<void> {
+/** Injectable seams so tests can exercise dispatch without Ansible. */
+export type OrchestrationActionDeps = {
+  coLocatedInstanceServiceEnabled: () => Promise<boolean>;
+  emitDevConvergeSkippedIfNeeded: typeof emitDevConvergeSkippedIfNeeded;
+  requireDevOrchestrationLayout: () => Promise<DevOrchestrationLayout>;
+  ensureAnsible: () => Promise<void>;
+  ensureGalaxyDockerRole: () => Promise<void>;
+  runPlaybookStreaming: typeof runPlaybookStreaming;
+  writeDevConvergeStamp: typeof writeDevConvergeStamp;
+  computeDevConvergeStamp: typeof computeDevConvergeStamp;
+  runAnsibleBuildToggle: typeof runAnsibleBuildToggle;
+  emit: (event: unknown) => void;
+  orchestrationDir: string;
+  ansiblePlaybookBin: string;
+  ansiblePlaybookCwd: string;
+};
+
+function defaultDeps(): OrchestrationActionDeps {
+  return {
+    coLocatedInstanceServiceEnabled,
+    emitDevConvergeSkippedIfNeeded,
+    requireDevOrchestrationLayout,
+    ensureAnsible,
+    ensureGalaxyDockerRole,
+    runPlaybookStreaming,
+    writeDevConvergeStamp,
+    computeDevConvergeStamp,
+    runAnsibleBuildToggle,
+    emit: emitEvent,
+    orchestrationDir: ORCHESTRATION_DIR,
+    ansiblePlaybookBin: ANSIBLE_PLAYBOOK_BIN,
+    ansiblePlaybookCwd: ANSIBLE_PLAYBOOK_CWD,
+  };
+}
+
+export async function runInstanceDevInstall(
+  ifNeeded: boolean,
+  deps: OrchestrationActionDeps = defaultDeps(),
+): Promise<"skipped" | "ran"> {
   if (ifNeeded) {
-    const instanceEnabled = await coLocatedInstanceServiceEnabled();
+    const instanceEnabled = await deps.coLocatedInstanceServiceEnabled();
     if (
-      await emitDevConvergeSkippedIfNeeded(
+      await deps.emitDevConvergeSkippedIfNeeded(
         true,
         instanceEnabled,
-        emitEvent,
+        deps.emit as (
+          event: { _event: "dev_converge_skipped"; reason: string },
+        ) => void,
       )
     ) {
       // Stamp matches — exit before ensureAnsible / Galaxy / playbook.
-      return;
+      return "skipped";
     }
   }
 
-  const layout = await requireDevOrchestrationLayout();
+  const layout = await deps.requireDevOrchestrationLayout();
 
   // Sync orchestration venv packages (ansible-lint for IDE linting, etc.) before converge.
-  await ensureAnsible();
+  await deps.ensureAnsible();
   // Dev converge always pulls Docker (postgres/redis/rabbitmq/clickhouse/…);
   // fetch the Galaxy docker role only now — not during orchestration bootstrap.
-  await ensureGalaxyDockerRole();
+  await deps.ensureGalaxyDockerRole();
 
-  await runPlaybookStreaming(
-    ANSIBLE_PLAYBOOK_BIN,
+  await deps.runPlaybookStreaming(
+    deps.ansiblePlaybookBin,
     [
       "-i",
       "localhost,",
@@ -268,45 +323,54 @@ async function runInstanceDevInstall(ifNeeded: boolean): Promise<void> {
       layout.playbookPath,
     ],
     {
-      cwd: ANSIBLE_PLAYBOOK_CWD,
+      cwd: deps.ansiblePlaybookCwd,
       env: devOrchestrationAnsibleEnv(layout),
       // TUI consumes JSONL via onEvent only — suppress structured log lines on
       // stdout so they are not mixed with event payloads.
       quiet: true,
-      onEvent: emitEvent,
+      onEvent: deps.emit,
     },
   );
 
-  await writeDevConvergeStamp(await computeDevConvergeStamp());
+  await deps.writeDevConvergeStamp(await deps.computeDevConvergeStamp());
+  return "ran";
 }
 
-async function runBuildToggle(): Promise<void> {
-  const raw = Deno.args[1];
-  if (!raw) {
+export async function runBuildToggle(
+  rawOptions: string | undefined,
+  deps: OrchestrationActionDeps = defaultDeps(),
+): Promise<void> {
+  if (!rawOptions) {
     throw new Error("build-toggle requires a JSON options argument");
   }
-  const opts = JSON.parse(raw) as {
+  const opts = JSON.parse(rawOptions) as {
     uiMode: "dev" | "static";
     instanceRunMode: "source" | "compiled";
     forceBuild?: boolean;
   };
-  await runAnsibleBuildToggle(opts, emitEvent);
+  await deps.runAnsibleBuildToggle(opts, deps.emit);
 }
 
-async function runPlaybook(): Promise<void> {
-  const playbookRelative = Deno.args[1];
+export async function runPlaybook(
+  playbookRelative: string | undefined,
+  extraArgs: string[],
+  deps: OrchestrationActionDeps = defaultDeps(),
+): Promise<void> {
   if (!playbookRelative) {
     throw new Error("playbook requires a playbook path argument");
   }
-  const extraArgs = Deno.args.slice(2);
-  const playbook = join(ORCHESTRATION_DIR, "playbooks", playbookRelative);
+  const playbook = join(
+    deps.orchestrationDir,
+    "playbooks",
+    playbookRelative,
+  );
   if (PLAYBOOKS_NEEDING_DOCKER_GALAXY.has(playbookRelative)) {
-    await ensureGalaxyDockerRole();
+    await deps.ensureGalaxyDockerRole();
   }
   // Co-located dev playbooks need dev user + runtime context from the daemon env;
   // CLI extra-vars passed after dev defaults win on duplicate keys.
-  await runPlaybookStreaming(
-    ANSIBLE_PLAYBOOK_BIN,
+  await deps.runPlaybookStreaming(
+    deps.ansiblePlaybookBin,
     [
       "-i",
       "localhost,",
@@ -317,35 +381,53 @@ async function runPlaybook(): Promise<void> {
       playbook,
     ],
     {
-      cwd: ANSIBLE_PLAYBOOK_CWD,
+      cwd: deps.ansiblePlaybookCwd,
       env: ansibleEnv(),
       quiet: true,
-      onEvent: emitEvent,
+      onEvent: deps.emit,
     },
   );
 }
 
-const action = Deno.args[0];
-if (!action) {
-  usage();
-}
-
-try {
+/**
+ * Dispatch a CLI action without exiting the process. Unknown actions throw so
+ * tests can assert; the CLI entry maps that to usage() / exit 2.
+ */
+export async function dispatchOrchestrationAction(
+  action: string,
+  args: string[],
+  deps: OrchestrationActionDeps = defaultDeps(),
+): Promise<"skipped" | "ran" | void> {
   switch (action) {
     case "instance-dev-install":
-      await runInstanceDevInstall(Deno.args.includes("--if-needed"));
-      break;
+      return await runInstanceDevInstall(args.includes("--if-needed"), deps);
     case "build-toggle":
-      await runBuildToggle();
-      break;
+      await runBuildToggle(args[0], deps);
+      return;
     case "playbook":
-      await runPlaybook();
-      break;
+      await runPlaybook(args[0], args.slice(1), deps);
+      return;
     default:
-      usage();
+      throw new Error(`unknown orchestration action: ${action}`);
   }
-} catch (err) {
-  const message = err instanceof Error ? err.message : String(err);
-  console.error(message);
-  Deno.exit(1);
+}
+
+if (import.meta.main) {
+  applyDaemonEnvToProcess();
+
+  const action = Deno.args[0];
+  if (!action) {
+    usage();
+  }
+
+  try {
+    await dispatchOrchestrationAction(action, Deno.args.slice(1));
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.startsWith("unknown orchestration action:")) {
+      usage();
+    }
+    console.error(message);
+    Deno.exit(1);
+  }
 }

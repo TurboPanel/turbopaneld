@@ -1,8 +1,12 @@
 export {
   type ContainerInspect,
   type ContainerSummary,
+  type DockerClientOptions,
+  type DockerFetch,
   DockerClient,
   type DockerEvent,
+  isStreamAbortError,
+  parseEventLines,
   resolveDockerSocket,
 } from "./client.ts";
 export {

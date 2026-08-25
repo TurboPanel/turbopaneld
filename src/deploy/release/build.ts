@@ -55,6 +55,25 @@ export type ReleaseBuildParams = {
   workingDir: string;
   onOutput?: ReleaseOutputHandler;
   redactSummary?: CommandSummaryRedactor;
+  /**
+   * Test seam for prlimit detection. Defaults to checking {@link PRLIMIT_BIN}.
+   * Host-free suites force `false` so the no-caps path is covered without
+   * depending on whether `/usr/bin/prlimit` exists in the guest.
+   */
+  hasPrlimit?: () => Promise<boolean>;
+  /**
+   * Test seam for the build command runner. Defaults to spawning `sh` /
+   * `prlimit`. Injected runners receive the same `(command, cwd, env,
+   * withPrlimit, …)` shape so they can assert the fallback without forking.
+   */
+  runCommand?: (
+    command: string,
+    cwd: string,
+    env: Record<string, string>,
+    withPrlimit: boolean,
+    onOutput?: ReleaseOutputHandler,
+    redactSummary?: CommandSummaryRedactor,
+  ) => Promise<void>;
 };
 
 /**
@@ -89,8 +108,11 @@ async function prlimitAvailable(): Promise<boolean> {
   }
 }
 
-/** `prlimit --cpu=… --as=… --fsize=… -- sh -c <command>`, or a bare `sh -c`. */
-function buildInvocation(
+/**
+ * `prlimit --cpu=… --as=… --fsize=… -- sh -c <command>`, or a bare `sh -c`.
+ * Exported so host-free suites can assert the argv shape without spawning.
+ */
+export function buildInvocation(
   command: string,
   withPrlimit: boolean,
 ): { bin: string; args: string[] } {
@@ -171,7 +193,7 @@ export async function runReleaseBuild(
   ].filter((command): command is string => Boolean(command));
   if (commands.length === 0) return;
 
-  const withPrlimit = await prlimitAvailable();
+  const withPrlimit = await (params.hasPrlimit ?? prlimitAvailable)();
   if (!withPrlimit) {
     params.onOutput?.(
       "stderr",
@@ -179,9 +201,10 @@ export async function runReleaseBuild(
     );
   }
   const env = buildEnvironment(params.build, params.workingDir);
+  const execute = params.runCommand ?? runBuildCommand;
   for (const command of commands) {
     params.onOutput?.("stdout", `$ ${command}`);
-    await runBuildCommand(
+    await execute(
       command,
       params.workingDir,
       env,

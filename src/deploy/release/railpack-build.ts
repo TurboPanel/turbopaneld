@@ -597,14 +597,14 @@ async function runToolStreamed(
     label: string;
     onOutput?: ReleaseOutputHandler;
     redactSummary?: CommandSummaryRedactor;
+    /** Test-only override; production keeps {@link RAILPACK_BUILD_TIMEOUT_MS}. */
+    timeoutMs?: number;
   },
 ): Promise<void> {
   const redactSummary = options.redactSummary ?? defaultSummaryRedactor;
+  const timeoutMs = options.timeoutMs ?? RAILPACK_BUILD_TIMEOUT_MS;
   const controller = new AbortController();
-  const timeout = setTimeout(
-    () => controller.abort(),
-    RAILPACK_BUILD_TIMEOUT_MS,
-  );
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const child = new Deno.Command(bin, {
       args,
@@ -640,7 +640,7 @@ async function runToolStreamed(
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") {
       throw new Error(
-        `${options.label} timed out after ${RAILPACK_BUILD_TIMEOUT_MS}ms`,
+        `${options.label} timed out after ${timeoutMs}ms`,
       );
     }
     throw err;
@@ -661,11 +661,14 @@ async function ensureBuildkitDaemon(
   tools: BuildkitRailpackTools,
   layout: Pick<LayoutPaths, "daemonStateDir">,
   onOutput?: ReleaseOutputHandler,
+  timeouts?: { readyMs?: number; pollMs?: number },
 ): Promise<string> {
   const socketDir = join(layout.daemonStateDir, "release-build");
   await Deno.mkdir(socketDir, { recursive: true, mode: 0o700 });
   const socketPath = join(socketDir, BUILDKITD_SOCKET_NAME);
   const addr = `unix://${socketPath}`;
+  const readyMs = timeouts?.readyMs ?? BUILDKITD_READY_TIMEOUT_MS;
+  const pollMs = timeouts?.pollMs ?? BUILDKITD_POLL_INTERVAL_MS;
 
   if (await buildkitdResponds(tools.buildctl, addr)) return addr;
 
@@ -680,15 +683,13 @@ async function ensureBuildkitDaemon(
   }).spawn();
   child.unref();
 
-  const deadline = Date.now() + BUILDKITD_READY_TIMEOUT_MS;
+  const deadline = Date.now() + readyMs;
   while (Date.now() < deadline) {
     if (await buildkitdResponds(tools.buildctl, addr)) return addr;
-    await new Promise((resolve) =>
-      setTimeout(resolve, BUILDKITD_POLL_INTERVAL_MS)
-    );
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
   }
   throw new Error(
-    `buildkitd did not become ready on ${socketPath} within ${BUILDKITD_READY_TIMEOUT_MS}ms`,
+    `buildkitd did not become ready on ${socketPath} within ${readyMs}ms`,
   );
 }
 
@@ -723,6 +724,34 @@ export type RailpackBuildParams = {
   layout: Pick<LayoutPaths, "daemonStateDir">;
   onOutput?: ReleaseOutputHandler;
   redactSummary?: CommandSummaryRedactor;
+};
+
+/** Optional test seams for {@link runRailpackBuild}. */
+export type RunRailpackBuildDeps = {
+  runTool?: (
+    bin: string,
+    args: string[],
+    options: {
+      cwd: string;
+      env: Record<string, string>;
+      label: string;
+      onOutput?: ReleaseOutputHandler;
+      redactSummary?: CommandSummaryRedactor;
+      timeoutMs?: number;
+    },
+  ) => Promise<void>;
+  ensureDaemon?: (
+    tools: BuildkitRailpackTools,
+    layout: Pick<LayoutPaths, "daemonStateDir">,
+    onOutput?: ReleaseOutputHandler,
+  ) => Promise<string>;
+  inspectImage?: (imageTag: string) => Promise<string | undefined>;
+  /** Test-only override for streamed-tool wall clock. */
+  toolTimeoutMs?: number;
+  /** Test-only override for how long we wait for a freshly spawned buildkitd. */
+  buildkitdReadyTimeoutMs?: number;
+  /** Test-only override for the buildkitd readiness poll interval. */
+  buildkitdPollIntervalMs?: number;
 };
 
 export type RailpackBuildResult = {
@@ -783,31 +812,46 @@ async function resolveLoadedImageDigest(
  */
 export async function runRailpackBuild(
   params: RailpackBuildParams,
+  deps?: RunRailpackBuildDeps,
 ): Promise<RailpackBuildResult> {
   const env = railpackToolEnvironment(params.build, params.workingDir);
   const planPath = join(params.scratchDir, RAILPACK_PLAN_FILENAME);
   const imageTarPath = join(params.scratchDir, RAILPACK_IMAGE_TAR_FILENAME);
+  const runTool = deps?.runTool ?? runToolStreamed;
+  const toolOptions = {
+    cwd: params.workingDir,
+    env,
+    ...(params.onOutput === undefined ? {} : { onOutput: params.onOutput }),
+    ...(params.redactSummary === undefined
+      ? {}
+      : { redactSummary: params.redactSummary }),
+    ...(deps?.toolTimeoutMs === undefined
+      ? {}
+      : { timeoutMs: deps.toolTimeoutMs }),
+  };
 
   params.onOutput?.("stdout", "$ railpack prepare");
-  await runToolStreamed(
+  await runTool(
     params.tools.railpack,
     ["prepare", params.workingDir, "--plan-out", planPath],
-    {
-      cwd: params.workingDir,
-      env,
-      label: "railpack prepare",
-      ...(params.onOutput === undefined ? {} : { onOutput: params.onOutput }),
-      ...(params.redactSummary === undefined
-        ? {}
-        : { redactSummary: params.redactSummary }),
-    },
+    { ...toolOptions, label: "railpack prepare" },
   );
 
-  const addr = await ensureBuildkitDaemon(
-    params.tools,
-    params.layout,
-    params.onOutput,
-  );
+  const addr = deps?.ensureDaemon
+    ? await deps.ensureDaemon(params.tools, params.layout, params.onOutput)
+    : await ensureBuildkitDaemon(
+      params.tools,
+      params.layout,
+      params.onOutput,
+      {
+        ...(deps?.buildkitdReadyTimeoutMs === undefined
+          ? {}
+          : { readyMs: deps.buildkitdReadyTimeoutMs }),
+        ...(deps?.buildkitdPollIntervalMs === undefined
+          ? {}
+          : { pollMs: deps.buildkitdPollIntervalMs }),
+      },
+    );
   await Deno.mkdir(params.cacheDir, { recursive: true, mode: 0o700 });
 
   // The frontend is mounted from the vendored layout and addressed by digest.
@@ -847,31 +891,22 @@ export async function runRailpackBuild(
   }
 
   params.onOutput?.("stdout", `$ buildctl build (${frontend})`);
-  await runToolStreamed(params.tools.buildctl, buildArgs, {
-    cwd: params.workingDir,
-    env,
+  await runTool(params.tools.buildctl, buildArgs, {
+    ...toolOptions,
     label: "buildctl build",
-    ...(params.onOutput === undefined ? {} : { onOutput: params.onOutput }),
-    ...(params.redactSummary === undefined
-      ? {}
-      : { redactSummary: params.redactSummary }),
   });
 
   params.onOutput?.("stdout", `$ docker load ${params.imageTag}`);
-  await runToolStreamed("docker", ["load", "-i", imageTarPath], {
-    cwd: params.workingDir,
-    env,
+  await runTool("docker", ["load", "-i", imageTarPath], {
+    ...toolOptions,
     label: "docker load",
-    ...(params.onOutput === undefined ? {} : { onOutput: params.onOutput }),
-    ...(params.redactSummary === undefined
-      ? {}
-      : { redactSummary: params.redactSummary }),
   });
   // The tarball is a second full copy of the image; drop it as soon as the
   // store has it rather than waiting for the scratch sweep.
   await Deno.remove(imageTarPath).catch(() => {});
 
-  const imageDigest = await resolveLoadedImageDigest(params.imageTag);
+  const inspectImage = deps?.inspectImage ?? resolveLoadedImageDigest;
+  const imageDigest = await inspectImage(params.imageTag);
   return {
     imageTag: params.imageTag,
     ...(imageDigest === undefined ? {} : { imageDigest }),

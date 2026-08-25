@@ -44,6 +44,20 @@ export type ReleaseOutputHandler = (
 /** How {@link CheckoutParams.credential} must be handed to git. */
 export type CheckoutCredentialKind = "token" | "ssh_key";
 
+/** Result of one git invocation — used by {@link checkoutRelease} and tests. */
+export type GitRunResult = { success: boolean; stdout: string; stderr: string };
+
+/**
+ * Host-free test seam for {@link checkoutRelease}. Production uses the real
+ * `git` binary; tests inject a fake that never spawns.
+ */
+export type GitRunner = (
+  args: string[],
+  cwd: string,
+  env: Record<string, string>,
+  onOutput?: ReleaseOutputHandler,
+) => Promise<GitRunResult>;
+
 export type CheckoutParams = {
   cloneUrl: string;
   ref: string;
@@ -67,6 +81,8 @@ export type CheckoutParams = {
   credentialUsername?: string;
   onOutput?: ReleaseOutputHandler;
   redactSummary?: CommandSummaryRedactor;
+  /** Test seam — defaults to spawning real `git`. */
+  runGit?: GitRunner;
 };
 
 export type CheckoutResult = {
@@ -233,8 +249,6 @@ export async function removeCheckoutCredentialFiles(
   }
 }
 
-type GitRunResult = { success: boolean; stdout: string; stderr: string };
-
 async function runGit(
   args: string[],
   cwd: string,
@@ -350,11 +364,12 @@ export async function checkoutRelease(
   params: CheckoutParams,
 ): Promise<CheckoutResult> {
   const redactSummary = params.redactSummary ?? defaultSummaryRedactor;
+  const git = params.runGit ?? runGit;
   const workingDir = join(params.scratchDir, "source");
   const credentialFiles = await writeCheckoutCredentialFiles(params);
   const env = gitEnvironment(credentialFiles, params.scratchDir);
   try {
-    const clone = await runGit(
+    const clone = await git(
       [
         "clone",
         "--depth",
@@ -378,7 +393,7 @@ export async function checkoutRelease(
       );
     }
 
-    const head = await runGit(["rev-parse", "HEAD"], workingDir, env);
+    const head = await git(["rev-parse", "HEAD"], workingDir, env);
     const clonedSha = head.success ? head.stdout : "";
     if (clonedSha === params.commitSha) {
       return { workingDir, commitSha: clonedSha };
@@ -386,7 +401,7 @@ export async function checkoutRelease(
 
     // The pinned commit is not what `--branch <ref>` produced — fetch it
     // explicitly rather than silently building a different commit.
-    const fetch = await runGit(
+    const fetch = await git(
       ["fetch", "--depth", "1", "origin", params.commitSha],
       workingDir,
       env,
@@ -398,7 +413,7 @@ export async function checkoutRelease(
           `git fetch of pinned commit failed`,
       );
     }
-    const checkout = await runGit(
+    const checkout = await git(
       ["checkout", "--detach", "FETCH_HEAD"],
       workingDir,
       env,
@@ -410,7 +425,7 @@ export async function checkoutRelease(
           "git checkout of pinned commit failed",
       );
     }
-    const pinned = await runGit(["rev-parse", "HEAD"], workingDir, env);
+    const pinned = await git(["rev-parse", "HEAD"], workingDir, env);
     return {
       workingDir,
       commitSha: pinned.success ? pinned.stdout : params.commitSha,

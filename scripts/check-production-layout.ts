@@ -29,17 +29,30 @@ import {
   PROD_RUNTIME_DIR_DEFAULT,
   resolveLayout,
   resolveRuntimesDir,
+  type LayoutPaths,
 } from "../src/paths/layout.ts";
 
 const repoRoot = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
-const failures: string[] = [];
+export function recordLayoutMismatch(
+  failures: string[],
+  label: string,
+  actual: string,
+  expected: string,
+): void {
+  if (actual !== expected) {
+    failures.push(`layout ${label}: expected "${expected}", got "${actual}"`);
+  }
+}
 
 /** CI verify extract trees must live in mktemp dirs, never in git. */
-async function assertReleaseRootVerifyNotTracked(): Promise<void> {
+export async function assertReleaseRootVerifyNotTracked(
+  failures: string[],
+  root = repoRoot,
+): Promise<void> {
   const { code, stdout } = await new Deno.Command("git", {
     args: ["ls-files", "release-root-verify-*"],
-    cwd: repoRoot,
+    cwd: root,
     stdout: "piped",
     stderr: "null",
   }).output();
@@ -53,94 +66,90 @@ async function assertReleaseRootVerifyNotTracked(): Promise<void> {
   );
 }
 
-function expect(label: string, actual: string, expected: string): void {
-  if (actual !== expected) {
-    failures.push(`layout ${label}: expected "${expected}", got "${actual}"`);
+export function assertProductionLayout(
+  failures: string[],
+  prod: LayoutPaths,
+): void {
+  recordLayoutMismatch(failures, "mode", prod.mode, "production");
+  recordLayoutMismatch(failures, "home", prod.home, "/opt/turbopanel");
+  recordLayoutMismatch(failures, "binDir", prod.binDir, "/opt/turbopanel/bin");
+  recordLayoutMismatch(failures, "libDir", prod.libDir, "/opt/turbopanel/lib");
+  recordLayoutMismatch(failures, "runtimeDir", prod.runtimeDir, "/opt/turbopanel/vendor");
+  recordLayoutMismatch(failures, "runtimesDir", prod.runtimesDir, "/opt/turbopanel/vendor");
+  recordLayoutMismatch(failures, "shareDir", prod.shareDir, "/opt/turbopanel/share");
+  recordLayoutMismatch(failures, "uiDir", prod.uiDir, "/opt/turbopanel/share/ui");
+  recordLayoutMismatch(
+    failures,
+    "orchestrationDir",
+    prod.orchestrationDir,
+    "/opt/turbopanel/share/orchestration",
+  );
+  recordLayoutMismatch(failures, "configDir", prod.configDir, "/etc/turbopanel");
+  recordLayoutMismatch(failures, "stateDir", prod.stateDir, "/var/lib/turbopanel");
+  recordLayoutMismatch(failures, "daemonStateDir", prod.daemonStateDir, "/var/lib/turbopanel");
+  recordLayoutMismatch(failures, "logDir", prod.logDir, "/var/log/turbopanel");
+  recordLayoutMismatch(failures, "runDir", prod.runDir, "/run/turbopanel");
+  recordLayoutMismatch(failures, "principalHomeRoot", prod.principalHomeRoot, "/srv/users");
+  recordLayoutMismatch(
+    failures,
+    "daemonRootDefault",
+    prod.daemonRootDefault,
+    "/opt/turbopanel/lib/daemon",
+  );
+  recordLayoutMismatch(failures, "instanceDir", prod.instanceDir, "/opt/turbopanel/lib/instance");
+
+  recordLayoutMismatch(
+    failures,
+    "daemon binary",
+    join(prod.binDir, "turbopaneld"),
+    "/opt/turbopanel/bin/turbopaneld",
+  );
+  recordLayoutMismatch(
+    failures,
+    "js fallback",
+    join(prod.binDir, "turbopaneld.js"),
+    "/opt/turbopanel/bin/turbopaneld.js",
+  );
+
+  if (prod.orchestrationDir.includes("/platform/")) {
+    failures.push(
+      `production orchestrationDir leaked the dev checkout: ${prod.orchestrationDir}`,
+    );
+  }
+
+  if (prod.instanceDir.includes("/platform/")) {
+    failures.push(
+      `production instanceDir leaked the dev checkout: ${prod.instanceDir}`,
+    );
+  }
+
+  if (prod.daemonRootDefault.includes("/platform/")) {
+    failures.push(
+      `production daemonRootDefault leaked the dev checkout: ${prod.daemonRootDefault}`,
+    );
   }
 }
 
-// --- 0. No committed CI verify extract trees --------------------------------
-await assertReleaseRootVerifyNotTracked();
-
-// --- 1. Production FHS tree contract ----------------------------------------
-const prod = resolveLayout({}, { forceMode: "production" });
-
-expect("mode", prod.mode, "production");
-expect("home", prod.home, "/opt/turbopanel");
-expect("binDir", prod.binDir, "/opt/turbopanel/bin");
-expect("libDir", prod.libDir, "/opt/turbopanel/lib");
-expect("runtimeDir", prod.runtimeDir, "/opt/turbopanel/vendor");
-expect("runtimesDir", prod.runtimesDir, "/opt/turbopanel/vendor");
-expect("shareDir", prod.shareDir, "/opt/turbopanel/share");
-expect("uiDir", prod.uiDir, "/opt/turbopanel/share/ui");
-expect(
-  "orchestrationDir",
-  prod.orchestrationDir,
-  "/opt/turbopanel/share/orchestration",
-);
-expect("configDir", prod.configDir, "/etc/turbopanel");
-expect("stateDir", prod.stateDir, "/var/lib/turbopanel");
-expect("daemonStateDir", prod.daemonStateDir, "/var/lib/turbopanel");
-expect("logDir", prod.logDir, "/var/log/turbopanel");
-expect("runDir", prod.runDir, "/run/turbopanel");
-expect("principalHomeRoot", prod.principalHomeRoot, "/srv/users");
-expect(
-  "daemonRootDefault",
-  prod.daemonRootDefault,
-  "/opt/turbopanel/lib/daemon",
-);
-expect("instanceDir", prod.instanceDir, "/opt/turbopanel/lib/instance");
-
-// Binary + helper entrypoints derived from the resolved bin dir.
-expect(
-  "daemon binary",
-  join(prod.binDir, "turbopaneld"),
-  "/opt/turbopanel/bin/turbopaneld",
-);
-expect(
-  "js fallback",
-  join(prod.binDir, "turbopaneld.js"),
-  "/opt/turbopanel/bin/turbopaneld.js",
-);
-
-if (prod.orchestrationDir.includes("/platform/")) {
-  failures.push(
-    `production orchestrationDir leaked the dev checkout: ${prod.orchestrationDir}`,
-  );
-}
-
-if (prod.instanceDir.includes("/platform/")) {
-  failures.push(
-    `production instanceDir leaked the dev checkout: ${prod.instanceDir}`,
-  );
-}
-
-if (prod.daemonRootDefault.includes("/platform/")) {
-  failures.push(
-    `production daemonRootDefault leaked the dev checkout: ${prod.daemonRootDefault}`,
-  );
-}
-
-// --- 2. Daemon unit template must derive lock path from runtime_socket_dir ---
-const DAEMON_UNIT_TEMPLATE = join(
-  repoRoot,
-  "orchestration/roles/daemon-launch/templates/turbopaneld.service.j2",
-);
-const daemonUnitText = await Deno.readTextFile(DAEMON_UNIT_TEMPLATE);
 const HARDCODED_DAEMON_LOCK = /\/run\/turbopanel\/daemon\.lock/;
-if (HARDCODED_DAEMON_LOCK.test(daemonUnitText)) {
-  failures.push(
-    "orchestration/roles/daemon-launch/templates/turbopaneld.service.j2 hardcodes /run/turbopanel/daemon.lock; use {{ runtime_socket_dir }}/daemon.lock",
-  );
-}
-if (!/\{\{\s*runtime_socket_dir\s*\}\}\/daemon\.lock/.test(daemonUnitText)) {
-  failures.push(
-    "orchestration/roles/daemon-launch/templates/turbopaneld.service.j2 must use {{ runtime_socket_dir }}/daemon.lock for flock ExecStart",
-  );
+const RUNTIME_SOCKET_DIR_LOCK = /\{\{\s*runtime_socket_dir\s*\}\}\/daemon\.lock/;
+
+export function assertDaemonUnitLock(
+  failures: string[],
+  daemonUnitText: string,
+): void {
+  if (HARDCODED_DAEMON_LOCK.test(daemonUnitText)) {
+    failures.push(
+      "orchestration/roles/daemon-launch/templates/turbopaneld.service.j2 hardcodes /run/turbopanel/daemon.lock; use {{ runtime_socket_dir }}/daemon.lock",
+    );
+  }
+  if (!RUNTIME_SOCKET_DIR_LOCK.test(daemonUnitText)) {
+    failures.push(
+      "orchestration/roles/daemon-launch/templates/turbopaneld.service.j2 must use {{ runtime_socket_dir }}/daemon.lock for flock ExecStart",
+    );
+  }
 }
 
-// --- 3. Forbidden references in production source ---------------------------
-const SKIP_DIRS = new Set([
+export const SKIP_DIRS = new Set([
   ".git",
   "node_modules",
   "dist",
@@ -150,39 +159,34 @@ const SKIP_DIRS = new Set([
 ]);
 
 /** Untracked/vendored build outputs that must not be scanned. */
-function isSkippedPath(rel: string): boolean {
+export function isSkippedPath(rel: string): boolean {
   // Galaxy docker: geerlingguy.docker/ or geerlingguy/docker/
   return /(^|\/)roles\/geerlingguy([./]|$)/.test(rel);
 }
 
-async function* walk(dir: string): AsyncGenerator<string> {
+async function* walk(dir: string, root: string): AsyncGenerator<string> {
   for await (const entry of Deno.readDir(dir)) {
     const abs = join(dir, entry.name);
-    const rel = relative(repoRoot, abs);
+    const rel = relative(root, abs);
     if (entry.isDirectory) {
       if (SKIP_DIRS.has(entry.name) || isSkippedPath(rel)) continue;
-      yield* walk(abs);
+      yield* walk(abs, root);
     } else if (entry.isFile && !isSkippedPath(rel)) {
       yield abs;
     }
   }
 }
 
-// Both forbidden-reference checks scan the same curated managed-install roots
-// so a hardcoded dev checkout path in main.ts, scripts/run.sh,
-// or a production playbook/template cannot slip through CI. Each pattern keeps
-// its own allowlist of files that legitimately name the forbidden string.
-const PRODUCTION_SCAN_ROOTS = ["src", "scripts", "orchestration", "main.ts"];
-const SCAN_EXTENSIONS = /\.(ts|sh|yml|yaml|j2)$/;
+export const PRODUCTION_SCAN_ROOTS = [
+  "src",
+  "scripts",
+  "orchestration",
+  "main.ts",
+];
+export const SCAN_EXTENSIONS = /\.(ts|sh|yml|yaml|j2)$/;
 
-// `/opt/turbopanel/platform(/daemon)` is the co-located dev checkout root. The
-// centralized layout module owns it as the development-mode default; a handful
-// of dev-only scripts and `turbopanel_dev_user`-gated orchestration assets also
-// reference it from their dev branches. Everything else in the production
-// surface must not name the dev tree. Tests are excluded (they assert both
-// dev and prod trees by design).
-const PLATFORM_REF = /\/opt\/turbopanel\/platform/;
-const PLATFORM_SCAN_ALLOWLIST = new Set([
+export const PLATFORM_REF = /\/opt\/turbopanel\/platform/;
+export const PLATFORM_SCAN_ALLOWLIST = new Set([
   "src/paths/layout.ts",
   "scripts/check-production-layout.ts",
   "scripts/run-orchestration-action.ts",
@@ -197,29 +201,23 @@ const PLATFORM_SCAN_ALLOWLIST = new Set([
   "orchestration/roles/mailpit/defaults/main.yml",
 ]);
 
-// TurboPanel's `share/ansible` is retired (production ships share/orchestration).
-// Do not flag Ansible's system collections path `/usr/share/ansible/…`.
-// The release verifiers and this checker legitimately name the retired path in
-// order to *reject* it, so they are allowlisted from the scan.
-const ANSIBLE_SHARE_REF = /(?<!\/usr\/)share\/ansible(\/|\b)/;
-const ANSIBLE_SCAN_ALLOWLIST = new Set([
+export const ANSIBLE_SHARE_REF = /(?<!\/usr\/)share\/ansible(\/|\b)/;
+export const ANSIBLE_SCAN_ALLOWLIST = new Set([
   "scripts/lib/release-artifacts.sh",
   "scripts/verify-release-root.sh",
   "scripts/check-production-layout.ts",
 ]);
 
-// Retired vendor trees — every caller must use TURBOPANEL_RUNTIMES_DIR / vendor.
-const RETIRED_RUNTIMES_REF = /\/opt\/turbopanel\/runtimes/;
-const RETIRED_LIB_RUNTIME_REF = /\/opt\/turbopanel\/lib\/runtime/;
-const RETIRED_RUNTIMES_SCAN_ALLOWLIST = new Set([
+export const RETIRED_RUNTIMES_REF = /\/opt\/turbopanel\/runtimes/;
+export const RETIRED_LIB_RUNTIME_REF = /\/opt\/turbopanel\/lib\/runtime/;
+export const RETIRED_RUNTIMES_SCAN_ALLOWLIST = new Set([
   "scripts/check-production-layout.ts",
   "src/dev-sync-apply.ts", // comment only: documents legacy path for operators
   "src/orchestration/cloudflared.ts", // comment only
 ]);
 
-// Unmanaged `/opt/turbopanel/vendor` literals outside approved layout modules.
-const RUNTIME_ROOT_LITERAL = /\/opt\/turbopanel\/vendor/;
-const RUNTIME_ROOT_SCAN_ALLOWLIST = new Set([
+export const RUNTIME_ROOT_LITERAL = /\/opt\/turbopanel\/vendor/;
+export const RUNTIME_ROOT_SCAN_ALLOWLIST = new Set([
   "src/paths/layout.ts",
   "src/orchestration/paths.test.ts",
   "scripts/check-production-layout.ts",
@@ -229,94 +227,73 @@ const RUNTIME_ROOT_SCAN_ALLOWLIST = new Set([
   "orchestration/roles/deno-runtime/meta/main.yml", // role description
 ]);
 
-for (const root of PRODUCTION_SCAN_ROOTS) {
-  const abs = join(repoRoot, root);
-  let stat: Deno.FileInfo;
-  try {
-    stat = await Deno.stat(abs);
-  } catch {
-    continue;
+export function collectForbiddenReferenceFailures(
+  rel: string,
+  text: string,
+  isTestFile = rel.endsWith(".test.ts"),
+): string[] {
+  const failures: string[] = [];
+  const lines = text.split("\n");
+
+  if (!isTestFile && !PLATFORM_SCAN_ALLOWLIST.has(rel)) {
+    lines.forEach((line, i) => {
+      if (PLATFORM_REF.test(line)) {
+        failures.push(
+          `${rel}:${
+            i + 1
+          } references the dev checkout /opt/turbopanel/platform in production source`,
+        );
+      }
+    });
   }
-  const files = stat.isDirectory ? walk(abs) : (async function* () {
-    yield abs;
-  })();
-  for await (const file of files) {
-    if (!SCAN_EXTENSIONS.test(file)) continue;
-    const rel = relative(repoRoot, file);
-    const text = await Deno.readTextFile(file);
-    const lines = text.split("\n");
 
-    if (!file.endsWith(".test.ts") && !PLATFORM_SCAN_ALLOWLIST.has(rel)) {
-      lines.forEach((line, i) => {
-        if (PLATFORM_REF.test(line)) {
-          failures.push(
-            `${rel}:${
-              i + 1
-            } references the dev checkout /opt/turbopanel/platform in production source`,
-          );
-        }
-      });
-    }
-
-    if (!ANSIBLE_SCAN_ALLOWLIST.has(rel)) {
-      lines.forEach((line, i) => {
-        if (ANSIBLE_SHARE_REF.test(line)) {
-          failures.push(
-            `${rel}:${
-              i + 1
-            } references retired share/ansible (use share/orchestration)`,
-          );
-        }
-      });
-    }
-
-    if (
-      !file.endsWith(".test.ts") && !RETIRED_RUNTIMES_SCAN_ALLOWLIST.has(rel)
-    ) {
-      lines.forEach((line, i) => {
-        if (RETIRED_RUNTIMES_REF.test(line)) {
-          failures.push(
-            `${rel}:${
-              i + 1
-            } references retired /opt/turbopanel/runtimes (use vendor contract)`,
-          );
-        }
-        if (RETIRED_LIB_RUNTIME_REF.test(line)) {
-          failures.push(
-            `${rel}:${
-              i + 1
-            } references retired /opt/turbopanel/lib/runtime (use vendor contract)`,
-          );
-        }
-      });
-    }
-
-    if (!file.endsWith(".test.ts") && !RUNTIME_ROOT_SCAN_ALLOWLIST.has(rel)) {
-      lines.forEach((line, i) => {
-        if (RUNTIME_ROOT_LITERAL.test(line)) {
-          failures.push(
-            `${rel}:${
-              i + 1
-            } hardcodes /opt/turbopanel/vendor outside approved layout modules`,
-          );
-        }
-      });
-    }
+  if (!ANSIBLE_SCAN_ALLOWLIST.has(rel)) {
+    lines.forEach((line, i) => {
+      if (ANSIBLE_SHARE_REF.test(line)) {
+        failures.push(
+          `${rel}:${
+            i + 1
+          } references retired share/ansible (use share/orchestration)`,
+        );
+      }
+    });
   }
+
+  if (!isTestFile && !RETIRED_RUNTIMES_SCAN_ALLOWLIST.has(rel)) {
+    lines.forEach((line, i) => {
+      if (RETIRED_RUNTIMES_REF.test(line)) {
+        failures.push(
+          `${rel}:${
+            i + 1
+          } references retired /opt/turbopanel/runtimes (use vendor contract)`,
+        );
+      }
+      if (RETIRED_LIB_RUNTIME_REF.test(line)) {
+        failures.push(
+          `${rel}:${
+            i + 1
+          } references retired /opt/turbopanel/lib/runtime (use vendor contract)`,
+        );
+      }
+    });
+  }
+
+  if (!isTestFile && !RUNTIME_ROOT_SCAN_ALLOWLIST.has(rel)) {
+    lines.forEach((line, i) => {
+      if (RUNTIME_ROOT_LITERAL.test(line)) {
+        failures.push(
+          `${rel}:${
+            i + 1
+          } hardcodes /opt/turbopanel/vendor outside approved layout modules`,
+        );
+      }
+    });
+  }
+
+  return failures;
 }
 
-// --- 4. resolveRuntimesDir matches production layout -----------------------
-if (
-  resolveRuntimesDir({}, { forceMode: "production" }) !==
-    PROD_RUNTIME_DIR_DEFAULT
-) {
-  failures.push(
-    `resolveRuntimesDir(production) must equal PROD_RUNTIME_DIR_DEFAULT (${PROD_RUNTIME_DIR_DEFAULT})`,
-  );
-}
-
-// --- 5. Retired production service identity fallbacks ----------------------
-const RETIRED_IDENTITY_PATTERNS: Array<{ label: string; re: RegExp }> = [
+export const RETIRED_IDENTITY_PATTERNS: Array<{ label: string; re: RegExp }> = [
   {
     label: "turbopaneli service identity fallback",
     re: /\belse\s+['"]turbopaneli['"]|\bdefault\(\s*['"]turbopaneli['"]\s*\)/,
@@ -331,43 +308,107 @@ const RETIRED_IDENTITY_PATTERNS: Array<{ label: string; re: RegExp }> = [
   },
 ];
 
-for (const root of PRODUCTION_SCAN_ROOTS) {
-  const abs = join(repoRoot, root);
-  let stat: Deno.FileInfo;
-  try {
-    stat = await Deno.stat(abs);
-  } catch {
-    continue;
-  }
-  const files = stat.isDirectory ? walk(abs) : (async function* () {
-    yield abs;
-  })();
-  for await (const file of files) {
-    if (!SCAN_EXTENSIONS.test(file)) continue;
-    const rel = relative(repoRoot, file);
-    const text = await Deno.readTextFile(file);
-    const lines = text.split("\n");
-    lines.forEach((line, i) => {
-      for (const { label, re } of RETIRED_IDENTITY_PATTERNS) {
-        if (re.test(line)) {
-          failures.push(
-            `${rel}:${i + 1} uses retired ${label} (use tp/tpctrl/tpcache)`,
-          );
-        }
+export function collectRetiredIdentityFailures(
+  rel: string,
+  text: string,
+): string[] {
+  const failures: string[] = [];
+  const lines = text.split("\n");
+  lines.forEach((line, i) => {
+    for (const { label, re } of RETIRED_IDENTITY_PATTERNS) {
+      if (re.test(line)) {
+        failures.push(
+          `${rel}:${i + 1} uses retired ${label} (use tp/tpctrl/tpcache)`,
+        );
       }
-    });
+    }
+  });
+  return failures;
+}
+
+export function assertRuntimesDirContract(failures: string[]): void {
+  if (
+    resolveRuntimesDir({}, { forceMode: "production" }) !==
+      PROD_RUNTIME_DIR_DEFAULT
+  ) {
+    failures.push(
+      `resolveRuntimesDir(production) must equal PROD_RUNTIME_DIR_DEFAULT (${PROD_RUNTIME_DIR_DEFAULT})`,
+    );
   }
 }
 
-if (failures.length > 0) {
-  console.error("Production layout check failed:\n");
-  for (const failure of failures) {
-    console.error(`  ✗ ${failure}`);
+export function reportLayoutFailures(
+  failures: string[],
+  io: {
+    error?: (message: string) => void;
+    log?: (message: string) => void;
+    exit?: (code: number) => void;
+  } = {},
+): void {
+  const error = io.error ?? ((message: string) => {
+    console.error(message);
+  });
+  const log = io.log ?? ((message: string) => {
+    console.log(message);
+  });
+  const exit = io.exit ?? ((code: number) => {
+    Deno.exit(code);
+  });
+  if (failures.length > 0) {
+    error("Production layout check failed:\n");
+    for (const failure of failures) {
+      error(`  ✗ ${failure}`);
+    }
+    error(`\n${failures.length} problem(s) found.`);
+    exit(1);
+    return;
   }
-  console.error(`\n${failures.length} problem(s) found.`);
-  Deno.exit(1);
+  log("Production layout check passed: FHS tree + no dev-checkout leaks.");
 }
 
-console.log(
-  "Production layout check passed: FHS tree + no dev-checkout leaks.",
-);
+export async function runProductionLayoutCheck(
+  root = repoRoot,
+): Promise<string[]> {
+  const failures: string[] = [];
+
+  await assertReleaseRootVerifyNotTracked(failures, root);
+
+  const prod = resolveLayout({}, { forceMode: "production" });
+  assertProductionLayout(failures, prod);
+
+  const daemonUnitPath = join(
+    root,
+    "orchestration/roles/daemon-launch/templates/turbopaneld.service.j2",
+  );
+  const daemonUnitText = await Deno.readTextFile(daemonUnitPath);
+  assertDaemonUnitLock(failures, daemonUnitText);
+
+  for (const scanRoot of PRODUCTION_SCAN_ROOTS) {
+    const abs = join(root, scanRoot);
+    let stat: Deno.FileInfo;
+    try {
+      stat = await Deno.stat(abs);
+    } catch {
+      continue;
+    }
+    const files = stat.isDirectory ? walk(abs, root) : (async function* () {
+      yield abs;
+    })();
+    for await (const file of files) {
+      if (!SCAN_EXTENSIONS.test(file)) continue;
+      const rel = relative(root, file);
+      const text = await Deno.readTextFile(file);
+      failures.push(
+        ...collectForbiddenReferenceFailures(rel, text),
+        ...collectRetiredIdentityFailures(rel, text),
+      );
+    }
+  }
+
+  assertRuntimesDirContract(failures);
+  return failures;
+}
+
+if (import.meta.main) {
+  reportLayoutFailures(await runProductionLayoutCheck());
+}

@@ -1,13 +1,17 @@
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import {
+  activeContainerLogCollector,
   ContainerLogCollector,
   createDeploymentIdentityLoader,
   createDeploymentManifestDiscovery,
   createDockerPsObservation,
   type DeploymentIdentityIndex,
+  isContainerLogCollectionEnabled,
   resetContainerLogCursorsForTests,
   resolveContainerLogTargets,
   splitDockerTimestampLine,
+  startContainerLogCollection,
+  stopContainerLogCollection,
 } from "./container-collector.ts";
 import type {
   ContainerLogBatchEvent,
@@ -491,5 +495,324 @@ test("a flush with no transport keeps its lines instead of dropping them", async
 
   assertEquals(batches[0]?.[0]?.message, "printed while disconnected");
   assertEquals(collector.stats().droppedEvents, 0);
+  resetContainerLogCursorsForTests();
+});
+
+test("splitDockerTimestampLine rejects a non-parseable stamp prefix", () => {
+  assertEquals(
+    splitDockerTimestampLine("2026-99-99T99:99:99Z still a line"),
+    { timestamp: null, message: "2026-99-99T99:99:99Z still a line" },
+  );
+});
+
+test("collector flushes when buffered bytes hit the flushBytes cap", async () => {
+  const batches: ContainerLogBatchEvent[][] = [];
+  let emitter: Emit | undefined;
+  const tiny = new ContainerLogCollector({
+    serverId: "srv-1",
+    now: () => 1_700_000_000_000,
+    flushIntervalMs: 1_000_000,
+    flushBytes: 20,
+    maxBatchSize: 100,
+    redactor: createMutableTranscriptRedactor([]),
+    discover: () => Promise.resolve([TARGET]),
+    tail: (params) => {
+      emitter = params.onLine;
+      return new Promise<void>((resolve) => {
+        params.signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+    },
+    send: (events) => {
+      batches.push([...events]);
+      return Promise.resolve();
+    },
+    setIntervalFn: (() => 0) as unknown as typeof setInterval,
+    clearIntervalFn: (() => {}) as unknown as typeof clearInterval,
+  });
+  tiny.start();
+  await tiny.reconcile();
+  assert(emitter, "tail was never attached");
+  emitter("stdout", "abcdefghijklmnopqrstuvwxyz");
+  await tiny.flush();
+  await tiny.stop();
+  assertEquals(batches.length >= 1, true);
+  assertEquals(
+    batches[0]?.[0]?.message.includes("abcdefghijklmnopqrstuvwxyz"),
+    true,
+  );
+});
+
+test("collector drops a blank line before buffering", async () => {
+  const batches: ContainerLogBatchEvent[][] = [];
+  const { collector, emit } = makeCollector({ targets: [TARGET], batches });
+  collector.start();
+  await collector.reconcile();
+  emit()("stdout", "");
+  await collector.flush();
+  await collector.stop();
+  assertEquals(batches.length, 0);
+});
+
+test("collector start/stop are idempotent and addSecrets extends the deny-set", async () => {
+  const batches: ContainerLogBatchEvent[][] = [];
+  const { collector, emit } = makeCollector({ targets: [TARGET], batches });
+  collector.start();
+  collector.start();
+  await collector.reconcile();
+  collector.addSecrets(["tokensecret"]);
+  emit()("stdout", "leak tokensecret here");
+  await collector.stop();
+  await collector.stop();
+  assertEquals(batches[0]?.[0]?.message, "leak *** here");
+  assertEquals(collector.running, false);
+});
+
+test("reconcile swallows discovery failures and updates existing targets", async () => {
+  let fail = false;
+  let targets: ContainerLogTarget[] = [TARGET];
+  let emitter: Emit | undefined;
+  const batches: ContainerLogBatchEvent[][] = [];
+  const collector = new ContainerLogCollector({
+    serverId: "srv-1",
+    now: () => 1_700_000_000_000,
+    flushIntervalMs: 1_000_000,
+    flushBytes: 1_000_000,
+    redactor: createMutableTranscriptRedactor([]),
+    discover: () => {
+      if (fail) return Promise.reject(new Error("discover boom"));
+      return Promise.resolve(targets);
+    },
+    tail: (params) => {
+      emitter = params.onLine;
+      return new Promise<void>((resolve) => {
+        params.signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+    },
+    send: (events) => {
+      batches.push([...events]);
+      return Promise.resolve();
+    },
+    setIntervalFn: (() => 0) as unknown as typeof setInterval,
+    clearIntervalFn: (() => {}) as unknown as typeof clearInterval,
+  });
+  collector.start();
+  await collector.reconcile();
+  assertEquals(collector.stats().tailedContainers, 1);
+
+  targets = [{
+    ...TARGET,
+    serviceId: "33333333-3333-4333-8333-333333333333",
+  }];
+  await collector.reconcile();
+  assertEquals(collector.stats().tailedContainers, 1);
+  assert(emitter);
+  emitter("stdout", "still attached");
+
+  fail = true;
+  await collector.reconcile();
+  assertEquals(collector.stats().tailedContainers, 1);
+
+  await collector.flush();
+  await collector.stop();
+  assertEquals(batches[0]?.[0]?.serviceId, "33333333-3333-4333-8333-333333333333");
+});
+
+test("constructor without layout or discover throws", () => {
+  assertThrows(
+    () =>
+      new ContainerLogCollector({
+        serverId: "srv-1",
+        send: () => Promise.resolve(),
+      }),
+    TypeError,
+    "needs a layout",
+  );
+});
+
+test("createDockerPsObservation skips blank ids and rows without compose labels", async () => {
+  const observe = createDockerPsObservation(() =>
+    Promise.resolve({
+      success: true,
+      code: 0,
+      stdout: [
+        JSON.stringify({
+          ID: "",
+          Labels: `com.docker.compose.project=${PROJECT_NAME}`,
+        }),
+        JSON.stringify({
+          ID: "ok1",
+          Labels:
+            `com.docker.compose.project=${PROJECT_NAME},com.docker.compose.service=web`,
+        }),
+        JSON.stringify({ ID: "ok2", Labels: "" }),
+      ].join("\n"),
+      stderr: "",
+    })
+  );
+  const rows = await observe();
+  assertEquals(rows.length, 2);
+  assertEquals(rows[0]?.containerId, "ok1");
+  assertEquals(rows[0]?.composeProject, PROJECT_NAME);
+  assertEquals(rows[0]?.composeService, "web");
+  assertEquals(rows[1]?.containerId, "ok2");
+  assertEquals(rows[1]?.composeProject, null);
+  assertEquals(rows[1]?.composeService, null);
+});
+
+test("createDockerPsObservation yields nothing when NDJSON is corrupted", async () => {
+  const observe = createDockerPsObservation(() =>
+    Promise.resolve({
+      success: true,
+      code: 0,
+      stdout: "{not-json\n" + JSON.stringify({ ID: "x", Labels: "" }),
+      stderr: "",
+    })
+  );
+  assertEquals(await observe(), []);
+});
+
+test("createDeploymentIdentityLoader skips invalid manifests", async () => {
+  const stateDir = await Deno.makeTempDir();
+  try {
+    const good = join(stateDir, "deployments", "proj-1", ENV_ID);
+    await Deno.mkdir(good, { recursive: true });
+    await writeDeploymentManifest(good, {
+      version: 2,
+      projectId: "proj-1",
+      environmentId: ENV_ID,
+      serverId: "srv-1",
+      generation: 1,
+      projectName: PROJECT_NAME,
+      composeSha256: "a".repeat(64),
+      services: {},
+      serviceIds: { web: SERVICE_ID },
+    });
+    const bad = join(stateDir, "deployments", "proj-2", ENV_ID);
+    await Deno.mkdir(bad, { recursive: true });
+    await Deno.writeTextFile(join(bad, "deployment.json"), "{bad");
+
+    const index = await createDeploymentIdentityLoader({ stateDir })();
+    assertEquals(index.size, 1);
+    assertEquals(index.get(PROJECT_NAME)?.environmentId, ENV_ID);
+  } finally {
+    await Deno.remove(stateDir, { recursive: true });
+  }
+});
+
+test("start/stopContainerLogCollection manages the process-wide collector", async () => {
+  resetContainerLogCursorsForTests();
+  await stopContainerLogCollection();
+  assertEquals(isContainerLogCollectionEnabled(), false);
+  assertEquals(activeContainerLogCollector(), undefined);
+
+  const batches: ContainerLogBatchEvent[][] = [];
+  const first = startContainerLogCollection({
+    serverId: "srv-1",
+    now: () => 1_700_000_000_000,
+    flushIntervalMs: 1_000_000,
+    flushBytes: 1_000_000,
+    redactor: createMutableTranscriptRedactor([]),
+    discover: () => Promise.resolve([TARGET]),
+    tail: (params) =>
+      new Promise<void>((resolve) => {
+        params.signal.addEventListener("abort", () => resolve(), { once: true });
+      }),
+    send: (events) => {
+      batches.push([...events]);
+      return Promise.resolve();
+    },
+    setIntervalFn: (() => 0) as unknown as typeof setInterval,
+    clearIntervalFn: (() => {}) as unknown as typeof clearInterval,
+  });
+  assertEquals(isContainerLogCollectionEnabled(), true);
+  assertEquals(activeContainerLogCollector(), first);
+
+  // Same server while running → no-op reuse.
+  const again = startContainerLogCollection({
+    serverId: "srv-1",
+    send: () => Promise.resolve(),
+    discover: () => Promise.resolve([]),
+  });
+  assertEquals(again, first);
+
+  // Different server replaces the collector.
+  const second = startContainerLogCollection({
+    serverId: "srv-2",
+    now: () => 1_700_000_000_000,
+    flushIntervalMs: 1_000_000,
+    flushBytes: 1_000_000,
+    redactor: createMutableTranscriptRedactor([]),
+    discover: () => Promise.resolve([]),
+    tail: (params) =>
+      new Promise<void>((resolve) => {
+        params.signal.addEventListener("abort", () => resolve(), { once: true });
+      }),
+    send: () => Promise.resolve(),
+    setIntervalFn: (() => 0) as unknown as typeof setInterval,
+    clearIntervalFn: (() => {}) as unknown as typeof clearInterval,
+  });
+  assertEquals(second.serverId, "srv-2");
+  assertEquals(activeContainerLogCollector()?.serverId, "srv-2");
+
+  await stopContainerLogCollection();
+  assertEquals(isContainerLogCollectionEnabled(), false);
+  await stopContainerLogCollection();
+  resetContainerLogCursorsForTests();
+});
+
+test("a non-timestamped line stamps the event from the injectable clock", async () => {
+  const batches: ContainerLogBatchEvent[][] = [];
+  const { collector, emit } = makeCollector({ targets: [TARGET], batches });
+  collector.start();
+  await collector.reconcile();
+  emit()("stdout", "plain without stamp");
+  await collector.flush();
+  await collector.stop();
+  assertEquals(batches[0]?.[0]?.timestamp, new Date(1_700_000_000_000).toISOString());
+  assertEquals(batches[0]?.[0]?.message, "plain without stamp");
+});
+
+test("tail retry re-attaches after the child exits while still running", async () => {
+  resetContainerLogCursorsForTests();
+  const attachCount = { n: 0 };
+  const batches: ContainerLogBatchEvent[][] = [];
+  let resolveFirst!: () => void;
+  const collector = new ContainerLogCollector({
+    serverId: "srv-1",
+    now: () => 1_700_000_000_000,
+    flushIntervalMs: 1_000_000,
+    flushBytes: 1_000_000,
+    tailRetryMs: 5,
+    redactor: createMutableTranscriptRedactor([]),
+    discover: () => Promise.resolve([TARGET]),
+    tail: (params) => {
+      attachCount.n += 1;
+      if (attachCount.n === 1) {
+        return new Promise<void>((resolve) => {
+          resolveFirst = resolve;
+          params.signal.addEventListener("abort", () => resolve(), {
+            once: true,
+          });
+        });
+      }
+      return new Promise<void>((resolve) => {
+        params.signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+    },
+    send: (events) => {
+      batches.push([...events]);
+      return Promise.resolve();
+    },
+    setIntervalFn: (() => 0) as unknown as typeof setInterval,
+    clearIntervalFn: (() => {}) as unknown as typeof clearInterval,
+  });
+  collector.start();
+  await collector.reconcile();
+  assertEquals(attachCount.n, 1);
+  // End the first tail without aborting the controller (docker child exit).
+  resolveFirst();
+  await new Promise((r) => setTimeout(r, 30));
+  assertEquals(attachCount.n >= 2, true);
+  await collector.stop();
   resetContainerLogCursorsForTests();
 });

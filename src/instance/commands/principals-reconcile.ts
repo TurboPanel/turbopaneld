@@ -21,25 +21,46 @@
  */
 
 import { logInfo } from "../../logger.ts";
-import { resolveLayout } from "../../paths/layout.ts";
-import { ensureSystemPrincipals } from "../../deploy/ensure-principal.ts";
-import { applySshAccess } from "../../deploy/ssh/apply.ts";
+import { resolveLayout, type LayoutPaths } from "../../paths/layout.ts";
+import {
+  ensureSystemPrincipals,
+  type PrincipalEnsureSpec,
+} from "../../deploy/ensure-principal.ts";
+import {
+  applySshAccess,
+  type PrincipalSshSpec,
+  type SshApplyPaths,
+  type SshApplyResult,
+} from "../../deploy/ssh/apply.ts";
 import type {
   PrincipalsReconcilePayload,
   PrincipalsReconcileResult,
 } from "./contracts.ts";
 
+export type PrincipalsReconcileDeps = {
+  resolveLayout?: () => LayoutPaths;
+  ensureSystemPrincipals?: (
+    layout: LayoutPaths,
+    principals: PrincipalEnsureSpec[],
+  ) => Promise<void>;
+  applySshAccess?: (
+    principals: readonly PrincipalSshSpec[],
+    paths?: SshApplyPaths,
+  ) => Promise<SshApplyResult>;
+};
+
 export async function handlePrincipalsReconcile(
   payload: PrincipalsReconcilePayload,
   _daemonReceivedAt: string,
+  deps: PrincipalsReconcileDeps = {},
 ): Promise<PrincipalsReconcileResult> {
-  const layout = resolveLayout();
+  const layout = (deps.resolveLayout ?? resolveLayout)();
 
   // Accounts, shells, and group membership first. `applySshAccess` writes files
   // keyed by username, so the account has to exist before its key file does —
   // and the access groups have to exist before `sshd` is asked to match on
   // them.
-  await ensureSystemPrincipals(
+  await (deps.ensureSystemPrincipals ?? ensureSystemPrincipals)(
     layout,
     payload.principals.map((principal) => ({
       principalId: principal.principalId,
@@ -57,7 +78,7 @@ export async function handlePrincipalsReconcile(
     })),
   );
 
-  const ssh = await applySshAccess(
+  const ssh = await (deps.applySshAccess ?? applySshAccess)(
     payload.principals.map((principal) => ({
       username: principal.username,
       // Absent means **none** here, unlike on a deploy payload where it means

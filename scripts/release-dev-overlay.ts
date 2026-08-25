@@ -30,7 +30,7 @@ async function gitShortSha(): Promise<string> {
   return new TextDecoder().decode(result.stdout).trim().toLowerCase();
 }
 
-function stampBuildInfo(
+export function stampBuildInfo(
   source: string,
   identity: { commit: string; buildId: string; builtAt: string },
 ): string {
@@ -54,31 +54,36 @@ async function runCompileAll(): Promise<void> {
   }
 }
 
-const sha = await gitShortSha();
-const builtAt = new Date();
-const commit = `${sha}+${Math.floor(builtAt.getTime() / 1000)}`;
-const identity = {
-  commit,
-  buildId: `dev-${commit}`,
-  builtAt: builtAt.toISOString(),
-};
+if (import.meta.main) {
+  const sha = await gitShortSha();
+  const builtAt = new Date();
+  const commit = `${sha}+${Math.floor(builtAt.getTime() / 1000)}`;
+  const identity = {
+    commit,
+    buildId: `dev-${commit}`,
+    builtAt: builtAt.toISOString(),
+  };
 
-const original = await Deno.readTextFile(BUILD_INFO_PATH);
-let failed = false;
-try {
-  await Deno.writeTextFile(BUILD_INFO_PATH, stampBuildInfo(original, identity));
-  console.log(
-    `release-dev-overlay: stamped build-info commit=${identity.commit} buildId=${identity.buildId}`,
-  );
-  await runCompileAll();
-  await writeDevChannelCatalog(identity);
-} catch (error) {
-  failed = true;
-  console.error(
-    error instanceof Error ? error.message : String(error),
-  );
-} finally {
-  await Deno.writeTextFile(BUILD_INFO_PATH, original);
-  console.log("release-dev-overlay: restored src/build-info.ts");
+  const original = await Deno.readTextFile(BUILD_INFO_PATH);
+  let failed = false;
+  try {
+    await Deno.writeTextFile(
+      BUILD_INFO_PATH,
+      stampBuildInfo(original, identity),
+    );
+    console.log(
+      `release-dev-overlay: stamped build-info commit=${identity.commit} buildId=${identity.buildId}`,
+    );
+    await runCompileAll();
+    await writeDevChannelCatalog(identity);
+  } catch (error) {
+    failed = true;
+    console.error(
+      error instanceof Error ? error.message : String(error),
+    );
+  } finally {
+    await Deno.writeTextFile(BUILD_INFO_PATH, original);
+    console.log("release-dev-overlay: restored src/build-info.ts");
+  }
+  if (failed) Deno.exit(1);
 }
-if (failed) Deno.exit(1);

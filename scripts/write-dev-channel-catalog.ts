@@ -17,7 +17,7 @@ import type {
 const ROOT = dirname(dirname(fromFileUrl(import.meta.url)));
 const DIST = join(ROOT, "dist");
 
-const ARTIFACTS = {
+export const ARTIFACTS = {
   "linux-amd64": "turbopaneld-amd64.tar.zst",
   "linux-arm64": "turbopaneld-arm64.tar.zst",
   jsFallback: "turbopaneld.js.tar.zst",
@@ -30,8 +30,11 @@ export type OverlayBuildIdentity = {
   builtAt: string;
 };
 
-async function artifactFromDist(filename: string): Promise<ArtifactEntry> {
-  const path = join(DIST, filename);
+export async function artifactFromDist(
+  filename: string,
+  distDir = DIST,
+): Promise<ArtifactEntry> {
+  const path = join(distDir, filename);
   let data: Uint8Array;
   try {
     data = await Deno.readFile(path);
@@ -56,11 +59,12 @@ async function artifactFromDist(filename: string): Promise<ArtifactEntry> {
 
 export async function writeDevChannelCatalog(
   identity: OverlayBuildIdentity,
+  distDir = DIST,
 ): Promise<void> {
-  const binaryAmd64 = await artifactFromDist(ARTIFACTS["linux-amd64"]);
-  const binaryArm64 = await artifactFromDist(ARTIFACTS["linux-arm64"]);
-  const jsFallback = await artifactFromDist(ARTIFACTS.jsFallback);
-  const orchestration = await artifactFromDist(ARTIFACTS.orchestration);
+  const binaryAmd64 = await artifactFromDist(ARTIFACTS["linux-amd64"], distDir);
+  const binaryArm64 = await artifactFromDist(ARTIFACTS["linux-arm64"], distDir);
+  const jsFallback = await artifactFromDist(ARTIFACTS.jsFallback, distDir);
+  const orchestration = await artifactFromDist(ARTIFACTS.orchestration, distDir);
 
   const manifest: ChannelManifest = {
     schema: 1,
@@ -85,16 +89,16 @@ export async function writeDevChannelCatalog(
   };
 
   await Deno.writeTextFile(
-    join(DIST, "manifest.json"),
+    join(distDir, "manifest.json"),
     `${JSON.stringify(manifest, null, 2)}\n`,
   );
   await Deno.writeTextFile(
-    join(DIST, "channels.json"),
+    join(distDir, "channels.json"),
     `${JSON.stringify(catalog, null, 2)}\n`,
   );
 
-  console.log(`write-dev-channel-catalog: wrote ${DIST}/channels.json`);
-  console.log(`write-dev-channel-catalog: wrote ${DIST}/manifest.json`);
+  console.log(`write-dev-channel-catalog: wrote ${distDir}/channels.json`);
+  console.log(`write-dev-channel-catalog: wrote ${distDir}/manifest.json`);
   console.log(
     `write-dev-channel-catalog: commit ${identity.commit} buildId ${identity.buildId}`,
   );
