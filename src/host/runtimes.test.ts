@@ -38,6 +38,27 @@ test("parsePhpExtensionsFromModsAvailable takes installed, not loaded", () => {
   );
 });
 
+test("readHostRuntimes defaults to TURBOPANEL_RUNTIMES_DIR via layout", async () => {
+  const dir = await Deno.makeTempDir();
+  const previous = Deno.env.get("TURBOPANEL_RUNTIMES_DIR");
+  try {
+    await Deno.mkdir(`${dir}/node-app/24/v24.1.0`, { recursive: true });
+    await Deno.symlink(
+      `${dir}/node-app/24/v24.1.0`,
+      `${dir}/node-app/24/current`,
+    );
+    Deno.env.set("TURBOPANEL_RUNTIMES_DIR", dir);
+    assertEquals(readHostRuntimes()?.node, { series: ["24"] });
+  } finally {
+    if (previous === undefined) {
+      Deno.env.delete("TURBOPANEL_RUNTIMES_DIR");
+    } else {
+      Deno.env.set("TURBOPANEL_RUNTIMES_DIR", previous);
+    }
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
 test("readHostRuntimes omits an area entirely when nothing is found", async () => {
   const dir = await Deno.makeTempDir();
   try {

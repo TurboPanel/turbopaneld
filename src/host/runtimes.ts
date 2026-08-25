@@ -14,6 +14,7 @@
  * runs on every idle tick.
  */
 
+import { readEnv, resolveRuntimesDir } from "../paths/layout.ts";
 import { RUNTIME_GID_BAND } from "../runtime/registry.ts";
 
 export type HostRuntimeMetadata = {
@@ -105,7 +106,9 @@ function vendoredSeries(root: string): string[] {
 }
 
 export function readHostRuntimes(
-  vendorDir = "/opt/turbopanel/vendor",
+  vendorDir = resolveRuntimesDir({
+    TURBOPANEL_RUNTIMES_DIR: readEnv("TURBOPANEL_RUNTIMES_DIR"),
+  }),
 ): HostRuntimeMetadata | undefined {
   const meta: HostRuntimeMetadata = {};
 

@@ -30,7 +30,7 @@ node_app_root: "{{ turbopanel_vendor_dir }}/node-app"
 # Membership is reconciled per principal by the daemon
 # (`ensurePrincipalManagedGroups` in `src/deploy/ensure-principal.ts`), which
 # both grants and **revokes** — this role only creates the groups.
-# `/opt/turbopanel` and `/opt/turbopanel/vendor` stay `tp:tp 0750` — they hold
+# `/opt/turbopanel` and `vendor/` stay `tp:tp 0750` — they hold
 # the panel's own runtimes. The runtime group is granted traverse-only there
 # through a POSIX ACL rather than by loosening the mode, so a tenant principal
 # can reach `node-app/` without being able to list either parent.
