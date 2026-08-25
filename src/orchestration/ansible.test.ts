@@ -620,6 +620,15 @@ test("galaxy docker lint neutralize silences third-party ansible-lint", () => {
   }
 });
 
+/**
+ * Index of an awaited call in a script source, tolerating the injected-deps
+ * form (`await deps.ensureAnsible()`) the orchestration script uses for its
+ * test seams. Returns -1 when the call is absent.
+ */
+function awaitedCallIndex(source: string, fn: string): number {
+  return source.search(new RegExp(`await (?:deps\\.)?${fn}\\(`));
+}
+
 test("TUI orchestration script emits dev_converge_skipped before expensive setup", () => {
   // instance-dev-install --if-needed must emit the skip JSONL event and return
   // before ensureAnsible / Galaxy / playbook when the stamp matches.
@@ -631,10 +640,10 @@ test("TUI orchestration script emits dev_converge_skipped before expensive setup
       "run-orchestration-action.ts must use emitDevConvergeSkippedIfNeeded for --if-needed skip",
     );
   }
-  const skipCall = script.indexOf("emitDevConvergeSkippedIfNeeded");
-  const ensureAnsibleCall = script.indexOf("await ensureAnsible()");
-  const galaxyCall = script.indexOf("await ensureGalaxyDockerRole()");
-  const playbookCall = script.indexOf("await runPlaybookStreaming(");
+  const skipCall = awaitedCallIndex(script, "emitDevConvergeSkippedIfNeeded");
+  const ensureAnsibleCall = awaitedCallIndex(script, "ensureAnsible");
+  const galaxyCall = awaitedCallIndex(script, "ensureGalaxyDockerRole");
+  const playbookCall = awaitedCallIndex(script, "runPlaybookStreaming");
   if (skipCall < 0 || ensureAnsibleCall < 0 || skipCall > ensureAnsibleCall) {
     throw new Error(
       "run-orchestration-action.ts must call emitDevConvergeSkippedIfNeeded before ensureAnsible()",
@@ -685,8 +694,8 @@ test("TUI orchestration script fetches Docker Galaxy before docker-using playboo
   }
   // instance-dev-install must ensure Galaxy *before* the playbook streams —
   // otherwise the TUI hits include_role: geerlingguy.docker with an empty tree.
-  const ensureCall = script.indexOf("await ensureGalaxyDockerRole()");
-  const playbookCall = script.indexOf("await runPlaybookStreaming(");
+  const ensureCall = awaitedCallIndex(script, "ensureGalaxyDockerRole");
+  const playbookCall = awaitedCallIndex(script, "runPlaybookStreaming");
   if (ensureCall < 0 || playbookCall < 0 || ensureCall > playbookCall) {
     throw new Error(
       "run-orchestration-action.ts must await ensureGalaxyDockerRole() before runPlaybookStreaming()",
