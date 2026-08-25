@@ -70,7 +70,11 @@ import {
   runDeployServiceHooks,
   runPostDeployHooks,
 } from "../../deploy/run-deploy-hooks.ts";
-import { applySites, type SiteRelease } from "../../deploy/site.ts";
+import {
+  applySites,
+  type SiteManagedDirectory,
+  type SiteRelease,
+} from "../../deploy/site.ts";
 import {
   type AppliedRelease,
   applySourceReleases,
@@ -732,6 +736,40 @@ function deployReleaseBindings(
 }
 
 /**
+ * Compose service name → the principal-owned `webroot/` it serves from.
+ *
+ * Same `serviceId` rule as {@link deployReleaseBindings} on purpose, so
+ * `sites/<serviceId>/webroot/` and `sites/<serviceId>/current` are siblings and
+ * connecting a repository later is a field flip rather than a move.
+ *
+ * A site that carries **both** a release and `sourceKind: managed-directory` is
+ * not a mixed state to reconcile: the release wins, because a promoted tree is
+ * what the release engine actually published and serving the directory instead
+ * would ignore a build the operator asked for. `applyOneSite` takes the release
+ * branch first for that reason; the entry is dropped here so the two never
+ * disagree about which lane a site is on.
+ */
+function deployManagedDirectoryBindings(
+  payload: EnvironmentDeployPayload,
+  releaseBindings: ReadonlyMap<string, SiteRelease>,
+): Map<string, SiteManagedDirectory> {
+  const bindings = new Map<string, SiteManagedDirectory>();
+  for (const site of payload.sites ?? []) {
+    if (site.sourceKind !== "managed-directory") continue;
+    if (releaseBindings.has(site.composeServiceName)) continue;
+    // The wire parser already refuses a managed directory with no principal;
+    // this keeps the type honest rather than re-reporting it.
+    const principal = site.principal;
+    if (!principal) continue;
+    bindings.set(site.composeServiceName, {
+      serviceId: resolveReleaseServiceId(payload, site.composeServiceName),
+      username: principal.username,
+    });
+  }
+  return bindings;
+}
+
+/**
  * Compose service names this deploy runs **outside** Docker.
  *
  * Both host-native lanes belong here: a site vhost and a native
@@ -947,11 +985,13 @@ async function applyDeploySites(
   sites: EnvironmentDeploySite[],
   dockerBindAddress: string | null,
   releaseBindings: ReadonlyMap<string, SiteRelease>,
+  managedDirectoryBindings: ReadonlyMap<string, SiteManagedDirectory>,
 ): Promise<void> {
   if (sites.length === 0) return;
   await applySites(layout, environmentId, sites, {
     dockerBindAddress,
     releaseBindings,
+    managedDirectoryBindings,
   });
 }
 
@@ -1530,6 +1570,7 @@ export async function handleEnvironmentDeploy(
     runtime.decryptSecrets,
   );
 
+  const siteReleaseBindings = deployReleaseBindings(parsedPayload);
   await applyDeploySites(
     layout,
     parsedPayload.environmentId,
@@ -1538,7 +1579,8 @@ export async function handleEnvironmentDeploy(
       hasContainers,
       sites,
     ),
-    deployReleaseBindings(parsedPayload),
+    siteReleaseBindings,
+    deployManagedDirectoryBindings(parsedPayload, siteReleaseBindings),
   );
 
   // Native apps come last of the host-native lanes: the release is promoted and

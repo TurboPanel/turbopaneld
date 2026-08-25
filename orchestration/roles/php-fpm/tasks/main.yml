@@ -120,3 +120,37 @@
     - "{{ turbopanel_config_dir }}/php/php.ini"
     - "{{ turbopanel_config_dir }}/php/pools"
     - "{{ turbopanel_config_dir }}/php/conf.d"
+
+# Loaded here rather than relying on the copy runtime-entitlement leaves behind:
+# that role is included per-series from series.yml, so depending on its side
+# effect would make the dispatcher's contents depend on task ordering.
+- name: Load the shared runtime registry
+  ansible.builtin.include_vars:
+    file: "{{ role_path }}/../../runtime-registry.json"
+    name: runtime_registry
+
+# /usr/local/bin precedes /usr/bin in Debian's default PATH, so this shadows
+# sury's `update-alternatives` link for `php` without removing it. Removing the
+# link would break every other package that expects `php` to exist; and the
+# link is not a privilege leak either way, because it resolves to
+# /usr/bin/php<series>, whose 0750 mode the kernel checks at execve.
+- name: Install the PHP shell dispatcher
+  ansible.builtin.template:
+    src: php-dispatcher.sh.j2
+    dest: /usr/local/bin/php
+    owner: root
+    group: root
+    mode: "0755"
+
+# Root-owned per-account series pins. The directory is world-readable because
+# the dispatcher reads it as the tenant; it is root-*writable* only, so a tenant
+# cannot pin itself to a series it was never granted. (It could not use one
+# anyway — the dispatcher only ever selects from what the account holds — but
+# a writable pin would let one tenant change another's default.)
+- name: Ensure the PHP pin directory
+  ansible.builtin.file:
+    path: "{{ turbopanel_config_dir }}/php/pins"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"

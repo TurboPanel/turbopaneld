@@ -1,0 +1,85 @@
+#!/bin/sh
+# Managed by TurboPanel. Edits are overwritten on the next converge.
+#
+# Resolves which co-installed PHP series a bare `php` means for the calling
+# account, then execs the real binary.
+#
+# **This grants nothing, and that is the point.** The enforcement is the
+# kernel's, at `execve`, against `/usr/bin/php<series>` being `root:tpphp<SS>
+# 0750`. A tenant who ignores this wrapper and runs `/usr/bin/php8.3` directly
+# gets EACCES unless entitled, exactly as if the wrapper did not exist. The
+# wrapper is ergonomics: without it, which series a bare `php` resolves to is
+# decided by host-global `update-alternatives` priority, so two tenants
+# entitled to different series would both land on whichever one apt installed
+# last.
+#
+# It lives in /usr/local/bin, which precedes /usr/bin in Debian's default PATH,
+# so it shadows sury's alternatives link without removing it. Removing that
+# link would break every other package that expects `php` to exist.
+set -eu
+
+self=$(basename "$0")
+
+# Rendered from orchestration/runtime-registry.json. A rendered table rather
+# than parsing the group name: `tpphp810` cannot be read back unambiguously as
+# 8.10 rather than 81.0, which is the same reason the registry hand-assigns
+# gids instead of computing them. Order here is irrelevant — `sort -V` below
+# does the version ordering, for that same 8.10-vs-8.4 reason.
+tp_entitlements='{% for series in php_fpm_versions | map('trim') | reject('equalto', '') | unique | list %}
+{{ runtime_registry.runtimes.php.series[series].group | default('') }}:{{ series }}{% endfor %}'
+
+tp_die() {
+  printf '%s: %s\n' "$self" "$1" >&2
+  exit 127
+}
+
+# Series this account may actually execute, version-ordered so the highest is
+# last. `sort -V` rather than plain sort: 8.10 must come after 8.4, not before.
+tp_entitled_series() {
+  groups=$(id -nG 2>/dev/null || echo '')
+  for pair in $tp_entitlements; do
+    group=${pair%%:*}
+    series=${pair#*:}
+    [ -n "$group" ] || continue
+    for held in $groups; do
+      if [ "$held" = "$group" ]; then
+        printf '%s\n' "$series"
+        break
+      fi
+    done
+  done | sort -V
+}
+
+entitled=$(tp_entitled_series)
+if [ -z "$entitled" ]; then
+  tp_die "this account is not permitted to run PHP on this server. Ask an operator to grant a PHP version to the account."
+fi
+
+# Explicit request wins, then a root-owned per-account pin, then the highest
+# entitled series. Only ever selected from what the account already holds: a
+# request for a series it is not entitled to would otherwise reach `execve` and
+# come back as a bare EACCES with nothing explaining why.
+requested=${TURBOPANEL_PHP:-}
+if [ -z "$requested" ]; then
+  pin_file="{{ turbopanel_config_dir }}/php/pins/$(id -un)"
+  if [ -r "$pin_file" ]; then
+    requested=$(head -n 1 "$pin_file" | tr -d '[:space:]')
+  fi
+fi
+
+if [ -n "$requested" ]; then
+  selected=''
+  for series in $entitled; do
+    [ "$series" = "$requested" ] && selected=$series
+  done
+  if [ -z "$selected" ]; then
+    tp_die "PHP $requested is not available to this account. Available: $(echo $entitled | tr '\n' ' ')"
+  fi
+else
+  selected=$(printf '%s\n' $entitled | tail -n 1)
+fi
+
+binary="/usr/bin/php${selected}"
+[ -x "$binary" ] || tp_die "PHP $selected is not installed on this server."
+
+exec "$binary" "$@"

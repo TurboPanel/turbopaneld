@@ -59,9 +59,11 @@ import {
   siteCurrentSymlink,
   siteRoot,
   siteSharedDir,
+  siteWebrootDir,
 } from "../paths/layout.ts";
 import type { EnvironmentDeploySite } from "../instance/commands/contracts.ts";
 import {
+  ensureDirectoryWithOwner,
   ensureEngineGroupMembership,
   principalUnixGroupName,
 } from "./ensure-principal.ts";
@@ -106,6 +108,25 @@ export type SiteRelease = {
 export type SiteReleaseBindings = ReadonlyMap<
   string,
   SiteRelease
+>;
+
+/**
+ * The principal-owned tree a **managed-directory** site serves from.
+ *
+ * Deliberately the same shape as {@link SiteRelease} and resolved by the same
+ * caller with the same `serviceId` rule, so `sites/<serviceId>/webroot/` and
+ * `sites/<serviceId>/current` are siblings. That is what makes connecting a
+ * repository to an existing site a field flip rather than a move.
+ */
+export type SiteManagedDirectory = {
+  serviceId: string;
+  username: string;
+};
+
+/** Compose service name → its principal-owned webroot. */
+export type SiteManagedDirectoryBindings = ReadonlyMap<
+  string,
+  SiteManagedDirectory
 >;
 
 /**
@@ -246,19 +267,36 @@ export function siteMetadataDir(
  *
  * Release-backed: `<principalHome>/sites/<serviceId>/current/<root>` — the
  * `current` segment is a stable *name*, so a promote never invalidates a
- * generated vhost. Otherwise the legacy daemon-owned tree, unchanged.
+ * generated vhost.
+ *
+ * Managed-directory: `<principalHome>/sites/<serviceId>/webroot/<root>`, owned
+ * by the principal so it can be filled over SFTP. A sibling of `current`, so a
+ * site that later connects a repository keeps the same parent tree.
+ *
+ * Otherwise the daemon-owned tree, unchanged — that is what a site with no
+ * principal and no source still gets.
  */
 export function resolveSiteDocumentRoot(
   layout: LayoutPaths,
   environmentId: string,
   site: SiteApplySpec,
   release?: SiteRelease,
+  managed?: SiteManagedDirectory,
 ): string {
   if (release) {
     return join(
       siteCurrentSymlink(
         principalHomePath(layout, release.username),
         release.serviceId,
+      ),
+      site.root,
+    );
+  }
+  if (managed) {
+    return join(
+      siteWebrootDir(
+        principalHomePath(layout, managed.username),
+        managed.serviceId,
       ),
       site.root,
     );
@@ -1697,11 +1735,19 @@ async function chownWebTree(
  * sealed it `root:<username>-grp` mode `0550`, and re-chowning it would hand
  * the app process write access to the code it is running.
  */
+/**
+ * Recursively re-own the daemon-owned site directory.
+ *
+ * Skipped for both principal-owned lanes. A release tree is root-owned `0550`
+ * by contract; a managed directory is already created with the right owner by
+ * `ensureManagedDirectory`, and a recursive `chmod u=rwX,g=rX` over it every
+ * deploy would fight whatever modes the tenant set on their own files.
+ */
 async function applySiteTreeOwnership(
   site: SiteApplySpec,
   paths: SitePaths,
 ): Promise<void> {
-  if (paths.release) return;
+  if (paths.release || paths.managed) return;
   const ownership = resolveSiteOwnership(site);
   await chownWebTree(paths.base, ownership.user, ownership.group);
 }
@@ -1715,6 +1761,13 @@ export type ApplySiteOpts = {
    * daemon-owned document root and ownership handling unchanged.
    */
   releaseBindings?: SiteReleaseBindings;
+  /**
+   * Compose service name → principal-owned `webroot/`, for sites the control
+   * plane marked `sourceKind: managed-directory`. Resolved by the caller with
+   * the same `serviceId` rule `releaseBindings` uses, so the two lanes address
+   * the same parent tree.
+   */
+  managedDirectoryBindings?: SiteManagedDirectoryBindings;
   /** Test seam: host command runner (sudo install / reload / chown). */
   run?: SiteRunFn;
   /** Test seam: Ansible playbook runner (vendor nginx/apache/OLS). */
@@ -2025,6 +2078,8 @@ type SitePaths = {
   configName: string;
   /** Set when this site serves out of a Git release tree. */
   release?: SiteRelease;
+  /** Set when this site serves out of a principal-owned `webroot/`. */
+  managed?: SiteManagedDirectory;
 };
 
 /** What one site's apply staged — the only two reasons anything reloads. */
@@ -2038,22 +2093,44 @@ type ApplySiteResult = {
 };
 
 /**
- * Release-backed pools/vhosts are confined and told the `current` symlink can
- * move under them; a legacy daemon-owned site keeps the previous behavior.
+ * Confinement for a pool serving out of a principal's home.
+ *
+ * Both principal-owned lanes get `open_basedir` — a managed directory is
+ * writable by the account running it, which is exactly why it must not also be
+ * able to read the rest of the filesystem. The difference is
+ * `releaseSymlinkSwap`: only a release has a `current` symlink that can move
+ * under a running worker, and telling PHP that about a directory that never
+ * moves would disable realpath caching for nothing.
+ *
+ * A daemon-owned site (no principal, no source) keeps the previous behavior.
  */
 function sitePhpAdminOpts(
   layout: LayoutPaths,
   paths: SitePaths,
 ): PhpFpmPoolAdminOpts | undefined {
-  if (!paths.release) return undefined;
-  return {
-    openBasedir: releasePhpOpenBasedir(
-      layout,
-      paths.release,
-      paths.documentRoot,
-    ),
-    releaseSymlinkSwap: true,
-  };
+  if (paths.release) {
+    return {
+      openBasedir: releasePhpOpenBasedir(
+        layout,
+        paths.release,
+        paths.documentRoot,
+      ),
+      releaseSymlinkSwap: true,
+    };
+  }
+  if (paths.managed) {
+    return {
+      openBasedir: [
+        paths.documentRoot,
+        siteSharedDir(
+          principalHomePath(layout, paths.managed.username),
+          paths.managed.serviceId,
+        ),
+        PHP_OPEN_BASEDIR_TMP,
+      ],
+    };
+  }
+  return undefined;
 }
 
 /**
@@ -2314,12 +2391,90 @@ async function userSupplementaryGroups(user: string): Promise<Set<string>> {
  * (smaller) supplementary group set — a reload will not pick it up, so the
  * caller escalates to a restart for that engine only.
  */
-async function ensureEngineCanReadRelease(
+/**
+ * Create a managed-directory site's tree, owned by the principal.
+ *
+ * `0750` with the engine's group, matching the release lane exactly: the owner
+ * writes, the serving engine reads through its group membership, and nothing
+ * else can traverse in. `install -d` also *repairs*, so a tree left by an
+ * earlier layout converges on the next deploy.
+ *
+ * `shared/` is created alongside because `open_basedir` names it — a PHP app
+ * that writes uploads or caches outside the document root has one place to put
+ * them that survives a later switch to releases.
+ *
+ * The placeholder `index.html` is written **only when the document root is
+ * empty**. Seeding it into a directory the tenant has already uploaded to would
+ * publish "TurboPanel site is ready" over their application — the same reason
+ * the release lane asserts rather than creates.
+ */
+async function ensureManagedDirectory(
+  layout: LayoutPaths,
   site: SiteApplySpec,
-  release: SiteRelease,
+  managed: SiteManagedDirectory,
+  documentRoot: string,
+): Promise<void> {
+  const principalHome = principalHomePath(layout, managed.username);
+  const owner = `${managed.username}:${siteEngineUnixUser(site.engine)}`;
+  for (
+    const dir of [
+      siteRoot(principalHome, managed.serviceId),
+      siteWebrootDir(principalHome, managed.serviceId),
+      siteSharedDir(principalHome, managed.serviceId),
+      documentRoot,
+    ]
+  ) {
+    await ensureDirectoryWithOwner(dir, "0750", owner, run);
+  }
+  await seedManagedIndexHtml(site, documentRoot, owner);
+}
+
+/** Write the placeholder only into a genuinely empty document root. */
+async function seedManagedIndexHtml(
+  site: SiteApplySpec,
+  documentRoot: string,
+  owner: string,
+): Promise<void> {
+  const listing = await run("sudo", ["-n", "ls", "-A", "--", documentRoot]);
+  if (!listing.success || listing.stdout.trim().length > 0) return;
+
+  const staged = await Deno.makeTempFile({ prefix: "tp-site-index-" });
+  try {
+    await Deno.writeTextFile(
+      staged,
+      defaultIndexHtml(site.composeServiceName, site.engine),
+      { mode: 0o600 },
+    );
+    const [user, group] = owner.split(":");
+    const install = await run("sudo", [
+      "-n",
+      "install",
+      "-m",
+      "0640",
+      "-o",
+      user as string,
+      "-g",
+      group as string,
+      staged,
+      join(documentRoot, "index.html"),
+    ]);
+    if (!install.success) {
+      logWarn(
+        "deploy",
+        `placeholder index.html skipped for ${site.composeServiceName}: ${install.stderr}`,
+      );
+    }
+  } finally {
+    await Deno.remove(staged).catch(() => {});
+  }
+}
+
+async function ensureEngineCanReadPrincipalTree(
+  site: SiteApplySpec,
+  username: string,
 ): Promise<boolean> {
   const engineUser = siteEngineUnixUser(site.engine);
-  const group = principalUnixGroupName(release.username);
+  const group = principalUnixGroupName(username);
   const existing = await userSupplementaryGroups(engineUser);
   if (existing.has(group)) return false;
   await ensureEngineGroupMembership(engineUser, group, run);
@@ -2338,6 +2493,7 @@ async function applyOneSite(
   sitesDirs: SiteConfigDirs,
   dockerBind: string | null,
   release?: SiteRelease,
+  managed?: SiteManagedDirectory,
 ): Promise<ApplyOneSiteResult> {
   const base = siteDir(
     layout,
@@ -2349,6 +2505,7 @@ async function applyOneSite(
     environmentId,
     site,
     release,
+    managed,
   );
 
   let restartEngine: SiteApplySpec["engine"] | undefined;
@@ -2356,7 +2513,19 @@ async function applyOneSite(
     // The release engine owns the tree; assert it, never create or seed it.
     await assertReleaseDocumentRoot(documentRoot, site);
     await writeReleaseHostingWebMetadata(layout, environmentId, site, release);
-    if (await ensureEngineCanReadRelease(site, release)) {
+    if (await ensureEngineCanReadPrincipalTree(site, release.username)) {
+      restartEngine = site.engine;
+    }
+  } else if (managed) {
+    // Nobody else creates this tree — there is no release engine on this lane,
+    // so the directory the tenant uploads into has to exist before the vhost
+    // that serves it does.
+    await ensureManagedDirectory(layout, site, managed, documentRoot);
+    await writeReleaseHostingWebMetadata(layout, environmentId, site, {
+      serviceId: managed.serviceId,
+      username: managed.username,
+    });
+    if (await ensureEngineCanReadPrincipalTree(site, managed.username)) {
       restartEngine = site.engine;
     }
   } else {
@@ -2374,6 +2543,7 @@ async function applyOneSite(
     documentRoot,
     configName,
     ...(release === undefined ? {} : { release }),
+    ...(managed === undefined ? {} : { managed }),
   };
   const restart = restartEngine === undefined ? {} : { restartEngine };
 
@@ -2466,6 +2636,7 @@ export async function applySites(
 
     const dockerBind = opts?.dockerBindAddress ?? null;
     const releaseBindings = opts?.releaseBindings;
+    const managedDirectoryBindings = opts?.managedDirectoryBindings;
     const applied: string[] = [];
     const restartEngines: SiteEngineSet = new Set();
     const staged = emptyStagedConfigs();
@@ -2478,6 +2649,7 @@ export async function applySites(
         sitesDirs,
         dockerBind,
         releaseBindings?.get(site.composeServiceName),
+        managedDirectoryBindings?.get(site.composeServiceName),
       );
       if (result.phpSeries && result.phpFpmStaged.length > 0) {
         const forSeries = staged.phpFpm.get(result.phpSeries) ?? [];

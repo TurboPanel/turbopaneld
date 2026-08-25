@@ -1223,6 +1223,82 @@ single org mesh (`server.fabric.reconcile` — see `src/instance/commands/fabric
 and `../../orchestration/AGENTS.md`). `{ enabled: false }` is a teardown; the
 daemon owns apply (no Ansible apply playbook).
 
+## Managed-directory sites
+
+A site's content comes from one of two lanes, named by `sourceKind` on the wire
+and never inferred:
+
+- **`release`** (the default, and every site's behavior before this existed) —
+  a Git-backed immutable tree the release engine publishes into
+  `sites/<serviceId>/current`. `applyOneSite` **asserts** it and never creates
+  it: silently seeding a placeholder would publish "TurboPanel site is ready"
+  over what the operator believes is their application.
+- **`managed-directory`** — a principal-writable `sites/<serviceId>/webroot/`
+  the tenant fills over SFTP. Created here, because there is no release engine
+  on this lane and the directory has to exist before the vhost that serves it.
+
+`webroot/` is a deliberate **sibling** of `releases/` and `current`, and both
+lanes resolve `serviceId` through the same `resolveReleaseServiceId`. That is
+what makes connecting a repository to an existing site a field flip rather than
+a move.
+
+**Names the concession.** A managed directory gives up the immutable-release
+property: the tree the engine executes is writable by the account running it,
+which is exactly what release confinement exists to prevent. Correct for a
+WordPress site (the application writes to itself by design), wrong for a built
+application — which is why it is an explicit field and not an inference from
+whether `source` is set. `open_basedir` still confines it to its own tree;
+`releaseSymlinkSwap` does not apply, because nothing moves under a worker here
+and telling PHP otherwise would disable realpath caching for nothing.
+
+**A release wins over the flag.** A site carrying both takes the release branch,
+because a promoted tree is what the release engine actually published and
+serving the directory instead would ignore a build the operator asked for.
+`deployManagedDirectoryBindings` drops the entry so the two can never disagree;
+the branch order in `applyOneSite` is the backstop.
+
+**Never recursively chowned.** `ensureManagedDirectory` creates the tree with
+the right owner once; a recursive `chmod u=rwX,g=rX` every deploy would fight
+whatever modes the tenant set on their own files. The placeholder `index.html`
+is written **only into an empty document root**, for the same reason the release
+lane asserts rather than creates.
+
+**A principal is required, not optional.** "A directory and an account" needs
+both; without an owner there is no account to upload as, and the fallback would
+be the daemon-owned tree — which serves fine and is unreachable over SFTP
+forever. Refused at three layers: deploy-prepare
+(`site_managed_directory_unowned`, with a sentence naming the service), the
+wire parser, and the daemon's own contract parser.
+
+## The PHP shell dispatcher
+
+`/usr/local/bin/php` resolves which co-installed series a bare `php` means for
+the calling account and execs the real binary.
+
+**It grants nothing.** The enforcement is the kernel's at `execve`, against
+`/usr/bin/php<series>` being `root:tpphp<SS> 0750` (the `dpkg-statoverride` the
+php-fpm role applies). A tenant who ignores the wrapper and runs
+`/usr/bin/php8.3` directly gets `EACCES` unless entitled, exactly as if it did
+not exist. No sudo, no setuid — `src/orchestration/php-dispatcher.test.ts`
+asserts both.
+
+**It is not a diversion.** `/usr/local/bin` precedes `/usr/bin` in Debian's
+default PATH, so the dispatcher shadows sury's `update-alternatives` link
+without removing it — removing it would break every other package that expects
+`php` to exist. That link was never a privilege leak either: it resolves to
+`/usr/bin/php<series>`, whose mode the kernel checks. What it actually is, is a
+*usability* problem — which series a bare `php` resolves to would otherwise be
+decided by host-global alternatives priority, so two tenants entitled to
+different series would both land on whichever apt installed last.
+
+Resolution order: `$TURBOPANEL_PHP`, then a root-owned per-account pin under
+`<configDir>/php/pins/<username>`, then the highest entitled series. Only ever
+selected from what the account already holds — passing a request straight
+through would reach `execve` and come back as a bare `EACCES` with nothing
+explaining why. The group→series table is **rendered from the registry**, not
+parsed out of the group name (`tpphp810` cannot be read back unambiguously as
+8.10 rather than 81.0), and ordering uses `sort -V` for that same reason.
+
 ## SSH access (`ssh/`)
 
 Tenant SSH is three files: a pure `authorized_keys` renderer, a pure `sshd`

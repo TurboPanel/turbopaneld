@@ -1,4 +1,9 @@
-import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "@std/assert";
 import { dirname, join } from "@std/path";
 import { resolveLayout } from "../paths/layout.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
@@ -7,6 +12,7 @@ import {
   RELEASE_SYMLINK_SWAP_PHP_DIRECTIVES,
   removeSites,
   type SiteApplySpec,
+  type SiteManagedDirectory,
   type SitePlaybookFn,
   type SiteRelease,
   type SiteRunFn,
@@ -109,6 +115,23 @@ function createSiteRunMock(): {
       await Deno.mkdir(dirname(dest), { recursive: true });
       await Deno.copyFile(src, dest);
       return ok();
+    }
+
+    // Real listing semantics: the managed-directory seed asks whether the
+    // document root is empty before writing a placeholder into it, and a mock
+    // that always answered "empty" would make that check untestable.
+    if (args.includes("ls")) {
+      const path = args.at(-1);
+      if (typeof path !== "string") {
+        throw new TypeError("expected ls path");
+      }
+      try {
+        const names: string[] = [];
+        for await (const entry of Deno.readDir(path)) names.push(entry.name);
+        return { success: true, stdout: names.join("\n"), stderr: "" };
+      } catch {
+        return fail("No such file or directory");
+      }
     }
 
     if (args.includes("rm")) {
@@ -1659,6 +1682,197 @@ test("applySites scopes an OpenLiteSpeed PHP vhost to its principal", async () =
     );
     assertStringIncludes(vhost, "extUser                   siteowner");
     assertStringIncludes(vhost, "extGroup                  siteowner-grp");
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Managed-directory sites: a principal-owned webroot the tenant fills itself.
+// ---------------------------------------------------------------------------
+
+const managedBinding: SiteManagedDirectory = {
+  serviceId: RELEASE_SERVICE_ID,
+  username: RELEASE_USERNAME,
+};
+
+function managedBindingsFor(
+  ...composeServiceNames: readonly string[]
+): Map<string, SiteManagedDirectory> {
+  return new Map(composeServiceNames.map((name) => [name, managedBinding]));
+}
+
+const managedSite: SiteApplySpec = {
+  ...nginxSite,
+  sourceKind: "managed-directory",
+  principal: {
+    principalId: "pr-1",
+    username: RELEASE_USERNAME,
+  },
+};
+
+test("a managed-directory site serves from a principal-owned webroot", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    const result = await applySites(layout, "envmd", [managedSite], {
+      run,
+      runPlaybook,
+      managedDirectoryBindings: managedBindingsFor("www"),
+    });
+    assertEquals(result.applied, ["www"]);
+
+    const webroot = join(siteTreeRoot(layout), "webroot", "public");
+    const conf = await Deno.readTextFile(
+      join(layout.configDir, "nginx", "sites", "tp-envmd-www.conf"),
+    );
+    assertStringIncludes(conf, `root ${webroot};`);
+
+    // `webroot/` is a sibling of `current` and `releases/`, so connecting a
+    // repository later is a field flip rather than a move.
+    await Deno.stat(join(siteTreeRoot(layout), "webroot"));
+    await Deno.stat(join(siteTreeRoot(layout), "shared"));
+
+    // Owned by the principal, group the engine, so the tenant writes and the
+    // engine reads.
+    const mkdir = mock.calls.find((c) =>
+      c.args.includes("install") && c.args.includes("-d") &&
+      c.args.at(-1) === webroot
+    );
+    assert(mkdir);
+    assertEquals(mkdir.args[mkdir.args.indexOf("-o") + 1], RELEASE_USERNAME);
+    assertEquals(mkdir.args[mkdir.args.indexOf("-g") + 1], "tpnginx");
+    assertEquals(mkdir.args[mkdir.args.indexOf("-m") + 1], "0750");
+
+    // The engine joins the principal's group and therefore restarts.
+    assertEquals(
+      usermodCalls(mock.calls)[0]?.args.slice(-3),
+      ["-aG", RELEASE_GROUP, "tpnginx"],
+    );
+    assertEquals(
+      systemctlActions(mock.calls, "turbopanel-nginx").includes("restart"),
+      true,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("the placeholder is seeded only into an empty document root", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    const first = createSiteRunMock();
+    await applySites(layout, "envmd", [managedSite], {
+      run: withGroupMembership(first.run, { tpnginx: ["tpnginx"] }),
+      runPlaybook,
+      managedDirectoryBindings: managedBindingsFor("www"),
+    });
+
+    const webroot = join(siteTreeRoot(layout), "webroot", "public");
+    const indexPath = join(webroot, "index.html");
+    assertStringIncludes(await Deno.readTextFile(indexPath), "TurboPanel site");
+
+    // The tenant uploads their application over the placeholder.
+    await Deno.writeTextFile(indexPath, "<h1>my site</h1>");
+
+    const second = createSiteRunMock();
+    await applySites(layout, "envmd", [managedSite], {
+      run: withGroupMembership(second.run, { tpnginx: ["tpnginx"] }),
+      runPlaybook,
+      managedDirectoryBindings: managedBindingsFor("www"),
+    });
+
+    // Re-seeding would publish "TurboPanel site is ready" over their app — the
+    // same reason the release lane asserts rather than creates.
+    assertEquals(await Deno.readTextFile(indexPath), "<h1>my site</h1>");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a managed directory is never recursively chowned", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    await applySites(layout, "envmd", [managedSite], {
+      run,
+      runPlaybook,
+      managedDirectoryBindings: managedBindingsFor("www"),
+    });
+    // A recursive `chmod u=rwX,g=rX` every deploy would fight whatever modes
+    // the tenant set on their own files.
+    assertEquals(mock.calls.some((c) => c.args.includes("chown")), false);
+    assertEquals(mock.calls.some((c) => c.args.includes("chmod")), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a managed-directory PHP pool is confined by open_basedir", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const run = withGroupMembership(mock.run, { tpapache: ["tpapache"] });
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    const site: SiteApplySpec = {
+      ...apachePhpSite,
+      sourceKind: "managed-directory",
+      principal: { principalId: "pr-1", username: RELEASE_USERNAME },
+    };
+    await applySites(layout, "envmd", [site], {
+      run,
+      runPlaybook,
+      managedDirectoryBindings: managedBindingsFor("phpapp"),
+    });
+
+    const pool = await Deno.readTextFile(
+      join(layout.configDir, "php", "8.4", "pools", "tp-envmd-phpapp.conf"),
+    );
+    const webroot = join(siteTreeRoot(layout), "webroot", "public");
+    // A managed directory is writable by the account running it, which is
+    // exactly why it must not also be able to read the rest of the filesystem.
+    assertStringIncludes(pool, `open_basedir`);
+    assertStringIncludes(pool, webroot);
+    assertStringIncludes(pool, join(siteTreeRoot(layout), "shared"));
+    // No `current` symlink to move under a worker, so the realpath-cache
+    // relaxations a release needs would be disabling caching for nothing.
+    for (const directive of RELEASE_SYMLINK_SWAP_PHP_DIRECTIVES) {
+      assertEquals(pool.includes(directive), false);
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a release wins over a managed-directory flag on the same site", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    await seedRelease(layout, "rel-1", "public", "<h1>release one</h1>");
+    await applySites(layout, "envmd", [managedSite], {
+      run,
+      runPlaybook,
+      releaseBindings: releaseBindingsFor("www"),
+      managedDirectoryBindings: managedBindingsFor("www"),
+    });
+
+    // Serving the directory instead would ignore a build the operator asked
+    // for. `deployManagedDirectoryBindings` drops the entry for exactly this
+    // reason; the branch order here is the backstop.
+    const conf = await Deno.readTextFile(
+      join(layout.configDir, "nginx", "sites", "tp-envmd-www.conf"),
+    );
+    assertStringIncludes(
+      conf,
+      `root ${join(siteTreeRoot(layout), "current", "public")};`,
+    );
   } finally {
     await cleanup();
   }

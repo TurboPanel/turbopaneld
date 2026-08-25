@@ -470,6 +470,29 @@ export function siteCurrentSymlink(
 }
 
 /**
+ * `<siteRoot>/webroot` — the document root of a **managed-directory** site.
+ *
+ * A deliberate sibling of `releases/` and `current`, so connecting a repository
+ * to an existing site later is a field flip rather than a move: the parent tree
+ * is already the right one, and a release simply starts being published beside
+ * the directory instead of into it.
+ *
+ * **Names the concession.** This directory is principal-*writable*, which gives
+ * up the immutable-release property — the tree the engine executes is writable
+ * by the account running it, which is exactly what release confinement exists
+ * to prevent. That is the correct trade for a WordPress site (the application
+ * writes to itself by design) and the wrong one for a built application, which
+ * is why it is an explicit `sourceKind` and never inferred. `open_basedir`
+ * still confines the site to its own tree.
+ */
+export function siteWebrootDir(
+  principalHome: string,
+  serviceId: string,
+): string {
+  return join(siteRoot(principalHome, serviceId), "webroot");
+}
+
+/**
  * `<siteRoot>/shared` — writable state (uploads, caches, logs) shared across
  * releases. The only writable path in the tree once a release is published.
  */

@@ -375,11 +375,27 @@ export type EnvironmentDeploySitePrincipal = {
   gid?: number;
 };
 
+/**
+ * Where a site's content comes from.
+ *
+ * `release` (the default) is a Git-backed immutable tree the release engine
+ * publishes and this module only ever *asserts*. `managed-directory` is a
+ * principal-writable `webroot/` the tenant fills over SFTP — "a directory and a
+ * principal", which is what a WordPress or plain-PHP site actually wants.
+ *
+ * One field rather than an inference, because the two differ in a property
+ * worth stating out loud: a managed directory gives up immutable releases, so
+ * the tree the engine executes is writable by the account running it.
+ */
+export type EnvironmentDeploySiteSourceKind = "release" | "managed-directory";
+
 export type EnvironmentDeploySite = {
   composeServiceName: string;
   engine: "caddy" | "apache" | "nginx" | "openlitespeed";
   root: string;
   listenPort: number;
+  /** Omitted means `release`, which is the behavior every existing site had. */
+  sourceKind?: EnvironmentDeploySiteSourceKind;
   webEnv?: Record<string, string>;
   php?: EnvironmentDeployHostingPhp;
   /**
@@ -2769,13 +2785,36 @@ function parseSite(
     root: parseNonEmptyString(value, "root"),
     listenPort: parseSiteListenPort(value.listenPort),
   };
+  const sourceKind = parseSiteSourceKind(value.sourceKind);
+  if (sourceKind) site.sourceKind = sourceKind;
   const webEnv = parseStringRecord(value.webEnv);
   if (webEnv) site.webEnv = webEnv;
   const php = parseHostingPhp(value.php);
   if (php) site.php = php;
   const principal = parseSitePrincipal(value.principal);
   if (principal) site.principal = principal;
+  // A managed directory is "a directory **and a principal**": without an owner
+  // there is no account to write into it and nobody the tree could belong to.
+  // Rejected rather than silently falling back to the daemon-owned tree, which
+  // would look like it worked and be unreachable over SFTP.
+  if (site.sourceKind === "managed-directory" && !site.principal) {
+    throw new TypeError(
+      `sites.${site.composeServiceName}: a managed-directory site requires a principal`,
+    );
+  }
   return site;
+}
+
+const SITE_SOURCE_KINDS = new Set(["release", "managed-directory"]);
+
+function parseSiteSourceKind(
+  value: unknown,
+): EnvironmentDeploySiteSourceKind | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !SITE_SOURCE_KINDS.has(value)) {
+    throw new TypeError("Invalid sites sourceKind");
+  }
+  return value as EnvironmentDeploySiteSourceKind;
 }
 
 /**
