@@ -5,7 +5,7 @@ galaxy_info:
     Create per-(runtime, series) entitlement groups from the shared runtime
     registry, and grant them traverse-only access to the vendor tree. A group
     here means exactly "may execute this runtime series"; membership is
-    reconciled per principal by the daemon (ensurePrincipalRuntimeGroups).
+    reconciled per principal by the daemon (ensurePrincipalManagedGroups).
   license: AGPL-3.0
   min_ansible_version: "2.14"
   platforms:

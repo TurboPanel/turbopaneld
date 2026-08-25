@@ -237,7 +237,7 @@ enforces uniqueness across both and that entitlement gids stay inside their band
 
 **Membership is reconciled by the daemon, not by this role.** The role only
 creates groups and grants them traverse-only ACLs on `/opt/turbopanel` and
-`vendor/`. `ensurePrincipalRuntimeGroups` (`../src/deploy/ensure-principal.ts`)
+`vendor/`. `ensurePrincipalManagedGroups` (`../src/deploy/ensure-principal.ts`)
 adds *and revokes* during principal materialization — which runs before any unit
 is installed, because systemd resolves supplementary groups at `execve` and a
 unit started too early dies `203/EXEC`. Revocation only ever touches names the

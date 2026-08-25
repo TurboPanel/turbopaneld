@@ -1,0 +1,13 @@
+---
+# Host prerequisites for tenant SSH access: the two Match groups the daemon's
+# sshd drop-in selects on, and the root-owned directory the panel writes
+# authorized_keys files into.
+#
+# The groups are read from the shared registry at
+# orchestration/runtime-registry.json — the same file the daemon imports in
+# src/runtime/registry.ts — so names and gids cannot drift between the two.
+#
+# This role creates nothing per principal. Membership is reconciled per account
+# by the daemon (ensurePrincipalManagedGroups), and the key files are written by
+# server.principals.reconcile; both need these to already exist.
+principal_access_keys_dir: /etc/ssh/turbopanel/authorized_keys

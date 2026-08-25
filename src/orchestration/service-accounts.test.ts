@@ -279,6 +279,7 @@ test("converge and web-service account ids are globally unique", async () => {
   ) as {
     gidBand: { min: number; max: number };
     runtimes: Record<string, { series: Record<string, { gid: number }> }>;
+    accessGroups: Record<string, { group: string; gid: number }>;
   };
   const entitlementIds = Object.values(registry.runtimes).flatMap((runtime) =>
     Object.values(runtime.series).map((entry) => entry.gid)
@@ -293,9 +294,24 @@ test("converge and web-service account ids are globally unique", async () => {
     }
   }
 
+  // SSH access groups share the same numeric space. They belong to the 9980+
+  // identity band rather than the entitlement band, because they protect no
+  // binary — they only select an `sshd` Match block — but a collision with a
+  // service account would be just as bad, so they go through the same check.
+  const accessGroupIds = Object.values(registry.accessGroups).map((entry) =>
+    entry.gid
+  );
+  for (const id of accessGroupIds) {
+    if (id >= registry.gidBand.min && id <= registry.gidBand.max) {
+      throw new Error(
+        `SSH access gid ${id} is inside the runtime entitlement band ${registry.gidBand.min}-${registry.gidBand.max}; it belongs in the 9980+ identity band`,
+      );
+    }
+  }
+
   const convergeIds = ACCOUNTS.map((entry) => entry.id);
   const webIds = Object.values(webServiceMap).map((entry) => entry.uid);
-  const ids = [...convergeIds, ...webIds, ...entitlementIds];
+  const ids = [...convergeIds, ...webIds, ...entitlementIds, ...accessGroupIds];
 
   const seen = new Set<number>();
   const collisions: number[] = [];

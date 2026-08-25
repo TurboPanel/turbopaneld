@@ -28,7 +28,7 @@ node_app_root: "{{ turbopanel_vendor_dir }}/node-app"
 # world bits are not an option on a tree reached through `/opt/turbopanel`.
 #
 # Membership is reconciled per principal by the daemon
-# (`ensurePrincipalRuntimeGroups` in `src/deploy/ensure-principal.ts`), which
+# (`ensurePrincipalManagedGroups` in `src/deploy/ensure-principal.ts`), which
 # both grants and **revokes** — this role only creates the groups.
 # `/opt/turbopanel` and `/opt/turbopanel/vendor` stay `tp:tp 0750` — they hold
 # the panel's own runtimes. The runtime group is granted traverse-only there

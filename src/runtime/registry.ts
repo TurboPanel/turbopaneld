@@ -38,6 +38,31 @@ const RUNTIMES = registryJson.runtimes as unknown as Readonly<
   Record<RuntimeName, RuntimeEntry>
 >;
 
+/** Access levels that correspond to a unix group. `none` holds no group. */
+export type PrincipalAccessGroupLevel = "sftp" | "shell";
+
+const ACCESS_GROUPS = registryJson.accessGroups as unknown as Readonly<
+  Record<PrincipalAccessGroupLevel, RuntimeSeriesEntry>
+>;
+
+/**
+ * Group that puts a principal in one `sshd` Match block.
+ *
+ * Not an entitlement group: it protects no inode and grants no `execve`. It
+ * exists because `sshd` matches on groups rather than on shells, so
+ * `ForceCommand internal-sftp` needs a group of its own to hang from.
+ */
+export function accessGroup(
+  level: PrincipalAccessGroupLevel,
+): string | undefined {
+  return ACCESS_GROUPS[level]?.group;
+}
+
+/** Every SSH access group the registry defines. */
+export function allAccessGroups(): ReadonlySet<string> {
+  return new Set(Object.values(ACCESS_GROUPS).map((entry) => entry.group));
+}
+
 export const RUNTIME_GID_BAND = Object.freeze({
   min: registryJson.gidBand.min,
   max: registryJson.gidBand.max,
@@ -101,9 +126,8 @@ export function runtimeGid(
 /**
  * Every entitlement group the registry defines.
  *
- * This is the containment set for revocation: `ensurePrincipalRuntimeGroups`
- * removes stale membership **only** for names in here, so `<username>-grp`,
- * `tp`, and anything an operator added by hand are never touched.
+ * Not the containment set for revocation on its own — {@link allManagedGroups}
+ * is, and it has to be, because SSH access is reconciled in the same pass.
  */
 export function allRuntimeGroups(): ReadonlySet<string> {
   const groups = new Set<string>();
@@ -113,6 +137,21 @@ export function allRuntimeGroups(): ReadonlySet<string> {
     }
   }
   return groups;
+}
+
+/**
+ * Every group TurboPanel reconciles on a principal — runtime entitlements plus
+ * SSH access.
+ *
+ * **This is the containment set for revocation**, and it must be exactly one
+ * set. `ensurePrincipalManagedGroups` removes stale membership only for names
+ * in here, so `<username>-grp`, `tp`, an engine group, and anything an operator
+ * added by hand survive untouched. Two sets would mean two containment rules,
+ * and a principal downgraded from shell to files-only would keep `tpshell`
+ * because the entitlement pass did not recognize it.
+ */
+export function allManagedGroups(): ReadonlySet<string> {
+  return new Set([...allRuntimeGroups(), ...allAccessGroups()]);
 }
 
 /** Extensions installed on every series, whether or not a site asked. */

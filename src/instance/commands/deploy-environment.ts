@@ -48,6 +48,7 @@ import {
 } from "../../logs/contracts.ts";
 import { ensureDocker as defaultEnsureDocker } from "../../deploy/ensure-docker.ts";
 import { ensureSystemPrincipals } from "../../deploy/ensure-principal.ts";
+import { applySshAccess } from "../../deploy/ssh/apply.ts";
 import {
   buildTcpUdpIngressEntries,
   cleanupStaleTcpUdpServiceIngress,
@@ -100,7 +101,7 @@ import {
   buildSiteReachabilityFragment,
   resolveDockerHostGatewayAddress,
 } from "../../deploy/site-docker.ts";
-import { logInfo } from "../../logger.ts";
+import { logInfo, logWarn } from "../../logger.ts";
 import {
   materializeSecretFiles,
   rewriteComposeSecretFilePaths,
@@ -481,8 +482,45 @@ async function ensureDeployPrincipals(
       ...(principal.runtimes === undefined
         ? {}
         : { runtimes: principal.runtimes }),
+      ...(principal.accessGroups === undefined
+        ? {}
+        : { accessGroups: principal.accessGroups }),
     })),
   );
+
+  // Key files, but **never** the removal sweep: this payload describes one
+  // environment and the host serves many, so pruning here would revoke every
+  // other environment's access. `server.principals.reconcile` is the caller
+  // that holds the whole server and is allowed to delete.
+  //
+  // Skipped entirely when no principal declared keys, so a deploy from a
+  // control plane that predates the key subsystem does not touch `sshd`.
+  const withKeys = principalMaterial.filter(
+    (principal) => principal.sshKeys !== undefined,
+  );
+  if (withKeys.length > 0) {
+    try {
+      await applySshAccess(
+        withKeys.map((principal) => ({
+          username: principal.username,
+          keys: principal.sshKeys ?? [],
+        })),
+      );
+    } catch (err) {
+      // Warn, do not fail. A host whose `sshd_config` has no `Include` line
+      // cannot take the drop-in, and that is a real problem — but it is not a
+      // reason to refuse to deploy an application. The key files themselves are
+      // written before that check, so the account is left correct-but-not-yet
+      // -consulted, and `server.principals.reconcile` is where the operator
+      // sees the failure as a failure.
+      logWarn(
+        "deploy",
+        `ssh access could not be applied: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
 }
 
 async function resolveDeployMountPaths(

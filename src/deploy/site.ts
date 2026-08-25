@@ -444,7 +444,6 @@ export function nginxSiteConfig(
 `;
 }
 
-const PHP_MEMORY_RE = /^\d+[KMG]?$/i;
 const PHP_VERSION_RE = /^\d+\.\d+$/;
 
 /**

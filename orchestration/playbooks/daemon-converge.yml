@@ -60,6 +60,7 @@
       when: turbopanel_daemon_exec_mode == 'js'
     - role: daemon-logs
     - role: daemon-prereqs
+    - role: principal-access
     - role: time-sync
 
   # Already-provisioned managed daemons only ever receive this lightweight

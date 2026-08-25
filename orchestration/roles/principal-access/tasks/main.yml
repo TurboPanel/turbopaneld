@@ -1,0 +1,54 @@
+---
+- name: Load the shared runtime registry
+  ansible.builtin.include_vars:
+    file: "{{ role_path }}/../../runtime-registry.json"
+    name: runtime_registry
+
+- name: Assert the registry defines both access groups
+  ansible.builtin.assert:
+    that:
+      - runtime_registry.accessGroups.sftp is defined
+      - runtime_registry.accessGroups.shell is defined
+    fail_msg: >-
+      runtime-registry.json is missing accessGroups.sftp/accessGroups.shell.
+      The daemon resolves the sshd Match groups from the same keys, so a host
+      provisioned without them would match no account.
+
+- name: Ensure the SSH access groups
+  ansible.builtin.group:
+    name: "{{ item.group }}"
+    gid: "{{ item.gid }}"
+    state: present
+    system: true
+  loop:
+    - "{{ runtime_registry.accessGroups.sftp }}"
+    - "{{ runtime_registry.accessGroups.shell }}"
+  loop_control:
+    label: "{{ item.group }} ({{ item.gid }})"
+
+# root:root and not group-writable at every level, or sshd with StrictModes on
+# refuses to read the AuthorizedKeysFile it points at and every login fails with
+# nothing useful in the log.
+- name: Ensure the panel-managed authorized_keys directory
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ principal_access_keys_dir | dirname }}"
+    - "{{ principal_access_keys_dir }}"
+
+# 0751, not 0755: traverse without list. A principal with a shell can otherwise
+# `ls /srv/users` and enumerate every other tenant on the box. Homes are 0750,
+# so contents were never exposed — the account names were. The daemon converges
+# the same mode on every principal materialization; this is for hosts that have
+# not run one yet.
+- name: Tighten the principal home root against tenant enumeration
+  ansible.builtin.file:
+    path: "{{ principal_home_root | default('/srv/users') }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0751"

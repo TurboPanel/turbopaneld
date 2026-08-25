@@ -739,7 +739,7 @@ test("native apply no longer grants runtime groups itself", async () => {
       applyOpts(host, mock),
     );
 
-    // Entitlement moved to `ensurePrincipalRuntimeGroups`, which runs during
+    // Entitlement moved to `ensurePrincipalManagedGroups`, which runs during
     // principal materialization — before releases and before any unit is
     // installed. Keeping a second grant here would be a second source of truth
     // that can only ever add, never revoke.

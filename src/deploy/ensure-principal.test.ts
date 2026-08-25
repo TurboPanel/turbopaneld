@@ -1,9 +1,9 @@
-import { assertEquals, assertRejects } from "@std/assert";
+import { assert, assertEquals, assertRejects } from "@std/assert";
 import type { LayoutPaths } from "../paths/layout.ts";
 import {
   DEFAULT_PRINCIPAL_SHELL,
   ensureDirectoryOwnedByPrincipal,
-  ensurePrincipalRuntimeGroups,
+  ensurePrincipalManagedGroups,
   ensureSystemPrincipals,
   parseGroupGid,
   parsePasswdHomeShell,
@@ -28,10 +28,19 @@ function stubLayout(principalHomeRoot = "/srv/users"): LayoutPaths {
 function captureRun(handlers: {
   getentPasswd?: RunResult;
   getentGroup?: RunResult;
+  /** Supplementary groups `id -nG` reports for the account. */
+  groups?: string[];
 }): { run: RunFn; calls: Array<{ command: string; args: string[] }> } {
   const calls: Array<{ command: string; args: string[] }> = [];
   const run: RunFn = (command, args) => {
     calls.push({ command, args });
+    if (command === "id") {
+      return Promise.resolve({
+        success: true,
+        stdout: (handlers.groups ?? []).join(" "),
+        stderr: "",
+      });
+    }
     if (command === "getent" && args[0] === "group") {
       return Promise.resolve(
         handlers.getentGroup ?? { success: false, stdout: "", stderr: "" },
@@ -700,9 +709,9 @@ function groupMutations(
     .map((c) => c.args);
 }
 
-test("ensurePrincipalRuntimeGroups adds only the missing groups", async () => {
+test("ensurePrincipalManagedGroups adds only the missing groups", async () => {
   const { run, calls } = runtimeGroupRun(["appuser-grp", "tpphp84"]);
-  await ensurePrincipalRuntimeGroups(
+  await ensurePrincipalManagedGroups(
     "appuser",
     new Set(["tpphp84", "tpnode24"]),
     run,
@@ -712,18 +721,18 @@ test("ensurePrincipalRuntimeGroups adds only the missing groups", async () => {
   ]);
 });
 
-test("ensurePrincipalRuntimeGroups revokes a group that is no longer granted", async () => {
+test("ensurePrincipalManagedGroups revokes a group that is no longer granted", async () => {
   // The whole reason this function exists: `usermod -aG` can only add, so a
   // principal that once deployed a Node app could execute Node forever.
   const { run, calls } = runtimeGroupRun(["appuser-grp", "tpnode24"]);
-  await ensurePrincipalRuntimeGroups("appuser", new Set(["tpphp84"]), run);
+  await ensurePrincipalManagedGroups("appuser", new Set(["tpphp84"]), run);
   assertEquals(groupMutations(calls), [
     ["-n", "usermod", "-aG", "tpphp84", "appuser"],
     ["-n", "gpasswd", "-d", "appuser", "tpnode24"],
   ]);
 });
 
-test("ensurePrincipalRuntimeGroups never touches a group outside the registry", async () => {
+test("ensurePrincipalManagedGroups never touches a group outside the registry", async () => {
   // Containment is what makes revocation safe. `<username>-grp` is the
   // principal's primary group, `tp` is the panel's own, `tpnginx` is an engine
   // account joined for release reads, and `ops` is something an operator added
@@ -735,22 +744,22 @@ test("ensurePrincipalRuntimeGroups never touches a group outside the registry", 
     "ops",
     "tpnode24",
   ]);
-  await ensurePrincipalRuntimeGroups("appuser", new Set(), run);
+  await ensurePrincipalManagedGroups("appuser", new Set(), run);
   assertEquals(groupMutations(calls), [
     ["-n", "gpasswd", "-d", "appuser", "tpnode24"],
   ]);
 });
 
-test("ensurePrincipalRuntimeGroups rejects a group the registry does not define", async () => {
+test("ensurePrincipalManagedGroups rejects a group the registry does not define", async () => {
   const { run } = runtimeGroupRun([]);
   await assertRejects(
-    () => ensurePrincipalRuntimeGroups("appuser", new Set(["tpevil"]), run),
+    () => ensurePrincipalManagedGroups("appuser", new Set(["tpevil"]), run),
     Error,
-    "unknown runtime entitlement group",
+    "unknown managed group",
   );
 });
 
-test("ensurePrincipalRuntimeGroups tolerates a host missing the group", async () => {
+test("ensurePrincipalManagedGroups tolerates a host missing the group", async () => {
   // A host provisioned some other way may legitimately not have the group yet;
   // the unit's own health probe is what catches an unreachable runtime. A
   // failed *revoke* stays loud, since a lingering entitlement is a real risk.
@@ -770,7 +779,7 @@ test("ensurePrincipalRuntimeGroups tolerates a host missing the group", async ()
       stderr: "group tpnode24 does not exist",
     });
   };
-  await ensurePrincipalRuntimeGroups("appuser", new Set(["tpnode24"]), run);
+  await ensurePrincipalManagedGroups("appuser", new Set(["tpnode24"]), run);
   assertEquals(groupMutations(calls).length, 1);
 });
 
@@ -792,4 +801,92 @@ test("ensureSystemPrincipals grants the runtimes its spec carries", async () => 
     .filter((c) => c.args.includes("usermod") && c.args.includes("-aG"))
     .map((c) => c.args[3]);
   assertEquals(added.sort(), ["tpnode24", "tpphp84"]);
+});
+
+test("ensureSystemPrincipals grants the access group its spec carries", async () => {
+  const { run, calls } = captureRun({});
+  await ensureSystemPrincipals(
+    stubLayout(),
+    [{
+      principalId: "pr-1",
+      username: "appuser",
+      shell: "/bin/bash",
+      accessGroups: ["tpshell"],
+      runtimes: [{ runtime: "php", series: "8.4" }],
+    }],
+    run,
+  );
+  const added = calls
+    .filter((c) => c.args.includes("usermod") && c.args.includes("-aG"))
+    .map((c) => c.args[3]);
+  // Entitlements and access are one reconcile pass, so both land together.
+  assertEquals(added.sort(), ["tpphp84", "tpshell"]);
+});
+
+test("downgrading from shell to files-only revokes the shell group", async () => {
+  // The whole reason the containment set is a single one: an entitlement-only
+  // pass would not recognize `tpshell` and would leave it behind.
+  const { run, calls } = captureRun({ groups: ["appuser-grp", "tpshell"] });
+  await ensureSystemPrincipals(
+    stubLayout(),
+    [{
+      principalId: "pr-1",
+      username: "appuser",
+      accessGroups: ["tpsftp"],
+    }],
+    run,
+  );
+  const removed = calls
+    .filter((c) => c.args.includes("gpasswd") && c.args.includes("-d"))
+    .map((c) => c.args.at(-1));
+  assertEquals(removed, ["tpshell"]);
+});
+
+test("a suspended account keeps its groups revoked and nothing else touched", async () => {
+  const { run, calls } = captureRun({
+    groups: ["appuser-grp", "tp", "tpsftp", "tpphp84"],
+  });
+  await ensureSystemPrincipals(
+    stubLayout(),
+    [{ principalId: "pr-1", username: "appuser", accessGroups: [] }],
+    run,
+  );
+  const removed = calls
+    .filter((c) => c.args.includes("gpasswd") && c.args.includes("-d"))
+    .map((c) => c.args.at(-1));
+  // `appuser-grp` and `tp` survive: they are outside the registry, so the
+  // reconcile has no opinion about them no matter what the wire asks for.
+  assertEquals(removed.sort(), ["tpphp84", "tpsftp"]);
+});
+
+test("an access group the registry does not define is dropped, not created", async () => {
+  const { run, calls } = captureRun({});
+  await ensureSystemPrincipals(
+    stubLayout(),
+    [{ principalId: "pr-1", username: "appuser", accessGroups: ["tproot"] }],
+    run,
+  );
+  // Inventing the group would hand out an `sshd` Match block nobody wrote.
+  assertEquals(
+    calls.filter((c) => c.args.includes("usermod") && c.args.includes("-aG")),
+    [],
+  );
+});
+
+test("the principal home root is traverse-only, not listable", async () => {
+  const { run, calls } = captureRun({});
+  const layout = stubLayout();
+  await ensureSystemPrincipals(
+    layout,
+    [{ principalId: "pr-1", username: "appuser" }],
+    run,
+  );
+  const mkdir = calls.find((c) =>
+    c.args.includes("install") && c.args.includes("-d") &&
+    c.args.at(-1) === layout.principalHomeRoot
+  );
+  assert(mkdir);
+  // 0755 would let any tenant with a shell `ls /srv/users` and enumerate every
+  // other account on the box.
+  assertEquals(mkdir.args[mkdir.args.indexOf("-m") + 1], "0751");
 });

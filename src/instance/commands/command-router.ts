@@ -23,6 +23,7 @@ import {
   parseManagedRestorePayload,
   parseNtpSetPayload,
   parsePingPayload,
+  parsePrincipalsReconcilePayload,
   parseRebootPayload,
   parseSystemReconcilePayload,
   parseTimezoneSetPayload,
@@ -49,6 +50,7 @@ import { handleNtp } from "./ntp.ts";
 import { handlePing } from "./ping.ts";
 import { handleReboot } from "./reboot.ts";
 import { handleTimezone } from "./timezone.ts";
+import { handlePrincipalsReconcile } from "./principals-reconcile.ts";
 import { handleTlsTrust } from "./tls-trust.ts";
 import { handleFabricReconcile } from "./fabric.ts";
 import {
@@ -236,6 +238,13 @@ export async function handleCommandDispatch(
       case "server.tls.trust.reconcile": {
         const payload = parseTlsTrustReconcilePayload(message.payload);
         result = await handleTlsTrust(payload, daemonReceivedAt);
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
+      case "server.principals.reconcile": {
+        const payload = parsePrincipalsReconcilePayload(message.payload);
+        result = await handlePrincipalsReconcile(payload, daemonReceivedAt);
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;

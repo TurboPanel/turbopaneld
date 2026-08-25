@@ -78,7 +78,7 @@ export function nativeAppRuntimeRoot(
  * principal can reach its own series without listing either parent or seeing
  * another series it was not granted.
  *
- * Membership is reconciled by `ensurePrincipalRuntimeGroups` during principal
+ * Membership is reconciled by `ensurePrincipalManagedGroups` during principal
  * materialization — which runs before any unit is installed, because systemd
  * resolves supplementary groups at `execve` and a unit started too early dies
  * `203/EXEC`.

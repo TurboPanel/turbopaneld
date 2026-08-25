@@ -57,6 +57,7 @@
     - role: deno-runtime
       when: turbopanel_daemon_exec_mode | default('native') == 'js'
     - role: daemon-logs
+    - role: principal-access
     - role: daemon-config
     - role: daemon-launch
 

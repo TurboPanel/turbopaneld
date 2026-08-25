@@ -1,0 +1,16 @@
+---
+galaxy_info:
+  author: turbopanel
+  description: >-
+    Create the tpsftp/tpshell SSH access groups from the shared runtime registry
+    and the root-owned authorized_keys directory the panel manages. A group here
+    means "sshd should apply this Match block to the account"; it protects no
+    binary and grants no execve, unlike a runtime entitlement group.
+  license: AGPL-3.0
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Debian
+      versions:
+        - all
+
+dependencies: []

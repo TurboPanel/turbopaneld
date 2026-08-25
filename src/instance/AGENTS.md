@@ -262,7 +262,16 @@ them as `caCerts`. Each reconnect re-reads the file (mtime+size cache);
 else the canonical layout `instance-ca.pem`) then invalidates
 that cache so the next connect (or an immediate reconnect) uses the overlap
 window **before** the old root is retired. Public-URL apply / CA rotate fans
-the command out over the existing WSS session. `run.sh` still pins
+the command out over the existing WSS session.
+
+`server.principals.reconcile` is the third `server.*` reconcile and follows the
+same shape: server-scoped, carries the full desired state, no reply channel. It
+exists because a deploy is the wrong trigger for a **revocation** — removing a
+key must not wait for an unrelated environment to ship — and because a deploy
+payload can never carry the complete set that safe removal requires. It
+subsumes shell and entitlement changes too, so granting a principal PHP 8.4 no
+longer means deploying one of its environments. See `../deploy/ssh/` for the
+host side. `run.sh` still pins
 `--cacert` first; on HTTP `000` with an existing CA it retries **once**
 unpinned, then installs only if the fetched PEM parses as a CA **and**
 validates the live leaf. `TURBOPANEL_INSTANCE_CA_FINGERPRINT` in `daemon.env`

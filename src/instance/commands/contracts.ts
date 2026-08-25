@@ -11,6 +11,7 @@ export const COMMAND_TYPES = [
   "server.timezone.set",
   "server.fabric.reconcile",
   "server.tls.trust.reconcile",
+  "server.principals.reconcile",
   "environment.deploy",
   "environment.lifecycle",
   "environment.stop",
@@ -88,6 +89,30 @@ export type NtpSetResult = {
   ntpServers: string[];
   fallbackNtpServers?: string[];
   summary?: string;
+};
+
+/**
+ * Must stay in sync with the instance canonical `server.principals.reconcile`
+ * shape.
+ *
+ * `principals` is the **complete** managed set for this server, which is what
+ * makes removal safe — an account absent from it is one TurboPanel no longer
+ * manages here, and its key file goes. That completeness is also why this is a
+ * command of its own rather than a field on `environment.deploy`: a deploy
+ * payload describes one environment, and revoking a key must not wait for, or
+ * be scoped by, an unrelated environment being deployed.
+ */
+export type PrincipalsReconcilePayload = {
+  principals: EnvironmentDeployPrincipalMaterial[];
+};
+
+/** Must stay in sync with the instance canonical `server.principals.reconcile` shape. */
+export type PrincipalsReconcileResult = {
+  principalsApplied: number;
+  keysChanged: string[];
+  keysRemoved: string[];
+  sshdReloaded: boolean;
+  warnings: string[];
 };
 
 /** Must stay in sync with the instance canonical `server.tls.trust.reconcile` shape. */
@@ -299,6 +324,25 @@ export type EnvironmentDeployPrincipalMaterial = {
    * derives entitlements itself, because a derived grant can only ever add.
    */
   runtimes?: EnvironmentDeployPrincipalRuntime[];
+  /**
+   * SSH access groups this principal should hold (`tpsftp` / `tpshell`).
+   *
+   * Resolved control-plane side from the account's shell **and** whether it
+   * holds any key — same doctrine as `runtimes`, and for the same reason: one
+   * place decides the effective set, the daemon reconciles to it. `[]` is a
+   * revocation and is the normal value for an account that holds no keys.
+   */
+  accessGroups?: string[];
+  /**
+   * Canonical `<type> <base64>` public keys for this account's managed
+   * `authorized_keys` file.
+   *
+   * `undefined` means "this payload says nothing about keys" and leaves the
+   * file alone; `[]` means the account has none. That distinction is why the
+   * field is optional rather than defaulted: a deploy that predates the key
+   * subsystem must not silently revoke every key on the host.
+   */
+  sshKeys?: string[];
 };
 
 export type EnvironmentDeployServiceHook = {
@@ -1497,6 +1541,43 @@ export function parseTimezoneSetPayload(value: unknown): TimezoneSetPayload {
   return { timezone };
 }
 
+/**
+ * Parse `server.principals.reconcile`.
+ *
+ * Reuses {@link parsePrincipalMaterial} verbatim rather than defining a second
+ * principal shape. That reuse is the point: the same account described by a
+ * deploy and by a reconcile must validate identically, or one channel becomes a
+ * way to say something the other refuses.
+ *
+ * An **empty** `principals` array is legal and means "TurboPanel manages no
+ * accounts on this server" — which is a real instruction (remove every key
+ * file), not an empty request. A missing or non-array `principals` is a
+ * malformed payload and throws, so the two can never be confused.
+ */
+export function parsePrincipalsReconcilePayload(
+  value: unknown,
+): PrincipalsReconcilePayload {
+  if (!isRecord(value)) {
+    throw new Error("Invalid principals reconcile payload");
+  }
+  if (!Array.isArray(value.principals)) {
+    throw new Error("principals must be an array");
+  }
+  const principals = value.principals.map(parsePrincipalMaterial);
+  const seen = new Set<string>();
+  for (const principal of principals) {
+    if (seen.has(principal.username)) {
+      // Two entries for one account would make "the complete set" ambiguous
+      // about which key list wins.
+      throw new Error(
+        `principals contains ${principal.username} more than once`,
+      );
+    }
+    seen.add(principal.username);
+  }
+  return { principals };
+}
+
 export function parseTlsTrustReconcilePayload(
   value: unknown,
 ): TlsTrustReconcilePayload {
@@ -2437,8 +2518,61 @@ function parsePrincipalMaterial(
       return { runtime: entry.runtime, series: String(entry.series) };
     });
   }
+  if (value.accessGroups !== undefined) {
+    // Rejected rather than dropped, for the same reason `runtimes` is: dropping
+    // a malformed grant silently revokes the login it describes.
+    if (
+      !Array.isArray(value.accessGroups) ||
+      !value.accessGroups.every((entry) =>
+        typeof entry === "string" && ACCESS_GROUP_RE.test(entry)
+      )
+    ) {
+      throw new TypeError(
+        "Invalid environment deploy principalMaterial accessGroups",
+      );
+    }
+    material.accessGroups = [...value.accessGroups];
+  }
+  if (value.sshKeys !== undefined) {
+    if (
+      !Array.isArray(value.sshKeys) ||
+      !value.sshKeys.every((entry) =>
+        typeof entry === "string" && CANONICAL_SSH_KEY_RE.test(entry)
+      )
+    ) {
+      // The daemon re-validates rather than trusting the wire: these lines land
+      // in a file `sshd` authenticates against, and the control plane being
+      // out of date or compromised is exactly the case a second gate is for.
+      throw new TypeError(
+        "Invalid environment deploy principalMaterial sshKeys",
+      );
+    }
+    material.sshKeys = [...value.sshKeys];
+  }
   return material;
 }
+
+/** Shape gate only — `allAccessGroups()` decides which names actually exist. */
+const ACCESS_GROUP_RE = /^[a-z][a-z0-9-]{0,31}$/;
+
+/**
+ * `<type> <base64>`, anchored, with no third field.
+ *
+ * Written out rather than imported: this module is a zero-import leaf that
+ * mirrors instance contracts, the same way `ALLOWED_PRINCIPAL_SHELLS` and
+ * `PRINCIPAL_USERNAME_RE` above it are mirrored. Keep in sync with
+ * `ALLOWED_SSH_KEY_TYPES` in `../../deploy/ssh/key-types.ts`, whose
+ * `isCanonicalSshPublicKey` is the second gate this one feeds — a drift test
+ * lives in `../../deploy/ssh/apply.test.ts`.
+ *
+ * Deliberately not a full blob decode: by the time a key reaches the daemon the
+ * control plane has already decoded it, compared its embedded algorithm name
+ * against its label, and re-rendered it. What is left to enforce is that
+ * nothing *structural* — a second line, an options field, a trailing comment —
+ * can reach a file `sshd` authenticates against.
+ */
+const CANONICAL_SSH_KEY_RE =
+  /^(?:ssh-ed25519|sk-ssh-ed25519@openssh\.com|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|sk-ecdsa-sha2-nistp256@openssh\.com|ssh-rsa) [A-Za-z0-9+/]+={0,2}$/;
 
 function parseServiceHook(value: unknown): EnvironmentDeployServiceHook {
   if (!isRecord(value)) {
