@@ -160,20 +160,18 @@ export function resolveServerKeyPath(
 /**
  * Resolve the platform CA PEM path for remote (url-mode) TLS trust.
  *
- * Prefers `TURBOPANEL_INSTANCE_CA` when set; otherwise falls back to the
- * canonical config path when that file exists (e.g. operator recovery via curl).
- *
- * `canonicalPath` is injectable because this function stats the **real**
- * filesystem: a test that hard-codes the canonical path passes on a clean
- * checkout and fails on any machine that actually has TurboPanel installed.
+ * Prefers `TURBOPANEL_INSTANCE_CA` when that file exists; otherwise falls
+ * back to the env-derived layout path (`TURBOPANEL_CONFIG_DIR` /
+ * {@link CANONICAL_INSTANCE_CA_PATH}) when that file exists. A stale env
+ * path falls through to the layout file. Tests inject the layout via
+ * `TURBOPANEL_CONFIG_DIR` so they never stat the host's real CA.
  */
 export function resolveInstanceCaPath(
   env: Record<string, string | undefined> = Deno.env.toObject(),
-  canonicalPath: string = CANONICAL_INSTANCE_CA_PATH,
 ): string | undefined {
   const fromEnv = env.TURBOPANEL_INSTANCE_CA?.trim();
   if (fromEnv && fileExistsSync(fromEnv)) return fromEnv;
-  // A stale env path falls through to the canonical file when present.
+  const canonicalPath = resolveLayout(env).instanceCaPath;
   return fileExistsSync(canonicalPath) ? canonicalPath : undefined;
 }
 

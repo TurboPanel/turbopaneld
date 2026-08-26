@@ -12,7 +12,9 @@ first; the socket carries live traffic only (outbox delivery, command dispatch,
 dev-sync, tunnel-token, etc.). Registration keys are one-shot: `enrollDaemon`
 sends a persisted `server.id` (when present) so re-enroll of the same host
 works; a consumed key cannot latch a second server (see instance Daemon Cell /
-license notes).
+license notes). `start()` snapshots the identity directory
+(`TURBOPANEL_DAEMON_STATE_DIR`) so license and key reads stay on that path
+for the process lifetime.
 
 **Co-located dev connectivity** (`src/orchestration/setup.ts`,
 `src/instance/paths.ts`): after console opt-in (`TURBOPANEL_DEV_INSTANCE=1`),

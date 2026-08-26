@@ -19,7 +19,7 @@ import {
 } from "./client.ts";
 import { generateDaemonKeypair, saveDaemonKeyFile } from "../crypto/keys.ts";
 import { enrollDaemon } from "./enroll.ts";
-import { IdlePresence } from "./idle-presence.ts";
+import { IdlePresence, installIdlePresenceProviders } from "./idle-presence.ts";
 import {
   challengeResponse,
   closeWithCode,
@@ -638,6 +638,28 @@ function parseSentFrames(
   frames: string[],
 ): Array<Record<string, unknown>> {
   return frames.map((frame) => JSON.parse(frame) as Record<string, unknown>);
+}
+
+/** Keep IdlePresence ticks free of host I/O so short stale windows stay deterministic. */
+function installCheapIdlePresence(): () => void {
+  return installIdlePresenceProviders({
+    getBuildInfo: () => ({
+      commit: "test",
+      buildId: "build-test",
+      builtAt: "2026-01-01T00:00:00Z",
+      channel: "trunk",
+    }),
+    getHostHelloIdentity: () => ({}),
+    collectPresenceSnapshot: () => ({
+      timeSync: {
+        timezone: "UTC",
+        ntpEnabled: true,
+        ntpSynced: true,
+        ntpServers: ["time.cloudflare.com"],
+      },
+      ips: [{ address: "203.0.113.10", version: 4, scope: "public" }],
+    }),
+  });
 }
 
 it({
@@ -1696,6 +1718,7 @@ it({
     } as unknown as WebSocket;
 
     let staleCount = 0;
+    const restore = installCheapIdlePresence();
     const session = new IdlePresence({
       serverId: "srv-presence",
       idleCheckIntervalMs,
@@ -1708,6 +1731,7 @@ it({
 
     try {
       session.attach(ws);
+      session.noteInboundActivity();
       const inboundTimer = setInterval(
         () => session.noteInboundActivity(),
         idleCheckIntervalMs,
@@ -1726,6 +1750,7 @@ it({
       );
     } finally {
       session.detach();
+      restore();
     }
   },
 });
@@ -4100,9 +4125,19 @@ it({
   },
   fn: async () => {
     const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
     const { sockets, restore: restoreWebSocket } = installTrackingWebSocket();
+    const parkedDelays: number[] = [];
+    const restoreClientTime = installClientTimeSource({
+      delay: (ms) => {
+        if (ms >= PARKED_BACKOFF_MIN_MS) parkedDelays.push(ms);
+        return new Promise((resolve) => setTimeout(resolve, 0));
+      },
+    });
     let restoreFetch: (() => void) | undefined;
+    let enrollCalls = 0;
     try {
+      Deno.env.delete("TURBOPANEL_FORCE_ENROLL");
       const { signing, authToken, enroll } = await prepareVerifiedAuth();
       const api = createFakeInstanceApi();
       api.script(
@@ -4114,7 +4149,10 @@ it({
         () => scriptedJwksResponse(signing),
       );
       api.script("/api/daemon/v1/auth/challenge", () => challengeResponse());
-      api.script("/api/daemon/v1/enroll", () => enrollResponse(enroll));
+      api.script("/api/daemon/v1/enroll", () => {
+        enrollCalls += 1;
+        return enrollResponse(enroll);
+      });
       api.script(
         "/api/daemon/v1/auth/session",
         () => sessionResponse({ token: authToken }),
@@ -4129,11 +4167,12 @@ it({
         await Deno.writeTextFile(`${tempDir}/license.id`, "\n");
         await Deno.writeTextFile(`${tempDir}/license.token`, "\n");
 
+        const host = "blank-license.park.test";
         const client = new InstanceClient({
           config: {
             kind: "url",
-            baseUrl: "https://instance.test",
-            wsBaseUrl: "wss://instance.test",
+            baseUrl: `https://${host}`,
+            wsBaseUrl: `wss://${host}`,
           },
           reconnectDelayMs: DEFAULT_INITIAL_BACKOFF_MS,
         });
@@ -4141,8 +4180,15 @@ it({
         try {
           client.start();
           // Missing usable license → permanent park (missing license credentials).
-          await new Promise((resolve) => setTimeout(resolve, 50));
-          assertEquals(sockets.length, 0);
+          await waitFor(
+            "parked delay",
+            () => parkedDelays.length > 0 ? true : undefined,
+          );
+          assertEquals(enrollCalls, 0);
+          assertEquals(
+            sockets.filter((socket) => socket.url.includes(host)).length,
+            0,
+          );
         } finally {
           client.stop();
         }
@@ -4150,7 +4196,9 @@ it({
     } finally {
       restoreFetch?.();
       restoreWebSocket();
+      restoreClientTime();
       setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
     }
   },
 });

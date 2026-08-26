@@ -195,13 +195,21 @@ test("resolveInstanceCaPath prefers TURBOPANEL_INSTANCE_CA env when file exists"
   }
 });
 
-test("resolveInstanceCaPath returns undefined when env unset and canonical file missing", () => {
-  // The canonical path is injected: statting the real one makes this pass on a
-  // clean checkout and fail on any machine with TurboPanel installed.
-  const path = resolveInstanceCaPath({}, "/tmp/missing-turbopanel-canonical-ca.pem");
-  if (path !== undefined) {
-    throw new Error(`expected undefined, got ${path}`);
-  }
+test("resolveInstanceCaPath falls back to layout instance-ca.pem when present", async () => {
+  await withTempLayout(async (fixture) => {
+    const canonical = join(fixture.dirs.configDir, "instance-ca.pem");
+    await Deno.writeTextFile(canonical, "placeholder\n");
+    assertEquals(resolveInstanceCaPath(fixture.env), canonical);
+  });
+});
+
+test("resolveInstanceCaPath returns undefined when env unset and canonical file missing", async () => {
+  await withTempLayout((fixture) => {
+    const path = resolveInstanceCaPath(fixture.env);
+    if (path !== undefined) {
+      throw new Error(`expected undefined, got ${path}`);
+    }
+  });
 });
 
 test("createInstanceHttpClient returns undefined for plaintext http with dev flag without reading CA", async () => {
@@ -323,12 +331,28 @@ test("resolveServerIdentityDir uses cwd when orchestration is skipped", () => {
   assertEquals(dir, Deno.cwd());
 });
 
-test("resolveInstanceCaPath ignores stale TURBOPANEL_INSTANCE_CA path", () => {
-  const path = resolveInstanceCaPath(
-    { TURBOPANEL_INSTANCE_CA: "/tmp/missing-turbopanel-ca.pem" },
-    "/tmp/missing-turbopanel-canonical-ca.pem",
-  );
-  assertEquals(path, undefined);
+test("resolveInstanceCaPath ignores stale TURBOPANEL_INSTANCE_CA path", async () => {
+  await withTempLayout((fixture) => {
+    const path = resolveInstanceCaPath({
+      ...fixture.env,
+      TURBOPANEL_INSTANCE_CA: join(fixture.dirs.configDir, "missing-ca.pem"),
+    });
+    assertEquals(path, undefined);
+  });
+});
+
+test("resolveInstanceCaPath falls through stale env path to layout CA", async () => {
+  await withTempLayout(async (fixture) => {
+    const canonical = join(fixture.dirs.configDir, "instance-ca.pem");
+    await Deno.writeTextFile(canonical, "placeholder\n");
+    assertEquals(
+      resolveInstanceCaPath({
+        ...fixture.env,
+        TURBOPANEL_INSTANCE_CA: join(fixture.dirs.configDir, "missing-ca.pem"),
+      }),
+      canonical,
+    );
+  });
 });
 
 test("createInstanceHttpClient builds unix and public-TLS clients", async () => {

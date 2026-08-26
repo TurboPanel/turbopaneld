@@ -14,7 +14,6 @@ import {
   resolveInstanceCaPath,
   resolveInstanceConfig,
   resolveServerIdentityDir,
-  resolveServerKeyPath,
 } from "./paths.ts";
 import {
   collectServerIps,
@@ -304,13 +303,15 @@ function resolveServerIdDir(
   return resolveServerIdentityDir(env);
 }
 
-function resolveServerIdPath(): string {
-  return `${resolveServerIdDir()}/${SERVER_ID_FILE}`;
+function resolveServerIdPath(dir = resolveServerIdDir()): string {
+  return `${dir}/${SERVER_ID_FILE}`;
 }
 
-async function readServerId(): Promise<string | undefined> {
+async function readServerId(
+  dir = resolveServerIdDir(),
+): Promise<string | undefined> {
   try {
-    const id = await Deno.readTextFile(resolveServerIdPath());
+    const id = await Deno.readTextFile(resolveServerIdPath(dir));
     const trimmed = id.trim();
     return trimmed.length > 0 ? trimmed : undefined;
   } catch {
@@ -318,19 +319,21 @@ async function readServerId(): Promise<string | undefined> {
   }
 }
 
-async function readDaemonKeyFile(): Promise<DaemonKeyFile | null> {
+async function readDaemonKeyFile(
+  dir = resolveServerIdDir(),
+): Promise<DaemonKeyFile | null> {
   try {
-    return await loadDaemonKeyFile(resolveServerKeyPath());
+    return await loadDaemonKeyFile(`${dir}/${SERVER_KEY_FILE}`);
   } catch {
     return null;
   }
 }
 
-async function readKeyId(): Promise<string | undefined> {
+async function readKeyId(
+  dir = resolveServerIdDir(),
+): Promise<string | undefined> {
   try {
-    const keyId = await Deno.readTextFile(
-      `${resolveServerIdDir()}/${KEY_ID_FILE}`,
-    );
+    const keyId = await Deno.readTextFile(`${dir}/${KEY_ID_FILE}`);
     const trimmed = keyId.trim();
     return trimmed.length > 0 ? trimmed : undefined;
   } catch {
@@ -338,11 +341,13 @@ async function readKeyId(): Promise<string | undefined> {
   }
 }
 
-async function writeKeyId(keyId: string): Promise<void> {
+async function writeKeyId(
+  keyId: string,
+  dir = resolveServerIdDir(),
+): Promise<void> {
   const trimmed = keyId.trim();
   if (!trimmed) return;
   try {
-    const dir = resolveServerIdDir();
     await Deno.mkdir(dir, { recursive: true });
     await Deno.writeTextFile(`${dir}/${KEY_ID_FILE}`, `${trimmed}\n`);
   } catch (err) {
@@ -350,11 +355,11 @@ async function writeKeyId(keyId: string): Promise<void> {
   }
 }
 
-async function readLicenseCredentials(): Promise<
+async function readLicenseCredentials(
+  dir = resolveServerIdDir(),
+): Promise<
   { licenseId?: string; licenseToken?: string }
 > {
-  const dir = resolveServerIdDir();
-
   let licenseId: string;
   let licenseToken: string;
   try {
@@ -430,6 +435,11 @@ export class InstanceClient {
   readonly #metricsCollectorFactory?: () => MetricsCollector;
   readonly #applyDevSyncTarball?: DevSyncApplyFn;
   #updateInstallInProgress = false;
+  /**
+   * Identity directory captured at {@link start} so reconnects do not follow a
+   * later `TURBOPANEL_DAEMON_STATE_DIR` change (parallel tests share process env).
+   */
+  #identityDir: string | undefined;
 
   constructor(options: InstanceClientOptions = {}) {
     this.#config = options.config ?? resolveInstanceConfig();
@@ -614,6 +624,7 @@ export class InstanceClient {
     if (this.#connectLoopStarted) return;
     this.#connectLoopStarted = true;
     this.#stopped = false;
+    this.#identityDir = resolveServerIdDir();
     this.#forceEnrollPending = isTruthyFlag(
       Deno.env.get("TURBOPANEL_FORCE_ENROLL"),
     );
@@ -713,8 +724,14 @@ export class InstanceClient {
     }
   }
 
+  #serverIdentityDir(): string {
+    return this.#identityDir ?? resolveServerIdDir();
+  }
+
   async #readLicenseStamp(): Promise<string | undefined> {
-    const { licenseId, licenseToken } = await readLicenseCredentials();
+    const { licenseId, licenseToken } = await readLicenseCredentials(
+      this.#serverIdentityDir(),
+    );
     if (!licenseId || !licenseToken) return undefined;
     const digest = await crypto.subtle.digest(
       "SHA-256",
@@ -846,9 +863,9 @@ export class InstanceClient {
     keyId: string | undefined;
   }> {
     const [loadedKeyFile, loadedServerId, loadedKeyId] = await Promise.all([
-      readDaemonKeyFile(),
-      readServerId(),
-      readKeyId(),
+      readDaemonKeyFile(stateDir),
+      readServerId(stateDir),
+      readKeyId(stateDir),
     ]);
 
     let keyFile = loadedKeyFile;
@@ -860,7 +877,7 @@ export class InstanceClient {
       return { keyFile, serverId, keyId };
     }
 
-    const licenseCredentials = await readLicenseCredentials();
+    const licenseCredentials = await readLicenseCredentials(stateDir);
     if (!licenseCredentials.licenseId || !licenseCredentials.licenseToken) {
       throw new Error("missing license credentials for enrollment");
     }
@@ -977,7 +994,7 @@ export class InstanceClient {
     // Calling #closeActiveSocket() here would kill a healthy connection on every
     // reconnect cycle, producing a perpetual ~2-second disconnect/reconnect storm.
 
-    const stateDir = resolveServerIdDir();
+    const stateDir = this.#serverIdentityDir();
     const machineKey = await readMachineKey();
     const hostname = Deno.hostname();
 
@@ -1481,7 +1498,7 @@ export class InstanceClient {
       return false;
     }
 
-    const credentials = await readLicenseCredentials();
+    const credentials = await readLicenseCredentials(this.#serverIdentityDir());
     if (!credentials.licenseId || !credentials.licenseToken) {
       throw new Error(
         "license credentials missing; re-run the installer with TURBOPANEL_LICENSE",
