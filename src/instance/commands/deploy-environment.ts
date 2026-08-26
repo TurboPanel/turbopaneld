@@ -595,8 +595,9 @@ function replicaCountsForManifest(
 
 /**
  * Compose service name → TurboPanel service UUID, as the deploy payload
- * declared it. Persisted so the container-log collector can resolve service
- * identity from deployment state instead of a live container label.
+ * declared it. Persisted so the on-demand log tail can decide whether a
+ * requested container belongs to the service being asked about, from
+ * deployment state rather than a live container label.
  */
 function serviceIdsForManifest(
   payload: EnvironmentDeployPayload,

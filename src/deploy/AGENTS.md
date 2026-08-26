@@ -70,7 +70,7 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    `<stateDir>/storage/<organizationId>/<storageId>/<locationId>/data`
    (`materializeLocation` in `materialize-storage.ts`); `docker volume create`
    for `kind=volume` + `provider=docker` using instance-supplied **`volumeName`**
-   (the storage UUID; else legacy `tp-<org8>-<name>`). Optional `chown` when a
+   (the storage UUID). Optional `chown` when a
    principal is linked. The instance owns Docker volume naming. Path-provider
    directory/file entries arrive with `sourcePath` — principal-owned defaults
    are `/srv/users/<username>/volumes/<storageId>` (explicit operator paths
@@ -506,8 +506,8 @@ entry. There is no `composeYaml` fallback on `environment.deploy`.
   `deployment.json` (`DEPLOYMENT_MANIFEST_FILENAME`, version 2: project /
   environment / server ids, generation, project name, compose sha256, replica
   counts, optional `secrets[]` plan, optional `serviceIds` map — compose service
-  name → service UUID, which is what lets the container-log collector resolve
-  identity from deployment state instead of live container labels — and optional
+  name → service UUID, which is what lets the on-demand log tail check container
+  ownership from deployment state instead of live container labels — and optional
   `releases[]`, one row per applied `sourceMaterial[]` entry
   (`composeServiceName`, `serviceId`, `releaseId`, `sourceId`, `commitSha`,
   optional `ref`, optional `username`) so the reboot / reconnect paths that
@@ -631,9 +631,8 @@ get a per-service Traefik project or an `ingressServices[]` entry.
 `src/instance/commands/stop-environment.ts`):
 
 1. `docker compose -p <projectName> -f compose.yaml down --remove-orphans --volumes`
-   against `resolveDeployedComposePaths` (compiled `compose.yaml`, else v1
-   manifest, else legacy `docker-compose.yml`) — idempotent no-op when no
-   compose file exists.
+   against `resolveDeployedComposePaths` (the compiled `compose.yaml`, and nothing
+   else) — idempotent no-op when no compose file exists.
 2. Best-effort `docker network rm` for payload `fabricNetworks[]` (`tpn_*`)
    then prune those names from `state.json` so boot re-reconcile does not
    recreate them. Missing / active-endpoint errors must not fail the stop.
@@ -649,7 +648,7 @@ get a per-service Traefik project or an `ingressServices[]` entry.
 `environment.lifecycle` (command router →
 `src/instance/commands/lifecycle-environment.ts`):
 
-1. Require a compiled or legacy-resolved compose file
+1. Require a compiled compose file
    (`resolveEnvironmentDeploymentDir` + `resolveDeployedComposePaths`) —
    missing compose **fails** with a deploy-first message (unlike idempotent
    stop).
@@ -674,7 +673,7 @@ Helpers: `src/deploy/ensure-docker.ts`, `src/deploy/ingress.ts`,
 `src/deploy/site.ts`, `src/deploy/site-docker.ts`,
 `src/deploy/ensure-docker-networks.ts`, `src/deploy/compose-ps.ts`,
 `src/deploy/compose-files.ts` (compiled `compose.yaml` + `.env` + `deployment.json`
-publish; legacy layered-chain read fallback),
+publish; `resolveDeployedComposePaths` resolves the compiled file only),
 `src/deploy/secret-runtime.ts` (host `/run` secret files),
 `src/deploy/rehydrate-deployments.ts` (boot/reconnect/lifecycle rehydrate),
 `src/deploy/compose-overlay.ts` (daemon overlay fragment merge into the
@@ -1160,8 +1159,8 @@ root-owned `0550` by design:
 - **PHP is confined.** A release-backed nginx/Apache PHP pool gets
   `php_admin_value[open_basedir] = <documentRoot>:<siteRoot>/shared:/tmp`, so
   scripts read the release and write through `shared/` — reachable as
-  `current/shared` — and nothing else on the filesystem. Legacy daemon-owned
-  sites keep their previous (unrestricted) behavior.
+  `current/shared` — and nothing else on the filesystem. Daemon-owned sites
+  (no release binding) stay unrestricted.
 - **PHP is told the symlink moved.** PHP is the one runtime that would keep
   serving the old release after a promote even though the document-root *string*
   never changed, because two caches hide the swap: the realpath cache still
@@ -1178,8 +1177,8 @@ root-owned `0550` by design:
   It costs a stat per include — the price of an atomic cutover with no reload —
   which is why the vendored baseline
   (`orchestration/roles/php-fpm/templates/php.ini.j2`) keeps opcache enabled with
-  `revalidate_freq = 2` for legacy daemon-owned roots, where nothing moves under
-  a running worker. Both sides carry a pointer to the other.
+  `revalidate_freq = 2` for daemon-owned roots, where nothing moves under a
+  running worker. Both sides carry a pointer to the other.
 
 Sites with no `sourceMaterial[]` entry are untouched by all of the above.
 

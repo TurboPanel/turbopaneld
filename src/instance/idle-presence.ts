@@ -21,18 +21,13 @@ export const IDLE_PRESENCE_MS = 60_000;
 /**
  * Floor cadence for the app-level `heartbeat`, independent of change detection.
  *
- * Heartbeats are otherwise only sent when a presence fact moved, and the
- * control plane answers presence frames — and only presence frames — with
- * `presence-ack`. That ack is how a daemon learns the organization flipped
- * `containerLogsEnabled` (see `turbopanel/src/daemon/container-logs-presence.ts`).
- * On an idle connection nothing changes for hours, so without this floor a
- * toggle would not reach the daemon until some unrelated fact (an IP, a Docker
- * version, a daemon build) happened to move — collection stuck on or off in
- * the meantime. The raw cell ping cannot carry it: on the Workers transport it
+ * Heartbeats are otherwise only sent when a presence fact moved. On an idle
+ * connection nothing changes for hours, so without this floor the daemon would
+ * never re-publish host facts (timeSync, addresses, Docker, runtimes) until
+ * something happened to move. Five minutes is cheap: one extra presence frame
+ * per daemon, and it still refreshes those facts on an otherwise-silent
+ * connection. The raw cell ping cannot carry them: on the Workers transport it
  * is answered by `setWebSocketAutoResponse` without ever waking the cell.
- *
- * Five minutes is the convergence bound for an otherwise-silent daemon, at one
- * extra presence frame (and one projection query) per daemon per five minutes.
  */
 export const PRESENCE_REFRESH_MS = 5 * 60_000;
 
@@ -54,7 +49,7 @@ export type IdlePresenceOptions = {
   /**
    * Floor cadence for the app-level heartbeat even with nothing to report;
    * defaults to {@link PRESENCE_REFRESH_MS}. See that constant for why an idle
-   * connection still has to ask.
+   * connection still refreshes presence facts.
    */
   presenceRefreshIntervalMs?: number;
   idleThresholdMs?: number;
@@ -328,9 +323,9 @@ export class IdlePresence {
    *    since the last hello/heartbeat, **or** when `timeSync` / `resources.ips` /
    *    `docker` changed since the last presence snapshot (change-detected,
    *    cadence-bound), **or** when no presence frame has gone out for
-   *    {@link PRESENCE_REFRESH_MS}. That last case is the only thing that
-   *    converges org-level opt-in flags (`presence-ack`) on a connection where
-   *    nothing else ever changes — see {@link PRESENCE_REFRESH_MS}.
+   *    {@link PRESENCE_REFRESH_MS}. That last case is the cheap floor that
+   *    still refreshes presence facts on a connection where nothing else
+   *    ever changes — see {@link PRESENCE_REFRESH_MS}.
    *
    * Offline self-heal (Postgres `connected: false` while the socket is still
    * live) is handled by the instance offline-sweep cron re-projecting online
@@ -383,8 +378,8 @@ export class IdlePresence {
     const presenceChanged = serialized !== this.#lastPresenceSnapshot;
 
     // Nothing moved *and* the connection is inside its refresh window: stay
-    // silent. Otherwise ask, so the ack can carry a flag that changed
-    // control-plane side while this daemon had nothing to say.
+    // silent. Otherwise send, so an idle daemon still refreshes presence
+    // facts on the cheap floor.
     const refreshDue = this.#lastPresenceFrameAt === 0 ||
       Date.now() - this.#lastPresenceFrameAt >= this.#presenceRefreshIntervalMs;
 

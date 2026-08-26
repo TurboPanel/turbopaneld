@@ -363,22 +363,27 @@ test(
 );
 
 test(
-  "clickhouse container_logs bootstrap enables nullable sorting keys",
+  "clickhouse bootstrap drops the retired container_logs table",
   async () => {
     const tasksPath = join(
       CHECKOUT_ORCHESTRATION_DIR,
       "roles/clickhouse/tasks/bootstrap.yml",
     );
     const tasks = await Deno.readTextFile(tasksPath);
-    const required = [
+    const drop = "DROP TABLE IF EXISTS turbopanel_metrics.container_logs";
+    if (!tasks.includes(drop)) {
+      throw new Error(
+        `${tasksPath}: expected retired container_logs drop (${drop})`,
+      );
+    }
+    const forbidden = [
       "CREATE TABLE IF NOT EXISTS {{ clickhouse_database }}.container_logs",
-      "ORDER BY (organization_id, server_id, service_id, timestamp)",
-      "SETTINGS allow_nullable_key = 1;",
+      "MODIFY TTL timestamp + INTERVAL {{ clickhouse_container_logs_retention_days }}",
     ];
-    for (const fragment of required) {
-      if (!tasks.includes(fragment)) {
+    for (const fragment of forbidden) {
+      if (tasks.includes(fragment)) {
         throw new Error(
-          `${tasksPath}: container_logs DDL missing ${fragment}`,
+          `${tasksPath}: retired container_logs DDL must not remain (${fragment})`,
         );
       }
     }

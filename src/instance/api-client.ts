@@ -1,9 +1,5 @@
 import { encodeBase64 } from "@std/encoding/base64";
 import { type InstanceConfig, instanceUrl } from "./paths.ts";
-import {
-  type ContainerLogBatchEvent,
-  MAX_CONTAINER_LOG_INGEST_BATCH,
-} from "../logs/container-log-contracts.ts";
 
 export interface DaemonApiClientOptions {
   config: InstanceConfig;
@@ -212,31 +208,6 @@ export class DaemonApiClient {
     return {
       nextSeq: typeof body.nextSeq === "number" ? body.nextSeq : params.seq + 1,
     };
-  }
-
-  /**
-   * Ship one already-redacted, already-batched group of container log lines
-   * (`POST /api/daemon/v1/logs/containers`).
-   *
-   * Fire-and-forget at the call site: `src/logs/container-collector.ts` counts
-   * and drops a batch it cannot deliver. This method does not swallow errors,
-   * and refuses an oversized batch locally rather than stressing the instance.
-   */
-  async sendContainerLogBatch(
-    events: readonly ContainerLogBatchEvent[],
-  ): Promise<void> {
-    if (events.length === 0) return;
-    if (events.length > MAX_CONTAINER_LOG_INGEST_BATCH) {
-      throw new DaemonApiError(
-        400,
-        `container log batch exceeds ${MAX_CONTAINER_LOG_INGEST_BATCH} events`,
-      );
-    }
-    await this.#request(
-      "/api/daemon/v1/logs/containers",
-      { method: "POST", body: JSON.stringify({ events }) },
-      { auth: true },
-    );
   }
 
   /**

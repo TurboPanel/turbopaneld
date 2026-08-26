@@ -246,54 +246,6 @@ export function assertSafeSystemIngressIdentity(
   }
 }
 
-/** Retired ProxySQL container-name suffix before the shared `-in` contract. */
-const LEGACY_MANAGED_INGRESS_CONTAINER_NAME_SUFFIX = "-sql";
-
-function legacyManagedIngressContainerName(serviceId: string): string {
-  return `${serviceId}${LEGACY_MANAGED_INGRESS_CONTAINER_NAME_SUFFIX}`;
-}
-
-/**
- * True when a persisted managed-ingress identity is the pre-`-in` shape:
- * `role: turbopanel` plus either `<serviceId>-sql` or bare `serviceId`.
- */
-function isLegacyManagedIngressDescriptor(
-  descriptor: SystemComponentDescriptor,
-): boolean {
-  if (descriptor.component !== SYSTEM_MANAGED_INGRESS_COMPONENT) return false;
-  if (descriptor.role !== "turbopanel") return false;
-  return descriptor.containerName === descriptor.serviceId ||
-    descriptor.containerName ===
-      legacyManagedIngressContainerName(descriptor.serviceId);
-}
-
-/**
- * Rewrite a legacy managed-ingress descriptor to `role: ingress` and
- * `<serviceId>-in`. Callers must validate and persist the result.
- */
-function migrateLegacyManagedIngressDescriptor(
-  descriptor: SystemComponentDescriptor,
-): SystemComponentDescriptor {
-  return {
-    ...descriptor,
-    role: "ingress",
-    containerName: ingressContainerName(descriptor.serviceId),
-  };
-}
-
-/**
- * True when a ProxySQL compose `container_name` is the current `-in`
- * identity or a retired managed-ingress name that can be recovered.
- */
-export function isRecoverableManagedIngressContainerName(
-  serviceId: string,
-  containerName: string,
-): boolean {
-  return containerName === ingressContainerName(serviceId) ||
-    containerName === serviceId ||
-    containerName === legacyManagedIngressContainerName(serviceId);
-}
-
 /** Shape-validate one persisted descriptor — mirrors TcpUdp entry guards. */
 export function isValidSystemComponentDescriptor(
   value: unknown,
@@ -401,15 +353,7 @@ export async function readSystemComponentDescriptor(
     );
   }
 
-  // Legacy managed-ingress rows used `role: turbopanel` with either
-  // `<serviceId>-sql` or bare `serviceId` before the shared `-in` /
-  // `role: ingress` contract. Rewrite in place so drain/reconcile can
-  // proceed without a manual descriptor edit (compose recreates the name).
-  const legacyManagedIngress = isLegacyManagedIngressDescriptor(parsed);
-  let descriptor: SystemComponentDescriptor = parsed;
-  if (legacyManagedIngress) {
-    descriptor = migrateLegacyManagedIngressDescriptor(parsed);
-  }
+  const descriptor: SystemComponentDescriptor = parsed;
 
   try {
     assertSafeSystemIngressIdentity(descriptor);
@@ -419,9 +363,6 @@ export async function readSystemComponentDescriptor(
       `corrupt system component descriptor ${component}.json: ${message}`,
       { cause: err },
     );
-  }
-  if (legacyManagedIngress) {
-    await writeSystemComponentDescriptor(layout, descriptor);
   }
   return descriptor;
 }

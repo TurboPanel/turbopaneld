@@ -1,7 +1,6 @@
 /**
  * Decrypt-seam capture: every plaintext the daemon decrypts has to land in the
- * process-wide deny-set, whether or not container log collection happens to be
- * running at that moment.
+ * process-wide deny-set used by execution-log transcripts.
  */
 
 import { assert, assertEquals } from "@std/assert";
@@ -11,7 +10,6 @@ import {
   resetSharedSecretRedactorForTests,
   sharedSecretRedactor,
 } from "./redactor.ts";
-import { isContainerLogCollectionEnabled } from "./container-collector.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -33,14 +31,11 @@ function recordingSink(): CommandOutputSink & { secrets: string[] } {
   } as unknown as CommandOutputSink & { secrets: string[] };
 }
 
-test("a decrypt with no collector running still feeds the shared deny-set", async () => {
+test("a decrypt still feeds the shared deny-set", async () => {
   resetSharedSecretRedactorForTests();
   try {
-    // The premise: retention is off right now. The value still has to be
-    // remembered, because the container that receives it keeps printing it
-    // long after this command ends — including after retention is turned on.
-    assert(!isContainerLogCollectionEnabled());
-
+    // The value has to be remembered on the process-wide deny-set so later
+    // execution-log transcripts redact it, not only this command's sink.
     const sink = recordingSink();
     const decrypt = captureDecryptedSecrets(
       (_ciphertexts: string[]) =>

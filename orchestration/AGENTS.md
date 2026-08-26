@@ -518,14 +518,9 @@ ready (they need `docker exec` against a running container, so they cannot run
 from the trimmed config-only role itself).
 
 Instance-side ClickHouse metrics store + schema/query contract: `../../turbopanel/src/daemon/metrics/AGENTS.md`.
-
-Instance-side container-log store (table `container_logs`, same database and
-same `turbopanel_app` user): `../../turbopanel/src/lib/container-logs/AGENTS.md`.
-The `turbopanel_app` grant below is already `<database>.*`-scoped, so that
-table needs **no** new grant. The CREATE in `tasks/bootstrap.yml` must stay
-in lockstep with `schema.ts`, including `SETTINGS allow_nullable_key = 1`
-(`service_id` is nullable in the ORDER BY; ClickHouse 26.x rejects the table
-without it).
+There is **no** `container_logs` table. `tasks/bootstrap.yml` runs an
+idempotent `DROP TABLE IF EXISTS turbopanel_metrics.container_logs` so
+existing installs stop retaining tenant output on the next converge.
 
 | Path / resource                                                                          | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -593,8 +588,7 @@ scoped to database `turbopanel_metrics`.
 instance-owned `ensureSchema()` (`CREATE TABLE IF NOT EXISTS` plus
 `MODIFY SETTING` / `MODIFY TTL`) and metrics reads/writes. No `DROP` or
 `TRUNCATE`. The wildcard is `<database>.*`, not per-table, so
-instance-owned tables added later — `container_logs` is the first — are covered
-with no playbook change.
+instance-owned tables added later are covered with no playbook change.
 
 **Converge wiring:** co-located dev installs ClickHouse via the dev-repo
 `<dev checkout>/orchestration/dev-converge-manifest.json` (role `clickhouse`,

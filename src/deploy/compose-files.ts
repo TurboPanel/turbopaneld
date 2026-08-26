@@ -156,11 +156,12 @@ export type DeploymentManifestV2 = {
    * Compose service name → TurboPanel service UUID, for every compose service
    * the deploy payload named a service for.
    *
-   * This is the daemon's authoritative copy of container identity: the
-   * container-log collector resolves `serviceId` from here rather than from a
-   * live `com.turbopanel.service` label, which can drift, be stripped, or be
-   * re-stamped by anything that touches the container outside the deployment
-   * pipeline. Absent on pre-`serviceIds` manifests.
+   * This is the daemon's authoritative copy of container identity. The
+   * on-demand log tail (`src/logs/container-tail.ts`) validates that a
+   * requested container belongs to the caller's service against this map
+   * rather than a live `com.turbopanel.service` label, which can drift, be
+   * stripped, or be re-stamped by anything that touches the container outside
+   * the deployment pipeline. Absent on pre-`serviceIds` manifests.
    */
   serviceIds?: Record<string, string>;
   /**

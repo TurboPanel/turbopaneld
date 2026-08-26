@@ -345,41 +345,6 @@ test("system component descriptor round-trips and rejects corrupt state", async 
   }
 });
 
-test("readSystemComponentDescriptor migrates legacy managed-ingress identity", async () => {
-  const { layout, cleanup } = await makeTestLayout();
-  try {
-    const serviceId = MANAGED_INGRESS_SERVICE_ID;
-    const systemDir = join(layout.stateDir, "system");
-    await Deno.mkdir(systemDir, { recursive: true });
-    const legacyNames = [serviceId, `${serviceId}-sql`];
-    for (const containerName of legacyNames) {
-      await Deno.writeTextFile(
-        join(systemDir, "managed-ingress.json"),
-        JSON.stringify({
-          component: "managed-ingress",
-          serviceId,
-          composeServiceName: "proxysql",
-          containerName,
-          role: "turbopanel",
-        }),
-      );
-      const loaded = await readSystemComponentDescriptor(
-        layout,
-        "managed-ingress",
-      );
-      assertEquals(loaded?.containerName, `${serviceId}-in`);
-      assertEquals(loaded?.role, "ingress");
-      const onDisk = JSON.parse(
-        await Deno.readTextFile(join(systemDir, "managed-ingress.json")),
-      ) as { containerName: string; role: string };
-      assertEquals(onDisk.containerName, `${serviceId}-in`);
-      assertEquals(onDisk.role, "ingress");
-    }
-  } finally {
-    await cleanup();
-  }
-});
-
 test("caddyTraefikUpstream http hop uses h2c and PROXY v2", () => {
   const upstream = caddyTraefikUpstream("http");
   assertStringIncludes(upstream, "127.0.0.1:7080");

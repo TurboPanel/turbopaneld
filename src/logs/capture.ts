@@ -9,12 +9,9 @@
  * keys — without a generic secret-scanning heuristic.
  *
  * The same plaintexts also feed the **process-wide** deny-set
- * (`sharedSecretRedactor`), which every container-log collector redacts
- * against: a container keeps printing its own credentials long after the
- * deploy that decrypted them finished. That registry is deliberately not the
- * running collector — a decrypt that happens while collection is off (or
- * between two collector instances) must still be remembered, or enabling
- * retention later would ship plaintext the daemon already knows about.
+ * (`sharedSecretRedactor`) used by execution-log transcripts: a command's
+ * decrypted values must stay redacted for the rest of the process lifetime,
+ * not only in the sink that captured this decrypt.
  */
 
 import type { CommandOutputSink } from "./contracts.ts";

@@ -46,9 +46,6 @@ export const LABEL_ROLE_INGRESS = "ingress";
 /** Value for {@link LABEL_ROLE} on platform (database/queue/analytics/ProxySQL) containers. */
 export const LABEL_ROLE_SYSTEM = "turbopanel";
 
-/** @deprecated Prefer {@link LABEL_ROLE_SYSTEM} (value is now `turbopanel`). */
-export const LABEL_ROLE_TURBOPANEL = LABEL_ROLE_SYSTEM;
-
 /**
  * Docker Compose's own identity labels, stamped by Compose itself on every
  * container it creates.

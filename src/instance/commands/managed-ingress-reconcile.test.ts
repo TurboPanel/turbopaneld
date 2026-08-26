@@ -823,7 +823,7 @@ async function seedProxySqlHostPrep(
   );
 }
 
-function legacyProxySqlCompose(containerName: string): string {
+function proxySqlCompose(containerName: string): string {
   return [
     "services:",
     "  proxysql:",
@@ -835,55 +835,44 @@ function legacyProxySqlCompose(containerName: string): string {
 
 test({
   name:
-    "handleManagedIngressReconcile recovers legacy ProxySQL compose identity when the descriptor is missing",
+    "handleManagedIngressReconcile recovers ProxySQL identity from compose when the descriptor is missing",
   permissions: { env: true, read: true, write: true, run: false },
   fn: async () => {
-    const recoverableNames = [
-      `${PROXYSQL_SERVICE_ID}-in`,
-      `${PROXYSQL_SERVICE_ID}-sql`,
-      PROXYSQL_SERVICE_ID,
-    ];
-    for (const containerName of recoverableNames) {
-      await withTempLayout(async (fixture) => {
-        const layout = resolveLayout(fixture.env);
-        await seedProxySqlHostPrep(layout);
-        await Deno.writeTextFile(
-          proxysqlComposePath(layout),
-          legacyProxySqlCompose(containerName),
+    // A descriptor can be absent (fresh state dir, manual wipe) while the
+    // compose file is still on disk. `<serviceId>-in` is the only container
+    // name that identifies managed ingress, so it is the only one recoverable.
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env);
+      await seedProxySqlHostPrep(layout);
+      await Deno.writeTextFile(
+        proxysqlComposePath(layout),
+        proxySqlCompose(`${PROXYSQL_SERVICE_ID}-in`),
+      );
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        const result = await handleManagedIngressReconcile(
+          payloadWithoutIdentity(),
+          new Date().toISOString(),
+          {
+            runDocker: fakeRun(),
+            decryptSecrets: decryptSecretsEcho,
+            ensureDocker: () => Promise.resolve(),
+          },
         );
-        Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
-        Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
-        try {
-          const result = await handleManagedIngressReconcile(
-            payloadWithoutIdentity(),
-            new Date().toISOString(),
-            {
-              runDocker: fakeRun(),
-              decryptSecrets: decryptSecretsEcho,
-              ensureDocker: () => Promise.resolve(),
-            },
-          );
-          assertEquals(result.restarted, true);
+        assertEquals(result.restarted, true);
 
-          const stored = await readSystemComponentDescriptor(
-            layout,
-            SYSTEM_MANAGED_INGRESS_COMPONENT,
-          );
-          assertEquals(stored?.containerName, `${PROXYSQL_SERVICE_ID}-in`);
-          assertEquals(stored?.role, "ingress");
-          const composeText = await Deno.readTextFile(
-            proxysqlComposePath(layout),
-          );
-          assertEquals(
-            composeText.includes(`container_name: ${PROXYSQL_SERVICE_ID}-in`),
-            true,
-          );
-        } finally {
-          Deno.env.delete("TURBOPANEL_STATE_DIR");
-          Deno.env.delete("TURBOPANEL_CONFIG_DIR");
-        }
-      });
-    }
+        const stored = await readSystemComponentDescriptor(
+          layout,
+          SYSTEM_MANAGED_INGRESS_COMPONENT,
+        );
+        assertEquals(stored?.containerName, `${PROXYSQL_SERVICE_ID}-in`);
+        assertEquals(stored?.role, "ingress");
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
   },
 });
 
@@ -897,7 +886,7 @@ test({
       await seedProxySqlHostPrep(layout);
       await Deno.writeTextFile(
         proxysqlComposePath(layout),
-        legacyProxySqlCompose(`${PROXYSQL_SERVICE_ID}-ha`),
+        proxySqlCompose(`${PROXYSQL_SERVICE_ID}-ha`),
       );
       Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
       Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);

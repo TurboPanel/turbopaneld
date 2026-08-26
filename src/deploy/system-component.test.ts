@@ -4,7 +4,6 @@ import { resolveLayout } from "../paths/layout.ts";
 import {
   assertSafeSystemIngressIdentity,
   expectedSystemComponentContainerName,
-  isRecoverableManagedIngressContainerName,
   isValidSystemComponentDescriptor,
   PROXYSQL_COMPOSE_SERVICE_NAME,
   readSystemComponentDescriptor,
@@ -164,66 +163,7 @@ test("isValidSystemComponentDescriptor rejects incomplete shapes", () => {
   );
 });
 
-test("isRecoverableManagedIngressContainerName accepts current and retired names", () => {
-  const serviceId = "00000000-0000-4000-8000-000000000055";
-  assertEquals(
-    isRecoverableManagedIngressContainerName(serviceId, `${serviceId}-in`),
-    true,
-  );
-  assertEquals(
-    isRecoverableManagedIngressContainerName(serviceId, `${serviceId}-sql`),
-    true,
-  );
-  assertEquals(
-    isRecoverableManagedIngressContainerName(serviceId, serviceId),
-    true,
-  );
-  assertEquals(
-    isRecoverableManagedIngressContainerName(serviceId, `${serviceId}-ha`),
-    false,
-  );
-});
-
-test("readSystemComponentDescriptor migrates legacy managed-ingress identity", async () => {
-  const fixture = await createTempLayout();
-  try {
-    const layout = resolveLayout(fixture.env, {
-      skipDiscovery: true,
-      forceMode: "production",
-    });
-    const serviceId = "00000000-0000-4000-8000-000000000066";
-    const systemDir = `${layout.stateDir}/system`;
-    await Deno.mkdir(systemDir, { recursive: true });
-    const legacyNames = [serviceId, `${serviceId}-sql`];
-    for (const containerName of legacyNames) {
-      await Deno.writeTextFile(
-        `${systemDir}/managed-ingress.json`,
-        JSON.stringify({
-          component: SYSTEM_MANAGED_INGRESS_COMPONENT,
-          serviceId,
-          composeServiceName: PROXYSQL_COMPOSE_SERVICE_NAME,
-          containerName,
-          role: "turbopanel",
-        }),
-      );
-      const loaded = await readSystemComponentDescriptor(
-        layout,
-        SYSTEM_MANAGED_INGRESS_COMPONENT,
-      );
-      assertEquals(loaded?.containerName, `${serviceId}-in`);
-      assertEquals(loaded?.role, "ingress");
-      const onDisk = JSON.parse(
-        await Deno.readTextFile(`${systemDir}/managed-ingress.json`),
-      ) as { containerName: string; role: string };
-      assertEquals(onDisk.containerName, `${serviceId}-in`);
-      assertEquals(onDisk.role, "ingress");
-    }
-  } finally {
-    await fixture.cleanup();
-  }
-});
-
-test("readSystemComponentDescriptor still rejects non-legacy managed-ingress drift", async () => {
+test("readSystemComponentDescriptor rejects managed-ingress container drift", async () => {
   const fixture = await createTempLayout();
   try {
     const layout = resolveLayout(fixture.env, {

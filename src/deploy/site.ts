@@ -558,7 +558,8 @@ const PHP_OPEN_BASEDIR_TMP = "/tmp"; // NOSONAR typescript:S5443 — an open_bas
  * makes the compiled-script check happen per request instead of every 2s (the
  * baseline `php.ini` value). It costs a stat per include, which is the price of
  * an atomic cutover without a reload — and it is scoped to release-backed pools,
- * so a legacy daemon-owned site keeps the baseline caching behavior.
+ * so a daemon-owned site (one with no release binding) keeps the baseline
+ * caching behavior.
  */
 export const RELEASE_SYMLINK_SWAP_PHP_VALUES: readonly PhpAdminValue[] = Object
   .freeze([
@@ -596,8 +597,8 @@ export type PhpAdminValue = Readonly<{ key: string; value: string }>;
  * `opts.openBasedir`, when given, pins PHP to exactly those paths. It is set
  * only for release-backed sites, where the whole point of the immutable tree is
  * that a compromised script cannot reach past the release it is serving — a
- * legacy daemon-owned site keeps the previous (unrestricted) behavior rather
- * than gaining a confinement nothing has been tested against.
+ * daemon-owned site keeps the unrestricted behavior rather than gaining a
+ * confinement nothing has been tested against.
  * `releaseSymlinkSwap` is scoped the same way, for the reasons on
  * {@link RELEASE_SYMLINK_SWAP_PHP_VALUES}.
  *
@@ -1268,7 +1269,7 @@ function hostingWebMetadataFiles(
   return files;
 }
 
-/** Legacy (daemon-owned) site tree: metadata lives under `<base>/.turbopanel/`. */
+/** Daemon-owned site tree: metadata lives under `<base>/.turbopanel/`. */
 async function writeHostingWebMetadata(
   siteBase: string,
   site: SiteApplySpec,
@@ -1290,7 +1291,7 @@ async function writeHostingWebMetadata(
  * root-owned and group-readable by the principal — never inside the release,
  * which is read-only by the time this runs.
  *
- * Files are staged in the (daemon-owned) legacy site dir and installed through
+ * Files are staged in the daemon-owned site dir and installed through
  * the same `sudo -n install` seam every other managed config file uses, so the
  * destination's owner and mode are set by the same call that publishes it.
  */
@@ -1765,8 +1766,8 @@ export type ApplySiteOpts = {
   dockerBindAddress?: string | null;
   /**
    * Compose service name → Git release tree, for services the deploy carries a
-   * `sourceMaterial[]` entry for. A site with no entry here keeps the legacy
-   * daemon-owned document root and ownership handling unchanged.
+   * `sourceMaterial[]` entry for. A site with no entry here uses the
+   * daemon-owned document root and ownership handling instead.
    */
   releaseBindings?: SiteReleaseBindings;
   /**
@@ -2079,7 +2080,7 @@ async function reloadSiteEngines(
 }
 
 type SitePaths = {
-  /** Daemon-owned legacy site dir — also the staging area for owned writes. */
+  /** Daemon-owned site dir — also the staging area for owned writes. */
   base: string;
   documentRoot: string;
   sitesDir: string;

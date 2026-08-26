@@ -15,7 +15,6 @@ import {
 } from "../../deploy/docker-cli.ts";
 import { ensureDocker as defaultEnsureDocker } from "../../deploy/ensure-docker.ts";
 import {
-  isRecoverableManagedIngressContainerName,
   PROXYSQL_COMPOSE_SERVICE_NAME,
   readSystemComponentDescriptor,
   SYSTEM_MANAGED_INGRESS_COMPONENT,
@@ -329,11 +328,7 @@ function identityFromComposeText(
   if (!nameMatch?.[1] || !idMatch?.[1]) return null;
   const serviceId = idMatch[1];
   const containerName = nameMatch[1];
-  // Recover retired ProxySQL names (`<serviceId>-sql` or bare serviceId)
-  // into the current `-in` / `role: ingress` descriptor.
-  if (!isRecoverableManagedIngressContainerName(serviceId, containerName)) {
-    return null;
-  }
+  if (containerName !== ingressContainerName(serviceId)) return null;
   return {
     component: SYSTEM_MANAGED_INGRESS_COMPONENT,
     serviceId,

@@ -162,29 +162,28 @@ export function resolveServerKeyPath(
  *
  * Prefers `TURBOPANEL_INSTANCE_CA` when set; otherwise falls back to the
  * canonical config path when that file exists (e.g. operator recovery via curl).
+ *
+ * `canonicalPath` is injectable because this function stats the **real**
+ * filesystem: a test that hard-codes the canonical path passes on a clean
+ * checkout and fails on any machine that actually has TurboPanel installed.
  */
 export function resolveInstanceCaPath(
   env: Record<string, string | undefined> = Deno.env.toObject(),
+  canonicalPath: string = CANONICAL_INSTANCE_CA_PATH,
 ): string | undefined {
   const fromEnv = env.TURBOPANEL_INSTANCE_CA?.trim();
-  let resolved: string | undefined;
-  if (fromEnv) {
-    try {
-      Deno.statSync(fromEnv);
-      resolved = fromEnv;
-    } catch {
-      // Stale env path — fall through to canonical file if present.
-    }
+  if (fromEnv && fileExistsSync(fromEnv)) return fromEnv;
+  // A stale env path falls through to the canonical file when present.
+  return fileExistsSync(canonicalPath) ? canonicalPath : undefined;
+}
+
+function fileExistsSync(path: string): boolean {
+  try {
+    Deno.statSync(path);
+    return true;
+  } catch {
+    return false;
   }
-  if (!resolved) {
-    try {
-      Deno.statSync(CANONICAL_INSTANCE_CA_PATH);
-      resolved = CANONICAL_INSTANCE_CA_PATH;
-    } catch {
-      resolved = undefined;
-    }
-  }
-  return resolved;
 }
 
 export interface InstanceHttpClientOptions {

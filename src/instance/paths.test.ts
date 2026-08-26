@@ -196,7 +196,9 @@ test("resolveInstanceCaPath prefers TURBOPANEL_INSTANCE_CA env when file exists"
 });
 
 test("resolveInstanceCaPath returns undefined when env unset and canonical file missing", () => {
-  const path = resolveInstanceCaPath({});
+  // The canonical path is injected: statting the real one makes this pass on a
+  // clean checkout and fail on any machine with TurboPanel installed.
+  const path = resolveInstanceCaPath({}, "/tmp/missing-turbopanel-canonical-ca.pem");
   if (path !== undefined) {
     throw new Error(`expected undefined, got ${path}`);
   }
@@ -322,9 +324,10 @@ test("resolveServerIdentityDir uses cwd when orchestration is skipped", () => {
 });
 
 test("resolveInstanceCaPath ignores stale TURBOPANEL_INSTANCE_CA path", () => {
-  const path = resolveInstanceCaPath({
-    TURBOPANEL_INSTANCE_CA: "/tmp/missing-turbopanel-ca.pem",
-  });
+  const path = resolveInstanceCaPath(
+    { TURBOPANEL_INSTANCE_CA: "/tmp/missing-turbopanel-ca.pem" },
+    "/tmp/missing-turbopanel-canonical-ca.pem",
+  );
   assertEquals(path, undefined);
 });
 

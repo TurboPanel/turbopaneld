@@ -549,12 +549,11 @@ test({
 
 test({
   name:
-    "IdlePresence sends a refresh heartbeat on an idle connection so acks keep coming",
+    "IdlePresence sends a refresh heartbeat on an idle connection so presence facts stay current",
   fn: async () => {
     // Nothing about this host changes: same build, same timeSync, same ips,
     // no docker. Without the refresh floor the daemon would send only the raw
-    // cell ping — which no transport answers with `presence-ack` — and an org
-    // toggle would never reach it. See PRESENCE_REFRESH_MS.
+    // cell ping and never re-publish presence facts. See PRESENCE_REFRESH_MS.
     const restore = installIdlePresenceProviders({
       getBuildInfo: () => makeDaemonBuild("abc1234"),
       getHostHelloIdentity: () => EMPTY_HOST,
@@ -578,10 +577,10 @@ test({
       const heartbeats = framesOfType(socket, "heartbeat");
       assert(
         heartbeats.length >= 1,
-        "an idle connection must still ask for a presence ack",
+        "an idle connection must still refresh presence facts",
       );
       const heartbeat = heartbeats[0] as Record<string, unknown>;
-      // A refresh carries no facts — it exists purely to be acked.
+      // A refresh carries no changed facts — it exists to keep the cadence.
       assertEquals("daemonBuild" in heartbeat, false);
       assertEquals("timeSync" in heartbeat, false);
       assertEquals("resources" in heartbeat, false);
