@@ -86,7 +86,10 @@ test("parseEnvironmentDeployPayload rejects non-object and missing hostings", ()
     "Invalid environment deploy payload",
   );
   rejectDeploy({ hostings: "none" }, "hostings must be an array");
-  rejectDeploy({ environmentId: "" }, "environmentId must be a non-empty string");
+  rejectDeploy(
+    { environmentId: "" },
+    "environmentId must be a non-empty string",
+  );
 });
 
 test("parseEnvironmentDeployPayload rejects hosting field parse errors", () => {
@@ -123,7 +126,10 @@ test("parseEnvironmentDeployPayload rejects hosting field parse errors", () => {
 });
 
 test("parseEnvironmentDeployPayload rejects tls/variable/secret/envFile shapes", () => {
-  rejectDeploy({ tlsMaterial: [null] }, "Invalid environment deploy tlsMaterial entry");
+  rejectDeploy(
+    { tlsMaterial: [null] },
+    "Invalid environment deploy tlsMaterial entry",
+  );
   rejectDeploy(
     { variableMaterial: ["API_KEY"] },
     "Invalid environment deploy variableMaterial entry",
@@ -454,7 +460,10 @@ test("parseEnvironmentDeployPayload rejects sites engine cron and sourceKind", (
 });
 
 test("parseEnvironmentDeployPayload rejects nativeAppServices resource limits", () => {
-  rejectDeploy({ nativeAppServices: [null] }, "Invalid nativeAppServices entry");
+  rejectDeploy(
+    { nativeAppServices: [null] },
+    "Invalid nativeAppServices entry",
+  );
   rejectDeploy(
     {
       nativeAppServices: [{
@@ -601,13 +610,22 @@ test("parseEnvironmentDeployPayload rejects optional array/boolean/network field
     { dockerExternalNetworks: ["-bad"] },
     "Invalid dockerExternalNetworks entry",
   );
-  rejectDeploy({ fabricNetworks: "tpn_net1" }, "fabricNetworks must be an array");
+  rejectDeploy(
+    { fabricNetworks: "tpn_net1" },
+    "fabricNetworks must be an array",
+  );
   rejectDeploy(
     { fabricNetworks: ["tpn_net1"] },
     "fabricNetworks must be an array of objects",
   );
   rejectDeploy(
-    { fabricNetworks: [{ name: "tpn_net1", subnet: "10.192.11.0/24", gateway: "host" }] },
+    {
+      fabricNetworks: [{
+        name: "tpn_net1",
+        subnet: "10.192.11.0/24",
+        gateway: "host",
+      }],
+    },
     "Invalid fabricNetworks gateway",
   );
   rejectDeploy(

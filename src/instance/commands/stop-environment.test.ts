@@ -418,8 +418,7 @@ test({
 });
 
 test({
-  name:
-    "handleEnvironmentStop keeps stopping when privileged reclaim throws",
+  name: "handleEnvironmentStop keeps stopping when privileged reclaim throws",
   permissions: { env: true, read: true, write: true, run: true },
   fn: async () => {
     const root = await Deno.makeTempDir({ prefix: "tp-stop-releases-throw-" });

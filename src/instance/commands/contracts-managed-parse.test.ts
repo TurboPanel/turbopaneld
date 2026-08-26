@@ -121,14 +121,24 @@ test("parseManagedApplyPayload rejects configFiles volumes credentials and resou
     TypeError,
     "Invalid managed.apply payload",
   );
-  rejectApply({ configFiles: "postgresql.conf" }, "Invalid managed.apply configFiles");
   rejectApply(
-    { configFiles: Array.from({ length: 33 }, () => VALID_MANAGED_APPLY.configFiles[0]) },
+    { configFiles: "postgresql.conf" },
+    "Invalid managed.apply configFiles",
+  );
+  rejectApply(
+    {
+      configFiles: Array.from(
+        { length: 33 },
+        () => VALID_MANAGED_APPLY.configFiles[0],
+      ),
+    },
     "Invalid managed.apply configFiles: too many entries",
   );
   rejectApply({ volumes: "pgdata" }, "Invalid managed.apply volumes");
   rejectApply(
-    { volumes: Array.from({ length: 17 }, () => VALID_MANAGED_APPLY.volumes[0]) },
+    {
+      volumes: Array.from({ length: 17 }, () => VALID_MANAGED_APPLY.volumes[0]),
+    },
     "Invalid managed.apply volumes: too many entries",
   );
   rejectApply(
@@ -140,7 +150,10 @@ test("parseManagedApplyPayload rejects configFiles volumes credentials and resou
     "Invalid managed.apply volumes entry",
   );
   rejectApply({ resources: "lots" }, "Invalid managed.apply resources");
-  rejectApply({ resources: { cpus: -1 } }, "Invalid managed.apply resources.cpus");
+  rejectApply(
+    { resources: { cpus: -1 } },
+    "Invalid managed.apply resources.cpus",
+  );
   rejectApply(
     { resources: { memoryBytes: 0 } },
     "Invalid managed.apply resources.memoryBytes",
@@ -151,7 +164,12 @@ test("parseManagedApplyPayload rejects configFiles volumes credentials and resou
   );
   rejectApply({ credentials: [] }, "Invalid managed.apply credentials");
   rejectApply(
-    { credentials: Array.from({ length: 33 }, () => VALID_MANAGED_APPLY.credentials[0]) },
+    {
+      credentials: Array.from(
+        { length: 33 },
+        () => VALID_MANAGED_APPLY.credentials[0],
+      ),
+    },
     "Invalid managed.apply credentials: too many entries",
   );
   rejectApply(
@@ -188,7 +206,10 @@ test("parseManagedApplyPayload rejects configFiles volumes credentials and resou
 });
 
 test("parseManagedApplyPayload rejects exposure databases dropUsers and peers", () => {
-  rejectApply({ exposure: { enabled: true } }, "Invalid managed.apply exposure");
+  rejectApply(
+    { exposure: { enabled: true } },
+    "Invalid managed.apply exposure",
+  );
   rejectApply(
     { exposure: { enabled: false, protocol: "quic" } },
     "Invalid managed.apply exposure.protocol",
@@ -199,7 +220,12 @@ test("parseManagedApplyPayload rejects exposure databases dropUsers and peers", 
   );
   rejectApply({ databases: "appdb" }, "Invalid managed.apply databases");
   rejectApply(
-    { databases: Array.from({ length: 65 }, (_, i) => ({ name: `db${i}`, action: "create" })) },
+    {
+      databases: Array.from(
+        { length: 65 },
+        (_, i) => ({ name: `db${i}`, action: "create" }),
+      ),
+    },
     "Invalid managed.apply databases: too many entries",
   );
   rejectApply({ dropUsers: "olduser" }, "Invalid managed.apply dropUsers");

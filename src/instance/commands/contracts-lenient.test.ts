@@ -307,7 +307,10 @@ test("managed result parsers drop invalid container entries instead of throwing"
   const capped = parseManagedApplyResult({
     host: "203.0.113.10",
     port: 5432,
-    containers: Array.from({ length: 101 }, (_, index) => deployContainer(index)),
+    containers: Array.from(
+      { length: 101 },
+      (_, index) => deployContainer(index),
+    ),
   });
   assertEquals(capped.containers?.length, 100);
 

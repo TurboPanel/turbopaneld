@@ -1,10 +1,7 @@
 import { assertEquals } from "@std/assert";
 import { createFakeClock, flushMicrotasks } from "../testing/fake-clock.ts";
 import type { OrchestratorProblem } from "../managed/orchestrator-api.ts";
-import {
-  ManagedHaObserver,
-  type ManagedHaEventMessage,
-} from "./ha-observe.ts";
+import { type ManagedHaEventMessage, ManagedHaObserver } from "./ha-observe.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.

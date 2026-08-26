@@ -47,7 +47,10 @@ const app: EnvironmentDeployNativeAppService = {
 };
 
 test("resolveNativeAppNodeVersion defaults when nodeVersion is blank", () => {
-  assertEquals(resolveNativeAppNodeVersion({}), DEFAULT_NATIVE_APP_NODE_VERSION);
+  assertEquals(
+    resolveNativeAppNodeVersion({}),
+    DEFAULT_NATIVE_APP_NODE_VERSION,
+  );
   assertEquals(
     resolveNativeAppNodeVersion({ nodeVersion: "   " }),
     DEFAULT_NATIVE_APP_NODE_VERSION,
@@ -70,7 +73,10 @@ test("nativeAppRuntimeRoot and nativeAppNodeBinary stay under node-app", () => {
 });
 
 test("native app path helpers follow systemd and staging conventions", () => {
-  assertEquals(nativeAppUnitName("svc-native-1"), "turbopanel-app-svc-native-1.service");
+  assertEquals(
+    nativeAppUnitName("svc-native-1"),
+    "turbopanel-app-svc-native-1.service",
+  );
   assertEquals(
     nativeAppUnitPath("svc-native-1", "/tmp/systemd"),
     "/tmp/systemd/turbopanel-app-svc-native-1.service",
@@ -140,8 +146,14 @@ test("nativeAppUnitContent points WorkingDirectory at current and applies limits
     startCommand: "node server.mjs",
   });
 
-  assertStringIncludes(content, "WorkingDirectory=/srv/users/appuser/sites/svc-native-1/current");
-  assertStringIncludes(content, "ReadWritePaths=/srv/users/appuser/sites/svc-native-1/shared");
+  assertStringIncludes(
+    content,
+    "WorkingDirectory=/srv/users/appuser/sites/svc-native-1/current",
+  );
+  assertStringIncludes(
+    content,
+    "ReadWritePaths=/srv/users/appuser/sites/svc-native-1/shared",
+  );
   assertStringIncludes(content, "User=appuser");
   assertStringIncludes(content, "Group=appuser-grp");
   assertStringIncludes(content, "Slice=turbopanel-appuser.slice");

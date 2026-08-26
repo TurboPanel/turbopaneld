@@ -33,7 +33,10 @@ test("composeHasContainerServices is false for empty or non-object services", ()
 
 test("composeFilesHaveContainerServices is true when any layer declares a service", () => {
   assertEquals(
-    composeFilesHaveContainerServices(["services: {}\n", "services:\n  web:\n    image: nginx\n"]),
+    composeFilesHaveContainerServices([
+      "services: {}\n",
+      "services:\n  web:\n    image: nginx\n",
+    ]),
     true,
   );
   assertEquals(

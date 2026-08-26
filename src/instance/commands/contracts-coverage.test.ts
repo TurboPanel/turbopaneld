@@ -682,8 +682,7 @@ test("parseTlsTrustReconcileResult rejects missing applied boolean", () => {
     "applied must be a boolean",
   );
   assertThrows(
-    () =>
-      parseTlsTrustReconcileResult({ applied: true, fingerprint: "   " }),
+    () => parseTlsTrustReconcileResult({ applied: true, fingerprint: "   " }),
     Error,
     "fingerprint must be a non-empty string",
   );

@@ -205,7 +205,9 @@ test("InstallEventPresenter summarizes a failing recap and captures raw lines", 
     true,
   );
   assertEquals(
-    lines.some((line) => line.includes("ansible-playbook could not reach redis")),
+    lines.some((line) =>
+      line.includes("ansible-playbook could not reach redis")
+    ),
     true,
   );
 });

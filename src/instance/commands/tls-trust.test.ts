@@ -47,7 +47,8 @@ async function mintCert(dir: string, cn: string): Promise<string> {
 }
 
 test({
-  name: "handleTlsTrust writes the bundle and rejects dropping the current anchor",
+  name:
+    "handleTlsTrust writes the bundle and rejects dropping the current anchor",
   permissions: TLS_TRUST_PERMS,
   fn: async () => {
     const dir = await Deno.makeTempDir({ prefix: "tp-tls-trust-" });
@@ -204,7 +205,8 @@ test({
 });
 
 test({
-  name: "handleTlsTrust rethrows non-NotFound errors when reading the current CA",
+  name:
+    "handleTlsTrust rethrows non-NotFound errors when reading the current CA",
   permissions: TLS_TRUST_PERMS,
   fn: async () => {
     const dir = await Deno.makeTempDir({ prefix: "tp-tls-trust-read-" });
