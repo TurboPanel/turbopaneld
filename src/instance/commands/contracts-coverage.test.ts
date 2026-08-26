@@ -579,6 +579,16 @@ test("parsePrincipalsReconcilePayload accepts empty list and rejects duplicate u
     principals: [],
   });
   assertThrows(
+    () => parsePrincipalsReconcilePayload(null),
+    Error,
+    "Invalid principals reconcile payload",
+  );
+  assertThrows(
+    () => parsePrincipalsReconcilePayload({ principals: "all" }),
+    TypeError,
+    "principals must be an array",
+  );
+  assertThrows(
     () =>
       parsePrincipalsReconcilePayload({
         principals: [
@@ -613,6 +623,29 @@ test("parseTlsTrustReconcilePayload round-trips allowRemoval and rejects bad PEM
     { bundlePem, fingerprint: "sha256:abc", allowRemoval: true },
   );
   assertThrows(
+    () => parseTlsTrustReconcilePayload(null),
+    Error,
+    "Invalid tls trust reconcile payload",
+  );
+  assertThrows(
+    () =>
+      parseTlsTrustReconcilePayload({
+        bundlePem: "   ",
+        fingerprint: "sha256:abc",
+      }),
+    Error,
+    "bundlePem must be a non-empty PEM string",
+  );
+  assertThrows(
+    () =>
+      parseTlsTrustReconcilePayload({
+        bundlePem,
+        fingerprint: "   ",
+      }),
+    Error,
+    "fingerprint must be a non-empty string",
+  );
+  assertThrows(
     () =>
       parseTlsTrustReconcilePayload({
         bundlePem: "not-a-pem-bundle",
@@ -639,9 +672,20 @@ test("parseTlsTrustReconcileResult rejects missing applied boolean", () => {
     { applied: false, fingerprint: "fp" },
   );
   assertThrows(
+    () => parseTlsTrustReconcileResult(null),
+    Error,
+    "Invalid tls trust reconcile result",
+  );
+  assertThrows(
     () => parseTlsTrustReconcileResult({ fingerprint: "fp" }),
     TypeError,
     "applied must be a boolean",
+  );
+  assertThrows(
+    () =>
+      parseTlsTrustReconcileResult({ applied: true, fingerprint: "   " }),
+    Error,
+    "fingerprint must be a non-empty string",
   );
 });
 

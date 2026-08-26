@@ -95,3 +95,74 @@ test({
     resetMachineKeyCacheForTests();
   },
 });
+
+test({
+  name: "readMachineKey caches the default /etc/machine-id path",
+  permissions: { read: true, run: true },
+  async fn() {
+    resetMachineKeyCacheForTests();
+    try {
+      const first = await readMachineKey();
+      const second = await readMachineKey();
+      assertEquals(second, first);
+      assertEquals(cachedMachineKey(), first);
+    } finally {
+      resetMachineKeyCacheForTests();
+    }
+  },
+});
+
+test({
+  name: "readMachineKey uses cat when Deno.readTextFileSync fails",
+  permissions: { read: true, write: true, run: true },
+  async fn() {
+    resetMachineKeyCacheForTests();
+    const dir = await Deno.makeTempDir({ prefix: "tp-machine-key-cat-" });
+    const originalRead = Deno.readTextFileSync;
+    try {
+      const path = `${dir}/machine-id`;
+      await Deno.writeTextFile(path, `${FIXTURE_MACHINE_ID}\n`);
+      Deno.readTextFileSync = () => {
+        throw new Error("read blocked");
+      };
+      assertEquals(await readMachineKey(path), PINNED_MACHINE_KEY);
+      assertEquals(cachedMachineKey(), undefined);
+    } finally {
+      Deno.readTextFileSync = originalRead;
+      await Deno.remove(dir, { recursive: true });
+      resetMachineKeyCacheForTests();
+    }
+  },
+});
+
+test({
+  name: "readMachineKey treats cat command failure as empty input",
+  permissions: { read: true, run: true },
+  async fn() {
+    resetMachineKeyCacheForTests();
+    const originalRead = Deno.readTextFileSync;
+    const OriginalCommand = Deno.Command;
+    Deno.readTextFileSync = () => {
+      throw new Error("read blocked");
+    };
+    Deno.Command = function (
+      cmd: string,
+      options?: Deno.CommandOptions,
+    ): Deno.Command {
+      if (cmd === "cat") {
+        throw new Error("cat unavailable");
+      }
+      return new OriginalCommand(cmd, options);
+    } as unknown as typeof Deno.Command;
+    try {
+      assertEquals(
+        await readMachineKey("/no/such/turbopanel-machine-id-cmd"),
+        undefined,
+      );
+    } finally {
+      Deno.Command = OriginalCommand;
+      Deno.readTextFileSync = originalRead;
+      resetMachineKeyCacheForTests();
+    }
+  },
+});

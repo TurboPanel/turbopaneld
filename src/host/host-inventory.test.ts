@@ -823,6 +823,8 @@ exit 1
     assertEquals(parseCpulist("0,0,1-2,1"), [0, 1, 2]);
     assertEquals(parseCpulist("0-x"), []);
     assertEquals(parseCpulist("a-b"), []);
+    assertEquals(parseCpulist("0-7:1.5"), []);
+    assertEquals(parseCpulist("-1-3"), []);
     assertEquals(advertisedMhzFromModelName("CPU @ 0GHz"), undefined);
     assertEquals(advertisedMhzFromModelName("CPU @ bogon"), undefined);
     assertEquals(advertisedMhzFromModelName("CPU @ 0MHz"), undefined);

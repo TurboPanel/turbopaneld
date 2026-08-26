@@ -921,6 +921,138 @@ test("removeNativeAppServices is a no-op when nothing is staged", async () => {
   }
 });
 
+test("applyNativeAppServices fails when unit install is refused", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  const originalRun = mock.run;
+  mock.run = async (command, args) => {
+    if (args.includes("install") && String(args.at(-1)).endsWith(".service")) {
+      return fail("install refused");
+    }
+    return await originalRun(command, args);
+  };
+  try {
+    const error = await assertRejects(
+      () =>
+        applyNativeAppServices(
+          host.layout,
+          ENVIRONMENT_ID,
+          [makeApp()],
+          applyOpts(host, mock),
+        ),
+      Error,
+    );
+    assertStringIncludes(error.message, "install refused");
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("applyNativeAppServices fails when enable --now is refused", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  const originalRun = mock.run;
+  mock.run = async (command, args) => {
+    if (args.includes("enable")) return fail("enable refused");
+    return await originalRun(command, args);
+  };
+  try {
+    const error = await assertRejects(
+      () =>
+        applyNativeAppServices(
+          host.layout,
+          ENVIRONMENT_ID,
+          [makeApp()],
+          applyOpts(host, mock),
+        ),
+      Error,
+    );
+    assertStringIncludes(error.message, "enable refused");
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("removeNativeAppServices continues when disable or unit removal fails", async () => {
+  const host = await makeTestHost();
+  try {
+    await applyNativeAppServices(
+      host.layout,
+      ENVIRONMENT_ID,
+      [
+        makeApp(),
+        makeApp({
+          composeServiceName: "api",
+          serviceId: "svc-api",
+          listenPort: 18101,
+        }),
+      ],
+      {
+        ...applyOpts(host, createRunMock()),
+        bindings: new Map([
+          ["web", { username: USERNAME, previousReleaseId: null }],
+          ["api", { username: USERNAME, previousReleaseId: null }],
+        ]),
+      },
+    );
+
+    const mock = createRunMock();
+    const originalRun = mock.run;
+    mock.run = async (command, args) => {
+      if (
+        args.includes("disable") &&
+        args.includes(nativeAppUnitName("svc-web"))
+      ) {
+        return fail("disable refused");
+      }
+      if (
+        args.includes("rm") &&
+        String(args.at(-1)).includes(nativeAppUnitName("svc-api"))
+      ) {
+        return fail("rm refused");
+      }
+      return await originalRun(command, args);
+    };
+    const removed = await removeNativeAppServices(
+      host.layout,
+      ENVIRONMENT_ID,
+      { run: mock.run, systemdUnitDir: host.unitDir },
+    );
+    // disable failure is warned and removal still proceeds; rm failure skips
+    // that unit. web is removed, api is not.
+    assertEquals(removed, 1);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("removeNativeAppServices warns when daemon-reload fails after teardown", async () => {
+  const host = await makeTestHost();
+  try {
+    await applyNativeAppServices(
+      host.layout,
+      ENVIRONMENT_ID,
+      [makeApp()],
+      applyOpts(host, createRunMock()),
+    );
+    const mock = createRunMock();
+    const originalRun = mock.run;
+    mock.run = async (command, args) => {
+      if (args.includes("daemon-reload")) return fail("reload refused");
+      return await originalRun(command, args);
+    };
+    assertEquals(
+      await removeNativeAppServices(host.layout, ENVIRONMENT_ID, {
+        run: mock.run,
+        systemdUnitDir: host.unitDir,
+      }),
+      1,
+    );
+  } finally {
+    await host.cleanup();
+  }
+});
+
 test("nativeAppNodeVersions deduplicates and sorts series pins", () => {
   assertEquals(DEFAULT_NATIVE_APP_NODE_VERSION, "24");
   assertEquals(

@@ -1,6 +1,7 @@
 import { assertEquals } from "@std/assert";
 import {
   logComponent,
+  presentStatusLine,
   relabelComponent,
   sanitizeStatusLine,
   shouldDropPresenterLogLine,
@@ -239,6 +240,49 @@ test("shouldDropStatusLine keeps meaningful installer status", () => {
   }
 });
 
+test("shouldDropStatusLine drops bare temp and vendor path echoes", () => {
+  const dropped = [
+    "/tmp",
+    "/tmp/",
+    "/var/tmp/ansible-tmp-xyz",
+    "/opt/turbopanel/vendor",
+    "/opt/turbopanel/vendor/",
+    "Using runtime 3.12.7 environment at: /opt/turbopanel/vendor/python/3.12",
+    "Downloading uv to /var/tmp/uv-install",
+  ];
+  for (const line of dropped) {
+    assertEquals(shouldDropStatusLine(line), true, line);
+  }
+});
+
+test("shouldDropStatusLine keeps paths that are not bare temp or vendor echoes", () => {
+  const kept = [
+    "/opt/turbopanel/bin/caddy",
+    "cache installed at /opt/turbopanel/vendor/redis/current",
+    "vendor/ansible/collections",
+    "/opt/turbopanel/tmp-hold",
+  ];
+  for (const line of kept) {
+    assertEquals(shouldDropStatusLine(line), false, line);
+  }
+});
+
+test("shouldDropPresenterLogLine drops remaining sanitized runtime bootstrap lines", () => {
+  const dropped = [
+    "ensuring runtime 3.12.7 is installed",
+    "installing galaxy roles from orchestration/requirements.yml",
+    "installing orchestration roles from orchestration/requirements.yml",
+    "runtime archive checksum verified",
+    "runtime 0.11.21 installed at /opt/turbopanel/vendor/uv/current/bin/uv",
+    "runtime 3.12.7 ready at /opt/turbopanel/vendor/python/3.12",
+    "orchestration installed",
+    "orchestration roles ready",
+  ];
+  for (const line of dropped) {
+    assertEquals(shouldDropPresenterLogLine(line), true, line);
+  }
+});
+
 test("summarizeRecap produces neutral success and failure one-liners", () => {
   assertEquals(
     summarizeRecap("ok=33 changed=15 failed=0 unreachable=0"),
@@ -252,4 +296,69 @@ test("summarizeRecap produces neutral success and failure one-liners", () => {
     summarizeRecap("ok=5 changed=0 failed=2 unreachable=1"),
     "orchestration failed (3 failures, 5 steps, 0 changes)",
   );
+});
+
+test("summarizeRecap reads stats from the segment before a semicolon suffix", () => {
+  // AnsibleRunSummaryCollector.build() joins recap + first failure with "; ".
+  assertEquals(
+    summarizeRecap(
+      "ok=1 changed=0 failed=1 unreachable=0; Set hostname: permission denied",
+    ),
+    "orchestration failed (1 failure, 1 steps, 0 changes)",
+  );
+  assertEquals(
+    summarizeRecap("ok=8 changed=3 failed=0 unreachable=0; extra notes"),
+    "orchestration applied (8 steps, 3 changes)",
+  );
+  assertEquals(
+    summarizeRecap("ok=5 changed=1 failed=0; skipped=2 rescued=0 ignored=0"),
+    "orchestration applied (5 steps, 1 changes)",
+  );
+});
+
+test("summarizeRecap matches host-prefixed recap lines and unreachable-only failures", () => {
+  assertEquals(
+    summarizeRecap("localhost : ok=4 changed=0 failed=0 unreachable=0"),
+    "orchestration applied (4 steps, 0 changes)",
+  );
+  assertEquals(
+    summarizeRecap("ok=0 changed=0 failed=0 unreachable=2"),
+    "orchestration failed (2 failures, 0 steps, 0 changes)",
+  );
+});
+
+test("summarizeRecap sanitizes recap text that does not match stats pattern", () => {
+  assertEquals(
+    summarizeRecap("  redis broker still starting  "),
+    "cache broker still starting",
+  );
+  // A leading semicolon leaves an empty first segment, so stats never match.
+  assertEquals(
+    summarizeRecap("; ok=4 changed=0 failed=0 unreachable=0"),
+    "; ok=4 changed=0 failed=0 unreachable=0",
+  );
+});
+
+test("presentStatusLine passes through when installer presenter is inactive", () => {
+  setActiveInstallPresenter(null);
+  const raw = "running ansible-galaxy collection install";
+  assertEquals(presentStatusLine(raw), raw);
+});
+
+test("presentStatusLine sanitizes when installer presenter is active", () => {
+  const presenter = new InstallPresenter(false);
+  setActiveInstallPresenter(presenter);
+  try {
+    assertEquals(
+      presentStatusLine("running ansible-galaxy collection install"),
+      "running orchestration collection install",
+    );
+    assertEquals(
+      presentStatusLine("proxysql listener ready"),
+      "ingress listener ready",
+    );
+  } finally {
+    presenter.dispose();
+    setActiveInstallPresenter(null);
+  }
 });

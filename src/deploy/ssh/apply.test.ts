@@ -637,3 +637,139 @@ test("prune defaults off", async () => {
     await host.cleanup();
   }
 });
+
+test("a missing sshd_config fails without writing a drop-in", async () => {
+  const host = await makeHost();
+  const inner = host.run;
+  host.run = async (command, args) => {
+    if (args.includes("cat") && args.at(-1) === host.sshdConfigPath) {
+      return fail("No such file or directory");
+    }
+    return await inner(command, args);
+  };
+  try {
+    const error = await assertRejects(() =>
+      apply(host, [{ username: "appuser", keys: [ED25519] }])
+    );
+    assertStringIncludes(String(error), "Could not read");
+    await assertRejects(() => Deno.stat(host.dropInPath));
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a failed drop-in snapshot fails before the live file is rewritten", async () => {
+  const host = await makeHost();
+  try {
+    await apply(host, [{ username: "appuser", keys: [ED25519] }]);
+    const good = await Deno.readTextFile(host.dropInPath);
+    const inner = host.run;
+    host.run = async (command, args) => {
+      if (args.includes("cp") && String(args.at(-1)).endsWith(".tpprev")) {
+        return fail("snapshot refused");
+      }
+      return await inner(command, args);
+    };
+    const error = await assertRejects(() =>
+      applySshAccess(
+        [{ username: "appuser", keys: [ED25519] }],
+        {
+          authorizedKeysDir: join(host.root, "etc/ssh/turbopanel/moved"),
+          sshdConfigPath: host.sshdConfigPath,
+          sshdDropInPath: host.dropInPath,
+        },
+        host.run,
+      )
+    );
+    assertStringIncludes(String(error), "snapshot refused");
+    assertEquals(await Deno.readTextFile(host.dropInPath), good);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a failed drop-in directory create fails the reconcile", async () => {
+  const host = await makeHost();
+  const inner = host.run;
+  host.run = async (command, args) => {
+    if (args.includes("install") && args.includes("-d")) {
+      const dest = args.at(-1);
+      if (dest === dirname(host.dropInPath)) {
+        return fail("mkdir refused");
+      }
+    }
+    return await inner(command, args);
+  };
+  try {
+    const error = await assertRejects(() =>
+      apply(host, [{ username: "appuser", keys: [ED25519] }])
+    );
+    assertStringIncludes(String(error), "mkdir refused");
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a failed key-file install fails the reconcile", async () => {
+  const host = await makeHost();
+  const inner = host.run;
+  host.run = async (command, args) => {
+    if (
+      args.includes("install") &&
+      !args.includes("-d") &&
+      String(args.at(-1)).includes("authorized_keys")
+    ) {
+      return fail("key install refused");
+    }
+    return await inner(command, args);
+  };
+  try {
+    const error = await assertRejects(() =>
+      apply(host, [{ username: "appuser", keys: [ED25519] }])
+    );
+    assertStringIncludes(String(error), "key install refused");
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("sshd reload failure throws after both unit names fail", async () => {
+  const host = await makeHost();
+  const inner = host.run;
+  host.run = async (command, args) => {
+    if (args.includes("systemctl") && args.includes("reload")) {
+      return fail("reload refused");
+    }
+    return await inner(command, args);
+  };
+  try {
+    const error = await assertRejects(() =>
+      apply(host, [{ username: "appuser", keys: [ED25519] }])
+    );
+    assertStringIncludes(String(error), "Failed to reload sshd");
+    assertStringIncludes(String(error), "reload refused");
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a failed prune removal is loud rather than ignored", async () => {
+  const host = await makeHost();
+  try {
+    await apply(host, [{ username: "gone", keys: [ED25519] }]);
+    const inner = host.run;
+    host.run = async (command, args) => {
+      if (
+        args.includes("rm") &&
+        String(args.at(-1)).endsWith("/gone")
+      ) {
+        return fail("rm refused");
+      }
+      return await inner(command, args);
+    };
+    const error = await assertRejects(() => apply(host, []));
+    assertStringIncludes(String(error), "rm refused");
+  } finally {
+    await host.cleanup();
+  }
+});

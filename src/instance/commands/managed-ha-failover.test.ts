@@ -141,3 +141,56 @@ test("managed.ha.failover recover falls back when endpoints are incomplete", asy
   assertEquals(promoteCalls.length, 1);
   assertEquals(result.summary.includes("without Orchestrator"), true);
 });
+
+test("managed.ha.failover drain skips drain helper when source endpoint is absent", async () => {
+  let drainCalled = false;
+  const result = await handleManagedHaFailover(
+    {
+      managedId: RECOVER_PAYLOAD.managedId,
+      sourceMemberId: RECOVER_PAYLOAD.sourceMemberId,
+      targetMemberId: RECOVER_PAYLOAD.targetMemberId,
+      phase: "drain",
+    },
+    "2026-08-19T12:00:00.000Z",
+    {
+      drain: () => {
+        drainCalled = true;
+        return Promise.resolve();
+      },
+    },
+  );
+  assertEquals(drainCalled, false);
+  assertEquals(result.phase, "drain");
+});
+
+test("managed.ha.failover recover stringifies non-Error recover failures", async () => {
+  const promoteCalls: unknown[] = [];
+  const result = await handleManagedHaFailover(
+    RECOVER_PAYLOAD,
+    "2026-08-19T12:00:00.000Z",
+    {
+      haPresent: () => Promise.resolve(true),
+      recover: () => Promise.reject("orchestrator string failure"),
+      promote: promoteStub(promoteCalls),
+    },
+  );
+  assertEquals(promoteCalls.length, 1);
+  assertEquals(result.summary.includes("Orchestrator recover failure"), true);
+});
+
+test("managed.ha.failover recover stringifies non-JSON-serializable failures", async () => {
+  const promoteCalls: unknown[] = [];
+  const circular: { self?: unknown } = {};
+  circular.self = circular;
+  const result = await handleManagedHaFailover(
+    RECOVER_PAYLOAD,
+    "2026-08-19T12:00:00.000Z",
+    {
+      haPresent: () => Promise.resolve(true),
+      recover: () => Promise.reject(circular),
+      promote: promoteStub(promoteCalls),
+    },
+  );
+  assertEquals(promoteCalls.length, 1);
+  assertEquals(result.phase, "recover");
+});

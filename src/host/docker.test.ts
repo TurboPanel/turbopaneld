@@ -132,3 +132,166 @@ exit 1
     }
   },
 });
+
+function writeStubDocker(dir: string, script: string): string {
+  const bin = `${dir}/docker`;
+  Deno.writeTextFileSync(bin, script);
+  Deno.chmodSync(bin, 0o750);
+  return bin;
+}
+
+test({
+  name: "readDocker reports CLI version when compose probes fail",
+  permissions: { read: true, write: true, run: true },
+  fn() {
+    const dir = Deno.makeTempDirSync({ prefix: "tp-docker-cli-only-" });
+    try {
+      const bin = writeStubDocker(
+        dir,
+        String.raw`#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "Docker version 28.1.0, build abc"
+  exit 0
+fi
+exit 1
+`,
+      );
+      assertEquals(readDocker(bin), { version: "28.1.0" });
+    } finally {
+      Deno.removeSync(dir, { recursive: true });
+    }
+  },
+});
+
+test({
+  name: "readDocker reports compose version when --version fails",
+  permissions: { read: true, write: true, run: true },
+  fn() {
+    const dir = Deno.makeTempDirSync({ prefix: "tp-docker-compose-only-" });
+    try {
+      const bin = writeStubDocker(
+        dir,
+        String.raw`#!/bin/sh
+if [ "$1" = "--version" ]; then
+  exit 1
+fi
+if [ "$1" = "compose" ] && [ "$2" = "version" ] && [ "$3" = "--short" ]; then
+  echo "2.40.0"
+  exit 0
+fi
+exit 1
+`,
+      );
+      assertEquals(readDocker(bin), { composeVersion: "2.40.0" });
+    } finally {
+      Deno.removeSync(dir, { recursive: true });
+    }
+  },
+});
+
+test({
+  name: "readDocker uses long compose banner when --short is unparseable",
+  permissions: { read: true, write: true, run: true },
+  fn() {
+    const dir = Deno.makeTempDirSync({ prefix: "tp-docker-compose-long-" });
+    try {
+      const bin = writeStubDocker(
+        dir,
+        String.raw`#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "28.3.3"
+  exit 0
+fi
+if [ "$1" = "compose" ] && [ "$2" = "version" ] && [ "$3" = "--short" ]; then
+  echo "compose is not installed"
+  exit 0
+fi
+if [ "$1" = "compose" ] && [ "$2" = "version" ]; then
+  echo "Docker Compose version v2.39.1"
+  exit 0
+fi
+exit 1
+`,
+      );
+      assertEquals(readDocker(bin), {
+        version: "28.3.3",
+        composeVersion: "2.39.1",
+      });
+    } finally {
+      Deno.removeSync(dir, { recursive: true });
+    }
+  },
+});
+
+test({
+  name: "readDocker returns undefined when the stub exists but cannot run",
+  permissions: { read: true, write: true, run: true },
+  fn() {
+    const dir = Deno.makeTempDirSync({ prefix: "tp-docker-noexec-" });
+    const bin = `${dir}/docker`;
+    try {
+      Deno.writeTextFileSync(bin, "not-executable");
+      // mode 0640: exists for pathExists, Deno.Command throws on execute.
+      Deno.chmodSync(bin, 0o640);
+      assertEquals(readDocker(bin), undefined);
+    } finally {
+      Deno.removeSync(dir, { recursive: true });
+    }
+  },
+});
+
+test({
+  name: "readDocker uses test -e when Deno.statSync is blocked",
+  permissions: { read: true, write: true, run: true },
+  fn() {
+    const dir = Deno.makeTempDirSync({ prefix: "tp-docker-stat-" });
+    const originalStat = Deno.statSync;
+    try {
+      const bin = writeStubDocker(
+        dir,
+        String.raw`#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "Docker version 26.1.0, build abc"
+  exit 0
+fi
+exit 1
+`,
+      );
+      Deno.statSync = () => {
+        throw new Error("stat blocked");
+      };
+      assertEquals(readDocker(bin), { version: "26.1.0" });
+      assertEquals(readDocker("/no/such/turbopanel-docker"), undefined);
+    } finally {
+      Deno.statSync = originalStat;
+      Deno.removeSync(dir, { recursive: true });
+    }
+  },
+});
+
+test({
+  name: "readDocker treats test command failures as a missing binary",
+  permissions: { read: true, write: true, run: true },
+  fn() {
+    const OriginalCommand = Deno.Command;
+    const originalStat = Deno.statSync;
+    Deno.statSync = () => {
+      throw new Error("stat blocked");
+    };
+    Deno.Command = function (
+      cmd: string,
+      options?: Deno.CommandOptions,
+    ): Deno.Command {
+      if (cmd === "test") {
+        throw new Error("test unavailable");
+      }
+      return new OriginalCommand(cmd, options);
+    } as unknown as typeof Deno.Command;
+    try {
+      assertEquals(readDocker("/usr/bin/docker"), undefined);
+    } finally {
+      Deno.Command = OriginalCommand;
+      Deno.statSync = originalStat;
+    }
+  },
+});

@@ -518,6 +518,132 @@ describe("compose-files", () => {
         }),
       );
       assertEquals(await readDeploymentManifest(deploymentDir), null);
+
+      await writeComposeFileSecure(
+        join(deploymentDir, "deployment.json"),
+        JSON.stringify({
+          version: 2,
+          projectId: "",
+          environmentId: "env-1",
+          serverId: "srv-1",
+          generation: 1,
+          projectName: "demo",
+          composeSha256: "a".repeat(64),
+          services: {},
+        }),
+      );
+      assertEquals(await readDeploymentManifest(deploymentDir), null);
+
+      await writeComposeFileSecure(
+        join(deploymentDir, "deployment.json"),
+        JSON.stringify({
+          version: 2,
+          projectId: "proj-1",
+          environmentId: "env-1",
+          serverId: "srv-1",
+          generation: -1,
+          projectName: "demo",
+          composeSha256: "a".repeat(64),
+          services: {},
+        }),
+      );
+      assertEquals(await readDeploymentManifest(deploymentDir), null);
+
+      await writeComposeFileSecure(
+        join(deploymentDir, "deployment.json"),
+        JSON.stringify({
+          version: 2,
+          projectId: "proj-1",
+          environmentId: "env-1",
+          serverId: "srv-1",
+          generation: 1,
+          projectName: "demo",
+          composeSha256: "a".repeat(64),
+          services: [],
+        }),
+      );
+      assertEquals(await readDeploymentManifest(deploymentDir), null);
+
+      await writeComposeFileSecure(
+        join(deploymentDir, "deployment.json"),
+        JSON.stringify({
+          version: 2,
+          projectId: "proj-1",
+          environmentId: "env-1",
+          serverId: "srv-1",
+          generation: 1,
+          projectName: "demo",
+          composeSha256: "a".repeat(64),
+          services: {},
+          secrets: [{
+            source: 1,
+            target: "x",
+            relativePath: "web_VAR",
+            composeServiceName: "web",
+          }],
+        }),
+      );
+      const noSecrets = await readDeploymentManifest(deploymentDir);
+      assertEquals(noSecrets?.secrets, undefined);
+    } finally {
+      await Deno.remove(tmp, { recursive: true });
+    }
+  });
+
+  it("resolveDeployedComposePaths ignores a compose.yaml directory", async () => {
+    const tmp = await Deno.makeTempDir({ prefix: "tp-" });
+    try {
+      await Deno.mkdir(join(tmp, RUNTIME_COMPOSE_FILENAME));
+      assertEquals(await resolveDeployedComposePaths(tmp), null);
+    } finally {
+      await Deno.remove(tmp, { recursive: true });
+    }
+  });
+
+  it("listLocalDeploymentManifests skips non-directory project entries", async () => {
+    const tmp = await Deno.makeTempDir({ prefix: "tp-" });
+    try {
+      const layout = resolveLayout({ TURBOPANEL_STATE_DIR: tmp });
+      const deployments = join(tmp, "deployments");
+      await Deno.mkdir(deployments, { recursive: true });
+      await Deno.writeTextFile(join(deployments, "not-a-project"), "file\n");
+      const envDir = environmentDeploymentDir(layout, "proj-1", "env-1");
+      await Deno.mkdir(envDir, { recursive: true, mode: 0o750 });
+      await writeDeploymentManifest(envDir, {
+        version: 2,
+        projectId: "proj-1",
+        environmentId: "env-1",
+        serverId: "srv-1",
+        generation: 1,
+        projectName: "demo",
+        composeSha256: "a".repeat(64),
+        services: {},
+      });
+      const listed = await listLocalDeploymentManifests(layout);
+      assertEquals(listed.length, 1);
+      assertEquals(listed[0]?.manifest.projectId, "proj-1");
+    } finally {
+      await Deno.remove(tmp, { recursive: true });
+    }
+  });
+
+  it("listLocalDeploymentManifests rethrows when deployments is not a directory", async () => {
+    const tmp = await Deno.makeTempDir({ prefix: "tp-" });
+    try {
+      await Deno.writeTextFile(join(tmp, "deployments"), "not a dir\n");
+      await assertRejects(
+        () => listLocalDeploymentManifests({ stateDir: tmp }),
+      );
+    } finally {
+      await Deno.remove(tmp, { recursive: true });
+    }
+  });
+
+  it("readDeploymentManifest rethrows when the manifest path is not a file", async () => {
+    const tmp = await Deno.makeTempDir({ prefix: "tp-" });
+    try {
+      await Deno.mkdir(join(tmp, "deployment.json"));
+      await assertRejects(() => readDeploymentManifest(tmp));
     } finally {
       await Deno.remove(tmp, { recursive: true });
     }

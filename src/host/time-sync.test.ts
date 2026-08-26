@@ -433,3 +433,51 @@ test("readTimeSync default synchronized mtime uses file timestamp", () => {
     Deno.removeSync(root, { recursive: true });
   }
 });
+
+test("parseTimedatectlShow maps true/1 and false/0 tokens", () => {
+  assertEquals(
+    parseTimedatectlShow("Timezone=UTC\nNTP=true\nNTPSynchronized=1\n"),
+    { timezone: "UTC", ntpEnabled: true, ntpSynced: true },
+  );
+  assertEquals(
+    parseTimedatectlShow("Timezone=UTC\nNTP=false\nNTPSynchronized=0\n"),
+    { timezone: "UTC", ntpEnabled: false, ntpSynced: false },
+  );
+});
+
+test("parseTimedatectlShow skips comments and empty last-sync stamps", () => {
+  assertEquals(
+    parseTimedatectlShow("# comment\nTimezone=UTC\n=novalue\n"),
+    { timezone: "UTC" },
+  );
+  assertEquals(
+    parseShowTimesyncLastSyncedAt(
+      "LastSyncTimestamp=0\nLastMessageTimestamp=n/a\n",
+    ),
+    undefined,
+  );
+});
+
+test("parseTimesyncdConf ignores empty FallbackNTP", () => {
+  assertEquals(
+    parseTimesyncdConf("[Time]\nNTP=pool.ntp.org\nFallbackNTP=\nOther=1\n"),
+    { ntpServers: ["pool.ntp.org"] },
+  );
+});
+
+test("readTimeSync default reader uses runCat code 1 as a miss", () => {
+  const root = Deno.makeTempDirSync({ prefix: "tp-timesync-cat-miss-" });
+  try {
+    const result = readTimeSync({
+      etcTimezonePath: `${root}/missing-timezone`,
+      timesyncdConfPath: `${root}/missing-timesyncd.conf`,
+      synchronizedPath: `${root}/missing-synchronized`,
+      spawnText: () => "Timezone=UTC\nNTP=yes\nNTPSynchronized=yes\n",
+      runCat: () => ({ code: 1, stdout: new Uint8Array() }),
+    });
+    assertEquals(result.timezone, "UTC");
+    assertEquals(result.ntpServers, []);
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});

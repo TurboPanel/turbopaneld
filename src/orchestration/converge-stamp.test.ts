@@ -5,6 +5,7 @@ import {
   describeDevConvergeDecision,
   devConvergeEnvMaterial,
   emitDevConvergeSkippedIfNeeded,
+  readDevConvergeStamp,
   resolveDevConvergeStampFile,
   shouldSkipDevConverge,
   writeDevConvergeStamp,
@@ -104,6 +105,17 @@ async function withIsolatedStamp(
     }
   });
 }
+
+test("readDevConvergeStamp returns null for missing or blank stamp files", async () => {
+  await withIsolatedStamp(async (stampFile) => {
+    assertEquals(await readDevConvergeStamp(), null);
+    await Deno.mkdir(dirname(stampFile), { recursive: true });
+    await Deno.writeTextFile(stampFile, "   \n");
+    assertEquals(await readDevConvergeStamp(), null);
+    await Deno.writeTextFile(stampFile, "abc123\n");
+    assertEquals(await readDevConvergeStamp(), "abc123");
+  });
+});
 
 test("shouldSkipDevConverge does not skip when no stamp is written", async () => {
   await withIsolatedStamp(async () => {

@@ -416,3 +416,47 @@ test({
     }
   },
 });
+
+test({
+  name:
+    "handleEnvironmentStop keeps stopping when privileged reclaim throws",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-stop-releases-throw-" });
+    const previous = {
+      TURBOPANEL_STATE_DIR: Deno.env.get("TURBOPANEL_STATE_DIR"),
+      TURBOPANEL_CONFIG_DIR: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
+      TURBOPANEL_PRINCIPAL_HOME_ROOT: Deno.env.get(
+        "TURBOPANEL_PRINCIPAL_HOME_ROOT",
+      ),
+    };
+    Deno.env.set("TURBOPANEL_STATE_DIR", join(root, "state"));
+    Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
+    Deno.env.set("TURBOPANEL_PRINCIPAL_HOME_ROOT", join(root, "srv", "users"));
+
+    try {
+      const result = await handleEnvironmentStop(
+        {
+          environmentId: "envrel0003",
+          projectId: "proj-1",
+          projectName: "tp-demo-envrel000",
+          siteReleases: [{ serviceId: "svc-1", username: "appuser" }],
+        },
+        new Date().toISOString(),
+        {
+          runPrivileged: () => {
+            throw new Error("sudo unavailable");
+          },
+        },
+      );
+      assertEquals(result.containers, []);
+      assertEquals(result.summary.includes("already stopped"), true);
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) Deno.env.delete(key);
+        else Deno.env.set(key, value);
+      }
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});

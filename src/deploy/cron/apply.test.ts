@@ -404,3 +404,108 @@ test("a failed daemon-reload fails the apply rather than enabling blindly", asyn
     await host.cleanup();
   }
 });
+
+test("a failed unit install fails the apply before systemd is touched", async () => {
+  const host = await makeHost();
+  const inner = host.run;
+  host.run = (command, args) => {
+    if (args.includes("install") && !args.includes("-d")) {
+      return Promise.resolve(fail("install refused"));
+    }
+    return inner(command, args);
+  };
+  try {
+    await assertRejects(
+      () => apply(host, [specFor()]),
+      Error,
+      "install refused",
+    );
+    assertEquals(systemctlCalls(host), []);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a failed timer enable fails after daemon-reload", async () => {
+  const host = await makeHost();
+  const inner = host.run;
+  host.run = (command, args) => {
+    if (args.includes("enable")) {
+      return Promise.resolve(fail("enable refused"));
+    }
+    return inner(command, args);
+  };
+  try {
+    await assertRejects(
+      () => apply(host, [specFor()]),
+      Error,
+      "enable refused",
+    );
+    assertEquals(
+      systemctlCalls(host).some((c) => c[0] === "daemon-reload"),
+      true,
+    );
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a failed unit listing is treated as no installed timers", async () => {
+  const host = await makeHost();
+  try {
+    await apply(host, [specFor()]);
+    const inner = host.run;
+    host.run = (command, args) => {
+      if (args.includes("ls")) return Promise.resolve(fail("ls refused"));
+      return inner(command, args);
+    };
+    const result = await apply(host, []);
+    assertEquals(result.removed, []);
+    await Deno.stat(join(host.unitDir, `${UNIT}.timer`));
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a failed timer disable still removes the unit files", async () => {
+  const host = await makeHost();
+  try {
+    await apply(host, [specFor()]);
+    const inner = host.run;
+    host.run = (command, args) => {
+      if (args.includes("disable")) {
+        return Promise.resolve(fail("disable refused"));
+      }
+      return inner(command, args);
+    };
+    const result = await apply(host, []);
+    assertEquals(result.removed, [UNIT]);
+    await assertRejects(() => Deno.stat(join(host.unitDir, `${UNIT}.timer`)));
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("removeCronJobs warns when daemon-reload fails after teardown", async () => {
+  const host = await makeHost();
+  try {
+    await apply(host, [specFor()]);
+    const inner = host.run;
+    host.run = (command, args) => {
+      if (args.includes("daemon-reload")) {
+        return Promise.resolve(fail("reload refused"));
+      }
+      return inner(command, args);
+    };
+    assertEquals(
+      await removeCronJobs(ENV_ID, {
+        run: host.run,
+        systemdUnitDir: host.unitDir,
+      }),
+      1,
+    );
+    await assertRejects(() => Deno.stat(join(host.unitDir, `${UNIT}.timer`)));
+  } finally {
+    await host.cleanup();
+  }
+});

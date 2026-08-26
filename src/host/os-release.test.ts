@@ -1,5 +1,6 @@
 import { assertEquals } from "@std/assert";
 import {
+  getHostHelloIdentity,
   hostOsFromFields,
   parseOsReleaseText,
   readOsRelease,
@@ -213,5 +214,215 @@ test({
       assertEquals(typeof os.family, "string");
     }
     resetHostOsCacheForTests();
+  },
+});
+
+test("hostOsFromFields maps windows / cygwin / PRETTY_NAME-only linux", () => {
+  assertEquals(
+    hostOsFromFields({ ID: "windows" }, { os: "linux", arch: "x86_64" })
+      ?.family,
+    "windows",
+  );
+  assertEquals(
+    hostOsFromFields({ ID_LIKE: "windows" }, { os: "linux", arch: "x86_64" })
+      ?.family,
+    "windows",
+  );
+  assertEquals(
+    hostOsFromFields({ ID: "cygwin" }, { os: "linux", arch: "x86_64" })
+      ?.family,
+    "windows",
+  );
+  assertEquals(
+    hostOsFromFields(
+      { PRETTY_NAME: "Some Linux" },
+      { os: "sunos", arch: "x86_64" },
+    )?.family,
+    "linux",
+  );
+});
+
+test("resolveOsVersion skips non-numeric DEBIAN_VERSION_FULL", () => {
+  assertEquals(
+    resolveOsVersion({ DEBIAN_VERSION_FULL: "trixie", VERSION_ID: "13" }),
+    "13",
+  );
+  assertEquals(resolveOsVersion({ DEBIAN_VERSION_FULL: "  " }), undefined);
+});
+
+test("getHostHelloIdentity includes hostname and cached OS", () => {
+  resetHostOsCacheForTests();
+  const first = getHostHelloIdentity();
+  const second = getHostHelloIdentity();
+  assertEquals(second.os, first.os);
+  if (first.hostname !== undefined) {
+    assertEquals(first.hostname.length > 0, true);
+  }
+  if (first.os) {
+    assertEquals(typeof first.os.family, "string");
+  }
+  resetHostOsCacheForTests();
+});
+
+test("getHostHelloIdentity omits hostname when Deno.hostname throws", () => {
+  resetHostOsCacheForTests();
+  const originalHostname = Deno.hostname;
+  Deno.hostname = () => {
+    throw new Error("sys blocked");
+  };
+  try {
+    const identity = getHostHelloIdentity();
+    assertEquals(identity.hostname, undefined);
+  } finally {
+    Deno.hostname = originalHostname;
+    resetHostOsCacheForTests();
+  }
+});
+
+test("getHostHelloIdentity omits blank hostname", () => {
+  resetHostOsCacheForTests();
+  const originalHostname = Deno.hostname;
+  Deno.hostname = () => "   ";
+  try {
+    const identity = getHostHelloIdentity();
+    assertEquals(identity.hostname, undefined);
+  } finally {
+    Deno.hostname = originalHostname;
+    resetHostOsCacheForTests();
+  }
+});
+
+test({
+  name: "readOsRelease uses cat when Deno.readTextFileSync fails",
+  permissions: { read: true, write: true, run: true },
+  fn() {
+    resetHostOsCacheForTests();
+    const dir = Deno.makeTempDirSync({ prefix: "tp-os-release-cat-" });
+    const path = `${dir}/os-release`;
+    Deno.writeTextFileSync(
+      path,
+      "ID=debian\nVERSION_ID=13\nPRETTY_NAME=Debian\n",
+    );
+    const originalRead = Deno.readTextFileSync;
+    Deno.readTextFileSync = () => {
+      throw new Error("read blocked");
+    };
+    try {
+      const os = readOsRelease(path);
+      assertEquals(os?.id, "debian");
+      assertEquals(os?.prettyName, "Debian");
+      assertEquals(os?.family, "linux");
+    } finally {
+      Deno.readTextFileSync = originalRead;
+      Deno.removeSync(dir, { recursive: true });
+      resetHostOsCacheForTests();
+    }
+  },
+});
+
+test({
+  name: "readOsRelease pathExists falls back to test -e when statSync throws",
+  permissions: { read: true, write: true, run: true },
+  fn() {
+    resetHostOsCacheForTests();
+    const dir = Deno.makeTempDirSync({ prefix: "tp-os-release-stat-" });
+    const path = `${dir}/os-release`;
+    Deno.writeTextFileSync(path, "ID=debian\nVERSION_ID=13\n");
+    const originalStat = Deno.statSync;
+    Deno.statSync = () => {
+      throw new Error("stat blocked");
+    };
+    try {
+      const os = readOsRelease(path);
+      assertEquals(os?.id, "debian");
+      assertEquals(os?.family, "linux");
+    } finally {
+      Deno.statSync = originalStat;
+      Deno.removeSync(dir, { recursive: true });
+      resetHostOsCacheForTests();
+    }
+  },
+});
+
+test({
+  name: "readOsRelease treats test/cat command failures as missing files",
+  permissions: { read: true, write: true, run: true },
+  fn() {
+    resetHostOsCacheForTests();
+    const OriginalCommand = Deno.Command;
+    const originalRead = Deno.readTextFileSync;
+    const originalStat = Deno.statSync;
+    Deno.readTextFileSync = () => {
+      throw new Error("read blocked");
+    };
+    Deno.statSync = () => {
+      throw new Error("stat blocked");
+    };
+    Deno.Command = function (
+      cmd: string,
+      options?: Deno.CommandOptions,
+    ): Deno.Command {
+      if (cmd === "test" || cmd === "cat") {
+        throw new Error(`${cmd} unavailable`);
+      }
+      return new OriginalCommand(cmd, options);
+    } as unknown as typeof Deno.Command;
+    try {
+      const os = readOsRelease("/no/such/turbopanel-os-release-cmd");
+      if (Deno.build.os === "linux") {
+        assertEquals(os?.family, "linux");
+      }
+    } finally {
+      Deno.Command = OriginalCommand;
+      Deno.readTextFileSync = originalRead;
+      Deno.statSync = originalStat;
+      resetHostOsCacheForTests();
+    }
+  },
+});
+
+test({
+  name: "readOsRelease marks raspberry-pi-os when test -e finds rpi-issue",
+  permissions: { read: true, write: true, run: true },
+  fn() {
+    resetHostOsCacheForTests();
+    const dir = Deno.makeTempDirSync({ prefix: "tp-os-release-rpi-" });
+    const path = `${dir}/os-release`;
+    Deno.writeTextFileSync(
+      path,
+      "ID=debian\nVERSION_ID=12\nPRETTY_NAME=Debian\n",
+    );
+    const originalStat = Deno.statSync;
+    const OriginalCommand = Deno.Command;
+    Deno.statSync = () => {
+      throw new Error("stat blocked");
+    };
+    Deno.Command = function (
+      cmd: string,
+      options?: Deno.CommandOptions,
+    ): Deno.Command {
+      if (cmd === "test") {
+        return {
+          outputSync: () => ({
+            code: 0,
+            stdout: new Uint8Array(),
+            stderr: new Uint8Array(),
+            success: true,
+            signal: null,
+          }),
+        } as Deno.Command;
+      }
+      return new OriginalCommand(cmd, options);
+    } as unknown as typeof Deno.Command;
+    try {
+      const os = readOsRelease(path);
+      assertEquals(os?.id, "debian");
+      assertEquals(os?.variant, "raspberry-pi-os");
+    } finally {
+      Deno.Command = OriginalCommand;
+      Deno.statSync = originalStat;
+      Deno.removeSync(dir, { recursive: true });
+      resetHostOsCacheForTests();
+    }
   },
 });

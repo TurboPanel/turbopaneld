@@ -1,6 +1,7 @@
 import { assertEquals, assertRejects } from "@std/assert";
 import type { DockerCliResult } from "./docker-cli.ts";
 import {
+  composeFilesHaveContainerServices,
   composeHasContainerServices,
   resolveComposeModel,
   validateComposeConfig,
@@ -22,6 +23,23 @@ function mockRun(
 
 test("composeHasContainerServices treats parse failures as possibly having services", () => {
   assertEquals(composeHasContainerServices("services:\n  web: ["), true);
+});
+
+test("composeHasContainerServices is false for empty or non-object services", () => {
+  assertEquals(composeHasContainerServices("services: {}\n"), false);
+  assertEquals(composeHasContainerServices("version: '3.8'\n"), false);
+  assertEquals(composeHasContainerServices("[]"), false);
+});
+
+test("composeFilesHaveContainerServices is true when any layer declares a service", () => {
+  assertEquals(
+    composeFilesHaveContainerServices(["services: {}\n", "services:\n  web:\n    image: nginx\n"]),
+    true,
+  );
+  assertEquals(
+    composeFilesHaveContainerServices(["services: {}\n", "version: '3.8'\n"]),
+    false,
+  );
 });
 
 test("composeHasContainerServices parses Compose scalar tag bodies", () => {
