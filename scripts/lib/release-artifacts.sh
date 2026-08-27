@@ -245,6 +245,16 @@ tp_stage_release_js_bundle() {
 	return 0
 }
 
+tp_stage_release_notices() {
+	_staging="$1"
+	_home="$2"
+	_notices="$3"
+	_dest="$_staging/$_home/share"
+	mkdir -p "$_dest"
+	install -m 0644 "$_notices" "$_dest/THIRD_PARTY_NOTICES.md"
+	return 0
+}
+
 tp_stage_release_orchestration() {
 	_staging="$1"
 	_home="$2"
@@ -343,6 +353,11 @@ tp_verify_release_root() {
 		_fail=1
 	fi
 
+	if [[ ! -f "$_prod/share/THIRD_PARTY_NOTICES.md" ]]; then
+		echo "tp_verify_release_root: missing $_prod/share/THIRD_PARTY_NOTICES.md" >&2
+		_fail=1
+	fi
+
 	if [[ "$_fail" -ne 0 ]]; then
 		return 1
 	fi
@@ -424,7 +439,9 @@ tp_install_verified_channel_release() {
 	_js_sha256="$4"
 	_orchestration_url="$5"
 	_orchestration_sha256="$6"
-	_home="$(tp_prod_home)"
+	_layout_home="$(tp_prod_home)"
+	# Nested helpers reuse `_home`; keep the install dest on a name they do not clobber.
+	_dest_home="${7:-$_layout_home}"
 	_binary_archive=""
 	_js_archive=""
 	_orchestration_archive=""
@@ -471,22 +488,66 @@ tp_install_verified_channel_release() {
 		return 1
 	fi
 
-	if ! tp_extract_orchestration_release "$_orchestration_archive" "$_orchestration_staging" "$_home"; then
+	if ! tp_extract_orchestration_release "$_orchestration_archive" "$_orchestration_staging" "$_layout_home"; then
+		return 1
+	fi
+	if ! tp_verify_release_root "$_orchestration_staging" "orchestration"; then
 		return 1
 	fi
 
-	mkdir -p "$_home/bin" "$_home/share/orchestration"
+	mkdir -p "$_dest_home/bin" "$_dest_home/share/orchestration" "$_dest_home/share"
 	install -m 0755 \
-		"$_binary_staging/$_home/bin/$(tp_daemon_binary_name)" \
-		"$_home/bin/$(tp_daemon_binary_name)"
+		"$_binary_staging/$_layout_home/bin/$(tp_daemon_binary_name)" \
+		"$_dest_home/bin/$(tp_daemon_binary_name)"
 	install -m 0644 \
-		"$_js_staging/$_home/bin/$(tp_daemon_js_fallback_name)" \
-		"$_home/bin/$(tp_daemon_js_fallback_name)"
-	rm -f "$_home/bin/turbopanel-update"
-	rm -rf "$_home/share/orchestration"
-	cp -a "$_orchestration_staging/$_home/share/orchestration" "$_home/share/"
+		"$_js_staging/$_layout_home/bin/$(tp_daemon_js_fallback_name)" \
+		"$_dest_home/bin/$(tp_daemon_js_fallback_name)"
+	rm -f "$_dest_home/bin/turbopanel-update"
+	rm -rf "$_dest_home/share/orchestration"
+	cp -a "$_orchestration_staging/$_layout_home/share/orchestration" "$_dest_home/share/"
+	if ! tp_install_release_notices_from_staging \
+		"$_layout_home" \
+		"$_dest_home" \
+		"$_orchestration_staging" \
+		"$_binary_staging" \
+		"$_js_staging"; then
+		return 1
+	fi
 
 	trap - EXIT INT HUP TERM
 	_cleanup
+	return 0
+}
+
+# Copy a verified THIRD_PARTY_NOTICES.md from a staged artifact into the
+# production FHS share directory.
+tp_install_release_notices() {
+	_src="$1"
+	_home="${2:-$(tp_prod_home)}"
+	if [[ ! -f "$_src" ]]; then
+		echo "tp_install_release_notices: missing $_src" >&2
+		return 1
+	fi
+	mkdir -p "$_home/share"
+	install -m 0644 "$_src" "$_home/share/THIRD_PARTY_NOTICES.md"
+	return 0
+}
+
+tp_install_release_notices_from_staging() {
+	_layout_home="$1"
+	_dest_home="$2"
+	shift 2
+	_notices=""
+	for _stage in "$@"; do
+		if [[ -f "$_stage/$_layout_home/share/THIRD_PARTY_NOTICES.md" ]]; then
+			_notices="$_stage/$_layout_home/share/THIRD_PARTY_NOTICES.md"
+			break
+		fi
+	done
+	if [[ -z "$_notices" ]]; then
+		echo "tp_install_verified_channel_release: missing verified THIRD_PARTY_NOTICES.md" >&2
+		return 1
+	fi
+	tp_install_release_notices "$_notices" "$_dest_home"
 	return 0
 }

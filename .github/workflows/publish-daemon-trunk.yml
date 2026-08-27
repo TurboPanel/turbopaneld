@@ -91,8 +91,9 @@ jobs:
 
       - name: Compute build metadata
         run: |
-          echo "BUILD_ID=$(date -u '+%Y%m%d-%H%M%S')-$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
-          echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          echo "GIT_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "SHORT_SHA=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
+          echo "BUILD_ID=$(date -u '+%Y%m%d-%H%M%S')-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
           echo "BUILT_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_ENV"
 
       - name: Embed build identity
@@ -103,13 +104,15 @@ jobs:
             buildId: string;
             builtAt: string;
             channel: string;
+            sourceUrl: string;
           }
 
           export const BUILD_INFO: BuildInfo = {
-            commit: "$SHORT_SHA",
+            commit: "$GIT_COMMIT",
             buildId: "$BUILD_ID",
             builtAt: "$BUILT_AT",
             channel: "trunk",
+            sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/$GIT_COMMIT",
           };
 
           export function getBuildInfo(): BuildInfo {

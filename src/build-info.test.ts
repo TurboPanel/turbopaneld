@@ -1,6 +1,12 @@
 import { assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
-import { BUILD_INFO, getBuildInfo, readGitShortCommit } from "./build-info.ts";
+import {
+  BUILD_INFO,
+  getBuildInfo,
+  readGitCommit,
+  readGitShortCommit,
+  sourceUrlForCommit,
+} from "./build-info.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -28,10 +34,23 @@ test("BUILD_INFO exposes the stamped compiled-identity fields", () => {
   assertEquals(typeof BUILD_INFO.buildId, "string");
   assertEquals(typeof BUILD_INFO.builtAt, "string");
   assertEquals(typeof BUILD_INFO.channel, "string");
+  assertEquals(typeof BUILD_INFO.sourceUrl, "string");
   assertEquals(BUILD_INFO.commit.length > 0, true);
 });
 
-test("readGitShortCommit returns null when .git is missing or unreadable", () => {
+test("sourceUrlForCommit maps overlay identity to the git tree URL", () => {
+  assertEquals(
+    sourceUrlForCommit("abcdef0123456789abcdef0123456789abcdef01+99"),
+    "https://github.com/TurboPanel/turbopaneld/tree/abcdef0123456789abcdef0123456789abcdef01",
+  );
+  assertEquals(
+    sourceUrlForCommit("dev"),
+    "https://github.com/TurboPanel/turbopaneld",
+  );
+});
+
+test("readGitCommit and readGitShortCommit return null when .git is missing", () => {
+  assertEquals(readGitCommit("/no/such/build-info-checkout"), null);
   assertEquals(readGitShortCommit("/no/such/build-info-checkout"), null);
 });
 
@@ -43,6 +62,10 @@ test("readGitShortCommit reads a symbolic HEAD ref", async () => {
       join(gitDir, "refs", "heads", "trunk"),
       "ABCDEF0123456789abcdef0123456789abcdef01\n",
     );
+    assertEquals(
+      readGitCommit(root),
+      "abcdef0123456789abcdef0123456789abcdef01",
+    );
     assertEquals(readGitShortCommit(root), "abcdef0");
   });
 });
@@ -53,6 +76,10 @@ test("readGitShortCommit reads a detached HEAD hash", async () => {
       join(gitDir, "HEAD"),
       "0123456789abcdef0123456789abcdef01234567\n",
     );
+    assertEquals(
+      readGitCommit(root),
+      "0123456789abcdef0123456789abcdef01234567",
+    );
     assertEquals(readGitShortCommit(root), "0123456");
   });
 });
@@ -60,12 +87,15 @@ test("readGitShortCommit reads a detached HEAD hash", async () => {
 test("readGitShortCommit rejects short, empty, and non-hex HEAD values", async () => {
   await withTempGitDir(async (root, gitDir) => {
     await Deno.writeTextFile(join(gitDir, "HEAD"), "abc123\n");
+    assertEquals(readGitCommit(root), null);
     assertEquals(readGitShortCommit(root), null);
 
     await Deno.writeTextFile(join(gitDir, "HEAD"), "not-a-git-hash\n");
+    assertEquals(readGitCommit(root), null);
     assertEquals(readGitShortCommit(root), null);
 
     await Deno.writeTextFile(join(gitDir, "HEAD"), "\n");
+    assertEquals(readGitCommit(root), null);
     assertEquals(readGitShortCommit(root), null);
   });
 });
@@ -76,22 +106,25 @@ test("readGitShortCommit returns null when the named ref is missing", async () =
       join(gitDir, "HEAD"),
       "ref: refs/heads/missing\n",
     );
+    assertEquals(readGitCommit(root), null);
     assertEquals(readGitShortCommit(root), null);
   });
 });
 
 test("getBuildInfo uses the checkout git identity in development", () => {
   const info = getBuildInfo();
-  const checkoutCommit = readGitShortCommit(
-    join(dirname(fromFileUrl(import.meta.url)), ".."),
-  );
-  if (checkoutCommit) {
+  const checkoutRoot = join(dirname(fromFileUrl(import.meta.url)), "..");
+  const checkoutCommit = readGitCommit(checkoutRoot);
+  const shortCommit = readGitShortCommit(checkoutRoot);
+  if (checkoutCommit && shortCommit) {
     assertEquals(info.commit, checkoutCommit);
-    assertEquals(info.buildId, `dev-${checkoutCommit}`);
+    assertEquals(info.commit.length, 40);
+    assertEquals(info.buildId, `dev-${shortCommit}`);
   } else {
     assertEquals(info.commit, "dev");
     assertEquals(info.buildId, "dev");
   }
   assertEquals(info.builtAt, BUILD_INFO.builtAt);
   assertEquals(info.channel, BUILD_INFO.channel);
+  assertEquals(info.sourceUrl, sourceUrlForCommit(info.commit));
 });

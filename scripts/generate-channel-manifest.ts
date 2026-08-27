@@ -47,7 +47,7 @@ export async function generateChannelManifest(options: {
   publishDir: string;
   outputPath?: string;
   buildId: string;
-  shortSha: string;
+  commit: string;
   builtAt: string;
   dlBaseUrl?: string;
   defaultControlPlaneUrl?: string;
@@ -86,7 +86,7 @@ export async function generateChannelManifest(options: {
   const manifest: ChannelManifest = {
     schema: 1,
     channel: "trunk",
-    commit: options.shortSha,
+    commit: options.commit,
     buildId: options.buildId,
     builtAt: options.builtAt,
     defaultControlPlaneUrl: options.defaultControlPlaneUrl ??
@@ -141,7 +141,7 @@ export async function runGenerateChannelManifestCli(
 
   try {
     const BUILD_ID = requireEnv("BUILD_ID", getEnv);
-    const SHORT_SHA = requireEnv("SHORT_SHA", getEnv);
+    const GIT_COMMIT = requireEnv("GIT_COMMIT", getEnv);
     const BUILT_AT = requireEnv("BUILT_AT", getEnv);
 
     const DL_BASE_URL = getEnv("DL_BASE_URL")?.trim() ||
@@ -165,7 +165,7 @@ export async function runGenerateChannelManifestCli(
       publishDir,
       outputPath,
       buildId: BUILD_ID,
-      shortSha: SHORT_SHA,
+      commit: GIT_COMMIT,
       builtAt: BUILT_AT,
       dlBaseUrl: DL_BASE_URL,
       defaultControlPlaneUrl: DEFAULT_CONTROL_PLANE_URL,

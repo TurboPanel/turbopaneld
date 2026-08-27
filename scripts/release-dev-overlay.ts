@@ -3,10 +3,11 @@
  * channel catalog, then restore `build-info.ts` so the checkout stays clean.
  *
  * Remote servers skip `#reconcileToLatestUpdate` when baked
- * `getBuildInfo().commit` equals the overlay catalog commit. A plain 7-char
- * git SHA never changes until HEAD moves, so **U** would no-op after the first
- * overlay of that commit. Stamp `<sha>+<unix-seconds>` (and matching `buildId`)
- * so each `release:dev` is a new identity remotes will actually install.
+ * `getBuildInfo().commit` equals the overlay catalog commit. A plain git SHA
+ * never changes until HEAD moves, so **U** would no-op after the first overlay
+ * of that commit. Stamp `<full-sha>+<unix-seconds>` (and matching `buildId`)
+ * so each `release:dev` is a new identity remotes will actually install. The
+ * source URL still names the immutable full commit before `+`.
  */
 import { dirname, fromFileUrl, join } from "@std/path";
 import {
@@ -18,6 +19,7 @@ const ROOT = dirname(dirname(fromFileUrl(import.meta.url)));
 const BUILD_INFO_PATH = join(ROOT, "src/build-info.ts");
 
 export type ReleaseDevOverlayHooks = {
+  gitCommit?: () => Promise<string>;
   gitShortSha?: () => Promise<string>;
   now?: () => Date;
   readBuildInfo?: () => Promise<string>;
@@ -29,7 +31,7 @@ export type ReleaseDevOverlayHooks = {
   exit?: (code: number) => void;
 };
 
-export async function resolveOverlayGitShortSha(
+export async function resolveOverlayGitCommit(
   cwd = ROOT,
   io: {
     output?: () => Promise<
@@ -41,7 +43,7 @@ export async function resolveOverlayGitShortSha(
 ): Promise<string> {
   const output = io.output ?? (() =>
     new Deno.Command("git", {
-      args: ["rev-parse", "--short=7", "HEAD"],
+      args: ["rev-parse", "HEAD"],
       cwd,
       stdout: "piped",
       stderr: "piped",
@@ -62,14 +64,32 @@ export async function resolveOverlayGitShortSha(
   return new TextDecoder().decode(result.stdout).trim().toLowerCase();
 }
 
+export async function resolveOverlayGitShortSha(
+  cwd = ROOT,
+  io: Parameters<typeof resolveOverlayGitCommit>[1] = {},
+): Promise<string> {
+  const full = await resolveOverlayGitCommit(cwd, io);
+  return full.slice(0, 7);
+}
+
 export function stampBuildInfo(
   source: string,
   identity: { commit: string; buildId: string; builtAt: string },
 ): string {
-  return source
+  const sourceUrl = `https://github.com/TurboPanel/turbopaneld/tree/${
+    identity.commit.split("+")[0]
+  }`;
+  let stamped = source
     .replace(/commit: "[^"]*"/, `commit: "${identity.commit}"`)
     .replace(/buildId: "[^"]*"/, `buildId: "${identity.buildId}"`)
     .replace(/builtAt: "[^"]*"/, `builtAt: "${identity.builtAt}"`);
+  if (/sourceUrl: "[^"]*"/.test(stamped)) {
+    stamped = stamped.replace(
+      /sourceUrl: "[^"]*"/,
+      `sourceUrl: "${sourceUrl}"`,
+    );
+  }
+  return stamped;
 }
 
 export async function runCompileAll(
@@ -91,7 +111,8 @@ export async function runCompileAll(
 export async function runReleaseDevOverlay(
   hooks: ReleaseDevOverlayHooks = {},
 ): Promise<void> {
-  const gitShortSha = hooks.gitShortSha ?? (() => resolveOverlayGitShortSha());
+  const gitCommit = hooks.gitCommit ?? hooks.gitShortSha ??
+    (() => resolveOverlayGitCommit());
   const now = hooks.now ?? (() => new Date());
   const readBuildInfo = hooks.readBuildInfo ??
     (() => Deno.readTextFile(BUILD_INFO_PATH));
@@ -110,12 +131,13 @@ export async function runReleaseDevOverlay(
     Deno.exit(code);
   });
 
-  const sha = await gitShortSha();
+  const sha = await gitCommit();
   const builtAt = now();
-  const commit = `${sha}+${Math.floor(builtAt.getTime() / 1000)}`;
+  const unix = Math.floor(builtAt.getTime() / 1000);
+  const commit = `${sha}+${unix}`;
   const identity: OverlayBuildIdentity = {
     commit,
-    buildId: `dev-${commit}`,
+    buildId: `dev-${sha.slice(0, 7)}+${unix}`,
     builtAt: builtAt.toISOString(),
   };
 

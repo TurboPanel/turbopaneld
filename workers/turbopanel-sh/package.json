@@ -1,5 +1,6 @@
 {
   "private": true,
+  "license": "AGPL-3.0-only",
   "packageManager": "npm@11.13.0",
   "scripts": {
     "stage": "mkdir -p public && cp ../../scripts/run.sh public/bootstrap && cp assets/_headers assets/_redirects public/",

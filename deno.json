@@ -40,6 +40,8 @@
     "bootstrap-orchestration": "deno run --allow-net --allow-read --allow-write --allow-run --allow-env scripts/bootstrap-orchestration.ts",
     "check:layout": "deno run --allow-read --allow-run=git scripts/check-production-layout.ts",
     "check:vocabulary": "deno run --allow-read scripts/check-vocabulary.ts",
+    "notices:generate": "deno run --allow-read --allow-write --allow-run --allow-net --allow-env scripts/generate-notices.ts",
+    "notices:check": "deno run --allow-read --allow-run --allow-net --allow-env scripts/generate-notices.ts --check",
     "test": "deno test -A",
     "test:coverage": "rm -rf coverage && deno test -A --coverage=coverage/profile && deno coverage coverage/profile --lcov --output=coverage/lcov.info",
     "lint": "deno lint",

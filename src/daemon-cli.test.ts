@@ -50,6 +50,7 @@ test("maybeRunDaemonCli prints version and exits 0", async () => {
       channel: "trunk",
       buildId: "build-1",
       builtAt: "2026-01-01T00:00:00.000Z",
+      sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/abc1234",
     }),
   });
   await maybeRunDaemonCli(io);
@@ -66,6 +67,7 @@ test("maybeRunDaemonCli prints version and exits 0", async () => {
       channel: "canary",
       buildId: "build-2",
       builtAt: "2026-02-02T00:00:00.000Z",
+      sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/def5678",
     }),
   });
   await maybeRunDaemonCli(verb.io);

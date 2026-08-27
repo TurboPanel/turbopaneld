@@ -52,9 +52,11 @@ test("collectVocabularyFailures flags forbidden phrases and skips allowlisted li
       `agent${" host"} leftover`,
       `agent${" commit"} leftover`,
       `server.daemon.projection.${"agent"}`,
+      `liquid${" glass"} leftover`,
+      `liquid${"-glass"} leftover`,
     ].join("\n"),
   );
-  assertEquals(failures.length, 6);
+  assertEquals(failures.length, 8);
   assertEquals(failures[0]?.includes(`turbopanel${" agent"}`), true);
   assertEquals(
     collectVocabularyFailures("src/ok.ts", "the host daemon enrolls"),

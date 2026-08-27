@@ -119,6 +119,8 @@ Maintainer conventions and path model: [AGENTS.md](./AGENTS.md). Pull requests a
 
 TurboPanel Daemon is licensed under the [GNU Affero General Public License v3.0 only (AGPL-3.0-only)](./LICENSE).
 
+Third-party components keep their own licenses; see [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md). Release packages stage that file at `/opt/turbopanel/share/THIRD_PARTY_NOTICES.md`. The published model is [Licensing](https://turbopanel.io/docs/getting-started/licensing).
+
 The TurboPanel name and logos are trademarks. See [TRADEMARKS.md](./TRADEMARKS.md).
 
 Copyright (C) 2025-2026 TurboPanel contributors

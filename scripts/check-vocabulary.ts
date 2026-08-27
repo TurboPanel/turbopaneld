@@ -5,15 +5,17 @@
  * Scans human-authored source, scripts, orchestration, and maintainer docs
  * for forbidden daemon-as-agent phrasing left over from before the daemon
  * build-identity rename (`agent` → `daemonBuild`; see instance
- * `src/daemon/cell/protocol.ts`). The daemon is a "daemon" / "host daemon",
- * never an "agent" — that word is reserved for coding-agent tooling
- * (`AGENTS.md`, `.agents/skills`) and unrelated third-party terms (HTTP
- * `User-Agent`, npm package names).
+ * `src/daemon/cell/protocol.ts`) and Apple-associated glass product copy.
+ * The daemon is a "daemon" / "host daemon", never an "agent" — that word is
+ * reserved for coding-agent tooling (`AGENTS.md`, `.agents/skills`) and
+ * unrelated third-party terms (HTTP `User-Agent`, npm package names). Shell
+ * chrome is "frosted chrome".
  *
  * This is a companion guard to `scripts/check-production-layout.ts`, not a
  * replacement — keep the forbidden-phrase list and allowlist in sync with
- * the sibling checks in `../turbopanel/scripts/check-vocabulary.mjs` and
- * `../website/scripts/check-vocabulary.mjs`.
+ * the sibling checks in `../turbopanel/scripts/check-vocabulary.mjs`,
+ * `../website/scripts/check-vocabulary.mjs`, `../ui/src/lib/vocabulary.ts`,
+ * and `../.github/scripts/check-vocabulary.sh`.
  *
  * Run: `deno task check:vocabulary`.
  */
@@ -21,10 +23,10 @@ import { relative } from "@std/path";
 
 const repoRoot = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
-// --- Forbidden daemon-as-agent phrases --------------------------------------
+// --- Forbidden phrases ------------------------------------------------------
 // Exact phrases, matched case-insensitively as substrings. Extend this list
-// as new daemon-as-agent regressions are found; keep the three repo copies
-// (daemon/instance/website) aligned.
+// as new daemon-as-agent or Apple-associated chrome regressions are found;
+// keep the sibling repo copies aligned.
 export const FORBIDDEN_PHRASES = [
   "turbopanel agent",
   "node agent",
@@ -32,6 +34,10 @@ export const FORBIDDEN_PHRASES = [
   "agent identity",
   "agent commit",
   "server.daemon.projection.agent",
+  // Spaced/hyphenated Apple product copy. CamelCase expo-glass-effect
+  // identifiers (`isLiquidGlassAvailable`) do not match these phrases.
+  "liquid glass",
+  "liquid-glass",
 ];
 
 // --- Allowlist: lines that must never be flagged, even if a forbidden ------
@@ -64,6 +70,7 @@ const SKIP_FILENAMES = new Set([
   "package-lock.json",
   "pnpm-lock.yaml",
   "yarn.lock",
+  "THIRD_PARTY_NOTICES.md",
 ]);
 
 /** Untracked/vendored build outputs and skill packs that must not be scanned. */
@@ -77,7 +84,7 @@ export function isSkippedPath(rel: string): boolean {
   return false;
 }
 
-const SCAN_EXTENSIONS = /\.(ts|tsx|js|mjs|cjs|md|mdx|yml|yaml|sh|j2|json)$/;
+const SCAN_EXTENSIONS = /\.(ts|tsx|js|mjs|cjs|md|mdx|yml|yaml|sh|j2|json|css)$/;
 
 export async function* walkVocabularyFiles(
   dir: string,
@@ -113,7 +120,7 @@ export function collectVocabularyFailures(
     for (const phrase of FORBIDDEN_PHRASES) {
       if (lower.includes(phrase)) {
         failures.push(
-          `${rel}:${i + 1} uses forbidden daemon-as-agent phrase "${phrase}"`,
+          `${rel}:${i + 1} uses forbidden phrase "${phrase}"`,
         );
       }
     }
@@ -145,12 +152,13 @@ export function reportVocabularyFailures(
     }
     error(
       `\n${failures.length} problem(s) found. The daemon is a "daemon" / "host daemon" / "turbopaneld", never an "agent". ` +
-        "Update the allowlist in this script (and the instance/website copies) if this is a legitimate coding-agent or third-party reference.",
+        'Shell chrome is "frosted chrome", never Apple-associated glass product copy. ' +
+        "Update the allowlist in this script (and the sibling repo copies) if this is a legitimate coding-agent, third-party, or expo-glass-effect identifier.",
     );
     exit(1);
     return;
   }
-  log("Vocabulary check passed: no daemon-as-agent phrasing found.");
+  log("Vocabulary check passed: no forbidden phrasing found.");
 }
 
 export async function runVocabularyCheck(

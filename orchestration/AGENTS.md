@@ -2,6 +2,18 @@
 
 Ansible roles and playbooks under `orchestration/`. Root context: `../AGENTS.md`. Cross-repo `../<repo>/…` links are relative to the repo root.
 
+### Upstream licenses (Ansible tooling)
+
+Ansible Core, `ansible-lint`, the `ansible.posix` collection, the
+`geerlingguy.docker` Galaxy role, and any packages these playbooks
+install remain under their upstream licenses. Pins live in
+`requirements.txt` (Ansible Core / ansible-lint), `requirements.yml`
+(`ansible.posix`), and `requirements-docker.yml` (`geerlingguy.docker`).
+Installing them onto a host is a different licensing event from
+redistributing them. Any TurboPanel-published appliance, VM/OCI image,
+or offline bundle that ships copies must carry the applicable upstream
+license, copyright, notice, and source-compliance material.
+
 ### Time sync (`time-sync`)
 
 First-party role (no Galaxy deps) that installs/enables `systemd-timesyncd`,

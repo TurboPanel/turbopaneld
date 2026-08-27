@@ -30,6 +30,7 @@ function makeDaemonBuild(commit: string): BuildInfo {
     buildId: `build-${commit}`,
     builtAt: "2026-07-03T15:30:52Z",
     channel: "trunk",
+    sourceUrl: `https://github.com/TurboPanel/turbopaneld/tree/${commit}`,
   };
 }
 

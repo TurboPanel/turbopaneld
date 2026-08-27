@@ -190,6 +190,16 @@ in `.vscode` / `dev.code-workspace`, and after Galaxy install
 — including `tasks/docker-*.yml` — is quiet. Path exclusions only apply to
 discovery, not explicitly opened files.
 
+**Upstream licenses:** Ansible Core, `ansible-lint`, the `ansible.posix`
+collection, the `geerlingguy.docker` Galaxy role, and any packages these
+playbooks install remain under their upstream licenses (pins in
+`orchestration/requirements.txt`, `orchestration/requirements.yml`, and
+`orchestration/requirements-docker.yml`). Installing them on a host is a
+different licensing event from redistributing them. Any TurboPanel-published
+appliance, VM/OCI image, or offline bundle that ships copies must carry the
+applicable upstream license, copyright, notice, and source-compliance
+material. Canonical copy of this boundary: `orchestration/AGENTS.md`.
+
 **Apple Silicon VMs (UTM / Parallels) + ansible cryptography:** hypervisors often
 advertise SVE2 in the guest without implementing it. cryptography 47+ ships
 OpenSSL that probes those features at import and **SIGILL**s (`ansible-playbook
@@ -232,7 +242,7 @@ GitHub repository:
 package name: `turbopaneld` (`deno.json`), aligned with the repo slug and the
 compiled `/opt/turbopanel/bin/turbopaneld` binary.
 
-**Public naming:** **TurboPanel Daemon** → [TurboPanel/turbopaneld](https://github.com/TurboPanel/turbopaneld); internal term `daemon`. **License:** AGPL-3.0-only ([`LICENSE`](./LICENSE), `deno.json`). Trademarks are not granted by the software license ([`TRADEMARKS.md`](./TRADEMARKS.md)). Contributions require the [CLA](https://github.com/TurboPanel/.github/blob/trunk/CLA.md). **Maturity:** **Private alpha**. README is product-facing; AGENTS.md is maintainer-facing.
+**Public naming:** **TurboPanel Daemon** → [TurboPanel/turbopaneld](https://github.com/TurboPanel/turbopaneld); internal term `daemon`. **License:** AGPL-3.0-only ([`LICENSE`](./LICENSE), `deno.json`). Trademarks are not granted by the software license ([`TRADEMARKS.md`](./TRADEMARKS.md)). Third-party components keep their own licenses ([`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md)); release packaging stages that file at `opt/turbopanel/share/THIRD_PARTY_NOTICES.md`. Published story: `../website` `/open-source` and `docs/getting-started/licensing.mdx`. Contributions require the [CLA](https://github.com/TurboPanel/.github/blob/trunk/CLA.md). **Maturity:** **Private alpha**. README is product-facing; AGENTS.md is maintainer-facing.
 
 **Host-base prerequisite boundary:** TurboPanel-managed vendors (uv, Python,
 Ansible venv, Deno, Node, Caddy, Redis, cloudflared) install under `vendor` via
@@ -251,8 +261,14 @@ compile toolchain).
   production source (`src/**`, excluding `*.test.ts` and `src/paths/layout.ts`)
   references `/opt/turbopanel/platform` or the retired `share/ansible`. Wired
   into `publish-daemon-trunk.yml`.
-- `deno task test` / `test:coverage` / `lint` / `fmt:check` / `check` — quality
-  surface in `deno.json`. The `test` task grants `-A` at the process level on
+- `deno task test` / `test:coverage` / `lint` / `fmt:check` / `check` / `notices:check` — quality
+  surface in `deno.json`. `notices:generate` writes `THIRD_PARTY_NOTICES.md` from
+  `deno.lock`, `workers/turbopanel-sh/package-lock.json`, and orchestration pins
+  (GPL-3.0-or-later Ansible tooling is a reviewed orchestration exception).
+  Release packaging stages that file at `opt/turbopanel/share/THIRD_PARTY_NOTICES.md`.
+  `tp_install_verified_channel_release` copies the verified notice into
+  `/opt/turbopanel/share/THIRD_PARTY_NOTICES.md` on install/update.
+  The `test` task grants `-A` at the process level on
   purpose: Deno's per-test `permissions` option can only *reduce* from the
   process grant, so a narrower task grant would silently break
   `src/instance/commands/ping.test.ts` (`sys: ["hostname"]`),
@@ -381,11 +397,13 @@ same files work behind LAN HTTPS, plaintext `:8880`, and a Cloudflare tunnel.
 `run.sh --insecure-tls` still only relaxes the platform-CA instance legs;
 public :443 TLS (tunnel) uses the system store. Rebuild the overlay with
 `deno task release:dev` (dev console **Rebuild daemon and upgrade connected servers**).
-Each `release:dev` stamps overlay `commit` as `<7-char-sha>+<unix-seconds>`
-(baked into the binaries **and** the catalog). Remotes skip reconcile when
+Each `release:dev` stamps overlay `commit` as `<40-char-sha>+<unix-seconds>`
+(baked into the binaries **and** the catalog). `sourceUrl` keeps the full
+immutable source commit (the SHA before `+`). Remotes skip reconcile when
 `getBuildInfo().commit` already matches the catalog; a plain git SHA would
-make **U** a no-op until HEAD moves. Production `release` still uses the real
-git SHA.
+make **U** a no-op until HEAD moves. Production `release` stores the full
+40-character git SHA in `BUILD_INFO.commit`, `BUILD_INFO.sourceUrl`, and
+`ChannelManifest.commit` (short SHA is only for `buildId` / logs).
 
 ### Host facts + command handlers (time sync)
 

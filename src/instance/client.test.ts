@@ -648,6 +648,7 @@ function installCheapIdlePresence(): () => void {
       buildId: "build-test",
       builtAt: "2026-01-01T00:00:00Z",
       channel: "trunk",
+      sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/test",
     }),
     getHostHelloIdentity: () => ({}),
     collectPresenceSnapshot: () => ({
@@ -4560,6 +4561,7 @@ it({
         buildId: "dev-old",
         builtAt: "2026-08-01T00:00:00Z",
         channel: "trunk",
+        sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/oldcommit",
       }),
       downloadRunScript: () => Promise.resolve("#!/bin/sh\nexit 0\n"),
       executeRunReconcile: async () => {
@@ -4630,6 +4632,7 @@ it({
           buildId: "dev-deadbeef",
           builtAt: "2026-08-01T00:00:00Z",
           channel: "trunk",
+          sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/deadbeef",
         }),
         resolveUpdate: () =>
           Promise.resolve({
@@ -4685,6 +4688,7 @@ it({
           buildId: "dev-aaa",
           builtAt: "2026-08-01T00:00:00Z",
           channel: "trunk",
+          sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/aaa",
         }),
         resolveUpdate: () =>
           Promise.resolve({
@@ -4994,6 +4998,7 @@ it({
         buildId: "dev-old",
         builtAt: "2026-08-01T00:00:00Z",
         channel: "trunk",
+        sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/old",
       }),
       resolveUpdate: () =>
         Promise.resolve({

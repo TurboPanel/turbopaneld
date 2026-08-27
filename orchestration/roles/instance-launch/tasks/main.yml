@@ -328,6 +328,22 @@
     - (_instance_secrets_raw.content | b64decode | trim | length) > 0
   no_log: true
 
+- name: Resolve instance source revision
+  ansible.builtin.command:
+    argv:
+      - git
+      - -C
+      - "{{ turbopanel_instance_dir }}"
+      - rev-parse
+      - HEAD
+  register: _instance_git_revision
+  changed_when: false
+  failed_when: false
+
+- name: Set instance source revision fact
+  ansible.builtin.set_fact:
+    turbopanel_instance_revision: "{{ _instance_git_revision.stdout | default('') | trim }}"
+
 - name: Install Workers runtime env (protected config dir)
   ansible.builtin.template:
     src: instance-workers.env.j2

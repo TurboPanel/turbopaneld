@@ -64,6 +64,7 @@ package_binary_arch() {
 
 	tp_build_release_staging_root "$_staging" "$PROD_HOME"
 	tp_stage_release_native_binary "$_staging" "$PROD_HOME" "$_daemon_src"
+	tp_stage_release_notices "$_staging" "$PROD_HOME" "$ROOT/THIRD_PARTY_NOTICES.md"
 
 	if ! tp_verify_release_root "$_staging" "binary"; then
 		echo "package-daemon-release.sh: native binary verification failed for $_arch" >&2
@@ -80,6 +81,7 @@ package_js_bundle() {
 
 	mkdir -p "$_staging/$PROD_HOME/bin"
 	tp_stage_release_js_bundle "$_staging" "$PROD_HOME" "$JS_SRC"
+	tp_stage_release_notices "$_staging" "$PROD_HOME" "$ROOT/THIRD_PARTY_NOTICES.md"
 
 	if ! tp_verify_release_root "$_staging" "js"; then
 		echo "package-daemon-release.sh: JS bundle verification failed" >&2

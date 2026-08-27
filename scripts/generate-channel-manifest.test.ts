@@ -23,9 +23,9 @@ test("requireEnv returns present values and rejects blanks", () => {
     "Missing required environment variable: BUILD_ID",
   );
   assertThrows(
-    () => requireEnv("SHORT_SHA", () => undefined),
+    () => requireEnv("GIT_COMMIT", () => undefined),
     TypeError,
-    "Missing required environment variable: SHORT_SHA",
+    "Missing required environment variable: GIT_COMMIT",
   );
 });
 
@@ -93,7 +93,7 @@ test("generateChannelManifest writes a file or stdout", async () => {
       publishDir: dir,
       outputPath: join(dir, "manifest.json"),
       buildId: "b1",
-      shortSha: "abc1234",
+      commit: "abcdef0123456789abcdef0123456789abcdef01",
       builtAt: "2026-01-01T00:00:00.000Z",
       writeTextFile: (_path, json) => {
         written.push(json);
@@ -101,13 +101,16 @@ test("generateChannelManifest writes a file or stdout", async () => {
       },
     });
     assertEquals(manifest.channel, "trunk");
-    assertEquals(manifest.commit, "abc1234");
+    assertEquals(
+      manifest.commit,
+      "abcdef0123456789abcdef0123456789abcdef01",
+    );
     assertEquals(written.length, 1);
 
     await generateChannelManifest({
       publishDir: dir,
       buildId: "b1",
-      shortSha: "abc1234",
+      commit: "abcdef0123456789abcdef0123456789abcdef01",
       builtAt: "2026-01-01T00:00:00.000Z",
       writeStdout: (json) => {
         stdout.push(json);
@@ -122,7 +125,7 @@ test("generateChannelManifest writes a file or stdout", async () => {
       publishDir: dir,
       outputPath: writtenPath,
       buildId: "b2",
-      shortSha: "def5678",
+      commit: "def5678123456789abcdef0123456789abcdef01",
       builtAt: "2026-02-02T00:00:00.000Z",
     });
     assertEquals(defaults.defaultControlPlaneUrl, "https://turbopanel.app");
@@ -179,7 +182,7 @@ test("runGenerateChannelManifestCli requires a publish dir and env", async () =>
   await runGenerateChannelManifestCli({
     env: {
       BUILD_ID: "b1",
-      SHORT_SHA: "abc1234",
+      GIT_COMMIT: "abcdef0123456789abcdef0123456789abcdef01",
       BUILT_AT: "2026-01-01T00:00:00.000Z",
     },
     args: [],
@@ -212,7 +215,7 @@ test("runGenerateChannelManifestCli forwards defaults and overrides", async () =
   await runGenerateChannelManifestCli({
     env: {
       BUILD_ID: "b1",
-      SHORT_SHA: "abc1234",
+      GIT_COMMIT: "abcdef0123456789abcdef0123456789abcdef01",
       BUILT_AT: "2026-01-01T00:00:00.000Z",
       DL_BASE_URL: "  ",
       TURBOPANEL_DEFAULT_CONTROL_PLANE_URL: "\t",
@@ -230,7 +233,7 @@ test("runGenerateChannelManifestCli forwards defaults and overrides", async () =
       return Promise.resolve({
         schema: 1,
         channel: "trunk",
-        commit: options.shortSha,
+        commit: options.commit,
         buildId: options.buildId,
         builtAt: options.builtAt,
         binaryArtifacts: {
@@ -252,7 +255,7 @@ test("runGenerateChannelManifestCli forwards defaults and overrides", async () =
   await runGenerateChannelManifestCli({
     env: {
       BUILD_ID: "b1",
-      SHORT_SHA: "abc1234",
+      GIT_COMMIT: "abcdef0123456789abcdef0123456789abcdef01",
       BUILT_AT: "2026-01-01T00:00:00.000Z",
       DL_BASE_URL: "https://cdn.example",
       TURBOPANEL_DEFAULT_CONTROL_PLANE_URL: "https://panel.example",
@@ -266,7 +269,7 @@ test("runGenerateChannelManifestCli forwards defaults and overrides", async () =
       return Promise.resolve({
         schema: 1,
         channel: "trunk",
-        commit: options.shortSha,
+        commit: options.commit,
         buildId: options.buildId,
         builtAt: options.builtAt,
         binaryArtifacts: {
@@ -306,7 +309,7 @@ test("generateChannelManifest default stdout writer encodes JSON", async () => {
     await generateChannelManifest({
       publishDir: dir,
       buildId: "b3",
-      shortSha: "aaa1111",
+      commit: "aaa1111123456789abcdef0123456789abcdef01",
       builtAt: "2026-03-03T00:00:00.000Z",
     });
     const body = new TextDecoder().decode(

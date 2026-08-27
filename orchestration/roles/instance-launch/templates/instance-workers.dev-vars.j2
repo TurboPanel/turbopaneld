@@ -1,5 +1,8 @@
 TURBOPANEL_SECRETS={{ turbopanel_instance_secrets }}
 TURBOPANEL_IS_SIGNUP_ENABLED=1
+{% if turbopanel_instance_revision | default('') | length > 0 %}
+TURBOPANEL_REVISION={{ turbopanel_instance_revision }}
+{% endif %}
 {% if turbopanel_dev_user | length > 0 %}
 TURBOPANEL_UI_CORS_ORIGINS={{ website_cors_origins }}
 {% endif %}

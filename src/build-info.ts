@@ -6,6 +6,16 @@ export interface BuildInfo {
   buildId: string;
   builtAt: string;
   channel: string;
+  sourceUrl: string;
+}
+
+const SOURCE_REPO = "https://github.com/TurboPanel/turbopaneld";
+
+export function sourceUrlForCommit(commit: string): string {
+  const plus = commit.indexOf("+");
+  const sha = (plus === -1 ? commit : commit.slice(0, plus)).trim();
+  if (!sha || sha === "dev") return SOURCE_REPO;
+  return `${SOURCE_REPO}/tree/${sha}`;
 }
 
 export const BUILD_INFO: BuildInfo = {
@@ -13,14 +23,15 @@ export const BUILD_INFO: BuildInfo = {
   buildId: "dev-fb62ec5+1786916563",
   builtAt: "2026-08-16T21:42:43.985Z",
   channel: "trunk",
+  sourceUrl: sourceUrlForCommit("fb62ec5+1786916563"),
 };
 
 function resolveDaemonCheckoutRoot(): string {
   return join(dirname(fromFileUrl(import.meta.url)), "..");
 }
 
-/** Read the current short git commit from a checkout (sync, no subprocess). */
-export function readGitShortCommit(checkoutRoot: string): string | null {
+/** Read the current full git commit from a checkout (sync, no subprocess). */
+export function readGitCommit(checkoutRoot: string): string | null {
   try {
     const gitDir = join(checkoutRoot, ".git");
     const headText = Deno.readTextFileSync(join(gitDir, "HEAD")).trim();
@@ -31,21 +42,29 @@ export function readGitShortCommit(checkoutRoot: string): string | null {
     } else {
       fullHash = headText;
     }
-    if (!/^[0-9a-f]{7,40}$/i.test(fullHash)) return null;
-    return fullHash.slice(0, 7).toLowerCase();
+    if (!/^[0-9a-f]{40}$/i.test(fullHash)) return null;
+    return fullHash.toLowerCase();
   } catch {
     return null;
   }
 }
 
+/** Short display SHA for buildId / logs. Release identity uses {@link readGitCommit}. */
+export function readGitShortCommit(checkoutRoot: string): string | null {
+  const full = readGitCommit(checkoutRoot);
+  return full ? full.slice(0, 7) : null;
+}
+
 function resolveDevelopmentBuildInfo(): BuildInfo {
-  const gitCommit = readGitShortCommit(resolveDaemonCheckoutRoot());
+  const gitCommit = readGitCommit(resolveDaemonCheckoutRoot());
+  const shortCommit = readGitShortCommit(resolveDaemonCheckoutRoot());
   if (gitCommit) {
     return {
       commit: gitCommit,
-      buildId: `dev-${gitCommit}`,
+      buildId: `dev-${shortCommit ?? gitCommit.slice(0, 7)}`,
       builtAt: BUILD_INFO.builtAt,
       channel: BUILD_INFO.channel,
+      sourceUrl: sourceUrlForCommit(gitCommit),
     };
   }
   return {
@@ -53,6 +72,7 @@ function resolveDevelopmentBuildInfo(): BuildInfo {
     buildId: "dev",
     builtAt: BUILD_INFO.builtAt,
     channel: BUILD_INFO.channel,
+    sourceUrl: SOURCE_REPO,
   };
 }
 

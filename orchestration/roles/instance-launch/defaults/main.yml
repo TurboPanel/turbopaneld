@@ -84,6 +84,9 @@ turbopanel_instance_run_mode: source
 turbopanel_instance_binary: "{{ turbopanel_instance_dir }}/dist/turbopanel-instance"
 # "deno" runs turbopanel-instance via systemd; "workers" expects manual wrangler dev.
 turbopanel_instance_runtime: deno
+# Exact git SHA of the instance checkout (set at converge). Injected as
+# TURBOPANEL_REVISION so GET /api/health can name Corresponding Source.
+turbopanel_instance_revision: ""
 wrangler_dev_port: 18787
 instance_start: true
 postgres_socket_dir: /var/run/turbopanel/postgres

@@ -1,10 +1,13 @@
 import { assertEquals, assertRejects } from "@std/assert";
 import {
+  resolveOverlayGitCommit,
   resolveOverlayGitShortSha,
   runCompileAll,
   runReleaseDevOverlay,
   stampBuildInfo,
 } from "./release-dev-overlay.ts";
+
+const FULL_SHA = "abcdef0123456789abcdef0123456789abcdef01";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -20,22 +23,34 @@ test("stampBuildInfo replaces commit, buildId, and builtAt", () => {
     '  commit: "oldsha",',
     '  buildId: "old-build",',
     '  builtAt: "2020-01-01T00:00:00.000Z",',
+    '  sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/oldsha",',
     "};",
   ].join("\n");
   const stamped = stampBuildInfo(source, {
-    commit: "abc1234+99",
-    buildId: "dev-abc1234+99",
+    commit: `${FULL_SHA}+99`,
+    buildId: "dev-abcdef0+99",
     builtAt: "2026-08-25T00:00:00.000Z",
   });
-  assertEquals(stamped.includes('commit: "abc1234+99"'), true);
-  assertEquals(stamped.includes('buildId: "dev-abc1234+99"'), true);
+  assertEquals(stamped.includes(`commit: "${FULL_SHA}+99"`), true);
+  assertEquals(stamped.includes('buildId: "dev-abcdef0+99"'), true);
   assertEquals(stamped.includes('builtAt: "2026-08-25T00:00:00.000Z"'), true);
+  assertEquals(
+    stamped.includes(
+      `sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/${FULL_SHA}"`,
+    ),
+    true,
+  );
   assertEquals(stamped.includes("oldsha"), false);
+});
+
+test("resolveOverlayGitCommit uses the full HEAD SHA", async () => {
+  const sha = await resolveOverlayGitCommit();
+  assertEquals(/^[0-9a-f]{40}$/.test(sha), true);
 });
 
 test("resolveOverlayGitShortSha uses git by default", async () => {
   const sha = await resolveOverlayGitShortSha();
-  assertEquals(/^[0-9a-f]{4,}$/.test(sha), true);
+  assertEquals(/^[0-9a-f]{7}$/.test(sha), true);
 });
 
 test("resolveOverlayGitShortSha returns a lowercase sha and fails closed", async () => {
@@ -43,11 +58,11 @@ test("resolveOverlayGitShortSha returns a lowercase sha and fails closed", async
     output: () =>
       Promise.resolve({
         success: true,
-        stdout: new TextEncoder().encode("ABC1234\n"),
+        stdout: new TextEncoder().encode(`${FULL_SHA.toUpperCase()}\n`),
         stderr: new Uint8Array(),
       }),
   });
-  assertEquals(sha, "abc1234");
+  assertEquals(sha, "abcdef0");
 
   const errors: string[] = [];
   const exits: number[] = [];
@@ -95,7 +110,7 @@ test("runReleaseDevOverlay stamps, compiles, catalogs, then restores", async () 
     "};",
   ].join("\n");
   await runReleaseDevOverlay({
-    gitShortSha: () => Promise.resolve("abc1234"),
+    gitCommit: () => Promise.resolve(FULL_SHA),
     now: () => new Date("2026-01-01T00:00:00.000Z"),
     readBuildInfo: () => Promise.resolve(original),
     writeBuildInfo: (text) => {
@@ -112,9 +127,10 @@ test("runReleaseDevOverlay stamps, compiles, catalogs, then restores", async () 
     },
   });
   assertEquals(writes.length, 2);
-  assertEquals(writes[0]?.includes("abc1234+1767225600"), true);
+  assertEquals(writes[0]?.includes(`${FULL_SHA}+1767225600`), true);
+  assertEquals(writes[0]?.includes(`dev-abcdef0+1767225600`), true);
   assertEquals(writes[1], original);
-  assertEquals(catalogs, ["abc1234+1767225600"]);
+  assertEquals(catalogs, [`${FULL_SHA}+1767225600`]);
   assertEquals(logs.at(-1)?.includes("restored"), true);
 });
 
@@ -125,7 +141,7 @@ test("runReleaseDevOverlay restores after Error and non-Error failures", async (
   const original = 'commit: "old"\nbuildId: "old"\nbuiltAt: "old"\n';
 
   await runReleaseDevOverlay({
-    gitShortSha: () => Promise.resolve("deadbee"),
+    gitCommit: () => Promise.resolve(FULL_SHA),
     now: () => new Date("2026-01-01T00:00:00.000Z"),
     readBuildInfo: () => Promise.resolve(original),
     writeBuildInfo: (text) => {
@@ -146,7 +162,7 @@ test("runReleaseDevOverlay restores after Error and non-Error failures", async (
   assertEquals(writes.at(-1), original);
 
   await runReleaseDevOverlay({
-    gitShortSha: () => Promise.resolve("deadbee"),
+    gitCommit: () => Promise.resolve(FULL_SHA),
     now: () => new Date("2026-01-01T00:00:00.000Z"),
     readBuildInfo: () => Promise.resolve(original),
     writeBuildInfo: (text) => {

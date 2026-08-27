@@ -68,6 +68,9 @@ jobs:
       - name: Check vocabulary (no daemon-as-agent phrasing)
         run: deno task check:vocabulary
 
+      - name: Check third-party notices
+        run: deno task notices:check
+
       - name: Test with coverage
         run: deno task test:coverage
 

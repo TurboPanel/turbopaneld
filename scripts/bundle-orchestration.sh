@@ -22,6 +22,7 @@ ORCH_ARCHIVE="$DIST/$(tp_orchestration_release_filename "$VERSION")"
 # Release layout: opt/turbopanel/share/orchestration/…
 rm -rf "$ARCHIVE_STAGING"
 tp_build_orchestration_archive_staging "$ARCHIVE_STAGING" "$PROD_HOME" "$ROOT/orchestration"
+tp_stage_release_notices "$ARCHIVE_STAGING" "$PROD_HOME" "$ROOT/THIRD_PARTY_NOTICES.md"
 if ! tp_verify_release_root "$ARCHIVE_STAGING" "orchestration"; then
 	echo "bundle-orchestration.sh: orchestration release verification failed" >&2
 	exit 1
