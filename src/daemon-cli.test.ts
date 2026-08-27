@@ -103,6 +103,17 @@ test("maybeRunDaemonCli unknown verb falls through", async () => {
   const { io, exits } = captureIo({ args: ["start"] });
   await maybeRunDaemonCli(io);
   assertEquals(exits, []);
+
+  const empty = captureIo({ args: [] });
+  await maybeRunDaemonCli(empty.io);
+  assertEquals(empty.exits, []);
+});
+
+test("maybeRunDaemonCli --version uses getBuildInfo when not injected", async () => {
+  const { io, exits, logs } = captureIo({ args: ["--version"] });
+  await maybeRunDaemonCli(io);
+  assertEquals(exits, [0]);
+  assertEquals(logs[0]?.startsWith("turbopaneld "), true);
 });
 
 test("parseInstallerFlags reads known flags", () => {

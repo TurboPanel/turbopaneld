@@ -64,6 +64,13 @@ test("readDocker returns undefined when the docker binary is missing", () => {
 test("parseDockerCliVersion rejects oversized or invalid tokens", () => {
   assertEquals(parseDockerCliVersion(`v${"a".repeat(80)}`), undefined);
   assertEquals(parseDockerCliVersion("Docker version bad version!"), undefined);
+  assertEquals(parseDockerCliVersion("v"), undefined);
+  assertEquals(parseDockerCliVersion("V"), undefined);
+});
+
+test("parse helpers strip an uppercase V prefix", () => {
+  assertEquals(parseDockerCliVersion("V28.3.3"), "28.3.3");
+  assertEquals(parseComposeVersion("V2.39.1"), "2.39.1");
 });
 
 test({
@@ -139,6 +146,25 @@ function writeStubDocker(dir: string, script: string): string {
   Deno.chmodSync(bin, 0o750);
   return bin;
 }
+
+test({
+  name: "readDocker returns undefined when both version probes fail",
+  permissions: { read: true, write: true, run: true },
+  fn() {
+    const dir = Deno.makeTempDirSync({ prefix: "tp-docker-both-fail-" });
+    try {
+      const bin = writeStubDocker(
+        dir,
+        String.raw`#!/bin/sh
+exit 1
+`,
+      );
+      assertEquals(readDocker(bin), undefined);
+    } finally {
+      Deno.removeSync(dir, { recursive: true });
+    }
+  },
+});
 
 test({
   name: "readDocker reports CLI version when compose probes fail",

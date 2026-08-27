@@ -163,6 +163,10 @@ test("parseOsReleaseText skips lines without a key=value pair", () => {
     parseOsReleaseText("NOEQUALS\n=novalue\nID=debian\n").ID,
     "debian",
   );
+  assertEquals(
+    parseOsReleaseText('ID="debian\nNAME=Bare\n').ID,
+    '"debian',
+  );
 });
 
 test("resolveOsVersion keeps VERSION_ID when debian_version is a suite name only", () => {
@@ -215,6 +219,21 @@ test({
     }
     resetHostOsCacheForTests();
   },
+});
+
+test("hostOsFromFields maps ID_LIKE darwin and NAME-only linux", () => {
+  assertEquals(
+    hostOsFromFields({ ID_LIKE: "darwin" }, { os: "linux", arch: "arm64" })
+      ?.family,
+    "darwin",
+  );
+  assertEquals(
+    hostOsFromFields(
+      { NAME: "Some Distro" },
+      { os: "sunos", arch: "x86_64" },
+    )?.family,
+    "linux",
+  );
 });
 
 test("hostOsFromFields maps windows / cygwin / PRETTY_NAME-only linux", () => {
@@ -339,6 +358,61 @@ test({
     } finally {
       Deno.statSync = originalStat;
       Deno.removeSync(dir, { recursive: true });
+      resetHostOsCacheForTests();
+    }
+  },
+});
+
+test({
+  name: "readOsRelease treats cat exit 1 as a missing file",
+  permissions: { read: true, write: true, run: true },
+  fn() {
+    resetHostOsCacheForTests();
+    const OriginalCommand = Deno.Command;
+    const originalRead = Deno.readTextFileSync;
+    Deno.readTextFileSync = () => {
+      throw new Error("read blocked");
+    };
+    Deno.Command = function (
+      cmd: string,
+      options?: Deno.CommandOptions,
+    ): Deno.Command {
+      if (cmd === "cat") {
+        return {
+          outputSync: () => ({
+            code: 1,
+            stdout: new Uint8Array(),
+            stderr: new Uint8Array(),
+            success: false,
+            signal: null,
+          }),
+        } as Deno.Command;
+      }
+      return new OriginalCommand(cmd, options);
+    } as unknown as typeof Deno.Command;
+    try {
+      const os = readOsRelease("/no/such/turbopanel-os-release-cat-exit");
+      if (Deno.build.os === "linux") {
+        assertEquals(os?.family, "linux");
+      }
+    } finally {
+      Deno.Command = OriginalCommand;
+      Deno.readTextFileSync = originalRead;
+      resetHostOsCacheForTests();
+    }
+  },
+});
+
+test({
+  name: "readOsRelease caches the default /etc/os-release path",
+  permissions: { read: true },
+  fn() {
+    resetHostOsCacheForTests();
+    try {
+      const first = readOsRelease();
+      const second = readOsRelease();
+      assertEquals(second, first);
+    } finally {
       resetHostOsCacheForTests();
     }
   },

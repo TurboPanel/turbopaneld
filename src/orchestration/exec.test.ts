@@ -42,6 +42,13 @@ test("runtimeEnv pins uv python install and cache directories", () => {
   assertEquals(env.PATH?.includes(":"), true);
 });
 
+test("runtimeEnv extra vars merge on top of the runtime PATH prefix", () => {
+  const env = runtimeEnv({ EXTRA_FLAG: "1", PATH: "/custom/bin" });
+  assertEquals(env.EXTRA_FLAG, "1");
+  assertEquals(env.PATH, "/custom/bin");
+  assertEquals(env.OPENSSL_armcap, "0");
+});
+
 describe("exec subprocess helpers", () => {
   it("run captures stdout when stream is false", async () => {
     const result = await run("/bin/echo", ["hello-exec"], { stream: false });
@@ -93,6 +100,50 @@ describe("exec subprocess helpers", () => {
       Error,
       "boom",
     );
+  });
+
+  it("run with default stream leaves captured stdout empty", async () => {
+    const result = await run("/bin/echo", ["streamed"]);
+    assertEquals(result.success, true);
+    assertEquals(result.stdout, "");
+    assertEquals(result.stderr, "");
+  });
+
+  it("runStreamingLines delivers a leftover buffer without a trailing newline", async () => {
+    const stdoutLines: string[] = [];
+    const result = await runStreamingLines(
+      "/bin/sh",
+      ["-c", "printf 'partial-no-newline'"],
+      {
+        onStdoutLine: (line) => stdoutLines.push(line),
+      },
+    );
+    assertEquals(result.success, true);
+    assertEquals(stdoutLines, ["partial-no-newline"]);
+  });
+
+  it("runStreamingLines cancels unused stdout when no line handler is set", async () => {
+    // Silent command: writing to a cancelled pipe (e.g. echo) can SIGPIPE.
+    const result = await runStreamingLines("/bin/true", []);
+    assertEquals(result.success, true);
+    assertEquals(result.code, 0);
+  });
+
+  it("runLogged returns success for a zero-exit command", async () => {
+    const result = await runLogged("/bin/echo", ["logged-ok"], {
+      level: "DEBUG",
+      component: "exec-test",
+    });
+    assertEquals(result.success, true);
+    assertEquals(result.code, 0);
+  });
+
+  it("runOrThrow returns the captured result when no presenter is active", async () => {
+    const result = await runOrThrow("/bin/echo", ["plain-ok"], {
+      stream: false,
+    });
+    assertEquals(result.success, true);
+    assertEquals(result.stdout.trim(), "plain-ok");
   });
 
   it("runOrThrow routes lines through the active install presenter", async () => {

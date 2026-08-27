@@ -9,6 +9,14 @@ import {
   managedDir,
   managedEnvFilePath,
   managedTlsDir,
+  orchestratorApiCnfPath,
+  orchestratorComposePath,
+  orchestratorConfigDir,
+  orchestratorConfPath,
+  orchestratorDataDir,
+  orchestratorProject,
+  orchestratorRaftCnfPath,
+  orchestratorTlsDir,
   proxysqlAdminCnfPath,
   proxysqlComposePath,
   proxysqlConfigDir,
@@ -229,6 +237,38 @@ test("assertSafeManagedIdentifiers rejects environmentId and volume names", () =
       }),
     Error,
     "volume name",
+  );
+});
+
+test("orchestrator path helpers join under config/state", () => {
+  assertEquals(orchestratorProject(), "turbopanel-orchestrator");
+  assertEquals(
+    orchestratorConfigDir(LAYOUT),
+    "/etc/turbopanel/orchestrator",
+  );
+  assertEquals(
+    orchestratorComposePath(LAYOUT),
+    "/etc/turbopanel/orchestrator/docker-compose.yml",
+  );
+  assertEquals(
+    orchestratorConfPath(LAYOUT),
+    "/etc/turbopanel/orchestrator/orchestrator.conf.json",
+  );
+  assertEquals(
+    orchestratorApiCnfPath(LAYOUT),
+    "/etc/turbopanel/orchestrator/api.cnf",
+  );
+  assertEquals(
+    orchestratorRaftCnfPath(LAYOUT),
+    "/etc/turbopanel/orchestrator/raft.cnf",
+  );
+  assertEquals(
+    orchestratorTlsDir(LAYOUT),
+    "/etc/turbopanel/orchestrator/tls",
+  );
+  assertEquals(
+    orchestratorDataDir(LAYOUT),
+    "/var/lib/turbopanel/orchestrator",
   );
 });
 

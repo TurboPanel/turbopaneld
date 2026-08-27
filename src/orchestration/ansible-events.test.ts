@@ -286,3 +286,72 @@ exit 0
 
   await Deno.remove(root, { recursive: true });
 });
+
+test("formatPlaybookRecap treats missing host counters as zero", () => {
+  assertEquals(
+    formatPlaybookRecap({ localhost: {} }),
+    "ok=0 changed=0 failed=0 unreachable=0",
+  );
+});
+
+test("AnsibleRunSummaryCollector records unreachable tasks and empty builds", () => {
+  const empty = new AnsibleRunSummaryCollector();
+  assertEquals(empty.build(), "");
+
+  const collector = new AnsibleRunSummaryCollector();
+  collector.handleEvent({
+    _event: "v2_runner_on_unreachable",
+    _timestamp: "2026-01-01T00:00:00Z",
+    task: { name: undefined as unknown as string, id: "1", path: "", duration: { start: "" } },
+    hosts: { localhost: {} },
+  });
+  assertEquals(collector.build(), "task: unknown error");
+});
+
+test("formatAnsibleEventLog falls back when a failed host has no msg", () => {
+  setActiveInstallPresenter(null);
+  const line = formatAnsibleEventLog({
+    _event: "v2_runner_on_failed",
+    _timestamp: "2026-01-01T00:00:00Z",
+    task: {
+      name: "Ping",
+      id: "1",
+      path: "",
+      duration: TASK_DURATION,
+    },
+    hosts: { localhost: {} },
+  });
+  assertEquals(line?.level, "ERROR");
+  assertEquals(line?.message, "[failed] Ping: unknown error");
+});
+
+test("logAnsibleEvent covers INFO play-start lines", () => {
+  setActiveInstallPresenter(null);
+  logAnsibleEvent({
+    _event: "v2_playbook_on_play_start",
+    _timestamp: "2026-01-01T00:00:00Z",
+    play: {
+      name: "Setup cache",
+      id: "play",
+      path: "",
+      duration: TASK_DURATION,
+    },
+    tasks: [],
+  });
+});
+
+test("runPlaybookStreaming non-quiet failure includes the binary name", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-ansible-events-fail-" });
+  const bin = join(root, "ansible-playbook");
+  await Deno.writeTextFile(bin, "#!/bin/sh\necho fail >&2\nexit 9\n");
+  await Deno.chmod(bin, 0o755);
+  try {
+    await assertRejects(
+      () => runPlaybookStreaming(bin, ["play.yml"], { quiet: false }),
+      Error,
+      "ansible-playbook failed (exit 9)",
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});

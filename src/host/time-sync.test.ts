@@ -134,6 +134,41 @@ test("parseTimedatectlShow ignores unknown yes/no tokens", () => {
   );
 });
 
+test("parseShowTimesyncLastSyncedAt skips unparseable timestamps", () => {
+  assertEquals(
+    parseShowTimesyncLastSyncedAt("LastSyncTimestamp=not-a-date\n"),
+    undefined,
+  );
+  assertEquals(
+    parseShowTimesyncLastSyncedAt("OtherKey=2026-08-17T20:00:00Z\n"),
+    undefined,
+  );
+});
+
+test("readTimeSync skips status when timedatectl show is complete", () => {
+  const calls: string[] = [];
+  const result = readTimeSync({
+    spawnText(_cmd, args) {
+      calls.push(args[0] ?? "");
+      if (args[0] === "show") {
+        return "Timezone=UTC\nNTP=yes\nNTPSynchronized=yes\n";
+      }
+      if (args[0] === "show-timesync") {
+        // lastSyncedAt still probes show-timesync when the synchronized
+        // mtime file is missing — that is not the status fallback.
+        return undefined;
+      }
+      throw new TypeError(`unexpected timedatectl ${args[0]}`);
+    },
+    readTextFile: () => "[Time]\nNTP=pool.ntp.org\n",
+    synchronizedFileMtime: () => undefined,
+  });
+  assertEquals(result.timezone, "UTC");
+  assertEquals(result.ntpEnabled, true);
+  assertEquals(result.ntpSynced, true);
+  assertEquals(calls.includes("status"), false);
+});
+
 test("readTimeSync merges show + status + conf via injected I/O", () => {
   const calls: string[] = [];
   const result = readTimeSync({
@@ -246,6 +281,24 @@ test("readTimeSync returns empty facts when spawn and file readers miss", () => 
     synchronizedFileMtime: () => undefined,
   });
   assertEquals(result, { ntpServers: [] });
+});
+
+test("readTimeSync ignores empty SystemNTPServers from show-timesync", () => {
+  const result = readTimeSync({
+    spawnText(_cmd, args) {
+      if (args[0] === "show") {
+        return "Timezone=UTC\nNTP=yes\nNTPSynchronized=yes\n";
+      }
+      if (args[0] === "show-timesync") {
+        return "SystemNTPServers=\nFallbackNTPServers=203.0.113.20\n";
+      }
+      return undefined;
+    },
+    readTextFile: () => undefined,
+    synchronizedFileMtime: () => undefined,
+  });
+  assertEquals(result.ntpServers, []);
+  assertEquals(result.fallbackNtpServers, ["203.0.113.20"]);
 });
 
 test("readTimeSync ignores empty FallbackNTPServers from show-timesync", () => {

@@ -56,6 +56,28 @@ test("readRootFilesystemCapacity returns null for non-finite statfs fields", asy
     }),
     null,
   );
+  assertEquals(
+    await readRootFilesystemCapacity("/", {
+      statfs: () => ({
+        blocks: 100,
+        bfree: Number.POSITIVE_INFINITY,
+        bavail: 10,
+        bsize: 4096,
+      }),
+    }),
+    null,
+  );
+  assertEquals(
+    await readRootFilesystemCapacity("/", {
+      statfs: () => ({
+        blocks: 100,
+        bfree: 10,
+        bavail: Number.NaN,
+        bsize: 4096,
+      }),
+    }),
+    null,
+  );
 });
 
 test("readRootFilesystemCapacity returns null when used+avail is zero", async () => {
@@ -70,4 +92,30 @@ test("readRootFilesystemCapacity returns null when used+avail is zero", async ()
     }),
     null,
   );
+});
+
+test("readRootFilesystemCapacity returns null when injected statfs throws", async () => {
+  assertEquals(
+    await readRootFilesystemCapacity("/", {
+      statfs: () => {
+        throw new Error("statfs boom");
+      },
+    }),
+    null,
+  );
+});
+
+test("readRootFilesystemCapacity computes percent from injected statfs", async () => {
+  const gauges = await readRootFilesystemCapacity("/", {
+    statfs: () => ({
+      blocks: 1_000,
+      bfree: 400,
+      bavail: 300,
+      bsize: 4096,
+    }),
+  });
+  if (!gauges) throw new TypeError("expected injected capacity gauges");
+  const used = (1_000 - 400) * 4096;
+  const avail = 300 * 4096;
+  assertEquals(gauges.diskUsedPercent, (used / (used + avail)) * 100);
 });

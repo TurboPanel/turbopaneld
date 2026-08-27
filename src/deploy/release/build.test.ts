@@ -1,6 +1,7 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import {
+  BUILD_TIMEOUT_MS,
   buildEnvironment,
   buildInvocation,
   NEXT_EXPORT_DIR,
@@ -259,4 +260,269 @@ test("runReleaseBuild uses prlimit when the host reports it available", async ()
     });
     assertEquals(ran, [{ command: "make", withPrlimit: true }]);
   });
+});
+
+test("buildEnvironment uses an empty payload env map", () => {
+  const env = buildEnvironment({ kind: "native" }, "/work");
+  assertEquals(env.HOME, "/work");
+  assertEquals(env.CI, "1");
+  assertEquals(env.NODE_ENV, "production");
+});
+
+test({
+  name: "runReleaseBuild default runner succeeds and fails through sh -c",
+  permissions: { read: true, write: true, run: true, env: true },
+  fn: async () => {
+    await withWorkingDir(async (workingDir) => {
+      const lines: string[] = [];
+      await runReleaseBuild({
+        build: { kind: "native", buildCommand: "printf 'built-ok\\n'" },
+        workingDir,
+        hasPrlimit: () => Promise.resolve(false),
+        onOutput: (_stream, line) => lines.push(line),
+      });
+      assertEquals(lines.some((line) => line.includes("built-ok")), true);
+
+      await assertRejects(
+        () =>
+          runReleaseBuild({
+            build: { kind: "native", buildCommand: "printf 'boom\\n' >&2; exit 7" },
+            workingDir,
+            hasPrlimit: () => Promise.resolve(false),
+          }),
+        Error,
+        "boom",
+      );
+    });
+  },
+});
+
+test({
+  name: "runReleaseBuild default runner uses a generic error when output is empty",
+  permissions: { read: true, write: true, run: true, env: true },
+  fn: async () => {
+    await withWorkingDir(async (workingDir) => {
+      await assertRejects(
+        () =>
+          runReleaseBuild({
+            build: { kind: "native", buildCommand: "exit 3" },
+            workingDir,
+            hasPrlimit: () => Promise.resolve(false),
+          }),
+        Error,
+        "build command failed: exit 3",
+      );
+    });
+  },
+});
+
+test({
+  name: "runReleaseBuild probes prlimit availability on the host",
+  permissions: { read: true, write: true, run: true, env: true },
+  fn: async () => {
+    await withWorkingDir(async (workingDir) => {
+      await runReleaseBuild({
+        build: { kind: "native", buildCommand: "true" },
+        workingDir,
+      });
+    });
+  },
+});
+
+function abortError(): DOMException {
+  return new DOMException("The signal has been aborted", "AbortError");
+}
+
+function stubDenoCommand(
+  spawn: (cmd: string) => Deno.ChildProcess,
+): () => void {
+  const original = Deno.Command;
+  Deno.Command = class {
+    #cmd: string;
+    constructor(cmd: string) {
+      this.#cmd = cmd;
+    }
+    spawn() {
+      return spawn(this.#cmd);
+    }
+  } as unknown as typeof Deno.Command;
+  return () => {
+    Deno.Command = original;
+  };
+}
+
+test({
+  name: "runReleaseBuild default runner reports a build timeout",
+  permissions: { read: true, write: true, run: true, env: true },
+  fn: async () => {
+    const restore = stubDenoCommand(() => {
+      throw abortError();
+    });
+    try {
+      await withWorkingDir(async (workingDir) => {
+        await assertRejects(
+          () =>
+            runReleaseBuild({
+              build: { kind: "native", buildCommand: "true" },
+              workingDir,
+              hasPrlimit: () => Promise.resolve(false),
+            }),
+          Error,
+          `build command timed out after ${BUILD_TIMEOUT_MS}ms`,
+        );
+      });
+    } finally {
+      restore();
+    }
+  },
+});
+
+test({
+  name: "runReleaseBuild default runner reports AbortError from child status",
+  permissions: { read: true, write: true, run: true, env: true },
+  fn: async () => {
+    const restore = stubDenoCommand(() => ({
+      status: Promise.reject(abortError()),
+      stdout: new ReadableStream({
+        start(controller) {
+          controller.close();
+        },
+      }),
+      stderr: new ReadableStream({
+        start(controller) {
+          controller.close();
+        },
+      }),
+    } as Deno.ChildProcess));
+    try {
+      await withWorkingDir(async (workingDir) => {
+        await assertRejects(
+          () =>
+            runReleaseBuild({
+              build: { kind: "native", buildCommand: "true" },
+              workingDir,
+              hasPrlimit: () => Promise.resolve(false),
+            }),
+          Error,
+          `build command timed out after ${BUILD_TIMEOUT_MS}ms`,
+        );
+      });
+    } finally {
+      restore();
+    }
+  },
+});
+
+test({
+  name: "runReleaseBuild default runner rethrows a spawn failure",
+  permissions: { read: true, write: true, run: true, env: true },
+  fn: async () => {
+    const restore = stubDenoCommand(() => {
+      throw new Error("sh missing");
+    });
+    try {
+      await withWorkingDir(async (workingDir) => {
+        await assertRejects(
+          () =>
+            runReleaseBuild({
+              build: { kind: "native", buildCommand: "true" },
+              workingDir,
+              hasPrlimit: () => Promise.resolve(false),
+            }),
+          Error,
+          "sh missing",
+        );
+      });
+    } finally {
+      restore();
+    }
+  },
+});
+
+test({
+  name: "runReleaseBuild default runner rethrows a prlimit spawn failure",
+  permissions: { read: true, write: true, run: true, env: true },
+  fn: async () => {
+    const restore = stubDenoCommand((cmd) => {
+      if (cmd === "/usr/bin/prlimit") {
+        throw new Error("prlimit denied");
+      }
+      throw new Error(`unexpected bin ${cmd}`);
+    });
+    try {
+      await withWorkingDir(async (workingDir) => {
+        await assertRejects(
+          () =>
+            runReleaseBuild({
+              build: { kind: "native", buildCommand: "true" },
+              workingDir,
+              hasPrlimit: () => Promise.resolve(true),
+            }),
+          Error,
+          "prlimit denied",
+        );
+      });
+    } finally {
+      restore();
+    }
+  },
+});
+
+test({
+  name: "runReleaseBuild default runner succeeds under prlimit with a cleared env",
+  permissions: { read: true, write: true, run: true, env: true },
+  fn: async () => {
+    await withWorkingDir(async (workingDir) => {
+      const lines: string[] = [];
+      await runReleaseBuild({
+        build: { kind: "native", buildCommand: "printf 'prlimit-ok\\n'" },
+        workingDir,
+        hasPrlimit: () => Promise.resolve(true),
+        onOutput: (_stream, line) => lines.push(line),
+      });
+      assertEquals(lines.some((line) => line.includes("prlimit-ok")), true);
+    });
+  },
+});
+
+test({
+  name: "runReleaseBuild treats a missing prlimit binary as unavailable",
+  permissions: { read: true, write: true, run: true, env: true },
+  fn: async () => {
+    const originalStat = Deno.stat;
+    Deno.stat = (path) => {
+      if (String(path) === "/usr/bin/prlimit") {
+        return Promise.reject(new Deno.errors.NotFound("missing"));
+      }
+      return originalStat(path);
+    };
+    try {
+      await withWorkingDir(async (workingDir) => {
+        const lines: string[] = [];
+        await runReleaseBuild({
+          build: { kind: "native", buildCommand: "true" },
+          workingDir,
+          onOutput: (_stream, line) => lines.push(line),
+        });
+        assertEquals(
+          lines.some((line) => line.includes("prlimit unavailable")),
+          true,
+        );
+      });
+    } finally {
+      Deno.stat = originalStat;
+    }
+  },
+});
+
+test("buildEnvironment falls back when PATH is unset", () => {
+  const previous = Deno.env.get("PATH");
+  try {
+    Deno.env.delete("PATH");
+    const env = buildEnvironment({ kind: "native" }, "/work");
+    assertEquals(env.PATH, "/usr/local/bin:/usr/bin:/bin");
+  } finally {
+    if (previous === undefined) Deno.env.delete("PATH");
+    else Deno.env.set("PATH", previous);
+  }
 });

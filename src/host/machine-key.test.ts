@@ -136,6 +136,46 @@ test({
 });
 
 test({
+  name: "readMachineKey treats cat exit 1 as empty input",
+  permissions: { read: true, run: true },
+  async fn() {
+    resetMachineKeyCacheForTests();
+    const originalRead = Deno.readTextFileSync;
+    const OriginalCommand = Deno.Command;
+    Deno.readTextFileSync = () => {
+      throw new Error("read blocked");
+    };
+    Deno.Command = function (
+      cmd: string,
+      options?: Deno.CommandOptions,
+    ): Deno.Command {
+      if (cmd === "cat") {
+        return {
+          outputSync: () => ({
+            code: 1,
+            stdout: new Uint8Array(),
+            stderr: new Uint8Array(),
+            success: false,
+            signal: null,
+          }),
+        } as Deno.Command;
+      }
+      return new OriginalCommand(cmd, options);
+    } as unknown as typeof Deno.Command;
+    try {
+      assertEquals(
+        await readMachineKey("/no/such/turbopanel-machine-id-cat-exit"),
+        undefined,
+      );
+    } finally {
+      Deno.Command = OriginalCommand;
+      Deno.readTextFileSync = originalRead;
+      resetMachineKeyCacheForTests();
+    }
+  },
+});
+
+test({
   name: "readMachineKey treats cat command failure as empty input",
   permissions: { read: true, run: true },
   async fn() {

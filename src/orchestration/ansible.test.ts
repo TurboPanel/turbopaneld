@@ -17,6 +17,7 @@ import { InstallPresenter } from "./install-presenter.ts";
 import { presentStatusLine } from "./presentation.ts";
 import {
   ANSIBLE_CFG,
+  ANSIBLE_LOCAL_TMP,
   ANSIBLE_PLAYBOOK_CWD,
   ANSIBLE_SHELL_EXECUTABLE,
   ansibleEnv,
@@ -440,6 +441,11 @@ test("ansibleEnv pins ANSIBLE_HOME under /tmp without overriding collections_pat
       `expected ANSIBLE_HOME=/tmp/turbopanel-ansible, got ${env.ANSIBLE_HOME}`,
     );
   }
+  if (env.ANSIBLE_LOCAL_TEMP !== ANSIBLE_LOCAL_TMP) {
+    throw new Error(
+      `expected ANSIBLE_LOCAL_TEMP=${ANSIBLE_LOCAL_TMP}, got ${env.ANSIBLE_LOCAL_TEMP}`,
+    );
+  }
   assertNotIn(env, "ANSIBLE_COLLECTIONS_PATH", "ansibleEnv");
   if (
     env.ANSIBLE_ROLES_PATH !== `${GALAXY_ROLES_DIR}:${GALAXY_VENDOR_ROLES_DIR}`
@@ -553,6 +559,29 @@ test("parseGalaxyDockerRoleVersion reads the requirements-docker pin", async () 
     if (!(err instanceof TypeError)) {
       throw err;
     }
+  }
+});
+
+test("parseGalaxyDockerRoleVersion accepts spaced pins and rejects unquoted versions", () => {
+  assertEquals(
+    parseGalaxyDockerRoleVersion(
+      "- name: geerlingguy.docker\n  src: ignored\n  version: \"8.1.2\"\n",
+    ),
+    "8.1.2",
+  );
+  try {
+    parseGalaxyDockerRoleVersion(
+      "- name: geerlingguy.docker\n  version: 8.1.2\n",
+    );
+    throw new TypeError("expected TypeError for unquoted version");
+  } catch (err) {
+    if (!(err instanceof TypeError)) {
+      throw err;
+    }
+    assertEquals(
+      err.message.includes("must pin geerlingguy.docker"),
+      true,
+    );
   }
 });
 
@@ -1016,6 +1045,17 @@ test("mergeTimeSyncApplyWithHostState preserves host NTP when command omits it",
     }),
     { ntpEnabled: true, ntpServers: ["custom.example"] },
   );
+  assertEquals(
+    mergeTimeSyncApplyWithHostState(
+      { ntpServers: ["already.set"] },
+      { ntpServers: ["host.example"] },
+    ),
+    { ntpServers: ["already.set"] },
+  );
+  assertEquals(
+    mergeTimeSyncApplyWithHostState({}, { ntpServers: [] }),
+    { ntpServers: [] },
+  );
 });
 
 test("buildTimeSyncApplyExtraArgs preserves native list and boolean types", () => {
@@ -1328,6 +1368,13 @@ test("devOwnershipPlaybookExtraArgs emits user uid gid and root", () => {
     ],
   );
   assertEquals(devOwnershipPlaybookExtraArgs({}), []);
+  assertEquals(
+    devOwnershipPlaybookExtraArgs({
+      TURBOPANEL_DEV_USER: "vagrant",
+      TURBOPANEL_DEV_ROOT: "  ",
+    }),
+    ["-e", "turbopanel_dev_user=vagrant"],
+  );
 });
 
 test("instance-certs apply never passes a platform CA rotate flag", async () => {

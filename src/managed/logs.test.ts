@@ -54,6 +54,35 @@ test("collectManagedLogs clamps tail to 1..2000 and requests compose logs", asyn
   ]);
 });
 
+test("collectManagedLogs floors a missing or non-positive tail at 1", async () => {
+  const tails: string[] = [];
+  await collectManagedLogs(
+    "managed_logs_floor",
+    { tail: 0 },
+    (args) => {
+      tails.push(args.at(-1) ?? "");
+      return Promise.resolve(ok(""));
+    },
+  );
+  await collectManagedLogs(
+    "managed_logs_floor",
+    { tail: -12.7 },
+    (args) => {
+      tails.push(args.at(-1) ?? "");
+      return Promise.resolve(ok(""));
+    },
+  );
+  await collectManagedLogs(
+    "managed_logs_floor",
+    undefined,
+    (args) => {
+      tails.push(args.at(-1) ?? "");
+      return Promise.resolve(ok(""));
+    },
+  );
+  assertEquals(tails, ["1", "1", "200"]);
+});
+
 test("collectManagedLogs truncates oversized stdout to the last 256 KiB", async () => {
   const chunk = "x".repeat(300 * 1024);
   const text = await collectManagedLogs(

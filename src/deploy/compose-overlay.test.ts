@@ -7,6 +7,7 @@ import {
   isEmptyFragment,
   mergeComposeOverlayFragments,
   mergeOverlayIntoComposeYaml,
+  renderComposeOverlay,
   writeDaemonComposeLayer,
 } from "./compose-overlay.ts";
 
@@ -215,4 +216,96 @@ test("applyRailpackImagesToComposeYaml is a no-op without railpack services", ()
     ),
     yaml,
   );
+});
+
+test("mergeComposeOverlayFragments merges volumes and skips unequal nested arrays", () => {
+  const merged = mergeComposeOverlayFragments([
+    {
+      volumes: { data: { name: "data", external: true } },
+      services: {
+        web: {
+          volumes: [{ type: "bind", source: "/a", extra: true }],
+        },
+      },
+    },
+    {
+      volumes: { cache: { name: "cache", external: true } },
+      services: {
+        web: {
+          volumes: [
+            { type: "bind", source: "/a" },
+            { type: "bind", source: "/b" },
+          ],
+        },
+      },
+    },
+  ]);
+  assertEquals(merged.volumes, {
+    data: { name: "data", external: true },
+    cache: { name: "cache", external: true },
+  });
+  assertEquals(merged.services?.web?.volumes, [
+    { type: "bind", source: "/a", extra: true },
+    { type: "bind", source: "/a" },
+    { type: "bind", source: "/b" },
+  ]);
+});
+
+test("renderComposeOverlay emits networks and volumes and omits empty maps", () => {
+  assertEquals(renderComposeOverlay({}), "{}\n");
+  const yaml = renderComposeOverlay({
+    networks: { "turbopanel-ingress": { external: true } },
+    volumes: { data: { external: true } },
+  });
+  assertEquals(yaml.includes("turbopanel-ingress"), true);
+  assertEquals(yaml.includes("data:"), true);
+  assertEquals(yaml.includes("services:"), false);
+});
+
+test("isEmptyFragment treats empty networks and volumes as empty", () => {
+  assertEquals(isEmptyFragment({ networks: {}, volumes: {} }), true);
+  assertEquals(
+    isEmptyFragment({ volumes: { data: { external: true } } }),
+    false,
+  );
+});
+
+test("mergeOverlayIntoComposeYaml folds volumes and ignores a non-object document", () => {
+  const withVolumes = mergeOverlayIntoComposeYaml(
+    "volumes:\n  data:\n    external: true\nservices:\n  web:\n    image: nginx\n",
+    { volumes: { cache: { external: true } } },
+  );
+  assertEquals(withVolumes.includes("cache:"), true);
+  assertEquals(withVolumes.includes("data:"), true);
+
+  const scalar = mergeOverlayIntoComposeYaml("just-a-string\n", {
+    services: { web: { image: "nginx" } },
+  });
+  assertEquals(scalar.includes("web:"), true);
+});
+
+test("applyRailpackImagesToComposeYaml ignores non-object documents and services", () => {
+  const images = new Map([["api", "turbopanel-app/api:rel-1"]]);
+  assertEquals(applyRailpackImagesToComposeYaml("[]\n", images), "[]\n");
+  assertEquals(
+    applyRailpackImagesToComposeYaml("services: []\n", images),
+    "services: []\n",
+  );
+  assertEquals(
+    applyRailpackImagesToComposeYaml("services:\n  api: nginx\n", images),
+    "services:\n  api: nginx\n",
+  );
+});
+
+test({
+  name: "writeDaemonComposeLayer returns null when an empty fragment has no file",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    const dir = await Deno.makeTempDir({ prefix: "tp-overlay-missing-" });
+    try {
+      assertEquals(await writeDaemonComposeLayer(dir, {}), null);
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
 });

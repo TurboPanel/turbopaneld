@@ -10,6 +10,10 @@ import { writeReleaseManifest } from "../../deploy/release/deployment-json.ts";
 import { createTempLayout } from "../../testing/temp-layout.ts";
 import { resolveLayout } from "../../paths/layout.ts";
 import {
+  COMMAND_LOG_PHASES,
+  type CommandOutputSink,
+} from "../../logs/contracts.ts";
+import {
   buildDeployServiceNames,
   buildDeploySummary,
   containerHostingsNeedSharedHttpIngress,
@@ -44,9 +48,91 @@ function fakeConfigJson(services: Record<string, unknown>): string {
   return JSON.stringify({ services });
 }
 
+function standardFakeRunDocker(
+  extras?: (args: string[]) => DockerCliResult | undefined,
+): (args: string[]) => Promise<DockerCliResult> {
+  return (args) => {
+    const extra = extras?.(args);
+    if (extra !== undefined) return Promise.resolve(extra);
+    if (args.includes("config") && args.includes("--format")) {
+      return Promise.resolve({
+        success: true,
+        stdout: fakeConfigJson({ web: { image: "nginx:alpine" } }),
+        stderr: "",
+        code: 0,
+      });
+    }
+    return Promise.resolve({
+      success: true,
+      stdout: args.includes("ps") ? "[]" : "",
+      stderr: "",
+      code: 0,
+    });
+  };
+}
+
+async function seedDummyCaddy(runtimesDir: string): Promise<void> {
+  const current = join(runtimesDir, "caddy", "current");
+  await Deno.mkdir(current, { recursive: true, mode: 0o750 });
+  await Deno.writeTextFile(join(current, "caddy"), "#!/bin/true\n", {
+    mode: 0o750,
+  });
+}
+
+function collectingLogSink(): {
+  sink: CommandOutputSink;
+  lines: string[];
+  phases: string[];
+} {
+  const lines: string[] = [];
+  const phases: string[] = [];
+  return {
+    lines,
+    phases,
+    sink: {
+      onLine(_stream, message) {
+        lines.push(message);
+      },
+      setPhase(phase) {
+        phases.push(phase);
+      },
+      addSecrets() {},
+      redactSummary(text) {
+        return text;
+      },
+      finalize() {
+        return Promise.resolve();
+      },
+    },
+  };
+}
+
+function baseComposePayload(
+  overrides: Partial<EnvironmentDeployPayload> = {},
+): EnvironmentDeployPayload {
+  return {
+    environmentId: "env-handler1",
+    projectId: "proj-1",
+    organizationId: "org-1",
+    projectName: "tp-demo-handler",
+    composeFiles: [{
+      filename: RUNTIME_COMPOSE_FILENAME,
+      role: "runtime",
+      content: "services:\n  web:\n    image: nginx:alpine\n",
+    }],
+    hostings: [],
+    ...overrides,
+  };
+}
+
 async function withDeployEnv(
   fn: (
-    dirs: { stateDir: string; configDir: string; runDir: string },
+    dirs: {
+      stateDir: string;
+      configDir: string;
+      runDir: string;
+      runtimesDir: string;
+    },
   ) => Promise<void>,
 ): Promise<void> {
   const fixture = await createTempLayout();
@@ -66,6 +152,7 @@ async function withDeployEnv(
       stateDir: fixture.dirs.stateDir,
       configDir: fixture.dirs.configDir,
       runDir: fixture.dirs.runDir,
+      runtimesDir: fixture.dirs.runtimesDir,
     });
   } finally {
     for (const [key, value] of previous) {
@@ -936,6 +1023,1054 @@ test({
       );
 
       assertEquals(sudoCalls, []);
+    });
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentDeploy publishes compose marker when there are no container services",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withDeployEnv(async ({ stateDir, runtimesDir }) => {
+      await seedDummyCaddy(runtimesDir);
+      const environmentId = "env-siteonly1";
+      const projectId = "proj-1";
+      const calls: string[][] = [];
+      const fakeRunDocker = (args: string[]): Promise<DockerCliResult> => {
+        calls.push([...args]);
+        return Promise.resolve({
+          success: true,
+          stdout: "",
+          stderr: "",
+          code: 0,
+        });
+      };
+
+      const result = await handleEnvironmentDeploy(
+        baseComposePayload({
+          environmentId,
+          projectName: "tp-demo-siteonly",
+          composeFiles: [{
+            filename: RUNTIME_COMPOSE_FILENAME,
+            role: "runtime",
+            content: "services: {}\n",
+          }],
+          envFile: "SITE__PORT=8080\n",
+          replicaCounts: { ghost: 3 },
+        }),
+        new Date().toISOString(),
+        { runDocker: fakeRunDocker, ...hermeticDeployDeps },
+      );
+
+      assertEquals(result.projectName, "tp-demo-siteonly");
+      assertEquals(result.containers, []);
+      assertEquals(calls.some((argv) => argv.includes("up")), false);
+      const deploymentDir = join(
+        stateDir,
+        "deployments",
+        projectId,
+        environmentId,
+      );
+      assertEquals(
+        await Deno.readTextFile(join(deploymentDir, RUNTIME_COMPOSE_FILENAME)),
+        "services: {}\n",
+      );
+      assertEquals(
+        await Deno.readTextFile(join(deploymentDir, COMPOSE_ENV_FILENAME)),
+        "SITE__PORT=8080\n",
+      );
+      const manifest = JSON.parse(
+        await Deno.readTextFile(
+          join(deploymentDir, DEPLOYMENT_MANIFEST_FILENAME),
+        ),
+      ) as { services: Record<string, { replicas: number }> };
+      assertEquals(manifest.services, { ghost: { replicas: 3 } });
+    });
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentDeploy persists shared HTTP ingress identity and starts the platform proxy",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withDeployEnv(async ({ stateDir, runtimesDir }) => {
+      await seedDummyCaddy(runtimesDir);
+      const ingressServiceId = "00000000-0000-4000-8000-0000000000ee";
+      const calls: string[][] = [];
+      const fakeRunDocker = (args: string[]): Promise<DockerCliResult> => {
+        calls.push([...args]);
+        if (args.includes("config") && args.includes("--format")) {
+          return Promise.resolve({
+            success: true,
+            stdout: fakeConfigJson({ web: { image: "nginx:alpine" } }),
+            stderr: "",
+            code: 0,
+          });
+        }
+        return Promise.resolve({
+          success: true,
+          stdout: args.includes("ps") ? "[]" : "",
+          stderr: "",
+          code: 0,
+        });
+      };
+
+      await handleEnvironmentDeploy(
+        baseComposePayload({
+          environmentId: "env-httpin1",
+          projectName: "tp-demo-httpin",
+          hostings: [{
+            hostingId: "h1",
+            serviceId: "s1",
+            composeServiceName: "web",
+            hostnames: ["app.example.test"],
+          }],
+          hostingIngress: {
+            serviceId: ingressServiceId,
+            composeServiceName: "traefik",
+            containerName: `${ingressServiceId}-in`,
+          },
+        }),
+        new Date().toISOString(),
+        { runDocker: fakeRunDocker, ...hermeticDeployDeps },
+      );
+
+      const descriptor = JSON.parse(
+        await Deno.readTextFile(
+          join(stateDir, "system", "hosting-ingress.json"),
+        ),
+      ) as { serviceId: string };
+      assertEquals(descriptor.serviceId, ingressServiceId);
+      assertEquals(
+        calls.some((argv) =>
+          argv.includes("up") && argv.includes("turbopanel-ingress")
+        ),
+        true,
+      );
+    });
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentDeploy omits serviceId when compose ps names a service without a hosting",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withDeployEnv(async () => {
+      const projectName = "tp-demo-orphanps";
+      const psJson = JSON.stringify([
+        {
+          ID: "web123",
+          Name: `${projectName}-web-1`,
+          Service: "web",
+          State: "running",
+        },
+        {
+          ID: "orphan123",
+          Name: `${projectName}-orphan-1`,
+          Service: "orphan",
+          State: "running",
+        },
+      ]);
+      const result = await handleEnvironmentDeploy(
+        baseComposePayload({
+          environmentId: "env-orphanps1",
+          projectName,
+          hostings: [{
+            hostingId: "h1",
+            serviceId: "svc-web",
+            composeServiceName: "web",
+            hostnames: [],
+            protocol: "tcp",
+            ports: [{ published: 8080, target: 80 }],
+          }],
+        }),
+        new Date().toISOString(),
+        {
+          runDocker: standardFakeRunDocker((args) => {
+            if (
+              args.includes("ps") &&
+              !args.some((arg) => arg.startsWith("turbopanel-ingress-"))
+            ) {
+              return { success: true, stdout: psJson, stderr: "", code: 0 };
+            }
+            return undefined;
+          }),
+          ...hermeticDeployDeps,
+        },
+      );
+
+      assertEquals(result.containers?.length, 2);
+      assertEquals(result.containers?.[0]?.serviceId, "svc-web");
+      assertEquals("serviceId" in (result.containers?.[1] ?? {}), false);
+      assertEquals(result.containers?.[1]?.composeServiceName, "orphan");
+    });
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentDeploy omits containers when compose ps fails without stderr",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withDeployEnv(async () => {
+      const result = await handleEnvironmentDeploy(
+        baseComposePayload({
+          environmentId: "env-psempty1",
+          projectName: "tp-demo-psempty",
+        }),
+        new Date().toISOString(),
+        {
+          runDocker: standardFakeRunDocker((args) => {
+            if (args.includes("ps")) {
+              return { success: false, stdout: "", stderr: "", code: 1 };
+            }
+            return undefined;
+          }),
+          ...hermeticDeployDeps,
+        },
+      );
+      assertEquals("containers" in result, false);
+    });
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentDeploy omits containers when compose ps throws a non-Error",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withDeployEnv(async () => {
+      const result = await handleEnvironmentDeploy(
+        baseComposePayload({
+          environmentId: "env-psthrownon1",
+          projectName: "tp-demo-psthrownon",
+        }),
+        new Date().toISOString(),
+        {
+          runDocker: (args) => {
+            if (args.includes("ps")) {
+              return Promise.reject("compose ps exploded");
+            }
+            if (args.includes("config") && args.includes("--format")) {
+              return Promise.resolve({
+                success: true,
+                stdout: fakeConfigJson({ web: { image: "nginx:alpine" } }),
+                stderr: "",
+                code: 0,
+              });
+            }
+            return Promise.resolve({
+              success: true,
+              stdout: "",
+              stderr: "",
+              code: 0,
+            });
+          },
+          ...hermeticDeployDeps,
+        },
+      );
+      assertEquals("containers" in result, false);
+    });
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentDeploy keeps service containers when ingress collect throws",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withDeployEnv(async () => {
+      const projectName = "tp-demo-ingthrow";
+      const serviceId = "00000000-0000-4000-8000-0000000000ff";
+      const psJson = JSON.stringify([{
+        ID: "abc123",
+        Name: `${projectName}-web-1`,
+        Service: "web",
+        State: "running",
+      }]);
+      const result = await handleEnvironmentDeploy(
+        baseComposePayload({
+          environmentId: "env-ingthrow1",
+          projectName,
+          hostings: [{
+            hostingId: "h1",
+            serviceId: "s1",
+            composeServiceName: "web",
+            hostnames: [],
+            protocol: "tcp",
+            ports: [{ published: 8080, target: 8080 }],
+          }],
+          ingressServices: [{
+            serviceId,
+            composeServiceName: "web",
+            containerName: `${serviceId}-in`,
+          }],
+        }),
+        new Date().toISOString(),
+        {
+          runDocker: (args) => {
+            if (args.includes("config") && args.includes("--format")) {
+              return Promise.resolve({
+                success: true,
+                stdout: fakeConfigJson({ web: { image: "nginx:alpine" } }),
+                stderr: "",
+                code: 0,
+              });
+            }
+            if (args.includes("ps")) {
+              if (args.some((arg) => arg.startsWith("turbopanel-ingress-"))) {
+                return Promise.reject(new Error("ingress ps exploded"));
+              }
+              return Promise.resolve({
+                success: true,
+                stdout: psJson,
+                stderr: "",
+                code: 0,
+              });
+            }
+            return Promise.resolve({
+              success: true,
+              stdout: "",
+              stderr: "",
+              code: 0,
+            });
+          },
+          ...hermeticDeployDeps,
+        },
+      );
+      assertEquals(result.containers?.length, 1);
+      assertEquals(result.containers?.[0]?.containerId, "abc123");
+    });
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentDeploy keeps service containers when ingress collect fails without stderr",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withDeployEnv(async () => {
+      const projectName = "tp-demo-ingempty";
+      const serviceId = "00000000-0000-4000-8000-0000000000aa";
+      const psJson = JSON.stringify([{
+        ID: "abc123",
+        Name: `${projectName}-web-1`,
+        Service: "web",
+        State: "running",
+      }]);
+      const result = await handleEnvironmentDeploy(
+        baseComposePayload({
+          environmentId: "env-ingempty1",
+          projectName,
+          hostings: [{
+            hostingId: "h1",
+            serviceId: "s1",
+            composeServiceName: "web",
+            hostnames: [],
+            protocol: "tcp",
+            ports: [{ published: 8080, target: 8080 }],
+          }],
+          ingressServices: [{
+            serviceId,
+            composeServiceName: "web",
+            containerName: `${serviceId}-in`,
+          }],
+        }),
+        new Date().toISOString(),
+        {
+          runDocker: standardFakeRunDocker((args) => {
+            if (
+              args.includes("ps") &&
+              args.some((arg) => arg.startsWith("turbopanel-ingress-"))
+            ) {
+              return { success: false, stdout: "", stderr: "", code: 1 };
+            }
+            if (args.includes("ps")) {
+              return { success: true, stdout: psJson, stderr: "", code: 0 };
+            }
+            return undefined;
+          }),
+          ...hermeticDeployDeps,
+        },
+      );
+      assertEquals(result.containers?.length, 1);
+    });
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentDeploy keeps service containers when ingress collect throws a non-Error",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withDeployEnv(async () => {
+      const projectName = "tp-demo-ingnonerr";
+      const serviceId = "00000000-0000-4000-8000-0000000000bb";
+      const psJson = JSON.stringify([{
+        ID: "abc123",
+        Name: `${projectName}-web-1`,
+        Service: "web",
+        State: "running",
+      }]);
+      const result = await handleEnvironmentDeploy(
+        baseComposePayload({
+          environmentId: "env-ingnonerr1",
+          projectName,
+          hostings: [{
+            hostingId: "h1",
+            serviceId: "s1",
+            composeServiceName: "web",
+            hostnames: [],
+            protocol: "tcp",
+            ports: [{ published: 8080, target: 8080 }],
+          }],
+          ingressServices: [{
+            serviceId,
+            composeServiceName: "web",
+            containerName: `${serviceId}-in`,
+          }],
+        }),
+        new Date().toISOString(),
+        {
+          runDocker: (args) => {
+            if (args.includes("config") && args.includes("--format")) {
+              return Promise.resolve({
+                success: true,
+                stdout: fakeConfigJson({ web: { image: "nginx:alpine" } }),
+                stderr: "",
+                code: 0,
+              });
+            }
+            if (args.includes("ps")) {
+              if (args.some((arg) => arg.startsWith("turbopanel-ingress-"))) {
+                return Promise.reject("ingress ps exploded");
+              }
+              return Promise.resolve({
+                success: true,
+                stdout: psJson,
+                stderr: "",
+                code: 0,
+              });
+            }
+            return Promise.resolve({
+              success: true,
+              stdout: "",
+              stderr: "",
+              code: 0,
+            });
+          },
+          ...hermeticDeployDeps,
+        },
+      );
+      assertEquals(result.containers?.length, 1);
+    });
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentDeploy materializes TLS PEMs and maps hostnames when decrypt is available",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withDeployEnv(async ({ configDir }) => {
+      const tlsId = "00000000-0000-4000-8000-0000000000cd";
+      const certificatePem =
+        "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
+      const privateKeyPem =
+        "-----BEGIN PRIVATE KEY-----\nMIIK\n-----END PRIVATE KEY-----\n";
+
+      await handleEnvironmentDeploy(
+        baseComposePayload({
+          environmentId: "env-tlsok1",
+          projectName: "tp-demo-tlsok",
+          hostings: [{
+            hostingId: "h1",
+            serviceId: "s1",
+            composeServiceName: "web",
+            hostnames: ["secure.example.test"],
+            tlsId,
+            protocol: "tcp",
+            ports: [{ published: 8443, target: 8443 }],
+          }],
+          tlsMaterial: [{
+            tlsId,
+            certificatePem,
+            privateKeyEnvelope: "tpdaemon.v1.tls",
+          }],
+        }),
+        new Date().toISOString(),
+        {
+          runDocker: standardFakeRunDocker(),
+          decryptSecrets: () => Promise.resolve([privateKeyPem]),
+          ...hermeticDeployDeps,
+        },
+      );
+
+      const tlsDir = join(configDir, "tls", tlsId);
+      assertEquals(
+        await Deno.readTextFile(join(tlsDir, "fullchain.pem")),
+        certificatePem,
+      );
+      assertEquals(
+        await Deno.readTextFile(join(tlsDir, "privkey.pem")),
+        privateKeyPem,
+      );
+    });
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentDeploy rejects TLS material when decrypt returns an empty key",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withDeployEnv(async () => {
+      await assertRejects(
+        () =>
+          handleEnvironmentDeploy(
+            baseComposePayload({
+              environmentId: "env-tlsempty1",
+              projectName: "tp-demo-tlsempty",
+              tlsMaterial: [{
+                tlsId: "00000000-0000-4000-8000-0000000000ce",
+                certificatePem:
+                  "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+                privateKeyEnvelope: "tpdaemon.v1.tls",
+              }],
+            }),
+            new Date().toISOString(),
+            {
+              runDocker: standardFakeRunDocker(),
+              decryptSecrets: () => Promise.resolve([""]),
+              ...hermeticDeployDeps,
+            },
+          ),
+        Error,
+        "failed to decrypt private key",
+      );
+    });
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentDeploy rejects TLS material when decrypt length mismatches",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withDeployEnv(async () => {
+      await assertRejects(
+        () =>
+          handleEnvironmentDeploy(
+            baseComposePayload({
+              environmentId: "env-tlslen1",
+              projectName: "tp-demo-tlslen",
+              tlsMaterial: [{
+                tlsId: "00000000-0000-4000-8000-0000000000cf",
+                certificatePem:
+                  "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+                privateKeyEnvelope: "tpdaemon.v1.tls",
+              }],
+            }),
+            new Date().toISOString(),
+            {
+              runDocker: standardFakeRunDocker(),
+              decryptSecrets: () => Promise.resolve([]),
+              ...hermeticDeployDeps,
+            },
+          ),
+        Error,
+        "secrets/decrypt returned unexpected length",
+      );
+    });
+  },
+});
+
+test({
+  name: "handleEnvironmentDeploy rejects a non-UUID tlsId at materialize time",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withDeployEnv(async () => {
+      await assertRejects(
+        () =>
+          handleEnvironmentDeploy(
+            baseComposePayload({
+              environmentId: "env-tlsid1",
+              projectName: "tp-demo-tlsid",
+              tlsMaterial: [{
+                tlsId: "not-a-uuid",
+                certificatePem:
+                  "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+                privateKeyEnvelope: "tpdaemon.v1.tls",
+              }],
+            }),
+            new Date().toISOString(),
+            {
+              runDocker: standardFakeRunDocker(),
+              decryptSecrets: () => Promise.resolve(["pem"]),
+              ...hermeticDeployDeps,
+            },
+          ),
+        Error,
+        "tlsId contains unsupported characters",
+      );
+    });
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentDeploy materializes path storage directories and files",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withDeployEnv(async ({ stateDir }) => {
+      await handleEnvironmentDeploy(
+        baseComposePayload({
+          environmentId: "env-stor1",
+          projectName: "tp-demo-stor",
+          storageMaterial: [
+            {
+              storageId: "stor-dir",
+              locationId: "loc-dir",
+              kind: "directory",
+              name: "data",
+              provider: "path",
+              serverId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+              mounts: [{
+                destinationPath: "/var/lib/app",
+                composeServiceName: "web",
+              }],
+            },
+            {
+              storageId: "stor-file",
+              locationId: "loc-file",
+              kind: "file",
+              name: "notes.txt",
+              provider: "path",
+              serverId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+              contentEnvelope: "hello-storage",
+              mounts: [{ destinationPath: "/etc/notes.txt" }],
+            },
+          ],
+        }),
+        new Date().toISOString(),
+        { runDocker: standardFakeRunDocker(), ...hermeticDeployDeps },
+      );
+
+      const dirStat = await Deno.stat(
+        join(stateDir, "storage", "org-1", "stor-dir", "loc-dir", "data"),
+      );
+      assertEquals(dirStat.isDirectory, true);
+      assertEquals(
+        await Deno.readTextFile(
+          join(
+            stateDir,
+            "storage",
+            "org-1",
+            "stor-file",
+            "loc-file",
+            "data",
+            "notes.txt",
+          ),
+        ),
+        "hello-storage",
+      );
+    });
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentDeploy rejects encrypted storage content when decrypt is unavailable",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withDeployEnv(async () => {
+      await assertRejects(
+        () =>
+          handleEnvironmentDeploy(
+            baseComposePayload({
+              environmentId: "env-storenc1",
+              projectName: "tp-demo-storenc",
+              storageMaterial: [{
+                storageId: "stor-enc",
+                locationId: "loc-enc",
+                kind: "file",
+                name: "secret.txt",
+                provider: "path",
+                serverId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                contentEnvelope: "tpdaemon.v1.x",
+                mounts: [{ destinationPath: "/etc/secret.txt" }],
+              }],
+            }),
+            new Date().toISOString(),
+            { runDocker: standardFakeRunDocker(), ...hermeticDeployDeps },
+          ),
+        Error,
+        "Storage content present but secrets decrypt is unavailable",
+      );
+    });
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentDeploy records skipped sourceMaterial in deployment.json",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withDeployEnv(async ({ stateDir }) => {
+      const log = collectingLogSink();
+      await handleEnvironmentDeploy(
+        baseComposePayload({
+          environmentId: "env-srcskip1",
+          projectName: "tp-demo-srcskip",
+          hostings: [{
+            hostingId: "h1",
+            serviceId: "svc-web",
+            composeServiceName: "web",
+            hostnames: [],
+            protocol: "tcp",
+            ports: [{ published: 8080, target: 80 }],
+          }],
+          sourceMaterial: [{
+            sourceId: "src-1",
+            composeServiceName: "web",
+            provider: "github",
+            cloneUrl: "https://example.test/repo.git",
+            ref: "main",
+            commitSha: "b".repeat(40),
+            releaseId: "rel-new",
+            rollbackToReleaseId: "rel-old",
+            commitMessage: "roll me back",
+            commitAuthor: "dev@example.test",
+            build: { kind: "native" },
+          }],
+        } as unknown as EnvironmentDeployPayload),
+        new Date().toISOString(),
+        {
+          runDocker: standardFakeRunDocker(),
+          logSink: log.sink,
+          ...hermeticDeployDeps,
+        },
+      );
+
+      assertEquals(
+        log.lines.some((line) =>
+          line.includes(
+            "release skipped for web: no project principal assigned",
+          )
+        ),
+        true,
+      );
+      const manifest = JSON.parse(
+        await Deno.readTextFile(
+          join(
+            stateDir,
+            "deployments",
+            "proj-1",
+            "env-srcskip1",
+            DEPLOYMENT_MANIFEST_FILENAME,
+          ),
+        ),
+      ) as {
+        releases?: Array<{
+          releaseId: string;
+          commitSha: string;
+          commitMessage?: string;
+          username?: string;
+        }>;
+      };
+      assertEquals(manifest.releases?.[0]?.releaseId, "rel-old");
+      assertEquals(manifest.releases?.[0]?.commitSha, "b".repeat(40));
+      assertEquals(manifest.releases?.[0]?.commitMessage, "roll me back");
+      assertEquals("username" in (manifest.releases?.[0] ?? {}), false);
+    });
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentDeploy reclaims a dropped release while keeping a still-sourced service id",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withDeployEnv(async ({ stateDir }) => {
+      const environmentId = "env-reclaimsrc1";
+      const previousHome = Deno.env.get("TURBOPANEL_PRINCIPAL_HOME_ROOT");
+      const principalHomeRoot = join(stateDir, "srv", "users");
+      Deno.env.set("TURBOPANEL_PRINCIPAL_HOME_ROOT", principalHomeRoot);
+      const deploymentDir = join(
+        stateDir,
+        "deployments",
+        "proj-1",
+        environmentId,
+      );
+      await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
+      await Deno.writeTextFile(
+        join(deploymentDir, DEPLOYMENT_MANIFEST_FILENAME),
+        JSON.stringify({
+          version: 2,
+          projectId: "proj-1",
+          environmentId,
+          serverId: "srv-1",
+          generation: 1,
+          projectName: "tp-demo-reclaimsrc",
+          composeSha256: "a".repeat(64),
+          services: {},
+          releases: [{
+            composeServiceName: "gone",
+            serviceId: "svc-gone",
+            releaseId: "rel-1",
+            sourceId: "src-old",
+            commitSha: "a".repeat(40),
+            username: "appuser",
+          }],
+        }),
+        { mode: 0o640 },
+      );
+      const sudoCalls: Array<{ command: string; args: string[] }> = [];
+      const log = collectingLogSink();
+
+      try {
+        await handleEnvironmentDeploy(
+          baseComposePayload({
+            environmentId,
+            projectName: "tp-demo-reclaimsrc",
+            sourceMaterial: [{
+              sourceId: "src-1",
+              composeServiceName: "web",
+              provider: "github",
+              cloneUrl: "https://example.test/repo.git",
+              ref: "main",
+              commitSha: "c".repeat(40),
+              releaseId: "rel-keep",
+              build: { kind: "native" },
+            }],
+          } as unknown as EnvironmentDeployPayload),
+          new Date().toISOString(),
+          {
+            runDocker: standardFakeRunDocker(),
+            logSink: log.sink,
+            ...hermeticDeployDeps,
+            runPrivileged: (command, args) => {
+              sudoCalls.push({ command, args: [...args] });
+              return Promise.resolve({
+                success: true,
+                stdout: "",
+                stderr: "",
+              });
+            },
+          },
+        );
+      } finally {
+        if (previousHome === undefined) {
+          Deno.env.delete("TURBOPANEL_PRINCIPAL_HOME_ROOT");
+        } else {
+          Deno.env.set("TURBOPANEL_PRINCIPAL_HOME_ROOT", previousHome);
+        }
+      }
+
+      assertEquals(
+        sudoCalls[0]?.args.includes(join(
+          principalHomeRoot,
+          "appuser",
+          "sites",
+          "svc-gone",
+        )),
+        true,
+      );
+      assertEquals(
+        log.lines.some((line) =>
+          line.startsWith("reclaimed removed service release tree ")
+        ),
+        true,
+      );
+    });
+  },
+});
+
+test({
+  name: "handleEnvironmentDeploy runs pre-deploy and post-deploy service hooks",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withDeployEnv(async () => {
+      const log = collectingLogSink();
+      const calls: string[][] = [];
+      const fakeRunDocker = (args: string[]): Promise<DockerCliResult> => {
+        calls.push([...args]);
+        if (args.includes("config") && args.includes("--format")) {
+          return Promise.resolve({
+            success: true,
+            stdout: fakeConfigJson({ web: { image: "nginx:alpine" } }),
+            stderr: "",
+            code: 0,
+          });
+        }
+        return Promise.resolve({
+          success: true,
+          stdout: args.includes("ps") ? "[]" : "",
+          stderr: "",
+          code: 0,
+        });
+      };
+
+      await handleEnvironmentDeploy(
+        baseComposePayload({
+          environmentId: "env-hooks1",
+          projectName: "tp-demo-hooks",
+          serviceHooks: [{
+            composeServiceName: "web",
+            buildDisableCache: true,
+            preDeployCommand: "printf 'pre-hook\\n'",
+            postDeployCommand: "printf 'post-hook\\n'",
+          }],
+        }),
+        new Date().toISOString(),
+        {
+          runDocker: fakeRunDocker,
+          logSink: log.sink,
+          ...hermeticDeployDeps,
+        },
+      );
+
+      assertEquals(
+        calls.some((argv) =>
+          argv.includes("build") && argv.includes("--no-cache") &&
+          argv.includes("web")
+        ),
+        true,
+      );
+      assertEquals(log.lines.includes("pre-hook"), true);
+      assertEquals(log.lines.includes("post-hook"), true);
+      assertEquals(log.phases.includes(COMMAND_LOG_PHASES.PRE_DEPLOY), true);
+      assertEquals(log.phases.includes(COMMAND_LOG_PHASES.POST_DEPLOY), true);
+    });
+  },
+});
+
+test({
+  name: "handleEnvironmentDeploy wraps a failing pre-deploy hook",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withDeployEnv(async () => {
+      await assertRejects(
+        () =>
+          handleEnvironmentDeploy(
+            baseComposePayload({
+              environmentId: "env-hookfail1",
+              projectName: "tp-demo-hookfail",
+              serviceHooks: [{
+                composeServiceName: "web",
+                preDeployCommand: "printf 'hook-boom\\n' >&2; exit 1",
+              }],
+            }),
+            new Date().toISOString(),
+            {
+              runDocker: standardFakeRunDocker(),
+              ...hermeticDeployDeps,
+            },
+          ),
+        Error,
+        "hook-boom",
+      );
+    });
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentDeploy wraps hook cacheless build failure without stderr",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withDeployEnv(async () => {
+      await assertRejects(
+        () =>
+          handleEnvironmentDeploy(
+            baseComposePayload({
+              environmentId: "env-hookbuild1",
+              projectName: "tp-demo-hookbuild",
+              serviceHooks: [{
+                composeServiceName: "web",
+                buildDisableCache: true,
+              }],
+            }),
+            new Date().toISOString(),
+            {
+              runDocker: standardFakeRunDocker((args) => {
+                if (args.includes("build") && args.includes("--no-cache")) {
+                  return { success: false, stdout: "", stderr: "", code: 1 };
+                }
+                return undefined;
+              }),
+              ...hermeticDeployDeps,
+            },
+          ),
+        Error,
+        "docker compose build --no-cache failed",
+      );
+    });
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentDeploy uses the fallback summary when compose up has empty stderr",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withDeployEnv(async () => {
+      await assertRejects(
+        () =>
+          handleEnvironmentDeploy(
+            baseComposePayload({
+              environmentId: "env-upempty1",
+              projectName: "tp-demo-upempty",
+            }),
+            new Date().toISOString(),
+            {
+              runDocker: standardFakeRunDocker((args) => {
+                if (args.includes("up")) {
+                  return { success: false, stdout: "", stderr: "", code: 1 };
+                }
+                return undefined;
+              }),
+              ...hermeticDeployDeps,
+            },
+          ),
+        Error,
+        "Docker Compose deployment failed",
+      );
+    });
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentDeploy uses the fallback summary when cacheless build has empty stderr",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withDeployEnv(async () => {
+      await assertRejects(
+        () =>
+          handleEnvironmentDeploy(
+            baseComposePayload({
+              environmentId: "env-buildempty1",
+              projectName: "tp-demo-buildempty",
+              noCache: true,
+            }),
+            new Date().toISOString(),
+            {
+              runDocker: standardFakeRunDocker((args) => {
+                if (args.includes("build") && args.includes("--no-cache")) {
+                  return { success: false, stdout: "", stderr: "", code: 1 };
+                }
+                return undefined;
+              }),
+              ...hermeticDeployDeps,
+            },
+          ),
+        Error,
+        "Docker Compose cacheless build failed",
+      );
     });
   },
 });

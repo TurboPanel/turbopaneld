@@ -1124,4 +1124,68 @@ test("parseSystemReconcilePayload rejects remaining invalid shapes and accepts m
     }).components[0]?.containerName,
     `${serviceId}-ha`,
   );
+  assertThrows(
+    () =>
+      parseSystemReconcilePayload({
+        environmentId,
+        components: [{
+          component: "database",
+          serviceId: "not-a-uuid",
+          composeServiceName: "database",
+          containerName: "not-a-uuid",
+          role: "turbopanel",
+          desired: "present",
+        }],
+      }),
+    TypeError,
+    "Invalid system.reconcile payload",
+  );
+  assertThrows(
+    () =>
+      parseSystemReconcilePayload({
+        environmentId,
+        components: [{
+          component: "database",
+          serviceId,
+          composeServiceName: "database",
+          containerName: serviceId,
+          role: "service",
+          desired: "present",
+        }],
+      }),
+    TypeError,
+    "Invalid system.reconcile payload",
+  );
+  assertThrows(
+    () =>
+      parseSystemReconcilePayload({
+        environmentId,
+        components: [{
+          component: "database",
+          serviceId,
+          composeServiceName: "database",
+          containerName: `${serviceId}-extra`,
+          role: "turbopanel",
+          desired: "present",
+        }],
+      }),
+    TypeError,
+    "Invalid system.reconcile payload",
+  );
+  assertThrows(
+    () =>
+      parseSystemReconcilePayload({
+        environmentId,
+        components: [{
+          component: "database",
+          serviceId,
+          composeServiceName: "database",
+          containerName: serviceId,
+          role: "turbopanel",
+          desired: "maybe",
+        }],
+      }),
+    TypeError,
+    "Invalid system.reconcile payload",
+  );
 });

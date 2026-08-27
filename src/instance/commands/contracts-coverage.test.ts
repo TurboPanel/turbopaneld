@@ -798,6 +798,291 @@ test("parseManagedApplyPayload rejects invalid databases and credential privileg
   );
 });
 
+test("parseEnvironmentDeployPayload covers leftover hosting site native and source fields", () => {
+  const hostingPayload = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    hostings: [{
+      hostingId: "h1",
+      serviceId: "s1",
+      composeServiceName: "web",
+      hostnames: ["app.example.test"],
+      tlsId: "tls-cert-1",
+    }],
+    sites: [{
+      composeServiceName: "site",
+      engine: "nginx",
+      root: "public",
+      listenPort: 18080,
+      php: { version: "8.4", settings: { memory_limit: "128M" } },
+    }],
+    nativeAppServices: [{
+      composeServiceName: "api",
+      serviceId: "svc-native-1",
+      listenPort: 13000,
+      framework: "node",
+      resources: {},
+      accountLimits: {},
+    }],
+  });
+  assertEquals(hostingPayload.hostings[0]?.tlsId, "tls-cert-1");
+  assertEquals(hostingPayload.sites?.[0]?.php?.version, "8.4");
+  assertEquals(hostingPayload.nativeAppServices?.[0]?.resources, undefined);
+  assertEquals(hostingPayload.nativeAppServices?.[0]?.accountLimits, undefined);
+
+  const partialLimits = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    nativeAppServices: [{
+      composeServiceName: "api",
+      serviceId: "svc-native-1",
+      listenPort: 13000,
+      framework: "node",
+      resources: { memoryBytes: 512_000_000 },
+      accountLimits: { cpus: 1 },
+    }],
+  });
+  assertEquals(partialLimits.nativeAppServices?.[0]?.resources, {
+    memoryBytes: 512_000_000,
+  });
+  assertEquals(partialLimits.nativeAppServices?.[0]?.accountLimits, {
+    cpus: 1,
+  });
+
+  const storage = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    storageMaterial: [{
+      storageId: "st-1",
+      locationId: "loc-1",
+      kind: "file",
+      name: "secret",
+      provider: "path",
+      serverId: "srv-1",
+      sourcePath: "/var/lib/turbopanel/secret",
+      principalId: PRINCIPAL_ID,
+      contentEnvelope: TP_ENVELOPE,
+      mounts: [{
+        destinationPath: "/run/secret",
+        serviceId: SERVICE_UUID,
+      }],
+    }],
+  });
+  assertEquals(storage.storageMaterial?.[0]?.principalId, PRINCIPAL_ID);
+  assertEquals(storage.storageMaterial?.[0]?.contentEnvelope, TP_ENVELOPE);
+  assertEquals(
+    storage.storageMaterial?.[0]?.mounts[0]?.serviceId,
+    SERVICE_UUID,
+  );
+
+  const source = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    sourceMaterial: [{
+      ...SOURCE_ENTRY,
+      commitMessage: "   \n  ",
+      commitAuthor: "x".repeat(400),
+    }],
+  });
+  assertEquals(source.sourceMaterial?.[0]?.commitMessage, undefined);
+  assertEquals(source.sourceMaterial?.[0]?.commitAuthor?.length, 300);
+
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...DEPLOY_BASE,
+        sourceMaterial: [{ ...SOURCE_ENTRY, subdirectory: 12 }],
+      }),
+    TypeError,
+    "Invalid sourceMaterial subdirectory",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...DEPLOY_BASE,
+        sourceMaterial: [{ ...SOURCE_ENTRY, subdirectory: "" }],
+      }),
+    TypeError,
+    "Invalid sourceMaterial subdirectory",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...DEPLOY_BASE,
+        sourceMaterial: [{ ...SOURCE_ENTRY, subdirectory: "/abs" }],
+      }),
+    TypeError,
+    "Invalid sourceMaterial subdirectory",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...DEPLOY_BASE,
+        composeFiles: [null],
+      }),
+    TypeError,
+    "Invalid environment deploy payload",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...DEPLOY_BASE,
+        composeFiles: [{
+          filename: "compose.yaml",
+          role: "project",
+          content: "services:\n  web:\n    image: nginx\n",
+        }],
+      }),
+    TypeError,
+    "Invalid environment deploy payload",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...DEPLOY_BASE,
+        composeFiles: [{
+          filename: "docker-compose.yaml",
+          role: "runtime",
+          content: "services:\n  web:\n    image: nginx\n",
+        }],
+      }),
+    TypeError,
+    "Invalid environment deploy payload",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...DEPLOY_BASE,
+        dockerExternalNetworks: [12],
+      }),
+    TypeError,
+    "Invalid dockerExternalNetworks entry",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...DEPLOY_BASE,
+        principalMaterial: [{
+          principalId: PRINCIPAL_ID,
+          username: "deploy_user",
+          home: "",
+        }],
+      }),
+    TypeError,
+    "Invalid environment deploy principalMaterial home",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...DEPLOY_BASE,
+        principalMaterial: [{
+          principalId: PRINCIPAL_ID,
+          username: "deploy_user",
+          home: `/${"a".repeat(255)}`,
+        }],
+      }),
+    TypeError,
+    "Invalid environment deploy principalMaterial home",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...DEPLOY_BASE,
+        principalMaterial: [{
+          principalId: PRINCIPAL_ID,
+          username: "deploy_user",
+          home: "/tmp/my home",
+        }],
+      }),
+    TypeError,
+    "Invalid environment deploy principalMaterial home",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...DEPLOY_BASE,
+        principalMaterial: [{
+          principalId: PRINCIPAL_ID,
+          username: "deploy_user",
+          home: "/tmp/home\0x",
+        }],
+      }),
+    TypeError,
+    "Invalid environment deploy principalMaterial home",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...DEPLOY_BASE,
+        principalMaterial: [{
+          principalId: PRINCIPAL_ID,
+          username: "deploy_user",
+          home: "/tmp/home\n",
+        }],
+      }),
+    TypeError,
+    "Invalid environment deploy principalMaterial home",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...DEPLOY_BASE,
+        principalMaterial: [{
+          principalId: PRINCIPAL_ID,
+          username: "deploy_user",
+          home: "/tmp/../etc",
+        }],
+      }),
+    TypeError,
+    "Invalid environment deploy principalMaterial home",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...DEPLOY_BASE,
+        principalMaterial: [{
+          principalId: PRINCIPAL_ID,
+          username: "deploy_user",
+          shell: "nologin",
+        }],
+      }),
+    TypeError,
+    "Invalid environment deploy principalMaterial shell",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...DEPLOY_BASE,
+        principalMaterial: [{
+          principalId: PRINCIPAL_ID,
+          username: "deploy_user",
+          shell: "/bin/sh@bad",
+        }],
+      }),
+    TypeError,
+    "Invalid environment deploy principalMaterial shell",
+  );
+});
+
+test("parseManagedIngressReconcileResult rejects a non-object result", () => {
+  assertThrows(
+    () => parseManagedIngressReconcileResult(null),
+    TypeError,
+    "Invalid managed.ingress.reconcile result",
+  );
+});
+
+test("parseManagedIngressReconcileResult rejects non-array containers", () => {
+  assertThrows(
+    () =>
+      parseManagedIngressReconcileResult({
+        summary: "ok",
+        appliedUsers: ["app"],
+        appliedBackends: [SERVICE_UUID],
+        restarted: false,
+        containers: "none",
+      }),
+    TypeError,
+    "Invalid managed.ingress.reconcile result containers",
+  );
+});
+
 test("parseManagedIngressReconcileResult rejects malformed container role", () => {
   assertThrows(
     () =>

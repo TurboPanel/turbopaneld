@@ -623,3 +623,123 @@ test({
     }
   },
 });
+
+test("IdlePresence hello and heartbeat carry runtimes when present", async () => {
+  const runtimes = { php: { series: ["8.4"] }, node: { series: ["22"] } };
+  let snapshotRuntimes: typeof runtimes | undefined = runtimes;
+  const restore = installIdlePresenceProviders({
+    getBuildInfo: () => makeDaemonBuild("abc1234"),
+    getHostHelloIdentity: () => EMPTY_HOST,
+    collectPresenceSnapshot: () => ({
+      timeSync: makeTimeSync("UTC"),
+      ips: makeIps("203.0.113.10"),
+      ...(snapshotRuntimes ? { runtimes: snapshotRuntimes } : {}),
+    }),
+  });
+  const idleCheckIntervalMs = 15;
+  const socket = openMockSocket();
+  const presence = new IdlePresence({
+    serverId: "srv-runtimes",
+    idleCheckIntervalMs,
+    idleThresholdMs: idleCheckIntervalMs,
+    staleConnectionMs: 60_000,
+  });
+  try {
+    presence.attach(socket as unknown as WebSocket);
+    const hello = framesOfType(socket, "hello")[0] as Record<string, unknown>;
+    assertEquals(hello.runtimes, runtimes);
+
+    snapshotRuntimes = { php: { series: ["8.3", "8.4"] }, node: { series: ["22"] } };
+    await sleep(idleCheckIntervalMs + 25);
+    const heartbeats = framesOfType(socket, "heartbeat");
+    assertEquals(heartbeats.length, 1);
+    const heartbeat = heartbeats[0] as Record<string, unknown>;
+    assertEquals(heartbeat.runtimes, snapshotRuntimes);
+    assertEquals("os" in heartbeat, false);
+  } finally {
+    presence.detach();
+    restore();
+  }
+});
+
+test({
+  name: "IdlePresence onStaleConnection fires once until inbound traffic",
+  fn: async () => {
+    const restore = installIdlePresenceProviders({
+      getBuildInfo: () => makeDaemonBuild("abc1234"),
+      getHostHelloIdentity: () => EMPTY_HOST,
+      collectPresenceSnapshot: () => ({
+        timeSync: makeTimeSync("UTC"),
+        ips: makeIps("203.0.113.10"),
+      }),
+    });
+    const idleCheckIntervalMs = 20;
+    const socket = openMockSocket();
+    let staleCalls = 0;
+    const presence = new IdlePresence({
+      serverId: "srv-stale",
+      idleCheckIntervalMs,
+      idleThresholdMs: idleCheckIntervalMs,
+      staleConnectionMs: 5,
+      onStaleConnection: () => {
+        staleCalls += 1;
+      },
+    });
+    try {
+      presence.attach(socket as unknown as WebSocket);
+      await sleep(idleCheckIntervalMs + 15);
+      assertEquals(staleCalls, 1, "stale should fire on first silent tick");
+      await sleep(idleCheckIntervalMs + 15);
+      assertEquals(staleCalls, 1, "stale must fire at most once until inbound");
+
+      presence.noteInboundActivity();
+      await sleep(idleCheckIntervalMs + 15);
+      assertEquals(
+        staleCalls,
+        2,
+        "inbound activity must re-arm stale detection",
+      );
+    } finally {
+      presence.detach();
+      restore();
+    }
+  },
+});
+
+test({
+  name: "IdlePresence honors a larger minPresenceInterval between cell pings",
+  fn: async () => {
+    const restore = installIdlePresenceProviders({
+      getBuildInfo: () => makeDaemonBuild("abc1234"),
+      getHostHelloIdentity: () => EMPTY_HOST,
+      collectPresenceSnapshot: () => ({
+        timeSync: makeTimeSync("UTC"),
+        ips: makeIps("203.0.113.10"),
+      }),
+    });
+    const idleCheckIntervalMs = 15;
+    const socket = openMockSocket();
+    const presence = new IdlePresence({
+      serverId: "srv-min-interval",
+      idleCheckIntervalMs,
+      idleThresholdMs: idleCheckIntervalMs,
+      minPresenceIntervalMs: 10_000,
+      staleConnectionMs: 60_000,
+    });
+    try {
+      presence.attach(socket as unknown as WebSocket);
+      await sleep(idleCheckIntervalMs * 2 + 25);
+      const pings = socket.sentFrames.filter((frame) =>
+        frame === '{"type":"ping"}'
+      );
+      assertEquals(
+        pings.length,
+        1,
+        "first tick pings; a larger min interval must skip the next tick",
+      );
+    } finally {
+      presence.detach();
+      restore();
+    }
+  },
+});

@@ -8,6 +8,14 @@ import {
 
 const test = Deno.test.bind(Deno);
 
+test("parsePhpSeriesFromBinaries caps series at 16", () => {
+  const names = Array.from({ length: 18 }, (_, i) => `php-fpm8.${i}`);
+  const parsed = parsePhpSeriesFromBinaries(names);
+  assertEquals(parsed.length, 16);
+  assertEquals(parsed[0], "8.0");
+  assertEquals(parsed[15], "8.15");
+});
+
 test("parsePhpSeriesFromBinaries reads co-installed series from /usr/sbin", () => {
   assertEquals(
     parsePhpSeriesFromBinaries([
@@ -165,6 +173,52 @@ test("readHostRuntimes caps vendored series at 16", async () => {
     assertEquals(series[15], "16");
   } finally {
     await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("readHostRuntimes omits php extensions when mods-available is empty", () => {
+  const originalReadDir = Deno.readDirSync.bind(Deno);
+  Deno.readDirSync = function (
+    path: string | URL,
+  ): Iterable<Deno.DirEntry> {
+    const p = String(path);
+    if (p === "/usr/sbin") {
+      return [dirEntry("php-fpm8.4")];
+    }
+    if (p === "/etc/php/8.4/mods-available") {
+      return [dirEntry("README")];
+    }
+    return originalReadDir(path);
+  } as typeof Deno.readDirSync;
+  const dir = Deno.makeTempDirSync({ prefix: "tp-runtimes-php-empty-" });
+  try {
+    const meta = readHostRuntimes(dir);
+    if (!meta?.php) {
+      throw new TypeError("expected php series without extensions");
+    }
+    assertEquals(meta.php.series, ["8.4"]);
+    assertEquals(meta.php.extensions, undefined);
+  } finally {
+    Deno.readDirSync = originalReadDir;
+    Deno.removeSync(dir, { recursive: true });
+  }
+});
+
+test("readHostRuntimes returns undefined when php and vendor trees are empty", () => {
+  const originalReadDir = Deno.readDirSync.bind(Deno);
+  Deno.readDirSync = function (
+    path: string | URL,
+  ): Iterable<Deno.DirEntry> {
+    const p = String(path);
+    if (p === "/usr/sbin") return [];
+    return originalReadDir(path);
+  } as typeof Deno.readDirSync;
+  const dir = Deno.makeTempDirSync({ prefix: "tp-runtimes-empty-" });
+  try {
+    assertEquals(readHostRuntimes(dir), undefined);
+  } finally {
+    Deno.readDirSync = originalReadDir;
+    Deno.removeSync(dir, { recursive: true });
   }
 });
 

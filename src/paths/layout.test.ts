@@ -657,3 +657,43 @@ test("resolveDaemonRoot cwd throw does not fail discovery", () => {
     Deno.cwd = originalCwd;
   }
 });
+
+test("detectInstallMode ignores whitespace and non-checkout TURBOPANEL_DAEMON_ROOT", async () => {
+  assertEquals(
+    detectInstallMode(
+      { TURBOPANEL_DAEMON_ROOT: "   " },
+      { fromMeta: "/opt/turbopanel/lib/daemon", skipDiscovery: true },
+    ),
+    "production",
+  );
+
+  await withTempLayout(async (fixture) => {
+    const notCheckout = join(fixture.dirs.stateDir, "not-checkout");
+    await Deno.mkdir(notCheckout);
+    assertEquals(
+      detectInstallMode(
+        { TURBOPANEL_DAEMON_ROOT: notCheckout },
+        { fromMeta: "/opt/turbopanel/lib/daemon", skipDiscovery: true },
+      ),
+      "production",
+    );
+  });
+});
+
+test("resolveDaemonRoot requireCheckout rejects a compiled-stub override", () => {
+  assertThrows(
+    () =>
+      resolveDaemonRoot(
+        { TURBOPANEL_DAEMON_ROOT: "/tmp/deno-compile-stub" },
+        { skipDiscovery: true, requireCheckout: true },
+      ),
+    DaemonSourceRootError,
+    "not a daemon source checkout",
+  );
+});
+
+test("DaemonSourceRootError keeps a distinct name", () => {
+  const err = new DaemonSourceRootError("missing checkout");
+  assertEquals(err.name, "DaemonSourceRootError");
+  assertEquals(err.message, "missing checkout");
+});

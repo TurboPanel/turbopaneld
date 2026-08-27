@@ -177,6 +177,19 @@ test("WireGuard validators accept canonical encodings and reject hostile input",
   assertEquals(isValidWireguardEndpoint("203.0.113.10"), false);
   assertEquals(isValidWireguardEndpoint("203.0.113.10:0"), false);
   assertEquals(isValidWireguardEndpoint("203.0.113.10:not-a-port"), false);
+  // Neither family — hostname CIDR is not a WireGuard allowed IP.
+  assertEquals(isValidWireguardAllowedIp("relay.example.test/24"), false);
+  // IPv6 prefix wider than /128, and a prefix that overflows to Infinity.
+  assertEquals(isValidWireguardAllowedIp("2001:db8::/129"), false);
+  assertEquals(
+    isValidWireguardAllowedIp(`203.0.113.0/${"9".repeat(400)}`),
+    false,
+  );
+  assertEquals(
+    isValidWireguardEndpoint(`host.example.test:${"1".repeat(250)}`),
+    false,
+  );
+  assertEquals(isValidWireguardEndpoint("203.0.113.10: 51820"), false);
 });
 
 test("parseFabricReconcilePayload rejects invalid peer keepalive and mtu", () => {

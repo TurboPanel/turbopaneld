@@ -79,6 +79,40 @@ test("byte cap emits one truncation marker and stops uploading", async () => {
   );
 });
 
+test("upload uses default sleep between retries", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const delays: number[] = [];
+  globalThis.setTimeout = ((handler: () => void, ms?: number) => {
+    delays.push(ms ?? 0);
+    queueMicrotask(handler);
+    return 0 as unknown as ReturnType<typeof setTimeout>;
+  }) as typeof setTimeout;
+  try {
+    let calls = 0;
+    const uploader = new CommandLogUploader({
+      commandId: "cmd-default-sleep",
+      send: () => {
+        calls += 1;
+        if (calls === 1) return Promise.reject(new Error("once"));
+        return Promise.resolve({ nextSeq: 1 });
+      },
+    });
+    assertEquals(await uploader.upload({ seq: 0, bytes: "line\n" }), true);
+    assertEquals(delays[0], 200);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("upload reports unacked when maxAttempts is zero", async () => {
+  const uploader = new CommandLogUploader({
+    commandId: "cmd-zero-attempts",
+    maxAttempts: 0,
+    send: () => Promise.reject(new Error("must not be called")),
+  });
+  assertEquals(await uploader.upload({ seq: 0, bytes: "line\n" }), false);
+});
+
 test("a failed truncation marker is reported as unacked and stays unsealed", async () => {
   const attempts: SentChunk[] = [];
   const uploader = new CommandLogUploader({

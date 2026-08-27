@@ -175,6 +175,7 @@ test("devOrchestrationAnsibleEnv overlays dev roles ahead of daemon roles", asyn
       true,
     );
     assertEquals(env.ANSIBLE_EXECUTABLE, "/bin/bash");
+    assertEquals(env.ANSIBLE_HOME, "/tmp/turbopanel-ansible");
   });
 });
 
@@ -207,6 +208,82 @@ test("devOrchestrationReady is true when manifest, cfg, and playbook exist", asy
     const restore = withDevOrchestrationEnv(devRoot);
     try {
       assertEquals(await devOrchestrationReady(), true);
+    } finally {
+      restore();
+    }
+  });
+});
+
+test("resolveDevOrchestrationDir defaults to <devRoot>/dev/orchestration", () => {
+  const dir = resolveDevOrchestrationDir({
+    TURBOPANEL_DEV_ORCHESTRATION_DIR: "",
+    TURBOPANEL_DEV_ROOT: "/home/vagrant",
+  });
+  assertEquals(dir, join("/home/vagrant", "dev", "orchestration"));
+});
+
+test("resolveDevOrchestrationDir maps a slash-only override to root", () => {
+  assertEquals(
+    resolveDevOrchestrationDir({ TURBOPANEL_DEV_ORCHESTRATION_DIR: "///" }),
+    "/",
+  );
+});
+
+test("devOrchestrationReady is false when ansible.cfg is missing", async () => {
+  await withTempLayout(async (fixture) => {
+    const devRoot = join(fixture.dirs.configDir, "dev-orch");
+    await Deno.mkdir(devRoot, { recursive: true });
+    await Deno.writeTextFile(
+      join(devRoot, DEV_CONVERGE_MANIFEST_FILE),
+      JSON.stringify({ playbook: "playbook.yml", roles: [], devRoles: [] }),
+    );
+    const restore = withDevOrchestrationEnv(devRoot);
+    try {
+      assertEquals(await devOrchestrationReady(), false);
+    } finally {
+      restore();
+    }
+  });
+});
+
+test("requireDevOrchestrationLayout returns the overlay when complete", async () => {
+  await withTempLayout(async (fixture) => {
+    const devRoot = join(fixture.dirs.configDir, "dev-orch");
+    await seedDevOrchestrationTree(devRoot);
+    const restore = withDevOrchestrationEnv(devRoot);
+    try {
+      const layout = await requireDevOrchestrationLayout();
+      assertEquals(layout.root, devRoot);
+      assertEquals(layout.playbookPath, join(devRoot, "playbook.yml"));
+    } finally {
+      restore();
+    }
+  });
+});
+
+test("requireDevOrchestrationLayout throws when ansible.cfg is missing", async () => {
+  await withTempLayout(async (fixture) => {
+    const devRoot = join(fixture.dirs.configDir, "dev-orch");
+    await Deno.mkdir(devRoot, { recursive: true });
+    await Deno.writeTextFile(
+      join(devRoot, DEV_CONVERGE_MANIFEST_FILE),
+      JSON.stringify({
+        playbook: "playbook.yml",
+        roles: [],
+        devRoles: [],
+      }),
+    );
+    await Deno.writeTextFile(
+      join(devRoot, "playbook.yml"),
+      "---\n- hosts: localhost\n",
+    );
+    const restore = withDevOrchestrationEnv(devRoot);
+    try {
+      await assertRejects(
+        () => requireDevOrchestrationLayout(),
+        Error,
+        "Dev orchestration ansible.cfg missing",
+      );
     } finally {
       restore();
     }

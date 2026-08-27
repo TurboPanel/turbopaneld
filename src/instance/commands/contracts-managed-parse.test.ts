@@ -5,12 +5,14 @@ import {
   parseManagedBackupResult,
   parseManagedDestroyPayload,
   parseManagedHaFailoverPayload,
+  parseManagedHaFailoverResult,
   parseManagedHaReconcilePayload,
   parseManagedHaReconcileResult,
   parseManagedIngressReconcilePayload,
   parseManagedLifecyclePayload,
   parseManagedPromotePayload,
   parseManagedPromoteResult,
+  parseManagedRestorePayload,
   parseManagedRestoreResult,
 } from "./contracts.ts";
 
@@ -952,5 +954,402 @@ test("parseManagedHaFailoverPayload rejects missing fields and optional host/por
       }),
     TypeError,
     "Invalid managed.ha.failover payload",
+  );
+});
+
+const RESTORE_BASE = {
+  managedId: MANAGED_ID,
+  engine: "postgres",
+  backupId: "bk_1",
+  artifactExtension: "dump",
+  checksum: "a".repeat(64),
+};
+
+const ORG_TLS = {
+  certificatePem:
+    "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----",
+  privateKeyEnvelope: TP_ENVELOPE,
+  caCertPem: "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----",
+};
+
+test("parseManagedRestorePayload rejects non-objects and accepts optional sizeBytes", () => {
+  assertThrows(
+    () => parseManagedRestorePayload(null),
+    Error,
+    "Invalid managed.restore payload",
+  );
+  assertThrows(
+    () => parseManagedRestorePayload([]),
+    Error,
+    "Invalid managed.restore payload",
+  );
+  assertEquals(
+    parseManagedRestorePayload({ ...RESTORE_BASE, sizeBytes: 4096 }).sizeBytes,
+    4096,
+  );
+  assertThrows(
+    () => parseManagedRestorePayload({ ...RESTORE_BASE, sizeBytes: -1 }),
+    Error,
+    "Invalid managed.restore payload sizeBytes",
+  );
+});
+
+test("parseManagedApplyPayload rejects leftover image config volume tls and replication shapes", () => {
+  rejectApply({ image: "" }, "Invalid managed.apply payload");
+  rejectApply({ image: "x".repeat(257) }, "Invalid managed.apply payload");
+  rejectApply({ image: "postgres alpine" }, "Invalid managed.apply payload");
+  rejectApply({ image: "postgres;rm" }, "Invalid managed.apply payload");
+  assertEquals(
+    parseManagedApplyPayload({
+      ...VALID_MANAGED_APPLY,
+      engine: "redis",
+      image: "docker.io/library/redis:7",
+      composeYaml: "services:\n  redis:\n    image: redis:7\n",
+    }).engine,
+    "redis",
+  );
+  rejectApply(
+    { configFiles: [null] },
+    "Invalid managed.apply configFiles entry",
+  );
+  rejectApply(
+    {
+      configFiles: [{
+        path: "",
+        contents: "listen_addresses = '*'\n",
+        mode: "0640",
+      }],
+    },
+    "Invalid managed.apply configFiles entry",
+  );
+  rejectApply(
+    {
+      configFiles: [{
+        path: "/postgresql.conf",
+        contents: "listen_addresses = '*'\n",
+        mode: "0640",
+      }],
+    },
+    "Invalid managed.apply configFiles entry",
+  );
+  rejectApply(
+    {
+      configFiles: [{
+        path: "tls\\server.crt",
+        contents: "cert",
+        mode: "0640",
+      }],
+    },
+    "Invalid managed.apply configFiles entry",
+  );
+  rejectApply(
+    {
+      configFiles: [{
+        path: "../postgresql.conf",
+        contents: "listen_addresses = '*'\n",
+        mode: "0640",
+      }],
+    },
+    "Invalid managed.apply configFiles entry",
+  );
+  rejectApply(
+    {
+      configFiles: [{
+        path: "postgresql.conf;rm",
+        contents: "listen_addresses = '*'\n",
+        mode: "0640",
+      }],
+    },
+    "Invalid managed.apply configFiles entry",
+  );
+  rejectApply({ volumes: [null] }, "Invalid managed.apply volumes entry");
+  rejectApply(
+    { tlsMaterial: "self-signed" },
+    "Invalid managed.apply tlsMaterial",
+  );
+  rejectApply(
+    { orgTlsMaterial: "pem" },
+    "Invalid managed.apply orgTlsMaterial",
+  );
+  rejectApply({ replication: "primary" }, "Invalid managed.apply replication");
+  rejectApply(
+    {
+      replication: {
+        role: "primary",
+        username: "repl",
+        desiredSlots: ["slot1"],
+        peerAddresses: [""],
+      },
+    },
+    "Invalid managed.apply replication.peerAddresses",
+  );
+  rejectApply(
+    { privateListener: { address: "::1", port: 5432 } },
+    "Invalid managed.apply privateListener",
+  );
+  assertEquals(
+    parseManagedApplyPayload({
+      ...VALID_MANAGED_APPLY,
+      tlsMaterial: {
+        selfSigned: true,
+        commonName: "db.example.test",
+        certPath: "tls/server.crt",
+        keyPath: "tls/server.key",
+      },
+      orgTlsMaterial: ORG_TLS,
+    }).tlsMaterial?.commonName,
+    "db.example.test",
+  );
+});
+
+test("parseManagedIngressReconcilePayload rejects leftover identity cluster and result shapes", () => {
+  assertThrows(
+    () =>
+      parseManagedIngressReconcilePayload({
+        serverId: SERVER_ID,
+        clusters: "none",
+      }),
+    TypeError,
+    "Invalid managed.ingress.reconcile payload",
+  );
+  assertThrows(
+    () =>
+      parseManagedIngressReconcilePayload({
+        ...VALID_INGRESS,
+        identity: "proxysql",
+      }),
+    TypeError,
+    "Invalid managed.ingress.reconcile identity",
+  );
+  assertThrows(
+    () =>
+      parseManagedIngressReconcilePayload({
+        ...VALID_INGRESS,
+        clusters: [{
+          ...VALID_INGRESS.clusters[0],
+          backends: "local",
+        }],
+      }),
+    TypeError,
+    "Invalid managed.ingress.reconcile cluster",
+  );
+  assertThrows(
+    () =>
+      parseManagedIngressReconcilePayload({
+        ...VALID_INGRESS,
+        clusters: [{
+          ...VALID_INGRESS.clusters[0],
+          users: [{
+            username: "app",
+            role: "user",
+            password: "plaintext",
+          }],
+        }],
+      }),
+    TypeError,
+    "Invalid managed.ingress.reconcile user",
+  );
+  assertThrows(
+    () =>
+      parseManagedIngressReconcilePayload({
+        ...VALID_INGRESS,
+        bindAddresses: [12],
+      }),
+    TypeError,
+    "Invalid managed.ingress.reconcile bindAddresses",
+  );
+  const accepted = parseManagedIngressReconcilePayload({
+    serverId: SERVER_ID,
+    clusters: VALID_INGRESS.clusters,
+    identity: {
+      serviceId: SERVICE_ID,
+      composeServiceName: "proxysql",
+      containerName: `${SERVICE_ID}-in`,
+    },
+  });
+  assertEquals(accepted.identity?.composeServiceName, "proxysql");
+  assertEquals(accepted.segments, undefined);
+});
+
+test("parseManagedHaReconcilePayload rejects leftover identity raft cluster and result shapes", () => {
+  assertThrows(
+    () =>
+      parseManagedHaReconcilePayload({
+        serverId: SERVER_ID,
+        desired: "present",
+        raft: null,
+        clusters: [],
+        identity: null,
+      }),
+    TypeError,
+    "Invalid managed.ha.reconcile identity",
+  );
+  assertThrows(
+    () =>
+      parseManagedHaReconcilePayload({
+        serverId: SERVER_ID,
+        desired: "present",
+        raft: {
+          nodeId: SERVER_ID,
+          advertiseAddress: "not-an-ip",
+          httpPort: 33001,
+          raftPort: 33002,
+          peers: [],
+        },
+        clusters: [],
+        identity: HA_IDENTITY,
+      }),
+    TypeError,
+    "Invalid managed.ha.reconcile raft",
+  );
+  assertThrows(
+    () =>
+      parseManagedHaReconcilePayload({
+        serverId: SERVER_ID,
+        desired: "present",
+        raft: {
+          nodeId: SERVER_ID,
+          advertiseAddress: "203.0.113.10",
+          httpPort: 33001,
+          raftPort: 33002,
+          peers: [{
+            nodeId: SERVER_ID,
+            address: "203.0.113.11",
+            raftPort: 0,
+            httpPort: 33001,
+          }],
+        },
+        clusters: [],
+        identity: HA_IDENTITY,
+      }),
+    TypeError,
+    "Invalid managed.ha.reconcile raft peer",
+  );
+  assertThrows(
+    () =>
+      parseManagedHaReconcilePayload({
+        serverId: SERVER_ID,
+        desired: "present",
+        raft: null,
+        clusters: [{
+          managedId: MANAGED_ID,
+          clusterAlias: MANAGED_ID,
+          engine: "postgres",
+          members: [{
+            memberId: MEMBER_ID,
+            role: "primary",
+            replicaClass: null,
+            host: "",
+            port: 5432,
+            promotionRule: "prefer",
+          }],
+          replicationUsername: "tp_repl",
+          replicationPasswordEnvelope: TP_ENVELOPE,
+        }],
+        identity: HA_IDENTITY,
+      }),
+    TypeError,
+    "Invalid managed.ha.reconcile cluster member",
+  );
+  assertThrows(
+    () =>
+      parseManagedHaReconcilePayload({
+        serverId: SERVER_ID,
+        desired: "present",
+        raft: null,
+        clusters: [{
+          managedId: MANAGED_ID,
+          clusterAlias: MANAGED_ID,
+          engine: "postgres",
+          members: [{
+            memberId: MEMBER_ID,
+            role: "primary",
+            replicaClass: null,
+            host: "db-1",
+            port: 5432,
+            promotionRule: "prefer",
+          }],
+          replicationUsername: "tp_repl",
+          replicationPasswordEnvelope: "plaintext",
+        }],
+        identity: HA_IDENTITY,
+      }),
+    TypeError,
+    "Invalid managed.ha.reconcile cluster",
+  );
+  assertThrows(
+    () =>
+      parseManagedHaReconcilePayload({
+        serverId: SERVER_ID,
+        desired: "present",
+        raft: {
+          nodeId: SERVER_ID,
+          advertiseAddress: "203.0.113.10",
+          httpPort: 33001,
+          raftPort: 33002,
+          peers: Array.from({ length: 33 }, (_, index) => ({
+            nodeId: `${SERVER_ID.slice(0, -2)}${
+              String(index).padStart(2, "0")
+            }`,
+            address: "203.0.113.11",
+            raftPort: 33002,
+            httpPort: 33001,
+          })),
+        },
+        clusters: [],
+        identity: HA_IDENTITY,
+      }),
+    TypeError,
+    "Invalid managed.ha.reconcile raft",
+  );
+  const withTls = parseManagedHaReconcilePayload({
+    serverId: SERVER_ID,
+    desired: "absent",
+    raft: null,
+    clusters: [],
+    identity: HA_IDENTITY,
+    orgTlsMaterial: ORG_TLS,
+  });
+  assertEquals(withTls.orgTlsMaterial?.caCertPem.includes("BEGIN"), true);
+  assertThrows(
+    () => parseManagedHaReconcileResult(null),
+    TypeError,
+    "Invalid managed.ha.reconcile result",
+  );
+  assertThrows(
+    () =>
+      parseManagedHaReconcileResult({
+        summary: "ok",
+        registeredClusters: [],
+        restarted: false,
+        containers: [{
+          composeServiceName: "ha",
+          containerId: "cid-1",
+          containerName: "ha-1",
+          status: "running",
+        }],
+      }),
+    TypeError,
+    "Invalid managed.ha.reconcile result containers",
+  );
+  assertEquals(
+    parseManagedHaReconcileResult({
+      summary: "ok",
+      registeredClusters: [MANAGED_ID],
+      restarted: false,
+      containers: [{
+        composeServiceName: "orchestrator",
+        containerId: "cid-1",
+        containerName: `${SERVICE_ID}-ha`,
+        status: "running",
+        role: "turbopanel",
+      }],
+    }).containers?.length,
+    1,
+  );
+  assertThrows(
+    () => parseManagedHaFailoverResult("ok"),
+    TypeError,
+    "Invalid managed.ha.failover result",
   );
 });

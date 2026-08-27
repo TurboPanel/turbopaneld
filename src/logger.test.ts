@@ -35,6 +35,8 @@ test("sanitizeForLog covers primitives, errors, and objects", () => {
   const circular: { self?: unknown } = {};
   circular.self = circular;
   assertEquals(sanitizeForLog(circular), "[unserializable]");
+  assertEquals(sanitizeForLog(Symbol("x")), "[unserializable]");
+  assertEquals(sanitizeForLog(() => "fn"), "[unserializable]");
 });
 
 test("log helpers write structured lines without throwing", () => {

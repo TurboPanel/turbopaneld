@@ -118,29 +118,50 @@ export async function generateChannelManifest(options: {
   return manifest;
 }
 
-if (import.meta.main) {
-  try {
-    const BUILD_ID = requireEnv("BUILD_ID");
-    const SHORT_SHA = requireEnv("SHORT_SHA");
-    const BUILT_AT = requireEnv("BUILT_AT");
+export type GenerateChannelManifestCliIo = {
+  env?: Record<string, string | undefined>;
+  args?: string[];
+  error?: (message: string) => void;
+  exit?: (code: number) => void;
+  generate?: typeof generateChannelManifest;
+};
 
-    const DL_BASE_URL = Deno.env.get("DL_BASE_URL")?.trim() ||
+export async function runGenerateChannelManifestCli(
+  io: GenerateChannelManifestCliIo = {},
+): Promise<void> {
+  const getEnv = (name: string) => io.env?.[name] ?? Deno.env.get(name);
+  const args = io.args ?? Deno.args;
+  const error = io.error ?? ((message: string) => {
+    console.error(message);
+  });
+  const exit = io.exit ?? ((code: number) => {
+    Deno.exit(code);
+  });
+  const generate = io.generate ?? generateChannelManifest;
+
+  try {
+    const BUILD_ID = requireEnv("BUILD_ID", getEnv);
+    const SHORT_SHA = requireEnv("SHORT_SHA", getEnv);
+    const BUILT_AT = requireEnv("BUILT_AT", getEnv);
+
+    const DL_BASE_URL = getEnv("DL_BASE_URL")?.trim() ||
       "https://dl.trbp.nl";
     const DEFAULT_CONTROL_PLANE_URL =
-      Deno.env.get("TURBOPANEL_DEFAULT_CONTROL_PLANE_URL")?.trim() ||
+      getEnv("TURBOPANEL_DEFAULT_CONTROL_PLANE_URL")?.trim() ||
       "https://turbopanel.app";
 
-    const publishDir = Deno.args[0];
-    const outputPath = Deno.args[1];
+    const publishDir = args[0];
+    const outputPath = args[1];
 
     if (!publishDir) {
-      console.error(
+      error(
         "Usage: generate-channel-manifest.ts <publish-daemon-dir> [manifest-output-path]",
       );
-      Deno.exit(1);
+      exit(1);
+      return;
     }
 
-    await generateChannelManifest({
+    await generate({
       publishDir,
       outputPath,
       buildId: BUILD_ID,
@@ -150,6 +171,10 @@ if (import.meta.main) {
       defaultControlPlaneUrl: DEFAULT_CONTROL_PLANE_URL,
     });
   } catch {
-    Deno.exit(1);
+    exit(1);
   }
+}
+
+if (import.meta.main) {
+  await runGenerateChannelManifestCli();
 }

@@ -345,6 +345,11 @@ it("MetricsScheduler steady cadence emits one frame per interval", async () => {
   assertEquals(parseMetricsFrames(sent).length, 5);
 });
 
+it("deterministicJitterMs is zero when maxMs is non-positive", () => {
+  assertEquals(deterministicJitterMs("server-a", 0), 0);
+  assertEquals(deterministicJitterMs("server-a", -1), 0);
+});
+
 it("deterministicJitterMs is bounded, stable, and spreads across ids", () => {
   const maxMs = METRICS_JITTER_MAX_MS;
   const a = deterministicJitterMs("server-a", maxMs);
@@ -810,6 +815,74 @@ it("collector factory throw disables metrics without throwing", () => {
 
   scheduler.attach(capturingSink(sent));
   assertEquals(logs.some((m) => m.includes("collector factory failed")), true);
+});
+
+it("rebindMetricsScheduler reuses the scheduler when serverId is unchanged", () => {
+  const clock = new FakeClock();
+  const factory = () =>
+    createFakeCollector((sequence) => supportedSample(sequence));
+  const first = rebindMetricsScheduler({
+    existing: undefined,
+    existingServerId: undefined,
+    serverId: "server-same",
+    collectorFactory: factory,
+    schedulerOptions: {
+      intervalMs: 1_000,
+      jitterMaxMs: 0,
+      primeMs: 0,
+      now: clock.now,
+      setTimeoutFn: clock.setTimeoutFn as unknown as typeof setTimeout,
+      clearTimeoutFn: clock.clearTimeoutFn as unknown as typeof clearTimeout,
+      setIntervalFn: clock.setIntervalFn as unknown as typeof setInterval,
+      clearIntervalFn: clock.clearIntervalFn as unknown as typeof clearInterval,
+    },
+  });
+  const reused = rebindMetricsScheduler({
+    existing: first.scheduler,
+    existingServerId: "server-same",
+    serverId: "server-same",
+    collectorFactory: factory,
+  });
+  assertEquals(reused.scheduler, first.scheduler);
+  assertEquals(reused.serverId, "server-same");
+});
+
+it("MetricsScheduler default logger does not throw on factory failure", () => {
+  const clock = new FakeClock();
+  const scheduler = makeScheduler({
+    clock,
+    jitterMaxMs: 0,
+    collectorFactory: () => {
+      throw new Error("factory boom");
+    },
+  });
+  scheduler.attach(capturingSink([]));
+});
+
+it("MetricsScheduler primed tick is a no-op after unsupported first sample", async () => {
+  const clock = new FakeClock();
+  const logs: string[] = [];
+  const sent: unknown[] = [];
+  const scheduler = makeScheduler({
+    clock,
+    intervalMs: 1_000,
+    jitterMaxMs: 0,
+    primeMs: 50,
+    onLog: (_level, message) => logs.push(message),
+    collectorFactory: () =>
+      createFakeCollector(() => ({
+        supported: false,
+        reason: "unsupported_os:windows",
+      })),
+  });
+
+  scheduler.attach(capturingSink(sent));
+  await clock.advance(0);
+  assertEquals(sent.length, 0);
+  const logCount = logs.length;
+  await clock.advance(50);
+  assertEquals(sent.length, 0);
+  assertEquals(logs.length, logCount);
 });
 
 it("rebindMetricsScheduler updates serverId and preserves sequence", async () => {

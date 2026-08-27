@@ -6,6 +6,7 @@
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import {
+  CHECKOUT_TIMEOUT_MS,
   checkoutRelease,
   gitEnvironment,
   type GitRunner,
@@ -82,6 +83,28 @@ test("gitEnvironment allow-list never carries credential material", async () => 
     }
     await removeCheckoutCredentialFiles(files);
   } finally {
+    await Deno.remove(scratchDir, { recursive: true });
+  }
+});
+
+test("gitEnvironment falls back to a POSIX PATH when PATH is unset", async () => {
+  const scratchDir = await Deno.makeTempDir({ prefix: "tp-checkout-path-" });
+  const previous = Deno.env.get("PATH");
+  Deno.env.delete("PATH");
+  try {
+    const files = await writeCheckoutCredentialFiles({
+      cloneUrl: "https://example.com/o/r.git",
+      ref: "main",
+      commitSha: SHA,
+      scratchDir,
+      credential: "super-secret-token",
+    });
+    const env = gitEnvironment(files, scratchDir);
+    assertEquals(env.PATH, "/usr/local/bin:/usr/bin:/bin");
+    await removeCheckoutCredentialFiles(files);
+  } finally {
+    if (previous === undefined) Deno.env.delete("PATH");
+    else Deno.env.set("PATH", previous);
     await Deno.remove(scratchDir, { recursive: true });
   }
 });
@@ -251,4 +274,362 @@ test("SSH gitEnvironment quotes identity and known-hosts paths", async () => {
   } finally {
     await Deno.remove(scratchDir, { recursive: true });
   }
+});
+
+test("checkoutRelease uses clone stdout when stderr is empty", async () => {
+  const scratchDir = await Deno.makeTempDir({
+    prefix: "tp-checkout-clone-stdout-",
+  });
+  try {
+    const { run } = scriptedGit([
+      () => ({ success: false, stdout: "clone stdout only", stderr: "" }),
+    ]);
+    await assertRejects(
+      () =>
+        checkoutRelease({
+          cloneUrl: "https://example.com/o/r.git",
+          ref: "main",
+          commitSha: SHA,
+          scratchDir,
+          runGit: run,
+        }),
+      Error,
+      "clone stdout only",
+    );
+  } finally {
+    await Deno.remove(scratchDir, { recursive: true });
+  }
+});
+
+test("checkoutRelease falls back to a generic clone error", async () => {
+  const scratchDir = await Deno.makeTempDir({
+    prefix: "tp-checkout-clone-generic-",
+  });
+  try {
+    const { run } = scriptedGit([
+      () => ({ success: false, stdout: "", stderr: "" }),
+    ]);
+    await assertRejects(
+      () =>
+        checkoutRelease({
+          cloneUrl: "https://example.com/o/r.git",
+          ref: "main",
+          commitSha: SHA,
+          scratchDir,
+          runGit: run,
+        }),
+      Error,
+      "git clone failed",
+    );
+  } finally {
+    await Deno.remove(scratchDir, { recursive: true });
+  }
+});
+
+test("checkoutRelease throws when checkout of the pinned commit fails", async () => {
+  const scratchDir = await Deno.makeTempDir({
+    prefix: "tp-checkout-cofail-",
+  });
+  try {
+    const { run } = scriptedGit([
+      () => ({ success: true, stdout: "", stderr: "" }),
+      () => ({ success: true, stdout: OTHER_SHA, stderr: "" }),
+      () => ({ success: true, stdout: "", stderr: "" }),
+      () => ({ success: false, stdout: "", stderr: "cannot detach" }),
+    ]);
+    await assertRejects(
+      () =>
+        checkoutRelease({
+          cloneUrl: "https://example.com/o/r.git",
+          ref: "main",
+          commitSha: SHA,
+          scratchDir,
+          runGit: run,
+        }),
+      Error,
+      "cannot detach",
+    );
+  } finally {
+    await Deno.remove(scratchDir, { recursive: true });
+  }
+});
+
+test("checkoutRelease uses a generic message when pinned checkout is silent", async () => {
+  const scratchDir = await Deno.makeTempDir({
+    prefix: "tp-checkout-co-generic-",
+  });
+  try {
+    const { run } = scriptedGit([
+      () => ({ success: true, stdout: "", stderr: "" }),
+      () => ({ success: true, stdout: OTHER_SHA, stderr: "" }),
+      () => ({ success: true, stdout: "", stderr: "" }),
+      () => ({ success: false, stdout: "", stderr: "" }),
+    ]);
+    await assertRejects(
+      () =>
+        checkoutRelease({
+          cloneUrl: "https://example.com/o/r.git",
+          ref: "main",
+          commitSha: SHA,
+          scratchDir,
+          runGit: run,
+        }),
+      Error,
+      "git checkout of pinned commit failed",
+    );
+  } finally {
+    await Deno.remove(scratchDir, { recursive: true });
+  }
+});
+
+test("checkoutRelease keeps the payload sha when pinned rev-parse fails", async () => {
+  const scratchDir = await Deno.makeTempDir({
+    prefix: "tp-checkout-revparse-",
+  });
+  try {
+    const { run } = scriptedGit([
+      () => ({ success: true, stdout: "", stderr: "" }),
+      () => ({ success: true, stdout: OTHER_SHA, stderr: "" }),
+      () => ({ success: true, stdout: "", stderr: "" }),
+      () => ({ success: true, stdout: "", stderr: "" }),
+      () => ({ success: false, stdout: "", stderr: "ambiguous" }),
+    ]);
+    const result = await checkoutRelease({
+      cloneUrl: "https://example.com/o/r.git",
+      ref: "main",
+      commitSha: SHA,
+      scratchDir,
+      runGit: run,
+    });
+    assertEquals(result.commitSha, SHA);
+  } finally {
+    await Deno.remove(scratchDir, { recursive: true });
+  }
+});
+
+test("checkoutRelease uses a generic fetch error when fetch is silent", async () => {
+  const scratchDir = await Deno.makeTempDir({
+    prefix: "tp-checkout-fetch-generic-",
+  });
+  try {
+    const { run } = scriptedGit([
+      () => ({ success: true, stdout: "", stderr: "" }),
+      () => ({ success: true, stdout: OTHER_SHA, stderr: "" }),
+      () => ({ success: false, stdout: "", stderr: "" }),
+    ]);
+    await assertRejects(
+      () =>
+        checkoutRelease({
+          cloneUrl: "https://example.com/o/r.git",
+          ref: "main",
+          commitSha: SHA,
+          scratchDir,
+          runGit: run,
+        }),
+      Error,
+      "git fetch of pinned commit failed",
+    );
+  } finally {
+    await Deno.remove(scratchDir, { recursive: true });
+  }
+});
+
+test({
+  name: "checkoutRelease default runner reports a failed local clone",
+  permissions: { read: true, write: true, run: true, env: true },
+  fn: async () => {
+    const scratchDir = await Deno.makeTempDir({
+      prefix: "tp-checkout-rungit-",
+    });
+    try {
+      await assertRejects(
+        () =>
+          checkoutRelease({
+            cloneUrl: join(scratchDir, "missing.git"),
+            ref: "main",
+            commitSha: SHA,
+            scratchDir,
+          }),
+        Error,
+      );
+    } finally {
+      await Deno.remove(scratchDir, { recursive: true });
+    }
+  },
+});
+
+function abortError(): DOMException {
+  return new DOMException("The signal has been aborted", "AbortError");
+}
+
+function stubDenoCommand(
+  spawn: () => Deno.ChildProcess,
+): () => void {
+  const original = Deno.Command;
+  Deno.Command = class {
+    spawn() {
+      return spawn();
+    }
+  } as unknown as typeof Deno.Command;
+  return () => {
+    Deno.Command = original;
+  };
+}
+
+test({
+  name: "checkoutRelease default runner reports a git timeout",
+  permissions: { read: true, write: true, run: true, env: true },
+  fn: async () => {
+    const restore = stubDenoCommand(() => {
+      throw abortError();
+    });
+    const scratchDir = await Deno.makeTempDir({
+      prefix: "tp-checkout-timeout-",
+    });
+    try {
+      await assertRejects(
+        () =>
+          checkoutRelease({
+            cloneUrl: "https://example.com/o/r.git",
+            ref: "main",
+            commitSha: SHA,
+            scratchDir,
+          }),
+        Error,
+        `git timed out after ${CHECKOUT_TIMEOUT_MS}ms`,
+      );
+    } finally {
+      restore();
+      await Deno.remove(scratchDir, { recursive: true });
+    }
+  },
+});
+
+test({
+  name: "checkoutRelease default runner reports AbortError from child status",
+  permissions: { read: true, write: true, run: true, env: true },
+  fn: async () => {
+    const restore = stubDenoCommand(() => ({
+      status: Promise.reject(abortError()),
+      stdout: new ReadableStream({
+        start(controller) {
+          controller.close();
+        },
+      }),
+      stderr: new ReadableStream({
+        start(controller) {
+          controller.close();
+        },
+      }),
+    } as Deno.ChildProcess));
+    const scratchDir = await Deno.makeTempDir({
+      prefix: "tp-checkout-abort-status-",
+    });
+    try {
+      await assertRejects(
+        () =>
+          checkoutRelease({
+            cloneUrl: "https://example.com/o/r.git",
+            ref: "main",
+            commitSha: SHA,
+            scratchDir,
+          }),
+        Error,
+        `git timed out after ${CHECKOUT_TIMEOUT_MS}ms`,
+      );
+    } finally {
+      restore();
+      await Deno.remove(scratchDir, { recursive: true });
+    }
+  },
+});
+
+test({
+  name: "checkoutRelease default runner reports a git spawn failure",
+  permissions: { read: true, write: true, run: true, env: true },
+  fn: async () => {
+    const restore = stubDenoCommand(() => {
+      throw new Error("ENOENT");
+    });
+    const scratchDir = await Deno.makeTempDir({
+      prefix: "tp-checkout-spawn-",
+    });
+    try {
+      await assertRejects(
+        () =>
+          checkoutRelease({
+            cloneUrl: "https://example.com/o/r.git",
+            ref: "main",
+            commitSha: SHA,
+            scratchDir,
+          }),
+        Error,
+        "git spawn failed: ENOENT",
+      );
+    } finally {
+      restore();
+      await Deno.remove(scratchDir, { recursive: true });
+    }
+  },
+});
+
+test({
+  name: "checkoutRelease default runner stringifies a non-Error spawn failure",
+  permissions: { read: true, write: true, run: true, env: true },
+  fn: async () => {
+    const restore = stubDenoCommand(() => {
+      throw "no-git";
+    });
+    const scratchDir = await Deno.makeTempDir({
+      prefix: "tp-checkout-spawn-str-",
+    });
+    try {
+      await assertRejects(
+        () =>
+          checkoutRelease({
+            cloneUrl: "https://example.com/o/r.git",
+            ref: "main",
+            commitSha: SHA,
+            scratchDir,
+          }),
+        Error,
+        "git spawn failed: no-git",
+      );
+    } finally {
+      restore();
+      await Deno.remove(scratchDir, { recursive: true });
+    }
+  },
+});
+
+test({
+  name: "checkoutRelease default runner fails when the clone cwd is missing",
+  permissions: { read: true, write: true, run: true, env: true },
+  fn: async () => {
+    const parent = await Deno.makeTempDir({ prefix: "tp-checkout-nocwd-" });
+    const scratchDir = join(parent, "missing");
+    try {
+      await assertRejects(
+        () =>
+          checkoutRelease({
+            cloneUrl: "https://example.com/o/r.git",
+            ref: "main",
+            commitSha: SHA,
+            scratchDir,
+          }),
+        Error,
+        "git spawn failed:",
+      );
+    } finally {
+      await Deno.remove(parent, { recursive: true });
+    }
+  },
+});
+
+test("removeCheckoutCredentialFiles ignores missing and null paths", async () => {
+  await removeCheckoutCredentialFiles({
+    askpassPath: "/tmp/tp-checkout-missing-askpass",
+    sshKeyPath: null,
+    knownHostsPath: null,
+  });
 });

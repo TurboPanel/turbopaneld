@@ -45,6 +45,54 @@ it("cpuPercentages computes usage from jiffie deltas", () => {
   assertEquals(pct.iowait, (50 / deltaTotal) * 100);
 });
 
+it("cpuPercentages returns nulls when interval or total delta is non-positive", () => {
+  const prev: CpuCounters = {
+    user: 100,
+    nice: 0,
+    system: 50,
+    idle: 800,
+    iowait: 50,
+    total: 1000,
+    active: 150,
+  };
+  const curr: CpuCounters = {
+    user: 200,
+    nice: 0,
+    system: 100,
+    idle: 1500,
+    iowait: 100,
+    total: 1900,
+    active: 300,
+  };
+  assertEquals(cpuPercentages(prev, curr, 0).usage, null);
+  assertEquals(cpuPercentages(prev, { ...curr, total: 1000 }, 60).usage, null);
+});
+
+it("cpuPercentages uses user-only delta when nice counters reset", () => {
+  const prev: CpuCounters = {
+    user: 100,
+    nice: 50,
+    system: 50,
+    idle: 800,
+    iowait: 50,
+    total: 1000,
+    active: 200,
+  };
+  const curr: CpuCounters = {
+    user: 200,
+    nice: 10,
+    system: 100,
+    idle: 1500,
+    iowait: 100,
+    total: 1900,
+    active: 310,
+  };
+  const pct = cpuPercentages(prev, curr, 60);
+  const deltaTotal = 900;
+  assertEquals(pct.user, (100 / deltaTotal) * 100);
+  assertEquals(pct.system, (50 / deltaTotal) * 100);
+});
+
 it("cpuPercentages returns nulls when no previous snapshot", () => {
   const curr: CpuCounters = {
     user: 100,
@@ -110,6 +158,61 @@ it("diskRates and netRates compute per-second deltas", () => {
   const net = netRates(prevNet, currNet, 10);
   assertEquals(net.receiveBytesPerSecond, 10_000);
   assertEquals(net.transmitBytesPerSecond, 5_000);
+});
+
+it("diskRates and netRates return empty when snapshots or seconds are missing", () => {
+  const disk: DiskCounters = {
+    devices: {
+      sda: {
+        readsCompleted: 1000,
+        sectorsRead: 30000,
+        writesCompleted: 500,
+        sectorsWritten: 70000,
+      },
+    },
+  };
+  const net: NetCounters = {
+    interfaces: { eth0: { receiveBytes: 100, transmitBytes: 50 } },
+  };
+  assertEquals(diskRates(null, disk, 60).readOpsPerSecond, null);
+  assertEquals(diskRates(disk, disk, 0).readOpsPerSecond, null);
+  assertEquals(netRates(null, net, 60).receiveBytesPerSecond, null);
+  assertEquals(netRates(net, net, 0).receiveBytesPerSecond, null);
+});
+
+it("diskRates returns null on write-side counter reset", () => {
+  const prev: DiskCounters = {
+    devices: {
+      sda: {
+        readsCompleted: 1000,
+        sectorsRead: 30000,
+        writesCompleted: 500,
+        sectorsWritten: 70000,
+      },
+    },
+  };
+  const writesReset: DiskCounters = {
+    devices: {
+      sda: {
+        readsCompleted: 1100,
+        sectorsRead: 33000,
+        writesCompleted: 50,
+        sectorsWritten: 77000,
+      },
+    },
+  };
+  const sectorsReset: DiskCounters = {
+    devices: {
+      sda: {
+        readsCompleted: 1100,
+        sectorsRead: 33000,
+        writesCompleted: 550,
+        sectorsWritten: 7000,
+      },
+    },
+  };
+  assertEquals(diskRates(prev, writesReset, 60).writeOpsPerSecond, null);
+  assertEquals(diskRates(prev, sectorsReset, 60).writeBytesPerSecond, null);
 });
 
 it("diskRates returns null on counter reset", () => {
@@ -242,6 +345,51 @@ it("bootChanged detects reboot via boot_id mismatch", () => {
   assertEquals(bootChanged("a", "b"), true);
   assertEquals(bootChanged("a", "a"), false);
   assertEquals(bootChanged(null, "a"), false);
+  assertEquals(bootChanged("a", null), false);
+});
+
+it("cpuPercentages nulls when current snapshot is missing", () => {
+  const prev: CpuCounters = {
+    user: 100,
+    total: 1000,
+    active: 100,
+  };
+  assertEquals(cpuPercentages(prev, null, 60).usage, null);
+});
+
+it("cpuPercentages nulls a field when that counter is undefined", () => {
+  const prev: CpuCounters = {
+    user: 100,
+    system: 50,
+    iowait: 10,
+    total: 1000,
+    active: 160,
+  };
+  const curr: CpuCounters = {
+    user: 200,
+    total: 1900,
+    active: 310,
+  };
+  const pct = cpuPercentages(prev, curr, 60);
+  assertEquals(pct.usage, (150 / 900) * 100);
+  assertEquals(pct.system, null);
+  assertEquals(pct.iowait, null);
+});
+
+it("netRates returns null on transmit-side counter reset", () => {
+  const prev: NetCounters = {
+    interfaces: {
+      eth0: { receiveBytes: 5_000_000, transmitBytes: 3_000_000 },
+    },
+  };
+  const curr: NetCounters = {
+    interfaces: {
+      eth0: { receiveBytes: 5_100_000, transmitBytes: 100_000 },
+    },
+  };
+  const rates = netRates(prev, curr, 60);
+  assertEquals(rates.receiveBytesPerSecond, null);
+  assertEquals(rates.transmitBytesPerSecond, null);
 });
 
 it("long interval averages rate correctly", () => {

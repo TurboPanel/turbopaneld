@@ -29,6 +29,18 @@ test("resolveDimensions uses injected os-release prettyName and kernel release",
   });
 });
 
+test("resolveDimensions falls back to Deno.build when deps are omitted", async () => {
+  const dims = await resolveDimensions({
+    readOsRelease: () => undefined,
+    readProcFile: () => undefined,
+    getBuildInfo: () => ({ commit: "defaultbuild" }),
+  });
+  assertEquals(dims.operatingSystem, Deno.build.os);
+  assertEquals(dims.architecture, Deno.build.arch);
+  assertEquals(dims.daemonVersion, "defaultbuild");
+  assertEquals(dims.kernelRelease, "");
+});
+
 test("resolveDimensions falls back to Deno.build.os when prettyName is absent", async () => {
   const dims = await resolveDimensions({
     readOsRelease: () => ({ family: "linux" }),

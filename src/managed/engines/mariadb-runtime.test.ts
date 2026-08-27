@@ -644,3 +644,209 @@ test("mariadb ensurePrimary provisions replication account", async () => {
   });
   assertEquals(calls.some((c) => c.input?.includes("tp_repl")), true);
 });
+
+const DENIED_NO_PASSWORD =
+  "ERROR 1045 (28000): Access denied for user 'root'@'localhost' (using password: NO)";
+
+function deniedThenOk(): { exec: ManagedEngineExec; calls: RecordedExec[] } {
+  const calls: RecordedExec[] = [];
+  let n = 0;
+  const exec: ManagedEngineExec = (argv, input) => {
+    calls.push({ argv: [...argv], input });
+    n += 1;
+    if (n === 1) {
+      return Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr: DENIED_NO_PASSWORD,
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  return { exec, calls };
+}
+
+test("mariadb waitReady does not use defaults-extra-file without a socket password", async () => {
+  const { exec, calls } = deniedThenOk();
+  await mariadbManagedEngineRuntime.waitReady(buildContext(exec));
+  assertEquals(calls.length, 2);
+  assertEquals(calls.every((c) => c.argv.includes("mariadb-admin")), true);
+  assertEquals(calls.some((c) => c.argv[0] === "sh"), false);
+});
+
+test("mariadb applyDatabases retries SQL via defaults-extra-file after 1045", async () => {
+  const { exec, calls } = deniedThenOk();
+  const applied = await mariadbManagedEngineRuntime.applyDatabases!(
+    { ...buildContext(exec), socketPassword: "root-pass" },
+    [{ action: "create", name: "appdb" }],
+  );
+  assertEquals(applied, ["appdb"]);
+  assertEquals(calls[1]!.argv[0], "sh");
+  assertEquals(calls[1]!.input?.includes("__TP_SQL__"), true);
+  assertEquals(calls[1]!.input?.includes("password=root-pass"), true);
+});
+
+test("mariadb applyCredentials creates a replication role and skips unknown privileges", async () => {
+  const { exec, calls } = recordingExec();
+  const applied = await mariadbManagedEngineRuntime.applyCredentials(
+    buildContext(exec),
+    [
+      {
+        principalId: "p-repl",
+        username: "tp_repl",
+        role: "replication",
+        databases: [],
+        password: "repl-pass",
+      },
+      {
+        principalId: "p-app",
+        username: "app_user",
+        role: "user",
+        databases: ["appdb"],
+        privileges: ["not-a-privilege", "read-only"],
+        password: "app-pass",
+      },
+    ],
+  );
+  assertEquals(applied, ["tp_repl", "app_user"]);
+  assertEquals(calls.some((c) => c.input?.includes("tp_repl")), true);
+  assertEquals(calls.some((c) => c.input?.includes("GRANT")), true);
+});
+
+test("mariadb applyDatabases throws when mariadb fails", async () => {
+  const exec: ManagedEngineExec = () =>
+    Promise.resolve({ success: false, stdout: "", stderr: "disk full" });
+  await assertRejects(
+    () =>
+      mariadbManagedEngineRuntime.applyDatabases!(buildContext(exec), [{
+        action: "create",
+        name: "appdb",
+      }]),
+    Error,
+    "mariadb failed",
+  );
+});
+
+test("mariadb backup dump/restore argv target the app database", () => {
+  if (!mariadbManagedEngineRuntime.backup) {
+    throw new TypeError("expected mariadb backup support");
+  }
+  const ctx = buildContext(recordingExec().exec);
+  assertEquals(
+    mariadbManagedEngineRuntime.backup.dumpArgv(ctx, { database: "appdb" })
+      .includes("appdb"),
+    true,
+  );
+  assertEquals(
+    mariadbManagedEngineRuntime.backup.restoreArgv(ctx, { database: "appdb" }),
+    ["mariadb", "--protocol=socket", "appdb"],
+  );
+  assertThrows(
+    () =>
+      mariadbManagedEngineRuntime.backup!.restoreArgv(ctx, {
+        database: "sys",
+      }),
+    Error,
+    "refusing mariadb system schema",
+  );
+});
+
+test("mariadb readVersion returns a trimmed version or undefined when empty", async () => {
+  const version = await mariadbManagedEngineRuntime.readVersion(
+    buildContext(() =>
+      Promise.resolve({ success: true, stdout: "  11.4.2\n", stderr: "" })
+    ),
+  );
+  assertEquals(version, "11.4.2");
+  const empty = await mariadbManagedEngineRuntime.readVersion(
+    buildContext(() =>
+      Promise.resolve({ success: true, stdout: "   \n", stderr: "" })
+    ),
+  );
+  assertEquals(empty, undefined);
+});
+
+test("resolveMariadbPrimaryConnectHost falls back to host without hostaddr", () => {
+  assertEquals(
+    resolveMariadbPrimaryConnectHost({ host: "svc-1" }),
+    "svc-1",
+  );
+});
+
+test("parseShowSlaveStatus reports stopped when both threads are down", () => {
+  const stopped = parseShowSlaveStatus(`
+               Slave_IO_Running: No
+              Slave_SQL_Running: No
+`);
+  assertEquals(stopped.state, "stopped");
+  assertEquals(stopped.lagSeconds, undefined);
+});
+
+test("mariadb bootstrapStandby defaults the data root when volumes are empty", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.bootstrapStandby) {
+    throw new TypeError("expected mariadb bootstrapStandby");
+  }
+  const probes: string[] = [];
+  const boot = await replication.bootstrapStandby(
+    {
+      managedId: "mariadb-boot",
+      image: "mariadb:11",
+      volumes: [],
+      stateDir: "/tmp/mariadb",
+      containerUser: "mysql",
+      containerGroup: "mysql",
+      runDocker: (args) => {
+        probes.push(args.join(" "));
+        return Promise.resolve({
+          success: false,
+          stdout: "",
+          stderr: "",
+          code: 1,
+        });
+      },
+    },
+    standbyReplicationSpec(),
+  );
+  assertEquals(boot, "seeded");
+  assertEquals(
+    probes.some((joined) => joined.includes("/var/lib/mysql/mysql")),
+    true,
+  );
+});
+
+test("mariadb configureStandby dials the DNS SAN when hostaddr is omitted", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.configureStandby) {
+    throw new TypeError("expected mariadb configureStandby");
+  }
+  const { exec, calls } = recordingExec();
+  const missingMarker: ManagedEngineExec = async (argv, input) => {
+    if (argv[0] === "test" && argv.includes("-f")) {
+      return { success: false, stdout: "", stderr: "" };
+    }
+    return await exec(argv, input);
+  };
+  await replication.configureStandby(buildContext(missingMarker), {
+    username: "tp_repl",
+    password: "repl-pass",
+    primary: { host: "svc-primary", port: 3306 },
+    slotName: "tp_member_2",
+  });
+  assertEquals(calls.some((c) => c.input?.includes("host=svc-primary")), true);
+});
+
+test("mariadb readHealth returns unknown when replica status is empty", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.readHealth) {
+    throw new TypeError("expected mariadb readHealth");
+  }
+  const exec: ManagedEngineExec = (argv) => {
+    if (argv.includes("-E")) {
+      return Promise.resolve({ success: true, stdout: "   \n", stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  const health = await replication.readHealth(buildContext(exec), "standby");
+  assertEquals(health.state, "unknown");
+});

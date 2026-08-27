@@ -1,5 +1,10 @@
-import { assertEquals } from "@std/assert";
-import { stampBuildInfo } from "./release-dev-overlay.ts";
+import { assertEquals, assertRejects } from "@std/assert";
+import {
+  resolveOverlayGitShortSha,
+  runCompileAll,
+  runReleaseDevOverlay,
+  stampBuildInfo,
+} from "./release-dev-overlay.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -26,4 +31,168 @@ test("stampBuildInfo replaces commit, buildId, and builtAt", () => {
   assertEquals(stamped.includes('buildId: "dev-abc1234+99"'), true);
   assertEquals(stamped.includes('builtAt: "2026-08-25T00:00:00.000Z"'), true);
   assertEquals(stamped.includes("oldsha"), false);
+});
+
+test("resolveOverlayGitShortSha uses git by default", async () => {
+  const sha = await resolveOverlayGitShortSha();
+  assertEquals(/^[0-9a-f]{4,}$/.test(sha), true);
+});
+
+test("resolveOverlayGitShortSha returns a lowercase sha and fails closed", async () => {
+  const sha = await resolveOverlayGitShortSha("/unused", {
+    output: () =>
+      Promise.resolve({
+        success: true,
+        stdout: new TextEncoder().encode("ABC1234\n"),
+        stderr: new Uint8Array(),
+      }),
+  });
+  assertEquals(sha, "abc1234");
+
+  const errors: string[] = [];
+  const exits: number[] = [];
+  await assertRejects(
+    () =>
+      resolveOverlayGitShortSha("/unused", {
+        output: () =>
+          Promise.resolve({
+            success: false,
+            stdout: new Uint8Array(),
+            stderr: new TextEncoder().encode("not a git repo\n"),
+          }),
+        error: (message) => {
+          errors.push(message);
+        },
+        exit: (code) => {
+          exits.push(code);
+        },
+      }),
+    TypeError,
+    "git rev-parse failed",
+  );
+  assertEquals(exits, [1]);
+  assertEquals(errors[0], "release-dev-overlay: git rev-parse failed");
+});
+
+test("runCompileAll throws when the compile task fails", async () => {
+  await runCompileAll(() => Promise.resolve({ success: true, code: 0 }));
+  await assertRejects(
+    () => runCompileAll(() => Promise.resolve({ success: false, code: 7 })),
+    Error,
+    "deno task compile:all exited 7",
+  );
+});
+
+test("runReleaseDevOverlay stamps, compiles, catalogs, then restores", async () => {
+  const writes: string[] = [];
+  const logs: string[] = [];
+  const catalogs: string[] = [];
+  const original = [
+    "export const BUILD_INFO = {",
+    '  commit: "oldsha",',
+    '  buildId: "old-build",',
+    '  builtAt: "2020-01-01T00:00:00.000Z",',
+    "};",
+  ].join("\n");
+  await runReleaseDevOverlay({
+    gitShortSha: () => Promise.resolve("abc1234"),
+    now: () => new Date("2026-01-01T00:00:00.000Z"),
+    readBuildInfo: () => Promise.resolve(original),
+    writeBuildInfo: (text) => {
+      writes.push(text);
+      return Promise.resolve();
+    },
+    compileAll: () => Promise.resolve(),
+    writeCatalog: (identity) => {
+      catalogs.push(identity.commit);
+      return Promise.resolve();
+    },
+    log: (message) => {
+      logs.push(message);
+    },
+  });
+  assertEquals(writes.length, 2);
+  assertEquals(writes[0]?.includes("abc1234+1767225600"), true);
+  assertEquals(writes[1], original);
+  assertEquals(catalogs, ["abc1234+1767225600"]);
+  assertEquals(logs.at(-1)?.includes("restored"), true);
+});
+
+test("runReleaseDevOverlay restores after Error and non-Error failures", async () => {
+  const writes: string[] = [];
+  const errors: string[] = [];
+  const exits: number[] = [];
+  const original = 'commit: "old"\nbuildId: "old"\nbuiltAt: "old"\n';
+
+  await runReleaseDevOverlay({
+    gitShortSha: () => Promise.resolve("deadbee"),
+    now: () => new Date("2026-01-01T00:00:00.000Z"),
+    readBuildInfo: () => Promise.resolve(original),
+    writeBuildInfo: (text) => {
+      writes.push(text);
+      return Promise.resolve();
+    },
+    compileAll: () => Promise.reject(new Error("compile boom")),
+    log: () => {},
+    error: (message) => {
+      errors.push(message);
+    },
+    exit: (code) => {
+      exits.push(code);
+    },
+  });
+  assertEquals(errors, ["compile boom"]);
+  assertEquals(exits, [1]);
+  assertEquals(writes.at(-1), original);
+
+  await runReleaseDevOverlay({
+    gitShortSha: () => Promise.resolve("deadbee"),
+    now: () => new Date("2026-01-01T00:00:00.000Z"),
+    readBuildInfo: () => Promise.resolve(original),
+    writeBuildInfo: (text) => {
+      writes.push(text);
+      return Promise.resolve();
+    },
+    compileAll: () => Promise.resolve(),
+    writeCatalog: () => Promise.reject("catalog-down"),
+    log: () => {},
+    error: (message) => {
+      errors.push(message);
+    },
+    exit: (code) => {
+      exits.push(code);
+    },
+  });
+  assertEquals(errors.at(-1), "catalog-down");
+  assertEquals(exits, [1, 1]);
+});
+
+test("resolveOverlayGitShortSha defaults error and exit on git failure", async () => {
+  const originalError = console.error;
+  const originalExit = Deno.exit;
+  const errors: string[] = [];
+  console.error = ((message: unknown) => {
+    errors.push(String(message));
+  }) as typeof console.error;
+  Deno.exit = ((code: number) => {
+    throw new TypeError(`exit ${code}`);
+  }) as typeof Deno.exit;
+  try {
+    await assertRejects(
+      () =>
+        resolveOverlayGitShortSha("/unused", {
+          output: () =>
+            Promise.resolve({
+              success: false,
+              stdout: new Uint8Array(),
+              stderr: new TextEncoder().encode("boom\n"),
+            }),
+        }),
+      TypeError,
+    );
+    assertEquals(errors[0], "release-dev-overlay: git rev-parse failed");
+  } finally {
+    console.error = originalError;
+    Deno.exit = originalExit;
+  }
 });

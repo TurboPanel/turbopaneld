@@ -2,7 +2,12 @@ import { assertEquals, assertThrows } from "@std/assert";
 import { join } from "@std/path";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import { commandLogSpoolDir } from "../paths/layout.ts";
-import { CommandLogSpool, commandLogSpoolPath } from "./spool.ts";
+import {
+  activeCommandSpoolPaths,
+  CommandLogSpool,
+  commandLogSpoolPath,
+  isActiveSpoolPath,
+} from "./spool.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -113,4 +118,43 @@ test("commandLogSpoolPath rejects path-unsafe command ids", () => {
     () => commandLogSpoolPath("/tmp/spool", "../escape"),
     TypeError,
   );
+});
+
+test("active spool paths track open files until close or discard", async () => {
+  await withTempLayout(async (fixture) => {
+    const dir = join(fixture.dirs.stateDir, "spool");
+    const spool = CommandLogSpool.open({ commandId: "cmd-active", dir });
+    try {
+      assertEquals(isActiveSpoolPath(spool.path), true);
+      assertEquals(activeCommandSpoolPaths().includes(spool.path), true);
+      assertEquals(spool.flushDue(), false);
+      appendLine(spool, "one");
+      spool.close();
+      assertEquals(isActiveSpoolPath(spool.path), false);
+      assertEquals((await Deno.stat(spool.path)).isFile, true);
+      // Close is idempotent; a later discard still removes the leftover.
+      spool.close();
+      await spool.discard();
+      assertEquals(await Deno.stat(spool.path).catch(() => null), null);
+    } finally {
+      await spool.discard().catch(() => undefined);
+    }
+  });
+});
+
+test("append still buffers when the spool file write fails", async () => {
+  await withTempLayout(async (fixture) => {
+    const dir = join(fixture.dirs.stateDir, "spool");
+    const spool = CommandLogSpool.open({ commandId: "cmd-broken", dir });
+    try {
+      appendLine(spool, "before-close");
+      spool.close();
+      const stored = appendLine(spool, "after-close");
+      assertEquals(stored.sequence, 2);
+      const chunk = spool.takePendingChunk();
+      assertEquals(chunk?.bytes.includes("after-close"), true);
+    } finally {
+      await spool.discard().catch(() => undefined);
+    }
+  });
 });

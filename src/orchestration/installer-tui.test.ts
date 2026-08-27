@@ -1,6 +1,9 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import type { AnsibleEvent } from "./ansible-events.ts";
-import { InstallEventPresenter } from "./installer-tui.ts";
+import {
+  createInstallPresenter,
+  InstallEventPresenter,
+} from "./installer-tui.ts";
 import { InstallPresenter } from "./install-presenter.ts";
 
 /**
@@ -210,4 +213,95 @@ test("InstallEventPresenter summarizes a failing recap and captures raw lines", 
     ),
     true,
   );
+});
+
+test("InstallEventPresenter labels handler and runner-start events", () => {
+  const lines = capturePresenterLines((_presenter, events) => {
+    events.onEvent({
+      _event: "v2_playbook_on_handler_task_start",
+      _timestamp: "2026-01-01T00:00:02Z",
+      task: {
+        name: "redis : restart",
+        id: "handler",
+        path: "",
+        duration: TASK_DURATION,
+      },
+      hosts: {},
+    });
+    events.onEvent({
+      _event: "v2_runner_on_start",
+      _timestamp: "2026-01-01T00:00:02Z",
+      task: {
+        name: "cache : start",
+        id: "runner",
+        path: "",
+        duration: TASK_DURATION,
+      },
+      hosts: {},
+    });
+    events.onEvent({
+      _event: "v2_playbook_on_play_start",
+      _timestamp: "2026-01-01T00:00:00Z",
+      play: {
+        name: "TurboPanel Redis setup",
+        id: "play",
+        path: "",
+        duration: TASK_DURATION,
+      },
+      tasks: [],
+    });
+  });
+  assertEquals(lines.some((line) => line.includes("restart")), true);
+  assertEquals(lines.some((line) => line.includes("start")), true);
+  assertEquals(
+    lines.some((line) => line.includes("TurboPanel cache setup")),
+    true,
+  );
+});
+
+test("InstallEventPresenter treats a leading-colon task as having no role", () => {
+  const lines = capturePresenterLines((_presenter, events) => {
+    events.onEvent({
+      _event: "v2_playbook_on_task_start",
+      _timestamp: "2026-01-01T00:00:02Z",
+      task: {
+        name: ": ping host",
+        id: "anon",
+        path: "",
+        duration: TASK_DURATION,
+      },
+      hosts: {},
+    });
+  });
+  assertEquals(lines.some((line) => line.includes("›")), false);
+  assertEquals(lines.some((line) => line.includes("ping host")), true);
+});
+
+test("InstallEventPresenter keeps the first raw-line failure detail", () => {
+  let failureDetail: string | null = null;
+  capturePresenterLines((_presenter, events) => {
+    events.onRawLine("stderr", "first problem");
+    events.onRawLine("stderr", "second problem");
+    failureDetail = events.failureDetail;
+  });
+  assertEquals(failureDetail, "first problem");
+});
+
+test("InstallEventPresenter ignores unknown events", () => {
+  const lines = capturePresenterLines((_presenter, events) => {
+    events.onEvent({
+      _event: "v2_playbook_on_notify",
+      _timestamp: "2026-01-01T00:00:00Z",
+    } as never);
+  });
+  assertEquals(lines, []);
+});
+
+test("createInstallPresenter returns a disposable presenter", () => {
+  const presenter = createInstallPresenter();
+  try {
+    assertEquals(presenter instanceof InstallPresenter, true);
+  } finally {
+    presenter.dispose();
+  }
 });

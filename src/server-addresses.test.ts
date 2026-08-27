@@ -112,3 +112,317 @@ test("collectServerIps records the interface CIDR when known", () => {
     },
   );
 });
+
+test("collectServerIps classifies RFC1918 IPv4 ranges and skips unusable IPv4", () => {
+  withNetworkInterfaces(
+    [
+      { name: "eth0", family: "IPv4", address: "172.16.0.1" },
+      { name: "eth0", family: "IPv4", address: "172.31.255.1" },
+      { name: "eth0", family: "IPv4", address: "0.1.2.3" },
+      { name: "eth0", family: "IPv4", address: "127.1.2.3" },
+      { name: "eth0", family: "IPv4", address: "169.254.10.1" },
+      { name: "eth0", family: "IPv4", address: "224.0.0.1" },
+      { name: "eth0", family: "IPv4", address: "255.255.255.255" },
+      { name: "eth0", family: "IPv4", address: "10.0.0.256" },
+      { name: "eth0", family: "IPv4", address: "10.0.0" },
+      { name: "eth0", family: "IPv4", address: "10.a.0.1" },
+      { name: "eth0", family: "IPv4", address: "198.51.100.8" },
+    ],
+    () => {
+      assertEquals(collectServerIps(), [
+        {
+          address: "172.16.0.1",
+          version: 4,
+          scope: "private",
+          interface: "eth0",
+        },
+        {
+          address: "172.31.255.1",
+          version: 4,
+          scope: "private",
+          interface: "eth0",
+        },
+        {
+          address: "198.51.100.8",
+          version: 4,
+          scope: "public",
+          interface: "eth0",
+        },
+      ]);
+    },
+  );
+});
+
+test("collectServerIps classifies IPv6 ULA / global unicast and skips unusable IPv6", () => {
+  withNetworkInterfaces(
+    [
+      { name: "eth0", family: "IPv6", address: "fd12:3456:789a:1::1" },
+      { name: "eth0", family: "IPv6", address: "FC00::1" },
+      { name: "eth0", family: "IPv6", address: "2001:db8::1" },
+      { name: "eth0", family: "IPv6", address: "3ffe::1" },
+      { name: "eth0", family: "IPv6", address: "2001:db8::2%eth0" },
+      { name: "eth0", family: "IPv6", address: "::1" },
+      { name: "eth0", family: "IPv6", address: "0:0:0:0:0:0:0:1" },
+      { name: "eth0", family: "IPv6", address: "fe80::1" },
+      { name: "eth0", family: "IPv6", address: "ff02::1" },
+      { name: "eth0", family: "IPv6", address: "::" },
+    ],
+    () => {
+      assertEquals(collectServerIps(), [
+        {
+          address: "2001:db8::1",
+          version: 6,
+          scope: "public",
+          interface: "eth0",
+        },
+        {
+          address: "2001:db8::2%eth0",
+          version: 6,
+          scope: "public",
+          interface: "eth0",
+        },
+        {
+          address: "3ffe::1",
+          version: 6,
+          scope: "public",
+          interface: "eth0",
+        },
+        {
+          address: "FC00::1",
+          version: 6,
+          scope: "private",
+          interface: "eth0",
+        },
+        {
+          address: "fd12:3456:789a:1::1",
+          version: 6,
+          scope: "private",
+          interface: "eth0",
+        },
+      ]);
+    },
+  );
+});
+
+test("collectServerIps skips virtual interface names", () => {
+  const virtual = [
+    "lo",
+    "docker",
+    "docker1",
+    "br-abc123",
+    "veth0",
+    "virbr0",
+    "tun0",
+    "tap0",
+    "wg0",
+    "cni0",
+    "flannel.1",
+    "cali1234",
+    "kube-ipvs0",
+    "tailscale0",
+    "ifb0",
+    "dummy0",
+  ];
+  withNetworkInterfaces(
+    [
+      ...virtual.map((name) => ({
+        name,
+        family: "IPv4" as const,
+        address: "10.0.0.5",
+      })),
+      { name: "enp1s0", family: "IPv4", address: "10.1.2.3" },
+    ],
+    () => {
+      assertEquals(collectServerIps(), [
+        {
+          address: "10.1.2.3",
+          version: 4,
+          scope: "private",
+          interface: "enp1s0",
+        },
+      ]);
+    },
+  );
+});
+
+test("collectServerIps derives prefix from netmask and ignores invalid CIDR/netmask", () => {
+  withNetworkInterfaces(
+    [
+      {
+        name: "eth0",
+        family: "IPv4",
+        address: "10.2.0.1",
+        netmask: "255.255.0.0",
+      },
+      {
+        name: "eth0",
+        family: "IPv4",
+        address: "10.3.0.1",
+        netmask: "255.255.255.128",
+      },
+      {
+        name: "eth0",
+        family: "IPv4",
+        address: "10.4.0.1",
+        netmask: "255.255.0.255",
+      },
+      {
+        name: "eth0",
+        family: "IPv4",
+        address: "10.5.0.1",
+        netmask: "not-a-mask",
+      },
+      {
+        name: "eth0",
+        family: "IPv4",
+        address: "10.6.0.1",
+        cidr: "10.6.0.1/33",
+      },
+      {
+        name: "eth0",
+        family: "IPv4",
+        address: "10.7.0.1",
+        cidr: "10.7.0.1/abc",
+      },
+      {
+        name: "eth0",
+        family: "IPv4",
+        address: "10.8.0.1",
+        cidr: "10.8.0.1",
+      },
+      {
+        name: "eth0",
+        family: "IPv6",
+        address: "2001:db8::10",
+        cidr: "2001:db8::10/64",
+      },
+      {
+        name: "eth0",
+        family: "IPv6",
+        address: "2001:db8::11",
+        cidr: "2001:db8::11/129",
+      },
+    ],
+    () => {
+      assertEquals(collectServerIps(), [
+        {
+          address: "10.2.0.1",
+          version: 4,
+          scope: "private",
+          cidr: "10.2.0.1/16",
+          interface: "eth0",
+        },
+        {
+          address: "10.3.0.1",
+          version: 4,
+          scope: "private",
+          cidr: "10.3.0.1/25",
+          interface: "eth0",
+        },
+        {
+          address: "10.4.0.1",
+          version: 4,
+          scope: "private",
+          interface: "eth0",
+        },
+        {
+          address: "10.5.0.1",
+          version: 4,
+          scope: "private",
+          interface: "eth0",
+        },
+        {
+          address: "10.6.0.1",
+          version: 4,
+          scope: "private",
+          interface: "eth0",
+        },
+        {
+          address: "10.7.0.1",
+          version: 4,
+          scope: "private",
+          interface: "eth0",
+        },
+        {
+          address: "10.8.0.1",
+          version: 4,
+          scope: "private",
+          interface: "eth0",
+        },
+        {
+          address: "2001:db8::10",
+          version: 6,
+          scope: "public",
+          cidr: "2001:db8::10/64",
+          interface: "eth0",
+        },
+        {
+          address: "2001:db8::11",
+          version: 6,
+          scope: "public",
+          interface: "eth0",
+        },
+      ]);
+    },
+  );
+});
+
+test("collectServerIps prefers a later CIDR and omits empty or overlong interface names", () => {
+  const longName = "n".repeat(65);
+  const maxName = "n".repeat(64);
+  withNetworkInterfaces(
+    [
+      { name: "eth0", family: "IPv4", address: "10.9.0.1" },
+      {
+        name: "eth0",
+        family: "IPv4",
+        address: "10.9.0.1",
+        cidr: "10.9.0.1/24",
+      },
+      {
+        name: "eth1",
+        family: "IPv4",
+        address: "10.10.0.1",
+        cidr: "10.10.0.1/24",
+      },
+      { name: "eth1", family: "IPv4", address: "10.10.0.1" },
+      { name: "   ", family: "IPv4", address: "10.11.0.1" },
+      { name: longName, family: "IPv4", address: "10.12.0.1" },
+      { name: maxName, family: "IPv4", address: "10.13.0.1" },
+    ],
+    () => {
+      assertEquals(collectServerIps(), [
+        {
+          address: "10.10.0.1",
+          version: 4,
+          scope: "private",
+          cidr: "10.10.0.1/24",
+          interface: "eth1",
+        },
+        {
+          address: "10.11.0.1",
+          version: 4,
+          scope: "private",
+        },
+        {
+          address: "10.12.0.1",
+          version: 4,
+          scope: "private",
+        },
+        {
+          address: "10.13.0.1",
+          version: 4,
+          scope: "private",
+          interface: maxName,
+        },
+        {
+          address: "10.9.0.1",
+          version: 4,
+          scope: "private",
+          cidr: "10.9.0.1/24",
+          interface: "eth0",
+        },
+      ]);
+    },
+  );
+});

@@ -14,7 +14,7 @@
  * assuming it is the connection identity.
  */
 
-import { assertEquals, assertRejects } from "@std/assert";
+import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import type { ManagedApplyCredential } from "../../instance/commands/contracts.ts";
 import { getManagedEngineRuntime } from "./index.ts";
 import { postgresManagedEngineRuntime } from "./postgres.ts";
@@ -450,4 +450,293 @@ test("postgres readHealth reports standby lag fields", async () => {
   assertEquals(health.state, "streaming");
   assertEquals(health.lagBytes, 4096);
   assertEquals(health.lagSeconds, 2);
+});
+
+test("postgres applyCredentials creates a replication role and skips unknown privileges", async () => {
+  const { exec, calls } = recordingExec();
+  const applied = await postgresManagedEngineRuntime.applyCredentials(
+    buildContext(exec),
+    [
+      {
+        principalId: "p-repl",
+        username: "tp_repl",
+        role: "replication",
+        databases: [],
+        password: "repl-pass",
+      },
+      {
+        principalId: "p-app",
+        username: "app_user",
+        role: "user",
+        databases: ["appdb"],
+        privileges: ["not-a-privilege", "read-only"],
+        password: "app-pass",
+      },
+    ],
+  );
+  assertEquals(applied, ["tp_repl", "app_user"]);
+  assertEquals(calls.some((c) => c.input?.includes("REPLICATION")), true);
+  assertEquals(calls.some((c) => c.input?.includes("GRANT CONNECT")), true);
+});
+
+test("postgres applyCredentials throws when psql fails", async () => {
+  const exec: ManagedEngineExec = () =>
+    Promise.resolve({ success: false, stdout: "", stderr: "role exists" });
+  await assertRejects(
+    () =>
+      postgresManagedEngineRuntime.applyCredentials(buildContext(exec), [{
+        principalId: "p-app",
+        username: "app_user",
+        role: "user",
+        databases: ["appdb"],
+        password: "app-pass",
+      }]),
+    Error,
+    "psql failed",
+  );
+});
+
+test("postgres waitReady retries until pg_isready succeeds", async () => {
+  let attempts = 0;
+  const exec: ManagedEngineExec = (argv) => {
+    if (argv.includes("pg_isready")) {
+      attempts++;
+      if (attempts === 1) {
+        return Promise.resolve({
+          success: false,
+          stdout: "accepting connections soon",
+          stderr: "",
+        });
+      }
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await postgresManagedEngineRuntime.waitReady(buildContext(exec));
+  assertEquals(attempts, 2);
+});
+
+test("postgres waitReady throws after the readiness deadline", async () => {
+  const originalDateNow = Date.now;
+  const originalSetTimeout = globalThis.setTimeout;
+  let nowCalls = 0;
+  Date.now = () => {
+    nowCalls++;
+    if (nowCalls === 1) return 0;
+    if (nowCalls === 2) return 1;
+    return 130_000;
+  };
+  globalThis.setTimeout = ((handler: () => void) => {
+    queueMicrotask(handler);
+    return 0 as unknown as ReturnType<typeof setTimeout>;
+  }) as typeof setTimeout;
+  try {
+    const exec: ManagedEngineExec = () =>
+      Promise.resolve({ success: false, stdout: "", stderr: "still booting" });
+    await assertRejects(
+      () => postgresManagedEngineRuntime.waitReady(buildContext(exec)),
+      Error,
+      "managed postgres not ready within",
+    );
+  } finally {
+    Date.now = originalDateNow;
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("postgres readVersion returns undefined when the query fails or is empty", async () => {
+  const failed = await postgresManagedEngineRuntime.readVersion(
+    buildContext(() =>
+      Promise.resolve({ success: false, stdout: "", stderr: "denied" })
+    ),
+  );
+  assertEquals(failed, undefined);
+  const empty = await postgresManagedEngineRuntime.readVersion(
+    buildContext(() =>
+      Promise.resolve({ success: true, stdout: "   \n", stderr: "" })
+    ),
+  );
+  assertEquals(empty, undefined);
+  const version = await postgresManagedEngineRuntime.readVersion(
+    buildContext(() =>
+      Promise.resolve({ success: true, stdout: "18.0\n", stderr: "" })
+    ),
+  );
+  assertEquals(version, "18.0");
+});
+
+test("postgres applyDatabases creates missing databases, skips existing, and drops", async () => {
+  const { exec, calls } = recordingExec();
+  const existingThenCreate: ManagedEngineExec = async (argv, input) => {
+    if (input?.includes("pg_database") && input.includes("appdb")) {
+      return { success: true, stdout: "", stderr: "" };
+    }
+    if (input?.includes("pg_database") && input.includes("legacy")) {
+      return { success: true, stdout: "1\n", stderr: "" };
+    }
+    return await exec(argv, input);
+  };
+  const applied = await postgresManagedEngineRuntime.applyDatabases!(
+    buildContext(existingThenCreate),
+    [
+      { action: "create", name: "appdb" },
+      { action: "create", name: "legacy" },
+      { action: "drop", name: "gone" },
+    ],
+  );
+  assertEquals(applied, ["appdb", "legacy", "gone"]);
+  assertEquals(calls.some((c) => c.input?.includes("CREATE DATABASE")), true);
+  assertEquals(calls.some((c) => c.input?.includes('"legacy"')), false);
+  assertEquals(calls.some((c) => c.input?.includes("DROP DATABASE")), true);
+});
+
+test("postgres applyDatabases throws when the existence probe fails", async () => {
+  const exec: ManagedEngineExec = (_argv, input) => {
+    if (input?.includes("pg_database")) {
+      return Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr: "catalog unavailable",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await assertRejects(
+    () =>
+      postgresManagedEngineRuntime.applyDatabases!(buildContext(exec), [{
+        action: "create",
+        name: "appdb",
+      }]),
+    Error,
+    "psql failed",
+  );
+});
+
+test("postgres ensureProxySqlMonitor creates the health-check role", async () => {
+  const { exec, calls } = recordingExec();
+  await postgresManagedEngineRuntime.ensureProxySqlMonitor!(
+    buildContext(exec),
+    { user: "tp_monitor", password: "mon-pass" },
+  );
+  assertEquals(calls.some((c) => c.input?.includes("tp_monitor")), true);
+});
+
+test("postgres promote throws when recovery does not clear", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.promote) {
+    throw new TypeError("expected postgres promote");
+  }
+  const originalDateNow = Date.now;
+  const originalSetTimeout = globalThis.setTimeout;
+  let nowCalls = 0;
+  Date.now = () => {
+    nowCalls++;
+    if (nowCalls === 1) return 0;
+    if (nowCalls <= 5) return 1_000;
+    return 70_000;
+  };
+  globalThis.setTimeout = ((handler: () => void) => {
+    queueMicrotask(handler);
+    return 0 as unknown as ReturnType<typeof setTimeout>;
+  }) as typeof setTimeout;
+  const exec: ManagedEngineExec = (_argv, input) => {
+    if (input?.includes("pg_is_in_recovery")) {
+      return Promise.resolve({ success: true, stdout: "t\n", stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  try {
+    await assertRejects(
+      () => replication.promote!(buildContext(exec)),
+      Error,
+      "pg_promote did not leave recovery within 60s",
+    );
+  } finally {
+    Date.now = originalDateNow;
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("postgres readHealth reports unknown when there are no rows or lag is not numeric", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.readHealth) {
+    throw new TypeError("expected postgres readHealth");
+  }
+  const emptyPrimary = await replication.readHealth(
+    buildContext(() =>
+      Promise.resolve({ success: true, stdout: "", stderr: "" })
+    ),
+    "primary",
+  );
+  assertEquals(emptyPrimary.state, "unknown");
+  assertEquals(emptyPrimary.lagBytes, undefined);
+
+  const emptyStandby = await replication.readHealth(
+    buildContext(() =>
+      Promise.resolve({ success: true, stdout: "\n", stderr: "" })
+    ),
+    "standby",
+  );
+  assertEquals(emptyStandby.state, "unknown");
+
+  const nonFinite = await replication.readHealth(
+    buildContext(() =>
+      Promise.resolve({
+        success: true,
+        stdout: "streaming\tnot-a-number\tbad\n",
+        stderr: "",
+      })
+    ),
+    "standby",
+  );
+  assertEquals(nonFinite.state, "streaming");
+  assertEquals(nonFinite.lagBytes, undefined);
+  assertEquals(nonFinite.lagSeconds, undefined);
+});
+
+test("postgres bootstrapStandby defaults the data root when volumes are empty", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.bootstrapStandby) {
+    throw new TypeError("expected postgres bootstrapStandby");
+  }
+  const probes: string[] = [];
+  const boot = await replication.bootstrapStandby(
+    {
+      managedId: "pg-boot",
+      image: "postgres:18-alpine",
+      volumes: [],
+      stateDir: "/tmp/pg",
+      containerUser: "postgres",
+      containerGroup: "postgres",
+      runDocker: (args) => {
+        probes.push(args.join(" "));
+        return Promise.resolve({
+          success: true,
+          stdout: "",
+          stderr: "",
+          code: 0,
+        });
+      },
+    },
+    standbyReplicationSpec(),
+  );
+  assertEquals(boot, "already_standby");
+  assertEquals(
+    probes.some((joined) => joined.includes("/var/lib/postgresql/PG_VERSION")),
+    true,
+  );
+});
+
+test("postgres backup dump argv rejects an unsafe database identifier", () => {
+  if (!postgresManagedEngineRuntime.backup) {
+    throw new TypeError("expected postgres backup support");
+  }
+  const ctx = buildContext(recordingExec().exec);
+  assertThrows(
+    () =>
+      postgresManagedEngineRuntime.backup!.dumpArgv(ctx, {
+        database: "has space",
+      }),
+    Error,
+    "invalid postgres identifier",
+  );
 });

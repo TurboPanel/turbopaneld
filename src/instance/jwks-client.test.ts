@@ -384,6 +384,103 @@ it("malformed tokens and JWKS entries return invalid or skip", async () => {
   });
   const ok = await client.verifyInstanceJwt(valid);
   if (!ok.ok) {
-    throw new Error("expected valid token still verifies with mixed JWKS");
+    throw new TypeError("expected valid token still verifies with mixed JWKS");
+  }
+});
+
+it("unknown kid after a healthy cache returns invalid, not unavailable", async () => {
+  const primary = await createTestSigningKey();
+  const other = await createTestSigningKey();
+  const { client } = makeClient(primary.jwks);
+
+  const valid = await signInstanceJwt(primary.privateKey, primary.kid, {
+    sub: "server-1",
+    kid: "daemon-key-1",
+  });
+  const first = await client.verifyInstanceJwt(valid);
+  if (!first.ok) {
+    throw new TypeError("expected primary token to verify");
+  }
+
+  const unknown = await signInstanceJwt(other.privateKey, other.kid, {
+    sub: "server-1",
+    kid: "daemon-key-1",
+  });
+  const result = await client.verifyInstanceJwt(unknown);
+  if (result.ok || result.reason !== "invalid") {
+    throw new TypeError(
+      "expected invalid when kid is missing from a populated JWKS cache",
+    );
+  }
+});
+
+it("unknown kid after a failed refresh returns unavailable", async () => {
+  const primary = await createTestSigningKey();
+  const other = await createTestSigningKey();
+  let calls = 0;
+  const { client } = makeClient(primary.jwks, {
+    getJwks: () => {
+      calls += 1;
+      if (calls === 1) return Promise.resolve(primary.jwks);
+      return Promise.reject(new Error("jwks down"));
+    },
+  });
+
+  const valid = await signInstanceJwt(primary.privateKey, primary.kid, {
+    sub: "server-1",
+    kid: "daemon-key-1",
+  });
+  const first = await client.verifyInstanceJwt(valid);
+  if (!first.ok) {
+    throw new TypeError("expected primary token to populate the cache");
+  }
+
+  const unknown = await signInstanceJwt(other.privateKey, other.kid, {
+    sub: "server-1",
+    kid: "daemon-key-1",
+  });
+  const result = await client.verifyInstanceJwt(unknown);
+  if (result.ok || result.reason !== "unavailable") {
+    throw new TypeError(
+      "expected unavailable when unknown-kid refresh fails with a warm cache",
+    );
+  }
+});
+
+it("undecodable signature bytes return invalid", async () => {
+  const { kid, privateKey, jwks } = await createTestSigningKey();
+  const { client } = makeClient(jwks);
+  const token = await signInstanceJwt(privateKey, kid, {
+    sub: "server-1",
+    kid: "daemon-key-1",
+  });
+  const parts = token.split(".");
+  parts[2] = "%%%";
+  const result = await client.verifyInstanceJwt(parts.join("."));
+  if (result.ok || result.reason !== "invalid") {
+    throw new TypeError("expected invalid for undecodable signature");
+  }
+});
+
+it("EdDSA header without a string kid returns invalid", async () => {
+  const { encodeBase64Url } = await import("@std/encoding/base64url");
+  const { kid, jwks } = await createTestSigningKey();
+  const { client } = makeClient(jwks);
+  const encoder = new TextEncoder();
+  const token = [
+    encodeBase64Url(encoder.encode(JSON.stringify({ alg: "EdDSA" }))),
+    encodeBase64Url(encoder.encode(JSON.stringify({
+      iss: "turbopanel",
+      aud: "turbopanel-daemon-api",
+      typ: "daemon",
+      exp: Math.floor(Date.now() / 1000) + 60,
+      sub: "s",
+      kid,
+    }))),
+    "sig",
+  ].join(".");
+  const result = await client.verifyInstanceJwt(token);
+  if (result.ok || result.reason !== "invalid") {
+    throw new TypeError("expected invalid when header kid is missing");
   }
 });

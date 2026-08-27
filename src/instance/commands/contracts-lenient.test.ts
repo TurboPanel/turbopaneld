@@ -226,6 +226,8 @@ test("managed.apply round-trips allowlisted dockerOptions including nofile ulimi
 });
 
 test("managed.apply dockerOptions inner parsers return null for hostile nested values", () => {
+  rejectDockerOptions("always");
+  rejectDockerOptions({ labels: { "": "v" } });
   rejectDockerOptions({ labels: "not-a-map" });
   rejectDockerOptions({
     labels: Object.fromEntries(
@@ -412,4 +414,51 @@ test("parseManagedReplicationHealth drops invalid lag fields and incomplete reco
       observedAt: "2026-08-09T12:00:00.000Z",
     },
   );
+  assertEquals(
+    parseManagedReplicationHealth({
+      state: "streaming",
+      observedAt: "",
+    }),
+    undefined,
+  );
+  assertEquals(
+    parseManagedReplicationHealth({
+      state: "streaming",
+      observedAt: `2026-08-09T12:00:00.000Z${"x".repeat(50)}`,
+    }),
+    undefined,
+  );
+});
+
+test("managed result parsers keep valid member and replication observations", () => {
+  const member = parseManagedLifecycleResult({
+    status: "ready",
+    summary: "up",
+    member: {
+      memberId: MEMBER_ID,
+      role: "primary",
+      status: "ready",
+      replication: {
+        state: "streaming",
+        observedAt: "2026-08-09T12:00:00.000Z",
+      },
+    },
+  }).member;
+  assertEquals(member?.memberId, MEMBER_ID);
+  assertEquals(member?.replication?.state, "streaming");
+
+  const promote = parseManagedPromoteResult({
+    status: "ready",
+    role: "primary",
+    promotedMemberId: MEMBER_ID,
+    demoted: true,
+    demotedMemberId: "00000000-0000-4000-8000-0000000000a2",
+    summary: "promoted",
+    replication: {
+      state: "streaming",
+      observedAt: "2026-08-09T12:00:00.000Z",
+    },
+  });
+  assertEquals(promote.demoted, true);
+  assertEquals(promote.replication?.state, "streaming");
 });

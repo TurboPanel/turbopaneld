@@ -12,6 +12,8 @@ import {
   openlitespeedSiteFragment,
   openlitespeedSiteName,
   openlitespeedVhostConfig,
+  phpAdminValues,
+  phpExtensionsForDeploy,
   phpFpmPoolAdminDirectives,
   phpFpmPoolConfig,
   phpFpmPoolId,
@@ -173,6 +175,24 @@ test("nginxSiteConfig listens on loopback only", () => {
   assertStringIncludes(conf, "root /var/lib/turbopanel/sites/env/site/public;");
 });
 
+test("apacheSiteConfig refuses a PHP site with no fpm socket", () => {
+  assertThrows(
+    () =>
+      apacheSiteConfig(
+        {
+          composeServiceName: "phpapp",
+          engine: "apache",
+          root: "public",
+          listenPort: 18081,
+          php: { version: "8.4" },
+        },
+        "/var/lib/turbopanel/sites/env/phpapp/public",
+      ),
+    Error,
+    "missing phpFpmSocket",
+  );
+});
+
 test("apacheSiteConfig listens on loopback and proxies PHP to php-fpm", () => {
   const socket = "/run/turbopanel/php/tp-env-phpapp.sock";
   const conf = apacheSiteConfig(
@@ -248,6 +268,58 @@ test("phpFpmPoolOverrides gates pool tuning and drops the rest", () => {
   assertEquals(phpFpmPoolOverrides({ pool: { listen: "/tmp/x.sock" } }), []);
   assertEquals(phpFpmPoolOverrides({ pool: { clear_env: "no" } }), []);
   assertEquals(phpFpmPoolOverrides(undefined), []);
+  // Empty, over-long, and punctuation-bearing values never reach the pool file.
+  assertEquals(phpFpmPoolOverrides({ pool: { pm: "   " } }), []);
+  assertEquals(
+    phpFpmPoolOverrides({ pool: { "pm.max_children": "x".repeat(65) } }),
+    [],
+  );
+  assertEquals(
+    phpFpmPoolOverrides({ pool: { "pm.max_children": "8; rm -rf /" } }),
+    [],
+  );
+});
+
+test("phpAdminValues drops empty, over-long, and newline settings", () => {
+  assertEquals(
+    phpAdminValues({
+      settings: {
+        memory_limit: "   ",
+        max_execution_time: "x".repeat(513),
+        display_errors: "Off\nOn",
+        upload_max_filesize: "32M",
+      },
+    }),
+    [{ key: "upload_max_filesize", value: "32M" }],
+  );
+});
+
+test("phpExtensionsForDeploy unions allowed names per series", () => {
+  assertEquals(
+    phpExtensionsForDeploy([
+      {
+        composeServiceName: "a",
+        engine: "nginx",
+        root: "public",
+        listenPort: 18080,
+        php: { version: "8.4", extensions: ["intl", "not-a-real-ext", "redis"] },
+      },
+      {
+        composeServiceName: "b",
+        engine: "apache",
+        root: "public",
+        listenPort: 18081,
+        php: { version: "8.4", extensions: ["intl", "apcu"] },
+      },
+      {
+        composeServiceName: "static",
+        engine: "nginx",
+        root: "public",
+        listenPort: 18082,
+      },
+    ]),
+    { "8.4": ["apcu", "intl", "redis"] },
+  );
 });
 
 test("phpFpmPoolConfig applies pool tuning and drops ondemand-only keys", () => {

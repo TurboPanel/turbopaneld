@@ -3,8 +3,12 @@ import {
   createMutableTranscriptRedactor,
   createTranscriptRedactor,
   normalizeDenySet,
+  redactCommandSummary,
   redactPlaintexts,
   redactSecretValues,
+  rememberSecretPlaintexts,
+  resetSharedSecretRedactorForTests,
+  sharedSecretRedactor,
 } from "./redactor.ts";
 
 /**
@@ -109,4 +113,46 @@ test("mutable redactor picks up secrets added after construction", () => {
   redactor.add(["second", null, ""]);
   assertEquals(redactor.redact("first second"), "*** ***");
   assertEquals(redactor.secrets().length, 2);
+});
+
+test("redactSecretValues skips empty deny candidates", () => {
+  assertEquals(redactSecretValues("keep empty", [""]), "keep empty");
+});
+
+test("normalizeDenySet tie-breaks equal-length secrets by code point", () => {
+  assertEquals(normalizeDenySet(["ba", "ab"]), ["ab", "ba"]);
+});
+
+test("mutable redactor add is a no-op when the deny-set does not grow", () => {
+  const redactor = createMutableTranscriptRedactor(["already"]);
+  const before = redactor.secrets();
+  redactor.add(["already", null, "x"]);
+  assertEquals(redactor.secrets(), before);
+});
+
+test("redactCommandSummary applies local then process-wide deny-sets", () => {
+  resetSharedSecretRedactorForTests();
+  try {
+    rememberSecretPlaintexts(["shared-pw"]);
+    assertEquals(
+      redactCommandSummary("local-pw and shared-pw", ["local-pw"]),
+      "*** and ***",
+    );
+    assertEquals(
+      sharedSecretRedactor().redact("echo shared-pw"),
+      "echo ***",
+    );
+  } finally {
+    resetSharedSecretRedactorForTests();
+  }
+});
+
+test("rememberSecretPlaintexts creates the process-wide deny-set on first use", () => {
+  resetSharedSecretRedactorForTests();
+  rememberSecretPlaintexts(["created-on-first-add"]);
+  assertEquals(
+    sharedSecretRedactor().redact("created-on-first-add"),
+    "***",
+  );
+  resetSharedSecretRedactorForTests();
 });

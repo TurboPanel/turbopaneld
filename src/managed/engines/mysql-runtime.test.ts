@@ -5,6 +5,7 @@
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import type { ManagedApplyCredential } from "../../instance/commands/contracts.ts";
 import {
+  BINLOG_EXPIRE_LOGS_SECONDS,
   buildMysqlStandbySeedScript,
   mysqlManagedEngineRuntime,
   parseShowReplicaStatus,
@@ -682,4 +683,275 @@ test("mysql ensurePrimary provisions replication account", async () => {
     peerAddresses: ["203.0.113.10"],
   });
   assertEquals(calls.some((c) => c.input?.includes("tp_repl")), true);
+});
+
+const DENIED_NO_PASSWORD =
+  "ERROR 1045 (28000): Access denied for user 'root'@'localhost' (using password: NO)";
+
+function deniedThenOk(): { exec: ManagedEngineExec; calls: RecordedExec[] } {
+  const calls: RecordedExec[] = [];
+  let n = 0;
+  const exec: ManagedEngineExec = (argv, input) => {
+    calls.push({ argv: [...argv], input });
+    n += 1;
+    if (n === 1) {
+      return Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr: DENIED_NO_PASSWORD,
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  return { exec, calls };
+}
+
+test("mysql waitReady does not use defaults-extra-file without a socket password", async () => {
+  const { exec, calls } = deniedThenOk();
+  await mysqlManagedEngineRuntime.waitReady(buildContext(exec));
+  assertEquals(calls.length, 2);
+  assertEquals(calls.every((c) => c.argv.includes("mysqladmin")), true);
+  assertEquals(calls.some((c) => c.argv[0] === "sh"), false);
+});
+
+test("mysql applyDatabases retries SQL via defaults-extra-file after 1045", async () => {
+  const { exec, calls } = deniedThenOk();
+  const applied = await mysqlManagedEngineRuntime.applyDatabases!(
+    { ...buildContext(exec), socketPassword: "root-pass" },
+    [{ action: "create", name: "appdb" }],
+  );
+  assertEquals(applied, ["appdb"]);
+  assertEquals(calls[1]!.argv[0], "sh");
+  assertEquals(calls[1]!.input?.includes("__TP_SQL__"), true);
+  assertEquals(calls[1]!.input?.includes("password=root-pass"), true);
+  assertEquals(calls[1]!.input?.includes("CREATE DATABASE"), true);
+});
+
+test("mysql applyCredentials skips plugin install when auth_socket is already loaded", async () => {
+  const { exec, calls } = recordingExec();
+  const pluginPresent: ManagedEngineExec = (argv, input) => {
+    if (argv.includes("-e")) {
+      const sql = argv[argv.indexOf("-e") + 1] ?? "";
+      if (sql.includes("PLUGIN_NAME")) {
+        return Promise.resolve({
+          success: true,
+          stdout: "auth_socket\n",
+          stderr: "",
+        });
+      }
+    }
+    return exec(argv, input);
+  };
+  const applied = await mysqlManagedEngineRuntime.applyCredentials(
+    buildContext(pluginPresent),
+    [{
+      principalId: "p-root",
+      username: "root",
+      role: "root",
+      databases: ["appdb"],
+      password: "root-pass",
+    }],
+  );
+  assertEquals(applied, ["root"]);
+  assertEquals(
+    calls.some((c) => c.input?.includes("INSTALL PLUGIN")),
+    false,
+  );
+});
+
+test("mysql applyCredentials treats plugin install already-exists as success", async () => {
+  const calls: RecordedExec[] = [];
+  const exec: ManagedEngineExec = (argv, input) => {
+    calls.push({ argv: [...argv], input });
+    if (input?.includes("INSTALL PLUGIN")) {
+      return Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr: "ERROR 1125: Function 'auth_socket' already exists",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  const applied = await mysqlManagedEngineRuntime.applyCredentials(
+    buildContext(exec),
+    [{
+      principalId: "p-root",
+      username: "root",
+      role: "root",
+      databases: ["appdb"],
+      password: "root-pass",
+    }],
+  );
+  assertEquals(applied, ["root"]);
+  assertEquals(calls.some((c) => c.input?.includes("INSTALL PLUGIN")), true);
+});
+
+test("mysql applyCredentials throws when plugin install fails", async () => {
+  const exec: ManagedEngineExec = (_argv, input) => {
+    if (input?.includes("INSTALL PLUGIN")) {
+      return Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr: "plugin load denied",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await assertRejects(
+    () =>
+      mysqlManagedEngineRuntime.applyCredentials(buildContext(exec), [{
+        principalId: "p-root",
+        username: "root",
+        role: "root",
+        databases: ["appdb"],
+        password: "root-pass",
+      }]),
+    Error,
+    "mysql failed",
+  );
+});
+
+test("mysql applyCredentials creates a replication role and skips unknown privileges", async () => {
+  const { exec, calls } = recordingExec();
+  const applied = await mysqlManagedEngineRuntime.applyCredentials(
+    buildContext(exec),
+    [
+      {
+        principalId: "p-repl",
+        username: "tp_repl",
+        role: "replication",
+        databases: [],
+        password: "repl-pass",
+      },
+      {
+        principalId: "p-app",
+        username: "app_user",
+        role: "user",
+        databases: ["appdb"],
+        privileges: ["not-a-privilege", "read-only"],
+        password: "app-pass",
+      },
+    ],
+  );
+  assertEquals(applied, ["tp_repl", "app_user"]);
+  assertEquals(calls.some((c) => c.input?.includes("tp_repl")), true);
+  assertEquals(calls.some((c) => c.input?.includes("GRANT")), true);
+});
+
+test("mysql applyDatabases throws when mysql fails", async () => {
+  const exec: ManagedEngineExec = () =>
+    Promise.resolve({ success: false, stdout: "", stderr: "disk full" });
+  await assertRejects(
+    () =>
+      mysqlManagedEngineRuntime.applyDatabases!(buildContext(exec), [{
+        action: "create",
+        name: "appdb",
+      }]),
+    Error,
+    "mysql failed",
+  );
+});
+
+test("mysql backup dump/restore argv target the app database", () => {
+  if (!mysqlManagedEngineRuntime.backup) {
+    throw new TypeError("expected mysql backup support");
+  }
+  const ctx = buildContext(recordingExec().exec);
+  assertEquals(
+    mysqlManagedEngineRuntime.backup.dumpArgv(ctx, { database: "appdb" })
+      .includes("appdb"),
+    true,
+  );
+  assertEquals(
+    mysqlManagedEngineRuntime.backup.restoreArgv(ctx, { database: "appdb" }),
+    ["mysql", "--protocol=socket", "appdb"],
+  );
+  assertEquals(BINLOG_EXPIRE_LOGS_SECONDS, 7 * 24 * 60 * 60);
+  assertThrows(
+    () =>
+      mysqlManagedEngineRuntime.backup!.dumpArgv(ctx, {
+        database: "information_schema",
+      }),
+    Error,
+    "refusing mysql system schema",
+  );
+});
+
+test("mysql readVersion returns a trimmed version or undefined when empty", async () => {
+  const version = await mysqlManagedEngineRuntime.readVersion(
+    buildContext(() =>
+      Promise.resolve({ success: true, stdout: "  8.4.0\n", stderr: "" })
+    ),
+  );
+  assertEquals(version, "8.4.0");
+  const empty = await mysqlManagedEngineRuntime.readVersion(
+    buildContext(() =>
+      Promise.resolve({ success: true, stdout: "   \n", stderr: "" })
+    ),
+  );
+  assertEquals(empty, undefined);
+});
+
+test("parseShowReplicaStatus reports reconnecting from mixed IO/SQL and Slave_* aliases", () => {
+  const mixed = parseShowReplicaStatus(`
+             Slave_IO_Running: Yes
+            Slave_SQL_Running: No
+         Seconds_Behind_Master: not-a-number
+`);
+  assertEquals(mixed.state, "reconnecting");
+  assertEquals(mixed.lagSeconds, undefined);
+});
+
+test("mysql bootstrapStandby defaults the data root when volumes are empty", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.bootstrapStandby) {
+    throw new TypeError("expected mysql bootstrapStandby");
+  }
+  const probes: string[] = [];
+  const boot = await replication.bootstrapStandby(
+    {
+      managedId: "mysql-boot",
+      image: "mysql:8",
+      volumes: [],
+      stateDir: "/tmp/mysql",
+      containerUser: "mysql",
+      containerGroup: "mysql",
+      runDocker: (args) => {
+        probes.push(args.join(" "));
+        return Promise.resolve({
+          success: false,
+          stdout: "",
+          stderr: "",
+          code: 1,
+        });
+      },
+    },
+    standbyReplicationSpec(),
+  );
+  assertEquals(boot, "seeded");
+  assertEquals(
+    probes.some((joined) => joined.includes("/var/lib/mysql/mysql")),
+    true,
+  );
+});
+
+test("mysql configureStandby dials the DNS SAN when hostaddr is omitted", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.configureStandby) {
+    throw new TypeError("expected mysql configureStandby");
+  }
+  const { exec, calls } = recordingExec();
+  const missingMarker: ManagedEngineExec = async (argv, input) => {
+    if (argv[0] === "test" && argv.includes("-f")) {
+      return { success: false, stdout: "", stderr: "" };
+    }
+    return await exec(argv, input);
+  };
+  await replication.configureStandby(buildContext(missingMarker), {
+    username: "tp_repl",
+    password: "repl-pass",
+    primary: { host: "svc-primary", port: 3306 },
+    slotName: "tp_member_2",
+  });
+  assertEquals(calls.some((c) => c.input?.includes("host=svc-primary")), true);
 });

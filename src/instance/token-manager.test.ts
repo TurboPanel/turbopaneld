@@ -471,3 +471,67 @@ test("verifyToken kid mismatch hard-fails without retry", async () => {
     );
   }
 });
+
+test("parseJwtExpiryMs rejects malformed tokens when verifyToken is omitted", async () => {
+  const keyFile = await makeKeyFile();
+  const cases: Array<{ token: string; expected: string }> = [
+    { token: "not-a-jwt", expected: "invalid JWT format" },
+    { token: "hdr.%%%.sig", expected: "invalid JWT payload encoding" },
+    { token: makeJwtWithExp("soon"), expected: "invalid JWT exp claim" },
+  ];
+
+  for (const { token, expected } of cases) {
+    const manager = new DaemonTokenManager({
+      keyFile,
+      serverId: "srv-1",
+      keyId: "kid-1",
+      machineKey: "machine-1",
+      hostname: "host-1",
+      apiClient: {
+        getAuthChallenge: () =>
+          Promise.resolve({
+            challengeId: "c1",
+            nonce: "n1",
+            at: "",
+            expiresAt: "",
+          }),
+        createSession: () =>
+          Promise.resolve({
+            token,
+            expiresAt: new Date(Date.now() + 900_000).toISOString(),
+          }),
+      },
+    });
+    let threw: unknown;
+    try {
+      await manager.getToken();
+    } catch (error) {
+      threw = error;
+    }
+    if (expected === "invalid JWT exp claim") {
+      if (!(threw instanceof TypeError)) {
+        throw new TypeError(`expected TypeError for ${expected}`);
+      }
+    } else if (!(threw instanceof Error)) {
+      throw new TypeError(`expected Error for ${expected}`);
+    }
+    if (!(threw instanceof Error) || threw.message !== expected) {
+      throw new TypeError(
+        `expected ${expected}, got ${
+          threw instanceof Error ? threw.message : String(threw)
+        }`,
+      );
+    }
+    manager.stop();
+  }
+});
+
+function makeJwtWithExp(exp: unknown): string {
+  const header = encodeBase64Url(
+    new TextEncoder().encode(JSON.stringify({ alg: "HS256", typ: "JWT" })),
+  );
+  const payload = encodeBase64Url(
+    new TextEncoder().encode(JSON.stringify({ exp })),
+  );
+  return `${header}.${payload}.signature`;
+}

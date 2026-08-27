@@ -4,6 +4,7 @@ import {
   createStreamedRunner,
   type DockerCliResult,
   type DockerStreamEvent,
+  emitBufferedDockerLines,
   runDockerStreamed,
   setDockerCliIoForTest,
 } from "./docker-cli.ts";
@@ -116,6 +117,82 @@ test("createStreamedRunner replays a buffered test seam through onLine", async (
 
 test("createStreamedRunner without an override returns runDockerStreamed", () => {
   assertEquals(createStreamedRunner(), runDockerStreamed);
+});
+
+test("emitBufferedDockerLines is a no-op without onLine", () => {
+  emitBufferedDockerLines("ignored\n", "stdout");
+});
+
+test("createStreamedRunner forwards stdin on the buffered seam", async () => {
+  let seenInput: string | undefined;
+  const runStreamed = createStreamedRunner((_args, options) => {
+    seenInput = options?.input;
+    return Promise.resolve({
+      success: true,
+      code: 0,
+      stdout: "ok",
+      stderr: "",
+    });
+  });
+  const result = await runStreamed(["compose", "config"], { input: "yaml" });
+  assertEquals(seenInput, "yaml");
+  assertEquals(result.stdout, "ok");
+});
+
+test("runDockerStreamed writes stdin to the child", async () => {
+  const restore = setDockerCliIoForTest({
+    runRaw: () =>
+      Promise.resolve({ success: true, code: 0, stdout: "24.0.0", stderr: "" }),
+    spawnStreaming: () =>
+      Promise.resolve(
+        new Deno.Command("/bin/sh", {
+          args: ["-c", "cat"],
+          stdin: "piped",
+          stdout: "piped",
+          stderr: "piped",
+        }).spawn(),
+      ),
+  });
+  try {
+    const result = await runDockerStreamed(["compose", "config"], {
+      input: "hello-stdin",
+    });
+    assertEquals(result.success, true);
+    assertEquals(result.stdout, "hello-stdin");
+  } finally {
+    restore();
+  }
+});
+
+test("runDockerStreamed reports a spawn failure", async () => {
+  const restore = setDockerCliIoForTest({
+    runRaw: () =>
+      Promise.resolve({ success: true, code: 0, stdout: "24.0.0", stderr: "" }),
+    spawnStreaming: () => Promise.reject(new Error("no docker")),
+  });
+  try {
+    const result = await runDockerStreamed(["ps"]);
+    assertEquals(result.success, false);
+    assertEquals(result.code, 127);
+    assertEquals(result.stderr.includes("no docker"), true);
+  } finally {
+    restore();
+  }
+});
+
+test("runDockerStreamed stringifies a non-Error spawn failure", async () => {
+  const restore = setDockerCliIoForTest({
+    runRaw: () =>
+      Promise.resolve({ success: true, code: 0, stdout: "24.0.0", stderr: "" }),
+    spawnStreaming: () => Promise.reject("boom-string"),
+  });
+  try {
+    const result = await runDockerStreamed(["ps"]);
+    assertEquals(result.success, false);
+    assertEquals(result.stderr.includes("boom-string"), true);
+  } finally {
+    restore();
+  }
 });
 
 /** Docker binary stand-in for probe tests (never spawned — `runRaw` is stubbed). */

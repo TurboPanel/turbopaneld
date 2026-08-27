@@ -49,5 +49,20 @@ it("cpuLineFieldCount reports jiffies field count", () => {
 
 it("parseStat returns null for invalid input", () => {
   assertEquals(parseStat(""), null);
+  assertEquals(parseStat("\ncpu 1 2 3 4"), null);
   assertEquals(parseStat("not cpu line\n"), null);
+  assertEquals(parseStatCpuLine("cpu nan nan nan nan"), null);
+  assertEquals(parseStatCpuLine("cpu 1 2 3"), null);
+  assertEquals(cpuLineFieldCount("cpu"), null);
+  assertEquals(cpuLineFieldCount(""), null);
+  assertEquals(cpuLineFieldCount("cpu0 1 2"), null);
+});
+
+it("parseStatCpuLine tolerates a non-finite trailing iowait field", () => {
+  const cpu = parseStatCpuLine("cpu 1 2 3 4 nan");
+  if (!cpu) throw new TypeError("expected counters with undefined iowait");
+  assertEquals(cpu.user, 1);
+  assertEquals(cpu.idle, 4);
+  assertEquals(cpu.iowait, undefined);
+  assertEquals(cpu.total, 10);
 });

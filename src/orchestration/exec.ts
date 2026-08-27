@@ -186,7 +186,7 @@ export async function runStreamingLines(
     reads.push(child.stdout.cancel());
   }
 
-  if (child.stderr && onStderrLine) {
+  if (onStderrLine && child.stderr) {
     reads.push(readStreamLines(child.stderr, onStderrLine));
   }
 

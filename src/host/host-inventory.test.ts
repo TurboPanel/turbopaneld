@@ -244,13 +244,16 @@ describe("host-inventory", () => {
   it("parseCpulist expands ranges and strides", () => {
     assertEquals(parseCpulist("0-3,8"), [0, 1, 2, 3, 8]);
     assertEquals(parseCpulist("0-7:2"), [0, 2, 4, 6]);
+    assertEquals(parseCpulist("0,,2"), [0, 2]);
     assertEquals(parseCpulist(""), []);
   });
 
   it("parseSizeToBytes accepts sysfs and cpuinfo units", () => {
     assertEquals(parseSizeToBytes("32K"), 32 * 1024);
+    assertEquals(parseSizeToBytes("32KiB"), 32 * 1024);
     assertEquals(parseSizeToBytes("8192 KB"), 8192 * 1024);
     assertEquals(parseSizeToBytes("8M"), 8 * 1024 * 1024);
+    assertEquals(parseSizeToBytes("8MiB"), 8 * 1024 * 1024);
   });
 
   it("advertisedMhzFromModelName reads @ GHz", () => {
@@ -905,6 +908,64 @@ exit 1
       "processor\t: 0\n",
     );
     assertEquals(matched?.cpus?.[0]?.threads?.total, 1);
+  });
+
+  it("hostResourcesFromProc falls back to cpu counts when hybrid lists lack core ids", () => {
+    const resources = hostResourcesFromProc(
+      "cpu  0\ncpu0 0\ncpu1 0\n",
+      undefined,
+      [
+        "processor\t: 0",
+        "physical id\t: 0",
+        "",
+        "processor\t: 1",
+        "physical id\t: 0",
+        "",
+      ].join("\n"),
+      "x86_64",
+      { pCpus: "0", eCpus: "1" },
+    );
+    assertEquals(resources?.cpus?.[0]?.cores, { total: 2, p: 1, e: 1 });
+    assertEquals(resources?.cpus?.[0]?.threads, { total: 2, p: 1, e: 1 });
+  });
+
+  it("hostResourcesFromProc keeps injected L1 when already set and falls back from empty cache", () => {
+    const cpuinfo = [
+      "processor\t: 0",
+      "vendor_id\t: GenuineIntel",
+      "model name\t: Cache CPU",
+      "physical id\t: 0",
+      "core id\t\t: 0",
+      "cache size\t: 4096 KB",
+      "",
+    ].join("\n");
+    const withL1 = hostResourcesFromProc(
+      "cpu  0\ncpu0 0\n",
+      undefined,
+      cpuinfo,
+      "x86_64",
+      {
+        cacheForCpu: () => ({
+          l1: 80 * 1024,
+          l1d: 48 * 1024,
+          l1i: 32 * 1024,
+        }),
+      },
+    );
+    assertEquals(withL1?.cpus?.[0]?.cache, {
+      l1: 80 * 1024,
+      l1d: 48 * 1024,
+      l1i: 32 * 1024,
+    });
+
+    const emptyCache = hostResourcesFromProc(
+      "cpu  0\ncpu0 0\n",
+      undefined,
+      cpuinfo,
+      "x86_64",
+      { cacheForCpu: () => ({}) },
+    );
+    assertEquals(emptyCache?.cpus?.[0]?.cache, { l3: 4096 * 1024 });
   });
 
   it("hostResourcesFromProc builds topologyless and name-only sockets", () => {

@@ -16,3 +16,7 @@ it("parseLoadavg extracts 1/5/15 minute averages", () => {
 it("parseLoadavg returns null for short input", () => {
   assertEquals(parseLoadavg("1.0 2.0"), null);
 });
+
+it("parseLoadavg returns null for non-numeric fields", () => {
+  assertEquals(parseLoadavg("foo bar baz"), null);
+});

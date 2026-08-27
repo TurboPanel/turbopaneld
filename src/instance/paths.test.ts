@@ -1,7 +1,8 @@
 import { join } from "@std/path";
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import {
   CANONICAL_INSTANCE_CA_PATH,
+  createHttpClientFromCaPath,
   createInstanceHttpClient,
   DEFAULT_SOCKET_DIR,
   fetchWithPlatformCa,
@@ -14,6 +15,7 @@ import {
   resolveServerIdentityDir,
   resolveServerKeyPath,
   splitPemBundle,
+  stripTrailingSlashes,
 } from "./paths.ts";
 import {
   DEV_CONFIG_DIR_DEFAULT,
@@ -506,4 +508,74 @@ test("fingerprintPemCertificate hashes the first cert DER", async () => {
 
 test("invalidatePlatformCaHttpClient drops the mtime cache", () => {
   invalidatePlatformCaHttpClient();
+});
+
+test("stripTrailingSlashes removes every trailing slash including all-slash paths", () => {
+  assertEquals(stripTrailingSlashes("/foo/bar/"), "/foo/bar");
+  assertEquals(stripTrailingSlashes("/foo"), "/foo");
+  assertEquals(stripTrailingSlashes("///"), "");
+  assertEquals(stripTrailingSlashes(""), "");
+});
+
+test("splitPemBundle stops on a BEGIN without a matching END", () => {
+  assertEquals(
+    splitPemBundle("-----BEGIN CERTIFICATE-----\nABCD\n"),
+    [],
+  );
+});
+
+test("fingerprintPemCertificate rejects a PEM with no certificates", async () => {
+  await assertRejects(
+    () => fingerprintPemCertificate("not a pem"),
+    Error,
+    "PEM bundle contains no certificates",
+  );
+});
+
+test("createHttpClientFromCaPath caches by mtime+size and rejects empty bundles", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-ca-cache-" });
+  const keyPath = `${dir}/key.pem`;
+  const certPath = `${dir}/cert.pem`;
+  const emptyPath = `${dir}/empty.pem`;
+  try {
+    const gen = await new Deno.Command("openssl", {
+      args: [
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-keyout",
+        keyPath,
+        "-out",
+        certPath,
+        "-days",
+        "1",
+        "-subj",
+        "/CN=turbopanel-test",
+      ],
+      stdout: "null",
+      stderr: "piped",
+    }).output();
+    if (!gen.success) return;
+
+    invalidatePlatformCaHttpClient();
+    const first = await createHttpClientFromCaPath(certPath);
+    const second = await createHttpClientFromCaPath(certPath);
+    if (!first || first !== second) {
+      throw new TypeError("expected mtime+size cache to reuse the HttpClient");
+    }
+    first.close();
+    invalidatePlatformCaHttpClient();
+
+    await Deno.writeTextFile(emptyPath, "not a certificate\n");
+    await assertRejects(
+      () => createHttpClientFromCaPath(emptyPath),
+      Error,
+      "contains no certificates",
+    );
+  } finally {
+    invalidatePlatformCaHttpClient();
+    await Deno.remove(dir, { recursive: true });
+  }
 });

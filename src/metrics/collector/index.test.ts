@@ -38,6 +38,13 @@ test("createMetricsCollector returns unsupported on non-linux via options.os", a
   if (!result.supported) {
     assertEquals(result.reason, "unsupported_os:darwin");
   }
+
+  const windows = createMetricsCollector(undefined, { os: "windows" });
+  const windowsResult = await windows.collect({ sequence: 0 });
+  assertEquals(windowsResult.supported, false);
+  if (!windowsResult.supported) {
+    assertEquals(windowsResult.reason, "unsupported_os:windows");
+  }
 });
 
 test({

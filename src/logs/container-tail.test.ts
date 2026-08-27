@@ -155,6 +155,38 @@ test("collectContainerLogs includes stderr from a successful docker logs call", 
   assertEquals(text.includes("warn from stderr"), true);
 });
 
+test("collectContainerLogs throws when docker logs fails", async () => {
+  await assertRejects(
+    () =>
+      collectContainerLogs(OWNED_ID, { stateDir: "/var/lib/turbopanel" }, {
+        listManifests: () => Promise.resolve(ownedManifests()),
+        runDocker: (args) => {
+          if (args[0] === "inspect") {
+            return Promise.resolve(ok(inspectStdout()));
+          }
+          return Promise.resolve(fail("permission denied"));
+        },
+      }),
+    Error,
+    "permission denied",
+  );
+});
+
+test("collectContainerLogs rejects empty compose labels as unowned", async () => {
+  await assertRejects(
+    () =>
+      collectContainerLogs(OWNED_ID, { stateDir: "/var/lib/turbopanel" }, {
+        listManifests: () => Promise.resolve(ownedManifests()),
+        runDocker: (args) => {
+          if (args[0] === "inspect") return Promise.resolve(ok("\n\n"));
+          return Promise.resolve(ok("should-not-run\n"));
+        },
+      }),
+    Error,
+    "not owned by this host",
+  );
+});
+
 test("collectContainerLogs truncates oversized UTF-8 tails by byte length", async () => {
   const euro = "€";
   const payload = `HEAD-DROP\n${euro.repeat(80_000)}\nTAIL-KEEP`;

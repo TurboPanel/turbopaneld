@@ -400,6 +400,131 @@ it("LinuxMetricsCollector falls back when sample construction throws", async () 
   assertEquals(result.sample.dimensions.daemonVersion, "unknown");
 });
 
+it("LinuxMetricsCollector uses deps.now when nowMs is omitted", async () => {
+  const deps: CollectorDeps = {
+    readProcFile: () => undefined,
+    statfs: () => null,
+    now: () => 5_000_000,
+    countProcesses: () => 2,
+    resolveDimensions: () => ({
+      schemaVersion: METRICS_SCHEMA_VERSION,
+      daemonVersion: "test",
+      operatingSystem: "Linux",
+      architecture: "x86_64",
+      kernelRelease: "6.1.0",
+    }),
+  };
+  const collector = new LinuxMetricsCollector(deps);
+  const result = await collector.collect({ sequence: 1 });
+  assertEquals(result.supported, true);
+  if (!result.supported) return;
+  assertEquals(result.sample.at, new Date(5_000_000).toISOString());
+  assertEquals(result.sample.metrics.processCount, 2);
+  assertEquals(result.sample.metrics.diskUsedPercent, null);
+});
+
+it("LinuxMetricsCollector nulls processCount when countProcesses throws", async () => {
+  const deps: CollectorDeps = {
+    readProcFile: () => undefined,
+    statfs: () => null,
+    now: () => 1_000_000,
+    countProcesses: () => {
+      throw new Error("ps unavailable");
+    },
+    resolveDimensions: () => ({
+      schemaVersion: METRICS_SCHEMA_VERSION,
+      daemonVersion: "test",
+      operatingSystem: "Linux",
+      architecture: "x86_64",
+      kernelRelease: "6.1.0",
+    }),
+  };
+  const collector = new LinuxMetricsCollector(deps);
+  const result = await collector.collect({ sequence: 1, nowMs: 1_000_000 });
+  assertEquals(result.supported, true);
+  if (!result.supported) return;
+  assertEquals(result.sample.metrics.processCount, null);
+});
+
+it("LinuxMetricsCollector uses elapsed seconds between samples", async () => {
+  let clock = 1_000_000;
+  const deps: CollectorDeps = {
+    readProcFile(path: string) {
+      if (path === "/proc/stat") return fixture("proc-stat-1.txt");
+      if (path === "/proc/meminfo") return fixture("proc-meminfo.txt");
+      if (path === "/proc/loadavg") return fixture("proc-loadavg.txt");
+      if (path === "/proc/uptime") return fixture("proc-uptime.txt");
+      if (path === "/proc/diskstats") return fixture("proc-diskstats.txt");
+      if (path === "/proc/net/dev") return fixture("proc-net-dev.txt");
+      if (path === "/proc/sys/kernel/random/boot_id") {
+        return fixture("proc-boot-id.txt");
+      }
+      return undefined;
+    },
+    statfs: () => null,
+    now: () => clock,
+    countProcesses: () => 4,
+    resolveDimensions: () => ({
+      schemaVersion: METRICS_SCHEMA_VERSION,
+      daemonVersion: "test",
+      operatingSystem: "Linux",
+      architecture: "x86_64",
+      kernelRelease: "6.1.0",
+    }),
+  };
+  const collector = new LinuxMetricsCollector(deps, {
+    nominalIntervalSeconds: 60,
+  });
+  await collector.collect({ sequence: 1, nowMs: clock });
+  clock += 30_000;
+  const result = await collector.collect({ sequence: 2, nowMs: clock });
+  assertEquals(result.supported, true);
+  if (!result.supported) return;
+  assertEquals(result.sample.intervalSeconds, 30);
+});
+
+it("LinuxMetricsCollector nulls disk capacity when statfs returns null", async () => {
+  const deps: CollectorDeps = {
+    readProcFile: () => undefined,
+    statfs: () => null,
+    now: () => 1_000_000,
+    countProcesses: () => 3,
+    resolveDimensions: () => ({
+      schemaVersion: METRICS_SCHEMA_VERSION,
+      daemonVersion: "test",
+      operatingSystem: "Linux",
+      architecture: "x86_64",
+      kernelRelease: "6.1.0",
+    }),
+  };
+  const collector = new LinuxMetricsCollector(deps);
+  const result = await collector.collect({ sequence: 1, nowMs: 1_000_000 });
+  assertEquals(result.supported, true);
+  if (!result.supported) return;
+  assertEquals(result.sample.metrics.diskUsedPercent, null);
+  assertEquals(result.sample.metrics.load1, null);
+  assertEquals(result.sample.metrics.uptimeSeconds, null);
+});
+
+it("LinuxMetricsCollector fallback uses deps.now when nowMs is omitted", async () => {
+  const deps: CollectorDeps = {
+    readProcFile: () => undefined,
+    statfs: () => null,
+    now: () => 9_000_000,
+    countProcesses: () => null,
+    resolveDimensions: () => {
+      throw new Error("dimensions boom");
+    },
+  };
+  const collector = new LinuxMetricsCollector(deps);
+  const result = await collector.collect({ sequence: 3 });
+  assertEquals(result.supported, true);
+  if (!result.supported) return;
+  assertEquals(result.sample.at, new Date(9_000_000).toISOString());
+  assertEquals(result.sample.sequence, 3);
+  assertEquals(result.sample.dimensions.daemonVersion, "unknown");
+});
+
 it("LinuxMetricsCollector keeps nominal interval when elapsed is non-positive", async () => {
   let clock = 2_000_000;
   const deps: CollectorDeps = {

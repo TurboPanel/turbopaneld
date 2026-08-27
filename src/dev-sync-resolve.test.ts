@@ -38,6 +38,28 @@ test("resolveDevSyncSourceRoot refuses co-located development daemons", () => {
   }
 });
 
+test("resolveDevSyncSourceRoot does not treat 0/false as colocated", async () => {
+  await withTempLayout(async (fixture) => {
+    const checkout = join(fixture.dirs.stateDir, "turbopaneld");
+    await Deno.mkdir(checkout);
+    await Deno.writeTextFile(join(checkout, "main.ts"), "// checkout\n");
+
+    for (const flag of ["0", "false", "no", ""]) {
+      const previous = Deno.env.get("TURBOPANEL_DEV_INSTANCE");
+      Deno.env.set("TURBOPANEL_DEV_INSTANCE", flag);
+      try {
+        const result = resolveDevSyncSourceRoot({
+          TURBOPANEL_DAEMON_ROOT: checkout,
+        });
+        assertEquals(result, { ok: true, root: checkout });
+      } finally {
+        if (previous === undefined) Deno.env.delete("TURBOPANEL_DEV_INSTANCE");
+        else Deno.env.set("TURBOPANEL_DEV_INSTANCE", previous);
+      }
+    }
+  });
+});
+
 test("resolveDevSyncSourceRoot accepts an editable checkout override", async () => {
   await withTempLayout(async (fixture) => {
     const checkout = join(fixture.dirs.stateDir, "turbopaneld");

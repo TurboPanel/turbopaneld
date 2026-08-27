@@ -1877,3 +1877,558 @@ test("a release wins over a managed-directory flag on the same site", async () =
     await cleanup();
   }
 });
+
+function stubDenoCommand(run: SiteRunFn): () => void {
+  const original = Deno.Command;
+  // deno-lint-ignore no-explicit-any
+  (Deno as any).Command = class {
+    #command: string;
+    #args: string[];
+    constructor(command: string, options?: { args?: string[] }) {
+      this.#command = command;
+      this.#args = options?.args ?? [];
+    }
+    async output(): Promise<Deno.CommandOutput> {
+      const result = await run(this.#command, this.#args);
+      const enc = new TextEncoder();
+      return {
+        success: result.success,
+        code: result.success ? 0 : 1,
+        signal: null,
+        stdout: enc.encode(result.stdout),
+        stderr: enc.encode(result.stderr),
+      };
+    }
+  };
+  return () => {
+    // deno-lint-ignore no-explicit-any
+    (Deno as any).Command = original;
+  };
+}
+
+test("applySites uses runDefault when run is omitted", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  const restore = stubDenoCommand(run);
+  try {
+    const result = await applySites(layout, "envdef", [nginxSite], {
+      runPlaybook,
+    });
+    assertEquals(result.applied, ["www"]);
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("applySites treats a missing engine playbook as already installed", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const originalStat = Deno.stat.bind(Deno);
+  Deno.stat = ((path: string | URL) => {
+    if (String(path).includes("site-nginx-apply")) {
+      return Promise.reject(new Deno.errors.NotFound("playbook"));
+    }
+    return originalStat(path);
+  }) as typeof Deno.stat;
+  try {
+    const result = await applySites(layout, "envpbmiss", [nginxSite], { run });
+    assertEquals(result.applied, ["www"]);
+  } finally {
+    Deno.stat = originalStat;
+    await cleanup();
+  }
+});
+
+test("applySites rethrows a non-NotFound playbook stat error", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const originalStat = Deno.stat.bind(Deno);
+  Deno.stat = ((path: string | URL) => {
+    if (String(path).includes("site-nginx-apply")) {
+      return Promise.reject(new Deno.errors.PermissionDenied("playbook"));
+    }
+    return originalStat(path);
+  }) as typeof Deno.stat;
+  try {
+    await assertRejects(
+      () => applySites(layout, "envpberr", [nginxSite], { run }),
+      Deno.errors.PermissionDenied,
+      "playbook",
+    );
+  } finally {
+    Deno.stat = originalStat;
+    await cleanup();
+  }
+});
+
+test("applySites rejects an unsupported engine and an invalid listenPort", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    await assertRejects(
+      () =>
+        applySites(layout, "enveng", [{
+          ...nginxSite,
+          engine: "lighttpd" as SiteApplySpec["engine"],
+        }], { run, runPlaybook }),
+      Error,
+      'site engine "lighttpd" is not supported',
+    );
+    await assertRejects(
+      () =>
+        applySites(layout, "envport", [{ ...nginxSite, listenPort: 80 }], {
+          run,
+          runPlaybook,
+        }),
+      Error,
+      "site listenPort is invalid",
+    );
+    await assertRejects(
+      () =>
+        applySites(layout, "envport2", [{
+          ...nginxSite,
+          listenPort: 70_000,
+        }], { run, runPlaybook }),
+      Error,
+      "site listenPort is invalid",
+    );
+    await assertRejects(
+      () =>
+        applySites(layout, "envport3", [{
+          ...nginxSite,
+          listenPort: 18080.5,
+        }], { run, runPlaybook }),
+      Error,
+      "site listenPort is invalid",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("applySites warns and continues when legacy chown/chmod/setgid fail", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    const chownBase = createSiteRunMock();
+    const chownRun: SiteRunFn = async (command, args) => {
+      if (args.includes("chown")) return fail("chown denied");
+      return await chownBase.run(command, args);
+    };
+    assertEquals(
+      (await applySites(layout, "envchown", [nginxSite], {
+        run: chownRun,
+        runPlaybook,
+      })).applied,
+      ["www"],
+    );
+
+    const modeBase = createSiteRunMock();
+    const modeRun: SiteRunFn = async (command, args) => {
+      if (args.includes("chmod") && args.includes("u=rwX,g=rX,o=")) {
+        return fail("chmod denied");
+      }
+      if (args.includes("find") && args.includes("g+s")) {
+        return fail("setgid denied");
+      }
+      return await modeBase.run(command, args);
+    };
+    assertEquals(
+      (await applySites(layout, "envchmod", [nginxSite], {
+        run: modeRun,
+        runPlaybook,
+      })).applied,
+      ["www"],
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("applySites fails when release hosting metadata mkdir or install fails", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { runPlaybook } = capturePlaybooks();
+  const site = { ...nginxSite, webEnv: { FOO: "bar" } };
+  try {
+    await seedRelease(layout, "rel-1", "public", "<h1>one</h1>");
+
+    const mkdirBase = createSiteRunMock();
+    const mkdirRun = withGroupMembership(async (command, args) => {
+      if (
+        args.includes("install") && args.includes("-d") &&
+        String(args.at(-1)).includes(".turbopanel-hosting")
+      ) {
+        return fail("mkdir hosting meta denied");
+      }
+      return await mkdirBase.run(command, args);
+    }, { tpnginx: ["tpnginx"] });
+    await assertRejects(
+      () =>
+        applySites(layout, "envmetamk", [site], {
+          run: mkdirRun,
+          runPlaybook,
+          releaseBindings: releaseBindingsFor("www"),
+        }),
+      Error,
+      "mkdir hosting meta denied",
+    );
+
+    const installBase = createSiteRunMock();
+    const installRun = withGroupMembership(async (command, args) => {
+      if (
+        args.includes("install") && args.includes("0640") &&
+        String(args.at(-1)).includes(".turbopanel-hosting")
+      ) {
+        return fail("install hosting meta denied");
+      }
+      return await installBase.run(command, args);
+    }, { tpnginx: ["tpnginx"] });
+    await assertRejects(
+      () =>
+        applySites(layout, "envmetainst", [site], {
+          run: installRun,
+          runPlaybook,
+          releaseBindings: releaseBindingsFor("www"),
+        }),
+      Error,
+      "install hosting meta denied",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("applySites fails when a release document root is not a directory", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    const tree = siteTreeRoot(layout);
+    await Deno.mkdir(join(tree, "current"), { recursive: true });
+    await Deno.writeTextFile(join(tree, "current", "public"), "not-a-dir");
+    await assertRejects(
+      () =>
+        applySites(layout, "envnotdir", [nginxSite], {
+          run,
+          runPlaybook,
+          releaseBindings: releaseBindingsFor("www"),
+        }),
+      Error,
+      "is not a directory",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("applySites skips a managed placeholder when index install fails", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const base = createSiteRunMock();
+  const run = withGroupMembership(async (command, args) => {
+    if (
+      args.includes("install") && args.includes("0640") &&
+      String(args.at(-1)).endsWith("index.html")
+    ) {
+      return fail("index skipped");
+    }
+    return await base.run(command, args);
+  }, { tpnginx: ["tpnginx"] });
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    const result = await applySites(layout, "envidx", [managedSite], {
+      run,
+      runPlaybook,
+      managedDirectoryBindings: managedBindingsFor("www"),
+    });
+    assertEquals(result.applied, ["www"]);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("removeSites warns when sudo rm, OLS vhost rm, php-fpm reload, or idle disable fail", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  const environmentId = "envrmfail";
+  try {
+    await applySites(layout, environmentId, [nginxPhpSite, olsSite], {
+      run,
+      runPlaybook,
+    });
+    const poolsDir = join(layout.configDir, "php", "8.4", "pools");
+    await Deno.writeTextFile(join(poolsDir, "default.conf"), "; bootstrap\n");
+
+    const remove: SiteRunFn = async (command, args) => {
+      if (args.includes("rm") && args.includes("-rf")) {
+        return fail("vhost rm refused");
+      }
+      if (
+        args.includes("rm") &&
+        String(args.at(-1)).includes("/nginx/sites/")
+      ) {
+        return fail("rm refused");
+      }
+      if (args.includes("--test")) throw new Error("fpm test exploded");
+      if (args.includes("disable") && args.includes("--now")) {
+        return fail("disable refused");
+      }
+      return await run(command, args);
+    };
+    await removeSites(layout, environmentId, { run: remove });
+  } finally {
+    await cleanup();
+  }
+});
+
+test("removeSites skips idle disable when another pool remains and swallows a string reload error", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  const environmentId = "envrmkeep";
+  try {
+    await applySites(layout, environmentId, [nginxPhpSite], {
+      run,
+      runPlaybook,
+    });
+    const poolsDir = join(layout.configDir, "php", "8.4", "pools");
+    await Deno.mkdir(join(layout.configDir, "php", "8.3", "pools"), {
+      recursive: true,
+    });
+    await Deno.writeTextFile(
+      join(poolsDir, "tp-otherenv-keep.conf"),
+      "; other env\n",
+    );
+
+    const remove: SiteRunFn = async (command, args) => {
+      if (args.includes("--test")) throw "fpm-test-string";
+      if (args.includes("disable") && args.includes("--now")) {
+        throw new TypeError("disable must not run while another pool remains");
+      }
+      return await run(command, args);
+    };
+    await removeSites(layout, environmentId, { run: remove });
+  } finally {
+    await cleanup();
+  }
+});
+
+test("removeSites rethrows a non-NotFound config-dir read", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const originalReadDir = Deno.readDir.bind(Deno);
+  Deno.readDir = ((path: string | URL) => {
+    if (String(path).includes(`${layout.configDir}/nginx/sites`)) {
+      // deno-lint-ignore require-yield
+      return (async function* () {
+        throw new Deno.errors.PermissionDenied("sites dir");
+      })();
+    }
+    return originalReadDir(path);
+  }) as typeof Deno.readDir;
+  try {
+    await assertRejects(
+      () => removeSites(layout, "envrd", { run }),
+      Deno.errors.PermissionDenied,
+      "sites dir",
+    );
+  } finally {
+    Deno.readDir = originalReadDir;
+    await cleanup();
+  }
+});
+
+test("applySites fails when OpenLiteSpeed cannot create the vhost directory", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const base = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  const run: SiteRunFn = async (command, args) => {
+    if (
+      args.includes("install") && args.includes("-d") &&
+      String(args.at(-1)).includes("/openlitespeed/vhosts/")
+    ) {
+      return fail("ols vhost mkdir denied");
+    }
+    return await base.run(command, args);
+  };
+  try {
+    await assertRejects(
+      () => applySites(layout, "envolsdir", [olsSite], { run, runPlaybook }),
+      Error,
+      "ols vhost mkdir denied",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("applySites treats a failed id lookup as no supplementary groups", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const run: SiteRunFn = async (command, args) => {
+    if (command === "id") return fail("no such user");
+    return await mock.run(command, args);
+  };
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    await seedRelease(layout, "rel-1", "public", "<h1>one</h1>");
+    const result = await applySites(layout, "envidfail", [nginxSite], {
+      run,
+      runPlaybook,
+      releaseBindings: releaseBindingsFor("www"),
+    });
+    assertEquals(result.applied, ["www"]);
+    assert(
+      mock.calls.some((call) =>
+        call.args.includes("usermod") && call.args.includes("-aG")
+      ),
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("applySites rethrows a non-NotFound document-root index stat", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  const originalStat = Deno.stat.bind(Deno);
+  Deno.stat = ((path: string | URL) => {
+    if (String(path).endsWith("/index.html") && String(path).includes("/www/")) {
+      return Promise.reject(new Deno.errors.PermissionDenied("index"));
+    }
+    return originalStat(path);
+  }) as typeof Deno.stat;
+  try {
+    await assertRejects(
+      () => applySites(layout, "envidxstat", [nginxSite], { run, runPlaybook }),
+      Deno.errors.PermissionDenied,
+      "index",
+    );
+  } finally {
+    Deno.stat = originalStat;
+    await cleanup();
+  }
+});
+
+test("applySites rethrows a non-NotFound release document-root stat", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
+  const { runPlaybook } = capturePlaybooks();
+  const originalStat = Deno.stat.bind(Deno);
+  Deno.stat = ((path: string | URL) => {
+    if (String(path).endsWith("/current/public")) {
+      return Promise.reject(new Deno.errors.PermissionDenied("docroot"));
+    }
+    return originalStat(path);
+  }) as typeof Deno.stat;
+  try {
+    await seedRelease(layout, "rel-1", "public", "<h1>one</h1>");
+    await assertRejects(
+      () =>
+        applySites(layout, "envstat", [nginxSite], {
+          run,
+          runPlaybook,
+          releaseBindings: releaseBindingsFor("www"),
+        }),
+      Deno.errors.PermissionDenied,
+      "docroot",
+    );
+  } finally {
+    Deno.stat = originalStat;
+    await cleanup();
+  }
+});
+
+test("removeSites swallows an engine reload failure after a successful site delete", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  const environmentId = "envengreload";
+  try {
+    await applySites(layout, environmentId, [nginxSite], { run, runPlaybook });
+    const remove: SiteRunFn = async (command, args) => {
+      if (args.includes("-t") && args.includes("-c")) {
+        throw "nginx-test-string";
+      }
+      return await run(command, args);
+    };
+    await removeSites(layout, environmentId, { run: remove });
+  } finally {
+    await cleanup();
+  }
+});
+
+test("removeSites swallows a missing OLS fragment and rethrows a denied one", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  const environmentId = "envolsrm";
+  try {
+    await applySites(layout, environmentId, [olsSite], { run, runPlaybook });
+    const fragment = join(
+      layout.configDir,
+      "openlitespeed",
+      "sites",
+      `tp-${environmentId}-static.conf`,
+    );
+    const originalRemove = Deno.remove.bind(Deno);
+    Deno.remove = ((path: string | URL, options?: Deno.RemoveOptions) => {
+      if (String(path) === fragment) {
+        return Promise.reject(new Deno.errors.NotFound("already gone"));
+      }
+      return originalRemove(path, options);
+    }) as typeof Deno.remove;
+    try {
+      await removeSites(layout, environmentId, { run });
+    } finally {
+      Deno.remove = originalRemove;
+    }
+
+    await applySites(layout, environmentId, [olsSite], { run, runPlaybook });
+    Deno.remove = ((path: string | URL, options?: Deno.RemoveOptions) => {
+      if (String(path) === fragment) {
+        return Promise.reject(new Deno.errors.PermissionDenied("fragment"));
+      }
+      return originalRemove(path, options);
+    }) as typeof Deno.remove;
+    try {
+      await assertRejects(
+        () => removeSites(layout, environmentId, { run }),
+        Deno.errors.PermissionDenied,
+        "fragment",
+      );
+    } finally {
+      Deno.remove = originalRemove;
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+test("removeSites best-effort-cleans a leftover staging directory", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  const environmentId = "envstage";
+  try {
+    await applySites(layout, environmentId, [nginxSite], { run, runPlaybook });
+    const leftover = join(
+      layout.configDir,
+      "nginx",
+      "sites",
+      `tp-${environmentId}-stale.tmp`,
+    );
+    await Deno.mkdir(leftover);
+    await Deno.writeTextFile(join(leftover, "keep"), "x");
+    await removeSites(layout, environmentId, { run });
+    await Deno.stat(leftover);
+  } finally {
+    await cleanup();
+  }
+});

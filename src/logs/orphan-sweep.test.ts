@@ -125,6 +125,61 @@ test("sweep uploads through DaemonApiClient.sendCommandLogChunk", async () => {
   });
 });
 
+test("sweep is a no-op when neither spoolDir nor layout is provided", async () => {
+  const result = await sweepOrphanCommandLogs({
+    send: () => Promise.reject(new Error("must not be called")),
+  });
+  assertEquals(result, { uploaded: 0, failed: 0, skipped: 0 });
+});
+
+test("sweep skips non-log entries, empty leftovers, and oversized transcripts", async () => {
+  await withTempLayout(async (fixture) => {
+    const dir = commandLogSpoolDir({ daemonStateDir: fixture.dirs.stateDir });
+    await Deno.mkdir(dir, { recursive: true, mode: 0o700 });
+    await Deno.writeTextFile(`${dir}/notes.txt`, "not a spool\n");
+    await Deno.mkdir(`${dir}/subdir`);
+    const emptyPath = `${dir}/cmd-empty.log`;
+    await Deno.writeTextFile(emptyPath, "");
+    const hugePath = `${dir}/cmd-huge.log`;
+    await Deno.writeTextFile(hugePath, "x".repeat(4 * 1024 * 1024 + 1));
+
+    const sent: string[] = [];
+    const result = await sweepOrphanCommandLogs({
+      spoolDir: dir,
+      send: (params) => {
+        sent.push(params.commandId);
+        return Promise.resolve({ nextSeq: params.seq + 1 });
+      },
+    });
+
+    assertEquals(result, { uploaded: 0, failed: 0, skipped: 2 });
+    assertEquals(sent, []);
+    assertEquals(await Deno.stat(emptyPath).catch(() => null), null);
+    assertEquals((await Deno.stat(hugePath)).isFile, true);
+    assertEquals((await Deno.stat(`${dir}/notes.txt`)).isFile, true);
+  });
+});
+
+test("sweep is a no-op when the spool directory cannot be listed", async () => {
+  await withTempLayout(async (fixture) => {
+    const dir = commandLogSpoolDir({ daemonStateDir: fixture.dirs.stateDir });
+    await writeSpoolFile(dir, "cmd-hidden", 1);
+    const originalReadDir = Deno.readDir.bind(Deno);
+    Deno.readDir = () => {
+      throw new Error("EACCES");
+    };
+    try {
+      const result = await sweepOrphanCommandLogs({
+        spoolDir: dir,
+        send: () => Promise.reject(new Error("must not be called")),
+      });
+      assertEquals(result, { uploaded: 0, failed: 0, skipped: 0 });
+    } finally {
+      Deno.readDir = originalReadDir;
+    }
+  });
+});
+
 test("sweep skips a spool file a live command sink still owns", async () => {
   await withTempLayout(async (fixture) => {
     const dir = commandLogSpoolDir({ daemonStateDir: fixture.dirs.stateDir });

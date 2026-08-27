@@ -79,13 +79,16 @@ export function isSkippedPath(rel: string): boolean {
 
 const SCAN_EXTENSIONS = /\.(ts|tsx|js|mjs|cjs|md|mdx|yml|yaml|sh|j2|json)$/;
 
-async function* walk(dir: string): AsyncGenerator<string> {
+export async function* walkVocabularyFiles(
+  dir: string,
+  root = repoRoot,
+): AsyncGenerator<string> {
   for await (const entry of Deno.readDir(dir)) {
     const abs = `${dir}/${entry.name}`;
-    const rel = relative(repoRoot, abs);
+    const rel = relative(root, abs);
     if (entry.isDirectory) {
       if (SKIP_DIRS.has(entry.name) || isSkippedPath(rel)) continue;
-      yield* walk(abs);
+      yield* walkVocabularyFiles(abs, root);
     } else if (entry.isFile) {
       if (SKIP_FILENAMES.has(entry.name) || isSkippedPath(rel)) continue;
       yield abs;
@@ -118,26 +121,51 @@ export function collectVocabularyFailures(
   return failures;
 }
 
-if (import.meta.main) {
-  const failures: string[] = [];
-  for await (const file of walk(repoRoot)) {
-    if (!SCAN_EXTENSIONS.test(file)) continue;
-    const rel = relative(repoRoot, file);
-    const text = await Deno.readTextFile(file);
-    failures.push(...collectVocabularyFailures(rel, text));
-  }
-
+export function reportVocabularyFailures(
+  failures: string[],
+  io: {
+    error?: (message: string) => void;
+    log?: (message: string) => void;
+    exit?: (code: number) => void;
+  } = {},
+): void {
+  const error = io.error ?? ((message: string) => {
+    console.error(message);
+  });
+  const log = io.log ?? ((message: string) => {
+    console.log(message);
+  });
+  const exit = io.exit ?? ((code: number) => {
+    Deno.exit(code);
+  });
   if (failures.length > 0) {
-    console.error("Vocabulary check failed:\n");
+    error("Vocabulary check failed:\n");
     for (const failure of failures) {
-      console.error(`  ✗ ${failure}`);
+      error(`  ✗ ${failure}`);
     }
-    console.error(
+    error(
       `\n${failures.length} problem(s) found. The daemon is a "daemon" / "host daemon" / "turbopaneld", never an "agent". ` +
         "Update the allowlist in this script (and the instance/website copies) if this is a legitimate coding-agent or third-party reference.",
     );
-    Deno.exit(1);
+    exit(1);
+    return;
   }
+  log("Vocabulary check passed: no daemon-as-agent phrasing found.");
+}
 
-  console.log("Vocabulary check passed: no daemon-as-agent phrasing found.");
+export async function runVocabularyCheck(
+  root = repoRoot,
+): Promise<string[]> {
+  const failures: string[] = [];
+  for await (const file of walkVocabularyFiles(root, root)) {
+    if (!SCAN_EXTENSIONS.test(file)) continue;
+    const rel = relative(root, file);
+    const text = await Deno.readTextFile(file);
+    failures.push(...collectVocabularyFailures(rel, text));
+  }
+  return failures;
+}
+
+if (import.meta.main) {
+  reportVocabularyFailures(await runVocabularyCheck());
 }

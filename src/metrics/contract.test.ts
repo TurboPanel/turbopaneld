@@ -152,6 +152,14 @@ it("buildHostMetricsSample rejects invalid intervalSeconds", () => {
   }
 });
 
+it("buildHostMetricsSample accepts a zero sequence", () => {
+  const sample = buildHostMetricsSample({
+    ...validBuildInput,
+    sequence: 0,
+  });
+  assertEquals(sample.sequence, 0);
+});
+
 it("buildHostMetricsSample rejects invalid sequence", () => {
   for (const sequence of [-1, Number.NaN, Number.NEGATIVE_INFINITY]) {
     assertThrows(

@@ -117,6 +117,51 @@ test("shouldEnableDockerIntegration stays off when orchestration is skipped", ()
   });
 });
 
+test("isPreOptInCoLocatedDev is false for a remote URL daemon", () => {
+  withEnv({ TURBOPANEL_INSTANCE_URL: "https://panel.example.com" }, () => {
+    assertEquals(isPreOptInCoLocatedDev(), false);
+    assertEquals(shouldConnectToInstance(), true);
+  });
+});
+
+test("TURBOPANEL_DEV_INSTANCE accepts true and yes", () => {
+  withEnv({ TURBOPANEL_DEV_INSTANCE: "true" }, () => {
+    assertEquals(isPreOptInCoLocatedDev(), false);
+    assertEquals(shouldEnableDockerIntegration(), true);
+  });
+  withEnv({ TURBOPANEL_DEV_INSTANCE: "yes" }, () => {
+    assertEquals(isPreOptInCoLocatedDev(), false);
+  });
+  withEnv({ TURBOPANEL_DEV_INSTANCE: "false" }, () => {
+    assertEquals(isPreOptInCoLocatedDev(), true);
+  });
+});
+
+test("TURBOPANEL_SKIP_ORCHESTRATION accepts true and yes", () => {
+  withEnv({ TURBOPANEL_SKIP_ORCHESTRATION: "true" }, () => {
+    assertEquals(shouldConnectToInstance(), true);
+    assertEquals(shouldEnableDockerIntegration(), false);
+  });
+  withEnv({ TURBOPANEL_SKIP_ORCHESTRATION: "yes" }, () => {
+    assertEquals(shouldConnectToInstance(), true);
+    assertEquals(shouldEnableDockerIntegration(), false);
+  });
+});
+
+test("opted-in Workers HTTPS is not pre-opt-in", () => {
+  withEnv(
+    {
+      TURBOPANEL_DEV_INSTANCE: "1",
+      TURBOPANEL_INSTANCE_RUNTIME: "workers",
+      TURBOPANEL_INSTANCE_URL: "https://203.0.113.10",
+    },
+    () => {
+      assertEquals(isPreOptInCoLocatedDev(), false);
+      assertEquals(shouldConnectToInstance(), true);
+    },
+  );
+});
+
 test("shouldEnableDockerIntegration stays off for opted-in Workers without URL kind fallthrough", () => {
   // DEV_INSTANCE + workers + URL → install-dev true (docker on). Document the
   // remaining false path via skip + remote is already covered; this pins the

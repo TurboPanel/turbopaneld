@@ -122,3 +122,54 @@ test("ManagedHaObserver uses injected now() for the emitted at timestamp", async
   assertEquals(sent.length, 1);
   assertEquals(sent[0]?.at, "2026-08-25T12:00:00.000Z");
 });
+
+test("ManagedHaObserver skips absent stack, invalid aliases, and duplicate keys", async () => {
+  const sent: ManagedHaEventMessage[] = [];
+  const absent = new ManagedHaObserver({
+    send: (message) => {
+      sent.push(message);
+    },
+    isStackPresent: () => Promise.resolve(false),
+    api: {
+      credentials: { user: "admin", password: "x" },
+      fetch: () => {
+        throw new TypeError("orchestrator must not be queried");
+      },
+    },
+  });
+  await absent.poll();
+  assertEquals(sent.length, 0);
+
+  const observer = new ManagedHaObserver({
+    send: (message) => {
+      sent.push(message);
+    },
+    isStackPresent: () => Promise.resolve(true),
+    api: {
+      credentials: { user: "admin", password: "x" },
+      fetch: () =>
+        Promise.resolve(
+          problemResponse([
+            {
+              clusterAlias: "not-a-uuid",
+              key: { hostname: "db-1", port: 5432 },
+              problems: ["DeadPrimary"],
+            },
+            {
+              clusterAlias: "",
+              problems: ["DeadPrimary"],
+            },
+            {
+              clusterAlias: MANAGED_ID,
+              key: { hostname: "db-1", port: 5432 },
+              problems: ["DeadPrimary"],
+            },
+          ]),
+        ),
+    },
+  });
+  await observer.poll();
+  await observer.poll();
+  assertEquals(sent.length, 1);
+  assertEquals(sent[0]?.managedId, MANAGED_ID);
+});

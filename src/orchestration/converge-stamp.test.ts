@@ -1,4 +1,4 @@
-import { assertEquals, assertStringIncludes } from "@std/assert";
+import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { dirname, join } from "@std/path";
 import {
   computeDevConvergeStamp,
@@ -267,6 +267,132 @@ test("devConvergeEnvMaterial captures dev-only extra-vars with defaults", () => 
   }
 });
 
+test("shouldSkipDevConverge does not skip when instance service is disabled", async () => {
+  await withIsolatedStamp(async () => {
+    const stamp = await computeDevConvergeStamp();
+    await writeDevConvergeStamp(stamp);
+    assertEquals(await shouldSkipDevConverge(false), false);
+    assertEquals(
+      await describeDevConvergeDecision(false),
+      "turbopanel-instance.service is not enabled",
+    );
+  });
+});
+
+test("shouldSkipDevConverge never skips when TURBOPANEL_FORCE_CONVERGE is true or yes", async () => {
+  await withIsolatedStamp(async () => {
+    const stamp = await computeDevConvergeStamp();
+    await writeDevConvergeStamp(stamp);
+    for (const flag of ["true", "yes", "TRUE", "Yes"]) {
+      Deno.env.set("TURBOPANEL_FORCE_CONVERGE", flag);
+      assertEquals(await shouldSkipDevConverge(true), false, flag);
+      assertEquals(
+        await describeDevConvergeDecision(true),
+        "TURBOPANEL_FORCE_CONVERGE is set",
+        flag,
+      );
+    }
+  });
+});
+
+test("emitDevConvergeSkippedIfNeeded does not emit when instance is disabled", async () => {
+  await withIsolatedStamp(async () => {
+    const stamp = await computeDevConvergeStamp();
+    await writeDevConvergeStamp(stamp);
+    const emitted: unknown[] = [];
+    const skipped = await emitDevConvergeSkippedIfNeeded(
+      true,
+      false,
+      (event) => {
+        emitted.push(event);
+      },
+    );
+    assertEquals(skipped, false);
+    assertEquals(emitted, []);
+  });
+});
+
+test("resolveDevConvergeStampFile honors an explicit runtimes env bag", () => {
+  const stampFile = resolveDevConvergeStampFile({
+    TURBOPANEL_RUNTIMES_DIR: "/tmp/tp-runtimes-fixture",
+  });
+  assertEquals(
+    stampFile,
+    join("/tmp/tp-runtimes-fixture", "ansible", "dev-converge.stamp"),
+  );
+});
+
+test("computeDevConvergeStamp hashes nested role yml/j2 and ignores other files", async () => {
+  await withIsolatedStamp(async () => {
+    const overlay = Deno.env.get("TURBOPANEL_DEV_ORCHESTRATION_DIR");
+    if (!overlay) {
+      throw new TypeError("expected isolated overlay path");
+    }
+    await Deno.writeTextFile(
+      join(overlay, DEV_CONVERGE_MANIFEST_FILE),
+      JSON.stringify({
+        playbook: "playbook.yml",
+        roles: ["dev-only"],
+        devRoles: ["dev-only"],
+      }),
+    );
+    const roleDir = join(overlay, "roles", "dev-only");
+    await Deno.mkdir(join(roleDir, "templates"), { recursive: true });
+    await Deno.writeTextFile(
+      join(roleDir, "templates", "unit.j2"),
+      "ExecStart={{ bin }}\n",
+    );
+    await Deno.writeTextFile(join(roleDir, "README.md"), "ignore me\n");
+
+    const first = await computeDevConvergeStamp();
+    await Deno.writeTextFile(join(roleDir, "notes.txt"), "still ignored\n");
+    assertEquals(await computeDevConvergeStamp(), first);
+
+    await Deno.writeTextFile(
+      join(roleDir, "handlers.yml"),
+      "- name: restart\n  debug:\n    msg: bounce\n",
+    );
+    const afterYaml = await computeDevConvergeStamp();
+    assertEquals(afterYaml === first, false);
+
+    await Deno.writeTextFile(
+      join(roleDir, "templates", "unit.j2"),
+      "ExecStart={{ bin }}\n# changed\n",
+    );
+    assertEquals((await computeDevConvergeStamp()) === afterYaml, false);
+  });
+});
+
+test("computeDevConvergeStamp rethrows non-NotFound role walk errors", async () => {
+  await withIsolatedStamp(async () => {
+    const overlay = Deno.env.get("TURBOPANEL_DEV_ORCHESTRATION_DIR");
+    if (!overlay) {
+      throw new TypeError("expected isolated overlay path");
+    }
+    await Deno.writeTextFile(
+      join(overlay, DEV_CONVERGE_MANIFEST_FILE),
+      JSON.stringify({
+        playbook: "playbook.yml",
+        roles: ["dev-only"],
+        devRoles: ["dev-only"],
+      }),
+    );
+    const blocked = join(overlay, "roles", "dev-only", "blocked");
+    await Deno.mkdir(blocked, { recursive: true });
+    await Deno.writeTextFile(join(blocked, "secret.yml"), "x: 1\n");
+    const previousMode = (await Deno.stat(blocked)).mode! & 0o777;
+    await Deno.chmod(blocked, 0o000);
+    try {
+      await assertRejects(
+        () => computeDevConvergeStamp(),
+        Deno.errors.PermissionDenied,
+      );
+    } finally {
+      await Deno.chmod(blocked, previousMode);
+    }
+  });
+});
+
 test("devConvergeEnvMaterial honors explicit static and workers overrides", () => {
   const previous = new Map<string, string | undefined>();
   for (
@@ -289,6 +415,53 @@ test("devConvergeEnvMaterial honors explicit static and workers overrides", () =
     assertStringIncludes(material, "instance_run_mode=compiled");
     assertStringIncludes(material, "instance_runtime=workers");
     assertStringIncludes(material, "optional_tabix=true");
+  } finally {
+    for (const [key, value] of previous.entries()) {
+      if (value === undefined) {
+        Deno.env.delete(key);
+      } else {
+        Deno.env.set(key, value);
+      }
+    }
+  }
+});
+
+test("devConvergeEnvMaterial parses optional flags and falls back on garbage", () => {
+  const keys = [
+    "TURBOPANEL_DEV_USER",
+    "TURBOPANEL_DEV_UID",
+    "TURBOPANEL_DEV_GID",
+    "TURBOPANEL_OPTIONAL_UI",
+    "TURBOPANEL_OPTIONAL_WEBSITE",
+    "TURBOPANEL_OPTIONAL_MAILPIT",
+    "TURBOPANEL_OPTIONAL_DBSTUDIO",
+    "TURBOPANEL_OPTIONAL_REDIS_INSIGHT",
+    "TURBOPANEL_OPTIONAL_TABIX",
+  ];
+  const previous = new Map<string, string | undefined>();
+  for (const key of keys) {
+    previous.set(key, Deno.env.get(key));
+  }
+  Deno.env.set("TURBOPANEL_DEV_USER", "vagrant");
+  Deno.env.set("TURBOPANEL_DEV_UID", "1000");
+  Deno.env.set("TURBOPANEL_DEV_GID", "1000");
+  Deno.env.set("TURBOPANEL_OPTIONAL_UI", "false");
+  Deno.env.set("TURBOPANEL_OPTIONAL_WEBSITE", "0");
+  Deno.env.set("TURBOPANEL_OPTIONAL_MAILPIT", "no");
+  Deno.env.set("TURBOPANEL_OPTIONAL_DBSTUDIO", "maybe");
+  Deno.env.set("TURBOPANEL_OPTIONAL_REDIS_INSIGHT", "1");
+  Deno.env.set("TURBOPANEL_OPTIONAL_TABIX", "bogus");
+  try {
+    const material = devConvergeEnvMaterial();
+    assertStringIncludes(material, "dev_user=vagrant");
+    assertStringIncludes(material, "dev_uid=1000");
+    assertStringIncludes(material, "dev_gid=1000");
+    assertStringIncludes(material, "optional_ui=false");
+    assertStringIncludes(material, "optional_website=false");
+    assertStringIncludes(material, "optional_mailpit=false");
+    assertStringIncludes(material, "optional_dbstudio=false");
+    assertStringIncludes(material, "optional_redis_insight=true");
+    assertStringIncludes(material, "optional_tabix=false");
   } finally {
     for (const [key, value] of previous.entries()) {
       if (value === undefined) {

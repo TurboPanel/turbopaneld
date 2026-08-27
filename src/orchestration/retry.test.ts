@@ -49,3 +49,18 @@ test("withRetry throws the last error once attempts are exhausted", async () => 
   }
   assertEquals(calls, 3);
 });
+
+test("withRetry rethrows a non-Error value after default attempts", async () => {
+  let calls = 0;
+  try {
+    await withRetry(async () => {
+      await Promise.resolve();
+      calls++;
+      throw "not-an-error";
+    }, { label: "non-error op", baseDelayMs: 1, maxDelayMs: 1 });
+    throw new TypeError("expected withRetry to throw");
+  } catch (err) {
+    assertEquals(err, "not-an-error");
+  }
+  assertEquals(calls, 3);
+});

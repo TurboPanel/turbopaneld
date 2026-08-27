@@ -131,6 +131,72 @@ test("handleManagedLifecycle reports stopped when compose ps is empty", async ()
   });
 });
 
+test("handleManagedLifecycle reports stopped when every container has exited", async () => {
+  const managedId = "managed_lifecycle_all_exited";
+  await withManagedStateDir(managedId, async () => {
+    const exited = JSON.stringify([
+      {
+        ID: "a1",
+        Name: "svc-1",
+        Service: "postgres",
+        State: "exited",
+      },
+      {
+        ID: "a2",
+        Name: "svc-2",
+        Service: "other",
+        State: "dead",
+      },
+    ]);
+    const result = await handleManagedLifecycle(
+      { managedId, action: "stop" },
+      new Date().toISOString(),
+      {
+        runDocker: (args) => {
+          if (args[0] === "compose" && args.includes("ps")) {
+            return Promise.resolve(dockerOk(exited));
+          }
+          return Promise.resolve(dockerOk());
+        },
+      },
+    );
+    assertEquals(result.status, "stopped");
+  });
+});
+
+test("handleManagedLifecycle reports failed when no container is running", async () => {
+  const managedId = "managed_lifecycle_created";
+  await withManagedStateDir(managedId, async () => {
+    const created = JSON.stringify([
+      {
+        ID: "a1",
+        Name: "svc-1",
+        Service: "postgres",
+        State: "created",
+      },
+      {
+        ID: "a2",
+        Name: "svc-2",
+        Service: "other",
+        State: "restarting",
+      },
+    ]);
+    const result = await handleManagedLifecycle(
+      { managedId, action: "restart" },
+      new Date().toISOString(),
+      {
+        runDocker: (args) => {
+          if (args[0] === "compose" && args.includes("ps")) {
+            return Promise.resolve(dockerOk(created));
+          }
+          return Promise.resolve(dockerOk());
+        },
+      },
+    );
+    assertEquals(result.status, "failed");
+  });
+});
+
 test("handleManagedLifecycle reports failed for mixed non-running states", async () => {
   const managedId = "managed_lifecycle_failed";
   await withManagedStateDir(managedId, async () => {
@@ -162,6 +228,25 @@ test("handleManagedLifecycle reports failed for mixed non-running states", async
     );
 
     assertEquals(result.status, "ready");
+  });
+});
+
+test("handleManagedLifecycle reports stopped when compose ps fails", async () => {
+  const managedId = "managed_lifecycle_ps_fail";
+  await withManagedStateDir(managedId, async () => {
+    const result = await handleManagedLifecycle(
+      { managedId, action: "stop" },
+      new Date().toISOString(),
+      {
+        runDocker: (args) => {
+          if (args[0] === "compose" && args.includes("ps")) {
+            return Promise.resolve(dockerFail("ps unavailable"));
+          }
+          return Promise.resolve(dockerOk());
+        },
+      },
+    );
+    assertEquals(result.status, "stopped");
   });
 });
 
@@ -362,6 +447,154 @@ test("handleManagedDestroy force-removes leftover compose project containers", a
       calls.some((args) => args[0] === "rm" && args.includes("abc123def456")),
       true,
     );
+  });
+});
+
+test("handleManagedDestroy throws when compose down and leftover listing both fail", async () => {
+  const managedId = "managed_destroy_list_fail";
+  await withManagedStateDir(managedId, async () => {
+    await assertRejects(
+      () =>
+        handleManagedDestroy(
+          { managedId, removeVolumes: false },
+          new Date().toISOString(),
+          {
+            runDocker: (args) => {
+              if (args.includes("down")) {
+                return Promise.resolve(dockerFail("compose down failed"));
+              }
+              if (args[0] === "ps") {
+                return Promise.resolve(dockerFail("docker ps failed"));
+              }
+              return Promise.resolve(dockerOk());
+            },
+          },
+        ),
+      Error,
+      "compose down failed",
+    );
+  });
+});
+
+test("handleManagedDestroy ignores leftover ids that are not docker container ids", async () => {
+  const managedId = "managed_destroy_junk_ids";
+  await withManagedStateDir(managedId, async () => {
+    const calls: string[][] = [];
+    const result = await handleManagedDestroy(
+      { managedId, removeVolumes: false },
+      new Date().toISOString(),
+      {
+        runDocker: (args) => {
+          calls.push([...args]);
+          if (args.includes("down")) return Promise.resolve(dockerOk());
+          if (args[0] === "ps") {
+            return Promise.resolve(dockerOk("not-an-id abc123"));
+          }
+          return Promise.resolve(dockerOk());
+        },
+      },
+    );
+    assertEquals(result.summary, "managed service destroyed");
+    assertEquals(calls.some((args) => args[0] === "rm"), false);
+  });
+});
+
+test("handleManagedLifecycle throws when the state path cannot be stat'd", async () => {
+  const managedId = "managed_life_stat";
+  await withManagedStateDir(managedId, async (root) => {
+    const originalStat = Deno.stat.bind(Deno);
+    Deno.stat = (path) => {
+      if (String(path) === root) {
+        return Promise.reject(new Error("EACCES"));
+      }
+      return originalStat(path);
+    };
+    try {
+      await assertRejects(
+        () =>
+          handleManagedLifecycle(
+            { managedId, action: "stop" },
+            new Date().toISOString(),
+            { runDocker: () => Promise.resolve(dockerOk()) },
+          ),
+        Error,
+        "EACCES",
+      );
+    } finally {
+      Deno.stat = originalStat;
+    }
+  });
+});
+
+test("handleManagedDestroy throws when the state path cannot be stat'd", async () => {
+  const managedId = "managed_destroy_stat";
+  await withManagedStateDir(managedId, async (root) => {
+    const originalStat = Deno.stat.bind(Deno);
+    Deno.stat = (path) => {
+      if (String(path) === root) {
+        return Promise.reject(new Error("EACCES"));
+      }
+      return originalStat(path);
+    };
+    try {
+      await assertRejects(
+        () =>
+          handleManagedDestroy(
+            { managedId, removeVolumes: false },
+            new Date().toISOString(),
+            { runDocker: mockDestroyDocker() },
+          ),
+        Error,
+        "EACCES",
+      );
+    } finally {
+      Deno.stat = originalStat;
+    }
+  });
+});
+
+test("handleManagedDestroy throws when the state directory cannot be removed", async () => {
+  const managedId = "managed_destroy_rm";
+  await withManagedStateDir(managedId, async (root) => {
+    const originalRemove = Deno.remove.bind(Deno);
+    Deno.remove = (path, options) => {
+      if (String(path) === root) {
+        return Promise.reject(new Error("directory busy"));
+      }
+      return originalRemove(path, options);
+    };
+    try {
+      await assertRejects(
+        () =>
+          handleManagedDestroy(
+            { managedId, removeVolumes: false },
+            new Date().toISOString(),
+            { runDocker: mockDestroyDocker() },
+          ),
+        TypeError,
+        "failed to remove managed state dir",
+      );
+    } finally {
+      Deno.remove = originalRemove;
+    }
+  });
+});
+
+test("handleManagedDestroy succeeds when leftover listing fails after a successful down", async () => {
+  const managedId = "managed_destroy_ps_fail";
+  await withManagedStateDir(managedId, async () => {
+    const result = await handleManagedDestroy(
+      { managedId, removeVolumes: false },
+      new Date().toISOString(),
+      {
+        runDocker: (args) => {
+          if (args.includes("down")) return Promise.resolve(dockerOk());
+          if (args[0] === "ps") return Promise.resolve(dockerFail("ps failed"));
+          return Promise.resolve(dockerOk());
+        },
+      },
+    );
+    assertEquals(result.summary, "managed service destroyed");
   });
 });
 

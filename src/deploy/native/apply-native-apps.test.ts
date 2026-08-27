@@ -17,6 +17,7 @@ import {
 } from "./apply-native-apps.ts";
 import {
   DEFAULT_NATIVE_APP_NODE_VERSION,
+  nativeAppConfigDir,
   nativeAppNodeBinary,
   nativeAppRuntimeGroup,
   nativeAppUnitName,
@@ -1078,4 +1079,344 @@ test("nativeAppNodeVersions deduplicates and sorts series pins", () => {
     ]),
     ["22", "24"],
   );
+});
+
+function stubDenoCommand(run: RunFn): () => void {
+  const original = Deno.Command;
+  // deno-lint-ignore no-explicit-any
+  (Deno as any).Command = class {
+    #command: string;
+    #args: string[];
+    constructor(command: string, options?: { args?: string[] }) {
+      this.#command = command;
+      this.#args = options?.args ?? [];
+    }
+    async output(): Promise<Deno.CommandOutput> {
+      const result = await run(this.#command, this.#args);
+      const enc = new TextEncoder();
+      return {
+        success: result.success,
+        code: result.success ? 0 : 1,
+        signal: null,
+        stdout: enc.encode(result.stdout),
+        stderr: enc.encode(result.stderr),
+      };
+    }
+  };
+  return () => {
+    // deno-lint-ignore no-explicit-any
+    (Deno as any).Command = original;
+  };
+}
+
+test("applyNativeAppServices uses runDefault when run is omitted", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  const restore = stubDenoCommand(mock.run);
+  try {
+    const result = await applyNativeAppServices(
+      host.layout,
+      ENVIRONMENT_ID,
+      [makeApp()],
+      {
+        bindings: bindings(),
+        runPlaybook: () => Promise.resolve(),
+        probe: () => Promise.resolve(true),
+        sleep: () => Promise.resolve(),
+        systemdUnitDir: host.unitDir,
+      },
+    );
+    assertEquals(result.applied, ["web"]);
+  } finally {
+    restore();
+    await host.cleanup();
+  }
+});
+
+test("applyNativeAppServices treats a missing Node playbook as already installed", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  const originalStat = Deno.stat.bind(Deno);
+  Deno.stat = ((path: string | URL) => {
+    if (String(path).includes("node-app-runtime")) {
+      return Promise.reject(new Deno.errors.NotFound("playbook"));
+    }
+    return originalStat(path);
+  }) as typeof Deno.stat;
+  try {
+    const result = await applyNativeAppServices(
+      host.layout,
+      ENVIRONMENT_ID,
+      [makeApp()],
+      {
+        bindings: bindings(),
+        run: mock.run,
+        probe: () => Promise.resolve(true),
+        sleep: () => Promise.resolve(),
+        systemdUnitDir: host.unitDir,
+      },
+    );
+    assertEquals(result.applied, ["web"]);
+  } finally {
+    Deno.stat = originalStat;
+    await host.cleanup();
+  }
+});
+
+test("applyNativeAppServices rethrows a non-NotFound playbook stat error", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  const originalStat = Deno.stat.bind(Deno);
+  Deno.stat = ((path: string | URL) => {
+    if (String(path).includes("node-app-runtime")) {
+      return Promise.reject(new Deno.errors.PermissionDenied("playbook"));
+    }
+    return originalStat(path);
+  }) as typeof Deno.stat;
+  try {
+    await assertRejects(
+      () =>
+        applyNativeAppServices(
+          host.layout,
+          ENVIRONMENT_ID,
+          [makeApp()],
+          {
+            bindings: bindings(),
+            run: mock.run,
+            probe: () => Promise.resolve(true),
+            sleep: () => Promise.resolve(),
+            systemdUnitDir: host.unitDir,
+          },
+        ),
+      Deno.errors.PermissionDenied,
+      "playbook",
+    );
+  } finally {
+    Deno.stat = originalStat;
+    await host.cleanup();
+  }
+});
+
+test("applyNativeAppServices rejects an unsafe serviceId", async () => {
+  const host = await makeTestHost();
+  try {
+    await assertRejects(
+      () =>
+        applyNativeAppServices(
+          host.layout,
+          ENVIRONMENT_ID,
+          [makeApp({ serviceId: "svc/web" })],
+          applyOpts(host, createRunMock()),
+        ),
+      Error,
+      "unsupported characters",
+    );
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("probeDefault treats any completed HTTP response as healthy", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = () =>
+    Promise.resolve(new Response("missing", { status: 404 }));
+  try {
+    const result = await applyNativeAppServices(
+      host.layout,
+      ENVIRONMENT_ID,
+      [makeApp()],
+      {
+        bindings: bindings(),
+        run: mock.run,
+        runPlaybook: () => Promise.resolve(),
+        sleep: () => Promise.resolve(),
+        systemdUnitDir: host.unitDir,
+      },
+    );
+    assertEquals(result.applied, ["web"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await host.cleanup();
+  }
+});
+
+test("probeDefault returns false when fetch fails and rollback catch does not mask the health error", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  const originalFetch = globalThis.fetch;
+  const originalSymlink = Deno.symlink.bind(Deno);
+  globalThis.fetch = () => Promise.reject(new TypeError("connection refused"));
+  Deno.symlink = (() =>
+    Promise.reject(new Error("symlink refused"))) as typeof Deno.symlink;
+  try {
+    const error = await assertRejects(
+      () =>
+        applyNativeAppServices(
+          host.layout,
+          ENVIRONMENT_ID,
+          [makeApp()],
+          {
+            bindings: bindings({ previousReleaseId: "rel-old" }),
+            run: mock.run,
+            runPlaybook: () => Promise.resolve(),
+            sleep: () => Promise.resolve(),
+            systemdUnitDir: host.unitDir,
+          },
+        ),
+      Error,
+    );
+    assertStringIncludes(error.message, "did not answer on 127.0.0.1:18100");
+    assertStringIncludes(error.message, "no previous release to roll back to");
+  } finally {
+    globalThis.fetch = originalFetch;
+    Deno.symlink = originalSymlink;
+    await host.cleanup();
+  }
+});
+
+test("listEnvironmentNativeAppServiceIds skips non-files and rethrows a non-NotFound readDir", async () => {
+  const host = await makeTestHost();
+  try {
+    await applyNativeAppServices(
+      host.layout,
+      ENVIRONMENT_ID,
+      [makeApp()],
+      applyOpts(host, createRunMock()),
+    );
+    const dir = nativeAppConfigDir(host.layout);
+    await Deno.mkdir(join(dir, "tp-env-1-not-a-file"));
+    await Deno.writeTextFile(join(dir, "tp-env-1-notes.txt"), "skip");
+    await Deno.writeTextFile(join(dir, "other-svc-web.service"), "skip");
+    assertEquals(
+      await listEnvironmentNativeAppServiceIds(host.layout, ENVIRONMENT_ID),
+      ["svc-web"],
+    );
+
+    const originalReadDir = Deno.readDir.bind(Deno);
+    Deno.readDir = ((path: string | URL) => {
+      if (String(path) === dir) {
+        // deno-lint-ignore require-yield
+        return (async function* () {
+          throw new Deno.errors.PermissionDenied("units dir");
+        })();
+      }
+      return originalReadDir(path);
+    }) as typeof Deno.readDir;
+    try {
+      await assertRejects(
+        () => listEnvironmentNativeAppServiceIds(host.layout, ENVIRONMENT_ID),
+        Deno.errors.PermissionDenied,
+        "units dir",
+      );
+    } finally {
+      Deno.readDir = originalReadDir;
+    }
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("applyNativeAppServices retries the health probe after the injected sleep", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  let probes = 0;
+  let sleeps = 0;
+  try {
+    const result = await applyNativeAppServices(
+      host.layout,
+      ENVIRONMENT_ID,
+      [makeApp()],
+      {
+        ...applyOpts(host, mock),
+        probe: () => {
+          probes += 1;
+          return Promise.resolve(probes >= 2);
+        },
+        sleep: () => {
+          sleeps += 1;
+          return Promise.resolve();
+        },
+      },
+    );
+    assertEquals(result.applied, ["web"]);
+    assertEquals(probes, 2);
+    assertEquals(sleeps, 1);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a failed rollback restart does not claim the previous release was restored", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  const siteDir = join(
+    host.layout.principalHomeRoot,
+    USERNAME,
+    "sites",
+    "svc-web",
+  );
+  await Deno.mkdir(join(siteDir, "releases", "rel-old"), { recursive: true });
+  await Deno.mkdir(join(siteDir, "releases", "rel-new"), { recursive: true });
+  await Deno.symlink(join("releases", "rel-new"), join(siteDir, "current"));
+  const run: typeof mock.run = async (command, args) => {
+    if (args.includes("systemctl") && args.includes("restart")) {
+      return fail("restart refused");
+    }
+    return await mock.run(command, args);
+  };
+  try {
+    const error = await assertRejects(
+      () =>
+        applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
+          ...applyOpts(host, mock, false),
+          run,
+          bindings: bindings({ previousReleaseId: "rel-old" }),
+        }),
+      Error,
+    );
+    assertStringIncludes(error.message, "did not answer on 127.0.0.1:18100");
+    assertStringIncludes(error.message, "no previous release to roll back to");
+    assertEquals(
+      await Deno.readLink(join(siteDir, "current")),
+      join("releases", "rel-old"),
+    );
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("removeNativeAppServices swallows a leftover staged file that cannot be unlinked", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  const originalRemove = Deno.remove.bind(Deno);
+  try {
+    await applyNativeAppServices(
+      host.layout,
+      ENVIRONMENT_ID,
+      [makeApp()],
+      applyOpts(host, mock),
+    );
+    const staged = join(
+      nativeAppConfigDir(host.layout),
+      `tp-${ENVIRONMENT_ID}-svc-web.service`,
+    );
+    Deno.remove = ((path: string | URL, options?: Deno.RemoveOptions) => {
+      if (String(path) === staged) {
+        return Promise.reject(new Deno.errors.PermissionDenied("staged"));
+      }
+      return originalRemove(path, options);
+    }) as typeof Deno.remove;
+    assertEquals(
+      await removeNativeAppServices(host.layout, ENVIRONMENT_ID, {
+        run: mock.run,
+        systemdUnitDir: host.unitDir,
+      }),
+      1,
+    );
+  } finally {
+    Deno.remove = originalRemove;
+    await host.cleanup();
+  }
 });

@@ -251,6 +251,134 @@ test("primary applyManagedEngineState runs host prep then ensures ProxySQL monit
   });
 });
 
+test("primary applyManagedEngineState drops users except the platform root", async () => {
+  const dropped: string[][] = [];
+  const payload = {
+    engine: "postgres",
+    dropUsers: ["postgres", "orphan_user"],
+  } as unknown as ManagedApplyPayload;
+  const engine = {
+    rootUsername: "postgres",
+    waitReady: () => Promise.resolve(),
+    applyCredentials: () => Promise.resolve(["postgres"]),
+    applyDatabases: () => {
+      throw new TypeError("databases must not run when omitted");
+    },
+    dropUsers: (_ctx: unknown, usernames: string[]) => {
+      dropped.push([...usernames]);
+      return Promise.resolve(usernames);
+    },
+    readVersion: () => Promise.resolve("18.0"),
+  };
+
+  const state = await applyManagedEngineState(
+    {} as never,
+    engine as never,
+    payload,
+    [],
+  );
+
+  assertEquals(dropped, [["orphan_user"]]);
+  assertEquals(state.appliedUsers, ["postgres", "orphan_user"]);
+  assertEquals(state.appliedDatabases, []);
+});
+
+test("primary applyManagedEngineState skips drop when only the root username is listed", async () => {
+  const payload = {
+    engine: "postgres",
+    dropUsers: ["postgres"],
+  } as unknown as ManagedApplyPayload;
+  const engine = {
+    rootUsername: "postgres",
+    waitReady: () => Promise.resolve(),
+    applyCredentials: () => Promise.resolve(["postgres"]),
+    dropUsers: () => {
+      throw new TypeError("dropUsers must not run for the platform root");
+    },
+    readVersion: () => Promise.resolve("18.0"),
+  };
+
+  const state = await applyManagedEngineState(
+    {} as never,
+    engine as never,
+    payload,
+    [],
+  );
+  assertEquals(state.appliedUsers, ["postgres"]);
+});
+
+test("primary applyManagedEngineState skips ProxySQL monitor when monitor.cnf is missing", async () => {
+  await withTempLayout(async (fixture) => {
+    const prior: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(fixture.env)) {
+      prior[key] = Deno.env.get(key);
+      Deno.env.set(key, value);
+    }
+    try {
+      const calls: string[] = [];
+      const payload = {
+        engine: "postgres",
+      } as unknown as ManagedApplyPayload;
+      const engine = {
+        rootUsername: "postgres",
+        waitReady: () => Promise.resolve(),
+        applyCredentials: () => Promise.resolve(["postgres"]),
+        ensureProxySqlMonitor: () => {
+          calls.push("ensure");
+          return Promise.resolve();
+        },
+        readVersion: () => Promise.resolve("18.0"),
+      };
+
+      await applyManagedEngineState(
+        {} as never,
+        engine as never,
+        payload,
+        [],
+      );
+      assertEquals(calls, []);
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) Deno.env.delete(key);
+        else Deno.env.set(key, value);
+      }
+    }
+  });
+});
+
+test("standby applyManagedEngineState skips configureStandby without a replication credential", async () => {
+  const calls: string[] = [];
+  const payload = {
+    engine: "mysql",
+    memberOrdinal: 2,
+    replication: {
+      role: "standby",
+      username: "tp_repl",
+      primary: { host: "primary", port: 3306 },
+    },
+  } as unknown as ManagedApplyPayload;
+  const engine = {
+    rootUsername: "root",
+    waitReady: () => {
+      calls.push("waitReady");
+      return Promise.resolve();
+    },
+    readVersion: () => {
+      calls.push("readVersion");
+      return Promise.resolve("8.4.0");
+    },
+    replication: {
+      configureStandby: () => {
+        calls.push("configureStandby");
+        return Promise.resolve();
+      },
+    },
+  };
+
+  await applyManagedEngineState({} as never, engine as never, payload, []);
+  assertEquals(calls, ["waitReady", "readVersion"]);
+});
+
 test("standby applyManagedEngineState runs configureStandby when replication credential exists", async () => {
   const calls: string[] = [];
   const credentials: ManagedApplyCredential[] = [

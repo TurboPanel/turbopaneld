@@ -69,6 +69,24 @@ test("sink redacts before spooling and uploads on finalize", async () => {
   });
 });
 
+test("sink redactSummary uses the deny-set accumulated from addSecrets", async () => {
+  await withTempLayout(async (fixture) => {
+    const sink = createCommandOutputSink({
+      commandId: "cmd-sink-summary",
+      phase: COMMAND_LOG_PHASES.PREPARE,
+      layout: { daemonStateDir: fixture.dirs.stateDir },
+      secrets: ["seed-secret"],
+      send: () => Promise.resolve({ nextSeq: 1 }),
+    });
+    sink.addSecrets(["later-secret"]);
+    assertEquals(
+      sink.redactSummary("seed-secret then later-secret"),
+      "*** then ***",
+    );
+    await sink.finalize();
+  });
+});
+
 test("finalize is safe to call twice", async () => {
   await withTempLayout(async (fixture) => {
     let calls = 0;
@@ -210,6 +228,49 @@ test("spooling stops once the truncation marker is sealed", async () => {
       false,
     );
     await sink.finalize();
+  });
+});
+
+test("sink drops empty lines after redaction and survives append failures", async () => {
+  await withTempLayout(async (fixture) => {
+    const sent: SentChunk[] = [];
+    const sink = createCommandOutputSink({
+      commandId: "cmd-sink-empty",
+      phase: COMMAND_LOG_PHASES.PREPARE,
+      layout: { daemonStateDir: fixture.dirs.stateDir },
+      send: (params) => {
+        sent.push(params);
+        return Promise.resolve({ nextSeq: params.seq + 1 });
+      },
+    });
+    const spoolPath = commandLogSpoolPath(
+      commandLogSpoolDir({ daemonStateDir: fixture.dirs.stateDir }),
+      "cmd-sink-empty",
+    );
+
+    sink.onLine("stdout", "");
+    assertEquals((await Deno.stat(spoolPath)).size, 0);
+
+    const originalToISOString = Date.prototype.toISOString;
+    let threwOnce = false;
+    Date.prototype.toISOString = function (this: Date) {
+      if (!threwOnce) {
+        threwOnce = true;
+        throw new Error("clock failed");
+      }
+      return originalToISOString.call(this);
+    };
+    try {
+      sink.onLine("stdout", "should not throw");
+    } finally {
+      Date.prototype.toISOString = originalToISOString;
+    }
+
+    sink.onLine("stdout", "kept");
+    await sink.finalize();
+    const events = parseEvents(sent);
+    assertEquals(events.some((event) => event.message === "kept"), true);
+    assertEquals(events.some((event) => event.message === ""), false);
   });
 });
 

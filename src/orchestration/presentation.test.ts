@@ -339,6 +339,27 @@ test("summarizeRecap sanitizes recap text that does not match stats pattern", ()
   );
 });
 
+test("shouldDropStatusLine drops remaining runtime and package noise patterns", () => {
+  const dropped = [
+    "Using runtime",
+    "Using runtime 3.14.6 environment at: /opt/turbopanel/vendor/python/3.14.6",
+  ];
+  for (const line of dropped) {
+    assertEquals(shouldDropStatusLine(line), true, line);
+  }
+});
+
+test("shouldDropPresenterLogLine drops remaining sanitized runtime replacement lines", () => {
+  const dropped = [
+    "runtime 0.11.0 found, replacing with pinned 0.11.21",
+    "installing galaxy roles from orchestration/requirements.yml",
+    "galaxy roles ready",
+  ];
+  for (const line of dropped) {
+    assertEquals(shouldDropPresenterLogLine(line), true, line);
+  }
+});
+
 test("presentStatusLine passes through when installer presenter is inactive", () => {
   setActiveInstallPresenter(null);
   const raw = "running ansible-galaxy collection install";

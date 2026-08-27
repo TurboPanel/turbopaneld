@@ -107,29 +107,61 @@ export async function writeDevChannelCatalog(
   );
 }
 
-async function gitShortSha(): Promise<string> {
-  const git = new Deno.Command("git", {
-    args: ["rev-parse", "--short=7", "HEAD"],
-    cwd: ROOT,
-    stdout: "piped",
-    stderr: "piped",
-  });
-  const result = await git.output();
+export async function resolveCatalogGitShortSha(
+  cwd = ROOT,
+  io: {
+    output?: () => Promise<
+      { success: boolean; stdout: Uint8Array; stderr: Uint8Array }
+    >;
+    error?: (message: string) => void;
+    exit?: (code: number) => void;
+  } = {},
+): Promise<string> {
+  const output = io.output ?? (() =>
+    new Deno.Command("git", {
+      args: ["rev-parse", "--short=7", "HEAD"],
+      cwd,
+      stdout: "piped",
+      stderr: "piped",
+    }).output());
+  const result = await output();
   if (!result.success) {
-    console.error("write-dev-channel-catalog: git rev-parse failed");
-    console.error(new TextDecoder().decode(result.stderr).trim());
-    Deno.exit(1);
+    const error = io.error ?? ((message: string) => {
+      console.error(message);
+    });
+    const exit = io.exit ?? ((code: number) => {
+      Deno.exit(code);
+    });
+    error("write-dev-channel-catalog: git rev-parse failed");
+    error(new TextDecoder().decode(result.stderr).trim());
+    exit(1);
+    throw new TypeError("git rev-parse failed");
   }
   return new TextDecoder().decode(result.stdout).trim().toLowerCase();
 }
 
-if (import.meta.main) {
+export async function runWriteDevChannelCatalogMain(
+  io: {
+    gitShortSha?: () => Promise<string>;
+    now?: () => Date;
+    writeCatalog?: (
+      identity: OverlayBuildIdentity,
+    ) => Promise<void>;
+  } = {},
+): Promise<void> {
+  const gitShortSha = io.gitShortSha ?? (() => resolveCatalogGitShortSha());
+  const now = io.now ?? (() => new Date());
+  const writeCatalog = io.writeCatalog ?? writeDevChannelCatalog;
   const sha = await gitShortSha();
-  const builtAt = new Date();
+  const builtAt = now();
   const commit = `${sha}+${Math.floor(builtAt.getTime() / 1000)}`;
-  await writeDevChannelCatalog({
+  await writeCatalog({
     commit,
     buildId: `dev-${commit}`,
     builtAt: builtAt.toISOString(),
   });
+}
+
+if (import.meta.main) {
+  await runWriteDevChannelCatalogMain();
 }

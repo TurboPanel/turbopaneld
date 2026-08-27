@@ -689,3 +689,65 @@ test({
     }
   },
 });
+
+test({
+  name: "sendCommandLogChunk rejects a non-opaque commandId before fetch",
+  fn: async () => {
+    const api = createFakeInstanceApi();
+    let logHits = 0;
+    api.script("/log", () => {
+      logHits += 1;
+      return commandLogChunkResponse();
+    });
+    const restore = api.install();
+    try {
+      const client = new DaemonApiClient({
+        config: INSTANCE_CONFIG,
+        getToken: () => Promise.resolve("tok"),
+      });
+      const rejected = await assertRejects(
+        () =>
+          client.sendCommandLogChunk({
+            commandId: "cmd/../escape",
+            seq: 0,
+            bytes: "x\n",
+          }),
+        DaemonApiError,
+      );
+      assertEquals(rejected.status, 400);
+      assertEquals(rejected.message, "invalid commandId");
+      assertEquals(logHits, 0);
+    } finally {
+      restore();
+    }
+  },
+});
+
+test({
+  name: "sendCommandLogChunk falls back to seq+1 when nextSeq is not a number",
+  fn: async () => {
+    const api = createFakeInstanceApi();
+    api.script(
+      "/log",
+      () =>
+        new Response(JSON.stringify({ ok: true, nextSeq: "nope" }), {
+          status: 200,
+        }),
+    );
+    const restore = api.install();
+    try {
+      const client = new DaemonApiClient({
+        config: INSTANCE_CONFIG,
+        getToken: () => Promise.resolve("tok"),
+      });
+      const result = await client.sendCommandLogChunk({
+        commandId: "cmd-1",
+        seq: 7,
+        bytes: "line\n",
+      });
+      assertEquals(result.nextSeq, 8);
+    } finally {
+      restore();
+    }
+  },
+});
