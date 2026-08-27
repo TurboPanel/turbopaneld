@@ -422,7 +422,7 @@ export type EnvironmentDeploySite = {
   webEnv?: Record<string, string>;
   php?: EnvironmentDeployHostingPhp;
   /**
-   * When set (from a project principal ↔ service steward), the site tree
+   * When set (from a project principal ↔ service tenancy), the site tree
    * is owned by this principal and Apache php-fpm workers run as that user.
    */
   principal?: EnvironmentDeploySitePrincipal;
@@ -1270,6 +1270,10 @@ export type ManagedIngressReconcilePayload = {
    */
   listenerPorts?: ManagedIngressListenerPortsPayload;
   clusters: ProxySqlClusterPayload[];
+  /**
+   * ProxySQL spanning attachments (`tpn_*`). Payload field is still `segments[]`
+   * — compose-bridge subnets, deliberately not renamed.
+   */
   segments?: Array<{ name: string; subnet: string }>;
   /**
    * ProxySQL system-component identity. Present on apply so remote hosts can

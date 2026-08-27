@@ -206,7 +206,10 @@ export type ProxySqlDesiredState = {
    */
   listenerPorts?: ProxySqlListenerPorts;
   clusters: ProxySqlClusterDesired[];
-  /** External `tpn_*` spanning segments this frontend joins as a platform attachment. */
+  /**
+   * ProxySQL spanning attachments (`tpn_*`). Payload field is still `segments[]`
+   * — compose-bridge subnets, deliberately not renamed.
+   */
   segments?: Array<{ name: string; subnet: string }>;
 };
 

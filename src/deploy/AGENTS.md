@@ -66,9 +66,10 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    of mutating that account. Shell is still reconciled via `usermod -s`;
    never `usermod -m` / `-d`. Directory creation uses `sudo -n install -d`
    so a non-root daemon can write under `/srv`.
-5. When `storageMaterial[]` is present, materialize each **location** under
+5. When `storageMaterial[]` is present, materialize each **copy** under
    `<stateDir>/storage/<organizationId>/<storageId>/<locationId>/data`
-   (`materializeLocation` in `materialize-storage.ts`); `docker volume create`
+   (`locationId` is the frozen wire field for a storage copy; `materializeLocation`
+   in `materialize-storage.ts`); `docker volume create`
    for `kind=volume` + `provider=docker` using instance-supplied **`volumeName`**
    (the storage UUID). Optional `chown` when a
    principal is linked. The instance owns Docker volume naming. Path-provider
@@ -295,7 +296,7 @@ removes `<principalHome>/sites/<serviceId>` recursively through the privileged
 runner — the tree is root-owned, so the daemon cannot unlink it itself. Removal
 is best-effort per entry and never fails the stop, matching the fabric-network
 and tcp/udp reclaim in the same handler. The control plane captures the list
-while the `service` / `steward` / `principal` rows still exist
+while the `tenancy` rows still exist
 (`turbopanel/src/client/environments/site-releases.ts`), because by the time the
 daemon runs a delete-triggered stop they are already gone.
 
@@ -1047,7 +1048,7 @@ Docker Compose. The daemon:
    service is release-backed**, see below. Merged hosting
    `webEnv` / `php` hints land in `<site>/.turbopanel/hosting.env` and
    `php.json`. When `sites[].principal` is set (from a project
-   principal ↔ service steward), the site tree is `chown`ed to
+   principal ↔ service tenancy), the site tree is `chown`ed to
    `principal:engineGroup` (`site_user:tpnginx` / `tpapache` / `tpols`) with
    `u=rwX,g=rX` + setgid dirs so the engine can read while the principal owns
    writes. Without a pin, ownership stays the engine user (previous default).
@@ -1196,7 +1197,7 @@ registered in the org network table (`kind: docker`, `options.dockerNetworkName`
 for the deploy server. Payload `dockerExternalNetworks[]` is ensured with
 `docker network create` before compose up (`ensure-docker-networks.ts`).
 **`fabricNetworks[]` is a disjoint set:** platform-owned `tpn_*` routed bridges
-derived from `segment` rows (`{ name, subnet, gateway?, mtu? }`), never
+derived from `subnet` rows (`{ name, subnet, gateway?, mtu? }` — compose-bridge CIDRs, not datacenter subnets), never
 operator-registered. Requiring a registry row would make every spanning deploy
 fail — `tpn_*` is allocated by the compiler. The daemon ensures them via
 `ensureFabricDockerNetworks` (fabric.ts routed-bridge path) as a belt-and-braces

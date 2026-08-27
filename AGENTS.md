@@ -465,8 +465,8 @@ git SHA.
   Compose standalone secret files under `/run/turbopanel/deployments/…/secrets/`
   and a non-secret `.env` next to `compose.yaml`. After JWT, it rehydrates
   those `/run` files (`POST /api/daemon/v1/deployments/secrets/rehydrate` then
-  `/secrets/decrypt`) and `compose up -d`. `environment.deploy` `storageMaterial[]`
-  is location-aware: host paths are
+  `/secrets/decrypt`) and `compose up -d`.   `environment.deploy` `storageMaterial[]`
+  is copy-aware (`locationId` is the frozen wire field for a storage copy): host paths are
   `<stateDir>/storage/<orgId>/<storageId>/<locationId>/data`. Overlay mounts come
   from each entry's `mounts[]`. TurboFabric `server.fabric.reconcile`
   `networks[]` entries carry optional `mtu` / `gateway`; the enabled payload
@@ -480,7 +480,8 @@ git SHA.
   the durable endpoint and keepalive from `state.json` then `tp0.conf` (clearing
   keepalive when the durable peer has none). `wg set` failures exclude that
   candidate from the returned observations. The Postgres table
-  is `segment` (renamed from `bridge`).
+  is `subnet` (renamed from `bridge`) — the **compose-bridge** subnet
+  (`tpn_*` routed bridge per host), not a datacenter routing-domain subnet.
 
 ## Subsystem docs (nested `AGENTS.md`)
 
