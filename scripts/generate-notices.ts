@@ -280,20 +280,66 @@ function galaxyPins(path: string): OrchestrationPin[] {
     if (error instanceof Deno.errors.NotFound) return [];
     throw error;
   }
+  return parseGalaxyRequirementsYaml(text);
+}
+
+/** Parse Ansible Galaxy `name` / `version` list items without a backtracking regex. */
+export function parseGalaxyRequirementsYaml(text: string): OrchestrationPin[] {
   const pins: OrchestrationPin[] = [];
-  const blocks = text.split(/^\s*-\s+name:\s+/m).slice(1);
-  for (const block of blocks) {
-    const nameMatch = /^["']?([^"'\n]+)["']?/.exec(block);
-    const versionMatch = /version:\s*["']?([^"'\n]+)["']?/.exec(block);
-    const name = nameMatch?.[1]?.trim();
-    if (!name) continue;
-    pins.push({
-      name,
-      version: versionMatch?.[1]?.trim() || "*",
-      license: ORCHESTRATION_LICENSES[name] ?? "",
-    });
+  let current: { name: string; version?: string } | undefined;
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const nameValue = galaxyListNameValue(line);
+    if (nameValue !== undefined) {
+      flushGalaxyPin(pins, current);
+      current = { name: unquoteYamlScalar(nameValue) };
+      continue;
+    }
+    if (!current) continue;
+    const versionValue = yamlKeyedValue(line, "version");
+    if (versionValue !== undefined) {
+      current.version = unquoteYamlScalar(versionValue);
+    }
   }
+  flushGalaxyPin(pins, current);
   return pins;
+}
+
+function galaxyListNameValue(line: string): string | undefined {
+  if (!line.startsWith("-")) return undefined;
+  return yamlKeyedValue(line.slice(1).trimStart(), "name");
+}
+
+function yamlKeyedValue(line: string, key: string): string | undefined {
+  const prefix = `${key}:`;
+  if (!line.startsWith(prefix)) return undefined;
+  return line.slice(prefix.length);
+}
+
+function unquoteYamlScalar(raw: string): string {
+  const value = raw.trim();
+  if (value.length < 2) return value;
+  const start = value.at(0);
+  const end = value.at(-1);
+  if ((start === '"' && end === '"') || (start === "'" && end === "'")) {
+    return value.slice(1, -1).trim();
+  }
+  return value;
+}
+
+function flushGalaxyPin(
+  pins: OrchestrationPin[],
+  current: { name: string; version?: string } | undefined,
+): void {
+  if (!current) return;
+  const name = current.name.trim();
+  if (!name) return;
+  pins.push({
+    name,
+    version: current.version?.trim() || "*",
+    license: ORCHESTRATION_LICENSES[name] ?? "",
+  });
 }
 
 export async function lookupRegistryLicense(
