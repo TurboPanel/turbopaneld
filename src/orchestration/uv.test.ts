@@ -101,7 +101,9 @@ case "$1" in
 esac
 exit 0
 `);
-    await Deno.remove(paths.UV_CURRENT_DIR, { recursive: true }).catch(() => {});
+    await Deno.remove(paths.UV_CURRENT_DIR, { recursive: true }).catch(
+      () => {},
+    );
     await uv.ensureUv();
     const link = await Deno.readLink(paths.UV_CURRENT_DIR);
     assertEquals(link, paths.RUNTIME_BIN_DIR);
@@ -114,7 +116,9 @@ case "$1" in
 esac
 exit 0
 `);
-    await Deno.remove(paths.UV_CURRENT_DIR, { recursive: true }).catch(() => {});
+    await Deno.remove(paths.UV_CURRENT_DIR, { recursive: true }).catch(
+      () => {},
+    );
     await Deno.mkdir(paths.UV_CURRENT_DIR, { recursive: true });
     await Deno.writeTextFile(join(paths.UV_CURRENT_DIR, "blocker"), "keep");
     await uv.ensureUv();
@@ -129,7 +133,9 @@ case "$1" in
 esac
 exit 0
 `);
-    await Deno.remove(paths.UV_CURRENT_DIR, { recursive: true }).catch(() => {});
+    await Deno.remove(paths.UV_CURRENT_DIR, { recursive: true }).catch(
+      () => {},
+    );
     const parent = join(paths.RUNTIMES_DIR, "uv");
     const previousMode = (await Deno.stat(parent)).mode! & 0o777;
     await Deno.chmod(parent, 0o555);
@@ -286,7 +292,9 @@ exit 0
     globalThis.fetch = (input) => {
       const url = String(input);
       if (url.endsWith(".sha256")) {
-        return Promise.resolve(new Response("not-hex  file\n", { status: 200 }));
+        return Promise.resolve(
+          new Response("not-hex  file\n", { status: 200 }),
+        );
       }
       if (url.includes("github.com/astral-sh/uv/releases/download")) {
         return Promise.resolve(

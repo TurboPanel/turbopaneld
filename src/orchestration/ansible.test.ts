@@ -565,7 +565,7 @@ test("parseGalaxyDockerRoleVersion reads the requirements-docker pin", async () 
 test("parseGalaxyDockerRoleVersion accepts spaced pins and rejects unquoted versions", () => {
   assertEquals(
     parseGalaxyDockerRoleVersion(
-      "- name: geerlingguy.docker\n  src: ignored\n  version: \"8.1.2\"\n",
+      '- name: geerlingguy.docker\n  src: ignored\n  version: "8.1.2"\n',
     ),
     "8.1.2",
   );

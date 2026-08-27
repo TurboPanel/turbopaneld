@@ -173,7 +173,8 @@ it({
 });
 
 it({
-  name: "refreshPlatformCaClient logs fingerprint mismatch and reuses a cache hit",
+  name:
+    "refreshPlatformCaClient logs fingerprint mismatch and reuses a cache hit",
   permissions: {
     env: true,
     read: true,
@@ -497,7 +498,10 @@ it({
           `${fixture.dirs.stateDir}/server-key.json`,
           "{not-json",
         );
-        await Deno.writeTextFile(`${fixture.dirs.stateDir}/server.id`, "srv-1\n");
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/server.id`,
+          "srv-1\n",
+        );
         await Deno.writeTextFile(
           `${fixture.dirs.stateDir}/server-key-id`,
           "kid-1\n",

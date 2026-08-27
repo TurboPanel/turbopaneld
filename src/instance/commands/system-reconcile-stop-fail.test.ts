@@ -82,12 +82,14 @@ test({
               {
                 ensureDocker: () => Promise.resolve(),
                 runDocker: () =>
-                  Promise.resolve({
-                    success: false,
-                    stdout: "",
-                    stderr: "",
-                    code: 1,
-                  } satisfies DockerCliResult),
+                  Promise.resolve(
+                    {
+                      success: false,
+                      stdout: "",
+                      stderr: "",
+                      code: 1,
+                    } satisfies DockerCliResult,
+                  ),
               },
             ),
           Error,
@@ -134,12 +136,14 @@ test({
                 {
                   ensureDocker: () => Promise.resolve(),
                   runDocker: () =>
-                    Promise.resolve({
-                      success: true,
-                      stdout: "",
-                      stderr: "",
-                      code: 0,
-                    } satisfies DockerCliResult),
+                    Promise.resolve(
+                      {
+                        success: true,
+                        stdout: "",
+                        stderr: "",
+                        code: 0,
+                      } satisfies DockerCliResult,
+                    ),
                 },
               ),
             Deno.errors.PermissionDenied,
@@ -188,12 +192,14 @@ test({
               {
                 ensureDocker: () => Promise.resolve(),
                 runDocker: () =>
-                  Promise.resolve({
-                    success: false,
-                    stdout: "",
-                    stderr: "stop denied",
-                    code: 1,
-                  } satisfies DockerCliResult),
+                  Promise.resolve(
+                    {
+                      success: false,
+                      stdout: "",
+                      stderr: "stop denied",
+                      code: 1,
+                    } satisfies DockerCliResult,
+                  ),
               },
             ),
           Error,

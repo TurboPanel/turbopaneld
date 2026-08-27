@@ -2298,7 +2298,9 @@ test("applySites rethrows a non-NotFound document-root index stat", async () => 
   const { runPlaybook } = capturePlaybooks();
   const originalStat = Deno.stat.bind(Deno);
   Deno.stat = ((path: string | URL) => {
-    if (String(path).endsWith("/index.html") && String(path).includes("/www/")) {
+    if (
+      String(path).endsWith("/index.html") && String(path).includes("/www/")
+    ) {
       return Promise.reject(new Deno.errors.PermissionDenied("index"));
     }
     return originalStat(path);

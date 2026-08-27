@@ -1248,8 +1248,8 @@ test("probeDefault returns false when fetch fails and rollback catch does not ma
   const originalFetch = globalThis.fetch;
   const originalSymlink = Deno.symlink.bind(Deno);
   globalThis.fetch = () => Promise.reject(new TypeError("connection refused"));
-  Deno.symlink = (() =>
-    Promise.reject(new Error("symlink refused"))) as typeof Deno.symlink;
+  Deno.symlink =
+    (() => Promise.reject(new Error("symlink refused"))) as typeof Deno.symlink;
   try {
     const error = await assertRejects(
       () =>

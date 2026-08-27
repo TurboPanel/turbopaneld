@@ -298,7 +298,8 @@ test("applyRailpackImagesToComposeYaml ignores non-object documents and services
 });
 
 test({
-  name: "writeDaemonComposeLayer returns null when an empty fragment has no file",
+  name:
+    "writeDaemonComposeLayer returns null when an empty fragment has no file",
   permissions: { read: true, write: true },
   fn: async () => {
     const dir = await Deno.makeTempDir({ prefix: "tp-overlay-missing-" });

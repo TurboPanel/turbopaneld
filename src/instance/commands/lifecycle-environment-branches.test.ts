@@ -70,8 +70,7 @@ test({
 });
 
 test({
-  name:
-    "handleEnvironmentLifecycle omits containers when compose ps throws",
+  name: "handleEnvironmentLifecycle omits containers when compose ps throws",
   permissions: { env: true, read: true, write: true, run: true },
   fn: async () => {
     const root = await Deno.makeTempDir({ prefix: "tp-life-ps-throw-" });
@@ -82,7 +81,12 @@ test({
 
     const environmentId = "envlife10";
     const projectName = "tp-demo-envlif10";
-    const deploymentDir = join(stateDir, "deployments", "proj-1", environmentId);
+    const deploymentDir = join(
+      stateDir,
+      "deployments",
+      "proj-1",
+      environmentId,
+    );
     await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
     await Deno.writeTextFile(
       join(deploymentDir, RUNTIME_COMPOSE_FILENAME),
@@ -130,7 +134,12 @@ test({
 
     const environmentId = "envlife11";
     const projectName = "tp-demo-envlif11";
-    const deploymentDir = join(stateDir, "deployments", "proj-1", environmentId);
+    const deploymentDir = join(
+      stateDir,
+      "deployments",
+      "proj-1",
+      environmentId,
+    );
     await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
     await Deno.writeTextFile(
       join(deploymentDir, RUNTIME_COMPOSE_FILENAME),
@@ -291,7 +300,12 @@ test({
     const projectName = "tp-demo-envlif13";
     const missingServiceId = "00000000-0000-4000-8000-0000000000aa";
     const dirServiceId = "00000000-0000-4000-8000-0000000000bb";
-    const deploymentDir = join(stateDir, "deployments", "proj-1", environmentId);
+    const deploymentDir = join(
+      stateDir,
+      "deployments",
+      "proj-1",
+      environmentId,
+    );
     await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
     await Deno.writeTextFile(
       join(deploymentDir, RUNTIME_COMPOSE_FILENAME),
@@ -333,9 +347,11 @@ test({
         {
           runDocker: (args) => {
             const projectIdx = args.indexOf("-p");
-            if (projectIdx >= 0 && args[projectIdx + 1]?.startsWith(
-              "turbopanel-ingress-",
-            )) {
+            if (
+              projectIdx >= 0 && args[projectIdx + 1]?.startsWith(
+                "turbopanel-ingress-",
+              )
+            ) {
               ingressProjects.push(args[projectIdx + 1]!);
             }
             return okDocker(args);

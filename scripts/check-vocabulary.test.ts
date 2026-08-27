@@ -162,7 +162,10 @@ test("runVocabularyCheck walks fixtures and skips lockfiles and skip dirs", asyn
       failures.some((line) => line.includes("package-lock.json")),
       false,
     );
-    assertEquals(failures.some((line) => line.includes("pnpm-lock.yaml")), false);
+    assertEquals(
+      failures.some((line) => line.includes("pnpm-lock.yaml")),
+      false,
+    );
     assertEquals(failures.some((line) => line.includes("yarn.lock")), false);
     assertEquals(failures.some((line) => line.includes("workers/")), false);
     assertEquals(failures.some((line) => line.includes("notes.txt")), false);

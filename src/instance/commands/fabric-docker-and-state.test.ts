@@ -3,6 +3,8 @@ import { join } from "@std/path";
 import {
   classifyPeerHandshakeHealth,
   ensureFabricDockerNetworks,
+  type FabricRunFn,
+  type FabricRunResult,
   parsePeerPresharedKeysFromWgConf,
   parseWgDumpPeers,
   pruneFabricStateNetworks,
@@ -13,8 +15,6 @@ import {
   setFabricNetworkDirForTests,
   setFabricRunForTests,
   setFabricSkipRealSyscallsForTests,
-  type FabricRunFn,
-  type FabricRunResult,
 } from "./fabric.ts";
 
 /**
@@ -82,7 +82,12 @@ function richState(): Record<string, unknown> {
       { publicKey: "not-a-key" },
     ],
     networks: [
-      { name: NETWORK_KEEP, subnet: "10.192.11.0/24", mtu: 1400, gateway: "10.192.11.1" },
+      {
+        name: NETWORK_KEEP,
+        subnet: "10.192.11.0/24",
+        mtu: 1400,
+        gateway: "10.192.11.1",
+      },
       { name: NETWORK_GONE, subnet: "10.192.12.0/24" },
       { name: 12 },
     ],
@@ -114,7 +119,9 @@ test({
   name: "pruneFabricStateNetworks drops matching bridges and keeps rich peers",
   permissions: { read: true, write: true },
   fn: async () => {
-    const networkDir = await Deno.makeTempDir({ prefix: "tp-fabric-prune-rich-" });
+    const networkDir = await Deno.makeTempDir({
+      prefix: "tp-fabric-prune-rich-",
+    });
     try {
       await Deno.writeTextFile(
         join(networkDir, "state.json"),
@@ -130,7 +137,9 @@ test({
         listenPort?: number;
         gateway?: boolean;
       };
-      assertEquals(state.networks.map((network) => network.name), [NETWORK_KEEP]);
+      assertEquals(state.networks.map((network) => network.name), [
+        NETWORK_KEEP,
+      ]);
       assertEquals(state.networks[0]?.mtu, 1400);
       assertEquals(state.networks[0]?.gateway, "10.192.11.1");
       assertEquals(state.listenPort, 51820);
@@ -150,7 +159,8 @@ test({
 });
 
 test({
-  name: "ensureFabricDockerNetworks creates, tolerates already-exists, and throws",
+  name:
+    "ensureFabricDockerNetworks creates, tolerates already-exists, and throws",
   permissions: { read: true, write: true },
   fn: async () => {
     await withFabricDir("tp-fabric-ensure-", async (_dir, invocations) => {
@@ -183,7 +193,9 @@ test({
         if (cmd === "docker" && args[0] === "network" && args[1] === "create") {
           return fail("network with name tpn_exists already exists");
         }
-        if (cmd === "docker" && args[0] === "network" && args[1] === "inspect") {
+        if (
+          cmd === "docker" && args[0] === "network" && args[1] === "inspect"
+        ) {
           return ok("");
         }
         return null;
@@ -240,7 +252,10 @@ test({
 
 test("classifyPeerHandshakeHealth treats unparseable timestamps as never", () => {
   assertEquals(
-    classifyPeerHandshakeHealth("not-a-date", Date.parse("2026-08-18T18:00:00.000Z")),
+    classifyPeerHandshakeHealth(
+      "not-a-date",
+      Date.parse("2026-08-18T18:00:00.000Z"),
+    ),
     "never",
   );
 });

@@ -286,7 +286,10 @@ test({
       await assertRejects(
         () =>
           runReleaseBuild({
-            build: { kind: "native", buildCommand: "printf 'boom\\n' >&2; exit 7" },
+            build: {
+              kind: "native",
+              buildCommand: "printf 'boom\\n' >&2; exit 7",
+            },
             workingDir,
             hasPrlimit: () => Promise.resolve(false),
           }),
@@ -298,7 +301,8 @@ test({
 });
 
 test({
-  name: "runReleaseBuild default runner uses a generic error when output is empty",
+  name:
+    "runReleaseBuild default runner uses a generic error when output is empty",
   permissions: { read: true, write: true, run: true, env: true },
   fn: async () => {
     await withWorkingDir(async (workingDir) => {
@@ -469,7 +473,8 @@ test({
 });
 
 test({
-  name: "runReleaseBuild default runner succeeds under prlimit with a cleared env",
+  name:
+    "runReleaseBuild default runner succeeds under prlimit with a cleared env",
   permissions: { read: true, write: true, run: true, env: true },
   fn: async () => {
     await withWorkingDir(async (workingDir) => {

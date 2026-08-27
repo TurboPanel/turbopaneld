@@ -649,7 +649,10 @@ test("IdlePresence hello and heartbeat carry runtimes when present", async () =>
     const hello = framesOfType(socket, "hello")[0] as Record<string, unknown>;
     assertEquals(hello.runtimes, runtimes);
 
-    snapshotRuntimes = { php: { series: ["8.3", "8.4"] }, node: { series: ["22"] } };
+    snapshotRuntimes = {
+      php: { series: ["8.3", "8.4"] },
+      node: { series: ["22"] },
+    };
     await sleep(idleCheckIntervalMs + 25);
     const heartbeats = framesOfType(socket, "heartbeat");
     assertEquals(heartbeats.length, 1);

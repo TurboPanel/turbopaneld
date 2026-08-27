@@ -302,7 +302,10 @@ test("phpExtensionsForDeploy unions allowed names per series", () => {
         engine: "nginx",
         root: "public",
         listenPort: 18080,
-        php: { version: "8.4", extensions: ["intl", "not-a-real-ext", "redis"] },
+        php: {
+          version: "8.4",
+          extensions: ["intl", "not-a-real-ext", "redis"],
+        },
       },
       {
         composeServiceName: "b",

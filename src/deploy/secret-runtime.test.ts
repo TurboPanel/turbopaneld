@@ -271,7 +271,8 @@ test({
 });
 
 test({
-  name: "materializeSecretFiles no-ops an empty plan and rejects empty material",
+  name:
+    "materializeSecretFiles no-ops an empty plan and rejects empty material",
   permissions: { read: true, write: true },
   fn: async () => {
     const root = await Deno.makeTempDir({ prefix: "tp-secret-empty-" });
@@ -421,8 +422,7 @@ test("removeSecretTree rethrows a non-NotFound remove error", async () => {
 
 test("plannedSecretsMissing rethrows a non-NotFound stat error", async () => {
   const original = Deno.stat;
-  Deno.stat = () =>
-    Promise.reject(new Deno.errors.PermissionDenied("denied"));
+  Deno.stat = () => Promise.reject(new Deno.errors.PermissionDenied("denied"));
   try {
     await assertRejects(
       () =>

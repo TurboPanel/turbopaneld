@@ -89,7 +89,12 @@ test({
 
     const environmentId = "envstop02";
     const projectName = "tp-demo-envstop2";
-    const deploymentDir = join(stateDir, "deployments", "proj-1", environmentId);
+    const deploymentDir = join(
+      stateDir,
+      "deployments",
+      "proj-1",
+      environmentId,
+    );
     await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
     await Deno.writeTextFile(
       join(deploymentDir, RUNTIME_COMPOSE_FILENAME),
@@ -142,16 +147,20 @@ test({
     await Deno.writeTextFile(
       join(networkDir, "state.json"),
       `${
-        JSON.stringify({
-          publicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-          address: "10.250.0.11/32",
-          prefix: "10.192.0.0/16",
-          peers: [],
-          networks: [
-            { name: keep, subnet: "10.192.11.0/24" },
-            { name: gone, subnet: "10.192.12.0/24" },
-          ],
-        }, null, 2)
+        JSON.stringify(
+          {
+            publicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            address: "10.250.0.11/32",
+            prefix: "10.192.0.0/16",
+            peers: [],
+            networks: [
+              { name: keep, subnet: "10.192.11.0/24" },
+              { name: gone, subnet: "10.192.12.0/24" },
+            ],
+          },
+          null,
+          2,
+        )
       }\n`,
       { mode: 0o600 },
     );

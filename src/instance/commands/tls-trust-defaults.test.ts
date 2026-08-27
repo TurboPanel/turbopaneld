@@ -72,7 +72,8 @@ test({
 });
 
 test({
-  name: "handleTlsTrust default writeAtomic keeps a PEM that already ends in newline",
+  name:
+    "handleTlsTrust default writeAtomic keeps a PEM that already ends in newline",
   permissions: TLS_TRUST_PERMS,
   fn: async () => {
     const dir = await Deno.makeTempDir({ prefix: "tp-tls-trust-nl-" });

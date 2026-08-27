@@ -1,10 +1,6 @@
 import { assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
-import {
-  BUILD_INFO,
-  getBuildInfo,
-  readGitShortCommit,
-} from "./build-info.ts";
+import { BUILD_INFO, getBuildInfo, readGitShortCommit } from "./build-info.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.

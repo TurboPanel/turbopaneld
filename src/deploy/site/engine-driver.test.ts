@@ -8,13 +8,13 @@ import {
   phpFpmDriver,
   publishStagedConfig,
   rolloutSiteConfigs,
+  type SiteRunFn,
+  type SiteRunResult,
   stageDaemonConfigFile,
+  type StagedConfigWrite,
   stageOwnedConfigFile,
   systemctlReloadOrStart,
   writeOwnedConfigFile,
-  type SiteRunFn,
-  type SiteRunResult,
-  type StagedConfigWrite,
 } from "./engine-driver.ts";
 
 /**
@@ -100,7 +100,9 @@ test({
       const path = join(fixture.dirs.configDir, "site.conf");
       const run: SiteRunFn = (_command, args) => {
         if (args.includes("cmp")) return Promise.resolve(fail());
-        if (args.includes("install")) return Promise.resolve(fail("stage denied"));
+        if (args.includes("install")) {
+          return Promise.resolve(fail("stage denied"));
+        }
         return Promise.resolve(ok());
       };
       await assertRejects(
