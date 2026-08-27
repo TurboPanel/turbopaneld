@@ -51,7 +51,7 @@ test("collectVocabularyFailures flags forbidden phrases and skips allowlisted li
       `agent${" identity"} on enroll`,
       `agent${" host"} leftover`,
       `agent${" commit"} leftover`,
-      "server.daemon.projection.agent",
+      `server.daemon.projection.${"agent"}`,
     ].join("\n"),
   );
   assertEquals(failures.length, 6);
