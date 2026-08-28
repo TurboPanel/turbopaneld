@@ -33,25 +33,19 @@ export type SystemComponentKey =
   | "analytics";
 
 /**
- * Compose service key inside project `turbopanel-ingress`.
+ * Compose service key inside the shared hosting-ingress project.
  * Must match the instance's `SYSTEM_TRAEFIK_COMPOSE_SERVICE_NAME`.
  */
 export const SHARED_TRAEFIK_COMPOSE_SERVICE_NAME = "traefik";
 
-/** Compose service key inside project `turbopanel-proxysql`. */
+/** Compose service key inside the shared ProxySQL managed-ingress project. */
 export const PROXYSQL_COMPOSE_SERVICE_NAME = "proxysql";
 
-/** Compose service key inside project `turbopanel-orchestrator`. */
+/** Compose service key inside the per-org Orchestrator project. */
 export const ORCHESTRATOR_COMPOSE_SERVICE_NAME = "orchestrator";
 
 /** Compose project name for the production system stack (database/queue/analytics). */
 export const SYSTEM_STACK_PROJECT = "turbopanel-system";
-
-/** Compose project name for the shared ProxySQL managed ingress. */
-export const PROXYSQL_PROJECT = "turbopanel-proxysql";
-
-/** Compose project name for the per-org Orchestrator Raft group. */
-export const ORCHESTRATOR_PROJECT = "turbopanel-orchestrator";
 
 const SYSTEM_COMPONENT_KEYS = new Set<string>([
   SYSTEM_HOSTING_INGRESS_COMPONENT,
@@ -74,12 +68,19 @@ export type SystemComponentSelfHeal =
   | "none";
 
 /**
- * Per-component contract: which compose project/service it lives in, its
- * container role (`service` / `ingress` / `turbopanel`), and the self-heal
- * strategy used by `system.reconcile`.
+ * Per-component contract: which compose service it lives in, its container
+ * role (`service` / `ingress` / `turbopanel`), and the self-heal strategy used
+ * by `system.reconcile`.
+ *
+ * `project` is set **only** for the inspect-only self-hosted stack components
+ * (`database` / `queue` / `analytics`), which share the readable
+ * {@link SYSTEM_STACK_PROJECT}. The three self-healing components
+ * (`hosting-ingress` / `managed-ingress` / `managed-ha`) have no static
+ * project: theirs is the persisted descriptor's `serviceId`, resolved at the
+ * point of use and written into the compose file's own top-level `name:` key.
  */
 export type SystemComponentContract = {
-  project: string;
+  project?: string;
   composeServiceName: string;
   role: "service" | "ingress" | "turbopanel";
   selfHeal: SystemComponentSelfHeal;
@@ -90,19 +91,16 @@ export const SYSTEM_COMPONENT_CONTRACTS: Record<
   SystemComponentContract
 > = {
   [SYSTEM_HOSTING_INGRESS_COMPONENT]: {
-    project: "turbopanel-ingress",
     composeServiceName: SHARED_TRAEFIK_COMPOSE_SERVICE_NAME,
     role: "ingress",
     selfHeal: "hosting-ingress",
   },
   [SYSTEM_MANAGED_INGRESS_COMPONENT]: {
-    project: PROXYSQL_PROJECT,
     composeServiceName: PROXYSQL_COMPOSE_SERVICE_NAME,
     role: "ingress",
     selfHeal: "proxysql",
   },
   [SYSTEM_MANAGED_HA_COMPONENT]: {
-    project: ORCHESTRATOR_PROJECT,
     composeServiceName: ORCHESTRATOR_COMPOSE_SERVICE_NAME,
     role: "turbopanel",
     selfHeal: "orchestrator",
@@ -189,6 +187,21 @@ export type SystemComponentDescriptor = {
   containerName: string;
   role: "service" | "ingress" | "turbopanel";
 };
+
+/**
+ * Compose project for one system component.
+ *
+ * The self-hosted stack rows (`database` / `queue` / `analytics`) keep the
+ * readable {@link SYSTEM_STACK_PROJECT}; every self-healing component is
+ * projected onto its own allocated `serviceId`, which is also the top-level
+ * `name:` key of the daemon-written compose file.
+ */
+export function systemComponentProject(
+  descriptor: SystemComponentDescriptor,
+): string {
+  return SYSTEM_COMPONENT_CONTRACTS[descriptor.component].project ??
+    descriptor.serviceId;
+}
 
 export function systemComponentDescriptorPath(
   layout: LayoutPaths,

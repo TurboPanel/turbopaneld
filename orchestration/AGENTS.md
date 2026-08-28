@@ -75,9 +75,9 @@ The daemon refuses compose up / config write while those paths are directories.
 
 | Owner | Responsibility |
 | --- | --- |
-| Ansible (`proxysql` role) | Config dir `0750` root:`turbopanel_group`, `tls/` subdir, state data dir + first-run alpine `chown` to `999:999`, one-shot `admin.cnf` mode `0600`, initial static `proxysql.cnf` **only when absent** (`force: no`), `wait-ready.sh`, `turbopanel-proxysql-stack.service`, ensure docker network `turbopanel-managed` |
+| Ansible (`proxysql` role) | Config dir `0750` root:`turbopanel_group`, `tls/` subdir, state data dir + first-run alpine `chown` to `999:999`, one-shot `admin.cnf` mode `0600`, initial static `proxysql.cnf` **only when absent** (`force: no`), `wait-ready.sh`, `turbopanel-proxysql-stack.service`. **Never** the managed Docker network and **never** the compose project name — both are per-organization identifiers the control plane allocates and Ansible cannot know at converge time. The `proxysql_managed_network` default var and the unit's `ExecStartPre … docker network create` are **gone**; do not reintroduce either |
 | Daemon (`src/managed/proxysql.ts`, `managed.ingress.reconcile`) | Write/update `docker-compose.yml`, regenerate full durable `proxysql.cnf` (static listeners + users/servers/rules), materialize TLS PEMs under `tls/`, admin runtime apply, compose up/restart |
-| Systemd unit | `Type=oneshot` `RemainAfterExit`; create network if missing; **if compose file exists** → `docker compose up -d` + wait-ready; **if compose not yet written** → no-op success (pre-reconcile hosts stay healthy after converge) |
+| Systemd unit | `Type=oneshot` `RemainAfterExit`; **if compose file exists** → `docker compose -f <configDir>/docker-compose.yml up -d --remove-orphans` + wait-ready; **if compose not yet written** → no-op success (pre-reconcile hosts stay healthy after converge). No `-p` and no templated project var: the project is the allocated `managed-ingress` `serviceId`, which the daemon writes into the compose file's own top-level `name:` key |
 
 **Paths**
 
@@ -90,8 +90,18 @@ The daemon refuses compose up / config write while those paths are directories.
 | `…/wait-ready.sh` | `0750` root:root | Probe admin `127.0.0.1:6032` after compose up |
 | `…/docker-compose.yml` | daemon `0640` | **Not** written by Ansible |
 | `/var/lib/turbopanel/proxysql/` | pre-owned `999:999` | Host-side data tree marker / optional bind target |
-| Network `turbopanel-managed` | bridge | Engines + ProxySQL (never tenant `turbopanel-ingress`) |
+| Managed network (bare-UUID per-org name from `network(kind='managed')`) | bridge | Engines + ProxySQL (never the tenant hosting-ingress network). **Not a path this role owns** — the name is allocated per organization by the control plane, is unknown at converge time, and the daemon creates it on reconcile and re-creates it on `system.reconcile` self-heal (recovered from the on-disk compose file). See `../src/managed/AGENTS.md` → **Managed network self-heal** |
 | Unit `turbopanel-proxysql-stack.service` | `0640` | Reboot durability once compose exists |
+
+**Why the config dir keeps a branded path.** `/etc/turbopanel/proxysql/` (and
+`/etc/turbopanel/orchestrator/` below) stayed put while the Docker
+network/project identifiers went bare-UUID, and that is deliberate: Ansible
+seeds `admin.cnf` / `monitor.cnf` / `proxysql.cnf` (and `api.cnf` / `raft.cnf`)
+on a **fresh host, before any service UUID exists**, so a UUID-named directory
+is simply not knowable at converge time. A filesystem path under the
+already-branded `/etc/turbopanel` tree is also not a Docker-visible identifier —
+nothing enumerating containers, networks, or compose projects on the host ever
+sees it. Same reasoning for the `turbopanel-*-stack.service` unit names.
 
 **Image pin:** `proxysql_image: proxysql/proxysql:3.0.9`. Must not be loosened
 without reviewing **CVE-2026-48773** (pre-auth first-packet heap overflow) and
@@ -118,9 +128,9 @@ after `ensureGalaxyDockerRole`). Co-located dev installs the role via
 
 | Owner | Responsibility |
 | --- | --- |
-| Ansible (`orchestrator` role) | Config/tls/data dirs `0770`, `api.cnf` + `raft.cnf` mode `0600` owned by `turbopanel_user`, `wait-ready.sh`, `turbopanel-orchestrator-stack.service`, join Docker network `turbopanel-managed` |
+| Ansible (`orchestrator` role) | Config/tls/data dirs `0770`, `api.cnf` + `raft.cnf` mode `0600` owned by `turbopanel_user`, `wait-ready.sh`, `turbopanel-orchestrator-stack.service`. **Never** the managed Docker network and **never** the compose project name — same per-organization/per-service identifiers the role cannot know at converge time; the daemon creates and heals the network. Config dirs keep their `/etc/turbopanel/orchestrator/` path for the reason given under ProxySQL → **Paths** |
 | Daemon (`src/managed/orchestrator.ts`, `managed.ha.reconcile`) | Write `docker-compose.yml` + `orchestrator.conf.json` (`Recover: false`, empty `RecoverMasterClusterFilters`), HTTP loopback `127.0.0.1:33001:33001`, Raft published on advertise address only (`33002`) |
-| Systemd unit | `Type=oneshot` `RemainAfterExit`; **if compose file exists** → `docker compose up -d` + wait-ready; **if compose not yet written** → no-op success |
+| Systemd unit | `Type=oneshot` `RemainAfterExit`; **if compose file exists** → `docker compose -f <configDir>/docker-compose.yml up -d --remove-orphans` + wait-ready; **if compose not yet written** → no-op success. No `-p`: the project is the allocated `managed-ha` `serviceId`, carried by the compose file's own `name:` key |
 
 **Image pin:** `ghcr.io/proxysql/orchestrator:v4.30.2`. Internal ports **33001**
 (HTTP) / **33002** (Raft). Never publish `0.0.0.0`. Avoid 6032/6132/45000–45999

@@ -1,6 +1,6 @@
 import { assertEquals } from "@std/assert";
 import { resolveManagedApplyHost } from "./apply.ts";
-import { PROXYSQL_PROJECT } from "./paths.ts";
+import { proxysqlProject } from "./paths.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -32,6 +32,9 @@ test("resolveManagedApplyHost always reports loopback — external access is via
   );
 });
 
-test("PROXYSQL_PROJECT names the shared managed ingress compose project", () => {
-  assertEquals(PROXYSQL_PROJECT, "turbopanel-proxysql");
+test("proxysqlProject names the shared managed ingress compose project", () => {
+  // The shared ProxySQL project is the managed-ingress system component's
+  // allocated serviceId, round-tripped verbatim — never a readable literal.
+  const serviceId = "00000000-0000-4000-8000-0000000000cc";
+  assertEquals(proxysqlProject(serviceId), serviceId);
 });

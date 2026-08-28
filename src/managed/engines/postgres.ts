@@ -279,7 +279,7 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
           "--user",
           ctx.containerUser,
           "--network",
-          "turbopanel-managed",
+          ctx.managedNetwork,
           ...volumeArgs,
           "-v",
           `${ctx.stateDir}/tls:/etc/postgresql/tls:ro`,

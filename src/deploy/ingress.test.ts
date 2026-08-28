@@ -6,6 +6,7 @@ import {
 } from "@std/assert";
 import { join } from "@std/path";
 import {
+  assertSafeComposeProjectName,
   assertSafeHostingPathPrefix,
   assertValidBindAddress,
   buildCaddyHostnameRoutes,
@@ -94,6 +95,9 @@ const SYSTEM_INGRESS_IDENTITY = {
   role: "ingress",
 } as const;
 
+/** The shared ingress network / project *is* the hosting-ingress serviceId. */
+const HOSTING_INGRESS_NETWORK = SYSTEM_INGRESS_IDENTITY.serviceId;
+
 const MANAGED_INGRESS_SERVICE_ID = "00000000-0000-4000-8000-0000000000cc";
 const MANAGED_INGRESS_IDENTITY = {
   component: SYSTEM_MANAGED_INGRESS_COMPONENT,
@@ -115,10 +119,8 @@ test("hostingIngressDir and compose path nest under stateDir/ingress", async () 
       join(layout.stateDir, "ingress", "traefik", "docker-compose.yml"),
     );
     const serviceId = "00000000-0000-4000-8000-0000000000dd";
-    assertEquals(
-      serviceIngressProject(serviceId),
-      `turbopanel-ingress-${serviceId}`,
-    );
+    // Bare serviceId — no readable prefix.
+    assertEquals(serviceIngressProject(serviceId), serviceId);
   } finally {
     await cleanup();
   }
@@ -142,7 +144,7 @@ test("assertSafeHostingPathPrefix and formatCaddyPathMatcher handle path matcher
 });
 
 test("traefikCompose publishes loopback ports with proxy protocol and TLS", () => {
-  const compose = traefikCompose();
+  const compose = traefikCompose(HOSTING_INGRESS_NETWORK);
   assertStringIncludes(compose, "127.0.0.1:7080:7080");
   assertStringIncludes(compose, "127.0.0.1:7443:7443");
   assertStringIncludes(compose, "--entrypoints.web.address=:7080");
@@ -168,14 +170,17 @@ test("traefikCompose publishes loopback ports with proxy protocol and TLS", () =
 });
 
 test("traefikCompose without identity stays anonymous", () => {
-  const compose = traefikCompose();
+  const compose = traefikCompose(HOSTING_INGRESS_NETWORK);
   assertEquals(compose.includes("container_name:"), false);
   assertEquals(compose.includes("x-turbopanel:"), false);
   assertEquals(compose.includes("labels:"), false);
 });
 
 test("traefikCompose with identity emits container_name, system x-turbopanel, and labels", () => {
-  const compose = traefikCompose(SYSTEM_INGRESS_IDENTITY);
+  const compose = traefikCompose(
+    HOSTING_INGRESS_NETWORK,
+    SYSTEM_INGRESS_IDENTITY,
+  );
   assertStringIncludes(
     compose,
     `container_name: ${SYSTEM_INGRESS_IDENTITY.containerName}`,
@@ -213,8 +218,28 @@ test("traefikCompose with identity emits container_name, system x-turbopanel, an
     compose,
     "/var/run/docker.sock:/var/run/docker.sock:ro",
   );
-  assertStringIncludes(compose, "turbopanel-ingress:");
+  assertStringIncludes(compose, `${HOSTING_INGRESS_NETWORK}:`);
   assertStringIncludes(compose, "external: true");
+});
+
+test("traefikCompose declares its compose project through the name: key", () => {
+  const compose = traefikCompose(
+    HOSTING_INGRESS_NETWORK,
+    SYSTEM_INGRESS_IDENTITY,
+  );
+  // `name:` carries the project so every `docker compose -f <path> …` (and the
+  // Ansible-installed stack unit) resolves it without `-p`.
+  assertStringIncludes(compose, `name: ${HOSTING_INGRESS_NETWORK}`);
+  assertEquals(compose.startsWith(`name: ${HOSTING_INGRESS_NETWORK}\n`), true);
+});
+
+test("compose project names must be lowercase, bounded, and Compose-safe", () => {
+  assertSafeComposeProjectName("00000000-0000-4000-8000-0000000000bb");
+  assertThrows(() => assertSafeComposeProjectName(""), Error);
+  assertThrows(() => assertSafeComposeProjectName("Upper-Case"), Error);
+  assertThrows(() => assertSafeComposeProjectName("-leading-hyphen"), Error);
+  assertThrows(() => assertSafeComposeProjectName("has space"), Error);
+  assertThrows(() => assertSafeComposeProjectName("a".repeat(65)), Error);
 });
 
 test("assertSafeSystemIngressIdentity rejects unsafe or mismatched identity", () => {
@@ -560,7 +585,7 @@ test("assertValidBindAddress rejects garbage before interpolation", () => {
 });
 
 test("traefikCompose is HTTP-only (no tcp/udp entrypoints or public ports)", () => {
-  const compose = traefikCompose();
+  const compose = traefikCompose(HOSTING_INGRESS_NETWORK);
   assertEquals(compose.includes("entrypoints.tcp"), false);
   assertEquals(compose.includes("entrypoints.udp"), false);
   assertEquals(compose.includes(":5432:5432"), false);
@@ -575,7 +600,11 @@ const SERVICE_INGRESS_IDENTITY = {
 };
 
 test("serviceTraefikCompose emits container_name, constraint, and x-turbopanel", () => {
-  const compose = serviceTraefikCompose([], SERVICE_INGRESS_IDENTITY);
+  const compose = serviceTraefikCompose(
+    [],
+    SERVICE_INGRESS_IDENTITY,
+    HOSTING_INGRESS_NETWORK,
+  );
   assertStringIncludes(
     compose,
     `container_name: ${SERVICE_INGRESS_IDENTITY.containerName}`,
@@ -589,9 +618,21 @@ test("serviceTraefikCompose emits container_name, constraint, and x-turbopanel",
     compose,
     `Label(\`com.turbopanel.service\`,\`${SERVICE_INGRESS_IDENTITY.serviceId}\`) && Label(\`com.turbopanel.raw-port\`,\`true\`)`,
   );
-  assertStringIncludes(compose, "turbopanel-ingress");
+  assertStringIncludes(compose, HOSTING_INGRESS_NETWORK);
   assertEquals(compose.includes("entrypoints.web"), false);
   assertEquals(compose.includes("entrypoints.websecure"), false);
+});
+
+test("serviceTraefikCompose names its project after the bare serviceId", () => {
+  const compose = serviceTraefikCompose(
+    [],
+    SERVICE_INGRESS_IDENTITY,
+    HOSTING_INGRESS_NETWORK,
+  );
+  assertStringIncludes(
+    compose,
+    `name: ${SERVICE_INGRESS_IDENTITY.serviceId}`,
+  );
 });
 
 test("serviceTraefikCompose adds a static entrypoint and published port per tcp/udp entry", () => {
@@ -606,6 +647,7 @@ test("serviceTraefikCompose adds a static entrypoint and published port per tcp/
       { hostingId: "h2", protocol: "udp", publishedPort: 53 },
     ],
     SERVICE_INGRESS_IDENTITY,
+    HOSTING_INGRESS_NETWORK,
   );
   assertStringIncludes(compose, "--entrypoints.tcp5432.address=:5432");
   assertStringIncludes(compose, "--entrypoints.udp53.address=:53/udp");
@@ -620,6 +662,7 @@ test("serviceTraefikCompose dedupes entries claiming the same protocol+port", ()
       { hostingId: "h1", protocol: "tcp", publishedPort: 5432 },
     ],
     SERVICE_INGRESS_IDENTITY,
+    HOSTING_INGRESS_NETWORK,
   );
   const occurrences = compose.split("entrypoints.tcp5432").length - 1;
   assertEquals(occurrences, 1);
@@ -974,7 +1017,7 @@ test("ensureHostingIngress creates network + compose and skips real Caddy via de
   let caddyCalls = 0;
   try {
     await writeSystemComponentDescriptor(layout, SYSTEM_INGRESS_IDENTITY);
-    await ensureHostingIngress(layout, {
+    await ensureHostingIngress(layout, HOSTING_INGRESS_NETWORK, {
       runDocker: (args) => {
         calls.push([...args]);
         if (args[0] === "network" && args[1] === "inspect") {
@@ -992,7 +1035,7 @@ test("ensureHostingIngress creates network + compose and skips real Caddy via de
     assertEquals(
       calls.some((a) =>
         a[0] === "network" && a[1] === "create" &&
-        a[2] === "turbopanel-ingress"
+        a[2] === HOSTING_INGRESS_NETWORK
       ),
       true,
     );
@@ -1012,7 +1055,7 @@ test("ensureHostingIngress reuses existing ingress network", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const calls: string[][] = [];
   try {
-    await ensureHostingIngress(layout, {
+    await ensureHostingIngress(layout, HOSTING_INGRESS_NETWORK, {
       runDocker: (args) => {
         calls.push([...args]);
         return Promise.resolve(fakeDockerOk());
@@ -1033,7 +1076,7 @@ test("ensureHostingIngress throws when compose up fails", async () => {
   try {
     await assertRejects(
       () =>
-        ensureHostingIngress(layout, {
+        ensureHostingIngress(layout, HOSTING_INGRESS_NETWORK, {
           runDocker: (args) => {
             if (args[0] === "compose") {
               return Promise.resolve(fakeDockerFail("compose boom"));
@@ -1060,7 +1103,7 @@ test("inspectHostingIngressContainer returns labelled Traefik row", async () => 
     });
     await Deno.writeTextFile(
       hostingIngressComposePath(layout),
-      traefikCompose(SYSTEM_INGRESS_IDENTITY),
+      traefikCompose(HOSTING_INGRESS_NETWORK, SYSTEM_INGRESS_IDENTITY),
       { mode: 0o640 },
     );
 
@@ -1157,6 +1200,7 @@ test("ensureServiceIngress and removeServiceIngress use injected runDocker", asy
       serviceId,
       [{ protocol: "tcp", publishedPort: 5432, hostingId: "h1" }],
       identity,
+      HOSTING_INGRESS_NETWORK,
       {
         runDocker: (args) => {
           ups.push([...args]);
@@ -1202,6 +1246,7 @@ test("ensureServiceIngress rejects identity serviceId mismatch", async () => {
             composeServiceName: "traefik",
             containerName: "00000000-0000-4000-8000-0000000000ff-in",
           },
+          HOSTING_INGRESS_NETWORK,
           { runDocker: () => Promise.resolve(fakeDockerOk()) },
         ),
       Error,
@@ -1350,7 +1395,7 @@ test("ensureHostingIngress throws when network create fails", async () => {
   try {
     await assertRejects(
       () =>
-        ensureHostingIngress(layout, {
+        ensureHostingIngress(layout, HOSTING_INGRESS_NETWORK, {
           runDocker: (args) => {
             if (args[0] === "network" && args[1] === "inspect") {
               return Promise.resolve({
@@ -1519,7 +1564,7 @@ test("ensureHostingIngress falls back to anonymous Traefik when descriptor is co
       "{not-json",
     );
     let wroteCompose = "";
-    await ensureHostingIngress(layout, {
+    await ensureHostingIngress(layout, HOSTING_INGRESS_NETWORK, {
       runDocker: (args) => {
         if (args[0] === "network" && args[1] === "inspect") {
           return Promise.resolve(fakeDockerOk());
@@ -1548,7 +1593,7 @@ test("inspectHostingIngressContainer skips mismatched or unlabelled rows", async
     });
     await Deno.writeTextFile(
       hostingIngressComposePath(layout),
-      traefikCompose(SYSTEM_INGRESS_IDENTITY),
+      traefikCompose(HOSTING_INGRESS_NETWORK, SYSTEM_INGRESS_IDENTITY),
       { mode: 0o640 },
     );
 
@@ -1625,6 +1670,7 @@ test("ensureServiceIngress throws commandError with empty stderr fallback", asyn
             composeServiceName: "traefik",
             containerName: `${serviceId}-in`,
           },
+          HOSTING_INGRESS_NETWORK,
           {
             runDocker: (args) => {
               if (args.includes("up")) {
@@ -2039,7 +2085,7 @@ test("inspectHostingIngressContainer skips null compose-ps rows", async () => {
     });
     await Deno.writeTextFile(
       hostingIngressComposePath(layout),
-      traefikCompose(SYSTEM_INGRESS_IDENTITY),
+      traefikCompose(HOSTING_INGRESS_NETWORK, SYSTEM_INGRESS_IDENTITY),
       { mode: 0o640 },
     );
     // Missing Name/Service/State → readComposePsContainer returns null.

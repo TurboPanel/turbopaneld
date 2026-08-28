@@ -8,7 +8,7 @@
  * renderers (see `../../managed/proxysql.test.ts` for those).
  */
 
-import { assertEquals, assertRejects } from "@std/assert";
+import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import type { DockerCliResult } from "../../deploy/docker-cli.ts";
 import {
   readSystemComponentDescriptor,
@@ -37,12 +37,15 @@ const SERVER_ID = "11111111-1111-4111-8111-111111111111";
 const PROXYSQL_SERVICE_ID = "22222222-2222-4222-8222-222222222222";
 const MANAGED_ID = "33333333-3333-4333-8333-333333333333";
 const MEMBER_ID = "44444444-4444-4444-8444-444444444444";
+/** Org-wide managed Docker network name — a `network.kind='managed'` row id. */
+const MANAGED_NETWORK = "00000000-0000-4000-8000-0000000000ee";
 
 function basePayload(
   ...bindAddresses: string[]
 ): ManagedIngressReconcilePayload {
   const payload: ManagedIngressReconcilePayload = {
     serverId: SERVER_ID,
+    managedNetwork: MANAGED_NETWORK,
     identity: {
       serviceId: PROXYSQL_SERVICE_ID,
       composeServiceName: "proxysql",
@@ -175,6 +178,9 @@ test({
         const composeText = await Deno.readTextFile(
           proxysqlComposePath(layout),
         );
+        // Compose declares the payload's per-org managed network, not a
+        // platform-wide constant.
+        assertStringIncludes(composeText, `  ${MANAGED_NETWORK}:`);
         assertEquals(
           readPublishedBindAddressesFromCompose(composeText),
           [],
@@ -334,6 +340,15 @@ test({
           dockerArgs.some((args) => args.includes("up") && args.includes("-d")),
           true,
         );
+        // The ensure targets the payload's per-org network, and runs before
+        // the compose up that references it as `external: true`.
+        const networkIndex = dockerArgs.findIndex((args) =>
+          args[0] === "network" && args[2] === MANAGED_NETWORK
+        );
+        const upIndex = dockerArgs.findIndex((args) =>
+          args.includes("up") && args.includes("-d")
+        );
+        assertEquals(networkIndex >= 0 && networkIndex < upIndex, true);
       } finally {
         Deno.env.delete("TURBOPANEL_STATE_DIR");
         Deno.env.delete("TURBOPANEL_CONFIG_DIR");
@@ -600,7 +615,11 @@ test({
         const dockerArgs: string[][] = [];
         let decryptCalls = 0;
         const result = await handleManagedIngressReconcile(
-          { serverId: SERVER_ID, clusters: [] },
+          {
+            serverId: SERVER_ID,
+            managedNetwork: MANAGED_NETWORK,
+            clusters: [],
+          },
           new Date().toISOString(),
           {
             runDocker: (args) => {
@@ -644,7 +663,11 @@ test({
       try {
         const dockerArgs: string[][] = [];
         const result = await handleManagedIngressReconcile(
-          { serverId: SERVER_ID, clusters: [] },
+          {
+            serverId: SERVER_ID,
+            managedNetwork: MANAGED_NETWORK,
+            clusters: [],
+          },
           new Date().toISOString(),
           {
             runDocker: (args) => {
@@ -707,6 +730,68 @@ test({
         );
         assertEquals(hostPrepCalls, 1);
         assertEquals(result.restarted, true);
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleManagedIngressReconcile ensures the managed network before lazy host prep",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env);
+      await writeSystemComponentDescriptor(layout, {
+        component: SYSTEM_MANAGED_INGRESS_COMPONENT,
+        serviceId: PROXYSQL_SERVICE_ID,
+        composeServiceName: "proxysql",
+        containerName: `${PROXYSQL_SERVICE_ID}-in`,
+        role: "ingress",
+      });
+      // A rerun on a host that already has a compose file but whose external
+      // managed network was pruned: host prep ends by starting
+      // `turbopanel-proxysql-stack.service`, whose unit runs
+      // `docker compose up -d` against that network.
+      await Deno.mkdir(proxysqlConfigDir(layout), { recursive: true });
+      await Deno.writeTextFile(
+        proxysqlComposePath(layout),
+        "services: {}\n",
+      );
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      const events: string[] = [];
+      try {
+        await handleManagedIngressReconcile(
+          basePayload(),
+          new Date().toISOString(),
+          {
+            runDocker: (args: string[]) => {
+              if (args[0] === "network") events.push(`network:${args[1]}`);
+              return fakeRun()(args);
+            },
+            decryptSecrets: decryptSecretsEcho,
+            ensureDocker: () => Promise.resolve(),
+            runHostPrep: async () => {
+              events.push("host-prep");
+              await Deno.mkdir(proxysqlConfigDir(layout), { recursive: true });
+              await Deno.writeTextFile(
+                `${proxysqlConfigDir(layout)}/admin.cnf`,
+                "[client]\nuser=admin\npassword=admin-secret\n",
+              );
+              await Deno.writeTextFile(
+                `${proxysqlConfigDir(layout)}/monitor.cnf`,
+                "[client]\nuser=tp_monitor\npassword=mon-secret\n",
+              );
+            },
+          },
+        );
+        assertEquals(events[0], "network:inspect");
+        assertEquals(events.includes("host-prep"), true);
+        assertEquals(events.indexOf("host-prep") > 0, true);
       } finally {
         Deno.env.delete("TURBOPANEL_STATE_DIR");
         Deno.env.delete("TURBOPANEL_CONFIG_DIR");

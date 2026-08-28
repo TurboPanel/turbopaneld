@@ -38,7 +38,6 @@ import {
   type SystemComponentDescriptor,
 } from "./system-component.ts";
 
-const INGRESS_NETWORK = "turbopanel-ingress";
 const CADDY_SERVICE = "turbopanel-hosting-caddy.service";
 const TRAEFIK_IMAGE = "traefik:v3.6.6";
 const TRAEFIK_LOOPBACK = "127.0.0.1";
@@ -54,13 +53,28 @@ const TRAEFIK_HTTPS_PORT = 7443;
  */
 const HOSTING_CADDY_ADMIN_ADDR = "127.0.0.1:2029";
 const SAFE_FILE_ID_RE = /^[A-Za-z0-9_-]+$/;
+/** Compose Spec `name:` charset — lowercase alphanumerics, `-`, and `_`. */
+const COMPOSE_PROJECT_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
 const decoder = new TextDecoder();
 
 /**
- * Compose project name for the shared HTTP Traefik.
- * Happens to equal {@link INGRESS_NETWORK}; kept as a distinct constant.
+ * Guard a value before it is interpolated as a compose document's top-level
+ * `name:` key.
+ *
+ * That key is new interpolation surface: since the shared/system compose
+ * projects moved off readable literals onto allocated UUIDs, the project name
+ * is written *into* the YAML instead of being passed as `-p`. Charset and
+ * length match `COMPOSE_PROJECT_RE` in `src/managed/paths.ts`.
  */
-export const HOSTING_INGRESS_PROJECT = "turbopanel-ingress";
+export function assertSafeComposeProjectName(value: string): void {
+  if (
+    value.length === 0 ||
+    value.length > 64 ||
+    !COMPOSE_PROJECT_NAME_RE.test(value)
+  ) {
+    throw new Error("compose project name is invalid");
+  }
+}
 
 export function hostingIngressDir(layout: LayoutPaths): string {
   return join(layout.stateDir, "ingress", "traefik");
@@ -75,8 +89,8 @@ export function hostingIngressComposePath(layout: LayoutPaths): string {
  * (no hostname/TLS routing) for a `tcp`/`udp` protocol hosting. Persisted per
  * service under `<stateDir>/ingress/tcp-udp/<serviceId>.json` for
  * cross-service conflict detection. Each service that publishes ports gets
- * its own Traefik compose project (`turbopanel-ingress-<serviceId>`); the
- * shared `turbopanel-ingress` Traefik stays HTTP-only (loopback web/websecure).
+ * its own Traefik compose project (named by its bare `<serviceId>`); the
+ * shared hosting-ingress Traefik stays HTTP-only (loopback web/websecure).
  */
 export type TcpUdpIngressEntry = {
   hostingId: string;
@@ -230,17 +244,26 @@ export type InspectHostingIngressDeps = {
   runDocker?: RunDockerFn;
 };
 
+/**
+ * Ensure the shared hosting-ingress Docker network exists.
+ *
+ * `network` is the `hosting-ingress` system component's allocated `serviceId`
+ * — threaded in by the caller (from the persisted descriptor, or from the
+ * deploy payload's `hostingIngressNetwork`), never a module constant.
+ */
 async function ensureIngressNetwork(
+  network: string,
   run: RunDockerFn = defaultRunDocker,
 ): Promise<void> {
+  assertSafeComposeProjectName(network);
   const inspect = await run([
     "network",
     "inspect",
-    INGRESS_NETWORK,
+    network,
   ]);
   if (inspect.success) return;
 
-  const create = await run(["network", "create", INGRESS_NETWORK]);
+  const create = await run(["network", "create", network]);
   if (!create.success) {
     throw commandError("Creating ingress Docker network", create);
   }
@@ -303,7 +326,13 @@ function tcpUdpPortLines(entries: readonly TcpUdpIngressEntry[]): string[] {
 
 /** Shared HTTP-only Traefik (loopback web/websecure). No tcp/udp entrypoints. */
 /**
- * Shared HTTP-only Traefik compose document (project {@link HOSTING_INGRESS_PROJECT}).
+ * Shared HTTP-only Traefik compose document.
+ *
+ * `ingressNetwork` is the `hosting-ingress` component's allocated `serviceId`
+ * — it names both the external Docker network the shared proxy joins and the
+ * compose project, which this document declares itself through the top-level
+ * `name:` key. Every `docker compose` invocation against this file therefore
+ * omits `-p`.
  *
  * Without `identity`, returns the anonymous shape used in the fresh
  * pre-provision state (no `container_name`, no `x-turbopanel`, no labels)
@@ -314,15 +343,12 @@ function tcpUdpPortLines(entries: readonly TcpUdpIngressEntry[]): string[] {
  * never `traefik.enable`, HTTP router labels, or `com.turbopanel.raw-port`
  * (omitting raw-port keeps the shared container invisible to every tenant
  * Traefik provider constraint).
- *
- * Adding `container_name` causes one compose recreation of the existing
- * `turbopanel-ingress-traefik-1` container on first identity-bearing ensure —
- * expected and self-healing, since `up -d` replaces the same compose service
- * rather than orphaning it.
  */
 export function traefikCompose(
+  ingressNetwork: string,
   identity?: SystemComponentDescriptor,
 ): string {
+  assertSafeComposeProjectName(ingressNetwork);
   if (identity !== undefined) {
     assertSafeSystemIngressIdentity(identity);
   }
@@ -345,6 +371,8 @@ export function traefikCompose(
   ];
 
   const lines = [
+    `name: ${ingressNetwork}`,
+    "",
     "services:",
     `  ${SHARED_TRAEFIK_COMPOSE_SERVICE_NAME}:`,
     `    image: ${TRAEFIK_IMAGE}`,
@@ -353,7 +381,7 @@ export function traefikCompose(
     "    command:",
     "      - --providers.docker=true",
     "      - --providers.docker.exposedbydefault=false",
-    `      - --providers.docker.network=${INGRESS_NETWORK}`,
+    `      - --providers.docker.network=${ingressNetwork}`,
     `      - --entrypoints.web.address=:${TRAEFIK_HTTP_PORT}`,
     "      - --entrypoints.web.proxyProtocol.insecure=true",
     `      - --entrypoints.websecure.address=:${TRAEFIK_HTTPS_PORT}`,
@@ -366,10 +394,10 @@ export function traefikCompose(
     "      - /var/run/docker.sock:/var/run/docker.sock:ro",
     ...labelLines,
     "    networks:",
-    `      - ${INGRESS_NETWORK}`,
+    `      - ${ingressNetwork}`,
     "",
     "networks:",
-    `  ${INGRESS_NETWORK}:`,
+    `  ${ingressNetwork}:`,
     "    external: true",
     "",
   ];
@@ -382,12 +410,18 @@ function assertSafeServiceIngressIdentity(
   assertSafeIngressIdentity(identity);
 }
 
-/** Compose project name for one service's tenant Traefik. */
+/**
+ * Compose project name for one service's tenant Traefik — the bare
+ * `serviceId`, with no readable prefix. The container keeps its
+ * `<serviceId>-in` name (see `ingressContainerName`), which is what
+ * distinguishes it from the tenant workload containers in the same project
+ * namespace.
+ */
 export function serviceIngressProject(serviceId: string): string {
   if (!SAFE_FILE_ID_RE.test(serviceId)) {
     throw new Error("serviceId contains unsupported characters");
   }
-  return `turbopanel-ingress-${serviceId}`;
+  return serviceId;
 }
 
 export function serviceIngressDir(
@@ -410,23 +444,34 @@ export function serviceIngressComposePath(
 /**
  * Compose document for one tenant service's Traefik project.
  *
- * Joins {@link INGRESS_NETWORK}, constrains the Docker provider to
+ * Joins `ingressNetwork` (the `hosting-ingress` component's allocated
+ * `serviceId`, supplied by the caller from the deploy payload's
+ * `hostingIngressNetwork`), constrains the Docker provider to
  * `com.turbopanel.service=<serviceId>` **and** `com.turbopanel.raw-port=true`
  * (stamped by `buildHostingLabelsFragment` only on services that publish tcp/udp),
  * and emits only that service's tcp/udp entrypoints + published ports.
  * HTTP routers on mixed-hosting services are pinned to `web,websecure`, which
  * this Traefik does not define — so HTTP config stays on shared loopback Traefik.
+ *
+ * Declares its own compose project through the top-level `name:` key
+ * ({@link serviceIngressProject}), so callers need no `-p`.
  */
 export function serviceTraefikCompose(
   entries: readonly TcpUdpIngressEntry[],
   identity: ServiceIngressIdentity,
+  ingressNetwork: string,
 ): string {
   assertSafeServiceIngressIdentity(identity);
+  assertSafeComposeProjectName(ingressNetwork);
+  const project = serviceIngressProject(identity.serviceId);
+  assertSafeComposeProjectName(project);
   const staticArgs = tcpUdpStaticArgLines(entries);
   const portLines = tcpUdpPortLines(entries);
   const constraint =
     `Label(\`${LABEL_SERVICE_ID}\`,\`${identity.serviceId}\`) && Label(\`${LABEL_RAW_PORT}\`,\`true\`)`;
   const lines = [
+    `name: ${project}`,
+    "",
     "services:",
     `  ${identity.composeServiceName}:`,
     `    image: ${TRAEFIK_IMAGE}`,
@@ -439,7 +484,7 @@ export function serviceTraefikCompose(
     "    command:",
     "      - --providers.docker=true",
     "      - --providers.docker.exposedbydefault=false",
-    `      - --providers.docker.network=${INGRESS_NETWORK}`,
+    `      - --providers.docker.network=${ingressNetwork}`,
     `      - ${
       quoteYamlScalar(`--providers.docker.constraints=${constraint}`)
     }`,
@@ -451,10 +496,10 @@ export function serviceTraefikCompose(
     `      ${LABEL_ROLE}: ${LABEL_ROLE_INGRESS}`,
     `      ${LABEL_SERVICE_ID}: ${quoteYamlScalar(identity.serviceId)}`,
     "    networks:",
-    `      - ${INGRESS_NETWORK}`,
+    `      - ${ingressNetwork}`,
     "",
     "networks:",
-    `  ${INGRESS_NETWORK}:`,
+    `  ${ingressNetwork}:`,
     "    external: true",
     "",
   ];
@@ -590,13 +635,21 @@ export type EnsureHostingIngressDeps = {
   ensureHostingCaddyRuntime?: (layout: LayoutPaths) => Promise<void>;
 };
 
-/** Ensure the shared HTTP-only Traefik + hosting Caddy runtime. */
+/**
+ * Ensure the shared HTTP-only Traefik + hosting Caddy runtime.
+ *
+ * `ingressNetwork` is the `hosting-ingress` component's allocated `serviceId`
+ * — the Docker network name **and** the compose project name. Callers supply
+ * it from the persisted descriptor (`system.reconcile`) or from the deploy
+ * payload's `hostingIngressNetwork` (`environment.deploy`).
+ */
 export async function ensureHostingIngress(
   layout: LayoutPaths,
+  ingressNetwork: string,
   deps?: EnsureHostingIngressDeps,
 ): Promise<void> {
   const run = deps?.runDocker ?? defaultRunDocker;
-  await ensureIngressNetwork(run);
+  await ensureIngressNetwork(ingressNetwork, run);
 
   const ingressDir = hostingIngressDir(layout);
   await Deno.mkdir(ingressDir, { recursive: true, mode: 0o750 });
@@ -617,13 +670,14 @@ export async function ensureHostingIngress(
     );
   }
 
-  await Deno.writeTextFile(composePath, traefikCompose(descriptor), {
-    mode: 0o640,
-  });
+  await Deno.writeTextFile(
+    composePath,
+    traefikCompose(ingressNetwork, descriptor),
+    { mode: 0o640 },
+  );
+  // No `-p`: the compose file declares its own project through `name:`.
   const composeUp = await run([
     "compose",
-    "-p",
-    HOSTING_INGRESS_PROJECT,
     "-f",
     composePath,
     "up",
@@ -701,8 +755,6 @@ export async function inspectHostingIngressContainer(
 
     const result = await run([
       "compose",
-      "-p",
-      HOSTING_INGRESS_PROJECT,
       "-f",
       composePath,
       "ps",
@@ -759,20 +811,21 @@ export async function ensureServiceIngress(
   serviceId: string,
   entries: readonly TcpUdpIngressEntry[],
   identity: ServiceIngressIdentity,
+  ingressNetwork: string,
   deps?: EnsureServiceIngressDeps,
 ): Promise<void> {
   if (identity.serviceId !== serviceId) {
     throw new Error("ingress identity serviceId mismatch");
   }
   const run = deps?.runDocker ?? defaultRunDocker;
-  await ensureIngressNetwork(run);
+  await ensureIngressNetwork(ingressNetwork, run);
 
   const ingressDir = serviceIngressDir(layout, serviceId);
   await Deno.mkdir(ingressDir, { recursive: true, mode: 0o750 });
   const composePath = serviceIngressComposePath(layout, serviceId);
   await Deno.writeTextFile(
     composePath,
-    serviceTraefikCompose(entries, identity),
+    serviceTraefikCompose(entries, identity, ingressNetwork),
     { mode: 0o640 },
   );
   const project = serviceIngressProject(serviceId);

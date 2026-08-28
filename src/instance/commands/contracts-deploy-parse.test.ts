@@ -699,6 +699,51 @@ test("parseEnvironmentDeployPayload rejects compose file path/source and ingress
   );
 });
 
+test("parseEnvironmentDeployPayload guards the hosting-ingress network identity", () => {
+  const withHosting = { hostings: [hosting({})] };
+  const ingress = {
+    serviceId: SERVICE_UUID,
+    composeServiceName: "traefik",
+    containerName: `${SERVICE_UUID}-in`,
+  };
+  // The shared hosting-ingress network is also the shared Traefik compose
+  // project, so it must equal the `hostingIngress` serviceId.
+  assertEquals(
+    parseEnvironmentDeployPayload({
+      ...DEPLOY_BASE,
+      ...withHosting,
+      hostingIngress: ingress,
+      hostingIngressNetwork: SERVICE_UUID,
+    }).hostingIngressNetwork,
+    SERVICE_UUID,
+  );
+  rejectDeploy(
+    {
+      ...withHosting,
+      hostingIngress: ingress,
+      hostingIngressNetwork: "00000000-0000-4000-8000-0000000000bb",
+    },
+    "Invalid environment deploy payload",
+  );
+  // Compose `name:` is stricter than the Docker resource rule
+  // (`assertSafeComposeProjectName` in `src/deploy/ingress.ts`) — reject at the
+  // boundary rather than at render time.
+  for (
+    const network of [
+      "Ingress-Net",
+      "ingress.net",
+      "-ingress",
+      "",
+      "a".repeat(65),
+    ]
+  ) {
+    rejectDeploy(
+      { ...withHosting, hostingIngressNetwork: network },
+      "Invalid environment deploy payload",
+    );
+  }
+});
+
 test("parseEnvironmentDeployPayload round-trips optional flags and networks", () => {
   const payload = parseEnvironmentDeployPayload({
     ...DEPLOY_BASE,

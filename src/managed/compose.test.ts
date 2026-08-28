@@ -7,7 +7,6 @@ import {
   normalizeManagedCompose,
   unnestPostgresConfigTlsMounts,
 } from "./compose.ts";
-import { MANAGED_INGRESS_NETWORK } from "./networks.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -16,6 +15,9 @@ import { MANAGED_INGRESS_NETWORK } from "./networks.ts";
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
 const test = Deno.test.bind(Deno);
+
+/** Managed network names are the `network(kind='managed')` row's bare UUID. */
+const MANAGED_NETWORK = "00000000-0000-4000-8000-0000000000ee";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -30,6 +32,7 @@ function basePayload(
     engine: "postgres",
     projectName: "tp-managed-pg",
     containerName: "01936b3e-aaaa-bbbb-cccc-123456789abc-1",
+    managedNetwork: MANAGED_NETWORK,
     image: "docker.io/library/postgres:18-alpine",
     containerPort: 5432,
     composeYaml: [
@@ -424,7 +427,7 @@ test("normalizeManagedCompose attaches managed network to array and object forms
     (arrayNetworks.services as Record<string, Record<string, unknown>>)
       .postgres!;
   assertEquals(
-    (arrayService.networks as string[]).includes(MANAGED_INGRESS_NETWORK),
+    (arrayService.networks as string[]).includes(MANAGED_NETWORK),
     true,
   );
 
@@ -443,7 +446,7 @@ test("normalizeManagedCompose attaches managed network to array and object forms
     (objectNetworks.services as Record<string, Record<string, unknown>>)
       .postgres!;
   const nets = objectService.networks as Record<string, unknown>;
-  assertEquals(nets[MANAGED_INGRESS_NETWORK] !== undefined, true);
+  assertEquals(nets[MANAGED_NETWORK] !== undefined, true);
 });
 
 test("normalizeManagedCompose rejects malformed compose documents", () => {
@@ -512,14 +515,25 @@ test("normalizeManagedCompose rejects malformed compose documents", () => {
   );
 });
 
+test("normalizeManagedCompose attaches the payload's managed network, not a constant", () => {
+  const other = "11111111-1111-4111-8111-111111111111";
+  const doc = parseNormalized(basePayload({ managedNetwork: other }));
+  const networks = doc.networks as Record<string, unknown>;
+  assertEquals(networks[other], { external: true });
+  assertEquals(networks[MANAGED_NETWORK], undefined);
+  const service = (doc.services as Record<string, Record<string, unknown>>)
+    .postgres!;
+  assertEquals((service.networks as string[]).includes(other), true);
+});
+
 test("normalizeManagedCompose always attaches managed network for ProxySQL reachability", () => {
   const doc = parseNormalized(basePayload());
   const networks = doc.networks as Record<string, unknown>;
-  assertEquals(networks[MANAGED_INGRESS_NETWORK], { external: true });
+  assertEquals(networks[MANAGED_NETWORK], { external: true });
   const service = (doc.services as Record<string, Record<string, unknown>>)
     .postgres!;
   assertEquals(
-    (service.networks as string[]).includes(MANAGED_INGRESS_NETWORK),
+    (service.networks as string[]).includes(MANAGED_NETWORK),
     true,
   );
   const labels = service.labels as Record<string, string> | undefined;

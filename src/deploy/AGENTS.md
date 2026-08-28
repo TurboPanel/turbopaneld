@@ -4,8 +4,9 @@ The `environment.deploy` / `environment.lifecycle` / `environment.stop` command 
 
 **Managed engines are a separate path** (`../managed/AGENTS.md`): platform-owned
 compose + config under `<stateDir>/managed/<managedId>/`, native ports only, no
-hosting Caddy, no tenant Traefik/`turbopanel-ingress`, no user compose merge,
-shared ProxySQL frontend (`turbopanel-proxysql` / `managed-ingress`). Do not
+hosting Caddy, no tenant Traefik / hosting-ingress network, no user compose merge,
+shared ProxySQL frontend (the `managed-ingress` system component; see
+`../managed/AGENTS.md` for the canonical compose-project naming rule). Do not
 route `managed.*` commands through this deploy stack.
 
 Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbopanel/src/lib/commands/AGENTS.md`. Cross-repo `../<repo>/…` links are relative to the repo root.
@@ -25,7 +26,9 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    `resolveDockerInvocation()` probes the **same ladder** up front (direct →
    `sudo -n -u <self>` → `sudo -n --`) so the streamed path has identical
    Docker access.
-2. Bootstrap Traefik on Docker network `turbopanel-ingress` **only when the
+2. Bootstrap Traefik on the shared hosting-ingress Docker network — named by the
+   `hosting-ingress` component's `serviceId`, carried on the wire as
+   `hostingIngressNetwork` — **only when the
    deploy has at least one container HTTP hosting with hostnames** (shared
    loopback entrypoints `127.0.0.1:7080` / `127.0.0.1:7443`, PROXY protocol,
    …). Bare container deploys (no hostnames / no HTTP hosting rows) never start
@@ -36,7 +39,7 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    the shared container gets allocated `container_name` /
    `x-turbopanel` / labels. Tenant HTTP `environment.deploy` may write that
    descriptor first from payload `hostingIngress` (`persistHostingIngressIdentity`)
-   so the first hostname deploy is not anonymous `turbopanel-ingress-traefik-1`.
+   so the first hostname deploy is not an anonymous `<project>-traefik-1`.
    When absent (or corrupt — logged and ignored),
    the anonymous pre-identity shape is written for older payloads that omit
    `hostingIngress` and have not yet run `system.reconcile`, so tenant deploys
@@ -575,11 +578,12 @@ Caddy — **no** hostname/TLS/path routing for those hostings;
 `{ published, target }` list.
 
 **Managed engines do not use this path** — they enter via the shared ProxySQL
-project (`turbopanel-proxysql` / `managed-ingress`). This section applies only
+`managed-ingress` system component (compose-project naming rule:
+`../managed/AGENTS.md`). This section applies only
 to **tenant** docker-compose hostings.
 
 **HTTP hostings are excluded** from this path: they stay on the shared
-loopback Traefik (`turbopanel-ingress` / `traefikCompose()` — `web` /
+loopback Traefik (`traefikCompose()` — `web` /
 `websecure` only, no published public ports) via Docker labels. They never
 get a per-service Traefik project or an `ingressServices[]` entry.
 
@@ -591,11 +595,12 @@ get a per-service Traefik project or an `ingressServices[]` entry.
   label targeting the container port.
 - **Per-service Traefik** (`serviceTraefikCompose` / `ensureServiceIngress`):
   every service in `payload.ingressServices[]` gets its own compose project
-  `turbopanel-ingress-<serviceId>` under
+  named by `serviceIngressProject(serviceId)` — the **bare `<serviceId>`
+  UUID**, no `turbopanel-` prefix — under
   `<stateDir>/ingress/services/<serviceId>/`, with
   `container_name: <serviceId>-in`,
   `x-turbopanel: { kind: ingress, serviceId, containerName }`, joined to
-  `turbopanel-ingress`, and
+  the shared hosting-ingress network, and
   ``--providers.docker.constraints=Label(`com.turbopanel.service`,`<serviceId>`)``.
   Static config is regenerated (not hot-reloaded): one quoted
   ``--entrypoints.<protocol><port>.address=:<port>[/udp]`` arg and one quoted
@@ -682,15 +687,15 @@ compiled YAML — storage / Traefik / site only).
 
 ## Shared HTTP ingress identity
 
-The shared loopback Traefik (compose project `turbopanel-ingress`, service key
+The shared loopback Traefik (compose project = the `hosting-ingress` `serviceId`, service key
 `traefik`) is **platform inventory**, distinct from per-service tenant TCP/UDP
 Traefik and from managed-engine ProxySQL:
 
 | Pattern | Ownership | Compose project |
 | --- | --- | --- |
-| Shared HTTP ingress | Platform (`system/hosting-ingress.json`) | `turbopanel-ingress` |
-| Tenant TCP/UDP ingress | Tenant service (`ingress/services/<serviceId>/`) | `turbopanel-ingress-<serviceId>` |
-| Managed-engine ingress | Platform system component (`managed-ingress` → ProxySQL under `configDir/proxysql/`) | `turbopanel-proxysql` |
+| Shared HTTP ingress | Platform (`system/hosting-ingress.json`) | `<hosting-ingress serviceId>` |
+| Tenant TCP/UDP ingress | Tenant service (`ingress/services/<serviceId>/`) | `<serviceId>` |
+| Managed-engine ingress | Platform system component (`managed-ingress` → ProxySQL under `configDir/proxysql/`) | `<managed-ingress serviceId>` |
 | System stack (database/queue/analytics) | Ansible/Ops (`system-compose` role), inspected via `system/<component>.json` | `turbopanel-system` |
 
 **Keep these four patterns distinct:**
@@ -707,7 +712,7 @@ Traefik and from managed-engine ProxySQL:
    Tenant claims colliding on any reserved published port are rejected
    daemon-side.
 3. **Managed-engine ProxySQL** (`managed-ingress`) — one per server,
-   `proxysql/proxysql:3.0.9`, project `turbopanel-proxysql`. Desired state is
+   `proxysql/proxysql:3.0.9`, project = the `managed-ingress` `serviceId`. Desired state is
    whole-server `managed.ingress.reconcile` (not embedded on `managed.apply`).
    System self-heal dispatches to ProxySQL compose start/restart when the
    inventory component is present. Engine containers never publish host ports
@@ -745,7 +750,7 @@ absence returns `null`. A missing compose file is authoritative absence
 labels (`turbopanel.role=ingress`,
 `com.turbopanel.system.component=hosting-ingress`,
 `com.turbopanel.service=<serviceId>`) — anonymous pre-provision
-`turbopanel-ingress-traefik-1` rows (no platform labels) are ignored.
+legacy `<project>-traefik-1` rows (no platform labels) are ignored.
 Production writer: the `system.reconcile` handler always calls
 `writeSystemComponentDescriptor`, then self-heals via `ensureDocker` +
 `ensureHostingIngress` when `desired: 'present'` (plus compose `restart` when
@@ -1196,6 +1201,21 @@ site **before** `docker compose up`, and (3) patches compose with
 registered in the org network table (`kind: docker`, `options.dockerNetworkName`)
 for the deploy server. Payload `dockerExternalNetworks[]` is ensured with
 `docker network create` before compose up (`ensure-docker-networks.ts`).
+
+**Payload-named platform networks** are a third, disjoint set. Neither the
+shared hosting-ingress network nor the organization's managed network has a
+literal name in daemon code any more — both arrive on the wire:
+
+| Field | Names | Required when |
+| --- | --- | --- |
+| `hostingIngressNetwork` | The shared hosting-ingress Docker network **and** the shared HTTP Traefik compose project — both the `hosting-ingress` component's bare `serviceId` | The deploy carries at least one hosting (HTTP **or** tcp/udp — a tcp/udp-only deploy still needs the network for its per-service Traefik, even though `hostingIngress` identity is absent) |
+| `managedNetwork` | The organization's managed engine network — the `network(kind='managed')` row's bare UUID | At least one compose service joins it (`managedNetworkServices[]` non-empty) |
+
+Both are **rejected when present but unused**, not silently dropped, and
+neither has a daemon-side default — a deploy that needs one and omits it is a
+contract error. Canonical naming rule: `../managed/AGENTS.md` → **Compose
+project names**.
+
 **`fabricNetworks[]` is a disjoint set:** platform-owned `tpn_*` routed bridges
 derived from `subnet` rows (`{ name, subnet, gateway?, mtu? }` — compose-bridge CIDRs, not datacenter subnets), never
 operator-registered. Requiring a registry row would make every spanning deploy

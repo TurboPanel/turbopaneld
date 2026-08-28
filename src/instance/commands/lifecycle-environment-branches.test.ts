@@ -346,13 +346,13 @@ test({
         new Date().toISOString(),
         {
           runDocker: (args) => {
-            const projectIdx = args.indexOf("-p");
+            // Per-service Traefik projects are bare serviceIds now, so the
+            // per-service compose path is what identifies one of those calls.
             if (
-              projectIdx >= 0 && args[projectIdx + 1]?.startsWith(
-                "turbopanel-ingress-",
-              )
+              args.some((arg) => arg.includes("/ingress/services/"))
             ) {
-              ingressProjects.push(args[projectIdx + 1]!);
+              const projectIdx = args.indexOf("-p");
+              if (projectIdx >= 0) ingressProjects.push(args[projectIdx + 1]!);
             }
             return okDocker(args);
           },

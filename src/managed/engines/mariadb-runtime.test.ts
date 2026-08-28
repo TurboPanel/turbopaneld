@@ -21,6 +21,9 @@ import type { ManagedEngineContext, ManagedEngineExec } from "./types.ts";
  */
 const test = Deno.test.bind(Deno);
 
+/** Managed network names are the `network(kind='managed')` row's bare UUID. */
+const MANAGED_NETWORK = "00000000-0000-4000-8000-0000000000ee";
+
 const HEALTHY_VERTICAL = `
 *************************** 1. row ***************************
                Slave_IO_Running: Yes
@@ -188,6 +191,7 @@ test("mariadb bootstrapStandby returns needs_resync when datadir exists without 
   const boot = await mariadbManagedEngineRuntime.replication.bootstrapStandby(
     {
       managedId: "mariadb-boot",
+      managedNetwork: MANAGED_NETWORK,
       image: "mariadb:11",
       volumes: [{ name: "vol", target: "/var/lib/mysql" }],
       stateDir: "/tmp/mariadb",
@@ -312,6 +316,7 @@ test("mariadb bootstrapStandby returns seeded when datadir is empty", async () =
   const boot = await replication.bootstrapStandby(
     {
       managedId: "mariadb-boot",
+      managedNetwork: MANAGED_NETWORK,
       image: "mariadb:11",
       volumes: [{ name: "vol", target: "/var/lib/mysql" }],
       stateDir: "/tmp/mariadb",
@@ -332,6 +337,7 @@ test("mariadb bootstrapStandby returns already_standby when marker exists", asyn
   const boot = await replication.bootstrapStandby(
     {
       managedId: "mariadb-boot",
+      managedNetwork: MANAGED_NETWORK,
       image: "mariadb:11",
       volumes: [{ name: "vol", target: "/var/lib/mysql" }],
       stateDir: "/tmp/mariadb",
@@ -791,6 +797,7 @@ test("mariadb bootstrapStandby defaults the data root when volumes are empty", a
   const boot = await replication.bootstrapStandby(
     {
       managedId: "mariadb-boot",
+      managedNetwork: MANAGED_NETWORK,
       image: "mariadb:11",
       volumes: [],
       stateDir: "/tmp/mariadb",

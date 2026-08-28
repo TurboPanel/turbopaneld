@@ -199,6 +199,51 @@ test(
 );
 
 test(
+  "proxysql / orchestrator stack units never template a compose project name",
+  async () => {
+    // The ProxySQL and Orchestrator compose projects are the allocated
+    // `managed-ingress` / `managed-ha` serviceIds, which Ansible cannot know at
+    // converge time. The daemon writes them into each compose file's own
+    // top-level `name:` key, so the units address compose by `-f <path>` alone.
+    const templates = [
+      "roles/proxysql/templates/turbopanel-proxysql-stack.service.j2",
+      "roles/proxysql/templates/wait-ready.sh.j2",
+      "roles/orchestrator/templates/turbopanel-orchestrator-stack.service.j2",
+      "roles/orchestrator/templates/wait-ready.sh.j2",
+    ];
+    for (const relPath of templates) {
+      const text = await Deno.readTextFile(
+        join(CHECKOUT_ORCHESTRATION_DIR, relPath),
+      );
+      if (/docker compose[^\n]*\s-p\s/.test(text)) {
+        throw new Error(`${relPath}: docker compose must not pass -p`);
+      }
+      if (text.includes("project_name")) {
+        throw new Error(`${relPath}: must not reference a project name var`);
+      }
+      if (!text.includes("docker compose -f")) {
+        throw new Error(`${relPath}: expected 'docker compose -f <path>'`);
+      }
+    }
+
+    // …and the role defaults must not carry the retired vars either.
+    for (
+      const relPath of [
+        "roles/proxysql/defaults/main.yml",
+        "roles/orchestrator/defaults/main.yml",
+      ]
+    ) {
+      const defaults = await Deno.readTextFile(
+        join(CHECKOUT_ORCHESTRATION_DIR, relPath),
+      );
+      if (defaults.includes("project_name")) {
+        throw new Error(`${relPath}: project name default must be removed`);
+      }
+    }
+  },
+);
+
+test(
   "instance-launch env templates always set metrics retention (no enable/disable gate)",
   async () => {
     const templates = [

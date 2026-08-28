@@ -31,6 +31,13 @@ import type {
 } from "./contracts.ts";
 
 /**
+ * Shared hosting-ingress Docker network — the `hosting-ingress` system
+ * component's allocated `serviceId`, required on the wire whenever a deploy
+ * carries hostings. A bare UUID, not a readable literal.
+ */
+const HOSTING_INGRESS_NETWORK = "00000000-0000-4000-8000-0000000000bb";
+
+/**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
  *
  * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
@@ -830,6 +837,7 @@ test({
             protocol: "tcp",
             ports: [{ published: 8080, target: 8080 }],
           }],
+          hostingIngressNetwork: HOSTING_INGRESS_NETWORK,
           sourceMaterial: [{
             sourceId: "src-1",
             composeServiceName: "web",
@@ -886,7 +894,7 @@ test({
           });
         }
         if (args.includes("ps")) {
-          if (args.some((arg) => arg.startsWith("turbopanel-ingress-"))) {
+          if (args.some((arg) => arg.includes("/ingress/services/"))) {
             return Promise.resolve({
               success: false,
               stdout: "",
@@ -928,6 +936,7 @@ test({
             protocol: "tcp",
             ports: [{ published: 8080, target: 8080 }],
           }],
+          hostingIngressNetwork: HOSTING_INGRESS_NETWORK,
           ingressServices: [{
             serviceId,
             composeServiceName: "web",
@@ -1127,6 +1136,8 @@ test({
             composeServiceName: "web",
             hostnames: ["app.example.test"],
           }],
+          // Network name and compose project are both the ingress serviceId.
+          hostingIngressNetwork: ingressServiceId,
           hostingIngress: {
             serviceId: ingressServiceId,
             composeServiceName: "traefik",
@@ -1143,9 +1154,14 @@ test({
         ),
       ) as { serviceId: string };
       assertEquals(descriptor.serviceId, ingressServiceId);
+      // The shared proxy is brought up by `-f <path>` alone — its compose file
+      // declares `name: <serviceId>` so no `-p` is passed.
       assertEquals(
         calls.some((argv) =>
-          argv.includes("up") && argv.includes("turbopanel-ingress")
+          argv.includes("up") &&
+          argv.some((arg) =>
+            arg.endsWith("/ingress/traefik/docker-compose.yml")
+          )
         ),
         true,
       );
@@ -1186,13 +1202,14 @@ test({
             protocol: "tcp",
             ports: [{ published: 8080, target: 80 }],
           }],
+          hostingIngressNetwork: HOSTING_INGRESS_NETWORK,
         }),
         new Date().toISOString(),
         {
           runDocker: standardFakeRunDocker((args) => {
             if (
               args.includes("ps") &&
-              !args.some((arg) => arg.startsWith("turbopanel-ingress-"))
+              !args.some((arg) => arg.includes("/ingress/services/"))
             ) {
               return { success: true, stdout: psJson, stderr: "", code: 0 };
             }
@@ -1303,6 +1320,7 @@ test({
             protocol: "tcp",
             ports: [{ published: 8080, target: 8080 }],
           }],
+          hostingIngressNetwork: HOSTING_INGRESS_NETWORK,
           ingressServices: [{
             serviceId,
             composeServiceName: "web",
@@ -1321,7 +1339,7 @@ test({
               });
             }
             if (args.includes("ps")) {
-              if (args.some((arg) => arg.startsWith("turbopanel-ingress-"))) {
+              if (args.some((arg) => arg.includes("/ingress/services/"))) {
                 return Promise.reject(new Error("ingress ps exploded"));
               }
               return Promise.resolve({
@@ -1373,6 +1391,7 @@ test({
             protocol: "tcp",
             ports: [{ published: 8080, target: 8080 }],
           }],
+          hostingIngressNetwork: HOSTING_INGRESS_NETWORK,
           ingressServices: [{
             serviceId,
             composeServiceName: "web",
@@ -1384,7 +1403,7 @@ test({
           runDocker: standardFakeRunDocker((args) => {
             if (
               args.includes("ps") &&
-              args.some((arg) => arg.startsWith("turbopanel-ingress-"))
+              args.some((arg) => arg.includes("/ingress/services/"))
             ) {
               return { success: false, stdout: "", stderr: "", code: 1 };
             }
@@ -1427,6 +1446,7 @@ test({
             protocol: "tcp",
             ports: [{ published: 8080, target: 8080 }],
           }],
+          hostingIngressNetwork: HOSTING_INGRESS_NETWORK,
           ingressServices: [{
             serviceId,
             composeServiceName: "web",
@@ -1445,7 +1465,7 @@ test({
               });
             }
             if (args.includes("ps")) {
-              if (args.some((arg) => arg.startsWith("turbopanel-ingress-"))) {
+              if (args.some((arg) => arg.includes("/ingress/services/"))) {
                 return Promise.reject("ingress ps exploded");
               }
               return Promise.resolve({
@@ -1495,6 +1515,7 @@ test({
             protocol: "tcp",
             ports: [{ published: 8443, target: 8443 }],
           }],
+          hostingIngressNetwork: HOSTING_INGRESS_NETWORK,
           tlsMaterial: [{
             tlsId,
             certificatePem,
@@ -1733,6 +1754,7 @@ test({
             protocol: "tcp",
             ports: [{ published: 8080, target: 80 }],
           }],
+          hostingIngressNetwork: HOSTING_INGRESS_NETWORK,
           sourceMaterial: [{
             sourceId: "src-1",
             composeServiceName: "web",

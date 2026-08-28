@@ -28,6 +28,9 @@ import type { ManagedEngineContext, ManagedEngineExec } from "./types.ts";
  */
 const test = Deno.test.bind(Deno);
 
+/** Managed network names are the `network(kind='managed')` row's bare UUID. */
+const MANAGED_NETWORK = "00000000-0000-4000-8000-0000000000ee";
+
 type RecordedExec = { argv: string[]; input?: string };
 
 function recordingExec(): { exec: ManagedEngineExec; calls: RecordedExec[] } {
@@ -196,6 +199,7 @@ test("postgres bootstrapStandby returns already_standby when signal exists", asy
   const boot = await replication.bootstrapStandby(
     {
       managedId: "pg-boot",
+      managedNetwork: MANAGED_NETWORK,
       image: "postgres:18-alpine",
       volumes: [{ name: "vol", target: "/var/lib/postgresql" }],
       stateDir: "/tmp/pg",
@@ -240,6 +244,7 @@ test("postgres bootstrapStandby returns needs_resync without standby signal", as
   const boot = await replication.bootstrapStandby(
     {
       managedId: "pg-boot",
+      managedNetwork: MANAGED_NETWORK,
       image: "postgres:18-alpine",
       volumes: [{ name: "vol", target: "/var/lib/postgresql" }],
       stateDir: "/tmp/pg",
@@ -287,6 +292,7 @@ test("postgres bootstrapStandby seeds empty volume via pg_basebackup", async () 
     const boot = await replication.bootstrapStandby(
       {
         managedId: "pg-boot",
+        managedNetwork: MANAGED_NETWORK,
         image: "postgres:18-alpine",
         volumes: [{ name: "vol", target: "/var/lib/postgresql" }],
         stateDir,
@@ -322,9 +328,15 @@ test("postgres bootstrapStandby seeds empty volume via pg_basebackup", async () 
       standbyReplicationSpec(),
     );
     assertEquals(boot, "seeded");
+    const basebackup = dockerCalls.find((args) =>
+      args.includes("pg_basebackup")
+    );
+    assertEquals(basebackup !== undefined, true);
+    // The bootstrap container must join the organization's managed network
+    // from the context, never a hardcoded platform-wide name.
     assertEquals(
-      dockerCalls.some((args) => args.includes("pg_basebackup")),
-      true,
+      basebackup![basebackup!.indexOf("--network") + 1],
+      MANAGED_NETWORK,
     );
     const envExists = await Deno.stat(`${stateDir}/.basebackup-env`).then(() =>
       false
@@ -349,6 +361,7 @@ test("postgres bootstrapStandby throws when pg_basebackup fails", async () => {
         replication.bootstrapStandby!(
           {
             managedId: "pg-boot",
+            managedNetwork: MANAGED_NETWORK,
             image: "postgres:18-alpine",
             volumes: [{ name: "vol", target: "/var/lib/postgresql" }],
             stateDir,
@@ -702,6 +715,7 @@ test("postgres bootstrapStandby defaults the data root when volumes are empty", 
   const boot = await replication.bootstrapStandby(
     {
       managedId: "pg-boot",
+      managedNetwork: MANAGED_NETWORK,
       image: "postgres:18-alpine",
       volumes: [],
       stateDir: "/tmp/pg",

@@ -23,13 +23,13 @@ import {
 import { ensureDocker as defaultEnsureDocker } from "../../deploy/ensure-docker.ts";
 import {
   ensureHostingIngress as defaultEnsureHostingIngress,
-  HOSTING_INGRESS_PROJECT,
   hostingIngressComposePath,
   inspectHostingIngressContainer as defaultInspectHostingIngressContainer,
 } from "../../deploy/ingress.ts";
 import { ensureManagedIngressNetwork } from "../../managed/networks.ts";
 import {
   inspectOrchestratorContainer,
+  readCurrentOrchestratorManagedNetwork,
   restartOrchestratorStack,
   stopOrchestratorStack,
 } from "../../managed/orchestrator.ts";
@@ -39,6 +39,7 @@ import {
   inspectProxySqlContainer,
   readCurrentProxySqlBindAddresses,
   readCurrentProxySqlListenerPorts,
+  readCurrentProxySqlManagedNetwork,
   readCurrentProxySqlSegmentAttachments,
   restartProxySqlIngress,
   stopProxySqlIngress,
@@ -46,6 +47,7 @@ import {
 import {
   SYSTEM_COMPONENT_CONTRACTS,
   type SystemComponentDescriptor,
+  systemComponentProject,
   type SystemComponentSelfHeal,
   writeSystemComponentDescriptor,
 } from "../../deploy/system-component.ts";
@@ -73,7 +75,10 @@ export type SystemReconcileHandlerDeps = {
   /** Test seam — defaults to {@link defaultEnsureDocker}. */
   ensureDocker?: () => Promise<void>;
   /** Test seam — defaults to {@link defaultEnsureHostingIngress}. */
-  ensureHostingIngress?: (layout: LayoutPaths) => Promise<void>;
+  ensureHostingIngress?: (
+    layout: LayoutPaths,
+    ingressNetwork: string,
+  ) => Promise<void>;
   /**
    * Test seam — defaults to {@link defaultInspectHostingIngressContainer}.
    * Return `undefined` when compose-ps itself failed (omit `containers`).
@@ -101,7 +106,10 @@ type ReconcileOneParams = {
   layout: LayoutPaths;
   run: RunDockerFn;
   ensureDockerFn: () => Promise<void>;
-  ensureHostingIngressFn: (layout: LayoutPaths) => Promise<void>;
+  ensureHostingIngressFn: (
+    layout: LayoutPaths,
+    ingressNetwork: string,
+  ) => Promise<void>;
   inspectHostingIngressFn: (
     layout: LayoutPaths,
   ) => Promise<ObservedContainer>;
@@ -126,10 +134,10 @@ async function restartHostingIngress(
   run: RunDockerFn,
 ): Promise<void> {
   const composePath = hostingIngressComposePath(layout);
+  // No `-p`: the daemon-written compose file declares its own project through
+  // the top-level `name:` key (the hosting-ingress `serviceId`).
   const result = await run([
     "compose",
-    "-p",
-    HOSTING_INGRESS_PROJECT,
     "-f",
     composePath,
     "restart",
@@ -158,8 +166,6 @@ async function stopHostingIngress(
   }
   const result = await run([
     "compose",
-    "-p",
-    HOSTING_INGRESS_PROJECT,
     "-f",
     composePath,
     "stop",
@@ -279,7 +285,7 @@ function observeComponent(
   };
   switch (selfHeal) {
     case "hosting-ingress":
-      return observeHostingIngress(runtime, params);
+      return observeHostingIngress(runtime, params, descriptor);
     case "proxysql":
       return observeProxySql(runtime, descriptor);
     case "orchestrator":
@@ -295,8 +301,10 @@ function observeComponent(
 
 /**
  * Shared stop / present / restart lifecycle for self-healing components.
- * `restart` is omitted when the strategy gates restart on extra local state
- * (Orchestrator only restarts when compose already exists).
+ * `restart` is omitted when the strategy gates restart on extra local state —
+ * both ProxySQL and Orchestrator only restart once their `present` step has
+ * confirmed a daemon-written compose (and managed network) on disk, so they
+ * own the restart decision inside `present` instead.
  */
 async function runWhenPresentOrStop(
   runtime: HealRuntime,
@@ -324,11 +332,16 @@ async function runWhenPresentOrStop(
 async function observeHostingIngress(
   runtime: HealRuntime,
   params: ReconcileOneParams,
+  descriptor: SystemComponentDescriptor,
 ): Promise<ObservedContainer> {
   const { layout, run } = runtime;
+  // The shared ingress network *is* the hosting-ingress component's allocated
+  // serviceId — the descriptor was persisted just above, so it is in hand
+  // here rather than reconstructed from a literal.
+  const ingressNetwork = systemComponentProject(descriptor);
   await runWhenPresentOrStop(runtime, {
     stop: () => stopHostingIngress(layout, run),
-    present: () => params.ensureHostingIngressFn(layout),
+    present: () => params.ensureHostingIngressFn(layout, ingressNetwork),
     restart: () => restartHostingIngress(layout, run),
   });
   return params.inspectHostingIngressFn(layout);
@@ -341,8 +354,8 @@ async function observeProxySql(
   const { layout, run } = runtime;
   await runWhenPresentOrStop(runtime, {
     stop: () => stopProxySqlIngress(layout, run),
-    present: () => ensurePresentProxySql(layout, descriptor, run),
-    restart: () => restartProxySqlIngress(layout, run),
+    present: () =>
+      ensurePresentProxySql(layout, descriptor, run, runtime.action),
   });
   return inspectProxySqlContainer(layout, descriptor, { runDocker: run });
 }
@@ -351,8 +364,21 @@ async function ensurePresentProxySql(
   layout: LayoutPaths,
   descriptor: SystemComponentDescriptor,
   run: RunDockerFn,
+  action: SystemReconcilePayload["action"],
 ): Promise<void> {
-  await ensureManagedIngressNetwork(run);
+  // The organization's managed network name lives only on the compose file:
+  // self-heal has no fresh `managed.ingress.reconcile` payload to read it
+  // from. No compose file means the frontend was never reconciled here, so
+  // there is nothing to heal — never guess a network name.
+  const managedNetwork = await readCurrentProxySqlManagedNetwork(layout);
+  if (managedNetwork === null) {
+    logInfo(
+      "commands",
+      "system.reconcile proxysql self-heal skipped: no managed network on disk",
+    );
+    return;
+  }
+  await ensureManagedIngressNetwork(managedNetwork, run);
   // Preserve whatever binds the last `managed.ingress.reconcile` desired
   // (or `[]`/private when never published) — self-heal has no fresh
   // desired-state payload and must never widen exposure by guessing
@@ -379,7 +405,13 @@ async function ensurePresentProxySql(
     preservedBindAddresses,
     preservedSegments,
     preservedListenerPorts,
+    managedNetwork,
   );
+  // Restart only once the compose file we just healed is known to exist —
+  // the skip above means there is no stack here to restart.
+  if (action === "restart") {
+    await restartProxySqlIngress(layout, run);
+  }
 }
 
 async function observeOrchestrator(
@@ -399,7 +431,6 @@ async function ensurePresentOrchestrator(
   run: RunDockerFn,
   action: SystemReconcilePayload["action"],
 ): Promise<void> {
-  await ensureManagedIngressNetwork(run);
   try {
     await Deno.stat(orchestratorComposePath(layout));
   } catch (err) {
@@ -408,6 +439,18 @@ async function ensurePresentOrchestrator(
     }
     throw err;
   }
+  // Same reasoning as ProxySQL: the managed network name survives only on the
+  // daemon-written compose file, so recover it rather than guessing. A file we
+  // cannot parse means we skip the ensure instead of creating a wrong network.
+  const managedNetwork = await readCurrentOrchestratorManagedNetwork(layout);
+  if (managedNetwork === null) {
+    logInfo(
+      "commands",
+      "system.reconcile orchestrator self-heal skipped: no managed network on disk",
+    );
+    return;
+  }
+  await ensureManagedIngressNetwork(managedNetwork, run);
   if (action === "restart") {
     await restartOrchestratorStack(layout, run);
   }

@@ -33,6 +33,13 @@ import type {
 } from "./contracts.ts";
 
 /**
+ * Shared hosting-ingress Docker network — the `hosting-ingress` system
+ * component's allocated `serviceId`, required on the wire whenever a deploy
+ * carries hostings. A bare UUID, not a readable literal.
+ */
+const HOSTING_INGRESS_NETWORK = "00000000-0000-4000-8000-0000000000bb";
+
+/**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
  *
  * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
@@ -532,6 +539,7 @@ test({
           replicaCounts: { web: 2 },
           hostings: [],
           managedNetworkServices: ["web"],
+          managedNetwork: "00000000-0000-4000-8000-0000000000ee",
           noCache: true,
         },
         new Date().toISOString(),
@@ -543,7 +551,10 @@ test({
       assertEquals(runtimeStat.mode! & 0o777, 0o640);
       const published = await Deno.readTextFile(runtimePath);
       assertEquals(published.includes("image: nginx:alpine"), true);
-      assertEquals(published.includes("turbopanel-managed"), true);
+      assertEquals(
+        published.includes("00000000-0000-4000-8000-0000000000ee"),
+        true,
+      );
       await assertRejects(
         () => Deno.stat(join(deploymentDir, "docker-compose.old.yml")),
         Deno.errors.NotFound,
@@ -631,6 +642,7 @@ test({
           }],
           hostings: [],
           managedNetworkServices: ["web"],
+          managedNetwork: "00000000-0000-4000-8000-0000000000ee",
         },
         new Date().toISOString(),
         { runDocker: fakeRunDocker, ...hermeticDeployDeps },
@@ -813,6 +825,7 @@ test({
               }],
               hostings: [],
               managedNetworkServices: ["web"],
+              managedNetwork: "00000000-0000-4000-8000-0000000000ee",
             },
             new Date().toISOString(),
             { runDocker: failingRunDocker, ...hermeticDeployDeps },
@@ -1384,7 +1397,7 @@ test({
         });
       }
       if (args.includes("ps")) {
-        if (args.some((arg) => arg.startsWith("turbopanel-ingress-"))) {
+        if (args.some((arg) => arg.includes("/ingress/services/"))) {
           return Promise.resolve({
             success: true,
             stdout: ingressPsJson,
@@ -1428,6 +1441,7 @@ test({
             protocol: "tcp",
             ports: [{ published: 8080, target: 80 }],
           }],
+          hostingIngressNetwork: HOSTING_INGRESS_NETWORK,
           ingressServices: [{
             serviceId,
             composeServiceName: "web",
@@ -1449,8 +1463,8 @@ test({
       // `runDocker` here starts a real ingress container on the test host.
       assertEquals(
         dockerCalls.some((args) =>
-          args.includes("up") &&
-          args.includes(`turbopanel-ingress-${serviceId}`)
+          // The per-service Traefik project is the bare serviceId.
+          args.includes("up") && args.includes(serviceId)
         ),
         true,
       );
@@ -1769,6 +1783,7 @@ function mixedLanePayload(): EnvironmentDeployPayload {
         hostnames: ["web.example.test"],
       },
     ],
+    hostingIngressNetwork: HOSTING_INGRESS_NETWORK,
     nativeAppServices: [{
       composeServiceName: "web",
       serviceId: "svcweb",

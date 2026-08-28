@@ -1,14 +1,19 @@
-import { assertEquals, assertRejects } from "@std/assert";
+import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import type { DockerCliResult } from "../../deploy/docker-cli.ts";
 import {
+  ORCHESTRATOR_COMPOSE_SERVICE_NAME,
   readSystemComponentDescriptor,
   SYSTEM_HOSTING_INGRESS_COMPONENT,
+  SYSTEM_MANAGED_HA_COMPONENT,
   SYSTEM_MANAGED_INGRESS_COMPONENT,
   type SystemComponentDescriptor,
   writeSystemComponentDescriptor,
 } from "../../deploy/system-component.ts";
+import { orchestratorCompose } from "../../managed/orchestrator.ts";
 import { ensureProxySqlIngress } from "../../managed/proxysql.ts";
 import {
+  orchestratorComposePath,
+  orchestratorConfigDir,
   proxysqlComposePath,
   proxysqlConfigDir,
   proxysqlMonitorCnfPath,
@@ -21,6 +26,7 @@ import {
 import type {
   ManagedIngressReconcilePayload,
   SystemComponentDescriptorPayload,
+  SystemReconcilePayload,
 } from "./contracts.ts";
 import { handleManagedIngressReconcile } from "./managed-ingress-reconcile.ts";
 import { handleSystemReconcile } from "./system-reconcile.ts";
@@ -32,6 +38,9 @@ import { handleSystemReconcile } from "./system-reconcile.ts";
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
 const test = Deno.test.bind(Deno);
+
+/** Managed network names are the `network(kind='managed')` row's bare UUID. */
+const MANAGED_NETWORK = "00000000-0000-4000-8000-0000000000ee";
 
 const SERVICE_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 const DATABASE_SERVICE_ID = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
@@ -254,10 +263,16 @@ test({
         assertEquals(ensureDockerCalls, 1);
         assertEquals(ensureIngressCalls, 0);
         assertEquals(result.containers, []);
+        // The compose file's own `name:` key carries the project now, so the
+        // invocation is addressed by `-f <path>` with no `-p` at all.
         const stopCall = dockerArgs.find((args) =>
-          args.includes("stop") && args.includes("turbopanel-ingress")
+          args.includes("stop") &&
+          args.some((arg) =>
+            arg.endsWith("/ingress/traefik/docker-compose.yml")
+          )
         );
         assertEquals(stopCall !== undefined, true);
+        assertEquals(stopCall?.includes("-p"), false);
       });
     });
   },
@@ -619,29 +634,296 @@ function fakeRunOk(): (args: string[]) => Promise<DockerCliResult> {
 
 test({
   name:
-    "handleSystemReconcile proxysql self-heal never widens bind to public when nothing was ever published",
+    "handleSystemReconcile proxysql self-heal skips entirely when no compose file exists",
   permissions: { env: true, read: true, write: true },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       await withLayoutEnv(fixture, async () => {
         const layout = resolveLayout(Deno.env.toObject());
 
+        const dockerArgs: string[][] = [];
         await handleSystemReconcile(
           proxysqlPayload(),
           new Date().toISOString(),
           {
             ensureDocker: () => Promise.resolve(),
-            runDocker: fakeRunOk(),
+            runDocker: (args: string[]) => {
+              dockerArgs.push([...args]);
+              return Promise.resolve(
+                {
+                  success: true,
+                  stdout: "",
+                  stderr: "",
+                  code: 0,
+                } satisfies DockerCliResult,
+              );
+            },
             inspectSystemStackContainer: () => Promise.resolve(null),
           },
         );
 
+        // `managed.ingress.reconcile` never ran here, so the organization's
+        // managed network name is unknown — never guess one, and never write
+        // a compose file (which would also have to guess a bind address).
+        assertEquals(
+          dockerArgs.some((args) => args[0] === "network"),
+          false,
+        );
+        await assertRejects(
+          () => Deno.readTextFile(proxysqlComposePath(layout)),
+          Deno.errors.NotFound,
+        );
+      });
+    });
+  },
+});
+
+test({
+  name:
+    "handleSystemReconcile proxysql action=restart skips restart when no compose file exists",
+  permissions: { env: true, read: true, write: true },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await withLayoutEnv(fixture, async () => {
+        const layout = resolveLayout(Deno.env.toObject());
+
+        const dockerArgs: string[][] = [];
+        await handleSystemReconcile(
+          { ...proxysqlPayload(), action: "restart" },
+          new Date().toISOString(),
+          {
+            ensureDocker: () => Promise.resolve(),
+            runDocker: (args: string[]) => {
+              dockerArgs.push([...args]);
+              return Promise.resolve(
+                {
+                  success: true,
+                  stdout: "",
+                  stderr: "",
+                  code: 0,
+                } satisfies DockerCliResult,
+              );
+            },
+            inspectSystemStackContainer: () => Promise.resolve(null),
+          },
+        );
+
+        // Self-heal decided there is nothing to heal, so `restart` must not
+        // reach a compose project that was never written here.
+        assertEquals(
+          dockerArgs.some((args) => args.includes("restart")),
+          false,
+        );
+        assertEquals(
+          dockerArgs.some((args) => args[0] === "network"),
+          false,
+        );
+        await assertRejects(
+          () => Deno.readTextFile(proxysqlComposePath(layout)),
+          Deno.errors.NotFound,
+        );
+      });
+    });
+  },
+});
+
+test({
+  name:
+    "handleSystemReconcile proxysql self-heal re-ensures the managed network recovered from compose",
+  permissions: { env: true, read: true, write: true },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await withLayoutEnv(fixture, async () => {
+        const layout = resolveLayout(Deno.env.toObject());
+        const descriptor: SystemComponentDescriptor = {
+          component: SYSTEM_MANAGED_INGRESS_COMPONENT,
+          serviceId: PROXYSQL_SERVICE_ID,
+          composeServiceName: "proxysql",
+          containerName: `${PROXYSQL_SERVICE_ID}-in`,
+          role: "ingress",
+        };
+        await ensureProxySqlIngress(
+          layout,
+          descriptor,
+          fakeRunOk(),
+          [],
+          [],
+          null,
+          MANAGED_NETWORK,
+        );
+
+        const dockerArgs: string[][] = [];
+        await handleSystemReconcile(
+          proxysqlPayload(),
+          new Date().toISOString(),
+          {
+            ensureDocker: () => Promise.resolve(),
+            runDocker: (args: string[]) => {
+              dockerArgs.push([...args]);
+              return Promise.resolve(
+                {
+                  success: true,
+                  stdout: "",
+                  stderr: "",
+                  code: 0,
+                } satisfies DockerCliResult,
+              );
+            },
+            inspectSystemStackContainer: () => Promise.resolve(null),
+          },
+        );
+
+        // A pruned network is recreated under the name recovered from disk.
+        assertEquals(
+          dockerArgs.some((args) =>
+            args[0] === "network" && args[1] === "inspect" &&
+            args[2] === MANAGED_NETWORK
+          ),
+          true,
+        );
         const composeText = await Deno.readTextFile(
           proxysqlComposePath(layout),
         );
-        // No prior explicit bind exists — self-heal must not guess `0.0.0.0`.
+        // The rewrite round-trips the same network, and still never guesses a
+        // publish bind.
+        assertStringIncludes(composeText, `  ${MANAGED_NETWORK}:`);
         assertEquals(composeText.includes(":5432:5432"), false);
         assertEquals(composeText.includes(":3306:3306"), false);
+      });
+    });
+  },
+});
+
+const HA_SERVICE_ID = "cccccccc-dddd-eeee-ffff-000000000000";
+
+function orchestratorPayload(
+  action: "reconcile" | "restart" = "reconcile",
+): SystemReconcilePayload {
+  return {
+    environmentId: ENVIRONMENT_ID,
+    action,
+    components: [
+      {
+        component: SYSTEM_MANAGED_HA_COMPONENT,
+        serviceId: HA_SERVICE_ID,
+        composeServiceName: ORCHESTRATOR_COMPOSE_SERVICE_NAME,
+        containerName: `${HA_SERVICE_ID}-ha`,
+        role: "turbopanel",
+        desired: "present",
+      },
+    ],
+  };
+}
+
+test({
+  name:
+    "handleSystemReconcile orchestrator self-heal skips the network ensure when no compose file exists",
+  permissions: { env: true, read: true, write: true },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await withLayoutEnv(fixture, async () => {
+        const dockerArgs: string[][] = [];
+        await handleSystemReconcile(
+          orchestratorPayload(),
+          new Date().toISOString(),
+          {
+            ensureDocker: () => Promise.resolve(),
+            runDocker: (args: string[]) => {
+              dockerArgs.push([...args]);
+              return Promise.resolve(
+                {
+                  success: true,
+                  stdout: "",
+                  stderr: "",
+                  code: 0,
+                } satisfies DockerCliResult,
+              );
+            },
+            inspectSystemStackContainer: () => Promise.resolve(null),
+          },
+        );
+
+        // `managed.ha.reconcile` never ran here — the managed network name is
+        // unknown, so never create one under a guessed name.
+        assertEquals(
+          dockerArgs.some((args) => args[0] === "network"),
+          false,
+        );
+      });
+    });
+  },
+});
+
+test({
+  name:
+    "handleSystemReconcile orchestrator self-heal re-ensures the managed network recovered from compose",
+  permissions: { env: true, read: true, write: true },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await withLayoutEnv(fixture, async () => {
+        const layout = resolveLayout(Deno.env.toObject());
+        await Deno.mkdir(orchestratorConfigDir(layout), {
+          recursive: true,
+          mode: 0o750,
+        });
+        await Deno.writeTextFile(
+          orchestratorComposePath(layout),
+          orchestratorCompose(
+            {
+              component: SYSTEM_MANAGED_HA_COMPONENT,
+              serviceId: HA_SERVICE_ID,
+              composeServiceName: ORCHESTRATOR_COMPOSE_SERVICE_NAME,
+              containerName: `${HA_SERVICE_ID}-ha`,
+              role: "turbopanel",
+            },
+            {
+              nodeId: "00000000-0000-4000-8000-0000000000ab",
+              advertiseAddress: "203.0.113.10",
+              httpPort: 33001,
+              raftPort: 33002,
+              peers: [],
+            },
+            MANAGED_NETWORK,
+          ),
+          { mode: 0o640 },
+        );
+
+        const dockerArgs: string[][] = [];
+        await handleSystemReconcile(
+          orchestratorPayload("restart"),
+          new Date().toISOString(),
+          {
+            ensureDocker: () => Promise.resolve(),
+            runDocker: (args: string[]) => {
+              dockerArgs.push([...args]);
+              return Promise.resolve(
+                {
+                  success: true,
+                  stdout: "",
+                  stderr: "",
+                  code: 0,
+                } satisfies DockerCliResult,
+              );
+            },
+            inspectSystemStackContainer: () => Promise.resolve(null),
+          },
+        );
+
+        assertEquals(
+          dockerArgs.some((args) =>
+            args[0] === "network" && args[1] === "inspect" &&
+            args[2] === MANAGED_NETWORK
+          ),
+          true,
+        );
+        // The network ensure runs before the restart it protects.
+        const networkIndex = dockerArgs.findIndex((args) =>
+          args[0] === "network"
+        );
+        const restartIndex = dockerArgs.findIndex((args) =>
+          args.includes("restart")
+        );
+        assertEquals(networkIndex >= 0 && networkIndex < restartIndex, true);
       });
     });
   },
@@ -670,6 +952,9 @@ test({
           descriptor,
           fakeRunOk(),
           ["203.0.113.9"],
+          [],
+          null,
+          MANAGED_NETWORK,
         );
 
         await handleSystemReconcile(
@@ -722,6 +1007,7 @@ async function reconcileWithTwoSegments(bindAddress?: string): Promise<void> {
 
   const payload: ManagedIngressReconcilePayload = {
     serverId: "11111111-1111-4111-8111-111111111111",
+    managedNetwork: "00000000-0000-4000-8000-0000000000ee",
     orgTlsMaterial: {
       certificatePem:
         "-----BEGIN CERTIFICATE-----\nLEAF\n-----END CERTIFICATE-----\n",
@@ -866,7 +1152,15 @@ test({
           containerName: `${PROXYSQL_SERVICE_ID}-in`,
           role: "ingress",
         };
-        await ensureProxySqlIngress(layout, descriptor, fakeRunOk(), []);
+        await ensureProxySqlIngress(
+          layout,
+          descriptor,
+          fakeRunOk(),
+          [],
+          [],
+          null,
+          MANAGED_NETWORK,
+        );
 
         const dockerArgs: string[][] = [];
         await handleSystemReconcile(
@@ -904,9 +1198,11 @@ test({
         );
 
         const restartCall = dockerArgs.find((args) =>
-          args.includes("restart") && args.includes("turbopanel-proxysql")
+          args.includes("restart") &&
+          args.some((arg) => arg.endsWith("/proxysql/docker-compose.yml"))
         );
         assertEquals(restartCall !== undefined, true);
+        assertEquals(restartCall?.includes("-p"), false);
       });
     });
   },
@@ -962,9 +1258,13 @@ test({
         );
 
         const restartCall = dockerArgs.find((args) =>
-          args.includes("restart") && args.includes("turbopanel-ingress")
+          args.includes("restart") &&
+          args.some((arg) =>
+            arg.endsWith("/ingress/traefik/docker-compose.yml")
+          )
         );
         assertEquals(restartCall !== undefined, true);
+        assertEquals(restartCall?.includes("-p"), false);
         assertEquals(result.containers?.[0]?.containerId, "cid-restart");
       });
     });
@@ -1082,7 +1382,15 @@ test({
           containerName: `${PROXYSQL_SERVICE_ID}-in`,
           role: "ingress",
         };
-        await ensureProxySqlIngress(layout, descriptor, fakeRunOk(), []);
+        await ensureProxySqlIngress(
+          layout,
+          descriptor,
+          fakeRunOk(),
+          [],
+          [],
+          null,
+          MANAGED_NETWORK,
+        );
 
         const dockerArgs: string[][] = [];
         const result = await handleSystemReconcile(
@@ -1112,9 +1420,11 @@ test({
         );
 
         const stopCall = dockerArgs.find((args) =>
-          args.includes("stop") && args.includes("turbopanel-proxysql")
+          args.includes("stop") &&
+          args.some((arg) => arg.endsWith("/proxysql/docker-compose.yml"))
         );
         assertEquals(stopCall !== undefined, true);
+        assertEquals(stopCall?.includes("-p"), false);
         assertEquals(result.containers, []);
       });
     });

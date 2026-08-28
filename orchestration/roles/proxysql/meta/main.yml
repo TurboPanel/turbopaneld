@@ -6,7 +6,7 @@ galaxy_info:
   description: >
     Host prerequisites for the shared ProxySQL managed-ingress stack
     (config dirs, admin credentials, static base proxysql.cnf, wait-ready,
-    turbopanel-proxysql-stack systemd unit, turbopanel-managed network). Does
+    turbopanel-proxysql-stack systemd unit). Does
     not write docker-compose.yml — the daemon owns that file under
     configDir/proxysql after managed.ingress.reconcile.
   min_ansible_version: "2.20"

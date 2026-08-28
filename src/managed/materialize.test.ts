@@ -39,6 +39,7 @@ function basePayload(
     engine: "postgres",
     projectName: "tp-managed-pg",
     containerName: "01936b3e-aaaa-bbbb-cccc-123456789abc-1",
+    managedNetwork: "00000000-0000-4000-8000-0000000000ee",
     image: "docker.io/library/postgres:18-alpine",
     containerPort: 5432,
     composeYaml: "services:\n  postgres:\n    image: postgres:18-alpine\n",

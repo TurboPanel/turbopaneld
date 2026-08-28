@@ -1,15 +1,20 @@
 /**
  * Shared ProxySQL managed ingress — compose + config generation.
  *
- * One per-server `turbopanel-proxysql` compose project terminates TLS on
- * `15432` / `13306` and routes to managed engine members on
- * {@link MANAGED_INGRESS_NETWORK}. Runtime users/servers/rules are applied
+ * One per-server compose project — named by the `managed-ingress` system
+ * component's allocated `serviceId`, declared in the compose file's own
+ * top-level `name:` key — terminates TLS on
+ * `15432` / `13306` and routes to managed engine members on the
+ * organization's managed Docker network. Runtime users/servers/rules are applied
  * through the admin interface; the on-disk `proxysql.cnf` is the durable
  * cold-start source of truth.
  */
 
 import { join } from "@std/path";
-import { assertValidBindAddress } from "../deploy/ingress.ts";
+import {
+  assertSafeComposeProjectName,
+  assertValidBindAddress,
+} from "../deploy/ingress.ts";
 import {
   LABEL_ROLE,
   LABEL_ROLE_INGRESS,
@@ -34,11 +39,10 @@ import type { EnvironmentDeployContainer } from "../instance/commands/contracts.
 import { logInfo } from "../logger.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { reservedManagedIngressAddress } from "./ingress-cidr.ts";
-import { MANAGED_INGRESS_NETWORK } from "./networks.ts";
 import {
-  PROXYSQL_PROJECT,
   proxysqlComposePath,
   proxysqlConfigDir,
+  proxysqlProject,
 } from "./paths.ts";
 
 /**
@@ -88,8 +92,8 @@ function resolveListenerPorts(
 /**
  * ProxySQL's listen address *inside its own container network namespace* —
  * always all-interfaces so both a host publish (compose `ports:`) and
- * sibling containers on {@link MANAGED_INGRESS_NETWORK} (bindings with no
- * host publish at all) can reach it. This is never the same knob as
+ * sibling containers on the organization's managed Docker network (bindings
+ * with no host publish at all) can reach it. This is never the same knob as
  * {@link ProxySqlDesiredState.bindAddresses}, which only decides whether/where
  * compose *publishes* that already-listening port to the host.
  */
@@ -186,7 +190,8 @@ export type ProxySqlDesiredState = {
   /**
    * Every host/interface the shared ProxySQL compose project **publishes** its
    * client listeners on — `[]` means "publish nothing" (frontend stays
-   * reachable only via {@link MANAGED_INGRESS_NETWORK}, never the host).
+   * reachable only via the organization's managed Docker network, never the
+   * host).
    *
    * More than one entry when the instance resolved distinct interfaces for the
    * enabled access scopes (a datacenter private IP *and* a TurboFabric `tp0`
@@ -333,6 +338,42 @@ export function readPublishedBindAddressesFromCompose(
     if (!addresses.includes(mapping.host)) addresses.push(mapping.host);
   }
   return addresses;
+}
+
+const TOP_LEVEL_NETWORKS_HEADER = "networks:";
+const TOP_LEVEL_NETWORK_LINE_PREFIX = "  ";
+
+/**
+ * Recover the organization's managed Docker network name from an on-disk
+ * `docker-compose.yml` produced by {@link proxysqlCompose}. The self-heal path
+ * (`system.reconcile` → `proxysql`) has no fresh `managed.ingress.reconcile`
+ * payload in hand, so the name it must ensure/re-render exists only on disk.
+ *
+ * Reads the **top-level** `networks:` block (a column-0 header, distinct from
+ * the 4-space-indented service-level {@link SERVICE_NETWORKS_HEADER}) and
+ * returns its first entry: {@link renderProxySqlTopLevelNetworks} always
+ * renders the managed network before any `tpn_*` segment attachment. Returns
+ * `null` for compose text it cannot confidently parse, mirroring
+ * {@link readPublishedBindAddressesFromCompose}.
+ */
+export function readManagedNetworkFromCompose(
+  composeText: string,
+): string | null {
+  const lines = composeText.split("\n");
+  const start = lines.indexOf(TOP_LEVEL_NETWORKS_HEADER);
+  if (start === -1) return null;
+
+  for (let index = start + 1; index < lines.length; index++) {
+    const line = lines[index]!;
+    if (line.trim().length === 0) break;
+    if (!line.startsWith(TOP_LEVEL_NETWORK_LINE_PREFIX)) break;
+    const body = line.slice(TOP_LEVEL_NETWORK_LINE_PREFIX.length);
+    if (body.startsWith(" ")) continue;
+    const colon = body.indexOf(":");
+    if (colon <= 0) return null;
+    return body.slice(0, colon);
+  }
+  return null;
 }
 
 /**
@@ -554,7 +595,8 @@ function pendingAttachmentNameFromNetworkLine(body: string): string | null {
   const colon = body.indexOf(":");
   if (colon <= 0) return null;
   const name = body.slice(0, colon);
-  if (name === MANAGED_INGRESS_NETWORK) return null;
+  // The managed network line renders inline (`name: {}`), so "nothing after
+  // the colon" already excludes it — no name comparison needed.
   if (body.slice(colon + 1).trim().length === 0) return name;
   return null;
 }
@@ -599,8 +641,9 @@ export function readSegmentAttachmentsFromCompose(
 
 function renderProxySqlServiceNetworks(
   attachments: ReadonlyArray<ProxySqlSegmentAttachment>,
+  managedNetwork: string,
 ): string[] {
-  const lines = [`      ${MANAGED_INGRESS_NETWORK}: {}`];
+  const lines = [`      ${managedNetwork}: {}`];
   for (const row of attachments) {
     lines.push(
       `      ${row.name}:`,
@@ -612,45 +655,49 @@ function renderProxySqlServiceNetworks(
 
 function renderProxySqlTopLevelNetworks(
   attachments: ReadonlyArray<ProxySqlSegmentAttachment>,
+  managedNetwork: string,
 ): string[] {
   return [
-    `  ${MANAGED_INGRESS_NETWORK}:`,
+    `  ${managedNetwork}:`,
     "    external: true",
     ...attachments.flatMap((row) => [`  ${row.name}:`, "    external: true"]),
   ];
 }
 
 /**
- * Compose document for the shared ProxySQL project
- * ({@link PROXYSQL_PROJECT}).
+ * Compose document for the shared ProxySQL project.
  *
  * When `identity` is provided, `container_name` / `x-turbopanel` use the
- * instance-allocated managed-ingress name (`<serviceId>-in`). Distinction
- * from tenant Traefik (same suffix) is the compose project
- * (`turbopanel-proxysql`) plus the `com.turbopanel.system.component`
- * label — not the suffix. Bare-uuid names remain for system-stack rows
- * (`database` / `queue` / `analytics`).
+ * instance-allocated managed-ingress name (`<serviceId>-in`), and the document
+ * declares `name: <serviceId>` so `docker compose -f <path> …` resolves the
+ * project without `-p` — which is what lets the Ansible stack unit stop
+ * templating a project name it cannot know at converge time. Distinction from
+ * tenant Traefik (same container suffix) is that compose project plus the
+ * `com.turbopanel.system.component` label — not the suffix. Bare-uuid names
+ * remain for system-stack rows (`database` / `queue` / `analytics`).
  *
  * `bindAddresses` controls only the **host publish** of the client
  * listeners — `[]` (the safe default) omits those `ports:` entries
  * entirely, so the frontend is reachable exclusively via
- * {@link MANAGED_INGRESS_NETWORK} (co-located compose services with a
- * binding) and never from the host or the public internet. Pass the addresses
+ * the organization's managed Docker network (co-located compose services with
+ * a binding) and never from the host or the public internet. Pass the addresses
  * resolved from enabled cluster exposure to additionally publish on each of
  * them; both protocol listeners are published per address. The admin port
  * always publishes to `127.0.0.1` only, regardless.
  */
 export function proxysqlCompose(
-  identity?: SystemComponentDescriptor | null,
-  bindAddresses: readonly string[] = [],
-  segments: ReadonlyArray<{ name: string; subnet: string }> = [],
-  listenerPorts?: ProxySqlListenerPorts | null,
+  identity: SystemComponentDescriptor | null | undefined,
+  bindAddresses: readonly string[],
+  segments: ReadonlyArray<{ name: string; subnet: string }>,
+  listenerPorts: ProxySqlListenerPorts | null | undefined,
+  managedNetwork: string,
 ): string {
   return proxysqlComposeWithAttachments(
     identity,
     bindAddresses,
     segmentAttachmentsFromDesired(segments),
     listenerPorts,
+    managedNetwork,
   );
 }
 
@@ -660,10 +707,11 @@ export function proxysqlCompose(
  * back out of the previous compose file, where the source subnet is gone.
  */
 export function proxysqlComposeWithAttachments(
-  identity?: SystemComponentDescriptor | null,
-  bindAddresses: readonly string[] = [],
-  attachments: ReadonlyArray<ProxySqlSegmentAttachment> = [],
-  listenerPorts?: ProxySqlListenerPorts | null,
+  identity: SystemComponentDescriptor | null | undefined,
+  bindAddresses: readonly string[],
+  attachments: ReadonlyArray<ProxySqlSegmentAttachment>,
+  listenerPorts: ProxySqlListenerPorts | null | undefined,
+  managedNetwork: string,
 ): string {
   const binds: string[] = [];
   for (const address of bindAddresses) {
@@ -671,6 +719,10 @@ export function proxysqlComposeWithAttachments(
     if (!binds.includes(address)) binds.push(address);
   }
   const ports = resolveListenerPorts(listenerPorts);
+
+  if (identity !== undefined && identity !== null) {
+    assertSafeComposeProjectName(proxysqlProject(identity.serviceId));
+  }
 
   const identityLines = identity === undefined || identity === null ? [] : [
     `    container_name: ${identity.containerName}`,
@@ -699,12 +751,21 @@ export function proxysqlComposeWithAttachments(
   ];
 
   const uniqueAttachments = uniqueAttachmentsByName(attachments);
-  const serviceNetworkLines = renderProxySqlServiceNetworks(uniqueAttachments);
+  const serviceNetworkLines = renderProxySqlServiceNetworks(
+    uniqueAttachments,
+    managedNetwork,
+  );
   const topLevelNetworkLines = renderProxySqlTopLevelNetworks(
     uniqueAttachments,
+    managedNetwork,
   );
 
+  const nameLines = identity === undefined || identity === null
+    ? []
+    : [`name: ${proxysqlProject(identity.serviceId)}`, ""];
+
   const lines = [
+    ...nameLines,
     "services:",
     `  ${PROXYSQL_COMPOSE_SERVICE_NAME}:`,
     `    image: ${PROXYSQL_IMAGE}`,
@@ -1344,8 +1405,6 @@ export async function inspectProxySqlContainer(
 
     const result = await run([
       "compose",
-      "-p",
-      PROXYSQL_PROJECT,
       "-f",
       composePath,
       "ps",
@@ -1398,10 +1457,11 @@ export async function inspectProxySqlContainer(
 export async function ensureProxySqlIngress(
   layout: LayoutPaths,
   descriptor: SystemComponentDescriptor,
-  run: RunDockerFn = defaultRunDocker,
-  bindAddresses: readonly string[] = [],
-  segmentAttachments: ReadonlyArray<ProxySqlSegmentAttachment> = [],
-  listenerPorts?: ProxySqlListenerPorts | null,
+  run: RunDockerFn,
+  bindAddresses: readonly string[],
+  segmentAttachments: ReadonlyArray<ProxySqlSegmentAttachment>,
+  listenerPorts: ProxySqlListenerPorts | null | undefined,
+  managedNetwork: string,
 ): Promise<void> {
   const composePath = proxysqlComposePath(layout);
   await Deno.mkdir(proxysqlConfigDir(layout), { recursive: true, mode: 0o750 });
@@ -1412,13 +1472,12 @@ export async function ensureProxySqlIngress(
       bindAddresses,
       segmentAttachments,
       listenerPorts,
+      managedNetwork,
     ),
     { mode: 0o640 },
   );
   const up = await run([
     "compose",
-    "-p",
-    PROXYSQL_PROJECT,
     "-f",
     composePath,
     "up",
@@ -1484,6 +1543,24 @@ export async function readCurrentProxySqlSegmentAttachments(
   }
 }
 
+/**
+ * Best-effort read of the organization's managed Docker network name already
+ * rendered into the on-disk compose file (`null` when absent / unparseable).
+ * See {@link readManagedNetworkFromCompose} for why the self-heal path must
+ * recover it from disk rather than defaulting.
+ */
+export async function readCurrentProxySqlManagedNetwork(
+  layout: LayoutPaths,
+): Promise<string | null> {
+  try {
+    const text = await Deno.readTextFile(proxysqlComposePath(layout));
+    return readManagedNetworkFromCompose(text);
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return null;
+    throw err;
+  }
+}
+
 /** Stop the shared ProxySQL compose project without removing compose files. */
 export async function stopProxySqlIngress(
   layout: LayoutPaths,
@@ -1493,8 +1570,6 @@ export async function stopProxySqlIngress(
   if (!(await pathExists(composePath))) return;
   const result = await run([
     "compose",
-    "-p",
-    PROXYSQL_PROJECT,
     "-f",
     composePath,
     "stop",
@@ -1512,8 +1587,6 @@ export async function restartProxySqlIngress(
   const composePath = proxysqlComposePath(layout);
   const result = await run([
     "compose",
-    "-p",
-    PROXYSQL_PROJECT,
     "-f",
     composePath,
     "restart",

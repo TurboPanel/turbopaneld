@@ -502,7 +502,8 @@ test({
         new Date().toISOString(),
         {
           runDocker: (args) => {
-            const ingressProject = `turbopanel-ingress-${serviceId}`;
+            // The per-service Traefik project is the bare serviceId.
+            const ingressProject = serviceId;
             if (args.includes(ingressProject) && args.includes("stop")) {
               return Promise.resolve({
                 success: false,

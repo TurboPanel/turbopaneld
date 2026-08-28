@@ -14,6 +14,16 @@ import {
  */
 const test = Deno.test.bind(Deno);
 
+/** Managed network names are the `network(kind='managed')` row's bare UUID. */
+const MANAGED_NETWORK = "00000000-0000-4000-8000-0000000000ee";
+
+/**
+ * The shared hosting-ingress network is the `hosting-ingress` system
+ * component's allocated `serviceId` — a bare UUID off the payload, never a
+ * readable literal reconstructed in the daemon.
+ */
+const HOSTING_INGRESS_NETWORK = "00000000-0000-4000-8000-0000000000bb";
+
 function resolvedFromServices(
   services: Record<string, Record<string, unknown>>,
 ): ResolvedComposeModel {
@@ -44,6 +54,7 @@ const payload: EnvironmentDeployPayload = {
     pathPrefix: "/api",
     targetPort: 3000,
   }],
+  hostingIngressNetwork: HOSTING_INGRESS_NETWORK,
 };
 
 const appResolved = resolvedFromServices({
@@ -59,7 +70,7 @@ test("buildHostingLabelsFragment configures Traefik and ingress network", () => 
   const labels = fragment.services?.app?.labels as Record<string, string>;
 
   assertEquals(labels["traefik.enable"], "true");
-  assertEquals(labels["traefik.docker.network"], "turbopanel-ingress");
+  assertEquals(labels["traefik.docker.network"], HOSTING_INGRESS_NETWORK);
   assertEquals(
     labels["traefik.http.routers.hosting_123.entrypoints"],
     "web,websecure",
@@ -74,10 +85,10 @@ test("buildHostingLabelsFragment configures Traefik and ingress network", () => 
   );
   assertEquals(labels["com.turbopanel.project"], "project_123");
   assertEquals(labels["com.turbopanel.raw-port"], undefined);
-  assertEquals(fragment.services?.app?.networks, ["turbopanel-ingress"]);
+  assertEquals(fragment.services?.app?.networks, [HOSTING_INGRESS_NETWORK]);
   assertEquals(
     (fragment.networks as Record<string, { external: boolean }>)[
-      "turbopanel-ingress"
+      HOSTING_INGRESS_NETWORK
     ].external,
     true,
   );
@@ -116,6 +127,7 @@ const tcpUdpPayload: EnvironmentDeployPayload = {
     ports: [{ published: 5432, target: 5432 }],
     bindAddress: "203.0.113.10",
   }],
+  hostingIngressNetwork: HOSTING_INGRESS_NETWORK,
 };
 
 const dbResolved = resolvedFromServices({
@@ -145,7 +157,7 @@ test("buildHostingLabelsFragment configures a tcp router+service per published p
   );
   assertEquals(labels["traefik.http.routers.hosting_db-5432.rule"], undefined);
   assertEquals(labels["com.turbopanel.raw-port"], "true");
-  assertEquals(fragment.services?.db?.networks, ["turbopanel-ingress"]);
+  assertEquals(fragment.services?.db?.networks, [HOSTING_INGRESS_NETWORK]);
 });
 
 test("buildHostingLabelsFragment configures a udp router+service with no rule label", () => {
@@ -285,20 +297,21 @@ test("buildHostingLabelsFragment without hostings leaves services free of ingres
   assertEquals(fragment.networks, undefined);
 });
 
-test("buildHostingLabelsFragment attaches turbopanel-managed to managedNetworkServices", () => {
+test("buildHostingLabelsFragment attaches the payload's managed network to managedNetworkServices", () => {
   const fragment = buildHostingLabelsFragment({
     payload: {
       ...payload,
       hostings: [],
       managedNetworkServices: ["app"],
+      managedNetwork: MANAGED_NETWORK,
     },
     hostings: [],
     resolved: appResolved,
   });
-  assertEquals(fragment.services?.app?.networks, ["turbopanel-managed"]);
+  assertEquals(fragment.services?.app?.networks, [MANAGED_NETWORK]);
   assertEquals(
     (fragment.networks as Record<string, { external: boolean }>)[
-      "turbopanel-managed"
+      MANAGED_NETWORK
     ]?.external,
     true,
   );
@@ -309,23 +322,24 @@ test("buildHostingLabelsFragment merges ingress and managed networks on the same
     payload: {
       ...payload,
       managedNetworkServices: ["app"],
+      managedNetwork: MANAGED_NETWORK,
     },
     hostings: payload.hostings,
     resolved: appResolved,
   });
   assertEquals(fragment.services?.app?.networks, [
-    "turbopanel-ingress",
-    "turbopanel-managed",
+    HOSTING_INGRESS_NETWORK,
+    MANAGED_NETWORK,
   ]);
   assertEquals(
     (fragment.networks as Record<string, { external: boolean }>)[
-      "turbopanel-ingress"
+      HOSTING_INGRESS_NETWORK
     ]?.external,
     true,
   );
   assertEquals(
     (fragment.networks as Record<string, { external: boolean }>)[
-      "turbopanel-managed"
+      MANAGED_NETWORK
     ]?.external,
     true,
   );
@@ -339,6 +353,7 @@ test("buildHostingLabelsFragment rejects an unknown managedNetworkServices entry
           ...payload,
           hostings: [],
           managedNetworkServices: ["does-not-exist"],
+          managedNetwork: MANAGED_NETWORK,
         },
         hostings: [],
         resolved: appResolved,
@@ -354,7 +369,7 @@ test("buildHostingLabelsFragment leaves network free when managedNetworkServices
     hostings: [],
     resolved: appResolved,
   });
-  assertEquals(fragment.networks?.["turbopanel-managed"], undefined);
+  assertEquals(fragment.networks?.[MANAGED_NETWORK], undefined);
 });
 
 test("buildHostingLabelsFragment unions resolved service networks with platform network", () => {
@@ -371,7 +386,7 @@ test("buildHostingLabelsFragment unions resolved service networks with platform 
   assertEquals(fragment.services?.app?.networks, [
     "frontend",
     "backend",
-    "turbopanel-ingress",
+    HOSTING_INGRESS_NETWORK,
   ]);
 });
 
@@ -408,7 +423,7 @@ test("buildHostingLabelsFragment unions list-form networks and proxy middlewares
   const labels = fragment.services?.app?.labels as Record<string, string>;
   assertEquals(fragment.services?.app?.networks, [
     "frontend",
-    "turbopanel-ingress",
+    HOSTING_INGRESS_NETWORK,
   ]);
   assertEquals(
     labels["traefik.http.routers.hosting_123.rule"],
@@ -475,6 +490,6 @@ test("buildHostingLabelsFragment keeps friendly-name aliases in the network unio
   // the alias instead of replacing it with an option-less platform list.
   assertEquals(fragment.services?.app?.networks, {
     default: { aliases: ["adminer"] },
-    "turbopanel-ingress": {},
+    [HOSTING_INGRESS_NETWORK]: {},
   });
 });

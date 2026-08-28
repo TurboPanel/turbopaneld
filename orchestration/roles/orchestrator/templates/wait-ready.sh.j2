@@ -10,7 +10,6 @@ max_attempts=60
 sleep_seconds=2
 http_port={{ orchestrator_http_port }}
 compose_file="{{ orchestrator_config_dir }}/docker-compose.yml"
-project="{{ orchestrator_project_name }}"
 
 wait_for() {
   i=0
@@ -32,8 +31,8 @@ probe_tcp() {
 }
 
 if [ -f "$compose_file" ] && command -v docker >/dev/null 2>&1; then
-  if /usr/bin/docker compose -p "$project" -f "$compose_file" ps --status running -q 2>/dev/null | grep -q .; then
-    wait_for /usr/bin/docker compose -p "$project" -f "$compose_file" exec -T orchestrator \
+  if /usr/bin/docker compose -f "$compose_file" ps --status running -q 2>/dev/null | grep -q .; then
+    wait_for /usr/bin/docker compose -f "$compose_file" exec -T orchestrator \
       bash -c "true </dev/tcp/127.0.0.1/${http_port}" && exit 0
   fi
 fi

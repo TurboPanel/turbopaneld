@@ -17,6 +17,9 @@ import { handleManagedApply } from "./apply.ts";
  */
 const test = Deno.test.bind(Deno);
 
+/** Managed network names are the `network(kind='managed')` row's bare UUID. */
+const MANAGED_NETWORK = "00000000-0000-4000-8000-0000000000ee";
+
 function dockerOk(stdout = "", stderr = ""): DockerCliResult {
   return { success: true, stdout, stderr, code: 0 };
 }
@@ -43,6 +46,7 @@ function basePayload(
     engine: "postgres",
     projectName: "tp-managed-pg",
     containerName: "01936b3e-aaaa-bbbb-cccc-123456789abc-1",
+    managedNetwork: MANAGED_NETWORK,
     image: "docker.io/library/postgres:18-alpine",
     containerPort: 5432,
     composeYaml: "services:\n  postgres:\n    image: postgres:18-alpine\n",
@@ -198,6 +202,82 @@ test("handleManagedApply primary path composes up and applies credentials", asyn
     assertEquals(result.summary, "managed postgres applied");
     assertEquals(result.containers?.length, 1);
     assertEquals(result.member?.status, "ready");
+  });
+});
+
+test("handleManagedApply creates the managed network before any compose up", async () => {
+  // Regression: the engine's compose document references the managed network
+  // as `external: true`. Creating it only inside `applyManagedEngineState`
+  // (which runs after `composeUpManagedEngine`) makes the very first apply on
+  // a fresh host fail with "network ... declared as external, but could not
+  // be found".
+  await withApplyEnv(async () => {
+    const argv: string[][] = [];
+    await handleManagedApply(
+      basePayload(),
+      new Date().toISOString(),
+      {
+        decryptSecrets: decryptOk,
+        ensureDocker: () => Promise.resolve(),
+        runHostPrep: () => Promise.resolve(),
+        runDocker: (args, options) => {
+          argv.push([...args]);
+          if (args[0] === "network" && args[1] === "inspect") {
+            return Promise.resolve(dockerFail("no such network"));
+          }
+          return primaryPostgresRun(args, options);
+        },
+      },
+    );
+
+    const inspectIndex = argv.findIndex((args) =>
+      args[0] === "network" && args[1] === "inspect" &&
+      args[2] === MANAGED_NETWORK
+    );
+    const createIndex = argv.findIndex((args) =>
+      args[0] === "network" && args[1] === "create" &&
+      args[2] === MANAGED_NETWORK
+    );
+    const composeUpIndex = argv.findIndex((args) =>
+      args[0] === "compose" && args.includes("up")
+    );
+
+    assertEquals(inspectIndex >= 0, true);
+    assertEquals(createIndex >= 0, true);
+    assertEquals(composeUpIndex >= 0, true);
+    assertEquals(inspectIndex < createIndex, true);
+    assertEquals(createIndex < composeUpIndex, true);
+  });
+});
+
+test("handleManagedApply uses the payload's managed network, never a constant", async () => {
+  await withApplyEnv(async () => {
+    const other = "11111111-1111-4111-8111-111111111111";
+    const argv: string[][] = [];
+    await handleManagedApply(
+      basePayload({ managedNetwork: other }),
+      new Date().toISOString(),
+      {
+        decryptSecrets: decryptOk,
+        ensureDocker: () => Promise.resolve(),
+        runHostPrep: () => Promise.resolve(),
+        runDocker: (args, options) => {
+          argv.push([...args]);
+          return primaryPostgresRun(args, options);
+        },
+      },
+    );
+
+    assertEquals(
+      argv.some((args) =>
+        args[0] === "network" && args[1] === "inspect" && args[2] === other
+      ),
+      true,
+    );
+    assertEquals(
+      argv.some((args) => args[0] === "network" && args[2] === MANAGED_NETWORK),
+      false,
+    );
   });
 });
 

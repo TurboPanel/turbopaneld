@@ -13,6 +13,13 @@ import {
 } from "./contracts.ts";
 
 /**
+ * Shared hosting-ingress Docker network — the `hosting-ingress` system
+ * component's allocated `serviceId`, required on the wire whenever a deploy
+ * carries hostings. A bare UUID, not a readable literal.
+ */
+const HOSTING_INGRESS_NETWORK = "00000000-0000-4000-8000-0000000000bb";
+
+/**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
  *
  * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
@@ -42,6 +49,7 @@ const VALID_MANAGED_APPLY = {
   engine: "postgres",
   projectName: "tp-managed-pg",
   containerName: "01936b3e-aaaa-bbbb-cccc-123456789abc-1",
+  managedNetwork: "00000000-0000-4000-8000-0000000000ee",
   image: "docker.io/library/postgres:18-alpine",
   containerPort: 5432,
   composeYaml: "services:\n  postgres:\n    image: postgres:18-alpine\n",
@@ -113,6 +121,7 @@ test("empty hosting proxy and php objects are omitted rather than stored", () =>
       proxy: {},
       web: { php: {}, env: {} },
     })],
+    hostingIngressNetwork: HOSTING_INGRESS_NETWORK,
     sites: [{
       composeServiceName: "site",
       engine: "nginx",
@@ -139,6 +148,7 @@ test("hosting web and site omit php when it is not a record", () => {
     hostings: [hosting({
       web: { env: { KEEP: "yes" }, php: "not-an-object" },
     })],
+    hostingIngressNetwork: HOSTING_INGRESS_NETWORK,
     sites: [{
       composeServiceName: "site",
       engine: "nginx",
@@ -173,6 +183,7 @@ test("hosting proxy and php drop non-boolean / non-string entries and keep valid
         web: "not-an-object",
       }),
     ],
+    hostingIngressNetwork: HOSTING_INGRESS_NETWORK,
   });
   assertEquals(payload.hostings[0]?.proxy, undefined);
   assertEquals(payload.hostings[0]?.web, {

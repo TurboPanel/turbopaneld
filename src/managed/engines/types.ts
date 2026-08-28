@@ -153,6 +153,8 @@ export type ManagedEngineReplicationRuntime = {
 export type ManagedEngineBootstrapContext = {
   managedId: string;
   image: string;
+  /** Organization's managed Docker network — the bootstrap container joins it. */
+  managedNetwork: string;
   volumes: Array<{ name: string; target: string }>;
   stateDir: string;
   containerUser: string;

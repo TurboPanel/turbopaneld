@@ -1,5 +1,4 @@
 import type { EnvironmentDeployPayload } from "../instance/commands/contracts.ts";
-import { MANAGED_INGRESS_NETWORK } from "../managed/networks.ts";
 import type { ComposeOverlayFragment } from "./compose-overlay.ts";
 import type { ResolvedComposeModel } from "./compose-services.ts";
 import {
@@ -9,7 +8,6 @@ import {
   LABEL_SERVICE_ID,
 } from "./labels.ts";
 
-const INGRESS_NETWORK = "turbopanel-ingress";
 const ROUTER_ID_RE = /^[A-Za-z0-9_-]+$/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -302,6 +300,10 @@ export function buildHostingLabelsFragment(input: {
   const { payload, hostings, resolved } = input;
   const services: Record<string, Record<string, unknown>> = {};
   const networks: Record<string, unknown> = {};
+  // The contract requires `hostingIngressNetwork` exactly when `hostings` is
+  // non-empty, and this fragment's `hostings` is a subset of the payload's, so
+  // it is a non-null read wherever it is used below.
+  const ingressNetwork = payload.hostingIngressNetwork!;
 
   for (const hosting of hostings) {
     assertRouterId(hosting.hostingId, "hostings[].hostingId");
@@ -318,7 +320,7 @@ export function buildHostingLabelsFragment(input: {
 
     const labels = serviceLabels(services, name);
     addLabel(labels, "traefik.enable", "true");
-    addLabel(labels, "traefik.docker.network", INGRESS_NETWORK);
+    addLabel(labels, "traefik.docker.network", ingressNetwork);
     if (hosting.protocol === "tcp" || hosting.protocol === "udp") {
       applyTcpUdpHostingLabels(labels, hosting);
       // Boundary for per-service Traefik: only containers that publish raw
@@ -337,7 +339,7 @@ export function buildHostingLabelsFragment(input: {
       networks: unionServiceNetworks(
         resolvedService,
         services[name]?.networks,
-        INGRESS_NETWORK,
+        ingressNetwork,
       ),
     };
   }
@@ -345,10 +347,13 @@ export function buildHostingLabelsFragment(input: {
   // Only declare the external ingress network when something actually routes
   // through it — bare container deploys must not require Traefik/network.
   if (hostings.length > 0) {
-    networks[INGRESS_NETWORK] = { external: true };
+    networks[ingressNetwork] = { external: true };
   }
 
   const managedNames = payload.managedNetworkServices ?? [];
+  // The contract requires `managedNetwork` exactly when `managedNetworkServices`
+  // is non-empty, so it is a non-null read inside this block.
+  const managedNetwork = payload.managedNetwork!;
   for (const composeServiceName of managedNames) {
     const resolvedService = requireResolvedService(
       resolved,
@@ -364,12 +369,12 @@ export function buildHostingLabelsFragment(input: {
       networks: unionServiceNetworks(
         resolvedService,
         services[composeServiceName]?.networks,
-        MANAGED_INGRESS_NETWORK,
+        managedNetwork,
       ),
     };
   }
   if (managedNames.length > 0) {
-    networks[MANAGED_INGRESS_NETWORK] = { external: true };
+    networks[managedNetwork] = { external: true };
   }
 
   const fragment: ComposeOverlayFragment = {};

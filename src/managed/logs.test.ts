@@ -45,7 +45,8 @@ test("collectManagedLogs clamps tail to 1..2000 and requests compose logs", asyn
     [
       "compose",
       "-p",
-      `turbopanel-managed-${managedId}`,
+      // The compose project is the bare managed id — no readable prefix.
+      managedId,
       "logs",
       "--no-color",
       "--tail",

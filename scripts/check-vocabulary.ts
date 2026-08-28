@@ -38,6 +38,16 @@ export const FORBIDDEN_PHRASES = [
   // identifiers (`isLiquidGlassAvailable`) do not match these phrases.
   "liquid glass",
   "liquid-glass",
+  // Machine-brochure marketing vocabulary. TurboPanel copy uses plain words
+  // (see website AGENTS.md "Messaging"); stems catch suffixed forms.
+  "seamless",
+  "effortless",
+  "empower",
+  "revolutioniz",
+  "supercharg",
+  "game-chang",
+  "next-generation",
+  "all-in-one",
 ];
 
 // --- Allowlist: lines that must never be flagged, even if a forbidden ------

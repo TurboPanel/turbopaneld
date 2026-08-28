@@ -125,9 +125,11 @@ test("managedDir and compose project naming", () => {
     managedDir(LAYOUT, "abc"),
     "/var/lib/turbopanel/managed/abc",
   );
+  // Bare managed row id — no readable prefix; must stay in lockstep with the
+  // instance's `apply-prepare` payload builder.
   assertEquals(
-    managedComposeProject("abc"),
-    "turbopanel-managed-abc",
+    managedComposeProject("00000000-0000-4000-8000-0000000000ab"),
+    "00000000-0000-4000-8000-0000000000ab",
   );
 });
 
@@ -137,7 +139,11 @@ const LAYOUT = {
 } as Parameters<typeof managedDir>[0];
 
 test("proxysql and managed path helpers join under config/state", () => {
-  assertEquals(proxysqlProject(), "turbopanel-proxysql");
+  // The compose project is the managed-ingress descriptor's own serviceId.
+  assertEquals(
+    proxysqlProject("00000000-0000-4000-8000-0000000000cc"),
+    "00000000-0000-4000-8000-0000000000cc",
+  );
   assertEquals(
     proxysqlConfigDir(LAYOUT),
     "/etc/turbopanel/proxysql",
@@ -241,7 +247,11 @@ test("assertSafeManagedIdentifiers rejects environmentId and volume names", () =
 });
 
 test("orchestrator path helpers join under config/state", () => {
-  assertEquals(orchestratorProject(), "turbopanel-orchestrator");
+  // The compose project is the managed-ha descriptor's own serviceId.
+  assertEquals(
+    orchestratorProject("00000000-0000-4000-8000-0000000000ha"),
+    "00000000-0000-4000-8000-0000000000ha",
+  );
   assertEquals(
     orchestratorConfigDir(LAYOUT),
     "/etc/turbopanel/orchestrator",

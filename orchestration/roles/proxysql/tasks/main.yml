@@ -1,8 +1,9 @@
 # Host prerequisites for shared ProxySQL managed ingress.
 #
 # Ansible owns: config/tls/data dirs, one-shot admin.cnf, initial static
-# proxysql.cnf (when absent), wait-ready.sh, turbopanel-proxysql-stack unit,
-# turbopanel-managed Docker network.
+# proxysql.cnf (when absent), wait-ready.sh, turbopanel-proxysql-stack unit.
+# The managed Docker network is per-organization and named by the control
+# plane, so the daemon (not converge) creates it on the first reconcile.
 #
 # The daemon owns docker-compose.yml under {{ proxysql_config_dir }} and
 # regenerates the dynamic portion of proxysql.cnf (users/servers/rules) on
@@ -256,21 +257,6 @@
     owner: root
     group: root
     mode: "0640"
-
-- name: Ensure turbopanel-managed Docker network exists
-  ansible.builtin.command:
-    argv:
-      - docker
-      - network
-      - create
-      - --driver
-      - bridge
-      - "{{ proxysql_managed_network }}"
-  register: _proxysql_network_create
-  changed_when: _proxysql_network_create.rc == 0
-  failed_when: >-
-    _proxysql_network_create.rc != 0
-    and ('already exists' not in (_proxysql_network_create.stderr | default('')))
 
 - name: Ensure turbopanel-proxysql-stack systemd unit is enabled and started
   ansible.builtin.systemd:

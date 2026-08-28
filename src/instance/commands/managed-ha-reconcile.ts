@@ -139,12 +139,11 @@ export async function handleManagedHaReconcile(
   const ensureDocker = deps?.ensureDocker ?? defaultEnsureDocker;
   const runHostPrep = deps?.runHostPrep ?? runOrchestratorSetup;
 
-  if (!(await hostPrepPresent(layout))) {
-    await runHostPrep();
-  }
-
   await persistIdentity(layout, payload);
 
+  // Teardown must never trigger lazy host prep: that playbook ends by starting
+  // `turbopanel-orchestrator-stack.service`, so a partially prepared host would
+  // start the stack on its way to stopping it.
   if (payload.desired === "absent" || payload.raft === null) {
     await ensureDocker();
     await stopOrchestratorStack(layout, run);
@@ -155,8 +154,16 @@ export async function handleManagedHaReconcile(
     return emptyHaResult(payload.serverId);
   }
 
+  // And the managed network must exist before host prep can start that unit:
+  // the unit runs `docker compose up -d` whenever compose already exists, which
+  // fails against a pruned external network unless the daemon recreates it
+  // first.
   await ensureDocker();
-  await ensureManagedIngressNetwork(run);
+  await ensureManagedIngressNetwork(payload.managedNetwork, run);
+
+  if (!(await hostPrepPresent(layout))) {
+    await runHostPrep();
+  }
 
   if (payload.orgTlsMaterial) {
     if (!deps?.decryptSecrets) {
@@ -198,6 +205,7 @@ export async function handleManagedHaReconcile(
     layout,
     descriptor,
     payload.raft,
+    payload.managedNetwork,
     conf,
     run,
   );

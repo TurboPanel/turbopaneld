@@ -3,7 +3,6 @@
 # (pre-auth first-packet heap overflow) and CVE-2026-48772 (PROXY-protocol-v1
 # client_addr ACL bypass). Both are fixed in ProxySQL 3.0.9.
 proxysql_image: proxysql/proxysql:3.0.9
-proxysql_project_name: turbopanel-proxysql
 proxysql_config_dir: "{{ turbopanel_config_dir }}/proxysql"
 proxysql_tls_dir: "{{ proxysql_config_dir }}/tls"
 proxysql_data_dir: "{{ turbopanel_state_dir }}/proxysql"
@@ -19,8 +18,6 @@ proxysql_admin_user: admin
 # Host-wide ProxySQL → backend health-check principal (all engines on this host).
 # Password lives only in monitor.cnf; never in Ansible facts after seed.
 proxysql_monitor_user: tp_monitor
-# Network for managed engines + ProxySQL
-proxysql_managed_network: turbopanel-managed
 turbopanel_config_dir: /etc/turbopanel  # noqa: var-naming[no-role-prefix]
 turbopanel_state_dir: /var/lib/turbopanel  # noqa: var-naming[no-role-prefix]
 turbopanel_dev_user: ""  # noqa: var-naming[no-role-prefix]

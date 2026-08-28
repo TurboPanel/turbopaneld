@@ -16,7 +16,6 @@ import {
   type ManagedApplyPayload,
   type ManagedApplyResources,
 } from "../instance/commands/contracts.ts";
-import { MANAGED_INGRESS_NETWORK } from "./networks.ts";
 
 /** Placeholder token permitted in managed compose (mirrors ManagedSecretPlaceholder). */
 export const MANAGED_ROOT_PASSWORD_VAR = "TURBOPANEL_MANAGED_ROOT_PASSWORD"; // NOSONAR typescript:S2068 — compose env var name for ${…} interpolation, not a credential value
@@ -150,23 +149,27 @@ function assertNoForbiddenInterpolation(document: ComposeDocument): void {
   }
 }
 
-function attachManagedIngressNetwork(service: ComposeService): void {
-  // Engines stay on `turbopanel-managed` only — a tenant-environment bridge
-  // must never carry a managed engine (isolation + blast radius). Cross-host
-  // reach is the single private listener bound to `tp0` / datacenter.
+function attachManagedIngressNetwork(
+  service: ComposeService,
+  networkName: string,
+): void {
+  // Engines stay on the organization's managed network only — a tenant-
+  // environment bridge must never carry a managed engine (isolation + blast
+  // radius). Cross-host reach is the single private listener bound to `tp0` /
+  // datacenter.
   const networks = service.networks;
   if (networks === undefined) {
-    service.networks = [MANAGED_INGRESS_NETWORK];
+    service.networks = [networkName];
     return;
   }
   if (Array.isArray(networks)) {
-    if (!networks.includes(MANAGED_INGRESS_NETWORK)) {
-      networks.push(MANAGED_INGRESS_NETWORK);
+    if (!networks.includes(networkName)) {
+      networks.push(networkName);
     }
     return;
   }
   if (isRecord(networks)) {
-    networks[MANAGED_INGRESS_NETWORK] ??= {};
+    networks[networkName] ??= {};
     return;
   }
   throw new Error("Compose service networks must be an array or object");
@@ -404,9 +407,9 @@ export function normalizeManagedCompose(
     applyDockerOptions(service, payload.dockerOptions, payload.engine);
   }
 
-  attachManagedIngressNetwork(service);
+  attachManagedIngressNetwork(service, payload.managedNetwork);
   const networks = isRecord(document.networks) ? { ...document.networks } : {};
-  networks[MANAGED_INGRESS_NETWORK] = { external: true };
+  networks[payload.managedNetwork] = { external: true };
   document.networks = networks;
 
   assertNoForbiddenInterpolation(document);

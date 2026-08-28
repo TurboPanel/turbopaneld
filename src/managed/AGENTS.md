@@ -4,7 +4,7 @@ Daemon-side runtime for environment-scoped managed database/cache engines
 (Postgres first). Completely separate from tenant `environment.deploy` — no
 hosting Caddy, no tenant Traefik network, no user compose merge. Frontend
 access for managed engines is **one shared ProxySQL** per server
-(`turbopanel-proxysql`), not per-service Traefik.
+(project = the `managed-ingress` `serviceId`), not per-service Traefik.
 
 Root context: `../../AGENTS.md`. Instance engine specs:
 `../../../turbopanel/src/lib/managed/AGENTS.md`. Command contracts:
@@ -16,17 +16,17 @@ Certificate authorities: `../../../turbopanel/src/lib/tls/AGENTS.md`.
 
 | File | Role |
 | --- | --- |
-| `paths.ts` | Managed state-dir layout + identifier / relative-path guards; `managedBackupsDir` / `managedBackupArtifactPath`; ProxySQL layout helpers (`proxysqlConfigDir`, `proxysqlComposePath`, `proxysqlConfigPath`, `proxysqlTlsDir`, `proxysqlDataDir`, `proxysqlAdminCnfPath`, `PROXYSQL_PROJECT`) |
-| `compose.ts` | Platform compose normalization (image, volumes, resources); always joins `turbopanel-managed`; optional private-listener-only `ports:` (rejects all other publishes / Traefik labels) |
+| `paths.ts` | Managed state-dir layout + identifier / relative-path guards; `managedBackupsDir` / `managedBackupArtifactPath`; ProxySQL layout helpers (`proxysqlConfigDir`, `proxysqlComposePath`, `proxysqlConfigPath`, `proxysqlTlsDir`, `proxysqlDataDir`, `proxysqlAdminCnfPath`, `proxysqlProject`) |
+| `compose.ts` | Platform compose normalization (image, volumes, resources); always joins the organization's managed network (`payload.managedNetwork`); optional private-listener-only `ports:` (rejects all other publishes / Traefik labels) |
 | `materialize.ts` | Write `config/` verbatim; optional engine self-signed TLS + `orgTlsMaterial` → `tls/server.*` + `tls/proxysql/`; ownership normalization via throwaway container (skips `backups/`). Standby replication passwords are **not** written under `auth/`. |
 | `tls.ts` | Engine self-signed cert generation; org-CA materialization for engine leaf + ProxySQL; standby passfile materialization |
-| `networks.ts` | Ensure Docker network `turbopanel-managed` (engines + ProxySQL) **and** attach ProxySQL to consumer `tpn_*` compose-bridge subnets |
+| `networks.ts` | Ensure the organization's managed Docker network by the name the command payload carries (`ensureManagedIngressNetwork(name, run)` — no daemon-side default) **and** attach ProxySQL to consumer `tpn_*` compose-bridge subnets |
 | `firewall.ts` | Best-effort idempotent `iptables` scoping for a **public** private listener: `TP-MANAGED-PUB` off `DOCKER-USER`, per-cluster `TP-MGD-<id>` chain matching the pre-DNAT publish via `conntrack --ctorigdst/--ctorigdstport`, ACCEPT known peers then DROP; no-op without a public IPv4 listener or known peers; never blocks apply/destroy |
 | `proxysql.ts` | Shared ProxySQL compose + durable `proxysql.cnf` generation, static-section diffing, inspect/start/stop/restart |
 | `proxysql-admin.ts` | Runtime admin apply via `docker exec` + `admin.cnf` (`[client]` secrets never on argv/logs) |
 | `containers.ts` | Shared `docker compose ps` collection + running-container resolution used by `apply.ts` and `backup.ts` |
-| `apply.ts` / `lifecycle.ts` / `destroy.ts` / `promote.ts` | Engine command handlers (wired from `command-router.ts`); apply/destroy do **not** bring up per-service Traefik; `managed.promote` is the engine promote step after TurboPanel fencing. **`managed.destroy` always `compose -p turbopanel-managed-<id> down`** (even if the state dir is missing), then `docker ps -aq --filter label=com.docker.compose.project=…` and `docker rm -f` leftovers; compose down failure is **not** success while labeled containers remain. No `-f` (same interpolation rule as lifecycle). |
-| `orchestrator.ts` / `orchestrator-api.ts` | Per-org Orchestrator compose (`turbopanel-orchestrator`) + local HTTP (`:33001`); `Recover: false`; Raft `:33002` on advertise address only |
+| `apply.ts` / `lifecycle.ts` / `destroy.ts` / `promote.ts` | Engine command handlers (wired from `command-router.ts`); apply/destroy do **not** bring up per-service Traefik; `managed.promote` is the engine promote step after TurboPanel fencing. **`managed.destroy` always `compose -p <managedId> down`** — the compose project is the bare `managed` row UUID — even if the state dir is missing, then `docker ps -aq --filter label=com.docker.compose.project=…` and `docker rm -f` leftovers; compose down failure is **not** success while labeled containers remain. No `-f` (same interpolation rule as lifecycle). |
+| `orchestrator.ts` / `orchestrator-api.ts` | Per-org Orchestrator compose (project = the `managed-ha` `serviceId`, written into the compose file's own `name:` key so the stack unit needs no `-p`) + local HTTP (`:33001`); `Recover: false`; Raft `:33002` on advertise address only |
 | `../instance/commands/managed-ha-reconcile.ts` / `managed-ha-failover.ts` | `managed.ha.reconcile` (whole-server HA stack) + `managed.ha.failover` (`drain` / `recover`). Designated Orchestrator recover-to; on HTTP/API failure **or** absent stack, falls back to `managed.promote` so fencing is not stranded. `Recover: false` stays — TurboPanel picks the candidate. `Future:` fail-closed HA lease when Raft is unreachable. |
 | `../instance/ha-observe.ts` | Poll local Orchestrator `/api/problems` when `configDir/orchestrator/docker-compose.yml` exists; emit unsolicited `managed-ha-event` |
 | `backup.ts` | `managed.backup` (`create`/`delete`) + `managed.restore` — streamed dump/restore, checksum, prune |
@@ -81,12 +81,19 @@ the duration of engine `docker compose --env-file … up` and is deleted in
 
 Compose project names:
 
-- Engine: `turbopanel-managed-<managedId>` on Docker network
-  `turbopanel-managed` (**always** — not only when exposed; **never** joins
-  tenant `turbopanel-ingress`)
-- Shared ProxySQL: `turbopanel-proxysql` (system component
-  `managed-ingress`, compose service `proxysql`) on the same
-  `turbopanel-managed` network
+- Engine: `<managedId>` (bare UUID) on the organization's managed
+  Docker network — the bare UUID of the instance's `network(kind='managed')`
+  row (**one row per organization**, no `tpn_`/`turbopanel-` prefix), carried
+  as `payload.managedNetwork` on every command that touches the network
+  (`managed.apply`, `managed.ingress.reconcile`, `managed.ha.reconcile`,
+  `environment.deploy` when any compose service joins it). There is **no
+  daemon-side default and no literal fallback** — a command without the field
+  is a contract error, not a cue to invent a name. Engines join it **always**
+  (not only when exposed) and **never** join the tenant hosting-ingress
+  network
+- Shared ProxySQL: the `managed-ingress` `serviceId` (system component
+  `managed-ingress`, compose service `proxysql`) on that same managed
+  network
 - Engine container name: instance-allocated `<service.id>-1` (ordinal 2/3 for
   replicas)
 
@@ -98,7 +105,7 @@ do not recreate them. ProxySQL reconcile no longer sweeps those trees.
 
 Independent of tenant `src/deploy/ingress.ts` Traefik. **One** ProxySQL
 container per managed host terminates the public (or scoped) MySQL/Postgres
-listeners and routes to engine members on `turbopanel-managed`.
+listeners and routes to engine members on the organization's managed network.
 
 | Piece | Detail |
 | --- | --- |
@@ -110,9 +117,9 @@ listeners and routes to engine members on `turbopanel-managed`.
 | Backend monitor | Host-wide principal in `configDir/proxysql/monitor.cnf` (`tp_monitor` + random password). Written into `mysql_variables`/`pgsql_variables` and SET on reconcile. Each **primary** `managed.apply` creates the role (`GRANT pg_monitor` / MySQL PROCESS+REPLICATION CLIENT) after the same lazy `runProxySqlSetup` as ingress when `admin.cnf`/`monitor.cnf` are missing — otherwise first provision races (ProxySQL gets the password, Postgres never gets the role). **Never** leave ProxySQL defaults (`monitor`/`monitor`) — they spam engine logs and never authenticate |
 | Cold start | Full `proxysql.cnf` (static + dynamic tables) is rewritten so reboot/`compose up` restores routing without a live admin session. Dynamic `{...}` records are **libconfig lists** and must be comma-separated (`{ row },` then the last `{ row }`); a second cluster or replica row without commas is `Parse error at /etc/proxysql.cnf` and the container crash-loops (`restart: unless-stopped`). Empty `()` lists are valid. |
 | Static vs dynamic | Static section = datadir, admin_variables, mysql_variables, pgsql_variables (interfaces + `have_ssl` + cert paths + monitor_*). Dynamic = `mysql_*` / `pgsql_*` servers, users, query_rules. Listener/static changes require container restart; user/backend changes prefer admin interface only |
-| Inventory | System component `managed-ingress` / project `turbopanel-proxysql`; container name `<serviceId>-in`, `role: ingress`; self-heal via `system.reconcile` → `proxysql` (distinct from inspect-only `database`/`queue`/`analytics`) |
-| Host prep | Ansible role `proxysql` + playbook `proxysql-setup.yml` (`runProxySqlSetup`; also on co-located `instance-dev-install`) — dirs, admin.cnf, **monitor.cnf**, initial static cnf when absent, wait-ready, `turbopanel-proxysql-stack.service`, network. Removes bind-mount **directory** scars at `admin.cnf`/`proxysql.cnf`/`monitor.cnf` before seed. **Never** daemon compose contents. **`managed.ingress.reconcile` and primary `managed.apply` lazy-run `runProxySqlSetup` when `admin.cnf`/`monitor.cnf` are missing** (same pattern as HA `hostPrepPresent` / `runOrchestratorSetup`) — remote daemon-only hosts never get ProxySQL from `daemon-converge.yml`. Reconcile still refuses compose up if admin/config paths are missing or not regular files after prep |
-| Compose-bridge subnets | ProxySQL still joins `turbopanel-managed` plus each consumer `tpn_*` as `external: true`. Attachments pin `ipv4_address` to the reserved last-usable host (`reservedManagedIngressAddress`) so remote bindings can `extra_hosts` that address |
+| Inventory | System component `managed-ingress` / project = its own `serviceId` (emitted as the compose file's `name:` key); container name `<serviceId>-in`, `role: ingress`; self-heal via `system.reconcile` → `proxysql` (distinct from inspect-only `database`/`queue`/`analytics`) |
+| Host prep | Ansible role `proxysql` + playbook `proxysql-setup.yml` (`runProxySqlSetup`; also on co-located `instance-dev-install`) — dirs, admin.cnf, **monitor.cnf**, initial static cnf when absent, wait-ready, `turbopanel-proxysql-stack.service` (which no longer templates a project name — the daemon-written compose file carries it). **Not** the managed Docker network — its name is per-organization and only the daemon knows it (`system.reconcile` self-heal recreates a pruned one from the on-disk compose file). Removes bind-mount **directory** scars at `admin.cnf`/`proxysql.cnf`/`monitor.cnf` before seed. **Never** daemon compose contents. **`managed.ingress.reconcile` and primary `managed.apply` lazy-run `runProxySqlSetup` when `admin.cnf`/`monitor.cnf` are missing** (same pattern as HA `hostPrepPresent` / `runOrchestratorSetup`) — remote daemon-only hosts never get ProxySQL from `daemon-converge.yml`. Reconcile still refuses compose up if admin/config paths are missing or not regular files after prep |
+| Compose-bridge subnets | ProxySQL still joins the organization's managed network plus each consumer `tpn_*` as `external: true`. Attachments pin `ipv4_address` to the reserved last-usable host (`reservedManagedIngressAddress`) so remote bindings can `extra_hosts` that address |
 
 ### Configurable listener ports
 
@@ -142,6 +149,27 @@ side, so the daemon must treat them as data:
   looser daemon check would accept a payload the control plane considers
   invalid, which is how a half-configured ingress happens. Canonical rules:
   `turbopanel/src/lib/managed/AGENTS.md` → **Client listener ports**.
+
+### Managed network self-heal
+
+`system.reconcile` runs without a fresh `managed.ingress.reconcile` /
+`managed.ha.reconcile` payload, so it has no `managedNetwork` field to read.
+The name is recovered from the on-disk daemon-written compose file instead —
+`readManagedNetworkFromCompose` (one in `proxysql.ts`, one in
+`orchestrator.ts`) parses the external network reference back out of
+`<configDir>/proxysql/docker-compose.yml` /
+`<configDir>/orchestrator/docker-compose.yml`, exactly mirroring how listener
+ports and bind addresses are round-tripped off disk (see **Configurable
+listener ports**).
+
+- **No compose file, or a file that will not parse → skip the heal.** Both
+  paths log and return rather than calling `ensureManagedIngressNetwork`.
+  Never guess a name: a wrong one silently creates a second, empty network and
+  strands every engine on the real one.
+- The recovered name is passed to `ensureManagedIngressNetwork`, which
+  recreates a pruned network before the stack restarts.
+- This is why the daemon-written compose file — not an Ansible template or a
+  daemon constant — is the durable record of the network name on the host.
 
 ### Hostgroup placement and read routing
 
@@ -206,7 +234,7 @@ ProxySQL to enforce. Canonical policy:
    system-component identity is `<serviceId>-in`
    (`ingressContainerNameFromService` on the instance) — it **shares** that
    suffix and `role: ingress` with tenant Traefik, and is distinguished by
-   compose project (`turbopanel-proxysql`) plus the `managed-ingress`
+   compose project (the `managed-ingress` `serviceId`) plus the `managed-ingress`
    system-component label. Distinct from engine ordinal names. Allocation still
    uses the `managed-ingress` system component, not engine ordinal slots.
    Suffix contract: `turbopanel/AGENTS.md` → **Container name suffix contract**.
@@ -230,11 +258,19 @@ ProxySQL to enforce. Canonical policy:
    `ca.crt` (Organization CA material) always land before the publish exists. `firewall.ts` then scopes that
    publish to the known peer address(es) — still never `0.0.0.0`, and never a
    broad fallback when no stable peer address is known.
-3. **Always join `turbopanel-managed`.** Every managed engine container joins
-   that network whether or not frontend exposure is enabled, so ProxySQL can
-   reach it and so multi-member replication paths stay consistent. That is
-   **not** exclusive: ProxySQL still joins `turbopanel-managed` **plus** each
-   consumer `tpn_*` compose-bridge subnet (see ProxySQL table → Compose-bridge subnets).
+3. **Always join the organization's managed network.** Every managed engine
+   container joins `payload.managedNetwork` whether or not frontend exposure is
+   enabled, so ProxySQL can reach it and so multi-member replication paths stay
+   consistent. That is **not** exclusive: ProxySQL still joins the managed
+   network **plus** each consumer `tpn_*` compose-bridge subnet (see ProxySQL table → Compose-bridge subnets).
+   **Ensure the network before any `compose up`.** `apply.ts` calls
+   `ensureManagedIngressNetwork(payload.managedNetwork, run)` *before*
+   `materializeManagedState` / `composeUpManagedEngine` (and before any
+   bootstrap `docker run --network …`); the compose file references the
+   network as `external: true`, so a missing network fails the whole `up`
+   rather than being created implicitly. `managed.ingress.reconcile`,
+   `managed.ha.reconcile`, `environment.deploy`, and both `system.reconcile`
+   self-heal paths ensure it the same way.
 4. **Config is verbatim.** The daemon does **not** rebuild `postgresql.conf`
    (or peer engine files). The instance engine spec is the single source of
    truth for base + operator snippet + `ssl = on`. Re-apply **unlinks then
@@ -316,7 +352,7 @@ Physical / GTID streaming is **engine → engine**, never through ProxySQL.
 
 | Path | Postgres | MySQL / MariaDB |
 | --- | --- | --- |
-| Co-resident | Peers by `containerName` on `turbopanel-managed` | same |
+| Co-resident | Peers by `containerName` on the organization's managed network | same |
 | Cross-host | Private listener (`private_port` on the transport ladder: `local` co-resident container name → `fabric` relay address over `tp0` → `datacenter` private address → `public` address, **Organization CA** TLS mandatory + iptables-scoped) | same (`REQUIRE SSL` on the replication grant) |
 | Config | Instance owns `postgresql.conf` + `pg_hba.conf` | Instance owns `my.cnf` + `initdb/00-turbopanel.sql` (socket-auth platform admin — keeps SQL/`backup.ts` credential-free) |
 | Slots / disk hazard | Physical slots + orphan drop on `ensurePrimary` | **No slots** — bounded `binlog_expire_logs_seconds` in platform `my.cnf` |

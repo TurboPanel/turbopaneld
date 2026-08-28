@@ -22,6 +22,9 @@ import type { ManagedEngineContext, ManagedEngineExec } from "./types.ts";
  */
 const test = Deno.test.bind(Deno);
 
+/** Managed network names are the `network(kind='managed')` row's bare UUID. */
+const MANAGED_NETWORK = "00000000-0000-4000-8000-0000000000ee";
+
 const HEALTHY_VERTICAL = `
 *************************** 1. row ***************************
              Replica_IO_Running: Yes
@@ -228,6 +231,7 @@ test("mysql bootstrapStandby returns needs_resync when datadir exists without ma
   const boot = await mysqlManagedEngineRuntime.replication.bootstrapStandby(
     {
       managedId: "mysql-boot",
+      managedNetwork: MANAGED_NETWORK,
       image: "mysql:8",
       volumes: [{ name: "vol", target: "/var/lib/mysql" }],
       stateDir: "/tmp/mysql",
@@ -352,6 +356,7 @@ test("mysql bootstrapStandby returns seeded when datadir is empty", async () => 
   const boot = await replication.bootstrapStandby(
     {
       managedId: "mysql-boot",
+      managedNetwork: MANAGED_NETWORK,
       image: "mysql:8",
       volumes: [{ name: "vol", target: "/var/lib/mysql" }],
       stateDir: "/tmp/mysql",
@@ -372,6 +377,7 @@ test("mysql bootstrapStandby returns already_standby when marker exists", async 
   const boot = await replication.bootstrapStandby(
     {
       managedId: "mysql-boot",
+      managedNetwork: MANAGED_NETWORK,
       image: "mysql:8",
       volumes: [{ name: "vol", target: "/var/lib/mysql" }],
       stateDir: "/tmp/mysql",
@@ -911,6 +917,7 @@ test("mysql bootstrapStandby defaults the data root when volumes are empty", asy
   const boot = await replication.bootstrapStandby(
     {
       managedId: "mysql-boot",
+      managedNetwork: MANAGED_NETWORK,
       image: "mysql:8",
       volumes: [],
       stateDir: "/tmp/mysql",

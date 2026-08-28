@@ -618,6 +618,7 @@ const ROUTER_STUB_MANAGED_APPLY = {
   engine: "postgres",
   projectName: "tp-managed-pg",
   containerName: "01936b3e-aaaa-bbbb-cccc-123456789abc-1",
+  managedNetwork: "00000000-0000-4000-8000-0000000000ee",
   image: "docker.io/library/postgres:18-alpine",
   containerPort: 5432,
   composeYaml: "services:\n  postgres:\n    image: postgres:18-alpine\n",
@@ -646,6 +647,7 @@ const ROUTER_STUB_MANAGED_APPLY = {
 
 const ROUTER_STUB_MANAGED_INGRESS = {
   serverId: "00000000-0000-4000-8000-0000000000ab",
+  managedNetwork: "00000000-0000-4000-8000-0000000000ee",
   bindAddress: "203.0.113.10",
   orgTlsMaterial: {
     certificatePem:
@@ -659,6 +661,7 @@ const ROUTER_STUB_MANAGED_INGRESS = {
 
 const ROUTER_STUB_MANAGED_HA = {
   serverId: "00000000-0000-4000-8000-0000000000ab",
+  managedNetwork: "00000000-0000-4000-8000-0000000000ee",
   desired: "absent",
   raft: null,
   clusters: [],

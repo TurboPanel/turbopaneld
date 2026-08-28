@@ -969,7 +969,8 @@ export async function runPostgresSetup(
 
 /**
  * Host prerequisites for shared ProxySQL managed ingress (dirs, admin.cnf,
- * static base config, systemd unit, turbopanel-managed network). Compose is
+ * static base config, systemd unit). The managed Docker network is
+ * per-organization and daemon-created, not an Ansible concern. Compose is
  * daemon-written later via managed.ingress.reconcile.
  */
 export async function runProxySqlSetup(
@@ -983,8 +984,9 @@ export async function runProxySqlSetup(
 
 /**
  * Host prerequisites for per-org Orchestrator (dirs, API/raft secrets,
- * systemd unit, turbopanel-managed network). Compose is daemon-written
- * later via managed.ha.reconcile.
+ * systemd unit). The managed Docker network is per-organization and
+ * daemon-created, not an Ansible concern. Compose is daemon-written later via
+ * managed.ha.reconcile.
  */
 export async function runOrchestratorSetup(
   onEvent?: AnsibleEventHandler,

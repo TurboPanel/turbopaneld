@@ -30,6 +30,8 @@ const ENV_ID = "00000000-0000-4000-8000-000000000002";
 const MEMBER_ID = "00000000-0000-4000-8000-0000000000a1";
 const REPLICA_ID = "00000000-0000-4000-8000-0000000000a2";
 const SERVER_ID = "00000000-0000-4000-8000-0000000000ab";
+/** Org-wide managed Docker network name — a `network.kind='managed'` row id. */
+const MANAGED_NETWORK = "00000000-0000-4000-8000-0000000000ee";
 const SERVICE_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 
 const VALID_MANAGED_APPLY = {
@@ -38,6 +40,7 @@ const VALID_MANAGED_APPLY = {
   engine: "postgres",
   projectName: "tp-managed-pg",
   containerName: "01936b3e-aaaa-bbbb-cccc-123456789abc-1",
+  managedNetwork: MANAGED_NETWORK,
   image: "docker.io/library/postgres:18-alpine",
   containerPort: 5432,
   composeYaml: "services:\n  postgres:\n    image: postgres:18-alpine\n",
@@ -73,6 +76,7 @@ const VALID_MANAGED_APPLY = {
 
 const VALID_INGRESS = {
   serverId: SERVER_ID,
+  managedNetwork: MANAGED_NETWORK,
   bindAddresses: ["203.0.113.10"],
   clusters: [
     {
@@ -781,6 +785,7 @@ test("parseManagedHaReconcilePayload rejects identity raft cluster and member sh
     () =>
       parseManagedHaReconcilePayload({
         serverId: SERVER_ID,
+        managedNetwork: MANAGED_NETWORK,
         desired: "maybe",
         raft: null,
         clusters: [],
@@ -793,6 +798,7 @@ test("parseManagedHaReconcilePayload rejects identity raft cluster and member sh
     () =>
       parseManagedHaReconcilePayload({
         serverId: SERVER_ID,
+        managedNetwork: MANAGED_NETWORK,
         desired: "absent",
         raft: null,
         clusters: [],
@@ -805,6 +811,7 @@ test("parseManagedHaReconcilePayload rejects identity raft cluster and member sh
     () =>
       parseManagedHaReconcilePayload({
         serverId: SERVER_ID,
+        managedNetwork: MANAGED_NETWORK,
         desired: "present",
         raft: "local",
         clusters: [],
@@ -817,6 +824,7 @@ test("parseManagedHaReconcilePayload rejects identity raft cluster and member sh
     () =>
       parseManagedHaReconcilePayload({
         serverId: SERVER_ID,
+        managedNetwork: MANAGED_NETWORK,
         desired: "present",
         raft: {
           nodeId: SERVER_ID,
@@ -835,6 +843,7 @@ test("parseManagedHaReconcilePayload rejects identity raft cluster and member sh
     () =>
       parseManagedHaReconcilePayload({
         serverId: SERVER_ID,
+        managedNetwork: MANAGED_NETWORK,
         desired: "present",
         raft: null,
         clusters: [null],
@@ -847,6 +856,7 @@ test("parseManagedHaReconcilePayload rejects identity raft cluster and member sh
     () =>
       parseManagedHaReconcilePayload({
         serverId: SERVER_ID,
+        managedNetwork: MANAGED_NETWORK,
         desired: "present",
         raft: null,
         clusters: [{
@@ -866,6 +876,7 @@ test("parseManagedHaReconcilePayload rejects identity raft cluster and member sh
     () =>
       parseManagedHaReconcilePayload({
         serverId: SERVER_ID,
+        managedNetwork: MANAGED_NETWORK,
         desired: "present",
         raft: null,
         clusters: [{
@@ -1160,6 +1171,7 @@ test("parseManagedIngressReconcilePayload rejects leftover identity cluster and 
   );
   const accepted = parseManagedIngressReconcilePayload({
     serverId: SERVER_ID,
+    managedNetwork: MANAGED_NETWORK,
     clusters: VALID_INGRESS.clusters,
     identity: {
       serviceId: SERVICE_ID,
@@ -1176,6 +1188,7 @@ test("parseManagedHaReconcilePayload rejects leftover identity raft cluster and 
     () =>
       parseManagedHaReconcilePayload({
         serverId: SERVER_ID,
+        managedNetwork: MANAGED_NETWORK,
         desired: "present",
         raft: null,
         clusters: [],
@@ -1188,6 +1201,7 @@ test("parseManagedHaReconcilePayload rejects leftover identity raft cluster and 
     () =>
       parseManagedHaReconcilePayload({
         serverId: SERVER_ID,
+        managedNetwork: MANAGED_NETWORK,
         desired: "present",
         raft: {
           nodeId: SERVER_ID,
@@ -1206,6 +1220,7 @@ test("parseManagedHaReconcilePayload rejects leftover identity raft cluster and 
     () =>
       parseManagedHaReconcilePayload({
         serverId: SERVER_ID,
+        managedNetwork: MANAGED_NETWORK,
         desired: "present",
         raft: {
           nodeId: SERVER_ID,
@@ -1229,6 +1244,7 @@ test("parseManagedHaReconcilePayload rejects leftover identity raft cluster and 
     () =>
       parseManagedHaReconcilePayload({
         serverId: SERVER_ID,
+        managedNetwork: MANAGED_NETWORK,
         desired: "present",
         raft: null,
         clusters: [{
@@ -1255,6 +1271,7 @@ test("parseManagedHaReconcilePayload rejects leftover identity raft cluster and 
     () =>
       parseManagedHaReconcilePayload({
         serverId: SERVER_ID,
+        managedNetwork: MANAGED_NETWORK,
         desired: "present",
         raft: null,
         clusters: [{
@@ -1281,6 +1298,7 @@ test("parseManagedHaReconcilePayload rejects leftover identity raft cluster and 
     () =>
       parseManagedHaReconcilePayload({
         serverId: SERVER_ID,
+        managedNetwork: MANAGED_NETWORK,
         desired: "present",
         raft: {
           nodeId: SERVER_ID,
@@ -1304,6 +1322,7 @@ test("parseManagedHaReconcilePayload rejects leftover identity raft cluster and 
   );
   const withTls = parseManagedHaReconcilePayload({
     serverId: SERVER_ID,
+    managedNetwork: MANAGED_NETWORK,
     desired: "absent",
     raft: null,
     clusters: [],

@@ -50,7 +50,6 @@ import {
 } from "../../managed/proxysql.ts";
 import { materializeProxySqlTlsMaterial } from "../../managed/tls.ts";
 import {
-  PROXYSQL_PROJECT,
   proxysqlAdminCnfPath,
   proxysqlComposePath,
   proxysqlConfigPath,
@@ -82,7 +81,8 @@ function desiredStateFromPayload(
     // scope that reaches the host" (see instance `ingress-desired.ts`
     // `decideIngressBindScopes`) — it must never be widened to "publish on every
     // interface". `[]` here means the shared frontend is reachable only via
-    // `MANAGED_INGRESS_NETWORK` (bindings from co-located compose services),
+    // the organization's managed Docker network (bindings from co-located
+    // compose services),
     // never the host. See `ProxySqlDesiredState.bindAddresses`.
     bindAddresses: payload.bindAddresses ?? [],
     // Absent means the control plane predates configurable ports; the renderer
@@ -227,10 +227,10 @@ async function ensureProxySqlComposeUp(
   );
   await Deno.mkdir(configDir, { recursive: true, mode: 0o750 });
   await Deno.writeTextFile(composePath, composeYaml, { mode: 0o640 });
+  // No `-p`: the daemon-written compose file declares its own project through
+  // the top-level `name:` key (the managed-ingress `serviceId`).
   const up = await run([
     "compose",
-    "-p",
-    PROXYSQL_PROJECT,
     "-f",
     composePath,
     "up",
@@ -287,8 +287,6 @@ async function tearDownProxySqlStack(
   }
   const down = await run([
     "compose",
-    "-p",
-    PROXYSQL_PROJECT,
     "-f",
     composePath,
     "down",
@@ -379,6 +377,14 @@ export async function handleManagedIngressReconcile(
     );
   }
 
+  // The managed network must exist before any lazy host prep runs: that
+  // playbook ends by starting `turbopanel-proxysql-stack.service`, whose unit
+  // runs `docker compose up -d` against an existing compose file. On a rerun
+  // where the external managed network was pruned, that start fails unless the
+  // daemon recreated the network first.
+  await ensureDockerFn();
+  await ensureManagedIngressNetwork(parsed.managedNetwork, run);
+
   if (!(await proxySqlHostPrepPresent(layout))) {
     await runHostPrep();
   }
@@ -399,9 +405,6 @@ export async function handleManagedIngressReconcile(
     parsed.orgTlsMaterial,
     deps.decryptSecrets,
   );
-
-  await ensureDockerFn();
-  await ensureManagedIngressNetwork(run);
 
   const adminCredentials = await loadProxySqlAdminCredentials(layout);
   const monitorCredentials = await loadProxySqlMonitorCredentials(layout);
@@ -452,6 +455,7 @@ export async function handleManagedIngressReconcile(
     bindAddresses,
     desired.segments ?? [],
     desired.listenerPorts,
+    parsed.managedNetwork,
   );
   const composeNeedsUp =
     previousComposeText?.trimEnd() !== nextComposeText.trimEnd();

@@ -30,6 +30,13 @@ import {
 } from "./contracts.ts";
 
 /**
+ * Shared hosting-ingress Docker network — the `hosting-ingress` system
+ * component's allocated `serviceId`, required on the wire whenever a deploy
+ * carries hostings. A bare UUID, not a readable literal.
+ */
+const HOSTING_INGRESS_NETWORK = "00000000-0000-4000-8000-0000000000bb";
+
+/**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
  *
  * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
@@ -86,6 +93,7 @@ test("environment.deploy hosting fixture round-trips bindAddress", () => {
         bindAddress: "203.0.113.10",
       },
     ],
+    hostingIngressNetwork: HOSTING_INGRESS_NETWORK,
   });
   assertEquals(payload.hostings[0]?.bindAddress, "203.0.113.10");
 });
@@ -131,6 +139,102 @@ test("environment.deploy hostingIngress round-trips shared Traefik identity", ()
     composeServiceName: "traefik",
     containerName: `${serviceId}-in`,
   });
+});
+
+test("environment.deploy ties hostingIngressNetwork to the hostingIngress serviceId", () => {
+  const serviceId = "00000000-0000-4000-8000-0000000000aa";
+  const base = {
+    environmentId: "env-1",
+    projectId: "proj-1",
+    organizationId: "org-1",
+    projectName: "demo",
+    composeFiles: [{
+      filename: "compose.yaml",
+      role: "runtime",
+      content: "services:\n  web:\n    image: nginx\n",
+    }],
+    hostings: [{
+      hostingId: "h1",
+      serviceId: "s1",
+      composeServiceName: "web",
+      hostnames: ["app.example.com"],
+    }],
+    hostingIngress: {
+      serviceId,
+      composeServiceName: "traefik",
+      containerName: `${serviceId}-in`,
+    },
+  };
+  // The shared hosting-ingress network *is* that component's compose project,
+  // so both must name the same allocated serviceId.
+  assertEquals(
+    parseEnvironmentDeployPayload({
+      ...base,
+      hostingIngressNetwork: serviceId,
+    }).hostingIngressNetwork,
+    serviceId,
+  );
+  // A skewed payload would persist one identity while deploying the network /
+  // compose project under another.
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...base,
+        hostingIngressNetwork: HOSTING_INGRESS_NETWORK,
+      }),
+    TypeError,
+    "Invalid environment deploy payload",
+  );
+});
+
+test("environment.deploy rejects a Compose-invalid hostingIngressNetwork", () => {
+  const base = {
+    environmentId: "env-1",
+    projectId: "proj-1",
+    organizationId: "org-1",
+    projectName: "demo",
+    composeFiles: [{
+      filename: "compose.yaml",
+      role: "runtime",
+      content: "services:\n  web:\n    image: nginx\n",
+    }],
+    hostings: [{
+      hostingId: "h1",
+      serviceId: "s1",
+      composeServiceName: "web",
+      hostnames: ["app.example.com"],
+    }],
+  };
+  // Each of these passes the broad Docker resource rule but fails
+  // `assertSafeComposeProjectName` in `src/deploy/ingress.ts`; rejecting them
+  // here keeps the failure at the contract boundary instead of mid-apply.
+  for (
+    const network of [
+      "Ingress-Net",
+      "ingress.net",
+      "-ingress",
+      "",
+      "a".repeat(65),
+      42,
+    ]
+  ) {
+    assertThrows(
+      () =>
+        parseEnvironmentDeployPayload({
+          ...base,
+          hostingIngressNetwork: network,
+        }),
+      TypeError,
+      "Invalid environment deploy payload",
+    );
+  }
+  assertEquals(
+    parseEnvironmentDeployPayload({
+      ...base,
+      hostingIngressNetwork: HOSTING_INGRESS_NETWORK,
+    }).hostingIngressNetwork,
+    HOSTING_INGRESS_NETWORK,
+  );
 });
 
 test("environment.deploy rejects the pre-rename traditionalWebSites key", () => {
@@ -470,6 +574,7 @@ test("environment.deploy hosting fixture round-trips tcp protocol and ports", ()
         bindAddress: "203.0.113.10",
       },
     ],
+    hostingIngressNetwork: HOSTING_INGRESS_NETWORK,
   });
   assertEquals(payload.hostings[0]?.protocol, "tcp");
   assertEquals(payload.hostings[0]?.ports, [{ published: 5432, target: 5432 }]);
@@ -556,6 +661,7 @@ test("environment.deploy sites fixture round-trips", () => {
         hostnames: ["site.example.com"],
       },
     ],
+    hostingIngressNetwork: HOSTING_INGRESS_NETWORK,
     sites: [
       {
         composeServiceName: "site",
@@ -825,9 +931,11 @@ test("environment.deploy round-trips managedNetworkServices and rejects hostile 
     }],
     hostings: [],
     managedNetworkServices: ["app", "app"],
+    managedNetwork: MANAGED_NETWORK,
   });
   // Deduped and sorted, mirroring the instance parser.
   assertEquals(payload.managedNetworkServices, ["app"]);
+  assertEquals(payload.managedNetwork, MANAGED_NETWORK);
   assertThrows(
     () =>
       parseEnvironmentDeployPayload({
@@ -842,9 +950,114 @@ test("environment.deploy round-trips managedNetworkServices and rejects hostile 
         }],
         hostings: [],
         managedNetworkServices: ["bad;name"],
+        managedNetwork: MANAGED_NETWORK,
       }),
     TypeError,
     "Invalid managedNetworkServices entry",
+  );
+  // Compose service keys never contain spaces; the instance parser rejects
+  // this, so the daemon must too (the ingress name rule would accept it).
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        environmentId: "env-1",
+        projectId: "proj-1",
+        organizationId: "org-1",
+        projectName: "demo",
+        composeFiles: [{
+          filename: "compose.yaml",
+          role: "runtime",
+          content: "services:\n  app:\n    image: nginx\n",
+        }],
+        hostings: [],
+        managedNetworkServices: ["bad name"],
+        managedNetwork: MANAGED_NETWORK,
+      }),
+    TypeError,
+    "Invalid managedNetworkServices entry",
+  );
+});
+
+test("environment.deploy pairs managedNetwork with its services", () => {
+  const base = {
+    environmentId: "env-1",
+    projectId: "proj-1",
+    organizationId: "org-1",
+    projectName: "demo",
+    composeFiles: [{
+      filename: "compose.yaml",
+      role: "runtime",
+      content: "services:\n  app:\n    image: nginx\n",
+    }],
+    hostings: [],
+  };
+  // Nothing joins the network — carrying a name for it would be dead weight
+  // this daemon could act on, so it is rejected rather than dropped.
+  assertEquals(parseEnvironmentDeployPayload(base).managedNetwork, undefined);
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...base,
+        managedNetwork: MANAGED_NETWORK,
+      }),
+    TypeError,
+    "Invalid environment deploy payload",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...base,
+        managedNetworkServices: ["app"],
+      }),
+    TypeError,
+    "Invalid environment deploy payload",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...base,
+        managedNetworkServices: ["app"],
+        managedNetwork: "not a docker name",
+      }),
+    TypeError,
+    "Invalid environment deploy payload",
+  );
+});
+
+test("managed payloads reject a non-Docker managedNetwork", () => {
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        managedNetwork: "not a docker name",
+      }),
+    TypeError,
+    "Invalid managed.apply payload",
+  );
+  assertThrows(
+    () =>
+      parseManagedIngressReconcilePayload({
+        ...VALID_MANAGED_INGRESS_RECONCILE,
+        managedNetwork: undefined,
+      }),
+    TypeError,
+    "Invalid managed.ingress.reconcile payload",
+  );
+  assertThrows(
+    () =>
+      parseManagedHaReconcilePayload({
+        serverId: "00000000-0000-4000-8000-0000000000ab",
+        desired: "absent",
+        raft: null,
+        clusters: [],
+        identity: {
+          serviceId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          composeServiceName: "orchestrator",
+          containerName: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee-ha",
+        },
+      }),
+    TypeError,
+    "Invalid managed.ha.reconcile payload",
   );
 });
 
@@ -1339,12 +1552,16 @@ test("server.fabric.reconcile disable result is summary-only", () => {
   assertEquals(result.skipped, undefined);
 });
 
+/** Org-wide managed Docker network name — a `network.kind='managed'` row id. */
+const MANAGED_NETWORK = "00000000-0000-4000-8000-0000000000ee";
+
 const VALID_MANAGED_APPLY = {
   managedId: "00000000-0000-4000-8000-000000000001",
   environmentId: "00000000-0000-4000-8000-000000000002",
   engine: "postgres",
   projectName: "tp-managed-pg",
   containerName: "01936b3e-aaaa-bbbb-cccc-123456789abc-1",
+  managedNetwork: MANAGED_NETWORK,
   image: "docker.io/library/postgres:18-alpine",
   containerPort: 5432,
   composeYaml: "services:\n  postgres:\n    image: postgres:18-alpine\n",
@@ -1382,6 +1599,7 @@ const VALID_MANAGED_APPLY = {
 test("managed.apply fixture round-trips", () => {
   const payload = parseManagedApplyPayload(VALID_MANAGED_APPLY);
   assertEquals(payload.engine, "postgres");
+  assertEquals(payload.managedNetwork, MANAGED_NETWORK);
   assertEquals(payload.projectName, "tp-managed-pg");
   assertEquals(
     payload.containerName,
@@ -2375,6 +2593,7 @@ test("managed.apply round-trips a fabric peer and rejects vpn", () => {
 
 const VALID_MANAGED_INGRESS_RECONCILE = {
   serverId: "00000000-0000-4000-8000-0000000000ab",
+  managedNetwork: MANAGED_NETWORK,
   bindAddresses: ["203.0.113.10"],
   orgTlsMaterial: {
     certificatePem:
@@ -2480,11 +2699,14 @@ test("managed.ingress.reconcile round-trips fabric backends and segments", () =>
     }).clusters[0]?.protocolPort,
     15432,
   );
+  // Teardown still names the network — the field is unconditional on the wire.
   const teardown = parseManagedIngressReconcilePayload({
     serverId: VALID_MANAGED_INGRESS_RECONCILE.serverId,
+    managedNetwork: MANAGED_NETWORK,
     clusters: [],
   });
   assertEquals(teardown.clusters, []);
+  assertEquals(teardown.managedNetwork, MANAGED_NETWORK);
   assertEquals(teardown.orgTlsMaterial, undefined);
   assertEquals(teardown.identity, undefined);
 });
@@ -2673,6 +2895,7 @@ test("managed.ha.reconcile round-trips identity and teardown", () => {
   const serviceId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
   const payload = parseManagedHaReconcilePayload({
     serverId: "00000000-0000-4000-8000-0000000000ab",
+    managedNetwork: MANAGED_NETWORK,
     desired: "absent",
     raft: null,
     clusters: [],
@@ -2683,6 +2906,7 @@ test("managed.ha.reconcile round-trips identity and teardown", () => {
     },
   });
   assertEquals(payload.desired, "absent");
+  assertEquals(payload.managedNetwork, MANAGED_NETWORK);
   assertEquals(payload.raft, null);
   assertEquals(payload.identity.containerName, `${serviceId}-ha`);
 });
@@ -2692,6 +2916,7 @@ test("managed.ha.reconcile round-trips raft peers and cluster members", () => {
   const managedId = "00000000-0000-4000-8000-000000000001";
   const payload = parseManagedHaReconcilePayload({
     serverId: "00000000-0000-4000-8000-0000000000ab",
+    managedNetwork: MANAGED_NETWORK,
     desired: "present",
     raft: {
       nodeId: "00000000-0000-4000-8000-0000000000ab",

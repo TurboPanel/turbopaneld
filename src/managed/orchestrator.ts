@@ -8,7 +8,10 @@
  */
 
 import { join } from "@std/path";
-import { assertValidBindAddress } from "../deploy/ingress.ts";
+import {
+  assertSafeComposeProjectName,
+  assertValidBindAddress,
+} from "../deploy/ingress.ts";
 import {
   LABEL_ROLE,
   LABEL_ROLE_SYSTEM,
@@ -30,14 +33,13 @@ import {
 } from "../deploy/docker-cli.ts";
 import { logInfo } from "../logger.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
-import { MANAGED_INGRESS_NETWORK } from "./networks.ts";
 import {
-  ORCHESTRATOR_PROJECT,
   orchestratorApiCnfPath,
   orchestratorComposePath,
   orchestratorConfigDir,
   orchestratorConfPath,
   orchestratorDataDir,
+  orchestratorProject,
   orchestratorRaftCnfPath,
   orchestratorTlsDir,
 } from "./paths.ts";
@@ -155,16 +157,29 @@ export function renderOrchestratorConf(input: OrchestratorConfInput): string {
   return `${JSON.stringify(conf, null, 2)}\n`;
 }
 
+/**
+ * Compose document for the per-org Orchestrator Raft group.
+ *
+ * Declares its own compose project through the top-level `name:` key — the
+ * `managed-ha` component's allocated `serviceId` — so `docker compose -f
+ * <path> …` resolves the project without `-p`, which is what lets the Ansible
+ * stack unit stop templating a project name it cannot know at converge time.
+ */
 export function orchestratorCompose(
   identity: SystemComponentDescriptor,
   raft: ManagedHaRaftConfig,
+  managedNetwork: string,
 ): string {
+  const project = orchestratorProject(identity.serviceId);
+  assertSafeComposeProjectName(project);
   const raftPublish = formatPublishedPort(
     raft.advertiseAddress,
     raft.raftPort,
   );
   const httpPublish = formatPublishedPort("127.0.0.1", raft.httpPort);
   const lines = [
+    `name: ${project}`,
+    "",
     "services:",
     `  ${ORCHESTRATOR_COMPOSE_SERVICE_NAME}:`,
     `    image: ${ORCHESTRATOR_IMAGE}`,
@@ -190,7 +205,7 @@ export function orchestratorCompose(
     }:/etc/orchestrator.conf.json:ro`,
     `      - ${quoteYamlScalar(join(".", "tls"))}:/etc/orchestrator/tls:ro`,
     "    networks:",
-    `      - ${MANAGED_INGRESS_NETWORK}`,
+    `      - ${managedNetwork}`,
     "    command:",
     "      - /usr/local/orchestrator/orchestrator",
     "      - -config",
@@ -201,7 +216,7 @@ export function orchestratorCompose(
     "  orchestrator-data:",
     "",
     "networks:",
-    `  ${MANAGED_INGRESS_NETWORK}:`,
+    `  ${managedNetwork}:`,
     "    external: true",
     "",
   ];
@@ -253,8 +268,6 @@ export async function inspectOrchestratorContainer(
 
     const result = await run([
       "compose",
-      "-p",
-      ORCHESTRATOR_PROJECT,
       "-f",
       composePath,
       "ps",
@@ -296,6 +309,7 @@ export async function ensureOrchestratorStack(
   layout: LayoutPaths,
   descriptor: SystemComponentDescriptor,
   raft: ManagedHaRaftConfig,
+  managedNetwork: string,
   conf: string,
   run: RunDockerFn = defaultRunDocker,
 ): Promise<boolean> {
@@ -312,7 +326,7 @@ export async function ensureOrchestratorStack(
 
   const composePath = orchestratorComposePath(layout);
   const confPath = orchestratorConfPath(layout);
-  const composeYaml = orchestratorCompose(descriptor, raft);
+  const composeYaml = orchestratorCompose(descriptor, raft, managedNetwork);
   const previousCompose = await readPreviousConfig(composePath);
   const previousConf = await readPreviousConfig(confPath);
   const restarted = previousCompose !== composeYaml || previousConf !== conf;
@@ -322,8 +336,6 @@ export async function ensureOrchestratorStack(
 
   const up = await run([
     "compose",
-    "-p",
-    ORCHESTRATOR_PROJECT,
     "-f",
     composePath,
     "up",
@@ -344,8 +356,6 @@ export async function stopOrchestratorStack(
   if (!(await pathExists(composePath))) return;
   const down = await run([
     "compose",
-    "-p",
-    ORCHESTRATOR_PROJECT,
     "-f",
     composePath,
     "down",
@@ -364,8 +374,6 @@ export async function restartOrchestratorStack(
   if (!(await pathExists(composePath))) return;
   const restart = await run([
     "compose",
-    "-p",
-    ORCHESTRATOR_PROJECT,
     "-f",
     composePath,
     "restart",
@@ -394,6 +402,57 @@ export async function orchestratorStackPresent(
     return true;
   } catch (err) {
     if (err instanceof Deno.errors.NotFound) return false;
+    throw err;
+  }
+}
+
+const TOP_LEVEL_NETWORKS_HEADER = "networks:";
+const TOP_LEVEL_NETWORK_LINE_PREFIX = "  ";
+
+/**
+ * Recover the organization's managed Docker network name from an on-disk
+ * `docker-compose.yml` produced by {@link orchestratorCompose}.
+ *
+ * The self-heal path (`system.reconcile` → `orchestrator`) has no fresh
+ * `managed.ha.reconcile` payload in hand, so the only surviving record of the
+ * name is the compose file itself. The orchestrator document declares exactly
+ * one top-level network (no segment attachments), so the first entry under the
+ * column-0 `networks:` header is it. Returns `null` for compose text it cannot
+ * confidently parse.
+ */
+export function readManagedNetworkFromCompose(
+  composeText: string,
+): string | null {
+  const lines = composeText.split("\n");
+  const start = lines.indexOf(TOP_LEVEL_NETWORKS_HEADER);
+  if (start === -1) return null;
+
+  for (let index = start + 1; index < lines.length; index++) {
+    const line = lines[index]!;
+    if (line.trim().length === 0) break;
+    if (!line.startsWith(TOP_LEVEL_NETWORK_LINE_PREFIX)) break;
+    const body = line.slice(TOP_LEVEL_NETWORK_LINE_PREFIX.length);
+    if (body.startsWith(" ")) continue;
+    const colon = body.indexOf(":");
+    if (colon <= 0) return null;
+    return body.slice(0, colon);
+  }
+  return null;
+}
+
+/**
+ * Best-effort read of the managed Docker network name already rendered into
+ * the on-disk orchestrator compose file (`null` when absent / unparseable).
+ * See {@link readManagedNetworkFromCompose}.
+ */
+export async function readCurrentOrchestratorManagedNetwork(
+  layout: LayoutPaths,
+): Promise<string | null> {
+  try {
+    const text = await Deno.readTextFile(orchestratorComposePath(layout));
+    return readManagedNetworkFromCompose(text);
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return null;
     throw err;
   }
 }

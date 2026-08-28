@@ -60,6 +60,7 @@ function presentPayload(
 ): ManagedHaReconcilePayload {
   return {
     serverId: SERVER_ID,
+    managedNetwork: "00000000-0000-4000-8000-0000000000ee",
     desired: "present",
     raft: {
       nodeId: "00000000-0000-4000-8000-0000000000ab",
@@ -91,6 +92,7 @@ function presentPayload(
 function teardownPayload(): ManagedHaReconcilePayload {
   return {
     serverId: SERVER_ID,
+    managedNetwork: "00000000-0000-4000-8000-0000000000ee",
     desired: "absent",
     raft: null,
     clusters: [],
@@ -310,6 +312,92 @@ test({
           },
         );
         assertEquals(hostPrepCalls, 1);
+      } finally {
+        clearLayoutEnv();
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleManagedHaReconcile ensures the managed network before lazy host prep",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env);
+      // A rerun on a host that already has a compose file but whose external
+      // managed network was pruned: host prep ends by starting
+      // `turbopanel-orchestrator-stack.service`, whose unit runs
+      // `docker compose up -d` against that network.
+      await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
+      await Deno.writeTextFile(
+        orchestratorComposePath(layout),
+        "services: {}\n",
+      );
+      applyLayoutEnv(fixture);
+      const events: string[] = [];
+      try {
+        await handleManagedHaReconcile(
+          presentPayload({ clusters: [] }),
+          new Date().toISOString(),
+          {
+            runDocker: (args) => {
+              if (args[0] === "network") events.push(`network:${args[1]}`);
+              return fakeRunSuccess()(args);
+            },
+            ensureDocker: () => Promise.resolve(),
+            decryptSecrets: decryptSecretsEcho,
+            runHostPrep: async () => {
+              events.push("host-prep");
+              await seedOrchestratorHostPrep(layout);
+            },
+          },
+        );
+        assertEquals(events[0], "network:inspect");
+        assertEquals(events.includes("host-prep"), true);
+        assertEquals(events.indexOf("host-prep") > 0, true);
+      } finally {
+        clearLayoutEnv();
+      }
+    });
+  },
+});
+
+test({
+  name: "handleManagedHaReconcile never runs host prep on teardown",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env);
+      // Partially prepared host: compose exists but api.cnf does not, so the
+      // old ordering would have started the stack on its way to stopping it.
+      await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
+      await Deno.writeTextFile(
+        orchestratorComposePath(layout),
+        "services: {}\n",
+      );
+      applyLayoutEnv(fixture);
+      let hostPrepCalls = 0;
+      const dockerArgs: string[][] = [];
+      try {
+        await handleManagedHaReconcile(
+          teardownPayload(),
+          new Date().toISOString(),
+          {
+            runDocker: (args) => {
+              dockerArgs.push([...args]);
+              return fakeRunSuccess()(args);
+            },
+            ensureDocker: () => Promise.resolve(),
+            runHostPrep: () => {
+              hostPrepCalls += 1;
+              return Promise.resolve();
+            },
+          },
+        );
+        assertEquals(hostPrepCalls, 0);
+        assertEquals(dockerArgs.some((args) => args.includes("down")), true);
       } finally {
         clearLayoutEnv();
       }

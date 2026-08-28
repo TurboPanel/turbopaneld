@@ -24,6 +24,8 @@ import {
   ORCHESTRATOR_IMAGE,
   orchestratorCompose,
   orchestratorStackPresent,
+  readCurrentOrchestratorManagedNetwork,
+  readManagedNetworkFromCompose,
   renderOrchestratorConf,
   restartOrchestratorStack,
   stopOrchestratorStack,
@@ -43,6 +45,9 @@ import {
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
 const test = Deno.test.bind(Deno);
+
+/** Managed network names are the `network(kind='managed')` row's bare UUID. */
+const MANAGED_NETWORK = "00000000-0000-4000-8000-0000000000ee";
 
 const HA_DESCRIPTOR: SystemComponentDescriptor = {
   component: SYSTEM_MANAGED_HA_COMPONENT,
@@ -123,6 +128,7 @@ test("orchestratorCompose publishes HTTP on loopback and Raft on advertise only"
       raftPort: MANAGED_HA_RAFT_PORT,
       peers: [],
     },
+    MANAGED_NETWORK,
   );
   assertEquals(yaml.includes(ORCHESTRATOR_IMAGE), true);
   assertEquals(yaml.includes("127.0.0.1:33001:33001"), true);
@@ -148,6 +154,7 @@ test("orchestratorCompose refuses publishing on every interface", () => {
           raftPort: MANAGED_HA_RAFT_PORT,
           peers: [],
         },
+        MANAGED_NETWORK,
       ),
     Error,
     "must not publish on every interface",
@@ -360,6 +367,56 @@ test("inspectOrchestratorContainer returns undefined when runDocker throws", asy
   }
 });
 
+test("orchestratorCompose declares its project through the name: key", () => {
+  const yaml = orchestratorCompose(HA_DESCRIPTOR, BASE_RAFT, MANAGED_NETWORK);
+  // The compose project is the managed-ha serviceId, carried by the document
+  // itself so neither the daemon nor the Ansible stack unit passes `-p`.
+  assertEquals(yaml.startsWith(`name: ${HA_DESCRIPTOR.serviceId}\n`), true);
+});
+
+test("orchestratorCompose renders the managed network it is given", () => {
+  const other = "11111111-1111-4111-8111-111111111111";
+  const yaml = orchestratorCompose(HA_DESCRIPTOR, BASE_RAFT, other);
+  assertEquals(yaml.includes(`      - ${other}`), true);
+  assertEquals(yaml.includes(`  ${other}:\n    external: true`), true);
+  assertEquals(yaml.includes(MANAGED_NETWORK), false);
+});
+
+test("readManagedNetworkFromCompose round-trips orchestratorCompose", () => {
+  assertEquals(
+    readManagedNetworkFromCompose(
+      orchestratorCompose(HA_DESCRIPTOR, BASE_RAFT, MANAGED_NETWORK),
+    ),
+    MANAGED_NETWORK,
+  );
+  assertEquals(readManagedNetworkFromCompose(""), null);
+  assertEquals(readManagedNetworkFromCompose("services: {}\n"), null);
+  assertEquals(readManagedNetworkFromCompose("networks:\n"), null);
+});
+
+test("readCurrentOrchestratorManagedNetwork reads the name back off disk", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    assertEquals(await readCurrentOrchestratorManagedNetwork(layout), null);
+
+    await ensureOrchestratorStack(
+      layout,
+      HA_DESCRIPTOR,
+      BASE_RAFT,
+      MANAGED_NETWORK,
+      sampleConf(),
+      fakeRunSuccess(),
+    );
+    assertEquals(
+      await readCurrentOrchestratorManagedNetwork(layout),
+      MANAGED_NETWORK,
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("ensureOrchestratorStack writes files and reports restart on first apply", async () => {
   const fixture = await createTempLayout();
   try {
@@ -369,6 +426,7 @@ test("ensureOrchestratorStack writes files and reports restart on first apply", 
       layout,
       HA_DESCRIPTOR,
       BASE_RAFT,
+      MANAGED_NETWORK,
       conf,
       fakeRunSuccess(),
     );
@@ -398,6 +456,7 @@ test("ensureOrchestratorStack reports no restart when compose and conf are uncha
         layout,
         HA_DESCRIPTOR,
         BASE_RAFT,
+        MANAGED_NETWORK,
         conf,
         fakeRunSuccess(),
       ),
@@ -408,6 +467,7 @@ test("ensureOrchestratorStack reports no restart when compose and conf are uncha
         layout,
         HA_DESCRIPTOR,
         BASE_RAFT,
+        MANAGED_NETWORK,
         conf,
         fakeRunSuccess(),
       ),
@@ -428,6 +488,7 @@ test("ensureOrchestratorStack throws when compose up fails", async () => {
           layout,
           HA_DESCRIPTOR,
           BASE_RAFT,
+          MANAGED_NETWORK,
           sampleConf(),
           () =>
             Promise.resolve({

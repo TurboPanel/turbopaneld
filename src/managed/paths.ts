@@ -24,13 +24,19 @@ const SAFE_VOLUME_NAME_RE = /^[A-Za-z_]\w*$/;
 /** Hyphen-permitting; must stay in sync with instance `DOCKER_RESOURCE_NAME_RE`. */
 const SAFE_CONTAINER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/;
 
-export const PROXYSQL_PROJECT = "turbopanel-proxysql";
-
-/** Compose project for the per-org Orchestrator Raft group. */
-export const ORCHESTRATOR_PROJECT = "turbopanel-orchestrator";
-
-export function proxysqlProject(): string {
-  return PROXYSQL_PROJECT;
+/**
+ * Compose project for the shared ProxySQL managed ingress — the persisted
+ * `managed-ingress` system-component descriptor's `serviceId` (a bare UUID),
+ * never a readable literal. Callers that do not already hold the descriptor
+ * read it with `readSystemComponentDescriptor(layout, 'managed-ingress')`.
+ *
+ * The daemon-written `docker-compose.yml` carries the same value as its
+ * top-level `name:` key, so `docker compose -f <path> …` resolves the project
+ * without `-p` (which is what lets the Ansible stack unit stop templating a
+ * project name it cannot know at converge time).
+ */
+export function proxysqlProject(serviceId: string): string {
+  return serviceId;
 }
 
 export function proxysqlConfigDir(layout: LayoutPaths): string {
@@ -62,8 +68,13 @@ export function proxysqlMonitorCnfPath(layout: LayoutPaths): string {
   return join(proxysqlConfigDir(layout), "monitor.cnf");
 }
 
-export function orchestratorProject(): string {
-  return ORCHESTRATOR_PROJECT;
+/**
+ * Compose project for the per-org Orchestrator Raft group — the persisted
+ * `managed-ha` system-component descriptor's `serviceId` (a bare UUID). Same
+ * compose-file `name:` contract as {@link proxysqlProject}.
+ */
+export function orchestratorProject(serviceId: string): string {
+  return serviceId;
 }
 
 export function orchestratorConfigDir(layout: LayoutPaths): string {
@@ -127,8 +138,14 @@ export function managedEnvFilePath(
   return join(managedDir(layout, managedId), ".env");
 }
 
+/**
+ * Compose project for one managed engine — the bare `managedId` (already a
+ * UUID), with no readable prefix. `assertSafeManagedIdentifiers` still
+ * enforces `COMPOSE_PROJECT_RE` and the 64-char bound on the instance-supplied
+ * `projectName`, which a lowercase UUID satisfies.
+ */
 export function managedComposeProject(managedId: string): string {
-  return `turbopanel-managed-${managedId}`;
+  return managedId;
 }
 
 /**

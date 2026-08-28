@@ -9,6 +9,7 @@ import type {
   ManagedApplyResult,
 } from "../instance/commands/contracts.ts";
 import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts";
+import { ensureManagedIngressNetwork } from "./networks.ts";
 import {
   createStreamedRunner,
   type DockerCliResult,
@@ -520,6 +521,10 @@ export async function handleManagedApply(
   const runHostPrep = deps?.runHostPrep ?? runProxySqlSetup;
 
   await ensureDocker();
+  // Before any `compose up` (engine or bootstrap `docker run --network …`):
+  // the organization's managed network must exist first or compose fails on
+  // the external network reference.
+  await ensureManagedIngressNetwork(payload.managedNetwork, run);
 
   const managedRoot = await materializeManagedState(
     layout,
@@ -558,6 +563,7 @@ export async function handleManagedApply(
       {
         managedId: payload.managedId,
         image: payload.image,
+        managedNetwork: payload.managedNetwork,
         volumes: payload.volumes,
         stateDir: managedRoot,
         containerUser: engine.containerUser,

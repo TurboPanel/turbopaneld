@@ -30,7 +30,9 @@ import {
   type ProxySqlDesiredState,
   readCurrentProxySqlBindAddresses,
   readCurrentProxySqlListenerPorts,
+  readCurrentProxySqlManagedNetwork,
   readCurrentProxySqlSegmentAttachments,
+  readManagedNetworkFromCompose,
   readPublishedBindAddressesFromCompose,
   readPublishedListenerPortsFromCompose,
   readSegmentAttachmentsFromCompose,
@@ -53,6 +55,9 @@ import { SYSTEM_MANAGED_INGRESS_COMPONENT } from "../deploy/system-component.ts"
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
 const test = Deno.test.bind(Deno);
+
+/** Managed network names are the `network(kind='managed')` row's bare UUID. */
+const MANAGED_NETWORK = "00000000-0000-4000-8000-0000000000ee";
 
 const DESCRIPTOR: SystemComponentDescriptor = {
   component: SYSTEM_MANAGED_INGRESS_COMPONENT,
@@ -116,16 +121,18 @@ test("reservedManagedIngressAddress pins the last usable host", () => {
 });
 
 test("proxysqlCompose without descriptor stays anonymous", () => {
-  const compose = proxysqlCompose();
+  const compose = proxysqlCompose(null, [], [], null, MANAGED_NETWORK);
   assertStringIncludes(compose, `image: ${PROXYSQL_IMAGE}`);
   assertEquals(compose.includes("container_name:"), false);
-  assertStringIncludes(compose, "turbopanel-managed:");
+  // No allocated identity means no project name to declare.
+  assertEquals(compose.includes("name:"), false);
+  assertStringIncludes(compose, `${MANAGED_NETWORK}:`);
   assertStringIncludes(compose, "external: true");
   assertStringIncludes(compose, "127.0.0.1:6032:6032");
 });
 
 test("proxysqlCompose with descriptor emits identity + system labels", () => {
-  const compose = proxysqlCompose(DESCRIPTOR);
+  const compose = proxysqlCompose(DESCRIPTOR, [], [], null, MANAGED_NETWORK);
   assertStringIncludes(compose, `container_name: ${DESCRIPTOR.containerName}`);
   assertEquals(DESCRIPTOR.containerName.endsWith("-in"), true);
   assertStringIncludes(compose, "component: managed-ingress");
@@ -134,6 +141,10 @@ test("proxysqlCompose with descriptor emits identity + system labels", () => {
     'com.turbopanel.system.component: "managed-ingress"',
   );
   assertStringIncludes(compose, "turbopanel.role: ingress");
+  // The compose project rides the document itself, so the stack unit and the
+  // daemon both run `docker compose -f <path> …` with no `-p`.
+  assertStringIncludes(compose, `name: ${DESCRIPTOR.serviceId}`);
+  assertEquals(compose.startsWith(`name: ${DESCRIPTOR.serviceId}\n`), true);
 });
 
 test("formatProxySqlBindHost brackets IPv6 and validates bind", () => {
@@ -144,7 +155,13 @@ test("formatProxySqlBindHost brackets IPv6 and validates bind", () => {
 });
 
 test("proxysqlCompose publishes bind-aware listener ports", () => {
-  const compose = proxysqlCompose(null, ["2001:db8::10"]);
+  const compose = proxysqlCompose(
+    null,
+    ["2001:db8::10"],
+    [],
+    null,
+    MANAGED_NETWORK,
+  );
   assertStringIncludes(compose, '"[2001:db8::10]:15432:15432"');
   assertStringIncludes(compose, '"[2001:db8::10]:13306:13306"');
 });
@@ -152,36 +169,34 @@ test("proxysqlCompose publishes bind-aware listener ports", () => {
 test("proxysqlCompose omits published db ports entirely when bindAddresses is empty", () => {
   // Regression coverage: exposure disabled everywhere must never fall back to
   // publishing on every interface. Only the loopback-only admin port remains.
-  const compose = proxysqlCompose(DESCRIPTOR, []);
+  const compose = proxysqlCompose(DESCRIPTOR, [], [], null, MANAGED_NETWORK);
   assertEquals(compose.includes(`:${PGSQL_PORT}:${PGSQL_PORT}`), false);
   assertEquals(compose.includes(`:${MYSQL_PORT}:${MYSQL_PORT}`), false);
   assertEquals(compose.includes(`:${5432}:${5432}`), false);
   assertEquals(compose.includes(`:${3306}:${3306}`), false);
   assertStringIncludes(compose, '"127.0.0.1:6032:6032"');
-  assertStringIncludes(compose, "turbopanel-managed:");
+  assertStringIncludes(compose, `${MANAGED_NETWORK}:`);
   assertStringIncludes(compose, "external: true");
 });
 
-test("proxysqlCompose with no bindAddresses argument also defaults to no publish", () => {
-  const compose = proxysqlCompose(DESCRIPTOR);
-  assertEquals(compose.includes(":15432:15432"), false);
-  assertEquals(compose.includes(":13306:13306"), false);
-  assertEquals(compose.includes(":5432:5432"), false);
-  assertEquals(compose.includes(":3306:3306"), false);
-});
-
 test("proxysqlCompose attaches external spanning segment networks", () => {
-  const compose = proxysqlCompose(DESCRIPTOR, [], [
-    {
-      name: "tpn_00000000-0000-4000-8000-0000000000cc",
-      subnet: "203.0.113.0/24",
-    },
-    {
-      name: "tpn_00000000-0000-4000-8000-0000000000dd",
-      subnet: "198.51.100.0/24",
-    },
-  ]);
-  assertStringIncludes(compose, "      turbopanel-managed: {}");
+  const compose = proxysqlCompose(
+    DESCRIPTOR,
+    [],
+    [
+      {
+        name: "tpn_00000000-0000-4000-8000-0000000000cc",
+        subnet: "203.0.113.0/24",
+      },
+      {
+        name: "tpn_00000000-0000-4000-8000-0000000000dd",
+        subnet: "198.51.100.0/24",
+      },
+    ],
+    null,
+    MANAGED_NETWORK,
+  );
+  assertStringIncludes(compose, `      ${MANAGED_NETWORK}: {}`);
   assertStringIncludes(
     compose,
     "      tpn_00000000-0000-4000-8000-0000000000cc:",
@@ -202,7 +217,7 @@ test("proxysqlCompose attaches external spanning segment networks", () => {
   );
   assertStringIncludes(compose, "    external: true");
   assertEquals(compose.includes("driver:"), false);
-  assertEquals(compose.includes("      - turbopanel-managed"), false);
+  assertEquals(compose.includes(`      - ${MANAGED_NETWORK}`), false);
   assertEquals(
     compose.includes("      - tpn_00000000-0000-4000-8000-0000000000cc"),
     false,
@@ -210,16 +225,22 @@ test("proxysqlCompose attaches external spanning segment networks", () => {
 });
 
 test("readSegmentAttachmentsFromCompose round-trips rendered spanning attachments", () => {
-  const compose = proxysqlCompose(DESCRIPTOR, ["203.0.113.5"], [
-    {
-      name: "tpn_00000000-0000-4000-8000-0000000000dd",
-      subnet: "198.51.100.0/24",
-    },
-    {
-      name: "tpn_00000000-0000-4000-8000-0000000000cc",
-      subnet: "203.0.113.0/24",
-    },
-  ]);
+  const compose = proxysqlCompose(
+    DESCRIPTOR,
+    ["203.0.113.5"],
+    [
+      {
+        name: "tpn_00000000-0000-4000-8000-0000000000dd",
+        subnet: "198.51.100.0/24",
+      },
+      {
+        name: "tpn_00000000-0000-4000-8000-0000000000cc",
+        subnet: "203.0.113.0/24",
+      },
+    ],
+    null,
+    MANAGED_NETWORK,
+  );
   assertEquals(readSegmentAttachmentsFromCompose(compose), [
     {
       name: "tpn_00000000-0000-4000-8000-0000000000cc",
@@ -232,7 +253,9 @@ test("readSegmentAttachmentsFromCompose round-trips rendered spanning attachment
   ]);
   // The always-present shared ingress network is not a spanning attachment.
   assertEquals(
-    readSegmentAttachmentsFromCompose(proxysqlCompose(DESCRIPTOR, [])),
+    readSegmentAttachmentsFromCompose(
+      proxysqlCompose(DESCRIPTOR, [], [], null, MANAGED_NETWORK),
+    ),
     [],
   );
   assertEquals(readSegmentAttachmentsFromCompose(""), []);
@@ -241,12 +264,18 @@ test("readSegmentAttachmentsFromCompose round-trips rendered spanning attachment
 test("proxysqlComposeWithAttachments renders pinned attachments verbatim", () => {
   // The self-heal path only recovers `ipv4_address` from disk — the source
   // subnet is gone — so attachments must render without re-deriving it.
-  const compose = proxysqlComposeWithAttachments(DESCRIPTOR, [], [
-    {
-      name: "tpn_00000000-0000-4000-8000-0000000000cc",
-      ipv4Address: "10.90.1.254",
-    },
-  ]);
+  const compose = proxysqlComposeWithAttachments(
+    DESCRIPTOR,
+    [],
+    [
+      {
+        name: "tpn_00000000-0000-4000-8000-0000000000cc",
+        ipv4Address: "10.90.1.254",
+      },
+    ],
+    null,
+    MANAGED_NETWORK,
+  );
   assertStringIncludes(
     compose,
     "      tpn_00000000-0000-4000-8000-0000000000cc:",
@@ -279,6 +308,8 @@ test("ensureProxySqlIngress preserves passed segment attachments in the written 
           ipv4Address: "10.90.1.254",
         },
       ],
+      null,
+      MANAGED_NETWORK,
     );
     assertEquals(await readCurrentProxySqlSegmentAttachments(layout), [
       {
@@ -306,22 +337,40 @@ test("readCurrentProxySqlSegmentAttachments returns empty when compose has never
 test("proxysqlCompose rejects invalid spanning segment subnets", () => {
   assertThrows(
     () =>
-      proxysqlCompose(DESCRIPTOR, [], [
-        { name: "tpn_bad", subnet: "not-a-cidr" },
-      ]),
+      proxysqlCompose(
+        DESCRIPTOR,
+        [],
+        [
+          { name: "tpn_bad", subnet: "not-a-cidr" },
+        ],
+        null,
+        MANAGED_NETWORK,
+      ),
     TypeError,
   );
   assertThrows(
     () =>
-      proxysqlCompose(DESCRIPTOR, [], [
-        { name: "tpn_narrow", subnet: "203.0.113.0/31" },
-      ]),
+      proxysqlCompose(
+        DESCRIPTOR,
+        [],
+        [
+          { name: "tpn_narrow", subnet: "203.0.113.0/31" },
+        ],
+        null,
+        MANAGED_NETWORK,
+      ),
     TypeError,
   );
 });
 
 test("proxysqlCompose publishes only on the intended address for public/datacenter exposure", () => {
-  const compose = proxysqlCompose(DESCRIPTOR, ["203.0.113.5"]);
+  const compose = proxysqlCompose(
+    DESCRIPTOR,
+    ["203.0.113.5"],
+    [],
+    null,
+    MANAGED_NETWORK,
+  );
   assertStringIncludes(compose, '"203.0.113.5:15432:15432"');
   assertStringIncludes(compose, '"203.0.113.5:13306:13306"');
   // Never accidentally widen to all-interfaces alongside the intended bind.
@@ -332,7 +381,7 @@ test("proxysqlCompose publishes only on the intended address for public/datacent
 test("renderProxySqlConfig keeps ProxySQL's internal listener on every interface regardless of the publish bind", () => {
   // The container's own `interfaces=` must stay `0.0.0.0` even when the
   // compose-level publish is private-only (null) or a narrow public IP —
-  // sibling containers on MANAGED_INGRESS_NETWORK dial this internal
+  // sibling containers on the managed network dial this internal
   // address, which is unrelated to whether/where compose publishes to the
   // host. See `CONTAINER_LISTEN_ADDRESS` in proxysql.ts.
   const privateCnf = renderProxySqlConfig({
@@ -349,20 +398,102 @@ test("renderProxySqlConfig keeps ProxySQL's internal listener on every interface
   }
 });
 
+test("readManagedNetworkFromCompose round-trips the rendered managed network", () => {
+  assertEquals(
+    readManagedNetworkFromCompose(
+      proxysqlCompose(DESCRIPTOR, [], [], null, MANAGED_NETWORK),
+    ),
+    MANAGED_NETWORK,
+  );
+  const other = "11111111-1111-4111-8111-111111111111";
+  assertEquals(
+    readManagedNetworkFromCompose(
+      proxysqlCompose(DESCRIPTOR, ["203.0.113.5"], [], null, other),
+    ),
+    other,
+  );
+});
+
+test("readManagedNetworkFromCompose still finds the managed network when segments follow it", () => {
+  // The managed network is always rendered first under the top-level
+  // `networks:` header, ahead of every `tpn_*` attachment.
+  const compose = proxysqlCompose(
+    DESCRIPTOR,
+    ["203.0.113.5"],
+    [
+      {
+        name: "tpn_00000000-0000-4000-8000-0000000000cc",
+        subnet: "203.0.113.0/24",
+      },
+      {
+        name: "tpn_00000000-0000-4000-8000-0000000000dd",
+        subnet: "198.51.100.0/24",
+      },
+    ],
+    null,
+    MANAGED_NETWORK,
+  );
+  assertEquals(readManagedNetworkFromCompose(compose), MANAGED_NETWORK);
+  // And the attachments still round-trip alongside it.
+  assertEquals(
+    readSegmentAttachmentsFromCompose(compose).map((row) => row.name),
+    [
+      "tpn_00000000-0000-4000-8000-0000000000cc",
+      "tpn_00000000-0000-4000-8000-0000000000dd",
+    ],
+  );
+});
+
+test("readManagedNetworkFromCompose returns null for compose it cannot parse", () => {
+  assertEquals(readManagedNetworkFromCompose(""), null);
+  assertEquals(
+    readManagedNetworkFromCompose("services:\n  proxysql: {}\n"),
+    null,
+  );
+  assertEquals(readManagedNetworkFromCompose("networks:\n"), null);
+  assertEquals(readManagedNetworkFromCompose("networks:\nnope:\n"), null);
+});
+
+test("readCurrentProxySqlManagedNetwork reads the name back off disk", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    assertEquals(await readCurrentProxySqlManagedNetwork(layout), null);
+
+    await ensureProxySqlIngress(
+      layout,
+      DESCRIPTOR,
+      () => Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 }),
+      ["203.0.113.5"],
+      [],
+      null,
+      MANAGED_NETWORK,
+    );
+    assertEquals(
+      await readCurrentProxySqlManagedNetwork(layout),
+      MANAGED_NETWORK,
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("readPublishedBindAddressesFromCompose round-trips proxysqlCompose's publish decision", () => {
   assertEquals(
-    readPublishedBindAddressesFromCompose(proxysqlCompose(DESCRIPTOR, [])),
+    readPublishedBindAddressesFromCompose(
+      proxysqlCompose(DESCRIPTOR, [], [], null, MANAGED_NETWORK),
+    ),
     [],
   );
   assertEquals(
     readPublishedBindAddressesFromCompose(
-      proxysqlCompose(DESCRIPTOR, ["203.0.113.5"]),
+      proxysqlCompose(DESCRIPTOR, ["203.0.113.5"], [], null, MANAGED_NETWORK),
     ),
     ["203.0.113.5"],
   );
   assertEquals(
     readPublishedBindAddressesFromCompose(
-      proxysqlCompose(DESCRIPTOR, ["2001:db8::10"]),
+      proxysqlCompose(DESCRIPTOR, ["2001:db8::10"], [], null, MANAGED_NETWORK),
     ),
     ["2001:db8::10"],
   );
@@ -370,10 +501,16 @@ test("readPublishedBindAddressesFromCompose round-trips proxysqlCompose's publis
 });
 
 test("readPublishedBindAddressesFromCompose recovers every scope's address in order", () => {
-  const compose = proxysqlCompose(DESCRIPTOR, [
-    "203.0.113.5",
-    "10.88.0.4",
-  ]);
+  const compose = proxysqlCompose(
+    DESCRIPTOR,
+    [
+      "203.0.113.5",
+      "10.88.0.4",
+    ],
+    [],
+    null,
+    MANAGED_NETWORK,
+  );
   assertEquals(readPublishedBindAddressesFromCompose(compose), [
     "203.0.113.5",
     "10.88.0.4",
@@ -410,7 +547,7 @@ test("readCurrentProxySqlBindAddresses reflects a previously-published bind on d
     await Deno.mkdir(proxysqlConfigDir(layout), { recursive: true });
     await Deno.writeTextFile(
       proxysqlComposePath(layout),
-      proxysqlCompose(DESCRIPTOR, ["203.0.113.5"]),
+      proxysqlCompose(DESCRIPTOR, ["203.0.113.5"], [], null, MANAGED_NETWORK),
     );
     assertEquals(
       await readCurrentProxySqlBindAddresses(layout),
@@ -526,7 +663,7 @@ test("buildProxySqlAdminStatements sets monitor variables when provided", () => 
 });
 
 test("proxysqlCompose mounts admin.cnf at the admin defaults path", () => {
-  const compose = proxysqlCompose();
+  const compose = proxysqlCompose(null, [], [], null, MANAGED_NETWORK);
   assertStringIncludes(compose, "./admin.cnf:/etc/proxysql-admin.cnf:ro");
 });
 
@@ -1080,10 +1217,16 @@ test("protocolFamilyForCluster prefers the payload family, then engine, then por
 });
 
 test("compose publishes organization-configured listener ports", () => {
-  const compose = proxysqlCompose(DESCRIPTOR, ["203.0.113.5"], [], {
-    pgsql: 18432,
-    mysql: 18306,
-  });
+  const compose = proxysqlCompose(
+    DESCRIPTOR,
+    ["203.0.113.5"],
+    [],
+    {
+      pgsql: 18432,
+      mysql: 18306,
+    },
+    MANAGED_NETWORK,
+  );
   assertStringIncludes(compose, '"203.0.113.5:18432:18432"');
   assertStringIncludes(compose, '"203.0.113.5:18306:18306"');
   // Admin stays loopback-only on its fixed port.
@@ -1098,10 +1241,20 @@ test("compose falls back to the platform default listener ports", () => {
     ["203.0.113.5"],
     [],
     DEFAULT_PROXYSQL_LISTENER_PORTS,
+    MANAGED_NETWORK,
   );
-  assertEquals(proxysqlCompose(DESCRIPTOR, ["203.0.113.5"]), explicit);
   assertEquals(
-    proxysqlCompose(DESCRIPTOR, ["203.0.113.5"], [], null),
+    proxysqlCompose(DESCRIPTOR, ["203.0.113.5"], [], null, MANAGED_NETWORK),
+    explicit,
+  );
+  assertEquals(
+    proxysqlCompose(
+      DESCRIPTOR,
+      ["203.0.113.5"],
+      [],
+      undefined,
+      MANAGED_NETWORK,
+    ),
     explicit,
   );
   assertStringIncludes(explicit, `:${PGSQL_PORT}:${PGSQL_PORT}`);
@@ -1130,10 +1283,16 @@ test("static config binds the configured listener ports", () => {
 });
 
 test("readPublishedListenerPortsFromCompose round-trips configured ports", () => {
-  const compose = proxysqlCompose(DESCRIPTOR, ["203.0.113.5"], [], {
-    pgsql: 18432,
-    mysql: 18306,
-  });
+  const compose = proxysqlCompose(
+    DESCRIPTOR,
+    ["203.0.113.5"],
+    [],
+    {
+      pgsql: 18432,
+      mysql: 18306,
+    },
+    MANAGED_NETWORK,
+  );
   assertEquals(readPublishedListenerPortsFromCompose(compose), {
     pgsql: 18432,
     mysql: 18306,
@@ -1144,7 +1303,7 @@ test("readPublishedListenerPortsFromCompose round-trips configured ports", () =>
 test("readPublishedListenerPortsFromCompose returns null when nothing is published", () => {
   // Unpublished frontend: only the loopback admin mapping exists, which is
   // excluded, so there are no client ports to recover.
-  const compose = proxysqlCompose(DESCRIPTOR, []);
+  const compose = proxysqlCompose(DESCRIPTOR, [], [], null, MANAGED_NETWORK);
   assertEquals(readPublishedListenerPortsFromCompose(compose), null);
   assertEquals(readPublishedListenerPortsFromCompose(""), null);
   assertEquals(
@@ -1163,10 +1322,16 @@ test("readCurrentProxySqlListenerPorts round-trips through disk", async () => {
     await Deno.mkdir(proxysqlConfigDir(layout), { recursive: true });
     await Deno.writeTextFile(
       proxysqlComposePath(layout),
-      proxysqlCompose(DESCRIPTOR, ["203.0.113.5"], [], {
-        pgsql: 18432,
-        mysql: 18306,
-      }),
+      proxysqlCompose(
+        DESCRIPTOR,
+        ["203.0.113.5"],
+        [],
+        {
+          pgsql: 18432,
+          mysql: 18306,
+        },
+        MANAGED_NETWORK,
+      ),
     );
     assertEquals(await readCurrentProxySqlListenerPorts(layout), {
       pgsql: 18432,
@@ -1256,7 +1421,13 @@ test("port preflight refuses a port an unrelated host listener already owns", as
 });
 
 test("legacy published 5432 compose text differs from current render so compose up is required", () => {
-  const next = proxysqlCompose(DESCRIPTOR, ["203.0.113.5"]);
+  const next = proxysqlCompose(
+    DESCRIPTOR,
+    ["203.0.113.5"],
+    [],
+    null,
+    MANAGED_NETWORK,
+  );
   const previous = next
     .replaceAll(":15432:15432", ":5432:5432")
     .replaceAll(":13306:13306", ":3306:3306");
@@ -1266,11 +1437,17 @@ test("legacy published 5432 compose text differs from current render so compose 
 });
 
 test("proxysqlCompose pins spanning segments to reserved ingress addresses", () => {
-  const compose = proxysqlCompose(DESCRIPTOR, ["203.0.113.5"], [
-    { name: "tpn_env_a", subnet: "203.0.113.0/24" },
-    { name: "tpn_env_a", subnet: "203.0.113.0/24" },
-    { name: "tpn_env_b", subnet: "198.51.100.0/24" },
-  ]);
+  const compose = proxysqlCompose(
+    DESCRIPTOR,
+    ["203.0.113.5"],
+    [
+      { name: "tpn_env_a", subnet: "203.0.113.0/24" },
+      { name: "tpn_env_a", subnet: "203.0.113.0/24" },
+      { name: "tpn_env_b", subnet: "198.51.100.0/24" },
+    ],
+    null,
+    MANAGED_NETWORK,
+  );
   assertStringIncludes(compose, "tpn_env_a:");
   assertStringIncludes(compose, '"203.0.113.254"');
   assertStringIncludes(compose, "tpn_env_b:");
@@ -1328,13 +1505,21 @@ test("inspectProxySqlContainer matches labelled managed-ingress row", async () =
   const fixture = await createTempLayout();
   try {
     const layout = resolveLayout(fixture.env);
-    await ensureProxySqlIngress(layout, DESCRIPTOR, () =>
-      Promise.resolve({
-        success: true,
-        stdout: "",
-        stderr: "",
-        code: 0,
-      }));
+    await ensureProxySqlIngress(
+      layout,
+      DESCRIPTOR,
+      () =>
+        Promise.resolve({
+          success: true,
+          stdout: "",
+          stderr: "",
+          code: 0,
+        }),
+      [],
+      [],
+      null,
+      MANAGED_NETWORK,
+    );
     const ps = JSON.stringify([
       {
         ID: "abc",
@@ -1376,13 +1561,21 @@ test("inspectProxySqlContainer returns undefined when compose ps fails", async (
   const fixture = await createTempLayout();
   try {
     const layout = resolveLayout(fixture.env);
-    await ensureProxySqlIngress(layout, DESCRIPTOR, () =>
-      Promise.resolve({
-        success: true,
-        stdout: "",
-        stderr: "",
-        code: 0,
-      }));
+    await ensureProxySqlIngress(
+      layout,
+      DESCRIPTOR,
+      () =>
+        Promise.resolve({
+          success: true,
+          stdout: "",
+          stderr: "",
+          code: 0,
+        }),
+      [],
+      [],
+      null,
+      MANAGED_NETWORK,
+    );
     const row = await inspectProxySqlContainer(layout, DESCRIPTOR, {
       runDocker: () =>
         Promise.resolve({
@@ -1402,13 +1595,21 @@ test("readCurrentProxySqlBindAddresses round-trips published bind", async () => 
   const fixture = await createTempLayout();
   try {
     const layout = resolveLayout(fixture.env);
-    await ensureProxySqlIngress(layout, DESCRIPTOR, () =>
-      Promise.resolve({
-        success: true,
-        stdout: "",
-        stderr: "",
-        code: 0,
-      }), ["203.0.113.8"]);
+    await ensureProxySqlIngress(
+      layout,
+      DESCRIPTOR,
+      () =>
+        Promise.resolve({
+          success: true,
+          stdout: "",
+          stderr: "",
+          code: 0,
+        }),
+      ["203.0.113.8"],
+      [],
+      null,
+      MANAGED_NETWORK,
+    );
     assertEquals(
       await readCurrentProxySqlBindAddresses(layout),
       ["203.0.113.8"],
@@ -1442,13 +1643,21 @@ test("restartProxySqlIngress throws when compose restart fails", async () => {
   const fixture = await createTempLayout();
   try {
     const layout = resolveLayout(fixture.env);
-    await ensureProxySqlIngress(layout, DESCRIPTOR, () =>
-      Promise.resolve({
-        success: true,
-        stdout: "",
-        stderr: "",
-        code: 0,
-      }));
+    await ensureProxySqlIngress(
+      layout,
+      DESCRIPTOR,
+      () =>
+        Promise.resolve({
+          success: true,
+          stdout: "",
+          stderr: "",
+          code: 0,
+        }),
+      [],
+      [],
+      null,
+      MANAGED_NETWORK,
+    );
     await assertRejects(
       () =>
         restartProxySqlIngress(layout, () =>
