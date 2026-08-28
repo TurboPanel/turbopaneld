@@ -9,6 +9,8 @@
 #   - wireguard-tools: TurboFabric mesh (`server.fabric.reconcile`) on managed hosts
 #   - openssl: managed-engine self-signed TLS material (`managed.apply`)
 #   - pamtester: instance install PAM gate (production)
+#   - acl: setfacl/getfacl for principal-access + runtime-entitlement traverse ACLs
+#     (Priority: optional on Debian — minimal images omit it; ansible.posix.acl needs it)
 #
 # run.sh installs only the smaller curl/tar/python3-minimal set when missing;
 # this role covers the remainder once the daemon can run Ansible.
@@ -21,6 +23,7 @@
     update_cache: true
     cache_valid_time: 3600
     name:
+      - acl
       - ca-certificates
       - curl
       - git

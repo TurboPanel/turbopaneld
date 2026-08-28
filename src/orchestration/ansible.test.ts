@@ -1218,6 +1218,17 @@ test("site apply playbooks vendor engines (never apt nginx/apache2)", async () =
     "authorized_keys directory mode",
   );
   assertEquals(principalAccessTasks.includes("ansible.posix.acl:"), true);
+  // Fresh Debian hosts often omit Priority: optional `acl`; daemon-prereqs must
+  // install setfacl before this role's ansible.posix.acl tasks (install failed
+  // on "Grant SSH access groups traversal" without it).
+  const daemonPrereqsTasks = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/daemon-prereqs/tasks/main.yml"),
+  );
+  assertMatch(
+    daemonPrereqsTasks,
+    /- acl\n/,
+    "daemon-prereqs must install acl for principal-access setfacl",
+  );
   assertEquals(
     principalAccessTasks.includes('mode: "0751"'),
     false,
