@@ -412,6 +412,16 @@ make **U** a no-op until HEAD moves. Production `release` stores the full
   with `timedatectl status` + `/etc/timezone` fallbacks, plus `timesyncd.conf`
   read; carried on hello and change-detected heartbeats with `ips` from
   `src/server-addresses.ts`).
+- **Addresses** — `src/server-addresses.ts` (`collectServerIps`): non-virtual
+  interface addresses, classified public/private per family. Pass
+  `readDefaultRouteInterfaces()` (parsed from `/proc/net/route` and
+  `/proc/net/ipv6_route`) and the addresses on the default-route NIC are marked
+  `preferred`, so a multi-homed host advertises the address a peer would
+  actually reach it on. **These are load-bearing, not decorative:** whenever the
+  daemon reaches the control plane through a reverse proxy, a Cloudflare Tunnel,
+  or a forwarded port, the peer address the control plane sees is the proxy's,
+  and this list is what it shows instead (`../turbopanel/AGENTS.md` → Caddy →
+  Server addresses).
 - **Docker** — `src/host/docker.ts` (cache-light `docker --version` +
   `docker compose version`; `server.metadata.docker` is omitted when the CLI
   is not installed; carried on hello and change-detected heartbeats).

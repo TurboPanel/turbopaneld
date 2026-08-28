@@ -12,6 +12,7 @@ import { type HostTimeSync, readTimeSync } from "../host/time-sync.ts";
 import { logInfo, logWarn, sanitizeForLog } from "../logger.ts";
 import {
   collectServerIps,
+  readDefaultRouteInterfaces,
   type ServerReportedIp,
 } from "../server-addresses.ts";
 import type { HostResources } from "../host/host-inventory.ts";
@@ -102,7 +103,7 @@ function defaultPresenceSnapshot(): PresenceSnapshot {
   const runtimes = readHostRuntimes();
   return {
     timeSync: readTimeSync(),
-    ips: collectServerIps(),
+    ips: collectServerIps(readDefaultRouteInterfaces()),
     ...(docker ? { docker } : {}),
     ...(runtimes ? { runtimes } : {}),
   };

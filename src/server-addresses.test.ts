@@ -3,7 +3,10 @@
  */
 
 import { assertEquals } from "@std/assert";
-import { collectServerIps } from "./server-addresses.ts";
+import {
+  collectServerIps,
+  readDefaultRouteInterfaces,
+} from "./server-addresses.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -420,6 +423,122 @@ test("collectServerIps prefers a later CIDR and omits empty or overlong interfac
           version: 4,
           scope: "private",
           cidr: "10.9.0.1/24",
+          interface: "eth0",
+        },
+      ]);
+    },
+  );
+});
+
+/**
+ * `/proc/net/route`, tab-separated with a header row. Destination and mask are
+ * little-endian hex; `00000000` for both marks the default route.
+ */
+const PROC_NET_ROUTE = [
+  "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT",
+  "eth1\t00000000\t0102A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0",
+  "eth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0",
+  "eth0\t0001A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0",
+  "",
+].join("\n");
+
+const PROC_NET_IPV6_ROUTE = [
+  "fe800000000000000000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000003 00000000 00000001       eth0",
+  "00000000000000000000000000000000 00 00000000000000000000000000000000 00 fe800000000000000000000000000001 00000400 00000001 00000000 00000003       eth0",
+  "",
+].join("\n");
+
+function withProcRoutes(
+  files: Record<string, string>,
+  fn: () => void,
+): void {
+  const original = Deno.readTextFileSync;
+  // deno-lint-ignore no-explicit-any
+  (Deno as any).readTextFileSync = (path: string | URL) => {
+    const key = String(path);
+    if (key in files) return files[key];
+    throw new Deno.errors.NotFound(key);
+  };
+  try {
+    fn();
+  } finally {
+    // deno-lint-ignore no-explicit-any
+    (Deno as any).readTextFileSync = original;
+  }
+}
+
+test("readDefaultRouteInterfaces picks the lowest-metric default route", () => {
+  withProcRoutes(
+    {
+      "/proc/net/route": PROC_NET_ROUTE,
+      "/proc/net/ipv6_route": PROC_NET_IPV6_ROUTE,
+    },
+    () => {
+      assertEquals(readDefaultRouteInterfaces(), { v4: "eth0", v6: "eth0" });
+    },
+  );
+});
+
+test("readDefaultRouteInterfaces is empty when /proc is unreadable", () => {
+  withProcRoutes({}, () => {
+    assertEquals(readDefaultRouteInterfaces(), {});
+  });
+});
+
+test("readDefaultRouteInterfaces ignores non-default and malformed rows", () => {
+  withProcRoutes(
+    {
+      "/proc/net/route": [
+        "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask",
+        // On-link subnet route, not a default route.
+        "eth0\t0001A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF",
+        // Zero destination but a non-zero mask.
+        "eth9\t00000000\t00000000\t0001\t0\t0\t1\t000000FF",
+        "truncated",
+        "",
+      ].join("\n"),
+    },
+    () => {
+      assertEquals(readDefaultRouteInterfaces(), {});
+    },
+  );
+});
+
+test("collectServerIps marks the default-route interface as preferred", () => {
+  withNetworkInterfaces(
+    [
+      { name: "eth1", family: "IPv4", address: "10.20.0.7" },
+      { name: "eth0", family: "IPv4", address: "192.168.1.50" },
+    ],
+    () => {
+      assertEquals(collectServerIps({ v4: "eth0" }), [
+        {
+          address: "10.20.0.7",
+          version: 4,
+          scope: "private",
+          interface: "eth1",
+        },
+        {
+          address: "192.168.1.50",
+          version: 4,
+          scope: "private",
+          interface: "eth0",
+          preferred: true,
+        },
+      ]);
+    },
+  );
+});
+
+test("collectServerIps without a route table marks nothing", () => {
+  withNetworkInterfaces(
+    [{ name: "eth0", family: "IPv4", address: "192.168.1.50" }],
+    () => {
+      assertEquals(collectServerIps(), [
+        {
+          address: "192.168.1.50",
+          version: 4,
+          scope: "private",
           interface: "eth0",
         },
       ]);

@@ -17,6 +17,7 @@ import {
 } from "./paths.ts";
 import {
   collectServerIps,
+  readDefaultRouteInterfaces,
   type ServerReportedIp,
 } from "../server-addresses.ts";
 import { readRemoteFiles } from "../deploy/release/read-remote-files.ts";
@@ -1620,7 +1621,7 @@ export class InstanceClient {
   ): void {
     let ips: ServerReportedIp[];
     try {
-      ips = clientTestHooks.collectServerIps();
+      ips = clientTestHooks.collectServerIps(readDefaultRouteInterfaces());
     } catch (err) {
       logWarn(
         "instance",
