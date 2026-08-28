@@ -21,7 +21,7 @@ import { logError, logInfo, sanitizeForLog } from "../logger.ts";
 import { DAEMON_INSTALL_PLAYBOOK } from "./paths.ts";
 
 /**
- * True when Tilt/local dev already manages the instance stack and the daemon
+ * True when local dev (console/converge) already manages the instance stack and the daemon
  * should only connect (no Ansible bootstrap on startup).
  */
 function shouldSkipOrchestration(): boolean {
