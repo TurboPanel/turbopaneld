@@ -29,6 +29,8 @@ export async function readProcFile(
         args: [p],
         stdout: "piped",
         stderr: "null",
+        // Scoped --allow-run=cat cannot inherit LD_* / DYLD_* (Deno 2.9).
+        clearEnv: true,
       }).output());
     const { code, stdout } = await runCat(path);
     if (code !== 0) return undefined;

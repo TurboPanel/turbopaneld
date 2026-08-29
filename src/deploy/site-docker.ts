@@ -35,16 +35,22 @@ export async function resolveDockerHostGatewayAddress(): Promise<string> {
   const override = Deno.env.get("TURBOPANEL_DOCKER_HOST_GATEWAY")?.trim();
   if (override && isValidIpv4(override)) return override;
 
-  const result = await new Deno.Command("ip", {
-    args: ["-4", "-o", "addr", "show", "dev", "docker0"],
-    stdin: "null",
-    stdout: "piped",
-    stderr: "null",
-  }).output();
-  if (result.success) {
-    const text = decoder.decode(result.stdout);
-    const match = /\binet\s+(\d+\.\d+\.\d+\.\d+)/.exec(text);
-    if (match?.[1] && isValidIpv4(match[1])) return match[1];
+  try {
+    const result = await new Deno.Command("ip", {
+      args: ["-4", "-o", "addr", "show", "dev", "docker0"],
+      stdin: "null",
+      stdout: "piped",
+      stderr: "null",
+      // Scoped --allow-run=ip cannot inherit LD_* / DYLD_* (Deno 2.9).
+      clearEnv: true,
+    }).output();
+    if (result.success) {
+      const text = decoder.decode(result.stdout);
+      const match = /\binet\s+(\d+\.\d+\.\d+\.\d+)/.exec(text);
+      if (match?.[1] && isValidIpv4(match[1])) return match[1];
+    }
+  } catch {
+    // Missing `ip`, no docker0, or spawn denied — Docker default below.
   }
 
   return DEFAULT_DOCKER_GATEWAY;

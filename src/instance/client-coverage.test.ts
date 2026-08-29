@@ -185,10 +185,13 @@ it({
   fn: async () => {
     const originalCa = Deno.env.get("TURBOPANEL_INSTANCE_CA");
     const originalFp = Deno.env.get("TURBOPANEL_INSTANCE_CA_FINGERPRINT");
+    const originalLd = Deno.env.get("LD_LIBRARY_PATH");
     const dir = await Deno.makeTempDir({ prefix: "tp-ca-refresh-" });
     const keyPath = `${dir}/key.pem`;
     const certPath = `${dir}/cert.pem`;
     try {
+      // CI setup-python exports this; scoped --allow-run=openssl must still spawn.
+      Deno.env.set("LD_LIBRARY_PATH", "/usr/lib");
       const gen = await new Deno.Command("openssl", {
         args: [
           "req",
@@ -207,6 +210,8 @@ it({
         ],
         stdout: "null",
         stderr: "piped",
+        // Scoped --allow-run=openssl cannot inherit LD_* / DYLD_* (Deno 2.9).
+        clearEnv: true,
       }).output();
       if (!gen.success) return;
 
@@ -237,6 +242,7 @@ it({
       invalidatePlatformCaHttpClient();
       setOptionalEnv("TURBOPANEL_INSTANCE_CA", originalCa);
       setOptionalEnv("TURBOPANEL_INSTANCE_CA_FINGERPRINT", originalFp);
+      setOptionalEnv("LD_LIBRARY_PATH", originalLd);
       await Deno.remove(dir, { recursive: true });
     }
   },

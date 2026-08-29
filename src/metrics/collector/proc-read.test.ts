@@ -69,10 +69,13 @@ test("readProcFile returns undefined when cat itself throws", async () => {
 
 test({
   name: "readProcFile uses default cat Command when runCat is omitted",
-  permissions: { read: true, write: true, run: ["cat"] },
+  permissions: { env: true, read: true, write: true, run: ["cat"] },
   async fn() {
     const dir = await Deno.makeTempDir({ prefix: "tp-proc-default-cat-" });
+    const previousLd = Deno.env.get("LD_LIBRARY_PATH");
     try {
+      // CI setup-python exports this; scoped --allow-run=cat must still spawn.
+      Deno.env.set("LD_LIBRARY_PATH", "/usr/lib");
       const path = `${dir}/payload`;
       await Deno.writeTextFile(path, "default-cat-body\n");
       assertEquals(
@@ -82,6 +85,11 @@ test({
         "default-cat-body\n",
       );
     } finally {
+      if (previousLd === undefined) {
+        Deno.env.delete("LD_LIBRARY_PATH");
+      } else {
+        Deno.env.set("LD_LIBRARY_PATH", previousLd);
+      }
       await Deno.remove(dir, { recursive: true });
     }
   },

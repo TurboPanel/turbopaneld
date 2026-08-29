@@ -50,7 +50,10 @@ test({
   permissions: { env: true, run: ["ip"] },
   fn: async () => {
     const previous = Deno.env.get("TURBOPANEL_DOCKER_HOST_GATEWAY");
+    const previousLd = Deno.env.get("LD_LIBRARY_PATH");
     try {
+      // CI setup-python exports this; scoped --allow-run=ip must still spawn.
+      Deno.env.set("LD_LIBRARY_PATH", "/usr/lib");
       Deno.env.set("TURBOPANEL_DOCKER_HOST_GATEWAY", "203.0.113.50");
       assertEquals(await resolveDockerHostGatewayAddress(), "203.0.113.50");
 
@@ -64,6 +67,11 @@ test({
         Deno.env.delete("TURBOPANEL_DOCKER_HOST_GATEWAY");
       } else {
         Deno.env.set("TURBOPANEL_DOCKER_HOST_GATEWAY", previous);
+      }
+      if (previousLd === undefined) {
+        Deno.env.delete("LD_LIBRARY_PATH");
+      } else {
+        Deno.env.set("LD_LIBRARY_PATH", previousLd);
       }
     }
   },

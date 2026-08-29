@@ -274,8 +274,12 @@ compile toolchain).
   `src/instance/commands/ping.test.ts` (`sys: ["hostname"]`),
   `src/instance/commands/stop-environment.test.ts` (`run: true`), and the
   twelve `permissions:` blocks in `src/instance/client.test.ts`. **Do not
-  weaken or remove any existing per-test `permissions` block.** Coverage
-  writes `coverage/lcov.info` (gitignored; already in Sonar / layout
+  weaken or remove any existing per-test `permissions` block.** A scoped
+  `run: ["cmd"]` cannot inherit `LD_*` / `DYLD_*` (Deno 2.9 `NotCapable`);
+  CI `actions/setup-python` exports `LD_LIBRARY_PATH` before
+  `test:coverage`, so those `Deno.Command` spawns must `clearEnv: true` (or
+  otherwise unset the vars). Unscoped `run: true` / process `-A` is fine.
+  Coverage writes `coverage/lcov.info` (gitignored; already in Sonar / layout
   `SKIP_DIRS`).
 - **SonarCloud coverage (CI):** `.github/workflows/verify.yml` runs
   `deno task test:coverage` then uploads LCOV via
