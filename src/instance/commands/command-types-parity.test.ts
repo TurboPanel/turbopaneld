@@ -1628,11 +1628,13 @@ test("managed.apply enforces the engine image allowlist", () => {
   );
   // Catalogued-but-untested series (17/16/15) are rejected here too: the
   // control plane will not mint them, and a forged payload must not either.
-  for (const image of [
-    "docker.io/library/postgres:17-alpine",
-    "docker.io/library/postgres:16",
-    "docker.io/library/postgres:15-alpine",
-  ]) {
+  for (
+    const image of [
+      "docker.io/library/postgres:17-alpine",
+      "docker.io/library/postgres:16",
+      "docker.io/library/postgres:15-alpine",
+    ]
+  ) {
     assertThrows(
       () =>
         parseManagedApplyPayload({
@@ -1678,11 +1680,13 @@ test("managed.apply enforces the engine image allowlist", () => {
   );
   // MySQL 8.0 went EOL in April 2026 and is absent from the catalog; 8.4 is
   // catalogued but untested, and is refused for the same reason.
-  for (const image of [
-    "docker.io/library/mysql:8.0",
-    "docker.io/library/mysql:8.4",
-    "docker.io/library/mysql:8.4-oraclelinux9",
-  ]) {
+  for (
+    const image of [
+      "docker.io/library/mysql:8.0",
+      "docker.io/library/mysql:8.4",
+      "docker.io/library/mysql:8.4-oraclelinux9",
+    ]
+  ) {
     assertThrows(
       () =>
         parseManagedApplyPayload({

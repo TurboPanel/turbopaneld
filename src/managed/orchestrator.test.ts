@@ -141,8 +141,8 @@ test("orchestratorCompose publishes HTTP on loopback and Raft on advertise only"
   // quoted whole.
   const doc = parseYaml(yaml) as Record<string, unknown>;
   const services = doc.services as Record<string, Record<string, unknown>>;
-  const volumes =
-    services[ORCHESTRATOR_COMPOSE_SERVICE_NAME].volumes as string[];
+  const volumes = services[ORCHESTRATOR_COMPOSE_SERVICE_NAME]
+    .volumes as string[];
   assertEquals(
     volumes.includes("./orchestrator.conf.json:/etc/orchestrator.conf.json:ro"),
     true,

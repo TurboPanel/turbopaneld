@@ -171,7 +171,9 @@ function buildEngineExec(
  * config). Container-name peers ride the managed docker network pattern —
  * only address literals need per-host accounts.
  */
-export function resolveClientSourceHosts(payload: ManagedApplyPayload): string[] {
+export function resolveClientSourceHosts(
+  payload: ManagedApplyPayload,
+): string[] {
   const hosts = new Set<string>();
   for (
     const address of [

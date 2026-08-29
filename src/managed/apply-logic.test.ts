@@ -443,7 +443,11 @@ Deno.test("isRetryableEngineExecFailure matches restart-window exec errors only"
     "OCI runtime exec failed: exec failed: unable to start container process: " +
     "error executing setns process: exit status 1";
   if (!isRetryableEngineExecFailure(oci)) throw new Error("expected retryable");
-  if (!isRetryableEngineExecFailure("Error response from daemon: container abc is not running")) {
+  if (
+    !isRetryableEngineExecFailure(
+      "Error response from daemon: container abc is not running",
+    )
+  ) {
     throw new Error("expected retryable");
   }
   if (

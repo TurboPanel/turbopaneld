@@ -379,7 +379,12 @@ test("applyProxySqlAdminStatements retries admin connect failures then succeeds"
                 "ERROR 2002 (HY000): Can't connect to server on '127.0.0.1' (115)",
             });
           }
-          return Promise.resolve({ success: true, code: 0, stdout: "", stderr: "" });
+          return Promise.resolve({
+            success: true,
+            code: 0,
+            stdout: "",
+            stderr: "",
+          });
         },
       },
     );

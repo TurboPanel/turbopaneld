@@ -3,17 +3,17 @@ import {
   changeReplicationSourceSql,
   createClientAccountSql,
   createNetworkAccountSql,
+  disableReadOnlySql,
+  enforceReadOnlySql,
   ensureReplicationAccountSql,
   ensureSocketAdminSql,
   grantDatabaseSql,
   grantReplicationSql,
+  isWritableSql,
   MANAGED_DOCKER_NETWORK_HOST,
+  promoteSql,
   quoteIdentifier,
   quoteLiteral,
-  disableReadOnlySql,
-  enforceReadOnlySql,
-  promoteSql,
-  isWritableSql,
 } from "./mariadb-sql.ts";
 import { mariadbManagedEngineRuntime } from "./mariadb.ts";
 

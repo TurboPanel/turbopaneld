@@ -17,8 +17,8 @@ import {
   createNetworkAccountSql,
   disableReadOnlySql,
   dropAccountSql,
-  enforceReadOnlySql,
   dropDatabaseSql,
+  enforceReadOnlySql,
   ensureProxySqlMonitorAccountSql,
   ensureReplicationAccountSql,
   ensureSocketAdminSql,
@@ -370,7 +370,8 @@ export function buildMariadbStandbySeedScript(): string {
   // (ERROR 1948, "contains no value for replication domain N"). `RESET
   // MASTER` clears state left by init; `SET SESSION sql_log_bin=0` keeps the
   // import out of the binlog entirely.
-  const SQL_LOG_BIN_OFF = String.raw`  { printf 'SET SESSION sql_log_bin=0;\n'; `
+  const SQL_LOG_BIN_OFF = String
+    .raw`  { printf 'SET SESSION sql_log_bin=0;\n'; `;
   return [
     "set -e",
     "tmp=$(mktemp)",

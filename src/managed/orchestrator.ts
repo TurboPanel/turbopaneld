@@ -185,7 +185,8 @@ export function orchestratorCompose(
   const httpPublish = formatPublishedPort("127.0.0.1", raft.httpPort);
   // Literal `./` prefix — `join(".", …)` normalizes it away and compose then
   // reads the source as a NAMED VOLUME instead of a bind mount.
-  const confMountSpec = "./orchestrator.conf.json:/etc/orchestrator.conf.json:ro";
+  const confMountSpec =
+    "./orchestrator.conf.json:/etc/orchestrator.conf.json:ro";
   const tlsMountSpec = "./tls:/etc/orchestrator/tls:ro";
   const lines = [
     `name: ${project}`,

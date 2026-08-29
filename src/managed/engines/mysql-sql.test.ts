@@ -233,7 +233,10 @@ test("grantReplicationSql keeps REQUIRE SSL out of GRANT (removed in MySQL 8)", 
   // TLS binding must ride ALTER USER — `GRANT … REQUIRE SSL` is a 1064
   // syntax error on MySQL 8+.
   assertEquals(/GRANT [^;]*REQUIRE SSL/.test(sql), false);
-  assertEquals(sql.includes("ALTER USER `tp_repl`@'203.0.113.20' REQUIRE SSL;"), true);
+  assertEquals(
+    sql.includes("ALTER USER `tp_repl`@'203.0.113.20' REQUIRE SSL;"),
+    true,
+  );
   // Seed privileges ride the same grant (mysqldump needs RELOAD et al.).
   assertEquals(
     sql.includes(

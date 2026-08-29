@@ -199,7 +199,10 @@ export async function normalizeManagedFileOwnership(
     try {
       const info = await Deno.stat(join(managedRoot, subdir));
       if (info.isDirectory) {
-        verifyMounts.push("-v", `${join(managedRoot, subdir)}:/verify/${subdir}:ro`);
+        verifyMounts.push(
+          "-v",
+          `${join(managedRoot, subdir)}:/verify/${subdir}:ro`,
+        );
       }
     } catch (err) {
       if (!(err instanceof Deno.errors.NotFound)) throw err;
@@ -210,10 +213,10 @@ export async function normalizeManagedFileOwnership(
   const verifyScript = [
     "set -eu",
     `USER_NAME=${shellSingleQuote(containerUser)}`,
-    '[ ! -d /verify/config ] ||',
+    "[ ! -d /verify/config ] ||",
     '  su -s /bin/sh "$USER_NAME" -c "ls /verify/config > /dev/null" ||',
     '  { echo "engine user cannot traverse config/" >&2; exit 1; }',
-    '[ ! -d /verify/tls ] ||',
+    "[ ! -d /verify/tls ] ||",
     '  su -s /bin/sh "$USER_NAME" -c "ls /verify/tls > /dev/null" ||',
     '  { echo "engine user cannot traverse tls/" >&2; exit 1; }',
     "[ ! -f /verify/tls/server.crt ] ||",
@@ -239,7 +242,9 @@ export async function normalizeManagedFileOwnership(
   if (!verified.success) {
     throw new Error(
       `managed file ownership verification failed: ${
-        sanitizeForLog(verified.stderr || verified.stdout || "docker run failed")
+        sanitizeForLog(
+          verified.stderr || verified.stdout || "docker run failed",
+        )
       }`,
     );
   }
