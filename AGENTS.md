@@ -120,12 +120,18 @@ service users `tp`, `tpctrl`, `tpcache`, `tpdata`, `tpqueue`, `tpmetrics`, and
 `tpcaddy` — see **`../turbopanel/AGENTS.md`** (Production UID/GID allocation).
 
 **Deno version pin:** `DENO_VERSION` (`src/orchestration/paths.ts`) =
-**`2.9.5`**. Keep it in step with `deno_version` in
+**`2.9.6`**. Keep it in step with `deno_version` in
 `orchestration/roles/deno-runtime/defaults/main.yml`, `TP_DENO_VERSION` in
 `scripts/run.sh`, and `DENO_VERSION` in
 [TurboPanel/dev](https://github.com/TurboPanel/dev) `src/lib/paths.ts` (dev
 console bootstrap fallback + status label). `src/orchestration/paths.test.ts`
-pins the const to the role default.
+pins the const to the role default. Bumping the pin is a fleet-wide rollout:
+`deno-runtime` runs on the install/converge path (`daemon-install.yml`,
+`daemon-converge.yml`) and on the instance-launch refresh path
+(`instance-launch-only.yml`, ahead of `instance-launch`), because instance and
+mailer units ExecStart through the vendored Deno path — it is not only the
+daemon's JS-fallback concern. `src/orchestration/paths.test.ts` pins that
+ordering too.
 
 **Vendored Node/Deno layout:** Ansible roles install pinned runtimes under
 `/opt/turbopanel/vendor/<tool>/<version>/` with a `current` symlink (see
@@ -405,11 +411,20 @@ gates from `verify.yml`, in CI order**: `deno lint`, `deno task check:layout`,
 staged-diff scans) and finish in ~1s together — they exist here because a new
 file that hardcodes a layout path or uses retired phrasing is otherwise only
 caught minutes into a PR run, which was the single most common cause of a red
-`verify` on an otherwise-good change. Deno is resolved in this order: PATH,
-`/opt/turbopanel/vendor/deno/current/deno`, then
-`vagrant ssh -c '… cd ~/turbopaneld && deno <args>'` from the sibling `dev`
-checkout (same guest command as Testing below); `tp_precommit_deno_exec`
-propagates the exit status, so a failing guard aborts the commit. Typecheck and
+`verify` on an otherwise-good change. Deno resolution is pin-aware and delegated to
+`../dev/scripts/lib/hook-toolchain.sh` (`tp_hook_ensure_deno_toolchain`), so the
+hook, `./console` and CI all run the one pinned release: the pinned
+`/opt/turbopanel/vendor/deno/<DENO_VERSION>/deno` wins;
+`vendor/deno/current` is used only once it resolves to that pin (the hook
+relinks it where it can write, and otherwise runs the versioned binary
+directly); an absent pin is fetched from `dl.deno.land` when `curl` + `python3`
+are present; a PATH Deno is a last resort, never the default — `deno fmt` /
+`lint` output differs between releases, so a stale host Deno reformats the tree
+the pinned CI runner then rejects. When none of that yields a pinned Deno the
+hook falls back to `vagrant ssh -c '… cd ~/turbopaneld && deno <args>'` from the
+sibling `dev` checkout (same guest command as Testing below). Resolution is
+memoized across the four guards, and `tp_precommit_deno_exec` propagates the
+exit status, so a failing guard aborts the commit. Typecheck and
 the suites stay deferred to `deno task verify` / CI. Set
 `TURBOPANEL_SKIP_HOOK_TESTS=1` to skip fmt **and** the guards (secret scan still
 runs; CI still gates all of them). The dev console’s daemon install
@@ -427,7 +442,7 @@ from production code.
 
 | Stage | dev | daemon | Rationale |
 | ----- | --- | ------ | --------- |
-| pre-commit | scan-secrets only (tests deferred) | scan-secrets + `deno fmt` + `lint` + `check:layout` + `check:vocabulary` (typecheck/tests deferred) | secret scan always; daemon fmt/guards via host Deno or `vagrant ssh`; the cheap half of `verify.yml` runs in ~1s so contract breaks never reach CI; suites in CI / guest |
+| pre-commit | scan-secrets only (tests deferred) | scan-secrets + `deno fmt` + `lint` + `check:layout` + `check:vocabulary` (typecheck/tests deferred) | secret scan always; daemon fmt/guards via the pinned Deno or `vagrant ssh`; the cheap half of `verify.yml` runs in ~1s so contract breaks never reach CI; suites in CI / guest |
 | PR → `trunk` | `verify.yml` | `verify.yml` | blocks merge |
 | push `trunk` | `verify.yml` | `verify.yml`; `publish` job `needs: verify` | nothing compiles from failing code |
 | promote → canary/rc/release | n/a | **artifact integrity only** (S3 sha256/size + CDN fetch) | no new code enters after publish |

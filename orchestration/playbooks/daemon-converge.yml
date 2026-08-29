@@ -56,8 +56,11 @@
   # never pull a container runtime.
   roles:
     - role: runtime-sockets
+    # Unconditional: the JS-fallback ExecStart needs Deno, and so do any
+    # co-located instance/mailer units on this host — gating on exec mode left
+    # native-binary hosts pinned to a stale vendor/deno/current. The role stats
+    # the pinned version first, so this is a no-op once converged.
     - role: deno-runtime
-      when: turbopanel_daemon_exec_mode == 'js'
     - role: daemon-logs
     - role: daemon-prereqs
     - role: principal-access

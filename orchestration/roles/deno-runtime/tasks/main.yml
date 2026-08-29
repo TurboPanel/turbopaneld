@@ -61,6 +61,28 @@
     state: link
     force: true
 
+# `current` now resolves to the pin, so any sibling version directory left by an
+# earlier pin is dead weight. Prune it so a host cannot be re-pointed at a stale
+# runtime by a hand-edited symlink.
+- name: Find superseded Deno version directories
+  ansible.builtin.find:
+    paths: "{{ turbopanel_vendor_dir }}/deno"
+    file_type: directory
+    recurse: false
+    excludes:
+      - current
+      - bin
+      - "{{ deno_version }}"
+  register: _deno_stale_versions
+
+- name: Remove superseded Deno version directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ _deno_stale_versions.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path }}"
+
 # Stable path for the JS-fallback systemd ExecStart:
 #   {{ turbopanel_vendor_dir }}/deno/bin/deno -> ../current/deno
 - name: Ensure Deno bin directory exists

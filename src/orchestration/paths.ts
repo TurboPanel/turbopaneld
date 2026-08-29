@@ -381,11 +381,13 @@ export function cloudflaredDownloadUrl(
 }
 
 /**
- * Pinned Deno runtime. Used for co-located `deno run main.ts` and the managed
- * JS-fallback ExecStart (`deno run …/bin/turbopaneld.js`). Keep in step with
- * `deno_version` in `orchestration/roles/deno-runtime/defaults/main.yml`.
+ * Pinned Deno runtime — canonical source of truth. Used for co-located
+ * `deno run main.ts` and the managed JS-fallback ExecStart
+ * (`deno run …/bin/turbopaneld.js`). Sibling pins must move in lockstep:
+ * - `deno_version` in `orchestration/roles/deno-runtime/defaults/main.yml`
+ * - `TP_DENO_VERSION` in `scripts/run.sh`
  */
-export const DENO_VERSION = "2.9.5";
+export const DENO_VERSION = "2.9.6";
 
 /**
  * Pinned ClickHouse version — Docker image tag

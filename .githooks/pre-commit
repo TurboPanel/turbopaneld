@@ -15,18 +15,6 @@ if [ "${TURBOPANEL_SKIP_HOOK_TESTS:-}" = 1 ]; then
   exit 0
 fi
 
-tp_precommit_deno() {
-  if command -v deno >/dev/null 2>&1; then
-    command -v deno
-    return 0
-  fi
-  if [ -x /opt/turbopanel/vendor/deno/current/deno ]; then
-    printf '%s\n' /opt/turbopanel/vendor/deno/current/deno
-    return 0
-  fi
-  return 1
-}
-
 tp_precommit_dev_checkout() {
   if [ -n "${TURBOPANEL_DEV_CHECKOUT:-}" ] &&
     [ -f "$TURBOPANEL_DEV_CHECKOUT/Vagrantfile" ]; then
@@ -45,12 +33,39 @@ tp_precommit_dev_checkout() {
   return 1
 }
 
+# Resolve the Deno this hook may run, through the dev checkout's pin-aware
+# toolchain (dev/scripts/lib/hook-toolchain.sh) so the hook, ./console and CI
+# all agree on one runtime. That policy is deliberately not version-blind: the
+# pinned vendor/deno/<DENO_VERSION>/deno wins, vendor/deno/current is used only
+# once it resolves to that pin (a `current` left behind by a superseded pin is
+# what a pin bump has to repair), and a PATH Deno is a last resort rather than
+# the default -- fmt/lint output differs between releases, so a stale host Deno
+# silently reformats the tree the pinned CI runner then rejects.
+#
+# Run in a subshell: tp_hook_toolchain_fail exits 1, and swallowing that here
+# keeps the vagrant fallback below reachable while stopping the sourced dev
+# libs from leaking their variables into this hook. The subshell runs without
+# `set -e` on purpose -- a relink into a read-only vendor tree is meant to fall
+# through to running vendor/deno/<DENO_VERSION>/deno directly, not to abort --
+# so the status is checked explicitly and the resolved binary is re-verified.
+tp_precommit_deno() {
+  _dev=$(tp_precommit_dev_checkout) || return 1
+  [ -f "$_dev/scripts/lib/hook-toolchain.sh" ] || return 1
+  TURBOPANEL_DEV_CHECKOUT="$_dev" sh -c '
+    set -u
+    . "$1/scripts/lib/hook-toolchain.sh" || exit 1
+    tp_hook_ensure_deno_toolchain >&2 || exit 1
+    [ -n "${DENO_BIN:-}" ] && [ -x "$DENO_BIN" ] || exit 1
+    printf "%s\n" "$DENO_BIN"
+  ' sh "$_dev"
+}
+
 tp_precommit_vagrant_deno() {
   if ! command -v vagrant >/dev/null 2>&1; then
     return 1
   fi
   _dev=$(tp_precommit_dev_checkout) || return 1
-  echo "pre-commit: no host Deno - running 'deno $*' via vagrant ssh ($_dev)" >&2
+  echo "pre-commit: no pinned host Deno - running 'deno $*' via vagrant ssh ($_dev)" >&2
   (
     CDPATH= cd -- "$_dev" || exit 1
     vagrant ssh -c "export PATH=\"/opt/turbopanel/vendor/deno/current:\$PATH\"; cd ~/turbopaneld && deno $*"
@@ -59,16 +74,26 @@ tp_precommit_vagrant_deno() {
 
 # Run `deno <args...>` on the host, else inside the sibling-dev guest.
 # Propagates the exit status so a failing guard aborts the commit.
+#
+# Resolution is memoized: four guards run below, and tp_precommit_deno may
+# vendor the pin, so re-resolving per guard would repeat that work (and its
+# failure) four times per commit.
+TP_PRECOMMIT_DENO=""
+TP_PRECOMMIT_DENO_RESOLVED=0
 tp_precommit_deno_exec() {
-  if DENO="$(tp_precommit_deno)"; then
-    "$DENO" "$@"
+  if [ "$TP_PRECOMMIT_DENO_RESOLVED" -eq 0 ]; then
+    TP_PRECOMMIT_DENO="$(tp_precommit_deno)" || TP_PRECOMMIT_DENO=""
+    TP_PRECOMMIT_DENO_RESOLVED=1
+  fi
+  if [ -n "$TP_PRECOMMIT_DENO" ]; then
+    "$TP_PRECOMMIT_DENO" "$@"
     return
   fi
   if tp_precommit_vagrant_deno "$@"; then
     return 0
   fi
-  echo "pre-commit: deno not found on this host, and 'vagrant ssh deno $*' failed" >&2
-  echo "pre-commit: install Deno 2.9.5, converge vendor Deno, or vagrant up from the sibling dev checkout" >&2
+  echo "pre-commit: no pinned Deno on this host, and 'vagrant ssh deno $*' failed" >&2
+  echo "pre-commit: install Deno 2.9.6, converge vendor Deno, or vagrant up from the sibling dev checkout" >&2
   echo "pre-commit: CI runs the same commands; skipping them only moves the failure to verify" >&2
   return 1
 }

@@ -767,6 +767,87 @@ test("node-runtime installs corepack with vendored npm before enabling pnpm", ()
   }
 });
 
+function readPlaybook(name: string): string {
+  return Deno.readTextFileSync(
+    join(fromMeta, "orchestration", "playbooks", name),
+  );
+}
+
+/**
+ * Assert `- role: <name>` appears in a playbook with no `when:` guard directly
+ * under it — the role has to run on every converge, not just one exec mode.
+ */
+function assertRoleIsUnconditional(playbook: string, role: string): void {
+  const lines = readPlaybook(playbook).split("\n");
+  const idx = lines.findIndex((line) => line.trim() === `- role: ${role}`);
+  if (idx < 0) {
+    throw new TypeError(`${playbook} must include the ${role} role`);
+  }
+  const next = lines.slice(idx + 1).find((line) => line.trim().length > 0) ??
+    "";
+  if (next.trim().startsWith("when:")) {
+    throw new TypeError(
+      `${playbook} must run ${role} unconditionally — co-located instance and ` +
+        "mailer units resolve Deno through vendor/deno/current on every host",
+    );
+  }
+}
+
+test("instance-launch-only refreshes the runtimes its units ExecStart through", () => {
+  const playbook = readPlaybook("instance-launch-only.yml");
+  const rolesIdx = playbook.indexOf("\n  roles:");
+  if (rolesIdx < 0) {
+    throw new TypeError("instance-launch-only.yml must declare a roles: block");
+  }
+  const roles = playbook.slice(rolesIdx);
+  for (const role of ["deno-runtime", "node-runtime"]) {
+    if (!roles.includes(`- role: ${role}`)) {
+      throw new TypeError(
+        `instance-launch-only.yml must run ${role} before instance-launch — ` +
+          "the instance/mailer unit templates ExecStart through the vendored runtimes",
+      );
+    }
+  }
+  const launchIdx = roles.indexOf("- role: instance-launch");
+  for (const role of ["deno-runtime", "node-runtime"]) {
+    if (roles.indexOf(`- role: ${role}`) > launchIdx) {
+      throw new TypeError(
+        `instance-launch-only.yml must run ${role} before instance-launch`,
+      );
+    }
+  }
+});
+
+test("daemon playbooks run deno-runtime unconditionally", () => {
+  assertRoleIsUnconditional("daemon-converge.yml", "deno-runtime");
+  assertRoleIsUnconditional("daemon-install.yml", "deno-runtime");
+});
+
+test("deno-runtime prunes superseded vendored versions", () => {
+  const tasks = Deno.readTextFileSync(
+    join(
+      fromMeta,
+      "orchestration",
+      "roles",
+      "deno-runtime",
+      "tasks",
+      "main.yml",
+    ),
+  );
+  const linkIdx = tasks.indexOf("deno/current");
+  const findIdx = tasks.indexOf("ansible.builtin.find");
+  if (findIdx < 0 || linkIdx < 0 || findIdx < linkIdx) {
+    throw new TypeError(
+      "deno-runtime must repoint deno/current before pruning stale version dirs",
+    );
+  }
+  if (!tasks.includes("state: absent")) {
+    throw new TypeError(
+      "deno-runtime must remove superseded version directories",
+    );
+  }
+});
+
 test("CLICKHOUSE_VERSION matches the clickhouse Ansible role default", () => {
   const roleDefaults = join(
     fromMeta,

@@ -29,4 +29,11 @@
     - role: instance-user
     # Caddy requires ./certs/self-signed.{crt,key}; idempotent and cheap.
     - role: instance-certs
+    # instance/mailer units template ExecStart from {{ turbopanel_deno }} /
+    # {{ turbopanel_node }}, so refresh the vendored runtimes (and the
+    # deno/current + node/current symlinks they resolve through) before the
+    # units are re-rendered and restarted. Both roles short-circuit on a stat
+    # of the pinned version, so a converge with nothing to do stays cheap.
+    - role: deno-runtime
+    - role: node-runtime
     - role: instance-launch

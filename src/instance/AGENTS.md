@@ -211,8 +211,10 @@ hardware. Do not treat the JS path as a temporary shim or something to delete
 Wire/manifest names still say `jsFallbackArtifact` for compatibility with
 published channel.json — the product meaning is “alternate runtime,” not
 “deprecated fallback.” Native hosts remove leftover `turbopaneld.js` on
-install/update; Deno is installed only when the JS ExecStart is selected
-(`daemon-install.yml` skips `deno-runtime` otherwise). Config lives in
+install/update, but Deno is still vendored on every host — `daemon-install.yml`
+and `daemon-converge.yml` run `deno-runtime` unconditionally, because co-located
+instance/mailer units resolve their ExecStart through `vendor/deno/current` even
+when the daemon itself runs the native binary. Config lives in
 `/etc/turbopanel` (`daemon.env`, `instance-ca.pem`); persistent identity in
 `/var/lib/turbopanel` (license, `server.id`, keys); runtime files in
 `/run/turbopanel`. Co-located dev keeps `deno run main.ts` from the home
