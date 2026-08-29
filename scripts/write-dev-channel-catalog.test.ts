@@ -51,6 +51,7 @@ test("writeDevChannelCatalog writes relative catalog files", async () => {
       commit: "abc1234+1",
       buildId: "dev-abc1234+1",
       builtAt: "2026-01-01T00:00:00.000Z",
+      source: "abc1234+dirty.0123456789ab",
     }, dir);
     const manifest = JSON.parse(
       await Deno.readTextFile(join(dir, "manifest.json")),
@@ -59,6 +60,7 @@ test("writeDevChannelCatalog writes relative catalog files", async () => {
       await Deno.readTextFile(join(dir, "channels.json")),
     );
     assertEquals(manifest.commit, "abc1234+1");
+    assertEquals(manifest.source, "abc1234+dirty.0123456789ab");
     assertEquals(
       manifest.binaryArtifacts["linux-amd64"].url,
       "./turbopaneld-amd64.tar.zst",
@@ -138,10 +140,13 @@ test("resolveCatalogGitShortSha defaults error and exit on git failure", async (
 });
 
 test("runWriteDevChannelCatalogMain stamps overlay identity from git", async () => {
-  const seen: Array<{ commit: string; buildId: string; builtAt: string }> = [];
+  const seen: Array<
+    { commit: string; buildId: string; builtAt: string; source?: string }
+  > = [];
   await runWriteDevChannelCatalogMain({
     gitShortSha: () => Promise.resolve("abc1234"),
     now: () => new Date("2026-01-01T00:00:00.000Z"),
+    sourceFingerprint: () => Promise.resolve("abc1234full"),
     writeCatalog: (identity) => {
       seen.push(identity);
       return Promise.resolve();
@@ -151,6 +156,7 @@ test("runWriteDevChannelCatalogMain stamps overlay identity from git", async () 
     commit: "abc1234+1767225600",
     buildId: "dev-abc1234+1767225600",
     builtAt: "2026-01-01T00:00:00.000Z",
+    source: "abc1234full",
   }]);
 
   const fromDefaultGit: Array<{ commit: string; buildId: string }> = [];

@@ -14,6 +14,7 @@ import {
   type OverlayBuildIdentity,
   writeDevChannelCatalog,
 } from "./write-dev-channel-catalog.ts";
+import { computeSourceFingerprint } from "./source-fingerprint.ts";
 
 const ROOT = dirname(dirname(fromFileUrl(import.meta.url)));
 const BUILD_INFO_PATH = join(ROOT, "src/build-info.ts");
@@ -21,6 +22,7 @@ const BUILD_INFO_PATH = join(ROOT, "src/build-info.ts");
 export type ReleaseDevOverlayHooks = {
   gitCommit?: () => Promise<string>;
   gitShortSha?: () => Promise<string>;
+  sourceFingerprint?: () => Promise<string>;
   now?: () => Date;
   readBuildInfo?: () => Promise<string>;
   writeBuildInfo?: (text: string) => Promise<void>;
@@ -131,7 +133,14 @@ export async function runReleaseDevOverlay(
     Deno.exit(code);
   });
 
+  const sourceFingerprint = hooks.sourceFingerprint ??
+    (() => computeSourceFingerprint(ROOT));
+
   const sha = await gitCommit();
+  // Fingerprint the checkout before build-info.ts is stamped: build-info is
+  // restored afterwards, so this is the state the dev instance recomputes when
+  // deciding whether the overlay is stale (dist/ itself is gitignored).
+  const source = await sourceFingerprint();
   const builtAt = now();
   const unix = Math.floor(builtAt.getTime() / 1000);
   const commit = `${sha}+${unix}`;
@@ -139,6 +148,7 @@ export async function runReleaseDevOverlay(
     commit,
     buildId: `dev-${sha.slice(0, 7)}+${unix}`,
     builtAt: builtAt.toISOString(),
+    source,
   };
 
   const original = await readBuildInfo();

@@ -33,6 +33,7 @@ import {
 } from "../deploy/docker-cli.ts";
 import { logInfo } from "../logger.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
+import { pruneStaleManagedDockerNetworks } from "./networks.ts";
 import {
   orchestratorApiCnfPath,
   orchestratorComposePath,
@@ -329,22 +330,36 @@ export async function ensureOrchestratorStack(
   const composeYaml = orchestratorCompose(descriptor, raft, managedNetwork);
   const previousCompose = await readPreviousConfig(composePath);
   const previousConf = await readPreviousConfig(confPath);
-  const restarted = previousCompose !== composeYaml || previousConf !== conf;
+  const previousNetwork = previousCompose === null
+    ? null
+    : readManagedNetworkFromCompose(previousCompose);
+  const networkRenamed = previousNetwork !== null &&
+    previousNetwork !== managedNetwork;
+  const restarted = previousCompose !== composeYaml || previousConf !== conf ||
+    networkRenamed;
 
   await Deno.writeTextFile(confPath, conf, { mode: 0o640 });
   await Deno.writeTextFile(composePath, composeYaml, { mode: 0o640 });
 
-  const up = await run([
+  const upArgs = [
     "compose",
     "-f",
     composePath,
     "up",
     "-d",
     "--remove-orphans",
-  ]);
+  ];
+  if (networkRenamed) upArgs.push("--force-recreate");
+  const up = await run(upArgs);
   if (!up.success) {
     throw new Error(up.stderr || "orchestrator compose up failed");
   }
+  await pruneStaleManagedDockerNetworks(
+    managedNetwork,
+    previousNetwork,
+    run,
+    { disconnect: networkRenamed },
+  );
   return restarted;
 }
 

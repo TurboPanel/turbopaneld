@@ -1554,7 +1554,8 @@ export async function readCurrentProxySqlManagedNetwork(
 ): Promise<string | null> {
   try {
     const text = await Deno.readTextFile(proxysqlComposePath(layout));
-    return readManagedNetworkFromCompose(text);
+    const recovered = readManagedNetworkFromCompose(text);
+    return recovered;
   } catch (err) {
     if (err instanceof Deno.errors.NotFound) return null;
     throw err;

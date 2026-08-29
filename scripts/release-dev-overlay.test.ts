@@ -101,7 +101,8 @@ test("runCompileAll throws when the compile task fails", async () => {
 test("runReleaseDevOverlay stamps, compiles, catalogs, then restores", async () => {
   const writes: string[] = [];
   const logs: string[] = [];
-  const catalogs: string[] = [];
+  const catalogs: Array<{ commit: string; source?: string }> = [];
+  const fingerprint = `${FULL_SHA}+dirty.0123456789ab`;
   const original = [
     "export const BUILD_INFO = {",
     '  commit: "oldsha",',
@@ -111,6 +112,7 @@ test("runReleaseDevOverlay stamps, compiles, catalogs, then restores", async () 
   ].join("\n");
   await runReleaseDevOverlay({
     gitCommit: () => Promise.resolve(FULL_SHA),
+    sourceFingerprint: () => Promise.resolve(fingerprint),
     now: () => new Date("2026-01-01T00:00:00.000Z"),
     readBuildInfo: () => Promise.resolve(original),
     writeBuildInfo: (text) => {
@@ -119,7 +121,7 @@ test("runReleaseDevOverlay stamps, compiles, catalogs, then restores", async () 
     },
     compileAll: () => Promise.resolve(),
     writeCatalog: (identity) => {
-      catalogs.push(identity.commit);
+      catalogs.push({ commit: identity.commit, source: identity.source });
       return Promise.resolve();
     },
     log: (message) => {
@@ -130,7 +132,10 @@ test("runReleaseDevOverlay stamps, compiles, catalogs, then restores", async () 
   assertEquals(writes[0]?.includes(`${FULL_SHA}+1767225600`), true);
   assertEquals(writes[0]?.includes(`dev-abcdef0+1767225600`), true);
   assertEquals(writes[1], original);
-  assertEquals(catalogs, [`${FULL_SHA}+1767225600`]);
+  assertEquals(catalogs, [{
+    commit: `${FULL_SHA}+1767225600`,
+    source: fingerprint,
+  }]);
   assertEquals(logs.at(-1)?.includes("restored"), true);
 });
 
@@ -142,6 +147,7 @@ test("runReleaseDevOverlay restores after Error and non-Error failures", async (
 
   await runReleaseDevOverlay({
     gitCommit: () => Promise.resolve(FULL_SHA),
+    sourceFingerprint: () => Promise.resolve(FULL_SHA),
     now: () => new Date("2026-01-01T00:00:00.000Z"),
     readBuildInfo: () => Promise.resolve(original),
     writeBuildInfo: (text) => {
@@ -163,6 +169,7 @@ test("runReleaseDevOverlay restores after Error and non-Error failures", async (
 
   await runReleaseDevOverlay({
     gitCommit: () => Promise.resolve(FULL_SHA),
+    sourceFingerprint: () => Promise.resolve(FULL_SHA),
     now: () => new Date("2026-01-01T00:00:00.000Z"),
     readBuildInfo: () => Promise.resolve(original),
     writeBuildInfo: (text) => {

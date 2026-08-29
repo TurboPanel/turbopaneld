@@ -88,7 +88,13 @@ Compose project names:
   (`managed.apply`, `managed.ingress.reconcile`, `managed.ha.reconcile`,
   `environment.deploy` when any compose service joins it). There is **no
   daemon-side default and no literal fallback** — a command without the field
-  is a contract error, not a cue to invent a name. Engines join it **always**
+  is a contract error, not a cue to invent a name. Hosts provisioned before the
+  UUID rename may still have a leftover `turbopanel-managed` bridge; ingress
+  reconcile force-recreates onto `payload.managedNetwork` (removing a
+  same-named container that Docker Compose no longer owns, which otherwise
+  fails with "already in use by container"), then `docker network connect`s a
+  frontend that is still only on the leftover, then prunes that name. Engines
+  join it **always**
   (not only when exposed) and **never** join the tenant hosting-ingress
   network
 - Shared ProxySQL: the `managed-ingress` `serviceId` (system component

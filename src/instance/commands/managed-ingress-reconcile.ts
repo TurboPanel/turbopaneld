@@ -24,7 +24,13 @@ import {
 import { ingressContainerName } from "../../deploy/ingress-identity.ts";
 import { logInfo } from "../../logger.ts";
 import { type LayoutPaths, resolveLayout } from "../../paths/layout.ts";
-import { ensureManagedIngressNetwork } from "../../managed/networks.ts";
+import {
+  containerMissesManagedNetwork,
+  dockerContainerNetworkNames,
+  ensureContainerJoinedManagedNetwork,
+  ensureManagedIngressNetwork,
+  pruneStaleManagedDockerNetworks,
+} from "../../managed/networks.ts";
 import {
   applyProxySqlAdminStatements,
   assertProxySqlHostRegularFile,
@@ -42,6 +48,7 @@ import {
   type ProbeHostPortFn,
   proxysqlCompose,
   type ProxySqlDesiredState,
+  readManagedNetworkFromCompose,
   readPublishedBindAddressesFromCompose,
   readPublishedListenerPortsFromCompose,
   renderProxySqlConfig,
@@ -205,11 +212,17 @@ function proxysqlStackNeedsComposeUp(
   return observed.status !== "running";
 }
 
+function proxysqlComposeNameConflict(stderr: string): boolean {
+  return stderr.includes("already in use by container");
+}
+
 async function ensureProxySqlComposeUp(
   layout: LayoutPaths,
   composePath: string,
   composeYaml: string,
   run: RunDockerFn,
+  forceRecreate = false,
+  containerName?: string,
 ): Promise<void> {
   const configDir = proxysqlComposePath(layout).replace(
     /\/docker-compose\.yml$/,
@@ -229,17 +242,37 @@ async function ensureProxySqlComposeUp(
   await Deno.writeTextFile(composePath, composeYaml, { mode: 0o640 });
   // No `-p`: the daemon-written compose file declares its own project through
   // the top-level `name:` key (the managed-ingress `serviceId`).
-  const up = await run([
+  // `--force-recreate` when the managed-engine network renamed: `up -d` alone
+  // can leave a running frontend attached to the retired bridge.
+  const upArgs = [
     "compose",
     "-f",
     composePath,
     "up",
     "-d",
     "--remove-orphans",
-  ]);
-  if (!up.success) {
-    throw new Error(up.stderr || "proxysql compose up failed");
+  ];
+  if (forceRecreate) upArgs.push("--force-recreate");
+  const up = await run(upArgs);
+  if (up.success) return;
+  // Compose's project `name:` is the allocated service UUID. A frontend
+  // created under an older project still occupies `container_name`, so
+  // `--force-recreate` tries to create a second container and Docker
+  // rejects the name. Remove the orphan and retry once.
+  if (
+    containerName &&
+    proxysqlComposeNameConflict(up.stderr)
+  ) {
+    logInfo(
+      "commands",
+      `removing conflicting ProxySQL container ${containerName} and retrying compose up`,
+    );
+    await run(["rm", "-f", containerName]);
+    const retry = await run(upArgs);
+    if (retry.success) return;
+    throw new Error(retry.stderr || up.stderr || "proxysql compose up failed");
   }
+  throw new Error(up.stderr || "proxysql compose up failed");
 }
 
 function collectAppliedUsers(desired: ProxySqlDesiredState): string[] {
@@ -294,6 +327,15 @@ async function tearDownProxySqlStack(
   ]);
   if (!down.success) {
     throw new Error(down.stderr || "proxysql compose down failed");
+  }
+  // The stack unit runs `compose up -d` at boot whenever the compose file
+  // exists, so a torn-down stack would resurrect on the next reboot unless
+  // the file goes with it. The descriptor stays: identity must survive for a
+  // later re-provision or repeated teardown.
+  try {
+    await Deno.remove(composePath);
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
   }
   logInfo(
     "commands",
@@ -357,6 +399,108 @@ async function resolveManagedIngressDescriptor(
   throw new Error("managed-ingress descriptor is missing");
 }
 
+function resolveHandlerDeps(deps?: ManagedIngressReconcileHandlerDeps) {
+  return {
+    run: deps?.runDocker ?? defaultRunDocker,
+    ensureDockerFn: deps?.ensureDocker ?? defaultEnsureDocker,
+    runHostPrep: deps?.runHostPrep ?? runProxySqlSetup,
+  };
+}
+
+/** Publish binds, listener ports, and managed network from the previous compose file. */
+function readPreviousComposeFacts(previousComposeText: string | null) {
+  if (previousComposeText === null) {
+    return {
+      previousBindAddresses: [] as string[],
+      previousListenerPorts: null,
+      previousManagedNetwork: null,
+    };
+  }
+  return {
+    previousBindAddresses: readPublishedBindAddressesFromCompose(
+      previousComposeText,
+    ),
+    previousListenerPorts: readPublishedListenerPortsFromCompose(
+      previousComposeText,
+    ),
+    previousManagedNetwork: readManagedNetworkFromCompose(previousComposeText),
+  };
+}
+
+/**
+ * Compose up when the stack needs it. During a managed-network migration a
+ * compose failure is tolerated: the follow-up `docker network connect`
+ * ({@link ensureContainerJoinedManagedNetwork}) still moves the frontend.
+ */
+async function composeUpIfNeeded(
+  restartNeeded: boolean,
+  layout: LayoutPaths,
+  composePath: string,
+  nextComposeText: string,
+  run: RunDockerFn,
+  migrateManagedNetwork: boolean,
+  containerName: string,
+): Promise<void> {
+  if (!restartNeeded) return;
+  try {
+    await ensureProxySqlComposeUp(
+      layout,
+      composePath,
+      nextComposeText,
+      run,
+      migrateManagedNetwork,
+      containerName,
+    );
+  } catch (err) {
+    const error = err instanceof Error ? err : new Error(String(err));
+    if (!migrateManagedNetwork) throw error;
+    logInfo(
+      "commands",
+      `managed.ingress.reconcile compose up failed; migrating networks anyway: ${error.message}`,
+    );
+  }
+}
+
+/**
+ * Join the frontend to the current managed bridge (when migrating) and prune
+ * leftovers. Stale networks are disconnected only after a confirmed join so a
+ * failed join never strands the container with no managed endpoint.
+ */
+async function migrateManagedNetworkMembership(
+  containerName: string,
+  managedNetwork: string,
+  previousManagedNetwork: string | null,
+  migrate: boolean,
+  run: RunDockerFn,
+): Promise<void> {
+  let joined = true;
+  if (migrate) {
+    joined = await ensureContainerJoinedManagedNetwork(
+      containerName,
+      managedNetwork,
+      run,
+    );
+  }
+  await pruneStaleManagedDockerNetworks(
+    managedNetwork,
+    previousManagedNetwork,
+    run,
+    { disconnect: migrate && joined },
+  );
+  if (migrate && !joined) {
+    throw new Error(
+      `ProxySQL container ${containerName} is not on managed network ${managedNetwork}`,
+    );
+  }
+}
+
+function containersFromObserved(
+  observed: EnvironmentDeployContainer | null | undefined,
+): EnvironmentDeployContainer[] | undefined {
+  if (observed === undefined) return undefined;
+  return observed === null ? [] : [observed];
+}
+
 export async function handleManagedIngressReconcile(
   payload: ManagedIngressReconcilePayload,
   daemonReceivedAt: string,
@@ -364,9 +508,7 @@ export async function handleManagedIngressReconcile(
 ): Promise<ManagedIngressReconcileResult> {
   const parsed = parseManagedIngressReconcilePayload(payload);
   const layout = resolveLayout(Deno.env.toObject());
-  const run = deps?.runDocker ?? defaultRunDocker;
-  const ensureDockerFn = deps?.ensureDocker ?? defaultEnsureDocker;
-  const runHostPrep = deps?.runHostPrep ?? runProxySqlSetup;
+  const { run, ensureDockerFn, runHostPrep } = resolveHandlerDeps(deps);
 
   if (parsed.clusters.length === 0) {
     return await tearDownProxySqlStack(
@@ -428,12 +570,11 @@ export async function handleManagedIngressReconcile(
   // (public <-> private, a different address, or gaining/losing a second scope)
   // only changes the compose `ports:` publish — caught by full nextComposeText
   // comparison below (along with container_name renames).
-  const previousBindAddresses = previousComposeText === null
-    ? []
-    : readPublishedBindAddressesFromCompose(previousComposeText);
-  const previousListenerPorts = previousComposeText === null
-    ? null
-    : readPublishedListenerPortsFromCompose(previousComposeText);
+  const {
+    previousBindAddresses,
+    previousListenerPorts,
+    previousManagedNetwork,
+  } = readPreviousComposeFacts(previousComposeText);
 
   // Preflight before the first write: an organization port that something else
   // on this host already owns must fail while the current frontend is still
@@ -457,8 +598,20 @@ export async function handleManagedIngressReconcile(
     desired.listenerPorts,
     parsed.managedNetwork,
   );
+  const attachedNetworks = await dockerContainerNetworkNames(
+    descriptor.containerName,
+    run,
+  );
+  const networkRenamed = previousManagedNetwork !== null &&
+    previousManagedNetwork !== parsed.managedNetwork;
+  const attachedToStale = containerMissesManagedNetwork(
+    attachedNetworks,
+    parsed.managedNetwork,
+  );
+  const migrateManagedNetwork = networkRenamed || attachedToStale;
   const composeNeedsUp =
-    previousComposeText?.trimEnd() !== nextComposeText.trimEnd();
+    previousComposeText?.trimEnd() !== nextComposeText.trimEnd() ||
+    migrateManagedNetwork;
   let restartNeeded = composeNeedsUp ||
     staticConfigSectionChanged(previousConfig, nextConfig) ||
     !sameBindAddresses(previousBindAddresses, bindAddresses);
@@ -469,14 +622,23 @@ export async function handleManagedIngressReconcile(
     restartNeeded = proxysqlStackNeedsComposeUp(current);
   }
 
-  if (restartNeeded) {
-    await ensureProxySqlComposeUp(
-      layout,
-      composePath,
-      nextComposeText,
-      run,
-    );
-  }
+  await composeUpIfNeeded(
+    restartNeeded,
+    layout,
+    composePath,
+    nextComposeText,
+    run,
+    migrateManagedNetwork,
+    descriptor.containerName,
+  );
+
+  await migrateManagedNetworkMembership(
+    descriptor.containerName,
+    parsed.managedNetwork,
+    previousManagedNetwork,
+    migrateManagedNetwork,
+    run,
+  );
 
   const containerName = descriptor.containerName;
 
@@ -489,17 +651,9 @@ export async function handleManagedIngressReconcile(
     containerName,
   });
 
-  let containers: EnvironmentDeployContainer[] | undefined;
-  const observed = await inspectProxySqlContainer(layout, descriptor, {
-    runDocker: run,
-  });
-  if (observed === undefined) {
-    containers = undefined;
-  } else if (observed !== null) {
-    containers = [observed];
-  } else {
-    containers = [];
-  }
+  const containers = containersFromObserved(
+    await inspectProxySqlContainer(layout, descriptor, { runDocker: run }),
+  );
 
   logInfo(
     "commands",

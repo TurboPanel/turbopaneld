@@ -4,7 +4,7 @@
  * plaintext `:8880`, and a Cloudflare tunnel. Remote `run.sh` / `resolveUpdate`
  * join those URLs against `TURBOPANEL_DL_BASE`.
  *
- * Usage: deno run --allow-read --allow-write scripts/write-dev-channel-catalog.ts
+ * Usage: deno run --allow-read --allow-write --allow-run scripts/write-dev-channel-catalog.ts
  */
 import { encodeHex } from "@std/encoding/hex";
 import { dirname, fromFileUrl, join } from "@std/path";
@@ -13,6 +13,7 @@ import type {
   ChannelManifest,
   RootCatalog,
 } from "../src/update/types.ts";
+import { computeSourceFingerprint } from "./source-fingerprint.ts";
 
 const ROOT = dirname(dirname(fromFileUrl(import.meta.url)));
 const DIST = join(ROOT, "dist");
@@ -28,6 +29,8 @@ export type OverlayBuildIdentity = {
   commit: string;
   buildId: string;
   builtAt: string;
+  /** Source-checkout fingerprint (scripts/source-fingerprint.ts), when known. */
+  source?: string;
 };
 
 export async function artifactFromDist(
@@ -75,6 +78,7 @@ export async function writeDevChannelCatalog(
     commit: identity.commit,
     buildId: identity.buildId,
     builtAt: identity.builtAt,
+    ...(identity.source ? { source: identity.source } : {}),
     binaryArtifacts: {
       "linux-amd64": binaryAmd64,
       "linux-arm64": binaryArm64,
@@ -144,6 +148,7 @@ export async function runWriteDevChannelCatalogMain(
   io: {
     gitShortSha?: () => Promise<string>;
     now?: () => Date;
+    sourceFingerprint?: () => Promise<string>;
     writeCatalog?: (
       identity: OverlayBuildIdentity,
     ) => Promise<void>;
@@ -151,6 +156,8 @@ export async function runWriteDevChannelCatalogMain(
 ): Promise<void> {
   const gitShortSha = io.gitShortSha ?? (() => resolveCatalogGitShortSha());
   const now = io.now ?? (() => new Date());
+  const sourceFingerprint = io.sourceFingerprint ??
+    (() => computeSourceFingerprint(ROOT));
   const writeCatalog = io.writeCatalog ?? writeDevChannelCatalog;
   const sha = await gitShortSha();
   const builtAt = now();
@@ -159,6 +166,7 @@ export async function runWriteDevChannelCatalogMain(
     commit,
     buildId: `dev-${commit}`,
     builtAt: builtAt.toISOString(),
+    source: await sourceFingerprint(),
   });
 }
 

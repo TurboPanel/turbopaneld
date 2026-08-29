@@ -28,6 +28,13 @@ export interface ChannelManifest {
   commit: string;
   buildId: string;
   builtAt: string;
+  /**
+   * Dev overlay only: fingerprint of the source checkout the artifacts were
+   * built from (see scripts/source-fingerprint.ts). The dev instance compares
+   * it against the live checkout to decide whether a rebuild is required
+   * before upgrading daemons. Absent from CI-published channel manifests.
+   */
+  source?: string;
   defaultControlPlaneUrl?: string;
   binaryArtifacts: BinaryArtifacts;
   jsFallbackArtifact: ArtifactEntry;

@@ -489,6 +489,59 @@ test({
 
 test({
   name:
+    "handleManagedIngressReconcile retries compose up after a container-name conflict",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedFixture(fixture);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        const dockerArgs: string[][] = [];
+        let upCount = 0;
+        const result = await handleManagedIngressReconcile(
+          basePayload(),
+          new Date().toISOString(),
+          {
+            runDocker: (args) => {
+              dockerArgs.push([...args]);
+              if (args.includes("up")) {
+                upCount += 1;
+                if (upCount === 1) {
+                  return Promise.resolve({
+                    success: false,
+                    stdout: "",
+                    stderr:
+                      `Conflict. The container name "/${PROXYSQL_SERVICE_ID}-in" is already in use by container "a27c5d513f04". You have to remove (or rename) that container to be able to reuse that name.`,
+                    code: 1,
+                  });
+                }
+              }
+              return fakeRun()(args);
+            },
+            decryptSecrets: decryptSecretsEcho,
+            ensureDocker: () => Promise.resolve(),
+          },
+        );
+        assertEquals(result.restarted, true);
+        assertEquals(upCount, 2);
+        assertEquals(
+          dockerArgs.some((args) =>
+            args[0] === "rm" && args[1] === "-f" &&
+            args[2] === `${PROXYSQL_SERVICE_ID}-in`
+          ),
+          true,
+        );
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name:
     "handleManagedIngressReconcile with no cluster users skips password decrypt",
   permissions: { env: true, read: true, write: true, run: false },
   fn: async () => {
@@ -644,6 +697,16 @@ test({
           dockerArgs.some((args) => args.includes("exec")),
           false,
         );
+        // The stack unit revives any compose file at boot — teardown must
+        // remove it so the stack stays down across reboots.
+        let composeRemains = true;
+        try {
+          await Deno.stat(proxysqlComposePath(layout));
+        } catch (err) {
+          if (err instanceof Deno.errors.NotFound) composeRemains = false;
+          else throw err;
+        }
+        assertEquals(composeRemains, false);
       } finally {
         Deno.env.delete("TURBOPANEL_STATE_DIR");
         Deno.env.delete("TURBOPANEL_CONFIG_DIR");
@@ -989,6 +1052,175 @@ test({
             ),
           Error,
           "managed-ingress descriptor is missing",
+        );
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleManagedIngressReconcile force-recreates when the managed network renamed",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedFixture(fixture);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        await handleManagedIngressReconcile(
+          { ...basePayload(), managedNetwork: "turbopanel-managed" },
+          new Date().toISOString(),
+          {
+            runDocker: fakeRun(),
+            decryptSecrets: decryptSecretsEcho,
+            ensureDocker: () => Promise.resolve(),
+          },
+        );
+
+        const dockerArgs: string[][] = [];
+        const leftoverInspect = JSON.stringify([{
+          Containers: { abc: { Name: `${PROXYSQL_SERVICE_ID}-in` } },
+        }]);
+        const second = await handleManagedIngressReconcile(
+          basePayload(),
+          new Date().toISOString(),
+          {
+            runDocker: (args) => {
+              dockerArgs.push([...args]);
+              if (
+                args[0] === "network" && args[1] === "inspect" &&
+                args[2] === "turbopanel-managed"
+              ) {
+                return Promise.resolve({
+                  success: true,
+                  stdout: leftoverInspect,
+                  stderr: "",
+                  code: 0,
+                });
+              }
+              if (args[0] === "inspect" && args[1] === "-f") {
+                return Promise.resolve({
+                  success: true,
+                  stdout: "turbopanel-managed\n",
+                  stderr: "",
+                  code: 0,
+                });
+              }
+              return fakeRun()(args);
+            },
+            decryptSecrets: decryptSecretsEcho,
+            ensureDocker: () => Promise.resolve(),
+          },
+        );
+        assertEquals(second.restarted, true);
+        assertEquals(
+          dockerArgs.some((args) =>
+            args.includes("up") && args.includes("--force-recreate")
+          ),
+          true,
+        );
+        assertEquals(
+          dockerArgs.some((args) =>
+            args[0] === "network" && args[1] === "rm" &&
+            args[2] === "turbopanel-managed"
+          ),
+          true,
+        );
+        const compose = await Deno.readTextFile(
+          proxysqlComposePath(resolveLayout(fixture.env)),
+        );
+        assertEquals(compose.includes(MANAGED_NETWORK), true);
+        assertEquals(compose.includes("turbopanel-managed"), false);
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleManagedIngressReconcile connects a stale frontend when compose already names the UUID even if compose up fails",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedFixture(fixture);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        await handleManagedIngressReconcile(
+          basePayload(),
+          new Date().toISOString(),
+          {
+            runDocker: fakeRun(),
+            decryptSecrets: decryptSecretsEcho,
+            ensureDocker: () => Promise.resolve(),
+          },
+        );
+
+        const dockerArgs: string[][] = [];
+        const leftoverInspect = JSON.stringify([{
+          Containers: { abc: { Name: `${PROXYSQL_SERVICE_ID}-in` } },
+        }]);
+        const second = await handleManagedIngressReconcile(
+          basePayload(),
+          new Date().toISOString(),
+          {
+            runDocker: (args) => {
+              dockerArgs.push([...args]);
+              if (args.includes("up")) {
+                return Promise.resolve({
+                  success: false,
+                  stdout: "",
+                  stderr: "compose up conflict",
+                  code: 1,
+                });
+              }
+              if (
+                args[0] === "network" && args[1] === "inspect" &&
+                args[2] === "turbopanel-managed"
+              ) {
+                return Promise.resolve({
+                  success: true,
+                  stdout: leftoverInspect,
+                  stderr: "",
+                  code: 0,
+                });
+              }
+              if (args[0] === "inspect" && args[1] === "-f") {
+                return Promise.resolve({
+                  success: true,
+                  stdout: "turbopanel-managed\n",
+                  stderr: "",
+                  code: 0,
+                });
+              }
+              return fakeRun()(args);
+            },
+            decryptSecrets: decryptSecretsEcho,
+            ensureDocker: () => Promise.resolve(),
+          },
+        );
+        assertEquals(second.restarted, true);
+        assertEquals(
+          dockerArgs.some((args) =>
+            args[0] === "network" && args[1] === "connect" &&
+            args[2] === MANAGED_NETWORK &&
+            args[3] === `${PROXYSQL_SERVICE_ID}-in`
+          ),
+          true,
+        );
+        assertEquals(
+          dockerArgs.some((args) =>
+            args[0] === "network" && args[1] === "rm" &&
+            args[2] === "turbopanel-managed"
+          ),
+          true,
         );
       } finally {
         Deno.env.delete("TURBOPANEL_STATE_DIR");
