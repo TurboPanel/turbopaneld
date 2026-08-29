@@ -7,6 +7,15 @@ import {
   runWriteDevChannelCatalogMain,
   writeDevChannelCatalog,
 } from "./write-dev-channel-catalog.ts";
+import { computeSourceFingerprint } from "./source-fingerprint.ts";
+import {
+  ambientCheckoutIsGitRepo,
+  withTempGitRepo,
+} from "../src/testing/temp-git-repo.ts";
+
+const AMBIENT_GIT = await ambientCheckoutIsGitRepo(
+  new URL("..", import.meta.url).pathname,
+);
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -72,9 +81,27 @@ test("writeDevChannelCatalog writes relative catalog files", async () => {
   }
 });
 
+// Real `git` against a throwaway repo — exercises the un-stubbed
+// `Deno.Command("git", …)` branch without depending on the ambient checkout.
 test("resolveCatalogGitShortSha uses git by default", async () => {
-  const sha = await resolveCatalogGitShortSha();
-  assertEquals(/^[0-9a-f]{4,}$/.test(sha), true);
+  await withTempGitRepo(async (repo) => {
+    const sha = await resolveCatalogGitShortSha(repo.path);
+    assertEquals(sha, repo.head.slice(0, 7));
+    assertEquals(/^[0-9a-f]{4,}$/.test(sha), true);
+  });
+});
+
+test({
+  name: "resolveCatalogGitShortSha reads the ambient checkout by default",
+  // Covers the `cwd = ROOT` default argument; skipped where the ambient tree
+  // is not a usable checkout.
+  ignore: !AMBIENT_GIT,
+  fn: async () => {
+    assertEquals(
+      /^[0-9a-f]{4,}$/.test(await resolveCatalogGitShortSha()),
+      true,
+    );
+  },
 });
 
 test("resolveCatalogGitShortSha returns a lowercase sha and fails closed", async () => {
@@ -159,17 +186,48 @@ test("runWriteDevChannelCatalogMain stamps overlay identity from git", async () 
     source: "abc1234full",
   }]);
 
-  const fromDefaultGit: Array<{ commit: string; buildId: string }> = [];
-  await runWriteDevChannelCatalogMain({
-    now: () => new Date("2026-01-01T00:00:00.000Z"),
-    writeCatalog: (identity) => {
-      fromDefaultGit.push({
-        commit: identity.commit,
-        buildId: identity.buildId,
-      });
-      return Promise.resolve();
-    },
+  // Same composition, but with the git-backed resolvers pointed at a
+  // throwaway repo instead of the ambient checkout: real `git` still runs, and
+  // the expected values are known rather than "whatever HEAD happens to be".
+  await withTempGitRepo(async (repo) => {
+    const fromRealGit: Array<{ commit: string; buildId: string }> = [];
+    await runWriteDevChannelCatalogMain({
+      gitShortSha: () => resolveCatalogGitShortSha(repo.path),
+      now: () => new Date("2026-01-01T00:00:00.000Z"),
+      sourceFingerprint: () => computeSourceFingerprint(repo.path),
+      writeCatalog: (identity) => {
+        fromRealGit.push({
+          commit: identity.commit,
+          buildId: identity.buildId,
+        });
+        return Promise.resolve();
+      },
+    });
+    const short = repo.head.slice(0, 7);
+    assertEquals(fromRealGit[0]?.commit, `${short}+1767225600`);
+    assertEquals(fromRealGit[0]?.buildId, `dev-${short}+1767225600`);
   });
-  assertEquals(fromDefaultGit[0]?.commit.endsWith("+1767225600"), true);
-  assertEquals(fromDefaultGit[0]?.buildId.startsWith("dev-"), true);
+});
+
+test({
+  name: "runWriteDevChannelCatalogMain defaults its git resolvers",
+  // Covers the `io.gitShortSha ?? …` / `io.sourceFingerprint ?? …` defaults,
+  // which resolve against the ambient checkout. Skipped where that tree is not
+  // a usable checkout; CI always has a real one.
+  ignore: !AMBIENT_GIT,
+  fn: async () => {
+    const fromDefaultGit: Array<{ commit: string; buildId: string }> = [];
+    await runWriteDevChannelCatalogMain({
+      now: () => new Date("2026-01-01T00:00:00.000Z"),
+      writeCatalog: (identity) => {
+        fromDefaultGit.push({
+          commit: identity.commit,
+          buildId: identity.buildId,
+        });
+        return Promise.resolve();
+      },
+    });
+    assertEquals(fromDefaultGit[0]?.commit.endsWith("+1767225600"), true);
+    assertEquals(fromDefaultGit[0]?.buildId.startsWith("dev-"), true);
+  },
 });

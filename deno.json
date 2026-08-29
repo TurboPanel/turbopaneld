@@ -43,7 +43,7 @@
     "notices:generate": "deno run --allow-read --allow-write --allow-run --allow-net --allow-env scripts/generate-notices.ts",
     "notices:check": "deno run --allow-read --allow-run --allow-net --allow-env scripts/generate-notices.ts --check",
     "test": "deno test -A",
-    "test:coverage": "rm -rf coverage && deno test -A --coverage=coverage/profile && deno coverage coverage/profile --lcov --output=coverage/lcov.info",
+    "test:coverage": "rm -rf coverage && deno test -A --coverage=$PWD/coverage/profile && deno coverage $PWD/coverage/profile --lcov --output=$PWD/coverage/lcov.info && deno run --allow-read --allow-write --allow-env scripts/normalize-lcov.ts coverage/lcov.info",
     "lint": "deno lint",
     "fmt": "deno fmt",
     "fmt:check": "deno fmt --check",

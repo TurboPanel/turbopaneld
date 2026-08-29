@@ -326,6 +326,30 @@ Sonar-way **80% new-code** floor.
 `new TypeError()` for shape assertions — both under TypeScript style
 (SonarQube) above; do not restate them here.
 
+**Coverage dir must stay absolute.** `test:coverage` passes
+`--coverage=$PWD/coverage/profile`, not a relative path. Several suites (and
+the `Deno.chdir("/")` fallbacks in `src/dev-sync-apply.ts` /
+`src/instance/run-reconcile.ts`) move the process cwd, and `deno test
+--coverage` resolves a *relative* coverage dir at end-of-run against whatever
+cwd it is left with — which fails with `Error generating coverage report:
+Failed to create output file` and silently drops that data. Absolute path, no
+dependence on ambient cwd.
+
+**LCOV paths:** `test:coverage` ends with `scripts/normalize-lcov.ts`, which
+rewrites `SF:` to repo-relative and asserts nothing absolute remains. Deno
+emits absolute `SF:` paths; SonarCloud resolves `SF:` against the project root,
+so an absolute path silently drops the whole report (green build, 0% coverage).
+CI re-runs the same script as an idempotent gate, so a local report is
+byte-identical to what SonarCloud imports.
+
+**Real-`git` suites:** use `withTempGitRepo` from `src/testing/temp-git-repo.ts`
+rather than running git against the ambient checkout. Ambient-tree suites break
+in a `git worktree` whose `.git` points outside the visible filesystem, in
+exported tarballs, and in containers without `.git`. Where a test must cover a
+helper's `cwd = ROOT` *default argument*, guard it with
+`ignore: !await ambientCheckoutIsGitRepo(...)` so it skips rather than fails
+off-checkout; CI always has a real checkout.
+
 **Where to run tests:** host VirtFS checkouts lack a usable Deno tree. Run
 suites **inside the Vagrant guest** from the host `dev` checkout:
 

@@ -74,40 +74,14 @@ jobs:
       - name: Test with coverage
         run: deno task test:coverage
 
-      - name: Normalize LCOV SF paths for SonarCloud
-        # Deno 2.9.5 on GitHub Actions emits absolute SF:/home/runner/work/...
-        # paths; SonarCloud needs repo-relative SF:src/... Resolve against the
-        # checkout root, then assert nothing absolute remains.
-        run: |
-          set -eu
-          if [ ! -f coverage/lcov.info ]; then
-            echo "::error::Missing coverage/lcov.info"
-            exit 1
-          fi
-          workspace="${GITHUB_WORKSPACE:-$(pwd)}"
-          workspace="${workspace%/}"
-          export LCOV_WORKSPACE="$workspace"
-          python3 - <<'PY'
-          from pathlib import Path
-          import os
-
-          path = Path("coverage/lcov.info")
-          text = path.read_text()
-          workspace = os.environ["LCOV_WORKSPACE"].rstrip("/")
-          for prefix in (f"file://{workspace}/", f"{workspace}/"):
-              text = text.replace(f"SF:{prefix}", "SF:")
-          path.write_text(text)
-          PY
-          bad="$(grep -E '^SF:(/|file:)' coverage/lcov.info || true)"
-          if [ -n "$bad" ]; then
-            echo "::error::LCOV SF paths must be repo-relative for SonarCloud after normalization"
-            printf '%s\n' "$bad" | head -n 20
-            exit 1
-          fi
-          if ! grep -q '^SF:src/' coverage/lcov.info; then
-            echo "::error::Expected at least one SF:src/ entry in coverage/lcov.info"
-            exit 1
-          fi
+      # `deno task test:coverage` already normalizes; re-running here is
+      # idempotent and keeps the assertions (nothing absolute, at least one
+      # SF:src/) as an explicit CI gate. One implementation, two callers --
+      # a local report is now byte-identical to what SonarCloud imports.
+      - name: Assert LCOV SF paths are repo-relative for SonarCloud
+        run: >-
+          deno run --allow-read --allow-write --allow-env
+          scripts/normalize-lcov.ts coverage/lcov.info
 
       - name: Upload coverage LCOV
         uses: actions/upload-artifact@v7

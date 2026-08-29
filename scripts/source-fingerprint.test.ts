@@ -3,6 +3,13 @@ import {
   computeSourceFingerprint,
   type SourceFingerprintRunner,
 } from "./source-fingerprint.ts";
+import {
+  ambientCheckoutIsGitRepo,
+  withTempGitRepo,
+} from "../src/testing/temp-git-repo.ts";
+
+const CHECKOUT = new URL("..", import.meta.url).pathname;
+const AMBIENT_GIT = await ambientCheckoutIsGitRepo(CHECKOUT);
 
 const HEAD = "abcdef0123456789abcdef0123456789abcdef01";
 
@@ -107,12 +114,59 @@ test("computeSourceFingerprint fails closed when git fails", async () => {
   );
 });
 
-test("computeSourceFingerprint runs real git in this checkout", async () => {
-  const fingerprint = await computeSourceFingerprint(
-    new URL("..", import.meta.url).pathname,
-  );
-  assertEquals(
-    /^[0-9a-f]{40}(\+dirty\.[0-9a-f]{12})?$/.test(fingerprint),
-    true,
-  );
+// The suites above drive computeSourceFingerprint through a stubbed runner.
+// These drive the real `git` binary against a throwaway repo, so the default
+// runner (`defaultSourceFingerprintRunner`) and the real diff / ls-files /
+// hash-object wiring are exercised without depending on how the ambient
+// checkout happens to be laid out.
+
+test("computeSourceFingerprint returns the bare HEAD sha for a clean real repo", async () => {
+  await withTempGitRepo(async (repo) => {
+    assertEquals(await computeSourceFingerprint(repo.path), repo.head);
+  });
+});
+
+test("computeSourceFingerprint suffixes real tracked modifications", async () => {
+  await withTempGitRepo(async (repo) => {
+    await repo.write("README.md", "changed\n");
+    const fingerprint = await computeSourceFingerprint(repo.path);
+    assertEquals(fingerprint.startsWith(`${repo.head}+dirty.`), true);
+    assertEquals(/^[0-9a-f]{40}\+dirty\.[0-9a-f]{12}$/.test(fingerprint), true);
+  });
+});
+
+test("computeSourceFingerprint covers real untracked files distinctly", async () => {
+  await withTempGitRepo(async (repo) => {
+    await repo.write("untracked.txt", "one\n");
+    const first = await computeSourceFingerprint(repo.path);
+    assertEquals(first.startsWith(`${repo.head}+dirty.`), true);
+
+    // Same path, different content must move the fingerprint — the untracked
+    // section hashes blob contents, not just names.
+    await repo.write("untracked.txt", "two\n");
+    const second = await computeSourceFingerprint(repo.path);
+    assertNotEquals(first, second);
+
+    // Committing it returns the tree to clean.
+    await repo.commit("add untracked");
+    const clean = await computeSourceFingerprint(repo.path);
+    assertEquals(/^[0-9a-f]{40}$/.test(clean), true);
+    assertNotEquals(clean, repo.head);
+  });
+});
+
+test({
+  name: "computeSourceFingerprint runs real git in this checkout",
+  // Exercises the `run = defaultSourceFingerprintRunner(cwd)` default against
+  // the ambient tree. Skipped where that tree is not a usable checkout (git
+  // worktree pointing outside the visible filesystem, exported tarball,
+  // container without `.git`); CI always has a real checkout.
+  ignore: !AMBIENT_GIT,
+  fn: async () => {
+    const fingerprint = await computeSourceFingerprint(CHECKOUT);
+    assertEquals(
+      /^[0-9a-f]{40}(\+dirty\.[0-9a-f]{12})?$/.test(fingerprint),
+      true,
+    );
+  },
 });

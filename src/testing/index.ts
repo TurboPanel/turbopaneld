@@ -25,6 +25,13 @@ export {
 } from "./temp-layout.ts";
 
 export {
+  ambientCheckoutIsGitRepo,
+  createTempGitRepo,
+  type TempGitRepo,
+  withTempGitRepo,
+} from "./temp-git-repo.ts";
+
+export {
   buildCloudflaredFixtureBinary,
   buildGalaxyDockerFixtureArchive,
   buildUvFixtureArchive,

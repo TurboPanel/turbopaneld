@@ -6,8 +6,16 @@ import {
   runReleaseDevOverlay,
   stampBuildInfo,
 } from "./release-dev-overlay.ts";
+import {
+  ambientCheckoutIsGitRepo,
+  withTempGitRepo,
+} from "../src/testing/temp-git-repo.ts";
 
 const FULL_SHA = "abcdef0123456789abcdef0123456789abcdef01";
+
+const AMBIENT_GIT = await ambientCheckoutIsGitRepo(
+  new URL("..", import.meta.url).pathname,
+);
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -43,14 +51,33 @@ test("stampBuildInfo replaces commit, buildId, and builtAt", () => {
   assertEquals(stamped.includes("oldsha"), false);
 });
 
+// Real `git` against a throwaway repo: exercises the un-stubbed
+// `Deno.Command("git", …)` branch without depending on the ambient checkout.
+// Asserting against repo.head is stronger than the shape regex these used to
+// apply to whatever sha the working tree happened to be on.
+
 test("resolveOverlayGitCommit uses the full HEAD SHA", async () => {
-  const sha = await resolveOverlayGitCommit();
-  assertEquals(/^[0-9a-f]{40}$/.test(sha), true);
+  await withTempGitRepo(async (repo) => {
+    assertEquals(await resolveOverlayGitCommit(repo.path), repo.head);
+  });
 });
 
 test("resolveOverlayGitShortSha uses git by default", async () => {
-  const sha = await resolveOverlayGitShortSha();
-  assertEquals(/^[0-9a-f]{7}$/.test(sha), true);
+  await withTempGitRepo(async (repo) => {
+    const sha = await resolveOverlayGitShortSha(repo.path);
+    assertEquals(sha, repo.head.slice(0, 7));
+    assertEquals(/^[0-9a-f]{7}$/.test(sha), true);
+  });
+});
+
+test({
+  name: "resolveOverlayGitCommit reads the ambient checkout by default",
+  // Covers the `cwd = ROOT` default argument. Skipped where the ambient tree
+  // is not a usable checkout; CI always has a real one.
+  ignore: !AMBIENT_GIT,
+  fn: async () => {
+    assertEquals(/^[0-9a-f]{40}$/.test(await resolveOverlayGitCommit()), true);
+  },
 });
 
 test("resolveOverlayGitShortSha returns a lowercase sha and fails closed", async () => {
