@@ -71,6 +71,24 @@ jobs:
       - name: Check third-party notices
         run: deno task notices:check
 
+      # The Ansible layer (20+ playbooks, 30+ first-party roles) had no CI
+      # gate at all -- its only feedback was a converge failure on a real host.
+      # orchestration/requirements.txt already pinned ansible-lint "for IDE/CI
+      # linting"; this is the CI half. See scripts/check-orchestration.sh for
+      # what is and is not gated.
+      - name: Set up Python for Ansible
+        uses: actions/setup-python@v5
+        with:
+          # Matches the vendored daemon pin (PYTHON_VERSION in
+          # src/orchestration/paths.ts) and orchestration/requirements.txt.
+          python-version: "3.14"
+
+      - name: Install Ansible toolchain
+        run: python -m pip install --disable-pip-version-check -r orchestration/requirements.txt
+
+      - name: Check orchestration (playbook syntax + ansible-lint min profile)
+        run: deno task check:orchestration
+
       - name: Test with coverage
         run: deno task test:coverage
 

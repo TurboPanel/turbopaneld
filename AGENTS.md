@@ -318,7 +318,8 @@ compile toolchain).
 ## Testing
 
 Local commands: `deno task test`, `deno task test:coverage`, `deno task
-fmt:check`, `deno task lint`, `deno task check`, `deno task check:layout`. See
+fmt:check`, `deno task lint`, `deno task check`, `deno task check:layout`,
+`deno task check:orchestration`. See
 **Guards / tests** above for the `-A` grant, per-test `permissions:` rule, and
 Sonar-way **80% new-code** floor.
 
@@ -341,6 +342,18 @@ emits absolute `SF:` paths; SonarCloud resolves `SF:` against the project root,
 so an absolute path silently drops the whole report (green build, 0% coverage).
 CI re-runs the same script as an idempotent gate, so a local report is
 byte-identical to what SonarCloud imports.
+
+**Orchestration is gated too.** `deno task check:orchestration`
+(`scripts/check-orchestration.sh`, wired into CI `verify.yml`) runs
+`ansible-playbook --syntax-check` on every playbook plus `ansible-lint
+--profile min`. Before this the Ansible layer — 20+ playbooks, 30+ first-party
+roles — had no CI gate of any kind, so a broken role reference or malformed
+task list only surfaced as a converge failure on a real host. Needs
+`ansible-playbook` / `ansible-lint` on PATH: in the guest,
+`export PATH="/opt/turbopanel/vendor/ansible/current/bin:$PATH"`. Rules that
+still fire on first-party content (`partial-become`, `parser-error`) are in
+`warn_list` in `.ansible-lint` with the reasoning; the full ansible-lint
+profile is deliberately **not** gated (~360 findings, nearly all style).
 
 **Real-`git` suites:** use `withTempGitRepo` from `src/testing/temp-git-repo.ts`
 rather than running git against the ambient checkout. Ambient-tree suites break

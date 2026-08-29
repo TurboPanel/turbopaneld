@@ -7,8 +7,29 @@
 # auto-discovery (explicitly opened files still lint via the nested
 # geerlingguy.*/.ansible-lint written by ensureGalaxyDockerRole).
 offline: true
+
+# Rules that fire on first-party content today. Reported, not fatal, so
+# `scripts/check-orchestration.sh` can gate the rest of the `min` profile now
+# rather than after a cleanup. Remove an entry once its findings are resolved.
+#
+#   partial-become  -- 12 tasks set `become_user:` with no `become:` at the
+#     same level. Ansible only switches user when `become` is truthy, so these
+#     may run as the connection user instead of the intended one. Real enough
+#     to fix, but the fix changes privilege semantics of live roles and needs
+#     an owner who knows each call site -- not a drive-by edit.
+#   parser-error    -- 1 finding, a false positive: ansible-lint mis-parses the
+#     multi-line `ansible.builtin.shell` block in
+#     roles/node-app-runtime/tasks/vendor-series.yml (Jinja inside a quoted
+#     shell body). Every playbook passes `ansible-playbook --syntax-check`.
+warn_list:
+  - partial-become
+  - parser-error
+
 exclude_paths:
   - .cache/
+  # Agent worktrees are checkouts of this same repo; linting them double-counts
+  # every finding against a stale copy.
+  - .claude/
   # Galaxy geerlingguy.docker (dot layout) and geerlingguy/docker (author/role)
   - orchestration/roles/geerlingguy.docker/
   - orchestration/roles/geerlingguy/
