@@ -30,6 +30,7 @@ import {
   ensureContainerJoinedManagedNetwork,
   ensureManagedIngressNetwork,
   pruneStaleManagedDockerNetworks,
+  removeUnusedManagedDockerNetwork,
 } from "../../managed/networks.ts";
 import {
   applyProxySqlAdminStatements,
@@ -306,12 +307,16 @@ function emptyIngressResult(
 async function tearDownProxySqlStack(
   layout: LayoutPaths,
   serverId: string,
+  managedNetwork: string,
   daemonReceivedAt: string,
   run: RunDockerFn,
 ): Promise<ManagedIngressReconcileResult> {
   const composePath = proxysqlComposePath(layout);
   const previousComposeText = await readPreviousConfig(composePath);
   if (previousComposeText === null) {
+    // Still sweep the managed bridge: a prior teardown (or a manual cleanup)
+    // may have removed the compose file while the external network lingered.
+    await removeUnusedManagedDockerNetwork(managedNetwork, run);
     logInfo(
       "commands",
       `managed.ingress.reconcile teardown skipped (no compose) serverId=${serverId} received=${daemonReceivedAt}`,
@@ -337,6 +342,11 @@ async function tearDownProxySqlStack(
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) throw err;
   }
+  // The managed bridge is compose-`external`, so the `down` above never
+  // removes it. Engine destroys land before this teardown fans out, so a
+  // zero-container network here is the org's last managed footprint on the
+  // host — drop it (skipped whenever anything is still attached).
+  await removeUnusedManagedDockerNetwork(managedNetwork, run);
   logInfo(
     "commands",
     `managed.ingress.reconcile teardown completed serverId=${serverId} received=${daemonReceivedAt}`,
@@ -514,6 +524,7 @@ export async function handleManagedIngressReconcile(
     return await tearDownProxySqlStack(
       layout,
       parsed.serverId,
+      parsed.managedNetwork,
       daemonReceivedAt,
       run,
     );

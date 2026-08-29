@@ -139,6 +139,18 @@ function fakeRunWithRunningProxySql(): (
   };
 }
 
+/** `docker network inspect` JSON for the managed bridge. */
+function managedNetworkInspectJson(
+  containers: Record<string, { Name: string }> = {},
+): string {
+  return JSON.stringify([{ Name: MANAGED_NETWORK, Containers: containers }]);
+}
+
+function isManagedNetworkRm(args: string[]): boolean {
+  return args[0] === "network" && args[1] === "rm" &&
+    args[2] === MANAGED_NETWORK;
+}
+
 function decryptSecretsEcho(
   ciphertexts: string[],
 ): Promise<(string | null)[]> {
@@ -677,6 +689,14 @@ test({
           {
             runDocker: (args) => {
               dockerArgs.push([...args]);
+              if (args[0] === "network" && args[1] === "inspect") {
+                return Promise.resolve({
+                  success: true,
+                  stdout: managedNetworkInspectJson(),
+                  stderr: "",
+                  code: 0,
+                });
+              }
               return fakeRun()(args);
             },
             ensureDocker: () => Promise.resolve(),
@@ -707,6 +727,9 @@ test({
           else throw err;
         }
         assertEquals(composeRemains, false);
+        // The managed bridge is compose-`external`, so `down` never removes
+        // it — teardown must drop the now-unused network itself.
+        assertEquals(dockerArgs.some(isManagedNetworkRm), true);
       } finally {
         Deno.env.delete("TURBOPANEL_STATE_DIR");
         Deno.env.delete("TURBOPANEL_CONFIG_DIR");
@@ -716,7 +739,57 @@ test({
 });
 
 test({
-  name: "empty clusters is a no-op when no compose file exists",
+  name:
+    "empty clusters teardown keeps a managed network that still has containers",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedFixture(fixture);
+      const layout = resolveLayout(fixture.env);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        await Deno.writeTextFile(
+          proxysqlComposePath(layout),
+          "services:\n  proxysql:\n    image: proxysql/proxysql:3.0.2\n",
+        );
+        const dockerArgs: string[][] = [];
+        await handleManagedIngressReconcile(
+          {
+            serverId: SERVER_ID,
+            managedNetwork: MANAGED_NETWORK,
+            clusters: [],
+          },
+          new Date().toISOString(),
+          {
+            runDocker: (args) => {
+              dockerArgs.push([...args]);
+              if (args[0] === "network" && args[1] === "inspect") {
+                return Promise.resolve({
+                  success: true,
+                  stdout: managedNetworkInspectJson({
+                    cid1: { Name: "some-engine-1" },
+                  }),
+                  stderr: "",
+                  code: 0,
+                });
+              }
+              return fakeRun()(args);
+            },
+          },
+        );
+        assertEquals(dockerArgs.some(isManagedNetworkRm), false);
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "empty clusters without a compose file still sweeps the idle managed network",
   permissions: { env: true, read: true, write: true, run: false },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -735,6 +808,14 @@ test({
           {
             runDocker: (args) => {
               dockerArgs.push([...args]);
+              if (args[0] === "network" && args[1] === "inspect") {
+                return Promise.resolve({
+                  success: true,
+                  stdout: managedNetworkInspectJson(),
+                  stderr: "",
+                  code: 0,
+                });
+              }
               return fakeRun()(args);
             },
           },
@@ -743,7 +824,17 @@ test({
         assertEquals(result.appliedBackends, []);
         assertEquals(result.restarted, false);
         assertEquals(result.containers, []);
-        assertEquals(dockerArgs.length, 0);
+        // No compose to tear down, but a leftover idle bridge (an earlier
+        // teardown that predates the network sweep) is still removed.
+        assertEquals(
+          dockerArgs.some((args) => args.includes("down")),
+          false,
+        );
+        assertEquals(
+          dockerArgs.every((args) => args[0] === "network"),
+          true,
+        );
+        assertEquals(dockerArgs.some(isManagedNetworkRm), true);
       } finally {
         Deno.env.delete("TURBOPANEL_STATE_DIR");
         Deno.env.delete("TURBOPANEL_CONFIG_DIR");

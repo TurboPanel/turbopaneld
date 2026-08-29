@@ -199,6 +199,21 @@ async function pruneDockerNetworkBestEffort(
   }
 }
 
+/**
+ * Remove the organization's managed-engine bridge once nothing is attached.
+ * The network is `external: true` in every compose file that joins it, so no
+ * `compose down` ever removes it — empty-cluster ingress teardown calls this
+ * so a server left with no managed engines keeps no idle network behind. The
+ * zero-container inspect guard never removes a bridge that engines, the HA
+ * orchestrator, or bound consumers still use.
+ */
+export async function removeUnusedManagedDockerNetwork(
+  name: string,
+  run: RunDockerFn,
+): Promise<void> {
+  await pruneDockerNetworkBestEffort(name, run, false);
+}
+
 /** Idempotently create the organization's managed-engine Docker network. */
 export async function ensureManagedIngressNetwork(
   name: string,

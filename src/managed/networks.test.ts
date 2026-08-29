@@ -6,6 +6,7 @@ import {
   ensureContainerJoinedManagedNetwork,
   ensureManagedIngressNetwork,
   pruneStaleManagedDockerNetworks,
+  removeUnusedManagedDockerNetwork,
   RETIRED_MANAGED_NETWORK_NAME,
   staleManagedDockerNetworkNames,
 } from "./networks.ts";
@@ -234,6 +235,54 @@ test("pruneStaleManagedDockerNetworks leaves occupied leftovers when disconnect 
   assertEquals(calls, [
     ["network", "inspect", RETIRED_MANAGED_NETWORK_NAME],
   ]);
+});
+
+test("removeUnusedManagedDockerNetwork removes an empty bridge", async () => {
+  const calls: string[][] = [];
+  await removeUnusedManagedDockerNetwork(MANAGED_NETWORK, (args) => {
+    calls.push([...args]);
+    if (args[0] === "network" && args[1] === "inspect") {
+      return Promise.resolve({
+        success: true,
+        stdout: JSON.stringify([{ Containers: {} }]),
+        stderr: "",
+        code: 0,
+      });
+    }
+    return Promise.resolve(okResult());
+  });
+  assertEquals(calls, [
+    ["network", "inspect", MANAGED_NETWORK],
+    ["network", "rm", MANAGED_NETWORK],
+  ]);
+});
+
+test("removeUnusedManagedDockerNetwork leaves an occupied bridge alone", async () => {
+  const calls: string[][] = [];
+  await removeUnusedManagedDockerNetwork(MANAGED_NETWORK, (args) => {
+    calls.push([...args]);
+    if (args[0] === "network" && args[1] === "inspect") {
+      return Promise.resolve({
+        success: true,
+        stdout: JSON.stringify([{
+          Containers: { abc: { Name: "engine-1" } },
+        }]),
+        stderr: "",
+        code: 0,
+      });
+    }
+    return Promise.resolve(okResult());
+  });
+  assertEquals(calls, [["network", "inspect", MANAGED_NETWORK]]);
+});
+
+test("removeUnusedManagedDockerNetwork is a no-op when the bridge is absent", async () => {
+  const calls: string[][] = [];
+  await removeUnusedManagedDockerNetwork(MANAGED_NETWORK, (args) => {
+    calls.push([...args]);
+    return Promise.resolve(failResult("no such network"));
+  });
+  assertEquals(calls, [["network", "inspect", MANAGED_NETWORK]]);
 });
 
 test("ensureContainerJoinedManagedNetwork is a no-op when already attached", async () => {
