@@ -575,6 +575,52 @@ test("requirements.yml pins ansible.posix to an exact version", async () => {
   }
 });
 
+test("check-orchestration installs ansible.posix when the vendor tree is absent", async () => {
+  const script = await Deno.readTextFile(
+    join(DAEMON_ROOT, "scripts/check-orchestration.sh"),
+  );
+  if (!script.includes("ansible-galaxy collection install --force")) {
+    throw new Error(
+      "check-orchestration.sh must force-install into -p so galaxy cannot skip from another collections_path",
+    );
+  }
+  if (!script.includes("orchestration/requirements.yml")) {
+    throw new Error(
+      "check-orchestration.sh must install from orchestration/requirements.yml",
+    );
+  }
+  if (/-r[^\n]*requirements-docker\.yml/.test(script)) {
+    throw new Error(
+      "check-orchestration.sh must not install requirements-docker.yml (deferred Docker role)",
+    );
+  }
+  if (!script.includes("ANSIBLE_COLLECTIONS_PATH")) {
+    throw new Error(
+      "check-orchestration.sh must set ANSIBLE_COLLECTIONS_PATH for pip-only CI",
+    );
+  }
+  if (!script.includes("TURBOPANEL_RUNTIMES_DIR/ansible/galaxy-collections")) {
+    throw new Error(
+      "check-orchestration.sh must skip Galaxy when collections are already vendored",
+    );
+  }
+  if (!script.includes("ansible_collections/ansible/posix")) {
+    throw new Error(
+      "check-orchestration.sh must verify ansible.posix landed in the install path",
+    );
+  }
+  if (script.includes("/opt/turbopanel/vendor")) {
+    throw new Error(
+      "check-orchestration.sh must not hardcode /opt/turbopanel/vendor (use TURBOPANEL_RUNTIMES_DIR)",
+    );
+  }
+  if (!script.includes('while [ "$attempt" -le 3 ]')) {
+    throw new Error(
+      "check-orchestration.sh must retry galaxy collection install (3 attempts)",
+    );
+  }
+});
+
 test("requirements-docker.yml pins geerlingguy.docker to an exact version", async () => {
   const requirements = await Deno.readTextFile(
     join(CHECKOUT_ORCHESTRATION_DIR, "requirements-docker.yml"),

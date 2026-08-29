@@ -356,7 +356,11 @@ byte-identical to what SonarCloud imports.
 roles — had no CI gate of any kind, so a broken role reference or malformed
 task list only surfaced as a converge failure on a real host. Needs
 `ansible-playbook` / `ansible-lint` on PATH: in the guest,
-`export PATH="/opt/turbopanel/vendor/ansible/current/bin:$PATH"`. Rules that
+`export PATH="/opt/turbopanel/vendor/ansible/current/bin:$PATH"`. Syntax-check
+resolves `ansible.posix.acl` / `ansible.posix.sysctl`: when the collection is
+not already vendored under `$TURBOPANEL_RUNTIMES_DIR/ansible/galaxy-collections`
+(CI has ansible-core from pip and no vendor tree), the script installs the pin
+from `orchestration/requirements.yml` (not `requirements-docker.yml`). Rules that
 still fire on first-party content (`partial-become`, `parser-error`) are in
 `warn_list` in `.ansible-lint` with the reasoning; the full ansible-lint
 profile is deliberately **not** gated (~360 findings, nearly all style).

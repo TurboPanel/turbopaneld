@@ -74,7 +74,9 @@ jobs:
       # The Ansible layer (20+ playbooks, 30+ first-party roles) had no CI
       # gate at all -- its only feedback was a converge failure on a real host.
       # orchestration/requirements.txt already pinned ansible-lint "for IDE/CI
-      # linting"; this is the CI half. See scripts/check-orchestration.sh for
+      # linting"; this is the CI half. check-orchestration.sh also installs
+      # ansible.posix from orchestration/requirements.yml (Galaxy collections
+      # are not committed; CI has no /opt vendor tree). See the script for
       # what is and is not gated.
       - name: Set up Python for Ansible
         uses: actions/setup-python@v5
