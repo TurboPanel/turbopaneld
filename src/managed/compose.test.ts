@@ -83,6 +83,16 @@ function parseNormalized(
   return doc;
 }
 
+test("normalizeManagedCompose pins the data volume name against project prefixing", () => {
+  // Without an explicit `name`, compose creates `<project>_<volume>` while
+  // bootstrapStandby throwaway containers `docker run -v <volume>` — the
+  // mismatch seeded/probed an orphan volume the engine never mounted.
+  const doc = parseNormalized(basePayload());
+  const volumes = doc.volumes as Record<string, unknown>;
+  const pgdata = volumes.pgdata as Record<string, unknown>;
+  assertEquals(pgdata?.name, "pgdata");
+});
+
 test("normalizeManagedCompose rewrites nested config/tls mounts that Docker cannot start", () => {
   const withTls = basePayload({
     composeYaml: [

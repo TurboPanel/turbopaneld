@@ -208,17 +208,21 @@ export function primaryReplicationStatusSql(): string {
 export function standbyReplicationStatusSql(): string {
   // Only report `streaming` when a live WAL receiver is active. A disconnected
   // hot standby remains in recovery but must not look promote-ready.
+  // A "standby" that is NOT in recovery has diverged into a standalone
+  // primary (lost/initdb'd data dir) — surface that as needs_resync, never
+  // an opaque 'unknown'.
   return [
     `SELECT`,
     `  CASE`,
-    `    WHEN NOT pg_catalog.pg_is_in_recovery() THEN 'unknown'`,
+    `    WHEN NOT pg_catalog.pg_is_in_recovery() THEN 'needs_resync'`,
     `    WHEN r.status IS NULL THEN 'stopped'`,
     `    WHEN r.status = 'streaming' THEN 'streaming'`,
     `    ELSE COALESCE(r.status, 'unknown')`,
     `  END AS state,`,
     `  CASE`,
-    `    WHEN r.status = 'streaming' AND r.received_lsn IS NOT NULL`,
-    `    THEN COALESCE(pg_catalog.pg_wal_lsn_diff(r.received_lsn, pg_catalog.pg_last_wal_replay_lsn()), 0)`,
+    // `received_lsn` was renamed to `flushed_lsn` in PostgreSQL 13.
+    `    WHEN r.status = 'streaming' AND r.flushed_lsn IS NOT NULL`,
+    `    THEN COALESCE(pg_catalog.pg_wal_lsn_diff(r.flushed_lsn, pg_catalog.pg_last_wal_replay_lsn()), 0)`,
     `    ELSE NULL`,
     `  END AS lag_bytes,`,
     `  CASE`,
@@ -228,6 +232,29 @@ export function standbyReplicationStatusSql(): string {
     `  END AS lag_seconds`,
     `FROM (SELECT 1) AS _dummy`,
     `LEFT JOIN pg_catalog.pg_stat_wal_receiver r ON true;`,
+  ].join("\n");
+}
+
+/**
+ * Post-reload verification: both views re-read the config files from disk at
+ * query time, so an unreadable or syntactically broken file surfaces here
+ * even though `pg_reload_conf()` itself returned true (the postmaster only
+ * logs reload failures — it never reports them to the caller).
+ *
+ * `'setting could not be applied'` rows are excluded from the error count —
+ * that is Postgres's marker for **restart-required** parameters (e.g.
+ * `max_replication_slots` growing with the member count), which is expected
+ * on reload, not a broken file. Their count is returned separately so the
+ * caller can log the pending restart.
+ */
+export function reloadVerifySql(): string {
+  return [
+    "SELECT",
+    "  (SELECT count(*) FROM pg_catalog.pg_file_settings",
+    "   WHERE error IS NOT NULL AND error <> 'setting could not be applied') AS config_errors,",
+    "  (SELECT count(*) FROM pg_catalog.pg_hba_file_rules WHERE error IS NOT NULL) AS hba_errors,",
+    "  (SELECT count(*) FROM pg_catalog.pg_file_settings",
+    "   WHERE error = 'setting could not be applied') AS restart_pending;",
   ].join("\n");
 }
 

@@ -75,6 +75,14 @@ test("buildMariadbStandbySeedScript registers trap before writing credentials", 
   const catIdx = script.indexOf('cat > "$tmp"');
   assertEquals(trapIdx !== -1 && catIdx !== -1 && trapIdx < catIdx, true);
   assertEquals(script.includes("mariadb-dump --defaults-extra-file="), true);
+  // --gtid records the snapshot position ONLY with --master-data; without it
+  // the standby replays the primary's binlog from the beginning.
+  assertEquals(script.includes("--master-data=1"), true);
+  assertEquals(script.includes("--gtid"), true);
+  // The standby's binlog must stay empty through the seed or its own GTID
+  // domain conflicts with the dump's SET GLOBAL gtid_slave_pos (error 1948).
+  assertEquals(script.includes('"RESET MASTER"'), true);
+  assertEquals(script.includes("SET SESSION sql_log_bin=0;"), true);
 });
 
 type RecordedExec = { argv: string[]; input?: string };
@@ -435,7 +443,8 @@ test("mariadb promote clears read-only and returns when writable", async () => {
     }
     if (argv.includes("-e")) {
       writableChecks++;
-      const stdout = writableChecks >= 2 ? "0\t0\n" : "1\t1\n";
+      // Single column: MariaDB has no super_read_only (MySQL-only).
+      const stdout = writableChecks >= 2 ? "0\n" : "1\n";
       return Promise.resolve({ success: true, stdout, stderr: "" });
     }
     return Promise.resolve({ success: true, stdout: "", stderr: "" });
@@ -841,6 +850,13 @@ test("mariadb configureStandby dials the DNS SAN when hostaddr is omitted", asyn
     slotName: "tp_member_2",
   });
   assertEquals(calls.some((c) => c.input?.includes("host=svc-primary")), true);
+  // MariaDB client dialect: never `ssl-mode` (MySQL-only) — use
+  // `ssl-verify-server-cert`.
+  assertEquals(calls.some((c) => c.input?.includes("ssl-mode")), false);
+  assertEquals(
+    calls.some((c) => c.input?.includes("ssl-verify-server-cert")),
+    true,
+  );
 });
 
 test("mariadb readHealth returns unknown when replica status is empty", async () => {

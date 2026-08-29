@@ -8,7 +8,7 @@ import type {
   ManagedApplyCredential,
   ManagedApplyDatabaseOp,
 } from "../../instance/commands/contracts.ts";
-import { sanitizeForLog } from "../../logger.ts";
+import { logInfo, sanitizeForLog } from "../../logger.ts";
 import {
   createDatabaseSql,
   createOrAlterRoleSql,
@@ -26,6 +26,7 @@ import {
   primaryReplicationStatusSql,
   promoteSql,
   quoteIdentifier,
+  reloadVerifySql,
   standbyReplicationStatusSql,
 } from "./postgres-sql.ts";
 import type {
@@ -232,6 +233,10 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
       volumeArgs.push("-v", `${volume.name}:${volume.target}`);
     }
     const dataRoot = ctx.volumes[0]?.target ?? "/var/lib/postgresql";
+    // The engine's PGDATA is pinned to `<volume>/data` by the compose spec
+    // (postgres:18 images changed their default to <volume>/<major>/docker) —
+    // probe and seed that directory, never the volume root.
+    const dataDir = `${dataRoot}/data`;
     // `test -f` alone cannot distinguish "file absent" from "docker never ran"
     // (e.g. socket permission error) — echo an explicit marker and require the
     // probe container itself to succeed, so a docker failure aborts instead of
@@ -257,13 +262,36 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
       }
       return probe.stdout.trim().endsWith("present");
     };
-    if (await probeFile(`${dataRoot}/PG_VERSION`)) {
+    if (!spec.forceResync && await probeFile(`${dataDir}/PG_VERSION`)) {
       // Initialized — need standby.signal to confirm standby role.
-      if (await probeFile(`${dataRoot}/standby.signal`)) {
+      if (await probeFile(`${dataDir}/standby.signal`)) {
         return "already_standby";
       }
       // Initialized but not a standby (orphaned primary data) — never auto-rewind.
       return "needs_resync";
+    }
+
+    // No PG_VERSION (or an operator-forced resync) ⇒ discard what lives
+    // here. Clears stranded partials (an interrupted seed, a stray cluster
+    // an unpinned PGDATA initdb'd, or a diverged standby being re-seeded) so
+    // pg_basebackup never fails with "directory exists but is not empty".
+    const clean = await ctx.runDocker([
+      "run",
+      "--rm",
+      "--user",
+      ctx.containerUser,
+      ...volumeArgs,
+      ctx.image,
+      "sh",
+      "-c",
+      `rm -rf '${dataDir}' '${dataDir}.tmp'`,
+    ]);
+    if (!clean.success) {
+      throw new Error(
+        `standby data cleanup failed: ${
+          sanitizeForLog(clean.stderr || clean.stdout || "unknown")
+        }`,
+      );
     }
 
     // Connection string: `host` is the cert SAN / leaf name used for
@@ -295,7 +323,11 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
           "-d",
           connectionString,
           "-D",
-          `${dataRoot}/data`,
+          // Seed into a temp dir and rename on success below: an interrupted
+          // basebackup then leaves only `data.tmp` (cleared on the next
+          // attempt) and can never strand a half-copied PGDATA that a later
+          // probe would misread as an initialized cluster.
+          `${dataDir}.tmp`,
           "-X",
           "stream",
           "-c",
@@ -321,8 +353,8 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
       }
     }
 
-    // -R writes standby.signal; reaffirm when using alternate layouts.
-    await ctx.runDocker([
+    // Atomic publish: -R already wrote standby.signal inside the temp dir.
+    const publish = await ctx.runDocker([
       "run",
       "--rm",
       "--user",
@@ -331,8 +363,15 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
       ctx.image,
       "sh",
       "-c",
-      "touch /var/lib/postgresql/data/standby.signal 2>/dev/null || touch /var/lib/postgresql/standby.signal 2>/dev/null || true",
+      `mv '${dataDir}.tmp' '${dataDir}'`,
     ]);
+    if (!publish.success) {
+      throw new Error(
+        `standby data publish failed: ${
+          sanitizeForLog(publish.stderr || publish.stdout || "unknown")
+        }`,
+      );
+    }
     return "seeded";
   },
 
@@ -416,6 +455,35 @@ export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
         sanitizeForLog(lastError)
       }`,
     );
+  },
+
+  async reloadConfig(ctx: ManagedEngineContext): Promise<void> {
+    // pg_reload_conf() re-reads pg_hba.conf and reloadable GUCs; safe in
+    // recovery, so standbys reload too.
+    await runPsql(ctx, "SELECT pg_reload_conf();");
+    // The postmaster only LOGS reload failures (unreadable/broken files) —
+    // pg_reload_conf() still returns true. Verify by re-reading the files
+    // through pg_file_settings / pg_hba_file_rules so a failed reload fails
+    // the apply loudly instead of leaving stale auth config in force.
+    const rows = await parsePsqlRows(ctx, reloadVerifySql());
+    const configErrors = Number(rows[0]?.[0] ?? "0");
+    const hbaErrors = Number(rows[0]?.[1] ?? "0");
+    const restartPending = Number(rows[0]?.[2] ?? "0");
+    if (configErrors > 0 || hbaErrors > 0) {
+      throw new Error(
+        `postgres config reload failed: ${configErrors} postgresql.conf error(s), ` +
+          `${hbaErrors} pg_hba.conf error(s) — see engine logs`,
+      );
+    }
+    if (restartPending > 0) {
+      // Restart-required GUCs (e.g. max_replication_slots growing with the
+      // member count) — expected on reload; they take effect on the next
+      // engine restart. Never fail the apply for these.
+      logInfo(
+        "managed",
+        `postgres reload: ${restartPending} setting(s) pending engine restart`,
+      );
+    }
   },
 
   async readVersion(ctx: ManagedEngineContext): Promise<string | undefined> {

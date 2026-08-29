@@ -436,3 +436,31 @@ test("standby applyManagedEngineState runs configureStandby when replication cre
   assertEquals(state.engineVersion, "8.4.0");
   assertEquals(calls, ["waitReady", "configureStandby", "readVersion"]);
 });
+
+Deno.test("isRetryableEngineExecFailure matches restart-window exec errors only", async () => {
+  const { isRetryableEngineExecFailure } = await import("./apply.ts");
+  const oci =
+    "OCI runtime exec failed: exec failed: unable to start container process: " +
+    "error executing setns process: exit status 1";
+  if (!isRetryableEngineExecFailure(oci)) throw new Error("expected retryable");
+  if (!isRetryableEngineExecFailure("Error response from daemon: container abc is not running")) {
+    throw new Error("expected retryable");
+  }
+  if (
+    !isRetryableEngineExecFailure(
+      "ERROR 2002 (HY000): Can't connect to local server through socket '/run/mysqld/mysqld.sock' (2)",
+    )
+  ) {
+    throw new Error("expected retryable (mysql-family socket gap)");
+  }
+  if (
+    !isRetryableEngineExecFailure(
+      'psql: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" failed: No such file or directory',
+    )
+  ) {
+    throw new Error("expected retryable (postgres socket gap)");
+  }
+  if (isRetryableEngineExecFailure("ERROR 1045 (28000): Access denied")) {
+    throw new Error("SQL failures must not retry");
+  }
+});

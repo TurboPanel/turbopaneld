@@ -1078,6 +1078,23 @@ export type ManagedApplyPayload = {
   privateListener?: ManagedApplyPrivateListener;
   replication?: ManagedApplyReplication;
   credentials: ManagedApplyCredential[];
+  /**
+   * Per-server ProxySQL monitor credentials (username + `tpdaemon.…` sealed
+   * password) for every server fronting this cluster. Primary payloads only —
+   * the engine creates one monitor role per server; standbys inherit via WAL.
+   */
+  monitorUsers?: Array<{ username: string; password: string }>;
+  /**
+   * Operator-forced standby re-seed: bootstrap skips its probes, clears the
+   * data directory, and seeds fresh from the primary. Standby payloads only.
+   */
+  forceResync?: boolean;
+  /**
+   * Cross-host consumer server addresses whose ProxySQL dials this engine's
+   * private listener (client + monitor traffic). Admitted by the firewall
+   * and by engine account host scoping; never granted replication.
+   */
+  ingressSourceAddresses?: string[];
   databases?: ManagedApplyDatabaseOp[];
   /** Transient usernames to drop after credentials are applied (never root). */
   dropUsers?: string[];
@@ -1297,6 +1314,13 @@ export type ManagedIngressReconcilePayload = {
    */
   listenerPorts?: ManagedIngressListenerPortsPayload;
   clusters: ProxySqlClusterPayload[];
+  /**
+   * This server's ProxySQL backend monitor credential (control-plane minted,
+   * per server; password is a `tpdaemon.…` envelope). When present the daemon
+   * uses it for the ProxySQL monitor globals and rewrites host `monitor.cnf`;
+   * absent means fall back to the host-seeded `monitor.cnf`.
+   */
+  monitor?: { username: string; password: string };
   /**
    * ProxySQL spanning attachments (`tpn_*`). Payload field is still `segments[]`
    * — compose-bridge subnets, deliberately not renamed.
@@ -3999,6 +4023,14 @@ const MAX_MANAGED_IMAGE_LENGTH = 256;
  * cannot run an unsupported or EOL major version (MySQL 8.0 went EOL in April
  * 2026 and is deliberately absent).
  *
+ * **Tested series only.** The control-plane catalog marks a series
+ * `tested: true` once it is validated end-to-end, and only those series are
+ * creatable: PostgreSQL 18, MySQL 9.7, MariaDB 12.3. The catalog still *knows*
+ * about older series (17/16/15, 8.4, 11.8/11.4/10.11) so an already-persisted
+ * image can be named in the UI, but they must never reach Docker — do not add
+ * one back here without flipping `tested` in the control-plane catalog and the
+ * UI mirror in the same change.
+ *
  * Neither MySQL nor MariaDB publish an official Alpine-based image, so both
  * default to the Docker Official Image's Debian-based tag with the
  * vendor-published Oracle Linux (MySQL) / UBI (MariaDB) variant as the
@@ -4009,28 +4041,14 @@ const MANAGED_ALLOWED_IMAGES_BY_ENGINE: Record<string, readonly string[]> = {
   postgres: [
     "docker.io/library/postgres:18-alpine",
     "docker.io/library/postgres:18",
-    "docker.io/library/postgres:17-alpine",
-    "docker.io/library/postgres:17",
-    "docker.io/library/postgres:16-alpine",
-    "docker.io/library/postgres:16",
-    "docker.io/library/postgres:15-alpine",
-    "docker.io/library/postgres:15",
   ],
   mysql: [
     "docker.io/library/mysql:9.7",
     "docker.io/library/mysql:9.7-oraclelinux9",
-    "docker.io/library/mysql:8.4",
-    "docker.io/library/mysql:8.4-oraclelinux9",
   ],
   mariadb: [
     "docker.io/library/mariadb:12.3",
     "docker.io/library/mariadb:12.3-ubi",
-    "docker.io/library/mariadb:11.8",
-    "docker.io/library/mariadb:11.8-ubi",
-    "docker.io/library/mariadb:11.4",
-    "docker.io/library/mariadb:11.4-ubi",
-    "docker.io/library/mariadb:10.11",
-    "docker.io/library/mariadb:10.11-ubi",
   ],
 };
 
@@ -4605,6 +4623,35 @@ function parseManagedApplyCredentials(
   return value.map(parseManagedApplyCredentialEntry);
 }
 
+/** One `{ username, tpdaemon-envelope password }` monitor credential. */
+function parseManagedMonitorCredential(
+  value: unknown,
+  label: string,
+): { username: string; password: string } {
+  if (
+    !isRecord(value) ||
+    typeof value.username !== "string" ||
+    !isSafeUsername(value.username) ||
+    typeof value.password !== "string" ||
+    !value.password.startsWith(DAEMON_ENVELOPE_PREFIX)
+  ) {
+    throw new TypeError(`Invalid ${label} monitor credential`);
+  }
+  return { username: value.username, password: value.password };
+}
+
+function parseManagedApplyMonitorUsers(
+  value: unknown,
+): Array<{ username: string; password: string }> | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > MAX_MANAGED_CREDENTIALS) {
+    throw new TypeError("Invalid managed.apply monitorUsers");
+  }
+  return value.map((entry) =>
+    parseManagedMonitorCredential(entry, "managed.apply")
+  );
+}
+
 function parseManagedApplyDatabases(
   value: unknown,
 ): ManagedApplyDatabaseOp[] | undefined {
@@ -4993,6 +5040,28 @@ function parseManagedMemberObservedResult(
   return member;
 }
 
+function parseManagedApplyForceResync(value: unknown): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== "boolean") {
+    throw new TypeError("Invalid managed.apply forceResync");
+  }
+  return value;
+}
+
+function parseManagedApplyIngressSourceAddresses(
+  value: unknown,
+): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (
+    !Array.isArray(value) ||
+    value.length > MAX_MANAGED_PEER_ADDRESSES ||
+    !value.every((entry) => typeof entry === "string" && entry.length > 0)
+  ) {
+    throw new TypeError("Invalid managed.apply ingressSourceAddresses");
+  }
+  return value as string[];
+}
+
 /** Must stay in sync with the instance canonical `managed.apply` validator. */
 export function parseManagedApplyPayload(
   value: unknown,
@@ -5043,6 +5112,11 @@ export function parseManagedApplyPayload(
     getManagedReservedEnvKeys(value.engine),
   );
   const databases = parseManagedApplyDatabases(value.databases);
+  const monitorUsers = parseManagedApplyMonitorUsers(value.monitorUsers);
+  const forceResync = parseManagedApplyForceResync(value.forceResync);
+  const ingressSourceAddresses = parseManagedApplyIngressSourceAddresses(
+    value.ingressSourceAddresses,
+  );
   const dropUsers = parseManagedApplyDropUsers(value.dropUsers);
   const tlsMaterial = parseManagedApplyTlsMaterial(value.tlsMaterial);
   const orgTlsMaterial = parseManagedApplyOrgTlsMaterial(value.orgTlsMaterial);
@@ -5076,6 +5150,9 @@ export function parseManagedApplyPayload(
     ...(privateListener === undefined ? {} : { privateListener }),
     ...(replication === undefined ? {} : { replication }),
     credentials: parseManagedApplyCredentials(value.credentials),
+    ...(monitorUsers === undefined ? {} : { monitorUsers }),
+    ...(forceResync ? { forceResync: true } : {}),
+    ...(ingressSourceAddresses === undefined ? {} : { ingressSourceAddresses }),
     ...(databases === undefined ? {} : { databases }),
     ...(dropUsers === undefined ? {} : { dropUsers }),
     ...(tlsMaterial === undefined ? {} : { tlsMaterial }),
@@ -5815,6 +5892,12 @@ export function parseManagedIngressReconcilePayload(
   if (value.bindAddresses !== undefined) {
     payload.bindAddresses = parseManagedIngressBindAddresses(
       value.bindAddresses,
+    );
+  }
+  if (value.monitor !== undefined) {
+    payload.monitor = parseManagedMonitorCredential(
+      value.monitor,
+      "managed.ingress.reconcile",
     );
   }
   if (value.segments !== undefined) {

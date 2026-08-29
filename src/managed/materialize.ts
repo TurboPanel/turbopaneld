@@ -7,6 +7,7 @@
  * by the container's engine user.
  */
 
+import { join } from "@std/path";
 import type { ManagedApplyPayload } from "../instance/commands/contracts.ts";
 import {
   type DockerCliResult,
@@ -182,6 +183,63 @@ export async function normalizeManagedFileOwnership(
     throw new Error(
       `failed to normalize managed file ownership: ${
         sanitizeForLog(result.stderr || result.stdout || "docker run failed")
+      }`,
+    );
+  }
+
+  // Verify the result AS THE ENGINE USER, with the subtrees mounted exactly
+  // the way the engine compose mounts them (subdirs directly — the engine
+  // never traverses the daemon-only managed root). A daemon-owned directory
+  // blocks traversal even when every file inside is correctly owned, and the
+  // engine then crash-loops on unreadable config/TLS with no hint in the
+  // apply — fail the apply loudly instead. `su -s /bin/sh` works on both
+  // shadow su (debian/ubuntu) and busybox su (alpine).
+  const verifyMounts: string[] = [];
+  for (const subdir of ["config", "tls"]) {
+    try {
+      const info = await Deno.stat(join(managedRoot, subdir));
+      if (info.isDirectory) {
+        verifyMounts.push("-v", `${join(managedRoot, subdir)}:/verify/${subdir}:ro`);
+      }
+    } catch (err) {
+      if (!(err instanceof Deno.errors.NotFound)) throw err;
+    }
+  }
+  if (verifyMounts.length === 0) return;
+
+  const verifyScript = [
+    "set -eu",
+    `USER_NAME=${shellSingleQuote(containerUser)}`,
+    '[ ! -d /verify/config ] ||',
+    '  su -s /bin/sh "$USER_NAME" -c "ls /verify/config > /dev/null" ||',
+    '  { echo "engine user cannot traverse config/" >&2; exit 1; }',
+    '[ ! -d /verify/tls ] ||',
+    '  su -s /bin/sh "$USER_NAME" -c "ls /verify/tls > /dev/null" ||',
+    '  { echo "engine user cannot traverse tls/" >&2; exit 1; }',
+    "[ ! -f /verify/tls/server.crt ] ||",
+    '  su -s /bin/sh "$USER_NAME" -c "cat /verify/tls/server.crt > /dev/null" ||',
+    '  { echo "engine user cannot read tls/server.crt" >&2; exit 1; }',
+    "[ ! -f /verify/tls/server.key ] ||",
+    '  su -s /bin/sh "$USER_NAME" -c "cat /verify/tls/server.key > /dev/null" ||',
+    '  { echo "engine user cannot read tls/server.key" >&2; exit 1; }',
+  ].join("\n");
+
+  const verified = await run([
+    "run",
+    "--rm",
+    "--user",
+    "0",
+    "--entrypoint",
+    "sh",
+    ...verifyMounts,
+    image,
+    "-c",
+    verifyScript,
+  ]);
+  if (!verified.success) {
+    throw new Error(
+      `managed file ownership verification failed: ${
+        sanitizeForLog(verified.stderr || verified.stdout || "docker run failed")
       }`,
     );
   }

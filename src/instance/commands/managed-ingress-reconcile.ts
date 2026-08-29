@@ -61,6 +61,7 @@ import {
   proxysqlAdminCnfPath,
   proxysqlComposePath,
   proxysqlConfigPath,
+  proxysqlMonitorCnfPath,
   proxysqlTlsDir,
 } from "../../managed/paths.ts";
 
@@ -560,7 +561,32 @@ export async function handleManagedIngressReconcile(
   );
 
   const adminCredentials = await loadProxySqlAdminCredentials(layout);
-  const monitorCredentials = await loadProxySqlMonitorCredentials(layout);
+  // Payload monitor credential (control-plane minted, per server) wins over
+  // the host-seeded `monitor.cnf`: cross-host clusters need every server to
+  // monitor with its own control-plane-known identity (the engine roles are
+  // created from `managed.apply` monitorUsers). Rewrite `monitor.cnf` so the
+  // engine-apply fallback path stays consistent with what ProxySQL uses.
+  let monitorCredentials: { user: string; password: string } | null;
+  if (parsed.monitor) {
+    const [monitorPassword] = await deps.decryptSecrets([
+      parsed.monitor.password,
+    ]);
+    if (typeof monitorPassword !== "string" || monitorPassword.length === 0) {
+      throw new Error(
+        "managed.ingress.reconcile failed to decrypt monitor credential",
+      );
+    }
+    monitorCredentials = {
+      user: parsed.monitor.username,
+      password: monitorPassword,
+    };
+    await writeProxySqlConfigAtomic(
+      proxysqlMonitorCnfPath(layout),
+      `[client]\nuser=${monitorCredentials.user}\npassword=${monitorCredentials.password}\n`,
+    );
+  } else {
+    monitorCredentials = await loadProxySqlMonitorCredentials(layout);
+  }
   const bindAddresses = desired.bindAddresses;
   const composePath = proxysqlComposePath(layout);
   const configPath = proxysqlConfigPath(layout);

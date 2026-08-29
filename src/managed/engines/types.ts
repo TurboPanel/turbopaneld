@@ -30,6 +30,12 @@ export type ManagedEngineContext = {
    * `MYSQL_PWD`.
    */
   socketPassword?: string;
+  /**
+   * Cross-host source addresses whose ProxySQL dials this engine's private
+   * listener (peer members + bound consumer servers). MySQL/MariaDB scope
+   * account hosts with these; Postgres admission is pg_hba (config-side).
+   */
+  clientSourceHosts?: readonly string[];
 };
 
 export type ManagedEngineRuntime = {
@@ -39,6 +45,14 @@ export type ManagedEngineRuntime = {
   rootUsername: string;
   defaultDatabase: string;
   waitReady(ctx: ManagedEngineContext): Promise<void>;
+  /**
+   * Optional: re-read bind-mounted config after materialize rewrote it.
+   * `compose up -d` does not recreate a container when only mounted file
+   * contents change, so engines that support live reload (Postgres SIGHUP
+   * for pg_hba.conf / reloadable GUCs) must be told explicitly. Runs on
+   * primaries and standbys — config reload is not user-data mutation.
+   */
+  reloadConfig?(ctx: ManagedEngineContext): Promise<void>;
   readVersion(ctx: ManagedEngineContext): Promise<string | undefined>;
   applyCredentials(
     ctx: ManagedEngineContext,
@@ -122,6 +136,12 @@ export type ManagedEngineReplicationRuntime = {
         port: number;
       };
       slotName: string;
+      /**
+       * Operator-forced re-seed: skip the initialized/standby probes, clear
+       * the data directory, and seed fresh from the primary. The only
+       * sanctioned way past `needs_resync` (which never auto-rewinds).
+       */
+      forceResync?: boolean;
     },
   ): Promise<"seeded" | "already_standby" | "needs_resync">;
   /**

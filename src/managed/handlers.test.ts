@@ -388,6 +388,16 @@ test("handleManagedDestroy runs compose down with volumes and removes state", as
       calls.some((args) => args.includes("down") && args.includes("--volumes")),
       true,
     );
+    // The pinned data volume (and any pre-pin bare-name orphan) must be
+    // removed by exact name — compose down -v only removes project-labeled
+    // volumes and misses orphans that `docker run -v` auto-created.
+    assertEquals(
+      calls.some((args) =>
+        args[0] === "volume" && args[1] === "rm" &&
+        args.includes(`managed_${managedId}_data`)
+      ),
+      true,
+    );
     let sawNotFound = false;
     try {
       await Deno.stat(root);

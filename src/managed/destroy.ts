@@ -104,6 +104,7 @@ async function tearDownManagedCompose(
         }`,
       );
     }
+    await removeManagedDataVolumeBestEffort(run, project, removeVolumes);
     return;
   }
   if (remaining.length > 0) {
@@ -114,6 +115,36 @@ async function tearDownManagedCompose(
     throw new Error(
       `managed.destroy left ${remaining.length} container(s) for project ${project}`,
     );
+  }
+  await removeManagedDataVolumeBestEffort(run, project, removeVolumes);
+}
+
+/**
+ * Best-effort removal of the engine data volume by its exact pinned name
+ * (`managed_<id>_data`). `compose down --volumes` only removes volumes
+ * labeled with the project, which misses (a) orphan bare-name volumes that
+ * pre-pin `bootstrapStandby` throwaway containers auto-created via
+ * `docker run -v`, and (b) nothing must survive a removeVolumes destroy —
+ * a leftover data volume makes the next standby seed misread stale state.
+ */
+async function removeManagedDataVolumeBestEffort(
+  run: RunDockerFn,
+  managedId: string,
+  removeVolumes: boolean,
+): Promise<void> {
+  if (!removeVolumes) return;
+  const volumeName = `managed_${managedId.replaceAll("-", "_")}_data`;
+  const removed = await run(["volume", "rm", "-f", volumeName]);
+  if (!removed.success) {
+    const text = (removed.stderr || "").toLowerCase();
+    if (!text.includes("no such volume")) {
+      logInfo(
+        "managed",
+        `managed.destroy data volume remove failed name=${volumeName}: ${
+          sanitizeForLog(removed.stderr || "volume rm failed")
+        }`,
+      );
+    }
   }
 }
 

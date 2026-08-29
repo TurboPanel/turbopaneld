@@ -211,3 +211,34 @@ test("replication and status SQL builders", () => {
 test("runtime defaultDatabase is a non-system application schema", () => {
   assertEquals(mysqlManagedEngineRuntime.defaultDatabase, "appdb");
 });
+
+test("account builders scope cross-host client sources per host", () => {
+  const monitor = ensureProxySqlMonitorAccountSql("tp_monitor_ab", "mon", [
+    "10.10.1.171",
+  ]);
+  assertEquals(monitor.includes("'172.16.0.0/255.240.0.0'"), true);
+  assertEquals(monitor.includes("'10.10.1.171'"), true);
+  assertEquals(
+    monitor.includes("GRANT USAGE, PROCESS, REPLICATION CLIENT"),
+    true,
+  );
+
+  const client = createClientAccountSql("appuser", "pw", ["10.10.1.171"]);
+  assertEquals(client.includes("'10.10.1.171'"), true);
+  assertEquals(client.includes("'localhost'"), true);
+});
+
+test("grantReplicationSql keeps REQUIRE SSL out of GRANT (removed in MySQL 8)", () => {
+  const sql = ensureReplicationAccountSql("tp_repl", "pw", ["203.0.113.20"]);
+  // TLS binding must ride ALTER USER — `GRANT … REQUIRE SSL` is a 1064
+  // syntax error on MySQL 8+.
+  assertEquals(/GRANT [^;]*REQUIRE SSL/.test(sql), false);
+  assertEquals(sql.includes("ALTER USER `tp_repl`@'203.0.113.20' REQUIRE SSL;"), true);
+  // Seed privileges ride the same grant (mysqldump needs RELOAD et al.).
+  assertEquals(
+    sql.includes(
+      "GRANT SELECT, RELOAD, PROCESS, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER, REPLICATION SLAVE, REPLICATION CLIENT ON *.*",
+    ),
+    true,
+  );
+});

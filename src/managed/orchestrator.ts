@@ -7,7 +7,6 @@
  * recoveries.
  */
 
-import { join } from "@std/path";
 import {
   assertSafeComposeProjectName,
   assertValidBindAddress,
@@ -50,8 +49,14 @@ import type {
 } from "../instance/commands/contracts.ts";
 import { parseProxySqlClientCnf } from "./proxysql-admin.ts";
 
-/** Pin must stay in step with ProxySQL/orchestrator releases. */
-export const ORCHESTRATOR_IMAGE = "ghcr.io/proxysql/orchestrator:v4.30.2";
+/**
+ * Percona's maintained Orchestrator distribution — public on Docker Hub and
+ * multi-arch (amd64 + arm64; verified binary at
+ * `/usr/local/orchestrator/orchestrator`). The previous
+ * `ghcr.io/proxysql/orchestrator:v4.30.2` pin never existed publicly (every
+ * pull failed `unauthorized`), so the HA stack had never actually started.
+ */
+export const ORCHESTRATOR_IMAGE = "percona/percona-orchestrator:3.2.6-24";
 
 export const MANAGED_HA_HTTP_PORT = 33001;
 export const MANAGED_HA_RAFT_PORT = 33002;
@@ -178,6 +183,10 @@ export function orchestratorCompose(
     raft.raftPort,
   );
   const httpPublish = formatPublishedPort("127.0.0.1", raft.httpPort);
+  // Literal `./` prefix — `join(".", …)` normalizes it away and compose then
+  // reads the source as a NAMED VOLUME instead of a bind mount.
+  const confMountSpec = "./orchestrator.conf.json:/etc/orchestrator.conf.json:ro";
+  const tlsMountSpec = "./tls:/etc/orchestrator/tls:ro";
   const lines = [
     `name: ${project}`,
     "",
@@ -201,10 +210,11 @@ export function orchestratorCompose(
     }`,
     "    volumes:",
     "      - orchestrator-data:/var/lib/orchestrator",
-    `      - ${
-      quoteYamlScalar(join(".", "orchestrator.conf.json"))
-    }:/etc/orchestrator.conf.json:ro`,
-    `      - ${quoteYamlScalar(join(".", "tls"))}:/etc/orchestrator/tls:ro`,
+    // Quote the WHOLE mount string: a quoted source path immediately
+    // followed by `:` (`- "./x":/etc/…`) parses as a mapping key in go-yaml
+    // and fails compose's loader ("did not find expected '-'").
+    `      - ${quoteYamlScalar(confMountSpec)}`,
+    `      - ${quoteYamlScalar(tlsMountSpec)}`,
     "    networks:",
     `      - ${managedNetwork}`,
     "    command:",

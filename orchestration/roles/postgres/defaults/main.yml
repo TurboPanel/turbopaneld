@@ -1,3 +1,5 @@
+# Keep >= 18: instance migrations require the built-in uuidv7() — `pnpm migrate`
+# preflights this (turbopanel scripts/check-postgres-compat.mjs) and refuses older servers.
 postgres_image: postgres:18
 postgres_container_name: turbopanel-database
 # PG 18+ images store data under $PGDATA (/var/lib/postgresql/18/docker); mount the parent.

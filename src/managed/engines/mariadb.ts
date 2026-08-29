@@ -15,7 +15,9 @@ import {
   createClientAccountSql,
   createDatabaseSql,
   createNetworkAccountSql,
+  disableReadOnlySql,
   dropAccountSql,
+  enforceReadOnlySql,
   dropDatabaseSql,
   ensureProxySqlMonitorAccountSql,
   ensureReplicationAccountSql,
@@ -251,8 +253,15 @@ async function applyOneCredential(
     await runMariadb(
       ctx,
       [
-        createNetworkAccountSql(credential.username, credential.password),
+        createNetworkAccountSql(
+          credential.username,
+          credential.password,
+          ctx.clientSourceHosts ?? [],
+        ),
         grantRootSql(credential.username),
+        ...(ctx.clientSourceHosts ?? []).map((host) =>
+          grantRootSql(credential.username, host)
+        ),
         ensureSocketAdminSql(),
         "FLUSH PRIVILEGES;",
       ].join("\n"),
@@ -270,7 +279,11 @@ async function applyOneCredential(
 
   await runMariadb(
     ctx,
-    createClientAccountSql(credential.username, credential.password),
+    createClientAccountSql(
+      credential.username,
+      credential.password,
+      ctx.clientSourceHosts ?? [],
+    ),
   );
 
   const privileges = credential.privileges ?? [];
@@ -280,7 +293,12 @@ async function applyOneCredential(
       if (privilege === null) continue;
       await runMariadb(
         ctx,
-        grantDatabaseSql(database, credential.username, privilege),
+        [
+          grantDatabaseSql(database, credential.username, privilege),
+          ...(ctx.clientSourceHosts ?? []).map((host) =>
+            grantDatabaseSql(database, credential.username, privilege, host)
+          ),
+        ].join("\n"),
       );
     }
   }
@@ -341,23 +359,38 @@ export function resolveMariadbPrimaryConnectHost(primary: {
  * removes it on every exit, dump|import fails if either side fails.
  */
 export function buildMariadbStandbySeedScript(): string {
+  // `--gtid` records a GTID start position ONLY together with
+  // `--master-data`; without it the import leaves gtid_slave_pos empty and
+  // MASTER_USE_GTID=slave_pos replays the primary's binlog from the very
+  // beginning over the seeded data. `--master-data=1` makes the dump SET
+  // gtid_slave_pos to the exact snapshot position.
+  // The standby's own binlog must stay EMPTY through the seed: entrypoint
+  // init and the import itself would otherwise be logged under the standby's
+  // GTID domain and conflict with the dump's `SET GLOBAL gtid_slave_pos`
+  // (ERROR 1948, "contains no value for replication domain N"). `RESET
+  // MASTER` clears state left by init; `SET SESSION sql_log_bin=0` keeps the
+  // import out of the binlog entirely.
+  const SQL_LOG_BIN_OFF = String.raw`  { printf 'SET SESSION sql_log_bin=0;\n'; `
   return [
     "set -e",
     "tmp=$(mktemp)",
     "trap 'rm -f \"$tmp\"' EXIT INT TERM HUP",
     'chmod 600 "$tmp"',
     'cat > "$tmp"',
+    'mariadb --protocol=socket -u root -e "RESET MASTER"',
     "if (set -o pipefail) 2>/dev/null; then",
     "  set -o pipefail",
-    '  mariadb-dump --defaults-extra-file="$tmp" --single-transaction --routines ' +
-    "--triggers --gtid --all-databases " +
+    SQL_LOG_BIN_OFF +
+    'mariadb-dump --defaults-extra-file="$tmp" --single-transaction --master-data=1 --routines ' +
+    "--triggers --events --gtid --all-databases; } " +
     "| mariadb --protocol=socket -u root",
     "else",
     '  fifo="$tmp.fifo"',
     '  mkfifo "$fifo"',
     '  trap \'rm -f "$tmp" "$fifo"\' EXIT INT TERM HUP',
-    '  mariadb-dump --defaults-extra-file="$tmp" --single-transaction --routines ' +
-    '--triggers --gtid --all-databases >"$fifo" &',
+    SQL_LOG_BIN_OFF +
+    'mariadb-dump --defaults-extra-file="$tmp" --single-transaction --master-data=1 --routines ' +
+    '--triggers --events --gtid --all-databases; } >"$fifo" &',
     "  dump_pid=$!",
     "  set +e",
     '  mariadb --protocol=socket -u root <"$fifo"',
@@ -380,7 +413,7 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
     );
   },
 
-  async bootstrapStandby(ctx: ManagedEngineBootstrapContext, _spec) {
+  async bootstrapStandby(ctx: ManagedEngineBootstrapContext, spec) {
     const volumeArgs: string[] = [];
     for (const volume of ctx.volumes) {
       volumeArgs.push("-v", `${volume.name}:${volume.target}`);
@@ -411,6 +444,30 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
       }
       return probe.stdout.trim().endsWith("present");
     };
+    if (spec.forceResync) {
+      // Operator-forced re-seed: wipe the datadir so the entrypoint re-runs
+      // initdb and `configureStandby` reseeds (the standby marker is gone).
+      const clean = await ctx.runDocker([
+        "run",
+        "--rm",
+        "--user",
+        "0",
+        ...volumeArgs,
+        ctx.image,
+        "sh",
+        "-c",
+        `find '${dataRoot}' -mindepth 1 -maxdepth 1 -exec rm -rf {} +`,
+      ]);
+      if (!clean.success) {
+        throw new Error(
+          `standby data cleanup failed: ${
+            sanitizeForLog(clean.stderr || clean.stdout || "unknown")
+          }`,
+        );
+      }
+      return "seeded";
+    }
+
     if (await probePath("-d", `${dataRoot}/mysql`)) {
       if (await probePath("-f", `${dataRoot}/${STANDBY_MARKER}`)) {
         return "already_standby";
@@ -436,10 +493,18 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
       `password=${spec.password}`,
       `host=${primaryHost}`,
       `port=${spec.primary.port}`,
-      "ssl-mode=VERIFY_IDENTITY",
+      // MariaDB client dialect: `ssl-mode` is MySQL-only ("unknown
+      // variable"). `ssl-verify-server-cert` + `ssl-ca` is the
+      // VERIFY_IDENTITY equivalent (CA validation + hostname check).
+      "ssl-verify-server-cert",
       "ssl-ca=/etc/mysql/tls/ca.crt",
       "",
     ].join("\n");
+
+    // The platform my.cnf boots standbys read-only — the seed IMPORT needs a
+    // writable window (error 1290 otherwise); re-enforced below once
+    // replication is configured.
+    await runMariadb(ctx, disableReadOnlySql());
 
     const seed = await ctx.exec(
       ["sh", "-c", buildMariadbStandbySeedScript()],
@@ -453,6 +518,11 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
       );
     }
 
+    // The seed imported the primary's grant tables (mysql.*) — the running
+    // server's in-memory grants do not reload on their own, and monitor /
+    // client logins from other hosts stay denied until they do.
+    await runMariadb(ctx, "FLUSH PRIVILEGES;");
+
     await runMariadb(
       ctx,
       changeReplicationSourceSql({
@@ -462,6 +532,8 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
         password: spec.password,
       }),
     );
+
+    await runMariadb(ctx, enforceReadOnlySql());
 
     const mark = await ctx.exec([
       "sh",
@@ -482,8 +554,8 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
     const deadline = Date.now() + 60_000;
     while (Date.now() < deadline) {
       const out = await runMariadbQuery(ctx, isWritableSql());
-      const [readOnly, superReadOnly] = out.trim().split(/\s+/);
-      if (readOnly === "0" && superReadOnly === "0") return;
+      const readOnly = out.trim();
+      if (readOnly === "0") return;
       await sleep(500);
     }
     throw new Error("mariadb promote did not become writable within 60s");
@@ -564,7 +636,11 @@ export const mariadbManagedEngineRuntime: ManagedEngineRuntime = {
   ): Promise<void> {
     await runMariadb(
       ctx,
-      ensureProxySqlMonitorAccountSql(credentials.user, credentials.password),
+      ensureProxySqlMonitorAccountSql(
+        credentials.user,
+        credentials.password,
+        ctx.clientSourceHosts ?? [],
+      ),
     );
   },
 

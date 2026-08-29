@@ -78,14 +78,20 @@ export function createOrAlterAccountSql(
 export function ensureProxySqlMonitorAccountSql(
   username: string,
   password: string,
+  extraHosts: readonly string[] = [],
 ): string {
-  const account = accountAt(username, MANAGED_DOCKER_NETWORK_HOST);
   const lit = quoteLiteral(password);
-  return [
-    `CREATE USER IF NOT EXISTS ${account} IDENTIFIED BY ${lit};`,
-    `ALTER USER ${account} IDENTIFIED BY ${lit};`,
-    `GRANT USAGE, PROCESS, REPLICATION CLIENT ON *.* TO ${account};`,
-  ].join("\n");
+  const hosts = [...new Set([MANAGED_DOCKER_NETWORK_HOST, ...extraHosts])];
+  const lines: string[] = [];
+  for (const host of hosts) {
+    const account = accountAt(username, host);
+    lines.push(
+      `CREATE USER IF NOT EXISTS ${account} IDENTIFIED BY ${lit};`,
+      `ALTER USER ${account} IDENTIFIED BY ${lit};`,
+      `GRANT USAGE, PROCESS, REPLICATION CLIENT ON *.* TO ${account};`,
+    );
+  }
+  return lines.join("\n");
 }
 
 /**
@@ -150,14 +156,24 @@ export function grantRootSql(
 /**
  * `REQUIRE SSL` binds TLS to the account itself, so the server rejects a
  * plaintext replication login even if a standby omits `SOURCE_SSL = 1`.
+ * MySQL 8+ removed the `REQUIRE` clause from `GRANT` (MariaDB keeps it) —
+ * the TLS binding must be an `ALTER USER`.
+ *
+ * The account doubles as the standby **seed** login: `configureStandby`
+ * dumps the primary with `mysqldump --all-databases --single-transaction
+ * --set-gtid-purged=ON`, which needs SELECT/RELOAD (FLUSH TABLES)/PROCESS/
+ * LOCK TABLES/SHOW VIEW/EVENT/TRIGGER on top of the replication grants.
  */
 export function grantReplicationSql(
   username: string,
   host: string,
 ): string {
-  return `GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO ${
-    accountAt(username, host)
-  } REQUIRE SSL;`;
+  const account = accountAt(username, host);
+  return [
+    `GRANT SELECT, RELOAD, PROCESS, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER, ` +
+    `REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO ${account};`,
+    `ALTER USER ${account} REQUIRE SSL;`,
+  ].join("\n");
 }
 
 /** Create/alter the replication account once per peer host. */
@@ -187,11 +203,14 @@ export function ensureReplicationAccountSql(
 export function createClientAccountSql(
   username: string,
   password: string,
+  extraHosts: readonly string[] = [],
 ): string {
-  return [
-    createOrAlterAccountSql(username, password, MANAGED_DOCKER_NETWORK_HOST),
-    createOrAlterAccountSql(username, password, "localhost"),
-  ].join("\n");
+  const hosts = [
+    ...new Set([MANAGED_DOCKER_NETWORK_HOST, "localhost", ...extraHosts]),
+  ];
+  return hosts
+    .map((host) => createOrAlterAccountSql(username, password, host))
+    .join("\n");
 }
 
 /**
@@ -201,12 +220,12 @@ export function createClientAccountSql(
 export function createNetworkAccountSql(
   username: string,
   password: string,
+  extraHosts: readonly string[] = [],
 ): string {
-  return createOrAlterAccountSql(
-    username,
-    password,
-    MANAGED_DOCKER_NETWORK_HOST,
-  );
+  const hosts = [...new Set([MANAGED_DOCKER_NETWORK_HOST, ...extraHosts])];
+  return hosts
+    .map((host) => createOrAlterAccountSql(username, password, host))
+    .join("\n");
 }
 
 /**
@@ -234,6 +253,26 @@ export function installAuthSocketPluginSql(): string {
 
 export function authSocketPluginPresentSql(): string {
   return "SELECT PLUGIN_NAME FROM INFORMATION_SCHEMA.PLUGINS WHERE PLUGIN_NAME = 'auth_socket'";
+}
+
+/**
+ * Standby seed window: the platform my.cnf boots standbys with
+ * `read_only=ON, super_read_only=ON`, which blocks the seed IMPORT (even for
+ * root over the socket, error 1290). `configureStandby` disables both for
+ * the seed and re-enforces them once replication is configured.
+ */
+export function disableReadOnlySql(): string {
+  return [
+    "SET GLOBAL super_read_only = OFF;",
+    "SET GLOBAL read_only = OFF;",
+  ].join("\n");
+}
+
+export function enforceReadOnlySql(): string {
+  return [
+    "SET GLOBAL read_only = ON;",
+    "SET GLOBAL super_read_only = ON;",
+  ].join("\n");
 }
 
 export function promoteSql(): string {

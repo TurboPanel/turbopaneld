@@ -961,4 +961,15 @@ test("mysql configureStandby dials the DNS SAN when hostaddr is omitted", async 
     slotName: "tp_member_2",
   });
   assertEquals(calls.some((c) => c.input?.includes("host=svc-primary")), true);
+  // The seed import needs a writable window (standby my.cnf boots
+  // super_read_only) and read-only must be re-enforced afterwards.
+  const inputs = calls.map((c) => c.input ?? "");
+  const disableIdx = inputs.findIndex((i) =>
+    i.includes("SET GLOBAL super_read_only = OFF;")
+  );
+  const enforceIdx = inputs.findIndex((i) =>
+    i.includes("SET GLOBAL super_read_only = ON;")
+  );
+  assertEquals(disableIdx >= 0, true);
+  assertEquals(enforceIdx > disableIdx, true);
 });

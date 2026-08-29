@@ -17,7 +17,9 @@ import {
   createClientAccountSql,
   createDatabaseSql,
   createNetworkAccountSql,
+  disableReadOnlySql,
   dropAccountSql,
+  enforceReadOnlySql,
   dropDatabaseSql,
   ensureProxySqlMonitorAccountSql,
   ensureReplicationAccountSql,
@@ -286,8 +288,15 @@ async function applyOneCredential(
     await runMysql(
       ctx,
       [
-        createNetworkAccountSql(credential.username, credential.password),
+        createNetworkAccountSql(
+          credential.username,
+          credential.password,
+          ctx.clientSourceHosts ?? [],
+        ),
         grantRootSql(credential.username),
+        ...(ctx.clientSourceHosts ?? []).map((host) =>
+          grantRootSql(credential.username, host)
+        ),
         ensureSocketAdminSql(),
         "FLUSH PRIVILEGES;",
       ].join("\n"),
@@ -306,7 +315,11 @@ async function applyOneCredential(
 
   await runMysql(
     ctx,
-    createClientAccountSql(credential.username, credential.password),
+    createClientAccountSql(
+      credential.username,
+      credential.password,
+      ctx.clientSourceHosts ?? [],
+    ),
   );
 
   const privileges = credential.privileges ?? [];
@@ -316,7 +329,12 @@ async function applyOneCredential(
       if (privilege === null) continue;
       await runMysql(
         ctx,
-        grantDatabaseSql(database, credential.username, privilege),
+        [
+          grantDatabaseSql(database, credential.username, privilege),
+          ...(ctx.clientSourceHosts ?? []).map((host) =>
+            grantDatabaseSql(database, credential.username, privilege, host)
+          ),
+        ].join("\n"),
       );
     }
   }
@@ -391,14 +409,14 @@ export function buildMysqlStandbySeedScript(): string {
     "if (set -o pipefail) 2>/dev/null; then",
     "  set -o pipefail",
     '  mysqldump --defaults-extra-file="$tmp" --single-transaction --routines ' +
-    "--triggers --set-gtid-purged=ON --all-databases " +
+    "--triggers --events --set-gtid-purged=ON --all-databases " +
     "| mysql --protocol=socket -u root",
     "else",
     '  fifo="$tmp.fifo"',
     '  mkfifo "$fifo"',
     '  trap \'rm -f "$tmp" "$fifo"\' EXIT INT TERM HUP',
     '  mysqldump --defaults-extra-file="$tmp" --single-transaction --routines ' +
-    '--triggers --set-gtid-purged=ON --all-databases >"$fifo" &',
+    '--triggers --events --set-gtid-purged=ON --all-databases >"$fifo" &',
     "  dump_pid=$!",
     "  set +e",
     '  mysql --protocol=socket -u root <"$fifo"',
@@ -421,7 +439,7 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
     );
   },
 
-  async bootstrapStandby(ctx: ManagedEngineBootstrapContext, _spec) {
+  async bootstrapStandby(ctx: ManagedEngineBootstrapContext, spec) {
     const volumeArgs: string[] = [];
     for (const volume of ctx.volumes) {
       volumeArgs.push("-v", `${volume.name}:${volume.target}`);
@@ -453,6 +471,30 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
       }
       return probe.stdout.trim().endsWith("present");
     };
+    if (spec.forceResync) {
+      // Operator-forced re-seed: wipe the datadir so the entrypoint re-runs
+      // initdb and `configureStandby` reseeds (the standby marker is gone).
+      const clean = await ctx.runDocker([
+        "run",
+        "--rm",
+        "--user",
+        "0",
+        ...volumeArgs,
+        ctx.image,
+        "sh",
+        "-c",
+        `find '${dataRoot}' -mindepth 1 -maxdepth 1 -exec rm -rf {} +`,
+      ]);
+      if (!clean.success) {
+        throw new Error(
+          `standby data cleanup failed: ${
+            sanitizeForLog(clean.stderr || clean.stdout || "unknown")
+          }`,
+        );
+      }
+      return "seeded";
+    }
+
     if (await probePath("-d", `${dataRoot}/mysql`)) {
       if (await probePath("-f", `${dataRoot}/${STANDBY_MARKER}`)) {
         return "already_standby";
@@ -486,6 +528,11 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
       "",
     ].join("\n");
 
+    // The platform my.cnf boots standbys read-only — the seed IMPORT needs a
+    // writable window (error 1290 otherwise); re-enforced below once
+    // replication is configured.
+    await runMysql(ctx, disableReadOnlySql());
+
     // Short-lived 0600 defaults file via stdin (never -p on argv / never MYSQL_PWD).
     const seed = await ctx.exec(
       ["sh", "-c", buildMysqlStandbySeedScript()],
@@ -499,6 +546,11 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
       );
     }
 
+    // The seed imported the primary's grant tables (mysql.*) — the running
+    // server's in-memory grants do not reload on their own, and monitor /
+    // client logins from other hosts stay denied until they do.
+    await runMysql(ctx, "FLUSH PRIVILEGES;");
+
     await runMysql(
       ctx,
       changeReplicationSourceSql({
@@ -508,6 +560,8 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
         password: spec.password,
       }),
     );
+
+    await runMysql(ctx, enforceReadOnlySql());
 
     const mark = await ctx.exec([
       "sh",
@@ -612,7 +666,11 @@ export const mysqlManagedEngineRuntime: ManagedEngineRuntime = {
   ): Promise<void> {
     await runMysql(
       ctx,
-      ensureProxySqlMonitorAccountSql(credentials.user, credentials.password),
+      ensureProxySqlMonitorAccountSql(
+        credentials.user,
+        credentials.password,
+        ctx.clientSourceHosts ?? [],
+      ),
     );
   },
 

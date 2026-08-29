@@ -193,6 +193,8 @@ export async function applyProxySqlAdminStatements(
     containerName?: string;
     /** Override container defaults path (tests). Defaults to mounted admin.cnf. */
     defaultsFile?: string;
+    /** Override connect-retry backoff (tests). Defaults to 3s. */
+    retryDelayMs?: number;
   },
 ): Promise<void> {
   if (statements.length === 0) return;
@@ -214,19 +216,34 @@ export async function applyProxySqlAdminStatements(
   const run = options?.runDocker ?? defaultRunDocker;
   const sql = `${statements.join(";\n")};\n`;
 
-  const result = await run(
-    [
-      "exec",
-      "-i",
-      containerName,
-      "mysql",
-      // defaults-extra-file must be the first mysql option (libmysqlclient).
-      `--defaults-extra-file=${containerDefaultsPath}`,
-      "-h127.0.0.1",
-      `-P6032`,
-    ],
-    { input: sql },
-  );
+  const argv = [
+    "exec",
+    "-i",
+    containerName,
+    "mysql",
+    // defaults-extra-file must be the first mysql option (libmysqlclient).
+    `--defaults-extra-file=${containerDefaultsPath}`,
+    "-h127.0.0.1",
+    `-P6032`,
+  ];
+
+  // A freshly `compose up`'d ProxySQL takes a few seconds before the admin
+  // interface accepts connections — the first reconcile on a new server
+  // otherwise fails with `ERROR 2002 … Can't connect`. Retry connect-class
+  // failures with a short backoff; any other failure surfaces immediately.
+  let result = await run(argv, { input: sql });
+  for (
+    let attempt = 0;
+    !result.success &&
+    ADMIN_CONNECT_RETRYABLE_RE.test(`${result.stderr}\n${result.stdout}`) &&
+    attempt < ADMIN_CONNECT_RETRIES;
+    attempt++
+  ) {
+    await new Promise((resolve) =>
+      setTimeout(resolve, options?.retryDelayMs ?? ADMIN_CONNECT_RETRY_MS)
+    );
+    result = await run(argv, { input: sql });
+  }
   if (!result.success) {
     throw new Error(
       redactCredentials(
@@ -236,3 +253,8 @@ export async function applyProxySqlAdminStatements(
     );
   }
 }
+
+/** `ERROR 2002` (socket/TCP connect) — admin interface not up yet. */
+const ADMIN_CONNECT_RETRYABLE_RE = /ERROR 2002\b|Can't connect to server/i;
+const ADMIN_CONNECT_RETRIES = 10;
+const ADMIN_CONNECT_RETRY_MS = 3_000;

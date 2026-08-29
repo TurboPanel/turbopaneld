@@ -473,3 +473,76 @@ test("managed result parsers keep valid member and replication observations", ()
   assertEquals(promote.demoted, true);
   assertEquals(promote.replication?.state, "streaming");
 });
+
+test("parseManagedApplyPayload accepts and validates monitorUsers", () => {
+  const payload = parseManagedApplyPayload({
+    ...VALID_MANAGED_APPLY,
+    monitorUsers: [
+      { username: "tp_monitor_0123456789ab", password: TP_ENVELOPE },
+      { username: "tp_monitor_ba9876543210", password: TP_ENVELOPE },
+    ],
+  });
+  assertEquals(payload.monitorUsers?.length, 2);
+  assertEquals(payload.monitorUsers?.[0]?.username, "tp_monitor_0123456789ab");
+
+  // Absent stays absent (older control planes).
+  assertEquals(
+    parseManagedApplyPayload({ ...VALID_MANAGED_APPLY }).monitorUsers,
+    undefined,
+  );
+
+  // Non-envelope password is rejected — plaintext must never ride the wire.
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        monitorUsers: [
+          { username: "tp_monitor_0123456789ab", password: "plaintext" },
+        ],
+      }),
+    TypeError,
+    "monitor credential",
+  );
+
+  // Unsafe username is rejected.
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        monitorUsers: [{ username: "bad; DROP", password: TP_ENVELOPE }],
+      }),
+    TypeError,
+    "monitor credential",
+  );
+});
+
+test("parseManagedApplyPayload accepts forceResync and ingressSourceAddresses", () => {
+  const payload = parseManagedApplyPayload({
+    ...VALID_MANAGED_APPLY,
+    forceResync: true,
+    ingressSourceAddresses: ["10.10.1.50", "10.10.1.51"],
+  });
+  assertEquals(payload.forceResync, true);
+  assertEquals(payload.ingressSourceAddresses, ["10.10.1.50", "10.10.1.51"]);
+
+  // Absent stays absent.
+  const bare = parseManagedApplyPayload({ ...VALID_MANAGED_APPLY });
+  assertEquals(bare.forceResync, undefined);
+  assertEquals(bare.ingressSourceAddresses, undefined);
+
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({ ...VALID_MANAGED_APPLY, forceResync: "yes" }),
+    TypeError,
+    "forceResync",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        ingressSourceAddresses: [""],
+      }),
+    TypeError,
+    "ingressSourceAddresses",
+  );
+});

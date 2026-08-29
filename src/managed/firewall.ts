@@ -121,6 +121,10 @@ export function resolveManagedPublicAllowedSources(
   for (const peer of payload.peers) {
     if (isValidIpv4Literal(peer.address)) sources.add(peer.address);
   }
+  // Cross-host consumer servers' ProxySQL dials the listener too.
+  for (const address of payload.ingressSourceAddresses ?? []) {
+    if (isValidIpv4Literal(address)) sources.add(address);
+  }
   return [...sources].sort((a, b) => a.localeCompare(b));
 }
 

@@ -281,13 +281,33 @@ function applyDockerOptions(
   }
 }
 
+/** Tiny stable digest for change detection only — never a security boundary. */
+function fnv1aHex(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.codePointAt(i) ?? 0;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
 function ensureTopLevelVolumes(
   document: ComposeDocument,
   volumes: ManagedApplyPayload["volumes"],
 ): void {
   const top = isRecord(document.volumes) ? { ...document.volumes } : {};
   for (const volume of volumes) {
-    top[volume.name] ??= null;
+    const existing = top[volume.name];
+    // Pin the docker volume name to exactly `volume.name`. An unnamed
+    // top-level entry gets the compose project prefix
+    // (`<managedId>_<name>`), while `bootstrapStandby` throwaway containers
+    // mount the bare name via `docker run -v` — that mismatch made every
+    // standby seed/probe operate on an orphan volume the engine never
+    // mounted, so replicas silently initdb'd standalone clusters.
+    top[volume.name] = {
+      ...(isRecord(existing) ? existing : {}),
+      name: volume.name,
+    };
   }
   document.volumes = top;
 }
@@ -405,6 +425,22 @@ export function normalizeManagedCompose(
   }
   if (payload.dockerOptions) {
     applyDockerOptions(service, payload.dockerOptions, payload.engine);
+  }
+
+  if (payload.engine === "mysql" || payload.engine === "mariadb") {
+    // `my.cnf` is not live-reloadable and `compose up -d` never recreates a
+    // container when only bind-mounted file contents change — stamp a config
+    // digest label so config edits change the compose text and force a
+    // recreate. Postgres is exempt: it reloads live (`reloadConfig`) and a
+    // digest label would restart it on every pg_hba change.
+    const digest = fnv1aHex(
+      payload.configFiles
+        .map((file) => `${file.path}\n${file.contents}`)
+        .join("\u0000"),
+    );
+    const labels = isRecord(service.labels) ? { ...service.labels } : {};
+    labels["tp.managed.config-digest"] = digest;
+    service.labels = labels;
   }
 
   attachManagedIngressNetwork(service, payload.managedNetwork);

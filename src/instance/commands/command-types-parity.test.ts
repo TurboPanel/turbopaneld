@@ -1618,14 +1618,31 @@ test("managed.apply enforces the engine image allowlist", () => {
     parseManagedApplyPayload(VALID_MANAGED_APPLY).image,
     "docker.io/library/postgres:18-alpine",
   );
-  // Every catalog series is accepted, not just the default.
+  // Both base-OS variants of the tested series are accepted.
   assertEquals(
     parseManagedApplyPayload({
       ...VALID_MANAGED_APPLY,
-      image: "docker.io/library/postgres:15-alpine",
+      image: "docker.io/library/postgres:18",
     }).image,
-    "docker.io/library/postgres:15-alpine",
+    "docker.io/library/postgres:18",
   );
+  // Catalogued-but-untested series (17/16/15) are rejected here too: the
+  // control plane will not mint them, and a forged payload must not either.
+  for (const image of [
+    "docker.io/library/postgres:17-alpine",
+    "docker.io/library/postgres:16",
+    "docker.io/library/postgres:15-alpine",
+  ]) {
+    assertThrows(
+      () =>
+        parseManagedApplyPayload({
+          ...VALID_MANAGED_APPLY,
+          image,
+        }),
+      TypeError,
+      "Invalid managed.apply payload",
+    );
+  }
   // Below the catalog floor (PostgreSQL 15) stays rejected.
   assertThrows(
     () =>
@@ -1659,21 +1676,28 @@ test("managed.apply enforces the engine image allowlist", () => {
     }).image,
     "docker.io/library/mysql:9.7",
   );
-  // MySQL 8.0 went EOL in April 2026 and is absent from the catalog.
-  assertThrows(
-    () =>
-      parseManagedApplyPayload({
-        ...VALID_MANAGED_APPLY,
-        engine: "mysql",
-        image: "docker.io/library/mysql:8.0",
-        credentials: [{
-          ...VALID_MANAGED_APPLY.credentials[0],
-          username: "root",
-        }],
-      }),
-    TypeError,
-    "Invalid managed.apply payload",
-  );
+  // MySQL 8.0 went EOL in April 2026 and is absent from the catalog; 8.4 is
+  // catalogued but untested, and is refused for the same reason.
+  for (const image of [
+    "docker.io/library/mysql:8.0",
+    "docker.io/library/mysql:8.4",
+    "docker.io/library/mysql:8.4-oraclelinux9",
+  ]) {
+    assertThrows(
+      () =>
+        parseManagedApplyPayload({
+          ...VALID_MANAGED_APPLY,
+          engine: "mysql",
+          image,
+          credentials: [{
+            ...VALID_MANAGED_APPLY.credentials[0],
+            username: "root",
+          }],
+        }),
+      TypeError,
+      "Invalid managed.apply payload",
+    );
+  }
   assertThrows(
     () =>
       parseManagedApplyPayload({
@@ -1690,9 +1714,10 @@ test("managed.apply enforces the engine image allowlist", () => {
   );
 });
 
-test("managed.apply admits every catalog series and variant", () => {
-  // Pin the daemon allowlist to the instance release catalog so adding
-  // PostgreSQL 19 later is a three-repo change, not a silent daemon skip.
+test("managed.apply admits exactly the tested series and their variants", () => {
+  // Pin the daemon allowlist to the instance release catalog's *tested* set
+  // (`ManagedEngineRelease.tested`) so promoting PostgreSQL 19 later is a
+  // three-repo change, not a silent daemon skip.
   const catalog: ReadonlyArray<{
     engine: "postgres" | "mysql" | "mariadb";
     image: string;
@@ -1708,46 +1733,10 @@ test("managed.apply admits every catalog series and variant", () => {
       image: "docker.io/library/postgres:18",
       username: "postgres",
     },
-    {
-      engine: "postgres",
-      image: "docker.io/library/postgres:17-alpine",
-      username: "postgres",
-    },
-    {
-      engine: "postgres",
-      image: "docker.io/library/postgres:17",
-      username: "postgres",
-    },
-    {
-      engine: "postgres",
-      image: "docker.io/library/postgres:16-alpine",
-      username: "postgres",
-    },
-    {
-      engine: "postgres",
-      image: "docker.io/library/postgres:16",
-      username: "postgres",
-    },
-    {
-      engine: "postgres",
-      image: "docker.io/library/postgres:15-alpine",
-      username: "postgres",
-    },
-    {
-      engine: "postgres",
-      image: "docker.io/library/postgres:15",
-      username: "postgres",
-    },
     { engine: "mysql", image: "docker.io/library/mysql:9.7", username: "root" },
     {
       engine: "mysql",
       image: "docker.io/library/mysql:9.7-oraclelinux9",
-      username: "root",
-    },
-    { engine: "mysql", image: "docker.io/library/mysql:8.4", username: "root" },
-    {
-      engine: "mysql",
-      image: "docker.io/library/mysql:8.4-oraclelinux9",
       username: "root",
     },
     {
@@ -1758,36 +1747,6 @@ test("managed.apply admits every catalog series and variant", () => {
     {
       engine: "mariadb",
       image: "docker.io/library/mariadb:12.3-ubi",
-      username: "root",
-    },
-    {
-      engine: "mariadb",
-      image: "docker.io/library/mariadb:11.8",
-      username: "root",
-    },
-    {
-      engine: "mariadb",
-      image: "docker.io/library/mariadb:11.8-ubi",
-      username: "root",
-    },
-    {
-      engine: "mariadb",
-      image: "docker.io/library/mariadb:11.4",
-      username: "root",
-    },
-    {
-      engine: "mariadb",
-      image: "docker.io/library/mariadb:11.4-ubi",
-      username: "root",
-    },
-    {
-      engine: "mariadb",
-      image: "docker.io/library/mariadb:10.11",
-      username: "root",
-    },
-    {
-      engine: "mariadb",
-      image: "docker.io/library/mariadb:10.11-ubi",
       username: "root",
     },
   ];
@@ -1803,6 +1762,62 @@ test("managed.apply admits every catalog series and variant", () => {
         }],
       }).image,
       row.image,
+    );
+  }
+
+  // Series the control-plane catalog knows about but has not validated never
+  // reach Docker.
+  const untested: ReadonlyArray<{
+    engine: "postgres" | "mysql" | "mariadb";
+    image: string;
+    username: string;
+  }> = [
+    {
+      engine: "postgres",
+      image: "docker.io/library/postgres:17-alpine",
+      username: "postgres",
+    },
+    {
+      engine: "postgres",
+      image: "docker.io/library/postgres:16",
+      username: "postgres",
+    },
+    {
+      engine: "postgres",
+      image: "docker.io/library/postgres:15-alpine",
+      username: "postgres",
+    },
+    { engine: "mysql", image: "docker.io/library/mysql:8.4", username: "root" },
+    {
+      engine: "mariadb",
+      image: "docker.io/library/mariadb:11.8",
+      username: "root",
+    },
+    {
+      engine: "mariadb",
+      image: "docker.io/library/mariadb:11.4-ubi",
+      username: "root",
+    },
+    {
+      engine: "mariadb",
+      image: "docker.io/library/mariadb:10.11",
+      username: "root",
+    },
+  ];
+  for (const row of untested) {
+    assertThrows(
+      () =>
+        parseManagedApplyPayload({
+          ...VALID_MANAGED_APPLY,
+          engine: row.engine,
+          image: row.image,
+          credentials: [{
+            ...VALID_MANAGED_APPLY.credentials[0],
+            username: row.username,
+          }],
+        }),
+      TypeError,
+      "Invalid managed.apply payload",
     );
   }
 });

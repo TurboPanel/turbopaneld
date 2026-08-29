@@ -191,6 +191,64 @@ test("postgres ensurePrimary creates slots and drops unmanaged ones", async () =
   assertEquals(calls.some((c) => c.input?.includes("orphan_slot")), true);
 });
 
+test("postgres bootstrapStandby forceResync wipes and re-seeds an initialized standby", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.bootstrapStandby) {
+    throw new TypeError("expected postgres bootstrapStandby");
+  }
+  const stateDir = await Deno.makeTempDir({ prefix: "pg-boot-force-" });
+  try {
+    const dockerCalls: string[][] = [];
+    const boot = await replication.bootstrapStandby(
+      {
+        managedId: "pg-boot",
+        managedNetwork: MANAGED_NETWORK,
+        image: "postgres:18-alpine",
+        volumes: [{ name: "vol", target: "/var/lib/postgresql" }],
+        stateDir,
+        containerUser: "postgres",
+        containerGroup: "postgres",
+        runDocker: (args) => {
+          dockerCalls.push([...args]);
+          const joined = args.join(" ");
+          if (joined.includes("PG_VERSION")) {
+            // Would report an initialized standby — force must never ask.
+            return Promise.resolve({
+              success: true,
+              stdout: "present",
+              stderr: "",
+              code: 0,
+            });
+          }
+          return Promise.resolve({
+            success: true,
+            stdout: "",
+            stderr: "",
+            code: 0,
+          });
+        },
+      },
+      { ...standbyReplicationSpec(), forceResync: true },
+    );
+    assertEquals(boot, "seeded");
+    // Probes skipped entirely; cleanup + basebackup ran.
+    assertEquals(
+      dockerCalls.some((args) => args.join(" ").includes("PG_VERSION")),
+      false,
+    );
+    assertEquals(
+      dockerCalls.some((args) => args.join(" ").includes("rm -rf")),
+      true,
+    );
+    assertEquals(
+      dockerCalls.some((args) => args.includes("pg_basebackup")),
+      true,
+    );
+  } finally {
+    await Deno.remove(stateDir, { recursive: true });
+  }
+});
+
 test("postgres bootstrapStandby returns already_standby when signal exists", async () => {
   const replication = postgresManagedEngineRuntime.replication;
   if (!replication?.bootstrapStandby) {
@@ -556,6 +614,46 @@ test("postgres waitReady throws after the readiness deadline", async () => {
   }
 });
 
+test("postgres reloadConfig issues pg_reload_conf via psql", async () => {
+  if (!postgresManagedEngineRuntime.reloadConfig) {
+    throw new TypeError("expected postgres reloadConfig");
+  }
+  const { exec, calls } = recordingExec();
+  await postgresManagedEngineRuntime.reloadConfig(buildContext(exec));
+  assertEquals(
+    calls.some((c) => c.input?.includes("pg_reload_conf()")),
+    true,
+  );
+});
+
+test("postgres reloadConfig tolerates restart-pending settings but rejects file errors", async () => {
+  const reload = postgresManagedEngineRuntime.reloadConfig;
+  if (!reload) throw new TypeError("expected postgres reloadConfig");
+
+  const verifyingExec = (row: string): ManagedEngineExec => (_argv, input) => {
+    if (input?.includes("pg_file_settings")) {
+      return Promise.resolve({ success: true, stdout: `${row}\n`, stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+
+  // Restart-required GUCs (e.g. max_replication_slots growth) must not fail.
+  await reload(buildContext(verifyingExec("0\t0\t3")));
+
+  // A genuine postgresql.conf error must fail the apply loudly.
+  let threw = false;
+  try {
+    await reload(buildContext(verifyingExec("1\t0\t0")));
+  } catch (err) {
+    threw = true;
+    assertEquals(
+      (err as Error).message.includes("postgres config reload failed"),
+      true,
+    );
+  }
+  assertEquals(threw, true);
+});
+
 test("postgres readVersion returns undefined when the query fails or is empty", async () => {
   const failed = await postgresManagedEngineRuntime.readVersion(
     buildContext(() =>
@@ -735,7 +833,9 @@ test("postgres bootstrapStandby defaults the data root when volumes are empty", 
   );
   assertEquals(boot, "already_standby");
   assertEquals(
-    probes.some((joined) => joined.includes("/var/lib/postgresql/PG_VERSION")),
+    probes.some((joined) =>
+      joined.includes("/var/lib/postgresql/data/PG_VERSION")
+    ),
     true,
   );
 });

@@ -345,3 +345,69 @@ test("applyProxySqlAdminStatements is a no-op for empty statement lists", async 
     await fixture.cleanup();
   }
 });
+
+test("applyProxySqlAdminStatements retries admin connect failures then succeeds", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    await Deno.mkdir(layout.configDir + "/proxysql", {
+      recursive: true,
+      mode: 0o750,
+    });
+    await Deno.writeTextFile(
+      proxysqlAdminCnfPath(layout),
+      "[client]\nuser=admin\npassword=s3cret-password\n",
+      { mode: 0o600 },
+    );
+
+    let attempts = 0;
+    await applyProxySqlAdminStatements(
+      ["LOAD PGSQL SERVERS TO RUNTIME"],
+      {
+        layout,
+        containerName: "proxysql-test",
+        retryDelayMs: 1,
+        runDocker: () => {
+          attempts += 1;
+          if (attempts < 3) {
+            // Fresh ProxySQL bring-up: admin interface not listening yet.
+            return Promise.resolve({
+              success: false,
+              code: 1,
+              stdout: "",
+              stderr:
+                "ERROR 2002 (HY000): Can't connect to server on '127.0.0.1' (115)",
+            });
+          }
+          return Promise.resolve({ success: true, code: 0, stdout: "", stderr: "" });
+        },
+      },
+    );
+    assertEquals(attempts, 3);
+
+    // Non-connect failures surface immediately (no retry storm).
+    let sqlAttempts = 0;
+    await assertRejects(
+      () =>
+        applyProxySqlAdminStatements(["LOAD PGSQL SERVERS TO RUNTIME"], {
+          layout,
+          containerName: "proxysql-test",
+          retryDelayMs: 1,
+          runDocker: () => {
+            sqlAttempts += 1;
+            return Promise.resolve({
+              success: false,
+              code: 1,
+              stdout: "",
+              stderr: "ERROR 1045 (28000): Access denied",
+            });
+          },
+        }),
+      Error,
+      "Access denied",
+    );
+    assertEquals(sqlAttempts, 1);
+  } finally {
+    await fixture.cleanup();
+  }
+});

@@ -71,14 +71,20 @@ export function createOrAlterAccountSql(
 export function ensureProxySqlMonitorAccountSql(
   username: string,
   password: string,
+  extraHosts: readonly string[] = [],
 ): string {
-  const account = accountAt(username, MANAGED_DOCKER_NETWORK_HOST);
   const lit = quoteLiteral(password);
-  return [
-    `CREATE USER IF NOT EXISTS ${account} IDENTIFIED BY ${lit};`,
-    `ALTER USER ${account} IDENTIFIED BY ${lit};`,
-    `GRANT USAGE, PROCESS, REPLICATION CLIENT ON *.* TO ${account};`,
-  ].join("\n");
+  const hosts = [...new Set([MANAGED_DOCKER_NETWORK_HOST, ...extraHosts])];
+  const lines: string[] = [];
+  for (const host of hosts) {
+    const account = accountAt(username, host);
+    lines.push(
+      `CREATE USER IF NOT EXISTS ${account} IDENTIFIED BY ${lit};`,
+      `ALTER USER ${account} IDENTIFIED BY ${lit};`,
+      `GRANT USAGE, PROCESS, REPLICATION CLIENT ON *.* TO ${account};`,
+    );
+  }
+  return lines.join("\n");
 }
 
 export function dropAccountSql(
@@ -139,14 +145,22 @@ export function grantRootSql(
 /**
  * `REQUIRE SSL` binds TLS to the account itself, so the server rejects a
  * plaintext replication login even if a standby omits `MASTER_SSL = 1`.
+ * (MariaDB keeps `REQUIRE` on `GRANT` — the MySQL dialect must use
+ * `ALTER USER`.)
+ *
+ * The account doubles as the standby **seed** login: `configureStandby`
+ * dumps the primary (`mariadb-dump --all-databases --single-transaction
+ * --gtid`), which needs SELECT/RELOAD (FLUSH TABLES)/PROCESS/LOCK TABLES/
+ * SHOW VIEW/EVENT/TRIGGER on top of the replication grants.
  */
 export function grantReplicationSql(
   username: string,
   host: string,
 ): string {
-  return `GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO ${
-    accountAt(username, host)
-  } REQUIRE SSL;`;
+  return `GRANT SELECT, RELOAD, PROCESS, LOCK TABLES, SHOW VIEW, EVENT, ` +
+    `TRIGGER, REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO ${
+      accountAt(username, host)
+    } REQUIRE SSL;`;
 }
 
 export function ensureReplicationAccountSql(
@@ -174,11 +188,14 @@ export function ensureReplicationAccountSql(
 export function createClientAccountSql(
   username: string,
   password: string,
+  extraHosts: readonly string[] = [],
 ): string {
-  return [
-    createOrAlterAccountSql(username, password, MANAGED_DOCKER_NETWORK_HOST),
-    createOrAlterAccountSql(username, password, "localhost"),
-  ].join("\n");
+  const hosts = [
+    ...new Set([MANAGED_DOCKER_NETWORK_HOST, "localhost", ...extraHosts]),
+  ];
+  return hosts
+    .map((host) => createOrAlterAccountSql(username, password, host))
+    .join("\n");
 }
 
 /**
@@ -188,12 +205,12 @@ export function createClientAccountSql(
 export function createNetworkAccountSql(
   username: string,
   password: string,
+  extraHosts: readonly string[] = [],
 ): string {
-  return createOrAlterAccountSql(
-    username,
-    password,
-    MANAGED_DOCKER_NETWORK_HOST,
-  );
+  const hosts = [...new Set([MANAGED_DOCKER_NETWORK_HOST, ...extraHosts])];
+  return hosts
+    .map((host) => createOrAlterAccountSql(username, password, host))
+    .join("\n");
 }
 
 /**
@@ -213,17 +230,32 @@ export function ensureSocketAdminSql(osUser: string = "mysql"): string {
   ].join("\n");
 }
 
+/**
+ * Standby seed window: the platform my.cnf boots standbys with
+ * `read_only=ON`, which blocks the seed IMPORT for non-SUPER users;
+ * `configureStandby` disables it for the seed and re-enforces it once
+ * replication is configured. **MariaDB has no `super_read_only`** (that is
+ * MySQL-only; MDEV-18441) — referencing it in my.cnf kills mariadbd at
+ * startup ("unknown variable") and in SQL it errors.
+ */
+export function disableReadOnlySql(): string {
+  return "SET GLOBAL read_only = OFF;";
+}
+
+export function enforceReadOnlySql(): string {
+  return "SET GLOBAL read_only = ON;";
+}
+
 export function promoteSql(): string {
   return [
     "STOP SLAVE;",
     "RESET SLAVE ALL;",
-    "SET GLOBAL super_read_only = OFF;",
     "SET GLOBAL read_only = OFF;",
   ].join("\n");
 }
 
 export function isWritableSql(): string {
-  return "SELECT @@GLOBAL.read_only, @@GLOBAL.super_read_only;";
+  return "SELECT @@GLOBAL.read_only;";
 }
 
 export function showReplicaStatusSql(): string {

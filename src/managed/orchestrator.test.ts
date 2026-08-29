@@ -1,3 +1,4 @@
+import { parse as parseYaml } from "yaml";
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import {
@@ -134,6 +135,19 @@ test("orchestratorCompose publishes HTTP on loopback and Raft on advertise only"
   assertEquals(yaml.includes("127.0.0.1:33001:33001"), true);
   assertEquals(yaml.includes("203.0.113.10:33002:33002"), true);
   assertEquals(yaml.includes("0.0.0.0"), false);
+  // The compose text must be valid YAML end-to-end. A quoted source path
+  // immediately followed by `:` (`- "./x":/etc/…`) is rejected by compose's
+  // go-yaml loader ("did not find expected '-'") — mount strings must be
+  // quoted whole.
+  const doc = parseYaml(yaml) as Record<string, unknown>;
+  const services = doc.services as Record<string, Record<string, unknown>>;
+  const volumes =
+    services[ORCHESTRATOR_COMPOSE_SERVICE_NAME].volumes as string[];
+  assertEquals(
+    volumes.includes("./orchestrator.conf.json:/etc/orchestrator.conf.json:ro"),
+    true,
+  );
+  assertEquals(volumes.includes("./tls:/etc/orchestrator/tls:ro"), true);
 });
 
 test("orchestratorCompose refuses publishing on every interface", () => {

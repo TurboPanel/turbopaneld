@@ -10,6 +10,10 @@ import {
   MANAGED_DOCKER_NETWORK_HOST,
   quoteIdentifier,
   quoteLiteral,
+  disableReadOnlySql,
+  enforceReadOnlySql,
+  promoteSql,
+  isWritableSql,
 } from "./mariadb-sql.ts";
 import { mariadbManagedEngineRuntime } from "./mariadb.ts";
 
@@ -92,4 +96,19 @@ test("ensureSocketAdminSql uses unix_socket on localhost only", () => {
 
 test("runtime defaultDatabase is a non-system application schema", () => {
   assertEquals(mariadbManagedEngineRuntime.defaultDatabase, "appdb");
+});
+
+test("mariadb dialect never references super_read_only (MySQL-only variable)", () => {
+  // An unknown variable in my.cnf kills mariadbd at startup; in SQL it
+  // errors. MariaDB has no super_read_only (MDEV-18441).
+  for (
+    const sql of [
+      disableReadOnlySql(),
+      enforceReadOnlySql(),
+      promoteSql(),
+      isWritableSql(),
+    ]
+  ) {
+    assertEquals(sql.includes("super_read_only"), false);
+  }
 });
