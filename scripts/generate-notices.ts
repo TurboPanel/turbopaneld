@@ -100,6 +100,7 @@ export async function runGenerateNotices(options: {
   for (
     const rel of [
       "orchestration/requirements.txt",
+      "orchestration/requirements.lock.txt",
       "orchestration/requirements.yml",
       "orchestration/requirements-docker.yml",
     ]

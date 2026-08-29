@@ -199,8 +199,9 @@ discovery, not explicitly opened files.
 **Upstream licenses:** Ansible Core, `ansible-lint`, the `ansible.posix`
 collection, the `geerlingguy.docker` Galaxy role, and any packages these
 playbooks install remain under their upstream licenses (pins in
-`orchestration/requirements.txt`, `orchestration/requirements.yml`, and
-`orchestration/requirements-docker.yml`). Installing them on a host is a
+`orchestration/requirements.txt` (constraints),
+`orchestration/requirements.lock.txt` (CI hash lock),
+`orchestration/requirements.yml`, and `orchestration/requirements-docker.yml`). Installing them on a host is a
 different licensing event from redistributing them. Any TurboPanel-published
 appliance, VM/OCI image, or offline bundle that ships copies must carry the
 applicable upstream license, copyright, notice, and source-compliance
@@ -366,7 +367,9 @@ byte-identical to what SonarCloud imports.
 roles — had no CI gate of any kind, so a broken role reference or malformed
 task list only surfaced as a converge failure on a real host. Needs
 `ansible-playbook` / `ansible-lint` on PATH: in the guest,
-`export PATH="/opt/turbopanel/vendor/ansible/current/bin:$PATH"`. Syntax-check
+`export PATH="/opt/turbopanel/vendor/ansible/current/bin:$PATH"`. CI installs
+that toolchain from `orchestration/requirements.lock.txt` (`pip install
+--require-hashes`). Syntax-check
 resolves `ansible.posix.acl` / `ansible.posix.sysctl`: when the collection is
 not already vendored under `$TURBOPANEL_RUNTIMES_DIR/ansible/galaxy-collections`
 (CI has ansible-core from pip and no vendor tree), the script installs the pin

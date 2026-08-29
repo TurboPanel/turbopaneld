@@ -96,6 +96,11 @@ export const ANSIBLE_LINT_BIN = join(VENV_BIN_DIR, "ansible-lint");
 export const ANSIBLE_CURRENT_DIR = join(RUNTIMES_DIR, "ansible", "current");
 
 export const REQUIREMENTS_FILE = join(ORCHESTRATION_DIR, "requirements.txt");
+/** Hash-locked CI install set (`pip install --require-hashes`). */
+export const REQUIREMENTS_LOCK_FILE = join(
+  ORCHESTRATION_DIR,
+  "requirements.lock.txt",
+);
 /** Collections (ansible.posix) — installed at orchestration bootstrap. */
 export const GALAXY_REQUIREMENTS_FILE = join(
   ORCHESTRATION_DIR,

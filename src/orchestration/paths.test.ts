@@ -27,6 +27,7 @@ import {
   PYTHON_RUNTIME_DIR,
   PYTHON_VERSION,
   REQUIREMENTS_FILE,
+  REQUIREMENTS_LOCK_FILE,
   resolveDaemonRoot,
   RUNTIMES_DIR,
   TUNNELS_DIR,
@@ -457,6 +458,11 @@ test("module-level orchestration constants match active layout", () => {
     "REQUIREMENTS_FILE",
   );
   assertEquals(
+    REQUIREMENTS_LOCK_FILE,
+    join(layout.orchestrationDir, "requirements.lock.txt"),
+    "REQUIREMENTS_LOCK_FILE",
+  );
+  assertEquals(
     GALAXY_COLLECTIONS_DIR,
     join(layout.runtimesDir, "ansible", "galaxy-collections"),
     "GALAXY_COLLECTIONS_DIR",
@@ -874,4 +880,19 @@ test("ANSIBLE_CORE_VERSION matches the ansible-core pin in requirements.txt", ()
     );
   }
   assertEquals(match[1], ANSIBLE_CORE_VERSION, "ansible-core requirements pin");
+});
+
+test("requirements.lock.txt pins ansible-core with hashes", () => {
+  const lockPath = join(checkoutOrchestrationDir, "requirements.lock.txt");
+  const lock = Deno.readTextFileSync(lockPath);
+  const match = lock.match(/^ansible-core==(\d+\.\d+)\.\d+/m);
+  if (!match) {
+    throw new Error(`could not read ansible-core pin from ${lockPath}`);
+  }
+  assertEquals(match[1], ANSIBLE_CORE_VERSION, "ansible-core lock pin");
+  assertEquals(
+    lock.includes("--hash=sha256:"),
+    true,
+    `${lockPath} must include --hash=sha256: entries`,
+  );
 });

@@ -78,6 +78,8 @@ jobs:
       # ansible.posix from orchestration/requirements.yml (Galaxy collections
       # are not committed; CI has no /opt vendor tree). See the script for
       # what is and is not gated.
+      # Install from the hash lock (githubactions:S8544 / S8541), not the
+      # range-pinned constraints file.
       - name: Set up Python for Ansible
         uses: actions/setup-python@v5
         with:
@@ -86,7 +88,10 @@ jobs:
           python-version: "3.14"
 
       - name: Install Ansible toolchain
-        run: python -m pip install --disable-pip-version-check -r orchestration/requirements.txt
+        run: >-
+          python -m pip install --disable-pip-version-check
+          --require-hashes --only-binary :all:
+          -r orchestration/requirements.lock.txt
 
       - name: Check orchestration (playbook syntax + ansible-lint min profile)
         run: deno task check:orchestration

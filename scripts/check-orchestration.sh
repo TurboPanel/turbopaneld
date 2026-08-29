@@ -14,7 +14,7 @@
 #      positives; every playbook passes today. Playbooks FQCN
 #      `ansible.posix.acl` / `ansible.posix.sysctl`, so this step installs
 #      the pin from orchestration/requirements.yml when the collection is
-#      not already vendored (CI has ansible-core from pip, no vendor tree).
+#      not already vendored (CI pip-installs requirements.lock.txt).
 #      Do not install the deferred Docker Galaxy role — it is on-demand
 #      and is not needed to resolve first-party syntax.
 #   2. `ansible-lint --profile min` -- ansible-lint's most conservative
@@ -43,7 +43,7 @@ cd "$ROOT"
 if ! command -v ansible-playbook >/dev/null 2>&1; then
   echo "check-orchestration: ansible-playbook not on PATH." >&2
   echo "  Guest:  export PATH=\"$TURBOPANEL_RUNTIMES_DIR/ansible/current/bin:\$PATH\"" >&2
-  echo "  CI:     pip install -r orchestration/requirements.txt" >&2
+  echo "  CI:     pip install --require-hashes --only-binary :all: -r orchestration/requirements.lock.txt" >&2
   exit 1
 fi
 
@@ -65,7 +65,7 @@ ensure_posix_collection() {
 
   if ! command -v ansible-galaxy >/dev/null 2>&1; then
     echo "check-orchestration: ansible-galaxy not on PATH (need ansible.posix for syntax-check)." >&2
-    echo "  CI: pip install -r orchestration/requirements.txt" >&2
+    echo "  CI: pip install --require-hashes --only-binary :all: -r orchestration/requirements.lock.txt" >&2
     exit 1
   fi
 
