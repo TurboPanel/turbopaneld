@@ -41,6 +41,8 @@
     "check:layout": "deno run --allow-read --allow-run=git scripts/check-production-layout.ts",
     "check:vocabulary": "deno run --allow-read scripts/check-vocabulary.ts",
     "check:orchestration": "sh scripts/check-orchestration.sh",
+    "verify:static": "deno task fmt:check && deno task lint && deno task check && deno task check:layout && deno task check:vocabulary",
+    "verify": "deno task verify:static && deno task notices:check && deno task test",
     "notices:generate": "deno run --allow-read --allow-write --allow-run --allow-net --allow-env scripts/generate-notices.ts",
     "notices:check": "deno run --allow-read --allow-run --allow-net --allow-env scripts/generate-notices.ts --check",
     "test": "deno test -A",

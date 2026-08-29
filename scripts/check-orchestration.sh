@@ -29,9 +29,15 @@ set -eu
 ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# Vendored runtime root (and the Apple Silicon OPENSSL_armcap workaround that
+# ansible-playbook needs). Never hardcode the vendor root here --
+# check:layout rejects that literal outside the layout modules.
+# shellcheck source=scripts/lib/runtime-paths.sh
+. "$ROOT/scripts/lib/runtime-paths.sh"
+
 if ! command -v ansible-playbook >/dev/null 2>&1; then
   echo "check-orchestration: ansible-playbook not on PATH." >&2
-  echo "  Guest:  export PATH=\"/opt/turbopanel/vendor/ansible/current/bin:\$PATH\"" >&2
+  echo "  Guest:  export PATH=\"$TURBOPANEL_RUNTIMES_DIR/ansible/current/bin:\$PATH\"" >&2
   echo "  CI:     pip install -r orchestration/requirements.txt" >&2
   exit 1
 fi

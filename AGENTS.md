@@ -317,9 +317,15 @@ compile toolchain).
 
 ## Testing
 
-Local commands: `deno task test`, `deno task test:coverage`, `deno task
-fmt:check`, `deno task lint`, `deno task check`, `deno task check:layout`,
-`deno task check:orchestration`. See
+Local commands: **`deno task verify`** — run this before pushing. It is the
+host-runnable mirror of `verify.yml`: `verify:static` (`fmt:check`, `lint`,
+`check`, `check:layout`, `check:vocabulary` — offline, ~7s) then
+`notices:check` and `test`. `deno task verify:static` alone is the fast
+pre-push sanity pass. The only CI steps it does **not** cover are
+`check:orchestration` (needs `ansible-playbook` / `ansible-lint` on PATH) and
+the Sonar gate; run `deno task check:orchestration` separately in the guest.
+Individual tasks (`test`, `test:coverage`, `fmt:check`, `lint`, `check`,
+`check:layout`, `check:vocabulary`) remain available. See
 **Guards / tests** above for the `-A` grant, per-test `permissions:` rule, and
 Sonar-way **80% new-code** floor.
 
@@ -385,12 +391,20 @@ report `Cannot find name 'Deno'` / missing `@std/*` on Deno sources. Install
 
 **Pre-commit** (`.githooks/pre-commit`): `scripts/scan-secrets.sh` is never
 skippable. The hook then runs `deno fmt` and restages files already in the
-commit so the index cannot stay unformatted. Deno is resolved in this order:
-PATH, `/opt/turbopanel/vendor/deno/current/deno`, then
-`vagrant ssh -c '… cd ~/turbopaneld && deno fmt'` from the sibling
-`dev` checkout (same guest command as Testing below). Lint/tests stay
-deferred. Set `TURBOPANEL_SKIP_HOOK_TESTS=1` to skip fmt only (secret scan
-still runs; CI `fmt:check` still gates). The dev console’s daemon install
+commit so the index cannot stay unformatted, followed by the **offline static
+gates from `verify.yml`, in CI order**: `deno lint`, `deno task check:layout`,
+`deno task check:vocabulary`. Those three are whole-tree scans (not
+staged-diff scans) and finish in ~1s together — they exist here because a new
+file that hardcodes a layout path or uses retired phrasing is otherwise only
+caught minutes into a PR run, which was the single most common cause of a red
+`verify` on an otherwise-good change. Deno is resolved in this order: PATH,
+`/opt/turbopanel/vendor/deno/current/deno`, then
+`vagrant ssh -c '… cd ~/turbopaneld && deno <args>'` from the sibling `dev`
+checkout (same guest command as Testing below); `tp_precommit_deno_exec`
+propagates the exit status, so a failing guard aborts the commit. Typecheck and
+the suites stay deferred to `deno task verify` / CI. Set
+`TURBOPANEL_SKIP_HOOK_TESTS=1` to skip fmt **and** the guards (secret scan still
+runs; CI still gates all of them). The dev console’s daemon install
 (`cloneOrUpdateRepo` in `../dev/src/lib/platform-install.ts`) sets
 `core.hooksPath=.githooks` after a successful clone or update when
 `.githooks/pre-commit` exists. Production `scripts/run.sh` never wires hooks.
@@ -405,7 +419,7 @@ from production code.
 
 | Stage | dev | daemon | Rationale |
 | ----- | --- | ------ | --------- |
-| pre-commit | scan-secrets only (tests deferred) | scan-secrets + `deno fmt` (lint/tests deferred) | secret scan always; daemon fmt via host Deno or `vagrant ssh`; suites in CI / guest |
+| pre-commit | scan-secrets only (tests deferred) | scan-secrets + `deno fmt` + `lint` + `check:layout` + `check:vocabulary` (typecheck/tests deferred) | secret scan always; daemon fmt/guards via host Deno or `vagrant ssh`; the cheap half of `verify.yml` runs in ~1s so contract breaks never reach CI; suites in CI / guest |
 | PR → `trunk` | `verify.yml` | `verify.yml` | blocks merge |
 | push `trunk` | `verify.yml` | `verify.yml`; `publish` job `needs: verify` | nothing compiles from failing code |
 | promote → canary/rc/release | n/a | **artifact integrity only** (S3 sha256/size + CDN fetch) | no new code enters after publish |

@@ -5,11 +5,13 @@ ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 # Secret scan is never skippable.
 "$ROOT/scripts/scan-secrets.sh"
 
-# lint/tests stay deferred until they can run inside the Vagrant guest.
-# deno fmt only needs a Deno binary. Prefer PATH / vendored current; otherwise
-# format inside the sibling-dev guest (same command as AGENTS.md Testing).
+# Typecheck and the test suite stay deferred to `deno task verify` / CI (they
+# need the Vagrant guest or minutes of wall clock). Everything below is the
+# cheap, offline half of verify.yml -- fmt, lint, and the two static contract
+# guards -- because those are what actually turn CI red on an otherwise-good
+# change, and they cost ~2s here instead of ~5min there.
 if [ "${TURBOPANEL_SKIP_HOOK_TESTS:-}" = 1 ]; then
-  echo "pre-commit: fmt skipped (TURBOPANEL_SKIP_HOOK_TESTS=1) — CI still runs deno task fmt:check" >&2
+  echo "pre-commit: fmt + guards skipped (TURBOPANEL_SKIP_HOOK_TESTS=1) -- CI still runs them" >&2
   exit 0
 fi
 
@@ -43,29 +45,31 @@ tp_precommit_dev_checkout() {
   return 1
 }
 
-tp_precommit_vagrant_fmt() {
+tp_precommit_vagrant_deno() {
   if ! command -v vagrant >/dev/null 2>&1; then
     return 1
   fi
   _dev=$(tp_precommit_dev_checkout) || return 1
-  echo "pre-commit: no host Deno — running deno fmt via vagrant ssh ($_dev)" >&2
+  echo "pre-commit: no host Deno - running 'deno $*' via vagrant ssh ($_dev)" >&2
   (
     CDPATH= cd -- "$_dev" || exit 1
-    vagrant ssh -c 'export PATH="/opt/turbopanel/vendor/deno/current:$PATH"; cd ~/turbopaneld && deno fmt'
+    vagrant ssh -c "export PATH=\"/opt/turbopanel/vendor/deno/current:\$PATH\"; cd ~/turbopaneld && deno $*"
   )
 }
 
-tp_precommit_fmt() {
+# Run `deno <args...>` on the host, else inside the sibling-dev guest.
+# Propagates the exit status so a failing guard aborts the commit.
+tp_precommit_deno_exec() {
   if DENO="$(tp_precommit_deno)"; then
-    "$DENO" fmt
+    "$DENO" "$@"
+    return
+  fi
+  if tp_precommit_vagrant_deno "$@"; then
     return 0
   fi
-  if tp_precommit_vagrant_fmt; then
-    return 0
-  fi
-  echo "pre-commit: deno not found on this host, and vagrant ssh fmt failed" >&2
+  echo "pre-commit: deno not found on this host, and 'vagrant ssh deno $*' failed" >&2
   echo "pre-commit: install Deno 2.9.5, converge vendor Deno, or vagrant up from the sibling dev checkout" >&2
-  echo "pre-commit: CI runs deno task fmt:check; unformatted files fail verify" >&2
+  echo "pre-commit: CI runs the same commands; skipping them only moves the failure to verify" >&2
   return 1
 }
 
@@ -73,7 +77,7 @@ cd "$ROOT"
 # Apply fmt (same rules as CI) and restage files already in this commit so the
 # index cannot stay on the unformatted copy.
 staged="$(git diff --cached --name-only --diff-filter=ACM || true)"
-tp_precommit_fmt
+tp_precommit_deno_exec fmt
 if [ -n "$staged" ]; then
   printf '%s\n' "$staged" | while IFS= read -r file; do
     [ -n "$file" ] || continue
@@ -81,3 +85,11 @@ if [ -n "$staged" ]; then
     git add -- "$file"
   done
 fi
+
+# Static gates from verify.yml, in CI order. These read the whole tree (not
+# just the staged diff) because the contract guards are whole-tree scans -- a
+# new file that hardcodes a layout path fails here rather than 5 minutes into
+# a PR run. All three are offline and finish in ~2s.
+tp_precommit_deno_exec lint
+tp_precommit_deno_exec task check:layout
+tp_precommit_deno_exec task check:vocabulary
