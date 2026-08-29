@@ -84,7 +84,13 @@ function clearDockerInvocationCache(): void {
 
 function isDockerSocketPermissionError(text: string): boolean {
   const lower = text.toLowerCase();
-  return lower.includes("permission denied") && lower.includes("docker");
+  if (!lower.includes("permission denied")) return false;
+  // Match only the CLI's socket-dial failure, not arbitrary daemon errors that
+  // happen to contain "docker" + "permission denied" (e.g. a bind-mount EACCES
+  // reported as "docker: Error response from daemon: … permission denied").
+  return lower.includes("docker daemon socket") ||
+    lower.includes("docker api at unix://") ||
+    lower.includes("docker.sock");
 }
 
 /** True when docker CLI reported a socket permission error on stdout or stderr. */
@@ -205,6 +211,18 @@ function preferOriginalSocketError(
 }
 
 /**
+ * True when a sudo rung failed to *reach the socket* (sudo itself refused, or
+ * docker still hit the socket permission wall) rather than the docker command
+ * genuinely running and failing. Only in the former case should the ladder
+ * keep climbing / fall back to the original socket error — otherwise the real
+ * command failure (e.g. a non-zero pg_basebackup) must be reported verbatim.
+ */
+function escalationBlocked(result: DockerCliResult): boolean {
+  return result.stderr.toLowerCase().includes("sudo:") ||
+    dockerOutputLooksLikeSocketPermission(result.stdout, result.stderr);
+}
+
+/**
  * Run `/usr/bin/docker …args`, retrying via `sudo -n -u <self>` when the
  * socket is permission-denied (stale process credentials after group
  * membership change), then `sudo -n -- docker` when that still cannot open
@@ -226,11 +244,14 @@ export async function runDocker(
   }
 
   const refreshed = await runDockerWithFreshGroups(args, options);
-  if (refreshed.success) return refreshed;
+  // A non-blocked failure means the command actually ran via sudo and failed
+  // on its own merits — return it verbatim instead of re-running as root and
+  // masking the real error behind the direct socket-permission message.
+  if (refreshed.success || !escalationBlocked(refreshed)) return refreshed;
 
   const asRoot = await runDockerAsRoot(args, options);
-  if (asRoot.success) return asRoot;
-  // Prefer the original docker.sock error when both sudo paths also fail.
+  if (asRoot.success || !escalationBlocked(asRoot)) return asRoot;
+  // Every rung failed to reach the socket; report the original docker.sock error.
   return preferOriginalSocketError(direct, asRoot);
 }
 

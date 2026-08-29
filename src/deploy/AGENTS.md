@@ -22,7 +22,13 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    first deploy after group membership still works without a daemon restart
    (`sg docker` fails for `/usr/sbin/nologin` service accounts with "This
    account is currently not available"). If that still cannot open the socket,
-   `runDocker` tries `sudo -n -- docker …` (`tp` has `NOPASSWD:ALL`).
+   `runDocker` tries `sudo -n -- docker …` (`tp` has `NOPASSWD:ALL`). The
+   ladder only climbs while the failure is a socket/sudo one — when a sudo
+   rung actually runs the command and it fails on its own merits, that result
+   is returned verbatim (never re-run as root, never masked by the original
+   docker.sock stderr), and socket-permission detection matches only the
+   CLI's socket-dial phrasing, not arbitrary daemon errors containing
+   "permission denied".
    `resolveDockerInvocation()` probes the **same ladder** up front (direct →
    `sudo -n -u <self>` → `sudo -n --`) so the streamed path has identical
    Docker access.

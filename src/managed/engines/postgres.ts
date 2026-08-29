@@ -232,31 +232,36 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
       volumeArgs.push("-v", `${volume.name}:${volume.target}`);
     }
     const dataRoot = ctx.volumes[0]?.target ?? "/var/lib/postgresql";
-    const probe = await ctx.runDocker([
-      "run",
-      "--rm",
-      "--user",
-      ctx.containerUser,
-      ...volumeArgs,
-      ctx.image,
-      "test",
-      "-f",
-      `${dataRoot}/PG_VERSION`,
-    ]);
-    if (probe.success) {
-      // Initialized — need standby.signal to confirm standby role.
-      const signalProbe = await ctx.runDocker([
+    // `test -f` alone cannot distinguish "file absent" from "docker never ran"
+    // (e.g. socket permission error) — echo an explicit marker and require the
+    // probe container itself to succeed, so a docker failure aborts instead of
+    // being misread as an uninitialized volume.
+    const probeFile = async (path: string): Promise<boolean> => {
+      const probe = await ctx.runDocker([
         "run",
         "--rm",
         "--user",
         ctx.containerUser,
         ...volumeArgs,
         ctx.image,
-        "test",
-        "-f",
-        `${dataRoot}/standby.signal`,
+        "sh",
+        "-c",
+        `test -f ${path} && echo present || echo absent`,
       ]);
-      if (signalProbe.success) return "already_standby";
+      if (!probe.success) {
+        throw new Error(
+          `standby data probe failed: ${
+            sanitizeForLog(probe.stderr || probe.stdout || "unknown")
+          }`,
+        );
+      }
+      return probe.stdout.trim().endsWith("present");
+    };
+    if (await probeFile(`${dataRoot}/PG_VERSION`)) {
+      // Initialized — need standby.signal to confirm standby role.
+      if (await probeFile(`${dataRoot}/standby.signal`)) {
+        return "already_standby";
+      }
       // Initialized but not a standby (orphaned primary data) — never auto-rewind.
       return "needs_resync";
     }

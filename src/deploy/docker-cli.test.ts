@@ -190,6 +190,64 @@ test("runDocker prefers original stderr when sudo refresh also fails", async () 
   }
 });
 
+test("runDocker returns the sudo-run command's real failure instead of the socket error", async () => {
+  const calls: Array<{ command: string; args: string[] }> = [];
+  const restore = setDockerCliIoForTest({
+    runRaw: (command, args) => {
+      calls.push({ command, args: [...args] });
+      if (command === "/usr/bin/docker") {
+        return Promise.resolve(
+          fail(
+            "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock",
+          ),
+        );
+      }
+      // sudo -u self reaches the socket; the command itself fails on its merits.
+      return Promise.resolve(
+        fail("pg_basebackup: error: connection to server failed", 1),
+      );
+    },
+  });
+  const previousUser = Deno.env.get("USER");
+  Deno.env.set("USER", "tp");
+  try {
+    const result = await runDocker(["run", "--rm", "img", "pg_basebackup"]);
+    assertEquals(result.success, false);
+    assertEquals(
+      result.stderr,
+      "pg_basebackup: error: connection to server failed",
+    );
+    // The failing command must not be re-run a third time as root.
+    assertEquals(calls.filter((c) => c.command === "/usr/bin/sudo").length, 1);
+  } finally {
+    if (previousUser === undefined) Deno.env.delete("USER");
+    else Deno.env.set("USER", previousUser);
+    restore();
+  }
+});
+
+test("runDocker does not sudo-retry daemon errors that merely mention permission denied", async () => {
+  const calls: string[] = [];
+  const restore = setDockerCliIoForTest({
+    runRaw: (command) => {
+      calls.push(command);
+      return Promise.resolve(
+        fail(
+          "docker: Error response from daemon: error while creating mount source path '/srv/tls': permission denied",
+        ),
+      );
+    },
+  });
+  try {
+    const result = await runDocker(["run", "--rm", "img", "true"]);
+    assertEquals(result.success, false);
+    assertEquals(calls, ["/usr/bin/docker"]);
+    assertEquals(result.stderr.includes("mount source path"), true);
+  } finally {
+    restore();
+  }
+});
+
 test("runDocker does not sudo-retry for non-permission failures", async () => {
   const calls: string[] = [];
   const restore = setDockerCliIoForTest({

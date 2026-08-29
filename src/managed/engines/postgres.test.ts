@@ -210,7 +210,7 @@ test("postgres bootstrapStandby returns already_standby when signal exists", asy
         if (joined.includes("PG_VERSION")) {
           return Promise.resolve({
             success: true,
-            stdout: "",
+            stdout: "present",
             stderr: "",
             code: 0,
           });
@@ -218,7 +218,7 @@ test("postgres bootstrapStandby returns already_standby when signal exists", asy
         if (joined.includes("standby.signal")) {
           return Promise.resolve({
             success: true,
-            stdout: "",
+            stdout: "present",
             stderr: "",
             code: 0,
           });
@@ -255,17 +255,17 @@ test("postgres bootstrapStandby returns needs_resync without standby signal", as
         if (joined.includes("PG_VERSION")) {
           return Promise.resolve({
             success: true,
-            stdout: "",
+            stdout: "present",
             stderr: "",
             code: 0,
           });
         }
         if (joined.includes("standby.signal")) {
           return Promise.resolve({
-            success: false,
-            stdout: "",
+            success: true,
+            stdout: "absent",
             stderr: "",
-            code: 1,
+            code: 0,
           });
         }
         return Promise.resolve({
@@ -303,10 +303,10 @@ test("postgres bootstrapStandby seeds empty volume via pg_basebackup", async () 
           const joined = args.join(" ");
           if (joined.includes("PG_VERSION")) {
             return Promise.resolve({
-              success: false,
-              stdout: "",
+              success: true,
+              stdout: "absent",
               stderr: "",
-              code: 1,
+              code: 0,
             });
           }
           if (joined.includes("pg_basebackup")) {
@@ -371,10 +371,10 @@ test("postgres bootstrapStandby throws when pg_basebackup fails", async () => {
               const joined = args.join(" ");
               if (joined.includes("PG_VERSION")) {
                 return Promise.resolve({
-                  success: false,
-                  stdout: "",
+                  success: true,
+                  stdout: "absent",
                   stderr: "",
-                  code: 1,
+                  code: 0,
                 });
               }
               if (joined.includes("pg_basebackup")) {
@@ -725,7 +725,7 @@ test("postgres bootstrapStandby defaults the data root when volumes are empty", 
         probes.push(args.join(" "));
         return Promise.resolve({
           success: true,
-          stdout: "",
+          stdout: "present",
           stderr: "",
           code: 0,
         });

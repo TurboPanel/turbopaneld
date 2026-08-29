@@ -428,16 +428,16 @@ test("handleManagedApply standby needs_resync returns early without compose up",
             return Promise.resolve(dockerOk());
           }
           if (
-            args[0] === "run" && args.includes("test") &&
+            args[0] === "run" &&
             args.some((part) => part.includes("PG_VERSION"))
           ) {
-            return Promise.resolve(dockerOk());
+            return Promise.resolve({ ...dockerOk(), stdout: "present" });
           }
           if (
-            args[0] === "run" && args.includes("test") &&
+            args[0] === "run" &&
             args.some((part) => part.includes("standby.signal"))
           ) {
-            return Promise.resolve(dockerFail("missing"));
+            return Promise.resolve({ ...dockerOk(), stdout: "absent" });
           }
           if (args[0] === "compose" && args.includes("stop")) {
             return Promise.resolve(dockerOk());

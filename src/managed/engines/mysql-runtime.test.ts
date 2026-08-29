@@ -245,7 +245,7 @@ test("mysql bootstrapStandby returns needs_resync when datadir exists without ma
         ) {
           return Promise.resolve({
             success: true,
-            stdout: "",
+            stdout: "present",
             stderr: "",
             code: 0,
           });
@@ -255,10 +255,10 @@ test("mysql bootstrapStandby returns needs_resync when datadir exists without ma
           joined.includes(STANDBY_MARKER)
         ) {
           return Promise.resolve({
-            success: false,
-            stdout: "",
+            success: true,
+            stdout: "absent",
             stderr: "",
-            code: 1,
+            code: 0,
           });
         }
         return Promise.resolve({
@@ -327,10 +327,10 @@ function bootstrapRunDocker(
       joined.includes("/mysql")
     ) {
       return Promise.resolve({
-        success: datadirExists,
-        stdout: "",
+        success: true,
+        stdout: datadirExists ? "present" : "absent",
         stderr: "",
-        code: datadirExists ? 0 : 1,
+        code: 0,
       });
     }
     if (
@@ -338,10 +338,10 @@ function bootstrapRunDocker(
       joined.includes(STANDBY_MARKER)
     ) {
       return Promise.resolve({
-        success: markerExists,
-        stdout: "",
+        success: true,
+        stdout: markerExists ? "present" : "absent",
         stderr: "",
-        code: markerExists ? 0 : 1,
+        code: 0,
       });
     }
     return Promise.resolve({ success: false, stdout: "", stderr: "", code: 1 });
@@ -926,10 +926,10 @@ test("mysql bootstrapStandby defaults the data root when volumes are empty", asy
       runDocker: (args) => {
         probes.push(args.join(" "));
         return Promise.resolve({
-          success: false,
-          stdout: "",
+          success: true,
+          stdout: "absent",
           stderr: "",
-          code: 1,
+          code: 0,
         });
       },
     },
