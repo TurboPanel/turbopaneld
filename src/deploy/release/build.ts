@@ -191,7 +191,13 @@ export async function runReleaseBuild(
     params.build.installCommand,
     params.build.buildCommand,
   ].filter((command): command is string => Boolean(command));
-  if (commands.length === 0) return;
+  if (commands.length === 0) {
+    params.onOutput?.(
+      "stdout",
+      "no install or build command — shipping the checkout as-is",
+    );
+    return;
+  }
 
   const withPrlimit = await (params.hasPrlimit ?? prlimitAvailable)();
   if (!withPrlimit) {

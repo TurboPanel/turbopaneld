@@ -54,9 +54,12 @@ the unit starts. Per app:
    systemd is guaranteed to have read every file the apply touched.
 6. `enable --now` on first deploy, `restart` when the unit is already active,
    nothing when neither is needed.
-7. Probe `127.0.0.1:<listenPort>` until it answers.
-8. On probe failure, repoint `current` back at the previous release and
-   restart, then fail the command.
+7. Probe `127.0.0.1:<listenPort>` until it answers. Start, the probe
+   verdict, and a failed unit's `journalctl` tail are written to the
+   command transcript (`health` phase).
+8. On probe failure, dump the unit journal **first**, then repoint
+   `current` back at the previous release and restart, then fail the
+   command.
 
 **Render → diff → install-if-changed** is the same discipline the vhost path
 uses, and the same reasoning: a candidate is staged under
@@ -184,6 +187,11 @@ systemd never restarts a unit whose `WorkingDirectory` has just been deleted.
 The per-principal **slice is deliberately left behind**: other environments of
 the same account still reference it, and an unreferenced slice costs nothing.
 
-Transcript phases are unchanged — `fetch` / `build` / `release-promote` already
-bracket this the way they bracket a site release.
+Transcript: fetch / build / release-promote still bracket the Git release.
+Native start, the loopback probe, and (on probe failure) a `journalctl`
+dump of the unit land under **`health`**, so an operator opening Deploy
+output sees why `node server.js` exited rather than only the 30s timeout.
+A source with no `installCommand` / `buildCommand` still ships the
+checkout as-is, but the build phase records that — an empty Build section
+used to look like the engine skipped the step.
 

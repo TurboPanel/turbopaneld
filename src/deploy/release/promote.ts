@@ -29,16 +29,143 @@ import {
   RELEASE_METADATA_DIRNAME,
   RELEASE_PUBLISHED_MODE,
   type ReleasePaths,
+  removePublishedRelease,
   runPrivileged,
   sealPublishedRelease,
 } from "./release-layout.ts";
 import {
+  RELEASE_MANIFEST_FILENAME,
   type ReleaseManifestV1,
   writeReleaseManifest,
 } from "./deployment-json.ts";
 
 /** Never copied into a release — build metadata, not shipped artifacts. */
 const EXCLUDED_TREE_ENTRIES = new Set([".git"]);
+
+function isMissingPrivilegedPathError(stderr: string): boolean {
+  const text = stderr.toLowerCase();
+  return text.includes("no such file") || text.includes("not found");
+}
+
+async function copyTreePrivileged(
+  from: string,
+  to: string,
+  runFn: RunFn,
+): Promise<void> {
+  const mkdir = await runFn("sudo", ["-n", "mkdir", "-p", "--", to]);
+  if (!mkdir.success) {
+    throw new Error(mkdir.stderr || `Failed to mkdir ${to}`);
+  }
+  const cp = await runFn("sudo", ["-n", "cp", "-a", "--", `${from}/.`, to]);
+  if (!cp.success) {
+    throw new Error(cp.stderr || `Failed to copy ${from} to ${to}`);
+  }
+  await runFn("sudo", ["-n", "rm", "-rf", "--", join(to, ".git")]);
+}
+
+async function writeReleaseManifestPrivileged(
+  releaseDir: string,
+  manifest: ReleaseManifestV1,
+  runFn: RunFn,
+): Promise<void> {
+  const staged = await Deno.makeTempFile({ prefix: "tp-rel-manifest-" });
+  try {
+    const body = `${JSON.stringify(manifest, null, 2)}\n`;
+    await Deno.writeTextFile(staged, body);
+    const destDir = join(releaseDir, RELEASE_METADATA_DIRNAME);
+    const mkdir = await runFn("sudo", ["-n", "mkdir", "-p", "--", destDir]);
+    if (!mkdir.success) {
+      throw new Error(mkdir.stderr || `Failed to mkdir ${destDir}`);
+    }
+    const dest = join(destDir, RELEASE_MANIFEST_FILENAME);
+    const install = await runFn("sudo", [
+      "-n",
+      "install",
+      "-m",
+      "0640",
+      "-o",
+      "root",
+      "-g",
+      "root",
+      "--",
+      staged,
+      dest,
+    ]);
+    if (!install.success) {
+      throw new Error(install.stderr || `Failed to install ${dest}`);
+    }
+  } finally {
+    try {
+      await Deno.remove(staged);
+    } catch {
+      // Temp file is under /tmp; leaving it is harmless.
+    }
+  }
+}
+
+function isSudoInvocationError(stderr: string): boolean {
+  const text = stderr.toLowerCase();
+  return text.includes("password") ||
+    text.includes("not allowed") ||
+    text.includes("a terminal is required") ||
+    text.includes("command not found") ||
+    text.includes("sudo:");
+}
+
+async function readCurrentReleaseIdPrivileged(
+  currentLink: string,
+  runFn: RunFn,
+): Promise<string | null> {
+  const exists = await runFn("sudo", ["-n", "test", "-e", currentLink]);
+  if (!exists.success) {
+    if (isSudoInvocationError(exists.stderr)) {
+      throw new Error(exists.stderr || `Failed to stat ${currentLink}`);
+    }
+    return null;
+  }
+  const isLink = await runFn("sudo", ["-n", "test", "-L", currentLink]);
+  if (!isLink.success) {
+    return null;
+  }
+  const result = await runFn("sudo", ["-n", "readlink", "--", currentLink]);
+  if (result.success) {
+    const name = basename(result.stdout.trim());
+    return name.length > 0 ? name : null;
+  }
+  if (
+    isMissingPrivilegedPathError(result.stderr) ||
+    isMissingPrivilegedPathError(result.stdout) ||
+    result.stderr.length === 0
+  ) {
+    return null;
+  }
+  throw new Error(result.stderr || `Failed to readlink ${currentLink}`);
+}
+
+async function swapCurrentSymlinkPrivileged(
+  currentLink: string,
+  target: string,
+  tmpLink: string,
+  runFn: RunFn,
+): Promise<void> {
+  await runFn("sudo", ["-n", "rm", "-f", "--", tmpLink]);
+  const ln = await runFn("sudo", ["-n", "ln", "-s", "--", target, tmpLink]);
+  if (!ln.success) {
+    throw new Error(ln.stderr || `Failed to create ${tmpLink}`);
+  }
+  const mv = await runFn("sudo", [
+    "-n",
+    "mv",
+    "-Tf",
+    "--",
+    tmpLink,
+    currentLink,
+  ]);
+  if (!mv.success) {
+    await runFn("sudo", ["-n", "rm", "-f", "--", tmpLink]);
+    throw new Error(mv.stderr || `Failed to swap ${currentLink}`);
+  }
+}
 
 /**
  * `Deno.stat` with "the path is absent" as a return value rather than an
@@ -72,21 +199,36 @@ export type ReleaseHealthProbe = (releaseDir: string) => Promise<void>;
  */
 export function expectedPathsProbe(
   relativePaths: readonly string[],
+  runFn?: RunFn,
 ): ReleaseHealthProbe {
   return async (releaseDir: string) => {
     for (const relative of relativePaths) {
       const target = relative.length === 0
         ? releaseDir
         : join(releaseDir, relative);
-      try {
-        await Deno.stat(target);
-      } catch {
-        throw new Error(
-          `release health probe failed: missing ${relative || "release root"}`,
-        );
-      }
+      if (await releasePathExists(target, runFn)) continue;
+      throw new Error(
+        `release health probe failed: missing ${relative || "release root"}`,
+      );
     }
   };
+}
+
+async function releasePathExists(
+  path: string,
+  runFn?: RunFn,
+): Promise<boolean> {
+  try {
+    await Deno.stat(path);
+    return true;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return false;
+    if (err instanceof Deno.errors.PermissionDenied && runFn) {
+      const result = await runFn("sudo", ["-n", "test", "-e", path]);
+      return result.success;
+    }
+    throw err;
+  }
 }
 
 /**
@@ -139,7 +281,7 @@ export function resolveReleaseSourceDir(params: StageReleaseParams): string {
 
 /** Copy the build output into the (still writable) release directory. */
 export async function stageRelease(
-  params: StageReleaseParams,
+  params: StageReleaseParams & { runFn?: RunFn },
 ): Promise<string> {
   const sourceDir = resolveReleaseSourceDir(params);
   const stat = await statOrNull(sourceDir);
@@ -149,7 +291,16 @@ export async function stageRelease(
   if (!stat.isDirectory) {
     throw new Error(`release output is not a directory: ${sourceDir}`);
   }
-  await copyTree(sourceDir, params.paths.releaseDir);
+  try {
+    await copyTree(sourceDir, params.paths.releaseDir);
+  } catch (err) {
+    if (!(err instanceof Deno.errors.PermissionDenied)) throw err;
+    await copyTreePrivileged(
+      sourceDir,
+      params.paths.releaseDir,
+      params.runFn ?? runPrivileged,
+    );
+  }
   return params.paths.releaseDir;
 }
 
@@ -177,14 +328,31 @@ export const RELEASE_SHARED_LINK_TARGET = join("..", "..", "shared");
  */
 export async function linkReleaseSharedDir(
   releaseDir: string,
+  runFn: RunFn = runPrivileged,
 ): Promise<void> {
   const linkPath = join(releaseDir, RELEASE_SHARED_LINK_NAME);
   try {
-    await Deno.remove(linkPath, { recursive: true });
+    try {
+      await Deno.remove(linkPath, { recursive: true });
+    } catch (err) {
+      if (!(err instanceof Deno.errors.NotFound)) throw err;
+    }
+    await Deno.symlink(RELEASE_SHARED_LINK_TARGET, linkPath);
   } catch (err) {
-    if (!(err instanceof Deno.errors.NotFound)) throw err;
+    if (!(err instanceof Deno.errors.PermissionDenied)) throw err;
+    await runFn("sudo", ["-n", "rm", "-rf", "--", linkPath]);
+    const ln = await runFn("sudo", [
+      "-n",
+      "ln",
+      "-s",
+      "--",
+      RELEASE_SHARED_LINK_TARGET,
+      linkPath,
+    ]);
+    if (!ln.success) {
+      throw new Error(ln.stderr || `Failed to link shared at ${linkPath}`);
+    }
   }
-  await Deno.symlink(RELEASE_SHARED_LINK_TARGET, linkPath);
 }
 
 /**
@@ -195,32 +363,44 @@ export async function linkReleaseSharedDir(
  */
 export async function swapCurrentSymlink(
   paths: ReleasePaths,
+  runFn: RunFn = runPrivileged,
 ): Promise<void> {
   const releaseName = basename(paths.releaseDir);
   const target = join("releases", releaseName);
   const tmpLink = `${paths.currentLink}.tmp.${releaseName}`;
   try {
-    await Deno.remove(tmpLink);
-  } catch (err) {
-    if (!(err instanceof Deno.errors.NotFound)) throw err;
-  }
-  await Deno.symlink(target, tmpLink);
-  try {
-    // Same filesystem by construction (both under the site dir) — atomic.
-    await Deno.rename(tmpLink, paths.currentLink);
-  } catch (err) {
     try {
       await Deno.remove(tmpLink);
-    } catch {
-      // Leave cleanup best-effort; the original error is what matters.
+    } catch (err) {
+      if (!(err instanceof Deno.errors.NotFound)) throw err;
     }
-    throw err;
+    await Deno.symlink(target, tmpLink);
+    try {
+      // Same filesystem by construction (both under the site dir) — atomic.
+      await Deno.rename(tmpLink, paths.currentLink);
+    } catch (err) {
+      try {
+        await Deno.remove(tmpLink);
+      } catch {
+        // Leave cleanup best-effort; the original error is what matters.
+      }
+      throw err;
+    }
+  } catch (err) {
+    if (!(err instanceof Deno.errors.PermissionDenied)) throw err;
+    await swapCurrentSymlinkPrivileged(
+      paths.currentLink,
+      target,
+      tmpLink,
+      runFn,
+    );
   }
 }
 
 /** Release `current` currently resolves to, or `null` when unpublished. */
 export async function readCurrentReleaseId(
   paths: ReleasePaths,
+  runFn: RunFn = runPrivileged,
 ): Promise<string | null> {
   try {
     const target = await Deno.readLink(paths.currentLink);
@@ -228,6 +408,12 @@ export async function readCurrentReleaseId(
     return name.length > 0 ? name : null;
   } catch (err) {
     if (err instanceof Deno.errors.NotFound) return null;
+    if (err instanceof Deno.errors.PermissionDenied) {
+      return await readCurrentReleaseIdPrivileged(
+        paths.currentLink,
+        runFn ?? runPrivileged,
+      );
+    }
     throw err;
   }
 }
@@ -337,22 +523,35 @@ export async function promoteRelease(
   const runFn = params.runFn ?? runPrivileged;
   try {
     const releaseDir = await stageRelease(params);
-    await linkReleaseSharedDir(releaseDir);
+    await linkReleaseSharedDir(releaseDir, runFn);
     if (params.manifest) {
-      await writeReleaseManifest(releaseDir, params.manifest);
+      try {
+        await writeReleaseManifest(releaseDir, params.manifest);
+      } catch (err) {
+        if (!(err instanceof Deno.errors.PermissionDenied)) throw err;
+        await writeReleaseManifestPrivileged(
+          releaseDir,
+          params.manifest,
+          runFn,
+        );
+      }
     }
     const probe = params.healthProbe ??
-      expectedPathsProbe([RELEASE_METADATA_DIRNAME]);
+      expectedPathsProbe([RELEASE_METADATA_DIRNAME], runFn);
     await probe(releaseDir);
     await sealPublishedRelease(releaseDir, params.username, runFn);
-    await swapCurrentSymlink(params.paths);
+    await swapCurrentSymlink(params.paths, runFn);
     return releaseDir;
   } catch (err) {
     // Never leave a half-staged release visible under `releases/`.
     try {
       await Deno.remove(params.paths.releaseDir, { recursive: true });
     } catch {
-      // Already sealed root-owned, or never created — nothing more to do here.
+      try {
+        await removePublishedRelease(params.paths.releaseDir, runFn);
+      } catch {
+        // Already sealed root-owned, or never created — nothing more to do here.
+      }
     }
     throw err;
   }

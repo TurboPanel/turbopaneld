@@ -74,7 +74,12 @@ seal. Directory creation reuses the single `sudo -n install -d` seam in
 `ensure-principal.ts` (`ensureDirectoryWithOwner` for the root-owned side,
 `ensureDirectoryOwnedByPrincipal` for `shared/`); sealing (`chown -R root:<grp>`
 + `chmod 0550`) and retention removal go through the same `sudo -n` runner seam,
-never a second mkdir helper. `install -d` repairs an existing directory's owner
+never a second mkdir helper. The daemon is **not** in `<username>-grp`, so it
+cannot traverse the root-owned `0750` site tree: unprivileged `readlink` of
+`current`, staging copy, the `shared` link, the per-release manifest, the health
+probe, and the atomic `current` swap all fall back to that same `sudo -n` runner
+when Deno returns EACCES. Tests that own a temp tree keep the Deno path.
+`install -d` repairs an existing directory's owner
 and mode, so a tree from the earlier principal-owned layout converges on the
 next deploy.
 

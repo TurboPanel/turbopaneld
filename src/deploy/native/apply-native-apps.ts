@@ -46,6 +46,7 @@ import type {
   EnvironmentDeployPayload,
 } from "../../instance/commands/contracts.ts";
 import { resolveReleasePaths } from "../release/release-layout.ts";
+import type { ReleaseOutputHandler } from "../release/checkout.ts";
 import { swapCurrentSymlink } from "../release/promote.ts";
 import type { RunFn, RunResult } from "../ensure-principal.ts";
 import {
@@ -69,6 +70,8 @@ export const NATIVE_APP_HEALTH_TIMEOUT_MS = 30_000;
 const NATIVE_APP_HEALTH_INTERVAL_MS = 500;
 /** Per-attempt cap so one hung socket cannot eat the whole health budget. */
 const NATIVE_APP_HEALTH_ATTEMPT_MS = 3_000;
+/** Journal lines copied into the deploy transcript on a failed health probe. */
+const NATIVE_APP_JOURNAL_TAIL = 80;
 
 /** Injectable host command runner — the single privileged seam. */
 export type NativeAppRunFn = RunFn;
@@ -114,6 +117,12 @@ export type ApplyNativeAppsOpts = {
   sleep?: NativeAppSleepFn;
   /** Test seam: systemd unit directory (defaults to `/etc/systemd/system`). */
   systemdUnitDir?: string;
+  /**
+   * Deploy transcript. Native start / health / unit journal ride this the
+   * same way fetch and build do — without it, a failed probe is only an
+   * error summary and the operator never sees why the process exited.
+   */
+  onOutput?: ReleaseOutputHandler;
 };
 
 const decoder = new TextDecoder();
@@ -196,6 +205,7 @@ type NativeAppIo = {
   runPlaybook: NativeAppPlaybookFn;
   probe: NativeAppProbeFn;
   sleep: NativeAppSleepFn;
+  onOutput?: ReleaseOutputHandler;
 };
 
 function resolveIo(opts?: Partial<NativeAppIo>): NativeAppIo {
@@ -204,6 +214,7 @@ function resolveIo(opts?: Partial<NativeAppIo>): NativeAppIo {
     runPlaybook: opts?.runPlaybook ?? runPlaybookDefault,
     probe: opts?.probe ?? probeDefault,
     sleep: opts?.sleep ?? sleepDefault,
+    ...(opts?.onOutput === undefined ? {} : { onOutput: opts.onOutput }),
   };
 }
 
@@ -293,12 +304,20 @@ async function unitIsActive(io: NativeAppIo, unit: string): Promise<boolean> {
   return result.success;
 }
 
+/** True when systemd has given up (`is-failed` exits 0). */
+async function unitIsFailed(io: NativeAppIo, unit: string): Promise<boolean> {
+  const result = await systemctl(io, ["is-failed", "--quiet", unit]);
+  return result.success;
+}
+
 /**
  * Wait for the app to answer on its loopback port.
  *
  * Polls rather than trusting `systemctl` alone: `Type=simple` reports active
  * the moment the process is forked, long before an HTTP listener exists, so
- * "the unit started" is not evidence the release works.
+ * "the unit started" is not evidence the release works. If systemd has already
+ * given up (`is-failed`), waiting out the rest of the budget would only hide
+ * the journal behind a 30s timeout.
  *
  * Bounded by a **number of attempts** rather than by wall-clock, so the
  * injected `sleep` seam fully controls how long this takes: a test with an
@@ -307,6 +326,7 @@ async function unitIsActive(io: NativeAppIo, unit: string): Promise<boolean> {
 async function waitForNativeApp(
   io: NativeAppIo,
   port: number,
+  unit: string,
   timeoutMs = NATIVE_APP_HEALTH_TIMEOUT_MS,
 ): Promise<boolean> {
   const attempts = Math.max(
@@ -315,9 +335,61 @@ async function waitForNativeApp(
   );
   for (let attempt = 0; attempt < attempts; attempt++) {
     if (await io.probe(port)) return true;
+    if (await unitIsFailed(io, unit)) return false;
     if (attempt < attempts - 1) await io.sleep(NATIVE_APP_HEALTH_INTERVAL_MS);
   }
   return false;
+}
+
+function emitOutputLines(
+  onOutput: ReleaseOutputHandler | undefined,
+  stream: "stdout" | "stderr",
+  text: string,
+): number {
+  if (!onOutput) return 0;
+  let count = 0;
+  for (const line of text.split("\n")) {
+    const trimmed = line.replaceAll("\r", "");
+    if (trimmed.length === 0) continue;
+    onOutput(stream, trimmed);
+    count += 1;
+  }
+  return count;
+}
+
+/**
+ * Copy the unit's recent journal into the deploy transcript.
+ *
+ * Captured **before** rollback restarts the previous release, so the dump is
+ * the process that just failed the probe — not the one we put back.
+ */
+async function emitNativeAppJournal(
+  io: NativeAppIo,
+  unit: string,
+): Promise<void> {
+  const onOutput = io.onOutput;
+  if (!onOutput) return;
+  onOutput(
+    "stderr",
+    `--- ${unit} journal (last ${NATIVE_APP_JOURNAL_TAIL} lines) ---`,
+  );
+  const result = await io.run("sudo", [
+    "-n",
+    "journalctl",
+    `--unit=${unit}`,
+    "-n",
+    String(NATIVE_APP_JOURNAL_TAIL),
+    "--no-pager",
+    "--output=short-iso",
+  ]);
+  const text = result.stdout.trim() || result.stderr.trim();
+  let lineCount = 0;
+  if (text.length > 0) {
+    lineCount = emitOutputLines(onOutput, "stderr", text);
+  }
+  if (lineCount === 0) {
+    onOutput("stderr", "(no journal output for this unit)");
+  }
 }
 
 /**
@@ -421,16 +493,36 @@ async function startNativeApp(
   // unit re-enabled is a no-op, but an already-running one needs a restart to
   // pick up the release `current` now points at.
   const active = await unitIsActive(io, unit);
+  const action = active ? "restart" : "enable --now";
+  io.onOutput?.(
+    "stdout",
+    `systemctl ${action} ${unit} (waiting for 127.0.0.1:${app.listenPort})`,
+  );
   const result = active
     ? await systemctl(io, ["restart", unit])
     : await systemctl(io, ["enable", "--now", unit]);
   if (!result.success) {
+    await emitNativeAppJournal(io, unit);
     throw new Error(
       result.stderr || `Failed to start native app unit ${unit}`,
     );
   }
 
-  if (await waitForNativeApp(io, app.listenPort)) return;
+  if (await waitForNativeApp(io, app.listenPort, unit)) {
+    io.onOutput?.(
+      "stdout",
+      `${app.composeServiceName} answered on 127.0.0.1:${app.listenPort}`,
+    );
+    return;
+  }
+
+  io.onOutput?.(
+    "stderr",
+    `${app.composeServiceName} did not answer on 127.0.0.1:${app.listenPort} within ${
+      NATIVE_APP_HEALTH_TIMEOUT_MS / 1000
+    }s`,
+  );
+  await emitNativeAppJournal(io, unit);
 
   const previous = binding.previousReleaseId;
   const rolledBack = previous

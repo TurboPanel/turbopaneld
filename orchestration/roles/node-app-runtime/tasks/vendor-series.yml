@@ -13,6 +13,10 @@
       Invalid tenant Node series '{{ node_app_series }}'.
       Expected a version series such as '24', '24.17', or '24.17.0'.
 
+- name: Resolve the series entitlement group
+  ansible.builtin.set_fact:
+    node_app_series_group: "tpnode{{ node_app_series | regex_replace('^([0-9]+).*$', '\\1') }}"
+
 # Ahead of the install: the shell below writes into this directory, and the
 # release tree it extracts inherits the group from it.
 - name: Ensure the tenant Node series tree is reachable by the runtime group
@@ -20,63 +24,47 @@
     path: "{{ node_app_root }}/{{ node_app_series }}"
     state: directory
     owner: root
-    group: "tpnode{{ node_app_series | regex_replace('^([0-9]+).*$', '\\1') }}"
+    group: "{{ node_app_series_group }}"
     mode: "0750"
 
+# Resolve the newest upstream release in Ansible rather than in a `shell:`
+# block. A previous inline `grep -o '"version":…'` plus a Jinja
+# `regex_replace` in the same script made ansible-playbook fail to parse the
+# task ("unbalanced jinja2 block or quotes", exit 4).
+- name: Fetch the Node dist index
+  ansible.builtin.uri:
+    url: https://nodejs.org/dist/index.json
+    return_content: true
+  register: _node_app_dist_index
+  check_mode: false
+
+- name: Resolve newest Node release in the series
+  vars:
+    _node_app_dist_releases: "{{ _node_app_dist_index.json | default(_node_app_dist_index.content | from_json) }}"
+    _node_app_versions: "{{ _node_app_dist_releases | map(attribute='version') | map('regex_replace', '^v', '') | list }}"
+    _node_app_series_re: "{{ '^' ~ (node_app_series | replace('.', '\\.')) ~ '(\\..+)?$' }}"
+  ansible.builtin.set_fact:
+    node_app_resolved_version: "{{ _node_app_versions | select('match', _node_app_series_re) | list | first | default('') }}"
+
+- name: Require an upstream release for the series
+  ansible.builtin.assert:
+    that:
+      - node_app_resolved_version | length > 0
+    fail_msg: "no Node release found for series {{ node_app_series }}"
+
+# The installer lives in files/ so this task has no inline shell. Ansible 2.20
+# rejects a `shell: |` block that mixes Jinja `{{ }}` with nested quotes
+# (readlink) or backticks in comments — parse error, exit 4, no task runs.
 - name: Install tenant Node series into the vendor tree
-  ansible.builtin.shell: |
-    set -euo pipefail
-    SERIES="{{ node_app_series }}"
-    ARCH="{{ node_app_arch }}"
-    SERIES_DIR="{{ node_app_root }}/${SERIES}"
-
-    # Newest upstream release inside the series. `index.json` is newest-first,
-    # so the first match wins. The `$0 "."` / `$s "."` trick anchors on a whole
-    # component, so series "2" never matches "24.17.0".
-    RESOLVED="$(curl -fsSL https://nodejs.org/dist/index.json \
-      | grep -o '"version":"v[0-9][0-9.]*"' \
-      | sed -e 's/.*"v//' -e 's/"$//' \
-      | awk -v s="$SERIES" 'index($0 ".", s ".") == 1 { print; exit }')"
-    if [ -z "$RESOLVED" ]; then
-      echo "no Node release found for series ${SERIES}" >&2
-      exit 1
-    fi
-
-    DEST="${SERIES_DIR}/${RESOLVED}"
-    if [ ! -x "${DEST}/bin/node" ]; then
-      NODE_DIR="node-v${RESOLVED}-linux-${ARCH}"
-      TMP="${SERIES_DIR}/.install"
-      rm -rf "$TMP" "$DEST"
-      mkdir -p "$TMP"
-      curl -fsSL -o "${TMP}/${NODE_DIR}.tar.gz" \
-        "https://nodejs.org/dist/v${RESOLVED}/${NODE_DIR}.tar.gz"
-      tar -xzf "${TMP}/${NODE_DIR}.tar.gz" -C "$TMP"
-      install -d "$DEST"
-      cp -a "${TMP}/${NODE_DIR}/bin" "${TMP}/${NODE_DIR}/include" \
-        "${TMP}/${NODE_DIR}/lib" "${TMP}/${NODE_DIR}/share" "${DEST}/"
-      rm -rf "$TMP"
-      echo "turbopanel-installed ${SERIES} ${RESOLVED}"
-    fi
-
-    # Unconditional, not folded into the install branch above: `cp -a` preserves
-    # the upstream tarball's world-readable 0755, *and* a host vendored before
-    # this tree moved to its per-series group still carries the old
-    # ownership on a release the branch above skips as already installed. Both
-    # converge here. `X` keeps the execute bit on directories and on what was
-    # already executable, so `bin/node` stays runnable without making every lib
-    # file executable too.
-    chown -R "root:tpnode{{ node_app_series | regex_replace('^([0-9]+).*$', '\\1') }}" "$DEST"
-    chmod -R u=rwX,g=rX,o= "$DEST"
-
-    # Tenant units exec `<series>/current/bin/node`; the unit text must stay
-    # byte-identical across patch bumps, so the resolved release only ever moves
-    # behind this symlink. Created via rename() so a reader never sees it gone.
-    if [ "$(readlink "${SERIES_DIR}/current" || true)" != "$DEST" ]; then
-      ln -sfn "$DEST" "${SERIES_DIR}/.current.tmp"
-      mv -Tf "${SERIES_DIR}/.current.tmp" "${SERIES_DIR}/current"
-      echo "turbopanel-linked ${SERIES} ${RESOLVED}"
-    fi
-  args:
-    executable: /bin/bash
+  ansible.builtin.command:
+    argv:
+      - /bin/bash
+      - "{{ role_path }}/files/install-series.sh"
+  environment:
+    NODE_APP_SERIES: "{{ node_app_series }}"
+    NODE_APP_ARCH: "{{ node_app_arch }}"
+    NODE_APP_RESOLVED: "{{ node_app_resolved_version }}"
+    NODE_APP_GROUP: "{{ node_app_series_group }}"
+    NODE_APP_SERIES_DIR: "{{ node_app_root }}/{{ node_app_series }}"
   register: _node_app_install
   changed_when: "'turbopanel-' in _node_app_install.stdout"

@@ -222,7 +222,9 @@ test("runReleaseBuild notes when prlimit is unavailable and skips empty commands
       onOutput: (_stream, line) => lines.push(line),
     });
     assertEquals(ran, []);
-    assertEquals(lines, []);
+    assertEquals(lines, [
+      "no install or build command — shipping the checkout as-is",
+    ]);
 
     await runReleaseBuild({
       build: {

@@ -1090,6 +1090,7 @@ async function applyDeployNativeApps(
   parsedPayload: EnvironmentDeployPayload,
   apps: readonly EnvironmentDeployNativeAppService[],
   applied: readonly AppliedRelease[],
+  logSink: CommandOutputSink,
   io?: Omit<ApplyNativeAppsOpts, "bindings">,
 ): Promise<void> {
   if (apps.length === 0) return;
@@ -1098,6 +1099,8 @@ async function applyDeployNativeApps(
   );
   await applyNativeAppServices(layout, parsedPayload.environmentId, apps, {
     ...io,
+    onOutput: io?.onOutput ??
+      ((stream, line) => logSink.onLine(stream, line)),
     bindings: nativeAppBindingsFromPayload(
       parsedPayload,
       previousReleaseByService,
@@ -1687,13 +1690,16 @@ export async function handleEnvironmentDeploy(
 
   // Native apps come last of the host-native lanes: the release is promoted and
   // the vhost tree is settled, so a unit that fails its health probe fails only
-  // itself and rolls its own `current` back.
-  runtime.logSink.setPhase(COMMAND_LOG_PHASES.RELEASE_PROMOTE);
+  // itself and rolls its own `current` back. Health (not promote) owns this
+  // pass so start + unit journal land in the same transcript section as the
+  // probe verdict.
+  runtime.logSink.setPhase(COMMAND_LOG_PHASES.HEALTH);
   await applyDeployNativeApps(
     layout,
     parsedPayload,
     nativeAppServices,
     appliedReleases,
+    runtime.logSink,
     deps?.nativeAppIo,
   );
   runtime.logSink.setPhase(COMMAND_LOG_PHASES.PREPARE);

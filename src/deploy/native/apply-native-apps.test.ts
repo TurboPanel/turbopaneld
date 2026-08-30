@@ -139,6 +139,10 @@ function createRunMock(): RunMock {
         : fail("inactive");
     }
 
+    if (args.includes("is-failed")) {
+      return fail("not-failed");
+    }
+
     return ok();
   };
 
@@ -395,6 +399,52 @@ test("a failed health probe with no previous release says so instead of rolling 
       Error,
     );
     assertStringIncludes(error.message, "no previous release to roll back to");
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a failed health probe streams the unit journal into the transcript", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  const run = mock.run;
+  mock.run = async (command, args) => {
+    if (args.includes("journalctl")) {
+      mock.calls.push({ command, args: [...args] });
+      return {
+        success: true,
+        stdout:
+          "Error: Cannot find module '/srv/users/tpproj1/sites/svc-web/current/server.js'\n",
+        stderr: "",
+      };
+    }
+    return await run(command, args);
+  };
+  const lines: string[] = [];
+  try {
+    await assertRejects(
+      () =>
+        applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
+          ...applyOpts(host, mock, false),
+          run: mock.run,
+          onOutput: (_stream, line) => lines.push(line),
+        }),
+      Error,
+    );
+    assertEquals(
+      lines.some((line) => line.includes("waiting for 127.0.0.1:18100")),
+      true,
+    );
+    assertEquals(
+      lines.some((line) =>
+        line.includes("Cannot find module") && line.includes("server.js")
+      ),
+      true,
+    );
+    assertEquals(
+      mock.calls.some((call) => call.args.includes("journalctl")),
+      true,
+    );
   } finally {
     await host.cleanup();
   }

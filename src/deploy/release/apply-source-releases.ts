@@ -251,7 +251,7 @@ async function rollbackOneRelease(
 ): Promise<AppliedRelease> {
   const { logSink, deps } = params;
   logSink.setPhase(COMMAND_LOG_PHASES.RELEASE_PROMOTE);
-  const previousReleaseId = await readCurrentReleaseId(paths);
+  const previousReleaseId = await readCurrentReleaseId(paths, deps.runFn);
 
   // A Railpack release published no tree, so there is no sealed directory to
   // validate and no `current` to swap: the manifest read straight off the
@@ -611,7 +611,7 @@ async function buildNativeRelease(
       };
 
     logSink.setPhase(COMMAND_LOG_PHASES.RELEASE_PROMOTE);
-    const previousReleaseId = await readCurrentReleaseId(paths);
+    const previousReleaseId = await readCurrentReleaseId(paths, deps.runFn);
     const manifest: ReleaseManifestV1 = definedFields({
       version: 1,
       serviceId,

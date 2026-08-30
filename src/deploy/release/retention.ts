@@ -40,7 +40,10 @@ import { principalHomePath, siteRoot } from "../../paths/layout.ts";
 export const DEFAULT_RELEASE_RETENTION = 5;
 
 /** Directory entries under `releases/`, newest-modified first. */
-async function listReleaseIds(releasesDir: string): Promise<string[]> {
+async function listReleaseIds(
+  releasesDir: string,
+  runFn: RunFn,
+): Promise<string[]> {
   const entries: Array<{ name: string; mtime: number }> = [];
   try {
     for await (const entry of Deno.readDir(releasesDir)) {
@@ -56,11 +59,34 @@ async function listReleaseIds(releasesDir: string): Promise<string[]> {
     }
   } catch (err) {
     if (err instanceof Deno.errors.NotFound) return [];
+    if (err instanceof Deno.errors.PermissionDenied) {
+      return await listReleaseIdsPrivileged(releasesDir, runFn);
+    }
     throw err;
   }
   return entries
     .toSorted((a, b) => b.mtime - a.mtime || b.name.localeCompare(a.name))
     .map((entry) => entry.name);
+}
+
+async function listReleaseIdsPrivileged(
+  releasesDir: string,
+  runFn: RunFn,
+): Promise<string[]> {
+  const result = await runFn("sudo", ["-n", "ls", "-1t", "--", releasesDir]);
+  if (!result.success) {
+    if (
+      result.stderr.toLowerCase().includes("no such file") ||
+      result.stderr.toLowerCase().includes("not found")
+    ) {
+      return [];
+    }
+    throw new Error(result.stderr || `Failed to list ${releasesDir}`);
+  }
+  return result.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((name) => name.length > 0);
 }
 
 /**
@@ -94,8 +120,8 @@ export async function pruneReleases(
 ): Promise<string[]> {
   const keep = params.keep ?? DEFAULT_RELEASE_RETENTION;
   const runFn = params.runFn ?? runPrivileged;
-  const releaseIds = await listReleaseIds(params.paths.releasesDir);
-  const currentReleaseId = await readCurrentReleaseId(params.paths);
+  const releaseIds = await listReleaseIds(params.paths.releasesDir, runFn);
+  const currentReleaseId = await readCurrentReleaseId(params.paths, runFn);
   const doomed = releasesToPrune(releaseIds, currentReleaseId, keep);
 
   const removed: string[] = [];
