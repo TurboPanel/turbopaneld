@@ -1,9 +1,6 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import { it } from "@std/testing/bdd";
-import {
-  LIVE_METRICS_INTERVAL_MS,
-  LiveLeaseManager,
-} from "./live-leases.ts";
+import { LIVE_METRICS_INTERVAL_MS, LiveLeaseManager } from "./live-leases.ts";
 import { METRICS_INTERVAL_MS } from "./scheduler.ts";
 
 type TimerHandle = { id: number };

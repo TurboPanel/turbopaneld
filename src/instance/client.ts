@@ -1277,8 +1277,7 @@ export class InstanceClient {
       serverId,
       collectorFactory: this.#metricsCollectorFactory,
       schedulerOptions: {
-        collectionMode: () =>
-          this.#liveLeases?.collectionMode() ?? "baseline",
+        collectionMode: () => this.#liveLeases?.collectionMode() ?? "baseline",
       },
     });
     this.#metricsScheduler = rebound.scheduler;
@@ -1867,14 +1866,20 @@ export class InstanceClient {
   }
 
   #applySensorOverridesUpdate(
-    message: Extract<DaemonMessage, { type: "metrics-sensor-overrides-update" }>,
+    message: Extract<
+      DaemonMessage,
+      { type: "metrics-sensor-overrides-update" }
+    >,
     ws: WebSocket,
   ): void {
     void this.#applySensorOverridesUpdateAsync(message, ws);
   }
 
   async #applySensorOverridesUpdateAsync(
-    message: Extract<DaemonMessage, { type: "metrics-sensor-overrides-update" }>,
+    message: Extract<
+      DaemonMessage,
+      { type: "metrics-sensor-overrides-update" }
+    >,
     ws: WebSocket,
   ): Promise<void> {
     let ok = false;
