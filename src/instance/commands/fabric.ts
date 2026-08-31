@@ -708,6 +708,12 @@ async function warnIfDockerNetworkMtuDiffers(
  * Deploy reuses this so compose up does not depend on `server.fabric.reconcile`
  * having landed first (belt-and-braces for that race; a later gating phase
  * closes it properly).
+ *
+ * Always a plain routed bridge — never `--internal`. A spanning network reaches
+ * its peers by being routed off this host over `tp0`, which is the exact
+ * traffic an internal network forbids, so the control plane refuses
+ * `internal: true` on a `driver: overlay` network at deploy validation rather
+ * than sending a flag this function would have to drop.
  */
 export async function ensureFabricDockerNetworks(
   networks: readonly FabricReconcileNetwork[],

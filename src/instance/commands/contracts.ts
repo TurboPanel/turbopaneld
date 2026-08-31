@@ -485,6 +485,25 @@ export type EnvironmentDeployNativeFramework = "auto" | "node" | "next";
  * Caddy proxies to, and the runtime family. `serviceId` is the release-tree
  * directory segment the release engine published under.
  */
+/**
+ * The `deploy.restart_policy` subset a generated unit can express. Mirrors
+ * instance `EnvironmentDeployNativeAppRestartPolicy`.
+ *
+ * The wire vocabulary is **Compose's** (`none` / `on-failure` / `any`), not
+ * systemd's: the control plane never decides what a unit says, so the
+ * translation into `Restart=` / `RestartSec=` / `StartLimitBurst=` /
+ * `StartLimitIntervalSec=` happens once, in `../../deploy/native/unit.ts`.
+ */
+export type EnvironmentDeployNativeAppRestartPolicy = {
+  condition?: "none" | "on-failure" | "any";
+  /** Compose duration (`5s`, `1m30s`) — a systemd time span as written. */
+  delay?: string;
+  /** Positive retry budget; at least 1. */
+  maxAttempts?: number;
+  /** Compose duration. */
+  window?: string;
+};
+
 export type EnvironmentDeployNativeAppService = {
   composeServiceName: string;
   serviceId: string;
@@ -512,6 +531,19 @@ export type EnvironmentDeployNativeAppService = {
    * limits cannot add up past the account total.
    */
   accountLimits?: { cpus?: number; memoryBytes?: number; tasksMax?: number };
+  /**
+   * Authored `services.<name>.deploy.restart_policy`. A `node` service is not
+   * in the compose document the host runs, so the generated unit is the only
+   * thing that can act on it — see
+   * {@link EnvironmentDeployNativeAppRestartPolicy}.
+   */
+  restartPolicy?: EnvironmentDeployNativeAppRestartPolicy;
+  /**
+   * Authored `services.<name>.deploy.labels` — *service* metadata, never
+   * container labels. Carries no behaviour: it is recorded on the unit as
+   * `X-TurboPanel-Labels` so `systemctl show` can answer what the author wrote.
+   */
+  serviceLabels?: Record<string, string>;
 };
 
 /**
@@ -2842,6 +2874,21 @@ const NATIVE_APP_MODES: ReadonlySet<string> = new Set([
   "development",
 ]);
 
+/** Compose `restart_policy.condition` vocabulary — never systemd's. */
+const NATIVE_APP_RESTART_CONDITIONS: ReadonlySet<string> = new Set([
+  "none",
+  "on-failure",
+  "any",
+]);
+
+/**
+ * Compose duration: one or more `<number><unit>` pairs (`5s`, `1m30s`).
+ *
+ * The same spelling systemd accepts for a time span, which is why the value
+ * rides the wire as written instead of being converted on either side.
+ */
+const NATIVE_APP_RESTART_DURATION_RE = /^(\d+(?:\.\d+)?(?:us|ms|s|m|h))+$/;
+
 const NODE_PACKAGE_MANAGERS: ReadonlySet<string> = new Set([
   "npm",
   "yarn",
@@ -2931,6 +2978,81 @@ function parseNativeAppMode(
   return value as EnvironmentDeployNativeAppService["appMode"];
 }
 
+function parseNativeAppRestartDuration(
+  value: unknown,
+  field: string,
+): string | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "string" ||
+    !NATIVE_APP_RESTART_DURATION_RE.test(value.trim())
+  ) {
+    throw new TypeError(`Invalid nativeAppServices restartPolicy.${field}`);
+  }
+  return value.trim();
+}
+
+/**
+ * Parse `restartPolicy`, in the Compose vocabulary the wire carries.
+ *
+ * Every value is re-checked here rather than trusted from the control plane —
+ * the payload is attacker-shaped input to this process, and each of these ends
+ * up as a systemd directive. `maxAttempts: 0` is refused for the reason the
+ * instance refuses it too: `StartLimitBurst=0` means *no* rate limit, the exact
+ * inverse of "do not retry", so a field that would invert its own meaning on
+ * the way to the host is not forwarded.
+ */
+function parseNativeAppRestartPolicy(
+  value: unknown,
+): EnvironmentDeployNativeAppRestartPolicy | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid nativeAppServices restartPolicy");
+  }
+
+  let condition: EnvironmentDeployNativeAppRestartPolicy["condition"];
+  if (value.condition !== undefined) {
+    if (
+      typeof value.condition !== "string" ||
+      !NATIVE_APP_RESTART_CONDITIONS.has(value.condition.trim())
+    ) {
+      throw new TypeError("Invalid nativeAppServices restartPolicy.condition");
+    }
+    condition = value.condition
+      .trim() as EnvironmentDeployNativeAppRestartPolicy["condition"];
+  }
+
+  const delay = parseNativeAppRestartDuration(value.delay, "delay");
+  const window = parseNativeAppRestartDuration(value.window, "window");
+
+  let maxAttempts: number | undefined;
+  if (value.maxAttempts !== undefined) {
+    if (
+      typeof value.maxAttempts !== "number" ||
+      !Number.isInteger(value.maxAttempts) ||
+      value.maxAttempts < 1
+    ) {
+      throw new TypeError(
+        "Invalid nativeAppServices restartPolicy.maxAttempts",
+      );
+    }
+    maxAttempts = value.maxAttempts;
+  }
+
+  if (
+    condition === undefined && delay === undefined &&
+    maxAttempts === undefined && window === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    ...(condition === undefined ? {} : { condition }),
+    ...(delay === undefined ? {} : { delay }),
+    ...(maxAttempts === undefined ? {} : { maxAttempts }),
+    ...(window === undefined ? {} : { window }),
+  };
+}
+
 function parseNativeAppService(
   value: unknown,
 ): EnvironmentDeployNativeAppService {
@@ -2973,6 +3095,12 @@ function parseNativeAppService(
   if (resources) app.resources = resources;
   const accountLimits = parseNativeAppAccountLimits(value.accountLimits);
   if (accountLimits) app.accountLimits = accountLimits;
+  const restartPolicy = parseNativeAppRestartPolicy(value.restartPolicy);
+  if (restartPolicy) app.restartPolicy = restartPolicy;
+  // Metadata only, so the loose string-record rule is the right one: a label
+  // whose value is not a string is dropped rather than failing the deploy.
+  const serviceLabels = parseStringRecord(value.serviceLabels);
+  if (serviceLabels) app.serviceLabels = serviceLabels;
   return app;
 }
 

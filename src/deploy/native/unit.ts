@@ -19,7 +19,10 @@ import {
 } from "../../paths/layout.ts";
 import { principalUnixGroupName } from "../ensure-principal.ts";
 import { runtimeGroup } from "../../runtime/registry.ts";
-import type { EnvironmentDeployNativeAppService } from "../../instance/commands/contracts.ts";
+import type {
+  EnvironmentDeployNativeAppRestartPolicy,
+  EnvironmentDeployNativeAppService,
+} from "../../instance/commands/contracts.ts";
 
 /**
  * Unit-name prefix. Follows the existing `turbopanel-*` convention
@@ -231,6 +234,109 @@ export function formatMemoryBytes(bytes: number): string {
   return String(Math.max(1, Math.round(bytes)));
 }
 
+/**
+ * What the unit says about supervision when the document said nothing.
+ *
+ * `on-failure` with a two-second backoff is the behaviour every native app has
+ * had since the lane existed, so an absent `restart_policy` has to keep
+ * producing exactly these two lines — otherwise adding the field would rewrite
+ * every existing unit and restart every tenant app on the next deploy.
+ */
+export const DEFAULT_NATIVE_APP_RESTART = "on-failure";
+export const DEFAULT_NATIVE_APP_RESTART_SEC = "2";
+
+/**
+ * Compose `restart_policy.condition` → systemd `Restart=`.
+ *
+ * The one place the two vocabularies meet. `any` is systemd's `always` (restart
+ * whatever the exit status), `none` is `no`, and `on-failure` happens to spell
+ * the same in both — which is exactly why the mapping is written out rather
+ * than assumed: two of the three names differ, and a passthrough would silently
+ * emit `Restart=any`, a directive systemd rejects.
+ */
+export function systemdRestartDirective(
+  condition: NonNullable<
+    EnvironmentDeployNativeAppRestartPolicy["condition"]
+  >,
+): string {
+  if (condition === "none") return "no";
+  if (condition === "any") return "always";
+  return "on-failure";
+}
+
+/**
+ * `[Service]` supervision lines for one app.
+ *
+ * `delay` and `window` ride the wire in the Compose spelling (`5s`, `1m30s`),
+ * which is also a valid systemd time span, so they are emitted as written —
+ * `parseNativeAppRestartPolicy` in the command contract is what guarantees the
+ * shape, and re-normalizing here would only give the two sides a way to
+ * disagree.
+ */
+function restartLines(
+  policy: EnvironmentDeployNativeAppRestartPolicy | undefined,
+): string[] {
+  const condition = policy?.condition;
+  const lines = [
+    `Restart=${
+      condition === undefined
+        ? DEFAULT_NATIVE_APP_RESTART
+        : systemdRestartDirective(condition)
+    }`,
+    `RestartSec=${policy?.delay ?? DEFAULT_NATIVE_APP_RESTART_SEC}`,
+  ];
+  return lines;
+}
+
+/**
+ * `[Unit]` rate-limit lines for one app.
+ *
+ * `StartLimitBurst` / `StartLimitIntervalSec` are `[Unit]` directives even
+ * though they govern restarts, so they cannot be emitted beside `Restart=`.
+ */
+function startLimitLines(
+  policy: EnvironmentDeployNativeAppRestartPolicy | undefined,
+): string[] {
+  const lines: string[] = [];
+  if (policy?.maxAttempts !== undefined) {
+    lines.push(`StartLimitBurst=${Math.max(1, Math.round(policy.maxAttempts))}`);
+  }
+  if (policy?.window !== undefined) {
+    lines.push(`StartLimitIntervalSec=${policy.window}`);
+  }
+  return lines;
+}
+
+/**
+ * Authored `deploy.labels`, recorded on the unit as one `X-TurboPanel-Labels`
+ * line.
+ *
+ * Service metadata carries no behaviour, so the only thing that matters is that
+ * it survives the trip and can be read back: `systemctl show -p ...` on the
+ * native lane answers what `docker inspect` answers on the container one. One
+ * JSON object rather than a directive per label because a Compose label key is
+ * free-form (`com.example.team`) while a systemd directive name is not, and
+ * because `JSON.stringify` escapes every control character — a label value
+ * containing a newline cannot break out into a directive of its own.
+ *
+ * Keys are sorted so the rendered text is a function of the label set alone;
+ * the whole install path is a byte-diff, and a mapping that reordered itself
+ * would rewrite and reload units that did not change.
+ */
+export function serviceLabelsLine(
+  labels: Record<string, string> | undefined,
+): string | null {
+  if (!labels) return null;
+  const keys = Object.keys(labels).sort((a, b) => {
+    if (a < b) return -1;
+    return a > b ? 1 : 0;
+  });
+  if (keys.length === 0) return null;
+  const ordered: Record<string, string> = {};
+  for (const key of keys) ordered[key] = labels[key];
+  return `X-TurboPanel-Labels=${JSON.stringify(ordered)}`;
+}
+
 export type NativeAppUnitOpts = {
   layout: Pick<LayoutPaths, "runtimesDir" | "principalHomeRoot">;
   app: EnvironmentDeployNativeAppService;
@@ -254,6 +360,14 @@ export type NativeAppUnitOpts = {
  * is what keeps this text byte-identical across promotes, so a deploy that only
  * moved `current` performs no install, no `daemon-reload`, and no unit rewrite —
  * only a restart.
+ *
+ * Supervision comes from the authored `deploy.restart_policy` when the payload
+ * carries one, translated here and nowhere else ({@link restartLines},
+ * {@link startLimitLines}); a payload without one renders the historical
+ * `Restart=on-failure` / `RestartSec=2` verbatim, so adding the field rewrote
+ * no existing unit. Authored `deploy.labels` are recorded as a single
+ * `X-TurboPanel-Labels` line ({@link serviceLabelsLine}) — metadata a
+ * `systemctl show` can answer with, never behaviour.
  */
 export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
   const { app, username } = opts;
@@ -272,13 +386,20 @@ export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
     ...(app.startupFile === undefined ? {} : { startupFile: app.startupFile }),
   });
 
+  const labelsLine = serviceLabelsLine(app.serviceLabels);
+
   const lines = [
     "# Managed by TurboPanel — regenerated on deploy; edits are overwritten.",
     "[Unit]",
     `Description=TurboPanel app ${app.composeServiceName} (${app.serviceId})`,
     `X-TurboPanel-Environment=${opts.environmentId}`,
+    ...(labelsLine === null ? [] : [labelsLine]),
     "After=network-online.target",
     "Wants=network-online.target",
+    // `StartLimitBurst` / `StartLimitIntervalSec` govern restarts but are
+    // `[Unit]` directives, so the retry budget lands here while `Restart=` and
+    // `RestartSec=` land below.
+    ...startLimitLines(app.restartPolicy),
     "",
     "[Service]",
     "Type=simple",
@@ -291,8 +412,7 @@ export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
     `Environment=HOST=127.0.0.1`,
     `Environment=HOME=${home}`,
     `ExecStart=${execStart}`,
-    "Restart=on-failure",
-    "RestartSec=2",
+    ...restartLines(app.restartPolicy),
     // Hardening. Containerless is not container isolation; this is the set that
     // makes the difference honest rather than nominal.
     "NoNewPrivileges=yes",

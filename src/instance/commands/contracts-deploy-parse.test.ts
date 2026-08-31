@@ -570,6 +570,65 @@ test("parseEnvironmentDeployPayload rejects nativeAppServices resource limits", 
   );
 });
 
+test("parseEnvironmentDeployPayload rejects unhonourable restart policies", () => {
+  // Each of these becomes a systemd directive, so the payload is re-checked
+  // here rather than trusted from the control plane. `maxAttempts: 0` is
+  // refused for the reason the instance refuses it: `StartLimitBurst=0` means
+  // *no* rate limit, the inverse of "do not retry".
+  for (
+    const [restartPolicy, message] of [
+      ["always", "Invalid nativeAppServices restartPolicy"],
+      [{ condition: "unless-stopped" }, "Invalid nativeAppServices restartPolicy.condition"],
+      [{ delay: "soon" }, "Invalid nativeAppServices restartPolicy.delay"],
+      [{ window: "5" }, "Invalid nativeAppServices restartPolicy.window"],
+      [{ maxAttempts: 0 }, "Invalid nativeAppServices restartPolicy.maxAttempts"],
+      [{ maxAttempts: 1.5 }, "Invalid nativeAppServices restartPolicy.maxAttempts"],
+    ] as const
+  ) {
+    rejectDeploy(
+      {
+        nativeAppServices: [{
+          composeServiceName: "api",
+          serviceId: "svc-native-1",
+          listenPort: 13000,
+          framework: "node",
+          restartPolicy,
+        }],
+      },
+      message,
+    );
+  }
+});
+
+test("parseEnvironmentDeployPayload keeps restartPolicy and serviceLabels", () => {
+  const payload = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    nativeAppServices: [{
+      composeServiceName: "api",
+      serviceId: "svc-native-1",
+      listenPort: 13000,
+      framework: "node",
+      restartPolicy: {
+        condition: "any",
+        delay: "5s",
+        maxAttempts: 3,
+        window: "1m30s",
+      },
+      serviceLabels: { "com.example.team": "platform", dropped: 7 },
+    }],
+  });
+  assertEquals(payload.nativeAppServices?.[0]?.restartPolicy, {
+    condition: "any",
+    delay: "5s",
+    maxAttempts: 3,
+    window: "1m30s",
+  });
+  // Metadata, so a non-string value is dropped rather than failing the deploy.
+  assertEquals(payload.nativeAppServices?.[0]?.serviceLabels, {
+    "com.example.team": "platform",
+  });
+});
+
 test("parseEnvironmentDeployPayload rejects sourceMaterial parse errors", () => {
   rejectDeploy({ sourceMaterial: [null] }, "Invalid sourceMaterial entry");
   rejectDeploy(

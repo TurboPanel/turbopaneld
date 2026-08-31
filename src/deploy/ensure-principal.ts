@@ -11,6 +11,21 @@ import {
 export type PrincipalEnsureSpec = {
   principalId: string;
   username: string;
+  /**
+   * Numeric id overrides. Omitted means "let `useradd` allocate", which is what
+   * every account gets today.
+   *
+   * This pair is also the seam a **stable, control-plane-allocated** id will
+   * arrive through when shared POSIX storage spans hosts: a tree written as
+   * uid 1007 on one server and read as uid 1009 on another is the same account
+   * to TurboPanel and two different owners to the kernel, so the allocation has
+   * to be made once, centrally, and asserted here. It will never be authored in
+   * compose — `ROOT_KEY_REDIRECTS` in the control plane's
+   * `lib/compose/root-extension.ts` refuses `uid` / `gid` at the root for
+   * exactly that reason, and a per-service `x-turbopanel.principal` names an
+   * alias, never an id. Nothing about this field changes when that lands; only
+   * who fills it in.
+   */
   uid?: number;
   gid?: number;
   home?: string;

@@ -119,6 +119,31 @@ ceiling, repeated on every app of a principal) becomes the slice. Because every
 unit sets `Slice=`, three generous per-app quotas still cannot add up past what
 the account is entitled to.
 
+**Supervision.** `nativeAppServices[].restartPolicy` arrives in the **Compose**
+vocabulary — the control plane never decides what a unit says — and `unit.ts` is
+the single place it becomes systemd's: `condition` → `Restart=` (`any` is
+`always`, `none` is `no`, `on-failure` spells the same in both), `delay` →
+`RestartSec=`, `max_attempts` → `StartLimitBurst=`, `window` →
+`StartLimitIntervalSec=`. The two rate-limit directives are `[Unit]`, not
+`[Service]`, so they are emitted apart from `Restart=`; systemd would ignore
+them under `[Service]`. A payload carrying no policy renders the historical
+`Restart=on-failure` / `RestartSec=2` verbatim — the install path is a byte
+diff, so any other default would rewrite every existing unit and restart every
+tenant app on the next deploy. Values outside the honourable subset never
+arrive: the control-plane linter refuses them at save and at deploy, and
+`parseNativeAppService` refuses them again here, because the payload is
+untrusted input to this process and each value becomes a directive.
+
+**Service labels.** `nativeAppServices[].serviceLabels` is the author's
+`deploy.labels` — *service* metadata, never container labels, and never
+behaviour. It is recorded as one sorted `X-TurboPanel-Labels=<json>` line in
+`[Unit]`, so `systemctl show` answers on this lane what `docker inspect`
+answers on the container one. One JSON object rather than a directive per
+label: a Compose label key is free-form (`com.example.team`) where a systemd
+directive name is not, and `JSON.stringify` escapes every control character, so
+a label value containing a newline cannot break out into a directive of its
+own. Keys are sorted so the rendered text is a function of the label set alone.
+
 **Health probe.** Any completed HTTP response counts as started — a 404 or a 500
 is a running app, and this gate answers "did the release come up", not "is the
 application logically correct". `Type=simple` reports active the moment the

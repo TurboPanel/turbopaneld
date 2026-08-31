@@ -224,6 +224,23 @@ unchanged — the transcript is a **separate, never load-bearing** channel.
 
 ## Compiled compose publish
 
+**The control-plane compiler now names its stages; nothing here changed.** The
+instance-side pipeline is documented as four models —
+`ComposeLayer[]` (authored) → `Application` (normalized merge) →
+`ResolvedApplication` (reconciled, scheduled, allocated) → `ServerDeployment`
+(one per participating server) — in
+`../../../turbopanel/src/lib/compose/ir.ts`. `ServerDeployment` is the whole
+`environment.deploy` payload one host receives — compiled compose and its
+material, sites, native apps, sources, *and* hostings, TLS material, shared
+ingress and listener ports — with every field an `EnvironmentDeploy*` wire type
+**verbatim**: same fields, same wire contract in
+`../../../turbopanel/src/lib/commands/schemas.ts`, same single
+`role: 'runtime'` `compose.yaml`. Naming the stages moved where the instance
+assembles that object (out of its deploy route, into its compiler) and changed
+nothing about the object itself. The daemon receives exactly what it received
+before and must not learn any of those names — it is handed a compiled
+document, never an authored one, and never a compiler stage.
+
 `environment.deploy` publishes a **single compiled** `compose.yaml` (overlay
 already merged) plus `.env` (non-secrets) plus `deployment.json` under
 `<stateDir>/deployments/<projectId>/<environmentId>/`. Lifecycle/stop resolve

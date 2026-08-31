@@ -18,6 +18,8 @@ import {
   principalSliceName,
   principalSliceStagedPath,
   quoteSystemdArgument,
+  serviceLabelsLine,
+  systemdRestartDirective,
   resolveExecStart,
   resolveNativeAppNodeVersion,
 } from "./unit.ts";
@@ -246,4 +248,93 @@ test("principalSliceContent emits account limits when provided", () => {
   assertStringIncludes(slice, "MemoryHigh=2000000000");
   assertStringIncludes(slice, "MemoryMax=2000000000");
   assertStringIncludes(slice, "TasksMax=128");
+});
+
+test("an app with no restart_policy keeps the historical supervision lines", () => {
+  // The regression that matters most: adding the field must not rewrite units
+  // that existed before it. A payload without a policy has to render exactly
+  // the two lines the lane has always emitted, or the next deploy reinstalls
+  // and restarts every tenant app for no reason.
+  const content = nativeAppUnitContent({
+    layout,
+    app,
+    username: "appuser",
+    environmentId: "env-1",
+  });
+  assertStringIncludes(content, "\nRestart=on-failure\n");
+  assertStringIncludes(content, "\nRestartSec=2\n");
+  assertEquals(content.includes("StartLimit"), false);
+  assertEquals(content.includes("X-TurboPanel-Labels"), false);
+});
+
+test("systemdRestartDirective maps the Compose vocabulary onto systemd's", () => {
+  // Two of the three names differ; a passthrough would emit `Restart=any`,
+  // which systemd rejects outright.
+  assertEquals(systemdRestartDirective("none"), "no");
+  assertEquals(systemdRestartDirective("any"), "always");
+  assertEquals(systemdRestartDirective("on-failure"), "on-failure");
+});
+
+test("an authored restart_policy becomes the unit's supervision directives", () => {
+  const content = nativeAppUnitContent({
+    layout,
+    app: {
+      ...app,
+      restartPolicy: {
+        condition: "any",
+        delay: "5s",
+        maxAttempts: 3,
+        window: "1m30s",
+      },
+    },
+    username: "appuser",
+    environmentId: "env-1",
+  });
+  assertStringIncludes(content, "\nRestart=always\n");
+  assertStringIncludes(content, "\nRestartSec=5s\n");
+  // Rate-limit directives are `[Unit]`, not `[Service]` — emitting them beside
+  // `Restart=` would make systemd ignore them.
+  const unitSection = content.slice(0, content.indexOf("[Service]"));
+  assertStringIncludes(unitSection, "StartLimitBurst=3");
+  assertStringIncludes(unitSection, "StartLimitIntervalSec=1m30s");
+});
+
+test("restart condition none disables restarting without touching the backoff", () => {
+  const content = nativeAppUnitContent({
+    layout,
+    app: { ...app, restartPolicy: { condition: "none" } },
+    username: "appuser",
+    environmentId: "env-1",
+  });
+  assertStringIncludes(content, "\nRestart=no\n");
+  assertStringIncludes(content, "\nRestartSec=2\n");
+});
+
+test("serviceLabelsLine is one sorted, escaped JSON line or nothing", () => {
+  assertEquals(serviceLabelsLine(undefined), null);
+  assertEquals(serviceLabelsLine({}), null);
+  // Sorted so the rendered unit is a function of the label set alone — the
+  // install path is a byte diff, and a reordered mapping would reload units
+  // that did not change.
+  assertEquals(
+    serviceLabelsLine({ team: "platform", app: "api" }),
+    'X-TurboPanel-Labels={"app":"api","team":"platform"}',
+  );
+  // A newline in a value cannot break out into a directive of its own.
+  const escaped = serviceLabelsLine({ note: "one\ntwo" });
+  assertEquals(escaped, 'X-TurboPanel-Labels={"note":"one\\ntwo"}');
+});
+
+test("authored deploy.labels are preserved on the generated unit", () => {
+  const content = nativeAppUnitContent({
+    layout,
+    app: { ...app, serviceLabels: { "com.example.team": "platform" } },
+    username: "appuser",
+    environmentId: "env-1",
+  });
+  const unitSection = content.slice(0, content.indexOf("[Service]"));
+  assertStringIncludes(
+    unitSection,
+    'X-TurboPanel-Labels={"com.example.team":"platform"}',
+  );
 });
