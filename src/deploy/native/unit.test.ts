@@ -18,10 +18,10 @@ import {
   principalSliceName,
   principalSliceStagedPath,
   quoteSystemdArgument,
-  serviceLabelsLine,
-  systemdRestartDirective,
   resolveExecStart,
   resolveNativeAppNodeVersion,
+  serviceLabelsLine,
+  systemdRestartDirective,
 } from "./unit.ts";
 
 /**

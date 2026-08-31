@@ -299,7 +299,9 @@ function startLimitLines(
 ): string[] {
   const lines: string[] = [];
   if (policy?.maxAttempts !== undefined) {
-    lines.push(`StartLimitBurst=${Math.max(1, Math.round(policy.maxAttempts))}`);
+    lines.push(
+      `StartLimitBurst=${Math.max(1, Math.round(policy.maxAttempts))}`,
+    );
   }
   if (policy?.window !== undefined) {
     lines.push(`StartLimitIntervalSec=${policy.window}`);

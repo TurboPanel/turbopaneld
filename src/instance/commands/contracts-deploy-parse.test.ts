@@ -578,11 +578,20 @@ test("parseEnvironmentDeployPayload rejects unhonourable restart policies", () =
   for (
     const [restartPolicy, message] of [
       ["always", "Invalid nativeAppServices restartPolicy"],
-      [{ condition: "unless-stopped" }, "Invalid nativeAppServices restartPolicy.condition"],
+      [
+        { condition: "unless-stopped" },
+        "Invalid nativeAppServices restartPolicy.condition",
+      ],
       [{ delay: "soon" }, "Invalid nativeAppServices restartPolicy.delay"],
       [{ window: "5" }, "Invalid nativeAppServices restartPolicy.window"],
-      [{ maxAttempts: 0 }, "Invalid nativeAppServices restartPolicy.maxAttempts"],
-      [{ maxAttempts: 1.5 }, "Invalid nativeAppServices restartPolicy.maxAttempts"],
+      [
+        { maxAttempts: 0 },
+        "Invalid nativeAppServices restartPolicy.maxAttempts",
+      ],
+      [
+        { maxAttempts: 1.5 },
+        "Invalid nativeAppServices restartPolicy.maxAttempts",
+      ],
     ] as const
   ) {
     rejectDeploy(
