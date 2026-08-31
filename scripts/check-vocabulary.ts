@@ -64,6 +64,7 @@ export const ALLOWLIST_LINE_PATTERNS: RegExp[] = [
 // --- Directories / files never scanned --------------------------------------
 const SKIP_DIRS = new Set([
   ".git",
+  ".claude",
   "node_modules",
   "dist",
   "publish",
