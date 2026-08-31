@@ -202,7 +202,6 @@ describe("ansible runtime with stubbed binaries", () => {
       "TURBOPANEL_OPTIONAL_WEBSITE",
       "TURBOPANEL_OPTIONAL_MAILPIT",
       "TURBOPANEL_OPTIONAL_REDIS_INSIGHT",
-      "TURBOPANEL_OPTIONAL_TABIX",
     ] as const;
     const previous = new Map<string, string | undefined>();
     for (const key of keys) {
@@ -217,7 +216,6 @@ describe("ansible runtime with stubbed binaries", () => {
     Deno.env.set("TURBOPANEL_OPTIONAL_WEBSITE", "maybe");
     Deno.env.set("TURBOPANEL_OPTIONAL_MAILPIT", "yes");
     Deno.env.set("TURBOPANEL_OPTIONAL_REDIS_INSIGHT", "no");
-    Deno.env.set("TURBOPANEL_OPTIONAL_TABIX", "false");
     try {
       await ansible.runDaemonConverge();
     } finally {

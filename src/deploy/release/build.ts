@@ -49,10 +49,25 @@ const RESERVED_BUILD_ENV_KEYS = new Set([
 const defaultSummaryRedactor: CommandSummaryRedactor = (text) =>
   redactCommandSummary(text);
 
+/**
+ * Native-app runtime context for a build. Present only when the release
+ * belongs to a `nativeAppServices[]` entry — it is what puts the vendored
+ * tenant Node (and its bundled npm/npx/corepack) on the build `PATH`, and what
+ * lets `NODE_ENV` follow the operator's application mode.
+ */
+export type NativeBuildRuntime = {
+  /** `dirname(nativeAppNodeBinary(layout, series))` — prefixed onto `PATH`. */
+  nodeBinDir: string;
+  /** Operator's application mode; `production` when undeclared. */
+  nodeEnv: "production" | "development";
+};
+
 export type ReleaseBuildParams = {
   build: EnvironmentDeploySourceBuild;
   /** Checked-out working tree; commands run here (or in `subdirectory`). */
   workingDir: string;
+  /** Set for native-app builds; absent for every other release kind. */
+  nativeRuntime?: NativeBuildRuntime;
   onOutput?: ReleaseOutputHandler;
   redactSummary?: CommandSummaryRedactor;
   /**
@@ -84,14 +99,26 @@ export type ReleaseBuildParams = {
 export function buildEnvironment(
   build: EnvironmentDeploySourceBuild,
   workingDir: string,
+  nativeRuntime?: NativeBuildRuntime,
 ): Record<string, string> {
+  const daemonPath = Deno.env.get("PATH") ?? "/usr/local/bin:/usr/bin:/bin";
   const env: Record<string, string> = {
-    PATH: Deno.env.get("PATH") ?? "/usr/local/bin:/usr/bin:/bin",
+    // The vendored tenant Node leads PATH for a native-app build so `node`,
+    // `npm`, `npx`, and `corepack` all resolve to the series the app runs on.
+    PATH: nativeRuntime
+      ? `${nativeRuntime.nodeBinDir}:${daemonPath}`
+      : daemonPath,
     HOME: workingDir,
     CI: "1",
     // Signals to the usual toolchains that this is a production build.
-    NODE_ENV: "production",
+    NODE_ENV: nativeRuntime?.nodeEnv ?? "production",
   };
+  if (nativeRuntime) {
+    // Corepack caches per checkout, never in the daemon's own home, and must
+    // not stop a build to ask whether downloading yarn/pnpm is okay.
+    env.COREPACK_HOME = join(workingDir, ".corepack");
+    env.COREPACK_ENABLE_DOWNLOAD_PROMPT = "0";
+  }
   for (const [key, value] of Object.entries(build.env ?? {})) {
     if (RESERVED_BUILD_ENV_KEYS.has(key)) continue;
     env[key] = value;
@@ -181,14 +208,93 @@ async function runBuildCommand(
 }
 
 /**
+ * True when `package.json` pins Yarn Berry (2+), or a `.yarnrc.yml` marks the
+ * checkout as a Berry project. Berry has no `--production` flag (and ignores
+ * `NODE_ENV` during install), so the classic-only dev-deps flag must not be
+ * passed to it.
+ */
+async function yarnIsBerry(workingDir: string): Promise<boolean> {
+  try {
+    const raw = await Deno.readTextFile(join(workingDir, "package.json"));
+    const pin = JSON.parse(raw)?.packageManager;
+    const match = typeof pin === "string" ? /^yarn@(\d+)/.exec(pin) : null;
+    if (match) return Number(match[1]) >= 2;
+  } catch {
+    // Unreadable/unparseable package.json — fall through to the file probe.
+  }
+  return await fileExists(join(workingDir, ".yarnrc.yml"));
+}
+
+/**
+ * Derive the install command for a native-app build from the operator's
+ * package-manager choice, falling back to lockfile detection
+ * (`pnpm-lock.yaml` > `yarn.lock` > `package-lock.json` > bare npm).
+ *
+ * The dev-deps flags (`--include=dev`, `--prod=false`, `--production=false`)
+ * are load-bearing: the build environment sets `NODE_ENV=production`, under
+ * which npm, pnpm, and classic yarn silently omit devDependencies — which is
+ * where every build toolchain lives.
+ *
+ * Returns `undefined` when there is no `package.json` to install from.
+ */
+export async function deriveNodeInstallCommand(params: {
+  packageManager?: EnvironmentDeploySourceBuild["packageManager"];
+  workingDir: string;
+}): Promise<string | undefined> {
+  const has = (name: string) => fileExists(join(params.workingDir, name));
+  if (!(await has("package.json"))) return undefined;
+
+  const hasPnpmLock = await has("pnpm-lock.yaml");
+  const hasYarnLock = await has("yarn.lock");
+  let lockfileManager: "pnpm" | "yarn" | "npm" = "npm";
+  if (hasPnpmLock) lockfileManager = "pnpm";
+  else if (hasYarnLock) lockfileManager = "yarn";
+  const manager = params.packageManager ?? lockfileManager;
+
+  if (manager === "pnpm") {
+    return hasPnpmLock
+      ? "corepack pnpm install --frozen-lockfile --prod=false"
+      : "corepack pnpm install --prod=false";
+  }
+  if (manager === "yarn") {
+    // CI=1 already makes Berry installs immutable when a lockfile exists.
+    if (await yarnIsBerry(params.workingDir)) return "corepack yarn install";
+    return hasYarnLock
+      ? "corepack yarn install --frozen-lockfile --production=false"
+      : "corepack yarn install --production=false";
+  }
+  return (await has("package-lock.json"))
+    ? "npm ci --include=dev"
+    : "npm install --include=dev";
+}
+
+/**
  * Run `installCommand` then `buildCommand`. A missing command is a no-op — a
- * source with neither is a valid "ship the repository as-is" release.
+ * source with neither is a valid "ship the repository as-is" release — except
+ * for a native-app build, where a missing `installCommand` is derived from the
+ * package manager / lockfile so all three managers deploy without the operator
+ * typing an install line.
  */
 export async function runReleaseBuild(
   params: ReleaseBuildParams,
 ): Promise<void> {
+  let installCommand = params.build.installCommand;
+  if (installCommand === undefined && params.nativeRuntime) {
+    installCommand = await deriveNodeInstallCommand({
+      packageManager: params.build.packageManager,
+      workingDir: params.workingDir,
+    });
+    if (installCommand !== undefined) {
+      params.onOutput?.(
+        "stdout",
+        `derived install command from ${
+          params.build.packageManager ?? "lockfile detection"
+        }`,
+      );
+    }
+  }
   const commands = [
-    params.build.installCommand,
+    installCommand,
     params.build.buildCommand,
   ].filter((command): command is string => Boolean(command));
   if (commands.length === 0) {
@@ -206,7 +312,11 @@ export async function runReleaseBuild(
       "prlimit unavailable — running build without resource caps",
     );
   }
-  const env = buildEnvironment(params.build, params.workingDir);
+  const env = buildEnvironment(
+    params.build,
+    params.workingDir,
+    params.nativeRuntime,
+  );
   const execute = params.runCommand ?? runBuildCommand;
   for (const command of commands) {
     params.onOutput?.("stdout", `$ ${command}`);

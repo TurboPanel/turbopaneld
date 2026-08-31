@@ -4,15 +4,16 @@
     file: "{{ role_path }}/../../runtime-registry.json"
     name: runtime_registry
 
-- name: Assert the registry defines both access groups
+- name: Assert the registry defines every access group
   ansible.builtin.assert:
     that:
       - runtime_registry.accessGroups.sftp is defined
       - runtime_registry.accessGroups.shell is defined
+      - runtime_registry.accessGroups.password is defined
     fail_msg: >-
-      runtime-registry.json is missing accessGroups.sftp/accessGroups.shell.
-      The daemon resolves the sshd Match groups from the same keys, so a host
-      provisioned without them would match no account.
+      runtime-registry.json is missing accessGroups.sftp/accessGroups.shell/
+      accessGroups.password. The daemon resolves the sshd Match groups from the
+      same keys, so a host provisioned without them would match no account.
 
 - name: Ensure the SSH access groups
   ansible.builtin.group:
@@ -23,6 +24,7 @@
   loop:
     - "{{ runtime_registry.accessGroups.sftp }}"
     - "{{ runtime_registry.accessGroups.shell }}"
+    - "{{ runtime_registry.accessGroups.password }}"
   loop_control:
     label: "{{ item.group }} ({{ item.gid }})"
 

@@ -85,16 +85,6 @@ const ACCOUNTS: AccountEntry[] = [
     uidVar: "rabbitmq_container_uid",
     gidVar: "rabbitmq_container_gid",
   },
-  {
-    account: "tpmetrics",
-    id: 9994,
-    primaryGroup: "tpmetrics",
-    defaultsFile: "roles/clickhouse/defaults/main.yml",
-    userVar: "clickhouse_system_user",
-    groupVar: "clickhouse_primary_group",
-    uidVar: "clickhouse_container_uid",
-    gidVar: "clickhouse_container_gid",
-  },
 ];
 
 const WEB_SERVICE_ACCOUNTS = [
@@ -405,14 +395,13 @@ test("systemd units and docker wrappers bind the expected identity variables", a
     "turbopanel-redis.service Group",
   );
 
-  // postgres/rabbitmq/clickhouse are Type=oneshot Compose services managed by
+  // postgres/rabbitmq are Type=oneshot Compose services managed by
   // system-compose — identity via the Compose `user:` key (rendered by that
   // role's docker-compose.yml.j2), not `User=` in a per-service unit or a
   // per-role `docker run --user`.
   const composeServices = [
     { uidVar: "postgres_container_uid", gidVar: "postgres_container_gid" },
     { uidVar: "rabbitmq_container_uid", gidVar: "rabbitmq_container_gid" },
-    { uidVar: "clickhouse_container_uid", gidVar: "clickhouse_container_gid" },
   ] as const;
 
   const composeTemplate = await readRole(

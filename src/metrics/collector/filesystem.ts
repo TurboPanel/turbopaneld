@@ -1,5 +1,14 @@
+/**
+ * Filesystem capacity probes via async `statfs` — no subprocess (`df`).
+ *
+ * The v2 contract carries three probes (system `/`, the tenant hosting root,
+ * and the Docker data root) as raw total/available bytes; percent reduction
+ * is an API-side concern. The Docker probe reports capacity on the filesystem
+ * backing TurboPanel Docker volumes, not per-volume quotas.
+ */
 import { statfs } from "node:fs/promises";
-import type { DiskCapacityGauges } from "./types.ts";
+
+import type { StorageProbeResult } from "./types.ts";
 
 export type StatfsLike = {
   blocks: number;
@@ -9,19 +18,29 @@ export type StatfsLike = {
 };
 
 /**
- * Root filesystem capacity via async `statfs` — no subprocess (`df`).
- * Returns `null` when unsupported or on error.
+ * Probe one path's capacity. Returns `null` when the path is missing, the
+ * probe is unsupported, or the statfs shape is invalid/zero-capacity.
  *
- * Optional `io.statfs` remaps the node `statfs` call for host-free tests of
- * invalid / zero-capacity shapes.
+ * Raw values, normalized before any aggregation: `totalBytes = blocks *
+ * bsize` (true filesystem capacity — root-reserved blocks stay in the
+ * denominator) and `availableBytes = bavail * bsize` (unprivileged
+ * availability). Percent reduction is an API-side concern.
+ *
+ * Optional `io.statfs` remaps the node `statfs` call for host-free tests;
+ * it may return `null` (CollectorDeps-shaped probes) as well as throw.
  */
-export async function readRootFilesystemCapacity(
-  path = "/",
-  io?: { statfs?: (path: string) => Promise<StatfsLike> | StatfsLike },
-): Promise<DiskCapacityGauges | null> {
+export async function probeStorage(
+  path: string,
+  io?: {
+    statfs?: (
+      path: string,
+    ) => Promise<StatfsLike | null> | StatfsLike | null;
+  },
+): Promise<StorageProbeResult> {
   try {
     const probe = io?.statfs ?? statfs;
     const stat = await probe(path);
+    if (!stat) return null;
     const blocks = Number(stat.blocks);
     const bfree = Number(stat.bfree);
     const bavail = Number(stat.bavail);
@@ -34,13 +53,11 @@ export async function readRootFilesystemCapacity(
       return null;
     }
 
-    const used = (blocks - bfree) * bsize;
-    const avail = bavail * bsize;
-    const denominator = used + avail;
-    if (denominator <= 0) return null;
+    const totalBytes = blocks * bsize;
+    const availableBytes = bavail * bsize;
+    if (totalBytes <= 0) return null;
 
-    const diskUsedPercent = (used / denominator) * 100;
-    return { diskUsedPercent };
+    return { totalBytes, availableBytes };
   } catch {
     return null;
   }

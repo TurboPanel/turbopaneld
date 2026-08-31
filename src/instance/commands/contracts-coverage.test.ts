@@ -395,6 +395,100 @@ test("parseEnvironmentDeployPayload rejects invalid nativeAppServices fields", (
   );
 });
 
+test("parseEnvironmentDeployPayload round-trips nativeAppServices appMode, enabled, and startupFile", () => {
+  const payload = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    nativeAppServices: [{
+      composeServiceName: "api",
+      serviceId: "svc-native-1",
+      listenPort: 13000,
+      framework: "node",
+      appMode: "development",
+      enabled: false,
+      startupFile: "dist/index.js",
+    }],
+  });
+  const app = payload.nativeAppServices?.[0];
+  assertEquals(app?.appMode, "development");
+  assertEquals(app?.enabled, false);
+  assertEquals(app?.startupFile, "dist/index.js");
+
+  // Absent stays absent: the daemon defaults (production, enabled, server.js)
+  // apply downstream rather than being minted at the contract boundary.
+  const bare = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    nativeAppServices: [{
+      composeServiceName: "api",
+      serviceId: "svc-native-1",
+      listenPort: 13000,
+      framework: "node",
+    }],
+  });
+  assertEquals(bare.nativeAppServices?.[0]?.appMode, undefined);
+  assertEquals(bare.nativeAppServices?.[0]?.enabled, undefined);
+  assertEquals(bare.nativeAppServices?.[0]?.startupFile, undefined);
+});
+
+test("parseEnvironmentDeployPayload rejects invalid nativeAppServices appMode, enabled, and startupFile", () => {
+  const base = {
+    composeServiceName: "api",
+    serviceId: "svc-native-1",
+    listenPort: 13000,
+    framework: "node",
+  };
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...DEPLOY_BASE,
+        nativeAppServices: [{ ...base, appMode: "staging" }],
+      }),
+    TypeError,
+    "Invalid nativeAppServices appMode",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...DEPLOY_BASE,
+        nativeAppServices: [{ ...base, enabled: "no" }],
+      }),
+    TypeError,
+    "Invalid nativeAppServices enabled",
+  );
+  // startupFile lands in an ExecStart line, so a traversal must never parse.
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...DEPLOY_BASE,
+        nativeAppServices: [{ ...base, startupFile: "../x" }],
+      }),
+    TypeError,
+    "Invalid nativeAppServices startupFile",
+  );
+});
+
+test("parseEnvironmentDeployPayload round-trips build packageManager and rejects unknown managers", () => {
+  const payload = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    sourceMaterial: [{
+      ...SOURCE_ENTRY,
+      build: { kind: "native", packageManager: "pnpm" },
+    }],
+  });
+  assertEquals(payload.sourceMaterial?.[0]?.build.packageManager, "pnpm");
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...DEPLOY_BASE,
+        sourceMaterial: [{
+          ...SOURCE_ENTRY,
+          build: { kind: "native", packageManager: "bun" },
+        }],
+      }),
+    TypeError,
+    "Invalid sourceMaterial build packageManager",
+  );
+});
+
 test("parseEnvironmentDeployPayload round-trips variableMaterial flags and ingressServices", () => {
   const payload = parseEnvironmentDeployPayload({
     ...DEPLOY_BASE,

@@ -3459,6 +3459,11 @@ it({
             at: new Date().toISOString(),
           });
           socket.receive({
+            type: "metrics-capabilities-request",
+            id: "caps-1",
+            at: new Date().toISOString(),
+          });
+          socket.receive({
             type: "fabric-paths-request",
             id: "fabric-1",
             fabricId: "00000000-0000-4000-8000-000000000002",
@@ -3527,6 +3532,14 @@ it({
             "managed-logs-result",
             () =>
               lastFrameOfType(socket, "managed-logs-result") ? true : undefined,
+          );
+          const capabilitiesFrame = await waitFor(
+            "metrics-capabilities-result",
+            () => lastFrameOfType(socket, "metrics-capabilities-result"),
+          );
+          assertEquals(
+            (capabilitiesFrame as { id?: string }).id,
+            "caps-1",
           );
           await waitFor(
             "fabric-paths-result",
@@ -5328,6 +5341,290 @@ it({
       restoreWebSocket();
       setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
       setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+    }
+  },
+});
+
+it({
+  name:
+    "InstanceClient live-metrics leases: wire round trips and fresh manager after reconnect",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  fn: async () => {
+    const tempDir = await Deno.makeTempDir();
+    const originalFetch = globalThis.fetch;
+    const originalWebSocket = globalThis.WebSocket;
+    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const sockets: MockWebSocket[] = [];
+    const { signing, authToken, enroll } = await prepareVerifiedAuth();
+    // Instant reconnect backoff so the second session opens immediately.
+    const restoreClientTime = installClientTimeSource({
+      delay: () => Promise.resolve(),
+    });
+
+    class TrackingWebSocket extends MockWebSocket {
+      constructor(url: string, options?: unknown) {
+        super(url, options);
+        sockets.push(this);
+      }
+    }
+
+    Object.defineProperty(globalThis, "WebSocket", {
+      configurable: true,
+      writable: true,
+      value: TrackingWebSocket,
+    });
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      writable: true,
+      value: async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/api/health")) {
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        if (url.endsWith("/api/daemon/v1/jwks.json")) {
+          return jwksResponse(signing);
+        }
+        if (url.endsWith("/api/daemon/v1/auth/challenge")) {
+          const raw = init?.body ? await new Response(init.body).text() : "{}";
+          const body = JSON.parse(raw) as { serverId?: string; keyId?: string };
+          const scope = body.serverId && body.keyId ? "auth" : "enroll";
+          return new Response(
+            JSON.stringify({
+              challengeId: `${scope}-challenge`,
+              nonce: `${scope}-nonce`,
+              at: new Date().toISOString(),
+              expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.endsWith("/api/daemon/v1/enroll")) {
+          return new Response(JSON.stringify(enroll), { status: 200 });
+        }
+        if (url.endsWith("/api/daemon/v1/auth/session")) {
+          return new Response(
+            JSON.stringify({
+              token: authToken,
+              expiresAt: new Date(Date.now() + 900_000).toISOString(),
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(JSON.stringify({ error: "not found" }), {
+          status: 404,
+        });
+      },
+    });
+
+    Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", tempDir);
+    Deno.env.set("TURBOPANEL_FORCE_ENROLL", "1");
+    await Deno.writeTextFile(`${tempDir}/license.id`, "license-123\n");
+    await Deno.writeTextFile(`${tempDir}/license.token`, "token-abc\n");
+
+    const modes: Array<string | undefined> = [];
+    const client = new InstanceClient({
+      config: {
+        kind: "url",
+        baseUrl: "https://instance.test",
+        wsBaseUrl: "wss://instance.test",
+      },
+      metricsCollectorFactory: () => ({
+        collect(options: { sequence: number; collectionMode?: string }) {
+          modes.push(options.collectionMode);
+          return Promise.resolve({
+            supported: true as const,
+            // Shape-only stub: the sink POST is stubbed to 404 and ignored.
+            sample: {
+              type: "metrics",
+              sequence: options.sequence,
+            } as unknown as import("../metrics/contract.ts").HostMetricsSample,
+          });
+        },
+      }),
+    });
+
+    try {
+      client.start();
+      const socket = await waitFor(
+        "live-lease websocket",
+        () => sockets.at(0),
+      );
+      socket.open();
+      await flushMicrotasks();
+
+      // First scheduled collect runs at baseline before any lease exists.
+      await waitFor("first collect", () => modes.length >= 1 || undefined);
+      assertEquals(modes[0], "baseline");
+
+      const farFuture = new Date(Date.now() + 3_600_000).toISOString();
+      socket.receive({
+        type: "metrics-live-start",
+        id: "live-1",
+        leaseId: "lease-a",
+        intervalSeconds: 10,
+        expiresAt: farFuture,
+        at: new Date().toISOString(),
+      });
+      const startResult = await waitFor(
+        "metrics-live-start-result",
+        () => lastFrameOfType(socket, "metrics-live-start-result"),
+      ) as { id?: string; ok?: boolean };
+      assertEquals(startResult.id, "live-1");
+      assertEquals(startResult.ok, true);
+
+      socket.receive({
+        type: "metrics-live-stop",
+        id: "stop-1",
+        leaseId: "lease-a",
+        at: new Date().toISOString(),
+      });
+      const stopResult = await waitFor(
+        "metrics-live-stop-result",
+        () => lastFrameOfType(socket, "metrics-live-stop-result"),
+      ) as { id?: string; ok?: boolean };
+      assertEquals(stopResult.id, "stop-1");
+      assertEquals(stopResult.ok, true);
+
+      // A start with an already-past expiry must be rejected (no silent
+      // renewal into live mode).
+      socket.receive({
+        type: "metrics-live-start",
+        id: "live-bad",
+        leaseId: "lease-bad",
+        intervalSeconds: 10,
+        expiresAt: new Date(Date.now() - 1_000).toISOString(),
+        at: new Date().toISOString(),
+      });
+      const badResult = await waitFor(
+        "rejected metrics-live-start-result",
+        () => {
+          const frame = lastFrameOfType(socket, "metrics-live-start-result") as
+            | { id?: string }
+            | undefined;
+          return frame?.id === "live-bad" ? frame : undefined;
+        },
+      ) as { ok?: boolean; error?: string };
+      assertEquals(badResult.ok, false);
+      assert(typeof badResult.error === "string");
+
+      // Sensor / hosting-path overrides push writes the daemon state files.
+      socket.receive({
+        type: "metrics-sensor-overrides-update",
+        id: "ovr-1",
+        overrides: {
+          cpuTemperature: "coretemp:Package id 0",
+          hostingPath: "/mnt/hosting",
+        },
+        at: new Date().toISOString(),
+      });
+      const overridesResult = await waitFor(
+        "metrics-sensor-overrides-update-result",
+        () => lastFrameOfType(socket, "metrics-sensor-overrides-update-result"),
+      ) as { id?: string; ok?: boolean };
+      assertEquals(overridesResult.id, "ovr-1");
+      assertEquals(overridesResult.ok, true);
+      const sensorFile = JSON.parse(
+        await Deno.readTextFile(`${tempDir}/metrics/sensor-overrides.json`),
+      ) as { cpuTemperature?: string };
+      assertEquals(sensorFile.cpuTemperature, "coretemp:Package id 0");
+      const hostingFile = JSON.parse(
+        await Deno.readTextFile(`${tempDir}/metrics/hosting-path.json`),
+      ) as { path?: string };
+      assertEquals(hostingFile.path, "/mnt/hosting");
+
+      // A clear whose delete fails (non-empty directory squatting on the
+      // override path → not NotFound) must report ok:false so the control
+      // plane sees the stale hosting path is still in effect.
+      await Deno.remove(`${tempDir}/metrics/hosting-path.json`);
+      await Deno.mkdir(`${tempDir}/metrics/hosting-path.json`);
+      await Deno.writeTextFile(
+        `${tempDir}/metrics/hosting-path.json/blocker`,
+        "x",
+      );
+      socket.receive({
+        type: "metrics-sensor-overrides-update",
+        id: "ovr-2",
+        overrides: { cpuTemperature: "coretemp:Package id 0" },
+        at: new Date().toISOString(),
+      });
+      const failedClearResult = await waitFor(
+        "failed metrics-sensor-overrides-update-result",
+        () => {
+          const frame = lastFrameOfType(
+            socket,
+            "metrics-sensor-overrides-update-result",
+          ) as { id?: string; ok?: boolean; error?: string } | undefined;
+          return frame?.id === "ovr-2" ? frame : undefined;
+        },
+      );
+      assertEquals(failedClearResult.ok, false);
+      assert(typeof failedClearResult.error === "string");
+      await Deno.remove(`${tempDir}/metrics/hosting-path.json`, {
+        recursive: true,
+      });
+
+      // Leave a live lease running, then drop the socket: the reconnect must
+      // build a fresh LiveLeaseManager, so the next session collects at
+      // baseline even though the old lease never expired or stopped.
+      socket.receive({
+        type: "metrics-live-start",
+        id: "live-2",
+        leaseId: "lease-b",
+        intervalSeconds: 10,
+        expiresAt: farFuture,
+        at: new Date().toISOString(),
+      });
+      await waitFor(
+        "second metrics-live-start-result",
+        () => {
+          const frame = lastFrameOfType(socket, "metrics-live-start-result") as
+            | { id?: string; ok?: boolean }
+            | undefined;
+          return frame?.id === "live-2" && frame.ok === true
+            ? frame
+            : undefined;
+        },
+      );
+
+      const modesBefore = modes.length;
+      socket.close(1000, "connection lost");
+
+      const socket2 = await waitFor(
+        "reconnect websocket",
+        () => sockets.at(1),
+        5_000,
+      );
+      socket2.open();
+      await flushMicrotasks();
+      await waitFor(
+        "first collect after reconnect",
+        () => modes.length > modesBefore || undefined,
+        5_000,
+      );
+      // Fresh lease manager: baseline despite the unexpired lease-b.
+      assertEquals(modes[modesBefore], "baseline");
+    } finally {
+      client.stop();
+      restoreClientTime();
+      Object.defineProperty(globalThis, "fetch", {
+        configurable: true,
+        writable: true,
+        value: originalFetch,
+      });
+      Object.defineProperty(globalThis, "WebSocket", {
+        configurable: true,
+        writable: true,
+        value: originalWebSocket,
+      });
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+      await Deno.remove(tempDir, { recursive: true });
     }
   },
 });

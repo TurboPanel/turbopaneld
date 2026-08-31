@@ -10,7 +10,6 @@ import {
   ANSIBLE_PLAYBOOK_BIN,
   ANSIBLE_PLAYBOOK_CWD,
   CACHE_DIR,
-  CLICKHOUSE_VERSION,
   CLOUDFLARED_CURRENT_DIR,
   DAEMON_ROOT,
   DEFAULT_DAEMON_ROOT,
@@ -852,23 +851,6 @@ test("deno-runtime prunes superseded vendored versions", () => {
       "deno-runtime must remove superseded version directories",
     );
   }
-});
-
-test("CLICKHOUSE_VERSION matches the clickhouse Ansible role default", () => {
-  const roleDefaults = join(
-    fromMeta,
-    "orchestration",
-    "roles",
-    "clickhouse",
-    "defaults",
-    "main.yml",
-  );
-  const yaml = Deno.readTextFileSync(roleDefaults);
-  const match = yaml.match(/^\s*clickhouse_version:\s*["']?([\d.]+)["']?\s*$/m);
-  if (!match) {
-    throw new Error(`could not read clickhouse_version from ${roleDefaults}`);
-  }
-  assertEquals(match[1], CLICKHOUSE_VERSION, "clickhouse_version role default");
 });
 
 test("ANSIBLE_CORE_VERSION matches the ansible-core pin in requirements.txt", () => {

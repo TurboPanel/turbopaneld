@@ -312,6 +312,28 @@ test("parseEnvironmentDeployPayload rejects principalMaterial field errors", () 
     },
     "Invalid environment deploy principalMaterial sshKeys",
   );
+  // Anything but a sha512-crypt hash is refused — a plaintext, a colon, or a
+  // newline here would otherwise land in `/etc/shadow` via `chpasswd -e`.
+  for (
+    const passwordHash of [
+      "hunter2",
+      `$1$old$${"a".repeat(22)}`,
+      `$6$saltstring$${"a".repeat(85)}`,
+      `$6$saltstring$${"a".repeat(86)}:x`,
+      `$6$saltstring$${"a".repeat(86)}\n`,
+    ]
+  ) {
+    rejectDeploy(
+      {
+        principalMaterial: [{
+          principalId: PRINCIPAL_ID,
+          username: "deploy_user",
+          passwordHash,
+        }],
+      },
+      "Invalid environment deploy principalMaterial passwordHash",
+    );
+  }
 });
 
 test("parsePrincipalsReconcilePayload rejects malformed principal grants", () => {
@@ -329,6 +351,18 @@ test("parsePrincipalsReconcilePayload rejects malformed principal grants", () =>
     TypeError,
     "Invalid environment deploy principalMaterial runtimes entry",
   );
+});
+
+test("parsePrincipalsReconcilePayload round-trips a password hash", () => {
+  const passwordHash = `$6$rounds=100000$saltstring$${"a".repeat(86)}`;
+  const payload = parsePrincipalsReconcilePayload({
+    principals: [{
+      principalId: PRINCIPAL_ID,
+      username: "deploy_user",
+      passwordHash,
+    }],
+  });
+  assertEquals(payload.principals[0].passwordHash, passwordHash);
 });
 
 test("parseEnvironmentDeployPayload rejects sites engine cron and sourceKind", () => {

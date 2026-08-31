@@ -199,11 +199,14 @@ export const DEFAULT_START_SCRIPT = "server.js";
 export function resolveExecStart(params: {
   nodeBinary: string;
   startCommand?: string;
+  /** Replaces {@link DEFAULT_START_SCRIPT}; an explicit `startCommand` wins. */
+  startupFile?: string;
 }): string {
   if (params.startCommand && params.startCommand.trim().length > 0) {
     return `/bin/sh -c ${quoteSystemdArgument(params.startCommand.trim())}`;
   }
-  return `${params.nodeBinary} ${DEFAULT_START_SCRIPT}`;
+  const script = params.startupFile?.trim() || DEFAULT_START_SCRIPT;
+  return `${params.nodeBinary} ${script}`;
 }
 
 /** systemd's escape for a `'` embedded in a single-quoted argument. */
@@ -266,6 +269,7 @@ export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
     ...(opts.startCommand === undefined
       ? {}
       : { startCommand: opts.startCommand }),
+    ...(app.startupFile === undefined ? {} : { startupFile: app.startupFile }),
   });
 
   const lines = [
@@ -282,7 +286,7 @@ export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
     `Group=${group}`,
     `Slice=${principalSliceName(username)}`,
     `WorkingDirectory=${workingDir}`,
-    `Environment=NODE_ENV=production`,
+    `Environment=NODE_ENV=${app.appMode ?? "production"}`,
     `Environment=PORT=${app.listenPort}`,
     `Environment=HOST=127.0.0.1`,
     `Environment=HOME=${home}`,

@@ -18,7 +18,7 @@
  *
  * Docker Galaxy (`geerlingguy.docker`) is not part of bootstrap — call
  * {@link ensureGalaxyDockerRole} before any playbook that pulls in the docker
- * role (dev converge, docker/postgres/rabbitmq/clickhouse setup). Same gate as
+ * role (dev converge, docker/postgres/rabbitmq setup). Same gate as
  * production `runDockerSetup` / `runPostgresSetup` / `runRabbitmqSetup`.
  */
 import { join } from "@std/path";
@@ -52,7 +52,6 @@ export const PLAYBOOKS_NEEDING_DOCKER_GALAXY = new Set([
   "docker-setup.yml",
   "postgres-setup.yml",
   "rabbitmq-setup.yml",
-  "clickhouse-setup.yml",
 ]);
 
 /**
@@ -193,10 +192,6 @@ export function optionalDevServiceExtraArgs(
     `turbopanel_optional_redis_insight=${
       optionalDevServiceFlag("TURBOPANEL_OPTIONAL_REDIS_INSIGHT", false, env)
     }`,
-    "-e",
-    `turbopanel_optional_tabix=${
-      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_TABIX", false, env)
-    }`,
   ];
 }
 
@@ -308,7 +303,7 @@ export async function runInstanceDevInstall(
 
   // Sync orchestration venv packages (ansible-lint for IDE linting, etc.) before converge.
   await deps.ensureAnsible();
-  // Dev converge always pulls Docker (postgres/redis/rabbitmq/clickhouse/…);
+  // Dev converge always pulls Docker (postgres/redis/rabbitmq/…);
   // fetch the Galaxy docker role only now — not during orchestration bootstrap.
   await deps.ensureGalaxyDockerRole();
 

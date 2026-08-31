@@ -45,8 +45,13 @@ import type {
 } from "../../instance/commands/contracts.ts";
 import type { DecryptSecretsFn } from "../materialize-tls.ts";
 import type { RunFn } from "../ensure-principal.ts";
+import { dirname } from "@std/path";
 import { checkoutRelease, type ReleaseOutputHandler } from "./checkout.ts";
 import { prepareNativeAppBuildOutput, runReleaseBuild } from "./build.ts";
+import {
+  nativeAppNodeBinary,
+  resolveNativeAppNodeVersion,
+} from "../native/unit.ts";
 import {
   ensureBuildkitRailpack,
   railpackCacheDir,
@@ -562,6 +567,7 @@ async function buildRailpackRelease(
  * project principal's home and prune what it superseded.
  */
 async function buildNativeRelease(
+  layout: LayoutPaths,
   payload: EnvironmentDeployPayload,
   entry: EnvironmentDeploySource,
   paths: ReleasePaths,
@@ -574,6 +580,7 @@ async function buildNativeRelease(
 ): Promise<AppliedRelease> {
   const { deps, onOutput, serviceId, username } = params;
   const { logSink } = deps;
+  const nativeApp = nativeAppForService(payload, entry.composeServiceName);
 
   await (deps.ensureReleaseTreeFn ?? ensureReleaseTree)(
     paths,
@@ -587,16 +594,27 @@ async function buildNativeRelease(
 
     logSink.setPhase(COMMAND_LOG_PHASES.BUILD);
     const buildWorkingDir = buildWorkingDirFor(entry, checkout.workingDir);
-    await (deps.runReleaseBuildFn ?? runReleaseBuild)({
+    await (deps.runReleaseBuildFn ?? runReleaseBuild)(definedFields({
       build: entry.build,
       workingDir: buildWorkingDir,
+      // A native app builds with its own runtime on PATH and its declared
+      // NODE_ENV, so the derived install command and the build both run on
+      // the series the app will execute on.
+      nativeRuntime: nativeApp
+        ? {
+          nodeBinDir: dirname(nativeAppNodeBinary(
+            layout,
+            resolveNativeAppNodeVersion(nativeApp),
+          )),
+          nodeEnv: nativeApp.appMode ?? "production",
+        }
+        : undefined,
       onOutput,
-      redactSummary: (text) => logSink.redactSummary(text),
-    });
+      redactSummary: (text: string) => logSink.redactSummary(text),
+    }));
 
     // An operator-declared `outputDirectory` always wins: they said where the
     // payload is, and second-guessing that would make the field a suggestion.
-    const nativeApp = nativeAppForService(payload, entry.composeServiceName);
     const nativeOutput = nativeApp && entry.build.outputDirectory === undefined
       ? await (deps.prepareNativeAppBuildOutputFn ??
         prepareNativeAppBuildOutput)({
@@ -766,7 +784,7 @@ async function applyOneRelease(
       `release for ${entry.composeServiceName} lost its principal`,
     );
   }
-  return await buildNativeRelease(payload, entry, paths, {
+  return await buildNativeRelease(layout, payload, entry, paths, {
     serviceId,
     username: principal.username,
     deps,

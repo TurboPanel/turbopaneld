@@ -191,10 +191,6 @@ function optionalDevServiceExtraArgs(): string[] {
     `turbopanel_optional_redis_insight=${
       optionalDevServiceFlag("TURBOPANEL_OPTIONAL_REDIS_INSIGHT", false)
     }`,
-    "-e",
-    `turbopanel_optional_tabix=${
-      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_TABIX", false)
-    }`,
   ];
 }
 
@@ -864,7 +860,7 @@ export async function runInstanceDevInstall(
 
   const layout = await requireDevOrchestrationLayout();
   const args = devInstanceExtraArgs();
-  // Dev converge pulls Docker (postgres/redis/rabbitmq/clickhouse/…); fetch the
+  // Dev converge pulls Docker (postgres/redis/rabbitmq/…); fetch the
   // Galaxy docker role only now, not during orchestration bootstrap.
   await ensureGalaxyDockerRole();
   logInfo(
@@ -1015,14 +1011,6 @@ export async function runRabbitmqSetup(
   await runLocalPlaybook(RABBITMQ_PLAYBOOK, [], onEvent);
   logInfo("orchestration", "rabbitmq-setup complete");
 }
-
-/**
- * ClickHouse setup is deferred: co-located dev installs it via the
- * dev-converge-manifest.json role list (same as postgres/redis/rabbitmq).
- * There is no discrete runClickHouseSetup() step here unless a managed
- * daemon-only-host use case is confirmed — use CLICKHOUSE_PLAYBOOK /
- * playbooks/clickhouse-setup.yml for that future path.
- */
 
 /**
  * Bootstrap orchestration runtime tools (uv, Python, ansible, Galaxy collections).

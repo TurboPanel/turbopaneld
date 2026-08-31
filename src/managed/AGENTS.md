@@ -329,13 +329,14 @@ ProxySQL to enforce. Canonical policy:
    always the stable platform admin the daemon uses for every internal admin
    path (`waitReady`, `psql`/`mysql` exec, `pg_dump`/`pg_restore`,
    promote/replication health). The user-facing "root" principal an operator
-   connects with may be a *different*, possibly org-suffixed username
-   (`resolveAvailableManagedRootUsername` in the instance repo) — it is
+   connects with is always a *different*, org-suffixed username
+   (`postgres_<11 rand>` / `root_<11 rand>` via `resolveManagedAppliedUsername`
+   in the instance repo — the bare engine admin name is never exposed) — it is
    applied as an ordinary `role: "root"` credential in `applyCredentials`
    (a separate SUPERUSER/grant, not a rename of the connection identity).
    Never assume the payload's root credential username equals
    `ctx.rootUsername`. Canonical contract:
-   `../../turbopanel/src/lib/managed/AGENTS.md` → "Managed root username".
+   `../../turbopanel/src/lib/managed/AGENTS.md` → "Login namespace".
 10. **Backup/restore (`backup.ts`).** Optional per engine via
    `ManagedEngineRuntime.backup` (`ManagedBackupNotSupportedError` when absent).
    - **Stream, never buffer.** Dump stdout pipes to a `<backupId>.<ext>.part`

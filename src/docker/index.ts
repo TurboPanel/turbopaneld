@@ -5,6 +5,7 @@ export {
   type DockerClientOptions,
   type DockerEvent,
   type DockerFetch,
+  type DockerInfo,
   isStreamAbortError,
   parseEventLines,
   resolveDockerSocket,

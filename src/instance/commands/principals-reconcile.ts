@@ -75,6 +75,9 @@ export async function handlePrincipalsReconcile(
       ...(principal.accessGroups === undefined
         ? {}
         : { accessGroups: principal.accessGroups }),
+      ...(principal.passwordHash === undefined
+        ? {}
+        : { passwordHash: principal.passwordHash }),
     })),
   );
 

@@ -3,7 +3,9 @@ import {
   hostDockerFromVersions,
   parseComposeVersion,
   parseDockerCliVersion,
+  parseDockerDataRoot,
   readDocker,
+  resolveDockerDataRoot,
 } from "./docker.ts";
 
 /**
@@ -320,4 +322,78 @@ test({
       Deno.statSync = originalStat;
     }
   },
+});
+
+test("parseDockerDataRoot accepts absolute paths and rejects garbage", () => {
+  assertEquals(parseDockerDataRoot("/var/lib/docker\n"), "/var/lib/docker");
+  assertEquals(parseDockerDataRoot("/mnt/docker-data"), "/mnt/docker-data");
+  assertEquals(parseDockerDataRoot("relative/path"), undefined);
+  assertEquals(parseDockerDataRoot(""), undefined);
+  assertEquals(parseDockerDataRoot("/var/lib/docker extra"), undefined);
+});
+
+test("parseDockerDataRoot maps the docker-info fixtures", () => {
+  const fixture = (name: string) =>
+    Deno.readTextFileSync(
+      new URL(
+        `../metrics/collector/testdata/${name}`,
+        import.meta.url,
+      ),
+    );
+  assertEquals(
+    parseDockerDataRoot(fixture("docker-info-root.txt")),
+    "/var/lib/docker",
+  );
+  assertEquals(
+    parseDockerDataRoot(fixture("docker-info-dedicated-mount.txt")),
+    "/mnt/docker-data",
+  );
+});
+
+test("resolveDockerDataRoot reads DockerRootDir from the Engine API", async () => {
+  assertEquals(
+    await resolveDockerDataRoot({
+      info: () => Promise.resolve({ DockerRootDir: "/var/lib/docker" }),
+    }),
+    "/var/lib/docker",
+  );
+  assertEquals(
+    await resolveDockerDataRoot({
+      info: () => Promise.resolve({ DockerRootDir: "/mnt/docker-data" }),
+    }),
+    "/mnt/docker-data",
+  );
+});
+
+test("resolveDockerDataRoot returns undefined when the daemon is unreachable", async () => {
+  assertEquals(
+    await resolveDockerDataRoot({
+      info: () => Promise.reject(new Error("socket down")),
+    }),
+    undefined,
+  );
+});
+
+test("resolveDockerDataRoot sanitizes malformed DockerRootDir values", async () => {
+  assertEquals(
+    await resolveDockerDataRoot({
+      info: () => Promise.resolve({ DockerRootDir: "relative/path" }),
+    }),
+    undefined,
+  );
+  assertEquals(
+    await resolveDockerDataRoot({
+      info: () => Promise.resolve({}),
+    }),
+    undefined,
+  );
+  assertEquals(
+    await resolveDockerDataRoot({
+      info: () =>
+        Promise.resolve(
+          { DockerRootDir: 42 } as unknown as { DockerRootDir?: string },
+        ),
+    }),
+    undefined,
+  );
 });

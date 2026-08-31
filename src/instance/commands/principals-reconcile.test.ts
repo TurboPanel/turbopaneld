@@ -44,6 +44,7 @@ test("handlePrincipalsReconcile maps optional fields and defaults ssh keys", asy
           runtimes: [{ runtime: "php", series: "8.4" }],
           accessGroups: ["tpshell"],
           sshKeys: ["ssh-ed25519 AAAA"],
+          passwordHash: `$6$saltstring$${"a".repeat(86)}`,
         },
         {
           principalId: "p2",
@@ -77,7 +78,10 @@ test("handlePrincipalsReconcile maps optional fields and defaults ssh keys", asy
     shell: "/bin/bash",
     runtimes: [{ runtime: "php", series: "8.4" }],
     accessGroups: ["tpshell"],
+    passwordHash: `$6$saltstring$${"a".repeat(86)}`,
   });
+  // No passwordHash on carol: `ensureSystemPrincipals` reads that as "locked",
+  // which is the state her account was created in.
   assertEquals(ensured[0][1], {
     principalId: "p2",
     username: "carol",

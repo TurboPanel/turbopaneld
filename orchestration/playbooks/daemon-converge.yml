@@ -2,12 +2,6 @@
 # Single convergence playbook for managed daemon-only hosts (no co-located
 # instance). Gathers facts once and runs shared infrastructure roles without
 # overlapping docker/redis/rabbitmq/postgres playbook invocations.
-#
-# ClickHouse is intentionally omitted here (same boundary as Postgres/Redis/
-# RabbitMQ): daemon-only hosts do not run the co-located instance metrics
-# store. ClickHouse is installed via the co-located dev converge manifest
-# (dev-converge-manifest.json → instance-dev-install) or the standalone
-# clickhouse-setup.yml playbook on control-plane hosts that need it.
 - name: TurboPanel daemon converge
   hosts: localhost
   connection: local

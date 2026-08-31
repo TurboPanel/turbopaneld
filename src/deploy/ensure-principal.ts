@@ -43,6 +43,16 @@ export type PrincipalEnsureSpec = {
    * case the second check is for.
    */
   sshKeys?: readonly string[];
+  /**
+   * sha512-crypt shadow hash for password sign-in. Present means "the shadow
+   * entry must be exactly this"; absent **locks** the account password, which
+   * is the state `useradd` created it in — so an old payload converges on the
+   * status quo rather than revoking something it never knew about.
+   *
+   * Re-validated before it reaches `chpasswd -e`, same doctrine as `shell`:
+   * this string lands in `/etc/shadow`.
+   */
+  passwordHash?: string;
 };
 
 export const DEFAULT_PRINCIPAL_SHELL = "/usr/sbin/nologin";
@@ -67,6 +77,16 @@ export const ALLOWED_PRINCIPAL_SHELLS: readonly string[] = [
 ];
 
 const PRINCIPAL_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
+
+/**
+ * sha512-crypt only — the one format the control plane emits. Anchored and
+ * colon/newline-free by construction, so a value that passes cannot smuggle a
+ * second `/etc/shadow` field through `chpasswd -e`. Keep in sync with the wire
+ * gate in `../instance/commands/contracts.ts` and the instance's
+ * `src/lib/sha512-crypt.ts`.
+ */
+const PASSWORD_HASH_RE =
+  /^\$6\$(?:rounds=\d{4,9}\$)?[./0-9A-Za-z]{8,16}\$[./0-9A-Za-z]{86}$/;
 /**
  * Cap so `${username}-grp` fits the Linux 32-char group-name limit.
  * Keep in sync with instance `MAX_PRINCIPAL_USERNAME_LENGTH`.
@@ -90,6 +110,12 @@ export type RunResult = {
 export type RunFn = (
   command: string,
   args: string[],
+  /**
+   * Bytes piped to the child's stdin. Exists for `chpasswd -e`, where the
+   * shadow hash must never appear in an argv another process could read via
+   * `ps`; everything else leaves it unset.
+   */
+  stdin?: string,
 ) => Promise<RunResult>;
 
 const decoder = new TextDecoder();
@@ -97,13 +123,20 @@ const decoder = new TextDecoder();
 async function runDefault(
   command: string,
   args: string[],
+  stdin?: string,
 ): Promise<RunResult> {
-  const result = await new Deno.Command(command, {
+  const spawned = new Deno.Command(command, {
     args,
-    stdin: "null",
+    stdin: stdin === undefined ? "null" : "piped",
     stdout: "piped",
     stderr: "piped",
-  }).output();
+  }).spawn();
+  if (stdin !== undefined) {
+    const writer = spawned.stdin.getWriter();
+    await writer.write(new TextEncoder().encode(stdin));
+    await writer.close();
+  }
+  const result = await spawned.output();
   return {
     success: result.success,
     stdout: decoder.decode(result.stdout).trim(),
@@ -343,6 +376,83 @@ async function ensurePrincipalUser(
   }
 }
 
+/**
+ * Current `/etc/shadow` password field for one account, or `null` when it
+ * cannot be read. Read via `getent shadow` rather than parsing the file so NSS
+ * stays the authority on where shadow data actually lives.
+ */
+async function currentShadowPasswordField(
+  username: string,
+  runFn: RunFn,
+): Promise<string | null> {
+  const result = await runFn("sudo", [
+    "-n",
+    "getent",
+    "shadow",
+    "--",
+    username,
+  ]);
+  if (!result.success) return null;
+  const fields = result.stdout.split(":");
+  return fields.length >= 2 ? fields[1] : null;
+}
+
+/** Locked (`!`, `!<hash>`) or no-password (`*`) shadow field. */
+function isLockedShadowPasswordField(field: string): boolean {
+  return field.startsWith("!") || field === "*";
+}
+
+/**
+ * Reconcile one account's shadow entry to the desired hash — or to locked when
+ * there is none.
+ *
+ * The hash travels over stdin (`chpasswd -e`), never argv: an argv is world-
+ * readable via `ps` for the life of the process, and a shadow hash is exactly
+ * the thing `/etc/shadow` is mode 0640 to protect. Locking uses `usermod -p !`
+ * (the state `useradd` creates), so disabling password sign-in discards the
+ * old hash rather than keeping a credential on file that nothing displays —
+ * the control plane holds the hash and re-sends it if sign-in is re-enabled.
+ *
+ * A shadow entry that cannot be read fails **closed**: with a hash to set the
+ * write happens anyway (it is idempotent), and with none the account is locked
+ * anyway — the one wrong answer would be leaving an unknown password live.
+ */
+export async function ensurePrincipalPassword(
+  username: string,
+  passwordHash: string | undefined,
+  runFn: RunFn = runDefault,
+): Promise<void> {
+  const current = await currentShadowPasswordField(username, runFn);
+
+  if (passwordHash !== undefined) {
+    if (!PASSWORD_HASH_RE.test(passwordHash)) {
+      throw new TypeError(`Invalid principal password hash for ${username}`);
+    }
+    if (current === passwordHash) return;
+    const result = await runFn(
+      "sudo",
+      ["-n", "chpasswd", "-e"],
+      `${username}:${passwordHash}\n`,
+    );
+    if (!result.success) {
+      throw new Error(
+        result.stderr || `Failed to set password for ${username}`,
+      );
+    }
+    return;
+  }
+
+  if (current !== null && isLockedShadowPasswordField(current)) return;
+  // A failed lock is loud for the same reason a failed group revoke is: a
+  // password that silently outlives its revocation is a security problem.
+  const result = await runFn("sudo", ["-n", "usermod", "-p", "!", username]);
+  if (!result.success) {
+    throw new Error(
+      result.stderr || `Failed to lock password for ${username}`,
+    );
+  }
+}
+
 async function ensurePrincipalHomeTree(
   home: string,
   username: string,
@@ -396,6 +506,11 @@ export async function ensureSystemPrincipals(
     await ensurePrincipalManagedGroups(
       principal.username,
       resolveManagedGroups(principal),
+      runFn,
+    );
+    await ensurePrincipalPassword(
+      principal.username,
+      principal.passwordHash,
       runFn,
     );
   }

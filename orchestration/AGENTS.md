@@ -172,8 +172,3 @@ ownership/mode, and the templated env lines.
 ### System services Compose stack (`system-compose`)
 
 Moved to `roles/system-compose/AGENTS.md`.
-
-### ClickHouse (self-hosted analytics)
-
-Moved to `roles/clickhouse/AGENTS.md` — role, idle-CPU tuning, app-user
-grants, dev-only Tabix GUI.

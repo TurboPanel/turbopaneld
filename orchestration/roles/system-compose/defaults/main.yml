@@ -1,20 +1,20 @@
 ---
-# Consolidates postgres/rabbitmq/clickhouse into one Docker Compose project
-# (turbopanel-system) instead of three independently `docker run` containers
+# Consolidates postgres/rabbitmq into one Docker Compose project
+# (turbopanel-system) instead of independently `docker run` containers
 # each with its own systemd unit. This role is self-sufficient for secrets
-# (it slurps the password files the postgres/rabbitmq/clickhouse roles
+# (it slurps the password files the postgres/rabbitmq roles
 # generate directly) but relies on those roles' OWN defaults (image, volume/
 # container names, uid/gid, ports, users, …) already being loaded into play
-# scope — i.e. it must run in the same play, after whichever of those three
+# scope — i.e. it must run in the same play, after whichever of those
 # roles are included. It renders a service only when that service's secret
-# file exists, so it works whether all three ran, or only one (see the
-# standalone postgres-setup.yml / rabbitmq-setup.yml / clickhouse-setup.yml
+# file exists, so it works whether both ran, or only one (see the
+# standalone postgres-setup.yml / rabbitmq-setup.yml
 # playbooks, which each add this role after their single service role).
 system_compose_project_name: turbopanel-system
 system_compose_dir: "{{ turbopanel_config_dir }}/system"
 system_compose_service_name: turbopanel-system-stack
 # Shared vars other roles also redefine defensively (noqa: this role can be
-# invoked without postgres/rabbitmq/clickhouse having run, e.g. bare `docker`
+# invoked without postgres/rabbitmq having run, e.g. bare `docker`
 # + `system-compose`, and still needs these to resolve the config directory).
 turbopanel_docker_network: turbopanel  # noqa: var-naming[no-role-prefix]
 turbopanel_config_dir: /etc/turbopanel  # noqa: var-naming[no-role-prefix]

@@ -519,6 +519,9 @@ async function ensureDeployPrincipals(
       ...(principal.accessGroups === undefined
         ? {}
         : { accessGroups: principal.accessGroups }),
+      ...(principal.passwordHash === undefined
+        ? {}
+        : { passwordHash: principal.passwordHash }),
     })),
   );
 

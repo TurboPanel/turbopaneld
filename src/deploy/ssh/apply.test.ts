@@ -331,6 +331,7 @@ test("the drop-in sets no global directive before its first Match", () => {
   const contents = sshdDropInContent({
     sftpGroup: "tpsftp",
     shellGroup: "tpshell",
+    passwordGroup: "tppasswd",
   });
   const directives = contents.split("\n").map((line) => line.trim()).filter(
     (line) => line.length > 0 && !line.startsWith("#"),
@@ -339,6 +340,37 @@ test("the drop-in sets no global directive before its first Match", () => {
   // occurrence of most keywords — so a global here would override the
   // administrator's own value for the entire host.
   assert(directives[0].startsWith("Match Group "));
+});
+
+test("the password block precedes the level blocks and sets only one keyword", () => {
+  const contents = sshdDropInContent({
+    sftpGroup: "tpsftp",
+    shellGroup: "tpshell",
+    passwordGroup: "tppasswd",
+  });
+  const directives = contents.split("\n").map((line) => line.trim()).filter(
+    (line) => line.length > 0 && !line.startsWith("#"),
+  );
+
+  // When several Match blocks apply, sshd uses the FIRST instance of each
+  // keyword. The password block must come before the level blocks or its
+  // `yes` loses to their `no` — and it must set nothing else, because every
+  // other restriction has to keep coming from the member's level block.
+  assertEquals(directives[0], "Match Group tppasswd");
+  assertEquals(directives[1], "PasswordAuthentication yes");
+  assert(directives[2].startsWith("Match Group "));
+
+  // The level blocks still say no: an account NOT in the password group must
+  // not gain password sign-in from the host's global default.
+  const sftpStart = directives.indexOf("Match Group tpsftp");
+  const shellStart = directives.indexOf("Match Group tpshell");
+  const sftpBlock = directives.slice(sftpStart, shellStart);
+  const shellBlock = directives.slice(
+    shellStart,
+    directives.indexOf("Match all"),
+  );
+  assert(sftpBlock.includes("PasswordAuthentication no"));
+  assert(shellBlock.includes("PasswordAuthentication no"));
 });
 
 test("sshd reloads only when the drop-in changed, and never restarts", async () => {

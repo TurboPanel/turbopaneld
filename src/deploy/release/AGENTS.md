@@ -135,6 +135,31 @@ non-secret by contract — build secrets keep riding `variableMaterial[]` /
 host has it, degrading to an unwrapped run with a transcript note where it does
 not.
 
+**Native-app builds run on the tenant runtime.** When an entry belongs to a
+`nativeAppServices[]` row, `buildNativeRelease` hands `runReleaseBuild` a
+`nativeRuntime`: the vendored series' `bin/` leads `PATH` (so `node` / `npm` /
+`npx` / `corepack` all resolve to the series the app will execute on),
+`NODE_ENV` follows the app's `appMode` (default `production`) in the build
+exactly as in the generated unit, and Corepack caches under
+`<checkout>/.corepack` with its download prompt off — never in the daemon's own
+home, never blocking a build on a yes/no.
+
+A missing `installCommand` is then **derived** rather than skipped
+(`deriveNodeInstallCommand`): the operator's `build.packageManager` wins, else
+the lockfile decides (`pnpm-lock.yaml` > `yarn.lock` > `package-lock.json` >
+bare npm) — `corepack pnpm install --frozen-lockfile --prod=false`,
+`corepack yarn install --frozen-lockfile --production=false` for classic yarn,
+`npm ci --include=dev` / `npm install --include=dev`; the frozen flag is
+dropped when the chosen manager has no lockfile, and Yarn Berry (a
+`packageManager: yarn@2+` pin or a `.yarnrc.yml`) gets plain
+`corepack yarn install`, because Berry has no `--production` flag and `CI=1`
+already makes its install immutable. The dev-deps flags are load-bearing: the
+build runs under `NODE_ENV=production`, where npm, pnpm, and classic yarn
+silently omit `devDependencies` — which is where every build toolchain lives.
+An explicit `installCommand` always wins, no `package.json` derives nothing,
+and the transcript records a `derived install command …` line so the operator
+can see what ran.
+
 **Retention** — `retention.ts` keeps the newest `DEFAULT_RELEASE_RETENTION` (5)
 releases **plus whatever `current` resolves to**, even when that falls outside
 the newest N. A rollback re-points `current` at an older release; pruning it for

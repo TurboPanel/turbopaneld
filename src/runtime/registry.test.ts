@@ -41,9 +41,10 @@ test("isRuntimeName accepts only registry names", () => {
 test("accessGroup and allAccessGroups cover SSH levels", () => {
   assertEquals(accessGroup("sftp"), "tpsftp");
   assertEquals(accessGroup("shell"), "tpshell");
+  assertEquals(accessGroup("password"), "tppasswd");
   assertEquals(
     [...allAccessGroups()].sort((a, b) => a.localeCompare(b)),
-    ["tpsftp", "tpshell"],
+    ["tppasswd", "tpsftp", "tpshell"],
   );
 });
 
@@ -86,6 +87,7 @@ test("allRuntimeGroups and allManagedGroups are the containment sets", () => {
   assertEquals(managed, [
     "tpnode22",
     "tpnode24",
+    "tppasswd",
     "tpphp83",
     "tpphp84",
     "tpsftp",

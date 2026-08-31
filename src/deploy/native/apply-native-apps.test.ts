@@ -517,6 +517,49 @@ test("an explicit startCommand replaces the default ExecStart", async () => {
   }
 });
 
+test("an operator-disabled app is installed but stopped and disabled, never probed", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  let probes = 0;
+  const lines: string[] = [];
+  try {
+    const result = await applyNativeAppServices(
+      host.layout,
+      ENVIRONMENT_ID,
+      [makeApp({ enabled: false })],
+      {
+        ...applyOpts(host, mock),
+        probe: () => {
+          probes += 1;
+          return Promise.resolve(false);
+        },
+        onOutput: (_stream, line) => lines.push(line),
+      },
+    );
+    // A disabled app still counts as applied — down *is* the desired state.
+    assertEquals(result.applied, ["web"]);
+
+    // The unit file is still installed, so re-enabling later is a start, not
+    // a re-render.
+    const unit = await Deno.readTextFile(
+      nativeAppUnitPath("svc-web", host.unitDir),
+    );
+    assertStringIncludes(unit, `User=${USERNAME}`);
+
+    // `disable --now` instead of enable/restart; no probe, no rollback.
+    assertEquals(mock.systemctl("disable"), [nativeAppUnitName("svc-web")]);
+    assertEquals(mock.systemctl("enable"), []);
+    assertEquals(mock.systemctl("restart"), []);
+    assertEquals(probes, 0);
+    assertEquals(
+      lines.some((line) => line.includes("disabled by operator")),
+      true,
+    );
+  } finally {
+    await host.cleanup();
+  }
+});
+
 test("nativeAppBindingsFromPayload skips sources with no owning principal", () => {
   const payload = {
     environmentId: ENVIRONMENT_ID,

@@ -255,7 +255,10 @@ test("primary applyManagedEngineState drops users except the platform root", asy
   const dropped: string[][] = [];
   const payload = {
     engine: "postgres",
-    dropUsers: ["postgres", "orphan_user"],
+    // The exposed root credential (suffixed) must be protected alongside the
+    // static platform admin, even if it ever lands in dropUsers.
+    credentials: [{ username: "postgres_a1b2c3d4", role: "root" }],
+    dropUsers: ["postgres", "postgres_a1b2c3d4", "orphan_user"],
   } as unknown as ManagedApplyPayload;
   const engine = {
     rootUsername: "postgres",

@@ -216,11 +216,6 @@ export const RABBITMQ_PLAYBOOK = join(
   "playbooks",
   "rabbitmq-setup.yml",
 );
-export const CLICKHOUSE_PLAYBOOK = join(
-  ORCHESTRATION_DIR,
-  "playbooks",
-  "clickhouse-setup.yml",
-);
 export const SOCKET_DIRS_PLAYBOOK = join(
   ORCHESTRATION_DIR,
   "playbooks",
@@ -393,13 +388,6 @@ export function cloudflaredDownloadUrl(
  * - `TP_DENO_VERSION` in `scripts/run.sh`
  */
 export const DENO_VERSION = "2.9.6";
-
-/**
- * Pinned ClickHouse version — Docker image tag
- * (`clickhouse/clickhouse-server:<version>`). Keep in step with
- * `clickhouse_version` in `orchestration/roles/clickhouse/defaults/main.yml`.
- */
-export const CLICKHOUSE_VERSION = "26.5.5.8"; // NOSONAR typescript:S1313 — pinned ClickHouse semver, not an IP address
 
 /** Versioned directory where the Deno runtime is installed. */
 export const DENO_RUNTIME_DIR = join(RUNTIMES_DIR, "deno", DENO_VERSION);

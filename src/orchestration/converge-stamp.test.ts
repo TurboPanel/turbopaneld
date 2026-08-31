@@ -400,7 +400,7 @@ test("devConvergeEnvMaterial honors explicit static and workers overrides", () =
       "TURBOPANEL_UI_MODE",
       "TURBOPANEL_INSTANCE_RUN_MODE",
       "TURBOPANEL_INSTANCE_RUNTIME",
-      "TURBOPANEL_OPTIONAL_TABIX",
+      "TURBOPANEL_OPTIONAL_REDIS_INSIGHT",
     ]
   ) {
     previous.set(key, Deno.env.get(key));
@@ -408,13 +408,13 @@ test("devConvergeEnvMaterial honors explicit static and workers overrides", () =
   Deno.env.set("TURBOPANEL_UI_MODE", "static");
   Deno.env.set("TURBOPANEL_INSTANCE_RUN_MODE", "compiled");
   Deno.env.set("TURBOPANEL_INSTANCE_RUNTIME", "workers");
-  Deno.env.set("TURBOPANEL_OPTIONAL_TABIX", "yes");
+  Deno.env.set("TURBOPANEL_OPTIONAL_REDIS_INSIGHT", "yes");
   try {
     const material = devConvergeEnvMaterial();
     assertStringIncludes(material, "ui_mode=static");
     assertStringIncludes(material, "instance_run_mode=compiled");
     assertStringIncludes(material, "instance_runtime=workers");
-    assertStringIncludes(material, "optional_tabix=true");
+    assertStringIncludes(material, "optional_redis_insight=true");
   } finally {
     for (const [key, value] of previous.entries()) {
       if (value === undefined) {
@@ -436,7 +436,6 @@ test("devConvergeEnvMaterial parses optional flags and falls back on garbage", (
     "TURBOPANEL_OPTIONAL_MAILPIT",
     "TURBOPANEL_OPTIONAL_DBSTUDIO",
     "TURBOPANEL_OPTIONAL_REDIS_INSIGHT",
-    "TURBOPANEL_OPTIONAL_TABIX",
   ];
   const previous = new Map<string, string | undefined>();
   for (const key of keys) {
@@ -450,7 +449,6 @@ test("devConvergeEnvMaterial parses optional flags and falls back on garbage", (
   Deno.env.set("TURBOPANEL_OPTIONAL_MAILPIT", "no");
   Deno.env.set("TURBOPANEL_OPTIONAL_DBSTUDIO", "maybe");
   Deno.env.set("TURBOPANEL_OPTIONAL_REDIS_INSIGHT", "1");
-  Deno.env.set("TURBOPANEL_OPTIONAL_TABIX", "bogus");
   try {
     const material = devConvergeEnvMaterial();
     assertStringIncludes(material, "dev_user=vagrant");
@@ -461,7 +459,6 @@ test("devConvergeEnvMaterial parses optional flags and falls back on garbage", (
     assertStringIncludes(material, "optional_mailpit=false");
     assertStringIncludes(material, "optional_dbstudio=false");
     assertStringIncludes(material, "optional_redis_insight=true");
-    assertStringIncludes(material, "optional_tabix=false");
   } finally {
     for (const [key, value] of previous.entries()) {
       if (value === undefined) {

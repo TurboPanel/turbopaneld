@@ -133,6 +133,33 @@ test("resolveExecStart uses vendored node or sh -c for custom commands", () => {
   );
 });
 
+test("resolveExecStart honors startupFile unless a startCommand wins", () => {
+  assertEquals(
+    resolveExecStart({
+      nodeBinary: "/opt/node/bin/node",
+      startupFile: "dist/index.js",
+    }),
+    "/opt/node/bin/node dist/index.js",
+  );
+  // An explicit startCommand always wins over startupFile.
+  assertEquals(
+    resolveExecStart({
+      nodeBinary: "/opt/node/bin/node",
+      startCommand: "node dist/main.js",
+      startupFile: "dist/index.js",
+    }),
+    `/bin/sh -c ${quoteSystemdArgument("node dist/main.js")}`,
+  );
+  // A blank startupFile falls back to the default script.
+  assertEquals(
+    resolveExecStart({
+      nodeBinary: "/opt/node/bin/node",
+      startupFile: "   ",
+    }),
+    `/opt/node/bin/node ${DEFAULT_START_SCRIPT}`,
+  );
+});
+
 test("nativeAppUnitContent points WorkingDirectory at current and applies limits", () => {
   const content = nativeAppUnitContent({
     layout,
@@ -176,6 +203,37 @@ test("nativeAppUnitContent defaults ExecStart to vendored node when no startComm
   assertStringIncludes(
     content,
     `ExecStart=${nativeAppNodeBinary(layout, "22")} ${DEFAULT_START_SCRIPT}`,
+  );
+});
+
+test("nativeAppUnitContent sets NODE_ENV from appMode and defaults to production", () => {
+  const dev = nativeAppUnitContent({
+    layout,
+    app: { ...app, appMode: "development" },
+    username: "appuser",
+    environmentId: "env-1",
+  });
+  assertStringIncludes(dev, "Environment=NODE_ENV=development");
+
+  const prod = nativeAppUnitContent({
+    layout,
+    app,
+    username: "appuser",
+    environmentId: "env-1",
+  });
+  assertStringIncludes(prod, "Environment=NODE_ENV=production");
+});
+
+test("nativeAppUnitContent threads startupFile into ExecStart", () => {
+  const content = nativeAppUnitContent({
+    layout,
+    app: { ...app, nodeVersion: "22", startupFile: "dist/index.js" },
+    username: "appuser",
+    environmentId: "env-1",
+  });
+  assertStringIncludes(
+    content,
+    `ExecStart=${nativeAppNodeBinary(layout, "22")} dist/index.js`,
   );
 });
 

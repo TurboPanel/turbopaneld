@@ -456,7 +456,7 @@ Traefik and from managed-engine ProxySQL:
    inventory component is present. Engine containers never publish host ports
    and never get a per-managed Traefik project.
 4. **System stack (`turbopanel-system`)** — inspect-only, never self-healed.
-   PostgreSQL/RabbitMQ/ClickHouse are provisioned by the `system-compose`
+   PostgreSQL/RabbitMQ are provisioned by the `system-compose`
    Ansible role. `system.reconcile` only inspects (`selfHeal: none`).
 
 Adoption for hosting-ingress and system-stack rows requires the documented

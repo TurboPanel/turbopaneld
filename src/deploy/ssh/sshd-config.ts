@@ -48,6 +48,12 @@ export type SshdDropInOpts = {
   sftpGroup: string;
   /** Group whose members get an interactive shell. */
   shellGroup: string;
+  /**
+   * Group whose members may authenticate with a password. Additive: a member
+   * always also holds `sftpGroup` or `shellGroup`, which carry the rest of the
+   * tenant restrictions.
+   */
+  passwordGroup: string;
   /** Managed key directory; defaulted so tests can render against a temp tree. */
   authorizedKeysDir?: string;
 };
@@ -79,6 +85,13 @@ export function sshdDropInContent(opts: SshdDropInOpts): string {
     "# Only Match blocks, and no global directives: this file is included from",
     "# the top of sshd_config, so a global set here would override the",
     "# administrator's own value for the whole host.",
+    "",
+    // First on purpose: when several Match blocks apply, sshd uses the first
+    // instance of each keyword, so this block's `yes` wins over the `no` in
+    // the level blocks below for members of the password group — and only the
+    // one keyword. Everything else still comes from the member's level block.
+    `Match Group ${opts.passwordGroup}`,
+    "  PasswordAuthentication yes",
     "",
     `Match Group ${opts.sftpGroup}`,
     ...directives.map((line) => `  ${line}`),

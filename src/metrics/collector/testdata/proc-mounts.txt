@@ -1,0 +1,11 @@
+proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
+sysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0
+devtmpfs /dev devtmpfs rw,nosuid 0 0
+tmpfs /run tmpfs rw,nosuid,nodev 0 0
+/dev/sda1 / ext4 rw,relatime 0 0
+/dev/sdb1 /srv/users xfs rw,relatime 0 0
+/dev/nvme0n1p1 /mnt/docker-data ext4 rw,relatime 0 0
+/dev/loop0 /snap/core/1 squashfs ro,nodev,relatime 0 0
+overlay /var/lib/docker/overlay2/abc/merged overlay rw,relatime 0 0
+/dev/sda1 /var/lib/docker ext4 rw,relatime 0 0
+tmpfs /tmp tmpfs rw,nosuid,nodev 0 0

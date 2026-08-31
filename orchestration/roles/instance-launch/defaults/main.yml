@@ -56,6 +56,12 @@ turbopanel_ui_config_dir: "{{ turbopanel_state_dir }}/ui/.config"
 turbopanel_website_config_dir: "{{ turbopanel_state_dir }}/website/.config"
 # Persistent daemon state always lives under /var/lib/turbopanel.
 turbopanel_daemon_state_dir: "{{ turbopanel_state_dir }}"
+# DuckDB metrics store root — matches instance resolveMetricsDir.
+turbopanel_metrics_dir: "{{ turbopanel_state_dir }}/metrics"
+# Vendored libduckdb.so: `deno compile` self-extracts the duckdb.node addon but
+# not this companion shared library, so the compiled instance loads it from the
+# vendor tree via LD_LIBRARY_PATH (source mode resolves both from node_modules).
+turbopanel_duckdb_lib_dir: "{{ turbopanel_vendor_dir }}/duckdb/lib"
 # Static UI export dir: always the shared FHS location served by Caddy.
 turbopanel_ui_dist_dir: /opt/turbopanel/share/ui
 website_service_name: turbopanel-website
@@ -103,9 +109,6 @@ rabbitmq_amqp_port: 5672
 rabbitmq_vhost: /
 rabbitmq_user: turbopanel
 redis_socket_path: /run/turbopanel/redis.sock
-clickhouse_http_port: 8123
-clickhouse_database: turbopanel_metrics
-clickhouse_app_user: turbopanel_app
 # Server metrics on by default; set false to opt out.
 turbopanel_server_metrics_retention_days: 90
 mailer_service_name: turbopanel-mailer

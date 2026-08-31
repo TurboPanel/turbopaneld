@@ -479,6 +479,36 @@ async function installNativeAppUnit(
 }
 
 /**
+ * Stop and disable one prepared app the operator turned off.
+ *
+ * The unit file stays installed (Phase 1 already wrote it) and the release
+ * stays promoted, so re-enabling is a start, not a re-render. No probe and no
+ * rollback: a unit that is *supposed* to be down answering nothing is the
+ * desired state, not a failed deploy. `disable --now` on an already-stopped
+ * unit is a no-op, which keeps repeat deploys of a disabled app quiet.
+ */
+async function disableNativeApp(
+  io: NativeAppIo,
+  prepared: PreparedNativeApp,
+): Promise<void> {
+  const { app, unit } = prepared;
+  io.onOutput?.(
+    "stdout",
+    `systemctl disable --now ${unit} (disabled by operator)`,
+  );
+  const result = await systemctl(io, ["disable", "--now", unit]);
+  if (!result.success) {
+    throw new Error(
+      result.stderr || `Failed to disable native app unit ${unit}`,
+    );
+  }
+  logInfo(
+    "deploy",
+    `native app disabled by operator service=${app.serviceId}`,
+  );
+}
+
+/**
  * Start (or restart) one prepared app and wait for it to answer, rolling
  * `current` back when it never does.
  */
@@ -693,10 +723,15 @@ export async function applyNativeAppServices(
     }
   }
 
-  // Phase 3 — start / restart and health-probe each app.
+  // Phase 3 — start / restart and health-probe each app; an operator-disabled
+  // app is stopped and disabled instead, and still counts as applied.
   const applied: string[] = [];
   for (const entry of prepared) {
-    await startNativeApp(io, layout, entry);
+    if (entry.app.enabled === false) {
+      await disableNativeApp(io, entry);
+    } else {
+      await startNativeApp(io, layout, entry);
+    }
     applied.push(entry.app.composeServiceName);
   }
 

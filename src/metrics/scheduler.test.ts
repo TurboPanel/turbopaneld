@@ -6,7 +6,7 @@ import {
   type MetricsCollectResult,
 } from "./collector/index.ts";
 import type { CollectorDeps } from "./collector/types.ts";
-import { METRICS_SCHEMA_VERSION } from "./contract.ts";
+import { buildHostMetricsSample, METRICS_SCHEMA_VERSION } from "./contract.ts";
 import {
   deterministicJitterMs,
   METRICS_INTERVAL_MS,
@@ -202,6 +202,18 @@ function createFixtureCollectorFactory(): () => MetricsCollector {
         architecture: "aarch64",
         kernelRelease: "6.1.0-amd64",
       }),
+      resolveDockerDataRoot: () => Promise.resolve(null),
+      resolveHostingPath: () => "/srv/users",
+      readSensors: () =>
+        Promise.resolve({
+          cpuTemperatureCelsius: null,
+          gpuTemperatureCelsius: null,
+          gpuPowerWatts: null,
+          cpuEnergy: null,
+          sensors: {},
+        }),
+      resolveFabricInterfaces: () => Promise.resolve(["tp0"]),
+      resolveAdminSensorOverrides: () => Promise.resolve({}),
     };
     const inner = createMetricsCollector(deps);
     return {
@@ -233,31 +245,16 @@ function createFakeCollector(
 function supportedSample(sequence: number): MetricsCollectResult {
   return {
     supported: true,
-    sample: {
-      type: "metrics",
-      version: METRICS_SCHEMA_VERSION,
+    sample: buildHostMetricsSample({
       at: new Date(0).toISOString(),
       intervalSeconds: 60,
       sequence,
       metrics: {
-        cpuUsagePercent: null,
-        cpuUserPercent: null,
-        cpuSystemPercent: null,
-        cpuIowaitPercent: null,
         load1: 1,
         load5: 1,
         load15: 1,
-        memoryUsedPercent: 50,
-        memoryUsedBytes: 100,
+        memoryTotalBytes: 200,
         memoryAvailableBytes: 100,
-        swapUsedPercent: null,
-        diskUsedPercent: 40,
-        diskReadBytesPerSecond: null,
-        diskWriteBytesPerSecond: null,
-        diskReadOpsPerSecond: null,
-        diskWriteOpsPerSecond: null,
-        networkReceiveBytesPerSecond: null,
-        networkTransmitBytesPerSecond: null,
         processCount: 10,
         uptimeSeconds: 100,
       },
@@ -267,8 +264,9 @@ function supportedSample(sequence: number): MetricsCollectResult {
         operatingSystem: "Test OS",
         architecture: "aarch64",
         kernelRelease: "6.1.0",
+        collectionMode: "baseline",
       },
-    },
+    }),
   };
 }
 
@@ -281,6 +279,7 @@ function makeScheduler(options: {
   primeMs?: number;
   logRateLimitMs?: number;
   onLog?: (level: "info" | "warn", message: string) => void;
+  collectionMode?: () => "baseline" | "live";
 }): MetricsScheduler {
   return new MetricsScheduler({
     serverId: options.serverId ?? "server-a",
@@ -288,6 +287,7 @@ function makeScheduler(options: {
     intervalMs: options.intervalMs ?? 1_000,
     jitterMaxMs: options.jitterMaxMs ?? 0,
     primeMs: options.primeMs ?? 0,
+    collectionMode: options.collectionMode,
     now: options.clock.now,
     setTimeoutFn: options.clock.setTimeoutFn as unknown as typeof setTimeout,
     clearTimeoutFn: options.clock
@@ -318,7 +318,7 @@ it("MetricsScheduler emits first metrics frame immediately on attach", async () 
   const frames = parseMetricsFrames(sent);
   assertEquals(frames.length, 1);
   assertEquals(frames[0].type, "metrics");
-  assertEquals(frames[0].version, 1);
+  assertEquals(frames[0].version, METRICS_SCHEMA_VERSION);
   assertEquals(typeof frames[0].sequence, "number");
 });
 
@@ -445,14 +445,14 @@ it({
     await clock.advance(0);
     const firstAttach = parseMetricsFrames(sent1);
     assertEquals(firstAttach.length, 1);
-    assertEquals(firstAttach[0].metrics.cpuUsagePercent, null);
+    assertEquals(firstAttach[0].metrics.cpuIdlePercent, null);
     assertEquals(firstAttach[0].metrics.diskReadBytesPerSecond, null);
 
     await clock.advance(intervalMs);
     const secondTick = parseMetricsFrames(sent1);
     assertEquals(secondTick.length, 2);
-    assertEquals(typeof secondTick[1].metrics.cpuUsagePercent, "number");
-    assertEquals(secondTick[1].metrics.cpuUsagePercent !== null, true);
+    assertEquals(typeof secondTick[1].metrics.cpuIdlePercent, "number");
+    assertEquals(secondTick[1].metrics.cpuIdlePercent !== null, true);
 
     scheduler.detach();
     const sent2: unknown[] = [];
@@ -460,7 +460,7 @@ it({
     await clock.advance(0);
     const afterReattach = parseMetricsFrames(sent2);
     assertEquals(afterReattach.length, 1);
-    assertEquals(afterReattach[0].metrics.cpuUsagePercent, null);
+    assertEquals(afterReattach[0].metrics.cpuIdlePercent, null);
     assertEquals(afterReattach[0].metrics.diskReadBytesPerSecond, null);
   },
 });
@@ -945,6 +945,140 @@ it("rebindMetricsScheduler updates serverId and preserves sequence", async () =>
   assertEquals(parseMetricsFrames(sent2)[0].sequence, 2);
 });
 
+it("setIntervalMs re-arms an armed interval without recreating the collector", async () => {
+  const clock = new FakeClock();
+  const sent: unknown[] = [];
+  let factoryCalls = 0;
+  const scheduler = makeScheduler({
+    clock,
+    intervalMs: 1_000,
+    jitterMaxMs: 0,
+    collectorFactory: () => {
+      factoryCalls += 1;
+      return createFakeCollector((sequence) => supportedSample(sequence));
+    },
+  });
+
+  scheduler.attach(capturingSink(sent));
+  await clock.advance(0);
+  assertEquals(parseMetricsFrames(sent).length, 1);
+  await clock.advance(1_000);
+  assertEquals(parseMetricsFrames(sent).length, 2);
+
+  scheduler.setIntervalMs(100);
+  assertEquals(scheduler.intervalMs(), 100);
+  await clock.advance(100);
+  assertEquals(parseMetricsFrames(sent).length, 3);
+  await clock.advance(300);
+  assertEquals(parseMetricsFrames(sent).length, 6);
+
+  // Re-armed in place: no detach/attach, so the stateful collector was never
+  // reconstructed and sequences stay continuous.
+  assertEquals(factoryCalls, 1);
+  assertEquals(
+    parseMetricsFrames(sent).map((f) => f.sequence),
+    [1, 2, 3, 4, 5, 6],
+  );
+
+  // Returning to baseline also re-arms without a fresh collector.
+  scheduler.setIntervalMs(1_000);
+  await clock.advance(1_000);
+  assertEquals(parseMetricsFrames(sent).length, 7);
+  assertEquals(factoryCalls, 1);
+});
+
+it("setIntervalMs is a no-op when the cadence is unchanged", async () => {
+  const clock = new FakeClock();
+  const sent: unknown[] = [];
+  const scheduler = makeScheduler({
+    clock,
+    intervalMs: 1_000,
+    jitterMaxMs: 0,
+    collectorFactory: () =>
+      createFakeCollector((sequence) => supportedSample(sequence)),
+  });
+
+  scheduler.attach(capturingSink(sent));
+  await clock.advance(0);
+  await clock.advance(500);
+  // Same value: must not clear/re-arm (which would reset the timer phase).
+  scheduler.setIntervalMs(1_000);
+  await clock.advance(500);
+  assertEquals(parseMetricsFrames(sent).length, 2);
+});
+
+it("setIntervalMs before the interval is armed takes effect on arm", async () => {
+  const clock = new FakeClock();
+  const sent: unknown[] = [];
+  const scheduler = makeScheduler({
+    clock,
+    intervalMs: 1_000,
+    jitterMaxMs: 0,
+    primeMs: 50,
+    collectorFactory: () =>
+      createFakeCollector((sequence) => supportedSample(sequence)),
+  });
+
+  scheduler.attach(capturingSink(sent));
+  await clock.advance(0);
+  assertEquals(parseMetricsFrames(sent).length, 1);
+
+  // Still inside the primed-tick window — no interval timer armed yet.
+  scheduler.setIntervalMs(100);
+
+  await clock.advance(50); // primed tick fires and arms the interval
+  assertEquals(parseMetricsFrames(sent).length, 2);
+
+  await clock.advance(100); // armed with the updated cadence
+  assertEquals(parseMetricsFrames(sent).length, 3);
+});
+
+it("MetricsScheduler asks the collectionMode callback on every tick", async () => {
+  const clock = new FakeClock();
+  const modes: Array<string | undefined> = [];
+  let mode: "baseline" | "live" = "baseline";
+  const scheduler = makeScheduler({
+    clock,
+    intervalMs: 1_000,
+    jitterMaxMs: 0,
+    collectionMode: () => mode,
+    collectorFactory: () => ({
+      collect(options: { sequence: number; collectionMode?: string }) {
+        modes.push(options.collectionMode);
+        return Promise.resolve(supportedSample(options.sequence));
+      },
+    }),
+  });
+
+  scheduler.attach(capturingSink([]));
+  await clock.advance(0);
+  mode = "live";
+  await clock.advance(1_000);
+  mode = "baseline";
+  await clock.advance(1_000);
+  assertEquals(modes, ["baseline", "live", "baseline"]);
+});
+
+it("MetricsScheduler defaults collectionMode to baseline", async () => {
+  const clock = new FakeClock();
+  const modes: Array<string | undefined> = [];
+  const scheduler = makeScheduler({
+    clock,
+    intervalMs: 1_000,
+    jitterMaxMs: 0,
+    collectorFactory: () => ({
+      collect(options: { sequence: number; collectionMode?: string }) {
+        modes.push(options.collectionMode);
+        return Promise.resolve(supportedSample(options.sequence));
+      },
+    }),
+  });
+
+  scheduler.attach(capturingSink([]));
+  await clock.advance(0);
+  assertEquals(modes, ["baseline"]);
+});
+
 it({
   name:
     "MetricsScheduler primed tick fills rate metrics after immediate first sample",
@@ -967,15 +1101,15 @@ it({
     await clock.advance(0);
     const first = parseMetricsFrames(sent);
     assertEquals(first.length, 1);
-    assertEquals(first[0].metrics.cpuUsagePercent, null);
-    assertEquals(first[0].metrics.memoryUsedPercent !== null, true);
+    assertEquals(first[0].metrics.cpuIdlePercent, null);
+    assertEquals(first[0].metrics.memoryTotalBytes !== null, true);
 
     await clock.advance(primeMs - 1);
     assertEquals(parseMetricsFrames(sent).length, 1);
     await clock.advance(1);
     const primed = parseMetricsFrames(sent);
     assertEquals(primed.length, 2);
-    assertEquals(typeof primed[1].metrics.cpuUsagePercent, "number");
-    assertEquals(primed[1].metrics.cpuUsagePercent !== null, true);
+    assertEquals(typeof primed[1].metrics.cpuIdlePercent, "number");
+    assertEquals(primed[1].metrics.cpuIdlePercent !== null, true);
   },
 });

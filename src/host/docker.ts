@@ -4,7 +4,11 @@
  * The `docker` metadata area is omitted entirely when the Docker CLI is not
  * installed. Re-probe on every call so a later Ansible `ensureDocker` is
  * reported on the next presence tick without waiting for reconnect.
+ *
+ * Docker data-root discovery is CLI-free: it reads the Docker Engine API
+ * (`GET /info`) over the Unix socket via {@link DockerClient}.
  */
+import { DockerClient, type DockerInfo } from "../docker/client.ts";
 
 export type HostDockerMetadata = {
   /** Docker CLI version (`docker --version`), e.g. `"28.3.3"`. */
@@ -107,6 +111,48 @@ function probeComposeVersion(bin: string): string | undefined {
   const full = spawnText(bin, ["compose", "version"]);
   if (!full) return undefined;
   return parseComposeVersion(full);
+}
+
+/**
+ * Sanitize an Engine `/info` DockerRootDir value: one absolute path, no
+ * whitespace/control characters. Exported for fixture tests.
+ */
+export function parseDockerDataRoot(text: string): string | undefined {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("/")) return undefined;
+  if (/[\s\p{Cc}]/u.test(trimmed)) return undefined;
+  return trimmed;
+}
+
+/** `/info` seam so tests never need a live Docker socket. */
+export type DockerInfoReader = {
+  info: () => Promise<DockerInfo>;
+};
+
+/**
+ * Resolve the Docker data root via the Docker Engine API (`GET /info`,
+ * `DockerRootDir`) over the Unix socket — no `docker` CLI subprocess.
+ *
+ * Consumers probe this path's filesystem capacity — that reports capacity on
+ * the filesystem backing TurboPanel Docker volumes, not per-volume quotas.
+ * Returns `undefined` when the Docker daemon is unreachable. Metrics wiring
+ * caches a successful result and bounds re-probes after failure — never once
+ * per interval.
+ */
+export async function resolveDockerDataRoot(
+  client?: DockerInfoReader,
+): Promise<string | undefined> {
+  let owned: DockerClient | undefined;
+  try {
+    const engine = client ?? (owned = new DockerClient());
+    const info = await engine.info();
+    if (typeof info.DockerRootDir !== "string") return undefined;
+    return parseDockerDataRoot(info.DockerRootDir);
+  } catch {
+    return undefined;
+  } finally {
+    owned?.close();
+  }
 }
 
 /**

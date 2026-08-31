@@ -71,7 +71,7 @@ add/extend a layout field instead. The development default checkout root is
 code must never name the retired `/opt/turbopanel/platform` token — the layout
 module and CI guard are the only places allowed to reference it.
 
-**Production (managed / FHS)** — compiled release, no source checkout. The daemon runs as **`tp:tp`** (UID/GID 9999); per-service accounts (`tpctrl`, `tpcache`, `tpdata`, `tpqueue`, `tpmetrics`, `tpcaddy`) are listed in **`../turbopanel/AGENTS.md`** (Production UID/GID allocation):
+**Production (managed / FHS)** — compiled release, no source checkout. The daemon runs as **`tp:tp`** (UID/GID 9999); per-service accounts (`tpctrl`, `tpcache`, `tpdata`, `tpqueue`, `tpcaddy`) are listed in **`../turbopanel/AGENTS.md`** (Production UID/GID allocation):
 
 | Purpose                                                           | Path                                  |
 | ----------------------------------------------------------------- | ------------------------------------- |
@@ -110,13 +110,13 @@ vs **Organization CA** (two-CA distinction):
 | Runtime (sockets, `daemon.lock`) | `/run/turbopanel`                                                                  |
 
 **Development identity:** co-located dev creates **no** dedicated `tp`,
-`tpctrl`, or `tpcache` / `tpmetrics` service accounts. The
+`tpctrl`, or `tpcache` service accounts. The
 `turbopaneld`, instance, UI, and Caddy systemd units, plus Docker-backed
-services (Postgres, RabbitMQ, and ClickHouse consolidated under the single
+services (Postgres and RabbitMQ consolidated under the single
 `turbopanel-system-stack` Compose stack — see
-`orchestration/roles/system-compose/AGENTS.md` — plus standalone Redis, Mailpit, Tabix — `turbopanel-tabix`), all run as
+`orchestration/roles/system-compose/AGENTS.md` — plus standalone Redis and Mailpit), all run as
 the **current dev user**. Production managed installs keep the dedicated
-service users `tp`, `tpctrl`, `tpcache`, `tpdata`, `tpqueue`, `tpmetrics`, and
+service users `tp`, `tpctrl`, `tpcache`, `tpdata`, `tpqueue`, and
 `tpcaddy` — see **`../turbopanel/AGENTS.md`** (Production UID/GID allocation).
 
 **Deno version pin:** `DENO_VERSION` (`src/orchestration/paths.ts`) =
@@ -173,7 +173,7 @@ accidental `/root/.ansible` after install. Runtime orchestration runs as
 (`ensureGalaxyDockerRole`) until a host actually needs the container runtime
 (`runDockerSetup` / co-located dev converge via
 `scripts/run-orchestration-action.ts` `instance-dev-install` /
-postgres|rabbitmq|clickhouse setup), so fresh daemon installs and pre-Docker
+postgres|rabbitmq setup), so fresh daemon installs and pre-Docker
 hosts skip that download. **Install path:** `ensureGalaxyDockerRole` reads the
 version pin from `requirements-docker.yml` and downloads the matching tag via
 **codeload.github.com** (`galaxyDockerRoleCodeloadUrl`) into
@@ -239,7 +239,7 @@ The [dev](https://github.com/TurboPanel/dev) console threads this as
 `TURBOPANEL_FORCE_CONVERGE=1`) for Developer → Converge / re-converge and
 legacy reset/provisioner callers. Optional co-located tooling
 (`TURBOPANEL_OPTIONAL_*` → `turbopanel_optional_*`) starts Drizzle Studio,
-Mailpit, Expo UI, website, Redis Insight, and Tabix only when selected; units
+Mailpit, Expo UI, website, and Redis Insight only when selected; units
 are still installed so the TUI can enable them later.
 
 ## Project metadata
@@ -268,6 +268,10 @@ compile toolchain).
   production source (`src/**`, excluding `*.test.ts` and `src/paths/layout.ts`)
   references `/opt/turbopanel/platform` or the retired `share/ansible`. Wired
   into `publish-daemon-trunk.yml`.
+- `deno task check:metrics-legacy` (`scripts/check-metrics-legacy.ts`) — fails
+  on any ClickHouse/Tabix reference outside the managed-engine allowlist (the
+  metrics store is DuckDB + Parquet / Analytics Engine); scans this repo plus
+  the co-located `turbopanel`/`dev`/`ui` `src` trees when present.
 - `deno task test` / `test:coverage` / `lint` / `fmt:check` / `check` / `notices:check` — quality
   surface in `deno.json`. `notices:generate` writes `THIRD_PARTY_NOTICES.md` from
   `deno.lock`, `workers/turbopanel-sh/package-lock.json`, and orchestration pins
@@ -468,14 +472,13 @@ Large subsystems live in focused `AGENTS.md` files next to their code — Cursor
 | Subsystem | Read before editing | Covers |
 |---|---|---|
 | **Instance client** | `src/instance/AGENTS.md` | WSS / Unix-socket connection, idle presence + heartbeats (`timeSync`/`ips`/`docker`), reconnect / parked backoff, JWKS JWT verification, daemon TLS trust model |
-| **Host metrics (collector)** | `src/metrics/AGENTS.md` | `/proc`-based collection + scheduling, `POST /api/daemon/v1/metrics`, 20-metric contract |
+| **Host metrics (collector)** | `src/metrics/AGENTS.md` | `/proc`-based collection + scheduling, `POST /api/daemon/v1/metrics`, v2 named-field contract, sensor discovery, live-mode leases |
 | **Tenant deploy & hosting ingress** | `src/deploy/AGENTS.md` | `environment.deploy` / `.lifecycle` / `.stop`, Docker Compose + Traefik, hosting Caddy, TLS materialization. Nested per-area docs: `src/deploy/release/AGENTS.md` (git-backed releases), `src/deploy/native/AGENTS.md` (host-run Node/Next), `src/deploy/site/AGENTS.md` (nginx/Apache/OLS sites), `src/deploy/cron/AGENTS.md` (scheduled jobs), `src/deploy/ssh/AGENTS.md` (tenant SSH) |
 | **Command execution logs** | `src/logs/` | Streamed command transcripts: redaction deny-set, `<stateDir>/spool/execution-logs/` spool, batched upload to `POST /api/daemon/v1/commands/:commandId/log`, orphan sweep. Control-plane side: `../turbopanel/src/lib/execution-logs/AGENTS.md`; capture details in `src/deploy/AGENTS.md` (Streamed transcript capture). This is the **only** log class uploaded and retained. |
 | **Managed engines (daemon runtime)** | `src/managed/AGENTS.md` | `managed.apply` / `.lifecycle` / `.destroy`, `managed.ingress.reconcile` (shared ProxySQL — compose project = the `managed-ingress` `serviceId` — on the organization's managed network, a bare-UUID name carried as `managedNetwork` on the command), engine registry (Postgres first); separate from tenant deploy. On-demand tails ride the same correlated cell round trip as `managed-logs-request` / `managed-logs-result`: engine `compose logs`, and running-container `docker container logs`. Neither is stored or collected; presence does not carry `containerLogsEnabled`. |
 | **Installer presentation** | `src/orchestration/AGENTS.md` | Installer presenter + sanitizer / vocabulary map for `run.sh` install & converge |
 | **Installer script hosting** | `workers/turbopanel-sh/AGENTS.md` | Assets-only **turbopanel.sh** Workers Static Assets host, deploy tooling, channel manifests, build/commit stamping |
 | **Host facts** | `src/host/AGENTS.md` | Host OS, time sync, docker, machine key, runtime inventory probes (hello + change-detected heartbeats) |
-| **ClickHouse (analytics)** | `orchestration/roles/clickhouse/AGENTS.md` | `clickhouse` Ansible role (Docker), idle-CPU tuning, app-user grants, dev-only Tabix GUI |
 | **Time sync (Ansible)** | `orchestration/AGENTS.md` | `time-sync` role + `time-sync-apply.yml` (NTP / timezone) |
 
 Ansible playbooks/roles live under `orchestration/`; runtime TypeScript under `src/`.

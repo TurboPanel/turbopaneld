@@ -38,8 +38,13 @@ const RUNTIMES = registryJson.runtimes as unknown as Readonly<
   Record<RuntimeName, RuntimeEntry>
 >;
 
-/** Access levels that correspond to a unix group. `none` holds no group. */
-export type PrincipalAccessGroupLevel = "sftp" | "shell";
+/**
+ * Access groups the registry defines. `sftp` / `shell` are levels (`none`
+ * holds no group); `password` is an additive credential group — its Match
+ * block turns `PasswordAuthentication` on for members and rides alongside a
+ * level group, never instead of one.
+ */
+export type PrincipalAccessGroupLevel = "sftp" | "shell" | "password";
 
 const ACCESS_GROUPS = registryJson.accessGroups as unknown as Readonly<
   Record<PrincipalAccessGroupLevel, RuntimeSeriesEntry>

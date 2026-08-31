@@ -42,20 +42,26 @@
     turbopanel_amqp_url: >-
       amqp://{{ rabbitmq_user }}:{{ _launch_rabbitmq_pass.content | b64decode | trim }}@127.0.0.1:{{ rabbitmq_amqp_port }}{{ rabbitmq_vhost }}
 
-- name: Read ClickHouse app password for systemd units
-  ansible.builtin.slurp:
-    src: "{{ turbopanel_config_dir }}/clickhouse/.clickhouse_app_pass"
-  register: _launch_clickhouse_app_pass
-  failed_when: false
+# Compiled-mode contract: the unit puts {{ turbopanel_duckdb_lib_dir }} on
+# LD_LIBRARY_PATH so the self-extracted duckdb.node addon can dlopen its
+# companion libduckdb.so. instance-build stages it; converging a compiled
+# instance without it would install a service that crash-loops at startup,
+# so fail the converge loudly instead.
+- name: Check vendored libduckdb.so for compiled instance
+  when: turbopanel_instance_run_mode == 'compiled'
+  ansible.builtin.stat:
+    path: "{{ turbopanel_duckdb_lib_dir }}/libduckdb.so"
+  register: _launch_duckdb_lib
 
-- name: Set ClickHouse connection facts for systemd units
-  ansible.builtin.set_fact:
-    turbopanel_clickhouse_url: "http://127.0.0.1:{{ clickhouse_http_port }}"
-    turbopanel_clickhouse_password: "{{ _launch_clickhouse_app_pass.content | b64decode | trim }}"
+- name: Fail when compiled instance lacks vendored libduckdb.so
   when:
-    - _launch_clickhouse_app_pass.content is defined
-    - (_launch_clickhouse_app_pass.content | b64decode | trim | length) > 0
-  no_log: true
+    - turbopanel_instance_run_mode == 'compiled'
+    - not _launch_duckdb_lib.stat.exists
+  ansible.builtin.fail:
+    msg: >-
+      Compiled run mode requires {{ turbopanel_duckdb_lib_dir }}/libduckdb.so
+      (the instance unit's LD_LIBRARY_PATH). Run the instance-build role
+      (instance-build-toggle playbook) so it stages the DuckDB native library.
 
 - name: Install instance systemd unit
   ansible.builtin.template:

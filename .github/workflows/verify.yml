@@ -68,6 +68,13 @@ jobs:
       - name: Check vocabulary (no daemon-as-agent phrasing)
         run: deno task check:vocabulary
 
+      # ClickHouse/Tabix metrics infrastructure is retired (DuckDB + Parquet /
+      # Analytics Engine replaced it). Sibling repo trees are scanned too when
+      # the co-located workspace layout is present; a clean single-repo CI
+      # checkout still verifies this repo's own trees.
+      - name: Check metrics legacy (no ClickHouse/Tabix references)
+        run: deno task check:metrics-legacy
+
       - name: Check third-party notices
         run: deno task notices:check
 

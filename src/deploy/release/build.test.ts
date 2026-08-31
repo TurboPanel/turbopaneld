@@ -4,6 +4,7 @@ import {
   BUILD_TIMEOUT_MS,
   buildEnvironment,
   buildInvocation,
+  deriveNodeInstallCommand,
   NEXT_EXPORT_DIR,
   NEXT_STANDALONE_DIR,
   prepareNativeAppBuildOutput,
@@ -269,6 +270,205 @@ test("buildEnvironment uses an empty payload env map", () => {
   assertEquals(env.HOME, "/work");
   assertEquals(env.CI, "1");
   assertEquals(env.NODE_ENV, "production");
+  // Without a native runtime nothing corepack-shaped is set.
+  assertEquals(env.COREPACK_HOME, undefined);
+  assertEquals(env.COREPACK_ENABLE_DOWNLOAD_PROMPT, undefined);
+});
+
+test("buildEnvironment threads the native runtime onto PATH, NODE_ENV, and corepack", () => {
+  const nodeBinDir = "/opt/turbopanel/vendor/node-app/24/current/bin";
+  const env = buildEnvironment({ kind: "native" }, "/work", {
+    nodeBinDir,
+    nodeEnv: "development",
+  });
+  // The vendored tenant Node leads PATH so node/npm/npx/corepack resolve to
+  // the series the app runs on.
+  assertEquals(env.PATH?.startsWith(`${nodeBinDir}:`), true);
+  assertEquals(env.NODE_ENV, "development");
+  assertEquals(env.COREPACK_HOME, join("/work", ".corepack"));
+  assertEquals(env.COREPACK_ENABLE_DOWNLOAD_PROMPT, "0");
+});
+
+test("deriveNodeInstallCommand returns undefined without a package.json", async () => {
+  await withWorkingDir(async (workingDir) => {
+    assertEquals(await deriveNodeInstallCommand({ workingDir }), undefined);
+    // A lockfile without a package.json still derives nothing to install.
+    await Deno.writeTextFile(join(workingDir, "package-lock.json"), "{}");
+    assertEquals(await deriveNodeInstallCommand({ workingDir }), undefined);
+  });
+});
+
+test("deriveNodeInstallCommand detects the manager from the lockfile", async () => {
+  await withWorkingDir(async (workingDir) => {
+    await Deno.writeTextFile(join(workingDir, "package.json"), "{}");
+    // Bare npm: no lockfile at all.
+    assertEquals(
+      await deriveNodeInstallCommand({ workingDir }),
+      "npm install --include=dev",
+    );
+    await Deno.writeTextFile(join(workingDir, "package-lock.json"), "{}");
+    assertEquals(
+      await deriveNodeInstallCommand({ workingDir }),
+      "npm ci --include=dev",
+    );
+    // yarn.lock outranks package-lock.json; classic yarn keeps its dev flag.
+    await Deno.writeTextFile(join(workingDir, "yarn.lock"), "");
+    assertEquals(
+      await deriveNodeInstallCommand({ workingDir }),
+      "corepack yarn install --frozen-lockfile --production=false",
+    );
+    // pnpm-lock.yaml outranks both.
+    await Deno.writeTextFile(join(workingDir, "pnpm-lock.yaml"), "");
+    assertEquals(
+      await deriveNodeInstallCommand({ workingDir }),
+      "corepack pnpm install --frozen-lockfile --prod=false",
+    );
+  });
+});
+
+test("deriveNodeInstallCommand lets an explicit packageManager override the lockfile", async () => {
+  await withWorkingDir(async (workingDir) => {
+    await Deno.writeTextFile(join(workingDir, "package.json"), "{}");
+    await Deno.writeTextFile(join(workingDir, "pnpm-lock.yaml"), "");
+    assertEquals(
+      await deriveNodeInstallCommand({ packageManager: "npm", workingDir }),
+      "npm install --include=dev",
+    );
+    // The declared manager without its lockfile drops the frozen flag.
+    assertEquals(
+      await deriveNodeInstallCommand({ packageManager: "yarn", workingDir }),
+      "corepack yarn install --production=false",
+    );
+    await Deno.remove(join(workingDir, "pnpm-lock.yaml"));
+    assertEquals(
+      await deriveNodeInstallCommand({ packageManager: "pnpm", workingDir }),
+      "corepack pnpm install --prod=false",
+    );
+  });
+});
+
+test("deriveNodeInstallCommand treats Yarn Berry as immutable-by-CI", async () => {
+  // Berry via the package.json packageManager pin.
+  await withWorkingDir(async (workingDir) => {
+    await Deno.writeTextFile(
+      join(workingDir, "package.json"),
+      JSON.stringify({ packageManager: "yarn@4.5.0" }),
+    );
+    await Deno.writeTextFile(join(workingDir, "yarn.lock"), "");
+    assertEquals(
+      await deriveNodeInstallCommand({ workingDir }),
+      "corepack yarn install",
+    );
+  });
+  // Berry via a .yarnrc.yml when package.json pins nothing.
+  await withWorkingDir(async (workingDir) => {
+    await Deno.writeTextFile(join(workingDir, "package.json"), "{}");
+    await Deno.writeTextFile(join(workingDir, "yarn.lock"), "");
+    await Deno.writeTextFile(
+      join(workingDir, ".yarnrc.yml"),
+      "nodeLinker: node-modules\n",
+    );
+    assertEquals(
+      await deriveNodeInstallCommand({ workingDir }),
+      "corepack yarn install",
+    );
+  });
+  // A yarn@1 pin stays classic.
+  await withWorkingDir(async (workingDir) => {
+    await Deno.writeTextFile(
+      join(workingDir, "package.json"),
+      JSON.stringify({ packageManager: "yarn@1.22.22" }),
+    );
+    await Deno.writeTextFile(join(workingDir, "yarn.lock"), "");
+    assertEquals(
+      await deriveNodeInstallCommand({ workingDir }),
+      "corepack yarn install --frozen-lockfile --production=false",
+    );
+  });
+});
+
+test("runReleaseBuild derives the install command for a native-app build", async () => {
+  await withWorkingDir(async (workingDir) => {
+    await Deno.writeTextFile(join(workingDir, "package.json"), "{}");
+    await Deno.writeTextFile(join(workingDir, "pnpm-lock.yaml"), "");
+    const lines: string[] = [];
+    const ran: string[] = [];
+    await runReleaseBuild({
+      build: { kind: "native", buildCommand: "npm run build" },
+      workingDir,
+      nativeRuntime: {
+        nodeBinDir: "/opt/turbopanel/vendor/node-app/24/current/bin",
+        nodeEnv: "production",
+      },
+      hasPrlimit: () => Promise.resolve(false),
+      runCommand: (command) => {
+        ran.push(command);
+        return Promise.resolve();
+      },
+      onOutput: (_stream, line) => lines.push(line),
+    });
+    // The derived install runs before the build command.
+    assertEquals(ran, [
+      "corepack pnpm install --frozen-lockfile --prod=false",
+      "npm run build",
+    ]);
+    assertEquals(
+      lines.some((line) => line.includes("derived install command")),
+      true,
+    );
+  });
+});
+
+test("runReleaseBuild prefers an explicit installCommand over the derived one", async () => {
+  await withWorkingDir(async (workingDir) => {
+    await Deno.writeTextFile(join(workingDir, "package.json"), "{}");
+    await Deno.writeTextFile(join(workingDir, "pnpm-lock.yaml"), "");
+    const lines: string[] = [];
+    const ran: string[] = [];
+    await runReleaseBuild({
+      build: { kind: "native", installCommand: "npm ci --ignore-scripts" },
+      workingDir,
+      nativeRuntime: {
+        nodeBinDir: "/opt/turbopanel/vendor/node-app/24/current/bin",
+        nodeEnv: "production",
+      },
+      hasPrlimit: () => Promise.resolve(false),
+      runCommand: (command) => {
+        ran.push(command);
+        return Promise.resolve();
+      },
+      onOutput: (_stream, line) => lines.push(line),
+    });
+    assertEquals(ran, ["npm ci --ignore-scripts"]);
+    assertEquals(
+      lines.some((line) => line.includes("derived install command")),
+      false,
+    );
+  });
+});
+
+test("runReleaseBuild does not derive an install without a native runtime", async () => {
+  await withWorkingDir(async (workingDir) => {
+    await Deno.writeTextFile(join(workingDir, "package.json"), "{}");
+    await Deno.writeTextFile(join(workingDir, "pnpm-lock.yaml"), "");
+    const lines: string[] = [];
+    const ran: string[] = [];
+    await runReleaseBuild({
+      build: { kind: "native", buildCommand: "npm run build" },
+      workingDir,
+      hasPrlimit: () => Promise.resolve(false),
+      runCommand: (command) => {
+        ran.push(command);
+        return Promise.resolve();
+      },
+      onOutput: (_stream, line) => lines.push(line),
+    });
+    assertEquals(ran, ["npm run build"]);
+    assertEquals(
+      lines.some((line) => line.includes("derived install command")),
+      false,
+    );
+  });
 });
 
 test({

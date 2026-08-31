@@ -175,7 +175,7 @@ test("optionalDevServiceFlag parses true/false tokens and falls back", () => {
   const env = fakeEnv({
     TURBOPANEL_OPTIONAL_UI: "yes",
     TURBOPANEL_OPTIONAL_DBSTUDIO: "0",
-    TURBOPANEL_OPTIONAL_TABIX: "maybe",
+    TURBOPANEL_OPTIONAL_REDIS_INSIGHT: "maybe",
   });
   assertEquals(
     optionalDevServiceFlag("TURBOPANEL_OPTIONAL_UI", false, env),
@@ -186,7 +186,7 @@ test("optionalDevServiceFlag parses true/false tokens and falls back", () => {
     false,
   );
   assertEquals(
-    optionalDevServiceFlag("TURBOPANEL_OPTIONAL_TABIX", false, env),
+    optionalDevServiceFlag("TURBOPANEL_OPTIONAL_REDIS_INSIGHT", false, env),
     false,
   );
   assertEquals(
@@ -380,10 +380,6 @@ test("playbook requires a path and fetches Galaxy only for docker playbooks", as
   assertEquals(dockerRec.galaxyCalls, 1);
   assertEquals(PLAYBOOKS_NEEDING_DOCKER_GALAXY.has("postgres-setup.yml"), true);
   assertEquals(PLAYBOOKS_NEEDING_DOCKER_GALAXY.has("rabbitmq-setup.yml"), true);
-  assertEquals(
-    PLAYBOOKS_NEEDING_DOCKER_GALAXY.has("clickhouse-setup.yml"),
-    true,
-  );
 });
 
 test("dispatchOrchestrationAction routes known actions and rejects unknown", async () => {

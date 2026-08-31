@@ -6,7 +6,8 @@ When `environment.deploy` carries **`nativeAppServices[]`** (compose services
 with `x-turbopanel.serviceKind: node`), those services are in neither Docker
 Compose nor a document root. Each entry is
 `{ composeServiceName, serviceId, listenPort, framework, nodeVersion?,
-resources?, accountLimits? }`; the *release* itself rides the ordinary
+appMode?, enabled?, startupFile?, resources?, accountLimits? }`; the *release*
+itself rides the ordinary
 `sourceMaterial[]` lane, so checkout, build, promote, retention, and
 `siteReleases[]` reclaim are all unchanged and kind-agnostic. This module only
 decides how a promoted `current` is **run**.
@@ -53,7 +54,8 @@ the unit starts. Per app:
    Writing everything first and reloading once is the only sequence in which
    systemd is guaranteed to have read every file the apply touched.
 6. `enable --now` on first deploy, `restart` when the unit is already active,
-   nothing when neither is needed.
+   nothing when neither is needed — unless the operator set `enabled: false`,
+   which issues `disable --now` instead (see "Operator disable" below).
 7. Probe `127.0.0.1:<listenPort>` until it answers. Start, the probe
    verdict, and a failed unit's `journalctl` tail are written to the
    command transcript (`health` phase).
@@ -88,6 +90,28 @@ from what is actually installed.
 cannot rewrite the code it is running. No supplementary-group dance is needed
 here (unlike the web engines): the app *is* the principal that already has group
 read on its own tree.
+
+**Entrypoint.** The default `ExecStart` is `<vendored node> server.js`.
+`startupFile` (a validated relative path — `isSafeSourceSubdirectory` at the
+contract boundary) replaces the `server.js` name; an explicit
+`build.startCommand` still wins over both and runs through `/bin/sh -c`
+untouched. A blank `startupFile` falls back to the default rather than
+rendering an `ExecStart` with no script.
+
+**Application mode.** `appMode` renders as `Environment=NODE_ENV=<mode>` in the
+unit (default `production`) and rides into the release build as the same value
+(see `../release/AGENTS.md`, native-app builds), so a `development` app builds
+and runs under one mode instead of two.
+
+**Operator disable.** An app with `enabled: false` still gets its unit
+installed (step 4) and its release promoted — step 6 issues
+`systemctl disable --now` instead of a start/restart, with no loopback probe
+and no rollback: a unit that is *supposed* to be down answering nothing is the
+desired state, not a failed deploy. The service still counts in `applied`, the
+transcript records the disable, and re-enabling is an instant start of what is
+already on disk, not a re-render or rebuild. `disable --now` on an
+already-stopped unit is a no-op, so repeat deploys of a disabled app stay
+quiet.
 
 **Per-app vs per-account limits.** `resources` (clamped service options) becomes
 the unit's `CPUQuota` / `MemoryMax`; `accountLimits` (the effective org ∩ server

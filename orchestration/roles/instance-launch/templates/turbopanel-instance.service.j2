@@ -47,6 +47,7 @@ Environment=TURBOPANEL_SYSTEM_EMAIL__SMTP_HOST=127.0.0.1
 Environment=TURBOPANEL_SYSTEM_EMAIL__SMTP_PORT={{ mailpit_smtp_port | default(1025) }}
 {% endif %}
 Environment=TURBOPANEL_DAEMON_STATE_DIR={{ turbopanel_daemon_state_dir }}
+Environment=TURBOPANEL_METRICS_DIR={{ turbopanel_metrics_dir }}
 Environment=TURBOPANEL_USER={{ turbopanel_user }}
 Environment=TURBOPANEL_CONFIG_DIR={{ turbopanel_config_dir }}
 Environment=TURBOPANEL_RUN_DIR={{ turbopanel_run_dir }}
@@ -67,13 +68,18 @@ Environment=NO_COLOR=1
 Environment=WRANGLER_DEV_PORT={{ wrangler_dev_port }}
 ExecStart={{ turbopanel_instance_dir }}/scripts/workers-serve.sh
 {% elif turbopanel_instance_run_mode == 'compiled' %}
+{# deno compile self-extracts the duckdb.node addon but not its companion
+   libduckdb.so (the dynamic linker cannot see the binary's virtual FS), so the
+   compiled instance loads the vendored copy via LD_LIBRARY_PATH. Source mode
+   needs no equivalent: both files are real siblings under node_modules. #}
+Environment=LD_LIBRARY_PATH={{ turbopanel_duckdb_lib_dir }}
 ExecStart={{ turbopanel_instance_binary }}
 {% else %}
 {# Deno 2.9+ treats Unix-domain connect as --allow-net (not --allow-read). #}
 {% if turbopanel_dev_user | length > 0 and turbopanel_ui_mode == 'dev' %}
-ExecStart={{ turbopanel_deno }} run --allow-env --allow-sys=networkInterfaces,hostname --allow-read={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_daemon_state_dir }} --allow-write={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_daemon_state_dir }} --allow-net=127.0.0.1:{{ drizzle_studio_port | default(4983) }},127.0.0.1:{{ rabbitmq_amqp_port }},127.0.0.1:{{ mailpit_smtp_port | default(1025) }},127.0.0.1:{{ clickhouse_http_port | default(8123) }},dl.trbp.nl:443,api.github.com:443,gitlab.com:443,unix:{{ turbopanel_run_dir }}/instance.sock,unix:{{ postgres_socket_dir }}/.s.PGSQL.5432,unix:{{ redis_socket_path }} --allow-run=git,systemctl,tar,sudo,/usr/bin/sudo,/bin/sh,mkfifo,/usr/bin/mkfifo,pamtester,/usr/bin/pamtester,{{ turbopanel_node }},{{ turbopanel_deno }} src/deno-dev.ts
+ExecStart={{ turbopanel_deno }} run --allow-env --allow-sys=networkInterfaces,hostname --allow-ffi --allow-read={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_daemon_state_dir }},{{ turbopanel_metrics_dir }} --allow-write={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_daemon_state_dir }},{{ turbopanel_metrics_dir }} --allow-net=127.0.0.1:{{ drizzle_studio_port | default(4983) }},127.0.0.1:{{ rabbitmq_amqp_port }},127.0.0.1:{{ mailpit_smtp_port | default(1025) }},dl.trbp.nl:443,api.github.com:443,gitlab.com:443,unix:{{ turbopanel_run_dir }}/instance.sock,unix:{{ postgres_socket_dir }}/.s.PGSQL.5432,unix:{{ redis_socket_path }} --allow-run=git,systemctl,tar,sudo,/usr/bin/sudo,/bin/sh,mkfifo,/usr/bin/mkfifo,pamtester,/usr/bin/pamtester,{{ turbopanel_node }},{{ turbopanel_deno }} src/deno-dev.ts
 {% else %}
-ExecStart={{ turbopanel_deno }} run --allow-env --allow-sys=networkInterfaces,hostname --allow-read={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_daemon_state_dir }} --allow-write={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_daemon_state_dir }} --allow-net=127.0.0.1:{{ rabbitmq_amqp_port }},127.0.0.1:{{ clickhouse_http_port | default(8123) }},dl.trbp.nl:443,api.github.com:443,gitlab.com:443,unix:{{ turbopanel_run_dir }}/instance.sock,unix:{{ postgres_socket_dir }}/.s.PGSQL.5432,unix:{{ redis_socket_path }} --allow-run=sudo,/usr/bin/sudo,/bin/sh,pamtester,/usr/bin/pamtester src/deno.ts
+ExecStart={{ turbopanel_deno }} run --allow-env --allow-sys=networkInterfaces,hostname --allow-ffi --allow-read={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_daemon_state_dir }},{{ turbopanel_metrics_dir }} --allow-write={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_daemon_state_dir }},{{ turbopanel_metrics_dir }} --allow-net=127.0.0.1:{{ rabbitmq_amqp_port }},dl.trbp.nl:443,api.github.com:443,gitlab.com:443,unix:{{ turbopanel_run_dir }}/instance.sock,unix:{{ postgres_socket_dir }}/.s.PGSQL.5432,unix:{{ redis_socket_path }} --allow-run=sudo,/usr/bin/sudo,/bin/sh,pamtester,/usr/bin/pamtester src/deno.ts
 {% endif %}
 {% endif %}
 Restart=always

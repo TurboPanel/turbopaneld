@@ -47,3 +47,63 @@
     owner: "{{ instance_user }}"
     group: "{{ turbopanel_group }}"
     mode: "0750"
+
+# `deno compile` self-extracts the bundled duckdb.node addon at runtime, but
+# NOT its companion libduckdb.so — the dynamic linker cannot see the compiled
+# binary's virtual filesystem. The instance unit therefore points
+# LD_LIBRARY_PATH at {{ turbopanel_duckdb_lib_dir }} (compiled branch of
+# turbopanel-instance.service.j2); stage the pinned, architecture-appropriate
+# library there so a compiled converge cannot install a service that fails to
+# start. The locator consults build inputs only (pnpm node_modules, Deno's npm
+# cache) and exits non-zero when the pinned bindings package is absent, which
+# fails the converge.
+- name: Locate built libduckdb.so for vendoring
+  when: turbopanel_instance_run_mode == 'compiled'
+  ansible.builtin.command:
+    cmd: "{{ turbopanel_deno }} run --allow-env --allow-read --allow-run scripts/duckdb-native-lib.ts"
+    chdir: "{{ turbopanel_instance_dir }}"
+  become_user: "{{ turbopanel_user }}"
+  environment:
+    HOME: "{{ turbopanel_install_root }}"
+    PATH: "{{ turbopanel_runtime_path }}"
+  register: _duckdb_lib_source
+  changed_when: false
+
+- name: Ensure DuckDB vendor lib directory
+  when: turbopanel_instance_run_mode == 'compiled'
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+  loop:
+    - "{{ turbopanel_vendor_dir }}/duckdb"
+    - "{{ turbopanel_duckdb_lib_dir }}"
+
+- name: Vendor libduckdb.so for the compiled instance
+  when: turbopanel_instance_run_mode == 'compiled'
+  ansible.builtin.copy:
+    src: "{{ _duckdb_lib_source.stdout | trim }}/libduckdb.so"
+    dest: "{{ turbopanel_duckdb_lib_dir }}/libduckdb.so"
+    remote_src: true
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+  notify: Restart turbopanel instance
+
+- name: Verify vendored libduckdb.so is staged
+  when: turbopanel_instance_run_mode == 'compiled'
+  ansible.builtin.stat:
+    path: "{{ turbopanel_duckdb_lib_dir }}/libduckdb.so"
+  register: _duckdb_vendored
+
+- name: Fail when the DuckDB native library is missing
+  when:
+    - turbopanel_instance_run_mode == 'compiled'
+    - not _duckdb_vendored.stat.exists
+  ansible.builtin.fail:
+    msg: >-
+      {{ turbopanel_duckdb_lib_dir }}/libduckdb.so was not staged — the
+      compiled instance unit's LD_LIBRARY_PATH contract
+      (turbopanel-instance.service.j2) requires it.

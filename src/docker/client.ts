@@ -61,6 +61,14 @@ export interface ContainerInspect {
   };
 }
 
+/**
+ * Docker Engine `/info` subset — only the fields the daemon consumes.
+ * `DockerRootDir` is the data root backing TurboPanel Docker volumes.
+ */
+export interface DockerInfo {
+  DockerRootDir?: string;
+}
+
 export type DockerEvent = {
   Type: string;
   Action: string;
@@ -130,6 +138,14 @@ export class DockerClient {
     } catch {
       return false;
     }
+  }
+
+  async info(): Promise<DockerInfo> {
+    const response = await this.#fetch("/info");
+    if (!response.ok) {
+      throw new Error(`docker info failed: HTTP ${response.status}`);
+    }
+    return await response.json() as DockerInfo;
   }
 
   async listContainers(all = false): Promise<ContainerSummary[]> {

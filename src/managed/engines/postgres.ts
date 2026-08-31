@@ -433,6 +433,9 @@ export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
   containerUser: "postgres",
   containerGroup: "postgres",
   rootUsername: "postgres",
+  // Admin connect DB for psql/pg_isready. initdb always creates `postgres`
+  // regardless of the container's POSTGRES_DB (which seeds the user-facing
+  // initial database, `defaultdb`), so this stays the stable internal target.
   defaultDatabase: "postgres",
 
   async waitReady(ctx: ManagedEngineContext): Promise<void> {

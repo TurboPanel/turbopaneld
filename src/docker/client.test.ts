@@ -93,6 +93,28 @@ test("DockerClient ping is false on non-200 and fetch errors", async () => {
   errorClient.close();
 });
 
+test("DockerClient info reads /info and throws on HTTP error", async () => {
+  const seen: string[] = [];
+  const client = new DockerClient(undefined, {
+    fetchImpl: (url) => {
+      seen.push(url);
+      return Promise.resolve(
+        jsonResponse({ DockerRootDir: "/var/lib/docker" }),
+      );
+    },
+  });
+  const info = await client.info();
+  assertEquals(info.DockerRootDir, "/var/lib/docker");
+  assertEquals(seen[0], `${DOCKER_HTTP_ORIGIN}/info`);
+  client.close();
+
+  const failing = new DockerClient(undefined, {
+    fetchImpl: () => Promise.resolve(new Response("no", { status: 500 })),
+  });
+  await assertRejects(() => failing.info(), Error, "docker info failed");
+  failing.close();
+});
+
 test("DockerClient listContainers encodes all and throws on HTTP error", async () => {
   const seen: string[] = [];
   const client = new DockerClient(undefined, {

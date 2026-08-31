@@ -4,6 +4,7 @@ import {
   DEFAULT_PRINCIPAL_SHELL,
   ensureDirectoryOwnedByPrincipal,
   ensurePrincipalManagedGroups,
+  ensurePrincipalPassword,
   ensureSystemPrincipals,
   parseGroupGid,
   parsePasswdHomeShell,
@@ -28,12 +29,17 @@ function stubLayout(principalHomeRoot = "/srv/users"): LayoutPaths {
 function captureRun(handlers: {
   getentPasswd?: RunResult;
   getentGroup?: RunResult;
+  /** `sudo getent shadow` reply; defaults to a locked fresh account. */
+  getentShadow?: RunResult;
   /** Supplementary groups `id -nG` reports for the account. */
   groups?: string[];
-}): { run: RunFn; calls: Array<{ command: string; args: string[] }> } {
-  const calls: Array<{ command: string; args: string[] }> = [];
-  const run: RunFn = (command, args) => {
-    calls.push({ command, args });
+}): {
+  run: RunFn;
+  calls: Array<{ command: string; args: string[]; stdin?: string }>;
+} {
+  const calls: Array<{ command: string; args: string[]; stdin?: string }> = [];
+  const run: RunFn = (command, args, stdin) => {
+    calls.push({ command, args, ...(stdin === undefined ? {} : { stdin }) });
     if (command === "id") {
       return Promise.resolve({
         success: true,
@@ -49,6 +55,14 @@ function captureRun(handlers: {
     if (command === "getent" && args[0] === "passwd") {
       return Promise.resolve(
         handlers.getentPasswd ?? { success: false, stdout: "", stderr: "" },
+      );
+    }
+    if (
+      command === "sudo" && args.includes("getent") && args.includes("shadow")
+    ) {
+      return Promise.resolve(
+        handlers.getentShadow ??
+          { success: true, stdout: "appuser:!:20000:0:99999:7:::", stderr: "" },
       );
     }
     // sudo install / useradd / groupadd / usermod succeed by default
@@ -920,4 +934,172 @@ test("a failed home-root traverse ACL fails the principal ensure", async () => {
     Error,
     "Failed to grant traverse ACL",
   );
+});
+
+// --- Password reconcile ------------------------------------------------------
+
+const VALID_HASH = `$6$saltstring$${"a".repeat(86)}`;
+const OTHER_HASH = `$6$saltstring$${"b".repeat(86)}`;
+
+function shadowEntry(field: string): RunResult {
+  return {
+    success: true,
+    stdout: `appuser:${field}:20000:0:99999:7:::`,
+    stderr: "",
+  };
+}
+
+test("ensurePrincipalPassword sets a differing hash over stdin, never argv", async () => {
+  const { run, calls } = captureRun({ getentShadow: shadowEntry("!") });
+  await ensurePrincipalPassword("appuser", VALID_HASH, run);
+
+  const chpasswd = calls.find((c) =>
+    c.command === "sudo" && c.args.includes("chpasswd")
+  );
+  assertEquals(chpasswd?.args, ["-n", "chpasswd", "-e"]);
+  // The hash reaches the tool via stdin only: an argv is world-readable via
+  // `ps` for the life of the process.
+  assertEquals(chpasswd?.stdin, `appuser:${VALID_HASH}\n`);
+  assert(
+    calls.every((c) => !c.args.includes(VALID_HASH)),
+    "the hash must never appear in argv",
+  );
+});
+
+test("ensurePrincipalPassword skips the write when the hash already matches", async () => {
+  const { run, calls } = captureRun({ getentShadow: shadowEntry(VALID_HASH) });
+  await ensurePrincipalPassword("appuser", VALID_HASH, run);
+  assertEquals(
+    calls.some((c) => c.args.includes("chpasswd")),
+    false,
+  );
+});
+
+test("ensurePrincipalPassword replaces a stale hash", async () => {
+  const { run, calls } = captureRun({ getentShadow: shadowEntry(OTHER_HASH) });
+  await ensurePrincipalPassword("appuser", VALID_HASH, run);
+  const chpasswd = calls.find((c) => c.args.includes("chpasswd"));
+  assertEquals(chpasswd?.stdin, `appuser:${VALID_HASH}\n`);
+});
+
+test("ensurePrincipalPassword locks a live password when no hash is desired", async () => {
+  const { run, calls } = captureRun({ getentShadow: shadowEntry(OTHER_HASH) });
+  await ensurePrincipalPassword("appuser", undefined, run);
+  const lock = calls.find((c) =>
+    c.command === "sudo" && c.args.includes("usermod")
+  );
+  assertEquals(lock?.args, ["-n", "usermod", "-p", "!", "appuser"]);
+});
+
+test("ensurePrincipalPassword leaves an already-locked account alone", async () => {
+  for (const field of ["!", "*", `!${OTHER_HASH}`]) {
+    const { run, calls } = captureRun({ getentShadow: shadowEntry(field) });
+    await ensurePrincipalPassword("appuser", undefined, run);
+    assertEquals(
+      calls.some((c) => c.args.includes("usermod")),
+      false,
+      `field ${field} is already locked`,
+    );
+  }
+});
+
+test("ensurePrincipalPassword locks fail-closed when shadow cannot be read", async () => {
+  const { run, calls } = captureRun({
+    getentShadow: { success: false, stdout: "", stderr: "denied" },
+  });
+  await ensurePrincipalPassword("appuser", undefined, run);
+  const lock = calls.find((c) => c.args.includes("usermod"));
+  assertEquals(lock?.args, ["-n", "usermod", "-p", "!", "appuser"]);
+});
+
+test("ensurePrincipalPassword refuses anything that is not a sha512-crypt hash", async () => {
+  const rejected = [
+    "hunter2",
+    "$1$old$md5hash",
+    `$6$saltstring$${"a".repeat(85)}`,
+    `$6$saltstring$${"a".repeat(86)}:extra`,
+    `$6$bad salt$${"a".repeat(86)}`,
+    `$6$saltstring$${"a".repeat(86)}\nroot:x`,
+  ];
+  for (const hash of rejected) {
+    const { run, calls } = captureRun({ getentShadow: shadowEntry("!") });
+    await assertRejects(
+      () => ensurePrincipalPassword("appuser", hash, run),
+      TypeError,
+      "Invalid principal password hash",
+    );
+    assertEquals(calls.some((c) => c.args.includes("chpasswd")), false);
+  }
+});
+
+test("ensurePrincipalPassword accepts an explicit rounds parameter", async () => {
+  const withRounds = `$6$rounds=100000$saltstring$${"a".repeat(86)}`;
+  const { run, calls } = captureRun({ getentShadow: shadowEntry("!") });
+  await ensurePrincipalPassword("appuser", withRounds, run);
+  const chpasswd = calls.find((c) => c.args.includes("chpasswd"));
+  assertEquals(chpasswd?.stdin, `appuser:${withRounds}\n`);
+});
+
+test("a failed password set is loud", async () => {
+  const { run } = captureRun({ getentShadow: shadowEntry("!") });
+  const failing: RunFn = (command, args, stdin) => {
+    if (args.includes("chpasswd")) {
+      return Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr: "chpasswd denied",
+      });
+    }
+    return run(command, args, stdin);
+  };
+  await assertRejects(
+    () => ensurePrincipalPassword("appuser", VALID_HASH, failing),
+    Error,
+    "chpasswd denied",
+  );
+});
+
+test("a failed password lock is loud", async () => {
+  const { run } = captureRun({ getentShadow: shadowEntry(OTHER_HASH) });
+  const failing: RunFn = (command, args, stdin) => {
+    if (args.includes("usermod")) {
+      return Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr: "usermod denied",
+      });
+    }
+    return run(command, args, stdin);
+  };
+  // A password that silently outlives its revocation is a security problem.
+  await assertRejects(
+    () => ensurePrincipalPassword("appuser", undefined, failing),
+    Error,
+    "usermod denied",
+  );
+});
+
+test("ensureSystemPrincipals applies the spec's password hash", async () => {
+  const { run, calls } = captureRun({ getentShadow: shadowEntry("!") });
+  await ensureSystemPrincipals(stubLayout(), [{
+    ...baseSpec,
+    home: defaultHome,
+    shell: "/bin/bash",
+    passwordHash: VALID_HASH,
+  }], run);
+  const chpasswd = calls.find((c) => c.args.includes("chpasswd"));
+  assertEquals(chpasswd?.stdin, `appuser:${VALID_HASH}\n`);
+});
+
+test("ensureSystemPrincipals locks the password when the spec carries none", async () => {
+  const { run, calls } = captureRun({ getentShadow: shadowEntry(OTHER_HASH) });
+  await ensureSystemPrincipals(stubLayout(), [{
+    ...baseSpec,
+    home: defaultHome,
+    shell: "/bin/bash",
+  }], run);
+  const lock = calls.find((c) =>
+    c.args.includes("usermod") && c.args.includes("-p")
+  );
+  assertEquals(lock?.args, ["-n", "usermod", "-p", "!", "appuser"]);
 });

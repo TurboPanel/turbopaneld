@@ -15,32 +15,31 @@ function readKbField(
   return undefined;
 }
 
+/**
+ * Parse `/proc/meminfo` into raw byte gauges — no derived percentages
+ * (used/percent math is an API-side concern in the v2 contract).
+ *
+ * Swap-absent hosts (missing `SwapTotal`/`SwapFree` lines, or a zero
+ * `SwapTotal`) yield `null` for both swap fields, never `0`.
+ */
 export function parseMeminfo(text: string): MemoryGauges | null {
   const lines = text.split("\n");
   const memTotal = readKbField(lines, "MemTotal");
   const memAvailable = readKbField(lines, "MemAvailable");
+  const memFree = readKbField(lines, "MemFree");
   const swapTotal = readKbField(lines, "SwapTotal");
   const swapFree = readKbField(lines, "SwapFree");
 
   if (memTotal === undefined || memAvailable === undefined) return null;
 
-  const memoryUsedBytes = memTotal - memAvailable;
-  const memoryAvailableBytes = memAvailable;
-  const memoryUsedPercent = memTotal > 0
-    ? (memoryUsedBytes / memTotal) * 100
-    : 0;
-
-  let swapUsedPercent: number | null = null;
-  if (
-    swapTotal !== undefined && swapFree !== undefined && swapTotal > 0
-  ) {
-    swapUsedPercent = ((swapTotal - swapFree) / swapTotal) * 100;
-  }
+  const swapAbsent = swapTotal === undefined || swapFree === undefined ||
+    swapTotal <= 0;
 
   return {
-    memoryUsedBytes,
-    memoryAvailableBytes,
-    memoryUsedPercent,
-    swapUsedPercent,
+    totalBytes: memTotal,
+    availableBytes: memAvailable,
+    freeBytes: memFree ?? null,
+    swapTotalBytes: swapAbsent ? null : swapTotal,
+    swapFreeBytes: swapAbsent ? null : swapFree,
   };
 }

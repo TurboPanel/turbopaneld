@@ -1,5 +1,11 @@
 import { assertEquals } from "@std/assert";
-import { createMetricsCollector } from "./index.ts";
+import {
+  createCachedDockerDataRoot,
+  createMetricsCollector,
+  DOCKER_DATA_ROOT_RETRY_MS,
+} from "./index.ts";
+import { METRICS_SCHEMA_VERSION } from "../contract.ts";
+import type { CollectorDeps } from "./types.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -9,23 +15,39 @@ import { createMetricsCollector } from "./index.ts";
  */
 const test = Deno.test.bind(Deno);
 
+function inertDeps(): Partial<CollectorDeps> {
+  return {
+    readProcFile: () => undefined,
+    statfs: () => null,
+    now: () => 0,
+    countProcesses: () => null,
+    resolveDimensions: () => ({
+      schemaVersion: METRICS_SCHEMA_VERSION,
+      daemonVersion: "test",
+      operatingSystem: "linux",
+      architecture: "x86_64",
+      kernelRelease: "",
+    }),
+    resolveDockerDataRoot: () => Promise.resolve(null),
+    resolveHostingPath: () => "/srv/users",
+    readSensors: () =>
+      Promise.resolve({
+        cpuTemperatureCelsius: null,
+        gpuTemperatureCelsius: null,
+        gpuPowerWatts: null,
+        cpuEnergy: null,
+        sensors: {},
+      }),
+    resolveFabricInterfaces: () => Promise.resolve(["tp0"]),
+    resolveAdminSensorOverrides: () => Promise.resolve({}),
+  };
+}
+
 test({
   name: "createMetricsCollector returns supported on linux with injected deps",
   ignore: Deno.build.os !== "linux",
   async fn() {
-    const collector = createMetricsCollector({
-      readProcFile: () => undefined,
-      statfs: () => null,
-      now: () => 0,
-      countProcesses: () => null,
-      resolveDimensions: () => ({
-        schemaVersion: 1,
-        daemonVersion: "test",
-        operatingSystem: "linux",
-        architecture: "x86_64",
-        kernelRelease: "",
-      }),
-    });
+    const collector = createMetricsCollector(inertDeps());
     const result = await collector.collect({ sequence: 0 });
     assertEquals(result.supported, true);
   },
@@ -47,29 +69,62 @@ test("createMetricsCollector returns unsupported on non-linux via options.os", a
   }
 });
 
+test("createCachedDockerDataRoot caches a successful resolution forever", async () => {
+  let calls = 0;
+  const cached = createCachedDockerDataRoot(
+    () => {
+      calls += 1;
+      return Promise.resolve("/var/lib/docker");
+    },
+    () => 0,
+  );
+  assertEquals(await cached(), "/var/lib/docker");
+  assertEquals(await cached(), "/var/lib/docker");
+  assertEquals(calls, 1);
+});
+
+test("createCachedDockerDataRoot bounds re-probes after failure", async () => {
+  let calls = 0;
+  let nowMs = 0;
+  let answer: string | undefined = undefined;
+  const cached = createCachedDockerDataRoot(
+    () => {
+      calls += 1;
+      return Promise.resolve(answer);
+    },
+    () => nowMs,
+  );
+
+  // Repeated collects inside the cooldown never re-probe.
+  assertEquals(await cached(), null);
+  nowMs = 60_000;
+  assertEquals(await cached(), null);
+  assertEquals(calls, 1);
+
+  // After the cooldown the probe runs again and a success sticks.
+  nowMs = DOCKER_DATA_ROOT_RETRY_MS;
+  answer = "/mnt/docker-data";
+  assertEquals(await cached(), "/mnt/docker-data");
+  assertEquals(await cached(), "/mnt/docker-data");
+  assertEquals(calls, 2);
+});
+
 test({
   name:
     "createMetricsCollector merges default statfs when other deps are overridden",
   ignore: Deno.build.os !== "linux",
   async fn() {
-    const collector = createMetricsCollector({
-      readProcFile: () => undefined,
-      now: () => 1_000,
-      countProcesses: () => 7,
-      resolveDimensions: () => ({
-        schemaVersion: 1,
-        daemonVersion: "test",
-        operatingSystem: "linux",
-        architecture: "x86_64",
-        kernelRelease: "fixture",
-      }),
-    });
+    const deps = inertDeps();
+    delete deps.statfs;
+    const collector = createMetricsCollector({ ...deps, now: () => 1_000 });
     const result = await collector.collect({ sequence: 1 });
     assertEquals(result.supported, true);
     if (!result.supported) return;
-    const disk = result.sample.metrics.diskUsedPercent;
-    if (disk !== null && typeof disk !== "number") {
-      throw new TypeError("diskUsedPercent must be a number when present");
+    const total = result.sample.metrics.systemStorageTotalBytes;
+    if (total !== null && typeof total !== "number") {
+      throw new TypeError(
+        "systemStorageTotalBytes must be a number when present",
+      );
     }
   },
 });

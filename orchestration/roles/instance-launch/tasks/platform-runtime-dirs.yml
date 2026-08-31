@@ -35,6 +35,25 @@
       )
     }}
 
+# DuckDB + Parquet server-metrics store root (matches instance
+# resolveMetricsDir / TURBOPANEL_METRICS_DIR in the instance unit). The store
+# constructor mkdirs these lazily, but on managed installs the instance runs
+# as tpctrl under a tp-owned /var/lib/turbopanel (0750) where that mkdir
+# fails and store selection silently falls back to the disabled store —
+# provision and repair the tree here so fresh installs come up with server
+# metrics enabled. In co-located dev instance_user is the dev user.
+- name: Ensure DuckDB metrics state directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ instance_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "2770"
+  loop:
+    - "{{ turbopanel_metrics_dir }}"
+    - "{{ turbopanel_metrics_dir }}/parquet"
+    - "{{ turbopanel_metrics_dir }}/tmp"
+
 - name: Ensure Caddy runtime directories
   ansible.builtin.file:
     path: "{{ item }}"

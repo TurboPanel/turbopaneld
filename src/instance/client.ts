@@ -61,8 +61,19 @@ import { decodeBase64 } from "@std/encoding/base64";
 import { getBuildInfo } from "../build-info.ts";
 import { IdlePresence } from "./idle-presence.ts";
 import type { MetricsCollector } from "../metrics/collector/index.ts";
+import {
+  collectMetricsCapabilities,
+  type MetricsCapabilities,
+} from "../metrics/capabilities.ts";
 import type { MetricsScheduler } from "../metrics/scheduler.ts";
 import { rebindMetricsScheduler } from "../metrics/scheduler.ts";
+import { LiveLeaseManager } from "../metrics/live-leases.ts";
+import { writeSensorOverrides } from "../metrics/collector/sensors/overrides.ts";
+import {
+  clearHostingPathOverride,
+  writeHostingPathOverride,
+} from "../metrics/collector/hosting.ts";
+import type { SensorOverrides } from "../metrics/collector/types.ts";
 import { resolveUpdateChannelConfig } from "../update/config.ts";
 import { resolveUpdate } from "../update/resolver.ts";
 import {
@@ -134,6 +145,58 @@ type DaemonMessage =
     type: "managed-logs-result";
     id: string;
     logs: string;
+    error?: string;
+    at: string;
+  }
+  | { type: "metrics-capabilities-request"; id: string; at: string }
+  | {
+    type: "metrics-capabilities-result";
+    id: string;
+    capabilities?: MetricsCapabilities;
+    error?: string;
+    at: string;
+  }
+  | {
+    type: "metrics-live-start";
+    id: string;
+    leaseId: string;
+    /** Advisory from the control plane; the daemon applies its own live cadence. */
+    intervalSeconds: number;
+    expiresAt: string;
+    at: string;
+  }
+  | {
+    type: "metrics-live-start-result";
+    id: string;
+    ok: boolean;
+    error?: string;
+    at: string;
+  }
+  | { type: "metrics-live-stop"; id: string; leaseId: string; at: string }
+  | {
+    type: "metrics-live-stop-result";
+    id: string;
+    ok: boolean;
+    error?: string;
+    at: string;
+  }
+  | {
+    type: "metrics-sensor-overrides-update";
+    id: string;
+    /** Full replacement — absent fields clear their overrides. */
+    overrides: {
+      cpuTemperature?: string;
+      gpuTemperature?: string;
+      cpuPower?: string;
+      gpuPower?: string;
+      hostingPath?: string;
+    };
+    at: string;
+  }
+  | {
+    type: "metrics-sensor-overrides-update-result";
+    id: string;
+    ok: boolean;
     error?: string;
     at: string;
   }
@@ -433,6 +496,12 @@ export class InstanceClient {
   #metricsScheduler: MetricsScheduler | undefined;
   /** Server id the current metrics scheduler was bound for (not `#tokenServerId`). */
   #metricsSchedulerServerId: string | undefined;
+  /**
+   * Live-metrics leases for the current socket session. Recreated fresh on
+   * every (re)connect and never persisted, so leases cannot survive a daemon
+   * restart or reconnect — a new session always starts at baseline cadence.
+   */
+  #liveLeases: LiveLeaseManager | undefined;
   readonly #metricsCollectorFactory?: () => MetricsCollector;
   readonly #applyDevSyncTarball?: DevSyncApplyFn;
   #updateInstallInProgress = false;
@@ -645,6 +714,8 @@ export class InstanceClient {
     this.#haObserver?.detach();
     this.#haObserver = undefined;
     this.#metricsScheduler?.detach();
+    this.#liveLeases?.dispose();
+    this.#liveLeases = undefined;
     this.#metricsScheduler = undefined;
     this.#metricsSchedulerServerId = undefined;
     this.#tokenManager?.stop();
@@ -1135,6 +1206,8 @@ export class InstanceClient {
       this.#idlePresence?.detach();
       this.#haObserver?.detach();
       this.#metricsScheduler?.detach();
+      // Live leases die with the socket — the next attach starts at baseline.
+      this.#liveLeases?.dispose();
       // Container log collection deliberately survives the socket. Tearing it
       // down here dropped every line a container printed during the outage —
       // the tails would be re-attached with no cursor on the next presence ack
@@ -1203,9 +1276,19 @@ export class InstanceClient {
       existingServerId: this.#metricsSchedulerServerId,
       serverId,
       collectorFactory: this.#metricsCollectorFactory,
+      schedulerOptions: {
+        collectionMode: () =>
+          this.#liveLeases?.collectionMode() ?? "baseline",
+      },
     });
     this.#metricsScheduler = rebound.scheduler;
     this.#metricsSchedulerServerId = rebound.serverId;
+    // Leases are session-scoped: a fresh manager per (re)connect guarantees
+    // any previous session's live cadence never leaks into the new one.
+    this.#liveLeases?.dispose();
+    this.#liveLeases = new LiveLeaseManager({
+      scheduler: rebound.scheduler,
+    });
   }
 
   #rehydrateDeploymentSecretsAfterConnect(): void {
@@ -1259,6 +1342,18 @@ export class InstanceClient {
         break;
       case "managed-logs-request":
         this.#collectManagedLogs(message, ws);
+        break;
+      case "metrics-capabilities-request":
+        this.#collectMetricsCapabilities(message, ws);
+        break;
+      case "metrics-live-start":
+        this.#applyLiveLeaseStart(message, ws);
+        break;
+      case "metrics-live-stop":
+        this.#applyLiveLeaseStop(message, ws);
+        break;
+      case "metrics-sensor-overrides-update":
+        this.#applySensorOverridesUpdate(message, ws);
         break;
       case "container-logs-request":
         this.#collectContainerLogs(message, ws);
@@ -1680,6 +1775,153 @@ export class InstanceClient {
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(result));
     }
+  }
+
+  #collectMetricsCapabilities(
+    message: Extract<DaemonMessage, { type: "metrics-capabilities-request" }>,
+    ws: WebSocket,
+  ): void {
+    void this.#collectMetricsCapabilitiesAsync(message, ws);
+  }
+
+  async #collectMetricsCapabilitiesAsync(
+    message: Extract<DaemonMessage, { type: "metrics-capabilities-request" }>,
+    ws: WebSocket,
+  ): Promise<void> {
+    let capabilities: MetricsCapabilities | undefined;
+    let error: string | undefined;
+    try {
+      capabilities = await collectMetricsCapabilities();
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+      logWarn(
+        "instance",
+        "collect metrics capabilities failed:",
+        sanitizeForLog(err),
+      );
+    }
+
+    const result: DaemonMessage = {
+      type: "metrics-capabilities-result",
+      id: message.id,
+      ...(capabilities === undefined ? {} : { capabilities }),
+      ...(error === undefined ? {} : { error }),
+      at: new Date().toISOString(),
+    };
+
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(result));
+    }
+  }
+
+  #applyLiveLeaseStart(
+    message: Extract<DaemonMessage, { type: "metrics-live-start" }>,
+    ws: WebSocket,
+  ): void {
+    let ok = false;
+    let error: string | undefined;
+    try {
+      const leases = this.#liveLeases;
+      if (!leases) throw new Error("metrics are not enabled on this daemon");
+      leases.start(message.leaseId, Date.parse(message.expiresAt));
+      ok = true;
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+      logWarn("instance", "live lease start failed:", sanitizeForLog(err));
+    }
+
+    const result: DaemonMessage = {
+      type: "metrics-live-start-result",
+      id: message.id,
+      ok,
+      ...(error === undefined ? {} : { error }),
+      at: new Date().toISOString(),
+    };
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result));
+  }
+
+  #applyLiveLeaseStop(
+    message: Extract<DaemonMessage, { type: "metrics-live-stop" }>,
+    ws: WebSocket,
+  ): void {
+    let ok = false;
+    let error: string | undefined;
+    try {
+      const leases = this.#liveLeases;
+      if (!leases) throw new Error("metrics are not enabled on this daemon");
+      leases.stop(message.leaseId);
+      ok = true;
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+      logWarn("instance", "live lease stop failed:", sanitizeForLog(err));
+    }
+
+    const result: DaemonMessage = {
+      type: "metrics-live-stop-result",
+      id: message.id,
+      ok,
+      ...(error === undefined ? {} : { error }),
+      at: new Date().toISOString(),
+    };
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result));
+  }
+
+  #applySensorOverridesUpdate(
+    message: Extract<DaemonMessage, { type: "metrics-sensor-overrides-update" }>,
+    ws: WebSocket,
+  ): void {
+    void this.#applySensorOverridesUpdateAsync(message, ws);
+  }
+
+  async #applySensorOverridesUpdateAsync(
+    message: Extract<DaemonMessage, { type: "metrics-sensor-overrides-update" }>,
+    ws: WebSocket,
+  ): Promise<void> {
+    let ok = false;
+    let error: string | undefined;
+    try {
+      const overrides = message.overrides ?? {};
+      const sensors: SensorOverrides = {};
+      if (typeof overrides.cpuTemperature === "string") {
+        sensors.cpuTemperature = overrides.cpuTemperature;
+      }
+      if (typeof overrides.gpuTemperature === "string") {
+        sensors.gpuTemperature = overrides.gpuTemperature;
+      }
+      if (typeof overrides.cpuPower === "string") {
+        sensors.cpuPower = overrides.cpuPower;
+      }
+      if (typeof overrides.gpuPower === "string") {
+        sensors.gpuPower = overrides.gpuPower;
+      }
+      // Full replacement: the pushed object is the complete override set.
+      await writeSensorOverrides(sensors);
+      if (
+        typeof overrides.hostingPath === "string" &&
+        overrides.hostingPath.length > 0
+      ) {
+        await writeHostingPathOverride(overrides.hostingPath);
+      } else {
+        await clearHostingPathOverride();
+      }
+      ok = true;
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+      logWarn(
+        "instance",
+        "sensor overrides update failed:",
+        sanitizeForLog(err),
+      );
+    }
+
+    const result: DaemonMessage = {
+      type: "metrics-sensor-overrides-update-result",
+      id: message.id,
+      ok,
+      ...(error === undefined ? {} : { error }),
+      at: new Date().toISOString(),
+    };
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result));
   }
 
   #collectContainerLogs(

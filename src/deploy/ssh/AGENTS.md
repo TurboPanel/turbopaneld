@@ -59,3 +59,14 @@ reconciled by `ensurePrincipalManagedGroups` in the same pass as runtime
 entitlements — one containment set (`allManagedGroups`), or a principal
 downgraded from shell to files-only would keep `tpshell` because the entitlement
 pass did not recognize it.
+
+**Password sign-in is a third group plus a shadow hash.** `tppasswd` is
+additive — its `Match` block sets only `PasswordAuthentication yes` and sits
+**first** in the drop-in, because when several `Match` blocks apply `sshd`
+takes the first instance of each keyword; everything else still comes from the
+member's level block, and non-members keep the level blocks' explicit `no`.
+The hash itself is sha512-crypt, computed control-plane side (the plaintext
+never rides the wire), applied by `ensurePrincipalPassword` in
+`ensure-principal.ts` via `chpasswd -e` over **stdin** — never argv, which
+`ps` can read. A material with no `passwordHash` locks the account password
+(`usermod -p !`), the state `useradd` created it in.

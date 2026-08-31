@@ -97,17 +97,6 @@ function assertNotIn(
   }
 }
 
-function parseYamlInt(yaml: string, key: string): number {
-  const match = new RegExp(
-    String.raw`^\s*${key}:\s*["']?(\d+)["']?\s*$`,
-    "m",
-  ).exec(yaml);
-  if (!match) {
-    throw new TypeError(`could not parse ${key} as integer from YAML`);
-  }
-  return Number(match[1]);
-}
-
 test("checked-in ansible.cfg defines vendored collections_path", async () => {
   const cfgPaths = [
     join(CHECKOUT_ORCHESTRATION_DIR, "ansible.cfg"),
@@ -189,7 +178,7 @@ test(
         `${unitPath}: must inject Environment=TURBOPANEL_USER={{ turbopanel_user }}`,
       );
     }
-    // Gate runtime.env on non-workers so Deno/compiled get ClickHouse + metrics env.
+    // Gate runtime.env on non-workers so Deno/compiled get the metrics env.
     assertMatch(
       unit,
       /turbopanel_instance_runtime[\s\S]*!= 'workers'[\s\S]*EnvironmentFile=-\{\{\s*turbopanel_instance_runtime_env\s*\}\}/,
@@ -261,208 +250,6 @@ test(
       if (template.includes("TURBOPANEL_SERVER_METRICS_ENABLED")) {
         throw new Error(
           `${relPath} must not expose TURBOPANEL_SERVER_METRICS_ENABLED (metrics are always on)`,
-        );
-      }
-    }
-  },
-);
-
-test(
-  "clickhouse users.xml keeps only bootstrap default; config.json names separate password files",
-  async () => {
-    const usersPath = join(
-      CHECKOUT_ORCHESTRATION_DIR,
-      "roles/clickhouse/templates/users.xml.j2",
-    );
-    const configPath = join(
-      CHECKOUT_ORCHESTRATION_DIR,
-      "roles/clickhouse/templates/clickhouse-config.json.j2",
-    );
-    const users = await Deno.readTextFile(usersPath);
-    const config = await Deno.readTextFile(configPath);
-    if (/<\{\{\s*clickhouse_app_user\s*\}\}>/.test(users)) {
-      throw new Error(
-        `${usersPath}: app user must not be declared in users.xml (SQL-only)`,
-      );
-    }
-    assertMatch(
-      users,
-      /_clickhouse_admin_password/,
-      "users.xml uses admin password fact",
-    );
-    assertMatch(
-      config,
-      /\.clickhouse_admin_pass/,
-      "config.json references admin password file",
-    );
-    assertMatch(
-      config,
-      /\.clickhouse_app_pass/,
-      "config.json references app password file",
-    );
-  },
-);
-
-test(
-  "clickhouse low-footprint defaults pin cache size and container resource caps",
-  async () => {
-    const defaultsPath = join(
-      CHECKOUT_ORCHESTRATION_DIR,
-      "roles/clickhouse/defaults/main.yml",
-    );
-    const configPath = join(
-      CHECKOUT_ORCHESTRATION_DIR,
-      "roles/clickhouse/templates/config.xml.j2",
-    );
-    // Container resource caps (mem_limit/cpus) are rendered into the shared
-    // turbopanel-system Compose file by system-compose, not a per-role docker
-    // run/inspect path — see roles/system-compose/templates/docker-compose.yml.j2.
-    const composeTemplatePath = join(
-      CHECKOUT_ORCHESTRATION_DIR,
-      "roles/system-compose/templates/docker-compose.yml.j2",
-    );
-    const defaults = await Deno.readTextFile(defaultsPath);
-    const config = await Deno.readTextFile(configPath);
-    const composeTemplate = await Deno.readTextFile(composeTemplatePath);
-
-    const markCache = parseYamlInt(defaults, "clickhouse_mark_cache_size");
-    const serverMemory = parseYamlInt(
-      defaults,
-      "clickhouse_max_server_memory_usage",
-    );
-    const memoryBytes = parseYamlInt(
-      defaults,
-      "clickhouse_container_memory_bytes",
-    );
-
-    // Ceilings: catch silent upward regressions of the low-footprint profile.
-    if (markCache > 67_108_864) {
-      throw new Error(
-        `${defaultsPath}: clickhouse_mark_cache_size=${markCache} exceeds 64 MiB ceiling`,
-      );
-    }
-    if (serverMemory > 536_870_912) {
-      throw new Error(
-        `${defaultsPath}: clickhouse_max_server_memory_usage=${serverMemory} exceeds 512 MiB ceiling`,
-      );
-    }
-    if (memoryBytes > 805_306_368) {
-      throw new Error(
-        `${defaultsPath}: clickhouse_container_memory_bytes=${memoryBytes} exceeds 768 MiB ceiling`,
-      );
-    }
-
-    // Single memory source: the Compose template and cache-size config must
-    // share the byte var (no parallel clickhouse_container_memory string that
-    // can diverge).
-    if (/^\s*clickhouse_container_memory:/m.test(defaults)) {
-      throw new Error(
-        `${defaultsPath}: clickhouse_container_memory must not exist; use clickhouse_container_memory_bytes only`,
-      );
-    }
-    assertMatch(
-      composeTemplate,
-      /mem_limit:\s*\{\{\s*clickhouse_container_memory_bytes\s*\}\}/,
-      "compose template sets mem_limit from clickhouse_container_memory_bytes",
-    );
-
-    assertMatch(
-      config,
-      /<mark_cache_size>\{\{\s*clickhouse_mark_cache_size\s*\}\}<\/mark_cache_size>/,
-      "config.xml.j2 renders mark_cache_size from defaults",
-    );
-    assertMatch(
-      config,
-      /<max_server_memory_usage>\{\{\s*clickhouse_max_server_memory_usage\s*\}\}<\/max_server_memory_usage>/,
-      "config.xml.j2 renders max_server_memory_usage from defaults",
-    );
-    assertMatch(
-      composeTemplate,
-      /cpus:\s*"\{\{\s*clickhouse_container_cpus\s*\}\}"/,
-      "compose template sets cpus from clickhouse_container_cpus",
-    );
-  },
-);
-
-test(
-  "clickhouse config.xml.j2 comments never contain XML-illegal double hyphens",
-  async () => {
-    const configPath = join(
-      CHECKOUT_ORCHESTRATION_DIR,
-      "roles/clickhouse/templates/config.xml.j2",
-    );
-    const config = await Deno.readTextFile(configPath);
-    // XML comments may not contain "--" (SAXParseException / CH refuses to boot).
-    const commentBodies = [...config.matchAll(/<!--([\s\S]*?)-->/g)].map(
-      (match) => match[1]!,
-    );
-    for (const body of commentBodies) {
-      if (body.includes("--")) {
-        throw new Error(
-          `${configPath}: XML comment contains "--" (illegal; breaks ClickHouse config merge):\n${
-            body.slice(0, 200)
-          }`,
-        );
-      }
-    }
-  },
-);
-
-test(
-  "clickhouse bootstrap drops the retired container_logs table",
-  async () => {
-    const tasksPath = join(
-      CHECKOUT_ORCHESTRATION_DIR,
-      "roles/clickhouse/tasks/bootstrap.yml",
-    );
-    const tasks = await Deno.readTextFile(tasksPath);
-    const drop = "DROP TABLE IF EXISTS turbopanel_metrics.container_logs";
-    if (!tasks.includes(drop)) {
-      throw new Error(
-        `${tasksPath}: expected retired container_logs drop (${drop})`,
-      );
-    }
-    const forbidden = [
-      "CREATE TABLE IF NOT EXISTS {{ clickhouse_database }}.container_logs",
-      "MODIFY TTL timestamp + INTERVAL {{ clickhouse_container_logs_retention_days }}",
-    ];
-    for (const fragment of forbidden) {
-      if (tasks.includes(fragment)) {
-        throw new Error(
-          `${tasksPath}: retired container_logs DDL must not remain (${fragment})`,
-        );
-      }
-    }
-  },
-);
-
-test(
-  "clickhouse system-log DROP cleanup stays aligned with config.xml remove list",
-  async () => {
-    const configPath = join(
-      CHECKOUT_ORCHESTRATION_DIR,
-      "roles/clickhouse/templates/config.xml.j2",
-    );
-    const tasksPath = join(
-      CHECKOUT_ORCHESTRATION_DIR,
-      "roles/clickhouse/tasks/bootstrap.yml",
-    );
-    const config = await Deno.readTextFile(configPath);
-    const tasks = await Deno.readTextFile(tasksPath);
-
-    const removedLogs = [
-      ...config.matchAll(/<([a-z0-9_]+)\s+remove="remove"\s*\/>/g),
-    ].map((match) => match[1]!);
-    if (removedLogs.length === 0) {
-      throw new Error(
-        `${configPath}: expected at least one <*_log remove="remove"/> entry`,
-      );
-    }
-    for (const logName of removedLogs) {
-      const drop = `DROP TABLE IF EXISTS system.${logName};`;
-      if (!tasks.includes(drop)) {
-        throw new Error(
-          `${tasksPath}: missing cleanup for disabled system log ${logName} (expected ${drop})`,
         );
       }
     }
@@ -831,7 +618,6 @@ test("TUI orchestration script fetches Docker Galaxy before docker-using playboo
       "docker-setup.yml",
       "postgres-setup.yml",
       "rabbitmq-setup.yml",
-      "clickhouse-setup.yml",
     ]
   ) {
     if (!script.includes(`"${playbook}"`)) {
@@ -1518,11 +1304,6 @@ test("docker-backed optional roles gate readiness and stop disabled containers",
       role: "mailpit",
       optionalVar: "turbopanel_optional_mailpit",
       containers: ["mailpit_container_name"],
-    },
-    {
-      role: "tabix",
-      optionalVar: "turbopanel_optional_tabix",
-      containers: ["tabix_container_name"],
     },
     {
       role: "redis-insight",

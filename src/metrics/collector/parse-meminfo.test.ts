@@ -8,38 +8,34 @@ function fixture(name: string): string {
   );
 }
 
-it("parseMeminfo derives memory and swap percentages", () => {
+it("parseMeminfo passes raw byte gauges through without percent math", () => {
   const mem = parseMeminfo(fixture("proc-meminfo.txt"));
-  assertEquals(mem !== null, true);
-  assertEquals(mem!.memoryUsedBytes, 4000000 * 1024);
-  assertEquals(mem!.memoryAvailableBytes, 4000000 * 1024);
-  assertEquals(mem!.memoryUsedPercent, 50);
-  assertEquals(mem!.swapUsedPercent, 50);
+  assertEquals(mem, {
+    totalBytes: 8000000 * 1024,
+    availableBytes: 4000000 * 1024,
+    freeBytes: 2000000 * 1024,
+    swapTotalBytes: 2000000 * 1024,
+    swapFreeBytes: 1000000 * 1024,
+  });
 });
 
-it("parseMeminfo returns null swap percent when SwapTotal is 0", () => {
+it("parseMeminfo nulls both swap fields (never 0) on a swap-absent host", () => {
   const mem = parseMeminfo(fixture("proc-meminfo-no-swap.txt"));
-  assertEquals(mem !== null, true);
-  assertEquals(mem!.swapUsedPercent, null);
+  if (!mem) throw new TypeError("expected gauges for swap-absent host");
+  assertEquals(mem.swapTotalBytes, null);
+  assertEquals(mem.swapFreeBytes, null);
+  assertEquals(mem.totalBytes, 8000000 * 1024);
+});
+
+it("parseMeminfo nulls swap when the lines are missing entirely", () => {
+  const mem = parseMeminfo("MemTotal: 2000 kB\nMemAvailable: 500 kB\n");
+  if (!mem) throw new TypeError("expected gauges without swap lines");
+  assertEquals(mem.swapTotalBytes, null);
+  assertEquals(mem.swapFreeBytes, null);
+  assertEquals(mem.freeBytes, null);
 });
 
 it("parseMeminfo returns null when MemTotal or MemAvailable is missing", () => {
   assertEquals(parseMeminfo("SwapTotal: 1000 kB\n"), null);
   assertEquals(parseMeminfo("MemTotal: 1000 kB\n"), null);
-});
-
-it("parseMeminfo reports zero used percent when MemTotal is 0", () => {
-  const mem = parseMeminfo(
-    "MemTotal: 0 kB\nMemAvailable: 0 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n",
-  );
-  if (!mem) throw new TypeError("expected gauges for zero MemTotal");
-  assertEquals(mem.memoryUsedPercent, 0);
-  assertEquals(mem.swapUsedPercent, null);
-});
-
-it("parseMeminfo leaves swapUsedPercent null when swap fields are absent", () => {
-  const mem = parseMeminfo("MemTotal: 2000 kB\nMemAvailable: 500 kB\n");
-  if (!mem) throw new TypeError("expected gauges without swap");
-  assertEquals(mem.memoryUsedBytes, 1500 * 1024);
-  assertEquals(mem.swapUsedPercent, null);
 });

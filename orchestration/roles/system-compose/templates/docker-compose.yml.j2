@@ -1,11 +1,11 @@
 # Managed by TurboPanel (system-compose role) — do not edit by hand.
 #
-# Regenerated on every converge from the postgres/rabbitmq/clickhouse role
+# Regenerated on every converge from the postgres/rabbitmq role
 # defaults (image, uid/gid, ports, users, …) plus secrets slurped directly
 # from their generated password files. A service block below only renders
-# once that service's role has generated its secret; `queue` / `analytics`
-# are additionally omitted on Workers runtime (Mailgun / Cloudflare
-# Analytics Engine replace them — see ../../turbopanel/AGENTS.md).
+# once that service's role has generated its secret; `queue` is
+# additionally omitted on Workers runtime (Mailgun replaces it — see
+# ../../turbopanel/AGENTS.md).
 #
 # Labels intentionally carry ONLY `com.turbopanel.system.component` +
 # `turbopanel.role: turbopanel` — never `com.turbopanel.service`, `traefik.enable`,
@@ -61,31 +61,6 @@ services:
       com.turbopanel.system.component: queue
       turbopanel.role: turbopanel
 {% endif %}
-{% if _system_compose_analytics_active %}
-  analytics:
-    image: {{ clickhouse_image }}
-    container_name: {{ clickhouse_container_name }}
-    restart: unless-stopped
-    user: "{{ clickhouse_container_uid }}:{{ clickhouse_container_gid }}"
-    networks:
-      - {{ turbopanel_docker_network }}
-    volumes:
-      - {{ clickhouse_volume_name }}:/var/lib/clickhouse
-      - {{ clickhouse_log_dir }}:/var/log/clickhouse-server
-      - {{ turbopanel_config_dir }}/clickhouse/config.xml:/etc/clickhouse-server/config.d/turbopanel.xml:ro
-      - {{ turbopanel_config_dir }}/clickhouse/users.xml:/etc/clickhouse-server/users.d/turbopanel.xml:ro
-    ulimits:
-      nofile:
-        soft: 262144
-        hard: 262144
-    mem_limit: {{ clickhouse_container_memory_bytes }}
-    cpus: "{{ clickhouse_container_cpus }}"
-    ports:
-      - "127.0.0.1:{{ clickhouse_http_port }}:8123"
-    labels:
-      com.turbopanel.system.component: analytics
-      turbopanel.role: turbopanel
-{% endif %}
 
 networks:
   {{ turbopanel_docker_network }}:
@@ -98,9 +73,5 @@ volumes:
 {% endif %}
 {% if _system_compose_queue_active %}
   {{ rabbitmq_volume_name }}:
-    external: true
-{% endif %}
-{% if _system_compose_analytics_active %}
-  {{ clickhouse_volume_name }}:
     external: true
 {% endif %}

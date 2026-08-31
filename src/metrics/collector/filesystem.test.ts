@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import { readRootFilesystemCapacity } from "./filesystem.ts";
+import { probeStorage } from "./filesystem.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -9,33 +9,31 @@ import { readRootFilesystemCapacity } from "./filesystem.ts";
  */
 const test = Deno.test.bind(Deno);
 
-test("readRootFilesystemCapacity returns a finite diskUsedPercent for /", async () => {
+test("probeStorage returns finite byte totals for /", async () => {
   // Uses node:fs/promises.statfs — keep this case outside a narrowed
   // permissions: {} sandbox (statfs is not covered by --allow-read alone).
-  const gauges = await readRootFilesystemCapacity("/");
-  if (gauges === null) {
-    throw new TypeError("expected capacity gauges for /");
+  const probe = await probeStorage("/");
+  if (probe === null) {
+    throw new TypeError("expected a storage probe for /");
   }
-  if (typeof gauges.diskUsedPercent !== "number") {
-    throw new TypeError("diskUsedPercent must be a number");
+  if (!Number.isFinite(probe.totalBytes) || probe.totalBytes <= 0) {
+    throw new TypeError("totalBytes must be finite and positive");
   }
-  if (!Number.isFinite(gauges.diskUsedPercent)) {
-    throw new TypeError("diskUsedPercent must be finite");
+  if (!Number.isFinite(probe.availableBytes) || probe.availableBytes < 0) {
+    throw new TypeError("availableBytes must be finite and non-negative");
   }
 });
 
-test("readRootFilesystemCapacity returns null for a missing path", async () => {
+test("probeStorage returns null for a missing path", async () => {
   assertEquals(
-    await readRootFilesystemCapacity(
-      "/no/such/turbopanel-filesystem-root",
-    ),
+    await probeStorage("/no/such/turbopanel-filesystem-root"),
     null,
   );
 });
 
-test("readRootFilesystemCapacity returns null for non-finite statfs fields", async () => {
+test("probeStorage returns null for non-finite or invalid statfs fields", async () => {
   assertEquals(
-    await readRootFilesystemCapacity("/", {
+    await probeStorage("/", {
       statfs: () => ({
         blocks: Number.NaN,
         bfree: 1,
@@ -46,18 +44,13 @@ test("readRootFilesystemCapacity returns null for non-finite statfs fields", asy
     null,
   );
   assertEquals(
-    await readRootFilesystemCapacity("/", {
-      statfs: () => ({
-        blocks: 100,
-        bfree: 10,
-        bavail: 10,
-        bsize: 0,
-      }),
+    await probeStorage("/", {
+      statfs: () => ({ blocks: 100, bfree: 10, bavail: 10, bsize: 0 }),
     }),
     null,
   );
   assertEquals(
-    await readRootFilesystemCapacity("/", {
+    await probeStorage("/", {
       statfs: () => ({
         blocks: 100,
         bfree: Number.POSITIVE_INFINITY,
@@ -68,7 +61,7 @@ test("readRootFilesystemCapacity returns null for non-finite statfs fields", asy
     null,
   );
   assertEquals(
-    await readRootFilesystemCapacity("/", {
+    await probeStorage("/", {
       statfs: () => ({
         blocks: 100,
         bfree: 10,
@@ -80,42 +73,37 @@ test("readRootFilesystemCapacity returns null for non-finite statfs fields", asy
   );
 });
 
-test("readRootFilesystemCapacity returns null when used+avail is zero", async () => {
+test("probeStorage returns null when raw capacity is zero", async () => {
   assertEquals(
-    await readRootFilesystemCapacity("/", {
-      statfs: () => ({
-        blocks: 100,
-        bfree: 100,
-        bavail: 0,
-        bsize: 4096,
-      }),
+    await probeStorage("/", {
+      statfs: () => ({ blocks: 0, bfree: 0, bavail: 0, bsize: 4096 }),
     }),
     null,
   );
 });
 
-test("readRootFilesystemCapacity returns null when injected statfs throws", async () => {
+test("probeStorage returns null when the injected statfs throws or yields null", async () => {
   assertEquals(
-    await readRootFilesystemCapacity("/", {
+    await probeStorage("/", {
       statfs: () => {
         throw new Error("statfs boom");
       },
     }),
     null,
   );
+  assertEquals(
+    await probeStorage("/", { statfs: () => null }),
+    null,
+  );
 });
 
-test("readRootFilesystemCapacity computes percent from injected statfs", async () => {
-  const gauges = await readRootFilesystemCapacity("/", {
-    statfs: () => ({
-      blocks: 1_000,
-      bfree: 400,
-      bavail: 300,
-      bsize: 4096,
-    }),
+test("probeStorage reports raw capacity: blocks * bsize, bavail * bsize", async () => {
+  // Reserved blocks stay in the denominator: total is the true filesystem
+  // capacity, not the legacy used + available reconstruction.
+  const probe = await probeStorage("/", {
+    statfs: () => ({ blocks: 1_000, bfree: 400, bavail: 300, bsize: 4096 }),
   });
-  if (!gauges) throw new TypeError("expected injected capacity gauges");
-  const used = (1_000 - 400) * 4096;
-  const avail = 300 * 4096;
-  assertEquals(gauges.diskUsedPercent, (used / (used + avail)) * 100);
+  if (!probe) throw new TypeError("expected injected storage probe");
+  assertEquals(probe.totalBytes, 1_000 * 4096);
+  assertEquals(probe.availableBytes, 300 * 4096);
 });

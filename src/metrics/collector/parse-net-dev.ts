@@ -1,30 +1,17 @@
-import type { NetCounters, NetInterfaceCounters } from "./types.ts";
-
 /**
- * Container/bridge/virtual interface prefixes excluded from host-summary totals
- * to avoid double-counting Docker/bridge traffic. Per-interface metrics is
- * future work (separate event type).
+ * Pure `/proc/net/dev` line parsing. Every interface is parsed and returned —
+ * classification (loopback / container-bridge / fabric / uplink) and
+ * aggregation happen afterwards in `network.ts`, never during parsing.
  */
-const EXCLUDED_PREFIXES = [
-  "veth",
-  "docker",
-  "br-",
-  "virbr",
-  "vnet",
-  "tap",
-  "tun",
-] as const;
-
-function isExcludedInterface(name: string): boolean {
-  if (name === "lo") return true;
-  return EXCLUDED_PREFIXES.some((prefix) => name.startsWith(prefix));
-}
+import type { NetInterfaceCounters } from "./types.ts";
 
 /**
- * Parse `/proc/net/dev` and return summed rx/tx byte counters.
+ * Parse `/proc/net/dev` into per-interface rx/tx byte counters.
  * rx = column 1, tx = column 9 (1-indexed) after the `iface:` label.
  */
-export function parseNetDev(text: string): NetCounters | null {
+export function parseNetDev(
+  text: string,
+): Record<string, NetInterfaceCounters> | null {
   const interfaces: Record<string, NetInterfaceCounters> = {};
 
   for (const line of text.split("\n")) {
@@ -32,7 +19,7 @@ export function parseNetDev(text: string): NetCounters | null {
     if (colon < 0) continue;
 
     const name = line.slice(0, colon).trim();
-    if (!name || isExcludedInterface(name)) continue;
+    if (!name || name.includes("|")) continue;
 
     const fields = line.slice(colon + 1).trim().split(/\s+/);
     if (fields.length < 9) continue;
@@ -45,10 +32,5 @@ export function parseNetDev(text: string): NetCounters | null {
   }
 
   if (Object.keys(interfaces).length === 0) return null;
-  return { interfaces };
-}
-
-/** Exported for tests. */
-export function isExcludedNetInterface(name: string): boolean {
-  return isExcludedInterface(name);
+  return interfaces;
 }

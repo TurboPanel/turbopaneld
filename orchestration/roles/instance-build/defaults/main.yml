@@ -21,3 +21,6 @@ turbopanel_instance_run_mode: source
 turbopanel_instance_dist_dir: "{{ turbopanel_instance_dir }}/dist"
 turbopanel_instance_binary: "{{ turbopanel_instance_dist_dir }}/turbopanel-instance"
 force_compile: false
+# Vendored libduckdb.so home — must match instance-launch's LD_LIBRARY_PATH
+# (turbopanel-instance.service.j2 compiled branch).
+turbopanel_duckdb_lib_dir: "{{ turbopanel_vendor_dir }}/duckdb/lib"

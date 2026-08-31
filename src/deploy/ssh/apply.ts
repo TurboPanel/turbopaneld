@@ -402,7 +402,8 @@ export async function applySshAccess(
 
   const sftpGroup = accessGroup("sftp");
   const shellGroup = accessGroup("shell");
-  if (!sftpGroup || !shellGroup) {
+  const passwordGroup = accessGroup("password");
+  if (!sftpGroup || !shellGroup || !passwordGroup) {
     throw new Error("runtime registry is missing an SSH access group");
   }
 
@@ -412,6 +413,7 @@ export async function applySshAccess(
     sshdDropInContent({
       sftpGroup,
       shellGroup,
+      passwordGroup,
       authorizedKeysDir: dir,
     }),
   );

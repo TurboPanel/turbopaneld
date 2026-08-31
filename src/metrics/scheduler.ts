@@ -16,6 +16,7 @@
  * in-flight emits across detach/reconnect.
  */
 import { logInfo, logWarn, sanitizeForLog } from "../logger.ts";
+import type { MetricsCollectionMode } from "./contract.ts";
 import type { MetricsCollector } from "./collector/index.ts";
 
 /** Steady metrics cadence (independent of IdlePresence / cell ping). */
@@ -74,6 +75,11 @@ export type MetricsSchedulerOptions = {
   clearTimeoutFn?: typeof clearTimeout;
   logRateLimitMs?: number;
   onLog?: (level: MetricsLogLevel, message: string) => void;
+  /**
+   * Per-tick collection mode, asked at emit time (live leases flip it without
+   * touching the scheduler). Defaults to always `"baseline"`.
+   */
+  collectionMode?: () => MetricsCollectionMode;
 };
 
 function defaultOnLog(level: MetricsLogLevel, message: string): void {
@@ -124,7 +130,8 @@ export function rebindMetricsScheduler(args: {
 export class MetricsScheduler {
   #serverId: string;
   readonly #collectorFactory: () => MetricsCollector;
-  readonly #intervalMs: number;
+  #intervalMs: number;
+  readonly #collectionMode: () => MetricsCollectionMode;
   readonly #jitterMaxMs: number;
   readonly #primeMs: number;
   readonly #now: () => number;
@@ -155,6 +162,7 @@ export class MetricsScheduler {
     this.#serverId = options.serverId;
     this.#collectorFactory = options.collectorFactory;
     this.#intervalMs = options.intervalMs ?? METRICS_INTERVAL_MS;
+    this.#collectionMode = options.collectionMode ?? (() => "baseline");
     this.#jitterMaxMs = options.jitterMaxMs ?? METRICS_JITTER_MAX_MS;
     this.#primeMs = options.primeMs ?? METRICS_PRIME_MS;
     this.#now = options.now ?? Date.now;
@@ -242,6 +250,28 @@ export class MetricsScheduler {
     }, this.#intervalMs);
   }
 
+  /**
+   * Change the steady cadence in place — re-arm without a detach/attach so the
+   * stateful collector (rate snapshots, sensor state) is preserved. When the
+   * interval timer is not armed yet (still in the primed-tick window) only the
+   * stored interval changes; the next {@link #armInterval} picks it up.
+   */
+  setIntervalMs(ms: number): void {
+    if (ms === this.#intervalMs) return;
+    this.#intervalMs = ms;
+    if (this.#intervalTimer === undefined) return;
+    this.#clearIntervalFn(this.#intervalTimer);
+    this.#intervalTimer = undefined;
+    const send = this.#send;
+    if (!send) return;
+    this.#armInterval(this.#attachGeneration, send);
+  }
+
+  /** Current steady cadence (test/introspection helper). */
+  intervalMs(): number {
+    return this.#intervalMs;
+  }
+
   detach(): void {
     this.#attachGeneration += 1;
     if (this.#firstTimer !== undefined) {
@@ -272,7 +302,10 @@ export class MetricsScheduler {
     try {
       let result;
       try {
-        result = await collector.collect({ sequence });
+        result = await collector.collect({
+          sequence,
+          collectionMode: this.#collectionMode(),
+        });
       } catch (err) {
         if (generation !== this.#attachGeneration) return;
         this.#logRateLimited(

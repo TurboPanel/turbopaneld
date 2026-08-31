@@ -343,6 +343,16 @@ export type EnvironmentDeployPrincipalMaterial = {
    * subsystem must not silently revoke every key on the host.
    */
   sshKeys?: string[];
+  /**
+   * sha512-crypt (`$6$…`) shadow hash for password sign-in, already computed
+   * control-plane side — the plaintext never rides the wire. Present means
+   * "ensure the account's shadow entry is exactly this"; absent means password
+   * sign-in is off and the account's password is **locked**. Absent-locks is
+   * safe rather than destructive because every principal is created locked
+   * (`useradd` without a password), so a payload from an older control plane
+   * reconciles to the state the account already had.
+   */
+  passwordHash?: string;
 };
 
 export type EnvironmentDeployServiceHook = {
@@ -445,6 +455,12 @@ export type EnvironmentDeploySite = {
  */
 export type EnvironmentDeploySourceBuild = {
   kind: "native" | "static" | "railpack";
+  /**
+   * Package manager for a `kind: 'native'` node-app install. Omitted means
+   * auto-detect from the lockfile after checkout. An explicit
+   * `installCommand` still wins over the derived install.
+   */
+  packageManager?: "npm" | "yarn" | "pnpm";
   installCommand?: string;
   buildCommand?: string;
   /**
@@ -475,6 +491,19 @@ export type EnvironmentDeployNativeAppService = {
   listenPort: number;
   framework: EnvironmentDeployNativeFramework;
   nodeVersion?: string;
+  /** `NODE_ENV` for the generated unit. Omitted means `production`. */
+  appMode?: "production" | "development";
+  /**
+   * Omitted means `true`. When `false` the unit is installed but stopped and
+   * disabled instead of started — the release stays promoted.
+   */
+  enabled?: boolean;
+  /**
+   * Script the vendored Node binary runs when `build.startCommand` is absent.
+   * Relative path — it lands in an `ExecStart` line. Omitted means the
+   * framework default (`server.js`).
+   */
+  startupFile?: string;
   /** Per-app unit ceiling: `cpus` → `CPUQuota`, `memoryBytes` → `MemoryMax`. */
   resources?: { cpus?: number; memoryBytes?: number };
   /**
@@ -2683,11 +2712,29 @@ function parsePrincipalMaterial(
       "sshKeys",
     );
   }
+  // Same second gate as sshKeys: this string lands in `/etc/shadow` via
+  // `chpasswd -e`, so only a well-formed sha512-crypt hash may pass — never a
+  // plaintext, an empty string, or anything with a `:` or newline that could
+  // smuggle a second shadow field.
+  const passwordHash = parsePrincipalOptionalString(
+    value.passwordHash,
+    "passwordHash",
+    (raw) => PASSWORD_HASH_RE.test(raw),
+  );
+  if (passwordHash !== undefined) material.passwordHash = passwordHash;
   return material;
 }
 
 /** Shape gate only — `allAccessGroups()` decides which names actually exist. */
 const ACCESS_GROUP_RE = /^[a-z][a-z0-9-]{0,31}$/;
+
+/**
+ * sha512-crypt: `$6$`, optional `rounds=`, 8-16 char salt, 86 char digest —
+ * the only format the control plane emits. Keep in sync with
+ * `PASSWORD_HASH_RE` in the instance's `src/lib/sha512-crypt.ts`.
+ */
+const PASSWORD_HASH_RE =
+  /^\$6\$(?:rounds=\d{4,9}\$)?[./0-9A-Za-z]{8,16}\$[./0-9A-Za-z]{86}$/;
 
 /**
  * `<type> <base64>`, anchored, with no third field.
@@ -2790,6 +2837,17 @@ const NATIVE_APP_FRAMEWORKS = new Set(["auto", "node", "next"]);
 /** Same shape as the instance parser — a range or tag is not a pin. */
 const NATIVE_APP_NODE_VERSION_RE = /^\d{1,3}(\.\d{1,3}){0,2}$/;
 
+const NATIVE_APP_MODES: ReadonlySet<string> = new Set([
+  "production",
+  "development",
+]);
+
+const NODE_PACKAGE_MANAGERS: ReadonlySet<string> = new Set([
+  "npm",
+  "yarn",
+  "pnpm",
+]);
+
 /**
  * Same rule the release engine applies to a release directory name, restated
  * here so a `serviceId` can never smuggle a path separator into the unit's
@@ -2855,6 +2913,24 @@ function parseNativeAppAccountLimits(
   };
 }
 
+function parseNativeAppNodeVersion(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !NATIVE_APP_NODE_VERSION_RE.test(value)) {
+    throw new TypeError("Invalid nativeAppServices nodeVersion");
+  }
+  return value;
+}
+
+function parseNativeAppMode(
+  value: unknown,
+): EnvironmentDeployNativeAppService["appMode"] | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !NATIVE_APP_MODES.has(value)) {
+    throw new TypeError("Invalid nativeAppServices appMode");
+  }
+  return value as EnvironmentDeployNativeAppService["appMode"];
+}
+
 function parseNativeAppService(
   value: unknown,
 ): EnvironmentDeployNativeAppService {
@@ -2875,14 +2951,23 @@ function parseNativeAppService(
     listenPort: parseSiteListenPort(value.listenPort),
     framework: value.framework as EnvironmentDeployNativeFramework,
   };
-  if (value.nodeVersion !== undefined) {
-    if (
-      typeof value.nodeVersion !== "string" ||
-      !NATIVE_APP_NODE_VERSION_RE.test(value.nodeVersion)
-    ) {
-      throw new TypeError("Invalid nativeAppServices nodeVersion");
+  const nodeVersion = parseNativeAppNodeVersion(value.nodeVersion);
+  if (nodeVersion !== undefined) app.nodeVersion = nodeVersion;
+  const appMode = parseNativeAppMode(value.appMode);
+  if (appMode !== undefined) app.appMode = appMode;
+  if (value.enabled !== undefined) {
+    if (typeof value.enabled !== "boolean") {
+      throw new TypeError("Invalid nativeAppServices enabled");
     }
-    app.nodeVersion = value.nodeVersion;
+    app.enabled = value.enabled;
+  }
+  if (value.startupFile !== undefined) {
+    // It becomes part of an ExecStart line, so it gets the same relative-path
+    // rule as outputDirectory, never the looser command rule.
+    if (!isSafeSourceSubdirectory(value.startupFile)) {
+      throw new TypeError("Invalid nativeAppServices startupFile");
+    }
+    app.startupFile = value.startupFile;
   }
   const resources = parseNativeAppResources(value.resources);
   if (resources) app.resources = resources;
@@ -3070,6 +3155,16 @@ function parseDeploySourceBuild(
   const build: EnvironmentDeploySourceBuild = {
     kind: value.kind as EnvironmentDeploySourceBuild["kind"],
   };
+  if (value.packageManager !== undefined) {
+    if (
+      typeof value.packageManager !== "string" ||
+      !NODE_PACKAGE_MANAGERS.has(value.packageManager)
+    ) {
+      throw new TypeError("Invalid sourceMaterial build packageManager");
+    }
+    build.packageManager = value
+      .packageManager as EnvironmentDeploySourceBuild["packageManager"];
+  }
   const installCommand = parseSourceBuildCommand(
     value.installCommand,
     "installCommand",

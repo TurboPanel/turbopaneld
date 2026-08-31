@@ -24,7 +24,7 @@
   "$accessGroupsComment": [
     "SSH access groups. Not entitlement groups, and deliberately not in the",
     "9900-9979 band: an entitlement group protects a binary's mode bits, while",
-    "these two only select an `sshd` Match block. They live here anyway because",
+    "these only select an `sshd` Match block. They live here anyway because",
     "revocation needs ONE containment set — ensurePrincipalManagedGroups removes",
     "stale membership only for names this file defines, so <user>-grp, tp, and",
     "anything an operator added by hand are never touched. Two files would mean",
@@ -32,7 +32,9 @@
     "",
     "One group per access level rather than one 'tpssh' group plus a shell",
     "check: sshd matches on groups, not on shells, so ForceCommand",
-    "internal-sftp has to hang off a group of its own."
+    "internal-sftp has to hang off a group of its own. 'password' is not a",
+    "level — it is an additive credential group whose Match block turns",
+    "PasswordAuthentication on for members; it rides alongside tpsftp/tpshell."
   ],
   "accessGroups": {
     "sftp": {
@@ -42,6 +44,10 @@
     "shell": {
       "group": "tpshell",
       "gid": 9985
+    },
+    "password": {
+      "group": "tppasswd",
+      "gid": 9984
     }
   },
   "runtimes": {

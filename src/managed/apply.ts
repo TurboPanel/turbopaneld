@@ -381,8 +381,17 @@ async function dropManagedUsers(
   ) {
     return;
   }
+  // Protect both admin identities: the static platform admin
+  // (engine.rootUsername) and the payload's exposed root credential
+  // (always a different, org-suffixed login — see AGENTS.md 9a).
+  const protectedUsernames = new Set([
+    engine.rootUsername,
+    ...(payload.credentials ?? [])
+      .filter((credential) => credential.role === "root")
+      .map((credential) => credential.username),
+  ]);
   const toDrop = payload.dropUsers.filter(
-    (username) => username !== engine.rootUsername,
+    (username) => !protectedUsernames.has(username),
   );
   if (toDrop.length === 0) return;
   const dropped = await engine.dropUsers(ctx, toDrop);
