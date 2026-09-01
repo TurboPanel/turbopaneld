@@ -1989,20 +1989,35 @@ export class InstanceClient {
     message: Extract<DaemonMessage, { type: "repo-read-request" }>,
     ws: WebSocket,
   ): Promise<void> {
-    let payload: DaemonMessage;
+    const payload = await this.#buildRepoReadPayload(message);
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(payload));
+    }
+  }
+
+  // Sealed `tpdaemon.…` envelope, unsealed through the same API path every
+  // deploy secret uses — the daemon never holds a long-lived key.
+  async #resolveRepoReadCredential(
+    message: Extract<DaemonMessage, { type: "repo-read-request" }>,
+  ): Promise<
+    { credential: string; credentialKind: "ssh_key" | "token" } | undefined
+  > {
+    if (message.credential === undefined) return undefined;
+    const apiClient = this.#apiClient;
+    if (!apiClient) throw new Error("api client unavailable");
+    const [plaintext] = await apiClient.decryptSecrets([message.credential]);
+    if (typeof plaintext !== "string") return undefined;
+    const credentialKind = message.credentialKind === "ssh_key"
+      ? "ssh_key"
+      : "token";
+    return { credential: plaintext, credentialKind };
+  }
+
+  async #buildRepoReadPayload(
+    message: Extract<DaemonMessage, { type: "repo-read-request" }>,
+  ): Promise<DaemonMessage> {
     try {
-      // Sealed `tpdaemon.…` envelope, unsealed through the same API path every
-      // deploy secret uses — the daemon never holds a long-lived key.
-      let credential: string | undefined;
-      if (message.credential !== undefined) {
-        const apiClient = this.#apiClient;
-        if (!apiClient) throw new Error("api client unavailable");
-        const [plaintext] = await apiClient.decryptSecrets([
-          message.credential,
-        ]);
-        credential = typeof plaintext === "string" ? plaintext : undefined;
-      }
-      const kind = message.credentialKind === "ssh_key" ? "ssh_key" : "token";
+      const credential = await this.#resolveRepoReadCredential(message);
       const result = await readRemoteFiles({
         cloneUrl: message.cloneUrl,
         ref: message.ref,
@@ -2011,14 +2026,12 @@ export class InstanceClient {
           ? {}
           : { listPath: message.listPath }),
         maxBytesPerFile: message.maxBytesPerFile,
-        ...(credential === undefined
-          ? {}
-          : { credential, credentialKind: kind }),
+        ...credential,
         ...(message.credentialUsername === undefined
           ? {}
           : { credentialUsername: message.credentialUsername }),
       });
-      payload = {
+      return {
         type: "repo-read-result",
         id: message.id,
         ok: true,
@@ -2029,7 +2042,7 @@ export class InstanceClient {
       };
     } catch (err) {
       logWarn("instance", "repository read failed:", sanitizeForLog(err));
-      payload = {
+      return {
         type: "repo-read-result",
         id: message.id,
         ok: false,
@@ -2040,10 +2053,6 @@ export class InstanceClient {
         ),
         at: new Date().toISOString(),
       };
-    }
-
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(payload));
     }
   }
 
