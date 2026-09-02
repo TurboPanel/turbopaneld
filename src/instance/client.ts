@@ -20,7 +20,10 @@ import {
   readDefaultRouteInterfaces,
   type ServerReportedIp,
 } from "../server-addresses.ts";
-import { readRemoteFiles } from "../deploy/release/read-remote-files.ts";
+import {
+  readRemoteFiles,
+  resolveDefaultBranch,
+} from "../deploy/release/read-remote-files.ts";
 import { collectManagedLogs } from "../managed/logs.ts";
 import { collectContainerLogs } from "../logs/container-tail.ts";
 import { handleFabricPathProbe } from "./commands/fabric.ts";
@@ -138,6 +141,22 @@ type DaemonMessage =
       reason?: string;
     }[];
     entries?: { path: string; kind: string }[];
+    error?: string;
+    at: string;
+  }
+  | {
+    type: "repo-default-branch-request";
+    id: string;
+    /** Anonymous only — the control plane never sends a credential here. */
+    cloneUrl: string;
+    at: string;
+  }
+  | {
+    type: "repo-default-branch-result";
+    id: string;
+    ok: boolean;
+    /** `null` when the remote answered but named no branch (an empty repo). */
+    defaultBranch?: string | null;
     error?: string;
     at: string;
   }
@@ -1360,6 +1379,9 @@ export class InstanceClient {
       case "repo-read-request":
         this.#readRepository(message, ws);
         break;
+      case "repo-default-branch-request":
+        this.#resolveRepoDefaultBranch(message, ws);
+        break;
       case "fabric-paths-request":
         this.#collectFabricPaths(message, ws);
         break;
@@ -2048,6 +2070,60 @@ export class InstanceClient {
         ok: false,
         // Sanitized: a git error can echo the clone URL, which for an HTTPS
         // token lane carries the credential in userinfo.
+        error: sanitizeForLog(
+          err instanceof Error ? err.message : String(err),
+        ),
+        at: new Date().toISOString(),
+      };
+    }
+  }
+
+  /**
+   * Answers the control plane's "what branch does this remote default to"
+   * request for a clone URL the operator gave no default branch — anonymous
+   * only, on the same correlated request channel `repo-read-request` uses.
+   */
+  #resolveRepoDefaultBranch(
+    message: Extract<DaemonMessage, { type: "repo-default-branch-request" }>,
+    ws: WebSocket,
+  ): void {
+    void this.#resolveRepoDefaultBranchAsync(message, ws);
+  }
+
+  async #resolveRepoDefaultBranchAsync(
+    message: Extract<DaemonMessage, { type: "repo-default-branch-request" }>,
+    ws: WebSocket,
+  ): Promise<void> {
+    const payload = await this.#buildRepoDefaultBranchPayload(message);
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(payload));
+    }
+  }
+
+  async #buildRepoDefaultBranchPayload(
+    message: Extract<DaemonMessage, { type: "repo-default-branch-request" }>,
+  ): Promise<DaemonMessage> {
+    try {
+      const result = await resolveDefaultBranch(message.cloneUrl);
+      return {
+        type: "repo-default-branch-result",
+        id: message.id,
+        ok: true,
+        defaultBranch: result.defaultBranch,
+        at: new Date().toISOString(),
+      };
+    } catch (err) {
+      logWarn(
+        "instance",
+        "resolve default branch failed:",
+        sanitizeForLog(err),
+      );
+      return {
+        type: "repo-default-branch-result",
+        id: message.id,
+        ok: false,
+        // Sanitized: same reasoning as `repo-read-result` — a git error can
+        // echo the clone URL.
         error: sanitizeForLog(
           err instanceof Error ? err.message : String(err),
         ),

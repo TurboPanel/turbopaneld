@@ -249,7 +249,8 @@ it({
 });
 
 it({
-  name: "connected client answers container-logs and repo-read requests",
+  name:
+    "connected client answers container-logs, repo-read, and repo-default-branch requests",
   permissions: {
     env: true,
     read: true,
@@ -337,6 +338,12 @@ it({
             maxBytesPerFile: 512,
             at: new Date().toISOString(),
           });
+          socket.receive({
+            type: "repo-default-branch-request",
+            id: "repo-branch-1",
+            cloneUrl: "https://example.test/repo.git",
+            at: new Date().toISOString(),
+          });
 
           await waitFor(
             "container-logs-result",
@@ -349,6 +356,14 @@ it({
             "repo-read-result",
             () =>
               lastFrameOfType(socket, "repo-read-result") ? true : undefined,
+            5_000,
+          );
+          await waitFor(
+            "repo-default-branch-result",
+            () =>
+              lastFrameOfType(socket, "repo-default-branch-result")
+                ? true
+                : undefined,
             5_000,
           );
           const container = lastFrameOfType(socket, "container-logs-result");

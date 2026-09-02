@@ -1,5 +1,5 @@
 import { assertEquals, assertRejects } from "@std/assert";
-import { readRemoteFiles } from "./read-remote-files.ts";
+import { readRemoteFiles, resolveDefaultBranch } from "./read-remote-files.ts";
 
 const test = Deno.test.bind(Deno);
 
@@ -196,5 +196,53 @@ test("readRemoteFiles cleans up even when the read throws", async () => {
     assertEquals([...Deno.readDirSync(scratchRoot)], []);
   } finally {
     await Deno.remove(scratchRoot, { recursive: true });
+  }
+});
+
+test("resolveDefaultBranch reports the remote's HEAD branch", async () => {
+  const repo = await makeRepo();
+  try {
+    const result = await resolveDefaultBranch(repo.path);
+    assertEquals(result.defaultBranch, "main");
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test('resolveDefaultBranch is not hardcoded to "main"', async () => {
+  const path = await Deno.makeTempDir({ prefix: "tp-repo-fixture-" });
+  try {
+    await git(["init", "-q", "-b", "trunk"], path);
+    await git(["config", "user.email", "t@example.com"], path);
+    await git(["config", "user.name", "T"], path);
+    await Deno.writeTextFile(`${path}/README.md`, "hello\n");
+    await git(["add", "-A"], path);
+    await git(["commit", "-qm", "init"], path);
+
+    const result = await resolveDefaultBranch(path);
+    assertEquals(result.defaultBranch, "trunk");
+  } finally {
+    await Deno.remove(path, { recursive: true });
+  }
+});
+
+test("resolveDefaultBranch fails loudly on an unreachable remote", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    await assertRejects(() => resolveDefaultBranch(`${dir}/does-not-exist`));
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("resolveDefaultBranch leaves no scratch directory behind", async () => {
+  const repo = await makeRepo();
+  const scratchRoot = await Deno.makeTempDir({ prefix: "tp-scratch-root-" });
+  try {
+    await resolveDefaultBranch(repo.path, scratchRoot);
+    assertEquals([...Deno.readDirSync(scratchRoot)], []);
+  } finally {
+    await Deno.remove(scratchRoot, { recursive: true });
+    await repo.cleanup();
   }
 });

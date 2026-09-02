@@ -202,6 +202,56 @@ async function discardScratch(
   }
 }
 
+export type ResolveDefaultBranchResult = { defaultBranch: string | null };
+
+/** `ref: refs/heads/<name>\tHEAD` — the line `ls-remote --symref` answers with. */
+const SYMREF_HEAD_RE = /^ref:\s+refs\/heads\/(\S+)\s+HEAD$/m;
+
+/**
+ * The remote's default branch, via `ls-remote --symref` — no clone, no
+ * credential, no scratch git repository to init.
+ *
+ * Anonymous only: this is for a public clone URL that named no default
+ * branch, so the operator does not have to look one up by hand. A private
+ * remote still needs a name from the operator — resolving it would mean
+ * running this same read with the deploy key before they have confirmed it
+ * is even added to the repository, which `checkout.ts` does not do either.
+ */
+export async function resolveDefaultBranch(
+  cloneUrl: string,
+  scratchRoot = "/tmp",
+): Promise<ResolveDefaultBranchResult> {
+  const scratchDir = await Deno.makeTempDir({
+    dir: scratchRoot,
+    prefix: "tp-repo-branch-",
+  });
+  await Deno.chmod(scratchDir, 0o700);
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REPO_READ_TIMEOUT_MS);
+  const env = gitEnvironment(
+    { askpassPath: null, sshKeyPath: null, knownHostsPath: null },
+    scratchDir,
+  );
+
+  try {
+    const result = await runGit(
+      ["ls-remote", "--symref", cloneUrl, "HEAD"],
+      scratchDir,
+      env,
+      controller.signal,
+    );
+    if (!result.success) {
+      throw new Error(result.stderr || "git ls-remote failed");
+    }
+    const match = SYMREF_HEAD_RE.exec(new TextDecoder().decode(result.stdout));
+    return { defaultBranch: match?.[1] ?? null };
+  } finally {
+    clearTimeout(timeout);
+    await discardScratch(scratchDir, []);
+  }
+}
+
 export async function readRemoteFiles(
   params: ReadRemoteFilesParams,
   scratchRoot = "/tmp",
