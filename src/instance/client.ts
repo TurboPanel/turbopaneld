@@ -71,12 +71,13 @@ import {
 import type { MetricsScheduler } from "../metrics/scheduler.ts";
 import { rebindMetricsScheduler } from "../metrics/scheduler.ts";
 import { LiveLeaseManager } from "../metrics/live-leases.ts";
-import { writeSensorOverrides } from "../metrics/collector/sensors/overrides.ts";
 import {
-  clearHostingPathOverride,
-  writeHostingPathOverride,
-} from "../metrics/collector/hosting.ts";
-import type { SensorOverrides } from "../metrics/collector/types.ts";
+  resolveHardwareProfile,
+  writeHardwareProfile,
+} from "../metrics/collector/sensors/overrides.ts";
+import { handleDrivetempEnable } from "./commands/drivetemp.ts";
+import type { DrivetempEnableResult } from "./commands/contracts.ts";
+import type { HardwareProfile } from "../metrics/collector/types.ts";
 import { resolveUpdateChannelConfig } from "../update/config.ts";
 import { resolveUpdate } from "../update/resolver.ts";
 import {
@@ -202,14 +203,8 @@ type DaemonMessage =
   | {
     type: "metrics-sensor-overrides-update";
     id: string;
-    /** Full replacement — absent fields clear their overrides. */
-    overrides: {
-      cpuTemperature?: string;
-      gpuTemperature?: string;
-      cpuPower?: string;
-      gpuPower?: string;
-      hostingPath?: string;
-    };
+    /** Full replacement — absent fields clear their setting. */
+    overrides: HardwareProfile;
     at: string;
   }
   | {
@@ -217,6 +212,15 @@ type DaemonMessage =
     id: string;
     ok: boolean;
     error?: string;
+    /**
+     * Present when this push flipped `drivetempEnabled` false/unset → true —
+     * the module-load outcome plus sensor capabilities re-discovered right
+     * after, awaited before this result is sent (never a bare fire-and-forget
+     * ack). Absent when the flip edge didn't occur, or if the drivetemp
+     * command itself failed unexpectedly (logged; `ok` above still reflects
+     * whether the profile write succeeded).
+     */
+    drivetemp?: DrivetempEnableResult;
     at: string;
   }
   | {
@@ -1906,32 +1910,37 @@ export class InstanceClient {
   ): Promise<void> {
     let ok = false;
     let error: string | undefined;
+    let drivetemp: DrivetempEnableResult | undefined;
     try {
-      const overrides = message.overrides ?? {};
-      const sensors: SensorOverrides = {};
-      if (typeof overrides.cpuTemperature === "string") {
-        sensors.cpuTemperature = overrides.cpuTemperature;
-      }
-      if (typeof overrides.gpuTemperature === "string") {
-        sensors.gpuTemperature = overrides.gpuTemperature;
-      }
-      if (typeof overrides.cpuPower === "string") {
-        sensors.cpuPower = overrides.cpuPower;
-      }
-      if (typeof overrides.gpuPower === "string") {
-        sensors.gpuPower = overrides.gpuPower;
-      }
-      // Full replacement: the pushed object is the complete override set.
-      await writeSensorOverrides(sensors);
-      if (
-        typeof overrides.hostingPath === "string" &&
-        overrides.hostingPath.length > 0
-      ) {
-        await writeHostingPathOverride(overrides.hostingPath);
-      } else {
-        await clearHostingPathOverride();
-      }
+      const previous = await resolveHardwareProfile();
+      // Full replacement: the pushed object is the complete hardware profile.
+      await writeHardwareProfile(message.overrides ?? {});
       ok = true;
+
+      // A flip from false/unset to true is the only edge that should load
+      // the module — every later push with drivetempEnabled already true is
+      // a no-op here. Awaited (not fire-and-forget) so this result reports
+      // the real load outcome and refreshed sensor capabilities instead of
+      // acking before that work has even run. Its own try/catch: the profile
+      // write above is what `ok` reports, so a drivetemp-command failure
+      // here degrades only the `drivetemp` field, never the overall ack.
+      if (
+        message.overrides?.drivetempEnabled === true &&
+        previous.drivetempEnabled !== true
+      ) {
+        try {
+          drivetemp = await handleDrivetempEnable(
+            {},
+            new Date().toISOString(),
+          );
+        } catch (err) {
+          logWarn(
+            "instance",
+            "drivetemp enable failed:",
+            sanitizeForLog(err),
+          );
+        }
+      }
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
       logWarn(
@@ -1946,6 +1955,7 @@ export class InstanceClient {
       id: message.id,
       ok,
       ...(error === undefined ? {} : { error }),
+      ...(drivetemp === undefined ? {} : { drivetemp }),
       at: new Date().toISOString(),
     };
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result));

@@ -16,6 +16,7 @@ import {
   readHostResources,
   resetHostResourcesCacheForTests,
   stripPciHexPrefix,
+  virtualizationKindFromFacts,
 } from "./host-inventory.ts";
 
 function writeFile(path: string, contents: string): void {
@@ -1060,6 +1061,109 @@ exit 1
       assertEquals(resources.gpus[0].name, undefined);
       assertEquals(resources.gpus[0].vendorId, "0x10de");
       assertEquals(resources.gpus[1].name, "0x1002 0x73ff");
+    } finally {
+      Deno.removeSync(root, { recursive: true });
+      resetHostResourcesCacheForTests();
+    }
+  });
+
+  it("virtualizationKindFromFacts classifies common hypervisor signatures", () => {
+    assertEquals(
+      virtualizationKindFromFacts("Dell Inc.", "PowerEdge R640", undefined),
+      "bare-metal",
+    );
+    assertEquals(
+      virtualizationKindFromFacts(
+        "ASUSTeK COMPUTER INC.",
+        "ROG STRIX",
+        undefined,
+      ),
+      "bare-metal",
+    );
+    assertEquals(
+      virtualizationKindFromFacts("QEMU", undefined, undefined),
+      "qemu",
+    );
+    assertEquals(
+      virtualizationKindFromFacts(
+        "VMware, Inc.",
+        "VMware Virtual Platform",
+        undefined,
+      ),
+      "vmware",
+    );
+    assertEquals(
+      virtualizationKindFromFacts(
+        "Microsoft Corporation",
+        "Virtual Machine",
+        undefined,
+      ),
+      "hyperv",
+    );
+    assertEquals(
+      virtualizationKindFromFacts("innotek GmbH", "VirtualBox", undefined),
+      "virtualbox",
+    );
+    assertEquals(
+      virtualizationKindFromFacts("Xen", undefined, undefined),
+      "xen",
+    );
+  });
+
+  it("virtualizationKindFromFacts falls back to the hypervisor cpuinfo flag when DMI is unreadable", () => {
+    const withHypervisorFlag = [
+      "processor\t: 0",
+      "flags\t\t: fpu vme de pse hypervisor tsc",
+      "",
+    ].join("\n");
+    assertEquals(
+      virtualizationKindFromFacts(undefined, undefined, withHypervisorFlag),
+      "virtualized",
+    );
+
+    const withoutHypervisorFlag = [
+      "processor\t: 0",
+      "flags\t\t: fpu vme de pse tsc",
+      "",
+    ].join("\n");
+    assertEquals(
+      virtualizationKindFromFacts(undefined, undefined, withoutHypervisorFlag),
+      "bare-metal",
+    );
+
+    // No DMI and no flags line at all — no signal, never guess bare-metal.
+    assertEquals(
+      virtualizationKindFromFacts(undefined, undefined, "processor\t: 0\n"),
+      undefined,
+    );
+    assertEquals(
+      virtualizationKindFromFacts(undefined, undefined, undefined),
+      undefined,
+    );
+  });
+
+  it("readHostResources reports virtualizationKind from the DMI fixture tree", () => {
+    resetHostResourcesCacheForTests();
+    const root = Deno.makeTempDirSync({ prefix: "tp-host-virt-" });
+    const procRoot = `${root}/proc`;
+    const sysRoot = `${root}/sys`;
+    try {
+      writeFile(`${procRoot}/stat`, "cpu  0\ncpu0 0\n");
+      writeFile(`${procRoot}/meminfo`, "MemTotal: 1024 kB\nSwapTotal: 0 kB\n");
+      writeFile(
+        `${procRoot}/cpuinfo`,
+        "processor\t: 0\nphysical id\t: 0\ncore id\t: 0\n",
+      );
+      writeFile(`${sysRoot}/class/dmi/id/sys_vendor`, "QEMU\n");
+      writeFile(`${sysRoot}/class/dmi/id/product_name`, "Standard PC\n");
+
+      const resources = readHostResources({
+        procRoot,
+        sysRoot,
+        architecture: "x86_64",
+        nvidiaSmiCsv: () => undefined,
+      });
+      assertEquals(resources?.virtualizationKind, "qemu");
     } finally {
       Deno.removeSync(root, { recursive: true });
       resetHostResourcesCacheForTests();

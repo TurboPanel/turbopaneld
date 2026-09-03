@@ -1,0 +1,23 @@
+# HELP proxysql_questions_total Total number of queries.
+# TYPE proxysql_questions_total counter
+proxysql_questions_total 48213
+# HELP proxysql_slow_queries_total Total number of slow queries.
+# TYPE proxysql_slow_queries_total counter
+proxysql_slow_queries_total 12
+# HELP proxysql_client_connections_connected Client connections that are currently connected.
+# TYPE proxysql_client_connections_connected gauge
+proxysql_client_connections_connected 7
+# HELP proxysql_server_connections_connected Backend connections that are currently connected.
+# TYPE proxysql_server_connections_connected gauge
+proxysql_server_connections_connected 4
+# HELP proxysql_connpool_conns_total How many connections have been tried to be established.
+# TYPE proxysql_connpool_conns_total counter
+proxysql_connpool_conns_total{endpoint="10.0.0.5:5432",hostgroup="0",status="ok"} 940
+proxysql_connpool_conns_total{endpoint="10.0.0.5:5432",hostgroup="0",status="err"} 3
+proxysql_connpool_conns_total{endpoint="10.0.0.6:5432",hostgroup="1",status="ok"} 512
+proxysql_connpool_conns_total{endpoint="10.0.0.6:5432",hostgroup="1",status="err"} 2
+# HELP proxysql_connpool_conns_status The status of the backend server (1 - ONLINE, 2 - SHUNNED, 3 - OFFLINE_SOFT, 4 - OFFLINE_HARD, 5 - SHUNNED_REPLICATION_LAG).
+# TYPE proxysql_connpool_conns_status gauge
+proxysql_connpool_conns_status{endpoint="10.0.0.5:5432",hostgroup="0"} 1
+proxysql_connpool_conns_status{endpoint="10.0.0.6:5432",hostgroup="1"} 1
+proxysql_connpool_conns_status{endpoint="10.0.0.7:5432",hostgroup="1"} 3

@@ -12,10 +12,15 @@ import { FABRIC_INTERFACE_NAME } from "../../instance/commands/fabric.ts";
 import { resolveDimensions } from "./dimensions.ts";
 import { resolveHostingPath } from "./hosting.ts";
 import { LinuxMetricsCollector } from "./linux-collector.ts";
+import { createProxyCountersReader } from "./proxy/index.ts";
 import { readProcFile } from "./proc-read.ts";
 import { countProcessesInProc } from "./processes.ts";
 import { readHostSensors } from "./sensors/index.ts";
-import { resolveAdminSensorOverrides } from "./sensors/overrides.ts";
+import {
+  resolveAdminSensorOverrides,
+  resolveHardwareProfile,
+  resolveNicSlots,
+} from "./sensors/overrides.ts";
 import type {
   CollectorDeps,
   MetricsCollector,
@@ -24,6 +29,7 @@ import type {
 } from "./types.ts";
 
 export type {
+  CaddyCounters,
   CollectorDeps,
   CpuCounters,
   CpuEnergyCounter,
@@ -35,6 +41,9 @@ export type {
   NetCounters,
   NetInterfaceClassification,
   NetInterfaceCounters,
+  NicSlots,
+  ProxyCounters,
+  ProxySqlCounters,
   RawSnapshot,
   SensorCandidate,
   SensorOverrides,
@@ -66,20 +75,26 @@ export {
   parseProcMounts,
   storageMountCandidates,
 } from "./mounts.ts";
-export {
-  HOSTING_PATH_OVERRIDE_RELATIVE_PATH,
-  hostingPathOverridePath,
-  parseHostingPathOverride,
-  resolveAdminHostingPathOverride,
-  resolveHostingPath,
-} from "./hosting.ts";
+export { resolveHostingPath } from "./hosting.ts";
 export {
   classifiedNetRates,
   classifyInterface,
   interfaceNamesByClass,
+  namedInterfaceRates,
   readNetCounters,
 } from "./network.ts";
 export { countProcessesInProc } from "./processes.ts";
+export {
+  createProxyCountersReader,
+  createRetryBoundedProbe,
+  parseCaddyExposition,
+  parseProxySqlExposition,
+  PROXY_ENDPOINT_RETRY_MS,
+  PROXYSQL_REST_ADDR,
+  readCaddyMetrics,
+  readProxySqlMetrics,
+  SITE_CADDY_ADMIN_ADDR,
+} from "./proxy/index.ts";
 export {
   cpuPowerFromEnergy,
   defaultSensorIo,
@@ -88,6 +103,7 @@ export {
   readGpuPower,
   readHostSensors,
   resolveAdminSensorOverrides,
+  resolveNicSlots,
   resolveTemperature,
   type SensorCapabilities,
   sensorId,
@@ -150,6 +166,10 @@ function defaultDeps(): CollectorDeps {
     readSensors: (overrides) => readHostSensors(overrides ?? {}),
     resolveFabricInterfaces: () => Promise.resolve([FABRIC_INTERFACE_NAME]),
     resolveAdminSensorOverrides: () => resolveAdminSensorOverrides(),
+    resolveHardwareProfileGeneration: async () =>
+      (await resolveHardwareProfile()).generation ?? 0,
+    resolveNicSlots: () => resolveNicSlots(),
+    readProxyCounters: createProxyCountersReader(),
   };
 }
 

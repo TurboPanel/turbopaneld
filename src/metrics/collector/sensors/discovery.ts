@@ -3,8 +3,8 @@
  *
  * Sources, all async file reads (no subprocess per interval):
  * - hwmon (`/sys/class/hwmon`) — chip `name` plus `tempN_input`/`tempN_label`
- *   (CPU chips like coretemp/k10temp; GPU chips like amdgpu/nouveau, which
- *   register here too, so a separate DRM `card` node traversal under
+ *   (CPU chips like coretemp/k10temp; GPU chips like amdgpu/nouveau/i915,
+ *   which register here too, so a separate DRM `card` node traversal under
  *   `/sys/class/drm` would only rediscover the same devices) and GPU
  *   `power1_average` gauges.
  * - thermal zones (`/sys/class/thermal`) — `{type,temp}` CPU zones for
@@ -49,8 +49,8 @@ export function defaultSensorIo(): SensorIo {
 /**
  * One physical GPU's candidates, grouped by its hwmon chip directory (a
  * within-snapshot device identity). Selection picks one device first, then
- * resolves temperature AND power from that same device — a v2 sample never
- * mixes two GPUs.
+ * resolves temperature/power/utilization/fan from that same device — a
+ * sample never mixes two GPUs.
  */
 export type GpuDeviceCandidates = {
   /** hwmon chip directory backing this device — stable within a snapshot. */
@@ -58,6 +58,9 @@ export type GpuDeviceCandidates = {
   chip: string;
   temperature: SensorCandidate[];
   power: SensorCandidate[];
+  /** Vendor busy-percent gauge (`amdgpu`/i915); empty on NVIDIA (unsupported). */
+  utilization: SensorCandidate[];
+  fan: SensorCandidate[];
 };
 
 export type SensorCapabilities = {
@@ -67,20 +70,54 @@ export type SensorCapabilities = {
   gpuPower: SensorCandidate[];
   /** GPU candidates grouped per device; flat arrays above are the concatenation. */
   gpuDevices: GpuDeviceCandidates[];
+  /** NVMe (`nvme`) and SATA/SAS (`drivetemp`) drive temperatures. */
+  diskTemperature: SensorCandidate[];
+  /** CPU- and system-chip fan tachometers (`chip` distinguishes CPU from system); GPU fans live on {@link GpuDeviceCandidates.fan}. */
+  fan: SensorCandidate[];
+  /** Board/ambient temperature candidates — every `tempN_input` not claimed by CPU, GPU, or disk. */
+  ambientTemperature: SensorCandidate[];
+  /** Explanation for an empty category the control plane can surface, when known. */
+  reasons?: {
+    diskTemperature?: string;
+  };
 };
 
-const CPU_HWMON_CHIPS: ReadonlySet<string> = new Set([
+export const CPU_HWMON_CHIPS: ReadonlySet<string> = new Set([
   "coretemp",
   "k10temp",
   "zenpower",
   "cpu_thermal",
 ]);
 
-const GPU_HWMON_CHIPS: ReadonlySet<string> = new Set([
+export const GPU_HWMON_CHIPS: ReadonlySet<string> = new Set([
   "amdgpu",
   "nouveau",
   "radeon",
+  // Intel discrete/integrated GPUs register an "i915" hwmon chip on newer
+  // kernels. Classifying it here means its temps/fans join the GPU pools
+  // instead of falling into ambient/system-fan — on a real Intel-integrated
+  // host this changes `ambient1Temperature`/`ambient2Temperature` versus
+  // pre-fix behavior (nothing in this repo's fixtures has an i915 chip, so
+  // no existing test is affected).
+  "i915",
 ]);
+
+/**
+ * Vendor busy-percent gauge filenames, probed in order under a GPU device's
+ * `device` symlink. AMD's `gpu_busy_percent` is a confirmed kernel sysfs
+ * attribute; the i915 name is not verifiable from this repo (upstream
+ * exposes no single stable sysfs busy-percent node as of this writing) —
+ * `gt_busy_percent` is this project's best-effort placeholder for whichever
+ * node a given kernel actually exposes, kept as a one-line edit away from
+ * the real name once confirmed.
+ */
+const GPU_UTILIZATION_FILENAMES: readonly string[] = [
+  "gpu_busy_percent",
+  "gt_busy_percent",
+];
+
+const NVME_HWMON_CHIP = "nvme";
+const DRIVETEMP_HWMON_CHIP = "drivetemp";
 
 const CPU_THERMAL_ZONE_TYPES: ReadonlySet<string> = new Set([
   "x86_pkg_temp",
@@ -93,7 +130,10 @@ const PREFERRED_CPU_TEMP_LABELS = ["Package id 0", "Tctl", "Tdie"] as const;
 const PREFERRED_GPU_TEMP_LABELS = ["edge", "junction"] as const;
 
 const TEMP_INPUT_RE = /^temp(\d+)_input$/;
+const FAN_INPUT_RE = /^fan(\d+)_input$/;
 const RAPL_PACKAGE_DIR_RE = /^intel-rapl:\d+$/;
+const NVME_BLOCK_DEVICE_RE = /^nvme\d+n\d+$/;
+const SATA_BLOCK_DEVICE_RE = /^sd[a-z]+$/;
 
 function labelRank(label: string, preferred: readonly string[]): number {
   const index = preferred.indexOf(label);
@@ -122,7 +162,25 @@ async function hwmonTempCandidates(
   return candidates;
 }
 
-/** One hwmon GPU chip's grouped candidates (temperature plus `power1_average`). */
+async function hwmonFanCandidates(
+  dir: string,
+  chip: string,
+  entries: string[],
+  io: SensorIo,
+): Promise<SensorCandidate[]> {
+  const candidates: SensorCandidate[] = [];
+  for (const entry of entries) {
+    const match = FAN_INPUT_RE.exec(entry);
+    if (!match) continue;
+    const labelRaw = await io.readFile(`${dir}/fan${match[1]}_label`);
+    const label = labelRaw?.trim() || `fan${match[1]}`;
+    candidates.push({ chip, label, path: `${dir}/${entry}` });
+  }
+  candidates.sort((a, b) => a.path.localeCompare(b.path));
+  return candidates;
+}
+
+/** One hwmon GPU chip's grouped candidates (temperature, power, utilization, fan). */
 async function hwmonGpuDevice(
   dir: string,
   chip: string,
@@ -145,16 +203,61 @@ async function hwmonGpuDevice(
       path: `${dir}/power1_average`,
     });
   }
-  return { path: dir, chip, temperature, power };
+  const fan = await hwmonFanCandidates(dir, chip, files, io);
+  const utilization: SensorCandidate[] = [];
+  for (const filename of GPU_UTILIZATION_FILENAMES) {
+    const path = `${dir}/device/${filename}`;
+    const busyPercent = await io.readFile(path);
+    if (busyPercent === undefined) continue;
+    utilization.push({ chip, label: filename, path });
+    break;
+  }
+  return { path: dir, chip, temperature, power, utilization, fan };
+}
+
+/**
+ * Correlate an anonymous `nvme`/`drivetemp` hwmon chip to a stable block
+ * device name via its `device` symlink, so two drives never collide on the
+ * same generic chip identity. Falls back to the generic chip name (still
+ * unique per hwmon directory in single-drive fixtures/hosts) when the
+ * device topology isn't resolvable.
+ */
+async function resolveDiskDeviceName(
+  dir: string,
+  chip: string,
+  io: SensorIo,
+): Promise<string | undefined> {
+  if (chip === NVME_HWMON_CHIP) {
+    const entries = await io.listDir(`${dir}/device`);
+    return entries.find((name) => NVME_BLOCK_DEVICE_RE.test(name));
+  }
+  if (chip === DRIVETEMP_HWMON_CHIP) {
+    const entries = await io.listDir(`${dir}/device/block`);
+    return entries[0];
+  }
+  return undefined;
+}
+
+async function hwmonDiskTempCandidates(
+  dir: string,
+  chip: string,
+  files: string[],
+  io: SensorIo,
+): Promise<SensorCandidate[]> {
+  const deviceName = await resolveDiskDeviceName(dir, chip, io);
+  return hwmonTempCandidates(dir, deviceName ?? chip, files, io, []);
 }
 
 async function discoverHwmonSensors(
   root: string,
   io: SensorIo,
   capabilities: SensorCapabilities,
-): Promise<void> {
+): Promise<{ hwmonRootHadEntries: boolean; sawDrivetempChip: boolean }> {
   const hwmonRoot = `${root}/class/hwmon`;
-  for (const entry of await io.listDir(hwmonRoot)) {
+  const entries = await io.listDir(hwmonRoot);
+  let sawDrivetempChip = false;
+
+  for (const entry of entries) {
     const dir = `${hwmonRoot}/${entry}`;
     const chip = (await io.readFile(`${dir}/name`))?.trim();
     if (!chip) continue;
@@ -170,16 +273,59 @@ async function discoverHwmonSensors(
           PREFERRED_CPU_TEMP_LABELS,
         ),
       );
+      capabilities.fan.push(...await hwmonFanCandidates(dir, chip, files, io));
+      continue;
     }
     if (GPU_HWMON_CHIPS.has(chip)) {
       const device = await hwmonGpuDevice(dir, chip, files, io);
       capabilities.gpuTemperature.push(...device.temperature);
       capabilities.gpuPower.push(...device.power);
-      if (device.temperature.length > 0 || device.power.length > 0) {
+      if (
+        device.temperature.length > 0 || device.power.length > 0 ||
+        device.utilization.length > 0 || device.fan.length > 0
+      ) {
         capabilities.gpuDevices.push(device);
       }
+      continue;
     }
+    if (chip === NVME_HWMON_CHIP || chip === DRIVETEMP_HWMON_CHIP) {
+      if (chip === DRIVETEMP_HWMON_CHIP) sawDrivetempChip = true;
+      capabilities.diskTemperature.push(
+        ...await hwmonDiskTempCandidates(dir, chip, files, io),
+      );
+      continue;
+    }
+    // Everything else: unclaimed temps are ambient/board candidates, fans
+    // are system fans (chip identity distinguishes them from CPU fans).
+    capabilities.ambientTemperature.push(
+      ...await hwmonTempCandidates(dir, chip, files, io, []),
+    );
+    capabilities.fan.push(...await hwmonFanCandidates(dir, chip, files, io));
   }
+
+  return { hwmonRootHadEntries: entries.length > 0, sawDrivetempChip };
+}
+
+/** SATA/SAS whole-disk devices under `/sys/block` (`sd*`), for the drivetemp-not-loaded reason. */
+async function hasSataBlockDevices(
+  root: string,
+  io: SensorIo,
+): Promise<boolean> {
+  const entries = await io.listDir(`${root}/block`);
+  return entries.some((name) => SATA_BLOCK_DEVICE_RE.test(name));
+}
+
+async function diskTemperatureReason(
+  root: string,
+  io: SensorIo,
+  hwmonRootHadEntries: boolean,
+  sawDrivetempChip: boolean,
+): Promise<string | undefined> {
+  if (!hwmonRootHadEntries) return "no_hwmon";
+  if (!sawDrivetempChip && await hasSataBlockDevices(root, io)) {
+    return "drivetemp_not_loaded";
+  }
+  return "no_disk_temperature_source";
 }
 
 async function discoverThermalZoneSensors(
@@ -234,10 +380,29 @@ export async function discoverSensors(
     cpuPower: [],
     gpuPower: [],
     gpuDevices: [],
+    diskTemperature: [],
+    fan: [],
+    ambientTemperature: [],
   };
-  await discoverHwmonSensors(root, io, capabilities);
+  const { hwmonRootHadEntries, sawDrivetempChip } = await discoverHwmonSensors(
+    root,
+    io,
+    capabilities,
+  );
   await discoverThermalZoneSensors(root, io, capabilities);
   await discoverRaplSensors(root, io, capabilities);
+
+  if (capabilities.diskTemperature.length === 0) {
+    capabilities.reasons = {
+      diskTemperature: await diskTemperatureReason(
+        root,
+        io,
+        hwmonRootHadEntries,
+        sawDrivetempChip,
+      ),
+    };
+  }
+
   return capabilities;
 }
 
@@ -246,21 +411,30 @@ export function sensorId(candidate: SensorCandidate): string {
   return `${candidate.chip}:${candidate.label}`;
 }
 
+/** True when `value` matches `candidate` by stable `chip:label` identity or by literal sysfs path. */
+function candidateMatches(candidate: SensorCandidate, value: string): boolean {
+  return candidate.path === value || sensorId(candidate) === value;
+}
+
 /**
  * Pick exactly one GPU device to feed the fixed contract: the device owning
- * an admin-override path when one matches, else the first enumerated device
+ * an admin-override match when one matches, else the first enumerated device
  * exposing both temperature and power, else the first device. Temperature
  * and power then both resolve from the returned device only.
+ *
+ * An override may be a stable `chip:label` identity (the hardware-profile
+ * format — see `overrides.ts`) or a literal sysfs path (the pre-profile
+ * escape hatch); both are matched here via {@link candidateMatches}.
  */
 export function selectGpuDevice(
   devices: GpuDeviceCandidates[],
   overrides: { gpuTemperature?: string; gpuPower?: string },
 ): GpuDeviceCandidates | undefined {
-  for (const path of [overrides.gpuTemperature, overrides.gpuPower]) {
-    if (!path) continue;
+  for (const value of [overrides.gpuTemperature, overrides.gpuPower]) {
+    if (!value) continue;
     const matched = devices.find((device) =>
-      device.temperature.some((c) => c.path === path) ||
-      device.power.some((c) => c.path === path)
+      device.temperature.some((c) => candidateMatches(c, value)) ||
+      device.power.some((c) => candidateMatches(c, value))
     );
     if (matched) return matched;
   }
@@ -271,17 +445,81 @@ export function selectGpuDevice(
 
 /**
  * Pick exactly one candidate: the admin override when set (matched against
- * discovered candidates by path, or taken verbatim so an operator can point
- * at any readable file), else the first auto-detected candidate, else none.
+ * discovered candidates by stable `chip:label` identity or literal sysfs
+ * path), else the first auto-detected candidate, else none. A literal path
+ * that matches nothing is still honored verbatim — an operator's escape
+ * hatch to point at any readable file. A `chip:label` identity that matches
+ * nothing degrades to "no reading" (`undefined`) rather than being opened as
+ * a literal (and broken) path — see `overrides.ts` on why a stale
+ * hardware-profile assignment must read `null`, never crash.
  */
 export function selectCandidate(
   candidates: SensorCandidate[],
   overridePath: string | undefined,
 ): SensorCandidate | undefined {
   if (overridePath) {
-    const matched = candidates.find((c) => c.path === overridePath);
+    const matched = candidates.find((c) => candidateMatches(c, overridePath));
     if (matched) return matched;
-    return { chip: "override", label: overridePath, path: overridePath };
+    if (overridePath.startsWith("/")) {
+      return { chip: "override", label: overridePath, path: overridePath };
+    }
+    return undefined;
   }
   return candidates[0];
+}
+
+/**
+ * Narrow a GPU-device-level override to the specific candidate pool a
+ * per-measurement resolver (temperature/power/utilization/fan) selects
+ * from. `overrides.gpuTemperature/gpuPower/gpuUtilization/gpuFan` often
+ * carry the SAME device-representative `chip:label` identity — see
+ * `resolveAdminSensorOverrides` in `overrides.ts`, which fans one assigned
+ * `gpuDevice` slot out to all four keys. That identity picks the *device*
+ * (via {@link selectGpuDevice}) and only incidentally also names one of its
+ * candidates (typically its temperature label) — passed straight through to
+ * {@link selectCandidate} for gpuPower/gpuUtilization/gpuFan, it would name
+ * nothing in those pools and (per `selectCandidate`'s non-path fallback)
+ * resolve to no reading, even though the device itself was correctly
+ * selected. This narrows the override to `undefined` in that case so
+ * `selectCandidate` falls through to auto-detection within the already-
+ * pinned device instead. A literal sysfs path is always passed through
+ * unchanged — that's the operator's per-file escape hatch, never a device
+ * identity, and it may legitimately point outside this pool too.
+ */
+export function withinDeviceOverride(
+  candidates: SensorCandidate[],
+  overridePath: string | undefined,
+): string | undefined {
+  if (!overridePath) return undefined;
+  if (overridePath.startsWith("/")) return overridePath;
+  return candidates.some((c) => sensorId(c) === overridePath)
+    ? overridePath
+    : undefined;
+}
+
+export type CandidateSelectionOptions = {
+  /** Auto-detection fallback index into `candidates` (default `0`). */
+  index?: number;
+  /**
+   * Whether auto-detection may fall back to a positional candidate at all
+   * when no override is set. `false` for slots with no natural default
+   * (e.g. board temperature) — an unassigned slot then reads `null` rather
+   * than silently duplicating another slot's auto-selected candidate.
+   */
+  positionalDefault?: boolean;
+};
+
+/**
+ * {@link selectCandidate} generalized for paired slots (disk1/2, ambient1/2,
+ * systemFan1/2) that auto-detect from different positions in the same
+ * discovered pool, and for slots with no positional default at all.
+ */
+export function selectCandidateWithOptions(
+  candidates: SensorCandidate[],
+  overridePath: string | undefined,
+  options?: CandidateSelectionOptions,
+): SensorCandidate | undefined {
+  if (overridePath) return selectCandidate(candidates, overridePath);
+  if (options?.positionalDefault === false) return undefined;
+  return candidates[options?.index ?? 0];
 }

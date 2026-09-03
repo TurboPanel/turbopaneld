@@ -54,6 +54,16 @@ export const PROXYSQL_IMAGE = "proxysql/proxysql:3.0.9";
 export const ADMIN_PORT = 6032;
 
 /**
+ * ProxySQL's own default `admin-restapi_port` — an unauthenticated HTTP
+ * server whose only route is `GET /metrics` (Prometheus text; see
+ * `lib/ProxySQL_Admin.cpp::load_restapi_server` in the ProxySQL source,
+ * which registers no other route and never checks credentials). Published to
+ * `127.0.0.1` only, same as {@link ADMIN_PORT}, and scraped by the daemon's
+ * traffic collector (`src/metrics/collector/proxy/proxysql.ts`).
+ */
+export const REST_API_PORT = 6070;
+
+/**
  * Platform-default managed client listeners. The organization may override
  * both through `ManagedIngressReconcileCommandPayload.listenerPorts`; these
  * remain the fallback when a payload predates that field.
@@ -312,9 +322,13 @@ function clientPortMappings(
     const line = rawLine.trim();
     if (!line.startsWith(COMPOSE_PORT_LINE_PREFIX)) continue;
     const mapping = publishedPortMapping(line);
-    // The admin listener is always published to loopback regardless of the
-    // client bind, so it must never answer "what bind did we last desire?".
-    if (mapping === null || mapping.port === ADMIN_PORT) continue;
+    // The admin and REST API listeners are always published to loopback
+    // regardless of the client bind, so neither must ever answer "what bind
+    // did we last desire?".
+    if (
+      mapping === null || mapping.port === ADMIN_PORT ||
+      mapping.port === REST_API_PORT
+    ) continue;
     mappings.push(mapping);
   }
   return mappings;
@@ -471,6 +485,11 @@ export async function assertManagedIngressPortsBindable(
 function formatAdminPublishedPort(): string {
   const adminAddress = `127.0.0.1:${ADMIN_PORT}:${ADMIN_PORT}`;
   return quoteYamlScalar(adminAddress);
+}
+
+function formatRestApiPublishedPort(): string {
+  const restApiAddress = `127.0.0.1:${REST_API_PORT}:${REST_API_PORT}`;
+  return quoteYamlScalar(restApiAddress);
 }
 
 export function assertNoFrontendUserConflict(
@@ -748,6 +767,7 @@ export function proxysqlComposeWithAttachments(
       `      - ${formatPublishedPort(bind, ports.mysql)}`,
     ]),
     `      - ${formatAdminPublishedPort()}`,
+    `      - ${formatRestApiPublishedPort()}`,
   ];
 
   const uniqueAttachments = uniqueAttachmentsByName(attachments);
@@ -1100,6 +1120,10 @@ export function renderProxySqlStaticConfig(
     "{",
     ...(adminCredLine ? [adminCredLine] : []),
     `    mysql_ifaces="127.0.0.1:${ADMIN_PORT}"`,
+    // Unauthenticated Prometheus /metrics only — see REST_API_PORT's doc
+    // comment for why that's acceptable at a loopback-only publish.
+    "    admin-restapi_enabled=true",
+    `    admin-restapi_port=${REST_API_PORT}`,
     "}",
     "",
     "mysql_variables=",

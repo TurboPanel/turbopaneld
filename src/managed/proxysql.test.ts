@@ -37,6 +37,8 @@ import {
   readPublishedListenerPortsFromCompose,
   readSegmentAttachmentsFromCompose,
   renderProxySqlConfig,
+  renderProxySqlStaticConfig,
+  REST_API_PORT,
   restartProxySqlIngress,
   staticConfigSectionChanged,
   stopProxySqlIngress,
@@ -665,6 +667,47 @@ test("buildProxySqlAdminStatements sets monitor variables when provided", () => 
 test("proxysqlCompose mounts admin.cnf at the admin defaults path", () => {
   const compose = proxysqlCompose(null, [], [], null, MANAGED_NETWORK);
   assertStringIncludes(compose, "./admin.cnf:/etc/proxysql-admin.cnf:ro");
+});
+
+test("proxysqlCompose always publishes the REST API port to loopback only, regardless of client bind", () => {
+  const unbound = proxysqlCompose(null, [], [], null, MANAGED_NETWORK);
+  assertStringIncludes(
+    unbound,
+    `"127.0.0.1:${REST_API_PORT}:${REST_API_PORT}"`,
+  );
+
+  const bound = proxysqlCompose(null, ["0.0.0.0"], [], null, MANAGED_NETWORK);
+  assertStringIncludes(bound, `"127.0.0.1:${REST_API_PORT}:${REST_API_PORT}"`);
+  // Never on the organization's public/datacenter bind.
+  assertEquals(
+    bound.includes(`"0.0.0.0:${REST_API_PORT}:${REST_API_PORT}"`),
+    false,
+  );
+});
+
+test("renderProxySqlStaticConfig enables the unauthenticated REST /metrics API on the default port", () => {
+  const cnf = renderProxySqlStaticConfig();
+  assertStringIncludes(cnf, "admin-restapi_enabled=true");
+  assertStringIncludes(cnf, `admin-restapi_port=${REST_API_PORT}`);
+});
+
+test("readPublishedListenerPortsFromCompose ignores the REST API port when recovering client listeners", () => {
+  const compose = proxysqlCompose(null, ["0.0.0.0"], [], null, MANAGED_NETWORK);
+  const ports = readPublishedListenerPortsFromCompose(compose);
+  assertEquals(ports, DEFAULT_PROXYSQL_LISTENER_PORTS);
+});
+
+test("readPublishedBindAddressesFromCompose ignores the REST API port when recovering the client bind", () => {
+  const compose = proxysqlCompose(
+    null,
+    ["203.0.113.5"],
+    [],
+    null,
+    MANAGED_NETWORK,
+  );
+  assertEquals(readPublishedBindAddressesFromCompose(compose), [
+    "203.0.113.5",
+  ]);
 });
 
 test("buildProxySqlAdminStatements inserts frontend passwords", () => {

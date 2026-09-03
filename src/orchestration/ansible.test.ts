@@ -1193,6 +1193,24 @@ test("site apply playbooks vendor engines (never apt nginx/apache2)", async () =
   );
   assertEquals(siteCaddyTasks.includes("00-empty.conf"), true);
 
+  // The global `metrics` option is what actually exposes `/metrics` on the
+  // admin listener — `servers { metrics }` alone only turns on per-server
+  // instrumentation and leaves `/metrics` 404, which would silently strand
+  // the daemon's traffic collector (`src/metrics/collector/proxy/caddy.ts`).
+  const siteCaddyfile = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/site-caddy/templates/Caddyfile.j2"),
+  );
+  assertMatch(
+    siteCaddyfile,
+    /^\tmetrics$/m,
+    "site Caddyfile enables the global metrics option",
+  );
+  assertMatch(
+    siteCaddyfile,
+    /servers\s*\{\s*metrics\s*\}/,
+    "site Caddyfile keeps per-server metrics instrumentation on",
+  );
+
   const nginxUnit = await Deno.readTextFile(
     join(
       CHECKOUT_ORCHESTRATION_DIR,

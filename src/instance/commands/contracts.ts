@@ -2,6 +2,7 @@
  * Typed command wire contracts mirrored from the instance
  * `src/lib/commands/` module. Keep in sync when instance command shapes change.
  */
+import type { SensorCapabilities } from "../../metrics/collector/sensors/discovery.ts";
 
 export const COMMAND_TYPES = [
   "daemon.ping",
@@ -62,6 +63,25 @@ export type RebootPayload = Record<string, never>;
 export type RebootResult = {
   scheduled: boolean;
   summary?: string;
+};
+
+/**
+ * Daemon-side drivetemp opt-in outcome: loads the `drivetemp` kernel module
+ * (`../../metrics/collector/sensors/drivetemp.ts`) and reruns sensor
+ * capability discovery immediately after, so the caller gets refreshed
+ * SATA/SAS disk-temperature candidates in the same round trip instead of
+ * guessing whether the module load worked. Invoked in-process by
+ * `InstanceClient#applySensorOverridesUpdateAsync` (`../client.ts`) when a
+ * hardware-profile push flips `drivetempEnabled` false/unset → true — not
+ * (yet) enrolled in the queued `COMMAND_TYPES` dispatch table.
+ */
+export type DrivetempEnablePayload = Record<string, never>;
+
+export type DrivetempEnableResult = {
+  loaded: boolean;
+  summary?: string;
+  /** Sensor capabilities re-discovered after the module-load attempt. */
+  capabilities: SensorCapabilities;
 };
 
 /** Must stay in sync with the instance canonical `server.timezone.set` shape. */
@@ -1671,6 +1691,15 @@ export function parsePingPayload(value: unknown): PingPayload {
 export function parseRebootPayload(value: unknown): RebootPayload {
   if (!isRecord(value)) {
     throw new Error("Invalid reboot payload");
+  }
+  return {};
+}
+
+export function parseDrivetempEnablePayload(
+  value: unknown,
+): DrivetempEnablePayload {
+  if (!isRecord(value)) {
+    throw new Error("Invalid drivetemp enable payload");
   }
   return {};
 }

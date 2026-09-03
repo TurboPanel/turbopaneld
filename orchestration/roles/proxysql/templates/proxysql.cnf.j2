@@ -8,6 +8,12 @@ admin_variables=
 {
     admin_credentials="{{ proxysql_admin_user }}:{{ _proxysql_admin_password }}"
     mysql_ifaces="127.0.0.1:{{ proxysql_admin_port }}"
+    # Unauthenticated Prometheus /metrics only (lib/ProxySQL_Admin.cpp
+    # registers no other route and never checks credentials on it) — kept off
+    # the public internet the same way as mysql_ifaces above, via the
+    # loopback-only compose port publish in src/managed/proxysql.ts.
+    admin-restapi_enabled=true
+    admin-restapi_port={{ proxysql_restapi_port }}
 }
 
 mysql_variables=

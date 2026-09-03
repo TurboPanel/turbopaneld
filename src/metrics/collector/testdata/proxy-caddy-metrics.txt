@@ -1,0 +1,54 @@
+# HELP caddy_http_requests_in_flight Number of requests currently handled by this server.
+# TYPE caddy_http_requests_in_flight gauge
+caddy_http_requests_in_flight{handler="subroute",server="srv0"} 2
+# HELP caddy_http_requests_total Counter of HTTP(S) requests made.
+# TYPE caddy_http_requests_total counter
+caddy_http_requests_total{handler="subroute",server="srv0"} 150
+caddy_http_requests_total{handler="static_response",server="srv1"} 25
+# HELP caddy_http_request_duration_seconds Histogram of round-trip request durations.
+# TYPE caddy_http_request_duration_seconds histogram
+caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="0.005"} 40
+caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="0.01"} 80
+caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="0.025"} 100
+caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="0.05"} 110
+caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="0.1"} 120
+caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="0.25"} 125
+caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="0.5"} 128
+caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="1"} 130
+caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="2.5"} 130
+caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="5"} 130
+caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="10"} 130
+caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="+Inf"} 130
+caddy_http_request_duration_seconds_sum{code="200",handler="subroute",method="GET",server="srv0"} 12.5
+caddy_http_request_duration_seconds_count{code="200",handler="subroute",method="GET",server="srv0"} 130
+caddy_http_request_duration_seconds_bucket{code="301",handler="subroute",method="GET",server="srv0",le="0.005"} 15
+caddy_http_request_duration_seconds_bucket{code="301",handler="subroute",method="GET",server="srv0",le="0.01"} 20
+caddy_http_request_duration_seconds_bucket{code="301",handler="subroute",method="GET",server="srv0",le="0.1"} 20
+caddy_http_request_duration_seconds_bucket{code="301",handler="subroute",method="GET",server="srv0",le="1"} 20
+caddy_http_request_duration_seconds_bucket{code="301",handler="subroute",method="GET",server="srv0",le="+Inf"} 20
+caddy_http_request_duration_seconds_sum{code="301",handler="subroute",method="GET",server="srv0"} 0.4
+caddy_http_request_duration_seconds_count{code="301",handler="subroute",method="GET",server="srv0"} 20
+caddy_http_request_duration_seconds_bucket{code="404",handler="subroute",method="GET",server="srv0",le="0.005"} 5
+caddy_http_request_duration_seconds_bucket{code="404",handler="subroute",method="GET",server="srv0",le="0.1"} 8
+caddy_http_request_duration_seconds_bucket{code="404",handler="subroute",method="GET",server="srv0",le="1"} 8
+caddy_http_request_duration_seconds_bucket{code="404",handler="subroute",method="GET",server="srv0",le="+Inf"} 8
+caddy_http_request_duration_seconds_sum{code="404",handler="subroute",method="GET",server="srv0"} 0.2
+caddy_http_request_duration_seconds_count{code="404",handler="subroute",method="GET",server="srv0"} 8
+caddy_http_request_duration_seconds_bucket{code="502",handler="subroute",method="GET",server="srv0",le="0.005"} 0
+caddy_http_request_duration_seconds_bucket{code="502",handler="subroute",method="GET",server="srv0",le="0.1"} 1
+caddy_http_request_duration_seconds_bucket{code="502",handler="subroute",method="GET",server="srv0",le="1"} 2
+caddy_http_request_duration_seconds_bucket{code="502",handler="subroute",method="GET",server="srv0",le="+Inf"} 2
+caddy_http_request_duration_seconds_sum{code="502",handler="subroute",method="GET",server="srv0"} 3.1
+caddy_http_request_duration_seconds_count{code="502",handler="subroute",method="GET",server="srv0"} 2
+# HELP caddy_http_request_size_bytes Total size of the request. Includes body
+# TYPE caddy_http_request_size_bytes histogram
+caddy_http_request_size_bytes_sum{code="200",handler="subroute",method="GET",server="srv0"} 84000
+caddy_http_request_size_bytes_sum{code="301",handler="subroute",method="GET",server="srv0"} 6000
+caddy_http_request_size_bytes_sum{code="404",handler="subroute",method="GET",server="srv0"} 2000
+caddy_http_request_size_bytes_sum{code="502",handler="subroute",method="GET",server="srv0"} 500
+# HELP caddy_http_response_size_bytes Size of the returned response.
+# TYPE caddy_http_response_size_bytes histogram
+caddy_http_response_size_bytes_sum{code="200",handler="subroute",method="GET",server="srv0"} 900000
+caddy_http_response_size_bytes_sum{code="301",handler="subroute",method="GET",server="srv0"} 3000
+caddy_http_response_size_bytes_sum{code="404",handler="subroute",method="GET",server="srv0"} 4000
+caddy_http_response_size_bytes_sum{code="502",handler="subroute",method="GET",server="srv0"} 700

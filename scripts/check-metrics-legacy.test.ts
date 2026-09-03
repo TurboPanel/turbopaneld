@@ -66,6 +66,46 @@ test("collectMetricsLegacyFailures skips allowlisted managed-engine paths", () =
   assertEquals(failures, []);
 });
 
+test("collectMetricsLegacyFailures flags a retired AE dataset name outside the allowed prefixes", () => {
+  const failures = collectMetricsLegacyFailures(
+    "dev/src/lib/example.ts",
+    "const dataset = 'turbopanel_server_telemetry';\n",
+  );
+  assertEquals(failures.length, 1);
+  assertEquals(
+    failures[0],
+    'dev/src/lib/example.ts:1 references retired metrics infrastructure ("turbopanel_server_telemetry")',
+  );
+});
+
+test("collectMetricsLegacyFailures allows a retired AE dataset name inside field-map.ts's allowed prefix", () => {
+  const failures = collectMetricsLegacyFailures(
+    "turbopanel/src/daemon/metrics/backends/cloudflare/field-map.ts",
+    "// retired: turbopanel_server_telemetry\n",
+  );
+  assertEquals(failures, []);
+});
+
+test("collectMetricsLegacyFailures flags a retired AE dataset name in another cloudflare-backend file even though clickhouse/tabix are allowed there", () => {
+  const failures = collectMetricsLegacyFailures(
+    "turbopanel/src/daemon/metrics/backends/cloudflare/sql-api.ts",
+    "const legacyDataset = 'turbopanel_server_metrics';\n",
+  );
+  assertEquals(failures.length, 1);
+  assertEquals(
+    failures[0],
+    'turbopanel/src/daemon/metrics/backends/cloudflare/sql-api.ts:1 references retired metrics infrastructure ("turbopanel_server_metrics")',
+  );
+});
+
+test("collectMetricsLegacyFailures still allows a plain clickhouse reference in a cloudflare-backend file outside the narrow dataset-name allowlist", () => {
+  const failures = collectMetricsLegacyFailures(
+    "turbopanel/src/daemon/metrics/backends/cloudflare/store.ts",
+    "// ClickHouse-compatible SQL dialect\n",
+  );
+  assertEquals(failures, []);
+});
+
 test("runMetricsLegacyCheck passes on the current workspace", async () => {
   assertEquals(await runMetricsLegacyCheck(), []);
 });

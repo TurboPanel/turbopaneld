@@ -7,6 +7,18 @@
 	# here over loopback. `auto_https off` (not `disable_redirects`) keeps it
 	# from trying to issue certificates for site blocks.
 	auto_https off
+	# Caddy has exactly one admin listener per process (the address above) —
+	# there is no supported way to bind a second, metrics-only admin API.
+	# The global `metrics` option is what actually exposes Prometheus text at
+	# `/metrics` on that admin listener; `servers { metrics }` only turns on
+	# per-server instrumentation and, on its own, leaves `/metrics` 404. The
+	# daemon's traffic collector (`src/metrics/collector/proxy/caddy.ts`)
+	# scrapes both together at the same loopback address as
+	# `site_caddy_admin_addr` above.
+	metrics
+	servers {
+		metrics
+	}
 }
 
 # An import whose glob matches nothing is an ERROR, not an empty set, so

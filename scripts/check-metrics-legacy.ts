@@ -8,6 +8,15 @@
  * `tabix` reference — code or comment — outside the managed-database-engine
  * code paths, where `clickhouse` is a legitimate catalog engine name.
  *
+ * It also guards the retired Analytics Engine dataset names
+ * `turbopanel_server_metrics` (the original single-datapoint layout) and
+ * `turbopanel_server_telemetry` (the two-part core/extended layout schema v3
+ * replaced) — AE datasets can't be deleted, so nothing should ever reference
+ * either name again outside the handful of files that document them as
+ * retired history (see RETIRED_DATASET_ALLOWED_PATHS below — its own narrow
+ * list, separate from the broader ALLOWED_PATH_PREFIXES clickhouse/tabix
+ * exemptions).
+ *
  * Scans this repo's `src/`, `scripts/`, and `orchestration/` trees, plus the
  * sibling `../turbopanel/src`, `../dev/src`, and `../ui/src` checkouts when
  * present (the co-located dev workspace layout), and the sibling contributor
@@ -29,13 +38,26 @@ const workspaceRoot = new URL("../..", import.meta.url).pathname.replace(
   "",
 );
 
-export const FORBIDDEN_PATTERN = /clickhouse|tabix/i;
+/** The retired ClickHouse backend / Tabix GUI — code or comment, case-insensitive. */
+export const CLICKHOUSE_TABIX_PATTERN = /clickhouse|tabix/i;
+
+/**
+ * The retired dataset names are matched with a trailing negative lookahead
+ * so this never flags the *current*, legitimately-similar
+ * `TURBOPANEL_SERVER_METRICS_*` env var prefix (`_RETENTION_DAYS`,
+ * `_DUCKDB_THREADS`, etc.) — those are a longer identifier, not the exact
+ * retired dataset name.
+ */
+export const RETIRED_DATASET_PATTERN =
+  /turbopanel_server_metrics(?![a-z0-9_])|turbopanel_server_telemetry(?![a-z0-9_])/i;
 
 /**
  * Managed-database-engine code paths where `clickhouse` names a catalog
  * engine, not the retired metrics backend. Keys are `<repo>/<path prefix>`.
  * Keep this list to actual managed-engine code — never re-allow metrics
- * plumbing or historical-rationale comments.
+ * plumbing more broadly. This allowlist governs `CLICKHOUSE_TABIX_PATTERN`
+ * matches only; it does not exempt the retired AE dataset names (see
+ * `RETIRED_DATASET_ALLOWED_PATHS` below, which is deliberately narrower).
  */
 export const ALLOWED_PATH_PREFIXES = [
   // turbopaneld: managed-engine registry + command contracts (MANAGED_ENGINE_CODES).
@@ -64,6 +86,24 @@ export const ALLOWED_PATH_PREFIXES = [
   "ui/src/lib/bindings.ts",
 ] as const;
 
+/**
+ * Exact files allowed to name a retired AE dataset (`turbopanel_server_metrics`
+ * / `turbopanel_server_telemetry`) as historical rationale for why the
+ * current dataset got a new name. Deliberately its own narrow list — the
+ * broad `turbopanel/src/daemon/metrics/backends/cloudflare/` prefix above
+ * exists only for the ClickHouse-dialect call-outs and must not also
+ * blanket-allow retired dataset names across every file in that directory
+ * (e.g. `sql-api.ts`, `store.ts`). Extend this list only for genuine
+ * historical-rationale call-outs, never for metrics plumbing.
+ */
+export const RETIRED_DATASET_ALLOWED_PATHS = [
+  "turbopaneld/scripts/check-metrics-legacy.ts",
+  "turbopaneld/scripts/check-metrics-legacy.test.ts",
+  "turbopanel/src/daemon/metrics/backends/cloudflare/field-map.ts",
+  "turbopanel/src/daemon/metrics/AGENTS.md",
+  "website/docs/architecture/server-metrics.mdx",
+] as const;
+
 const SKIP_DIRS = new Set([
   ".git",
   "node_modules",
@@ -90,6 +130,13 @@ export function isAllowedPath(scoped: string): boolean {
   return ALLOWED_PATH_PREFIXES.some((prefix) => scoped.startsWith(prefix));
 }
 
+/** Narrow check for `RETIRED_DATASET_PATTERN` matches — exact files only, no prefixes. */
+export function isAllowedRetiredDatasetPath(scoped: string): boolean {
+  return (RETIRED_DATASET_ALLOWED_PATHS as readonly string[]).includes(
+    scoped,
+  );
+}
+
 async function* walkFiles(dir: string, root: string): AsyncGenerator<string> {
   for await (const entry of Deno.readDir(dir)) {
     const abs = `${dir}/${entry.name}`;
@@ -107,16 +154,30 @@ export function collectMetricsLegacyFailures(
   scoped: string,
   text: string,
 ): string[] {
-  if (isAllowedPath(scoped)) return [];
+  const clickhouseTabixAllowed = isAllowedPath(scoped);
+  const retiredDatasetAllowed = isAllowedRetiredDatasetPath(scoped);
+  if (clickhouseTabixAllowed && retiredDatasetAllowed) return [];
   const failures: string[] = [];
   text.split("\n").forEach((line, i) => {
-    const match = FORBIDDEN_PATTERN.exec(line);
-    if (match) {
-      failures.push(
-        `${scoped}:${i + 1} references retired metrics infrastructure ("${
-          match[0]
-        }")`,
-      );
+    if (!clickhouseTabixAllowed) {
+      const match = CLICKHOUSE_TABIX_PATTERN.exec(line);
+      if (match) {
+        failures.push(
+          `${scoped}:${i + 1} references retired metrics infrastructure ("${
+            match[0]
+          }")`,
+        );
+      }
+    }
+    if (!retiredDatasetAllowed) {
+      const match = RETIRED_DATASET_PATTERN.exec(line);
+      if (match) {
+        failures.push(
+          `${scoped}:${i + 1} references retired metrics infrastructure ("${
+            match[0]
+          }")`,
+        );
+      }
     }
   });
   return failures;
@@ -226,9 +287,12 @@ export function reportMetricsLegacyFailures(
     error(
       `\n${failures.length} problem(s) found. Server metrics use DuckDB + Parquet ` +
         "(Deno) / Analytics Engine (Workers) — the ClickHouse backend and the " +
-        "Tabix GUI are retired. Only managed-database-engine code paths may " +
-        "name the `clickhouse` catalog engine; extend ALLOWED_PATH_PREFIXES " +
-        "in this script only for such code, never for metrics plumbing.",
+        "Tabix GUI are retired, and so are the `turbopanel_server_metrics` / " +
+        "`turbopanel_server_telemetry` AE dataset names. Only managed-database-" +
+        "engine code paths may name the `clickhouse` catalog engine, and only " +
+        "the files already listed in RETIRED_DATASET_ALLOWED_PATHS may name a " +
+        "retired dataset as history; extend that list in this script only for " +
+        "such cases, never for metrics plumbing.",
     );
     exit(1);
     return;

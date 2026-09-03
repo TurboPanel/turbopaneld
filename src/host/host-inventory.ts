@@ -61,6 +61,12 @@ export type HostResources = {
   swap?: { totalBytes?: number };
   /** Host interface addresses — nested here on hello / change-detected heartbeat. */
   ips?: ServerReportedIp[];
+  /**
+   * Detected virtualization platform (`"qemu"`, `"vmware"`, `"hyperv"`,
+   * `"virtualbox"`, `"xen"`, `"bare-metal"`, or the flag-only fallback
+   * `"virtualized"`), or `undefined` when there is no signal either way.
+   */
+  virtualizationKind?: string;
 };
 
 /**
@@ -77,6 +83,7 @@ export type HostInventoryExtras = {
   /** Linux cpulist of E-cores (`cpu_atom` and/or `cpu_lowpower`). */
   eCpus?: string;
   gpus?: HostGpu[];
+  virtualizationKind?: string;
 };
 
 /**
@@ -118,6 +125,8 @@ type InventoryLayout = {
   sysCpuCore: string;
   sysCpuAtom: string;
   sysCpuLowpower: string;
+  sysDmiSysVendor: string;
+  sysDmiProductName: string;
   nvidiaGpuInfo: (slot: string) => string;
   readTextFile: (path: string) => string | undefined;
   readDirSync: (path: string) => Iterable<{ name: string }>;
@@ -160,6 +169,8 @@ function resolveInventoryLayout(io?: HostInventoryIo): InventoryLayout {
     sysCpuCore: `${sysRoot}/devices/cpu_core/cpus`,
     sysCpuAtom: `${sysRoot}/devices/cpu_atom/cpus`,
     sysCpuLowpower: `${sysRoot}/devices/cpu_lowpower/cpus`,
+    sysDmiSysVendor: `${sysRoot}/class/dmi/id/sys_vendor`,
+    sysDmiProductName: `${sysRoot}/class/dmi/id/product_name`,
     nvidiaGpuInfo: (slot) =>
       `${procRoot}/driver/nvidia/gpus/${slot}/information`,
     readTextFile: io?.readTextFile ??
@@ -757,6 +768,54 @@ function hostCpusFromProc(
   return [socket];
 }
 
+const FLAGS_LINE_RE = /^flags\s*:/m;
+const HYPERVISOR_FLAG_RE = /^flags\s*:.*\bhypervisor\b/m;
+
+/**
+ * Classify the virtualization platform from DMI identity strings, falling
+ * back to the `hypervisor` CPUID flag in `/proc/cpuinfo`'s first processor
+ * block when DMI is unreadable (restricted sysfs, containers).
+ *
+ * Tokens are new — nothing downstream depends on the exact strings yet:
+ * `"qemu"` also covers generic KVM (indistinguishable from DMI/flags alone),
+ * `"vmware"` / `"hyperv"` / `"virtualbox"` / `"xen"` are vendor-specific,
+ * `"bare-metal"` is a real board (or a flags line with no hypervisor token),
+ * and `"virtualized"` is the flag-only fallback when DMI names no vendor.
+ * Returns `undefined` when there is no signal either way, rather than
+ * guessing.
+ */
+export function virtualizationKindFromFacts(
+  sysVendor: string | undefined,
+  productName: string | undefined,
+  cpuinfoText: string | undefined,
+): string | undefined {
+  const vendor = sysVendor?.trim() ?? "";
+  const product = productName?.trim() ?? "";
+  if (vendor || product) {
+    if (/qemu/i.test(vendor) || /qemu/i.test(product)) return "qemu";
+    if (/vmware/i.test(vendor) || /vmware/i.test(product)) return "vmware";
+    if (
+      vendor === "Microsoft Corporation" && /virtual machine/i.test(product)
+    ) {
+      return "hyperv";
+    }
+    if (/innotek gmbh/i.test(vendor)) return "virtualbox";
+    if (/\bxen\b/i.test(vendor) || /\bxen\b/i.test(product)) return "xen";
+    return "bare-metal";
+  }
+  if (cpuinfoText === undefined) return undefined;
+  const firstBlock = cpuinfoText.split("\n\n")[0] ?? cpuinfoText;
+  if (HYPERVISOR_FLAG_RE.test(firstBlock)) return "virtualized";
+  return FLAGS_LINE_RE.test(firstBlock) ? "bare-metal" : undefined;
+}
+
+function readVirtualizationKind(layout: InventoryLayout): string | undefined {
+  const sysVendor = layout.readTextFile(layout.sysDmiSysVendor);
+  const productName = layout.readTextFile(layout.sysDmiProductName);
+  const cpuinfoText = layout.readTextFile(layout.procCpuinfo);
+  return virtualizationKindFromFacts(sysVendor, productName, cpuinfoText);
+}
+
 function applyMeminfoToResources(
   resources: HostResources,
   memText: string,
@@ -786,6 +845,9 @@ export function hostResourcesFromProc(
   const cpus = hostCpusFromProc(statText, cpuinfoText, architecture, extras);
   if (cpus?.some(hasCpuSocketFields)) resources.cpus = cpus;
   if (extras?.gpus && extras.gpus.length > 0) resources.gpus = extras.gpus;
+  if (extras?.virtualizationKind !== undefined) {
+    resources.virtualizationKind = extras.virtualizationKind;
+  }
   if (memText) applyMeminfoToResources(resources, memText);
   return Object.keys(resources).length > 0 ? resources : undefined;
 }
@@ -1060,6 +1122,10 @@ function readLiveInventoryExtras(layout: InventoryLayout): HostInventoryExtras {
   if (eCpus !== undefined) extras.eCpus = eCpus;
   const gpus = readHostGpus(layout);
   if (gpus) extras.gpus = gpus;
+  const virtualizationKind = readVirtualizationKind(layout);
+  if (virtualizationKind !== undefined) {
+    extras.virtualizationKind = virtualizationKind;
+  }
   return extras;
 }
 

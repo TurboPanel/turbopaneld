@@ -40,6 +40,10 @@ import {
   withTempLayout,
 } from "../testing/index.ts";
 import { DaemonTokenManager } from "./token-manager.ts";
+import {
+  setDrivetempDropinWriterForTests,
+  setDrivetempExecutorForTests,
+} from "../metrics/collector/sensors/drivetemp.ts";
 
 type EnrollIdentity = { serverId: string; keyId: string };
 
@@ -5449,6 +5453,13 @@ it({
       }),
     });
 
+    let drivetempModprobeCalls = 0;
+    setDrivetempExecutorForTests(() => {
+      drivetempModprobeCalls++;
+      return Promise.resolve({ success: true, stderr: "" });
+    });
+    setDrivetempDropinWriterForTests(() => Promise.resolve());
+
     try {
       client.start();
       const socket = await waitFor(
@@ -5513,44 +5524,99 @@ it({
       assertEquals(badResult.ok, false);
       assert(typeof badResult.error === "string");
 
-      // Sensor / hosting-path overrides push writes the daemon state files.
+      // Hardware-profile push writes the daemon state file (sensor slots,
+      // NIC bindings, hosting path, drivetemp opt-in, generation).
       socket.receive({
         type: "metrics-sensor-overrides-update",
         id: "ovr-1",
         overrides: {
-          cpuTemperature: "coretemp:Package id 0",
+          cpuTemperature: { chip: "coretemp", label: "Package id 0" },
+          nic1: "eth0",
           hostingPath: "/mnt/hosting",
+          drivetempEnabled: true,
+          generation: 2,
+          generationAppliedAt: "2026-01-01T00:00:00.000Z",
         },
         at: new Date().toISOString(),
       });
       const overridesResult = await waitFor(
         "metrics-sensor-overrides-update-result",
         () => lastFrameOfType(socket, "metrics-sensor-overrides-update-result"),
-      ) as { id?: string; ok?: boolean };
+      ) as {
+        id?: string;
+        ok?: boolean;
+        drivetemp?: { loaded?: boolean; capabilities?: unknown };
+      };
       assertEquals(overridesResult.id, "ovr-1");
       assertEquals(overridesResult.ok, true);
-      const sensorFile = JSON.parse(
-        await Deno.readTextFile(`${tempDir}/metrics/sensor-overrides.json`),
-      ) as { cpuTemperature?: string };
-      assertEquals(sensorFile.cpuTemperature, "coretemp:Package id 0");
-      const hostingFile = JSON.parse(
-        await Deno.readTextFile(`${tempDir}/metrics/hosting-path.json`),
-      ) as { path?: string };
-      assertEquals(hostingFile.path, "/mnt/hosting");
+      // The drivetemp opt-in is awaited before this ack (not backgrounded) —
+      // modprobe has already run, and its outcome plus refreshed sensor
+      // capabilities ride this same result.
+      assertEquals(drivetempModprobeCalls, 1);
+      assertEquals(overridesResult.drivetemp?.loaded, true);
+      assertEquals(typeof overridesResult.drivetemp?.capabilities, "object");
+      const profileFile = JSON.parse(
+        await Deno.readTextFile(`${tempDir}/metrics/hardware-profile.json`),
+      ) as {
+        cpuTemperature?: { chip?: string; label?: string };
+        nic1?: string;
+        hostingPath?: string;
+        drivetempEnabled?: boolean;
+        generation?: number;
+        generationAppliedAt?: string;
+      };
+      assertEquals(profileFile.cpuTemperature, {
+        chip: "coretemp",
+        label: "Package id 0",
+      });
+      assertEquals(profileFile.nic1, "eth0");
+      assertEquals(profileFile.hostingPath, "/mnt/hosting");
+      assertEquals(profileFile.drivetempEnabled, true);
+      assertEquals(profileFile.generation, 2);
+      assertEquals(
+        profileFile.generationAppliedAt,
+        "2026-01-01T00:00:00.000Z",
+      );
 
-      // A clear whose delete fails (non-empty directory squatting on the
-      // override path → not NotFound) must report ok:false so the control
-      // plane sees the stale hosting path is still in effect.
-      await Deno.remove(`${tempDir}/metrics/hosting-path.json`);
-      await Deno.mkdir(`${tempDir}/metrics/hosting-path.json`);
+      // A later push with drivetempEnabled already true is a no-op — only
+      // the flip edge re-runs modprobe.
+      socket.receive({
+        type: "metrics-sensor-overrides-update",
+        id: "ovr-drivetemp-noop",
+        overrides: {
+          cpuTemperature: { chip: "coretemp", label: "Package id 0" },
+          drivetempEnabled: true,
+        },
+        at: new Date().toISOString(),
+      });
+      await waitFor(
+        "no-op metrics-sensor-overrides-update-result",
+        () => {
+          const frame = lastFrameOfType(
+            socket,
+            "metrics-sensor-overrides-update-result",
+          ) as { id?: string } | undefined;
+          return frame?.id === "ovr-drivetemp-noop" ? frame : undefined;
+        },
+      );
+      await flushMicrotasks();
+      assertEquals(drivetempModprobeCalls, 1);
+
+      // A write whose rename fails (non-empty directory squatting on the
+      // profile path) must report ok:false so the control plane sees the
+      // stale profile is still in effect.
+      await Deno.remove(`${tempDir}/metrics/hardware-profile.json`);
+      await Deno.mkdir(`${tempDir}/metrics/hardware-profile.json`);
       await Deno.writeTextFile(
-        `${tempDir}/metrics/hosting-path.json/blocker`,
+        `${tempDir}/metrics/hardware-profile.json/blocker`,
         "x",
       );
       socket.receive({
         type: "metrics-sensor-overrides-update",
         id: "ovr-2",
-        overrides: { cpuTemperature: "coretemp:Package id 0" },
+        overrides: {
+          cpuTemperature: { chip: "coretemp", label: "Package id 0" },
+        },
         at: new Date().toISOString(),
       });
       const failedClearResult = await waitFor(
@@ -5565,7 +5631,7 @@ it({
       );
       assertEquals(failedClearResult.ok, false);
       assert(typeof failedClearResult.error === "string");
-      await Deno.remove(`${tempDir}/metrics/hosting-path.json`, {
+      await Deno.remove(`${tempDir}/metrics/hardware-profile.json`, {
         recursive: true,
       });
 
@@ -5624,6 +5690,8 @@ it({
       });
       setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
       setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+      setDrivetempExecutorForTests(null);
+      setDrivetempDropinWriterForTests(null);
       await Deno.remove(tempDir, { recursive: true });
     }
   },

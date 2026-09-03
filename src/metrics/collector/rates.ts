@@ -17,6 +17,20 @@ export function rate(
 }
 
 /**
+ * Raw per-interval delta from monotonic counters — same reset/first-sample
+ * contract as {@link rate}, but no division by `seconds`. Traffic counters
+ * (Caddy/ProxySQL) are stored as per-interval totals, not per-second rates.
+ */
+export function counterDelta(
+  prev: number | undefined,
+  curr: number,
+): number | null {
+  if (prev === undefined) return null;
+  if (curr < prev) return null;
+  return curr - prev;
+}
+
+/**
  * Detect reboot/counter reset via boot_id change.
  * When boot IDs differ, all rate/CPU/power metrics for the interval must be `null`.
  */

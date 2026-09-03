@@ -1,0 +1,7 @@
+# Freshly started Caddy: process-wide counters registered but no requests
+# served yet, and one malformed line thrown in for parser robustness.
+# HELP caddy_http_requests_in_flight Number of requests currently handled by this server.
+# TYPE caddy_http_requests_in_flight gauge
+caddy_http_requests_in_flight{handler="subroute",server="srv0"} 0
+this is not a valid exposition line
+caddy_http_requests_total{handler="subroute",server="srv0"} 0

@@ -197,10 +197,6 @@ function createFixtureCollectorFactory(): () => MetricsCollector {
       countProcesses: () => 42,
       resolveDimensions: () => ({
         schemaVersion: METRICS_SCHEMA_VERSION,
-        daemonVersion: "testcommit",
-        operatingSystem: "Test OS",
-        architecture: "aarch64",
-        kernelRelease: "6.1.0-amd64",
       }),
       resolveDockerDataRoot: () => Promise.resolve(null),
       resolveHostingPath: () => "/srv/users",
@@ -209,11 +205,24 @@ function createFixtureCollectorFactory(): () => MetricsCollector {
           cpuTemperatureCelsius: null,
           gpuTemperatureCelsius: null,
           gpuPowerWatts: null,
+          gpuUtilizationPercent: null,
+          gpuFanRpm: null,
+          disk1TemperatureCelsius: null,
+          disk2TemperatureCelsius: null,
+          ambient1TemperatureCelsius: null,
+          ambient2TemperatureCelsius: null,
+          boardTemperatureCelsius: null,
+          cpuFanRpm: null,
+          systemFan1Rpm: null,
+          systemFan2Rpm: null,
           cpuEnergy: null,
           sensors: {},
         }),
       resolveFabricInterfaces: () => Promise.resolve(["tp0"]),
       resolveAdminSensorOverrides: () => Promise.resolve({}),
+      resolveHardwareProfileGeneration: () => 0,
+      resolveNicSlots: () => Promise.resolve({ nic1: null, nic2: null }),
+      readProxyCounters: () => Promise.resolve({ caddy: null, proxysql: null }),
     };
     const inner = createMetricsCollector(deps);
     return {
@@ -249,6 +258,7 @@ function supportedSample(sequence: number): MetricsCollectResult {
       at: new Date(0).toISOString(),
       intervalSeconds: 60,
       sequence,
+      parts: ["core", "extended"],
       metrics: {
         load1: 1,
         load5: 1,
@@ -260,11 +270,9 @@ function supportedSample(sequence: number): MetricsCollectResult {
       },
       dimensions: {
         schemaVersion: METRICS_SCHEMA_VERSION,
-        daemonVersion: "test",
-        operatingSystem: "Test OS",
-        architecture: "aarch64",
-        kernelRelease: "6.1.0",
         collectionMode: "baseline",
+        hardwareProfileGeneration: 0,
+        trafficSources: { caddy: false, proxysql: false },
       },
     }),
   };

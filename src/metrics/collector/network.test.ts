@@ -4,6 +4,7 @@ import {
   classifiedNetRates,
   classifyInterface,
   interfaceNamesByClass,
+  namedInterfaceRates,
   readNetCounters,
 } from "./network.ts";
 
@@ -95,4 +96,66 @@ it("classifiedNetRates nulls a class with no interfaces instead of reporting 0",
 
 it("readNetCounters returns null when nothing is parsable", () => {
   assertEquals(readNetCounters("", FABRIC), null);
+});
+
+it("namedInterfaceRates nulls an unassigned slot", () => {
+  const net = readNetCounters(fixture("proc-net-dev.txt"), FABRIC);
+  const rates = namedInterfaceRates(net, net, null, 60);
+  assertEquals(rates.receiveBytesPerSecond, null);
+  assertEquals(rates.transmitBytesPerSecond, null);
+});
+
+it("namedInterfaceRates nulls on the first sample", () => {
+  const net = readNetCounters(
+    fixture("proc-net-dev-with-fabric-tunnel.txt"),
+    FABRIC,
+  );
+  const rates = namedInterfaceRates(null, net, "eth0", 60);
+  assertEquals(rates.receiveBytesPerSecond, null);
+  assertEquals(rates.transmitBytesPerSecond, null);
+});
+
+it("namedInterfaceRates computes an assigned slot's rate independently of class aggregation", () => {
+  const prev = readNetCounters(
+    fixture("proc-net-dev-with-fabric-tunnel.txt"),
+    FABRIC,
+  );
+  const currText = fixture("proc-net-dev-with-fabric-tunnel.txt")
+    .replace("  eth0: 5000000", "  eth0: 5600000")
+    .replace("3000000    2000", "3300000    2100")
+    .replace("   tp0: 400000", "   tp0: 460000")
+    .replace("300000      150", "330000      160");
+  const curr = readNetCounters(currText, FABRIC);
+
+  const nic1 = namedInterfaceRates(prev, curr, "eth0", 60);
+  assertEquals(nic1.receiveBytesPerSecond, 600_000 / 60);
+  assertEquals(nic1.transmitBytesPerSecond, 300_000 / 60);
+
+  // eth0 is also part of the uplink class aggregate — both agree here
+  // because it's the only uplink member, but the two lookups are
+  // independent paths.
+  const uplink = classifiedNetRates(prev, curr, "uplink", 60);
+  assertEquals(nic1.receiveBytesPerSecond, uplink.receiveBytesPerSecond);
+});
+
+it("namedInterfaceRates nulls only the vanished slot when an assigned interface disappears", () => {
+  const prev = readNetCounters(
+    fixture("proc-net-dev-with-fabric-tunnel.txt"),
+    FABRIC,
+  );
+  const withoutVeth = fixture("proc-net-dev-with-fabric-tunnel.txt")
+    .split("\n")
+    .filter((line) => !line.includes("veth123"))
+    .join("\n");
+  const curr = readNetCounters(withoutVeth, FABRIC);
+
+  const vanished = namedInterfaceRates(prev, curr, "veth123", 60);
+  assertEquals(vanished.receiveBytesPerSecond, null);
+  assertEquals(vanished.transmitBytesPerSecond, null);
+
+  // eth0's counters are unchanged between prev and this veth-stripped curr
+  // (same fixture, only the veth123 line removed) — 0, not null: a present,
+  // unchanged interface is a real zero-traffic reading.
+  const stillPresent = namedInterfaceRates(prev, curr, "eth0", 60);
+  assertEquals(stillPresent.receiveBytesPerSecond, 0);
 });

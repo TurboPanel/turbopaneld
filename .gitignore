@@ -38,3 +38,6 @@ workers/turbopanel-sh/node_modules/
 
 # Claude Code nested worktree checkouts (background-session isolation).
 /.claude/worktrees/
+
+# Local Claude Code settings (background-session isolation)
+.claude/settings.json

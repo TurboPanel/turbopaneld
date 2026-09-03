@@ -60,6 +60,22 @@ export async function readCpuEnergy(
   };
 }
 
+/**
+ * Read and sanity-check one GPU power candidate's raw sysfs value,
+ * independent of candidate selection — shared by {@link readGpuPower} (one
+ * selected candidate) and capability discovery (every candidate, for the
+ * picker's live-reading column).
+ */
+export async function readGpuPowerValue(
+  path: string,
+  io: SensorIo,
+): Promise<number | null> {
+  const raw = await io.readFile(path);
+  const microwatts = Number(raw?.trim());
+  if (!Number.isFinite(microwatts) || microwatts < 0) return null;
+  return microwatts / 1e6;
+}
+
 /** Instantaneous GPU power gauge (hwmon `power1_average`, microwatts). */
 export async function readGpuPower(
   candidates: SensorCandidate[],
@@ -69,12 +85,9 @@ export async function readGpuPower(
   const candidate = selectCandidate(candidates, overridePath);
   if (!candidate) return { watts: null };
 
-  const raw = await io.readFile(candidate.path);
-  const microwatts = Number(raw?.trim());
-  if (!Number.isFinite(microwatts) || microwatts < 0) {
-    return { watts: null, sensor: sensorId(candidate) };
-  }
-  return { watts: microwatts / 1e6, sensor: sensorId(candidate) };
+  const watts = await readGpuPowerValue(candidate.path, io);
+  if (watts === null) return { watts: null, sensor: sensorId(candidate) };
+  return { watts, sensor: sensorId(candidate) };
 }
 
 /**

@@ -1,114 +1,143 @@
-import { assertEquals, assertRejects } from "@std/assert";
+import { assertEquals } from "@std/assert";
 import { it } from "@std/testing/bdd";
 import { join } from "@std/path";
+import { resolveHostingPath } from "./hosting.ts";
 import {
-  clearHostingPathOverride,
-  hostingPathOverridePath,
-  parseHostingPathOverride,
-  resolveAdminHostingPathOverride,
-  resolveHostingPath,
-  writeHostingPathOverride,
-} from "./hosting.ts";
+  hardwareProfilePath,
+  writeHardwareProfile,
+} from "./sensors/overrides.ts";
 
-it("parseHostingPathOverride accepts one absolute clean path", () => {
-  assertEquals(
-    parseHostingPathOverride(JSON.stringify({ path: "/mnt/hosting" })),
-    "/mnt/hosting",
-  );
-  assertEquals(
-    parseHostingPathOverride(JSON.stringify({ path: " /srv/tenants " })),
-    "/srv/tenants",
-  );
-  assertEquals(
-    parseHostingPathOverride(JSON.stringify({ path: "relative/path" })),
-    undefined,
-  );
-  assertEquals(
-    parseHostingPathOverride(JSON.stringify({ path: "/with space" })),
-    undefined,
-  );
-  assertEquals(
-    parseHostingPathOverride(JSON.stringify({ path: 42 })),
-    undefined,
-  );
-  assertEquals(parseHostingPathOverride("not json"), undefined);
-  assertEquals(parseHostingPathOverride("[1,2]"), undefined);
-  assertEquals(parseHostingPathOverride("null"), undefined);
-});
-
-it("resolveAdminHostingPathOverride reads daemon state and defaults to unset", async () => {
-  const tempDir = await Deno.makeTempDir();
-  try {
-    assertEquals(await resolveAdminHostingPathOverride(tempDir), undefined);
-
-    const path = hostingPathOverridePath(tempDir);
-    await Deno.mkdir(join(tempDir, "metrics"), { recursive: true });
-    await Deno.writeTextFile(path, JSON.stringify({ path: "/mnt/hosting" }));
-    assertEquals(
-      await resolveAdminHostingPathOverride(tempDir),
-      "/mnt/hosting",
-    );
-
-    await Deno.writeTextFile(path, "{broken");
-    assertEquals(await resolveAdminHostingPathOverride(tempDir), undefined);
-  } finally {
-    await Deno.remove(tempDir, { recursive: true });
-  }
-});
-
-it("clearHostingPathOverride removes the file and treats a missing one as cleared", async () => {
-  const tempDir = await Deno.makeTempDir();
-  try {
-    // Missing file: already "no override" — must not throw.
-    await clearHostingPathOverride(tempDir);
-
-    await writeHostingPathOverride("/mnt/hosting", tempDir);
-    assertEquals(
-      await resolveAdminHostingPathOverride(tempDir),
-      "/mnt/hosting",
-    );
-    await clearHostingPathOverride(tempDir);
-    assertEquals(await resolveAdminHostingPathOverride(tempDir), undefined);
-  } finally {
-    await Deno.remove(tempDir, { recursive: true });
-  }
-});
-
-it("clearHostingPathOverride rethrows delete failures other than NotFound", async () => {
-  const tempDir = await Deno.makeTempDir();
-  try {
-    // A non-empty directory at the override path makes the non-recursive
-    // Deno.remove fail with something other than NotFound — the stale
-    // override state must surface instead of reporting a successful clear.
-    const overridePath = hostingPathOverridePath(tempDir);
-    await Deno.mkdir(overridePath, { recursive: true });
-    await Deno.writeTextFile(join(overridePath, "blocker"), "x");
-
-    await assertRejects(() => clearHostingPathOverride(tempDir));
-  } finally {
-    await Deno.remove(tempDir, { recursive: true });
-  }
-});
+/** Every candidate "exists" — isolates preference/fallback logic from the walk-up. */
+const ALWAYS_EXISTS = () => true;
 
 it("resolveHostingPath prefers the admin override over the layout default", async () => {
   const tempDir = await Deno.makeTempDir();
   try {
     // No override on disk: the layout's principal home root wins.
-    assertEquals(await resolveHostingPath({}, tempDir), "/srv/users");
+    assertEquals(
+      await resolveHostingPath({}, tempDir, { isDirectory: ALWAYS_EXISTS }),
+      "/srv/users",
+    );
     assertEquals(
       await resolveHostingPath(
         { TURBOPANEL_PRINCIPAL_HOME_ROOT: "/data/homes" },
         tempDir,
+        { isDirectory: ALWAYS_EXISTS },
       ),
       "/data/homes",
     );
 
-    await Deno.mkdir(join(tempDir, "metrics"), { recursive: true });
-    await Deno.writeTextFile(
-      hostingPathOverridePath(tempDir),
-      JSON.stringify({ path: "/mnt/hosting" }),
+    await writeHardwareProfile({ hostingPath: "/mnt/hosting" }, tempDir);
+    assertEquals(
+      await resolveHostingPath({}, tempDir, { isDirectory: ALWAYS_EXISTS }),
+      "/mnt/hosting",
     );
-    assertEquals(await resolveHostingPath({}, tempDir), "/mnt/hosting");
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+it("resolveHostingPath falls back to the layout default on malformed state", async () => {
+  const tempDir = await Deno.makeTempDir();
+  try {
+    await Deno.mkdir(join(tempDir, "metrics"), { recursive: true });
+    await Deno.writeTextFile(hardwareProfilePath(tempDir), "{broken");
+    assertEquals(
+      await resolveHostingPath({}, tempDir, { isDirectory: ALWAYS_EXISTS }),
+      "/srv/users",
+    );
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+it("resolveHostingPath falls back to the layout default on a malformed on-disk hostingPath", async () => {
+  const tempDir = await Deno.makeTempDir();
+  try {
+    await Deno.mkdir(join(tempDir, "metrics"), { recursive: true });
+    // A stale/manually-edited state file can carry a relative path or one
+    // with embedded whitespace — parseHardwareProfile() must drop it so
+    // this never walks a relative path (e.g. up to ".") instead of falling
+    // back to principalHomeRoot.
+    await Deno.writeTextFile(
+      hardwareProfilePath(tempDir),
+      JSON.stringify({ hostingPath: "relative/path" }),
+    );
+    assertEquals(
+      await resolveHostingPath({}, tempDir, { isDirectory: ALWAYS_EXISTS }),
+      "/srv/users",
+    );
+
+    await Deno.writeTextFile(
+      hardwareProfilePath(tempDir),
+      JSON.stringify({ hostingPath: "/mnt/has space" }),
+    );
+    assertEquals(
+      await resolveHostingPath({}, tempDir, { isDirectory: ALWAYS_EXISTS }),
+      "/srv/users",
+    );
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+it("resolveHostingPath returns the resolved candidate unchanged when it already exists", async () => {
+  const tempDir = await Deno.makeTempDir();
+  try {
+    await writeHardwareProfile({ hostingPath: "/mnt/hosting" }, tempDir);
+    const probed: string[] = [];
+    const result = await resolveHostingPath({}, tempDir, {
+      isDirectory: (path) => {
+        probed.push(path);
+        return true;
+      },
+    });
+    assertEquals(result, "/mnt/hosting");
+    // No walk-up needed: only the candidate itself is ever probed.
+    assertEquals(probed, ["/mnt/hosting"]);
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+it("resolveHostingPath walks up to the nearest existing ancestor when the admin override doesn't exist yet", async () => {
+  const tempDir = await Deno.makeTempDir();
+  try {
+    await writeHardwareProfile({
+      hostingPath: "/mnt/hosting/pool-a/nested",
+    }, tempDir);
+    const result = await resolveHostingPath({}, tempDir, {
+      isDirectory: (path) => path === "/mnt/hosting",
+    });
+    assertEquals(result, "/mnt/hosting");
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+it("resolveHostingPath walks up to the nearest existing ancestor when the layout default doesn't exist yet", async () => {
+  const tempDir = await Deno.makeTempDir();
+  try {
+    // No override on disk: the layout default is "/srv/users", which is
+    // only created on first tenant principal — a fresh host has "/srv" but
+    // not yet "/srv/users".
+    const result = await resolveHostingPath({}, tempDir, {
+      isDirectory: (path) => path === "/srv",
+    });
+    assertEquals(result, "/srv");
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+it("resolveHostingPath bounds the walk-up at the filesystem root", async () => {
+  const tempDir = await Deno.makeTempDir();
+  try {
+    await writeHardwareProfile({ hostingPath: "/a/b/c" }, tempDir);
+    const result = await resolveHostingPath({}, tempDir, {
+      isDirectory: () => false,
+    });
+    assertEquals(result, "/");
   } finally {
     await Deno.remove(tempDir, { recursive: true });
   }

@@ -115,6 +115,59 @@ export type SensorOverrides = {
   gpuTemperature?: string;
   cpuPower?: string;
   gpuPower?: string;
+  /** Rides the same `gpuDevice` slot identity as `gpuTemperature`/`gpuPower`. */
+  gpuUtilization?: string;
+  gpuFan?: string;
+  disk1Temperature?: string;
+  disk2Temperature?: string;
+  ambient1Temperature?: string;
+  ambient2Temperature?: string;
+  boardTemperature?: string;
+  cpuFan?: string;
+  systemFan1?: string;
+  systemFan2?: string;
+};
+
+/**
+ * Stable sensor identity for one hardware-profile slot — `chip` + `label`,
+ * mirroring the control plane's `ServerSensorSlotAssignment`
+ * (`src/lib/db/server-metadata.ts` in the client repo). Never a raw sysfs
+ * path — those reindex across reboots.
+ */
+export type HardwareProfileSensorSlot = { chip: string; label: string };
+
+/**
+ * Operator-assigned hardware profile pushed from the control plane over the
+ * cell socket (`metrics-sensor-overrides-update`) and cached as daemon
+ * state. `undefined` (key absent) = never configured; `null` = explicitly
+ * unassigned; an assignment = pinned identity. Mirrors the control plane's
+ * `ServerHardwareProfile`.
+ */
+export type HardwareProfile = {
+  cpuTemperature?: HardwareProfileSensorSlot | null;
+  cpuPower?: HardwareProfileSensorSlot | null;
+  gpuDevice?: HardwareProfileSensorSlot | null;
+  /**
+   * Overrides the fan candidate `gpuDevice`'s fan-out otherwise selects —
+   * only needed when a GPU's fan tachometer isn't discoverable from the same
+   * device identity as its temperature/power (see `resolveAdminSensorOverrides`
+   * in `overrides.ts`).
+   */
+  gpuFan?: HardwareProfileSensorSlot | null;
+  disk1Temperature?: HardwareProfileSensorSlot | null;
+  disk2Temperature?: HardwareProfileSensorSlot | null;
+  ambient1Temperature?: HardwareProfileSensorSlot | null;
+  ambient2Temperature?: HardwareProfileSensorSlot | null;
+  boardTemperature?: HardwareProfileSensorSlot | null;
+  cpuFan?: HardwareProfileSensorSlot | null;
+  systemFan1?: HardwareProfileSensorSlot | null;
+  systemFan2?: HardwareProfileSensorSlot | null;
+  nic1?: string | null;
+  nic2?: string | null;
+  hostingPath?: string;
+  drivetempEnabled?: boolean;
+  generation?: number;
+  generationAppliedAt?: string;
 };
 
 /** RAPL cumulative energy counter — power is a two-snapshot delta. */
@@ -130,14 +183,87 @@ export type SensorReadings = {
   gpuTemperatureCelsius: number | null;
   /** Instantaneous GPU power gauge (hwmon `power1_average`); `null` when unsupported. */
   gpuPowerWatts: number | null;
+  /** Vendor busy-percent gauge (`amdgpu`/i915); `null` on NVIDIA (unsupported). */
+  gpuUtilizationPercent: number | null;
+  gpuFanRpm: number | null;
+  disk1TemperatureCelsius: number | null;
+  disk2TemperatureCelsius: number | null;
+  ambient1TemperatureCelsius: number | null;
+  ambient2TemperatureCelsius: number | null;
+  boardTemperatureCelsius: number | null;
+  cpuFanRpm: number | null;
+  systemFan1Rpm: number | null;
+  systemFan2Rpm: number | null;
   /** Cumulative CPU energy counter for delta-based `cpuPowerWatts`. */
   cpuEnergy: CpuEnergyCounter | null;
+  /** Resolved sensor identities — daemon-internal, never re-added to dimensions. */
   sensors: {
     cpuTemperatureSensor?: string;
     gpuTemperatureSensor?: string;
     cpuPowerSensor?: string;
     gpuPowerSensor?: string;
+    gpuUtilizationSensor?: string;
+    gpuFanSensor?: string;
+    disk1TemperatureSensor?: string;
+    disk2TemperatureSensor?: string;
+    ambient1TemperatureSensor?: string;
+    ambient2TemperatureSensor?: string;
+    boardTemperatureSensor?: string;
+    cpuFanSensor?: string;
+    systemFan1Sensor?: string;
+    systemFan2Sensor?: string;
   };
+};
+
+/** Operator-assigned NIC-slot interface names (`HardwareProfile.nic1`/`.nic2`); `null` = unassigned. */
+export type NicSlots = {
+  nic1: string | null;
+  nic2: string | null;
+};
+
+/**
+ * One scrape of the site Caddy's Prometheus exposition (`/metrics` on its
+ * admin listener). Counter fields are cumulative-since-process-start, exactly
+ * as Caddy reports them — the collector derives per-interval deltas via
+ * `counterDelta`. `requestsInFlight` is the only gauge.
+ */
+export type CaddyCounters = {
+  requestsTotal: number;
+  responses2xxTotal: number;
+  responses3xxTotal: number;
+  responses4xxTotal: number;
+  responses5xxTotal: number;
+  requestBytesTotal: number;
+  responseBytesTotal: number;
+  requestDurationSecondsSum: number;
+  requestsUnder100msTotal: number;
+  requestsUnder1sTotal: number;
+  requestsInFlight: number;
+};
+
+/**
+ * One scrape of ProxySQL's REST API (`admin-restapi_enabled`) `/metrics`
+ * endpoint. `queriesTotal`/`slowQueriesTotal`/`connectionErrorsTotal` are
+ * cumulative counters (delta'd by the collector); the connection-count and
+ * backend fields are point-in-time gauges.
+ */
+export type ProxySqlCounters = {
+  queriesTotal: number;
+  slowQueriesTotal: number;
+  connectionErrorsTotal: number;
+  clientConnections: number;
+  backendConnections: number;
+  backendsUp: number;
+};
+
+/**
+ * Combined traffic-sidecar scrape for one tick. Each source is independently
+ * `null` when its process is absent or unreachable — a host running only
+ * ProxySQL (no site Caddy) still reports `proxysql` fields.
+ */
+export type ProxyCounters = {
+  caddy: CaddyCounters | null;
+  proxysql: ProxySqlCounters | null;
 };
 
 /** Point-in-time snapshot used for delta/rate computation on the next collect. */
@@ -157,6 +283,8 @@ export type RawSnapshot = {
   sensors: SensorReadings | null;
   processCount: number | null;
   uptimeSeconds: number | null;
+  nicSlots: NicSlots;
+  proxy: ProxyCounters | null;
 };
 
 export type StatfsResult = {
@@ -167,19 +295,16 @@ export type StatfsResult = {
 };
 
 /**
- * Static per-sample dimensions the collector cannot know: everything but
- * `collectionMode` and the sensor/interface identities, which the collector
- * fills in from its own resolution results.
+ * Static per-sample dimensions the collector cannot know from its own I/O:
+ * everything but `collectionMode` (per-collect), `hardwareProfileGeneration`
+ * (stamped from the resolved `HardwareProfile.generation`), and
+ * `trafficSources` (stamped from the tick's `readProxyCounters()` result) —
+ * sensor/interface identities live in Postgres via the hardware-profile round
+ * trip, never on the wire sample itself.
  */
 export type StaticDimensions = Omit<
   HostMetricsDimensions,
-  | "collectionMode"
-  | "cpuTemperatureSensor"
-  | "gpuTemperatureSensor"
-  | "cpuPowerSensor"
-  | "gpuPowerSensor"
-  | "uplinkInterfaces"
-  | "fabricInterfaces"
+  "collectionMode" | "hardwareProfileGeneration" | "trafficSources"
 >;
 
 /**
@@ -208,4 +333,14 @@ export type CollectorDeps = {
   resolveFabricInterfaces: () => Promise<string[]>;
   /** Operator-selected sensors from daemon state; `{}` when unset. */
   resolveAdminSensorOverrides: () => Promise<SensorOverrides>;
+  /** Resolved hardware-profile generation for `dimensions.hardwareProfileGeneration`; `0` when unset. */
+  resolveHardwareProfileGeneration: () => number | Promise<number>;
+  /** Operator-assigned NIC-slot interface names (`HardwareProfile.nic1`/`.nic2`); `null` slot when unset. */
+  resolveNicSlots: () => Promise<NicSlots>;
+  /**
+   * Traffic-sidecar scrape (site Caddy + ProxySQL REST `/metrics`). Never
+   * throws — each source resolves independently to `null` on any
+   * network/parse failure.
+   */
+  readProxyCounters: () => Promise<ProxyCounters>;
 };

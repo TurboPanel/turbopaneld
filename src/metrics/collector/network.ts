@@ -108,3 +108,43 @@ export function classifiedNetRates(
     seconds,
   );
 }
+
+function singleInterfaceSubset(
+  net: NetCounters | null,
+  name: string,
+): Record<string, NetInterfaceCounters> | null {
+  if (!net) return null;
+  const value = net.interfaces[name];
+  if (!value) return {};
+  return {
+    [name]: {
+      receiveBytes: value.receiveBytes,
+      transmitBytes: value.transmitBytes,
+    },
+  };
+}
+
+/**
+ * Per-second byte rates for one operator-named interface (`HardwareProfile
+ * .nic1`/`.nic2`) — a parallel, independent lookup path alongside
+ * classification-based aggregation, so an interface can be both part of the
+ * `uplink` aggregate and individually reported as `nic1`/`nic2`. An unset
+ * slot (`null` name) always nulls; an assigned slot missing from either
+ * snapshot (unplugged, renamed) nulls only via the same membership-churn
+ * rule `netRates` already applies to classes.
+ */
+export function namedInterfaceRates(
+  prev: NetCounters | null,
+  curr: NetCounters | null,
+  name: string | null,
+  seconds: number,
+): NetRates {
+  if (name === null) {
+    return { receiveBytesPerSecond: null, transmitBytesPerSecond: null };
+  }
+  return netRates(
+    singleInterfaceSubset(prev, name),
+    singleInterfaceSubset(curr, name),
+    seconds,
+  );
+}

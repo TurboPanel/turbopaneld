@@ -1,0 +1,8 @@
+# A ProxySQL with admin-restapi enabled but no dynamic backends configured
+# yet (no mysql_servers loaded) — only the process-wide counters/gauges are
+# present, plus one malformed line for parser robustness.
+proxysql_questions_total 0
+proxysql_slow_queries_total 0
+proxysql_client_connections_connected 0
+proxysql_server_connections_connected 0
+not a metric line at all

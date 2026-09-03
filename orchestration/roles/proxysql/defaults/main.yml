@@ -8,6 +8,9 @@ proxysql_tls_dir: "{{ proxysql_config_dir }}/tls"
 proxysql_data_dir: "{{ turbopanel_state_dir }}/proxysql"
 proxysql_service_name: turbopanel-proxysql-stack
 proxysql_admin_port: 6032
+# ProxySQL's own default REST API port (admin-restapi_port). Unauthenticated
+# and loopback-only — see proxysql.cnf.j2 for why that's acceptable.
+proxysql_restapi_port: 6070
 proxysql_pgsql_port: 15432
 proxysql_mysql_port: 13306
 # Runtime uid/gid for image — ProxySQL official image often runs as 999 or 2;
