@@ -284,8 +284,16 @@ async function buildSensorCapabilities(
     gpuDevices,
   ] = await Promise.all([
     enrichCandidates(raw.cpuTemperature, "temperature", io),
-    enrichCandidates(fanChipCandidates(raw.fan, CPU_HWMON_CHIPS, true), "fan", io),
-    enrichCandidates(fanChipCandidates(raw.fan, CPU_HWMON_CHIPS, false), "fan", io),
+    enrichCandidates(
+      fanChipCandidates(raw.fan, CPU_HWMON_CHIPS, true),
+      "fan",
+      io,
+    ),
+    enrichCandidates(
+      fanChipCandidates(raw.fan, CPU_HWMON_CHIPS, false),
+      "fan",
+      io,
+    ),
     enrichCandidates(raw.ambientTemperature, "temperature", io),
     enrichCandidates(raw.diskTemperature, "temperature", io),
     Promise.all(raw.gpuDevices.map((device) => enrichGpuDevice(device, io))),
@@ -293,7 +301,10 @@ async function buildSensorCapabilities(
 
   return {
     cpuTemperature,
-    cpuPower: raw.cpuPower.map((candidate) => ({ ...candidate, reading: null })),
+    cpuPower: raw.cpuPower.map((candidate) => ({
+      ...candidate,
+      reading: null,
+    })),
     cpuFan,
     gpuFan: gpuDevices.flatMap((device) => device.fan),
     boardTemperature: ambientBoard,
