@@ -6,9 +6,9 @@ import {
   buildEnvironment,
   buildInvocation,
   deriveNodeInstallCommand,
-  normalizeNodeBuildCommand,
   NEXT_EXPORT_DIR,
   NEXT_STANDALONE_DIR,
+  normalizeNodeBuildCommand,
   prepareNativeAppBuildOutput,
   runReleaseBuild,
 } from "./build.ts";
@@ -409,10 +409,19 @@ test("deriveNodeInstallCommand treats Yarn Berry as immutable-by-CI", async () =
 });
 
 test("normalizeNodeBuildCommand prefixes bare pnpm and yarn with corepack", () => {
-  assertEquals(normalizeNodeBuildCommand("pnpm run build"), "corepack pnpm run build");
+  assertEquals(
+    normalizeNodeBuildCommand("pnpm run build"),
+    "corepack pnpm run build",
+  );
   assertEquals(normalizeNodeBuildCommand("pnpm build"), "corepack pnpm build");
-  assertEquals(normalizeNodeBuildCommand("yarn run build"), "corepack yarn run build");
-  assertEquals(normalizeNodeBuildCommand("corepack pnpm run build"), "corepack pnpm run build");
+  assertEquals(
+    normalizeNodeBuildCommand("yarn run build"),
+    "corepack yarn run build",
+  );
+  assertEquals(
+    normalizeNodeBuildCommand("corepack pnpm run build"),
+    "corepack pnpm run build",
+  );
   assertEquals(normalizeNodeBuildCommand("npm run build"), "npm run build");
 });
 
@@ -473,7 +482,9 @@ test("runReleaseBuild normalizes bare pnpm build commands for native-app builds"
       "corepack pnpm run build",
     ]);
     assertEquals(
-      lines.some((line) => line.includes("normalized build command for Corepack")),
+      lines.some((line) =>
+        line.includes("normalized build command for Corepack")
+      ),
       true,
     );
   });
