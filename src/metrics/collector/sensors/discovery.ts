@@ -1,7 +1,12 @@
 /**
  * Sensor discovery: enumerate temperature/power sources under sysfs.
  *
- * Sources, all async file reads (no subprocess per interval):
+ * Sources, all async file reads (no subprocess per interval). Deno 2
+ * `NotCapable`s `Deno.readDir` on `/sys` under `--allow-read` (compiled
+ * binaries ask for `--allow-all`); listing uses the same `ls -1` fallback
+ * as `/proc` (`processes.ts`). Individual sysfs files already go through
+ * {@link readProcFile}'s `cat` fallback.
+ *
  * - hwmon (`/sys/class/hwmon`) — chip `name` plus `tempN_input`/`tempN_label`
  *   (CPU chips like coretemp/k10temp; GPU chips like amdgpu/nouveau/i915,
  *   which register here too, so a separate DRM `card` node traversal under
@@ -29,18 +34,62 @@ export type SensorIo = {
   readFile: (path: string) => Promise<string | undefined> | string | undefined;
 };
 
-export function defaultSensorIo(): SensorIo {
+type ListDirIo = {
+  readDir?: (path: string) => AsyncIterable<{ name: string }>;
+  runLs?: (
+    path: string,
+  ) => Promise<{ code: number; stdout: Uint8Array }>;
+};
+
+async function lsDirNames(
+  path: string,
+  runLs?: ListDirIo["runLs"],
+): Promise<string[] | null> {
+  try {
+    const run = runLs ?? ((p) =>
+      new Deno.Command("ls", {
+        args: ["-1", p],
+        stdout: "piped",
+        stderr: "null",
+        // Scoped --allow-run=ls cannot inherit LD_* / DYLD_* (Deno 2.9).
+        clearEnv: true,
+      }).output());
+    const { code, stdout } = await run(path);
+    if (code !== 0) return null;
+    return new TextDecoder().decode(stdout).split("\n").filter((n) =>
+      n.length > 0
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * List a directory, falling back to `ls -1` when `Deno.readDir` throws.
+ * Deno 2 blocks `/sys` (and `/proc`) directory listing under `--allow-read`.
+ */
+async function listDirectoryNames(
+  path: string,
+  io?: ListDirIo,
+): Promise<string[]> {
+  try {
+    const readDir = io?.readDir ?? ((p) => Deno.readDir(p));
+    const names: string[] = [];
+    for await (const entry of readDir(path)) {
+      names.push(entry.name);
+    }
+    return names;
+  } catch {
+    // Deno 2 NotCapable on /sys (and /proc) under --allow-read.
+  }
+  return (await lsDirNames(path, io?.runLs)) ?? [];
+}
+
+export function defaultSensorIo(io?: ListDirIo): SensorIo {
   return {
     async listDir(path: string): Promise<string[]> {
-      try {
-        const names: string[] = [];
-        for await (const entry of Deno.readDir(path)) {
-          names.push(entry.name);
-        }
-        return names.sort((a, b) => a.localeCompare(b));
-      } catch {
-        return [];
-      }
+      const names = await listDirectoryNames(path, io);
+      return names.sort((a, b) => a.localeCompare(b));
     },
     readFile: (path: string) => readProcFile(path),
   };

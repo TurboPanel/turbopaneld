@@ -55,8 +55,11 @@ the field fill. Sources: `/proc/stat` (all 8 CPU percentages — no stored
 `/proc/uptime`, `/proc/diskstats` (throughput, IOPS, and `Δticks/Δops` read/
 write latency), `/proc/net/dev`, `/proc/sys/kernel/osrelease`, process count
 via `/proc` (`Deno.readDir`, with `ls -1` fallback — Deno 2 blocks direct
-`/proc` directory listing under `--allow-read` the same way it blocks
-`readTextFile`; `proc-read.ts` already `cat`s individual `/proc` files). **Three storage probes** via `node:fs/promises` `statfs` (no
+`/proc` **and `/sys`** directory listing under `--allow-read` the same way it
+blocks `readTextFile`; `proc-read.ts` already `cat`s individual `/proc`/sysfs
+files, and sensor discovery's `defaultSensorIo.listDir` uses the same `ls -1`
+fallback so a compiled daemon can still see `coretemp` / RAPL / thermal
+zones). **Three storage probes** via `node:fs/promises` `statfs` (no
 `df`): system `/`, the hosting path (admin override from
 `<daemonStateDir>/metrics/hardware-profile.json`, else `principalHomeRoot` —
 `collector/hosting.ts`), and the Docker data root (Docker Engine API

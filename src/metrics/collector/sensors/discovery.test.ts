@@ -297,3 +297,27 @@ it("defaultSensorIo returns empty listings for missing directories", async () =>
     [],
   );
 });
+
+it("defaultSensorIo listDir uses ls when Deno.readDir throws", async () => {
+  const io = defaultSensorIo({
+    readDir: () => {
+      throw new Error("blocked");
+    },
+    runLs: () =>
+      Promise.resolve({
+        code: 0,
+        stdout: new TextEncoder().encode("hwmon3\nhwmon0\n"),
+      }),
+  });
+  assertEquals(await io.listDir("/sys/class/hwmon"), ["hwmon0", "hwmon3"]);
+});
+
+it("defaultSensorIo listDir stays empty when both readDir and ls fail", async () => {
+  const io = defaultSensorIo({
+    readDir: () => {
+      throw new Error("blocked");
+    },
+    runLs: () => Promise.resolve({ code: 1, stdout: new Uint8Array() }),
+  });
+  assertEquals(await io.listDir("/sys/class/hwmon"), []);
+});
