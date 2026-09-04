@@ -114,6 +114,23 @@ test("formatCpuQuota and formatMemoryBytes clamp to positive values", () => {
   assertEquals(formatMemoryBytes(0.4), "1");
 });
 
+test("resolveExecStart runs bare package-manager start via node --run", () => {
+  assertEquals(
+    resolveExecStart({
+      nodeBinary: "/opt/node/bin/node",
+      startCommand: "pnpm start",
+    }),
+    `/bin/sh -c ${quoteSystemdArgument("/opt/node/bin/node --run start")}`,
+  );
+  assertEquals(
+    resolveExecStart({
+      nodeBinary: "/opt/node/bin/node",
+      startCommand: "yarn start",
+    }),
+    `/bin/sh -c ${quoteSystemdArgument("/opt/node/bin/node --run start")}`,
+  );
+});
+
 test("resolveExecStart uses vendored node or sh -c for custom commands", () => {
   assertEquals(
     resolveExecStart({ nodeBinary: "/opt/node/bin/node" }),
@@ -192,6 +209,34 @@ test("nativeAppUnitContent points WorkingDirectory at current and applies limits
   assertStringIncludes(
     content,
     `ExecStart=/bin/sh -c ${quoteSystemdArgument("node server.mjs")}`,
+  );
+});
+
+test("nativeAppUnitContent prefixes PATH with the vendored tenant Node bin", () => {
+  const content = nativeAppUnitContent({
+    layout,
+    app: { ...app, nodeVersion: "22" },
+    username: "appuser",
+    environmentId: "env-1",
+    startCommand: "pnpm start",
+  });
+  assertStringIncludes(
+    content,
+    "Environment=PATH=/opt/turbopanel/vendor/node-app/22/current/bin:/usr/bin:/bin",
+  );
+  assertStringIncludes(
+    content,
+    "Environment=XDG_CACHE_HOME=/srv/users/appuser/sites/svc-native-1/shared/.cache",
+  );
+  assertStringIncludes(
+    content,
+    "Environment=COREPACK_HOME=/srv/users/appuser/sites/svc-native-1/shared/.corepack",
+  );
+  assertStringIncludes(
+    content,
+    `ExecStart=/bin/sh -c ${quoteSystemdArgument(
+      "/opt/turbopanel/vendor/node-app/22/current/bin/node --run start",
+    )}`,
   );
 });
 

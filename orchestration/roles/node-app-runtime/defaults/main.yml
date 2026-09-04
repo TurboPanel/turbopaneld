@@ -14,8 +14,14 @@ turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') 
 node_app_default_version: "24"
 # Series to vendor on this run. The daemon overrides this with the distinct
 # versions the deploy's native apps declared; a manual run gets the default.
+# Series to vendor on this run. The daemon overrides this with the distinct
+# versions the deploy's native apps declared; a manual run gets the default.
 node_app_versions: ["{{ node_app_default_version }}"]
 node_app_root: "{{ turbopanel_vendor_dir }}/node-app"
+# Native builds run as the daemon, not the tenant principal. The playbook
+# appends this account to each series group so `sg tpnode24` can exec the
+# 0750 tree without a daemon re-login.
+turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
 
 # Entitlement groups come from the shared registry
 # (`orchestration/runtime-registry.json`) via the `runtime-entitlement` role,

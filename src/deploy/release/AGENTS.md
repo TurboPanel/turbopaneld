@@ -133,16 +133,26 @@ credential material is inherited (`clearEnv` + allow-list; build `env` is
 non-secret by contract — build secrets keep riding `variableMaterial[]` /
 `secretPlan[]`); and CPU / address-space / file-size caps via `prlimit` where the
 host has it, degrading to an unwrapped run with a transcript note where it does
-not.
+not. The address-space cap is **64 GiB virtual**, not 4 GiB: V8 pointer
+compression reserves a 4 GiB CodeRange per isolate, and Corepack/pnpm workers
+each need their own — `RLIMIT_AS=4G` dies with `Failed to reserve virtual
+memory for CodeRange`; `16G` lets Node start but pnpm's registry GETs fail
+with `error (unknown)` / `ERR_PNPM_META_FETCH_FAIL`. That cap is virtual
+size, not RSS.
 
-**Native-app builds run on the tenant runtime.** When an entry belongs to a
-`nativeAppServices[]` row, `buildNativeRelease` hands `runReleaseBuild` a
-`nativeRuntime`: the vendored series' `bin/` leads `PATH` (so `node` / `npm` /
-`npx` / `corepack` all resolve to the series the app will execute on),
-`NODE_ENV` follows the app's `appMode` (default `production`) in the build
-exactly as in the generated unit, and Corepack caches under
-`<checkout>/.corepack` with its download prompt off — never in the daemon's own
-home, never blocking a build on a yes/no.
+**Native-app builds run on the tenant runtime.** `ensureNativeAppRuntime`
+vendors `vendor/node-app/<series>/current` **before** `applySourceReleases`,
+because the install line (`corepack pnpm install`, …) runs in the Git build —
+not after promote. When an entry belongs to a `nativeAppServices[]` row,
+`buildNativeRelease` hands `runReleaseBuild` a `nativeRuntime`: the vendored
+series' `bin/` leads a **curated** `PATH` (`<bin>:/usr/bin:/bin`, never the
+daemon's PATH — Deno's `node_compat_bin` would shadow `node`, and an
+unreadable `/usr/local/sbin` makes dash report `corepack: Permission denied`
+for a missing binary). The child is entered with `sg tpnode<series>` so the
+daemon can exec the `0750 root:tpnodeNN` tree; Corepack still caches under
+`<checkout>/.corepack` with its download prompt off — never a host-wide
+Corepack install, never the daemon's home. `NODE_ENV` follows the app's
+`appMode` (default `production`) in the build exactly as in the generated unit.
 
 A missing `installCommand` is then **derived** rather than skipped
 (`deriveNodeInstallCommand`): the operator's `build.packageManager` wins, else

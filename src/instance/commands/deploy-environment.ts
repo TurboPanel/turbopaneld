@@ -85,6 +85,7 @@ import {
 import {
   applyNativeAppServices,
   type ApplyNativeAppsOpts,
+  ensureNativeAppRuntime,
   nativeAppBindingsFromPayload,
 } from "../../deploy/native/apply-native-apps.ts";
 import {
@@ -1627,6 +1628,15 @@ export async function handleEnvironmentDeploy(
   await ensureDeployPrincipals(
     layout,
     deployPrincipalSpecs(parsedPayload, principalMaterial),
+  );
+
+  // Tenant Node must exist before the Git build: native installs run
+  // `corepack` from `vendor/node-app/<series>/current/bin`, which this
+  // playbook vendors. Waiting until `applyNativeAppServices` (after promote)
+  // left the first build with no binary.
+  await ensureNativeAppRuntime(
+    parsedPayload.nativeAppServices ?? [],
+    deps?.nativeAppIo,
   );
 
   // Git-backed releases run before the compose / site apply steps,

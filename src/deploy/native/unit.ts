@@ -17,6 +17,9 @@ import {
   siteCurrentSymlink,
   siteSharedDir,
 } from "../../paths/layout.ts";
+import {
+  resolveNativeAppRuntimeStartCommand,
+} from "../node-package-manager.ts";
 import { principalUnixGroupName } from "../ensure-principal.ts";
 import { runtimeGroup } from "../../runtime/registry.ts";
 import type {
@@ -111,14 +114,23 @@ export function nativeAppNodeBinary(
   layout: Pick<LayoutPaths, "runtimesDir">,
   nodeVersion: string = DEFAULT_NATIVE_APP_NODE_VERSION,
 ): string {
+  return join(nativeAppNodeBinDir(layout, nodeVersion), "node");
+}
+
+/** `<runtimesDir>/node-app/<series>/current/bin` — leads native-app unit `PATH`. */
+export function nativeAppNodeBinDir(
+  layout: Pick<LayoutPaths, "runtimesDir">,
+  nodeVersion: string = DEFAULT_NATIVE_APP_NODE_VERSION,
+): string {
   return join(
     nativeAppRuntimeRoot(layout),
     nodeVersion,
     "current",
     "bin",
-    "node",
   );
 }
+
+const NATIVE_RUNTIME_PATH_TAIL = "/usr/bin:/bin";
 
 /** `/etc/systemd/system/turbopanel-app-<serviceId>.service`. */
 export function nativeAppUnitName(serviceId: string): string {
@@ -206,7 +218,11 @@ export function resolveExecStart(params: {
   startupFile?: string;
 }): string {
   if (params.startCommand && params.startCommand.trim().length > 0) {
-    return `/bin/sh -c ${quoteSystemdArgument(params.startCommand.trim())}`;
+    const command = resolveNativeAppRuntimeStartCommand(
+      params.startCommand.trim(),
+      params.nodeBinary,
+    );
+    return `/bin/sh -c ${quoteSystemdArgument(command)}`;
   }
   const script = params.startupFile?.trim() || DEFAULT_START_SCRIPT;
   return `${params.nodeBinary} ${script}`;
@@ -377,11 +393,10 @@ export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
   const workingDir = siteCurrentSymlink(home, app.serviceId);
   const sharedDir = siteSharedDir(home, app.serviceId);
   const group = principalUnixGroupName(username);
+  const nodeVersion = resolveNativeAppNodeVersion(app);
+  const nodeBinDir = nativeAppNodeBinDir(opts.layout, nodeVersion);
   const execStart = resolveExecStart({
-    nodeBinary: nativeAppNodeBinary(
-      opts.layout,
-      resolveNativeAppNodeVersion(app),
-    ),
+    nodeBinary: nativeAppNodeBinary(opts.layout, nodeVersion),
     ...(opts.startCommand === undefined
       ? {}
       : { startCommand: opts.startCommand }),
@@ -409,10 +424,16 @@ export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
     `Group=${group}`,
     `Slice=${principalSliceName(username)}`,
     `WorkingDirectory=${workingDir}`,
+    `Environment=PATH=${nodeBinDir}:${NATIVE_RUNTIME_PATH_TAIL}`,
     `Environment=NODE_ENV=${app.appMode ?? "production"}`,
     `Environment=PORT=${app.listenPort}`,
     `Environment=HOST=127.0.0.1`,
     `Environment=HOME=${home}`,
+    // Writable under ReadWritePaths=shared — Corepack falls back here when a
+    // custom start command still invokes pnpm/yarn at runtime.
+    `Environment=XDG_CACHE_HOME=${sharedDir}/.cache`,
+    `Environment=COREPACK_HOME=${sharedDir}/.corepack`,
+    `Environment=COREPACK_ENABLE_DOWNLOAD_PROMPT=0`,
     `ExecStart=${execStart}`,
     ...restartLines(app.restartPolicy),
     // Hardening. Containerless is not container isolation; this is the set that

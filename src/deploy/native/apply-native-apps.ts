@@ -36,7 +36,10 @@
 import { join } from "@std/path";
 import { logInfo, logWarn } from "../../logger.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
-import { runLocalPlaybook } from "../../orchestration/ansible.ts";
+import {
+  devOwnershipPlaybookExtraArgs,
+  runLocalPlaybook,
+} from "../../orchestration/ansible.ts";
 import {
   NODE_APP_RUNTIME_APPLY_PLAYBOOK,
   ORCHESTRATION_DIR,
@@ -165,7 +168,10 @@ async function runPlaybookDefault(
     throw err;
   }
   logInfo("deploy", `running ${label} playbook`);
-  await runLocalPlaybook(playbookPath, extraArgs);
+  await runLocalPlaybook(playbookPath, [
+    ...devOwnershipPlaybookExtraArgs(),
+    ...extraArgs,
+  ]);
 }
 
 /**
@@ -634,17 +640,24 @@ export function nativeAppNodeVersions(
  * Vendor the tenant Node runtimes on first use, the same way hosting Caddy and
  * the web engines are installed on demand rather than up front.
  *
+ * Called **before** the Git build as well as from {@link applyNativeAppServices}:
+ * native installs run `corepack` / `node` from this tree, and the playbook
+ * historically ran only after promote — so the first build had no binary and
+ * dash reported `corepack: Permission denied` against an unreadable PATH dir.
+ *
  * The requested series are passed **into** the playbook rather than pinned in
  * its defaults: `nodeVersion` is a per-app contract, so two apps on different
  * series have to end up on two different vendored trees
  * (`vendor/node-app/<series>/current`) or the hint would be decorative.
  */
-async function ensureNativeAppRuntime(
-  io: NativeAppIo,
+export async function ensureNativeAppRuntime(
   apps: readonly EnvironmentDeployNativeAppService[],
+  opts?: Pick<ApplyNativeAppsOpts, "runPlaybook">,
 ): Promise<void> {
+  if (apps.length === 0) return;
   const versions = nativeAppNodeVersions(apps);
-  await io.runPlaybook(
+  const runPlaybook = opts?.runPlaybook ?? runPlaybookDefault;
+  await runPlaybook(
     NODE_APP_RUNTIME_APPLY_PLAYBOOK,
     `node-app-runtime-apply (vendor tenant Node ${versions.join(", ")})`,
     ["-e", JSON.stringify({ node_app_versions: versions })],
@@ -671,7 +684,7 @@ export async function applyNativeAppServices(
   }
 
   const io = resolveIo(opts);
-  await ensureNativeAppRuntime(io, apps);
+  await ensureNativeAppRuntime(apps, io);
   await Deno.mkdir(nativeAppConfigDir(layout), {
     recursive: true,
     mode: 0o750,

@@ -10,6 +10,7 @@ import type {
 import {
   applyNativeAppLifecycle,
   applyNativeAppServices,
+  ensureNativeAppRuntime,
   listEnvironmentNativeAppServiceIds,
   nativeAppBindingsFromPayload,
   nativeAppNodeVersions,
@@ -854,6 +855,37 @@ test("nativeAppRuntimeGroup resolves the per-series entitlement group", () => {
   // An unknown series has no group rather than an invented name — a name that
   // does not exist would fail `usermod` far from the cause.
   assertEquals(nativeAppRuntimeGroup("18"), undefined);
+});
+
+test("ensureNativeAppRuntime is a no-op for an empty app list", async () => {
+  let called = false;
+  await ensureNativeAppRuntime([], {
+    runPlaybook: () => {
+      called = true;
+      return Promise.resolve();
+    },
+  });
+  assertEquals(called, false);
+});
+
+test("ensureNativeAppRuntime vendors the distinct series before the Git build", async () => {
+  const playbook = createPlaybookMock();
+  await ensureNativeAppRuntime(
+    [
+      makeApp(),
+      makeApp({
+        composeServiceName: "api",
+        serviceId: "svc-api",
+        nodeVersion: "22",
+      }),
+    ],
+    { runPlaybook: playbook.runPlaybook },
+  );
+  assertEquals(playbook.calls.length, 1);
+  const extraArgs = playbook.calls[0]!.extraArgs ?? [];
+  assertEquals(JSON.parse(extraArgs[1] ?? "{}"), {
+    node_app_versions: ["22", DEFAULT_NATIVE_APP_NODE_VERSION],
+  });
 });
 
 test("applyNativeAppServices with an empty list is a no-op", async () => {

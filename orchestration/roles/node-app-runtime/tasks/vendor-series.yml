@@ -68,3 +68,12 @@
     NODE_APP_SERIES_DIR: "{{ node_app_root }}/{{ node_app_series }}"
   register: _node_app_install
   changed_when: "'turbopanel-' in _node_app_install.stdout"
+
+# Builds run as the daemon (`tp` / the co-located dest user), not as the
+# principal. Supplementary-group changes are not visible to an already-running
+# process, so the build child enters this group with `sg` after this append.
+- name: Allow the daemon account to execute this tenant Node series
+  ansible.builtin.user:
+    name: "{{ turbopanel_user }}"
+    groups: "{{ node_app_series_group }}"
+    append: true

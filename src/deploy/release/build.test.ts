@@ -1,10 +1,12 @@
 import { assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import {
+  BUILD_RLIMIT_AS_BYTES,
   BUILD_TIMEOUT_MS,
   buildEnvironment,
   buildInvocation,
   deriveNodeInstallCommand,
+  normalizeNodeBuildCommand,
   NEXT_EXPORT_DIR,
   NEXT_STANDALONE_DIR,
   prepareNativeAppBuildOutput,
@@ -206,6 +208,25 @@ test("buildInvocation wraps with prlimit or falls back to bare sh -c", () => {
   assertEquals(wrapped.args.includes("--"), true);
   assertEquals(wrapped.args.includes("sh"), true);
   assertEquals(wrapped.args.at(-1), "npm run build");
+  // 4 GiB AS cannot hold V8's pointer cage; keep the cap strictly above that.
+  assertEquals(
+    wrapped.args.includes(`--as=${BUILD_RLIMIT_AS_BYTES}`),
+    true,
+  );
+  // 16 GiB still fails pnpm registry fetches; keep room for worker isolates.
+  assertEquals(BUILD_RLIMIT_AS_BYTES >= 32 * 1024 * 1024 * 1024, true);
+});
+
+test("buildInvocation enters the tenant Node entitlement group via sg", () => {
+  assertEquals(buildInvocation("corepack pnpm install", false, "tpnode24"), {
+    bin: "/usr/bin/sg",
+    args: ["tpnode24", "-c", "corepack pnpm install"],
+  });
+  const wrapped = buildInvocation("corepack pnpm install", true, "tpnode24");
+  assertEquals(wrapped.bin, "/usr/bin/prlimit");
+  assertEquals(wrapped.args.includes("/usr/bin/sg"), true);
+  assertEquals(wrapped.args.includes("tpnode24"), true);
+  assertEquals(wrapped.args.at(-1), "corepack pnpm install");
 });
 
 test("runReleaseBuild notes when prlimit is unavailable and skips empty commands", async () => {
@@ -281,9 +302,9 @@ test("buildEnvironment threads the native runtime onto PATH, NODE_ENV, and corep
     nodeBinDir,
     nodeEnv: "development",
   });
-  // The vendored tenant Node leads PATH so node/npm/npx/corepack resolve to
-  // the series the app runs on.
-  assertEquals(env.PATH?.startsWith(`${nodeBinDir}:`), true);
+  // Tenant Node leads PATH; the daemon PATH is not inherited (Deno's
+  // node_compat_bin and unreadable /usr/local/sbin both break installs).
+  assertEquals(env.PATH, `${nodeBinDir}:/usr/bin:/bin`);
   assertEquals(env.NODE_ENV, "development");
   assertEquals(env.COREPACK_HOME, join("/work", ".corepack"));
   assertEquals(env.COREPACK_ENABLE_DOWNLOAD_PROMPT, "0");
@@ -387,6 +408,14 @@ test("deriveNodeInstallCommand treats Yarn Berry as immutable-by-CI", async () =
   });
 });
 
+test("normalizeNodeBuildCommand prefixes bare pnpm and yarn with corepack", () => {
+  assertEquals(normalizeNodeBuildCommand("pnpm run build"), "corepack pnpm run build");
+  assertEquals(normalizeNodeBuildCommand("pnpm build"), "corepack pnpm build");
+  assertEquals(normalizeNodeBuildCommand("yarn run build"), "corepack yarn run build");
+  assertEquals(normalizeNodeBuildCommand("corepack pnpm run build"), "corepack pnpm run build");
+  assertEquals(normalizeNodeBuildCommand("npm run build"), "npm run build");
+});
+
 test("runReleaseBuild derives the install command for a native-app build", async () => {
   await withWorkingDir(async (workingDir) => {
     await Deno.writeTextFile(join(workingDir, "package.json"), "{}");
@@ -414,6 +443,37 @@ test("runReleaseBuild derives the install command for a native-app build", async
     ]);
     assertEquals(
       lines.some((line) => line.includes("derived install command")),
+      true,
+    );
+  });
+});
+
+test("runReleaseBuild normalizes bare pnpm build commands for native-app builds", async () => {
+  await withWorkingDir(async (workingDir) => {
+    await Deno.writeTextFile(join(workingDir, "package.json"), "{}");
+    await Deno.writeTextFile(join(workingDir, "pnpm-lock.yaml"), "");
+    const lines: string[] = [];
+    const ran: string[] = [];
+    await runReleaseBuild({
+      build: { kind: "native", buildCommand: "pnpm run build" },
+      workingDir,
+      nativeRuntime: {
+        nodeBinDir: "/opt/turbopanel/vendor/node-app/24/current/bin",
+        nodeEnv: "production",
+      },
+      hasPrlimit: () => Promise.resolve(false),
+      runCommand: (command) => {
+        ran.push(command);
+        return Promise.resolve();
+      },
+      onOutput: (_stream, line) => lines.push(line),
+    });
+    assertEquals(ran, [
+      "corepack pnpm install --frozen-lockfile --prod=false",
+      "corepack pnpm run build",
+    ]);
+    assertEquals(
+      lines.some((line) => line.includes("normalized build command for Corepack")),
       true,
     );
   });

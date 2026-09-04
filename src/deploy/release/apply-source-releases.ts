@@ -50,6 +50,7 @@ import { checkoutRelease, type ReleaseOutputHandler } from "./checkout.ts";
 import { prepareNativeAppBuildOutput, runReleaseBuild } from "./build.ts";
 import {
   nativeAppNodeBinary,
+  nativeAppRuntimeGroup,
   resolveNativeAppNodeVersion,
 } from "../native/unit.ts";
 import {
@@ -601,13 +602,16 @@ async function buildNativeRelease(
       // NODE_ENV, so the derived install command and the build both run on
       // the series the app will execute on.
       nativeRuntime: nativeApp
-        ? {
+        ? definedFields({
           nodeBinDir: dirname(nativeAppNodeBinary(
             layout,
             resolveNativeAppNodeVersion(nativeApp),
           )),
           nodeEnv: nativeApp.appMode ?? "production",
-        }
+          runtimeGroup: nativeAppRuntimeGroup(
+            resolveNativeAppNodeVersion(nativeApp),
+          ),
+        })
         : undefined,
       onOutput,
       redactSummary: (text: string) => logSink.redactSummary(text),

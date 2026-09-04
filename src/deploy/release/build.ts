@@ -25,6 +25,7 @@ import type {
   EnvironmentDeploySourceBuild,
 } from "../../instance/commands/contracts.ts";
 import type { ReleaseOutputHandler } from "./checkout.ts";
+import { normalizeNodePackageManagerCommand } from "../node-package-manager.ts";
 import { copyTree } from "./promote.ts";
 
 /** Build ceiling. Long enough for a cold dependency install, not unbounded. */
@@ -32,9 +33,28 @@ export const BUILD_TIMEOUT_MS = 1_800_000;
 
 /** `prlimit` caps applied when the host has the binary. */
 const BUILD_RLIMIT_CPU_SECONDS = 1_800;
-const BUILD_RLIMIT_AS_BYTES = 4 * 1024 * 1024 * 1024;
+/**
+ * Virtual address-space cap. Must be **well above** 4 GiB per V8 isolate:
+ * pointer compression reserves a 4 GiB CodeRange, and Corepack/pnpm spawn
+ * worker threads that each need their own. 4 GiB dies at isolate init
+ * (`Failed to reserve virtual memory for CodeRange`); 16 GiB lets Node
+ * start but pnpm's fetch workers fail with `GET … error (unknown)` /
+ * `ERR_PNPM_META_FETCH_FAIL`. 32 GiB is enough for a one-package install;
+ * 64 GiB leaves room for a Next.js install + `next build`. This is virtual
+ * size, not RSS.
+ */
+export const BUILD_RLIMIT_AS_BYTES = 64 * 1024 * 1024 * 1024;
 const BUILD_RLIMIT_FSIZE_BYTES = 4 * 1024 * 1024 * 1024;
 const PRLIMIT_BIN = "/usr/bin/prlimit";
+/** `sg` applies a supplementary group without waiting for a daemon re-login. */
+const SG_BIN = "/usr/bin/sg";
+/**
+ * Host binaries a native build may resolve after the tenant Node `bin/`.
+ * Do not inherit the daemon PATH: Deno's `node_compat_bin` would shadow
+ * `node`, and an unreadable `/usr/local/sbin` makes dash report
+ * `Permission denied` for a missing `corepack` (POSIX `eacces` sticky bit).
+ */
+const NATIVE_BUILD_PATH_TAIL = "/usr/bin:/bin";
 
 /** Environment keys a build command may never set — they are the sandbox. */
 const RESERVED_BUILD_ENV_KEYS = new Set([
@@ -60,6 +80,12 @@ export type NativeBuildRuntime = {
   nodeBinDir: string;
   /** Operator's application mode; `production` when undeclared. */
   nodeEnv: "production" | "development";
+  /**
+   * Per-series entitlement group (`tpnode24`). The vendored tree is
+   * `root:<group> 0750`; builds run as the daemon, so the child is entered
+   * via `sg` after the playbook appends the daemon account to this group.
+   */
+  runtimeGroup?: string;
 };
 
 export type ReleaseBuildParams = {
@@ -106,7 +132,7 @@ export function buildEnvironment(
     // The vendored tenant Node leads PATH for a native-app build so `node`,
     // `npm`, `npx`, and `corepack` all resolve to the series the app runs on.
     PATH: nativeRuntime
-      ? `${nativeRuntime.nodeBinDir}:${daemonPath}`
+      ? `${nativeRuntime.nodeBinDir}:${NATIVE_BUILD_PATH_TAIL}`
       : daemonPath,
     HOME: workingDir,
     CI: "1",
@@ -142,8 +168,12 @@ async function prlimitAvailable(): Promise<boolean> {
 export function buildInvocation(
   command: string,
   withPrlimit: boolean,
+  runtimeGroup?: string,
 ): { bin: string; args: string[] } {
-  if (!withPrlimit) return { bin: "sh", args: ["-c", command] };
+  const runner = runtimeGroup
+    ? { bin: SG_BIN, args: [runtimeGroup, "-c", command] }
+    : { bin: "sh", args: ["-c", command] };
+  if (!withPrlimit) return runner;
   return {
     bin: PRLIMIT_BIN,
     args: [
@@ -151,9 +181,8 @@ export function buildInvocation(
       `--as=${BUILD_RLIMIT_AS_BYTES}`,
       `--fsize=${BUILD_RLIMIT_FSIZE_BYTES}`,
       "--",
-      "sh",
-      "-c",
-      command,
+      runner.bin,
+      ...runner.args,
     ],
   };
 }
@@ -165,10 +194,11 @@ async function runBuildCommand(
   withPrlimit: boolean,
   onOutput?: ReleaseOutputHandler,
   redactSummary: CommandSummaryRedactor = defaultSummaryRedactor,
+  runtimeGroup?: string,
 ): Promise<void> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), BUILD_TIMEOUT_MS);
-  const { bin, args } = buildInvocation(command, withPrlimit);
+  const { bin, args } = buildInvocation(command, withPrlimit, runtimeGroup);
   try {
     const child = new Deno.Command(bin, {
       args,
@@ -268,6 +298,11 @@ export async function deriveNodeInstallCommand(params: {
     : "npm install --include=dev";
 }
 
+/** @deprecated Use {@link normalizeNodePackageManagerCommand}. */
+export {
+  normalizeNodePackageManagerCommand as normalizeNodeBuildCommand,
+} from "../node-package-manager.ts";
+
 /**
  * Run `installCommand` then `buildCommand`. A missing command is a no-op — a
  * source with neither is a valid "ship the repository as-is" release — except
@@ -293,9 +328,20 @@ export async function runReleaseBuild(
       );
     }
   }
+  let buildCommand = params.build.buildCommand;
+  if (buildCommand && params.nativeRuntime) {
+    const normalized = normalizeNodePackageManagerCommand(buildCommand);
+    if (normalized !== buildCommand) {
+      params.onOutput?.(
+        "stdout",
+        "normalized build command for Corepack (bare pnpm/yarn is not on the native build PATH)",
+      );
+      buildCommand = normalized;
+    }
+  }
   const commands = [
     installCommand,
-    params.build.buildCommand,
+    buildCommand,
   ].filter((command): command is string => Boolean(command));
   if (commands.length === 0) {
     params.onOutput?.(
@@ -317,7 +363,24 @@ export async function runReleaseBuild(
     params.workingDir,
     params.nativeRuntime,
   );
-  const execute = params.runCommand ?? runBuildCommand;
+  const execute = params.runCommand ??
+    ((
+      command,
+      cwd,
+      commandEnv,
+      commandWithPrlimit,
+      commandOnOutput,
+      commandRedactSummary,
+    ) =>
+      runBuildCommand(
+        command,
+        cwd,
+        commandEnv,
+        commandWithPrlimit,
+        commandOnOutput,
+        commandRedactSummary,
+        params.nativeRuntime?.runtimeGroup,
+      ));
   for (const command of commands) {
     params.onOutput?.("stdout", `$ ${command}`);
     await execute(

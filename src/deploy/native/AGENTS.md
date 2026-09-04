@@ -26,11 +26,17 @@ the unit starts. Per app:
 
 1. Vendor the tenant Node runtimes on first use —
    `playbooks/node-app-runtime-apply.yml` (`node-app-runtime` role) installs
-   `vendor/node-app/<series>/current`. It is **separate from the `node-runtime`
-   role**, which vendors the instance's own Node under `vendor/node/current`:
-   bumping what tenants execute must never move the panel's toolchain, and vice
-   versa. A missing playbook is a warning, not a deploy failure (same rule the
-   web engines use). See "Per-app Node version" below.
+   `vendor/node-app/<series>/current`. `handleEnvironmentDeploy` calls
+   `ensureNativeAppRuntime` **before** `applySourceReleases` so the Git build
+   can exec that tree; `applyNativeAppServices` calls it again (idempotent)
+   before units are installed. The role also appends the daemon account
+   (`tp` / dest user) to `tpnode<series>` so a build child can `sg` into
+   that group without a daemon re-login. It is **separate from the
+   `node-runtime` role**, which vendors the instance's own Node under
+   `vendor/node/current`: bumping what tenants execute must never move the
+   panel's toolchain, and vice versa. A missing playbook is a warning, not a
+   deploy failure (same rule the web engines use). See "Per-app Node version"
+   below.
 2. Add every principal in the deploy to the **`tpnodeapp`** group
    (`ensureSupplementaryGroupMembership`). systemd `execve()`s `ExecStart`
    *after* dropping to `User=`, so the principal itself needs read + traverse on
