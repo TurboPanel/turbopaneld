@@ -54,7 +54,9 @@ the field fill. Sources: `/proc/stat` (all 8 CPU percentages — no stored
 `/proc/meminfo` (raw bytes only, swap-absent hosts report `null` never `0`),
 `/proc/uptime`, `/proc/diskstats` (throughput, IOPS, and `Δticks/Δops` read/
 write latency), `/proc/net/dev`, `/proc/sys/kernel/osrelease`, process count
-via `/proc`. **Three storage probes** via `node:fs/promises` `statfs` (no
+via `/proc` (`Deno.readDir`, with `ls -1` fallback — Deno 2 blocks direct
+`/proc` directory listing under `--allow-read` the same way it blocks
+`readTextFile`; `proc-read.ts` already `cat`s individual `/proc` files). **Three storage probes** via `node:fs/promises` `statfs` (no
 `df`): system `/`, the hosting path (admin override from
 `<daemonStateDir>/metrics/hardware-profile.json`, else `principalHomeRoot` —
 `collector/hosting.ts`), and the Docker data root (Docker Engine API
