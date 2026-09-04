@@ -51,7 +51,7 @@ export function managedHaContainerName(serviceId: string): string {
  * Shared by {@link assertSafeIngressIdentity} (ingress role) and the
  * per-component system contract in `system-component.ts` (`-in` for
  * `hosting-ingress` / `managed-ingress`, bare `serviceId` for
- * `database`/`queue`/`analytics`).
+ * `database`/`queue`).
  */
 export function assertSafeIdentityShape(identity: IngressIdentity): void {
   if (!SAFE_FILE_ID_RE.test(identity.serviceId)) {

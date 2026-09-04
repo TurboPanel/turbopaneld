@@ -923,8 +923,7 @@ export type SystemComponentKey =
   | "managed-ingress"
   | "managed-ha"
   | "database"
-  | "queue"
-  | "analytics";
+  | "queue";
 
 /** Must stay in sync with the instance canonical `system.reconcile` action set. */
 export type SystemReconcileAction = "reconcile" | "restart" | "stop";
@@ -946,7 +945,6 @@ export const SYSTEM_COMPONENT_ROLES: Record<
   "managed-ha": "turbopanel",
   database: "turbopanel",
   queue: "turbopanel",
-  analytics: "turbopanel",
 };
 
 /**
@@ -3815,7 +3813,6 @@ function expectedSystemComponentContainerName(
       return `${serviceId}${MANAGED_HA_CONTAINER_NAME_SUFFIX}`;
     case "database":
     case "queue":
-    case "analytics":
       return serviceId;
   }
 }
@@ -4146,7 +4143,6 @@ const SYSTEM_COMPONENT_KEYS = new Set([
   "managed-ha",
   "database",
   "queue",
-  "analytics",
 ]);
 const SYSTEM_RECONCILE_ACTIONS = new Set(["reconcile", "restart", "stop"]);
 const SYSTEM_RECONCILE_DESIRED = new Set(["present", "absent"]);

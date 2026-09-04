@@ -8,7 +8,7 @@
 /**
  * Role of a container in the TurboPanel inventory vocabulary:
  * `service` (tenant workload / managed engine row), `ingress` (Traefik),
- * or `system` (platform database/queue/analytics). Managed **engine**
+ * or `system` (platform database/queue). Managed **engine**
  * containers additionally stamp the separate value `engine` for Traefik
  * provider constraints — that is not part of the inventory `role` union.
  */
@@ -43,7 +43,7 @@ export const LABEL_ROLE_SERVICE = "service";
 /** Value for {@link LABEL_ROLE} on every Traefik ingress container. */
 export const LABEL_ROLE_INGRESS = "ingress";
 
-/** Value for {@link LABEL_ROLE} on platform (database/queue/analytics/ProxySQL) containers. */
+/** Value for {@link LABEL_ROLE} on platform (database/queue/ProxySQL) containers. */
 export const LABEL_ROLE_SYSTEM = "turbopanel";
 
 /**

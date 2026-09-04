@@ -1,6 +1,6 @@
 /**
  * Inspect-only access to the platform-managed `turbopanel-system` production
- * stack (database / queue / analytics).
+ * stack (database / queue).
  *
  * Unlike the shared hosting-ingress Traefik (`ingress.ts`), the daemon never
  * deploys, starts, or restarts this stack — it is Ansible/Ops-managed. This
@@ -80,7 +80,7 @@ async function systemStackComposeFileExists(
 
 /**
  * Best-effort observe one system-stack component's container (database /
- * queue / analytics).
+ * queue).
  *
  * Returns `undefined` when Docker/`ps` fails (caller should omit
  * `containers` from the command result). Returns `null` when the compose

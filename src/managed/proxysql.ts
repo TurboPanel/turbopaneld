@@ -693,7 +693,7 @@ function renderProxySqlTopLevelNetworks(
  * templating a project name it cannot know at converge time. Distinction from
  * tenant Traefik (same container suffix) is that compose project plus the
  * `com.turbopanel.system.component` label — not the suffix. Bare-uuid names
- * remain for system-stack rows (`database` / `queue` / `analytics`).
+ * remain for system-stack rows (`database` / `queue`).
  *
  * `bindAddresses` controls only the **host publish** of the client
  * listeners — `[]` (the safe default) omits those `ports:` entries

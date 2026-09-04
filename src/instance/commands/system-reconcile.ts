@@ -3,8 +3,8 @@
  * report per the component's contract.
  *
  * Database-free: all identity arrives in the payload. `hosting-ingress`,
- * `proxysql`, and `orchestrator` self-heal. `database` / `queue` /
- * `analytics` live in the platform-managed `turbopanel-system` production
+ * `proxysql`, and `orchestrator` self-heal. `database` / `queue`
+ * live in the platform-managed `turbopanel-system` production
  * stack — the daemon only persists identity and inspects; it never deploys,
  * starts, or restarts them, regardless of `desired` or `action`.
  *
@@ -90,7 +90,7 @@ export type SystemReconcileHandlerDeps = {
   /**
    * Test seam — defaults to {@link defaultInspectSystemStackContainer}.
    * Same return contract as {@link inspectHostingIngressContainer}, for the
-   * inspect-only `database` / `queue` / `analytics` components.
+   * inspect-only `database` / `queue` components.
    */
   inspectSystemStackContainer?: (
     layout: LayoutPaths,
@@ -180,7 +180,7 @@ async function stopHostingIngress(
 /**
  * Reconcile each system component: always persist the descriptor, then
  * dispatch on the component's contract — self-heal (`hosting-ingress`) or
- * inspect-only (`database` / `queue` / `analytics`).
+ * inspect-only (`database` / `queue`).
  */
 export async function handleSystemReconcile(
   payload: SystemReconcilePayload,

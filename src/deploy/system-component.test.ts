@@ -40,7 +40,6 @@ test("systemComponentContract returns per-component selfHeal and project", () =>
     SYSTEM_STACK_PROJECT,
   );
   assertEquals(systemComponentContract("queue").selfHeal, "none");
-  assertEquals(systemComponentContract("analytics").role, "turbopanel");
   assertEquals(
     systemComponentContract(SYSTEM_MANAGED_INGRESS_COMPONENT).role,
     "ingress",
@@ -80,10 +79,6 @@ test("expectedSystemComponentContainerName covers every allowlisted key", () => 
   );
   assertEquals(
     expectedSystemComponentContainerName("queue", serviceId),
-    serviceId,
-  );
-  assertEquals(
-    expectedSystemComponentContainerName("analytics", serviceId),
     serviceId,
   );
 });

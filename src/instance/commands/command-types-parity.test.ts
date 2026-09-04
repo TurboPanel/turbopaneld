@@ -1291,9 +1291,9 @@ test("system.reconcile payload parser round-trips and rejects invalid shapes", (
   );
 });
 
-test("system.reconcile payload parser accepts database/queue/analytics with system role and bare serviceId containerName", () => {
+test("system.reconcile payload parser accepts database/queue with system role and bare serviceId containerName", () => {
   const serviceId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
-  for (const component of ["database", "queue", "analytics"] as const) {
+  for (const component of ["database", "queue"] as const) {
     assertEquals(
       parseSystemReconcilePayload({
         environmentId: "11111111-2222-3333-4444-555555555555",

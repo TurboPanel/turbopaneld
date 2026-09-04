@@ -29,8 +29,7 @@ export type SystemComponentKey =
   | typeof SYSTEM_MANAGED_INGRESS_COMPONENT
   | typeof SYSTEM_MANAGED_HA_COMPONENT
   | "database"
-  | "queue"
-  | "analytics";
+  | "queue";
 
 /**
  * Compose service key inside the shared hosting-ingress project.
@@ -44,7 +43,7 @@ export const PROXYSQL_COMPOSE_SERVICE_NAME = "proxysql";
 /** Compose service key inside the per-org Orchestrator project. */
 export const ORCHESTRATOR_COMPOSE_SERVICE_NAME = "orchestrator";
 
-/** Compose project name for the production system stack (database/queue/analytics). */
+/** Compose project name for the production system stack (database/queue). */
 export const SYSTEM_STACK_PROJECT = "turbopanel-system";
 
 const SYSTEM_COMPONENT_KEYS = new Set<string>([
@@ -53,12 +52,11 @@ const SYSTEM_COMPONENT_KEYS = new Set<string>([
   SYSTEM_MANAGED_HA_COMPONENT,
   "database",
   "queue",
-  "analytics",
 ]);
 
 /**
  * Per-component self-heal dispatch. `hosting-ingress`, `proxysql`, and
- * `orchestrator` are self-healing; `database` / `queue` / `analytics` are
+ * `orchestrator` are self-healing; `database` / `queue` are
  * inspect-only.
  */
 export type SystemComponentSelfHeal =
@@ -73,7 +71,7 @@ export type SystemComponentSelfHeal =
  * by `system.reconcile`.
  *
  * `project` is set **only** for the inspect-only self-hosted stack components
- * (`database` / `queue` / `analytics`), which share the readable
+ * (`database` / `queue`), which share the readable
  * {@link SYSTEM_STACK_PROJECT}. The three self-healing components
  * (`hosting-ingress` / `managed-ingress` / `managed-ha`) have no static
  * project: theirs is the persisted descriptor's `serviceId`, resolved at the
@@ -117,12 +115,6 @@ export const SYSTEM_COMPONENT_CONTRACTS: Record<
     role: "turbopanel",
     selfHeal: "none",
   },
-  analytics: {
-    project: SYSTEM_STACK_PROJECT,
-    composeServiceName: "analytics",
-    role: "turbopanel",
-    selfHeal: "none",
-  },
 };
 
 export function systemComponentContract(
@@ -140,7 +132,7 @@ export function systemComponentContract(
  * | `hosting-ingress` | `<serviceId>-in` |
  * | `managed-ingress` | `<serviceId>-in` |
  * | `managed-ha` | `<serviceId>-ha` |
- * | `database` / `queue` / `analytics` | bare `serviceId` |
+ * | `database` / `queue` | bare `serviceId` |
  */
 export function expectedSystemComponentContainerName(
   component: SystemComponentKey,
@@ -155,7 +147,6 @@ export function expectedSystemComponentContainerName(
       return managedHaContainerName(serviceId);
     case "database":
     case "queue":
-    case "analytics":
       return serviceId;
   }
 }
@@ -172,7 +163,6 @@ function systemComponentContainerNameMismatchMessage(
       return "system managed-ha containerName must equal <serviceId>-ha";
     case "database":
     case "queue":
-    case "analytics":
       return `system ${
         SYSTEM_COMPONENT_CONTRACTS[component].role
       } containerName must equal <serviceId>`;
@@ -191,7 +181,7 @@ export type SystemComponentDescriptor = {
 /**
  * Compose project for one system component.
  *
- * The self-hosted stack rows (`database` / `queue` / `analytics`) keep the
+ * The self-hosted stack rows (`database` / `queue`) keep the
  * readable {@link SYSTEM_STACK_PROJECT}; every self-healing component is
  * projected onto its own allocated `serviceId`, which is also the top-level
  * `name:` key of the daemon-written compose file.
@@ -221,7 +211,7 @@ export function systemComponentDescriptorPath(
  * - `containerName` matches the per-component naming rule:
  *   `hosting-ingress` / `managed-ingress` → `<serviceId>-in`;
  *   `managed-ha` → `<serviceId>-ha`;
- *   `database` / `queue` / `analytics` → bare `serviceId`.
+ *   `database` / `queue` → bare `serviceId`.
  */
 export function assertSafeSystemIngressIdentity(
   descriptor: SystemComponentDescriptor,
