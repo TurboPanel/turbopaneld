@@ -234,9 +234,11 @@ test("nativeAppUnitContent prefixes PATH with the vendored tenant Node bin", () 
   );
   assertStringIncludes(
     content,
-    `ExecStart=/bin/sh -c ${quoteSystemdArgument(
-      "/opt/turbopanel/vendor/node-app/22/current/bin/node --run start",
-    )}`,
+    `ExecStart=/bin/sh -c ${
+      quoteSystemdArgument(
+        "/opt/turbopanel/vendor/node-app/22/current/bin/node --run start",
+      )
+    }`,
   );
 });
 
