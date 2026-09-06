@@ -342,7 +342,7 @@ test("systemd units and docker wrappers bind the expected identity variables", a
     daemonUnit,
     /ExecStart=.*--allow-ffi.*\bmain\.ts\b/,
     "turbopaneld.service source-mode ExecStart --allow-ffi",
-  )
+  );
   // `node:fs/promises.statfs` needs an explicit `--allow-sys=statfs` grant
   // (it is not covered by `--allow-read`). Without it, root filesystem
   // capacity probes return null and Storage charts stay empty.
