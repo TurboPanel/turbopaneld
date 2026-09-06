@@ -1,7 +1,7 @@
 #!/usr/bin/env -S deno run --allow-read --allow-write --allow-run --allow-net --allow-env
 /**
  * Generate or check THIRD_PARTY_NOTICES.md from deno.lock, the turbopanel-sh
- * npm lock, and orchestration pins.
+ * pnpm lock, and orchestration pins.
  *
  * Usage:
  *   deno task notices:generate
@@ -10,6 +10,7 @@
 import { crypto } from "@std/crypto";
 import { encodeHex } from "@std/encoding/hex";
 import { dirname, fromFileUrl, join } from "@std/path";
+import { parseAllDocuments } from "yaml";
 import {
   defaultLicenseForPackageName,
   type DenoLockfile,
@@ -26,8 +27,8 @@ import {
   noticesAreCurrent,
   type OrchestrationPin,
   packagesFromDenoLock,
-  packagesFromNpmLockfile,
   packagesFromOrchestrationPins,
+  packagesFromPnpmLockfile,
   renderThirdPartyNotices,
 } from "../src/lib/notices.ts";
 
@@ -35,6 +36,32 @@ const ROOT = dirname(dirname(fromFileUrl(import.meta.url)));
 
 /** Shipped daemon runtimes (native compile + JS bundle). */
 export const PRODUCTION_ENTRYPOINTS = ["src/prod-main.ts"] as const;
+
+/** Last YAML document is the project lockfile; earlier docs are catalogs. */
+export function parsePnpmLockYaml(text: string): {
+  importers?: Readonly<
+    Record<string, {
+      dependencies?: Readonly<Record<string, unknown>>;
+      devDependencies?: Readonly<Record<string, unknown>>;
+    }>
+  >;
+  packages?: Readonly<Record<string, unknown>>;
+} {
+  const docs = parseAllDocuments(text);
+  const project = docs.at(-1)?.toJSON();
+  if (!project || typeof project !== "object" || Array.isArray(project)) {
+    throw new TypeError("generate-notices: unexpected pnpm-lock.yaml");
+  }
+  return project as {
+    importers?: Readonly<
+      Record<string, {
+        dependencies?: Readonly<Record<string, unknown>>;
+        devDependencies?: Readonly<Record<string, unknown>>;
+      }>
+    >;
+    packages?: Readonly<Record<string, unknown>>;
+  };
+}
 
 const ORCHESTRATION_LICENSES: Record<string, string> = {
   "ansible-core": "GPL-3.0-or-later",
@@ -88,11 +115,11 @@ export async function runGenerateNotices(options: {
       await hashFile(join(root, "deno.lock")),
     ),
   };
-  const npmLock = join(root, "workers", "turbopanel-sh", "package-lock.json");
+  const pnpmLock = join(root, "workers", "turbopanel-sh", "pnpm-lock.yaml");
   try {
-    fingerprints["workers/turbopanel-sh/package-lock.json"] =
+    fingerprints["workers/turbopanel-sh/pnpm-lock.yaml"] =
       fingerprintCommentValue(
-        await hashFile(npmLock),
+        await hashFile(pnpmLock),
       );
   } catch {
     // Optional deploy-tool lock may be absent in stripped checkouts.
@@ -159,16 +186,18 @@ export async function collectDaemonNoticePackages(
   );
 
   let npmPackages: NoticePackage[] = [];
-  const npmLockPath = join(
+  const pnpmLockPath = join(
     root,
     "workers",
     "turbopanel-sh",
-    "package-lock.json",
+    "pnpm-lock.yaml",
   );
   try {
-    const npmLock = JSON.parse(await Deno.readTextFile(npmLockPath));
+    const pnpmLock = parsePnpmLockYaml(
+      await Deno.readTextFile(pnpmLockPath),
+    );
     npmPackages = await fillMissingLicenses(
-      packagesFromNpmLockfile(npmLock),
+      packagesFromPnpmLockfile(pnpmLock),
       lookup,
     );
   } catch (error) {
@@ -346,7 +375,10 @@ function flushGalaxyPin(
 export async function lookupRegistryLicense(
   pkg: NoticePackage,
 ): Promise<string> {
-  if (pkg.source === "deno.lock (npm)" || pkg.source === "package-lock.json") {
+  if (
+    pkg.source === "deno.lock (npm)" || pkg.source === "package-lock.json" ||
+    pkg.source === "pnpm-lock.yaml"
+  ) {
     return (await readNpmCacheLicense(pkg.name, pkg.version)) ||
       (await fetchNpmLicense(pkg.name, pkg.version));
   }

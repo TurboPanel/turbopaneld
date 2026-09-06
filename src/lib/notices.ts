@@ -218,6 +218,63 @@ export function packagesFromNpmLockfile(lock: NpmLockfile): NoticePackage[] {
   return out;
 }
 
+type PnpmLockImporter = Readonly<{
+  dependencies?: Readonly<Record<string, unknown>>;
+  devDependencies?: Readonly<Record<string, unknown>>;
+}>;
+
+type PnpmLockfile = Readonly<{
+  importers?: Readonly<Record<string, PnpmLockImporter>>;
+  packages?: Readonly<Record<string, unknown>>;
+}>;
+
+/** Resolved pnpm lockfile v9 graph (`pnpm-lock.yaml` project document). */
+export function packagesFromPnpmLockfile(lock: PnpmLockfile): NoticePackage[] {
+  const packages = lock.packages ?? {};
+  const production = pnpmLockHasProductionDependencies(lock);
+  const out: NoticePackage[] = [];
+  for (const id of Object.keys(packages)) {
+    const parsed = parsePnpmPackageId(id);
+    if (!parsed) continue;
+    if (parsed.name === "pnpm" || parsed.name.startsWith("@pnpm/")) continue;
+    out.push({
+      name: parsed.name,
+      version: parsed.version,
+      license: "",
+      role: production ? "production" : "development",
+      source: "pnpm-lock.yaml",
+    });
+  }
+  return out;
+}
+
+export function parsePnpmPackageId(
+  id: string,
+): { name: string; version: string } | undefined {
+  const peerIdx = id.indexOf("(");
+  const base = peerIdx === -1 ? id : id.slice(0, peerIdx);
+  if (base.startsWith("@")) {
+    const slash = base.indexOf("/");
+    const at = base.lastIndexOf("@");
+    if (slash === -1 || at <= slash) return undefined;
+    const name = base.slice(0, at);
+    const version = base.slice(at + 1);
+    if (!name || !version) return undefined;
+    return { name, version };
+  }
+  const at = base.lastIndexOf("@");
+  if (at <= 0) return undefined;
+  const name = base.slice(0, at);
+  const version = base.slice(at + 1);
+  if (!name || !version) return undefined;
+  return { name, version };
+}
+
+function pnpmLockHasProductionDependencies(lock: PnpmLockfile): boolean {
+  const deps = lock.importers?.["."]?.dependencies;
+  return deps != null && Object.keys(deps).length > 0;
+}
+
 function npmLockName(
   installPath: string,
   explicit?: string,

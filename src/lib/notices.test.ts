@@ -19,6 +19,7 @@ import {
   packagesFromNpmLockfile,
   packagesFromOrchestrationPins,
   packagesFromPnpmLicenses,
+  packagesFromPnpmLockfile,
   packagesFromPodfileLock,
   parseDenoLockId,
   pnpmLicenseKeys,
@@ -104,6 +105,58 @@ describe("packagesFromNpmLockfile", () => {
       [
         "miniflare",
         "wrangler",
+      ],
+    );
+  });
+});
+
+describe("packagesFromPnpmLockfile", () => {
+  it("marks a lockfile with only devDependencies as development-only", () => {
+    const packages = packagesFromPnpmLockfile({
+      importers: {
+        ".": { devDependencies: { wrangler: { specifier: "^4.124.0" } } },
+      },
+      packages: {
+        "wrangler@4.124.0": {},
+        "@cloudflare/kv-asset-handler@0.5.0": {},
+        "pnpm@12.3.4": {},
+        "@pnpm/exe.linux-x64@12.3.4": {},
+      },
+    });
+    assertEquals(packages.every((row) => row.role === "development"), true);
+    assertEquals(
+      packages.map((row) => `${row.name}@${row.version}`).sort((a, b) =>
+        a.localeCompare(b)
+      ),
+      [
+        "@cloudflare/kv-asset-handler@0.5.0",
+        "wrangler@4.124.0",
+      ],
+    );
+    assertEquals(
+      packages.every((row) => row.source === "pnpm-lock.yaml"),
+      true,
+    );
+  });
+
+  it("parses scoped ids and peer-suffix keys", () => {
+    const packages = packagesFromPnpmLockfile({
+      importers: {
+        ".": { dependencies: { next: { specifier: "16.2.9" } } },
+      },
+      packages: {
+        "next@16.2.9(@babel/core@7.29.7)": {},
+        "@babel/core@7.29.7": {},
+      },
+    });
+    assertEquals(packages.every((row) => row.role === "production"), true);
+    assertEquals(
+      packages.map((row) => `${row.name}@${row.version}`).sort((a, b) =>
+        a.localeCompare(b)
+      ),
+      [
+        "@babel/core@7.29.7",
+        "next@16.2.9",
       ],
     );
   });

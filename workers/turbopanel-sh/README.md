@@ -12,7 +12,7 @@ so `curl | sh` fetches are always fresh.
 into a gitignored `public/bootstrap` before upload — nothing is duplicated in git.
 
 Committed asset config lives under `assets/` (`_headers`, `_redirects`) and is
-staged into `public/` by `npm run stage`. Wrangler consumes those files at
+staged into `public/` by `pnpm run stage`. Wrangler consumes those files at
 deploy time rather than uploading them as downloadable assets.
 
 Non-GET/HEAD requests no longer get a hand-rolled `405` from Worker code —
@@ -29,13 +29,13 @@ method handling is whatever the asset server returns.
 From this directory:
 
 ```bash
-npm ci
-npm run deploy
+pnpm install --frozen-lockfile
+pnpm deploy
 ```
 
-`package-lock.json` is committed so Cloudflare Workers Builds installs with npm
-deterministically. Local installs may use `npm install` instead of `npm ci` when
-the lockfile changes.
+`pnpm-lock.yaml` is committed so Cloudflare Workers Builds installs with pnpm
+deterministically. The lockfile must include pnpm 12's `packageManagerDependencies`
+catalog — `--frozen-lockfile` fails without it.
 
 `deploy` runs `wrangler deploy`, which executes the `build.command` in
 `wrangler.jsonc` first (staging `../../scripts/run.sh` → `public/bootstrap` plus

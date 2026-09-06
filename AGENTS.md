@@ -274,7 +274,7 @@ compile toolchain).
   the co-located `turbopanel`/`dev`/`ui` `src` trees when present.
 - `deno task test` / `test:coverage` / `lint` / `fmt:check` / `check` / `notices:check` — quality
   surface in `deno.json`. `notices:generate` writes `THIRD_PARTY_NOTICES.md` from
-  `deno.lock`, `workers/turbopanel-sh/package-lock.json`, and orchestration pins
+  `deno.lock`, `workers/turbopanel-sh/pnpm-lock.yaml`, and orchestration pins
   (GPL-3.0-or-later Ansible tooling is a reviewed orchestration exception).
   Release packaging stages that file at `opt/turbopanel/share/THIRD_PARTY_NOTICES.md`.
   `tp_install_verified_channel_release` copies the verified notice into

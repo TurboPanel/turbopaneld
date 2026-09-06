@@ -3,6 +3,7 @@ import { dirname, fromFileUrl, join } from "@std/path";
 import {
   parseGalaxyRequirementsYaml,
   parseOrchestrationPins,
+  parsePnpmLockYaml,
 } from "./generate-notices.ts";
 
 /**
@@ -113,4 +114,37 @@ test({
       await Deno.remove(root, { recursive: true });
     }
   },
+});
+
+test("parsePnpmLockYaml uses the last YAML document as the project lockfile", () => {
+  const parsed = parsePnpmLockYaml(`---
+lockfileVersion: '9.0'
+importers:
+  .:
+    packageManagerDependencies:
+      pnpm:
+        specifier: 12.3.4
+        version: 12.3.4
+packages:
+  pnpm@12.3.4: {}
+---
+lockfileVersion: '9.0'
+importers:
+  .:
+    devDependencies:
+      wrangler:
+        specifier: ^4.124.0
+        version: 4.124.0
+packages:
+  wrangler@4.124.0:
+    resolution: {integrity: sha512-demo}
+`);
+  assertEquals(parsed.importers?.["."]?.devDependencies?.wrangler, {
+    specifier: "^4.124.0",
+    version: "4.124.0",
+  });
+  assertEquals(parsed.packages?.["wrangler@4.124.0"], {
+    resolution: { integrity: "sha512-demo" },
+  });
+  assertEquals(parsed.packages?.["pnpm@12.3.4"], undefined);
 });
