@@ -146,6 +146,60 @@ test("detach stops the interval and reportNow becomes a no-op", async () => {
   assertEquals(sent.length, 1);
 });
 
+test("reportNow skips send when detached mid-collect", async () => {
+  const timer = fakeTimer();
+  const sent: unknown[] = [];
+  let releaseCollect: (() => void) | undefined;
+  const collectGate = new Promise<void>((resolve) => {
+    releaseCollect = resolve;
+  });
+  const reporter = new TopologyReporter({
+    collectTopology: async () => {
+      await collectGate;
+      return fakeSnapshot(3);
+    },
+    setIntervalFn: timer.setIntervalFn,
+    clearIntervalFn: timer.clearIntervalFn,
+  });
+
+  reporter.attach((report) => sent.push(report));
+  reporter.detach();
+  releaseCollect?.();
+  await Promise.resolve();
+  await Promise.resolve();
+  assertEquals(sent.length, 0);
+});
+
+test("reportNow logs collect failures through the default logger", async () => {
+  const timer = fakeTimer();
+  const reporter = new TopologyReporter({
+    collectTopology: () => Promise.reject(new Error("sysfs unreadable")),
+    setIntervalFn: timer.setIntervalFn,
+    clearIntervalFn: timer.clearIntervalFn,
+  });
+
+  reporter.attach(() => {
+    throw new TypeError("send must not run after a collect failure");
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  await reporter.reportNow();
+});
+
+test("attach uses the default interval helpers when none are injected", async () => {
+  const sent: unknown[] = [];
+  const reporter = new TopologyReporter({
+    collectTopology: () => Promise.resolve(fakeSnapshot(0)),
+    intervalMs: 60_000,
+  });
+
+  reporter.attach((report) => sent.push(report));
+  await Promise.resolve();
+  await Promise.resolve();
+  reporter.detach();
+  assertEquals(sent.length, 1);
+});
+
 test("the interval fires reportNow on the configured cadence", async () => {
   const timer = fakeTimer();
   const sent: unknown[] = [];

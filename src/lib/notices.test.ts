@@ -6,11 +6,13 @@ import {
   authorToCopyright,
   classifyLicense,
   defaultLicenseForPackageName,
+  enrichMissingPackageLicenses,
   evaluateLicensePolicy,
   fillMissingLicenses,
   fingerprintCommentValue,
   formatPolicyFailures,
   mergeNoticePackages,
+  nameFromJsrNpmSpec,
   type NoticePackage,
   noticesAreCurrent,
   packagesFromDenoLock,
@@ -18,10 +20,13 @@ import {
   packagesFromOrchestrationPins,
   packagesFromPnpmLicenses,
   packagesFromPodfileLock,
+  parseDenoLockId,
   pnpmLicenseKeys,
   pnpmPackagePaths,
+  referencedDenoLockKeys,
   renderThirdPartyNotices,
   sortNoticePackages,
+  walkDenoLockReachableKeys,
 } from "./notices.ts";
 
 const renderOpts = {
@@ -326,6 +331,7 @@ describe("classifyLicense", () => {
   it("defaults @std and @tamagui package names to MIT", () => {
     assertEquals(defaultLicenseForPackageName("@std/assert"), "MIT");
     assertEquals(defaultLicenseForPackageName("@tamagui/core"), "MIT");
+    assertEquals(defaultLicenseForPackageName("org/khroma"), "MIT");
     assertEquals(defaultLicenseForPackageName("react"), undefined);
   });
 
@@ -533,6 +539,85 @@ describe("fillMissingLicenses", () => {
     );
     assertEquals(filled[0]?.license, "ISC");
     assertEquals(filled[1]?.license, "MIT");
+  });
+
+  it("keeps the package when lookup and default both miss", async () => {
+    const filled = await fillMissingLicenses(
+      [pkg({ name: "unknown-pkg", license: "" })],
+      () => Promise.resolve("   "),
+    );
+    assertEquals(filled[0]?.license, "");
+  });
+});
+
+describe("enrichMissingPackageLicenses", () => {
+  it("fills from resolve, then the package-name default, then leaves empty", () => {
+    const rows = enrichMissingPackageLicenses(
+      [
+        pkg({ name: "yaml", license: "ISC" }),
+        pkg({ name: "looked-up", license: "" }),
+        pkg({ name: "@std/path", license: "" }),
+        pkg({ name: "still-empty", license: "" }),
+      ],
+      (row) => row.name === "looked-up" ? " MIT " : undefined,
+    );
+    assertEquals(rows[0]?.license, "ISC");
+    assertEquals(rows[1]?.license, "MIT");
+    assertEquals(rows[2]?.license, "MIT");
+    assertEquals(rows[3]?.license, "");
+  });
+});
+
+describe("parseDenoLockId and nameFromJsrNpmSpec", () => {
+  it("rejects ids without a version separator", () => {
+    assertEquals(parseDenoLockId("npm", "no-version"), undefined);
+    assertEquals(parseDenoLockId("jsr", "@scopeonly"), undefined);
+    assertEquals(parseDenoLockId("npm", "@scope@"), undefined);
+  });
+
+  it("strips npm peer suffixes and scoped names", () => {
+    assertEquals(parseDenoLockId("npm", "semver@6.3.1_peer@1"), {
+      name: "semver",
+      version: "6.3.1",
+    });
+    assertEquals(nameFromJsrNpmSpec("jsr:@std/assert@1.0.19"), "@std/assert");
+    assertEquals(nameFromJsrNpmSpec("npm:yaml@2.9.0"), "yaml");
+    assertEquals(nameFromJsrNpmSpec("jsr:@std/assert"), "@std/assert");
+  });
+});
+
+describe("walkDenoLockReachableKeys", () => {
+  it("follows unprefixed, https, and scoped jsr dependencies", () => {
+    const keys = walkDenoLockReachableKeys(
+      {
+        specifiers: {
+          "jsr:@std/assert@1": "1.0.19",
+        },
+        jsr: {
+          "@std/assert@1.0.19": {
+            dependencies: ["@std/path", "https://example.com/mod.ts", "yaml"],
+          },
+          "@std/path@1.0.0": {},
+        },
+        npm: {
+          "yaml@2.9.0": {},
+        },
+      },
+      ["jsr:@std/assert@1", "npm:missing@1", "bare"],
+    );
+    assertEquals(keys.has("@std/assert@1.0.19"), true);
+    assertEquals(keys.has("@std/path@1.0.0"), true);
+    assertEquals(keys.has("yaml@2.9.0"), true);
+  });
+
+  it("referencedDenoLockKeys falls back to every table id without workspace roots", () => {
+    const keys = referencedDenoLockKeys({
+      jsr: { "not-a-lock-id": {}, "@std/assert@1.0.19": {} },
+      npm: { "yaml@2.9.0": {} },
+    });
+    assertEquals(keys.has("@std/assert@1.0.19"), true);
+    assertEquals(keys.has("yaml@2.9.0"), true);
+    assertEquals(keys.has("not-a-lock-id"), false);
   });
 });
 

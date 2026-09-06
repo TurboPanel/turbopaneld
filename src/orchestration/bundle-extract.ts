@@ -18,11 +18,13 @@ async function fileExists(path: string): Promise<boolean> {
  * Development checkouts ship `orchestration/` in the git tree. Production releases
  * install Ansible assets under `share/orchestration` (see `TURBOPANEL_ORCHESTRATION_DIR`).
  */
-export async function ensureOrchestrationTree(): Promise<void> {
+export async function ensureOrchestrationTree(
+  options: { forceMode?: "development" | "production" } = {},
+): Promise<void> {
   const ansibleCfg = join(ORCHESTRATION_DIR, "ansible.cfg");
   if (await fileExists(ansibleCfg)) return;
 
-  const mode = detectInstallMode({
+  const mode = options.forceMode ?? detectInstallMode({
     TURBOPANEL_DAEMON_ROOT: readEnv("TURBOPANEL_DAEMON_ROOT"),
     TURBOPANEL_ORCHESTRATION_DIR: readEnv("TURBOPANEL_ORCHESTRATION_DIR"),
   });

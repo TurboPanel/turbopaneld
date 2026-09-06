@@ -522,7 +522,9 @@ test({
         at: new Date().toISOString(),
       };
 
-      await handleCommandDispatch(message, ws);
+      await handleCommandDispatch(message, ws, {
+        decryptSecrets: echoDecryptSecrets,
+      });
 
       const frames = parseFrames((ws as unknown as MockWebSocket).sentFrames);
       assertEquals(frames[1]?.ok, true);
@@ -586,7 +588,10 @@ test({
         at: new Date().toISOString(),
       };
 
-      await handleCommandDispatch(message, ws);
+      await handleCommandDispatch(message, ws, {
+        decryptSecrets: echoDecryptSecrets,
+        rehydrateDeploymentSecrets: () => Promise.resolve([]),
+      });
 
       const frames = parseFrames((ws as unknown as MockWebSocket).sentFrames);
       assertEquals(frames[1]?.ok, true);
@@ -708,6 +713,7 @@ async function dispatchWithStubHandler(
     | "handleManagedHaReconcile"
     | "handleManagedHaFailover"
     | "handleSystemReconcile",
+  decryptSecrets?: (ciphertexts: string[]) => Promise<(string | null)[]>,
 ): Promise<Record<string, unknown>> {
   const { handleCommandDispatch, setCommandRouterHandlersForTests } =
     await import("./command-router.ts");
@@ -724,7 +730,11 @@ async function dispatchWithStubHandler(
       payload,
       at: new Date().toISOString(),
     };
-    await handleCommandDispatch(message, ws);
+    await handleCommandDispatch(
+      message,
+      ws,
+      decryptSecrets ? { decryptSecrets } : undefined,
+    );
     const frames = parseFrames((ws as unknown as MockWebSocket).sentFrames);
     assertEquals(frames[0]?.type, "command-ack");
     assertEquals(frames[1]?.type, "command-outcome");
@@ -733,6 +743,12 @@ async function dispatchWithStubHandler(
   } finally {
     setCommandRouterHandlersForTests(null);
   }
+}
+
+function echoDecryptSecrets(
+  ciphertexts: string[],
+): Promise<(string | null)[]> {
+  return Promise.resolve(ciphertexts);
 }
 
 test({
@@ -785,6 +801,7 @@ test({
       { managedId: "00000000-0000-4000-8000-000000000001", action: "stop" },
       { summary: "managed stopped" },
       "handleManagedLifecycle",
+      echoDecryptSecrets,
     );
     const result = outcome.result as Record<string, unknown>;
     assertEquals(result.summary, "managed stopped");
@@ -803,6 +820,7 @@ test({
       },
       { summary: "managed destroyed" },
       "handleManagedDestroy",
+      echoDecryptSecrets,
     );
     const result = outcome.result as Record<string, unknown>;
     assertEquals(result.summary, "managed destroyed");
@@ -821,6 +839,7 @@ test({
       },
       { status: "ready", role: "primary" },
       "handleManagedPromote",
+      echoDecryptSecrets,
     );
     const result = outcome.result as Record<string, unknown>;
     assertEquals(result.role, "primary");
@@ -887,6 +906,7 @@ test({
         restarted: false,
       },
       "handleManagedIngressReconcile",
+      echoDecryptSecrets,
     );
     const result = outcome.result as Record<string, unknown>;
     assertEquals(result.summary, "ingress reconciled");
@@ -907,6 +927,7 @@ test({
         restarted: false,
       },
       "handleManagedHaReconcile",
+      echoDecryptSecrets,
     );
     const result = outcome.result as Record<string, unknown>;
     assertEquals(result.summary, "ha reconciled");
@@ -922,6 +943,7 @@ test({
       ROUTER_STUB_MANAGED_HA_FAILOVER,
       { summary: "drained writer", phase: "drain" },
       "handleManagedHaFailover",
+      echoDecryptSecrets,
     );
     const result = outcome.result as Record<string, unknown>;
     assertEquals(result.phase, "drain");

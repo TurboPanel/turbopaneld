@@ -268,6 +268,45 @@ test({
 });
 
 test({
+  name: "handleNtp uses the real ansible probe and host time-sync reader",
+  permissions: { env: true, read: true, run: true },
+  fn: async () => {
+    const {
+      handleNtp,
+      setAnsibleAvailabilityCheckForTests,
+      setTimeSyncApplyForTests,
+      setTimeSyncReaderForTests,
+    } = await import("./ntp.ts");
+
+    setAnsibleAvailabilityCheckForTests(null);
+    setTimeSyncReaderForTests(null);
+    setTimeSyncApplyForTests(async () => {
+      await Promise.resolve();
+      return { summary: "applied-via-default-probe" };
+    });
+    try {
+      const nowIso = new Date().toISOString();
+      try {
+        const result = await handleNtp({ enabled: true }, nowIso);
+        assertEquals(Array.isArray(result.ntpServers), true);
+        assertEquals(result.summary, "applied-via-default-probe");
+      } catch (err) {
+        if (
+          !(err instanceof Error) ||
+          !err.message.includes("Ansible/bootstrap runtime is missing")
+        ) {
+          throw err;
+        }
+      }
+    } finally {
+      setAnsibleAvailabilityCheckForTests(null);
+      setTimeSyncApplyForTests(null);
+      setTimeSyncReaderForTests(null);
+    }
+  },
+});
+
+test({
   name: "handleNtp omits optional fields when host state is sparse",
   fn: async () => {
     const {

@@ -440,7 +440,7 @@ test("handleManagedApply standby needs_resync returns early without compose up",
             return Promise.resolve({ ...dockerOk(), stdout: "absent" });
           }
           if (args[0] === "compose" && args.includes("stop")) {
-            return Promise.resolve(dockerOk());
+            return Promise.resolve(dockerFail("already stopped"));
           }
           return Promise.resolve(dockerOk());
         },
@@ -561,6 +561,259 @@ test("handleManagedApply primary mysql path composes up and applies credentials"
     assertEquals(result.appliedDatabases, ["appdb"]);
     assertEquals(result.engineVersion, "8.4.0");
     assertEquals(result.summary, "managed mysql applied");
+  });
+});
+
+test("handleManagedApply rejects a decryptSecrets length mismatch", async () => {
+  await withApplyEnv(async () => {
+    await assertRejects(
+      () =>
+        handleManagedApply(
+          basePayload(),
+          new Date().toISOString(),
+          {
+            decryptSecrets: () => Promise.resolve([]),
+            ensureDocker: () => Promise.resolve(),
+            runHostPrep: () => Promise.resolve(),
+            runDocker: primaryPostgresRun,
+          },
+        ),
+      Error,
+      "unexpected length",
+    );
+  });
+});
+
+test("handleManagedApply rejects an empty decrypted credential password", async () => {
+  await withApplyEnv(async () => {
+    await assertRejects(
+      () =>
+        handleManagedApply(
+          basePayload(),
+          new Date().toISOString(),
+          {
+            decryptSecrets: () => Promise.resolve([""]),
+            ensureDocker: () => Promise.resolve(),
+            runHostPrep: () => Promise.resolve(),
+            runDocker: primaryPostgresRun,
+          },
+        ),
+      Error,
+      "failed to decrypt credential password",
+    );
+  });
+});
+
+test("handleManagedApply applies payload monitorUsers after decrypt", async () => {
+  await withApplyEnv(async () => {
+    const sql: string[] = [];
+    await handleManagedApply(
+      basePayload({
+        monitorUsers: [
+          {
+            username: "tp_monitor_srv1",
+            password: "tpdaemon.v1.mon.payload",
+          },
+        ],
+      }),
+      new Date().toISOString(),
+      {
+        decryptSecrets: (ciphertexts) =>
+          Promise.resolve(ciphertexts.map(() => "mon-s3cret")),
+        ensureDocker: () => Promise.resolve(),
+        runHostPrep: () => Promise.resolve(),
+        runDocker: (args, options) => {
+          if (args[0] === "exec" && args.includes("psql") && options?.input) {
+            sql.push(options.input);
+          }
+          return primaryPostgresRun(args, options);
+        },
+      },
+    );
+    assertEquals(sql.some((part) => part.includes("tp_monitor_srv1")), true);
+  });
+});
+
+test("handleManagedApply rejects a monitorUsers decrypt length mismatch", async () => {
+  await withApplyEnv(async () => {
+    let calls = 0;
+    await assertRejects(
+      () =>
+        handleManagedApply(
+          basePayload({
+            monitorUsers: [
+              {
+                username: "tp_monitor_srv1",
+                password: "tpdaemon.v1.mon.payload",
+              },
+            ],
+          }),
+          new Date().toISOString(),
+          {
+            decryptSecrets: (ciphertexts) => {
+              calls += 1;
+              if (calls === 1) {
+                return Promise.resolve(ciphertexts.map(() => "s3cret-root"));
+              }
+              return Promise.resolve([]);
+            },
+            ensureDocker: () => Promise.resolve(),
+            runHostPrep: () => Promise.resolve(),
+            runDocker: primaryPostgresRun,
+          },
+        ),
+      Error,
+      "unexpected length for monitorUsers",
+    );
+  });
+});
+
+test("handleManagedApply rejects an empty decrypted monitor password", async () => {
+  await withApplyEnv(async () => {
+    let calls = 0;
+    await assertRejects(
+      () =>
+        handleManagedApply(
+          basePayload({
+            monitorUsers: [
+              {
+                username: "tp_monitor_srv1",
+                password: "tpdaemon.v1.mon.payload",
+              },
+            ],
+          }),
+          new Date().toISOString(),
+          {
+            decryptSecrets: (ciphertexts) => {
+              calls += 1;
+              if (calls === 1) {
+                return Promise.resolve(ciphertexts.map(() => "s3cret-root"));
+              }
+              return Promise.resolve([""]);
+            },
+            ensureDocker: () => Promise.resolve(),
+            runHostPrep: () => Promise.resolve(),
+            runDocker: primaryPostgresRun,
+          },
+        ),
+      Error,
+      "failed to decrypt monitor credential",
+    );
+  });
+});
+
+test("handleManagedApply forceResync removes the engine container before bootstrap", async () => {
+  await withApplyEnv(async () => {
+    const argv: string[][] = [];
+    await assertRejects(
+      () =>
+        handleManagedApply(
+          basePayload({
+            memberRole: "replica",
+            forceResync: true,
+            replication: {
+              role: "standby",
+              username: "tp_repl",
+              primary: {
+                host: "managed-primary-id",
+                hostaddr: "203.0.113.10",
+                port: 15432,
+              },
+            },
+            credentials: [
+              {
+                principalId: "p-root",
+                username: "postgres",
+                role: "root",
+                databases: ["postgres"],
+                password: "tpdaemon.v1.root.payload",
+              },
+              {
+                principalId: "p-repl",
+                username: "tp_repl",
+                role: "replication",
+                databases: [],
+                password: "tpdaemon.v1.repl.payload",
+              },
+            ],
+          }),
+          new Date().toISOString(),
+          {
+            decryptSecrets: (ciphertexts) =>
+              Promise.resolve(ciphertexts.map(() => "repl-s3cret")),
+            ensureDocker: () => Promise.resolve(),
+            runHostPrep: () => Promise.resolve(),
+            runDocker: (args) => {
+              argv.push([...args]);
+              if (args[0] === "run" && args.includes("0")) {
+                return Promise.resolve(dockerOk());
+              }
+              if (
+                args[0] === "run" &&
+                args.some((part) => part.includes("rm -rf"))
+              ) {
+                return Promise.resolve(dockerFail("cleanup denied"));
+              }
+              return Promise.resolve(dockerOk());
+            },
+          },
+        ),
+      Error,
+      "standby data cleanup failed",
+    );
+    assertEquals(
+      argv.some((args) =>
+        args[0] === "rm" &&
+        args.includes("01936b3e-aaaa-bbbb-cccc-123456789abc-1")
+      ),
+      true,
+    );
+  });
+});
+
+test("handleManagedApply primary replication collects member health", async () => {
+  await withApplyEnv(async () => {
+    const result = await handleManagedApply(
+      basePayload({
+        replication: {
+          role: "primary",
+          username: "tp_repl",
+          desiredSlots: ["tp_member_2"],
+          peerAddresses: ["203.0.113.10"],
+        },
+        ingressSourceAddresses: ["2001:db8::10"],
+        credentials: [
+          {
+            principalId: "p-root",
+            username: "postgres",
+            role: "root",
+            databases: ["postgres"],
+            password: "tpdaemon.v1.root.payload",
+          },
+          {
+            principalId: "p-repl",
+            username: "tp_repl",
+            role: "replication",
+            databases: [],
+            password: "tpdaemon.v1.repl.payload",
+          },
+        ],
+      }),
+      new Date().toISOString(),
+      {
+        decryptSecrets: decryptOk,
+        ensureDocker: () => Promise.resolve(),
+        runHostPrep: () => Promise.resolve(),
+        runDocker: primaryPostgresRun,
+      },
+    );
+    assertEquals(
+      result.member?.memberId,
+      "00000000-0000-4000-8000-0000000000a1",
+    );
+    assertEquals(result.member?.role, "primary");
+    assertEquals(result.member?.status, "ready");
+    assertEquals(result.member?.replication?.state !== undefined, true);
   });
 });
 

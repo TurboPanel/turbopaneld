@@ -1,5 +1,9 @@
 import { assertEquals, assertThrows } from "@std/assert";
-import { parseArg, parseBuildToggleArgs } from "./run-build-toggle.ts";
+import {
+  parseArg,
+  parseBuildToggleArgs,
+  runBuildToggleCli,
+} from "./run-build-toggle.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -55,4 +59,60 @@ test("parseBuildToggleArgs rejects invalid or missing flags", () => {
     TypeError,
     "Missing or invalid --ui-mode=dev|static",
   );
+});
+
+test("runBuildToggleCli reports parse errors and exits 1", async () => {
+  const exits: number[] = [];
+  const errors: string[] = [];
+  await runBuildToggleCli({
+    args: ["--ui-mode=prod"],
+    exit: (code) => {
+      exits.push(code);
+    },
+    error: (message) => {
+      errors.push(message);
+    },
+  });
+  assertEquals(exits, [1]);
+  assertEquals(errors[0]?.includes("--ui-mode=dev|static"), true);
+});
+
+test("runBuildToggleCli stringifies non-Error throws", async () => {
+  const exits: number[] = [];
+  const errors: string[] = [];
+  await runBuildToggleCli({
+    args: ["--ui-mode=dev", "--instance-run-mode=source"],
+    run: () => Promise.reject("boom"),
+    exit: (code) => {
+      exits.push(code);
+    },
+    error: (message) => {
+      errors.push(message);
+    },
+  });
+  assertEquals(exits, [1]);
+  assertEquals(errors, ["boom"]);
+});
+
+test("runBuildToggleCli forwards parsed flags to run", async () => {
+  const seen: unknown[] = [];
+  await runBuildToggleCli({
+    args: [
+      "--ui-mode=static",
+      "--instance-run-mode=compiled",
+      "--force-build=true",
+    ],
+    run: (parsed) => {
+      seen.push(parsed);
+      return Promise.resolve();
+    },
+    exit: () => {
+      throw new TypeError("should not exit on success");
+    },
+  });
+  assertEquals(seen, [{
+    uiMode: "static",
+    instanceRunMode: "compiled",
+    forceBuild: true,
+  }]);
 });

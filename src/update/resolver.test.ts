@@ -233,6 +233,51 @@ test("resolveUpdate allows http overlay catalogs via TURBOPANEL_DL_BASE", async 
   }
 });
 
+test("resolveUpdate surfaces a string fetch cause", async () => {
+  const restore = installFetch(() => {
+    throw new TypeError("fetch failed", { cause: "tls handshake" });
+  });
+  try {
+    await assertRejects(
+      () => resolveUpdate({ app: "daemon", channel: "trunk" }, {}),
+      MalformedManifestError,
+      "Failed to fetch channels.json: fetch failed (tls handshake)",
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("resolveUpdate wraps a fetch failed error without a usable cause", async () => {
+  const restore = installFetch(() => {
+    throw new TypeError("fetch failed", { cause: 12 });
+  });
+  try {
+    await assertRejects(
+      () => resolveUpdate({ app: "daemon", channel: "trunk" }, {}),
+      MalformedManifestError,
+      "Failed to fetch channels.json: fetch failed",
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("resolveUpdate wraps a non-Error throw", async () => {
+  const restore = installFetch(() => {
+    throw "offline";
+  });
+  try {
+    await assertRejects(
+      () => resolveUpdate({ app: "daemon", channel: "trunk" }, {}),
+      MalformedManifestError,
+      "Failed to fetch channels.json: offline",
+    );
+  } finally {
+    restore();
+  }
+});
+
 test("resolveUpdate surfaces fetch cause in MalformedManifestError", async () => {
   const restore = installFetch(() => {
     throw new TypeError("fetch failed", {

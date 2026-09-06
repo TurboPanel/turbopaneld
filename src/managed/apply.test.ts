@@ -1,6 +1,7 @@
 import { assertEquals } from "@std/assert";
-import { resolveManagedApplyHost } from "./apply.ts";
+import { resolveClientSourceHosts, resolveManagedApplyHost } from "./apply.ts";
 import { proxysqlProject } from "./paths.ts";
+import type { ManagedApplyPayload } from "../instance/commands/contracts.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -29,6 +30,25 @@ test("resolveManagedApplyHost always reports loopback — external access is via
   assertEquals(
     resolveManagedApplyHost({ enabled: false, protocol: "tcp" }),
     "127.0.0.1",
+  );
+});
+
+test("resolveClientSourceHosts keeps IPv4 and IPv6 literals and drops names", () => {
+  const hosts = resolveClientSourceHosts({
+    replication: {
+      role: "primary",
+      username: "tp_repl",
+      peerAddresses: ["203.0.113.10", "primary.internal", "2001:db8::1"],
+    },
+    ingressSourceAddresses: ["198.51.100.20", "db-peer"],
+  } as ManagedApplyPayload);
+  assertEquals(hosts, ["198.51.100.20", "2001:db8::1", "203.0.113.10"]);
+});
+
+test("resolveClientSourceHosts is empty when no address lists are present", () => {
+  assertEquals(
+    resolveClientSourceHosts({} as ManagedApplyPayload),
+    [],
   );
 });
 

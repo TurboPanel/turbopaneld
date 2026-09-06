@@ -291,6 +291,139 @@ test("parseMonitorMessage rejects malformed events and daemon base", () => {
   );
 });
 
+test("parseMonitorMessage rejects remaining invalid resource and event shapes", () => {
+  assertEquals(
+    parseMonitorMessage({
+      type: "monitor.sync",
+      from: "daemon",
+      serverId: SERVER_ID,
+      at: "2026-01-01T00:00:00Z",
+      sequence: 1,
+      instance: {},
+      resources: ["not-a-record"],
+      protocolVersion: MONITOR_PROTOCOL_VERSION,
+    }),
+    null,
+  );
+  assertEquals(
+    parseMonitorMessage({
+      type: "monitor.heartbeat",
+      from: "daemon",
+      serverId: SERVER_ID,
+      at: "2026-01-01T00:00:00Z",
+      sequence: 1,
+      instance: {},
+      events: ["not-a-record"],
+    }),
+    null,
+  );
+  assertEquals(
+    parseMonitorMessage({
+      type: "monitor.heartbeat",
+      from: "daemon",
+      serverId: SERVER_ID,
+      at: "2026-01-01T00:00:00Z",
+      sequence: 1,
+      instance: {},
+      events: [{
+        toStatus: "healthy",
+        at: "2026-01-01T00:00:00Z",
+        resourceKey: 12,
+      }],
+    }),
+    null,
+  );
+  assertEquals(
+    parseMonitorMessage({
+      type: "monitor.heartbeat",
+      from: "daemon",
+      serverId: SERVER_ID,
+      at: "2026-01-01T00:00:00Z",
+      sequence: 1,
+      instance: {},
+      events: [{
+        toStatus: "healthy",
+        at: "2026-01-01T00:00:00Z",
+        kind: "unknown",
+      }],
+    }),
+    null,
+  );
+  assertEquals(
+    parseMonitorMessage({
+      type: "monitor.heartbeat",
+      from: "daemon",
+      serverId: SERVER_ID,
+      at: "2026-01-01T00:00:00Z",
+      sequence: 1,
+      instance: {},
+      events: [{
+        toStatus: "healthy",
+        at: "2026-01-01T00:00:00Z",
+        sequence: "1",
+      }],
+    }),
+    null,
+  );
+  assertEquals(
+    parseMonitorMessage({
+      type: "monitor.sync",
+      from: "daemon",
+      serverId: SERVER_ID,
+      at: "2026-01-01T00:00:00Z",
+      sequence: 1,
+      instance: {},
+      resources: [],
+      events: [{ toStatus: "healthy" }],
+      protocolVersion: MONITOR_PROTOCOL_VERSION,
+    }),
+    null,
+  );
+  assertEquals(
+    parseMonitorMessage({
+      type: "monitor.heartbeat",
+      from: "not-daemon",
+      serverId: SERVER_ID,
+      at: "2026-01-01T00:00:00Z",
+      sequence: 1,
+      instance: {},
+    }),
+    null,
+  );
+  assertEquals(
+    parseMonitorMessage({
+      type: "monitor.heartbeat",
+      from: "daemon",
+      serverId: SERVER_ID,
+      at: "2026-01-01T00:00:00Z",
+      sequence: 1,
+    }),
+    null,
+  );
+  assertEquals(
+    parseMonitorMessage({
+      type: "monitor.transition",
+      from: "daemon",
+      serverId: SERVER_ID,
+      at: "2026-01-01T00:00:00Z",
+      sequence: 1,
+      events: [{ toStatus: "healthy", at: "2026-01-01T00:00:00Z" }],
+      resources: [{ resourceKey: "x", kind: "container", status: "bogus" }],
+    }),
+    null,
+  );
+  assertEquals(
+    parseMonitorMessage({
+      type: "monitor.ack",
+      from: "instance",
+      serverId: 12,
+      at: "2026-01-01T00:00:00Z",
+      acceptedSequence: 1,
+    }),
+    null,
+  );
+});
+
 test("parseMonitorMessage ignores incomplete daemonBuild objects", () => {
   const parsed = parseMonitorMessage({
     type: "monitor.heartbeat",
@@ -306,6 +439,20 @@ test("parseMonitorMessage ignores incomplete daemonBuild objects", () => {
     throw new TypeError("expected monitor.heartbeat");
   }
   assertEquals(parsed.daemonBuild, undefined);
+
+  const missingBuildId = parseMonitorMessage({
+    type: "monitor.heartbeat",
+    from: "daemon",
+    serverId: SERVER_ID,
+    at: "2026-01-01T00:00:00Z",
+    sequence: 1,
+    instance: {},
+    daemonBuild: { commit: "abc1234", buildId: "" },
+  });
+  if (missingBuildId?.type !== "monitor.heartbeat") {
+    throw new TypeError("expected monitor.heartbeat");
+  }
+  assertEquals(missingBuildId.daemonBuild, undefined);
 });
 
 test("parseMonitorMessage accepts heartbeat resources and rejects bad kinds", () => {

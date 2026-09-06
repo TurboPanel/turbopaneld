@@ -163,6 +163,133 @@ describe("ensureCloudflared", () => {
     assertEquals(path, bin);
   });
 
+  it("rethrows non-NotFound stat errors while probing the binary", async () => {
+    const bin = paths.cloudflaredBin();
+    const originalStat = Deno.stat;
+    Deno.stat = (path) => {
+      if (path === bin) {
+        return Promise.reject(new Deno.errors.PermissionDenied("denied"));
+      }
+      return originalStat(path);
+    };
+    try {
+      await assertRejects(
+        () => cloudflared.ensureCloudflared(),
+        Deno.errors.PermissionDenied,
+      );
+    } finally {
+      Deno.stat = originalStat;
+    }
+  });
+
+  it("treats a failing --version probe as missing and reinstalls", async () => {
+    const bin = paths.cloudflaredBin();
+    await Deno.mkdir(paths.cloudflaredDir(), { recursive: true });
+    await Deno.writeTextFile(
+      bin,
+      `#!/bin/sh
+echo "cloudflared boom"
+exit 2
+`,
+    );
+    await Deno.chmod(bin, 0o755);
+
+    const good = await buildCloudflaredFixtureBinary(
+      paths.CLOUDFLARED_VERSION,
+    );
+    const asset = paths.resolveCloudflaredAsset();
+    const url = paths.cloudflaredDownloadUrl(asset);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (input) => {
+      if (String(input) === url) {
+        return Promise.resolve(
+          new Response(new Uint8Array(good), { status: 200 }),
+        );
+      }
+      return originalFetch(input);
+    };
+    try {
+      const path = await cloudflared.ensureCloudflared();
+      assertEquals(path, bin);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("treats a version-less --version banner as missing", async () => {
+    const bin = paths.cloudflaredBin();
+    await Deno.mkdir(paths.cloudflaredDir(), { recursive: true });
+    await Deno.writeTextFile(
+      bin,
+      `#!/bin/sh
+echo "cloudflared (no version token)"
+exit 0
+`,
+    );
+    await Deno.chmod(bin, 0o755);
+
+    const good = await buildCloudflaredFixtureBinary(
+      paths.CLOUDFLARED_VERSION,
+    );
+    const asset = paths.resolveCloudflaredAsset();
+    const url = paths.cloudflaredDownloadUrl(asset);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (input) => {
+      if (String(input) === url) {
+        return Promise.resolve(
+          new Response(new Uint8Array(good), { status: 200 }),
+        );
+      }
+      return originalFetch(input);
+    };
+    try {
+      const path = await cloudflared.ensureCloudflared();
+      assertEquals(path, bin);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("treats a throwing --version probe as missing", async () => {
+    const bin = paths.cloudflaredBin();
+    await Deno.mkdir(paths.cloudflaredDir(), { recursive: true });
+    await Deno.writeTextFile(bin, "#!/bin/sh\nexit 0\n");
+    await Deno.chmod(bin, 0o755);
+    const originalCommand = Deno.Command;
+    let probes = 0;
+    Deno.Command = class extends originalCommand {
+      constructor(command: string | URL, options?: Deno.CommandOptions) {
+        super(command, options);
+        if (command === bin) {
+          probes += 1;
+          if (probes === 1) throw new TypeError("spawn failed");
+        }
+      }
+    } as typeof Deno.Command;
+
+    const good = await buildCloudflaredFixtureBinary(
+      paths.CLOUDFLARED_VERSION,
+    );
+    const asset = paths.resolveCloudflaredAsset();
+    const url = paths.cloudflaredDownloadUrl(asset);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (input) => {
+      if (String(input) === url) {
+        return Promise.resolve(
+          new Response(new Uint8Array(good), { status: 200 }),
+        );
+      }
+      return originalFetch(input);
+    };
+    try {
+      const path = await cloudflared.ensureCloudflared();
+      assertEquals(path, bin);
+    } finally {
+      Deno.Command = originalCommand;
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("warns when creating the current symlink fails", async () => {
     const bin = paths.cloudflaredBin();
     await Deno.mkdir(paths.cloudflaredDir(), { recursive: true });

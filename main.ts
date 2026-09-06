@@ -3,9 +3,10 @@
  * before starting the daemon. Managed compile uses {@link ./src/prod-main.ts}.
  */
 import { maybeRunDaemonCli } from "./src/daemon-cli.ts";
+import { runDaemon } from "./src/daemon-run.ts";
 import { applyDevSyncTarball } from "./src/dev-sync-apply.ts";
 import { enableCheckoutDevSync } from "./src/instance/dev-sync-runtime.ts";
 
 await maybeRunDaemonCli();
 enableCheckoutDevSync(applyDevSyncTarball);
-await import("./src/daemon-run.ts");
+await runDaemon();

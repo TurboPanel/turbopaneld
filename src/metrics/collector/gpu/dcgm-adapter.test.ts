@@ -69,6 +69,7 @@ function ctx(overrides: Partial<GpuReadContext> = {}): GpuReadContext {
 test("normalizeDcgmPciBusId collapses the 8-hex-digit DCGM domain to sysfs' 4-hex-digit form", () => {
   assertEquals(normalizeDcgmPciBusId("00000000:01:00.0"), "0000:01:00.0");
   assertEquals(normalizeDcgmPciBusId("00000000:1A:00.0"), "0000:1a:00.0");
+  assertEquals(normalizeDcgmPciBusId("not-a-pci-id"), "not-a-pci-id");
 });
 
 test("parseDcgmGpuReading maps every current field and converts MiB to bytes", () => {
@@ -161,4 +162,40 @@ test("DcgmGpuAdapter.read succeeds on a valid scrape", async () => {
   });
   const reading = await adapter.read(gpu(), ctx());
   assertEquals(reading?.utilizationPercent, 42);
+});
+
+test("parseDcgmGpuReading returns null when the GPU has no PCI path", () => {
+  const samples = parsePrometheusExposition(TWO_GPU_EXPOSITION);
+  assertEquals(parseDcgmGpuReading(samples, gpu({ pciPath: "" }), ctx()), null);
+});
+
+test("parseDcgmGpuReading maps memory-activity, memory-temp, and PCIe series when present", () => {
+  const text = `${TWO_GPU_EXPOSITION}
+DCGM_FI_DEV_MEM_COPY_UTIL{gpu="0",UUID="GPU-aaa",pci_bus_id="00000000:01:00.0"} 18
+DCGM_FI_DEV_MEMORY_TEMP{gpu="0",UUID="GPU-aaa",pci_bus_id="00000000:01:00.0"} 72
+DCGM_FI_PROF_PCIE_RX_BYTES{gpu="0",UUID="GPU-aaa",pci_bus_id="00000000:01:00.0"} 4096
+DCGM_FI_PROF_PCIE_TX_BYTES{gpu="0",UUID="GPU-aaa",pci_bus_id="00000000:01:00.0"} 2048
+`;
+  const reading = parseDcgmGpuReading(
+    parsePrometheusExposition(text),
+    gpu(),
+    ctx(),
+  );
+  assertEquals(reading?.memoryActivityPercent, 18);
+  assertEquals(reading?.memoryTemperatureCelsius, 72);
+  assertEquals(reading?.pcieReceiveBytesPerSecond, 4096);
+  assertEquals(reading?.pcieTransmitBytesPerSecond, 2048);
+});
+
+test("DcgmGpuAdapter.probe is a no-op and a throwing parse degrades the read to null", async () => {
+  const adapter = new DcgmGpuAdapter({
+    fetchText: () => Promise.resolve(TWO_GPU_EXPOSITION),
+  });
+  await adapter.probe();
+  const tracker = {
+    rate: () => {
+      throw new Error("tracker failed");
+    },
+  } as unknown as CounterBaselineTracker;
+  assertEquals(await adapter.read(gpu(), ctx({ tracker })), null);
 });

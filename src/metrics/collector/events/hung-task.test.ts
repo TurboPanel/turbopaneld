@@ -208,6 +208,90 @@ test("createDefaultKernelLogReader: kmsg unavailable falls back to dmesg", async
   assertEquals(await reader(), [HUNG_TASK_LINE]);
 });
 
+test("createKmsgKernelLogReader: unparseable records and already-seen seqs never become messages", () => {
+  const records = [
+    "not-a-kmsg-record",
+    "6,abc,123456,-;bad seq",
+    kmsgRecord(3, "first real"),
+    kmsgRecord(3, "same seq again"),
+    kmsgRecord(2, "older than cursor"),
+  ];
+  const reader = createKmsgKernelLogReader(memoryKmsgIo(records));
+  assertEquals(reader(), []);
+  records.push(kmsgRecord(4, "fresh"));
+  assertEquals(reader(), ["fresh"]);
+});
+
+test("createKmsgKernelLogReader: a close() throw after a fatal read still marks kmsg unavailable", () => {
+  const io: KmsgIo = {
+    open() {
+      return {
+        next: () => {
+          throw new Error("read failed");
+        },
+        close: () => {
+          throw new Error("already closed");
+        },
+      };
+    },
+  };
+  const reader = createKmsgKernelLogReader(io);
+  assertEquals(reader(), undefined);
+  assertEquals(reader(), undefined);
+});
+
+test("createDefaultKernelLogReader: missing dmesgReader falls back to the real dmesg helper", async () => {
+  const reader = createDefaultKernelLogReader({ kmsgIo: failingKmsgIo() });
+  const lines = await reader();
+  if (!Array.isArray(lines)) {
+    throw new TypeError("expected a dmesg fallback array");
+  }
+});
+
+test("createDefaultKernelLogReader: missing kmsgIo opens the production /dev/kmsg path", async () => {
+  const lines = await createDefaultKernelLogReader({
+    dmesgReader: () => Promise.resolve(["dmesg fallback"]),
+  })();
+  if (!Array.isArray(lines)) {
+    throw new TypeError("expected kmsg or dmesg lines");
+  }
+});
+
+test("HungTaskEventCollector: a hung-task line without a comm still fires, with no payload", async () => {
+  const collector = new HungTaskEventCollector({
+    intervalMs: 0,
+    reader: () =>
+      Promise.resolve([
+        "[1.0] watchdog: blocked for more than 120 seconds.",
+      ]),
+  });
+  const events = await collector.detect(ctx());
+  assertEquals(events.length, 1);
+  assertEquals(events[0].kind, "hung_task");
+  assertEquals(events[0].payload, undefined);
+});
+
+test("HungTaskEventCollector: the seen-line set is trimmed when it exceeds the bound", async () => {
+  let generation = 0;
+  const collector = new HungTaskEventCollector({
+    intervalMs: 0,
+    reader: () => {
+      const start = generation * 501;
+      generation += 1;
+      return Promise.resolve(
+        Array.from({ length: 501 }, (_, i) => {
+          const n = start + i;
+          return `[${n}.0] INFO: task worker${n}:${n} blocked for more than 120 seconds.`;
+        }),
+      );
+    },
+  });
+  const first = await collector.detect(ctx({ nowMs: 0 }));
+  assertEquals(first.length, 501);
+  const second = await collector.detect(ctx({ nowMs: 1 }));
+  assertEquals(second.length, 501);
+});
+
 test("HungTaskEventCollector: end-to-end over the kmsg + dmesg-fallback reader still fires on a real hung-task record", async () => {
   const records = [kmsgRecord(1, "backlog only")];
   const io = memoryKmsgIo(records);

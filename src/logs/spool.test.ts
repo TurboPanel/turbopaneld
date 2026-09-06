@@ -1,4 +1,4 @@
-import { assertEquals, assertThrows } from "@std/assert";
+import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { join } from "@std/path";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import { commandLogSpoolDir } from "../paths/layout.ts";
@@ -137,6 +137,100 @@ test("active spool paths track open files until close or discard", async () => {
       await spool.discard();
       assertEquals(await Deno.stat(spool.path).catch(() => null), null);
     } finally {
+      await spool.discard().catch(() => undefined);
+    }
+  });
+});
+
+test("sequence and pendingBytes expose the in-memory buffer", async () => {
+  await withTempLayout(async (fixture) => {
+    const spool = CommandLogSpool.open({
+      commandId: "cmd-metrics",
+      dir: join(fixture.dirs.stateDir, "spool"),
+    });
+    try {
+      assertEquals(spool.sequence, 0);
+      assertEquals(spool.pendingBytes, 0);
+      appendLine(spool, "one");
+      assertEquals(spool.sequence, 1);
+      assertEquals(spool.pendingBytes > 0, true);
+    } finally {
+      await spool.discard();
+    }
+  });
+});
+
+test("append still buffers when writeSync throws on an open handle", async () => {
+  await withTempLayout(async (fixture) => {
+    const originalOpen = Deno.openSync;
+    Deno.openSync = ((...args: Parameters<typeof Deno.openSync>) => {
+      const file = originalOpen.apply(Deno, args);
+      file.writeSync = () => {
+        throw new TypeError("disk full");
+      };
+      return file;
+    }) as typeof Deno.openSync;
+    try {
+      const spool = CommandLogSpool.open({
+        commandId: "cmd-write-throw",
+        dir: join(fixture.dirs.stateDir, "spool"),
+      });
+      try {
+        const stored = appendLine(spool, "kept-in-memory");
+        assertEquals(stored.sequence, 1);
+        assertEquals(
+          spool.takePendingChunk()?.bytes.includes("kept-in-memory"),
+          true,
+        );
+      } finally {
+        await spool.discard().catch(() => undefined);
+      }
+    } finally {
+      Deno.openSync = originalOpen;
+    }
+  });
+});
+
+test("close swallows a throw from the file handle", async () => {
+  await withTempLayout((fixture) => {
+    const originalOpen = Deno.openSync;
+    Deno.openSync = ((...args: Parameters<typeof Deno.openSync>) => {
+      const file = originalOpen.apply(Deno, args);
+      file.close = () => {
+        throw new TypeError("already closed");
+      };
+      return file;
+    }) as typeof Deno.openSync;
+    try {
+      const spool = CommandLogSpool.open({
+        commandId: "cmd-close-throw",
+        dir: join(fixture.dirs.stateDir, "spool"),
+      });
+      spool.close();
+      spool.close();
+    } finally {
+      Deno.openSync = originalOpen;
+    }
+  });
+});
+
+test("discard rethrows a non-NotFound remove error", async () => {
+  await withTempLayout(async (fixture) => {
+    const spool = CommandLogSpool.open({
+      commandId: "cmd-discard-err",
+      dir: join(fixture.dirs.stateDir, "spool"),
+    });
+    const originalRemove = Deno.remove;
+    Deno.remove = () =>
+      Promise.reject(new Deno.errors.PermissionDenied("denied"));
+    try {
+      await assertRejects(
+        () => spool.discard(),
+        Deno.errors.PermissionDenied,
+        "denied",
+      );
+    } finally {
+      Deno.remove = originalRemove;
       await spool.discard().catch(() => undefined);
     }
   });

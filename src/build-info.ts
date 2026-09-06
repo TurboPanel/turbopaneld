@@ -19,9 +19,9 @@ export function sourceUrlForCommit(commit: string): string {
 }
 
 export const BUILD_INFO: BuildInfo = {
-  commit: "fb62ec5+1786916563",
-  buildId: "dev-fb62ec5+1786916563",
-  builtAt: "2026-08-16T21:42:43.985Z",
+  commit: "76993c327e33d5b3c173ea0eefa41e890cb960b0+1788702538",
+  buildId: "dev-76993c3+1788702538",
+  builtAt: "2026-09-06T13:48:58.104Z",
   channel: "trunk",
   sourceUrl: sourceUrlForCommit("fb62ec5+1786916563"),
 };

@@ -189,6 +189,8 @@ test("LinuxMetricsCollector assembles a full v4 sample across two ticks", async 
   // (procs, memory, file handles, conntrack) resolve immediately.
   assertEquals(first.sample.host.cpu.busyPercent, null);
   assertEquals(first.sample.host.cpu.procsRunning, 2);
+  assertEquals(typeof first.sample.host.cpu.processCount, "number");
+  assertEquals((first.sample.host.cpu.processCount ?? 0) > 2, true);
   assertEquals(
     first.sample.host.kernel.fileHandlesUsedPercent,
     (4256 / 1048576) * 100,

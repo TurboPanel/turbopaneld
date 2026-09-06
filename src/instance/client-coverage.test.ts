@@ -173,6 +173,221 @@ it({
 });
 
 it({
+  name: "tls-trust park reads the platform CA fingerprint when a CA file exists",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    run: ["openssl"],
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const originalInstanceCa = Deno.env.get("TURBOPANEL_INSTANCE_CA");
+    const originalLd = Deno.env.get("LD_LIBRARY_PATH");
+    const { restore: restoreWebSocket } = installTrackingWebSocket();
+    const originalSetTimeout = globalThis.setTimeout;
+    const reconnectDelays: number[] = [];
+    let restoreFetch: (() => void) | undefined;
+
+    globalThis.setTimeout = ((
+      handler: (...args: unknown[]) => void,
+      timeout?: number,
+      ...args: unknown[]
+    ) => {
+      if (
+        typeof timeout === "number" && timeout >= DEFAULT_INITIAL_BACKOFF_MS
+      ) {
+        reconnectDelays.push(timeout);
+      }
+      return originalSetTimeout(handler, 0, ...args);
+    }) as typeof setTimeout;
+
+    try {
+      const api = createFakeInstanceApi();
+      api.script(
+        "/api/health",
+        () => new Response(JSON.stringify({ ok: true }), { status: 200 }),
+      );
+      api.script("/api/daemon/v1/jwks.json", () => {
+        throw new Error("invalid peer certificate: UnknownIssuer");
+      });
+      api.script("/api/daemon/v1/auth/challenge", () => {
+        throw new Error("invalid peer certificate: UnknownIssuer");
+      });
+      restoreFetch = api.install();
+
+      await withTempLayout(async (fixture) => {
+        const caPath = `${fixture.dirs.configDir}/instance-ca.pem`;
+        const keyPath = `${fixture.dirs.configDir}/instance-ca.key`;
+        Deno.env.set("LD_LIBRARY_PATH", "/usr/lib");
+        const gen = await new Deno.Command("openssl", {
+          args: [
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            keyPath,
+            "-out",
+            caPath,
+            "-days",
+            "1",
+            "-subj",
+            "/CN=turbopanel-park-ca",
+          ],
+          stdout: "null",
+          stderr: "piped",
+          clearEnv: true,
+        }).output();
+        if (!gen.success) return;
+
+        Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", fixture.dirs.stateDir);
+        Deno.env.set("TURBOPANEL_INSTANCE_CA", caPath);
+        Deno.env.set("TURBOPANEL_FORCE_ENROLL", "1");
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.id`,
+          "license-123\n",
+        );
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.token`,
+          "token-abc\n",
+        );
+        invalidatePlatformCaHttpClient();
+
+        const client = new InstanceClient({
+          config: {
+            kind: "url",
+            baseUrl: "https://instance.test",
+            wsBaseUrl: "wss://instance.test",
+          },
+        });
+        try {
+          client.start();
+          await waitFor(
+            "tls-trust parked delay with CA file",
+            () =>
+              reconnectDelays.some((d) => d >= PARKED_BACKOFF_MIN_MS)
+                ? true
+                : undefined,
+          );
+        } finally {
+          client.stop();
+        }
+      });
+    } finally {
+      invalidatePlatformCaHttpClient();
+      globalThis.setTimeout = originalSetTimeout;
+      restoreFetch?.();
+      restoreWebSocket();
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+      setOptionalEnv("TURBOPANEL_INSTANCE_CA", originalInstanceCa);
+      setOptionalEnv("LD_LIBRARY_PATH", originalLd);
+    }
+  },
+});
+
+it({
+  name: "tls-trust park reports an unreadable fingerprint when the CA is junk",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const originalInstanceCa = Deno.env.get("TURBOPANEL_INSTANCE_CA");
+    const { restore: restoreWebSocket } = installTrackingWebSocket();
+    const originalSetTimeout = globalThis.setTimeout;
+    const reconnectDelays: number[] = [];
+    let restoreFetch: (() => void) | undefined;
+    const pinned = Deno.createHttpClient({});
+
+    globalThis.setTimeout = ((
+      handler: (...args: unknown[]) => void,
+      timeout?: number,
+      ...args: unknown[]
+    ) => {
+      if (
+        typeof timeout === "number" && timeout >= DEFAULT_INITIAL_BACKOFF_MS
+      ) {
+        reconnectDelays.push(timeout);
+      }
+      return originalSetTimeout(handler, 0, ...args);
+    }) as typeof setTimeout;
+
+    try {
+      const api = createFakeInstanceApi();
+      api.script(
+        "/api/health",
+        () => new Response(JSON.stringify({ ok: true }), { status: 200 }),
+      );
+      api.script("/api/daemon/v1/jwks.json", () => {
+        throw new Error("invalid peer certificate: UnknownIssuer");
+      });
+      api.script("/api/daemon/v1/auth/challenge", () => {
+        throw new Error("invalid peer certificate: UnknownIssuer");
+      });
+      restoreFetch = api.install();
+
+      await withTempLayout(async (fixture) => {
+        const caPath = `${fixture.dirs.configDir}/instance-ca.pem`;
+        await Deno.writeTextFile(caPath, "not-a-certificate\n");
+        Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", fixture.dirs.stateDir);
+        Deno.env.set("TURBOPANEL_INSTANCE_CA", caPath);
+        Deno.env.set("TURBOPANEL_FORCE_ENROLL", "1");
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.id`,
+          "license-123\n",
+        );
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.token`,
+          "token-abc\n",
+        );
+
+        const client = new InstanceClient({
+          config: {
+            kind: "url",
+            baseUrl: "https://instance.test",
+            wsBaseUrl: "wss://instance.test",
+          },
+          httpClient: pinned,
+        });
+        try {
+          client.start();
+          await waitFor(
+            "tls-trust parked delay with unreadable CA",
+            () =>
+              reconnectDelays.some((d) => d >= PARKED_BACKOFF_MIN_MS)
+                ? true
+                : undefined,
+          );
+        } finally {
+          client.stop();
+        }
+      });
+    } finally {
+      pinned.close();
+      globalThis.setTimeout = originalSetTimeout;
+      restoreFetch?.();
+      restoreWebSocket();
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+      setOptionalEnv("TURBOPANEL_INSTANCE_CA", originalInstanceCa);
+    }
+  },
+});
+
+it({
   name:
     "refreshPlatformCaClient logs fingerprint mismatch and reuses a cache hit",
   permissions: {

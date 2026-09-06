@@ -3,12 +3,34 @@ import { runBootstrapOrchestration } from "../src/orchestration/bootstrap-once.t
 import { InstallerPresentedFailure } from "../src/orchestration/install-presenter-context.ts";
 import { sanitizeForLog } from "../src/logger.ts";
 
-try {
-  await runBootstrapOrchestration();
-} catch (err) {
-  if (err instanceof InstallerPresentedFailure) {
-    Deno.exit(1);
+export type BootstrapOrchestrationCliIo = {
+  run?: () => Promise<void>;
+  exit?: (code: number) => void;
+  error?: (message: string) => void;
+};
+
+/** CLI wrapper around {@link runBootstrapOrchestration}. */
+export async function runBootstrapOrchestrationCli(
+  io: BootstrapOrchestrationCliIo = {},
+): Promise<void> {
+  const exitFn = io.exit ?? ((code: number) => {
+    Deno.exit(code);
+  });
+  const error = io.error ?? ((message: string) => {
+    console.error(message);
+  });
+  try {
+    await (io.run ?? runBootstrapOrchestration)();
+  } catch (err) {
+    if (err instanceof InstallerPresentedFailure) {
+      exitFn(1);
+      return;
+    }
+    error(`[bootstrap] ${sanitizeForLog(err)}`);
+    exitFn(1);
   }
-  console.error(`[bootstrap] ${sanitizeForLog(err)}`);
-  Deno.exit(1);
+}
+
+if (import.meta.main) {
+  await runBootstrapOrchestrationCli();
 }

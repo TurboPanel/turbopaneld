@@ -130,6 +130,30 @@ it("resolveHostingPath walks up to the nearest existing ancestor when the layout
   }
 });
 
+it("resolveHostingPath uses Deno.stat when no isDirectory override is supplied", async () => {
+  const tempDir = await Deno.makeTempDir();
+  const missingChild = join(tempDir, "not-provisioned-yet");
+  try {
+    await writeHardwareProfile({ hostingPath: missingChild }, tempDir);
+    assertEquals(await resolveHostingPath({}, tempDir), tempDir);
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+it("resolveHostingPath walks past a non-directory ancestor when using the default existence probe", async () => {
+  const tempDir = await Deno.makeTempDir();
+  const filePath = join(tempDir, "not-a-dir");
+  const nested = join(filePath, "child");
+  try {
+    await Deno.writeTextFile(filePath, "file");
+    await writeHardwareProfile({ hostingPath: nested }, tempDir);
+    assertEquals(await resolveHostingPath({}, tempDir), tempDir);
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
 it("resolveHostingPath bounds the walk-up at the filesystem root", async () => {
   const tempDir = await Deno.makeTempDir();
   try {

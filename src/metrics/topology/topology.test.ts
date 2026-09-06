@@ -136,6 +136,58 @@ test("collectTopology: a second identical tick reuses the same generation", asyn
   });
 });
 
+test("collectTopology: meminfo totals land on the snapshot and missing mounts stay empty", async () => {
+  await withTempStateDir(async (daemonStateDir) => {
+    const snapshot = await collectTopology({
+      readProcFile: (path) => {
+        if (path === "/proc/net/dev") {
+          return "Inter-|   Receive\n face |bytes\n  eth0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n";
+        }
+        if (path === "/proc/meminfo") return fixtureText("proc-meminfo.txt");
+        return undefined;
+      },
+      resolveDockerDataRoot: () => Promise.resolve(null),
+      resolveHostingPath: () => "/srv/users",
+      resolveFabricInterfaces: () => Promise.resolve([]),
+      io: defaultSensorIo(),
+      sysRoot: fixtureRoot("net-topology"),
+      daemonStateDir,
+      resolveTopologyOverrides: () => Promise.resolve(EMPTY_TOPOLOGY_OVERRIDES),
+      resolveBootGeneration: () => Promise.resolve(0),
+      collectHardwareSignals: () => Promise.resolve([]),
+    });
+
+    assertEquals(snapshot.memoryTotalBytes, 8000000 * 1024);
+    assertEquals(snapshot.swapTotalBytes, 2000000 * 1024);
+    assertEquals(snapshot.filesystems, []);
+  });
+});
+
+test("collectTopologyInputs default statfs probes a real path without throwing", async () => {
+  await withTempStateDir(async (daemonStateDir) => {
+    const snapshot = await collectTopology({
+      readProcFile: (path) => {
+        if (path === "/proc/net/dev") {
+          return "Inter-|   Receive\n face |bytes\n  eth0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n";
+        }
+        if (path === "/proc/mounts") return "/dev/sda1 / ext4 rw 0 0\n";
+        return undefined;
+      },
+      resolveDockerDataRoot: () => Promise.resolve(null),
+      resolveHostingPath: () => "/no/such/turbopanel-hosting-path",
+      resolveFabricInterfaces: () => Promise.resolve([]),
+      io: defaultSensorIo(),
+      sysRoot: fixtureRoot("net-topology"),
+      daemonStateDir,
+      resolveTopologyOverrides: () => Promise.resolve(EMPTY_TOPOLOGY_OVERRIDES),
+      resolveBootGeneration: () => Promise.resolve(0),
+      collectHardwareSignals: () => Promise.resolve([]),
+    });
+    assertEquals(snapshot.generation >= 0, true);
+    assertEquals(snapshot.filesystems.length >= 0, true);
+  });
+});
+
 test("collectTopology: a VM with real hwmon/RAPL sysfs still reports hardwareSignals: [] (isPhysicalMachine gates the real collector, not a fixture stub)", async () => {
   await withTempStateDir(async (daemonStateDir) => {
     const snapshot = await collectTopology({

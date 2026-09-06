@@ -156,6 +156,95 @@ test("loadDaemonKeyFile returns null for missing file", async () => {
   }
 });
 
+test("loadDaemonKeyFile rejects non-objects and missing fields", async () => {
+  const tempDir = await Deno.makeTempDir();
+  try {
+    const cases: unknown[] = [
+      [],
+      "not-json-object",
+      {
+        algorithm: "RSA",
+        keyId: "k",
+        createdAt: "t",
+        publicJwk: {},
+        privateJwk: {},
+      },
+      {
+        algorithm: "Ed25519",
+        keyId: 1,
+        createdAt: "t",
+        publicJwk: {},
+        privateJwk: {},
+      },
+      {
+        algorithm: "Ed25519",
+        keyId: "k",
+        createdAt: 1,
+        publicJwk: {},
+        privateJwk: {},
+      },
+      {
+        algorithm: "Ed25519",
+        keyId: "k",
+        createdAt: "t",
+        publicJwk: null,
+        privateJwk: {},
+      },
+      {
+        algorithm: "Ed25519",
+        keyId: "k",
+        createdAt: "t",
+        publicJwk: {},
+        privateJwk: [],
+      },
+    ];
+    for (const [index, value] of cases.entries()) {
+      const path = `${tempDir}/key-${index}.json`;
+      await Deno.writeTextFile(path, JSON.stringify(value));
+      const loaded = await loadDaemonKeyFile(path);
+      if (loaded !== null) {
+        throw new TypeError(`case ${index} should be rejected`);
+      }
+    }
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+test("generateDaemonKeypair rejects a non-keypair CryptoKey", async () => {
+  const original = crypto.subtle.generateKey.bind(crypto.subtle);
+  crypto.subtle.generateKey = (() =>
+    Promise.resolve({
+      type: "secret",
+    })) as unknown as typeof crypto.subtle.generateKey;
+  try {
+    let failed = false;
+    try {
+      await generateDaemonKeypair();
+    } catch (err) {
+      failed = err instanceof TypeError &&
+        err.message === "Expected an Ed25519 CryptoKeyPair";
+    }
+    if (!failed) {
+      throw new TypeError("expected CryptoKeyPair TypeError");
+    }
+  } finally {
+    crypto.subtle.generateKey = original;
+  }
+});
+
+test("verifyChallenge returns false for an unparseable signature", async () => {
+  const keypair = await generateDaemonKeypair();
+  const valid = await verifyChallenge(
+    keypair.publicJwk,
+    "payload",
+    "not-valid-base64url!!!",
+  );
+  if (valid) {
+    throw new TypeError("garbage signature should fail verification");
+  }
+});
+
 test("loadDaemonKeyFile returns null for structurally invalid JSON", async () => {
   const tempDir = await Deno.makeTempDir();
   const keyFilePath = `${tempDir}/server-key.json`;

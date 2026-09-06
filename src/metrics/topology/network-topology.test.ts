@@ -258,6 +258,84 @@ test("collectNetworkTopology: a container's renamed veth peer (no bus device, no
   assertEquals(devices.filter((d) => d.defaultRoute === true).length, 1);
 });
 
+test("collectNetworkTopology: missing /proc/net/dev yields no devices", async () => {
+  const devices = await collectNetworkTopology({
+    readProcFile: () => undefined,
+    resolveFabricInterfaces: () => Promise.resolve(["tp0"]),
+    io: defaultSensorIo(),
+    sysRoot: fixtureRoot("net-topology"),
+  });
+  assertEquals(devices, []);
+});
+
+test("collectNetworkTopology: a throwing fabric resolver degrades to no fabric names", async () => {
+  const devices = await collectNetworkTopology({
+    readProcFile: (path) =>
+      path === "/proc/net/dev" ? netDevFor(["eth0", "tp0"]) : undefined,
+    resolveFabricInterfaces: () => Promise.reject(new Error("wg dump failed")),
+    io: defaultSensorIo(),
+    sysRoot: fixtureRoot("net-topology"),
+  });
+  const tp0 = devices.find((d) => d.name === "tp0");
+  if (!tp0) throw new TypeError("expected tp0 to still be enumerated");
+  assertEquals(tp0.kind === "fabric", false);
+});
+
+test("collectNetworkTopology: invalid or missing speed/mtu are omitted rather than coerced", async () => {
+  const devices = await collectNetworkTopology({
+    readProcFile: (path) =>
+      path === "/proc/net/dev" ? netDevFor(["eth0"]) : undefined,
+    resolveFabricInterfaces: () => Promise.resolve([]),
+    io: {
+      listDir: defaultSensorIo().listDir,
+      readFile: (path) => {
+        if (path.endsWith("/speed")) return " -1\n";
+        if (path.endsWith("/mtu")) return "not-a-number\n";
+        return defaultSensorIo().readFile(path);
+      },
+    },
+    sysRoot: fixtureRoot("net-topology"),
+  });
+  assertEquals(devices.length, 1);
+  assertEquals(devices[0].speedMbps, undefined);
+  assertEquals(devices[0].mtu, undefined);
+});
+
+test("collectNetworkTopology: a throwing default-route read leaves defaultRoute unset", async () => {
+  const devices = await collectNetworkTopology({
+    readProcFile: (path) => {
+      if (path === "/proc/net/dev") return netDevFor(["eth0"]);
+      throw new Error("route tables unreadable");
+    },
+    resolveFabricInterfaces: () => Promise.resolve([]),
+    io: defaultSensorIo(),
+    sysRoot: fixtureRoot("net-topology"),
+  });
+  assertEquals(devices[0]?.defaultRoute, undefined);
+});
+
+test("collectNetworkTopology: defaults sysRoot to /sys when omitted", async () => {
+  const readPaths: string[] = [];
+  const devices = await collectNetworkTopology({
+    readProcFile: (path) =>
+      path === "/proc/net/dev" ? netDevFor(["lo"]) : undefined,
+    resolveFabricInterfaces: () => Promise.resolve([]),
+    io: {
+      listDir: () => [],
+      readFile: (path) => {
+        readPaths.push(path);
+        return undefined;
+      },
+    },
+  });
+  assertEquals(devices.length, 1);
+  assertEquals(devices[0].kind, "loopback");
+  assertEquals(
+    readPaths.some((path) => path.startsWith("/sys/class/net/lo/")),
+    true,
+  );
+});
+
 test("collectNetworkTopology: an uplink-named device with no sysfs entry at all is virtual, never an uplink", async () => {
   const devices = await collectNetworkTopology({
     readProcFile: (path: string) => {

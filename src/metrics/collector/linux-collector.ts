@@ -79,6 +79,7 @@ import {
   parseStatPerCoreLines,
   parseStatProcs,
 } from "./parse-stat.ts";
+import { countProcessesInProc } from "./processes.ts";
 import { parseSoftnetStat, softnetDropsPerSecond } from "./parse-softnet.ts";
 import {
   parseNetstatTcpOrigDataSent,
@@ -251,6 +252,7 @@ function emptySample(
         maxCoreBusyPercent: null,
         procsRunning: null,
         procsBlocked: null,
+        processCount: null,
       },
       kernel: { fileHandlesUsedPercent: null, conntrackUsedPercent: null },
       memory: {
@@ -567,6 +569,7 @@ function optionalSampleFields(
 
 function buildHostMetrics(parts: {
   cpu: CpuTick;
+  processCount: number | null;
   psi: PsiPercents;
   kernel: {
     fileHandlesPercent: number | null;
@@ -592,6 +595,7 @@ function buildHostMetrics(parts: {
       maxCoreBusyPercent: parts.cpu.maxCoreBusyPercent,
       procsRunning: parts.cpu.procs.running,
       procsBlocked: parts.cpu.procs.blocked,
+      processCount: parts.processCount,
     },
     kernel: {
       fileHandlesUsedPercent: parts.kernel.fileHandlesPercent,
@@ -720,6 +724,7 @@ export class LinuxMetricsCollector implements MetricsCollector {
     };
 
     const cpu = parseCpuTick(raw.statText, previous, bootChanged, seconds);
+    const processCount = await countProcessesInProc();
     const psi = readPsiPercents(raw, rates);
     const kernel = readKernelLimits(raw);
     const memory = readMemoryTick(raw, rates, this.#pageSizeBytes);
@@ -824,6 +829,7 @@ export class LinuxMetricsCollector implements MetricsCollector {
       },
       host: buildHostMetrics({
         cpu,
+        processCount,
         psi,
         kernel,
         memory,

@@ -16,7 +16,11 @@ import {
   writeSystemComponentDescriptor,
 } from "../../deploy/system-component.ts";
 import { resolveLayout } from "../../paths/layout.ts";
-import { proxysqlComposePath, proxysqlConfigDir } from "../../managed/paths.ts";
+import {
+  proxysqlComposePath,
+  proxysqlConfigDir,
+  proxysqlConfigPath,
+} from "../../managed/paths.ts";
 import { readPublishedBindAddressesFromCompose } from "../../managed/proxysql.ts";
 import {
   type TempLayoutFixture,
@@ -1312,6 +1316,94 @@ test({
             args[2] === "turbopanel-managed"
           ),
           true,
+        );
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleManagedIngressReconcile writes listenerPorts and control-plane monitor credentials",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedFixture(fixture);
+      const layout = resolveLayout(fixture.env);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        const payload = basePayload();
+        payload.listenerPorts = { postgres: 6432, mysqlFamily: 6033 };
+        payload.monitor = {
+          username: "tp_monitor_cp",
+          password: "tpdaemon.v1.mon-pass",
+        };
+        const result = await handleManagedIngressReconcile(
+          payload,
+          new Date().toISOString(),
+          {
+            runDocker: fakeRun(),
+            decryptSecrets: decryptSecretsEcho,
+            ensureDocker: () => Promise.resolve(),
+          },
+        );
+        assertEquals(result.restarted, true);
+        const monitorCnf = await Deno.readTextFile(
+          `${proxysqlConfigDir(layout)}/monitor.cnf`,
+        );
+        assertStringIncludes(monitorCnf, "user=tp_monitor_cp");
+        assertStringIncludes(monitorCnf, "password=v1.mon-pass");
+        const cnf = await Deno.readTextFile(proxysqlConfigPath(layout));
+        assertStringIncludes(cnf, "6432");
+        assertStringIncludes(cnf, "6033");
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleManagedIngressReconcile rejects an empty decrypted monitor password",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedFixture(fixture);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        const payload = basePayload();
+        payload.monitor = {
+          username: "tp_monitor_cp",
+          password: "tpdaemon.v1.mon-pass",
+        };
+        await assertRejects(
+          () =>
+            handleManagedIngressReconcile(
+              payload,
+              new Date().toISOString(),
+              {
+                runDocker: fakeRun(),
+                decryptSecrets: (ciphertexts) => {
+                  if (
+                    ciphertexts.length === 1 &&
+                    ciphertexts[0] === "tpdaemon.v1.mon-pass"
+                  ) {
+                    return Promise.resolve([""]);
+                  }
+                  return decryptSecretsEcho(ciphertexts);
+                },
+                ensureDocker: () => Promise.resolve(),
+              },
+            ),
+          Error,
+          "failed to decrypt monitor credential",
         );
       } finally {
         Deno.env.delete("TURBOPANEL_STATE_DIR");

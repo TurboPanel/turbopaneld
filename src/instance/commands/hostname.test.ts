@@ -113,6 +113,45 @@ test({
 });
 
 test({
+  name:
+    "handleHostname uses the real ansible availability probe when no override is set",
+  permissions: { env: true, read: true, run: true, sys: ["hostname"] },
+  fn: async () => {
+    const {
+      handleHostname,
+      setAnsibleAvailabilityCheckForTests,
+      setRunSetHostnameForTests,
+    } = await import("./hostname.ts");
+
+    let runnerCalled = false;
+    setAnsibleAvailabilityCheckForTests(null);
+    setRunSetHostnameForTests(() => {
+      runnerCalled = true;
+      return Promise.resolve({ summary: "probed" });
+    });
+    try {
+      const nowIso = new Date().toISOString();
+      try {
+        const result = await handleHostname({ hostname: "web-01" }, nowIso);
+        assertEquals(typeof result.observedHostname, "string");
+        assertEquals(runnerCalled, true);
+      } catch (err) {
+        if (
+          !(err instanceof Error) ||
+          !err.message.includes("Ansible/bootstrap runtime is missing")
+        ) {
+          throw err;
+        }
+        assertEquals(runnerCalled, false);
+      }
+    } finally {
+      setAnsibleAvailabilityCheckForTests(null);
+      setRunSetHostnameForTests(null);
+    }
+  },
+});
+
+test({
   name: "handleHostname omits summary when ansible apply returns empty",
   fn: async () => {
     const {

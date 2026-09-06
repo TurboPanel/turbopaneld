@@ -52,3 +52,18 @@ test("conntrackUsedPercent returns null (not 0) when the module isn't loaded (fi
   assertEquals(conntrackUsedPercent(null, 262144), null);
   assertEquals(conntrackUsedPercent(12345, null), null);
 });
+
+test("parseFileNr/parseFirstInteger return null when no integer is present", () => {
+  assertEquals(parseFileNr("   \n"), null);
+  assertEquals(parseFileNr("not-a-number\n"), null);
+  assertEquals(parseFileMax(""), null);
+  assertEquals(parseConntrackCount("none"), null);
+});
+
+test("fileHandlesUsedPercent and conntrackUsedPercent clamp below 0 and above 100", () => {
+  assertEquals(fileHandlesUsedPercent(-10, 100), 0);
+  assertEquals(fileHandlesUsedPercent(150, 100), 100);
+  assertEquals(conntrackUsedPercent(-1, 50), 0);
+  assertEquals(conntrackUsedPercent(80, 50), 100);
+  assertEquals(conntrackUsedPercent(10, 0), null);
+});

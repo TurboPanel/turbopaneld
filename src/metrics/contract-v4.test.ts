@@ -2,6 +2,7 @@ import { assertEquals, assertThrows } from "@std/assert";
 import {
   buildMetricsSampleV4,
   clampPercent,
+  isHardwareHealthEventKindV4,
   METRIC_EVENT_KINDS_V4,
   type MetricEventV4,
   METRICS_SCHEMA_VERSION_V4,
@@ -25,6 +26,16 @@ test("METRIC_EVENT_KINDS_V4 has no duplicates", () => {
   assertEquals(
     new Set(METRIC_EVENT_KINDS_V4).size,
     METRIC_EVENT_KINDS_V4.length,
+  );
+});
+
+test("isHardwareHealthEventKindV4 splits physical-health kinds from generation/clock kinds", () => {
+  assertEquals(isHardwareHealthEventKindV4("gpu_xid"), true);
+  assertEquals(isHardwareHealthEventKindV4("edac_uncorrected"), true);
+  assertEquals(isHardwareHealthEventKindV4("clock_sync_lost"), false);
+  assertEquals(
+    isHardwareHealthEventKindV4("topology_generation_changed"),
+    false,
   );
 });
 
@@ -79,6 +90,7 @@ function fixtureInput(): MetricsSampleV4Input {
         maxCoreBusyPercent: 99,
         procsRunning: 3,
         procsBlocked: 0,
+        processCount: 42,
       },
       kernel: {
         fileHandlesUsedPercent: 12,
@@ -156,6 +168,7 @@ test("buildMetricsSampleV4 sanitizes the shared cross-repo fixture", () => {
   assertEquals(sample.type, "metrics");
   assertEquals(sample.metadata.version, 4);
   assertEquals(sample.host.cpu.pressureSomePercent, 100);
+  assertEquals(sample.host.cpu.processCount, 42);
   assertEquals(sample.host.kernel.conntrackUsedPercent, null);
   assertEquals(sample.host.memory.swapInBytesPerSecond, null);
   assertEquals(sample.host.memory.swapOutBytesPerSecond, null);
@@ -395,6 +408,67 @@ test("buildMetricsSampleV4 sanitizes and clamps cpuCoreLive entries", () => {
   assertEquals(sample.cpuCoreLive?.length, 2);
   assertEquals(sample.cpuCoreLive?.[0].busyPercent, 100);
   assertEquals(sample.cpuCoreLive?.[1].iowaitPercent, 0);
+});
+
+test("buildMetricsSampleV4 sanitizes GPU fields and clamps percents", () => {
+  const input = fixtureInput();
+  input.gpus = [{
+    gpuId: "pci:0000:01:00.0",
+    utilizationPercent: 150,
+    memoryUsedBytes: Number.NaN,
+    memoryActivityPercent: -2,
+    temperatureCelsius: 71,
+    memoryTemperatureCelsius: undefined,
+    powerWatts: 180,
+    pcieReceiveBytesPerSecond: 10,
+    pcieTransmitBytesPerSecond: Number.POSITIVE_INFINITY,
+    throttlePercent: 101,
+  }];
+  const sample = buildMetricsSampleV4(input);
+  assertEquals(sample.gpus, [{
+    gpuId: "pci:0000:01:00.0",
+    utilizationPercent: 100,
+    memoryUsedBytes: null,
+    memoryActivityPercent: 0,
+    temperatureCelsius: 71,
+    memoryTemperatureCelsius: null,
+    powerWatts: 180,
+    pcieReceiveBytesPerSecond: 10,
+    pcieTransmitBytesPerSecond: null,
+    throttlePercent: 100,
+  }]);
+});
+
+test("buildMetricsSampleV4 sanitizes numaNodes and rejects an oversized list", () => {
+  const input = fixtureInput();
+  input.numaNodes = [{
+    nodeId: "node0",
+    freeBytes: Number.NaN,
+    totalBytes: 8_000_000,
+    localAllocationsPerSecond: undefined,
+    foreignAllocationsPerSecond: 3,
+  }];
+  const sample = buildMetricsSampleV4(input);
+  assertEquals(sample.numaNodes, [{
+    nodeId: "node0",
+    freeBytes: null,
+    totalBytes: 8_000_000,
+    localAllocationsPerSecond: null,
+    foreignAllocationsPerSecond: 3,
+  }]);
+
+  input.numaNodes = Array.from({ length: 65 }, (_, i) => ({
+    nodeId: `node${i}`,
+    freeBytes: 0,
+    totalBytes: 0,
+    localAllocationsPerSecond: 0,
+    foreignAllocationsPerSecond: 0,
+  }));
+  assertThrows(
+    () => buildMetricsSampleV4(input),
+    TypeError,
+    "metrics numaNodes has 65 entries, exceeding the 64-entry cap",
+  );
 });
 
 test("buildMetricsSampleV4 rejects a cpuCoreLive array beyond the defensive cap", () => {

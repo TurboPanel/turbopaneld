@@ -1,7 +1,8 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import {
   absoluteSourceFiles,
   normalizeLcov,
+  runNormalizeLcov,
   sourceFiles,
   stripPrefixes,
 } from "./normalize-lcov.ts";
@@ -79,4 +80,97 @@ test("absoluteSourceFiles reports what normalization could not fix", () => {
 
 test("absoluteSourceFiles is empty for a fully normalized report", () => {
   assertEquals(absoluteSourceFiles("SF:src/a.ts\nSF:scripts/b.ts"), []);
+});
+
+function captureCli() {
+  const exits: number[] = [];
+  const errors: string[] = [];
+  const logs: string[] = [];
+  const written: Array<{ path: string; text: string }> = [];
+  return {
+    exits,
+    errors,
+    logs,
+    written,
+    io: {
+      exit: (code: number) => {
+        exits.push(code);
+      },
+      error: (message: string) => {
+        errors.push(message);
+      },
+      log: (message: string) => {
+        logs.push(message);
+      },
+      cwd: () => "/repo",
+      realPath: (path: string) => Promise.resolve(path),
+      envGet: () => undefined,
+      writeTextFile: (path: string, text: string) => {
+        written.push({ path, text });
+        return Promise.resolve();
+      },
+    },
+  };
+}
+
+test("runNormalizeLcov exits when the report is missing", async () => {
+  const { io, exits, errors } = captureCli();
+  await runNormalizeLcov({
+    ...io,
+    args: ["missing.lcov"],
+    readTextFile: () =>
+      Promise.reject(new Deno.errors.NotFound("missing.lcov")),
+  });
+  assertEquals(exits, [1]);
+  assertEquals(errors[0]?.includes("missing missing.lcov"), true);
+});
+
+test("runNormalizeLcov rethrows unexpected read errors", async () => {
+  const { io } = captureCli();
+  await assertRejects(
+    () =>
+      runNormalizeLcov({
+        ...io,
+        readTextFile: () => Promise.reject(new TypeError("disk failed")),
+      }),
+    TypeError,
+    "disk failed",
+  );
+});
+
+test("runNormalizeLcov keeps cwd when realPath fails and rewrites the report", async () => {
+  const { io, exits, logs, written } = captureCli();
+  await runNormalizeLcov({
+    ...io,
+    args: ["coverage/lcov.info"],
+    envGet: (key) => key === "GITHUB_WORKSPACE" ? "/workspace" : undefined,
+    realPath: () => Promise.reject(new TypeError("no realpath")),
+    readTextFile: () =>
+      Promise.resolve("SF:/repo/src/a.ts\nDA:1,1\nend_of_record"),
+  });
+  assertEquals(written.length, 1);
+  assertEquals(sourceFiles(written[0]!.text), ["src/a.ts"]);
+  assertEquals(exits, []);
+  assertEquals(logs[0]?.includes("OK"), true);
+});
+
+test("runNormalizeLcov exits when SF paths stay absolute", async () => {
+  const { io, exits, errors } = captureCli();
+  await runNormalizeLcov({
+    ...io,
+    readTextFile: () =>
+      Promise.resolve("SF:/elsewhere/src/a.ts\nend_of_record"),
+  });
+  assertEquals(exits, [1]);
+  assertEquals(errors.some((line) => line.includes("still absolute")), true);
+});
+
+test("runNormalizeLcov exits when no src/ entry remains", async () => {
+  const { io, exits, errors } = captureCli();
+  await runNormalizeLcov({
+    ...io,
+    readTextFile: () => Promise.resolve("SF:scripts/a.ts\nend_of_record"),
+  });
+  assertEquals(exits, [1]);
+  assertEquals(errors.some((line) => line.includes("no SF:src/")), true);
 });

@@ -60,56 +60,91 @@ export function sourceFiles(text: string): string[] {
     .map((line) => line.slice(3));
 }
 
-if (import.meta.main) {
-  const target = Deno.args[0] ?? "coverage/lcov.info";
+export type NormalizeLcovIo = {
+  args?: string[];
+  cwd?: () => string;
+  realPath?: (path: string) => Promise<string>;
+  envGet?: (key: string) => string | undefined;
+  readTextFile?: (path: string) => Promise<string>;
+  writeTextFile?: (path: string, text: string) => Promise<void>;
+  exit?: (code: number) => void;
+  error?: (message: string) => void;
+  log?: (message: string) => void;
+};
+
+/** CLI entry used by `deno task test:coverage` and CI. */
+export async function runNormalizeLcov(
+  io: NormalizeLcovIo = {},
+): Promise<void> {
+  const args = io.args ?? Deno.args;
+  const exitFn = io.exit ?? ((code: number) => {
+    Deno.exit(code);
+  });
+  const error = io.error ?? ((message: string) => {
+    console.error(message);
+  });
+  const log = io.log ?? ((message: string) => {
+    console.log(message);
+  });
+  const readTextFile = io.readTextFile ?? Deno.readTextFile;
+  const writeTextFile = io.writeTextFile ?? Deno.writeTextFile;
+  const target = args[0] ?? "coverage/lcov.info";
 
   let text: string;
   try {
-    text = await Deno.readTextFile(target);
-  } catch (error) {
-    if (error instanceof Deno.errors.NotFound) {
-      console.error(`normalize-lcov: missing ${target}`);
-      Deno.exit(1);
+    text = await readTextFile(target);
+  } catch (error_) {
+    if (error_ instanceof Deno.errors.NotFound) {
+      error(`normalize-lcov: missing ${target}`);
+      exitFn(1);
+      return;
     }
-    throw error;
+    throw error_;
   }
 
   // The checkout can be reached by more than one path (CI's
   // GITHUB_WORKSPACE, the cwd, and the symlink-resolved cwd all differ in
   // some setups), so strip every root we can name.
-  const cwd = Deno.cwd();
+  const cwd = (io.cwd ?? Deno.cwd)();
   let realCwd = cwd;
   try {
-    realCwd = await Deno.realPath(cwd);
+    realCwd = await (io.realPath ?? Deno.realPath)(cwd);
   } catch {
     // Keep cwd; a resolution failure only means one fewer prefix to strip.
   }
-  const roots = [Deno.env.get("GITHUB_WORKSPACE") ?? "", cwd, realCwd];
+  const envGet = io.envGet ?? ((key: string) => Deno.env.get(key));
+  const roots = [envGet("GITHUB_WORKSPACE") ?? "", cwd, realCwd];
 
   const normalized = normalizeLcov(text, stripPrefixes(roots));
-  if (normalized !== text) await Deno.writeTextFile(target, normalized);
+  if (normalized !== text) await writeTextFile(target, normalized);
 
   const stillAbsolute = absoluteSourceFiles(normalized);
   if (stillAbsolute.length > 0) {
-    console.error(
+    error(
       `normalize-lcov: ${stillAbsolute.length} SF: path(s) in ${target} are still absolute; ` +
         "SonarCloud would drop this report.",
     );
     for (const value of stillAbsolute.slice(0, 20)) {
-      console.error(`  SF:${value}`);
+      error(`  SF:${value}`);
     }
-    Deno.exit(1);
+    exitFn(1);
+    return;
   }
 
   const files = sourceFiles(normalized);
   if (!files.some((value) => value.startsWith("src/"))) {
-    console.error(
+    error(
       `normalize-lcov: ${target} has no SF:src/ entry — the report covers nothing in src/.`,
     );
-    Deno.exit(1);
+    exitFn(1);
+    return;
   }
 
-  console.log(
+  log(
     `normalize-lcov: ${target} OK (${files.length} source files, all repo-relative)`,
   );
+}
+
+if (import.meta.main) {
+  await runNormalizeLcov();
 }

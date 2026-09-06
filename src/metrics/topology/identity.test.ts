@@ -2,10 +2,12 @@ import { assertEquals, assertNotEquals } from "@std/assert";
 import { fromFileUrl } from "@std/path";
 import { defaultSensorIo } from "../collector/sensors/discovery.ts";
 import {
+  deriveBlockDeviceId,
   deriveBlockDeviceIdentity,
   deriveFilesystemId,
   deriveNetworkDeviceId,
   deriveNetworkDeviceIdentity,
+  parseDriverName,
 } from "./identity.ts";
 
 const test = Deno.test.bind(Deno);
@@ -106,6 +108,83 @@ test("deriveNetworkDeviceIdentity: software devices never identify by MAC even w
   assertEquals(ids[0], "mac:aa:bb:cc:11:00:01");
   for (const id of ids.slice(1)) assertEquals(id.startsWith("virtual:"), true);
   assertEquals(new Set(ids).size, ids.length);
+});
+
+test("parseDriverName reads DRIVER= from uevent and ignores a blank value", () => {
+  assertEquals(
+    parseDriverName("DRIVER=igb\nPCI_SLOT_NAME=0000:00:1f.6\n"),
+    "igb",
+  );
+  assertEquals(parseDriverName("PCI_SLOT_NAME=0000:00:1f.6\n"), undefined);
+  assertEquals(parseDriverName("DRIVER=\n"), undefined);
+});
+
+test("deriveNetworkDeviceIdentity: hardware-backed devices without a MAC fall back to PCI", async () => {
+  const identity = await deriveNetworkDeviceIdentity("eth0", {
+    listDir: () => [],
+    readFile: (path) => {
+      if (path.endsWith("/address")) return "00:00:00:00:00:00\n";
+      if (path.endsWith("/device/uevent")) {
+        return "DRIVER=virtio_net\nPCI_SLOT_NAME=0000:00:03.0\n";
+      }
+      return undefined;
+    },
+  }, "/sys");
+  assertEquals(identity.deviceId, "pci:0000:00:03.0");
+  assertEquals(identity.identity, { pciPath: "0000:00:03.0" });
+});
+
+test("deriveNetworkDeviceIdentity: defaults the sysfs root to /sys", async () => {
+  const paths: string[] = [];
+  await deriveNetworkDeviceId("lo", {
+    listDir: () => [],
+    readFile: (path) => {
+      paths.push(path);
+      return undefined;
+    },
+  });
+  assertEquals(
+    paths.some((path) => path.startsWith("/sys/class/net/lo/")),
+    true,
+  );
+});
+
+test("deriveBlockDeviceIdentity: a WWN wins over model+serial", async () => {
+  const identity = await deriveBlockDeviceIdentity("sda", {
+    listDir: () => [],
+    readFile: (path) => {
+      if (path.endsWith("/device/model")) return "SSD\n";
+      if (path.endsWith("/device/serial")) return "SN1\n";
+      if (path.endsWith("/wwn_id")) return "0x5000cca\n";
+      if (path.endsWith("/dev")) return "8:0\n";
+      return undefined;
+    },
+  }, "/sys");
+  assertEquals(identity, {
+    deviceId: "wwn:0x5000cca",
+    model: "SSD",
+    serial: "SN1",
+    wwn: "0x5000cca",
+  });
+});
+
+test("deriveBlockDeviceId is the deviceId wrapper around deriveBlockDeviceIdentity", async () => {
+  const io = defaultSensorIo();
+  const root = fixtureRoot("block-graph-nvme");
+  const full = await deriveBlockDeviceIdentity("nvme0n1", io, root);
+  assertEquals(await deriveBlockDeviceId("nvme0n1", io, root), full.deviceId);
+});
+
+test("deriveBlockDeviceId defaults the sysfs root to /sys", async () => {
+  const paths: string[] = [];
+  await deriveBlockDeviceId("sda", {
+    listDir: () => [],
+    readFile: (path) => {
+      paths.push(path);
+      return undefined;
+    },
+  });
+  assertEquals(paths.some((path) => path.startsWith("/sys/block/sda/")), true);
 });
 
 test("deriveNetworkDeviceIdentity: a bare Ethernet device (container veth peer) keeps its mac: id only when the caller asks for MAC identity", async () => {

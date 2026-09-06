@@ -43,6 +43,14 @@ describe("ensureOrchestrationTree dev checkout error", () => {
     );
   });
 
+  it("throws the production share/orchestration message when forced", async () => {
+    await assertRejects(
+      () => bundleExtract.ensureOrchestrationTree({ forceMode: "production" }),
+      Error,
+      "release install must ship share/orchestration",
+    );
+  });
+
   it("rethrows non-NotFound stat errors from fileExists", async () => {
     const target = join(emptyOrch, "ansible.cfg");
     const originalStat = Deno.stat;

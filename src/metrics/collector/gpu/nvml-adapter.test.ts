@@ -1,6 +1,6 @@
 import { assertEquals } from "@std/assert";
 import { CounterBaselineTracker } from "../baseline.ts";
-import { NvmlGpuAdapter } from "./nvml-adapter.ts";
+import { NvmlGpuAdapter, openDefaultNvmlBinding } from "./nvml-adapter.ts";
 import type { NvmlBinding, NvmlDeviceHandle } from "./nvml-adapter.ts";
 import type { GpuReadContext } from "./adapter.ts";
 import type { GpuTopology } from "../../topology/types.ts";
@@ -236,6 +236,80 @@ test("NvmlGpuAdapter.readHealthSignals surfaces XID, remapped-row, and retiremen
 
 test("NvmlGpuAdapter.readHealthSignals returns every field null when NVML never activates", async () => {
   const adapter = new NvmlGpuAdapter({ openBinding: () => null });
+  assertEquals(await adapter.readHealthSignals(gpu()), {
+    eccDoubleBitAggregateTotal: null,
+    lastXidErrorCode: null,
+    remappedRows: null,
+    retiredPagesPending: null,
+  });
+});
+
+test("openDefaultNvmlBinding returns null when libnvidia-ml.so.1 cannot be opened", () => {
+  assertEquals(openDefaultNvmlBinding(), null);
+});
+
+test("NvmlGpuAdapter.read nulls utilization and PCIe fields when those binding calls return null", async () => {
+  const adapter = new NvmlGpuAdapter({
+    openBinding: () =>
+      fakeBinding({
+        getUtilizationRates: () => null,
+        getPcieThroughputBytesPerSecond: () => null,
+      }),
+  });
+  const reading = await adapter.read(gpu(), ctx());
+  assertEquals(reading?.utilizationPercent, null);
+  assertEquals(reading?.memoryActivityPercent, null);
+  assertEquals(reading?.pcieReceiveBytesPerSecond, null);
+  assertEquals(reading?.pcieTransmitBytesPerSecond, null);
+  assertEquals(reading?.temperatureCelsius, 58);
+});
+
+test("NvmlGpuAdapter.read clamps throttlePercent to 100 when violation time exceeds the interval", async () => {
+  const tracker = new CounterBaselineTracker();
+  let violationNs = 0;
+  const adapter = new NvmlGpuAdapter({
+    openBinding: () =>
+      fakeBinding({
+        getThermalViolationNanoseconds: () => violationNs,
+      }),
+  });
+  await adapter.read(gpu(), ctx({ tracker }));
+  violationNs = 90_000_000_000;
+  const second = await adapter.read(gpu(), ctx({ tracker, seconds: 30 }));
+  assertEquals(second?.throttlePercent, 100);
+});
+
+test("NvmlGpuAdapter.read stays inactive when openBinding throws", async () => {
+  const adapter = new NvmlGpuAdapter({
+    openBinding: () => {
+      throw new Error("dlopen denied");
+    },
+  });
+  assertEquals(await adapter.read(gpu(), ctx()), null);
+  assertEquals(await adapter.read(gpu(), ctx()), null);
+});
+
+test("NvmlGpuAdapter.readHealthSignals returns every field null when no device handle resolves", async () => {
+  const adapter = new NvmlGpuAdapter({
+    openBinding: () => fakeBinding({ getHandleByPciBusId: () => null }),
+  });
+  assertEquals(await adapter.readHealthSignals(gpu()), {
+    eccDoubleBitAggregateTotal: null,
+    lastXidErrorCode: null,
+    remappedRows: null,
+    retiredPagesPending: null,
+  });
+});
+
+test("NvmlGpuAdapter.readHealthSignals treats a throwing handle lookup as unresolved", async () => {
+  const adapter = new NvmlGpuAdapter({
+    openBinding: () =>
+      fakeBinding({
+        getHandleByPciBusId: () => {
+          throw new Error("ABI mismatch");
+        },
+      }),
+  });
   assertEquals(await adapter.readHealthSignals(gpu()), {
     eccDoubleBitAggregateTotal: null,
     lastXidErrorCode: null,

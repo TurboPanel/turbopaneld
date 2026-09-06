@@ -205,3 +205,121 @@ test("resolveSoleEngineContainer throws when no containers are present", () => {
     "not running",
   );
 });
+
+test("collectManagedContainers returns an empty list for blank compose ps output", async () => {
+  const rows = await collectManagedContainers(
+    "turbopanel-managed-empty",
+    undefined,
+    () => Promise.resolve(dockerOk("   \n")),
+  );
+  assertEquals(rows, []);
+});
+
+test("collectManagedContainers accepts a single compose ps object", async () => {
+  const rows = await collectManagedContainers(
+    "turbopanel-managed-one",
+    undefined,
+    () =>
+      Promise.resolve(dockerOk(JSON.stringify({
+        ID: "abc123",
+        Name: UUID_SHAPED_NAME,
+        Service: "postgres",
+        State: "running",
+      }))),
+  );
+  assertEquals(rows?.length, 1);
+  assertEquals(rows?.[0]?.containerId, "abc123");
+});
+
+test("collectManagedContainers returns empty when NDJSON contains a bad line", async () => {
+  const stdout = [
+    JSON.stringify({
+      ID: "row1",
+      Name: "name-1",
+      Service: "postgres",
+      State: "running",
+    }),
+    "",
+    "not-json",
+  ].join("\n");
+  const rows = await collectManagedContainers(
+    "turbopanel-managed-bad-ndjson",
+    undefined,
+    () => Promise.resolve(dockerOk(stdout)),
+  );
+  assertEquals(rows, []);
+});
+
+test("collectManagedContainers returns undefined when runDocker throws", async () => {
+  const rows = await collectManagedContainers(
+    "turbopanel-managed-throw",
+    (text) => `redacted:${text}`,
+    () => Promise.reject(new TypeError("socket down")),
+  );
+  assertEquals(rows, undefined);
+});
+
+test("resolveEngineContainerId throws when the project has no containers", () => {
+  assertThrows(
+    () => resolveEngineContainerId(undefined, "postgres"),
+    Error,
+    "not found",
+  );
+  assertThrows(
+    () => resolveEngineContainerId([], "postgres"),
+    Error,
+    "not found",
+  );
+});
+
+test("resolveSoleEngineContainer throws when the sole container is not running", () => {
+  assertThrows(
+    () =>
+      resolveSoleEngineContainer([
+        {
+          composeServiceName: "postgres",
+          containerId: "abc123",
+          containerName: UUID_SHAPED_NAME,
+          status: "exited",
+          role: "service",
+        },
+      ]),
+    Error,
+    "not running",
+  );
+});
+
+test("collectManagedContainersForService returns undefined when collect fails", async () => {
+  const rows = await collectManagedContainersForService(
+    "turbopanel-managed-fail",
+    "00000000-0000-4000-8000-0000000000aa",
+    undefined,
+    () => Promise.resolve(dockerFail("compose ps failed")),
+  );
+  assertEquals(rows, undefined);
+});
+
+test("collectManagedMemberHealth omits member when health collection throws", async () => {
+  const result = await collectManagedMemberHealth(
+    "turbopanel-managed-health-err",
+    {
+      rootUsername: "postgres",
+      defaultDatabase: "postgres",
+      replication: {
+        readHealth: () => Promise.reject(new TypeError("health failed")),
+      },
+    },
+    { memberId: "member-3", role: "primary" },
+    () =>
+      Promise.resolve(dockerOk(JSON.stringify([
+        {
+          ID: "abc123",
+          Name: UUID_SHAPED_NAME,
+          Service: "postgres",
+          State: "running",
+        },
+      ]))),
+  );
+  assertEquals(result.containers?.length, 1);
+  assertEquals(result.member, undefined);
+});

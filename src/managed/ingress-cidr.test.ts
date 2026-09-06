@@ -22,9 +22,20 @@ test("reservedManagedIngressAddress returns the last usable host in TEST-NET /24
 
 test("reservedManagedIngressAddress rejects /31 and invalid CIDR input", () => {
   assertEquals(reservedManagedIngressAddress("198.51.100.0/31"), null);
+  assertEquals(reservedManagedIngressAddress("198.51.100.0/32"), null);
+  assertEquals(
+    reservedManagedIngressAddress("198.51.100.0/0"),
+    "255.255.255.254",
+  );
   assertEquals(reservedManagedIngressAddress("not-a-cidr"), null);
   assertEquals(reservedManagedIngressAddress("203.0.113.1"), null);
+  assertEquals(reservedManagedIngressAddress("/24"), null);
+  assertEquals(reservedManagedIngressAddress("203.0.113.0/"), null);
+  assertEquals(reservedManagedIngressAddress("203.0.113.0/-1"), null);
   assertEquals(reservedManagedIngressAddress("999.0.113.0/24"), null);
+  assertEquals(reservedManagedIngressAddress("203.0.113.256/24"), null);
+  assertEquals(reservedManagedIngressAddress("203.0.113/24"), null);
+  assertEquals(reservedManagedIngressAddress("203.0.113.1.2/24"), null);
 });
 
 test("reservedManagedIngressAddress normalizes network base for non-aligned input", () => {

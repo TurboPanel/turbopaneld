@@ -26,3 +26,41 @@ test("collectNumaTopology: no NUMA nodes on the host returns an empty array", as
   });
   assertEquals(nodes, []);
 });
+
+test("collectNumaTopology: skips non-node dirs, empty/invalid cpulist parts, and missing cpulist", async () => {
+  const root = "/sys";
+  const nodes = await collectNumaTopology({
+    sysRoot: root,
+    io: {
+      listDir: (path) =>
+        path === `${root}/devices/system/node`
+          ? ["node1", "online", "node0", "has_normal_memory"]
+          : [],
+      readFile: (path) => {
+        if (path === `${root}/devices/system/node/node0/cpulist`) {
+          return "0-1,,foo,4-3,8\n";
+        }
+        return undefined;
+      },
+    },
+  });
+  assertEquals(nodes, [
+    { nodeId: "node0", cpuIds: [0, 1, 8] },
+    { nodeId: "node1", cpuIds: [] },
+  ]);
+});
+
+test("collectNumaTopology: defaults sysRoot to /sys when omitted", async () => {
+  const listed: string[] = [];
+  const nodes = await collectNumaTopology({
+    io: {
+      listDir: (path) => {
+        listed.push(path);
+        return [];
+      },
+      readFile: () => undefined,
+    },
+  });
+  assertEquals(nodes, []);
+  assertEquals(listed, ["/sys/devices/system/node"]);
+});

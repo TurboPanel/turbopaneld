@@ -382,6 +382,40 @@ test("standby applyManagedEngineState skips configureStandby without a replicati
   assertEquals(calls, ["waitReady", "readVersion"]);
 });
 
+test("primary applyManagedEngineState applies payload monitorUsers without host prep", async () => {
+  const calls: string[] = [];
+  const payload = {
+    engine: "postgres",
+  } as unknown as ManagedApplyPayload;
+  const engine = {
+    rootUsername: "postgres",
+    waitReady: () => Promise.resolve(),
+    applyCredentials: () => Promise.resolve(["postgres"]),
+    ensureProxySqlMonitor: (
+      _ctx: unknown,
+      creds: { user: string },
+    ) => {
+      calls.push(`ensure:${creds.user}`);
+      return Promise.resolve();
+    },
+    readVersion: () => Promise.resolve("18.0"),
+  };
+
+  await applyManagedEngineState(
+    {} as never,
+    engine as never,
+    payload,
+    [],
+    {
+      monitorUsers: [
+        { user: "tp_monitor_aaa", password: "mon-a" },
+        { user: "tp_monitor_bbb", password: "mon-b" },
+      ],
+    },
+  );
+  assertEquals(calls, ["ensure:tp_monitor_aaa", "ensure:tp_monitor_bbb"]);
+});
+
 test("standby applyManagedEngineState runs configureStandby when replication credential exists", async () => {
   const calls: string[] = [];
   const credentials: ManagedApplyCredential[] = [
@@ -440,7 +474,7 @@ test("standby applyManagedEngineState runs configureStandby when replication cre
   assertEquals(calls, ["waitReady", "configureStandby", "readVersion"]);
 });
 
-Deno.test("isRetryableEngineExecFailure matches restart-window exec errors only", async () => {
+test("isRetryableEngineExecFailure matches restart-window exec errors only", async () => {
   const { isRetryableEngineExecFailure } = await import("./apply.ts");
   const oci =
     "OCI runtime exec failed: exec failed: unable to start container process: " +

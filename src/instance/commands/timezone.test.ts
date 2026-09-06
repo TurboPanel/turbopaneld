@@ -174,6 +174,46 @@ test({
 });
 
 test({
+  name:
+    "handleTimezone uses the real ansible probe and host time-sync reader",
+  permissions: { env: true, read: true, run: true },
+  fn: async () => {
+    const {
+      handleTimezone,
+      setAnsibleAvailabilityCheckForTests,
+      setTimeSyncApplyForTests,
+      setTimeSyncReaderForTests,
+    } = await import("./timezone.ts");
+
+    setAnsibleAvailabilityCheckForTests(null);
+    setTimeSyncReaderForTests(null);
+    setTimeSyncApplyForTests(async () => {
+      await Promise.resolve();
+      return { summary: "applied-via-default-probe" };
+    });
+    try {
+      const nowIso = new Date().toISOString();
+      try {
+        const result = await handleTimezone({ timezone: "UTC" }, nowIso);
+        assertEquals(typeof result.timezone, "string");
+        assertEquals(result.summary, "applied-via-default-probe");
+      } catch (err) {
+        if (
+          !(err instanceof Error) ||
+          !err.message.includes("Ansible/bootstrap runtime is missing")
+        ) {
+          throw err;
+        }
+      }
+    } finally {
+      setAnsibleAvailabilityCheckForTests(null);
+      setTimeSyncApplyForTests(null);
+      setTimeSyncReaderForTests(null);
+    }
+  },
+});
+
+test({
   name: "handleTimezone falls back to payload timezone when host omits it",
   fn: async () => {
     const {

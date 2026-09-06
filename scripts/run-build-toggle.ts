@@ -40,14 +40,32 @@ export function parseBuildToggleArgs(
   return { uiMode, instanceRunMode, forceBuild };
 }
 
-if (import.meta.main) {
+export type BuildToggleCliIo = {
+  args?: string[];
+  run?: (parsed: BuildToggleCliArgs) => Promise<void>;
+  exit?: (code: number) => void;
+  error?: (message: string) => void;
+};
+
+/** CLI wrapper around {@link runBuildToggle}. */
+export async function runBuildToggleCli(
+  io: BuildToggleCliIo = {},
+): Promise<void> {
+  const exitFn = io.exit ?? ((code: number) => {
+    Deno.exit(code);
+  });
+  const error = io.error ?? ((message: string) => {
+    console.error(message);
+  });
   try {
-    const parsed = parseBuildToggleArgs();
-    await runBuildToggle(parsed);
-  } catch (error) {
-    console.error(
-      error instanceof Error ? error.message : String(error),
-    );
-    Deno.exit(1);
+    const parsed = parseBuildToggleArgs(io.args ?? Deno.args);
+    await (io.run ?? runBuildToggle)(parsed);
+  } catch (error_) {
+    error(error_ instanceof Error ? error_.message : String(error_));
+    exitFn(1);
   }
+}
+
+if (import.meta.main) {
+  await runBuildToggleCli();
 }

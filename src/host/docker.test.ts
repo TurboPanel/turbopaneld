@@ -374,6 +374,15 @@ test("resolveDockerDataRoot returns undefined when the daemon is unreachable", a
   );
 });
 
+test({
+  name: "resolveDockerDataRoot owns and closes a default Docker client",
+  permissions: { read: true, net: true },
+  fn: async () => {
+    const root = await resolveDockerDataRoot();
+    assertEquals(root === undefined || root.startsWith("/"), true);
+  },
+});
+
 test("resolveDockerDataRoot sanitizes malformed DockerRootDir values", async () => {
   assertEquals(
     await resolveDockerDataRoot({

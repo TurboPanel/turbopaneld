@@ -434,6 +434,23 @@ test("InstallPresenter fail with empty detail tail skips stderr tail", () => {
   assertEquals(err.trim().split("\n").length, 1);
 });
 
+test("InstallPresenter completeStep infers the outcome when summary is omitted", () => {
+  const stdout = captureWriteStream(Deno.stdout);
+  const stderr = captureWriteStream(Deno.stderr);
+  const ok = new InstallPresenter(false);
+  ok.beginStep("Cache");
+  ok.completeStep(true);
+
+  const failed = new InstallPresenter(false);
+  failed.beginStep("Queue");
+  failed.completeStep(false);
+
+  stdout.restore();
+  stderr.restore();
+  assertMatch(stdout.text(), /Cache/);
+  assertMatch(stderr.text(), /Queue failed/);
+});
+
 test("InstallPresenter TTY success uses colored checkmark", () => {
   const stdout = captureWriteStream(Deno.stdout);
   const presenter = new InstallPresenter(true);

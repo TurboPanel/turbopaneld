@@ -503,6 +503,72 @@ test({
 });
 
 test({
+  name:
+    "handleManagedHaReconcile requires decryptSecrets when org TLS material is present",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedOrchestratorHostPrep(resolveLayout(fixture.env));
+      applyLayoutEnv(fixture);
+      try {
+        await assertRejects(
+          () =>
+            handleManagedHaReconcile(
+              presentPayload({
+                orgTlsMaterial: {
+                  certificatePem:
+                    "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+                  privateKeyEnvelope: "tpdaemon.v1.server.key.payload",
+                  caCertPem:
+                    "-----BEGIN CERTIFICATE-----\nMIICaaaa\n-----END CERTIFICATE-----\n",
+                },
+              }),
+              new Date().toISOString(),
+              {
+                runDocker: fakeRunSuccess(),
+                ensureDocker: () => Promise.resolve(),
+              },
+            ),
+          Error,
+          "managed.ha.reconcile requires decryptSecrets",
+        );
+      } finally {
+        clearLayoutEnv();
+      }
+    });
+  },
+});
+
+test({
+  name: "handleManagedHaReconcile rejects an empty decrypted replication password",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedOrchestratorHostPrep(resolveLayout(fixture.env));
+      applyLayoutEnv(fixture);
+      try {
+        await assertRejects(
+          () =>
+            handleManagedHaReconcile(
+              presentPayload(),
+              new Date().toISOString(),
+              {
+                runDocker: fakeRunWithRunningOrchestrator(),
+                ensureDocker: () => Promise.resolve(),
+                decryptSecrets: () => Promise.resolve([""]),
+              },
+            ),
+          Error,
+          "failed to decrypt managed HA replication password",
+        );
+      } finally {
+        clearLayoutEnv();
+      }
+    });
+  },
+});
+
+test({
   name: "handleManagedHaReconcile requires decryptSecrets for present desired",
   permissions: { env: true, read: true, write: true, run: false },
   fn: async () => {

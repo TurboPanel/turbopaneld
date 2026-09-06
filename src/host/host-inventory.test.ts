@@ -249,6 +249,33 @@ describe("host-inventory", () => {
     assertEquals(parseCpulist(""), []);
   });
 
+  it("parseCpulist drops inverted ranges, bad strides, and non-integers", () => {
+    assertEquals(parseCpulist("5-1"), []);
+    assertEquals(parseCpulist("0-3:0"), []);
+    assertEquals(parseCpulist("0-3:-2"), []);
+    assertEquals(parseCpulist("foo"), []);
+    assertEquals(parseCpulist("1.5-3"), []);
+    assertEquals(parseCpulist("2--1"), []);
+  });
+
+  it("countPhysicalCpuCores still counts blocks with invalid processor indexes", () => {
+    const text = [
+      "processor\t: -1",
+      "physical id\t: 0",
+      "core id\t\t: 0",
+      "",
+      "processor\t: abc",
+      "physical id\t: 0",
+      "core id\t\t: 1",
+      "",
+      "processor\t: 0",
+      "physical id\t: 0",
+      "core id\t\t: 2",
+      "",
+    ].join("\n");
+    assertEquals(countPhysicalCpuCores(text), 3);
+  });
+
   it("parseSizeToBytes accepts sysfs and cpuinfo units", () => {
     assertEquals(parseSizeToBytes("32K"), 32 * 1024);
     assertEquals(parseSizeToBytes("32KiB"), 32 * 1024);

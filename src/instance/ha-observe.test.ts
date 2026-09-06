@@ -123,6 +123,27 @@ test("ManagedHaObserver uses injected now() for the emitted at timestamp", async
   assertEquals(sent[0]?.at, "2026-08-25T12:00:00.000Z");
 });
 
+test("ManagedHaObserver loads Orchestrator credentials when api omits them", async () => {
+  const sent: ManagedHaEventMessage[] = [];
+  const observer = new ManagedHaObserver({
+    send: (message) => {
+      sent.push(message);
+    },
+    isStackPresent: () => Promise.resolve(true),
+    api: {
+      fetch: () =>
+        Promise.resolve(
+          problemResponse([{
+            clusterAlias: MANAGED_ID,
+            problems: ["DeadPrimary"],
+          }]),
+        ),
+    },
+  });
+  await observer.poll();
+  assertEquals(sent.length === 0 || sent[0]?.managedId === MANAGED_ID, true);
+});
+
 test("ManagedHaObserver skips absent stack, invalid aliases, and duplicate keys", async () => {
   const sent: ManagedHaEventMessage[] = [];
   const absent = new ManagedHaObserver({

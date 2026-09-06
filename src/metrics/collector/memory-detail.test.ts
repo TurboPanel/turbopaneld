@@ -64,6 +64,35 @@ test("buildMemoryDetailSample returns null only when both /proc/meminfo and /pro
   assertEquals(sample, null);
 });
 
+test("buildMemoryDetailSample keeps every meminfo gauge null when only vmstat is readable", () => {
+  const tracker = new CounterBaselineTracker();
+  const sample = buildMemoryDetailSample({
+    memText: undefined,
+    vmstatText: fixture("proc-vmstat-reclaim-1.txt"),
+    tracker,
+    bootGeneration: 0,
+    seconds: 60,
+  });
+  if (!sample) throw new TypeError("expected a sample");
+  assertEquals(sample.memoryFreeBytes, null);
+  assertEquals(sample.cachedBytes, null);
+  assertEquals(sample.anonPagesBytes, null);
+  assertEquals(sample.slabReclaimableBytes, null);
+  assertEquals(sample.slabUnreclaimableBytes, null);
+  assertEquals(sample.dirtyBytes, null);
+  assertEquals(sample.writebackBytes, null);
+  assertEquals(sample.shmemBytes, null);
+  assertEquals(sample.pageTablesBytes, null);
+  assertEquals(sample.kernelStackBytes, null);
+  assertEquals(sample.committedAsBytes, null);
+  assertEquals(sample.commitLimitBytes, null);
+  assertEquals(sample.activeAnonBytes, null);
+  assertEquals(sample.inactiveAnonBytes, null);
+  assertEquals(sample.activeFileBytes, null);
+  assertEquals(sample.inactiveFileBytes, null);
+  assertEquals(sample.pageScanDirectPerSecond, null);
+});
+
 test("buildMemoryDetailSample still resolves gauge fields when only vmstat is unreadable", () => {
   const tracker = new CounterBaselineTracker();
   const sample = buildMemoryDetailSample({

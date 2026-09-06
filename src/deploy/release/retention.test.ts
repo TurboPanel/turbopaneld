@@ -3,7 +3,7 @@
  * Whole-tree reclaim lives in `retention-reclaim.test.ts`.
  */
 
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import type { RunFn } from "../ensure-principal.ts";
 import { resolveReleasePaths } from "./release-layout.ts";
@@ -112,6 +112,161 @@ test("pruneReleases is best-effort when a release refuses to unlink", async () =
       lines.some((line) => line.includes("could not remove")),
       true,
     );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("pruneReleases skips non-directory entries and surviving files", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-prune-skip-" });
+  try {
+    const paths = resolveReleasePaths(
+      { principalHomeRoot: root, daemonStateDir: join(root, "state") },
+      { username: "appuser", serviceId: "svc-1", releaseId: "rel-keep" },
+    );
+    await Deno.mkdir(join(paths.releasesDir, "rel-keep"), { recursive: true });
+    await Deno.writeTextFile(join(paths.releasesDir, "notes.txt"), "skip");
+    await Deno.symlink(join("releases", "rel-keep"), paths.currentLink);
+    const removed = await pruneReleases({
+      paths,
+      keep: 1,
+      runFn: () => Promise.resolve({ success: true, stdout: "", stderr: "" }),
+    });
+    assertEquals(removed, []);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("pruneReleases lists via sudo when the releases dir is unreadable", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-prune-priv-" });
+  try {
+    const paths = resolveReleasePaths(
+      { principalHomeRoot: root, daemonStateDir: join(root, "state") },
+      { username: "appuser", serviceId: "svc-1", releaseId: "rel-keep" },
+    );
+    await Deno.mkdir(paths.releasesDir, { recursive: true });
+    const originalReadDir = Deno.readDir;
+    Deno.readDir = (() => {
+      throw new Deno.errors.PermissionDenied("denied");
+    }) as typeof Deno.readDir;
+    try {
+      const removed = await pruneReleases({
+        paths,
+        keep: 1,
+        runFn: (_command, args) => {
+          if (args.includes("ls")) {
+            return Promise.resolve({
+              success: true,
+              stdout: "rel-keep\nrel-old\n",
+              stderr: "",
+            });
+          }
+          return Promise.resolve({ success: true, stdout: "", stderr: "" });
+        },
+      });
+      assertEquals(removed.includes("rel-old"), true);
+      assertEquals(removed.includes("rel-keep"), false);
+    } finally {
+      Deno.readDir = originalReadDir;
+    }
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("pruneReleases treats a privileged missing list as empty", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-prune-priv-miss-" });
+  try {
+    const paths = resolveReleasePaths(
+      { principalHomeRoot: root, daemonStateDir: join(root, "state") },
+      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+    );
+    await Deno.mkdir(paths.releasesDir, { recursive: true });
+    const originalReadDir = Deno.readDir;
+    Deno.readDir = (() => {
+      throw new Deno.errors.PermissionDenied("denied");
+    }) as typeof Deno.readDir;
+    try {
+      const removed = await pruneReleases({
+        paths,
+        runFn: () =>
+          Promise.resolve({
+            success: false,
+            stdout: "",
+            stderr: "No such file or directory",
+          }),
+      });
+      assertEquals(removed, []);
+    } finally {
+      Deno.readDir = originalReadDir;
+    }
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("pruneReleases throws when privileged listing fails for another reason", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-prune-priv-fail-" });
+  try {
+    const paths = resolveReleasePaths(
+      { principalHomeRoot: root, daemonStateDir: join(root, "state") },
+      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+    );
+    await Deno.mkdir(paths.releasesDir, { recursive: true });
+    const originalReadDir = Deno.readDir;
+    Deno.readDir = (() => {
+      throw new Deno.errors.PermissionDenied("denied");
+    }) as typeof Deno.readDir;
+    try {
+      await assertRejects(
+        () =>
+          pruneReleases({
+            paths,
+            runFn: () =>
+              Promise.resolve({
+                success: false,
+                stdout: "",
+                stderr: "I/O error",
+              }),
+          }),
+        Error,
+        "I/O error",
+      );
+    } finally {
+      Deno.readDir = originalReadDir;
+    }
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("pruneReleases rethrows a non-PermissionDenied listing error", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-prune-list-err-" });
+  try {
+    const paths = resolveReleasePaths(
+      { principalHomeRoot: root, daemonStateDir: join(root, "state") },
+      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+    );
+    await Deno.mkdir(paths.releasesDir, { recursive: true });
+    const originalReadDir = Deno.readDir;
+    Deno.readDir = (() => {
+      throw new TypeError("listing io");
+    }) as typeof Deno.readDir;
+    try {
+      await assertRejects(
+        () =>
+          pruneReleases({
+            paths,
+            runFn: () =>
+              Promise.resolve({ success: true, stdout: "", stderr: "" }),
+          }),
+        TypeError,
+        "listing io",
+      );
+    } finally {
+      Deno.readDir = originalReadDir;
+    }
   } finally {
     await Deno.remove(root, { recursive: true });
   }

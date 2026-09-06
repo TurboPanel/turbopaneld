@@ -142,6 +142,37 @@ test("managed.ha.failover recover falls back when endpoints are incomplete", asy
   assertEquals(result.summary.includes("without Orchestrator"), true);
 });
 
+test("managed.ha.failover drain uses the local ProxySQL helper when drain is omitted", async () => {
+  const result = await handleManagedHaFailover(
+    {
+      ...RECOVER_PAYLOAD,
+      phase: "drain",
+    },
+    "2026-08-19T12:00:00.000Z",
+  );
+  assertEquals(result.phase, "drain");
+  assertEquals(result.summary.includes("drained writer"), true);
+});
+
+test("managed.ha.failover recover probes host prep when haPresent is omitted", async () => {
+  const promoteCalls: unknown[] = [];
+  const result = await handleManagedHaFailover(
+    {
+      managedId: RECOVER_PAYLOAD.managedId,
+      sourceMemberId: RECOVER_PAYLOAD.sourceMemberId,
+      targetMemberId: RECOVER_PAYLOAD.targetMemberId,
+      phase: "recover",
+      sourceHost: "203.0.113.10",
+    },
+    "2026-08-19T12:00:00.000Z",
+    {
+      promote: promoteStub(promoteCalls),
+    },
+  );
+  assertEquals(promoteCalls.length, 1);
+  assertEquals(result.summary.includes("without Orchestrator"), true);
+});
+
 test("managed.ha.failover drain skips drain helper when source endpoint is absent", async () => {
   let drainCalled = false;
   const result = await handleManagedHaFailover(
