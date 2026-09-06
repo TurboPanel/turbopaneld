@@ -99,8 +99,8 @@ test("topology change mid-stream: a slot reorder / GPU swap bumps topologyGenera
 test("topology change mid-stream: an operator/uplink-detection NIC1/NIC2 slot swap moves stable-identity keys unaffected — each device's rate stays continuous through the reorder tick", () => {
   const tracker = new CounterBaselineTracker();
   // `identity.ts`'s `deriveNetworkDeviceIdentity` prefers a MAC-derived
-  // deviceId, and `slot-mapping.ts` layers a separate `nicSlot1DeviceId` /
-  // `nicSlot2DeviceId` resolution on top of that stable identity set — an
+  // deviceId, and `slot-mapping.ts` layers a separate `nicSlotDeviceIds`
+  // resolution on top of that stable identity set — an
   // operator override or a re-detected uplink order can flip which
   // deviceId is reported as "NIC1" vs "NIC2" (bumping topologyGeneration
   // via the resolved `SlotMapping`) without touching either device's own

@@ -1,8 +1,9 @@
 /**
  * Physical NIC link state: reads `/sys/class/net/<name>/operstate` per
- * topology-enumerated network device (skipping `loopback`/`container-bridge`
- * — a `veth` coming and going is container churn, not a physical link
- * event). `up`→`down` fires `nic_link_down`; a prior `down` returning to
+ * topology-enumerated network device (skipping `loopback`/`container-bridge`/
+ * `virtual` — a `veth` coming and going is container churn and a tunnel or
+ * VLAN child has no carrier of its own; bond/bridge `member` ports are kept,
+ * since a port dropping out of a bond is a real physical link event). `up`→`down` fires `nic_link_down`; a prior `down` returning to
  * `up` fires `nic_link_up`. `unknown` (common on interfaces with no carrier
  * detection, or immediately after boot) is treated as "not down" — it never
  * triggers a link-down event on its own.
@@ -32,7 +33,10 @@ export class NicLinkEventCollector implements EventCollector {
     const events: MetricEventV4[] = [];
 
     for (const device of ctx.snapshot.networks) {
-      if (device.kind === "loopback" || device.kind === "container-bridge") {
+      if (
+        device.kind === "loopback" || device.kind === "container-bridge" ||
+        device.kind === "virtual"
+      ) {
         continue;
       }
 

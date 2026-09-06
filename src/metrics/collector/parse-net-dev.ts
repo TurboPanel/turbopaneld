@@ -1,7 +1,8 @@
 /**
  * Pure `/proc/net/dev` line parsing. Every interface is parsed and returned —
- * classification (loopback / container-bridge / fabric / uplink) and
- * aggregation happen afterwards in `network.ts`, never during parsing.
+ * classification (loopback / container-bridge / fabric / uplink / member /
+ * virtual) happens afterwards in `topology/network-classifier.ts`, never
+ * during parsing.
  */
 import type { NetInterfaceCounters } from "./types.ts";
 

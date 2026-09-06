@@ -1,11 +1,21 @@
 /**
- * Network device topology: wraps `collector/network.ts`'s classification
- * (fabric/uplink/container-bridge/loopback — this module only adds stable
- * identity) with `/sys/class/net/<name>/{address,speed,mtu}` reads.
+ * Network device topology: sysfs-refined classification
+ * (`network-classifier.ts` — hardware-backed uplinks and the aggregates
+ * stacked on them versus members/virtual children/container bridges/
+ * loopback/fabric), stable identity (`identity.ts`), the default-route
+ * flag, and `/sys/class/net/<name>/{speed,mtu}` reads.
  */
+import {
+  parseIpv4DefaultRouteInterface,
+  parseIpv6DefaultRouteInterface,
+} from "../../server-addresses.ts";
 import { parseNetDev } from "../collector/parse-net-dev.ts";
-import { classifyInterface } from "../collector/network.ts";
 import { deriveNetworkDeviceIdentity, type IdentityIo } from "./identity.ts";
+import {
+  classifyNetworkDevices,
+  isBareEthernet,
+  readNetworkDeviceFacts,
+} from "./network-classifier.ts";
 import type { NetworkDeviceTopology } from "./types.ts";
 
 export type NetworkTopologyDeps = {
@@ -27,33 +37,67 @@ async function readOptionalNumber(
   return Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
-/** Enumerate every network device with stable identity, current classification, speed, and MTU. */
+/**
+ * The interface name carrying the host's default route — IPv4 first (the
+ * lowest-metric `0.0.0.0/0` row in `/proc/net/route`), IPv6 `::/0` as the
+ * fallback. `undefined` when neither table is readable or has a default.
+ */
+async function readDefaultRouteInterface(
+  readProcFile: NetworkTopologyDeps["readProcFile"],
+): Promise<string | undefined> {
+  const [v4, v6] = await Promise.all([
+    readProcFile("/proc/net/route"),
+    readProcFile("/proc/net/ipv6_route"),
+  ]);
+  const fromV4 = v4 ? parseIpv4DefaultRouteInterface(v4) : undefined;
+  if (fromV4) return fromV4;
+  return v6 ? parseIpv6DefaultRouteInterface(v6) : undefined;
+}
+
+/**
+ * Enumerate every network device with stable identity, current
+ * classification, speed, MTU, and — on exactly one `uplink` at most — the
+ * `defaultRoute` flag `slot-mapping.ts` uses to pick the auto-monitored NIC.
+ */
 export async function collectNetworkTopology(
   deps: NetworkTopologyDeps,
 ): Promise<NetworkDeviceTopology[]> {
   const root = deps.sysRoot ?? "/sys";
-  const [netDevText, fabricInterfaces] = await Promise.all([
+  const [netDevText, fabricInterfaces, routeInterface] = await Promise.all([
     deps.readProcFile("/proc/net/dev"),
     deps.resolveFabricInterfaces().catch(() => [] as string[]),
+    readDefaultRouteInterface(deps.readProcFile).catch(() => undefined),
   ]);
   const parsed = netDevText ? parseNetDev(netDevText) : null;
   if (!parsed) return [];
 
   const names = Object.keys(parsed).sort((a, b) => a.localeCompare(b));
+  const facts = await Promise.all(
+    names.map((name) => readNetworkDeviceFacts(name, deps.io, root)),
+  );
+  const factsByName = new Map(facts.map((entry) => [entry.name, entry]));
+  const classification = classifyNetworkDevices(facts, fabricInterfaces);
+  const defaultRouteUplink = routeInterface
+    ? classification.resolveUplinkFor(routeInterface)
+    : undefined;
+
   return await Promise.all(
     names.map(async (name): Promise<NetworkDeviceTopology> => {
       const [{ deviceId, identity }, speedMbps, mtu] = await Promise.all([
-        deriveNetworkDeviceIdentity(name, deps.io, root),
+        deriveNetworkDeviceIdentity(name, deps.io, root, {
+          macIdentity: isBareEthernet(factsByName.get(name)!),
+        }),
         readOptionalNumber(`${root}/class/net/${name}/speed`, deps.io),
         readOptionalNumber(`${root}/class/net/${name}/mtu`, deps.io),
       ]);
       return {
         deviceId,
-        kind: classifyInterface(name, fabricInterfaces),
+        kind: classification.kinds.get(name) ?? "virtual",
         name,
         identity,
         ...(speedMbps !== undefined ? { speedMbps } : {}),
         ...(mtu !== undefined ? { mtu } : {}),
+        ...(name === defaultRouteUplink ? { defaultRoute: true } : {}),
       };
     }),
   );

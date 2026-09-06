@@ -168,8 +168,8 @@ test("resolveTopologyGeneration: NIC1/NIC2 slot mapping stays pinned to deviceId
     );
 
     assertEquals(generation, 0);
-    assertEquals(beforeMapping.normalNicSlot1, afterMapping.normalNicSlot1);
-    assertEquals(afterMapping.normalNicSlot1, "mac:a");
+    assertEquals(beforeMapping.normalNicSlots, afterMapping.normalNicSlots);
+    assertEquals(afterMapping.normalNicSlots, ["mac:a"]);
   });
 });
 
@@ -200,7 +200,7 @@ test("resolveTopologyGeneration: an operator override reassigning a slot bumps t
     );
     const second = await resolveTopologyGeneration(twoNics, {
       ...EMPTY_TOPOLOGY_OVERRIDES,
-      nicSlot1DeviceId: "mac:b",
+      nicSlotDeviceIds: ["mac:b"],
     }, { daemonStateDir });
     assertEquals(first, 0);
     assertNotEquals(second, first);

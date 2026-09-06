@@ -31,7 +31,12 @@ import {
   buildCpuCoreIdIndex,
   coreIdForStatKey,
 } from "../topology/cpu-topology.ts";
-import type { TopologySnapshot } from "../topology/types.ts";
+import { computeSlotMapping } from "../topology/slot-mapping.ts";
+import {
+  EMPTY_TOPOLOGY_OVERRIDES,
+  type NetworkDeviceTopology,
+  type TopologySnapshot,
+} from "../topology/types.ts";
 import { CounterBaselineTracker } from "./baseline.ts";
 import {
   buildBlockDeviceSamples,
@@ -623,6 +628,33 @@ function buildHostMetrics(parts: {
   };
 }
 
+/**
+ * The network devices this tick actually reports: the resolved
+ * `SlotMapping`'s `normalNicSlots` in slot order (so a control plane that
+ * has not recorded this topology generation yet still embeds slot 1/2 by
+ * position), then every fabric device. Members, VLAN children, tunnels,
+ * container bridges, and loopback are enumerated in the topology (identity,
+ * generation, the settings picker) but never sampled — their traffic is
+ * either already counted on a monitored uplink or not the host's to bill.
+ * A pinned slot id absent from this snapshot simply has no device to
+ * sample this tick; it never pulls in a different device by position.
+ */
+function monitoredNetworkDevices(
+  snapshot: TopologySnapshot,
+  overrides: Parameters<typeof computeSlotMapping>[1],
+): NetworkDeviceTopology[] {
+  const mapping = computeSlotMapping(snapshot, overrides);
+  const byId = new Map(
+    snapshot.networks.map((device) => [device.deviceId, device]),
+  );
+  const ordered: NetworkDeviceTopology[] = [];
+  for (const id of [...mapping.normalNicSlots, ...mapping.fabricDeviceIds]) {
+    const device = byId.get(id);
+    if (device && !ordered.includes(device)) ordered.push(device);
+  }
+  return ordered;
+}
+
 export class LinuxMetricsCollector implements MetricsCollector {
   #previous: PreviousCpuSnapshot | undefined;
   readonly #tracker = new CounterBaselineTracker();
@@ -666,9 +698,11 @@ export class LinuxMetricsCollector implements MetricsCollector {
     nowMs: number,
     collectionMode: MetricsCollectionModeV4,
   ): Promise<MetricsCollectResult> {
-    const [snapshot, raw] = await Promise.all([
+    const [snapshot, raw, overrides] = await Promise.all([
       this.#deps.collectTopology(),
       readRawTexts(this.#deps),
+      this.#deps.resolveTopologyOverrides?.() ??
+        Promise.resolve(EMPTY_TOPOLOGY_OVERRIDES),
     ]);
 
     const previous = this.#previous;
@@ -701,7 +735,7 @@ export class LinuxMetricsCollector implements MetricsCollector {
       { statfs: this.#deps.statfs },
     );
     const networks = await buildNetworkDeviceSamples(
-      snapshot.networks,
+      monitoredNetworkDevices(snapshot, overrides),
       {
         io: this.#deps.io,
         sysRoot: this.#deps.sysRoot,

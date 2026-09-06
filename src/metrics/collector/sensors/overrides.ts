@@ -46,10 +46,11 @@ const NIC_KEYS = ["nic1", "nic2"] as const satisfies readonly (
 )[];
 
 const TOPOLOGY_ID_KEYS = [
-  "nicSlot1DeviceId",
-  "nicSlot2DeviceId",
   "hostingFilesystemId",
 ] as const satisfies readonly (keyof HardwareProfile)[];
+
+/** Pre-array NIC-slot pin keys — read (and folded into `nicSlotDeviceIds`) only, never written. */
+const LEGACY_NIC_SLOT_KEYS = ["nicSlot1DeviceId", "nicSlot2DeviceId"] as const;
 
 function pickTrimmedString(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
@@ -123,7 +124,7 @@ function applyNicBindings(
 /**
  * Topology-identity pins share the nic-binding parsing discipline (`null` =
  * explicitly unassigned, a string = pinned id) but never resolve against
- * live interface names — see `HardwareProfile.nicSlot1DeviceId` etc.
+ * live interface names — see `HardwareProfile.hostingFilesystemId`.
  */
 function applyTopologyIdBindings(
   record: Record<string, unknown>,
@@ -134,6 +135,36 @@ function applyTopologyIdBindings(
     const id = pickNicBinding(record[key]);
     if (id !== undefined) profile[key] = id;
   }
+}
+
+/**
+ * `nicSlotDeviceIds`: an array of non-blank id strings, deduplicated in
+ * order (the slot-mapping layer applies the `MAX_NIC_SLOTS` cap). A profile
+ * written before the array existed carries `nicSlot1DeviceId`/
+ * `nicSlot2DeviceId` instead — those fold into the list (slot 1 first) so
+ * an already-pinned server keeps its pins across the upgrade. Anything
+ * malformed is dropped, never fatal.
+ */
+function applyNicSlotDeviceIds(
+  record: Record<string, unknown>,
+  profile: HardwareProfile,
+): void {
+  const raw = record.nicSlotDeviceIds;
+  if (Array.isArray(raw)) {
+    const ids: string[] = [];
+    for (const entry of raw) {
+      const id = pickTrimmedString(entry);
+      if (id && !ids.includes(id)) ids.push(id);
+    }
+    profile.nicSlotDeviceIds = ids;
+    return;
+  }
+  const legacy: string[] = [];
+  for (const key of LEGACY_NIC_SLOT_KEYS) {
+    const id = pickTrimmedString(record[key]);
+    if (id && !legacy.includes(id)) legacy.push(id);
+  }
+  if (legacy.length > 0) profile.nicSlotDeviceIds = legacy;
 }
 
 function applyScalarFields(
@@ -165,6 +196,7 @@ export function parseHardwareProfile(text: string): HardwareProfile {
     applySensorSlots(record, profile);
     applyNicBindings(record, profile);
     applyTopologyIdBindings(record, profile);
+    applyNicSlotDeviceIds(record, profile);
     applyScalarFields(record, profile);
     return profile;
   } catch {

@@ -54,38 +54,66 @@ export function parseDriverName(uevent: string): string | undefined {
 }
 
 /**
- * One network interface's stable identity. Reads `/sys/class/net/<name>/
- * address` (permanent-enough MAC for topology purposes — a bonded/virtual
- * MAC still identifies the device consistently across a rename) and the
- * backing `device/uevent` for a PCI slot path; a device with neither (pure
- * software devices — `lo`, `tap`/`veth`/`tp0`-shaped names) falls back to a
- * hash of name+driver, which is stable as long as the driver doesn't change
- * underneath the same logical device.
+ * One network interface's stable identity.
+ *
+ * Hardware-backed devices (a readable `device/uevent` — PCI/USB/virtio/Xen/
+ * Hyper-V backing) identify by MAC, preferring `bonding_slave/perm_hwaddr`
+ * when the device is enslaved to a bond: every active-backup bond port
+ * reports the bond's MAC as its `address`, so the permanent hardware MAC is
+ * the only thing that keeps two ports distinct. A MAC-less hardware device
+ * falls back to its PCI slot path.
+ *
+ * Software devices (bonds, bridges, teams, VLAN/macvlan children, tunnels,
+ * veth legs — no `device` backing) never identify by MAC: a bond, its VLAN
+ * children, and a bridge on top of it all share one MAC, which would
+ * collapse them onto one id and one counter baseline. They hash name+driver
+ * instead, stable for as long as the operator keeps the same device name.
+ *
+ * The one exception is `options.macIdentity`: the caller (network topology,
+ * from `network-classifier.ts`'s `isBareEthernet`) sets it for a plain
+ * Ethernet device with no bus backing and no stack above or below it — a
+ * container's renamed veth peer. Nothing shares its MAC, and it is that
+ * host's only uplink, so it keeps the `mac:` id it always had.
  */
 export async function deriveNetworkDeviceIdentity(
   name: string,
   io: IdentityIo,
   root = "/sys",
+  options: { macIdentity?: boolean } = {},
 ): Promise<{ deviceId: TopologyDeviceId; identity: NetworkDeviceIdentity }> {
-  const [macRaw, uevent] = await Promise.all([
-    io.readFile(`${root}/class/net/${name}/address`),
-    io.readFile(`${root}/class/net/${name}/device/uevent`),
+  const base = `${root}/class/net/${name}`;
+  const [macRaw, uevent, permanentMacRaw] = await Promise.all([
+    io.readFile(`${base}/address`),
+    io.readFile(`${base}/device/uevent`),
+    io.readFile(`${base}/bonding_slave/perm_hwaddr`),
   ]);
-  const mac = macRaw?.trim().toLowerCase();
-  const pciPath = uevent ? parsePciSlotName(uevent) : undefined;
-
-  if (mac && mac.length > 0 && mac !== ZERO_MAC) {
-    return {
-      deviceId: `mac:${mac}`,
-      identity: { mac, ...(pciPath ? { pciPath } : {}) },
-    };
-  }
-  if (pciPath) {
-    return { deviceId: `pci:${pciPath}`, identity: { pciPath } };
-  }
+  const hardwareBacked = uevent !== undefined;
   const driver = uevent ? parseDriverName(uevent) : undefined;
+
+  if (hardwareBacked || options.macIdentity === true) {
+    const permanentMac = normalizeMac(permanentMacRaw);
+    const mac = permanentMac ?? normalizeMac(macRaw);
+    const pciPath = uevent ? parsePciSlotName(uevent) : undefined;
+    if (mac) {
+      return {
+        deviceId: `mac:${mac}`,
+        identity: { mac, ...(pciPath ? { pciPath } : {}) },
+      };
+    }
+    if (pciPath) {
+      return { deviceId: `pci:${pciPath}`, identity: { pciPath } };
+    }
+  }
+
   const virtualKey = fnv1aHex(`${name}:${driver ?? "unknown"}`);
   return { deviceId: `virtual:${virtualKey}`, identity: { virtualKey } };
+}
+
+/** Lower-cased MAC, or `undefined` for a missing/blank/all-zero address. */
+function normalizeMac(raw: string | undefined): string | undefined {
+  const mac = raw?.trim().toLowerCase();
+  if (!mac || mac === ZERO_MAC) return undefined;
+  return mac;
 }
 
 /** Convenience wrapper when only the id (not the display identity struct) is needed. */

@@ -217,7 +217,9 @@ const IPV6_UNSPECIFIED = "0".repeat(32);
  * destination *and* mask are both zero; when several exist (multiple uplinks)
  * the lowest metric wins, matching the kernel's own selection.
  */
-function parseIpv4DefaultRouteInterface(text: string): string | undefined {
+export function parseIpv4DefaultRouteInterface(
+  text: string,
+): string | undefined {
   let best: { iface: string; metric: number } | undefined;
   for (const line of text.split("\n").slice(1)) {
     const fields = line.trim().split(/\s+/);
@@ -239,7 +241,9 @@ function parseIpv4DefaultRouteInterface(text: string): string | undefined {
  * refcnt use flags iface`. The default route is `::/0`, i.e. an all-zero
  * destination with a zero prefix length.
  */
-function parseIpv6DefaultRouteInterface(text: string): string | undefined {
+export function parseIpv6DefaultRouteInterface(
+  text: string,
+): string | undefined {
   let best: { iface: string; metric: number } | undefined;
   for (const line of text.split("\n")) {
     const fields = line.trim().split(/\s+/);

@@ -9,6 +9,7 @@ import { statfs } from "node:fs/promises";
 
 import { resolveDockerDataRoot } from "../../host/docker.ts";
 import { collectTopology } from "../topology/topology.ts";
+import { resolveTopologyOverrides } from "../topology/overrides.ts";
 import type { DatabaseProxyAdapterSet } from "./database-proxy/adapter.ts";
 import { ProxySqlDatabaseProxyAdapter } from "./database-proxy/proxysql-v4.ts";
 import { EventCollectorSet } from "./events/index.ts";
@@ -246,6 +247,7 @@ function defaultDepsV4(): CollectorDepsV4 {
     statfs: defaultStatfs,
     now: () => Date.now(),
     collectTopology: () => collectTopology(),
+    resolveTopologyOverrides: () => resolveTopologyOverrides(),
     io: defaultSensorIo(),
     // Resolved once here (construction time), never per tick.
     pageSizeBytes: resolvePageSizeBytes(),

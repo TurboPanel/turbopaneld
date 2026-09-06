@@ -5,7 +5,7 @@
  * adapters, and the hardware-signal/event-detection seams below). This stays
  * separate from v3's `CollectorDeps` rather than mutating it in place.
  */
-import type { TopologySnapshot } from "../topology/types.ts";
+import type { TopologyOverrides, TopologySnapshot } from "../topology/types.ts";
 import type { DatabaseProxyAdapterSet } from "./database-proxy/adapter.ts";
 import type { TopLevelEventCollector } from "./events/index.ts";
 import type { GpuAdapterSet } from "./gpu/adapter.ts";
@@ -23,6 +23,16 @@ export type CollectorDepsV4 = {
   now: () => number;
   /** This tick's topology discovery — networks/filesystems/blockDevices identity, generation, boot generation. */
   collectTopology: () => Promise<TopologySnapshot>;
+  /**
+   * The operator's topology overrides (`topology/overrides.ts`'s
+   * `resolveTopologyOverrides`), re-read each tick alongside
+   * `collectTopology` so `linux-collector.ts` can recompute the same
+   * `SlotMapping` the topology generation was stamped with and emit only the
+   * monitored NICs (`normalNicSlots` in slot order, then fabric devices).
+   * Optional: absent means `EMPTY_TOPOLOGY_OVERRIDES` — auto slot selection
+   * (the default-route uplink only).
+   */
+  resolveTopologyOverrides?: () => Promise<TopologyOverrides>;
   /** Sysfs access for per-NIC directional stats (`network.ts`'s `buildNetworkDeviceSamples`). */
   io: SensorIo;
   sysRoot?: string;

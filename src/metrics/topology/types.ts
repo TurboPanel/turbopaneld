@@ -15,11 +15,39 @@ export type FilesystemId = string; // NOSONAR typescript:S6564 — opaque stable
 export type GpuId = string; // NOSONAR typescript:S6564 — opaque stable identity, never a PCI/kernel name
 export type SignalId = string; // NOSONAR typescript:S6564 — opaque stable identity, never a hwmon label
 
+/**
+ * Network device classification (`network-classifier.ts`):
+ *
+ * - `uplink` — a monitorable host link: a hardware-backed NIC (PCI/USB/
+ *   virtio/Xen/Hyper-V `device` backing) or the topmost bond/bridge/team
+ *   aggregate stacked on one. Only uplinks are eligible NIC slots.
+ * - `member` — a physical-backed device sitting *under* a physical-backed
+ *   aggregate (a bond port, a bridge member, a bond nested under a bridge).
+ *   Its traffic is already counted on the aggregate above it, so it is never
+ *   offered as a slot.
+ * - `virtual` — a software device whose traffic rolls into an uplink (VLAN/
+ *   macvlan children of an uplink) or that carries overlay/tunnel traffic
+ *   (WireGuard, tun, vxlan) with no hardware backing of its own.
+ * - `fabric` — a TurboFabric mesh interface (`tp0`).
+ * - `container-bridge` — Docker/libvirt bridges and their veth/tap/vnet legs.
+ * - `loopback` — `lo`.
+ */
 export type NetworkDeviceKind =
   | "uplink"
+  | "member"
+  | "virtual"
   | "fabric"
   | "container-bridge"
   | "loopback";
+
+/**
+ * Hard ceiling on monitored NIC slots per server, shared by the daemon
+ * (`slot-mapping.ts`), the control plane's mirror, and the UI picker. The
+ * *effective* count a server may store is the capability plan's
+ * `normalNicSlots` (`../../../../turbopanel/src/daemon/metrics/capability-plan.ts`
+ * — 2 by default on the hosted platform, 8 self-hosted), clamped to this.
+ */
+export const MAX_NIC_SLOTS = 8;
 
 export type NetworkDeviceIdentity = {
   /** Permanent hardware MAC, when readable — the strongest identity signal. */
@@ -38,6 +66,16 @@ export type NetworkDeviceTopology = {
   identity: NetworkDeviceIdentity;
   speedMbps?: number;
   mtu?: number;
+  /**
+   * `true` on the one `uplink` that carries the host's default route this
+   * tick (IPv4 preferred, IPv6 fallback — `/proc/net/route` /
+   * `/proc/net/ipv6_route`, resolved through VLAN children and bond/bridge
+   * members down or up to the monitorable uplink). Absent everywhere else,
+   * and absent on snapshots recorded before this field existed. Rides the
+   * snapshot (not the slot mapping) so the control plane can reconstruct
+   * the identical `SlotMapping` without a kernel to ask.
+   */
+  defaultRoute?: boolean;
 };
 
 export type FilesystemRole =
@@ -162,32 +200,39 @@ export type TopologySnapshot = {
  * names or paths. Projected from the daemon's existing `HardwareProfile`
  * (`collector/sensors/overrides.ts`) via `toTopologyOverrides` in
  * `overrides.ts` of this module; the underlying `HardwareProfile.nic1`/
- * `.nic2`/`.hostingPath` fields stay untouched for v3's
- * `namedInterfaceRates`/`resolveHostingPath` — sensor-slot selection is a
- * separate concern from topology identity.
+ * `.nic2`/`.hostingPath` fields stay untouched for `resolveHostingPath` —
+ * sensor-slot selection is a separate concern from topology identity.
  */
 export type TopologyOverrides = {
-  nicSlot1DeviceId: TopologyDeviceId | null;
-  nicSlot2DeviceId: TopologyDeviceId | null;
+  /**
+   * The operator's monitored-NIC list, in slot order (slot 1 first). Empty
+   * means "auto": `slot-mapping.ts` monitors only the default-route uplink.
+   * Non-empty is the complete monitored set — the operator's list wins
+   * outright, deduplicated and capped at {@link MAX_NIC_SLOTS}.
+   */
+  nicSlotDeviceIds: TopologyDeviceId[];
   hostingFilesystemId: FilesystemId | null;
   drivetempEnabled: boolean;
 };
 
 export const EMPTY_TOPOLOGY_OVERRIDES: TopologyOverrides = {
-  nicSlot1DeviceId: null,
-  nicSlot2DeviceId: null,
+  nicSlotDeviceIds: [],
   hostingFilesystemId: null,
   drivetempEnabled: false,
 };
 
 /**
- * Pure slot-mapping output — the shared contract with the future Cloudflare
- * packer/query-reconstruction phases (control plane vendors/mirrors
+ * Pure slot-mapping output — the shared contract with the Cloudflare
+ * packer/query-reconstruction layer (control plane vendors/mirrors
  * `slot-mapping.ts` the same way `contract.ts` is mirrored today).
  */
 export type SlotMapping = {
-  normalNicSlot1: TopologyDeviceId | null;
-  normalNicSlot2: TopologyDeviceId | null;
+  /**
+   * Monitored normal-NIC slots in slot order: index 0 is slot 1. At most
+   * {@link MAX_NIC_SLOTS} entries, no holes. Cloudflare embeds the first two
+   * in `host.io`; any further slot pages as a standalone `network` row.
+   */
+  normalNicSlots: TopologyDeviceId[];
   fabricDeviceIds: TopologyDeviceId[];
   rootFilesystemId: FilesystemId | null;
   gpuPageOrder: GpuId[];

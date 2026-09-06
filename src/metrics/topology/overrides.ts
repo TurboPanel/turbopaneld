@@ -2,10 +2,10 @@
  * Topology-overrides projection: the operator-assigned `HardwareProfile`
  * (`collector/sensors/overrides.ts`, still the single on-disk store, pushed
  * over the cell socket as `topology-overrides-update`) narrowed to the
- * three fields that resolve against stable topology identity —
- * `nicSlot1DeviceId`/`nicSlot2DeviceId`/`hostingFilesystemId` — plus
- * `drivetempEnabled`. `nic1`/`nic2`/`hostingPath`/sensor slots stay
- * `HardwareProfile`-only; this module never reads or writes those.
+ * fields that resolve against stable topology identity —
+ * `nicSlotDeviceIds`/`hostingFilesystemId` — plus `drivetempEnabled`.
+ * `nic1`/`nic2`/`hostingPath`/sensor slots stay `HardwareProfile`-only; this
+ * module never reads or writes those.
  */
 import { resolveHardwareProfile } from "../collector/sensors/overrides.ts";
 import type { HardwareProfile } from "../collector/types.ts";
@@ -16,8 +16,7 @@ export function toTopologyOverrides(
   profile: HardwareProfile,
 ): TopologyOverrides {
   return {
-    nicSlot1DeviceId: profile.nicSlot1DeviceId ?? null,
-    nicSlot2DeviceId: profile.nicSlot2DeviceId ?? null,
+    nicSlotDeviceIds: profile.nicSlotDeviceIds ?? [],
     hostingFilesystemId: profile.hostingFilesystemId ?? null,
     drivetempEnabled: profile.drivetempEnabled ?? false,
   };

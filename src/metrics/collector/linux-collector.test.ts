@@ -683,3 +683,66 @@ test("LinuxMetricsCollector attaches cpuDetail/memoryDetail every tick, and cpuC
     ["cpu:p0c0t0", "cpu:p0c1t0"],
   );
 });
+
+test("LinuxMetricsCollector samples only the slot-mapped NICs (slot order) plus fabric devices — members, VLAN children, tunnels, container bridges, and loopback are never emitted", async () => {
+  const nic = (
+    name: string,
+    kind: TopologySnapshot["networks"][number]["kind"],
+    extra: Partial<TopologySnapshot["networks"][number]> = {},
+  ) => ({
+    deviceId: `virtual:${name}`,
+    kind,
+    name,
+    identity: { virtualKey: name },
+    ...extra,
+  });
+  const snapshot = fullTopologySnapshot({
+    networks: [
+      nic("lo", "loopback"),
+      nic("veth1", "container-bridge"),
+      nic("bond0", "uplink"),
+      nic("eth0", "member"),
+      nic("eth1", "member"),
+      nic("eth2", "uplink", { defaultRoute: true }),
+      nic("eth2.100", "virtual"),
+      nic("tp0", "fabric"),
+    ],
+  });
+  const nowMs = 1_000_000;
+  const raw = () => TICK_1;
+
+  // Auto selection: the default-route uplink only, then fabric.
+  const auto = new LinuxMetricsCollector(
+    makeDeps(raw, snapshot, () => nowMs),
+    { nominalIntervalSeconds: 60 },
+  );
+  const autoResult = await auto.collect({ sequence: 1, nowMs });
+  if (!autoResult.supported) throw new TypeError("expected a supported sample");
+  assertEquals(
+    autoResult.sample.networks.map((device) => device.deviceId),
+    ["virtual:eth2", "virtual:tp0"],
+  );
+
+  // An operator list wins outright, in its own order; a pinned id absent
+  // from the snapshot has nothing to sample and never pulls in a neighbor.
+  const pinned = new LinuxMetricsCollector(
+    {
+      ...makeDeps(raw, snapshot, () => nowMs),
+      resolveTopologyOverrides: () =>
+        Promise.resolve({
+          nicSlotDeviceIds: ["virtual:bond0", "virtual:gone", "virtual:eth2"],
+          hostingFilesystemId: null,
+          drivetempEnabled: false,
+        }),
+    },
+    { nominalIntervalSeconds: 60 },
+  );
+  const pinnedResult = await pinned.collect({ sequence: 1, nowMs });
+  if (!pinnedResult.supported) {
+    throw new TypeError("expected a supported sample");
+  }
+  assertEquals(
+    pinnedResult.sample.networks.map((device) => device.deviceId),
+    ["virtual:bond0", "virtual:eth2", "virtual:tp0"],
+  );
+});

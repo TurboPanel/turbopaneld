@@ -167,9 +167,14 @@ export type HardwareProfile = {
    * `nic1`/`nic2`/`hostingPath` above, which stay interface-name/path-typed
    * for `resolveHostingPath`; sensor-slot selection is a separate concern
    * from topology identity.
+   *
+   * `nicSlotDeviceIds` is the operator's monitored-NIC list in slot order
+   * (see `topology/types.ts`'s `TopologyOverrides`); absent/empty means
+   * "auto" (default-route uplink only). The pre-array `nicSlot1DeviceId`/
+   * `nicSlot2DeviceId` keys are still read from an older on-disk profile by
+   * `parseHardwareProfile` and folded into this list, never written back.
    */
-  nicSlot1DeviceId?: string | null;
-  nicSlot2DeviceId?: string | null;
+  nicSlotDeviceIds?: string[];
   hostingFilesystemId?: string | null;
   generation?: number;
   generationAppliedAt?: string;

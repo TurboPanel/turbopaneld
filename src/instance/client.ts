@@ -196,8 +196,8 @@ type DaemonMessage =
     /**
      * Full replacement — absent fields clear their setting. Carries both
      * v3 sensor-slot/NIC-name/hosting-path/drivetemp fields and the
-     * topology-identity pins (`nicSlot1DeviceId`/`nicSlot2DeviceId`/
-     * `hostingFilesystemId`, resolved against `src/metrics/topology/`
+     * topology-identity pins (`nicSlotDeviceIds`/`hostingFilesystemId`,
+     * resolved against `src/metrics/topology/`
      * device/filesystem ids rather than raw names/paths) in one object —
      * renamed from `metrics-sensor-overrides-update` when topology
      * identity was added; the underlying store and v3 semantics are

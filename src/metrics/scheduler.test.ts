@@ -219,6 +219,10 @@ function createFixtureCollectorFactory(): () => MetricsCollector {
       statfs: () => null,
       now: () => clockMs,
       collectTopology: () => Promise.resolve(fixtureTopologySnapshot()),
+      // The default seam re-reads the on-disk hardware profile every tick —
+      // real file I/O the fake clock can't step through, same as the
+      // adapters below. Absent means auto slot selection.
+      resolveTopologyOverrides: undefined,
       io: { listDir: () => [], readFile: () => undefined },
       // Unlike GPU adapters (only invoked per topology-enumerated GPU, and
       // this fixture's topology has none), ingress/database-proxy adapters

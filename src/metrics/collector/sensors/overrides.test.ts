@@ -47,6 +47,46 @@ it("parseHardwareProfile keeps only well-formed slot/NIC/scalar fields", () => {
   assertEquals(parseHardwareProfile("null"), {});
 });
 
+it("parseHardwareProfile reads nicSlotDeviceIds as a deduplicated list of non-blank ids", () => {
+  assertEquals(
+    parseHardwareProfile(JSON.stringify({
+      nicSlotDeviceIds: ["mac:a", " mac:b ", "", "mac:a", 7, null],
+    })),
+    { nicSlotDeviceIds: ["mac:a", "mac:b"] },
+  );
+  assertEquals(
+    parseHardwareProfile(JSON.stringify({ nicSlotDeviceIds: "mac:a" })),
+    {},
+  );
+});
+
+it("parseHardwareProfile folds a pre-array nicSlot1DeviceId/nicSlot2DeviceId profile into nicSlotDeviceIds, slot 1 first", () => {
+  assertEquals(
+    parseHardwareProfile(JSON.stringify({
+      nicSlot1DeviceId: "mac:a",
+      nicSlot2DeviceId: "mac:b",
+      hostingFilesystemId: "fs:dev:/dev/sdb1",
+    })),
+    {
+      nicSlotDeviceIds: ["mac:a", "mac:b"],
+      hostingFilesystemId: "fs:dev:/dev/sdb1",
+    },
+  );
+  assertEquals(
+    parseHardwareProfile(
+      JSON.stringify({ nicSlot1DeviceId: null, nicSlot2DeviceId: "mac:b" }),
+    ),
+    { nicSlotDeviceIds: ["mac:b"] },
+  );
+  // The array, when present, wins over any legacy keys alongside it.
+  assertEquals(
+    parseHardwareProfile(
+      JSON.stringify({ nicSlotDeviceIds: [], nicSlot1DeviceId: "mac:a" }),
+    ),
+    { nicSlotDeviceIds: [] },
+  );
+});
+
 it("parseHardwareProfile drops a malformed on-disk hostingPath instead of accepting it", () => {
   // Matches the PUT /servers/:id/metrics/hardware-profile route-level rule:
   // hostingPath must be an absolute path with no whitespace/control chars.

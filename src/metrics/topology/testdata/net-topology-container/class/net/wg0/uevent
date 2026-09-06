@@ -1,0 +1,3 @@
+DEVTYPE=wireguard
+INTERFACE=wg0
+IFINDEX=3

@@ -1,0 +1,2 @@
+INTERFACE=tailscale0
+IFINDEX=4

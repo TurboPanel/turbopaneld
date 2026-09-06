@@ -10,14 +10,12 @@ test("toTopologyOverrides: projects only the topology-identity fields, ignoring 
     nic1: "eth0",
     nic2: null,
     hostingPath: "/srv/users",
-    nicSlot1DeviceId: "mac:a",
-    nicSlot2DeviceId: null,
+    nicSlotDeviceIds: ["mac:a", "mac:b"],
     hostingFilesystemId: "fs:dev:/dev/sdb1",
     drivetempEnabled: true,
   };
   assertEquals(toTopologyOverrides(profile), {
-    nicSlot1DeviceId: "mac:a",
-    nicSlot2DeviceId: null,
+    nicSlotDeviceIds: ["mac:a", "mac:b"],
     hostingFilesystemId: "fs:dev:/dev/sdb1",
     drivetempEnabled: true,
   });
@@ -25,8 +23,7 @@ test("toTopologyOverrides: projects only the topology-identity fields, ignoring 
 
 test("toTopologyOverrides: an empty profile projects to all-null/false", () => {
   assertEquals(toTopologyOverrides({}), {
-    nicSlot1DeviceId: null,
-    nicSlot2DeviceId: null,
+    nicSlotDeviceIds: [],
     hostingFilesystemId: null,
     drivetempEnabled: false,
   });
