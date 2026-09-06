@@ -7,8 +7,10 @@ host for the daemon installer script — **no Worker script**, so public install
 can never generate Worker invocation billing. `_headers` sets the shellscript
 content type + `no-store` on `/`.
 Deploy tooling lives in the isolated `workers/turbopanel-sh/` package (Node +
-wrangler only — not part of the Deno graph). Manual deploy: `pnpm install` then
-`pnpm deploy` from that directory; the stage step copies `scripts/run.sh` to
+wrangler only — not part of the Deno graph). Cloudflare Workers Builds runs
+`pnpm install --frozen-lockfile`; `pnpm-workspace.yaml` must `allowBuilds`
+`esbuild` and `workerd` or pnpm 12 fails with `ERR_PNPM_IGNORED_BUILDS`.
+Manual deploy: `pnpm install` then `pnpm deploy` from that directory; the stage step copies `scripts/run.sh` to
 `public/bootstrap` (plus committed `assets/_headers` and `assets/_redirects`) into
 gitignored `public/` at deploy time so the script stays a single source of truth. The
 `workers/` tree is deploy tooling only and is

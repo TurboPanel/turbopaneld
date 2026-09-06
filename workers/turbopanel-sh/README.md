@@ -35,7 +35,9 @@ pnpm deploy
 
 `pnpm-lock.yaml` is committed so Cloudflare Workers Builds installs with pnpm
 deterministically. The lockfile must include pnpm 12's `packageManagerDependencies`
-catalog — `--frozen-lockfile` fails without it.
+catalog — `--frozen-lockfile` fails without it. `pnpm-workspace.yaml` must
+`allowBuilds` for `esbuild` and `workerd` (wrangler postinstalls); pnpm 12
+`strictDepBuilds` otherwise fails the install with `ERR_PNPM_IGNORED_BUILDS`.
 
 `deploy` runs `wrangler deploy`, which executes the `build.command` in
 `wrangler.jsonc` first (staging `../../scripts/run.sh` → `public/bootstrap` plus
