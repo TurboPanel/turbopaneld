@@ -52,7 +52,9 @@ export async function probeStorage(
   try {
     const probe = io?.statfs ?? statfs;
     const stat = await probe(path);
-    if (!stat) return null;
+    if (!stat) {
+      return null;
+    }
     const blocks = Number(stat.blocks);
     const bfree = Number(stat.bfree);
     const bavail = Number(stat.bavail);
@@ -67,7 +69,9 @@ export async function probeStorage(
 
     const totalBytes = blocks * bsize;
     const availableBytes = bavail * bsize;
-    if (totalBytes <= 0) return null;
+    if (totalBytes <= 0) {
+      return null;
+    }
 
     const totalInodes = Number.isFinite(stat.files) ? Number(stat.files) : null;
     const freeInodes = Number.isFinite(stat.ffree) ? Number(stat.ffree) : null;

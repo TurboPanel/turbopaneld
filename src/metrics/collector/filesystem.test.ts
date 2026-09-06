@@ -16,7 +16,8 @@ const test = Deno.test.bind(Deno);
 
 test("probeStorage returns finite byte totals for /", async () => {
   // Uses node:fs/promises.statfs — keep this case outside a narrowed
-  // permissions: {} sandbox (statfs is not covered by --allow-read alone).
+  // permissions: {} sandbox (`statfs` needs `--allow-sys=statfs`, not
+  // `--allow-read` alone).
   const probe = await probeStorage("/");
   if (probe === null) {
     throw new TypeError("expected a storage probe for /");

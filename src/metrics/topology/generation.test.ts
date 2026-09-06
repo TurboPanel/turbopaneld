@@ -207,10 +207,54 @@ test("resolveTopologyGeneration: an operator override reassigning a slot bumps t
   });
 });
 
+test("resolveTopologyGeneration: filesystem totalBytes going from null to a finite value bumps the generation", async () => {
+  await withTempStateDir(async (daemonStateDir) => {
+    const unknownCapacity = inputs({
+      filesystems: [
+        {
+          filesystemId: "fs:dev:/dev/sda1",
+          mountpoint: "/",
+          fsType: "ext4",
+          sourceDevice: "/dev/sda1",
+          totalBytes: null,
+          totalInodes: null,
+          roles: ["root"],
+        },
+      ],
+    });
+    const first = await resolveTopologyGeneration(
+      unknownCapacity,
+      EMPTY_TOPOLOGY_OVERRIDES,
+      { daemonStateDir },
+    );
+    const knownCapacity = inputs({
+      filesystems: [
+        {
+          filesystemId: "fs:dev:/dev/sda1",
+          mountpoint: "/",
+          fsType: "ext4",
+          sourceDevice: "/dev/sda1",
+          totalBytes: 100_000_000_000,
+          totalInodes: 6_000_000,
+          roles: ["root"],
+        },
+      ],
+    });
+    const second = await resolveTopologyGeneration(
+      knownCapacity,
+      EMPTY_TOPOLOGY_OVERRIDES,
+      { daemonStateDir },
+    );
+    assertEquals(first, 0);
+    assertEquals(second, 1);
+  });
+});
+
 test("computeTopologyGeneration: null previous state starts at 0", () => {
   const fingerprint = {
     networkDeviceIds: [],
     filesystemIds: [],
+    filesystemCapacities: [],
     serviceBlockDeviceIds: [],
     gpuIds: [],
     hardwareSignalIds: [],

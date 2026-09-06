@@ -3,12 +3,13 @@
  * topology-generation.json` (atomic write, same discipline as
  * `sensors/overrides.ts`'s `writeHardwareProfile`) and compares a
  * deterministic fingerprint of the slot-affecting identity — network device
- * id set, filesystem id set, service-device block-device id set, GPU id
- * set, physical-signal id set, and the resolved `SlotMapping` (which
- * already reflects any operator override that reassigns a slot) — against
- * the previous tick's fingerprint. Cosmetic changes (a renamed interface
- * with the same MAC, a signal's current reading) never touch this
- * fingerprint, so they never bump the generation.
+ * id set, filesystem id set plus each filesystem's capacity
+ * (`totalBytes`/`totalInodes`, not live used-space), service-device
+ * block-device id set, GPU id set, physical-signal id set, and the resolved
+ * `SlotMapping` (which already reflects any operator override that
+ * reassigns a slot) — against the previous tick's fingerprint. Cosmetic
+ * changes (a renamed interface with the same MAC, a signal's current
+ * reading) never touch this fingerprint, so they never bump the generation.
  *
  * The persisted file carries the fingerprint (not just the bare generation
  * number) because an override can reassign a slot — flipping which of two
@@ -37,6 +38,16 @@ export function topologyGenerationPath(daemonStateDir: string): string {
 export type TopologyFingerprint = {
   networkDeviceIds: string[];
   filesystemIds: string[];
+  /**
+   * Filesystem capacity (not live used-space). A null→finite transition is
+   * a real topology change: the first successful `statfs` after a denied
+   * probe, or a resize. Live used/available bytes stay off this fingerprint.
+   */
+  filesystemCapacities: Array<{
+    filesystemId: string;
+    totalBytes: number | null;
+    totalInodes: number | null;
+  }>;
   serviceBlockDeviceIds: string[];
   gpuIds: string[];
   hardwareSignalIds: string[];
@@ -61,6 +72,13 @@ export function computeTopologyFingerprint(
   return {
     networkDeviceIds: sortedIds(current.networks, (n) => n.deviceId),
     filesystemIds: sortedIds(current.filesystems, (fs) => fs.filesystemId),
+    filesystemCapacities: current.filesystems
+      .map((fs) => ({
+        filesystemId: fs.filesystemId,
+        totalBytes: fs.totalBytes,
+        totalInodes: fs.totalInodes,
+      }))
+      .sort((a, b) => a.filesystemId.localeCompare(b.filesystemId)),
     serviceBlockDeviceIds: sortedIds(
       current.blockDevices.filter((device) => device.isServiceDevice),
       (device) => device.deviceId,
