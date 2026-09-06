@@ -170,9 +170,7 @@ export type HardwareProfile = {
    *
    * `nicSlotDeviceIds` is the operator's monitored-NIC list in slot order
    * (see `topology/types.ts`'s `TopologyOverrides`); absent/empty means
-   * "auto" (default-route uplink only). The pre-array `nicSlot1DeviceId`/
-   * `nicSlot2DeviceId` keys are still read from an older on-disk profile by
-   * `parseHardwareProfile` and folded into this list, never written back.
+   * "auto" (default-route uplink only). Only this list key is supported.
    */
   nicSlotDeviceIds?: string[];
   hostingFilesystemId?: string | null;

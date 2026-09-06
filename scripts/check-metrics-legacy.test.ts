@@ -5,6 +5,7 @@ import {
   collectV4PageIdentifierFailures,
   isAllowedPath,
   reportMetricsLegacyFailures,
+  resolveScanRoots,
   runMetricsLegacyCheck,
 } from "./check-metrics-legacy.ts";
 
@@ -30,6 +31,10 @@ test("isAllowedPath admits only managed-engine code paths", () => {
     true,
   );
   assertEquals(isAllowedPath("ui/src/lib/managed-services.ts"), true);
+  assertEquals(
+    isAllowedPath("ui/design-system/turbopanel/pages/project-create.md"),
+    true,
+  );
   // Metrics plumbing is never allowed back.
   assertEquals(
     isAllowedPath("turbopanel/src/daemon/metrics/backends/duckdb/store.ts"),
@@ -80,10 +85,46 @@ test("collectMetricsLegacyFailures flags a retired AE dataset name outside the a
   );
 });
 
-test("collectMetricsLegacyFailures allows a retired AE dataset name inside field-map.ts's allowed prefix", () => {
+test("collectMetricsLegacyFailures flags a retired AE dataset name in field-map.ts (no historical-context allowlist)", () => {
   const failures = collectMetricsLegacyFailures(
     "turbopanel/src/daemon/metrics/backends/cloudflare/field-map.ts",
     "// retired: turbopanel_server_telemetry\n",
+  );
+  assertEquals(failures.length, 1);
+  assertEquals(
+    failures[0],
+    'turbopanel/src/daemon/metrics/backends/cloudflare/field-map.ts:1 references retired metrics infrastructure ("turbopanel_server_telemetry")',
+  );
+});
+
+test("collectMetricsLegacyFailures flags retired dataset names in website docs, wrangler.jsonc, and design-system docs", () => {
+  assertEquals(
+    collectMetricsLegacyFailures(
+      "website/docs/architecture/server-metrics.mdx",
+      "The retired v3 `turbopanel_server_host_metrics` layout.\n",
+    ).length,
+    1,
+  );
+  assertEquals(
+    collectMetricsLegacyFailures(
+      "turbopanel/wrangler.jsonc",
+      '// Retired: SERVER_METRICS bound "turbopanel_server_host_metrics"\n',
+    ).length,
+    1,
+  );
+  assertEquals(
+    collectMetricsLegacyFailures(
+      "ui/design-system/turbopanel/pages/server-metrics.md",
+      "dataset turbopanel_server_telemetry\n",
+    ).length,
+    1,
+  );
+});
+
+test("collectMetricsLegacyFailures still allows a retired dataset name inside the guard script itself", () => {
+  const failures = collectMetricsLegacyFailures(
+    "turbopaneld/scripts/check-metrics-legacy.ts",
+    "const name = 'turbopanel_server_telemetry';\n",
   );
   assertEquals(failures, []);
 });
@@ -286,6 +327,30 @@ test("collectMetricsLegacyFailures composes v4 boundary failures with the legacy
 
 test("runMetricsLegacyCheck passes on the current workspace", async () => {
   assertEquals(await runMetricsLegacyCheck(), []);
+});
+
+test("resolveScanRoots includes website docs, UI design-system, and wrangler.jsonc when those siblings exist", async () => {
+  const daemonRoot = await Deno.makeTempDir({ prefix: "tp-legacy-daemon-" });
+  const siblings = await Deno.makeTempDir({ prefix: "tp-legacy-siblings-" });
+  try {
+    await Deno.mkdir(`${daemonRoot}/src`, { recursive: true });
+    await Deno.mkdir(`${siblings}/website/docs`, { recursive: true });
+    await Deno.mkdir(`${siblings}/ui/design-system`, { recursive: true });
+    await Deno.mkdir(`${siblings}/turbopanel`, { recursive: true });
+    await Deno.writeTextFile(`${siblings}/turbopanel/wrangler.jsonc`, "{}\n");
+
+    const roots = await resolveScanRoots(daemonRoot, siblings);
+    const scopes = roots.map((root) => root.scope).sort((a, b) =>
+      a.localeCompare(b)
+    );
+    assertEquals(scopes.includes("website/docs"), true);
+    assertEquals(scopes.includes("ui/design-system"), true);
+    assertEquals(scopes.includes("turbopanel/wrangler.jsonc"), true);
+    assertEquals(scopes.includes("turbopaneld/src"), true);
+  } finally {
+    await Deno.remove(daemonRoot, { recursive: true });
+    await Deno.remove(siblings, { recursive: true });
+  }
 });
 
 test("reportMetricsLegacyFailures exits non-zero only on failures", () => {

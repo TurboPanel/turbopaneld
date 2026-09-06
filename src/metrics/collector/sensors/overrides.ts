@@ -49,9 +49,6 @@ const TOPOLOGY_ID_KEYS = [
   "hostingFilesystemId",
 ] as const satisfies readonly (keyof HardwareProfile)[];
 
-/** Pre-array NIC-slot pin keys — read (and folded into `nicSlotDeviceIds`) only, never written. */
-const LEGACY_NIC_SLOT_KEYS = ["nicSlot1DeviceId", "nicSlot2DeviceId"] as const;
-
 function pickTrimmedString(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
@@ -139,32 +136,22 @@ function applyTopologyIdBindings(
 
 /**
  * `nicSlotDeviceIds`: an array of non-blank id strings, deduplicated in
- * order (the slot-mapping layer applies the `MAX_NIC_SLOTS` cap). A profile
- * written before the array existed carries `nicSlot1DeviceId`/
- * `nicSlot2DeviceId` instead — those fold into the list (slot 1 first) so
- * an already-pinned server keeps its pins across the upgrade. Anything
- * malformed is dropped, never fatal.
+ * order (the slot-mapping layer applies the `MAX_NIC_SLOTS` cap). Only the
+ * current list key is accepted; `nicSlot1DeviceId` / `nicSlot2DeviceId` are
+ * ignored. Anything malformed is dropped, never fatal.
  */
 function applyNicSlotDeviceIds(
   record: Record<string, unknown>,
   profile: HardwareProfile,
 ): void {
   const raw = record.nicSlotDeviceIds;
-  if (Array.isArray(raw)) {
-    const ids: string[] = [];
-    for (const entry of raw) {
-      const id = pickTrimmedString(entry);
-      if (id && !ids.includes(id)) ids.push(id);
-    }
-    profile.nicSlotDeviceIds = ids;
-    return;
+  if (!Array.isArray(raw)) return;
+  const ids: string[] = [];
+  for (const entry of raw) {
+    const id = pickTrimmedString(entry);
+    if (id && !ids.includes(id)) ids.push(id);
   }
-  const legacy: string[] = [];
-  for (const key of LEGACY_NIC_SLOT_KEYS) {
-    const id = pickTrimmedString(record[key]);
-    if (id && !legacy.includes(id)) legacy.push(id);
-  }
-  if (legacy.length > 0) profile.nicSlotDeviceIds = legacy;
+  profile.nicSlotDeviceIds = ids;
 }
 
 function applyScalarFields(

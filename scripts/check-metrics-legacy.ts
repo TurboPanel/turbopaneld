@@ -8,24 +8,22 @@
  * `tabix` reference — code or comment — outside the managed-database-engine
  * code paths, where `clickhouse` is a legitimate catalog engine name.
  *
- * It also guards the retired Analytics Engine dataset names
- * `turbopanel_server_metrics` (the original single-datapoint layout) and
- * `turbopanel_server_telemetry` (the two-part core/extended layout schema v3
- * replaced) — AE datasets can't be deleted, so nothing should ever reference
- * either name again outside the handful of files that document them as
- * retired history (see RETIRED_DATASET_ALLOWED_PATHS below — its own narrow
- * list, separate from the broader ALLOWED_PATH_PREFIXES clickhouse/tabix
- * exemptions).
+ * It also guards retired Analytics Engine dataset names
+ * (`turbopanel_server_metrics`, `turbopanel_server_telemetry`,
+ * `turbopanel_server_host_metrics`). Those names must not appear outside
+ * this guard and its tests — there is no historical-context allowlist for
+ * docs or config (see RETIRED_DATASET_ALLOWED_PATHS).
  *
  * Scans this repo's `src/`, `scripts/`, and `orchestration/` trees, plus the
  * sibling `../turbopanel/src`, `../dev/src`, and `../ui/src` checkouts when
  * present (the co-located dev workspace layout), and the sibling contributor
  * tooling that used to provision the retired backend — `../dev/scripts`,
- * `../dev/orchestration`, and `../dev/Vagrantfile`; absent siblings are
- * skipped so a clean single-repo CI checkout still verifies its own tree.
- * Sibling repos run this guard from their own CI by checking out this repo
- * next to theirs (see their verify/build workflows), so a PR in any repo is
- * gated without needing the full co-located workspace.
+ * `../dev/orchestration`, and `../dev/Vagrantfile`. Also scans website docs,
+ * UI design-system docs, and `../turbopanel/wrangler.jsonc` so retired
+ * dataset names cannot return in public docs or Cloudflare config. Absent
+ * siblings are skipped so a clean single-repo CI checkout still verifies
+ * its own tree. Sibling repos run this guard from their own CI by checking
+ * out this repo next to theirs (see their verify/build workflows).
  *
  * Companion guard to `scripts/check-vocabulary.ts` — same walk/report shape.
  * Run: `deno task check:metrics-legacy`.
@@ -76,7 +74,7 @@ export const CLICKHOUSE_TABIX_PATTERN = /clickhouse|tabix/i;
  * retired dataset name.
  */
 export const RETIRED_DATASET_PATTERN =
-  /turbopanel_server_metrics(?![a-z0-9_])|turbopanel_server_telemetry(?![a-z0-9_])/i;
+  /turbopanel_server_metrics(?![a-z0-9_])|turbopanel_server_telemetry(?![a-z0-9_])|turbopanel_server_host_metrics(?![a-z0-9_])/i;
 
 /**
  * Managed-database-engine code paths where `clickhouse` names a catalog
@@ -115,24 +113,19 @@ export const ALLOWED_PATH_PREFIXES = [
   "ui/src/lib/managed-services.test.ts",
   "ui/src/lib/managed-releases.test.ts",
   "ui/src/lib/bindings.ts",
+  // UI design-system: managed catalog copy (not the retired metrics backend).
+  "ui/design-system/turbopanel/pages/project-create.md",
 ] as const;
 
 /**
- * Exact files allowed to name a retired AE dataset (`turbopanel_server_metrics`
- * / `turbopanel_server_telemetry`) as historical rationale for why the
- * current dataset got a new name. Deliberately its own narrow list — the
- * broad `turbopanel/src/daemon/metrics/backends/cloudflare/` prefix above
- * exists only for the ClickHouse-dialect call-outs and must not also
- * blanket-allow retired dataset names across every file in that directory
- * (e.g. `sql-api.ts`, `store.ts`). Extend this list only for genuine
- * historical-rationale call-outs, never for metrics plumbing.
+ * Exact files allowed to name a retired AE dataset. Only this guard and its
+ * tests may mention those names — to define and assert the ban. Docs,
+ * Wrangler config, and metrics module comments must describe the current
+ * dataset only.
  */
 export const RETIRED_DATASET_ALLOWED_PATHS = [
   "turbopaneld/scripts/check-metrics-legacy.ts",
   "turbopaneld/scripts/check-metrics-legacy.test.ts",
-  "turbopanel/src/daemon/metrics/backends/cloudflare/field-map.ts",
-  "turbopanel/src/daemon/metrics/AGENTS.md",
-  "website/docs/architecture/server-metrics.mdx",
 ] as const;
 
 const SKIP_DIRS = new Set([
@@ -155,7 +148,7 @@ const SKIP_FILENAMES = new Set([
 ]);
 
 const SCAN_EXTENSIONS =
-  /\.(ts|tsx|js|mjs|cjs|md|mdx|yml|yaml|sh|j2|json|css|rb)$/;
+  /\.(ts|tsx|js|mjs|cjs|md|mdx|yml|yaml|sh|j2|json|jsonc|css|rb)$/;
 
 /**
  * AE v4 physical column literal or the raw sentinel value, as real code (not
@@ -486,6 +479,21 @@ export async function resolveScanRoots(
   if (await fileExists(devVagrantfile)) {
     roots.push({ scope: "dev/Vagrantfile", file: devVagrantfile });
   }
+  // Public docs + console design-system docs (page overrides such as
+  // server-metrics.md) and the instance Wrangler config — retired dataset
+  // names must not return here as historical context.
+  const websiteDocs = `${siblingsRoot}/website/docs`;
+  if (await directoryExists(websiteDocs)) {
+    roots.push({ scope: "website/docs", dir: websiteDocs });
+  }
+  const uiDesignSystem = `${siblingsRoot}/ui/design-system`;
+  if (await directoryExists(uiDesignSystem)) {
+    roots.push({ scope: "ui/design-system", dir: uiDesignSystem });
+  }
+  const wrangler = `${siblingsRoot}/turbopanel/wrangler.jsonc`;
+  if (await fileExists(wrangler)) {
+    roots.push({ scope: "turbopanel/wrangler.jsonc", file: wrangler });
+  }
   return roots;
 }
 
@@ -530,12 +538,11 @@ export function reportMetricsLegacyFailures(
     error(
       `\n${failures.length} problem(s) found. Server metrics use DuckDB + Parquet ` +
         "(Deno) / Analytics Engine (Workers) — the ClickHouse backend and the " +
-        "Tabix GUI are retired, and so are the `turbopanel_server_metrics` / " +
-        "`turbopanel_server_telemetry` AE dataset names. Only managed-database-" +
-        "engine code paths may name the `clickhouse` catalog engine, and only " +
-        "the files already listed in RETIRED_DATASET_ALLOWED_PATHS may name a " +
-        "retired dataset as history; extend that list in this script only for " +
-        "such cases, never for metrics plumbing. AE v4 positional tokens " +
+        "Tabix GUI are retired. Only managed-database-engine code paths may name " +
+        "the `clickhouse` catalog engine. Retired AE dataset names " +
+        "(`turbopanel_server_metrics`, `turbopanel_server_telemetry`, " +
+        "`turbopanel_server_host_metrics`) must not appear outside this guard " +
+        "and its tests. AE v4 positional tokens " +
         "(double<N>/blob<N>/-1e308) must stay confined to backends/cloudflare/ " +
         "— always derive columns through field-map-v4.ts. v4-suffixed files and " +
         "metrics-contract surfaces outside the metrics tree must never reference " +

@@ -60,7 +60,7 @@ it("parseHardwareProfile reads nicSlotDeviceIds as a deduplicated list of non-bl
   );
 });
 
-it("parseHardwareProfile folds a pre-array nicSlot1DeviceId/nicSlot2DeviceId profile into nicSlotDeviceIds, slot 1 first", () => {
+it("parseHardwareProfile ignores pre-array nicSlot1DeviceId/nicSlot2DeviceId keys", () => {
   assertEquals(
     parseHardwareProfile(JSON.stringify({
       nicSlot1DeviceId: "mac:a",
@@ -68,7 +68,6 @@ it("parseHardwareProfile folds a pre-array nicSlot1DeviceId/nicSlot2DeviceId pro
       hostingFilesystemId: "fs:dev:/dev/sdb1",
     })),
     {
-      nicSlotDeviceIds: ["mac:a", "mac:b"],
       hostingFilesystemId: "fs:dev:/dev/sdb1",
     },
   );
@@ -76,14 +75,16 @@ it("parseHardwareProfile folds a pre-array nicSlot1DeviceId/nicSlot2DeviceId pro
     parseHardwareProfile(
       JSON.stringify({ nicSlot1DeviceId: null, nicSlot2DeviceId: "mac:b" }),
     ),
-    { nicSlotDeviceIds: ["mac:b"] },
+    {},
   );
-  // The array, when present, wins over any legacy keys alongside it.
   assertEquals(
     parseHardwareProfile(
-      JSON.stringify({ nicSlotDeviceIds: [], nicSlot1DeviceId: "mac:a" }),
+      JSON.stringify({
+        nicSlotDeviceIds: ["mac:a"],
+        nicSlot1DeviceId: "mac:b",
+      }),
     ),
-    { nicSlotDeviceIds: [] },
+    { nicSlotDeviceIds: ["mac:a"] },
   );
 });
 
