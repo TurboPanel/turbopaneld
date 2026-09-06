@@ -278,3 +278,106 @@ test("buildGpuSamples invalidates the Intel engine-busy baseline on an unreadabl
   samples = await tick();
   assertEquals(samples[0].utilizationPercent, null);
 });
+
+test("SysfsGpuAdapter reduces Intel RC6 residency to a tracker-backed GT-awake percent across two ticks", async () => {
+  const card0 = `${SYS_ROOT}/class/drm/card0`;
+  const files: Record<string, string | undefined> = {
+    [`${card0}/device/vendor`]: "0x8086",
+    [`${card0}/device/uevent`]: "PCI_SLOT_NAME=0000:00:02.0\nDRIVER=i915\n",
+    [`${card0}/gt/gt0/rc6_residency_ms`]: "100000",
+  };
+  const dirs: Record<string, string[]> = {
+    [`${SYS_ROOT}/class/drm`]: ["card0"],
+    [`${card0}/engine`]: ["rcs0"],
+    [`${card0}/gt`]: ["gt0"],
+    [`${card0}/gt/gt0`]: ["rc6_residency_ms"],
+  };
+  const io = fakeIo(files, dirs);
+  const adapter = new SysfsGpuAdapter({ io, sysRoot: SYS_ROOT });
+  const gpu: GpuTopology = {
+    gpuId: "pci:0000:00:02.0",
+    kind: "drm",
+    pciPath: "0000:00:02.0",
+    vendor: "intel",
+    chip: "i915",
+  };
+  const tracker = new CounterBaselineTracker();
+
+  const first = await adapter.read(gpu, ctx({ tracker, seconds: 10 }));
+  assertEquals(first?.utilizationPercent, null);
+
+  // 5000 ms RC6 over 10 s wall = 50% idle = 50% GT-awake.
+  files[`${card0}/gt/gt0/rc6_residency_ms`] = "105000";
+  const second = await adapter.read(gpu, ctx({ tracker, seconds: 10 }));
+  assertEquals(second?.utilizationPercent, 50);
+});
+
+test("SysfsGpuAdapter prefers DRM engine busy over RC6 when both exist", async () => {
+  const card0 = `${SYS_ROOT}/class/drm/card0`;
+  const files: Record<string, string | undefined> = {
+    [`${card0}/device/vendor`]: "0x8086",
+    [`${card0}/device/uevent`]: "PCI_SLOT_NAME=0000:00:02.0\nDRIVER=i915\n",
+    [`${card0}/engine/rcs0/busy`]: "0",
+    [`${card0}/gt/gt0/rc6_residency_ms`]: "0",
+  };
+  const dirs: Record<string, string[]> = {
+    [`${SYS_ROOT}/class/drm`]: ["card0"],
+    [`${card0}/engine`]: ["rcs0"],
+    [`${card0}/gt`]: ["gt0"],
+  };
+  const io = fakeIo(files, dirs);
+  const adapter = new SysfsGpuAdapter({ io, sysRoot: SYS_ROOT });
+  const gpu: GpuTopology = {
+    gpuId: "pci:0000:00:02.0",
+    kind: "drm",
+    pciPath: "0000:00:02.0",
+    vendor: "intel",
+    chip: "i915",
+  };
+  const tracker = new CounterBaselineTracker();
+  await adapter.read(gpu, ctx({ tracker, seconds: 10 }));
+  files[`${card0}/engine/rcs0/busy`] = String(2_000_000_000);
+  files[`${card0}/gt/gt0/rc6_residency_ms`] = "0";
+  const second = await adapter.read(gpu, ctx({ tracker, seconds: 10 }));
+  // Engine busy +2s / 10s = 20%. Fully-busy RC6 (delta 0) would be 100%.
+  assertEquals(second?.utilizationPercent, 20);
+});
+
+test("SysfsGpuAdapter reduces RAPL uncore energy_uj to Intel GPU watts across two ticks", async () => {
+  const card0 = `${SYS_ROOT}/class/drm/card0`;
+  const uncore = `${SYS_ROOT}/class/powercap/intel-rapl:0:1`;
+  const files: Record<string, string | undefined> = {
+    [`${card0}/device/vendor`]: "0x8086",
+    [`${card0}/device/uevent`]: "PCI_SLOT_NAME=0000:00:02.0\nDRIVER=i915\n",
+    [`${card0}/gt/gt0/rc6_residency_ms`]: "0",
+    [`${SYS_ROOT}/class/powercap/intel-rapl:0/name`]: "package-0",
+    [`${SYS_ROOT}/class/powercap/intel-rapl:0/energy_uj`]: "9000000000",
+    [`${uncore}/name`]: "uncore",
+    [`${uncore}/energy_uj`]: "1000000000",
+  };
+  const dirs: Record<string, string[]> = {
+    [`${SYS_ROOT}/class/drm`]: ["card0"],
+    [`${card0}/engine`]: ["rcs0"],
+    [`${card0}/gt`]: ["gt0"],
+    [`${SYS_ROOT}/class/powercap`]: ["intel-rapl:0", "intel-rapl:0:1"],
+  };
+  const io = fakeIo(files, dirs);
+  const adapter = new SysfsGpuAdapter({ io, sysRoot: SYS_ROOT });
+  const gpu: GpuTopology = {
+    gpuId: "pci:0000:00:02.0",
+    kind: "drm",
+    pciPath: "0000:00:02.0",
+    vendor: "intel",
+    chip: "i915",
+  };
+  const tracker = new CounterBaselineTracker();
+
+  const first = await adapter.read(gpu, ctx({ tracker, seconds: 10 }));
+  assertEquals(first?.powerWatts, null);
+
+  // +50_000_000 µJ over 10 s = 5 W. Package energy must not leak in.
+  files[`${uncore}/energy_uj`] = "1050000000";
+  files[`${SYS_ROOT}/class/powercap/intel-rapl:0/energy_uj`] = "9500000000";
+  const second = await adapter.read(gpu, ctx({ tracker, seconds: 10 }));
+  assertEquals(second?.powerWatts, 5);
+});

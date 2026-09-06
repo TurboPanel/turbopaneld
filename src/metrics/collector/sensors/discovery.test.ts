@@ -4,6 +4,7 @@ import { fromFileUrl } from "@std/path";
 import {
   defaultSensorIo,
   discoverSensors,
+  findIntelRaplGpuEnergyPath,
   selectCandidate,
   selectGpuDevice,
   sensorId,
@@ -177,6 +178,14 @@ it("discoverSensors reads Intel DRM engine busy counters when no i915 hwmon exis
     "i915:vcs0",
     "i915:vecs0",
   ]);
+});
+
+it("discoverSensors keeps an Intel DRM card with RC6 and no engine busy files", async () => {
+  const caps = await discoverSensors(fixtureRoot("sensors-intel-drm-rc6"));
+  assertEquals(caps.gpuDevices.length, 1);
+  assertEquals(caps.gpuDevices[0].chip, "i915");
+  assertEquals(caps.gpuDevices[0].utilization, []);
+  assertEquals(caps.gpuDevices[0].power, []);
 });
 
 it("discoverSensors attaches DRM engine busy counters to an existing i915 hwmon device", async () => {
@@ -430,4 +439,46 @@ it("defaultSensorIo listDir stays empty when both readDir and ls fail", async ()
     runLs: () => Promise.resolve({ code: 1, stdout: new Uint8Array() }),
   });
   assertEquals(await io.listDir("/sys/class/hwmon"), []);
+});
+
+it("findIntelRaplGpuEnergyPath picks the uncore RAPL subdomain, never the package", async () => {
+  const root = "/sys";
+  const powercap = `${root}/class/powercap`;
+  const files: Record<string, string | undefined> = {
+    [`${powercap}/intel-rapl:0/name`]: "package-0",
+    [`${powercap}/intel-rapl:0/energy_uj`]: "9000000000",
+    [`${powercap}/intel-rapl:0:0/name`]: "core",
+    [`${powercap}/intel-rapl:0:0/energy_uj`]: "1000000000",
+    [`${powercap}/intel-rapl:0:1/name`]: "uncore",
+    [`${powercap}/intel-rapl:0:1/energy_uj`]: "500000000",
+    [`${powercap}/intel-rapl:0:2/name`]: "dram",
+    [`${powercap}/intel-rapl:0:2/energy_uj`]: "200000000",
+  };
+  const dirs: Record<string, string[]> = {
+    [powercap]: [
+      "intel-rapl:0",
+      "intel-rapl:0:0",
+      "intel-rapl:0:1",
+      "intel-rapl:0:2",
+    ],
+  };
+  assertEquals(
+    await findIntelRaplGpuEnergyPath(root, memoryIo(files, dirs)),
+    `${powercap}/intel-rapl:0:1/energy_uj`,
+  );
+});
+
+it("findIntelRaplGpuEnergyPath skips uncore when energy_uj is unreadable", async () => {
+  const root = "/sys";
+  const powercap = `${root}/class/powercap`;
+  const files: Record<string, string | undefined> = {
+    [`${powercap}/intel-rapl:0:1/name`]: "uncore",
+  };
+  const dirs: Record<string, string[]> = {
+    [powercap]: ["intel-rapl:0:1"],
+  };
+  assertEquals(
+    await findIntelRaplGpuEnergyPath(root, memoryIo(files, dirs)),
+    undefined,
+  );
 });

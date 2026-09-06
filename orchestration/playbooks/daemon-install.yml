@@ -60,6 +60,7 @@
     - role: deno-runtime
     - role: daemon-logs
     - role: principal-access
+    - role: rapl-access
     - role: daemon-config
     - role: daemon-launch
 

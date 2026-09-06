@@ -1,0 +1,17 @@
+---
+- name: Reload RAPL udev rules
+  ansible.builtin.command:
+    argv:
+      - udevadm
+      - control
+      - --reload-rules
+  changed_when: true
+
+- name: Trigger powercap udev
+  ansible.builtin.command:
+    argv:
+      - udevadm
+      - trigger
+      - --subsystem-match=powercap
+      - --action=add
+  changed_when: true

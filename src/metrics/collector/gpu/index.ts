@@ -97,15 +97,13 @@ function invalidateKnownBaselineKeys(
 ): void {
   tracker.invalidate(`gpu:nvml:${gpuId}:violation`);
   tracker.invalidate(`gpu:dcgm:${gpuId}:violation`);
-  // sysfs engine-busy keys are per-engine-name (`gpu:sysfs:<gpuId>:engine:
-  // <name>`) and unbounded without device knowledge — the engine names
-  // themselves are only known to `SysfsGpuAdapter` at read time, discovered
-  // fresh every tick. `invalidatePrefix` drops every key under this GPU's
-  // namespace without needing them enumerated here, so an unreadable tick
-  // never leaves a stale per-engine baseline for the next readable tick to
-  // diff across (which would compress however many missed intervals
-  // elapsed into one fabricated utilization sample).
-  tracker.invalidatePrefix(`gpu:sysfs:${gpuId}:engine:`);
+  // sysfs keys fan out per source (`gpu:sysfs:<gpuId>:engine:<name>` and
+  // `gpu:sysfs:<gpuId>:rc6_ms`) and are discovered fresh every tick.
+  // `invalidatePrefix` drops every key under this GPU's namespace so an
+  // unreadable tick never leaves a stale baseline for the next readable
+  // tick to diff across (which would compress missed intervals into one
+  // fabricated utilization sample).
+  tracker.invalidatePrefix(`gpu:sysfs:${gpuId}:`);
 }
 
 /**

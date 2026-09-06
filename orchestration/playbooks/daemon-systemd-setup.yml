@@ -51,6 +51,7 @@
   roles:
     - role: daemon-prereqs
     - role: turbopanel-user
+    - role: rapl-access
     - role: deno-runtime
     - role: runtime-sockets
     - role: daemon-logs

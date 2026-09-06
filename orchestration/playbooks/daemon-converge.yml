@@ -58,6 +58,7 @@
     - role: daemon-logs
     - role: daemon-prereqs
     - role: principal-access
+    - role: rapl-access
     - role: time-sync
 
   # Already-provisioned managed daemons only ever receive this lightweight

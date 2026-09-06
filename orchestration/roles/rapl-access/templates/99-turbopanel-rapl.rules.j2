@@ -1,0 +1,3 @@
+# RAPL energy_uj is 0400 (root-only). The TurboPanel daemon samples it for
+# CPU package watts and Intel iGPU PP1/uncore watts — never world-readable.
+SUBSYSTEM=="powercap", ACTION=="add", KERNEL=="*-rapl:*", RUN+="/bin/sh -c 'test -e /sys%p/energy_uj || exit 0; chgrp {{ turbopanel_group }} /sys%p/energy_uj; chmod g+r /sys%p/energy_uj'"

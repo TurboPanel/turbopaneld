@@ -147,7 +147,8 @@ export const GPU_HWMON_CHIPS: ReadonlySet<string> = new Set([
   // kernels when CONFIG_DRM_I915_HWMON is on *and* the platform exposes the
   // PCODE mailbox. Alder Lake-N / Twin Lake (N150) often loads i915 but
   // never registers this chip — utilization then comes from DRM engine
-  // busy counters in {@link discoverDrmIntelGpuDevices}, not hwmon.
+  // busy counters or inverted RC6 residency in
+  // {@link discoverDrmIntelGpuDevices}, not hwmon.
   "i915",
 ]);
 
@@ -157,8 +158,10 @@ export const GPU_HWMON_CHIPS: ReadonlySet<string> = new Set([
  * attribute; `gt_busy_percent` is a best-effort i915 placeholder that real
  * kernels typically do not expose. Intel i915/Xe utilization on ADL-N and
  * similar iGPUs is the accumulating engine busy nanosecond counter
- * under `/sys/class/drm/cardN/engine/<name>/busy` — see
- * {@link discoverDrmIntelGpuDevices}.
+ * under `/sys/class/drm/cardN/engine/<name>/busy` when that file exists.
+ * Stock i915 (Debian 6.12, current Alpine) does not ship `engine/<name>/busy`;
+ * utilization then falls through to inverted `gt/gtN/rc6_residency_ms` —
+ * see {@link discoverDrmIntelGpuDevices}.
  */
 const GPU_UTILIZATION_FILENAMES: readonly string[] = [
   "gpu_busy_percent",
@@ -187,6 +190,13 @@ const PREFERRED_GPU_TEMP_LABELS = ["edge", "junction"] as const;
 const TEMP_INPUT_RE = /^temp(\d+)_input$/;
 const FAN_INPUT_RE = /^fan(\d+)_input$/;
 const RAPL_PACKAGE_DIR_RE = /^intel-rapl:\d+$/;
+const RAPL_SUBDOMAIN_RE = /^intel-rapl:\d+:\d+$/;
+/** RAPL PP1 — client GPU power plane. Kernel sysfs name is `uncore`; perf RAPL event is `energy-gpu`. */
+const RAPL_GPU_DOMAIN_NAMES: ReadonlySet<string> = new Set([
+  "uncore",
+  "gpu",
+  "pp1",
+]);
 const NVME_BLOCK_DEVICE_RE = /^nvme\d+n\d+$/;
 const SATA_BLOCK_DEVICE_RE = /^sd[a-z]+$/;
 
@@ -377,6 +387,55 @@ function engineSort(a: string, b: string): number {
   return a.localeCompare(b);
 }
 
+const GT_DIR_RE = /^gt\d+$/;
+
+/**
+ * World-readable i915/Xe RC6 residency, used as a GT-awake utilization
+ * fallback when `engine/<name>/busy` is absent. Prefers per-tile
+ * `gt/gtN/rc6_residency_ms` over the legacy `power/rc6_residency_ms` ABI.
+ */
+export async function findIntelRc6ResidencyPath(
+  cardPath: string,
+  io: SensorIo,
+): Promise<string | undefined> {
+  const gtRoot = `${cardPath}/gt`;
+  const gts = [...await io.listDir(gtRoot)]
+    .filter((name) => GT_DIR_RE.test(name))
+    .sort((a, b) => a.localeCompare(b));
+  for (const gt of gts) {
+    const path = `${gtRoot}/${gt}/rc6_residency_ms`;
+    if ((await io.readFile(path)) !== undefined) return path;
+  }
+  const legacy = `${cardPath}/power/rc6_residency_ms`;
+  if ((await io.readFile(legacy)) !== undefined) return legacy;
+  return undefined;
+}
+
+/**
+ * RAPL PP1 (`uncore`/`gpu`) `energy_uj` — the sysfs twin of btop/intel_gpu_top
+ * `power/energy-gpu`. Package/core/dram are CPU or memory, never GPU.
+ * Kernel ships `energy_uj` as 0400; skip when unreadable (orchestration
+ * `rapl-access` grants the daemon group `g+r`).
+ */
+export async function findIntelRaplGpuEnergyPath(
+  root: string,
+  io: SensorIo,
+): Promise<string | undefined> {
+  const powercapRoot = `${root}/class/powercap`;
+  const matches: string[] = [];
+  for (const entry of await io.listDir(powercapRoot)) {
+    if (!RAPL_SUBDOMAIN_RE.test(entry)) continue;
+    const dir = `${powercapRoot}/${entry}`;
+    const name = (await io.readFile(`${dir}/name`))?.trim().toLowerCase();
+    if (!name || !RAPL_GPU_DOMAIN_NAMES.has(name)) continue;
+    const path = `${dir}/energy_uj`;
+    if ((await io.readFile(path)) === undefined) continue;
+    matches.push(path);
+  }
+  matches.sort((a, b) => a.localeCompare(b));
+  return matches[0];
+}
+
 /** A hwmon-sourced GPU device's own PCI identity, for correlation to a DRM card representing the same physical GPU. */
 async function hwmonDevicePciPath(
   device: GpuDeviceCandidates,
@@ -427,14 +486,18 @@ async function findExistingIntelHwmonDevice(
 
 /**
  * Intel iGPU utilization when hwmon never registered an `i915`/`xe` chip:
- * DRM engine busy files (accumulating nanoseconds, world-readable). AMD
- * already has `gpu_busy_percent`; NVIDIA stays unsupported. Cards whose
- * vendor is not Intel are skipped. When an i915 hwmon device already
- * exists with no utilization gauge, the engine counters attach to that
- * device (via {@link findExistingIntelHwmonDevice}) so one GPU still feeds
- * every measurement — correlated by PCI identity, never by driver name
- * alone, so a second same-driver card is never merged into or skipped
- * behind the first.
+ * DRM engine busy files (accumulating nanoseconds, world-readable) when
+ * present; otherwise inverted RC6 residency (`gt/gtN/rc6_residency_ms`).
+ * Stock i915 does not expose `engine/<name>/busy` — Debian 6.12 and current
+ * Alpine on Alder Lake-N / Twin Lake (N150, PCI `8086:46D4`) have engine
+ * directories and RC6, not busy files. AMD already has `gpu_busy_percent`;
+ * NVIDIA stays unsupported. Cards whose vendor is not Intel are skipped.
+ * When an i915 hwmon device already exists with no utilization gauge, the
+ * engine counters attach to that device (via
+ * {@link findExistingIntelHwmonDevice}) so one GPU still feeds every
+ * measurement — correlated by PCI identity, never by driver name alone,
+ * so a second same-driver card is never merged into or skipped behind the
+ * first. An Intel DRM card with neither busy files nor RC6 is skipped.
  */
 async function discoverDrmIntelGpuDevices(
   root: string,
@@ -462,7 +525,12 @@ async function discoverDrmIntelGpuDevices(
       if ((await io.readFile(path)) === undefined) continue;
       utilization.push({ chip, label: engine, path });
     }
-    if (utilization.length === 0) continue;
+    if (
+      utilization.length === 0 &&
+      (await findIntelRc6ResidencyPath(cardPath, io)) === undefined
+    ) {
+      continue;
+    }
 
     const existing = await findExistingIntelHwmonDevice(
       capabilities.gpuDevices,

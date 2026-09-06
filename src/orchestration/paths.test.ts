@@ -828,6 +828,27 @@ test("daemon playbooks run deno-runtime unconditionally", () => {
   assertRoleIsUnconditional("daemon-install.yml", "deno-runtime");
 });
 
+test("daemon playbooks grant RAPL energy_uj to the daemon group", () => {
+  assertRoleIsUnconditional("daemon-converge.yml", "rapl-access");
+  assertRoleIsUnconditional("daemon-install.yml", "rapl-access");
+  const rule = Deno.readTextFileSync(
+    join(
+      fromMeta,
+      "orchestration",
+      "roles",
+      "rapl-access",
+      "templates",
+      "99-turbopanel-rapl.rules.j2",
+    ),
+  );
+  if (!rule.includes("chgrp {{ turbopanel_group }}")) {
+    throw new TypeError("rapl-access udev rule must chgrp the daemon group");
+  }
+  if (!rule.includes("chmod g+r")) {
+    throw new TypeError("rapl-access udev rule must chmod g+r energy_uj");
+  }
+});
+
 test("deno-runtime prunes superseded vendored versions", () => {
   const tasks = Deno.readTextFileSync(
     join(

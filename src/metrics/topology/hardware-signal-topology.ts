@@ -113,9 +113,30 @@ async function toSignal(
     kind,
     unit,
     component,
-    label: candidate.label,
+    label: operatorFacingSignalLabel(candidate.label, kind, component),
     ...(thresholds ? { thresholds } : {}),
   };
+}
+
+/**
+ * Kernel hwmon/RAPL names (`Package id 0`, `package-0`) are identity, not
+ * operator copy. Chart titles use these; `signalId` stays `chip:label`.
+ */
+function operatorFacingSignalLabel(
+  kernelLabel: string,
+  kind: string,
+  component: string,
+): string {
+  if (
+    component === "cpu" && kind === "temperature" &&
+    CPU_PACKAGE_TEMP_LABEL_RE.test(kernelLabel)
+  ) {
+    return "CPU package temperature";
+  }
+  if (component === "cpu" && kind === "power" && /^package-\d+$/i.test(kernelLabel)) {
+    return "CPU package power";
+  }
+  return kernelLabel;
 }
 
 async function toSignals(

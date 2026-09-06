@@ -1,0 +1,15 @@
+---
+galaxy_info:
+  role_name: rapl_access
+  author: turbopanel
+  description: >
+    Grant the daemon group read on RAPL energy_uj (kernel ships it 0400)
+    so CPU package watts and Intel iGPU PP1/uncore watts can be sampled.
+  license: AGPL-3.0
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Debian
+      versions:
+        - trixie
+
+dependencies: []

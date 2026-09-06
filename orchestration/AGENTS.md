@@ -33,6 +33,18 @@ stringify them). `timesyncd.conf` is `root:<systemd-timesync|root>` mode
   is gated on `turbopanel_ntp_enabled | bool` so a disable + config change does
   not restart/start timesyncd after `timedatectl set-ntp false`.
 
+### RAPL sysfs (`rapl-access`)
+
+Kernel RAPL `energy_uj` is **0400** (root-only). The daemon collector reads it
+for CPU package watts and Intel iGPU PP1/`uncore` watts — file reads only, no
+`CAP_PERFMON`. This role templates
+`/etc/udev/rules.d/99-turbopanel-rapl.rules` (`chgrp` the daemon group +
+`chmod g+r`, never world-readable) and applies the same grant to live
+`/sys/class/powercap/*/energy_uj` on every converge. Wired into
+`daemon-converge.yml`, `daemon-install.yml`, and `daemon-systemd-setup.yml`
+(plus the dev overlay `instance-dev-install.yml`). Hosts without RAPL are a
+no-op (`failed_when: false` on the live grant).
+
 ### TurboFabric (`server.fabric.reconcile`)
 
 There is **no** Ansible WireGuard apply role. The daemon

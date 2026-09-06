@@ -25,7 +25,7 @@ test("collectHardwareSignals maps hwmon/RAPL candidates into stable signal ident
   assertEquals(temp?.signalId, "signal:coretemp:Package id 0");
   assertEquals(temp?.unit, "celsius");
   assertEquals(temp?.component, "cpu");
-  assertEquals(temp?.label, "Package id 0");
+  assertEquals(temp?.label, "CPU package temperature");
   // hwmon's sibling tempN_max/tempN_crit files, converted to celsius same as the reading.
   assertEquals(temp?.thresholds, { warning: 90, critical: 100 });
 
@@ -33,6 +33,7 @@ test("collectHardwareSignals maps hwmon/RAPL candidates into stable signal ident
   assertEquals(power?.signalId, "signal:intel-rapl:package-0");
   assertEquals(power?.unit, "watts");
   assertEquals(power?.component, "cpu");
+  assertEquals(power?.label, "CPU package power");
   // RAPL energy counters expose no threshold files.
   assertEquals(power?.thresholds, undefined);
 });
@@ -84,6 +85,7 @@ test("collectHardwareSignals: the full conservative catalog — fan-free, GPU-fr
   const power = signals.find((s) => s.kind === "power");
   assertEquals(power?.component, "cpu");
   assertEquals(power?.signalId, "signal:intel-rapl:package-0");
+  assertEquals(power?.label, "CPU package power");
 
   const hottestCore = signals.find((s) =>
     s.signalId === CPU_HOTTEST_CORE_SIGNAL_ID

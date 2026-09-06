@@ -7,11 +7,18 @@
  *
  * `memoryActivityPercent`, PCIe throughput, and `throttlePercent` stay
  * `null` — there is no stable AMD/Intel consumer-part sysfs source for any
- * of them.
+ * of them. Intel iGPU utilization prefers `engine/<name>/busy` when present,
+ * then inverted `gt/gtN/rc6_residency_ms` (GT-awake, not per-engine busy).
+ * Intel iGPU power prefers hwmon `power1_average` when present, then RAPL
+ * PP1 (`uncore`/`gpu` `energy_uj` — the same RAPL GPU energy btop reads
+ * via `perf_event_open` `energy-gpu`, without needing `CAP_PERFMON`).
+ * Intel iGPU `memoryUsedBytes` stays `null` — `mem_info_vram_used` is AMD.
  */
 import {
   defaultSensorIo,
   discoverSensors,
+  findIntelRaplGpuEnergyPath,
+  findIntelRc6ResidencyPath,
   type GpuDeviceCandidates,
   type SensorIo,
 } from "../sensors/discovery.ts";
@@ -28,6 +35,7 @@ import type { GpuAdapter, GpuReadContext, GpuReading } from "./adapter.ts";
 const AMD_HWMON_CHIP = "amdgpu";
 /** amdgpu's distinct VRAM-junction hwmon label (RDNA2+) — never `junction`, which is the GPU-die hotspot, not memory. */
 const MEMORY_TEMPERATURE_LABEL = "mem";
+const DRM_CARD_DIR_RE = /^card\d+$/;
 
 async function devicePciPath(
   device: GpuDeviceCandidates,
@@ -122,6 +130,96 @@ function utilizationFromEngineBusy(
   return Math.min(100, maxRatio * 100);
 }
 
+/**
+ * Read accumulating RC6 residency milliseconds from a DRM card path, or
+ * from an i915 hwmon chip via its PCI `device/drm/cardN` child.
+ */
+async function readIntelRc6ResidencyMs(
+  device: GpuDeviceCandidates,
+  io: SensorIo,
+): Promise<number | null> {
+  const cardPaths = [device.path];
+  for (const entry of await io.listDir(`${device.path}/device/drm`)) {
+    if (!DRM_CARD_DIR_RE.test(entry)) continue;
+    cardPaths.push(`${device.path}/device/drm/${entry}`);
+  }
+  for (const cardPath of cardPaths) {
+    const path = await findIntelRc6ResidencyPath(cardPath, io);
+    if (!path) continue;
+    const ms = Number((await io.readFile(path))?.trim());
+    if (Number.isFinite(ms) && ms >= 0) return ms;
+  }
+  return null;
+}
+
+/**
+ * Invert RC6 residency into a 0–100 GT-awake percent. `rc6_residency_ms`
+ * accumulates time the GT spent in RC6 (asleep); a fully idle GPU tracks
+ * wall clock 1:1 (0% util), a fully busy GPU does not increment (100%).
+ * First sample / boot change / counter decrease yield `null`.
+ */
+function utilizationFromIntelRc6(
+  gpuId: string,
+  rc6Ms: number,
+  ctx: GpuReadContext,
+): number | null {
+  const deltaMs = ctx.tracker.delta(
+    `gpu:sysfs:${gpuId}:rc6_ms`,
+    rc6Ms,
+    ctx.bootGeneration,
+  );
+  if (deltaMs === null) return null;
+  const wallMs = ctx.seconds * 1000;
+  if (wallMs <= 0) return null;
+  const idleRatio = deltaMs / wallMs;
+  if (!Number.isFinite(idleRatio)) return null;
+  return Math.min(100, Math.max(0, (1 - idleRatio) * 100));
+}
+
+async function utilizationFromIntelRc6Fallback(
+  gpuId: string,
+  device: GpuDeviceCandidates,
+  ctx: GpuReadContext,
+  io: SensorIo,
+): Promise<number | null> {
+  const rc6Ms = await readIntelRc6ResidencyMs(device, io);
+  if (rc6Ms === null) {
+    ctx.tracker.invalidate(`gpu:sysfs:${gpuId}:rc6_ms`);
+    return null;
+  }
+  return utilizationFromIntelRc6(gpuId, rc6Ms, ctx);
+}
+
+/**
+ * RAPL PP1 cumulative `energy_uj` → average watts over the interval.
+ * Same first-sample / boot / decrease nulling as CPU RAPL.
+ */
+async function powerFromIntelRapl(
+  gpuId: string,
+  sysRoot: string,
+  ctx: GpuReadContext,
+  io: SensorIo,
+): Promise<number | null> {
+  const path = await findIntelRaplGpuEnergyPath(sysRoot, io);
+  if (!path) {
+    ctx.tracker.invalidate(`gpu:sysfs:${gpuId}:rapl_uj`);
+    return null;
+  }
+  const energyMicrojoules = Number((await io.readFile(path))?.trim());
+  if (!Number.isFinite(energyMicrojoules) || energyMicrojoules < 0) {
+    ctx.tracker.invalidate(`gpu:sysfs:${gpuId}:rapl_uj`);
+    return null;
+  }
+  const rate = ctx.tracker.rate(
+    `gpu:sysfs:${gpuId}:rapl_uj`,
+    energyMicrojoules,
+    ctx.bootGeneration,
+    ctx.seconds,
+  );
+  if (rate === null) return null;
+  return rate / 1e6;
+}
+
 export class SysfsGpuAdapter implements GpuAdapter {
   readonly id = "sysfs" as const;
   readonly #io: SensorIo;
@@ -167,6 +265,16 @@ export class SysfsGpuAdapter implements GpuAdapter {
       const utilizationPercent = utilization.percent ??
         (utilization.busy
           ? utilizationFromEngineBusy(gpu.gpuId, utilization.busy.engines, ctx)
+          : await utilizationFromIntelRc6Fallback(
+            gpu.gpuId,
+            device,
+            ctx,
+            this.#io,
+          ));
+
+      const powerWatts = power.watts ??
+        (gpu.vendor === "intel"
+          ? await powerFromIntelRapl(gpu.gpuId, this.#sysRoot, ctx, this.#io)
           : null);
 
       return {
@@ -175,7 +283,7 @@ export class SysfsGpuAdapter implements GpuAdapter {
         memoryActivityPercent: null,
         temperatureCelsius: temperature.celsius,
         memoryTemperatureCelsius,
-        powerWatts: power.watts,
+        powerWatts,
         pcieReceiveBytesPerSecond: null,
         pcieTransmitBytesPerSecond: null,
         throttlePercent: null,

@@ -1,0 +1,38 @@
+---
+# Kernel RAPL energy_uj is 0400 so unprivileged processes cannot read the
+# power side-channel. The collector is file-read only (no CAP_PERFMON), so
+# the daemon group needs g+r. Re-applied on every converge; udev covers reboot.
+- name: Install RAPL energy_uj udev rule
+  ansible.builtin.template:
+    src: 99-turbopanel-rapl.rules.j2
+    dest: /etc/udev/rules.d/99-turbopanel-rapl.rules
+    owner: root
+    group: root
+    mode: "0640"
+  notify:
+    - Reload RAPL udev rules
+    - Trigger powercap udev
+
+- name: Grant daemon group read on current RAPL energy_uj
+  ansible.builtin.shell: |
+    changed=0
+    for f in /sys/class/powercap/*/energy_uj; do
+      [ -f "$f" ] || continue
+      grp=$(stat -c %G "$f")
+      mode=$(stat -c %a "$f")
+      if [ "$grp" != "{{ turbopanel_group }}" ]; then
+        chgrp "{{ turbopanel_group }}" "$f"
+        changed=1
+      fi
+      case "$mode" in
+        ?[4567]?) ;;
+        *)
+          chmod g+r "$f"
+          changed=1
+          ;;
+      esac
+    done
+    [ "$changed" -eq 0 ]
+  register: rapl_energy_grant
+  changed_when: rapl_energy_grant.rc != 0
+  failed_when: false
