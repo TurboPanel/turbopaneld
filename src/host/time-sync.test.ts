@@ -1,11 +1,13 @@
 import { assertEquals } from "@std/assert";
 import {
+  getLastObservedTimeSync,
   parseEtcTimezone,
   parseShowTimesyncLastSyncedAt,
   parseTimedatectlShow,
   parseTimedatectlStatus,
   parseTimesyncdConf,
   readTimeSync,
+  setLastObservedTimeSyncForTests,
 } from "./time-sync.ts";
 
 /**
@@ -532,5 +534,42 @@ test("readTimeSync default reader uses runCat code 1 as a miss", () => {
     assertEquals(result.ntpServers, []);
   } finally {
     Deno.removeSync(root, { recursive: true });
+  }
+});
+
+test("readTimeSync with injected (host-free) io never writes the process-wide time-sync cache", () => {
+  try {
+    setLastObservedTimeSyncForTests(undefined);
+    const root = Deno.makeTempDirSync({ prefix: "tp-timesync-cache-" });
+    try {
+      const result = readTimeSync({
+        etcTimezonePath: `${root}/missing-timezone`,
+        timesyncdConfPath: `${root}/missing-timesyncd.conf`,
+        synchronizedPath: `${root}/missing-synchronized`,
+        spawnText: () => "Timezone=UTC\nNTP=yes\nNTPSynchronized=yes\n",
+        runCat: () => ({ code: 1, stdout: new Uint8Array() }),
+      });
+      // `io` was supplied (a host-free test read) — the process-wide cache
+      // must stay untouched, exactly like `readHostResources`'s discipline.
+      assertEquals(getLastObservedTimeSync(), undefined);
+      assertEquals(result.timezone, "UTC");
+    } finally {
+      Deno.removeSync(root, { recursive: true });
+    }
+  } finally {
+    setLastObservedTimeSyncForTests(undefined);
+  }
+});
+
+test("setLastObservedTimeSyncForTests / getLastObservedTimeSync round-trip", () => {
+  try {
+    assertEquals(getLastObservedTimeSync(), undefined);
+    setLastObservedTimeSyncForTests({ ntpSynced: true, ntpServers: [] });
+    assertEquals(getLastObservedTimeSync(), {
+      ntpSynced: true,
+      ntpServers: [],
+    });
+  } finally {
+    setLastObservedTimeSyncForTests(undefined);
   }
 });

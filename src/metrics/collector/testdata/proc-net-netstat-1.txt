@@ -1,0 +1,4 @@
+TcpExt: SyncookiesSent SyncookiesRecv SyncookiesFailed EmbryonicRsts PruneCalled TCPOrigDataSent TCPHystartTrainDetect
+TcpExt: 0 0 0 0 0 90000 5
+IpExt: InNoRoutes InTruncatedPkts InMcastPkts OutMcastPkts InBcastPkts OutBcastPkts
+IpExt: 0 0 0 0 0 0

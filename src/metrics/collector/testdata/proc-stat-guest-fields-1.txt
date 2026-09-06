@@ -1,0 +1,7 @@
+cpu  10000 500 3000 80000 1000 200 300 400 100 20
+intr 12345678
+ctxt 98765432
+btime 1609459200
+processes 12345
+procs_running 2
+procs_blocked 0

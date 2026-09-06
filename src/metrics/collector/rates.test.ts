@@ -19,6 +19,9 @@ function device(
     writesCompleted: 500,
     sectorsWritten: 70000,
     writeTicksMs: 800,
+    iosInProgress: 0,
+    ioTicksMs: 0,
+    weightedIoTicksMs: 0,
     ...overrides,
   };
 }

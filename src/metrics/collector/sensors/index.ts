@@ -38,7 +38,7 @@ export {
 export { resolveTemperature } from "./temperature.ts";
 export { cpuPowerFromEnergy, readCpuEnergy, readGpuPower } from "./power.ts";
 export { resolveFan } from "./fan.ts";
-export { readGpuUtilization } from "./utilization.ts";
+export { gpuUtilizationFromBusy, readGpuUtilization } from "./utilization.ts";
 export {
   HARDWARE_PROFILE_RELATIVE_PATH,
   hardwareProfilePath,
@@ -205,6 +205,7 @@ export async function readHostSensors(
     gpuTemperatureCelsius: gpuTemperature.celsius,
     gpuPowerWatts: gpuPower.watts,
     gpuUtilizationPercent: gpuUtilization.percent,
+    gpuBusy: gpuUtilization.busy,
     gpuFanRpm: gpuFan.rpm,
     disk1TemperatureCelsius: disk1Temperature.celsius,
     disk2TemperatureCelsius: disk2Temperature.celsius,

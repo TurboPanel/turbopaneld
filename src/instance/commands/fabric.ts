@@ -1256,12 +1256,30 @@ function stampObservedPeerHealth(
   }));
 }
 
+/**
+ * Last `wg show tp0 dump` observation, refreshed opportunistically whenever
+ * {@link collectFabricPeerState} runs (instance-initiated reconcile/path
+ * probe) — never a new subprocess of its own. `events/fabric-state.ts` reads
+ * this via {@link getLastObservedFabricPeers} to detect peer availability
+ * transitions without violating the collector's no-subprocess-per-interval
+ * rule; an empty cache (no reconcile/probe has run yet this process) yields
+ * `[]`, matching every other "no telemetry wired" default in `collector/`.
+ */
+let lastObservedFabricPeers: FabricReconcileObservedPeer[] = [];
+
+/** See {@link lastObservedFabricPeers}. */
+export function getLastObservedFabricPeers(): FabricReconcileObservedPeer[] {
+  return lastObservedFabricPeers;
+}
+
 async function collectFabricPeerState(): Promise<
   FabricReconcileObservedPeer[]
 > {
   const dump = await runHost("wg", ["show", FABRIC_INTERFACE_NAME, "dump"]);
   if (!dump.success) return [];
-  return stampObservedPeerHealth(parseWgDumpPeers(dump.stdout));
+  const peers = stampObservedPeerHealth(parseWgDumpPeers(dump.stdout));
+  lastObservedFabricPeers = peers;
+  return peers;
 }
 
 async function wgShowInterface(): Promise<boolean> {

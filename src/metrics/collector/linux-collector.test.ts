@@ -1,21 +1,21 @@
 import { assertEquals } from "@std/assert";
-import { it } from "@std/testing/bdd";
 import { fromFileUrl } from "@std/path";
+import { EventCollectorSet } from "./events/index.ts";
 import { LinuxMetricsCollector } from "./linux-collector.ts";
-import type {
-  CaddyCounters,
-  CollectorDeps,
-  ProxyCounters,
-  ProxySqlCounters,
-  SensorReadings,
-  StatfsResult,
-} from "./types.ts";
-import { METRICS_SCHEMA_VERSION } from "../contract.ts";
-import { readHostSensors } from "./sensors/index.ts";
-import {
-  resolveAdminSensorOverrides,
-  writeHardwareProfile,
-} from "./sensors/overrides.ts";
+import { defaultSensorIo } from "./sensors/discovery.ts";
+import type { CollectorDepsV4 } from "./types-v4.ts";
+import { collectTopology } from "../topology/topology.ts";
+import { collectHardwareSignals } from "../topology/hardware-signal-topology.ts";
+import { EMPTY_TOPOLOGY_OVERRIDES } from "../topology/types.ts";
+import type { TopologySnapshot } from "../topology/types.ts";
+
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno);
 
 function fixture(name: string): string {
   return Deno.readTextFileSync(
@@ -23,1012 +23,663 @@ function fixture(name: string): string {
   );
 }
 
-function sensorsFixtureRoot(name: string): string {
-  return fromFileUrl(new URL(`./testdata/${name}`, import.meta.url));
+function topologyFixtureRoot(name: string): string {
+  return fromFileUrl(
+    new URL(`../topology/testdata/${name}`, import.meta.url),
+  );
 }
 
-const DISKSTATS_1 =
-  "   8       0 sda 1000 200 30000 400 500 600 70000 800 0 0 0 0 0 0\n";
-const DISKSTATS_2 =
-  "   8       0 sda 1600 200 60000 700 800 600 100000 1100 0 0 0 0 0 0\n";
-const DISKSTATS_2_SDB_APPEARS = DISKSTATS_2 +
-  "   8      16 sdb 500 100 15000 200 250 300 35000 400 0 0 0 0 0 0\n";
-
-const NET_DEV_1 = fixture("proc-net-dev-with-fabric-tunnel.txt");
-const NET_DEV_2 = NET_DEV_1
-  .replace("  eth0: 5000000", "  eth0: 5600000")
-  .replace("3000000    2000", "3300000    2100")
-  .replace("   tp0: 400000", "   tp0: 460000")
-  .replace("300000      150", "330000      160");
-const NET_DEV_2_NO_VETH = NET_DEV_2
-  .split("\n")
-  .filter((line) => !line.includes("veth123"))
-  .join("\n");
-
-const STATFS_BY_PATH: Record<string, StatfsResult> = {
-  "/": { blocks: 1_000_000, bfree: 400_000, bavail: 350_000, bsize: 4096 },
-  "/srv/users": {
-    blocks: 500_000,
-    bfree: 200_000,
-    bavail: 150_000,
-    bsize: 4096,
-  },
-  "/var/lib/docker": {
-    blocks: 250_000,
-    bfree: 100_000,
-    bavail: 50_000,
-    bsize: 4096,
-  },
-  "/mnt/docker-data": {
-    blocks: 2_000_000,
-    bfree: 1_000_000,
-    bavail: 900_000,
-    bsize: 4096,
-  },
-};
-
-function expectedStorage(path: string): {
-  totalBytes: number;
-  availableBytes: number;
-} {
-  // Raw-capacity contract: normalize first (blocks * bsize), aggregate later.
-  const stat = STATFS_BY_PATH[path]!;
+/** One service block device (sda), one uplink NIC (eth0), one root filesystem. */
+function fullTopologySnapshot(
+  overrides: Partial<TopologySnapshot> = {},
+): TopologySnapshot {
   return {
-    totalBytes: stat.blocks * stat.bsize,
-    availableBytes: stat.bavail * stat.bsize,
-  };
-}
-
-function sensorReadings(energyMicrojoules: number): SensorReadings {
-  return {
-    cpuTemperatureCelsius: 45,
-    gpuTemperatureCelsius: 61,
-    gpuPowerWatts: 37,
-    gpuUtilizationPercent: null,
-    gpuFanRpm: null,
-    disk1TemperatureCelsius: null,
-    disk2TemperatureCelsius: null,
-    ambient1TemperatureCelsius: null,
-    ambient2TemperatureCelsius: null,
-    boardTemperatureCelsius: null,
-    cpuFanRpm: null,
-    systemFan1Rpm: null,
-    systemFan2Rpm: null,
-    cpuEnergy: { energyMicrojoules, maxEnergyRangeMicrojoules: null },
-    sensors: {
-      cpuTemperatureSensor: "coretemp:Package id 0",
-      gpuTemperatureSensor: "amdgpu:edge",
-      cpuPowerSensor: "intel-rapl:package-0",
-      gpuPowerSensor: "amdgpu:PPT",
+    generation: 7,
+    bootGeneration: 2,
+    networks: [
+      {
+        deviceId: "mac:aa:bb:cc:dd:ee:00",
+        kind: "uplink",
+        name: "eth0",
+        identity: { mac: "aa:bb:cc:dd:ee:00" },
+      },
+    ],
+    filesystems: [
+      {
+        filesystemId: "fs:dev:/dev/sda1",
+        mountpoint: "/",
+        fsType: "ext4",
+        sourceDevice: "/dev/sda1",
+        totalBytes: null,
+        totalInodes: null,
+        roles: ["root"],
+      },
+      {
+        filesystemId: "fs:dev:/dev/sdb1",
+        mountpoint: "/data",
+        fsType: "ext4",
+        sourceDevice: "/dev/sdb1",
+        totalBytes: null,
+        totalInodes: null,
+        roles: ["hosting"],
+      },
+    ],
+    blockDevices: [
+      {
+        deviceId: "blk:sda",
+        kernelName: "sda",
+        deviceType: "physical",
+        isServiceDevice: true,
+      },
+    ],
+    gpus: [],
+    hardwareSignals: [],
+    cpu: {
+      sockets: 1,
+      coresPerSocket: 2,
+      threadsPerSocket: 2,
+      model: null,
+      cores: [
+        { logicalIndex: 0, coreId: "cpu:p0c0t0" },
+        { logicalIndex: 1, coreId: "cpu:p0c1t0" },
+      ],
     },
-  };
-}
-
-/** A full sensor-assignment sample — every slot resolves to a reading. */
-function fullSensorReadings(): SensorReadings {
-  return {
-    cpuTemperatureCelsius: 45,
-    gpuTemperatureCelsius: 61,
-    gpuPowerWatts: 37,
-    gpuUtilizationPercent: 42,
-    gpuFanRpm: 1800,
-    disk1TemperatureCelsius: 36.85,
-    disk2TemperatureCelsius: 33,
-    ambient1TemperatureCelsius: 32,
-    ambient2TemperatureCelsius: 45,
-    boardTemperatureCelsius: 32,
-    cpuFanRpm: 1200,
-    systemFan1Rpm: 800,
-    systemFan2Rpm: 750,
-    cpuEnergy: {
-      energyMicrojoules: 1_000_000_000,
-      maxEnergyRangeMicrojoules: null,
-    },
-    sensors: {
-      cpuTemperatureSensor: "coretemp:Package id 0",
-      gpuTemperatureSensor: "amdgpu:edge",
-      cpuPowerSensor: "intel-rapl:package-0",
-      gpuPowerSensor: "amdgpu:PPT",
-      gpuUtilizationSensor: "amdgpu:gpu_busy_percent",
-      gpuFanSensor: "amdgpu:fan1",
-      disk1TemperatureSensor: "nvme0n1:Composite",
-      disk2TemperatureSensor: "nvme0n1:Sensor 1",
-      ambient1TemperatureSensor: "nct6775:SYSTIN",
-      ambient2TemperatureSensor: "nct6775:AUXTIN",
-      boardTemperatureSensor: "nct6775:SYSTIN",
-      cpuFanSensor: "coretemp:cpu_fan",
-      systemFan1Sensor: "nct6775:sys_fan1",
-      systemFan2Sensor: "nct6775:sys_fan2",
-    },
-  };
-}
-
-/** VM-shaped sensor readings — every field null, no candidates at all. */
-function noSensorReadings(): SensorReadings {
-  return {
-    cpuTemperatureCelsius: null,
-    gpuTemperatureCelsius: null,
-    gpuPowerWatts: null,
-    gpuUtilizationPercent: null,
-    gpuFanRpm: null,
-    disk1TemperatureCelsius: null,
-    disk2TemperatureCelsius: null,
-    ambient1TemperatureCelsius: null,
-    ambient2TemperatureCelsius: null,
-    boardTemperatureCelsius: null,
-    cpuFanRpm: null,
-    systemFan1Rpm: null,
-    systemFan2Rpm: null,
-    cpuEnergy: null,
-    sensors: {},
-  };
-}
-
-type FixtureState = {
-  statText: string;
-  diskText: string;
-  netText: string;
-  memText: string;
-  bootText: string;
-  energyMicrojoules: number;
-  dockerRoot: string | null;
-  mountsText?: string;
-};
-
-function createDeps(
-  state: FixtureState,
-  overrides?: Partial<CollectorDeps>,
-): CollectorDeps {
-  return {
-    readProcFile(path: string) {
-      if (path === "/proc/stat") return state.statText;
-      if (path === "/proc/meminfo") return state.memText;
-      if (path === "/proc/loadavg") return fixture("proc-loadavg.txt");
-      if (path === "/proc/uptime") return fixture("proc-uptime.txt");
-      if (path === "/proc/diskstats") return state.diskText;
-      if (path === "/proc/net/dev") return state.netText;
-      if (path === "/proc/mounts") return state.mountsText;
-      if (path === "/proc/sys/kernel/random/boot_id") return state.bootText;
-      return undefined;
-    },
-    statfs: (path: string) => STATFS_BY_PATH[path] ?? null,
-    now: () => 1_000_000,
-    countProcesses: () => 42,
-    resolveDimensions: () => ({
-      schemaVersion: METRICS_SCHEMA_VERSION,
-    }),
-    resolveDockerDataRoot: () => Promise.resolve(state.dockerRoot),
-    resolveHostingPath: () => "/srv/users",
-    readSensors: () => Promise.resolve(sensorReadings(state.energyMicrojoules)),
-    resolveFabricInterfaces: () => Promise.resolve(["tp0"]),
-    resolveAdminSensorOverrides: () => Promise.resolve({}),
-    resolveHardwareProfileGeneration: () => 0,
-    resolveNicSlots: () => Promise.resolve({ nic1: null, nic2: null }),
-    readProxyCounters: () => Promise.resolve({ caddy: null, proxysql: null }),
+    numaNodes: [],
+    memoryTotalBytes: null,
+    swapTotalBytes: null,
     ...overrides,
   };
 }
 
-function defaultState(): FixtureState {
+type RawFixtureMap = Partial<{
+  "/proc/stat": string;
+  "/proc/meminfo": string;
+  "/proc/vmstat": string;
+  "/proc/diskstats": string;
+  "/proc/net/dev": string;
+  "/proc/net/snmp": string;
+  "/proc/net/netstat": string;
+  "/proc/net/softnet_stat": string;
+  "/proc/pressure/cpu": string;
+  "/proc/pressure/memory": string;
+  "/proc/pressure/io": string;
+  "/proc/sys/fs/file-nr": string;
+  "/proc/sys/fs/file-max": string;
+  "/proc/sys/net/netfilter/nf_conntrack_count": string;
+  "/proc/sys/net/netfilter/nf_conntrack_max": string;
+  "/proc/mounts": string;
+  "/proc/mdstat": string;
+}>;
+
+/**
+ * `raw` is read lazily via a getter so the same collector instance (and its
+ * internal counter-baseline tracker) can serve fixture text that changes
+ * between ticks.
+ */
+function makeDeps(
+  raw: () => RawFixtureMap,
+  snapshot: TopologySnapshot,
+  now: () => number,
+  pageSizeBytes = 4096,
+): CollectorDepsV4 {
   return {
-    statText: fixture("proc-stat-full-fields-1.txt"),
-    diskText: DISKSTATS_1,
-    netText: NET_DEV_1,
-    memText: fixture("proc-meminfo.txt"),
-    bootText: fixture("proc-boot-id.txt"),
-    energyMicrojoules: 1_000_000_000,
-    dockerRoot: "/var/lib/docker",
+    readProcFile: (path: string) =>
+      (raw() as Record<string, string | undefined>)[path],
+    statfs: () => ({
+      blocks: 1_000_000,
+      bfree: 400_000,
+      bavail: 350_000,
+      bsize: 4096,
+      files: 100_000,
+      ffree: 90_000,
+    }),
+    now,
+    collectTopology: () => Promise.resolve(snapshot),
+    io: { listDir: () => [], readFile: () => undefined },
+    pageSizeBytes,
   };
 }
 
-function advanceState(state: FixtureState): void {
-  state.statText = fixture("proc-stat-full-fields-2.txt");
-  state.diskText = DISKSTATS_2;
-  state.netText = NET_DEV_2;
-  state.energyMicrojoules = 1_600_000_000;
-}
+const TICK_1: RawFixtureMap = {
+  "/proc/stat": fixture("proc-stat-guest-fields-1.txt"),
+  "/proc/meminfo": fixture("proc-meminfo.txt"),
+  "/proc/vmstat": fixture("proc-vmstat-1.txt"),
+  "/proc/diskstats": fixture("proc-diskstats-v4-virtio-1.txt")
+    .replace("vda", "sda"),
+  "/proc/net/dev": fixture("proc-net-dev.txt"),
+  "/proc/net/snmp": fixture("proc-net-snmp-1.txt"),
+  "/proc/net/netstat": fixture("proc-net-netstat-1.txt"),
+  "/proc/net/softnet_stat": fixture("proc-net-softnet-stat-1.txt"),
+  "/proc/pressure/cpu": fixture("proc-pressure-cpu.txt"),
+  "/proc/pressure/memory": fixture("proc-pressure-memory.txt"),
+  "/proc/pressure/io": fixture("proc-pressure-io.txt"),
+  "/proc/sys/fs/file-nr": fixture("proc-file-nr.txt"),
+  "/proc/sys/fs/file-max": fixture("proc-file-max.txt"),
+  "/proc/sys/net/netfilter/nf_conntrack_count": fixture(
+    "proc-conntrack-count.txt",
+  ),
+  "/proc/sys/net/netfilter/nf_conntrack_max": fixture("proc-conntrack-max.txt"),
+};
 
-it("first sample carries every gauge but null rates and percentages", async () => {
-  const state = defaultState();
-  const collector = new LinuxMetricsCollector(createDeps(state), {
-    nominalIntervalSeconds: 60,
+const TICK_2: RawFixtureMap = {
+  ...TICK_1,
+  "/proc/stat": fixture("proc-stat-guest-fields-2.txt"),
+  "/proc/diskstats": fixture("proc-diskstats-v4-virtio-2.txt")
+    .replace("vda", "sda"),
+  "/proc/net/snmp": fixture("proc-net-snmp-2.txt"),
+  "/proc/net/netstat": fixture("proc-net-netstat-2.txt"),
+  "/proc/net/softnet_stat": fixture("proc-net-softnet-stat-2.txt"),
+  "/proc/pressure/cpu": fixture("proc-pressure-cpu-2.txt"),
+  "/proc/pressure/memory": fixture("proc-pressure-memory-2.txt"),
+  "/proc/pressure/io": fixture("proc-pressure-io-2.txt"),
+};
+
+test("LinuxMetricsCollector assembles a full v4 sample across two ticks", async () => {
+  const snapshot = fullTopologySnapshot();
+  let tick = 0;
+  let nowMs = 1_000_000;
+  const collector = new LinuxMetricsCollector(
+    makeDeps(() => (tick === 0 ? TICK_1 : TICK_2), snapshot, () => nowMs),
+  );
+
+  const first = await collector.collect({ sequence: 1, nowMs });
+  if (!first.supported) throw new TypeError("expected a supported sample");
+
+  // First tick: every rate/percent needing a prior baseline is null; gauges
+  // (procs, memory, file handles, conntrack) resolve immediately.
+  assertEquals(first.sample.host.cpu.busyPercent, null);
+  assertEquals(first.sample.host.cpu.procsRunning, 2);
+  assertEquals(
+    first.sample.host.kernel.fileHandlesUsedPercent,
+    (4256 / 1048576) * 100,
+  );
+  assertEquals(
+    first.sample.host.kernel.conntrackUsedPercent,
+    (12345 / 262144) * 100,
+  );
+  assertEquals(first.sample.host.memory.availableBytes !== null, true);
+  assertEquals(first.sample.host.storage.diskReadBytesPerSecond, null);
+  assertEquals(first.sample.host.network.tcpRetransmitPercent, null);
+  assertEquals(first.sample.metadata.topologyGeneration, 7);
+  assertEquals(first.sample.metadata.bootGeneration, 2);
+  assertEquals(first.sample.networks.length, 1);
+  assertEquals(first.sample.filesystems.length, 1);
+  assertEquals(first.sample.blockDevices.length, 1);
+  assertEquals(first.sample.gpus, []);
+  assertEquals(first.sample.hardwareSignals, []);
+
+  tick = 1;
+  nowMs += 60_000;
+  const second = await collector.collect({ sequence: 2, nowMs });
+  if (!second.supported) throw new TypeError("expected a supported sample");
+
+  // Second tick: rates/percentages now compute from real deltas.
+  assertEquals(typeof second.sample.host.cpu.busyPercent, "number");
+  assertEquals(second.sample.host.cpu.busyPercent !== null, true);
+  assertEquals(
+    typeof second.sample.host.storage.diskReadBytesPerSecond,
+    "number",
+  );
+  assertEquals(
+    second.sample.host.storage.diskReadBytesPerSecond,
+    (3000 * 512) / 60,
+  );
+  assertEquals(
+    typeof second.sample.host.network.tcpRetransmitPercent,
+    "number",
+  );
+  assertEquals(second.sample.blockDevices[0].deviceId, "blk:sda");
+  assertEquals(second.sample.networks[0].deviceId, "mac:aa:bb:cc:dd:ee:00");
+  // Root's own entry ("fs:dev:/dev/sda1") never appears in filesystems[] —
+  // its capacity lives exclusively in host.storage's rootFilesystem* fields
+  // below (see probeRootFilesystemCapacity in filesystem.ts).
+  assertEquals(second.sample.filesystems[0].filesystemId, "fs:dev:/dev/sdb1");
+  assertEquals(
+    second.sample.host.storage.rootFilesystemAvailableBytes,
+    350_000 * 4096,
+  );
+  assertEquals(second.sample.host.storage.rootFilesystemFreeInodes, 90_000);
+});
+
+test("LinuxMetricsCollector applies the injected page size to swap byte rates, not a hard-coded 4096", async () => {
+  const snapshot = fullTopologySnapshot();
+  const tick2WithVmstatDelta: RawFixtureMap = {
+    ...TICK_2,
+    "/proc/vmstat": fixture("proc-vmstat-2.txt"),
+  };
+  let tick = 0;
+  let nowMs = 1_000_000;
+  const nonDefaultPageSizeBytes = 16384;
+  const collector = new LinuxMetricsCollector(
+    makeDeps(
+      () => (tick === 0 ? TICK_1 : tick2WithVmstatDelta),
+      snapshot,
+      () => nowMs,
+      nonDefaultPageSizeBytes,
+    ),
+  );
+
+  await collector.collect({ sequence: 1, nowMs });
+  tick = 1;
+  nowMs += 60_000;
+  const second = await collector.collect({ sequence: 2, nowMs });
+  if (!second.supported) throw new TypeError("expected a supported sample");
+
+  // proc-vmstat-1.txt -> proc-vmstat-2.txt: pswpin 100 -> 160, pswpout 200 -> 380.
+  assertEquals(
+    second.sample.host.memory.swapInBytesPerSecond,
+    ((160 - 100) / 60) * nonDefaultPageSizeBytes,
+  );
+  assertEquals(
+    second.sample.host.memory.swapOutBytesPerSecond,
+    ((380 - 200) / 60) * nonDefaultPageSizeBytes,
+  );
+});
+
+test("LinuxMetricsCollector reports null (never 0) for PSI-absent and conntrack-absent hosts", async () => {
+  const snapshot = fullTopologySnapshot();
+  const raw: RawFixtureMap = {
+    ...TICK_1,
+    "/proc/pressure/cpu": undefined,
+    "/proc/pressure/memory": undefined,
+    "/proc/pressure/io": undefined,
+    "/proc/sys/net/netfilter/nf_conntrack_count": undefined,
+    "/proc/sys/net/netfilter/nf_conntrack_max": undefined,
+  };
+  let nowMs = 1_000_000;
+  const collector = new LinuxMetricsCollector(
+    makeDeps(() => raw, snapshot, () => nowMs),
+  );
+
+  await collector.collect({ sequence: 1, nowMs });
+  nowMs += 60_000;
+  const second = await collector.collect({ sequence: 2, nowMs });
+  if (!second.supported) throw new TypeError("expected a supported sample");
+
+  assertEquals(second.sample.host.cpu.pressureSomePercent, null);
+  assertEquals(second.sample.host.memory.pressureSomePercent, null);
+  assertEquals(second.sample.host.memory.pressureFullPercent, null);
+  assertEquals(second.sample.host.storage.ioPressureSomePercent, null);
+  assertEquals(second.sample.host.storage.ioPressureFullPercent, null);
+  assertEquals(second.sample.host.kernel.conntrackUsedPercent, null);
+});
+
+test("LinuxMetricsCollector smoke test: a normal 1-NIC VM produces a logically complete sample", async () => {
+  const snapshot = fullTopologySnapshot();
+  let nowMs = 1_000_000;
+  const collector = new LinuxMetricsCollector(
+    makeDeps(() => TICK_1, snapshot, () => nowMs),
+  );
+
+  await collector.collect({ sequence: 1, nowMs });
+  nowMs += 60_000;
+  const result = await collector.collect({ sequence: 2, nowMs });
+  if (!result.supported) throw new TypeError("expected a supported sample");
+
+  assertEquals(result.sample.type, "metrics");
+  assertEquals(result.sample.metadata.version, 4);
+  assertEquals(result.sample.networks.length, 1);
+  assertEquals(result.sample.filesystems.length, 1);
+  assertEquals(result.sample.blockDevices.length, 1);
+  assertEquals(result.sample.events, []);
+  assertEquals(result.sample.ingressSources, []);
+  assertEquals(result.sample.databaseProxies, []);
+});
+
+test("LinuxMetricsCollector never throws out of collect() — falls back to a minimal valid sample", async () => {
+  const collector = new LinuxMetricsCollector({
+    readProcFile: () => undefined,
+    statfs: () => null,
+    now: () => 1_000,
+    collectTopology: () => Promise.reject(new Error("topology boom")),
+    io: { listDir: () => [], readFile: () => undefined },
+    pageSizeBytes: 4096,
   });
 
-  const result = await collector.collect({ sequence: 1, nowMs: 1_000_000 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-
-  const { metrics, dimensions } = result.sample;
-  // Rates and percentages: null on first sample, never 0.
-  assertEquals(metrics.cpuUserPercent, null);
-  assertEquals(metrics.cpuIdlePercent, null);
-  assertEquals(metrics.cpuStealPercent, null);
-  assertEquals(metrics.diskReadBytesPerSecond, null);
-  assertEquals(metrics.diskReadLatencyMs, null);
-  assertEquals(metrics.interfaceReceiveBytesPerSecond, null);
-  assertEquals(metrics.fabricReceiveBytesPerSecond, null);
-  assertEquals(metrics.cpuPowerWatts, null);
-
-  // Gauges report immediately.
-  assertEquals(metrics.load1, 1.25);
-  assertEquals(metrics.load5, 0.75);
-  assertEquals(metrics.load15, 0.5);
-  assertEquals(metrics.memoryTotalBytes, 8000000 * 1024);
-  assertEquals(metrics.memoryAvailableBytes, 4000000 * 1024);
-  assertEquals(metrics.swapTotalBytes, 2000000 * 1024);
-  assertEquals(metrics.swapFreeBytes, 1000000 * 1024);
-  assertEquals(
-    metrics.systemStorageTotalBytes,
-    expectedStorage("/").totalBytes,
-  );
-  assertEquals(
-    metrics.systemStorageAvailableBytes,
-    expectedStorage("/").availableBytes,
-  );
-  assertEquals(
-    metrics.hostingStorageTotalBytes,
-    expectedStorage("/srv/users").totalBytes,
-  );
-  assertEquals(
-    metrics.hostingStorageAvailableBytes,
-    expectedStorage("/srv/users").availableBytes,
-  );
-  assertEquals(
-    metrics.dockerStorageTotalBytes,
-    expectedStorage("/var/lib/docker").totalBytes,
-  );
-  assertEquals(
-    metrics.dockerStorageAvailableBytes,
-    expectedStorage("/var/lib/docker").availableBytes,
-  );
-  assertEquals(metrics.cpuTemperatureCelsius, 45);
-  assertEquals(metrics.gpuTemperatureCelsius, 61);
-  assertEquals(metrics.gpuPowerWatts, 37);
-  assertEquals(metrics.processCount, 42);
-  assertEquals(metrics.uptimeSeconds, 12345);
-
-  assertEquals(dimensions.collectionMode, "baseline");
-  assertEquals(dimensions.schemaVersion, METRICS_SCHEMA_VERSION);
-  assertEquals(dimensions.hardwareProfileGeneration, 0);
-  assertEquals(result.sample.intervalSeconds, 60);
-  assertEquals(result.sample.sequence, 1);
-  // sensorReadings() resolves a non-null cpuTemperatureCelsius, and that
-  // field now lives in the sensors part itself, so "sensors" is declared
-  // even though cpuPowerWatts (a delta) is still null on this first sample.
-  assertEquals(result.sample.parts, ["core", "extended", "sensors"]);
-});
-
-it("second sample computes CPU, disk, network, and power deltas", async () => {
-  const state = defaultState();
-  const deps = createDeps(state);
-  const collector = new LinuxMetricsCollector(deps, {
-    nominalIntervalSeconds: 60,
-  });
-
-  await collector.collect({ sequence: 1, nowMs: 1_000_000 });
-  advanceState(state);
-  const result = await collector.collect({ sequence: 2, nowMs: 1_060_000 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-
-  const { metrics } = result.sample;
-  // CPU deltas from proc-stat-full-fields-1/2: total 8800.
-  assertEquals(metrics.cpuUserPercent, (900 / 8800) * 100);
-  assertEquals(metrics.cpuNicePercent, (50 / 8800) * 100);
-  assertEquals(metrics.cpuSystemPercent, (300 / 8800) * 100);
-  assertEquals(metrics.cpuIdlePercent, (7200 / 8800) * 100);
-  assertEquals(metrics.cpuIowaitPercent, (180 / 8800) * 100);
-  assertEquals(metrics.cpuIrqPercent, (50 / 8800) * 100);
-  assertEquals(metrics.cpuSoftirqPercent, (80 / 8800) * 100);
-  assertEquals(metrics.cpuStealPercent, (40 / 8800) * 100);
-
-  // Disk deltas over 60 s: Δreads 600, Δsectors 30000 each way, Δticks 300.
-  assertEquals(metrics.diskReadBytesPerSecond, (30000 * 512) / 60);
-  assertEquals(metrics.diskWriteBytesPerSecond, (30000 * 512) / 60);
-  assertEquals(metrics.diskReadOpsPerSecond, 10);
-  assertEquals(metrics.diskWriteOpsPerSecond, 5);
-  assertEquals(metrics.diskReadLatencyMs, 300 / 600);
-  assertEquals(metrics.diskWriteLatencyMs, 300 / 300);
-
-  // Uplink (eth0) and fabric (tp0) aggregate independently.
-  assertEquals(metrics.interfaceReceiveBytesPerSecond, 600_000 / 60);
-  assertEquals(metrics.interfaceTransmitBytesPerSecond, 300_000 / 60);
-  assertEquals(metrics.fabricReceiveBytesPerSecond, 60_000 / 60);
-  assertEquals(metrics.fabricTransmitBytesPerSecond, 30_000 / 60);
-
-  // RAPL energy delta: 600 J over 60 s.
-  assertEquals(metrics.cpuPowerWatts, 10);
-  assertEquals(result.sample.intervalSeconds, 60);
-});
-
-it("boot_id change nulls rate, CPU, and power metrics for the interval", async () => {
-  const state = defaultState();
-  const collector = new LinuxMetricsCollector(createDeps(state));
-
-  await collector.collect({ sequence: 1, nowMs: 1_000_000 });
-  advanceState(state);
-  state.bootText = fixture("proc-boot-id-2.txt");
-  const result = await collector.collect({ sequence: 2, nowMs: 1_060_000 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-
-  const { metrics } = result.sample;
-  assertEquals(metrics.cpuIdlePercent, null);
-  assertEquals(metrics.diskReadBytesPerSecond, null);
-  assertEquals(metrics.diskReadLatencyMs, null);
-  assertEquals(metrics.interfaceReceiveBytesPerSecond, null);
-  assertEquals(metrics.fabricReceiveBytesPerSecond, null);
-  assertEquals(metrics.cpuPowerWatts, null);
-  // Gauges survive the reset.
-  assertEquals(metrics.load1, 1.25);
-  assertEquals(metrics.cpuTemperatureCelsius, 45);
-});
-
-it("fan RPM and GPU utilization gauges are unaffected by boot-id resets", async () => {
-  const state = defaultState();
-  const collector = new LinuxMetricsCollector(createDeps(state, {
-    readSensors: () => Promise.resolve(fullSensorReadings()),
-  }));
-
-  await collector.collect({ sequence: 1, nowMs: 1_000_000 });
-  advanceState(state);
-  state.bootText = fixture("proc-boot-id-2.txt");
-  const result = await collector.collect({ sequence: 2, nowMs: 1_060_000 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-
-  const { metrics } = result.sample;
-  // Unlike cpuPowerWatts (a delta), these are point-in-time gauges — the
-  // boot-id reset guard never applies to them.
-  assertEquals(metrics.gpuUtilizationPercent, 42);
-  assertEquals(metrics.gpuFanRpm, 1800);
-  assertEquals(metrics.cpuFanRpm, 1200);
-  assertEquals(metrics.systemFan1Rpm, 800);
-  assertEquals(metrics.systemFan2Rpm, 750);
-  assertEquals(metrics.disk1TemperatureCelsius, 36.85);
-  assertEquals(metrics.ambient1TemperatureCelsius, 32);
-  assertEquals(metrics.boardTemperatureCelsius, 32);
-});
-
-it("disk device membership churn nulls only the disk rates", async () => {
-  const state = defaultState();
-  const collector = new LinuxMetricsCollector(createDeps(state));
-
-  await collector.collect({ sequence: 1, nowMs: 1_000_000 });
-  advanceState(state);
-  state.diskText = DISKSTATS_2_SDB_APPEARS;
-  const result = await collector.collect({ sequence: 2, nowMs: 1_060_000 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-  assertEquals(result.sample.metrics.diskReadBytesPerSecond, null);
-  assertEquals(result.sample.metrics.diskWriteOpsPerSecond, null);
-  assertEquals(result.sample.metrics.diskReadLatencyMs, null);
-  assertEquals(
-    result.sample.metrics.interfaceReceiveBytesPerSecond,
-    600_000 / 60,
-  );
-});
-
-it("mount-backed disk preference survives unrelated-disk churn", async () => {
-  // With a mount table resolving every probed path to sda, an unrelated sdb
-  // appearing mid-interval neither pollutes the totals nor nulls the rates.
-  const state = defaultState();
-  state.mountsText = [
-    "/dev/sda1 / ext4 rw,relatime 0 0",
-    "/dev/sda1 /srv/users ext4 rw,relatime 0 0",
-    "/dev/sda1 /var/lib/docker ext4 rw,relatime 0 0",
-  ].join("\n");
-  const collector = new LinuxMetricsCollector(createDeps(state), {
-    nominalIntervalSeconds: 60,
-  });
-
-  await collector.collect({ sequence: 1, nowMs: 1_000_000 });
-  advanceState(state);
-  state.diskText = DISKSTATS_2_SDB_APPEARS;
-  const result = await collector.collect({ sequence: 2, nowMs: 1_060_000 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-  // sda-only aggregation: same deltas as the churn-free case.
-  assertEquals(
-    result.sample.metrics.diskReadBytesPerSecond,
-    (30000 * 512) / 60,
-  );
-  assertEquals(result.sample.metrics.diskReadOpsPerSecond, 10);
-  assertEquals(result.sample.metrics.diskReadLatencyMs, 300 / 600);
-});
-
-it("veth churn nulls neither uplink nor fabric rates", async () => {
-  const state = defaultState();
-  const collector = new LinuxMetricsCollector(createDeps(state));
-
-  await collector.collect({ sequence: 1, nowMs: 1_000_000 });
-  advanceState(state);
-  state.netText = NET_DEV_2_NO_VETH;
-  const result = await collector.collect({ sequence: 2, nowMs: 1_060_000 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-  assertEquals(
-    result.sample.metrics.interfaceReceiveBytesPerSecond,
-    600_000 / 60,
-  );
-  assertEquals(
-    result.sample.metrics.fabricTransmitBytesPerSecond,
-    30_000 / 60,
-  );
-});
-
-it("Docker on a dedicated mount probes that mount's filesystem", async () => {
-  const state = defaultState();
-  state.dockerRoot = "/mnt/docker-data";
-  const collector = new LinuxMetricsCollector(createDeps(state));
-  const result = await collector.collect({ sequence: 1, nowMs: 1_000_000 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-  assertEquals(
-    result.sample.metrics.dockerStorageTotalBytes,
-    expectedStorage("/mnt/docker-data").totalBytes,
-  );
-  assertEquals(
-    result.sample.metrics.dockerStorageAvailableBytes,
-    expectedStorage("/mnt/docker-data").availableBytes,
-  );
-});
-
-it("Docker absence nulls the docker storage fields only", async () => {
-  const state = defaultState();
-  state.dockerRoot = null;
-  const collector = new LinuxMetricsCollector(createDeps(state));
-  const result = await collector.collect({ sequence: 1, nowMs: 1_000_000 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-  assertEquals(result.sample.metrics.dockerStorageTotalBytes, null);
-  assertEquals(result.sample.metrics.dockerStorageAvailableBytes, null);
-  assertEquals(
-    result.sample.metrics.systemStorageTotalBytes,
-    expectedStorage("/").totalBytes,
-  );
-});
-
-it("swap-absent hosts report null swap bytes, never 0", async () => {
-  const state = defaultState();
-  state.memText = fixture("proc-meminfo-no-swap.txt");
-  const collector = new LinuxMetricsCollector(createDeps(state));
-  const result = await collector.collect({ sequence: 1, nowMs: 1_000_000 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-  assertEquals(result.sample.metrics.swapTotalBytes, null);
-  assertEquals(result.sample.metrics.swapFreeBytes, null);
-  assertEquals(result.sample.metrics.memoryTotalBytes, 8000000 * 1024);
-});
-
-it("collect passes an explicit live collectionMode into dimensions", async () => {
-  const state = defaultState();
-  const collector = new LinuxMetricsCollector(createDeps(state));
-  const result = await collector.collect({
-    sequence: 1,
-    nowMs: 1_000_000,
-    collectionMode: "live",
-  });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-  assertEquals(result.sample.dimensions.collectionMode, "live");
-});
-
-it("tolerates throwing statfs, sensors, and fabric resolution", async () => {
-  const state = defaultState();
-  const collector = new LinuxMetricsCollector(createDeps(state, {
-    statfs: () => {
-      throw new Error("statfs unavailable");
-    },
-    readSensors: () => Promise.reject(new Error("sysfs boom")),
-    resolveFabricInterfaces: () => Promise.reject(new Error("fabric boom")),
-  }));
-  const result = await collector.collect({ sequence: 1, nowMs: 1_000_000 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-  const { metrics } = result.sample;
-  assertEquals(metrics.systemStorageTotalBytes, null);
-  // readSensors threw, so no sensors-part field resolved: "sensors" is
-  // absent and cpuTemperatureCelsius (now a sensors-part key) is omitted
-  // entirely rather than reported as a validated null.
-  assertEquals(metrics.cpuTemperatureCelsius, undefined);
-  assertEquals(metrics.gpuPowerWatts, null);
-  assertEquals(metrics.load1, 1.25);
-  assertEquals(result.sample.parts, ["core", "extended"]);
-});
-
-it("nulls processCount when countProcesses throws", async () => {
-  const state = defaultState();
-  const collector = new LinuxMetricsCollector(createDeps(state, {
-    countProcesses: () => {
-      throw new Error("ps unavailable");
-    },
-  }));
-  const result = await collector.collect({ sequence: 1, nowMs: 1_000_000 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-  assertEquals(result.sample.metrics.processCount, null);
-});
-
-it("falls back with current-schema dimensions when construction throws", async () => {
-  const state = defaultState();
-  const collector = new LinuxMetricsCollector(createDeps(state, {
-    resolveDimensions: () => {
-      throw new Error("dimensions boom");
-    },
-  }));
-  const result = await collector.collect({ sequence: 7, nowMs: 1_000_000 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-  assertEquals(result.sample.sequence, 7);
-  assertEquals(
-    result.sample.dimensions.schemaVersion,
-    METRICS_SCHEMA_VERSION,
-  );
-  assertEquals(result.sample.dimensions.collectionMode, "baseline");
-  assertEquals(result.sample.dimensions.hardwareProfileGeneration, 0);
-  assertEquals(result.sample.parts, ["core", "extended"]);
-});
-
-it("uses deps.now when nowMs is omitted", async () => {
-  const state = defaultState();
-  const collector = new LinuxMetricsCollector(createDeps(state, {
-    now: () => 5_000_000,
-  }));
   const result = await collector.collect({ sequence: 1 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-  assertEquals(result.sample.at, new Date(5_000_000).toISOString());
+  if (!result.supported) {
+    throw new TypeError("expected a supported (fallback) sample");
+  }
+  assertEquals(result.sample.type, "metrics");
+  assertEquals(result.sample.metadata.topologyGeneration, 0);
+  assertEquals(result.sample.metadata.bootGeneration, 0);
+  assertEquals(result.sample.host.cpu.busyPercent, null);
+  assertEquals(result.sample.networks, []);
+  assertEquals(result.sample.filesystems, []);
+  assertEquals(result.sample.blockDevices, []);
 });
 
-it("uses elapsed seconds between samples", async () => {
-  const state = defaultState();
-  const collector = new LinuxMetricsCollector(createDeps(state), {
-    nominalIntervalSeconds: 60,
+test("LinuxMetricsCollector re-baselines (nulls once) on a boot generation change", async () => {
+  let generation = 2;
+  let tick = 0;
+  const collector = new LinuxMetricsCollector({
+    readProcFile: (path: string) => {
+      const source = tick === 0 ? TICK_1 : TICK_2;
+      return (source as Record<string, string | undefined>)[path];
+    },
+    statfs: () => ({
+      blocks: 1_000_000,
+      bfree: 400_000,
+      bavail: 350_000,
+      bsize: 4096,
+      files: 100_000,
+      ffree: 90_000,
+    }),
+    now: () => 0,
+    collectTopology: () =>
+      Promise.resolve(fullTopologySnapshot({ bootGeneration: generation })),
+    io: { listDir: () => [], readFile: () => undefined },
+    pageSizeBytes: 4096,
   });
-  await collector.collect({ sequence: 1, nowMs: 1_000_000 });
-  const result = await collector.collect({ sequence: 2, nowMs: 1_030_000 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-  assertEquals(result.sample.intervalSeconds, 30);
+
+  let nowMs = 1_000_000;
+  await collector.collect({ sequence: 1, nowMs });
+  tick = 1;
+  nowMs += 60_000;
+  const beforeReboot = await collector.collect({ sequence: 2, nowMs });
+  if (!beforeReboot.supported) {
+    throw new TypeError("expected a supported sample");
+  }
+  assertEquals(typeof beforeReboot.sample.host.cpu.busyPercent, "number");
+  assertEquals(beforeReboot.sample.host.cpu.busyPercent !== null, true);
+
+  // Reboot: bootGeneration bumps — every counter-delta field re-baselines.
+  generation = 3;
+  nowMs += 60_000;
+  const afterReboot = await collector.collect({ sequence: 3, nowMs });
+  if (!afterReboot.supported) {
+    throw new TypeError("expected a supported sample");
+  }
+  assertEquals(afterReboot.sample.host.cpu.busyPercent, null);
+  assertEquals(afterReboot.sample.host.network.tcpRetransmitPercent, null);
 });
 
-it("keeps nominal interval when elapsed is non-positive", async () => {
-  const state = defaultState();
-  const collector = new LinuxMetricsCollector(createDeps(state), {
-    nominalIntervalSeconds: 60,
-  });
-  await collector.collect({ sequence: 1, nowMs: 2_000_000 });
-  const result = await collector.collect({ sequence: 2, nowMs: 1_999_000 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-  assertEquals(result.sample.intervalSeconds, 60);
-});
-
-it("a VM sample with no sensor readings omits the sensors part entirely", async () => {
-  const state = defaultState();
-  const collector = new LinuxMetricsCollector(createDeps(state, {
-    readSensors: () => Promise.resolve(noSensorReadings()),
-  }));
-  const result = await collector.collect({ sequence: 1, nowMs: 1_000_000 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-  assertEquals(result.sample.parts, ["core", "extended"]);
-  assertEquals(result.sample.metrics.gpuUtilizationPercent, undefined);
-  assertEquals(result.sample.metrics.cpuFanRpm, undefined);
-  // No NIC slot is assigned (createDeps defaults resolveNicSlots to both
-  // null) — the unassigned pair alone must not force "sensors" into parts,
-  // so these sensors-part keys are omitted entirely (undefined), just like
-  // every other sensors-part field on this VM-shaped sample.
-  assertEquals(result.sample.metrics.nic1ReceiveBytesPerSecond, undefined);
-  assertEquals(result.sample.metrics.nic1TransmitBytesPerSecond, undefined);
-  assertEquals(result.sample.metrics.nic2ReceiveBytesPerSecond, undefined);
-  assertEquals(result.sample.metrics.nic2TransmitBytesPerSecond, undefined);
-});
-
-it("an assigned NIC slot naming a nonexistent interface stays null and omits the sensors part", async () => {
-  const state = defaultState();
-  const collector = new LinuxMetricsCollector(createDeps(state, {
-    readSensors: () => Promise.resolve(noSensorReadings()),
-    resolveNicSlots: () => Promise.resolve({ nic1: "eth99", nic2: null }),
-  }));
-  await collector.collect({ sequence: 1, nowMs: 1_000_000 });
-  advanceState(state);
-  const result = await collector.collect({ sequence: 2, nowMs: 1_060_000 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-  assertEquals(result.sample.parts, ["core", "extended"]);
-  assertEquals(result.sample.metrics.nic1ReceiveBytesPerSecond, undefined);
-  assertEquals(result.sample.metrics.nic1TransmitBytesPerSecond, undefined);
-});
-
-it("an assigned NIC slot with a resolvable rate declares the sensors part on its own", async () => {
-  const state = defaultState();
-  const collector = new LinuxMetricsCollector(createDeps(state, {
-    readSensors: () => Promise.resolve(noSensorReadings()),
-    resolveNicSlots: () => Promise.resolve({ nic1: "eth0", nic2: null }),
-  }));
-  await collector.collect({ sequence: 1, nowMs: 1_000_000 });
-  advanceState(state);
-  const result = await collector.collect({ sequence: 2, nowMs: 1_060_000 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-  assertEquals(result.sample.parts, ["core", "extended", "sensors"]);
-  assertEquals(
-    result.sample.metrics.nic1ReceiveBytesPerSecond,
-    600_000 / 60,
-  );
-  assertEquals(
-    result.sample.metrics.nic1TransmitBytesPerSecond,
-    300_000 / 60,
-  );
-  assertEquals(result.sample.metrics.nic2ReceiveBytesPerSecond, null);
-  assertEquals(result.sample.metrics.nic2TransmitBytesPerSecond, null);
-});
-
-it("both NIC slots assigned compute independent rates alongside class aggregation", async () => {
-  const state = defaultState();
-  const collector = new LinuxMetricsCollector(createDeps(state, {
-    resolveNicSlots: () => Promise.resolve({ nic1: "eth0", nic2: "tp0" }),
-  }));
-  await collector.collect({ sequence: 1, nowMs: 1_000_000 });
-  advanceState(state);
-  const result = await collector.collect({ sequence: 2, nowMs: 1_060_000 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-  const { metrics } = result.sample;
-  assertEquals(metrics.nic1ReceiveBytesPerSecond, 600_000 / 60);
-  assertEquals(metrics.nic1TransmitBytesPerSecond, 300_000 / 60);
-  assertEquals(metrics.nic2ReceiveBytesPerSecond, 60_000 / 60);
-  assertEquals(metrics.nic2TransmitBytesPerSecond, 30_000 / 60);
-  // Matches the independently-computed uplink/fabric class aggregates —
-  // eth0/tp0 are each the sole member of their class in this fixture.
-  assertEquals(
-    metrics.nic1ReceiveBytesPerSecond,
-    metrics.interfaceReceiveBytesPerSecond,
-  );
-  assertEquals(
-    metrics.nic2ReceiveBytesPerSecond,
-    metrics.fabricReceiveBytesPerSecond,
-  );
-});
-
-it("a NIC slot reassigned between ticks nulls that slot instead of mixing interface identities", async () => {
-  // eth0 and tp0 are both present in NET_DEV_1 and NET_DEV_2 (only their
-  // counters change). If nic1 is "eth0" on the first tick and "tp0" on the
-  // second, the naive fix of always resolving `namedInterfaceRates` against
-  // the *current* tick's name would find tp0 present in both snapshots and
-  // emit a real (but mislabeled) rate — attributing part of the interval to
-  // an interface that wasn't actually assigned to nic1 for that whole span.
-  // The slot must null instead.
-  const state = defaultState();
-  let nic1Name = "eth0";
-  const collector = new LinuxMetricsCollector(createDeps(state, {
-    resolveNicSlots: () => Promise.resolve({ nic1: nic1Name, nic2: null }),
-  }));
-  await collector.collect({ sequence: 1, nowMs: 1_000_000 });
-  advanceState(state);
-  nic1Name = "tp0";
-  const result = await collector.collect({ sequence: 2, nowMs: 1_060_000 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-  assertEquals(result.sample.metrics.nic1ReceiveBytesPerSecond, null);
-  assertEquals(result.sample.metrics.nic1TransmitBytesPerSecond, null);
-});
-
-it("a bare-metal sample with only CPU temperature and CPU power assigned still declares the sensors part", async () => {
-  const state = defaultState();
-  // sensorReadings() carries only CPU temperature/power (now sensors-part
-  // fields themselves) — every other sensors-part field stays null. A
-  // CPU-only host must not be misreported as having no hardware sensors.
-  // cpuPowerWatts is a delta, so a second sample is needed for it to resolve
-  // non-null alongside the always-gauge cpuTemperatureCelsius.
-  const collector = new LinuxMetricsCollector(createDeps(state));
-  await collector.collect({ sequence: 1, nowMs: 1_000_000 });
-  advanceState(state);
-  const result = await collector.collect({ sequence: 2, nowMs: 1_060_000 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-  assertEquals(result.sample.metrics.cpuTemperatureCelsius, 45);
-  assertEquals(result.sample.metrics.cpuPowerWatts, 10);
-  assertEquals(result.sample.parts, ["core", "extended", "sensors"]);
-  assertEquals(result.sample.metrics.gpuUtilizationPercent, null);
-  assertEquals(result.sample.metrics.disk1TemperatureCelsius, null);
-  assertEquals(result.sample.metrics.cpuFanRpm, null);
-});
-
-it("a fully-assigned sample declares every sensors-part slot", async () => {
-  const state = defaultState();
-  const collector = new LinuxMetricsCollector(createDeps(state, {
-    readSensors: () => Promise.resolve(fullSensorReadings()),
-  }));
-  const result = await collector.collect({ sequence: 1, nowMs: 1_000_000 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-  const { metrics } = result.sample;
-  assertEquals(result.sample.parts, ["core", "extended", "sensors"]);
-  assertEquals(metrics.gpuUtilizationPercent, 42);
-  assertEquals(metrics.gpuFanRpm, 1800);
-  assertEquals(metrics.disk1TemperatureCelsius, 36.85);
-  assertEquals(metrics.disk2TemperatureCelsius, 33);
-  assertEquals(metrics.ambient1TemperatureCelsius, 32);
-  assertEquals(metrics.ambient2TemperatureCelsius, 45);
-  assertEquals(metrics.boardTemperatureCelsius, 32);
-  assertEquals(metrics.cpuFanRpm, 1200);
-  assertEquals(metrics.systemFan1Rpm, 800);
-  assertEquals(metrics.systemFan2Rpm, 750);
-});
-
-it("a real hardware-profile GPU assignment reads back through the full collector pipeline", async () => {
-  // Regression coverage for the resolveAdminSensorOverrides() → readHostSensors
-  // round trip inside the actual collector (not a canned SensorReadings
-  // stub): a gpuDevice slot's chip:label identity must resolve temperature,
-  // power, and utilization together, not just whichever pool the identity
-  // happens to literally name.
-  const state = defaultState();
-  const stateDir = await Deno.makeTempDir();
+test("LinuxMetricsCollector: a real /dev/mapper/* (LVM) root, discovered through collectTopology(), still produces service block devices and non-null host disk aggregates", async () => {
+  const daemonStateDir = await Deno.makeTempDir();
   try {
-    await writeHardwareProfile({
-      gpuDevice: { chip: "amdgpu", label: "edge" },
-    }, stateDir);
-    const overrides = await resolveAdminSensorOverrides(stateDir);
-    const root = sensorsFixtureRoot("sensors-gpu-utilization");
+    const diskstatsLvm1 = fixture("proc-diskstats-lvm.txt");
+    const diskstatsLvm2 = diskstatsLvm1.replace(
+      "dm-0 900 180 27000 360 450 540 63000 720",
+      "dm-0 1000 180 30000 400 550 540 77000 800",
+    );
 
-    const collector = new LinuxMetricsCollector(createDeps(state, {
-      resolveAdminSensorOverrides: () => Promise.resolve(overrides),
-      readSensors: (o) => readHostSensors(o ?? {}, { root }),
-    }));
-    const result = await collector.collect({ sequence: 1, nowMs: 1_000_000 });
-    assertEquals(result.supported, true);
-    if (!result.supported) return;
+    const snapshot = await collectTopology({
+      readProcFile: (path) => {
+        if (path === "/proc/net/dev") {
+          return "Inter-|   Receive\n face |bytes\n  eth0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n";
+        }
+        // An LVM root: the mount source is a /dev/mapper/* symlink target,
+        // never a direct /dev/<name> — the actual production path this
+        // end-to-end test exercises (see mounts.ts's `backingDeviceNames`).
+        if (path === "/proc/mounts") {
+          return "/dev/mapper/vg0-root / ext4 rw,relatime 0 0\n";
+        }
+        if (path === "/proc/diskstats") return diskstatsLvm1;
+        return undefined;
+      },
+      statfs: () => ({ blocks: 1000, bfree: 500, bavail: 400, bsize: 4096 }),
+      resolveDockerDataRoot: () => Promise.resolve(null),
+      resolveHostingPath: () => Promise.reject(new Error("no hosting path")),
+      resolveFabricInterfaces: () => Promise.resolve([]),
+      io: defaultSensorIo(),
+      sysRoot: topologyFixtureRoot("block-graph-lvm"),
+      daemonStateDir,
+      resolveTopologyOverrides: () => Promise.resolve(EMPTY_TOPOLOGY_OVERRIDES),
+      resolveBootGeneration: () => Promise.resolve(0),
+      collectHardwareSignals: () => Promise.resolve([]),
+    });
 
-    const { metrics } = result.sample;
-    assertEquals(metrics.gpuTemperatureCelsius, 61);
-    assertEquals(metrics.gpuPowerWatts, 37);
-    assertEquals(metrics.gpuUtilizationPercent, 42);
+    const dm0 = snapshot.blockDevices.find((d) => d.kernelName === "dm-0");
+    if (!dm0) throw new TypeError("expected dm-0 in block topology");
+    assertEquals(dm0.isServiceDevice, true);
+
+    let tick = 0;
+    let nowMs = 1_000_000;
+    const collector = new LinuxMetricsCollector(
+      makeDeps(
+        () => ({
+          "/proc/diskstats": tick === 0 ? diskstatsLvm1 : diskstatsLvm2,
+        }),
+        snapshot,
+        () => nowMs,
+      ),
+    );
+
+    await collector.collect({ sequence: 1, nowMs });
+    tick = 1;
+    nowMs += 60_000;
+    const second = await collector.collect({ sequence: 2, nowMs });
+    if (!second.supported) throw new TypeError("expected a supported sample");
+
+    assertEquals(
+      second.sample.blockDevices.some((d) => d.deviceId === dm0.deviceId),
+      true,
+    );
+    assertEquals(
+      second.sample.host.storage.diskReadBytesPerSecond,
+      (3000 * 512) / 60,
+    );
+    assertEquals(
+      second.sample.host.storage.diskWriteBytesPerSecond,
+      (14000 * 512) / 60,
+    );
   } finally {
-    await Deno.remove(stateDir, { recursive: true });
+    await Deno.remove(daemonStateDir, { recursive: true });
   }
 });
 
-it("stamps dimensions.hardwareProfileGeneration from the resolved hardware profile", async () => {
-  const state = defaultState();
-  const collector = new LinuxMetricsCollector(createDeps(state, {
-    resolveHardwareProfileGeneration: () => 3,
-  }));
-  const result = await collector.collect({ sequence: 1, nowMs: 1_000_000 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-  assertEquals(result.sample.dimensions.hardwareProfileGeneration, 3);
-});
+test("LinuxMetricsCollector populates ingressSources/databaseProxies when their adapters are wired, and keeps them [] when absent (default)", async () => {
+  const snapshot = fullTopologySnapshot();
+  const nowMs = 1_000_000;
 
-it("defaults hardwareProfileGeneration to 0 when resolution throws", async () => {
-  const state = defaultState();
-  const collector = new LinuxMetricsCollector(createDeps(state, {
-    resolveHardwareProfileGeneration: () => {
-      throw new Error("profile read boom");
+  const withoutAdapters = new LinuxMetricsCollector(
+    makeDeps(() => TICK_1, snapshot, () => nowMs),
+  );
+  const withoutResult = await withoutAdapters.collect({
+    sequence: 1,
+    nowMs,
+  });
+  if (!withoutResult.supported) {
+    throw new TypeError("expected a supported sample");
+  }
+  assertEquals(withoutResult.sample.ingressSources, []);
+  assertEquals(withoutResult.sample.databaseProxies, []);
+
+  const withAdapters = new LinuxMetricsCollector({
+    ...makeDeps(() => TICK_1, snapshot, () => nowMs),
+    ingressAdapters: {
+      caddy: {
+        id: "caddy",
+        probe: () => Promise.resolve(),
+        read: () =>
+          Promise.resolve({
+            sourceId: "caddy",
+            sourceKind: "caddy",
+            reading: { requests: null },
+          }),
+      },
+      traefik: {
+        id: "traefik",
+        probe: () => Promise.resolve(),
+        read: () => Promise.resolve(null),
+      },
     },
-  }));
-  const result = await collector.collect({ sequence: 1, nowMs: 1_000_000 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-  assertEquals(result.sample.dimensions.hardwareProfileGeneration, 0);
+    databaseProxyAdapters: {
+      proxysql: {
+        id: "proxysql",
+        probe: () => Promise.resolve(),
+        read: () =>
+          Promise.resolve({
+            sourceId: "proxysql",
+            sourceKind: "proxysql",
+            reading: { clientConnections: 3 },
+          }),
+      },
+    },
+  });
+  const withResult = await withAdapters.collect({ sequence: 1, nowMs });
+  if (!withResult.supported) {
+    throw new TypeError("expected a supported sample");
+  }
+  assertEquals(withResult.sample.ingressSources.length, 1);
+  assertEquals(withResult.sample.ingressSources[0].sourceId, "caddy");
+  assertEquals(withResult.sample.databaseProxies.length, 1);
+  assertEquals(withResult.sample.databaseProxies[0].sourceId, "proxysql");
+  assertEquals(withResult.sample.databaseProxies[0].clientConnections, 3);
 });
 
-function caddyCounters(overrides?: Partial<CaddyCounters>): CaddyCounters {
-  return {
-    requestsTotal: 100,
-    responses2xxTotal: 90,
-    responses3xxTotal: 5,
-    responses4xxTotal: 4,
-    responses5xxTotal: 1,
-    requestBytesTotal: 10_000,
-    responseBytesTotal: 50_000,
-    requestDurationSecondsSum: 12,
-    requestsUnder100msTotal: 80,
-    requestsUnder1sTotal: 98,
-    requestsInFlight: 3,
-    ...overrides,
+function quietEventCollectorSet(): EventCollectorSet {
+  return new EventCollectorSet({
+    gpuHealthReader: () =>
+      Promise.resolve({
+        eccDoubleBitAggregateTotal: null,
+        lastXidErrorCode: null,
+        remappedRows: null,
+        retiredPagesPending: null,
+      }),
+    smartRunner: () => Promise.resolve(null),
+    fabricStateReader: () => [],
+    clockSyncReader: () => undefined,
+    kernelLogReader: () => Promise.resolve([]),
+  });
+}
+
+test("LinuxMetricsCollector: a bare-metal host with real hardware signals wired end-to-end (hardwareSignals populated, events stay [] on a quiet tick)", async () => {
+  const sysRoot = topologyFixtureRoot("physical-signals-basic");
+  const hardwareSignals = await collectHardwareSignals({
+    io: defaultSensorIo(),
+    sysRoot,
+  });
+  const snapshot = fullTopologySnapshot({ hardwareSignals });
+
+  let nowMs = 1_000_000;
+  const collector = new LinuxMetricsCollector({
+    ...makeDeps(() => TICK_1, snapshot, () => nowMs),
+    io: defaultSensorIo(),
+    sysRoot,
+    eventCollectors: quietEventCollectorSet(),
+  });
+
+  const first = await collector.collect({ sequence: 1, nowMs });
+  if (!first.supported) throw new TypeError("expected a supported sample");
+  assertEquals(first.sample.events, []);
+  assertEquals(first.sample.hardwareSignals.length, 2);
+  const firstTemp = first.sample.hardwareSignals.find((s) =>
+    s.kind === "temperature"
+  );
+  assertEquals(firstTemp?.value, 45); // fixture's temp1_input (45000 millidegrees), well under its 90°C _max.
+  const firstPower = first.sample.hardwareSignals.find((s) =>
+    s.kind === "power"
+  );
+  assertEquals(firstPower?.value, null); // RAPL energy: first observation has no baseline yet.
+
+  nowMs += 60_000;
+  const second = await collector.collect({ sequence: 2, nowMs });
+  if (!second.supported) throw new TypeError("expected a supported sample");
+  assertEquals(second.sample.events, []);
+  const secondPower = second.sample.hardwareSignals.find((s) =>
+    s.kind === "power"
+  );
+  assertEquals(secondPower?.value, 0); // Static fixture counter -> zero delta -> 0 W, not null.
+});
+
+test("LinuxMetricsCollector: the full physical-signal fixture is fan-free/GPU-free and carries both CPU virtual signals", async () => {
+  const sysRoot = topologyFixtureRoot("physical-signals-full");
+  const hardwareSignals = await collectHardwareSignals({
+    io: defaultSensorIo(),
+    sysRoot,
+  });
+  const snapshot = fullTopologySnapshot({ hardwareSignals });
+
+  let nowMs = 1_000_000;
+  const collector = new LinuxMetricsCollector({
+    ...makeDeps(() => TICK_1, snapshot, () => nowMs),
+    io: defaultSensorIo(),
+    sysRoot,
+    eventCollectors: quietEventCollectorSet(),
+  });
+
+  const first = await collector.collect({ sequence: 1, nowMs });
+  if (!first.supported) throw new TypeError("expected a supported sample");
+  assertEquals(first.sample.hardwareSignals.length, 7);
+  assertEquals(
+    first.sample.hardwareSignals.some((s) => s.kind === "fan"),
+    false,
+  );
+
+  const hottestCore = first.sample.hardwareSignals.find((s) =>
+    s.signalId === "signal:cpu:hottest-core"
+  );
+  assertEquals(hottestCore?.value, 68); // max(Core 0: 50°C, Core 1: 68°C).
+
+  const throttledFirst = first.sample.hardwareSignals.find((s) =>
+    s.signalId === "signal:cpu:thermal-throttled"
+  );
+  assertEquals(throttledFirst?.value, null); // no baseline yet.
+
+  nowMs += 60_000;
+  const second = await collector.collect({ sequence: 2, nowMs });
+  if (!second.supported) throw new TypeError("expected a supported sample");
+  const throttledSecond = second.sample.hardwareSignals.find((s) =>
+    s.signalId === "signal:cpu:thermal-throttled"
+  );
+  assertEquals(throttledSecond?.value, 0); // Static fixture counter -> zero delta -> 0%, not null.
+});
+
+test("LinuxMetricsCollector attaches cpuDetail/memoryDetail every tick, and cpuCoreLive only during a live-mode collect", async () => {
+  const snapshot = fullTopologySnapshot();
+  const tick1: RawFixtureMap = {
+    ...TICK_1,
+    "/proc/stat": fixture("proc-stat-percore-1.txt"),
   };
-}
-
-function proxySqlCounters(
-  overrides?: Partial<ProxySqlCounters>,
-): ProxySqlCounters {
-  return {
-    queriesTotal: 5_000,
-    slowQueriesTotal: 2,
-    connectionErrorsTotal: 0,
-    clientConnections: 6,
-    backendConnections: 3,
-    backendsUp: 2,
-    ...overrides,
+  const tick2: RawFixtureMap = {
+    ...TICK_2,
+    "/proc/stat": fixture("proc-stat-percore-2.txt"),
   };
-}
+  const tick3: RawFixtureMap = {
+    ...TICK_2,
+    "/proc/stat": fixture("proc-stat-percore-3.txt"),
+  };
+  let tick = 0;
+  let nowMs = 1_000_000;
+  const collector = new LinuxMetricsCollector(
+    makeDeps(
+      () => (tick === 0 ? tick1 : tick === 1 ? tick2 : tick3),
+      snapshot,
+      () => nowMs,
+    ),
+  );
 
-function proxyReader(
-  counters: ProxyCounters,
-): () => Promise<ProxyCounters> {
-  return () => Promise.resolve(counters);
-}
+  const first = await collector.collect({ sequence: 1, nowMs });
+  if (!first.supported) throw new TypeError("expected a supported sample");
+  assertEquals(first.sample.cpuDetail !== undefined, true);
+  assertEquals(first.sample.memoryDetail !== undefined, true);
+  assertEquals(first.sample.cpuCoreLive, undefined);
 
-it('omits "traffic" from parts when neither Caddy nor ProxySQL is reachable', async () => {
-  const state = defaultState();
-  const collector = new LinuxMetricsCollector(createDeps(state));
-  const result = await collector.collect({ sequence: 1, nowMs: 1_000_000 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-
-  assertEquals(result.sample.parts, ["core", "extended", "sensors"]);
-  assertEquals(result.sample.metrics.caddyRequestsTotal, undefined);
-  assertEquals(result.sample.metrics.proxysqlQueriesTotal, undefined);
-  // Neither source contributed — distinct from a per-metric null, which a
-  // partially-reachable tick would also produce.
-  assertEquals(result.sample.dimensions.trafficSources, {
-    caddy: false,
-    proxysql: false,
+  tick = 1;
+  nowMs += 60_000;
+  const secondBaseline = await collector.collect({
+    sequence: 2,
+    nowMs,
+    collectionMode: "baseline",
   });
-});
+  if (!secondBaseline.supported) {
+    throw new TypeError("expected a supported sample");
+  }
+  assertEquals(secondBaseline.sample.cpuDetail?.hotspots.length, 2);
+  assertEquals(secondBaseline.sample.cpuCoreLive, undefined);
 
-it('declares "traffic" and nulls every counter delta on the first sample after attach, while gauges resolve', async () => {
-  const state = defaultState();
-  const collector = new LinuxMetricsCollector(createDeps(state, {
-    readProxyCounters: proxyReader({
-      caddy: caddyCounters(),
-      proxysql: proxySqlCounters(),
-    }),
-  }));
-  const result = await collector.collect({ sequence: 1, nowMs: 1_000_000 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-
-  const { metrics } = result.sample;
-  assertEquals(result.sample.parts, ["core", "extended", "sensors", "traffic"]);
-  assertEquals(metrics.caddyRequestsTotal, null);
-  assertEquals(metrics.caddyResponses2xxTotal, null);
-  assertEquals(metrics.caddyRequestDurationSecondsSum, null);
-  assertEquals(metrics.proxysqlQueriesTotal, null);
-  assertEquals(metrics.proxysqlSlowQueriesTotal, null);
-  // Gauges resolve even on the first tick — no previous sample needed.
-  assertEquals(metrics.caddyRequestsInFlight, 3);
-  assertEquals(metrics.proxysqlClientConnections, 6);
-  assertEquals(metrics.proxysqlBackendConnections, 3);
-  assertEquals(metrics.proxysqlBackendsUp, 2);
-  assertEquals(result.sample.dimensions.trafficSources, {
-    caddy: true,
-    proxysql: true,
+  tick = 2;
+  nowMs += 60_000;
+  const third = await collector.collect({
+    sequence: 3,
+    nowMs,
+    collectionMode: "live",
   });
-});
-
-it('declares "traffic" when only ProxySQL is reachable, leaving Caddy fields null', async () => {
-  const state = defaultState();
-  const collector = new LinuxMetricsCollector(createDeps(state, {
-    readProxyCounters: proxyReader({
-      caddy: null,
-      proxysql: proxySqlCounters(),
-    }),
-  }));
-  const result = await collector.collect({ sequence: 1, nowMs: 1_000_000 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-
-  const { metrics } = result.sample;
-  assertEquals(result.sample.parts, ["core", "extended", "sensors", "traffic"]);
-  assertEquals(metrics.caddyRequestsTotal, null);
-  assertEquals(metrics.caddyRequestsInFlight, null);
-  assertEquals(metrics.proxysqlClientConnections, 6);
-  // ProxySQL not installed vs. down both null every proxysql field the same
-  // way — this marker is what actually distinguishes "reachable this tick"
-  // (Caddy here) from "not contributing" (ProxySQL, whichever the reason).
-  assertEquals(result.sample.dimensions.trafficSources, {
-    caddy: false,
-    proxysql: true,
-  });
-});
-
-it('declares "traffic" when only Caddy is reachable, leaving ProxySQL fields null', async () => {
-  const state = defaultState();
-  const collector = new LinuxMetricsCollector(createDeps(state, {
-    readProxyCounters: proxyReader({
-      caddy: caddyCounters(),
-      proxysql: null,
-    }),
-  }));
-  const result = await collector.collect({ sequence: 1, nowMs: 1_000_000 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-
-  const { metrics } = result.sample;
-  assertEquals(result.sample.parts, ["core", "extended", "sensors", "traffic"]);
-  assertEquals(metrics.proxysqlQueriesTotal, null);
-  assertEquals(metrics.proxysqlClientConnections, null);
-  assertEquals(metrics.caddyRequestsInFlight, 3);
-  assertEquals(result.sample.dimensions.trafficSources, {
-    caddy: true,
-    proxysql: false,
-  });
-});
-
-it("computes Caddy/ProxySQL counter deltas on the second sample", async () => {
-  const state = defaultState();
-  let caddy = caddyCounters();
-  let proxysql = proxySqlCounters();
-  const collector = new LinuxMetricsCollector(createDeps(state, {
-    readProxyCounters: () => Promise.resolve({ caddy, proxysql }),
-  }));
-
-  await collector.collect({ sequence: 1, nowMs: 1_000_000 });
-  caddy = caddyCounters({
-    requestsTotal: 175,
-    responses2xxTotal: 150,
-    requestDurationSecondsSum: 20,
-    requestsInFlight: 1,
-  });
-  proxysql = proxySqlCounters({
-    queriesTotal: 5_400,
-    slowQueriesTotal: 3,
-    clientConnections: 4,
-  });
-  const result = await collector.collect({ sequence: 2, nowMs: 1_060_000 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-
-  const { metrics } = result.sample;
-  assertEquals(metrics.caddyRequestsTotal, 75);
-  assertEquals(metrics.caddyResponses2xxTotal, 60);
-  assertEquals(metrics.caddyRequestDurationSecondsSum, 8);
-  assertEquals(metrics.caddyRequestsInFlight, 1);
-  assertEquals(metrics.proxysqlQueriesTotal, 400);
-  assertEquals(metrics.proxysqlSlowQueriesTotal, 1);
-  assertEquals(metrics.proxysqlClientConnections, 4);
-});
-
-it("nulls a counter field for the interval when it decreases (proxy restart), without nulling unrelated fields", async () => {
-  const state = defaultState();
-  let caddy = caddyCounters();
-  const collector = new LinuxMetricsCollector(createDeps(state, {
-    readProxyCounters: () => Promise.resolve({ caddy, proxysql: null }),
-  }));
-
-  await collector.collect({ sequence: 1, nowMs: 1_000_000 });
-  // Caddy restarted: its Prometheus counters reset to near-zero, but keeps
-  // running (requestsInFlight still reports).
-  caddy = caddyCounters({ requestsTotal: 3, requestsInFlight: 1 });
-  const result = await collector.collect({ sequence: 2, nowMs: 1_060_000 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-
-  const { metrics } = result.sample;
-  assertEquals(metrics.caddyRequestsTotal, null);
-  // Unaffected counters (no decrease) still compute a normal delta.
-  assertEquals(metrics.caddyResponses2xxTotal, 0);
-  assertEquals(metrics.caddyRequestsInFlight, 1);
-});
-
-it("boot-id change nulls every traffic counter delta but leaves connection/backend gauges intact", async () => {
-  const state = defaultState();
-  let caddy = caddyCounters();
-  let proxysql = proxySqlCounters();
-  const collector = new LinuxMetricsCollector(createDeps(state, {
-    readProxyCounters: () => Promise.resolve({ caddy, proxysql }),
-  }));
-
-  await collector.collect({ sequence: 1, nowMs: 1_000_000 });
-  advanceState(state);
-  state.bootText = fixture("proc-boot-id-2.txt");
-  caddy = caddyCounters({ requestsTotal: 10, requestsInFlight: 0 });
-  proxysql = proxySqlCounters({ queriesTotal: 20, backendsUp: 0 });
-  const result = await collector.collect({ sequence: 2, nowMs: 1_060_000 });
-  assertEquals(result.supported, true);
-  if (!result.supported) return;
-
-  const { metrics } = result.sample;
-  assertEquals(metrics.caddyRequestsTotal, null);
-  assertEquals(metrics.caddyRequestDurationSecondsSum, null);
-  assertEquals(metrics.proxysqlQueriesTotal, null);
-  assertEquals(metrics.proxysqlSlowQueriesTotal, null);
-  // Gauges survive the reset, same as load1/cpuTemperatureCelsius above.
-  assertEquals(metrics.caddyRequestsInFlight, 0);
-  assertEquals(metrics.proxysqlClientConnections, 6);
-  assertEquals(metrics.proxysqlBackendsUp, 0);
+  if (!third.supported) throw new TypeError("expected a supported sample");
+  assertEquals(third.sample.cpuCoreLive?.length, 2);
+  assertEquals(
+    third.sample.cpuCoreLive?.map((c) => c.coreId),
+    ["cpu:p0c0t0", "cpu:p0c1t0"],
+  );
 });

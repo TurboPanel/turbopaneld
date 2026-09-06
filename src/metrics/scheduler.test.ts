@@ -5,8 +5,12 @@ import {
   type MetricsCollector,
   type MetricsCollectResult,
 } from "./collector/index.ts";
-import type { CollectorDeps } from "./collector/types.ts";
-import { buildHostMetricsSample, METRICS_SCHEMA_VERSION } from "./contract.ts";
+import type { CollectorDepsV4 } from "./collector/types-v4.ts";
+import {
+  buildMetricsSampleV4,
+  METRICS_SCHEMA_VERSION_V4,
+} from "./contract-v4.ts";
+import type { TopologySnapshot } from "./topology/types.ts";
 import {
   deterministicJitterMs,
   METRICS_INTERVAL_MS,
@@ -132,17 +136,23 @@ class FakeClock {
 
 function parseMetricsFrames(sent: unknown[]): Array<{
   type: string;
-  version: number;
-  sequence: number;
-  metrics: Record<string, number | null>;
+  metadata: { version: number; sequence: number };
+  host: {
+    cpu: { busyPercent: number | null };
+    storage: { diskReadBytesPerSecond: number | null };
+    memory: { availableBytes: number | null };
+  };
 }> {
   return sent
     .map((sample) =>
       sample as {
         type: string;
-        version: number;
-        sequence: number;
-        metrics: Record<string, number | null>;
+        metadata: { version: number; sequence: number };
+        host: {
+          cpu: { busyPercent: number | null };
+          storage: { diskReadBytesPerSecond: number | null };
+          memory: { availableBytes: number | null };
+        };
       }
     )
     .filter((f) => f.type === "metrics");
@@ -161,11 +171,41 @@ function fixture(name: string): string {
   );
 }
 
+/** Minimal fixed topology snapshot: one service block device, nothing else. */
+function fixtureTopologySnapshot(): TopologySnapshot {
+  return {
+    generation: 1,
+    bootGeneration: 0,
+    networks: [],
+    filesystems: [],
+    blockDevices: [
+      {
+        deviceId: "blk:sda",
+        kernelName: "sda",
+        deviceType: "physical",
+        isServiceDevice: true,
+      },
+    ],
+    gpus: [],
+    hardwareSignals: [],
+    cpu: {
+      sockets: 1,
+      coresPerSocket: 1,
+      threadsPerSocket: 1,
+      model: null,
+      cores: [],
+    },
+    numaNodes: [],
+    memoryTotalBytes: null,
+    swapTotalBytes: null,
+  };
+}
+
 function createFixtureCollectorFactory(): () => MetricsCollector {
   return () => {
     let sampleIndex = 0;
     let clockMs = 1_000_000;
-    const deps: Partial<CollectorDeps> = {
+    const deps: Partial<CollectorDepsV4> = {
       readProcFile(path: string) {
         if (path === "/proc/stat") {
           return sampleIndex === 0
@@ -173,56 +213,25 @@ function createFixtureCollectorFactory(): () => MetricsCollector {
             : fixture("proc-stat-2.txt");
         }
         if (path === "/proc/meminfo") return fixture("proc-meminfo.txt");
-        if (path === "/proc/loadavg") return fixture("proc-loadavg.txt");
-        if (path === "/proc/uptime") return fixture("proc-uptime.txt");
         if (path === "/proc/diskstats") return fixture("proc-diskstats.txt");
-        if (path === "/proc/net/dev") return fixture("proc-net-dev.txt");
-        if (path === "/proc/sys/kernel/random/boot_id") {
-          return fixture("proc-boot-id.txt");
-        }
-        if (path === "/proc/sys/kernel/osrelease") {
-          return fixture("proc-osrelease.txt");
-        }
         return undefined;
       },
-      statfs() {
-        return {
-          blocks: 1_000_000,
-          bfree: 400_000,
-          bavail: 350_000,
-          bsize: 4096,
-        };
-      },
+      statfs: () => null,
       now: () => clockMs,
-      countProcesses: () => 42,
-      resolveDimensions: () => ({
-        schemaVersion: METRICS_SCHEMA_VERSION,
-      }),
-      resolveDockerDataRoot: () => Promise.resolve(null),
-      resolveHostingPath: () => "/srv/users",
-      readSensors: () =>
-        Promise.resolve({
-          cpuTemperatureCelsius: null,
-          gpuTemperatureCelsius: null,
-          gpuPowerWatts: null,
-          gpuUtilizationPercent: null,
-          gpuFanRpm: null,
-          disk1TemperatureCelsius: null,
-          disk2TemperatureCelsius: null,
-          ambient1TemperatureCelsius: null,
-          ambient2TemperatureCelsius: null,
-          boardTemperatureCelsius: null,
-          cpuFanRpm: null,
-          systemFan1Rpm: null,
-          systemFan2Rpm: null,
-          cpuEnergy: null,
-          sensors: {},
-        }),
-      resolveFabricInterfaces: () => Promise.resolve(["tp0"]),
-      resolveAdminSensorOverrides: () => Promise.resolve({}),
-      resolveHardwareProfileGeneration: () => 0,
-      resolveNicSlots: () => Promise.resolve({ nic1: null, nic2: null }),
-      readProxyCounters: () => Promise.resolve({ caddy: null, proxysql: null }),
+      collectTopology: () => Promise.resolve(fixtureTopologySnapshot()),
+      io: { listDir: () => [], readFile: () => undefined },
+      // Unlike GPU adapters (only invoked per topology-enumerated GPU, and
+      // this fixture's topology has none), ingress/database-proxy adapters
+      // are scrape-derived with no topology gate — `defaultDepsV4()`'s real
+      // adapters would otherwise attempt genuine loopback network calls on
+      // every tick here, breaking this test's hermetic/synchronous timing.
+      ingressAdapters: undefined,
+      databaseProxyAdapters: undefined,
+      // Same reasoning: the real `EventCollectorSet`'s default readers spawn
+      // genuine subprocesses (`dmesg`, `timedatectl`) on their own internal
+      // low-cadence timers — real I/O this fixture's hermetic/synchronous
+      // timing can't accommodate.
+      eventCollectors: undefined,
     };
     const inner = createMetricsCollector(deps);
     return {
@@ -254,26 +263,60 @@ function createFakeCollector(
 function supportedSample(sequence: number): MetricsCollectResult {
   return {
     supported: true,
-    sample: buildHostMetricsSample({
-      at: new Date(0).toISOString(),
-      intervalSeconds: 60,
-      sequence,
-      parts: ["core", "extended"],
-      metrics: {
-        load1: 1,
-        load5: 1,
-        load15: 1,
-        memoryTotalBytes: 200,
-        memoryAvailableBytes: 100,
-        processCount: 10,
-        uptimeSeconds: 100,
-      },
-      dimensions: {
-        schemaVersion: METRICS_SCHEMA_VERSION,
+    sample: buildMetricsSampleV4({
+      metadata: {
+        version: METRICS_SCHEMA_VERSION_V4,
+        sampledAt: new Date(0).toISOString(),
+        intervalSeconds: 60,
+        sequence,
         collectionMode: "baseline",
-        hardwareProfileGeneration: 0,
-        trafficSources: { caddy: false, proxysql: false },
+        topologyGeneration: 1,
+        bootGeneration: 0,
       },
+      host: {
+        cpu: {
+          busyPercent: null,
+          userPercent: null,
+          systemPercent: null,
+          iowaitPercent: null,
+          stealPercent: null,
+          softirqPercent: null,
+          pressureSomePercent: null,
+          maxCoreBusyPercent: null,
+          procsRunning: null,
+          procsBlocked: null,
+        },
+        kernel: { fileHandlesUsedPercent: null, conntrackUsedPercent: null },
+        memory: {
+          availableBytes: 100,
+          swapUsedBytes: null,
+          pressureSomePercent: null,
+          pressureFullPercent: null,
+          swapInBytesPerSecond: null,
+          swapOutBytesPerSecond: null,
+          majorPageFaultsPerSecond: null,
+        },
+        storage: {
+          ioPressureSomePercent: null,
+          ioPressureFullPercent: null,
+          diskReadBytesPerSecond: null,
+          diskWriteBytesPerSecond: null,
+          diskReadLatencyMs: null,
+          diskWriteLatencyMs: null,
+          maxBlockDeviceUtilPercent: null,
+          rootFilesystemAvailableBytes: null,
+          rootFilesystemFreeInodes: null,
+        },
+        network: { tcpRetransmitPercent: null, softnetDropsPerSecond: null },
+      },
+      networks: [],
+      filesystems: [],
+      blockDevices: [],
+      gpus: [],
+      hardwareSignals: [],
+      ingressSources: [],
+      databaseProxies: [],
+      events: [],
     }),
   };
 }
@@ -326,8 +369,8 @@ it("MetricsScheduler emits first metrics frame immediately on attach", async () 
   const frames = parseMetricsFrames(sent);
   assertEquals(frames.length, 1);
   assertEquals(frames[0].type, "metrics");
-  assertEquals(frames[0].version, METRICS_SCHEMA_VERSION);
-  assertEquals(typeof frames[0].sequence, "number");
+  assertEquals(frames[0].metadata.version, METRICS_SCHEMA_VERSION_V4);
+  assertEquals(typeof frames[0].metadata.sequence, "number");
 });
 
 it("MetricsScheduler steady cadence emits one frame per interval", async () => {
@@ -423,14 +466,14 @@ it("MetricsScheduler sequence increases across ticks and survives detach→attac
   await clock.advance(0);
   await clock.advance(intervalMs);
   const first = parseMetricsFrames(sent1);
-  assertEquals(first.map((f) => f.sequence), [1, 2]);
+  assertEquals(first.map((f) => f.metadata.sequence), [1, 2]);
 
   scheduler.detach();
   scheduler.attach(capturingSink(sent2));
   await clock.advance(0);
   await clock.advance(intervalMs);
   const second = parseMetricsFrames(sent2);
-  assertEquals(second.map((f) => f.sequence), [3, 4]);
+  assertEquals(second.map((f) => f.metadata.sequence), [3, 4]);
 });
 
 it({
@@ -453,14 +496,14 @@ it({
     await clock.advance(0);
     const firstAttach = parseMetricsFrames(sent1);
     assertEquals(firstAttach.length, 1);
-    assertEquals(firstAttach[0].metrics.cpuIdlePercent, null);
-    assertEquals(firstAttach[0].metrics.diskReadBytesPerSecond, null);
+    assertEquals(firstAttach[0].host.cpu.busyPercent, null);
+    assertEquals(firstAttach[0].host.storage.diskReadBytesPerSecond, null);
 
     await clock.advance(intervalMs);
     const secondTick = parseMetricsFrames(sent1);
     assertEquals(secondTick.length, 2);
-    assertEquals(typeof secondTick[1].metrics.cpuIdlePercent, "number");
-    assertEquals(secondTick[1].metrics.cpuIdlePercent !== null, true);
+    assertEquals(typeof secondTick[1].host.cpu.busyPercent, "number");
+    assertEquals(secondTick[1].host.cpu.busyPercent !== null, true);
 
     scheduler.detach();
     const sent2: unknown[] = [];
@@ -468,8 +511,8 @@ it({
     await clock.advance(0);
     const afterReattach = parseMetricsFrames(sent2);
     assertEquals(afterReattach.length, 1);
-    assertEquals(afterReattach[0].metrics.cpuIdlePercent, null);
-    assertEquals(afterReattach[0].metrics.diskReadBytesPerSecond, null);
+    assertEquals(afterReattach[0].host.cpu.busyPercent, null);
+    assertEquals(afterReattach[0].host.storage.diskReadBytesPerSecond, null);
   },
 });
 
@@ -679,7 +722,7 @@ it(
     await clock.advance(0);
     assertEquals(collectCount, 1);
     assertEquals(
-      parseMetricsFrames(sent).map((f) => f.sequence),
+      parseMetricsFrames(sent).map((f) => f.metadata.sequence),
       [1],
     );
 
@@ -700,18 +743,24 @@ it(
     }
 
     const afterSlow = parseMetricsFrames(sent);
-    assertEquals(afterSlow.map((f) => f.sequence), [1, 2]);
+    assertEquals(afterSlow.map((f) => f.metadata.sequence), [1, 2]);
     for (let i = 1; i < afterSlow.length; i++) {
-      assertEquals(afterSlow[i].sequence > afterSlow[i - 1].sequence, true);
+      assertEquals(
+        afterSlow[i].metadata.sequence > afterSlow[i - 1].metadata.sequence,
+        true,
+      );
     }
 
     // Next cadence tick still works and keeps send-order sequences increasing.
     await clock.advance(intervalMs);
     const frames = parseMetricsFrames(sent);
-    assertEquals(frames.map((f) => f.sequence), [1, 2, 3]);
+    assertEquals(frames.map((f) => f.metadata.sequence), [1, 2, 3]);
     assertEquals(maxInFlight, 1);
     for (let i = 1; i < frames.length; i++) {
-      assertEquals(frames[i].sequence > frames[i - 1].sequence, true);
+      assertEquals(
+        frames[i].metadata.sequence > frames[i - 1].metadata.sequence,
+        true,
+      );
     }
   },
 );
@@ -924,7 +973,7 @@ it("rebindMetricsScheduler updates serverId and preserves sequence", async () =>
   const sent1: unknown[] = [];
   first.scheduler.attach(capturingSink(sent1));
   await clock.advance(0);
-  assertEquals(parseMetricsFrames(sent1)[0].sequence, 1);
+  assertEquals(parseMetricsFrames(sent1)[0].metadata.sequence, 1);
 
   // Simulate tokenServerId already equal to the new id (the reuse bug condition).
   const tokenServerIdAlreadyUpdated = "server-new";
@@ -950,7 +999,7 @@ it("rebindMetricsScheduler updates serverId and preserves sequence", async () =>
   rebound.scheduler.attach(capturingSink(sent2));
   await clock.advance(0);
   // Process-local sequence continues after identity rebind.
-  assertEquals(parseMetricsFrames(sent2)[0].sequence, 2);
+  assertEquals(parseMetricsFrames(sent2)[0].metadata.sequence, 2);
 });
 
 it("setIntervalMs re-arms an armed interval without recreating the collector", async () => {
@@ -984,7 +1033,7 @@ it("setIntervalMs re-arms an armed interval without recreating the collector", a
   // reconstructed and sequences stay continuous.
   assertEquals(factoryCalls, 1);
   assertEquals(
-    parseMetricsFrames(sent).map((f) => f.sequence),
+    parseMetricsFrames(sent).map((f) => f.metadata.sequence),
     [1, 2, 3, 4, 5, 6],
   );
 
@@ -1109,15 +1158,15 @@ it({
     await clock.advance(0);
     const first = parseMetricsFrames(sent);
     assertEquals(first.length, 1);
-    assertEquals(first[0].metrics.cpuIdlePercent, null);
-    assertEquals(first[0].metrics.memoryTotalBytes !== null, true);
+    assertEquals(first[0].host.cpu.busyPercent, null);
+    assertEquals(first[0].host.memory.availableBytes !== null, true);
 
     await clock.advance(primeMs - 1);
     assertEquals(parseMetricsFrames(sent).length, 1);
     await clock.advance(1);
     const primed = parseMetricsFrames(sent);
     assertEquals(primed.length, 2);
-    assertEquals(typeof primed[1].metrics.cpuIdlePercent, "number");
-    assertEquals(primed[1].metrics.cpuIdlePercent !== null, true);
+    assertEquals(typeof primed[1].host.cpu.busyPercent, "number");
+    assertEquals(primed[1].host.cpu.busyPercent !== null, true);
   },
 });

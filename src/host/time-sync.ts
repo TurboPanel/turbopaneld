@@ -376,8 +376,36 @@ function readLastSyncedAt(
 }
 
 /**
- * Read current host timezone + NTP state (no process-lifetime cache).
- * Optional `io` injects spawn/file readers for host-free tests.
+ * Last real `readTimeSync()` observation, refreshed opportunistically
+ * whenever some other real caller (e.g. `instance/idle-presence.ts`'s
+ * hello/heartbeat snapshot) actually reads it — never a read of its own.
+ * `events/clock-sync.ts` reads this via {@link getLastObservedTimeSync} to
+ * detect NTP-sync transitions without violating the collector's
+ * no-subprocess-per-interval rule; `undefined` (no real read has happened
+ * yet this process) matches every other "no telemetry wired" default in
+ * `collector/`. A host-free test call (`io` supplied) never writes here —
+ * mirrors `host-inventory.ts`'s `readHostResources` cache discipline.
+ */
+let lastObservedTimeSync: HostTimeSync | undefined;
+
+/** See {@link lastObservedTimeSync}. */
+export function getLastObservedTimeSync(): HostTimeSync | undefined {
+  return lastObservedTimeSync;
+}
+
+/** Test-only override for {@link lastObservedTimeSync}, mirroring `resetHostResourcesCacheForTests`. */
+export function setLastObservedTimeSyncForTests(
+  value: HostTimeSync | undefined,
+): void {
+  lastObservedTimeSync = value;
+}
+
+/**
+ * Read current host timezone + NTP state (no process-lifetime cache for the
+ * read itself; the *result* of a real, non-test read is stashed via
+ * {@link getLastObservedTimeSync} for callers that must not spawn their own
+ * `timedatectl`). Optional `io` injects spawn/file readers for host-free
+ * tests.
  */
 export function readTimeSync(io?: TimeSyncIo): HostTimeSync {
   const spawn = resolveSpawn(io);
@@ -411,7 +439,7 @@ export function readTimeSync(io?: TimeSyncIo): HostTimeSync {
     spawn,
     synchronizedFileMtime,
   );
-  return {
+  const result: HostTimeSync = {
     ...(timezone ? { timezone } : {}),
     ...(ntpEnabled !== undefined ? { ntpEnabled } : {}),
     ...(ntpSynced !== undefined ? { ntpSynced } : {}),
@@ -421,4 +449,6 @@ export function readTimeSync(io?: TimeSyncIo): HostTimeSync {
       : {}),
     ...(lastSyncedAt ? { lastSyncedAt } : {}),
   };
+  if (!io) lastObservedTimeSync = result;
+  return result;
 }

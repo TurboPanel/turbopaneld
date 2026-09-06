@@ -25,6 +25,7 @@
  * enumerated, or the admin-override match) feeds the fixed contract.
  */
 import { readProcFile } from "../proc-read.ts";
+import { parsePciSlotName } from "../../topology/identity.ts";
 import type { SensorCandidate } from "../types.ts";
 
 /** Injectable sysfs access for fixture-driven tests. */
@@ -143,27 +144,32 @@ export const GPU_HWMON_CHIPS: ReadonlySet<string> = new Set([
   "nouveau",
   "radeon",
   // Intel discrete/integrated GPUs register an "i915" hwmon chip on newer
-  // kernels. Classifying it here means its temps/fans join the GPU pools
-  // instead of falling into ambient/system-fan — on a real Intel-integrated
-  // host this changes `ambient1Temperature`/`ambient2Temperature` versus
-  // pre-fix behavior (nothing in this repo's fixtures has an i915 chip, so
-  // no existing test is affected).
+  // kernels when CONFIG_DRM_I915_HWMON is on *and* the platform exposes the
+  // PCODE mailbox. Alder Lake-N / Twin Lake (N150) often loads i915 but
+  // never registers this chip — utilization then comes from DRM engine
+  // busy counters in {@link discoverDrmIntelGpuDevices}, not hwmon.
   "i915",
 ]);
 
 /**
  * Vendor busy-percent gauge filenames, probed in order under a GPU device's
  * `device` symlink. AMD's `gpu_busy_percent` is a confirmed kernel sysfs
- * attribute; the i915 name is not verifiable from this repo (upstream
- * exposes no single stable sysfs busy-percent node as of this writing) —
- * `gt_busy_percent` is this project's best-effort placeholder for whichever
- * node a given kernel actually exposes, kept as a one-line edit away from
- * the real name once confirmed.
+ * attribute; `gt_busy_percent` is a best-effort i915 placeholder that real
+ * kernels typically do not expose. Intel i915/Xe utilization on ADL-N and
+ * similar iGPUs is the accumulating engine busy nanosecond counter
+ * under `/sys/class/drm/cardN/engine/<name>/busy` — see
+ * {@link discoverDrmIntelGpuDevices}.
  */
 const GPU_UTILIZATION_FILENAMES: readonly string[] = [
   "gpu_busy_percent",
   "gt_busy_percent",
 ];
+
+const INTEL_PCI_VENDOR_IDS: ReadonlySet<string> = new Set([
+  "0x8086",
+  "8086",
+]);
+const DRM_CARD_DIR_RE = /^card\d+$/;
 
 const NVME_HWMON_CHIP = "nvme";
 const DRIVETEMP_HWMON_CHIP = "drivetemp";
@@ -355,6 +361,134 @@ async function discoverHwmonSensors(
   return { hwmonRootHadEntries: entries.length > 0, sawDrivetempChip };
 }
 
+function drmDriverName(uevent: string): string {
+  const line = uevent.split("\n").find((entry) => entry.startsWith("DRIVER="));
+  const name = line?.slice("DRIVER=".length).trim();
+  return name && name.length > 0 ? name : "i915";
+}
+
+function engineSort(a: string, b: string): number {
+  if (a === b) return 0;
+  if (a === "rcs0") return -1;
+  if (b === "rcs0") return 1;
+  if (a.startsWith("ccs") !== b.startsWith("ccs")) {
+    return a.startsWith("ccs") ? -1 : 1;
+  }
+  return a.localeCompare(b);
+}
+
+/** A hwmon-sourced GPU device's own PCI identity, for correlation to a DRM card representing the same physical GPU. */
+async function hwmonDevicePciPath(
+  device: GpuDeviceCandidates,
+  io: SensorIo,
+): Promise<string | undefined> {
+  const uevent = await io.readFile(`${device.path}/device/uevent`);
+  return uevent ? parsePciSlotName(uevent) : undefined;
+}
+
+/**
+ * Find the pre-existing (hwmon-sourced) GPU device this DRM card's engine
+ * counters belong to, so a second card can never be folded into — or
+ * silently drop behind — a device this function already created for an
+ * earlier card. Only devices with no utilization candidates yet are
+ * eligible (an already-fed device is either a distinct GPU or already
+ * complete); `drmCreated` further excludes any device this same discovery
+ * pass created for a *different* card, since two DRM cards must never
+ * correlate to each other.
+ *
+ * PCI identity (shared between a card's `device/uevent` and its hwmon
+ * counterpart's `device/uevent`) is the correlation key whenever it
+ * resolves. When it doesn't (older kernels, or a fixture with no
+ * `PCI_SLOT_NAME` line), chip-name matching is only safe when it is
+ * unambiguous — exactly one eligible same-chip device — otherwise this
+ * card gets its own new device rather than guessing.
+ */
+async function findExistingIntelHwmonDevice(
+  devices: readonly GpuDeviceCandidates[],
+  drmCreated: ReadonlySet<GpuDeviceCandidates>,
+  chip: string,
+  pciPath: string | undefined,
+  io: SensorIo,
+): Promise<GpuDeviceCandidates | undefined> {
+  const eligible = devices.filter((device) =>
+    !drmCreated.has(device) && device.utilization.length === 0
+  );
+
+  if (pciPath) {
+    for (const device of eligible) {
+      if ((await hwmonDevicePciPath(device, io)) === pciPath) return device;
+    }
+    return undefined;
+  }
+
+  const sameChip = eligible.filter((device) => device.chip === chip);
+  return sameChip.length === 1 ? sameChip[0] : undefined;
+}
+
+/**
+ * Intel iGPU utilization when hwmon never registered an `i915`/`xe` chip:
+ * DRM engine busy files (accumulating nanoseconds, world-readable). AMD
+ * already has `gpu_busy_percent`; NVIDIA stays unsupported. Cards whose
+ * vendor is not Intel are skipped. When an i915 hwmon device already
+ * exists with no utilization gauge, the engine counters attach to that
+ * device (via {@link findExistingIntelHwmonDevice}) so one GPU still feeds
+ * every measurement — correlated by PCI identity, never by driver name
+ * alone, so a second same-driver card is never merged into or skipped
+ * behind the first.
+ */
+async function discoverDrmIntelGpuDevices(
+  root: string,
+  io: SensorIo,
+  capabilities: SensorCapabilities,
+): Promise<void> {
+  const drmRoot = `${root}/class/drm`;
+  const drmCreated = new Set<GpuDeviceCandidates>();
+  for (const entry of await io.listDir(drmRoot)) {
+    if (!DRM_CARD_DIR_RE.test(entry)) continue;
+    const cardPath = `${drmRoot}/${entry}`;
+    const vendor = (await io.readFile(`${cardPath}/device/vendor`))?.trim()
+      .toLowerCase();
+    if (!vendor || !INTEL_PCI_VENDOR_IDS.has(vendor)) continue;
+
+    const uevent = (await io.readFile(`${cardPath}/device/uevent`))?.trim() ??
+      "";
+    const chip = drmDriverName(uevent);
+    const pciPath = parsePciSlotName(uevent);
+    const engineRoot = `${cardPath}/engine`;
+    const engineNames = [...await io.listDir(engineRoot)].sort(engineSort);
+    const utilization: SensorCandidate[] = [];
+    for (const engine of engineNames) {
+      const path = `${engineRoot}/${engine}/busy`;
+      if ((await io.readFile(path)) === undefined) continue;
+      utilization.push({ chip, label: engine, path });
+    }
+    if (utilization.length === 0) continue;
+
+    const existing = await findExistingIntelHwmonDevice(
+      capabilities.gpuDevices,
+      drmCreated,
+      chip,
+      pciPath,
+      io,
+    );
+    if (existing) {
+      existing.utilization.push(...utilization);
+      continue;
+    }
+
+    const created: GpuDeviceCandidates = {
+      path: cardPath,
+      chip,
+      temperature: [],
+      power: [],
+      utilization,
+      fan: [],
+    };
+    capabilities.gpuDevices.push(created);
+    drmCreated.add(created);
+  }
+}
+
 /** SATA/SAS whole-disk devices under `/sys/block` (`sd*`), for the drivetemp-not-loaded reason. */
 async function hasSataBlockDevices(
   root: string,
@@ -438,6 +572,7 @@ export async function discoverSensors(
     io,
     capabilities,
   );
+  await discoverDrmIntelGpuDevices(root, io, capabilities);
   await discoverThermalZoneSensors(root, io, capabilities);
   await discoverRaplSensors(root, io, capabilities);
 
@@ -468,12 +603,14 @@ function candidateMatches(candidate: SensorCandidate, value: string): boolean {
 /**
  * Pick exactly one GPU device to feed the fixed contract: the device owning
  * an admin-override match when one matches, else the first enumerated device
- * exposing both temperature and power, else the first device. Temperature
- * and power then both resolve from the returned device only.
+ * exposing both temperature and power, else the first device. Temperature,
+ * power, and utilization then all resolve from the returned device only.
  *
  * An override may be a stable `chip:label` identity (the hardware-profile
  * format — see `overrides.ts`) or a literal sysfs path (the pre-profile
- * escape hatch); both are matched here via {@link candidateMatches}.
+ * escape hatch); both are matched here via {@link candidateMatches} against
+ * temperature, power, *and* utilization candidates (Intel DRM-only iGPUs
+ * have utilization identities and no temp/power).
  */
 export function selectGpuDevice(
   devices: GpuDeviceCandidates[],
@@ -483,7 +620,8 @@ export function selectGpuDevice(
     if (!value) continue;
     const matched = devices.find((device) =>
       device.temperature.some((c) => candidateMatches(c, value)) ||
-      device.power.some((c) => candidateMatches(c, value))
+      device.power.some((c) => candidateMatches(c, value)) ||
+      device.utilization.some((c) => candidateMatches(c, value))
     );
     if (matched) return matched;
   }

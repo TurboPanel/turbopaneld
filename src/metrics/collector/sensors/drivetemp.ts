@@ -5,7 +5,7 @@
  * the `drivetemp` hwmon chip, see `discovery.ts`) require the `drivetemp`
  * kernel module, which most distributions do not autoload. When an operator
  * flips `HardwareProfile.drivetempEnabled` to `true` (pushed over
- * `metrics-sensor-overrides-update`, see `../../../instance/client.ts`),
+ * `topology-overrides-update`, see `../../../instance/client.ts`),
  * {@link ensureDrivetempLoaded} loads the module for the running kernel and
  * writes a `modules-load.d` drop-in so it survives a reboot too.
  *
@@ -63,7 +63,7 @@ const writeDropinDefault: WriteDropin = (path, contents) =>
 /**
  * Load the `drivetemp` module now and register it for reboot durability.
  * Never throws — a failed load is logged and reported in the result so the
- * caller (the `metrics-sensor-overrides-update` handler) can proceed with
+ * caller (the `topology-overrides-update` handler) can proceed with
  * the already-acked profile write regardless.
  */
 export async function ensureDrivetempLoaded(): Promise<DrivetempLoadResult> {

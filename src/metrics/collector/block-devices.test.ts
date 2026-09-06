@@ -1,10 +1,13 @@
 import { assertEquals } from "@std/assert";
 import { it } from "@std/testing/bdd";
+import { CounterBaselineTracker } from "./baseline.ts";
 import {
-  isDiskPartition,
-  isVirtualDiskDevice,
-  readBlockDevices,
+  buildBlockDeviceSamples,
+  hostDiskAggregates,
+  maxBlockDeviceUtilPercent,
 } from "./block-devices.ts";
+import { parseDiskstatsRows } from "./parse-diskstats.ts";
+import type { BlockDeviceTopology } from "../topology/types.ts";
 
 function fixture(name: string): string {
   return Deno.readTextFileSync(
@@ -12,133 +15,315 @@ function fixture(name: string): string {
   );
 }
 
-it("readBlockDevices filters virtual devices and partitions", () => {
-  const disk = readBlockDevices(fixture("proc-diskstats.txt"));
-  assertEquals(disk !== null, true);
-  assertEquals(Object.keys(disk!.devices).sort((a, b) => a.localeCompare(b)), [
-    "nvme0n1",
-    "sda",
-    "sdb",
-  ]);
-  assertEquals(disk!.devices.sda, {
-    readsCompleted: 1000,
-    sectorsRead: 30000,
-    readTicksMs: 400,
-    writesCompleted: 500,
-    sectorsWritten: 70000,
-    writeTicksMs: 800,
-  });
+function serviceDevice(
+  overrides: Partial<BlockDeviceTopology> = {},
+): BlockDeviceTopology {
+  return {
+    deviceId: `blk:${overrides.kernelName ?? "vda"}`,
+    kernelName: overrides.kernelName ?? "vda",
+    deviceType: "physical",
+    isServiceDevice: true,
+    ...overrides,
+  };
+}
+
+it("buildBlockDeviceSamples computes per-device rate/latency/utilization/queue-depth math (single virtio disk)", () => {
+  const tracker = new CounterBaselineTracker();
+  const topology = [serviceDevice({ kernelName: "vda", deviceId: "blk:vda" })];
+
+  const first = parseDiskstatsRows(fixture("proc-diskstats-v4-virtio-1.txt"));
+  buildBlockDeviceSamples(topology, first, tracker, 0, 60);
+
+  const second = parseDiskstatsRows(fixture("proc-diskstats-v4-virtio-2.txt"));
+  const samples = buildBlockDeviceSamples(topology, second, tracker, 0, 60);
+
+  assertEquals(samples, [{
+    deviceId: "blk:vda",
+    readBytesPerSecond: (3000 * 512) / 60,
+    writeBytesPerSecond: (14000 * 512) / 60,
+    readOpsPerSecond: 100 / 60,
+    writeOpsPerSecond: 100 / 60,
+    readLatencyMs: 60 / 100,
+    writeLatencyMs: 180 / 100,
+    utilizationPercent: (900 / (60 * 1000)) * 100,
+    temperatureCelsius: null,
+    queueDepth: 1800 / (60 * 1000),
+  }]);
 });
 
-it("readBlockDevices never counts an NVMe disk and its partitions twice", () => {
-  const disk = readBlockDevices(fixture("proc-diskstats-nvme.txt"));
-  if (!disk) throw new TypeError("expected NVMe whole disks");
-  assertEquals(Object.keys(disk.devices).sort((a, b) => a.localeCompare(b)), [
-    "nvme0n1",
-    "nvme1n1",
-  ]);
-});
+it("buildBlockDeviceSamples computes correct math for NVMe naming", () => {
+  const tracker = new CounterBaselineTracker();
+  const topology = [
+    serviceDevice({ kernelName: "nvme0n1", deviceId: "blk:nvme0n1" }),
+  ];
 
-it("readBlockDevices excludes device-mapper rows on an LVM host", () => {
-  // dm-* I/O is accounted on the underlying physical device — counting both
-  // would double every LVM request.
-  const disk = readBlockDevices(fixture("proc-diskstats-lvm.txt"));
-  if (!disk) throw new TypeError("expected the physical disk to survive");
-  assertEquals(Object.keys(disk.devices), ["sda"]);
-});
-
-it("isVirtualDiskDevice matches pseudo device prefixes", () => {
-  assertEquals(isVirtualDiskDevice("loop0"), true);
-  assertEquals(isVirtualDiskDevice("dm-0"), true);
-  assertEquals(isVirtualDiskDevice("ram0"), true);
-  assertEquals(isVirtualDiskDevice("zram0"), true);
-  assertEquals(isVirtualDiskDevice("fd0"), true);
-  assertEquals(isVirtualDiskDevice("md0"), true);
-  assertEquals(isVirtualDiskDevice("dcssblk0"), true);
-  assertEquals(isVirtualDiskDevice("sr0"), true);
-  assertEquals(isVirtualDiskDevice("nbd0"), true);
-  assertEquals(isVirtualDiskDevice("sda"), false);
-  assertEquals(isVirtualDiskDevice("nvme0n1"), false);
-});
-
-it("isDiskPartition detects sda1 and nvme0n1p1 suffixes", () => {
-  const names = ["sda", "sda1", "nvme0n1", "nvme0n1p1"];
-  assertEquals(isDiskPartition("sda1", names), true);
-  assertEquals(isDiskPartition("nvme0n1p1", names), true);
-  assertEquals(isDiskPartition("sda", names), false);
-});
-
-it("isDiskPartition ignores shorter-or-equal candidate parents", () => {
-  assertEquals(isDiskPartition("sda", ["sda", "sda1"]), false);
-  assertEquals(isDiskPartition("sda", ["sdb"]), false);
-});
-
-it("readBlockDevices prefers disks backing the probed mounts over extra disks", () => {
-  // Host with unrelated extra disks (sdb, sdc): when the probed system /
-  // hosting / Docker mounts resolve to sda1 and nvme0n1p1, aggregation
-  // narrows to their whole disks and the unrelated devices drop out.
-  const disk = readBlockDevices(fixture("proc-diskstats-extra-disks.txt"), [
-    "sda1",
-    "nvme0n1p1",
-  ]);
-  if (!disk) throw new TypeError("expected mount-backed whole disks");
-  assertEquals(Object.keys(disk.devices).sort((a, b) => a.localeCompare(b)), [
-    "nvme0n1",
-    "sda",
-  ]);
-});
-
-it("readBlockDevices accepts whole-disk preferred names verbatim", () => {
-  const disk = readBlockDevices(fixture("proc-diskstats-extra-disks.txt"), [
-    "sdb",
-  ]);
-  if (!disk) throw new TypeError("expected the preferred whole disk");
-  assertEquals(Object.keys(disk.devices), ["sdb"]);
-});
-
-it("readBlockDevices falls back to every whole disk when preference misses", () => {
-  // Device-mapper style sources never match a diskstats name — the
-  // host-wide whole-disk filter stays in charge.
-  const all = ["nvme0n1", "sda", "sdb", "sdc"];
-  const unmatched = readBlockDevices(
-    fixture("proc-diskstats-extra-disks.txt"),
-    ["vg-root"],
+  buildBlockDeviceSamples(
+    topology,
+    parseDiskstatsRows(fixture("proc-diskstats-v4-nvme-1.txt")),
+    tracker,
+    0,
+    60,
   );
-  if (!unmatched) throw new TypeError("expected fallback whole disks");
+  const samples = buildBlockDeviceSamples(
+    topology,
+    parseDiskstatsRows(fixture("proc-diskstats-v4-nvme-2.txt")),
+    tracker,
+    0,
+    60,
+  );
+
+  assertEquals(samples[0].readBytesPerSecond, (6000 * 512) / 60);
+  assertEquals(samples[0].writeBytesPerSecond, (28000 * 512) / 60);
+  assertEquals(samples[0].utilizationPercent, (1800 / (60 * 1000)) * 100);
+  assertEquals(samples[0].queueDepth, 3600 / (60 * 1000));
+});
+
+it("buildBlockDeviceSamples reports null latency (not 0) on a genuinely idle interval", () => {
+  const tracker = new CounterBaselineTracker();
+  const topology = [serviceDevice({ kernelName: "sdb", deviceId: "blk:sdb" })];
+
+  buildBlockDeviceSamples(
+    topology,
+    parseDiskstatsRows(fixture("proc-diskstats-v4-idle-1.txt")),
+    tracker,
+    0,
+    60,
+  );
+  const samples = buildBlockDeviceSamples(
+    topology,
+    parseDiskstatsRows(fixture("proc-diskstats-v4-idle-2.txt")),
+    tracker,
+    0,
+    60,
+  );
+
+  assertEquals(samples[0].readOpsPerSecond, 0);
+  assertEquals(samples[0].readLatencyMs, null);
+  assertEquals(samples[0].writeLatencyMs, null);
+});
+
+it("buildBlockDeviceSamples excludes partitions from the detailed array", () => {
+  const tracker = new CounterBaselineTracker();
+  const topology = [
+    serviceDevice({ kernelName: "sda", deviceId: "blk:sda" }),
+    serviceDevice({
+      kernelName: "sda1",
+      deviceId: "blk:sda1",
+      deviceType: "partition",
+      isServiceDevice: false,
+      parentDeviceId: "blk:sda",
+    }),
+  ];
+
+  const samples = buildBlockDeviceSamples(
+    topology,
+    parseDiskstatsRows(fixture("proc-diskstats-v4-partition-1.txt")),
+    tracker,
+    0,
+    60,
+  );
+  assertEquals(samples.map((s) => s.deviceId), ["blk:sda"]);
+});
+
+it("buildBlockDeviceSamples keeps an entry present with null fields when the diskstats row is missing", () => {
+  const tracker = new CounterBaselineTracker();
+  const topology = [
+    serviceDevice({ kernelName: "missing", deviceId: "blk:missing" }),
+  ];
+  const samples = buildBlockDeviceSamples(topology, {}, tracker, 0, 60);
+  assertEquals(samples, [{
+    deviceId: "blk:missing",
+    readBytesPerSecond: null,
+    writeBytesPerSecond: null,
+    readOpsPerSecond: null,
+    writeOpsPerSecond: null,
+    readLatencyMs: null,
+    writeLatencyMs: null,
+    utilizationPercent: null,
+    temperatureCelsius: null,
+    queueDepth: null,
+  }]);
+});
+
+it("buildBlockDeviceSamples nulls the interval right after a missing-row gap, then resumes real rates the interval after that", () => {
+  const tracker = new CounterBaselineTracker();
+  const topology = [serviceDevice({ kernelName: "vda", deviceId: "blk:vda" })];
+
+  // Tick 1: normal reading — establishes the baseline.
+  buildBlockDeviceSamples(
+    topology,
+    parseDiskstatsRows(fixture("proc-diskstats-v4-virtio-1.txt")),
+    tracker,
+    0,
+    60,
+  );
+
+  // Tick 2: the diskstats row is missing this tick (simulated gap) — the
+  // baseline is invalidated, not just skipped.
+  const gapTick = buildBlockDeviceSamples(topology, {}, tracker, 0, 60);
+  assertEquals(gapTick[0].readBytesPerSecond, null);
+
+  const virtio2 = parseDiskstatsRows(fixture("proc-diskstats-v4-virtio-2.txt"));
+
+  // Tick 3: the row reappears, but this is the first observation after the
+  // invalidated baseline — null, re-baselined, never a rate compressing the
+  // (unknown) elapsed gap into one interval.
+  const firstResumedTick = buildBlockDeviceSamples(
+    topology,
+    virtio2,
+    tracker,
+    0,
+    60,
+  );
+  assertEquals(firstResumedTick[0].readBytesPerSecond, null);
+  assertEquals(firstResumedTick[0].readOpsPerSecond, null);
+  assertEquals(firstResumedTick[0].readLatencyMs, null);
+
+  // Tick 4: the interval after that computes a real (here zero-delta, since
+  // the fixture is unchanged) rate/latency against the tick-3 baseline.
+  const secondResumedTick = buildBlockDeviceSamples(
+    topology,
+    virtio2,
+    tracker,
+    0,
+    60,
+  );
+  assertEquals(secondResumedTick[0].readBytesPerSecond, 0);
+  assertEquals(secondResumedTick[0].readOpsPerSecond, 0);
+  assertEquals(secondResumedTick[0].readLatencyMs, null);
+});
+
+it("maxBlockDeviceUtilPercent picks the correct max and returns null on an empty/all-null set", () => {
+  assertEquals(maxBlockDeviceUtilPercent([]), null);
   assertEquals(
-    Object.keys(unmatched.devices).sort((a, b) => a.localeCompare(b)),
-    all,
+    maxBlockDeviceUtilPercent([
+      {
+        deviceId: "a",
+        readBytesPerSecond: null,
+        writeBytesPerSecond: null,
+        readOpsPerSecond: null,
+        writeOpsPerSecond: null,
+        readLatencyMs: null,
+        writeLatencyMs: null,
+        utilizationPercent: null,
+        temperatureCelsius: null,
+        queueDepth: null,
+      },
+    ]),
+    null,
   );
-
-  const empty = readBlockDevices(fixture("proc-diskstats-extra-disks.txt"), []);
-  if (!empty) throw new TypeError("expected fallback whole disks");
   assertEquals(
-    Object.keys(empty.devices).sort((a, b) => a.localeCompare(b)),
-    all,
+    maxBlockDeviceUtilPercent([
+      {
+        deviceId: "a",
+        readBytesPerSecond: null,
+        writeBytesPerSecond: null,
+        readOpsPerSecond: null,
+        writeOpsPerSecond: null,
+        readLatencyMs: null,
+        writeLatencyMs: null,
+        utilizationPercent: 12,
+        temperatureCelsius: null,
+        queueDepth: null,
+      },
+      {
+        deviceId: "b",
+        readBytesPerSecond: null,
+        writeBytesPerSecond: null,
+        readOpsPerSecond: null,
+        writeOpsPerSecond: null,
+        readLatencyMs: null,
+        writeLatencyMs: null,
+        utilizationPercent: 87,
+        temperatureCelsius: null,
+        queueDepth: null,
+      },
+    ]),
+    87,
   );
 });
 
-it("readBlockDevices returns null for empty input", () => {
-  assertEquals(readBlockDevices(""), null);
-});
+it("hostDiskAggregates sums correctly across the service-device set, excluding non-service devices", () => {
+  const tracker = new CounterBaselineTracker();
+  const topology = [
+    serviceDevice({ kernelName: "sda", deviceId: "blk:sda" }),
+    serviceDevice({
+      kernelName: "sda1",
+      deviceId: "blk:sda1",
+      deviceType: "partition",
+      isServiceDevice: false,
+      parentDeviceId: "blk:sda",
+    }),
+  ];
 
-it("readBlockDevices drops remaining virtual prefixes", () => {
-  const row = (name: string) =>
-    `   8       0 ${name} 1000 200 30000 400 500 600 70000 800 0 0 0 0 0 0`;
-  const disk = readBlockDevices(
-    ["zram0", "fd0", "md0", "dcssblk0", "sr0", "nbd0", "sda"].map(row).join(
-      "\n",
-    ),
+  hostDiskAggregates(
+    topology,
+    parseDiskstatsRows(fixture("proc-diskstats-v4-partition-1.txt")),
+    tracker,
+    0,
+    60,
   );
-  if (!disk) throw new TypeError("expected sda after virtual filters");
-  assertEquals(Object.keys(disk.devices), ["sda"]);
+  const aggregates = hostDiskAggregates(
+    topology,
+    parseDiskstatsRows(fixture("proc-diskstats-v4-partition-2.txt")),
+    tracker,
+    0,
+    60,
+  );
+
+  // Only sda (the service device) contributes — sda1 (a partition, never a
+  // service device) is excluded even though its counters also moved.
+  assertEquals(aggregates.diskReadBytesPerSecond, (3000 * 512) / 60);
+  assertEquals(aggregates.diskWriteBytesPerSecond, (14000 * 512) / 60);
+  assertEquals(aggregates.diskReadLatencyMs, 60 / 100);
+  assertEquals(aggregates.diskWriteLatencyMs, 180 / 100);
 });
 
-it("readBlockDevices returns null when only virtual devices remain", () => {
-  const text = [
-    "   7       0 loop0 50 10 1500 20 25 30 3500 40 0 0 0 0 0 0",
-    " 253       0 dm-0 300 60 9000 120 150 180 21000 240 0 0 0 0 0 0",
-    "",
-  ].join("\n");
-  assertEquals(readBlockDevices(text), null);
+it("hostDiskAggregates nulls the interval right after a missing-row gap, then resumes real rates the interval after that", () => {
+  const tracker = new CounterBaselineTracker();
+  const topology = [serviceDevice({ kernelName: "sda", deviceId: "blk:sda" })];
+
+  // Tick 1: normal reading — establishes the baseline.
+  hostDiskAggregates(
+    topology,
+    parseDiskstatsRows(fixture("proc-diskstats-v4-partition-1.txt")),
+    tracker,
+    0,
+    60,
+  );
+
+  // Tick 2: the diskstats row is missing this tick (simulated gap) — the
+  // baseline is invalidated, not just skipped.
+  const gapTick = hostDiskAggregates(topology, {}, tracker, 0, 60);
+  assertEquals(gapTick.diskReadBytesPerSecond, null);
+  assertEquals(gapTick.diskWriteBytesPerSecond, null);
+
+  const partition2 = parseDiskstatsRows(
+    fixture("proc-diskstats-v4-partition-2.txt"),
+  );
+
+  // Tick 3: the row reappears, but this is the first observation after the
+  // invalidated baseline — null, never a rate compressing the (unknown)
+  // elapsed gap into one interval.
+  const firstResumedTick = hostDiskAggregates(
+    topology,
+    partition2,
+    tracker,
+    0,
+    60,
+  );
+  assertEquals(firstResumedTick.diskReadBytesPerSecond, null);
+  assertEquals(firstResumedTick.diskWriteBytesPerSecond, null);
+
+  // Tick 4: the interval after that computes a real (here zero-delta, since
+  // the fixture is unchanged) rate against the tick-3 baseline.
+  const secondResumedTick = hostDiskAggregates(
+    topology,
+    partition2,
+    tracker,
+    0,
+    60,
+  );
+  assertEquals(secondResumedTick.diskReadBytesPerSecond, 0);
+  assertEquals(secondResumedTick.diskWriteBytesPerSecond, 0);
 });

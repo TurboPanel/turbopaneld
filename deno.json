@@ -35,8 +35,8 @@
     ]
   },
   "tasks": {
-    "start": "deno run --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env main.ts",
-    "dev": "deno run --watch --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env main.ts",
+    "start": "deno run --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env --allow-ffi main.ts",
+    "dev": "deno run --watch --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env --allow-ffi main.ts",
     "bootstrap-orchestration": "deno run --allow-net --allow-read --allow-write --allow-run --allow-env scripts/bootstrap-orchestration.ts",
     "check:layout": "deno run --allow-read --allow-run=git scripts/check-production-layout.ts",
     "check:vocabulary": "deno run --allow-read scripts/check-vocabulary.ts",
@@ -54,9 +54,9 @@
     "check": "deno check main.ts src/prod-main.ts src/ scripts/",
     "bundle:js": "deno bundle src/prod-main.ts -o dist/turbopaneld.js",
     "bundle:orchestration": "bash scripts/bundle-orchestration.sh",
-    "compile": "deno compile --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env -o dist/turbopaneld src/prod-main.ts",
-    "compile:linux-amd64": "deno compile --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env --target x86_64-unknown-linux-gnu -o dist/.build/turbopaneld-linux-amd64 src/prod-main.ts",
-    "compile:linux-arm64": "deno compile --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env --target aarch64-unknown-linux-gnu -o dist/.build/turbopaneld-linux-arm64 src/prod-main.ts",
+    "compile": "deno compile --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env --allow-ffi -o dist/turbopaneld src/prod-main.ts",
+    "compile:linux-amd64": "deno compile --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env --allow-ffi --target x86_64-unknown-linux-gnu -o dist/.build/turbopaneld-linux-amd64 src/prod-main.ts",
+    "compile:linux-arm64": "deno compile --allow-net --allow-sys=networkInterfaces,hostname --allow-read --allow-write --allow-run --allow-env --allow-ffi --target aarch64-unknown-linux-gnu -o dist/.build/turbopaneld-linux-arm64 src/prod-main.ts",
     "compile:all": "deno task compile:linux-amd64 && deno task compile:linux-arm64 && deno task bundle:js && deno task bundle:orchestration && deno task package:release",
     "package:release": "bash scripts/package-daemon-release.sh",
     "release:package": "deno task compile:all",

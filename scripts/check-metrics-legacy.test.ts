@@ -1,6 +1,8 @@
 import { assertEquals } from "@std/assert";
 import {
   collectMetricsLegacyFailures,
+  collectV4BoundaryFailures,
+  collectV4PageIdentifierFailures,
   isAllowedPath,
   reportMetricsLegacyFailures,
   runMetricsLegacyCheck,
@@ -104,6 +106,182 @@ test("collectMetricsLegacyFailures still allows a plain clickhouse reference in 
     "// ClickHouse-compatible SQL dialect\n",
   );
   assertEquals(failures, []);
+});
+
+test("collectV4BoundaryFailures flags a positional AE literal outside backends/cloudflare/", () => {
+  const failures = collectV4BoundaryFailures(
+    "turbopanel/src/daemon/metrics/query/series-response-v4.ts",
+    "const value = row.double12;\n",
+  );
+  assertEquals(failures.length, 1);
+  assertEquals(
+    failures[0],
+    'turbopanel/src/daemon/metrics/query/series-response-v4.ts:1 references AE v4 physical token ".double12" outside backends/cloudflare/',
+  );
+});
+
+test("collectV4BoundaryFailures flags the raw sentinel literal outside backends/cloudflare/", () => {
+  const failures = collectV4BoundaryFailures(
+    "turbopanel/src/daemon/metrics/query/uptime.ts",
+    "const SENTINEL = -1e308;\n",
+  );
+  assertEquals(failures.length, 1);
+});
+
+test("collectV4BoundaryFailures allows AE positional tokens inside backends/cloudflare/", () => {
+  const failures = collectV4BoundaryFailures(
+    "turbopanel/src/daemon/metrics/backends/cloudflare/field-map-v4.ts",
+    "doubles[embedBase] = nic0?.receiveBytesPerSecond ?? AE_V4_MISSING_METRIC_SENTINEL;\n",
+  );
+  assertEquals(failures, []);
+});
+
+test("collectV4BoundaryFailures allows importing the sentinel constant by name anywhere (only the raw literal/column names are confined)", () => {
+  const failures = collectV4BoundaryFailures(
+    "turbopanel/src/daemon/metrics/backends/duckdb/store.test.ts",
+    'import { AE_V4_MISSING_METRIC_SENTINEL } from "../cloudflare/field-map-v4.ts";\n',
+  );
+  assertEquals(failures, []);
+});
+
+test("collectV4BoundaryFailures ignores files outside a /metrics/ path", () => {
+  const failures = collectV4BoundaryFailures(
+    "ui/src/components/example.ts",
+    "const value = row.double12;\n",
+  );
+  assertEquals(failures, []);
+});
+
+test("collectV4BoundaryFailures does not flag doc-comment prose mentioning a slot name", () => {
+  const failures = collectV4BoundaryFailures(
+    "turbopanel/src/daemon/metrics/query/uptime.ts",
+    " * slot (`double20`-equivalent) for the sample's intervalSeconds.\n",
+  );
+  assertEquals(failures, []);
+});
+
+test("collectV4BoundaryFailures flags a v3 symbol as real code in a v4-suffixed file", () => {
+  const failures = collectV4BoundaryFailures(
+    "turbopanel/src/daemon/metrics/contract-v4.ts",
+    "import type { MetricPart } from './contract.ts';\n",
+  );
+  assertEquals(failures.length, 1);
+  assertEquals(
+    failures[0],
+    'turbopanel/src/daemon/metrics/contract-v4.ts:1 references v3 symbol "MetricPart" in a v4-only file',
+  );
+});
+
+test("collectV4BoundaryFailures does not flag doc-comment prose contrasting v4 with v3's MetricPart", () => {
+  const failures = collectV4BoundaryFailures(
+    "turbopanel/src/daemon/metrics/contract-v4.ts",
+    " * v4 drops the v3 `MetricPart`/19-slot-per-part allowlist coupling entirely.\n",
+  );
+  assertEquals(failures, []);
+});
+
+test("collectV4BoundaryFailures ignores non-.ts files", () => {
+  const failures = collectV4BoundaryFailures(
+    "turbopanel/src/daemon/metrics/AGENTS.md",
+    "MetricPart double12 -1e308\n",
+  );
+  assertEquals(failures, []);
+});
+
+test("collectV4BoundaryFailures flags the v3 `parts` field as real code in a v4-suffixed file", () => {
+  const failures = collectV4BoundaryFailures(
+    "turbopanel/src/daemon/metrics/contract-v4.ts",
+    "const declared = sample.parts;\n",
+  );
+  assertEquals(failures.length, 1);
+  assertEquals(
+    failures[0],
+    'turbopanel/src/daemon/metrics/contract-v4.ts:1 references v3 symbol ".parts" in a v4-only file',
+  );
+});
+
+test('collectV4BoundaryFailures does not flag the bare English word "parts" elsewhere in a v4-suffixed file', () => {
+  const failures = collectV4BoundaryFailures(
+    "turbopanel/src/daemon/metrics/contract-v4.ts",
+    "const parts = raw.split(',');\nconsole.log(parts[0]);\n",
+  );
+  assertEquals(failures, []);
+});
+
+test("collectV4BoundaryFailures allows the v3 `parts` fixture in the allowlisted validation-v4 legacy-rejection tests", () => {
+  const failures = collectV4BoundaryFailures(
+    "turbopanel/src/daemon/metrics/validation-v4.test.ts",
+    '  parts: ["core", "extended"],\n',
+  );
+  assertEquals(failures, []);
+});
+
+test("collectV4BoundaryFailures flags a v3 symbol in a metrics-contract surface regardless of filename suffix", () => {
+  const failures = collectV4BoundaryFailures(
+    "turbopanel/src/daemon/openapi/metrics.ts",
+    "import type { MetricPart } from '../metrics/contract.ts';\n",
+  );
+  assertEquals(failures.length, 1);
+  assertEquals(
+    failures[0],
+    'turbopanel/src/daemon/openapi/metrics.ts:1 references v3 symbol "MetricPart" in a metrics-contract surface that must stay backend-agnostic',
+  );
+});
+
+test("collectV4BoundaryFailures flags a v3 symbol in an exact-listed metrics-contract file", () => {
+  const failures = collectV4BoundaryFailures(
+    "turbopanel/src/client/servers/metrics-routes.ts",
+    "const keys = HOST_METRIC_KEYS;\n",
+  );
+  assertEquals(failures.length, 1);
+});
+
+test("collectV4BoundaryFailures does not flag a negative-assertion string literal for `parts`", () => {
+  const failures = collectV4BoundaryFailures(
+    "turbopanel/src/daemon/openapi/metrics.ts",
+    "  assertEquals('parts' in sample.properties, false);\n",
+  );
+  assertEquals(failures, []);
+});
+
+test("collectV4PageIdentifierFailures allows the allowlisted daemon end-to-end ingest-route test", () => {
+  const failures = collectV4PageIdentifierFailures(
+    "turbopanel/src/daemon/api-routes.test.ts",
+    "  const ids = blobs[AE_V4_BLOB_SOURCE_OR_IDENTITY_INDEX];\n",
+  );
+  assertEquals(failures, []);
+});
+
+test("collectV4PageIdentifierFailures flags a page-identifier symbol outside backends/cloudflare/ and outside the allowlist", () => {
+  const failures = collectV4PageIdentifierFailures(
+    "turbopanel/src/client/servers/metrics-routes.ts",
+    "  const ids = blobs[AE_V4_BLOB_SOURCE_OR_IDENTITY_INDEX];\n",
+  );
+  assertEquals(failures.length, 1);
+  assertEquals(
+    failures[0],
+    'turbopanel/src/client/servers/metrics-routes.ts:1 references backend-private v4 page-identifier symbol "AE_V4_BLOB_SOURCE_OR_IDENTITY_INDEX" outside backends/cloudflare/',
+  );
+});
+
+test("collectV4PageIdentifierFailures allows page-identifier symbols inside backends/cloudflare/", () => {
+  const failures = collectV4PageIdentifierFailures(
+    "turbopanel/src/daemon/metrics/backends/cloudflare/sql-api-v4.ts",
+    "export function entityIdInPageIdentityPredicateV4(entityId: string): string {\n",
+  );
+  assertEquals(failures, []);
+});
+
+test("collectMetricsLegacyFailures composes v4 boundary failures with the legacy scan", () => {
+  const failures = collectMetricsLegacyFailures(
+    "turbopanel/src/daemon/metrics/query/series-response-v4.ts",
+    "const value = row.double12;\n",
+  );
+  assertEquals(failures.length, 1);
+  assertEquals(
+    failures[0],
+    'turbopanel/src/daemon/metrics/query/series-response-v4.ts:1 references AE v4 physical token ".double12" outside backends/cloudflare/',
+  );
 });
 
 test("runMetricsLegacyCheck passes on the current workspace", async () => {

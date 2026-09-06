@@ -1,17 +1,23 @@
 import { assertEquals } from "@std/assert";
 import { it } from "@std/testing/bdd";
+import { fromFileUrl } from "@std/path";
+import { CounterBaselineTracker } from "./baseline.ts";
 import {
-  classifiedNetRates,
+  buildNetworkDeviceSamples,
   classifyInterface,
-  interfaceNamesByClass,
-  namedInterfaceRates,
-  readNetCounters,
+  readNetInterfaceDetailedCounters,
 } from "./network.ts";
+import { defaultSensorIo } from "./sensors/discovery.ts";
+import type { NetworkDeviceTopology } from "../topology/types.ts";
 
 function fixture(name: string): string {
   return Deno.readTextFileSync(
     new URL(`./testdata/${name}`, import.meta.url),
   );
+}
+
+function fixtureRoot(name: string): string {
+  return fromFileUrl(new URL(`./testdata/${name}`, import.meta.url));
 }
 
 const FABRIC = ["tp0"];
@@ -33,129 +39,167 @@ it("classifyInterface maps loopback, fabric, bridges, and uplinks", () => {
   assertEquals(classifyInterface("tun9", ["tun9"]), "fabric");
 });
 
-it("readNetCounters preserves all three traffic classes independently", () => {
-  const net = readNetCounters(
-    fixture("proc-net-dev-with-fabric-tunnel.txt"),
-    FABRIC,
+function eth0Eth1Topology(): NetworkDeviceTopology[] {
+  return [
+    {
+      deviceId: "mac:aa:bb:cc:dd:ee:00",
+      kind: "uplink",
+      name: "eth0",
+      identity: { mac: "aa:bb:cc:dd:ee:00" },
+    },
+    {
+      deviceId: "mac:aa:bb:cc:dd:ee:01",
+      kind: "uplink",
+      name: "eth1",
+      identity: { mac: "aa:bb:cc:dd:ee:01" },
+    },
+  ];
+}
+
+it("readNetInterfaceDetailedCounters reads sysfs statistics files", async () => {
+  const counters = await readNetInterfaceDetailedCounters(
+    "eth0",
+    defaultSensorIo(),
+    fixtureRoot("net-device-samples-1"),
   );
-  if (!net) throw new TypeError("expected classified interfaces");
-  assertEquals(interfaceNamesByClass(net, "uplink"), ["eth0"]);
-  assertEquals(interfaceNamesByClass(net, "fabric"), ["tp0"]);
-  assertEquals(interfaceNamesByClass(net, "container-bridge"), [
-    "docker0",
-    "veth123",
-  ]);
-  assertEquals(interfaceNamesByClass(net, "loopback"), ["lo"]);
-  assertEquals(net.interfaces.tp0.classification, "fabric");
-  assertEquals(net.interfaces.tp0.receiveBytes, 400_000);
+  assertEquals(counters, {
+    rx: 5000000,
+    tx: 3000000,
+    rxErrors: 10,
+    txErrors: 2,
+    rxDropped: 5,
+    txDropped: 1,
+  });
 });
 
-it("classifiedNetRates aggregates uplink and fabric separately, never combined", () => {
-  const prev = readNetCounters(
-    fixture("proc-net-dev-with-fabric-tunnel.txt"),
-    FABRIC,
+it("readNetInterfaceDetailedCounters returns null when a statistics file is missing", async () => {
+  const counters = await readNetInterfaceDetailedCounters(
+    "eth1",
+    defaultSensorIo(),
+    fixtureRoot("net-device-samples-1"),
   );
-  const currText = fixture("proc-net-dev-with-fabric-tunnel.txt")
-    .replace("  eth0: 5000000", "  eth0: 5600000")
-    .replace("3000000    2000", "3300000    2100")
-    .replace("   tp0: 400000", "   tp0: 460000")
-    .replace("300000      150", "330000      160");
-  const curr = readNetCounters(currText, FABRIC);
-
-  const uplink = classifiedNetRates(prev, curr, "uplink", 60);
-  const fabric = classifiedNetRates(prev, curr, "fabric", 60);
-  assertEquals(uplink.receiveBytesPerSecond, 600_000 / 60);
-  assertEquals(uplink.transmitBytesPerSecond, 300_000 / 60);
-  assertEquals(fabric.receiveBytesPerSecond, 60_000 / 60);
-  assertEquals(fabric.transmitBytesPerSecond, 30_000 / 60);
+  assertEquals(counters, null);
 });
 
-it("veth churn nulls only the container-bridge class, not uplink or fabric", () => {
-  const prev = readNetCounters(
-    fixture("proc-net-dev-with-fabric-tunnel.txt"),
-    FABRIC,
+it("buildNetworkDeviceSamples computes per-device rates, preferring sysfs, falling back to /proc/net/dev", async () => {
+  const tracker = new CounterBaselineTracker();
+  const topology = eth0Eth1Topology();
+
+  await buildNetworkDeviceSamples(
+    topology,
+    {
+      io: defaultSensorIo(),
+      sysRoot: fixtureRoot("net-device-samples-1"),
+      netDevText: fixture("proc-net-dev-eth1-fallback-1.txt"),
+    },
+    tracker,
+    0,
+    60,
   );
-  const withoutVeth = fixture("proc-net-dev-with-fabric-tunnel.txt")
-    .split("\n")
-    .filter((line) => !line.includes("veth123"))
-    .join("\n");
-  const curr = readNetCounters(withoutVeth, FABRIC);
 
-  const uplink = classifiedNetRates(prev, curr, "uplink", 60);
-  const bridge = classifiedNetRates(prev, curr, "container-bridge", 60);
-  assertEquals(uplink.receiveBytesPerSecond, 0);
-  assertEquals(bridge.receiveBytesPerSecond, null);
-});
-
-it("classifiedNetRates nulls a class with no interfaces instead of reporting 0", () => {
-  const noFabric = readNetCounters(fixture("proc-net-dev.txt"), FABRIC);
-  const rates = classifiedNetRates(noFabric, noFabric, "fabric", 60);
-  assertEquals(rates.receiveBytesPerSecond, null);
-  assertEquals(rates.transmitBytesPerSecond, null);
-});
-
-it("readNetCounters returns null when nothing is parsable", () => {
-  assertEquals(readNetCounters("", FABRIC), null);
-});
-
-it("namedInterfaceRates nulls an unassigned slot", () => {
-  const net = readNetCounters(fixture("proc-net-dev.txt"), FABRIC);
-  const rates = namedInterfaceRates(net, net, null, 60);
-  assertEquals(rates.receiveBytesPerSecond, null);
-  assertEquals(rates.transmitBytesPerSecond, null);
-});
-
-it("namedInterfaceRates nulls on the first sample", () => {
-  const net = readNetCounters(
-    fixture("proc-net-dev-with-fabric-tunnel.txt"),
-    FABRIC,
+  const samples = await buildNetworkDeviceSamples(
+    topology,
+    {
+      io: defaultSensorIo(),
+      sysRoot: fixtureRoot("net-device-samples-2"),
+      netDevText: fixture("proc-net-dev-eth1-fallback-2.txt"),
+    },
+    tracker,
+    0,
+    60,
   );
-  const rates = namedInterfaceRates(null, net, "eth0", 60);
-  assertEquals(rates.receiveBytesPerSecond, null);
-  assertEquals(rates.transmitBytesPerSecond, null);
+
+  const eth0 = samples.find((s) => s.deviceId === "mac:aa:bb:cc:dd:ee:00");
+  const eth1 = samples.find((s) => s.deviceId === "mac:aa:bb:cc:dd:ee:01");
+
+  assertEquals(eth0?.receiveBytesPerSecond, (5600000 - 5000000) / 60);
+  assertEquals(eth0?.transmitBytesPerSecond, (3300000 - 3000000) / 60);
+  assertEquals(eth0?.receiveErrorsPerSecond, (12 - 10) / 60);
+  assertEquals(eth0?.receiveDropsPerSecond, (7 - 5) / 60);
+
+  // eth1 has no sysfs statistics/ directory — falls back to /proc/net/dev.
+  assertEquals(eth1?.receiveBytesPerSecond, (2500000 - 2000000) / 60);
+  assertEquals(eth1?.transmitBytesPerSecond, (1300000 - 1000000) / 60);
+  assertEquals(eth1?.transmitDropsPerSecond, (3 - 2) / 60);
 });
 
-it("namedInterfaceRates computes an assigned slot's rate independently of class aggregation", () => {
-  const prev = readNetCounters(
-    fixture("proc-net-dev-with-fabric-tunnel.txt"),
-    FABRIC,
+it("buildNetworkDeviceSamples keeps an entry present with all-null fields when counters are unreadable", async () => {
+  const tracker = new CounterBaselineTracker();
+  const topology = eth0Eth1Topology();
+
+  const samples = await buildNetworkDeviceSamples(
+    topology,
+    { io: defaultSensorIo(), sysRoot: fixtureRoot("net-device-samples-1") },
+    tracker,
+    0,
+    60,
   );
-  const currText = fixture("proc-net-dev-with-fabric-tunnel.txt")
-    .replace("  eth0: 5000000", "  eth0: 5600000")
-    .replace("3000000    2000", "3300000    2100")
-    .replace("   tp0: 400000", "   tp0: 460000")
-    .replace("300000      150", "330000      160");
-  const curr = readNetCounters(currText, FABRIC);
 
-  const nic1 = namedInterfaceRates(prev, curr, "eth0", 60);
-  assertEquals(nic1.receiveBytesPerSecond, 600_000 / 60);
-  assertEquals(nic1.transmitBytesPerSecond, 300_000 / 60);
-
-  // eth0 is also part of the uplink class aggregate — both agree here
-  // because it's the only uplink member, but the two lookups are
-  // independent paths.
-  const uplink = classifiedNetRates(prev, curr, "uplink", 60);
-  assertEquals(nic1.receiveBytesPerSecond, uplink.receiveBytesPerSecond);
+  const eth1 = samples.find((s) => s.deviceId === "mac:aa:bb:cc:dd:ee:01");
+  assertEquals(eth1, {
+    deviceId: "mac:aa:bb:cc:dd:ee:01",
+    receiveBytesPerSecond: null,
+    transmitBytesPerSecond: null,
+    receiveErrorsPerSecond: null,
+    transmitErrorsPerSecond: null,
+    receiveDropsPerSecond: null,
+    transmitDropsPerSecond: null,
+  });
 });
 
-it("namedInterfaceRates nulls only the vanished slot when an assigned interface disappears", () => {
-  const prev = readNetCounters(
-    fixture("proc-net-dev-with-fabric-tunnel.txt"),
-    FABRIC,
+it("buildNetworkDeviceSamples nulls (does not fabricate a rate) the interval right after a name lookup gap, then resumes real rates the interval after that", async () => {
+  const tracker = new CounterBaselineTracker();
+  const topology = eth0Eth1Topology();
+
+  // Tick 1: normal reading — establishes the baseline.
+  await buildNetworkDeviceSamples(
+    topology,
+    { io: defaultSensorIo(), sysRoot: fixtureRoot("net-device-samples-1") },
+    tracker,
+    0,
+    60,
   );
-  const withoutVeth = fixture("proc-net-dev-with-fabric-tunnel.txt")
-    .split("\n")
-    .filter((line) => !line.includes("veth123"))
-    .join("\n");
-  const curr = readNetCounters(withoutVeth, FABRIC);
 
-  const vanished = namedInterfaceRates(prev, curr, "veth123", 60);
-  assertEquals(vanished.receiveBytesPerSecond, null);
-  assertEquals(vanished.transmitBytesPerSecond, null);
+  // Tick 2: eth0's counters are unreadable this tick (simulated rename gap)
+  // — its baseline is invalidated, not just skipped.
+  const gapTick = await buildNetworkDeviceSamples(
+    [topology[0]],
+    {
+      io: defaultSensorIo(),
+      sysRoot: fixtureRoot("net-device-samples-1/class/net/eth1"),
+    },
+    tracker,
+    0,
+    60,
+  );
+  assertEquals(gapTick[0].receiveBytesPerSecond, null);
 
-  // eth0's counters are unchanged between prev and this veth-stripped curr
-  // (same fixture, only the veth123 line removed) — 0, not null: a present,
-  // unchanged interface is a real zero-traffic reading.
-  const stillPresent = namedInterfaceRates(prev, curr, "eth0", 60);
-  assertEquals(stillPresent.receiveBytesPerSecond, 0);
+  // Tick 3: readable again, but this is the first observation after the
+  // invalidated baseline — null and re-baselined, never a rate compressing
+  // the (unknown) elapsed gap into one interval.
+  const firstResumedTick = await buildNetworkDeviceSamples(
+    topology,
+    { io: defaultSensorIo(), sysRoot: fixtureRoot("net-device-samples-2") },
+    tracker,
+    0,
+    60,
+  );
+  const eth0AtFirstResumedTick = firstResumedTick.find(
+    (s) => s.deviceId === "mac:aa:bb:cc:dd:ee:00",
+  );
+  assertEquals(eth0AtFirstResumedTick?.receiveBytesPerSecond, null);
+
+  // Tick 4: the interval after that computes a real (here zero-delta, since
+  // the fixture is unchanged) rate against the tick-3 baseline.
+  const secondResumedTick = await buildNetworkDeviceSamples(
+    topology,
+    { io: defaultSensorIo(), sysRoot: fixtureRoot("net-device-samples-2") },
+    tracker,
+    0,
+    60,
+  );
+  const eth0AtSecondResumedTick = secondResumedTick.find(
+    (s) => s.deviceId === "mac:aa:bb:cc:dd:ee:00",
+  );
+  assertEquals(eth0AtSecondResumedTick?.receiveBytesPerSecond, 0);
 });

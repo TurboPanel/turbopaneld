@@ -1196,7 +1196,7 @@ test("site apply playbooks vendor engines (never apt nginx/apache2)", async () =
   // The global `metrics` option is what actually exposes `/metrics` on the
   // admin listener — `servers { metrics }` alone only turns on per-server
   // instrumentation and leaves `/metrics` 404, which would silently strand
-  // the daemon's traffic collector (`src/metrics/collector/proxy/caddy.ts`).
+  // the daemon's traffic collector (`src/metrics/collector/ingress/caddy-v4.ts`).
   const siteCaddyfile = await Deno.readTextFile(
     join(CHECKOUT_ORCHESTRATION_DIR, "roles/site-caddy/templates/Caddyfile.j2"),
   );

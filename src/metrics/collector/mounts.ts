@@ -14,6 +14,8 @@ export type MountEntry = {
   mountPoint: string;
   /** Filesystem type, e.g. `ext4`. */
   fsType: string;
+  /** Comma-separated mount options (fourth `/proc/mounts` field, e.g. `rw,relatime`) — `events/filesystem-state.ts`'s ro/remount detection. */
+  options: string;
 };
 
 /** Filesystem types never offered as storage mount candidates. */
@@ -37,11 +39,12 @@ export function parseProcMounts(text: string): MountEntry[] {
   const entries: MountEntry[] = [];
   for (const line of text.split("\n")) {
     const parts = line.trim().split(/\s+/);
-    if (parts.length < 3) continue;
+    if (parts.length < 4) continue;
     entries.push({
       source: decodeMountField(parts[0]),
       mountPoint: decodeMountField(parts[1]),
       fsType: parts[2],
+      options: decodeMountField(parts[3]),
     });
   }
   return entries;
@@ -84,25 +87,67 @@ export function mountForPath(
   return best;
 }
 
+/** Injectable sysfs access for resolving `/dev/mapper/*` sources — fixture-driven for host-free tests. */
+export type MapperResolverIo = {
+  listDir: (path: string) => Promise<string[]> | string[];
+  readFile: (path: string) => Promise<string | undefined> | string | undefined;
+};
+
+/**
+ * Resolve a `/dev/mapper/<name>` mount source to its kernel `dm-N` device.
+ * Device-mapper stamps the same friendly name (`vg-root`, etc.) at
+ * `/sys/block/dm-N/dm/name` that it exposes as the `/dev/mapper/<name>`
+ * symlink — a plain sysfs scan finds the match without a `dmsetup`/`lsblk`
+ * subprocess. `undefined` when no `dm-N` device carries a matching name.
+ */
+async function resolveMapperDevice(
+  mapperName: string,
+  io: MapperResolverIo,
+  sysRoot: string,
+): Promise<string | undefined> {
+  const entries = await io.listDir(`${sysRoot}/block`);
+  for (const name of entries) {
+    if (!name.startsWith("dm-")) continue;
+    const dmName = await io.readFile(`${sysRoot}/block/${name}/dm/name`);
+    if (dmName?.trim() === mapperName) return name;
+  }
+  return undefined;
+}
+
 /**
  * Kernel device names (as they appear in `/proc/diskstats`) backing `paths`.
  *
- * Only direct `/dev/<name>` sources resolve — `/dev/mapper/*`, network, and
- * pseudo sources yield nothing for that path, letting the caller fall back
- * to the whole-disk filter. Partition names are returned as-is; whole-disk
- * mapping is `block-devices.ts`'s concern.
+ * Direct `/dev/<name>` sources resolve verbatim. `/dev/mapper/<name>` sources
+ * (LVM, dm-crypt) resolve via {@link resolveMapperDevice} to the backing
+ * `dm-N` device — without it a dm-backed root/hosting/Docker mount would
+ * never be recognized as a service device, and host disk aggregates/detail
+ * would silently disappear on any LVM host. Network and other pseudo sources
+ * still yield nothing for that path, letting the caller fall back to the
+ * whole-disk filter. Partition names are returned as-is; whole-disk mapping
+ * is `block-devices.ts`'s concern.
  */
-export function backingDeviceNames(
+export async function backingDeviceNames(
   entries: MountEntry[],
   paths: string[],
-): string[] {
+  io: MapperResolverIo,
+  sysRoot = "/sys",
+): Promise<string[]> {
   const names = new Set<string>();
   for (const path of paths) {
     const mount = mountForPath(entries, path);
     if (!mount) continue;
-    const match = /^\/dev\/([^/]+)$/.exec(mount.source);
-    if (!match) continue;
-    names.add(match[1]);
+
+    const direct = /^\/dev\/([^/]+)$/.exec(mount.source);
+    if (direct) {
+      names.add(direct[1]);
+      continue;
+    }
+
+    const mapper = /^\/dev\/mapper\/(.+)$/.exec(mount.source);
+    if (mapper) {
+      const dmName = await resolveMapperDevice(mapper[1], io, sysRoot);
+      if (dmName) names.add(dmName);
+    }
   }
   return [...names];
 }

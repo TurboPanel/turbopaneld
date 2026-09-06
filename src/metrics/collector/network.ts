@@ -1,18 +1,19 @@
 /**
- * Network domain: interface classification and per-class aggregation.
- *
- * `parse-net-dev.ts` stays the pure line parser; this module classifies every
- * interface (loopback / container-bridge / fabric / uplink) and aggregates
- * uplink and fabric byte rates as two independent, non-additive totals.
- * Container-bridge traffic is classified but never aggregated into either.
+ * Network domain: interface classification (used by topology discovery to
+ * stamp each device's `kind`) and per-device directional stats keyed by
+ * stable topology `deviceId`.
  */
-import { parseNetDev } from "./parse-net-dev.ts";
-import { type NetRates, netRates } from "./rates.ts";
+import type { CounterBaselineTracker } from "./baseline.ts";
+import type { NetworkDeviceSampleV4 } from "../contract-v4.ts";
+import {
+  type NetInterfaceDetailedCounters,
+  parseNetDevDetailedCounters,
+} from "./parse-net-dev.ts";
+import type { SensorIo } from "./sensors/discovery.ts";
 import type {
-  NetCounters,
-  NetInterfaceClassification,
-  NetInterfaceCounters,
-} from "./types.ts";
+  NetworkDeviceKind,
+  NetworkDeviceTopology,
+} from "../topology/types.ts";
 
 /** Container/bridge/virtual interface prefixes (Docker, libvirt, taps). */
 const CONTAINER_BRIDGE_PREFIXES = [
@@ -33,7 +34,7 @@ const CONTAINER_BRIDGE_PREFIXES = [
 export function classifyInterface(
   name: string,
   fabricInterfaces: string[],
-): NetInterfaceClassification {
+): NetworkDeviceKind {
   if (name === "lo") return "loopback";
   if (fabricInterfaces.includes(name)) return "fabric";
   if (CONTAINER_BRIDGE_PREFIXES.some((prefix) => name.startsWith(prefix))) {
@@ -45,106 +46,146 @@ export function classifyInterface(
   return "uplink";
 }
 
-/** Parse and classify `/proc/net/dev`; `null` when nothing is parsable. */
-export function readNetCounters(
-  text: string,
-  fabricInterfaces: string[],
-): NetCounters | null {
-  const parsed = parseNetDev(text);
-  if (!parsed) return null;
-
-  const interfaces: NetCounters["interfaces"] = {};
-  for (const [name, counters] of Object.entries(parsed)) {
-    interfaces[name] = {
-      ...counters,
-      classification: classifyInterface(name, fabricInterfaces),
-    };
-  }
-  return { interfaces };
-}
-
-/** Names of interfaces in `net` with the given classification, sorted. */
-export function interfaceNamesByClass(
-  net: NetCounters | null,
-  classification: NetInterfaceClassification,
-): string[] {
-  if (!net) return [];
-  return Object.entries(net.interfaces)
-    .filter(([, value]) => value.classification === classification)
-    .map(([name]) => name)
-    .sort((a, b) => a.localeCompare(b));
-}
-
-function classSubset(
-  net: NetCounters | null,
-  classification: NetInterfaceClassification,
-): Record<string, NetInterfaceCounters> | null {
-  if (!net) return null;
-  const subset: Record<string, NetInterfaceCounters> = {};
-  for (const [name, value] of Object.entries(net.interfaces)) {
-    if (value.classification !== classification) continue;
-    subset[name] = {
-      receiveBytes: value.receiveBytes,
-      transmitBytes: value.transmitBytes,
-    };
-  }
-  return subset;
+async function readOptionalCounter(
+  io: SensorIo,
+  path: string,
+): Promise<number | undefined> {
+  const raw = await io.readFile(path);
+  if (raw === undefined) return undefined;
+  const value = Number(raw.trim());
+  return Number.isFinite(value) ? value : undefined;
 }
 
 /**
- * Per-second byte rates summed over one classification. Membership churn or
- * a counter reset within the class nulls only that class — a `veth` coming
- * and going never nulls uplink or fabric rates.
+ * Per-NIC directional counters preferring `/sys/class/net/<name>/statistics/
+ * *` (per-file async reads) over `/proc/net/dev` parsing. Sysfs statistics
+ * files are the chosen source; rtnetlink (which would need a raw netlink
+ * socket, not available from Deno without a subprocess) is deferred unless a
+ * concrete gap is found. Returns `null` when any sysfs statistics file is
+ * missing — the caller falls back to `/proc/net/dev` for that device (some
+ * virtual devices expose no `statistics/` directory).
  */
-export function classifiedNetRates(
-  prev: NetCounters | null,
-  curr: NetCounters | null,
-  classification: NetInterfaceClassification,
-  seconds: number,
-): NetRates {
-  return netRates(
-    classSubset(prev, classification),
-    classSubset(curr, classification),
-    seconds,
-  );
-}
-
-function singleInterfaceSubset(
-  net: NetCounters | null,
+export async function readNetInterfaceDetailedCounters(
   name: string,
-): Record<string, NetInterfaceCounters> | null {
-  if (!net) return null;
-  const value = net.interfaces[name];
-  if (!value) return {};
-  return {
-    [name]: {
-      receiveBytes: value.receiveBytes,
-      transmitBytes: value.transmitBytes,
-    },
-  };
+  io: SensorIo,
+  sysRoot = "/sys",
+): Promise<NetInterfaceDetailedCounters | null> {
+  const base = `${sysRoot}/class/net/${name}/statistics`;
+  const [rx, tx, rxErrors, txErrors, rxDropped, txDropped] = await Promise.all(
+    [
+      readOptionalCounter(io, `${base}/rx_bytes`),
+      readOptionalCounter(io, `${base}/tx_bytes`),
+      readOptionalCounter(io, `${base}/rx_errors`),
+      readOptionalCounter(io, `${base}/tx_errors`),
+      readOptionalCounter(io, `${base}/rx_dropped`),
+      readOptionalCounter(io, `${base}/tx_dropped`),
+    ],
+  );
+  if (
+    rx === undefined || tx === undefined || rxErrors === undefined ||
+    txErrors === undefined || rxDropped === undefined ||
+    txDropped === undefined
+  ) {
+    return null;
+  }
+  return { rx, tx, rxErrors, txErrors, rxDropped, txDropped };
 }
 
+const EMPTY_NETWORK_DEVICE_RATES: Omit<NetworkDeviceSampleV4, "deviceId"> = {
+  receiveBytesPerSecond: null,
+  transmitBytesPerSecond: null,
+  receiveErrorsPerSecond: null,
+  transmitErrorsPerSecond: null,
+  receiveDropsPerSecond: null,
+  transmitDropsPerSecond: null,
+};
+
+/** Every baseline field {@link buildNetworkDeviceSamples} tracks per device. */
+const NETWORK_DEVICE_BASELINE_FIELDS = [
+  "rx",
+  "tx",
+  "rxErrors",
+  "txErrors",
+  "rxDrops",
+  "txDrops",
+] as const;
+
 /**
- * Per-second byte rates for one operator-named interface (`HardwareProfile
- * .nic1`/`.nic2`) — a parallel, independent lookup path alongside
- * classification-based aggregation, so an interface can be both part of the
- * `uplink` aggregate and individually reported as `nic1`/`nic2`. An unset
- * slot (`null` name) always nulls; an assigned slot missing from either
- * snapshot (unplugged, renamed) nulls only via the same membership-churn
- * rule `netRates` already applies to classes.
+ * Build one `NetworkDeviceSampleV4` per topology-enumerated device — TurboFabric
+ * interfaces included as ordinary entries, never pre-aggregated. Keyed by the
+ * stable `deviceId` (not the current kernel `name`), so a rename between
+ * ticks doesn't fabricate a rate: a device whose counters are unreadable this
+ * tick stays present in the output with every field `null`, and its baseline
+ * entries are explicitly invalidated — the next readable tick re-origins
+ * (`null` again) instead of diffing against a stale pre-gap value and
+ * compressing however many missed intervals elapsed into one fabricated
+ * rate. Topology said the device exists, so the entry is never dropped.
  */
-export function namedInterfaceRates(
-  prev: NetCounters | null,
-  curr: NetCounters | null,
-  name: string | null,
+export async function buildNetworkDeviceSamples(
+  topology: NetworkDeviceTopology[],
+  deps: { io: SensorIo; sysRoot?: string; netDevText?: string },
+  tracker: CounterBaselineTracker,
+  bootGeneration: number,
   seconds: number,
-): NetRates {
-  if (name === null) {
-    return { receiveBytesPerSecond: null, transmitBytesPerSecond: null };
-  }
-  return netRates(
-    singleInterfaceSubset(prev, name),
-    singleInterfaceSubset(curr, name),
-    seconds,
-  );
+): Promise<NetworkDeviceSampleV4[]> {
+  const root = deps.sysRoot ?? "/sys";
+  const fallback = deps.netDevText
+    ? parseNetDevDetailedCounters(deps.netDevText)
+    : {};
+
+  return await Promise.all(topology.map(async (device) => {
+    const sysfsCounters = await readNetInterfaceDetailedCounters(
+      device.name,
+      deps.io,
+      root,
+    );
+    const counters = sysfsCounters ?? fallback[device.name] ?? null;
+    const key = (field: string) => `net:${device.deviceId}:${field}`;
+    if (!counters) {
+      for (const field of NETWORK_DEVICE_BASELINE_FIELDS) {
+        tracker.invalidate(key(field));
+      }
+      return { deviceId: device.deviceId, ...EMPTY_NETWORK_DEVICE_RATES };
+    }
+
+    return {
+      deviceId: device.deviceId,
+      receiveBytesPerSecond: tracker.rate(
+        key("rx"),
+        counters.rx,
+        bootGeneration,
+        seconds,
+      ),
+      transmitBytesPerSecond: tracker.rate(
+        key("tx"),
+        counters.tx,
+        bootGeneration,
+        seconds,
+      ),
+      receiveErrorsPerSecond: tracker.rate(
+        key("rxErrors"),
+        counters.rxErrors,
+        bootGeneration,
+        seconds,
+      ),
+      transmitErrorsPerSecond: tracker.rate(
+        key("txErrors"),
+        counters.txErrors,
+        bootGeneration,
+        seconds,
+      ),
+      receiveDropsPerSecond: tracker.rate(
+        key("rxDrops"),
+        counters.rxDropped,
+        bootGeneration,
+        seconds,
+      ),
+      transmitDropsPerSecond: tracker.rate(
+        key("txDrops"),
+        counters.txDropped,
+        bootGeneration,
+        seconds,
+      ),
+    };
+  }));
 }

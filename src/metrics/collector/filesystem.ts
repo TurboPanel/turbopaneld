@@ -8,6 +8,8 @@
  */
 import { statfs } from "node:fs/promises";
 
+import type { FilesystemSampleV4 } from "../contract-v4.ts";
+import type { FilesystemTopology } from "../topology/types.ts";
 import type { StorageProbeResult } from "./types.ts";
 
 export type StatfsLike = {
@@ -15,6 +17,20 @@ export type StatfsLike = {
   bfree: number;
   bavail: number;
   bsize: number;
+  /** Total inode count, when the platform's `statfs` exposes it (Linux does). */
+  files?: number;
+  /** Free inode count, when the platform's `statfs` exposes it (Linux does). */
+  ffree?: number;
+};
+
+/** Injected `statfs` may return a value, a promise, or `null`. */
+export type StatfsProbeResult = StatfsLike | null;
+export type StatfsProbe = (
+  path: string,
+) => StatfsProbeResult | Promise<StatfsProbeResult>;
+
+export type StatfsIo = {
+  statfs?: StatfsProbe;
 };
 
 /**
@@ -31,11 +47,7 @@ export type StatfsLike = {
  */
 export async function probeStorage(
   path: string,
-  io?: {
-    statfs?: (
-      path: string,
-    ) => Promise<StatfsLike | null> | StatfsLike | null;
-  },
+  io?: StatfsIo,
 ): Promise<StorageProbeResult> {
   try {
     const probe = io?.statfs ?? statfs;
@@ -57,8 +69,59 @@ export async function probeStorage(
     const availableBytes = bavail * bsize;
     if (totalBytes <= 0) return null;
 
-    return { totalBytes, availableBytes };
+    const totalInodes = Number.isFinite(stat.files) ? Number(stat.files) : null;
+    const freeInodes = Number.isFinite(stat.ffree) ? Number(stat.ffree) : null;
+    return { totalBytes, availableBytes, totalInodes, freeInodes };
   } catch {
     return null;
   }
+}
+
+/**
+ * Build one `FilesystemSampleV4` per non-root topology-enumerated filesystem.
+ * The root-tagged entry is never included here — its capacity is carried
+ * exclusively by `host.storage`'s `rootFilesystemAvailableBytes`/
+ * `rootFilesystemFreeInodes` (see {@link probeRootFilesystemCapacity}), so a
+ * server never spends an `extraFilesystemSlots` budget slot on `/` itself. A
+ * non-root filesystem whose `statfs` probe fails this tick stays present in
+ * the output with both fields `null` — topology said it exists, so the entry
+ * is never dropped.
+ */
+export async function buildFilesystemSamples(
+  topology: FilesystemTopology[],
+  statfsIo?: StatfsIo,
+): Promise<FilesystemSampleV4[]> {
+  const nonRoot = topology.filter((fs) => !fs.roles.includes("root"));
+  return await Promise.all(nonRoot.map(async (fs): Promise<
+    FilesystemSampleV4
+  > => {
+    const probe = await probeStorage(fs.mountpoint, statfsIo);
+    return {
+      filesystemId: fs.filesystemId,
+      availableBytes: probe?.availableBytes ?? null,
+      freeInodes: probe?.freeInodes ?? null,
+    };
+  }));
+}
+
+/**
+ * Probe the root-tagged topology filesystem's capacity for `host.storage`'s
+ * `rootFilesystemAvailableBytes`/`rootFilesystemFreeInodes` — the sole home
+ * for root capacity now that {@link buildFilesystemSamples} excludes it.
+ * Returns `null` when no topology entry is tagged `"root"` (unexpected, but
+ * never thrown) or when its `statfs` probe fails.
+ */
+export async function probeRootFilesystemCapacity(
+  topology: FilesystemTopology[],
+  statfsIo?: StatfsIo,
+): Promise<
+  { availableBytes: number | null; freeInodes: number | null } | null
+> {
+  const root = topology.find((fs) => fs.roles.includes("root"));
+  if (!root) return null;
+  const probe = await probeStorage(root.mountpoint, statfsIo);
+  return {
+    availableBytes: probe?.availableBytes ?? null,
+    freeInodes: probe?.freeInodes ?? null,
+  };
 }

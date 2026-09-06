@@ -22,6 +22,9 @@ export function parseDiskstatsRow(
   const writesCompleted = Number(parts[7]);
   const sectorsWritten = Number(parts[9]);
   const writeTicksMs = Number(parts[10]);
+  const iosInProgress = Number(parts[11]);
+  const ioTicksMs = Number(parts[12]);
+  const weightedIoTicksMs = Number(parts[13]);
 
   if (
     !name ||
@@ -32,6 +35,9 @@ export function parseDiskstatsRow(
       writesCompleted,
       sectorsWritten,
       writeTicksMs,
+      iosInProgress,
+      ioTicksMs,
+      weightedIoTicksMs,
     ].some((n) => !Number.isFinite(n))
   ) {
     return null;
@@ -46,6 +52,9 @@ export function parseDiskstatsRow(
       writesCompleted,
       sectorsWritten,
       writeTicksMs,
+      iosInProgress,
+      ioTicksMs,
+      weightedIoTicksMs,
     },
   };
 }

@@ -1,160 +1,125 @@
 /**
- * Linux collector orchestrator: builds the raw snapshot from the per-domain
- * modules, computes two-snapshot deltas, and fills every v2 `HostMetrics`
- * field plus the resolved `HostMetricsDimensions`.
+ * Linux collector orchestrator — v4 assembly.
  *
- * No collapsed `cpuUsagePercent` is stored — the API derives utilization as
- * `100 - cpuIdlePercent`.
+ * Builds one `MetricsSampleV4` per tick by composing this tick's
+ * `TopologySnapshot` (identity + topology generation + boot generation), the
+ * shared counter-baseline layer (`baseline.ts`), and every v4 parser module.
+ * `gpus` is populated via `gpu/index.ts`'s `buildGpuSamples` when
+ * `CollectorDepsV4.gpuAdapters` is wired (production always wires it —
+ * `collector/index.ts`'s `defaultDepsV4`); `ingressSources`/
+ * `databaseProxies` are populated the same way via `ingress/index.ts`'s
+ * `buildIngressSources` / `database-proxy/index.ts`'s
+ * `buildDatabaseProxies` when their respective adapter sets are wired.
+ * `hardwareSignals` is populated via `hardware-signals.ts`'s
+ * `buildHardwareSignalSamples` for every topology-identified signal
+ * (`[]` on a VM, since topology never identifies any). `events` is
+ * populated via `CollectorDepsV4.eventCollectors`
+ * (`events/index.ts`'s `EventCollectorSet`) when wired. Absent (e.g. a test
+ * collector), each of these stays `[]`.
  */
 import {
-  buildHostMetricsSample,
-  type HostMetricKey,
-  type HostMetricsDimensions,
-  type MetricPart,
-  METRICS_SCHEMA_VERSION,
-  type MetricsCollectionMode,
-  type TrafficSourceContribution,
-} from "../contract.ts";
-import { readBlockDevices } from "./block-devices.ts";
-import { cpuPercentagesV2, EMPTY_CPU_PERCENTAGES } from "./cpu.ts";
-import { probeStorage } from "./filesystem.ts";
-import { readMemoryGauges } from "./memory.ts";
-import { backingDeviceNames, parseProcMounts } from "./mounts.ts";
+  buildMetricsSampleV4,
+  type CpuCoreLiveSampleV4,
+  type CpuDetailSampleV4,
+  type HostMetricsV4,
+  type MemoryDetailSampleV4,
+  METRICS_SCHEMA_VERSION_V4,
+  type MetricsCollectionModeV4,
+  type MetricsSampleV4,
+} from "../contract-v4.ts";
 import {
-  classifiedNetRates,
-  namedInterfaceRates,
-  readNetCounters,
-} from "./network.ts";
-import { parseLoadavg } from "./parse-loadavg.ts";
-import { parseStat } from "./parse-stat.ts";
-import { parseUptime } from "./parse-uptime.ts";
-import { bootChanged, counterDelta, diskRates } from "./rates.ts";
-import { cpuPowerFromEnergy } from "./sensors/power.ts";
+  buildCpuCoreIdIndex,
+  coreIdForStatKey,
+} from "../topology/cpu-topology.ts";
+import type { TopologySnapshot } from "../topology/types.ts";
+import { CounterBaselineTracker } from "./baseline.ts";
+import {
+  buildBlockDeviceSamples,
+  type HostDiskAggregates,
+  hostDiskAggregates,
+  maxBlockDeviceUtilPercent,
+} from "./block-devices.ts";
+import {
+  cpuBusyPercentV4,
+  type CpuPercentagesV4,
+  maxCoreBusyPercentV4,
+} from "./cpu.ts";
+import { buildCpuCoreLiveSamples } from "./cpu-core-live.ts";
+import { buildCpuDetailSample } from "./cpu-detail.ts";
+import { buildDatabaseProxies } from "./database-proxy/index.ts";
+import type { EventDetectContext } from "./events/index.ts";
+import {
+  buildFilesystemSamples,
+  probeRootFilesystemCapacity,
+} from "./filesystem.ts";
+import { buildGpuSamples } from "./gpu/index.ts";
+import { buildHardwareSignalSamples } from "./hardware-signals.ts";
+import { buildIngressSources } from "./ingress/index.ts";
+import { readMemoryGauges } from "./memory.ts";
+import { buildMemoryDetailSample } from "./memory-detail.ts";
+import { parseProcMounts } from "./mounts.ts";
+import { buildNetworkDeviceSamples } from "./network.ts";
+import { parseDiskstatsRows } from "./parse-diskstats.ts";
+import {
+  conntrackUsedPercent,
+  fileHandlesUsedPercent,
+  parseConntrackCount,
+  parseConntrackMax,
+  parseFileMax,
+  parseFileNr,
+} from "./parse-kernel-limits.ts";
+import { parsePsiLine, type PsiKind, psiPercent } from "./parse-psi.ts";
+import {
+  parseStat,
+  parseStatPerCoreLines,
+  parseStatProcs,
+} from "./parse-stat.ts";
+import { parseSoftnetStat, softnetDropsPerSecond } from "./parse-softnet.ts";
+import {
+  parseNetstatTcpOrigDataSent,
+  parseSnmpRetransSegs,
+  tcpRetransmitPercent,
+} from "./parse-tcp.ts";
+import {
+  parseVmstat,
+  type VmstatCounters,
+  type VmstatRates,
+  vmstatRates,
+} from "./parse-vmstat.ts";
+import type { CollectorDepsV4 } from "./types-v4.ts";
 import type {
-  CaddyCounters,
-  CollectorDeps,
+  CpuCounters,
   MetricsCollector,
   MetricsCollectResult,
-  ProxySqlCounters,
-  RawSnapshot,
-  SensorReadings,
 } from "./types.ts";
 
 const PROC_STAT = "/proc/stat";
 const PROC_MEMINFO = "/proc/meminfo";
-const PROC_LOADAVG = "/proc/loadavg";
-const PROC_UPTIME = "/proc/uptime";
+const PROC_VMSTAT = "/proc/vmstat";
 const PROC_DISKSTATS = "/proc/diskstats";
 const PROC_NET_DEV = "/proc/net/dev";
+const PROC_NET_SNMP = "/proc/net/snmp";
+const PROC_NET_NETSTAT = "/proc/net/netstat";
+const PROC_NET_SOFTNET_STAT = "/proc/net/softnet_stat";
+const PROC_PRESSURE_CPU = "/proc/pressure/cpu";
+const PROC_PRESSURE_MEMORY = "/proc/pressure/memory";
+const PROC_PRESSURE_IO = "/proc/pressure/io";
+const PROC_FILE_NR = "/proc/sys/fs/file-nr";
+const PROC_FILE_MAX = "/proc/sys/fs/file-max";
+const PROC_CONNTRACK_COUNT = "/proc/sys/net/netfilter/nf_conntrack_count";
+const PROC_CONNTRACK_MAX = "/proc/sys/net/netfilter/nf_conntrack_max";
 const PROC_MOUNTS = "/proc/mounts";
-const PROC_BOOT_ID = "/proc/sys/kernel/random/boot_id";
+const PROC_MDSTAT = "/proc/mdstat";
 
-async function safeAsync<T>(fn: () => Promise<T>): Promise<T | null> {
-  try {
-    return await fn();
-  } catch {
-    return null;
-  }
-}
-
-async function buildRawSnapshot(
-  deps: CollectorDeps,
-  atMs: number,
-): Promise<RawSnapshot> {
-  // Resolve the probed paths first — the storage probes and the disk device
-  // preference (mount-backed disks) both need them.
-  const [hostingPath, dockerRoot] = await Promise.all([
-    safeAsync(async () => await deps.resolveHostingPath()),
-    safeAsync(() => deps.resolveDockerDataRoot()),
-  ]);
-
-  const [
-    statText,
-    memText,
-    loadText,
-    uptimeText,
-    diskstatsText,
-    netDevText,
-    mountsText,
-    bootIdRaw,
-    fabricInterfaces,
-    systemStorage,
-    hostingStorage,
-    dockerStorage,
-    sensors,
-    processCount,
-    nicSlots,
-    proxy,
-  ] = await Promise.all([
-    deps.readProcFile(PROC_STAT),
-    deps.readProcFile(PROC_MEMINFO),
-    deps.readProcFile(PROC_LOADAVG),
-    deps.readProcFile(PROC_UPTIME),
-    deps.readProcFile(PROC_DISKSTATS),
-    deps.readProcFile(PROC_NET_DEV),
-    deps.readProcFile(PROC_MOUNTS),
-    deps.readProcFile(PROC_BOOT_ID),
-    safeAsync(() => deps.resolveFabricInterfaces()),
-    probeStorage("/", { statfs: deps.statfs }),
-    safeAsync(async () => {
-      if (!hostingPath) return null;
-      return await probeStorage(hostingPath, { statfs: deps.statfs });
-    }),
-    safeAsync(async () => {
-      if (!dockerRoot) return null;
-      return await probeStorage(dockerRoot, { statfs: deps.statfs });
-    }),
-    safeAsync(async () => {
-      const overrides = await safeAsync(() =>
-        deps.resolveAdminSensorOverrides()
-      );
-      return await deps.readSensors(overrides ?? {});
-    }),
-    safeAsync(async () => await deps.countProcesses()),
-    safeAsync(() => deps.resolveNicSlots()),
-    safeAsync(() => deps.readProxyCounters()),
-  ]);
-
-  const cpu = statText ? parseStat(statText) : null;
-  const memory = memText ? readMemoryGauges(memText) : null;
-  const load = loadText ? parseLoadavg(loadText) : null;
-  const uptimeSeconds = uptimeText ? parseUptime(uptimeText) : null;
-  const probedPaths = ["/", hostingPath, dockerRoot]
-    .filter((path): path is string => typeof path === "string");
-  const preferredDevices = mountsText
-    ? backingDeviceNames(parseProcMounts(mountsText), probedPaths)
-    : [];
-  const disk = diskstatsText
-    ? readBlockDevices(diskstatsText, preferredDevices)
-    : null;
-  const net = netDevText
-    ? readNetCounters(netDevText, fabricInterfaces ?? [])
-    : null;
-  const bootId = bootIdRaw?.trim() ?? null;
-
-  return {
-    atMs,
-    bootId,
-    cpu,
-    disk,
-    net,
-    load,
-    memory,
-    storage: {
-      system: systemStorage,
-      hosting: hostingStorage,
-      docker: dockerStorage,
-    },
-    sensors,
-    processCount,
-    uptimeSeconds,
-    nicSlots: nicSlots ?? { nic1: null, nic2: null },
-    proxy: proxy ?? { caddy: null, proxysql: null },
-  };
-}
+type PreviousCpuSnapshot = {
+  atMs: number;
+  bootGeneration: number;
+  cpu: CpuCounters | null;
+  cores: Record<string, CpuCounters>;
+};
 
 function intervalSeconds(
-  previous: RawSnapshot | undefined,
+  previous: PreviousCpuSnapshot | undefined,
   nowMs: number,
   nominalIntervalSeconds: number,
 ): number {
@@ -164,372 +129,691 @@ function intervalSeconds(
   return elapsed;
 }
 
-/** CPU power comes from an energy-counter delta — same sensor on both sides. */
-function cpuPowerWatts(
-  previous: SensorReadings | null | undefined,
-  current: SensorReadings | null,
-  seconds: number,
+/** All raw `/proc` text this tick needs, read in one batch. */
+type RawTexts = {
+  statText: string | undefined;
+  memText: string | undefined;
+  vmstatText: string | undefined;
+  diskstatsText: string | undefined;
+  netDevText: string | undefined;
+  netSnmpText: string | undefined;
+  netstatText: string | undefined;
+  softnetText: string | undefined;
+  pressureCpuText: string | undefined;
+  pressureMemoryText: string | undefined;
+  pressureIoText: string | undefined;
+  fileNrText: string | undefined;
+  fileMaxText: string | undefined;
+  conntrackCountText: string | undefined;
+  conntrackMaxText: string | undefined;
+  mountsText: string | undefined;
+  mdstatText: string | undefined;
+};
+
+async function readRawTexts(deps: CollectorDepsV4): Promise<RawTexts> {
+  const [
+    statText,
+    memText,
+    vmstatText,
+    diskstatsText,
+    netDevText,
+    netSnmpText,
+    netstatText,
+    softnetText,
+    pressureCpuText,
+    pressureMemoryText,
+    pressureIoText,
+    fileNrText,
+    fileMaxText,
+    conntrackCountText,
+    conntrackMaxText,
+    mountsText,
+    mdstatText,
+  ] = await Promise.all([
+    deps.readProcFile(PROC_STAT),
+    deps.readProcFile(PROC_MEMINFO),
+    deps.readProcFile(PROC_VMSTAT),
+    deps.readProcFile(PROC_DISKSTATS),
+    deps.readProcFile(PROC_NET_DEV),
+    deps.readProcFile(PROC_NET_SNMP),
+    deps.readProcFile(PROC_NET_NETSTAT),
+    deps.readProcFile(PROC_NET_SOFTNET_STAT),
+    deps.readProcFile(PROC_PRESSURE_CPU),
+    deps.readProcFile(PROC_PRESSURE_MEMORY),
+    deps.readProcFile(PROC_PRESSURE_IO),
+    deps.readProcFile(PROC_FILE_NR),
+    deps.readProcFile(PROC_FILE_MAX),
+    deps.readProcFile(PROC_CONNTRACK_COUNT),
+    deps.readProcFile(PROC_CONNTRACK_MAX),
+    deps.readProcFile(PROC_MOUNTS),
+    deps.readProcFile(PROC_MDSTAT),
+  ]);
+  return {
+    statText,
+    memText,
+    vmstatText,
+    diskstatsText,
+    netDevText,
+    netSnmpText,
+    netstatText,
+    softnetText,
+    pressureCpuText,
+    pressureMemoryText,
+    pressureIoText,
+    fileNrText,
+    fileMaxText,
+    conntrackCountText,
+    conntrackMaxText,
+    mountsText,
+    mdstatText,
+  };
+}
+
+function swapUsedBytes(
+  swapTotalBytes: number | null,
+  swapFreeBytes: number | null,
 ): number | null {
-  if (!previous || !current) return null;
-  if (
-    previous.sensors.cpuPowerSensor !== current.sensors.cpuPowerSensor
-  ) {
-    return null;
-  }
-  return cpuPowerFromEnergy(previous.cpuEnergy, current.cpuEnergy, seconds);
+  if (swapTotalBytes === null || swapFreeBytes === null) return null;
+  return swapTotalBytes - swapFreeBytes;
 }
 
-/** `undefined` when the source was absent on that tick — `counterDelta`'s "first sample" case. */
-function caddyPrevField(
-  previous: CaddyCounters | null | undefined,
-  field: keyof CaddyCounters,
-): number | undefined {
-  return previous ? previous[field] : undefined;
-}
-
-function proxySqlPrevField(
-  previous: ProxySqlCounters | null | undefined,
-  field: keyof ProxySqlCounters,
-): number | undefined {
-  return previous ? previous[field] : undefined;
-}
-
-/**
- * Traffic-sidecar deltas/gauges for one tick. A source that is `null` this
- * tick (process absent/unreachable) resolves every one of its fields to
- * `null` — never a stale carry-forward. A boot-id change (`reset`) nulls
- * every counter-delta field (the sidecar restarted with the host), but
- * leaves the connection-count/backends-up gauges alone, same reasoning as
- * fan RPM in `hasAnySensorReading`.
- */
-function trafficMetrics(
-  current: RawSnapshot,
-  previous: RawSnapshot | undefined,
-  reset: boolean,
-): Partial<Record<HostMetricKey, number | null>> {
-  const currentCaddy = current.proxy?.caddy ?? null;
-  const previousCaddy = reset ? null : previous?.proxy?.caddy;
-  const caddyDelta = (field: keyof CaddyCounters): number | null =>
-    currentCaddy === null
-      ? null
-      : counterDelta(caddyPrevField(previousCaddy, field), currentCaddy[field]);
-
-  const currentProxySql = current.proxy?.proxysql ?? null;
-  const previousProxySql = reset ? null : previous?.proxy?.proxysql;
-  const proxySqlDelta = (field: keyof ProxySqlCounters): number | null =>
-    currentProxySql === null ? null : counterDelta(
-      proxySqlPrevField(previousProxySql, field),
-      currentProxySql[field],
-    );
-
-  return {
-    caddyRequestsTotal: caddyDelta("requestsTotal"),
-    caddyResponses2xxTotal: caddyDelta("responses2xxTotal"),
-    caddyResponses3xxTotal: caddyDelta("responses3xxTotal"),
-    caddyResponses4xxTotal: caddyDelta("responses4xxTotal"),
-    caddyResponses5xxTotal: caddyDelta("responses5xxTotal"),
-    caddyRequestBytesTotal: caddyDelta("requestBytesTotal"),
-    caddyResponseBytesTotal: caddyDelta("responseBytesTotal"),
-    caddyRequestDurationSecondsSum: caddyDelta("requestDurationSecondsSum"),
-    caddyRequestsUnder100msTotal: caddyDelta("requestsUnder100msTotal"),
-    caddyRequestsUnder1sTotal: caddyDelta("requestsUnder1sTotal"),
-    // Gauge, not a delta — unaffected by the boot-id reset above.
-    caddyRequestsInFlight: currentCaddy?.requestsInFlight ?? null,
-    proxysqlQueriesTotal: proxySqlDelta("queriesTotal"),
-    proxysqlSlowQueriesTotal: proxySqlDelta("slowQueriesTotal"),
-    proxysqlConnectionErrorsTotal: proxySqlDelta("connectionErrorsTotal"),
-    // Gauges, not deltas — unaffected by the boot-id reset above.
-    proxysqlClientConnections: currentProxySql?.clientConnections ?? null,
-    proxysqlBackendConnections: currentProxySql?.backendConnections ?? null,
-    proxysqlBackendsUp: currentProxySql?.backendsUp ?? null,
-  };
-}
-
-function snapshotToMetrics(
-  current: RawSnapshot,
-  previous: RawSnapshot | undefined,
+/** Minimal-but-valid v4 sample for the collect-failure path — never throws out of `collect()`. */
+function emptySample(
+  nowMs: number,
   seconds: number,
-): Partial<Record<HostMetricKey, number | null>> {
-  // A boot-id change means every monotonic counter restarted: rate, CPU, and
-  // power-delta metrics for the interval are null, gauges still report.
-  const reset = previous !== undefined &&
-    bootChanged(previous.bootId, current.bootId);
+  sequence: number,
+  collectionMode: MetricsCollectionModeV4,
+): MetricsSampleV4 {
+  return buildMetricsSampleV4({
+    metadata: {
+      version: METRICS_SCHEMA_VERSION_V4,
+      sampledAt: new Date(nowMs).toISOString(),
+      intervalSeconds: seconds,
+      sequence,
+      collectionMode,
+      topologyGeneration: 0,
+      bootGeneration: 0,
+    },
+    host: {
+      cpu: {
+        busyPercent: null,
+        userPercent: null,
+        systemPercent: null,
+        iowaitPercent: null,
+        stealPercent: null,
+        softirqPercent: null,
+        pressureSomePercent: null,
+        maxCoreBusyPercent: null,
+        procsRunning: null,
+        procsBlocked: null,
+      },
+      kernel: { fileHandlesUsedPercent: null, conntrackUsedPercent: null },
+      memory: {
+        availableBytes: null,
+        swapUsedBytes: null,
+        pressureSomePercent: null,
+        pressureFullPercent: null,
+        swapInBytesPerSecond: null,
+        swapOutBytesPerSecond: null,
+        majorPageFaultsPerSecond: null,
+      },
+      storage: {
+        ioPressureSomePercent: null,
+        ioPressureFullPercent: null,
+        diskReadBytesPerSecond: null,
+        diskWriteBytesPerSecond: null,
+        diskReadLatencyMs: null,
+        diskWriteLatencyMs: null,
+        maxBlockDeviceUtilPercent: null,
+        rootFilesystemAvailableBytes: null,
+        rootFilesystemFreeInodes: null,
+      },
+      network: { tcpRetransmitPercent: null, softnetDropsPerSecond: null },
+    },
+    networks: [],
+    filesystems: [],
+    blockDevices: [],
+    gpus: [],
+    hardwareSignals: [],
+    ingressSources: [],
+    databaseProxies: [],
+    events: [],
+  });
+}
 
-  const cpu = reset ? EMPTY_CPU_PERCENTAGES : cpuPercentagesV2(
-    previous?.cpu ?? null,
-    current.cpu,
-    seconds,
+/** Shared per-tick rate inputs every domain helper threads through the baseline tracker. */
+type TickRates = {
+  tracker: CounterBaselineTracker;
+  bootGeneration: number;
+  seconds: number;
+};
+
+const EMPTY_PROCS = { running: null, blocked: null };
+const EMPTY_VMSTAT: VmstatCounters = {
+  pswpin: null,
+  pswpout: null,
+  pgmajfault: null,
+  oomKill: null,
+};
+
+function whenPresent<T>(
+  text: string | undefined,
+  parse: (text: string) => T,
+): T | null {
+  if (!text) return null;
+  return parse(text);
+}
+
+function whenPresentOr<T>(
+  text: string | undefined,
+  parse: (text: string) => T,
+  fallback: T,
+): T {
+  if (!text) return fallback;
+  return parse(text);
+}
+
+function bootGenerationChanged(
+  previous: PreviousCpuSnapshot | undefined,
+  bootGeneration: number,
+): boolean {
+  if (previous === undefined) return false;
+  return previous.bootGeneration !== bootGeneration;
+}
+
+type CpuTick = {
+  currentCpu: CpuCounters | null;
+  currentCores: Record<string, CpuCounters>;
+  prevCpu: CpuCounters | null;
+  prevCores: Record<string, CpuCounters>;
+  cpuPct: CpuPercentagesV4;
+  maxCoreBusyPercent: number | null;
+  procs: { running: number | null; blocked: number | null };
+};
+
+function previousCpuCounters(
+  previous: PreviousCpuSnapshot | undefined,
+  bootChanged: boolean,
+): CpuCounters | null {
+  if (bootChanged) return null;
+  return previous?.cpu ?? null;
+}
+
+function previousCoreCounters(
+  previous: PreviousCpuSnapshot | undefined,
+  bootChanged: boolean,
+): Record<string, CpuCounters> {
+  if (bootChanged) return {};
+  return previous?.cores ?? {};
+}
+
+function parseCpuTick(
+  statText: string | undefined,
+  previous: PreviousCpuSnapshot | undefined,
+  bootChanged: boolean,
+  seconds: number,
+): CpuTick {
+  const currentCpu = whenPresent(statText, parseStat);
+  const currentCores = whenPresentOr(statText, parseStatPerCoreLines, {});
+  const prevCpu = previousCpuCounters(previous, bootChanged);
+  const prevCores = previousCoreCounters(previous, bootChanged);
+  return {
+    currentCpu,
+    currentCores,
+    prevCpu,
+    prevCores,
+    cpuPct: cpuBusyPercentV4(prevCpu, currentCpu, seconds),
+    maxCoreBusyPercent: maxCoreBusyPercentV4(prevCores, currentCores, seconds),
+    procs: whenPresentOr(statText, parseStatProcs, EMPTY_PROCS),
+  };
+}
+
+type PsiPercents = {
+  cpuSome: number | null;
+  memorySome: number | null;
+  memoryFull: number | null;
+  ioSome: number | null;
+  ioFull: number | null;
+};
+
+function psiFromText(
+  text: string | undefined,
+  kind: PsiKind,
+  rates: TickRates,
+  key: string,
+): number | null {
+  return psiPercent(
+    whenPresent(text, (t) => parsePsiLine(t, kind)),
+    rates.seconds,
+    rates.tracker,
+    key,
+    rates.bootGeneration,
   );
+}
 
-  const diskRate = reset
-    ? {
-      readBytesPerSecond: null,
-      writeBytesPerSecond: null,
-      readOpsPerSecond: null,
-      writeOpsPerSecond: null,
-      readLatencyMs: null,
-      writeLatencyMs: null,
-    }
-    : diskRates(previous?.disk ?? null, current.disk, seconds);
-
-  const prevNet = reset ? null : previous?.net ?? null;
-  const uplink = classifiedNetRates(prevNet, current.net, "uplink", seconds);
-  const fabric = classifiedNetRates(prevNet, current.net, "fabric", seconds);
-  // Named NIC-slot rates use the *current* tick's slot assignment — but only
-  // when the previous tick agreed on that same assignment. `netRates`'
-  // membership-churn null only fires when the interface itself vanishes from
-  // one snapshot; it does NOT catch a slot reassignment where both the old
-  // and new named interfaces are present in both snapshots (e.g. nic1 goes
-  // from eth0 to eth1 while both still exist) — that would otherwise compute
-  // a real rate for eth1 that partially covers an interval eth1 wasn't even
-  // assigned to nic1 for. So a slot whose name changed between ticks is
-  // nulled directly instead of calling `namedInterfaceRates`.
-  const prevNicSlots = reset ? null : previous?.nicSlots ?? null;
-  const nic1 = prevNicSlots && prevNicSlots.nic1 !== current.nicSlots.nic1
-    ? { receiveBytesPerSecond: null, transmitBytesPerSecond: null }
-    : namedInterfaceRates(
-      prevNet,
-      current.net,
-      current.nicSlots.nic1,
-      seconds,
-    );
-  const nic2 = prevNicSlots && prevNicSlots.nic2 !== current.nicSlots.nic2
-    ? { receiveBytesPerSecond: null, transmitBytesPerSecond: null }
-    : namedInterfaceRates(
-      prevNet,
-      current.net,
-      current.nicSlots.nic2,
-      seconds,
-    );
-
-  const power = reset
-    ? null
-    : cpuPowerWatts(previous?.sensors, current.sensors, seconds);
-
-  const sensors = current.sensors;
-  const traffic = trafficMetrics(current, previous, reset);
-
+function readPsiPercents(raw: RawTexts, rates: TickRates): PsiPercents {
   return {
-    ...traffic,
-    cpuUserPercent: cpu.userPercent,
-    cpuSystemPercent: cpu.systemPercent,
-    cpuNicePercent: cpu.nicePercent,
-    cpuIdlePercent: cpu.idlePercent,
-    cpuIowaitPercent: cpu.iowaitPercent,
-    cpuIrqPercent: cpu.irqPercent,
-    cpuSoftirqPercent: cpu.softirqPercent,
-    cpuStealPercent: cpu.stealPercent,
-    load1: current.load?.one ?? null,
-    load5: current.load?.five ?? null,
-    load15: current.load?.fifteen ?? null,
-    memoryTotalBytes: current.memory?.totalBytes ?? null,
-    memoryAvailableBytes: current.memory?.availableBytes ?? null,
-    swapTotalBytes: current.memory?.swapTotalBytes ?? null,
-    swapFreeBytes: current.memory?.swapFreeBytes ?? null,
-    systemStorageTotalBytes: current.storage.system?.totalBytes ?? null,
-    systemStorageAvailableBytes: current.storage.system?.availableBytes ??
-      null,
-    hostingStorageTotalBytes: current.storage.hosting?.totalBytes ?? null,
-    hostingStorageAvailableBytes: current.storage.hosting?.availableBytes ??
-      null,
-    dockerStorageTotalBytes: current.storage.docker?.totalBytes ?? null,
-    dockerStorageAvailableBytes: current.storage.docker?.availableBytes ??
-      null,
-    diskReadBytesPerSecond: diskRate.readBytesPerSecond,
-    diskWriteBytesPerSecond: diskRate.writeBytesPerSecond,
-    diskReadOpsPerSecond: diskRate.readOpsPerSecond,
-    diskWriteOpsPerSecond: diskRate.writeOpsPerSecond,
-    diskReadLatencyMs: diskRate.readLatencyMs,
-    diskWriteLatencyMs: diskRate.writeLatencyMs,
-    interfaceReceiveBytesPerSecond: uplink.receiveBytesPerSecond,
-    interfaceTransmitBytesPerSecond: uplink.transmitBytesPerSecond,
-    fabricReceiveBytesPerSecond: fabric.receiveBytesPerSecond,
-    fabricTransmitBytesPerSecond: fabric.transmitBytesPerSecond,
-    nic1ReceiveBytesPerSecond: nic1.receiveBytesPerSecond,
-    nic1TransmitBytesPerSecond: nic1.transmitBytesPerSecond,
-    nic2ReceiveBytesPerSecond: nic2.receiveBytesPerSecond,
-    nic2TransmitBytesPerSecond: nic2.transmitBytesPerSecond,
-    cpuTemperatureCelsius: sensors?.cpuTemperatureCelsius ?? null,
-    gpuTemperatureCelsius: sensors?.gpuTemperatureCelsius ?? null,
-    cpuPowerWatts: power,
-    gpuPowerWatts: sensors?.gpuPowerWatts ?? null,
-    // Gauges, not deltas — unaffected by the boot-id reset above.
-    gpuUtilizationPercent: sensors?.gpuUtilizationPercent ?? null,
-    gpuFanRpm: sensors?.gpuFanRpm ?? null,
-    disk1TemperatureCelsius: sensors?.disk1TemperatureCelsius ?? null,
-    disk2TemperatureCelsius: sensors?.disk2TemperatureCelsius ?? null,
-    ambient1TemperatureCelsius: sensors?.ambient1TemperatureCelsius ?? null,
-    ambient2TemperatureCelsius: sensors?.ambient2TemperatureCelsius ?? null,
-    boardTemperatureCelsius: sensors?.boardTemperatureCelsius ?? null,
-    cpuFanRpm: sensors?.cpuFanRpm ?? null,
-    systemFan1Rpm: sensors?.systemFan1Rpm ?? null,
-    systemFan2Rpm: sensors?.systemFan2Rpm ?? null,
-    processCount: current.processCount,
-    uptimeSeconds: current.uptimeSeconds,
+    cpuSome: psiFromText(raw.pressureCpuText, "some", rates, "psi:cpu:some"),
+    memorySome: psiFromText(
+      raw.pressureMemoryText,
+      "some",
+      rates,
+      "psi:memory:some",
+    ),
+    memoryFull: psiFromText(
+      raw.pressureMemoryText,
+      "full",
+      rates,
+      "psi:memory:full",
+    ),
+    ioSome: psiFromText(raw.pressureIoText, "some", rates, "psi:io:some"),
+    ioFull: psiFromText(raw.pressureIoText, "full", rates, "psi:io:full"),
   };
 }
 
-/**
- * Whether this tick has any `"sensors"`-part reading to report (contract.ts
- * `SENSORS_PART_KEYS`) — `gpuTemperatureCelsius`/`gpuPowerWatts` live in
- * `extended`, always present, so they don't count here.
- * `cpuTemperatureCelsius`/`cpuPowerWatts` DO live in `sensors` now, so they're
- * checked against the already-computed `metrics` (not the raw sensor
- * snapshot) — `cpuPowerWatts` is a two-snapshot RAPL delta the orchestrator
- * computes outside `SensorReadings`, so the raw snapshot alone can't answer
- * this. `nic1*`/`nic2*` are name-keyed NIC-slot rates, not sensor-chip
- * readings, but they share the `"sensors"` part per the wire contract — an
- * unassigned (or vanished) slot resolves `null` here just like an
- * unassigned sensor slot, so it never forces the part on by itself. A VM
- * with no hwmon at all and no NIC slots assigned resolves every sensors-part
- * field to `null`, so `parts` omits `"sensors"` entirely rather than
- * emitting an all-null part.
- */
-function hasAnySensorReading(
-  metrics: Partial<Record<HostMetricKey, number | null>>,
-): boolean {
-  return metrics.cpuTemperatureCelsius !== null ||
-    metrics.cpuPowerWatts !== null ||
-    metrics.gpuUtilizationPercent !== null ||
-    metrics.gpuFanRpm !== null ||
-    metrics.disk1TemperatureCelsius !== null ||
-    metrics.disk2TemperatureCelsius !== null ||
-    metrics.ambient1TemperatureCelsius !== null ||
-    metrics.ambient2TemperatureCelsius !== null ||
-    metrics.boardTemperatureCelsius !== null ||
-    metrics.cpuFanRpm !== null ||
-    metrics.systemFan1Rpm !== null ||
-    metrics.systemFan2Rpm !== null ||
-    metrics.nic1ReceiveBytesPerSecond !== null ||
-    metrics.nic1TransmitBytesPerSecond !== null ||
-    metrics.nic2ReceiveBytesPerSecond !== null ||
-    metrics.nic2TransmitBytesPerSecond !== null;
-}
-
-/**
- * Per-source contribution marker for `dimensions.trafficSources` — `true`
- * only when that source's `readProxyCounters()` scrape actually resolved
- * data this tick, independent of `hasAnyTrafficReading`/`"traffic"` part
- * membership below (a gauge-only contribution still counts).
- */
-function trafficSourceContribution(
-  current: RawSnapshot,
-): TrafficSourceContribution {
+function readKernelLimits(raw: RawTexts): {
+  fileHandlesPercent: number | null;
+  conntrackPercent: number | null;
+} {
   return {
-    caddy: current.proxy?.caddy !== null && current.proxy?.caddy !== undefined,
-    proxysql: current.proxy?.proxysql !== null &&
-      current.proxy?.proxysql !== undefined,
+    fileHandlesPercent: fileHandlesUsedPercent(
+      whenPresent(raw.fileNrText, parseFileNr),
+      whenPresent(raw.fileMaxText, parseFileMax),
+    ),
+    conntrackPercent: conntrackUsedPercent(
+      whenPresent(raw.conntrackCountText, parseConntrackCount),
+      whenPresent(raw.conntrackMaxText, parseConntrackMax),
+    ),
   };
 }
 
-/**
- * Whether this tick has any `"traffic"`-part reading (contract.ts
- * `TRAFFIC_PART_KEYS`) — a host with neither the site Caddy nor ProxySQL
- * reachable resolves every traffic field to `null`, so `parts` omits
- * `"traffic"` entirely rather than emitting an all-null part.
- */
-function hasAnyTrafficReading(
-  metrics: Partial<Record<HostMetricKey, number | null>>,
-): boolean {
-  return metrics.caddyRequestsTotal !== null ||
-    metrics.caddyResponses2xxTotal !== null ||
-    metrics.caddyResponses3xxTotal !== null ||
-    metrics.caddyResponses4xxTotal !== null ||
-    metrics.caddyResponses5xxTotal !== null ||
-    metrics.caddyRequestBytesTotal !== null ||
-    metrics.caddyResponseBytesTotal !== null ||
-    metrics.caddyRequestDurationSecondsSum !== null ||
-    metrics.caddyRequestsUnder100msTotal !== null ||
-    metrics.caddyRequestsUnder1sTotal !== null ||
-    metrics.caddyRequestsInFlight !== null ||
-    metrics.proxysqlQueriesTotal !== null ||
-    metrics.proxysqlSlowQueriesTotal !== null ||
-    metrics.proxysqlConnectionErrorsTotal !== null ||
-    metrics.proxysqlClientConnections !== null ||
-    metrics.proxysqlBackendConnections !== null ||
-    metrics.proxysqlBackendsUp !== null;
+type MemoryTick = {
+  availableBytes: number | null;
+  swapUsedBytes: number | null;
+  vmstat: VmstatCounters;
+  rates: VmstatRates;
+};
+
+function readMemoryTick(
+  raw: RawTexts,
+  rates: TickRates,
+  pageSizeBytes: number,
+): MemoryTick {
+  const gauges = whenPresent(raw.memText, readMemoryGauges);
+  const vmstat = whenPresentOr(raw.vmstatText, parseVmstat, EMPTY_VMSTAT);
+  return {
+    availableBytes: gauges?.availableBytes ?? null,
+    swapUsedBytes: swapUsedBytes(
+      gauges?.swapTotalBytes ?? null,
+      gauges?.swapFreeBytes ?? null,
+    ),
+    vmstat,
+    rates: vmstatRates(
+      vmstat,
+      rates.seconds,
+      pageSizeBytes,
+      rates.tracker,
+      rates.bootGeneration,
+    ),
+  };
+}
+
+function softnetDropsRate(
+  softnetText: string | undefined,
+  rates: TickRates,
+): number | null {
+  const total = whenPresent(softnetText, parseSoftnetStat);
+  if (total === null) return null;
+  return softnetDropsPerSecond(
+    total,
+    rates.seconds,
+    rates.tracker,
+    rates.bootGeneration,
+  );
+}
+
+function readNetworkRates(
+  raw: RawTexts,
+  rates: TickRates,
+): { tcpRetransmit: number | null; softnetDrops: number | null } {
+  return {
+    tcpRetransmit: tcpRetransmitPercent(
+      whenPresent(raw.netSnmpText, parseSnmpRetransSegs),
+      whenPresent(raw.netstatText, parseNetstatTcpOrigDataSent),
+      rates.tracker,
+      rates.bootGeneration,
+    ),
+    softnetDrops: softnetDropsRate(raw.softnetText, rates),
+  };
+}
+
+type DiskTick = {
+  blockDevices: ReturnType<typeof buildBlockDeviceSamples>;
+  aggregates: HostDiskAggregates;
+};
+
+function readDiskTick(
+  topology: TopologySnapshot["blockDevices"],
+  diskstatsText: string | undefined,
+  rates: TickRates,
+): DiskTick {
+  const counters = whenPresentOr(diskstatsText, parseDiskstatsRows, {});
+  return {
+    blockDevices: buildBlockDeviceSamples(
+      topology,
+      counters,
+      rates.tracker,
+      rates.bootGeneration,
+      rates.seconds,
+    ),
+    aggregates: hostDiskAggregates(
+      topology,
+      counters,
+      rates.tracker,
+      rates.bootGeneration,
+      rates.seconds,
+    ),
+  };
+}
+
+async function collectGpuSamples(
+  deps: CollectorDepsV4,
+  gpus: TopologySnapshot["gpus"],
+  rates: TickRates,
+) {
+  if (!deps.gpuAdapters) return [];
+  return await buildGpuSamples(gpus, deps.gpuAdapters, rates);
+}
+
+function liveCpuCores(
+  collectionMode: MetricsCollectionModeV4,
+  prevCores: Record<string, CpuCounters>,
+  currentCores: Record<string, CpuCounters>,
+  seconds: number,
+  coreIdOf: (key: string) => string,
+): CpuCoreLiveSampleV4[] | undefined {
+  if (collectionMode !== "live") return undefined;
+  return buildCpuCoreLiveSamples(prevCores, currentCores, seconds, coreIdOf);
+}
+
+async function collectEvents(
+  deps: CollectorDepsV4,
+  ctx: Omit<EventDetectContext, "isPhysical">,
+) {
+  if (!deps.eventCollectors) return [];
+  return await deps.eventCollectors.detect(ctx);
+}
+
+function optionalSampleFields(
+  cpuDetail: CpuDetailSampleV4 | null,
+  memoryDetail: MemoryDetailSampleV4 | null,
+  cpuCoreLive: CpuCoreLiveSampleV4[] | undefined,
+): {
+  cpuDetail?: CpuDetailSampleV4;
+  memoryDetail?: MemoryDetailSampleV4;
+  cpuCoreLive?: CpuCoreLiveSampleV4[];
+} {
+  return {
+    ...(cpuDetail ? { cpuDetail } : {}),
+    ...(memoryDetail ? { memoryDetail } : {}),
+    ...(cpuCoreLive ? { cpuCoreLive } : {}),
+  };
+}
+
+function buildHostMetrics(parts: {
+  cpu: CpuTick;
+  psi: PsiPercents;
+  kernel: {
+    fileHandlesPercent: number | null;
+    conntrackPercent: number | null;
+  };
+  memory: MemoryTick;
+  network: { tcpRetransmit: number | null; softnetDrops: number | null };
+  disks: DiskTick;
+  rootFilesystemCapacity: {
+    availableBytes: number | null;
+    freeInodes: number | null;
+  } | null;
+}): HostMetricsV4 {
+  return {
+    cpu: {
+      busyPercent: parts.cpu.cpuPct.busyPercent,
+      userPercent: parts.cpu.cpuPct.userPercent,
+      systemPercent: parts.cpu.cpuPct.systemPercent,
+      iowaitPercent: parts.cpu.cpuPct.iowaitPercent,
+      stealPercent: parts.cpu.cpuPct.stealPercent,
+      softirqPercent: parts.cpu.cpuPct.softirqPercent,
+      pressureSomePercent: parts.psi.cpuSome,
+      maxCoreBusyPercent: parts.cpu.maxCoreBusyPercent,
+      procsRunning: parts.cpu.procs.running,
+      procsBlocked: parts.cpu.procs.blocked,
+    },
+    kernel: {
+      fileHandlesUsedPercent: parts.kernel.fileHandlesPercent,
+      conntrackUsedPercent: parts.kernel.conntrackPercent,
+    },
+    memory: {
+      availableBytes: parts.memory.availableBytes,
+      swapUsedBytes: parts.memory.swapUsedBytes,
+      pressureSomePercent: parts.psi.memorySome,
+      pressureFullPercent: parts.psi.memoryFull,
+      swapInBytesPerSecond: parts.memory.rates.swapInBytesPerSecond,
+      swapOutBytesPerSecond: parts.memory.rates.swapOutBytesPerSecond,
+      majorPageFaultsPerSecond: parts.memory.rates.majorPageFaultsPerSecond,
+    },
+    storage: {
+      ioPressureSomePercent: parts.psi.ioSome,
+      ioPressureFullPercent: parts.psi.ioFull,
+      diskReadBytesPerSecond: parts.disks.aggregates.diskReadBytesPerSecond,
+      diskWriteBytesPerSecond: parts.disks.aggregates.diskWriteBytesPerSecond,
+      diskReadLatencyMs: parts.disks.aggregates.diskReadLatencyMs,
+      diskWriteLatencyMs: parts.disks.aggregates.diskWriteLatencyMs,
+      maxBlockDeviceUtilPercent: maxBlockDeviceUtilPercent(
+        parts.disks.blockDevices,
+      ),
+      rootFilesystemAvailableBytes:
+        parts.rootFilesystemCapacity?.availableBytes ?? null,
+      rootFilesystemFreeInodes: parts.rootFilesystemCapacity?.freeInodes ??
+        null,
+    },
+    network: {
+      tcpRetransmitPercent: parts.network.tcpRetransmit,
+      softnetDropsPerSecond: parts.network.softnetDrops,
+    },
+  };
 }
 
 export class LinuxMetricsCollector implements MetricsCollector {
-  #previous: RawSnapshot | undefined;
-  readonly #deps: CollectorDeps;
+  #previous: PreviousCpuSnapshot | undefined;
+  readonly #tracker = new CounterBaselineTracker();
+  readonly #deps: CollectorDepsV4;
   readonly #nominalIntervalSeconds: number;
+  readonly #pageSizeBytes: number;
 
   constructor(
-    deps: CollectorDeps,
+    deps: CollectorDepsV4,
     options?: { nominalIntervalSeconds?: number },
   ) {
     this.#deps = deps;
     this.#nominalIntervalSeconds = options?.nominalIntervalSeconds ?? 60;
+    this.#pageSizeBytes = deps.pageSizeBytes;
   }
 
   async collect(options: {
     sequence: number;
     nowMs?: number;
-    collectionMode?: MetricsCollectionMode;
+    collectionMode?: MetricsCollectionModeV4;
   }): Promise<MetricsCollectResult> {
     const collectionMode = options.collectionMode ?? "baseline";
+    const nowMs = options.nowMs ?? this.#deps.now();
     try {
-      const nowMs = options.nowMs ?? this.#deps.now();
-      const current = await buildRawSnapshot(this.#deps, nowMs);
-      const previous = this.#previous;
-      const seconds = intervalSeconds(
-        previous,
-        nowMs,
-        this.#nominalIntervalSeconds,
-      );
-      const metrics = snapshotToMetrics(current, previous, seconds);
-      const staticDimensions = await this.#deps.resolveDimensions();
-      const hardwareProfileGeneration = await safeAsync(() =>
-        Promise.resolve(this.#deps.resolveHardwareProfileGeneration())
-      ) ?? 0;
-      const dimensions: HostMetricsDimensions = {
-        ...staticDimensions,
-        collectionMode,
-        hardwareProfileGeneration,
-        trafficSources: trafficSourceContribution(current),
-      };
-      const parts: MetricPart[] = ["core", "extended"];
-      if (hasAnySensorReading(metrics)) {
-        parts.push("sensors");
-      }
-      if (hasAnyTrafficReading(metrics)) {
-        parts.push("traffic");
-      }
-
-      const sample = buildHostMetricsSample({
-        at: new Date(nowMs).toISOString(),
-        intervalSeconds: seconds,
-        sequence: options.sequence,
-        parts,
-        metrics,
-        dimensions,
-      });
-
-      this.#previous = current;
-      return { supported: true, sample };
+      return await this.#collectTick(options.sequence, nowMs, collectionMode);
     } catch {
-      const nowMs = options.nowMs ?? this.#deps.now();
-      const staticDimensions = await safeAsync(() =>
-        Promise.resolve(this.#deps.resolveDimensions())
-      ) ?? { schemaVersion: METRICS_SCHEMA_VERSION };
-      const dimensions: HostMetricsDimensions = {
-        ...staticDimensions,
-        collectionMode,
-        hardwareProfileGeneration: 0,
-        trafficSources: { caddy: false, proxysql: false },
+      return {
+        supported: true,
+        sample: emptySample(
+          nowMs,
+          this.#nominalIntervalSeconds,
+          options.sequence,
+          collectionMode,
+        ),
       };
-
-      const sample = buildHostMetricsSample({
-        at: new Date(nowMs).toISOString(),
-        intervalSeconds: this.#nominalIntervalSeconds,
-        sequence: options.sequence,
-        parts: ["core", "extended"],
-        metrics: {},
-        dimensions,
-      });
-
-      return { supported: true, sample };
     }
+  }
+
+  async #collectTick(
+    sequence: number,
+    nowMs: number,
+    collectionMode: MetricsCollectionModeV4,
+  ): Promise<MetricsCollectResult> {
+    const [snapshot, raw] = await Promise.all([
+      this.#deps.collectTopology(),
+      readRawTexts(this.#deps),
+    ]);
+
+    const previous = this.#previous;
+    const seconds = intervalSeconds(
+      previous,
+      nowMs,
+      this.#nominalIntervalSeconds,
+    );
+    const bootGeneration = snapshot.bootGeneration;
+    const bootChanged = bootGenerationChanged(previous, bootGeneration);
+    const rates: TickRates = {
+      tracker: this.#tracker,
+      bootGeneration,
+      seconds,
+    };
+
+    const cpu = parseCpuTick(raw.statText, previous, bootChanged, seconds);
+    const psi = readPsiPercents(raw, rates);
+    const kernel = readKernelLimits(raw);
+    const memory = readMemoryTick(raw, rates, this.#pageSizeBytes);
+    const network = readNetworkRates(raw, rates);
+    const disks = readDiskTick(snapshot.blockDevices, raw.diskstatsText, rates);
+
+    const filesystems = await buildFilesystemSamples(
+      snapshot.filesystems,
+      { statfs: this.#deps.statfs },
+    );
+    const rootFilesystemCapacity = await probeRootFilesystemCapacity(
+      snapshot.filesystems,
+      { statfs: this.#deps.statfs },
+    );
+    const networks = await buildNetworkDeviceSamples(
+      snapshot.networks,
+      {
+        io: this.#deps.io,
+        sysRoot: this.#deps.sysRoot,
+        netDevText: raw.netDevText,
+      },
+      this.#tracker,
+      bootGeneration,
+      seconds,
+    );
+    const gpus = await collectGpuSamples(this.#deps, snapshot.gpus, rates);
+    const ingressSources = await buildIngressSources(
+      this.#deps.ingressAdapters,
+      rates,
+    );
+    const databaseProxies = await buildDatabaseProxies(
+      this.#deps.databaseProxyAdapters,
+      rates,
+    );
+    const hardwareSignalResult = await buildHardwareSignalSamples(
+      snapshot.hardwareSignals,
+      {
+        io: this.#deps.io,
+        sysRoot: this.#deps.sysRoot,
+        tracker: this.#tracker,
+        bootGeneration,
+        seconds,
+      },
+    );
+    const mountEntries = whenPresentOr(raw.mountsText, parseProcMounts, []);
+    const cpuCoreIdIndex = buildCpuCoreIdIndex(snapshot.cpu.cores);
+    const coreIdOf = (key: string) => coreIdForStatKey(cpuCoreIdIndex, key);
+
+    const cpuDetail = await buildCpuDetailSample({
+      io: this.#deps.io,
+      sysRoot: this.#deps.sysRoot,
+      statText: raw.statText,
+      prevCpu: cpu.prevCpu,
+      currCpu: cpu.currentCpu,
+      prevCores: cpu.prevCores,
+      currCores: cpu.currentCores,
+      coreIdOf,
+      tracker: this.#tracker,
+      bootGeneration,
+      seconds,
+    });
+    const memoryDetail = buildMemoryDetailSample({
+      memText: raw.memText,
+      vmstatText: raw.vmstatText,
+      tracker: this.#tracker,
+      bootGeneration,
+      seconds,
+    });
+    const cpuCoreLive = liveCpuCores(
+      collectionMode,
+      cpu.prevCores,
+      cpu.currentCores,
+      seconds,
+      coreIdOf,
+    );
+    const events = await collectEvents(this.#deps, {
+      nowMs,
+      snapshot,
+      tracker: this.#tracker,
+      bootGeneration,
+      seconds,
+      gpus,
+      hardwareSignals: hardwareSignalResult.samples,
+      hardwareSignalCandidates: hardwareSignalResult.candidates,
+      oomKillTotal: memory.vmstat.oomKill,
+      conntrackUsedPercent: kernel.conntrackPercent,
+      mountEntries,
+      mdstatText: raw.mdstatText,
+      io: this.#deps.io,
+      sysRoot: this.#deps.sysRoot,
+    });
+
+    const sample = buildMetricsSampleV4({
+      metadata: {
+        version: METRICS_SCHEMA_VERSION_V4,
+        sampledAt: new Date(nowMs).toISOString(),
+        intervalSeconds: seconds,
+        sequence,
+        collectionMode,
+        topologyGeneration: snapshot.generation,
+        bootGeneration,
+      },
+      host: buildHostMetrics({
+        cpu,
+        psi,
+        kernel,
+        memory,
+        network,
+        disks,
+        rootFilesystemCapacity,
+      }),
+      networks,
+      filesystems,
+      blockDevices: disks.blockDevices,
+      gpus,
+      hardwareSignals: hardwareSignalResult.samples,
+      ingressSources,
+      databaseProxies,
+      events,
+      ...optionalSampleFields(cpuDetail, memoryDetail, cpuCoreLive),
+    });
+
+    this.#previous = {
+      atMs: nowMs,
+      bootGeneration,
+      cpu: cpu.currentCpu,
+      cores: cpu.currentCores,
+    };
+    return { supported: true, sample };
   }
 }

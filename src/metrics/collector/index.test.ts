@@ -4,8 +4,8 @@ import {
   createMetricsCollector,
   DOCKER_DATA_ROOT_RETRY_MS,
 } from "./index.ts";
-import { METRICS_SCHEMA_VERSION } from "../contract.ts";
-import type { CollectorDeps } from "./types.ts";
+import type { CollectorDepsV4 } from "./types-v4.ts";
+import type { TopologySnapshot } from "../topology/types.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -15,40 +15,35 @@ import type { CollectorDeps } from "./types.ts";
  */
 const test = Deno.test.bind(Deno);
 
-function inertDeps(): Partial<CollectorDeps> {
+function emptyTopologySnapshot(): TopologySnapshot {
+  return {
+    generation: 0,
+    bootGeneration: 0,
+    networks: [],
+    filesystems: [],
+    blockDevices: [],
+    gpus: [],
+    hardwareSignals: [],
+    cpu: {
+      sockets: 1,
+      coresPerSocket: 1,
+      threadsPerSocket: 1,
+      model: null,
+      cores: [],
+    },
+    numaNodes: [],
+    memoryTotalBytes: null,
+    swapTotalBytes: null,
+  };
+}
+
+function inertDeps(): Partial<CollectorDepsV4> {
   return {
     readProcFile: () => undefined,
     statfs: () => null,
     now: () => 0,
-    countProcesses: () => null,
-    resolveDimensions: () => ({
-      schemaVersion: METRICS_SCHEMA_VERSION,
-    }),
-    resolveDockerDataRoot: () => Promise.resolve(null),
-    resolveHostingPath: () => "/srv/users",
-    readSensors: () =>
-      Promise.resolve({
-        cpuTemperatureCelsius: null,
-        gpuTemperatureCelsius: null,
-        gpuPowerWatts: null,
-        gpuUtilizationPercent: null,
-        gpuFanRpm: null,
-        disk1TemperatureCelsius: null,
-        disk2TemperatureCelsius: null,
-        ambient1TemperatureCelsius: null,
-        ambient2TemperatureCelsius: null,
-        boardTemperatureCelsius: null,
-        cpuFanRpm: null,
-        systemFan1Rpm: null,
-        systemFan2Rpm: null,
-        cpuEnergy: null,
-        sensors: {},
-      }),
-    resolveFabricInterfaces: () => Promise.resolve(["tp0"]),
-    resolveAdminSensorOverrides: () => Promise.resolve({}),
-    resolveHardwareProfileGeneration: () => 0,
-    resolveNicSlots: () => Promise.resolve({ nic1: null, nic2: null }),
-    readProxyCounters: () => Promise.resolve({ caddy: null, proxysql: null }),
+    collectTopology: () => Promise.resolve(emptyTopologySnapshot()),
+    io: { listDir: () => [], readFile: () => undefined },
   };
 }
 
@@ -129,10 +124,10 @@ test({
     const result = await collector.collect({ sequence: 1 });
     assertEquals(result.supported, true);
     if (!result.supported) return;
-    const total = result.sample.metrics.systemStorageTotalBytes;
-    if (total !== null && typeof total !== "number") {
+    const available = result.sample.host.memory.availableBytes;
+    if (available !== null && typeof available !== "number") {
       throw new TypeError(
-        "systemStorageTotalBytes must be a number when present",
+        "host.memory.availableBytes must be a number when present",
       );
     }
   },

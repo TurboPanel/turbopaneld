@@ -3463,11 +3463,6 @@ it({
             at: new Date().toISOString(),
           });
           socket.receive({
-            type: "metrics-capabilities-request",
-            id: "caps-1",
-            at: new Date().toISOString(),
-          });
-          socket.receive({
             type: "fabric-paths-request",
             id: "fabric-1",
             fabricId: "00000000-0000-4000-8000-000000000002",
@@ -3536,14 +3531,6 @@ it({
             "managed-logs-result",
             () =>
               lastFrameOfType(socket, "managed-logs-result") ? true : undefined,
-          );
-          const capabilitiesFrame = await waitFor(
-            "metrics-capabilities-result",
-            () => lastFrameOfType(socket, "metrics-capabilities-result"),
-          );
-          assertEquals(
-            (capabilitiesFrame as { id?: string }).id,
-            "caps-1",
           );
           await waitFor(
             "fabric-paths-result",
@@ -5447,7 +5434,7 @@ it({
             sample: {
               type: "metrics",
               sequence: options.sequence,
-            } as unknown as import("../metrics/contract.ts").HostMetricsSample,
+            } as unknown as import("../metrics/contract-v4.ts").MetricsSampleV4,
           });
         },
       }),
@@ -5527,7 +5514,7 @@ it({
       // Hardware-profile push writes the daemon state file (sensor slots,
       // NIC bindings, hosting path, drivetemp opt-in, generation).
       socket.receive({
-        type: "metrics-sensor-overrides-update",
+        type: "topology-overrides-update",
         id: "ovr-1",
         overrides: {
           cpuTemperature: { chip: "coretemp", label: "Package id 0" },
@@ -5540,8 +5527,8 @@ it({
         at: new Date().toISOString(),
       });
       const overridesResult = await waitFor(
-        "metrics-sensor-overrides-update-result",
-        () => lastFrameOfType(socket, "metrics-sensor-overrides-update-result"),
+        "topology-overrides-update-result",
+        () => lastFrameOfType(socket, "topology-overrides-update-result"),
       ) as {
         id?: string;
         ok?: boolean;
@@ -5581,7 +5568,7 @@ it({
       // A later push with drivetempEnabled already true is a no-op — only
       // the flip edge re-runs modprobe.
       socket.receive({
-        type: "metrics-sensor-overrides-update",
+        type: "topology-overrides-update",
         id: "ovr-drivetemp-noop",
         overrides: {
           cpuTemperature: { chip: "coretemp", label: "Package id 0" },
@@ -5590,11 +5577,11 @@ it({
         at: new Date().toISOString(),
       });
       await waitFor(
-        "no-op metrics-sensor-overrides-update-result",
+        "no-op topology-overrides-update-result",
         () => {
           const frame = lastFrameOfType(
             socket,
-            "metrics-sensor-overrides-update-result",
+            "topology-overrides-update-result",
           ) as { id?: string } | undefined;
           return frame?.id === "ovr-drivetemp-noop" ? frame : undefined;
         },
@@ -5612,7 +5599,7 @@ it({
         "x",
       );
       socket.receive({
-        type: "metrics-sensor-overrides-update",
+        type: "topology-overrides-update",
         id: "ovr-2",
         overrides: {
           cpuTemperature: { chip: "coretemp", label: "Package id 0" },
@@ -5620,11 +5607,11 @@ it({
         at: new Date().toISOString(),
       });
       const failedClearResult = await waitFor(
-        "failed metrics-sensor-overrides-update-result",
+        "failed topology-overrides-update-result",
         () => {
           const frame = lastFrameOfType(
             socket,
-            "metrics-sensor-overrides-update-result",
+            "topology-overrides-update-result",
           ) as { id?: string; ok?: boolean; error?: string } | undefined;
           return frame?.id === "ovr-2" ? frame : undefined;
         },

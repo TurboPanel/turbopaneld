@@ -1,0 +1,4 @@
+nr_free_pages 1000000
+pswpin 100
+pswpout 200
+pgmajfault 5000

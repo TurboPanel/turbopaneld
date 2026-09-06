@@ -1,0 +1,2 @@
+DRIVER=virtio_net
+PCI_SLOT_NAME=0000:00:03.0

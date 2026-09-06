@@ -333,6 +333,16 @@ test("systemd units and docker wrappers bind the expected identity variables", a
     /Group=\{\{\s*turbopanel_group\s*\}\}/,
     "turbopaneld.service Group",
   );
+  // Source-mode ExecStart (the {% else %} branch running main.ts directly)
+  // must grant --allow-ffi — NVML telemetry (`gpu/nvml-adapter.ts`) opens
+  // libnvidia-ml.so.1 via Deno.dlopen, which Deno denies without it, so a
+  // missing grant here silently disables NVIDIA telemetry under systemd
+  // even though ad-hoc `deno task start`/`dev` runs (deno.json) work fine.
+  assertMatch(
+    daemonUnit,
+    /ExecStart=.*--allow-ffi.*\bmain\.ts\b/,
+    "turbopaneld.service source-mode ExecStart --allow-ffi",
+  );
 
   const instanceUnit = await readRole(
     "roles/instance-launch/templates/turbopanel-instance.service.j2",

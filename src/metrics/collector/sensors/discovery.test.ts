@@ -7,11 +7,23 @@ import {
   selectCandidate,
   selectGpuDevice,
   sensorId,
+  type SensorIo,
   withinDeviceOverride,
 } from "./discovery.ts";
 
 function fixtureRoot(name: string): string {
   return fromFileUrl(new URL(`../testdata/${name}`, import.meta.url));
+}
+
+/** In-memory `SensorIo` for tests that don't need real fixture files on disk. */
+function memoryIo(
+  files: Record<string, string | undefined>,
+  dirs: Record<string, string[]>,
+): SensorIo {
+  return {
+    listDir: (path: string) => dirs[path] ?? [],
+    readFile: (path: string) => files[path],
+  };
 }
 
 it("discoverSensors enumerates Intel bare-metal candidates with stable identities", async () => {
@@ -151,6 +163,104 @@ it("discoverSensors classifies an i915 chip as a GPU device and reads its busy-p
   // fixture, so nothing leaks into cpuTemperature/ambientTemperature.
   assertEquals(caps.cpuTemperature, []);
   assertEquals(caps.ambientTemperature, []);
+});
+
+it("discoverSensors reads Intel DRM engine busy counters when no i915 hwmon exists", async () => {
+  const caps = await discoverSensors(fixtureRoot("sensors-intel-drm-engines"));
+  assertEquals(caps.gpuDevices.length, 1);
+  assertEquals(caps.gpuDevices[0].chip, "i915");
+  assertEquals(caps.gpuDevices[0].temperature, []);
+  assertEquals(caps.gpuDevices[0].power, []);
+  assertEquals(caps.gpuDevices[0].utilization.map(sensorId), [
+    "i915:rcs0",
+    "i915:bcs0",
+    "i915:vcs0",
+    "i915:vecs0",
+  ]);
+});
+
+it("discoverSensors attaches DRM engine busy counters to an existing i915 hwmon device", async () => {
+  const caps = await discoverSensors(
+    fixtureRoot("sensors-i915-hwmon-drm-engines"),
+  );
+  assertEquals(caps.gpuDevices.length, 1);
+  assertEquals(caps.gpuDevices[0].chip, "i915");
+  assertEquals(caps.gpuDevices[0].temperature.map(sensorId), ["i915:gpu"]);
+  assertEquals(caps.gpuDevices[0].utilization.map(sensorId), ["i915:rcs0"]);
+});
+
+it("discoverSensors keeps two same-driver Intel DRM GPUs as separate devices even without hwmon or PCI identity", async () => {
+  const root = "/sys";
+  const card0 = `${root}/class/drm/card0`;
+  const card1 = `${root}/class/drm/card1`;
+  const files: Record<string, string | undefined> = {
+    [`${card0}/device/vendor`]: "0x8086",
+    [`${card0}/device/uevent`]: "DRIVER=i915\n",
+    [`${card0}/engine/rcs0/busy`]: "0",
+    [`${card1}/device/vendor`]: "0x8086",
+    [`${card1}/device/uevent`]: "DRIVER=i915\n",
+    [`${card1}/engine/rcs0/busy`]: "0",
+  };
+  const dirs: Record<string, string[]> = {
+    [`${root}/class/drm`]: ["card0", "card1"],
+    [`${card0}/engine`]: ["rcs0"],
+    [`${card1}/engine`]: ["rcs0"],
+  };
+  const caps = await discoverSensors(root, memoryIo(files, dirs));
+  // Before the fix, the second same-chip card matched the first card's
+  // freshly created device by chip name and was silently dropped.
+  assertEquals(caps.gpuDevices.length, 2);
+  assertEquals(caps.gpuDevices.map((d) => d.path), [card0, card1]);
+  assertEquals(caps.gpuDevices[0].utilization.map((c) => c.path), [
+    `${card0}/engine/rcs0/busy`,
+  ]);
+  assertEquals(caps.gpuDevices[1].utilization.map((c) => c.path), [
+    `${card1}/engine/rcs0/busy`,
+  ]);
+});
+
+it("discoverSensors correlates DRM engine counters to the matching hwmon device by PCI identity, not driver name", async () => {
+  const root = "/sys";
+  const hwmon0 = `${root}/class/hwmon/hwmon0`;
+  const hwmon1 = `${root}/class/hwmon/hwmon1`;
+  const card0 = `${root}/class/drm/card0`;
+  const card1 = `${root}/class/drm/card1`;
+  const files: Record<string, string | undefined> = {
+    [`${hwmon0}/name`]: "i915",
+    [`${hwmon0}/temp1_input`]: "40000",
+    [`${hwmon0}/temp1_label`]: "gpu",
+    [`${hwmon0}/device/uevent`]: "PCI_SLOT_NAME=0000:00:02.0\nDRIVER=i915\n",
+    [`${hwmon1}/name`]: "i915",
+    [`${hwmon1}/temp1_input`]: "55000",
+    [`${hwmon1}/temp1_label`]: "gpu",
+    [`${hwmon1}/device/uevent`]: "PCI_SLOT_NAME=0000:03:00.0\nDRIVER=i915\n",
+    [`${card0}/device/vendor`]: "0x8086",
+    [`${card0}/device/uevent`]: "PCI_SLOT_NAME=0000:00:02.0\nDRIVER=i915\n",
+    [`${card0}/engine/rcs0/busy`]: "0",
+    [`${card1}/device/vendor`]: "0x8086",
+    [`${card1}/device/uevent`]: "PCI_SLOT_NAME=0000:03:00.0\nDRIVER=i915\n",
+    [`${card1}/engine/rcs0/busy`]: "0",
+  };
+  const dirs: Record<string, string[]> = {
+    [`${root}/class/hwmon`]: ["hwmon0", "hwmon1"],
+    [hwmon0]: ["name", "temp1_input", "temp1_label"],
+    [hwmon1]: ["name", "temp1_input", "temp1_label"],
+    [`${root}/class/drm`]: ["card0", "card1"],
+    [`${card0}/engine`]: ["rcs0"],
+    [`${card1}/engine`]: ["rcs0"],
+  };
+  const caps = await discoverSensors(root, memoryIo(files, dirs));
+  assertEquals(caps.gpuDevices.length, 2);
+  const device0 = caps.gpuDevices.find((d) => d.path === hwmon0);
+  const device1 = caps.gpuDevices.find((d) => d.path === hwmon1);
+  assertEquals(device0?.temperature.map(sensorId), ["i915:gpu"]);
+  assertEquals(device1?.temperature.map(sensorId), ["i915:gpu"]);
+  assertEquals(device0?.utilization.map((c) => c.path), [
+    `${card0}/engine/rcs0/busy`,
+  ]);
+  assertEquals(device1?.utilization.map((c) => c.path), [
+    `${card1}/engine/rcs0/busy`,
+  ]);
 });
 
 it("selectGpuDevice picks one device for both measurements", () => {

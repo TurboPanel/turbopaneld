@@ -1,33 +1,11 @@
 /**
- * CPU domain: v2 eight-way percentage split from `/proc/stat` jiffie deltas.
+ * CPU domain: v4 percentage splits from `/proc/stat` jiffie deltas.
  *
  * Raw parsing stays in `parse-stat.ts`; this module only turns two counter
  * snapshots into percentages. No collapsed `usage` value is computed — the
  * API derives utilization as `100 - cpuIdlePercent`, never the daemon.
  */
 import type { CpuCounters } from "./types.ts";
-
-export type CpuPercentages = {
-  userPercent: number | null;
-  systemPercent: number | null;
-  nicePercent: number | null;
-  idlePercent: number | null;
-  iowaitPercent: number | null;
-  irqPercent: number | null;
-  softirqPercent: number | null;
-  stealPercent: number | null;
-};
-
-export const EMPTY_CPU_PERCENTAGES: CpuPercentages = {
-  userPercent: null,
-  systemPercent: null,
-  nicePercent: null,
-  idlePercent: null,
-  iowaitPercent: null,
-  irqPercent: null,
-  softirqPercent: null,
-  stealPercent: null,
-};
 
 function fieldDelta(
   prev: number | undefined,
@@ -39,33 +17,128 @@ function fieldDelta(
 }
 
 /**
- * All eight CPU percentages from jiffie deltas between two aggregate `cpu`
- * snapshots against `deltaTotal`. A field whose counter is missing on either
- * side stays `null` (never coerced to `0`); user and nice are NOT combined.
+ * v4 CPU percentages: `busyPercent` is `100 - idle% - iowait% - steal%`
+ * (never `100 - idle` alone — steal/iowait are not "busy" time this host
+ * controls). `guest`/`guest_nice` deltas are folded out of `user`/`nice`
+ * before computing their percentages, since the kernel already counts guest
+ * ticks inside `user`/`nice` — without this, guest time would be counted
+ * twice (once in `user`, once implicitly via `busyPercent`).
  */
-export function cpuPercentagesV2(
+export type CpuPercentagesV4 = {
+  busyPercent: number | null;
+  userPercent: number | null;
+  systemPercent: number | null;
+  iowaitPercent: number | null;
+  stealPercent: number | null;
+  softirqPercent: number | null;
+};
+
+export const EMPTY_CPU_PERCENTAGES_V4: CpuPercentagesV4 = {
+  busyPercent: null,
+  userPercent: null,
+  systemPercent: null,
+  iowaitPercent: null,
+  stealPercent: null,
+  softirqPercent: null,
+};
+
+export function cpuBusyPercentV4(
   prev: CpuCounters | null,
   curr: CpuCounters | null,
   seconds: number,
-): CpuPercentages {
-  if (!prev || !curr || seconds <= 0) return EMPTY_CPU_PERCENTAGES;
+): CpuPercentagesV4 {
+  if (!prev || !curr || seconds <= 0) return EMPTY_CPU_PERCENTAGES_V4;
 
   const deltaTotal = curr.total - prev.total;
-  if (deltaTotal <= 0) return EMPTY_CPU_PERCENTAGES;
+  if (deltaTotal <= 0) return EMPTY_CPU_PERCENTAGES_V4;
 
   const pct = (delta: number | null): number | null => {
     if (delta === null) return null;
     return (delta / deltaTotal) * 100;
   };
 
+  const idlePercent = pct(fieldDelta(prev.idle, curr.idle));
+  const iowaitPercent = pct(fieldDelta(prev.iowait, curr.iowait));
+  const stealPercent = pct(fieldDelta(prev.steal, curr.steal));
+
+  const busyPercent = idlePercent === null || iowaitPercent === null ||
+      stealPercent === null
+    ? null
+    : 100 - idlePercent - iowaitPercent - stealPercent;
+
+  const userDelta = fieldDelta(prev.user, curr.user);
+  const guestDelta = fieldDelta(prev.guest, curr.guest);
+  const dedupedUserDelta = userDelta === null
+    ? null
+    : userDelta - (guestDelta ?? 0);
+
+  const niceDelta = fieldDelta(prev.nice, curr.nice);
+  const guestNiceDelta = fieldDelta(prev.guestNice, curr.guestNice);
+  const dedupedNiceDelta = niceDelta === null
+    ? null
+    : niceDelta - (guestNiceDelta ?? 0);
+
+  const userPercent = pct(dedupedUserDelta);
+  const nicePercent = pct(dedupedNiceDelta);
+  const systemPercentRaw = pct(fieldDelta(prev.system, curr.system));
+
+  // user/nice are reported together as one "userPercent" field in the v4
+  // contract; combine only after de-duplicating guest time from each.
+  const combinedUserPercent = userPercent === null && nicePercent === null
+    ? null
+    : (userPercent ?? 0) + (nicePercent ?? 0);
+
   return {
-    userPercent: pct(fieldDelta(prev.user, curr.user)),
-    systemPercent: pct(fieldDelta(prev.system, curr.system)),
-    nicePercent: pct(fieldDelta(prev.nice, curr.nice)),
-    idlePercent: pct(fieldDelta(prev.idle, curr.idle)),
-    iowaitPercent: pct(fieldDelta(prev.iowait, curr.iowait)),
-    irqPercent: pct(fieldDelta(prev.irq, curr.irq)),
+    busyPercent,
+    userPercent: combinedUserPercent,
+    systemPercent: systemPercentRaw,
+    iowaitPercent,
+    stealPercent,
     softirqPercent: pct(fieldDelta(prev.softirq, curr.softirq)),
-    stealPercent: pct(fieldDelta(prev.steal, curr.steal)),
   };
+}
+
+/**
+ * Max per-core busy% across every `cpuN` key present in *both* snapshots.
+ * Missing/mismatched core sets across the interval null that core's
+ * contribution (never fabricate a max from a partial set); `null` when zero
+ * cores compute cleanly.
+ */
+export function maxCoreBusyPercentV4(
+  prevCores: Record<string, CpuCounters>,
+  currCores: Record<string, CpuCounters>,
+  seconds: number,
+): number | null {
+  let max: number | null = null;
+  for (const key of Object.keys(currCores)) {
+    const prev = prevCores[key];
+    const curr = currCores[key];
+    if (!prev) continue;
+    const { busyPercent } = cpuBusyPercentV4(prev, curr, seconds);
+    if (busyPercent === null) continue;
+    if (max === null || busyPercent > max) max = busyPercent;
+  }
+  return max;
+}
+
+/**
+ * Share of aggregate delta ticks spent servicing hardware+software
+ * interrupts (`irq` + `softirq`), against the same `deltaTotal` denominator
+ * as every other v4 CPU percentage — feeds `CpuDetailSampleV4.cpuIrqPercent`.
+ */
+export function cpuIrqPercentV4(
+  prev: CpuCounters | null,
+  curr: CpuCounters | null,
+): number | null {
+  if (!prev || !curr) return null;
+
+  const deltaTotal = curr.total - prev.total;
+  if (deltaTotal <= 0) return null;
+
+  const irqDelta = fieldDelta(prev.irq, curr.irq);
+  const softirqDelta = fieldDelta(prev.softirq, curr.softirq);
+  if (irqDelta === null && softirqDelta === null) return null;
+
+  const combined = (irqDelta ?? 0) + (softirqDelta ?? 0);
+  return (combined / deltaTotal) * 100;
 }

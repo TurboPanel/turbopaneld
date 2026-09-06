@@ -1,0 +1,15 @@
+nr_free_pages 1000000
+pswpin 100
+pswpout 200
+pgmajfault 5000
+pgscan_kswapd 10000
+pgscan_direct 2000
+pgscan_direct_throttle 3
+pgscan_anon 5000
+pgscan_file 7000
+pgsteal_kswapd 8000
+pgsteal_direct 1500
+pgsteal_anon 4000
+pgsteal_file 5500
+compact_stall 40
+oom_kill 0

@@ -1,0 +1,8 @@
+# Freshly started Caddy: process-wide counters registered but no requests
+# served yet.
+# HELP caddy_http_requests_in_flight Number of requests currently handled by this server.
+# TYPE caddy_http_requests_in_flight gauge
+caddy_http_requests_in_flight{handler="subroute",server="srv0"} 0
+# HELP caddy_http_requests_total Counter of HTTP(S) requests made.
+# TYPE caddy_http_requests_total counter
+caddy_http_requests_total{handler="subroute",server="srv0"} 0

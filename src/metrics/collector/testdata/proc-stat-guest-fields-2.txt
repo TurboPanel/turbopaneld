@@ -1,0 +1,7 @@
+cpu  10900 550 3300 87200 1180 250 380 440 150 30
+intr 12345999
+ctxt 98766000
+btime 1609459200
+processes 12350
+procs_running 4
+procs_blocked 1

@@ -4,6 +4,9 @@ import {
   cpuLineFieldCount,
   parseStat,
   parseStatCpuLine,
+  parseStatPerCoreLines,
+  parseStatProcs,
+  parseStatScalarCounters,
 } from "./parse-stat.ts";
 
 function fixture(name: string): string {
@@ -65,4 +68,41 @@ it("parseStatCpuLine tolerates a non-finite trailing iowait field", () => {
   assertEquals(cpu.idle, 4);
   assertEquals(cpu.iowait, undefined);
   assertEquals(cpu.total, 10);
+});
+
+it("parseStatCpuLine captures guest/guest_nice without adding them to total", () => {
+  const cpu = parseStat(fixture("proc-stat-guest-fields-1.txt"));
+  if (!cpu) throw new TypeError("expected guest-field counters");
+  assertEquals(cpu.guest, 100);
+  assertEquals(cpu.guestNice, 20);
+  // total sums only the eight base fields — guest ticks are already inside
+  // user/nice per kernel accounting, so adding them again would double-count.
+  assertEquals(cpu.total, 10000 + 500 + 3000 + 80000 + 1000 + 200 + 300 + 400);
+});
+
+it("parseStatPerCoreLines keys per-core counters by core index", () => {
+  const cores = parseStatPerCoreLines(fixture("proc-stat-percore-1.txt"));
+  assertEquals(Object.keys(cores).sort(), ["0", "1"]);
+  assertEquals(cores["0"].user, 10000);
+  assertEquals(cores["0"].idle, 89000);
+  assertEquals(cores["1"].user, 10000);
+  assertEquals(cores["1"].idle, 86000);
+});
+
+it("parseStatProcs parses procs_running/procs_blocked, defaulting to null", () => {
+  assertEquals(
+    parseStatProcs(fixture("proc-stat-percore-1.txt")),
+    { running: 1, blocked: 0 },
+  );
+  assertEquals(parseStatProcs("cpu 1 2 3 4\n"), {
+    running: null,
+    blocked: null,
+  });
+});
+
+it("parseStatScalarCounters parses ctxt/processes/intr", () => {
+  const scalars = parseStatScalarCounters(fixture("proc-stat-percore-1.txt"));
+  assertEquals(scalars.ctxt, 456);
+  assertEquals(scalars.processes, 10);
+  assertEquals(scalars.intr, 123);
 });

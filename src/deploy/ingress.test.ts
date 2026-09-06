@@ -169,6 +169,18 @@ test("traefikCompose publishes loopback ports with proxy protocol and TLS", () =
   }
 });
 
+test("traefikCompose publishes a loopback-only Prometheus metrics entrypoint", () => {
+  const compose = traefikCompose(HOSTING_INGRESS_NETWORK);
+  assertStringIncludes(compose, "127.0.0.1:7081:7081");
+  assertStringIncludes(compose, "--entrypoints.metrics.address=:7081");
+  assertStringIncludes(compose, "--metrics.prometheus=true");
+  assertStringIncludes(compose, "--metrics.prometheus.entryPoint=metrics");
+  assertStringIncludes(
+    compose,
+    "--metrics.prometheus.buckets=0.1,0.5,1.0,5.0",
+  );
+});
+
 test("traefikCompose without identity stays anonymous", () => {
   const compose = traefikCompose(HOSTING_INGRESS_NETWORK);
   assertEquals(compose.includes("container_name:"), false);

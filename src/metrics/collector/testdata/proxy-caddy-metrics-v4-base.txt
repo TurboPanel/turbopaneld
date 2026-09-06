@@ -1,0 +1,34 @@
+# Single server, single handler — the simple counter and the duration
+# histogram agree exactly (no nested re-instrumentation), so every
+# (server,handler) group is valid and feeds the class/byte/duration
+# aggregates.
+# HELP caddy_http_requests_in_flight Number of requests currently handled by this server.
+# TYPE caddy_http_requests_in_flight gauge
+caddy_http_requests_in_flight{handler="subroute",server="srv0"} 3
+# HELP caddy_http_requests_total Counter of HTTP(S) requests made.
+# TYPE caddy_http_requests_total counter
+caddy_http_requests_total{handler="subroute",server="srv0"} 100
+# HELP caddy_http_request_duration_seconds Histogram of round-trip request durations.
+# TYPE caddy_http_request_duration_seconds histogram
+caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="0.1"} 60
+caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="0.5"} 85
+caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="1"} 88
+caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="5"} 90
+caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="+Inf"} 90
+caddy_http_request_duration_seconds_sum{code="200",handler="subroute",method="GET",server="srv0"} 9.0
+caddy_http_request_duration_seconds_count{code="200",handler="subroute",method="GET",server="srv0"} 90
+caddy_http_request_duration_seconds_bucket{code="404",handler="subroute",method="GET",server="srv0",le="0.1"} 8
+caddy_http_request_duration_seconds_bucket{code="404",handler="subroute",method="GET",server="srv0",le="0.5"} 10
+caddy_http_request_duration_seconds_bucket{code="404",handler="subroute",method="GET",server="srv0",le="1"} 10
+caddy_http_request_duration_seconds_bucket{code="404",handler="subroute",method="GET",server="srv0",le="5"} 10
+caddy_http_request_duration_seconds_bucket{code="404",handler="subroute",method="GET",server="srv0",le="+Inf"} 10
+caddy_http_request_duration_seconds_sum{code="404",handler="subroute",method="GET",server="srv0"} 1.0
+caddy_http_request_duration_seconds_count{code="404",handler="subroute",method="GET",server="srv0"} 10
+# HELP caddy_http_request_size_bytes Total size of the request. Includes body
+# TYPE caddy_http_request_size_bytes histogram
+caddy_http_request_size_bytes_sum{code="200",handler="subroute",method="GET",server="srv0"} 45000
+caddy_http_request_size_bytes_sum{code="404",handler="subroute",method="GET",server="srv0"} 2000
+# HELP caddy_http_response_size_bytes Size of the returned response.
+# TYPE caddy_http_response_size_bytes histogram
+caddy_http_response_size_bytes_sum{code="200",handler="subroute",method="GET",server="srv0"} 500000
+caddy_http_response_size_bytes_sum{code="404",handler="subroute",method="GET",server="srv0"} 4000

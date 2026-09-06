@@ -1,0 +1,28 @@
+# Same single-handler shape as proxy-caddy-metrics-v4-base.txt, plus
+# reverse_proxy upstream-health gauges (present only on reverse-proxying
+# sites) — two upstreams, one unhealthy.
+# HELP caddy_http_requests_in_flight Number of requests currently handled by this server.
+# TYPE caddy_http_requests_in_flight gauge
+caddy_http_requests_in_flight{handler="subroute",server="srv0"} 1
+# HELP caddy_http_requests_total Counter of HTTP(S) requests made.
+# TYPE caddy_http_requests_total counter
+caddy_http_requests_total{handler="subroute",server="srv0"} 50
+# HELP caddy_http_request_duration_seconds Histogram of round-trip request durations.
+# TYPE caddy_http_request_duration_seconds histogram
+caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="0.1"} 50
+caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="0.5"} 50
+caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="1"} 50
+caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="5"} 50
+caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="+Inf"} 50
+caddy_http_request_duration_seconds_sum{code="200",handler="subroute",method="GET",server="srv0"} 2.5
+caddy_http_request_duration_seconds_count{code="200",handler="subroute",method="GET",server="srv0"} 50
+# HELP caddy_http_request_size_bytes Total size of the request. Includes body
+# TYPE caddy_http_request_size_bytes histogram
+caddy_http_request_size_bytes_sum{code="200",handler="subroute",method="GET",server="srv0"} 20000
+# HELP caddy_http_response_size_bytes Size of the returned response.
+# TYPE caddy_http_response_size_bytes histogram
+caddy_http_response_size_bytes_sum{code="200",handler="subroute",method="GET",server="srv0"} 100000
+# HELP caddy_reverse_proxy_upstreams_healthy Health status of reverse proxy upstreams.
+# TYPE caddy_reverse_proxy_upstreams_healthy gauge
+caddy_reverse_proxy_upstreams_healthy{upstream="127.0.0.1:9001"} 1
+caddy_reverse_proxy_upstreams_healthy{upstream="127.0.0.1:9002"} 0

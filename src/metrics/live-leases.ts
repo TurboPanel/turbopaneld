@@ -9,7 +9,7 @@
  * nudge is ever required. Leases are never persisted — a daemon restart or
  * socket reconnect constructs a fresh manager and starts at baseline.
  */
-import type { MetricsCollectionMode } from "./contract.ts";
+import type { MetricsCollectionModeV4 as MetricsCollectionMode } from "./contract-v4.ts";
 import { METRICS_INTERVAL_MS } from "./scheduler.ts";
 
 /** Live cadence while at least one lease is active. */

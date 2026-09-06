@@ -12,15 +12,74 @@ export type PromSample = {
 };
 
 const SAMPLE_LINE = /^([a-zA-Z_:][\w:]*)(\{(.*)\})?\s+(\S+)$/;
-const LABEL_PAIR = /([a-zA-Z_]\w*)="((?:[^"\\]|\\.)*)"/g;
 
+function isLabelNameStart(ch: string): boolean {
+  return (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || ch === "_";
+}
+
+function isLabelNameChar(ch: string): boolean {
+  return isLabelNameStart(ch) || (ch >= "0" && ch <= "9");
+}
+
+/**
+ * Scan a double-quoted label value whose opening quote sits at `start`.
+ * Only `\"` and `\\` are unescaped; any other backslash pair is kept
+ * verbatim. Returns `undefined` when no closing quote is found.
+ */
+function scanQuotedValue(
+  blob: string,
+  start: number,
+): { value: string; end: number } | undefined {
+  const parts: string[] = [];
+  let runStart = start + 1;
+  let i = runStart;
+  while (i < blob.length) {
+    const ch = blob[i];
+    if (ch === '"') {
+      parts.push(blob.slice(runStart, i));
+      return { value: parts.join(""), end: i + 1 };
+    }
+    if (ch !== "\\") {
+      i += 1;
+      continue;
+    }
+    if (i + 1 >= blob.length) return undefined;
+    const escaped = blob[i + 1]!;
+    parts.push(
+      blob.slice(runStart, i),
+      escaped === '"' || escaped === "\\" ? escaped : ch + escaped,
+    );
+    i += 2;
+    runStart = i;
+  }
+  return undefined;
+}
+
+/**
+ * Single-pass `name="value"` pair scanner. Hand-rolled instead of a regex so
+ * the run time stays linear in the blob length on malformed input (Sonar
+ * typescript:S5852). Pairs may be separated by arbitrary junk, and a value
+ * runs greedily to the first unescaped `"`.
+ */
 function parseLabels(blob: string): Record<string, string> {
   const labels: Record<string, string> = {};
-  for (const match of blob.matchAll(LABEL_PAIR)) {
-    labels[match[1]!] = match[2]!.replaceAll(String.raw`\"`, '"').replaceAll(
-      String.raw`\\`,
-      "\\",
-    );
+  let i = 0;
+  while (i < blob.length) {
+    if (!isLabelNameStart(blob[i]!)) {
+      i += 1;
+      continue;
+    }
+    const nameStart = i;
+    while (i < blob.length && isLabelNameChar(blob[i]!)) i += 1;
+    // No pair can start inside the name run: every suffix meets the same
+    // terminator, so skipping the whole run keeps the scan linear.
+    if (blob[i] !== "=" || blob[i + 1] !== '"') continue;
+    const scanned = scanQuotedValue(blob, i + 1);
+    // An unterminated value means no later pair can close either: a later
+    // opening quote directly follows `=`, so it would have closed this one.
+    if (!scanned) break;
+    labels[blob.slice(nameStart, i)] = scanned.value;
+    i = scanned.end;
   }
   return labels;
 }

@@ -44,6 +44,18 @@ const TRAEFIK_LOOPBACK = "127.0.0.1";
 const TRAEFIK_HTTP_PORT = 7080;
 const TRAEFIK_HTTPS_PORT = 7443;
 /**
+ * Loopback-only Prometheus metrics entrypoint for the shared hosting-ingress
+ * Traefik. Scraped by the daemon's `ingress/traefik.ts` v4 metrics adapter
+ * the same way `SITE_CADDY_ADMIN_ADDR`/`PROXYSQL_REST_ADDR` are — never
+ * published beyond `TRAEFIK_LOOPBACK`. Per-service tenant Traefik
+ * (`serviceTraefikCompose`) does not get one; ingress metrics are scoped to
+ * the shared HTTP-only proxy only.
+ */
+const TRAEFIK_METRICS_PORT = 7081;
+/** Loopback address `ingress/traefik.ts` scrapes for shared Traefik metrics. */
+export const TRAEFIK_METRICS_ADDR =
+  `${TRAEFIK_LOOPBACK}:${TRAEFIK_METRICS_PORT}`;
+/**
  * Dedicated admin endpoint for the hosting Caddy.
  *
  * Caddy defaults to `127.0.0.1:2019`, which the co-located dev panel Caddy
@@ -387,9 +399,14 @@ export function traefikCompose(
     `      - --entrypoints.websecure.address=:${TRAEFIK_HTTPS_PORT}`,
     "      - --entrypoints.websecure.proxyProtocol.insecure=true",
     "      - --entrypoints.websecure.http.tls=true",
+    `      - --entrypoints.metrics.address=:${TRAEFIK_METRICS_PORT}`,
+    "      - --metrics.prometheus=true",
+    "      - --metrics.prometheus.entryPoint=metrics",
+    "      - --metrics.prometheus.buckets=0.1,0.5,1.0,5.0",
     "    ports:",
     `      - ${TRAEFIK_LOOPBACK}:${TRAEFIK_HTTP_PORT}:${TRAEFIK_HTTP_PORT}`,
     `      - ${TRAEFIK_LOOPBACK}:${TRAEFIK_HTTPS_PORT}:${TRAEFIK_HTTPS_PORT}`,
+    `      - ${TRAEFIK_LOOPBACK}:${TRAEFIK_METRICS_PORT}:${TRAEFIK_METRICS_PORT}`,
     "    volumes:",
     "      - /var/run/docker.sock:/var/run/docker.sock:ro",
     ...labelLines,

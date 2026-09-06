@@ -1,199 +1,57 @@
 # Host metrics (daemon collector) — AGENTS.md
 
-Fire-and-forget host-metrics collection (async `/proc` + `statfs` reads, **no** per-interval subprocesses) and scheduling, sent via `POST /api/daemon/v1/metrics`. `HOST_METRIC_KEYS` is the schema v3 named logical contract, partitioned into `core`/`extended`/`sensors`/`traffic` `MetricPart`s (a sample's `parts` list declares which groups it carries this tick — `core`/`extended` are mandatory, `sensors`/`traffic` are conditional), mirrored (not build-coupled) with the instance — it carries no storage ordering.
+Fire-and-forget host-metrics collection (async `/proc` + `statfs` reads, **no** per-interval subprocesses) and scheduling, sent via `POST /api/daemon/v1/metrics`. The wire contract (`src/metrics/contract-v4.ts`, schema version 4) groups every reading by **entity** — host, network device, filesystem, block device, GPU, hardware signal, ingress source, database proxy — instead of a flat key list. Every leaf metric is `number | null` (missing is always `null`, never coerced to `0`), and each entity carries a stable logical id instead of relying on positional/part membership. There is no `MetricPart`/allowlist concept anywhere in this contract: a family is either always present (the universal host-scoped groups) or presence-derived — an entity array holds however many the topology/adapter actually found this tick, empty when none did, never a placeholder. **No Analytics Engine concept (`doubleN`/`blobN`/positional slot/sentinel) appears anywhere in this repo** — this daemon only collects and emits `MetricsSampleV4`; physical AE packing is entirely the instance's concern (`../turbopanel/src/daemon/metrics/backends/cloudflare/`).
 
 Root context: `../../AGENTS.md`. Instance-side storage/query/caching: `../../../turbopanel/src/daemon/metrics/AGENTS.md`. Cross-repo `../<repo>/…` links are relative to the repo root.
 
-### Host metrics
+## Topology (`topology/`)
 
-Samples are sent via authenticated `POST /api/daemon/v1/metrics`
-(`DaemonApiClient.sendHostMetrics`, `src/instance/api-client.ts`,
-fire-and-forget). Protocol v1 request body:
+Stable device/filesystem/GPU/hardware-signal/NUMA/CPU identity and generation tracking, discovery-only (no telemetry) — see `topology/topology.ts`'s doc comment for the composition shape (`collectTopology`, one `*-topology.ts` discovery module per entity kind run in parallel where independent). Two independent generation counters ride every sample's `metadata`:
 
-```json
-{ "type": "metrics", "version": 3, "at", "intervalSeconds", "sequence", "parts", "metrics", "dimensions" }
-```
+- **`topologyGeneration`** (`topology/generation.ts`) bumps whenever the discovered entity set changes shape (a NIC added/removed, a filesystem (un)mounted, a GPU added/removed, etc.) — the instance-side query layer's replacement for v3's `hardwareProfileGeneration` (see `../turbopanel/src/daemon/metrics/query/cache.ts`).
+- **`bootGeneration`** (`topology/boot-generation.ts`) bumps only on a host reboot (kernel boot id change) — the invalidation signal every `CounterBaselineTracker` delta/rate checks before diffing across two snapshots, so a reboot never produces one fabricated rate compressing the gap.
 
-Contract mirrored (not build-coupled) in `src/metrics/contract.ts` ↔
-`../turbopanel/src/daemon/metrics/contract.ts` (`METRICS_SCHEMA_VERSION = 3`). The
-`HOST_METRIC_KEYS` list (`cpuUserPercent` … `proxysqlBackendsUp`) is a
-**named logical allowlist** for the wire/API surface — physical storage
-positions are backend-private on the instance side and never depend on this
-list's order.
+`hardwareSignals` is a conservative physical-only catalog — CPU package temperature/power, NVMe/`drivetemp` storage temperatures, trustworthily labeled board/inlet/DIMM/VRM/chipset temperatures, plus two synthetic CPU virtual signals (hottest-core temperature, thermal-throttled percent). Fan tachometers and GPU temperature/power are never projected here — GPU readings ride `GpuSampleV4` instead (`gpus[]`), and fan RPM has no telemetry family at all (fan *fault/alarm* detection still works, from the broader live candidate map — see **Events** below). Telemetry *reading* for topology-identified hardware signals is `collector/hardware-signals.ts` (`buildHardwareSignalSamples`): re-runs `discoverSensors` against the same `io`/`sysRoot` topology used, joins back to topology identity via the `signal:${chip}:${label}` id, and resolves temperature (instantaneous) and CPU RAPL power (tracked-rate `Δenergy_uj/Δseconds/1e6`, mirroring `cpuPowerFromEnergy`'s math as a `CounterBaselineTracker` key); the two synthetic CPU signals are computed directly (max live per-core temperature; cumulative `package_throttle_total_time_ms` tracked-rate, same convention as GPU `throttlePercent`). A signal topology already identified but unreadable this tick stays present with `value: null` — never dropped. Control-plane persistence for reported generations is `../turbopanel/src/client/servers/server-topology-records.ts`. Physical-machine classification (bare metal vs. VM/hypervisor) lives in `topology/physical-classifier.ts`'s `isPhysicalMachine`, memoized once per process by `events/index.ts`'s `EventCollectorSet`. Operator sensor/NIC-slot overrides are a separate, still-live mechanism — `collector/sensors/overrides.ts`'s `HardwareProfile` JSON round trip (`<daemonStateDir>/metrics/hardware-profile.json`, pushed over `topology-overrides-update`) — orthogonal to topology identity; see **Sensor subsystem** below.
 
-**Scheduling** (`src/metrics/scheduler.ts`): `MetricsScheduler` takes an
-injected `MetricsSink` (`attach(send)`) rather than the raw `WebSocket` — the WS
-keeps only commands/outbox + the cell ping. On attach (first registration and
-every reconnect, including the co-located self-hosted daemon) the first sample
-POSTs immediately so gauges (load / memory / disk / uptime) populate without
-waiting. A primed second sample **2 s** later (`METRICS_PRIME_MS`) plus
-deterministic per-`serverId` phase jitter ≤**5 s** (`METRICS_JITTER_MAX_MS`,
-FNV‑1a) fills CPU / disk / net rates (two-snapshot deltas). Steady cadence is
-then one sample ~every **60 s** (`METRICS_INTERVAL_MS`); jitter does not change
-query resolution. Monotonic process-local `sequence` resets on daemon restart
-(not persisted). Fire-and-forget, disposable — no acks, retries, or outbox.
-Never blocks startup, connect, liveness, command dispatch, shutdown, or
-reconnect. Factory/collect/send failures are rate-limited
-(`METRICS_LOG_RATE_LIMIT_MS` = 5 min) and must not tear down the socket.
-Overlapping ticks are dropped; the steady interval arms when the primed tick
-fires (not after first-collect completion). Attach-scoped generation ignores
-stale in-flight emits across detach/reconnect. Scheduler rebinding tracks
-`#metricsSchedulerServerId` separately from `#tokenServerId` so jitter stays
-tied to the authenticated server after identity recovery.
+## Events (`collector/events/`)
 
-**Collector** (`src/metrics/collector/`): async reads only — **no subprocesses
-per interval** (no `top`/`vmstat`/`iostat`/`free`/`df`/`ps`/`sar`; the Docker
-data-root query goes over the Engine API Unix socket, is cached after success,
-and bounds failure re-probes to `DOCKER_DATA_ROOT_RETRY_MS`). Per-domain
-modules (`cpu.ts`, `memory.ts`, `filesystem.ts`, `block-devices.ts`,
-`mounts.ts`, `network.ts`, `processes.ts`, `sensors/`) own raw parsing +
-per-sample assembly;
-`linux-collector.ts` orchestrates the raw snapshot, two-snapshot deltas, and
-the field fill. Sources: `/proc/stat` (all 8 CPU percentages — no stored
-`cpuUsagePercent`; the API derives `100 - cpuIdlePercent`), `/proc/loadavg`,
-`/proc/meminfo` (raw bytes only, swap-absent hosts report `null` never `0`),
-`/proc/uptime`, `/proc/diskstats` (throughput, IOPS, and `Δticks/Δops` read/
-write latency), `/proc/net/dev`, `/proc/sys/kernel/osrelease`, process count
-via `/proc` (`Deno.readDir`, with `ls -1` fallback — Deno 2 blocks direct
-`/proc` **and `/sys`** directory listing under `--allow-read` the same way it
-blocks `readTextFile`; `proc-read.ts` already `cat`s individual `/proc`/sysfs
-files, and sensor discovery's `defaultSensorIo.listDir` uses the same `ls -1`
-fallback so a compiled daemon can still see `coretemp` / RAPL / thermal
-zones). **Three storage probes** via `node:fs/promises` `statfs` (no
-`df`): system `/`, the hosting path (admin override from
-`<daemonStateDir>/metrics/hardware-profile.json`, else `principalHomeRoot` —
-`collector/hosting.ts`), and the Docker data root (Docker Engine API
-`GET /info` `DockerRootDir` via `src/docker/client.ts`, `null` when Docker
-is absent) — raw bytes normalized first (`totalBytes = blocks * bsize`,
-`availableBytes = bavail * bsize`), no percent reduction. The hosting path
-walks up to the nearest existing ancestor directory (bounded at `/`) before
-being probed — `principalHomeRoot` is only created on first tenant
-principal, and an admin override can name a not-yet-provisioned filesystem,
-so `resolveHostingPath` never hands `statfs` a path guaranteed to fail.
-**Network
-classification** (`network.ts`): every interface is parsed, then classified
-`loopback` / `container-bridge` (`veth*`/`docker*`/`br-*`/`virbr*`/`vnet*`/
-`tap*`/`tun*`) / `fabric` (TurboFabric names, seeded `tp0`) / `uplink`;
-uplink and fabric byte rates aggregate independently and are never combined,
-and `veth` churn nulls only the container-bridge class. Alongside that
-classification-keyed aggregation, two independent **name-keyed** rate series
-(`nic1*`/`nic2*ReceiveBytesPerSecond`/`TransmitBytesPerSecond`,
-`namedInterfaceRates` in `network.ts`) report the operator-assigned
-`HardwareProfile.nic1`/`.nic2` interfaces (same hardware-profile round trip
-as the sensor slots, `CollectorDeps.resolveNicSlots` →
-`sensors/overrides.ts`) — an interface can be both part of the `uplink`
-aggregate and individually reported as `nic1`; an unassigned or vanished
-slot nulls only that slot, never the class aggregates, and never forces the
-`"sensors"` part on by itself. **Sensor subsystem**
-(`sensors/`): hwmon/thermal-zone temperatures, RAPL energy-delta CPU power,
-hwmon `power1_average` GPU power, NVMe/`drivetemp` disk temperatures,
-hwmon `fanN_input` tachometers (CPU/system/GPU-attributed by chip), and the
-vendor GPU busy-percent gauge (NVIDIA GPU power and utilization stay
-`null` — `nvidia-smi` would be a per-interval subprocess); admin overrides
-resolved from the operator-pushed `HardwareProfile`
-(`sensors/overrides.ts`, `<daemonStateDir>/metrics/hardware-profile.json`)
-beat auto-detection. Resolved sensor identities (`chip:label`) are
-daemon-internal only — persisted via the hardware-profile round trip to
-Postgres, never re-added to the wire sample's `dimensions`; only
-`dimensions.hardwareProfileGeneration` (the applied profile's generation
-number) rides the sample. A sample declares the `"sensors"` `MetricPart`
-only when at least one sensors-part field actually resolved (a VM with no
-hwmon omits it entirely). CPU % and per-second rates use two-snapshot
-deltas; first-sample rate metrics are **`null`** (never coerced to `0`),
-and a boot-id change nulls rates, CPU, and power deltas — fan RPM and GPU
-utilization are point-in-time gauges, not deltas, so the boot-id reset
-never touches them. GPU selection is device-first (`selectGpuDevice`):
-candidates group per hwmon device and one GPU feeds temperature, power,
-utilization, and fan — a multi-GPU host never mixes two cards in one
-sample. The `drivetemp` kernel module is opt-in
-(`sensors/drivetemp.ts`, `HardwareProfile.drivetempEnabled`): a push over
-`metrics-sensor-overrides-update` that flips it false/unset → true fires a
-fire-and-forget `modprobe drivetemp` plus a `modules-load.d` drop-in for
-reboot durability; later pushes with the flag already `true` are a no-op.
-**Disk filter** (`block-devices.ts` + `mounts.ts`):
-exclude device prefixes `loop`, `ram`, `zram`, `fd`, `dm-`, `md`, `dcssblk`,
-`sr`, `nbd`; drop partition rows (`^p?\d+$` suffix) when the parent
-whole-disk row survives; sectors = 512 B. When `/proc/mounts` resolves the
-probed system/hosting/Docker paths to `/dev/<name>` sources, aggregation
-narrows to those backing whole disks (unrelated extra disks neither pollute
-totals nor null the interval on churn); the host-wide whole-disk filter is
-the fallback when mount resolution is unavailable. Per-filesystem and
-per-interface series are deferred to future event types. **Capabilities**
-(`src/metrics/capabilities.ts`): `collectMetricsCapabilities` enumerates
-sensor candidates, storage mounts (current system/hosting/docker selections
-plus block-backed mount-table `candidates` for administrator hosting-path
-selection — a `null` hosting/docker probe carries a `storageMounts.reasons`
-entry (`"path_not_found"` / `"docker_absent"` / `"statfs_unsupported"`),
-the same `reasons` pattern `sensors/discovery.ts` uses for an empty
-`diskTemperature` category), and classified interfaces for the
-`metrics-capabilities-request`/`-result` correlated round trip in
-`src/instance/client.ts` (instance-side cell kind + client route arrive with
-the live-metrics-leases phase). **Unsupported OS:**
-`UnsupportedMetricsCollector` returns
-`{ supported: false, reason: "unsupported_os:<os>" }` and keeps the daemon
-running. **Traffic** (`collector/proxy/`): two independent loopback
-Prometheus scrapes, `caddy.ts` (site Caddy — `orchestration/roles/site-caddy`,
-**not** the hosting Caddy in `src/deploy/ingress.ts` — reachable at
-`site_caddy_admin_addr`, `127.0.0.1:2039`; that role's `Caddyfile.j2` sets the
-global `metrics` option, which exposes the result at `/metrics` on its own
-admin listener (`servers { metrics }` alone only turns on per-server
-instrumentation and leaves `/metrics` 404) — there is no supported way to
-bind a second, metrics-only admin API) and `proxysql.ts` (managed ProxySQL —
-`src/managed/proxysql.ts` — `admin-restapi_enabled`/`admin-restapi_port`
-start an unauthenticated `GET /metrics` REST server, published to
-`127.0.0.1:6070` only, same as the admin MySQL-protocol port). Each source
-resolves independently to `null` on any network/parse failure — one absent
-sidecar never blocks the other. Counter fields (request/query counts, byte
-totals, duration sums, response-class breakdowns) go through `counterDelta`
-(`rates.ts`) for a raw per-interval delta — first-sample and
-counter-decrease (sidecar restart) both null the field for that interval,
-same contract as `rate()` but without dividing by seconds, since traffic
-fields are per-interval totals, not per-second rates; connection-count and
-backends-up fields are point-in-time gauges, read through unchanged. A
-boot-id change nulls every counter delta (the sidecar restarted with the
-host) but leaves the gauges alone. `createProxyCountersReader` wraps each
-source in `endpoint-cache.ts`'s retry-bounded probe (`PROXY_ENDPOINT_RETRY_MS`
-= 5 min, mirroring `DOCKER_DATA_ROOT_RETRY_MS`) so a stopped sidecar is not
-re-dialed every tick forever; unlike the Docker data-root cache, a
-*successful* scrape is never remembered — traffic counters must be re-read
-every interval. A sample declares the `"traffic"` `MetricPart` only when at
-least one of the 17 traffic-part fields actually resolved (mirrors the
-`"sensors"` part's own VM-omission rule).
+`contract-v4.ts`'s closed `MetricEventKindV4` catalog is populated by one stateful sub-collector per catalog area (`oom-kill.ts`, `hung-task.ts`, `conntrack.ts`, `filesystem-state.ts`, `mdstat.ts`, `edac.ts`, `smart.ts`, `nic-link.ts`, `fabric-state.ts`, `physical-health.ts`, `gpu-health.ts`, `clock-sync.ts`, `generation-events.ts`), each holding its own tick-to-tick dedupe/cooldown state and emitting only on a state *transition* — never every tick a condition holds. `events/index.ts`'s `EventCollectorSet` composes all of them: wraps each in its own try/catch (`safeAsync`) so one throwing never drops another's events, resolves physical-machine classification once per process and memoizes it, and truncates the combined result to `MAX_EVENTS_PER_DETECT_TICK` (128, mirroring `contract-v4.ts`'s private `MAX_METRIC_EVENTS_PER_SAMPLE` — `buildMetricsSampleV4` throws the *entire* sample away over that cap). `linux-collector.ts` calls it via the optional `CollectorDepsV4.eventCollectors` seam; absent (e.g. a test collector), `events` stays `[]`, matching every other adapter's absent-default convention. `fabric-state.ts` reads `instance/commands/fabric.ts`'s `getLastObservedFabricPeers()` — a cache stashed by `wg show tp0 dump` whenever an *instance-initiated* reconcile/path-probe already runs it — rather than spawning its own `wg` subprocess. `HARDWARE_HEALTH_EVENT_KIND_V4` in `contract-v4.ts` classifies every kind as a physical-hardware-health signal or not — the split the instance's `capability-plan.ts` (`../turbopanel/src/daemon/metrics/capability-plan.ts`) actually gates.
 
-**Env:** `TURBOPANEL_SERVER_METRICS_RETENTION_DAYS` default `90` (instance
-raw-metrics retention). Server metrics are always on — there is no instance-side
-enable/disable gate; the daemon always collects and emits host metrics
-fire-and-forget, and the instance always persists when a backend is configured.
-See **`../turbopanel/AGENTS.md`** (Server metrics).
+`smart.ts`'s `smartctl -H -j -n standby` (~10 min cadence, one per physical block device) is the collector's only remaining subprocess-per-tick exception, gated behind its own internal low-cadence timer, never the ~60 s metrics tick itself. `hung-task.ts` primarily reads `/dev/kmsg` — non-blocking (`O_NONBLOCK`) and cursor-based (tracks the last-consumed record `seq`), so a read either returns an already-buffered record or fails `EAGAIN` immediately, never blocking the collection tick the way a plain blocking open would; bounded `dmesg --level=err,warn -x` is a strictly secondary fallback for hosts where `/dev/kmsg` is unreadable (`kernel.dmesg_restrict=1` without `CAP_SYSLOG`), still gated behind the same ~2 min timer. `clock-sync.ts` reads `host/time-sync.ts`'s cached `getLastObservedTimeSync()` fact — populated as a side effect whenever some other real caller (e.g. idle presence) actually invokes `readTimeSync()` — rather than spawning `timedatectl` itself. `mounts.ts`'s `MountEntry` carries an `options` field (the fourth `/proc/mounts` column) for `filesystem-state.ts`'s ro/remount detection.
 
-**Local validation:** fixture-driven tests under `src/metrics/` (no live `/proc`
-required):
+## Host metrics
+
+Samples are sent via authenticated `POST /api/daemon/v1/metrics` (`DaemonApiClient.sendHostMetrics`, `src/instance/api-client.ts`, fire-and-forget). Every sample is one `MetricsSampleV4` (`{ type: "metrics", metadata, host, networks, filesystems, blockDevices, gpus, hardwareSignals, ingressSources, databaseProxies, events, cpuDetail?, memoryDetail?, cpuCoreLive?, numaNodes? }`), mirrored (not build-coupled) with the instance's own copy at `../turbopanel/src/daemon/metrics/contract-v4.ts`. `metadata` carries `version` (`METRICS_SCHEMA_VERSION_V4 = 4`), `sampledAt`, `intervalSeconds`, `sequence`, `collectionMode`, `topologyGeneration`, and `bootGeneration`. `host` is the **universal baseline** — always present, five subsystem groups (`cpu`, `kernel`, `memory`, `storage`, `network`) covering the instance's `host.system`/`host.io` families — every field a scalar `number | null`, never entity-scoped. Everything else is either a **presence-derived array** (`networks`, `filesystems`, `blockDevices`, `gpus`, `hardwareSignals`, `ingressSources`, `databaseProxies` — however many the topology/adapter actually found this tick, `[]` when none) or an **optional detail family** (`cpuDetail?`, `memoryDetail?`, `cpuCoreLive?`, `numaNodes?` — present only when the collector populated it; `numaNodes` is a reserved, fully-shaped family with no populating collector yet).
+
+**Scheduling** (`src/metrics/scheduler.ts`): `MetricsScheduler` takes an injected `MetricsSink` (`attach(send)`) rather than the raw `WebSocket` — the WS keeps only commands/outbox + the cell ping. On attach (first registration and every reconnect, including the co-located self-hosted daemon) the first sample POSTs immediately so gauges (load / memory / disk / uptime) populate without waiting. A primed second sample **2 s** later (`METRICS_PRIME_MS`) plus deterministic per-`serverId` phase jitter ≤**5 s** (`METRICS_JITTER_MAX_MS`, FNV‑1a) fills CPU / disk / net rates (two-snapshot deltas). Steady cadence is then one sample ~every **60 s** (`METRICS_INTERVAL_MS`); jitter does not change query resolution. Live sessions switch cadence to **10 s** (`LIVE_METRICS_INTERVAL_MS`, `live-leases.ts`) while at least one lease is active. Monotonic process-local `sequence` resets on daemon restart (not persisted). Fire-and-forget, disposable — no acks, retries, or outbox. Never blocks startup, connect, liveness, command dispatch, shutdown, or reconnect. Factory/collect/send failures are rate-limited (`METRICS_LOG_RATE_LIMIT_MS` = 5 min) and must not tear down the socket. Overlapping ticks are dropped; the steady interval arms when the primed tick fires (not after first-collect completion). Attach-scoped generation ignores stale in-flight emits across detach/reconnect. Scheduler rebinding tracks `#metricsSchedulerServerId` separately from `#tokenServerId` so jitter stays tied to the authenticated server after identity recovery.
+
+**Collector** (`src/metrics/collector/`): async reads only — **no subprocesses per interval** (no `top`/`vmstat`/`iostat`/`free`/`df`/`ps`/`sar`; the Docker data-root query goes over the Engine API Unix socket, is cached after success, and bounds failure re-probes to `DOCKER_DATA_ROOT_RETRY_MS`). `smart.ts` is the only events sub-collector that spawns a real subprocess, on its own internal low-cadence timer, never the metrics tick itself — `hung-task.ts` reads `/dev/kmsg` (falling back to a bounded `dmesg` on the same low-cadence timer only when kmsg is unreadable) and `clock-sync.ts` reads a cached fact rather than spawning anything itself (see **Events** above). `linux-collector.ts` orchestrates one tick: composes the `TopologySnapshot` (identity + both generations), the shared counter-baseline layer (`baseline.ts`'s `CounterBaselineTracker` — first-sample and counter-decrease/reboot both null a rate, never fabricate one across the gap), and every per-domain parser/builder module, then hands the result to `buildMetricsSampleV4` (`contract-v4.ts`), which sanitizes/clamps every leaf and enforces the events-per-sample cap.
+
+Sources: `/proc/stat` (aggregate + per-core CPU jiffies, `procs_running`/`procs_blocked`), `/proc/pressure/{cpu,memory,io}` (PSI `some`/`full` percentages), `/proc/loadavg`, `/proc/meminfo` (raw bytes only, swap-absent hosts report `null` never `0`), `/proc/vmstat` (reclaim/compaction rates), `/proc/uptime`, `/proc/diskstats` (throughput, IOPS, and `Δticks/Δops` read/write latency, keyed by topology `deviceId`), `/proc/net/dev` plus `/sys/class/net/<name>/statistics/*` (preferred per-NIC directional counters, falling back to `/proc/net/dev` when a device has no sysfs `statistics/` directory), `/proc/net/{netstat,snmp}` (TCP retransmit percent), `/proc/net/softnet_stat` (softnet drops), `/proc/sys/fs/{file-nr,file-max}` and `/proc/sys/net/netfilter/nf_conntrack_{count,max}` (kernel-limit used-percentages), `/proc/sys/kernel/osrelease`. **Three storage probes** via `node:fs/promises` `statfs` (no `df`): system `/`, the hosting path (admin override from `<daemonStateDir>/metrics/hardware-profile.json`, else `principalHomeRoot` — `collector/hosting.ts`), and the Docker data root (Docker Engine API `GET /info` `DockerRootDir` via `src/docker/client.ts`, `null` when Docker is absent) — raw bytes normalized first (`totalBytes = blocks * bsize`, `availableBytes = bavail * bsize`), no percent reduction. The hosting path walks up to the nearest existing ancestor directory (bounded at `/`) before being probed — `principalHomeRoot` is only created on first tenant principal, and an admin override can name a not-yet-provisioned filesystem, so `resolveHostingPath` never hands `statfs` a path guaranteed to fail.
+
+**Network topology** (`topology/network-topology.ts` + `collector/network.ts`): every interface enumerated from `/proc/net/dev` is classified `loopback` / `container-bridge` (`veth*`/`docker*`/`br-*`/`virbr*`/`vnet*`/`tap*`/`tun*`) / `fabric` (TurboFabric names, seeded `tp0`) / `uplink` (`classifyInterface`, fabric registration wins over a prefix match) and stamped with stable identity (`identity.ts`) plus `speed`/`mtu`; `collector/network.ts`'s `buildNetworkDeviceSamples` then reports one `NetworkDeviceSampleV4` per topology-enumerated device (never pre-aggregated by class — that was v3's job) keyed by the stable `deviceId`, so a kernel rename between ticks never fabricates a rate. Reads per-NIC directional counters via `/sys/class/net/<name>/statistics/*`, falling back to `/proc/net/dev` when unavailable.
+
+**Sensor subsystem** (`sensors/`): hwmon/thermal-zone temperatures, RAPL energy-delta CPU power, hwmon `power1_average` GPU power, NVMe/`drivetemp` disk temperatures, hwmon `fanN_input` tachometers (CPU/system/GPU-attributed by chip), and GPU utilization: AMD `gpu_busy_percent` (instantaneous gauge) plus Intel i915/Xe DRM `engine/*/busy` accumulating nanosecond counters (two-snapshot delta, busiest engine, same first-sample/`boot_id` nulling as RAPL CPU power). Intel Alder Lake-N / Twin Lake (N150, PCI `8086:46D4`) typically **does not** register an `i915` hwmon chip, so GPU temperature and `power1_average` stay `null` — CPU package temp (`coretemp`) is the closest thermal. NVIDIA GPU power/utilization ride the GPU adapter stack instead (see below — `nvidia-smi` would be a per-interval subprocess, so sysfs/NVML/DCGM are used instead). Admin overrides resolved from the operator-pushed `HardwareProfile` (`sensors/overrides.ts`, `<daemonStateDir>/metrics/hardware-profile.json`) beat auto-detection; the same file also carries the operator-assigned `nic1`/`nic2` NIC-slot interfaces and topology-identity pins (`nicSlot1DeviceId`/`nicSlot2DeviceId`/`hostingFilesystemId`). Resolved sensor identities (`chip:label`) are daemon-internal only — never re-added to the wire sample. CPU % and per-second rates use two-snapshot deltas; first-sample rate metrics are **`null`** (never coerced to `0`), and a boot-generation change nulls rates, CPU, RAPL power, and Intel DRM engine-busy GPU utilization — AMD `gpu_busy_percent` and fan RPM are point-in-time gauges, so the boot reset never touches them. GPU sensor selection is device-first (`selectGpuDevice`): candidates group per hwmon (or DRM card) device and one GPU feeds temperature, power, utilization, and fan — a multi-GPU host never mixes two cards in one reading. Intel iGPUs without an `i915` hwmon still appear as a GPU device when DRM `engine/*/busy` counters exist. The `drivetemp` kernel module is opt-in (`sensors/drivetemp.ts`, `HardwareProfile.drivetempEnabled`): a push over `topology-overrides-update` that flips it false/unset → true fires a fire-and-forget `modprobe drivetemp` plus a `modules-load.d` drop-in for reboot durability; later pushes with the flag already `true` are a no-op.
+
+**GPU adapter stack** (`collector/gpu/`): `gpu/index.ts`'s `buildGpuSamples` merges up to three independent adapters per topology-identified GPU, in precedence order — **DCGM** (`dcgm-adapter.ts`, scrapes `dcgm-exporter`'s Prometheus endpoint, `DCGM_EXPORTER_ADDR`, the richest source when present), **NVML** (`nvml-adapter.ts`, direct FFI into `libnvidia-ml.so.1` — construction-time singleton, never re-`dlopen`ed), and **sysfs/DRM** (`sysfs-adapter.ts`, the universal fallback reading `/sys/class/drm/` and hwmon, covering AMD/Intel and NVIDIA hosts with no driver userspace installed). A field DCGM or NVML don't supply falls through to sysfs rather than the whole GPU sample failing; a host with none of the three adapters available for a topology-identified GPU still reports the entity with every field `null`.
+
+**Block-device detail** (`collector/block-devices.ts` + `mounts.ts`): per-device diskstats samples (`buildBlockDeviceSamples`) and host-wide aggregates (`hostDiskAggregates`) are both scoped to topology-flagged `isServiceDevice === true` devices only (partitions and device-mapper layers excluded — I/O is accounted on the underlying physical device) and keyed by stable topology `deviceId`, never a positional index; sectors are 512 bytes per kernel convention. A device whose diskstats row is missing this tick stays present with every field `null` and its baseline explicitly invalidated, so the next readable tick re-origins instead of diffing across the gap.
+
+**Traffic adapters** (`collector/ingress/` + `collector/database-proxy/`): `ingressSources`/`databaseProxies` split traffic into three independent adapters: `ingress/caddy-v4.ts` (site Caddy — `orchestration/roles/site-caddy`, **not** the hosting Caddy in `src/deploy/ingress.ts` — reachable at `SITE_CADDY_ADMIN_ADDR`, `127.0.0.1:2039`; that role's `Caddyfile.j2` sets the global `metrics` option, which exposes the result at `/metrics` on its own admin listener), `ingress/traefik.ts` (the shared hosting-ingress Traefik — `src/deploy/ingress.ts`'s loopback-only `TRAEFIK_METRICS_ADDR` Prometheus entrypoint, **not** any per-service tenant Traefik), and `database-proxy/proxysql-v4.ts` (managed ProxySQL — `src/managed/proxysql.ts` — `admin-restapi_enabled`/`admin-restapi_port` start an unauthenticated `GET /metrics` REST server, published to `PROXYSQL_REST_ADDR`, `127.0.0.1:6070`, only). Each adapter's presence is scrape-derived, not topology-enumerated — there is no fixed entity list the way GPUs/NICs have one — so `ingress/index.ts`'s `buildIngressSources` / `database-proxy/index.ts`'s `buildDatabaseProxies` read every adapter independently each tick and the output array holds however many (0, 1, or more) actually answered; an absent/unreachable adapter is simply omitted from the array (never an all-`null` placeholder) and its `CounterBaselineTracker` key namespace is invalidated so a later readable tick re-origins instead of diffing across the gap. Every counter field is a **per-second rate** via `CounterBaselineTracker.rate`; first-sample, counter-decrease (sidecar restart), and boot-generation-change all null the field and re-baseline — the full battery (reboot, counter wrap, sidecar restart, device replacement) is regression-tested end to end in `collector/baseline-reset-battery.test.ts`. Caddy's `caddy_http_requests_total` counter and its per-handler duration histogram can disagree when a route is nested/re-instrumented; `caddy-v4.ts` only folds a `(server,handler)` group into the response-class/byte/duration aggregates when that group's histogram count exactly matches the server's simple-counter total and no other handler group on the same server also matches — an ambiguous or inflated group is excluded rather than double-counted (see that module's doc comment for the full rule). `requestErrors` stays `null` on both Caddy and Traefik (neither exposes a per-request error counter distinct from the 5xx response class) and Caddy's `retries` stays `null` (no Caddy equivalent to Traefik's `traefik_service_retries_total`) — both are left `null` rather than approximated from an unrelated metric. Every adapter shares `collector/proxy/prom-exposition.ts`'s Prometheus text parser and `collector/proxy/endpoint-cache.ts`'s retry-bounded probe wrapper (`PROXY_ENDPOINT_RETRY_MS` = 5 min, mirroring `DOCKER_DATA_ROOT_RETRY_MS`, so a stopped sidecar is not re-dialed every tick forever — unlike the Docker data-root cache, a *successful* scrape is never remembered; traffic counters must be re-read every interval).
+
+**Detail families** (`cpuDetail?`/`memoryDetail?`/`cpuCoreLive?`): `cpu-detail.ts`'s `buildCpuDetailSample` reports the daemon's 4 busiest logical cores this interval (`hotspots`) plus host-wide frequency/scheduling counters (context switches, interrupts, forks/s, combined irq+softirq percent). `memory-detail.ts`'s `buildMemoryDetailSample` reports slab/dirty/writeback/commit breakdown from `/proc/meminfo` plus reclaim/compaction rates from `/proc/vmstat` — `pageScanDirectPerSecond`/`pageScanKswapdPerSecond` are kept separate rather than combined, since a direct-reclaim-heavy host is under acute memory pressure in a way a kswapd-heavy host is not. `cpu-core-live.ts`'s `buildCpuCoreLiveSamples` reports one entry per online logical core, populated only in live sessions (`collectionMode === "live"`).
+
+**Unsupported OS:** `UnsupportedMetricsCollector` returns `{ supported: false, reason: "unsupported_os:<os>" }` and keeps the daemon running.
+
+**Env:** `TURBOPANEL_SERVER_METRICS_RETENTION_DAYS` default `90` (instance raw-metrics retention). Server metrics are always on — there is no instance-side enable/disable gate; the daemon always collects and emits host metrics fire-and-forget, and the instance always persists when a backend is configured. See **`../turbopanel/AGENTS.md`** (Server metrics).
+
+**Local validation:** fixture-driven tests under `src/metrics/` (no live `/proc` required):
 
 ```bash
 deno test src/metrics/
 deno fmt && deno lint && deno check
 deno task check:layout
+deno task check:metrics-legacy
 ```
 
-Fixtures: `src/metrics/collector/testdata/` — `/proc` text snapshots
-(`proc-stat-full-fields-*` for all-8-counter CPU deltas,
-`proc-diskstats-nvme`/`-lvm`/`-extra-disks` for NVMe naming, device-mapper
-exclusion, and mount-backed disk preference, `proc-mounts` for mount-table
-candidates and device resolution, `proc-net-dev-with-fabric-tunnel` for
-uplink + `tp0` + `docker0`/`veth` classification), `docker-info-*.txt`
-data-root parses, and sysfs sensor trees: `sensors-intel/` = coretemp +
-RAPL, `sensors-amd/` = k10temp + amdgpu, `sensors-multi-gpu/` = two amdgpu
-cards for device-consistent GPU selection, `sensors-none/` = the
-sensorless-VM case (no `class/hwmon` at all), `sensors-nvme-disk/` = an
-NVMe hwmon chip correlated to its `nvme0n1` block device, `sensors-drivetemp/`
-= a `drivetemp` SATA/SAS chip correlated to its `sda` block device,
-`sensors-fans-ambient/` = CPU/system fan tachometers plus unclaimed temps
-swept into the ambient pool (with a `sd*` block device and no `drivetemp`
-chip, for the `drivetemp_not_loaded` capability reason), and
-`sensors-gpu-utilization/` = an amdgpu device exposing `gpu_busy_percent`,
-`sensors-gpu-utilization-intel/` = an i915 device exposing its busy-percent
-gauge under an alternate node name, and `proxy-caddy-metrics.txt` /
-`proxy-proxysql-metrics.txt` (plus `-partial` variants for a freshly-started
-sidecar with no traffic yet) — captured Prometheus exposition text for the
-`collector/proxy/` parser tests.
-
+Fixtures: `src/metrics/collector/testdata/` — `/proc` text snapshots (`proc-stat-full-fields-*`/`proc-stat-guest-fields-*`/`proc-stat-percore-*` for CPU jiffie deltas and per-core busy%, `proc-pressure-{cpu,memory,io}-*` for PSI, `proc-vmstat-*` for reclaim/compaction rates, `proc-diskstats-v4-*` for per-device rate/latency/utilization math keyed by topology `deviceId`, `proc-net-dev-eth1-fallback-*` for the sysfs-preferred/`/proc/net/dev`-fallback per-NIC counter path, `proc-net-netstat-*`/`proc-net-snmp-*` for TCP retransmit percent, `proc-net-softnet-stat-*` for softnet drops, `proc-file-*`/`proc-conntrack-*` for kernel-limit percentages, `proc-mounts` for mount-table candidates and device resolution), `docker-info-*.txt` data-root parses, `net-device-samples-{1,2}/` (sysfs `class/net/<name>/statistics/` trees for the two-tick per-NIC rate tests), and sysfs sensor trees: `sensors-intel/` = coretemp + RAPL, `sensors-amd/` = k10temp + amdgpu, `sensors-multi-gpu/` = two amdgpu cards for device-consistent GPU selection, `sensors-none/` = the sensorless-VM case (no `class/hwmon` at all), `sensors-nvme-disk/` = an NVMe hwmon chip correlated to its `nvme0n1` block device, `sensors-drivetemp/` = a `drivetemp` SATA/SAS chip correlated to its `sda` block device, `sensors-fans-ambient/` = CPU/system fan tachometers plus unclaimed temps swept into the ambient pool, `sensors-gpu-utilization/` = an amdgpu device exposing `gpu_busy_percent`, `sensors-gpu-utilization-intel/` = an i915 device exposing its busy-percent gauge under an alternate node name, `sensors-intel-drm-engines/` = an Intel iGPU with no hwmon chip and DRM `engine/*/busy` counters (N150-shaped), `sensors-i915-hwmon-drm-engines/` = i915 hwmon temp plus DRM engines merged onto one device. Traffic-adapter fixtures: `proxy-proxysql-metrics*.txt` (shared by `database-proxy/proxysql-v4.ts`'s tests), `proxy-caddy-metrics-v4-base.txt`/`-partial.txt` (single valid handler group), `proxy-caddy-metrics-v4-reverse-proxy.txt` (upstream health gauges), `proxy-caddy-metrics-multi-handler.txt` (two handler groups both matching the server total — the no-double-count case), and `proxy-traefik-metrics.txt`/`-partial.txt` (shared hosting-ingress Traefik metrics entrypoint scrape, same synthetic traffic shape as the Caddy fixtures for adapter-parity testing).

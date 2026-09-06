@@ -16,7 +16,7 @@
  * in-flight emits across detach/reconnect.
  */
 import { logInfo, logWarn, sanitizeForLog } from "../logger.ts";
-import type { MetricsCollectionMode } from "./contract.ts";
+import type { MetricsCollectionModeV4 as MetricsCollectionMode } from "./contract-v4.ts";
 import type { MetricsCollector } from "./collector/index.ts";
 
 /** Steady metrics cadence (independent of IdlePresence / cell ping). */

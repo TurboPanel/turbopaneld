@@ -2,6 +2,7 @@ import { assertEquals } from "@std/assert";
 import { it } from "@std/testing/bdd";
 import {
   backingDeviceNames,
+  type MapperResolverIo,
   mountForPath,
   parseProcMounts,
   storageMountCandidates,
@@ -23,8 +24,18 @@ it("parseProcMounts parses rows and decodes octal escapes", () => {
     ].join("\n"),
   );
   assertEquals(entries, [
-    { source: "/dev/sda1", mountPoint: "/", fsType: "ext4" },
-    { source: "/dev/sdb1", mountPoint: "/mnt/my disk", fsType: "ext4" },
+    {
+      source: "/dev/sda1",
+      mountPoint: "/",
+      fsType: "ext4",
+      options: "rw,relatime",
+    },
+    {
+      source: "/dev/sdb1",
+      mountPoint: "/mnt/my disk",
+      fsType: "ext4",
+      options: "rw",
+    },
   ]);
 });
 
@@ -72,17 +83,43 @@ it("mountForPath picks the longest matching mount-point prefix", () => {
   assertEquals(mountForPath([], "/anything"), undefined);
 });
 
-it("backingDeviceNames resolves /dev sources and skips unresolvable ones", () => {
+const noMapperDevices: MapperResolverIo = {
+  listDir: () => [],
+  readFile: () => undefined,
+};
+
+it("backingDeviceNames resolves /dev sources and skips unresolvable ones", async () => {
   const entries = parseProcMounts(fixture("proc-mounts.txt"));
   assertEquals(
-    backingDeviceNames(entries, ["/", "/srv/users", "/mnt/docker-data"]).sort(
-      (a, b) => a.localeCompare(b),
-    ),
+    (await backingDeviceNames(
+      entries,
+      ["/", "/srv/users", "/mnt/docker-data"],
+      noMapperDevices,
+    )).sort((a, b) => a.localeCompare(b)),
     ["nvme0n1p1", "sda1", "sdb1"],
   );
   // Same backing device for two paths is reported once.
-  assertEquals(backingDeviceNames(entries, ["/", "/var/lib/docker"]), ["sda1"]);
-  // /dev/mapper/* and pseudo sources never resolve to a diskstats name.
+  assertEquals(
+    await backingDeviceNames(
+      entries,
+      ["/", "/var/lib/docker"],
+      noMapperDevices,
+    ),
+    ["sda1"],
+  );
+});
+
+it("backingDeviceNames resolves /dev/mapper/* sources to the backing dm-N device via sysfs", async () => {
   const mapper = parseProcMounts("/dev/mapper/vg-root / ext4 rw 0 0");
-  assertEquals(backingDeviceNames(mapper, ["/"]), []);
+  const io: MapperResolverIo = {
+    listDir: (path) => path === "/sys/block" ? ["sda", "sda1", "dm-0"] : [],
+    readFile: (path) =>
+      path === "/sys/block/dm-0/dm/name" ? "vg-root\n" : undefined,
+  };
+  assertEquals(await backingDeviceNames(mapper, ["/"], io), ["dm-0"]);
+});
+
+it("backingDeviceNames yields nothing for /dev/mapper/* and pseudo sources when no dm device matches", async () => {
+  const mapper = parseProcMounts("/dev/mapper/vg-root / ext4 rw 0 0");
+  assertEquals(await backingDeviceNames(mapper, ["/"], noMapperDevices), []);
 });

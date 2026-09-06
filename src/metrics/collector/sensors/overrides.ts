@@ -4,7 +4,7 @@
  * Operators assign sensor/NIC slots, a hosting path, and a drivetemp opt-in
  * from the control plane. The selection is persisted on
  * `server.metadata.hardwareProfile` and pushed here over the cell socket
- * (`metrics-sensor-overrides-update`); {@link writeHardwareProfile} replaces
+ * (`topology-overrides-update`); {@link writeHardwareProfile} replaces
  * `<daemonStateDir>/metrics/hardware-profile.json` atomically — full
  * replacement, so an absent field clears that setting. Absent/invalid state
  * yields an empty profile so auto-detection/defaults stay in charge.
@@ -44,6 +44,12 @@ const SENSOR_SLOT_KEYS = [
 const NIC_KEYS = ["nic1", "nic2"] as const satisfies readonly (
   keyof HardwareProfile
 )[];
+
+const TOPOLOGY_ID_KEYS = [
+  "nicSlot1DeviceId",
+  "nicSlot2DeviceId",
+  "hostingFilesystemId",
+] as const satisfies readonly (keyof HardwareProfile)[];
 
 function pickTrimmedString(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
@@ -114,6 +120,22 @@ function applyNicBindings(
   }
 }
 
+/**
+ * Topology-identity pins share the nic-binding parsing discipline (`null` =
+ * explicitly unassigned, a string = pinned id) but never resolve against
+ * live interface names — see `HardwareProfile.nicSlot1DeviceId` etc.
+ */
+function applyTopologyIdBindings(
+  record: Record<string, unknown>,
+  profile: HardwareProfile,
+): void {
+  for (const key of TOPOLOGY_ID_KEYS) {
+    if (!(key in record)) continue;
+    const id = pickNicBinding(record[key]);
+    if (id !== undefined) profile[key] = id;
+  }
+}
+
 function applyScalarFields(
   record: Record<string, unknown>,
   profile: HardwareProfile,
@@ -142,6 +164,7 @@ export function parseHardwareProfile(text: string): HardwareProfile {
     const profile: HardwareProfile = {};
     applySensorSlots(record, profile);
     applyNicBindings(record, profile);
+    applyTopologyIdBindings(record, profile);
     applyScalarFields(record, profile);
     return profile;
   } catch {

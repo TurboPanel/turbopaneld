@@ -15,8 +15,20 @@ it("parseDiskstatsRow captures throughput, ops, and I/O-time counters", () => {
       writesCompleted: 500,
       sectorsWritten: 70000,
       writeTicksMs: 800,
+      iosInProgress: 0,
+      ioTicksMs: 0,
+      weightedIoTicksMs: 0,
     },
   });
+});
+
+it("parseDiskstatsRow captures in-progress/io-ticks/weighted-io-ticks fields", () => {
+  const parsed = parseDiskstatsRow(
+    "   8       0 sda 1000 200 30000 400 500 600 70000 800 3 1500 4200 0 0",
+  );
+  assertEquals(parsed?.counters.iosInProgress, 3);
+  assertEquals(parsed?.counters.ioTicksMs, 1500);
+  assertEquals(parsed?.counters.weightedIoTicksMs, 4200);
 });
 
 it("parseDiskstatsRow rejects short and non-finite rows", () => {

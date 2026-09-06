@@ -4,7 +4,7 @@
  * Operators point the hosting storage probe at a specific filesystem from
  * the control plane. The selection is persisted on
  * `server.metadata.hardwareProfile.hostingPath` and pushed here over the
- * cell socket (`metrics-sensor-overrides-update`) as part of the full
+ * cell socket (`topology-overrides-update`) as part of the full
  * hardware profile (see `./sensors/overrides.ts`); absent/invalid state
  * falls back to the layout's `principalHomeRoot`.
  *

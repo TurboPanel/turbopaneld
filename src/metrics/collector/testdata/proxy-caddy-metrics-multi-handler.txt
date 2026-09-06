@@ -1,0 +1,39 @@
+# Normal single-terminal-site shape: server "srv0" is a bare `reverse_proxy`
+# site, so every request passes through both the top-level "subroute"
+# wrapper and its one "reverse_proxy" handler — both report the exact same
+# counts (100) across requests_total, in-flight, and every histogram.
+# Neither count is more "real" than the other; the scope-selection tie is
+# broken deterministically by handler name so requests are counted exactly
+# once (100), never doubled (200).
+# HELP caddy_http_requests_in_flight Number of requests currently handled by this server.
+# TYPE caddy_http_requests_in_flight gauge
+caddy_http_requests_in_flight{handler="subroute",server="srv0"} 2
+caddy_http_requests_in_flight{handler="reverse_proxy",server="srv0"} 2
+# HELP caddy_http_requests_total Counter of HTTP(S) requests made.
+# TYPE caddy_http_requests_total counter
+caddy_http_requests_total{handler="subroute",server="srv0"} 100
+caddy_http_requests_total{handler="reverse_proxy",server="srv0"} 100
+# HELP caddy_http_request_duration_seconds Histogram of round-trip request durations.
+# TYPE caddy_http_request_duration_seconds histogram
+caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="0.1"} 100
+caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="0.5"} 100
+caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="1"} 100
+caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="5"} 100
+caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="+Inf"} 100
+caddy_http_request_duration_seconds_sum{code="200",handler="subroute",method="GET",server="srv0"} 10.0
+caddy_http_request_duration_seconds_count{code="200",handler="subroute",method="GET",server="srv0"} 100
+caddy_http_request_duration_seconds_bucket{code="200",handler="reverse_proxy",method="GET",server="srv0",le="0.1"} 100
+caddy_http_request_duration_seconds_bucket{code="200",handler="reverse_proxy",method="GET",server="srv0",le="0.5"} 100
+caddy_http_request_duration_seconds_bucket{code="200",handler="reverse_proxy",method="GET",server="srv0",le="1"} 100
+caddy_http_request_duration_seconds_bucket{code="200",handler="reverse_proxy",method="GET",server="srv0",le="5"} 100
+caddy_http_request_duration_seconds_bucket{code="200",handler="reverse_proxy",method="GET",server="srv0",le="+Inf"} 100
+caddy_http_request_duration_seconds_sum{code="200",handler="reverse_proxy",method="GET",server="srv0"} 10.0
+caddy_http_request_duration_seconds_count{code="200",handler="reverse_proxy",method="GET",server="srv0"} 100
+# HELP caddy_http_request_size_bytes Total size of the request. Includes body
+# TYPE caddy_http_request_size_bytes histogram
+caddy_http_request_size_bytes_sum{code="200",handler="subroute",method="GET",server="srv0"} 40000
+caddy_http_request_size_bytes_sum{code="200",handler="reverse_proxy",method="GET",server="srv0"} 40000
+# HELP caddy_http_response_size_bytes Size of the returned response.
+# TYPE caddy_http_response_size_bytes histogram
+caddy_http_response_size_bytes_sum{code="200",handler="subroute",method="GET",server="srv0"} 400000
+caddy_http_response_size_bytes_sum{code="200",handler="reverse_proxy",method="GET",server="srv0"} 400000

@@ -17,6 +17,7 @@ import {
   shouldEnableDockerIntegration,
 } from "./orchestration/setup.ts";
 import { createMetricsCollector } from "./metrics/collector/index.ts";
+import { collectTopology } from "./metrics/topology/topology.ts";
 import { startTunnels } from "./tunnels.ts";
 
 logInfo("daemon", "starting up");
@@ -78,6 +79,7 @@ let instance: { stop(): void } = instanceHandle;
 if (shouldConnectToInstance()) {
   instance = await connectInstance({
     metricsCollectorFactory: () => createMetricsCollector(),
+    collectTopologyFn: () => collectTopology(),
   });
 } else {
   logInfo(

@@ -36,6 +36,7 @@ it("readHostSensors on a VM yields all nulls and no sensor identities", async ()
     gpuTemperatureCelsius: null,
     gpuPowerWatts: null,
     gpuUtilizationPercent: null,
+    gpuBusy: null,
     gpuFanRpm: null,
     disk1TemperatureCelsius: null,
     disk2TemperatureCelsius: null,
@@ -207,6 +208,18 @@ it("readHostSensors resolves GPU utilization from the i915 busy-percent gauge", 
     readings.sensors.gpuUtilizationSensor,
     "i915:gt_busy_percent",
   );
+  assertEquals(readings.gpuBusy, null);
+});
+
+it("readHostSensors reads Intel DRM engine busy counters without a percent gauge", async () => {
+  const readings = await readHostSensors({}, {
+    root: fixtureRoot("sensors-intel-drm-engines"),
+  });
+  assertEquals(readings.gpuUtilizationPercent, null);
+  assertEquals(readings.sensors.gpuUtilizationSensor, "i915:engines");
+  assertEquals(readings.gpuBusy, {
+    engines: { rcs0: 1_000_000_000, bcs0: 0, vcs0: 0, vecs0: 0 },
+  });
 });
 
 // Regression coverage for a hardware-profile assignment resolving to `null`

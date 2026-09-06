@@ -64,10 +64,6 @@ import { decodeBase64 } from "@std/encoding/base64";
 import { getBuildInfo } from "../build-info.ts";
 import { IdlePresence } from "./idle-presence.ts";
 import type { MetricsCollector } from "../metrics/collector/index.ts";
-import {
-  collectMetricsCapabilities,
-  type MetricsCapabilities,
-} from "../metrics/capabilities.ts";
 import type { MetricsScheduler } from "../metrics/scheduler.ts";
 import { rebindMetricsScheduler } from "../metrics/scheduler.ts";
 import { LiveLeaseManager } from "../metrics/live-leases.ts";
@@ -91,6 +87,8 @@ import {
 } from "./run-reconcile.ts";
 import { installOriginNeedsInsecureTls } from "./install-tls.ts";
 import { ManagedHaObserver } from "./ha-observe.ts";
+import { TopologyReporter } from "./topology-reporter.ts";
+import type { TopologySnapshot } from "../metrics/topology/types.ts";
 
 type DaemonMessage =
   | { type: "echo"; payload: unknown; at: string }
@@ -168,14 +166,6 @@ type DaemonMessage =
     error?: string;
     at: string;
   }
-  | { type: "metrics-capabilities-request"; id: string; at: string }
-  | {
-    type: "metrics-capabilities-result";
-    id: string;
-    capabilities?: MetricsCapabilities;
-    error?: string;
-    at: string;
-  }
   | {
     type: "metrics-live-start";
     id: string;
@@ -201,14 +191,23 @@ type DaemonMessage =
     at: string;
   }
   | {
-    type: "metrics-sensor-overrides-update";
+    type: "topology-overrides-update";
     id: string;
-    /** Full replacement — absent fields clear their setting. */
+    /**
+     * Full replacement — absent fields clear their setting. Carries both
+     * v3 sensor-slot/NIC-name/hosting-path/drivetemp fields and the
+     * topology-identity pins (`nicSlot1DeviceId`/`nicSlot2DeviceId`/
+     * `hostingFilesystemId`, resolved against `src/metrics/topology/`
+     * device/filesystem ids rather than raw names/paths) in one object —
+     * renamed from `metrics-sensor-overrides-update` when topology
+     * identity was added; the underlying store and v3 semantics are
+     * unchanged.
+     */
     overrides: HardwareProfile;
     at: string;
   }
   | {
-    type: "metrics-sensor-overrides-update-result";
+    type: "topology-overrides-update-result";
     id: string;
     ok: boolean;
     error?: string;
@@ -221,6 +220,21 @@ type DaemonMessage =
      * whether the profile write succeeded).
      */
     drivetemp?: DrivetempEnableResult;
+    at: string;
+  }
+  | {
+    /**
+     * Daemon-initiated, fire-and-forget (no correlated request/result) —
+     * `../metrics/topology/`'s stable device/filesystem/GPU/signal identity
+     * and generation, reported over the socket by `TopologyReporter`
+     * (`./topology-reporter.ts`) so the control plane can persist per-server
+     * topology-generation history (`turbopanel/src/client/servers/
+     * server-topology-records.ts`).
+     */
+    type: "topology-report";
+    generation: number;
+    bootGeneration: number;
+    snapshot: TopologySnapshot;
     at: string;
   }
   | {
@@ -343,6 +357,8 @@ export interface InstanceClientOptions {
   onMessage?: (message: DaemonMessage) => void;
   /** When set, enables host metrics on the daemon WebSocket. */
   metricsCollectorFactory?: () => MetricsCollector;
+  /** When set, enables `topology-report` emission on the daemon WebSocket (see `TopologyReporter`). */
+  collectTopologyFn?: () => Promise<TopologySnapshot>;
   /**
    * Checkout-sync unpack implementation. Production compile never supplies this;
    * source `main.ts` registers it via `enableCheckoutDevSync`.
@@ -526,6 +542,9 @@ export class InstanceClient {
    */
   #liveLeases: LiveLeaseManager | undefined;
   readonly #metricsCollectorFactory?: () => MetricsCollector;
+  readonly #collectTopologyFn?: () => Promise<TopologySnapshot>;
+  /** Created lazily once `#collectTopologyFn` is set; lives across reconnects (unlike `#liveLeases`). */
+  #topologyReporter: TopologyReporter | undefined;
   readonly #applyDevSyncTarball?: DevSyncApplyFn;
   #updateInstallInProgress = false;
   /**
@@ -548,6 +567,7 @@ export class InstanceClient {
     this.#backoffMs = this.#initialBackoffMs;
     this.#onMessage = options.onMessage;
     this.#metricsCollectorFactory = options.metricsCollectorFactory;
+    this.#collectTopologyFn = options.collectTopologyFn;
   }
 
   get config(): InstanceConfig {
@@ -741,6 +761,7 @@ export class InstanceClient {
     this.#liveLeases = undefined;
     this.#metricsScheduler = undefined;
     this.#metricsSchedulerServerId = undefined;
+    this.#topologyReporter?.detach();
     this.#tokenManager?.stop();
     this.#ws?.close();
     this.#ws = undefined;
@@ -1142,6 +1163,7 @@ export class InstanceClient {
     let sessionRegistered = false;
     this.#ensureIdlePresence(serverId);
     this.#ensureMetricsScheduler(serverId);
+    this.#ensureTopologyReporter();
 
     try {
       await new Promise<void>((resolve, reject) => {
@@ -1198,6 +1220,12 @@ export class InstanceClient {
     this.#metricsScheduler?.attach((sample) =>
       this.#apiClient?.sendHostMetrics(sample) ?? Promise.resolve()
     );
+    this.#topologyReporter?.attach((report) => {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      ws.send(JSON.stringify(
+        { type: "topology-report", ...report } satisfies DaemonMessage,
+      ));
+    });
     this.#rehydrateDeploymentSecretsAfterConnect();
 
     ws.onmessage = (event) => {
@@ -1229,6 +1257,7 @@ export class InstanceClient {
       this.#idlePresence?.detach();
       this.#haObserver?.detach();
       this.#metricsScheduler?.detach();
+      this.#topologyReporter?.detach();
       // Live leases die with the socket — the next attach starts at baseline.
       this.#liveLeases?.dispose();
       // Container log collection deliberately survives the socket. Tearing it
@@ -1271,6 +1300,14 @@ export class InstanceClient {
         if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return;
         this.#ws.send(JSON.stringify(message));
       },
+    });
+  }
+
+  /** Survives reconnects (unlike `#liveLeases`) — a new session just re-attaches it to the new socket. */
+  #ensureTopologyReporter(): void {
+    if (!this.#collectTopologyFn || this.#topologyReporter) return;
+    this.#topologyReporter = new TopologyReporter({
+      collectTopology: this.#collectTopologyFn,
     });
   }
 
@@ -1365,17 +1402,14 @@ export class InstanceClient {
       case "managed-logs-request":
         this.#collectManagedLogs(message, ws);
         break;
-      case "metrics-capabilities-request":
-        this.#collectMetricsCapabilities(message, ws);
-        break;
       case "metrics-live-start":
         this.#applyLiveLeaseStart(message, ws);
         break;
       case "metrics-live-stop":
         this.#applyLiveLeaseStop(message, ws);
         break;
-      case "metrics-sensor-overrides-update":
-        this.#applySensorOverridesUpdate(message, ws);
+      case "topology-overrides-update":
+        this.#applyTopologyOverridesUpdate(message, ws);
         break;
       case "container-logs-request":
         this.#collectContainerLogs(message, ws);
@@ -1802,43 +1836,6 @@ export class InstanceClient {
     }
   }
 
-  #collectMetricsCapabilities(
-    message: Extract<DaemonMessage, { type: "metrics-capabilities-request" }>,
-    ws: WebSocket,
-  ): void {
-    void this.#collectMetricsCapabilitiesAsync(message, ws);
-  }
-
-  async #collectMetricsCapabilitiesAsync(
-    message: Extract<DaemonMessage, { type: "metrics-capabilities-request" }>,
-    ws: WebSocket,
-  ): Promise<void> {
-    let capabilities: MetricsCapabilities | undefined;
-    let error: string | undefined;
-    try {
-      capabilities = await collectMetricsCapabilities();
-    } catch (err) {
-      error = err instanceof Error ? err.message : String(err);
-      logWarn(
-        "instance",
-        "collect metrics capabilities failed:",
-        sanitizeForLog(err),
-      );
-    }
-
-    const result: DaemonMessage = {
-      type: "metrics-capabilities-result",
-      id: message.id,
-      ...(capabilities === undefined ? {} : { capabilities }),
-      ...(error === undefined ? {} : { error }),
-      at: new Date().toISOString(),
-    };
-
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(result));
-    }
-  }
-
   #applyLiveLeaseStart(
     message: Extract<DaemonMessage, { type: "metrics-live-start" }>,
     ws: WebSocket,
@@ -1891,20 +1888,20 @@ export class InstanceClient {
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result));
   }
 
-  #applySensorOverridesUpdate(
+  #applyTopologyOverridesUpdate(
     message: Extract<
       DaemonMessage,
-      { type: "metrics-sensor-overrides-update" }
+      { type: "topology-overrides-update" }
     >,
     ws: WebSocket,
   ): void {
-    void this.#applySensorOverridesUpdateAsync(message, ws);
+    void this.#applyTopologyOverridesUpdateAsync(message, ws);
   }
 
-  async #applySensorOverridesUpdateAsync(
+  async #applyTopologyOverridesUpdateAsync(
     message: Extract<
       DaemonMessage,
-      { type: "metrics-sensor-overrides-update" }
+      { type: "topology-overrides-update" }
     >,
     ws: WebSocket,
   ): Promise<void> {
@@ -1916,6 +1913,12 @@ export class InstanceClient {
       // Full replacement: the pushed object is the complete hardware profile.
       await writeHardwareProfile(message.overrides ?? {});
       ok = true;
+
+      // A pushed nicSlot*/hostingFilesystemId override can reassign a slot
+      // without changing any identity set — only the resolved SlotMapping
+      // reflects that (see `../metrics/topology/generation.ts`). Force a
+      // recompute now rather than waiting for the next scheduled tick.
+      void this.#topologyReporter?.reportNow();
 
       // A flip from false/unset to true is the only edge that should load
       // the module — every later push with drivetempEnabled already true is
@@ -1951,7 +1954,7 @@ export class InstanceClient {
     }
 
     const result: DaemonMessage = {
-      type: "metrics-sensor-overrides-update-result",
+      type: "topology-overrides-update-result",
       id: message.id,
       ok,
       ...(error === undefined ? {} : { error }),
