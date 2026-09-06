@@ -173,7 +173,8 @@ it({
 });
 
 it({
-  name: "tls-trust park reads the platform CA fingerprint when a CA file exists",
+  name:
+    "tls-trust park reads the platform CA fingerprint when a CA file exists",
   permissions: {
     env: true,
     read: true,

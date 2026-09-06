@@ -540,7 +540,8 @@ test({
 });
 
 test({
-  name: "handleManagedHaReconcile rejects an empty decrypted replication password",
+  name:
+    "handleManagedHaReconcile rejects an empty decrypted replication password",
   permissions: { env: true, read: true, write: true, run: false },
   fn: async () => {
     await withTempLayout(async (fixture) => {

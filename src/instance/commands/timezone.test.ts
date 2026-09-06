@@ -174,8 +174,7 @@ test({
 });
 
 test({
-  name:
-    "handleTimezone uses the real ansible probe and host time-sync reader",
+  name: "handleTimezone uses the real ansible probe and host time-sync reader",
   permissions: { env: true, read: true, run: true },
   fn: async () => {
     const {
