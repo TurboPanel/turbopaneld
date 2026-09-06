@@ -224,6 +224,10 @@ function createFixtureCollectorFactory(): () => MetricsCollector {
       // adapters below. Absent means auto slot selection.
       resolveTopologyOverrides: undefined,
       io: { listDir: () => [], readFile: () => undefined },
+      // Live `/proc` PID scans are real async directory I/O (and may fall
+      // back to `ls`). FakeClock only drains microtasks, so a busy CI
+      // runner never finishes the first collect before the assertion.
+      countProcesses: () => 42,
       // Unlike GPU adapters (only invoked per topology-enumerated GPU, and
       // this fixture's topology has none), ingress/database-proxy adapters
       // are scrape-derived with no topology gate — `defaultDepsV4()`'s real

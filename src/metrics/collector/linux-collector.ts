@@ -551,6 +551,13 @@ async function collectEvents(
   return await deps.eventCollectors.detect(ctx);
 }
 
+async function readProcessCount(
+  deps: CollectorDepsV4,
+): Promise<number | null> {
+  if (deps.countProcesses) return await deps.countProcesses();
+  return await countProcessesInProc();
+}
+
 function optionalSampleFields(
   cpuDetail: CpuDetailSampleV4 | null,
   memoryDetail: MemoryDetailSampleV4 | null,
@@ -724,7 +731,7 @@ export class LinuxMetricsCollector implements MetricsCollector {
     };
 
     const cpu = parseCpuTick(raw.statText, previous, bootChanged, seconds);
-    const processCount = await countProcessesInProc();
+    const processCount = await readProcessCount(this.#deps);
     const psi = readPsiPercents(raw, rates);
     const kernel = readKernelLimits(raw);
     const memory = readMemoryTick(raw, rates, this.#pageSizeBytes);

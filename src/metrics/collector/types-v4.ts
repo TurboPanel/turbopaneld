@@ -39,6 +39,13 @@ export type CollectorDepsV4 = {
   /** Host page size in bytes (`parse-vmstat.ts`'s `resolvePageSizeBytes`), resolved once at construction, never per tick. */
   pageSizeBytes: number;
   /**
+   * Count running processes (`processes.ts`'s `countProcessesInProc`).
+   * Optional: absent means a live `/proc` scan. Host-free scheduler tests
+   * stub this so FakeClock microtask draining never waits on real directory
+   * I/O (hundreds of PID entries, plus a possible `ls` fallback).
+   */
+  countProcesses?: () => number | null | Promise<number | null>;
+  /**
    * GPU telemetry adapters (sysfs/NVML/DCGM), constructed once at daemon
    * startup — `gpu/index.ts`'s `buildGpuSamples`. Optional: absent means
    * `gpus` stays `[]`, matching this phase's prior behavior for hosts/tests

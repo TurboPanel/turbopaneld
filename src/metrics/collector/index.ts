@@ -23,6 +23,7 @@ import { TraefikIngressAdapter } from "./ingress/traefik.ts";
 import { defaultSensorIo } from "./sensors/discovery.ts";
 import { LinuxMetricsCollector } from "./linux-collector.ts";
 import { resolvePageSizeBytes } from "./parse-vmstat.ts";
+import { countProcessesInProc } from "./processes.ts";
 import { readProcFile } from "./proc-read.ts";
 import type { CollectorDepsV4 } from "./types-v4.ts";
 import type {
@@ -251,6 +252,7 @@ function defaultDepsV4(): CollectorDepsV4 {
     io: defaultSensorIo(),
     // Resolved once here (construction time), never per tick.
     pageSizeBytes: resolvePageSizeBytes(),
+    countProcesses: () => countProcessesInProc(),
     gpuAdapters: defaultGpuAdapters(),
     ingressAdapters: defaultIngressAdapters(),
     databaseProxyAdapters: defaultDatabaseProxyAdapters(),

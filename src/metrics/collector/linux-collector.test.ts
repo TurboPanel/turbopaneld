@@ -243,6 +243,18 @@ test("LinuxMetricsCollector assembles a full v4 sample across two ticks", async 
   assertEquals(second.sample.host.storage.rootFilesystemFreeInodes, 90_000);
 });
 
+test("LinuxMetricsCollector uses injected countProcesses instead of a live /proc scan", async () => {
+  const collector = new LinuxMetricsCollector({
+    ...makeDeps(() => TICK_1, fullTopologySnapshot(), () => 1_000_000),
+    countProcesses: () => 17,
+  });
+  const result = await collector.collect({ sequence: 1, nowMs: 1_000_000 });
+  if (!result.supported) {
+    throw new TypeError("expected a supported sample");
+  }
+  assertEquals(result.sample.host.cpu.processCount, 17);
+});
+
 test("LinuxMetricsCollector applies the injected page size to swap byte rates, not a hard-coded 4096", async () => {
   const snapshot = fullTopologySnapshot();
   const tick2WithVmstatDelta: RawFixtureMap = {
