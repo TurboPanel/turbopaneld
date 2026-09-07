@@ -9,7 +9,8 @@
  * code paths, where `clickhouse` is a legitimate catalog engine name.
  *
  * It also guards retired Analytics Engine dataset names
- * (`turbopanel_server_metrics`, `turbopanel_server_telemetry`,
+ * (`turbopanel_server_metrics`, `turbopanel_server_metrics_v4`,
+ * `turbopanel_server_telemetry`,
  * `turbopanel_server_host_metrics`). Those names must not appear outside
  * this guard and its tests — there is no historical-context allowlist for
  * docs or config (see RETIRED_DATASET_ALLOWED_PATHS).
@@ -28,24 +29,24 @@
  * Companion guard to `scripts/check-vocabulary.ts` — same walk/report shape.
  * Run: `deno task check:metrics-legacy`.
  *
- * Also covers three v4 metrics boundary invariants (`.ts` files only),
- * mirroring the control-plane's own `turbopanel/scripts/check-v4-boundaries.mjs`
+ * Also covers three v5 metrics boundary invariants (`.ts` files only),
+ * mirroring the control-plane's own `turbopanel/scripts/check-v5-boundaries.mjs`
  * so the daemon's CI catches a regression even when that sibling script
  * doesn't run (e.g. a PR against this repo alone):
  *
- *  1. AE v4 physical positional tokens (`double<N>`/`blob<N>`/the raw
+ *  1. AE v5 physical positional tokens (`double<N>`/`blob<N>`/the raw
  *     `-1e308` sentinel) stay confined to `backends/cloudflare/`.
  *  2. v3-only symbols (`MetricPart`, `HOST_METRIC_KEYS`, and the v3 wire
  *     field `parts` — anchored to property-access/field-declaration shapes,
- *     see `V3_SYMBOL_PATTERN`) never appear as real code in a `*-v4.ts` file
+ *     see `V3_SYMBOL_PATTERN`) never appear as real code in a `*-v5.ts` file
  *     under a `/metrics/` path, nor in the metrics-contract-facing surfaces
  *     outside the metrics tree that must stay backend-agnostic regardless of
  *     filename suffix (`METRICS_CONTRACT_SURFACE_PATHS` below — the
  *     turbopanel-side mirror of that sibling script's `EXTRA_SURFACE_*`).
- *  3. The v4 paged-entity-series "page identity" symbols
- *     (`AE_V4_BLOB_PAGE_INDEX`, `AE_V4_BLOB_SOURCE_OR_IDENTITY_INDEX`,
- *     `entityIdInPageIdentityPredicateV4` — backend-private per
- *     `field-map-v4.ts`'s doc comments) never appear as real code outside
+ *  3. The v5 paged-entity-series "page identity" symbols
+ *     (`AE_V5_BLOB_PAGE_INDEX`, `AE_V5_BLOB_SOURCE_OR_IDENTITY_INDEX`,
+ *     `entityIdInPageIdentityPredicateV5` — backend-private per
+ *     `field-map-v5.ts`'s doc comments) never appear as real code outside
  *     `backends/cloudflare/`, scanned across every `.ts` file (not just
  *     `/metrics/` paths) since these names are unique enough to carry no
  *     false-positive risk. turbopaneld has no equivalent of its own: it only
@@ -74,7 +75,7 @@ export const CLICKHOUSE_TABIX_PATTERN = /clickhouse|tabix/i;
  * retired dataset name.
  */
 export const RETIRED_DATASET_PATTERN =
-  /turbopanel_server_metrics(?![a-z0-9_])|turbopanel_server_telemetry(?![a-z0-9_])|turbopanel_server_host_metrics(?![a-z0-9_])/i;
+  /turbopanel_server_metrics(?![a-z0-9_])|turbopanel_server_metrics_v4(?![a-z0-9_])|turbopanel_server_telemetry(?![a-z0-9_])|turbopanel_server_host_metrics(?![a-z0-9_])/i;
 
 /**
  * Managed-database-engine code paths where `clickhouse` names a catalog
@@ -103,7 +104,7 @@ export const ALLOWED_PATH_PREFIXES = [
   // turbopanel: fake-AE test harness — same ClickHouse-dialect rationale as
   // the cloudflare/ backend itself (documents the DuckDB macros it shims in
   // for ClickHouse-flavored SQL identifiers the real AE SQL API accepts).
-  "turbopanel/src/daemon/metrics/testing/fake-analytics-engine-v4.ts",
+  "turbopanel/src/daemon/metrics/testing/fake-analytics-engine-v5.ts",
   // turbopanel: negative guard asserting ClickHouse grants stay gone.
   "turbopanel/src/deno-compile-permissions.test.ts",
   // ui: managed-engine catalog UI + release/binding metadata.
@@ -151,14 +152,14 @@ const SCAN_EXTENSIONS =
   /\.(ts|tsx|js|mjs|cjs|md|mdx|yml|yaml|sh|j2|json|jsonc|css|rb)$/;
 
 /**
- * AE v4 physical column literal or the raw sentinel value, as real code (not
+ * AE v5 physical column literal or the raw sentinel value, as real code (not
  * doc prose). Deliberately does not match the exported
- * `AE_V4_MISSING_METRIC_SENTINEL` *symbol* — importing that constant to
+ * `AE_V5_MISSING_METRIC_SENTINEL` *symbol* — importing that constant to
  * compare against (rather than inlining its `-1e308` value) is always fine
  * anywhere; this rule only confines the raw literal and hardcoded column
  * names, never the symbol.
  */
-export const AE_V4_TOKEN_PATTERN =
+export const AE_V5_TOKEN_PATTERN =
   /(["'`])(double|blob)\d{1,2}\1|\.(double|blob)\d{1,2}\b|-1e308/;
 
 /**
@@ -171,14 +172,14 @@ export const AE_V4_TOKEN_PATTERN =
 export const V3_SYMBOL_PATTERN =
   /\bMetricPart\b|\bHOST_METRIC_KEYS\b|\.parts\b|\bparts\??\s*:/;
 
-/** Matches a `*-v4.ts` / `*-v4.test.ts` / `*-v4.deno.test.ts` file (basename only). */
-export const V4_SUFFIXED_FILE_PATTERN = /-v4(\.deno)?\.test\.ts$|-v4\.ts$/;
+/** Matches a `*-v5.ts` / `*-v5.test.ts` / `*-v5.deno.test.ts` file (basename only). */
+export const V5_SUFFIXED_FILE_PATTERN = /-v5(\.deno)?\.test\.ts$|-v5\.ts$/;
 
 /**
  * turbopanel-side metrics-contract-facing files outside `src/daemon/metrics/`
- * that must stay just as backend-agnostic as a v4-suffixed file inside it —
+ * that must stay just as backend-agnostic as a v5-suffixed file inside it —
  * `V3_SYMBOL_PATTERN` applies to these regardless of filename suffix. Mirrors
- * `turbopanel/scripts/check-v4-boundaries.mjs`'s `EXTRA_SURFACE_DIRS` /
+ * `turbopanel/scripts/check-v5-boundaries.mjs`'s `EXTRA_SURFACE_DIRS` /
  * `EXTRA_SURFACE_FILES`. Exact `turbopanel/`-scoped paths — `turbopanel/src`
  * is not scanned wholesale for this the way `/metrics/` paths are, since
  * `parts` is too common a word/property name elsewhere in that tree.
@@ -193,13 +194,13 @@ export const METRICS_CONTRACT_SURFACE_EXACT_PATHS = new Set([
   "turbopanel/src/client/servers/metrics-routes.test.ts",
   "turbopanel/src/client/servers/metrics-routes-helpers.ts",
   "turbopanel/src/client/servers/metrics-routes-helpers.hostfree.test.ts",
-  // Topology/SlotMapping records: `field-map-v4.ts` derives its
+  // Topology/SlotMapping records: `field-map-v5.ts` derives its
   // identity-addressed page ordering (`gpuPageOrder` / `blockPageOrder` /
   // `filesystemPageOrder` / `hardwareSignalPageOrder`) from these, so they
   // sit right next to the backend-private paging concept even though they
   // are themselves backend-neutral (`SlotMapping` is computed once by the
   // ingest route and handed to whichever backend is active). Mirrors
-  // turbopanel/scripts/check-v4-boundaries.mjs's EXTRA_SURFACE_FILES.
+  // turbopanel/scripts/check-v5-boundaries.mjs's EXTRA_SURFACE_FILES.
   "turbopanel/src/client/servers/server-topology-records.ts",
   "turbopanel/src/client/servers/server-topology-records.test.ts",
   "turbopanel/src/client/servers/topology-inventory.ts",
@@ -219,14 +220,14 @@ function isMetricsContractSurface(scoped: string): boolean {
 }
 
 /**
- * Backend-private v4 paged-entity-series "page identity" symbols — blob9's
+ * Backend-private v5 paged-entity-series "page identity" symbols — blob9's
  * page index and blob10's comma-joined page identity list
- * (`AE_V4_BLOB_PAGE_INDEX`, `AE_V4_BLOB_SOURCE_OR_IDENTITY_INDEX`) and the
- * SQL predicate built from them (`entityIdInPageIdentityPredicateV4`). Must
+ * (`AE_V5_BLOB_PAGE_INDEX`, `AE_V5_BLOB_SOURCE_OR_IDENTITY_INDEX`) and the
+ * SQL predicate built from them (`entityIdInPageIdentityPredicateV5`). Must
  * never appear as real code outside `backends/cloudflare/`.
  */
 export const PAGE_IDENTIFIER_PATTERN =
-  /\bAE_V4_BLOB_PAGE_INDEX\b|\bAE_V4_BLOB_SOURCE_OR_IDENTITY_INDEX\b|\bentityIdInPageIdentityPredicateV4\b|\bsplitPageIdentityV4\b/;
+  /\bAE_V5_BLOB_PAGE_INDEX\b|\bAE_V5_BLOB_SOURCE_OR_IDENTITY_INDEX\b|\bentityIdInPageIdentityPredicateV5\b|\bsplitPageIdentityV5\b/;
 
 /**
  * Exact `turbopanel/`-scoped paths permitted to reference the page-identifier
@@ -234,7 +235,7 @@ export const PAGE_IDENTIFIER_PATTERN =
  */
 export const PAGE_IDENTIFIER_ALLOWED_PATHS = new Set([
   // Daemon end-to-end ingest-route test: asserts on the actual AE row shape
-  // (`blobs[...]`) written by CloudflareAnalyticsEngineServerMetricsStoreV4,
+  // (`blobs[...]`) written by CloudflareAnalyticsEngineServerMetricsStoreV5,
   // so it necessarily reaches into the backend-private blob layout directly
   // rather than through a query-side abstraction. Narrow, intentional.
   "turbopanel/src/daemon/api-routes.test.ts",
@@ -242,15 +243,15 @@ export const PAGE_IDENTIFIER_ALLOWED_PATHS = new Set([
 
 /**
  * Exact `turbopanel/`-scoped paths permitted to reference v3 symbols
- * (`V3_SYMBOL_PATTERN`) inside a v4-suffixed file.
+ * (`V3_SYMBOL_PATTERN`) inside a v5-suffixed file.
  */
-export const V3_SYMBOL_IN_V4_FILE_ALLOWED_PATHS = new Set([
+export const V3_SYMBOL_IN_V5_FILE_ALLOWED_PATHS = new Set([
   // Both construct a `legacyV3Raw()` fixture (a retired v3 wire shape,
-  // `parts: [...]` included) specifically to assert that the v4 validator
-  // *rejects* it — the v3 shape is the fixture under test, not a real v4
+  // `parts: [...]` included) specifically to assert that the v5 validator
+  // *rejects* it — the v3 shape is the fixture under test, not a real v5
   // dependency on v3's `parts` model.
-  "turbopanel/src/daemon/metrics/validation-v4.test.ts",
-  "turbopanel/src/daemon/metrics/validation-v4.deno.test.ts",
+  "turbopanel/src/daemon/metrics/validation-v5.test.ts",
+  "turbopanel/src/daemon/metrics/validation-v5.deno.test.ts",
 ]);
 
 function isCommentLine(line: string): boolean {
@@ -267,19 +268,19 @@ function isUnderCloudflareBackend(scoped: string): boolean {
 }
 
 /**
- * v4 boundary failures for one `.ts` file — invariants 1 and 2 in the
+ * v5 boundary failures for one `.ts` file — invariants 1 and 2 in the
  * module doc comment. Never applied to non-`.ts` files (doc/config files may
  * legitimately discuss these tokens in prose). In scope for either of two
  * reasons: the path sits under a `/metrics/` directory — mirroring
- * `turbopanel/scripts/check-v4-boundaries.mjs`'s own `src/daemon/metrics`
+ * `turbopanel/scripts/check-v5-boundaries.mjs`'s own `src/daemon/metrics`
  * scan root, so a token match in unrelated UI/app code (this script also
  * scans `ui/src`, `dev/src`, etc.) is never a false positive here — or the
  * path is one of the explicit `METRICS_CONTRACT_SURFACE_*` surfaces outside
  * the metrics tree, where the v3-symbol ban applies regardless of filename
  * suffix (those surfaces must stay backend-agnostic in general, not merely
- * v4-agnostic).
+ * v5-agnostic).
  */
-export function collectV4BoundaryFailures(
+export function collectV5BoundaryFailures(
   scoped: string,
   text: string,
 ): string[] {
@@ -290,20 +291,20 @@ export function collectV4BoundaryFailures(
 
   const scanForAeTokens = isContractSurface ||
     (inMetricsPath && !isUnderCloudflareBackend(scoped));
-  const isV4SuffixedInMetrics = inMetricsPath &&
-    V4_SUFFIXED_FILE_PATTERN.test(scoped.split("/").pop() ?? scoped) &&
-    !V3_SYMBOL_IN_V4_FILE_ALLOWED_PATHS.has(scoped);
-  const scanForV3Symbols = isV4SuffixedInMetrics || isContractSurface;
+  const isV5SuffixedInMetrics = inMetricsPath &&
+    V5_SUFFIXED_FILE_PATTERN.test(scoped.split("/").pop() ?? scoped) &&
+    !V3_SYMBOL_IN_V5_FILE_ALLOWED_PATHS.has(scoped);
+  const scanForV3Symbols = isV5SuffixedInMetrics || isContractSurface;
   if (!scanForAeTokens && !scanForV3Symbols) return [];
 
   const failures: string[] = [];
   text.split("\n").forEach((line, i) => {
     if (isCommentLine(line)) return;
     if (scanForAeTokens) {
-      const match = AE_V4_TOKEN_PATTERN.exec(line);
+      const match = AE_V5_TOKEN_PATTERN.exec(line);
       if (match) {
         failures.push(
-          `${scoped}:${i + 1} references AE v4 physical token "${
+          `${scoped}:${i + 1} references AE v5 physical token "${
             match[0]
           }" outside backends/cloudflare/`,
         );
@@ -316,7 +317,7 @@ export function collectV4BoundaryFailures(
           `${scoped}:${i + 1} references v3 symbol "${match[0]}" in ${
             isContractSurface
               ? "a metrics-contract surface that must stay backend-agnostic"
-              : "a v4-only file"
+              : "a v5-only file"
           }`,
         );
       }
@@ -328,13 +329,13 @@ export function collectV4BoundaryFailures(
 /**
  * Page-identifier boundary failures for one `.ts` file — invariant 3 in the
  * module doc comment. Scanned across every `.ts` file (not gated to
- * `/metrics/` paths, unlike {@link collectV4BoundaryFailures}) since
+ * `/metrics/` paths, unlike {@link collectV5BoundaryFailures}) since
  * `PAGE_IDENTIFIER_PATTERN`'s symbol names are unique enough to carry no
  * false-positive risk, and the real leak this rule exists to catch
  * (`turbopanel/src/daemon/api-routes.test.ts`) lives outside every other
  * surface this guard scopes by path.
  */
-export function collectV4PageIdentifierFailures(
+export function collectV5PageIdentifierFailures(
   scoped: string,
   text: string,
 ): string[] {
@@ -349,7 +350,7 @@ export function collectV4PageIdentifierFailures(
       failures.push(
         `${scoped}:${
           i + 1
-        } references backend-private v4 page-identifier symbol "${
+        } references backend-private v5 page-identifier symbol "${
           match[0]
         }" outside backends/cloudflare/`,
       );
@@ -413,8 +414,8 @@ export function collectMetricsLegacyFailures(
     }
   });
   failures.push(
-    ...collectV4BoundaryFailures(scoped, text),
-    ...collectV4PageIdentifierFailures(scoped, text),
+    ...collectV5BoundaryFailures(scoped, text),
+    ...collectV5PageIdentifierFailures(scoped, text),
   );
   return failures;
 }
@@ -542,14 +543,14 @@ export function reportMetricsLegacyFailures(
         "the `clickhouse` catalog engine. Retired AE dataset names " +
         "(`turbopanel_server_metrics`, `turbopanel_server_telemetry`, " +
         "`turbopanel_server_host_metrics`) must not appear outside this guard " +
-        "and its tests. AE v4 positional tokens " +
+        "and its tests. AE v5 positional tokens " +
         "(double<N>/blob<N>/-1e308) must stay confined to backends/cloudflare/ " +
-        "— always derive columns through field-map-v4.ts. v4-suffixed files and " +
+        "— always derive columns through field-map-v5.ts. v5-suffixed files and " +
         "metrics-contract surfaces outside the metrics tree must never reference " +
         "v3-only symbols (MetricPart, HOST_METRIC_KEYS, the v3 `parts` field) as " +
-        "real code. The v4 page-identifier symbols (AE_V4_BLOB_PAGE_INDEX, " +
-        "AE_V4_BLOB_SOURCE_OR_IDENTITY_INDEX, entityIdInPageIdentityPredicateV4, " +
-        "splitPageIdentityV4) are backend-private and must stay confined to " +
+        "real code. The v5 page-identifier symbols (AE_V5_BLOB_PAGE_INDEX, " +
+        "AE_V5_BLOB_SOURCE_OR_IDENTITY_INDEX, entityIdInPageIdentityPredicateV5, " +
+        "splitPageIdentityV5) are backend-private and must stay confined to " +
         "backends/cloudflare/ as well.",
     );
     exit(1);

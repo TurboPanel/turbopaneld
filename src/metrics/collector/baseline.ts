@@ -1,7 +1,7 @@
 /**
- * Generic, reusable counter-baseline layer for v4 collectors.
+ * Generic, reusable counter-baseline layer for v5 collectors.
  *
- * Every cumulative-counter source in the v4 phase (diskstats, softnet, TCP
+ * Every cumulative-counter source in the v5 phase (diskstats, softnet, TCP
  * retransmission, vmstat, PSI totals, per-NIC directional counters) routes
  * through one `CounterBaselineTracker` instance instead of ad hoc
  * reset/first-sample handling scattered per module. Keys are caller-assembled

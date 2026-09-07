@@ -8,7 +8,7 @@
  * entity list, so `read()` itself decides whether its source exists this
  * tick.
  */
-import type { DatabaseProxySampleV4 } from "../../contract-v4.ts";
+import type { DatabaseProxySampleV5 } from "../../contract-v5.ts";
 import type { CounterBaselineTracker } from "../baseline.ts";
 
 /**
@@ -17,7 +17,7 @@ import type { CounterBaselineTracker } from "../baseline.ts";
  * this tick" — never fabricated, never coerced to `0`.
  */
 export type DatabaseProxyReading = Partial<
-  Omit<DatabaseProxySampleV4, "sourceId" | "sourceKind">
+  Omit<DatabaseProxySampleV5, "sourceId" | "sourceKind">
 >;
 
 /** Shared context every adapter needs to compute rates from cumulative counters. */

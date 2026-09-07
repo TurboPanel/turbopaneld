@@ -4,7 +4,7 @@
  * stable topology `deviceId`.
  */
 import type { CounterBaselineTracker } from "./baseline.ts";
-import type { NetworkDeviceSampleV4 } from "../contract-v4.ts";
+import type { NetworkDeviceSampleV5 } from "../contract-v5.ts";
 import {
   type NetInterfaceDetailedCounters,
   parseNetDevDetailedCounters,
@@ -91,7 +91,7 @@ export async function readNetInterfaceDetailedCounters(
   return { rx, tx, rxErrors, txErrors, rxDropped, txDropped };
 }
 
-const EMPTY_NETWORK_DEVICE_RATES: Omit<NetworkDeviceSampleV4, "deviceId"> = {
+const EMPTY_NETWORK_DEVICE_RATES: Omit<NetworkDeviceSampleV5, "deviceId"> = {
   receiveBytesPerSecond: null,
   transmitBytesPerSecond: null,
   receiveErrorsPerSecond: null,
@@ -111,7 +111,7 @@ const NETWORK_DEVICE_BASELINE_FIELDS = [
 ] as const;
 
 /**
- * Build one `NetworkDeviceSampleV4` per topology-enumerated device — TurboFabric
+ * Build one `NetworkDeviceSampleV5` per topology-enumerated device — TurboFabric
  * interfaces included as ordinary entries, never pre-aggregated. Keyed by the
  * stable `deviceId` (not the current kernel `name`), so a rename between
  * ticks doesn't fabricate a rate: a device whose counters are unreadable this
@@ -127,7 +127,7 @@ export async function buildNetworkDeviceSamples(
   tracker: CounterBaselineTracker,
   bootGeneration: number,
   seconds: number,
-): Promise<NetworkDeviceSampleV4[]> {
+): Promise<NetworkDeviceSampleV5[]> {
   const root = deps.sysRoot ?? "/sys";
   const fallback = deps.netDevText
     ? parseNetDevDetailedCounters(deps.netDevText)

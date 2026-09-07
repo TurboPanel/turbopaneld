@@ -5434,7 +5434,7 @@ it({
             sample: {
               type: "metrics",
               sequence: options.sequence,
-            } as unknown as import("../metrics/contract-v4.ts").MetricsSampleV4,
+            } as unknown as import("../metrics/contract-v5.ts").MetricsSampleV5,
           });
         },
       }),

@@ -1,5 +1,5 @@
 /**
- * v4 collector dependency seam — deliberately narrow: only what this phase's
+ * v5 collector dependency seam — deliberately narrow: only what this phase's
  * collectors need (topology discovery, raw `/proc` reads, `statfs`, sysfs IO
  * for per-NIC directional stats, GPU/ingress/database-proxy telemetry
  * adapters, and the hardware-signal/event-detection seams below). This stays
@@ -13,7 +13,7 @@ import type { IngressAdapterSet } from "./ingress/adapter.ts";
 import type { SensorIo } from "./sensors/discovery.ts";
 import type { StatfsResult } from "./types.ts";
 
-export type CollectorDepsV4 = {
+export type CollectorDepsV5 = {
   readProcFile: (
     path: string,
   ) => string | undefined | Promise<string | undefined>;

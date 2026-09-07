@@ -15,7 +15,7 @@
  */
 import type { EventCollector, EventDetectContext } from "./types.ts";
 import { makeEvent } from "./types.ts";
-import type { MetricEventV4 } from "../../contract-v4.ts";
+import type { MetricEventV5 } from "../../contract-v5.ts";
 
 const FLAP_WINDOW_MS = 5 * 60_000;
 const FLAP_THRESHOLD = 4;
@@ -28,9 +28,9 @@ type NicState = {
 export class NicLinkEventCollector implements EventCollector {
   readonly #previous = new Map<string, NicState>();
 
-  async detect(ctx: EventDetectContext): Promise<MetricEventV4[]> {
+  async detect(ctx: EventDetectContext): Promise<MetricEventV5[]> {
     const root = ctx.sysRoot ?? "/sys";
-    const events: MetricEventV4[] = [];
+    const events: MetricEventV5[] = [];
 
     for (const device of ctx.snapshot.networks) {
       if (

@@ -1,54 +1,25 @@
 /**
- * CPU-detail collector: builds `CpuDetailSampleV4` — the daemon's 4 busiest
- * logical cores this interval (`hotspots`), host-wide current-frequency
+ * CPU-detail collector: builds `CpuDetailSampleV5` — host-wide
+ * current-frequency
  * range (`/sys/devices/system/cpu/cpuN/cpufreq/scaling_cur_freq`, falling
  * back to the read-only `cpuinfo_cur_freq` on governors that don't expose
  * `scaling_cur_freq`), and scheduling/interrupt counters
  * (`ctxt`/`processes`/`intr` from `/proc/stat`, routed through the shared
  * `CounterBaselineTracker` as rates — `parseStatScalarCounters` already
  * parses these, reserved for this exact phase). `cpuIrqPercent` reuses
- * `cpu.ts`'s `cpuIrqPercentV4` against the aggregate `cpu` line, not a
+ * `cpu.ts`'s `cpuIrqPercentV5` against the aggregate `cpu` line, not a
  * per-core sum.
  *
- * Cores are identified via `coreIdOf`, resolved from `topology/
- * cpu-topology.ts`'s per-core topology catalog (`buildCpuCoreIdIndex`/
- * `coreIdForStatKey`) — a topology-stable id, not the raw `/proc/stat`
- * `cpuN` key, so a reboot/hotplug reindex never silently reuses an old id
- * for a different logical thread.
+ * v5 carries no per-core breakdown: the busiest-core `hotspots` array was
+ * removed with the rest of the per-core surface, so this family is purely
+ * host-scoped and its slot budget dropped from 19 to 7.
  */
-import { cpuBusyPercentV4, cpuIrqPercentV4 } from "./cpu.ts";
+import { cpuIrqPercentV5 } from "./cpu.ts";
 import { parseStatScalarCounters } from "./parse-stat.ts";
 import type { CounterBaselineTracker } from "./baseline.ts";
-import type { CpuDetailSampleV4, CpuHotspotSampleV4 } from "../contract-v4.ts";
+import type { CpuDetailSampleV5 } from "../contract-v5.ts";
 import type { SensorIo } from "./sensors/discovery.ts";
 import type { CpuCounters } from "./types.ts";
-
-const HOTSPOT_COUNT = 4;
-
-/** This tick's `HOTSPOT_COUNT` busiest logical cores, by `busyPercent`, present in both snapshots. */
-function selectHotspots(
-  prevCores: Record<string, CpuCounters>,
-  currCores: Record<string, CpuCounters>,
-  seconds: number,
-  coreIdOf: (key: string) => string,
-): CpuHotspotSampleV4[] {
-  const scored: CpuHotspotSampleV4[] = [];
-  for (const key of Object.keys(currCores)) {
-    const prev = prevCores[key];
-    const curr = currCores[key];
-    if (!prev) continue;
-    const pct = cpuBusyPercentV4(prev, curr, seconds);
-    if (pct.busyPercent === null) continue;
-    scored.push({
-      coreId: coreIdOf(key),
-      busyPercent: pct.busyPercent,
-      iowaitPercent: pct.iowaitPercent,
-      stealPercent: pct.stealPercent,
-    });
-  }
-  scored.sort((a, b) => (b.busyPercent ?? 0) - (a.busyPercent ?? 0));
-  return scored.slice(0, HOTSPOT_COUNT);
-}
 
 type FrequencyRangeMHz = {
   averageFrequencyMHz: number | null;
@@ -107,10 +78,7 @@ export type CpuDetailDeps = {
   statText: string | undefined;
   prevCpu: CpuCounters | null;
   currCpu: CpuCounters | null;
-  prevCores: Record<string, CpuCounters>;
   currCores: Record<string, CpuCounters>;
-  /** Resolves a `/proc/stat` logical-core key (e.g. `"0"`) to its topology-stable coreId. */
-  coreIdOf: (key: string) => string;
   tracker: CounterBaselineTracker;
   bootGeneration: number;
   seconds: number;
@@ -119,15 +87,9 @@ export type CpuDetailDeps = {
 /** `null` only when `/proc/stat` itself was unreadable this tick (matches the orchestrator's other "no raw text → no reading" gates). */
 export async function buildCpuDetailSample(
   deps: CpuDetailDeps,
-): Promise<CpuDetailSampleV4 | null> {
+): Promise<CpuDetailSampleV5 | null> {
   if (deps.statText === undefined) return null;
 
-  const hotspots = selectHotspots(
-    deps.prevCores,
-    deps.currCores,
-    deps.seconds,
-    deps.coreIdOf,
-  );
   const frequency = await readFrequencyRangeMHz(
     deps.io,
     deps.sysRoot ?? "/sys",
@@ -157,13 +119,12 @@ export async function buildCpuDetailSample(
   );
 
   return {
-    hotspots,
     averageFrequencyMHz: frequency.averageFrequencyMHz,
     minimumFrequencyMHz: frequency.minimumFrequencyMHz,
     maximumFrequencyMHz: frequency.maximumFrequencyMHz,
     contextSwitchesPerSecond,
     interruptsPerSecond,
     forksPerSecond,
-    cpuIrqPercent: cpuIrqPercentV4(deps.prevCpu, deps.currCpu),
+    cpuIrqPercent: cpuIrqPercentV5(deps.prevCpu, deps.currCpu),
   };
 }

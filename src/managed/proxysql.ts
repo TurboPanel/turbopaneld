@@ -59,7 +59,7 @@ export const ADMIN_PORT = 6032;
  * `lib/ProxySQL_Admin.cpp::load_restapi_server` in the ProxySQL source,
  * which registers no other route and never checks credentials). Published to
  * `127.0.0.1` only, same as {@link ADMIN_PORT}, and scraped by the daemon's
- * traffic collector (`src/metrics/collector/database-proxy/proxysql-v4.ts`).
+ * traffic collector (`src/metrics/collector/database-proxy/proxysql-v5.ts`).
  */
 export const REST_API_PORT = 6070;
 

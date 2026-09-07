@@ -40,7 +40,7 @@ import {
 import { readTemperatureValue } from "./sensors/temperature.ts";
 import type { CounterBaselineTracker } from "./baseline.ts";
 import type { HardwareSignalCandidateMap } from "./events/types.ts";
-import type { HardwareSignalSampleV4 } from "../contract-v4.ts";
+import type { HardwareSignalSampleV5 } from "../contract-v5.ts";
 import type { PhysicalSignalTopology } from "../topology/types.ts";
 import type { SensorCandidate } from "./types.ts";
 
@@ -50,7 +50,7 @@ function toSignalId(candidate: SensorCandidate): string {
 }
 
 export type HardwareSignalSamplesResult = {
-  samples: HardwareSignalSampleV4[];
+  samples: HardwareSignalSampleV5[];
   /** Live candidate map (`signalId → SensorCandidate`) — reused by `events/physical-health.ts` to derive sibling alarm/fault sysfs paths without a third `discoverSensors` walk. */
   candidates: HardwareSignalCandidateMap;
 };
@@ -180,7 +180,7 @@ export async function buildHardwareSignalSamples(
   );
 
   const samples = await Promise.all(
-    topologySignals.map(async (signal): Promise<HardwareSignalSampleV4> => {
+    topologySignals.map(async (signal): Promise<HardwareSignalSampleV5> => {
       if (signal.signalId === CPU_HOTTEST_CORE_SIGNAL_ID) {
         const value = await readHottestCoreValue(coreCandidates, deps.io);
         return { signalId: signal.signalId, kind: signal.kind, value };

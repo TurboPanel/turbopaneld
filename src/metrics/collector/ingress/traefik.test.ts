@@ -95,7 +95,7 @@ test("parseTraefikExposition: a freshly-started proxy with no services nulls eve
   assertEquals(reading.responseBytes, null);
   assertEquals(reading.requestDurationSecondsAvg, null);
   assertEquals(reading.requestsUnder100ms, null);
-  // No entrypoint_open_connections series in this fixture at all.
+  // No traefik_open_connections series in this fixture at all.
   assertEquals(reading.requestsInFlight, null);
   // No service registered yet — no retries/server-up series at all.
   assertEquals(reading.retries, null);

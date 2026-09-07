@@ -9,7 +9,7 @@
  * (reachable + expected metrics present) and, if so, returns its own
  * `sourceId`/`sourceKind` alongside the reading.
  */
-import type { IngressSourceSampleV4 } from "../../contract-v4.ts";
+import type { IngressSourceSampleV5 } from "../../contract-v5.ts";
 import type { CounterBaselineTracker } from "../baseline.ts";
 
 /**
@@ -18,7 +18,7 @@ import type { CounterBaselineTracker } from "../baseline.ts";
  * tick" — never fabricated, never coerced to `0`.
  */
 export type IngressReading = Partial<
-  Omit<IngressSourceSampleV4, "sourceId" | "sourceKind">
+  Omit<IngressSourceSampleV5, "sourceId" | "sourceKind">
 >;
 
 /** Shared context every adapter needs to compute rates from cumulative counters. */

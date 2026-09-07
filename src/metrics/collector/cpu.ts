@@ -1,5 +1,5 @@
 /**
- * CPU domain: v4 percentage splits from `/proc/stat` jiffie deltas.
+ * CPU domain: v5 percentage splits from `/proc/stat` jiffie deltas.
  *
  * Raw parsing stays in `parse-stat.ts`; this module only turns two counter
  * snapshots into percentages. No collapsed `usage` value is computed — the
@@ -17,14 +17,14 @@ function fieldDelta(
 }
 
 /**
- * v4 CPU percentages: `busyPercent` is `100 - idle% - iowait% - steal%`
+ * v5 CPU percentages: `busyPercent` is `100 - idle% - iowait% - steal%`
  * (never `100 - idle` alone — steal/iowait are not "busy" time this host
  * controls). `guest`/`guest_nice` deltas are folded out of `user`/`nice`
  * before computing their percentages, since the kernel already counts guest
  * ticks inside `user`/`nice` — without this, guest time would be counted
  * twice (once in `user`, once implicitly via `busyPercent`).
  */
-export type CpuPercentagesV4 = {
+export type CpuPercentagesV5 = {
   busyPercent: number | null;
   userPercent: number | null;
   systemPercent: number | null;
@@ -33,7 +33,7 @@ export type CpuPercentagesV4 = {
   softirqPercent: number | null;
 };
 
-export const EMPTY_CPU_PERCENTAGES_V4: CpuPercentagesV4 = {
+export const EMPTY_CPU_PERCENTAGES_V5: CpuPercentagesV5 = {
   busyPercent: null,
   userPercent: null,
   systemPercent: null,
@@ -42,15 +42,15 @@ export const EMPTY_CPU_PERCENTAGES_V4: CpuPercentagesV4 = {
   softirqPercent: null,
 };
 
-export function cpuBusyPercentV4(
+export function cpuBusyPercentV5(
   prev: CpuCounters | null,
   curr: CpuCounters | null,
   seconds: number,
-): CpuPercentagesV4 {
-  if (!prev || !curr || seconds <= 0) return EMPTY_CPU_PERCENTAGES_V4;
+): CpuPercentagesV5 {
+  if (!prev || !curr || seconds <= 0) return EMPTY_CPU_PERCENTAGES_V5;
 
   const deltaTotal = curr.total - prev.total;
-  if (deltaTotal <= 0) return EMPTY_CPU_PERCENTAGES_V4;
+  if (deltaTotal <= 0) return EMPTY_CPU_PERCENTAGES_V5;
 
   const pct = (delta: number | null): number | null => {
     if (delta === null) return null;
@@ -82,7 +82,7 @@ export function cpuBusyPercentV4(
   const nicePercent = pct(dedupedNiceDelta);
   const systemPercentRaw = pct(fieldDelta(prev.system, curr.system));
 
-  // user/nice are reported together as one "userPercent" field in the v4
+  // user/nice are reported together as one "userPercent" field in the v5
   // contract; combine only after de-duplicating guest time from each.
   const combinedUserPercent = userPercent === null && nicePercent === null
     ? null
@@ -98,35 +98,48 @@ export function cpuBusyPercentV4(
   };
 }
 
+/** A logical core at or above this busy% counts as saturated for the interval. */
+export const SATURATED_CORE_BUSY_PERCENT = 90;
+
 /**
- * Max per-core busy% across every `cpuN` key present in *both* snapshots.
- * Missing/mismatched core sets across the interval null that core's
- * contribution (never fabricate a max from a partial set); `null` when zero
- * cores compute cleanly.
+ * How many logical cores ran at or above {@link SATURATED_CORE_BUSY_PERCENT}
+ * this interval, across every `cpuN` key present in *both* snapshots.
+ *
+ * v5's replacement for v4's `maxCoreBusyPercent`. A maximum saturates as a
+ * statistic on a many-core host — something is nearly always near the top,
+ * so the series pins high and stops carrying information. A *count* scales
+ * with the core budget instead: `0` on a healthy host, `1` when a single
+ * thread is wedged (the single-threaded-bottleneck signal the max was
+ * really there to catch), and a large number when the box is genuinely
+ * saturated. Cores missing from either snapshot contribute nothing rather
+ * than being counted as idle; `null` when zero cores compute cleanly, so an
+ * unreadable `/proc/stat` never reads as "nothing is busy".
  */
-export function maxCoreBusyPercentV4(
+export function saturatedCoreCountV5(
   prevCores: Record<string, CpuCounters>,
   currCores: Record<string, CpuCounters>,
   seconds: number,
 ): number | null {
-  let max: number | null = null;
+  let counted = 0;
+  let saturated = 0;
   for (const key of Object.keys(currCores)) {
     const prev = prevCores[key];
     const curr = currCores[key];
     if (!prev) continue;
-    const { busyPercent } = cpuBusyPercentV4(prev, curr, seconds);
+    const { busyPercent } = cpuBusyPercentV5(prev, curr, seconds);
     if (busyPercent === null) continue;
-    if (max === null || busyPercent > max) max = busyPercent;
+    counted += 1;
+    if (busyPercent >= SATURATED_CORE_BUSY_PERCENT) saturated += 1;
   }
-  return max;
+  return counted === 0 ? null : saturated;
 }
 
 /**
  * Share of aggregate delta ticks spent servicing hardware+software
  * interrupts (`irq` + `softirq`), against the same `deltaTotal` denominator
- * as every other v4 CPU percentage — feeds `CpuDetailSampleV4.cpuIrqPercent`.
+ * as every other v5 CPU percentage — feeds `CpuDetailSampleV5.cpuIrqPercent`.
  */
-export function cpuIrqPercentV4(
+export function cpuIrqPercentV5(
   prev: CpuCounters | null,
   curr: CpuCounters | null,
 ): number | null {

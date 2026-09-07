@@ -1,36 +1,31 @@
 /**
- * Linux collector orchestrator — v4 assembly.
+ * Linux collector orchestrator — v5 assembly.
  *
- * Builds one `MetricsSampleV4` per tick by composing this tick's
+ * Builds one `MetricsSampleV5` per tick by composing this tick's
  * `TopologySnapshot` (identity + topology generation + boot generation), the
- * shared counter-baseline layer (`baseline.ts`), and every v4 parser module.
+ * shared counter-baseline layer (`baseline.ts`), and every v5 parser module.
  * `gpus` is populated via `gpu/index.ts`'s `buildGpuSamples` when
- * `CollectorDepsV4.gpuAdapters` is wired (production always wires it —
- * `collector/index.ts`'s `defaultDepsV4`); `ingressSources`/
+ * `CollectorDepsV5.gpuAdapters` is wired (production always wires it —
+ * `collector/index.ts`'s `defaultDepsV5`); `ingressSources`/
  * `databaseProxies` are populated the same way via `ingress/index.ts`'s
  * `buildIngressSources` / `database-proxy/index.ts`'s
  * `buildDatabaseProxies` when their respective adapter sets are wired.
  * `hardwareSignals` is populated via `hardware-signals.ts`'s
  * `buildHardwareSignalSamples` for every topology-identified signal
  * (`[]` on a VM, since topology never identifies any). `events` is
- * populated via `CollectorDepsV4.eventCollectors`
+ * populated via `CollectorDepsV5.eventCollectors`
  * (`events/index.ts`'s `EventCollectorSet`) when wired. Absent (e.g. a test
  * collector), each of these stays `[]`.
  */
 import {
-  buildMetricsSampleV4,
-  type CpuCoreLiveSampleV4,
-  type CpuDetailSampleV4,
-  type HostMetricsV4,
-  type MemoryDetailSampleV4,
-  METRICS_SCHEMA_VERSION_V4,
-  type MetricsCollectionModeV4,
-  type MetricsSampleV4,
-} from "../contract-v4.ts";
-import {
-  buildCpuCoreIdIndex,
-  coreIdForStatKey,
-} from "../topology/cpu-topology.ts";
+  buildMetricsSampleV5,
+  type CpuDetailSampleV5,
+  type HostMetricsV5,
+  type MemoryDetailSampleV5,
+  METRICS_SCHEMA_VERSION_V5,
+  type MetricsCollectionModeV5,
+  type MetricsSampleV5,
+} from "../contract-v5.ts";
 import { computeSlotMapping } from "../topology/slot-mapping.ts";
 import {
   EMPTY_TOPOLOGY_OVERRIDES,
@@ -39,17 +34,17 @@ import {
 } from "../topology/types.ts";
 import { CounterBaselineTracker } from "./baseline.ts";
 import {
+  type BlockDeviceTemperatures,
   buildBlockDeviceSamples,
+  buildBlockDeviceTemperatures,
   type HostDiskAggregates,
   hostDiskAggregates,
-  maxBlockDeviceUtilPercent,
 } from "./block-devices.ts";
 import {
-  cpuBusyPercentV4,
-  type CpuPercentagesV4,
-  maxCoreBusyPercentV4,
+  cpuBusyPercentV5,
+  type CpuPercentagesV5,
+  saturatedCoreCountV5,
 } from "./cpu.ts";
-import { buildCpuCoreLiveSamples } from "./cpu-core-live.ts";
 import { buildCpuDetailSample } from "./cpu-detail.ts";
 import { buildDatabaseProxies } from "./database-proxy/index.ts";
 import type { EventDetectContext } from "./events/index.ts";
@@ -92,7 +87,7 @@ import {
   type VmstatRates,
   vmstatRates,
 } from "./parse-vmstat.ts";
-import type { CollectorDepsV4 } from "./types-v4.ts";
+import type { CollectorDepsV5 } from "./types-v5.ts";
 import type {
   CpuCounters,
   MetricsCollector,
@@ -156,7 +151,7 @@ type RawTexts = {
   mdstatText: string | undefined;
 };
 
-async function readRawTexts(deps: CollectorDepsV4): Promise<RawTexts> {
+async function readRawTexts(deps: CollectorDepsV5): Promise<RawTexts> {
   const [
     statText,
     memText,
@@ -223,16 +218,16 @@ function swapUsedBytes(
   return swapTotalBytes - swapFreeBytes;
 }
 
-/** Minimal-but-valid v4 sample for the collect-failure path — never throws out of `collect()`. */
+/** Minimal-but-valid v5 sample for the collect-failure path — never throws out of `collect()`. */
 function emptySample(
   nowMs: number,
   seconds: number,
   sequence: number,
-  collectionMode: MetricsCollectionModeV4,
-): MetricsSampleV4 {
-  return buildMetricsSampleV4({
+  collectionMode: MetricsCollectionModeV5,
+): MetricsSampleV5 {
+  return buildMetricsSampleV5({
     metadata: {
-      version: METRICS_SCHEMA_VERSION_V4,
+      version: METRICS_SCHEMA_VERSION_V5,
       sampledAt: new Date(nowMs).toISOString(),
       intervalSeconds: seconds,
       sequence,
@@ -249,14 +244,15 @@ function emptySample(
         stealPercent: null,
         softirqPercent: null,
         pressureSomePercent: null,
-        maxCoreBusyPercent: null,
+        saturatedCoreCount: null,
         procsRunning: null,
         procsBlocked: null,
         processCount: null,
       },
       kernel: { fileHandlesUsedPercent: null, conntrackUsedPercent: null },
       memory: {
-        availableBytes: null,
+        usedBytes: null,
+        cachedFilesBytes: null,
         swapUsedBytes: null,
         pressureSomePercent: null,
         pressureFullPercent: null,
@@ -269,9 +265,7 @@ function emptySample(
         ioPressureFullPercent: null,
         diskReadBytesPerSecond: null,
         diskWriteBytesPerSecond: null,
-        diskReadLatencyMs: null,
-        diskWriteLatencyMs: null,
-        maxBlockDeviceUtilPercent: null,
+        diskLatencyMs: null,
         rootFilesystemAvailableBytes: null,
         rootFilesystemFreeInodes: null,
       },
@@ -333,8 +327,8 @@ type CpuTick = {
   currentCores: Record<string, CpuCounters>;
   prevCpu: CpuCounters | null;
   prevCores: Record<string, CpuCounters>;
-  cpuPct: CpuPercentagesV4;
-  maxCoreBusyPercent: number | null;
+  cpuPct: CpuPercentagesV5;
+  saturatedCoreCount: number | null;
   procs: { running: number | null; blocked: number | null };
 };
 
@@ -369,8 +363,8 @@ function parseCpuTick(
     currentCores,
     prevCpu,
     prevCores,
-    cpuPct: cpuBusyPercentV4(prevCpu, currentCpu, seconds),
-    maxCoreBusyPercent: maxCoreBusyPercentV4(prevCores, currentCores, seconds),
+    cpuPct: cpuBusyPercentV5(prevCpu, currentCpu, seconds),
+    saturatedCoreCount: saturatedCoreCountV5(prevCores, currentCores, seconds),
     procs: whenPresentOr(statText, parseStatProcs, EMPTY_PROCS),
   };
 }
@@ -435,7 +429,8 @@ function readKernelLimits(raw: RawTexts): {
 }
 
 type MemoryTick = {
-  availableBytes: number | null;
+  usedBytes: number | null;
+  cachedFilesBytes: number | null;
   swapUsedBytes: number | null;
   vmstat: VmstatCounters;
   rates: VmstatRates;
@@ -449,7 +444,8 @@ function readMemoryTick(
   const gauges = whenPresent(raw.memText, readMemoryGauges);
   const vmstat = whenPresentOr(raw.vmstatText, parseVmstat, EMPTY_VMSTAT);
   return {
-    availableBytes: gauges?.availableBytes ?? null,
+    usedBytes: gauges?.usedBytes ?? null,
+    cachedFilesBytes: gauges?.cachedFilesBytes ?? null,
     swapUsedBytes: swapUsedBytes(
       gauges?.swapTotalBytes ?? null,
       gauges?.swapFreeBytes ?? null,
@@ -503,6 +499,7 @@ function readDiskTick(
   topology: TopologySnapshot["blockDevices"],
   diskstatsText: string | undefined,
   rates: TickRates,
+  temperatures: BlockDeviceTemperatures,
 ): DiskTick {
   const counters = whenPresentOr(diskstatsText, parseDiskstatsRows, {});
   return {
@@ -512,6 +509,7 @@ function readDiskTick(
       rates.tracker,
       rates.bootGeneration,
       rates.seconds,
+      temperatures,
     ),
     aggregates: hostDiskAggregates(
       topology,
@@ -524,7 +522,7 @@ function readDiskTick(
 }
 
 async function collectGpuSamples(
-  deps: CollectorDepsV4,
+  deps: CollectorDepsV5,
   gpus: TopologySnapshot["gpus"],
   rates: TickRates,
 ) {
@@ -532,19 +530,8 @@ async function collectGpuSamples(
   return await buildGpuSamples(gpus, deps.gpuAdapters, rates);
 }
 
-function liveCpuCores(
-  collectionMode: MetricsCollectionModeV4,
-  prevCores: Record<string, CpuCounters>,
-  currentCores: Record<string, CpuCounters>,
-  seconds: number,
-  coreIdOf: (key: string) => string,
-): CpuCoreLiveSampleV4[] | undefined {
-  if (collectionMode !== "live") return undefined;
-  return buildCpuCoreLiveSamples(prevCores, currentCores, seconds, coreIdOf);
-}
-
 async function collectEvents(
-  deps: CollectorDepsV4,
+  deps: CollectorDepsV5,
   ctx: Omit<EventDetectContext, "isPhysical">,
 ) {
   if (!deps.eventCollectors) return [];
@@ -552,25 +539,22 @@ async function collectEvents(
 }
 
 async function readProcessCount(
-  deps: CollectorDepsV4,
+  deps: CollectorDepsV5,
 ): Promise<number | null> {
   if (deps.countProcesses) return await deps.countProcesses();
   return await countProcessesInProc();
 }
 
 function optionalSampleFields(
-  cpuDetail: CpuDetailSampleV4 | null,
-  memoryDetail: MemoryDetailSampleV4 | null,
-  cpuCoreLive: CpuCoreLiveSampleV4[] | undefined,
+  cpuDetail: CpuDetailSampleV5 | null,
+  memoryDetail: MemoryDetailSampleV5 | null,
 ): {
-  cpuDetail?: CpuDetailSampleV4;
-  memoryDetail?: MemoryDetailSampleV4;
-  cpuCoreLive?: CpuCoreLiveSampleV4[];
+  cpuDetail?: CpuDetailSampleV5;
+  memoryDetail?: MemoryDetailSampleV5;
 } {
   return {
     ...(cpuDetail ? { cpuDetail } : {}),
     ...(memoryDetail ? { memoryDetail } : {}),
-    ...(cpuCoreLive ? { cpuCoreLive } : {}),
   };
 }
 
@@ -589,7 +573,7 @@ function buildHostMetrics(parts: {
     availableBytes: number | null;
     freeInodes: number | null;
   } | null;
-}): HostMetricsV4 {
+}): HostMetricsV5 {
   return {
     cpu: {
       busyPercent: parts.cpu.cpuPct.busyPercent,
@@ -599,7 +583,7 @@ function buildHostMetrics(parts: {
       stealPercent: parts.cpu.cpuPct.stealPercent,
       softirqPercent: parts.cpu.cpuPct.softirqPercent,
       pressureSomePercent: parts.psi.cpuSome,
-      maxCoreBusyPercent: parts.cpu.maxCoreBusyPercent,
+      saturatedCoreCount: parts.cpu.saturatedCoreCount,
       procsRunning: parts.cpu.procs.running,
       procsBlocked: parts.cpu.procs.blocked,
       processCount: parts.processCount,
@@ -609,7 +593,8 @@ function buildHostMetrics(parts: {
       conntrackUsedPercent: parts.kernel.conntrackPercent,
     },
     memory: {
-      availableBytes: parts.memory.availableBytes,
+      usedBytes: parts.memory.usedBytes,
+      cachedFilesBytes: parts.memory.cachedFilesBytes,
       swapUsedBytes: parts.memory.swapUsedBytes,
       pressureSomePercent: parts.psi.memorySome,
       pressureFullPercent: parts.psi.memoryFull,
@@ -622,11 +607,7 @@ function buildHostMetrics(parts: {
       ioPressureFullPercent: parts.psi.ioFull,
       diskReadBytesPerSecond: parts.disks.aggregates.diskReadBytesPerSecond,
       diskWriteBytesPerSecond: parts.disks.aggregates.diskWriteBytesPerSecond,
-      diskReadLatencyMs: parts.disks.aggregates.diskReadLatencyMs,
-      diskWriteLatencyMs: parts.disks.aggregates.diskWriteLatencyMs,
-      maxBlockDeviceUtilPercent: maxBlockDeviceUtilPercent(
-        parts.disks.blockDevices,
-      ),
+      diskLatencyMs: parts.disks.aggregates.diskLatencyMs,
       rootFilesystemAvailableBytes:
         parts.rootFilesystemCapacity?.availableBytes ?? null,
       rootFilesystemFreeInodes: parts.rootFilesystemCapacity?.freeInodes ??
@@ -669,12 +650,12 @@ function monitoredNetworkDevices(
 export class LinuxMetricsCollector implements MetricsCollector {
   #previous: PreviousCpuSnapshot | undefined;
   readonly #tracker = new CounterBaselineTracker();
-  readonly #deps: CollectorDepsV4;
+  readonly #deps: CollectorDepsV5;
   readonly #nominalIntervalSeconds: number;
   readonly #pageSizeBytes: number;
 
   constructor(
-    deps: CollectorDepsV4,
+    deps: CollectorDepsV5,
     options?: { nominalIntervalSeconds?: number },
   ) {
     this.#deps = deps;
@@ -685,7 +666,7 @@ export class LinuxMetricsCollector implements MetricsCollector {
   async collect(options: {
     sequence: number;
     nowMs?: number;
-    collectionMode?: MetricsCollectionModeV4;
+    collectionMode?: MetricsCollectionModeV5;
   }): Promise<MetricsCollectResult> {
     const collectionMode = options.collectionMode ?? "baseline";
     const nowMs = options.nowMs ?? this.#deps.now();
@@ -707,7 +688,7 @@ export class LinuxMetricsCollector implements MetricsCollector {
   async #collectTick(
     sequence: number,
     nowMs: number,
-    collectionMode: MetricsCollectionModeV4,
+    collectionMode: MetricsCollectionModeV5,
   ): Promise<MetricsCollectResult> {
     const [snapshot, raw, overrides] = await Promise.all([
       this.#deps.collectTopology(),
@@ -736,7 +717,6 @@ export class LinuxMetricsCollector implements MetricsCollector {
     const kernel = readKernelLimits(raw);
     const memory = readMemoryTick(raw, rates, this.#pageSizeBytes);
     const network = readNetworkRates(raw, rates);
-    const disks = readDiskTick(snapshot.blockDevices, raw.diskstatsText, rates);
 
     const filesystems = await buildFilesystemSamples(
       snapshot.filesystems,
@@ -776,9 +756,15 @@ export class LinuxMetricsCollector implements MetricsCollector {
         seconds,
       },
     );
+    // Disk sampling trails hardware signals: drive temperature is joined out
+    // of the sensor catalog by kernel name (`buildBlockDeviceTemperatures`).
+    const disks = readDiskTick(
+      snapshot.blockDevices,
+      raw.diskstatsText,
+      rates,
+      buildBlockDeviceTemperatures(hardwareSignalResult.samples),
+    );
     const mountEntries = whenPresentOr(raw.mountsText, parseProcMounts, []);
-    const cpuCoreIdIndex = buildCpuCoreIdIndex(snapshot.cpu.cores);
-    const coreIdOf = (key: string) => coreIdForStatKey(cpuCoreIdIndex, key);
 
     const cpuDetail = await buildCpuDetailSample({
       io: this.#deps.io,
@@ -786,9 +772,7 @@ export class LinuxMetricsCollector implements MetricsCollector {
       statText: raw.statText,
       prevCpu: cpu.prevCpu,
       currCpu: cpu.currentCpu,
-      prevCores: cpu.prevCores,
       currCores: cpu.currentCores,
-      coreIdOf,
       tracker: this.#tracker,
       bootGeneration,
       seconds,
@@ -800,13 +784,6 @@ export class LinuxMetricsCollector implements MetricsCollector {
       bootGeneration,
       seconds,
     });
-    const cpuCoreLive = liveCpuCores(
-      collectionMode,
-      cpu.prevCores,
-      cpu.currentCores,
-      seconds,
-      coreIdOf,
-    );
     const events = await collectEvents(this.#deps, {
       nowMs,
       snapshot,
@@ -824,9 +801,9 @@ export class LinuxMetricsCollector implements MetricsCollector {
       sysRoot: this.#deps.sysRoot,
     });
 
-    const sample = buildMetricsSampleV4({
+    const sample = buildMetricsSampleV5({
       metadata: {
-        version: METRICS_SCHEMA_VERSION_V4,
+        version: METRICS_SCHEMA_VERSION_V5,
         sampledAt: new Date(nowMs).toISOString(),
         intervalSeconds: seconds,
         sequence,
@@ -852,7 +829,7 @@ export class LinuxMetricsCollector implements MetricsCollector {
       ingressSources,
       databaseProxies,
       events,
-      ...optionalSampleFields(cpuDetail, memoryDetail, cpuCoreLive),
+      ...optionalSampleFields(cpuDetail, memoryDetail),
     });
 
     this.#previous = {

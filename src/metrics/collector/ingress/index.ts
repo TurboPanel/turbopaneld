@@ -13,7 +13,7 @@
  * namespace so a later readable tick re-origins instead of diffing across
  * the gap.
  */
-import type { IngressSourceSampleV4 } from "../../contract-v4.ts";
+import type { IngressSourceSampleV5 } from "../../contract-v5.ts";
 import type { CounterBaselineTracker } from "../baseline.ts";
 import type {
   IngressAdapter,
@@ -29,11 +29,11 @@ export type {
   IngressReadContext,
   IngressReading,
 } from "./adapter.ts";
-export { CaddyIngressAdapter, SITE_CADDY_ADMIN_ADDR } from "./caddy-v4.ts";
+export { CaddyIngressAdapter, SITE_CADDY_ADMIN_ADDR } from "./caddy-v5.ts";
 export { TRAEFIK_METRICS_ADDR, TraefikIngressAdapter } from "./traefik.ts";
 
 const EMPTY_INGRESS_FIELDS: Omit<
-  IngressSourceSampleV4,
+  IngressSourceSampleV5,
   "sourceId" | "sourceKind"
 > = {
   requests: null,
@@ -59,14 +59,14 @@ function toSample(
   sourceId: string,
   sourceKind: string,
   reading: IngressReading,
-): IngressSourceSampleV4 {
+): IngressSourceSampleV5 {
   return { sourceId, sourceKind, ...EMPTY_INGRESS_FIELDS, ...reading };
 }
 
 async function readOne(
   adapter: IngressAdapter,
   ctx: IngressReadContext,
-): Promise<IngressSourceSampleV4 | null> {
+): Promise<IngressSourceSampleV5 | null> {
   try {
     const result = await adapter.read(ctx);
     if (result === null) return null;
@@ -96,7 +96,7 @@ export async function buildIngressSources(
     bootGeneration: number;
     seconds: number;
   },
-): Promise<IngressSourceSampleV4[]> {
+): Promise<IngressSourceSampleV5[]> {
   if (!adapters) return [];
   const readCtx: IngressReadContext = ctx;
 
@@ -105,7 +105,7 @@ export async function buildIngressSources(
     readOne(adapters.traefik, readCtx),
   ]);
 
-  const sources: IngressSourceSampleV4[] = [];
+  const sources: IngressSourceSampleV5[] = [];
   if (caddy !== null) {
     sources.push(caddy);
   } else {

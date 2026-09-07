@@ -15,7 +15,7 @@
  */
 import type { EventCollector, EventDetectContext } from "./types.ts";
 import { makeEvent } from "./types.ts";
-import type { MetricEventV4 } from "../../contract-v4.ts";
+import type { MetricEventV5 } from "../../contract-v5.ts";
 import type { SensorIo } from "../sensors/discovery.ts";
 
 const INPUT_SUFFIX = "_input";
@@ -40,9 +40,9 @@ export class PhysicalHealthEventCollector implements EventCollector {
   readonly #voltageActive = new Map<string, boolean>();
   readonly #psuActive = new Map<string, boolean>();
 
-  async detect(ctx: EventDetectContext): Promise<MetricEventV4[]> {
+  async detect(ctx: EventDetectContext): Promise<MetricEventV5[]> {
     if (!ctx.isPhysical) return [];
-    const events: MetricEventV4[] = [];
+    const events: MetricEventV5[] = [];
 
     await this.#detectFanFaults(ctx, events);
     this.#detectTempThresholds(ctx, events);
@@ -53,7 +53,7 @@ export class PhysicalHealthEventCollector implements EventCollector {
 
   async #detectFanFaults(
     ctx: EventDetectContext,
-    events: MetricEventV4[],
+    events: MetricEventV5[],
   ): Promise<void> {
     for (const [signalId, candidate] of ctx.hardwareSignalCandidates) {
       if (!FAN_CANDIDATE_RE.test(candidate.path)) continue;
@@ -85,7 +85,7 @@ export class PhysicalHealthEventCollector implements EventCollector {
 
   #detectTempThresholds(
     ctx: EventDetectContext,
-    events: MetricEventV4[],
+    events: MetricEventV5[],
   ): void {
     for (const signal of ctx.snapshot.hardwareSignals) {
       if (signal.kind !== "temperature" || !signal.thresholds) continue;
@@ -121,7 +121,7 @@ export class PhysicalHealthEventCollector implements EventCollector {
 
   async #detectVoltagePsuAlarms(
     ctx: EventDetectContext,
-    events: MetricEventV4[],
+    events: MetricEventV5[],
   ): Promise<void> {
     const dirs = new Set<string>();
     for (const candidate of ctx.hardwareSignalCandidates.values()) {
@@ -157,7 +157,7 @@ export class PhysicalHealthEventCollector implements EventCollector {
 
   async #detectAlarmFile(
     ctx: EventDetectContext,
-    events: MetricEventV4[],
+    events: MetricEventV5[],
     path: string,
     state: Map<string, boolean>,
     kind: "voltage_alarm" | "psu_fault",

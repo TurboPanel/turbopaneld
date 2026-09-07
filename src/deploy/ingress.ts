@@ -45,7 +45,7 @@ const TRAEFIK_HTTP_PORT = 7080;
 const TRAEFIK_HTTPS_PORT = 7443;
 /**
  * Loopback-only Prometheus metrics entrypoint for the shared hosting-ingress
- * Traefik. Scraped by the daemon's `ingress/traefik.ts` v4 metrics adapter
+ * Traefik. Scraped by the daemon's `ingress/traefik.ts` v5 metrics adapter
  * the same way `SITE_CADDY_ADMIN_ADDR`/`PROXYSQL_REST_ADDR` are — never
  * published beyond `TRAEFIK_LOOPBACK`. Per-service tenant Traefik
  * (`serviceTraefikCompose`) does not get one; ingress metrics are scoped to

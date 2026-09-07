@@ -4,7 +4,7 @@
  * topology `gpuId` (`topology/gpu-topology.ts`). `gpu/index.ts`'s
  * `buildGpuSamples` is the only orchestrator that calls these.
  */
-import type { GpuSampleV4 } from "../../contract-v4.ts";
+import type { GpuSampleV5 } from "../../contract-v5.ts";
 import type { CounterBaselineTracker } from "../baseline.ts";
 import type { GpuTopology } from "../../topology/types.ts";
 
@@ -16,7 +16,7 @@ import type { GpuTopology } from "../../topology/types.ts";
  * falls through to the next adapter in the chain for that one field (see
  * that module's doc comment for the full per-field precedence contract).
  */
-export type GpuReading = Partial<Omit<GpuSampleV4, "gpuId">>;
+export type GpuReading = Partial<Omit<GpuSampleV5, "gpuId">>;
 
 /** Shared context every adapter needs to compute rates from cumulative counters. */
 export type GpuReadContext = {

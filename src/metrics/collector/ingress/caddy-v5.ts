@@ -1,5 +1,5 @@
 /**
- * v4 site-Caddy ingress adapter (`orchestration/roles/site-caddy` — the
+ * v5 site-Caddy ingress adapter (`orchestration/roles/site-caddy` — the
  * unprivileged per-site Caddy, not the hosting Caddy in
  * `src/deploy/ingress.ts` nor the control-plane Caddy). That role's
  * `Caddyfile.j2` sets the global `metrics` option, which is what actually
@@ -60,10 +60,10 @@ import type {
 export const SITE_CADDY_ADMIN_ADDR = "127.0.0.1:2039";
 
 /**
- * Every metric name `parseCaddyExpositionV4` requires at least one of to
+ * Every metric name `parseCaddyExpositionV5` requires at least one of to
  * treat a scrape as a genuine Caddy `/metrics` response.
  */
-const CADDY_V4_EXPECTED_METRIC_NAMES = [
+const CADDY_V5_EXPECTED_METRIC_NAMES = [
   "caddy_http_requests_total",
   "caddy_http_request_duration_seconds_count",
   "caddy_http_request_duration_seconds_sum",
@@ -158,9 +158,9 @@ function bucketSum(
 
 /**
  * Pure parser — exported for fixture tests. `samples` must already be a
- * gated Caddy `/metrics` scrape (see {@link CADDY_V4_EXPECTED_METRIC_NAMES}).
+ * gated Caddy `/metrics` scrape (see {@link CADDY_V5_EXPECTED_METRIC_NAMES}).
  */
-export function parseCaddyExpositionV4(
+export function parseCaddyExpositionV5(
   samples: readonly PromSample[],
   ctx: IngressReadContext,
 ): IngressReading {
@@ -324,7 +324,7 @@ export class CaddyIngressAdapter implements IngressAdapter {
       const text = await fetchText(addr, "/metrics");
       if (text === undefined) return null;
       const samples = parsePrometheusExposition(text);
-      if (!containsAnyMetricName(samples, CADDY_V4_EXPECTED_METRIC_NAMES)) {
+      if (!containsAnyMetricName(samples, CADDY_V5_EXPECTED_METRIC_NAMES)) {
         return null;
       }
       return samples;
@@ -345,7 +345,7 @@ export class CaddyIngressAdapter implements IngressAdapter {
     const samples = await this.scrape();
     if (!samples) return null;
     try {
-      const reading = parseCaddyExpositionV4(samples, ctx);
+      const reading = parseCaddyExpositionV5(samples, ctx);
       return { sourceId: "caddy", sourceKind: "caddy", reading };
     } catch {
       return null;

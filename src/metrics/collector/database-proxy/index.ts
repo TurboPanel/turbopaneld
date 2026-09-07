@@ -6,7 +6,7 @@
  * result omits the source entirely (never an all-`null` placeholder) and
  * invalidates its counter-baseline namespace.
  */
-import type { DatabaseProxySampleV4 } from "../../contract-v4.ts";
+import type { DatabaseProxySampleV5 } from "../../contract-v5.ts";
 import type { CounterBaselineTracker } from "../baseline.ts";
 import type {
   DatabaseProxyAdapter,
@@ -25,10 +25,10 @@ export type {
 export {
   PROXYSQL_REST_ADDR,
   ProxySqlDatabaseProxyAdapter,
-} from "./proxysql-v4.ts";
+} from "./proxysql-v5.ts";
 
 const EMPTY_DATABASE_PROXY_FIELDS: Omit<
-  DatabaseProxySampleV4,
+  DatabaseProxySampleV5,
   "sourceId" | "sourceKind"
 > = {
   queries: null,
@@ -43,7 +43,7 @@ function toSample(
   sourceId: string,
   sourceKind: string,
   reading: DatabaseProxyReading,
-): DatabaseProxySampleV4 {
+): DatabaseProxySampleV5 {
   return {
     sourceId,
     sourceKind,
@@ -55,7 +55,7 @@ function toSample(
 async function readOne(
   adapter: DatabaseProxyAdapter,
   ctx: DatabaseProxyReadContext,
-): Promise<DatabaseProxySampleV4 | null> {
+): Promise<DatabaseProxySampleV5 | null> {
   try {
     const result = await adapter.read(ctx);
     if (result === null) return null;
@@ -78,7 +78,7 @@ export async function buildDatabaseProxies(
     bootGeneration: number;
     seconds: number;
   },
-): Promise<DatabaseProxySampleV4[]> {
+): Promise<DatabaseProxySampleV5[]> {
   if (!adapters) return [];
   const readCtx: DatabaseProxyReadContext = ctx;
 

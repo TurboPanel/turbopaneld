@@ -7,7 +7,7 @@
  */
 import type { EventCollector, EventDetectContext } from "./types.ts";
 import { makeEvent } from "./types.ts";
-import type { MetricEventV4 } from "../../contract-v4.ts";
+import type { MetricEventV5 } from "../../contract-v5.ts";
 import type { SensorIo } from "../sensors/discovery.ts";
 
 const MC_DIR_RE = /^mc\d+$/;
@@ -45,7 +45,7 @@ async function sumMcCounters(
 }
 
 export class EdacEventCollector implements EventCollector {
-  async detect(ctx: EventDetectContext): Promise<MetricEventV4[]> {
+  async detect(ctx: EventDetectContext): Promise<MetricEventV5[]> {
     if (!ctx.isPhysical) return [];
 
     const root = ctx.sysRoot ?? "/sys";
@@ -55,7 +55,7 @@ export class EdacEventCollector implements EventCollector {
     );
     if (!totals) return [];
 
-    const events: MetricEventV4[] = [];
+    const events: MetricEventV5[] = [];
     const ceDelta = ctx.tracker.delta(
       CE_BASELINE_KEY,
       totals.ce,

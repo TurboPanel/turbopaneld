@@ -13,6 +13,9 @@ it("parseMeminfo passes raw byte gauges through without percent math", () => {
   assertEquals(mem, {
     totalBytes: 8000000 * 1024,
     availableBytes: 4000000 * 1024,
+    usedBytes: 4000000 * 1024,
+    // Cached + Buffers + SReclaimable - Shmem
+    cachedFilesBytes: (1500000 + 100000 + 120000 - 50000) * 1024,
     freeBytes: 2000000 * 1024,
     swapTotalBytes: 2000000 * 1024,
     swapFreeBytes: 1000000 * 1024,

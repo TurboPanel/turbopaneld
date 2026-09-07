@@ -1,11 +1,11 @@
 import type {
-  MetricsCollectionModeV4 as MetricsCollectionMode,
-  MetricsSampleV4,
-} from "../contract-v4.ts";
+  MetricsCollectionModeV5 as MetricsCollectionMode,
+  MetricsSampleV5,
+} from "../contract-v5.ts";
 
-/** Outcome of a single collect() invocation: an entity-grouped `MetricsSampleV4`. */
+/** Outcome of a single collect() invocation: an entity-grouped `MetricsSampleV5`. */
 export type MetricsCollectResult =
-  | { supported: true; sample: MetricsSampleV4 }
+  | { supported: true; sample: MetricsSampleV5 }
   | { supported: false; reason: string };
 
 /**
@@ -81,6 +81,10 @@ export type LoadGauges = {
 export type MemoryGauges = {
   totalBytes: number;
   availableBytes: number;
+  /** `totalBytes - availableBytes` — what v5 reports, since "free" is misleading on Linux. */
+  usedBytes: number;
+  /** `Cached + Buffers + SReclaimable - Shmem` — reclaimable file-backed page cache. */
+  cachedFilesBytes: number | null;
   freeBytes: number | null;
   /** `null` (never `0`) on swap-absent hosts. */
   swapTotalBytes: number | null;

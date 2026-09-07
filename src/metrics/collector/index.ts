@@ -11,21 +11,21 @@ import { resolveDockerDataRoot } from "../../host/docker.ts";
 import { collectTopology } from "../topology/topology.ts";
 import { resolveTopologyOverrides } from "../topology/overrides.ts";
 import type { DatabaseProxyAdapterSet } from "./database-proxy/adapter.ts";
-import { ProxySqlDatabaseProxyAdapter } from "./database-proxy/proxysql-v4.ts";
+import { ProxySqlDatabaseProxyAdapter } from "./database-proxy/proxysql-v5.ts";
 import { EventCollectorSet } from "./events/index.ts";
 import type { GpuAdapterSet } from "./gpu/adapter.ts";
 import { DcgmGpuAdapter } from "./gpu/dcgm-adapter.ts";
 import { NvmlGpuAdapter } from "./gpu/nvml-adapter.ts";
 import { SysfsGpuAdapter } from "./gpu/sysfs-adapter.ts";
 import type { IngressAdapterSet } from "./ingress/adapter.ts";
-import { CaddyIngressAdapter } from "./ingress/caddy-v4.ts";
+import { CaddyIngressAdapter } from "./ingress/caddy-v5.ts";
 import { TraefikIngressAdapter } from "./ingress/traefik.ts";
 import { defaultSensorIo } from "./sensors/discovery.ts";
 import { LinuxMetricsCollector } from "./linux-collector.ts";
 import { resolvePageSizeBytes } from "./parse-vmstat.ts";
 import { countProcessesInProc } from "./processes.ts";
 import { readProcFile } from "./proc-read.ts";
-import type { CollectorDepsV4 } from "./types-v4.ts";
+import type { CollectorDepsV5 } from "./types-v5.ts";
 import type {
   MetricsCollector,
   MetricsCollectResult,
@@ -176,7 +176,7 @@ export function createCachedDockerDataRoot(
  * `probe()`/memoized-unavailable fast path keeps a GPU-less host from
  * paying FFI/scrape cost every interval. Module-level singleton so a
  * process never opens `libnvidia-ml.so.1` (or dials dcgm-exporter) more
- * than once even if `defaultDepsV4` is called again.
+ * than once even if `defaultDepsV5` is called again.
  */
 let cachedGpuAdapters: GpuAdapterSet | undefined;
 function defaultGpuAdapters(): GpuAdapterSet {
@@ -242,7 +242,7 @@ function defaultEventCollectors(): EventCollectorSet {
   return cachedEventCollectors;
 }
 
-function defaultDepsV4(): CollectorDepsV4 {
+function defaultDepsV5(): CollectorDepsV5 {
   return {
     readProcFile,
     statfs: defaultStatfs,
@@ -279,7 +279,7 @@ class UnsupportedMetricsCollector implements MetricsCollector {
  * exercise the unsupported-OS path without leaving Linux.
  */
 export function createMetricsCollector(
-  deps?: Partial<CollectorDepsV4>,
+  deps?: Partial<CollectorDepsV5>,
   options?: { os?: string },
 ): MetricsCollector {
   const os = options?.os ?? Deno.build.os;
@@ -289,6 +289,6 @@ export function createMetricsCollector(
     );
   }
 
-  const merged: CollectorDepsV4 = { ...defaultDepsV4(), ...deps };
+  const merged: CollectorDepsV5 = { ...defaultDepsV5(), ...deps };
   return new LinuxMetricsCollector(merged);
 }

@@ -7,11 +7,11 @@
  * Sectors are 512 bytes per kernel convention.
  */
 import type { CounterBaselineTracker } from "./baseline.ts";
-import { type BlockDeviceSampleV4, clampPercent } from "../contract-v4.ts";
+import { type BlockDeviceSampleV5, clampPercent } from "../contract-v5.ts";
 import type { BlockDeviceTopology } from "../topology/types.ts";
 import type { DiskDeviceCounters } from "./types.ts";
 
-const SECTOR_BYTES_V4 = 512;
+const SECTOR_BYTES_V5 = 512;
 
 function toRate(delta: number | null, seconds: number): number | null {
   if (delta === null || seconds <= 0) return null;
@@ -27,7 +27,7 @@ function latencyMs(
   return ticksDelta / opsDelta;
 }
 
-const EMPTY_BLOCK_DEVICE_SAMPLE: Omit<BlockDeviceSampleV4, "deviceId"> = {
+const EMPTY_BLOCK_DEVICE_SAMPLE: Omit<BlockDeviceSampleV5, "deviceId"> = {
   readBytesPerSecond: null,
   writeBytesPerSecond: null,
   readOpsPerSecond: null,
@@ -49,20 +49,21 @@ const DISKSTATS_BASELINE_FIELDS = [
   "writeTicks",
 ] as const;
 
-/** `buildBlockDeviceSamples`-only baseline fields, beyond {@link DISKSTATS_BASELINE_FIELDS}. */
-const BLOCK_DEVICE_ONLY_BASELINE_FIELDS = [
-  "ioTicks",
-  "weightedIoTicks",
-] as const;
-
 /**
- * One `BlockDeviceSampleV4` per topology device flagged `isServiceDevice`
+ * One `BlockDeviceSampleV5` per topology device flagged `isServiceDevice`
  * (mirrors the ticket's "per selected service device"). `temperatureCelsius`
- * is always `null` here — sensor correlation is a later phase's job. A
- * device whose diskstats row is missing this tick stays present with every
- * field `null`, and its baseline entries are explicitly invalidated so the
- * next tick a diskstats row reappears re-origins (`null` again) instead of
- * diffing across the gap into one fabricated rate.
+ * is joined from the hardware-signal catalog by kernel name — see
+ * {@link BlockDeviceTemperatures}.
+ *
+ * A device whose diskstats row is missing this tick reports every rate
+ * `null` for that tick but **keeps its baseline**. v4 invalidated here,
+ * which cost two ticks of nulls for one bad read — the tick itself, then
+ * the re-origin tick — i.e. a two-minute hole in the chart at the 60 s
+ * cadence from a single transient failure. The baseline is only genuinely
+ * invalid when the counter goes backwards or the host rebooted, and
+ * `CounterBaselineTracker.delta` already detects both, so carrying it
+ * across a missing read is safe: the next successful read diffs against the
+ * older origin and divides by the real elapsed time.
  */
 export function buildBlockDeviceSamples(
   topology: BlockDeviceTopology[],
@@ -70,20 +71,20 @@ export function buildBlockDeviceSamples(
   tracker: CounterBaselineTracker,
   bootGeneration: number,
   seconds: number,
-): BlockDeviceSampleV4[] {
+  temperatures?: BlockDeviceTemperatures,
+): BlockDeviceSampleV5[] {
   return topology
     .filter((device) => device.isServiceDevice)
-    .map((device): BlockDeviceSampleV4 => {
+    .map((device): BlockDeviceSampleV5 => {
       const counters = currentCounters[device.kernelName];
       const key = (field: string) => `block:${device.deviceId}:${field}`;
       if (!counters) {
-        for (const field of DISKSTATS_BASELINE_FIELDS) {
-          tracker.invalidate(key(field));
-        }
-        for (const field of BLOCK_DEVICE_ONLY_BASELINE_FIELDS) {
-          tracker.invalidate(key(field));
-        }
-        return { deviceId: device.deviceId, ...EMPTY_BLOCK_DEVICE_SAMPLE };
+        // Baselines are deliberately kept — see this function's doc comment.
+        return {
+          deviceId: device.deviceId,
+          ...EMPTY_BLOCK_DEVICE_SAMPLE,
+          temperatureCelsius: temperatures?.[device.kernelName] ?? null,
+        };
       }
 
       const readOpsDelta = tracker.delta(
@@ -137,13 +138,13 @@ export function buildBlockDeviceSamples(
       return {
         deviceId: device.deviceId,
         readBytesPerSecond: toRate(
-          readSectorsDelta === null ? null : readSectorsDelta * SECTOR_BYTES_V4,
+          readSectorsDelta === null ? null : readSectorsDelta * SECTOR_BYTES_V5,
           seconds,
         ),
         writeBytesPerSecond: toRate(
           writeSectorsDelta === null
             ? null
-            : writeSectorsDelta * SECTOR_BYTES_V4,
+            : writeSectorsDelta * SECTOR_BYTES_V5,
           seconds,
         ),
         readOpsPerSecond: toRate(readOpsDelta, seconds),
@@ -151,31 +152,74 @@ export function buildBlockDeviceSamples(
         readLatencyMs: latencyMs(readTicksDelta, readOpsDelta),
         writeLatencyMs: latencyMs(writeTicksDelta, writeOpsDelta),
         utilizationPercent,
-        temperatureCelsius: null,
+        temperatureCelsius: temperatures?.[device.kernelName] ?? null,
         queueDepth,
       };
     });
 }
 
-/** Max `utilizationPercent` across `samples`; `null` when empty or every entry is `null`. */
-export function maxBlockDeviceUtilPercent(
-  samples: BlockDeviceSampleV4[],
-): number | null {
-  let max: number | null = null;
-  for (const sample of samples) {
-    if (sample.utilizationPercent === null) continue;
-    if (max === null || sample.utilizationPercent > max) {
-      max = sample.utilizationPercent;
+/**
+ * Per-kernel-name drive temperature, keyed the way `/proc/diskstats` names
+ * devices (`nvme0n1`, `sda`) so it joins straight onto block topology.
+ */
+export type BlockDeviceTemperatures = Record<string, number | null>;
+
+/** NVMe's own composite reading — the drive-level temperature, not one internal probe. */
+const NVME_COMPOSITE_LABEL = "Composite";
+
+/**
+ * Build the block-device ↔ sensor temperature join.
+ *
+ * Disk temperatures arrive as hardware signals keyed
+ * `signal:<kernelName>:<label>` — `discovery.ts` already resolves an NVMe or
+ * `drivetemp` hwmon chip down to its backing block device, which is exactly
+ * the `kernelName` block topology uses. v4 never closed this loop and left
+ * `BlockDeviceSampleV5.temperatureCelsius` hardcoded `null`, so drive temps
+ * existed only as loose sensor rows and never reached the drive itself.
+ *
+ * NVMe exposes several probes per drive (`Composite`, `Sensor 1` …
+ * `Sensor 8`); `Composite` is the vendor-computed whole-drive value the NVMe
+ * spec defines and the one that drives the drive's own thermal throttling,
+ * so it wins outright. Otherwise the hottest reading for that device is used
+ * — a `drivetemp` SATA disk only ever reports one.
+ */
+export function buildBlockDeviceTemperatures(
+  signals: readonly { signalId: string; kind: string; value: number | null }[],
+): BlockDeviceTemperatures {
+  const out: BlockDeviceTemperatures = {};
+  const fromComposite = new Set<string>();
+  for (const signal of signals) {
+    if (signal.kind !== "temperature" || signal.value === null) continue;
+    const parts = signal.signalId.split(":");
+    if (parts.length < 3 || parts[0] !== "signal") continue;
+    const kernelName = parts[1]!;
+    const label = parts.slice(2).join(":");
+    if (label === NVME_COMPOSITE_LABEL) {
+      out[kernelName] = signal.value;
+      fromComposite.add(kernelName);
+      continue;
+    }
+    // A composite reading is authoritative: never let a hotter internal
+    // probe overwrite it, whichever order the signals arrive in.
+    if (fromComposite.has(kernelName)) continue;
+    const current = out[kernelName];
+    if (current === undefined || current === null || signal.value > current) {
+      out[kernelName] = signal.value;
     }
   }
-  return max;
+  return out;
 }
 
 export type HostDiskAggregates = {
   diskReadBytesPerSecond: number | null;
   diskWriteBytesPerSecond: number | null;
-  diskReadLatencyMs: number | null;
-  diskWriteLatencyMs: number | null;
+  /**
+   * Combined read+write service time, Σticks/Σops across the service set.
+   * v5 collapses v4's separate read/write host latencies into one: per-disk
+   * read and write latency both ride the storage row now, so the host-level
+   * split was duplicating a breakdown that is directly available.
+   */
+  diskLatencyMs: number | null;
 };
 
 function invalidateDiskHostBaselines(
@@ -271,14 +315,13 @@ export function hostDiskAggregates(
 
   return {
     diskReadBytesPerSecond: sawReadDelta
-      ? toRate(read.sectors * SECTOR_BYTES_V4, seconds)
+      ? toRate(read.sectors * SECTOR_BYTES_V5, seconds)
       : null,
     diskWriteBytesPerSecond: sawWriteDelta
-      ? toRate(write.sectors * SECTOR_BYTES_V4, seconds)
+      ? toRate(write.sectors * SECTOR_BYTES_V5, seconds)
       : null,
-    diskReadLatencyMs: sawReadDelta ? latencyMs(read.ticks, read.ops) : null,
-    diskWriteLatencyMs: sawWriteDelta
-      ? latencyMs(write.ticks, write.ops)
+    diskLatencyMs: sawReadDelta || sawWriteDelta
+      ? latencyMs(read.ticks + write.ticks, read.ops + write.ops)
       : null,
   };
 }

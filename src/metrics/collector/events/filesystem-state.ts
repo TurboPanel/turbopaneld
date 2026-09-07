@@ -14,7 +14,7 @@
  */
 import type { EventCollector, EventDetectContext } from "./types.ts";
 import { makeEvent } from "./types.ts";
-import type { MetricEventV4 } from "../../contract-v4.ts";
+import type { MetricEventV5 } from "../../contract-v5.ts";
 import type { MountEntry } from "../mounts.ts";
 
 type TrackedMountState = {
@@ -39,7 +39,7 @@ function findMountEntry(
 function disappearedEvent(
   filesystemId: string,
   nowMs: number,
-): MetricEventV4 {
+): MetricEventV5 {
   return makeEvent("fs_disappeared", "critical", nowMs, {
     entityId: filesystemId,
   });
@@ -50,7 +50,7 @@ function mountTransitionEvent(
   entry: MountEntry,
   filesystemId: string,
   nowMs: number,
-): MetricEventV4 | undefined {
+): MetricEventV5 | undefined {
   if (!prior) return undefined;
   if (!prior.readOnly && isReadOnly(entry.options)) {
     return makeEvent("fs_read_only", "critical", nowMs, {
@@ -69,8 +69,8 @@ function mountTransitionEvent(
 export class FilesystemStateEventCollector implements EventCollector {
   readonly #tracked = new Map<string, TrackedMountState>();
 
-  detect(ctx: EventDetectContext): MetricEventV4[] {
-    const events: MetricEventV4[] = [];
+  detect(ctx: EventDetectContext): MetricEventV5[] {
+    const events: MetricEventV5[] = [];
     const seen = new Set<string>();
 
     for (const fs of ctx.snapshot.filesystems) {
@@ -103,7 +103,7 @@ export class FilesystemStateEventCollector implements EventCollector {
     return events;
   }
 
-  #forgetTracked(filesystemId: string, nowMs: number): MetricEventV4[] {
+  #forgetTracked(filesystemId: string, nowMs: number): MetricEventV5[] {
     if (!this.#tracked.has(filesystemId)) return [];
     this.#tracked.delete(filesystemId);
     return [disappearedEvent(filesystemId, nowMs)];
@@ -121,8 +121,8 @@ export class FilesystemStateEventCollector implements EventCollector {
     seen: ReadonlySet<string>,
     mountEntries: readonly MountEntry[],
     nowMs: number,
-  ): MetricEventV4[] {
-    const events: MetricEventV4[] = [];
+  ): MetricEventV5[] {
+    const events: MetricEventV5[] = [];
     for (const [filesystemId, tracked] of this.#tracked) {
       if (seen.has(filesystemId)) continue;
       if (!findMountEntry(mountEntries, tracked.mountpoint)) {

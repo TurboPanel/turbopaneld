@@ -12,7 +12,7 @@
  * VRM/chipset temperatures whose hwmon label is trustworthily identifiable
  * — never a generic "everything else" catch-all. Fan tachometers and GPU
  * temperature/power are excluded entirely: fan RPM has no home in sampled
- * telemetry, and GPU temperature/power already ride `GpuSampleV4` (via
+ * telemetry, and GPU temperature/power already ride `GpuSampleV5` (via
  * `gpus[]`, `gpu-topology.ts`/`collector/gpu/`) — projecting them here too
  * would double-report the same reading under two different families. (Fan
  * *fault/alarm* fault detection still works: `events/physical-health.ts`
@@ -133,7 +133,10 @@ function operatorFacingSignalLabel(
   ) {
     return "CPU package temperature";
   }
-  if (component === "cpu" && kind === "power" && /^package-\d+$/i.test(kernelLabel)) {
+  if (
+    component === "cpu" && kind === "power" &&
+    /^package-\d+$/i.test(kernelLabel)
+  ) {
     return "CPU package power";
   }
   return kernelLabel;

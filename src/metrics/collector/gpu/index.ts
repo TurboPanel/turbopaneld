@@ -21,7 +21,7 @@
  * later readable tick re-origins instead of diffing across the gap) and an
  * all-`null` sample is still emitted for that `gpuId`.
  */
-import type { GpuSampleV4 } from "../../contract-v4.ts";
+import type { GpuSampleV5 } from "../../contract-v5.ts";
 import type { GpuTopology } from "../../topology/types.ts";
 import type { CounterBaselineTracker } from "../baseline.ts";
 import type {
@@ -42,7 +42,7 @@ export { DCGM_EXPORTER_ADDR, DcgmGpuAdapter } from "./dcgm-adapter.ts";
 export { NvmlGpuAdapter } from "./nvml-adapter.ts";
 export { SysfsGpuAdapter } from "./sysfs-adapter.ts";
 
-const EMPTY_GPU_FIELDS: Omit<GpuSampleV4, "gpuId"> = {
+const EMPTY_GPU_FIELDS: Omit<GpuSampleV5, "gpuId"> = {
   utilizationPercent: null,
   memoryUsedBytes: null,
   memoryActivityPercent: null,
@@ -54,7 +54,7 @@ const EMPTY_GPU_FIELDS: Omit<GpuSampleV4, "gpuId"> = {
   throttlePercent: null,
 };
 
-/** Every per-GPU field name, in the order `GpuSampleV4` declares them (minus `gpuId`). */
+/** Every per-GPU field name, in the order `GpuSampleV5` declares them (minus `gpuId`). */
 const GPU_FIELD_NAMES = Object.keys(EMPTY_GPU_FIELDS) as ReadonlyArray<
   keyof typeof EMPTY_GPU_FIELDS
 >;
@@ -67,8 +67,8 @@ const GPU_FIELD_NAMES = Object.keys(EMPTY_GPU_FIELDS) as ReadonlyArray<
  * `null` — never fabricated, never backfilled past the last adapter in
  * the chain.
  */
-function mergeReadings(gpuId: string, readings: GpuReading[]): GpuSampleV4 {
-  const fields: Omit<GpuSampleV4, "gpuId"> = { ...EMPTY_GPU_FIELDS };
+function mergeReadings(gpuId: string, readings: GpuReading[]): GpuSampleV5 {
+  const fields: Omit<GpuSampleV5, "gpuId"> = { ...EMPTY_GPU_FIELDS };
   for (const field of GPU_FIELD_NAMES) {
     for (const reading of readings) {
       const candidate = reading[field];
@@ -107,7 +107,7 @@ function invalidateKnownBaselineKeys(
 }
 
 /**
- * Build one `GpuSampleV4` per topology-enumerated GPU. See the module doc
+ * Build one `GpuSampleV5` per topology-enumerated GPU. See the module doc
  * comment for the adapter-precedence and never-drop-the-entity contract.
  */
 export async function buildGpuSamples(
@@ -118,7 +118,7 @@ export async function buildGpuSamples(
     bootGeneration: number;
     seconds: number;
   },
-): Promise<GpuSampleV4[]> {
+): Promise<GpuSampleV5[]> {
   const readCtx: GpuReadContext = ctx;
 
   return await Promise.all(topology.map(async (gpu) => {

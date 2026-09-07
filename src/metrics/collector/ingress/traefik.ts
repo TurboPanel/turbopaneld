@@ -1,5 +1,5 @@
 /**
- * v4 shared hosting-ingress Traefik adapter (`src/deploy/ingress.ts`'s
+ * v5 shared hosting-ingress Traefik adapter (`src/deploy/ingress.ts`'s
  * `traefikCompose` — the loopback-only HTTP/HTTPS proxy fronting Docker
  * hostings, not any per-service tenant Traefik). Scrapes the dedicated
  * loopback Prometheus metrics entrypoint `traefikCompose` publishes
@@ -41,11 +41,12 @@ export { TRAEFIK_METRICS_ADDR };
 /**
  * Every metric name `parseTraefikExposition` requires at least one of to
  * treat a scrape as a genuine Traefik `/metrics` response.
- * `traefik_entrypoint_open_connections` and `traefik_service_retries_total`/
+ * `traefik_open_connections` and `traefik_service_retries_total`/
  * `traefik_service_server_up` are deliberately excluded from this gate —
- * older Traefik builds or a service-less proxy may omit them, and their
- * absence should degrade the corresponding field to `null`, not the whole
- * source to absent.
+ * a service-less proxy may omit them, and their absence should degrade the
+ * corresponding field to `null`, not the whole source to absent. That
+ * degrade rule is also why a wrong metric name here fails silently: the
+ * names below must track the pinned image in `src/deploy/ingress.ts`.
  */
 const TRAEFIK_EXPECTED_METRIC_NAMES = [
   "traefik_entrypoint_requests_total",
@@ -188,8 +189,14 @@ export function parseTraefikExposition(
     ctx.bootGeneration,
   );
 
+  // Traefik v3 (pinned in `src/deploy/ingress.ts`) replaced the per-scope
+  // `traefik_entrypoint_open_connections` / `traefik_service_open_connections`
+  // gauges with one `traefik_open_connections{entrypoint,protocol}` gauge —
+  // the v2 name is simply absent from a v3 exposition. Summed across
+  // `protocol`: this router only carries HTTP/HTTPS, so every customer
+  // entrypoint row is hosted traffic.
   const inFlightSamples = samples.filter((sample) =>
-    sample.name === "traefik_entrypoint_open_connections" &&
+    sample.name === "traefik_open_connections" &&
     isCustomerEntrypoint(sample.labels)
   );
   const requestsInFlight = inFlightSamples.length === 0

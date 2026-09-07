@@ -4,7 +4,7 @@ import { GpuHealthEventCollector } from "./gpu-health.ts";
 import type { GpuHealthSignals } from "./gpu-health.ts";
 import type { EventDetectContext } from "./types.ts";
 import type { GpuTopology, TopologySnapshot } from "../../topology/types.ts";
-import type { GpuSampleV4 } from "../../contract-v4.ts";
+import type { GpuSampleV5 } from "../../contract-v5.ts";
 
 const test = Deno.test.bind(Deno);
 
@@ -23,7 +23,7 @@ const EMPTY_HEALTH: GpuHealthSignals = {
   retiredPagesPending: null,
 };
 
-function gpuSample(temperatureCelsius: number | null): GpuSampleV4 {
+function gpuSample(temperatureCelsius: number | null): GpuSampleV5 {
   return {
     gpuId: GPU.gpuId,
     utilizationPercent: null,

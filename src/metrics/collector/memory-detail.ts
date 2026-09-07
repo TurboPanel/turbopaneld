@@ -1,5 +1,5 @@
 /**
- * Memory-detail collector: builds `MemoryDetailSampleV4` — the 16 slab/
+ * Memory-detail collector: builds `MemoryDetailSampleV5` — the 16 slab/
  * dirty/writeback/commit gauge fields from `/proc/meminfo`
  * (`parse-meminfo.ts`'s `parseMeminfoDetail`) plus 3 reclaim/compaction
  * rates from `/proc/vmstat` (`parse-vmstat.ts`'s `parseVmstatReclaim`),
@@ -8,7 +8,7 @@
 import { parseMeminfoDetail } from "./parse-meminfo.ts";
 import { parseVmstatReclaim } from "./parse-vmstat.ts";
 import type { CounterBaselineTracker } from "./baseline.ts";
-import type { MemoryDetailSampleV4 } from "../contract-v4.ts";
+import type { MemoryDetailSampleV5 } from "../contract-v5.ts";
 
 export type MemoryDetailDeps = {
   memText: string | undefined;
@@ -21,7 +21,7 @@ export type MemoryDetailDeps = {
 /** `null` only when both `/proc/meminfo` and `/proc/vmstat` were unreadable this tick. */
 export function buildMemoryDetailSample(
   deps: MemoryDetailDeps,
-): MemoryDetailSampleV4 | null {
+): MemoryDetailSampleV5 | null {
   if (deps.memText === undefined && deps.vmstatText === undefined) {
     return null;
   }

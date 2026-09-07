@@ -1,6 +1,6 @@
 /**
  * Host metrics wire contract (daemon → instance). Mirrored in instance
- * `src/daemon/metrics/contract-v4.ts`.
+ * `src/daemon/metrics/contract-v5.ts`.
  *
  * Metrics are grouped by entity (host, network device, filesystem, block
  * device, GPU, hardware signal, ingress source, database proxy) instead of a
@@ -8,15 +8,15 @@
  * `null`, never coerced to `0`), and entities carry a stable logical id
  * instead of relying on positional/part membership. Physical storage
  * layout (Cloudflare Analytics Engine packing) is entirely downstream of
- * this file — see `metric-descriptors-v4.ts` (instance repo, control-plane
+ * this file — see `metric-descriptors-v5.ts` (instance repo, control-plane
  * only) for the per-metric unit/aggregation/family contract this type
  * pairs with.
  */
 
-export const METRICS_SCHEMA_VERSION_V4 = 4 as const;
+export const METRICS_SCHEMA_VERSION_V5 = 5 as const;
 
 /** Sampling cadence the daemon collected under — baseline (steady) or live (on-demand fast). */
-export type MetricsCollectionModeV4 = "baseline" | "live";
+export type MetricsCollectionModeV5 = "baseline" | "live";
 
 /** Maps every non-string field of `T` to `number | null` — the sanitized-output shape for a raw input `T`. */
 type RawNumeric<T> = {
@@ -29,7 +29,7 @@ type RawNumeric<T> = {
 // cover the universal host.system/host.io metric families.
 // ---------------------------------------------------------------------------
 
-export type HostCpuMetricsV4 = {
+export type HostCpuMetricsV5 = {
   busyPercent: number | null;
   userPercent: number | null;
   systemPercent: number | null;
@@ -37,20 +37,21 @@ export type HostCpuMetricsV4 = {
   stealPercent: number | null;
   softirqPercent: number | null;
   pressureSomePercent: number | null;
-  maxCoreBusyPercent: number | null;
+  saturatedCoreCount: number | null;
   procsRunning: number | null;
   procsBlocked: number | null;
   /** Total `/proc` PID directories — not the run-queue `procs_running` gauge. */
   processCount: number | null;
 };
 
-export type HostKernelMetricsV4 = {
+export type HostKernelMetricsV5 = {
   fileHandlesUsedPercent: number | null;
   conntrackUsedPercent: number | null;
 };
 
-export type HostMemoryMetricsV4 = {
-  availableBytes: number | null;
+export type HostMemoryMetricsV5 = {
+  usedBytes: number | null;
+  cachedFilesBytes: number | null;
   swapUsedBytes: number | null;
   pressureSomePercent: number | null;
   pressureFullPercent: number | null;
@@ -59,29 +60,27 @@ export type HostMemoryMetricsV4 = {
   majorPageFaultsPerSecond: number | null;
 };
 
-export type HostStorageMetricsV4 = {
+export type HostStorageMetricsV5 = {
   ioPressureSomePercent: number | null;
   ioPressureFullPercent: number | null;
   diskReadBytesPerSecond: number | null;
   diskWriteBytesPerSecond: number | null;
-  diskReadLatencyMs: number | null;
-  diskWriteLatencyMs: number | null;
-  maxBlockDeviceUtilPercent: number | null;
+  diskLatencyMs: number | null;
   rootFilesystemAvailableBytes: number | null;
   rootFilesystemFreeInodes: number | null;
 };
 
-export type HostNetworkMetricsV4 = {
+export type HostNetworkMetricsV5 = {
   tcpRetransmitPercent: number | null;
   softnetDropsPerSecond: number | null;
 };
 
-export type HostMetricsV4 = {
-  cpu: HostCpuMetricsV4;
-  kernel: HostKernelMetricsV4;
-  memory: HostMemoryMetricsV4;
-  storage: HostStorageMetricsV4;
-  network: HostNetworkMetricsV4;
+export type HostMetricsV5 = {
+  cpu: HostCpuMetricsV5;
+  kernel: HostKernelMetricsV5;
+  memory: HostMemoryMetricsV5;
+  storage: HostStorageMetricsV5;
+  network: HostNetworkMetricsV5;
 };
 
 // ---------------------------------------------------------------------------
@@ -90,7 +89,7 @@ export type HostMetricsV4 = {
 // discriminator).
 // ---------------------------------------------------------------------------
 
-export type NetworkDeviceSampleV4 = {
+export type NetworkDeviceSampleV5 = {
   deviceId: string;
   receiveBytesPerSecond: number | null;
   transmitBytesPerSecond: number | null;
@@ -100,13 +99,13 @@ export type NetworkDeviceSampleV4 = {
   transmitDropsPerSecond: number | null;
 };
 
-export type FilesystemSampleV4 = {
+export type FilesystemSampleV5 = {
   filesystemId: string;
   availableBytes: number | null;
   freeInodes: number | null;
 };
 
-export type BlockDeviceSampleV4 = {
+export type BlockDeviceSampleV5 = {
   deviceId: string;
   readBytesPerSecond: number | null;
   writeBytesPerSecond: number | null;
@@ -119,7 +118,7 @@ export type BlockDeviceSampleV4 = {
   queueDepth: number | null;
 };
 
-export type GpuSampleV4 = {
+export type GpuSampleV5 = {
   gpuId: string;
   utilizationPercent: number | null;
   memoryUsedBytes: number | null;
@@ -132,14 +131,14 @@ export type GpuSampleV4 = {
   throttlePercent: number | null;
 };
 
-/** Conservative physical sensor reading (CPU package temp/power, storage temp, trustworthy board temps, plus the synthetic hottest-core/thermal-throttled CPU signals) — dynamic count per host, not a fixed family. Never fan RPM or GPU temp/power (GPU rides `GpuSampleV4` instead). */
-export type HardwareSignalSampleV4 = {
+/** Conservative physical sensor reading (CPU package temp/power, storage temp, trustworthy board temps, plus the synthetic hottest-core/thermal-throttled CPU signals) — dynamic count per host, not a fixed family. Never fan RPM or GPU temp/power (GPU rides `GpuSampleV5` instead). */
+export type HardwareSignalSampleV5 = {
   signalId: string;
   kind: string;
   value: number | null;
 };
 
-export type IngressSourceSampleV4 = {
+export type IngressSourceSampleV5 = {
   sourceId: string;
   /** Discriminates which ingress adapter produced this source (`"caddy"` / `"traefik"`). */
   sourceKind: string;
@@ -162,7 +161,7 @@ export type IngressSourceSampleV4 = {
   retries: number | null;
 };
 
-export type DatabaseProxySampleV4 = {
+export type DatabaseProxySampleV5 = {
   sourceId: string;
   /** Discriminates which database-proxy adapter produced this source (`"proxysql"`). */
   sourceKind: string;
@@ -174,20 +173,14 @@ export type DatabaseProxySampleV4 = {
   backendsUp: number | null;
 };
 
-/** A single busiest-core reading embedded in {@link CpuDetailSampleV4}. */
-export type CpuHotspotSampleV4 = {
-  coreId: string;
-  busyPercent: number | null;
-  iowaitPercent: number | null;
-  stealPercent: number | null;
-};
-
 /**
- * Per-core/detail CPU breakdown: the daemon's 4 busiest logical cores this
- * interval (`hotspots`) plus host-wide frequency/scheduling counters.
+ * Host-wide CPU frequency/scheduling counters. v5 carries no per-core
+ * breakdown at all: the busiest-core hotspots and the live per-core family
+ * were removed outright, so a 64-core host costs exactly the same rows as a
+ * 2-core one. `host.cpu.saturatedCoreCount` is the host-scoped scalar that
+ * replaced them.
  */
-export type CpuDetailSampleV4 = {
-  hotspots: CpuHotspotSampleV4[];
+export type CpuDetailSampleV5 = {
   averageFrequencyMHz: number | null;
   minimumFrequencyMHz: number | null;
   maximumFrequencyMHz: number | null;
@@ -204,7 +197,7 @@ export type CpuDetailSampleV4 = {
  * (rather than one combined scan total) because a direct-reclaim-heavy host
  * is under acute memory pressure in a way a kswapd-heavy host is not.
  */
-export type MemoryDetailSampleV4 = {
+export type MemoryDetailSampleV5 = {
   memoryFreeBytes: number | null;
   cachedBytes: number | null;
   anonPagesBytes: number | null;
@@ -226,20 +219,12 @@ export type MemoryDetailSampleV4 = {
   compactionStallsPerSecond: number | null;
 };
 
-/** Per-core live breakdown (live sessions only) — one entry per online logical core. */
-export type CpuCoreLiveSampleV4 = {
-  coreId: string;
-  busyPercent: number | null;
-  iowaitPercent: number | null;
-  stealPercent: number | null;
-};
-
 /**
  * Per-NUMA-node memory/allocation counters. Reserved conceptual family —
- * fully shaped, referenced only via `MetricsSampleV4.numaNodes?`, not yet
+ * fully shaped, referenced only via `MetricsSampleV5.numaNodes?`, not yet
  * populated by any collector.
  */
-export type NumaNodeSampleV4 = {
+export type NumaNodeSampleV5 = {
   nodeId: string;
   freeBytes: number | null;
   totalBytes: number | null;
@@ -252,7 +237,7 @@ export type NumaNodeSampleV4 = {
 // from the continuous numeric metrics above.
 // ---------------------------------------------------------------------------
 
-export const METRIC_EVENT_KINDS_V4 = [
+export const METRIC_EVENT_KINDS_V5 = [
   "oom_kill",
   "hung_task",
   "conntrack_exhaustion",
@@ -293,13 +278,13 @@ export const METRIC_EVENT_KINDS_V4 = [
   "boot_generation_changed",
 ] as const;
 
-export type MetricEventKindV4 = (typeof METRIC_EVENT_KINDS_V4)[number];
+export type MetricEventKindV5 = (typeof METRIC_EVENT_KINDS_V5)[number];
 
 /**
- * Classifies every {@link MetricEventKindV4} as a physical-hardware-health
+ * Classifies every {@link MetricEventKindV5} as a physical-hardware-health
  * signal or not — the split `hardwareHealthEventsEnabled`
  * (`capability-plan.ts`) actually gates. `Record`, not an allowlist `Set`, so
- * adding a kind to {@link METRIC_EVENT_KINDS_V4} without extending this map
+ * adding a kind to {@link METRIC_EVENT_KINDS_V5} without extending this map
  * fails to compile instead of silently defaulting either way.
  *
  * Hardware-health (`true`): sensor/component-fault signals from a physical
@@ -314,7 +299,7 @@ export type MetricEventKindV4 = (typeof METRIC_EVENT_KINDS_V4)[number];
  * unrelated to physical hardware that must survive a plan disabling
  * hardware-health events.
  */
-export const HARDWARE_HEALTH_EVENT_KIND_V4: Record<MetricEventKindV4, boolean> =
+export const HARDWARE_HEALTH_EVENT_KIND_V5: Record<MetricEventKindV5, boolean> =
   {
     oom_kill: false,
     hung_task: false,
@@ -356,43 +341,43 @@ export const HARDWARE_HEALTH_EVENT_KIND_V4: Record<MetricEventKindV4, boolean> =
     boot_generation_changed: false,
   };
 
-/** Whether `kind` is a physical-hardware-health signal — see {@link HARDWARE_HEALTH_EVENT_KIND_V4}. */
-export function isHardwareHealthEventKindV4(kind: MetricEventKindV4): boolean {
-  return HARDWARE_HEALTH_EVENT_KIND_V4[kind];
+/** Whether `kind` is a physical-hardware-health signal — see {@link HARDWARE_HEALTH_EVENT_KIND_V5}. */
+export function isHardwareHealthEventKindV5(kind: MetricEventKindV5): boolean {
+  return HARDWARE_HEALTH_EVENT_KIND_V5[kind];
 }
 
-export type MetricEventSeverityV4 = "info" | "warning" | "critical";
+export type MetricEventSeverityV5 = "info" | "warning" | "critical";
 
-export type MetricEventV4 = {
+export type MetricEventV5 = {
   eventId: string;
   at: string;
-  kind: MetricEventKindV4;
-  severity: MetricEventSeverityV4;
+  kind: MetricEventKindV5;
+  severity: MetricEventSeverityV5;
   entityId?: string;
   source?: string;
   payload?: Record<string, string | number | boolean | null>;
 };
 
 /**
- * Module-load invariant: `METRIC_EVENT_KINDS_V4` — the array backing the
- * `MetricEventKindV4` union — has no duplicates. There is no
+ * Module-load invariant: `METRIC_EVENT_KINDS_V5` — the array backing the
+ * `MetricEventKindV5` union — has no duplicates. There is no
  * partition/ceiling to enforce here (unlike v3's `MetricPart`s); this is the
- * v4 analogue of `assertMetricPartsCoverAllKeys` scoped to what v4 actually
+ * v5 analogue of `assertMetricPartsCoverAllKeys` scoped to what v5 actually
  * needs checked on import.
  */
 function assertNoDuplicateEventKinds(): void {
   const seen = new Set<string>();
-  for (const kind of METRIC_EVENT_KINDS_V4) {
+  for (const kind of METRIC_EVENT_KINDS_V5) {
     if (seen.has(kind)) {
-      throw new TypeError(`duplicate MetricEventKindV4 entry: ${kind}`);
+      throw new TypeError(`duplicate MetricEventKindV5 entry: ${kind}`);
     }
     seen.add(kind);
   }
 }
 assertNoDuplicateEventKinds();
 
-function assertValidEventKind(kind: string): asserts kind is MetricEventKindV4 {
-  if (!(METRIC_EVENT_KINDS_V4 as readonly string[]).includes(kind)) {
+function assertValidEventKind(kind: string): asserts kind is MetricEventKindV5 {
+  if (!(METRIC_EVENT_KINDS_V5 as readonly string[]).includes(kind)) {
     throw new TypeError(`metrics event has an unknown kind: ${kind}`);
   }
 }
@@ -401,32 +386,31 @@ function assertValidEventKind(kind: string): asserts kind is MetricEventKindV4 {
 // Top-level sample
 // ---------------------------------------------------------------------------
 
-export type MetricsSampleMetadataV4 = {
-  version: typeof METRICS_SCHEMA_VERSION_V4;
+export type MetricsSampleMetadataV5 = {
+  version: typeof METRICS_SCHEMA_VERSION_V5;
   sampledAt: string;
   intervalSeconds: number;
   sequence: number;
-  collectionMode: MetricsCollectionModeV4;
+  collectionMode: MetricsCollectionModeV5;
   topologyGeneration: number;
   bootGeneration: number;
 };
 
-export type MetricsSampleV4 = {
+export type MetricsSampleV5 = {
   type: "metrics";
-  metadata: MetricsSampleMetadataV4;
-  host: HostMetricsV4;
-  networks: NetworkDeviceSampleV4[];
-  filesystems: FilesystemSampleV4[];
-  blockDevices: BlockDeviceSampleV4[];
-  gpus: GpuSampleV4[];
-  hardwareSignals: HardwareSignalSampleV4[];
-  ingressSources: IngressSourceSampleV4[];
-  databaseProxies: DatabaseProxySampleV4[];
-  events: MetricEventV4[];
-  cpuDetail?: CpuDetailSampleV4;
-  memoryDetail?: MemoryDetailSampleV4;
-  cpuCoreLive?: CpuCoreLiveSampleV4[];
-  numaNodes?: NumaNodeSampleV4[];
+  metadata: MetricsSampleMetadataV5;
+  host: HostMetricsV5;
+  networks: NetworkDeviceSampleV5[];
+  filesystems: FilesystemSampleV5[];
+  blockDevices: BlockDeviceSampleV5[];
+  gpus: GpuSampleV5[];
+  hardwareSignals: HardwareSignalSampleV5[];
+  ingressSources: IngressSourceSampleV5[];
+  databaseProxies: DatabaseProxySampleV5[];
+  events: MetricEventV5[];
+  cpuDetail?: CpuDetailSampleV5;
+  memoryDetail?: MemoryDetailSampleV5;
+  numaNodes?: NumaNodeSampleV5[];
 };
 
 /**
@@ -434,27 +418,26 @@ export type MetricsSampleV4 = {
  * `number | null | undefined`; the constructor sanitizes/clamps and never
  * coerces a missing reading to `0`.
  */
-export type MetricsSampleV4Input = {
-  metadata: MetricsSampleMetadataV4;
+export type MetricsSampleV5Input = {
+  metadata: MetricsSampleMetadataV5;
   host: {
-    cpu: RawInput<HostCpuMetricsV4>;
-    kernel: RawInput<HostKernelMetricsV4>;
-    memory: RawInput<HostMemoryMetricsV4>;
-    storage: RawInput<HostStorageMetricsV4>;
-    network: RawInput<HostNetworkMetricsV4>;
+    cpu: RawInput<HostCpuMetricsV5>;
+    kernel: RawInput<HostKernelMetricsV5>;
+    memory: RawInput<HostMemoryMetricsV5>;
+    storage: RawInput<HostStorageMetricsV5>;
+    network: RawInput<HostNetworkMetricsV5>;
   };
-  networks: RawInput<NetworkDeviceSampleV4>[];
-  filesystems: RawInput<FilesystemSampleV4>[];
-  blockDevices: RawInput<BlockDeviceSampleV4>[];
-  gpus: RawInput<GpuSampleV4>[];
-  hardwareSignals: RawInput<HardwareSignalSampleV4>[];
-  ingressSources: RawInput<IngressSourceSampleV4>[];
-  databaseProxies: RawInput<DatabaseProxySampleV4>[];
-  events: MetricEventV4[];
-  cpuDetail?: RawInput<CpuDetailSampleV4>;
-  memoryDetail?: RawInput<MemoryDetailSampleV4>;
-  cpuCoreLive?: RawInput<CpuCoreLiveSampleV4>[];
-  numaNodes?: RawInput<NumaNodeSampleV4>[];
+  networks: RawInput<NetworkDeviceSampleV5>[];
+  filesystems: RawInput<FilesystemSampleV5>[];
+  blockDevices: RawInput<BlockDeviceSampleV5>[];
+  gpus: RawInput<GpuSampleV5>[];
+  hardwareSignals: RawInput<HardwareSignalSampleV5>[];
+  ingressSources: RawInput<IngressSourceSampleV5>[];
+  databaseProxies: RawInput<DatabaseProxySampleV5>[];
+  events: MetricEventV5[];
+  cpuDetail?: RawInput<CpuDetailSampleV5>;
+  memoryDetail?: RawInput<MemoryDetailSampleV5>;
+  numaNodes?: RawInput<NumaNodeSampleV5>[];
 };
 
 type RawInput<T> = {
@@ -465,7 +448,7 @@ type RawInput<T> = {
 
 // ---------------------------------------------------------------------------
 // Sanitization primitives — reused verbatim from v3's `contract.ts` idiom.
-// Not imported from there: v4 has no dependency on the v3 module.
+// Not imported from there: v5 has no dependency on the v3 module.
 // ---------------------------------------------------------------------------
 
 /** Clamp percent metrics to 0–100; pass through `null`. */
@@ -522,7 +505,7 @@ function assertArrayWithinCap(
   }
 }
 
-function sanitizeHostCpu(raw: RawInput<HostCpuMetricsV4>): HostCpuMetricsV4 {
+function sanitizeHostCpu(raw: RawInput<HostCpuMetricsV5>): HostCpuMetricsV5 {
   return {
     busyPercent: clampPercent(sanitizeFinite(raw.busyPercent)),
     userPercent: clampPercent(sanitizeFinite(raw.userPercent)),
@@ -533,7 +516,7 @@ function sanitizeHostCpu(raw: RawInput<HostCpuMetricsV4>): HostCpuMetricsV4 {
     pressureSomePercent: clampPercent(
       sanitizeFinite(raw.pressureSomePercent),
     ),
-    maxCoreBusyPercent: clampPercent(sanitizeFinite(raw.maxCoreBusyPercent)),
+    saturatedCoreCount: sanitizeFinite(raw.saturatedCoreCount),
     procsRunning: sanitizeFinite(raw.procsRunning),
     procsBlocked: sanitizeFinite(raw.procsBlocked),
     processCount: sanitizeFinite(raw.processCount),
@@ -541,8 +524,8 @@ function sanitizeHostCpu(raw: RawInput<HostCpuMetricsV4>): HostCpuMetricsV4 {
 }
 
 function sanitizeHostKernel(
-  raw: RawInput<HostKernelMetricsV4>,
-): HostKernelMetricsV4 {
+  raw: RawInput<HostKernelMetricsV5>,
+): HostKernelMetricsV5 {
   return {
     fileHandlesUsedPercent: clampPercent(
       sanitizeFinite(raw.fileHandlesUsedPercent),
@@ -554,10 +537,11 @@ function sanitizeHostKernel(
 }
 
 function sanitizeHostMemory(
-  raw: RawInput<HostMemoryMetricsV4>,
-): HostMemoryMetricsV4 {
+  raw: RawInput<HostMemoryMetricsV5>,
+): HostMemoryMetricsV5 {
   return {
-    availableBytes: sanitizeFinite(raw.availableBytes),
+    usedBytes: sanitizeFinite(raw.usedBytes),
+    cachedFilesBytes: sanitizeFinite(raw.cachedFilesBytes),
     swapUsedBytes: sanitizeFinite(raw.swapUsedBytes),
     pressureSomePercent: clampPercent(
       sanitizeFinite(raw.pressureSomePercent),
@@ -572,8 +556,8 @@ function sanitizeHostMemory(
 }
 
 function sanitizeHostStorage(
-  raw: RawInput<HostStorageMetricsV4>,
-): HostStorageMetricsV4 {
+  raw: RawInput<HostStorageMetricsV5>,
+): HostStorageMetricsV5 {
   return {
     ioPressureSomePercent: clampPercent(
       sanitizeFinite(raw.ioPressureSomePercent),
@@ -583,11 +567,7 @@ function sanitizeHostStorage(
     ),
     diskReadBytesPerSecond: sanitizeFinite(raw.diskReadBytesPerSecond),
     diskWriteBytesPerSecond: sanitizeFinite(raw.diskWriteBytesPerSecond),
-    diskReadLatencyMs: sanitizeFinite(raw.diskReadLatencyMs),
-    diskWriteLatencyMs: sanitizeFinite(raw.diskWriteLatencyMs),
-    maxBlockDeviceUtilPercent: clampPercent(
-      sanitizeFinite(raw.maxBlockDeviceUtilPercent),
-    ),
+    diskLatencyMs: sanitizeFinite(raw.diskLatencyMs),
     rootFilesystemAvailableBytes: sanitizeFinite(
       raw.rootFilesystemAvailableBytes,
     ),
@@ -596,8 +576,8 @@ function sanitizeHostStorage(
 }
 
 function sanitizeHostNetwork(
-  raw: RawInput<HostNetworkMetricsV4>,
-): HostNetworkMetricsV4 {
+  raw: RawInput<HostNetworkMetricsV5>,
+): HostNetworkMetricsV5 {
   return {
     tcpRetransmitPercent: clampPercent(
       sanitizeFinite(raw.tcpRetransmitPercent),
@@ -607,8 +587,8 @@ function sanitizeHostNetwork(
 }
 
 function sanitizeNetworkDevice(
-  raw: RawInput<NetworkDeviceSampleV4>,
-): NetworkDeviceSampleV4 {
+  raw: RawInput<NetworkDeviceSampleV5>,
+): NetworkDeviceSampleV5 {
   return {
     deviceId: raw.deviceId,
     receiveBytesPerSecond: sanitizeFinite(raw.receiveBytesPerSecond),
@@ -621,8 +601,8 @@ function sanitizeNetworkDevice(
 }
 
 function sanitizeFilesystem(
-  raw: RawInput<FilesystemSampleV4>,
-): FilesystemSampleV4 {
+  raw: RawInput<FilesystemSampleV5>,
+): FilesystemSampleV5 {
   return {
     filesystemId: raw.filesystemId,
     availableBytes: sanitizeFinite(raw.availableBytes),
@@ -631,8 +611,8 @@ function sanitizeFilesystem(
 }
 
 function sanitizeBlockDevice(
-  raw: RawInput<BlockDeviceSampleV4>,
-): BlockDeviceSampleV4 {
+  raw: RawInput<BlockDeviceSampleV5>,
+): BlockDeviceSampleV5 {
   return {
     deviceId: raw.deviceId,
     readBytesPerSecond: sanitizeFinite(raw.readBytesPerSecond),
@@ -647,7 +627,7 @@ function sanitizeBlockDevice(
   };
 }
 
-function sanitizeGpu(raw: RawInput<GpuSampleV4>): GpuSampleV4 {
+function sanitizeGpu(raw: RawInput<GpuSampleV5>): GpuSampleV5 {
   return {
     gpuId: raw.gpuId,
     utilizationPercent: clampPercent(sanitizeFinite(raw.utilizationPercent)),
@@ -667,8 +647,8 @@ function sanitizeGpu(raw: RawInput<GpuSampleV4>): GpuSampleV4 {
 }
 
 function sanitizeHardwareSignal(
-  raw: RawInput<HardwareSignalSampleV4>,
-): HardwareSignalSampleV4 {
+  raw: RawInput<HardwareSignalSampleV5>,
+): HardwareSignalSampleV5 {
   return {
     signalId: raw.signalId,
     kind: raw.kind,
@@ -677,8 +657,8 @@ function sanitizeHardwareSignal(
 }
 
 function sanitizeIngressSource(
-  raw: RawInput<IngressSourceSampleV4>,
-): IngressSourceSampleV4 {
+  raw: RawInput<IngressSourceSampleV5>,
+): IngressSourceSampleV5 {
   return {
     sourceId: raw.sourceId,
     sourceKind: raw.sourceKind,
@@ -707,8 +687,8 @@ function sanitizeIngressSource(
 }
 
 function sanitizeDatabaseProxy(
-  raw: RawInput<DatabaseProxySampleV4>,
-): DatabaseProxySampleV4 {
+  raw: RawInput<DatabaseProxySampleV5>,
+): DatabaseProxySampleV5 {
   return {
     sourceId: raw.sourceId,
     sourceKind: raw.sourceKind,
@@ -721,27 +701,10 @@ function sanitizeDatabaseProxy(
   };
 }
 
-/**
- * Shared sanitizer for {@link CpuHotspotSampleV4} and
- * {@link CpuCoreLiveSampleV4} — they carry the same four leaves.
- */
-function sanitizeCpuCorePercents(
-  raw: RawInput<CpuHotspotSampleV4>,
-): CpuHotspotSampleV4 {
-  return {
-    coreId: raw.coreId,
-    busyPercent: clampPercent(sanitizeFinite(raw.busyPercent)),
-    iowaitPercent: clampPercent(sanitizeFinite(raw.iowaitPercent)),
-    stealPercent: clampPercent(sanitizeFinite(raw.stealPercent)),
-  };
-}
-
 function sanitizeCpuDetail(
-  raw: RawInput<CpuDetailSampleV4>,
-): CpuDetailSampleV4 {
-  assertArrayWithinCap("cpuDetail.hotspots", raw.hotspots, 4);
+  raw: RawInput<CpuDetailSampleV5>,
+): CpuDetailSampleV5 {
   return {
-    hotspots: raw.hotspots.map(sanitizeCpuCorePercents),
     averageFrequencyMHz: sanitizeFinite(raw.averageFrequencyMHz),
     minimumFrequencyMHz: sanitizeFinite(raw.minimumFrequencyMHz),
     maximumFrequencyMHz: sanitizeFinite(raw.maximumFrequencyMHz),
@@ -753,8 +716,8 @@ function sanitizeCpuDetail(
 }
 
 function sanitizeMemoryDetail(
-  raw: RawInput<MemoryDetailSampleV4>,
-): MemoryDetailSampleV4 {
+  raw: RawInput<MemoryDetailSampleV5>,
+): MemoryDetailSampleV5 {
   return {
     memoryFreeBytes: sanitizeFinite(raw.memoryFreeBytes),
     cachedBytes: sanitizeFinite(raw.cachedBytes),
@@ -778,7 +741,7 @@ function sanitizeMemoryDetail(
   };
 }
 
-function sanitizeNumaNode(raw: RawInput<NumaNodeSampleV4>): NumaNodeSampleV4 {
+function sanitizeNumaNode(raw: RawInput<NumaNodeSampleV5>): NumaNodeSampleV5 {
   return {
     nodeId: raw.nodeId,
     freeBytes: sanitizeFinite(raw.freeBytes),
@@ -790,7 +753,7 @@ function sanitizeNumaNode(raw: RawInput<NumaNodeSampleV4>): NumaNodeSampleV4 {
   };
 }
 
-function sanitizeEvent(event: MetricEventV4): MetricEventV4 {
+function sanitizeEvent(event: MetricEventV5): MetricEventV5 {
   assertValidEventKind(event.kind);
   if (
     event.severity !== "info" &&
@@ -804,12 +767,12 @@ function sanitizeEvent(event: MetricEventV4): MetricEventV4 {
   return event;
 }
 
-export function buildMetricsSampleV4(
-  input: MetricsSampleV4Input,
-): MetricsSampleV4 {
-  if (input.metadata.version !== METRICS_SCHEMA_VERSION_V4) {
+export function buildMetricsSampleV5(
+  input: MetricsSampleV5Input,
+): MetricsSampleV5 {
+  if (input.metadata.version !== METRICS_SCHEMA_VERSION_V5) {
     throw new TypeError(
-      `metrics metadata.version must be ${METRICS_SCHEMA_VERSION_V4}`,
+      `metrics metadata.version must be ${METRICS_SCHEMA_VERSION_V5}`,
     );
   }
   if (
@@ -867,13 +830,6 @@ export function buildMetricsSampleV4(
     MAX_METRIC_ENTITY_ARRAY_LENGTH,
   );
   assertArrayWithinCap("events", input.events, MAX_METRIC_EVENTS_PER_SAMPLE);
-  if (input.cpuCoreLive) {
-    assertArrayWithinCap(
-      "cpuCoreLive",
-      input.cpuCoreLive,
-      MAX_METRIC_ENTITY_ARRAY_LENGTH,
-    );
-  }
   if (input.numaNodes) {
     assertArrayWithinCap(
       "numaNodes",
@@ -882,7 +838,7 @@ export function buildMetricsSampleV4(
     );
   }
 
-  const sample: MetricsSampleV4 = {
+  const sample: MetricsSampleV5 = {
     type: "metrics",
     metadata: { ...input.metadata },
     host: {
@@ -904,9 +860,6 @@ export function buildMetricsSampleV4(
   if (input.cpuDetail) sample.cpuDetail = sanitizeCpuDetail(input.cpuDetail);
   if (input.memoryDetail) {
     sample.memoryDetail = sanitizeMemoryDetail(input.memoryDetail);
-  }
-  if (input.cpuCoreLive) {
-    sample.cpuCoreLive = input.cpuCoreLive.map(sanitizeCpuCorePercents);
   }
   if (input.numaNodes) {
     sample.numaNodes = input.numaNodes.map(sanitizeNumaNode);

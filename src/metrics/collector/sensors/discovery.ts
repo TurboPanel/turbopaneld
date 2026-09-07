@@ -303,6 +303,23 @@ async function resolveDiskDeviceName(
   return undefined;
 }
 
+/**
+ * Chip name for a disk-temperature hwmon, preferring the backing block
+ * device (`nvme0n1`, `sda`) so the signal id joins onto block topology.
+ *
+ * When that resolution fails the fallback must still be *unique per chip*.
+ * v4 fell back to the bare literal `"nvme"`, so two unresolvable NVMe drives
+ * both produced `signal:nvme:Composite` and one silently shadowed the other
+ * in the id map — losing a whole drive's temperatures on exactly the
+ * two-drive hosts v5 supports by default. The hwmon directory name is
+ * unique within a boot, so `nvme@hwmon3` keeps them distinct.
+ */
+function diskChipName(dir: string, chip: string, deviceName?: string): string {
+  if (deviceName) return deviceName;
+  const hwmonDir = dir.split("/").filter(Boolean).pop();
+  return hwmonDir ? `${chip}@${hwmonDir}` : chip;
+}
+
 async function hwmonDiskTempCandidates(
   dir: string,
   chip: string,
@@ -310,7 +327,13 @@ async function hwmonDiskTempCandidates(
   io: SensorIo,
 ): Promise<SensorCandidate[]> {
   const deviceName = await resolveDiskDeviceName(dir, chip, io);
-  return hwmonTempCandidates(dir, deviceName ?? chip, files, io, []);
+  return hwmonTempCandidates(
+    dir,
+    diskChipName(dir, chip, deviceName),
+    files,
+    io,
+    [],
+  );
 }
 
 async function discoverHwmonSensors(

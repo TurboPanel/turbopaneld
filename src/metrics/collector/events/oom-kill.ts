@@ -8,14 +8,14 @@
  */
 import type { EventCollector, EventDetectContext } from "./types.ts";
 import { makeEvent } from "./types.ts";
-import type { MetricEventV4 } from "../../contract-v4.ts";
+import type { MetricEventV5 } from "../../contract-v5.ts";
 
 const OOM_KILL_BASELINE_KEY = "events:oom_kill:host";
 /** Multiple kills in one interval escalate from "warning" to "critical". */
 const CRITICAL_KILL_COUNT = 3;
 
 export class OomKillEventCollector implements EventCollector {
-  detect(ctx: EventDetectContext): MetricEventV4[] {
+  detect(ctx: EventDetectContext): MetricEventV5[] {
     if (ctx.oomKillTotal === null) return [];
     const delta = ctx.tracker.delta(
       OOM_KILL_BASELINE_KEY,

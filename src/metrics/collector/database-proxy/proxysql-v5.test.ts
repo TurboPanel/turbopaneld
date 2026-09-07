@@ -2,9 +2,9 @@ import { assertEquals } from "@std/assert";
 import { CounterBaselineTracker } from "../baseline.ts";
 import { parsePrometheusExposition } from "../proxy/prom-exposition.ts";
 import {
-  parseProxySqlExpositionV4,
+  parseProxySqlExpositionV5,
   ProxySqlDatabaseProxyAdapter,
-} from "./proxysql-v4.ts";
+} from "./proxysql-v5.ts";
 import type { DatabaseProxyReadContext } from "./adapter.ts";
 
 /**
@@ -32,17 +32,17 @@ function ctx(
   };
 }
 
-test("parseProxySqlExpositionV4 computes rates from a primed baseline and passes gauges through unchanged", () => {
+test("parseProxySqlExpositionV5 computes rates from a primed baseline and passes gauges through unchanged", () => {
   const tracker = new CounterBaselineTracker();
   const partial = parsePrometheusExposition(
     fixture("proxy-proxysql-metrics-partial.txt"),
   );
-  parseProxySqlExpositionV4(partial, ctx({ tracker })); // prime baseline
+  parseProxySqlExpositionV5(partial, ctx({ tracker })); // prime baseline
 
   const samples = parsePrometheusExposition(
     fixture("proxy-proxysql-metrics.txt"),
   );
-  const reading = parseProxySqlExpositionV4(samples, ctx({ tracker }));
+  const reading = parseProxySqlExpositionV5(samples, ctx({ tracker }));
 
   assertEquals(reading.queries, 48213);
   assertEquals(reading.slowQueries, 12);
@@ -52,11 +52,11 @@ test("parseProxySqlExpositionV4 computes rates from a primed baseline and passes
   assertEquals(reading.backendsUp, 2);
 });
 
-test("parseProxySqlExpositionV4: a freshly-started ProxySQL nulls every rate field on the first observation, gauges resolve to real numbers", () => {
+test("parseProxySqlExpositionV5: a freshly-started ProxySQL nulls every rate field on the first observation, gauges resolve to real numbers", () => {
   const samples = parsePrometheusExposition(
     fixture("proxy-proxysql-metrics-partial.txt"),
   );
-  const reading = parseProxySqlExpositionV4(samples, ctx());
+  const reading = parseProxySqlExpositionV5(samples, ctx());
   assertEquals(reading.queries, null);
   assertEquals(reading.slowQueries, null);
   assertEquals(reading.connectionErrors, null);
@@ -71,38 +71,38 @@ const RESETTABLE_EXPOSITION = (queriesTotal: number) => `
 proxysql_questions_total ${queriesTotal}
 `;
 
-test("parseProxySqlExpositionV4: a counter decrease (sidecar restart) nulls that field and re-baselines", () => {
+test("parseProxySqlExpositionV5: a counter decrease (sidecar restart) nulls that field and re-baselines", () => {
   const tracker = new CounterBaselineTracker();
-  const first = parseProxySqlExpositionV4(
+  const first = parseProxySqlExpositionV5(
     parsePrometheusExposition(RESETTABLE_EXPOSITION(1000)),
     ctx({ tracker, bootGeneration: 1 }),
   );
   assertEquals(first.queries, null);
 
-  const second = parseProxySqlExpositionV4(
+  const second = parseProxySqlExpositionV5(
     parsePrometheusExposition(RESETTABLE_EXPOSITION(1600)),
     ctx({ tracker, bootGeneration: 1 }),
   );
   assertEquals(second.queries, 600);
 
-  const third = parseProxySqlExpositionV4(
+  const third = parseProxySqlExpositionV5(
     parsePrometheusExposition(RESETTABLE_EXPOSITION(50)),
     ctx({ tracker, bootGeneration: 1 }),
   );
   assertEquals(third.queries, null);
 });
 
-test("parseProxySqlExpositionV4: a boot generation change nulls the counter and re-baselines", () => {
+test("parseProxySqlExpositionV5: a boot generation change nulls the counter and re-baselines", () => {
   const tracker = new CounterBaselineTracker();
-  parseProxySqlExpositionV4(
+  parseProxySqlExpositionV5(
     parsePrometheusExposition(RESETTABLE_EXPOSITION(1000)),
     ctx({ tracker, bootGeneration: 1 }),
   );
-  parseProxySqlExpositionV4(
+  parseProxySqlExpositionV5(
     parsePrometheusExposition(RESETTABLE_EXPOSITION(1600)),
     ctx({ tracker, bootGeneration: 1 }),
   );
-  const afterRestart = parseProxySqlExpositionV4(
+  const afterRestart = parseProxySqlExpositionV5(
     parsePrometheusExposition(RESETTABLE_EXPOSITION(50)),
     ctx({ tracker, bootGeneration: 2 }),
   );

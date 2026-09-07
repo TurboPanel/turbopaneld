@@ -38,10 +38,11 @@ traefik_entrypoint_requests_bytes_total{code="200",entrypoint="metrics",method="
 traefik_entrypoint_responses_bytes_total{code="200",entrypoint="web",method="GET",protocol="http"} 500000
 traefik_entrypoint_responses_bytes_total{code="404",entrypoint="web",method="GET",protocol="http"} 4000
 traefik_entrypoint_responses_bytes_total{code="200",entrypoint="metrics",method="GET",protocol="http"} 7000000
-# HELP traefik_entrypoint_open_connections How many open connections exist on an entrypoint, partitioned by method and protocol.
-# TYPE traefik_entrypoint_open_connections gauge
-traefik_entrypoint_open_connections{entrypoint="web",method="GET",protocol="http"} 3
-traefik_entrypoint_open_connections{entrypoint="metrics",method="GET",protocol="http"} 9
+# HELP traefik_open_connections How many open connections exist, by entrypoint and protocol.
+# TYPE traefik_open_connections gauge
+traefik_open_connections{entrypoint="web",protocol="TCP"} 2
+traefik_open_connections{entrypoint="web",protocol="UDP"} 1
+traefik_open_connections{entrypoint="metrics",protocol="TCP"} 9
 # HELP traefik_service_retries_total How many request retries happened on a service.
 # TYPE traefik_service_retries_total counter
 traefik_service_retries_total{service="hosting-svc@docker"} 4

@@ -8,7 +8,7 @@
  */
 import { statfs } from "node:fs/promises";
 
-import type { FilesystemSampleV4 } from "../contract-v4.ts";
+import type { FilesystemSampleV5 } from "../contract-v5.ts";
 import type { FilesystemTopology } from "../topology/types.ts";
 import type { StorageProbeResult } from "./types.ts";
 
@@ -82,7 +82,7 @@ export async function probeStorage(
 }
 
 /**
- * Build one `FilesystemSampleV4` per non-root topology-enumerated filesystem.
+ * Build one `FilesystemSampleV5` per non-root topology-enumerated filesystem.
  * The root-tagged entry is never included here — its capacity is carried
  * exclusively by `host.storage`'s `rootFilesystemAvailableBytes`/
  * `rootFilesystemFreeInodes` (see {@link probeRootFilesystemCapacity}), so a
@@ -94,10 +94,10 @@ export async function probeStorage(
 export async function buildFilesystemSamples(
   topology: FilesystemTopology[],
   statfsIo?: StatfsIo,
-): Promise<FilesystemSampleV4[]> {
+): Promise<FilesystemSampleV5[]> {
   const nonRoot = topology.filter((fs) => !fs.roles.includes("root"));
   return await Promise.all(nonRoot.map(async (fs): Promise<
-    FilesystemSampleV4
+    FilesystemSampleV5
   > => {
     const probe = await probeStorage(fs.mountpoint, statfsIo);
     return {

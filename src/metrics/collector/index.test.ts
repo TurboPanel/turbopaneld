@@ -4,7 +4,7 @@ import {
   createMetricsCollector,
   DOCKER_DATA_ROOT_RETRY_MS,
 } from "./index.ts";
-import type { CollectorDepsV4 } from "./types-v4.ts";
+import type { CollectorDepsV5 } from "./types-v5.ts";
 import type { TopologySnapshot } from "../topology/types.ts";
 
 /**
@@ -37,7 +37,7 @@ function emptyTopologySnapshot(): TopologySnapshot {
   };
 }
 
-function inertDeps(): Partial<CollectorDepsV4> {
+function inertDeps(): Partial<CollectorDepsV5> {
   return {
     readProcFile: () => undefined,
     statfs: () => null,
@@ -125,10 +125,10 @@ test({
     const result = await collector.collect({ sequence: 1 });
     assertEquals(result.supported, true);
     if (!result.supported) return;
-    const available = result.sample.host.memory.availableBytes;
+    const available = result.sample.host.memory.usedBytes;
     if (available !== null && typeof available !== "number") {
       throw new TypeError(
-        "host.memory.availableBytes must be a number when present",
+        "host.memory.usedBytes must be a number when present",
       );
     }
   },

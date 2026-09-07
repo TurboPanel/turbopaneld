@@ -1,5 +1,5 @@
 /**
- * v4 managed-ProxySQL database-proxy adapter (`src/managed/proxysql.ts` —
+ * v5 managed-ProxySQL database-proxy adapter (`src/managed/proxysql.ts` —
  * the shared, containerized ProxySQL managed-ingress). `admin-restapi_enabled`
  * / `admin-restapi_port` (rendered by `renderProxySqlStaticConfig`) start an
  * unauthenticated HTTP REST server inside the container whose only route is
@@ -31,10 +31,10 @@ import type {
 export const PROXYSQL_REST_ADDR = "127.0.0.1:6070";
 
 /**
- * Every metric name `parseProxySqlExpositionV4` requires at least one of to
+ * Every metric name `parseProxySqlExpositionV5` requires at least one of to
  * treat a scrape as a genuine ProxySQL `/metrics` response.
  */
-const PROXYSQL_V4_EXPECTED_METRIC_NAMES = [
+const PROXYSQL_V5_EXPECTED_METRIC_NAMES = [
   "proxysql_questions_total",
   "proxysql_slow_queries_total",
   "proxysql_connpool_conns_total",
@@ -47,7 +47,7 @@ const PROXYSQL_V4_EXPECTED_METRIC_NAMES = [
 const CONNPOOL_STATUS_ONLINE = 1;
 
 /** Pure parser — exported for fixture tests. */
-export function parseProxySqlExpositionV4(
+export function parseProxySqlExpositionV5(
   samples: readonly PromSample[],
   ctx: DatabaseProxyReadContext,
 ): DatabaseProxyReading {
@@ -110,7 +110,7 @@ export class ProxySqlDatabaseProxyAdapter implements DatabaseProxyAdapter {
       if (text === undefined) return null;
       const samples = parsePrometheusExposition(text);
       if (
-        !containsAnyMetricName(samples, PROXYSQL_V4_EXPECTED_METRIC_NAMES)
+        !containsAnyMetricName(samples, PROXYSQL_V5_EXPECTED_METRIC_NAMES)
       ) {
         return null;
       }
@@ -132,7 +132,7 @@ export class ProxySqlDatabaseProxyAdapter implements DatabaseProxyAdapter {
     const samples = await this.#scrape();
     if (!samples) return null;
     try {
-      const reading = parseProxySqlExpositionV4(samples, ctx);
+      const reading = parseProxySqlExpositionV5(samples, ctx);
       return { sourceId: "proxysql", sourceKind: "proxysql", reading };
     } catch {
       return null;

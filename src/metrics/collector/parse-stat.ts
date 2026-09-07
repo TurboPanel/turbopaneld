@@ -123,7 +123,7 @@ export function parseStatProcs(
 /**
  * Scalar cumulative counters (`ctxt`/`processes`/`intr`) from `/proc/stat`.
  * Parsed now (free from the same file read) but reserved for a future
- * `cpu.detail` phase — not wired into `MetricsSampleV4` yet.
+ * `cpu.detail` phase — not wired into `MetricsSampleV5` yet.
  */
 export function parseStatScalarCounters(
   text: string,

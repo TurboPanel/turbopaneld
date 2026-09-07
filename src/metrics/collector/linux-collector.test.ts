@@ -3,7 +3,7 @@ import { fromFileUrl } from "@std/path";
 import { EventCollectorSet } from "./events/index.ts";
 import { LinuxMetricsCollector } from "./linux-collector.ts";
 import { defaultSensorIo } from "./sensors/discovery.ts";
-import type { CollectorDepsV4 } from "./types-v4.ts";
+import type { CollectorDepsV5 } from "./types-v5.ts";
 import { collectTopology } from "../topology/topology.ts";
 import { collectHardwareSignals } from "../topology/hardware-signal-topology.ts";
 import { EMPTY_TOPOLOGY_OVERRIDES } from "../topology/types.ts";
@@ -121,7 +121,7 @@ function makeDeps(
   snapshot: TopologySnapshot,
   now: () => number,
   pageSizeBytes = 4096,
-): CollectorDepsV4 {
+): CollectorDepsV5 {
   return {
     readProcFile: (path: string) =>
       (raw() as Record<string, string | undefined>)[path],
@@ -144,7 +144,7 @@ const TICK_1: RawFixtureMap = {
   "/proc/stat": fixture("proc-stat-guest-fields-1.txt"),
   "/proc/meminfo": fixture("proc-meminfo.txt"),
   "/proc/vmstat": fixture("proc-vmstat-1.txt"),
-  "/proc/diskstats": fixture("proc-diskstats-v4-virtio-1.txt")
+  "/proc/diskstats": fixture("proc-diskstats-v5-virtio-1.txt")
     .replace("vda", "sda"),
   "/proc/net/dev": fixture("proc-net-dev.txt"),
   "/proc/net/snmp": fixture("proc-net-snmp-1.txt"),
@@ -164,7 +164,7 @@ const TICK_1: RawFixtureMap = {
 const TICK_2: RawFixtureMap = {
   ...TICK_1,
   "/proc/stat": fixture("proc-stat-guest-fields-2.txt"),
-  "/proc/diskstats": fixture("proc-diskstats-v4-virtio-2.txt")
+  "/proc/diskstats": fixture("proc-diskstats-v5-virtio-2.txt")
     .replace("vda", "sda"),
   "/proc/net/snmp": fixture("proc-net-snmp-2.txt"),
   "/proc/net/netstat": fixture("proc-net-netstat-2.txt"),
@@ -174,7 +174,7 @@ const TICK_2: RawFixtureMap = {
   "/proc/pressure/io": fixture("proc-pressure-io-2.txt"),
 };
 
-test("LinuxMetricsCollector assembles a full v4 sample across two ticks", async () => {
+test("LinuxMetricsCollector assembles a full v5 sample across two ticks", async () => {
   const snapshot = fullTopologySnapshot();
   let tick = 0;
   let nowMs = 1_000_000;
@@ -199,7 +199,7 @@ test("LinuxMetricsCollector assembles a full v4 sample across two ticks", async 
     first.sample.host.kernel.conntrackUsedPercent,
     (12345 / 262144) * 100,
   );
-  assertEquals(first.sample.host.memory.availableBytes !== null, true);
+  assertEquals(first.sample.host.memory.usedBytes !== null, true);
   assertEquals(first.sample.host.storage.diskReadBytesPerSecond, null);
   assertEquals(first.sample.host.network.tcpRetransmitPercent, null);
   assertEquals(first.sample.metadata.topologyGeneration, 7);
@@ -331,7 +331,7 @@ test("LinuxMetricsCollector smoke test: a normal 1-NIC VM produces a logically c
   if (!result.supported) throw new TypeError("expected a supported sample");
 
   assertEquals(result.sample.type, "metrics");
-  assertEquals(result.sample.metadata.version, 4);
+  assertEquals(result.sample.metadata.version, 5);
   assertEquals(result.sample.networks.length, 1);
   assertEquals(result.sample.filesystems.length, 1);
   assertEquals(result.sample.blockDevices.length, 1);
@@ -638,64 +638,6 @@ test("LinuxMetricsCollector: the full physical-signal fixture is fan-free/GPU-fr
     s.signalId === "signal:cpu:thermal-throttled"
   );
   assertEquals(throttledSecond?.value, 0); // Static fixture counter -> zero delta -> 0%, not null.
-});
-
-test("LinuxMetricsCollector attaches cpuDetail/memoryDetail every tick, and cpuCoreLive only during a live-mode collect", async () => {
-  const snapshot = fullTopologySnapshot();
-  const tick1: RawFixtureMap = {
-    ...TICK_1,
-    "/proc/stat": fixture("proc-stat-percore-1.txt"),
-  };
-  const tick2: RawFixtureMap = {
-    ...TICK_2,
-    "/proc/stat": fixture("proc-stat-percore-2.txt"),
-  };
-  const tick3: RawFixtureMap = {
-    ...TICK_2,
-    "/proc/stat": fixture("proc-stat-percore-3.txt"),
-  };
-  let tick = 0;
-  let nowMs = 1_000_000;
-  const collector = new LinuxMetricsCollector(
-    makeDeps(
-      () => (tick === 0 ? tick1 : tick === 1 ? tick2 : tick3),
-      snapshot,
-      () => nowMs,
-    ),
-  );
-
-  const first = await collector.collect({ sequence: 1, nowMs });
-  if (!first.supported) throw new TypeError("expected a supported sample");
-  assertEquals(first.sample.cpuDetail !== undefined, true);
-  assertEquals(first.sample.memoryDetail !== undefined, true);
-  assertEquals(first.sample.cpuCoreLive, undefined);
-
-  tick = 1;
-  nowMs += 60_000;
-  const secondBaseline = await collector.collect({
-    sequence: 2,
-    nowMs,
-    collectionMode: "baseline",
-  });
-  if (!secondBaseline.supported) {
-    throw new TypeError("expected a supported sample");
-  }
-  assertEquals(secondBaseline.sample.cpuDetail?.hotspots.length, 2);
-  assertEquals(secondBaseline.sample.cpuCoreLive, undefined);
-
-  tick = 2;
-  nowMs += 60_000;
-  const third = await collector.collect({
-    sequence: 3,
-    nowMs,
-    collectionMode: "live",
-  });
-  if (!third.supported) throw new TypeError("expected a supported sample");
-  assertEquals(third.sample.cpuCoreLive?.length, 2);
-  assertEquals(
-    third.sample.cpuCoreLive?.map((c) => c.coreId),
-    ["cpu:p0c0t0", "cpu:p0c1t0"],
-  );
 });
 
 test("LinuxMetricsCollector samples only the slot-mapped NICs (slot order) plus fabric devices — members, VLAN children, tunnels, container bridges, and loopback are never emitted", async () => {

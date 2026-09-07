@@ -1,7 +1,7 @@
 import { assertEquals } from "@std/assert";
 import { CounterBaselineTracker } from "../baseline.ts";
 import { parsePrometheusExposition } from "../proxy/prom-exposition.ts";
-import { parseCaddyExpositionV4 } from "./caddy-v4.ts";
+import { parseCaddyExpositionV5 } from "./caddy-v5.ts";
 import { buildIngressSources } from "./index.ts";
 import { parseTraefikExposition } from "./traefik.ts";
 import type {
@@ -152,7 +152,7 @@ test("buildIngressSources: adapter throwing degrades to absent, not a rejected p
 
 // ---------------------------------------------------------------------------
 // Adapter parity — Caddy and Traefik must expose the identical
-// IngressSourceSampleV4 field set for equivalent synthetic traffic; only
+// IngressSourceSampleV5 field set for equivalent synthetic traffic; only
 // sourceKind (and fields with no vendor equivalent) differ.
 // ---------------------------------------------------------------------------
 
@@ -162,8 +162,8 @@ test("Caddy and Traefik parsers produce the identical field set for equivalent t
 
   // Prime both trackers so rate fields resolve to real numbers, not
   // first-observation nulls.
-  parseCaddyExpositionV4(
-    parsePrometheusExposition(fixture("proxy-caddy-metrics-v4-partial.txt")),
+  parseCaddyExpositionV5(
+    parsePrometheusExposition(fixture("proxy-caddy-metrics-v5-partial.txt")),
     { tracker: caddyTracker, bootGeneration: 1, seconds: 60 },
   );
   parseTraefikExposition(
@@ -174,8 +174,8 @@ test("Caddy and Traefik parsers produce the identical field set for equivalent t
   // Both fixtures encode the same synthetic traffic shape: 100 requests
   // (90×200, 10×404), 47000 request bytes, 504000 response bytes, 10s
   // cumulative duration, and identical bucket-boundary counts.
-  const caddyReading = parseCaddyExpositionV4(
-    parsePrometheusExposition(fixture("proxy-caddy-metrics-v4-base.txt")),
+  const caddyReading = parseCaddyExpositionV5(
+    parsePrometheusExposition(fixture("proxy-caddy-metrics-v5-base.txt")),
     { tracker: caddyTracker, bootGeneration: 1, seconds: 60 },
   );
   const traefikReading = parseTraefikExposition(

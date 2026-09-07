@@ -5,11 +5,11 @@ import {
   type MetricsCollector,
   type MetricsCollectResult,
 } from "./collector/index.ts";
-import type { CollectorDepsV4 } from "./collector/types-v4.ts";
+import type { CollectorDepsV5 } from "./collector/types-v5.ts";
 import {
-  buildMetricsSampleV4,
-  METRICS_SCHEMA_VERSION_V4,
-} from "./contract-v4.ts";
+  buildMetricsSampleV5,
+  METRICS_SCHEMA_VERSION_V5,
+} from "./contract-v5.ts";
 import type { TopologySnapshot } from "./topology/types.ts";
 import {
   deterministicJitterMs,
@@ -140,7 +140,7 @@ function parseMetricsFrames(sent: unknown[]): Array<{
   host: {
     cpu: { busyPercent: number | null };
     storage: { diskReadBytesPerSecond: number | null };
-    memory: { availableBytes: number | null };
+    memory: { usedBytes: number | null };
   };
 }> {
   return sent
@@ -151,7 +151,7 @@ function parseMetricsFrames(sent: unknown[]): Array<{
         host: {
           cpu: { busyPercent: number | null };
           storage: { diskReadBytesPerSecond: number | null };
-          memory: { availableBytes: number | null };
+          memory: { usedBytes: number | null };
         };
       }
     )
@@ -205,7 +205,7 @@ function createFixtureCollectorFactory(): () => MetricsCollector {
   return () => {
     let sampleIndex = 0;
     let clockMs = 1_000_000;
-    const deps: Partial<CollectorDepsV4> = {
+    const deps: Partial<CollectorDepsV5> = {
       readProcFile(path: string) {
         if (path === "/proc/stat") {
           return sampleIndex === 0
@@ -230,7 +230,7 @@ function createFixtureCollectorFactory(): () => MetricsCollector {
       countProcesses: () => 42,
       // Unlike GPU adapters (only invoked per topology-enumerated GPU, and
       // this fixture's topology has none), ingress/database-proxy adapters
-      // are scrape-derived with no topology gate — `defaultDepsV4()`'s real
+      // are scrape-derived with no topology gate — `defaultDepsV5()`'s real
       // adapters would otherwise attempt genuine loopback network calls on
       // every tick here, breaking this test's hermetic/synchronous timing.
       ingressAdapters: undefined,
@@ -271,9 +271,9 @@ function createFakeCollector(
 function supportedSample(sequence: number): MetricsCollectResult {
   return {
     supported: true,
-    sample: buildMetricsSampleV4({
+    sample: buildMetricsSampleV5({
       metadata: {
-        version: METRICS_SCHEMA_VERSION_V4,
+        version: METRICS_SCHEMA_VERSION_V5,
         sampledAt: new Date(0).toISOString(),
         intervalSeconds: 60,
         sequence,
@@ -290,14 +290,15 @@ function supportedSample(sequence: number): MetricsCollectResult {
           stealPercent: null,
           softirqPercent: null,
           pressureSomePercent: null,
-          maxCoreBusyPercent: null,
+          saturatedCoreCount: null,
           procsRunning: null,
           procsBlocked: null,
           processCount: null,
         },
         kernel: { fileHandlesUsedPercent: null, conntrackUsedPercent: null },
         memory: {
-          availableBytes: 100,
+          usedBytes: 100,
+          cachedFilesBytes: null,
           swapUsedBytes: null,
           pressureSomePercent: null,
           pressureFullPercent: null,
@@ -310,9 +311,7 @@ function supportedSample(sequence: number): MetricsCollectResult {
           ioPressureFullPercent: null,
           diskReadBytesPerSecond: null,
           diskWriteBytesPerSecond: null,
-          diskReadLatencyMs: null,
-          diskWriteLatencyMs: null,
-          maxBlockDeviceUtilPercent: null,
+          diskLatencyMs: null,
           rootFilesystemAvailableBytes: null,
           rootFilesystemFreeInodes: null,
         },
@@ -378,7 +377,7 @@ it("MetricsScheduler emits first metrics frame immediately on attach", async () 
   const frames = parseMetricsFrames(sent);
   assertEquals(frames.length, 1);
   assertEquals(frames[0].type, "metrics");
-  assertEquals(frames[0].metadata.version, METRICS_SCHEMA_VERSION_V4);
+  assertEquals(frames[0].metadata.version, METRICS_SCHEMA_VERSION_V5);
   assertEquals(typeof frames[0].metadata.sequence, "number");
 });
 
@@ -1168,7 +1167,7 @@ it({
     const first = parseMetricsFrames(sent);
     assertEquals(first.length, 1);
     assertEquals(first[0].host.cpu.busyPercent, null);
-    assertEquals(first[0].host.memory.availableBytes !== null, true);
+    assertEquals(first[0].host.memory.usedBytes !== null, true);
 
     await clock.advance(primeMs - 1);
     assertEquals(parseMetricsFrames(sent).length, 1);

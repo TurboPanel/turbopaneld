@@ -25,58 +25,6 @@ const CPUFREQ_IO = memoryIo({
 });
 
 /** Test-only stable-id stand-in — real ids come from `topology/cpu-topology.ts`. */
-function coreIdOf(key: string): string {
-  return `cpu:p0c${key}t0`;
-}
-
-test("buildCpuDetailSample selects hotspots, frequency range, and scalar rates", async () => {
-  const statText1 = fixture("proc-stat-percore-1.txt");
-  const statText2 = fixture("proc-stat-percore-2.txt");
-  const prevCores = parseStatPerCoreLines(statText1);
-  const currCores = parseStatPerCoreLines(statText2);
-  const tracker = new CounterBaselineTracker();
-
-  await buildCpuDetailSample({
-    io: CPUFREQ_IO,
-    sysRoot: "/sys",
-    statText: statText1,
-    prevCpu: null,
-    currCpu: parseStat(statText1),
-    prevCores: {},
-    currCores: prevCores,
-    coreIdOf,
-    tracker,
-    bootGeneration: 0,
-    seconds: 60,
-  });
-
-  const sample = await buildCpuDetailSample({
-    io: CPUFREQ_IO,
-    sysRoot: "/sys",
-    statText: statText2,
-    prevCpu: parseStat(statText1),
-    currCpu: parseStat(statText2),
-    prevCores,
-    currCores,
-    coreIdOf,
-    tracker,
-    bootGeneration: 0,
-    seconds: 60,
-  });
-  if (!sample) throw new TypeError("expected a sample");
-
-  assertEquals(sample.hotspots.map((h) => h.coreId), [
-    "cpu:p0c1t0",
-    "cpu:p0c0t0",
-  ]);
-  assertEquals(sample.averageFrequencyMHz, (2400 + 3200) / 2);
-  assertEquals(sample.minimumFrequencyMHz, 2400);
-  assertEquals(sample.maximumFrequencyMHz, 3200);
-  // ctxt: 457 - 456 = 1 over 60s; processes: 11 - 10 = 1 over 60s; intr: 124 - 123 = 1 over 60s.
-  assertEquals(sample.contextSwitchesPerSecond, 1 / 60);
-  assertEquals(sample.forksPerSecond, 1 / 60);
-  assertEquals(sample.interruptsPerSecond, 1 / 60);
-});
 
 test("buildCpuDetailSample falls back to cpuinfo_cur_freq when scaling_cur_freq is absent", async () => {
   const statText = fixture("proc-stat-percore-1.txt");
@@ -91,9 +39,7 @@ test("buildCpuDetailSample falls back to cpuinfo_cur_freq when scaling_cur_freq 
     statText,
     prevCpu: null,
     currCpu: parseStat(statText),
-    prevCores: {},
     currCores: parseStatPerCoreLines(statText),
-    coreIdOf,
     tracker,
     bootGeneration: 0,
     seconds: 60,
@@ -110,9 +56,7 @@ test("buildCpuDetailSample returns null when /proc/stat itself is unreadable", a
     statText: undefined,
     prevCpu: null,
     currCpu: null,
-    prevCores: {},
     currCores: {},
-    coreIdOf,
     tracker,
     bootGeneration: 0,
     seconds: 60,

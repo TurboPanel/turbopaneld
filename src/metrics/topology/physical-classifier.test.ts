@@ -54,3 +54,33 @@ test("GPU topology enumeration never consults the physical classifier — no sha
   });
   assertEquals(classifierCalled, false);
 });
+
+test("isPhysicalMachine: an ambiguous vendor with bare-metal product_name reads true", async () => {
+  // v4 substring-matched "microsoft corporation" and demoted this host to
+  // virtual, silently dropping every hardware signal it reported.
+  const physical = await isPhysicalMachine({
+    readFile: (path: string) =>
+      Promise.resolve(
+        path.endsWith("sys_vendor")
+          ? "Microsoft Corporation"
+          : path.endsWith("product_name")
+          ? "Surface Laptop Studio"
+          : undefined,
+      ),
+  });
+  assertEquals(physical, true);
+});
+
+test("isPhysicalMachine: an ambiguous vendor reads false once product_name confirms a VM", async () => {
+  const physical = await isPhysicalMachine({
+    readFile: (path: string) =>
+      Promise.resolve(
+        path.endsWith("sys_vendor")
+          ? "Google"
+          : path.endsWith("product_name")
+          ? "Google Compute Engine"
+          : undefined,
+      ),
+  });
+  assertEquals(physical, false);
+});
