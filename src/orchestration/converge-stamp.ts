@@ -122,6 +122,9 @@ export function devConvergeEnvMaterial(): string {
     `optional_redis_insight=${
       optionalFlag("TURBOPANEL_OPTIONAL_REDIS_INSIGHT", false)
     }`,
+    `optional_stripe_listen=${
+      optionalFlag("TURBOPANEL_OPTIONAL_STRIPE_LISTEN", false)
+    }`,
   ].join("\n");
 }
 

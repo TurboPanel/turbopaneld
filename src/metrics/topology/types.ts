@@ -45,9 +45,15 @@ export type NetworkDeviceKind =
  * (`slot-mapping.ts`), the control plane's mirror, and the UI picker. The
  * *effective* count a server may store is the capability plan's
  * `normalNicSlots` (`../../../../turbopanel/src/daemon/metrics/capability-plan.ts`
- * — 2 by default on the hosted platform, 8 self-hosted), clamped to this.
+ * — 2 by default on the hosted platform, 11 self-hosted), clamped to this.
+ *
+ * 11 is the top of the priced ladder: the S7 and SX tiers sell 11 NIC slots
+ * (`turbopanel/src/lib/billing/catalogue.ts`), and the row budget those
+ * prices were measured on (`turbopanel/scripts/metrics-tier-model.ts`)
+ * assumed all 11 are stored. A ceiling below that would sell slots nothing
+ * can fill.
  */
-export const MAX_NIC_SLOTS = 8;
+export const MAX_NIC_SLOTS = 11;
 
 export type NetworkDeviceIdentity = {
   /** Permanent hardware MAC, when readable — the strongest identity signal. */
@@ -78,10 +84,23 @@ export type NetworkDeviceTopology = {
   defaultRoute?: boolean;
 };
 
+/**
+ * What a discovered filesystem is *for*. Role-bearing filesystems are pinned
+ * ahead of everything else in `SlotMapping.filesystemPageOrder`
+ * (`slot-mapping.ts`), so the ones a storage panel actually renders never fall
+ * off the end of a page as unrelated mounts come and go.
+ *
+ * `backup` is the managed-backup root (`LayoutPaths.backupDir`, `/backup` by
+ * default) and `logs` the daemon log directory (`LayoutPaths.logDir`) — both
+ * added in v6 alongside the `managed.storage` family, which reports used and
+ * free bytes for each.
+ */
 export type FilesystemRole =
   | "root"
   | "hosting"
   | "docker"
+  | "backup"
+  | "logs"
   | "application"
   | "custom";
 
@@ -192,6 +211,25 @@ export type TopologySnapshot = {
   numaNodes: NumaNodeTopology[];
   memoryTotalBytes: number | null;
   swapTotalBytes: number | null;
+  /**
+   * The daemon's own physical-vs-VM verdict (`physical-classifier.ts`, DMI +
+   * hypervisor marker) — the control plane prefers this over inferring from
+   * `hardwareSignals`, so a bare-metal host with nothing discoverable is
+   * still `physical`. Absent on snapshots recorded by pre-v6 daemons.
+   */
+  machineClass?: "physical" | "virtual";
+  /**
+   * Static layout paths from the host environment (`TURBOPANEL_BACKUP_DIR`
+   * and the log directory) — reported, never probed, so the console can show
+   * where backups land. Absent on snapshots recorded by pre-v6 daemons.
+   */
+  paths?: TopologyLayoutPaths;
+};
+
+/** Host layout paths the daemon reports on its topology snapshot. */
+export type TopologyLayoutPaths = {
+  backup: string;
+  logs: string;
 };
 
 /**

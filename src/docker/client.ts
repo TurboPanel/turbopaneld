@@ -69,6 +69,39 @@ export interface DockerInfo {
   DockerRootDir?: string;
 }
 
+/**
+ * Docker Engine `GET /system/df` subset — only the fields the disk-usage
+ * rollup consumes (`metrics/collector/docker-usage.ts`).
+ *
+ * Every array is optional and every field within it is optional: the Engine
+ * omits a section entirely when its `type=` query parameter is not asked for,
+ * and older Engine versions omit `UsageData` on volumes unless the request is
+ * a "verbose" one. Absent means unknown, and the rollup keeps it `null`
+ * rather than treating it as zero bytes.
+ *
+ * `LayersSize` is the deduplicated on-disk size of every image layer — not
+ * the sum of `Images[].Size`, which double-counts shared layers.
+ */
+export interface DockerSystemDf {
+  LayersSize?: number;
+  Images?: Array<{
+    Size?: number;
+    /** How many containers use this image; `0` means a prune would reclaim it. */
+    Containers?: number;
+  }>;
+  Containers?: Array<{
+    /** Writable-layer bytes on top of the image. */
+    SizeRw?: number;
+  }>;
+  Volumes?: Array<{
+    UsageData?: { Size?: number; RefCount?: number } | null;
+  }>;
+  BuildCache?: Array<{
+    Size?: number;
+    InUse?: boolean;
+  }>;
+}
+
 export type DockerEvent = {
   Type: string;
   Action: string;
@@ -146,6 +179,26 @@ export class DockerClient {
       throw new Error(`docker info failed: HTTP ${response.status}`);
     }
     return await response.json() as DockerInfo;
+  }
+
+  /**
+   * Docker's own disk accounting. Asks for all four object types explicitly
+   * so the response shape is deterministic across Engine versions rather than
+   * depending on the endpoint's defaults.
+   *
+   * Not cheap: the Engine walks every image, container, volume and build-cache
+   * record to answer, so callers must throttle this on their own interval —
+   * never once per metrics tick. Same error-handling shape as {@link info}:
+   * a non-2xx response throws rather than returning a partial reading.
+   */
+  async systemDf(): Promise<DockerSystemDf> {
+    const response = await this.#fetch(
+      "/system/df?type=image&type=container&type=volume&type=build-cache",
+    );
+    if (!response.ok) {
+      throw new Error(`docker system df failed: HTTP ${response.status}`);
+    }
+    return await response.json() as DockerSystemDf;
   }
 
   async listContainers(all = false): Promise<ContainerSummary[]> {

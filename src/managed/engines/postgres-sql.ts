@@ -258,6 +258,18 @@ export function reloadVerifySql(): string {
   ].join("\n");
 }
 
+/**
+ * Metrics census: client backends open now, and the configured ceiling.
+ * One row, two integer cells, for `psql -t -A -F '\t'`.
+ */
+export function connectionCensusSql(): string {
+  return [
+    `SELECT (SELECT count(*) FROM pg_catalog.pg_stat_activity`,
+    `        WHERE backend_type = 'client backend')::int,`,
+    `       current_setting('max_connections')::int;`,
+  ].join("\n");
+}
+
 export function promoteSql(): string {
   return "SELECT pg_catalog.pg_promote(true, 60);";
 }

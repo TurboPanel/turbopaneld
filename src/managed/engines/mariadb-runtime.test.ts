@@ -873,3 +873,79 @@ test("mariadb readHealth returns unknown when replica status is empty", async ()
   const health = await replication.readHealth(buildContext(exec), "standby");
   assertEquals(health.state, "unknown");
 });
+
+Deno.test("readCensus: a passing mariadb-admin ping plus the census rows is healthy with connections; a failing ping is down; a refused query is healthy-unknown", async () => {
+  const calls: string[][] = [];
+  const answering: ManagedEngineExec = (argv) => {
+    calls.push([...argv]);
+    if (argv[0] === "mariadb-admin" && argv[1] === "ping") {
+      return Promise.resolve({
+        success: true,
+        stdout: "mysqld is alive",
+        stderr: "",
+      });
+    }
+    if (argv.includes("-e") && argv.at(-1)?.includes("Threads_connected")) {
+      return Promise.resolve({
+        success: true,
+        stdout: "Threads_connected\t12\n151\n",
+        stderr: "",
+      });
+    }
+    return Promise.resolve({
+      success: false,
+      stdout: "",
+      stderr: "unexpected",
+    });
+  };
+  assertEquals(
+    await mariadbManagedEngineRuntime.readCensus!(buildContext(answering)),
+    {
+      healthy: true,
+      connectionsUsed: 12,
+      connectionsMax: 151,
+    },
+  );
+  // Probed once, never polled like waitReady.
+  assertEquals(calls.filter((argv) => argv[1] === "ping").length, 1);
+
+  const down: ManagedEngineExec = (argv) => {
+    if (argv[1] === "ping") {
+      return Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr: "connect failed",
+      });
+    }
+    throw new Error("must not query a down instance");
+  };
+  assertEquals(
+    await mariadbManagedEngineRuntime.readCensus!(buildContext(down)),
+    {
+      healthy: false,
+      connectionsUsed: null,
+      connectionsMax: null,
+    },
+  );
+
+  // Alive, but the census query is refused (no socket auth, no password here).
+  const refusing: ManagedEngineExec = (argv) =>
+    Promise.resolve(
+      argv[1] === "ping"
+        ? { success: true, stdout: "mysqld is alive", stderr: "" }
+        : {
+          success: false,
+          stdout: "",
+          stderr:
+            "ERROR 1045 (28000): Access denied for user 'root'@'localhost' (using password: NO)",
+        },
+    );
+  assertEquals(
+    await mariadbManagedEngineRuntime.readCensus!(buildContext(refusing)),
+    {
+      healthy: true,
+      connectionsUsed: null,
+      connectionsMax: null,
+    },
+  );
+});

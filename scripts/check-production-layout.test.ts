@@ -39,6 +39,7 @@ function productionLayout(
     stateDir: "/var/lib/turbopanel",
     daemonStateDir: "/var/lib/turbopanel",
     logDir: "/var/log/turbopanel",
+    backupDir: "/backup",
     runDir: "/run/turbopanel",
     principalHomeRoot: "/srv/users",
     daemonRootDefault: "/opt/turbopanel/lib/daemon",

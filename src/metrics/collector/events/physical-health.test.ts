@@ -30,6 +30,30 @@ const TEMP_SIGNAL: PhysicalSignalTopology = {
   thresholds: { warning: 80, critical: 95 },
 };
 
+/**
+ * The two halves of one service drive's thermal reading: the raw hwmon probe
+ * (`component: "disk"`) and the entity-joined whole-drive mirror
+ * (`component: "drive"`) A2 added, which copies the probe's thresholds so the
+ * control plane can draw them. Same physical sensor, so a crossing must fire
+ * exactly one event.
+ */
+const DISK_PROBE_SIGNAL: PhysicalSignalTopology = {
+  signalId: "signal:nvme:Composite",
+  kind: "temperature",
+  unit: "celsius",
+  component: "disk",
+  label: "Composite",
+  thresholds: { warning: 70, critical: 85 },
+};
+const DRIVE_ENTITY_SIGNAL: PhysicalSignalTopology = {
+  signalId: "signal:block:blk:nvme0n1:temperature",
+  kind: "temperature",
+  unit: "celsius",
+  component: "drive",
+  label: "nvme0n1 temperature",
+  thresholds: { warning: 70, critical: 85 },
+};
+
 const FAN_CANDIDATE: SensorCandidate = {
   chip: "nct6775",
   label: "fan1",
@@ -88,6 +112,7 @@ function ctx(overrides: Partial<EventDetectContext> = {}): EventDetectContext {
     bootGeneration: 1,
     seconds: 60,
     gpus: [],
+    gpuThermals: new Map(),
     hardwareSignals: [
       { signalId: TEMP_SIGNAL.signalId, kind: "temperature", value: 50 },
     ],
@@ -236,4 +261,46 @@ test("PhysicalHealthEventCollector: a power-alarm file fires psu_fault", async (
     }),
   );
   assertEquals(events.some((e) => e.kind === "psu_fault"), true);
+});
+
+test("PhysicalHealthEventCollector: a service drive carrying both its raw probe and its entity-joined mirror fires one thermal event, from the probe", async () => {
+  const collector = new PhysicalHealthEventCollector();
+  const driveSnapshot = snapshot([DISK_PROBE_SIGNAL, DRIVE_ENTITY_SIGNAL]);
+  const readings = (celsius: number) => [
+    {
+      signalId: DISK_PROBE_SIGNAL.signalId,
+      kind: "temperature",
+      value: celsius,
+    },
+    {
+      signalId: DRIVE_ENTITY_SIGNAL.signalId,
+      kind: "temperature",
+      value: celsius,
+    },
+  ];
+
+  await collector.detect(
+    ctx({ snapshot: driveSnapshot, hardwareSignals: readings(40) }),
+  );
+  const warned = await collector.detect(
+    ctx({
+      snapshot: driveSnapshot,
+      hardwareSignals: readings(75),
+      nowMs: 1_000,
+    }),
+  );
+  assertEquals(warned.length, 1);
+  assertEquals(warned[0].kind, "temp_alarm");
+  assertEquals(warned[0].entityId, DISK_PROBE_SIGNAL.signalId);
+
+  const crossed = await collector.detect(
+    ctx({
+      snapshot: driveSnapshot,
+      hardwareSignals: readings(90),
+      nowMs: 2_000,
+    }),
+  );
+  assertEquals(crossed.length, 1);
+  assertEquals(crossed[0].kind, "temp_critical");
+  assertEquals(crossed[0].entityId, DISK_PROBE_SIGNAL.signalId);
 });

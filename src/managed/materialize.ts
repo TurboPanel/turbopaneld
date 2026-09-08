@@ -139,7 +139,8 @@ export async function normalizeManagedFileOwnership(
 ): Promise<void> {
   // Shell script runs as root inside a throwaway engine image.
   // Scope to bind-mounted trees only (`config/`, `tls/`) — never
-  // `docker-compose.yml`, short-lived `.env`, or `backups/` (daemon-owned).
+  // `docker-compose.yml` or the short-lived `.env` (daemon-owned). Backups
+  // are not in this tree at all since v6 — they live under `backupDir`.
   // Whole-tree chown left compose as root:<engineGroup> 0640 and broke
   // re-apply with writefile Permission denied.
   // 0640 → root:<engineGroup>; 0600 → <engineUser>:<engineGroup>.

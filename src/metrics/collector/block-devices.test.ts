@@ -31,10 +31,10 @@ it("buildBlockDeviceSamples computes per-device rate/latency/utilization/queue-d
   const tracker = new CounterBaselineTracker();
   const topology = [serviceDevice({ kernelName: "vda", deviceId: "blk:vda" })];
 
-  const first = parseDiskstatsRows(fixture("proc-diskstats-v5-virtio-1.txt"));
+  const first = parseDiskstatsRows(fixture("proc-diskstats-virtio-1.txt"));
   buildBlockDeviceSamples(topology, first, tracker, 0, 60);
 
-  const second = parseDiskstatsRows(fixture("proc-diskstats-v5-virtio-2.txt"));
+  const second = parseDiskstatsRows(fixture("proc-diskstats-virtio-2.txt"));
   const samples = buildBlockDeviceSamples(topology, second, tracker, 0, 60);
 
   assertEquals(samples, [{
@@ -46,7 +46,6 @@ it("buildBlockDeviceSamples computes per-device rate/latency/utilization/queue-d
     readLatencyMs: 60 / 100,
     writeLatencyMs: 180 / 100,
     utilizationPercent: (900 / (60 * 1000)) * 100,
-    temperatureCelsius: null,
     queueDepth: 1800 / (60 * 1000),
   }]);
 });
@@ -59,14 +58,14 @@ it("buildBlockDeviceSamples computes correct math for NVMe naming", () => {
 
   buildBlockDeviceSamples(
     topology,
-    parseDiskstatsRows(fixture("proc-diskstats-v5-nvme-1.txt")),
+    parseDiskstatsRows(fixture("proc-diskstats-nvme-1.txt")),
     tracker,
     0,
     60,
   );
   const samples = buildBlockDeviceSamples(
     topology,
-    parseDiskstatsRows(fixture("proc-diskstats-v5-nvme-2.txt")),
+    parseDiskstatsRows(fixture("proc-diskstats-nvme-2.txt")),
     tracker,
     0,
     60,
@@ -84,14 +83,14 @@ it("buildBlockDeviceSamples reports null latency (not 0) on a genuinely idle int
 
   buildBlockDeviceSamples(
     topology,
-    parseDiskstatsRows(fixture("proc-diskstats-v5-idle-1.txt")),
+    parseDiskstatsRows(fixture("proc-diskstats-idle-1.txt")),
     tracker,
     0,
     60,
   );
   const samples = buildBlockDeviceSamples(
     topology,
-    parseDiskstatsRows(fixture("proc-diskstats-v5-idle-2.txt")),
+    parseDiskstatsRows(fixture("proc-diskstats-idle-2.txt")),
     tracker,
     0,
     60,
@@ -117,7 +116,7 @@ it("buildBlockDeviceSamples excludes partitions from the detailed array", () => 
 
   const samples = buildBlockDeviceSamples(
     topology,
-    parseDiskstatsRows(fixture("proc-diskstats-v5-partition-1.txt")),
+    parseDiskstatsRows(fixture("proc-diskstats-partition-1.txt")),
     tracker,
     0,
     60,
@@ -140,7 +139,6 @@ it("buildBlockDeviceSamples keeps an entry present with null fields when the dis
     readLatencyMs: null,
     writeLatencyMs: null,
     utilizationPercent: null,
-    temperatureCelsius: null,
     queueDepth: null,
   }]);
 });
@@ -152,7 +150,7 @@ it("buildBlockDeviceSamples keeps the baseline across a missing row, so one bad 
   // Tick 1: normal reading — establishes the baseline.
   buildBlockDeviceSamples(
     topology,
-    parseDiskstatsRows(fixture("proc-diskstats-v5-virtio-1.txt")),
+    parseDiskstatsRows(fixture("proc-diskstats-virtio-1.txt")),
     tracker,
     0,
     60,
@@ -165,7 +163,7 @@ it("buildBlockDeviceSamples keeps the baseline across a missing row, so one bad 
   const gapTick = buildBlockDeviceSamples(topology, {}, tracker, 0, 60);
   assertEquals(gapTick[0].readBytesPerSecond, null);
 
-  const virtio2 = parseDiskstatsRows(fixture("proc-diskstats-v5-virtio-2.txt"));
+  const virtio2 = parseDiskstatsRows(fixture("proc-diskstats-virtio-2.txt"));
 
   // Tick 3: the row reappears and immediately produces a real rate, diffed
   // against the tick-1 baseline. No second wasted interval.
@@ -183,8 +181,8 @@ it("buildBlockDeviceSamples keeps the baseline across a missing row, so one bad 
 it("buildBlockDeviceSamples still nulls a rate when the counter actually goes backwards", () => {
   const tracker = new CounterBaselineTracker();
   const topology = [serviceDevice({ kernelName: "vda", deviceId: "blk:vda" })];
-  const virtio1 = parseDiskstatsRows(fixture("proc-diskstats-v5-virtio-1.txt"));
-  const virtio2 = parseDiskstatsRows(fixture("proc-diskstats-v5-virtio-2.txt"));
+  const virtio1 = parseDiskstatsRows(fixture("proc-diskstats-virtio-1.txt"));
+  const virtio2 = parseDiskstatsRows(fixture("proc-diskstats-virtio-2.txt"));
 
   // Baseline at the *higher* counters, then hand back the lower ones: a
   // device replacement or counter wrap, which must still re-origin rather
@@ -194,18 +192,17 @@ it("buildBlockDeviceSamples still nulls a rate when the counter actually goes ba
   assertEquals(wrapped[0].readBytesPerSecond, null);
 });
 
-it("buildBlockDeviceSamples joins drive temperature onto the device by kernel name", () => {
+it("buildBlockDeviceSamples never carries a drive temperature — it is a hardware.physical signal, not a block field", () => {
   const tracker = new CounterBaselineTracker();
   const topology = [serviceDevice({ kernelName: "vda", deviceId: "blk:vda" })];
   const samples = buildBlockDeviceSamples(
     topology,
-    parseDiskstatsRows(fixture("proc-diskstats-v5-virtio-1.txt")),
+    parseDiskstatsRows(fixture("proc-diskstats-virtio-1.txt")),
     tracker,
     0,
     60,
-    { vda: 41 },
   );
-  assertEquals(samples[0].temperatureCelsius, 41);
+  assertEquals(Object.hasOwn(samples[0], "temperatureCelsius"), false);
 });
 
 it("buildBlockDeviceTemperatures prefers NVMe Composite over the numbered internal sensors", () => {
@@ -249,14 +246,14 @@ it("hostDiskAggregates sums correctly across the service-device set, excluding n
 
   hostDiskAggregates(
     topology,
-    parseDiskstatsRows(fixture("proc-diskstats-v5-partition-1.txt")),
+    parseDiskstatsRows(fixture("proc-diskstats-partition-1.txt")),
     tracker,
     0,
     60,
   );
   const aggregates = hostDiskAggregates(
     topology,
-    parseDiskstatsRows(fixture("proc-diskstats-v5-partition-2.txt")),
+    parseDiskstatsRows(fixture("proc-diskstats-partition-2.txt")),
     tracker,
     0,
     60,
@@ -279,7 +276,7 @@ it("hostDiskAggregates nulls the interval right after a missing-row gap, then re
   // Tick 1: normal reading — establishes the baseline.
   hostDiskAggregates(
     topology,
-    parseDiskstatsRows(fixture("proc-diskstats-v5-partition-1.txt")),
+    parseDiskstatsRows(fixture("proc-diskstats-partition-1.txt")),
     tracker,
     0,
     60,
@@ -292,7 +289,7 @@ it("hostDiskAggregates nulls the interval right after a missing-row gap, then re
   assertEquals(gapTick.diskWriteBytesPerSecond, null);
 
   const partition2 = parseDiskstatsRows(
-    fixture("proc-diskstats-v5-partition-2.txt"),
+    fixture("proc-diskstats-partition-2.txt"),
   );
 
   // Tick 3: the row reappears, but this is the first observation after the

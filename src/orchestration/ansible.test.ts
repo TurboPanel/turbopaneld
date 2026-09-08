@@ -836,6 +836,14 @@ test(
 
     const defaults = await Deno.readTextFile(defaultsPath);
     const tasks = await Deno.readTextFile(tasksPath);
+    const launchTasksForStripe = await Deno.readTextFile(
+      join(CHECKOUT_ORCHESTRATION_DIR, "roles/instance-launch/tasks/main.yml"),
+    );
+    assertEquals(
+      launchTasksForStripe.includes("dev/local/stripe.env"),
+      true,
+      "co-located dev seeds the protected Stripe files from the mounted dev checkout",
+    );
     const denoDevVars = await Deno.readTextFile(denoDevVarsPath);
     const workersDevVars = await Deno.readTextFile(workersDevVarsPath);
 
@@ -1196,7 +1204,7 @@ test("site apply playbooks vendor engines (never apt nginx/apache2)", async () =
   // The global `metrics` option is what actually exposes `/metrics` on the
   // admin listener — `servers { metrics }` alone only turns on per-server
   // instrumentation and leaves `/metrics` 404, which would silently strand
-  // the daemon's traffic collector (`src/metrics/collector/ingress/caddy-v5.ts`).
+  // the daemon's traffic collector (`src/metrics/collector/ingress/caddy.ts`).
   const siteCaddyfile = await Deno.readTextFile(
     join(CHECKOUT_ORCHESTRATION_DIR, "roles/site-caddy/templates/Caddyfile.j2"),
   );
@@ -1313,6 +1321,146 @@ test("instance-certs apply never passes a platform CA rotate flag", async () => 
     tasks,
     /TURBOPANEL_TLS_CA_BUNDLE:/,
     "pass TURBOPANEL_TLS_CA_BUNDLE",
+  );
+});
+
+test("stripe-listen role is unit-only, gated on its optional var, and never re-templates stripe.env", async () => {
+  const tasks = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/stripe-listen/tasks/main.yml"),
+  );
+  assertEquals(
+    tasks.includes("turbopanel_optional_stripe_listen | default(false) | bool"),
+    true,
+    "stripe-listen: unit state follows turbopanel_optional_stripe_listen, default off",
+  );
+  assertEquals(
+    tasks.includes("wrapper-start.sh"),
+    true,
+    "stripe-listen: install wrapper-start.sh",
+  );
+  assertEquals(
+    tasks.includes("force: false"),
+    true,
+    "stripe-listen: stripe.env is seeded once, never overwritten",
+  );
+  assertEquals(tasks.includes("docker"), false, "stripe-listen: no container");
+  assertEquals(
+    tasks.includes("stripe-cli/{{ stripe_cli_version }}/stripe"),
+    true,
+    "stripe-listen: vendors the pinned binary under vendor/stripe-cli/<version>/",
+  );
+  const wrapper = await Deno.readTextFile(
+    join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/stripe-listen/templates/stripe-listen-wrapper-start.sh.j2",
+    ),
+  );
+  assertEquals(
+    wrapper.includes("listen --print-secret"),
+    true,
+    "wrapper: reads the forwarding secret deterministically",
+  );
+  assertEquals(
+    wrapper.includes("TURBOPANEL_STRIPE_WEBHOOK_SIGNING_SECRET="),
+    true,
+    "wrapper: writes the signing secret",
+  );
+  assertEquals(
+    wrapper.includes("--api-key"),
+    false,
+    "wrapper: the key never appears in argv",
+  );
+  assertEquals(
+    wrapper.includes("--skip-verify"),
+    true,
+    "wrapper: Caddy is self-signed on the dev listener",
+  );
+  // `wrangler dev` never fires the Worker's cron, so the Workers dev runtime
+  // ships a minutely timer that hits wrangler's local trigger endpoint —
+  // without it the offline sweep and the billing chores never run in dev.
+  const cronService = await Deno.readTextFile(
+    join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/instance-launch/templates/turbopanel-instance-cron.service.j2",
+    ),
+  );
+  assertEquals(
+    cronService.includes("/cdn-cgi/local/scheduled"),
+    true,
+    "cron oneshot: hits wrangler's local scheduled trigger",
+  );
+  assertEquals(
+    cronService.includes("{{ wrangler_dev_port }}"),
+    true,
+    "cron oneshot: uses the configured wrangler port",
+  );
+  const cronTimer = await Deno.readTextFile(
+    join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/instance-launch/templates/turbopanel-instance-cron.timer.j2",
+    ),
+  );
+  assertEquals(
+    cronTimer.includes("OnCalendar=*-*-* *:*:00"),
+    true,
+    "cron timer: every minute, like the deployed trigger",
+  );
+  const launchTasks = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/instance-launch/tasks/main.yml"),
+  );
+  assertEquals(
+    /Install Workers dev cron trigger units\n {2}when: \(turbopanel_instance_runtime \| default\('deno'\)\) == 'workers'/
+      .test(launchTasks),
+    true,
+    "cron units are installed only on the Workers runtime",
+  );
+  // The Workers dev instance takes its Stripe values from two by-hand files
+  // under the protected config dir, so a re-converge keeps them; the Deno
+  // dev-vars template must never carry them.
+  const workersDevVars = await Deno.readTextFile(
+    join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/instance-launch/templates/instance-workers.dev-vars.j2",
+    ),
+  );
+  assertEquals(
+    workersDevVars.includes("TURBOPANEL_STRIPE_SECRET_KEY="),
+    true,
+    "workers dev vars: secret key line",
+  );
+  assertEquals(
+    workersDevVars.includes("TURBOPANEL_STRIPE_WEBHOOK_SIGNING_SECRET="),
+    true,
+    "workers dev vars: signing secret line",
+  );
+  const denoDevVars = await Deno.readTextFile(
+    join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/instance-launch/templates/instance-deno.dev-vars.j2",
+    ),
+  );
+  assertEquals(
+    denoDevVars.includes("TURBOPANEL_STRIPE"),
+    false,
+    "deno dev vars: no Stripe, self-hosted has no billing",
+  );
+  const instanceUnit = await Deno.readTextFile(
+    join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/instance-launch/templates/turbopanel-instance.service.j2",
+    ),
+  );
+  // Billing is Workers-only and self-hosted Deno has no billing surface, so
+  // the instance unit must never hand the instance a Stripe key.
+  assertEquals(
+    instanceUnit.includes("stripe-listen/stripe.env"),
+    false,
+    "instance unit does not load stripe.env: a Deno instance must never see a Stripe key",
+  );
+  assertEquals(
+    instanceUnit.includes("TURBOPANEL_STRIPE"),
+    false,
+    "instance unit sets no Stripe variables",
   );
 });
 

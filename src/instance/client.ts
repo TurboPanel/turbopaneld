@@ -68,6 +68,11 @@ import type { MetricsScheduler } from "../metrics/scheduler.ts";
 import { rebindMetricsScheduler } from "../metrics/scheduler.ts";
 import { LiveLeaseManager } from "../metrics/live-leases.ts";
 import {
+  type MetricsCapabilityPlan,
+  parseMetricsCapabilityPlan,
+} from "../metrics/capability-plan.ts";
+import { writeCapabilityPlan } from "../metrics/collector/capability-plan-store.ts";
+import {
   resolveHardwareProfile,
   writeHardwareProfile,
 } from "../metrics/collector/sensors/overrides.ts";
@@ -220,6 +225,20 @@ type DaemonMessage =
      * whether the profile write succeeded).
      */
     drivetemp?: DrivetempEnableResult;
+    at: string;
+  }
+  | {
+    type: "capability-plan-update";
+    id: string;
+    plan: MetricsCapabilityPlan;
+    generation: number;
+    at: string;
+  }
+  | {
+    type: "capability-plan-update-result";
+    id: string;
+    ok: boolean;
+    error?: string;
     at: string;
   }
   | {
@@ -1336,9 +1355,7 @@ export class InstanceClient {
       existingServerId: this.#metricsSchedulerServerId,
       serverId,
       collectorFactory: this.#metricsCollectorFactory,
-      schedulerOptions: {
-        collectionMode: () => this.#liveLeases?.collectionMode() ?? "baseline",
-      },
+      schedulerOptions: {},
     });
     this.#metricsScheduler = rebound.scheduler;
     this.#metricsSchedulerServerId = rebound.serverId;
@@ -1410,6 +1427,9 @@ export class InstanceClient {
         break;
       case "topology-overrides-update":
         this.#applyTopologyOverridesUpdate(message, ws);
+        break;
+      case "capability-plan-update":
+        this.#applyCapabilityPlanUpdate(message, ws);
         break;
       case "container-logs-request":
         this.#collectContainerLogs(message, ws);
@@ -1959,6 +1979,62 @@ export class InstanceClient {
       ok,
       ...(error === undefined ? {} : { error }),
       ...(drivetemp === undefined ? {} : { drivetemp }),
+      at: new Date().toISOString(),
+    };
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result));
+  }
+
+  #applyCapabilityPlanUpdate(
+    message: Extract<
+      DaemonMessage,
+      { type: "capability-plan-update" }
+    >,
+    ws: WebSocket,
+  ): void {
+    void this.#applyCapabilityPlanUpdateAsync(message, ws);
+  }
+
+  async #applyCapabilityPlanUpdateAsync(
+    message: Extract<
+      DaemonMessage,
+      { type: "capability-plan-update" }
+    >,
+    ws: WebSocket,
+  ): Promise<void> {
+    let ok = false;
+    let error: string | undefined;
+    try {
+      const plan = parseMetricsCapabilityPlan(message.plan);
+      if (!plan) {
+        throw new TypeError("invalid capability plan");
+      }
+      if (
+        typeof message.generation !== "number" ||
+        !Number.isInteger(message.generation) ||
+        message.generation < 0
+      ) {
+        throw new TypeError("invalid capability plan generation");
+      }
+      await writeCapabilityPlan(
+        resolveLayout(Deno.env.toObject()).daemonStateDir,
+        plan,
+        message.generation,
+      );
+      ok = true;
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+      logWarn(
+        "instance",
+        "capability plan update failed:",
+        sanitizeForLog(err),
+      );
+    }
+
+    const result: DaemonMessage = {
+      type: "capability-plan-update-result",
+      id: message.id,
+      ok,
+      ...(error === undefined ? {} : { error }),
       at: new Date().toISOString(),
     };
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result));

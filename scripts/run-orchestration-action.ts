@@ -192,6 +192,10 @@ export function optionalDevServiceExtraArgs(
     `turbopanel_optional_redis_insight=${
       optionalDevServiceFlag("TURBOPANEL_OPTIONAL_REDIS_INSIGHT", false, env)
     }`,
+    "-e",
+    `turbopanel_optional_stripe_listen=${
+      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_STRIPE_LISTEN", false, env)
+    }`,
   ];
 }
 

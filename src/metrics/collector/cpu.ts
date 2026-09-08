@@ -24,7 +24,7 @@ function fieldDelta(
  * ticks inside `user`/`nice` — without this, guest time would be counted
  * twice (once in `user`, once implicitly via `busyPercent`).
  */
-export type CpuPercentagesV5 = {
+export type CpuPercentages = {
   busyPercent: number | null;
   userPercent: number | null;
   systemPercent: number | null;
@@ -33,7 +33,7 @@ export type CpuPercentagesV5 = {
   softirqPercent: number | null;
 };
 
-export const EMPTY_CPU_PERCENTAGES_V5: CpuPercentagesV5 = {
+export const EMPTY_CPU_PERCENTAGES: CpuPercentages = {
   busyPercent: null,
   userPercent: null,
   systemPercent: null,
@@ -42,15 +42,15 @@ export const EMPTY_CPU_PERCENTAGES_V5: CpuPercentagesV5 = {
   softirqPercent: null,
 };
 
-export function cpuBusyPercentV5(
+export function cpuBusyPercent(
   prev: CpuCounters | null,
   curr: CpuCounters | null,
   seconds: number,
-): CpuPercentagesV5 {
-  if (!prev || !curr || seconds <= 0) return EMPTY_CPU_PERCENTAGES_V5;
+): CpuPercentages {
+  if (!prev || !curr || seconds <= 0) return EMPTY_CPU_PERCENTAGES;
 
   const deltaTotal = curr.total - prev.total;
-  if (deltaTotal <= 0) return EMPTY_CPU_PERCENTAGES_V5;
+  if (deltaTotal <= 0) return EMPTY_CPU_PERCENTAGES;
 
   const pct = (delta: number | null): number | null => {
     if (delta === null) return null;
@@ -115,7 +115,7 @@ export const SATURATED_CORE_BUSY_PERCENT = 90;
  * than being counted as idle; `null` when zero cores compute cleanly, so an
  * unreadable `/proc/stat` never reads as "nothing is busy".
  */
-export function saturatedCoreCountV5(
+export function saturatedCoreCount(
   prevCores: Record<string, CpuCounters>,
   currCores: Record<string, CpuCounters>,
   seconds: number,
@@ -126,7 +126,7 @@ export function saturatedCoreCountV5(
     const prev = prevCores[key];
     const curr = currCores[key];
     if (!prev) continue;
-    const { busyPercent } = cpuBusyPercentV5(prev, curr, seconds);
+    const { busyPercent } = cpuBusyPercent(prev, curr, seconds);
     if (busyPercent === null) continue;
     counted += 1;
     if (busyPercent >= SATURATED_CORE_BUSY_PERCENT) saturated += 1;
@@ -137,9 +137,9 @@ export function saturatedCoreCountV5(
 /**
  * Share of aggregate delta ticks spent servicing hardware+software
  * interrupts (`irq` + `softirq`), against the same `deltaTotal` denominator
- * as every other v5 CPU percentage — feeds `CpuDetailSampleV5.cpuIrqPercent`.
+ * as every other v5 CPU percentage — feeds `DiagnosticsSample.cpu.cpuIrqPercent`.
  */
-export function cpuIrqPercentV5(
+export function cpuIrqPercent(
   prev: CpuCounters | null,
   curr: CpuCounters | null,
 ): number | null {

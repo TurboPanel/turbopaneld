@@ -2,7 +2,7 @@
  * `/proc/vmstat` parsing and rate conversion for swap and major-fault
  * counters. `oom_kill` is parsed when present (some older kernels expose no
  * such vmstat entry) and exposed as a raw cumulative counter for a later
- * events-phase collector to diff — this phase never emits `MetricEventV5`.
+ * events-phase collector to diff — this phase never emits `MetricEvent`.
  */
 import type { CounterBaselineTracker } from "./baseline.ts";
 
@@ -70,7 +70,7 @@ export function parseVmstat(text: string): VmstatCounters {
 
 /**
  * Cumulative reclaim/compaction counters for `memory-detail.ts`'s
- * `MemoryDetailSampleV5.pageScanDirectPerSecond`/`pageScanKswapdPerSecond`/
+ * `DiagnosticsSample.memory.pageScanDirectPerSecond`/`pageScanKswapdPerSecond`/
  * `compactionStallsPerSecond`. `pgscanDirect`/`pgscanKswapd` each sum every
  * `pgscan_direct*` (respectively `pgscan_kswapd*`) line present — modern
  * kernels expose one bare counter per reclaim path, older kernels split per

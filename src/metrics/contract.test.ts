@@ -1,14 +1,14 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import {
-  buildMetricsSampleV5,
+  buildMetricsSample,
   clampPercent,
-  isHardwareHealthEventKindV5,
-  METRIC_EVENT_KINDS_V5,
-  type MetricEventV5,
-  METRICS_SCHEMA_VERSION_V5,
-  type MetricsSampleV5Input,
+  isHardwareHealthEventKind,
+  METRIC_EVENT_KINDS,
+  type MetricEvent,
+  METRICS_SCHEMA_VERSION,
+  type MetricsSampleInput,
   sanitizeFinite,
-} from "./contract-v5.ts";
+} from "./contract.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -18,23 +18,23 @@ import {
  */
 const test = Deno.test.bind(Deno);
 
-test("METRICS_SCHEMA_VERSION_V5 is 5", () => {
-  assertEquals(METRICS_SCHEMA_VERSION_V5, 5);
+test("METRICS_SCHEMA_VERSION is 6", () => {
+  assertEquals(METRICS_SCHEMA_VERSION, 6);
 });
 
-test("METRIC_EVENT_KINDS_V5 has no duplicates", () => {
+test("METRIC_EVENT_KINDS has no duplicates", () => {
   assertEquals(
-    new Set(METRIC_EVENT_KINDS_V5).size,
-    METRIC_EVENT_KINDS_V5.length,
+    new Set(METRIC_EVENT_KINDS).size,
+    METRIC_EVENT_KINDS.length,
   );
 });
 
-test("isHardwareHealthEventKindV5 splits physical-health kinds from generation/clock kinds", () => {
-  assertEquals(isHardwareHealthEventKindV5("gpu_xid"), true);
-  assertEquals(isHardwareHealthEventKindV5("edac_uncorrected"), true);
-  assertEquals(isHardwareHealthEventKindV5("clock_sync_lost"), false);
+test("isHardwareHealthEventKind splits physical-health kinds from generation/clock kinds", () => {
+  assertEquals(isHardwareHealthEventKind("gpu_xid"), true);
+  assertEquals(isHardwareHealthEventKind("edac_uncorrected"), true);
+  assertEquals(isHardwareHealthEventKind("clock_sync_lost"), false);
   assertEquals(
-    isHardwareHealthEventKindV5("topology_generation_changed"),
+    isHardwareHealthEventKind("topology_generation_changed"),
     false,
   );
 });
@@ -58,23 +58,22 @@ test("sanitizeFinite rejects NaN and +/-Infinity, keeps missing as null", () => 
 });
 
 /**
- * Shared fixture, hand-mirrored into `contract-v5.test.ts` in
- * `turbopanel/src/daemon/metrics`. Both files exercise `buildMetricsSampleV5`
+ * Shared fixture, hand-mirrored into `contract.test.ts` in
+ * `turbopanel/src/daemon/metrics`. Both files exercise `buildMetricsSample`
  * against this same hard-coded expected-shape input/output pair as a
  * behavioral check — it is not itself the drift gate. Real mirror-drift
  * detection is the parity suite at the bottom of this file, which reads the
- * counterpart `contract-v5.ts` off the co-located sibling checkout and
+ * counterpart `contract.ts` off the co-located sibling checkout and
  * diffs it directly, rather than trusting two hand-copied fixtures to stay
  * in sync by discipline alone.
  */
-function fixtureInput(): MetricsSampleV5Input {
+function fixtureInput(): MetricsSampleInput {
   return {
     metadata: {
-      version: METRICS_SCHEMA_VERSION_V5,
+      version: METRICS_SCHEMA_VERSION,
       sampledAt: "2020-01-01T00:00:00.000Z",
       intervalSeconds: 60,
       sequence: 1,
-      collectionMode: "baseline",
       topologyGeneration: 1,
       bootGeneration: 1,
     },
@@ -143,7 +142,6 @@ function fixtureInput(): MetricsSampleV5Input {
       readLatencyMs: 0.5,
       writeLatencyMs: 0.6,
       utilizationPercent: 150,
-      temperatureCelsius: 45,
       queueDepth: 1,
     }],
     gpus: [],
@@ -156,16 +154,16 @@ function fixtureInput(): MetricsSampleV5Input {
         at: "2020-01-01T00:00:00.000Z",
         kind: "smart_critical",
         severity: "critical",
-      } satisfies MetricEventV5,
+      } satisfies MetricEvent,
     ],
   };
 }
 
-test("buildMetricsSampleV5 sanitizes the shared cross-repo fixture", () => {
-  const sample = buildMetricsSampleV5(fixtureInput());
+test("buildMetricsSample sanitizes the shared cross-repo fixture", () => {
+  const sample = buildMetricsSample(fixtureInput());
 
   assertEquals(sample.type, "metrics");
-  assertEquals(sample.metadata.version, 5);
+  assertEquals(sample.metadata.version, 6);
   assertEquals(sample.host.cpu.pressureSomePercent, 100);
   assertEquals(sample.host.cpu.processCount, 42);
   assertEquals(sample.host.kernel.conntrackUsedPercent, null);
@@ -176,52 +174,41 @@ test("buildMetricsSampleV5 sanitizes the shared cross-repo fixture", () => {
   assertEquals(sample.events[0].kind, "smart_critical");
 });
 
-test("buildMetricsSampleV5 never coerces missing metrics to 0", () => {
+test("buildMetricsSample never coerces missing metrics to 0", () => {
   const input = fixtureInput();
   input.host.storage.diskReadBytesPerSecond = undefined;
-  const sample = buildMetricsSampleV5(input);
+  const sample = buildMetricsSample(input);
   assertEquals(sample.host.storage.diskReadBytesPerSecond, null);
 });
 
-test("buildMetricsSampleV5 rejects a metadata.version that does not match METRICS_SCHEMA_VERSION_V5", () => {
+test("buildMetricsSample rejects a metadata.version that does not match METRICS_SCHEMA_VERSION", () => {
   const input = fixtureInput();
   // deno-lint-ignore no-explicit-any
   input.metadata.version = 3 as any;
   assertThrows(
-    () => buildMetricsSampleV5(input),
+    () => buildMetricsSample(input),
     TypeError,
-    `metrics metadata.version must be ${METRICS_SCHEMA_VERSION_V5}`,
+    `metrics metadata.version must be ${METRICS_SCHEMA_VERSION}`,
   );
 });
 
-test("buildMetricsSampleV5 rejects an invalid collectionMode", () => {
-  const input = fixtureInput();
-  // deno-lint-ignore no-explicit-any
-  input.metadata.collectionMode = "turbo" as any;
-  assertThrows(
-    () => buildMetricsSampleV5(input),
-    TypeError,
-    'metrics metadata.collectionMode must be "baseline" or "live"',
-  );
-});
-
-test("buildMetricsSampleV5 rejects non-positive intervalSeconds", () => {
+test("buildMetricsSample rejects non-positive intervalSeconds", () => {
   for (const intervalSeconds of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
     const input = fixtureInput();
     input.metadata.intervalSeconds = intervalSeconds;
     assertThrows(
-      () => buildMetricsSampleV5(input),
+      () => buildMetricsSample(input),
       TypeError,
       "metrics metadata.intervalSeconds must be a finite positive number",
     );
   }
 });
 
-test("buildMetricsSampleV5 rejects negative sequence/topologyGeneration/bootGeneration", () => {
+test("buildMetricsSample rejects negative sequence/topologyGeneration/bootGeneration", () => {
   const sequenceInput = fixtureInput();
   sequenceInput.metadata.sequence = -1;
   assertThrows(
-    () => buildMetricsSampleV5(sequenceInput),
+    () => buildMetricsSample(sequenceInput),
     TypeError,
     "metrics metadata.sequence must be a finite non-negative number",
   );
@@ -229,7 +216,7 @@ test("buildMetricsSampleV5 rejects negative sequence/topologyGeneration/bootGene
   const topologyInput = fixtureInput();
   topologyInput.metadata.topologyGeneration = -1;
   assertThrows(
-    () => buildMetricsSampleV5(topologyInput),
+    () => buildMetricsSample(topologyInput),
     TypeError,
     "metrics metadata.topologyGeneration must be a finite non-negative number",
   );
@@ -237,24 +224,24 @@ test("buildMetricsSampleV5 rejects negative sequence/topologyGeneration/bootGene
   const bootInput = fixtureInput();
   bootInput.metadata.bootGeneration = -1;
   assertThrows(
-    () => buildMetricsSampleV5(bootInput),
+    () => buildMetricsSample(bootInput),
     TypeError,
     "metrics metadata.bootGeneration must be a finite non-negative number",
   );
 });
 
-test("buildMetricsSampleV5 accepts a zero sequence/topologyGeneration/bootGeneration", () => {
+test("buildMetricsSample accepts a zero sequence/topologyGeneration/bootGeneration", () => {
   const input = fixtureInput();
   input.metadata.sequence = 0;
   input.metadata.topologyGeneration = 0;
   input.metadata.bootGeneration = 0;
-  const sample = buildMetricsSampleV5(input);
+  const sample = buildMetricsSample(input);
   assertEquals(sample.metadata.sequence, 0);
   assertEquals(sample.metadata.topologyGeneration, 0);
   assertEquals(sample.metadata.bootGeneration, 0);
 });
 
-test("buildMetricsSampleV5 rejects an unknown event kind", () => {
+test("buildMetricsSample rejects an unknown event kind", () => {
   const input = fixtureInput();
   input.events = [{
     eventId: "evt-bad",
@@ -264,13 +251,13 @@ test("buildMetricsSampleV5 rejects an unknown event kind", () => {
     severity: "info",
   }];
   assertThrows(
-    () => buildMetricsSampleV5(input),
+    () => buildMetricsSample(input),
     TypeError,
     "metrics event has an unknown kind: not_a_real_kind",
   );
 });
 
-test("buildMetricsSampleV5 rejects an invalid event severity", () => {
+test("buildMetricsSample rejects an invalid event severity", () => {
   const input = fixtureInput();
   input.events = [{
     eventId: "evt-bad",
@@ -280,13 +267,13 @@ test("buildMetricsSampleV5 rejects an invalid event severity", () => {
     severity: "urgent" as any,
   }];
   assertThrows(
-    () => buildMetricsSampleV5(input),
+    () => buildMetricsSample(input),
     TypeError,
     "metrics event evt-bad has an invalid severity: urgent",
   );
 });
 
-test("buildMetricsSampleV5 rejects an entity array beyond the defensive cap", () => {
+test("buildMetricsSample rejects an entity array beyond the defensive cap", () => {
   const input = fixtureInput();
   input.networks = Array.from({ length: 65 }, (_, i) => ({
     deviceId: `eth${i}`,
@@ -298,102 +285,72 @@ test("buildMetricsSampleV5 rejects an entity array beyond the defensive cap", ()
     transmitDropsPerSecond: 0,
   }));
   assertThrows(
-    () => buildMetricsSampleV5(input),
+    () => buildMetricsSample(input),
     TypeError,
     "metrics networks has 65 entries, exceeding the 64-entry cap",
   );
 });
 
-test("buildMetricsSampleV5 sanitizes all 19 memoryDetail fields, never coercing missing to 0", () => {
+test("buildMetricsSample sanitizes both diagnostics halves, never coercing missing to 0", () => {
   const input = fixtureInput();
-  input.memoryDetail = {
-    memoryFreeBytes: 1,
-    cachedBytes: 2,
-    anonPagesBytes: 3,
-    slabReclaimableBytes: 4,
-    slabUnreclaimableBytes: 5,
-    dirtyBytes: 6,
-    writebackBytes: 7,
-    shmemBytes: 8,
-    pageTablesBytes: 9,
-    kernelStackBytes: 10,
-    committedAsBytes: 11,
-    commitLimitBytes: 12,
-    activeAnonBytes: 13,
-    inactiveAnonBytes: 14,
-    activeFileBytes: 15,
-    inactiveFileBytes: 16,
-    pageScanDirectPerSecond: undefined,
-    pageScanKswapdPerSecond: 18,
-    compactionStallsPerSecond: 19,
+  input.diagnostics = {
+    cpu: {
+      averageFrequencyMHz: 2000,
+      minimumFrequencyMHz: 1000,
+      maximumFrequencyMHz: 3000,
+      contextSwitchesPerSecond: undefined,
+      interruptsPerSecond: 5,
+      forksPerSecond: 6,
+      cpuIrqPercent: 150,
+    },
+    memory: {
+      memoryFreeBytes: 1,
+      cachedBytes: 2,
+      anonPagesBytes: 3,
+      slabReclaimableBytes: 4,
+      slabUnreclaimableBytes: 5,
+      dirtyBytes: 6,
+      writebackBytes: 7,
+      shmemBytes: 8,
+      committedAsBytes: 9,
+      pageScanDirectPerSecond: undefined,
+      pageScanKswapdPerSecond: 11,
+      compactionStallsPerSecond: 12,
+    },
   };
-  const sample = buildMetricsSampleV5(input);
-  assertEquals(sample.memoryDetail?.memoryFreeBytes, 1);
-  assertEquals(sample.memoryDetail?.inactiveFileBytes, 16);
-  assertEquals(sample.memoryDetail?.pageScanDirectPerSecond, null);
-  assertEquals(sample.memoryDetail?.pageScanKswapdPerSecond, 18);
-  assertEquals(sample.memoryDetail?.compactionStallsPerSecond, 19);
+  const sample = buildMetricsSample(input);
+  assertEquals(sample.diagnostics?.cpu.averageFrequencyMHz, 2000);
+  assertEquals(sample.diagnostics?.cpu.contextSwitchesPerSecond, null);
+  // `cpuIrqPercent` is the one clamped field on the CPU half.
+  assertEquals(sample.diagnostics?.cpu.cpuIrqPercent, 100);
+  assertEquals(sample.diagnostics?.memory.memoryFreeBytes, 1);
+  assertEquals(sample.diagnostics?.memory.committedAsBytes, 9);
+  assertEquals(sample.diagnostics?.memory.pageScanDirectPerSecond, null);
+  assertEquals(sample.diagnostics?.memory.pageScanKswapdPerSecond, 11);
+  assertEquals(sample.diagnostics?.memory.compactionStallsPerSecond, 12);
 });
 
-test("buildMetricsSampleV5 sanitizes GPU fields and clamps percents", () => {
+test("buildMetricsSample sanitizes GPU fields and clamps percents", () => {
   const input = fixtureInput();
   input.gpus = [{
     gpuId: "pci:0000:01:00.0",
     utilizationPercent: 150,
     memoryUsedBytes: Number.NaN,
     memoryActivityPercent: -2,
-    temperatureCelsius: 71,
-    memoryTemperatureCelsius: undefined,
-    powerWatts: 180,
     pcieReceiveBytesPerSecond: 10,
     pcieTransmitBytesPerSecond: Number.POSITIVE_INFINITY,
     throttlePercent: 101,
   }];
-  const sample = buildMetricsSampleV5(input);
+  const sample = buildMetricsSample(input);
   assertEquals(sample.gpus, [{
     gpuId: "pci:0000:01:00.0",
     utilizationPercent: 100,
     memoryUsedBytes: null,
     memoryActivityPercent: 0,
-    temperatureCelsius: 71,
-    memoryTemperatureCelsius: null,
-    powerWatts: 180,
     pcieReceiveBytesPerSecond: 10,
     pcieTransmitBytesPerSecond: null,
     throttlePercent: 100,
   }]);
-});
-
-test("buildMetricsSampleV5 sanitizes numaNodes and rejects an oversized list", () => {
-  const input = fixtureInput();
-  input.numaNodes = [{
-    nodeId: "node0",
-    freeBytes: Number.NaN,
-    totalBytes: 8_000_000,
-    localAllocationsPerSecond: undefined,
-    foreignAllocationsPerSecond: 3,
-  }];
-  const sample = buildMetricsSampleV5(input);
-  assertEquals(sample.numaNodes, [{
-    nodeId: "node0",
-    freeBytes: null,
-    totalBytes: 8_000_000,
-    localAllocationsPerSecond: null,
-    foreignAllocationsPerSecond: 3,
-  }]);
-
-  input.numaNodes = Array.from({ length: 65 }, (_, i) => ({
-    nodeId: `node${i}`,
-    freeBytes: 0,
-    totalBytes: 0,
-    localAllocationsPerSecond: 0,
-    foreignAllocationsPerSecond: 0,
-  }));
-  assertThrows(
-    () => buildMetricsSampleV5(input),
-    TypeError,
-    "metrics numaNodes has 65 entries, exceeding the 64-entry cap",
-  );
 });
 
 // ---------------------------------------------------------------------------
@@ -413,12 +370,12 @@ test("buildMetricsSampleV5 sanitizes numaNodes and rejects an oversized list", (
 // CI job is a follow-up, not part of this change.
 // ---------------------------------------------------------------------------
 
-const SIBLING_CONTRACT_V5_URL = new URL(
-  "../../../turbopanel/src/daemon/metrics/contract-v5.ts",
+const SIBLING_CONTRACT_URL = new URL(
+  "../../../turbopanel/src/daemon/metrics/contract.ts",
   import.meta.url,
 );
 
-const siblingContractV5Exists = await Deno.stat(SIBLING_CONTRACT_V5_URL)
+const siblingContractExists = await Deno.stat(SIBLING_CONTRACT_URL)
   .then((stat) => stat.isFile)
   .catch(() => false);
 
@@ -430,12 +387,12 @@ function stripHeaderDocblock(source: string): string {
 
 test({
   name:
-    "contract-v5.ts stays byte-identical to its turbopanel mirror below the header docblock",
-  ignore: !siblingContractV5Exists,
+    "contract.ts stays byte-identical to its turbopanel mirror below the header docblock",
+  ignore: !siblingContractExists,
   fn: async () => {
     const [ownSource, siblingSource] = await Promise.all([
-      Deno.readTextFile(new URL("./contract-v5.ts", import.meta.url)),
-      Deno.readTextFile(SIBLING_CONTRACT_V5_URL),
+      Deno.readTextFile(new URL("./contract.ts", import.meta.url)),
+      Deno.readTextFile(SIBLING_CONTRACT_URL),
     ]);
     assertEquals(
       stripHeaderDocblock(ownSource),
@@ -446,18 +403,18 @@ test({
 
 test({
   name:
-    "contract-v5.ts agrees with its turbopanel mirror on schema version, event kinds, and export set",
-  ignore: !siblingContractV5Exists,
+    "contract.ts agrees with its turbopanel mirror on schema version, event kinds, and export set",
+  ignore: !siblingContractExists,
   fn: async () => {
     const [own, sibling] = await Promise.all([
-      import("./contract-v5.ts"),
-      import(SIBLING_CONTRACT_V5_URL.href),
+      import("./contract.ts"),
+      import(SIBLING_CONTRACT_URL.href),
     ]);
     assertEquals(
-      sibling.METRICS_SCHEMA_VERSION_V5,
-      own.METRICS_SCHEMA_VERSION_V5,
+      sibling.METRICS_SCHEMA_VERSION,
+      own.METRICS_SCHEMA_VERSION,
     );
-    assertEquals(sibling.METRIC_EVENT_KINDS_V5, own.METRIC_EVENT_KINDS_V5);
+    assertEquals(sibling.METRIC_EVENT_KINDS, own.METRIC_EVENT_KINDS);
     assertEquals(new Set(Object.keys(sibling)), new Set(Object.keys(own)));
   },
 });

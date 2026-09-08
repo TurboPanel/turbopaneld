@@ -10,6 +10,7 @@ import type {
 } from "../../instance/commands/contracts.ts";
 import { logInfo, sanitizeForLog } from "../../logger.ts";
 import {
+  connectionCensusSql,
   createDatabaseSql,
   createOrAlterRoleSql,
   createPhysicalSlotSql,
@@ -29,6 +30,12 @@ import {
   reloadVerifySql,
   standbyReplicationStatusSql,
 } from "./postgres-sql.ts";
+import {
+  DOWN_ENGINE_CENSUS,
+  type ManagedEngineCensus,
+  parsePostgresConnectionCensus,
+  UNREAD_ENGINE_CENSUS,
+} from "./census.ts";
 import type {
   ManagedEngineBackupRuntime,
   ManagedEngineBootstrapContext,
@@ -486,6 +493,26 @@ export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
         "managed",
         `postgres reload: ${restartPending} setting(s) pending engine restart`,
       );
+    }
+  },
+
+  async readCensus(ctx: ManagedEngineContext): Promise<ManagedEngineCensus> {
+    // The same probe `waitReady` polls, taken once: a down or recovering
+    // instance is unhealthy, never an error.
+    const ready = await ctx.exec([
+      "pg_isready",
+      "-U",
+      ctx.rootUsername,
+      "-d",
+      ctx.defaultDatabase,
+    ]);
+    if (!ready.success) return DOWN_ENGINE_CENSUS;
+    try {
+      return parsePostgresConnectionCensus(
+        await parsePsqlRows(ctx, connectionCensusSql()),
+      );
+    } catch {
+      return UNREAD_ENGINE_CENSUS;
     }
   },
 

@@ -1,6 +1,9 @@
 /**
  * Ingress domain orchestrator — reads every configured ingress adapter
- * (Caddy, Traefik) independently each tick and collects whatever answers.
+ * independently each tick and collects whatever answers. v6 is Caddy-only:
+ * the shared hosting Traefik moved to its own host-wide `router/` domain,
+ * because a router's service/backend/config surface and a web server's
+ * per-handler request accounting never fit one field set.
  *
  * Unlike `gpu/index.ts`'s `buildGpuSamples`, there is no topology-enumerated
  * entity list to iterate: an ingress source's presence is entirely
@@ -13,7 +16,7 @@
  * namespace so a later readable tick re-origins instead of diffing across
  * the gap.
  */
-import type { IngressSourceSampleV5 } from "../../contract-v5.ts";
+import type { IngressSourceSample } from "../../contract.ts";
 import type { CounterBaselineTracker } from "../baseline.ts";
 import type {
   IngressAdapter,
@@ -29,11 +32,10 @@ export type {
   IngressReadContext,
   IngressReading,
 } from "./adapter.ts";
-export { CaddyIngressAdapter, SITE_CADDY_ADMIN_ADDR } from "./caddy-v5.ts";
-export { TRAEFIK_METRICS_ADDR, TraefikIngressAdapter } from "./traefik.ts";
+export { CaddyIngressAdapter, SITE_CADDY_ADMIN_ADDR } from "./caddy.ts";
 
 const EMPTY_INGRESS_FIELDS: Omit<
-  IngressSourceSampleV5,
+  IngressSourceSample,
   "sourceId" | "sourceKind"
 > = {
   requests: null,
@@ -44,11 +46,13 @@ const EMPTY_INGRESS_FIELDS: Omit<
   requestErrors: null,
   requestBytes: null,
   responseBytes: null,
-  requestDurationSecondsAvg: null,
-  requestsUnder100ms: null,
-  requestsUnder500ms: null,
-  requestsUnder1s: null,
-  requestsUnder5s: null,
+  requestDurationSecondsSum: null,
+  bucket10ms: null,
+  bucket50ms: null,
+  bucket100ms: null,
+  bucket500ms: null,
+  bucket1s: null,
+  bucket5s: null,
   requestsInFlight: null,
   upstreamsHealthy: null,
   upstreamsTotal: null,
@@ -59,14 +63,14 @@ function toSample(
   sourceId: string,
   sourceKind: string,
   reading: IngressReading,
-): IngressSourceSampleV5 {
+): IngressSourceSample {
   return { sourceId, sourceKind, ...EMPTY_INGRESS_FIELDS, ...reading };
 }
 
 async function readOne(
   adapter: IngressAdapter,
   ctx: IngressReadContext,
-): Promise<IngressSourceSampleV5 | null> {
+): Promise<IngressSourceSample | null> {
   try {
     const result = await adapter.read(ctx);
     if (result === null) return null;
@@ -96,25 +100,13 @@ export async function buildIngressSources(
     bootGeneration: number;
     seconds: number;
   },
-): Promise<IngressSourceSampleV5[]> {
+): Promise<IngressSourceSample[]> {
   if (!adapters) return [];
   const readCtx: IngressReadContext = ctx;
 
-  const [caddy, traefik] = await Promise.all([
-    readOne(adapters.caddy, readCtx),
-    readOne(adapters.traefik, readCtx),
-  ]);
+  const caddy = await readOne(adapters.caddy, readCtx);
+  if (caddy !== null) return [caddy];
 
-  const sources: IngressSourceSampleV5[] = [];
-  if (caddy !== null) {
-    sources.push(caddy);
-  } else {
-    invalidateKnownBaselineKeys(ctx.tracker, "caddy");
-  }
-  if (traefik !== null) {
-    sources.push(traefik);
-  } else {
-    invalidateKnownBaselineKeys(ctx.tracker, "traefik");
-  }
-  return sources;
+  invalidateKnownBaselineKeys(ctx.tracker, "caddy");
+  return [];
 }

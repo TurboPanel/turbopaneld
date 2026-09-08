@@ -85,12 +85,12 @@ it("LiveLeaseManager start flips cadence 60s→10s", () => {
 
   assertEquals(manager.hasActiveLease(), false);
   assertEquals(manager.effectiveIntervalMs(), METRICS_INTERVAL_MS);
-  assertEquals(manager.collectionMode(), "baseline");
+  assertEquals(manager.effectiveIntervalMs(), METRICS_INTERVAL_MS);
 
   manager.start("lease-1", clock.now() + 60_000);
   assertEquals(manager.hasActiveLease(), true);
   assertEquals(manager.effectiveIntervalMs(), LIVE_METRICS_INTERVAL_MS);
-  assertEquals(manager.collectionMode(), "live");
+  assertEquals(manager.effectiveIntervalMs(), LIVE_METRICS_INTERVAL_MS);
   assertEquals(scheduler.intervals, [LIVE_METRICS_INTERVAL_MS]);
 });
 
@@ -103,7 +103,7 @@ it("LiveLeaseManager explicit stop returns to 60s immediately", () => {
   manager.stop("lease-1");
 
   assertEquals(manager.hasActiveLease(), false);
-  assertEquals(manager.collectionMode(), "baseline");
+  assertEquals(manager.effectiveIntervalMs(), METRICS_INTERVAL_MS);
   assertEquals(scheduler.intervals, [
     LIVE_METRICS_INTERVAL_MS,
     METRICS_INTERVAL_MS,
@@ -115,14 +115,14 @@ it("LiveLeaseManager lost stop: local expiry timer returns to 60s", () => {
   const { scheduler, manager } = makeManager(clock);
 
   manager.start("lease-1", clock.now() + 60_000);
-  assertEquals(manager.collectionMode(), "live");
+  assertEquals(manager.effectiveIntervalMs(), LIVE_METRICS_INTERVAL_MS);
 
   // No stop ever arrives — the local timer alone restores baseline.
   clock.advance(59_999);
-  assertEquals(manager.collectionMode(), "live");
+  assertEquals(manager.effectiveIntervalMs(), LIVE_METRICS_INTERVAL_MS);
   clock.advance(1);
   assertEquals(manager.hasActiveLease(), false);
-  assertEquals(manager.collectionMode(), "baseline");
+  assertEquals(manager.effectiveIntervalMs(), METRICS_INTERVAL_MS);
   assertEquals(scheduler.intervals, [
     LIVE_METRICS_INTERVAL_MS,
     METRICS_INTERVAL_MS,
@@ -144,11 +144,11 @@ it("two viewers: one cadence change up, one down on last stop", () => {
 
   manager.stop("lease-1");
   // Second lease still active — cadence stays live.
-  assertEquals(manager.collectionMode(), "live");
+  assertEquals(manager.effectiveIntervalMs(), LIVE_METRICS_INTERVAL_MS);
   assertEquals(scheduler.intervals.at(-1), LIVE_METRICS_INTERVAL_MS);
 
   manager.stop("lease-2");
-  assertEquals(manager.collectionMode(), "baseline");
+  assertEquals(manager.effectiveIntervalMs(), METRICS_INTERVAL_MS);
   assertEquals(scheduler.intervals.at(-1), METRICS_INTERVAL_MS);
 });
 
@@ -160,10 +160,10 @@ it("two viewers: expiry of the longer lease un-cadences after the shorter stops"
   manager.start("lease-2", clock.now() + 60_000);
 
   clock.advance(30_000); // lease-1 expires locally; lease-2 keeps live
-  assertEquals(manager.collectionMode(), "live");
+  assertEquals(manager.effectiveIntervalMs(), LIVE_METRICS_INTERVAL_MS);
 
   clock.advance(30_000); // lease-2 expires
-  assertEquals(manager.collectionMode(), "baseline");
+  assertEquals(manager.effectiveIntervalMs(), METRICS_INTERVAL_MS);
   assertEquals(scheduler.intervals.at(-1), METRICS_INTERVAL_MS);
 });
 
@@ -173,7 +173,7 @@ it("no silent renewal: a start past expiresAt is rejected", () => {
 
   manager.start("lease-1", clock.now() + 10_000);
   clock.advance(10_000);
-  assertEquals(manager.collectionMode(), "baseline");
+  assertEquals(manager.effectiveIntervalMs(), METRICS_INTERVAL_MS);
 
   // Renewing an expired lease requires a future expiry from a new explicit
   // control-plane call — a stale expiry never re-enters live mode.
@@ -182,7 +182,7 @@ it("no silent renewal: a start past expiresAt is rejected", () => {
     TypeError,
   );
   assertThrows(() => manager.start("lease-1", Number.NaN), TypeError);
-  assertEquals(manager.collectionMode(), "baseline");
+  assertEquals(manager.effectiveIntervalMs(), METRICS_INTERVAL_MS);
 });
 
 it("explicit renewal with a future expiry extends the same lease", () => {
@@ -194,9 +194,9 @@ it("explicit renewal with a future expiry extends the same lease", () => {
   manager.start("lease-1", clock.now() + 10_000);
 
   clock.advance(9_999);
-  assertEquals(manager.collectionMode(), "live");
+  assertEquals(manager.effectiveIntervalMs(), LIVE_METRICS_INTERVAL_MS);
   clock.advance(1);
-  assertEquals(manager.collectionMode(), "baseline");
+  assertEquals(manager.effectiveIntervalMs(), METRICS_INTERVAL_MS);
 });
 
 it("dispose drops every lease and restores baseline", () => {
@@ -208,7 +208,7 @@ it("dispose drops every lease and restores baseline", () => {
   manager.dispose();
 
   assertEquals(manager.hasActiveLease(), false);
-  assertEquals(manager.collectionMode(), "baseline");
+  assertEquals(manager.effectiveIntervalMs(), METRICS_INTERVAL_MS);
   assertEquals(scheduler.intervals.at(-1), METRICS_INTERVAL_MS);
 
   // No stray timer fires later.
@@ -231,7 +231,7 @@ it("full 10s live session against a real scheduler-shaped stub", () => {
   manager.start("viewer-lease", clock.now() + 10_000);
   assertEquals(scheduler.intervals, [LIVE_METRICS_INTERVAL_MS]);
   clock.advance(9_000);
-  assertEquals(manager.collectionMode(), "live");
+  assertEquals(manager.effectiveIntervalMs(), LIVE_METRICS_INTERVAL_MS);
   manager.stop("viewer-lease");
   assertEquals(scheduler.intervals, [
     LIVE_METRICS_INTERVAL_MS,

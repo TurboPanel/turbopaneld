@@ -18,6 +18,7 @@ import { logInfo, sanitizeForLog } from "../logger.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { removeManagedPublicFirewallBestEffort } from "./firewall.ts";
 import {
+  managedBackupsDir,
   managedComposeProject,
   managedDir,
   SAFE_MANAGED_ID_RE,
@@ -160,6 +161,28 @@ async function removeManagedStateDir(root: string): Promise<void> {
   }
 }
 
+/**
+ * Remove the engine's backup tree too.
+ *
+ * v6 moved backups out of `<stateDir>/managed/<id>/backups` and under the
+ * separate `LayoutPaths.backupDir` root, so removing the managed state dir no
+ * longer takes them with it. Destroy has always removed an engine's backups
+ * along with the engine; this keeps that contract rather than silently
+ * leaving an orphan tree behind on whatever storage the operator pointed
+ * `TURBOPANEL_BACKUP_DIR` at.
+ */
+async function removeManagedBackupDir(backupRoot: string): Promise<void> {
+  try {
+    await Deno.remove(backupRoot, { recursive: true });
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) {
+      throw new TypeError(
+        `failed to remove managed backup dir: ${sanitizeForLog(err)}`,
+      );
+    }
+  }
+}
+
 export async function handleManagedDestroy(
   payload: ManagedDestroyPayload,
   _daemonReceivedAt: string,
@@ -178,6 +201,7 @@ export async function handleManagedDestroy(
   await tearDownManagedCompose(run, project, payload.removeVolumes);
   await removeManagedPublicFirewallBestEffort(payload.managedId);
   await removeManagedStateDir(root);
+  await removeManagedBackupDir(managedBackupsDir(layout, payload.managedId));
 
   return {
     status: "stopped",

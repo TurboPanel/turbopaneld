@@ -7,11 +7,12 @@
  * Sectors are 512 bytes per kernel convention.
  */
 import type { CounterBaselineTracker } from "./baseline.ts";
-import { type BlockDeviceSampleV5, clampPercent } from "../contract-v5.ts";
+import { type BlockDeviceSample, clampPercent } from "../contract.ts";
+import { NVME_COMPOSITE_LABEL } from "../topology/hardware-signal-topology.ts";
 import type { BlockDeviceTopology } from "../topology/types.ts";
 import type { DiskDeviceCounters } from "./types.ts";
 
-const SECTOR_BYTES_V5 = 512;
+const SECTOR_BYTES = 512;
 
 function toRate(delta: number | null, seconds: number): number | null {
   if (delta === null || seconds <= 0) return null;
@@ -27,7 +28,7 @@ function latencyMs(
   return ticksDelta / opsDelta;
 }
 
-const EMPTY_BLOCK_DEVICE_SAMPLE: Omit<BlockDeviceSampleV5, "deviceId"> = {
+const EMPTY_BLOCK_DEVICE_SAMPLE: Omit<BlockDeviceSample, "deviceId"> = {
   readBytesPerSecond: null,
   writeBytesPerSecond: null,
   readOpsPerSecond: null,
@@ -35,7 +36,6 @@ const EMPTY_BLOCK_DEVICE_SAMPLE: Omit<BlockDeviceSampleV5, "deviceId"> = {
   readLatencyMs: null,
   writeLatencyMs: null,
   utilizationPercent: null,
-  temperatureCelsius: null,
   queueDepth: null,
 };
 
@@ -50,10 +50,13 @@ const DISKSTATS_BASELINE_FIELDS = [
 ] as const;
 
 /**
- * One `BlockDeviceSampleV5` per topology device flagged `isServiceDevice`
- * (mirrors the ticket's "per selected service device"). `temperatureCelsius`
- * is joined from the hardware-signal catalog by kernel name — see
- * {@link BlockDeviceTemperatures}.
+ * One `BlockDeviceSample` per topology device flagged `isServiceDevice`
+ * (mirrors the ticket's "per selected service device"). Drive temperature is
+ * **not** one of these fields: it is a physical-only reading, so it rides the
+ * `hardware.physical` family keyed to the owning drive
+ * (`signal:block:<deviceId>:temperature`) and this module's
+ * {@link buildBlockDeviceTemperatures} is the join `collector/
+ * hardware-signals.ts` calls to resolve it.
  *
  * A device whose diskstats row is missing this tick reports every rate
  * `null` for that tick but **keeps its baseline**. v4 invalidated here,
@@ -71,20 +74,15 @@ export function buildBlockDeviceSamples(
   tracker: CounterBaselineTracker,
   bootGeneration: number,
   seconds: number,
-  temperatures?: BlockDeviceTemperatures,
-): BlockDeviceSampleV5[] {
+): BlockDeviceSample[] {
   return topology
     .filter((device) => device.isServiceDevice)
-    .map((device): BlockDeviceSampleV5 => {
+    .map((device): BlockDeviceSample => {
       const counters = currentCounters[device.kernelName];
       const key = (field: string) => `block:${device.deviceId}:${field}`;
       if (!counters) {
         // Baselines are deliberately kept — see this function's doc comment.
-        return {
-          deviceId: device.deviceId,
-          ...EMPTY_BLOCK_DEVICE_SAMPLE,
-          temperatureCelsius: temperatures?.[device.kernelName] ?? null,
-        };
+        return { deviceId: device.deviceId, ...EMPTY_BLOCK_DEVICE_SAMPLE };
       }
 
       const readOpsDelta = tracker.delta(
@@ -138,13 +136,11 @@ export function buildBlockDeviceSamples(
       return {
         deviceId: device.deviceId,
         readBytesPerSecond: toRate(
-          readSectorsDelta === null ? null : readSectorsDelta * SECTOR_BYTES_V5,
+          readSectorsDelta === null ? null : readSectorsDelta * SECTOR_BYTES,
           seconds,
         ),
         writeBytesPerSecond: toRate(
-          writeSectorsDelta === null
-            ? null
-            : writeSectorsDelta * SECTOR_BYTES_V5,
+          writeSectorsDelta === null ? null : writeSectorsDelta * SECTOR_BYTES,
           seconds,
         ),
         readOpsPerSecond: toRate(readOpsDelta, seconds),
@@ -152,7 +148,6 @@ export function buildBlockDeviceSamples(
         readLatencyMs: latencyMs(readTicksDelta, readOpsDelta),
         writeLatencyMs: latencyMs(writeTicksDelta, writeOpsDelta),
         utilizationPercent,
-        temperatureCelsius: temperatures?.[device.kernelName] ?? null,
         queueDepth,
       };
     });
@@ -164,18 +159,22 @@ export function buildBlockDeviceSamples(
  */
 export type BlockDeviceTemperatures = Record<string, number | null>;
 
-/** NVMe's own composite reading — the drive-level temperature, not one internal probe. */
-const NVME_COMPOSITE_LABEL = "Composite";
-
 /**
  * Build the block-device ↔ sensor temperature join.
  *
  * Disk temperatures arrive as hardware signals keyed
  * `signal:<kernelName>:<label>` — `discovery.ts` already resolves an NVMe or
  * `drivetemp` hwmon chip down to its backing block device, which is exactly
- * the `kernelName` block topology uses. v4 never closed this loop and left
- * `BlockDeviceSampleV5.temperatureCelsius` hardcoded `null`, so drive temps
- * existed only as loose sensor rows and never reached the drive itself.
+ * the `kernelName` block topology uses. Its one caller is
+ * `collector/hardware-signals.ts`, which resolves the entity-joined
+ * `signal:block:<deviceId>:temperature` signals out of this map: the drive
+ * temperature belongs to the owning drive, but as a `hardware.physical`
+ * reading rather than a `BlockDeviceSample` field, so a VM (which reports no
+ * `hardware.physical` row at all) never carries a fabricated one.
+ *
+ * Callers must pass only the per-probe `component: "disk"` signals — a
+ * signal from any other component parses into a meaningless `kernelName`
+ * that could shadow a real drive.
  *
  * NVMe exposes several probes per drive (`Composite`, `Sensor 1` …
  * `Sensor 8`); `Composite` is the vendor-computed whole-drive value the NVMe
@@ -315,10 +314,10 @@ export function hostDiskAggregates(
 
   return {
     diskReadBytesPerSecond: sawReadDelta
-      ? toRate(read.sectors * SECTOR_BYTES_V5, seconds)
+      ? toRate(read.sectors * SECTOR_BYTES, seconds)
       : null,
     diskWriteBytesPerSecond: sawWriteDelta
-      ? toRate(write.sectors * SECTOR_BYTES_V5, seconds)
+      ? toRate(write.sectors * SECTOR_BYTES, seconds)
       : null,
     diskLatencyMs: sawReadDelta || sawWriteDelta
       ? latencyMs(read.ticks + write.ticks, read.ops + write.ops)

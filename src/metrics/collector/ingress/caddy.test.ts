@@ -1,7 +1,7 @@
 import { assertEquals } from "@std/assert";
 import { CounterBaselineTracker } from "../baseline.ts";
 import { parsePrometheusExposition } from "../proxy/prom-exposition.ts";
-import { CaddyIngressAdapter, parseCaddyExpositionV5 } from "./caddy-v5.ts";
+import { CaddyIngressAdapter, parseCaddyExposition } from "./caddy.ts";
 import type { IngressReadContext } from "./adapter.ts";
 
 /**
@@ -27,17 +27,17 @@ function ctx(overrides: Partial<IngressReadContext> = {}): IngressReadContext {
   };
 }
 
-test("parseCaddyExpositionV5: single-handler group computes every rate/avg/bucket field from a primed baseline", () => {
+test("parseCaddyExposition: single-handler group computes every rate/avg/bucket field from a primed baseline", () => {
   const tracker = new CounterBaselineTracker();
   const partial = parsePrometheusExposition(
-    fixture("proxy-caddy-metrics-v5-partial.txt"),
+    fixture("proxy-caddy-metrics-partial.txt"),
   );
-  parseCaddyExpositionV5(partial, ctx({ tracker })); // prime baseline at 0
+  parseCaddyExposition(partial, ctx({ tracker })); // prime baseline at 0
 
   const samples = parsePrometheusExposition(
-    fixture("proxy-caddy-metrics-v5-base.txt"),
+    fixture("proxy-caddy-metrics-base.txt"),
   );
-  const reading = parseCaddyExpositionV5(samples, ctx({ tracker }));
+  const reading = parseCaddyExposition(samples, ctx({ tracker }));
 
   assertEquals(reading.requests, 100);
   assertEquals(reading.responses2xx, 90);
@@ -46,12 +46,16 @@ test("parseCaddyExpositionV5: single-handler group computes every rate/avg/bucke
   assertEquals(reading.responses5xx, 0);
   assertEquals(reading.requestBytes, 45000 + 2000);
   assertEquals(reading.responseBytes, 500000 + 4000);
-  // (9.0 + 1.0) seconds of cumulative duration over (90 + 10) requests = 0.1s avg.
-  assertEquals(reading.requestDurationSecondsAvg, 0.1);
-  assertEquals(reading.requestsUnder100ms, 60 + 8);
-  assertEquals(reading.requestsUnder500ms, 85 + 10);
-  assertEquals(reading.requestsUnder1s, 88 + 10);
-  assertEquals(reading.requestsUnder5s, 90 + 10);
+  // The raw per-interval duration sum, shipped undivided — the read path
+  // divides by `requests` to get the 0.1s mean, so the stored value stays
+  // re-aggregatable across windows.
+  assertEquals(reading.requestDurationSecondsSum, 9.0 + 1.0);
+  assertEquals(reading.bucket10ms, 15 + 2);
+  assertEquals(reading.bucket50ms, 36 + 4);
+  assertEquals(reading.bucket100ms, 60 + 8);
+  assertEquals(reading.bucket500ms, 85 + 10);
+  assertEquals(reading.bucket1s, 88 + 10);
+  assertEquals(reading.bucket5s, 90 + 10);
   assertEquals(reading.requestsInFlight, 3);
   assertEquals(reading.upstreamsHealthy, null);
   assertEquals(reading.upstreamsTotal, null);
@@ -59,17 +63,17 @@ test("parseCaddyExpositionV5: single-handler group computes every rate/avg/bucke
   assertEquals(reading.requestErrors, null);
 });
 
-test("parseCaddyExpositionV5: two handler groups fully duplicating the same requests collapse to one authoritative scope, never double-counted", () => {
+test("parseCaddyExposition: two handler groups fully duplicating the same requests collapse to one authoritative scope, never double-counted", () => {
   const tracker = new CounterBaselineTracker();
   const partial = parsePrometheusExposition(
-    fixture("proxy-caddy-metrics-v5-partial.txt"),
+    fixture("proxy-caddy-metrics-partial.txt"),
   );
-  parseCaddyExpositionV5(partial, ctx({ tracker }));
+  parseCaddyExposition(partial, ctx({ tracker }));
 
   const samples = parsePrometheusExposition(
     fixture("proxy-caddy-metrics-multi-handler.txt"),
   );
-  const reading = parseCaddyExpositionV5(samples, ctx({ tracker }));
+  const reading = parseCaddyExposition(samples, ctx({ tracker }));
 
   // "subroute" and "reverse_proxy" both wrap the same 100 requests — tied at
   // the max, so the scope resolves to exactly one of them (never both, and
@@ -78,13 +82,13 @@ test("parseCaddyExpositionV5: two handler groups fully duplicating the same requ
   assertEquals(reading.responses2xx, 100);
   assertEquals(reading.requestBytes, 40000);
   assertEquals(reading.responseBytes, 400000);
-  assertEquals(reading.requestDurationSecondsAvg, 0.1);
-  assertEquals(reading.requestsUnder100ms, 100);
+  assertEquals(reading.requestDurationSecondsSum, 10.0);
+  assertEquals(reading.bucket100ms, 100);
   // Not 4 — only the chosen handler's in-flight gauge is counted.
   assertEquals(reading.requestsInFlight, 2);
 });
 
-test("parseCaddyExpositionV5: legitimate split-handler traffic under a shared top-level wrapper is fully aggregated, not zeroed", () => {
+test("parseCaddyExposition: legitimate split-handler traffic under a shared top-level wrapper is fully aggregated, not zeroed", () => {
   // "subroute" is the top-level wrapper every request passes through; it
   // then splits traffic between "file_server" (60) and "reverse_proxy" (40).
   // Neither inner handler alone matches the server total, but "subroute" —
@@ -127,8 +131,8 @@ caddy_http_response_size_bytes_sum{code="200",handler="reverse_proxy",method="GE
 `;
 
   const tracker = new CounterBaselineTracker();
-  parseCaddyExpositionV5(parsePrometheusExposition(""), ctx({ tracker }));
-  const reading = parseCaddyExpositionV5(
+  parseCaddyExposition(parsePrometheusExposition(""), ctx({ tracker }));
+  const reading = parseCaddyExposition(
     parsePrometheusExposition(exposition),
     ctx({ tracker }),
   );
@@ -137,12 +141,12 @@ caddy_http_response_size_bytes_sum{code="200",handler="reverse_proxy",method="GE
   assertEquals(reading.responses2xx, 100);
   assertEquals(reading.requestBytes, 50000);
   assertEquals(reading.responseBytes, 600000);
-  assertEquals(reading.requestDurationSecondsAvg, 0.1);
-  assertEquals(reading.requestsUnder100ms, 100);
+  assertEquals(reading.requestDurationSecondsSum, 10.0);
+  assertEquals(reading.bucket100ms, 100);
   assertEquals(reading.requestsInFlight, 4);
 });
 
-test("parseCaddyExpositionV5: a single HTTP request through duplicated handler labels increments the normalized rate exactly once", () => {
+test("parseCaddyExposition: a single HTTP request through duplicated handler labels increments the normalized rate exactly once", () => {
   const duplicatedHandlerExposition = (n: number) => `
 # HELP caddy_http_requests_total Counter of HTTP(S) requests made.
 # TYPE caddy_http_requests_total counter
@@ -151,34 +155,34 @@ caddy_http_requests_total{handler="reverse_proxy",server="srv0"} ${n}
 `;
 
   const tracker = new CounterBaselineTracker();
-  parseCaddyExpositionV5(
+  parseCaddyExposition(
     parsePrometheusExposition(duplicatedHandlerExposition(100)),
     ctx({ tracker }),
   ); // prime baseline
 
   // Exactly one real HTTP request served — both duplicated handler labels
   // advance by 1, not 2.
-  const reading = parseCaddyExpositionV5(
+  const reading = parseCaddyExposition(
     parsePrometheusExposition(duplicatedHandlerExposition(101)),
     ctx({ tracker, seconds: 60 }),
   );
   assertEquals(reading.requests, 1);
 });
 
-test("parseCaddyExpositionV5: reverse-proxy upstream health gauges", () => {
+test("parseCaddyExposition: reverse-proxy upstream health gauges", () => {
   const samples = parsePrometheusExposition(
-    fixture("proxy-caddy-metrics-v5-reverse-proxy.txt"),
+    fixture("proxy-caddy-metrics-reverse-proxy.txt"),
   );
-  const reading = parseCaddyExpositionV5(samples, ctx());
+  const reading = parseCaddyExposition(samples, ctx());
   assertEquals(reading.upstreamsHealthy, 1);
   assertEquals(reading.upstreamsTotal, 2);
 });
 
-test("parseCaddyExpositionV5: a freshly-started Caddy nulls every rate/avg field on the first observation, gauges resolve to real numbers", () => {
+test("parseCaddyExposition: a freshly-started Caddy nulls every rate/avg field on the first observation, gauges resolve to real numbers", () => {
   const samples = parsePrometheusExposition(
-    fixture("proxy-caddy-metrics-v5-partial.txt"),
+    fixture("proxy-caddy-metrics-partial.txt"),
   );
-  const reading = parseCaddyExpositionV5(samples, ctx());
+  const reading = parseCaddyExposition(samples, ctx());
   assertEquals(reading.requests, null);
   assertEquals(reading.responses2xx, null);
   assertEquals(reading.responses3xx, null);
@@ -186,11 +190,13 @@ test("parseCaddyExpositionV5: a freshly-started Caddy nulls every rate/avg field
   assertEquals(reading.responses5xx, null);
   assertEquals(reading.requestBytes, null);
   assertEquals(reading.responseBytes, null);
-  assertEquals(reading.requestDurationSecondsAvg, null);
-  assertEquals(reading.requestsUnder100ms, null);
-  assertEquals(reading.requestsUnder500ms, null);
-  assertEquals(reading.requestsUnder1s, null);
-  assertEquals(reading.requestsUnder5s, null);
+  assertEquals(reading.requestDurationSecondsSum, null);
+  assertEquals(reading.bucket10ms, null);
+  assertEquals(reading.bucket50ms, null);
+  assertEquals(reading.bucket100ms, null);
+  assertEquals(reading.bucket500ms, null);
+  assertEquals(reading.bucket1s, null);
+  assertEquals(reading.bucket5s, null);
   assertEquals(reading.requestsInFlight, 0);
   assertEquals(reading.upstreamsHealthy, null);
   assertEquals(reading.upstreamsTotal, null);
@@ -202,52 +208,52 @@ const RESETTABLE_EXPOSITION = (requestsTotal: number) => `
 caddy_http_requests_total{handler="subroute",server="srv0"} ${requestsTotal}
 `;
 
-test("parseCaddyExpositionV5: a counter decrease (sidecar restart) nulls that field and re-baselines", () => {
+test("parseCaddyExposition: a counter decrease (sidecar restart) nulls that field and re-baselines", () => {
   const tracker = new CounterBaselineTracker();
-  const first = parseCaddyExpositionV5(
+  const first = parseCaddyExposition(
     parsePrometheusExposition(RESETTABLE_EXPOSITION(100)),
     ctx({ tracker, bootGeneration: 1 }),
   );
   assertEquals(first.requests, null); // first observation
 
-  const second = parseCaddyExpositionV5(
+  const second = parseCaddyExposition(
     parsePrometheusExposition(RESETTABLE_EXPOSITION(160)),
     ctx({ tracker, bootGeneration: 1 }),
   );
   assertEquals(second.requests, 60);
 
   // Sidecar restarted: cumulative counter dropped back down.
-  const third = parseCaddyExpositionV5(
+  const third = parseCaddyExposition(
     parsePrometheusExposition(RESETTABLE_EXPOSITION(10)),
     ctx({ tracker, bootGeneration: 1 }),
   );
   assertEquals(third.requests, null);
 
-  const fourth = parseCaddyExpositionV5(
+  const fourth = parseCaddyExposition(
     parsePrometheusExposition(RESETTABLE_EXPOSITION(25)),
     ctx({ tracker, bootGeneration: 1 }),
   );
   assertEquals(fourth.requests, 15);
 });
 
-test("parseCaddyExpositionV5: a boot generation change nulls the counter and re-baselines", () => {
+test("parseCaddyExposition: a boot generation change nulls the counter and re-baselines", () => {
   const tracker = new CounterBaselineTracker();
-  parseCaddyExpositionV5(
+  parseCaddyExposition(
     parsePrometheusExposition(RESETTABLE_EXPOSITION(100)),
     ctx({ tracker, bootGeneration: 1 }),
   );
-  parseCaddyExpositionV5(
+  parseCaddyExposition(
     parsePrometheusExposition(RESETTABLE_EXPOSITION(160)),
     ctx({ tracker, bootGeneration: 1 }),
   );
 
-  const afterReboot = parseCaddyExpositionV5(
+  const afterReboot = parseCaddyExposition(
     parsePrometheusExposition(RESETTABLE_EXPOSITION(5)),
     ctx({ tracker, bootGeneration: 2 }),
   );
   assertEquals(afterReboot.requests, null);
 
-  const nextTick = parseCaddyExpositionV5(
+  const nextTick = parseCaddyExposition(
     parsePrometheusExposition(RESETTABLE_EXPOSITION(65)),
     ctx({ tracker, bootGeneration: 2 }),
   );
@@ -272,8 +278,7 @@ test("CaddyIngressAdapter.read returns null when the body has none of the expect
 
 test("CaddyIngressAdapter.read succeeds on a valid scrape", async () => {
   const adapter = new CaddyIngressAdapter({
-    fetchText: () =>
-      Promise.resolve(fixture("proxy-caddy-metrics-v5-base.txt")),
+    fetchText: () => Promise.resolve(fixture("proxy-caddy-metrics-base.txt")),
   });
   const result = await adapter.read(ctx());
   assertEquals(result?.sourceId, "caddy");

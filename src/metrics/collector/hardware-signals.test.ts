@@ -1,12 +1,17 @@
 import { assertEquals } from "@std/assert";
 import {
+  blockTemperatureSignalId,
   CPU_HOTTEST_CORE_SIGNAL_ID,
   CPU_THERMAL_THROTTLED_SIGNAL_ID,
+  gpuSignalId,
 } from "../topology/hardware-signal-topology.ts";
 import { CounterBaselineTracker } from "./baseline.ts";
 import { buildHardwareSignalSamples } from "./hardware-signals.ts";
 import type { SensorIo } from "./sensors/discovery.ts";
-import type { PhysicalSignalTopology } from "../topology/types.ts";
+import type {
+  BlockDeviceTopology,
+  PhysicalSignalTopology,
+} from "../topology/types.ts";
 
 const test = Deno.test.bind(Deno);
 
@@ -280,4 +285,171 @@ test("buildHardwareSignalSamples: CPU thermal-throttled percent clamps at 100 an
     },
   );
   assertEquals(unreadable.samples[0].value, null);
+});
+
+// ---------------------------------------------------------------------------
+// Entity-joined signals: GPU thermals come from the adapter merge threaded
+// in, drive temperature from this tick's own per-probe disk readings.
+// ---------------------------------------------------------------------------
+
+const GPU_ID = "gpu:pci:0000:01:00.0";
+
+function gpuSignal(
+  kind: "temperature" | "memory-temperature" | "power",
+): PhysicalSignalTopology {
+  return {
+    signalId: gpuSignalId(GPU_ID, kind),
+    kind: kind === "power" ? "power" : "temperature",
+    unit: kind === "power" ? "watts" : "celsius",
+    component: "gpu",
+    label: `AD102 ${kind}`,
+  };
+}
+
+const NVME_PROBE_SIGNAL: PhysicalSignalTopology = {
+  signalId: "signal:nvme0n1:Composite",
+  kind: "temperature",
+  unit: "celsius",
+  component: "disk",
+  label: "Composite",
+};
+const NVME_HOT_PROBE_SIGNAL: PhysicalSignalTopology = {
+  signalId: "signal:nvme0n1:Sensor 2",
+  kind: "temperature",
+  unit: "celsius",
+  component: "disk",
+  label: "Sensor 2",
+};
+const DRIVE_SIGNAL: PhysicalSignalTopology = {
+  signalId: blockTemperatureSignalId("blk:nvme0n1"),
+  kind: "temperature",
+  unit: "celsius",
+  component: "drive",
+  label: "nvme0n1 temperature",
+};
+
+const NVME_DIRS: Record<string, string[]> = {
+  ...DIRS,
+  "/sys/class/hwmon": ["hwmon0", "hwmon1", "hwmon3"],
+  "/sys/class/hwmon/hwmon3": [
+    "name",
+    "device",
+    "temp1_input",
+    "temp1_label",
+    "temp2_input",
+    "temp2_label",
+  ],
+  "/sys/class/hwmon/hwmon3/device": ["nvme0n1"],
+};
+
+function nvmeFiles(): Record<string, string> {
+  return {
+    ...baseFiles("0"),
+    "/sys/class/hwmon/hwmon3/name": "nvme",
+    "/sys/class/hwmon/hwmon3/temp1_input": "44000",
+    "/sys/class/hwmon/hwmon3/temp1_label": "Composite",
+    "/sys/class/hwmon/hwmon3/temp2_input": "61000",
+    "/sys/class/hwmon/hwmon3/temp2_label": "Sensor 2",
+  };
+}
+
+const NVME_DEVICE: BlockDeviceTopology = {
+  deviceId: "blk:nvme0n1",
+  kernelName: "nvme0n1",
+  deviceType: "physical",
+  isServiceDevice: true,
+};
+
+test("buildHardwareSignalSamples: GPU signals resolve from the threaded-in adapter merge, never from a sysfs walk", async () => {
+  const result = await buildHardwareSignalSamples(
+    [
+      gpuSignal("temperature"),
+      gpuSignal("memory-temperature"),
+      gpuSignal("power"),
+    ],
+    {
+      io: memoryIo(baseFiles("0"), DIRS),
+      tracker: new CounterBaselineTracker(),
+      bootGeneration: 1,
+      seconds: 60,
+      gpuThermals: new Map([[GPU_ID, {
+        temperatureCelsius: 71,
+        memoryTemperatureCelsius: 84,
+        powerWatts: 310,
+      }]]),
+    },
+  );
+  assertEquals(result.samples.map((s) => s.value), [71, 84, 310]);
+});
+
+test("buildHardwareSignalSamples: a GPU topology identified but with no adapter reading resolves to null, never to the hwmon candidate fallback", async () => {
+  const result = await buildHardwareSignalSamples([gpuSignal("temperature")], {
+    io: memoryIo(baseFiles("0"), DIRS),
+    tracker: new CounterBaselineTracker(),
+    bootGeneration: 1,
+    seconds: 60,
+  });
+  assertEquals(result.samples, [{
+    signalId: gpuSignalId(GPU_ID, "temperature"),
+    kind: "temperature",
+    value: null,
+  }]);
+});
+
+test("buildHardwareSignalSamples: drive temperature joins this tick's own disk probes onto the owning device, Composite winning over a hotter internal probe", async () => {
+  const result = await buildHardwareSignalSamples(
+    [NVME_HOT_PROBE_SIGNAL, NVME_PROBE_SIGNAL, DRIVE_SIGNAL],
+    {
+      io: memoryIo(nvmeFiles(), NVME_DIRS),
+      tracker: new CounterBaselineTracker(),
+      bootGeneration: 1,
+      seconds: 60,
+      blockDevices: [NVME_DEVICE],
+    },
+  );
+  // The per-probe signals keep their own raw readings...
+  assertEquals(result.samples[0].value, 61);
+  assertEquals(result.samples[1].value, 44);
+  // ...and the entity-joined one is the vendor Composite, not the max.
+  assertEquals(result.samples[2].value, 44);
+});
+
+test("buildHardwareSignalSamples: a drive whose probes all read nothing this tick resolves to null rather than dropping out", async () => {
+  const result = await buildHardwareSignalSamples(
+    [NVME_PROBE_SIGNAL, DRIVE_SIGNAL],
+    {
+      io: memoryIo(baseFiles("0"), DIRS),
+      tracker: new CounterBaselineTracker(),
+      bootGeneration: 1,
+      seconds: 60,
+      blockDevices: [NVME_DEVICE],
+    },
+  );
+  assertEquals(result.samples.map((s) => s.value), [null, null]);
+});
+
+test("buildHardwareSignalSamples: a non-disk signal never leaks into the drive join, even when its id parses into a matching kernel name", async () => {
+  // `signal:cpu:hottest-core` splits to kernelName "cpu"; a device literally
+  // named `cpu` must still get its own probes' reading, not the CPU's.
+  const result = await buildHardwareSignalSamples(
+    [HOTTEST_CORE_SIGNAL, {
+      ...DRIVE_SIGNAL,
+      signalId: blockTemperatureSignalId("blk:cpu"),
+    }],
+    {
+      io: memoryIo(baseFiles("0"), DIRS),
+      tracker: new CounterBaselineTracker(),
+      bootGeneration: 1,
+      seconds: 60,
+      blockDevices: [{
+        ...NVME_DEVICE,
+        deviceId: "blk:cpu",
+        kernelName: "cpu",
+      }],
+    },
+  );
+  // Hottest core reads the real 62C max across Core 0/Core 1...
+  assertEquals(result.samples[0].value, 62);
+  // ...and the drive, which has no probe of its own, stays null.
+  assertEquals(result.samples[1].value, null);
 });

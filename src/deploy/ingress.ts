@@ -45,14 +45,14 @@ const TRAEFIK_HTTP_PORT = 7080;
 const TRAEFIK_HTTPS_PORT = 7443;
 /**
  * Loopback-only Prometheus metrics entrypoint for the shared hosting-ingress
- * Traefik. Scraped by the daemon's `ingress/traefik.ts` v5 metrics adapter
+ * Traefik. Scraped by the daemon's `metrics/collector/router/traefik.ts` adapter
  * the same way `SITE_CADDY_ADMIN_ADDR`/`PROXYSQL_REST_ADDR` are — never
  * published beyond `TRAEFIK_LOOPBACK`. Per-service tenant Traefik
  * (`serviceTraefikCompose`) does not get one; ingress metrics are scoped to
  * the shared HTTP-only proxy only.
  */
 const TRAEFIK_METRICS_PORT = 7081;
-/** Loopback address `ingress/traefik.ts` scrapes for shared Traefik metrics. */
+/** Loopback address `metrics/collector/router/traefik.ts` scrapes for shared Traefik metrics. */
 export const TRAEFIK_METRICS_ADDR =
   `${TRAEFIK_LOOPBACK}:${TRAEFIK_METRICS_PORT}`;
 /**
@@ -402,7 +402,17 @@ export function traefikCompose(
     `      - --entrypoints.metrics.address=:${TRAEFIK_METRICS_PORT}`,
     "      - --metrics.prometheus=true",
     "      - --metrics.prometheus.entryPoint=metrics",
-    "      - --metrics.prometheus.buckets=0.1,0.5,1.0,5.0",
+    // Traefik defaults `addRoutersLabels` to false, which suppresses the
+    // whole `traefik_router_*` family. The daemon's router adapter derives
+    // `routersTotal` from it, so without this flag that field would be
+    // permanently null. The services/entrypoints label sets are on by
+    // default and need no flag.
+    "      - --metrics.prometheus.addRoutersLabels=true",
+    // Six bounds, not v5's four. The old set bottomed out at 100ms, which put
+    // every request on a healthy site in the first bucket and made the
+    // read-time p50 meaningless; 10ms/50ms are what give the low end any
+    // resolution at all.
+    "      - --metrics.prometheus.buckets=0.01,0.05,0.1,0.5,1.0,5.0",
     "    ports:",
     `      - ${TRAEFIK_LOOPBACK}:${TRAEFIK_HTTP_PORT}:${TRAEFIK_HTTP_PORT}`,
     `      - ${TRAEFIK_LOOPBACK}:${TRAEFIK_HTTPS_PORT}:${TRAEFIK_HTTPS_PORT}`,

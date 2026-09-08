@@ -13,13 +13,14 @@
  * fires when a GPU stays in topology but every health field goes `null`
  * right after a tick that had a real reading (adapter lost the device
  * without topology re-discovering yet). `gpu_thermal_critical` cross-checks
- * this tick's already-built `GpuSampleV5.temperatureCelsius` against a fixed
- * conservative threshold — no per-GPU thermal threshold exists in topology
- * today.
+ * this tick's merged GPU temperature (`EventDetectContext.gpuThermals`, the
+ * adapter reading itself — not the `hardware.physical` signal it becomes,
+ * which a GPU-passthrough VM never emits) against a fixed conservative
+ * threshold — no per-GPU thermal threshold exists in topology today.
  */
 import type { EventCollector, EventDetectContext } from "./types.ts";
 import { makeEvent } from "./types.ts";
-import type { MetricEventV5 } from "../../contract-v5.ts";
+import type { MetricEvent } from "../../contract.ts";
 import type { GpuTopology } from "../../topology/types.ts";
 
 /** No topology-level GPU thermal threshold exists yet — this is a conservative fixed default until one is added. */
@@ -75,8 +76,8 @@ export class GpuHealthEventCollector implements EventCollector {
     this.#reader = deps.reader;
   }
 
-  async detect(ctx: EventDetectContext): Promise<MetricEventV5[]> {
-    const events: MetricEventV5[] = [];
+  async detect(ctx: EventDetectContext): Promise<MetricEvent[]> {
+    const events: MetricEvent[] = [];
     const currentIds = new Set(ctx.snapshot.gpus.map((g) => g.gpuId));
     this.#forgetMissingGpus(ctx, events, currentIds);
 
@@ -92,7 +93,7 @@ export class GpuHealthEventCollector implements EventCollector {
 
   #forgetMissingGpus(
     ctx: EventDetectContext,
-    events: MetricEventV5[],
+    events: MetricEvent[],
     currentIds: Set<string>,
   ): void {
     const missing: string[] = [];
@@ -112,7 +113,7 @@ export class GpuHealthEventCollector implements EventCollector {
 
   #detectGpu(
     ctx: EventDetectContext,
-    events: MetricEventV5[],
+    events: MetricEvent[],
     gpuId: string,
     prior: GpuHealthState,
     health: GpuHealthSignals,
@@ -142,19 +143,19 @@ export class GpuHealthEventCollector implements EventCollector {
   }
 
   /**
-   * Thermal comes from this tick's already-built `GpuSampleV5`
+   * Thermal comes from this tick's already-built `GpuSample`
    * (sysfs/DCGM-fed on non-NVIDIA GPUs), not from `health` — it must
    * still be checked even when this GPU has no NVML health signals at
    * all (e.g. every AMD/Intel GPU, always all-null here).
    */
   #pushThermalCritical(
     ctx: EventDetectContext,
-    events: MetricEventV5[],
+    events: MetricEvent[],
     gpuId: string,
     prior: GpuHealthState,
   ): boolean {
-    const sample = ctx.gpus.find((s) => s.gpuId === gpuId);
-    const temperatureCelsius = sample?.temperatureCelsius ?? null;
+    const temperatureCelsius = ctx.gpuThermals.get(gpuId)?.temperatureCelsius ??
+      null;
     const thermalCritical = temperatureCelsius !== null &&
       temperatureCelsius >= GPU_THERMAL_CRITICAL_CELSIUS;
     if (thermalCritical && !prior.thermalCritical) {
@@ -170,7 +171,7 @@ export class GpuHealthEventCollector implements EventCollector {
 
   #rememberUnreadable(
     ctx: EventDetectContext,
-    events: MetricEventV5[],
+    events: MetricEvent[],
     gpuId: string,
     prior: GpuHealthState,
     thermalCritical: boolean,
@@ -191,7 +192,7 @@ export class GpuHealthEventCollector implements EventCollector {
 
   #pushXidEvents(
     ctx: EventDetectContext,
-    events: MetricEventV5[],
+    events: MetricEvent[],
     gpuId: string,
     prior: GpuHealthState,
     health: GpuHealthSignals,
@@ -220,7 +221,7 @@ export class GpuHealthEventCollector implements EventCollector {
 
   #pushEccEvent(
     ctx: EventDetectContext,
-    events: MetricEventV5[],
+    events: MetricEvent[],
     gpuId: string,
     health: GpuHealthSignals,
   ): void {
@@ -241,7 +242,7 @@ export class GpuHealthEventCollector implements EventCollector {
 
   #pushRemapEvents(
     ctx: EventDetectContext,
-    events: MetricEventV5[],
+    events: MetricEvent[],
     gpuId: string,
     prior: GpuHealthState,
     health: GpuHealthSignals,
@@ -273,7 +274,7 @@ export class GpuHealthEventCollector implements EventCollector {
 
   #pushRetirementEvent(
     ctx: EventDetectContext,
-    events: MetricEventV5[],
+    events: MetricEvent[],
     gpuId: string,
     prior: GpuHealthState,
     health: GpuHealthSignals,

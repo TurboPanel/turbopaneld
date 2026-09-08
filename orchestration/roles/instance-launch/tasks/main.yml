@@ -74,6 +74,54 @@
     - Reload systemd for instance units
     - Restart turbopanel instance
 
+# `wrangler dev` does not run the Worker's `* * * * *` cron trigger, so on the
+# Workers dev runtime a systemd timer hits wrangler's local trigger endpoint
+# every minute; otherwise the offline sweep, TLS renewal and billing chores
+# never run and every server stays "online" forever. Deno runs its own
+# scheduler in-process and needs nothing here, so the units are removed.
+- name: Install Workers dev cron trigger units
+  when: (turbopanel_instance_runtime | default('deno')) == 'workers'
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "/etc/systemd/system/{{ instance_cron_service_name }}.{{ item.kind }}"
+    owner: root
+    group: root
+    mode: "0640"
+  loop:
+    - { src: turbopanel-instance-cron.service.j2, kind: service }
+    - { src: turbopanel-instance-cron.timer.j2, kind: timer }
+  loop_control:
+    label: "{{ item.kind }}"
+  notify:
+    - Reload systemd for instance units
+
+- name: Enable Workers dev cron timer
+  when:
+    - (turbopanel_instance_runtime | default('deno')) == 'workers'
+    - instance_start | bool
+  ansible.builtin.systemd:
+    name: "{{ instance_cron_service_name }}.timer"
+    daemon_reload: true
+    enabled: true
+    state: started
+
+- name: Stop Workers dev cron timer on a non-Workers runtime
+  when: (turbopanel_instance_runtime | default('deno')) != 'workers'
+  ansible.builtin.systemd:
+    name: "{{ instance_cron_service_name }}.timer"
+    enabled: false
+    state: stopped
+  failed_when: false
+
+- name: Remove Workers dev cron trigger units on a non-Workers runtime
+  when: (turbopanel_instance_runtime | default('deno')) != 'workers'
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ instance_cron_service_name }}.{{ item }}"
+    state: absent
+  loop: [service, timer]
+  notify:
+    - Reload systemd for instance units
+
 - name: Ensure Drizzle Studio serve script is executable
   when: turbopanel_ui_mode == 'dev'
   ansible.builtin.file:
@@ -421,6 +469,100 @@
     - (turbopanel_instance_runtime | default('deno')) == 'workers'
     - _analytics_engine_api_token_raw.content is defined
     - (_analytics_engine_api_token_raw.content | b64decode | trim) | length > 0
+
+# Stripe for the Workers *dev* instance only. Two by-hand files under the
+# protected instance config dir (0640 root:group, never generated, never
+# committed): `.stripe_secret_key` (the sandbox `sk_test_…`) and
+# `.stripe_webhook_signing_secret` (the Dashboard endpoint's or the CLI
+# forwarder's `whsec_…`). They are read here so a re-converge keeps the two
+# lines in runtime.dev-vars instead of wiping them. The Deno unit never loads
+# either: self-hosted has no billing. Production takes the same two values
+# from Wrangler secrets, not from files.
+# Co-located dev only: the dev checkout may carry both values in
+# `<dev root>/dev/local/stripe.env` (gitignored; the checkout is mounted into
+# the VM, so it survives a VM rebuild). When present, it seeds the two protected
+# files above so a fresh VM needs no re-entry. The files stay the source the
+# rest of this role reads; the checkout is only the durable copy.
+- name: Stat dev-checkout Stripe env file
+  ansible.builtin.stat:
+    path: "{{ turbopanel_dev_root }}/dev/local/stripe.env"
+  register: _stripe_dev_checkout_env
+  when:
+    - (turbopanel_instance_runtime | default('deno')) == 'workers'
+    - turbopanel_dev_user | default('') | length > 0
+
+- name: Read dev-checkout Stripe env file
+  ansible.builtin.slurp:
+    src: "{{ turbopanel_dev_root }}/dev/local/stripe.env"
+  register: _stripe_dev_checkout_raw
+  no_log: true
+  when:
+    - (turbopanel_instance_runtime | default('deno')) == 'workers'
+    - turbopanel_dev_user | default('') | length > 0
+    - _stripe_dev_checkout_env.stat.exists | default(false)
+
+- name: Seed protected Stripe files from the dev checkout
+  ansible.builtin.copy:
+    dest: "{{ turbopanel_config_dir }}/instance/{{ item.file }}"
+    content: "{{ item.value }}\n"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+  loop:
+    - file: .stripe_secret_key
+      value: >-
+        {{ ((_stripe_dev_checkout_raw.content | default('') | b64decode).splitlines()
+            | select('match', '^TURBOPANEL_STRIPE_SECRET_KEY=')
+            | map('regex_replace', '^[^=]*=', '') | first | default('')) | trim }}
+    - file: .stripe_webhook_signing_secret
+      value: >-
+        {{ ((_stripe_dev_checkout_raw.content | default('') | b64decode).splitlines()
+            | select('match', '^TURBOPANEL_STRIPE_WEBHOOK_SIGNING_SECRET=')
+            | map('regex_replace', '^[^=]*=', '') | first | default('')) | trim }}
+  loop_control:
+    label: "{{ item.file }}"
+  # Secrets in the loop values: hidden unless a developer debugs this task
+  # with `-e stripe_seed_no_log=false`.
+  no_log: "{{ stripe_seed_no_log | default(true) }}"
+  when:
+    - (turbopanel_instance_runtime | default('deno')) == 'workers'
+    - turbopanel_dev_user | default('') | length > 0
+    - _stripe_dev_checkout_raw.content is defined
+    - item.value | length > 0
+
+- name: Stat Stripe dev secret files
+  ansible.builtin.stat:
+    path: "{{ turbopanel_config_dir }}/instance/{{ item }}"
+  loop: [.stripe_secret_key, .stripe_webhook_signing_secret]
+  register: _stripe_dev_secret_stats
+  when: (turbopanel_instance_runtime | default('deno')) == 'workers'
+
+- name: Read Stripe dev secret files
+  ansible.builtin.slurp:
+    src: "{{ item.stat.path }}"
+  loop: "{{ _stripe_dev_secret_stats.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item | default('') }}"
+  register: _stripe_dev_secret_raw
+  when:
+    - (turbopanel_instance_runtime | default('deno')) == 'workers'
+    - item.stat is defined
+    - item.stat.exists
+
+- name: Set Stripe dev secret facts
+  ansible.builtin.set_fact:
+    turbopanel_stripe_secret_key: >-
+      {{ (_stripe_dev_secret_raw.results | default([])
+          | selectattr('item.item', 'equalto', '.stripe_secret_key')
+          | selectattr('content', 'defined') | map(attribute='content')
+          | map('b64decode') | map('trim') | first) | default('') }}
+    turbopanel_stripe_webhook_signing_secret: >-
+      {{ (_stripe_dev_secret_raw.results | default([])
+          | selectattr('item.item', 'equalto', '.stripe_webhook_signing_secret')
+          | selectattr('content', 'defined') | map(attribute='content')
+          | map('b64decode') | map('trim') | first) | default('') }}
+  no_log: true
+  when: (turbopanel_instance_runtime | default('deno')) == 'workers'
 
 - name: Install Workers runtime dev vars (protected config dir)
   ansible.builtin.template:

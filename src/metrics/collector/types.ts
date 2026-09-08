@@ -1,26 +1,34 @@
-import type {
-  MetricsCollectionModeV5 as MetricsCollectionMode,
-  MetricsSampleV5,
-} from "../contract-v5.ts";
+import type { MetricsCapabilityPlan } from "../capability-plan.ts";
+import type { MetricsSample } from "../contract.ts";
+import type { TopologyOverrides, TopologySnapshot } from "../topology/types.ts";
+import type { DatabaseProxyAdapterSet } from "./database-proxy/adapter.ts";
+import type { DirectoryUsageSnapshot } from "./directory-usage.ts";
+import type { DockerUsageReading } from "./docker-usage.ts";
+import type { ManagedEngineCensusReading } from "./managed-engines.ts";
+import type { TopLevelEventCollector } from "./events/index.ts";
+import type { GpuAdapterSet } from "./gpu/adapter.ts";
+import type { IngressAdapterSet } from "./ingress/adapter.ts";
+import type { RouterAdapterSet } from "./router/adapter.ts";
+import type { SensorIo } from "./sensors/discovery.ts";
 
-/** Outcome of a single collect() invocation: an entity-grouped `MetricsSampleV5`. */
+/** Outcome of a single collect() invocation: an entity-grouped `MetricsSample`. */
 export type MetricsCollectResult =
-  | { supported: true; sample: MetricsSampleV5 }
+  | { supported: true; sample: MetricsSample }
   | { supported: false; reason: string };
 
 /**
  * Host metrics collector seam for scheduler integration.
  *
  * The scheduler owns monotonic `sequence` generation; the collector only
- * consumes the value passed in `collect({ sequence })`. `collectionMode`
- * defaults to `"baseline"` — the live-leases phase passes `"live"` without
- * touching the collector internals.
+ * consumes the value passed in `collect({ sequence })`. v6 dropped the
+ * baseline/live `collectionMode` discriminator: a live lease changes the
+ * scheduler's cadence, and the resulting `metadata.intervalSeconds` is the
+ * only thing any consumer ever needed to tell the two apart.
  */
 export interface MetricsCollector {
   collect(options: {
     sequence: number;
     nowMs?: number;
-    collectionMode?: MetricsCollectionMode;
   }): Promise<MetricsCollectResult>;
 }
 
@@ -248,4 +256,129 @@ export type StatfsResult = {
   /** Total/free inode counts, when the platform's `statfs` exposes them. */
   files?: number;
   ffree?: number;
+};
+
+export type CollectorDeps = {
+  readProcFile: (
+    path: string,
+  ) => string | undefined | Promise<string | undefined>;
+  statfs: (
+    path: string,
+  ) => StatfsResult | null | Promise<StatfsResult | null>;
+  now: () => number;
+  /** This tick's topology discovery — networks/filesystems/blockDevices identity, generation, boot generation. */
+  collectTopology: () => Promise<TopologySnapshot>;
+  /**
+   * The operator's topology overrides (`topology/overrides.ts`'s
+   * `resolveTopologyOverrides`), re-read each tick alongside
+   * `collectTopology` so `linux-collector.ts` can recompute the same
+   * `SlotMapping` the topology generation was stamped with and emit only the
+   * monitored NICs (`normalNicSlots` in slot order, then fabric devices).
+   * Optional: absent means `EMPTY_TOPOLOGY_OVERRIDES` — auto slot selection
+   * (the default-route uplink only).
+   */
+  resolveTopologyOverrides?: () => Promise<TopologyOverrides>;
+  /**
+   * Persisted capability plan from the last `capability-plan-update`.
+   * Optional: absent means no truncation — the collector sends the full
+   * discovered sample (self-hosted, or before the first push lands).
+   * Production `defaultDeps` wires `readCapabilityPlan`.
+   */
+  resolveCapabilityPlan?: () => Promise<
+    { plan: MetricsCapabilityPlan; generation: number } | undefined
+  >;
+  /**
+   * When true, never truncate the outbound sample even if a leftover
+   * capability plan is persisted. Self-hosted ingest writes the full sample
+   * on the operator's own disk; a finite plan must not start dropping
+   * entities after enroll or reconnect.
+   */
+  skipCapabilityPlanTruncation?: boolean;
+  /** Sysfs access for per-NIC directional stats (`network.ts`'s `buildNetworkDeviceSamples`). */
+  io: SensorIo;
+  sysRoot?: string;
+  /** Host page size in bytes (`parse-vmstat.ts`'s `resolvePageSizeBytes`), resolved once at construction, never per tick. */
+  pageSizeBytes: number;
+  /**
+   * Count running processes (`processes.ts`'s `countProcessesInProc`).
+   * Optional: absent means a live `/proc` scan. Host-free scheduler tests
+   * stub this so FakeClock microtask draining never waits on real directory
+   * I/O (hundreds of PID entries, plus a possible `ls` fallback).
+   */
+  countProcesses?: () => number | null | Promise<number | null>;
+  /**
+   * GPU telemetry adapters (sysfs/NVML/DCGM), constructed once at daemon
+   * startup — `gpu/index.ts`'s `buildGpuSamples`. Optional: absent means
+   * `gpus` stays `[]`, matching this phase's prior behavior for hosts/tests
+   * that don't wire GPU telemetry.
+   */
+  gpuAdapters?: GpuAdapterSet;
+  /**
+   * Ingress traffic adapters (the site Caddy loopback scrape), constructed
+   * once at daemon startup — `ingress/index.ts`'s `buildIngressSources`.
+   * Optional: absent means `ingressSources` stays `[]`, matching this
+   * phase's prior behavior for hosts/tests that don't wire ingress
+   * telemetry.
+   */
+  ingressAdapters?: IngressAdapterSet;
+  /**
+   * Shared HTTP-router adapters (the hosting Traefik loopback scrape),
+   * constructed once at daemon startup — `router/index.ts`'s
+   * `buildRouterSample`. Separate from {@link CollectorDeps.ingressAdapters}
+   * because the router is host-wide and singleton, not one of many
+   * `sourceId`-keyed ingress sources. Optional: absent means `router` is
+   * omitted from the sample entirely, matching every other adapter set's
+   * absent-default convention.
+   */
+  routerAdapters?: RouterAdapterSet;
+  /**
+   * Database-proxy traffic adapters (ProxySQL REST scrape), constructed once
+   * at daemon startup — `database-proxy/index.ts`'s `buildDatabaseProxies`.
+   * Optional: absent means `databaseProxies` stays `[]`, matching this
+   * phase's prior behavior for hosts/tests that don't wire database-proxy
+   * telemetry.
+   */
+  databaseProxyAdapters?: DatabaseProxyAdapterSet;
+  /**
+   * Event sub-collector aggregator (`events/index.ts`'s `EventCollectorSet`),
+   * constructed once at daemon startup. Optional: absent means `events`
+   * stays `[]`, matching every other adapter's absent-default convention.
+   */
+  eventCollectors?: TopLevelEventCollector;
+  /**
+   * Cached directory-usage reading for the hosting root, the backup root and
+   * the log directory — the `managed.storage` family's byte fields.
+   *
+   * A *getter*, not a probe: the walk runs on
+   * `directory-usage.ts`'s own slow interval, owned by whatever started the
+   * daemon, and the tick only reads its last completed result. Wiring it as a
+   * collect-time async call would put a full recursive tree walk on the 60 s
+   * path, which is precisely what that module exists to avoid.
+   *
+   * Optional: absent means `storage` is omitted from the sample entirely,
+   * matching every adapter set's absent-default convention.
+   */
+  directoryUsage?: () => DirectoryUsageSnapshot;
+  /**
+   * Cached Docker `GET /system/df` rollup — the `managed.docker` family, plus
+   * the `dockerUsedBytes` total `managed.storage` carries. Same getter
+   * discipline and the same reason as {@link CollectorDeps.directoryUsage}.
+   *
+   * Returns `null` when Docker is absent or the first poll has not landed, in
+   * which case `dockerUsage` is omitted from the sample and
+   * `storage.dockerUsedBytes` stays `null`.
+   */
+  dockerUsage?: () => DockerUsageReading | null;
+  /**
+   * Cached managed-engine census — the twelve per-engine fields of
+   * `managed.storage` (`managed-engines.ts`'s `ManagedEngineSampler`). Same
+   * getter discipline as {@link CollectorDeps.directoryUsage}: the census
+   * costs a Docker listing plus one `docker exec` per running instance, so
+   * it runs on its own slow timer and the tick only reads the last result.
+   *
+   * Returns `null` when Docker is absent or the first census has not landed,
+   * in which case every engine group stays `null`. Optional: absent means
+   * the same.
+   */
+  managedEngines?: () => ManagedEngineCensusReading | null;
 };

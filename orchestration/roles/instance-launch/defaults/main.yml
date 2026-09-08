@@ -69,6 +69,9 @@ website_port: 19820
 website_cors_origins: "http://localhost:{{ website_port }},http://127.0.0.1:{{ website_port }}"
 instance_service_name: turbopanel-instance
 caddy_service_name: turbopanel-caddy
+# Workers dev only: minutely timer that hits wrangler's local scheduled-trigger
+# endpoint, because `wrangler dev` never fires the Worker's cron on its own.
+instance_cron_service_name: turbopanel-instance-cron
 ui_service_name: turbopanel-ui
 caddy_port: 8443
 caddy_http_port: 8880

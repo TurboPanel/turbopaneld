@@ -7,8 +7,8 @@
  * DMI vendor strings don't change while the daemon process is running.
  *
  * The combined result is truncated to {@link MAX_EVENTS_PER_DETECT_TICK}
- * (mirroring `contract-v5.ts`'s private `MAX_METRIC_EVENTS_PER_SAMPLE`) —
- * `buildMetricsSampleV5` throws the *entire* sample away over that cap, so
+ * (mirroring `contract.ts`'s private `MAX_METRIC_EVENTS_PER_SAMPLE`) —
+ * `buildMetricsSample` throws the *entire* sample away over that cap, so
  * this set must never hand it more than the wire contract accepts.
  */
 import { isPhysicalMachine } from "../../topology/physical-classifier.ts";
@@ -32,7 +32,7 @@ import { SmartEventCollector } from "./smart.ts";
 import type { SmartRunner } from "./smart.ts";
 import { MAX_EVENTS_PER_DETECT_TICK } from "./types.ts";
 import type { EventDetectContext } from "./types.ts";
-import type { MetricEventV5 } from "../../contract-v5.ts";
+import type { MetricEvent } from "../../contract.ts";
 
 export { MAX_EVENTS_PER_DETECT_TICK } from "./types.ts";
 export type { EventCollector, EventDetectContext } from "./types.ts";
@@ -41,13 +41,13 @@ export type { EventCollector, EventDetectContext } from "./types.ts";
  * What `linux-collector.ts` actually has to hand: everything in
  * `EventDetectContext` except `isPhysical`, which `EventCollectorSet` alone
  * resolves and memoizes (`linux-collector.ts` never runs `isPhysicalMachine`
- * itself). This is the type `CollectorDepsV5.eventCollectors` is declared
+ * itself). This is the type `CollectorDeps.eventCollectors` is declared
  * against.
  */
 export type TopLevelEventCollector = {
   detect(
     ctx: Omit<EventDetectContext, "isPhysical">,
-  ): Promise<MetricEventV5[]>;
+  ): Promise<MetricEvent[]>;
 };
 
 export type EventCollectorSetDeps = {
@@ -59,8 +59,8 @@ export type EventCollectorSetDeps = {
 };
 
 async function safeAsync(
-  fn: () => MetricEventV5[] | Promise<MetricEventV5[]>,
-): Promise<MetricEventV5[]> {
+  fn: () => MetricEvent[] | Promise<MetricEvent[]>,
+): Promise<MetricEvent[]> {
   try {
     return await fn();
   } catch {
@@ -115,7 +115,7 @@ export class EventCollectorSet implements TopLevelEventCollector {
 
   async detect(
     ctxWithoutPhysical: Omit<EventDetectContext, "isPhysical">,
-  ): Promise<MetricEventV5[]> {
+  ): Promise<MetricEvent[]> {
     const isPhysical = await this.#resolveIsPhysical(ctxWithoutPhysical);
     const ctx: EventDetectContext = { ...ctxWithoutPhysical, isPhysical };
 

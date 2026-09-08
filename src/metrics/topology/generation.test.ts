@@ -265,3 +265,12 @@ test("computeTopologyGeneration: null previous state starts at 0", () => {
   };
   assertEquals(computeTopologyGeneration(null, fingerprint), 0);
 });
+
+test("resolveTopologyGeneration never consults the capability plan", () => {
+  const source = Deno.readTextFileSync(
+    new URL("./generation.ts", import.meta.url),
+  );
+  assertEquals(source.includes("capability-plan"), false);
+  assertEquals(source.includes("capabilityPlan"), false);
+  assertEquals(source.includes("truncateSample"), false);
+});

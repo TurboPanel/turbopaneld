@@ -9,6 +9,8 @@ caddy_http_requests_in_flight{handler="subroute",server="srv0"} 1
 caddy_http_requests_total{handler="subroute",server="srv0"} 50
 # HELP caddy_http_request_duration_seconds Histogram of round-trip request durations.
 # TYPE caddy_http_request_duration_seconds histogram
+caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="0.01"} 12
+caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="0.05"} 30
 caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="0.1"} 50
 caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="0.5"} 50
 caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="1"} 50

@@ -6,6 +6,10 @@
 # managed converge is bit-for-bit unchanged.
 turbopanel_install_root: /opt/turbopanel
 turbopanel_vendor_dir: "{{ turbopanel_install_root }}/vendor"
+# Managed-engine backup root (`LayoutPaths.backupDir`, `TURBOPANEL_BACKUP_DIR`).
+# Top-level rather than under /var/lib so an operator can mount separate
+# storage at it without moving the rest of the state tree.
+turbopanel_backup_dir: /backup
 turbopanel_dev_user: ""
 turbopanel_dev_uid: ""
 turbopanel_dev_gid: ""

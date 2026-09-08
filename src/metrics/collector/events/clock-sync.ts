@@ -14,7 +14,7 @@
 import { getLastObservedTimeSync } from "../../../host/time-sync.ts";
 import type { EventCollector, EventDetectContext } from "./types.ts";
 import { makeEvent } from "./types.ts";
-import type { MetricEventV5 } from "../../contract-v5.ts";
+import type { MetricEvent } from "../../contract.ts";
 
 export const DEFAULT_CLOCK_SYNC_INTERVAL_MS = 5 * 60_000;
 
@@ -39,7 +39,7 @@ export class ClockSyncEventCollector implements EventCollector {
     this.#intervalMs = deps?.intervalMs ?? DEFAULT_CLOCK_SYNC_INTERVAL_MS;
   }
 
-  detect(ctx: EventDetectContext): MetricEventV5[] {
+  detect(ctx: EventDetectContext): MetricEvent[] {
     if (
       this.#lastRunMs !== null &&
       ctx.nowMs - this.#lastRunMs < this.#intervalMs
@@ -49,7 +49,7 @@ export class ClockSyncEventCollector implements EventCollector {
     this.#lastRunMs = ctx.nowMs;
 
     const synced = this.#reader();
-    const events: MetricEventV5[] = [];
+    const events: MetricEvent[] = [];
     if (
       synced !== undefined && this.#lastSynced !== undefined &&
       synced !== this.#lastSynced

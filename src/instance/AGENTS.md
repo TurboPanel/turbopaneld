@@ -112,7 +112,8 @@ refresh, no identity clear), `stale-identity` (`404 Server key not found`,
 `NotValidForName`, `CertExpired` — **park**, not a silent 30 s loop), or
 `permanent`
 (`401 Invalid license`, `400 License already consumed or invalid`,
-`400 License is inactive`, `400 Server key is inactive`,
+`400 License is inactive`, `400 License tier below required`,
+`400 License tier not assigned`, `400 Server key is inactive`,
 `403 Invalid signature`, `409 Fingerprint already exists`, and the local
 `missing license credentials for enrollment` → **park**). On `permanent` or
 `tls-trust`,

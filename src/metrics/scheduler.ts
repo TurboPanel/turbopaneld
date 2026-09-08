@@ -16,7 +16,6 @@
  * in-flight emits across detach/reconnect.
  */
 import { logInfo, logWarn, sanitizeForLog } from "../logger.ts";
-import type { MetricsCollectionModeV5 as MetricsCollectionMode } from "./contract-v5.ts";
 import type { MetricsCollector } from "./collector/index.ts";
 
 /** Steady metrics cadence (independent of IdlePresence / cell ping). */
@@ -75,11 +74,6 @@ export type MetricsSchedulerOptions = {
   clearTimeoutFn?: typeof clearTimeout;
   logRateLimitMs?: number;
   onLog?: (level: MetricsLogLevel, message: string) => void;
-  /**
-   * Per-tick collection mode, asked at emit time (live leases flip it without
-   * touching the scheduler). Defaults to always `"baseline"`.
-   */
-  collectionMode?: () => MetricsCollectionMode;
 };
 
 function defaultOnLog(level: MetricsLogLevel, message: string): void {
@@ -131,7 +125,6 @@ export class MetricsScheduler {
   #serverId: string;
   readonly #collectorFactory: () => MetricsCollector;
   #intervalMs: number;
-  readonly #collectionMode: () => MetricsCollectionMode;
   readonly #jitterMaxMs: number;
   readonly #primeMs: number;
   readonly #now: () => number;
@@ -162,7 +155,6 @@ export class MetricsScheduler {
     this.#serverId = options.serverId;
     this.#collectorFactory = options.collectorFactory;
     this.#intervalMs = options.intervalMs ?? METRICS_INTERVAL_MS;
-    this.#collectionMode = options.collectionMode ?? (() => "baseline");
     this.#jitterMaxMs = options.jitterMaxMs ?? METRICS_JITTER_MAX_MS;
     this.#primeMs = options.primeMs ?? METRICS_PRIME_MS;
     this.#now = options.now ?? Date.now;
@@ -302,10 +294,7 @@ export class MetricsScheduler {
     try {
       let result;
       try {
-        result = await collector.collect({
-          sequence,
-          collectionMode: this.#collectionMode(),
-        });
+        result = await collector.collect({ sequence });
       } catch (err) {
         if (generation !== this.#attachGeneration) return;
         this.#logRateLimited(

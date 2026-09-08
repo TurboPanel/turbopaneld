@@ -4,12 +4,12 @@
  * `parse-kernel-limits.ts`'s `conntrackUsedPercent`). Hysteresis between
  * {@link HIGH_WATER_PERCENT}/{@link LOW_WATER_PERCENT} avoids flapping one
  * event per tick while the table hovers around a single threshold. There is
- * no `conntrack_recovered` kind in the catalog (`contract-v5.ts`'s
- * `METRIC_EVENT_KINDS_V5`) — recovery is a silent state reset, not an event.
+ * no `conntrack_recovered` kind in the catalog (`contract.ts`'s
+ * `METRIC_EVENT_KINDS`) — recovery is a silent state reset, not an event.
  */
 import type { EventCollector, EventDetectContext } from "./types.ts";
 import { makeEvent } from "./types.ts";
-import type { MetricEventV5 } from "../../contract-v5.ts";
+import type { MetricEvent } from "../../contract.ts";
 
 const HIGH_WATER_PERCENT = 90;
 const LOW_WATER_PERCENT = 80;
@@ -17,7 +17,7 @@ const LOW_WATER_PERCENT = 80;
 export class ConntrackEventCollector implements EventCollector {
   #exhausted = false;
 
-  detect(ctx: EventDetectContext): MetricEventV5[] {
+  detect(ctx: EventDetectContext): MetricEvent[] {
     const pct = ctx.conntrackUsedPercent;
     if (pct === null) return [];
 

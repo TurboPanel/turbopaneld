@@ -10,14 +10,23 @@
  * `discoverSensors` can produce: CPU package temperature, CPU package power
  * (RAPL), NVMe/`drivetemp` storage temperatures, and only board/inlet/DIMM/
  * VRM/chipset temperatures whose hwmon label is trustworthily identifiable
- * — never a generic "everything else" catch-all. Fan tachometers and GPU
- * temperature/power are excluded entirely: fan RPM has no home in sampled
- * telemetry, and GPU temperature/power already ride `GpuSampleV5` (via
- * `gpus[]`, `gpu-topology.ts`/`collector/gpu/`) — projecting them here too
- * would double-report the same reading under two different families. (Fan
- * *fault/alarm* fault detection still works: `events/physical-health.ts`
- * reads the broader live candidate map `hardware-signals.ts` builds each
- * tick directly, independent of this topology catalog.)
+ * — never a generic "everything else" catch-all. Fan tachometers are
+ * excluded entirely: fan RPM has no home in sampled telemetry. (Fan
+ * *fault/alarm* detection still works: `events/physical-health.ts` reads
+ * the broader live candidate map `hardware-signals.ts` builds each tick
+ * directly, independent of this topology catalog.)
+ *
+ * Entity-joined signals round out the catalog: one temperature /
+ * memory-temperature / power signal per topology-enumerated GPU
+ * ({@link gpuSignalId}) and one temperature signal per topology-enumerated
+ * *service* block device that a disk-temperature candidate actually backs
+ * ({@link blockTemperatureSignalId}). These carry the physical-only
+ * readings that used to ride `GpuSample`/`BlockDeviceSample` directly, so
+ * every physical sensor reading — whatever entity owns it — rides this one
+ * family, behind this one `isPhysicalMachine()` gate, with one paging
+ * order and one `physicalHardwareSignalSlots` entitlement. They are never
+ * fabricated: a GPU signal only exists when GPU topology enumerated that
+ * GPU, and a drive signal only when a matching hwmon probe was discovered.
  *
  * Two synthetic (non-hwmon-file-backed) CPU virtual signals round out the
  * catalog: hottest-core temperature (max of the per-core hwmon candidates,
@@ -35,14 +44,32 @@ import {
 } from "../collector/sensors/discovery.ts";
 import type { SensorCandidate } from "../collector/types.ts";
 import type {
+  BlockDeviceTopology,
+  GpuId,
+  GpuTopology,
   PhysicalSignalThresholds,
   PhysicalSignalTopology,
   SignalId,
+  TopologyDeviceId,
 } from "./types.ts";
 
 export type HardwareSignalTopologyDeps = {
   io: SensorIo;
   sysRoot?: string;
+  /**
+   * This tick's already-discovered GPU topology — one temperature /
+   * memory-temperature / power signal is enumerated per entry. Absent (or
+   * empty) means no GPU signals at all; a GPU signal is never synthesized
+   * for a GPU topology did not enumerate.
+   */
+  gpus?: readonly GpuTopology[];
+  /**
+   * This tick's already-discovered block topology. Only `isServiceDevice`
+   * entries are considered (the same membership `buildBlockDeviceSamples`
+   * uses), and only those a disk-temperature candidate actually backs get a
+   * signal.
+   */
+  blockDevices?: readonly BlockDeviceTopology[];
 };
 
 /** Stable signal identity — `chip:label`, same discipline as every other topology id. */
@@ -50,9 +77,140 @@ function toSignalId(candidate: SensorCandidate): SignalId {
   return `signal:${sensorId(candidate)}`;
 }
 
+/**
+ * NVMe's own composite reading — the vendor-computed whole-drive value the
+ * NVMe spec defines and the one that drives the drive's own thermal
+ * throttling, so it wins outright over the per-probe `Sensor N` readings.
+ * Shared with `collector/block-devices.ts`'s temperature join so both sides
+ * of the drive-temperature pipeline agree on which probe is authoritative.
+ */
+export const NVME_COMPOSITE_LABEL = "Composite";
+
 export const CPU_HOTTEST_CORE_SIGNAL_ID: SignalId = "signal:cpu:hottest-core";
 export const CPU_THERMAL_THROTTLED_SIGNAL_ID: SignalId =
   "signal:cpu:thermal-throttled";
+
+/** The three physical readings a GPU contributes to `hardware.physical` — the fields that used to sit on `GpuSample`. */
+export type GpuSignalKind = "temperature" | "memory-temperature" | "power";
+
+/** Every GPU signal kind, in the order {@link gpuEntitySignals} enumerates them. */
+export const GPU_SIGNAL_KINDS: readonly GpuSignalKind[] = [
+  "temperature",
+  "memory-temperature",
+  "power",
+];
+
+/**
+ * Stable signal identity for a GPU-owned physical reading. The `signal:gpu:`
+ * / `signal:block:` prefixes deliberately can't collide with an hwmon-backed
+ * `signal:<chip>:<label>` id, whose chip segment is a kernel hwmon/RAPL name.
+ * Consumers must resolve these by exact-id lookup, never by splitting on
+ * `:` — a `GpuId`/`TopologyDeviceId` is opaque and may itself contain one.
+ */
+export function gpuSignalId(gpuId: GpuId, kind: GpuSignalKind): SignalId {
+  return `signal:gpu:${gpuId}:${kind}`;
+}
+
+/** Stable signal identity for a service block device's drive temperature — see {@link gpuSignalId} on why these are never parsed apart. */
+export function blockTemperatureSignalId(
+  deviceId: TopologyDeviceId,
+): SignalId {
+  return `signal:block:${deviceId}:temperature`;
+}
+
+const GPU_SIGNAL_SHAPE: Record<
+  GpuSignalKind,
+  { kind: string; unit: string; suffix: string }
+> = {
+  "temperature": {
+    kind: "temperature",
+    unit: "celsius",
+    suffix: "temperature",
+  },
+  "memory-temperature": {
+    kind: "temperature",
+    unit: "celsius",
+    suffix: "memory temperature",
+  },
+  "power": { kind: "power", unit: "watts", suffix: "power" },
+};
+
+/**
+ * Three signals per topology-enumerated GPU. Gated on GPU topology alone,
+ * never on an hwmon probe: NVIDIA GPUs expose no hwmon chip at all (their
+ * readings come from NVML/DCGM), so requiring a sensor candidate here would
+ * drop every NVIDIA GPU. A GPU whose adapters read nothing this tick
+ * resolves to `{ value: null }` in `collector/hardware-signals.ts`, the same
+ * as any other identified-but-unreadable signal.
+ */
+function gpuEntitySignals(
+  gpus: readonly GpuTopology[],
+): PhysicalSignalTopology[] {
+  return gpus.flatMap((gpu) =>
+    GPU_SIGNAL_KINDS.map((signalKind): PhysicalSignalTopology => {
+      const shape = GPU_SIGNAL_SHAPE[signalKind];
+      const prefix = gpu.chip.trim() || "GPU";
+      return {
+        signalId: gpuSignalId(gpu.gpuId, signalKind),
+        kind: shape.kind,
+        unit: shape.unit,
+        component: "gpu",
+        label: `${prefix} ${shape.suffix}`,
+      };
+    })
+  );
+}
+
+/**
+ * One drive-temperature signal per *service* block device an actual
+ * disk-temperature candidate backs — `discovery.ts` already resolves an
+ * NVMe/`drivetemp` hwmon chip down to its backing block device, which is
+ * exactly the `kernelName` block topology keys on. A service device with no
+ * probe gets no signal rather than a permanently-`null` one.
+ *
+ * The per-probe `component: "disk"` signals stay in the catalog alongside
+ * these: NVMe exposes several probes per drive and an operator may want the
+ * individual ones, while this entity-joined signal is the single
+ * whole-drive reading (`Composite` when present) that joins onto the drive.
+ * Thresholds come from the same candidate the reading will — they are here
+ * so the control plane can draw a drive's warning/critical lines, *not* so a
+ * crossing fires twice: `events/physical-health.ts` raises thermal events
+ * from the raw `component: "disk"` probe only and skips these mirrors.
+ */
+async function blockEntitySignals(
+  blockDevices: readonly BlockDeviceTopology[],
+  diskCandidates: readonly SensorCandidate[],
+  io: SensorIo,
+): Promise<PhysicalSignalTopology[]> {
+  const byKernelName = new Map<string, SensorCandidate[]>();
+  for (const candidate of diskCandidates) {
+    const bucket = byKernelName.get(candidate.chip);
+    if (bucket) bucket.push(candidate);
+    else byKernelName.set(candidate.chip, [candidate]);
+  }
+
+  const devices = blockDevices.filter((device) =>
+    device.isServiceDevice && byKernelName.has(device.kernelName)
+  );
+  return await Promise.all(devices.map(async (device) => {
+    const bucket = byKernelName.get(device.kernelName)!;
+    const representative = bucket.find((c) =>
+      c.label === NVME_COMPOSITE_LABEL
+    ) ?? bucket[0];
+    const thresholds = await readTemperatureThresholds(
+      representative.path,
+      io,
+    );
+    return {
+      signalId: blockTemperatureSignalId(device.deviceId),
+      kind: "temperature",
+      unit: "celsius",
+      component: "drive",
+      label: `${device.kernelName} temperature`,
+      ...(thresholds ? { thresholds } : {}),
+    };
+  }));
+}
 
 /** Cumulative ms a CPU package has spent thermally throttled since boot (Intel, kernel ≥5.4) — package-wide, so only `cpu0`'s copy is read (every core in a package reports the same counter; summing per-cpuN would double-count). */
 export function cpuThermalThrottlePath(sysRoot: string): string {
@@ -211,8 +369,9 @@ async function thermalThrottledSignal(
 /**
  * Enumerate the conservative physical-signal catalog: CPU package
  * temperature/power, NVMe/`drivetemp` storage temperatures, trustworthily
- * labeled board/inlet/DIMM/VRM/chipset temperatures, and (when discoverable)
- * the two synthetic CPU virtual signals.
+ * labeled board/inlet/DIMM/VRM/chipset temperatures, (when discoverable) the
+ * two synthetic CPU virtual signals, and the entity-joined GPU/service-drive
+ * signals `deps.gpus`/`deps.blockDevices` make possible.
  */
 export async function collectHardwareSignals(
   deps: HardwareSignalTopologyDeps,
@@ -235,6 +394,7 @@ export async function collectHardwareSignals(
     cpuPower,
     hottestCore,
     thermalThrottled,
+    blockEntities,
   ] = await Promise.all([
     packageCandidate
       ? toSignal(
@@ -266,6 +426,11 @@ export async function collectHardwareSignals(
     toSignals(capabilities.cpuPower, "power", "watts", "cpu", deps.io, false),
     hottestCoreSignal(coreCandidates, deps.io),
     thermalThrottledSignal(root, deps.io),
+    blockEntitySignals(
+      deps.blockDevices ?? [],
+      capabilities.diskTemperature,
+      deps.io,
+    ),
   ]);
 
   return [
@@ -275,5 +440,7 @@ export async function collectHardwareSignals(
     ...cpuPower,
     ...(hottestCore ? [hottestCore] : []),
     ...(thermalThrottled ? [thermalThrottled] : []),
+    ...blockEntities,
+    ...gpuEntitySignals(deps.gpus ?? []),
   ];
 }

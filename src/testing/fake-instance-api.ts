@@ -16,10 +16,16 @@ export type FakeInstanceApiResponder = (
 type PermanentEnrollmentKind =
   | "invalid-license"
   | "already-consumed"
+  | "tier-below-required"
+  | "tier-unassigned"
   | "invalid-signature"
   | "fingerprint-exists";
 
-type PermanentAuthKind = "license-inactive" | "key-inactive";
+type PermanentAuthKind =
+  | "license-inactive"
+  | "tier-below-required"
+  | "tier-unassigned"
+  | "key-inactive";
 
 /** Exact pairs from connect-failure.ts PERMANENT_ENROLLMENT_ERRORS. */
 const PERMANENT_ENROLLMENT: Record<
@@ -31,6 +37,11 @@ const PERMANENT_ENROLLMENT: Record<
     status: 400,
     message: "License already consumed or invalid",
   },
+  "tier-below-required": {
+    status: 400,
+    message: "License tier below required",
+  },
+  "tier-unassigned": { status: 400, message: "License tier not assigned" },
   "invalid-signature": { status: 403, message: "Invalid signature" },
   "fingerprint-exists": {
     status: 409,
@@ -44,6 +55,11 @@ const PERMANENT_AUTH: Record<
   { status: number; message: string }
 > = {
   "license-inactive": { status: 400, message: "License is inactive" },
+  "tier-below-required": {
+    status: 400,
+    message: "License tier below required",
+  },
+  "tier-unassigned": { status: 400, message: "License tier not assigned" },
   "key-inactive": { status: 400, message: "Server key is inactive" },
 };
 

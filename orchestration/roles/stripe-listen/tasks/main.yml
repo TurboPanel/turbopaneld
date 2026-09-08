@@ -1,0 +1,125 @@
+# Dev-only Stripe CLI forwarder (`stripe listen`) for local billing work.
+# Not routed through Caddy — it is an outbound client that replays sandbox
+# events at the instance's loopback listener.
+#
+# State that must survive restarts lives in one file, stripe.env:
+#   TURBOPANEL_STRIPE_SECRET_KEY            supplied by hand (test-mode only;
+#                                           never generated, never committed)
+#   TURBOPANEL_STRIPE_WEBHOOK_SIGNING_SECRET written by the wrapper on EVERY
+#                                           start from `stripe listen
+#                                           --print-secret` — the CLI's own
+#                                           forwarding secret, distinct from
+#                                           any Dashboard endpoint's, and not
+#                                           stable across CLI sessions
+# The file is created once with empty keys and never re-templated, so a
+# converge cannot clobber the key a contributor pasted in. The instance unit
+# does not load it: billing is Workers-only, a Deno instance has no billing
+# surface, and a wrangler dev instance reads .dev.vars (copy the two values
+# there by hand).
+
+- name: Assert supported CPU architecture
+  ansible.builtin.assert:
+    that:
+      - ansible_architecture in ['aarch64', 'x86_64']
+    fail_msg: >-
+      Unsupported CPU architecture '{{ ansible_architecture }}'.
+      TurboPanel supports 64-bit Linux only: aarch64 (arm64), x86_64 (amd64).
+
+- name: Resolve Stripe CLI release architecture
+  ansible.builtin.set_fact:
+    stripe_cli_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'x86_64' }}"
+
+- name: Check vendored Stripe CLI binary
+  ansible.builtin.stat:
+    path: "{{ turbopanel_vendor_dir }}/stripe-cli/{{ stripe_cli_version }}/stripe"
+  register: _stripe_cli_pinned
+
+- name: Install Stripe CLI into runtimes directory
+  when: not _stripe_cli_pinned.stat.exists
+  ansible.builtin.shell: |
+    set -euo pipefail
+    STRIPE_VER="{{ stripe_cli_version }}"
+    STRIPE_TAG="{{ stripe_cli_release_tag }}"
+    STRIPE_ARCH="{{ stripe_cli_arch }}"
+    TMP="$(mktemp -d)"
+    ASSET="stripe_${STRIPE_VER}_linux_${STRIPE_ARCH}.tar.gz"
+    curl -fsSL -o "$TMP/$ASSET" \
+      "https://github.com/stripe/stripe-cli/releases/download/${STRIPE_TAG}/${ASSET}"
+    tar -xzf "$TMP/$ASSET" -C "$TMP" stripe
+    install -d "{{ turbopanel_vendor_dir }}/stripe-cli/${STRIPE_VER}"
+    install -m 0750 "$TMP/stripe" "{{ turbopanel_vendor_dir }}/stripe-cli/${STRIPE_VER}/stripe"
+    rm -rf "$TMP"
+  args:
+    creates: "{{ turbopanel_vendor_dir }}/stripe-cli/{{ stripe_cli_version }}/stripe"
+
+- name: Harden Stripe CLI binary permissions
+  ansible.builtin.file:
+    path: "{{ turbopanel_vendor_dir }}/stripe-cli/{{ stripe_cli_version }}/stripe"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
+- name: Point Stripe CLI current symlink at pinned version
+  ansible.builtin.file:
+    src: "{{ turbopanel_vendor_dir }}/stripe-cli/{{ stripe_cli_version }}"
+    dest: "{{ turbopanel_vendor_dir }}/stripe-cli/current"
+    state: link
+    force: true
+
+- name: Ensure stripe-listen config directory exists
+  ansible.builtin.file:
+    path: "{{ stripe_listen_config_dir }}"
+    state: directory
+    owner: "{{ stripe_listen_config_owner }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
+- name: Ensure stripe-listen CLI state directory exists
+  ansible.builtin.file:
+    path: "{{ stripe_listen_state_dir }}"
+    state: directory
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
+# force: false — written once with empty keys; the key is pasted in by hand and
+# the signing secret is rewritten by the wrapper. Never re-template this file.
+- name: Seed stripe-listen env file once (never overwritten)
+  ansible.builtin.template:
+    src: stripe.env.j2
+    dest: "{{ stripe_listen_env_file }}"
+    owner: "{{ stripe_listen_config_owner }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+    force: false
+
+- name: Install stripe-listen wrapper start script
+  ansible.builtin.template:
+    src: stripe-listen-wrapper-start.sh.j2
+    dest: "{{ stripe_listen_config_dir }}/wrapper-start.sh"
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Install Stripe listen systemd unit
+  ansible.builtin.template:
+    src: turbopanel-stripe-listen.service.j2
+    dest: "/etc/systemd/system/{{ stripe_listen_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0640"
+
+# `enabled` follows the picker; `state: started` is best-effort because the
+# wrapper exits 78 (EX_CONFIG, no restart) until a key is in stripe.env — an
+# empty key must not fail the converge.
+- name: Ensure Stripe listen systemd unit desired state
+  ansible.builtin.systemd:
+    name: "{{ stripe_listen_service_name }}"
+    daemon_reload: true
+    enabled: "{{ turbopanel_optional_stripe_listen | default(false) | bool }}"
+    state: "{{ 'started' if (turbopanel_optional_stripe_listen | default(false) | bool) else 'stopped' }}"
+  register: _stripe_listen_unit
+  failed_when:
+    - _stripe_listen_unit is failed
+    - "'stripe.env' not in (_stripe_listen_unit.msg | default(''))"
+    - "'Job for' not in (_stripe_listen_unit.msg | default(''))"

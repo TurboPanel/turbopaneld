@@ -8,7 +8,7 @@
  */
 import type { EventCollector, EventDetectContext } from "./types.ts";
 import { makeEvent } from "./types.ts";
-import type { MetricEventV5 } from "../../contract-v5.ts";
+import type { MetricEvent } from "../../contract.ts";
 
 export type MdArrayState = {
   name: string;
@@ -66,9 +66,9 @@ export function parseMdstat(text: string): MdArrayState[] {
 export class MdstatEventCollector implements EventCollector {
   readonly #previous = new Map<string, MdArrayState>();
 
-  detect(ctx: EventDetectContext): MetricEventV5[] {
+  detect(ctx: EventDetectContext): MetricEvent[] {
     if (ctx.mdstatText === undefined) return [];
-    const events: MetricEventV5[] = [];
+    const events: MetricEvent[] = [];
     const seen = new Set<string>();
 
     for (const array of parseMdstat(ctx.mdstatText)) {
@@ -84,11 +84,11 @@ export class MdstatEventCollector implements EventCollector {
     return events;
   }
 
-  #transitionsFor(array: MdArrayState, nowMs: number): MetricEventV5[] {
+  #transitionsFor(array: MdArrayState, nowMs: number): MetricEvent[] {
     const prior = this.#previous.get(array.name);
     if (!prior) return [];
 
-    const events: MetricEventV5[] = [];
+    const events: MetricEvent[] = [];
     if (!prior.degraded && array.degraded) {
       events.push(
         makeEvent("raid_degraded", "critical", nowMs, {
@@ -113,7 +113,7 @@ export class MdstatEventCollector implements EventCollector {
   }
 }
 
-function rebuildEndedEvent(array: MdArrayState, nowMs: number): MetricEventV5 {
+function rebuildEndedEvent(array: MdArrayState, nowMs: number): MetricEvent {
   if (array.degraded) {
     return makeEvent("raid_rebuild_failed", "critical", nowMs, {
       entityId: array.name,

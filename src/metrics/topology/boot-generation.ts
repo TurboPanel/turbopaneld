@@ -3,7 +3,7 @@
  * (`collector/linux-collector.ts`'s `PROC_BOOT_ID`) compared against a
  * persisted `<daemonStateDir>/metrics/boot-generation.json` counter — the
  * same atomic-write discipline as `sensors/overrides.ts`'s
- * `writeHardwareProfile`. Feeds `MetricsSampleV5.metadata.bootGeneration`.
+ * `writeHardwareProfile`. Feeds `MetricsSample.metadata.bootGeneration`.
  */
 import { dirname, join } from "@std/path";
 

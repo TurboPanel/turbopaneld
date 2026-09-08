@@ -18,12 +18,16 @@ type StatusMessage = Readonly<{ status: number; message: string }>;
 const PERMANENT_ENROLLMENT_ERRORS: readonly StatusMessage[] = [
   { status: 401, message: "Invalid license" },
   { status: 400, message: "License already consumed or invalid" },
+  { status: 400, message: "License tier below required" },
+  { status: 400, message: "License tier not assigned" },
   { status: 403, message: "Invalid signature" },
   { status: 409, message: "Fingerprint already exists" },
 ];
 
 const PERMANENT_AUTH_ERRORS: readonly StatusMessage[] = [
   { status: 400, message: "License is inactive" },
+  { status: 400, message: "License tier below required" },
+  { status: 400, message: "License tier not assigned" },
   { status: 400, message: "Server key is inactive" },
 ];
 

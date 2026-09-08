@@ -12,10 +12,15 @@
  * Physical-machine gated: a VM's `hardwareSignals` topology (and therefore
  * this collector's candidate map) is always empty, so `isPhysical: false` is
  * also a cheap early-exit.
+ *
+ * Temperature thresholds are read from `ctx.snapshot.hardwareSignals`, but
+ * never from the entity-joined `component: "drive"` mirrors: those copy a
+ * probe's reading *and* its thresholds, so evaluating both would fire two
+ * events for one physical crossing. See `#detectTempThresholds`.
  */
 import type { EventCollector, EventDetectContext } from "./types.ts";
 import { makeEvent } from "./types.ts";
-import type { MetricEventV5 } from "../../contract-v5.ts";
+import type { MetricEvent } from "../../contract.ts";
 import type { SensorIo } from "../sensors/discovery.ts";
 
 const INPUT_SUFFIX = "_input";
@@ -40,9 +45,9 @@ export class PhysicalHealthEventCollector implements EventCollector {
   readonly #voltageActive = new Map<string, boolean>();
   readonly #psuActive = new Map<string, boolean>();
 
-  async detect(ctx: EventDetectContext): Promise<MetricEventV5[]> {
+  async detect(ctx: EventDetectContext): Promise<MetricEvent[]> {
     if (!ctx.isPhysical) return [];
-    const events: MetricEventV5[] = [];
+    const events: MetricEvent[] = [];
 
     await this.#detectFanFaults(ctx, events);
     this.#detectTempThresholds(ctx, events);
@@ -53,7 +58,7 @@ export class PhysicalHealthEventCollector implements EventCollector {
 
   async #detectFanFaults(
     ctx: EventDetectContext,
-    events: MetricEventV5[],
+    events: MetricEvent[],
   ): Promise<void> {
     for (const [signalId, candidate] of ctx.hardwareSignalCandidates) {
       if (!FAN_CANDIDATE_RE.test(candidate.path)) continue;
@@ -85,10 +90,21 @@ export class PhysicalHealthEventCollector implements EventCollector {
 
   #detectTempThresholds(
     ctx: EventDetectContext,
-    events: MetricEventV5[],
+    events: MetricEvent[],
   ): void {
     for (const signal of ctx.snapshot.hardwareSignals) {
       if (signal.kind !== "temperature" || !signal.thresholds) continue;
+      // A service drive is carried twice in the catalog: the raw
+      // `component: "disk"` hwmon probe and the entity-joined
+      // `component: "drive"` signal that copies that same probe's reading
+      // and thresholds (see `topology/hardware-signal-topology.ts`'s
+      // `blockEntitySignals`). One physical crossing must raise one event,
+      // so the probe is the canonical thermal-event source — it predates
+      // the entity join, so a drive's `temp_alarm`/`temp_critical`
+      // `entityId` stays the id it has always been — and the drive signal
+      // is skipped here. Its thresholds still ride the wire for the
+      // control plane's threshold lines.
+      if (signal.component === "drive") continue;
       const value = ctx.hardwareSignals.find((s) =>
         s.signalId === signal.signalId
       )?.value ?? null;
@@ -121,7 +137,7 @@ export class PhysicalHealthEventCollector implements EventCollector {
 
   async #detectVoltagePsuAlarms(
     ctx: EventDetectContext,
-    events: MetricEventV5[],
+    events: MetricEvent[],
   ): Promise<void> {
     const dirs = new Set<string>();
     for (const candidate of ctx.hardwareSignalCandidates.values()) {
@@ -157,7 +173,7 @@ export class PhysicalHealthEventCollector implements EventCollector {
 
   async #detectAlarmFile(
     ctx: EventDetectContext,
-    events: MetricEventV5[],
+    events: MetricEvent[],
     path: string,
     state: Map<string, boolean>,
     kind: "voltage_alarm" | "psu_fault",

@@ -33,17 +33,31 @@ const FAKE_CONTAINER: EnvironmentDeployContainer = {
 
 const noopEnsureDocker = () => Promise.resolve();
 
+/**
+ * Points both the state root and the *backup* root at one temp dir.
+ *
+ * v6 moved backup artifacts out from under `<stateDir>/managed/<id>/backups`
+ * to `<backupDir>/<id>` (`TURBOPANEL_BACKUP_DIR`, `/backup` by default), so
+ * overriding `TURBOPANEL_STATE_DIR` alone would leave these tests writing to
+ * the real `/backup`. The `tmp` handed to each test is the value both
+ * overrides carry, which is why a `{ backupDir: tmp }` layout stub and a
+ * `{ stateDir: tmp }` one resolve to the same tree.
+ */
 async function withTempStateDir<T>(
   fn: (tmp: string) => Promise<T>,
 ): Promise<T> {
-  const prior = Deno.env.get("TURBOPANEL_STATE_DIR");
+  const priorState = Deno.env.get("TURBOPANEL_STATE_DIR");
+  const priorBackup = Deno.env.get("TURBOPANEL_BACKUP_DIR");
   const tmp = await Deno.makeTempDir({ prefix: "tp-managed-backup-" });
   Deno.env.set("TURBOPANEL_STATE_DIR", tmp);
+  Deno.env.set("TURBOPANEL_BACKUP_DIR", tmp);
   try {
     return await fn(tmp);
   } finally {
-    if (prior === undefined) Deno.env.delete("TURBOPANEL_STATE_DIR");
-    else Deno.env.set("TURBOPANEL_STATE_DIR", prior);
+    if (priorState === undefined) Deno.env.delete("TURBOPANEL_STATE_DIR");
+    else Deno.env.set("TURBOPANEL_STATE_DIR", priorState);
+    if (priorBackup === undefined) Deno.env.delete("TURBOPANEL_BACKUP_DIR");
+    else Deno.env.set("TURBOPANEL_BACKUP_DIR", priorBackup);
     await Deno.remove(tmp, { recursive: true });
   }
 }
@@ -121,7 +135,7 @@ test("handleManagedBackup writes a 0600 artifact and checksums the written bytes
     assertEquals(result.database, "app");
 
     const expectedPath = managedBackupArtifactPath(
-      { stateDir: tmp } as Parameters<typeof managedBackupArtifactPath>[0],
+      { backupDir: tmp } as Parameters<typeof managedBackupArtifactPath>[0],
       managedId,
       backupId,
       "dump",
@@ -297,7 +311,7 @@ test("handleManagedBackup prune keeps exactly the newest retentionKeep artifacts
   await withTempStateDir(async (tmp) => {
     const managedId = `bk-${crypto.randomUUID()}`;
     const dir = managedBackupsDir(
-      { stateDir: tmp } as Parameters<typeof managedBackupsDir>[0],
+      { backupDir: tmp } as Parameters<typeof managedBackupsDir>[0],
       managedId,
     );
     await Deno.mkdir(dir, { recursive: true, mode: 0o750 });
@@ -356,7 +370,7 @@ test("handleManagedRestore rejects a checksum mismatch before touching the engin
   await withTempStateDir(async (tmp) => {
     const managedId = `bk-${crypto.randomUUID()}`;
     const backupId = "restore_me";
-    const layout = { stateDir: tmp } as Parameters<
+    const layout = { backupDir: tmp } as Parameters<
       typeof managedBackupArtifactPath
     >[0];
     const dir = managedBackupsDir(layout, managedId);
@@ -413,7 +427,7 @@ test("handleManagedRestore streams the artifact into the engine on a checksum ma
   await withTempStateDir(async (tmp) => {
     const managedId = `bk-${crypto.randomUUID()}`;
     const backupId = "restore_ok";
-    const layout = { stateDir: tmp } as Parameters<
+    const layout = { backupDir: tmp } as Parameters<
       typeof managedBackupArtifactPath
     >[0];
     const dir = managedBackupsDir(layout, managedId);
@@ -621,7 +635,7 @@ test(
     await withTempStateDir(async (tmp) => {
       const managedId = `bk-${crypto.randomUUID()}`;
       const backupId = "restore_pipe_fail";
-      const layout = { stateDir: tmp } as Parameters<
+      const layout = { backupDir: tmp } as Parameters<
         typeof managedBackupArtifactPath
       >[0];
       const dir = managedBackupsDir(layout, managedId);
@@ -692,7 +706,7 @@ test("handleManagedBackup delete removes the artifact when present", async () =>
   await withTempStateDir(async (tmp) => {
     const managedId = `bk-${crypto.randomUUID()}`;
     const backupId = "to_delete";
-    const layout = { stateDir: tmp } as Parameters<
+    const layout = { backupDir: tmp } as Parameters<
       typeof managedBackupArtifactPath
     >[0];
     const dir = managedBackupsDir(layout, managedId);
@@ -980,7 +994,7 @@ test("handleManagedBackup prune skips non-files, wrong extensions, and unsafe id
   await withTempStateDir(async (tmp) => {
     const managedId = `bk-${crypto.randomUUID()}`;
     const dir = managedBackupsDir(
-      { stateDir: tmp } as Parameters<typeof managedBackupsDir>[0],
+      { backupDir: tmp } as Parameters<typeof managedBackupsDir>[0],
       managedId,
     );
     await Deno.mkdir(dir, { recursive: true, mode: 0o750 });
@@ -1123,7 +1137,7 @@ test("handleManagedRestore rejects a size mismatch before touching the engine", 
   await withTempStateDir(async (tmp) => {
     const managedId = `bk-${crypto.randomUUID()}`;
     const backupId = "size_mismatch";
-    const layout = { stateDir: tmp } as Parameters<
+    const layout = { backupDir: tmp } as Parameters<
       typeof managedBackupArtifactPath
     >[0];
     const dir = managedBackupsDir(layout, managedId);
@@ -1170,7 +1184,7 @@ test("handleManagedRestore surfaces a generic failure when stderr is empty", asy
   await withTempStateDir(async (tmp) => {
     const managedId = `bk-${crypto.randomUUID()}`;
     const backupId = "restore_empty_stderr";
-    const layout = { stateDir: tmp } as Parameters<
+    const layout = { backupDir: tmp } as Parameters<
       typeof managedBackupArtifactPath
     >[0];
     const dir = managedBackupsDir(layout, managedId);
@@ -1215,7 +1229,7 @@ test("handleManagedRestore uses the engine default database when payload.databas
   await withTempStateDir(async (tmp) => {
     const managedId = `bk-${crypto.randomUUID()}`;
     const backupId = "restore_defdb";
-    const layout = { stateDir: tmp } as Parameters<
+    const layout = { backupDir: tmp } as Parameters<
       typeof managedBackupArtifactPath
     >[0];
     const dir = managedBackupsDir(layout, managedId);

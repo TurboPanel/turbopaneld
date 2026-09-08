@@ -256,6 +256,7 @@ test("devConvergeEnvMaterial captures dev-only extra-vars with defaults", () => 
     assertStringIncludes(material, "instance_runtime=deno");
     assertStringIncludes(material, "optional_ui=true");
     assertStringIncludes(material, "optional_dbstudio=false");
+    assertStringIncludes(material, "optional_stripe_listen=false");
   } finally {
     for (const [key, value] of previous.entries()) {
       if (value === undefined) {
@@ -436,6 +437,7 @@ test("devConvergeEnvMaterial parses optional flags and falls back on garbage", (
     "TURBOPANEL_OPTIONAL_MAILPIT",
     "TURBOPANEL_OPTIONAL_DBSTUDIO",
     "TURBOPANEL_OPTIONAL_REDIS_INSIGHT",
+    "TURBOPANEL_OPTIONAL_STRIPE_LISTEN",
   ];
   const previous = new Map<string, string | undefined>();
   for (const key of keys) {
@@ -449,6 +451,7 @@ test("devConvergeEnvMaterial parses optional flags and falls back on garbage", (
   Deno.env.set("TURBOPANEL_OPTIONAL_MAILPIT", "no");
   Deno.env.set("TURBOPANEL_OPTIONAL_DBSTUDIO", "maybe");
   Deno.env.set("TURBOPANEL_OPTIONAL_REDIS_INSIGHT", "1");
+  Deno.env.set("TURBOPANEL_OPTIONAL_STRIPE_LISTEN", "yes");
   try {
     const material = devConvergeEnvMaterial();
     assertStringIncludes(material, "dev_user=vagrant");
@@ -459,6 +462,7 @@ test("devConvergeEnvMaterial parses optional flags and falls back on garbage", (
     assertStringIncludes(material, "optional_mailpit=false");
     assertStringIncludes(material, "optional_dbstudio=false");
     assertStringIncludes(material, "optional_redis_insight=true");
+    assertStringIncludes(material, "optional_stripe_listen=true");
   } finally {
     for (const [key, value] of previous.entries()) {
       if (value === undefined) {

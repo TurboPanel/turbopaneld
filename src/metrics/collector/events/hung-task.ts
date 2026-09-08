@@ -26,7 +26,7 @@
 import { closeSync, constants, openSync, readSync } from "node:fs";
 import type { EventCollector, EventDetectContext } from "./types.ts";
 import { makeEvent } from "./types.ts";
-import type { MetricEventV5 } from "../../contract-v5.ts";
+import type { MetricEvent } from "../../contract.ts";
 
 export const DEFAULT_HUNG_TASK_INTERVAL_MS = 2 * 60_000;
 const MAX_SEEN_LINES = 500;
@@ -222,7 +222,7 @@ export class HungTaskEventCollector implements EventCollector {
     this.#intervalMs = deps?.intervalMs ?? DEFAULT_HUNG_TASK_INTERVAL_MS;
   }
 
-  async detect(ctx: EventDetectContext): Promise<MetricEventV5[]> {
+  async detect(ctx: EventDetectContext): Promise<MetricEvent[]> {
     if (
       this.#lastRunMs !== null &&
       ctx.nowMs - this.#lastRunMs < this.#intervalMs
@@ -232,7 +232,7 @@ export class HungTaskEventCollector implements EventCollector {
     this.#lastRunMs = ctx.nowMs;
 
     const lines = await this.#reader();
-    const events: MetricEventV5[] = [];
+    const events: MetricEvent[] = [];
 
     for (const line of lines) {
       if (!HUNG_TASK_RE.test(line)) continue;

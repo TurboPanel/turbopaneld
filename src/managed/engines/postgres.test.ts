@@ -854,3 +854,67 @@ test("postgres backup dump argv rejects an unsafe database identifier", () => {
     "invalid postgres identifier",
   );
 });
+
+Deno.test("readCensus: a passing pg_isready plus the census row is healthy with connections; a failing probe is down", async () => {
+  const calls: string[][] = [];
+  const answering: ManagedEngineExec = (argv, input) => {
+    calls.push([...argv]);
+    if (argv[0] === "pg_isready") {
+      return Promise.resolve({ success: true, stdout: "", stderr: "" });
+    }
+    if (argv[0] === "psql" && input?.includes("pg_stat_activity")) {
+      return Promise.resolve({ success: true, stdout: "7\t100\n", stderr: "" });
+    }
+    return Promise.resolve({
+      success: false,
+      stdout: "",
+      stderr: "unexpected",
+    });
+  };
+  const census = await postgresManagedEngineRuntime.readCensus!(
+    buildContext(answering),
+  );
+  assertEquals(census, {
+    healthy: true,
+    connectionsUsed: 7,
+    connectionsMax: 100,
+  });
+  // The probe is taken exactly once — never polled like waitReady.
+  assertEquals(calls.filter((argv) => argv[0] === "pg_isready").length, 1);
+  assertEquals(calls[0], ["pg_isready", "-U", "postgres", "-d", "postgres"]);
+
+  const down: ManagedEngineExec = (argv) => {
+    if (argv[0] === "pg_isready") {
+      return Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr: "no response",
+      });
+    }
+    throw new Error("must not query a down instance");
+  };
+  assertEquals(
+    await postgresManagedEngineRuntime.readCensus!(buildContext(down)),
+    {
+      healthy: false,
+      connectionsUsed: null,
+      connectionsMax: null,
+    },
+  );
+
+  // Up, but the census query fails: healthy with unknown connections, no throw.
+  const refusing: ManagedEngineExec = (argv) =>
+    Promise.resolve(
+      argv[0] === "pg_isready"
+        ? { success: true, stdout: "", stderr: "" }
+        : { success: false, stdout: "", stderr: "permission denied" },
+    );
+  assertEquals(
+    await postgresManagedEngineRuntime.readCensus!(buildContext(refusing)),
+    {
+      healthy: true,
+      connectionsUsed: null,
+      connectionsMax: null,
+    },
+  );
+});

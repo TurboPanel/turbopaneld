@@ -1,0 +1,40 @@
+# Dev-only Stripe CLI `listen` forwarder: sandbox webhook events → the
+# co-located instance's /webhook/stripe. Off unless the dev console enables
+# it (turbopanel_optional_stripe_listen) AND a test-mode key is in the env file.
+# Billing exists only in the Workers build: this is for a
+# `turbopanel_instance_runtime: workers` (wrangler dev) instance. A Deno
+# instance has no /webhook/stripe (self-hosted has no billing), so the
+# forwarder has nothing to deliver to there.
+# Pinned release; assets are stripe_<ver>_linux_{x86_64,arm64}.tar.gz.
+stripe_cli_version: "1.50.10"
+stripe_cli_release_tag: "v1.50.10"
+stripe_listen_service_name: turbopanel-stripe-listen
+# The instance's Caddy listener (instance-launch caddy_port); self-signed, so
+# the wrapper passes --skip-verify.
+stripe_listen_forward_port: "{{ caddy_port | default(8443) }}"
+stripe_listen_forward_url: "https://127.0.0.1:{{ stripe_listen_forward_port }}/webhook/stripe"
+# Restarted by the wrapper when the forwarding secret changes. The new secret
+# only reaches a wrangler dev instance once it has been copied into .dev.vars
+# by hand; the restart is what makes that copy take effect.
+stripe_listen_instance_service_name: turbopanel-instance
+# Runtimes always live under the FHS vendor tree (dev shares it with prod).
+turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/vendor"  # noqa: var-naming[no-role-prefix]
+# FHS config dir (dev shares it with prod).
+turbopanel_config_dir: /etc/turbopanel  # noqa: var-naming[no-role-prefix]
+turbopanel_state_dir: /var/lib/turbopanel  # noqa: var-naming[no-role-prefix]
+# The one env file: TURBOPANEL_STRIPE_SECRET_KEY (by hand) +
+# TURBOPANEL_STRIPE_WEBHOOK_SIGNING_SECRET (written by the wrapper). Read by
+# this unit's wrapper and by the billing test-clock harness. The instance unit
+# does NOT load it: a Deno instance must never see a Stripe key, and a wrangler
+# dev instance takes its secrets from .dev.vars (copied by hand).
+stripe_listen_config_dir: "{{ turbopanel_config_dir }}/stripe-listen"
+stripe_listen_env_file: "{{ stripe_listen_config_dir }}/stripe.env"
+# HOME/XDG for the CLI (it keeps a config + cache); never root's home.
+stripe_listen_state_dir: "{{ turbopanel_state_dir }}/stripe-listen"
+# Shared dev-identity contract: config dir group resolves to the dev group in dev.
+turbopanel_dev_user: ""  # noqa: var-naming[no-role-prefix]
+turbopanel_dev_uid: ""  # noqa: var-naming[no-role-prefix]
+turbopanel_dev_gid: ""  # noqa: var-naming[no-role-prefix]
+turbopanel_group: >-  # noqa: var-naming[no-role-prefix]
+  {{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}
+stripe_listen_config_owner: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'root' }}"

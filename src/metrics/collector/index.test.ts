@@ -4,7 +4,7 @@ import {
   createMetricsCollector,
   DOCKER_DATA_ROOT_RETRY_MS,
 } from "./index.ts";
-import type { CollectorDepsV5 } from "./types-v5.ts";
+import type { CollectorDeps } from "./types.ts";
 import type { TopologySnapshot } from "../topology/types.ts";
 
 /**
@@ -37,7 +37,7 @@ function emptyTopologySnapshot(): TopologySnapshot {
   };
 }
 
-function inertDeps(): Partial<CollectorDepsV5> {
+function inertDeps(): Partial<CollectorDeps> {
   return {
     readProcFile: () => undefined,
     statfs: () => null,

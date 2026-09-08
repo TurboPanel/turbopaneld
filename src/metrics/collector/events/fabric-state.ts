@@ -23,7 +23,7 @@ import type {
 } from "../../../instance/commands/contracts.ts";
 import type { EventCollector, EventDetectContext } from "./types.ts";
 import { makeEvent } from "./types.ts";
-import type { MetricEventV5 } from "../../contract-v5.ts";
+import type { MetricEvent } from "../../contract.ts";
 
 export type FabricStateReader = () => FabricReconcileObservedPeer[];
 
@@ -44,9 +44,9 @@ export class FabricStateEventCollector implements EventCollector {
     this.#reader = deps?.reader ?? getLastObservedFabricPeers;
   }
 
-  detect(ctx: EventDetectContext): MetricEventV5[] {
+  detect(ctx: EventDetectContext): MetricEvent[] {
     const peers = this.#reader();
-    const events: MetricEventV5[] = [];
+    const events: MetricEvent[] = [];
     const seen = new Set<string>();
 
     for (const peer of peers) {
@@ -70,7 +70,7 @@ export class FabricStateEventCollector implements EventCollector {
   }
 
   #pushTransitions(
-    events: MetricEventV5[],
+    events: MetricEvent[],
     peer: FabricReconcileObservedPeer,
     prior: ObservedPeerState,
     health: FabricPeerHealth,

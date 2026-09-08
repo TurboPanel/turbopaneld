@@ -20,8 +20,15 @@
  * counter key this GPU's adapters might have used is invalidated (so a
  * later readable tick re-origins instead of diffing across the gap) and an
  * all-`null` sample is still emitted for that `gpuId`.
+ *
+ * GPU temperature/memory-temperature/power are *not* `GpuSample` fields —
+ * they are physical-only readings that ride the `hardware.physical` family
+ * keyed to the owning GPU. The adapters here stay their only source, so
+ * `buildGpuSamples` merges them with the exact same per-field precedence and
+ * returns them alongside the samples (`GpuSamplesResult.thermals`) for
+ * `hardware-signals.ts` to resolve `signal:gpu:<gpuId>:<kind>` against.
  */
-import type { GpuSampleV5 } from "../../contract-v5.ts";
+import type { GpuSample } from "../../contract.ts";
 import type { GpuTopology } from "../../topology/types.ts";
 import type { CounterBaselineTracker } from "../baseline.ts";
 import type {
@@ -29,6 +36,7 @@ import type {
   GpuAdapterSet,
   GpuReadContext,
   GpuReading,
+  GpuThermalReading,
 } from "./adapter.ts";
 
 export type {
@@ -37,27 +45,50 @@ export type {
   GpuAdapterSet,
   GpuReadContext,
   GpuReading,
+  GpuThermalReading,
 } from "./adapter.ts";
 export { DCGM_EXPORTER_ADDR, DcgmGpuAdapter } from "./dcgm-adapter.ts";
 export { NvmlGpuAdapter } from "./nvml-adapter.ts";
 export { SysfsGpuAdapter } from "./sysfs-adapter.ts";
 
-const EMPTY_GPU_FIELDS: Omit<GpuSampleV5, "gpuId"> = {
+const EMPTY_GPU_FIELDS: Omit<GpuSample, "gpuId"> = {
   utilizationPercent: null,
   memoryUsedBytes: null,
   memoryActivityPercent: null,
-  temperatureCelsius: null,
-  memoryTemperatureCelsius: null,
-  powerWatts: null,
   pcieReceiveBytesPerSecond: null,
   pcieTransmitBytesPerSecond: null,
   throttlePercent: null,
 };
 
-/** Every per-GPU field name, in the order `GpuSampleV5` declares them (minus `gpuId`). */
+/** All-`null` thermals — the shape a GPU with no readable adapter contributes to `hardware.physical`. */
+export const EMPTY_GPU_THERMALS: GpuThermalReading = {
+  temperatureCelsius: null,
+  memoryTemperatureCelsius: null,
+  powerWatts: null,
+};
+
+/** Every per-GPU field name, in the order `GpuSample` declares them (minus `gpuId`). */
 const GPU_FIELD_NAMES = Object.keys(EMPTY_GPU_FIELDS) as ReadonlyArray<
   keyof typeof EMPTY_GPU_FIELDS
 >;
+
+/** Every physical-only per-GPU field name — merged the same way, emitted as `hardware.physical` signals rather than sample fields. */
+const GPU_THERMAL_FIELD_NAMES = Object.keys(
+  EMPTY_GPU_THERMALS,
+) as ReadonlyArray<keyof GpuThermalReading>;
+
+/** Per-GPU physical readings this tick, keyed by the stable `gpuId` — one entry per topology-enumerated GPU, never a partial set. */
+export type GpuThermalReadings = Map<string, GpuThermalReading>;
+
+export type GpuSamplesResult = {
+  samples: GpuSample[];
+  thermals: GpuThermalReadings;
+};
+
+/** The empty result — the shape a collector with no wired adapter set produces. */
+export function emptyGpuSamplesResult(): GpuSamplesResult {
+  return { samples: [], thermals: new Map() };
+}
 
 /**
  * Merge one or more adapter readings for the same `gpuId`, resolving each
@@ -67,8 +98,11 @@ const GPU_FIELD_NAMES = Object.keys(EMPTY_GPU_FIELDS) as ReadonlyArray<
  * `null` — never fabricated, never backfilled past the last adapter in
  * the chain.
  */
-function mergeReadings(gpuId: string, readings: GpuReading[]): GpuSampleV5 {
-  const fields: Omit<GpuSampleV5, "gpuId"> = { ...EMPTY_GPU_FIELDS };
+function mergeReadings(
+  gpuId: string,
+  readings: GpuReading[],
+): { sample: GpuSample; thermals: GpuThermalReading } {
+  const fields: Omit<GpuSample, "gpuId"> = { ...EMPTY_GPU_FIELDS };
   for (const field of GPU_FIELD_NAMES) {
     for (const reading of readings) {
       const candidate = reading[field];
@@ -78,7 +112,17 @@ function mergeReadings(gpuId: string, readings: GpuReading[]): GpuSampleV5 {
       }
     }
   }
-  return { gpuId, ...fields };
+  const thermals: GpuThermalReading = { ...EMPTY_GPU_THERMALS };
+  for (const field of GPU_THERMAL_FIELD_NAMES) {
+    for (const reading of readings) {
+      const candidate = reading[field];
+      if (candidate !== undefined && candidate !== null) {
+        thermals[field] = candidate;
+        break;
+      }
+    }
+  }
+  return { sample: { gpuId, ...fields }, thermals };
 }
 
 /** Vendor-scoped adapter precedence chain — never mixed per GPU (see module doc). */
@@ -107,8 +151,11 @@ function invalidateKnownBaselineKeys(
 }
 
 /**
- * Build one `GpuSampleV5` per topology-enumerated GPU. See the module doc
- * comment for the adapter-precedence and never-drop-the-entity contract.
+ * Build one `GpuSample` — plus one {@link GpuThermalReading} — per
+ * topology-enumerated GPU. See the module doc comment for the
+ * adapter-precedence and never-drop-the-entity contract. Both maps always
+ * cover every topology GPU, so an unreadable GPU still yields an all-`null`
+ * sample *and* all-`null` thermals rather than dropping out of either.
  */
 export async function buildGpuSamples(
   topology: readonly GpuTopology[],
@@ -118,10 +165,10 @@ export async function buildGpuSamples(
     bootGeneration: number;
     seconds: number;
   },
-): Promise<GpuSampleV5[]> {
+): Promise<GpuSamplesResult> {
   const readCtx: GpuReadContext = ctx;
 
-  return await Promise.all(topology.map(async (gpu) => {
+  const merged = await Promise.all(topology.map(async (gpu) => {
     const chain = adapterChainFor(gpu.vendor, adapters);
     const readings: GpuReading[] = [];
     for (const adapter of chain) {
@@ -135,8 +182,18 @@ export async function buildGpuSamples(
     }
     if (readings.length === 0) {
       invalidateKnownBaselineKeys(ctx.tracker, gpu.gpuId);
-      return { gpuId: gpu.gpuId, ...EMPTY_GPU_FIELDS };
+      return {
+        sample: { gpuId: gpu.gpuId, ...EMPTY_GPU_FIELDS },
+        thermals: { ...EMPTY_GPU_THERMALS },
+      };
     }
     return mergeReadings(gpu.gpuId, readings);
   }));
+
+  return {
+    samples: merged.map((entry) => entry.sample),
+    thermals: new Map(
+      merged.map((entry) => [entry.sample.gpuId, entry.thermals]),
+    ),
+  };
 }

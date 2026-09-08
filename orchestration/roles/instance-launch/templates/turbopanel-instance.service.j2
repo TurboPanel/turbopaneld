@@ -58,6 +58,10 @@ Environment=TURBOPANEL_INSTANCE_RUNTIME_DEV_VARS={{ turbopanel_instance_runtime_
 EnvironmentFile=-{{ turbopanel_instance_runtime_env }}
 {% endif %}
 EnvironmentFile=-{{ turbopanel_instance_runtime_dev_vars }}
+{# No Stripe env here on purpose. Billing exists only in the Workers build;
+   self-hosted Deno is free software with no billing surface, so it must never
+   be handed a Stripe key. The dev-only stripe-listen role keeps its own
+   stripe.env for the CLI and the test-clock harness. #}
 # turbopanel_instance_run_mode: "source" (deno run) | "compiled" (single binary)
 StandardOutput=append:{{ instance_log_dir }}/instance.log
 StandardError=append:{{ instance_log_dir }}/instance.err.log

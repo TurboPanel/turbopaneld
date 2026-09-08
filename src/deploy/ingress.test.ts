@@ -175,9 +175,12 @@ test("traefikCompose publishes a loopback-only Prometheus metrics entrypoint", (
   assertStringIncludes(compose, "--entrypoints.metrics.address=:7081");
   assertStringIncludes(compose, "--metrics.prometheus=true");
   assertStringIncludes(compose, "--metrics.prometheus.entryPoint=metrics");
+  // Required for `traefik_router_*` to exist at all — Traefik defaults it off.
+  assertStringIncludes(compose, "--metrics.prometheus.addRoutersLabels=true");
+  // Six bounds: 10ms/50ms are what make the read-time p50 meaningful.
   assertStringIncludes(
     compose,
-    "--metrics.prometheus.buckets=0.1,0.5,1.0,5.0",
+    "--metrics.prometheus.buckets=0.01,0.05,0.1,0.5,1.0,5.0",
   );
 });
 

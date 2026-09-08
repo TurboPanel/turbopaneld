@@ -50,6 +50,7 @@
     - /etc/turbopanel
     - /var/lib/turbopanel
     - /var/log/turbopanel
+    - "{{ turbopanel_backup_dir }}"
 
 # The pre-playbook `turbopaneld bootstrap-orchestration` (invoked by run.sh as
 # root on first binary install) may have populated uv/python/ansible state dirs

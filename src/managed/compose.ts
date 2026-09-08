@@ -369,18 +369,22 @@ export function unnestPostgresConfigTlsMounts(
   return rewritten;
 }
 
+/**
+ * Container label carrying the managed engine code (`postgres` / `mysql` /
+ * …). The metrics census (`../metrics/collector/managed-engines.ts`) finds
+ * managed engine containers by this label alone — never by image name, which
+ * a registry mirror or a pinned digest can make unrecognisable.
+ */
+export const MANAGED_ENGINE_LABEL = "tp.managed.engine";
+
 export type NormalizedManagedCompose = {
   composeYaml: string;
   composeServiceName: string;
 };
 
-/**
- * Produce the authoritative runtime compose document for a managed apply.
- */
-export function normalizeManagedCompose(
-  payload: ManagedApplyPayload,
-): NormalizedManagedCompose {
-  const document = parseCompose(payload.composeYaml);
+function resolveSoleManagedService(
+  document: ComposeDocument,
+): { composeServiceName: string; service: ComposeService } {
   const serviceNames = Object.keys(document.services ?? {});
   if (serviceNames.length !== 1) {
     throw new Error("managed compose must define exactly one service");
@@ -390,12 +394,17 @@ export function normalizeManagedCompose(
   if (!isRecord(service)) {
     throw new Error("managed compose service must be an object");
   }
-
   if (service.build !== undefined) {
     throw new Error("managed compose must not declare build");
   }
-  delete service.ports;
+  return { composeServiceName, service };
+}
 
+function applyManagedPublish(
+  service: ComposeService,
+  payload: ManagedApplyPayload,
+): void {
+  delete service.ports;
   if (payload.privateListener) {
     const { address, port } = payload.privateListener;
     assertPublicPrivateListenerTls(payload);
@@ -403,17 +412,68 @@ export function normalizeManagedCompose(
     assertPrivateListener(address, port);
     service.ports = [`${address}:${port}:${payload.containerPort}`];
   }
+}
 
+function assertManagedServicePolicy(
+  service: ComposeService,
+  payload: ManagedApplyPayload,
+): void {
   for (const key of Object.keys(service)) {
     if (MANAGED_SERVICE_DENYLIST.has(key)) {
       throw new Error(`managed compose rejects service key: ${key}`);
     }
   }
-
   // After denylist: if ports remain and are not exactly our privateListener, reject.
   if (service.ports !== undefined && !payload.privateListener) {
     throw new Error("managed compose must not declare ports");
   }
+}
+
+function cloneServiceLabels(service: ComposeService): Record<string, unknown> {
+  return isRecord(service.labels) ? { ...service.labels } : {};
+}
+
+function stampManagedEngineLabels(
+  service: ComposeService,
+  payload: ManagedApplyPayload,
+): void {
+  const labels = cloneServiceLabels(service);
+  labels[MANAGED_ENGINE_LABEL] = payload.engine;
+  if (payload.engine === "mysql" || payload.engine === "mariadb") {
+    // `my.cnf` is not live-reloadable and `compose up -d` never recreates a
+    // container when only bind-mounted file contents change — stamp a config
+    // digest label so config edits change the compose text and force a
+    // recreate. Postgres is exempt: it reloads live (`reloadConfig`) and a
+    // digest label would restart it on every pg_hba change.
+    labels["tp.managed.config-digest"] = fnv1aHex(
+      payload.configFiles
+        .map((file) => `${file.path}\n${file.contents}`)
+        .join("\u0000"),
+    );
+  }
+  service.labels = labels;
+}
+
+function ensureDocumentManagedNetwork(
+  document: ComposeDocument,
+  networkName: string,
+): void {
+  const networks = isRecord(document.networks) ? { ...document.networks } : {};
+  networks[networkName] = { external: true };
+  document.networks = networks;
+}
+
+/**
+ * Produce the authoritative runtime compose document for a managed apply.
+ */
+export function normalizeManagedCompose(
+  payload: ManagedApplyPayload,
+): NormalizedManagedCompose {
+  const document = parseCompose(payload.composeYaml);
+  const { composeServiceName, service } = resolveSoleManagedService(document);
+
+  applyManagedPublish(service, payload);
+  assertManagedServicePolicy(service, payload);
 
   service.image = payload.image;
   service.container_name = payload.containerName;
@@ -427,27 +487,9 @@ export function normalizeManagedCompose(
     applyDockerOptions(service, payload.dockerOptions, payload.engine);
   }
 
-  if (payload.engine === "mysql" || payload.engine === "mariadb") {
-    // `my.cnf` is not live-reloadable and `compose up -d` never recreates a
-    // container when only bind-mounted file contents change — stamp a config
-    // digest label so config edits change the compose text and force a
-    // recreate. Postgres is exempt: it reloads live (`reloadConfig`) and a
-    // digest label would restart it on every pg_hba change.
-    const digest = fnv1aHex(
-      payload.configFiles
-        .map((file) => `${file.path}\n${file.contents}`)
-        .join("\u0000"),
-    );
-    const labels = isRecord(service.labels) ? { ...service.labels } : {};
-    labels["tp.managed.config-digest"] = digest;
-    service.labels = labels;
-  }
-
+  stampManagedEngineLabels(service, payload);
   attachManagedIngressNetwork(service, payload.managedNetwork);
-  const networks = isRecord(document.networks) ? { ...document.networks } : {};
-  networks[payload.managedNetwork] = { external: true };
-  document.networks = networks;
-
+  ensureDocumentManagedNetwork(document, payload.managedNetwork);
   assertNoForbiddenInterpolation(document);
 
   return {

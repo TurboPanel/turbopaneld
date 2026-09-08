@@ -21,3 +21,30 @@ proxysql_connpool_conns_total{endpoint="10.0.0.6:5432",hostgroup="1",status="err
 proxysql_connpool_conns_status{endpoint="10.0.0.5:5432",hostgroup="0"} 1
 proxysql_connpool_conns_status{endpoint="10.0.0.6:5432",hostgroup="1"} 1
 proxysql_connpool_conns_status{endpoint="10.0.0.7:5432",hostgroup="1"} 3
+# HELP proxysql_active_transactions Provides a count of how many client connection are currently processing a transaction.
+# TYPE proxysql_active_transactions gauge
+proxysql_active_transactions{protocol="mysql"} 3
+# HELP proxysql_client_connections_total Total number of client connections created.
+# TYPE proxysql_client_connections_total counter
+proxysql_client_connections_total{protocol="mysql",status="created"} 1200
+proxysql_client_connections_total{protocol="mysql",status="aborted"} 17
+# HELP proxysql_server_connections_total Total number of server connections (created|delayed|aborted).
+# TYPE proxysql_server_connections_total counter
+proxysql_server_connections_total{protocol="mysql",status="created"} 640
+proxysql_server_connections_total{protocol="mysql",status="delayed"} 9
+proxysql_server_connections_total{protocol="mysql",status="aborted"} 6
+# HELP proxysql_access_denied_max_connections_total Total access denied 'max connections'.
+# TYPE proxysql_access_denied_max_connections_total counter
+proxysql_access_denied_max_connections_total{protocol="mysql"} 4
+# HELP proxysql_connpool_data_bytes_total Amount of data (sent|recv) from the backend, excluding metadata.
+# TYPE proxysql_connpool_data_bytes_total counter
+proxysql_connpool_data_bytes_total{endpoint="10.0.0.5:5432",hostgroup="0",protocol="mysql",traffic_flow="recv"} 8000000
+proxysql_connpool_data_bytes_total{endpoint="10.0.0.6:5432",hostgroup="1",protocol="mysql",traffic_flow="recv"} 2000000
+proxysql_connpool_data_bytes_total{endpoint="10.0.0.5:5432",hostgroup="0",protocol="mysql",traffic_flow="sent"} 300000
+proxysql_connpool_data_bytes_total{endpoint="10.0.0.6:5432",hostgroup="1",protocol="mysql",traffic_flow="sent"} 100000
+# HELP proxysql_backend_query_time_seconds_total Time spent making network calls to communicate with the backends.
+# TYPE proxysql_backend_query_time_seconds_total counter
+proxysql_backend_query_time_seconds_total{protocol="mysql"} 96.426
+# HELP proxysql_query_processor_time_seconds_total The time spent inside the 'Query Processor' to determine what action needs to be taken.
+# TYPE proxysql_query_processor_time_seconds_total counter
+proxysql_query_processor_time_seconds_total{protocol="mysql"} 48.213

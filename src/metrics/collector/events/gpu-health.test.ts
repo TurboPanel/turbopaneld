@@ -4,7 +4,8 @@ import { GpuHealthEventCollector } from "./gpu-health.ts";
 import type { GpuHealthSignals } from "./gpu-health.ts";
 import type { EventDetectContext } from "./types.ts";
 import type { GpuTopology, TopologySnapshot } from "../../topology/types.ts";
-import type { GpuSampleV5 } from "../../contract-v5.ts";
+import type { GpuSample } from "../../contract.ts";
+import type { GpuThermalReadings } from "../gpu/index.ts";
 
 const test = Deno.test.bind(Deno);
 
@@ -23,19 +24,30 @@ const EMPTY_HEALTH: GpuHealthSignals = {
   retiredPagesPending: null,
 };
 
-function gpuSample(temperatureCelsius: number | null): GpuSampleV5 {
-  return {
-    gpuId: GPU.gpuId,
-    utilizationPercent: null,
-    memoryUsedBytes: null,
-    memoryActivityPercent: null,
+const GPU_SAMPLE: GpuSample = {
+  gpuId: GPU.gpuId,
+  utilizationPercent: null,
+  memoryUsedBytes: null,
+  memoryActivityPercent: null,
+  pcieReceiveBytesPerSecond: null,
+  pcieTransmitBytesPerSecond: null,
+  throttlePercent: null,
+};
+
+/**
+ * GPU temperature is a `hardware.physical` reading now, not a `GpuSample`
+ * field, so the thermal cross-check reads `ctx.gpuThermals` — the adapter
+ * merge itself, which still exists on a GPU-passthrough VM where the whole
+ * `hardware.physical` family does not.
+ */
+function gpuThermals(
+  temperatureCelsius: number | null,
+): GpuThermalReadings {
+  return new Map([[GPU.gpuId, {
     temperatureCelsius,
     memoryTemperatureCelsius: null,
     powerWatts: null,
-    pcieReceiveBytesPerSecond: null,
-    pcieTransmitBytesPerSecond: null,
-    throttlePercent: null,
-  };
+  }]]);
 }
 
 function snapshot(gpus: GpuTopology[]): TopologySnapshot {
@@ -67,7 +79,8 @@ function ctx(overrides: Partial<EventDetectContext> = {}): EventDetectContext {
     tracker: new CounterBaselineTracker(),
     bootGeneration: 1,
     seconds: 60,
-    gpus: [gpuSample(60)],
+    gpus: [GPU_SAMPLE],
+    gpuThermals: gpuThermals(60),
     hardwareSignals: [],
     hardwareSignalCandidates: new Map(),
     oomKillTotal: null,
@@ -205,14 +218,14 @@ test("GpuHealthEventCollector: GPU thermal at/above the critical threshold fires
   const collector = new GpuHealthEventCollector({
     reader: () => Promise.resolve(EMPTY_HEALTH),
   });
-  await collector.detect(ctx({ gpus: [gpuSample(60)], nowMs: 0 }));
+  await collector.detect(ctx({ gpuThermals: gpuThermals(60), nowMs: 0 }));
   const events = await collector.detect(
-    ctx({ gpus: [gpuSample(110)], nowMs: 1_000 }),
+    ctx({ gpuThermals: gpuThermals(110), nowMs: 1_000 }),
   );
   assertEquals(events.length, 1);
   assertEquals(events[0].kind, "gpu_thermal_critical");
   const again = await collector.detect(
-    ctx({ gpus: [gpuSample(111)], nowMs: 2_000 }),
+    ctx({ gpuThermals: gpuThermals(111), nowMs: 2_000 }),
   );
   assertEquals(again, []);
 });

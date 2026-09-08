@@ -973,3 +973,79 @@ test("mysql configureStandby dials the DNS SAN when hostaddr is omitted", async 
   assertEquals(disableIdx >= 0, true);
   assertEquals(enforceIdx > disableIdx, true);
 });
+
+Deno.test("readCensus: a passing mysqladmin ping plus the census rows is healthy with connections; a failing ping is down; a refused query is healthy-unknown", async () => {
+  const calls: string[][] = [];
+  const answering: ManagedEngineExec = (argv) => {
+    calls.push([...argv]);
+    if (argv[0] === "mysqladmin" && argv[1] === "ping") {
+      return Promise.resolve({
+        success: true,
+        stdout: "mysqld is alive",
+        stderr: "",
+      });
+    }
+    if (argv.includes("-e") && argv.at(-1)?.includes("Threads_connected")) {
+      return Promise.resolve({
+        success: true,
+        stdout: "Threads_connected\t12\n151\n",
+        stderr: "",
+      });
+    }
+    return Promise.resolve({
+      success: false,
+      stdout: "",
+      stderr: "unexpected",
+    });
+  };
+  assertEquals(
+    await mysqlManagedEngineRuntime.readCensus!(buildContext(answering)),
+    {
+      healthy: true,
+      connectionsUsed: 12,
+      connectionsMax: 151,
+    },
+  );
+  // Probed once, never polled like waitReady.
+  assertEquals(calls.filter((argv) => argv[1] === "ping").length, 1);
+
+  const down: ManagedEngineExec = (argv) => {
+    if (argv[1] === "ping") {
+      return Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr: "connect failed",
+      });
+    }
+    throw new Error("must not query a down instance");
+  };
+  assertEquals(
+    await mysqlManagedEngineRuntime.readCensus!(buildContext(down)),
+    {
+      healthy: false,
+      connectionsUsed: null,
+      connectionsMax: null,
+    },
+  );
+
+  // Alive, but the census query is refused (no socket auth, no password here).
+  const refusing: ManagedEngineExec = (argv) =>
+    Promise.resolve(
+      argv[1] === "ping"
+        ? { success: true, stdout: "mysqld is alive", stderr: "" }
+        : {
+          success: false,
+          stdout: "",
+          stderr:
+            "ERROR 1045 (28000): Access denied for user 'root'@'localhost' (using password: NO)",
+        },
+    );
+  assertEquals(
+    await mysqlManagedEngineRuntime.readCensus!(buildContext(refusing)),
+    {
+      healthy: true,
+      connectionsUsed: null,
+      connectionsMax: null,
+    },
+  );
+});

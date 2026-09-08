@@ -23,7 +23,15 @@ it("classifies permanent enrollment and auth errors", async () => {
     await toDaemonApiError(
       permanentEnrollmentErrorResponse("already-consumed"),
     ),
+    await toDaemonApiError(
+      permanentEnrollmentErrorResponse("tier-below-required"),
+    ),
+    await toDaemonApiError(
+      permanentEnrollmentErrorResponse("tier-unassigned"),
+    ),
     await toDaemonApiError(permanentAuthErrorResponse("license-inactive")),
+    await toDaemonApiError(permanentAuthErrorResponse("tier-below-required")),
+    await toDaemonApiError(permanentAuthErrorResponse("tier-unassigned")),
     await toDaemonApiError(permanentAuthErrorResponse("key-inactive")),
     await toDaemonApiError(
       permanentEnrollmentErrorResponse("invalid-signature"),

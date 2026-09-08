@@ -8,12 +8,11 @@
  * ${label}` id `hardware-signal-topology.ts` derives.
  *
  * The live candidate map built here stays deliberately BROADER than the
- * topology catalog it's joined against (fan/GPU/ambient candidates
- * included, even though none of those are projected into
- * `hardwareSignals` telemetry any more) — `events/physical-health.ts` reads
- * this same map directly for fan fault/alarm and voltage/PSU-alarm
- * detection, independent of which signals actually made it into the
- * topology catalog.
+ * topology catalog it's joined against (fan candidates included, even
+ * though fan RPM is never projected into `hardwareSignals` telemetry) —
+ * `events/physical-health.ts` reads this same map directly for fan
+ * fault/alarm and voltage/PSU-alarm detection, independent of which signals
+ * actually made it into the topology catalog.
  *
  * No physical-machine check is needed here: `topologySignals` is already
  * `[]` on every VM (`physical-classifier.ts` gates topology discovery
@@ -21,15 +20,37 @@
  *
  * A signal topology already identified but unreadable this tick (candidate
  * vanished, sysfs read failed) resolves to `{ value: null }` — it is never
- * dropped, since topology said it exists. The two synthetic CPU virtual
- * signals (hottest-core, thermal-throttled) have no candidate-map entry at
- * all — they're computed directly, branched on by signal id before the
- * candidate lookup.
+ * dropped, since topology said it exists.
+ *
+ * Three groups of signals have no hwmon candidate of their own and are
+ * resolved by exact signal id *before* the candidate lookup (a candidate miss
+ * invalidates a RAPL baseline key and returns `null`, which would be wrong
+ * for all of them):
+ *
+ *  - The two synthetic CPU virtual signals (hottest-core, thermal-throttled),
+ *    computed directly here.
+ *  - The per-GPU temperature/memory-temperature/power signals, whose only
+ *    source is this tick's already-merged `GpuThermalReadings` from
+ *    `gpu/index.ts` — NVIDIA GPUs expose no hwmon chip at all, so there is
+ *    nothing to walk sysfs for. Threading the merge in also means no second
+ *    read of the same device per tick.
+ *  - The per-service-drive temperature signals, resolved by joining this
+ *    tick's own per-probe `component: "disk"` results back onto block
+ *    topology by kernel name via `block-devices.ts`'s
+ *    `buildBlockDeviceTemperatures` — the same authoritative-`Composite`
+ *    discipline that used to fill `BlockDeviceSample.temperatureCelsius`.
+ *
+ * Because the drive signals are derived from other signals' values, this
+ * builder runs in two phases: resolve everything candidate-backed and
+ * synthetic first, then fill the drive entities from those results.
  */
 import {
+  blockTemperatureSignalId,
   CPU_HOTTEST_CORE_SIGNAL_ID,
   CPU_THERMAL_THROTTLED_SIGNAL_ID,
   cpuThermalThrottlePath,
+  GPU_SIGNAL_KINDS,
+  gpuSignalId,
   selectCpuCoreTemperatures,
 } from "../topology/hardware-signal-topology.ts";
 import {
@@ -38,10 +59,15 @@ import {
   type SensorIo,
 } from "./sensors/discovery.ts";
 import { readTemperatureValue } from "./sensors/temperature.ts";
+import { buildBlockDeviceTemperatures } from "./block-devices.ts";
 import type { CounterBaselineTracker } from "./baseline.ts";
 import type { HardwareSignalCandidateMap } from "./events/types.ts";
-import type { HardwareSignalSampleV5 } from "../contract-v5.ts";
-import type { PhysicalSignalTopology } from "../topology/types.ts";
+import type { GpuThermalReading, GpuThermalReadings } from "./gpu/index.ts";
+import type { HardwareSignalSample } from "../contract.ts";
+import type {
+  BlockDeviceTopology,
+  PhysicalSignalTopology,
+} from "../topology/types.ts";
 import type { SensorCandidate } from "./types.ts";
 
 /** Same stable identity discipline as `hardware-signal-topology.ts`'s private `toSignalId`. */
@@ -50,7 +76,7 @@ function toSignalId(candidate: SensorCandidate): string {
 }
 
 export type HardwareSignalSamplesResult = {
-  samples: HardwareSignalSampleV5[];
+  samples: HardwareSignalSample[];
   /** Live candidate map (`signalId → SensorCandidate`) — reused by `events/physical-health.ts` to derive sibling alarm/fault sysfs paths without a third `discoverSensors` walk. */
   candidates: HardwareSignalCandidateMap;
 };
@@ -159,15 +185,84 @@ async function readThermalThrottledPercent(
   return Math.min(100, Math.max(0, (rate / 1000) * 100));
 }
 
+/** Which {@link GpuThermalReading} field each GPU signal kind reads — the one place the two vocabularies are tied together. */
+const GPU_SIGNAL_FIELD: Record<
+  (typeof GPU_SIGNAL_KINDS)[number],
+  keyof GpuThermalReading
+> = {
+  "temperature": "temperatureCelsius",
+  "memory-temperature": "memoryTemperatureCelsius",
+  "power": "powerWatts",
+};
+
+/**
+ * This tick's per-GPU signal values, keyed by the exact `signalId`
+ * `hardware-signal-topology.ts` derives — built up front so the resolve loop
+ * is an id lookup, never a parse of the opaque `gpuId` back out of the id.
+ * Empty when no adapter set is wired, which resolves every GPU signal to
+ * `null` rather than falling through to the hwmon candidate lookup.
+ */
+function buildGpuSignalValues(
+  thermals: GpuThermalReadings | undefined,
+): Map<string, number | null> {
+  const out = new Map<string, number | null>();
+  if (!thermals) return out;
+  for (const [gpuId, reading] of thermals) {
+    for (const kind of GPU_SIGNAL_KINDS) {
+      out.set(gpuSignalId(gpuId, kind), reading[GPU_SIGNAL_FIELD[kind]]);
+    }
+  }
+  return out;
+}
+
+/** `signalId → kernelName` for the entity-joined drive signals — same up-front-map discipline as {@link buildGpuSignalValues}. */
+function buildBlockSignalKernelNames(
+  blockDevices: readonly BlockDeviceTopology[] | undefined,
+): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const device of blockDevices ?? []) {
+    out.set(blockTemperatureSignalId(device.deviceId), device.kernelName);
+  }
+  return out;
+}
+
+/**
+ * Phase 2: fill the entity-joined drive signals from the per-probe
+ * `component: "disk"` readings this tick already produced. Only those are
+ * passed to the join — every other component's id parses into a
+ * meaningless kernel name that could shadow a real drive.
+ */
+function resolveDriveTemperatures(
+  topologySignals: readonly PhysicalSignalTopology[],
+  samples: HardwareSignalSample[],
+  kernelNames: Map<string, string>,
+): void {
+  if (kernelNames.size === 0) return;
+  const temperatures = buildBlockDeviceTemperatures(
+    samples.filter((_, index) => topologySignals[index].component === "disk"),
+  );
+  samples.forEach((sample, index) => {
+    const kernelName = kernelNames.get(sample.signalId);
+    if (kernelName === undefined) return;
+    samples[index] = { ...sample, value: temperatures[kernelName] ?? null };
+  });
+}
+
+export type HardwareSignalDeps = {
+  io: SensorIo;
+  sysRoot?: string;
+  tracker: CounterBaselineTracker;
+  bootGeneration: number;
+  seconds: number;
+  /** This tick's merged per-GPU physical readings (`gpu/index.ts`'s `buildGpuSamples`) — the only source for the `component: "gpu"` signals. */
+  gpuThermals?: GpuThermalReadings;
+  /** This tick's block topology — resolves each `component: "drive"` signal back to the kernel name its temperature is keyed by. */
+  blockDevices?: readonly BlockDeviceTopology[];
+};
+
 export async function buildHardwareSignalSamples(
   topologySignals: readonly PhysicalSignalTopology[],
-  deps: {
-    io: SensorIo;
-    sysRoot?: string;
-    tracker: CounterBaselineTracker;
-    bootGeneration: number;
-    seconds: number;
-  },
+  deps: HardwareSignalDeps,
 ): Promise<HardwareSignalSamplesResult> {
   if (topologySignals.length === 0) {
     return { samples: [], candidates: new Map() };
@@ -178,9 +273,22 @@ export async function buildHardwareSignalSamples(
     deps.io,
     root,
   );
+  const gpuValues = buildGpuSignalValues(deps.gpuThermals);
+  const blockKernelNames = buildBlockSignalKernelNames(deps.blockDevices);
 
   const samples = await Promise.all(
-    topologySignals.map(async (signal): Promise<HardwareSignalSampleV5> => {
+    topologySignals.map(async (signal): Promise<HardwareSignalSample> => {
+      if (signal.component === "gpu") {
+        return {
+          signalId: signal.signalId,
+          kind: signal.kind,
+          value: gpuValues.get(signal.signalId) ?? null,
+        };
+      }
+      if (signal.component === "drive") {
+        // Filled in phase 2 — it reads the disk results this pass produces.
+        return { signalId: signal.signalId, kind: signal.kind, value: null };
+      }
       if (signal.signalId === CPU_HOTTEST_CORE_SIGNAL_ID) {
         const value = await readHottestCoreValue(coreCandidates, deps.io);
         return { signalId: signal.signalId, kind: signal.kind, value };
@@ -222,5 +330,6 @@ export async function buildHardwareSignalSamples(
     }),
   );
 
+  resolveDriveTemperatures(topologySignals, samples, blockKernelNames);
   return { samples, candidates };
 }

@@ -15,6 +15,8 @@ caddy_http_requests_total{handler="subroute",server="srv0"} 100
 caddy_http_requests_total{handler="reverse_proxy",server="srv0"} 100
 # HELP caddy_http_request_duration_seconds Histogram of round-trip request durations.
 # TYPE caddy_http_request_duration_seconds histogram
+caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="0.01"} 25
+caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="0.05"} 60
 caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="0.1"} 100
 caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="0.5"} 100
 caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="1"} 100
@@ -22,6 +24,8 @@ caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method=
 caddy_http_request_duration_seconds_bucket{code="200",handler="subroute",method="GET",server="srv0",le="+Inf"} 100
 caddy_http_request_duration_seconds_sum{code="200",handler="subroute",method="GET",server="srv0"} 10.0
 caddy_http_request_duration_seconds_count{code="200",handler="subroute",method="GET",server="srv0"} 100
+caddy_http_request_duration_seconds_bucket{code="200",handler="reverse_proxy",method="GET",server="srv0",le="0.01"} 25
+caddy_http_request_duration_seconds_bucket{code="200",handler="reverse_proxy",method="GET",server="srv0",le="0.05"} 60
 caddy_http_request_duration_seconds_bucket{code="200",handler="reverse_proxy",method="GET",server="srv0",le="0.1"} 100
 caddy_http_request_duration_seconds_bucket{code="200",handler="reverse_proxy",method="GET",server="srv0",le="0.5"} 100
 caddy_http_request_duration_seconds_bucket{code="200",handler="reverse_proxy",method="GET",server="srv0",le="1"} 100

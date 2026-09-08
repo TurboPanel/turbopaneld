@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import { parseMeminfo, parseMeminfoDetail } from "./parse-meminfo.ts";
+import { parseMeminfo, parseMeminfoDiagnostics } from "./parse-meminfo.ts";
 import { it } from "@std/testing/bdd";
 
 function fixture(name: string): string {
@@ -43,9 +43,9 @@ it("parseMeminfo returns null when MemTotal or MemAvailable is missing", () => {
   assertEquals(parseMeminfo("MemTotal: 1000 kB\n"), null);
 });
 
-it("parseMeminfoDetail reads all 16 §40 gauge fields, including parenthesized Active/Inactive keys", () => {
-  const detail = parseMeminfoDetail(fixture("proc-meminfo-detail.txt"));
-  assertEquals(detail, {
+it("parseMeminfoDiagnostics reads all 9 retained gauge fields", () => {
+  const gauges = parseMeminfoDiagnostics(fixture("proc-meminfo-detail.txt"));
+  assertEquals(gauges, {
     memoryFreeBytes: 2000000 * 1024,
     cachedBytes: 1500000 * 1024,
     anonPagesBytes: 900000 * 1024,
@@ -54,20 +54,35 @@ it("parseMeminfoDetail reads all 16 §40 gauge fields, including parenthesized A
     dirtyBytes: 4000 * 1024,
     writebackBytes: 1000 * 1024,
     shmemBytes: 50000 * 1024,
-    pageTablesBytes: 30000 * 1024,
-    kernelStackBytes: 20000 * 1024,
     committedAsBytes: 6000000 * 1024,
-    commitLimitBytes: 10000000 * 1024,
-    activeAnonBytes: 700000 * 1024,
-    inactiveAnonBytes: 200000 * 1024,
-    activeFileBytes: 900000 * 1024,
-    inactiveFileBytes: 600000 * 1024,
   });
 });
 
-it("parseMeminfoDetail nulls every field (never 0) when its line is absent", () => {
-  const detail = parseMeminfoDetail("MemTotal: 1000 kB\n");
-  assertEquals(detail.memoryFreeBytes, null);
-  assertEquals(detail.activeAnonBytes, null);
-  assertEquals(detail.committedAsBytes, null);
+it("parseMeminfoDiagnostics ignores the seven gauges v6 dropped, even when present", () => {
+  const gauges = parseMeminfoDiagnostics(
+    fixture("proc-meminfo-detail.txt"),
+  ) as Record<
+    string,
+    number | null
+  >;
+  for (
+    const dropped of [
+      "pageTablesBytes",
+      "kernelStackBytes",
+      "commitLimitBytes",
+      "activeAnonBytes",
+      "inactiveAnonBytes",
+      "activeFileBytes",
+      "inactiveFileBytes",
+    ]
+  ) {
+    assertEquals(dropped in gauges, false);
+  }
+});
+
+it("parseMeminfoDiagnostics nulls every field (never 0) when its line is absent", () => {
+  const gauges = parseMeminfoDiagnostics("MemTotal: 1000 kB\n");
+  assertEquals(gauges.memoryFreeBytes, null);
+  assertEquals(gauges.cachedBytes, null);
+  assertEquals(gauges.committedAsBytes, null);
 });

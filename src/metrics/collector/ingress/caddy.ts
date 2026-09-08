@@ -60,10 +60,10 @@ import type {
 export const SITE_CADDY_ADMIN_ADDR = "127.0.0.1:2039";
 
 /**
- * Every metric name `parseCaddyExpositionV5` requires at least one of to
+ * Every metric name `parseCaddyExposition` requires at least one of to
  * treat a scrape as a genuine Caddy `/metrics` response.
  */
-const CADDY_V5_EXPECTED_METRIC_NAMES = [
+const CADDY_EXPECTED_METRIC_NAMES = [
   "caddy_http_requests_total",
   "caddy_http_request_duration_seconds_count",
   "caddy_http_request_duration_seconds_sum",
@@ -158,9 +158,9 @@ function bucketSum(
 
 /**
  * Pure parser — exported for fixture tests. `samples` must already be a
- * gated Caddy `/metrics` scrape (see {@link CADDY_V5_EXPECTED_METRIC_NAMES}).
+ * gated Caddy `/metrics` scrape (see {@link CADDY_EXPECTED_METRIC_NAMES}).
  */
-export function parseCaddyExpositionV5(
+export function parseCaddyExposition(
   samples: readonly PromSample[],
   ctx: IngressReadContext,
 ): IngressReading {
@@ -230,6 +230,12 @@ export function parseCaddyExpositionV5(
     "caddy_http_request_duration_seconds_count",
     (labels) => isValidGroupSample(labels, validGroups),
   );
+  // The raw per-interval duration *sum*, shipped undivided. v5 divided it by
+  // the count here and shipped a pre-computed average; that average could not
+  // be re-aggregated (an average of per-interval averages is not the window
+  // average), so the instance repo now derives the mean at read time from this
+  // sum and `requests` — see `query/derived-metrics.ts`. The count delta is
+  // still read, but only to detect the counter reset that must null the sum.
   const durationSumDelta = ctx.tracker.delta(
     "ingress:caddy:durationSum",
     durationSumTotal,
@@ -240,29 +246,43 @@ export function parseCaddyExpositionV5(
     durationCountTotal,
     ctx.bootGeneration,
   );
-  const requestDurationSecondsAvg =
-    durationSumDelta === null || durationCountDelta === null ||
-      durationCountDelta === 0
+  const requestDurationSecondsSum =
+    durationSumDelta === null || durationCountDelta === null
       ? null
-      : durationSumDelta / durationCountDelta;
+      : durationSumDelta;
 
-  const requestsUnder100ms = ctx.tracker.delta(
-    "ingress:caddy:under100ms",
+  // Cumulative-`le` buckets straight off Caddy's default histogram bounds —
+  // each counts every request at or under its bound, and the six together are
+  // what the read path derives p50/p90/p99 from. 0.01/0.05 are new in v6: the
+  // old four-bucket set bottomed out at 100ms, which put every request on a
+  // healthy site in the first bucket and made p50 meaningless.
+  const bucket10ms = ctx.tracker.delta(
+    "ingress:caddy:bucket10ms",
+    bucketSum(samples, validGroups, "0.01"),
+    ctx.bootGeneration,
+  );
+  const bucket50ms = ctx.tracker.delta(
+    "ingress:caddy:bucket50ms",
+    bucketSum(samples, validGroups, "0.05"),
+    ctx.bootGeneration,
+  );
+  const bucket100ms = ctx.tracker.delta(
+    "ingress:caddy:bucket100ms",
     bucketSum(samples, validGroups, "0.1"),
     ctx.bootGeneration,
   );
-  const requestsUnder500ms = ctx.tracker.delta(
-    "ingress:caddy:under500ms",
+  const bucket500ms = ctx.tracker.delta(
+    "ingress:caddy:bucket500ms",
     bucketSum(samples, validGroups, "0.5"),
     ctx.bootGeneration,
   );
-  const requestsUnder1s = ctx.tracker.delta(
-    "ingress:caddy:under1s",
+  const bucket1s = ctx.tracker.delta(
+    "ingress:caddy:bucket1s",
     bucketSum(samples, validGroups, "1"),
     ctx.bootGeneration,
   );
-  const requestsUnder5s = ctx.tracker.delta(
-    "ingress:caddy:under5s",
+  const bucket5s = ctx.tracker.delta(
+    "ingress:caddy:bucket5s",
     bucketSum(samples, validGroups, "5"),
     ctx.bootGeneration,
   );
@@ -294,11 +314,13 @@ export function parseCaddyExpositionV5(
     requestErrors: null,
     requestBytes,
     responseBytes,
-    requestDurationSecondsAvg,
-    requestsUnder100ms,
-    requestsUnder500ms,
-    requestsUnder1s,
-    requestsUnder5s,
+    requestDurationSecondsSum,
+    bucket10ms,
+    bucket50ms,
+    bucket100ms,
+    bucket500ms,
+    bucket1s,
+    bucket5s,
     requestsInFlight,
     upstreamsHealthy,
     upstreamsTotal,
@@ -324,7 +346,7 @@ export class CaddyIngressAdapter implements IngressAdapter {
       const text = await fetchText(addr, "/metrics");
       if (text === undefined) return null;
       const samples = parsePrometheusExposition(text);
-      if (!containsAnyMetricName(samples, CADDY_V5_EXPECTED_METRIC_NAMES)) {
+      if (!containsAnyMetricName(samples, CADDY_EXPECTED_METRIC_NAMES)) {
         return null;
       }
       return samples;
@@ -345,7 +367,7 @@ export class CaddyIngressAdapter implements IngressAdapter {
     const samples = await this.scrape();
     if (!samples) return null;
     try {
-      const reading = parseCaddyExpositionV5(samples, ctx);
+      const reading = parseCaddyExposition(samples, ctx);
       return { sourceId: "caddy", sourceKind: "caddy", reading };
     } catch {
       return null;

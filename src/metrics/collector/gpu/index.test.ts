@@ -59,7 +59,7 @@ test("buildGpuSamples never drops a topology-enumerated GPU even when every adap
     nvml: nullAdapter("nvml"),
     sysfs: nullAdapter("sysfs"),
   };
-  const samples = await buildGpuSamples(
+  const { samples, thermals } = await buildGpuSamples(
     [gpu({ gpuId: "gpu-a" }), gpu({ gpuId: "gpu-b" })],
     adapters,
     ctx(),
@@ -70,6 +70,17 @@ test("buildGpuSamples never drops a topology-enumerated GPU even when every adap
     assertEquals(sample.utilizationPercent, null);
     assertEquals(sample.memoryUsedBytes, null);
     assertEquals(sample.throttlePercent, null);
+  }
+  // The thermals map covers every topology GPU too — an unreadable GPU is
+  // all-`null` there rather than missing, so its `hardware.physical` signals
+  // resolve to `null` instead of silently vanishing.
+  assertEquals([...thermals.keys()], ["gpu-a", "gpu-b"]);
+  for (const reading of thermals.values()) {
+    assertEquals(reading, {
+      temperatureCelsius: null,
+      memoryTemperatureCelsius: null,
+      powerWatts: null,
+    });
   }
 });
 
@@ -87,7 +98,7 @@ test("buildGpuSamples routes AMD/Intel GPUs to sysfs only, never dcgm/nvml", asy
       return { utilizationPercent: 42 };
     }),
   };
-  const samples = await buildGpuSamples(
+  const { samples } = await buildGpuSamples(
     [gpu({ vendor: "amd" })],
     adapters,
     ctx(),
@@ -106,7 +117,7 @@ test("buildGpuSamples: NVIDIA GPUs prefer DCGM per field, backfilling only what 
     }),
     sysfs: nullAdapter("sysfs"),
   };
-  const samples = await buildGpuSamples(
+  const { samples, thermals } = await buildGpuSamples(
     [gpu({ vendor: "nvidia" })],
     adapters,
     ctx(),
@@ -114,10 +125,12 @@ test("buildGpuSamples: NVIDIA GPUs prefer DCGM per field, backfilling only what 
   // DCGM is still consulted and still wins any field it has a value for —
   // its utilizationPercent is never overridden by NVML's. But DCGM leaving
   // powerWatts unset for this GPU no longer strands the field at `null`
-  // when NVML (a real reading of the same physical GPU) has it.
+  // when NVML (a real reading of the same physical GPU) has it. Power is a
+  // `hardware.physical` reading now, so it resolves on the thermals side,
+  // under the exact same per-field precedence.
   assertEquals(nvmlCalled, true);
   assertEquals(samples[0].utilizationPercent, 55);
-  assertEquals(samples[0].powerWatts, 200);
+  assertEquals(thermals.get(samples[0].gpuId)?.powerWatts, 200);
 });
 
 test("buildGpuSamples: DCGM's own null for a field it attempted (e.g. throttlePercent not yet computable) still falls through to NVML", async () => {
@@ -129,7 +142,7 @@ test("buildGpuSamples: DCGM's own null for a field it attempted (e.g. throttlePe
     nvml: fakeAdapter("nvml", () => ({ throttlePercent: 12 })),
     sysfs: nullAdapter("sysfs"),
   };
-  const samples = await buildGpuSamples(
+  const { samples } = await buildGpuSamples(
     [gpu({ vendor: "nvidia" })],
     adapters,
     ctx(),
@@ -144,12 +157,12 @@ test("buildGpuSamples: NVIDIA falls back to NVML when DCGM has nothing for this 
     nvml: fakeAdapter("nvml", () => ({ powerWatts: 250 })),
     sysfs: nullAdapter("sysfs"),
   };
-  const samples = await buildGpuSamples(
+  const { samples, thermals } = await buildGpuSamples(
     [gpu({ vendor: "nvidia" })],
     adapters,
     ctx(),
   );
-  assertEquals(samples[0].powerWatts, 250);
+  assertEquals(thermals.get(samples[0].gpuId)?.powerWatts, 250);
   assertEquals(samples[0].utilizationPercent, null);
 });
 
@@ -161,12 +174,12 @@ test("buildGpuSamples treats a throwing adapter the same as a null reading and f
     nvml: fakeAdapter("nvml", () => ({ temperatureCelsius: 61 })),
     sysfs: nullAdapter("sysfs"),
   };
-  const samples = await buildGpuSamples(
+  const { samples, thermals } = await buildGpuSamples(
     [gpu({ vendor: "nvidia" })],
     adapters,
     ctx(),
   );
-  assertEquals(samples[0].temperatureCelsius, 61);
+  assertEquals(thermals.get(samples[0].gpuId)?.temperatureCelsius, 61);
 });
 
 test("buildGpuSamples invalidates baseline keys for a GPU with no reading this tick", async () => {
@@ -197,15 +210,39 @@ test("buildGpuSamples merges a partial reading with every unset field as null", 
     nvml: nullAdapter("nvml"),
     sysfs: fakeAdapter("sysfs", () => ({ temperatureCelsius: 55 })),
   };
-  const samples = await buildGpuSamples([gpu()], adapters, ctx());
+  const { samples, thermals } = await buildGpuSamples([gpu()], adapters, ctx());
   const sample = samples[0];
-  assertEquals(sample.temperatureCelsius, 55);
   assertEquals(sample.utilizationPercent, null);
   assertEquals(sample.memoryUsedBytes, null);
   assertEquals(sample.memoryActivityPercent, null);
-  assertEquals(sample.memoryTemperatureCelsius, null);
-  assertEquals(sample.powerWatts, null);
   assertEquals(sample.pcieReceiveBytesPerSecond, null);
   assertEquals(sample.pcieTransmitBytesPerSecond, null);
   assertEquals(sample.throttlePercent, null);
+  assertEquals(thermals.get(sample.gpuId), {
+    temperatureCelsius: 55,
+    memoryTemperatureCelsius: null,
+    powerWatts: null,
+  });
+});
+
+test("buildGpuSamples keeps temperature/power off the sample — they are hardware.physical signals now", async () => {
+  const adapters: GpuAdapterSet = {
+    dcgm: nullAdapter("dcgm"),
+    nvml: nullAdapter("nvml"),
+    sysfs: fakeAdapter("sysfs", () => ({
+      temperatureCelsius: 55,
+      memoryTemperatureCelsius: 62,
+      powerWatts: 130,
+    })),
+  };
+  const { samples } = await buildGpuSamples([gpu()], adapters, ctx());
+  for (
+    const field of [
+      "temperatureCelsius",
+      "memoryTemperatureCelsius",
+      "powerWatts",
+    ]
+  ) {
+    assertEquals(Object.hasOwn(samples[0], field), false);
+  }
 });

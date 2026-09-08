@@ -3,30 +3,31 @@
  *
  * Every sub-collector in this directory holds its own dedupe/cooldown state
  * (last-emitted-kind, cooldown timestamps, or a simple prior-value map) and
- * exposes a `detect(ctx): MetricEventV5[] | Promise<MetricEventV5[]>` method.
+ * exposes a `detect(ctx): MetricEvent[] | Promise<MetricEvent[]>` method.
  * `EventCollectorSet` (`index.ts`) is the only orchestrator that calls these —
  * it wraps each in `safeAsync` so one collector throwing never drops another's
  * events, and truncates the combined result to
  * {@link MAX_EVENTS_PER_DETECT_TICK} before returning (mirrors
- * `contract-v5.ts`'s `MAX_METRIC_EVENTS_PER_SAMPLE` — `buildMetricsSampleV5`
+ * `contract.ts`'s `MAX_METRIC_EVENTS_PER_SAMPLE` — `buildMetricsSample`
  * throws the whole sample away over that cap, so the event set must never
  * hand it more).
  */
 import type {
-  GpuSampleV5,
-  HardwareSignalSampleV5,
-  MetricEventKindV5,
-  MetricEventSeverityV5,
-  MetricEventV5,
-} from "../../contract-v5.ts";
+  GpuSample,
+  HardwareSignalSample,
+  MetricEvent,
+  MetricEventKind,
+  MetricEventSeverity,
+} from "../../contract.ts";
 import { fnv1aHex } from "../../topology/identity.ts";
 import type { TopologySnapshot } from "../../topology/types.ts";
 import type { CounterBaselineTracker } from "../baseline.ts";
+import type { GpuThermalReadings } from "../gpu/index.ts";
 import type { MountEntry } from "../mounts.ts";
 import type { SensorCandidate } from "../types.ts";
 import type { SensorIo } from "../sensors/discovery.ts";
 
-/** Mirrors `contract-v5.ts`'s private `MAX_METRIC_EVENTS_PER_SAMPLE` — kept in sync by hand, checked by `events/index.test.ts`. */
+/** Mirrors `contract.ts`'s private `MAX_METRIC_EVENTS_PER_SAMPLE` — kept in sync by hand, checked by `events/index.test.ts`. */
 export const MAX_EVENTS_PER_DETECT_TICK = 128;
 
 /** Stable signal identity → discovered sensor candidate, from `hardware-signals.ts`'s live discovery this tick. */
@@ -44,9 +45,18 @@ export type EventDetectContext = {
   bootGeneration: number;
   seconds: number;
   /** This tick's already-built GPU samples (`linux-collector.ts` builds these before events). */
-  gpus: GpuSampleV5[];
+  gpus: GpuSample[];
+  /**
+   * This tick's merged per-GPU physical readings (temperature/memory
+   * temperature/power), keyed by `gpuId`. Deliberately taken straight from
+   * the adapter merge rather than read back out of `hardwareSignals`: those
+   * are `[]` on a GPU-passthrough VM (the whole `hardware.physical` family
+   * is `isPhysicalMachine()`-gated), which would silently stop
+   * `gpu_thermal_critical` from ever firing there.
+   */
+  gpuThermals: GpuThermalReadings;
   /** This tick's already-built hardware-signal samples (`hardware-signals.ts`). */
-  hardwareSignals: HardwareSignalSampleV5[];
+  hardwareSignals: HardwareSignalSample[];
   hardwareSignalCandidates: HardwareSignalCandidateMap;
   /** Raw cumulative `/proc/vmstat` `oom_kill` counter this tick; `null` when absent (older kernels). */
   oomKillTotal: number | null;
@@ -63,7 +73,7 @@ export type EventDetectContext = {
 
 /** One event sub-collector — the shape `EventCollectorSet` composes. Implementations hold their own tick-to-tick state. */
 export type EventCollector = {
-  detect(ctx: EventDetectContext): MetricEventV5[] | Promise<MetricEventV5[]>;
+  detect(ctx: EventDetectContext): MetricEvent[] | Promise<MetricEvent[]>;
 };
 
 export type MakeEventOptions = {
@@ -97,7 +107,7 @@ function stablePayloadKey(
  * accepted tradeoff for stable, hash-based identity with no stored state.
  */
 function eventIdentity(
-  kind: MetricEventKindV5,
+  kind: MetricEventKind,
   options: MakeEventOptions | undefined,
 ): string {
   const entity = options?.entityId ?? options?.source ?? "";
@@ -105,14 +115,14 @@ function eventIdentity(
   return `evt:${fnv1aHex(key)}`;
 }
 
-/** Build one `MetricEventV5` — the single place every detector stamps `eventId`/`at`. */
+/** Build one `MetricEvent` — the single place every detector stamps `eventId`/`at`. */
 export function makeEvent(
-  kind: MetricEventKindV5,
-  severity: MetricEventSeverityV5,
+  kind: MetricEventKind,
+  severity: MetricEventSeverity,
   nowMs: number,
   options?: MakeEventOptions,
-): MetricEventV5 {
-  const event: MetricEventV5 = {
+): MetricEvent {
+  const event: MetricEvent = {
     eventId: eventIdentity(kind, options),
     at: new Date(nowMs).toISOString(),
     kind,

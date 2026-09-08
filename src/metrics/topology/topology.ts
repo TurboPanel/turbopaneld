@@ -10,6 +10,7 @@
 import { statfs } from "node:fs/promises";
 
 import { resolveDockerDataRoot } from "../../host/docker.ts";
+import { resolveLayout } from "../../paths/layout.ts";
 import { FABRIC_INTERFACE_NAME } from "../../instance/commands/fabric.ts";
 import { resolveHostingPath } from "../collector/hosting.ts";
 import { backingDeviceNames, parseProcMounts } from "../collector/mounts.ts";
@@ -31,6 +32,8 @@ import { resolveTopologyOverrides } from "./overrides.ts";
 import { isPhysicalMachine } from "./physical-classifier.ts";
 import { resolveTopologyGeneration } from "./generation.ts";
 import type {
+  BlockDeviceTopology,
+  GpuTopology,
   PhysicalSignalTopology,
   TopologyOverrides,
   TopologySnapshot,
@@ -62,6 +65,14 @@ export type TopologyDeps = {
   ) => StatfsResult | null | Promise<StatfsResult | null>;
   resolveDockerDataRoot: () => Promise<string | null>;
   resolveHostingPath: () => string | Promise<string>;
+  /**
+   * The managed-backup root and the daemon log directory
+   * (`LayoutPaths.backupDir` / `logDir`). Plain layout reads, not probes —
+   * injectable only so a host-free test can point them at fixture mount
+   * points without setting process env.
+   */
+  resolveBackupPath: () => string;
+  resolveLogsPath: () => string;
   resolveFabricInterfaces: () => Promise<string[]>;
   io: IdentityIo;
   sysRoot?: string;
@@ -69,14 +80,21 @@ export type TopologyDeps = {
   resolveTopologyOverrides: () => Promise<TopologyOverrides>;
   resolveBootGeneration: () => Promise<number>;
   /**
-   * Physical (non-VM) hardware signals — hwmon/RAPL temperature, power, and
-   * fan candidates re-shaped into stable topology identity. Takes the same
-   * `io`/`sysRoot` this tick resolved (never re-reads `defaultSensorIo()`/
-   * `/sys` directly) so a test overriding `io`/`sysRoot` without overriding
-   * this dep still reads the fixture, not the real host.
+   * Physical (non-VM) hardware signals — hwmon/RAPL temperature and power
+   * candidates re-shaped into stable topology identity, plus the
+   * entity-joined GPU/service-drive signals derived from this tick's already
+   * discovered `gpus`/`blockDevices`. Takes the same `io`/`sysRoot` this
+   * tick resolved (never re-reads `defaultSensorIo()`/`/sys` directly) so a
+   * test overriding `io`/`sysRoot` without overriding this dep still reads
+   * the fixture, not the real host.
    */
   collectHardwareSignals: (
-    deps: { io: IdentityIo; sysRoot: string },
+    deps: {
+      io: IdentityIo;
+      sysRoot: string;
+      gpus: readonly GpuTopology[];
+      blockDevices: readonly BlockDeviceTopology[];
+    },
   ) => Promise<PhysicalSignalTopology[]>;
 };
 
@@ -86,6 +104,8 @@ function defaultDeps(): TopologyDeps {
     statfs: defaultStatfs,
     resolveDockerDataRoot: async () => (await resolveDockerDataRoot()) ?? null,
     resolveHostingPath: () => resolveHostingPath(),
+    resolveBackupPath: () => resolveLayout(Deno.env.toObject()).backupDir,
+    resolveLogsPath: () => resolveLayout(Deno.env.toObject()).logDir,
     resolveFabricInterfaces: () => Promise.resolve([FABRIC_INTERFACE_NAME]),
     io: defaultSensorIo(),
     resolveTopologyOverrides: () => resolveTopologyOverrides(),
@@ -133,7 +153,6 @@ export async function collectTopologyInputs(
     gpus,
     cpu,
     numaNodes,
-    hardwareSignals,
   ] = await Promise.all([
     collectNetworkTopology({
       readProcFile: merged.readProcFile,
@@ -146,6 +165,8 @@ export async function collectTopologyInputs(
       statfs: merged.statfs,
       resolveHostingPath: merged.resolveHostingPath,
       resolveDockerDataRoot: merged.resolveDockerDataRoot,
+      resolveBackupPath: merged.resolveBackupPath,
+      resolveLogsPath: merged.resolveLogsPath,
       io: merged.io,
       sysRoot: root,
     }),
@@ -158,13 +179,22 @@ export async function collectTopologyInputs(
     collectGpuTopology({ io: merged.io, sysRoot: root }),
     collectCpuTopology({ readProcFile: merged.readProcFile }),
     collectNumaTopology({ io: merged.io, sysRoot: root }),
-    // GPU enumeration above and physical classification earlier are
-    // independent calls sharing no state — a GPU-passthrough VM never
-    // reads as bare metal (see `physical-classifier.ts`).
-    isPhysical
-      ? merged.collectHardwareSignals({ io: merged.io, sysRoot: root })
-      : Promise.resolve([]),
   ]);
+
+  // Hardware-signal discovery trails the parallel block: the catalog now
+  // enumerates one signal per GPU and per probe-backed service drive, so it
+  // needs those two entity lists resolved first. GPU enumeration and
+  // physical classification are still independent calls sharing no state —
+  // a GPU-passthrough VM never reads as bare metal (see
+  // `physical-classifier.ts`) and so reports no GPU thermal signals either.
+  const hardwareSignals = isPhysical
+    ? await merged.collectHardwareSignals({
+      io: merged.io,
+      sysRoot: root,
+      gpus,
+      blockDevices,
+    })
+    : [];
 
   return {
     bootGeneration,
@@ -177,6 +207,11 @@ export async function collectTopologyInputs(
     numaNodes,
     memoryTotalBytes: meminfo?.totalBytes ?? null,
     swapTotalBytes: meminfo?.swapTotalBytes ?? null,
+    machineClass: isPhysical ? "physical" : "virtual",
+    paths: {
+      backup: merged.resolveBackupPath(),
+      logs: merged.resolveLogsPath(),
+    },
   };
 }
 

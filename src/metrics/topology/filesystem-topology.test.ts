@@ -26,25 +26,54 @@ function fakeStatfs() {
   };
 }
 
-test("collectFilesystemTopology: root, hosting, and Docker resolving to the same device collapse to one entry with every role", async () => {
-  // proc-mounts.txt: /dev/sda1 is mounted at both "/" and "/var/lib/docker".
+test("collectFilesystemTopology: root, hosting, Docker, backup and logs resolving to the same device collapse to one entry with every role", async () => {
+  // proc-mounts.txt: /dev/sda1 is mounted at both "/" and "/var/lib/docker",
+  // and neither /backup nor /var/log has a mount of its own, so both resolve
+  // up to "/" — the single-disk shape every small host has.
   const filesystems = await collectFilesystemTopology({
     readProcFile: (path) =>
       path === "/proc/mounts" ? fixtureText("proc-mounts.txt") : undefined,
     statfs: () => fakeStatfs(),
     resolveHostingPath: () => "/",
     resolveDockerDataRoot: () => Promise.resolve("/var/lib/docker"),
+    resolveBackupPath: () => "/backup",
+    resolveLogsPath: () => "/var/log/turbopanel",
     io: defaultSensorIo(),
     sysRoot: fixtureRoot("net-topology"),
   });
 
   const merged = filesystems.find((fs) => fs.sourceDevice === "/dev/sda1");
   assertEquals(merged !== undefined, true);
-  assertEquals(new Set(merged!.roles), new Set(["root", "hosting", "docker"]));
+  assertEquals(
+    new Set(merged!.roles),
+    new Set(["root", "hosting", "docker", "backup", "logs"]),
+  );
   assertEquals(
     filesystems.filter((fs) => fs.sourceDevice === "/dev/sda1").length,
     1,
   );
+});
+
+test("collectFilesystemTopology: a backup root on its own device is a separate entry with the backup role", async () => {
+  const filesystems = await collectFilesystemTopology({
+    readProcFile: (path) =>
+      path === "/proc/mounts" ? fixtureText("proc-mounts.txt") : undefined,
+    statfs: () => fakeStatfs(),
+    resolveHostingPath: () => "/",
+    resolveDockerDataRoot: () => Promise.resolve(null),
+    // An operator pointing TURBOPANEL_BACKUP_DIR at the second disk.
+    resolveBackupPath: () => "/mnt/docker-data",
+    resolveLogsPath: () => "/var/log/turbopanel",
+    io: defaultSensorIo(),
+    sysRoot: fixtureRoot("net-topology"),
+  });
+
+  const backup = filesystems.find((fs) => fs.roles.includes("backup"));
+  assertEquals(backup?.sourceDevice, "/dev/nvme0n1p1");
+  assertEquals(backup?.roles, ["backup"]);
+  // The logs role still collapsed onto root, which also carries hosting.
+  const root = filesystems.find((fs) => fs.roles.includes("root"));
+  assertEquals(new Set(root!.roles), new Set(["root", "hosting", "logs"]));
 });
 
 test("collectFilesystemTopology: distinct devices for hosting and Docker stay as separate entries", async () => {
@@ -54,6 +83,8 @@ test("collectFilesystemTopology: distinct devices for hosting and Docker stay as
     statfs: () => fakeStatfs(),
     resolveHostingPath: () => "/srv/users",
     resolveDockerDataRoot: () => Promise.resolve("/mnt/docker-data"),
+    resolveBackupPath: () => "/backup",
+    resolveLogsPath: () => "/var/log/turbopanel",
     io: defaultSensorIo(),
     sysRoot: fixtureRoot("net-topology"),
   });
@@ -64,5 +95,8 @@ test("collectFilesystemTopology: distinct devices for hosting and Docker stay as
   assertEquals(root?.sourceDevice, "/dev/sda1");
   assertEquals(hosting?.sourceDevice, "/dev/sdb1");
   assertEquals(docker?.sourceDevice, "/dev/nvme0n1p1");
+  // Backup and logs have no mount of their own here, so both collapse onto
+  // root rather than adding entries — still three filesystems.
+  assertEquals(new Set(root!.roles), new Set(["root", "backup", "logs"]));
   assertEquals(filesystems.length, 3);
 });

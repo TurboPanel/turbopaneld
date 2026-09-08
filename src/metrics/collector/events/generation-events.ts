@@ -7,14 +7,14 @@
  */
 import type { EventCollector, EventDetectContext } from "./types.ts";
 import { makeEvent } from "./types.ts";
-import type { MetricEventV5 } from "../../contract-v5.ts";
+import type { MetricEvent } from "../../contract.ts";
 
 export class GenerationEventCollector implements EventCollector {
   #lastTopologyGeneration: number | undefined;
   #lastBootGeneration: number | undefined;
 
-  detect(ctx: EventDetectContext): MetricEventV5[] {
-    const events: MetricEventV5[] = [];
+  detect(ctx: EventDetectContext): MetricEvent[] {
+    const events: MetricEvent[] = [];
     const { generation, bootGeneration } = ctx.snapshot;
 
     if (

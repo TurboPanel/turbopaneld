@@ -11,6 +11,9 @@ import type {
   ManagedBackupArtifactExtension,
   ManagedEngineCode,
 } from "../../instance/commands/contracts.ts";
+import type { ManagedEngineCensus } from "./census.ts";
+
+export type { ManagedEngineCensus } from "./census.ts";
 
 export type ManagedEngineExec = (
   argv: string[],
@@ -54,6 +57,16 @@ export type ManagedEngineRuntime = {
    */
   reloadConfig?(ctx: ManagedEngineContext): Promise<void>;
   readVersion(ctx: ManagedEngineContext): Promise<string | undefined>;
+  /**
+   * Optional one-shot census for the daemon's `managed.storage` metrics
+   * family (`../../metrics/collector/managed-engines.ts`): the readiness
+   * probe `waitReady` polls, run exactly once, plus the instance's client
+   * connection count against `max_connections`. Never polls and never throws
+   * for an engine that is merely down — that is `{ healthy: false }` with
+   * `null` connections, and a probe that passes but a census query that does
+   * not is `{ healthy: true }` with `null` connections.
+   */
+  readCensus?(ctx: ManagedEngineContext): Promise<ManagedEngineCensus>;
   applyCredentials(
     ctx: ManagedEngineContext,
     credentials: ManagedApplyCredential[],

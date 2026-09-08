@@ -16,7 +16,10 @@ import {
   shouldConnectToInstance,
   shouldEnableDockerIntegration,
 } from "./orchestration/setup.ts";
-import { createMetricsCollector } from "./metrics/collector/index.ts";
+import {
+  createMetricsCollector,
+  stopHostStorageSamplers,
+} from "./metrics/collector/index.ts";
 import { collectTopology } from "./metrics/topology/topology.ts";
 import { startTunnels } from "./tunnels.ts";
 
@@ -55,6 +58,13 @@ export type DaemonRunIo = {
   }) => Promise<{ stop(): void }>;
   createMetricsCollector?: () => unknown;
   collectTopology?: () => unknown;
+  /**
+   * Stop the host-storage samplers (the directory-usage walker and the Docker
+   * `/system/df` poller) on shutdown. They are started lazily by
+   * `createMetricsCollector`'s default deps and own intervals of their own, so
+   * something has to clear them or the process will not exit.
+   */
+  stopHostStorageSamplers?: () => void;
   addSignalListener?: (signal: Deno.Signal, handler: () => void) => void;
   exit?: (code: number) => void;
   logInfo?: typeof logInfo;
@@ -194,6 +204,7 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
       info("daemon", "shutting down");
       instance.stop();
       sentinel.stop();
+      (io.stopHostStorageSamplers ?? stopHostStorageSamplers)();
       closeDockerClient(dockerClient);
       dockerClient = undefined;
       abort.abort();

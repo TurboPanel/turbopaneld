@@ -148,6 +148,8 @@ test("collectTopology: meminfo totals land on the snapshot and missing mounts st
       },
       resolveDockerDataRoot: () => Promise.resolve(null),
       resolveHostingPath: () => "/srv/users",
+      resolveBackupPath: () => "/mnt/nas/turbopanel-backups",
+      resolveLogsPath: () => "/var/log/turbopanel",
       resolveFabricInterfaces: () => Promise.resolve([]),
       io: defaultSensorIo(),
       sysRoot: fixtureRoot("net-topology"),
@@ -160,6 +162,16 @@ test("collectTopology: meminfo totals land on the snapshot and missing mounts st
     assertEquals(snapshot.memoryTotalBytes, 8000000 * 1024);
     assertEquals(snapshot.swapTotalBytes, 2000000 * 1024);
     assertEquals(snapshot.filesystems, []);
+    // Static host facts ride the snapshot: the layout paths verbatim from the
+    // resolvers (never probed), and the classifier's own verdict.
+    assertEquals(snapshot.paths, {
+      backup: "/mnt/nas/turbopanel-backups",
+      logs: "/var/log/turbopanel",
+    });
+    assertEquals(
+      ["physical", "virtual"].includes(snapshot.machineClass ?? ""),
+      true,
+    );
   });
 });
 
@@ -218,5 +230,54 @@ test("collectTopology: a VM with real hwmon/RAPL sysfs still reports hardwareSig
     });
 
     assertEquals(snapshot.hardwareSignals, []);
+  });
+});
+
+test("collectTopology: hardware-signal discovery receives this tick's already-discovered GPU and block topology (the entity-joined signals depend on it)", async () => {
+  await withTempStateDir(async (daemonStateDir) => {
+    let received:
+      | {
+        gpus: readonly unknown[];
+        blockDevices: readonly { kernelName: string }[];
+      }
+      | null = null;
+    const snapshot = await collectTopology({
+      readProcFile: (path) => {
+        if (path === "/proc/net/dev") {
+          return "Inter-|   Receive\n face |bytes\n  eth0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n";
+        }
+        if (path === "/proc/mounts") return fixtureText("proc-mounts.txt");
+        if (path === "/proc/diskstats") {
+          return fixtureText("proc-diskstats-nvme.txt");
+        }
+        return undefined;
+      },
+      statfs: () => ({ blocks: 1000, bfree: 500, bavail: 400, bsize: 4096 }),
+      resolveDockerDataRoot: () => Promise.resolve("/var/lib/docker"),
+      resolveHostingPath: () => "/srv/users",
+      resolveFabricInterfaces: () => Promise.resolve([]),
+      io: defaultSensorIo(),
+      // Bare metal, so the `isPhysicalMachine` gate lets discovery run at all.
+      sysRoot: fixtureRoot("physical-bare-metal"),
+      daemonStateDir,
+      resolveTopologyOverrides: () => Promise.resolve(EMPTY_TOPOLOGY_OVERRIDES),
+      resolveBootGeneration: () => Promise.resolve(0),
+      collectHardwareSignals: (deps) => {
+        received = { gpus: deps.gpus, blockDevices: deps.blockDevices };
+        return Promise.resolve([]);
+      },
+    });
+
+    if (received === null) {
+      throw new TypeError("collectHardwareSignals was never called");
+    }
+    const seen = received as {
+      gpus: readonly unknown[];
+      blockDevices: readonly { kernelName: string }[];
+    };
+    // Same arrays the snapshot itself carries — never a re-discovery.
+    assertEquals(seen.gpus, snapshot.gpus);
+    assertEquals(seen.blockDevices, snapshot.blockDevices);
+    assertEquals(seen.blockDevices.length > 0, true);
   });
 });

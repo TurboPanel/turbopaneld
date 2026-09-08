@@ -123,6 +123,9 @@ export function assertProductionLayout(
     "/var/lib/turbopanel",
   );
   recordLayoutMismatch(failures, "logDir", prod.logDir, "/var/log/turbopanel");
+  // Deliberately outside the FHS state tree: backups are the one artifact an
+  // operator points at separate storage (`TURBOPANEL_BACKUP_DIR`).
+  recordLayoutMismatch(failures, "backupDir", prod.backupDir, "/backup");
   recordLayoutMismatch(failures, "runDir", prod.runDir, "/run/turbopanel");
   recordLayoutMismatch(
     failures,

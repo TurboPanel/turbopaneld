@@ -52,6 +52,7 @@ function ctx(overrides: Partial<EventDetectContext> = {}): EventDetectContext {
     bootGeneration: 1,
     seconds: 60,
     gpus: [],
+    gpuThermals: new Map(),
     hardwareSignals: [],
     hardwareSignalCandidates: new Map(),
     oomKillTotal: null,

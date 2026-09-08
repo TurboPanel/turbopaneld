@@ -136,6 +136,9 @@ test("managedDir and compose project naming", () => {
 const LAYOUT = {
   configDir: "/etc/turbopanel",
   stateDir: "/var/lib/turbopanel",
+  // Backups live under their own root since v6, not inside the managed state
+  // tree — see `managedBackupsDir`.
+  backupDir: "/backup",
 } as Parameters<typeof managedDir>[0];
 
 test("proxysql and managed path helpers join under config/state", () => {
@@ -283,13 +286,13 @@ test("orchestrator path helpers join under config/state", () => {
 });
 
 test("managedBackupsDir and managedBackupArtifactPath", () => {
-  assertEquals(
-    managedBackupsDir(LAYOUT, "abc"),
-    "/var/lib/turbopanel/managed/abc/backups",
-  );
+  // `<backupDir>/<managedId>`, never under `<stateDir>/managed/<id>`: an
+  // operator points `TURBOPANEL_BACKUP_DIR` at separate storage without
+  // moving the engine's own state tree with it.
+  assertEquals(managedBackupsDir(LAYOUT, "abc"), "/backup/abc");
   assertEquals(
     managedBackupArtifactPath(LAYOUT, "abc", "bk_1", "dump"),
-    "/var/lib/turbopanel/managed/abc/backups/bk_1.dump",
+    "/backup/abc/bk_1.dump",
   );
   assertThrows(
     () => managedBackupArtifactPath(LAYOUT, "abc", "../escape", "dump"),

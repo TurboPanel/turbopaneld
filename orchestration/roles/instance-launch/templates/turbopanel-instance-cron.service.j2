@@ -1,0 +1,13 @@
+# Managed by instance-launch (Workers dev runtime only). `wrangler dev` never
+# fires the Worker's cron trigger on its own: the scheduled handler (offline
+# sweep, TLS renewal, billing chores) only runs when something hits wrangler's
+# local trigger endpoint. This oneshot is what the timer below fires every
+# minute, mirroring the deployed `* * * * *` trigger.
+[Unit]
+Description=TurboPanel Workers dev cron trigger (one scheduled tick)
+After={{ instance_service_name }}.service
+Requires={{ instance_service_name }}.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/curl --silent --show-error --fail --max-time 55 http://127.0.0.1:{{ wrangler_dev_port }}/cdn-cgi/local/scheduled

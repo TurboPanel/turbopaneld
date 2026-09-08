@@ -3,6 +3,7 @@ import { parse } from "yaml";
 import type { ManagedApplyPayload } from "../instance/commands/contracts.ts";
 import {
   assertPublicPrivateListenerTls,
+  MANAGED_ENGINE_LABEL,
   MANAGED_ROOT_PASSWORD_VAR,
   normalizeManagedCompose,
   unnestPostgresConfigTlsMounts,
@@ -548,4 +549,40 @@ test("normalizeManagedCompose always attaches managed network for ProxySQL reach
   );
   const labels = service.labels as Record<string, string> | undefined;
   assertEquals(labels?.["traefik.enable"], undefined);
+});
+
+Deno.test("normalizeManagedCompose stamps the engine code label on every engine — the metrics census's only discovery key", () => {
+  for (const engine of ["postgres", "mysql", "mariadb"] as const) {
+    const document = parseNormalized(basePayload({ engine }));
+    const services = document.services as Record<
+      string,
+      Record<string, unknown>
+    >;
+    const service = services["postgres"]!;
+    const labels = service.labels as Record<string, string>;
+    assertEquals(labels[MANAGED_ENGINE_LABEL], engine, engine);
+  }
+  // A caller-supplied label survives beside it.
+  const withLabels = parseNormalized(
+    basePayload({
+      composeYaml: [
+        "services:",
+        "  postgres:",
+        "    image: postgres:18-alpine",
+        "    labels:",
+        "      tp.example: keep",
+        "    volumes:",
+        "      - pgdata:/var/lib/postgresql",
+        "volumes:",
+        "  pgdata:",
+      ].join("\n"),
+    }),
+  );
+  const labels =
+    (withLabels.services as Record<string, Record<string, unknown>>)[
+      "postgres"
+    ]!
+      .labels as Record<string, string>;
+  assertEquals(labels["tp.example"], "keep");
+  assertEquals(labels[MANAGED_ENGINE_LABEL], "postgres");
 });

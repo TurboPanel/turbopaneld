@@ -1,0 +1,70 @@
+#!/bin/sh
+# TurboPanel dev — start `stripe listen`, publishing its forwarding secret.
+#
+# 1. Read the test-mode key from stripe.env (refuse anything but sk_test_/rk_test_).
+# 2. Ask the CLI for THIS session's signing secret (`--print-secret`, no
+#    stdout parsing) and write it into stripe.env when it changed.
+# 3. A changed secret restarts the instance so a wrangler dev instance
+#    re-reads its .dev.vars (billing is Workers-only; Deno has none).
+# 4. exec the forwarder. The key goes via STRIPE_API_KEY, never argv.
+set -eu
+
+env_file="{{ stripe_listen_env_file }}"
+stripe_bin="{{ turbopanel_vendor_dir }}/stripe-cli/current/stripe"
+forward_url="{{ stripe_listen_forward_url }}"
+instance_unit="{{ stripe_listen_instance_service_name }}"
+state_dir="{{ stripe_listen_state_dir }}"
+service="{{ stripe_listen_service_name }}"
+
+export HOME="$state_dir"
+export XDG_CONFIG_HOME="$state_dir/config"
+export XDG_CACHE_HOME="$state_dir/cache"
+mkdir -p "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME"
+
+read_env_key() {
+  sed -n "s/^$1=//p" "$env_file" | tail -n 1 | sed "s/^[\"']//; s/[\"']\$//"
+}
+
+if [ ! -r "$env_file" ]; then
+  echo "$service: $env_file is missing or unreadable; re-run converge" >&2
+  exit 1
+fi
+
+key="$(read_env_key TURBOPANEL_STRIPE_SECRET_KEY)"
+if [ -z "$key" ]; then
+  echo "$service: TURBOPANEL_STRIPE_SECRET_KEY is empty in $env_file — paste a test-mode key (sk_test_…) and restart $service" >&2
+  exit 78
+fi
+case "$key" in
+  sk_test_*|rk_test_*) ;;
+  *)
+    echo "$service: refusing a non-test key in $env_file (only sk_test_/rk_test_ keys may be forwarded to a dev instance)" >&2
+    exit 78
+    ;;
+esac
+export STRIPE_API_KEY="$key"
+
+secret="$("$stripe_bin" listen --print-secret)"
+case "$secret" in
+  whsec_*) ;;
+  *)
+    echo "$service: could not obtain the forwarding secret from the Stripe CLI (got: ${secret:-nothing})" >&2
+    exit 1
+    ;;
+esac
+
+current="$(read_env_key TURBOPANEL_STRIPE_WEBHOOK_SIGNING_SECRET)"
+if [ "$current" != "$secret" ]; then
+  tmp="$(mktemp "${env_file}.XXXXXX")"
+  grep -v '^TURBOPANEL_STRIPE_WEBHOOK_SIGNING_SECRET=' "$env_file" > "$tmp" || true
+  printf 'TURBOPANEL_STRIPE_WEBHOOK_SIGNING_SECRET=%s\n' "$secret" >> "$tmp"
+  chown --reference="$env_file" "$tmp"
+  chmod --reference="$env_file" "$tmp"
+  mv "$tmp" "$env_file"
+  echo "$service: forwarding secret changed; wrote TURBOPANEL_STRIPE_WEBHOOK_SIGNING_SECRET to $env_file"
+  # Only a running instance is restarted; a stopped one picks the file up on its next start.
+  systemctl try-restart "$instance_unit" || true
+fi
+
+echo "$service: forwarding sandbox events to $forward_url"
+exec "$stripe_bin" listen --forward-to "$forward_url" --skip-verify

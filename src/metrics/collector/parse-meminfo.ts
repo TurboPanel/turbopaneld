@@ -1,9 +1,6 @@
 import type { MemoryGauges } from "./types.ts";
 
 const KB_LINE_PATTERN = /^(\w+):\s+(\d+)\s+kB/;
-// `Active(anon)`/`Inactive(file)`-style keys carry parentheses the plain
-// `\w+` pattern above can't match.
-const KB_LINE_PATTERN_WITH_PARENS = /^([\w()]+):\s+(\d+)\s+kB/;
 
 function readKbField(
   lines: string[],
@@ -11,19 +8,6 @@ function readKbField(
 ): number | undefined {
   for (const line of lines) {
     const match = KB_LINE_PATTERN.exec(line);
-    if (match?.[1] !== key) continue;
-    const bytes = Number(match[2]) * 1024;
-    return Number.isFinite(bytes) ? bytes : undefined;
-  }
-  return undefined;
-}
-
-function readKbFieldWithParens(
-  lines: string[],
-  key: string,
-): number | undefined {
-  for (const line of lines) {
-    const match = KB_LINE_PATTERN_WITH_PARENS.exec(line);
     if (match?.[1] !== key) continue;
     const bytes = Number(match[2]) * 1024;
     return Number.isFinite(bytes) ? bytes : undefined;
@@ -87,11 +71,22 @@ function cachedFilesBytes(
 ): number | null {
   if (cached === undefined) return null;
   const total = cached + (buffers ?? 0) + (slabReclaimable ?? 0) - (shmem ?? 0);
-  return total < 0 ? 0 : total;
+  return Math.max(0, total);
 }
 
-/** Raw `/proc/meminfo` byte gauges feeding `MemoryDetailSampleV5` — every field `null` (never `0`) when its line is absent. */
-export type MeminfoDetailGauges = {
+/**
+ * Raw `/proc/meminfo` byte gauges feeding the memory half of
+ * `DiagnosticsSample` — every field `null` (never `0`) when its line is
+ * absent.
+ *
+ * v6 dropped seven gauges v5 collected here: `PageTables`, `KernelStack`,
+ * and `CommitLimit` (near-static or derivable), and the four
+ * `Active(anon)`/`Inactive(anon)`/`Active(file)`/`Inactive(file)` LRU
+ * gauges, which nothing charted and which the retained `AnonPages`/`Cached`
+ * pair already summarizes. Dropping them is what lets the merged
+ * `host.diagnostics` family fit one 19-slot row.
+ */
+export type MeminfoDiagnosticsGauges = {
   memoryFreeBytes: number | null;
   cachedBytes: number | null;
   anonPagesBytes: number | null;
@@ -100,18 +95,13 @@ export type MeminfoDetailGauges = {
   dirtyBytes: number | null;
   writebackBytes: number | null;
   shmemBytes: number | null;
-  pageTablesBytes: number | null;
-  kernelStackBytes: number | null;
   committedAsBytes: number | null;
-  commitLimitBytes: number | null;
-  activeAnonBytes: number | null;
-  inactiveAnonBytes: number | null;
-  activeFileBytes: number | null;
-  inactiveFileBytes: number | null;
 };
 
-/** Parse the §40 `MemoryDetailSampleV5` gauge fields from `/proc/meminfo` text. */
-export function parseMeminfoDetail(text: string): MeminfoDetailGauges {
+/** Parse the diagnostics memory gauge fields from `/proc/meminfo` text. */
+export function parseMeminfoDiagnostics(
+  text: string,
+): MeminfoDiagnosticsGauges {
   const lines = text.split("\n");
   return {
     memoryFreeBytes: readKbField(lines, "MemFree") ?? null,
@@ -122,13 +112,6 @@ export function parseMeminfoDetail(text: string): MeminfoDetailGauges {
     dirtyBytes: readKbField(lines, "Dirty") ?? null,
     writebackBytes: readKbField(lines, "Writeback") ?? null,
     shmemBytes: readKbField(lines, "Shmem") ?? null,
-    pageTablesBytes: readKbField(lines, "PageTables") ?? null,
-    kernelStackBytes: readKbField(lines, "KernelStack") ?? null,
     committedAsBytes: readKbField(lines, "Committed_AS") ?? null,
-    commitLimitBytes: readKbField(lines, "CommitLimit") ?? null,
-    activeAnonBytes: readKbFieldWithParens(lines, "Active(anon)") ?? null,
-    inactiveAnonBytes: readKbFieldWithParens(lines, "Inactive(anon)") ?? null,
-    activeFileBytes: readKbFieldWithParens(lines, "Active(file)") ?? null,
-    inactiveFileBytes: readKbFieldWithParens(lines, "Inactive(file)") ?? null,
   };
 }

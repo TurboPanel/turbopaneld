@@ -286,6 +286,16 @@ export function changeReplicationSourceSql(spec: {
   ].join("\n");
 }
 
+/**
+ * Metrics census for the `-N -B -e` client: a `Threads_connected<TAB>n` row from
+ * `SHOW GLOBAL STATUS` (portable across MySQL 8 and MariaDB, unlike the
+ * `performance_schema` / `information_schema` status tables) followed by the
+ * bare `@@max_connections` value.
+ */
+export function connectionCensusSql(): string {
+  return "SHOW GLOBAL STATUS LIKE 'Threads_connected'; SELECT @@max_connections;";
+}
+
 export function versionSql(): string {
   return "SELECT VERSION();";
 }

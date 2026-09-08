@@ -221,3 +221,12 @@ test("the interval fires reportNow on the configured cadence", async () => {
   await Promise.resolve();
   assertEquals(sent.length, 1);
 });
+
+test("topology-reporter never consults the capability plan", () => {
+  const source = Deno.readTextFileSync(
+    new URL("./topology-reporter.ts", import.meta.url),
+  );
+  assertEquals(source.includes("capability-plan"), false);
+  assertEquals(source.includes("capabilityPlan"), false);
+  assertEquals(source.includes("truncateSample"), false);
+});

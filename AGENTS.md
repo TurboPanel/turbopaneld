@@ -61,8 +61,8 @@ extraction dir — means development, otherwise production). Every path is
 env-overridable (`TURBOPANEL_HOME`, `TURBOPANEL_BIN_DIR`, `TURBOPANEL_LIB_DIR`,
 `TURBOPANEL_RUNTIME_DIR`, `TURBOPANEL_SHARE_DIR`, `TURBOPANEL_UI_DIR`,
 `TURBOPANEL_ORCHESTRATION_DIR`, `TURBOPANEL_CONFIG_DIR`, `TURBOPANEL_STATE_DIR`,
-`TURBOPANEL_DAEMON_STATE_DIR`, `TURBOPANEL_LOG_DIR`, `TURBOPANEL_RUN_DIR`,
-`TURBOPANEL_RUNTIMES_DIR`, `TURBOPANEL_DAEMON_ROOT`,
+`TURBOPANEL_DAEMON_STATE_DIR`, `TURBOPANEL_LOG_DIR`, `TURBOPANEL_BACKUP_DIR`,
+`TURBOPANEL_RUN_DIR`, `TURBOPANEL_RUNTIMES_DIR`, `TURBOPANEL_DAEMON_ROOT`,
 `TURBOPANEL_PRINCIPAL_HOME_ROOT`).
 `src/orchestration/paths.ts` and `src/instance/paths.ts` derive their constants
 from `resolveLayout` — do **not** hardcode absolute paths in runtime code;
@@ -85,7 +85,18 @@ module and CI guard are the only places allowed to reference it.
 | Persistent identity (license, `server.id`, keys, tunnels)         | `/var/lib/turbopanel`                 |
 | Tenant principal homes (`principalHomeRoot`)                      | `/srv/users/<username>`               |
 | Logs                                                              | `/var/log/turbopanel`                 |
+| Managed-engine backups (`backupDir`, one subdir per `managedId`)   | `/backup`                             |
 | Runtime (sockets, `daemon.lock`)                                  | `/run/turbopanel`                     |
+
+`backupDir` is deliberately **outside** the FHS state tree and carries the same
+`/backup` default in development and production: backups are the one artifact
+an operator is expected to point at other storage (a second disk, a NAS mount,
+an attached volume), so `TURBOPANEL_BACKUP_DIR` repoints them without moving
+anything else. Artifacts live at `<backupDir>/<managedId>/` (`managed/paths.ts`'s
+`managedBackupsDir`), written 0600 by the daemon user itself. Repointing the
+override affects **new** backups only — nothing relocates an existing tree —
+and `managed.destroy` still removes an engine's backup directory along with its
+state dir, so destroying an engine never leaves an orphan tree on that storage.
 
 The **host** allocates UID/GID via `useradd`/`groupadd`. The control plane may
 send an optional operator override, which must clear the `tp*` service band
@@ -106,6 +117,7 @@ vs **Organization CA** (two-CA distinction):
 | Daemon env file                  | `/etc/turbopanel/daemon.env`                                                       |
 | Daemon state                     | `/var/lib/turbopanel`                                                              |
 | Logs                             | `/var/log/turbopanel`                                                              |
+| Managed-engine backups           | `/backup`                                                                          |
 | Config dir                       | `/etc/turbopanel`                                                                  |
 | Runtime (sockets, `daemon.lock`) | `/run/turbopanel`                                                                  |
 
@@ -115,7 +127,16 @@ vs **Organization CA** (two-CA distinction):
 services (Postgres and RabbitMQ consolidated under the single
 `turbopanel-system-stack` Compose stack — see
 `orchestration/roles/system-compose/AGENTS.md` — plus standalone Redis and Mailpit), all run as
-the **current dev user**. Production managed installs keep the dedicated
+the **current dev user**. The optional Stripe CLI forwarder
+(`orchestration/roles/stripe-listen`, unit `turbopanel-stripe-listen`,
+extra-var `turbopanel_optional_stripe_listen`, off by default) is dev-only
+too: it vendors the pinned `stripe` binary under `vendor/stripe-cli/` and keeps
+the hand-supplied test key and the CLI's forwarding secret in
+`/etc/turbopanel/stripe-listen/stripe.env` (seeded once, never re-templated).
+The instance unit does **not** load that file: billing exists only in the
+Workers build, a self-hosted Deno instance has no billing surface and must
+never see a Stripe key, and a `wrangler dev` instance takes its secrets from
+`.dev.vars`. Production managed installs keep the dedicated
 service users `tp`, `tpctrl`, `tpcache`, `tpdata`, `tpqueue`, and
 `tpcaddy` — see **`../turbopanel/AGENTS.md`** (Production UID/GID allocation).
 

@@ -10,6 +10,7 @@ export type TempLayoutDirs = {
   configDir: string;
   stateDir: string;
   logDir: string;
+  backupDir: string;
   runDir: string;
   runtimesDir: string;
 };
@@ -25,12 +26,14 @@ export async function createTempLayout(): Promise<TempLayoutFixture> {
   const configDir = `${root}/config`;
   const stateDir = `${root}/state`;
   const logDir = `${root}/log`;
+  const backupDir = `${root}/backup`;
   const runDir = `${root}/run`;
   const runtimesDir = `${root}/runtimes`;
 
   await Deno.mkdir(configDir);
   await Deno.mkdir(stateDir);
   await Deno.mkdir(logDir);
+  await Deno.mkdir(backupDir);
   await Deno.mkdir(runDir);
   await Deno.mkdir(runtimesDir);
 
@@ -47,11 +50,12 @@ export async function createTempLayout(): Promise<TempLayoutFixture> {
   };
 
   return {
-    dirs: { configDir, stateDir, logDir, runDir, runtimesDir },
+    dirs: { configDir, stateDir, logDir, backupDir, runDir, runtimesDir },
     env: {
       TURBOPANEL_CONFIG_DIR: configDir,
       TURBOPANEL_STATE_DIR: stateDir,
       TURBOPANEL_LOG_DIR: logDir,
+      TURBOPANEL_BACKUP_DIR: backupDir,
       TURBOPANEL_RUN_DIR: runDir,
       TURBOPANEL_DAEMON_STATE_DIR: stateDir,
       TURBOPANEL_RUNTIMES_DIR: runtimesDir,

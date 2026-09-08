@@ -143,6 +143,7 @@
         group: "{{ turbopanel_group }}"
         mode: "0640"
       no_log: true
+      register: _system_compose_file_written
 
     - name: Install system-compose readiness wait script
       ansible.builtin.template:
@@ -167,6 +168,37 @@
         daemon_reload: true
         enabled: true
         state: started
+    # The stack unit is `Type=oneshot` + `RemainAfterExit=yes`, so once it is
+    # active `state: started` is a no-op and a re-rendered Compose file never
+    # reaches Docker: the containers keep the old definition. That is how a
+    # Deno-first dev host stayed without the exposed Postgres port after the
+    # Workers switch rendered it, and the switch's migrate step then failed
+    # on localhost:5432. `up -d` recreates only the services whose definition
+    # changed and removes orphans (the queue when the runtime is Workers).
+    # First run is excluded: the unit start above already brought it up.
+    - name: Apply Compose changes to the running stack
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - -p
+          - "{{ system_compose_project_name }}"
+          - -f
+          - "{{ system_compose_dir }}/docker-compose.yml"
+          - up
+          - -d
+          - --remove-orphans
+      when:
+        - _system_compose_file_stat.stat.exists
+        - _system_compose_file_written is changed
+      changed_when: true
+    - name: Wait for the stack after a Compose change
+      ansible.builtin.command:
+        argv: ["{{ system_compose_dir }}/wait-ready.sh"]
+      when:
+        - _system_compose_file_stat.stat.exists
+        - _system_compose_file_written is changed
+      changed_when: false
 
     # docker compose up -d does not restart an already-running container just
     # because a bind-mounted config file's *content* changed (only container

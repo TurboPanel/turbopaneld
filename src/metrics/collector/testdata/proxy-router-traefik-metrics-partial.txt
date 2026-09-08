@@ -1,0 +1,13 @@
+# Freshly started Traefik v3: the global config families are registered, but
+# nothing has been routed yet — no service and no router series exist at all,
+# and no certificate has been issued. Every service/router-derived field must
+# degrade to null rather than reading as a confident zero.
+# HELP traefik_config_reloads_total Config reloads.
+# TYPE traefik_config_reloads_total counter
+traefik_config_reloads_total 1
+# HELP traefik_config_last_reload_success Last config reload success.
+# TYPE traefik_config_last_reload_success gauge
+traefik_config_last_reload_success 0
+# HELP traefik_entrypoint_requests_total How many HTTP requests processed on an entrypoint, partitioned by status code, protocol, and method.
+# TYPE traefik_entrypoint_requests_total counter
+traefik_entrypoint_requests_total{code="200",entrypoint="web",method="GET",protocol="http"} 0

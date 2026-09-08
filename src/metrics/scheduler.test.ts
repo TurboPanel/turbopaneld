@@ -5,11 +5,8 @@ import {
   type MetricsCollector,
   type MetricsCollectResult,
 } from "./collector/index.ts";
-import type { CollectorDepsV5 } from "./collector/types-v5.ts";
-import {
-  buildMetricsSampleV5,
-  METRICS_SCHEMA_VERSION_V5,
-} from "./contract-v5.ts";
+import type { CollectorDeps } from "./collector/types.ts";
+import { buildMetricsSample, METRICS_SCHEMA_VERSION } from "./contract.ts";
 import type { TopologySnapshot } from "./topology/types.ts";
 import {
   deterministicJitterMs,
@@ -205,7 +202,7 @@ function createFixtureCollectorFactory(): () => MetricsCollector {
   return () => {
     let sampleIndex = 0;
     let clockMs = 1_000_000;
-    const deps: Partial<CollectorDepsV5> = {
+    const deps: Partial<CollectorDeps> = {
       readProcFile(path: string) {
         if (path === "/proc/stat") {
           return sampleIndex === 0
@@ -229,11 +226,12 @@ function createFixtureCollectorFactory(): () => MetricsCollector {
       // runner never finishes the first collect before the assertion.
       countProcesses: () => 42,
       // Unlike GPU adapters (only invoked per topology-enumerated GPU, and
-      // this fixture's topology has none), ingress/database-proxy adapters
-      // are scrape-derived with no topology gate — `defaultDepsV5()`'s real
-      // adapters would otherwise attempt genuine loopback network calls on
-      // every tick here, breaking this test's hermetic/synchronous timing.
+      // this fixture's topology has none), the ingress/router/database-proxy
+      // adapters are scrape-derived with no topology gate — `defaultDeps()`'s
+      // real adapters would otherwise attempt genuine loopback network calls
+      // on every tick here, breaking this test's hermetic/synchronous timing.
       ingressAdapters: undefined,
+      routerAdapters: undefined,
       databaseProxyAdapters: undefined,
       // Same reasoning: the real `EventCollectorSet`'s default readers spawn
       // genuine subprocesses (`dmesg`, `timedatectl`) on their own internal
@@ -271,13 +269,12 @@ function createFakeCollector(
 function supportedSample(sequence: number): MetricsCollectResult {
   return {
     supported: true,
-    sample: buildMetricsSampleV5({
+    sample: buildMetricsSample({
       metadata: {
-        version: METRICS_SCHEMA_VERSION_V5,
+        version: METRICS_SCHEMA_VERSION,
         sampledAt: new Date(0).toISOString(),
         intervalSeconds: 60,
         sequence,
-        collectionMode: "baseline",
         topologyGeneration: 1,
         bootGeneration: 0,
       },
@@ -338,7 +335,6 @@ function makeScheduler(options: {
   primeMs?: number;
   logRateLimitMs?: number;
   onLog?: (level: "info" | "warn", message: string) => void;
-  collectionMode?: () => "baseline" | "live";
 }): MetricsScheduler {
   return new MetricsScheduler({
     serverId: options.serverId ?? "server-a",
@@ -346,7 +342,6 @@ function makeScheduler(options: {
     intervalMs: options.intervalMs ?? 1_000,
     jitterMaxMs: options.jitterMaxMs ?? 0,
     primeMs: options.primeMs ?? 0,
-    collectionMode: options.collectionMode,
     now: options.clock.now,
     setTimeoutFn: options.clock.setTimeoutFn as unknown as typeof setTimeout,
     clearTimeoutFn: options.clock
@@ -377,7 +372,7 @@ it("MetricsScheduler emits first metrics frame immediately on attach", async () 
   const frames = parseMetricsFrames(sent);
   assertEquals(frames.length, 1);
   assertEquals(frames[0].type, "metrics");
-  assertEquals(frames[0].metadata.version, METRICS_SCHEMA_VERSION_V5);
+  assertEquals(frames[0].metadata.version, METRICS_SCHEMA_VERSION);
   assertEquals(typeof frames[0].metadata.sequence, "number");
 });
 
@@ -1096,52 +1091,6 @@ it("setIntervalMs before the interval is armed takes effect on arm", async () =>
 
   await clock.advance(100); // armed with the updated cadence
   assertEquals(parseMetricsFrames(sent).length, 3);
-});
-
-it("MetricsScheduler asks the collectionMode callback on every tick", async () => {
-  const clock = new FakeClock();
-  const modes: Array<string | undefined> = [];
-  let mode: "baseline" | "live" = "baseline";
-  const scheduler = makeScheduler({
-    clock,
-    intervalMs: 1_000,
-    jitterMaxMs: 0,
-    collectionMode: () => mode,
-    collectorFactory: () => ({
-      collect(options: { sequence: number; collectionMode?: string }) {
-        modes.push(options.collectionMode);
-        return Promise.resolve(supportedSample(options.sequence));
-      },
-    }),
-  });
-
-  scheduler.attach(capturingSink([]));
-  await clock.advance(0);
-  mode = "live";
-  await clock.advance(1_000);
-  mode = "baseline";
-  await clock.advance(1_000);
-  assertEquals(modes, ["baseline", "live", "baseline"]);
-});
-
-it("MetricsScheduler defaults collectionMode to baseline", async () => {
-  const clock = new FakeClock();
-  const modes: Array<string | undefined> = [];
-  const scheduler = makeScheduler({
-    clock,
-    intervalMs: 1_000,
-    jitterMaxMs: 0,
-    collectorFactory: () => ({
-      collect(options: { sequence: number; collectionMode?: string }) {
-        modes.push(options.collectionMode);
-        return Promise.resolve(supportedSample(options.sequence));
-      },
-    }),
-  });
-
-  scheduler.attach(capturingSink([]));
-  await clock.advance(0);
-  assertEquals(modes, ["baseline"]);
 });
 
 it({

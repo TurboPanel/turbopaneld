@@ -1,7 +1,11 @@
 /**
  * Vendor-neutral ingress traffic adapter interface — one adapter per
- * loopback proxy sidecar (Caddy, Traefik). `ingress/index.ts`'s
+ * loopback web-server sidecar (Caddy). `ingress/index.ts`'s
  * `buildIngressSources` is the only orchestrator that calls these.
+ *
+ * The shared hosting Traefik is deliberately *not* here: v6 moved it to the
+ * host-wide `router/` domain (`router/adapter.ts`), which reports one
+ * singleton reading with no `sourceId` rather than an entry in this array.
  *
  * Unlike GPUs (topology-enumerated identity) an ingress source's presence is
  * scrape-derived: there is no topology list of "ingress sources" to iterate
@@ -9,7 +13,7 @@
  * (reachable + expected metrics present) and, if so, returns its own
  * `sourceId`/`sourceKind` alongside the reading.
  */
-import type { IngressSourceSampleV5 } from "../../contract-v5.ts";
+import type { IngressSourceSample } from "../../contract.ts";
 import type { CounterBaselineTracker } from "../baseline.ts";
 
 /**
@@ -18,7 +22,7 @@ import type { CounterBaselineTracker } from "../baseline.ts";
  * tick" — never fabricated, never coerced to `0`.
  */
 export type IngressReading = Partial<
-  Omit<IngressSourceSampleV5, "sourceId" | "sourceKind">
+  Omit<IngressSourceSample, "sourceId" | "sourceKind">
 >;
 
 /** Shared context every adapter needs to compute rates from cumulative counters. */
@@ -28,7 +32,7 @@ export type IngressReadContext = {
   seconds: number;
 };
 
-export type IngressAdapterId = "caddy" | "traefik";
+export type IngressAdapterId = "caddy";
 
 /**
  * One ingress telemetry source. `read` returning `null` means "this source
@@ -51,5 +55,4 @@ export type IngressAdapter = {
 /** The adapters `buildIngressSources` reads every tick. */
 export type IngressAdapterSet = {
   caddy: IngressAdapter;
-  traefik: IngressAdapter;
 };

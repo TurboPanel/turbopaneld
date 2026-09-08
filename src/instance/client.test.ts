@@ -5418,7 +5418,10 @@ it({
     await Deno.writeTextFile(`${tempDir}/license.id`, "license-123\n");
     await Deno.writeTextFile(`${tempDir}/license.token`, "token-abc\n");
 
-    const modes: Array<string | undefined> = [];
+    // v6 dropped the baseline/live `collectionMode` discriminator, so a
+    // collect is now observed only by the fact that it ran — cadence lives
+    // entirely in the scheduler's interval.
+    const collects: number[] = [];
     const client = new InstanceClient({
       config: {
         kind: "url",
@@ -5426,15 +5429,15 @@ it({
         wsBaseUrl: "wss://instance.test",
       },
       metricsCollectorFactory: () => ({
-        collect(options: { sequence: number; collectionMode?: string }) {
-          modes.push(options.collectionMode);
+        collect(options: { sequence: number }) {
+          collects.push(options.sequence);
           return Promise.resolve({
             supported: true as const,
             // Shape-only stub: the sink POST is stubbed to 404 and ignored.
             sample: {
               type: "metrics",
               sequence: options.sequence,
-            } as unknown as import("../metrics/contract-v5.ts").MetricsSampleV5,
+            } as unknown as import("../metrics/contract.ts").MetricsSample,
           });
         },
       }),
@@ -5456,9 +5459,9 @@ it({
       socket.open();
       await flushMicrotasks();
 
-      // First scheduled collect runs at baseline before any lease exists.
-      await waitFor("first collect", () => modes.length >= 1 || undefined);
-      assertEquals(modes[0], "baseline");
+      // First scheduled collect runs at the baseline cadence, before any
+      // lease exists.
+      await waitFor("first collect", () => collects.length >= 1 || undefined);
 
       const farFuture = new Date(Date.now() + 3_600_000).toISOString();
       socket.receive({
@@ -5565,6 +5568,39 @@ it({
         "2026-01-01T00:00:00.000Z",
       );
 
+      const capabilityPlan = {
+        liveMinIntervalSeconds: 10,
+        normalNicSlots: 2,
+        turboFabricEnabled: true,
+        extraFilesystemSlots: 0,
+        detailedBlockDeviceSlots: 2,
+        gpuSlots: 1,
+        gpuInterconnectEnabled: false,
+        physicalHardwareSignalSlots: 19,
+        managedIngressEnabled: true,
+        databaseProxyMetricsEnabled: true,
+        managedDockerEnabled: true,
+        hardwareHealthEventsEnabled: true,
+      };
+      socket.receive({
+        type: "capability-plan-update",
+        id: "cap-1",
+        plan: capabilityPlan,
+        generation: 3,
+        at: new Date().toISOString(),
+      });
+      const capabilityPlanResult = await waitFor(
+        "capability-plan-update-result",
+        () => lastFrameOfType(socket, "capability-plan-update-result"),
+      ) as { id?: string; ok?: boolean };
+      assertEquals(capabilityPlanResult.id, "cap-1");
+      assertEquals(capabilityPlanResult.ok, true);
+      const storedPlan = JSON.parse(
+        await Deno.readTextFile(`${tempDir}/metrics/capability-plan.json`),
+      ) as { plan?: unknown; generation?: number };
+      assertEquals(storedPlan.generation, 3);
+      assertEquals(storedPlan.plan, capabilityPlan);
+
       // A later push with drivetempEnabled already true is a no-op — only
       // the flip edge re-runs modprobe.
       socket.receive({
@@ -5645,7 +5681,7 @@ it({
         },
       );
 
-      const modesBefore = modes.length;
+      const collectsBefore = collects.length;
       socket.close(1000, "connection lost");
 
       const socket2 = await waitFor(
@@ -5655,13 +5691,13 @@ it({
       );
       socket2.open();
       await flushMicrotasks();
+      // Fresh lease manager: back to the baseline cadence despite the
+      // unexpired lease-b, so a collect still lands after the reconnect.
       await waitFor(
         "first collect after reconnect",
-        () => modes.length > modesBefore || undefined,
+        () => collects.length > collectsBefore || undefined,
         5_000,
       );
-      // Fresh lease manager: baseline despite the unexpired lease-b.
-      assertEquals(modes[modesBefore], "baseline");
     } finally {
       client.stop();
       restoreClientTime();

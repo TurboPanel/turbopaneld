@@ -375,7 +375,7 @@ export class NvmlGpuAdapter implements GpuAdapter {
 
   /**
    * Raw health-signal read for the events-phase collector to consume later
-   * — this adapter never synthesizes `MetricEventV5` rows itself, only
+   * — this adapter never synthesizes `MetricEvent` rows itself, only
    * exposes the counts/flags. Resolves (and caches) its own device handle
    * on demand, exactly like {@link read} — it does not require a prior
    * `read()` call for `gpu.gpuId` to have already populated the handle

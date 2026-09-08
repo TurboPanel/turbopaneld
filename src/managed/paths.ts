@@ -149,16 +149,22 @@ export function managedComposeProject(managedId: string): string {
 }
 
 /**
- * `<stateDir>/managed/<managedId>/backups` — written 0600 by the daemon
- * user itself (never chowned to the container engine user; see
- * `materialize.ts` `normalizeManagedFileOwnership`, which prunes this
+ * `<backupDir>/<managedId>` — the managed engine's backup artifacts, written
+ * 0600 by the daemon user itself (never chowned to the container engine user;
+ * see `materialize.ts` `normalizeManagedFileOwnership`, which prunes this
  * subtree).
+ *
+ * Lives under `LayoutPaths.backupDir` (`/backup` by default,
+ * `TURBOPANEL_BACKUP_DIR` to override) rather than inside the engine's own
+ * `<stateDir>/managed/<id>` tree, so an operator can put backups on separate
+ * storage without moving anything else. Repointing the override only affects
+ * *new* backups — nothing relocates an existing tree.
  */
 export function managedBackupsDir(
   layout: LayoutPaths,
   managedId: string,
 ): string {
-  return join(managedDir(layout, managedId), "backups");
+  return join(layout.backupDir, managedId);
 }
 
 /**

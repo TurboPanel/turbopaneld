@@ -1,10 +1,16 @@
 /**
  * Filesystem topology: wraps `collector/mounts.ts`'s mount-table parsing and
  * `collector/hosting.ts`/Docker data-root resolution, deduped by
- * {@link deriveFilesystemId} so the system root, the hosting path, and the
- * Docker data root — often the same physical filesystem — collapse to one
- * `FilesystemTopology` entry carrying every role that resolved onto it,
- * instead of three duplicate entries.
+ * {@link deriveFilesystemId} so the system root, the hosting path, the Docker
+ * data root, the backup root and the log directory — often the same physical
+ * filesystem — collapse to one `FilesystemTopology` entry carrying every role
+ * that resolved onto it, instead of five duplicate entries.
+ *
+ * The backup and log roles were added in v6 alongside the `managed.storage`
+ * family, which reports used/free bytes for both. Unlike the hosting path and
+ * the Docker data root, neither needs discovery: both are plain
+ * `LayoutPaths` fields, so their deps are synchronous string getters rather
+ * than probes that can fail.
  */
 import {
   type MountEntry,
@@ -26,6 +32,10 @@ export type FilesystemTopologyDeps = {
   ) => StatfsResult | null | Promise<StatfsResult | null>;
   resolveHostingPath: () => string | Promise<string>;
   resolveDockerDataRoot: () => Promise<string | null>;
+  /** `LayoutPaths.backupDir` — always a concrete path, never probed. */
+  resolveBackupPath: () => string;
+  /** `LayoutPaths.logDir` — always a concrete path, never probed. */
+  resolveLogsPath: () => string;
   io: IdentityIo;
   sysRoot?: string;
 };
@@ -94,6 +104,11 @@ export async function collectFilesystemTopology(
       { path: "/", role: "root" },
       { path: hostingPath, role: "hosting" },
       { path: dockerRoot, role: "docker" },
+      // `mountForPath` walks up to the nearest containing mount, so a backup
+      // or log directory that does not exist yet still resolves to the
+      // filesystem it will live on — the same forgiving lookup `/` gets.
+      { path: deps.resolveBackupPath(), role: "backup" },
+      { path: deps.resolveLogsPath(), role: "logs" },
     ],
     mountEntries,
     deps.io,

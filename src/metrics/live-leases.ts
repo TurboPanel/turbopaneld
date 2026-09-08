@@ -9,7 +9,6 @@
  * nudge is ever required. Leases are never persisted — a daemon restart or
  * socket reconnect constructs a fresh manager and starts at baseline.
  */
-import type { MetricsCollectionModeV5 as MetricsCollectionMode } from "./contract-v5.ts";
 import { METRICS_INTERVAL_MS } from "./scheduler.ts";
 
 /** Live cadence while at least one lease is active. */
@@ -93,10 +92,6 @@ export class LiveLeaseManager {
     return this.hasActiveLease()
       ? this.#liveIntervalMs
       : this.#baselineIntervalMs;
-  }
-
-  collectionMode(): MetricsCollectionMode {
-    return this.hasActiveLease() ? "live" : "baseline";
   }
 
   #applyCadence(): void {

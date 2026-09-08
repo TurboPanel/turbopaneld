@@ -1,0 +1,14 @@
+# Managed by instance-launch (Workers dev runtime only). Fires the cron
+# oneshot at the top of every minute — the local stand-in for the deployed
+# Worker's `* * * * *` trigger, which `wrangler dev` does not run.
+[Unit]
+Description=TurboPanel Workers dev cron (every minute)
+After={{ instance_service_name }}.service
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+AccuracySec=1s
+Unit={{ instance_cron_service_name }}.service
+
+[Install]
+WantedBy=timers.target

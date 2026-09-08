@@ -247,12 +247,12 @@ test("buildGpuSamples invalidates the Intel engine-busy baseline on an unreadabl
     sysfs: new SysfsGpuAdapter({ io, sysRoot: SYS_ROOT }),
   };
   const tracker = new CounterBaselineTracker();
-  const tick = () =>
-    buildGpuSamples([gpu], adapters, {
+  const tick = async () =>
+    (await buildGpuSamples([gpu], adapters, {
       tracker,
       bootGeneration: 1,
       seconds: 10,
-    });
+    })).samples;
 
   // Tick 1: readable, first observation — no prior baseline yet.
   let samples = await tick();

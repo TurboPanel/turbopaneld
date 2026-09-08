@@ -12,6 +12,7 @@ import type {
 import { sanitizeForLog } from "../../logger.ts";
 import {
   changeReplicationSourceSql,
+  connectionCensusSql,
   createClientAccountSql,
   createDatabaseSql,
   createNetworkAccountSql,
@@ -31,6 +32,12 @@ import {
   showReplicaStatusSql,
   versionSql,
 } from "./mariadb-sql.ts";
+import {
+  DOWN_ENGINE_CENSUS,
+  type ManagedEngineCensus,
+  parseMysqlConnectionCensus,
+  UNREAD_ENGINE_CENSUS,
+} from "./census.ts";
 import type {
   ManagedEngineBackupRuntime,
   ManagedEngineBootstrapContext,
@@ -607,6 +614,27 @@ export const mariadbManagedEngineRuntime: ManagedEngineRuntime = {
         sanitizeForLog(lastError)
       }`,
     );
+  },
+
+  async readCensus(ctx: ManagedEngineContext): Promise<ManagedEngineCensus> {
+    // The same probe `waitReady` polls, taken once.
+    const ping = await execMariadb(ctx, [
+      "mariadb-admin",
+      "ping",
+      "--protocol=socket",
+      "-u",
+      ctx.rootUsername,
+    ]);
+    if (!ping.success) return DOWN_ENGINE_CENSUS;
+    try {
+      return parseMysqlConnectionCensus(
+        await runMariadbQuery(ctx, connectionCensusSql()),
+      );
+    } catch {
+      // Alive but the census was refused (a volume without socket auth and
+      // no password on this path): healthy, connections unknown.
+      return UNREAD_ENGINE_CENSUS;
+    }
   },
 
   async readVersion(ctx: ManagedEngineContext): Promise<string | undefined> {

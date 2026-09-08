@@ -1,31 +1,37 @@
 /**
  * Linux collector orchestrator — v5 assembly.
  *
- * Builds one `MetricsSampleV5` per tick by composing this tick's
+ * Builds one `MetricsSample` per tick by composing this tick's
  * `TopologySnapshot` (identity + topology generation + boot generation), the
  * shared counter-baseline layer (`baseline.ts`), and every v5 parser module.
  * `gpus` is populated via `gpu/index.ts`'s `buildGpuSamples` when
- * `CollectorDepsV5.gpuAdapters` is wired (production always wires it —
- * `collector/index.ts`'s `defaultDepsV5`); `ingressSources`/
- * `databaseProxies` are populated the same way via `ingress/index.ts`'s
- * `buildIngressSources` / `database-proxy/index.ts`'s
- * `buildDatabaseProxies` when their respective adapter sets are wired.
+ * `CollectorDeps.gpuAdapters` is wired (production always wires it —
+ * `collector/index.ts`'s `defaultDeps`); `ingressSources`/
+ * `databaseProxies`/`router` are populated the same way via
+ * `ingress/index.ts`'s `buildIngressSources`, `database-proxy/index.ts`'s
+ * `buildDatabaseProxies` and `router/index.ts`'s `buildRouterSample` when
+ * their respective adapter sets are wired.
  * `hardwareSignals` is populated via `hardware-signals.ts`'s
  * `buildHardwareSignalSamples` for every topology-identified signal
- * (`[]` on a VM, since topology never identifies any). `events` is
- * populated via `CollectorDepsV5.eventCollectors`
+ * (`[]` on a VM, since topology never identifies any) — including the
+ * entity-joined GPU and service-drive readings, which is why GPU sampling
+ * runs ahead of it (its adapter merge is their only source) and block-device
+ * sampling no longer needs to run after it. `events` is
+ * populated via `CollectorDeps.eventCollectors`
  * (`events/index.ts`'s `EventCollectorSet`) when wired. Absent (e.g. a test
  * collector), each of these stays `[]`.
  */
 import {
-  buildMetricsSampleV5,
-  type CpuDetailSampleV5,
-  type HostMetricsV5,
-  type MemoryDetailSampleV5,
-  METRICS_SCHEMA_VERSION_V5,
-  type MetricsCollectionModeV5,
-  type MetricsSampleV5,
-} from "../contract-v5.ts";
+  buildMetricsSample,
+  type DiagnosticsSample,
+  type DockerUsageSample,
+  type HostMetrics,
+  METRICS_SCHEMA_VERSION,
+  type MetricsSample,
+  type RouterSample,
+  type StorageSample,
+} from "../contract.ts";
+import { truncateSampleToCapabilityPlan } from "../capability-plan-truncate.ts";
 import { computeSlotMapping } from "../topology/slot-mapping.ts";
 import {
   EMPTY_TOPOLOGY_OVERRIDES,
@@ -34,29 +40,35 @@ import {
 } from "../topology/types.ts";
 import { CounterBaselineTracker } from "./baseline.ts";
 import {
-  type BlockDeviceTemperatures,
   buildBlockDeviceSamples,
-  buildBlockDeviceTemperatures,
   type HostDiskAggregates,
   hostDiskAggregates,
 } from "./block-devices.ts";
 import {
-  cpuBusyPercentV5,
-  type CpuPercentagesV5,
-  saturatedCoreCountV5,
+  cpuBusyPercent,
+  type CpuPercentages,
+  saturatedCoreCount,
 } from "./cpu.ts";
-import { buildCpuDetailSample } from "./cpu-detail.ts";
 import { buildDatabaseProxies } from "./database-proxy/index.ts";
 import type { EventDetectContext } from "./events/index.ts";
 import {
   buildFilesystemSamples,
   probeRootFilesystemCapacity,
 } from "./filesystem.ts";
-import { buildGpuSamples } from "./gpu/index.ts";
+import { buildGpuSamples, emptyGpuSamplesResult } from "./gpu/index.ts";
 import { buildHardwareSignalSamples } from "./hardware-signals.ts";
 import { buildIngressSources } from "./ingress/index.ts";
+import { buildRouterSample } from "./router/index.ts";
 import { readMemoryGauges } from "./memory.ts";
-import { buildMemoryDetailSample } from "./memory-detail.ts";
+import { buildDiagnosticsSample } from "./diagnostics.ts";
+import {
+  type DirectoryUsageSnapshot,
+  storageBytesFromSnapshot,
+} from "./directory-usage.ts";
+import {
+  emptyManagedEngineCensus,
+  type ManagedEngineCensusReading,
+} from "./managed-engines.ts";
 import { parseProcMounts } from "./mounts.ts";
 import { buildNetworkDeviceSamples } from "./network.ts";
 import { parseDiskstatsRows } from "./parse-diskstats.ts";
@@ -87,8 +99,8 @@ import {
   type VmstatRates,
   vmstatRates,
 } from "./parse-vmstat.ts";
-import type { CollectorDepsV5 } from "./types-v5.ts";
 import type {
+  CollectorDeps,
   CpuCounters,
   MetricsCollector,
   MetricsCollectResult,
@@ -151,7 +163,7 @@ type RawTexts = {
   mdstatText: string | undefined;
 };
 
-async function readRawTexts(deps: CollectorDepsV5): Promise<RawTexts> {
+async function readRawTexts(deps: CollectorDeps): Promise<RawTexts> {
   const [
     statText,
     memText,
@@ -223,15 +235,13 @@ function emptySample(
   nowMs: number,
   seconds: number,
   sequence: number,
-  collectionMode: MetricsCollectionModeV5,
-): MetricsSampleV5 {
-  return buildMetricsSampleV5({
+): MetricsSample {
+  return buildMetricsSample({
     metadata: {
-      version: METRICS_SCHEMA_VERSION_V5,
+      version: METRICS_SCHEMA_VERSION,
       sampledAt: new Date(nowMs).toISOString(),
       intervalSeconds: seconds,
       sequence,
-      collectionMode,
       topologyGeneration: 0,
       bootGeneration: 0,
     },
@@ -327,7 +337,7 @@ type CpuTick = {
   currentCores: Record<string, CpuCounters>;
   prevCpu: CpuCounters | null;
   prevCores: Record<string, CpuCounters>;
-  cpuPct: CpuPercentagesV5;
+  cpuPct: CpuPercentages;
   saturatedCoreCount: number | null;
   procs: { running: number | null; blocked: number | null };
 };
@@ -363,8 +373,8 @@ function parseCpuTick(
     currentCores,
     prevCpu,
     prevCores,
-    cpuPct: cpuBusyPercentV5(prevCpu, currentCpu, seconds),
-    saturatedCoreCount: saturatedCoreCountV5(prevCores, currentCores, seconds),
+    cpuPct: cpuBusyPercent(prevCpu, currentCpu, seconds),
+    saturatedCoreCount: saturatedCoreCount(prevCores, currentCores, seconds),
     procs: whenPresentOr(statText, parseStatProcs, EMPTY_PROCS),
   };
 }
@@ -499,7 +509,6 @@ function readDiskTick(
   topology: TopologySnapshot["blockDevices"],
   diskstatsText: string | undefined,
   rates: TickRates,
-  temperatures: BlockDeviceTemperatures,
 ): DiskTick {
   const counters = whenPresentOr(diskstatsText, parseDiskstatsRows, {});
   return {
@@ -509,7 +518,6 @@ function readDiskTick(
       rates.tracker,
       rates.bootGeneration,
       rates.seconds,
-      temperatures,
     ),
     aggregates: hostDiskAggregates(
       topology,
@@ -522,16 +530,16 @@ function readDiskTick(
 }
 
 async function collectGpuSamples(
-  deps: CollectorDepsV5,
+  deps: CollectorDeps,
   gpus: TopologySnapshot["gpus"],
   rates: TickRates,
 ) {
-  if (!deps.gpuAdapters) return [];
+  if (!deps.gpuAdapters) return emptyGpuSamplesResult();
   return await buildGpuSamples(gpus, deps.gpuAdapters, rates);
 }
 
 async function collectEvents(
-  deps: CollectorDepsV5,
+  deps: CollectorDeps,
   ctx: Omit<EventDetectContext, "isPhysical">,
 ) {
   if (!deps.eventCollectors) return [];
@@ -539,22 +547,65 @@ async function collectEvents(
 }
 
 async function readProcessCount(
-  deps: CollectorDepsV5,
+  deps: CollectorDeps,
 ): Promise<number | null> {
   if (deps.countProcesses) return await deps.countProcesses();
   return await countProcessesInProc();
 }
 
-function optionalSampleFields(
-  cpuDetail: CpuDetailSampleV5 | null,
-  memoryDetail: MemoryDetailSampleV5 | null,
-): {
-  cpuDetail?: CpuDetailSampleV5;
-  memoryDetail?: MemoryDetailSampleV5;
+/**
+ * The presence-gated singleton families, spread into the sample only when
+ * actually read. Omitting the key (rather than assigning `undefined`) is what
+ * keeps "no router on this host" distinguishable from "a router that reported
+ * nothing" all the way through to storage.
+ */
+function optionalSampleFields(parts: {
+  diagnostics: DiagnosticsSample | null;
+  router: RouterSample | null;
+  storage: StorageSample | null;
+  dockerUsage: DockerUsageSample | null;
+}): {
+  diagnostics?: DiagnosticsSample;
+  router?: RouterSample;
+  storage?: StorageSample;
+  dockerUsage?: DockerUsageSample;
 } {
   return {
-    ...(cpuDetail ? { cpuDetail } : {}),
-    ...(memoryDetail ? { memoryDetail } : {}),
+    ...(parts.diagnostics ? { diagnostics: parts.diagnostics } : {}),
+    ...(parts.router ? { router: parts.router } : {}),
+    ...(parts.storage ? { storage: parts.storage } : {}),
+    ...(parts.dockerUsage ? { dockerUsage: parts.dockerUsage } : {}),
+  };
+}
+
+/**
+ * Build the host-wide `managed.storage` sample from the three cached
+ * readings: the directory walker's bytes, the Docker total, and the
+ * managed-engine census.
+ *
+ * Returns `null` — omitting the family entirely — until the directory-usage
+ * walker has produced at least one result. A row of all-`null` bytes would be
+ * indistinguishable from a host whose disks genuinely could not be read,
+ * and it would cost a stored row per sample from the moment the daemon
+ * starts.
+ *
+ * The twelve per-engine census fields come from `managed-engines.ts`'s
+ * sampler verbatim: an engine with no instance on the host stays `null`,
+ * one with instances present reports its counts. Before the first census
+ * lands (or with no Docker at all) every engine group is `null`.
+ */
+function buildStorageSample(
+  usage: DirectoryUsageSnapshot | null,
+  dockerUsedBytes: number | null,
+  engines: ManagedEngineCensusReading | null,
+): StorageSample | null {
+  if (usage?.computedAtMs == null) return null;
+  const census = engines ?? emptyManagedEngineCensus();
+  return {
+    ...storageBytesFromSnapshot(usage, dockerUsedBytes),
+    postgres: { ...census.postgres },
+    mysql: { ...census.mysql },
+    mariadb: { ...census.mariadb },
   };
 }
 
@@ -573,7 +624,7 @@ function buildHostMetrics(parts: {
     availableBytes: number | null;
     freeInodes: number | null;
   } | null;
-}): HostMetricsV5 {
+}): HostMetrics {
   return {
     cpu: {
       busyPercent: parts.cpu.cpuPct.busyPercent,
@@ -650,12 +701,12 @@ function monitoredNetworkDevices(
 export class LinuxMetricsCollector implements MetricsCollector {
   #previous: PreviousCpuSnapshot | undefined;
   readonly #tracker = new CounterBaselineTracker();
-  readonly #deps: CollectorDepsV5;
+  readonly #deps: CollectorDeps;
   readonly #nominalIntervalSeconds: number;
   readonly #pageSizeBytes: number;
 
   constructor(
-    deps: CollectorDepsV5,
+    deps: CollectorDeps,
     options?: { nominalIntervalSeconds?: number },
   ) {
     this.#deps = deps;
@@ -666,12 +717,10 @@ export class LinuxMetricsCollector implements MetricsCollector {
   async collect(options: {
     sequence: number;
     nowMs?: number;
-    collectionMode?: MetricsCollectionModeV5;
   }): Promise<MetricsCollectResult> {
-    const collectionMode = options.collectionMode ?? "baseline";
     const nowMs = options.nowMs ?? this.#deps.now();
     try {
-      return await this.#collectTick(options.sequence, nowMs, collectionMode);
+      return await this.#collectTick(options.sequence, nowMs);
     } catch {
       return {
         supported: true,
@@ -679,7 +728,6 @@ export class LinuxMetricsCollector implements MetricsCollector {
           nowMs,
           this.#nominalIntervalSeconds,
           options.sequence,
-          collectionMode,
         ),
       };
     }
@@ -688,7 +736,6 @@ export class LinuxMetricsCollector implements MetricsCollector {
   async #collectTick(
     sequence: number,
     nowMs: number,
-    collectionMode: MetricsCollectionModeV5,
   ): Promise<MetricsCollectResult> {
     const [snapshot, raw, overrides] = await Promise.all([
       this.#deps.collectTopology(),
@@ -737,7 +784,10 @@ export class LinuxMetricsCollector implements MetricsCollector {
       bootGeneration,
       seconds,
     );
-    const gpus = await collectGpuSamples(this.#deps, snapshot.gpus, rates);
+    // GPU sampling leads hardware signals: GPU temperature/power are
+    // `hardware.physical` signals now, and this merge is their only source.
+    const gpuResult = await collectGpuSamples(this.#deps, snapshot.gpus, rates);
+    const gpus = gpuResult.samples;
     const ingressSources = await buildIngressSources(
       this.#deps.ingressAdapters,
       rates,
@@ -746,6 +796,10 @@ export class LinuxMetricsCollector implements MetricsCollector {
       this.#deps.databaseProxyAdapters,
       rates,
     );
+    const router = await buildRouterSample(this.#deps.routerAdapters, {
+      ...rates,
+      nowMs,
+    });
     const hardwareSignalResult = await buildHardwareSignalSamples(
       snapshot.hardwareSignals,
       {
@@ -754,22 +808,19 @@ export class LinuxMetricsCollector implements MetricsCollector {
         tracker: this.#tracker,
         bootGeneration,
         seconds,
+        gpuThermals: gpuResult.thermals,
+        blockDevices: snapshot.blockDevices,
       },
     );
-    // Disk sampling trails hardware signals: drive temperature is joined out
-    // of the sensor catalog by kernel name (`buildBlockDeviceTemperatures`).
-    const disks = readDiskTick(
-      snapshot.blockDevices,
-      raw.diskstatsText,
-      rates,
-      buildBlockDeviceTemperatures(hardwareSignalResult.samples),
-    );
+    const disks = readDiskTick(snapshot.blockDevices, raw.diskstatsText, rates);
     const mountEntries = whenPresentOr(raw.mountsText, parseProcMounts, []);
 
-    const cpuDetail = await buildCpuDetailSample({
+    const diagnostics = await buildDiagnosticsSample({
       io: this.#deps.io,
       sysRoot: this.#deps.sysRoot,
       statText: raw.statText,
+      memText: raw.memText,
+      vmstatText: raw.vmstatText,
       prevCpu: cpu.prevCpu,
       currCpu: cpu.currentCpu,
       currCores: cpu.currentCores,
@@ -777,13 +828,13 @@ export class LinuxMetricsCollector implements MetricsCollector {
       bootGeneration,
       seconds,
     });
-    const memoryDetail = buildMemoryDetailSample({
-      memText: raw.memText,
-      vmstatText: raw.vmstatText,
-      tracker: this.#tracker,
-      bootGeneration,
-      seconds,
-    });
+    const directoryUsage = this.#deps.directoryUsage?.() ?? null;
+    const dockerUsageReading = this.#deps.dockerUsage?.() ?? null;
+    const storage = buildStorageSample(
+      directoryUsage,
+      dockerUsageReading?.dockerUsedBytes ?? null,
+      this.#deps.managedEngines?.() ?? null,
+    );
     const events = await collectEvents(this.#deps, {
       nowMs,
       snapshot,
@@ -791,6 +842,7 @@ export class LinuxMetricsCollector implements MetricsCollector {
       bootGeneration,
       seconds,
       gpus,
+      gpuThermals: gpuResult.thermals,
       hardwareSignals: hardwareSignalResult.samples,
       hardwareSignalCandidates: hardwareSignalResult.candidates,
       oomKillTotal: memory.vmstat.oomKill,
@@ -801,13 +853,12 @@ export class LinuxMetricsCollector implements MetricsCollector {
       sysRoot: this.#deps.sysRoot,
     });
 
-    const sample = buildMetricsSampleV5({
+    const sample = buildMetricsSample({
       metadata: {
-        version: METRICS_SCHEMA_VERSION_V5,
+        version: METRICS_SCHEMA_VERSION,
         sampledAt: new Date(nowMs).toISOString(),
         intervalSeconds: seconds,
         sequence,
-        collectionMode,
         topologyGeneration: snapshot.generation,
         bootGeneration,
       },
@@ -829,8 +880,26 @@ export class LinuxMetricsCollector implements MetricsCollector {
       ingressSources,
       databaseProxies,
       events,
-      ...optionalSampleFields(cpuDetail, memoryDetail),
+      ...optionalSampleFields({
+        diagnostics,
+        router,
+        storage,
+        dockerUsage: dockerUsageReading?.usage ?? null,
+      }),
     });
+
+    const storedPlan = this.#deps.resolveCapabilityPlan
+      ? await this.#deps.resolveCapabilityPlan()
+      : undefined;
+    // Self-hosted never caps outbound samples — ignore a leftover plan so
+    // enroll/reconnect cannot start dropping GPUs, filesystems, or signals.
+    const outgoing = storedPlan && !this.#deps.skipCapabilityPlanTruncation
+      ? truncateSampleToCapabilityPlan(
+        sample,
+        storedPlan.plan,
+        computeSlotMapping(snapshot, overrides),
+      )
+      : sample;
 
     this.#previous = {
       atMs: nowMs,
@@ -838,6 +907,6 @@ export class LinuxMetricsCollector implements MetricsCollector {
       cpu: cpu.currentCpu,
       cores: cpu.currentCores,
     };
-    return { supported: true, sample };
+    return { supported: true, sample: outgoing };
   }
 }

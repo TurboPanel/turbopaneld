@@ -25,6 +25,15 @@ export const PROD_UI_DIR_DEFAULT = "/opt/turbopanel/share/ui";
 export const PROD_CONFIG_DIR_DEFAULT = "/etc/turbopanel";
 export const PROD_STATE_DIR_DEFAULT = "/var/lib/turbopanel";
 export const PROD_LOG_DIR_DEFAULT = "/var/log/turbopanel";
+/**
+ * Managed-engine backup root. Deliberately **not** under the FHS state tree:
+ * backups are the one artifact an operator is expected to point at other
+ * storage (a second disk, a NAS mount, an attached volume), so it gets a
+ * top-level path of its own that `TURBOPANEL_BACKUP_DIR` overrides, and the
+ * same default in development and production — a dev box that fills `/backup`
+ * should fill the same path a production one does.
+ */
+export const PROD_BACKUP_DIR_DEFAULT = "/backup";
 export const PROD_RUN_DIR_DEFAULT = "/run/turbopanel";
 export const PROD_DAEMON_ROOT_DEFAULT = join(PROD_LIB_DIR_DEFAULT, "daemon");
 /** Production Ansible assets ship under share/orchestration in release installs. */
@@ -104,6 +113,14 @@ export interface LayoutPaths {
   configDir: string;
   stateDir: string;
   logDir: string;
+  /**
+   * Managed-engine backup root (`/backup`), overridable with
+   * `TURBOPANEL_BACKUP_DIR`. Per-engine artifacts live at
+   * `<backupDir>/<managedId>/` — see `managed/paths.ts`'s
+   * `managedBackupsDir`. Changing the override only affects *new* backups;
+   * nothing relocates an existing tree.
+   */
+  backupDir: string;
   runDir: string;
   daemonRootDefault: string;
   runtimesDir: string;
@@ -314,6 +331,13 @@ export function resolveLayout(
     PROD_LOG_DIR_DEFAULT,
     mode,
   );
+  const backupDir = pickPath(
+    env,
+    "TURBOPANEL_BACKUP_DIR",
+    PROD_BACKUP_DIR_DEFAULT,
+    PROD_BACKUP_DIR_DEFAULT,
+    mode,
+  );
   const runDir = pickPath(
     env,
     "TURBOPANEL_RUN_DIR",
@@ -401,6 +425,7 @@ export function resolveLayout(
     configDir,
     stateDir,
     logDir,
+    backupDir,
     runDir,
     daemonRootDefault,
     runtimesDir,

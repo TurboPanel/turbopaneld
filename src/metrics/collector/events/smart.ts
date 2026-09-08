@@ -15,7 +15,7 @@
  */
 import type { EventCollector, EventDetectContext } from "./types.ts";
 import { makeEvent } from "./types.ts";
-import type { MetricEventV5 } from "../../contract-v5.ts";
+import type { MetricEvent } from "../../contract.ts";
 
 export const DEFAULT_SMART_INTERVAL_MS = 10 * 60_000;
 
@@ -80,7 +80,7 @@ type SmartEventKind =
   | "nvme_media_error";
 
 function emitRisingCritical(
-  events: MetricEventV5[],
+  events: MetricEvent[],
   kind: SmartEventKind,
   nowMs: number,
   entityId: string,
@@ -103,8 +103,8 @@ export class SmartEventCollector implements EventCollector {
     this.#intervalMs = deps?.intervalMs ?? DEFAULT_SMART_INTERVAL_MS;
   }
 
-  async detect(ctx: EventDetectContext): Promise<MetricEventV5[]> {
-    const events: MetricEventV5[] = [];
+  async detect(ctx: EventDetectContext): Promise<MetricEvent[]> {
+    const events: MetricEvent[] = [];
     const physicalDisks = ctx.snapshot.blockDevices.filter((device) =>
       device.deviceType === "physical"
     );
@@ -120,7 +120,7 @@ export class SmartEventCollector implements EventCollector {
     deviceId: string,
     kernelName: string,
     ctx: EventDetectContext,
-    events: MetricEventV5[],
+    events: MetricEvent[],
   ): Promise<void> {
     const last = this.#lastRunMs.get(deviceId);
     if (last !== undefined && ctx.nowMs - last < this.#intervalMs) return;

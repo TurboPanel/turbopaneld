@@ -1,0 +1,53 @@
+# Shared hosting-ingress Traefik v3 metrics-entrypoint scrape — one
+# customer-facing entrypoint ("web"), two backend services (three servers
+# across them, one down), two routers, a retry, one 5xx, and the daemon's own
+# self-scrapes of the "metrics" entrypoint (nonzero, to prove they never leak
+# into the customer-traffic fields).
+#
+# `traefik_router_*` appears only because src/deploy/ingress.ts passes
+# --metrics.prometheus.addRoutersLabels=true; Traefik defaults it off.
+# HELP traefik_config_reloads_total Config reloads.
+# TYPE traefik_config_reloads_total counter
+traefik_config_reloads_total 12
+# HELP traefik_config_last_reload_success Last config reload success.
+# TYPE traefik_config_last_reload_success gauge
+traefik_config_last_reload_success 1.7671e+09
+# HELP traefik_open_connections How many open connections exist, by entrypoint and protocol.
+# TYPE traefik_open_connections gauge
+traefik_open_connections{entrypoint="web",protocol="TCP"} 2
+traefik_open_connections{entrypoint="web",protocol="UDP"} 1
+traefik_open_connections{entrypoint="metrics",protocol="TCP"} 9
+# HELP traefik_tls_certs_not_after Certificate expiration timestamp.
+# TYPE traefik_tls_certs_not_after gauge
+traefik_tls_certs_not_after{cn="a.example.com",sans="a.example.com",serial="01"} 1.7714e+09
+traefik_tls_certs_not_after{cn="b.example.com",sans="b.example.com",serial="02"} 1.7692e+09
+# HELP traefik_entrypoint_requests_total How many HTTP requests processed on an entrypoint, partitioned by status code, protocol, and method.
+# TYPE traefik_entrypoint_requests_total counter
+traefik_entrypoint_requests_total{code="200",entrypoint="web",method="GET",protocol="http"} 90
+traefik_entrypoint_requests_total{code="404",entrypoint="web",method="GET",protocol="http"} 10
+traefik_entrypoint_requests_total{code="200",entrypoint="metrics",method="GET",protocol="http"} 5000
+# HELP traefik_router_requests_total How many HTTP requests are processed on a router.
+# TYPE traefik_router_requests_total counter
+traefik_router_requests_total{code="200",method="GET",protocol="http",router="site-a@docker",service="hosting-svc@docker"} 80
+traefik_router_requests_total{code="200",method="GET",protocol="http",router="site-b@docker",service="other-svc@docker"} 15
+# HELP traefik_service_requests_total How many HTTP requests processed on a service.
+# TYPE traefik_service_requests_total counter
+traefik_service_requests_total{code="200",method="GET",protocol="http",service="hosting-svc@docker"} 80
+traefik_service_requests_total{code="503",method="GET",protocol="http",service="hosting-svc@docker"} 5
+traefik_service_requests_total{code="200",method="GET",protocol="http",service="other-svc@docker"} 15
+# HELP traefik_service_request_duration_seconds How long it took to process the request on a service.
+# TYPE traefik_service_request_duration_seconds histogram
+traefik_service_request_duration_seconds_sum{code="200",method="GET",protocol="http",service="hosting-svc@docker"} 8.0
+traefik_service_request_duration_seconds_count{code="200",method="GET",protocol="http",service="hosting-svc@docker"} 80
+traefik_service_request_duration_seconds_sum{code="503",method="GET",protocol="http",service="hosting-svc@docker"} 0.5
+traefik_service_request_duration_seconds_count{code="503",method="GET",protocol="http",service="hosting-svc@docker"} 5
+traefik_service_request_duration_seconds_sum{code="200",method="GET",protocol="http",service="other-svc@docker"} 1.5
+traefik_service_request_duration_seconds_count{code="200",method="GET",protocol="http",service="other-svc@docker"} 15
+# HELP traefik_service_retries_total How many request retries happened on a service.
+# TYPE traefik_service_retries_total counter
+traefik_service_retries_total{service="hosting-svc@docker"} 4
+# HELP traefik_service_server_up Backend server up status.
+# TYPE traefik_service_server_up gauge
+traefik_service_server_up{service="hosting-svc@docker",url="http://172.18.0.2:80"} 1
+traefik_service_server_up{service="hosting-svc@docker",url="http://172.18.0.3:80"} 0
+traefik_service_server_up{service="other-svc@docker",url="http://172.18.0.4:80"} 1

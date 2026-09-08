@@ -178,6 +178,17 @@ opt-in via `turbopanel_instance_secret_rotate` (default `false`): prepends
 `src/orchestration/ansible.test.ts` pins the default, the gate expression, the
 ownership/mode, and the templated env lines.
 
+**Workers dev runtime extras (instance-launch):** `turbopanel-instance-cron.timer`
+hits wrangler's local scheduled-trigger endpoint every minute, because
+`wrangler dev` never fires the Worker's cron; the units are installed only when
+`turbopanel_instance_runtime == 'workers'` and removed otherwise. The Workers
+dev vars also carry Stripe from two by-hand files under the instance config dir
+(`.stripe_secret_key`, `.stripe_webhook_signing_secret`) so a re-converge keeps
+them. `system-compose` re-applies a changed Compose file to the running stack
+(`docker compose up -d --remove-orphans`) — the stack unit is a oneshot, so
+`state: started` alone never reached Docker and the runtime switch used to die
+on a closed Postgres port.
+
 ---
 
 

@@ -115,6 +115,45 @@ test("DockerClient info reads /info and throws on HTTP error", async () => {
   failing.close();
 });
 
+test("DockerClient systemDf asks for every object type explicitly and throws on HTTP error", async () => {
+  const seen: string[] = [];
+  const client = new DockerClient(undefined, {
+    fetchImpl: (url) => {
+      seen.push(url);
+      return Promise.resolve(
+        jsonResponse({
+          LayersSize: 6000,
+          Images: [{ Size: 4000, Containers: 2 }],
+          Containers: [{ SizeRw: 800 }],
+          Volumes: [{ UsageData: { Size: 700, RefCount: 1 } }],
+          BuildCache: [{ Size: 60, InUse: true }],
+        }),
+      );
+    },
+  });
+  const df = await client.systemDf();
+  assertEquals(df.LayersSize, 6000);
+  assertEquals(df.Images?.length, 1);
+  assertEquals(df.Volumes?.[0].UsageData?.RefCount, 1);
+  // All four types named explicitly, so the response shape stays deterministic
+  // across Engine versions rather than depending on endpoint defaults.
+  assertEquals(
+    seen[0],
+    `${DOCKER_HTTP_ORIGIN}/system/df?type=image&type=container&type=volume&type=build-cache`,
+  );
+  client.close();
+
+  const failing = new DockerClient(undefined, {
+    fetchImpl: () => Promise.resolve(new Response("no", { status: 500 })),
+  });
+  await assertRejects(
+    () => failing.systemDf(),
+    Error,
+    "docker system df failed",
+  );
+  failing.close();
+});
+
 test("DockerClient listContainers encodes all and throws on HTTP error", async () => {
   const seen: string[] = [];
   const client = new DockerClient(undefined, {

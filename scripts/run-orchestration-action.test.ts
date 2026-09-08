@@ -205,6 +205,15 @@ test("optionalDevServiceExtraArgs emits ansible -e pairs from env", () => {
   assertEquals(args.includes("turbopanel_optional_dbstudio=true"), true);
   assertEquals(args.includes("turbopanel_optional_ui=false"), true);
   assertEquals(args.includes("turbopanel_optional_website=true"), true);
+  // Stripe listen is off unless asked for: it needs a hand-supplied test key.
+  assertEquals(args.includes("turbopanel_optional_stripe_listen=false"), true);
+  const stripeOn = optionalDevServiceExtraArgs(
+    fakeEnv({ TURBOPANEL_OPTIONAL_STRIPE_LISTEN: "yes" }),
+  );
+  assertEquals(
+    stripeOn.includes("turbopanel_optional_stripe_listen=true"),
+    true,
+  );
 });
 
 test("devInstanceExtraArgs includes SSH repo urls and workers postgres expose", () => {

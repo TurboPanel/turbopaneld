@@ -18,7 +18,7 @@ Certificate authorities: `../../../turbopanel/src/lib/tls/AGENTS.md`.
 | --- | --- |
 | `paths.ts` | Managed state-dir layout + identifier / relative-path guards; `managedBackupsDir` / `managedBackupArtifactPath`; ProxySQL layout helpers (`proxysqlConfigDir`, `proxysqlComposePath`, `proxysqlConfigPath`, `proxysqlTlsDir`, `proxysqlDataDir`, `proxysqlAdminCnfPath`, `proxysqlProject`) |
 | `compose.ts` | Platform compose normalization (image, volumes, resources); always joins the organization's managed network (`payload.managedNetwork`); optional private-listener-only `ports:` (rejects all other publishes / Traefik labels). Top-level data volumes are **name-pinned** (`name: <volume.name>`) — an unnamed entry gets the compose project prefix while `bootstrapStandby` throwaway containers `docker run -v <bare name>`, and that mismatch made every standby seed/probe operate on an orphan volume the engine never mounted (replicas silently initdb'd standalone clusters) |
-| `materialize.ts` | Write `config/` verbatim; optional engine self-signed TLS + `orgTlsMaterial` → `tls/server.*` + `tls/proxysql/`; ownership normalization via throwaway container (skips `backups/`); a second throwaway run then verifies config/TLS readability AS the engine user with subdir-shaped mounts, failing the apply loudly instead of letting the engine crash-loop on an untraversable dir. Standby replication passwords are **not** written under `auth/`. |
+| `materialize.ts` | Write `config/` verbatim; optional engine self-signed TLS + `orgTlsMaterial` → `tls/server.*` + `tls/proxysql/`; ownership normalization via throwaway container (scoped to `config/`+`tls/`; backups live outside this tree entirely since v6); a second throwaway run then verifies config/TLS readability AS the engine user with subdir-shaped mounts, failing the apply loudly instead of letting the engine crash-loop on an untraversable dir. Standby replication passwords are **not** written under `auth/`. |
 | `tls.ts` | Engine self-signed cert generation; org-CA materialization for engine leaf + ProxySQL; standby passfile materialization |
 | `networks.ts` | Ensure the organization's managed Docker network by the name the command payload carries (`ensureManagedIngressNetwork(name, run)` — no daemon-side default) **and** attach ProxySQL to consumer `tpn_*` compose-bridge subnets |
 | `firewall.ts` | Best-effort idempotent `iptables` scoping for a **public** private listener: `TP-MANAGED-PUB` off `DOCKER-USER`, per-cluster `TP-MGD-<id>` chain matching the pre-DNAT publish via `conntrack --ctorigdst/--ctorigdstport`, ACCEPT known peers then DROP; no-op without a public IPv4 listener or known peers; never blocks apply/destroy |
@@ -52,8 +52,14 @@ Certificate authorities: `../../../turbopanel/src/lib/tls/AGENTS.md`.
 │       ├── fullchain.pem  # 0640
 │       ├── privkey.pem    # 0600
 │       └── ca.pem         # 0640
-└── backups/             # 0750; artifacts written 0600 by the daemon user itself
-    └── <backupId>.<ext> # <ext> from MANAGED_BACKUP_ARTIFACT_EXTENSIONS (dump | sql)
+
+# Backups are NOT under this tree since v6 — they live at
+# <backupDir>/<managedId>/ (LayoutPaths.backupDir, /backup by default,
+# TURBOPANEL_BACKUP_DIR to override) so an operator can mount separate storage
+# for them without moving the engine's own state:
+#
+# /backup/<managedId>/    # 0750; artifacts written 0600 by the daemon user itself
+# └── <backupId>.<ext>    # <ext> from MANAGED_BACKUP_ARTIFACT_EXTENSIONS (dump | sql)
 
 # Standby replication passwords must not live under managed/<id>/auth.
 # Bootstrap uses a short-lived 0600 env-file; streaming password is seeded by
@@ -293,7 +299,7 @@ ProxySQL to enforce. Canonical policy:
    by the container engine user. `normalizeManagedFileOwnership` runs one
    throwaway `docker run --user 0` of the engine image to `chown`/`chmod`
    **only** the bind-mounted trees (`config/`, `tls/`) — never
-   `docker-compose.yml`, the short-lived `.env`, or `backups/` (those stay
+   `docker-compose.yml` or the short-lived `.env` (those stay
    daemon-owned so re-apply can rewrite them). **`tls/proxysql/` is pruned**
    from that chown (daemon rewrites those PEMs on every apply; root:engine
    ownership left them Permission denied). Owner/group names come from
@@ -348,7 +354,10 @@ ProxySQL to enforce. Canonical policy:
    - **`.part` cleanup on failure.** Partial artifacts must never look complete.
    - **Prune by payload retention.** After create, keep newest
      `payload.retentionKeep` artifacts; omit retention → no prune.
-   - **`managed.destroy` removes `backups/`** with the managed dir.
+   - **`managed.destroy` removes `<backupDir>/<managedId>/`** alongside the
+     managed state dir. Backups moved out of the managed tree in v6, so
+     removing the state dir no longer takes them with it — destroy removes both
+     explicitly rather than leaving an orphan tree on the backup storage.
    - **Scheduled backups** remain an explicit future seam (no timers here).
    - Container resolution reuses `containers.ts` /
      `resolveSoleEngineContainer`.
