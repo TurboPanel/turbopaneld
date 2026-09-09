@@ -148,8 +148,11 @@ not after promote. When an entry belongs to a `nativeAppServices[]` row,
 series' `bin/` leads a **curated** `PATH` (`<bin>:/usr/bin:/bin`, never the
 daemon's PATH — Deno's `node_compat_bin` would shadow `node`, and an
 unreadable `/usr/local/sbin` makes dash report `corepack: Permission denied`
-for a missing binary). The child is entered with `sg tpnode<series>` so the
-daemon can exec the `0750 root:tpnodeNN` tree; Corepack still caches under
+for a missing binary). The child is `sudo -n -u <self> -- env … sh -c` so
+`initgroups()` picks up `tpnode<series>` without a daemon re-login and
+without exec'ing the passwd shell (`sg` dies on `/usr/sbin/nologin` with
+"This account is currently not available" — the managed daemon user `tp`
+and tenant principals are both nologin). Corepack still caches under
 `<checkout>/.corepack` with its download prompt off — never a host-wide
 Corepack install, never the daemon's home. `NODE_ENV` follows the app's
 `appMode` (default `production`) in the build exactly as in the generated unit.

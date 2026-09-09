@@ -30,8 +30,9 @@ the unit starts. Per app:
    `ensureNativeAppRuntime` **before** `applySourceReleases` so the Git build
    can exec that tree; `applyNativeAppServices` calls it again (idempotent)
    before units are installed. The role also appends the daemon account
-   (`tp` / dest user) to `tpnode<series>` so a build child can `sg` into
-   that group without a daemon re-login. It is **separate from the
+   (`tp` / dest user) to `tpnode<series>` so a build child can
+   `sudo -n -u <self>` into that group without a daemon re-login (`sg` execs
+   nologin and cannot). It is **separate from the
    `node-runtime` role**, which vendors the instance's own Node under
    `vendor/node/current`: bumping what tenants execute must never move the
    panel's toolchain, and vice versa. A missing playbook is a warning, not a

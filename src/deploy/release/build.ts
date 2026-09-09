@@ -46,8 +46,15 @@ const BUILD_RLIMIT_CPU_SECONDS = 1_800;
 export const BUILD_RLIMIT_AS_BYTES = 64 * 1024 * 1024 * 1024;
 const BUILD_RLIMIT_FSIZE_BYTES = 4 * 1024 * 1024 * 1024;
 const PRLIMIT_BIN = "/usr/bin/prlimit";
-/** `sg` applies a supplementary group without waiting for a daemon re-login. */
-const SG_BIN = "/usr/bin/sg";
+/**
+ * Refresh supplementary groups (`tpnodeNN`) without a login shell. `sg` execs
+ * the passwd shell and dies on `/usr/sbin/nologin` with "This account is
+ * currently not available" — the managed daemon user `tp` is nologin, and so
+ * is a tenant principal. Same `sudo -n -u <self>` pattern as docker-cli.ts.
+ */
+const SUDO_BIN = "/usr/bin/sudo";
+/** Apply the sandboxed build env after sudo's env_reset / secure_path. */
+const ENV_BIN = "/usr/bin/env";
 /**
  * Host binaries a native build may resolve after the tenant Node `bin/`.
  * Do not inherit the daemon PATH: Deno's `node_compat_bin` would shadow
@@ -82,10 +89,17 @@ export type NativeBuildRuntime = {
   nodeEnv: "production" | "development";
   /**
    * Per-series entitlement group (`tpnode24`). The vendored tree is
-   * `root:<group> 0750`; builds run as the daemon, so the child is entered
-   * via `sg` after the playbook appends the daemon account to this group.
+   * `root:<group> 0750`; builds run as the daemon, so the child is
+   * `sudo -n -u <self>` after the playbook appends the daemon account to this
+   * group (`sg` cannot — it execs `/usr/sbin/nologin`).
    */
   runtimeGroup?: string;
+};
+
+/** Group-refresh context for a native-app build child. */
+export type BuildInvocationIdentity = {
+  username: string;
+  env: Record<string, string>;
 };
 
 export type ReleaseBuildParams = {
@@ -163,16 +177,41 @@ async function prlimitAvailable(): Promise<boolean> {
 
 /**
  * `prlimit --cpu=… --as=… --fsize=… -- sh -c <command>`, or a bare `sh -c`.
+ * Native-app builds wrap with `sudo -n -u <self> -- env … sh -c` so
+ * `initgroups()` picks up `tpnodeNN` without exec'ing the passwd shell.
  * Exported so host-free suites can assert the argv shape without spawning.
  */
 export function buildInvocation(
   command: string,
   withPrlimit: boolean,
   runtimeGroup?: string,
+  identity?: BuildInvocationIdentity,
 ): { bin: string; args: string[] } {
-  const runner = runtimeGroup
-    ? { bin: SG_BIN, args: [runtimeGroup, "-c", command] }
-    : { bin: "sh", args: ["-c", command] };
+  let runner: { bin: string; args: string[] };
+  if (!runtimeGroup) {
+    runner = { bin: "sh", args: ["-c", command] };
+  } else if (!identity) {
+    throw new TypeError(
+      "native build group refresh requires the daemon username",
+    );
+  } else {
+    runner = {
+      bin: SUDO_BIN,
+      args: [
+        "-n",
+        "-u",
+        identity.username,
+        "--",
+        ENV_BIN,
+        ...Object.entries(identity.env).map(([key, value]) =>
+          `${key}=${value}`
+        ),
+        "sh",
+        "-c",
+        command,
+      ],
+    };
+  }
   if (!withPrlimit) return runner;
   return {
     bin: PRLIMIT_BIN,
@@ -187,6 +226,36 @@ export function buildInvocation(
   };
 }
 
+async function currentUsername(): Promise<string> {
+  const fromEnv = Deno.env.get("USER")?.trim() ||
+    Deno.env.get("LOGNAME")?.trim();
+  if (fromEnv) return fromEnv;
+  const output = await new Deno.Command("/usr/bin/id", {
+    args: ["-un"],
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  const name = new TextDecoder().decode(output.stdout).trim();
+  if (output.success && name) return name;
+  throw new Error(
+    "cannot resolve daemon username for native build group refresh",
+  );
+}
+
+async function resolveBuildInvocation(
+  command: string,
+  withPrlimit: boolean,
+  env: Record<string, string>,
+  runtimeGroup?: string,
+): Promise<{ bin: string; args: string[] }> {
+  if (!runtimeGroup) return buildInvocation(command, withPrlimit);
+  const username = await currentUsername();
+  return buildInvocation(command, withPrlimit, runtimeGroup, {
+    username,
+    env,
+  });
+}
+
 async function runBuildCommand(
   command: string,
   cwd: string,
@@ -198,7 +267,12 @@ async function runBuildCommand(
 ): Promise<void> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), BUILD_TIMEOUT_MS);
-  const { bin, args } = buildInvocation(command, withPrlimit, runtimeGroup);
+  const { bin, args } = await resolveBuildInvocation(
+    command,
+    withPrlimit,
+    env,
+    runtimeGroup,
+  );
   try {
     const child = new Deno.Command(bin, {
       args,

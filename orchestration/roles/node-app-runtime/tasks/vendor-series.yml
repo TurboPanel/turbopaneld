@@ -71,7 +71,8 @@
 
 # Builds run as the daemon (`tp` / the co-located dest user), not as the
 # principal. Supplementary-group changes are not visible to an already-running
-# process, so the build child enters this group with `sg` after this append.
+# process, so the build child refreshes groups with `sudo -n -u <self>` after
+# this append (`sg` execs the passwd shell and dies on nologin).
 - name: Allow the daemon account to execute this tenant Node series
   ansible.builtin.user:
     name: "{{ turbopanel_user }}"

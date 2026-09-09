@@ -1,4 +1,4 @@
-import { assertEquals, assertRejects } from "@std/assert";
+import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { join } from "@std/path";
 import {
   BUILD_RLIMIT_AS_BYTES,
@@ -217,16 +217,51 @@ test("buildInvocation wraps with prlimit or falls back to bare sh -c", () => {
   assertEquals(BUILD_RLIMIT_AS_BYTES >= 32 * 1024 * 1024 * 1024, true);
 });
 
-test("buildInvocation enters the tenant Node entitlement group via sg", () => {
-  assertEquals(buildInvocation("corepack pnpm install", false, "tpnode24"), {
-    bin: "/usr/bin/sg",
-    args: ["tpnode24", "-c", "corepack pnpm install"],
-  });
-  const wrapped = buildInvocation("corepack pnpm install", true, "tpnode24");
+test("buildInvocation enters the tenant Node entitlement group via sudo -u self", () => {
+  const identity = {
+    username: "tp",
+    env: {
+      PATH: "/opt/turbopanel/vendor/node-app/24/current/bin:/usr/bin:/bin",
+      HOME: "/tmp/release-build",
+    },
+  };
+  const invoked = buildInvocation(
+    "corepack pnpm install",
+    false,
+    "tpnode24",
+    identity,
+  );
+  assertEquals(invoked.bin, "/usr/bin/sudo");
+  assertEquals(invoked.args.slice(0, 4), ["-n", "-u", "tp", "--"]);
+  assertEquals(invoked.args.includes("/usr/bin/sg"), false);
+  assertEquals(invoked.args.includes("/usr/bin/env"), true);
+  assertEquals(
+    invoked.args.includes(
+      "PATH=/opt/turbopanel/vendor/node-app/24/current/bin:/usr/bin:/bin",
+    ),
+    true,
+  );
+  assertEquals(invoked.args.at(-2), "sh");
+  assertEquals(invoked.args.at(-1), "corepack pnpm install");
+  const wrapped = buildInvocation(
+    "corepack pnpm install",
+    true,
+    "tpnode24",
+    identity,
+  );
   assertEquals(wrapped.bin, "/usr/bin/prlimit");
-  assertEquals(wrapped.args.includes("/usr/bin/sg"), true);
-  assertEquals(wrapped.args.includes("tpnode24"), true);
+  assertEquals(wrapped.args.includes("/usr/bin/sudo"), true);
+  assertEquals(wrapped.args.includes("/usr/bin/sg"), false);
+  assertEquals(wrapped.args.includes("tp"), true);
   assertEquals(wrapped.args.at(-1), "corepack pnpm install");
+});
+
+test("buildInvocation refuses a native group wrap without the daemon username", () => {
+  assertThrows(
+    () => buildInvocation("corepack pnpm install", false, "tpnode24"),
+    TypeError,
+    "daemon username",
+  );
 });
 
 test("runReleaseBuild notes when prlimit is unavailable and skips empty commands", async () => {

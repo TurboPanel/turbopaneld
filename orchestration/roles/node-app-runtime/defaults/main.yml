@@ -19,8 +19,8 @@ node_app_default_version: "24"
 node_app_versions: ["{{ node_app_default_version }}"]
 node_app_root: "{{ turbopanel_vendor_dir }}/node-app"
 # Native builds run as the daemon, not the tenant principal. The playbook
-# appends this account to each series group so `sg tpnode24` can exec the
-# 0750 tree without a daemon re-login.
+# appends this account to each series group so `sudo -n -u <self>` can exec the
+# 0750 tree without a daemon re-login (`sg` execs /usr/sbin/nologin).
 turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
 
 # Entitlement groups come from the shared registry
