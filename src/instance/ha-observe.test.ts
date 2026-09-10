@@ -150,46 +150,35 @@ test("ManagedHaObserver loads Orchestrator credentials when api omits them", asy
   assertEquals(sent.length === 0 || sent[0]?.managedId === MANAGED_ID, true);
 });
 
-test({
-  name:
-    "ManagedHaObserver loads Orchestrator credentials from the layout when api omits them",
-  permissions: { env: true, read: true, write: true },
-  fn: async () => {
-    await withTempLayout(async (fixture) => {
-      const layout = resolveLayout(fixture.env);
-      await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
-      await Deno.writeTextFile(
-        orchestratorApiCnfPath(layout),
-        "[client]\nuser=orch-admin\npassword=orch-secret\n",
-      );
-      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
-      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
-      const sent: ManagedHaEventMessage[] = [];
-      try {
-        const observer = new ManagedHaObserver({
-          send: (message) => {
-            sent.push(message);
-          },
-          isStackPresent: () => Promise.resolve(true),
-          api: {
-            fetch: () =>
-              Promise.resolve(
-                problemResponse([{
-                  clusterAlias: MANAGED_ID,
-                  problems: ["DeadPrimary"],
-                }]),
-              ),
-          },
-        });
-        await observer.poll();
-        assertEquals(sent.length, 1);
-        assertEquals(sent[0]?.managedId, MANAGED_ID);
-      } finally {
-        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
-        Deno.env.delete("TURBOPANEL_STATE_DIR");
-      }
+test("ManagedHaObserver loads Orchestrator credentials from the layout when api omits them", async () => {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
+    await Deno.writeTextFile(
+      orchestratorApiCnfPath(layout),
+      "[client]\nuser=orch-admin\npassword=orch-secret\n",
+    );
+    const sent: ManagedHaEventMessage[] = [];
+    const observer = new ManagedHaObserver({
+      layout,
+      send: (message) => {
+        sent.push(message);
+      },
+      isStackPresent: () => Promise.resolve(true),
+      api: {
+        fetch: () =>
+          Promise.resolve(
+            problemResponse([{
+              clusterAlias: MANAGED_ID,
+              problems: ["DeadPrimary"],
+            }]),
+          ),
+      },
     });
-  },
+    await observer.poll();
+    assertEquals(sent.length, 1);
+    assertEquals(sent[0]?.managedId, MANAGED_ID);
+  });
 });
 
 test("ManagedHaObserver skips absent stack, invalid aliases, and duplicate keys", async () => {

@@ -311,9 +311,13 @@ test("runDaemon connect path falls back to default metric factories", async () =
     createMetricsCollector: undefined,
     collectTopology: undefined,
     connectInstance: (opts) => {
+      // Invoke the collector factory (construction only) but do not call
+      // collectTopologyFn — the production default persists boot-generation
+      // under daemonStateDir (`/var/lib/turbopanel` here) and would leak an
+      // unhandled PermissionDenied on CI hosts that cannot mkdir that path.
       const metrics = opts.metricsCollectorFactory();
-      const topology = opts.collectTopologyFn();
-      usedDefaults = metrics !== undefined && topology !== undefined;
+      usedDefaults = metrics !== undefined &&
+        typeof opts.collectTopologyFn === "function";
       return Promise.resolve({ stop() {} });
     },
   });

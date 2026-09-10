@@ -6,7 +6,7 @@
  */
 
 import { logInfo, logWarn, sanitizeForLog } from "../logger.ts";
-import { resolveLayout } from "../paths/layout.ts";
+import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import {
   loadOrchestratorApiCredentials,
   orchestratorStackPresent,
@@ -35,6 +35,8 @@ export type ManagedHaObserverOptions = {
   api?: OrchestratorApiDeps;
   /** Test seam — defaults to {@link orchestratorStackPresent}. */
   isStackPresent?: () => Promise<boolean>;
+  /** Test seam — defaults to {@link resolveLayout} from process env. */
+  layout?: LayoutPaths;
 };
 
 export class ManagedHaObserver {
@@ -43,6 +45,7 @@ export class ManagedHaObserver {
   readonly #send: (message: ManagedHaEventMessage) => void;
   readonly #api: OrchestratorApiDeps | undefined;
   readonly #isStackPresent: () => Promise<boolean>;
+  readonly #layout: LayoutPaths | undefined;
   readonly #emitted = new Set<string>();
   #timer: ReturnType<typeof setInterval> | undefined;
 
@@ -51,8 +54,13 @@ export class ManagedHaObserver {
     this.#now = options.now ?? (() => new Date().toISOString());
     this.#send = options.send;
     this.#api = options.api;
+    this.#layout = options.layout;
     this.#isStackPresent = options.isStackPresent ??
-      (() => orchestratorStackPresent(resolveLayout()));
+      (() => orchestratorStackPresent(this.#resolveLayout()));
+  }
+
+  #resolveLayout(): LayoutPaths {
+    return this.#layout ?? resolveLayout(Deno.env.toObject());
   }
 
   attach(): void {
@@ -73,7 +81,7 @@ export class ManagedHaObserver {
     try {
       if (!(await this.#isStackPresent())) return;
       const credentials = this.#api?.credentials ??
-        await loadOrchestratorApiCredentials(resolveLayout());
+        await loadOrchestratorApiCredentials(this.#resolveLayout());
       const problems = await listOrchestratorProblems({
         ...this.#api,
         credentials,
