@@ -4,6 +4,7 @@ import { join } from "@std/path";
 import { PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN } from "../capability-plan.ts";
 import {
   capabilityPlanPath,
+  clearCapabilityPlan,
   readCapabilityPlan,
   writeCapabilityPlan,
 } from "./capability-plan-store.ts";
@@ -79,6 +80,29 @@ test("readCapabilityPlan returns undefined for a malformed file", async () => {
   try {
     await Deno.mkdir(join(dir, "metrics"), { recursive: true });
     await Deno.writeTextFile(capabilityPlanPath(dir), "{not-json");
+    assertEquals(await readCapabilityPlan(dir), undefined);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("clearCapabilityPlan deletes a stored plan and is a no-op when absent", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-cap-plan-" });
+  try {
+    await writeCapabilityPlan(
+      dir,
+      PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN,
+      4,
+    );
+    await clearCapabilityPlan(dir);
+    assertEquals(await readCapabilityPlan(dir), undefined);
+    try {
+      await Deno.stat(capabilityPlanPath(dir));
+      throw new TypeError("capability-plan.json should be gone");
+    } catch (err) {
+      if (!(err instanceof Deno.errors.NotFound)) throw err;
+    }
+    await clearCapabilityPlan(dir);
     assertEquals(await readCapabilityPlan(dir), undefined);
   } finally {
     await Deno.remove(dir, { recursive: true });

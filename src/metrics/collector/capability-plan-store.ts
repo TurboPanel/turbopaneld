@@ -3,9 +3,10 @@
  *
  * The control plane pushes the resolved plan + generation over the cell
  * socket (`capability-plan-update`); {@link writeCapabilityPlan} replaces
- * `<daemonStateDir>/metrics/capability-plan.json` atomically. Absent or
- * invalid state means the collector sends the full sample (server-side
- * truncation still applies for hosted ingest).
+ * `<daemonStateDir>/metrics/capability-plan.json` atomically. A self-hosted
+ * control plane sends `capability-plan-clear` so a leftover hosted plan is
+ * deleted. Absent or invalid state means the collector sends the full sample
+ * (server-side truncation still applies for hosted ingest).
  */
 import { dirname, join } from "@std/path";
 
@@ -66,6 +67,18 @@ export async function writeCapabilityPlan(
     JSON.stringify({ plan, generation }),
   );
   await Deno.rename(tmpPath, path);
+}
+
+export async function clearCapabilityPlan(
+  daemonStateDir?: string,
+): Promise<void> {
+  const stateDir = daemonStateDir ??
+    resolveLayout(Deno.env.toObject()).daemonStateDir;
+  try {
+    await Deno.remove(capabilityPlanPath(stateDir));
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
 }
 
 export async function readCapabilityPlan(

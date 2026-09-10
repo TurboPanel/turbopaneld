@@ -8,6 +8,11 @@ import type { CollectorDeps } from "./types.ts";
 import { collectTopology } from "../topology/topology.ts";
 import { collectHardwareSignals } from "../topology/hardware-signal-topology.ts";
 import { PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN } from "../capability-plan.ts";
+import {
+  clearCapabilityPlan,
+  readCapabilityPlan,
+  writeCapabilityPlan,
+} from "./capability-plan-store.ts";
 import { computeSlotMapping } from "../topology/slot-mapping.ts";
 import { EMPTY_TOPOLOGY_OVERRIDES } from "../topology/types.ts";
 import type {
@@ -1064,6 +1069,59 @@ test("LinuxMetricsCollector keeps the full sample after enroll when no capabilit
     result.sample.hardwareSignals.map((signal) => signal.signalId),
     ["signal:cpu:package", "signal:board:inlet", "signal:dimm:a"],
   );
+});
+
+test("LinuxMetricsCollector keeps the full sample after a leftover hosted plan is cleared", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-cap-leftover-" });
+  try {
+    await writeCapabilityPlan(
+      dir,
+      {
+        ...PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN,
+        gpuSlots: 1,
+        extraFilesystemSlots: 0,
+        detailedBlockDeviceSlots: 1,
+        physicalHardwareSignalSlots: 1,
+      },
+      1,
+    );
+    const snapshot = pageOrderMismatchSnapshot();
+    const collector = new LinuxMetricsCollector({
+      ...makeDeps(() => TICK_1, snapshot, () => 1_000_000),
+      gpuAdapters: NULL_GPU_ADAPTERS,
+      resolveCapabilityPlan: () => readCapabilityPlan(dir),
+    });
+    const truncated = await collector.collect({
+      sequence: 1,
+      nowMs: 1_000_000,
+    });
+    if (!truncated.supported) {
+      throw new TypeError("expected a supported sample");
+    }
+    assertEquals(truncated.sample.gpus.map((gpu) => gpu.gpuId).length, 1);
+
+    await clearCapabilityPlan(dir);
+    const result = await collector.collect({ sequence: 2, nowMs: 1_001_000 });
+    if (!result.supported) throw new TypeError("expected a supported sample");
+    assertEquals(
+      result.sample.gpus.map((gpu) => gpu.gpuId),
+      ["pci:z", "pci:a", "pci:m"],
+    );
+    assertEquals(
+      result.sample.blockDevices.map((device) => device.deviceId),
+      ["blk:zda", "blk:ada", "blk:mda"],
+    );
+    assertEquals(
+      result.sample.filesystems.map((fs) => fs.filesystemId),
+      ["fs:z", "fs:a", "fs:m"],
+    );
+    assertEquals(
+      result.sample.hardwareSignals.map((signal) => signal.signalId),
+      ["signal:cpu:package", "signal:board:inlet", "signal:dimm:a"],
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
 });
 
 test("LinuxMetricsCollector does not truncate a leftover plan when skipCapabilityPlanTruncation is set", async () => {

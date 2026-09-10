@@ -398,8 +398,10 @@ function defaultDeps(): CollectorDeps {
     resolveTopologyOverrides: () => resolveTopologyOverrides(),
     resolveCapabilityPlan: () => readCapabilityPlan(),
     // Colocated Deno instance — never truncate even if a leftover plan file
-    // remains from an earlier push. Remote production daemons leave this
-    // unset and rely on the control plane not pushing a plan.
+    // remains from an earlier push. Remote daemons that reconnect to a
+    // self-hosted control plane receive `capability-plan-clear` and delete
+    // the file; do not treat TURBOPANEL_INSTANCE_RUNTIME as that signal
+    // (it is not set on remote hosts).
     skipCapabilityPlanTruncation:
       Deno.env.get("TURBOPANEL_INSTANCE_RUNTIME")?.trim() === "deno",
     io: defaultSensorIo(),

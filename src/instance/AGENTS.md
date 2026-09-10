@@ -16,6 +16,13 @@ license notes). `start()` snapshots the identity directory
 (`TURBOPANEL_DAEMON_STATE_DIR`) so license and key reads stay on that path
 for the process lifetime.
 
+**Capability plan.** Hosted control planes push `capability-plan-update` to
+persist `<daemonStateDir>/metrics/capability-plan.json`. Self-hosted control
+planes send `capability-plan-clear` on attach so a remote daemon that
+previously stored a hosted plan deletes the file and emits an untruncated
+sample. Do not use `TURBOPANEL_INSTANCE_RUNTIME` for that on remote daemons —
+the authenticated cell message is the signal.
+
 **Co-located dev connectivity** (`src/orchestration/setup.ts`,
 `src/instance/paths.ts`): after console opt-in (`TURBOPANEL_DEV_INSTANCE=1`),
 Deno runtime dials the local Unix socket (no `TURBOPANEL_INSTANCE_URL`); Workers

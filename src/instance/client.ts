@@ -71,7 +71,7 @@ import {
   type MetricsCapabilityPlan,
   parseMetricsCapabilityPlan,
 } from "../metrics/capability-plan.ts";
-import { writeCapabilityPlan } from "../metrics/collector/capability-plan-store.ts";
+import { clearCapabilityPlan, writeCapabilityPlan } from "../metrics/collector/capability-plan-store.ts";
 import {
   resolveHardwareProfile,
   writeHardwareProfile,
@@ -236,6 +236,18 @@ type DaemonMessage =
   }
   | {
     type: "capability-plan-update-result";
+    id: string;
+    ok: boolean;
+    error?: string;
+    at: string;
+  }
+  | {
+    type: "capability-plan-clear";
+    id: string;
+    at: string;
+  }
+  | {
+    type: "capability-plan-clear-result";
     id: string;
     ok: boolean;
     error?: string;
@@ -1431,6 +1443,9 @@ export class InstanceClient {
       case "capability-plan-update":
         this.#applyCapabilityPlanUpdate(message, ws);
         break;
+      case "capability-plan-clear":
+        this.#applyCapabilityPlanClear(message, ws);
+        break;
       case "container-logs-request":
         this.#collectContainerLogs(message, ws);
         break;
@@ -2032,6 +2047,49 @@ export class InstanceClient {
 
     const result: DaemonMessage = {
       type: "capability-plan-update-result",
+      id: message.id,
+      ok,
+      ...(error === undefined ? {} : { error }),
+      at: new Date().toISOString(),
+    };
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result));
+  }
+
+  #applyCapabilityPlanClear(
+    message: Extract<
+      DaemonMessage,
+      { type: "capability-plan-clear" }
+    >,
+    ws: WebSocket,
+  ): void {
+    void this.#applyCapabilityPlanClearAsync(message, ws);
+  }
+
+  async #applyCapabilityPlanClearAsync(
+    message: Extract<
+      DaemonMessage,
+      { type: "capability-plan-clear" }
+    >,
+    ws: WebSocket,
+  ): Promise<void> {
+    let ok = false;
+    let error: string | undefined;
+    try {
+      await clearCapabilityPlan(
+        resolveLayout(Deno.env.toObject()).daemonStateDir,
+      );
+      ok = true;
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+      logWarn(
+        "instance",
+        "capability plan clear failed:",
+        sanitizeForLog(err),
+      );
+    }
+
+    const result: DaemonMessage = {
+      type: "capability-plan-clear-result",
       id: message.id,
       ok,
       ...(error === undefined ? {} : { error }),

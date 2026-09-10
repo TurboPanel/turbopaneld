@@ -7,6 +7,11 @@ import {
   InstanceClient,
   PARKED_BACKOFF_MIN_MS,
 } from "./client.ts";
+import { PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN } from "../metrics/capability-plan.ts";
+import {
+  readCapabilityPlan,
+  writeCapabilityPlan,
+} from "../metrics/collector/capability-plan-store.ts";
 import { setDrivetempExecutorForTests } from "../metrics/collector/sensors/drivetemp.ts";
 import type { TopologySnapshot } from "../metrics/topology/types.ts";
 import {
@@ -330,6 +335,98 @@ it({
       restoreWebSocket();
       setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
       setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+    }
+  },
+});
+
+it({
+  name:
+    "remote daemon deletes a leftover hosted capability plan on capability-plan-clear",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  fn: async () => {
+    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const originalRuntime = Deno.env.get("TURBOPANEL_INSTANCE_RUNTIME");
+    const { sockets, restore: restoreWebSocket } = installTrackingWebSocket();
+    let restoreFetch: (() => void) | undefined;
+    try {
+      Deno.env.delete("TURBOPANEL_INSTANCE_RUNTIME");
+      const { signing, authToken, enroll } = await prepareVerifiedAuth();
+      const api = createFakeInstanceApi();
+      scriptStandardAuth(api, signing, authToken, enroll);
+      api.script(
+        "/api/daemon/v1/deployments/secrets/rehydrate",
+        () =>
+          new Response(JSON.stringify({ deployments: [] }), { status: 200 }),
+      );
+      restoreFetch = api.install();
+
+      await withTempLayout(async (fixture) => {
+        Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", fixture.dirs.stateDir);
+        Deno.env.set("TURBOPANEL_FORCE_ENROLL", "1");
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.id`,
+          "license-123\n",
+        );
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.token`,
+          "token-abc\n",
+        );
+        await writeCapabilityPlan(
+          fixture.dirs.stateDir,
+          {
+            ...PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN,
+            gpuSlots: 1,
+            extraFilesystemSlots: 0,
+            detailedBlockDeviceSlots: 1,
+            physicalHardwareSignalSlots: 1,
+          },
+          1,
+        );
+
+        const client = new InstanceClient({
+          config: {
+            kind: "url",
+            baseUrl: "https://instance.test",
+            wsBaseUrl: "wss://instance.test",
+          },
+          httpClient: {} as Deno.HttpClient,
+        });
+        try {
+          client.start();
+          const socket = await waitFor(
+            "capability-clear websocket",
+            () => sockets.at(0),
+          );
+          socket.open();
+          await flushMicrotasks();
+
+          socket.receive({
+            type: "capability-plan-clear",
+            id: "cap-clear",
+            at: new Date().toISOString(),
+          });
+          const cleared = await waitFor(
+            "capability-plan-clear-result",
+            () => lastFrameOfType(socket, "capability-plan-clear-result"),
+          );
+          assertEquals((cleared as { ok?: boolean }).ok, true);
+          assertEquals(await readCapabilityPlan(fixture.dirs.stateDir), undefined);
+        } finally {
+          client.stop();
+        }
+      });
+    } finally {
+      restoreFetch?.();
+      restoreWebSocket();
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+      setOptionalEnv("TURBOPANEL_INSTANCE_RUNTIME", originalRuntime);
     }
   },
 });
