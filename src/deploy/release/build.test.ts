@@ -241,8 +241,7 @@ test("buildInvocation enters the tenant Node entitlement group via sudo -u self"
     ),
     true,
   );
-  assertEquals(invoked.args.at(-2), "sh");
-  assertEquals(invoked.args.at(-1), "corepack pnpm install");
+  assertEquals(invoked.args.slice(-3), ["sh", "-c", "corepack pnpm install"]);
   const wrapped = buildInvocation(
     "corepack pnpm install",
     true,

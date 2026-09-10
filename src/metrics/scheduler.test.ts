@@ -220,6 +220,11 @@ function createFixtureCollectorFactory(): () => MetricsCollector {
       // real file I/O the fake clock can't step through, same as the
       // adapters below. Absent means auto slot selection.
       resolveTopologyOverrides: undefined,
+      // Production `defaultDeps` reads `<daemonStateDir>/metrics/capability-plan.json`
+      // each tick. That `Deno.readTextFile` is a macrotask FakeClock cannot
+      // drain, so a busy CI runner would finish `advance(0)` before the first
+      // sample lands. Absent means no truncation (self-hosted / no plan).
+      resolveCapabilityPlan: undefined,
       io: { listDir: () => [], readFile: () => undefined },
       // Live `/proc` PID scans are real async directory I/O (and may fall
       // back to `ls`). FakeClock only drains microtasks, so a busy CI
