@@ -45,6 +45,7 @@ test("log helpers write structured lines without throwing", () => {
   logWarn("logger-test", "warn\nline");
   logError("logger-test", new Error("err"));
   logInfo("logger-test", "multi\nline\n");
+  logInfo("logger-test");
 });
 
 test("log routes orchestration components through the active installer presenter", () => {
@@ -60,6 +61,9 @@ test("log routes orchestration components through the active installer presenter
     );
     logInfo("ansible", "");
     logInfo("python", "installing runtime interpreter");
+    logInfo("galaxy", "installing collections");
+    logInfo("ansible-core", "running play");
+    logInfo("ansible-galaxy", "fetching roles");
     logInfo("logger-test", "\n");
   } finally {
     presenter.dispose();

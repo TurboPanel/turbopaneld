@@ -84,4 +84,63 @@ it("cpuPowerFromEnergy handles counter wraparound via the known range", () => {
     ),
     null,
   );
+
+  const rangeTooSmall = {
+    energyMicrojoules: 100,
+    maxEnergyRangeMicrojoules: 50,
+  };
+  assertEquals(
+    cpuPowerFromEnergy(
+      { energyMicrojoules: 900, maxEnergyRangeMicrojoules: 50 },
+      rangeTooSmall,
+      60,
+    ),
+    null,
+  );
+});
+
+it("readCpuEnergy returns null energy when the RAPL counter is unreadable", async () => {
+  const candidate = {
+    chip: "intel-rapl",
+    label: "package-0",
+    path: "/sys/class/powercap/intel-rapl:0/energy_uj",
+  };
+  const resolved = await readCpuEnergy([candidate], undefined, {
+    listDir: () => [],
+    readFile: () => "nope",
+  });
+  assertEquals(resolved, {
+    energy: null,
+    sensor: "intel-rapl:package-0",
+  });
+});
+
+it("readCpuEnergy treats a non-positive max_energy_range_uj as unknown", async () => {
+  const candidate = {
+    chip: "intel-rapl",
+    label: "package-0",
+    path: "/sys/class/powercap/intel-rapl:0/energy_uj",
+  };
+  const resolved = await readCpuEnergy([candidate], undefined, {
+    listDir: () => [],
+    readFile: (path: string) =>
+      path.endsWith("max_energy_range_uj") ? "0" : "1000",
+  });
+  assertEquals(resolved.energy, {
+    energyMicrojoules: 1000,
+    maxEnergyRangeMicrojoules: null,
+  });
+});
+
+it("readGpuPower returns null watts when the sysfs value is unreadable", async () => {
+  const candidate = {
+    chip: "amdgpu",
+    label: "PPT",
+    path: "/sys/class/hwmon/hwmon0/power1_average",
+  };
+  const resolved = await readGpuPower([candidate], undefined, {
+    listDir: () => [],
+    readFile: () => "nope",
+  });
+  assertEquals(resolved, { watts: null, sensor: "amdgpu:PPT" });
 });

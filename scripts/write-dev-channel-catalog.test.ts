@@ -76,6 +76,17 @@ test("writeDevChannelCatalog writes relative catalog files", async () => {
     );
     assertEquals(catalog.defaultChannel, "trunk");
     assertEquals(catalog.channels.trunk.manifestUrl, "./manifest.json");
+
+    await writeDevChannelCatalog({
+      commit: "abc1234+1",
+      buildId: "dev-abc1234+1",
+      builtAt: "2026-01-01T00:00:00.000Z",
+    }, dir);
+    const withoutSource = JSON.parse(
+      await Deno.readTextFile(join(dir, "manifest.json")),
+    );
+    assertEquals(manifest.source, "abc1234+dirty.0123456789ab");
+    assertEquals(withoutSource.source, undefined);
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

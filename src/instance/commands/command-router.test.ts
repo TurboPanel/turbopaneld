@@ -703,6 +703,8 @@ async function dispatchWithStubHandler(
   stubResult: unknown,
   handlerKey:
     | "handleEnvironmentDeploy"
+    | "handleEnvironmentLifecycle"
+    | "handlePrincipalsReconcile"
     | "handleManagedApply"
     | "handleManagedLifecycle"
     | "handleManagedDestroy"
@@ -962,5 +964,105 @@ test({
     );
     const result = outcome.result as Record<string, unknown>;
     assertEquals(result.summary, "system reconciled");
+  },
+});
+
+test({
+  name:
+    "handleCommandDispatch routes server.principals.reconcile through stub handler",
+  permissions: { env: true, read: true },
+  fn: async () => {
+    const outcome = await dispatchWithStubHandler(
+      "server.principals.reconcile",
+      { principals: [] },
+      {
+        principalsApplied: 0,
+        keysChanged: [],
+        keysRemoved: [],
+        sshdReloaded: false,
+        warnings: [],
+        summary: "principals stub",
+      },
+      "handlePrincipalsReconcile",
+    );
+    const result = outcome.result as Record<string, unknown>;
+    assertEquals(result.summary, "principals stub");
+    assertEquals(result.principalsApplied, 0);
+  },
+});
+
+test({
+  name:
+    "handleCommandDispatch wraps lifecycle rehydrate through parseRehydrateDeploymentResults",
+  permissions: { env: true, read: true },
+  fn: async () => {
+    const { handleCommandDispatch, setCommandRouterHandlersForTests } =
+      await import("./command-router.ts");
+    let rehydrateCalls = 0;
+    setCommandRouterHandlersForTests({
+      handleEnvironmentLifecycle: async (_payload, _at, deps) => {
+        const rows = await deps?.rehydrateDeploymentSecrets?.([{
+          projectId: "proj-1",
+          environmentId: "env-1",
+        }]);
+        if (!Array.isArray(rows)) {
+          throw new TypeError("expected parsed rehydrate rows");
+        }
+        return {
+          projectName: "tp-demo-rehydrate",
+          summary: `rehydrated ${rows.length}`,
+        };
+      },
+    });
+    try {
+      const ws = new MockWebSocket() as unknown as WebSocket;
+      const message: CommandDispatchMessage = {
+        type: "command-dispatch",
+        id: "req-life-rehydrate",
+        commandId: "cmd-life-rehydrate",
+        commandType: "environment.lifecycle",
+        payload: {
+          environmentId: "envrouter3",
+          projectId: "proj-1",
+          projectName: "tp-demo-rehydrate",
+          action: "start",
+        },
+        at: new Date().toISOString(),
+      };
+      await handleCommandDispatch(message, ws, {
+        rehydrateDeploymentSecrets: () => {
+          rehydrateCalls += 1;
+          return Promise.resolve([{
+            projectId: "proj-1",
+            environmentId: "env-1",
+            generation: 2,
+            secretPlan: [{
+              key: "TOKEN",
+              composeServiceName: "web",
+              source: "web_token",
+              target: "TOKEN",
+              relativePath: "web--TOKEN",
+              forBuild: false,
+              forRuntime: true,
+            }],
+            variableMaterial: [{
+              key: "TOKEN",
+              composeServiceName: "web",
+              forBuild: false,
+              forRuntime: true,
+              isLiteral: false,
+              valueEnvelope: "tpdaemon.v1.abc",
+            }],
+          }]);
+        },
+      });
+      const frames = parseFrames((ws as unknown as MockWebSocket).sentFrames);
+      assertEquals(frames[1]?.ok, true);
+      const result = frames[1]?.result as Record<string, unknown>;
+      assertEquals(result.summary, "rehydrated 1");
+      assertEquals(rehydrateCalls, 1);
+    } finally {
+      setCommandRouterHandlersForTests(null);
+    }
   },
 });

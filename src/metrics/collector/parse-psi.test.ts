@@ -58,3 +58,19 @@ test("psiPercent re-baselines on boot generation change", () => {
   assertEquals(psiPercent(1000, 60, tracker, "psi:cpu:some", 0), null);
   assertEquals(psiPercent(50, 60, tracker, "psi:cpu:some", 1), null);
 });
+
+test("parsePsiLine returns null when the kind line has no total= field", () => {
+  assertEquals(parsePsiLine("some avg10=1.00 avg60=1.00\n", "some"), null);
+  assertEquals(parsePsiLine("some\n", "some"), null);
+});
+
+test("psiPercent clamps to 0–100 and nulls a non-positive interval after a baseline exists", () => {
+  const tracker = new CounterBaselineTracker();
+  assertEquals(psiPercent(1_000, 1, tracker, "psi:clamp", 0), null);
+  // 2 s of stall in a 1 s window is 200% → clamped to 100.
+  assertEquals(psiPercent(1_000 + 2_000_000, 1, tracker, "psi:clamp", 0), 100);
+
+  const zeroWindow = new CounterBaselineTracker();
+  assertEquals(psiPercent(1_000, 60, zeroWindow, "psi:zero", 0), null);
+  assertEquals(psiPercent(2_000, 0, zeroWindow, "psi:zero", 0), null);
+});

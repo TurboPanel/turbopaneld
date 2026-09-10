@@ -493,3 +493,71 @@ test("buildHostingLabelsFragment keeps friendly-name aliases in the network unio
     [HOSTING_INGRESS_NETWORK]: {},
   });
 });
+
+test("buildHostingLabelsFragment rejects empty HTTP hostnames", () => {
+  assertThrows(
+    () =>
+      buildHostingLabelsFragment({
+        payload,
+        hostings: [{
+          ...payload.hostings[0],
+          hostnames: [],
+        }],
+        resolved: appResolved,
+      }),
+    Error,
+    "hostings[].hostnames must not be empty",
+  );
+});
+
+test("buildHostingLabelsFragment ignores a non-collection networks value", () => {
+  const fragment = buildHostingLabelsFragment({
+    payload,
+    hostings: payload.hostings,
+    resolved: resolvedFromServices({
+      app: { image: "nginx:alpine", networks: "frontend" },
+    }),
+  });
+  assertEquals(fragment.services?.app?.networks, [HOSTING_INGRESS_NETWORK]);
+});
+
+test("buildHostingLabelsFragment re-unions mapping networks across hostings on the same service", () => {
+  const hostings = [
+    {
+      ...payload.hostings[0],
+      hostingId: "hosting_a",
+      hostnames: ["a.example.test"],
+    },
+    {
+      ...payload.hostings[0],
+      hostingId: "hosting_b",
+      hostnames: ["b.example.test"],
+      proxy: { gzip: true },
+    },
+  ];
+  const fragment = buildHostingLabelsFragment({
+    payload: { ...payload, hostings },
+    hostings,
+    resolved: resolvedFromServices({
+      app: {
+        image: "nginx:alpine",
+        networks: { default: { aliases: ["app"] } },
+      },
+    }),
+  });
+  assertEquals(fragment.services?.app?.networks, {
+    default: { aliases: ["app"] },
+    [HOSTING_INGRESS_NETWORK]: {},
+  });
+  const labels = fragment.services?.app?.labels as Record<string, string>;
+  assertEquals(
+    labels["traefik.http.middlewares.hosting_b-compress.compress"],
+    "true",
+  );
+  assertEquals(
+    labels[
+      "traefik.http.middlewares.hosting_b-compress.compress.encodings"
+    ],
+    undefined,
+  );
+});

@@ -160,4 +160,94 @@ describe("exec subprocess helpers", () => {
       setActiveInstallPresenter(null);
     }
   });
+
+  it("runLogged routes stdout and stderr through the active presenter", async () => {
+    const presenter = new InstallPresenter(false);
+    setActiveInstallPresenter(presenter);
+    presenter.beginStep("logged presenter");
+    try {
+      const result = await runLogged(
+        "/bin/sh",
+        ["-c", "echo presented-log; echo presented-err 1>&2"],
+        {
+          level: "INFO",
+          component: "exec-test",
+        },
+      );
+      assertEquals(result.success, true);
+    } finally {
+      presenter.dispose();
+      setActiveInstallPresenter(null);
+    }
+  });
+
+  it("runLogged throws through the active presenter when the command fails", async () => {
+    const presenter = new InstallPresenter(false);
+    setActiveInstallPresenter(presenter);
+    presenter.beginStep("logged presenter fail");
+    try {
+      await assertRejects(
+        () =>
+          runLogged("/bin/sh", ["-c", "exit 8"], {
+            level: "INFO",
+            component: "exec-test",
+          }),
+        Error,
+        "exit 8",
+      );
+    } finally {
+      presenter.dispose();
+      setActiveInstallPresenter(null);
+    }
+  });
+
+  it("runOrThrow throws through the active presenter when the command fails", async () => {
+    const presenter = new InstallPresenter(false);
+    setActiveInstallPresenter(presenter);
+    presenter.beginStep("exec presenter fail");
+    try {
+      await assertRejects(
+        () => runOrThrow("/bin/sh", ["-c", "exit 4"]),
+        Error,
+        "exit 4",
+      );
+    } finally {
+      presenter.dispose();
+      setActiveInstallPresenter(null);
+    }
+  });
+
+  it("runOrThrow prefers stdout when stderr is empty", async () => {
+    await assertRejects(
+      () =>
+        runOrThrow("/bin/sh", ["-c", "echo only-out; exit 5"], {
+          stream: false,
+        }),
+      Error,
+      "only-out",
+    );
+  });
+
+  it("runOrThrow omits a detail suffix when stdout and stderr are empty", async () => {
+    await assertRejects(
+      () => runOrThrow("/bin/sh", ["-c", "exit 6"], { stream: false }),
+      Error,
+      "exit 6",
+    );
+  });
+
+  it("runtimeEnv treats a missing PATH as empty", () => {
+    const previous = Deno.env.get("PATH");
+    Deno.env.delete("PATH");
+    try {
+      const env = runtimeEnv();
+      assertEquals(env.PATH?.endsWith(":"), true);
+    } finally {
+      if (previous === undefined) {
+        Deno.env.delete("PATH");
+      } else {
+        Deno.env.set("PATH", previous);
+      }
+    }
+  });
 });

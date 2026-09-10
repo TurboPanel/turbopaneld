@@ -237,6 +237,96 @@ test("runDaemon reinstalls fabric when Docker becomes reachable", async () => {
   assertEquals(stub.fabricReinstalls >= 2, true);
 });
 
+test("runDaemon passes the Docker monitor into the default sentinel", async () => {
+  let monitorStarts = 0;
+  const dockerMonitor: DockerMonitorLike & {
+    start(signal: AbortSignal): void;
+    waitUntilReady(): Promise<void>;
+    getContainers(): unknown[];
+    getContainerInspect(): undefined;
+    subscribe(): () => void;
+  } = {
+    subscribeReachability: () => {},
+    start() {
+      monitorStarts += 1;
+    },
+    waitUntilReady: () => Promise.resolve(),
+    getContainers: () => [],
+    getContainerInspect: () => undefined,
+    subscribe: () => () => {},
+  };
+  const stub = stubIo({
+    initOrchestration: () => Promise.resolve(true),
+    shouldEnableDockerIntegration: () => true,
+    dockerBinaryPresent: () => Promise.resolve(true),
+    createDockerMonitor: () => dockerMonitor,
+    createSentinel: undefined,
+  });
+  await runDaemon(stub.io);
+  assertEquals(monitorStarts >= 1, true);
+  assertEquals(stub.exits, [0]);
+});
+
+test("runDaemon uses default Docker monitor construction", async () => {
+  const stub = stubIo({
+    initOrchestration: () => Promise.resolve(true),
+    shouldEnableDockerIntegration: () => true,
+    dockerBinaryPresent: () => Promise.resolve(true),
+    createDockerMonitor: undefined,
+  });
+  await runDaemon(stub.io);
+  assertEquals(stub.exits, [0]);
+});
+
+test("runDaemon connect path uses injected metric factories", async () => {
+  let metricsCalls = 0;
+  let topologyCalls = 0;
+  const stub = stubIo({
+    shouldConnectToInstance: () => true,
+    createMetricsCollector: () => {
+      metricsCalls += 1;
+      return { kind: "metrics" };
+    },
+    collectTopology: () => {
+      topologyCalls += 1;
+      return { kind: "topology" };
+    },
+    connectInstance: (opts) => {
+      const metrics = opts.metricsCollectorFactory() as { kind: string };
+      const topology = opts.collectTopologyFn() as { kind: string };
+      assertEquals(metrics.kind, "metrics");
+      assertEquals(topology.kind, "topology");
+      return Promise.resolve({ stop() {} });
+    },
+  });
+  await runDaemon(stub.io);
+  assertEquals(metricsCalls, 1);
+  assertEquals(topologyCalls, 1);
+});
+
+test("runDaemon connect path falls back to default metric factories", async () => {
+  let usedDefaults = false;
+  const stub = stubIo({
+    shouldConnectToInstance: () => true,
+    createMetricsCollector: undefined,
+    collectTopology: undefined,
+    connectInstance: (opts) => {
+      const metrics = opts.metricsCollectorFactory();
+      const topology = opts.collectTopologyFn();
+      usedDefaults = metrics !== undefined && topology !== undefined;
+      return Promise.resolve({ stop() {} });
+    },
+  });
+  await runDaemon(stub.io);
+  assertEquals(usedDefaults, true);
+});
+
+test("runDaemon writes startup logs through the default logger", async () => {
+  const stub = stubIo({ logInfo: undefined });
+  await runDaemon(stub.io);
+  assertEquals(stub.exits, [0]);
+});
+
 test("runDaemon ignores a second shutdown signal and close errors", async () => {
   const handlers: SignalHandler[] = [];
   let closes = 0;

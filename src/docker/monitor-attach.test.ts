@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import {
   decideDockerMonitorAttach,
   dockerBinaryPresent,
@@ -57,4 +57,20 @@ test("dockerBinaryPresent is false when the path is missing", async () => {
     await dockerBinaryPresent("/tmp/turbopanel-no-such-docker-binary"),
     false,
   );
+});
+
+test("dockerBinaryPresent rethrows unexpected stat errors", async () => {
+  const original = Deno.stat.bind(Deno);
+  Deno.stat = (() =>
+    Promise.reject(
+      new Deno.errors.PermissionDenied("denied"),
+    )) as typeof Deno.stat;
+  try {
+    await assertRejects(
+      () => dockerBinaryPresent("/usr/bin/docker"),
+      Deno.errors.PermissionDenied,
+    );
+  } finally {
+    Deno.stat = original;
+  }
 });

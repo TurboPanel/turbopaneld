@@ -472,6 +472,46 @@ test("applyDevSyncTarball skips deno cache when execPath spawn throws", async ()
   }
 });
 
+test("applyDevSyncTarball logs a non-Error cache skip without aborting", async () => {
+  const fixture = await createCheckoutFixture();
+  const originalCwd = Deno.cwd();
+  const contentDir = await Deno.makeTempDir();
+  const originalCommand = Deno.Command;
+  Deno.Command = class {
+    #cmd: string;
+    #opts: Deno.CommandOptions;
+    constructor(cmd: string, opts: Deno.CommandOptions) {
+      this.#cmd = cmd;
+      this.#opts = opts;
+      if (cmd === Deno.execPath()) {
+        throw "cache binary missing";
+      }
+    }
+    output() {
+      return new originalCommand(this.#cmd, this.#opts).output();
+    }
+  } as unknown as typeof Deno.Command;
+  try {
+    await writeTree(contentDir, { "main.ts": "// cache skip string\n" });
+    const tarball = await createTarGzFromDir(contentDir);
+
+    await withEnvMap({
+      TURBOPANEL_DEV_INSTANCE: undefined,
+      TURBOPANEL_DAEMON_ROOT: fixture.daemonRoot,
+    }, async () => {
+      await applyDevSyncTarball(tarball);
+    });
+
+    const main = await Deno.readTextFile(join(fixture.daemonRoot, "main.ts"));
+    assertEquals(main, "// cache skip string\n");
+  } finally {
+    Deno.Command = originalCommand;
+    await restoreCwd(originalCwd);
+    await Deno.remove(contentDir, { recursive: true });
+    await fixture.cleanup();
+  }
+});
+
 test("applyDevSyncTarball syncs when no host-local artifacts are present", async () => {
   const parent = await Deno.makeTempDir({ prefix: "dev-sync-minimal-" });
   const daemonRoot = join(parent, "turbopaneld");

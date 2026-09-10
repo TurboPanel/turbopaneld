@@ -137,6 +137,13 @@ test("allowed sources merge replication peers and IP-literal peers", () => {
   assertEquals(sources, ["203.0.113.51", "203.0.113.52"]);
 });
 
+test("allowed sources include ingressSourceAddresses consumer IPs", () => {
+  const sources = resolveManagedPublicAllowedSources(publicPayload({
+    ingressSourceAddresses: ["203.0.113.80", "db-peer"],
+  }));
+  assertEquals(sources, ["203.0.113.51", "203.0.113.80"]);
+});
+
 test("reconcile scopes the public listener to known peers and drops the rest", async () => {
   await withRunner(async (invocations) => {
     await reconcileManagedPublicFirewall(publicPayload());
@@ -283,4 +290,51 @@ test("best-effort removal swallows teardown failures", async () => {
   } finally {
     setManagedFirewallRunForTests(null);
   }
+});
+
+test("reconcile throws when a peer ACCEPT or trailing DROP cannot be installed", async () => {
+  await withRunner(async () => {
+    let threw = false;
+    try {
+      await reconcileManagedPublicFirewall(publicPayload());
+    } catch {
+      threw = true;
+    }
+    assertEquals(threw, true);
+  }, (args) => {
+    if (args[0] === "-A" && args.includes("ACCEPT")) {
+      return fail("failed to allow managed peer");
+    }
+    return null;
+  });
+
+  await withRunner(async () => {
+    let threw = false;
+    try {
+      await reconcileManagedPublicFirewall(publicPayload());
+    } catch {
+      threw = true;
+    }
+    assertEquals(threw, true);
+  }, (args) => {
+    if (args[0] === "-A" && args.includes("DROP")) {
+      return fail("failed to install managed drop rule");
+    }
+    return null;
+  });
+});
+
+test("reconcile throws when a missing jump cannot be inserted", async () => {
+  await withRunner(async () => {
+    let threw = false;
+    try {
+      await reconcileManagedPublicFirewall(publicPayload());
+    } catch {
+      threw = true;
+    }
+    assertEquals(threw, true);
+  }, (args) => {
+    if (args[0] === "-I") return fail("failed to install iptables rule");
+    return null;
+  });
 });

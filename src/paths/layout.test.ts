@@ -1,5 +1,5 @@
 import { assertEquals, assertThrows } from "@std/assert";
-import { join } from "@std/path";
+import { dirname, fromFileUrl, join } from "@std/path";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import {
   commandLogSpoolDir,
@@ -7,6 +7,7 @@ import {
   defaultDaemonRootForMode,
   detectInstallMode,
   DEV_CONFIG_DIR_DEFAULT,
+  DEV_DAEMON_ROOT_DEFAULT,
   DEV_INSTANCE_DIR_DEFAULT,
   DEV_RUNTIMES_DIR_DEFAULT,
   fabricNetworkDir,
@@ -16,6 +17,7 @@ import {
   isCompiledStubRoot,
   pathExists,
   principalHomePath,
+  PROD_BACKUP_DIR_DEFAULT,
   PROD_BIN_DIR_DEFAULT,
   PROD_CONFIG_DIR_DEFAULT,
   PROD_DAEMON_ROOT_DEFAULT,
@@ -48,6 +50,13 @@ import {
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
 const test = Deno.test.bind(Deno);
+
+/** Same walk `layout.ts` uses for default `fromMeta` (`src/paths` → repo root). */
+const importMetaCheckoutRoot = join(
+  dirname(fromFileUrl(import.meta.url)),
+  "..",
+  "..",
+);
 
 test("pathExists reports present and missing paths", async () => {
   await withTempLayout((fixture) => {
@@ -126,6 +135,15 @@ test("resolveLayout ignores whitespace-only pickPath env overrides", () => {
   );
   assertEquals(development.home, PROD_HOME_DEFAULT);
   assertEquals(development.configDir, DEV_CONFIG_DIR_DEFAULT);
+});
+
+test("readEnv returns present values and undefined for missing keys", () => {
+  const home = Deno.env.get("HOME");
+  if (typeof home !== "string") {
+    throw new TypeError("HOME must be a string in the test environment");
+  }
+  assertEquals(readEnv("HOME"), home);
+  assertEquals(readEnv("TURBOPANEL_LAYOUT_COVERAGE_UNSET"), undefined);
 });
 
 test("readEnv returns undefined when env access fails", () => {
@@ -247,6 +265,14 @@ test("defaultDaemonRootForMode and resolveRuntimesDir follow mode defaults", () 
     ),
     "/custom/vendor",
   );
+  assertEquals(
+    resolveRuntimesDir({}, { forceMode: "development", skipDiscovery: true }),
+    DEV_RUNTIMES_DIR_DEFAULT,
+  );
+  assertEquals(
+    DEV_DAEMON_ROOT_DEFAULT,
+    join(resolveDevRoot({}), "turbopaneld"),
+  );
 });
 
 test("resolveLayout strips trailing slashes and wires fabric helpers", () => {
@@ -330,6 +356,7 @@ test("resolveLayout production defaults match the FHS tree", () => {
   assertEquals(layout.stateDir, PROD_STATE_DIR_DEFAULT);
   assertEquals(layout.logDir, PROD_LOG_DIR_DEFAULT);
   assertEquals(layout.runDir, PROD_RUN_DIR_DEFAULT);
+  assertEquals(layout.backupDir, PROD_BACKUP_DIR_DEFAULT);
   assertEquals(layout.daemonRootDefault, PROD_DAEMON_ROOT_DEFAULT);
   assertEquals(layout.runtimesDir, PROD_RUNTIME_DIR_DEFAULT);
   assertEquals(layout.instanceDir, PROD_INSTANCE_DIR_DEFAULT);
@@ -358,6 +385,8 @@ test("resolveLayout development uses home-relative bins and FHS mutable dirs", (
   assertEquals(layout.shareDir, "/custom/opt/share");
   assertEquals(layout.uiDir, "/custom/opt/share/ui");
   assertEquals(layout.runtimeDir, DEV_RUNTIMES_DIR_DEFAULT);
+  assertEquals(layout.runtimesDir, DEV_RUNTIMES_DIR_DEFAULT);
+  assertEquals(layout.backupDir, PROD_BACKUP_DIR_DEFAULT);
   assertEquals(layout.configDir, DEV_CONFIG_DIR_DEFAULT);
   assertEquals(layout.instanceDir, DEV_INSTANCE_DIR_DEFAULT);
   assertEquals(
@@ -385,6 +414,7 @@ test("resolveLayout honors every path override", () => {
     TURBOPANEL_CONFIG_DIR: "/c/",
     TURBOPANEL_STATE_DIR: "/st/",
     TURBOPANEL_LOG_DIR: "/lg/",
+    TURBOPANEL_BACKUP_DIR: "/bk///",
     TURBOPANEL_RUN_DIR: "/r/",
     TURBOPANEL_RUNTIMES_DIR: "/v/",
     TURBOPANEL_INSTANCE_DIR: "/i/",
@@ -401,6 +431,7 @@ test("resolveLayout honors every path override", () => {
   assertEquals(layout.configDir, "/c");
   assertEquals(layout.stateDir, "/st");
   assertEquals(layout.logDir, "/lg");
+  assertEquals(layout.backupDir, "/bk");
   assertEquals(layout.runDir, "/r");
   assertEquals(layout.runtimesDir, "/v");
   assertEquals(layout.instanceDir, "/i");
@@ -696,4 +727,96 @@ test("DaemonSourceRootError keeps a distinct name", () => {
   const err = new DaemonSourceRootError("missing checkout");
   assertEquals(err.name, "DaemonSourceRootError");
   assertEquals(err.message, "missing checkout");
+});
+
+test("detectInstallMode defaults fromMeta to the import.meta checkout", () => {
+  assertEquals(
+    detectInstallMode({}, { skipDiscovery: true }),
+    "development",
+  );
+});
+
+test("resolveDaemonRoot defaults fromMeta to the import.meta checkout", () => {
+  assertEquals(
+    resolveDaemonRoot({}, { skipDiscovery: true }),
+    importMetaCheckoutRoot,
+  );
+});
+
+test("resolveLayout development orchestration dir discovers import.meta checkout", () => {
+  const layout = resolveLayout({}, {
+    forceMode: "development",
+    skipDiscovery: false,
+  });
+  assertEquals(
+    layout.orchestrationDir,
+    join(importMetaCheckoutRoot, "orchestration"),
+  );
+});
+
+test("isCompiledStubRoot treats deno-compile trees as stubs even with main.ts", async () => {
+  await withTempLayout(async (fixture) => {
+    const compiledRoot = join(fixture.dirs.stateDir, "deno-compile-extracted");
+    await Deno.mkdir(compiledRoot);
+    await Deno.writeTextFile(join(compiledRoot, "main.ts"), "// stub\n");
+    assertEquals(isCompiledStubRoot(compiledRoot), true);
+    assertEquals(hasDaemonCheckout(compiledRoot), true);
+    assertEquals(
+      detectInstallMode({}, {
+        fromMeta: compiledRoot,
+        skipDiscovery: true,
+      }),
+      "production",
+    );
+    assertEquals(
+      resolveDaemonRoot({}, {
+        fromMeta: compiledRoot,
+        skipDiscovery: true,
+        forceMode: "production",
+      }),
+      PROD_DAEMON_ROOT_DEFAULT,
+    );
+  });
+});
+
+test("resolveDaemonRoot returns a non-checkout override when requireCheckout is off", async () => {
+  await withTempLayout(async (fixture) => {
+    const notCheckout = join(fixture.dirs.stateDir, "managed-root");
+    await Deno.mkdir(notCheckout);
+    assertEquals(
+      resolveDaemonRoot(
+        { TURBOPANEL_DAEMON_ROOT: `${notCheckout}/` },
+        { skipDiscovery: true },
+      ),
+      `${notCheckout}/`,
+    );
+  });
+});
+
+test("resolveDaemonRoot ignores whitespace-only TURBOPANEL_DAEMON_ROOT", () => {
+  assertEquals(
+    resolveDaemonRoot(
+      { TURBOPANEL_DAEMON_ROOT: "   " },
+      { fromMeta: importMetaCheckoutRoot, skipDiscovery: true },
+    ),
+    importMetaCheckoutRoot,
+  );
+});
+
+test("resolveLayout ignores whitespace-only IIFE env overrides", () => {
+  const layout = resolveLayout(
+    {
+      TURBOPANEL_BACKUP_DIR: "  ",
+      TURBOPANEL_ORCHESTRATION_DIR: "\t",
+      TURBOPANEL_RUNTIMES_DIR: " \n ",
+      TURBOPANEL_DAEMON_STATE_DIR: "   ",
+      TURBOPANEL_PRINCIPAL_HOME_ROOT: "\t",
+    },
+    { forceMode: "production", skipDiscovery: true },
+  );
+  assertEquals(layout.backupDir, PROD_BACKUP_DIR_DEFAULT);
+  assertEquals(layout.orchestrationDir, PROD_ORCHESTRATION_DIR_DEFAULT);
+  assertEquals(layout.runtimesDir, PROD_RUNTIME_DIR_DEFAULT);
+  assertEquals(layout.daemonStateDir, PROD_STATE_DIR_DEFAULT);
+  assertEquals(layout.principalHomeRoot, "/srv/users");
 });

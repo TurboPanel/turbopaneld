@@ -34,8 +34,10 @@ const noSleep = () => Promise.resolve();
 test("upload forwards the chunk and reports the ack", async () => {
   const { sent, send } = recorder();
   const uploader = new CommandLogUploader({ commandId: "cmd-1", send });
+  assertEquals(uploader.uploadedBytes, 0);
   assertEquals(await uploader.upload({ seq: 1, bytes: "line\n" }), true);
   assertEquals(sent, [{ commandId: "cmd-1", seq: 1, bytes: "line\n" }]);
+  assertEquals(uploader.uploadedBytes, "line\n".length);
 });
 
 test("upload retries then gives up without throwing", async () => {
@@ -76,6 +78,10 @@ test("byte cap emits one truncation marker and stops uploading", async () => {
   assertEquals(
     sent.filter((c) => c.bytes.includes(TRUNCATION_MARKER)).length,
     1,
+  );
+  assertEquals(
+    uploader.uploadedBytes,
+    "0123456789\n".length + `${TRUNCATION_MARKER}\n`.length,
   );
 });
 

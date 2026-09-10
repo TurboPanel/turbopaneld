@@ -383,6 +383,26 @@ test({
   },
 });
 
+test({
+  name:
+    "resolveDockerDataRoot closes the owned client when the Unix socket is missing",
+  permissions: { read: true, write: true, net: true, env: true },
+  async fn() {
+    const dir = Deno.makeTempDirSync({ prefix: "tp-docker-owned-" });
+    const sock = `${dir}/missing.sock`;
+    const previous = Deno.env.get("TURBOPANEL_DOCKER_SOCKET");
+    Deno.env.set("TURBOPANEL_DOCKER_SOCKET", sock);
+    try {
+      const root = await resolveDockerDataRoot();
+      assertEquals(root, undefined);
+    } finally {
+      if (previous === undefined) Deno.env.delete("TURBOPANEL_DOCKER_SOCKET");
+      else Deno.env.set("TURBOPANEL_DOCKER_SOCKET", previous);
+      Deno.removeSync(dir, { recursive: true });
+    }
+  },
+});
+
 test("resolveDockerDataRoot sanitizes malformed DockerRootDir values", async () => {
   assertEquals(
     await resolveDockerDataRoot({

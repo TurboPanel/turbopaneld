@@ -160,6 +160,34 @@ test("runDocker retries sudo when socket permission is on stdout", async () => {
   }
 });
 
+test("runDocker falls back to sudo stderr when the original socket error is empty", async () => {
+  const restore = setDockerCliIoForTest({
+    runRaw: (command) => {
+      if (command === "/usr/bin/docker") {
+        return Promise.resolve({
+          success: false,
+          code: 1,
+          stdout:
+            "permission denied while trying to connect to the Docker daemon socket",
+          stderr: "",
+        });
+      }
+      return Promise.resolve(fail("sudo: a password is required", 1));
+    },
+  });
+  const previousUser = Deno.env.get("USER");
+  Deno.env.set("USER", "tp");
+  try {
+    const result = await runDocker(["info"]);
+    assertEquals(result.success, false);
+    assertEquals(result.stderr, "sudo: a password is required");
+  } finally {
+    if (previousUser === undefined) Deno.env.delete("USER");
+    else Deno.env.set("USER", previousUser);
+    restore();
+  }
+});
+
 test("runDocker prefers original stderr when sudo refresh also fails", async () => {
   const restore = setDockerCliIoForTest({
     runRaw: (command) => {

@@ -55,6 +55,14 @@ const PEM = [
   "",
 ].join("\n");
 
+test("normalizeDenySet expands CRLF multiline plaintexts into line fragments", () => {
+  const crlf = "line-one-secret\r\nline-two-secret\r\n";
+  const denySet = normalizeDenySet([crlf]);
+  assertEquals(denySet.includes("line-one-secret"), true);
+  assertEquals(denySet.includes("line-two-secret"), true);
+  assertEquals(denySet.includes("\r"), false);
+});
+
 test("normalizeDenySet expands multiline plaintexts into line fragments", () => {
   const denySet = normalizeDenySet([PEM]);
   // The whole PEM plus every non-trivial line of it.

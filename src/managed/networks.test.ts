@@ -352,3 +352,55 @@ test("ensureContainerJoinedManagedNetwork treats already-connected stderr as suc
   );
   assertEquals(joined, true);
 });
+
+test("ensureContainerJoinedManagedNetwork rejects unsafe names without Docker", async () => {
+  const calls: string[][] = [];
+  const joined = await ensureContainerJoinedManagedNetwork(
+    "../escape",
+    MANAGED_NETWORK,
+    (args) => {
+      calls.push([...args]);
+      return Promise.resolve(okResult());
+    },
+  );
+  assertEquals(joined, false);
+  assertEquals(calls, []);
+});
+
+test("ensureContainerJoinedManagedNetwork returns false when connect fails", async () => {
+  const joined = await ensureContainerJoinedManagedNetwork(
+    "frontend-in",
+    MANAGED_NETWORK,
+    (args) => {
+      if (args[0] === "inspect") {
+        return Promise.resolve({
+          success: true,
+          stdout: "turbopanel-managed\n",
+          stderr: "",
+          code: 0,
+        });
+      }
+      return Promise.resolve(failResult("network not found"));
+    },
+  );
+  assertEquals(joined, false);
+});
+
+test("ensureContainerJoinedManagedNetwork treats already-connected phrasing as success", async () => {
+  const joined = await ensureContainerJoinedManagedNetwork(
+    "frontend-in",
+    MANAGED_NETWORK,
+    (args) => {
+      if (args[0] === "inspect") {
+        return Promise.resolve({
+          success: true,
+          stdout: "other-net\n",
+          stderr: "",
+          code: 0,
+        });
+      }
+      return Promise.resolve(failResult("already connected"));
+    },
+  );
+  assertEquals(joined, true);
+});

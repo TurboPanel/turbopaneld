@@ -462,3 +462,20 @@ test("InstallPresenter TTY success uses colored checkmark", () => {
   stdout.restore();
   assertMatch(stdout.text(), /ok/);
 });
+
+test("InstallPresenter completeStep is a no-op when no step is active", () => {
+  const stdout = captureWriteStream(Deno.stdout);
+  const presenter = new InstallPresenter(false);
+  presenter.completeStep(true, "should not emit");
+  presenter.dispose();
+  stdout.restore();
+  assertEquals(stdout.text().includes("should not emit"), false);
+});
+
+test("InstallPresenter fail without an active step uses a generic label", () => {
+  const stderr = captureWriteStream(Deno.stderr);
+  const presenter = new InstallPresenter(false);
+  presenter.fail("   ");
+  stderr.restore();
+  assertMatch(stderr.text(), /step failed/);
+});

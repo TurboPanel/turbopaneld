@@ -1,5 +1,9 @@
 import { assertEquals, assertRejects } from "@std/assert";
-import { readRemoteFiles, resolveDefaultBranch } from "./read-remote-files.ts";
+import {
+  _internal,
+  readRemoteFiles,
+  resolveDefaultBranch,
+} from "./read-remote-files.ts";
 
 const test = Deno.test.bind(Deno);
 
@@ -243,6 +247,216 @@ test("resolveDefaultBranch leaves no scratch directory behind", async () => {
     assertEquals([...Deno.readDirSync(scratchRoot)], []);
   } finally {
     await Deno.remove(scratchRoot, { recursive: true });
+    await repo.cleanup();
+  }
+});
+
+test("isSafeRepoPath rejects empty, oversized, and escape-prone paths", () => {
+  assertEquals(_internal.isSafeRepoPath(""), false);
+  assertEquals(_internal.isSafeRepoPath("a".repeat(201)), false);
+  assertEquals(_internal.isSafeRepoPath("\\windows"), false);
+  assertEquals(_internal.isSafeRepoPath("foo\0bar"), false);
+  assertEquals(_internal.isSafeRepoPath("foo bar"), false);
+  assertEquals(_internal.isSafeRepoPath("docker-compose.yml"), true);
+  assertEquals(_internal.isSafeRepoPath("public/index.html"), true);
+});
+
+test("readRemoteFiles lists a nested directory and ignores an unsafe listPath", async () => {
+  const repo = await makeRepo();
+  try {
+    const nested = await readRemoteFiles({
+      cloneUrl: repo.path,
+      ref: "main",
+      paths: [],
+      listPath: "public",
+      maxBytesPerFile: 256 * 1024,
+    });
+    assertEquals(
+      nested.entries.some((entry) => entry.path === "public/index.html"),
+      true,
+    );
+
+    const unsafe = await readRemoteFiles({
+      cloneUrl: repo.path,
+      ref: "main",
+      paths: [],
+      listPath: "../etc",
+      maxBytesPerFile: 256 * 1024,
+    });
+    assertEquals(unsafe.entries, []);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test("resolveDefaultBranch returns null when HEAD is not a branch", async () => {
+  const path = await Deno.makeTempDir({ prefix: "tp-repo-detached-" });
+  try {
+    await git(["init", "-q", "-b", "main"], path);
+    await git(["config", "user.email", "t@example.com"], path);
+    await git(["config", "user.name", "T"], path);
+    await Deno.writeTextFile(`${path}/README.md`, "hello\n");
+    await git(["add", "-A"], path);
+    await git(["commit", "-qm", "init"], path);
+    await git(["checkout", "--detach", "HEAD"], path);
+    await git(["branch", "-D", "main"], path);
+
+    const result = await resolveDefaultBranch(path);
+    assertEquals(result.defaultBranch, null);
+  } finally {
+    await Deno.remove(path, { recursive: true });
+  }
+});
+
+test("readRemoteFiles lists an empty tree when ls-tree cannot read the path", async () => {
+  const repo = await makeRepo();
+  try {
+    const result = await readRemoteFiles({
+      cloneUrl: repo.path,
+      ref: "main",
+      paths: [],
+      listPath: "README.md",
+      maxBytesPerFile: 256 * 1024,
+    });
+    assertEquals(result.entries, []);
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test("readRemoteFiles treats a git spawn throw as a failed command", async () => {
+  const original = Deno.Command;
+  Deno.Command = class {
+    output() {
+      return Promise.reject(new TypeError("git exec failed"));
+    }
+  } as unknown as typeof Deno.Command;
+  try {
+    await assertRejects(
+      () =>
+        readRemoteFiles({
+          cloneUrl: "https://example.com/o/r.git",
+          ref: "main",
+          paths: ["README.md"],
+          maxBytesPerFile: 256 * 1024,
+        }),
+      Error,
+    );
+  } finally {
+    Deno.Command = original;
+  }
+});
+
+test("readRemoteFiles stringifies a non-Error git spawn throw", async () => {
+  const original = Deno.Command;
+  Deno.Command = class {
+    output() {
+      return Promise.reject("git exploded");
+    }
+  } as unknown as typeof Deno.Command;
+  try {
+    await assertRejects(
+      () =>
+        readRemoteFiles({
+          cloneUrl: "https://example.com/o/r.git",
+          ref: "main",
+          paths: ["README.md"],
+          maxBytesPerFile: 256 * 1024,
+        }),
+      Error,
+    );
+  } finally {
+    Deno.Command = original;
+  }
+});
+
+test("readRemoteFiles fails when git init is denied", async () => {
+  const original = Deno.Command;
+  Deno.Command = class {
+    output() {
+      return Promise.resolve({
+        code: 1,
+        success: false,
+        stdout: new Uint8Array(),
+        stderr: new TextEncoder().encode("cannot init"),
+        signal: null,
+      });
+    }
+  } as unknown as typeof Deno.Command;
+  try {
+    await assertRejects(
+      () =>
+        readRemoteFiles({
+          cloneUrl: "https://example.com/o/r.git",
+          ref: "main",
+          paths: ["README.md"],
+          maxBytesPerFile: 256 * 1024,
+        }),
+      Error,
+      "cannot init",
+    );
+  } finally {
+    Deno.Command = original;
+  }
+});
+
+test("readRemoteFiles fails when git remote add is denied", async () => {
+  const original = Deno.Command;
+  let calls = 0;
+  Deno.Command = class {
+    output() {
+      calls += 1;
+      if (calls === 1) {
+        return Promise.resolve({
+          code: 0,
+          success: true,
+          stdout: new Uint8Array(),
+          stderr: new Uint8Array(),
+          signal: null,
+        });
+      }
+      return Promise.resolve({
+        code: 1,
+        success: false,
+        stdout: new Uint8Array(),
+        stderr: new TextEncoder().encode("cannot add remote"),
+        signal: null,
+      });
+    }
+  } as unknown as typeof Deno.Command;
+  try {
+    await assertRejects(
+      () =>
+        readRemoteFiles({
+          cloneUrl: "https://example.com/o/r.git",
+          ref: "main",
+          paths: ["README.md"],
+          maxBytesPerFile: 256 * 1024,
+        }),
+      Error,
+      "cannot add remote",
+    );
+  } finally {
+    Deno.Command = original;
+  }
+});
+
+test("readRemoteFiles swallows scratch cleanup errors", async () => {
+  const repo = await makeRepo();
+  const originalRemove = Deno.remove;
+  Deno.remove = () => Promise.reject(new TypeError("busy"));
+  try {
+    const result = await readRemoteFiles({
+      cloneUrl: repo.path,
+      ref: "main",
+      paths: ["README.md"],
+      credential: "ghp_exampletoken",
+      credentialKind: "token",
+      maxBytesPerFile: 256 * 1024,
+    });
+    assertEquals(result.files[0]?.found, true);
+  } finally {
+    Deno.remove = originalRemove;
     await repo.cleanup();
   }
 });

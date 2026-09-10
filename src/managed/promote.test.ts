@@ -126,3 +126,49 @@ test("ManagedPromoteResult shape fields are present in type contract", () => {
   assertEquals(sample.demoted, true);
   assertEquals(sample.role, "primary");
 });
+
+test("handleManagedPromote rejects engines without replication support", async () => {
+  await assertRejects(
+    () =>
+      handleManagedPromote(
+        {
+          managedId: "00000000-0000-4000-8000-000000000001",
+          memberId: "00000000-0000-4000-8000-000000000002",
+          engine: "redis",
+        },
+        new Date().toISOString(),
+        {
+          ensureDocker: () => Promise.resolve(),
+          runDocker: () => Promise.resolve(dockerOk("[]")),
+        },
+      ),
+    Error,
+    "redis",
+  );
+});
+
+test("handleManagedPromote rejects when compose ps collection fails", async () => {
+  await assertRejects(
+    () =>
+      handleManagedPromote(
+        {
+          managedId: "managed_promote_ps_fail",
+          memberId: "00000000-0000-4000-8000-000000000002",
+          engine: "postgres",
+        },
+        new Date().toISOString(),
+        {
+          ensureDocker: () => Promise.resolve(),
+          runDocker: () =>
+            Promise.resolve({
+              success: false,
+              stdout: "",
+              stderr: "compose ps failed",
+              code: 1,
+            }),
+        },
+      ),
+    Error,
+    "no running containers",
+  );
+});

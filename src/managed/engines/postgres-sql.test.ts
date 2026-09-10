@@ -1,5 +1,6 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import {
+  connectionCensusSql,
   createDatabaseSql,
   createOrAlterRoleSql,
   createPhysicalSlotSql,
@@ -10,11 +11,14 @@ import {
   dropRoleSql,
   ensureProxySqlMonitorRoleSql,
   grantDatabaseSql,
+  isInRecoverySql,
   listManagedSlotsSql,
+  MANAGED_SLOT_PREFIX,
   primaryReplicationStatusSql,
   promoteSql,
   quoteIdentifier,
   quoteLiteral,
+  reloadVerifySql,
   standbyReplicationStatusSql,
 } from "./postgres-sql.ts";
 
@@ -32,6 +36,7 @@ test("quoteIdentifier doubles embedded quotes and rejects injection", () => {
   assertThrows(() => quoteIdentifier('evil"; DROP TABLE'), Error);
   assertThrows(() => quoteIdentifier("has-dash"), Error);
   assertThrows(() => quoteIdentifier(""), Error);
+  assertThrows(() => quoteIdentifier("a".repeat(64)), Error);
 });
 
 test("quoteLiteral doubles single quotes and rejects control chars", () => {
@@ -49,6 +54,15 @@ test("createOrAlterRoleSql is idempotent via pg_roles check", () => {
   assertEquals(sql.includes('ALTER ROLE "app"'), true);
   assertEquals(sql.includes("'s3cret'"), true);
   assertEquals(sql.includes("; DROP"), false);
+  assertEquals(sql.includes("LOGIN"), true);
+  assertEquals(sql.includes("NOSUPERUSER"), true);
+
+  const nologin = createOrAlterRoleSql("app", "s3cret", {
+    login: false,
+    superuser: true,
+  });
+  assertEquals(nologin.includes("NOLOGIN"), true);
+  assertEquals(nologin.includes("SUPERUSER"), true);
 });
 
 test("ensureProxySqlMonitorRoleSql grants pg_monitor without superuser", () => {
@@ -64,6 +78,7 @@ test("createDatabaseSql and dropDatabaseSql", () => {
   const create = createDatabaseSql("appdb", "app");
   assertEquals(create.includes("DO $"), false);
   assertEquals(create.includes('CREATE DATABASE "appdb" OWNER "app"'), true);
+  assertEquals(createDatabaseSql("appdb"), 'CREATE DATABASE "appdb";');
   assertEquals(
     databaseExistsSql("appdb").includes("pg_catalog.pg_database"),
     true,
@@ -117,6 +132,20 @@ test("replication SQL builders use quoted identifiers and managed slot prefix", 
   assertEquals(standbySql.includes("status = 'streaming'"), true);
   assertEquals(standbySql.includes("'stopped'"), true);
   assertEquals(promoteSql().includes("pg_promote"), true);
+});
+
+test("reload, census, recovery, and slot-prefix SQL stay catalog-qualified", () => {
+  const reload = reloadVerifySql();
+  assertEquals(reload.includes("pg_file_settings"), true);
+  assertEquals(reload.includes("pg_hba_file_rules"), true);
+  assertEquals(reload.includes("restart_pending"), true);
+
+  const census = connectionCensusSql();
+  assertEquals(census.includes("pg_stat_activity"), true);
+  assertEquals(census.includes("max_connections"), true);
+
+  assertEquals(isInRecoverySql(), "SELECT pg_catalog.pg_is_in_recovery();");
+  assertEquals(MANAGED_SLOT_PREFIX, "tp_member_");
 });
 
 test("standbyReplicationStatusSql does not report streaming solely from recovery", () => {

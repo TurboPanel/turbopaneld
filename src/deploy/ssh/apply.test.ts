@@ -196,6 +196,34 @@ function apply(host: Host, principals: { username: string; keys: string[] }[]) {
   );
 }
 
+function stubDenoCommand(run: RunFn): () => void {
+  const original = Deno.Command;
+  // deno-lint-ignore no-explicit-any
+  (Deno as any).Command = class {
+    #command: string;
+    #args: string[];
+    constructor(command: string, options?: { args?: string[] }) {
+      this.#command = command;
+      this.#args = options?.args ?? [];
+    }
+    async output(): Promise<Deno.CommandOutput> {
+      const result = await run(this.#command, this.#args);
+      const enc = new TextEncoder();
+      return {
+        success: result.success,
+        code: result.success ? 0 : 1,
+        signal: null,
+        stdout: enc.encode(result.stdout),
+        stderr: enc.encode(result.stderr),
+      };
+    }
+  };
+  return () => {
+    // deno-lint-ignore no-explicit-any
+    (Deno as any).Command = original;
+  };
+}
+
 test("a managed account's key file is root-owned 0644 and holds its keys", async () => {
   const host = await makeHost();
   try {
@@ -801,6 +829,65 @@ test("a failed prune removal is loud rather than ignored", async () => {
     };
     const error = await assertRejects(() => apply(host, []));
     assertStringIncludes(String(error), "rm refused");
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("applySshAccess uses runDefault when run is omitted", async () => {
+  const host = await makeHost();
+  const restore = stubDenoCommand(host.run);
+  try {
+    const result = await applySshAccess(
+      [{ username: "appuser", keys: [ED25519] }],
+      {
+        authorizedKeysDir: host.keysDir,
+        sshdConfigPath: host.sshdConfigPath,
+        sshdDropInPath: host.dropInPath,
+        prune: true,
+      },
+    );
+    assertEquals(result.changedPrincipals, ["appuser"]);
+  } finally {
+    restore();
+    await host.cleanup();
+  }
+});
+
+test("a silent key-directory create failure still names the path", async () => {
+  const host = await makeHost();
+  const inner = host.run;
+  host.run = async (command, args) => {
+    if (args.includes("install") && args.includes("-d")) {
+      const dest = args.at(-1);
+      if (dest === host.keysDir) return fail("");
+    }
+    return await inner(command, args);
+  };
+  try {
+    const error = await assertRejects(() =>
+      apply(host, [{ username: "appuser", keys: [ED25519] }])
+    );
+    assertStringIncludes(String(error), `Failed to create ${host.keysDir}`);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a failed key-directory listing leaves existing files in place", async () => {
+  const host = await makeHost();
+  try {
+    await apply(host, [{ username: "appuser", keys: [ED25519] }]);
+    const inner = host.run;
+    host.run = async (command, args) => {
+      if (args.includes("ls") && args.at(-1) === host.keysDir) {
+        return fail("ls refused");
+      }
+      return await inner(command, args);
+    };
+    const result = await apply(host, []);
+    assertEquals(result.removedPrincipals, []);
+    await Deno.stat(authorizedKeysPath("appuser", host.keysDir));
   } finally {
     await host.cleanup();
   }

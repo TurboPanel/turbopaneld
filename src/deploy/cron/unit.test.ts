@@ -99,3 +99,27 @@ test("cronTimerContent wires OnCalendar and randomized delay", () => {
   );
   assertStringIncludes(content, "WantedBy=timers.target");
 });
+
+test("cronServiceContent defaults the run ceiling and lets a job raise it", () => {
+  // `Type=oneshot` makes ExecStart the unit's *start*, so TimeoutStartSec is
+  // the run ceiling — a job that declares one replaces the default rather than
+  // adding a second, weaker bound.
+  assertStringIncludes(cronServiceContent(baseOpts), "TimeoutStartSec=900");
+
+  const bounded = cronServiceContent({
+    ...baseOpts,
+    job: { ...baseOpts.job, timeoutSeconds: 30 },
+  });
+  assertStringIncludes(bounded, "TimeoutStartSec=30");
+  assertEquals(bounded.includes("TimeoutStartSec=900"), false);
+});
+
+test("cronTimerContent carries a timezone the control plane appended", () => {
+  // The zone rides the OnCalendar string; this side renders what it was handed
+  // and never parses a zone of its own.
+  const content = cronTimerContent({
+    ...baseOpts,
+    job: { ...baseOpts.job, schedule: "*-*-* 03:00:00 America/New_York" },
+  });
+  assertStringIncludes(content, "OnCalendar=*-*-* 03:00:00 America/New_York");
+});

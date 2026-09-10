@@ -1853,6 +1853,12 @@ test("buildCaddyHostnameRoutes skips tcp and empty hostnames", () => {
         proxy: { forceHttps: false },
       },
     ],
+    nativeAppServices: [{
+      composeServiceName: "web",
+      serviceId: "s-http",
+      listenPort: 3000,
+      framework: "next",
+    }],
   });
   assertEquals([...routes.keys()], ["app.example.com"]);
   assertEquals(routes.get("app.example.com")?.forceHttps, false);
@@ -2070,6 +2076,20 @@ test("collectTcpUdpIngressEntries rejects invalid entry shapes in array", async 
       Error,
       "expected an array of tcp/udp ingress entries",
     );
+
+    await Deno.writeTextFile(
+      join(dir, "00000000-0000-4000-8000-0000000000de.json"),
+      JSON.stringify([{
+        hostingId: "h1",
+        protocol: "tcp",
+        publishedPort: 0,
+      }]),
+    );
+    await assertRejects(
+      () => collectTcpUdpIngressEntries(layout),
+      Error,
+      "expected an array of tcp/udp ingress entries",
+    );
   } finally {
     await cleanup();
   }
@@ -2112,6 +2132,282 @@ test("inspectHostingIngressContainer skips null compose-ps rows", async () => {
       null,
     );
   } finally {
+    await cleanup();
+  }
+});
+
+test("inspectHostingIngressContainer returns undefined when compose stat is denied", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const originalStat = Deno.stat.bind(Deno);
+  try {
+    await writeSystemComponentDescriptor(layout, SYSTEM_INGRESS_IDENTITY);
+    const composePath = hostingIngressComposePath(layout);
+    Deno.stat = ((path: string | URL) => {
+      if (String(path) === composePath) {
+        return Promise.reject(new Deno.errors.PermissionDenied("compose"));
+      }
+      return originalStat(path);
+    }) as typeof Deno.stat;
+    assertEquals(
+      await inspectHostingIngressContainer(layout, {
+        runDocker: () => Promise.resolve(fakeDockerOk()),
+      }),
+      undefined,
+    );
+  } finally {
+    Deno.stat = originalStat;
+    await cleanup();
+  }
+});
+
+test("removeServiceIngress rethrows when compose cannot be statted", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const serviceId = "00000000-0000-4000-8000-0000000000f1";
+  const originalStat = Deno.stat.bind(Deno);
+  try {
+    await Deno.mkdir(serviceIngressDir(layout, serviceId), {
+      recursive: true,
+      mode: 0o750,
+    });
+    const composePath = serviceIngressComposePath(layout, serviceId);
+    Deno.stat = ((path: string | URL) => {
+      if (String(path) === composePath) {
+        return Promise.reject(new Deno.errors.PermissionDenied("compose"));
+      }
+      return originalStat(path);
+    }) as typeof Deno.stat;
+    await assertRejects(
+      () =>
+        removeServiceIngress(layout, serviceId, {
+          runDocker: () => Promise.resolve(fakeDockerOk()),
+        }),
+      Deno.errors.PermissionDenied,
+      "compose",
+    );
+  } finally {
+    Deno.stat = originalStat;
+    await cleanup();
+  }
+});
+
+test("removeHostingCaddySite rethrows when the snippet cannot be unlinked", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const sitesDir = join(layout.configDir, "hosting", "sites");
+  await Deno.mkdir(sitesDir, { recursive: true });
+  const sitePath = join(sitesDir, "env-denied.caddy");
+  await Deno.writeTextFile(sitePath, "# stale\n");
+  const originalRemove = Deno.remove.bind(Deno);
+  Deno.remove = ((path: string | URL, opts?: Deno.RemoveOptions) => {
+    if (String(path) === sitePath) {
+      return Promise.reject(new Deno.errors.PermissionDenied("caddy site"));
+    }
+    return originalRemove(path, opts);
+  }) as typeof Deno.remove;
+  try {
+    await assertRejects(
+      () => removeHostingCaddySite(layout, "env-denied"),
+      Deno.errors.PermissionDenied,
+      "caddy site",
+    );
+  } finally {
+    Deno.remove = originalRemove;
+    await cleanup();
+  }
+});
+
+test("syncTcpUdpIngressEntries rejects a tmp file that fails validation before commit", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const serviceId = "00000000-0000-4000-8000-0000000000f2";
+  const originalRead = Deno.readTextFile.bind(Deno);
+  Deno.readTextFile = ((path: string | URL, opts?: Deno.ReadFileOptions) => {
+    if (String(path).includes(".tmp")) {
+      return Promise.resolve(JSON.stringify([{ hostingId: "h1" }]));
+    }
+    return originalRead(path, opts);
+  }) as typeof Deno.readTextFile;
+  try {
+    await assertRejects(
+      () =>
+        syncTcpUdpIngressEntries(layout, serviceId, [{
+          hostingId: "h1",
+          protocol: "tcp",
+          publishedPort: 9100,
+        }]),
+      Error,
+      "failed validation before commit",
+    );
+  } finally {
+    Deno.readTextFile = originalRead;
+    await cleanup();
+  }
+});
+
+test("collectTcpUdpIngressEntries skips non-claim files in the state dir", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const serviceId = "00000000-0000-4000-8000-0000000000f3";
+  try {
+    const dir = join(layout.stateDir, "ingress", "tcp-udp");
+    await Deno.mkdir(dir, { recursive: true });
+    await Deno.writeTextFile(join(dir, "notes.txt"), "ignore");
+    await Deno.writeTextFile(join(dir, `.${serviceId}.tmp`), "[]");
+    await Deno.writeTextFile(
+      join(dir, `${serviceId}.json`),
+      JSON.stringify([{
+        hostingId: "h1",
+        protocol: "tcp",
+        publishedPort: 9300,
+      }]),
+    );
+    assertEquals(await collectTcpUdpIngressEntries(layout), [{
+      hostingId: "h1",
+      protocol: "tcp",
+      publishedPort: 9300,
+    }]);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("listPersistedTcpUdpServiceIds skips non-directory service entries", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const goodId = "00000000-0000-4000-8000-0000000000f4";
+  try {
+    const servicesDir = join(layout.stateDir, "ingress", "services");
+    await Deno.mkdir(join(servicesDir, goodId), { recursive: true });
+    await Deno.writeTextFile(join(servicesDir, "not-a-dir"), "file\n");
+    assertEquals(await listPersistedTcpUdpServiceIds(layout), [goodId]);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("syncTcpUdpIngressEntries rethrows when an empty claim cannot be unlinked", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const serviceId = "00000000-0000-4000-8000-0000000000f5";
+  const originalRemove = Deno.remove.bind(Deno);
+  try {
+    await syncTcpUdpIngressEntries(layout, serviceId, [{
+      hostingId: "h1",
+      protocol: "tcp",
+      publishedPort: 9400,
+    }]);
+    const claimPath = join(
+      layout.stateDir,
+      "ingress",
+      "tcp-udp",
+      `${serviceId}.json`,
+    );
+    Deno.remove = ((path: string | URL, opts?: Deno.RemoveOptions) => {
+      if (String(path) === claimPath) {
+        return Promise.reject(new Deno.errors.PermissionDenied("claim"));
+      }
+      return originalRemove(path, opts);
+    }) as typeof Deno.remove;
+    await assertRejects(
+      () => syncTcpUdpIngressEntries(layout, serviceId, []),
+      Deno.errors.PermissionDenied,
+      "claim",
+    );
+  } finally {
+    Deno.remove = originalRemove;
+    await cleanup();
+  }
+});
+
+test("removeTcpUdpIngressEntries rethrows when the claim cannot be statted", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const serviceId = "00000000-0000-4000-8000-0000000000f6";
+  const originalStat = Deno.stat.bind(Deno);
+  try {
+    await syncTcpUdpIngressEntries(layout, serviceId, [{
+      hostingId: "h1",
+      protocol: "udp",
+      publishedPort: 9500,
+    }]);
+    const claimPath = join(
+      layout.stateDir,
+      "ingress",
+      "tcp-udp",
+      `${serviceId}.json`,
+    );
+    Deno.stat = ((path: string | URL) => {
+      if (String(path) === claimPath) {
+        return Promise.reject(new Deno.errors.PermissionDenied("stat"));
+      }
+      return originalStat(path);
+    }) as typeof Deno.stat;
+    await assertRejects(
+      () => removeTcpUdpIngressEntries(layout, serviceId),
+      Deno.errors.PermissionDenied,
+      "stat",
+    );
+  } finally {
+    Deno.stat = originalStat;
+    await cleanup();
+  }
+});
+
+test("removeEnvironmentTcpUdpServiceIngress rethrows when the empty index cannot be unlinked", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const environmentId = "env-idx-rm";
+  const serviceId = "00000000-0000-4000-8000-0000000000f7";
+  const originalRemove = Deno.remove.bind(Deno);
+  try {
+    await cleanupStaleTcpUdpServiceIngress(
+      layout,
+      environmentId,
+      new Set([serviceId]),
+      new Set([serviceId]),
+      { runDocker: () => Promise.resolve(fakeDockerOk()) },
+    );
+    const indexPath = join(
+      layout.stateDir,
+      "ingress",
+      "by-environment",
+      `${environmentId}.json`,
+    );
+    Deno.remove = ((path: string | URL, opts?: Deno.RemoveOptions) => {
+      if (String(path) === indexPath) {
+        return Promise.reject(new Deno.errors.PermissionDenied("index"));
+      }
+      return originalRemove(path, opts);
+    }) as typeof Deno.remove;
+    await assertRejects(
+      () =>
+        removeEnvironmentTcpUdpServiceIngress(layout, environmentId, [], {
+          runDocker: () => Promise.resolve(fakeDockerOk()),
+        }),
+      Deno.errors.PermissionDenied,
+      "index",
+    );
+  } finally {
+    Deno.remove = originalRemove;
+    await cleanup();
+  }
+});
+
+test("collectTcpUdpIngressEntries rethrows when the state dir cannot be listed", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const dir = join(layout.stateDir, "ingress", "tcp-udp");
+  await Deno.mkdir(dir, { recursive: true });
+  const originalReadDir = Deno.readDir.bind(Deno);
+  Deno.readDir = ((path: string | URL) => {
+    if (String(path) === dir) {
+      // deno-lint-ignore require-yield
+      return (async function* () {
+        throw new Deno.errors.PermissionDenied("tcp-udp dir");
+      })();
+    }
+    return originalReadDir(path);
+  }) as typeof Deno.readDir;
+  try {
+    await assertRejects(
+      () => collectTcpUdpIngressEntries(layout),
+      Deno.errors.PermissionDenied,
+      "tcp-udp dir",
+    );
+  } finally {
+    Deno.readDir = originalReadDir;
     await cleanup();
   }
 });

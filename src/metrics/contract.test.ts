@@ -8,6 +8,7 @@ import {
   METRICS_SCHEMA_VERSION,
   type MetricsSampleInput,
   sanitizeFinite,
+  storageEngineFieldName,
 } from "./contract.ts";
 
 /**
@@ -55,6 +56,21 @@ test("sanitizeFinite rejects NaN and +/-Infinity, keeps missing as null", () => 
   assertEquals(sanitizeFinite(Number.NaN), null);
   assertEquals(sanitizeFinite(Number.POSITIVE_INFINITY), null);
   assertEquals(sanitizeFinite(Number.NEGATIVE_INFINITY), null);
+});
+
+test("storageEngineFieldName flattens engine + field into a camelCase leaf", () => {
+  assertEquals(
+    storageEngineFieldName("postgres", "instancesRunning"),
+    "postgresInstancesRunning",
+  );
+  assertEquals(
+    storageEngineFieldName("mysql", "connectionsMax"),
+    "mysqlConnectionsMax",
+  );
+  assertEquals(
+    storageEngineFieldName("mariadb", "instancesHealthy"),
+    "mariadbInstancesHealthy",
+  );
 });
 
 /**

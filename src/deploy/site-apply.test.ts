@@ -2434,3 +2434,237 @@ test("removeSites best-effort-cleans a leftover staging directory", async () => 
     await cleanup();
   }
 });
+
+test("removeSites is a no-op when no engine config directories exist", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  try {
+    await removeSites(layout, "envmissing", { run });
+  } finally {
+    await cleanup();
+  }
+});
+
+test("removeSites reloads both PHP series an environment owned", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run, calls } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  const environmentId = "envtworm";
+  try {
+    await applySites(layout, environmentId, [
+      {
+        composeServiceName: "legacy",
+        engine: "apache",
+        root: "public",
+        listenPort: 18090,
+        php: { version: "8.3" },
+      },
+      {
+        composeServiceName: "modern",
+        engine: "nginx",
+        root: "public",
+        listenPort: 18091,
+        php: { version: "8.4" },
+      },
+    ], { run, runPlaybook });
+    calls.length = 0;
+    await removeSites(layout, environmentId, { run });
+    const units = calls
+      .filter((c) => c.args.includes("systemctl"))
+      .map((c) => c.args.at(-1));
+    assertEquals(units.includes("turbopanel-php-fpm@8.3"), true);
+    assertEquals(units.includes("turbopanel-php-fpm@8.4"), true);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("removeSites skips idle disable when the pools directory vanishes", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  const environmentId = "envnopools";
+  const poolsDir = join(layout.configDir, "php", "8.4", "pools");
+  const originalReadDir = Deno.readDir.bind(Deno);
+  try {
+    await applySites(layout, environmentId, [nginxPhpSite], {
+      run,
+      runPlaybook,
+    });
+    Deno.readDir = ((path: string | URL) => {
+      if (String(path) !== poolsDir) return originalReadDir(path);
+      const inner = originalReadDir(path);
+      return (async function* () {
+        let count = 0;
+        for await (const entry of inner) {
+          count += 1;
+          yield entry;
+        }
+        if (count === 0) {
+          Deno.readDir = ((later: string | URL) => {
+            if (String(later) === poolsDir) {
+              throw new Deno.errors.NotFound("pools gone");
+            }
+            return originalReadDir(later);
+          }) as typeof Deno.readDir;
+        }
+      })();
+    }) as typeof Deno.readDir;
+    await removeSites(layout, environmentId, { run });
+  } finally {
+    Deno.readDir = originalReadDir;
+    await cleanup();
+  }
+});
+
+test("removeSites skips leftover OLS files that are not this environment's fragments", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  const environmentId = "envolskeep";
+  try {
+    await applySites(layout, environmentId, [olsSite], { run, runPlaybook });
+    const sitesDir = join(layout.configDir, "openlitespeed", "sites");
+    await Deno.writeTextFile(join(sitesDir, "README"), "keep\n");
+    await Deno.writeTextFile(
+      join(sitesDir, "tp-otherenv-static.conf"),
+      "other\n",
+    );
+    await removeSites(layout, environmentId, { run });
+    assertEquals(await Deno.readTextFile(join(sitesDir, "README")), "keep\n");
+    assertEquals(
+      await Deno.readTextFile(join(sitesDir, "tp-otherenv-static.conf")),
+      "other\n",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("removeSites swallows a leftover staging file that cannot be unlinked", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  const environmentId = "envstagefile";
+  try {
+    await applySites(layout, environmentId, [nginxSite], { run, runPlaybook });
+    const leftover = join(
+      layout.configDir,
+      "nginx",
+      "sites",
+      `tp-${environmentId}-www.conf.tpnew`,
+    );
+    await Deno.writeTextFile(leftover, "stale\n");
+    const originalRemove = Deno.remove.bind(Deno);
+    Deno.remove = ((path: string | URL, options?: Deno.RemoveOptions) => {
+      if (String(path) === leftover) {
+        return Promise.reject(new Deno.errors.PermissionDenied("staged"));
+      }
+      return originalRemove(path, options);
+    }) as typeof Deno.remove;
+    try {
+      await removeSites(layout, environmentId, { run });
+    } finally {
+      Deno.remove = originalRemove;
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+test("removeSites uses runDefault when run is omitted", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const restore = stubDenoCommand(run);
+  try {
+    await removeSites(layout, "envdefrun");
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("removeSites reloads site Caddy after tearing down a Caddy vhost", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run, calls } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  const environmentId = "envcaddyrm";
+  try {
+    await applySites(layout, environmentId, [caddySite], { run, runPlaybook });
+    calls.length = 0;
+    await removeSites(layout, environmentId, { run });
+    assertEquals(
+      calls.some((c) =>
+        c.args.includes("validate") && c.args.includes("caddyfile")
+      ),
+      true,
+    );
+    assertEquals(
+      systemctlActions(calls, "turbopanel-site-caddy").length > 0,
+      true,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("applySites rethrows a non-NotFound OpenLiteSpeed sites listing", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  const originalReadDir = Deno.readDir.bind(Deno);
+  Deno.readDir = ((path: string | URL) => {
+    if (String(path).includes("/openlitespeed/sites")) {
+      // deno-lint-ignore require-yield
+      return (async function* () {
+        throw new Deno.errors.PermissionDenied("ols sites");
+      })();
+    }
+    return originalReadDir(path);
+  }) as typeof Deno.readDir;
+  try {
+    await assertRejects(
+      () => applySites(layout, "envolsrd", [olsSite], { run, runPlaybook }),
+      Deno.errors.PermissionDenied,
+      "ols sites",
+    );
+  } finally {
+    Deno.readDir = originalReadDir;
+    await cleanup();
+  }
+});
+
+test("removeSites rethrows a non-NotFound leftover staging listing", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  const environmentId = "envstagerd";
+  const originalReadDir = Deno.readDir.bind(Deno);
+  let nginxSitesReads = 0;
+  try {
+    await applySites(layout, environmentId, [nginxSite], {
+      run,
+      runPlaybook,
+    });
+    Deno.readDir = ((path: string | URL) => {
+      if (String(path).includes("/nginx/sites")) {
+        nginxSitesReads += 1;
+        if (nginxSitesReads >= 2) {
+          // deno-lint-ignore require-yield
+          return (async function* () {
+            throw new Deno.errors.PermissionDenied("staging list");
+          })();
+        }
+      }
+      return originalReadDir(path);
+    }) as typeof Deno.readDir;
+    await assertRejects(
+      () => removeSites(layout, environmentId, { run }),
+      Deno.errors.PermissionDenied,
+      "staging list",
+    );
+  } finally {
+    Deno.readDir = originalReadDir;
+    await cleanup();
+  }
+});

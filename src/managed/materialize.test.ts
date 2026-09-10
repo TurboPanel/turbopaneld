@@ -286,3 +286,78 @@ test("normalizeManagedFileOwnership throws when docker run fails", async () => {
     "chown failed",
   );
 });
+
+test("normalizeManagedFileOwnership verifies bind trees as the engine user", async () => {
+  await withTempLayout(async (_layout, root) => {
+    const managedRoot = join(root, "managed1");
+    await Deno.mkdir(join(managedRoot, "config"), { recursive: true });
+    await Deno.mkdir(join(managedRoot, "tls"), { recursive: true });
+    await Deno.writeTextFile(join(managedRoot, "tls", "server.crt"), "crt");
+    await Deno.writeTextFile(join(managedRoot, "tls", "server.key"), "key");
+    const calls: string[][] = [];
+    await normalizeManagedFileOwnership(
+      "postgres:18-alpine",
+      managedRoot,
+      "o'reilly",
+      "postgres",
+      (args) => {
+        calls.push([...args]);
+        return Promise.resolve({
+          success: true,
+          stdout: "",
+          stderr: "",
+          code: 0,
+        });
+      },
+    );
+    assertEquals(calls.length, 2);
+    assertEquals(
+      calls[1]?.some((part) => part.includes("/verify/config")),
+      true,
+    );
+    assertEquals(
+      calls[1]?.some((part) => part.includes("/verify/tls")),
+      true,
+    );
+    assertEquals(
+      calls[0]?.some((part) => part.includes(String.raw`'\''`)),
+      true,
+    );
+  });
+});
+
+test("normalizeManagedFileOwnership throws when verification docker run fails", async () => {
+  await withTempLayout(async (_layout, root) => {
+    const managedRoot = join(root, "managed1");
+    await Deno.mkdir(join(managedRoot, "config"), { recursive: true });
+    let attempt = 0;
+    await assertRejects(
+      () =>
+        normalizeManagedFileOwnership(
+          "postgres:18-alpine",
+          managedRoot,
+          "postgres",
+          "postgres",
+          () => {
+            attempt += 1;
+            if (attempt === 1) {
+              return Promise.resolve({
+                success: true,
+                stdout: "",
+                stderr: "",
+                code: 0,
+              });
+            }
+            return Promise.resolve({
+              success: false,
+              stdout: "",
+              stderr: "engine user cannot traverse config/",
+              code: 1,
+            });
+          },
+        ),
+      Error,
+      "engine user cannot traverse config/",
+    );
+  });
+});

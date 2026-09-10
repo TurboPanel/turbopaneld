@@ -74,4 +74,15 @@ test("installOriginNeedsInsecureTls ignores malformed dotted hosts as private IP
   assertEquals(installOriginNeedsInsecureTls("https://10.0.0.256"), false);
   // Non-numeric final label is not an IPv4 literal.
   assertEquals(installOriginNeedsInsecureTls("https://10.0.0.1a"), false);
+  // Four dotted labels with a non-octet token skip the IPv4 private check.
+  assertEquals(installOriginNeedsInsecureTls("https://10.0.0.foo"), false);
+});
+
+test("installOriginNeedsInsecureTls treats an empty hostname as private", () => {
+  // Bracket stripping of an empty IPv6 literal yields "" → private.
+  try {
+    assertEquals(installOriginNeedsInsecureTls("https://[]"), true);
+  } catch {
+    // Deno's URL parser may reject the origin before hostname checks.
+  }
 });

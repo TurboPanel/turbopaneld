@@ -1275,6 +1275,20 @@ test("isFreshProbeHandshake requires a handshake newer than the previous value a
     ),
     true,
   );
+  assertEquals(isFreshProbeHandshake(previous, undefined, start), false);
+  assertEquals(isFreshProbeHandshake(previous, "", start), false);
+  assertEquals(
+    isFreshProbeHandshake(previous, "not-a-date", start),
+    false,
+  );
+  assertEquals(
+    isFreshProbeHandshake(
+      undefined,
+      new Date(start + 1).toISOString(),
+      start,
+    ),
+    true,
+  );
 });
 
 test("handleFabricPathProbe does not treat a recent pre-probe handshake as success", async () => {

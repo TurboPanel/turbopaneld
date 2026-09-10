@@ -431,10 +431,24 @@ export type EnvironmentDeploySiteSourceKind = "release" | "managed-directory";
 export type EnvironmentDeployCronJob = {
   /** Unit-name segment, unique within the service. */
   name: string;
-  /** systemd `OnCalendar` value. */
+  /**
+   * systemd `OnCalendar` value, which may carry a trailing IANA zone
+   * (`Mon *-*-* 03:00:00 Europe/Berlin`). The control plane appends it for the
+   * same reason it owns the cron translation: one translator, and this side
+   * renders what it is handed rather than re-deriving a zone.
+   */
   schedule: string;
   /** argv; `command[0]` is an absolute path. */
   command: string[];
+  /** `RuntimeMaxSec=`; omitted means no ceiling, systemd's default. */
+  timeoutSeconds?: number;
+  /**
+   * Only `forbid` crosses the wire — and it is what systemd already does with
+   * a unit that is still active. `allow` and `replace` are refused control-plane
+   * side, because a job running under `User=` cannot spawn a second instance of
+   * itself without a privileged helper this contract does not have.
+   */
+  concurrencyPolicy?: "forbid";
 };
 
 export type EnvironmentDeploySite = {
@@ -564,6 +578,15 @@ export type EnvironmentDeployNativeAppService = {
    * `X-TurboPanel-Labels` so `systemctl show` can answer what the author wrote.
    */
   serviceLabels?: Record<string, string>;
+  /**
+   * Scheduled jobs, run as the principal that owns this app's release tree.
+   *
+   * No principal is repeated here the way a site repeats one: the account and
+   * the tree both come from the release binding this deploy already resolved
+   * for the app's own unit, so a job cannot end up owned differently from the
+   * application it belongs to.
+   */
+  cron?: EnvironmentDeployCronJob[];
 };
 
 /**
@@ -3080,6 +3103,27 @@ function parseNativeAppRestartPolicy(
   };
 }
 
+function parseNativeAppEnabled(value: unknown): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "boolean") {
+    throw new TypeError("Invalid nativeAppServices enabled");
+  }
+  return value;
+}
+
+/**
+ * `startupFile` becomes part of an `ExecStart` line, so it gets the same
+ * relative-path rule as `outputDirectory` — never the looser command rule.
+ */
+function parseNativeAppStartupFile(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (!isSafeSourceSubdirectory(value)) {
+    throw new TypeError("Invalid nativeAppServices startupFile");
+  }
+  // Narrowed by the type guard above.
+  return value;
+}
+
 function parseNativeAppService(
   value: unknown,
 ): EnvironmentDeployNativeAppService {
@@ -3104,20 +3148,10 @@ function parseNativeAppService(
   if (nodeVersion !== undefined) app.nodeVersion = nodeVersion;
   const appMode = parseNativeAppMode(value.appMode);
   if (appMode !== undefined) app.appMode = appMode;
-  if (value.enabled !== undefined) {
-    if (typeof value.enabled !== "boolean") {
-      throw new TypeError("Invalid nativeAppServices enabled");
-    }
-    app.enabled = value.enabled;
-  }
-  if (value.startupFile !== undefined) {
-    // It becomes part of an ExecStart line, so it gets the same relative-path
-    // rule as outputDirectory, never the looser command rule.
-    if (!isSafeSourceSubdirectory(value.startupFile)) {
-      throw new TypeError("Invalid nativeAppServices startupFile");
-    }
-    app.startupFile = value.startupFile;
-  }
+  const enabled = parseNativeAppEnabled(value.enabled);
+  if (enabled !== undefined) app.enabled = enabled;
+  const startupFile = parseNativeAppStartupFile(value.startupFile);
+  if (startupFile !== undefined) app.startupFile = startupFile;
   const resources = parseNativeAppResources(value.resources);
   if (resources) app.resources = resources;
   const accountLimits = parseNativeAppAccountLimits(value.accountLimits);
@@ -3128,6 +3162,8 @@ function parseNativeAppService(
   // whose value is not a string is dropped rather than failing the deploy.
   const serviceLabels = parseStringRecord(value.serviceLabels);
   if (serviceLabels) app.serviceLabels = serviceLabels;
+  const cron = parseCronJobs(value.cron, "nativeAppServices");
+  if (cron?.length) app.cron = cron;
   return app;
 }
 
@@ -3183,9 +3219,11 @@ const CRON_JOB_NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
  * two answers to one question. This only ensures nothing structural (a newline,
  * a directive separator) can reach a unit file.
  */
-const ON_CALENDAR_RE = /^[A-Za-z0-9 ,.:*/-]{1,200}$/;
+const ON_CALENDAR_RE = /^[A-Za-z0-9 ,.:*/_-]{1,200}$/;
 /** Mirrors instance `MAX_CRON_JOBS_PER_SERVICE`. */
 const MAX_CRON_JOBS = 20;
+/** Mirrors instance `MAX_CRON_TIMEOUT_SECONDS` (24h). */
+const MAX_CRON_TIMEOUT_SECONDS = 86_400;
 
 function parseCronJobs(
   value: unknown,
@@ -3214,11 +3252,31 @@ function parseCronJobs(
       // Two jobs under one name would render one unit and silently lose a job.
       throw new TypeError(`Duplicate ${label} cron job: ${raw.name}`);
     }
+    if (
+      raw.timeoutSeconds !== undefined &&
+      (typeof raw.timeoutSeconds !== "number" ||
+        !Number.isInteger(raw.timeoutSeconds) ||
+        raw.timeoutSeconds <= 0 ||
+        raw.timeoutSeconds > MAX_CRON_TIMEOUT_SECONDS)
+    ) {
+      throw new TypeError(`Invalid ${label} cron entry`);
+    }
+    if (
+      raw.concurrencyPolicy !== undefined && raw.concurrencyPolicy !== "forbid"
+    ) {
+      throw new TypeError(`Invalid ${label} cron entry`);
+    }
     seen.add(raw.name);
     return {
       name: raw.name,
       schedule: raw.schedule,
       command: [...raw.command] as string[],
+      ...(raw.timeoutSeconds === undefined
+        ? {}
+        : { timeoutSeconds: raw.timeoutSeconds }),
+      ...(raw.concurrencyPolicy === undefined
+        ? {}
+        : { concurrencyPolicy: "forbid" as const }),
     };
   });
 }

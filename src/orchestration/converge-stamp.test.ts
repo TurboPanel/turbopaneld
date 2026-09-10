@@ -344,6 +344,7 @@ test("computeDevConvergeStamp hashes nested role yml/j2 and ignores other files"
       "ExecStart={{ bin }}\n",
     );
     await Deno.writeTextFile(join(roleDir, "README.md"), "ignore me\n");
+    await Deno.symlink("/tmp/nowhere", join(roleDir, "link.yml"));
 
     const first = await computeDevConvergeStamp();
     await Deno.writeTextFile(join(roleDir, "notes.txt"), "still ignored\n");
@@ -390,6 +391,27 @@ test("computeDevConvergeStamp rethrows non-NotFound role walk errors", async () 
       );
     } finally {
       await Deno.chmod(blocked, previousMode);
+    }
+  });
+});
+
+test("readDevConvergeStamp rethrows non-NotFound stamp stat errors", async () => {
+  await withIsolatedStamp(async (stampFile) => {
+    await writeDevConvergeStamp("abc");
+    const originalStat = Deno.stat;
+    Deno.stat = ((path) => {
+      if (String(path) === stampFile) {
+        return Promise.reject(new Deno.errors.PermissionDenied("denied"));
+      }
+      return originalStat.call(Deno, path);
+    }) as typeof Deno.stat;
+    try {
+      await assertRejects(
+        () => readDevConvergeStamp(),
+        Deno.errors.PermissionDenied,
+      );
+    } finally {
+      Deno.stat = originalStat;
     }
   });
 });
@@ -470,6 +492,21 @@ test("devConvergeEnvMaterial parses optional flags and falls back on garbage", (
       } else {
         Deno.env.set(key, value);
       }
+    }
+  }
+});
+
+test("devConvergeEnvMaterial treats garbage optional flags as the fallback true", () => {
+  const previous = Deno.env.get("TURBOPANEL_OPTIONAL_UI");
+  Deno.env.set("TURBOPANEL_OPTIONAL_UI", "maybe");
+  try {
+    const material = devConvergeEnvMaterial();
+    assertStringIncludes(material, "optional_ui=true");
+  } finally {
+    if (previous === undefined) {
+      Deno.env.delete("TURBOPANEL_OPTIONAL_UI");
+    } else {
+      Deno.env.set("TURBOPANEL_OPTIONAL_UI", previous);
     }
   }
 });

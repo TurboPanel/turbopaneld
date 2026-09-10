@@ -1,7 +1,11 @@
 import { assertEquals, assertRejects } from "@std/assert";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import type { LocalDeploymentManifest } from "../deploy/compose-files.ts";
-import { createMutableTranscriptRedactor } from "./redactor.ts";
+import {
+  createMutableTranscriptRedactor,
+  rememberSecretPlaintexts,
+  resetSharedSecretRedactorForTests,
+} from "./redactor.ts";
 import { collectContainerLogs } from "./container-tail.ts";
 
 /**
@@ -211,4 +215,183 @@ test("collectContainerLogs truncates oversized UTF-8 tails by byte length", asyn
   assertEquals(encoded.byteLength <= 200 * 1024, true);
   assertEquals(text.includes("TAIL-KEEP"), true);
   assertEquals(text.includes("HEAD-DROP"), false);
+});
+
+test("collectContainerLogs falls back to stdout/stderr when no streamed lines arrive", async () => {
+  const text = await collectContainerLogs(
+    OWNED_ID,
+    { stateDir: "/var/lib/turbopanel" },
+    {
+      listManifests: () => Promise.resolve(ownedManifests()),
+      runDocker: (args) => {
+        if (args[0] === "inspect") return Promise.resolve(ok(inspectStdout()));
+        return Promise.resolve({
+          success: true,
+          stdout: "\n",
+          stderr: "\n",
+          code: 0,
+        });
+      },
+    },
+  );
+
+  // Newlines never become streamed lines; the fallback joins both buffers
+  // then the shared redactor turns control characters into underscores.
+  assertEquals(text, "___");
+});
+
+test("collectContainerLogs falls back to stdout alone when stderr is empty", async () => {
+  const text = await collectContainerLogs(
+    OWNED_ID,
+    { stateDir: "/var/lib/turbopanel" },
+    {
+      listManifests: () => Promise.resolve(ownedManifests()),
+      runDocker: (args) => {
+        if (args[0] === "inspect") return Promise.resolve(ok(inspectStdout()));
+        return Promise.resolve({
+          success: true,
+          stdout: "\n",
+          stderr: "",
+          code: 0,
+        });
+      },
+    },
+  );
+
+  assertEquals(text, "_");
+});
+
+test("collectContainerLogs falls back to stderr alone when stdout is empty", async () => {
+  const text = await collectContainerLogs(
+    OWNED_ID,
+    { stateDir: "/var/lib/turbopanel" },
+    {
+      listManifests: () => Promise.resolve(ownedManifests()),
+      runDocker: (args) => {
+        if (args[0] === "inspect") return Promise.resolve(ok(inspectStdout()));
+        return Promise.resolve({
+          success: true,
+          stdout: "",
+          stderr: "\n",
+          code: 0,
+        });
+      },
+    },
+  );
+
+  assertEquals(text, "_");
+});
+
+test("collectContainerLogs times out a hung docker inspect", async () => {
+  await assertRejects(
+    () =>
+      collectContainerLogs(OWNED_ID, { stateDir: "/var/lib/turbopanel" }, {
+        listManifests: () => Promise.resolve(ownedManifests()),
+        now: (() => {
+          let calls = 0;
+          return () => {
+            calls += 1;
+            return calls === 1 ? 0 : 20_000;
+          };
+        })(),
+        runDocker: () => new Promise<DockerCliResult>(() => {}),
+      }),
+    Error,
+    "timed out",
+  );
+});
+
+test("collectContainerLogs uses a default inspect-failed message when stderr is empty", async () => {
+  await assertRejects(
+    () =>
+      collectContainerLogs(OWNED_ID, { stateDir: "/var/lib/turbopanel" }, {
+        listManifests: () => Promise.resolve(ownedManifests()),
+        runDocker: () => Promise.resolve(fail("")),
+      }),
+    Error,
+    "inspect failed",
+  );
+});
+
+test("collectContainerLogs uses a default logs-failed message when stderr is empty", async () => {
+  await assertRejects(
+    () =>
+      collectContainerLogs(OWNED_ID, { stateDir: "/var/lib/turbopanel" }, {
+        listManifests: () => Promise.resolve(ownedManifests()),
+        runDocker: (args) => {
+          if (args[0] === "inspect") {
+            return Promise.resolve(ok(inspectStdout()));
+          }
+          return Promise.resolve(fail(""));
+        },
+      }),
+    Error,
+    "container logs failed",
+  );
+});
+
+test("collectContainerLogs treats a missing compose service label as unowned", async () => {
+  await assertRejects(
+    () =>
+      collectContainerLogs(OWNED_ID, { stateDir: "/var/lib/turbopanel" }, {
+        listManifests: () => Promise.resolve(ownedManifests()),
+        runDocker: (args) => {
+          if (args[0] === "inspect") return Promise.resolve(ok(PROJECT));
+          return Promise.resolve(ok("should-not-run\n"));
+        },
+      }),
+    Error,
+    "not owned by this host",
+  );
+});
+
+test("collectContainerLogs clamps a missing or sub-one tail to the defaults", async () => {
+  const tails: string[] = [];
+  const run = (tail: number | undefined) =>
+    collectContainerLogs(
+      OWNED_ID,
+      tail === undefined
+        ? { stateDir: "/var/lib/turbopanel" }
+        : { stateDir: "/var/lib/turbopanel", tail },
+      {
+        listManifests: () => Promise.resolve(ownedManifests()),
+        runDocker: (args) => {
+          if (args[0] === "inspect") {
+            return Promise.resolve(ok(inspectStdout()));
+          }
+          tails.push(args[3] ?? "");
+          return Promise.resolve(ok("line\n"));
+        },
+      },
+    );
+
+  await run(undefined);
+  await run(0);
+  await run(-3);
+  await run(1.9);
+  assertEquals(tails, ["200", "1", "1", "1"]);
+});
+
+test("collectContainerLogs redacts via the process-wide deny-set when no redactor is passed", async () => {
+  resetSharedSecretRedactorForTests();
+  try {
+    rememberSecretPlaintexts(["tail-secret"]);
+    const text = await collectContainerLogs(
+      OWNED_ID,
+      { stateDir: "/var/lib/turbopanel" },
+      {
+        listManifests: () => Promise.resolve(ownedManifests()),
+        runDocker: (args) => {
+          if (args[0] === "inspect") {
+            return Promise.resolve(ok(inspectStdout()));
+          }
+          return Promise.resolve(ok("password=tail-secret\n"));
+        },
+      },
+    );
+    assertEquals(text.includes("tail-secret"), false);
+    assertEquals(text.includes("***"), true);
+  } finally {
+    resetSharedSecretRedactorForTests();
+  }
 });

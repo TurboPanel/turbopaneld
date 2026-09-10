@@ -573,3 +573,14 @@ test("setLastObservedTimeSyncForTests / getLastObservedTimeSync round-trip", () 
     setLastObservedTimeSyncForTests(undefined);
   }
 });
+
+test("readTimeSync without io writes the process-wide last observation", () => {
+  try {
+    setLastObservedTimeSyncForTests(undefined);
+    const result = readTimeSync();
+    assertEquals(Array.isArray(result.ntpServers), true);
+    assertEquals(getLastObservedTimeSync(), result);
+  } finally {
+    setLastObservedTimeSyncForTests(undefined);
+  }
+});

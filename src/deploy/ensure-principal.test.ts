@@ -3,8 +3,11 @@ import type { LayoutPaths } from "../paths/layout.ts";
 import {
   DEFAULT_PRINCIPAL_SHELL,
   ensureDirectoryOwnedByPrincipal,
+  ensureDirectoryWithOwner,
+  ensureEngineGroupMembership,
   ensurePrincipalManagedGroups,
   ensurePrincipalPassword,
+  ensureSupplementaryGroupMembership,
   ensureSystemPrincipals,
   parseGroupGid,
   parsePasswdHomeShell,
@@ -12,6 +15,7 @@ import {
   principalUnixGroupName,
   type RunFn,
   type RunResult,
+  userSupplementaryGroups,
 } from "./ensure-principal.ts";
 
 /**
@@ -1102,4 +1106,393 @@ test("ensureSystemPrincipals locks the password when the spec carries none", asy
     c.args.includes("usermod") && c.args.includes("-p")
   );
   assertEquals(lock?.args, ["-n", "usermod", "-p", "!", "appuser"]);
+});
+
+test("ensureSystemPrincipals rejects a shell outside the allowlist", async () => {
+  const { run } = captureRun({});
+  await assertRejects(
+    () =>
+      ensureSystemPrincipals(stubLayout(), [{
+        ...baseSpec,
+        home: defaultHome,
+        shell: "/bin/zsh",
+      }], run),
+    TypeError,
+    "Principal shell is not allowed",
+  );
+});
+
+test("ensureSystemPrincipals drops an unknown runtime instead of failing", async () => {
+  const { run, calls } = captureRun({});
+  await ensureSystemPrincipals(stubLayout(), [{
+    ...baseSpec,
+    home: defaultHome,
+    runtimes: [{ runtime: "python", series: "3.12" }],
+  }], run);
+  assertEquals(
+    calls.filter((c) => c.args.includes("usermod") && c.args.includes("-aG")),
+    [],
+  );
+});
+
+test("ensureSystemPrincipals rejects existing username with mismatched gid override", async () => {
+  const { run } = captureRun({
+    getentGroup: { success: true, stdout: "appuser-grp:x:10001:", stderr: "" },
+    getentPasswd: {
+      success: true,
+      stdout: `appuser:x:10001:33::${defaultHome}:/usr/sbin/nologin`,
+      stderr: "",
+    },
+  });
+  await assertRejects(
+    () =>
+      ensureSystemPrincipals(stubLayout(), [{
+        ...baseSpec,
+        uid: 10001,
+        gid: 10001,
+        home: defaultHome,
+      }], run),
+    Error,
+    "already exists with uid=10001 gid=33",
+  );
+});
+
+test("ensureSystemPrincipals skips usermod when the adopted shell already matches", async () => {
+  const { run, calls } = captureRun({
+    getentGroup: { success: true, stdout: "appuser-grp:x:10001:", stderr: "" },
+    getentPasswd: {
+      success: true,
+      stdout: `appuser:x:10001:10001::${defaultHome}:/bin/bash`,
+      stderr: "",
+    },
+  });
+  await ensureSystemPrincipals(stubLayout(), [{
+    ...baseSpec,
+    home: defaultHome,
+    shell: "/bin/bash",
+  }], run);
+  assertEquals(
+    calls.some((c) =>
+      c.command === "sudo" && c.args.includes("usermod") &&
+      c.args.includes("-s")
+    ),
+    false,
+  );
+});
+
+test("ensureSystemPrincipals uses generic errors when sudo stderr is empty", async () => {
+  const failingInstall: RunFn = (command, args) => {
+    if (command === "sudo" && args.includes("install")) {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await assertRejects(
+    () =>
+      ensureSystemPrincipals(stubLayout(), [{
+        ...baseSpec,
+        home: defaultHome,
+      }], failingInstall),
+    Error,
+    "Failed to create directory",
+  );
+
+  const failingGroupadd: RunFn = (command, args) => {
+    if (command === "getent") {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    if (command === "sudo" && args.includes("groupadd")) {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await assertRejects(
+    () =>
+      ensureSystemPrincipals(stubLayout(), [{
+        ...baseSpec,
+        home: defaultHome,
+      }], failingGroupadd),
+    Error,
+    "Failed to create principal group",
+  );
+
+  const failingUseradd: RunFn = (command, args) => {
+    if (command === "getent" && args[0] === "group") {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    if (command === "getent" && args[0] === "passwd") {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    if (command === "sudo" && args.includes("useradd")) {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await assertRejects(
+    () =>
+      ensureSystemPrincipals(stubLayout(), [{
+        ...baseSpec,
+        home: defaultHome,
+      }], failingUseradd),
+    Error,
+    "Failed to create principal user",
+  );
+
+  const failingUsermod: RunFn = (command, args) => {
+    if (command === "getent" && args[0] === "group") {
+      return Promise.resolve({
+        success: true,
+        stdout: "appuser-grp:x:1000:",
+        stderr: "",
+      });
+    }
+    if (command === "getent" && args[0] === "passwd") {
+      return Promise.resolve({
+        success: true,
+        stdout: `appuser:x:1000:1000::${defaultHome}:/bin/false`,
+        stderr: "",
+      });
+    }
+    if (command === "sudo" && args.includes("usermod") && args.includes("-s")) {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await assertRejects(
+    () =>
+      ensureSystemPrincipals(stubLayout(), [{
+        ...baseSpec,
+        home: defaultHome,
+        shell: "/bin/bash",
+      }], failingUsermod),
+    Error,
+    "Failed to update principal shell",
+  );
+});
+
+test("ensureDirectoryWithOwner treats a bare owner as both user and group", async () => {
+  const calls: string[][] = [];
+  await ensureDirectoryWithOwner(
+    "/srv/users",
+    "0750",
+    "root",
+    (command, args) => {
+      calls.push([command, ...args]);
+      return Promise.resolve({ success: true, stdout: "", stderr: "" });
+    },
+  );
+  assertEquals(calls[0], [
+    "sudo",
+    "-n",
+    "install",
+    "-d",
+    "-m",
+    "0750",
+    "-o",
+    "root",
+    "-g",
+    "root",
+    "/srv/users",
+  ]);
+});
+
+test("userSupplementaryGroups returns empty when id fails", async () => {
+  const groups = await userSupplementaryGroups(
+    "appuser",
+    () => Promise.resolve({ success: false, stdout: "denied", stderr: "nope" }),
+  );
+  assertEquals([...groups], []);
+});
+
+test("ensurePrincipalManagedGroups is loud when a revoke fails", async () => {
+  const run: RunFn = (command, args) => {
+    if (command === "id") {
+      return Promise.resolve({
+        success: true,
+        stdout: "appuser-grp tpnode24",
+        stderr: "",
+      });
+    }
+    if (args.includes("gpasswd")) {
+      return Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr: "gpasswd denied",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await assertRejects(
+    () => ensurePrincipalManagedGroups("appuser", new Set(), run),
+    Error,
+    "gpasswd denied",
+  );
+});
+
+test("ensurePrincipalManagedGroups uses a generic revoke error when stderr is empty", async () => {
+  const run: RunFn = (command, args) => {
+    if (command === "id") {
+      return Promise.resolve({
+        success: true,
+        stdout: "tpphp84",
+        stderr: "",
+      });
+    }
+    if (args.includes("gpasswd")) {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await assertRejects(
+    () => ensurePrincipalManagedGroups("appuser", new Set(), run),
+    Error,
+    "Failed to remove appuser from group tpphp84",
+  );
+});
+
+test("ensureSupplementaryGroupMembership surfaces empty-stderr failures", async () => {
+  await assertRejects(
+    () =>
+      ensureSupplementaryGroupMembership(
+        "appuser",
+        "tpnode24",
+        () => Promise.resolve({ success: false, stdout: "", stderr: "" }),
+      ),
+    Error,
+    "Failed to add appuser to group tpnode24",
+  );
+});
+
+test("ensureEngineGroupMembership adds the engine account to the principal group", async () => {
+  const calls: string[][] = [];
+  await ensureEngineGroupMembership(
+    "tpnginx",
+    "appuser-grp",
+    (command, args) => {
+      calls.push([command, ...args]);
+      return Promise.resolve({ success: true, stdout: "", stderr: "" });
+    },
+  );
+  assertEquals(calls[0], [
+    "sudo",
+    "-n",
+    "usermod",
+    "-aG",
+    "appuser-grp",
+    "tpnginx",
+  ]);
+});
+
+test("ensurePrincipalPassword locks when shadow has no password field", async () => {
+  const { run, calls } = captureRun({
+    getentShadow: { success: true, stdout: "appuser", stderr: "" },
+  });
+  await ensurePrincipalPassword("appuser", undefined, run);
+  assertEquals(
+    calls.some((c) => c.args.includes("usermod") && c.args.includes("-p")),
+    true,
+  );
+});
+
+test("ensurePrincipalPassword uses generic errors when sudo stderr is empty", async () => {
+  const failingSet: RunFn = (command, args, stdin) => {
+    if (args.includes("chpasswd")) {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    return captureRun({ getentShadow: shadowEntry("!") }).run(
+      command,
+      args,
+      stdin,
+    );
+  };
+  await assertRejects(
+    () => ensurePrincipalPassword("appuser", VALID_HASH, failingSet),
+    Error,
+    "Failed to set password for appuser",
+  );
+
+  const failingLock: RunFn = (command, args, stdin) => {
+    if (args.includes("usermod") && args.includes("-p")) {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    return captureRun({ getentShadow: shadowEntry(OTHER_HASH) }).run(
+      command,
+      args,
+      stdin,
+    );
+  };
+  await assertRejects(
+    () => ensurePrincipalPassword("appuser", undefined, failingLock),
+    Error,
+    "Failed to lock password for appuser",
+  );
+});
+
+test("ensureDirectoryOwnedByPrincipal uses a generic chown error when stderr is empty", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-principal-chown-empty-" });
+  const path = `${root}/owned`;
+  try {
+    await assertRejects(
+      () =>
+        ensureDirectoryOwnedByPrincipal(
+          path,
+          "appuser",
+          "appuser-grp",
+          (command, args) => {
+            if (command === "sudo" && args.includes("chown")) {
+              return Promise.resolve({
+                success: false,
+                stdout: "",
+                stderr: "",
+              });
+            }
+            return Promise.resolve({ success: true, stdout: "", stderr: "" });
+          },
+        ),
+      Error,
+      `Failed to chown ${path}`,
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("ensureDirectoryWithOwner default runner pipes stdin and reports output", async () => {
+  const original = Deno.Command;
+  let wroteStdin = "";
+  Deno.Command = class {
+    constructor(
+      _command: string,
+      opts: { stdin?: "null" | "piped" },
+    ) {
+      this.stdinMode = opts.stdin ?? "null";
+    }
+    stdinMode: "null" | "piped";
+    spawn() {
+      return {
+        stdin: {
+          getWriter: () => ({
+            write: (chunk: Uint8Array) => {
+              wroteStdin += new TextDecoder().decode(chunk);
+              return Promise.resolve();
+            },
+            close: () => Promise.resolve(),
+          }),
+        },
+        output: () =>
+          Promise.resolve({
+            success: true,
+            stdout: new TextEncoder().encode("ok\n"),
+            stderr: new TextEncoder().encode(""),
+          }),
+      };
+    }
+  } as unknown as typeof Deno.Command;
+  try {
+    await ensureDirectoryWithOwner("/tmp/tp-owner", "0750", "root:root");
+    await ensurePrincipalPassword("appuser", VALID_HASH);
+    assertEquals(wroteStdin.includes(`appuser:${VALID_HASH}`), true);
+  } finally {
+    Deno.Command = original;
+  }
 });

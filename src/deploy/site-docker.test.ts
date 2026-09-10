@@ -77,6 +77,65 @@ test({
   },
 });
 
+test({
+  name: "resolveDockerHostGatewayAddress falls back when ip cannot answer",
+  permissions: { env: true },
+  fn: async () => {
+    const previous = Deno.env.get("TURBOPANEL_DOCKER_HOST_GATEWAY");
+    const original = Deno.Command;
+    const enc = new TextEncoder();
+    const restoreEnv = () => {
+      if (previous === undefined) {
+        Deno.env.delete("TURBOPANEL_DOCKER_HOST_GATEWAY");
+      } else {
+        Deno.env.set("TURBOPANEL_DOCKER_HOST_GATEWAY", previous);
+      }
+    };
+    try {
+      Deno.env.delete("TURBOPANEL_DOCKER_HOST_GATEWAY");
+      // deno-lint-ignore no-explicit-any
+      (Deno as any).Command = class {
+        output(): Promise<never> {
+          return Promise.reject(new TypeError("ip missing"));
+        }
+      };
+      assertEquals(await resolveDockerHostGatewayAddress(), "172.17.0.1");
+
+      // deno-lint-ignore no-explicit-any
+      (Deno as any).Command = class {
+        output(): Promise<Deno.CommandOutput> {
+          return Promise.resolve({
+            success: false,
+            code: 1,
+            signal: null,
+            stdout: new Uint8Array(),
+            stderr: enc.encode("no docker0"),
+          });
+        }
+      };
+      assertEquals(await resolveDockerHostGatewayAddress(), "172.17.0.1");
+
+      // deno-lint-ignore no-explicit-any
+      (Deno as any).Command = class {
+        output(): Promise<Deno.CommandOutput> {
+          return Promise.resolve({
+            success: true,
+            code: 0,
+            signal: null,
+            stdout: enc.encode("2: docker0    inet6 fe80::1/64"),
+            stderr: new Uint8Array(),
+          });
+        }
+      };
+      assertEquals(await resolveDockerHostGatewayAddress(), "172.17.0.1");
+    } finally {
+      // deno-lint-ignore no-explicit-any
+      (Deno as any).Command = original;
+      restoreEnv();
+    }
+  },
+});
+
 test("buildSiteReachabilityFragment adds extra_hosts and env URLs", () => {
   const fragment = buildSiteReachabilityFragment(
     [{ composeServiceName: "static", listenPort: 18080 }],

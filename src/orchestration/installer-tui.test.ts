@@ -259,6 +259,23 @@ test("InstallEventPresenter labels handler and runner-start events", () => {
   );
 });
 
+test("InstallEventPresenter falls back to play when the play name is blank", () => {
+  const lines = capturePresenterLines((_presenter, events) => {
+    events.onEvent({
+      _event: "v2_playbook_on_play_start",
+      _timestamp: "2026-01-01T00:00:00Z",
+      play: {
+        name: "   ",
+        id: "play",
+        path: "",
+        duration: TASK_DURATION,
+      },
+      tasks: [],
+    });
+  });
+  assertEquals(lines.some((line) => line.includes("play")), true);
+});
+
 test("InstallEventPresenter treats a leading-colon task as having no role", () => {
   const lines = capturePresenterLines((_presenter, events) => {
     events.onEvent({
@@ -304,4 +321,53 @@ test("createInstallPresenter returns a disposable presenter", () => {
   } finally {
     presenter.dispose();
   }
+});
+
+test("InstallEventPresenter falls back when task names and recap counters are missing", () => {
+  const lines = capturePresenterLines((_presenter, events) => {
+    const unnamed = {
+      name: undefined as unknown as string,
+      id: "anon",
+      path: "",
+      duration: TASK_DURATION,
+    };
+    events.onEvent({
+      _event: "v2_playbook_on_task_start",
+      _timestamp: "2026-01-01T00:00:02Z",
+      task: unnamed,
+      hosts: {},
+    });
+    events.onEvent({
+      _event: "v2_runner_on_ok",
+      _timestamp: "2026-01-01T00:00:02Z",
+      task: unnamed,
+      hosts: { localhost: { changed: true } },
+    });
+    events.onEvent({
+      _event: "v2_runner_on_skipped",
+      _timestamp: "2026-01-01T00:00:02Z",
+      task: unnamed,
+      hosts: {},
+    });
+    events.onEvent({
+      _event: "v2_runner_on_failed",
+      _timestamp: "2026-01-01T00:00:02Z",
+      task: unnamed,
+      hosts: { localhost: { msg: "" } },
+    });
+    events.onEvent({
+      _event: "v2_playbook_on_stats",
+      _timestamp: "2026-01-01T00:00:03Z",
+      stats: { localhost: { failed: 0 } },
+      custom_stats: {},
+      global_custom_stats: {},
+    });
+  });
+  assertEquals(lines.some((line) => line.includes("task")), true);
+  assertEquals(
+    lines.some((line) =>
+      line.includes("orchestration applied (0 steps, 0 changes)")
+    ),
+    true,
+  );
 });

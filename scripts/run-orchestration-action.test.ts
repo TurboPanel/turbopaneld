@@ -10,6 +10,7 @@ import {
   applyDaemonEnvToProcess,
   devInstanceExtraArgs,
   dispatchOrchestrationAction,
+  emitEvent,
   optionalDevServiceExtraArgs,
   optionalDevServiceFlag,
   type OrchestrationActionDeps,
@@ -427,4 +428,31 @@ test("dispatchOrchestrationAction routes known actions and rejects unknown", asy
     Error,
     "unknown orchestration action: nope",
   );
+});
+
+test("emitEvent writes slim JSON to stdout", () => {
+  const original = console.log;
+  const lines: string[] = [];
+  console.log = ((message: unknown) => {
+    lines.push(String(message));
+  }) as typeof console.log;
+  try {
+    emitEvent({
+      event: "runner_on_ok",
+      hosts: {
+        localhost: {
+          action: "ping",
+          changed: false,
+          ansible_facts: { huge: true },
+        },
+      },
+    });
+    const parsed = JSON.parse(lines[0] ?? "{}") as {
+      hosts?: { localhost?: { ansible_facts?: unknown; action?: string } };
+    };
+    assertEquals(parsed.hosts?.localhost?.action, "ping");
+    assertEquals(parsed.hosts?.localhost?.ansible_facts, undefined);
+  } finally {
+    console.log = original;
+  }
 });

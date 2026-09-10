@@ -223,6 +223,20 @@ test("createKmsgKernelLogReader: unparseable records and already-seen seqs never
   assertEquals(reader(), ["fresh"]);
 });
 
+test("createKmsgKernelLogReader: a later scan skips seqs that are not past the cursor", () => {
+  const records = [kmsgRecord(1, "prime")];
+  const reader = createKmsgKernelLogReader(memoryKmsgIo(records));
+  assertEquals(reader(), []);
+  records.push(kmsgRecord(1, "stale"), kmsgRecord(2, "fresh"));
+  assertEquals(reader(), ["fresh"]);
+});
+
+test("HungTaskEventCollector default kernel-log reader against this host does not throw", async () => {
+  const collector = new HungTaskEventCollector({ intervalMs: 0 });
+  const events = await collector.detect(ctx());
+  assertEquals(Array.isArray(events), true);
+});
+
 test("createKmsgKernelLogReader: a close() throw after a fatal read still marks kmsg unavailable", () => {
   const io: KmsgIo = {
     open() {

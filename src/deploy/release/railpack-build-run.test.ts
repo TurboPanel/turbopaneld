@@ -750,3 +750,99 @@ test({
     });
   },
 });
+
+test({
+  name: "runRailpackBuild reports a streamed-tool AbortError as a timeout",
+  permissions: { read: true, write: true, run: true, env: true },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env, {
+        skipDiscovery: true,
+        forceMode: "production",
+      });
+      const workingDir = join(fixture.dirs.stateDir, "checkout");
+      const scratchDir = join(fixture.dirs.stateDir, "scratch");
+      await Deno.mkdir(workingDir, { recursive: true });
+      await Deno.mkdir(scratchDir, { recursive: true });
+      const original = Deno.Command;
+      Deno.Command = class {
+        spawn() {
+          throw new DOMException("The signal has been aborted", "AbortError");
+        }
+      } as unknown as typeof Deno.Command;
+      try {
+        await assertRejects(
+          () =>
+            runRailpackBuild({
+              build: { kind: "railpack" },
+              workingDir,
+              scratchDir,
+              cacheDir: railpackCacheDir(layout, "proj-abort"),
+              imageTag: "turbopanel-app/web:rel-1",
+              tools: {
+                railpack: "/missing",
+                buildctl: "/missing",
+                buildkitd: "/missing",
+                frontendLayoutDir: "/missing",
+                frontendDigest: VALID_DIGEST,
+              },
+              layout,
+            }, {
+              ensureDaemon: () => Promise.resolve("unix:///tmp/x.sock"),
+              inspectImage: () => Promise.resolve(undefined),
+            }),
+          Error,
+          "timed out",
+        );
+      } finally {
+        Deno.Command = original;
+      }
+    });
+  },
+});
+
+test({
+  name: "runRailpackBuild treats a throwing docker inspect as no digest",
+  permissions: { read: true, write: true, env: true, run: true },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env, {
+        skipDiscovery: true,
+        forceMode: "production",
+      });
+      const workingDir = join(fixture.dirs.stateDir, "checkout");
+      const scratchDir = join(fixture.dirs.stateDir, "scratch");
+      await Deno.mkdir(workingDir, { recursive: true });
+      await Deno.mkdir(scratchDir, { recursive: true });
+      const original = Deno.Command;
+      Deno.Command = class {
+        output() {
+          return Promise.reject(new TypeError("docker missing"));
+        }
+      } as unknown as typeof Deno.Command;
+      try {
+        const result = await runRailpackBuild({
+          build: { kind: "railpack" },
+          workingDir,
+          scratchDir,
+          cacheDir: railpackCacheDir(layout, "proj-inspect"),
+          imageTag: "turbopanel-app/web:rel-1",
+          tools: {
+            railpack: "/missing",
+            buildctl: "/missing",
+            buildkitd: "/missing",
+            frontendLayoutDir: "/missing",
+            frontendDigest: VALID_DIGEST,
+          },
+          layout,
+        }, {
+          ensureDaemon: () => Promise.resolve("unix:///tmp/x.sock"),
+          runTool: () => Promise.resolve(),
+        });
+        assertEquals(result.imageDigest, undefined);
+      } finally {
+        Deno.Command = original;
+      }
+    });
+  },
+});

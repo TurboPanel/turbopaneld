@@ -60,6 +60,29 @@ export function sourceFiles(text: string): string[] {
     .map((line) => line.slice(3));
 }
 
+/**
+ * Drop LCOV records whose `SF:` path is still absolute after prefix stripping.
+ *
+ * Co-located suites can dynamically import a sibling checkout (e.g.
+ * `../turbopanel/src/daemon/metrics/contract.ts`). Deno coverage then emits
+ * that file as an absolute `SF:` outside this repo. SonarCloud would drop
+ * the whole report if those lines stayed; they are not this project's
+ * sources, so omit the records instead of failing the gate.
+ */
+export function dropAbsoluteRecords(text: string): string {
+  const parts = text.split("end_of_record");
+  const kept: string[] = [];
+  for (const part of parts) {
+    const sf = part.split("\n").find((line) => line.startsWith("SF:"));
+    if (sf) {
+      const value = sf.slice(3);
+      if (value.startsWith("/") || value.startsWith("file:")) continue;
+    }
+    kept.push(part);
+  }
+  return kept.join("end_of_record");
+}
+
 export type NormalizeLcovIo = {
   args?: string[];
   cwd?: () => string;
@@ -115,7 +138,9 @@ export async function runNormalizeLcov(
   const envGet = io.envGet ?? ((key: string) => Deno.env.get(key));
   const roots = [envGet("GITHUB_WORKSPACE") ?? "", cwd, realCwd];
 
-  const normalized = normalizeLcov(text, stripPrefixes(roots));
+  const rewritten = normalizeLcov(text, stripPrefixes(roots));
+  const droppedCount = absoluteSourceFiles(rewritten).length;
+  const normalized = dropAbsoluteRecords(rewritten);
   if (normalized !== text) await writeTextFile(target, normalized);
 
   const stillAbsolute = absoluteSourceFiles(normalized);
@@ -129,6 +154,11 @@ export async function runNormalizeLcov(
     }
     exitFn(1);
     return;
+  }
+  if (droppedCount > 0) {
+    log(
+      `normalize-lcov: dropped ${droppedCount} out-of-repo SF record(s) from ${target}`,
+    );
   }
 
   const files = sourceFiles(normalized);

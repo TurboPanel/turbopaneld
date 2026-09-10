@@ -91,6 +91,8 @@ export interface CommandRouterDeps {
 /** Test-only handler overrides — host-free router dispatch without Docker/Ansible. */
 export type CommandRouterHandlerOverrides = {
   handleEnvironmentDeploy?: typeof handleEnvironmentDeploy;
+  handleEnvironmentLifecycle?: typeof handleEnvironmentLifecycle;
+  handlePrincipalsReconcile?: typeof handlePrincipalsReconcile;
   handleManagedApply?: typeof handleManagedApply;
   handleManagedLifecycle?: typeof handleManagedLifecycle;
   handleManagedDestroy?: typeof handleManagedDestroy;
@@ -243,7 +245,10 @@ export async function handleCommandDispatch(
       }
       case "server.principals.reconcile": {
         const payload = parsePrincipalsReconcilePayload(message.payload);
-        result = await handlePrincipalsReconcile(payload, daemonReceivedAt);
+        result = await pickCommandRouterHandler(
+          "handlePrincipalsReconcile",
+          handlePrincipalsReconcile,
+        )(payload, daemonReceivedAt);
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;
@@ -273,7 +278,10 @@ export async function handleCommandDispatch(
       }
       case "environment.lifecycle": {
         const payload = parseEnvironmentLifecyclePayload(message.payload);
-        result = await handleEnvironmentLifecycle(payload, daemonReceivedAt, {
+        result = await pickCommandRouterHandler(
+          "handleEnvironmentLifecycle",
+          handleEnvironmentLifecycle,
+        )(payload, daemonReceivedAt, {
           decryptSecrets: deps?.decryptSecrets,
           logSink,
           rehydrateDeploymentSecrets: deps?.rehydrateDeploymentSecrets

@@ -1,5 +1,10 @@
 import { assertEquals } from "@std/assert";
 import {
+  cachedMachineKey,
+  readMachineKey,
+  resetMachineKeyCacheForTests,
+} from "./machine-key.ts";
+import {
   getHostHelloIdentity,
   hostOsFromFields,
   parseOsReleaseText,
@@ -496,6 +501,58 @@ test({
       Deno.Command = OriginalCommand;
       Deno.statSync = originalStat;
       Deno.removeSync(dir, { recursive: true });
+      resetHostOsCacheForTests();
+    }
+  },
+});
+
+function withDenoBuild<T>(build: typeof Deno.build, fn: () => T): T {
+  const original = Object.getOwnPropertyDescriptor(Deno, "build");
+  Object.defineProperty(Deno, "build", {
+    configurable: true,
+    enumerable: true,
+    value: build,
+    writable: true,
+  });
+  try {
+    return fn();
+  } finally {
+    if (original) {
+      Object.defineProperty(Deno, "build", original);
+    }
+  }
+}
+
+test({
+  name:
+    "readOsRelease fallback is undefined when Deno.build.os is not a known family",
+  permissions: { read: true },
+  fn() {
+    resetHostOsCacheForTests();
+    try {
+      const os = withDenoBuild(
+        { ...Deno.build, os: "solaris" },
+        () => readOsRelease("/no/such/turbopanel-os-release-unknown-family"),
+      );
+      assertEquals(os, undefined);
+    } finally {
+      resetHostOsCacheForTests();
+    }
+  },
+});
+
+test({
+  name: "getHostHelloIdentity includes a warmed machine key when present",
+  permissions: { read: true, run: true },
+  async fn() {
+    resetHostOsCacheForTests();
+    resetMachineKeyCacheForTests();
+    try {
+      await readMachineKey();
+      const identity = getHostHelloIdentity();
+      assertEquals(identity.machineKey, cachedMachineKey());
+    } finally {
+      resetMachineKeyCacheForTests();
       resetHostOsCacheForTests();
     }
   },

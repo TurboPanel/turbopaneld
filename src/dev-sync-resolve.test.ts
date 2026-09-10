@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertThrows } from "@std/assert";
 import { join } from "@std/path";
 import { withTempLayout } from "./testing/temp-layout.ts";
 import {
@@ -78,6 +78,26 @@ test("resolveDevSyncSourceRoot accepts an editable checkout override", async () 
       else Deno.env.set("TURBOPANEL_DEV_INSTANCE", previous);
     }
   });
+});
+
+test("resolveDevSyncSourceRoot rethrows unexpected resolver errors", () => {
+  const previous = Deno.env.get("TURBOPANEL_DEV_INSTANCE");
+  Deno.env.delete("TURBOPANEL_DEV_INSTANCE");
+  try {
+    assertThrows(
+      () =>
+        resolveDevSyncSourceRoot({
+          get TURBOPANEL_DAEMON_ROOT(): string {
+            throw new TypeError("injected resolver failure");
+          },
+        }),
+      TypeError,
+      "injected resolver failure",
+    );
+  } finally {
+    if (previous === undefined) Deno.env.delete("TURBOPANEL_DEV_INSTANCE");
+    else Deno.env.set("TURBOPANEL_DEV_INSTANCE", previous);
+  }
 });
 
 test("resolveDevSyncSourceRoot refuses managed installs without a checkout", async () => {

@@ -208,6 +208,11 @@ test("resolveManagedRelativePath rejects empty, metachar, and bad segments", () 
     Error,
     "invalid",
   );
+  assertThrows(
+    () => resolveManagedRelativePath("/tmp/managed", "foo//bar"),
+    Error,
+    "invalid",
+  );
 });
 
 test("assertSafeManagedIdentifiers rejects environmentId and volume names", () => {
@@ -243,6 +248,30 @@ test("assertSafeManagedIdentifiers rejects environmentId and volume names", () =
         projectName: "tp-managed-pg",
         containerName: "ok-name-1",
         volumes: [{ name: "bad-name", target: "/data" }],
+      }),
+    Error,
+    "volume name",
+  );
+  assertThrows(
+    () =>
+      assertSafeManagedIdentifiers({
+        managedId: "ok-id",
+        environmentId: "env1",
+        projectName: "a".repeat(65),
+        containerName: "ok-name-1",
+        volumes: [],
+      }),
+    Error,
+    "projectName",
+  );
+  assertThrows(
+    () =>
+      assertSafeManagedIdentifiers({
+        managedId: "ok-id",
+        environmentId: "env1",
+        projectName: "tp-managed-pg",
+        containerName: "ok-name-1",
+        volumes: [{ name: "", target: "/data" }],
       }),
     Error,
     "volume name",

@@ -290,6 +290,64 @@ exit 0
     }
   });
 
+  it("treats a throwing --version probe as missing after install", async () => {
+    const bin = paths.cloudflaredBin();
+    await Deno.remove(bin).catch(() => {});
+    const asset = paths.resolveCloudflaredAsset();
+    const url = paths.cloudflaredDownloadUrl(asset);
+    const body = new TextEncoder().encode("#!/bin/sh\nexit 0\n");
+    const originalFetch = globalThis.fetch;
+    const originalCommand = Deno.Command;
+    globalThis.fetch = (input) => {
+      if (String(input) === url) {
+        return Promise.resolve(new Response(body, { status: 200 }));
+      }
+      return originalFetch(input);
+    };
+    Deno.Command = class extends originalCommand {
+      constructor(command: string | URL, options?: Deno.CommandOptions) {
+        super(command, options);
+      }
+      override output(): Promise<Deno.CommandOutput> {
+        return Promise.reject(new TypeError("version probe failed"));
+      }
+    } as typeof Deno.Command;
+    try {
+      await assertRejects(
+        () => cloudflared.ensureCloudflared(),
+        Error,
+        "got none",
+      );
+    } finally {
+      Deno.Command = originalCommand;
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("reports none when post-install --version cannot be parsed", async () => {
+    const bin = paths.cloudflaredBin();
+    await Deno.remove(bin).catch(() => {});
+    const asset = paths.resolveCloudflaredAsset();
+    const url = paths.cloudflaredDownloadUrl(asset);
+    const body = new TextEncoder().encode("#!/bin/sh\nexit 2\n");
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (input) => {
+      if (String(input) === url) {
+        return Promise.resolve(new Response(body, { status: 200 }));
+      }
+      return originalFetch(input);
+    };
+    try {
+      await assertRejects(
+        () => cloudflared.ensureCloudflared(),
+        Error,
+        "got none",
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("warns when creating the current symlink fails", async () => {
     const bin = paths.cloudflaredBin();
     await Deno.mkdir(paths.cloudflaredDir(), { recursive: true });

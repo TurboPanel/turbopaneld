@@ -323,3 +323,91 @@ test("collectManagedMemberHealth omits member when health collection throws", as
   assertEquals(result.containers?.length, 1);
   assertEquals(result.member, undefined);
 });
+
+test("resolveEngineContainerId falls back to the first row when Service does not match", () => {
+  const id = resolveEngineContainerId(
+    [
+      {
+        composeServiceName: "other",
+        containerId: "first123",
+        containerName: UUID_SHAPED_NAME,
+        status: "running",
+        role: "service",
+      },
+    ],
+    "postgres",
+  );
+  assertEquals(id, "first123");
+});
+
+test("collectManagedMemberHealth omits member when compose ps collection fails", async () => {
+  const result = await collectManagedMemberHealth(
+    "turbopanel-managed-health-ps",
+    {
+      rootUsername: "postgres",
+      defaultDatabase: "postgres",
+      replication: {
+        readHealth: () =>
+          Promise.resolve({
+            state: "streaming",
+            observedAt: "2030-01-01T00:00:00.000Z",
+          }),
+      },
+    },
+    { memberId: "member-4", role: "primary" },
+    () => Promise.resolve(dockerFail("compose ps failed")),
+  );
+  assertEquals(result.containers, undefined);
+  assertEquals(result.member, undefined);
+});
+
+test("collectManagedMemberHealth redacts exec stderr and forwards SQL on stdin", async () => {
+  const inputs: Array<string | undefined> = [];
+  const result = await collectManagedMemberHealth(
+    "turbopanel-managed-health-exec",
+    {
+      rootUsername: "postgres",
+      defaultDatabase: "postgres",
+      replication: {
+        readHealth: async (ctx) => {
+          const withInput = await ctx.exec(["psql"], "SELECT 1;");
+          const without = await ctx.exec(["psql"]);
+          if (!withInput.success || !without.success) {
+            throw new TypeError("exec failed");
+          }
+          return {
+            state: "streaming",
+            observedAt: "2030-01-01T00:00:00.000Z",
+          };
+        },
+      },
+    },
+    {
+      memberId: "member-5",
+      role: "primary",
+      redact: (text) => `redacted:${text}`,
+    },
+    (args, options) => {
+      inputs.push(options?.input);
+      if (args[0] === "compose") {
+        return Promise.resolve(dockerOk(JSON.stringify([
+          {
+            ID: "abc123",
+            Name: UUID_SHAPED_NAME,
+            Service: "postgres",
+            State: "running",
+          },
+        ])));
+      }
+      return Promise.resolve({
+        success: true,
+        stdout: "ok",
+        stderr: "secret",
+        code: 0,
+      });
+    },
+  );
+  assertEquals(result.member?.replication?.state, "streaming");
+  assertEquals(inputs.includes("SELECT 1;"), true);
+  assertEquals(inputs.includes(undefined), true);
+});

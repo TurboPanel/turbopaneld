@@ -11,6 +11,7 @@ import {
   fillMissingLicenses,
   fingerprintCommentValue,
   formatPolicyFailures,
+  isDenoDevelopmentPackageName,
   mergeNoticePackages,
   nameFromJsrNpmSpec,
   type NoticePackage,
@@ -22,6 +23,7 @@ import {
   packagesFromPnpmLockfile,
   packagesFromPodfileLock,
   parseDenoLockId,
+  parsePnpmPackageId,
   pnpmLicenseKeys,
   pnpmPackagePaths,
   referencedDenoLockKeys,
@@ -137,6 +139,20 @@ describe("packagesFromPnpmLockfile", () => {
       packages.every((row) => row.source === "pnpm-lock.yaml"),
       true,
     );
+  });
+
+  it("skips lock ids that do not parse as name@version", () => {
+    const packages = packagesFromPnpmLockfile({
+      importers: { ".": { dependencies: { next: { specifier: "16.2.9" } } } },
+      packages: {
+        "not-an-id": {},
+        "@scope/name": {},
+        "next@16.2.9": {},
+      },
+    });
+    assertEquals(packages.map((row) => `${row.name}@${row.version}`), [
+      "next@16.2.9",
+    ]);
   });
 
   it("parses scoped ids and peer-suffix keys", () => {
@@ -621,6 +637,141 @@ describe("enrichMissingPackageLicenses", () => {
   });
 });
 
+describe("packagesFromPnpmLicenses edge rows", () => {
+  it("skips nameless entries and blank versions", () => {
+    const packages = packagesFromPnpmLicenses({
+      MIT: [
+        { versions: ["1.0.0"], license: "MIT" },
+        { name: "keep", versions: ["", "2.0.0"], license: "MIT" },
+        { name: "via-group", versions: ["3.0.0"] },
+      ],
+    }, new Set(["keep@2.0.0"]));
+    assertEquals(
+      packages.map((row) => `${row.name}@${row.version}`).sort((a, b) =>
+        a.localeCompare(b)
+      ),
+      ["keep@2.0.0", "via-group@3.0.0"],
+    );
+    assertEquals(
+      packages.find((row) => row.name === "keep")?.role,
+      "production",
+    );
+    assertEquals(
+      packages.find((row) => row.name === "via-group")?.license,
+      "MIT",
+    );
+  });
+});
+
+describe("packagesFromNpmLockfile name and license fallbacks", () => {
+  it("derives names from install paths and treats missing versions as skip", () => {
+    const packages = packagesFromNpmLockfile({
+      packages: {
+        "": { name: "root" },
+        "node_modules/left-pad": { version: "1.3.0" },
+        "not-a-modules-path": { version: "1.0.0", license: "MIT" },
+        "node_modules/": { version: "1.0.0", license: "MIT" },
+        "node_modules/no-version": { license: "MIT" },
+        "node_modules/explicit": {
+          name: "  renamed  ",
+          version: "9.0.0",
+          license: 12 as unknown as string,
+        },
+      },
+    });
+    assertEquals(
+      packages.map((row) => `${row.name}@${row.version}:${row.license}`).sort(
+        (a, b) => a.localeCompare(b),
+      ),
+      ["left-pad@1.3.0:", "renamed@9.0.0:"],
+    );
+    assertEquals(packagesFromNpmLockfile({}), []);
+  });
+});
+
+describe("parsePnpmPackageId", () => {
+  it("rejects scoped ids without a version separator and empty slices", () => {
+    assertEquals(parsePnpmPackageId("@noslash"), undefined);
+    assertEquals(parsePnpmPackageId("@scope/name"), undefined);
+    assertEquals(parsePnpmPackageId("@scope/@"), undefined);
+    assertEquals(parsePnpmPackageId("name"), undefined);
+    assertEquals(parsePnpmPackageId("@1.0.0"), undefined);
+    assertEquals(parsePnpmPackageId("left@"), undefined);
+    assertEquals(parsePnpmPackageId("next@16.2.9(peer@1)"), {
+      name: "next",
+      version: "16.2.9",
+    });
+  });
+});
+
+describe("packagesFromDenoLock remaining graph branches", () => {
+  it("marks unreferenced-table development names as development without entrypoints", () => {
+    const packages = packagesFromDenoLock(
+      {
+        npm: {
+          "yaml@2.9.0": {},
+          "vitest@4.1.10": {},
+          "not-a-lock-id": {},
+        },
+      },
+      { "yaml@2.9.0": "ISC", "vitest@4.1.10": "MIT" },
+    );
+    assertEquals(
+      packages.find((row) => row.name === "yaml")?.role,
+      "production",
+    );
+    assertEquals(
+      packages.find((row) => row.name === "vitest")?.role,
+      "development",
+    );
+    assertEquals(packages.some((row) => row.name === "not-a-lock-id"), false);
+    assertEquals(isDenoDevelopmentPackageName("vitest"), true);
+    assertEquals(isDenoDevelopmentPackageName("@vitest/coverage"), true);
+  });
+
+  it("resolves bare name@version specs and version-only specifier maps", () => {
+    const keys = walkDenoLockReachableKeys(
+      {
+        specifiers: {
+          "jsr:@std/path@1": "1.0.0",
+          "npm:yaml@2": "2.9.0",
+        },
+        jsr: {
+          "@std/path@1.0.0": { dependencies: ["@std/assert@1.0.19"] },
+          "@std/assert@1.0.19": {},
+        },
+        npm: {
+          "yaml@2.9.0_peer@1": { dependencies: ["semver"] },
+          "semver@6.3.1": {},
+        },
+      },
+      ["jsr:@std/path@1", "@std/assert@1.0.19", "npm:yaml@2"],
+    );
+    assertEquals(keys.has("@std/path@1.0.0"), true);
+    assertEquals(keys.has("@std/assert@1.0.19"), true);
+    assertEquals(keys.has("yaml@2.9.0"), true);
+    assertEquals(keys.has("semver@6.3.1"), true);
+  });
+
+  it("finds lock rows by name when the specifier map misses", () => {
+    const keys = walkDenoLockReachableKeys(
+      {
+        jsr: { "@std/fmt@1.0.0": {} },
+        npm: { "left-pad@1.3.0": {} },
+      },
+      ["jsr:@std/fmt", "left-pad"],
+    );
+    assertEquals(keys.has("@std/fmt@1.0.0"), true);
+    assertEquals(keys.has("left-pad@1.3.0"), true);
+  });
+});
+
+describe("parseDenoLockId npm peer suffix that empties the version", () => {
+  it("rejects a peer-only version remnant", () => {
+    assertEquals(parseDenoLockId("npm", "semver@_peer@1"), undefined);
+  });
+});
+
 describe("parseDenoLockId and nameFromJsrNpmSpec", () => {
   it("rejects ids without a version separator", () => {
     assertEquals(parseDenoLockId("npm", "no-version"), undefined);
@@ -671,6 +822,123 @@ describe("walkDenoLockReachableKeys", () => {
     assertEquals(keys.has("@std/assert@1.0.19"), true);
     assertEquals(keys.has("yaml@2.9.0"), true);
     assertEquals(keys.has("not-a-lock-id"), false);
+  });
+});
+
+describe("packagesFromPodfileLock duplicates", () => {
+  it("keeps the first occurrence of a name@version pair", () => {
+    const pods = packagesFromPodfileLock(`PODS:
+  - Expo (57.0.14)
+  - Expo (57.0.14)
+  - hermes-engine (0.86.2)
+`);
+    assertEquals(pods.map((row) => `${row.name}@${row.version}`), [
+      "Expo@57.0.14",
+      "hermes-engine@0.86.2",
+    ]);
+  });
+});
+
+describe("license policy remaining tokens", () => {
+  it("allows reviewed sharp LGPL and rejects remaining copyleft families", () => {
+    assertEquals(
+      classifyLicense(
+        "LGPL-3.0-or-later",
+        "production",
+        "@img/sharp-linux-x64",
+      ),
+      null,
+    );
+    assertEquals(
+      classifyLicense("EUPL-1.2", "production"),
+      "copyleft-production",
+    );
+    assertEquals(
+      classifyLicense("OSL-3.0", "production"),
+      "copyleft-production",
+    );
+    assertEquals(
+      classifyLicense("CPL-1.0", "production"),
+      "copyleft-production",
+    );
+    assertEquals(
+      classifyLicense("Sleepycat", "production"),
+      "copyleft-production",
+    );
+    assertEquals(
+      classifyLicense("CDDL-1.0", "production"),
+      "copyleft-production",
+    );
+    assertEquals(
+      classifyLicense("GPL-3.0-only OR GPL-2.0-only", "production"),
+      "copyleft-production",
+    );
+    assertEquals(classifyLicense("(MIT", "production"), "custom");
+    assertEquals(classifyLicense("MIT) leftover", "production"), "custom");
+  });
+});
+
+describe("render and attach remaining notice fields", () => {
+  it("renders extra preamble, source, and name-keyed license maps", () => {
+    const markdown = renderThirdPartyNotices(
+      [
+        pkg({
+          name: "left-pad",
+          license: "MIT",
+          source: "package-lock.json",
+          copyright: "Ben",
+        }),
+      ],
+      { ...renderOpts, extraPreamble: "Bundled fonts stay under OFL." },
+    );
+    assertStringIncludes(markdown, "Bundled fonts stay under OFL.");
+    assertStringIncludes(markdown, "- Source: package-lock.json");
+    assertStringIncludes(markdown, "- Copyright: Ben");
+
+    const attached = attachLicensesFromMap(
+      [pkg({ name: "Expo", version: "1.0.0", license: "", role: "native" })],
+      { Expo: "MIT" },
+    );
+    assertEquals(attached[0]?.license, "MIT");
+    assertEquals(
+      attachNoticeText(pkg({ name: "x", license: "MIT" }), "   ")
+        .noticeText,
+      undefined,
+    );
+  });
+
+  it("keeps prior notice metadata when promoting a development row", () => {
+    const merged = mergeNoticePackages([
+      [pkg({
+        name: "yaml",
+        license: "ISC",
+        role: "development",
+        noticeText: "dev NOTICE",
+        copyright: "Dev",
+        homepage: "https://example.com",
+      })],
+      [pkg({ name: "yaml", license: "ISC", role: "production" })],
+    ]);
+    assertEquals(merged[0]?.role, "production");
+    assertEquals(merged[0]?.noticeText, "dev NOTICE");
+    assertEquals(merged[0]?.copyright, "Dev");
+    assertEquals(merged[0]?.homepage, "https://example.com");
+  });
+
+  it("skips pnpm path rows without a name, path, or version", () => {
+    const paths = pnpmPackagePaths({
+      MIT: [
+        { versions: ["1.0.0"], paths: ["node_modules/missing-name"] },
+        { name: "no-path", versions: ["1.0.0"] },
+        {
+          name: "keep",
+          versions: ["", "2.0.0"],
+          paths: ["node_modules/keep"],
+        },
+      ],
+    });
+    assertEquals(paths.size, 1);
+    assertEquals(paths.get("keep@2.0.0"), "node_modules/keep");
   });
 });
 

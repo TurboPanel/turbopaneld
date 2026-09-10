@@ -381,3 +381,140 @@ test("SysfsGpuAdapter reduces RAPL uncore energy_uj to Intel GPU watts across tw
   const second = await adapter.read(gpu, ctx({ tracker, seconds: 10 }));
   assertEquals(second?.powerWatts, 5);
 });
+
+test("SysfsGpuAdapter correlates a GPU with no PCI path by chip name", async () => {
+  const hwmon0 = `${SYS_ROOT}/class/hwmon/hwmon0`;
+  const files: Record<string, string | undefined> = {
+    [`${hwmon0}/name`]: "amdgpu",
+    [`${hwmon0}/temp1_input`]: "45000",
+    [`${hwmon0}/temp1_label`]: "edge",
+    [`${hwmon0}/device/gpu_busy_percent`]: "12",
+  };
+  const dirs: Record<string, string[]> = {
+    [`${SYS_ROOT}/class/hwmon`]: ["hwmon0"],
+    [hwmon0]: ["name", "temp1_input", "temp1_label"],
+  };
+  const adapter = new SysfsGpuAdapter({
+    io: fakeIo(files, dirs),
+    sysRoot: SYS_ROOT,
+  });
+  const gpu: GpuTopology = {
+    gpuId: "drm:card0",
+    kind: "sysfs",
+    pciPath: "",
+    vendor: "amd",
+    chip: "amdgpu",
+  };
+  const reading = await adapter.read(gpu, ctx());
+  assertEquals(reading?.temperatureCelsius, 45);
+  assertEquals(reading?.utilizationPercent, 12);
+});
+
+test("SysfsGpuAdapter does not report memory temperature when it is the same sensor as the primary", async () => {
+  const hwmon0 = `${SYS_ROOT}/class/hwmon/hwmon0`;
+  const files: Record<string, string | undefined> = {
+    [`${hwmon0}/name`]: "amdgpu",
+    [`${hwmon0}/temp1_input`]: "38000",
+    [`${hwmon0}/temp1_label`]: "mem",
+    [`${hwmon0}/device/uevent`]: "PCI_SLOT_NAME=0000:01:00.0\nDRIVER=amdgpu\n",
+  };
+  const dirs: Record<string, string[]> = {
+    [`${SYS_ROOT}/class/hwmon`]: ["hwmon0"],
+    [hwmon0]: ["name", "temp1_input", "temp1_label"],
+  };
+  const adapter = new SysfsGpuAdapter({
+    io: fakeIo(files, dirs),
+    sysRoot: SYS_ROOT,
+  });
+  const gpu: GpuTopology = {
+    gpuId: "pci:0000:01:00.0",
+    kind: "sysfs",
+    pciPath: "0000:01:00.0",
+    vendor: "amd",
+    chip: "amdgpu",
+  };
+  const reading = await adapter.read(gpu, ctx());
+  assertEquals(reading?.temperatureCelsius, 38);
+  assertEquals(reading?.memoryTemperatureCelsius, null);
+});
+
+test("SysfsGpuAdapter.read returns null when sensor discovery throws", async () => {
+  const io: SensorIo = {
+    listDir: () => {
+      throw new Error("sysfs gone");
+    },
+    readFile: () => undefined,
+  };
+  const adapter = new SysfsGpuAdapter({ io, sysRoot: SYS_ROOT });
+  const gpu: GpuTopology = {
+    gpuId: "pci:0000:01:00.0",
+    kind: "sysfs",
+    pciPath: "0000:01:00.0",
+    vendor: "amd",
+    chip: "amdgpu",
+  };
+  assertEquals(await adapter.read(gpu, ctx()), null);
+});
+
+test("SysfsGpuAdapter invalidates RAPL GPU power when energy_uj is unreadable", async () => {
+  const card0 = `${SYS_ROOT}/class/drm/card0`;
+  const uncore = `${SYS_ROOT}/class/powercap/intel-rapl:0:1`;
+  const files: Record<string, string | undefined> = {
+    [`${card0}/device/vendor`]: "0x8086",
+    [`${card0}/device/uevent`]: "PCI_SLOT_NAME=0000:00:02.0\nDRIVER=i915\n",
+    [`${card0}/gt/gt0/rc6_residency_ms`]: "0",
+    [`${SYS_ROOT}/class/powercap/intel-rapl:0/name`]: "package-0",
+    [`${uncore}/name`]: "uncore",
+    [`${uncore}/energy_uj`]: "nope",
+  };
+  const dirs: Record<string, string[]> = {
+    [`${SYS_ROOT}/class/drm`]: ["card0"],
+    [`${card0}/engine`]: ["rcs0"],
+    [`${card0}/gt`]: ["gt0"],
+    [`${SYS_ROOT}/class/powercap`]: ["intel-rapl:0", "intel-rapl:0:1"],
+  };
+  const adapter = new SysfsGpuAdapter({
+    io: fakeIo(files, dirs),
+    sysRoot: SYS_ROOT,
+  });
+  const gpu: GpuTopology = {
+    gpuId: "pci:0000:00:02.0",
+    kind: "drm",
+    pciPath: "0000:00:02.0",
+    vendor: "intel",
+    chip: "i915",
+  };
+  const reading = await adapter.read(gpu, ctx());
+  assertEquals(reading?.powerWatts, null);
+});
+
+test("SysfsGpuAdapter RC6 fallback stays null across a non-positive interval", async () => {
+  const card0 = `${SYS_ROOT}/class/drm/card0`;
+  const files: Record<string, string | undefined> = {
+    [`${card0}/device/vendor`]: "0x8086",
+    [`${card0}/device/uevent`]: "PCI_SLOT_NAME=0000:00:02.0\nDRIVER=i915\n",
+    [`${card0}/gt/gt0/rc6_residency_ms`]: "100000",
+  };
+  const dirs: Record<string, string[]> = {
+    [`${SYS_ROOT}/class/drm`]: ["card0"],
+    [`${card0}/engine`]: ["rcs0"],
+    [`${card0}/gt`]: ["gt0"],
+    [`${card0}/gt/gt0`]: ["rc6_residency_ms"],
+  };
+  const adapter = new SysfsGpuAdapter({
+    io: fakeIo(files, dirs),
+    sysRoot: SYS_ROOT,
+  });
+  const gpu: GpuTopology = {
+    gpuId: "pci:0000:00:02.0",
+    kind: "drm",
+    pciPath: "0000:00:02.0",
+    vendor: "intel",
+    chip: "i915",
+  };
+  const tracker = new CounterBaselineTracker();
+  await adapter.read(gpu, ctx({ tracker, seconds: 10 }));
+  files[`${card0}/gt/gt0/rc6_residency_ms`] = "105000";
+  const second = await adapter.read(gpu, ctx({ tracker, seconds: 0 }));
+  assertEquals(second?.utilizationPercent, null);
+});

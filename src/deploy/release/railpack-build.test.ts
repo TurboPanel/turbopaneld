@@ -9,6 +9,7 @@ import {
   RAILPACK_FRONTEND_IMAGE,
   RAILPACK_FRONTEND_VERSION,
   RAILPACK_VERSION,
+  railpackBinaryPath,
   railpackCacheDir,
   railpackFrontendDigestPath,
   railpackFrontendLayoutDir,
@@ -746,6 +747,86 @@ test({
         // deno-lint-ignore no-explicit-any
         (Deno as any).Command = OriginalCommand;
       }
+    });
+  },
+});
+
+test({
+  name: "ensureBuildkitRailpack rethrows a non-NotFound digest read",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = layoutOf(fixture.env);
+      await plantVendorTools(layout.runtimesDir);
+      const digestPath = railpackFrontendDigestPath(layout.runtimesDir);
+      await Deno.remove(digestPath);
+      await Deno.mkdir(digestPath);
+      await assertRejects(
+        () =>
+          ensureBuildkitRailpack(layout, {
+            runBuildkitSetup: () => Promise.resolve(),
+            runCommand: () => {
+              throw new TypeError("download must not run");
+            },
+          }),
+        Error,
+      );
+    });
+  },
+});
+
+test({
+  name: "ensureBuildkitRailpack rethrows a non-NotFound tool stat",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = layoutOf(fixture.env);
+      await plantVendorTools(layout.runtimesDir);
+      const originalStat = Deno.stat;
+      const railpack = railpackBinaryPath(layout.runtimesDir);
+      Deno.stat = ((path: string | URL) => {
+        if (String(path) === railpack) {
+          return Promise.reject(new TypeError("stat busy"));
+        }
+        return originalStat.call(Deno, path);
+      }) as typeof Deno.stat;
+      try {
+        await assertRejects(
+          () =>
+            ensureBuildkitRailpack(layout, {
+              runBuildkitSetup: () => Promise.resolve(),
+              runCommand: () => {
+                throw new TypeError("download must not run");
+              },
+            }),
+          TypeError,
+          "stat busy",
+        );
+      } finally {
+        Deno.stat = originalStat;
+      }
+    });
+  },
+});
+
+test({
+  name: "ensureBuildkitRailpack rethrows when current cannot be replaced",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = layoutOf(fixture.env);
+      const current = join(layout.runtimesDir, "railpack", "current");
+      await Deno.mkdir(join(current, "nested"), { recursive: true });
+      await Deno.writeTextFile(join(current, "nested", "keep"), "x");
+      await assertRejects(
+        () =>
+          ensureBuildkitRailpack(layout, {
+            runBuildkitSetup: () => Promise.resolve(),
+            resolveArch: () => "amd64",
+            runCommand: mockDownloadCommands(),
+          }),
+        Error,
+      );
     });
   },
 });

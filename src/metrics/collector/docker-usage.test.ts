@@ -162,3 +162,33 @@ test("the sampler's default interval is slower than the metrics tick", () => {
   assertEquals(DOCKER_USAGE_REFRESH_INTERVAL_MS, 5 * 60_000);
   assertEquals(DOCKER_USAGE_REFRESH_INTERVAL_MS > 60_000, true);
 });
+
+test("reduceDockerSystemDf treats an absent BuildCache section as null reclaimable", () => {
+  const { usage } = reduceDockerSystemDf(df({ BuildCache: undefined }));
+  assertEquals(usage.buildCacheBytes, null);
+  assertEquals(usage.buildCacheReclaimableBytes, null);
+});
+
+test("DockerUsageSampler.start is idempotent and stop is safe before start", async () => {
+  let intervalArmed = 0;
+  let intervalCleared = 0;
+  const sampler = new DockerUsageSampler({
+    systemDf: () => Promise.resolve(df()),
+    setIntervalFn: ((fn: () => void) => {
+      intervalArmed += 1;
+      fn();
+      return 1;
+    }) as unknown as typeof setInterval,
+    clearIntervalFn: (() => {
+      intervalCleared += 1;
+    }) as unknown as typeof clearInterval,
+  });
+  sampler.stop();
+  sampler.start();
+  sampler.start();
+  await sampler.refresh();
+  sampler.stop();
+  sampler.stop();
+  assertEquals(intervalArmed, 1);
+  assertEquals(intervalCleared, 1);
+});

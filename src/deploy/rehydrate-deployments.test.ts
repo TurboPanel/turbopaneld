@@ -458,6 +458,18 @@ test({
   },
 });
 
+test("parseRehydrateDeploymentResults defaults omitted variableMaterial", () => {
+  const parsed = parseRehydrateDeploymentResults([{
+    projectId: "proj-1",
+    environmentId: "env-1",
+    generation: 3,
+    secretPlan: [],
+    variableMaterial: undefined as unknown as [],
+  }]);
+  assertEquals(parsed.length, 1);
+  assertEquals(parsed[0]?.variableMaterial, []);
+});
+
 test("parseRehydrateDeploymentResults drops invalid rows", () => {
   const parsed = parseRehydrateDeploymentResults(
     [

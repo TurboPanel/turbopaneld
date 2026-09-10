@@ -521,3 +521,32 @@ test("parseMonitorMessage accepts heartbeat resources and rejects bad kinds", ()
     null,
   );
 });
+
+test("parseMonitorMessage rejects daemon payloads whose base from is not daemon", () => {
+  assertEquals(
+    parseMonitorMessage({
+      type: "monitor.sync",
+      from: "instance",
+      serverId: SERVER_ID,
+      at: "2026-01-01T00:00:00Z",
+      sequence: 1,
+      instance: {},
+      resources: [],
+      protocolVersion: MONITOR_PROTOCOL_VERSION,
+    }),
+    null,
+  );
+  assertEquals(
+    parseMonitorMessage({
+      type: "monitor.sync",
+      from: "daemon",
+      serverId: SERVER_ID,
+      at: "2026-01-01T00:00:00Z",
+      sequence: 1,
+      instance: {},
+      resources: [{ kind: "container", status: "healthy" }],
+      protocolVersion: MONITOR_PROTOCOL_VERSION,
+    }),
+    null,
+  );
+});

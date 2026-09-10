@@ -282,3 +282,80 @@ function assertSectionShape(summary: MonitorInstanceSummary): void {
     assert(typeof summary.bootId === "string");
   }
 }
+
+test("collectHostSummary treats failed cat and df as missing data", async () => {
+  const originalRead = Deno.readTextFileSync.bind(Deno);
+  Deno.readTextFileSync = () => {
+    throw new Error("direct proc read blocked");
+  };
+  const originalCommand = Deno.Command;
+  Deno.Command = class {
+    #cmd: string;
+    constructor(cmd: string) {
+      this.#cmd = cmd;
+    }
+    outputSync() {
+      if (this.#cmd === "cat") {
+        return { code: 1, stdout: new Uint8Array() };
+      }
+      throw new Error("unexpected sync command");
+    }
+    output() {
+      if (this.#cmd === "df") {
+        return Promise.resolve({
+          success: false,
+          code: 1,
+          stdout: new Uint8Array(),
+          stderr: new Uint8Array(),
+        });
+      }
+      return Promise.reject(new Error("unexpected command"));
+    }
+  } as unknown as typeof Deno.Command;
+
+  try {
+    const summary = await collectHostSummary();
+    assertEquals(summary.cpu, undefined);
+    assertEquals(summary.disk, undefined);
+  } finally {
+    Deno.readTextFileSync = originalRead;
+    Deno.Command = originalCommand;
+  }
+});
+
+test("collectHostSummary returns undefined when cat itself throws", async () => {
+  const originalRead = Deno.readTextFileSync.bind(Deno);
+  Deno.readTextFileSync = () => {
+    throw new Error("direct proc read blocked");
+  };
+  const originalCommand = Deno.Command;
+  Deno.Command = class {
+    constructor() {
+      throw new Error("cat unavailable");
+    }
+  } as unknown as typeof Deno.Command;
+
+  try {
+    const summary = await collectHostSummary();
+    assertEquals(summary.cpu, undefined);
+    assertEquals(summary.disk, undefined);
+  } finally {
+    Deno.readTextFileSync = originalRead;
+    Deno.Command = originalCommand;
+  }
+});
+
+test("injected sources cover short cpu rows and non-numeric load/uptime", async () => {
+  const summary = await createHostSummaryCollector({
+    readProcFile: (path) => {
+      if (path === "/proc/stat") return "cpu  10 0 5 85 0\n";
+      if (path === "/proc/loadavg") return "1.0 foo 0.3\n";
+      if (path === "/proc/uptime") return "not-a-number rest\n";
+      return undefined;
+    },
+    readDfOutput: () => Promise.resolve(undefined),
+  }).collect();
+  assertEquals(summary.cpu?.cores, 0);
+  assertEquals(summary.load, undefined);
+  assertEquals(summary.uptimeSeconds, undefined);
+});

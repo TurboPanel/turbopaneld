@@ -293,3 +293,165 @@ test("pruneReleases is a no-op when releases/ is missing", async () => {
     await Deno.remove(root, { recursive: true });
   }
 });
+
+test("pruneReleases treats a racing stat as oldest rather than failing", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-prune-race-" });
+  try {
+    const paths = resolveReleasePaths(
+      { principalHomeRoot: root, daemonStateDir: join(root, "state") },
+      { username: "appuser", serviceId: "svc-1", releaseId: "rel-keep" },
+    );
+    await Deno.mkdir(join(paths.releasesDir, "rel-keep"), { recursive: true });
+    await Deno.mkdir(join(paths.releasesDir, "rel-ghost"), { recursive: true });
+    await Deno.symlink(join("releases", "rel-keep"), paths.currentLink);
+    const originalStat = Deno.stat;
+    Deno.stat = ((path: string | URL) => {
+      if (String(path).endsWith("rel-ghost")) {
+        return Promise.reject(new Deno.errors.NotFound("gone"));
+      }
+      return originalStat.call(Deno, path);
+    }) as typeof Deno.stat;
+    try {
+      const removed = await pruneReleases({
+        paths,
+        keep: 1,
+        runFn: () => Promise.resolve({ success: true, stdout: "", stderr: "" }),
+      });
+      assertEquals(removed.includes("rel-ghost"), true);
+      assertEquals(removed.includes("rel-keep"), false);
+    } finally {
+      Deno.stat = originalStat;
+    }
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("pruneReleases treats a privileged not-found listing as empty", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-prune-notfound-" });
+  try {
+    const paths = resolveReleasePaths(
+      { principalHomeRoot: root, daemonStateDir: join(root, "state") },
+      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+    );
+    await Deno.mkdir(paths.releasesDir, { recursive: true });
+    const originalReadDir = Deno.readDir;
+    Deno.readDir = (() => {
+      throw new Deno.errors.PermissionDenied("denied");
+    }) as typeof Deno.readDir;
+    try {
+      const removed = await pruneReleases({
+        paths,
+        runFn: () =>
+          Promise.resolve({
+            success: false,
+            stdout: "",
+            stderr: "ls: not found",
+          }),
+      });
+      assertEquals(removed, []);
+    } finally {
+      Deno.readDir = originalReadDir;
+    }
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("pruneReleases ignores blank privileged listing lines", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-prune-blank-" });
+  try {
+    const paths = resolveReleasePaths(
+      { principalHomeRoot: root, daemonStateDir: join(root, "state") },
+      { username: "appuser", serviceId: "svc-1", releaseId: "rel-keep" },
+    );
+    await Deno.mkdir(paths.releasesDir, { recursive: true });
+    const originalReadDir = Deno.readDir;
+    Deno.readDir = (() => {
+      throw new Deno.errors.PermissionDenied("denied");
+    }) as typeof Deno.readDir;
+    try {
+      const removed = await pruneReleases({
+        paths,
+        keep: 1,
+        runFn: (_command, args) => {
+          if (args.includes("ls")) {
+            return Promise.resolve({
+              success: true,
+              stdout: "rel-keep\n\n  \nrel-old\n",
+              stderr: "",
+            });
+          }
+          return Promise.resolve({ success: true, stdout: "", stderr: "" });
+        },
+      });
+      assertEquals(removed.includes("rel-old"), true);
+      assertEquals(removed.includes("rel-keep"), false);
+    } finally {
+      Deno.readDir = originalReadDir;
+    }
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("pruneReleases reports a non-Error unlink failure", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-prune-throw-" });
+  try {
+    const paths = resolveReleasePaths(
+      { principalHomeRoot: root, daemonStateDir: join(root, "state") },
+      { username: "appuser", serviceId: "svc-1", releaseId: "rel-new" },
+    );
+    for (const id of ["rel-old", "rel-new"]) {
+      await Deno.mkdir(join(paths.releasesDir, id), { recursive: true });
+      await Deno.utime(
+        join(paths.releasesDir, id),
+        Date.now() / 1000,
+        (Date.now() + (id === "rel-new" ? 10 : 1)) / 1000,
+      );
+    }
+    await Deno.symlink(join("releases", "rel-new"), paths.currentLink);
+    const lines: string[] = [];
+    const removed = await pruneReleases({
+      paths,
+      keep: 1,
+      runFn: (_command, args) => {
+        if (args.includes("rm")) return Promise.reject("busy");
+        return Promise.resolve({ success: true, stdout: "", stderr: "" });
+      },
+      onOutput: (_stream, line) => lines.push(line),
+    });
+    assertEquals(removed, []);
+    assertEquals(lines.some((line) => line.includes("busy")), true);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("pruneReleases keeps the default newest five plus current", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-prune-default-" });
+  try {
+    const paths = resolveReleasePaths(
+      { principalHomeRoot: root, daemonStateDir: join(root, "state") },
+      { username: "appuser", serviceId: "svc-1", releaseId: "rel-5" },
+    );
+    for (let i = 0; i < 6; i += 1) {
+      const id = `rel-${i}`;
+      await Deno.mkdir(join(paths.releasesDir, id), { recursive: true });
+      await Deno.utime(
+        join(paths.releasesDir, id),
+        Date.now() / 1000,
+        (Date.now() + i) / 1000,
+      );
+    }
+    await Deno.symlink(join("releases", "rel-5"), paths.currentLink);
+    const removed = await pruneReleases({
+      paths,
+      runFn: () => Promise.resolve({ success: true, stdout: "", stderr: "" }),
+    });
+    assertEquals(removed.includes("rel-5"), false);
+    assertEquals(removed.length, 1);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});

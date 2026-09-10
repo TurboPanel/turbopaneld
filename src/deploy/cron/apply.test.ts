@@ -145,6 +145,34 @@ function apply(host: Host, specs: readonly CronApplySpec[]) {
   });
 }
 
+function stubDenoCommand(run: RunFn): () => void {
+  const original = Deno.Command;
+  // deno-lint-ignore no-explicit-any
+  (Deno as any).Command = class {
+    #command: string;
+    #args: string[];
+    constructor(command: string, options?: { args?: string[] }) {
+      this.#command = command;
+      this.#args = options?.args ?? [];
+    }
+    async output(): Promise<Deno.CommandOutput> {
+      const result = await run(this.#command, this.#args);
+      const enc = new TextEncoder();
+      return {
+        success: result.success,
+        code: result.success ? 0 : 1,
+        signal: null,
+        stdout: enc.encode(result.stdout),
+        stderr: enc.encode(result.stderr),
+      };
+    }
+  };
+  return () => {
+    // deno-lint-ignore no-explicit-any
+    (Deno as any).Command = original;
+  };
+}
+
 const UNIT = cronUnitName({
   environmentId: ENV_ID,
   composeServiceName: "blog",
@@ -505,6 +533,52 @@ test("removeCronJobs warns when daemon-reload fails after teardown", async () =>
       1,
     );
     await assertRejects(() => Deno.stat(join(host.unitDir, `${UNIT}.timer`)));
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("applyCronJobs uses runDefault when run is omitted", async () => {
+  const host = await makeHost();
+  const restore = stubDenoCommand(host.run);
+  try {
+    const result = await applyCronJobs(host.layout, ENV_ID, [specFor()], {
+      systemdUnitDir: host.unitDir,
+    });
+    assertEquals(result.changed, [UNIT]);
+  } finally {
+    restore();
+    await host.cleanup();
+  }
+});
+
+test("removeCronJobs is a no-op when no timers are installed", async () => {
+  const host = await makeHost();
+  try {
+    assertEquals(
+      await removeCronJobs(ENV_ID, {
+        run: host.run,
+        systemdUnitDir: host.unitDir,
+      }),
+      0,
+    );
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a failed unit file removal is logged rather than aborting teardown", async () => {
+  const host = await makeHost();
+  try {
+    await apply(host, [specFor()]);
+    const inner = host.run;
+    host.run = (command, args) => {
+      if (args.includes("rm")) return Promise.resolve(fail("rm refused"));
+      return inner(command, args);
+    };
+    const result = await apply(host, []);
+    assertEquals(result.removed, [UNIT]);
+    await Deno.stat(join(host.unitDir, `${UNIT}.timer`));
   } finally {
     await host.cleanup();
   }

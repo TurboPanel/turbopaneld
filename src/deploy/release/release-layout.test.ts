@@ -15,6 +15,7 @@ import {
   resetReleaseScratchDir,
   resolveDaemonReleasePaths,
   resolveReleasePaths,
+  runPrivileged,
   sealPublishedRelease,
 } from "./release-layout.ts";
 
@@ -259,4 +260,89 @@ test("resetReleaseScratchDir recreates an empty 0700 directory", async () => {
   } finally {
     await Deno.remove(root, { recursive: true });
   }
+});
+
+test("sealPublishedRelease throws when chmod fails after a successful chown", async () => {
+  const run: RunFn = (_command, args) =>
+    Promise.resolve({
+      success: !args.includes("chmod"),
+      stdout: "",
+      stderr: args.includes("chmod") ? "chmod denied" : "",
+    });
+  await assertRejects(
+    () =>
+      sealPublishedRelease(
+        "/var/lib/turbopanel/releases/rel",
+        "appuser",
+        run,
+      ),
+    Error,
+    "chmod denied",
+  );
+});
+
+test("sealPublishedRelease uses a default error when chmod is silent after chown", async () => {
+  const run: RunFn = (_command, args) =>
+    Promise.resolve({
+      success: !args.includes("chmod"),
+      stdout: "",
+      stderr: "",
+    });
+  await assertRejects(
+    () =>
+      sealPublishedRelease(
+        "/var/lib/turbopanel/releases/rel",
+        "appuser",
+        run,
+      ),
+    Error,
+    "Failed to chmod release",
+  );
+});
+
+test("sealPublishedRelease and removePublishedRelease use default errors when sudo is silent", async () => {
+  const silent: RunFn = () =>
+    Promise.resolve({ success: false, stdout: "", stderr: "" });
+  await assertRejects(
+    () =>
+      sealPublishedRelease(
+        "/var/lib/turbopanel/releases/rel",
+        "appuser",
+        silent,
+      ),
+    Error,
+    "Failed to chown release",
+  );
+  await assertRejects(
+    () => removePublishedRelease("/var/lib/turbopanel/releases/rel", silent),
+    Error,
+    "Failed to remove release",
+  );
+});
+
+test("removeReleaseScratchDir rethrows a non-NotFound error", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-scratch-err-" });
+  const paths = stubPaths(root);
+  const originalRemove = Deno.remove;
+  Deno.remove = () => Promise.reject(new TypeError("busy"));
+  try {
+    await assertRejects(
+      () => removeReleaseScratchDir(paths),
+      TypeError,
+      "busy",
+    );
+  } finally {
+    Deno.remove = originalRemove;
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test({
+  name: "runPrivileged captures stdout from a real command",
+  permissions: { read: true, run: true },
+  fn: async () => {
+    const result = await runPrivileged("/bin/echo", ["hello-release"]);
+    assertEquals(result.success, true);
+    assertEquals(result.stdout, "hello-release");
+  },
 });

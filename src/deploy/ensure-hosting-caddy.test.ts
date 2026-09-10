@@ -469,3 +469,75 @@ test({
     });
   },
 });
+
+test({
+  name: "ensureHostingCaddy rethrows when the caddy binary cannot be statted",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env, {
+        skipDiscovery: true,
+        forceMode: "production",
+      });
+      const originalStat = Deno.stat.bind(Deno);
+      const caddyPath = join(layout.runtimesDir, "caddy", "current", "caddy");
+      Deno.stat = ((path: string | URL) => {
+        if (String(path) === caddyPath) {
+          return Promise.reject(new Deno.errors.PermissionDenied("caddy"));
+        }
+        return originalStat(path);
+      }) as typeof Deno.stat;
+      try {
+        await assertRejects(
+          () =>
+            ensureHostingCaddy(layout, {
+              runCaddySetup: () => Promise.resolve(),
+            }),
+          Deno.errors.PermissionDenied,
+          "caddy",
+        );
+      } finally {
+        Deno.stat = originalStat;
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "ensureHostingCaddy rethrows when the current symlink cannot be removed",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env, {
+        skipDiscovery: true,
+        forceMode: "production",
+      });
+      const staleDir = join(layout.runtimesDir, "caddy", "stale-link");
+      const currentLink = join(layout.runtimesDir, "caddy", "current");
+      await Deno.mkdir(staleDir, { recursive: true });
+      await Deno.symlink(staleDir, currentLink);
+      const originalRemove = Deno.remove.bind(Deno);
+      Deno.remove = ((path: string | URL, opts?: Deno.RemoveOptions) => {
+        if (String(path) === currentLink) {
+          return Promise.reject(new Deno.errors.PermissionDenied("link"));
+        }
+        return originalRemove(path, opts);
+      }) as typeof Deno.remove;
+      try {
+        await assertRejects(
+          () =>
+            ensureHostingCaddy(layout, {
+              runCaddySetup: () => Promise.resolve(),
+              resolveArch: () => "amd64",
+              runCommand: mockDownloadCommands({}),
+            }),
+          Deno.errors.PermissionDenied,
+          "link",
+        );
+      } finally {
+        Deno.remove = originalRemove;
+      }
+    });
+  },
+});

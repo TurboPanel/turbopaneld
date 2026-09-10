@@ -55,6 +55,20 @@ test("composeHasContainerServices parses Compose scalar tag bodies", () => {
 `),
     true,
   );
+  assertEquals(
+    composeHasContainerServices(`services:
+  web:
+    image: nginx
+    tty: !reset true
+    stdin_open: !override false
+    restart: !reset unless-stopped
+    labels: !override
+      foo: bar
+    volumes: !reset
+      - /data
+`),
+    true,
+  );
 });
 
 test("resolveComposeModel parses docker compose config JSON", async () => {
@@ -194,6 +208,24 @@ test("validateComposeConfig delegates to docker compose config -q", async () => 
       ),
     Error,
     "compose invalid",
+  );
+});
+
+test("resolveComposeModel falls back when docker stderr is empty", async () => {
+  await assertRejects(
+    () =>
+      resolveComposeModel(
+        "proj",
+        ["/tmp/compose.yaml"],
+        mockRun(() => ({
+          success: false,
+          stdout: "",
+          stderr: "",
+          code: 1,
+        })),
+      ),
+    Error,
+    "docker compose config failed",
   );
 });
 

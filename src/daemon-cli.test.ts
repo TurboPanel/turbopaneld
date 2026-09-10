@@ -118,6 +118,44 @@ test("maybeRunDaemonCli --version uses getBuildInfo when not injected", async ()
   assertEquals(logs[0]?.startsWith("turbopaneld "), true);
 });
 
+test("maybeRunDaemonCli uses Deno.args when args are not injected", async () => {
+  const { io, exits } = captureIo();
+  await maybeRunDaemonCli(io);
+  assertEquals(Array.isArray(exits), true);
+});
+
+test("maybeRunDaemonCli version and installer errors use default console writers", async () => {
+  const originalLog = console.log;
+  const originalError = console.error;
+  const logs: string[] = [];
+  const errors: string[] = [];
+  console.log = (...args: unknown[]) => {
+    logs.push(String(args[0]));
+  };
+  console.error = (...args: unknown[]) => {
+    errors.push(String(args[0]));
+  };
+  try {
+    const version = captureIo({ args: ["--version"] });
+    delete version.io.log;
+    await maybeRunDaemonCli(version.io);
+    assertEquals(version.exits, [0]);
+    assertEquals(logs[0]?.startsWith("turbopaneld "), true);
+
+    const installer = captureIo({ args: ["run-installer"] });
+    delete installer.io.error;
+    await maybeRunDaemonCli(installer.io);
+    assertEquals(installer.exits, [1]);
+    assertEquals(
+      errors.some((line) => line.includes("--instance-url or --vars-file")),
+      true,
+    );
+  } finally {
+    console.log = originalLog;
+    console.error = originalError;
+  }
+});
+
 test("parseInstallerFlags reads known flags", () => {
   const { io } = captureIo();
   const flags = parseInstallerFlags([

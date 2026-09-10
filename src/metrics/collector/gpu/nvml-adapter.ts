@@ -133,14 +133,74 @@ function pciBusIdBuffer(pciBusId: string): Uint8Array {
   return new TextEncoder().encode(`${pciBusId}\0`);
 }
 
-/** Real `Deno.dlopen` binding. `null` when the library can't be opened. */
-export function openDefaultNvmlBinding(): NvmlBinding | null {
-  let lib: Deno.DynamicLibrary<typeof NVML_SYMBOLS>;
-  try {
-    lib = Deno.dlopen(NVML_LIBRARY, NVML_SYMBOLS);
-  } catch {
-    return null;
-  }
+/**
+ * Structural `libnvidia-ml.so.1` surface — the real `Deno.dlopen` result
+ * or a host-free test double. Extracted so buffer-decode / rc-check logic
+ * can run without a NVIDIA driver.
+ */
+export type NvmlLibrary = {
+  symbols: {
+    nvmlInit_v2: () => number;
+    nvmlShutdown: () => number;
+    nvmlDeviceGetHandleByPciBusId_v2: (
+      busId: Uint8Array,
+      out: Uint8Array,
+    ) => number;
+    nvmlDeviceGetUtilizationRates: (
+      handle: NvmlDeviceHandle,
+      out: Uint8Array,
+    ) => number;
+    nvmlDeviceGetMemoryInfo_v2: (
+      handle: NvmlDeviceHandle,
+      out: Uint8Array,
+    ) => number;
+    nvmlDeviceGetTemperature: (
+      handle: NvmlDeviceHandle,
+      sensor: number,
+      out: Uint8Array,
+    ) => number;
+    nvmlDeviceGetPowerUsage: (
+      handle: NvmlDeviceHandle,
+      out: Uint8Array,
+    ) => number;
+    nvmlDeviceGetPcieThroughput: (
+      handle: NvmlDeviceHandle,
+      counter: number,
+      out: Uint8Array,
+    ) => number;
+    nvmlDeviceGetViolationStatus: (
+      handle: NvmlDeviceHandle,
+      policy: number,
+      out: Uint8Array,
+    ) => number;
+    nvmlDeviceGetTotalEccErrors: (
+      handle: NvmlDeviceHandle,
+      bitType: number,
+      counterType: number,
+      out: Uint8Array,
+    ) => number;
+    nvmlDeviceGetFieldValues: (
+      handle: NvmlDeviceHandle,
+      count: number,
+      out: Uint8Array,
+    ) => number;
+    nvmlDeviceGetRemappedRows: (
+      handle: NvmlDeviceHandle,
+      corr: Uint8Array,
+      unc: Uint8Array,
+      pending: Uint8Array,
+      failure: Uint8Array,
+    ) => number;
+    nvmlDeviceGetRetiredPagesPendingStatus: (
+      handle: NvmlDeviceHandle,
+      out: Uint8Array,
+    ) => number;
+  };
+  close: () => void;
+};
+
+/** Wrap a loaded NVML library (or test double) as {@link NvmlBinding}. */
+export function createNvmlBindingFromLibrary(lib: NvmlLibrary): NvmlBinding {
   const sym = lib.symbols;
 
   return {
@@ -288,6 +348,17 @@ export function openDefaultNvmlBinding(): NvmlBinding | null {
       return new DataView(out.buffer).getUint32(0, true) !== 0;
     },
   };
+}
+
+/** Real `Deno.dlopen` binding. `null` when the library can't be opened. */
+export function openDefaultNvmlBinding(): NvmlBinding | null {
+  try {
+    return createNvmlBindingFromLibrary(
+      Deno.dlopen(NVML_LIBRARY, NVML_SYMBOLS) as unknown as NvmlLibrary,
+    );
+  } catch {
+    return null;
+  }
 }
 
 function safeCall<T>(fn: () => T | null): T | null {

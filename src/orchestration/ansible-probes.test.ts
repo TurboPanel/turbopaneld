@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import { afterAll, beforeAll, describe, it } from "@std/testing/bdd";
 import {
   applyOrchestrationEnv,
@@ -34,5 +34,24 @@ describe("ansible binary probes", () => {
 
   it("ansibleLintWorks returns false when ansible-lint is absent", async () => {
     assertEquals(await ansible.ansibleLintWorks(), false);
+  });
+
+  it("ansiblePlaybookWorks rethrows non-NotFound stat errors", async () => {
+    const { ANSIBLE_PLAYBOOK_BIN } = await import("./paths.ts");
+    const originalStat = Deno.stat;
+    Deno.stat = ((path) => {
+      if (String(path) === ANSIBLE_PLAYBOOK_BIN) {
+        return Promise.reject(new Deno.errors.PermissionDenied("denied"));
+      }
+      return originalStat.call(Deno, path);
+    }) as typeof Deno.stat;
+    try {
+      await assertRejects(
+        () => ansible.ansiblePlaybookWorks(),
+        Deno.errors.PermissionDenied,
+      );
+    } finally {
+      Deno.stat = originalStat;
+    }
   });
 });

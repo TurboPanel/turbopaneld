@@ -295,3 +295,41 @@ test("resolveUpdate surfaces fetch cause in MalformedManifestError", async () =>
     restore();
   }
 });
+
+test("resolveUpdate rejects unsupported CPU architectures", async () => {
+  const restore = installFetch((url) => {
+    if (url.endsWith("/channels.json")) {
+      return Response.json({
+        schema: 1,
+        defaultChannel: "trunk",
+        channels: {
+          trunk: {
+            manifestUrl: "https://dl.trbp.nl/channels/trunk/manifest.json",
+          },
+        },
+      });
+    }
+    if (url.endsWith("/manifest.json")) {
+      return Response.json(channelManifest());
+    }
+    return new Response("missing", { status: 404 });
+  });
+  const original = Deno.build;
+  Object.defineProperty(Deno, "build", {
+    configurable: true,
+    value: { ...original, arch: "riscv64" },
+  });
+  try {
+    await assertRejects(
+      () => resolveUpdate({ app: "daemon", channel: "trunk" }, {}),
+      MalformedManifestError,
+      "Unsupported CPU architecture",
+    );
+  } finally {
+    Object.defineProperty(Deno, "build", {
+      configurable: true,
+      value: original,
+    });
+    restore();
+  }
+});

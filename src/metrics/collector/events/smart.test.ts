@@ -39,6 +39,15 @@ test("parseSmartctlJson decodes passed/nvme critical-warning bits", () => {
   assertEquals(media?.nvmeCritical, true);
   assertEquals(media?.nvmeMediaError, true);
   assertEquals(parseSmartctlJson("not json"), null);
+  assertEquals(parseSmartctlJson("null"), null);
+  assertEquals(parseSmartctlJson("42"), null);
+  // JSON arrays are objects, so they degrade to the healthy-default shape
+  // rather than null (the `!json || typeof json !== "object"` gate).
+  assertEquals(parseSmartctlJson("[]"), {
+    critical: false,
+    nvmeCritical: false,
+    nvmeMediaError: false,
+  });
 });
 
 const DISK: BlockDeviceTopology = {

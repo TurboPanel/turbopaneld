@@ -25,6 +25,23 @@ const AMBIENT_GIT = await ambientCheckoutIsGitRepo(
  */
 const test = Deno.test.bind(Deno);
 
+test("stampBuildInfo leaves sourceUrl alone when the field is absent", () => {
+  const source = [
+    "export const BUILD_INFO = {",
+    '  commit: "oldsha",',
+    '  buildId: "old-build",',
+    '  builtAt: "2020-01-01T00:00:00.000Z",',
+    "};",
+  ].join("\n");
+  const stamped = stampBuildInfo(source, {
+    commit: `${FULL_SHA}+99`,
+    buildId: "dev-abcdef0+99",
+    builtAt: "2026-08-25T00:00:00.000Z",
+  });
+  assertEquals(stamped.includes("sourceUrl"), false);
+  assertEquals(stamped.includes(`commit: "${FULL_SHA}+99"`), true);
+});
+
 test("stampBuildInfo replaces commit, buildId, and builtAt", () => {
   const source = [
     "export const BUILD_INFO = {",
@@ -123,6 +140,25 @@ test("runCompileAll throws when the compile task fails", async () => {
     Error,
     "deno task compile:all exited 7",
   );
+});
+
+test("runReleaseDevOverlay uses gitShortSha when gitCommit is omitted", async () => {
+  const catalogs: Array<{ commit: string }> = [];
+  const original = 'commit: "old"\nbuildId: "old"\nbuiltAt: "old"\n';
+  await runReleaseDevOverlay({
+    gitShortSha: () => Promise.resolve(FULL_SHA),
+    sourceFingerprint: () => Promise.resolve(FULL_SHA),
+    now: () => new Date("2026-01-01T00:00:00.000Z"),
+    readBuildInfo: () => Promise.resolve(original),
+    writeBuildInfo: () => Promise.resolve(),
+    compileAll: () => Promise.resolve(),
+    writeCatalog: (identity) => {
+      catalogs.push({ commit: identity.commit });
+      return Promise.resolve();
+    },
+    log: () => {},
+  });
+  assertEquals(catalogs[0]?.commit, `${FULL_SHA}+1767225600`);
 });
 
 test("runReleaseDevOverlay stamps, compiles, catalogs, then restores", async () => {

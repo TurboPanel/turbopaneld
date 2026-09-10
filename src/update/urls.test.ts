@@ -32,6 +32,7 @@ test("rootCatalogUrl joins channels.json onto the overlay origin", () => {
     rootCatalogUrl("https://turbopanel.dev/downloads/daemon"),
     "https://turbopanel.dev/downloads/daemon/channels.json",
   );
+  assertEquals(rootCatalogUrl(), `${DL_BASE_URL}/channels.json`);
 });
 
 test("catalogAllowsHttp is true only for http: catalog URLs", () => {

@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import { InstallerPresentedFailure } from "../src/orchestration/install-presenter-context.ts";
 import { runBootstrapOrchestrationCli } from "./bootstrap-orchestration.ts";
 
@@ -51,4 +51,46 @@ test("runBootstrapOrchestrationCli succeeds without exiting", async () => {
     },
   });
   assertEquals(exits, []);
+});
+
+test("runBootstrapOrchestrationCli uses the default error writer", async () => {
+  const originalError = console.error;
+  const errors: string[] = [];
+  console.error = ((message: unknown) => {
+    errors.push(String(message));
+  }) as typeof console.error;
+  try {
+    await runBootstrapOrchestrationCli({
+      run: () => Promise.reject(new TypeError("uv missing")),
+      exit: () => {},
+    });
+  } finally {
+    console.error = originalError;
+  }
+  assertEquals(errors[0]?.includes("[bootstrap] uv missing"), true);
+});
+
+test("runBootstrapOrchestrationCli defaults to Deno.exit on failure", async () => {
+  const originalExit = Deno.exit;
+  const originalError = console.error;
+  const exits: number[] = [];
+  Deno.exit = ((code?: number) => {
+    exits.push(code ?? 0);
+    throw new TypeError(`exit ${code}`);
+  }) as typeof Deno.exit;
+  console.error = () => {};
+  try {
+    await assertRejects(
+      () =>
+        runBootstrapOrchestrationCli({
+          run: () => Promise.reject(new TypeError("uv missing")),
+        }),
+      TypeError,
+      "exit 1",
+    );
+    assertEquals(exits, [1]);
+  } finally {
+    Deno.exit = originalExit;
+    console.error = originalError;
+  }
 });

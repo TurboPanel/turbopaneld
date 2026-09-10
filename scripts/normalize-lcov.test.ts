@@ -1,6 +1,7 @@
 import { assertEquals, assertRejects } from "@std/assert";
 import {
   absoluteSourceFiles,
+  dropAbsoluteRecords,
   normalizeLcov,
   runNormalizeLcov,
   sourceFiles,
@@ -82,6 +83,31 @@ test("absoluteSourceFiles is empty for a fully normalized report", () => {
   assertEquals(absoluteSourceFiles("SF:src/a.ts\nSF:scripts/b.ts"), []);
 });
 
+test("dropAbsoluteRecords omits sibling/out-of-repo records and keeps relative ones", () => {
+  const text = [
+    "TN:",
+    "SF:src/a.ts",
+    "DA:1,1",
+    "end_of_record",
+    "TN:",
+    "SF:/home/vagrant/turbopanel/src/daemon/metrics/contract.ts",
+    "DA:1,0",
+    "end_of_record",
+    "TN:",
+    "SF:file:///elsewhere/src/c.ts",
+    "DA:2,0",
+    "end_of_record",
+  ].join("\n");
+  const out = dropAbsoluteRecords(text);
+  assertEquals(sourceFiles(out), ["src/a.ts"]);
+  assertEquals(out.includes("end_of_record"), true);
+});
+
+test("dropAbsoluteRecords leaves a fully relative report unchanged", () => {
+  const text = "TN:\nSF:src/a.ts\nDA:1,1\nend_of_record\n";
+  assertEquals(dropAbsoluteRecords(text), text);
+});
+
 function captureCli() {
   const exits: number[] = [];
   const errors: string[] = [];
@@ -154,15 +180,37 @@ test("runNormalizeLcov keeps cwd when realPath fails and rewrites the report", a
   assertEquals(logs[0]?.includes("OK"), true);
 });
 
-test("runNormalizeLcov exits when SF paths stay absolute", async () => {
-  const { io, exits, errors } = captureCli();
+test("runNormalizeLcov drops out-of-repo SF records then fails when nothing in src/ remains", async () => {
+  const { io, exits, errors, written } = captureCli();
   await runNormalizeLcov({
     ...io,
     readTextFile: () =>
       Promise.resolve("SF:/elsewhere/src/a.ts\nend_of_record"),
   });
   assertEquals(exits, [1]);
-  assertEquals(errors.some((line) => line.includes("still absolute")), true);
+  assertEquals(errors.some((line) => line.includes("no SF:src/")), true);
+  assertEquals(written.length, 1);
+});
+
+test("runNormalizeLcov drops sibling-checkout SF records and keeps in-repo files", async () => {
+  const { io, exits, logs, written } = captureCli();
+  await runNormalizeLcov({
+    ...io,
+    readTextFile: () =>
+      Promise.resolve(
+        [
+          "SF:/repo/src/a.ts",
+          "DA:1,1",
+          "end_of_record",
+          "SF:/elsewhere/src/b.ts",
+          "DA:1,0",
+          "end_of_record",
+        ].join("\n"),
+      ),
+  });
+  assertEquals(exits, []);
+  assertEquals(sourceFiles(written[0]!.text), ["src/a.ts"]);
+  assertEquals(logs.some((line) => line.includes("dropped 1")), true);
 });
 
 test("runNormalizeLcov exits when no src/ entry remains", async () => {
@@ -173,4 +221,57 @@ test("runNormalizeLcov exits when no src/ entry remains", async () => {
   });
   assertEquals(exits, [1]);
   assertEquals(errors.some((line) => line.includes("no SF:src/")), true);
+});
+
+test("runNormalizeLcov skips rewrite when the report is already relative", async () => {
+  const { io, exits, logs, written } = captureCli();
+  await runNormalizeLcov({
+    ...io,
+    readTextFile: () => Promise.resolve("SF:src/a.ts\nDA:1,1\nend_of_record"),
+  });
+  assertEquals(written, []);
+  assertEquals(exits, []);
+  assertEquals(logs[0]?.includes("1 source files"), true);
+});
+
+test("runNormalizeLcov fails when every SF record is out-of-repo", async () => {
+  const { io, exits, errors } = captureCli();
+  const lines = Array.from(
+    { length: 21 },
+    (_, i) => `SF:/elsewhere/src/f${i}.ts\nend_of_record`,
+  );
+  await runNormalizeLcov({
+    ...io,
+    readTextFile: () => Promise.resolve(lines.join("\n")),
+  });
+  assertEquals(exits, [1]);
+  assertEquals(errors.some((line) => line.includes("no SF:src/")), true);
+});
+
+test({
+  name: "runNormalizeLcov uses Deno defaults to rewrite a real report file",
+  permissions: { read: true, write: true, env: true },
+  async fn() {
+    const dir = await Deno.makeTempDir({ prefix: "tp-lcov-" });
+    const target = `${dir}/lcov.info`;
+    const cwd = Deno.cwd();
+    await Deno.writeTextFile(
+      target,
+      `SF:${cwd}/src/a.ts\nDA:1,1\nend_of_record\n`,
+    );
+    const exits: number[] = [];
+    try {
+      await runNormalizeLcov({
+        args: [target],
+        exit: (code) => {
+          exits.push(code);
+        },
+      });
+      assertEquals(exits, []);
+      const rewritten = await Deno.readTextFile(target);
+      assertEquals(sourceFiles(rewritten), ["src/a.ts"]);
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
 });

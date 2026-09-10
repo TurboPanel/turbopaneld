@@ -1,5 +1,11 @@
 import { assertEquals } from "@std/assert";
 import { createFakeClock, flushMicrotasks } from "../testing/fake-clock.ts";
+import { withTempLayout } from "../testing/temp-layout.ts";
+import { resolveLayout } from "../paths/layout.ts";
+import {
+  orchestratorApiCnfPath,
+  orchestratorConfigDir,
+} from "../managed/paths.ts";
 import type { OrchestratorProblem } from "../managed/orchestrator-api.ts";
 import { type ManagedHaEventMessage, ManagedHaObserver } from "./ha-observe.ts";
 
@@ -142,6 +148,48 @@ test("ManagedHaObserver loads Orchestrator credentials when api omits them", asy
   });
   await observer.poll();
   assertEquals(sent.length === 0 || sent[0]?.managedId === MANAGED_ID, true);
+});
+
+test({
+  name:
+    "ManagedHaObserver loads Orchestrator credentials from the layout when api omits them",
+  permissions: { env: true, read: true, write: true },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env);
+      await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
+      await Deno.writeTextFile(
+        orchestratorApiCnfPath(layout),
+        "[client]\nuser=orch-admin\npassword=orch-secret\n",
+      );
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      const sent: ManagedHaEventMessage[] = [];
+      try {
+        const observer = new ManagedHaObserver({
+          send: (message) => {
+            sent.push(message);
+          },
+          isStackPresent: () => Promise.resolve(true),
+          api: {
+            fetch: () =>
+              Promise.resolve(
+                problemResponse([{
+                  clusterAlias: MANAGED_ID,
+                  problems: ["DeadPrimary"],
+                }]),
+              ),
+          },
+        });
+        await observer.poll();
+        assertEquals(sent.length, 1);
+        assertEquals(sent[0]?.managedId, MANAGED_ID);
+      } finally {
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+      }
+    });
+  },
 });
 
 test("ManagedHaObserver skips absent stack, invalid aliases, and duplicate keys", async () => {

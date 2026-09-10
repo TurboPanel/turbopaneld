@@ -2,12 +2,15 @@ import { assertEquals, assertThrows } from "@std/assert";
 import {
   authSocketPluginPresentSql,
   changeReplicationSourceSql,
+  connectionCensusSql,
   createClientAccountSql,
   createDatabaseSql,
   createNetworkAccountSql,
   createOrAlterAccountSql,
+  disableReadOnlySql,
   dropAccountSql,
   dropDatabaseSql,
+  enforceReadOnlySql,
   ensureProxySqlMonitorAccountSql,
   ensureReplicationAccountSql,
   ensureSocketAdminSql,
@@ -210,6 +213,33 @@ test("replication and status SQL builders", () => {
 
 test("runtime defaultDatabase is a non-system application schema", () => {
   assertEquals(mysqlManagedEngineRuntime.defaultDatabase, "appdb");
+});
+
+test("standby seed window and census SQL stay credential-free", () => {
+  assertEquals(disableReadOnlySql().includes("super_read_only = OFF"), true);
+  assertEquals(enforceReadOnlySql().includes("super_read_only = ON"), true);
+  assertEquals(
+    connectionCensusSql(),
+    "SHOW GLOBAL STATUS LIKE 'Threads_connected'; SELECT @@max_connections;",
+  );
+  assertEquals(
+    dropAccountSql("app", ["203.0.113.4"]).includes("`app`@'203.0.113.4'"),
+    true,
+  );
+  assertEquals(
+    grantRootSql("root", "203.0.113.4").includes("'203.0.113.4'"),
+    true,
+  );
+  assertEquals(
+    createNetworkAccountSql("root", "x", ["203.0.113.4"]).includes(
+      "'203.0.113.4'",
+    ),
+    true,
+  );
+  assertEquals(
+    ensureSocketAdminSql("mysqladmin").includes("`mysqladmin`@'localhost'"),
+    true,
+  );
 });
 
 test("account builders scope cross-host client sources per host", () => {

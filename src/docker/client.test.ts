@@ -418,3 +418,85 @@ test("DockerClient #fetch prefixes paths that lack a slash", async () => {
   assertEquals(seen[0]?.startsWith(`${DOCKER_HTTP_ORIGIN}/`), true);
   client.close();
 });
+
+test("DockerClient listContainers encodes all=false on the success path", async () => {
+  const seen: string[] = [];
+  const client = new DockerClient(undefined, {
+    fetchImpl: (url) => {
+      seen.push(url);
+      return Promise.resolve(jsonResponse([]));
+    },
+  });
+  assertEquals(await client.listContainers(), []);
+  assertEquals(seen[0], `${DOCKER_HTTP_ORIGIN}/containers/json?all=false`);
+  client.close();
+});
+
+test("DockerClient uses the unix HttpClient fetch when fetchImpl is omitted", async () => {
+  const original = globalThis.fetch;
+  const seen: string[] = [];
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    writable: true,
+    value: (input: RequestInfo | URL) => {
+      const url = typeof input === "string"
+        ? input
+        : input instanceof URL
+        ? input.href
+        : input.url;
+      seen.push(url);
+      return Promise.resolve(new Response("OK", { status: 200 }));
+    },
+  });
+  try {
+    let createdPath = "";
+    const client = new DockerClient("/tmp/docker.sock", {
+      createHttpClient: (path) => {
+        createdPath = path;
+        return {
+          close() {},
+          [Symbol.dispose]() {},
+        } as unknown as Deno.HttpClient;
+      },
+    });
+    assertEquals(await client.ping(), true);
+    assertEquals(createdPath, "/tmp/docker.sock");
+    assertEquals(seen[0], `${DOCKER_HTTP_ORIGIN}/_ping`);
+    client.close();
+  } finally {
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      writable: true,
+      value: original,
+    });
+  }
+});
+
+test("DockerClient streamEvents swallows releaseLock errors", async () => {
+  const proto = ReadableStreamDefaultReader.prototype;
+  const original = proto.releaseLock;
+  proto.releaseLock = function releaseLock() {
+    throw new TypeError("already closed");
+  };
+  try {
+    const client = new DockerClient(undefined, {
+      fetchImpl: () =>
+        Promise.resolve(
+          new Response(
+            '{"Type":"container","Action":"start","Actor":{"ID":"a"}}\n',
+            { status: 200 },
+          ),
+        ),
+    });
+    const seen: DockerEvent[] = [];
+    for await (
+      const item of client.streamEvents(new AbortController().signal)
+    ) {
+      seen.push(item);
+    }
+    assertEquals(seen.length, 1);
+    client.close();
+  } finally {
+    proto.releaseLock = original;
+  }
+});

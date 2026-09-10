@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import { parse } from "yaml";
 import { DAEMON_COMPOSE_FILENAME } from "./compose-files.ts";
@@ -309,4 +309,55 @@ test({
       await Deno.remove(dir, { recursive: true });
     }
   },
+});
+
+test({
+  name:
+    "writeDaemonComposeLayer rethrows when an empty overlay file cannot be removed",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    const dir = await Deno.makeTempDir({ prefix: "tp-overlay-rm-" });
+    const originalRemove = Deno.remove.bind(Deno);
+    try {
+      const path = join(dir, DAEMON_COMPOSE_FILENAME);
+      await Deno.writeTextFile(path, "services: {}\n");
+      Deno.remove = ((target: string | URL, opts?: Deno.RemoveOptions) => {
+        if (String(target) === path) {
+          return Promise.reject(new Deno.errors.PermissionDenied("overlay"));
+        }
+        return originalRemove(target, opts);
+      }) as typeof Deno.remove;
+      await assertRejects(
+        () => writeDaemonComposeLayer(dir, {}),
+        Deno.errors.PermissionDenied,
+        "overlay",
+      );
+    } finally {
+      Deno.remove = originalRemove;
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+});
+
+test("mergeComposeOverlayFragments treats nested arrays of different lengths as distinct", () => {
+  const merged = mergeComposeOverlayFragments([
+    {
+      services: {
+        web: {
+          volumes: [{ items: [1, 2] }],
+        },
+      },
+    },
+    {
+      services: {
+        web: {
+          volumes: [{ items: [1] }, { items: [1, 2] }],
+        },
+      },
+    },
+  ]);
+  assertEquals(merged.services?.web?.volumes, [
+    { items: [1, 2] },
+    { items: [1] },
+  ]);
 });

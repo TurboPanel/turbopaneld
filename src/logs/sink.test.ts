@@ -3,7 +3,7 @@ import { withTempLayout } from "../testing/temp-layout.ts";
 import { commandLogSpoolDir } from "../paths/layout.ts";
 import { commandLogSpoolPath } from "./spool.ts";
 import { createCommandOutputSink } from "./sink.ts";
-import { TRUNCATION_MARKER } from "./uploader.ts";
+import { CommandLogUploader, TRUNCATION_MARKER } from "./uploader.ts";
 import { COMMAND_LOG_PHASES } from "./contracts.ts";
 
 /**
@@ -319,5 +319,109 @@ test("multiline TLS private key material never reaches the spool", async () => {
     const uploaded = sent.map((chunk) => chunk.bytes).join("");
     assertEquals(uploaded.includes("PLAINTEXT+not+for+disk"), false);
     assertEquals(uploaded.includes("VAR_LINE_TWO_SECRET"), false);
+  });
+});
+
+test("finalize warns when spool cleanup fails after a successful upload", async () => {
+  await withTempLayout(async (fixture) => {
+    const sink = createCommandOutputSink({
+      commandId: "cmd-sink-cleanup",
+      phase: COMMAND_LOG_PHASES.PREPARE,
+      layout: { daemonStateDir: fixture.dirs.stateDir },
+      send: (params) => Promise.resolve({ nextSeq: params.seq + 1 }),
+    });
+    sink.onLine("stdout", "acked");
+
+    const originalRemove = Deno.remove;
+    Deno.remove = ((path, options) => {
+      if (String(path).endsWith("cmd-sink-cleanup.log")) {
+        return Promise.reject(new TypeError("busy"));
+      }
+      return originalRemove.call(Deno, path, options);
+    }) as typeof Deno.remove;
+    try {
+      await sink.finalize();
+    } finally {
+      Deno.remove = originalRemove;
+    }
+  });
+});
+
+test("a throwing uploader leaves the spool for the orphan sweep", async () => {
+  await withTempLayout(async (fixture) => {
+    const originalUpload = CommandLogUploader.prototype.upload;
+    CommandLogUploader.prototype.upload = () => {
+      throw new TypeError("upload exploded");
+    };
+    try {
+      const sink = createCommandOutputSink({
+        commandId: "cmd-sink-throw",
+        phase: COMMAND_LOG_PHASES.PREPARE,
+        layout: { daemonStateDir: fixture.dirs.stateDir },
+        send: () => Promise.resolve({ nextSeq: 1 }),
+      });
+      sink.onLine("stdout", "line one");
+      await sink.finalize();
+
+      const spoolPath = commandLogSpoolPath(
+        commandLogSpoolDir({ daemonStateDir: fixture.dirs.stateDir }),
+        "cmd-sink-throw",
+      );
+      assertStringIncludes(await Deno.readTextFile(spoolPath), "line one");
+    } finally {
+      CommandLogUploader.prototype.upload = originalUpload;
+    }
+  });
+});
+
+test("onLine after finalize is ignored", async () => {
+  await withTempLayout(async (fixture) => {
+    const sent: SentChunk[] = [];
+    const sink = createCommandOutputSink({
+      commandId: "cmd-sink-late",
+      phase: COMMAND_LOG_PHASES.PREPARE,
+      layout: { daemonStateDir: fixture.dirs.stateDir },
+      send: (params) => {
+        sent.push(params);
+        return Promise.resolve({ nextSeq: params.seq + 1 });
+      },
+    });
+    sink.onLine("stdout", "before");
+    await sink.finalize();
+    sink.onLine("stdout", "after-finalize");
+    assertEquals(parseEvents(sent).map((event) => event.message), ["before"]);
+  });
+});
+
+test("sink accepts an explicit spoolDir and flush clock", async () => {
+  await withTempLayout(async (fixture) => {
+    const sent: SentChunk[] = [];
+    let clock = 1_000;
+    const spoolDir = `${fixture.dirs.stateDir}/custom-spool`;
+    const sink = createCommandOutputSink({
+      commandId: "cmd-sink-opts",
+      phase: COMMAND_LOG_PHASES.PREPARE,
+      layout: { daemonStateDir: fixture.dirs.stateDir },
+      spoolDir,
+      flushIntervalMs: 50,
+      flushBytes: 10_000,
+      now: () => clock,
+      send: (params) => {
+        sent.push(params);
+        return Promise.resolve({ nextSeq: params.seq + 1 });
+      },
+    });
+
+    sink.onLine("stdout", "small");
+    clock += 100;
+    sink.onLine("stdout", "later");
+    await sink.finalize();
+
+    const events = parseEvents(sent);
+    assertEquals(events.map((event) => event.message), ["small", "later"]);
+    assertEquals(
+      await Deno.stat(`${spoolDir}/cmd-sink-opts.log`).catch(() => null),
+      null,
+    );
   });
 });

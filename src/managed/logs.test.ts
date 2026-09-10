@@ -108,3 +108,16 @@ test("collectManagedLogs throws when compose logs fails", async () => {
     "compose unavailable",
   );
 });
+
+test("collectManagedLogs uses a fallback message when stderr is empty", async () => {
+  await assertRejects(
+    () =>
+      collectManagedLogs(
+        "managed_logs_4",
+        undefined,
+        () => Promise.resolve(fail("")),
+      ),
+    Error,
+    "compose logs failed",
+  );
+});

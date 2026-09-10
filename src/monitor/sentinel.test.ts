@@ -414,6 +414,85 @@ test("sentinel logs when container collection throws during change handling", as
   sentinel.stop();
 });
 
+test("sentinel logs non-Error throws from change handling and callbacks", async () => {
+  class ThrowingListMonitor extends FakeDockerMonitor {
+    override getContainers(): ContainerSummary[] {
+      throw "collect exploded";
+    }
+  }
+
+  const dockerMonitor = new ThrowingListMonitor();
+  const sentinel = createSentinel({
+    dockerMonitor: dockerMonitor as unknown as DockerMonitor,
+  });
+  const controller = new AbortController();
+  let calls = 0;
+  sentinel.onTransition(() => {
+    calls += 1;
+    throw "callback exploded";
+  });
+
+  dockerMonitor.seed(makeSummary(), makeInspect());
+  sentinel.start(controller.signal);
+  await sentinel.waitForReady();
+
+  dockerMonitor.emitChange({
+    containerId: CONTAINER_ID,
+    summary: makeSummary(),
+    inspect: makeInspect(),
+    event: {
+      Type: "container",
+      Action: "die",
+      Actor: { ID: CONTAINER_ID },
+    } as DockerEvent,
+    removed: true,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assertEquals(calls, 0);
+
+  const okMonitor = new FakeDockerMonitor();
+  const okSentinel = createSentinel({
+    dockerMonitor: okMonitor as unknown as DockerMonitor,
+  });
+  okSentinel.onTransition(() => {
+    calls += 1;
+    throw "callback exploded";
+  });
+  okMonitor.seed(makeSummary(), makeInspect());
+  const okController = new AbortController();
+  okSentinel.start(okController.signal);
+  await okSentinel.waitForReady();
+  okMonitor.emitChange({
+    containerId: CONTAINER_ID,
+    summary: makeSummary(),
+    inspect: makeInspect(),
+    event: {
+      Type: "container",
+      Action: "destroy",
+      Actor: { ID: CONTAINER_ID },
+    } as DockerEvent,
+    removed: true,
+  });
+  await waitFor(
+    "non-error callback invoked",
+    () => calls > 0 ? calls : undefined,
+  );
+  assertEquals(calls, 1);
+  okController.abort();
+  okSentinel.stop();
+  controller.abort();
+  sentinel.stop();
+});
+
+test("sentinel without a docker monitor still becomes ready", async () => {
+  const sentinel = createSentinel();
+  const controller = new AbortController();
+  sentinel.start(controller.signal);
+  await sentinel.waitForReady();
+  controller.abort();
+  sentinel.stop();
+});
+
 test("sentinel tolerates throwing transition callbacks on real transitions", async () => {
   const dockerMonitor = new FakeDockerMonitor();
   const sentinel = createSentinel({

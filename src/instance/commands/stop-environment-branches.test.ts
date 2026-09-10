@@ -292,3 +292,45 @@ test({
     }
   },
 });
+
+test({
+  name:
+    "handleEnvironmentStop continues when native-app teardown cannot list units",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-stop-native-apps-" });
+    const previous = snapshotEnv();
+    const stateDir = join(root, "state");
+    const configDir = join(root, "config");
+    await Deno.mkdir(configDir, { recursive: true });
+    // nativeAppConfigDir is <configDir>/node-apps — a file here makes readDir
+    // throw something other than NotFound, which the stop handler swallows.
+    await Deno.writeTextFile(join(configDir, "node-apps"), "not a directory");
+    Deno.env.set("TURBOPANEL_STATE_DIR", stateDir);
+    Deno.env.set("TURBOPANEL_CONFIG_DIR", configDir);
+
+    try {
+      const result = await handleEnvironmentStop(
+        {
+          environmentId: "envstop06",
+          projectId: "proj-1",
+          projectName: "tp-demo-envstop6",
+        },
+        new Date().toISOString(),
+        {
+          runDocker: () =>
+            Promise.resolve({
+              success: true,
+              stdout: "",
+              stderr: "",
+              code: 0,
+            }),
+        },
+      );
+      assertEquals(result.summary.includes("already stopped"), true);
+    } finally {
+      restoreEnv(previous);
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});

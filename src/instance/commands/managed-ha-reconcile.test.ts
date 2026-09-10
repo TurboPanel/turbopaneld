@@ -631,3 +631,79 @@ test({
     });
   },
 });
+
+test({
+  name:
+    "handleManagedHaReconcile swallows cluster-alias failures after register",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env);
+      await seedOrchestratorHostPrep(layout);
+      applyLayoutEnv(fixture);
+      try {
+        const result = await handleManagedHaReconcile(
+          presentPayload(),
+          new Date().toISOString(),
+          {
+            runDocker: fakeRunWithRunningOrchestrator(),
+            ensureDocker: () => Promise.resolve(),
+            decryptSecrets: decryptSecretsEcho,
+            orchestratorApi: {
+              fetch: (url) => {
+                if (url.includes("/api/set-cluster-alias/")) {
+                  return Promise.reject(new Error("alias rejected"));
+                }
+                return Promise.resolve(new Response("", { status: 200 }));
+              },
+            },
+          },
+        );
+        assertEquals(result.registeredClusters, [MANAGED_ID]);
+      } finally {
+        clearLayoutEnv();
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleManagedHaReconcile materializes org TLS when decryptSecrets is set",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedOrchestratorHostPrep(resolveLayout(fixture.env));
+      applyLayoutEnv(fixture);
+      const privatePem =
+        "-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----\n";
+      try {
+        const result = await handleManagedHaReconcile(
+          presentPayload({
+            clusters: [],
+            orgTlsMaterial: {
+              certificatePem:
+                "-----BEGIN CERTIFICATE-----\nLEAF\n-----END CERTIFICATE-----\n",
+              privateKeyEnvelope: "tpdaemon.v1.server.KEYID.ciphertext",
+              caCertPem:
+                "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n",
+            },
+          }),
+          new Date().toISOString(),
+          {
+            runDocker: fakeRunWithRunningOrchestrator(),
+            ensureDocker: () => Promise.resolve(),
+            decryptSecrets: (ciphertexts) =>
+              Promise.resolve(ciphertexts.map(() => privatePem)),
+            orchestratorApi: {
+              fetch: () => Promise.resolve(new Response("", { status: 200 })),
+            },
+          },
+        );
+        assertEquals(result.restarted, true);
+      } finally {
+        clearLayoutEnv();
+      }
+    });
+  },
+});

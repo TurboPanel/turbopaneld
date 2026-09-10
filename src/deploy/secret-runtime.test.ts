@@ -462,3 +462,77 @@ test({
     }
   },
 });
+
+test({
+  name: "writeSecretFiles ignores a NotFound chmod on the secret file parent",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-secret-chmod-nf-" });
+    const layout = { runDir: join(root, "run") };
+    const original = Deno.chmod;
+    let secretDirChmods = 0;
+    Deno.chmod = (path, mode) => {
+      const target = String(path);
+      if (!target.endsWith("web--TOKEN") && !target.endsWith(".tmp")) {
+        secretDirChmods += 1;
+        if (secretDirChmods >= 2) {
+          return Promise.reject(new Deno.errors.NotFound("gone"));
+        }
+      }
+      return original.call(Deno, path, mode);
+    };
+    try {
+      await writeSecretFiles(layout, "proj", "env", [{
+        relativePath: "web--TOKEN",
+        plaintext: "x",
+      }]);
+      const path = join(
+        layout.runDir,
+        "deployments",
+        "proj",
+        "env",
+        "secrets",
+        "web--TOKEN",
+      );
+      assertEquals(await Deno.readTextFile(path), "x");
+    } finally {
+      Deno.chmod = original;
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});
+
+test({
+  name: "writeSecretFiles rethrows a non-NotFound chmod on the file parent",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-secret-chmod-atomic-" });
+    const layout = { runDir: join(root, "run") };
+    const original = Deno.chmod;
+    let secretDirChmods = 0;
+    Deno.chmod = (path, mode) => {
+      const target = String(path);
+      if (!target.endsWith("web--TOKEN") && !target.endsWith(".tmp")) {
+        secretDirChmods += 1;
+        if (secretDirChmods >= 2) {
+          return Promise.reject(new Deno.errors.PermissionDenied("atomic"));
+        }
+      }
+      return original.call(Deno, path, mode);
+    };
+    try {
+      await assertRejects(
+        () =>
+          writeSecretFiles(layout, "proj", "env", [{
+            relativePath: "web--TOKEN",
+            plaintext: "x",
+          }]),
+        Deno.errors.PermissionDenied,
+        "atomic",
+      );
+    } finally {
+      Deno.chmod = original;
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});

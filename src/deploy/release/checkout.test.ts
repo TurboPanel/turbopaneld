@@ -5,6 +5,7 @@
 
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
+import { withTempGitRepo } from "../../testing/temp-git-repo.ts";
 import {
   CHECKOUT_TIMEOUT_MS,
   checkoutRelease,
@@ -382,6 +383,31 @@ test("checkoutRelease uses a generic message when pinned checkout is silent", as
   }
 });
 
+test("checkoutRelease fetches the pin when clone HEAD cannot be parsed", async () => {
+  const scratchDir = await Deno.makeTempDir({
+    prefix: "tp-checkout-nohead-",
+  });
+  try {
+    const { run } = scriptedGit([
+      () => ({ success: true, stdout: "", stderr: "" }),
+      () => ({ success: false, stdout: "", stderr: "no HEAD" }),
+      () => ({ success: true, stdout: "", stderr: "" }),
+      () => ({ success: true, stdout: "", stderr: "" }),
+      () => ({ success: true, stdout: SHA, stderr: "" }),
+    ]);
+    const result = await checkoutRelease({
+      cloneUrl: "https://example.com/o/r.git",
+      ref: "main",
+      commitSha: SHA,
+      scratchDir,
+      runGit: run,
+    });
+    assertEquals(result.commitSha, SHA);
+  } finally {
+    await Deno.remove(scratchDir, { recursive: true });
+  }
+});
+
 test("checkoutRelease keeps the payload sha when pinned rev-parse fails", async () => {
   const scratchDir = await Deno.makeTempDir({
     prefix: "tp-checkout-revparse-",
@@ -632,4 +658,35 @@ test("removeCheckoutCredentialFiles ignores missing and null paths", async () =>
     sshKeyPath: null,
     knownHostsPath: null,
   });
+});
+
+test({
+  name: "checkoutRelease default runner streams output when the clone matches",
+  permissions: { read: true, write: true, run: true, env: true },
+  fn: async () => {
+    await withTempGitRepo(async (repo) => {
+      const scratchDir = await Deno.makeTempDir({
+        prefix: "tp-checkout-live-",
+      });
+      try {
+        const result = await checkoutRelease({
+          cloneUrl: repo.path,
+          ref: "main",
+          commitSha: repo.head,
+          scratchDir,
+          onOutput: (_stream, line) => {
+            void line;
+          },
+        });
+        assertEquals(result.commitSha, repo.head);
+        assertEquals(result.workingDir, join(scratchDir, "source"));
+        const readme = await Deno.readTextFile(
+          join(result.workingDir, "README.md"),
+        );
+        assertEquals(readme.includes("temp git repo"), true);
+      } finally {
+        await Deno.remove(scratchDir, { recursive: true });
+      }
+    });
+  },
 });

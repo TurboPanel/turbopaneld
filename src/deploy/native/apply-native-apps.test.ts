@@ -1545,3 +1545,145 @@ test("removeNativeAppServices swallows a leftover staged file that cannot be unl
     await host.cleanup();
   }
 });
+
+test("waitForNativeApp stops immediately when systemd has already given up", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  const originalRun = mock.run;
+  mock.run = async (command, args) => {
+    if (args.includes("is-failed")) return ok();
+    return await originalRun(command, args);
+  };
+  try {
+    const error = await assertRejects(
+      () =>
+        applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
+          ...applyOpts(host, mock, false),
+          run: mock.run,
+        }),
+      Error,
+    );
+    assertStringIncludes(error.message, "did not answer on 127.0.0.1:18100");
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("an empty unit journal is recorded as such in the transcript", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  const originalRun = mock.run;
+  mock.run = async (command, args) => {
+    if (args.includes("journalctl")) {
+      return { success: true, stdout: "", stderr: "" };
+    }
+    return await originalRun(command, args);
+  };
+  const lines: string[] = [];
+  try {
+    await assertRejects(
+      () =>
+        applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
+          ...applyOpts(host, mock, false),
+          run: mock.run,
+          onOutput: (_stream, line) => lines.push(line),
+        }),
+      Error,
+    );
+    assertEquals(
+      lines.some((line) => line.includes("(no journal output for this unit)")),
+      true,
+    );
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("blank journal lines are skipped when copying into the transcript", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  const originalRun = mock.run;
+  mock.run = async (command, args) => {
+    if (args.includes("journalctl")) {
+      return {
+        success: true,
+        stdout: "keep\n\nError: boom\n\nmore\n",
+        stderr: "",
+      };
+    }
+    return await originalRun(command, args);
+  };
+  const lines: string[] = [];
+  try {
+    await assertRejects(
+      () =>
+        applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
+          ...applyOpts(host, mock, false),
+          run: mock.run,
+          onOutput: (_stream, line) => lines.push(line),
+        }),
+      Error,
+    );
+    assertEquals(lines.includes("keep"), true);
+    assertEquals(lines.includes("Error: boom"), true);
+    assertEquals(lines.includes("more"), true);
+    assertEquals(lines.includes(""), false);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("disabling a native app uses a generic error when systemd is silent", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  const originalRun = mock.run;
+  mock.run = async (command, args) => {
+    if (args.includes("disable")) return fail("");
+    return await originalRun(command, args);
+  };
+  try {
+    const error = await assertRejects(
+      () =>
+        applyNativeAppServices(
+          host.layout,
+          ENVIRONMENT_ID,
+          [makeApp({ enabled: false })],
+          { ...applyOpts(host, mock), run: mock.run },
+        ),
+      Error,
+    );
+    assertStringIncludes(
+      error.message,
+      `Failed to disable native app unit ${nativeAppUnitName("svc-web")}`,
+    );
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("waitForNativeApp uses sleepDefault between probes when sleep is omitted", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  let probes = 0;
+  try {
+    const result = await applyNativeAppServices(
+      host.layout,
+      ENVIRONMENT_ID,
+      [makeApp()],
+      {
+        bindings: bindings(),
+        run: mock.run,
+        runPlaybook: () => Promise.resolve(),
+        probe: () => {
+          probes += 1;
+          return Promise.resolve(probes >= 2);
+        },
+        systemdUnitDir: host.unitDir,
+      },
+    );
+    assertEquals(result.applied, ["web"]);
+    assertEquals(probes, 2);
+  } finally {
+    await host.cleanup();
+  }
+});

@@ -628,3 +628,172 @@ test("handleManagedDestroy fails when leftover containers cannot be removed", as
     );
   });
 });
+
+test("handleManagedDestroy fails when leftovers remain after a successful rm", async () => {
+  const managedId = "managed_destroy_reappear";
+  await withManagedStateDir(managedId, async () => {
+    await assertRejects(
+      () =>
+        handleManagedDestroy(
+          { managedId, removeVolumes: false },
+          new Date().toISOString(),
+          {
+            runDocker: mockDestroyDocker({
+              psStdout: ["abc123def456", "abc123def456"],
+            }),
+          },
+        ),
+      Error,
+      "left 1 container",
+    );
+  });
+});
+
+test("handleManagedDestroy treats a missing data volume as success", async () => {
+  const managedId = "managed_destroy_no_vol";
+  await withManagedStateDir(managedId, async () => {
+    const result = await handleManagedDestroy(
+      { managedId, removeVolumes: true },
+      new Date().toISOString(),
+      {
+        runDocker: (args) => {
+          if (args[0] === "volume") {
+            return Promise.resolve(dockerFail("Error: no such volume"));
+          }
+          return mockDestroyDocker()(args);
+        },
+      },
+    );
+    assertEquals(result.summary, "managed service destroyed");
+  });
+});
+
+test("handleManagedDestroy logs a data-volume remove failure without aborting", async () => {
+  const managedId = "managed_destroy_vol_busy";
+  await withManagedStateDir(managedId, async () => {
+    const result = await handleManagedDestroy(
+      { managedId, removeVolumes: true },
+      new Date().toISOString(),
+      {
+        runDocker: (args) => {
+          if (args[0] === "volume") {
+            return Promise.resolve(dockerFail("volume is in use"));
+          }
+          return mockDestroyDocker()(args);
+        },
+      },
+    );
+    assertEquals(result.summary, "managed service destroyed");
+  });
+});
+
+test("handleManagedDestroy removes the backup tree alongside state", async () => {
+  const managedId = "managed_destroy_backups";
+  await withTempLayout(async (fixture) => {
+    const prior = new Map<string, string | undefined>();
+    for (const [key, value] of Object.entries(fixture.env)) {
+      prior.set(key, Deno.env.get(key));
+      Deno.env.set(key, value);
+    }
+    try {
+      const root = managedDir(
+        { stateDir: fixture.dirs.stateDir } as Parameters<typeof managedDir>[0],
+        managedId,
+      );
+      await Deno.mkdir(root, { recursive: true });
+      const backups = join(fixture.dirs.backupDir, managedId);
+      await Deno.mkdir(backups, { recursive: true });
+      await Deno.writeTextFile(join(backups, "bk_1.dump"), "payload");
+      const result = await handleManagedDestroy(
+        { managedId, removeVolumes: false },
+        new Date().toISOString(),
+        { runDocker: mockDestroyDocker() },
+      );
+      assertEquals(result.summary, "managed service destroyed");
+      let backupGone = false;
+      try {
+        await Deno.stat(backups);
+      } catch (err) {
+        if (err instanceof Deno.errors.NotFound) backupGone = true;
+        else throw err;
+      }
+      assertEquals(backupGone, true);
+    } finally {
+      for (const [key, value] of prior) {
+        if (value === undefined) Deno.env.delete(key);
+        else Deno.env.set(key, value);
+      }
+    }
+  });
+});
+
+test("handleManagedDestroy throws when the backup directory cannot be removed", async () => {
+  const managedId = "managed_destroy_bk_rm";
+  await withTempLayout(async (fixture) => {
+    const prior = new Map<string, string | undefined>();
+    for (const [key, value] of Object.entries(fixture.env)) {
+      prior.set(key, Deno.env.get(key));
+      Deno.env.set(key, value);
+    }
+    const backups = join(fixture.dirs.backupDir, managedId);
+    await Deno.mkdir(backups, { recursive: true });
+    const root = managedDir(
+      { stateDir: fixture.dirs.stateDir } as Parameters<typeof managedDir>[0],
+      managedId,
+    );
+    await Deno.mkdir(root, { recursive: true });
+    const originalRemove = Deno.remove.bind(Deno);
+    Deno.remove = (path, options) => {
+      if (String(path) === backups) {
+        return Promise.reject(new Error("backup busy"));
+      }
+      return originalRemove(path, options);
+    };
+    try {
+      await assertRejects(
+        () =>
+          handleManagedDestroy(
+            { managedId, removeVolumes: false },
+            new Date().toISOString(),
+            { runDocker: mockDestroyDocker() },
+          ),
+        TypeError,
+        "failed to remove managed backup dir",
+      );
+    } finally {
+      Deno.remove = originalRemove;
+      for (const [key, value] of prior) {
+        if (value === undefined) Deno.env.delete(key);
+        else Deno.env.set(key, value);
+      }
+    }
+  });
+});
+
+test("handleManagedLifecycle with memberId omits member when health collection fails", async () => {
+  const managedId = "managed_lifecycle_member_err";
+  await withManagedStateDir(managedId, async () => {
+    const result = await handleManagedLifecycle(
+      {
+        managedId,
+        action: "restart",
+        memberId: "00000000-0000-4000-8000-0000000000a1",
+        engine: "postgres",
+      },
+      new Date().toISOString(),
+      {
+        runDocker: (args) => {
+          if (args[0] === "compose" && args.includes("ps")) {
+            return Promise.resolve(dockerOk(RUNNING_PS));
+          }
+          if (args[0] === "exec") {
+            return Promise.resolve(dockerFail("psql unavailable"));
+          }
+          return Promise.resolve(dockerOk());
+        },
+      },
+    );
+    assertEquals(result.status, "ready");
+    assertEquals(result.member, undefined);
+  });
+});

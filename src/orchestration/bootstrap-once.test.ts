@@ -6,6 +6,7 @@ import {
   createOrchestrationRuntimeFixture,
   type OrchestrationRuntimeFixture,
   restoreOrchestrationEnv,
+  runtimePaths,
   snapshotOrchestrationEnv,
   writeOrchestrationBootstrapStamps,
 } from "../testing/orchestration-fixtures.ts";
@@ -81,6 +82,75 @@ describe("runBootstrapOrchestration", () => {
       await writeOrchestrationBootstrapStamps({ withBootstrapStamp: true });
     }
   });
+
+  it("present:true smoke-test forwards JSONL events and raw lines", async () => {
+    const { UV_BIN } = await import("./paths.ts");
+    const { ansibleBinDir, bootstrapStampFile } = runtimePaths(
+      fixture.runtimesDir,
+    );
+    const playbookBin = join(ansibleBinDir, "ansible-playbook");
+    const lintBin = join(ansibleBinDir, "ansible-lint");
+    const playbookStub = join(fixture.runtimesDir, "jsonl-playbook.sh");
+    const lintStub = join(fixture.runtimesDir, "lint-ok.sh");
+    await Deno.writeTextFile(
+      playbookStub,
+      String.raw`#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "ansible-playbook [core 2.20.0]"
+  exit 0
+fi
+echo not-json
+printf '%s\n' '{"_event":"v2_playbook_on_stats","_timestamp":"2026-01-01T00:00:00Z","stats":{"localhost":{"ok":1,"changed":0,"failed":0,"unreachable":0}},"custom_stats":{},"global_custom_stats":{}}'
+echo stderr-noise >&2
+exit 0
+`,
+    );
+    await Deno.writeTextFile(
+      lintStub,
+      String.raw`#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "ansible-lint 25.0.0"
+  exit 0
+fi
+exit 0
+`,
+    );
+    await Deno.chmod(playbookStub, 0o755);
+    await Deno.chmod(lintStub, 0o755);
+    const uvBackup = await Deno.readTextFile(UV_BIN);
+    await Deno.remove(bootstrapStampFile).catch(() => {});
+    await Deno.writeTextFile(
+      UV_BIN,
+      `#!/bin/sh
+case "$1" in
+  --version)
+    echo "uv 0.11.21"
+    exit 0
+    ;;
+  venv)
+    mkdir -p "${ansibleBinDir}"
+    exit 0
+    ;;
+  pip)
+    mkdir -p "${ansibleBinDir}"
+    cp "${playbookStub}" "${playbookBin}"
+    cp "${lintStub}" "${lintBin}"
+    chmod 755 "${playbookBin}" "${lintBin}"
+    exit 0
+    ;;
+esac
+exit 0
+`,
+    );
+    await Deno.chmod(UV_BIN, 0o755);
+    try {
+      await bootstrapOnce.runBootstrapOrchestration({ present: true });
+    } finally {
+      await Deno.writeTextFile(UV_BIN, uvBackup);
+      await Deno.chmod(UV_BIN, 0o755);
+      await writeOrchestrationBootstrapStamps({ withBootstrapStamp: true });
+    }
+  });
 });
 
 describe("resolveFailureMessage", () => {
@@ -108,6 +178,10 @@ describe("resolveFailureMessage", () => {
     circular.self = circular;
     assertEquals(
       bootstrapOnce.resolveFailureMessage(circular),
+      "orchestration failed",
+    );
+    assertEquals(
+      bootstrapOnce.resolveFailureMessage(undefined),
       "orchestration failed",
     );
   });

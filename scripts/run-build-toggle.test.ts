@@ -94,6 +94,27 @@ test("runBuildToggleCli stringifies non-Error throws", async () => {
   assertEquals(errors, ["boom"]);
 });
 
+test("runBuildToggleCli uses the default error writer on parse failure", async () => {
+  const originalError = console.error;
+  const errors: string[] = [];
+  console.error = ((message: unknown) => {
+    errors.push(String(message));
+  }) as typeof console.error;
+  const exits: number[] = [];
+  try {
+    await runBuildToggleCli({
+      args: ["--ui-mode=prod"],
+      exit: (code) => {
+        exits.push(code);
+      },
+    });
+  } finally {
+    console.error = originalError;
+  }
+  assertEquals(exits, [1]);
+  assertEquals(errors[0]?.includes("--ui-mode=dev|static"), true);
+});
+
 test("runBuildToggleCli forwards parsed flags to run", async () => {
   const seen: unknown[] = [];
   await runBuildToggleCli({

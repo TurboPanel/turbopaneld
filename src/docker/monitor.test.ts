@@ -195,6 +195,17 @@ async function waitFor<T>(
   throw new Error(`timed out waiting for ${label}`);
 }
 
+test("start with an already-aborted signal skips reconcile", async () => {
+  const client = new MockDockerClient();
+  client.containers = [makeSummary()];
+  const monitor = createMonitor(client);
+  const controller = new AbortController();
+  controller.abort();
+  monitor.start(controller.signal);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assertEquals(monitor.getContainers().length, 0);
+});
+
 test("reconcile bootstrap seeds tracked containers and notifies listeners", async () => {
   const client = new MockDockerClient();
   client.containers = [makeSummary()];

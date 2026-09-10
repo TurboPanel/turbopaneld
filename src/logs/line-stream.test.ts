@@ -68,6 +68,59 @@ test("pumpLines skips empty chunks and empty lines", async () => {
   assertEquals(lines, ["keep"]);
 });
 
+test("pumpLines skips a decoded empty string chunk", async () => {
+  const lines: string[] = [];
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode("keep\n"));
+      controller.enqueue(new Uint8Array());
+      controller.enqueue(encoder.encode("tail\n"));
+      controller.close();
+    },
+  });
+  const text = await pumpLines(stream, (line) => lines.push(line));
+  assertEquals(text, "keep\ntail\n");
+  assertEquals(lines, ["keep", "tail"]);
+});
+
+test("pumpLines skips a falsy decoded value from TextDecoderStream", async () => {
+  const Original = globalThis.TextDecoderStream;
+  globalThis.TextDecoderStream = class
+    extends TransformStream<Uint8Array, string> {
+    constructor() {
+      super({
+        transform(chunk, controller) {
+          controller.enqueue("");
+          const decoded = new TextDecoder().decode(chunk);
+          if (decoded) controller.enqueue(decoded);
+        },
+      });
+    }
+  } as typeof TextDecoderStream;
+  try {
+    const lines: string[] = [];
+    const text = await pumpLines(
+      streamFrom("keep\n"),
+      (line) => lines.push(line),
+    );
+    assertEquals(text, "keep\n");
+    assertEquals(lines, ["keep"]);
+  } finally {
+    globalThis.TextDecoderStream = Original;
+  }
+});
+
+test("pumpLines drops a trailing whitespace-only remainder", async () => {
+  const lines: string[] = [];
+  const text = await pumpLines(
+    streamFrom("keep\n   "),
+    (line) => lines.push(line),
+  );
+  assertEquals(text, "keep\n   ");
+  assertEquals(lines, ["keep"]);
+});
+
 test("emitBufferedLines is a no-op without a handler or text", () => {
   emitBufferedLines("", () => {
     throw new TypeError("must not emit");

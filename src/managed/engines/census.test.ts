@@ -28,6 +28,8 @@ test("parseCensusCount accepts a bare non-negative integer and nothing else", ()
   assertEquals(parseCensusCount("-1"), null);
   assertEquals(parseCensusCount("1.5"), null);
   assertEquals(parseCensusCount("NULL"), null);
+  // Above Number.MAX_SAFE_INTEGER — digits, but not a safe integer.
+  assertEquals(parseCensusCount("9007199254740993"), null);
 });
 
 test("parsePostgresConnectionCensus reads used and max from the one tuples-only row", () => {
@@ -63,6 +65,16 @@ test("parseMysqlConnectionCensus reads the SHOW GLOBAL STATUS row and the bare @
     connectionsMax: 151,
   });
   assertEquals(parseMysqlConnectionCensus(""), UNREAD_ENGINE_CENSUS);
+  // Extra two-cell rows that are not Threads_connected are ignored; a second
+  // bare integer does not overwrite a max already captured.
+  assertEquals(
+    parseMysqlConnectionCensus("Uptime\t99\nThreads_connected\t4\n151\n200\n"),
+    {
+      healthy: true,
+      connectionsUsed: 4,
+      connectionsMax: 151,
+    },
+  );
 });
 
 test("the down and unread sentinels differ only in health", () => {

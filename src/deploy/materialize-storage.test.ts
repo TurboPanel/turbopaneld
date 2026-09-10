@@ -310,3 +310,95 @@ test("materializeStorageEntries ignores unresolved principalId", async () => {
     );
   });
 });
+
+test("materializeStorageEntries rejects a decrypted envelope that is not a string", async () => {
+  await withTempLayout(async (layout) => {
+    await assertRejects(
+      () =>
+        materializeStorageEntries(
+          layout,
+          "org-1",
+          [
+            {
+              storageId: "stor-sec",
+              locationId: "loc-sec",
+              kind: "file",
+              name: "secret.txt",
+              provider: "path",
+              serverId: "srv",
+              contentEnvelope: "tpdaemon.v1.x",
+              mounts: [],
+            },
+          ],
+          undefined,
+          () => Promise.resolve([null]),
+        ),
+      TypeError,
+      "Failed to decrypt storage content",
+    );
+  });
+});
+
+test("materializeStorageEntries chowns directory and file copies for a linked principal", async () => {
+  const original = Deno.Command;
+  Deno.Command = class {
+    spawn() {
+      return {
+        stdin: {
+          getWriter: () => ({
+            write: () => Promise.resolve(),
+            close: () => Promise.resolve(),
+          }),
+        },
+        output: () =>
+          Promise.resolve({
+            success: true,
+            stdout: new Uint8Array(),
+            stderr: new Uint8Array(),
+          }),
+      };
+    }
+  } as unknown as typeof Deno.Command;
+  try {
+    await withTempLayout(async (layout) => {
+      const ownedDir = join(layout.stateDir, "owned-data");
+      const paths = await materializeStorageEntries(
+        layout,
+        "org-1",
+        [
+          {
+            storageId: "stor-dir",
+            locationId: "loc-dir",
+            kind: "directory",
+            name: "data",
+            provider: "path",
+            serverId: "srv",
+            principalId: "pr-1",
+            sourcePath: ownedDir,
+            mounts: [],
+          },
+          {
+            storageId: "stor-file",
+            locationId: "loc-file",
+            kind: "file",
+            name: "notes.txt",
+            provider: "path",
+            serverId: "srv",
+            principalId: "pr-1",
+            contentEnvelope: "hello",
+            mounts: [],
+          },
+        ],
+        [{ principalId: "pr-1", username: "siteuser" }],
+      );
+      assertEquals(paths.get("loc-dir"), ownedDir);
+      const filePath = paths.get("loc-file");
+      if (filePath === undefined) {
+        throw new TypeError("expected mount path for loc-file");
+      }
+      assertEquals(await Deno.readTextFile(filePath), "hello");
+    });
+  } finally {
+    Deno.Command = original;
+  }
+});

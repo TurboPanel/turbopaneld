@@ -27,15 +27,22 @@ test("reservedManagedIngressAddress rejects /31 and invalid CIDR input", () => {
     reservedManagedIngressAddress("198.51.100.0/0"),
     "255.255.255.254",
   );
+  assertEquals(
+    reservedManagedIngressAddress("203.0.113.0/30"),
+    "203.0.113.2",
+  );
   assertEquals(reservedManagedIngressAddress("not-a-cidr"), null);
   assertEquals(reservedManagedIngressAddress("203.0.113.1"), null);
   assertEquals(reservedManagedIngressAddress("/24"), null);
   assertEquals(reservedManagedIngressAddress("203.0.113.0/"), null);
   assertEquals(reservedManagedIngressAddress("203.0.113.0/-1"), null);
+  assertEquals(reservedManagedIngressAddress("203.0.113.0/33"), null);
+  assertEquals(reservedManagedIngressAddress("203.0.113.0/abc"), null);
   assertEquals(reservedManagedIngressAddress("999.0.113.0/24"), null);
   assertEquals(reservedManagedIngressAddress("203.0.113.256/24"), null);
   assertEquals(reservedManagedIngressAddress("203.0.113/24"), null);
   assertEquals(reservedManagedIngressAddress("203.0.113.1.2/24"), null);
+  assertEquals(reservedManagedIngressAddress("203.0.113.foo/24"), null);
 });
 
 test("reservedManagedIngressAddress normalizes network base for non-aligned input", () => {

@@ -121,14 +121,41 @@ test({
   async fn() {
     const deps = inertDeps();
     delete deps.statfs;
-    const collector = createMetricsCollector({ ...deps, now: () => 1_000 });
+    const collector = createMetricsCollector({
+      ...deps,
+      now: () => 1_000,
+      collectTopology: () =>
+        Promise.resolve({
+          ...emptyTopologySnapshot(),
+          filesystems: [
+            {
+              filesystemId: "fs:root",
+              mountpoint: "/",
+              fsType: "ext4",
+              sourceDevice: "/dev/sda1",
+              totalBytes: null,
+              totalInodes: null,
+              roles: ["root"],
+            },
+            {
+              filesystemId: "fs:missing",
+              mountpoint: "/no/such/turbopanel-metrics-statfs-missing-path",
+              fsType: "ext4",
+              sourceDevice: "/dev/sdb1",
+              totalBytes: null,
+              totalInodes: null,
+              roles: ["hosting"],
+            },
+          ],
+        }),
+    });
     const result = await collector.collect({ sequence: 1 });
     assertEquals(result.supported, true);
     if (!result.supported) return;
-    const available = result.sample.host.memory.usedBytes;
+    const available = result.sample.host.storage.rootFilesystemAvailableBytes;
     if (available !== null && typeof available !== "number") {
       throw new TypeError(
-        "host.memory.usedBytes must be a number when present",
+        "rootFilesystemAvailableBytes must be a number when present",
       );
     }
   },

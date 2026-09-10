@@ -360,3 +360,24 @@ test("runPlaybookStreaming non-quiet failure includes the binary name", async ()
     await Deno.remove(root, { recursive: true });
   }
 });
+
+test("runPlaybookStreaming quiet mode drops raw lines when no handler is set", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-ansible-events-quiet-" });
+  const bin = join(root, "ansible-playbook");
+  await Deno.writeTextFile(
+    bin,
+    `#!/bin/sh
+printf '\\n'
+printf '%s\\n' 'not-json' '{"_event":"v2_runner_on_ok","_timestamp":"2026-01-01T00:00:00Z","task":{"name":"T","id":"1","path":"","duration":{"start":""}},"hosts":{}}'
+printf '\\n' >&2
+echo stderr-noise >&2
+exit 0
+`,
+  );
+  await Deno.chmod(bin, 0o755);
+  try {
+    await runPlaybookStreaming(bin, ["play.yml"], { quiet: true });
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});

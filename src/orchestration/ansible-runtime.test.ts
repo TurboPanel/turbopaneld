@@ -72,14 +72,25 @@ describe("ansible runtime with stubbed binaries", () => {
 
   it("thin setup wrappers invoke stub playbooks", async () => {
     await ansible.runSocketDirsSetup();
-    const hostname = await ansible.runSetHostname("fixture-host.example");
+    const seen: string[] = [];
+    const onEvent = (event: { _event: string }) => {
+      seen.push(event._event);
+    };
+    const hostname = await ansible.runSetHostname(
+      "fixture-host.example",
+      onEvent,
+    );
     if (typeof hostname.summary !== "string") {
       throw new TypeError("expected set-hostname summary string");
     }
-    const timeSync = await ansible.runTimeSyncApply({ timezone: "UTC" });
+    const timeSync = await ansible.runTimeSyncApply(
+      { timezone: "UTC" },
+      onEvent,
+    );
     if (typeof timeSync.summary !== "string") {
       throw new TypeError("expected time-sync summary string");
     }
+    assertEquals(seen.includes("v2_playbook_on_stats"), true);
     await ansible.runDaemonLogsSetup();
     await ansible.runDaemonSystemdSetup();
     await ansible.runDockerSetup();
@@ -88,6 +99,7 @@ describe("ansible runtime with stubbed binaries", () => {
     await ansible.runProxySqlSetup();
     await ansible.runOrchestratorSetup();
     await ansible.runRabbitmqSetup();
+    await ansible.runBuildkitSetup();
     await ansible.runBuildToggle({
       uiMode: "static",
       instanceRunMode: "compiled",
@@ -497,6 +509,145 @@ exit 0
         withBootstrapStamp: true,
         withGalaxyDockerRole: true,
       });
+    }
+  });
+
+  it("devInstanceExtraArgs honors workers, compiled, static, and public URLs", async () => {
+    const keys = [
+      "TURBOPANEL_UI_MODE",
+      "TURBOPANEL_INSTANCE_RUN_MODE",
+      "TURBOPANEL_INSTANCE_RUNTIME",
+      "TURBOPANEL_PUBLIC_URLS",
+    ] as const;
+    const previous = new Map<string, string | undefined>();
+    for (const key of keys) {
+      previous.set(key, Deno.env.get(key));
+    }
+    Deno.env.set("TURBOPANEL_UI_MODE", "static");
+    Deno.env.set("TURBOPANEL_INSTANCE_RUN_MODE", "compiled");
+    Deno.env.set("TURBOPANEL_INSTANCE_RUNTIME", "workers");
+    Deno.env.set("TURBOPANEL_PUBLIC_URLS", "https://203.0.113.10");
+    try {
+      await ansible.runDaemonConverge();
+      await ansible.runBuildToggle({
+        uiMode: "dev",
+        instanceRunMode: "source",
+        forceBuild: true,
+      });
+    } finally {
+      for (const [key, value] of previous.entries()) {
+        if (value === undefined) Deno.env.delete(key);
+        else Deno.env.set(key, value);
+      }
+    }
+  });
+
+  it("coLocatedInstanceServiceEnabled returns false when systemctl cannot spawn", async () => {
+    const originalCommand = Deno.Command;
+    Deno.Command = class extends originalCommand {
+      constructor(command: string | URL, options?: Deno.CommandOptions) {
+        if (command === "systemctl") {
+          throw new TypeError("spawn failed");
+        }
+        super(command, options);
+      }
+    } as typeof Deno.Command;
+    try {
+      await ansible.runDaemonSystemdSetup();
+    } finally {
+      Deno.Command = originalCommand;
+    }
+  });
+
+  it("neutralizeGalaxyDockerLintConfig rethrows non-NotFound yamllint removals", async () => {
+    const { galaxyVendorRolesDir } = runtimePaths(fixture.runtimesDir);
+    const roleDir = join(galaxyVendorRolesDir, "geerlingguy.docker");
+    const yamllintDir = join(roleDir, ".yamllint");
+    await Deno.mkdir(yamllintDir, { recursive: true });
+    await Deno.writeTextFile(join(yamllintDir, "inner"), "keep\n");
+    try {
+      await assertRejects(
+        () => ansible.ensureGalaxyDockerRole(),
+        Error,
+      );
+    } finally {
+      await Deno.remove(yamllintDir, { recursive: true }).catch(() => {});
+    }
+  });
+
+  it("installGalaxyDockerRoleFromArchive rethrows dest removal errors", async () => {
+    const { galaxyVendorRolesDir, galaxyDockerStampFile } = runtimePaths(
+      fixture.runtimesDir,
+    );
+    await Deno.remove(galaxyDockerStampFile).catch(() => {});
+    const dest = join(galaxyVendorRolesDir, "geerlingguy.docker");
+    await Deno.mkdir(dest, { recursive: true });
+    const archive = await buildGalaxyDockerFixtureArchive("8.0.0");
+    const originalFetch = globalThis.fetch;
+    const originalRemove = Deno.remove;
+    globalThis.fetch = (input) => {
+      if (String(input).includes("codeload.github.com")) {
+        return Promise.resolve(
+          new Response(new Uint8Array(archive), { status: 200 }),
+        );
+      }
+      return originalFetch(input);
+    };
+    Deno.remove = ((path, options) => {
+      if (String(path) === dest) {
+        return Promise.reject(new Deno.errors.PermissionDenied("blocked dest"));
+      }
+      return originalRemove.call(Deno, path, options);
+    }) as typeof Deno.remove;
+    try {
+      await assertRejects(
+        () => ansible.ensureGalaxyDockerRole(),
+        Deno.errors.PermissionDenied,
+      );
+    } finally {
+      Deno.remove = originalRemove;
+      globalThis.fetch = originalFetch;
+      await Deno.remove(dest, { recursive: true }).catch(() => {});
+      await writeOrchestrationBootstrapStamps({
+        withBootstrapStamp: true,
+        withGalaxyDockerRole: true,
+      });
+    }
+  });
+
+  it("bootstrap stamps treat blank files as missing", async () => {
+    const { bootstrapStampFile, galaxyDockerStampFile } = runtimePaths(
+      fixture.runtimesDir,
+    );
+    await Deno.writeTextFile(bootstrapStampFile, "  \n");
+    await Deno.writeTextFile(galaxyDockerStampFile, "  \n");
+    try {
+      assertEquals(await bootstrapStamp.readBootstrapStamp(), null);
+      assertEquals(await bootstrapStamp.readGalaxyDockerStamp(), null);
+    } finally {
+      await writeOrchestrationBootstrapStamps({
+        withBootstrapStamp: true,
+        withGalaxyDockerRole: true,
+      });
+    }
+  });
+
+  it("readBootstrapStamp rethrows non-NotFound stat errors", async () => {
+    const { bootstrapStampFile } = runtimePaths(fixture.runtimesDir);
+    const originalStat = Deno.stat;
+    Deno.stat = ((path) => {
+      if (String(path) === bootstrapStampFile) {
+        return Promise.reject(new Deno.errors.PermissionDenied("denied"));
+      }
+      return originalStat.call(Deno, path);
+    }) as typeof Deno.stat;
+    try {
+      await assertRejects(
+        () => bootstrapStamp.readBootstrapStamp(),
+        Deno.errors.PermissionDenied,
+      );
+    } finally {
+      Deno.stat = originalStat;
     }
   });
 });

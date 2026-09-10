@@ -1220,3 +1220,15 @@ test("LinuxMetricsCollector carries the managed-engine census into storage verba
   // The byte fields ride beside the census on the same row.
   assertEquals(storage.hostingUsedBytes, 4096);
 });
+
+test("LinuxMetricsCollector falls back to the nominal interval when the clock goes backwards", async () => {
+  const collector = new LinuxMetricsCollector(
+    makeDeps(() => TICK_1, fullTopologySnapshot(), () => 1_000_000),
+  );
+  const first = await collector.collect({ sequence: 1, nowMs: 1_000_000 });
+  const second = await collector.collect({ sequence: 2, nowMs: 500_000 });
+  if (!first.supported || !second.supported) {
+    throw new TypeError("expected supported samples");
+  }
+  assertEquals(second.sample.metadata.intervalSeconds, 60);
+});

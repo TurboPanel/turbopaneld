@@ -539,6 +539,57 @@ describe("compose-files", () => {
         JSON.stringify({
           version: 2,
           projectId: "proj-1",
+          environmentId: "",
+          serverId: "srv-1",
+          generation: 1,
+          projectName: "demo",
+          composeSha256: "a".repeat(64),
+          services: {},
+        }),
+      );
+      assertEquals(await readDeploymentManifest(deploymentDir), null);
+
+      await writeComposeFileSecure(
+        join(deploymentDir, "deployment.json"),
+        JSON.stringify({
+          version: 2,
+          projectId: "proj-1",
+          environmentId: "env-1",
+          serverId: 12,
+          generation: 1,
+          projectName: "demo",
+          composeSha256: "a".repeat(64),
+          services: {},
+        }),
+      );
+      assertEquals(await readDeploymentManifest(deploymentDir), null);
+
+      await writeComposeFileSecure(
+        join(deploymentDir, "deployment.json"),
+        JSON.stringify({
+          version: 2,
+          projectId: "proj-1",
+          environmentId: "env-1",
+          serverId: "srv-1",
+          generation: 1,
+          projectName: "",
+          composeSha256: "a".repeat(64),
+          services: {},
+        }),
+      );
+      assertEquals(await readDeploymentManifest(deploymentDir), null);
+
+      await writeComposeFileSecure(
+        join(deploymentDir, "deployment.json"),
+        JSON.stringify([{ version: 2, projectId: "proj-1" }]),
+      );
+      assertEquals(await readDeploymentManifest(deploymentDir), null);
+
+      await writeComposeFileSecure(
+        join(deploymentDir, "deployment.json"),
+        JSON.stringify({
+          version: 2,
+          projectId: "proj-1",
           environmentId: "env-1",
           serverId: "srv-1",
           generation: -1,
@@ -600,6 +651,30 @@ describe("compose-files", () => {
     }
   });
 
+  it("listLocalDeploymentManifests skips a project whose env listing vanished", async () => {
+    const tmp = await Deno.makeTempDir({ prefix: "tp-manifest-vanish-" });
+    const originalReadDir = Deno.readDir.bind(Deno);
+    try {
+      const layout = resolveLayout({ TURBOPANEL_STATE_DIR: tmp });
+      const envDir = environmentDeploymentDir(layout, "proj-1", "env-1");
+      await Deno.mkdir(envDir, { recursive: true, mode: 0o750 });
+      const projectDir = join(tmp, "deployments", "proj-1");
+      Deno.readDir = ((path: string | URL) => {
+        if (String(path) === projectDir) {
+          // deno-lint-ignore require-yield
+          return (async function* () {
+            throw new Deno.errors.NotFound("gone");
+          })();
+        }
+        return originalReadDir(path);
+      }) as typeof Deno.readDir;
+      assertEquals(await listLocalDeploymentManifests(layout), []);
+    } finally {
+      Deno.readDir = originalReadDir;
+      await Deno.remove(tmp, { recursive: true });
+    }
+  });
+
   it("listLocalDeploymentManifests skips non-directory project entries", async () => {
     const tmp = await Deno.makeTempDir({ prefix: "tp-" });
     try {
@@ -645,6 +720,91 @@ describe("compose-files", () => {
       await Deno.mkdir(join(tmp, "deployment.json"));
       await assertRejects(() => readDeploymentManifest(tmp));
     } finally {
+      await Deno.remove(tmp, { recursive: true });
+    }
+  });
+
+  it("removeComposeEnvFile rethrows when the env file cannot be removed", async () => {
+    const tmp = await Deno.makeTempDir({ prefix: "tp-env-rm-" });
+    const originalRemove = Deno.remove.bind(Deno);
+    try {
+      Deno.remove = ((path: string | URL, opts?: Deno.RemoveOptions) => {
+        if (String(path).endsWith(".env")) {
+          return Promise.reject(new Deno.errors.PermissionDenied("env"));
+        }
+        return originalRemove(path, opts);
+      }) as typeof Deno.remove;
+      await assertRejects(
+        () => removeComposeEnvFile(tmp),
+        Deno.errors.PermissionDenied,
+        "env",
+      );
+    } finally {
+      Deno.remove = originalRemove;
+      await Deno.remove(tmp, { recursive: true });
+    }
+  });
+
+  it("resolveDeployedComposePaths rethrows when compose.yaml cannot be statted", async () => {
+    const tmp = await Deno.makeTempDir({ prefix: "tp-compose-stat-" });
+    const originalStat = Deno.stat.bind(Deno);
+    try {
+      const composePath = join(tmp, RUNTIME_COMPOSE_FILENAME);
+      Deno.stat = ((path: string | URL) => {
+        if (String(path) === composePath) {
+          return Promise.reject(new Deno.errors.PermissionDenied("compose"));
+        }
+        return originalStat(path);
+      }) as typeof Deno.stat;
+      await assertRejects(
+        () => resolveDeployedComposePaths(tmp),
+        Deno.errors.PermissionDenied,
+        "compose",
+      );
+    } finally {
+      Deno.stat = originalStat;
+      await Deno.remove(tmp, { recursive: true });
+    }
+  });
+
+  it("resetComposeStageDir rethrows when staging cannot be removed", async () => {
+    const tmp = await Deno.makeTempDir({ prefix: "tp-stage-reset-" });
+    const originalRemove = Deno.remove.bind(Deno);
+    try {
+      Deno.remove = ((path: string | URL, opts?: Deno.RemoveOptions) => {
+        if (String(path).endsWith(".staging")) {
+          return Promise.reject(new Deno.errors.PermissionDenied("stage"));
+        }
+        return originalRemove(path, opts);
+      }) as typeof Deno.remove;
+      await assertRejects(
+        () => resetComposeStageDir(tmp),
+        Deno.errors.PermissionDenied,
+        "stage",
+      );
+    } finally {
+      Deno.remove = originalRemove;
+      await Deno.remove(tmp, { recursive: true });
+    }
+  });
+
+  it("removeComposeStageDir rethrows when staging cannot be removed", async () => {
+    const tmp = await Deno.makeTempDir({ prefix: "tp-stage-rm-" });
+    const originalRemove = Deno.remove.bind(Deno);
+    try {
+      Deno.remove = ((path: string | URL, opts?: Deno.RemoveOptions) => {
+        if (String(path).endsWith(".staging")) {
+          return Promise.reject(new Deno.errors.PermissionDenied("stage"));
+        }
+        return originalRemove(path, opts);
+      }) as typeof Deno.remove;
+      await assertRejects(
+        () => removeComposeStageDir(tmp),
+        Deno.errors.PermissionDenied,
+        "stage",
+      );
+    } finally {
+      Deno.remove = originalRemove;
       await Deno.remove(tmp, { recursive: true });
     }
   });

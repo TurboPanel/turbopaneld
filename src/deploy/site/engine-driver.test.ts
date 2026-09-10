@@ -5,6 +5,8 @@ import { withTempLayout } from "../../testing/temp-layout.ts";
 import {
   APACHE_DRIVER,
   CADDY_DRIVER,
+  NGINX_DRIVER,
+  OPENLITESPEED_DRIVER,
   phpFpmDriver,
   publishStagedConfig,
   rolloutSiteConfigs,
@@ -14,6 +16,7 @@ import {
   type StagedConfigWrite,
   stageOwnedConfigFile,
   systemctlReloadOrStart,
+  validateSiteEndpoints,
   writeOwnedConfigFile,
 } from "./engine-driver.ts";
 
@@ -258,5 +261,138 @@ test({
         "bad config",
       );
     });
+  },
+});
+
+test({
+  name: "stageDaemonConfigFile snapshots nothing when the live file is absent",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const path = join(fixture.dirs.configDir, "vhconf.conf");
+      const staged = await stageDaemonConfigFile(path, "next\n");
+      if (staged === null) {
+        throw new TypeError("expected a staged write for a missing live file");
+      }
+      assertEquals(staged.kind, "daemon");
+      assertEquals(staged.previousPath, null);
+      assertEquals(await Deno.readTextFile(staged.candidatePath), "next\n");
+    });
+  },
+});
+
+test({
+  name: "stageDaemonConfigFile copies the live file when it already exists",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const path = join(fixture.dirs.configDir, "vhconf.conf");
+      await Deno.writeTextFile(path, "current\n");
+      const staged = await stageDaemonConfigFile(path, "next\n");
+      if (staged === null) {
+        throw new TypeError("expected a staged write when contents differ");
+      }
+      if (staged.previousPath === null) {
+        throw new TypeError("expected a snapshot of the live file");
+      }
+      assertEquals(await Deno.readTextFile(staged.previousPath), "current\n");
+      assertEquals(await Deno.readTextFile(staged.candidatePath), "next\n");
+    });
+  },
+});
+
+test("validateSiteEndpoints retries after a failed curl then accepts HTTP 200", async () => {
+  let attempts = 0;
+  const run: SiteRunFn = (command) => {
+    if (command === "curl") {
+      attempts += 1;
+      if (attempts === 1) return Promise.resolve(fail("connection refused"));
+      return Promise.resolve({ success: true, stdout: "200", stderr: "" });
+    }
+    return Promise.resolve(ok());
+  };
+  await validateSiteEndpoints(run, "nginx", [{
+    label: "www",
+    url: "http://127.0.0.1:18080/",
+  }]);
+  assertEquals(attempts, 2);
+});
+
+test("validateSiteEndpoints fails when every probe is an HTTP 5xx", async () => {
+  const run: SiteRunFn = (command) => {
+    if (command === "curl") {
+      return Promise.resolve({ success: true, stdout: "503", stderr: "" });
+    }
+    return Promise.resolve(ok());
+  };
+  await assertRejects(
+    () =>
+      validateSiteEndpoints(run, "nginx", [{
+        label: "www",
+        url: "http://127.0.0.1:18080/",
+      }]),
+    Error,
+    "HTTP 503",
+  );
+});
+
+test({
+  name: "engine reload helpers config-test then start the unit",
+  permissions: { env: true },
+  fn: async () => {
+    const layout = resolveLayout({}, {
+      skipDiscovery: true,
+      forceMode: "production",
+    });
+    const calls: string[][] = [];
+    const run: SiteRunFn = (command, args) => {
+      calls.push([command, ...args]);
+      return Promise.resolve(ok());
+    };
+    await CADDY_DRIVER.reload(run, layout, false);
+    await NGINX_DRIVER.reload(run, layout, true);
+    await OPENLITESPEED_DRIVER.reload(run, layout, false);
+    await phpFpmDriver("8.4").reload(run, layout);
+    assertEquals(
+      calls.some((c) => c.includes("validate") && c.includes("caddyfile")),
+      true,
+    );
+    assertEquals(calls.some((c) => c.includes("turbopanel-nginx")), true);
+    assertEquals(
+      calls.some((c) => c.includes("turbopanel-openlitespeed")),
+      true,
+    );
+    assertEquals(
+      calls.some((c) => c.includes("turbopanel-php-fpm@8.4")),
+      true,
+    );
+  },
+});
+
+test({
+  name:
+    "rolloutSiteConfigs rolls back nothing when the failure is before publish",
+  permissions: { env: true },
+  fn: async () => {
+    const layout = resolveLayout({}, {
+      skipDiscovery: true,
+      forceMode: "production",
+    });
+    await assertRejects(
+      () =>
+        rolloutSiteConfigs({
+          run: () => Promise.resolve(ok()),
+          layout,
+          target: {
+            label: "nginx",
+            unit: "turbopanel-nginx",
+            configTest: () => Promise.reject(new Error("never swapped")),
+          },
+          restart: false,
+          staged: [],
+        }),
+      Error,
+      "never swapped",
+    );
   },
 });

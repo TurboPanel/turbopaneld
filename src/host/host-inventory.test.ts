@@ -1207,4 +1207,176 @@ exit 1
       resetHostResourcesCacheForTests();
     }
   });
+
+  it("parseMeminfoTotals skips non-finite kilobyte values", () => {
+    const overflow = `MemTotal: ${"9".repeat(400)} kB\nSwapTotal: 1024 kB\n`;
+    assertEquals(parseMeminfoTotals(overflow), {
+      swapTotalBytes: 1024 * 1024,
+    });
+  });
+
+  it("hostResourcesFromProc ignores unparseable hybrid cpulists", () => {
+    const resources = hostResourcesFromProc(
+      "cpu  0\ncpu0 0\ncpu1 0\n",
+      undefined,
+      [
+        "processor\t: 0",
+        "physical id\t: 0",
+        "core id\t\t: 0",
+        "",
+        "processor\t: 1",
+        "physical id\t: 0",
+        "core id\t\t: 1",
+        "",
+      ].join("\n"),
+      "x86_64",
+      { pCpus: "bogus", eCpus: "   " },
+    );
+    assertEquals(resources?.cpus?.[0]?.cores, { total: 2 });
+    assertEquals(resources?.cpus?.[0]?.threads, { total: 2 });
+  });
+
+  it("hostResourcesFromProc assigns topology indexes when processor is unreadable", () => {
+    const resources = hostResourcesFromProc(
+      "cpu  0\ncpu0 0\n",
+      undefined,
+      [
+        "processor\t: abc",
+        "vendor_id\t: GenuineIntel",
+        "model name\t: Indexless CPU",
+        "physical id\t: 0",
+        "core id\t\t: 0",
+        "",
+      ].join("\n"),
+      "x86_64",
+    );
+    assertEquals(resources?.cpus?.[0]?.vendorId, "GenuineIntel");
+    assertEquals(resources?.cpus?.[0]?.name, "Indexless CPU");
+    assertEquals(resources?.cpus?.[0]?.threads?.total, 1);
+    assertEquals(resources?.cpus?.[0]?.cores?.total, 1);
+  });
+
+  it("virtualizationKindFromFacts matches product-only hypervisor names", () => {
+    assertEquals(
+      virtualizationKindFromFacts(undefined, "QEMU Virtual Machine", undefined),
+      "qemu",
+    );
+    assertEquals(
+      virtualizationKindFromFacts(
+        undefined,
+        "VMware Virtual Platform",
+        undefined,
+      ),
+      "vmware",
+    );
+    assertEquals(
+      virtualizationKindFromFacts(undefined, "Xen HVM domU", undefined),
+      "xen",
+    );
+    assertEquals(
+      virtualizationKindFromFacts(
+        "Microsoft Corporation",
+        "Surface Laptop",
+        undefined,
+      ),
+      "bare-metal",
+    );
+  });
+
+  it("readHostResources treats DRM cards without vendor or device as no GPUs", () => {
+    resetHostResourcesCacheForTests();
+    const root = Deno.makeTempDirSync({ prefix: "tp-host-empty-drm-" });
+    const procRoot = `${root}/proc`;
+    const sysRoot = `${root}/sys`;
+    try {
+      writeFile(`${procRoot}/stat`, "cpu  0\ncpu0 0\n");
+      writeFile(`${procRoot}/meminfo`, "MemTotal: 1024 kB\nSwapTotal: 0 kB\n");
+      writeFile(
+        `${procRoot}/cpuinfo`,
+        "processor\t: 0\nphysical id\t: 0\ncore id\t: 0\n",
+      );
+      Deno.mkdirSync(`${sysRoot}/class/drm/card0/device`, { recursive: true });
+      Deno.mkdirSync(`${sysRoot}/class/drm/card1/device`, { recursive: true });
+
+      const resources = readHostResources({
+        procRoot,
+        sysRoot,
+        architecture: "x86_64",
+        nvidiaSmiCsv: () => undefined,
+      });
+      assertEquals(resources?.gpus, undefined);
+      assertEquals(resources?.cpus?.[0]?.threads?.total, 1);
+    } finally {
+      Deno.removeSync(root, { recursive: true });
+      resetHostResourcesCacheForTests();
+    }
+  });
+
+  it("readHostResources skips cache indexes with missing type or size", () => {
+    resetHostResourcesCacheForTests();
+    const root = Deno.makeTempDirSync({ prefix: "tp-host-cache-gaps-" });
+    const procRoot = `${root}/proc`;
+    const sysRoot = `${root}/sys`;
+    try {
+      writeFile(`${procRoot}/stat`, "cpu  0\ncpu0 0\n");
+      writeFile(`${procRoot}/meminfo`, "MemTotal: 1024 kB\nSwapTotal: 0 kB\n");
+      writeFile(
+        `${procRoot}/cpuinfo`,
+        "processor\t: 0\nphysical id\t: 0\ncore id\t: 0\n",
+      );
+      const cpu0 = `${sysRoot}/devices/system/cpu/cpu0`;
+      writeFile(`${cpu0}/cache/index0/level`, "1\n");
+      writeFile(`${cpu0}/cache/index0/size`, "16K\n");
+      writeFile(`${cpu0}/cache/index1/level`, "2\n");
+      writeFile(`${cpu0}/cache/index1/type`, "Unified\n");
+
+      const resources = readHostResources({
+        procRoot,
+        sysRoot,
+        architecture: "x86_64",
+        nvidiaSmiCsv: () => undefined,
+      });
+      assertEquals(resources?.cpus?.[0]?.cache, { l1: 16 * 1024 });
+    } finally {
+      Deno.removeSync(root, { recursive: true });
+      resetHostResourcesCacheForTests();
+    }
+  });
+
+  it("readHostResources process-caches a failed default read", () => {
+    resetHostResourcesCacheForTests();
+    const originalRead = Deno.readTextFileSync;
+    const OriginalCommand = Deno.Command;
+    const originalReadDir = Deno.readDirSync;
+    const originalBuild = Object.getOwnPropertyDescriptor(Deno, "build");
+    let reads = 0;
+    Deno.readTextFileSync = () => {
+      reads++;
+      throw new Error("read blocked");
+    };
+    Deno.readDirSync = () => {
+      throw new Error("readdir blocked");
+    };
+    Deno.Command = function () {
+      throw new Error("command blocked");
+    } as unknown as typeof Deno.Command;
+    Object.defineProperty(Deno, "build", {
+      configurable: true,
+      enumerable: true,
+      value: { ...Deno.build, arch: "" as typeof Deno.build.arch },
+      writable: true,
+    });
+    try {
+      assertEquals(readHostResources(), undefined);
+      const afterFirst = reads;
+      assertEquals(readHostResources(), undefined);
+      assertEquals(reads, afterFirst);
+    } finally {
+      Deno.readTextFileSync = originalRead;
+      Deno.Command = OriginalCommand;
+      Deno.readDirSync = originalReadDir;
+      if (originalBuild) Object.defineProperty(Deno, "build", originalBuild);
+      resetHostResourcesCacheForTests();
+    }
+  });
 });

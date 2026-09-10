@@ -2,6 +2,7 @@ import { assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import type { DockerCliResult } from "./docker-cli.ts";
 import {
+  HOOK_TIMEOUT_MS,
   runDeployServiceHooks,
   runPostDeployHooks,
 } from "./run-deploy-hooks.ts";
@@ -125,6 +126,127 @@ test({
         "boom",
       );
     } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+});
+
+test({
+  name: "runPostDeployHooks falls back when a hook prints nothing",
+  permissions: { read: true, write: true, run: true },
+  fn: async () => {
+    const dir = await Deno.makeTempDir({ prefix: "tp-post-hooks-empty-" });
+    try {
+      await assertRejects(
+        () =>
+          runPostDeployHooks(
+            [{
+              composeServiceName: "web",
+              postDeployCommand: "exit 2",
+            }],
+            dir,
+          ),
+        Error,
+        "Hook command failed",
+      );
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+});
+
+test({
+  name: "runDeployServiceHooks streams build output and skips empty hooks",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    const dir = await Deno.makeTempDir({ prefix: "tp-hooks-stream-" });
+    const lines: Array<{ stream: string; line: string }> = [];
+    try {
+      await runDeployServiceHooks(
+        [
+          { composeServiceName: "idle" },
+          { composeServiceName: "web", buildDisableCache: true },
+        ],
+        {
+          projectName: "demo",
+          composePaths: [join(dir, "compose.yaml")],
+          deploymentDir: dir,
+          runDocker: () =>
+            Promise.resolve({
+              success: true,
+              stdout: "building\n",
+              stderr: "",
+              code: 0,
+            }),
+          onOutput: (stream, line) => lines.push({ stream, line }),
+        },
+      );
+      assertEquals(lines.some((row) => row.line.includes("building")), true);
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+});
+
+test({
+  name:
+    "runDeployServiceHooks uses the generic build error when stderr is empty",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    const dir = await Deno.makeTempDir({ prefix: "tp-hooks-empty-err-" });
+    try {
+      await assertRejects(
+        () =>
+          runDeployServiceHooks(
+            [{ composeServiceName: "web", buildDisableCache: true }],
+            {
+              projectName: "demo",
+              composePaths: [join(dir, "compose.yaml")],
+              deploymentDir: dir,
+              runDocker: () =>
+                Promise.resolve({
+                  success: false,
+                  stdout: "",
+                  stderr: "",
+                  code: 1,
+                }),
+            },
+          ),
+        Error,
+        "docker compose build --no-cache failed",
+      );
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+});
+
+test({
+  name: "runPostDeployHooks reports AbortError as a hook timeout",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    const dir = await Deno.makeTempDir({ prefix: "tp-hooks-timeout-" });
+    const original = Deno.Command;
+    Deno.Command = class {
+      spawn() {
+        throw new DOMException("The signal has been aborted", "AbortError");
+      }
+    } as unknown as typeof Deno.Command;
+    try {
+      await assertRejects(
+        () =>
+          runPostDeployHooks(
+            [{
+              composeServiceName: "web",
+              postDeployCommand: "true",
+            }],
+            dir,
+          ),
+        Error,
+        `Hook command timed out after ${HOOK_TIMEOUT_MS}ms`,
+      );
+    } finally {
+      Deno.Command = original;
       await Deno.remove(dir, { recursive: true });
     }
   },

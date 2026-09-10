@@ -112,4 +112,136 @@ describe("buildStorageVolumesFragment", () => {
       "Compose service missing not found",
     );
   });
+
+  it("returns an empty fragment when there are no storage entries", () => {
+    assertEquals(
+      buildStorageVolumesFragment([], new Map(), webResolved),
+      {},
+    );
+  });
+
+  it("skips bind overlay when mounts are empty and stamps read-only plus volume subpath", () => {
+    const volumeId = "01936b3e-8c7a-7b2d-a1f0-123456789abd";
+    const fragment = buildStorageVolumesFragment(
+      [
+        {
+          storageId: "st-bind-empty",
+          locationId: "loc-bind-empty",
+          kind: "directory",
+          name: "empty",
+          provider: "path",
+          serverId: "srv",
+          mounts: [],
+        },
+        {
+          storageId: "st-vol-sub",
+          locationId: "loc-vol-sub",
+          kind: "volume",
+          name: "cache",
+          provider: "docker",
+          serverId: "srv",
+          mounts: [
+            { destinationPath: "/skipped" },
+            {
+              composeServiceName: "web",
+              destinationPath: "/cache",
+              readOnly: true,
+              subpath: "nested",
+            },
+          ],
+        },
+      ],
+      new Map([
+        ["loc-bind-empty", "/unused"],
+        ["loc-vol-sub", volumeId],
+      ]),
+      webResolved,
+    );
+
+    assertEquals(fragment.services?.web?.volumes, [
+      {
+        type: "volume",
+        source: volumeId,
+        target: "/cache",
+        read_only: true,
+        volume: { subpath: "nested" },
+      },
+    ]);
+    assertEquals(fragment.volumes?.[volumeId], {
+      name: volumeId,
+      external: true,
+    });
+  });
+
+  it("throws when a bind mount is missing its host path", () => {
+    assertThrows(
+      () =>
+        buildStorageVolumesFragment(
+          [{
+            storageId: "st-bind",
+            locationId: "loc-missing",
+            kind: "directory",
+            name: "data",
+            provider: "path",
+            serverId: "srv",
+            mounts: [{
+              composeServiceName: "web",
+              destinationPath: "/data",
+            }],
+          }],
+          new Map(),
+          webResolved,
+        ),
+      Error,
+      "Missing host path for location loc-missing",
+    );
+  });
+
+  it("falls back to the mount-path map when volumeName is omitted", () => {
+    const fragment = buildStorageVolumesFragment(
+      [{
+        storageId: "st-vol",
+        locationId: "loc-vol",
+        kind: "volume",
+        name: "data",
+        provider: "docker",
+        serverId: "srv",
+        volumeName: "",
+        mounts: [{
+          composeServiceName: "web",
+          destinationPath: "/vol",
+        }],
+      }],
+      new Map([["loc-vol", "tp-from-map"]]),
+      webResolved,
+    );
+    assertEquals(fragment.volumes?.["tp-from-map"], {
+      name: "tp-from-map",
+      external: true,
+    });
+  });
+
+  it("throws when a docker volume has neither volumeName nor a mapped path", () => {
+    assertThrows(
+      () =>
+        buildStorageVolumesFragment(
+          [{
+            storageId: "st-vol",
+            locationId: "loc-vol",
+            kind: "volume",
+            name: "data",
+            provider: "docker",
+            serverId: "srv",
+            mounts: [{
+              composeServiceName: "web",
+              destinationPath: "/data",
+            }],
+          }],
+          new Map(),
+          webResolved,
+        ),
+      Error,
+      "Missing docker volume path for location loc-vol",
+    );
+  });
 });

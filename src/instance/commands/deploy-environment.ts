@@ -86,6 +86,7 @@ import {
   applyNativeAppServices,
   type ApplyNativeAppsOpts,
   ensureNativeAppRuntime,
+  type NativeAppBindings,
   nativeAppBindingsFromPayload,
 } from "../../deploy/native/apply-native-apps.ts";
 import {
@@ -128,7 +129,12 @@ import {
   type EnvironmentDeploySource,
   parseEnvironmentDeployPayload,
 } from "./contracts.ts";
-import { type LayoutPaths, resolveLayout } from "../../paths/layout.ts";
+import {
+  type LayoutPaths,
+  principalHomePath,
+  resolveLayout,
+  siteCurrentSymlink,
+} from "../../paths/layout.ts";
 
 const SAFE_PATH_ID_RE = /^[A-Za-z0-9_-]+$/;
 const COMPOSE_PROJECT_RE = /^[a-z0-9][a-z0-9_-]*$/;
@@ -1015,15 +1021,18 @@ async function persistComposeEnvFile(
 }
 
 /**
- * Scheduled jobs for this environment's sites.
+ * Scheduled jobs for this environment's sites **and** native apps.
  *
  * Resolves each job's account and working directory from the same bindings the
- * site apply used, rather than re-deriving them — two derivations from one
+ * owning apply used, rather than re-deriving them — two derivations from one
  * input is how a timer ends up running in a tree the vhost does not serve.
  *
  * Always called, even with no jobs: the apply's removal sweep is what retires a
  * timer the operator deleted from compose, and skipping it when the payload
- * declares none would leave those firing forever.
+ * declares none would leave those firing forever. That single sweep is also why
+ * both lanes are collected here and applied in one pass: a second
+ * `applyCronJobs` call would treat the first lane's timers as stale and remove
+ * the ones it had just installed.
  */
 async function applyDeployCronJobs(
   layout: LayoutPaths,
@@ -1031,6 +1040,8 @@ async function applyDeployCronJobs(
   sites: readonly EnvironmentDeploySite[],
   releaseBindings: ReadonlyMap<string, SiteRelease>,
   managedBindings: ReadonlyMap<string, SiteManagedDirectory>,
+  nativeAppServices: readonly EnvironmentDeployNativeAppService[],
+  nativeAppBindings: NativeAppBindings,
 ): Promise<void> {
   const specs: CronApplySpec[] = [];
   for (const site of sites) {
@@ -1049,6 +1060,26 @@ async function applyDeployCronJobs(
         managedBindings.get(site.composeServiceName),
       ),
       jobs: site.cron,
+    });
+  }
+  for (const app of nativeAppServices) {
+    if (!app.cron || app.cron.length === 0) continue;
+    const binding = nativeAppBindings.get(app.composeServiceName);
+    // No binding means no promoted release and no account to run as. The app's
+    // own unit is skipped for the same reason, so a timer here would be a job
+    // pointing into a tree that was never published.
+    if (!binding) continue;
+    specs.push({
+      composeServiceName: app.composeServiceName,
+      // The release `current` symlink, exactly what the app's own unit uses as
+      // `WorkingDirectory` — a job and the application it belongs to must not
+      // disagree about which tree is live.
+      workingDirectory: siteCurrentSymlink(
+        principalHomePath(layout, binding.username),
+        app.serviceId,
+      ),
+      username: binding.username,
+      jobs: app.cron,
     });
   }
   try {
@@ -1689,18 +1720,6 @@ export async function handleEnvironmentDeploy(
     siteManagedBindings,
   );
 
-  // After the site apply, because a job's WorkingDirectory is the document root
-  // the apply just settled — and a timer pointed at a tree that does not exist
-  // yet fails on its first firing rather than at deploy, which is the worst
-  // place to find out.
-  await applyDeployCronJobs(
-    layout,
-    parsedPayload,
-    sites,
-    siteReleaseBindings,
-    siteManagedBindings,
-  );
-
   // Native apps come last of the host-native lanes: the release is promoted and
   // the vhost tree is settled, so a unit that fails its health probe fails only
   // itself and rolls its own `current` back. Health (not promote) owns this
@@ -1716,6 +1735,25 @@ export async function handleEnvironmentDeploy(
     deps?.nativeAppIo,
   );
   runtime.logSink.setPhase(COMMAND_LOG_PHASES.PREPARE);
+
+  // After *both* host-native applies, because a job's WorkingDirectory is the
+  // tree its owner just settled — a site's document root, or a native app's
+  // release `current` symlink, which does not exist until the promote above has
+  // run. A timer pointed at a tree that is not there yet fails on its first
+  // firing rather than at deploy, which is the worst place to find out.
+  //
+  // One call covers both lanes on purpose: `applyCronJobs` retires every timer
+  // for this environment that the specs it was handed do not name, so splitting
+  // this into two passes would make each one delete the other's units.
+  await applyDeployCronJobs(
+    layout,
+    parsedPayload,
+    sites,
+    siteReleaseBindings,
+    siteManagedBindings,
+    nativeAppServices,
+    nativeAppBindingsFromPayload(parsedPayload),
+  );
 
   const published = await publishDeployedCompose({
     hasContainers,

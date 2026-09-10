@@ -182,3 +182,59 @@ test("setClusterAlias surfaces HTTP failures", async () => {
     "orchestrator /api/set-cluster-alias/db-1%3A5432/alias failed: HTTP 503",
   );
 });
+
+test("recoverToCandidate and listOrchestratorProblems surface HTTP failures", async () => {
+  await assertRejects(
+    () =>
+      recoverToCandidate({
+        sourceHost: "203.0.113.10",
+        sourcePort: 5432,
+        targetHost: "203.0.113.11",
+        targetPort: 5432,
+      }, { fetch: errorFetch }),
+    Error,
+    "orchestrator /api/recover/203.0.113.10/5432/203.0.113.11/5432 failed: HTTP 503",
+  );
+  await assertRejects(
+    () =>
+      listOrchestratorProblems({
+        fetch: () => Promise.resolve(new Response("", { status: 500 })),
+      }),
+    Error,
+    "orchestrator /api/problems failed: HTTP 500",
+  );
+});
+
+test("orchestrator GET sends basic auth and tolerates empty or non-JSON bodies", async () => {
+  const headers: Array<HeadersInit | undefined> = [];
+  await discoverInstance({ host: "db-1", port: 5432 }, {
+    credentials: { user: "admin", password: "s3cret" },
+    fetch: (_url, init) => {
+      headers.push(init?.headers);
+      return Promise.resolve(new Response("", { status: 200 }));
+    },
+  });
+  const auth = headers[0] as Record<string, string> | undefined;
+  assertEquals(auth?.Authorization, `Basic ${btoa("admin:s3cret")}`);
+
+  const empty = await listOrchestratorProblems({
+    fetch: () => Promise.resolve(new Response("", { status: 200 })),
+  });
+  assertEquals(empty, []);
+
+  const plaintext = await listOrchestratorProblems({
+    fetch: () => Promise.resolve(new Response("not-json", { status: 200 })),
+  });
+  assertEquals(plaintext, []);
+});
+
+test("parseOrchestratorProblems skips malformed keys and non-array problem lists", () => {
+  assertEquals(
+    parseOrchestratorProblems([{
+      ClusterAlias: "cluster-c",
+      Key: "not-an-object",
+      Problems: "DeadPrimary",
+    }]),
+    [{ clusterAlias: "cluster-c" }],
+  );
+});

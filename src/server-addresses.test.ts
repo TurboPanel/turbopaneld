@@ -5,6 +5,8 @@
 import { assertEquals } from "@std/assert";
 import {
   collectServerIps,
+  parseIpv4DefaultRouteInterface,
+  parseIpv6DefaultRouteInterface,
   readDefaultRouteInterfaces,
 } from "./server-addresses.ts";
 
@@ -542,6 +544,129 @@ test("collectServerIps without a route table marks nothing", () => {
           interface: "eth0",
         },
       ]);
+    },
+  );
+});
+
+test("collectServerIps prefers a later preferred marker for the same address", () => {
+  withNetworkInterfaces(
+    [
+      { name: "eth0", family: "IPv4", address: "10.0.0.5" },
+      { name: "eth1", family: "IPv4", address: "10.0.0.5" },
+    ],
+    () => {
+      assertEquals(collectServerIps({ v4: "eth1" }), [
+        {
+          address: "10.0.0.5",
+          version: 4,
+          scope: "private",
+          interface: "eth1",
+          preferred: true,
+        },
+      ]);
+    },
+  );
+});
+
+test("collectServerIps marks the IPv6 default-route interface as preferred", () => {
+  withNetworkInterfaces(
+    [
+      { name: "eth0", family: "IPv6", address: "2001:db8::1" },
+      { name: "eth1", family: "IPv6", address: "fd12::1" },
+    ],
+    () => {
+      assertEquals(collectServerIps({ v6: "eth0" }), [
+        {
+          address: "2001:db8::1",
+          version: 6,
+          scope: "public",
+          interface: "eth0",
+          preferred: true,
+        },
+        {
+          address: "fd12::1",
+          version: 6,
+          scope: "private",
+          interface: "eth1",
+        },
+      ]);
+    },
+  );
+});
+
+test("collectServerIps records a /0 prefix from an all-zero netmask", () => {
+  withNetworkInterfaces(
+    [
+      {
+        name: "eth0",
+        family: "IPv4",
+        address: "203.0.113.9",
+        netmask: "0.0.0.0",
+      },
+    ],
+    () => {
+      assertEquals(collectServerIps(), [
+        {
+          address: "203.0.113.9",
+          version: 4,
+          scope: "public",
+          cidr: "203.0.113.9/0",
+          interface: "eth0",
+        },
+      ]);
+    },
+  );
+});
+
+test("parseIpv4DefaultRouteInterface skips short rows and non-numeric metrics", () => {
+  const nanMetric = [
+    "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask",
+    "eth9\t00000000\t00000000\t0003\t0\t0\tabc\t00000000",
+    "truncated",
+    "",
+  ].join("\n");
+  assertEquals(parseIpv4DefaultRouteInterface(nanMetric), "eth9");
+
+  const numeric = [
+    "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask",
+    "eth1\t00000000\t00000000\t0003\t0\t0\t80\t00000000",
+    "eth0\t00000000\t00000000\t0003\t0\t0\t50\t00000000",
+    "",
+  ].join("\n");
+  assertEquals(parseIpv4DefaultRouteInterface(numeric), "eth0");
+});
+
+test("parseIpv6DefaultRouteInterface skips short, loopback, and non-default rows", () => {
+  const unspecified = "0".repeat(32);
+  const nanMetric = [
+    "short",
+    `${unspecified} 00 00000000000000000000000000000000 00 00000000000000000000000000000000 nothex 00000001 00000000 00000003       eth9`,
+    "",
+  ].join("\n");
+  assertEquals(parseIpv6DefaultRouteInterface(nanMetric), "eth9");
+
+  const ranked = [
+    `${unspecified} 00 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000001 00000000 00000003       lo`,
+    `${unspecified} 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000001 00000000 00000003       eth2`,
+    `${unspecified} 00 00000000000000000000000000000000 00 00000000000000000000000000000000 00000200 00000001 00000000 00000003       eth0`,
+    `${unspecified} 00 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000001 00000000 00000003       eth1`,
+    "",
+  ].join("\n");
+  assertEquals(parseIpv6DefaultRouteInterface(ranked), "eth1");
+});
+
+test("readDefaultRouteInterfaces keeps a family empty when its table has no default", () => {
+  withProcRoutes(
+    {
+      "/proc/net/route": [
+        "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask",
+        "eth0\t0001A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF",
+        "",
+      ].join("\n"),
+      "/proc/net/ipv6_route": "too-short\n",
+    },
+    () => {
+      assertEquals(readDefaultRouteInterfaces(), {});
     },
   );
 });

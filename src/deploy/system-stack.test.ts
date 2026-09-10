@@ -208,3 +208,134 @@ test("inspectSystemStackContainer reports authoritative absence when the compose
     await fixture.cleanup();
   }
 });
+
+test("inspectSystemStackContainer skips malformed and mismatched compose rows", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env, {
+      skipDiscovery: true,
+      forceMode: "production",
+    });
+    const result = await withComposeFile(
+      layout,
+      () =>
+        inspectSystemStackContainer(layout, DATABASE_DESCRIPTOR, {
+          runDocker: (_args) =>
+            Promise.resolve(
+              {
+                success: true,
+                code: 0,
+                stdout: JSON.stringify([
+                  { Name: "broken" },
+                  labelledRow({ Service: "queue" }),
+                ]),
+                stderr: "",
+              } satisfies DockerCliResult,
+            ),
+        }),
+    );
+    assertEquals(result, null);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("inspectSystemStackContainer returns undefined when docker throws", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env, {
+      skipDiscovery: true,
+      forceMode: "production",
+    });
+    const result = await withComposeFile(
+      layout,
+      () =>
+        inspectSystemStackContainer(layout, DATABASE_DESCRIPTOR, {
+          runDocker: () => Promise.reject(new TypeError("socket missing")),
+        }),
+    );
+    assertEquals(result, undefined);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("inspectSystemStackContainer rethrows a compose-file stat that is not NotFound", async () => {
+  const fixture = await createTempLayout();
+  const originalStat = Deno.stat.bind(Deno);
+  try {
+    const layout = resolveLayout(fixture.env, {
+      skipDiscovery: true,
+      forceMode: "production",
+    });
+    const composePath = systemStackComposePath(layout);
+    Deno.stat = ((path: string | URL) => {
+      if (String(path) === composePath) {
+        return Promise.reject(new Deno.errors.PermissionDenied("compose"));
+      }
+      return originalStat(path);
+    }) as typeof Deno.stat;
+    const result = await inspectSystemStackContainer(
+      layout,
+      DATABASE_DESCRIPTOR,
+      {
+        runDocker: () =>
+          Promise.resolve({
+            success: true,
+            code: 0,
+            stdout: "[]",
+            stderr: "",
+          }),
+      },
+    );
+    assertEquals(result, undefined);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("inspectSystemStackContainer falls back when docker stderr is empty", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env, {
+      skipDiscovery: true,
+      forceMode: "production",
+    });
+    const result = await withComposeFile(
+      layout,
+      () =>
+        inspectSystemStackContainer(layout, DATABASE_DESCRIPTOR, {
+          runDocker: () =>
+            Promise.resolve({
+              success: false,
+              code: 1,
+              stdout: "",
+              stderr: "",
+            }),
+        }),
+    );
+    assertEquals(result, undefined);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("inspectSystemStackContainer stringifies a non-Error throw", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env, {
+      skipDiscovery: true,
+      forceMode: "production",
+    });
+    const result = await withComposeFile(
+      layout,
+      () =>
+        inspectSystemStackContainer(layout, DATABASE_DESCRIPTOR, {
+          runDocker: () => Promise.reject("socket missing"),
+        }),
+    );
+    assertEquals(result, undefined);
+  } finally {
+    await fixture.cleanup();
+  }
+});

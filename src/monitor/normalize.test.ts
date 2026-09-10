@@ -243,3 +243,47 @@ test("deriveContainerStatus covers remaining docker and event branches", () => {
     new Date(1_700_000_000 * 1000).toISOString(),
   );
 });
+
+test("normalizeContainer prefers FinishedAt and summary ports when inspect bindings are empty", () => {
+  const fromFinished = normalizeContainer({
+    inspect: inspect({
+      Id: "abc123def4567890",
+      State: {
+        Status: "exited",
+        ExitCode: 0,
+        StartedAt: "2026-01-01T00:00:00Z",
+        FinishedAt: "2026-02-01T00:00:00Z",
+      },
+    }),
+  });
+  assertEquals(fromFinished.updatedAt, "2026-02-01T00:00:00Z");
+
+  const fromSummaryPorts = normalizeContainer({
+    inspect: inspect({
+      Id: "abc123def4567890",
+      NetworkSettings: {
+        Ports: {
+          "80/tcp": null,
+          "443/tcp": [],
+        },
+      },
+    }),
+    summary: summary({
+      Id: "abc123def4567890",
+      Ports: [{ PrivatePort: 80, Type: "tcp" }],
+    }),
+  });
+  assertEquals(fromSummaryPorts.ports?.[0], "0.0.0.0:?->80/tcp");
+
+  const missingHostPort = normalizeContainer({
+    inspect: inspect({
+      Id: "abc123def4567890",
+      NetworkSettings: {
+        Ports: {
+          "80/tcp": [{ HostIp: "203.0.113.10" }],
+        },
+      },
+    }),
+  });
+  assertEquals(missingHostPort.ports?.[0], "203.0.113.10:?->80/tcp");
+});

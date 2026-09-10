@@ -176,6 +176,45 @@ test("artifactFromPublishFile wraps non-Error read failures", async () => {
   }
 });
 
+test("runGenerateChannelManifestCli reads Deno.env when io.env is omitted", async () => {
+  const keys = ["BUILD_ID", "GIT_COMMIT", "BUILT_AT"] as const;
+  const previous = Object.fromEntries(
+    keys.map((key) => [key, Deno.env.get(key)]),
+  );
+  Deno.env.set("BUILD_ID", "env-build");
+  Deno.env.set("GIT_COMMIT", "abcdef0123456789abcdef0123456789abcdef01");
+  Deno.env.set("BUILT_AT", "2026-01-01T00:00:00.000Z");
+  const seen: string[] = [];
+  try {
+    await runGenerateChannelManifestCli({
+      args: ["/tmp/publish"],
+      generate: (options) => {
+        seen.push(options.buildId);
+        return Promise.resolve({
+          schema: 1,
+          channel: "trunk",
+          commit: options.commit,
+          buildId: options.buildId,
+          builtAt: options.builtAt,
+          binaryArtifacts: {
+            "linux-amd64": { url: "./a", sha256: "0", size: 1 },
+            "linux-arm64": { url: "./b", sha256: "0", size: 1 },
+          },
+          jsFallbackArtifact: { url: "./c", sha256: "0", size: 1 },
+          orchestrationArtifact: { url: "./d", sha256: "0", size: 1 },
+        });
+      },
+    });
+    assertEquals(seen, ["env-build"]);
+  } finally {
+    for (const key of keys) {
+      const value = previous[key];
+      if (value === undefined) Deno.env.delete(key);
+      else Deno.env.set(key, value);
+    }
+  }
+});
+
 test("runGenerateChannelManifestCli requires a publish dir and env", async () => {
   const errors: string[] = [];
   const exits: number[] = [];

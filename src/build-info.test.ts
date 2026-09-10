@@ -44,7 +44,23 @@ test("sourceUrlForCommit maps overlay identity to the git tree URL", () => {
     "https://github.com/TurboPanel/turbopaneld/tree/abcdef0123456789abcdef0123456789abcdef01",
   );
   assertEquals(
+    sourceUrlForCommit("abcdef0123456789abcdef0123456789abcdef01"),
+    "https://github.com/TurboPanel/turbopaneld/tree/abcdef0123456789abcdef0123456789abcdef01",
+  );
+  assertEquals(
     sourceUrlForCommit("dev"),
+    "https://github.com/TurboPanel/turbopaneld",
+  );
+  assertEquals(
+    sourceUrlForCommit(""),
+    "https://github.com/TurboPanel/turbopaneld",
+  );
+  assertEquals(
+    sourceUrlForCommit("   "),
+    "https://github.com/TurboPanel/turbopaneld",
+  );
+  assertEquals(
+    sourceUrlForCommit("+99"),
     "https://github.com/TurboPanel/turbopaneld",
   );
 });
@@ -127,4 +143,75 @@ test("getBuildInfo uses the checkout git identity in development", () => {
   assertEquals(info.builtAt, BUILD_INFO.builtAt);
   assertEquals(info.channel, BUILD_INFO.channel);
   assertEquals(info.sourceUrl, sourceUrlForCommit(info.commit));
+});
+
+test("getBuildInfo falls back to a generic dev identity when git is unreadable", () => {
+  const original = Deno.readTextFileSync;
+  // deno-lint-ignore no-explicit-any
+  (Deno as any).readTextFileSync = (path: string | URL) => {
+    const target = String(path);
+    if (
+      target.includes(`${join(".git", "HEAD")}`) || target.endsWith("/HEAD")
+    ) {
+      throw new Deno.errors.NotFound(target);
+    }
+    return original(path);
+  };
+  try {
+    const info = getBuildInfo();
+    assertEquals(info.commit, "dev");
+    assertEquals(info.buildId, "dev");
+    assertEquals(info.builtAt, BUILD_INFO.builtAt);
+    assertEquals(info.channel, BUILD_INFO.channel);
+    assertEquals(info.sourceUrl, "https://github.com/TurboPanel/turbopaneld");
+  } finally {
+    // deno-lint-ignore no-explicit-any
+    (Deno as any).readTextFileSync = original;
+  }
+});
+
+test("getBuildInfo uses the short SHA fallback when the second git read fails", () => {
+  const original = Deno.readTextFileSync;
+  const hash = "abcdef0123456789abcdef0123456789abcdef01";
+  let gitReads = 0;
+  // deno-lint-ignore no-explicit-any
+  (Deno as any).readTextFileSync = (path: string | URL) => {
+    const target = String(path);
+    if (target.includes(".git")) {
+      gitReads += 1;
+      if (gitReads === 1) return `${hash}\n`;
+      throw new Deno.errors.NotFound(target);
+    }
+    return original(path);
+  };
+  try {
+    const info = getBuildInfo();
+    assertEquals(info.commit, hash);
+    assertEquals(info.buildId, "dev-abcdef0");
+    assertEquals(info.sourceUrl, sourceUrlForCommit(hash));
+  } finally {
+    // deno-lint-ignore no-explicit-any
+    (Deno as any).readTextFileSync = original;
+  }
+});
+
+test("getBuildInfo returns the stamped identity in production mode", () => {
+  const originalStatSync = Deno.statSync;
+  const originalCwd = Deno.cwd;
+  const originalToObject = Deno.env.toObject.bind(Deno.env);
+  // deno-lint-ignore no-explicit-any
+  (Deno as any).statSync = (_path: string | URL) => {
+    throw new Deno.errors.NotFound("no checkout markers");
+  };
+  Deno.cwd = () => "/nonexistent-turbopaneld-build-info-prod";
+  Deno.env.toObject = () => ({});
+  try {
+    const info = getBuildInfo();
+    assertEquals(info, BUILD_INFO);
+  } finally {
+    // deno-lint-ignore no-explicit-any
+    (Deno as any).statSync = originalStatSync;
+    Deno.cwd = originalCwd;
+    Deno.env.toObject = originalToObject;
+  }
 });

@@ -3,7 +3,7 @@
  * `releases/<releaseId>/.turbopanel/release.json`.
  */
 
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import {
   readReleaseManifest,
@@ -154,5 +154,18 @@ test("readReleaseManifest rejects non-string railpack version fields", async () 
       JSON.stringify({ ...BASE, railpackFrontendVersion: 9 }),
     );
     assertEquals(await readReleaseManifest(releaseDir), null);
+  });
+});
+
+test("readReleaseManifest rethrows a non-NotFound read error", async () => {
+  await withReleaseDir(async (releaseDir) => {
+    await Deno.mkdir(join(releaseDir, RELEASE_METADATA_DIRNAME), {
+      recursive: true,
+    });
+    await Deno.mkdir(releaseManifestPath(releaseDir), { recursive: true });
+    await assertRejects(
+      () => readReleaseManifest(releaseDir),
+      Error,
+    );
   });
 });

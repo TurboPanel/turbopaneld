@@ -97,6 +97,15 @@ export type CronUnitOpts = {
  * and by nothing else, so enabling it would be meaningless and `WantedBy` would
  * make it run once at boot as a side effect.
  */
+/**
+ * Ceiling for a job that did not declare one.
+ *
+ * Fifteen minutes: long enough for the backup and import jobs these timers
+ * mostly run, short enough that a wedged job is noticed on the next firing
+ * rather than a week later.
+ */
+const DEFAULT_CRON_TIMEOUT_SECONDS = 900;
+
 export function cronServiceContent(opts: CronUnitOpts): string {
   const home = principalHomePath(opts.layout, opts.username);
   return [
@@ -128,7 +137,13 @@ export function cronServiceContent(opts: CronUnitOpts): string {
     }`,
     // A job that hangs must not hold a slot forever; the timer would then never
     // fire again, and the failure would look like "cron stopped working".
-    "TimeoutStartSec=900",
+    //
+    // `Type=oneshot` makes the whole `ExecStart` the unit's *start*, so this is
+    // the run ceiling — `RuntimeMaxSec` would not bound it. An author's
+    // `timeoutSeconds` therefore replaces this default rather than joining it.
+    `TimeoutStartSec=${
+      opts.job.timeoutSeconds ?? DEFAULT_CRON_TIMEOUT_SECONDS
+    }`,
     "NoNewPrivileges=yes",
     "PrivateTmp=yes",
     "ProtectSystem=strict",

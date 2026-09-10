@@ -747,3 +747,35 @@ test({
     }
   },
 });
+
+test({
+  name:
+    "IdlePresence hello uses the default host snapshot when no collector is installed",
+  permissions: {
+    read: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  fn: () => {
+    const restore = installIdlePresenceProviders({
+      getBuildInfo: () => makeDaemonBuild("abc1234"),
+      getHostHelloIdentity: () => EMPTY_HOST,
+    });
+    const socket = openMockSocket();
+    const presence = new IdlePresence({
+      serverId: "srv-hello-default",
+      idleCheckIntervalMs: 50,
+    });
+    try {
+      presence.attach(socket as unknown as WebSocket);
+      const hellos = framesOfType(socket, "hello");
+      assertEquals(hellos.length, 1);
+      const hello = hellos[0] as Record<string, unknown>;
+      assertEquals(hello.type, "hello");
+      assertEquals(hello.daemonBuild, makeDaemonBuild("abc1234"));
+      assertEquals(typeof hello.timeSync, "object");
+    } finally {
+      presence.detach();
+      restore();
+    }
+  },
+});

@@ -153,3 +153,16 @@ test("reclaimRemovedReleaseTrees survives a runner that throws", async () => {
   assertEquals(removed, []);
   assertEquals(lines[0]?.includes("sudo unavailable"), true);
 });
+
+test("reclaimRemovedReleaseTrees stringifies a non-Error runner failure", async () => {
+  const lines: string[] = [];
+  const removed = await reclaimRemovedReleaseTrees({
+    layout: LAYOUT,
+    previous: [REMOVED],
+    currentServiceIds: new Set<string>(),
+    runFn: () => Promise.reject("sudo exploded"),
+    onOutput: (_stream, line) => lines.push(line),
+  });
+  assertEquals(removed, []);
+  assertEquals(lines[0]?.includes("sudo exploded"), true);
+});

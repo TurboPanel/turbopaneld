@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import { parseNetDev } from "./parse-net-dev.ts";
+import { parseNetDev, parseNetDevDetailedCounters } from "./parse-net-dev.ts";
 import { it } from "@std/testing/bdd";
 
 function fixture(name: string): string {
@@ -47,5 +47,43 @@ it("parseNetDev returns null for empty, short, or non-finite rows", () => {
       "  eth0: NaN 1000 0 0 0 0 0 0 3000000 2000 0 0 0 0 0 0\n",
     ),
     null,
+  );
+});
+
+it("parseNetDev skips header rows whose iface name contains a pipe", () => {
+  assertEquals(
+    parseNetDev("face|bytes: 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16\n"),
+    null,
+  );
+  assertEquals(
+    parseNetDev("  : 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16\n"),
+    null,
+  );
+});
+
+it("parseNetDevDetailedCounters parses rx/tx errors and drops", () => {
+  const text = "  eth0: 100 1 2 3 0 0 0 0 200 4 5 6 0 0 0 0\n";
+  assertEquals(parseNetDevDetailedCounters(text), {
+    eth0: {
+      rx: 100,
+      tx: 200,
+      rxErrors: 2,
+      txErrors: 5,
+      rxDropped: 3,
+      txDropped: 6,
+    },
+  });
+});
+
+it("parseNetDevDetailedCounters skips header, short, and non-finite rows", () => {
+  assertEquals(
+    parseNetDevDetailedCounters("Inter-| Receive\n  eth0: 1 2 3\n"),
+    {},
+  );
+  assertEquals(
+    parseNetDevDetailedCounters(
+      "  eth0: NaN 1 2 3 0 0 0 0 200 4 5 6 0 0 0 0\n",
+    ),
+    {},
   );
 });

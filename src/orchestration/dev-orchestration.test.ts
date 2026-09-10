@@ -315,3 +315,50 @@ test("requireDevOrchestrationLayout throws when playbook is missing", async () =
     }
   });
 });
+
+test("devOrchestrationReady is false when the overlay manifest is invalid", async () => {
+  await withTempLayout(async (fixture) => {
+    const devRoot = join(fixture.dirs.configDir, "dev-orch");
+    await Deno.mkdir(devRoot, { recursive: true });
+    await Deno.writeTextFile(join(devRoot, "ansible.cfg"), "[defaults]\n");
+    await Deno.writeTextFile(
+      join(devRoot, DEV_CONVERGE_MANIFEST_FILE),
+      JSON.stringify({ playbook: 1 }),
+    );
+    const restore = withDevOrchestrationEnv(devRoot);
+    try {
+      assertEquals(await devOrchestrationReady(), false);
+    } finally {
+      restore();
+    }
+  });
+});
+
+test("devOrchestrationReady rethrows non-NotFound overlay stat errors", async () => {
+  await withTempLayout(async (fixture) => {
+    const devRoot = join(fixture.dirs.configDir, "dev-orch");
+    await Deno.mkdir(devRoot, { recursive: true });
+    const manifestPath = join(devRoot, DEV_CONVERGE_MANIFEST_FILE);
+    await Deno.writeTextFile(
+      manifestPath,
+      JSON.stringify({ playbook: "playbook.yml", roles: [], devRoles: [] }),
+    );
+    const restore = withDevOrchestrationEnv(devRoot);
+    const originalStat = Deno.stat;
+    Deno.stat = ((path) => {
+      if (String(path) === manifestPath) {
+        return Promise.reject(new Deno.errors.PermissionDenied("denied"));
+      }
+      return originalStat.call(Deno, path);
+    }) as typeof Deno.stat;
+    try {
+      await assertRejects(
+        () => devOrchestrationReady(),
+        Deno.errors.PermissionDenied,
+      );
+    } finally {
+      Deno.stat = originalStat;
+      restore();
+    }
+  });
+});
