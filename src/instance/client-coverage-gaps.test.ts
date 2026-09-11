@@ -3,6 +3,7 @@ import { assertEquals } from "@std/assert";
 import {
   clearDaemonKeyState,
   DEFAULT_INITIAL_BACKOFF_MS,
+  installClientTestHooks,
   installClientTimeSource,
   InstanceClient,
   PARKED_BACKOFF_MIN_MS,
@@ -232,6 +233,120 @@ it({
 });
 
 it({
+  name: "connected client answers metrics-capabilities-request",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  fn: async () => {
+    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const { sockets, restore: restoreWebSocket } = installTrackingWebSocket();
+    let restoreFetch: (() => void) | undefined;
+    const restoreHooks = installClientTestHooks({
+      collectMetricsCapabilities: () =>
+        Promise.resolve({
+          sensors: {
+            cpuTemperature: [],
+            cpuPower: [],
+            cpuFan: [],
+            gpuFan: [],
+            boardTemperature: [],
+            ambient1Temperature: [],
+            ambient2Temperature: [],
+            disk1Temperature: [],
+            disk2Temperature: [],
+            systemFan1: [],
+            systemFan2: [],
+            gpuDevices: [],
+          },
+          storageMounts: {
+            system: null,
+            hosting: { probedPath: "/srv/users", result: null },
+            docker: {
+              probedPath: null,
+              result: null,
+              reason: "docker_absent",
+            },
+            candidates: [],
+          },
+          networkInterfaces: [],
+          process: { probedPath: "/proc" },
+        }),
+    });
+    try {
+      const { signing, authToken, enroll } = await prepareVerifiedAuth();
+      const api = createFakeInstanceApi();
+      scriptStandardAuth(api, signing, authToken, enroll);
+      api.script(
+        "/api/daemon/v1/deployments/secrets/rehydrate",
+        () =>
+          new Response(JSON.stringify({ deployments: [] }), { status: 200 }),
+      );
+      restoreFetch = api.install();
+
+      await withTempLayout(async (fixture) => {
+        Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", fixture.dirs.stateDir);
+        Deno.env.set("TURBOPANEL_FORCE_ENROLL", "1");
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.id`,
+          "license-123\n",
+        );
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.token`,
+          "token-abc\n",
+        );
+
+        const client = new InstanceClient({
+          config: {
+            kind: "url",
+            baseUrl: "https://instance.test",
+            wsBaseUrl: "wss://instance.test",
+          },
+          httpClient: {} as Deno.HttpClient,
+        });
+        try {
+          client.start();
+          const socket = await waitFor(
+            "capabilities websocket",
+            () => sockets.at(0),
+          );
+          socket.open();
+          await flushMicrotasks();
+
+          socket.receive({
+            type: "metrics-capabilities-request",
+            id: "caps-1",
+            at: new Date().toISOString(),
+          });
+
+          const result = await waitFor(
+            "metrics-capabilities-result",
+            () => lastFrameOfType(socket, "metrics-capabilities-result"),
+          );
+          assertEquals((result as { ok?: boolean }).ok, true);
+          assertEquals(
+            (result as { capabilities?: { process?: { probedPath?: string } } })
+              .capabilities?.process?.probedPath,
+            "/proc",
+          );
+        } finally {
+          client.stop();
+        }
+      });
+    } finally {
+      restoreHooks();
+      restoreFetch?.();
+      restoreWebSocket();
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+    }
+  },
+});
+
+it({
   name: "connected client rejects invalid capability plans and generations",
   permissions: {
     env: true,
@@ -416,7 +531,10 @@ it({
             () => lastFrameOfType(socket, "capability-plan-clear-result"),
           );
           assertEquals((cleared as { ok?: boolean }).ok, true);
-          assertEquals(await readCapabilityPlan(fixture.dirs.stateDir), undefined);
+          assertEquals(
+            await readCapabilityPlan(fixture.dirs.stateDir),
+            undefined,
+          );
         } finally {
           client.stop();
         }

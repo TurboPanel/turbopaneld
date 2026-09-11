@@ -3456,6 +3456,11 @@ it({
             at: new Date().toISOString(),
           });
           socket.receive({
+            type: "metrics-capabilities-request",
+            id: "caps-1",
+            at: new Date().toISOString(),
+          });
+          socket.receive({
             type: "managed-logs-request",
             id: "logs-1",
             managedId: "00000000-0000-4000-8000-000000000001",

@@ -64,6 +64,7 @@ import { decodeBase64 } from "@std/encoding/base64";
 import { getBuildInfo } from "../build-info.ts";
 import { IdlePresence } from "./idle-presence.ts";
 import type { MetricsCollector } from "../metrics/collector/index.ts";
+import { collectMetricsCapabilities } from "../metrics/collector/capabilities.ts";
 import type { MetricsScheduler } from "../metrics/scheduler.ts";
 import { rebindMetricsScheduler } from "../metrics/scheduler.ts";
 import { LiveLeaseManager } from "../metrics/live-leases.ts";
@@ -71,7 +72,10 @@ import {
   type MetricsCapabilityPlan,
   parseMetricsCapabilityPlan,
 } from "../metrics/capability-plan.ts";
-import { clearCapabilityPlan, writeCapabilityPlan } from "../metrics/collector/capability-plan-store.ts";
+import {
+  clearCapabilityPlan,
+  writeCapabilityPlan,
+} from "../metrics/collector/capability-plan-store.ts";
 import {
   resolveHardwareProfile,
   writeHardwareProfile,
@@ -192,6 +196,15 @@ type DaemonMessage =
     type: "metrics-live-stop-result";
     id: string;
     ok: boolean;
+    error?: string;
+    at: string;
+  }
+  | { type: "metrics-capabilities-request"; id: string; at: string }
+  | {
+    type: "metrics-capabilities-result";
+    id: string;
+    ok: boolean;
+    capabilities?: Record<string, unknown>;
     error?: string;
     at: string;
   }
@@ -1437,6 +1450,9 @@ export class InstanceClient {
       case "metrics-live-stop":
         this.#applyLiveLeaseStop(message, ws);
         break;
+      case "metrics-capabilities-request":
+        this.#collectMetricsCapabilities(message, ws);
+        break;
       case "topology-overrides-update":
         this.#applyTopologyOverridesUpdate(message, ws);
         break;
@@ -1824,6 +1840,45 @@ export class InstanceClient {
       type: "addresses-result",
       id: message.id,
       ips,
+      at: new Date().toISOString(),
+    };
+
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(result));
+    }
+  }
+
+  #collectMetricsCapabilities(
+    message: Extract<DaemonMessage, { type: "metrics-capabilities-request" }>,
+    ws: WebSocket,
+  ): void {
+    void this.#collectMetricsCapabilitiesAsync(message, ws);
+  }
+
+  async #collectMetricsCapabilitiesAsync(
+    message: Extract<DaemonMessage, { type: "metrics-capabilities-request" }>,
+    ws: WebSocket,
+  ): Promise<void> {
+    let capabilities: Record<string, unknown> | undefined;
+    let error: string | undefined;
+    try {
+      capabilities = await clientTestHooks
+        .collectMetricsCapabilities() as Record<string, unknown>;
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+      logWarn(
+        "instance",
+        "collect metrics capabilities failed:",
+        sanitizeForLog(err),
+      );
+    }
+
+    const result: DaemonMessage = {
+      type: "metrics-capabilities-result",
+      id: message.id,
+      ok: error === undefined,
+      ...(capabilities === undefined ? {} : { capabilities }),
+      ...(error === undefined ? {} : { error }),
       at: new Date().toISOString(),
     };
 
@@ -2357,6 +2412,7 @@ type ClientTestHooks = {
   downloadRunScript: typeof downloadRunScript;
   executeRunReconcile: typeof executeRunReconcile;
   collectServerIps: typeof collectServerIps;
+  collectMetricsCapabilities: typeof collectMetricsCapabilities;
   handleFabricPathProbe: typeof handleFabricPathProbe;
   writeInstanceTunnelToken: typeof writeInstanceTunnelToken;
   applyPublicUrls: typeof applyPublicUrls;
@@ -2372,6 +2428,7 @@ let clientTestHooks: ClientTestHooks = {
   downloadRunScript,
   executeRunReconcile,
   collectServerIps,
+  collectMetricsCapabilities,
   handleFabricPathProbe,
   writeInstanceTunnelToken,
   applyPublicUrls,

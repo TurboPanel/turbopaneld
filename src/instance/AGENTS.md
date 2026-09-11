@@ -101,7 +101,11 @@ are a separate completed measurement interval — see `../metrics/AGENTS.md`.
 `MetricsScheduler` is independent of `IdlePresence` (neither suppresses the
 other). The first metrics POST fires as soon as the socket opens (including
 the co-located self-hosted daemon) so overview stats are not gated on the 60 s
-cadence.
+cadence. Hardware-profile picker discovery is a third, on-demand path:
+`metrics-capabilities-request` / `metrics-capabilities-result` (empty request,
+result carries `MetricsCapabilities`) — not sampled on the tick, not served
+from topology. The control plane's `GET /servers/:id/metrics/capabilities`
+waits on that correlated round trip.
 
 **Reconnect jitter:** `InstanceClient` reconnects with **full-jitter** backoff
 in `[initialBackoffMs, currentBackoffMs]` (defaults 2 s → 30 s cap, doubling on
