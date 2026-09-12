@@ -751,6 +751,21 @@ export type EnvironmentDeployFabricNetwork = {
   gateway?: string;
 };
 
+/**
+ * Addressing for one operator-registered external Docker network — the
+ * byte-aligned mirror of `EnvironmentDeployDockerNetwork` in instance
+ * `src/lib/commands/schemas.ts`. `name` matches a `dockerExternalNetworks`
+ * entry; every other key is optional and is only applied when the daemon
+ * *creates* the network (Docker cannot re-range an existing one).
+ */
+export type EnvironmentDeployDockerNetwork = {
+  name: string;
+  subnet?: string;
+  ipRange?: string;
+  gateway?: string;
+  mtu?: number;
+};
+
 export type EnvironmentDeployPayload = {
   environmentId: string;
   projectId: string;
@@ -800,6 +815,14 @@ export type EnvironmentDeployPayload = {
    */
   hostingIngressNetwork?: string;
   dockerExternalNetworks?: string[];
+  /**
+   * Additive sibling of `dockerExternalNetworks`: addressing for the
+   * networks that carry any. Names only ever reference
+   * `dockerExternalNetworks` entries (an unknown name is dropped at parse
+   * time); a name with no entry here is created bare, exactly as before this
+   * field existed.
+   */
+  dockerNetworkAddressing?: EnvironmentDeployDockerNetwork[];
   /**
    * Routed TurboFabric Docker bridges (`tpn_*`) this host participates in for
    * this environment's spanning networks. Self-ensured before compose up so
@@ -1916,6 +1939,102 @@ export function isValidWireguardAllowedIp(value: unknown): boolean {
   if (isValidIpv4Literal(addressPart)) return prefix <= 32;
   if (isValidIpv6Literal(addressPart)) return prefix <= 128;
   return false;
+}
+
+/** Expand an IPv6 literal (already validated) into eight hextet integers. */
+function ipv6Hextets(value: string): number[] | null {
+  const expandSide = (side: string): number[] | null => {
+    if (side === "") return [];
+    const out: number[] = [];
+    for (const part of side.split(":")) {
+      if (part.includes(".")) {
+        const v4 = ipv4ToBigInt(part);
+        if (v4 === null) return null;
+        out.push(Number(v4 >> 16n), Number(v4 & 0xffffn));
+        continue;
+      }
+      out.push(Number.parseInt(part, 16));
+    }
+    return out;
+  };
+  const sides = value.split("::");
+  const left = expandSide(sides[0] ?? "");
+  const right = sides.length === 2 ? expandSide(sides[1] ?? "") : [];
+  if (left === null || right === null) return null;
+  if (sides.length === 1) return left.length === 8 ? left : null;
+  const gap = 8 - left.length - right.length;
+  if (gap < 1) return null;
+  return [...left, ...new Array<number>(gap).fill(0), ...right];
+}
+
+function ipv4ToBigInt(value: string): bigint | null {
+  if (!isValidIpv4Literal(value)) return null;
+  let out = 0n;
+  for (const octet of value.split(".")) {
+    out = (out << 8n) + BigInt(Number.parseInt(octet, 10));
+  }
+  return out;
+}
+
+/** IPv4 / IPv6 literal → integer address, `null` when not a literal. */
+export function ipLiteralToBigInt(value: string): bigint | null {
+  if (isValidIpv4Literal(value)) return ipv4ToBigInt(value);
+  if (!isValidIpv6Literal(value)) return null;
+  const hextets = ipv6Hextets(value);
+  if (!hextets) return null;
+  let out = 0n;
+  for (const hextet of hextets) out = (out << 16n) + BigInt(hextet);
+  return out;
+}
+
+type ParsedCidrLiteral = {
+  version: 4 | 6;
+  prefix: number;
+  /** Network address (host bits cleared). */
+  base: bigint;
+  /** Last address of the range. */
+  last: bigint;
+};
+
+/**
+ * Parse `address/prefix` (an {@link isValidWireguardAllowedIp} shape) into
+ * its aligned range; `null` for anything else.
+ */
+export function parseCidrLiteral(value: string): ParsedCidrLiteral | null {
+  const trimmed = value.trim();
+  if (!isValidWireguardAllowedIp(trimmed)) return null;
+  const slash = trimmed.lastIndexOf("/");
+  const address = trimmed.slice(0, slash);
+  const prefix = Number.parseInt(trimmed.slice(slash + 1), 10);
+  const version: 4 | 6 = isValidIpv4Literal(address) ? 4 : 6;
+  const raw = ipLiteralToBigInt(address);
+  if (raw === null) return null;
+  const hostBits = BigInt((version === 4 ? 32 : 128) - prefix);
+  const base = (raw >> hostBits) << hostBits;
+  return { version, prefix, base, last: base + (1n << hostBits) - 1n };
+}
+
+/**
+ * `child` sits entirely inside `parent` (same family). Mirrors the instance's
+ * `cidrContains` so `environment.deploy` addressing is re-validated on the
+ * daemon with the same rule the control plane applied.
+ */
+export function cidrLiteralContains(parent: string, child: string): boolean {
+  const outer = parseCidrLiteral(parent);
+  const inner = parseCidrLiteral(child);
+  if (!outer || !inner) return false;
+  if (outer.version !== inner.version) return false;
+  return inner.base >= outer.base && inner.last <= outer.last;
+}
+
+/** `address` (a bare literal) is inside `cidr`. Mirrors the instance's `addressInCidr`. */
+export function addressInCidrLiteral(address: string, cidr: string): boolean {
+  const range = parseCidrLiteral(cidr);
+  const value = ipLiteralToBigInt(address);
+  if (!range || value === null) return false;
+  const version = isValidIpv4Literal(address) ? 4 : 6;
+  if (version !== range.version) return false;
+  return value >= range.base && value <= range.last;
 }
 
 export function isValidWireguardEndpoint(value: unknown): boolean {
@@ -3653,6 +3772,89 @@ function parseOptionalStringArray(
   return [...new Set(names)].sort((a, b) => a.localeCompare(b));
 }
 
+function parseDeployDockerNetworkAddressingEntry(
+  value: unknown,
+): EnvironmentDeployDockerNetwork {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("dockerNetworkAddressing must be an array of objects");
+  }
+  const record = value as Record<string, unknown>;
+  const entry: EnvironmentDeployDockerNetwork = {
+    name: parseDockerExternalNetworkName(record.name),
+  };
+  if (record.subnet !== undefined) {
+    if (
+      typeof record.subnet !== "string" ||
+      !isValidWireguardAllowedIp(record.subnet.trim())
+    ) {
+      throw new TypeError("Invalid dockerNetworkAddressing subnet");
+    }
+    entry.subnet = record.subnet.trim();
+  }
+  // Same containment rules as the instance parser (`schemas.ts`): an
+  // `ipRange` must sit inside `subnet` and a `gateway` must be an address in
+  // it, so a tampered payload never reaches `docker network create`.
+  if (record.ipRange !== undefined) {
+    if (
+      typeof record.ipRange !== "string" ||
+      !isValidWireguardAllowedIp(record.ipRange.trim()) ||
+      entry.subnet === undefined ||
+      !cidrLiteralContains(entry.subnet, record.ipRange.trim())
+    ) {
+      throw new TypeError("Invalid dockerNetworkAddressing ipRange");
+    }
+    entry.ipRange = record.ipRange.trim();
+  }
+  if (record.gateway !== undefined) {
+    if (
+      typeof record.gateway !== "string" ||
+      (!isValidIpv4Literal(record.gateway) &&
+        !isValidIpv6Literal(record.gateway)) ||
+      entry.subnet === undefined ||
+      !addressInCidrLiteral(record.gateway, entry.subnet)
+    ) {
+      throw new TypeError("Invalid dockerNetworkAddressing gateway");
+    }
+    entry.gateway = record.gateway;
+  }
+  if (record.mtu !== undefined) {
+    if (
+      typeof record.mtu !== "number" ||
+      !Number.isInteger(record.mtu) ||
+      record.mtu < FABRIC_MTU_MIN ||
+      record.mtu > FABRIC_MTU_MAX
+    ) {
+      throw new TypeError("Invalid dockerNetworkAddressing mtu");
+    }
+    entry.mtu = record.mtu;
+  }
+  return entry;
+}
+
+/**
+ * Same normalization as `parseOptionalStringArray` on
+ * `dockerExternalNetworks`: deduped by name (first wins), sorted with
+ * `localeCompare`, entries naming a network outside `dockerExternalNetworks`
+ * dropped rather than rejected.
+ */
+function parseDeployDockerNetworkAddressing(
+  value: unknown,
+  externalNetworks: readonly string[] | undefined,
+): EnvironmentDeployDockerNetwork[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw new TypeError("dockerNetworkAddressing must be an array");
+  }
+  const known = new Set(externalNetworks ?? []);
+  const byName = new Map<string, EnvironmentDeployDockerNetwork>();
+  for (const raw of value) {
+    const entry = parseDeployDockerNetworkAddressingEntry(raw);
+    if (!known.has(entry.name) || byName.has(entry.name)) continue;
+    byName.set(entry.name, entry);
+  }
+  return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
 function parseDeployFabricNetworkEntry(
   value: unknown,
 ): EnvironmentDeployFabricNetwork {
@@ -4015,6 +4217,10 @@ export function parseEnvironmentDeployPayload(
     value.managedNetworkServices,
   );
   const hostingIngress = parseDeployHostingIngress(value.hostingIngress);
+  const dockerExternalNetworks = parseOptionalStringArray(
+    value.dockerExternalNetworks,
+    "dockerExternalNetworks",
+  );
 
   return {
     environmentId: parseNonEmptyString(value, "environmentId"),
@@ -4050,9 +4256,10 @@ export function parseEnvironmentDeployPayload(
         hostings.length,
         hostingIngress,
       ),
-      dockerExternalNetworks: parseOptionalStringArray(
-        value.dockerExternalNetworks,
-        "dockerExternalNetworks",
+      dockerExternalNetworks,
+      dockerNetworkAddressing: parseDeployDockerNetworkAddressing(
+        value.dockerNetworkAddressing,
+        dockerExternalNetworks,
       ),
       fabricNetworks: parseDeployFabricNetworks(value.fabricNetworks),
       managedNetworkServices,

@@ -1,6 +1,7 @@
 import { join } from "@std/path";
 import { assertEquals } from "@std/assert";
 import {
+  buildDockerSetupExtraArgs,
   buildTimeSyncApplyExtraArgs,
   devOwnershipPlaybookExtraArgs,
   galaxyBootstrapRunContext,
@@ -1513,4 +1514,142 @@ test("docker-backed optional roles gate readiness and stop disabled containers",
       );
     }
   }
+});
+
+test("docker role merges daemon.json address pools behind a non-empty gate and a restart handler", async () => {
+  const roleDir = join(CHECKOUT_ORCHESTRATION_DIR, "roles/docker");
+  const main = await Deno.readTextFile(join(roleDir, "tasks/main.yml"));
+  const daemonJson = await Deno.readTextFile(
+    join(roleDir, "tasks/daemon-json.yml"),
+  );
+  const handlers = await Deno.readTextFile(join(roleDir, "handlers/main.yml"));
+  const defaults = await Deno.readTextFile(join(roleDir, "defaults/main.yml"));
+
+  // Included, and only when the master switch is on and something is set.
+  assertEquals(main.includes("include_tasks: daemon-json.yml"), true);
+  assertEquals(
+    main.includes("turbopanel_docker_manage_daemon_json | bool"),
+    true,
+  );
+  assertEquals(
+    main.includes("(turbopanel_docker_address_pools | length > 0)"),
+    true,
+  );
+  assertEquals(
+    main.includes("(turbopanel_docker_default_bridge_cidr | length > 0)"),
+    true,
+  );
+  // ...or when the daemon asks to clear what an earlier apply wrote.
+  assertEquals(
+    main.includes("(turbopanel_docker_clear_addressing | bool)"),
+    true,
+  );
+  // Defaults are empty so an unrelated converge is a strict no-op.
+  assertEquals(defaults.includes("turbopanel_docker_address_pools: []"), true);
+  assertEquals(
+    defaults.includes('turbopanel_docker_default_bridge_cidr: ""'),
+    true,
+  );
+  assertEquals(
+    defaults.includes("turbopanel_docker_clear_addressing: false"),
+    true,
+  );
+  assertEquals(
+    defaults.includes("turbopanel_docker_manage_daemon_json: true"),
+    true,
+  );
+
+  // Merge, not overwrite: read the existing file and combine onto it.
+  assertEquals(daemonJson.includes("ansible.builtin.slurp"), true);
+  assertEquals(daemonJson.includes("from_json"), true);
+  assertEquals(daemonJson.includes("| combine("), true);
+  assertEquals(daemonJson.includes("'default-address-pools'"), true);
+  assertEquals(daemonJson.includes("'bip'"), true);
+  // The owned keys are dropped before the combine so an empty var removes a
+  // previously written value (the non-empty → empty clear case).
+  assertEquals(
+    daemonJson.includes(
+      "rejectattr('key', 'in', ['default-address-pools', 'bip'])",
+    ),
+    true,
+    "strip owned keys before merging the current values back on",
+  );
+  assertEquals(
+    daemonJson.includes("_docker_daemon_json_current is mapping"),
+    true,
+    "refuse to merge into a non-object daemon.json",
+  );
+  // The write is the only mutation and it notifies the restart handler.
+  assertEquals(daemonJson.includes("dest: /etc/docker/daemon.json"), true);
+  assertEquals(daemonJson.includes("to_nice_json"), true);
+  assertEquals(daemonJson.includes("notify: Restart docker"), true);
+  assertEquals(daemonJson.includes("backup: true"), true);
+  assertEquals(daemonJson.includes('mode: "0640"'), true);
+  assertEquals(daemonJson.includes("owner: root"), true);
+  // Loud restart notice.
+  assertEquals(daemonJson.includes("dockerd RESTARTS"), true);
+  assertEquals(
+    daemonJson.includes("Existing containers keep their current"),
+    true,
+  );
+  assertEquals(handlers.includes("name: Restart docker"), true);
+  assertEquals(handlers.includes("state: restarted"), true);
+});
+
+test("buildDockerSetupExtraArgs emits one JSON -e object and nothing when empty", () => {
+  assertEquals(buildDockerSetupExtraArgs({}), []);
+  assertEquals(
+    buildDockerSetupExtraArgs({ addressPools: [], defaultBridgeCidr: null }),
+    [],
+  );
+  const args = buildDockerSetupExtraArgs({
+    addressPools: [{ base: "10.200.0.0/16", size: 24 }],
+    defaultBridgeCidr: "172.26.0.1/16",
+  });
+  assertEquals(args[0], "-e");
+  assertEquals(JSON.parse(args[1] ?? "{}"), {
+    turbopanel_docker_address_pools: [{ base: "10.200.0.0/16", size: 24 }],
+    turbopanel_docker_default_bridge_cidr: "172.26.0.1/16",
+  });
+  const poolsOnly = buildDockerSetupExtraArgs({
+    addressPools: [{ base: "10.200.0.0/16", size: 24 }],
+  });
+  assertEquals(JSON.parse(poolsOnly[1] ?? "{}"), {
+    turbopanel_docker_address_pools: [{ base: "10.200.0.0/16", size: 24 }],
+  });
+});
+
+test("buildDockerSetupExtraArgs forces the daemon.json merge when clearing an applied descriptor", () => {
+  // Empty values alone stay a no-op; the clear flag is what makes the role
+  // include daemon-json.yml and strip the previously written keys.
+  assertEquals(
+    buildDockerSetupExtraArgs({
+      addressPools: [],
+      defaultBridgeCidr: null,
+      clearAddressing: false,
+    }),
+    [],
+  );
+  const cleared = buildDockerSetupExtraArgs({
+    addressPools: [],
+    defaultBridgeCidr: null,
+    clearAddressing: true,
+  });
+  assertEquals(cleared[0], "-e");
+  assertEquals(JSON.parse(cleared[1] ?? "{}"), {
+    turbopanel_docker_clear_addressing: true,
+  });
+});
+
+test("runDockerSetup passes docker addressing as -e extra-vars", () => {
+  const source = Deno.readTextFileSync(
+    join(DAEMON_ROOT, "src/orchestration/ansible.ts"),
+  );
+  const start = source.indexOf("export async function runDockerSetup(");
+  const end = source.indexOf("export async function runCaddySetup(");
+  if (start < 0 || end < 0) throw new Error("could not locate runDockerSetup");
+  const body = source.slice(start, end);
+  assertEquals(body.includes("buildDockerSetupExtraArgs(resolved)"), true);
+  assertEquals(body.includes("readDockerNetworkingState("), true);
+  assertEquals(body.includes("devInstanceExtraArgs()"), true);
 });

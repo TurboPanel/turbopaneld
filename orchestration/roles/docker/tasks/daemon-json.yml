@@ -1,0 +1,98 @@
+---
+# Merge org-wide dockerd addressing into /etc/docker/daemon.json.
+#
+# Included from tasks/main.yml ONLY when turbopanel_docker_manage_daemon_json
+# is true AND (at least one of turbopanel_docker_address_pools /
+# turbopanel_docker_default_bridge_cidr is non-empty OR
+# turbopanel_docker_clear_addressing is true). Absent config without the
+# clear flag is a strict no-op — an unrelated converge never touches this
+# file.
+#
+# Merge, never overwrite: the existing file is read, `default-address-pools`
+# and `bip` are set from the vars when non-empty and REMOVED when empty (so
+# clearing the org config strips what an earlier apply wrote and dockerd
+# falls back to its built-in defaults), every other operator key is
+# preserved verbatim. The write is a real content diff, so `Restart docker`
+# fires only when something changed.
+
+- name: Check for an existing daemon.json
+  ansible.builtin.stat:
+    path: /etc/docker/daemon.json
+  register: _docker_daemon_json_stat
+
+- name: Read the existing daemon.json
+  ansible.builtin.slurp:
+    src: /etc/docker/daemon.json
+  register: _docker_daemon_json_slurp
+  when: _docker_daemon_json_stat.stat.exists and _docker_daemon_json_stat.stat.size > 0
+
+- name: Decode the existing daemon.json (empty when missing)
+  ansible.builtin.set_fact:
+    _docker_daemon_json_current: >-
+      {{
+        (_docker_daemon_json_slurp.content | b64decode | from_json)
+        if (_docker_daemon_json_slurp is not skipped and _docker_daemon_json_slurp.content is defined)
+        else {}
+      }}
+
+- name: Assert the existing daemon.json is a JSON object
+  ansible.builtin.assert:
+    that: _docker_daemon_json_current is mapping
+    fail_msg: >-
+      /etc/docker/daemon.json exists but is not a JSON object; refusing to
+      merge address pools into it. Fix the file by hand or set
+      turbopanel_docker_manage_daemon_json: false.
+
+# Drop the two owned keys first so an empty var removes a previously written
+# value instead of leaving it behind; everything else passes through as-is.
+- name: Build the merged daemon.json (address pools only; other keys preserved)
+  ansible.builtin.set_fact:
+    _docker_daemon_json_merged: >-
+      {{
+        _docker_daemon_json_current
+        | dict2items
+        | rejectattr('key', 'in', ['default-address-pools', 'bip'])
+        | list
+        | items2dict
+        | combine(
+            ({'default-address-pools': turbopanel_docker_address_pools}
+              if (turbopanel_docker_address_pools | length > 0) else {})
+          )
+        | combine(
+            ({'bip': turbopanel_docker_default_bridge_cidr}
+              if (turbopanel_docker_default_bridge_cidr | length > 0) else {})
+          )
+      }}
+
+- name: Ensure /etc/docker exists
+  ansible.builtin.file:
+    path: /etc/docker
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Announce the daemon.json write
+  ansible.builtin.debug:
+    msg: >-
+      Writing dockerd address pools to /etc/docker/daemon.json
+      ({{ 'removing default-address-pools/bip — Docker built-in defaults apply'
+          if (turbopanel_docker_address_pools | length == 0
+              and turbopanel_docker_default_bridge_cidr | length == 0)
+          else 'setting default-address-pools/bip' }}). If the content
+      changes, dockerd RESTARTS. Existing containers keep their current
+      addresses and existing networks keep their subnets — the pools only
+      affect networks created afterwards.
+  when: >-
+    (_docker_daemon_json_merged | to_nice_json)
+    != (_docker_daemon_json_current | to_nice_json)
+
+- name: Write /etc/docker/daemon.json
+  ansible.builtin.copy:
+    content: "{{ _docker_daemon_json_merged | to_nice_json }}\n"
+    dest: /etc/docker/daemon.json
+    owner: root
+    group: root
+    mode: "0640"
+    backup: true
+  notify: Restart docker

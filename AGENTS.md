@@ -353,17 +353,19 @@ compile toolchain).
 
 ## Testing
 
-Local commands: **`deno task verify`** — run this before pushing. It is the
-host-runnable mirror of `verify.yml`: `verify:static` (`fmt:check`, `lint`,
-`check`, `check:layout`, `check:vocabulary` — offline, ~7s) then
-`notices:check` and `test`. `deno task verify:static` alone is the fast
-pre-push sanity pass. The only CI steps it does **not** cover are
-`check:orchestration` (needs `ansible-playbook` / `ansible-lint` on PATH) and
-the Sonar gate; run `deno task check:orchestration` separately in the guest.
-Individual tasks (`test`, `test:coverage`, `fmt:check`, `lint`, `check`,
-`check:layout`, `check:vocabulary`) remain available. See
-**Guards / tests** above for the `-A` grant, per-test `permissions:` rule, and
-Sonar-way **80% new-code** floor.
+Local commands: **`deno task verify:ci`** is the guest mirror of `verify.yml`
+minus the Sonar upload: `verify:static` (`fmt:check`, `lint`, `check`,
+`check:layout`, `check:vocabulary`, `check:metrics-legacy`) then
+`notices:check`, `check:orchestration` (needs `ansible-playbook` /
+`ansible-lint` on PATH — prepend `/opt/turbopanel/vendor/ansible/current/bin`
+in the guest), and **`test:coverage`** (the LCOV Sonar imports).
+**`deno task verify`** is the faster host-runnable cousin (`test` instead of
+`test:coverage`, no orchestration). `deno task verify:static` alone is the
+offline sanity pass. Fleet-wide from the host `dev` checkout:
+`./scripts/ci-verify.sh` (re-execs via `vagrant ssh`). Individual tasks
+(`test`, `test:coverage`, `fmt:check`, `lint`, `check`, `check:layout`,
+`check:vocabulary`) remain available. See **Guards / tests** above for the
+`-A` grant, per-test `permissions:` rule, and Sonar-way **80% new-code** floor.
 
 **Test style:** use the mandatory `const test = Deno.test.bind(Deno);` alias and
 `new TypeError()` for shape assertions — both under TypeScript style

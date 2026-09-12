@@ -3094,3 +3094,85 @@ test("environment.deploy rejects a credentialUsername the askpass script cannot 
     );
   }
 });
+
+test("environment.deploy round-trips dockerNetworkAddressing beside dockerExternalNetworks", () => {
+  const base = {
+    environmentId: "env-1",
+    projectId: "proj-1",
+    organizationId: "org-1",
+    projectName: "demo",
+    composeFiles: [{
+      filename: "compose.yaml",
+      role: "runtime",
+      content: "services:\n  web:\n    image: nginx\n",
+    }],
+    hostings: [],
+  };
+  const payload = parseEnvironmentDeployPayload({
+    ...base,
+    dockerExternalNetworks: ["edge", "core"],
+    dockerNetworkAddressing: [
+      {
+        name: "edge",
+        subnet: "10.77.0.0/16",
+        ipRange: "10.77.8.0/24",
+        gateway: "10.77.0.1",
+        mtu: 1450,
+      },
+    ],
+  });
+  assertEquals(payload.dockerExternalNetworks, ["core", "edge"]);
+  assertEquals(payload.dockerNetworkAddressing, [
+    {
+      name: "edge",
+      subnet: "10.77.0.0/16",
+      ipRange: "10.77.8.0/24",
+      gateway: "10.77.0.1",
+      mtu: 1450,
+    },
+  ]);
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...base,
+        dockerExternalNetworks: ["edge"],
+        dockerNetworkAddressing: [{
+          name: "edge",
+          subnet: "10.77.0.0/16",
+          ipRange: "nope",
+        }],
+      }),
+    TypeError,
+    "Invalid dockerNetworkAddressing ipRange",
+  );
+  // Same containment rejections as the instance `parseCommandPayload`
+  // (`schemas.test.ts`): values outside `subnet` are refused on both sides.
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...base,
+        dockerExternalNetworks: ["edge"],
+        dockerNetworkAddressing: [{
+          name: "edge",
+          subnet: "10.77.0.0/16",
+          ipRange: "10.78.0.0/24",
+        }],
+      }),
+    TypeError,
+    "Invalid dockerNetworkAddressing ipRange",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...base,
+        dockerExternalNetworks: ["edge"],
+        dockerNetworkAddressing: [{
+          name: "edge",
+          subnet: "10.77.0.0/16",
+          gateway: "10.78.0.1",
+        }],
+      }),
+    TypeError,
+    "Invalid dockerNetworkAddressing gateway",
+  );
+});

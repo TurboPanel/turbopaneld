@@ -1336,3 +1336,152 @@ test("parseSystemReconcilePayload rejects remaining invalid shapes and accepts m
     "Invalid system.reconcile payload",
   );
 });
+
+test("parseEnvironmentDeployPayload zips dockerNetworkAddressing onto dockerExternalNetworks", () => {
+  const payload = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    dockerExternalNetworks: ["zeta", "alpha"],
+    dockerNetworkAddressing: [
+      {
+        name: "zeta",
+        subnet: " 10.77.0.0/16 ",
+        ipRange: "10.77.8.0/24",
+        gateway: "10.77.0.1",
+        mtu: 1450,
+      },
+      { name: "alpha" },
+      { name: "alpha", subnet: "10.78.0.0/16" },
+      { name: "not-listed", subnet: "10.79.0.0/16" },
+    ],
+  });
+  assertEquals(payload.dockerExternalNetworks, ["alpha", "zeta"]);
+  assertEquals(payload.dockerNetworkAddressing, [
+    { name: "alpha" },
+    {
+      name: "zeta",
+      subnet: "10.77.0.0/16",
+      ipRange: "10.77.8.0/24",
+      gateway: "10.77.0.1",
+      mtu: 1450,
+    },
+  ]);
+
+  // A names-only payload (older control plane) parses exactly as before.
+  const bare = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    dockerExternalNetworks: ["alpha"],
+  });
+  assertEquals(bare.dockerExternalNetworks, ["alpha"]);
+  assertEquals("dockerNetworkAddressing" in bare, false);
+});
+
+test("parseEnvironmentDeployPayload rejects malformed dockerNetworkAddressing", () => {
+  const withNetwork = { dockerExternalNetworks: ["edge"] };
+  rejectDeploy(
+    { ...withNetwork, dockerNetworkAddressing: "edge" },
+    "dockerNetworkAddressing must be an array",
+  );
+  rejectDeploy(
+    { ...withNetwork, dockerNetworkAddressing: ["edge"] },
+    "dockerNetworkAddressing must be an array of objects",
+  );
+  rejectDeploy(
+    { ...withNetwork, dockerNetworkAddressing: [{ name: "-bad" }] },
+    "Invalid dockerExternalNetworks entry",
+  );
+  rejectDeploy(
+    {
+      ...withNetwork,
+      dockerNetworkAddressing: [{ name: "edge", subnet: "10.77.0.0" }],
+    },
+    "Invalid dockerNetworkAddressing subnet",
+  );
+  rejectDeploy(
+    {
+      ...withNetwork,
+      dockerNetworkAddressing: [{ name: "edge", ipRange: "10.77.8.0/24" }],
+    },
+    "Invalid dockerNetworkAddressing ipRange",
+  );
+  rejectDeploy(
+    {
+      ...withNetwork,
+      dockerNetworkAddressing: [{
+        name: "edge",
+        subnet: "10.77.0.0/16",
+        gateway: "host",
+      }],
+    },
+    "Invalid dockerNetworkAddressing gateway",
+  );
+  // Containment mirrors the instance parser: ipRange inside subnet, gateway
+  // an address inside subnet — syntactically valid values outside are refused.
+  rejectDeploy(
+    {
+      ...withNetwork,
+      dockerNetworkAddressing: [{
+        name: "edge",
+        subnet: "10.77.0.0/16",
+        ipRange: "10.78.8.0/24",
+      }],
+    },
+    "Invalid dockerNetworkAddressing ipRange",
+  );
+  rejectDeploy(
+    {
+      ...withNetwork,
+      dockerNetworkAddressing: [{
+        name: "edge",
+        subnet: "10.77.0.0/16",
+        // A wider range than the subnet is not "inside" it either.
+        ipRange: "10.0.0.0/8",
+      }],
+    },
+    "Invalid dockerNetworkAddressing ipRange",
+  );
+  rejectDeploy(
+    {
+      ...withNetwork,
+      dockerNetworkAddressing: [{
+        name: "edge",
+        subnet: "10.77.0.0/16",
+        gateway: "10.78.0.1",
+      }],
+    },
+    "Invalid dockerNetworkAddressing gateway",
+  );
+  rejectDeploy(
+    {
+      ...withNetwork,
+      dockerNetworkAddressing: [{
+        name: "edge",
+        subnet: "10.77.0.0/16",
+        gateway: "fd00::1",
+      }],
+    },
+    "Invalid dockerNetworkAddressing gateway",
+  );
+  rejectDeploy(
+    { ...withNetwork, dockerNetworkAddressing: [{ name: "edge", mtu: 1279 }] },
+    "Invalid dockerNetworkAddressing mtu",
+  );
+});
+
+test("parseEnvironmentDeployPayload accepts IPv6 dockerNetworkAddressing inside its subnet", () => {
+  const payload = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    dockerExternalNetworks: ["edge"],
+    dockerNetworkAddressing: [{
+      name: "edge",
+      subnet: "fd00:77::/64",
+      ipRange: "fd00:77::/80",
+      gateway: "fd00:77::1",
+    }],
+  });
+  assertEquals(payload.dockerNetworkAddressing, [{
+    name: "edge",
+    subnet: "fd00:77::/64",
+    ipRange: "fd00:77::/80",
+    gateway: "fd00:77::1",
+  }]);
+});

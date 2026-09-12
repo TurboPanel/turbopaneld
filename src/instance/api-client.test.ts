@@ -751,3 +751,51 @@ test({
     }
   },
 });
+
+test({
+  name:
+    "fetchHostDockerNetworking parses pools tolerantly and drops malformed entries",
+  permissions: { net: true },
+  fn: async () => {
+    const api = createFakeInstanceApi();
+    const restore = api.install();
+    try {
+      const client = new DaemonApiClient({
+        config: INSTANCE_CONFIG,
+        getToken: () => Promise.resolve("tok"),
+      });
+      let body: unknown = {
+        ok: true,
+        addressPools: [
+          { base: "10.200.0.0/16", size: 24 },
+          { base: "nope", size: 24 },
+          { base: "10.201.0.0/16", size: "24" },
+          "skip",
+        ],
+        defaultBridgeCidr: "172.26.0.1/16",
+      };
+      api.script(
+        "/api/daemon/v1/host/docker-networking",
+        () => new Response(JSON.stringify(body), { status: 200 }),
+      );
+      assertEquals(await client.fetchHostDockerNetworking(), {
+        addressPools: [{ base: "10.200.0.0/16", size: 24 }],
+        defaultBridgeCidr: "172.26.0.1/16",
+      });
+
+      body = { ok: true, addressPools: [], defaultBridgeCidr: null };
+      assertEquals(await client.fetchHostDockerNetworking(), {
+        addressPools: [],
+        defaultBridgeCidr: null,
+      });
+
+      body = "garbage";
+      assertEquals(await client.fetchHostDockerNetworking(), {
+        addressPools: [],
+        defaultBridgeCidr: null,
+      });
+    } finally {
+      restore();
+    }
+  },
+});

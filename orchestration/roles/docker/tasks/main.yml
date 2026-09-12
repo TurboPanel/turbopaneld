@@ -7,6 +7,17 @@
 # Fast-path: if the docker binary exists and the service is active, skip
 # install. Group membership for docker_user always runs (co-located hosts often
 # already have Docker). Otherwise include geerlingguy.docker after validation.
+#
+# daemon.json: this role also owns the org-wide dockerd addressing
+# (`default-address-pools` / `bip`) via tasks/daemon-json.yml — MERGED into
+# any existing /etc/docker/daemon.json, never overwritten, and only when the
+# daemon passed non-empty vars OR asked to clear them
+# (turbopanel_docker_clear_addressing, sent when an empty org config replaces
+# one previously applied on this host — the merge then REMOVES both keys so
+# dockerd falls back to its built-in defaults). A real content change
+# restarts dockerd (handlers/main.yml). Existing containers keep their
+# current addresses and existing networks keep their subnets; pools only
+# affect networks created afterwards.
 
 - name: Assert rootless Docker is not requested
   ansible.builtin.assert:
@@ -86,3 +97,12 @@
   when:
     - docker_add_turbopanel_user | bool
     - turbopanel_dev_user | length > 0
+
+- name: Merge org address pools into daemon.json
+  ansible.builtin.include_tasks: daemon-json.yml
+  when:
+    - turbopanel_docker_manage_daemon_json | bool
+    - >-
+      (turbopanel_docker_address_pools | length > 0)
+      or (turbopanel_docker_default_bridge_cidr | length > 0)
+      or (turbopanel_docker_clear_addressing | bool)

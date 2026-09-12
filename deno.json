@@ -44,6 +44,7 @@
     "check:orchestration": "sh scripts/check-orchestration.sh",
     "verify:static": "deno task fmt:check && deno task lint && deno task check && deno task check:layout && deno task check:vocabulary && deno task check:metrics-legacy",
     "verify": "deno task verify:static && deno task notices:check && deno task test",
+    "verify:ci": "deno task verify:static && deno task notices:check && deno task check:orchestration && deno task test:coverage",
     "notices:generate": "deno run --allow-read --allow-write --allow-run --allow-net --allow-env scripts/generate-notices.ts",
     "notices:check": "deno run --allow-read --allow-run --allow-net --allow-env scripts/generate-notices.ts --check",
     "test": "deno test -A",

@@ -1,0 +1,10 @@
+---
+# Fires only when tasks/daemon-json.yml actually changed /etc/docker/daemon.json.
+# Restarting dockerd keeps existing containers running (live-restore is not
+# assumed — containers are recreated by their restart policy) and every
+# existing network keeps its current subnet; the new pools only affect
+# networks created afterwards.
+- name: Restart docker
+  ansible.builtin.systemd:
+    name: docker
+    state: restarted

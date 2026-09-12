@@ -23,6 +23,7 @@ import {
 } from "./converge-stamp.ts";
 import { join } from "@std/path";
 import { logInfo, logWarn } from "../logger.ts";
+import { readDockerNetworkingState } from "../deploy/docker-networking-state.ts";
 import { logComponent } from "./presentation.ts";
 import { withRetry } from "./retry.ts";
 import {
@@ -51,6 +52,7 @@ import {
   galaxyDockerRoleCodeloadUrl,
   LOCALHOST_PLAYBOOK,
   ORCHESTRATION_DIR,
+  ORCHESTRATION_LAYOUT,
   ORCHESTRATOR_PLAYBOOK,
   POSTGRES_PLAYBOOK,
   PROXYSQL_PLAYBOOK,
@@ -919,13 +921,68 @@ export async function runBuildToggle(
   logInfo("orchestration", "instance-build-toggle complete");
 }
 
-/** Install Docker and ensure turbopanel/dev users are in the docker group. */
+/**
+ * Org-wide dockerd addressing the `docker` role merges into
+ * `/etc/docker/daemon.json`. Mirrors the persisted descriptor
+ * (`deploy/docker-networking-state.ts`).
+ */
+export type DockerSetupOpts = {
+  addressPools?: ReadonlyArray<{ base: string; size: number }>;
+  defaultBridgeCidr?: string | null;
+  /**
+   * Force the `daemon.json` merge even when both values are empty, so the
+   * role strips `default-address-pools` / `bip` a previous apply wrote.
+   * Set by `syncHostDockerNetworking` when an empty descriptor replaces a
+   * non-empty persisted one; never for a fresh on-demand install.
+   */
+  clearAddressing?: boolean;
+};
+
+/**
+ * `-e` JSON extra-vars for the docker role's `daemon.json` merge, built the
+ * same way `runTimeSyncApply` passes its list/boolean vars — one JSON object
+ * so `turbopanel_docker_address_pools` stays a list. Empty when there is
+ * nothing to apply and nothing to clear, which keeps the role's
+ * `daemon.json` task a strict no-op; `clearAddressing` alone emits
+ * `turbopanel_docker_clear_addressing: true` so the role removes the keys.
+ */
+export function buildDockerSetupExtraArgs(opts: DockerSetupOpts): string[] {
+  const extra: Record<string, unknown> = {};
+  if (opts.addressPools && opts.addressPools.length > 0) {
+    extra.turbopanel_docker_address_pools = opts.addressPools.map((pool) => ({
+      base: pool.base,
+      size: pool.size,
+    }));
+  }
+  if (opts.defaultBridgeCidr) {
+    extra.turbopanel_docker_default_bridge_cidr = opts.defaultBridgeCidr;
+  }
+  if (opts.clearAddressing) {
+    extra.turbopanel_docker_clear_addressing = true;
+  }
+  if (Object.keys(extra).length === 0) return [];
+  return ["-e", JSON.stringify(extra)];
+}
+
+/**
+ * Install Docker and ensure turbopanel/dev users are in the docker group.
+ * When `opts` is omitted the org Docker addressing is resolved from the
+ * descriptor the daemon session persisted, so an on-demand install
+ * (`ensureDocker`) lands with the right `default-address-pools` too.
+ */
 export async function runDockerSetup(
+  opts?: DockerSetupOpts,
   onEvent?: AnsibleEventHandler,
 ): Promise<void> {
   await ensureGalaxyDockerRole();
+  const resolved = opts ??
+    (await readDockerNetworkingState(ORCHESTRATION_LAYOUT)) ?? {};
   logInfo("orchestration", "running docker-setup playbook");
-  await runLocalPlaybook(DOCKER_PLAYBOOK, devInstanceExtraArgs(), onEvent);
+  await runLocalPlaybook(
+    DOCKER_PLAYBOOK,
+    [...devInstanceExtraArgs(), ...buildDockerSetupExtraArgs(resolved)],
+    onEvent,
+  );
   logInfo("orchestration", "docker-setup complete");
 }
 

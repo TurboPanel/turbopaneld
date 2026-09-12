@@ -33,6 +33,47 @@ stringify them). `timesyncd.conf` is `root:<systemd-timesync|root>` mode
   is gated on `turbopanel_ntp_enabled | bool` so a disable + config change does
   not restart/start timesyncd after `timedatectl set-ntp false`.
 
+### Docker (`docker`)
+
+Thin wrapper around the deferred `geerlingguy.docker` Galaxy role (fetched
+on demand by `ensureGalaxyDockerRole()`, never during bootstrap) with a
+fast-path when the binary is present and the service active. The role
+**also owns `/etc/docker/daemon.json`** for the org-wide dockerd addressing
+(`tasks/daemon-json.yml`):
+
+- Inputs are `turbopanel_docker_address_pools` (dockerd
+  `default-address-pools`, `[{ base, size }]`) and
+  `turbopanel_docker_default_bridge_cidr` (dockerd `bip`), passed by the
+  daemon as **one JSON `-e` object** (`runDockerSetup(opts)` /
+  `buildDockerSetupExtraArgs`) so the list stays a list. With no options the
+  daemon resolves them from `<configDir>/docker/networking.json`, the copy
+  it persisted after `GET /api/daemon/v1/host/docker-networking`
+  (`src/deploy/docker-networking-state.ts`, synced once per daemon session by
+  `syncHostDockerNetworking`), so an on-demand install lands with the right
+  pools too.
+- **Strict no-op when both are empty and nothing is being cleared** (and
+  when `turbopanel_docker_manage_daemon_json: false`): `daemon-json.yml` is
+  not even included, so an unrelated converge never reads, writes or
+  restarts anything.
+- **Clearing**: when an empty org config replaces a non-empty descriptor the
+  host already applied, `syncHostDockerNetworking` passes
+  `clearAddressing: true` → `turbopanel_docker_clear_addressing: true`,
+  which forces the include so the merge *removes* `default-address-pools`
+  and `bip` from the file (Docker's built-in defaults take over). The local
+  descriptor is only persisted after that removal succeeds, so a failed
+  clear retries next session instead of reading as `unchanged`.
+- **Merge, never overwrite**: the existing file is `slurp`ed, `from_json`ed,
+  refused if it is not a JSON object, the two owned keys are dropped and
+  then `default-address-pools` / `bip` are `combine`d back on when
+  non-empty — so an empty value removes the key, and every other operator
+  key survives verbatim. Written with `to_nice_json`, `owner/group root`,
+  `mode 0640`, `backup: true`.
+- **Restart gate**: the write `notify`s `Restart docker`
+  (`handlers/main.yml`), so dockerd restarts only on a real content change.
+  A `debug` task announces it first. Existing containers keep their
+  addresses and existing networks keep their subnets — pools only affect
+  networks created afterwards.
+
 ### RAPL sysfs (`rapl-access`)
 
 Kernel RAPL `energy_uj` is **0400** (root-only). The daemon collector reads it

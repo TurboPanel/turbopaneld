@@ -564,7 +564,7 @@ test({
   fn: async () => {
     await withDeployEnv(async () => {
       const events: string[] = [];
-      const ensured: string[][] = [];
+      const ensured: Array<Array<{ name: string; subnet?: string }>> = [];
       const fakeRunDocker = (args: string[]): Promise<DockerCliResult> => {
         if (args.includes("up")) events.push("compose-up");
         if (args.includes("config") && args.includes("--format")) {
@@ -596,20 +596,27 @@ test({
           }],
           hostings: [],
           dockerExternalNetworks: ["tp-external-a", "tp-external-b"],
+          // Addressing is zipped by name; a name without an entry stays bare.
+          dockerNetworkAddressing: [
+            { name: "tp-external-b", subnet: "10.77.0.0/16" },
+          ],
         },
         new Date().toISOString(),
         {
           runDocker: fakeRunDocker,
           ...hermeticDeployDeps,
-          ensureExternalDockerNetworks: (names) => {
+          ensureExternalDockerNetworks: (networks) => {
             events.push("ensure-external");
-            ensured.push([...names]);
+            ensured.push(networks.map((spec) => ({ ...spec })));
             return Promise.resolve();
           },
         },
       );
 
-      assertEquals(ensured, [["tp-external-a", "tp-external-b"]]);
+      assertEquals(ensured, [[
+        { name: "tp-external-a" },
+        { name: "tp-external-b", subnet: "10.77.0.0/16" },
+      ]]);
       assertEquals(
         events.indexOf("ensure-external") < events.indexOf("compose-up"),
         true,

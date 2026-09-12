@@ -101,6 +101,51 @@ export interface JwksDocument {
   keys: JsonWebKey[];
 }
 
+/** Mirror of the instance `GET /api/daemon/v1/host/docker-networking` body. */
+export interface HostDockerNetworking {
+  /** dockerd `default-address-pools`; empty = Docker built-ins. */
+  addressPools: Array<{ base: string; size: number }>;
+  /** dockerd `bip`; `null` = Docker's built-in bridge. */
+  defaultBridgeCidr: string | null;
+}
+
+/** Same shape/prefix rule the control plane enforces on the way in. */
+const CIDR_LITERAL_RE = /^[0-9A-Fa-f:.]+\/\d{1,3}$/;
+
+function parseHostDockerNetworkingBody(body: unknown): HostDockerNetworking {
+  const out: HostDockerNetworking = {
+    addressPools: [],
+    defaultBridgeCidr: null,
+  };
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return out;
+  }
+  const record = body as Record<string, unknown>;
+  if (Array.isArray(record.addressPools)) {
+    for (const entry of record.addressPools) {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+        continue;
+      }
+      const pool = entry as Record<string, unknown>;
+      if (
+        typeof pool.base !== "string" || !CIDR_LITERAL_RE.test(pool.base) ||
+        typeof pool.size !== "number" || !Number.isInteger(pool.size) ||
+        pool.size < 0 || pool.size > 128
+      ) {
+        continue;
+      }
+      out.addressPools.push({ base: pool.base, size: pool.size });
+    }
+  }
+  if (
+    typeof record.defaultBridgeCidr === "string" &&
+    CIDR_LITERAL_RE.test(record.defaultBridgeCidr)
+  ) {
+    out.defaultBridgeCidr = record.defaultBridgeCidr;
+  }
+  return out;
+}
+
 export class DaemonApiClient {
   readonly #options: DaemonApiClientOptions;
 
@@ -314,6 +359,21 @@ export class DaemonApiClient {
       });
     }
     return out;
+  }
+
+  /**
+   * Org-wide dockerd addressing for this host (`default-address-pools` /
+   * `bip`). Tolerant parse: a malformed entry is dropped rather than thrown
+   * into the caller, mirroring {@link rehydrateDeploymentSecrets}. A transport
+   * or auth failure still throws — the caller treats the fetch as best-effort.
+   */
+  async fetchHostDockerNetworking(): Promise<HostDockerNetworking> {
+    const body = await this.#requestJson<unknown>(
+      "/api/daemon/v1/host/docker-networking",
+      { method: "GET" },
+      { auth: true },
+    );
+    return parseHostDockerNetworkingBody(body);
   }
 
   async #requestJson<T>(

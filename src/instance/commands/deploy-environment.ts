@@ -95,7 +95,10 @@ import {
 } from "../../deploy/release/retention.ts";
 import { runPrivileged as defaultRunPrivileged } from "../../deploy/release/release-layout.ts";
 import type { RunFn } from "../../deploy/ensure-principal.ts";
-import { ensureExternalDockerNetworks as defaultEnsureExternalDockerNetworks } from "../../deploy/ensure-docker-networks.ts";
+import {
+  ensureExternalDockerNetworks as defaultEnsureExternalDockerNetworks,
+  type ExternalDockerNetworkSpec,
+} from "../../deploy/ensure-docker-networks.ts";
 import {
   ensureFabricDockerNetworks as defaultEnsureFabricDockerNetworks,
   FABRIC_DEFAULT_MTU,
@@ -282,10 +285,12 @@ export type EnvironmentDeployDeps = {
   ensureDocker?: () => Promise<void>;
   /**
    * Test seam — defaults to {@link defaultEnsureExternalDockerNetworks}.
-   * When omitted, the default uses `runDocker` from these deps.
+   * When omitted, the default uses `runDocker` from these deps. Receives one
+   * spec per `dockerExternalNetworks` name, zipped with any
+   * `dockerNetworkAddressing` entry (a name without one is a bare `{ name }`).
    */
   ensureExternalDockerNetworks?: (
-    names: readonly string[],
+    networks: readonly ExternalDockerNetworkSpec[],
   ) => Promise<void>;
   /**
    * Test seam — defaults to {@link defaultEnsureFabricDockerNetworks}.
@@ -1189,12 +1194,32 @@ type DeployContainerServicesInput = {
   runStreamed: RunDockerStreamedFn;
   logSink: CommandOutputSink;
   decryptSecrets: DecryptSecretsFn | undefined;
-  ensureExternalNetworks: (names: readonly string[]) => Promise<void>;
+  ensureExternalNetworks: (
+    networks: readonly ExternalDockerNetworkSpec[],
+  ) => Promise<void>;
   ensureFabricDockerNetworks: (
     networks: readonly EnvironmentDeployFabricNetwork[],
     defaultMtu: number,
   ) => Promise<void>;
 };
+
+/**
+ * Zip `dockerExternalNetworks` (names, the authoritative list) with
+ * `dockerNetworkAddressing` (additive, may be absent on a payload from an
+ * older control plane). A name with no addressing entry is created bare —
+ * today's behaviour — so the two fields never disagree about *which*
+ * networks exist, only about how the new ones are addressed.
+ */
+export function zipExternalDockerNetworkSpecs(
+  names: readonly string[] | undefined,
+  addressing: readonly ExternalDockerNetworkSpec[] | undefined,
+): ExternalDockerNetworkSpec[] {
+  const byName = new Map<string, ExternalDockerNetworkSpec>();
+  for (const entry of addressing ?? []) {
+    if (!byName.has(entry.name)) byName.set(entry.name, entry);
+  }
+  return (names ?? []).map((name) => byName.get(name) ?? { name });
+}
 
 async function materializeDeploySecrets(
   layout: LayoutPaths,
@@ -1343,7 +1368,10 @@ async function deployContainerServices(
       });
     }
 
-    const externalNetworks = parsedPayload.dockerExternalNetworks ?? [];
+    const externalNetworks = zipExternalDockerNetworkSpecs(
+      parsedPayload.dockerExternalNetworks,
+      parsedPayload.dockerNetworkAddressing,
+    );
     if (externalNetworks.length > 0) {
       await ensureExternalNetworks(externalNetworks);
     }
@@ -1527,7 +1555,9 @@ function resolveEnvironmentDeployRuntime(deps?: EnvironmentDeployDeps): {
   logSink: CommandOutputSink;
   decryptSecrets: DecryptSecretsFn | undefined;
   ensureDockerFn: () => Promise<void>;
-  ensureExternalNetworks: (names: readonly string[]) => Promise<void>;
+  ensureExternalNetworks: (
+    networks: readonly ExternalDockerNetworkSpec[],
+  ) => Promise<void>;
   ensureFabricDockerNetworks: NonNullable<
     EnvironmentDeployDeps["ensureFabricDockerNetworks"]
   >;
@@ -1544,8 +1574,8 @@ function resolveEnvironmentDeployRuntime(deps?: EnvironmentDeployDeps): {
     decryptSecrets: captureDecryptedSecrets(deps?.decryptSecrets, logSink),
     ensureDockerFn: deps?.ensureDocker ?? defaultEnsureDocker,
     ensureExternalNetworks: deps?.ensureExternalDockerNetworks ??
-      ((names: readonly string[]) =>
-        defaultEnsureExternalDockerNetworks(names, run)),
+      ((networks: readonly ExternalDockerNetworkSpec[]) =>
+        defaultEnsureExternalDockerNetworks(networks, run)),
     ensureFabricDockerNetworks: deps?.ensureFabricDockerNetworks ??
       defaultEnsureFabricDockerNetworks,
     runPrivileged: deps?.runPrivileged ?? defaultRunPrivileged,

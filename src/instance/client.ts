@@ -54,6 +54,8 @@ import {
   rehydrateLocalDeployments,
 } from "../deploy/rehydrate-deployments.ts";
 import { runDocker as defaultRunDocker } from "../deploy/docker-cli.ts";
+import { syncHostDockerNetworking } from "../deploy/docker-networking-sync.ts";
+import { runDockerSetup } from "../orchestration/ansible.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { sweepOrphanCommandLogs } from "../logs/orphan-sweep.ts";
 import { classifyConnectFailure } from "./connect-failure.ts";
@@ -569,6 +571,8 @@ export class InstanceClient {
   #orphanSweepStarted = false;
   #didCompleteSecretsRehydrate = false;
   #secretsRehydrateInFlight = false;
+  #dockerNetworkingSyncInFlight = false;
+  #didCompleteDockerNetworkingSync = false;
   #parked = false;
   #parkedReason: string | undefined;
   #parkedKind: "permanent" | "tls-trust" | undefined;
@@ -1271,6 +1275,7 @@ export class InstanceClient {
       ));
     });
     this.#rehydrateDeploymentSecretsAfterConnect();
+    this.#syncDockerNetworkingAfterConnect();
 
     ws.onmessage = (event) => {
       this.#idlePresence?.noteInboundActivity();
@@ -1418,6 +1423,47 @@ export class InstanceClient {
       );
     }).finally(() => {
       this.#secretsRehydrateInFlight = false;
+    });
+  }
+
+  /**
+   * Best-effort, once per daemon session: pull the org's Docker host
+   * addressing and merge it into `daemon.json` when it changed. Not tied to
+   * `environment.deploy` — the pools must reach hosts that never deploy a
+   * tenant workload, and applying them restarts dockerd.
+   */
+  #syncDockerNetworkingAfterConnect(): void {
+    if (
+      this.#dockerNetworkingSyncInFlight ||
+      this.#didCompleteDockerNetworkingSync ||
+      !this.#apiClient
+    ) {
+      return;
+    }
+    this.#dockerNetworkingSyncInFlight = true;
+    const apiClient = this.#apiClient;
+    clientTestHooks.syncHostDockerNetworking({
+      layout: resolveLayout(Deno.env.toObject()),
+      fetch: () => apiClient.fetchHostDockerNetworking(),
+      apply: (descriptor, { clearAddressing }) =>
+        clientTestHooks.runDockerSetup({
+          addressPools: descriptor.addressPools,
+          defaultBridgeCidr: descriptor.defaultBridgeCidr,
+          clearAddressing,
+        }),
+    }).then((outcome) => {
+      this.#didCompleteDockerNetworkingSync = true;
+      if (outcome !== "unchanged") {
+        logInfo("instance", `docker host addressing ${outcome}`);
+      }
+    }).catch((err) => {
+      logWarn(
+        "instance",
+        "docker host addressing sync failed:",
+        sanitizeForLog(err),
+      );
+    }).finally(() => {
+      this.#dockerNetworkingSyncInFlight = false;
     });
   }
 
@@ -2417,6 +2463,8 @@ type ClientTestHooks = {
   writeInstanceTunnelToken: typeof writeInstanceTunnelToken;
   applyPublicUrls: typeof applyPublicUrls;
   rehydrateLocalDeployments: typeof rehydrateLocalDeployments;
+  syncHostDockerNetworking: typeof syncHostDockerNetworking;
+  runDockerSetup: typeof runDockerSetup;
   /** Override UPDATE_RESULT_HANDOFF_DELAY_MS for host-free update tests. */
   updateResultHandoffDelayMs: number;
 };
@@ -2433,6 +2481,8 @@ let clientTestHooks: ClientTestHooks = {
   writeInstanceTunnelToken,
   applyPublicUrls,
   rehydrateLocalDeployments,
+  syncHostDockerNetworking,
+  runDockerSetup,
   updateResultHandoffDelayMs: UPDATE_RESULT_HANDOFF_DELAY_MS,
 };
 

@@ -12,3 +12,26 @@ docker_add_turbopanel_user: true
 
 # Co-located dev: human developer invoking ./console (passed as extra-var).
 turbopanel_dev_user: ""  # noqa: var-naming[no-role-prefix]
+
+# Org-wide dockerd addressing merged into /etc/docker/daemon.json
+# (tasks/daemon-json.yml). All three are passed by the daemon as one JSON
+# `-e` object (runDockerSetup) so the list stays a list. Both values empty
+# and the clear flag off = strict no-op: daemon.json is not read, not
+# written, and dockerd is not restarted.
+#
+# turbopanel_docker_address_pools → dockerd `default-address-pools`
+#   [{ base: "10.200.0.0/16", size: 24 }, ...]
+# turbopanel_docker_default_bridge_cidr → dockerd `bip` ("172.17.0.1/16")
+# turbopanel_docker_clear_addressing → run the merge even though both values
+#   are empty, so a previously written `default-address-pools` / `bip` is
+#   REMOVED from daemon.json (Docker's built-in defaults take over). The
+#   daemon sets it when an empty org config replaces one it applied earlier.
+#   Whenever the merge runs, a key whose value is empty is removed, so the
+#   file always mirrors the org config for those two keys.
+turbopanel_docker_address_pools: []  # noqa: var-naming[no-role-prefix]
+turbopanel_docker_default_bridge_cidr: ""  # noqa: var-naming[no-role-prefix]
+turbopanel_docker_clear_addressing: false  # noqa: var-naming[no-role-prefix]
+
+# Master switch for the daemon.json merge. Set false to leave the file alone
+# entirely (an operator who manages daemon.json by other means).
+turbopanel_docker_manage_daemon_json: true  # noqa: var-naming[no-role-prefix]
