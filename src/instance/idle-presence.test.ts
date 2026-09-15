@@ -1,5 +1,4 @@
 import { assert, assertEquals, assertExists } from "@std/assert";
-import type { BuildInfo } from "../build-info.ts";
 import type { HostHelloIdentity } from "../host/os-release.ts";
 import type { HostTimeSync } from "../host/time-sync.ts";
 import type { ServerReportedIp } from "../server-addresses.ts";
@@ -24,7 +23,11 @@ function openMockSocket(): MockWebSocket {
   return socket;
 }
 
-function makeDaemonBuild(commit: string): BuildInfo {
+// Not annotated `: BuildInfo` — `channel` is a placement fact sourced live
+// from resolveUpdateChannelConfig() (defaults to "trunk" absent
+// TURBOPANEL_UPDATE_CHANNEL, matching the literal below), never part of
+// BuildInfo itself. Kept here as the wire-shape callers compare against.
+function makeDaemonBuild(commit: string) {
   return {
     commit,
     buildId: `build-${commit}`,
@@ -81,6 +84,10 @@ const FULL_HOST: HostHelloIdentity = {
 test("IdlePresence hello omits optional host fields when absent", () => {
   const restore = installIdlePresenceProviders({
     getBuildInfo: () => makeDaemonBuild("abc1234"),
+    resolveUpdateChannelConfig: () => ({
+      app: "daemon" as const,
+      channel: "trunk" as const,
+    }),
     getHostHelloIdentity: () => EMPTY_HOST,
     collectPresenceSnapshot: () => ({
       timeSync: makeTimeSync("UTC"),
@@ -116,6 +123,10 @@ test("IdlePresence hello omits optional host fields when absent", () => {
 test("IdlePresence hello includes optional host fields when present", () => {
   const restore = installIdlePresenceProviders({
     getBuildInfo: () => makeDaemonBuild("abc1234"),
+    resolveUpdateChannelConfig: () => ({
+      app: "daemon" as const,
+      channel: "trunk" as const,
+    }),
     getHostHelloIdentity: () => FULL_HOST,
     collectPresenceSnapshot: () => ({
       timeSync: makeTimeSync("America/Chicago"),
@@ -154,6 +165,10 @@ test({
   fn: async () => {
     const restore = installIdlePresenceProviders({
       getBuildInfo: () => makeDaemonBuild("abc1234"),
+      resolveUpdateChannelConfig: () => ({
+        app: "daemon" as const,
+        channel: "trunk" as const,
+      }),
       getHostHelloIdentity: () => EMPTY_HOST,
       collectPresenceSnapshot: () => ({
         timeSync: makeTimeSync("UTC"),
@@ -188,6 +203,10 @@ test({
   fn: async () => {
     const restore = installIdlePresenceProviders({
       getBuildInfo: () => makeDaemonBuild("abc1234"),
+      resolveUpdateChannelConfig: () => ({
+        app: "daemon" as const,
+        channel: "trunk" as const,
+      }),
       getHostHelloIdentity: () => EMPTY_HOST,
       collectPresenceSnapshot: () => ({
         timeSync: makeTimeSync("UTC"),
@@ -223,6 +242,10 @@ test({
     let daemonBuild = makeDaemonBuild("commit-a");
     const restore = installIdlePresenceProviders({
       getBuildInfo: () => daemonBuild,
+      resolveUpdateChannelConfig: () => ({
+        app: "daemon" as const,
+        channel: "trunk" as const,
+      }),
       getHostHelloIdentity: () => FULL_HOST,
       collectPresenceSnapshot: () => ({
         timeSync: makeTimeSync("UTC"),
@@ -261,6 +284,10 @@ test({
     let timeSync = makeTimeSync("UTC");
     const restore = installIdlePresenceProviders({
       getBuildInfo: () => makeDaemonBuild("abc1234"),
+      resolveUpdateChannelConfig: () => ({
+        app: "daemon" as const,
+        channel: "trunk" as const,
+      }),
       getHostHelloIdentity: () => FULL_HOST,
       collectPresenceSnapshot: () => ({
         timeSync,
@@ -298,6 +325,10 @@ test({
     let ips = makeIps("203.0.113.10");
     const restore = installIdlePresenceProviders({
       getBuildInfo: () => makeDaemonBuild("abc1234"),
+      resolveUpdateChannelConfig: () => ({
+        app: "daemon" as const,
+        channel: "trunk" as const,
+      }),
       getHostHelloIdentity: () => FULL_HOST,
       collectPresenceSnapshot: () => ({
         timeSync: makeTimeSync("UTC"),
@@ -336,6 +367,10 @@ test({
     let docker: { version: string; composeVersion: string } | undefined;
     const restore = installIdlePresenceProviders({
       getBuildInfo: () => makeDaemonBuild("abc1234"),
+      resolveUpdateChannelConfig: () => ({
+        app: "daemon" as const,
+        channel: "trunk" as const,
+      }),
       getHostHelloIdentity: () => FULL_HOST,
       collectPresenceSnapshot: () => ({
         timeSync: makeTimeSync("UTC"),
@@ -375,6 +410,10 @@ test({
   fn: async () => {
     const restore = installIdlePresenceProviders({
       getBuildInfo: () => makeDaemonBuild("abc1234"),
+      resolveUpdateChannelConfig: () => ({
+        app: "daemon" as const,
+        channel: "trunk" as const,
+      }),
       getHostHelloIdentity: () => EMPTY_HOST,
       collectPresenceSnapshot: () => ({
         timeSync: makeTimeSync("UTC"),
@@ -437,6 +476,10 @@ test({
     {
       const restore = installIdlePresenceProviders({
         getBuildInfo: () => makeDaemonBuild("abc1234"),
+        resolveUpdateChannelConfig: () => ({
+          app: "daemon" as const,
+          channel: "trunk" as const,
+        }),
         getHostHelloIdentity: () => EMPTY_HOST,
         collectPresenceSnapshot: () => ({
           timeSync: makeTimeSync("UTC"),
@@ -466,6 +509,10 @@ test({
     {
       const restore = installIdlePresenceProviders({
         getBuildInfo: () => makeDaemonBuild("abc1234"),
+        resolveUpdateChannelConfig: () => ({
+          app: "daemon" as const,
+          channel: "trunk" as const,
+        }),
         getHostHelloIdentity: () => EMPTY_HOST,
         collectPresenceSnapshot: () => ({
           timeSync: makeTimeSync("UTC"),
@@ -496,6 +543,10 @@ test({
         restore();
         const restore2 = installIdlePresenceProviders({
           getBuildInfo: () => makeDaemonBuild("changed1"),
+          resolveUpdateChannelConfig: () => ({
+            app: "daemon" as const,
+            channel: "trunk" as const,
+          }),
           getHostHelloIdentity: () => EMPTY_HOST,
           collectPresenceSnapshot: () => ({
             timeSync: makeTimeSync("America/Chicago"),
@@ -517,6 +568,10 @@ test({
     {
       const restore = installIdlePresenceProviders({
         getBuildInfo: () => makeDaemonBuild("abc1234"),
+        resolveUpdateChannelConfig: () => ({
+          app: "daemon" as const,
+          channel: "trunk" as const,
+        }),
         getHostHelloIdentity: () => EMPTY_HOST,
         collectPresenceSnapshot: () => ({
           timeSync: makeTimeSync("UTC"),
@@ -557,6 +612,10 @@ test({
     // cell ping and never re-publish presence facts. See PRESENCE_REFRESH_MS.
     const restore = installIdlePresenceProviders({
       getBuildInfo: () => makeDaemonBuild("abc1234"),
+      resolveUpdateChannelConfig: () => ({
+        app: "daemon" as const,
+        channel: "trunk" as const,
+      }),
       getHostHelloIdentity: () => EMPTY_HOST,
       collectPresenceSnapshot: () => ({
         timeSync: makeTimeSync("UTC"),
@@ -598,6 +657,10 @@ test({
   fn: async () => {
     const restore = installIdlePresenceProviders({
       getBuildInfo: () => makeDaemonBuild("abc1234"),
+      resolveUpdateChannelConfig: () => ({
+        app: "daemon" as const,
+        channel: "trunk" as const,
+      }),
       getHostHelloIdentity: () => EMPTY_HOST,
       collectPresenceSnapshot: () => ({
         timeSync: makeTimeSync("UTC"),
@@ -630,6 +693,10 @@ test("IdlePresence hello and heartbeat carry runtimes when present", async () =>
   let snapshotRuntimes: typeof runtimes | undefined = runtimes;
   const restore = installIdlePresenceProviders({
     getBuildInfo: () => makeDaemonBuild("abc1234"),
+    resolveUpdateChannelConfig: () => ({
+      app: "daemon" as const,
+      channel: "trunk" as const,
+    }),
     getHostHelloIdentity: () => EMPTY_HOST,
     collectPresenceSnapshot: () => ({
       timeSync: makeTimeSync("UTC"),
@@ -671,6 +738,10 @@ test({
   fn: async () => {
     const restore = installIdlePresenceProviders({
       getBuildInfo: () => makeDaemonBuild("abc1234"),
+      resolveUpdateChannelConfig: () => ({
+        app: "daemon" as const,
+        channel: "trunk" as const,
+      }),
       getHostHelloIdentity: () => EMPTY_HOST,
       collectPresenceSnapshot: () => ({
         timeSync: makeTimeSync("UTC"),
@@ -715,6 +786,10 @@ test({
   fn: async () => {
     const restore = installIdlePresenceProviders({
       getBuildInfo: () => makeDaemonBuild("abc1234"),
+      resolveUpdateChannelConfig: () => ({
+        app: "daemon" as const,
+        channel: "trunk" as const,
+      }),
       getHostHelloIdentity: () => EMPTY_HOST,
       collectPresenceSnapshot: () => ({
         timeSync: makeTimeSync("UTC"),
@@ -758,6 +833,10 @@ test({
   fn: () => {
     const restore = installIdlePresenceProviders({
       getBuildInfo: () => makeDaemonBuild("abc1234"),
+      resolveUpdateChannelConfig: () => ({
+        app: "daemon" as const,
+        channel: "trunk" as const,
+      }),
       getHostHelloIdentity: () => EMPTY_HOST,
     });
     const socket = openMockSocket();

@@ -1,4 +1,8 @@
 import { type BuildInfo, getBuildInfo } from "../build-info.ts";
+import {
+  resolveUpdateChannelConfig,
+  type UpdateChannelConfig,
+} from "../update/config.ts";
 import { type HostDockerMetadata, readDocker } from "../host/docker.ts";
 import {
   type HostRuntimeMetadata,
@@ -95,8 +99,13 @@ type PresenceSnapshot = {
 };
 
 type BuildInfoProvider = () => BuildInfo;
+type UpdateChannelConfigProvider = () => UpdateChannelConfig;
 type HostHelloIdentityProvider = () => HostHelloIdentity;
 type PresenceSnapshotProvider = () => PresenceSnapshot;
+
+/** `daemonBuild` on the wire: BuildInfo plus the live-resolved channel —
+ * channel is a placement fact, never baked into BuildInfo itself. */
+type DaemonBuildWire = BuildInfo & { channel: string };
 
 function defaultPresenceSnapshot(): PresenceSnapshot {
   const docker = readDocker();
@@ -109,10 +118,30 @@ function defaultPresenceSnapshot(): PresenceSnapshot {
   };
 }
 
+// resolveUpdateChannelConfig() reads Deno.env — its own doc says invalid
+// values "crash at startup", i.e. it's meant to be resolved once, not
+// per-message. hello/heartbeat fire far more often than the channel can
+// possibly change (only a process restart changes it), so the default path
+// memoizes the first resolution; an injected test provider bypasses the
+// cache entirely and is called fresh every time, as before.
+let cachedUpdateChannelConfig: UpdateChannelConfig | undefined;
+function defaultUpdateChannelConfig(): UpdateChannelConfig {
+  return cachedUpdateChannelConfig ??= resolveUpdateChannelConfig();
+}
+
 let buildInfoProvider: BuildInfoProvider = getBuildInfo;
+let updateChannelConfigProvider: UpdateChannelConfigProvider =
+  defaultUpdateChannelConfig;
 let hostHelloIdentityProvider: HostHelloIdentityProvider = getHostHelloIdentity;
 let presenceSnapshotProvider: PresenceSnapshotProvider =
   defaultPresenceSnapshot;
+
+function currentDaemonBuild(): DaemonBuildWire {
+  return {
+    ...buildInfoProvider(),
+    channel: updateChannelConfigProvider().channel,
+  };
+}
 
 /**
  * Test-only injection for hello/heartbeat presence inputs. Returns a restore
@@ -120,13 +149,18 @@ let presenceSnapshotProvider: PresenceSnapshotProvider =
  */
 export function installIdlePresenceProviders(source: {
   getBuildInfo?: BuildInfoProvider;
+  resolveUpdateChannelConfig?: UpdateChannelConfigProvider;
   getHostHelloIdentity?: HostHelloIdentityProvider;
   collectPresenceSnapshot?: PresenceSnapshotProvider;
 }): () => void {
   const previousBuildInfo = buildInfoProvider;
+  const previousChannel = updateChannelConfigProvider;
   const previousHost = hostHelloIdentityProvider;
   const previousPresence = presenceSnapshotProvider;
   if (source.getBuildInfo) buildInfoProvider = source.getBuildInfo;
+  if (source.resolveUpdateChannelConfig) {
+    updateChannelConfigProvider = source.resolveUpdateChannelConfig;
+  }
   if (source.getHostHelloIdentity) {
     hostHelloIdentityProvider = source.getHostHelloIdentity;
   }
@@ -135,6 +169,7 @@ export function installIdlePresenceProviders(source: {
   }
   return () => {
     buildInfoProvider = previousBuildInfo;
+    updateChannelConfigProvider = previousChannel;
     hostHelloIdentityProvider = previousHost;
     presenceSnapshotProvider = previousPresence;
   };
@@ -282,7 +317,7 @@ export class IdlePresence {
     const ws = this.#ws;
     if (ws?.readyState !== WebSocket.OPEN) return;
 
-    const daemonBuild = buildInfoProvider();
+    const daemonBuild = currentDaemonBuild();
     this.#lastDaemonBuildCommit = daemonBuild.commit;
     const host = hostHelloIdentityProvider();
     const presence = this.#collectPresenceSnapshot();
@@ -370,7 +405,7 @@ export class IdlePresence {
   #maybeSendPresence(): void {
     if (!this.#presencePingDue()) return;
     this.#sendCellPing();
-    const daemonBuild = buildInfoProvider();
+    const daemonBuild = currentDaemonBuild();
     const daemonBuildChanged =
       daemonBuild.commit !== this.#lastDaemonBuildCommit;
 

@@ -97,13 +97,20 @@ jobs:
           echo "BUILT_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_ENV"
 
       - name: Embed build identity
+        # channel is deliberately not embedded here: it's a placement fact
+        # (which channel a host is configured to follow via
+        # TURBOPANEL_UPDATE_CHANNEL, resolveUpdateChannelConfig() in
+        # src/update/config.ts), not a build fact. Baking it as "trunk" meant
+        # flipping a release from pre-release to release would report the
+        # wrong channel on every host running those bytes — every reader
+        # (daemon-cli.ts, ping.ts, idle-presence.ts) now resolves it live
+        # instead of reading it off BuildInfo.
         run: |
           cat > src/build-info.ts <<EOF
           export interface BuildInfo {
             commit: string;
             buildId: string;
             builtAt: string;
-            channel: string;
             sourceUrl: string;
           }
 
@@ -111,7 +118,6 @@ jobs:
             commit: "$GIT_COMMIT",
             buildId: "$BUILD_ID",
             builtAt: "$BUILT_AT",
-            channel: "trunk",
             sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/$GIT_COMMIT",
           };
 

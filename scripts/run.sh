@@ -803,13 +803,39 @@ printf '%s' "$LICENSE_TOKEN" > "$STAGING_DIR/license.token"
 chmod 0640 "$STAGING_DIR/license.id" "$STAGING_DIR/license.token"
 
 export DEBIAN_FRONTEND=noninteractive
+tp_print_step "▸" "Checking host operating system…"
+# TurboPanel's orchestration (the docker role's distro map,
+# turbopaneld/orchestration/roles/docker/vars/main.yml) supports Debian and
+# Raspbian only — Ubuntu is explicitly rejected downstream by an Ansible
+# assert. Fail here, in plain language, before apt-get runs at all: apt
+# exists on Ubuntu too, so without this check the bootstrap looks like it's
+# working right up until Ansible fails deep into the install.
+if [ -r /etc/os-release ]; then
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  case "${ID:-}" in
+    debian | raspbian) ;;
+    *)
+      tp_print_error "Unsupported operating system '${PRETTY_NAME:-${ID:-unknown}}' — TurboPanel supports Debian and Raspbian only."
+      exit 1
+      ;;
+  esac
+else
+  tp_print_error "Cannot read /etc/os-release to identify the operating system — TurboPanel supports Debian and Raspbian only."
+  exit 1
+fi
+tp_print_ok "Operating system supported (${PRETTY_NAME:-$ID})"
+
 tp_print_step "▸" "Checking host prerequisites…"
 # Host-base boundary (not TurboPanel-managed vendors): tools required to
 # download/extract release artifacts and bootstrap vendor. Vendor runtimes
 # (uv, Deno, Node, Caddy, Redis, …) are installed by orchestration — never via
-# apt in run.sh.
+# apt in run.sh. zstd is required here, not just later by orchestration:
+# tp_extract_tar_zst_archive() (above) needs it to unpack the release
+# artifacts this same script downloads, and daemon-prereqs only installs it
+# afterward — a minimal Debian host used to die at the first extraction.
 _tp_host_missing=""
-for _tp_host_cmd in sudo curl tar python3; do
+for _tp_host_cmd in sudo curl tar python3 zstd; do
   if ! command -v "$_tp_host_cmd" >/dev/null 2>&1; then
     _tp_host_missing="$_tp_host_missing $_tp_host_cmd"
   fi
@@ -824,12 +850,12 @@ _tp_host_prereq_fail() {
 _apt_log="$(mktemp)"
 if [ -n "$_tp_host_missing" ] \
   && { ! apt-get update -qq >>"$_apt_log" 2>&1 \
-    || ! apt-get install -y -qq sudo curl ca-certificates tar python3-minimal >>"$_apt_log" 2>&1; }; then
+    || ! apt-get install -y -qq sudo curl ca-certificates tar python3-minimal zstd >>"$_apt_log" 2>&1; }; then
   _tp_host_prereq_fail "host prerequisites failed (need:${_tp_host_missing})"
 fi
 if ! command -v curl >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1 \
-  || ! command -v python3 >/dev/null 2>&1; then
-  _tp_host_prereq_fail "host prerequisites missing after install (need curl tar python3)"
+  || ! command -v python3 >/dev/null 2>&1 || ! command -v zstd >/dev/null 2>&1; then
+  _tp_host_prereq_fail "host prerequisites missing after install (need curl tar python3 zstd)"
 fi
 rm -f "$_apt_log"
 tp_print_ok "Host prerequisites ready"

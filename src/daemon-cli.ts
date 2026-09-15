@@ -6,6 +6,7 @@ import {
   runInstaller,
   type RunInstallerOptions,
 } from "./orchestration/setup.ts";
+import { resolveUpdateChannelConfig } from "./update/config.ts";
 
 export type DaemonCliIo = {
   args?: string[];
@@ -13,6 +14,7 @@ export type DaemonCliIo = {
   log?: (message: string) => void;
   error?: (message: string) => void;
   getBuildInfo?: () => BuildInfo;
+  resolveUpdateChannelConfig?: typeof resolveUpdateChannelConfig;
   runBootstrapOrchestration?: () => Promise<void>;
   runInstaller?: (opts: RunInstallerOptions) => Promise<void>;
 };
@@ -51,8 +53,12 @@ export async function maybeRunDaemonCli(io: DaemonCliIo = {}): Promise<void> {
   const { args, exit, log, error } = resolveIo(io);
   if (args[0] === "--version" || args[0] === "version") {
     const info = (io.getBuildInfo ?? getBuildInfo)();
+    // Channel is a placement fact (which channel this daemon is configured
+    // to follow), not a build fact — read live, never baked into BuildInfo.
+    const { channel } = (io.resolveUpdateChannelConfig ??
+      resolveUpdateChannelConfig)();
     log(
-      `turbopaneld ${info.commit} (${info.channel}, ${info.buildId}, ${info.builtAt})`,
+      `turbopaneld ${info.commit} (${channel}, ${info.buildId}, ${info.builtAt})`,
     );
     exit(0);
     return;

@@ -1616,7 +1616,7 @@ test("docker-backed optional roles gate readiness and stop disabled containers",
   }
 });
 
-test("docker role merges daemon.json address pools behind a non-empty gate and a restart handler", async () => {
+test("docker role merges daemon.json address pools and live-restore, skipping the restart on a co-located instance host", async () => {
   const roleDir = join(CHECKOUT_ORCHESTRATION_DIR, "roles/docker");
   const main = await Deno.readTextFile(join(roleDir, "tasks/main.yml"));
   const daemonJson = await Deno.readTextFile(
@@ -1625,7 +1625,9 @@ test("docker role merges daemon.json address pools behind a non-empty gate and a
   const handlers = await Deno.readTextFile(join(roleDir, "handlers/main.yml"));
   const defaults = await Deno.readTextFile(join(roleDir, "defaults/main.yml"));
 
-  // Included, and only when the master switch is on and something is set.
+  // Included whenever the master switch is on — no longer gated on the
+  // address pools being non-empty, since the merge also owns live-restore,
+  // which every host should carry regardless of org address-pool usage.
   assertEquals(main.includes("include_tasks: daemon-json.yml"), true);
   assertEquals(
     main.includes("turbopanel_docker_manage_daemon_json | bool"),
@@ -1633,18 +1635,11 @@ test("docker role merges daemon.json address pools behind a non-empty gate and a
   );
   assertEquals(
     main.includes("(turbopanel_docker_address_pools | length > 0)"),
-    true,
+    false,
+    "the pools-non-empty gate was removed — the merge always runs",
   );
-  assertEquals(
-    main.includes("(turbopanel_docker_default_bridge_cidr | length > 0)"),
-    true,
-  );
-  // ...or when the daemon asks to clear what an earlier apply wrote.
-  assertEquals(
-    main.includes("(turbopanel_docker_clear_addressing | bool)"),
-    true,
-  );
-  // Defaults are empty so an unrelated converge is a strict no-op.
+  // Defaults are empty so an unrelated converge writes nothing beyond
+  // live-restore (a real diff only on the very first run).
   assertEquals(defaults.includes("turbopanel_docker_address_pools: []"), true);
   assertEquals(
     defaults.includes('turbopanel_docker_default_bridge_cidr: ""'),
@@ -1665,11 +1660,14 @@ test("docker role merges daemon.json address pools behind a non-empty gate and a
   assertEquals(daemonJson.includes("| combine("), true);
   assertEquals(daemonJson.includes("'default-address-pools'"), true);
   assertEquals(daemonJson.includes("'bip'"), true);
-  // The owned keys are dropped before the combine so an empty var removes a
-  // previously written value (the non-empty → empty clear case).
+  // live-restore is always forced true, unconditionally combined (no
+  // "clear" case the way the address-pool keys have).
+  assertEquals(daemonJson.includes("combine({'live-restore': true})"), true);
+  // The three owned keys are dropped before the combine so an empty var
+  // removes a previously written value (the non-empty → empty clear case).
   assertEquals(
     daemonJson.includes(
-      "rejectattr('key', 'in', ['default-address-pools', 'bip'])",
+      "rejectattr('key', 'in', ['default-address-pools', 'bip', 'live-restore'])",
     ),
     true,
     "strip owned keys before merging the current values back on",
@@ -1679,6 +1677,17 @@ test("docker role merges daemon.json address pools behind a non-empty gate and a
     true,
     "refuse to merge into a non-object daemon.json",
   );
+  // Detects the co-located self-hosted instance by its systemd unit.
+  assertEquals(
+    daemonJson.includes(
+      "path: /etc/systemd/system/turbopanel-instance.service",
+    ),
+    true,
+  );
+  assertEquals(
+    daemonJson.includes("_docker_colocated_instance_host"),
+    true,
+  );
   // The write is the only mutation and it notifies the restart handler.
   assertEquals(daemonJson.includes("dest: /etc/docker/daemon.json"), true);
   assertEquals(daemonJson.includes("to_nice_json"), true);
@@ -1686,14 +1695,26 @@ test("docker role merges daemon.json address pools behind a non-empty gate and a
   assertEquals(daemonJson.includes("backup: true"), true);
   assertEquals(daemonJson.includes('mode: "0640"'), true);
   assertEquals(daemonJson.includes("owner: root"), true);
-  // Loud restart notice.
+  // Loud restart notice, with the co-located case flagged separately.
   assertEquals(daemonJson.includes("dockerd RESTARTS"), true);
   assertEquals(
     daemonJson.includes("Existing containers keep their current"),
     true,
   );
+  assertEquals(
+    daemonJson.includes("will NOT be restarted automatically"),
+    true,
+  );
   assertEquals(handlers.includes("name: Restart docker"), true);
   assertEquals(handlers.includes("state: restarted"), true);
+  // The handler itself skips on a co-located instance host — a control-plane
+  // outage risk, not just a database blip.
+  assertEquals(
+    handlers.includes(
+      "when: not (_docker_colocated_instance_host | default(false) | bool)",
+    ),
+    true,
+  );
 });
 
 test("buildDockerSetupExtraArgs emits one JSON -e object and nothing when empty", () => {

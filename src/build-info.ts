@@ -5,7 +5,6 @@ export interface BuildInfo {
   commit: string;
   buildId: string;
   builtAt: string;
-  channel: string;
   sourceUrl: string;
 }
 
@@ -18,12 +17,19 @@ export function sourceUrlForCommit(commit: string): string {
   return `${SOURCE_REPO}/tree/${sha}`;
 }
 
+// Unstamped placeholder — the trunk publish workflow's "Embed build
+// identity" step overwrites this whole file with real values before
+// `deno task compile` runs (never committed back; transient in the CI
+// checkout only), so this literal must never look like a real build. Channel
+// is deliberately absent here: it is a placement fact (which channel a host
+// is configured to follow), not a build fact, and used to be baked in here
+// and in that CI step — callers read it from resolveUpdateChannelConfig()
+// (src/update/config.ts) instead.
 export const BUILD_INFO: BuildInfo = {
-  commit: "fb62ec5+1786916563",
-  buildId: "dev-fb62ec5+1786916563",
-  builtAt: "2026-08-16T21:42:43.985Z",
-  channel: "trunk",
-  sourceUrl: sourceUrlForCommit("fb62ec5+1786916563"),
+  commit: "unstamped",
+  buildId: "unstamped",
+  builtAt: "unstamped",
+  sourceUrl: SOURCE_REPO,
 };
 
 function resolveDaemonCheckoutRoot(): string {
@@ -63,7 +69,6 @@ function resolveDevelopmentBuildInfo(): BuildInfo {
       commit: gitCommit,
       buildId: `dev-${shortCommit ?? gitCommit.slice(0, 7)}`,
       builtAt: BUILD_INFO.builtAt,
-      channel: BUILD_INFO.channel,
       sourceUrl: sourceUrlForCommit(gitCommit),
     };
   }
@@ -71,7 +76,6 @@ function resolveDevelopmentBuildInfo(): BuildInfo {
     commit: "dev",
     buildId: "dev",
     builtAt: BUILD_INFO.builtAt,
-    channel: BUILD_INFO.channel,
     sourceUrl: SOURCE_REPO,
   };
 }

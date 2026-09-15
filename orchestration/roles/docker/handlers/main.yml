@@ -1,10 +1,16 @@
 ---
 # Fires only when tasks/daemon-json.yml actually changed /etc/docker/daemon.json.
-# Restarting dockerd keeps existing containers running (live-restore is not
-# assumed — containers are recreated by their restart policy) and every
-# existing network keeps its current subnet; the new pools only affect
-# networks created afterwards.
+# Restarting dockerd keeps existing containers running once live-restore is
+# active (tasks/daemon-json.yml now always asserts `live-restore: true`) and
+# every existing network keeps its current subnet; the new pools only affect
+# networks created afterwards. Skipped on a host that also runs the
+# co-located self-hosted instance — dockerd fronts that instance's own
+# Postgres and RabbitMQ containers there, and an automatic restart would be
+# a control-plane outage rather than a database blip. That host's operator
+# restarts dockerd by hand (see the "Announce the daemon.json write" debug
+# message for confirmation the file actually changed first).
 - name: Restart docker
   ansible.builtin.systemd:
     name: docker
     state: restarted
+  when: not (_docker_colocated_instance_host | default(false) | bool)

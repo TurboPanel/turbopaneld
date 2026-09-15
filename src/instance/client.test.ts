@@ -651,9 +651,9 @@ function installCheapIdlePresence(): () => void {
       commit: "test",
       buildId: "build-test",
       builtAt: "2026-01-01T00:00:00Z",
-      channel: "trunk",
       sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/test",
     }),
+    resolveUpdateChannelConfig: () => ({ app: "daemon", channel: "trunk" }),
     getHostHelloIdentity: () => ({}),
     collectPresenceSnapshot: () => ({
       timeSync: {

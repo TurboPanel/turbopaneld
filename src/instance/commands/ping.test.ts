@@ -1,5 +1,6 @@
 import { assert, assertEquals } from "@std/assert";
 import { getBuildInfo } from "../../build-info.ts";
+import { resolveUpdateChannelConfig } from "../../update/config.ts";
 import { handlePing } from "./ping.ts";
 
 /**
@@ -29,7 +30,11 @@ test({
     const build = getBuildInfo();
     assertEquals(result.daemonBuild?.commit, build.commit);
     assertEquals(result.daemonBuild?.buildId, build.buildId);
-    assertEquals(result.daemonBuild?.channel, build.channel);
-    assertEquals(build.channel, "trunk");
+    // Channel is a placement fact, read live from resolveUpdateChannelConfig()
+    // — never baked into BuildInfo — so it's compared against that, not build.
+    assertEquals(
+      result.daemonBuild?.channel,
+      resolveUpdateChannelConfig().channel,
+    );
   },
 });

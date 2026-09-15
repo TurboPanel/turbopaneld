@@ -33,7 +33,6 @@ test("BUILD_INFO exposes the stamped compiled-identity fields", () => {
   assertEquals(typeof BUILD_INFO.commit, "string");
   assertEquals(typeof BUILD_INFO.buildId, "string");
   assertEquals(typeof BUILD_INFO.builtAt, "string");
-  assertEquals(typeof BUILD_INFO.channel, "string");
   assertEquals(typeof BUILD_INFO.sourceUrl, "string");
   assertEquals(BUILD_INFO.commit.length > 0, true);
 });
@@ -141,7 +140,6 @@ test("getBuildInfo uses the checkout git identity in development", () => {
     assertEquals(info.buildId, "dev");
   }
   assertEquals(info.builtAt, BUILD_INFO.builtAt);
-  assertEquals(info.channel, BUILD_INFO.channel);
   assertEquals(info.sourceUrl, sourceUrlForCommit(info.commit));
 });
 
@@ -162,7 +160,6 @@ test("getBuildInfo falls back to a generic dev identity when git is unreadable",
     assertEquals(info.commit, "dev");
     assertEquals(info.buildId, "dev");
     assertEquals(info.builtAt, BUILD_INFO.builtAt);
-    assertEquals(info.channel, BUILD_INFO.channel);
     assertEquals(info.sourceUrl, "https://github.com/TurboPanel/turbopaneld");
   } finally {
     // deno-lint-ignore no-explicit-any

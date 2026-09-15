@@ -10,14 +10,22 @@
 #
 # daemon.json: this role also owns the org-wide dockerd addressing
 # (`default-address-pools` / `bip`) via tasks/daemon-json.yml — MERGED into
-# any existing /etc/docker/daemon.json, never overwritten, and only when the
-# daemon passed non-empty vars OR asked to clear them
-# (turbopanel_docker_clear_addressing, sent when an empty org config replaces
-# one previously applied on this host — the merge then REMOVES both keys so
-# dockerd falls back to its built-in defaults). A real content change
-# restarts dockerd (handlers/main.yml). Existing containers keep their
-# current addresses and existing networks keep their subnets; pools only
-# affect networks created afterwards.
+# any existing /etc/docker/daemon.json, never overwritten. The merge always
+# runs (when turbopanel_docker_manage_daemon_json is true) because it also
+# owns `live-restore: true`, which every host should carry regardless of
+# whether org address pools are configured — not just when the daemon passed
+# non-empty vars or asked to clear them (turbopanel_docker_clear_addressing,
+# sent when an empty org config replaces one previously applied on this host
+# — the merge then REMOVES both address-pool keys so dockerd falls back to
+# its built-in defaults). The write only happens on a real content diff, so
+# an unconfigured host still gets a no-op merge after its first run. A real
+# content change restarts dockerd (handlers/main.yml) — except on a host
+# that also runs the co-located self-hosted instance, where the restart is
+# skipped (see daemon-json.yml): dockerd fronts that instance's own Postgres
+# and RabbitMQ, so an automatic restart there is a control-plane outage, not
+# just a database blip. Existing containers keep their current addresses and
+# existing networks keep their subnets; pools only affect networks created
+# afterwards.
 
 - name: Assert rootless Docker is not requested
   ansible.builtin.assert:
@@ -98,11 +106,7 @@
     - docker_add_turbopanel_user | bool
     - turbopanel_dev_user | length > 0
 
-- name: Merge org address pools into daemon.json
+- name: Merge org address pools and live-restore into daemon.json
   ansible.builtin.include_tasks: daemon-json.yml
   when:
     - turbopanel_docker_manage_daemon_json | bool
-    - >-
-      (turbopanel_docker_address_pools | length > 0)
-      or (turbopanel_docker_default_bridge_cidr | length > 0)
-      or (turbopanel_docker_clear_addressing | bool)
