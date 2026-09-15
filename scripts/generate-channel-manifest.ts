@@ -1,5 +1,34 @@
 import { encodeHex } from "@std/encoding/hex";
-import type { ArtifactEntry, ChannelManifest } from "../src/update/types.ts";
+import type {
+  ArtifactEntry,
+  ChannelManifest,
+  UpdateChannel,
+} from "../src/update/types.ts";
+
+/**
+ * Mirrors scripts/lib/release-artifacts.sh's tp_daemon_release_filename /
+ * tp_orchestration_release_filename / tp_js_release_filename — the manifest
+ * generator has to read the exact filenames those bash helpers produce.
+ * Unversioned (no `version`) matches today's trunk-channel output exactly.
+ */
+export function daemonReleaseFilename(
+  arch: "amd64" | "arm64",
+  version?: string,
+): string {
+  return version
+    ? `turbopaneld-${version}-${arch}.tar.zst`
+    : `turbopaneld-${arch}.tar.zst`;
+}
+
+export function orchestrationReleaseFilename(version?: string): string {
+  return version ? `orchestration-${version}.tar.zst` : `orchestration.tar.zst`;
+}
+
+export function jsReleaseFilename(version?: string): string {
+  return version
+    ? `turbopaneld.js-${version}.tar.zst`
+    : `turbopaneld.js.tar.zst`;
+}
 
 export function requireEnv(
   name: string,
@@ -51,41 +80,51 @@ export async function generateChannelManifest(options: {
   builtAt: string;
   dlBaseUrl?: string;
   defaultControlPlaneUrl?: string;
+  /** Which channel this manifest publishes to. Default `"trunk"` — unchanged trunk behavior. */
+  channel?: UpdateChannel;
+  /**
+   * Release version (e.g. `0.1.0-rc1`), present only for a tagged release
+   * build. Unset (the trunk default) produces today's unversioned filenames;
+   * set, it switches to versioned filenames matching
+   * scripts/lib/release-artifacts.sh's naming helpers.
+   */
+  version?: string;
   writeTextFile?: (path: string, json: string) => Promise<void>;
   writeStdout?: (json: string) => Promise<void>;
 }): Promise<ChannelManifest> {
+  const channel: UpdateChannel = options.channel ?? "trunk";
   const artifactBase = `${
     options.dlBaseUrl ?? "https://dl.trbp.nl"
-  }/channels/trunk/daemon`;
+  }/channels/${channel}/daemon`;
 
   const binaryAmd64 = await artifactFromPublishFile(
     options.publishDir,
-    "turbopaneld-amd64.tar.zst",
+    daemonReleaseFilename("amd64", options.version),
     artifactBase,
     options.buildId,
   );
   const binaryArm64 = await artifactFromPublishFile(
     options.publishDir,
-    "turbopaneld-arm64.tar.zst",
+    daemonReleaseFilename("arm64", options.version),
     artifactBase,
     options.buildId,
   );
   const jsFallback = await artifactFromPublishFile(
     options.publishDir,
-    "turbopaneld.js.tar.zst",
+    jsReleaseFilename(options.version),
     artifactBase,
     options.buildId,
   );
   const orchestration = await artifactFromPublishFile(
     options.publishDir,
-    "orchestration.tar.zst",
+    orchestrationReleaseFilename(options.version),
     artifactBase,
     options.buildId,
   );
 
   const manifest: ChannelManifest = {
     schema: 1,
-    channel: "trunk",
+    channel,
     commit: options.commit,
     buildId: options.buildId,
     builtAt: options.builtAt,
@@ -149,6 +188,10 @@ export async function runGenerateChannelManifestCli(
     const DEFAULT_CONTROL_PLANE_URL =
       getEnv("TURBOPANEL_DEFAULT_CONTROL_PLANE_URL")?.trim() ||
       "https://turbopanel.app";
+    // Both optional, both default to today's trunk/unversioned behavior.
+    const CHANNEL = (getEnv("CHANNEL")?.trim() ||
+      "trunk") as UpdateChannel;
+    const VERSION = getEnv("RELEASE_VERSION")?.trim() || undefined;
 
     const publishDir = args[0];
     const outputPath = args[1];
@@ -169,6 +212,8 @@ export async function runGenerateChannelManifestCli(
       builtAt: BUILT_AT,
       dlBaseUrl: DL_BASE_URL,
       defaultControlPlaneUrl: DEFAULT_CONTROL_PLANE_URL,
+      channel: CHANNEL,
+      version: VERSION,
     });
   } catch {
     exit(1);

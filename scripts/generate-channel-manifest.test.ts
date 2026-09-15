@@ -1,8 +1,12 @@
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { join } from "@std/path";
+import type { ChannelManifest } from "../src/update/types.ts";
 import {
   artifactFromPublishFile,
+  daemonReleaseFilename,
   generateChannelManifest,
+  jsReleaseFilename,
+  orchestrationReleaseFilename,
   requireEnv,
   runGenerateChannelManifestCli,
 } from "./generate-channel-manifest.ts";
@@ -137,6 +141,68 @@ test("generateChannelManifest writes a file or stdout", async () => {
     );
     const disk = JSON.parse(await Deno.readTextFile(writtenPath));
     assertEquals(disk.buildId, "b2");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("release filename helpers mirror scripts/lib/release-artifacts.sh's bash helpers", () => {
+  assertEquals(daemonReleaseFilename("amd64"), "turbopaneld-amd64.tar.zst");
+  assertEquals(
+    daemonReleaseFilename("arm64", "0.1.0-rc1"),
+    "turbopaneld-0.1.0-rc1-arm64.tar.zst",
+  );
+  assertEquals(orchestrationReleaseFilename(), "orchestration.tar.zst");
+  assertEquals(
+    orchestrationReleaseFilename("0.1.0-rc1"),
+    "orchestration-0.1.0-rc1.tar.zst",
+  );
+  assertEquals(jsReleaseFilename(), "turbopaneld.js.tar.zst");
+  assertEquals(
+    jsReleaseFilename("0.1.0-rc1"),
+    "turbopaneld.js-0.1.0-rc1.tar.zst",
+  );
+});
+
+test("generateChannelManifest honors channel and version for a tagged release", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-manifest-versioned-" });
+  try {
+    for (
+      const name of [
+        "turbopaneld-0.1.0-rc1-amd64.tar.zst",
+        "turbopaneld-0.1.0-rc1-arm64.tar.zst",
+        "turbopaneld.js-0.1.0-rc1.tar.zst",
+        "orchestration-0.1.0-rc1.tar.zst",
+      ]
+    ) {
+      await Deno.writeFile(join(dir, name), new Uint8Array([1, 2, 3]));
+    }
+    const manifest = await generateChannelManifest({
+      publishDir: dir,
+      buildId: "b-rc1",
+      commit: "abcdef0123456789abcdef0123456789abcdef01",
+      builtAt: "2026-01-01T00:00:00.000Z",
+      channel: "rc",
+      version: "0.1.0-rc1",
+      writeStdout: () => Promise.resolve(),
+    });
+    assertEquals(manifest.channel, "rc");
+    assertEquals(
+      manifest.binaryArtifacts["linux-amd64"].url,
+      "https://dl.trbp.nl/channels/rc/daemon/b-rc1/turbopaneld-0.1.0-rc1-amd64.tar.zst",
+    );
+    assertEquals(
+      manifest.jsFallbackArtifact.url.endsWith(
+        "turbopaneld.js-0.1.0-rc1.tar.zst",
+      ),
+      true,
+    );
+    assertEquals(
+      manifest.orchestrationArtifact.url.endsWith(
+        "orchestration-0.1.0-rc1.tar.zst",
+      ),
+      true,
+    );
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
@@ -324,6 +390,56 @@ test("runGenerateChannelManifestCli forwards defaults and overrides", async () =
     dlBaseUrl: "https://cdn.example",
     defaultControlPlaneUrl: "https://panel.example",
   });
+});
+
+test("runGenerateChannelManifestCli defaults CHANNEL to trunk and forwards RELEASE_VERSION when set", async () => {
+  const seen: Array<Record<string, unknown>> = [];
+  const manifestStub = (
+    options: { commit: string; buildId: string; builtAt: string },
+  ): Promise<ChannelManifest> =>
+    Promise.resolve({
+      schema: 1,
+      channel: "trunk",
+      commit: options.commit,
+      buildId: options.buildId,
+      builtAt: options.builtAt,
+      binaryArtifacts: {
+        "linux-amd64": { url: "./a", sha256: "0", size: 1 },
+        "linux-arm64": { url: "./b", sha256: "0", size: 1 },
+      },
+      jsFallbackArtifact: { url: "./c", sha256: "0", size: 1 },
+      orchestrationArtifact: { url: "./d", sha256: "0", size: 1 },
+    });
+
+  await runGenerateChannelManifestCli({
+    env: {
+      BUILD_ID: "b1",
+      GIT_COMMIT: "abcdef0123456789abcdef0123456789abcdef01",
+      BUILT_AT: "2026-01-01T00:00:00.000Z",
+    },
+    args: ["/tmp/publish"],
+    generate: (options) => {
+      seen.push({ channel: options.channel, version: options.version });
+      return manifestStub(options);
+    },
+  });
+  assertEquals(seen[0], { channel: "trunk", version: undefined });
+
+  await runGenerateChannelManifestCli({
+    env: {
+      BUILD_ID: "b1",
+      GIT_COMMIT: "abcdef0123456789abcdef0123456789abcdef01",
+      BUILT_AT: "2026-01-01T00:00:00.000Z",
+      CHANNEL: "rc",
+      RELEASE_VERSION: "0.1.0-rc1",
+    },
+    args: ["/tmp/publish"],
+    generate: (options) => {
+      seen.push({ channel: options.channel, version: options.version });
+      return manifestStub(options);
+    },
+  });
+  assertEquals(seen[1], { channel: "rc", version: "0.1.0-rc1" });
 });
 
 test("generateChannelManifest default stdout writer encodes JSON", async () => {

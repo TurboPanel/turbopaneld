@@ -1,0 +1,199 @@
+# Cuts a GitHub Release on a v* tag: compiles and packages the daemon
+# exactly like publish-daemon-trunk.yml does for the trunk/CDN drop, but
+# with a real version (TURBOPANEL_RELEASE_VERSION, already supported
+# end-to-end by scripts/package-daemon-release.sh and
+# scripts/bundle-orchestration.sh — this workflow is the first caller to
+# actually set it), and publishes to GitHub Releases instead of Bunny/CDN.
+#
+# The existing trunk → Bunny/dl.trbp.nl path in publish-daemon-trunk.yml is
+# UNCHANGED and stays on its own push-to-trunk trigger — `retire-cdn` on the
+# Road page already decided dl.trbp.nl is kept, not replaced, so this adds a
+# second, independent publish path rather than touching the first.
+#
+# Known limitation, left for the Road page's `github-rail` item: the
+# manifest.json this generates records CDN-shaped artifact URLs
+# (channels/<channel>/daemon/<buildId>/<file>, matching
+# generate-channel-manifest.ts's existing URL scheme), not GitHub Release
+# download URLs — nothing today publishes these built artifacts to that CDN
+# path for a real channel/version, only to GitHub Releases. The manifest is
+# still schema-correct and hash-correct (useful as a release record, and
+# what this workflow's own post-publish verification step checks against),
+# but a daemon can't yet resolve `rc`/`release` channels from it — that's
+# `github-rail`'s job: teaching channels.json and the daemon/control-plane
+# resolvers about GitHub-shaped manifest URLs.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release without a leading v (e.g. 0.0.0-workflow-test)
+        required: true
+        type: string
+      channel:
+        description: Channel label for this release
+        required: true
+        type: string
+        default: rc
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    uses: ./.github/workflows/verify.yml
+    secrets: inherit
+
+  prepare:
+    needs: verify
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      channel: ${{ steps.resolve.outputs.channel }}
+    steps:
+      - name: Resolve version and channel
+        id: resolve
+        run: |
+          set -eu
+          if [ -n "${{ inputs.version }}" ]; then
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "channel=${{ inputs.channel }}" >> "$GITHUB_OUTPUT"
+          else
+            _ref="${{ github.ref_name }}"
+            echo "version=${_ref#v}" >> "$GITHUB_OUTPUT"
+            echo "channel=release" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: prepare
+    runs-on: ubuntu-latest
+    env:
+      TURBOPANEL_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install Deno
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.6).
+          deno-version: "2.9.6"
+
+      - name: Install zstd
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zstd
+
+      - name: Compute build metadata
+        run: |
+          echo "GIT_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "BUILD_ID=$(date -u '+%Y%m%d-%H%M%S')-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
+          echo "BUILT_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_ENV"
+
+      - name: Embed build identity
+        # Same content as publish-daemon-trunk.yml's step of the same name —
+        # channel is deliberately not embedded (see that file's comment).
+        run: |
+          cat > src/build-info.ts <<EOF
+          export interface BuildInfo {
+            commit: string;
+            buildId: string;
+            builtAt: string;
+            sourceUrl: string;
+          }
+
+          export const BUILD_INFO: BuildInfo = {
+            commit: "$GIT_COMMIT",
+            buildId: "$BUILD_ID",
+            builtAt: "$BUILT_AT",
+            sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/$GIT_COMMIT",
+          };
+
+          export function getBuildInfo(): BuildInfo {
+            return BUILD_INFO;
+          }
+          EOF
+
+      - name: Compile linux-amd64 binary
+        run: deno task compile:linux-amd64
+
+      - name: Compile linux-arm64 binary
+        run: deno task compile:linux-arm64
+
+      - name: Bundle JS fallback
+        run: deno task bundle:js
+
+      - name: Stage orchestration share tree
+        run: deno task bundle:orchestration
+
+      - name: Package versioned release artifacts
+        run: deno task package:release
+
+      - name: Verify release packages and stage publish tree
+        run: |
+          set -eu
+          # shellcheck source=scripts/lib/release-artifacts.sh
+          . scripts/lib/release-artifacts.sh
+          chmod +x scripts/verify-release-root.sh
+
+          _version="${{ needs.prepare.outputs.version }}"
+          _publish_dir="release-assets"
+          mkdir -p "$_publish_dir"
+
+          _js_name="$(tp_js_release_filename "$_version")"
+          _orch_name="$(tp_orchestration_release_filename "$_version")"
+
+          for _arch in amd64 arm64; do
+            _name="$(tp_daemon_release_filename "$_arch" "$_version")"
+            _tarball="dist/${_name}"
+            _verify_root="$(mktemp -d)"
+            zstd -d -q -c "$_tarball" | tar -x -C "$_verify_root"
+            bash scripts/verify-release-root.sh --binary-only "$_verify_root"
+            cp "$_tarball" "$_publish_dir/"
+            rm -rf "$_verify_root"
+          done
+
+          _js_tarball="dist/${_js_name}"
+          _js_verify="$(mktemp -d)"
+          zstd -d -q -c "$_js_tarball" | tar -x -C "$_js_verify"
+          bash scripts/verify-release-root.sh --js-only "$_js_verify"
+          cp "$_js_tarball" "$_publish_dir/${_js_name}"
+          rm -rf "$_js_verify"
+
+          _orch_tarball="dist/${_orch_name}"
+          _orch_verify="$(mktemp -d)"
+          zstd -d -q -c "$_orch_tarball" | tar -x -C "$_orch_verify"
+          bash scripts/verify-release-root.sh --orchestration-only "$_orch_verify"
+          cp "$_orch_tarball" "$_publish_dir/${_orch_name}"
+          rm -rf "$_orch_verify"
+
+      - name: Generate channel manifest
+        env:
+          CHANNEL: ${{ needs.prepare.outputs.channel }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          deno run --allow-env --allow-read --allow-write scripts/generate-channel-manifest.ts \
+            release-assets \
+            release-assets/manifest.json
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v7
+        with:
+          name: turbopaneld-release-assets
+          path: release-assets
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: [prepare, build]
+    uses: TurboPanel/dev/.github/workflows/gh-release.yml@trunk
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      channel: ${{ needs.prepare.outputs.channel }}
+      assets-artifact-name: turbopaneld-release-assets
+      manifest-filename: manifest.json
+      release-notes: "See https://github.com/${{ github.repository }}/commits/v${{ needs.prepare.outputs.version }} for changes."
