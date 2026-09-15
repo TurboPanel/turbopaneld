@@ -26,12 +26,16 @@ name: Release
 
 on:
   push:
+    # v[0-9]* (not v*) so a dry-run dispatch's own tag (e.g. vtest-workflow-0,
+    # created by gh release create with no matching pre-existing tag) can't
+    # re-trigger this same workflow via the tag-push path -- that would race
+    # a second `gh release create` against a tag that already has a release.
     tags:
-      - "v*"
+      - "v[0-9]*"
   workflow_dispatch:
     inputs:
       version:
-        description: Version to release without a leading v (e.g. 0.0.0-workflow-test)
+        description: Version to release without a leading v (e.g. test-workflow-0 for a dry run -- avoid a leading digit so the tag doesn't match v[0-9]* and re-trigger this workflow)
         required: true
         type: string
       channel:
