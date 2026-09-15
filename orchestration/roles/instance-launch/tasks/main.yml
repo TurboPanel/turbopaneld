@@ -147,6 +147,48 @@
   ansible.builtin.include_role:
     name: caddy
 
+- name: Assert control-plane TLS mode is valid
+  ansible.builtin.assert:
+    that:
+      - turbopanel_tls_mode | default('self_signed') in ['self_signed', 'upload', 'lets_encrypt']
+    fail_msg: >-
+      turbopanel_tls_mode must be one of self_signed, upload, or lets_encrypt
+      (got '{{ turbopanel_tls_mode | default('') }}').
+
+- name: Assert upload TLS mode has cert and key paths
+  when: turbopanel_tls_mode | default('self_signed') == 'upload'
+  ansible.builtin.assert:
+    that:
+      - turbopanel_tls_cert_path | default('') | length > 0
+      - turbopanel_tls_key_path | default('') | length > 0
+    fail_msg: >-
+      turbopanel_tls_mode=upload requires turbopanel_tls_cert_path and
+      turbopanel_tls_key_path.
+
+- name: Assert Let's Encrypt TLS mode has a public hostname
+  when: turbopanel_tls_mode | default('self_signed') == 'lets_encrypt'
+  ansible.builtin.assert:
+    that:
+      - turbopanel_public_hostname | default('') | length > 0
+    fail_msg: >-
+      turbopanel_tls_mode=lets_encrypt requires turbopanel_public_hostname.
+      ACME email is optional: the Caddy unit and Caddyfile.acme omit the
+      email directive when turbopanel_acme_email is empty.
+
+- name: Assert Let's Encrypt TLS mode is managed-install only
+  when: turbopanel_tls_mode | default('self_signed') == 'lets_encrypt'
+  ansible.builtin.assert:
+    that:
+      - turbopanel_dev_user | default('') | length == 0
+    fail_msg: >-
+      turbopanel_tls_mode=lets_encrypt is managed-install only
+      (turbopanel_dev_user must be empty; the dev overlay Caddyfile wins
+      over turbopanel_caddyfile).
+
+- name: Compute effective public TLS flag
+  ansible.builtin.set_fact:
+    turbopanel_tls_public_effective: "{{ true if (turbopanel_tls_mode | default('self_signed') == 'lets_encrypt') else (turbopanel_tls_public | default(false) | bool) }}"
+
 - name: Install Caddy systemd unit
   ansible.builtin.template:
     src: turbopanel-caddy.service.j2

@@ -134,9 +134,26 @@ test("parseEnvironmentDeployPayload round-trips hosting proxy and web.php option
   assertEquals(hosting?.pathPrefix, "/api");
   assertEquals(hosting?.targetPort, 8080);
   assertEquals(hosting?.tlsId, null);
+  assertEquals(hosting?.tlsMode, undefined);
   assertEquals(hosting?.proxy?.forceHttps, true);
   assertEquals(hosting?.proxy?.stripPrefix, "/old");
   assertEquals(hosting?.web?.php?.extensions, ["curl", "mbstring"]);
+});
+
+test("parseEnvironmentDeployPayload accepts tlsMode acme without a tlsId", () => {
+  const payload = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    hostings: [{
+      hostingId: "h-acme",
+      serviceId: "s-acme",
+      composeServiceName: "web",
+      hostnames: ["app.example.test"],
+      tlsMode: "acme",
+    }],
+    hostingIngressNetwork: HOSTING_INGRESS_NETWORK,
+  });
+  assertEquals(payload.hostings[0]?.tlsMode, "acme");
+  assertEquals(payload.hostings[0]?.tlsId, undefined);
 });
 
 test("parseEnvironmentDeployPayload round-trips udp protocol and rejects empty ports", () => {

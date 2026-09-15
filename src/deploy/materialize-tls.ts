@@ -62,7 +62,7 @@ export function hostnameTlsMap(
 ): Map<string, string> {
   const map = new Map<string, string>();
   for (const hosting of payload.hostings) {
-    if (!hosting.tlsId) continue;
+    if (!hosting.tlsId || hosting.tlsMode === "acme") continue;
     for (const hostname of hosting.hostnames) {
       map.set(hostname, hosting.tlsId);
     }

@@ -542,8 +542,11 @@ export function caddyfile(configDir: string): string {
   // `disable_redirects`, not `off`: every site snippet writes its own
   // `http://<host>` redirect block, but `off` also disables certificate
   // management — `tls internal` sites then fail the handshake with no leaf
-  // cert ever issued. Public ACME stays unreachable because siteSnippet always
-  // pins either a materialized cert pair or `tls internal`.
+  // cert ever issued. Site snippets emit a materialized cert pair,
+  // `tls internal`, or omit the `tls` line (`tlsMode: 'acme'`) so Caddy's
+  // ACME client can issue on :80/:443.
+  // Future: optional `email {acmeEmail}` in this global block when the
+  // deploy payload carries an ACME contact address.
   return `{
   admin ${HOSTING_CADDY_ADMIN_ADDR}
   auto_https disable_redirects
@@ -954,7 +957,34 @@ type HostnameSite = {
   forceHttps: boolean;
   bindAddress?: string;
   routes: CaddySiteRoute[];
+  tlsMode?: EnvironmentDeployHosting["tlsMode"];
 };
+
+function hostingTlsDirective(
+  tlsMode: EnvironmentDeployHosting["tlsMode"],
+  tlsId: string | undefined,
+  tlsDir: string,
+): string {
+  if (tlsMode === "acme") return "";
+  if (tlsId) {
+    return `  tls ${join(tlsDir, tlsId, "fullchain.pem")} ${
+      join(tlsDir, tlsId, "privkey.pem")
+    }`;
+  }
+  return "  tls internal";
+}
+
+/**
+ * ACME needs a bare-host HTTPS site so Caddy can issue and terminate TLS.
+ * `forceHttps: false` is incompatible with `tlsMode: 'acme'` — emit HTTPS
+ * anyway (a sibling HTTP-only route on the same hostname cannot drop it).
+ */
+function emitHttpsSite(
+  forceHttps: boolean,
+  tlsMode: EnvironmentDeployHosting["tlsMode"],
+): boolean {
+  return forceHttps || tlsMode === "acme";
+}
 
 export function assertSafeHostingPathPrefix(pathPrefix: string): void {
   if (pathPrefix.includes("`") || /[\r\n]/.test(pathPrefix)) {
@@ -1050,15 +1080,29 @@ function resolveUpstreamBlocks(
   };
 }
 
-export function siteSnippet(
-  hostname: string,
-  tlsId: string | undefined,
-  tlsDir: string,
-  forceHttps = true,
-  bindAddress?: string,
-  upstream: CaddyUpstream = DEFAULT_TRAEFIK_UPSTREAM,
-  routes?: readonly CaddySiteRoute[],
-): string {
+/** Inputs for a hosting-Caddy per-hostname site block. */
+export type SiteSnippetOptions = Readonly<{
+  hostname: string;
+  tlsDir: string;
+  tlsId?: string;
+  forceHttps?: boolean;
+  bindAddress?: string;
+  upstream?: CaddyUpstream;
+  routes?: readonly CaddySiteRoute[];
+  tlsMode?: EnvironmentDeployHosting["tlsMode"];
+}>;
+
+export function siteSnippet(options: SiteSnippetOptions): string {
+  const {
+    hostname,
+    tlsDir,
+    tlsId,
+    forceHttps = true,
+    bindAddress,
+    upstream = DEFAULT_TRAEFIK_UPSTREAM,
+    routes,
+    tlsMode,
+  } = options;
   const effectiveRoutes: CaddySiteRoute[] = routes?.length
     ? [...routes]
     : [{ upstream }];
@@ -1068,14 +1112,11 @@ export function siteSnippet(
     const { http: httpUpstream, https: httpsUpstream } = resolveUpstreamBlocks(
       single,
     );
-    const tlsLine = tlsId
-      ? `  tls ${join(tlsDir, tlsId, "fullchain.pem")} ${
-        join(tlsDir, tlsId, "privkey.pem")
-      }`
-      : "  tls internal";
+    const tlsLine = hostingTlsDirective(tlsMode, tlsId, tlsDir);
     const bindLine = bindAddress ? formatBindDirective(bindAddress) : "";
+    const https = emitHttpsSite(forceHttps, tlsMode);
 
-    const httpBlock = forceHttps
+    const httpBlock = https
       ? `http://${hostname} {
 ${bindLine}  redir https://{host}{uri} permanent
 }
@@ -1087,7 +1128,7 @@ ${bindLine}  ${httpUpstream}
 
 `;
 
-    const httpsBlock = forceHttps
+    const httpsBlock = https
       ? `${hostname} {
 ${bindLine}${tlsLine}
   ${httpsUpstream}
@@ -1098,16 +1139,13 @@ ${bindLine}${tlsLine}
     return httpBlock + httpsBlock;
   }
 
-  const tlsLine = tlsId
-    ? `  tls ${join(tlsDir, tlsId, "fullchain.pem")} ${
-      join(tlsDir, tlsId, "privkey.pem")
-    }`
-    : "  tls internal";
+  const tlsLine = hostingTlsDirective(tlsMode, tlsId, tlsDir);
   const bindLine = bindAddress ? formatBindDirective(bindAddress) : "";
   const httpsHandlers = formatRouteHandlers(effectiveRoutes, "https");
   const httpHandlers = formatRouteHandlers(effectiveRoutes, "http");
+  const https = emitHttpsSite(forceHttps, tlsMode);
 
-  const httpBlock = forceHttps
+  const httpBlock = https
     ? `http://${hostname} {
 ${bindLine}  redir https://{host}{uri} permanent
 }
@@ -1119,7 +1157,7 @@ ${bindLine}${httpHandlers}
 
 `;
 
-  const httpsBlock = forceHttps
+  const httpsBlock = https
     ? `${hostname} {
 ${bindLine}${tlsLine}
 ${httpsHandlers}
@@ -1190,7 +1228,13 @@ function mergeHostingIntoHostnameSite(
   hosting: EnvironmentDeployHosting,
   route: CaddySiteRoute,
 ): void {
-  site.forceHttps = site.forceHttps && (hosting.proxy?.forceHttps ?? true);
+  if (hosting.tlsMode === "acme") {
+    site.tlsMode = "acme";
+  }
+  // ACME on this hostname always keeps HTTPS — a sibling `forceHttps: false`
+  // must not AND the site down to HTTP-only and block issuance.
+  site.forceHttps = site.tlsMode === "acme" ||
+    (site.forceHttps && (hosting.proxy?.forceHttps ?? true));
   if (hosting.bindAddress) {
     assertValidBindAddress(hosting.bindAddress);
     site.bindAddress = hosting.bindAddress;
@@ -1246,15 +1290,15 @@ export async function rewriteHostingCaddySites(
   const siteContent = hostnames
     .map((hostname) => {
       const site = hostnameSites.get(hostname)!;
-      return siteSnippet(
+      return siteSnippet({
         hostname,
-        hostnameTls?.get(hostname),
-        layout.tlsDir,
-        site.forceHttps,
-        site.bindAddress,
-        DEFAULT_TRAEFIK_UPSTREAM,
-        site.routes,
-      );
+        tlsId: hostnameTls?.get(hostname),
+        tlsDir: layout.tlsDir,
+        forceHttps: site.forceHttps,
+        bindAddress: site.bindAddress,
+        routes: site.routes,
+        tlsMode: site.tlsMode,
+      });
     })
     .join("\n");
   await Deno.writeTextFile(

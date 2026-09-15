@@ -595,14 +595,11 @@ test("defaultIndexHtml labels each site engine", () => {
 });
 
 test("siteSnippet with http upstream proxies to nginx listen port", () => {
-  const snippet = siteSnippet(
-    "app.example.com",
-    undefined,
-    "/etc/turbopanel/tls",
-    true,
-    undefined,
-    { kind: "http", host: "127.0.0.1", port: 18080 },
-  );
+  const snippet = siteSnippet({
+    hostname: "app.example.com",
+    tlsDir: "/etc/turbopanel/tls",
+    upstream: { kind: "http", host: "127.0.0.1", port: 18080 },
+  });
   assertStringIncludes(snippet, "reverse_proxy 127.0.0.1:18080");
   if (snippet.includes("7080") || snippet.includes("7443")) {
     throw new Error("site upstream must not use Traefik ports");

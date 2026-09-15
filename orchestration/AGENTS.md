@@ -202,6 +202,31 @@ Moved to `roles/php-fpm/AGENTS.md` — co-installed sury series, per-series
 Moved to `roles/openlitespeed/AGENTS.md` — includes the `lsphp` (LSAPI PHP)
 subsection.
 
+### instance-launch control-plane TLS modes
+
+`instance-certs` and `instance-launch` share `turbopanel_tls_mode`
+(`self_signed` | `upload` | `lets_encrypt`, default `self_signed`). The Platform
+CA is still minted in every mode. Vars (both roles; extra-vars win):
+
+| Var | Purpose |
+| --- | --- |
+| `turbopanel_tls_mode` | How Caddy presents the instance hostname |
+| `turbopanel_tls_cert_path` / `turbopanel_tls_key_path` | Operator pair (`upload`); copied to `{{ turbopanel_instance_dir }}/certs/uploaded.{crt,key}` (`0640`, `instance_certs_owner`:`turbopanel_group`) |
+| `turbopanel_public_hostname` / `turbopanel_acme_email` | ACME hostname + optional account email (`lets_encrypt`) |
+| `turbopanel_tls_public` | Operator-declared publicly trusted leaf; forced true in `lets_encrypt` as `turbopanel_tls_public_effective` |
+| `turbopanel_public_urls` | Defaults to `https://{{ turbopanel_public_hostname }}` in `lets_encrypt` when a hostname is set |
+
+`turbopanel_caddyfile` is the dev overlay first, then `Caddyfile.acme` in
+`lets_encrypt`, else `Caddyfile`. The Caddy unit stays on `:8443` with
+`certs/self-signed.*` unless `upload` (copied pair) or `lets_encrypt`
+(`CADDY_PORT=443`, `CAP_NET_BIND_SERVICE`, ACME storage under
+`XDG_DATA_HOME={{ turbopanel_caddy_runtime_dir }}/share`).
+`instance-deno.env.j2` emits `TURBOPANEL_TLS_PUBLIC=1` when the effective flag
+is true — not the Workers env template.
+
+`lets_encrypt` is managed-install only (`turbopanel_dev_user` must be empty)
+and needs `:80`/`:443` free on the control-plane host.
+
 ### instance-launch secret keyring
 
 The `instance-launch` role persists the control-plane root secret keyring under

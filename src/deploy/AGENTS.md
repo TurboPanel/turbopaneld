@@ -117,16 +117,23 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    envelopes — decrypt only through `POST /api/daemon/v1/secrets/decrypt`
    (daemon JWT); never log plaintext.
 11. Refresh hosting Caddy config under `/etc/turbopanel/hosting/`
-   (`auto_https off` always). Per-hostname site blocks use
-   `tls <fullchain> <privkey>` when a resolved `tlsId` was materialized;
-   otherwise `tls internal`. When `hostings[].bindAddress` is set, both the
-   HTTPS site block and the `forceHttps` HTTP redirect block emit a Caddy
-   `bind <address>` directive (IPv4/IPv6 literal validated before interpolation)
-   so neither listener attaches to all interfaces — sourced at deploy-prepare
-   time from hosting `bind` scope: **public** pinned `ip` row, **datacenter**
-   private `ip` (`scope = 'datacenter'` on the target server), or **local**
-   loopback `127.0.0.1`. Unit `turbopanel-hosting-caddy.service` when sudo
-   allows. **Distinct** from control-plane Caddy (`:8443`).
+   (`auto_https disable_redirects` — site snippets own the HTTP→HTTPS
+   redirect so `:80` stays open for HTTP-01). Per-hostname site blocks use
+   one of three TLS states: `tls <fullchain> <privkey>` when a resolved
+   `tlsId` was materialized; `tls internal` when no pin and `tlsMode` is
+   absent/`internal`; or **no `tls` line** when `tlsMode` is `acme` so
+   Caddy's own ACME client issues and renews on `:80`/`:443`. `tlsMode: 'acme'`
+   always emits the HTTPS site (and the HTTP→HTTPS redirect) even when a
+   hosting or sibling route on that hostname sets `forceHttps: false` — ACME
+   cannot issue on an HTTP-only site. When
+   `hostings[].bindAddress` is set, both the HTTPS site block and the
+   `forceHttps` HTTP redirect block emit a Caddy `bind <address>` directive
+   (IPv4/IPv6 literal validated before interpolation) so neither listener
+   attaches to all interfaces — sourced at deploy-prepare time from hosting
+   `bind` scope: **public** pinned `ip` row, **datacenter** private `ip`
+   (`scope = 'datacenter'` on the target server), or **local** loopback
+   `127.0.0.1`. Unit `turbopanel-hosting-caddy.service` when sudo allows.
+   **Distinct** from control-plane Caddy (`:8443`).
 12. Best-effort `docker compose ps --format json` — per-container identity/status
    (`containerId`, `containerName`, `composeServiceName`, `status`, optional
    `serviceId` from `payload.hostings`) is included in the command result when

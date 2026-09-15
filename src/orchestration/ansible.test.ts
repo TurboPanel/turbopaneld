@@ -789,6 +789,106 @@ test(
       /Environment=CADDY_TLS_KEY=\{\{\s*turbopanel_instance_dir\s*\}\}\/certs\/self-signed\.key/,
       "caddy unit pins leaf key to instance checkout",
     );
+    assertMatch(
+      defaults,
+      /^\s*turbopanel_tls_mode:\s*self_signed\s*$/m,
+      "production default turbopanel_tls_mode is self_signed",
+    );
+    assertMatch(
+      defaults,
+      /turbopanel_caddyfile:[\s\S]*?Caddyfile\.acme/,
+      "turbopanel_caddyfile selects Caddyfile.acme when turbopanel_tls_mode is lets_encrypt",
+    );
+    assertMatch(
+      defaults,
+      /turbopanel_caddyfile:[\s\S]*?lets_encrypt/,
+      "turbopanel_caddyfile three-way expression names lets_encrypt",
+    );
+    assertMatch(
+      caddyUnit,
+      /lets_encrypt[\s\S]*?Environment=CADDY_PORT=443/,
+      "lets_encrypt Caddy unit binds :443",
+    );
+    assertMatch(
+      caddyUnit,
+      /lets_encrypt[\s\S]*?AmbientCapabilities=CAP_NET_BIND_SERVICE/,
+      "lets_encrypt Caddy unit grants CAP_NET_BIND_SERVICE",
+    );
+    assertMatch(
+      caddyUnit,
+      /lets_encrypt[\s\S]*?CapabilityBoundingSet=CAP_NET_BIND_SERVICE/,
+      "lets_encrypt Caddy unit bounds CAP_NET_BIND_SERVICE",
+    );
+    const withoutLetsEncrypt = caddyUnit.replace(
+      /\{%\s*if\s+turbopanel_tls_mode[\s\S]*?lets_encrypt[\s\S]*?\{%\s*elif\s/g,
+      "{% elif ",
+    );
+    assertEquals(
+      withoutLetsEncrypt.includes("AmbientCapabilities"),
+      false,
+      "AmbientCapabilities only appear inside the lets_encrypt branch",
+    );
+    assertEquals(
+      withoutLetsEncrypt.includes("CapabilityBoundingSet"),
+      false,
+      "CapabilityBoundingSet only appear inside the lets_encrypt branch",
+    );
+    assertMatch(
+      caddyUnit,
+      /turbopanel_acme_email \| default\(''\) \| length > 0/,
+      "lets_encrypt Caddy unit omits ACME email env when empty",
+    );
+    assertMatch(
+      caddyUnit,
+      /Environment="TURBOPANEL_CADDY_ACME_EMAIL_DIRECTIVE=email \{\{ turbopanel_acme_email \}\}"/,
+      "lets_encrypt Caddy unit quotes the optional email directive",
+    );
+
+    const instanceCaddyAcme = join(
+      DAEMON_ROOT,
+      "..",
+      "turbopanel",
+      "Caddyfile.acme",
+    );
+    try {
+      const acme = await Deno.readTextFile(instanceCaddyAcme);
+      assertEquals(
+        acme.includes("email {$TURBOPANEL_ACME_EMAIL}"),
+        false,
+        "Caddyfile.acme does not expand an empty email directive",
+      );
+      assertEquals(
+        acme.includes("{$TURBOPANEL_CADDY_ACME_EMAIL_DIRECTIVE}"),
+        true,
+        "Caddyfile.acme omits email when the unit leaves the directive unset",
+      );
+    } catch (err) {
+      if (!(err instanceof Deno.errors.NotFound)) throw err;
+    }
+
+    const denoEnv = await Deno.readTextFile(
+      join(
+        CHECKOUT_ORCHESTRATION_DIR,
+        "roles/instance-launch/templates/instance-deno.env.j2",
+      ),
+    );
+    const workersEnv = await Deno.readTextFile(
+      join(
+        CHECKOUT_ORCHESTRATION_DIR,
+        "roles/instance-launch/templates/instance-workers.env.j2",
+      ),
+    );
+    assertMatch(
+      denoEnv,
+      /turbopanel_tls_public_effective[\s\S]*?TURBOPANEL_TLS_PUBLIC=1/,
+      "instance-deno.env.j2 gates TURBOPANEL_TLS_PUBLIC on turbopanel_tls_public_effective",
+    );
+    assertEquals(
+      workersEnv.includes("TURBOPANEL_TLS_PUBLIC"),
+      false,
+      "instance-workers.env.j2 must not emit TURBOPANEL_TLS_PUBLIC",
+    );
+
     if (caddyUnit.includes("TURBOPANEL_DEV_HTTP_CONTROL_PLANE")) {
       throw new Error(
         `${caddyUnitPath}: Caddy unit must not set TURBOPANEL_DEV_HTTP_CONTROL_PLANE (client-only flag)`,

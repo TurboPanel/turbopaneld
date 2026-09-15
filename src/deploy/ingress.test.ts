@@ -416,8 +416,74 @@ test("caddyfile pins an admin endpoint off Caddy's default 2019", () => {
   assertStringIncludes(config, "admin 127.0.0.1:2029");
 });
 
+test("siteSnippet acme mode still emits HTTPS when forceHttps is false", () => {
+  const snippet = siteSnippet({
+    hostname: "app.example.com",
+    tlsDir: TLS_DIR,
+    forceHttps: false,
+    tlsMode: "acme",
+  });
+  assertStringIncludes(
+    snippet,
+    `http://app.example.com {
+  redir https://{host}{uri} permanent
+}
+`,
+  );
+  assertEquals(/^ {2}tls /m.test(snippet), false);
+  assertEquals(snippet.includes("tls internal"), false);
+  assertStringIncludes(snippet, `app.example.com {`);
+  assertStringIncludes(snippet, caddyTraefikUpstream("https"));
+});
+
+test("siteSnippet acme mode keeps HTTPS for multi-route forceHttps:false", () => {
+  const snippet = siteSnippet({
+    hostname: "app.example.com",
+    tlsDir: TLS_DIR,
+    forceHttps: false,
+    routes: [
+      {
+        pathPrefix: "/api",
+        upstream: { kind: "http", host: "127.0.0.1", port: 18080 },
+      },
+      { upstream: { kind: "traefik" } },
+    ],
+    tlsMode: "acme",
+  });
+  assertStringIncludes(snippet, "redir https://{host}{uri} permanent");
+  assertStringIncludes(snippet, `app.example.com {`);
+  assertStringIncludes(snippet, "handle /api/*");
+  assertEquals(/^ {2}tls /m.test(snippet), false);
+});
+
+test("siteSnippet acme mode omits the tls line and keeps the redirect block", () => {
+  const snippet = siteSnippet({
+    hostname: "app.example.com",
+    tlsDir: TLS_DIR,
+    tlsMode: "acme",
+  });
+  assertStringIncludes(
+    snippet,
+    `http://app.example.com {
+  redir https://{host}{uri} permanent
+}
+`,
+  );
+  // Site-level `tls` only — Traefik hop transport still uses `tls` /
+  // `tls_insecure_skip_verify` inside `reverse_proxy`.
+  assertEquals(/^ {2}tls /m.test(snippet), false);
+  assertEquals(snippet.includes("tls internal"), false);
+  assertStringIncludes(snippet, `app.example.com {`);
+  assertStringIncludes(snippet, caddyTraefikUpstream("https"));
+  // Manual `caddy adapt` of this snippet (when the binary is available)
+  // succeeds: omitting `tls` leaves Caddy's ACME client on :80/:443.
+});
+
 test("siteSnippet without bindAddress matches baseline forceHttps output", () => {
-  const snippet = siteSnippet("app.example.com", undefined, TLS_DIR, true);
+  const snippet = siteSnippet({
+    hostname: "app.example.com",
+    tlsDir: TLS_DIR,
+  });
   assertEquals(
     snippet,
     `http://app.example.com {
@@ -436,13 +502,11 @@ app.example.com {
 });
 
 test("siteSnippet emits IPv4 bind in https block", () => {
-  const snippet = siteSnippet(
-    "app.example.com",
-    undefined,
-    TLS_DIR,
-    true,
-    "203.0.113.10",
-  );
+  const snippet = siteSnippet({
+    hostname: "app.example.com",
+    tlsDir: TLS_DIR,
+    bindAddress: "203.0.113.10",
+  });
   assertStringIncludes(
     snippet,
     `http://app.example.com {
@@ -461,13 +525,11 @@ test("siteSnippet emits IPv4 bind in https block", () => {
 });
 
 test("siteSnippet emits bracketed IPv6 bind", () => {
-  const snippet = siteSnippet(
-    "app.example.com",
-    undefined,
-    TLS_DIR,
-    true,
-    "2001:db8::10",
-  );
+  const snippet = siteSnippet({
+    hostname: "app.example.com",
+    tlsDir: TLS_DIR,
+    bindAddress: "2001:db8::10",
+  });
   assertStringIncludes(
     snippet,
     `http://app.example.com {
@@ -486,13 +548,11 @@ test("siteSnippet emits bracketed IPv6 bind", () => {
 });
 
 test("siteSnippet emits loopback bind for local scope", () => {
-  const snippet = siteSnippet(
-    "app.example.com",
-    undefined,
-    TLS_DIR,
-    true,
-    "127.0.0.1",
-  );
+  const snippet = siteSnippet({
+    hostname: "app.example.com",
+    tlsDir: TLS_DIR,
+    bindAddress: "127.0.0.1",
+  });
   assertStringIncludes(
     snippet,
     `http://app.example.com {
@@ -511,14 +571,10 @@ test("siteSnippet emits loopback bind for local scope", () => {
 });
 
 test("siteSnippet routes multiple path prefixes on one hostname", () => {
-  const snippet = siteSnippet(
-    "app.example.com",
-    undefined,
-    TLS_DIR,
-    true,
-    undefined,
-    { kind: "traefik" },
-    [
+  const snippet = siteSnippet({
+    hostname: "app.example.com",
+    tlsDir: TLS_DIR,
+    routes: [
       {
         pathPrefix: "/php",
         upstream: { kind: "http", host: "127.0.0.1", port: 18081 },
@@ -527,7 +583,7 @@ test("siteSnippet routes multiple path prefixes on one hostname", () => {
         upstream: { kind: "http", host: "127.0.0.1", port: 18080 },
       },
     ],
-  );
+  });
   assertStringIncludes(snippet, "handle /php/*");
   assertStringIncludes(snippet, "reverse_proxy 127.0.0.1:18081");
   assertStringIncludes(snippet, "reverse_proxy 127.0.0.1:18080");
@@ -593,7 +649,12 @@ test("assertValidBindAddress rejects garbage before interpolation", () => {
     "unsupported characters",
   );
   assertThrows(
-    () => siteSnippet("app.example.com", undefined, TLS_DIR, true, "evil;bind"),
+    () =>
+      siteSnippet({
+        hostname: "app.example.com",
+        tlsDir: TLS_DIR,
+        bindAddress: "evil;bind",
+      }),
     Error,
     "unsupported characters",
   );
@@ -1758,14 +1819,11 @@ test("removeServiceIngress rejects unsafe serviceId", async () => {
 });
 
 test("siteSnippet stripPrefix and forceHttps=false paths", () => {
-  const multi = siteSnippet(
-    "app.example.com",
-    "tls-1",
-    TLS_DIR,
-    true,
-    undefined,
-    { kind: "traefik" },
-    [
+  const multi = siteSnippet({
+    hostname: "app.example.com",
+    tlsId: "tls-1",
+    tlsDir: TLS_DIR,
+    routes: [
       {
         pathPrefix: "/api",
         stripPrefix: "/api",
@@ -1773,34 +1831,30 @@ test("siteSnippet stripPrefix and forceHttps=false paths", () => {
       },
       { upstream: { kind: "traefik" } },
     ],
-  );
+  });
   assertStringIncludes(multi, "uri strip_prefix /api");
   assertStringIncludes(multi, "tls ");
 
-  const plainHttp = siteSnippet(
-    "plain.example.com",
-    undefined,
-    TLS_DIR,
-    false,
-  );
+  const plainHttp = siteSnippet({
+    hostname: "plain.example.com",
+    tlsDir: TLS_DIR,
+    forceHttps: false,
+  });
   assertStringIncludes(plainHttp, "http://plain.example.com");
   assertEquals(plainHttp.includes("redir https://"), false);
 
-  const multiNoForce = siteSnippet(
-    "multi.example.com",
-    undefined,
-    TLS_DIR,
-    false,
-    undefined,
-    { kind: "traefik" },
-    [
+  const multiNoForce = siteSnippet({
+    hostname: "multi.example.com",
+    tlsDir: TLS_DIR,
+    forceHttps: false,
+    routes: [
       {
         pathPrefix: "/v1",
         upstream: { kind: "http", host: "127.0.0.1", port: 18081 },
       },
       { upstream: { kind: "traefik" } },
     ],
-  );
+  });
   assertStringIncludes(multiNoForce, "handle /v1/*");
   assertEquals(multiNoForce.includes("redir https://"), false);
 });
@@ -1862,6 +1916,66 @@ test("buildCaddyHostnameRoutes skips tcp and empty hostnames", () => {
   });
   assertEquals([...routes.keys()], ["app.example.com"]);
   assertEquals(routes.get("app.example.com")?.forceHttps, false);
+});
+
+test("buildCaddyHostnameRoutes keeps HTTPS for a single ACME hosting with forceHttps:false", () => {
+  const routes = buildCaddyHostnameRoutes({
+    environmentId: "env-1",
+    projectId: "proj-1",
+    organizationId: "org-1",
+    projectName: "demo",
+    composeFiles: [{
+      filename: "compose.yaml",
+      role: "runtime",
+      content: "services: {}",
+    }],
+    hostings: [
+      {
+        hostingId: "acme",
+        serviceId: "s-web",
+        composeServiceName: "web",
+        hostnames: ["app.example.com"],
+        tlsMode: "acme",
+        proxy: { forceHttps: false },
+      },
+    ],
+  });
+  assertEquals(routes.get("app.example.com")?.forceHttps, true);
+  assertEquals(routes.get("app.example.com")?.tlsMode, "acme");
+});
+
+test("buildCaddyHostnameRoutes keeps HTTPS when a sibling route disables it on an ACME hostname", () => {
+  const routes = buildCaddyHostnameRoutes({
+    environmentId: "env-1",
+    projectId: "proj-1",
+    organizationId: "org-1",
+    projectName: "demo",
+    composeFiles: [{
+      filename: "compose.yaml",
+      role: "runtime",
+      content: "services: {}",
+    }],
+    hostings: [
+      {
+        hostingId: "http",
+        serviceId: "s-api",
+        composeServiceName: "api",
+        hostnames: ["app.example.com"],
+        proxy: { forceHttps: false },
+      },
+      {
+        hostingId: "acme",
+        serviceId: "s-web",
+        composeServiceName: "web",
+        hostnames: ["app.example.com"],
+        pathPrefix: "/app",
+        tlsMode: "acme",
+      },
+    ],
+  });
+  assertEquals(routes.get("app.example.com")?.forceHttps, true);
+  assertEquals(routes.get("app.example.com")?.tlsMode, "acme");
+  assertEquals(routes.get("app.example.com")?.routes.length, 2);
 });
 
 test("removeHostingCaddySite rejects unsafe environmentId", async () => {

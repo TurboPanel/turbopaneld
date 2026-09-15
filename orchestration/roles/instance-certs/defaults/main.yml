@@ -21,7 +21,27 @@ turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') 
 # Co-located dev generates certs as the dev user (git/Ansible identity); managed
 # installs use tpctrl. Both branches naturally resolve to the single dev user in dev.
 instance_certs_owner: "{{ turbopanel_user if (turbopanel_dev_user | default('') | length > 0) else instance_user }}"
-turbopanel_public_urls: ""
+# How the control-plane hostname is presented. self_signed (default) mints a
+# Platform CA leaf on :8443; upload copies an operator pair into certs/;
+# lets_encrypt lets Caddy issue on :443 (managed-install only).
+turbopanel_tls_mode: self_signed
+# Absolute paths on the target host (upload). Copied into the role-owned
+# certs/ tree so tpcaddy can read the key without mutating the operator's files.
+turbopanel_tls_cert_path: ""
+turbopanel_tls_key_path: ""
+# Public DNS name Caddy obtains a certificate for (lets_encrypt).
+turbopanel_public_hostname: ""
+# ACME account contact (lets_encrypt). Optional. The Caddy unit omits
+# TURBOPANEL_ACME_EMAIL and TURBOPANEL_CADDY_ACME_EMAIL_DIRECTIVE when empty
+# so Caddyfile.acme does not render `email `.
+turbopanel_acme_email: ""
+# Operator-declared "the endpoint presents a publicly trusted certificate".
+# Forced true when turbopanel_tls_mode is lets_encrypt.
+turbopanel_tls_public: false
+# Derived from turbopanel_public_hostname in lets_encrypt so leaf SANs /
+# TURBOPANEL_PUBLIC_URLS stay correct without a second source of truth.
+# An explicit extra-var still wins (admin public-URL apply).
+turbopanel_public_urls: "{{ ('https://' ~ turbopanel_public_hostname) if (turbopanel_tls_mode | default('self_signed') == 'lets_encrypt' and (turbopanel_public_hostname | default('') | length > 0)) else '' }}"
 turbopanel_tls_extra_sans: ""
 # Durable platform CA (not the replaceable instance checkout).
 turbopanel_state_dir: /var/lib/turbopanel

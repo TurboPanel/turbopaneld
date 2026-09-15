@@ -81,11 +81,31 @@ drizzle_studio_port: 4983
 # "static" serves the exported web build from {{ turbopanel_ui_dist_dir }}.
 # Production default is static; co-located converge passes -e turbopanel_ui_mode=dev.
 turbopanel_ui_mode: static
+# How the control-plane hostname is presented. self_signed (default) mints a
+# Platform CA leaf on :8443; upload copies an operator pair into certs/;
+# lets_encrypt lets Caddy issue on :443 (managed-install only).
+turbopanel_tls_mode: self_signed
+# Absolute paths on the target host (upload). Copied into the role-owned
+# certs/ tree so tpcaddy can read the key without mutating the operator's files.
+turbopanel_tls_cert_path: ""
+turbopanel_tls_key_path: ""
+# Public DNS name Caddy obtains a certificate for (lets_encrypt).
+turbopanel_public_hostname: ""
+# ACME account contact (lets_encrypt). Optional. The Caddy unit omits
+# TURBOPANEL_ACME_EMAIL and TURBOPANEL_CADDY_ACME_EMAIL_DIRECTIVE when empty
+# so Caddyfile.acme does not render `email `.
+turbopanel_acme_email: ""
+# Operator-declared "the endpoint presents a publicly trusted certificate".
+# Forced true when turbopanel_tls_mode is lets_encrypt.
+turbopanel_tls_public: false
 # Co-located (turbopanel_dev_user set) loads the development Caddyfile from the
-# turbopanel/dev overlay; managed/production uses the instance checkout Caddyfile.
+# turbopanel/dev overlay; lets_encrypt uses Caddyfile.acme; otherwise the
+# instance checkout Caddyfile (self_signed / upload).
 turbopanel_caddyfile: >-
   {{ (turbopanel_dev_root ~ '/dev/orchestration/Caddyfile') if
   (turbopanel_dev_user | default('') | length > 0) else
+  (turbopanel_instance_dir ~ '/Caddyfile.acme') if
+  (turbopanel_tls_mode | default('self_signed') == 'lets_encrypt') else
   (turbopanel_instance_dir ~ '/Caddyfile') }}
 # "source" runs deno run src/deno-dev.ts when the developer surface is on,
 # otherwise src/deno.ts; "compiled" exec's dist/turbopanel-instance.
@@ -120,5 +140,8 @@ mailpit_smtp_port: 1025
 dbstudio_service_name: turbopanel-dbstudio
 # Co-located: the development Caddyfile serves /downloads/daemon from
 # {{ turbopanel_daemon_dir }}/dist when UI_MODE=dev.
-turbopanel_public_urls: ""
+# Derived from turbopanel_public_hostname in lets_encrypt so leaf SANs /
+# TURBOPANEL_PUBLIC_URLS stay correct without a second source of truth.
+# An explicit extra-var still wins (admin public-URL apply).
+turbopanel_public_urls: "{{ ('https://' ~ turbopanel_public_hostname) if (turbopanel_tls_mode | default('self_signed') == 'lets_encrypt' and (turbopanel_public_hostname | default('') | length > 0)) else '' }}"
 turbopanel_tls_extra_sans: ""

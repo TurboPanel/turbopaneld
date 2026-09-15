@@ -4,6 +4,44 @@
 # addresses or SANs change, so running it on every converge is cheap.
 # The CA is durable under turbopanel_instance_ca_dir; this role never passes
 # TURBOPANEL_TLS_CA_ROTATE (leaf-only apply / converge).
+- name: Assert control-plane TLS mode is valid
+  ansible.builtin.assert:
+    that:
+      - turbopanel_tls_mode | default('self_signed') in ['self_signed', 'upload', 'lets_encrypt']
+    fail_msg: >-
+      turbopanel_tls_mode must be one of self_signed, upload, or lets_encrypt
+      (got '{{ turbopanel_tls_mode | default('') }}').
+
+- name: Assert upload TLS mode has cert and key paths
+  when: turbopanel_tls_mode | default('self_signed') == 'upload'
+  ansible.builtin.assert:
+    that:
+      - turbopanel_tls_cert_path | default('') | length > 0
+      - turbopanel_tls_key_path | default('') | length > 0
+    fail_msg: >-
+      turbopanel_tls_mode=upload requires turbopanel_tls_cert_path and
+      turbopanel_tls_key_path.
+
+- name: Assert Let's Encrypt TLS mode has a public hostname
+  when: turbopanel_tls_mode | default('self_signed') == 'lets_encrypt'
+  ansible.builtin.assert:
+    that:
+      - turbopanel_public_hostname | default('') | length > 0
+    fail_msg: >-
+      turbopanel_tls_mode=lets_encrypt requires turbopanel_public_hostname.
+      ACME email is optional: the Caddy unit and Caddyfile.acme omit the
+      email directive when turbopanel_acme_email is empty.
+
+- name: Assert Let's Encrypt TLS mode is managed-install only
+  when: turbopanel_tls_mode | default('self_signed') == 'lets_encrypt'
+  ansible.builtin.assert:
+    that:
+      - turbopanel_dev_user | default('') | length == 0
+    fail_msg: >-
+      turbopanel_tls_mode=lets_encrypt is managed-install only
+      (turbopanel_dev_user must be empty; the dev overlay Caddyfile wins
+      over turbopanel_caddyfile).
+
 - name: Ensure durable platform CA directory exists
   ansible.builtin.file:
     path: "{{ turbopanel_instance_ca_dir }}"
@@ -53,5 +91,53 @@
   ansible.builtin.file:
     path: "{{ turbopanel_instance_ca_dir }}/ca.key"
     owner: "{{ instance_certs_owner if (turbopanel_dev_user | default('') | length > 0) else 'root' }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+
+- name: Stat operator TLS certificate for upload mode
+  when: turbopanel_tls_mode | default('self_signed') == 'upload'
+  ansible.builtin.stat:
+    path: "{{ turbopanel_tls_cert_path }}"
+  register: _tls_upload_cert
+
+- name: Stat operator TLS private key for upload mode
+  when: turbopanel_tls_mode | default('self_signed') == 'upload'
+  ansible.builtin.stat:
+    path: "{{ turbopanel_tls_key_path }}"
+  register: _tls_upload_key
+
+- name: Assert operator TLS certificate exists for upload mode
+  when: turbopanel_tls_mode | default('self_signed') == 'upload'
+  ansible.builtin.assert:
+    that:
+      - _tls_upload_cert.stat.exists
+    fail_msg: >-
+      turbopanel_tls_cert_path does not exist: {{ turbopanel_tls_cert_path }}
+
+- name: Assert operator TLS private key exists for upload mode
+  when: turbopanel_tls_mode | default('self_signed') == 'upload'
+  ansible.builtin.assert:
+    that:
+      - _tls_upload_key.stat.exists
+    fail_msg: >-
+      turbopanel_tls_key_path does not exist: {{ turbopanel_tls_key_path }}
+
+- name: Copy uploaded TLS certificate into instance certs
+  when: turbopanel_tls_mode | default('self_signed') == 'upload'
+  ansible.builtin.copy:
+    src: "{{ turbopanel_tls_cert_path }}"
+    dest: "{{ turbopanel_instance_dir }}/certs/uploaded.crt"
+    remote_src: true
+    owner: "{{ instance_certs_owner }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+
+- name: Copy uploaded TLS private key into instance certs
+  when: turbopanel_tls_mode | default('self_signed') == 'upload'
+  ansible.builtin.copy:
+    src: "{{ turbopanel_tls_key_path }}"
+    dest: "{{ turbopanel_instance_dir }}/certs/uploaded.key"
+    remote_src: true
+    owner: "{{ instance_certs_owner }}"
     group: "{{ turbopanel_group }}"
     mode: "0640"

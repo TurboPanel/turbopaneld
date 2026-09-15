@@ -187,3 +187,21 @@ test("hostnameTlsMap maps hostnames to tlsId (last write wins)", () => {
   );
   assertEquals(map.has("c.example.test"), false);
 });
+
+test("hostnameTlsMap skips acme-mode hostings even when tlsId is set", () => {
+  const payload = {
+    hostings: [
+      {
+        hostingId: "h-acme",
+        serviceId: "s-acme",
+        composeServiceName: "web",
+        hostnames: ["acme.example.test"],
+        tlsId: TLS_ID,
+        tlsMode: "acme",
+      },
+    ],
+  } as EnvironmentDeployPayload;
+
+  const map = hostnameTlsMap(payload);
+  assertEquals(map.has("acme.example.test"), false);
+});

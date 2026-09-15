@@ -98,6 +98,32 @@ test("environment.deploy hosting fixture round-trips bindAddress", () => {
   assertEquals(payload.hostings[0]?.bindAddress, "203.0.113.10");
 });
 
+test("environment.deploy hosting fixture round-trips tlsMode acme", () => {
+  const payload = parseEnvironmentDeployPayload({
+    environmentId: "env-1",
+    projectId: "proj-1",
+    organizationId: "org-1",
+    projectName: "demo",
+    composeFiles: [{
+      filename: "compose.yaml",
+      role: "runtime",
+      content: "services:\n  web:\n    image: nginx\n",
+    }],
+    hostings: [
+      {
+        hostingId: "h1",
+        serviceId: "s1",
+        composeServiceName: "web",
+        hostnames: ["app.example.com"],
+        tlsMode: "acme",
+      },
+    ],
+    hostingIngressNetwork: HOSTING_INGRESS_NETWORK,
+  });
+  assertEquals(payload.hostings[0]?.tlsMode, "acme");
+  assertEquals(payload.hostings[0]?.tlsId, undefined);
+});
+
 test("environment.deploy composeFiles round-trips runtime snapshot", () => {
   const composeFiles = [{
     filename: "compose.yaml",

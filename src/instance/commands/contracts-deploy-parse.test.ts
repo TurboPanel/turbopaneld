@@ -115,6 +115,10 @@ test("parseEnvironmentDeployPayload rejects hosting field parse errors", () => {
     "hostings[].protocol must be http, tcp, or udp",
   );
   rejectDeploy(
+    { hostings: [hosting({ tlsMode: "dns" })] },
+    "hostings[].tlsMode must be internal, pinned, or acme",
+  );
+  rejectDeploy(
     {
       hostings: [hosting({
         protocol: "tcp",
@@ -798,6 +802,25 @@ test("parseEnvironmentDeployPayload rejects compose file path/source and ingress
   rejectDeploy(
     { hostingIngress: { serviceId: "not-a-uuid" } },
     "Invalid environment.deploy hostingIngress",
+  );
+});
+
+test("parseEnvironmentDeployPayload accepts optional tlsMode acme and omits when absent", () => {
+  assertEquals(
+    parseEnvironmentDeployPayload({
+      ...DEPLOY_BASE,
+      hostings: [hosting({ tlsMode: "acme" })],
+      hostingIngressNetwork: SERVICE_UUID,
+    }).hostings[0]?.tlsMode,
+    "acme",
+  );
+  assertEquals(
+    parseEnvironmentDeployPayload({
+      ...DEPLOY_BASE,
+      hostings: [hosting({})],
+      hostingIngressNetwork: SERVICE_UUID,
+    }).hostings[0]?.tlsMode,
+    undefined,
   );
 });
 

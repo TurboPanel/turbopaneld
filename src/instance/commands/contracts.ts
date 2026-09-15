@@ -265,6 +265,12 @@ export type EnvironmentDeployHosting = {
   targetPort?: number;
   /** Resolved org TLS id; null/omit = Caddy `tls internal`. */
   tlsId?: string | null;
+  /**
+   * How hosting Caddy should obtain a leaf. Absent = unchanged behavior
+   * (`tls <pair>` when `tlsId` is set, else `tls internal`). `acme` omits
+   * the `tls` directive so Caddy's own ACME client issues on :80/:443.
+   */
+  tlsMode?: "internal" | "pinned" | "acme";
   proxy?: EnvironmentDeployHostingProxy;
   /**
    * Resolved Caddy `bind` address for this hosting (public pinned IP, datacenter
@@ -2447,6 +2453,7 @@ function parseHostingBindAddress(value: unknown): string | undefined {
 }
 
 const HOSTING_PROTOCOLS = new Set(["http", "tcp", "udp"]);
+const HOSTING_TLS_MODES = new Set(["internal", "pinned", "acme"]);
 
 function parseHostingProtocol(
   value: unknown,
@@ -2456,6 +2463,18 @@ function parseHostingProtocol(
     throw new TypeError("hostings[].protocol must be http, tcp, or udp");
   }
   return value as EnvironmentDeployHosting["protocol"];
+}
+
+function parseHostingTlsMode(
+  value: unknown,
+): EnvironmentDeployHosting["tlsMode"] | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !HOSTING_TLS_MODES.has(value)) {
+    throw new TypeError(
+      "hostings[].tlsMode must be internal, pinned, or acme",
+    );
+  }
+  return value as EnvironmentDeployHosting["tlsMode"];
 }
 
 function isValidPortNumber(value: unknown): value is number {
@@ -2558,6 +2577,7 @@ function parseHosting(value: unknown): EnvironmentDeployHosting {
   const pathPrefix = parseHostingPathPrefix(value.pathPrefix);
   const targetPort = parseHostingTargetPort(value.targetPort);
   const tlsId = parseHostingTlsId(value.tlsId);
+  const tlsMode = parseHostingTlsMode(value.tlsMode);
   const proxy = parseHostingProxy(value.proxy);
   const bindAddress = parseHostingBindAddress(value.bindAddress);
   const protocol = parseHostingProtocol(value.protocol);
@@ -2572,6 +2592,7 @@ function parseHosting(value: unknown): EnvironmentDeployHosting {
     ...(pathPrefix === undefined ? {} : { pathPrefix }),
     ...(targetPort === undefined ? {} : { targetPort }),
     ...(tlsId === undefined ? {} : { tlsId }),
+    ...(tlsMode === undefined ? {} : { tlsMode }),
     ...(proxy === undefined ? {} : { proxy }),
     ...(bindAddress === undefined ? {} : { bindAddress }),
     ...(protocol === undefined ? {} : { protocol }),
