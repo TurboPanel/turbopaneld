@@ -316,7 +316,7 @@ async function resolveDiskDeviceName(
  */
 function diskChipName(dir: string, chip: string, deviceName?: string): string {
   if (deviceName) return deviceName;
-  const hwmonDir = dir.split("/").filter(Boolean).pop();
+  const hwmonDir = dir.split("/").findLast(Boolean);
   return hwmonDir ? `${chip}@${hwmonDir}` : chip;
 }
 
