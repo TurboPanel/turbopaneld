@@ -84,6 +84,30 @@ disaster recovery" documents the RPO/RTO and the restore runbook this pairs
 with; `src/orchestration/ansible.test.ts` pins the defaults, the gate
 expressions, and the script's dump/retention/push shape.
 
+**Container hardening.** Both `database` and `queue` run `cap_drop: [ALL]`,
+`security_opt: [no-new-privileges:true]`, `read_only: true` (with a `tmpfs`
+`/tmp` for the writes each image still needs at that path — the rest of what
+either process writes already lives on its named volume), a `mem_limit` /
+`pids_limit` ceiling (`{postgres,rabbitmq}_container_mem_limit` /
+`_pids_limit`, default `512m` / `200`, each role's own defaults), and a
+`healthcheck` reusing the exact `pg_isready` / `rabbitmq-diagnostics -q ping`
+commands `wait-ready.sh` already runs — so a container that is *running but
+degraded* (Postgres up but refusing connections, RabbitMQ up with a broken
+vhost) now surfaces as unhealthy in `docker ps` instead of looking identical
+to a healthy one. Verified live in this sandbox (Docker is available here,
+unlike most Ansible-only changes on this page): a hand-built Compose file
+with these exact directives against the real `postgres:18` /
+`rabbitmq:4-management` images reached `healthy`, a write outside the
+declared volumes/tmpfs failed with `Read-only file system` (confirming
+`read_only` actually took effect, not just parsed), a real
+`CREATE TABLE`/`INSERT`/`SELECT` and `rabbitmqctl list_vhosts` both
+succeeded, and the database container returned to `healthy` after a
+`docker restart`. Separately, the real Jinja2 template was rendered with
+realistic variables and the result passed `docker compose config`. Tenant
+compose services get no such default ceiling yet — that is a separate,
+larger product decision (what default is safe for an arbitrary tenant
+workload) deliberately left open; see the Road-page item this closes.
+
 **Converge order:** `postgres` → `rabbitmq` (config only) →
 `system-compose` (brings the stack up). Standalone single-service playbooks
 (`postgres-setup.yml` / `rabbitmq-setup.yml`) each run

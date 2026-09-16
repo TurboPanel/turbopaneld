@@ -24,3 +24,7 @@ rabbitmq_container_gid: "{{ turbopanel_dev_gid if (turbopanel_dev_user | default
 # Owner of the generated rabbitmq secret/config files: the dev user in dev (so it
 # owns its own secrets), else root.
 rabbitmq_config_owner: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'root' }}"
+# Container resource ceiling — overridable per install; raise if legitimate
+# load needs more.
+rabbitmq_container_mem_limit: 512m
+rabbitmq_container_pids_limit: 200

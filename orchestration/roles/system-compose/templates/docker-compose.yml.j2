@@ -20,6 +20,15 @@ services:
     container_name: {{ postgres_container_name }}
     restart: unless-stopped
     user: "{{ postgres_container_uid }}:{{ postgres_container_gid }}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: {{ postgres_container_mem_limit }}
+    pids_limit: {{ postgres_container_pids_limit }}
     networks:
       - {{ turbopanel_docker_network }}
     volumes:
@@ -36,6 +45,11 @@ services:
     labels:
       com.turbopanel.system.component: database
       turbopanel.role: turbopanel
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "{{ postgres_user }}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 {% endif %}
 {% if _system_compose_queue_active %}
   queue:
@@ -43,6 +57,15 @@ services:
     container_name: {{ rabbitmq_container_name }}
     restart: unless-stopped
     user: "{{ rabbitmq_container_uid }}:{{ rabbitmq_container_gid }}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: {{ rabbitmq_container_mem_limit }}
+    pids_limit: {{ rabbitmq_container_pids_limit }}
     networks:
       - {{ turbopanel_docker_network }}
     volumes:
@@ -60,6 +83,11 @@ services:
     labels:
       com.turbopanel.system.component: queue
       turbopanel.role: turbopanel
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 {% endif %}
 
 networks:

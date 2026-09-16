@@ -1110,6 +1110,103 @@ test(
 );
 
 test(
+  "system-compose CIS hardening: cap_drop, no-new-privileges, read_only, resource ceiling, healthcheck",
+  async () => {
+    const composeTemplatePath = join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/system-compose/templates/docker-compose.yml.j2",
+    );
+    const postgresDefaultsPath = join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/postgres/defaults/main.yml",
+    );
+    const rabbitmqDefaultsPath = join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/rabbitmq/defaults/main.yml",
+    );
+
+    const compose = await Deno.readTextFile(composeTemplatePath);
+    const postgresDefaults = await Deno.readTextFile(postgresDefaultsPath);
+    const rabbitmqDefaults = await Deno.readTextFile(rabbitmqDefaultsPath);
+
+    for (const service of ["database", "queue"] as const) {
+      const databaseStart = compose.indexOf("  database:");
+      const queueStart = compose.indexOf("  queue:");
+      const topLevelNetworksStart = compose.indexOf("\nnetworks:\n");
+      const serviceBlock = service === "database"
+        ? compose.slice(databaseStart, queueStart)
+        : compose.slice(queueStart, topLevelNetworksStart);
+      assertMatch(
+        serviceBlock,
+        /cap_drop:\s*\n\s*- ALL/,
+        `${service} drops all Linux capabilities`,
+      );
+      assertMatch(
+        serviceBlock,
+        /security_opt:\s*\n\s*- no-new-privileges:true/,
+        `${service} refuses privilege escalation`,
+      );
+      assertMatch(
+        serviceBlock,
+        /read_only:\s*true/,
+        `${service} runs with a read-only root filesystem`,
+      );
+      assertMatch(
+        serviceBlock,
+        /tmpfs:\s*\n\s*- \/tmp/,
+        `${service} gets a writable /tmp via tmpfs, not the rootfs`,
+      );
+      assertMatch(
+        serviceBlock,
+        /mem_limit:\s*\{\{ \w+_container_mem_limit \}\}/,
+        `${service} has a configurable memory ceiling`,
+      );
+      assertMatch(
+        serviceBlock,
+        /pids_limit:\s*\{\{ \w+_container_pids_limit \}\}/,
+        `${service} has a configurable pids ceiling`,
+      );
+      assertMatch(
+        serviceBlock,
+        /healthcheck:\s*\n\s*test:/,
+        `${service} has a healthcheck, so a degraded-but-running container is noticed`,
+      );
+    }
+    assertMatch(
+      compose,
+      /test: \["CMD", "pg_isready", "-U", "\{\{ postgres_user \}\}"\]/,
+      "database healthcheck reuses the same pg_isready command the readiness-wait script already uses",
+    );
+    assertMatch(
+      compose,
+      /test: \["CMD", "rabbitmq-diagnostics", "-q", "ping"\]/,
+      "queue healthcheck reuses the same rabbitmq-diagnostics command the readiness-wait script already uses",
+    );
+
+    assertMatch(
+      postgresDefaults,
+      /^\s*postgres_container_mem_limit:\s*512m\s*$/m,
+      "postgres container memory ceiling defaults to 512m",
+    );
+    assertMatch(
+      postgresDefaults,
+      /^\s*postgres_container_pids_limit:\s*200\s*$/m,
+      "postgres container pids ceiling defaults to 200",
+    );
+    assertMatch(
+      rabbitmqDefaults,
+      /^\s*rabbitmq_container_mem_limit:\s*512m\s*$/m,
+      "rabbitmq container memory ceiling defaults to 512m",
+    );
+    assertMatch(
+      rabbitmqDefaults,
+      /^\s*rabbitmq_container_pids_limit:\s*200\s*$/m,
+      "rabbitmq container pids ceiling defaults to 200",
+    );
+  },
+);
+
+test(
   "ui-build defaults turbopanel_ui_mode to static",
   async () => {
     const defaultsPath = join(

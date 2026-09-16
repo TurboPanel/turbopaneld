@@ -26,5 +26,11 @@ postgres_container_gid: "{{ turbopanel_dev_gid if (turbopanel_dev_user | default
 # Owner of the generated postgres secret/config files: the dev user in dev (so it
 # owns its own secrets), else root.
 postgres_config_owner: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'root' }}"
+# Container resource ceiling — this database holds every organization's secrets
+# and TLS keys, so it is hardened by default rather than left to its own
+# devices on a shared host. Overridable per install; raise if legitimate load
+# needs more.
+postgres_container_mem_limit: 512m
+postgres_container_pids_limit: 200
 # FHS config dir (dev shares it with prod).
 turbopanel_config_dir: /etc/turbopanel  # noqa: var-naming[no-role-prefix]
