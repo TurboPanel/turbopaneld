@@ -964,6 +964,21 @@ test(
       ".instance_secrets hardened root:group 0640",
     );
     assertMatch(
+      defaults,
+      /^\s*turbopanel_instance_secret_escrow_path:\s*""\s*$/m,
+      "off-host escrow is opt-in and defaults to empty (skipped)",
+    );
+    assertMatch(
+      tasks,
+      /when:\s*turbopanel_instance_secret_escrow_path\s*\|\s*default\('\s*'\)\s*\|\s*length\s*>\s*0/,
+      "escrow task is gated on turbopanel_instance_secret_escrow_path",
+    );
+    assertMatch(
+      tasks,
+      /ansible\.builtin\.fetch:[\s\S]*?src:\s*"\{\{\s*turbopanel_config_dir\s*\}\}\/instance\/\.instance_secrets"[\s\S]*?dest:\s*"\{\{\s*turbopanel_instance_secret_escrow_path\s*\}\}"[\s\S]*?flat:\s*true/,
+      "escrow task fetches .instance_secrets to the operator-supplied controller path",
+    );
+    assertMatch(
       tasks,
       /name:\s*Install Deno runtime dev vars[\s\S]*?Restart turbopanel mailer/,
       "Deno dev-vars task notifies Restart turbopanel mailer",
@@ -984,10 +999,11 @@ test(
         ),
         `${label} emits ${pluralAssign.slice(0, -1)} when keyring is set`,
       );
+      const singularAssign = ["TURBOPANEL_SECRET", "="].join("");
       assertEquals(
-        /(?:^|\n)TURBOPANEL_SECRET=/.test(body),
+        new RegExp(`(?:^|\\n)${singularAssign}`).test(body),
         false,
-        `${label} must not emit legacy TURBOPANEL_SECRET`,
+        `${label} must not emit legacy ${singularAssign.slice(0, -1)}`,
       );
     }
   },

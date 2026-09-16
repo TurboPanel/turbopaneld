@@ -244,6 +244,18 @@ opt-in via `turbopanel_instance_secret_rotate` (default `false`): prepends
 `src/orchestration/ansible.test.ts` pins the default, the gate expression, the
 ownership/mode, and the templated env lines.
 
+This keyring is the sole root of trust and this file is its only copy —
+losing it is permanent, total data loss. Off-host backup is opt-in via
+`turbopanel_instance_secret_escrow_path` (default `""`, skips entirely): when
+set to a path *on the machine running the playbook* (never on the target
+host), `ansible.builtin.fetch` pulls a fresh copy there on every converge,
+including after a rotation. No Ansible Vault or other encryption is applied
+to the fetched copy — the operator is responsible for the security of the
+destination, the same trust model the `.instance_secrets` file itself
+already has. `security.mdx` documents this for self-hosted operators and
+covers the hosted (Workers) side separately, where `wrangler secret put` is
+write-only and there is no equivalent automatable backup.
+
 **Workers dev runtime extras (instance-launch):** `turbopanel-instance-cron.timer`
 hits wrangler's local scheduled-trigger endpoint every minute, because
 `wrangler dev` never fires the Worker's cron; the units are installed only when

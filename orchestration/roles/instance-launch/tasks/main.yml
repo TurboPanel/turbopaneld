@@ -410,6 +410,23 @@
     mode: "0640"
   failed_when: false
 
+# Opt-in off-host backup: this keyring is the sole root of trust — sessions,
+# daemon JWTs, and every at-rest envelope derive from it — generated once on
+# this host with no read-back path if it's lost (Cloudflare's `wrangler
+# secret put` is likewise write-only for hosted deployments; see
+# security.mdx). Empty (default) skips escrow entirely. Set this to a path on
+# the machine *running this playbook* — never a path on the target host
+# itself, or it isn't actually off this host — to pull a fresh copy there on
+# every converge, including after a rotation.
+- name: Escrow a copy of the instance signing secret keyring off-host
+  when: turbopanel_instance_secret_escrow_path | default('') | length > 0
+  ansible.builtin.fetch:
+    src: "{{ turbopanel_config_dir }}/instance/.instance_secrets"
+    dest: "{{ turbopanel_instance_secret_escrow_path }}"
+    flat: true
+    mode: "0600"
+  register: _instance_secrets_escrow
+
 - name: Read instance signing secret keyring
   ansible.builtin.slurp:
     src: "{{ turbopanel_config_dir }}/instance/.instance_secrets"

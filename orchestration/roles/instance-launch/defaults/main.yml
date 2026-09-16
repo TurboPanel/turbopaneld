@@ -23,6 +23,10 @@ turbopanel_instance_runtime_env: "{{ turbopanel_config_dir }}/instance/runtime.e
 turbopanel_instance_runtime_dev_vars: "{{ turbopanel_config_dir }}/instance/runtime.dev-vars"
 # Opt-in via extra-var; ordinary converges must never rotate the instance secret keyring.
 turbopanel_instance_secret_rotate: false
+# Opt-in off-host root-secret backup; empty (default) skips it entirely. Set
+# to a path on the machine running this playbook — never on the target host —
+# to pull a copy of the signing secret keyring there on every converge.
+turbopanel_instance_secret_escrow_path: ""
 turbopanel_install_root: /opt/turbopanel
 turbopanel_ssh_dir: "{{ turbopanel_install_root }}/.ssh"
 turbopanel_github_key: "{{ turbopanel_ssh_dir }}/github_ed25519"
