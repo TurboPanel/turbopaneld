@@ -80,7 +80,7 @@ jobs:
 
       - name: Install osv-scanner
         run: |
-          curl -sSfL -o /usr/local/bin/osv-scanner \
+          curl -sSfL --retry 3 --retry-connrefused --retry-delay 2 -o /usr/local/bin/osv-scanner \
             https://github.com/google/osv-scanner/releases/download/v2.6.0/osv-scanner_linux_amd64
           echo "ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108  /usr/local/bin/osv-scanner" | sha256sum -c -
           chmod +x /usr/local/bin/osv-scanner
