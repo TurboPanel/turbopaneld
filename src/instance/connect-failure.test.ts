@@ -129,6 +129,14 @@ it("spot-checks permanent and transient predicates", async () => {
     ),
     "inactive license is auth, not enrollment",
   );
+  // An operator revoked the key: re-enroll is refused for good, so the daemon
+  // must stop rather than loop on enroll.
+  assert(
+    classifyConnectFailure(
+      await toDaemonApiError(permanentEnrollmentErrorResponse("key-revoked")),
+    ).kind === "permanent",
+    "403 Server key revoked is a permanent enrollment failure",
+  );
   assert(
     isPermanentAuthError(
       await toDaemonApiError(permanentAuthErrorResponse("license-inactive")),

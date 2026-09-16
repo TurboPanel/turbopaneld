@@ -19,6 +19,7 @@ type PermanentEnrollmentKind =
   | "tier-below-required"
   | "tier-unassigned"
   | "invalid-signature"
+  | "key-revoked"
   | "fingerprint-exists";
 
 type PermanentAuthKind =
@@ -43,6 +44,7 @@ const PERMANENT_ENROLLMENT: Record<
   },
   "tier-unassigned": { status: 400, message: "License tier not assigned" },
   "invalid-signature": { status: 403, message: "Invalid signature" },
+  "key-revoked": { status: 403, message: "Server key revoked" },
   "fingerprint-exists": {
     status: 409,
     message: "Fingerprint already exists",

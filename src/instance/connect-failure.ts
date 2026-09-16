@@ -21,6 +21,9 @@ const PERMANENT_ENROLLMENT_ERRORS: readonly StatusMessage[] = [
   { status: 400, message: "License tier below required" },
   { status: 400, message: "License tier not assigned" },
   { status: 403, message: "Invalid signature" },
+  // An operator revoked this server's key; re-enrolling is refused until
+  // the server is deleted and enrolled fresh. Retrying cannot change that.
+  { status: 403, message: "Server key revoked" },
   { status: 409, message: "Fingerprint already exists" },
 ];
 
