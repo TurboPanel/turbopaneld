@@ -78,6 +78,16 @@ jobs:
       - name: Check third-party notices
         run: deno task notices:check
 
+      - name: Install osv-scanner
+        run: |
+          curl -sSfL -o /usr/local/bin/osv-scanner \
+            https://github.com/google/osv-scanner/releases/download/v2.6.0/osv-scanner_linux_amd64
+          echo "ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108  /usr/local/bin/osv-scanner" | sha256sum -c -
+          chmod +x /usr/local/bin/osv-scanner
+
+      - name: Dependency vulnerability scan (osv-scanner)
+        run: osv-scanner scan source --recursive .
+
       # The Ansible layer (20+ playbooks, 30+ first-party roles) had no CI
       # gate at all -- its only feedback was a converge failure on a real host.
       # orchestration/requirements.txt already pinned ansible-lint "for IDE/CI
