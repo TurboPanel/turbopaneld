@@ -25,6 +25,7 @@ import {
   hostingIngressDir,
   inspectHostingIngressContainer,
   listPersistedTcpUdpServiceIds,
+  readAcmeModeHostnames,
   readEnvironmentTcpUdpServiceIds,
   removeEnvironmentTcpUdpServiceIngress,
   removeHostingCaddySite,
@@ -1420,6 +1421,156 @@ test("removeHostingCaddySite deletes snippet and tolerates missing file", async 
     assertEquals(reloadCount, 2);
   } finally {
     restore();
+    await cleanup();
+  }
+});
+
+test("rewriteHostingCaddySites writes an acme-hostnames manifest alongside the site snippet", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const restore = setIngressHostCommandForTest(() =>
+    Promise.resolve({ success: true, stderr: "" })
+  );
+  try {
+    await rewriteHostingCaddySites(layout, {
+      environmentId: "env-acme-1",
+      projectId: "proj-1",
+      organizationId: "org-1",
+      projectName: "demo",
+      composeFiles: [{
+        filename: "compose.yaml",
+        role: "runtime",
+        content: "services: {}",
+      }],
+      hostings: [
+        {
+          hostingId: "h1",
+          serviceId: "s1",
+          composeServiceName: "web",
+          hostnames: ["acme.example.com"],
+          tlsMode: "acme",
+        },
+        {
+          hostingId: "h2",
+          serviceId: "s2",
+          composeServiceName: "internal",
+          hostnames: ["internal.example.com"],
+        },
+      ],
+    });
+    const manifestPath = join(
+      layout.configDir,
+      "hosting",
+      "sites",
+      "env-acme-1.acme-hostnames.json",
+    );
+    const manifest = JSON.parse(await Deno.readTextFile(manifestPath));
+    assertEquals(manifest, ["acme.example.com"]);
+    assertEquals(await readAcmeModeHostnames(layout), ["acme.example.com"]);
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("rewriteHostingCaddySites writes an empty acme-hostnames manifest when nothing is acme-mode", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const restore = setIngressHostCommandForTest(() =>
+    Promise.resolve({ success: true, stderr: "" })
+  );
+  try {
+    await rewriteHostingCaddySites(layout, {
+      environmentId: "env-no-acme",
+      projectId: "proj-1",
+      organizationId: "org-1",
+      projectName: "demo",
+      composeFiles: [{
+        filename: "compose.yaml",
+        role: "runtime",
+        content: "services: {}",
+      }],
+      hostings: [
+        {
+          hostingId: "h1",
+          serviceId: "s1",
+          composeServiceName: "web",
+          hostnames: ["internal.example.com"],
+        },
+      ],
+    });
+    assertEquals(await readAcmeModeHostnames(layout), []);
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("removeHostingCaddySite deletes the acme-hostnames manifest too, tolerating a missing one", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const restore = setIngressHostCommandForTest(() =>
+    Promise.resolve({ success: true, stderr: "" })
+  );
+  try {
+    await rewriteHostingCaddySites(layout, {
+      environmentId: "env-acme-rm",
+      projectId: "proj-1",
+      organizationId: "org-1",
+      projectName: "demo",
+      composeFiles: [{
+        filename: "compose.yaml",
+        role: "runtime",
+        content: "services: {}",
+      }],
+      hostings: [
+        {
+          hostingId: "h1",
+          serviceId: "s1",
+          composeServiceName: "web",
+          hostnames: ["acme.example.com"],
+          tlsMode: "acme",
+        },
+      ],
+    });
+    assertEquals(await readAcmeModeHostnames(layout), ["acme.example.com"]);
+
+    await removeHostingCaddySite(layout, "env-acme-rm");
+    assertEquals(await readAcmeModeHostnames(layout), []);
+    // Second removal must not throw even though the manifest is already gone.
+    await removeHostingCaddySite(layout, "env-acme-rm");
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("readAcmeModeHostnames unions manifests across environments, sorted, deduped, and tolerates a missing sites dir", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    assertEquals(await readAcmeModeHostnames(layout), []);
+
+    const sitesDir = join(layout.configDir, "hosting", "sites");
+    await Deno.mkdir(sitesDir, { recursive: true });
+    await Deno.writeTextFile(
+      join(sitesDir, "env-a.acme-hostnames.json"),
+      JSON.stringify(["b.example.com", "a.example.com"]),
+    );
+    await Deno.writeTextFile(
+      join(sitesDir, "env-b.acme-hostnames.json"),
+      JSON.stringify(["a.example.com", "c.example.com"]),
+    );
+    // A malformed manifest must be skipped, not crash the union.
+    await Deno.writeTextFile(
+      join(sitesDir, "env-c.acme-hostnames.json"),
+      "not json",
+    );
+    // A non-manifest file in the same directory must be ignored.
+    await Deno.writeTextFile(join(sitesDir, "env-a.caddy"), "# irrelevant");
+
+    assertEquals(await readAcmeModeHostnames(layout), [
+      "a.example.com",
+      "b.example.com",
+      "c.example.com",
+    ]);
+  } finally {
     await cleanup();
   }
 });

@@ -134,6 +134,23 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    (`scope = 'datacenter'` on the target server), or **local** loopback
    `127.0.0.1`. Unit `turbopanel-hosting-caddy.service` when sudo allows.
    **Distinct** from control-plane Caddy (`:8443`).
+11a. Alongside each environment's `.caddy` site file, `rewriteHostingCaddySites`
+   also writes a companion `<environmentId>.acme-hostnames.json` naming just
+   that environment's `tlsMode: 'acme'` hostnames (removed in lockstep by
+   `removeHostingCaddySite`, so a stale environment never leaves a phantom
+   entry). `readAcmeModeHostnames()` unions every environment's manifest —
+   this is what `AcmeIssuanceObserver` (`src/instance/acme-observe.ts`) polls
+   every 60s, live-probing each hostname over `fetch()` (system trust store,
+   `HEAD` + `redirect: manual`) and sending a daemon-initiated
+   `acme-issuance-event` only on a state change — a debounced failure (two
+   consecutive bad polls, so the few seconds Caddy needs right after a fresh
+   deploy never false-alarms) or an immediate recovery. Caddy's admin API has
+   no issuance-status endpoint to poll instead — verified empirically against
+   a real container before choosing the live-handshake probe (see
+   `src/deploy/acme-probe.ts`'s header comment). The control plane
+   merge-patches the matching `managed` `lets_encrypt` row's
+   `tls.metadata.acme.lastError` and deliberately never touches `tls.status`
+   — see `turbopanel/src/client/tls/acme-issuance-event.ts`.
 12. Best-effort `docker compose ps --format json` — per-container identity/status
    (`containerId`, `containerName`, `composeServiceName`, `status`, optional
    `serviceId` from `payload.hostings`) is included in the command result when

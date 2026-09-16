@@ -98,6 +98,7 @@ import {
 } from "./run-reconcile.ts";
 import { installOriginNeedsInsecureTls } from "./install-tls.ts";
 import { ManagedHaObserver } from "./ha-observe.ts";
+import { AcmeIssuanceObserver } from "./acme-observe.ts";
 import { TopologyReporter } from "./topology-reporter.ts";
 import type { TopologySnapshot } from "../metrics/topology/types.ts";
 
@@ -294,6 +295,19 @@ type DaemonMessage =
     type: "managed-ha-event";
     managedId: string;
     sourceMemberId?: string;
+    at: string;
+  }
+  | {
+    /**
+     * Daemon-initiated, fire-and-forget (no correlated request/result, same
+     * shape as `managed-ha-event`) — `AcmeIssuanceObserver`'s live TLS-probe
+     * verdict for one `tlsMode: 'acme'` hostname, sent only on a state
+     * change (first failure after a short debounce, or a recovery).
+     */
+    type: "acme-issuance-event";
+    hostname: string;
+    ok: boolean;
+    errorMessage?: string;
     at: string;
   }
   | {
@@ -580,6 +594,7 @@ export class InstanceClient {
   #licenseStamp: string | undefined;
   #idlePresence: IdlePresence | undefined;
   #haObserver: ManagedHaObserver | undefined;
+  #acmeObserver: AcmeIssuanceObserver | undefined;
   #metricsScheduler: MetricsScheduler | undefined;
   /** Server id the current metrics scheduler was bound for (not `#tokenServerId`). */
   #metricsSchedulerServerId: string | undefined;
@@ -804,6 +819,8 @@ export class InstanceClient {
     this.#idlePresence = undefined;
     this.#haObserver?.detach();
     this.#haObserver = undefined;
+    this.#acmeObserver?.detach();
+    this.#acmeObserver = undefined;
     this.#metricsScheduler?.detach();
     this.#liveLeases?.dispose();
     this.#liveLeases = undefined;
@@ -877,6 +894,7 @@ export class InstanceClient {
     this.#closeActiveSocket();
     this.#idlePresence?.detach();
     this.#haObserver?.detach();
+    this.#acmeObserver?.detach();
     this.#metricsScheduler?.detach();
     const classified = classifyConnectFailure(err);
     if (classified.kind === "permanent") {
@@ -1265,6 +1283,8 @@ export class InstanceClient {
     this.#idlePresence?.attach(ws);
     this.#ensureHaObserver();
     this.#haObserver?.attach();
+    this.#ensureAcmeObserver();
+    this.#acmeObserver?.attach();
     this.#metricsScheduler?.attach((sample) =>
       this.#apiClient?.sendHostMetrics(sample) ?? Promise.resolve()
     );
@@ -1305,6 +1325,7 @@ export class InstanceClient {
       if (this.#ws === ws) this.#ws = undefined;
       this.#idlePresence?.detach();
       this.#haObserver?.detach();
+      this.#acmeObserver?.detach();
       this.#metricsScheduler?.detach();
       this.#topologyReporter?.detach();
       // Live leases die with the socket — the next attach starts at baseline.
@@ -1345,6 +1366,16 @@ export class InstanceClient {
   #ensureHaObserver(): void {
     if (this.#haObserver) return;
     this.#haObserver = new ManagedHaObserver({
+      send: (message) => {
+        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return;
+        this.#ws.send(JSON.stringify(message));
+      },
+    });
+  }
+
+  #ensureAcmeObserver(): void {
+    if (this.#acmeObserver) return;
+    this.#acmeObserver = new AcmeIssuanceObserver({
       send: (message) => {
         if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return;
         this.#ws.send(JSON.stringify(message));

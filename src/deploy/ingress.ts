@@ -1270,6 +1270,66 @@ export function buildCaddyHostnameRoutes(
   return byHostname;
 }
 
+/** Companion manifest naming which of an environment's hostnames run tlsMode: 'acme'. */
+function acmeHostnamesManifestPath(
+  layout: LayoutPaths,
+  environmentId: string,
+): string {
+  return join(
+    layout.configDir,
+    "hosting",
+    "sites",
+    `${environmentId}.acme-hostnames.json`,
+  );
+}
+
+/**
+ * Every currently-deployed `tlsMode: 'acme'` hostname, across all
+ * environments — unions each environment's own manifest (written/removed in
+ * lockstep with its `.caddy` site file by {@link rewriteHostingCaddySites} /
+ * {@link removeHostingCaddySite}, so a stale environment never leaves a
+ * phantom entry here). Used by {@link AcmeIssuanceObserver} to know what to
+ * poll without re-parsing Caddyfile syntax.
+ */
+export async function readAcmeModeHostnames(
+  layout: LayoutPaths,
+): Promise<string[]> {
+  const sitesDir = join(layout.configDir, "hosting", "sites");
+  const hostnames = new Set<string>();
+  let entries: AsyncIterable<Deno.DirEntry>;
+  try {
+    entries = Deno.readDir(sitesDir);
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return [];
+    throw err;
+  }
+  try {
+    for await (const entry of entries) {
+      if (!entry.isFile || !entry.name.endsWith(".acme-hostnames.json")) {
+        continue;
+      }
+      try {
+        const raw = await Deno.readTextFile(join(sitesDir, entry.name));
+        const parsed: unknown = JSON.parse(raw);
+        if (!Array.isArray(parsed)) continue;
+        for (const value of parsed) {
+          if (typeof value === "string") hostnames.add(value);
+        }
+      } catch (err) {
+        logWarn(
+          "deploy",
+          `acme-hostnames manifest unreadable, skipping: ${entry.name}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+  return [...hostnames].sort((a, b) => a.localeCompare(b));
+}
+
 export async function rewriteHostingCaddySites(
   layout: LayoutPaths,
   payload: EnvironmentDeployPayload,
@@ -1307,6 +1367,18 @@ export async function rewriteHostingCaddySites(
     { mode: 0o640 },
   );
 
+  // Rewritten unconditionally, same lifecycle as the .caddy file above, so an
+  // environment that moves off acme-mode entirely never leaves a stale entry
+  // for readAcmeModeHostnames() to keep polling.
+  const acmeHostnames = hostnames.filter((hostname) =>
+    hostnameSites.get(hostname)!.tlsMode === "acme"
+  );
+  await Deno.writeTextFile(
+    acmeHostnamesManifestPath(layout, payload.environmentId),
+    JSON.stringify(acmeHostnames),
+    { mode: 0o640 },
+  );
+
   const reload = await run("sudo", [
     "-n",
     "systemctl",
@@ -1335,6 +1407,14 @@ export async function removeHostingCaddySite(
   );
   try {
     await Deno.remove(sitePath);
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) {
+      throw err;
+    }
+  }
+
+  try {
+    await Deno.remove(acmeHostnamesManifestPath(layout, environmentId));
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) {
       throw err;
