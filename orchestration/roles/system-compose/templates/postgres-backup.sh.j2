@@ -1,0 +1,50 @@
+#!/bin/bash
+# Managed by TurboPanel (system-compose role) — do not edit by hand.
+#
+# Nightly pg_dump of the control-plane database (custom format, already
+# compressed), atomic write + rename, retention pruning, and an optional
+# rsync push to an operator-supplied off-host destination. Run by
+# turbopanel-postgres-backup.timer. No password is passed: pg_dump runs
+# inside the database container over its default local connection, the
+# same trust model turbopaneld/src/managed/engines/postgres.ts already
+# relies on for the customer-facing managed-engine backup feature.
+#
+# Restore runbook: website/docs/deployment/security.mdx
+# "Backup and disaster recovery".
+set -euo pipefail
+
+backup_dir="{{ postgres_backup_dir }}"
+container="{{ postgres_container_name }}"
+db_user="{{ postgres_user }}"
+db_name="{{ postgres_db }}"
+retention_keep={{ postgres_backup_retention_keep }}
+remote_destination="{{ postgres_backup_remote_destination }}"
+
+mkdir -p "$backup_dir"
+chmod 0700 "$backup_dir"
+
+stamp=$(date -u +%Y%m%dT%H%M%SZ)
+dest="$backup_dir/turbopanel-${stamp}.dump"
+tmp="${dest}.part"
+
+cleanup() {
+  rm -f -- "$tmp"
+}
+trap cleanup EXIT
+
+umask 077
+docker exec "$container" pg_dump -Fc -U "$db_user" -d "$db_name" > "$tmp"
+mv -- "$tmp" "$dest"
+trap - EXIT
+chmod 0600 "$dest"
+
+# Retention: keep the newest N dumps, delete the rest.
+mapfile -t old_dumps < <(find "$backup_dir" -maxdepth 1 -name 'turbopanel-*.dump' -printf '%T@ %p\n' \
+  | sort -rn | tail -n "+$((retention_keep + 1))" | cut -d' ' -f2-)
+if [ "${#old_dumps[@]}" -gt 0 ]; then
+  rm -f -- "${old_dumps[@]}"
+fi
+
+if [ -n "$remote_destination" ]; then
+  rsync -a --chmod=D0700,F0600 "$dest" "$remote_destination"
+fi

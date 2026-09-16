@@ -55,10 +55,34 @@ same play and:
 | `/etc/turbopanel/system/wait-ready.sh`                      | Readiness script (`pg_isready` / `rabbitmq-diagnostics -q ping` via `docker exec`), run as a second `ExecStart` so the oneshot unit blocks until services actually answer                    |
 | `turbopanel-system-stack.service`                           | `Type=oneshot`, `RemainAfterExit=yes`; `ExecStart` = compose `up -d --remove-orphans` then `wait-ready.sh`; `ExecStop` = compose `down`                                                      |
 | Containers `turbopanel-database` / `turbopanel-queue`       | Unchanged names/volumes from the old per-service containers — Compose adopts them (old non-Compose containers with the same name are force-removed on first run)                            |
+| `/etc/turbopanel/system/postgres-backup.sh`                 | Nightly `pg_dump -Fc` of the control-plane database; installed only when `_system_compose_database_active`                                                                                   |
+| `turbopanel-postgres-backup.timer` / `.service`              | `OnCalendar={{ postgres_backup_oncalendar }}` (default `03:00`), `Persistent=true`; the `.service` is `Type=oneshot`, `Requires=turbopanel-system-stack.service`                             |
 
 Dependent units (`turbopanel-instance.service`, `turbopanel-dbstudio.service`,
 `turbopanel-mailer.service`) declare
 `After=`/`Wants=`/`Requires=turbopanel-system-stack.service`.
+
+**Postgres backup.** `postgres_backup_enabled` defaults `true` — the database
+holds every organization's secrets and TLS keys, so a nightly local backup is
+the default posture, not opt-in. The script (`postgres-backup.sh.j2`) runs
+`pg_dump -Fc` **inside** the `database` container over its default local
+connection — no password is slurped or passed, the same trust model
+`turbopaneld/src/managed/engines/postgres.ts`'s `dumpArgv` already relies on
+for the unrelated customer-facing managed-engine backup feature — writes
+atomically (`.part` + rename, `trap` cleanup on failure), and prunes to the
+newest `postgres_backup_retention_keep` dumps (default 14) under
+`{{ postgres_backup_dir }}` (default `{{ turbopanel_state_dir
+}}/backup/postgres`). Off-host push is a separate opt-in,
+`postgres_backup_remote_destination` (default `""`, local-only): when set to
+an `rsync`-compatible target the script pushes the fresh dump there after
+every successful local write — this runs from inside the nightly script
+itself, not at Ansible converge time, since a systemd timer fires
+independently of converges (contrast the `instance-launch` secret-keyring
+escrow, which *is* pull-at-converge via `ansible.builtin.fetch` and cannot
+satisfy "nightly"). `website/docs/deployment/security.mdx` → "Backup and
+disaster recovery" documents the RPO/RTO and the restore runbook this pairs
+with; `src/orchestration/ansible.test.ts` pins the defaults, the gate
+expressions, and the script's dump/retention/push shape.
 
 **Converge order:** `postgres` → `rabbitmq` (config only) →
 `system-compose` (brings the stack up). Standalone single-service playbooks

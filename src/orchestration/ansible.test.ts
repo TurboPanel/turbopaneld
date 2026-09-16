@@ -1010,6 +1010,106 @@ test(
 );
 
 test(
+  "system-compose Postgres backup: defaults, gate, script shape, and systemd units",
+  async () => {
+    const defaultsPath = join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/system-compose/defaults/main.yml",
+    );
+    const tasksPath = join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/system-compose/tasks/main.yml",
+    );
+    const scriptPath = join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/system-compose/templates/postgres-backup.sh.j2",
+    );
+    const timerPath = join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/system-compose/templates/turbopanel-postgres-backup.timer.j2",
+    );
+    const servicePath = join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/system-compose/templates/turbopanel-postgres-backup.service.j2",
+    );
+
+    const defaults = await Deno.readTextFile(defaultsPath);
+    const tasks = await Deno.readTextFile(tasksPath);
+    const script = await Deno.readTextFile(scriptPath);
+    const timer = await Deno.readTextFile(timerPath);
+    const service = await Deno.readTextFile(servicePath);
+
+    assertMatch(
+      defaults,
+      /^\s*postgres_backup_enabled:\s*true\s*$/m,
+      "nightly backup is on by default — this DB holds every org's secrets",
+    );
+    assertMatch(
+      defaults,
+      /^\s*postgres_backup_retention_keep:\s*14\s*$/m,
+      "retention defaults to 14 dumps",
+    );
+    assertMatch(
+      defaults,
+      /^\s*postgres_backup_remote_destination:\s*""\s*$/m,
+      "off-host push is opt-in and defaults to empty (local-only)",
+    );
+    assertMatch(
+      tasks,
+      /name:\s*Install Postgres backup script[\s\S]*?when:[\s\S]*?_system_compose_database_active \| bool[\s\S]*?postgres_backup_enabled \| bool/,
+      "backup script install is gated on the database being active and the feature being enabled",
+    );
+    assertMatch(
+      tasks,
+      /name:\s*Ensure Postgres backup timer desired state[\s\S]*?name:\s*turbopanel-postgres-backup\.timer[\s\S]*?enabled:\s*true[\s\S]*?state:\s*started/,
+      "backup timer is enabled and started once installed",
+    );
+
+    assertMatch(
+      script,
+      /pg_dump -Fc -U "\$db_user" -d "\$db_name" > "\$tmp"/,
+      "dumps in custom format (already compressed) to a .part file, never the final path directly",
+    );
+    assertMatch(
+      script,
+      /mv -- "\$tmp" "\$dest"/,
+      "atomic rename from .part to the final dump path",
+    );
+    assertEquals(
+      script.includes("PGPASSWORD"),
+      false,
+      "no password handling — pg_dump runs inside the container over its default local trust connection, matching managed/engines/postgres.ts's dumpArgv",
+    );
+    assertMatch(
+      script,
+      /retention_keep \+ 1/,
+      "retention pruning keeps the newest N dumps and deletes the rest",
+    );
+    assertMatch(
+      script,
+      /if \[ -n "\$remote_destination" \]; then\s*\n\s*rsync/,
+      "off-host push only runs when a remote destination was configured",
+    );
+
+    assertMatch(
+      timer,
+      /OnCalendar=\{\{ postgres_backup_oncalendar \}\}/,
+      "backup cadence is configurable, not hardcoded in the timer unit",
+    );
+    assertMatch(
+      timer,
+      /Persistent=true/,
+      "a missed nightly run (host down at 03:00) still fires on next boot",
+    );
+    assertMatch(
+      service,
+      /Requires=\{\{ system_compose_service_name \}\}\.service/,
+      "backup service requires the compose stack it dumps from",
+    );
+  },
+);
+
+test(
   "ui-build defaults turbopanel_ui_mode to static",
   async () => {
     const defaultsPath = join(

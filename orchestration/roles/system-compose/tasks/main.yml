@@ -225,3 +225,38 @@
         - _system_compose_queue_active | bool
         - rabbitmq_conf_written is defined
         - rabbitmq_conf_written is changed
+
+    - name: Install Postgres backup script
+      ansible.builtin.template:
+        src: postgres-backup.sh.j2
+        dest: "{{ system_compose_dir }}/postgres-backup.sh"
+        owner: root
+        group: root
+        mode: "0750"
+      when:
+        - _system_compose_database_active | bool
+        - postgres_backup_enabled | bool
+
+    - name: Install Postgres backup systemd units
+      ansible.builtin.template:
+        src: "{{ item }}.j2"
+        dest: "/etc/systemd/system/{{ item }}"
+        owner: root
+        group: root
+        mode: "0640"
+      loop:
+        - turbopanel-postgres-backup.service
+        - turbopanel-postgres-backup.timer
+      when:
+        - _system_compose_database_active | bool
+        - postgres_backup_enabled | bool
+
+    - name: Ensure Postgres backup timer desired state
+      ansible.builtin.systemd:
+        name: turbopanel-postgres-backup.timer
+        daemon_reload: true
+        enabled: true
+        state: started
+      when:
+        - _system_compose_database_active | bool
+        - postgres_backup_enabled | bool

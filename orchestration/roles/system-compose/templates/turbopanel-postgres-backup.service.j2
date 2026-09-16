@@ -1,0 +1,9 @@
+# Managed by TurboPanel (system-compose role) — do not edit by hand.
+[Unit]
+Description=TurboPanel control-plane Postgres backup
+After={{ system_compose_service_name }}.service
+Requires={{ system_compose_service_name }}.service
+
+[Service]
+Type=oneshot
+ExecStart={{ system_compose_dir }}/postgres-backup.sh

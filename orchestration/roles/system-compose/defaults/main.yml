@@ -18,6 +18,22 @@ system_compose_service_name: turbopanel-system-stack
 # + `system-compose`, and still needs these to resolve the config directory).
 turbopanel_docker_network: turbopanel  # noqa: var-naming[no-role-prefix]
 turbopanel_config_dir: /etc/turbopanel  # noqa: var-naming[no-role-prefix]
+turbopanel_state_dir: /var/lib/turbopanel  # noqa: var-naming[no-role-prefix]
 turbopanel_dev_user: ""  # noqa: var-naming[no-role-prefix]
 turbopanel_group: >-  # noqa: var-naming[no-role-prefix]
   {{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}
+
+# Nightly control-plane Postgres backup (pg_dump -Fc, local by default). On by
+# default — cheap, safe, no operator input required; the DB this backs up
+# holds every organization's secrets and TLS keys, so losing it with no copy
+# anywhere is the default risk, not an opt-in one. Set to false only if an
+# external mechanism already covers this host.
+postgres_backup_enabled: true
+postgres_backup_dir: "{{ turbopanel_state_dir }}/backup/postgres"
+postgres_backup_oncalendar: "*-*-* 03:00:00"
+postgres_backup_retention_keep: 14
+# Opt-in off-host push (an rsync target, e.g. "user@host:/path/"); empty
+# (default) means backups stay local, on the same host as the database they
+# protect — see security.mdx "Backup and disaster recovery" for what that
+# means for the off-host half of this control.
+postgres_backup_remote_destination: ""
