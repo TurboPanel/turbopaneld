@@ -28,7 +28,7 @@ jobs:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           # Full history for SonarCloud new-code / blame (shallow clones skew the gate).
           fetch-depth: 0
@@ -88,7 +88,7 @@ jobs:
       # Install from the hash lock (githubactions:S8544 / S8541), not the
       # range-pinned constraints file.
       - name: Set up Python for Ansible
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           # Matches the vendored daemon pin (PYTHON_VERSION in
           # src/orchestration/paths.ts) and orchestration/requirements.txt.
@@ -116,7 +116,7 @@ jobs:
           scripts/normalize-lcov.ts coverage/lcov.info
 
       - name: Upload coverage LCOV
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: daemon-coverage-lcov
           path: coverage/lcov.info

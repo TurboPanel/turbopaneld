@@ -79,7 +79,7 @@ jobs:
       TURBOPANEL_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 0
 
@@ -185,7 +185,7 @@ jobs:
             release-assets/manifest.json
 
       - name: Upload release assets
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: turbopaneld-release-assets
           path: release-assets
