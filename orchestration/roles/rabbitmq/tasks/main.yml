@@ -81,16 +81,16 @@
     mode: "0640"
 
 - name: Write queue broker config
-  # World-readable on purpose: the broker container runs as
-  # rabbitmq_container_uid (9995 on a managed install — not root, not in the
-  # tp group) and bind-mounts this file read-only, so 0640 root:root left it
+  # Owned by the uid the broker container runs as (rabbitmq_container_uid —
+  # 9995 on a managed install, no host user; the dev user in co-located
+  # dev): it bind-mounts this file read-only, and 0640 root:root left it
   # unable to open its own config and crash-looping (install-rehearsal,
-  # Road to 0.1.x). The file carries no secret — the password lives in
-  # the generated password file, which stays 0600.
+  # Road to 0.1.x). Numeric owner on purpose — the uid has no passwd entry
+  # on a managed host. Still 0640: not world-readable.
   ansible.builtin.template:
     src: rabbitmq.conf.j2
     dest: "{{ turbopanel_config_dir }}/rabbitmq/rabbitmq.conf"
-    owner: "{{ rabbitmq_config_owner }}"
+    owner: "{{ rabbitmq_container_uid }}"
     group: root
-    mode: "0644"
+    mode: "0640"
   register: rabbitmq_conf_written
