@@ -25,9 +25,15 @@
 # TURBOPANEL_DL_BASE (dev overlay catalog; never falls back to the public CDN).
 # Flags (--license, --host, …) remain supported for scripts and sudo re-exec.
 #
-# Self-hosted control plane (explicit opt-in — never inferred from a missing
-# license):
-#   curl -fsSL turbopanel.sh | TURBOPANEL_INSTANCE=1 sh
+# Self-hosted control plane — the one door, chosen by what you pass:
+#   curl -fsSL turbopanel.sh | sh                        # nothing → panel install
+#   curl -fsSL turbopanel.sh | TURBOPANEL_INSTANCE=1 sh  # the same, said explicitly
+# Decided 2026-09-17: with no license and no daemon arguments the script
+# installs the control plane. On a terminal it first shows a two-line menu so
+# a plain run can be backed out of (or turned into a daemon enrolment); piped
+# without a terminal it proceeds. Daemon arguments without a license
+# (--host, --tunnel-token, --instance-ca, TURBOPANEL_HOST …) still mean "you
+# meant to enrol a daemon and forgot the license" and stop with that error.
 # Downloads the daemon package for its orchestration tree, then the instance
 # and UI release packages from the same channel (default: release), verifies
 # every sha256 against each manifest, unpacks them under /opt/turbopanel, and
@@ -447,7 +453,10 @@ tp_is_interactive() {
   if [ -t 0 ]; then
     return 0
   fi
-  [ -r /dev/tty ] && [ -w /dev/tty ] 2>/dev/null
+  # `[ -r /dev/tty ]` only checks the node's permissions; without a
+  # controlling terminal the open itself fails ("No such device or
+  # address"), so try the open.
+  ( : </dev/tty >/dev/tty ) 2>/dev/null
 }
 tp_sudo_installed() { command -v sudo >/dev/null 2>&1; }
 tp_validate_sudo() {
@@ -911,6 +920,35 @@ case "${TURBOPANEL_INSTANCE:-}" in
   *) ;;
 esac
 
+# A bare run — no license, no daemon arguments — is a control plane install.
+# Daemon arguments without a license keep the old error: that is an enrolment
+# that forgot its license, not a request for a panel.
+if [ "$INSTANCE_INSTALL" != true ] && [ -z "$LICENSE" ] && [ -z "$HOST_URL" ] \
+  && [ -z "$TUNNEL_TOKEN" ] && [ -z "$INSTANCE_CA" ] && [ -z "$DL_BASE" ] \
+  && [ -z "$MANIFEST_URL" ]; then
+  if tp_is_interactive; then
+    tp_print_step "▸" "No license given — this installs a self-hosted TurboPanel control plane on this host."
+    printf '  [1] Install the control plane here (default)\n' >/dev/tty
+    printf '  [2] Enrol this host as a daemon instead (needs a license from an existing panel)\n' >/dev/tty
+    printf '  [q] Quit\n' >/dev/tty
+    printf 'Choice [1]: ' >/dev/tty
+    _choice=""
+    read -r _choice </dev/tty || _choice=""
+    case "$_choice" in
+      ""|1) INSTANCE_INSTALL=true ;;
+      2)
+        printf 'License (base64, from the panel'"'"'s Servers page): ' >/dev/tty
+        read -r LICENSE </dev/tty || LICENSE=""
+        [ -n "$LICENSE" ] || { tp_print_error "a license is required to enrol a daemon"; exit 1; }
+        ;;
+      *) echo "run.sh: nothing installed"; exit 0 ;;
+    esac
+  else
+    tp_print_step "▸" "No license given — installing a self-hosted TurboPanel control plane on this host (set TURBOPANEL_LICENSE to enrol a daemon instead)."
+    INSTANCE_INSTALL=true
+  fi
+fi
+
 if [ "$INSTANCE_INSTALL" = true ]; then
   # A control plane install: no license (the wizard issues the first one),
   # no control-plane URL (this host becomes one), and the packages only exist
@@ -925,7 +963,7 @@ if [ "$INSTANCE_INSTALL" = true ]; then
     exit 1
   fi
 elif [ -z "$LICENSE" ]; then
-  tp_print_error "TURBOPANEL_LICENSE (or --license) is required"
+  tp_print_error "TURBOPANEL_LICENSE (or --license) is required to enrol a daemon (run with no arguments to install a control plane instead)"
   exit 1
 fi
 
