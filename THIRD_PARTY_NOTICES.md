@@ -10,7 +10,7 @@ orchestration/requirements-docker.yml sha256:7aaeade63e316749d179a03a9289e37a23a
 orchestration/requirements.lock.txt sha256:2a2b88cc97affa78a54c1635b65333eb1259a4aa49f251cfc41aaa0261f2e673
 orchestration/requirements.txt sha256:bcd5495ade36b7203ef5411fe77be58d740df3437810a00332203a1bbc162162
 orchestration/requirements.yml sha256:e2003efba060bce064c6f4f7e4f5857dd8f41120e2537aaa6a76cab7834cae3c
-workers/turbopanel-sh/pnpm-lock.yaml sha256:552802cc82b1047954664dc6f5160ad0ddbac005830e13b39f9d3110db08f6af
+workers/turbopanel-sh/pnpm-lock.yaml sha256:e896877b5d6aad7cb3409814debd516fe793d3d23af1380fd61f46b923b2c491
 -->
 
 ## Production dependencies
@@ -214,132 +214,132 @@ These packages are used for development, test, or build tooling and are not bund
 - License: MIT
 - Source: pnpm-lock.yaml
 
-### @img/sharp-darwin-arm64@0.35.2
+### @img/sharp-darwin-arm64@0.35.4
 
 - License: Apache-2.0
 - Source: pnpm-lock.yaml
 
-### @img/sharp-darwin-x64@0.35.2
+### @img/sharp-darwin-x64@0.35.4
 
 - License: Apache-2.0
 - Source: pnpm-lock.yaml
 
-### @img/sharp-freebsd-wasm32@0.35.2
+### @img/sharp-freebsd-wasm32@0.35.4
 
 - License: Apache-2.0
 - Source: pnpm-lock.yaml
 
-### @img/sharp-libvips-darwin-arm64@1.3.1
+### @img/sharp-libvips-darwin-arm64@1.3.3
 
 - License: LGPL-3.0-or-later
 - Source: pnpm-lock.yaml
 
-### @img/sharp-libvips-darwin-x64@1.3.1
+### @img/sharp-libvips-darwin-x64@1.3.3
 
 - License: LGPL-3.0-or-later
 - Source: pnpm-lock.yaml
 
-### @img/sharp-libvips-linux-arm@1.3.1
+### @img/sharp-libvips-linux-arm@1.3.3
 
 - License: LGPL-3.0-or-later
 - Source: pnpm-lock.yaml
 
-### @img/sharp-libvips-linux-arm64@1.3.1
+### @img/sharp-libvips-linux-arm64@1.3.3
 
 - License: LGPL-3.0-or-later
 - Source: pnpm-lock.yaml
 
-### @img/sharp-libvips-linux-ppc64@1.3.1
+### @img/sharp-libvips-linux-ppc64@1.3.3
 
 - License: LGPL-3.0-or-later
 - Source: pnpm-lock.yaml
 
-### @img/sharp-libvips-linux-riscv64@1.3.1
+### @img/sharp-libvips-linux-riscv64@1.3.3
 
 - License: LGPL-3.0-or-later
 - Source: pnpm-lock.yaml
 
-### @img/sharp-libvips-linux-s390x@1.3.1
+### @img/sharp-libvips-linux-s390x@1.3.3
 
 - License: LGPL-3.0-or-later
 - Source: pnpm-lock.yaml
 
-### @img/sharp-libvips-linux-x64@1.3.1
+### @img/sharp-libvips-linux-x64@1.3.3
 
 - License: LGPL-3.0-or-later
 - Source: pnpm-lock.yaml
 
-### @img/sharp-libvips-linuxmusl-arm64@1.3.1
+### @img/sharp-libvips-linuxmusl-arm64@1.3.3
 
 - License: LGPL-3.0-or-later
 - Source: pnpm-lock.yaml
 
-### @img/sharp-libvips-linuxmusl-x64@1.3.1
+### @img/sharp-libvips-linuxmusl-x64@1.3.3
 
 - License: LGPL-3.0-or-later
 - Source: pnpm-lock.yaml
 
-### @img/sharp-linux-arm@0.35.2
+### @img/sharp-linux-arm@0.35.4
 
 - License: Apache-2.0
 - Source: pnpm-lock.yaml
 
-### @img/sharp-linux-arm64@0.35.2
+### @img/sharp-linux-arm64@0.35.4
 
 - License: Apache-2.0
 - Source: pnpm-lock.yaml
 
-### @img/sharp-linux-ppc64@0.35.2
+### @img/sharp-linux-ppc64@0.35.4
 
 - License: Apache-2.0
 - Source: pnpm-lock.yaml
 
-### @img/sharp-linux-riscv64@0.35.2
+### @img/sharp-linux-riscv64@0.35.4
 
 - License: Apache-2.0
 - Source: pnpm-lock.yaml
 
-### @img/sharp-linux-s390x@0.35.2
+### @img/sharp-linux-s390x@0.35.4
 
 - License: Apache-2.0
 - Source: pnpm-lock.yaml
 
-### @img/sharp-linux-x64@0.35.2
+### @img/sharp-linux-x64@0.35.4
 
 - License: Apache-2.0
 - Source: pnpm-lock.yaml
 
-### @img/sharp-linuxmusl-arm64@0.35.2
+### @img/sharp-linuxmusl-arm64@0.35.4
 
 - License: Apache-2.0
 - Source: pnpm-lock.yaml
 
-### @img/sharp-linuxmusl-x64@0.35.2
+### @img/sharp-linuxmusl-x64@0.35.4
 
 - License: Apache-2.0
 - Source: pnpm-lock.yaml
 
-### @img/sharp-wasm32@0.35.2
+### @img/sharp-wasm32@0.35.4
 
 - License: Apache-2.0 AND LGPL-3.0-or-later AND MIT
 - Source: pnpm-lock.yaml
 
-### @img/sharp-webcontainers-wasm32@0.35.2
+### @img/sharp-webcontainers-wasm32@0.35.4
 
 - License: Apache-2.0
 - Source: pnpm-lock.yaml
 
-### @img/sharp-win32-arm64@0.35.2
+### @img/sharp-win32-arm64@0.35.4
 
 - License: Apache-2.0 AND LGPL-3.0-or-later
 - Source: pnpm-lock.yaml
 
-### @img/sharp-win32-ia32@0.35.2
+### @img/sharp-win32-ia32@0.35.4
 
 - License: Apache-2.0 AND LGPL-3.0-or-later
 - Source: pnpm-lock.yaml
 
-### @img/sharp-win32-x64@0.35.2
+### @img/sharp-win32-x64@0.35.4
 
 - License: Apache-2.0 AND LGPL-3.0-or-later
 - Source: pnpm-lock.yaml
@@ -464,7 +464,7 @@ These packages are used for development, test, or build tooling and are not bund
 - License: ISC
 - Source: pnpm-lock.yaml
 
-### sharp@0.35.2
+### sharp@0.35.4
 
 - License: Apache-2.0
 - Source: pnpm-lock.yaml
