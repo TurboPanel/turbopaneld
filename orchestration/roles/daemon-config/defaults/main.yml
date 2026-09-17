@@ -11,3 +11,4 @@ turbopanel_service_name: turbopaneld
 turbopanel_update_channel: trunk
 # Local overlay catalog (dev). Empty in production — daemons use https://dl.trbp.nl.
 turbopanel_dl_base: ""
+turbopanel_manifest_url: ""

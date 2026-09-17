@@ -161,6 +161,48 @@ test("resolveUpdate follows rc and release to GitHub Releases", async () => {
   }
 });
 
+test("resolveUpdate honours a pinned manifest over the channel, but not over an overlay", async () => {
+  const fetched: string[] = [];
+  const restore = installFetch((url) => {
+    fetched.push(url);
+    if (url.endsWith("/channels.json")) {
+      return Response.json({
+        schema: 1,
+        defaultChannel: "trunk",
+        channels: { trunk: { manifestUrl: "./manifest.json" } },
+      });
+    }
+    return Response.json(channelManifest());
+  });
+  const pin =
+    "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.0/manifest.json";
+  try {
+    // Pinned: the channel is ignored, the pin is fetched directly.
+    await resolveUpdate({ app: "daemon", channel: "release" }, {
+      TURBOPANEL_MANIFEST_URL: pin,
+    });
+    assertEquals(fetched, [pin]);
+    // An overlay catalog still wins — a dev host is never pinned past it.
+    fetched.length = 0;
+    await resolveUpdate({ app: "daemon", channel: "trunk" }, {
+      TURBOPANEL_MANIFEST_URL: pin,
+      TURBOPANEL_DL_BASE: "https://dev.example/downloads/daemon",
+    });
+    assertEquals(
+      fetched[0],
+      "https://dev.example/downloads/daemon/channels.json",
+    );
+    // A non-https pin is ignored, not followed.
+    fetched.length = 0;
+    await resolveUpdate({ app: "daemon", channel: "trunk" }, {
+      TURBOPANEL_MANIFEST_URL: "http://evil.example/manifest.json",
+    });
+    assertEquals(fetched, ["https://dl.trbp.nl/channels/trunk/manifest.json"]);
+  } finally {
+    restore();
+  }
+});
+
 test("resolveUpdate throws MissingChannelError for reserved channels without an overlay", async () => {
   const restore = installFetch(() => {
     throw new Error("must not fetch");

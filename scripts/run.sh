@@ -386,8 +386,21 @@ tp_install_verified_binary_and_orchestration() {
   fi
 
   mkdir -p "$_home/bin" "$_home/share/orchestration"
+  # Keep exactly one previous generation beside the new one (update-rollback,
+  # Road to 0.1.x): bin/turbopaneld.prev and share/orchestration.prev. A
+  # rollback is a re-run of this script pinned to the previous release's
+  # manifest (--manifest-url, or TURBOPANEL_MANIFEST_URL in daemon.env); the
+  # .prev copies are the offline emergency — swap them back by hand when the
+  # rail itself is unreachable.
+  if [ -f "$_home/bin/$_binary_name" ]; then
+    rm -f "$_home/bin/$_binary_name.prev"
+    mv "$_home/bin/$_binary_name" "$_home/bin/$_binary_name.prev"
+  fi
   install -m 0755 "$_binary_staging/$_home/bin/$_binary_name" "$_home/bin/$_binary_name"
-  rm -rf "$_home/share/orchestration"
+  if [ -d "$_home/share/orchestration" ]; then
+    rm -rf "$_home/share/orchestration.prev"
+    mv "$_home/share/orchestration" "$_home/share/orchestration.prev"
+  fi
   cp -a "$_orchestration_staging/$_home/share/orchestration" "$_home/share/"
   trap - EXIT INT HUP TERM
   _cleanup
@@ -663,6 +676,10 @@ tp_fetch_channel_manifest() {
       return 1
     fi
     _manifest_url="$(tp_join_url "$_catalog_url" "$_manifest_url")" || return 1
+  elif [ -n "${TURBOPANEL_MANIFEST_URL:-}" ]; then
+    # Pinned: this exact manifest, whatever the channel points at now.
+    _curl="$(tp_release_curl)"
+    _manifest_url="$TURBOPANEL_MANIFEST_URL"
   else
     _curl="$(tp_release_curl)"
     if ! _manifest_url="$(tp_builtin_channel_manifest_url "$_channel")"; then
@@ -820,6 +837,7 @@ TUNNEL_TOKEN=""
 INSECURE_TLS=false
 NO_START=false
 INSTANCE_INSTALL=false
+MANIFEST_URL=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -844,6 +862,9 @@ while [ $# -gt 0 ]; do
       NO_START=true; shift ;;
     --instance)
       INSTANCE_INSTALL=true; shift ;;
+    --manifest-url)
+      [ $# -ge 2 ] || { tp_print_error "--manifest-url requires an argument"; exit 1; }
+      MANIFEST_URL="$2"; shift 2 ;;
     --channel)
       [ $# -ge 2 ] || { tp_print_error "--channel requires an argument"; exit 1; }
       export TURBOPANEL_UPDATE_CHANNEL="$2"; shift 2 ;;
@@ -861,6 +882,23 @@ done
 DL_BASE="$(tp_strip_trailing_slashes "$DL_BASE")"
 if [ -n "$DL_BASE" ]; then
   export TURBOPANEL_DL_BASE="$DL_BASE"
+fi
+# A pin: one exact daemon manifest (a tag's
+# releases/download/vX.Y.Z/manifest.json) instead of whatever the channel
+# points at now. Written to daemon.env so panel-driven updates hold the pin
+# too (the daemon's resolver reads the same variable); clear it with a plain
+# channel install. Rolling back is pinning the previous tag.
+[ -n "$MANIFEST_URL" ] || MANIFEST_URL="${TURBOPANEL_MANIFEST_URL:-}"
+if [ -n "$MANIFEST_URL" ]; then
+  case "$MANIFEST_URL" in
+    https://*) ;;
+    *) tp_print_error "--manifest-url must be an https:// URL (got $MANIFEST_URL)"; exit 1 ;;
+  esac
+  if [ -n "$DL_BASE" ]; then
+    tp_print_error "--manifest-url and TURBOPANEL_DL_BASE are exclusive: a pin names one manifest, an overlay names a catalog"
+    exit 1
+  fi
+  export TURBOPANEL_MANIFEST_URL="$MANIFEST_URL"
 fi
 case "${TURBOPANEL_INSECURE_TLS:-}" in
   1|true|TRUE|yes|YES) INSECURE_TLS=true ;;
@@ -931,6 +969,7 @@ if ! tp_is_root; then
   set --
   [ -n "$LICENSE" ] && set -- "$@" --license "$LICENSE"
   [ "$INSTANCE_INSTALL" = true ] && set -- "$@" --instance
+  [ -n "$MANIFEST_URL" ] && set -- "$@" --manifest-url "$MANIFEST_URL"
   [ -n "$HOST_URL" ] && set -- "$@" --host "$HOST_URL"
   [ -n "$DL_BASE" ] && set -- "$@" --dl-base "$DL_BASE"
   [ -n "$INSTANCE_CA" ] && set -- "$@" --instance-ca "$INSTANCE_CA"
@@ -1044,7 +1083,11 @@ fi
 if [ -z "$HOST_URL" ]; then
   HOST_URL="$_manifest_host"
 fi
-tp_print_ok "Release manifest resolved (channel ${TURBOPANEL_UPDATE_CHANNEL:-trunk}, arch ${_linux_arch:-unknown})"
+if [ -n "$MANIFEST_URL" ]; then
+  tp_print_ok "Release manifest resolved (pinned to $MANIFEST_URL, arch ${_linux_arch:-unknown})"
+else
+  tp_print_ok "Release manifest resolved (channel ${TURBOPANEL_UPDATE_CHANNEL:-trunk}, arch ${_linux_arch:-unknown})"
+fi
 tp_print_step "  " "Binary (${_linux_arch:-unknown}): $_binary_artifact_url"
 tp_print_step "  " "JS bundle (if needed): $_js_fallback_artifact_url"
 tp_print_step "  " "Commit: ${_manifest_commit:-unknown}"
@@ -1245,6 +1288,7 @@ trap 'rm -f "$VARS_FILE"' EXIT
   if [ -n "$DL_BASE" ]; then
     printf 'turbopanel_dl_base: %s\n' "$DL_BASE"
   fi
+  printf 'turbopanel_manifest_url: %s\n' "$MANIFEST_URL"
   if [ -n "$TUNNEL_TOKEN" ]; then
     printf 'turbopanel_tunnel_token: %s\n' "$TUNNEL_TOKEN"
   fi

@@ -9,6 +9,7 @@ import {
   builtinChannelManifestUrl,
   catalogAllowsHttp,
   resolveOverlayDlBase,
+  resolvePinnedManifestUrl,
   rootCatalogUrl,
 } from "./urls.ts";
 import { parseChannelManifest, parseRootCatalog } from "./validate.ts";
@@ -65,8 +66,10 @@ function resolveLinuxArch(): LinuxArch {
 /**
  * Where the channel manifest is read from: the overlay catalog's
  * `channels.json` when `TURBOPANEL_DL_BASE` is set (the catalog hop stays so
- * relative overlay URLs and plaintext `:8880` keep working), otherwise the
- * built-in rail — one URL per advertised channel, no catalog fetch.
+ * relative overlay URLs and plaintext `:8880` keep working), otherwise a
+ * pinned manifest when `TURBOPANEL_MANIFEST_URL` is set (update-rollback),
+ * otherwise the built-in rail — one URL per advertised channel, no catalog
+ * fetch.
  */
 async function resolveManifestLocation(
   config: UpdateChannelConfig,
@@ -74,6 +77,10 @@ async function resolveManifestLocation(
 ): Promise<{ manifestUrl: string; allowHttp: boolean }> {
   const overlayBase = resolveOverlayDlBase(env);
   if (overlayBase === null) {
+    const pinned = resolvePinnedManifestUrl(env);
+    if (pinned !== null) {
+      return { manifestUrl: pinned, allowHttp: false };
+    }
     const manifestUrl = builtinChannelManifestUrl(config.channel);
     if (manifestUrl === null) {
       throw new MissingChannelError(

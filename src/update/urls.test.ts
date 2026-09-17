@@ -9,6 +9,7 @@ import {
   resolveDlBase,
   resolveMaybeRelativeUrl,
   resolveOverlayDlBase,
+  resolvePinnedManifestUrl,
   rootCatalogUrl,
 } from "./urls.ts";
 import type { UpdateChannel } from "./types.ts";
@@ -30,6 +31,29 @@ test("resolveDlBase prefers TURBOPANEL_DL_BASE over the public CDN", () => {
       TURBOPANEL_DL_BASE: "https://turbopanel.dev/downloads/daemon/",
     }),
     "https://turbopanel.dev/downloads/daemon",
+  );
+});
+
+test("resolvePinnedManifestUrl accepts only an https pin", () => {
+  assertEquals(resolvePinnedManifestUrl({}), null);
+  assertEquals(
+    resolvePinnedManifestUrl({ TURBOPANEL_MANIFEST_URL: " " }),
+    null,
+  );
+  assertEquals(
+    resolvePinnedManifestUrl({ TURBOPANEL_MANIFEST_URL: "http://x/m.json" }),
+    null,
+  );
+  assertEquals(
+    resolvePinnedManifestUrl({ TURBOPANEL_MANIFEST_URL: "not a url" }),
+    null,
+  );
+  assertEquals(
+    resolvePinnedManifestUrl({
+      TURBOPANEL_MANIFEST_URL:
+        " https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.0/manifest.json ",
+    }),
+    "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.0/manifest.json",
   );
 });
 

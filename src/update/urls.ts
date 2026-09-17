@@ -65,6 +65,25 @@ export function resolveDlBase(
 }
 
 /**
+ * A pinned manifest (run.sh --manifest-url → TURBOPANEL_MANIFEST_URL in
+ * daemon.env): one exact release manifest, typically a tag's
+ * releases/download/vX.Y.Z/manifest.json, that wins over the channel's
+ * current pointer so a host can be held on (or rolled back to) a specific
+ * release while the channel moves on. https only; `null` when unset.
+ */
+export function resolvePinnedManifestUrl(
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+): string | null {
+  const pinned = env.TURBOPANEL_MANIFEST_URL?.trim();
+  if (!pinned) return null;
+  try {
+    return new URL(pinned).protocol === "https:" ? pinned : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The overlay catalog origin when one is configured, else `null` — the
  * resolver reads `<origin>/channels.json` in that case and the built-in
  * per-channel rail otherwise. Setting `TURBOPANEL_DL_BASE=https://dl.trbp.nl`

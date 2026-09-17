@@ -21,3 +21,9 @@ TURBOPANEL_UPDATE_CHANNEL={{ turbopanel_update_channel | default('trunk') }}
 {% if turbopanel_dl_base | default('') | length > 0 %}
 TURBOPANEL_DL_BASE={{ turbopanel_dl_base }}
 {% endif %}
+{# A pin (run.sh --manifest-url): one exact release manifest instead of the
+   channel's current pointer. The daemon's resolver honours it for
+   panel-driven updates too; a plain channel install clears it. #}
+{% if turbopanel_manifest_url | default('') | length > 0 %}
+TURBOPANEL_MANIFEST_URL={{ turbopanel_manifest_url }}
+{% endif %}
