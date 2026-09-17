@@ -154,6 +154,7 @@ export async function generateChannelManifest(options: {
     commit: options.commit,
     buildId: options.buildId,
     builtAt: options.builtAt,
+    ...(options.version ? { version: options.version } : {}),
     defaultControlPlaneUrl: options.defaultControlPlaneUrl ??
       "https://turbopanel.app",
     binaryArtifacts: {

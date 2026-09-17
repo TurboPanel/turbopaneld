@@ -7,6 +7,7 @@ import {
   type RunInstallerOptions,
 } from "./orchestration/setup.ts";
 import { resolveUpdateChannelConfig } from "./update/config.ts";
+import { DAEMON_VERSION } from "./version.ts";
 
 export type DaemonCliIo = {
   args?: string[];
@@ -58,7 +59,7 @@ export async function maybeRunDaemonCli(io: DaemonCliIo = {}): Promise<void> {
     const { channel } = (io.resolveUpdateChannelConfig ??
       resolveUpdateChannelConfig)();
     log(
-      `turbopaneld ${info.commit} (${channel}, ${info.buildId}, ${info.builtAt})`,
+      `turbopaneld v${DAEMON_VERSION} ${info.commit} (${channel}, ${info.buildId}, ${info.builtAt})`,
     );
     exit(0);
     return;

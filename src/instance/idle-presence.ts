@@ -1,4 +1,5 @@
 import { type BuildInfo, getBuildInfo } from "../build-info.ts";
+import { DAEMON_VERSION } from "../version.ts";
 import {
   resolveUpdateChannelConfig,
   type UpdateChannelConfig,
@@ -104,8 +105,10 @@ type HostHelloIdentityProvider = () => HostHelloIdentity;
 type PresenceSnapshotProvider = () => PresenceSnapshot;
 
 /** `daemonBuild` on the wire: BuildInfo plus the live-resolved channel —
- * channel is a placement fact, never baked into BuildInfo itself. */
-type DaemonBuildWire = BuildInfo & { channel: string };
+ * channel is a placement fact, never baked into BuildInfo itself — and the
+ * daemon's semver (src/version.ts), which the control plane holds against
+ * its supported range. */
+type DaemonBuildWire = BuildInfo & { channel: string; version: string };
 
 function defaultPresenceSnapshot(): PresenceSnapshot {
   const docker = readDocker();
@@ -140,6 +143,7 @@ function currentDaemonBuild(): DaemonBuildWire {
   return {
     ...buildInfoProvider(),
     channel: updateChannelConfigProvider().channel,
+    version: DAEMON_VERSION,
   };
 }
 

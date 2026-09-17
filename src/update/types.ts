@@ -29,6 +29,12 @@ export interface ChannelManifest {
   buildId: string;
   builtAt: string;
   /**
+   * The daemon's semver for a tagged release build (the `v` stripped).
+   * Absent from the trunk drop and the dev overlay, whose builds carry only
+   * a commit.
+   */
+  version?: string;
+  /**
    * Dev overlay only: fingerprint of the source checkout the artifacts were
    * built from (see scripts/source-fingerprint.ts). The dev instance compares
    * it against the live checkout to decide whether a rebuild is required

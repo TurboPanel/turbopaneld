@@ -1,4 +1,5 @@
 import { assert, assertEquals, assertExists } from "@std/assert";
+import { DAEMON_VERSION } from "../version.ts";
 import type { HostHelloIdentity } from "../host/os-release.ts";
 import type { HostTimeSync } from "../host/time-sync.ts";
 import type { ServerReportedIp } from "../server-addresses.ts";
@@ -26,13 +27,15 @@ function openMockSocket(): MockWebSocket {
 // Not annotated `: BuildInfo` — `channel` is a placement fact sourced live
 // from resolveUpdateChannelConfig() (defaults to "trunk" absent
 // TURBOPANEL_UPDATE_CHANNEL, matching the literal below), never part of
-// BuildInfo itself. Kept here as the wire-shape callers compare against.
+// BuildInfo itself, and `version` is the semver src/version.ts reads from
+// deno.json. Kept here as the wire-shape callers compare against.
 function makeDaemonBuild(commit: string) {
   return {
     commit,
     buildId: `build-${commit}`,
     builtAt: "2026-07-03T15:30:52Z",
     channel: "trunk",
+    version: DAEMON_VERSION,
     sourceUrl: `https://github.com/TurboPanel/turbopaneld/tree/${commit}`,
   };
 }

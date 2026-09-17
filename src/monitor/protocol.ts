@@ -91,6 +91,8 @@ export type DaemonBuildInfo = {
   buildId: string;
   builtAt?: string;
   channel?: string;
+  /** The daemon's semver (src/version.ts). */
+  version?: string;
 };
 
 export type MonitorSyncMessage = {
@@ -214,6 +216,7 @@ function parseDaemonBuildInfo(value: unknown): DaemonBuildInfo | undefined {
   };
   if (isString(value.builtAt)) daemonBuild.builtAt = value.builtAt;
   if (isString(value.channel)) daemonBuild.channel = value.channel;
+  if (isString(value.version)) daemonBuild.version = value.version;
   return daemonBuild;
 }
 

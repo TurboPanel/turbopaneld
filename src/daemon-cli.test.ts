@@ -1,4 +1,5 @@
 import { assertEquals, assertThrows } from "@std/assert";
+import { DAEMON_VERSION } from "./version.ts";
 import { InstallerPresentedFailure } from "./orchestration/install-presenter-context.ts";
 import {
   type DaemonCliIo,
@@ -57,7 +58,7 @@ test("maybeRunDaemonCli prints version and exits 0", async () => {
   assertEquals(exits, [0]);
   assertEquals(
     logs[0],
-    "turbopaneld abc1234 (trunk, build-1, 2026-01-01T00:00:00.000Z)",
+    `turbopaneld v${DAEMON_VERSION} abc1234 (trunk, build-1, 2026-01-01T00:00:00.000Z)`,
   );
 
   const verb = captureIo({

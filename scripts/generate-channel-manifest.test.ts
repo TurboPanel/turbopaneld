@@ -124,6 +124,8 @@ test("generateChannelManifest writes a file or stdout", async () => {
     });
     assertEquals(stdout.length, 1);
     assertEquals(JSON.parse(stdout[0] ?? "{}").buildId, "b1");
+    // Trunk drops carry no semver.
+    assertEquals("version" in JSON.parse(stdout[0] ?? "{}"), false);
 
     const writtenPath = join(dir, "default-write.json");
     const defaults = await generateChannelManifest({
@@ -188,6 +190,7 @@ test("generateChannelManifest honors channel and version for a tagged release", 
       writeStdout: () => Promise.resolve(),
     });
     assertEquals(manifest.channel, "rc");
+    assertEquals(manifest.version, "0.1.0-rc1");
     assertEquals(
       manifest.binaryArtifacts["linux-amd64"].url,
       "https://dl.trbp.nl/channels/rc/daemon/b-rc1/turbopaneld-0.1.0-rc1-amd64.tar.zst",

@@ -69,6 +69,25 @@ jobs:
             echo "channel=release" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Check out repository
+        if: inputs.version == ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Require the tag to match deno.json's version
+        # The number the binary reports (src/version.ts reads deno.json) and
+        # the number on the release must be the same number — a tag cut
+        # before the bump is a release that lies about itself. Dry runs
+        # (workflow_dispatch) use throwaway versions and skip this.
+        if: inputs.version == ''
+        run: |
+          set -eu
+          _tag_version="${{ steps.resolve.outputs.version }}"
+          _pkg_version="$(python3 -c 'import json; print(json.load(open("deno.json"))["version"])')"
+          if [ "$_tag_version" != "$_pkg_version" ]; then
+            echo "::error::tag v${_tag_version} does not match deno.json version ${_pkg_version} — bump deno.json (and sonar.projectVersion) first"
+            exit 1
+          fi
+
   build:
     needs: prepare
     runs-on: ubuntu-latest

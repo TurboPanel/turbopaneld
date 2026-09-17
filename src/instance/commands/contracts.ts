@@ -46,6 +46,8 @@ export type PingResult = {
     buildId?: string;
     builtAt?: string;
     channel?: string;
+    /** The daemon's semver (src/version.ts). */
+    version?: string;
   };
 };
 

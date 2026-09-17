@@ -1,5 +1,6 @@
 import { getBuildInfo } from "../../build-info.ts";
 import { resolveUpdateChannelConfig } from "../../update/config.ts";
+import { DAEMON_VERSION } from "../../version.ts";
 import type { PingResult } from "./contracts.ts";
 
 export function handlePing(daemonReceivedAt: string): PingResult {
@@ -18,6 +19,7 @@ export function handlePing(daemonReceivedAt: string): PingResult {
       buildId: build.buildId,
       builtAt: build.builtAt,
       channel,
+      version: DAEMON_VERSION,
     },
   };
 }
