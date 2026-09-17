@@ -1288,7 +1288,9 @@ trap 'rm -f "$VARS_FILE"' EXIT
   if [ -n "$DL_BASE" ]; then
     printf 'turbopanel_dl_base: %s\n' "$DL_BASE"
   fi
-  printf 'turbopanel_manifest_url: %s\n' "$MANIFEST_URL"
+  if [ -n "$MANIFEST_URL" ]; then
+    printf 'turbopanel_manifest_url: %s\n' "$MANIFEST_URL"
+  fi
   if [ -n "$TUNNEL_TOKEN" ]; then
     printf 'turbopanel_tunnel_token: %s\n' "$TUNNEL_TOKEN"
   fi
