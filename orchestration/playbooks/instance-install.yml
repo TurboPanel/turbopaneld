@@ -148,6 +148,19 @@
         mode: "0750"
         recurse: true
 
+    - name: Let the instance hand the co-located daemon its license
+      # The wizard writes the co-located license credentials and server.id into the
+      # daemon state directory so the daemon on this host can enrol with the
+      # first organization's license. The instance runs as tpctrl (group tp);
+      # the state directory is tp:tp — setgid + group-write lets those files
+      # land, owned by tpctrl in group tp, where the daemon (tp) reads them.
+      ansible.builtin.file:
+        path: "{{ turbopanel_state_dir }}"
+        state: directory
+        owner: "{{ turbopanel_user | default('tp') }}"
+        group: "{{ turbopanel_group | default('tp') }}"
+        mode: "2770"
+
     - name: Own the static UI export
       ansible.builtin.file:
         path: "{{ turbopanel_ui_dist_dir }}"
