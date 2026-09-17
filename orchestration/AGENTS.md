@@ -211,7 +211,7 @@ CA is still minted in every mode. Vars (both roles; extra-vars win):
 | Var | Purpose |
 | --- | --- |
 | `turbopanel_tls_mode` | How Caddy presents the instance hostname |
-| `turbopanel_tls_cert_path` / `turbopanel_tls_key_path` | Operator pair (`upload`); copied to `{{ turbopanel_instance_dir }}/certs/uploaded.{crt,key}` (`0640`, `instance_certs_owner`:`turbopanel_group`) |
+| `turbopanel_tls_cert_path` / `turbopanel_tls_key_path` | Operator pair (`upload`); copied to `{{ turbopanel_instance_certs_dir }}/uploaded.{crt,key}` (`<checkout>/certs` in source mode, `<state>/tls/certs` in compiled mode) (`0640`, `instance_certs_owner`:`turbopanel_group`) |
 | `turbopanel_public_hostname` / `turbopanel_acme_email` | ACME hostname + optional account email (`lets_encrypt`) |
 | `turbopanel_tls_public` | Operator-declared publicly trusted leaf; forced true in `lets_encrypt` as `turbopanel_tls_public_effective` |
 | `turbopanel_public_urls` | Defaults to `https://{{ turbopanel_public_hostname }}` in `lets_encrypt` when a hostname is set |

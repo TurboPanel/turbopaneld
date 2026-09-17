@@ -23,12 +23,12 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 {% elif turbopanel_tls_mode | default('self_signed') == 'upload' %}
 Environment=CADDY_PORT={{ caddy_port }}
-Environment=CADDY_TLS_CERT={{ turbopanel_instance_dir }}/certs/uploaded.crt
-Environment=CADDY_TLS_KEY={{ turbopanel_instance_dir }}/certs/uploaded.key
+Environment=CADDY_TLS_CERT={{ turbopanel_instance_certs_dir }}/uploaded.crt
+Environment=CADDY_TLS_KEY={{ turbopanel_instance_certs_dir }}/uploaded.key
 {% else %}
 Environment=CADDY_PORT={{ caddy_port }}
-Environment=CADDY_TLS_CERT={{ turbopanel_instance_dir }}/certs/self-signed.crt
-Environment=CADDY_TLS_KEY={{ turbopanel_instance_dir }}/certs/self-signed.key
+Environment=CADDY_TLS_CERT={{ turbopanel_instance_certs_dir }}/self-signed.crt
+Environment=CADDY_TLS_KEY={{ turbopanel_instance_certs_dir }}/self-signed.key
 {% endif %}
 Environment=TURBOPANEL_RUN_DIR={{ turbopanel_run_dir }}
 Environment=TURBOPANEL_SOCKET_DIAL={{ (turbopanel_run_dir ~ '/instance.sock') | regex_replace('^/+', '') }}

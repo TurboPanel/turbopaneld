@@ -1,5 +1,5 @@
 import { join } from "@std/path";
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import {
   buildDockerSetupExtraArgs,
   buildTimeSyncApplyExtraArgs,
@@ -779,15 +779,24 @@ test(
       /--config \{\{\s*turbopanel_caddyfile\s*\}\}/,
       "caddy unit uses turbopanel_caddyfile",
     );
+    // The leaf's home follows the run mode (instance-runtime-packaging): the
+    // checkout's certs/ in source mode, <state>/tls/certs in compiled mode —
+    // the compiled binary can only write its state tree. Never
+    // Caddyfile-relative ./certs.
     assertMatch(
       caddyUnit,
-      /Environment=CADDY_TLS_CERT=\{\{\s*turbopanel_instance_dir\s*\}\}\/certs\/self-signed\.crt/,
-      "caddy unit pins leaf cert to instance checkout (not Caddyfile-relative ./certs)",
+      /Environment=CADDY_TLS_CERT=\{\{\s*turbopanel_instance_certs_dir\s*\}\}\/self-signed\.crt/,
+      "caddy unit pins leaf cert to turbopanel_instance_certs_dir",
     );
     assertMatch(
       caddyUnit,
-      /Environment=CADDY_TLS_KEY=\{\{\s*turbopanel_instance_dir\s*\}\}\/certs\/self-signed\.key/,
-      "caddy unit pins leaf key to instance checkout",
+      /Environment=CADDY_TLS_KEY=\{\{\s*turbopanel_instance_certs_dir\s*\}\}\/self-signed\.key/,
+      "caddy unit pins leaf key to turbopanel_instance_certs_dir",
+    );
+    assertMatch(
+      defaults,
+      /turbopanel_instance_certs_dir:[\s\S]*?turbopanel_state_dir ~ '\/tls\/certs'[\s\S]*?turbopanel_instance_dir ~ '\/certs'/,
+      "turbopanel_instance_certs_dir is <state>/tls/certs in compiled mode and <checkout>/certs in source mode",
     );
     assertMatch(
       defaults,
@@ -1987,3 +1996,83 @@ test("runDockerSetup passes docker addressing as -e extra-vars", () => {
   assertEquals(body.includes("readDockerNetworkingState("), true);
   assertEquals(body.includes("devInstanceExtraArgs()"), true);
 });
+
+test(
+  "compiled run mode needs no source checkout: mailer binary, secret and cert verbs",
+  async () => {
+    // instance-runtime-packaging (Road to 0.1.x): in compiled mode every
+    // install-time step the roles used to run from the checkout with node
+    // is a verb of the instance binary, and the mailer is its own binary
+    // shipped beside it.
+    const launchDefaults = await Deno.readTextFile(join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/instance-launch/defaults/main.yml",
+    ));
+    const launchTasks = await Deno.readTextFile(join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/instance-launch/tasks/main.yml",
+    ));
+    const mailerUnit = await Deno.readTextFile(join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/instance-launch/templates/turbopanel-mailer.service.j2",
+    ));
+    const certsDefaults = await Deno.readTextFile(join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/instance-certs/defaults/main.yml",
+    ));
+    const certsTasks = await Deno.readTextFile(join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/instance-certs/tasks/main.yml",
+    ));
+
+    assertMatch(
+      launchDefaults,
+      /turbopanel_mailer_binary:\s*"\{\{ turbopanel_instance_binary \| dirname \}\}\/turbopanel-mailer"/,
+      "the compiled mailer sits beside the instance binary",
+    );
+    assertMatch(
+      launchDefaults,
+      /turbopanel_instance_secret_cmd:[\s\S]*?turbopanel_instance_binary ~ ' generate-secret'[\s\S]*?compiled[\s\S]*?generate-secret\.mjs/,
+      "the secret generator is the binary's verb in compiled mode and the node script otherwise",
+    );
+    assertEquals(
+      (launchTasks.match(/\{\{ turbopanel_instance_secret_cmd \}\}/g) ?? [])
+        .length,
+      2,
+      "both keyring tasks (create + rotate) mint through turbopanel_instance_secret_cmd",
+    );
+    assert(
+      !launchTasks.includes("generate-secret.mjs"),
+      "instance-launch tasks must not reach into the checkout for generate-secret.mjs",
+    );
+    assertMatch(
+      mailerUnit,
+      /\{% if turbopanel_instance_run_mode == 'compiled' %\}\s*\{#[\s\S]*?#\}\s*ExecStart=\{\{ turbopanel_mailer_binary \}\}\s*\{% else %\}/,
+      "the mailer unit exec's the compiled mailer in compiled mode",
+    );
+    assertMatch(
+      mailerUnit,
+      /mailer\/main\.ts\s*\{% endif %\}/,
+      "source mode still runs mailer/main.ts from the checkout",
+    );
+    assertMatch(
+      certsDefaults,
+      /turbopanel_instance_cert_argv:[\s\S]*?\[turbopanel_instance_binary, 'generate-self-signed-cert'\][\s\S]*?compiled[\s\S]*?generate-self-signed-cert\.mjs/,
+      "the cert generator is the binary's verb in compiled mode and the node script otherwise",
+    );
+    assertMatch(
+      certsTasks,
+      /argv: "\{\{ turbopanel_instance_cert_argv \}\}"/,
+      "instance-certs runs whichever generator the run mode selects",
+    );
+    assertMatch(
+      certsTasks,
+      /TURBOPANEL_TLS_CERTS_DIR: "\{\{ turbopanel_instance_certs_dir \}\}"/,
+      "the generator is told where the leaf lives, so both modes agree with Caddy",
+    );
+    assert(
+      !certsTasks.includes("turbopanel_instance_dir }}/certs"),
+      "instance-certs must not hard-code the checkout's certs/ directory",
+    );
+  },
+);

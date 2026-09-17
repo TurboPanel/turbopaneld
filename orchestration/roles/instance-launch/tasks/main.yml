@@ -348,8 +348,7 @@
       set -euo pipefail
       f='{{ turbopanel_config_dir }}/instance/.instance_secrets'
       if [ ! -s "$f" ]; then
-        val=$({{ turbopanel_node }} \
-          {{ turbopanel_instance_dir }}/scripts/generate-secret.mjs)
+        val=$({{ turbopanel_instance_secret_cmd }})
         umask 077
         printf '1:%s\n' "$val" > "$f"
         echo created
@@ -384,8 +383,7 @@
         }')
       fi
       new_ver=$((max + 1))
-      new_val=$({{ turbopanel_node }} \
-        {{ turbopanel_instance_dir }}/scripts/generate-secret.mjs)
+      new_val=$({{ turbopanel_instance_secret_cmd }})
       dir=$(dirname "$f")
       umask 077
       tmp=$(mktemp -p "$dir" .instance_secrets.XXXXXX)

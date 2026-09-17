@@ -52,7 +52,7 @@
 
 - name: Ensure instance certs directory exists for cert generation
   ansible.builtin.file:
-    path: "{{ turbopanel_instance_dir }}/certs"
+    path: "{{ turbopanel_instance_certs_dir }}"
     state: directory
     owner: "{{ instance_certs_owner }}"
     group: "{{ turbopanel_group }}"
@@ -60,9 +60,7 @@
 
 - name: Generate platform CA and server certificate
   ansible.builtin.command:
-    argv:
-      - "{{ turbopanel_node }}"
-      - scripts/generate-self-signed-cert.mjs
+    argv: "{{ turbopanel_instance_cert_argv }}"
     chdir: "{{ turbopanel_instance_dir }}"
   # Co-located dev stores CA material as the dev user (git/Ansible identity); tpctrl
   # cannot chmod dev-user-owned keys when the script normalizes permissions.
@@ -71,6 +69,7 @@
     HOME: "{{ turbopanel_dev_root if (turbopanel_dev_user | default('') | length > 0) else turbopanel_instance_dir }}"
     PATH: "{{ turbopanel_runtime_path }}"
     TURBOPANEL_STATE_DIR: "{{ turbopanel_state_dir }}"
+    TURBOPANEL_TLS_CERTS_DIR: "{{ turbopanel_instance_certs_dir }}"
     TURBOPANEL_TLS_CA: "{{ turbopanel_instance_ca_dir }}/ca.crt"
     TURBOPANEL_TLS_CA_KEY: "{{ turbopanel_instance_ca_dir }}/ca.key"
     TURBOPANEL_TLS_CA_BUNDLE: "{{ turbopanel_instance_ca_dir }}/ca-bundle.pem"
@@ -82,7 +81,7 @@
 # generate-self-signed-cert.mjs chmods keys to 0640 but does not set group ownership.
 - name: Harden server leaf key ownership for Caddy
   ansible.builtin.file:
-    path: "{{ turbopanel_instance_dir }}/certs/self-signed.key"
+    path: "{{ turbopanel_instance_certs_dir }}/self-signed.key"
     owner: "{{ instance_certs_owner }}"
     group: "{{ turbopanel_group }}"
     mode: "0640"
@@ -126,7 +125,7 @@
   when: turbopanel_tls_mode | default('self_signed') == 'upload'
   ansible.builtin.copy:
     src: "{{ turbopanel_tls_cert_path }}"
-    dest: "{{ turbopanel_instance_dir }}/certs/uploaded.crt"
+    dest: "{{ turbopanel_instance_certs_dir }}/uploaded.crt"
     remote_src: true
     owner: "{{ instance_certs_owner }}"
     group: "{{ turbopanel_group }}"
@@ -136,7 +135,7 @@
   when: turbopanel_tls_mode | default('self_signed') == 'upload'
   ansible.builtin.copy:
     src: "{{ turbopanel_tls_key_path }}"
-    dest: "{{ turbopanel_instance_dir }}/certs/uploaded.key"
+    dest: "{{ turbopanel_instance_certs_dir }}/uploaded.key"
     remote_src: true
     owner: "{{ instance_certs_owner }}"
     group: "{{ turbopanel_group }}"

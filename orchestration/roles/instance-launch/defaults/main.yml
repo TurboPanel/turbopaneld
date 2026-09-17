@@ -115,6 +115,27 @@ turbopanel_caddyfile: >-
 # otherwise src/deno.ts; "compiled" exec's dist/turbopanel-instance.
 turbopanel_instance_run_mode: source
 turbopanel_instance_binary: "{{ turbopanel_instance_dir }}/dist/turbopanel-instance"
+# The compiled mailer ships beside the instance binary in the release
+# package (bin/turbopanel-mailer); source mode runs mailer/main.ts from the
+# checkout instead.
+turbopanel_mailer_binary: "{{ turbopanel_instance_binary | dirname }}/turbopanel-mailer"
+# How a fresh signing secret is minted: the instance binary's own
+# `generate-secret` verb in compiled mode (no checkout needed), the Node
+# script from the checkout in source mode. Same generator either way
+# (turbopanel src/cli/generate-secret.ts wraps scripts/generate-secret.mjs).
+# Where the server leaf (self-signed or uploaded) lives — what Caddy serves.
+# Source mode keeps it beside the checkout; the compiled binary can only
+# write its state tree, so compiled mode keeps it at <state>/tls/certs (the
+# default the `generate-self-signed-cert` verb picks without
+# TURBOPANEL_TLS_CERTS_DIR).
+turbopanel_instance_certs_dir: >-
+  {{ (turbopanel_state_dir ~ '/tls/certs')
+     if turbopanel_instance_run_mode == 'compiled'
+     else (turbopanel_instance_dir ~ '/certs') }}
+turbopanel_instance_secret_cmd: >-
+  {{ (turbopanel_instance_binary ~ ' generate-secret')
+     if turbopanel_instance_run_mode == 'compiled'
+     else (turbopanel_node ~ ' ' ~ turbopanel_instance_dir ~ '/scripts/generate-secret.mjs') }}
 # "deno" runs turbopanel-instance via systemd; "workers" expects manual wrangler dev.
 turbopanel_instance_runtime: deno
 # Exact git SHA of the instance checkout (set at converge). Injected as

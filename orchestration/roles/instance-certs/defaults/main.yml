@@ -10,6 +10,24 @@ turbopanel_lib_dir: "{{ turbopanel_install_root }}/lib"
 # Runtimes always live under the FHS vendor tree (dev shares it with prod).
 turbopanel_vendor_dir: "{{ turbopanel_install_root }}/vendor"
 turbopanel_node: "{{ turbopanel_vendor_dir }}/node/current/bin/node"
+# Mirrors instance-launch: "compiled" runs the instance binary's own
+# `generate-self-signed-cert` verb (no checkout needed); "source" runs the
+# Node script from the checkout. Same script either way.
+turbopanel_instance_run_mode: source
+turbopanel_instance_binary: "{{ turbopanel_instance_dir }}/dist/turbopanel-instance"
+# Where the server leaf (self-signed or uploaded) lives — what Caddy serves.
+# Source mode keeps it beside the checkout; the compiled binary can only
+# write its state tree, so compiled mode keeps it at <state>/tls/certs (the
+# default the `generate-self-signed-cert` verb picks without
+# TURBOPANEL_TLS_CERTS_DIR).
+turbopanel_instance_certs_dir: >-
+  {{ (turbopanel_state_dir ~ '/tls/certs')
+     if turbopanel_instance_run_mode == 'compiled'
+     else (turbopanel_instance_dir ~ '/certs') }}
+turbopanel_instance_cert_argv: >-
+  {{ [turbopanel_instance_binary, 'generate-self-signed-cert']
+     if turbopanel_instance_run_mode == 'compiled'
+     else [turbopanel_node, 'scripts/generate-self-signed-cert.mjs'] }}
 turbopanel_deno: "{{ turbopanel_vendor_dir }}/deno/current/deno"
 turbopanel_runtime_path: "{{ turbopanel_vendor_dir }}/node/current/bin:{{ turbopanel_vendor_dir }}/deno/current:{{ turbopanel_vendor_dir }}/caddy/current:/usr/bin:/bin"
 # Source checkout: co-located dev uses the dev user's home; managed installs use

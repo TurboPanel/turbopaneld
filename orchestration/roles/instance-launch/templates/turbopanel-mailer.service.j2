@@ -27,6 +27,14 @@ Environment=MAILPIT_SMTP_PORT={{ mailpit_smtp_port | default(1025) }}
 Environment=TURBOPANEL_SYSTEM_EMAIL__PROVIDER=mailpit
 Environment=MAILPIT_API_URL=http://127.0.0.1:{{ mailpit_web_port | default(8025) }}
 {% endif %}
+{% if turbopanel_instance_run_mode == 'compiled' %}
+{# The compiled mailer (turbopanel `deno task compile:mailer`, shipped as
+   bin/turbopanel-mailer beside the instance binary) bakes its own permission
+   set: unrestricted outbound --allow-net — it talks to operator-configured
+   SMTP relays and Mailgun — plus the runtime/config trees and the Postgres
+   socket directory. Nothing here needs the checkout. #}
+ExecStart={{ turbopanel_mailer_binary }}
+{% else %}
 {# Deno 2.9+ treats Unix-domain connect as --allow-net (not --allow-read).
    postgres.js also needs --allow-write on the socket path to connect. #}
 ExecStart={{ turbopanel_deno }} run \
@@ -37,6 +45,7 @@ ExecStart={{ turbopanel_deno }} run \
   --allow-write={{ postgres_socket_dir }} \
 {% endif %}
   mailer/main.ts
+{% endif %}
 Restart=always
 RestartSec=5
 
