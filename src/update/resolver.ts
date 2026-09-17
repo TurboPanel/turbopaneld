@@ -6,8 +6,9 @@ import type { LinuxArch, UpdateInfo } from "./types.ts";
 import {
   absolutizeChannelManifestJson,
   absolutizeRootCatalogJson,
+  builtinChannelManifestUrl,
   catalogAllowsHttp,
-  resolveDlBase,
+  resolveOverlayDlBase,
   rootCatalogUrl,
 } from "./urls.ts";
 import { parseChannelManifest, parseRootCatalog } from "./validate.ts";
@@ -61,11 +62,28 @@ function resolveLinuxArch(): LinuxArch {
   }
 }
 
-export async function resolveUpdate(
+/**
+ * Where the channel manifest is read from: the overlay catalog's
+ * `channels.json` when `TURBOPANEL_DL_BASE` is set (the catalog hop stays so
+ * relative overlay URLs and plaintext `:8880` keep working), otherwise the
+ * built-in rail — one URL per advertised channel, no catalog fetch.
+ */
+async function resolveManifestLocation(
   config: UpdateChannelConfig,
-  env: Record<string, string | undefined> = Deno.env.toObject(),
-): Promise<UpdateInfo> {
-  const catalogUrl = rootCatalogUrl(resolveDlBase(env));
+  env: Record<string, string | undefined>,
+): Promise<{ manifestUrl: string; allowHttp: boolean }> {
+  const overlayBase = resolveOverlayDlBase(env);
+  if (overlayBase === null) {
+    const manifestUrl = builtinChannelManifestUrl(config.channel);
+    if (manifestUrl === null) {
+      throw new MissingChannelError(
+        `Channel has no built-in manifest location: ${config.channel}`,
+      );
+    }
+    return { manifestUrl, allowHttp: false };
+  }
+
+  const catalogUrl = rootCatalogUrl(overlayBase);
   const allowHttp = catalogAllowsHttp(catalogUrl);
   const catalogResponse = await trustedFetch(
     catalogUrl,
@@ -93,8 +111,17 @@ export async function resolveUpdate(
       `Channel not found in catalog: ${config.channel}`,
     );
   }
+  return { manifestUrl: channelEntry.manifestUrl, allowHttp };
+}
 
-  const manifestUrl = channelEntry.manifestUrl;
+export async function resolveUpdate(
+  config: UpdateChannelConfig,
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+): Promise<UpdateInfo> {
+  const { manifestUrl, allowHttp } = await resolveManifestLocation(
+    config,
+    env,
+  );
   const manifestResponse = await trustedFetch(
     manifestUrl,
     env,

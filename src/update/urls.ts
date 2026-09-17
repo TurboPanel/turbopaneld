@@ -1,4 +1,40 @@
+import type { UpdateChannel } from "./types.ts";
+
 export const DL_BASE_URL = "https://dl.trbp.nl";
+
+/** The repository whose GitHub Releases carry the daemon's rc/release packages. */
+export const GITHUB_RELEASES_REPO = "TurboPanel/turbopaneld";
+
+/**
+ * Where each advertised channel's manifest lives when no overlay catalog
+ * (`TURBOPANEL_DL_BASE`) is configured — the built-in rail.
+ *
+ * `trunk` is the per-merge CDN drop. `rc` and `release` are GitHub Releases:
+ * `release` follows the platform's own `releases/latest` pointer (which skips
+ * pre-releases, so promotion is `gh release edit --prerelease=false` and
+ * nothing here moves); `rc` follows a rolling pre-release tagged `rc`. Both
+ * are redirects GitHub serves without touching the unauthenticated API
+ * limit. `edge` / `canary` are reserved and unadvertised: no built-in
+ * location, so a daemon following one needs an overlay catalog that names it.
+ *
+ * Mirrored by hand in scripts/run.sh (`tp_builtin_channel_manifest_url`) and
+ * the control plane's src/lib/update/channel.ts — keep the three in step;
+ * urls.test.ts pins run.sh's copy against this one.
+ */
+export function builtinChannelManifestUrl(
+  channel: UpdateChannel,
+): string | null {
+  switch (channel) {
+    case "trunk":
+      return `${DL_BASE_URL}/channels/trunk/manifest.json`;
+    case "rc":
+      return `https://github.com/${GITHUB_RELEASES_REPO}/releases/download/rc/manifest.json`;
+    case "release":
+      return `https://github.com/${GITHUB_RELEASES_REPO}/releases/latest/download/manifest.json`;
+    default:
+      return null;
+  }
+}
 
 /** Strip all trailing `/` without a backtracking regex. */
 function stripTrailingSlashes(path: string): string {
@@ -26,6 +62,19 @@ export function resolveDlBase(
   const override = env.TURBOPANEL_DL_BASE?.trim();
   if (override) return stripTrailingSlashes(override);
   return DL_BASE_URL;
+}
+
+/**
+ * The overlay catalog origin when one is configured, else `null` — the
+ * resolver reads `<origin>/channels.json` in that case and the built-in
+ * per-channel rail otherwise. Setting `TURBOPANEL_DL_BASE=https://dl.trbp.nl`
+ * is the manual override that forces the CDN catalog for every channel.
+ */
+export function resolveOverlayDlBase(
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+): string | null {
+  const override = env.TURBOPANEL_DL_BASE?.trim();
+  return override ? stripTrailingSlashes(override) : null;
 }
 
 export function rootCatalogUrl(base = DL_BASE_URL): string {

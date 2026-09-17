@@ -10,17 +10,14 @@
 # Road page already decided dl.trbp.nl is kept, not replaced, so this adds a
 # second, independent publish path rather than touching the first.
 #
-# Known limitation, left for the Road page's `github-rail` item: the
-# manifest.json this generates records CDN-shaped artifact URLs
-# (channels/<channel>/daemon/<buildId>/<file>, matching
-# generate-channel-manifest.ts's existing URL scheme), not GitHub Release
-# download URLs — nothing today publishes these built artifacts to that CDN
-# path for a real channel/version, only to GitHub Releases. The manifest is
-# still schema-correct and hash-correct (useful as a release record, and
-# what this workflow's own post-publish verification step checks against),
-# but a daemon can't yet resolve `rc`/`release` channels from it — that's
-# `github-rail`'s job: teaching channels.json and the daemon/control-plane
-# resolvers about GitHub-shaped manifest URLs.
+# The manifest.json this generates records the tag-pinned GitHub Release
+# download URL for every asset (ARTIFACT_BASE_URL below — see
+# generate-channel-manifest.ts's githubReleaseDownloadBase), so a daemon
+# following the built-in `rc` / `release` rail (src/update/urls.ts
+# builtinChannelManifestUrl: releases/download/rc/manifest.json and
+# releases/latest/download/manifest.json) downloads straight from the
+# release. gh-release.yml re-downloads each asset from that exact URL after
+# publish and re-hashes it against the manifest.
 
 name: Release
 
@@ -179,6 +176,9 @@ jobs:
         env:
           CHANNEL: ${{ needs.prepare.outputs.channel }}
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          # Tag-pinned, not releases/latest — a promotion landing between a
+          # daemon's manifest fetch and its asset fetch must not 404 it.
+          ARTIFACT_BASE_URL: https://github.com/${{ github.repository }}/releases/download/v${{ needs.prepare.outputs.version }}
         run: |
           deno run --allow-env --allow-read --allow-write scripts/generate-channel-manifest.ts \
             release-assets \

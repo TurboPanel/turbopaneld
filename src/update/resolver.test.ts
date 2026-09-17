@@ -123,11 +123,66 @@ test("resolveUpdate fetches catalog + manifest and picks host arch artifact", as
   }
 });
 
+const OVERLAY_ENV = { TURBOPANEL_DL_BASE: "https://dl.trbp.nl" };
+
+test("resolveUpdate reads the built-in rail directly — no channels.json hop without an overlay", async () => {
+  const fetched: string[] = [];
+  const restore = installFetch((url) => {
+    fetched.push(url);
+    if (url === "https://dl.trbp.nl/channels/trunk/manifest.json") {
+      return Response.json(channelManifest());
+    }
+    return new Response("missing", { status: 404 });
+  });
+  try {
+    const info = await resolveUpdate({ app: "daemon", channel: "trunk" }, {});
+    assertEquals(info.commit, "abc1234");
+    assertEquals(fetched, ["https://dl.trbp.nl/channels/trunk/manifest.json"]);
+  } finally {
+    restore();
+  }
+});
+
+test("resolveUpdate follows rc and release to GitHub Releases", async () => {
+  const fetched: string[] = [];
+  const restore = installFetch((url) => {
+    fetched.push(url);
+    return Response.json({ ...channelManifest(), channel: "release" });
+  });
+  try {
+    await resolveUpdate({ app: "daemon", channel: "rc" }, {});
+    await resolveUpdate({ app: "daemon", channel: "release" }, {});
+    assertEquals(fetched, [
+      "https://github.com/TurboPanel/turbopaneld/releases/download/rc/manifest.json",
+      "https://github.com/TurboPanel/turbopaneld/releases/latest/download/manifest.json",
+    ]);
+  } finally {
+    restore();
+  }
+});
+
+test("resolveUpdate throws MissingChannelError for reserved channels without an overlay", async () => {
+  const restore = installFetch(() => {
+    throw new Error("must not fetch");
+  });
+  try {
+    for (const channel of ["edge", "canary"] as const) {
+      await assertRejects(
+        () => resolveUpdate({ app: "daemon", channel }, {}),
+        MissingChannelError,
+        "no built-in manifest location",
+      );
+    }
+  } finally {
+    restore();
+  }
+});
+
 test("resolveUpdate throws when channels.json HTTP status is not ok", async () => {
   const restore = installFetch(() => new Response("nope", { status: 503 }));
   try {
     await assertRejects(
-      () => resolveUpdate({ app: "daemon", channel: "trunk" }, {}),
+      () => resolveUpdate({ app: "daemon", channel: "trunk" }, OVERLAY_ENV),
       MalformedManifestError,
       "Failed to fetch channels.json",
     );
@@ -153,7 +208,7 @@ test("resolveUpdate throws MissingChannelError for absent catalog channels", asy
   });
   try {
     await assertRejects(
-      () => resolveUpdate({ app: "daemon", channel: "canary" }, {}),
+      () => resolveUpdate({ app: "daemon", channel: "canary" }, OVERLAY_ENV),
       MissingChannelError,
       "Channel not found",
     );
@@ -241,7 +296,7 @@ test("resolveUpdate surfaces a string fetch cause", async () => {
     await assertRejects(
       () => resolveUpdate({ app: "daemon", channel: "trunk" }, {}),
       MalformedManifestError,
-      "Failed to fetch channels.json: fetch failed (tls handshake)",
+      "Failed to fetch channel manifest: fetch failed (tls handshake)",
     );
   } finally {
     restore();
@@ -256,7 +311,7 @@ test("resolveUpdate wraps a fetch failed error without a usable cause", async ()
     await assertRejects(
       () => resolveUpdate({ app: "daemon", channel: "trunk" }, {}),
       MalformedManifestError,
-      "Failed to fetch channels.json: fetch failed",
+      "Failed to fetch channel manifest: fetch failed",
     );
   } finally {
     restore();
@@ -271,7 +326,7 @@ test("resolveUpdate wraps a non-Error throw", async () => {
     await assertRejects(
       () => resolveUpdate({ app: "daemon", channel: "trunk" }, {}),
       MalformedManifestError,
-      "Failed to fetch channels.json: offline",
+      "Failed to fetch channel manifest: offline",
     );
   } finally {
     restore();
@@ -289,7 +344,7 @@ test("resolveUpdate surfaces fetch cause in MalformedManifestError", async () =>
     await assertRejects(
       () => resolveUpdate({ app: "daemon", channel: "trunk" }, {}),
       MalformedManifestError,
-      "Failed to fetch channels.json: fetch failed (certificate verify failed)",
+      "Failed to fetch channel manifest: fetch failed (certificate verify failed)",
     );
   } finally {
     restore();

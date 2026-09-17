@@ -5,6 +5,7 @@ import {
   artifactFromPublishFile,
   daemonReleaseFilename,
   generateChannelManifest,
+  githubReleaseDownloadBase,
   jsReleaseFilename,
   orchestrationReleaseFilename,
   requireEnv,
@@ -202,6 +203,56 @@ test("generateChannelManifest honors channel and version for a tagged release", 
         "orchestration-0.1.0-rc1.tar.zst",
       ),
       true,
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("generateChannelManifest pins release assets to the tag's GitHub download path", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-manifest-github-" });
+  try {
+    for (
+      const name of [
+        "turbopaneld-0.1.0-amd64.tar.zst",
+        "turbopaneld-0.1.0-arm64.tar.zst",
+        "turbopaneld.js-0.1.0.tar.zst",
+        "orchestration-0.1.0.tar.zst",
+      ]
+    ) {
+      await Deno.writeFile(join(dir, name), new Uint8Array([1, 2, 3]));
+    }
+    const base = githubReleaseDownloadBase("TurboPanel/turbopaneld", "0.1.0");
+    assertEquals(
+      base,
+      "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.0",
+    );
+    const manifest = await generateChannelManifest({
+      publishDir: dir,
+      buildId: "b-010",
+      commit: "abcdef0123456789abcdef0123456789abcdef01",
+      builtAt: "2026-01-01T00:00:00.000Z",
+      channel: "release",
+      version: "0.1.0",
+      artifactBaseUrl: base,
+      writeStdout: () => Promise.resolve(),
+    });
+    // No buildId segment: the tag is the immutable coordinate on GitHub.
+    assertEquals(
+      manifest.binaryArtifacts["linux-amd64"].url,
+      `${base}/turbopaneld-0.1.0-amd64.tar.zst`,
+    );
+    assertEquals(
+      manifest.binaryArtifacts["linux-arm64"].url,
+      `${base}/turbopaneld-0.1.0-arm64.tar.zst`,
+    );
+    assertEquals(
+      manifest.jsFallbackArtifact.url,
+      `${base}/turbopaneld.js-0.1.0.tar.zst`,
+    );
+    assertEquals(
+      manifest.orchestrationArtifact.url,
+      `${base}/orchestration-0.1.0.tar.zst`,
     );
   } finally {
     await Deno.remove(dir, { recursive: true });
@@ -440,6 +491,56 @@ test("runGenerateChannelManifestCli defaults CHANNEL to trunk and forwards RELEA
     },
   });
   assertEquals(seen[1], { channel: "rc", version: "0.1.0-rc1" });
+});
+
+test("runGenerateChannelManifestCli forwards ARTIFACT_BASE_URL only when set", async () => {
+  const seen: Array<string | undefined> = [];
+  const generate = (
+    options: {
+      commit: string;
+      buildId: string;
+      builtAt: string;
+      artifactBaseUrl?: string;
+    },
+  ): Promise<ChannelManifest> => {
+    seen.push(options.artifactBaseUrl);
+    return Promise.resolve({
+      schema: 1,
+      channel: "trunk",
+      commit: options.commit,
+      buildId: options.buildId,
+      builtAt: options.builtAt,
+      binaryArtifacts: {
+        "linux-amd64": { url: "./a", sha256: "0", size: 1 },
+        "linux-arm64": { url: "./b", sha256: "0", size: 1 },
+      },
+      jsFallbackArtifact: { url: "./c", sha256: "0", size: 1 },
+      orchestrationArtifact: { url: "./d", sha256: "0", size: 1 },
+    });
+  };
+  const env = {
+    BUILD_ID: "b1",
+    GIT_COMMIT: "abcdef0123456789abcdef0123456789abcdef01",
+    BUILT_AT: "2026-01-01T00:00:00.000Z",
+  };
+  await runGenerateChannelManifestCli({
+    env,
+    args: ["/tmp/publish"],
+    generate,
+  });
+  await runGenerateChannelManifestCli({
+    env: {
+      ...env,
+      ARTIFACT_BASE_URL:
+        "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.0",
+    },
+    args: ["/tmp/publish"],
+    generate,
+  });
+  assertEquals(seen, [
+    undefined,
+    "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.0",
+  ]);
 });
 
 test("generateChannelManifest default stdout writer encodes JSON", async () => {

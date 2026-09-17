@@ -2,9 +2,12 @@
 # TurboPanel daemon bootstrap — single entrypoint served at turbopanel.sh.
 # Co-located dev Caddy serves the same script at /run.sh.
 #
-# Fetches split release artifacts from the channel manifest
-# (https://dl.trbp.nl/channels.json by default, or $TURBOPANEL_DL_BASE/channels.json
-# on a development overlay so remote servers never hit the public CDN):
+# Fetches split release artifacts from the channel manifest. Without an
+# overlay the manifest comes from the built-in rail — trunk from the CDN drop
+# (https://dl.trbp.nl/channels/trunk/manifest.json), rc and release from
+# GitHub Releases (see tp_builtin_channel_manifest_url); with
+# $TURBOPANEL_DL_BASE set it comes from that overlay's channels.json instead,
+# so remote servers on a development overlay never hit the public rail:
 # host-arch native binary + orchestration tree, plus the JS bundle when the
 # native binary cannot execute on this host. Installs the production FHS layout
 # (bin/turbopaneld, optional bin/turbopaneld.js, share/orchestration/), probes
@@ -604,32 +607,44 @@ PY
   ln -sfn "../current/deno" "$RUNTIMES_DIR/deno/bin/deno"
 }
 
+# Built-in manifest location per advertised channel, used when no overlay
+# catalog is configured. Mirrors src/update/urls.ts builtinChannelManifestUrl
+# (urls.test.ts pins this copy against that one) — keep the two in step.
+# edge / canary are reserved and unadvertised: no built-in location.
+tp_builtin_channel_manifest_url() {
+  case "$1" in
+    trunk) printf '%s' "https://dl.trbp.nl/channels/trunk/manifest.json" ;;
+    rc) printf '%s' "https://github.com/TurboPanel/turbopaneld/releases/download/rc/manifest.json" ;;
+    release) printf '%s' "https://github.com/TurboPanel/turbopaneld/releases/latest/download/manifest.json" ;;
+    *) return 1 ;;
+  esac
+}
+
 tp_fetch_channel_manifest() {
   _channel="${TURBOPANEL_UPDATE_CHANNEL:-trunk}"
   _dl_base="${TURBOPANEL_DL_BASE:-}"
   if [ -n "$_dl_base" ]; then
     _catalog_url="${_dl_base}/channels.json"
     _curl="$(tp_artifact_curl)"
-  else
-    _catalog_url="https://dl.trbp.nl/channels.json"
-    _curl="$(tp_release_curl)"
-  fi
 
-  _channels_json=""
-  if ! _channels_json="$($_curl "$_catalog_url" 2>/dev/null)"; then
-    if [ -n "$_dl_base" ]; then
+    _channels_json=""
+    if ! _channels_json="$($_curl "$_catalog_url" 2>/dev/null)"; then
       echo "run.sh: overlay catalog missing at ${_catalog_url} — rebuild the daemon on the development host" >&2
+      return 1
     fi
-    return 1
-  fi
 
-  _channels_oneline="$(tp_manifest_compact "$_channels_json")"
-  _manifest_url="$(printf '%s' "$_channels_oneline" | grep -o "\"${_channel}\"[^}]*manifestUrl\":\"[^\"]*\"" | sed 's/.*manifestUrl":"//' | tr -d '"')"
-  if [ -z "$_manifest_url" ]; then
-    return 1
-  fi
-  if [ -n "$_dl_base" ]; then
+    _channels_oneline="$(tp_manifest_compact "$_channels_json")"
+    _manifest_url="$(printf '%s' "$_channels_oneline" | grep -o "\"${_channel}\"[^}]*manifestUrl\":\"[^\"]*\"" | sed 's/.*manifestUrl":"//' | tr -d '"')"
+    if [ -z "$_manifest_url" ]; then
+      return 1
+    fi
     _manifest_url="$(tp_join_url "$_catalog_url" "$_manifest_url")" || return 1
+  else
+    _curl="$(tp_release_curl)"
+    if ! _manifest_url="$(tp_builtin_channel_manifest_url "$_channel")"; then
+      echo "run.sh: channel ${_channel} has no built-in manifest location; set TURBOPANEL_DL_BASE to a catalog that names it" >&2
+      return 1
+    fi
   fi
 
   _manifest_json=""

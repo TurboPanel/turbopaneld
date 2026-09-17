@@ -1,13 +1,19 @@
 import { assertEquals } from "@std/assert";
+import { dirname, fromFileUrl, join } from "@std/path";
 import {
   absolutizeChannelManifestJson,
   absolutizeRootCatalogJson,
+  builtinChannelManifestUrl,
   catalogAllowsHttp,
   DL_BASE_URL,
   resolveDlBase,
   resolveMaybeRelativeUrl,
+  resolveOverlayDlBase,
   rootCatalogUrl,
 } from "./urls.ts";
+import type { UpdateChannel } from "./types.ts";
+
+const ROOT = dirname(dirname(dirname(fromFileUrl(import.meta.url))));
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -25,6 +31,62 @@ test("resolveDlBase prefers TURBOPANEL_DL_BASE over the public CDN", () => {
     }),
     "https://turbopanel.dev/downloads/daemon",
   );
+});
+
+test("resolveOverlayDlBase is null without TURBOPANEL_DL_BASE", () => {
+  assertEquals(resolveOverlayDlBase({}), null);
+  assertEquals(resolveOverlayDlBase({ TURBOPANEL_DL_BASE: "  " }), null);
+  assertEquals(
+    resolveOverlayDlBase({
+      TURBOPANEL_DL_BASE: "http://203.0.113.10:8880/downloads/daemon/",
+    }),
+    "http://203.0.113.10:8880/downloads/daemon",
+  );
+});
+
+test("builtinChannelManifestUrl: trunk on the CDN, rc/release on GitHub Releases, reserved channels none", () => {
+  assertEquals(
+    builtinChannelManifestUrl("trunk"),
+    "https://dl.trbp.nl/channels/trunk/manifest.json",
+  );
+  assertEquals(
+    builtinChannelManifestUrl("rc"),
+    "https://github.com/TurboPanel/turbopaneld/releases/download/rc/manifest.json",
+  );
+  assertEquals(
+    builtinChannelManifestUrl("release"),
+    "https://github.com/TurboPanel/turbopaneld/releases/latest/download/manifest.json",
+  );
+  assertEquals(builtinChannelManifestUrl("edge"), null);
+  assertEquals(builtinChannelManifestUrl("canary"), null);
+});
+
+test("scripts/run.sh mirrors builtinChannelManifestUrl exactly", async () => {
+  const runSh = await Deno.readTextFile(join(ROOT, "scripts", "run.sh"));
+  const fn = runSh.match(
+    /tp_builtin_channel_manifest_url\(\) \{\n([\s\S]*?)\n\}/,
+  );
+  if (!fn) {
+    throw new Error("tp_builtin_channel_manifest_url not found in run.sh");
+  }
+  const shell = new Map<string, string>();
+  for (const m of fn[1].matchAll(/^\s+(\w+)\) printf '%s' "([^"]+)" ;;$/gm)) {
+    shell.set(m[1], m[2]);
+  }
+  const channels: UpdateChannel[] = [
+    "trunk",
+    "edge",
+    "canary",
+    "rc",
+    "release",
+  ];
+  const expected = new Map<string, string>();
+  for (const channel of channels) {
+    const url = builtinChannelManifestUrl(channel);
+    if (url !== null) expected.set(channel, url);
+  }
+  assertEquals(shell.size, 3);
+  assertEquals(shell, expected);
 });
 
 test("rootCatalogUrl joins channels.json onto the overlay origin", () => {

@@ -42,11 +42,24 @@ export function requireEnv(
   return value;
 }
 
+/**
+ * Where a release build's assets are downloaded from: the tag-pinned GitHub
+ * Release download path. Absolute and pinned to the tag (not
+ * `releases/latest/download/…`) so a promotion landing between a daemon's
+ * manifest fetch and its asset fetch can never make a versioned filename 404.
+ */
+export function githubReleaseDownloadBase(
+  repository: string,
+  version: string,
+): string {
+  return `https://github.com/${repository}/releases/download/v${version}`;
+}
+
 export async function artifactFromPublishFile(
   publishDir: string,
   filename: string,
   urlBase: string,
-  buildId: string,
+  buildId?: string,
 ): Promise<ArtifactEntry> {
   const path = `${publishDir}/${filename}`;
   let data: Uint8Array;
@@ -65,8 +78,12 @@ export async function artifactFromPublishFile(
   copy.set(data);
   const digest = await crypto.subtle.digest("SHA-256", copy);
   return {
-    // Version artifact paths by buildId — Bunny CDN ignores ?build= cache-bust params.
-    url: `${urlBase}/${buildId}/${filename}`,
+    // CDN drops version artifact paths by buildId — Bunny CDN ignores
+    // ?build= cache-bust params. A GitHub Release is already immutable per
+    // tag, so its base carries the filename directly.
+    url: buildId
+      ? `${urlBase}/${buildId}/${filename}`
+      : `${urlBase}/${filename}`,
     sha256: encodeHex(new Uint8Array(digest)),
     size: data.byteLength,
   };
@@ -89,37 +106,46 @@ export async function generateChannelManifest(options: {
    * scripts/lib/release-artifacts.sh's naming helpers.
    */
   version?: string;
+  /**
+   * Where the assets are downloaded from, verbatim — `<base>/<filename>`
+   * with no buildId segment. Set by the GitHub Release job to the
+   * tag-pinned `releases/download/v<version>` path (see
+   * `githubReleaseDownloadBase`); unset, the CDN drop's
+   * `<dlBaseUrl>/channels/<channel>/daemon/<buildId>/…` scheme applies.
+   */
+  artifactBaseUrl?: string;
   writeTextFile?: (path: string, json: string) => Promise<void>;
   writeStdout?: (json: string) => Promise<void>;
 }): Promise<ChannelManifest> {
   const channel: UpdateChannel = options.channel ?? "trunk";
-  const artifactBase = `${
-    options.dlBaseUrl ?? "https://dl.trbp.nl"
-  }/channels/${channel}/daemon`;
+  const artifactBase = options.artifactBaseUrl ??
+    `${options.dlBaseUrl ?? "https://dl.trbp.nl"}/channels/${channel}/daemon`;
+  // Only the CDN scheme segments by buildId.
+  const buildIdSegment = options.artifactBaseUrl ? undefined : options.buildId;
 
   const binaryAmd64 = await artifactFromPublishFile(
     options.publishDir,
     daemonReleaseFilename("amd64", options.version),
     artifactBase,
-    options.buildId,
+    buildIdSegment,
   );
   const binaryArm64 = await artifactFromPublishFile(
     options.publishDir,
     daemonReleaseFilename("arm64", options.version),
     artifactBase,
-    options.buildId,
+    buildIdSegment,
   );
   const jsFallback = await artifactFromPublishFile(
     options.publishDir,
     jsReleaseFilename(options.version),
     artifactBase,
-    options.buildId,
+    buildIdSegment,
   );
   const orchestration = await artifactFromPublishFile(
     options.publishDir,
     orchestrationReleaseFilename(options.version),
     artifactBase,
-    options.buildId,
+    buildIdSegment,
   );
 
   const manifest: ChannelManifest = {
@@ -192,6 +218,10 @@ export async function runGenerateChannelManifestCli(
     const CHANNEL = (getEnv("CHANNEL")?.trim() ||
       "trunk") as UpdateChannel;
     const VERSION = getEnv("RELEASE_VERSION")?.trim() || undefined;
+    // Set by release.yml to the tag-pinned GitHub download path; the trunk
+    // drop leaves it unset and keeps the CDN scheme.
+    const ARTIFACT_BASE_URL = getEnv("ARTIFACT_BASE_URL")?.trim() ||
+      undefined;
 
     const publishDir = args[0];
     const outputPath = args[1];
@@ -214,6 +244,7 @@ export async function runGenerateChannelManifestCli(
       defaultControlPlaneUrl: DEFAULT_CONTROL_PLANE_URL,
       channel: CHANNEL,
       version: VERSION,
+      artifactBaseUrl: ARTIFACT_BASE_URL,
     });
   } catch {
     exit(1);
