@@ -64,7 +64,11 @@
     chdir: "{{ turbopanel_instance_dir }}"
   # Co-located dev stores CA material as the dev user (git/Ansible identity); tpctrl
   # cannot chmod dev-user-owned keys when the script normalizes permissions.
-  become_user: "{{ instance_certs_owner }}"
+  # A managed install keeps the CA directory root-owned (0750 root:tp, see the
+  # task above and the hardening below), so there the generator runs as root
+  # — the instance user could not create ca.key in it (install-rehearsal,
+  # Road to 0.1.x); the hardening tasks then set the leaf's owner.
+  become_user: "{{ instance_certs_owner if (turbopanel_dev_user | default('') | length > 0) else 'root' }}"
   environment:
     HOME: "{{ turbopanel_dev_root if (turbopanel_dev_user | default('') | length > 0) else turbopanel_instance_dir }}"
     PATH: "{{ turbopanel_runtime_path }}"

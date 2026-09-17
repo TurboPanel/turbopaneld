@@ -41,9 +41,12 @@ chmod 0600 "$dest"
 # Retention: keep the newest N dumps, delete the rest.
 mapfile -t old_dumps < <(find "$backup_dir" -maxdepth 1 -name 'turbopanel-*.dump' -printf '%T@ %p\n' \
   | sort -rn | tail -n "+$((retention_keep + 1))" | cut -d' ' -f2-)
+{# `${#…}` is a Jinja comment opener — keep the bash verbatim. #}
+{% raw %}
 if [ "${#old_dumps[@]}" -gt 0 ]; then
   rm -f -- "${old_dumps[@]}"
 fi
+{% endraw %}
 
 if [ -n "$remote_destination" ]; then
   rsync -a --chmod=D0700,F0600 "$dest" "$remote_destination"

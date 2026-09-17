@@ -1,5 +1,6 @@
 import {
   bootstrapOrchestrationRuntime,
+  ensureGalaxyDockerRole,
   runDaemonConverge,
   runLocalPlaybook,
 } from "./ansible.ts";
@@ -232,6 +233,15 @@ export async function runInstaller(opts: RunInstallerOptions): Promise<void> {
     if (!varsFile) {
       varsFile = await createInstallerVarsFile(opts);
       internallyCreatedVarsFile = true;
+    }
+
+    // The instance installer converges Docker (postgres/redis/rabbitmq run as
+    // one compose project) through the pinned geerlingguy.docker Galaxy
+    // role, which orchestration bootstrap deliberately does not fetch —
+    // same on-demand step the dev converge takes. The daemon installer needs
+    // no Docker.
+    if (playbookName === "instance-install.yml") {
+      await ensureGalaxyDockerRole();
     }
 
     const onEvent: AnsibleEventHandler = (event) => {
