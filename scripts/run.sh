@@ -25,6 +25,17 @@
 # TURBOPANEL_DL_BASE (dev overlay catalog; never falls back to the public CDN).
 # Flags (--license, --host, …) remain supported for scripts and sudo re-exec.
 #
+# Self-hosted control plane (explicit opt-in — never inferred from a missing
+# license):
+#   curl -fsSL turbopanel.sh | TURBOPANEL_INSTANCE=1 sh
+# Downloads the daemon package for its orchestration tree, then the instance
+# and UI release packages from the same channel (default: release), verifies
+# every sha256 against each manifest, unpacks them under /opt/turbopanel, and
+# runs instance-install.yml (Postgres, Redis, RabbitMQ, Docker, certs, units,
+# Caddy) before handing off to the install wizard. No daemon is enrolled:
+# that needs a license the wizard has not issued yet — run this script again
+# with TURBOPANEL_LICENSE afterwards to enrol this host.
+#
 # Manifest and release helpers below must stay in sync with scripts/lib/release-artifacts.sh.
 
 # Shared curl prefixes for HTTPS downloads (and the insecure-TLS install path).
@@ -620,6 +631,19 @@ tp_builtin_channel_manifest_url() {
   esac
 }
 
+# The same rail for the other two packages a self-hosted install needs
+# (TurboPanel/turbopanel — the compiled instance; TurboPanel/ui — the web
+# export). Both publish only through GitHub Releases: there is no trunk drop,
+# so trunk has no location and an --instance install must name rc or release.
+tp_builtin_repo_manifest_url() {
+  _repo="$1"
+  case "$2" in
+    rc) printf '%s' "https://github.com/TurboPanel/${_repo}/releases/download/rc/manifest.json" ;;
+    release) printf '%s' "https://github.com/TurboPanel/${_repo}/releases/latest/download/manifest.json" ;;
+    *) return 1 ;;
+  esac
+}
+
 tp_fetch_channel_manifest() {
   _channel="${TURBOPANEL_UPDATE_CHANNEL:-trunk}"
   _dl_base="${TURBOPANEL_DL_BASE:-}"
@@ -665,6 +689,115 @@ tp_fetch_channel_manifest() {
   return 0
 }
 
+# --- self-hosted instance install (--instance) ---------------------------
+# The instance (TurboPanel/turbopanel) and UI (TurboPanel/ui) packages come
+# from the same channel as the daemon package, over the same public-trust
+# TLS, and are verified against their own manifest.json exactly like the
+# daemon's artifacts (sha256 from the manifest, retried on mismatch).
+
+# Fetch a repo's channel manifest into $_repo_manifest_compact (one line).
+tp_fetch_repo_manifest() {
+  _repo="$1"
+  _channel="${TURBOPANEL_UPDATE_CHANNEL:-release}"
+  if ! _manifest_url="$(tp_builtin_repo_manifest_url "$_repo" "$_channel")"; then
+    echo "run.sh: ${_repo} has no ${_channel} channel — use --channel rc or release" >&2
+    return 1
+  fi
+  _curl="$(tp_release_curl)"
+  _manifest_json=""
+  if ! _manifest_json="$($_curl "${_manifest_url}?$(date +%s)" 2>/dev/null)"; then
+    echo "run.sh: failed to fetch ${_manifest_url} — does TurboPanel/${_repo} have a ${_channel} release yet?" >&2
+    return 1
+  fi
+  _repo_manifest_compact="$(tp_manifest_compact "$_manifest_json")"
+  [ -n "$_repo_manifest_compact" ]
+}
+
+# Download one artifacts.<key> entry of the last fetched repo manifest to $2.
+tp_download_repo_artifact() {
+  _key="$1"
+  _dest="$2"
+  _url="$(tp_manifest_binary_artifact_field "$_repo_manifest_compact" "$_key" "url")" || {
+    echo "run.sh: manifest has no artifacts.${_key}.url" >&2
+    return 1
+  }
+  _sha="$(tp_manifest_binary_artifact_field "$_repo_manifest_compact" "$_key" "sha256")" || {
+    echo "run.sh: manifest has no artifacts.${_key}.sha256" >&2
+    return 1
+  }
+  tp_download_verified_artifact "$_url" "$_sha" "$_dest"
+}
+
+tp_run_instance_install() {
+  _instance_dir="$INSTALL_ROOT/lib/instance"
+  _ui_dir="$INSTALL_ROOT/share/ui"
+  _work="$(mktemp -d)"
+
+  tp_print_step "▸" "Fetching instance release manifest (TurboPanel/turbopanel, channel ${TURBOPANEL_UPDATE_CHANNEL:-release})…"
+  tp_fetch_repo_manifest turbopanel || { rm -rf "$_work"; return 1; }
+  _instance_version="$(tp_manifest_field "$_repo_manifest_compact" "version")"
+  _instance_commit="$(tp_manifest_field "$_repo_manifest_compact" "commit")"
+  tp_print_step "  " "Instance: v${_instance_version:-?} (${_instance_commit:-unknown})"
+  tp_print_step "▸" "Downloading instance package (${_linux_arch})…"
+  tp_download_repo_artifact "instance-${_linux_arch}" "$_work/instance.tar.zst" || { rm -rf "$_work"; return 1; }
+  tp_print_ok "Instance package verified (SHA-256 ok)"
+
+  tp_print_step "▸" "Fetching UI release manifest (TurboPanel/ui)…"
+  tp_fetch_repo_manifest ui || { rm -rf "$_work"; return 1; }
+  _ui_version="$(tp_manifest_field "$_repo_manifest_compact" "version")"
+  tp_print_step "  " "UI: v${_ui_version:-?}"
+  tp_print_step "▸" "Downloading UI export…"
+  tp_download_repo_artifact ui "$_work/ui.tar.gz" || { rm -rf "$_work"; return 1; }
+  tp_print_ok "UI export verified (SHA-256 ok)"
+
+  tp_print_step "▸" "Unpacking under $INSTALL_ROOT…"
+  # The compiled instance package is replaced whole — bin/, lib/ and
+  # share/caddy/ only, never state (/var/lib/turbopanel) or config.
+  rm -rf "$_instance_dir"
+  mkdir -p "$_instance_dir"
+  zstd -d -q -c "$_work/instance.tar.zst" | tar -x -C "$_instance_dir"
+  rm -rf "$_ui_dir"
+  mkdir -p "$_ui_dir"
+  tar -xzf "$_work/ui.tar.gz" -C "$_ui_dir"
+  rm -rf "$_work"
+  for _required in \
+    "$_instance_dir/bin/turbopanel-instance" \
+    "$_instance_dir/bin/turbopanel-mailer" \
+    "$_instance_dir/lib/libduckdb.so" \
+    "$_instance_dir/share/caddy/Caddyfile" \
+    "$_ui_dir/index.html"; do
+    if [ ! -e "$_required" ]; then
+      tp_print_error "Instance package missing $_required"
+      return 1
+    fi
+  done
+  chmod 0755 "$_instance_dir/bin/turbopanel-instance" "$_instance_dir/bin/turbopanel-mailer"
+  tp_print_ok "Packages unpacked (instance v${_instance_version:-?}, UI v${_ui_version:-?})"
+
+  _vars="$(mktemp)"
+  {
+    printf 'turbopanel_update_channel: %s\n' "${TURBOPANEL_UPDATE_CHANNEL:-release}"
+    printf 'turbopanel_vendor_dir: %s\n' "$RUNTIMES_DIR"
+    printf 'turbopanel_orchestration_dir: %s\n' "$ORCHESTRATION_DIR"
+    printf 'instance_start: %s\n' "$([ "$NO_START" = true ] && echo false || echo true)"
+  } > "$_vars"
+  tp_print_step "▸" "Provisioning the self-hosted instance (Postgres, Redis, RabbitMQ, Docker, certs, units, Caddy)…"
+  _rc=0
+  if [ "$DAEMON_EXEC_MODE" = "native" ]; then
+    "$(tp_daemon_binary_path)" run-installer --playbook instance-install.yml --vars-file "$_vars" || _rc=$?
+  else
+    HOME="$INSTALL_ROOT" "$DENO_BIN" run --allow-all "$(tp_daemon_js_fallback_path)" run-installer --playbook instance-install.yml --vars-file "$_vars" || _rc=$?
+  fi
+  rm -f "$_vars"
+  rm -rf /tmp/turbopanel-ansible /root/.ansible
+  if [ "$_rc" -ne 0 ]; then
+    tp_print_error "Instance provisioning failed"
+    return "$_rc"
+  fi
+  tp_print_ok "Self-hosted instance installed — open the wizard URL printed above (https://<this host>:8443/install), then enrol this host as a daemon with the license the wizard issues"
+  return 0
+}
+
 set -eu
 
 tp_print_header() {
@@ -686,6 +819,7 @@ INSTANCE_CA=""
 TUNNEL_TOKEN=""
 INSECURE_TLS=false
 NO_START=false
+INSTANCE_INSTALL=false
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -708,6 +842,8 @@ while [ $# -gt 0 ]; do
       INSECURE_TLS=true; shift ;;
     --no-start)
       NO_START=true; shift ;;
+    --instance)
+      INSTANCE_INSTALL=true; shift ;;
     --channel)
       [ $# -ge 2 ] || { tp_print_error "--channel requires an argument"; exit 1; }
       export TURBOPANEL_UPDATE_CHANNEL="$2"; shift 2 ;;
@@ -732,25 +868,46 @@ case "${TURBOPANEL_INSECURE_TLS:-}" in
     # Leave INSECURE_TLS unchanged (may already be set by --insecure-tls).
     ;;
 esac
+case "${TURBOPANEL_INSTANCE:-}" in
+  1|true|TRUE|yes|YES) INSTANCE_INSTALL=true ;;
+  *) ;;
+esac
 
-if [ -z "$LICENSE" ]; then
+if [ "$INSTANCE_INSTALL" = true ]; then
+  # A control plane install: no license (the wizard issues the first one),
+  # no control-plane URL (this host becomes one), and the packages only exist
+  # on the GitHub rail — so the channel defaults to release, not trunk.
+  [ -n "${TURBOPANEL_UPDATE_CHANNEL:-}" ] || export TURBOPANEL_UPDATE_CHANNEL=release
+  if [ -n "$LICENSE" ] || [ -n "$TUNNEL_TOKEN" ] || [ -n "$INSTANCE_CA" ]; then
+    tp_print_error "--instance installs a control plane: it takes no --license, --tunnel-token or --instance-ca (enrol this host as a daemon afterwards, with a license from the wizard)"
+    exit 1
+  fi
+  if ! tp_builtin_repo_manifest_url turbopanel "$TURBOPANEL_UPDATE_CHANNEL" >/dev/null; then
+    tp_print_error "--instance needs --channel rc or release (the instance and UI packages publish only through GitHub Releases; got ${TURBOPANEL_UPDATE_CHANNEL})"
+    exit 1
+  fi
+elif [ -z "$LICENSE" ]; then
   tp_print_error "TURBOPANEL_LICENSE (or --license) is required"
   exit 1
 fi
 
-_padded="$LICENSE"
-while [ $(( ${#_padded} % 4 )) -ne 0 ]; do
-  _padded="${_padded}="
-done
-_decoded="$(printf '%s' "$_padded" | tr -- '-_' '+/' | base64 -d 2>/dev/null)" || {
-  tp_print_error "invalid --license format; expected base64url-encoded id:token"
-  exit 1
-}
-LICENSE_ID="$(echo "$_decoded" | cut -d: -f1)"
-LICENSE_TOKEN="$(echo "$_decoded" | cut -d: -f2-)"
-if [ -z "$LICENSE_ID" ] || [ -z "$LICENSE_TOKEN" ]; then
-  tp_print_error "invalid --license format; expected base64url-encoded id:token"
-  exit 1
+LICENSE_ID=""
+LICENSE_TOKEN=""
+if [ "$INSTANCE_INSTALL" != true ]; then
+  _padded="$LICENSE"
+  while [ $(( ${#_padded} % 4 )) -ne 0 ]; do
+    _padded="${_padded}="
+  done
+  _decoded="$(printf '%s' "$_padded" | tr -- '-_' '+/' | base64 -d 2>/dev/null)" || {
+    tp_print_error "invalid --license format; expected base64url-encoded id:token"
+    exit 1
+  }
+  LICENSE_ID="$(echo "$_decoded" | cut -d: -f1)"
+  LICENSE_TOKEN="$(echo "$_decoded" | cut -d: -f2-)"
+  if [ -z "$LICENSE_ID" ] || [ -z "$LICENSE_TOKEN" ]; then
+    tp_print_error "invalid --license format; expected base64url-encoded id:token"
+    exit 1
+  fi
 fi
 
 if ! tp_is_root; then
@@ -771,7 +928,9 @@ if ! tp_is_root; then
   else
     _REEXEC_SCRIPT_URL="https://turbopanel.sh"
   fi
-  set -- --license "$LICENSE"
+  set --
+  [ -n "$LICENSE" ] && set -- "$@" --license "$LICENSE"
+  [ "$INSTANCE_INSTALL" = true ] && set -- "$@" --instance
   [ -n "$HOST_URL" ] && set -- "$@" --host "$HOST_URL"
   [ -n "$DL_BASE" ] && set -- "$@" --dl-base "$DL_BASE"
   [ -n "$INSTANCE_CA" ] && set -- "$@" --instance-ca "$INSTANCE_CA"
@@ -811,11 +970,13 @@ LICENSE_STAGING_DIR="$STATE_DIR/daemon-license-staging"
 # relax them is the undocumented operator-only TURBOPANEL_RELEASE_TLS_INSECURE_OVERRIDE.
 
 mkdir -p "$STATE_DIR" "$CONFIG_DIR" "$BIN_DIR" "$INSTALL_ROOT/share" "$RUN_DIR"
-STAGING_DIR="$LICENSE_STAGING_DIR"
-mkdir -p "$STAGING_DIR"
-printf '%s' "$LICENSE_ID" > "$STAGING_DIR/license.id"
-printf '%s' "$LICENSE_TOKEN" > "$STAGING_DIR/license.token"
-chmod 0640 "$STAGING_DIR/license.id" "$STAGING_DIR/license.token"
+if [ "$INSTANCE_INSTALL" != true ]; then
+  STAGING_DIR="$LICENSE_STAGING_DIR"
+  mkdir -p "$STAGING_DIR"
+  printf '%s' "$LICENSE_ID" > "$STAGING_DIR/license.id"
+  printf '%s' "$LICENSE_TOKEN" > "$STAGING_DIR/license.token"
+  chmod 0640 "$STAGING_DIR/license.id" "$STAGING_DIR/license.token"
+fi
 
 export DEBIAN_FRONTEND=noninteractive
 tp_print_step "▸" "Checking host operating system…"
@@ -887,10 +1048,18 @@ tp_print_ok "Release manifest resolved (channel ${TURBOPANEL_UPDATE_CHANNEL:-tru
 tp_print_step "  " "Binary (${_linux_arch:-unknown}): $_binary_artifact_url"
 tp_print_step "  " "JS bundle (if needed): $_js_fallback_artifact_url"
 tp_print_step "  " "Commit: ${_manifest_commit:-unknown}"
-tp_print_step "  " "Control plane: $HOST_URL"
+if [ "$INSTANCE_INSTALL" = true ]; then
+  tp_print_step "  " "Control plane: this host (self-hosted instance install)"
+else
+  tp_print_step "  " "Control plane: $HOST_URL"
+fi
 
 mkdir -p "$CONFIG_DIR"
-if [ -n "$INSTANCE_CA" ]; then
+if [ "$INSTANCE_INSTALL" = true ]; then
+  # No control plane to fetch a CA from — this host mints its own
+  # (instance-certs, via the binary's generate-self-signed-cert verb).
+  :
+elif [ -n "$INSTANCE_CA" ]; then
   # Compare resolved paths, not raw strings: a symlink or path-variant (e.g. a
   # trailing slash or relative form) pointing at the canonical CA otherwise
   # slips past a string-only check and makes `install` fail with
@@ -1027,6 +1196,17 @@ fi
 if [ ! -f "$ORCHESTRATION_DIR/ansible.cfg" ]; then
   tp_print_error "Bootstrap did not leave orchestration/ansible.cfg in place"
   exit 1
+fi
+
+if [ "$INSTANCE_INSTALL" = true ]; then
+  # The daemon package above was only the carrier for the orchestration tree
+  # and its vendored Ansible; no daemon is configured or started here.
+  if ! command -v zstd >/dev/null 2>&1; then
+    tp_print_error "zstd is required to unpack the instance package (apt install zstd)"
+    exit 1
+  fi
+  tp_run_instance_install
+  exit $?
 fi
 
 VARS_FILE="$(mktemp)"

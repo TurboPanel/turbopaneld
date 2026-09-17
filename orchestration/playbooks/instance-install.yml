@@ -1,0 +1,186 @@
+---
+# TurboPanel self-hosted instance install (Road to 0.1.x,
+# `self-hosted-installer`).
+#
+# Run by `turbopaneld run-installer --playbook instance-install.yml` from
+# scripts/run.sh --instance, after run.sh has already downloaded and
+# sha256-verified the daemon package (which carries this orchestration tree
+# and the vendored Ansible), the instance package
+# (turbopanel-instance-<version>-<arch>.tar.zst → /opt/turbopanel/lib/instance:
+# bin/turbopanel-instance, bin/turbopanel-mailer, lib/libduckdb.so,
+# share/caddy/Caddyfile{,.acme}) and the UI export
+# (turbopanel-ui-<version>.tar.gz → /opt/turbopanel/share/ui). Nothing here
+# clones or builds: the instance runs compiled (turbopanel_instance_run_mode
+# compiled), the UI is served static, and every install-time step that used
+# to reach into a source checkout is a verb of the instance binary
+# (migrate, generate-secret, generate-self-signed-cert).
+#
+# Role order mirrors turbopanel/dev's instance-dev-install.yml minus the
+# dev-only roles (repos, builds, dev permissions, mailpit, redis-insight,
+# stripe-listen, tier catalogue). The play ends by printing the install
+# wizard URL; the wizard (turbopanel src/lib/install/) takes it from there.
+#
+# Co-located daemon enrolment is deliberately not part of this play: the
+# daemon needs a license the wizard has not issued yet. Once the first
+# organization exists, `run.sh` with TURBOPANEL_LICENSE enrols this host like
+# any other.
+- name: TurboPanel self-hosted instance install
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    turbopanel_install_root: /opt/turbopanel
+    turbopanel_managed_install: true
+    turbopanel_vendor_dir: "{{ turbopanel_install_root }}/vendor"
+    turbopanel_lib_dir: "{{ turbopanel_install_root }}/lib"
+    turbopanel_orchestration_dir: "{{ turbopanel_install_root }}/share/orchestration"
+    turbopanel_config_dir: /etc/turbopanel
+    turbopanel_state_dir: /var/lib/turbopanel
+    turbopanel_dev_user: ""
+    turbopanel_dev_uid: ""
+    turbopanel_dev_gid: ""
+    # The unpacked release packages (run.sh puts them here before this play).
+    turbopanel_instance_dir: "{{ turbopanel_lib_dir }}/instance"
+    turbopanel_instance_run_mode: compiled
+    turbopanel_instance_binary: "{{ turbopanel_instance_dir }}/bin/turbopanel-instance"
+    turbopanel_ui_mode: static
+    turbopanel_ui_dist_dir: "{{ turbopanel_install_root }}/share/ui"
+    turbopanel_ui_artifact_url: ""
+    turbopanel_instance_runtime: deno
+    instance_start: true
+    postgres_expose_port: false
+    rabbitmq_amqp_port: 5672
+    rabbitmq_mgmt_port: 15672
+    rabbitmq_expose_mgmt_port: false
+    redis_socket_path: /run/turbopanel/redis.sock
+    turbopanel_optional_dbstudio: false
+    turbopanel_optional_ui: false
+    turbopanel_optional_website: false
+    turbopanel_optional_mailpit: false
+    turbopanel_optional_redis_insight: false
+    turbopanel_optional_stripe_listen: false
+    # Which channel this instance resolves daemon updates on
+    # (TURBOPANEL_UPDATE_CHANNEL in the runtime env). run.sh passes the
+    # channel it installed from.
+    turbopanel_update_channel: release
+    # Where the vendored libduckdb.so the compiled unit needs on
+    # LD_LIBRARY_PATH is staged from the package (instance-build's job in
+    # source mode; here the package ships it).
+    turbopanel_duckdb_lib_dir: "{{ turbopanel_vendor_dir }}/duckdb/lib"
+
+  pre_tasks:
+    - name: Refresh apt cache once per install (Debian)
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+      when: ansible_os_family == 'Debian'
+
+    - name: Require the unpacked instance package
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ turbopanel_instance_binary }}"
+        - "{{ turbopanel_instance_dir }}/bin/turbopanel-mailer"
+        - "{{ turbopanel_instance_dir }}/lib/libduckdb.so"
+        - "{{ turbopanel_instance_dir }}/share/caddy/Caddyfile"
+        - "{{ turbopanel_ui_dist_dir }}/index.html"
+      register: _instance_package_files
+
+    - name: Fail when the instance or UI package is missing
+      ansible.builtin.assert:
+        that: _instance_package_files.results | map(attribute='stat.exists') | list is all
+        fail_msg: >-
+          The instance package and UI export must be unpacked under
+          {{ turbopanel_instance_dir }} and {{ turbopanel_ui_dist_dir }}
+          before this play runs — run.sh --instance does that.
+
+  roles:
+    - role: turbopanel-user
+    - role: runtime-sockets
+    - role: daemon-logs
+    - role: daemon-prereqs
+    - role: rapl-access
+    - role: docker
+    - role: postgres
+    - role: redis
+    - role: rabbitmq
+    # Brings postgres/rabbitmq up as one Docker Compose project
+    # (turbopanel-system).
+    - role: system-compose
+    # Host prep for shared managed-DB ingress and per-org managed HA; the
+    # compose content stays daemon-owned.
+    - role: proxysql
+    - role: orchestrator
+    - role: instance-user
+    - role: caddy
+
+  tasks:
+    - name: Ensure the DuckDB vendor lib directory
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: "{{ turbopanel_group | default('tp') }}"
+        mode: "0750"
+      loop:
+        - "{{ turbopanel_vendor_dir }}/duckdb"
+        - "{{ turbopanel_duckdb_lib_dir }}"
+
+    - name: Vendor libduckdb.so from the instance package
+      # What instance-build does from node_modules in source mode; the
+      # compiled unit puts this directory on LD_LIBRARY_PATH.
+      ansible.builtin.copy:
+        src: "{{ turbopanel_instance_dir }}/lib/libduckdb.so"
+        dest: "{{ turbopanel_duckdb_lib_dir }}/libduckdb.so"
+        remote_src: true
+        owner: root
+        group: "{{ turbopanel_group | default('tp') }}"
+        mode: "0640"
+
+    - name: Own the unpacked instance package
+      ansible.builtin.file:
+        path: "{{ turbopanel_instance_dir }}"
+        state: directory
+        owner: "{{ instance_user | default('tpctrl') }}"
+        group: "{{ turbopanel_group | default('tp') }}"
+        mode: "0750"
+        recurse: true
+
+    - name: Own the static UI export
+      ansible.builtin.file:
+        path: "{{ turbopanel_ui_dist_dir }}"
+        state: directory
+        owner: "{{ instance_user | default('tpctrl') }}"
+        group: "{{ turbopanel_group | default('tp') }}"
+        mode: "2770"
+        recurse: true
+
+    - name: Platform CA, server leaf, units and the first migration
+      ansible.builtin.include_role:
+        name: "{{ item }}"
+      loop:
+        - instance-certs
+        - instance-launch
+
+  post_tasks:
+    - name: Ensure the instance stack is running
+      when: instance_start | default(true) | bool
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop:
+        - turbopanel-system-stack
+        - turbopanel-instance
+        - turbopanel-mailer
+        - turbopanel-caddy
+
+    - name: Print the install wizard address
+      ansible.builtin.debug:
+        msg: >-
+          TurboPanel instance is up. Finish the install in the wizard:
+          https://{{ ansible_default_ipv4.address | default('<this host>') }}:8443/install
+          (self-signed certificate — the platform CA is at
+          {{ turbopanel_state_dir }}/tls/ca.crt).

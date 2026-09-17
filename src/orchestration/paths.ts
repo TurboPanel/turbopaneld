@@ -287,6 +287,24 @@ export const DAEMON_INSTALL_PLAYBOOK = join(
   "playbooks",
   "daemon-install.yml",
 );
+/**
+ * The self-hosted instance installer (Road to 0.1.x,
+ * `self-hosted-installer`): run.sh --instance downloads the instance and UI
+ * release packages, then hands this playbook the host to converge — Postgres,
+ * Redis, RabbitMQ, Docker, the instance user, certs, units, Caddy — before
+ * the install wizard takes over.
+ */
+export const INSTANCE_INSTALL_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  "playbooks",
+  "instance-install.yml",
+);
+/** The playbooks `run-installer --playbook` may name; anything else is refused. */
+export const INSTALLER_PLAYBOOKS = {
+  "daemon-install.yml": DAEMON_INSTALL_PLAYBOOK,
+  "instance-install.yml": INSTANCE_INSTALL_PLAYBOOK,
+} as const;
+export type InstallerPlaybook = keyof typeof INSTALLER_PLAYBOOKS;
 
 export interface UvTarget {
   /** uv release target triple, e.g. `aarch64-unknown-linux-gnu`. */

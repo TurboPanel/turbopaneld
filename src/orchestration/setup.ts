@@ -18,7 +18,11 @@ import { ensurePython } from "./python.ts";
 import { ensureUv } from "./uv.ts";
 import { resolveInstanceConfig } from "../instance/paths.ts";
 import { logError, logInfo, sanitizeForLog } from "../logger.ts";
-import { DAEMON_INSTALL_PLAYBOOK } from "./paths.ts";
+import {
+  DAEMON_INSTALL_PLAYBOOK,
+  INSTALLER_PLAYBOOKS,
+  type InstallerPlaybook,
+} from "./paths.ts";
 
 /**
  * True when local dev (console/converge) already manages the instance stack and the daemon
@@ -146,7 +150,23 @@ export interface RunInstallerOptions {
   instanceCa?: string;
   tunnelToken?: string;
   varsFile?: string;
+  /** Which shipped installer to run; defaults to the daemon's. */
+  playbook?: InstallerPlaybook;
 }
+
+const INSTALLER_STEP_LABELS: Record<
+  InstallerPlaybook,
+  { running: string; done: string }
+> = {
+  "daemon-install.yml": {
+    running: "Running daemon provisioning…",
+    done: "TurboPanel daemon provisioning complete",
+  },
+  "instance-install.yml": {
+    running: "Running self-hosted instance provisioning…",
+    done: "TurboPanel instance provisioning complete",
+  },
+};
 
 function resolveInstallerFailureMessage(
   failureDetail: string | null,
@@ -199,10 +219,14 @@ export async function runInstaller(opts: RunInstallerOptions): Promise<void> {
   let varsFile: string | undefined = opts.varsFile;
   let internallyCreatedVarsFile = false;
 
+  const playbookName: InstallerPlaybook = opts.playbook ?? "daemon-install.yml";
+  const playbookPath = INSTALLER_PLAYBOOKS[playbookName] ??
+    DAEMON_INSTALL_PLAYBOOK;
+  const labels = INSTALLER_STEP_LABELS[playbookName];
   const presenter = createInstallPresenter();
   const events = new InstallEventPresenter(presenter);
   setActiveInstallPresenter(presenter);
-  presenter.beginStep("Running daemon provisioning…");
+  presenter.beginStep(labels.running);
   events.beginStep();
   try {
     if (!varsFile) {
@@ -215,7 +239,7 @@ export async function runInstaller(opts: RunInstallerOptions): Promise<void> {
     };
 
     await runLocalPlaybook(
-      DAEMON_INSTALL_PLAYBOOK,
+      playbookPath,
       ["-e", `@${varsFile}`],
       onEvent,
       undefined,
@@ -224,10 +248,7 @@ export async function runInstaller(opts: RunInstallerOptions): Promise<void> {
         events.onRawLine(stream, line);
       },
     );
-    presenter.completeStep(
-      true,
-      "TurboPanel daemon provisioning complete",
-    );
+    presenter.completeStep(true, labels.done);
   } catch (err) {
     presenter.fail(resolveInstallerFailureMessage(events.failureDetail, err));
     throw new InstallerPresentedFailure();

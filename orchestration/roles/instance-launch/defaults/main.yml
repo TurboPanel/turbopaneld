@@ -104,13 +104,19 @@ turbopanel_acme_email: ""
 turbopanel_tls_public: false
 # Co-located (turbopanel_dev_user set) loads the development Caddyfile from the
 # turbopanel/dev overlay; lets_encrypt uses Caddyfile.acme; otherwise the
-# instance checkout Caddyfile (self_signed / upload).
+# instance Caddyfile (self_signed / upload). Source mode reads both from the
+# checkout root; compiled mode from share/caddy/ inside the release package
+# (turbopanel .github/workflows/release.yml stages them there).
+turbopanel_caddyfile_dir: >-
+  {{ (turbopanel_instance_dir ~ '/share/caddy')
+     if turbopanel_instance_run_mode == 'compiled'
+     else turbopanel_instance_dir }}
 turbopanel_caddyfile: >-
   {{ (turbopanel_dev_root ~ '/dev/orchestration/Caddyfile') if
   (turbopanel_dev_user | default('') | length > 0) else
-  (turbopanel_instance_dir ~ '/Caddyfile.acme') if
+  (turbopanel_caddyfile_dir ~ '/Caddyfile.acme') if
   (turbopanel_tls_mode | default('self_signed') == 'lets_encrypt') else
-  (turbopanel_instance_dir ~ '/Caddyfile') }}
+  (turbopanel_caddyfile_dir ~ '/Caddyfile') }}
 # "source" runs deno run src/deno-dev.ts when the developer surface is on,
 # otherwise src/deno.ts; "compiled" exec's dist/turbopanel-instance.
 turbopanel_instance_run_mode: source
@@ -119,6 +125,14 @@ turbopanel_instance_binary: "{{ turbopanel_instance_dir }}/dist/turbopanel-insta
 # package (bin/turbopanel-mailer); source mode runs mailer/main.ts from the
 # checkout instead.
 turbopanel_mailer_binary: "{{ turbopanel_instance_binary | dirname }}/turbopanel-mailer"
+# How the versioned migrations are applied: the instance binary's own
+# `migrate` verb in compiled mode (the migrations ride inside the binary —
+# the same advisory-locked drizzle migrator pnpm migrate runs), the
+# checkout's bootstrap script in source mode.
+turbopanel_instance_migrate_argv: >-
+  {{ [turbopanel_instance_binary, 'migrate']
+     if turbopanel_instance_run_mode == 'compiled'
+     else [turbopanel_instance_dir ~ '/scripts/bootstrap-dev-db.sh'] }}
 # How a fresh signing secret is minted: the instance binary's own
 # `generate-secret` verb in compiled mode (no checkout needed), the Node
 # script from the checkout in source mode. Same generator either way

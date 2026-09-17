@@ -771,8 +771,13 @@ test(
     );
     assertMatch(
       defaults,
-      /turbopanel_caddyfile:[\s\S]*?instance_dir ~ '\/Caddyfile'/,
-      "turbopanel_caddyfile falls back to the instance checkout Caddyfile",
+      /turbopanel_caddyfile:[\s\S]*?caddyfile_dir ~ '\/Caddyfile'/,
+      "turbopanel_caddyfile falls back to the instance Caddyfile",
+    );
+    assertMatch(
+      defaults,
+      /turbopanel_caddyfile_dir:[\s\S]*?instance_dir ~ '\/share\/caddy'[\s\S]*?compiled[\s\S]*?else turbopanel_instance_dir/,
+      "the Caddyfile comes from share/caddy in the release package in compiled mode, the checkout root in source mode",
     );
     assertMatch(
       caddyUnit,
@@ -2064,6 +2069,26 @@ test(
       certsTasks,
       /argv: "\{\{ turbopanel_instance_cert_argv \}\}"/,
       "instance-certs runs whichever generator the run mode selects",
+    );
+    const migrateTasks = await Deno.readTextFile(join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/instance-launch/tasks/instance-migrate.yml",
+    ));
+    assertMatch(
+      launchDefaults,
+      /turbopanel_instance_migrate_argv:[\s\S]*?\[turbopanel_instance_binary, 'migrate'\][\s\S]*?compiled[\s\S]*?bootstrap-dev-db\.sh/,
+      "migrations run through the binary's migrate verb in compiled mode and the checkout script otherwise",
+    );
+    assertMatch(
+      migrateTasks,
+      /argv: "\{\{ turbopanel_instance_migrate_argv \}\}"/,
+      "instance-migrate runs whichever migrator the run mode selects",
+    );
+    assert(
+      !migrateTasks.includes(
+        'argv: \["{{ turbopanel_instance_dir }}/scripts/bootstrap-dev-db.sh"\]',
+      ),
+      "instance-migrate must not hard-code the checkout's bootstrap script",
     );
     assertMatch(
       certsTasks,

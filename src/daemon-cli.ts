@@ -6,6 +6,10 @@ import {
   runInstaller,
   type RunInstallerOptions,
 } from "./orchestration/setup.ts";
+import {
+  INSTALLER_PLAYBOOKS,
+  type InstallerPlaybook,
+} from "./orchestration/paths.ts";
 import { resolveUpdateChannelConfig } from "./update/config.ts";
 import { DAEMON_VERSION } from "./version.ts";
 
@@ -26,6 +30,7 @@ export type InstallerCliFlags = {
   instanceCa?: string;
   tunnelToken?: string;
   varsFile?: string;
+  playbook?: InstallerPlaybook;
 };
 
 function resolveIo(io: DaemonCliIo = {}): Required<
@@ -85,6 +90,10 @@ export async function maybeRunDaemonCli(io: DaemonCliIo = {}): Promise<void> {
   await runInstallerCli(args.slice(1), io);
 }
 
+function isInstallerPlaybook(value: string): value is InstallerPlaybook {
+  return Object.hasOwn(INSTALLER_PLAYBOOKS, value);
+}
+
 function requireFlagValue(
   flag: string,
   value: string | undefined,
@@ -130,6 +139,23 @@ export function parseInstallerFlags(
       case "--vars-file":
         flags.varsFile = requireFlagValue(arg, args[++i], io);
         break;
+      case "--playbook": {
+        // Allowlisted: the two shipped installers, by bare name — never a
+        // path, so a vars file or flag can't point the daemon at arbitrary
+        // YAML on the host.
+        const value = requireFlagValue(arg, args[++i], io);
+        if (!isInstallerPlaybook(value)) {
+          error(
+            `[installer] --playbook must be one of: ${
+              Object.keys(INSTALLER_PLAYBOOKS).join(", ")
+            }`,
+          );
+          exit(1);
+          throw new TypeError("--playbook not allowlisted");
+        }
+        flags.playbook = value;
+        break;
+      }
       default:
         error(`[installer] unknown flag: ${sanitizeForLog(arg)}`);
         exit(1);

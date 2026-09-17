@@ -221,6 +221,47 @@ test("parseInstallerFlags exits when a value is missing", () => {
   }
 });
 
+test("parseInstallerFlags accepts only the two shipped installers for --playbook", () => {
+  const ok = captureIo();
+  assertEquals(
+    parseInstallerFlags([
+      "--vars-file",
+      "/tmp/v.yml",
+      "--playbook",
+      "instance-install.yml",
+    ], ok.io),
+    { start: true, varsFile: "/tmp/v.yml", playbook: "instance-install.yml" },
+  );
+  assertEquals(
+    parseInstallerFlags(["--playbook", "daemon-install.yml"], ok.io).playbook,
+    "daemon-install.yml",
+  );
+  // Never a path: a vars file or flag must not point the daemon at arbitrary
+  // YAML on the host.
+  for (
+    const bad of ["/etc/evil.yml", "../daemon-install.yml", "site.yml", ""]
+  ) {
+    const { io, exits, errors } = captureIo();
+    assertThrows(
+      () => parseInstallerFlags(["--playbook", bad], io),
+      TypeError,
+    );
+    assertEquals(exits, [1]);
+    assertEquals(
+      errors.some((line) =>
+        line.includes(
+          "--playbook must be one of: daemon-install.yml, instance-install.yml",
+        ) ||
+        line.includes("--playbook requires a value")
+      ),
+      true,
+      `bad playbook ${
+        JSON.stringify(bad)
+      } must be refused with a clear message`,
+    );
+  }
+});
+
 test("parseInstallerFlags exits on unknown flags", () => {
   const { io, exits, errors } = captureIo();
   assertThrows(
