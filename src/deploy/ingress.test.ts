@@ -2683,7 +2683,11 @@ test("no Traefik sees the Docker socket; only the host's socket proxy does", () 
   // mean full Docker control and every co-hosted tenant with it.
   const shared = traefikCompose(HOSTING_INGRESS_NETWORK);
   const perService = serviceTraefikCompose(
-    [{ protocol: "tcp", published: 15432, target: 5432 }],
+    [{
+      hostingId: "00000000-0000-4000-8000-0000000000cd",
+      protocol: "tcp",
+      publishedPort: 15432,
+    }],
     SERVICE_INGRESS_IDENTITY,
     HOSTING_INGRESS_NETWORK,
   );
