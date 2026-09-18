@@ -422,8 +422,22 @@
     src: "{{ turbopanel_config_dir }}/instance/.instance_secrets"
     dest: "{{ turbopanel_instance_secret_escrow_path }}"
     flat: true
-    mode: "0600"
   register: _instance_secrets_escrow
+
+# `fetch` has no `mode` — it accepts one and ignores it, so the copy landed
+# 0644 (proven on a real converge, 2026-09-18). That is the single root of
+# trust sitting world-readable on the operator's machine, so tighten it here,
+# on the controller, where the file actually is.
+- name: Restrict the escrowed keyring copy to its owner
+  when:
+    - turbopanel_instance_secret_escrow_path | default('') | length > 0
+    - _instance_secrets_escrow is defined
+    - _instance_secrets_escrow.dest is defined
+  delegate_to: localhost
+  become: false
+  ansible.builtin.file:
+    path: "{{ _instance_secrets_escrow.dest }}"
+    mode: "0600"
 
 - name: Read instance signing secret keyring
   ansible.builtin.slurp:

@@ -992,6 +992,20 @@ test(
       /ansible\.builtin\.fetch:[\s\S]*?src:\s*"\{\{\s*turbopanel_config_dir\s*\}\}\/instance\/\.instance_secrets"[\s\S]*?dest:\s*"\{\{\s*turbopanel_instance_secret_escrow_path\s*\}\}"[\s\S]*?flat:\s*true/,
       "escrow task fetches .instance_secrets to the operator-supplied controller path",
     );
+    // `fetch` accepts a `mode` and ignores it — proven on a real converge
+    // 2026-09-18, where the escrowed copy of the single root of trust landed
+    // 0644. The follow-up task is what actually restricts it, on the
+    // controller, where the file is.
+    assertMatch(
+      tasks,
+      /name:\s*Restrict the escrowed keyring copy to its owner[\s\S]*?delegate_to:\s*localhost[\s\S]*?ansible\.builtin\.file:[\s\S]*?path:\s*"\{\{\s*_instance_secrets_escrow\.dest\s*\}\}"[\s\S]*?mode:\s*"0600"/,
+      "escrowed keyring copy is chmodded 0600 on the controller",
+    );
+    assertEquals(
+      /ansible\.builtin\.fetch:[\s\S]{0,300}?mode:/.test(tasks),
+      false,
+      "fetch carries no mode — it would be silently ignored",
+    );
     assertMatch(
       tasks,
       /name:\s*Install Deno runtime dev vars[\s\S]*?Restart turbopanel mailer/,
