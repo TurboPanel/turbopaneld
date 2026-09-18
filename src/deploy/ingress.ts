@@ -34,12 +34,24 @@ import {
   assertSafeSystemIngressIdentity,
   readSystemComponentDescriptor,
   SHARED_TRAEFIK_COMPOSE_SERVICE_NAME,
+  SOCKET_PROXY_COMPOSE_SERVICE_NAME,
   SYSTEM_HOSTING_INGRESS_COMPONENT,
   type SystemComponentDescriptor,
 } from "./system-component.ts";
 
 const CADDY_SERVICE = "turbopanel-hosting-caddy.service";
 const TRAEFIK_IMAGE = "traefik:v3.6.6";
+/**
+ * The only container on the host that sees the Docker socket.
+ *
+ * Both Traefiks proxy live tenant traffic, and a remote-code bug in either
+ * used to hand over `/var/run/docker.sock` — `:ro` blocks writes to the
+ * socket *file*, not Engine API calls, so it was full Docker control and
+ * every co-hosted tenant with it. They now reach Docker through this proxy,
+ * which answers only the two read endpoints a Docker provider needs.
+ */
+const SOCKET_PROXY_IMAGE = "tecnativa/docker-socket-proxy:0.3.0";
+const SOCKET_PROXY_PORT = 2375;
 const TRAEFIK_LOOPBACK = "127.0.0.1";
 const TRAEFIK_HTTP_PORT = 7080;
 const TRAEFIK_HTTPS_PORT = 7443;
@@ -392,6 +404,7 @@ export function traefikCompose(
     "    restart: unless-stopped",
     "    command:",
     "      - --providers.docker=true",
+    `      - --providers.docker.endpoint=${socketProxyEndpoint()}`,
     "      - --providers.docker.exposedbydefault=false",
     `      - --providers.docker.network=${ingressNetwork}`,
     `      - --entrypoints.web.address=:${TRAEFIK_HTTP_PORT}`,
@@ -417,11 +430,12 @@ export function traefikCompose(
     `      - ${TRAEFIK_LOOPBACK}:${TRAEFIK_HTTP_PORT}:${TRAEFIK_HTTP_PORT}`,
     `      - ${TRAEFIK_LOOPBACK}:${TRAEFIK_HTTPS_PORT}:${TRAEFIK_HTTPS_PORT}`,
     `      - ${TRAEFIK_LOOPBACK}:${TRAEFIK_METRICS_PORT}:${TRAEFIK_METRICS_PORT}`,
-    "    volumes:",
-    "      - /var/run/docker.sock:/var/run/docker.sock:ro",
     ...labelLines,
     "    networks:",
     `      - ${ingressNetwork}`,
+    "    depends_on:",
+    `      - ${SOCKET_PROXY_COMPOSE_SERVICE_NAME}`,
+    ...socketProxyServiceLines(ingressNetwork),
     "",
     "networks:",
     `  ${ingressNetwork}:`,
@@ -429,6 +443,37 @@ export function traefikCompose(
     "",
   ];
   return lines.join("\n");
+}
+
+/** Where every Traefik on this host reaches Docker. */
+function socketProxyEndpoint(): string {
+  return `tcp://${SOCKET_PROXY_COMPOSE_SERVICE_NAME}:${SOCKET_PROXY_PORT}`;
+}
+
+/**
+ * The host's single Docker-socket proxy, scoped to what a Docker provider
+ * actually reads.
+ *
+ * `CONTAINERS` and `EVENTS` are what Traefik needs to discover routers and
+ * follow changes; everything else — `POST` above all, but also images,
+ * networks, volumes, exec, and the rest — stays off, which is the proxy's
+ * default. So a container that breaks out of Traefik can list containers and
+ * watch events, and cannot create, start, mount or exec anything.
+ */
+function socketProxyServiceLines(ingressNetwork: string): string[] {
+  return [
+    `  ${SOCKET_PROXY_COMPOSE_SERVICE_NAME}:`,
+    `    image: ${SOCKET_PROXY_IMAGE}`,
+    "    restart: unless-stopped",
+    "    environment:",
+    '      CONTAINERS: "1"',
+    '      EVENTS: "1"',
+    '      POST: "0"',
+    "    volumes:",
+    "      - /var/run/docker.sock:/var/run/docker.sock:ro",
+    "    networks:",
+    `      - ${ingressNetwork}`,
+  ];
 }
 
 function assertSafeServiceIngressIdentity(
@@ -510,6 +555,10 @@ export function serviceTraefikCompose(
     "    restart: unless-stopped",
     "    command:",
     "      - --providers.docker=true",
+    // The host's socket proxy lives in the shared ingress project and is
+    // reachable over the ingress network this container already joins — one
+    // proxy per host, not one per service.
+    `      - --providers.docker.endpoint=${socketProxyEndpoint()}`,
     "      - --providers.docker.exposedbydefault=false",
     `      - --providers.docker.network=${ingressNetwork}`,
     `      - ${
@@ -517,8 +566,6 @@ export function serviceTraefikCompose(
     }`,
     ...staticArgs,
     ...(portLines.length > 0 ? ["    ports:", ...portLines] : []),
-    "    volumes:",
-    "      - /var/run/docker.sock:/var/run/docker.sock:ro",
     "    labels:",
     `      ${LABEL_ROLE}: ${LABEL_ROLE_INGRESS}`,
     `      ${LABEL_SERVICE_ID}: ${quoteYamlScalar(identity.serviceId)}`,

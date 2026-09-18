@@ -464,6 +464,28 @@ publish; `resolveDeployedComposePaths` resolves the compiled file only),
 `src/deploy/compose-overlay.ts` (daemon overlay fragment merge into the
 compiled YAML — storage / Traefik / site only).
 
+## The host's Docker socket proxy
+
+Neither Traefik sees `/var/run/docker.sock`. Both proxy live tenant traffic,
+and `:ro` blocks writes to the socket *file*, not Engine API calls — so a
+remote-code bug in either used to be full Docker control of the host and every
+co-hosted tenant with it.
+
+One `docker-socket-proxy` container per host lives in the shared ingress
+project (`SOCKET_PROXY_COMPOSE_SERVICE_NAME`), holds the only socket mount, and
+answers `CONTAINERS` and `EVENTS` — what a Docker provider reads — with
+everything else, `POST` included, off. The shared HTTP Traefik and every
+per-service raw-TCP/UDP Traefik point at it with
+`--providers.docker.endpoint=tcp://docker-socket-proxy:2375` over the ingress
+network they already join; the per-service files mount nothing at all, so the
+proxy count stays one per host rather than one per service.
+
+Proven on a real Docker daemon (2026-09-18): Traefik's own
+`GET /containers/json` succeeds through the proxy, `/images/json`,
+`/networks`, `/volumes`, `/info` and `POST /containers/create` all answer 403,
+and `/var/run/docker.sock` is absent from the Traefik container. `ingress.ts`
+is the only writer of these files; `ingress.test.ts` pins the invariant.
+
 ## Shared HTTP ingress identity
 
 The shared loopback Traefik (compose project = the `hosting-ingress` `serviceId`, service key

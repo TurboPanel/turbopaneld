@@ -2676,3 +2676,38 @@ test("collectTcpUdpIngressEntries rethrows when the state dir cannot be listed",
     await cleanup();
   }
 });
+
+test("no Traefik sees the Docker socket; only the host's socket proxy does", () => {
+  // `:ro` blocks writes to the socket *file*, not Engine API calls, so a
+  // remote-code bug in a Traefik that proxies live tenant traffic used to
+  // mean full Docker control and every co-hosted tenant with it.
+  const shared = traefikCompose(HOSTING_INGRESS_NETWORK);
+  const perService = serviceTraefikCompose(
+    [{ protocol: "tcp", published: 15432, target: 5432 }],
+    SERVICE_INGRESS_IDENTITY,
+    HOSTING_INGRESS_NETWORK,
+  );
+
+  for (
+    const [label, yaml] of [["shared", shared], ["per-service", perService]]
+  ) {
+    const mounts = yaml
+      .split("\n")
+      .filter((line) => line.includes("/var/run/docker.sock"));
+    // Exactly one mount in the shared file — the proxy's — and none at all in
+    // the per-service file, which reaches the host's proxy over the network.
+    assertEquals(mounts.length, label === "shared" ? 1 : 0, `${label} mounts`);
+    assertEquals(
+      yaml.includes(
+        "--providers.docker.endpoint=tcp://docker-socket-proxy:2375",
+      ),
+      true,
+      `${label} endpoint`,
+    );
+  }
+
+  // The proxy answers the two reads a Docker provider needs and nothing else.
+  assertEquals(shared.includes('CONTAINERS: "1"'), true);
+  assertEquals(shared.includes('EVENTS: "1"'), true);
+  assertEquals(shared.includes('POST: "0"'), true);
+});

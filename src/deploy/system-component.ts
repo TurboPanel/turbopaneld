@@ -37,6 +37,17 @@ export type SystemComponentKey =
  */
 export const SHARED_TRAEFIK_COMPOSE_SERVICE_NAME = "traefik";
 
+/**
+ * Compose service key for the host's Docker-socket proxy, in the same shared
+ * ingress project as {@link SHARED_TRAEFIK_COMPOSE_SERVICE_NAME}.
+ *
+ * Only this container sees `/var/run/docker.sock`. Every Traefik on the host
+ * — the shared HTTP ingress and each per-service raw-TCP/UDP one — reaches
+ * Docker through it over the ingress network instead, so an RCE in a Traefik
+ * that proxies tenant traffic no longer hands over the Engine API.
+ */
+export const SOCKET_PROXY_COMPOSE_SERVICE_NAME = "docker-socket-proxy";
+
 /** Compose service key inside the shared ProxySQL managed-ingress project. */
 export const PROXYSQL_COMPOSE_SERVICE_NAME = "proxysql";
 
