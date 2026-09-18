@@ -437,6 +437,47 @@ test("systemd units and docker wrappers bind the expected identity variables", a
   }
 });
 
+test("the instance unit's source-mode ExecStart lines parse as flags then the entrypoint", async () => {
+  // Regression: dropping the --allow-net host list (2026-09-18) once left the
+  // tail of the old list behind as a bare positional argument, so the rendered
+  // unit ran `deno run … --allow-net drizzle_studio_port … src/deno-dev.ts` and
+  // crash-looped on "Module not found". Every token between `run` and the
+  // entrypoint must be a flag, and --allow-net must stand alone.
+  const instanceUnit = await readRole(
+    "roles/instance-launch/templates/turbopanel-instance.service.j2",
+  );
+  const execStarts = instanceUnit
+    .split("\n")
+    .filter((line) => line.startsWith("ExecStart=") && line.includes(" run "));
+  if (execStarts.length !== 2) {
+    throw new Error(
+      `expected two source-mode ExecStart lines, got ${execStarts.length}`,
+    );
+  }
+  for (const line of execStarts) {
+    // Jinja expressions carry spaces (`{{ turbopanel_run_dir }}`); collapse
+    // each to a placeholder so the split sees the rendered token shape.
+    const afterRun = line
+      .slice(line.indexOf(" run ") + " run ".length)
+      .replaceAll(/\{\{.*?\}\}/g, "V");
+    const tokens = afterRun.split(/\s+/).filter((t) => t.length > 0);
+    const entrypoint = tokens.at(-1);
+    if (entrypoint !== "src/deno-dev.ts" && entrypoint !== "src/deno.ts") {
+      throw new Error(
+        `ExecStart must end in the entrypoint, got ${entrypoint}`,
+      );
+    }
+    for (const token of tokens.slice(0, -1)) {
+      if (!token.startsWith("--")) {
+        throw new Error(`stray positional argument in ExecStart: ${token}`);
+      }
+    }
+    if (!tokens.includes("--allow-net")) {
+      throw new Error("--allow-net must be present and bare (no host list)");
+    }
+  }
+});
+
 test("orchestration roles do not import identity-cutover tasks", async () => {
   const rolesDir = join(CHECKOUT_ORCHESTRATION_DIR, "roles");
   for await (const entry of Deno.readDir(rolesDir)) {
