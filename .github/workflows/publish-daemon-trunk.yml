@@ -20,8 +20,18 @@
 #
 # Code quality gates live in .github/workflows/verify.yml and must pass before
 # anything is compiled or published. Promotion of an already-published build into
-# canary / rc / release re-verifies artifact hashes only and deliberately runs no
-# unit tests, because no new code enters the pipeline after publish.
+# rc / release re-verifies artifact hashes only and deliberately runs no unit
+# tests, because no new code enters the pipeline after publish.
+#
+# Every green trunk merge is published twice from the same compiled bytes:
+#
+#   - the CDN drop (`trunk` channel): unversioned tarballs under
+#     channels/trunk/daemon/<buildId>/ on dl.trbp.nl — the hosted platform's
+#     rail and the hand-operable override (Road to 0.1.x, `trunk-canary`);
+#   - the GitHub canary (`canary` channel): the same tarballs under versioned
+#     names (turbopaneld-<X.Y.Z>-canary.<buildId>-<arch>.tar.zst) on the
+#     rolling `canary` pre-release, published by TurboPanel/dev's
+#     gh-canary.yml — what a self-hosted canary install follows.
 
 name: Publish daemon trunk build
 
@@ -345,3 +355,60 @@ jobs:
               f"({manifest['buildId']})"
           )
           PY
+
+      - name: Stage the canary assets under versioned names
+        id: canary
+        # Same bytes as the CDN drop, renamed the way a release names them so
+        # the rolling canary release never has two builds fighting over one
+        # filename. The version is deno.json's number (what the binary
+        # reports on the wire) plus a `-canary.<buildId>` pre-release suffix,
+        # which semver orders below the release it leads to.
+        run: |
+          set -eu
+          # shellcheck source=scripts/lib/release-artifacts.sh
+          . scripts/lib/release-artifacts.sh
+          _pkg_version="$(python3 -c 'import json; print(json.load(open("deno.json"))["version"])')"
+          _version="${_pkg_version}-canary.${BUILD_ID}"
+          echo "version=${_version}" >> "$GITHUB_OUTPUT"
+          mkdir -p canary-assets
+          _src="publish/channels/trunk/daemon"
+          cp "${_src}/turbopaneld-amd64.tar.zst" "canary-assets/$(tp_daemon_release_filename amd64 "$_version")"
+          cp "${_src}/turbopaneld-arm64.tar.zst" "canary-assets/$(tp_daemon_release_filename arm64 "$_version")"
+          cp "${_src}/$(tp_js_release_filename)" "canary-assets/$(tp_js_release_filename "$_version")"
+          cp "${_src}/$(tp_orchestration_release_filename)" "canary-assets/$(tp_orchestration_release_filename "$_version")"
+          ls -l canary-assets
+
+      - name: Generate the canary manifest
+        env:
+          CHANNEL: canary
+          RELEASE_VERSION: ${{ steps.canary.outputs.version }}
+          # The rolling release's download path: assets are added under
+          # build-unique names, so this never 404s a manifest that names them.
+          ARTIFACT_BASE_URL: https://github.com/${{ github.repository }}/releases/download/canary
+        run: |
+          deno run --allow-env --allow-read --allow-write scripts/generate-channel-manifest.ts \
+            canary-assets \
+            canary-assets/manifest.json
+          cat canary-assets/manifest.json
+
+      - name: Upload canary assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: turbopaneld-canary-assets
+          path: canary-assets
+          if-no-files-found: error
+          retention-days: 3
+
+    outputs:
+      canary-version: ${{ steps.canary.outputs.version }}
+
+  canary:
+    needs: publish
+    permissions:
+      contents: write
+    uses: TurboPanel/dev/.github/workflows/gh-canary.yml@trunk
+    with:
+      version: ${{ needs.publish.outputs.canary-version }}
+      commit: ${{ github.sha }}
+      assets-artifact-name: turbopaneld-canary-assets
+      manifest-filename: manifest.json

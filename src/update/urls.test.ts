@@ -68,7 +68,7 @@ test("resolveOverlayDlBase is null without TURBOPANEL_DL_BASE", () => {
   );
 });
 
-test("builtinChannelManifestUrl: trunk on the CDN, rc/release on GitHub Releases, reserved channels none", () => {
+test("builtinChannelManifestUrl: trunk on the CDN, canary/rc/release on GitHub Releases, edge none", () => {
   assertEquals(
     builtinChannelManifestUrl("trunk"),
     "https://dl.trbp.nl/channels/trunk/manifest.json",
@@ -81,8 +81,11 @@ test("builtinChannelManifestUrl: trunk on the CDN, rc/release on GitHub Releases
     builtinChannelManifestUrl("release"),
     "https://github.com/TurboPanel/turbopaneld/releases/latest/download/manifest.json",
   );
+  assertEquals(
+    builtinChannelManifestUrl("canary"),
+    "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest.json",
+  );
   assertEquals(builtinChannelManifestUrl("edge"), null);
-  assertEquals(builtinChannelManifestUrl("canary"), null);
 });
 
 test("scripts/run.sh mirrors builtinChannelManifestUrl exactly", async () => {
@@ -109,7 +112,7 @@ test("scripts/run.sh mirrors builtinChannelManifestUrl exactly", async () => {
     const url = builtinChannelManifestUrl(channel);
     if (url !== null) expected.set(channel, url);
   }
-  assertEquals(shell.size, 3);
+  assertEquals(shell.size, 4);
   assertEquals(shell, expected);
 });
 

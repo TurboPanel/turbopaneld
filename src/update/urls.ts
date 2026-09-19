@@ -2,20 +2,24 @@ import type { UpdateChannel } from "./types.ts";
 
 export const DL_BASE_URL = "https://dl.trbp.nl";
 
-/** The repository whose GitHub Releases carry the daemon's rc/release packages. */
+/** The repository whose GitHub Releases carry the daemon's canary/rc/release packages. */
 export const GITHUB_RELEASES_REPO = "TurboPanel/turbopaneld";
 
 /**
  * Where each advertised channel's manifest lives when no overlay catalog
  * (`TURBOPANEL_DL_BASE`) is configured — the built-in rail.
  *
- * `trunk` is the per-merge CDN drop. `rc` and `release` are GitHub Releases:
- * `release` follows the platform's own `releases/latest` pointer (which skips
- * pre-releases, so promotion is `gh release edit --prerelease=false` and
- * nothing here moves); `rc` follows a rolling pre-release tagged `rc`. Both
- * are redirects GitHub serves without touching the unauthenticated API
- * limit. `edge` / `canary` are reserved and unadvertised: no built-in
- * location, so a daemon following one needs an overlay catalog that names it.
+ * `trunk` is the per-merge CDN drop. `canary`, `rc` and `release` are GitHub
+ * Releases: `release` follows the platform's own `releases/latest` pointer
+ * (which skips pre-releases, so promotion is `gh release edit
+ * --prerelease=false` and nothing here moves); `rc` follows a rolling
+ * pre-release tagged `rc` whose manifest points at a versioned pre-release;
+ * `canary` follows a rolling pre-release tagged `canary` that carries the
+ * newest green trunk build's own bytes, replaced on every merge
+ * (publish-daemon-trunk.yml → TurboPanel/dev gh-canary.yml). All three are
+ * redirects GitHub serves without touching the unauthenticated API limit.
+ * `edge` is reserved and unadvertised: no built-in location, so a daemon
+ * following it needs an overlay catalog that names it.
  *
  * Mirrored by hand in scripts/run.sh (`tp_builtin_channel_manifest_url`) and
  * the control plane's src/lib/update/channel.ts — keep the three in step;
@@ -27,6 +31,8 @@ export function builtinChannelManifestUrl(
   switch (channel) {
     case "trunk":
       return `${DL_BASE_URL}/channels/trunk/manifest.json`;
+    case "canary":
+      return `https://github.com/${GITHUB_RELEASES_REPO}/releases/download/canary/manifest.json`;
     case "rc":
       return `https://github.com/${GITHUB_RELEASES_REPO}/releases/download/rc/manifest.json`;
     case "release":

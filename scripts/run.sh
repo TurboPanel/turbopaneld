@@ -643,10 +643,12 @@ PY
 # Built-in manifest location per advertised channel, used when no overlay
 # catalog is configured. Mirrors src/update/urls.ts builtinChannelManifestUrl
 # (urls.test.ts pins this copy against that one) — keep the two in step.
-# edge / canary are reserved and unadvertised: no built-in location.
+# canary is the rolling GitHub pre-release carrying the newest green trunk
+# build; edge is reserved and unadvertised: no built-in location.
 tp_builtin_channel_manifest_url() {
   case "$1" in
     trunk) printf '%s' "https://dl.trbp.nl/channels/trunk/manifest.json" ;;
+    canary) printf '%s' "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest.json" ;;
     rc) printf '%s' "https://github.com/TurboPanel/turbopaneld/releases/download/rc/manifest.json" ;;
     release) printf '%s' "https://github.com/TurboPanel/turbopaneld/releases/latest/download/manifest.json" ;;
     *) return 1 ;;
@@ -655,11 +657,14 @@ tp_builtin_channel_manifest_url() {
 
 # The same rail for the other two packages a self-hosted install needs
 # (TurboPanel/turbopanel — the compiled instance; TurboPanel/ui — the web
-# export). Both publish only through GitHub Releases: there is no trunk drop,
-# so trunk has no location and an --instance install must name rc or release.
+# export). Both publish only through GitHub Releases: canary (every green
+# trunk merge, rolling), rc and release. There is no CDN drop for them, so
+# trunk has no location and an --instance install must name canary, rc or
+# release.
 tp_builtin_repo_manifest_url() {
   _repo="$1"
   case "$2" in
+    canary) printf '%s' "https://github.com/TurboPanel/${_repo}/releases/download/canary/manifest.json" ;;
     rc) printf '%s' "https://github.com/TurboPanel/${_repo}/releases/download/rc/manifest.json" ;;
     release) printf '%s' "https://github.com/TurboPanel/${_repo}/releases/latest/download/manifest.json" ;;
     *) return 1 ;;
@@ -726,7 +731,7 @@ tp_fetch_repo_manifest() {
   _repo="$1"
   _channel="${TURBOPANEL_UPDATE_CHANNEL:-release}"
   if ! _manifest_url="$(tp_builtin_repo_manifest_url "$_repo" "$_channel")"; then
-    echo "run.sh: ${_repo} has no ${_channel} channel — use --channel rc or release" >&2
+    echo "run.sh: ${_repo} has no ${_channel} channel — use --channel canary, rc or release" >&2
     return 1
   fi
   _curl="$(tp_release_curl)"
@@ -959,7 +964,7 @@ if [ "$INSTANCE_INSTALL" = true ]; then
     exit 1
   fi
   if ! tp_builtin_repo_manifest_url turbopanel "$TURBOPANEL_UPDATE_CHANNEL" >/dev/null; then
-    tp_print_error "--instance needs --channel rc or release (the instance and UI packages publish only through GitHub Releases; got ${TURBOPANEL_UPDATE_CHANNEL})"
+    tp_print_error "--instance needs --channel canary, rc or release (the instance and UI packages publish only through GitHub Releases; got ${TURBOPANEL_UPDATE_CHANNEL})"
     exit 1
   fi
 elif [ -z "$LICENSE" ]; then
