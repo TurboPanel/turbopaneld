@@ -203,18 +203,18 @@ test("resolveUpdate honours a pinned manifest over the channel, but not over an 
   }
 });
 
-test("resolveUpdate throws MissingChannelError for reserved channels without an overlay", async () => {
+test("resolveUpdate throws MissingChannelError for the reserved channel without an overlay", async () => {
   const restore = installFetch(() => {
     throw new Error("must not fetch");
   });
   try {
-    for (const channel of ["edge", "canary"] as const) {
-      await assertRejects(
-        () => resolveUpdate({ app: "daemon", channel }, {}),
-        MissingChannelError,
-        "no built-in manifest location",
-      );
-    }
+    // canary is advertised now (the rolling GitHub pre-release); only edge
+    // still has no built-in location.
+    await assertRejects(
+      () => resolveUpdate({ app: "daemon", channel: "edge" }, {}),
+      MissingChannelError,
+      "no built-in manifest location",
+    );
   } finally {
     restore();
   }
