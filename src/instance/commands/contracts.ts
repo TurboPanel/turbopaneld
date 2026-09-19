@@ -2088,10 +2088,11 @@ function parseFirewallAddressList(
   return out;
 }
 
-function parseFirewallRule(value: unknown, index: number): FirewallRule {
-  if (!isRecord(value)) {
-    throw new Error(`rules[${index}] must be an object`);
-  }
+/** The enum-valued fields of a rule, each checked against its closed set. */
+function parseFirewallRuleHead(
+  value: Record<string, unknown>,
+  index: number,
+): Pick<FirewallRule, "id" | "scope" | "action" | "proto" | "origin"> {
   if (typeof value.id !== "string" || !FIREWALL_RULE_ID_RE.test(value.id)) {
     throw new Error(`rules[${index}].id must match ${FIREWALL_RULE_ID_RE}`);
   }
@@ -2107,64 +2108,102 @@ function parseFirewallRule(value: unknown, index: number): FirewallRule {
   if (!FIREWALL_ORIGINS.has(value.origin as FirewallRuleOrigin)) {
     throw new Error(`rules[${index}].origin must be system, derived or user`);
   }
-  const rule: FirewallRule = {
+  return {
     id: value.id,
     scope: value.scope as FirewallRuleScope,
     action: value.action as FirewallRuleAction,
     proto: value.proto as FirewallRuleProto,
+    origin: value.origin as FirewallRuleOrigin,
+  };
+}
+
+/**
+ * `ports`, normalised to `N` or `N-M`; `undefined` when the rule names none.
+ * An accept of every port from a source is exactly the rule that turns a
+ * narrowed host into an open one by accident, so an accept must name a port.
+ */
+function parseFirewallRulePorts(
+  value: unknown,
+  rule: Pick<FirewallRule, "proto" | "action">,
+  index: number,
+): string | undefined {
+  if (value === undefined) {
+    if (rule.action === "accept") {
+      throw new Error(`rules[${index}].ports is required on an accept rule`);
+    }
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    throw new TypeError(`rules[${index}].ports must be a string`);
+  }
+  const range = parseFirewallPortRange(value);
+  if (!range) {
+    throw new Error(
+      `rules[${index}].ports must be a port or an ascending range 1-65535`,
+    );
+  }
+  if (rule.proto === "any") {
+    throw new Error(`rules[${index}].ports requires proto tcp or udp`);
+  }
+  return range.from === range.to
+    ? String(range.from)
+    : `${range.from}-${range.to}`;
+}
+
+/** `destinations`: addresses only, never `any`; `undefined` when absent or empty. */
+function parseFirewallRuleDestinations(
+  value: unknown,
+  index: number,
+): string[] | undefined {
+  if (value === undefined) return undefined;
+  const destinations = parseFirewallAddressList(
+    value,
+    `rules[${index}].destinations`,
+    true,
+  );
+  if (destinations.includes("any")) {
+    throw new Error(
+      `rules[${index}].destinations lists addresses, not "any" (omit it instead)`,
+    );
+  }
+  return destinations.length > 0 ? destinations : undefined;
+}
+
+function parseFirewallRuleComment(
+  value: unknown,
+  index: number,
+): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !FIREWALL_COMMENT_RE.test(value)) {
+    throw new Error(
+      `rules[${index}].comment must be 1-48 chars of letters, digits, space . _ : / -`,
+    );
+  }
+  return value;
+}
+
+function parseFirewallRule(value: unknown, index: number): FirewallRule {
+  if (!isRecord(value)) {
+    throw new Error(`rules[${index}] must be an object`);
+  }
+  const head = parseFirewallRuleHead(value, index);
+  const rule: FirewallRule = {
+    ...head,
     sources: parseFirewallAddressList(
       value.sources,
       `rules[${index}].sources`,
       false,
     ),
-    origin: value.origin as FirewallRuleOrigin,
   };
-  if (value.ports !== undefined) {
-    if (typeof value.ports !== "string") {
-      throw new TypeError(`rules[${index}].ports must be a string`);
-    }
-    const range = parseFirewallPortRange(value.ports);
-    if (!range) {
-      throw new Error(
-        `rules[${index}].ports must be a port or an ascending range 1-65535`,
-      );
-    }
-    if (rule.proto === "any") {
-      throw new Error(`rules[${index}].ports requires proto tcp or udp`);
-    }
-    rule.ports = range.from === range.to
-      ? String(range.from)
-      : `${range.from}-${range.to}`;
-  } else if (rule.action === "accept") {
-    // An accept of every port from a source is exactly the rule that turns a
-    // narrowed host into an open one by accident; make the author name the
-    // port.
-    throw new Error(`rules[${index}].ports is required on an accept rule`);
-  }
-  if (value.destinations !== undefined) {
-    const destinations = parseFirewallAddressList(
-      value.destinations,
-      `rules[${index}].destinations`,
-      true,
-    );
-    if (destinations.includes("any")) {
-      throw new Error(
-        `rules[${index}].destinations lists addresses, not "any" (omit it instead)`,
-      );
-    }
-    if (destinations.length > 0) rule.destinations = destinations;
-  }
-  if (value.comment !== undefined) {
-    if (
-      typeof value.comment !== "string" ||
-      !FIREWALL_COMMENT_RE.test(value.comment)
-    ) {
-      throw new Error(
-        `rules[${index}].comment must be 1-48 chars of letters, digits, space . _ : / -`,
-      );
-    }
-    rule.comment = value.comment;
-  }
+  const ports = parseFirewallRulePorts(value.ports, head, index);
+  if (ports !== undefined) rule.ports = ports;
+  const destinations = parseFirewallRuleDestinations(
+    value.destinations,
+    index,
+  );
+  if (destinations !== undefined) rule.destinations = destinations;
+  const comment = parseFirewallRuleComment(value.comment, index);
+  if (comment !== undefined) rule.comment = comment;
   return rule;
 }
 
@@ -2180,6 +2219,40 @@ function parseFirewallPortList(value: unknown, field: string): number[] {
     if (!out.includes(entry)) out.push(entry);
   }
   return out.sort((a, b) => a - b);
+}
+
+function parseFirewallPolicy(
+  value: unknown,
+): FirewallReconcilePayload["policy"] {
+  if (!isRecord(value)) {
+    throw new Error("policy must be an object");
+  }
+  if (value.inputDefault !== "accept" && value.inputDefault !== "drop") {
+    throw new Error("policy.inputDefault must be accept or drop");
+  }
+  if (value.ipv6 !== "mirror" && value.ipv6 !== "skip") {
+    throw new Error("policy.ipv6 must be mirror or skip");
+  }
+  return { inputDefault: value.inputDefault, ipv6: value.ipv6 };
+}
+
+/** The rule list, bounded, each rule parsed, ids unique. */
+function parseFirewallRules(value: unknown): FirewallRule[] {
+  if (!Array.isArray(value)) {
+    throw new TypeError("rules must be an array");
+  }
+  if (value.length > FIREWALL_MAX_RULES) {
+    throw new Error(`rules exceeds ${FIREWALL_MAX_RULES} entries`);
+  }
+  const rules = value.map((rule, index) => parseFirewallRule(rule, index));
+  const seen = new Set<string>();
+  for (const rule of rules) {
+    if (seen.has(rule.id)) {
+      throw new Error(`rules contains id ${rule.id} more than once`);
+    }
+    seen.add(rule.id);
+  }
+  return rules;
 }
 
 /**
@@ -2207,42 +2280,11 @@ export function parseFirewallReconcilePayload(
   if (!FIREWALL_MODES.has(value.mode as FirewallMode)) {
     throw new Error("mode must be managed, observe or off");
   }
-  if (!isRecord(value.policy)) {
-    throw new Error("policy must be an object");
-  }
-  if (
-    value.policy.inputDefault !== "accept" &&
-    value.policy.inputDefault !== "drop"
-  ) {
-    throw new Error("policy.inputDefault must be accept or drop");
-  }
-  if (value.policy.ipv6 !== "mirror" && value.policy.ipv6 !== "skip") {
-    throw new Error("policy.ipv6 must be mirror or skip");
-  }
-  if (!Array.isArray(value.rules)) {
-    throw new TypeError("rules must be an array");
-  }
-  if (value.rules.length > FIREWALL_MAX_RULES) {
-    throw new Error(`rules exceeds ${FIREWALL_MAX_RULES} entries`);
-  }
-  const rules = value.rules.map((rule, index) =>
-    parseFirewallRule(rule, index)
-  );
-  const seen = new Set<string>();
-  for (const rule of rules) {
-    if (seen.has(rule.id)) {
-      throw new Error(`rules contains id ${rule.id} more than once`);
-    }
-    seen.add(rule.id);
-  }
   const payload: FirewallReconcilePayload = {
     generation: value.generation,
     mode: value.mode as FirewallMode,
-    policy: {
-      inputDefault: value.policy.inputDefault,
-      ipv6: value.policy.ipv6,
-    },
-    rules,
+    policy: parseFirewallPolicy(value.policy),
+    rules: parseFirewallRules(value.rules),
   };
   if (value.controlPlane !== undefined) {
     if (!isRecord(value.controlPlane)) {
@@ -2270,7 +2312,7 @@ export function parseFirewallReconcileResult(
   if (
     typeof value.generation !== "number" || !Number.isInteger(value.generation)
   ) {
-    throw new Error("generation must be an integer");
+    throw new TypeError("generation must be an integer");
   }
   if (!FIREWALL_MODES.has(value.mode as FirewallMode)) {
     throw new Error("mode must be managed, observe or off");

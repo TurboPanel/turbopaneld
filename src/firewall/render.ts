@@ -282,13 +282,13 @@ function inputInvariants(
     } -j ACCEPT`,
   ];
   if (family === 4) {
-    lines.push(`-A ${c} -p icmp ${systemComment("icmp")} -j ACCEPT`);
     lines.push(
+      `-A ${c} -p icmp ${systemComment("icmp")} -j ACCEPT`,
       `-A ${c} -p udp --sport 67 --dport 68 ${systemComment("dhcp")} -j ACCEPT`,
     );
   } else {
-    lines.push(`-A ${c} -p ipv6-icmp ${systemComment("icmpv6")} -j ACCEPT`);
     lines.push(
+      `-A ${c} -p ipv6-icmp ${systemComment("icmpv6")} -j ACCEPT`,
       `-A ${c} -p udp --sport 547 --dport 546 ${
         systemComment("dhcpv6")
       } -j ACCEPT`,

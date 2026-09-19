@@ -129,7 +129,8 @@ function defaultPresenceSnapshot(): PresenceSnapshot {
 // cache entirely and is called fresh every time, as before.
 let cachedUpdateChannelConfig: UpdateChannelConfig | undefined;
 function defaultUpdateChannelConfig(): UpdateChannelConfig {
-  return cachedUpdateChannelConfig ??= resolveUpdateChannelConfig();
+  cachedUpdateChannelConfig ??= resolveUpdateChannelConfig();
+  return cachedUpdateChannelConfig;
 }
 
 let buildInfoProvider: BuildInfoProvider = getBuildInfo;

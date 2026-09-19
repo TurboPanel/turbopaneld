@@ -202,6 +202,11 @@ tp_manifest_compact() {
   printf '%s' "$_json" | tr -d '[:space:]'
 }
 
+# The manifest field carrying an artifact's SHA-256, and the exec mode the
+# systemd unit template takes when the native binary runs here.
+TP_MANIFEST_SHA_FIELD="sha256"
+TP_EXEC_MODE_NATIVE="native"
+
 tp_manifest_field() {
   _json="$1"
   _field="$2"
@@ -237,11 +242,11 @@ tp_resolve_channel_manifest() {
   _manifest_build_id="$(tp_manifest_field "$_compact" "buildId")"
   _linux_arch="$(tp_resolve_linux_arch)" || return 1
   _binary_artifact_url="$(tp_manifest_binary_artifact_field "$_compact" "$_linux_arch" "url")"
-  _binary_artifact_sha256="$(tp_manifest_binary_artifact_field "$_compact" "$_linux_arch" "sha256")"
+  _binary_artifact_sha256="$(tp_manifest_binary_artifact_field "$_compact" "$_linux_arch" "$TP_MANIFEST_SHA_FIELD")"
   _js_fallback_artifact_url="$(tp_manifest_artifact_field "$_compact" "jsFallbackArtifact" "url")"
-  _js_fallback_artifact_sha256="$(tp_manifest_artifact_field "$_compact" "jsFallbackArtifact" "sha256")"
+  _js_fallback_artifact_sha256="$(tp_manifest_artifact_field "$_compact" "jsFallbackArtifact" "$TP_MANIFEST_SHA_FIELD")"
   _orchestration_artifact_url="$(tp_manifest_artifact_field "$_compact" "orchestrationArtifact" "url")"
-  _orchestration_artifact_sha256="$(tp_manifest_artifact_field "$_compact" "orchestrationArtifact" "sha256")"
+  _orchestration_artifact_sha256="$(tp_manifest_artifact_field "$_compact" "orchestrationArtifact" "$TP_MANIFEST_SHA_FIELD")"
   if [ -z "$_manifest_host" ]; then
     _manifest_host="https://turbopanel.app"
   fi
@@ -752,7 +757,7 @@ tp_download_repo_artifact() {
     echo "run.sh: manifest has no artifacts.${_key}.url" >&2
     return 1
   }
-  _sha="$(tp_manifest_binary_artifact_field "$_repo_manifest_compact" "$_key" "sha256")" || {
+  _sha="$(tp_manifest_binary_artifact_field "$_repo_manifest_compact" "$_key" "$TP_MANIFEST_SHA_FIELD")" || {
     echo "run.sh: manifest has no artifacts.${_key}.sha256" >&2
     return 1
   }
@@ -814,7 +819,7 @@ tp_run_instance_install() {
   } > "$_vars"
   tp_print_step "▸" "Provisioning the self-hosted instance (Postgres, Redis, RabbitMQ, Docker, certs, units, Caddy)…"
   _rc=0
-  if [ "$DAEMON_EXEC_MODE" = "native" ]; then
+  if [ "$DAEMON_EXEC_MODE" = "$TP_EXEC_MODE_NATIVE" ]; then
     "$(tp_daemon_binary_path)" run-installer --playbook instance-install.yml --vars-file "$_vars" || _rc=$?
   else
     HOME="$INSTALL_ROOT" "$DENO_BIN" run --allow-all "$(tp_daemon_js_fallback_path)" run-installer --playbook instance-install.yml --vars-file "$_vars" || _rc=$?
@@ -1241,7 +1246,7 @@ tp_print_ok "Release installed (SHA-256 ok)"
 
 tp_print_step "▸" "Probing native daemon binary…"
 if tp_probe_native_daemon; then
-  DAEMON_EXEC_MODE="native"
+  DAEMON_EXEC_MODE="$TP_EXEC_MODE_NATIVE"
   tp_print_ok "Native binary is executable — using turbopaneld"
   tp_remove_js_fallback_binaries
 else
@@ -1271,7 +1276,7 @@ else
   tp_print_step "–" "Skipping Deno runtime (native binary)"
 fi
 
-if [ "$DAEMON_EXEC_MODE" = "native" ]; then
+if [ "$DAEMON_EXEC_MODE" = "$TP_EXEC_MODE_NATIVE" ]; then
   "$(tp_daemon_binary_path)" bootstrap-orchestration
 else
   HOME="$INSTALL_ROOT" "$DENO_BIN" run --allow-all "$(tp_daemon_js_fallback_path)" bootstrap-orchestration
@@ -1339,7 +1344,7 @@ trap 'rm -f "$VARS_FILE"' EXIT
   fi
 } > "$VARS_FILE"
 
-if [ "$DAEMON_EXEC_MODE" = "native" ]; then
+if [ "$DAEMON_EXEC_MODE" = "$TP_EXEC_MODE_NATIVE" ]; then
   if ! "$(tp_daemon_binary_path)" run-installer --vars-file "$VARS_FILE"; then
     rm -rf /tmp/turbopanel-ansible /root/.ansible
     exit 1

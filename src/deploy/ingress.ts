@@ -1,5 +1,5 @@
 import { join } from "@std/path";
-import { logInfo, logWarn } from "../logger.ts";
+import { errorText, logInfo, logWarn } from "../logger.ts";
 import {
   type EnvironmentDeployContainer,
   type EnvironmentDeployHosting,
@@ -1355,26 +1355,39 @@ export async function readAcmeModeHostnames(
       if (!entry.isFile || !entry.name.endsWith(".acme-hostnames.json")) {
         continue;
       }
-      try {
-        const raw = await Deno.readTextFile(join(sitesDir, entry.name));
-        const parsed: unknown = JSON.parse(raw);
-        if (!Array.isArray(parsed)) continue;
-        for (const value of parsed) {
-          if (typeof value === "string") hostnames.add(value);
-        }
-      } catch (err) {
-        logWarn(
-          "deploy",
-          `acme-hostnames manifest unreadable, skipping: ${entry.name}: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
+      for (const hostname of await readAcmeHostnamesManifest(sitesDir, entry)) {
+        hostnames.add(hostname);
       }
     }
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) throw err;
   }
   return [...hostnames].sort((a, b) => a.localeCompare(b));
+}
+
+/**
+ * One environment's `.acme-hostnames.json`: the string entries of its array.
+ * Unreadable or malformed is logged and skipped — one stale manifest must not
+ * hide every other environment's hostnames from the observer.
+ */
+async function readAcmeHostnamesManifest(
+  sitesDir: string,
+  entry: Deno.DirEntry,
+): Promise<string[]> {
+  try {
+    const raw = await Deno.readTextFile(join(sitesDir, entry.name));
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((value): value is string => typeof value === "string");
+  } catch (err) {
+    logWarn(
+      "deploy",
+      `acme-hostnames manifest unreadable, skipping: ${entry.name}: ${
+        errorText(err)
+      }`,
+    );
+    return [];
+  }
 }
 
 export async function rewriteHostingCaddySites(

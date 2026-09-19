@@ -20,6 +20,8 @@
  * does, so this module deliberately never touches the lower-level API.
  */
 
+import { errorText } from "../logger.ts";
+
 export type AcmeProbeResult =
   | { hostname: string; ok: true }
   | { hostname: string; ok: false; errorMessage: string };
@@ -28,7 +30,7 @@ const DEFAULT_TIMEOUT_MS = 8_000;
 const MAX_ERROR_MESSAGE_CHARS = 500;
 
 function summarizeError(err: unknown): string {
-  const top = err instanceof Error ? err.message : String(err);
+  const top = errorText(err);
   const cause = err instanceof Error && err.cause instanceof Error
     ? err.cause.message
     : undefined;

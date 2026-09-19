@@ -35,7 +35,7 @@
 
 import { join } from "@std/path";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
-import { logInfo, logWarn, sanitizeForLog } from "../logger.ts";
+import { errorText, logInfo, logWarn, sanitizeForLog } from "../logger.ts";
 import {
   FIREWALL_FORWARD_CHAIN,
   FIREWALL_INPUT_CHAIN,
@@ -221,27 +221,13 @@ export async function applyRenderedFirewall(
     );
   }
 
-  let ipv6Applied = false;
-  if (rendered.v6 !== null) {
-    if (!probe.ipv6) {
-      warnings.push("ip6tables is not available; IPv6 was left unchanged");
-    } else {
-      try {
-        await restoreDocument(6, rendered.v6, run);
-        await ensureJump(6, INPUT_BUILTIN, FIREWALL_INPUT_CHAIN, run);
-        if (includeForward[6]) {
-          await ensureJump(6, DOCKER_USER_CHAIN, FIREWALL_FORWARD_CHAIN, run);
-        }
-        ipv6Applied = true;
-      } catch (err) {
-        warnings.push(
-          `IPv6 ruleset was not applied; IPv6 left unchanged: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-      }
-    }
-  }
+  const ipv6Applied = rendered.v6 === null ? false : await applyIpv6BestEffort(
+    rendered.v6,
+    includeForward[6],
+    probe,
+    run,
+    warnings,
+  );
 
   await writeDurableDocuments(
     layout,
@@ -250,6 +236,36 @@ export async function applyRenderedFirewall(
   );
 
   return { ipv6Applied, forwardApplied: includeForward[4], warnings };
+}
+
+/**
+ * IPv4 is the product; the v6 document is applied best-effort and any failure
+ * becomes a warning rather than a failed command. Returns whether it applied.
+ */
+async function applyIpv6BestEffort(
+  v6: string,
+  includeForward: boolean,
+  probe: XtablesProbe,
+  run: FirewallRunFn,
+  warnings: string[],
+): Promise<boolean> {
+  if (!probe.ipv6) {
+    warnings.push("ip6tables is not available; IPv6 was left unchanged");
+    return false;
+  }
+  try {
+    await restoreDocument(6, v6, run);
+    await ensureJump(6, INPUT_BUILTIN, FIREWALL_INPUT_CHAIN, run);
+    if (includeForward) {
+      await ensureJump(6, DOCKER_USER_CHAIN, FIREWALL_FORWARD_CHAIN, run);
+    }
+    return true;
+  } catch (err) {
+    warnings.push(
+      `IPv6 ruleset was not applied; IPv6 left unchanged: ${errorText(err)}`,
+    );
+    return false;
+  }
 }
 
 async function writeDurableDocuments(
