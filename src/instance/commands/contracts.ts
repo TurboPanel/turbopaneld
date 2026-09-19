@@ -2225,7 +2225,9 @@ export function parseFirewallReconcilePayload(
   if (value.rules.length > FIREWALL_MAX_RULES) {
     throw new Error(`rules exceeds ${FIREWALL_MAX_RULES} entries`);
   }
-  const rules = value.rules.map(parseFirewallRule);
+  const rules = value.rules.map((rule, index) =>
+    parseFirewallRule(rule, index)
+  );
   const seen = new Set<string>();
   for (const rule of rules) {
     if (seen.has(rule.id)) {
