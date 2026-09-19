@@ -86,6 +86,18 @@ stays deferred until opt-in on both runtimes.
   from `readTimeSync()`. Wire contracts live in
   `src/instance/commands/contracts.ts` and must stay aligned with the instance
   canonical `server.timezone.set` / `server.ntp.set` shapes.
+- Command handler `server.firewall.reconcile`
+  (`src/instance/commands/firewall-reconcile.ts`) renders the panel's
+  **complete** desired firewall through `src/firewall/render.ts` and applies
+  it through `src/firewall/apply.ts` (see `src/firewall/AGENTS.md`). Two
+  hooks: `INPUT → TP-INPUT` for host listeners, `DOCKER-USER → TP-FWD` for
+  published container ports; atomic `iptables-restore --noflush` of only those
+  chains; invariants (lo, established, ICMP/ICMPv6, DHCP, every `sshd -T` port,
+  the co-located control plane's ports) rendered first. `policy.inputDefault:
+  drop` is **held** (rendered, refused with `DEFAULT_DROP_HELD_WARNING`) until
+  commit-confirm rollback lands (`fw-invariants-commit-confirm`); `accept`
+  applies. Refusals are `applied: false` + a warning, not a failed command.
+  Wire contract in `contracts.ts`, mirrored in the instance `schemas.ts`.
 - **Max-connection-age self-recycle:** once per idle tick,
   `#checkMaxConnectionAge` enforces `MAX_CONNECTION_AGE_MS` (2 h, mirrors the
   instance `MAX_WS_CONNECTION_AGE_MS`). When the socket exceeds that age it

@@ -13,6 +13,7 @@ export const COMMAND_TYPES = [
   "server.fabric.reconcile",
   "server.tls.trust.reconcile",
   "server.principals.reconcile",
+  "server.firewall.reconcile",
   "environment.deploy",
   "environment.lifecycle",
   "environment.stop",
@@ -135,6 +136,147 @@ export type PrincipalsReconcileResult = {
   keysRemoved: string[];
   sshdReloaded: boolean;
   warnings: string[];
+};
+
+/**
+ * Must stay in sync with the instance canonical `server.firewall.reconcile`
+ * shape.
+ *
+ * Where a rule lands. `host` is the host's own listeners (`INPUT` →
+ * `TP-INPUT`: sshd, the co-located control plane, WireGuard, host-native
+ * sites). `published` is a port Docker publishes for a container
+ * (`DOCKER-USER` → `TP-FWD`, matched post-DNAT on the *original* destination
+ * port): Traefik, ProxySQL, a managed listener, a compose `ports:` entry. A
+ * published port never traverses `INPUT`, which is the ufw + Docker footgun
+ * this split exists to avoid.
+ */
+export type FirewallRuleScope = "host" | "published";
+
+/** Must stay in sync with the instance canonical `server.firewall.reconcile` shape. */
+export type FirewallRuleAction = "accept" | "drop" | "reject";
+
+/** Must stay in sync with the instance canonical `server.firewall.reconcile` shape. */
+export type FirewallRuleProto = "tcp" | "udp" | "any";
+
+/**
+ * Must stay in sync with the instance canonical `server.firewall.reconcile`
+ * shape. `system` rows are invariants the panel echoes for display, `derived`
+ * rows the panel computed from what it deployed, `user` rows someone typed.
+ * The daemon renders them identically; the origin only rides the comment so
+ * the console can attribute counters.
+ */
+export type FirewallRuleOrigin = "system" | "derived" | "user";
+
+/**
+ * Must stay in sync with the instance canonical `server.firewall.reconcile`
+ * shape.
+ *
+ * `sources` is a list of CIDR literals (`10.0.0.0/8`, `2001:db8::/32`), bare
+ * addresses (taken as `/32` / `/128`) or the word `any`. On a `published`
+ * rule an `accept` with sources other than `any` **narrows** the port: those
+ * sources pass, everyone else is dropped for that port — the shape
+ * `managed/firewall.ts` already uses for a public managed listener. An
+ * `accept` from `any` on a published port renders nothing, because Docker
+ * already accepts it. On a `host` rule an `accept` is a plain `ACCEPT`.
+ *
+ * `ports` is one port or an inclusive range (`8443`, `5432-5440`); omitted
+ * means every port of `proto`, which is only meaningful with `drop` /
+ * `reject`.
+ */
+export type FirewallRule = {
+  /** Stable id (≤ 64 chars, `[A-Za-z0-9_.:-]`), rendered into the rule comment. */
+  id: string;
+  scope: FirewallRuleScope;
+  action: FirewallRuleAction;
+  proto: FirewallRuleProto;
+  ports?: string;
+  sources: string[];
+  /** Optional host addresses this rule is limited to (`-d` / `--ctorigdst`). */
+  destinations?: string[];
+  origin: FirewallRuleOrigin;
+  /** ≤ 48 chars of `[A-Za-z0-9 ._:/-]`; anything else is refused at parse. */
+  comment?: string;
+};
+
+/**
+ * Must stay in sync with the instance canonical `server.firewall.reconcile`
+ * shape.
+ *
+ * `managed` renders and applies. `observe` renders, reports the digest and
+ * warnings, and applies nothing — the mode a server sits in before an operator
+ * turns the firewall on, and the mode the daemon falls back to when applying
+ * would be unsafe. `off` removes TurboPanel's chains and jumps and leaves the
+ * host as it found it.
+ */
+export type FirewallMode = "managed" | "observe" | "off";
+
+/** Must stay in sync with the instance canonical `server.firewall.reconcile` shape. */
+export type FirewallPolicy = {
+  /**
+   * What `TP-INPUT` does with a host packet no rule matched. `drop` is the
+   * product; `accept` is the observe-shaped middle where only explicit
+   * `drop` / `reject` rows and published-port narrowing bite.
+   */
+  inputDefault: "accept" | "drop";
+  /** Render the same ruleset for `ip6tables` (`mirror`) or leave v6 alone (`skip`). */
+  ipv6: "mirror" | "skip";
+};
+
+/**
+ * Must stay in sync with the instance canonical `server.firewall.reconcile`
+ * shape.
+ *
+ * `rules` is the **complete** desired set for this server, the way
+ * `server.principals.reconcile` carries every account: a rule absent from it
+ * is one the host must not have. `generation` is the panel's monotonic counter
+ * for this server's desired firewall and is echoed in the result so the panel
+ * can tell which desired state a report describes.
+ *
+ * `controlPlane.tcpPorts` names the co-located control plane's entrypoint
+ * (8443 by default; 80 and 443 under `lets_encrypt`). The daemon treats those
+ * as invariants — accepted before any rule — and refuses a default-drop apply
+ * on a host where `turbopanel-instance.service` is active and the list is
+ * absent, because a panel that forgot its own port must not lock its wizard
+ * out a second time.
+ *
+ * `sshPorts` is the panel's belief about sshd; the daemon unions it with what
+ * `sshd -T` reports and guarantees an `ACCEPT` covers every one of them.
+ */
+export type FirewallReconcilePayload = {
+  generation: number;
+  mode: FirewallMode;
+  policy: FirewallPolicy;
+  rules: FirewallRule[];
+  controlPlane?: { tcpPorts: number[] };
+  sshPorts?: number[];
+};
+
+/**
+ * Must stay in sync with the instance canonical `server.firewall.reconcile`
+ * shape. `applied: false` with a non-empty `warnings` is how the daemon says
+ * "rendered, refused to apply, here is why" without failing the command —
+ * a refusal is a state the console must show, not an error to retry.
+ */
+export type FirewallReconcileResult = {
+  generation: number;
+  mode: FirewallMode;
+  applied: boolean;
+  /** sha256 hex of the rendered v4 + v6 documents; the panel's drift key. */
+  digest: string;
+  ruleCount: number;
+  ipv6Applied: boolean;
+  /** `DOCKER-USER` existed and `TP-FWD` is hung off it (v4). */
+  forwardApplied: boolean;
+  /**
+   * The effective sshd ports — detected via `sshd -T`, unioned with the
+   * payload's `sshPorts`, falling back to 22 when neither knew — each of
+   * which has a host `ACCEPT`. The co-located control plane's ports are
+   * guaranteed too but are not listed here; this field answers "SSH stays
+   * open on…".
+   */
+  sshPorts: number[];
+  warnings: string[];
+  summary: string;
 };
 
 /** Must stay in sync with the instance canonical `server.tls.trust.reconcile` shape. */
@@ -1862,6 +2004,310 @@ export function parseTlsTrustReconcileResult(
     throw new Error("fingerprint must be a non-empty string");
   }
   return { applied: record.applied, fingerprint };
+}
+
+const FIREWALL_RULE_ID_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
+const FIREWALL_COMMENT_RE = /^[A-Za-z0-9 ._:/-]{1,48}$/;
+const FIREWALL_MAX_RULES = 1024;
+const FIREWALL_MAX_SOURCES = 256;
+const FIREWALL_SCOPES = new Set<FirewallRuleScope>(["host", "published"]);
+const FIREWALL_ACTIONS = new Set<FirewallRuleAction>([
+  "accept",
+  "drop",
+  "reject",
+]);
+const FIREWALL_PROTOS = new Set<FirewallRuleProto>(["tcp", "udp", "any"]);
+const FIREWALL_ORIGINS = new Set<FirewallRuleOrigin>([
+  "system",
+  "derived",
+  "user",
+]);
+const FIREWALL_MODES = new Set<FirewallMode>(["managed", "observe", "off"]);
+
+export function isValidFirewallPort(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 &&
+    value <= 65535;
+}
+
+/**
+ * `8443` or `5432-5440` (inclusive, ascending). Returned normalised so two
+ * spellings of the same range render the same rule.
+ */
+export function parseFirewallPortRange(
+  value: string,
+): { from: number; to: number } | null {
+  const match = /^(\d{1,5})(?:-(\d{1,5}))?$/.exec(value.trim());
+  if (!match) return null;
+  const from = Number.parseInt(match[1]!, 10);
+  const to = match[2] === undefined ? from : Number.parseInt(match[2], 10);
+  if (!isValidFirewallPort(from) || !isValidFirewallPort(to) || to < from) {
+    return null;
+  }
+  return { from, to };
+}
+
+/**
+ * A firewall source or destination: `any`, a CIDR literal, or a bare address
+ * (normalised to `/32` or `/128`). Returns the normalised literal.
+ */
+export function parseFirewallAddress(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (trimmed === "any") return "any";
+  if (isValidIpv4Literal(trimmed)) return `${trimmed}/32`;
+  if (isValidIpv6Literal(trimmed)) return `${trimmed}/128`;
+  return parseCidrLiteral(trimmed) ? trimmed : null;
+}
+
+function parseFirewallAddressList(
+  value: unknown,
+  field: string,
+  allowEmpty: boolean,
+): string[] {
+  if (!Array.isArray(value)) {
+    throw new TypeError(`${field} must be an array`);
+  }
+  if (!allowEmpty && value.length === 0) {
+    throw new Error(`${field} must name at least one address or "any"`);
+  }
+  if (value.length > FIREWALL_MAX_SOURCES) {
+    throw new Error(`${field} exceeds ${FIREWALL_MAX_SOURCES} entries`);
+  }
+  const out: string[] = [];
+  for (const entry of value) {
+    const parsed = parseFirewallAddress(entry);
+    if (parsed === null) {
+      throw new Error(
+        `${field} entry must be "any", an IP literal or a CIDR: ${
+          typeof entry === "string" ? entry : typeof entry
+        }`,
+      );
+    }
+    if (!out.includes(parsed)) out.push(parsed);
+  }
+  return out;
+}
+
+function parseFirewallRule(value: unknown, index: number): FirewallRule {
+  if (!isRecord(value)) {
+    throw new Error(`rules[${index}] must be an object`);
+  }
+  if (typeof value.id !== "string" || !FIREWALL_RULE_ID_RE.test(value.id)) {
+    throw new Error(`rules[${index}].id must match ${FIREWALL_RULE_ID_RE}`);
+  }
+  if (!FIREWALL_SCOPES.has(value.scope as FirewallRuleScope)) {
+    throw new Error(`rules[${index}].scope must be host or published`);
+  }
+  if (!FIREWALL_ACTIONS.has(value.action as FirewallRuleAction)) {
+    throw new Error(`rules[${index}].action must be accept, drop or reject`);
+  }
+  if (!FIREWALL_PROTOS.has(value.proto as FirewallRuleProto)) {
+    throw new Error(`rules[${index}].proto must be tcp, udp or any`);
+  }
+  if (!FIREWALL_ORIGINS.has(value.origin as FirewallRuleOrigin)) {
+    throw new Error(`rules[${index}].origin must be system, derived or user`);
+  }
+  const rule: FirewallRule = {
+    id: value.id,
+    scope: value.scope as FirewallRuleScope,
+    action: value.action as FirewallRuleAction,
+    proto: value.proto as FirewallRuleProto,
+    sources: parseFirewallAddressList(
+      value.sources,
+      `rules[${index}].sources`,
+      false,
+    ),
+    origin: value.origin as FirewallRuleOrigin,
+  };
+  if (value.ports !== undefined) {
+    if (typeof value.ports !== "string") {
+      throw new TypeError(`rules[${index}].ports must be a string`);
+    }
+    const range = parseFirewallPortRange(value.ports);
+    if (!range) {
+      throw new Error(
+        `rules[${index}].ports must be a port or an ascending range 1-65535`,
+      );
+    }
+    if (rule.proto === "any") {
+      throw new Error(`rules[${index}].ports requires proto tcp or udp`);
+    }
+    rule.ports = range.from === range.to
+      ? String(range.from)
+      : `${range.from}-${range.to}`;
+  } else if (rule.action === "accept") {
+    // An accept of every port from a source is exactly the rule that turns a
+    // narrowed host into an open one by accident; make the author name the
+    // port.
+    throw new Error(`rules[${index}].ports is required on an accept rule`);
+  }
+  if (value.destinations !== undefined) {
+    const destinations = parseFirewallAddressList(
+      value.destinations,
+      `rules[${index}].destinations`,
+      true,
+    );
+    if (destinations.includes("any")) {
+      throw new Error(
+        `rules[${index}].destinations lists addresses, not "any" (omit it instead)`,
+      );
+    }
+    if (destinations.length > 0) rule.destinations = destinations;
+  }
+  if (value.comment !== undefined) {
+    if (
+      typeof value.comment !== "string" ||
+      !FIREWALL_COMMENT_RE.test(value.comment)
+    ) {
+      throw new Error(
+        `rules[${index}].comment must be 1-48 chars of letters, digits, space . _ : / -`,
+      );
+    }
+    rule.comment = value.comment;
+  }
+  return rule;
+}
+
+function parseFirewallPortList(value: unknown, field: string): number[] {
+  if (!Array.isArray(value)) {
+    throw new TypeError(`${field} must be an array of ports`);
+  }
+  const out: number[] = [];
+  for (const entry of value) {
+    if (!isValidFirewallPort(entry)) {
+      throw new Error(`${field} entries must be integers 1-65535`);
+    }
+    if (!out.includes(entry)) out.push(entry);
+  }
+  return out.sort((a, b) => a - b);
+}
+
+/**
+ * Parse `server.firewall.reconcile`.
+ *
+ * An **empty** `rules` array is legal: with `policy.inputDefault: "accept"` it
+ * means "TurboPanel manages the firewall and has nothing to add beyond the
+ * invariants"; with `"drop"` it means "only what the invariants allow". A
+ * missing or non-array `rules` is malformed and throws, so the two can never
+ * be confused. Rule ids must be unique — the comment carrying the id is how
+ * the console attributes a counter to a row.
+ */
+export function parseFirewallReconcilePayload(
+  value: unknown,
+): FirewallReconcilePayload {
+  if (!isRecord(value)) {
+    throw new Error("Invalid firewall reconcile payload");
+  }
+  if (
+    typeof value.generation !== "number" ||
+    !Number.isInteger(value.generation) || value.generation < 0
+  ) {
+    throw new Error("generation must be a non-negative integer");
+  }
+  if (!FIREWALL_MODES.has(value.mode as FirewallMode)) {
+    throw new Error("mode must be managed, observe or off");
+  }
+  if (!isRecord(value.policy)) {
+    throw new Error("policy must be an object");
+  }
+  if (
+    value.policy.inputDefault !== "accept" &&
+    value.policy.inputDefault !== "drop"
+  ) {
+    throw new Error("policy.inputDefault must be accept or drop");
+  }
+  if (value.policy.ipv6 !== "mirror" && value.policy.ipv6 !== "skip") {
+    throw new Error("policy.ipv6 must be mirror or skip");
+  }
+  if (!Array.isArray(value.rules)) {
+    throw new TypeError("rules must be an array");
+  }
+  if (value.rules.length > FIREWALL_MAX_RULES) {
+    throw new Error(`rules exceeds ${FIREWALL_MAX_RULES} entries`);
+  }
+  const rules = value.rules.map(parseFirewallRule);
+  const seen = new Set<string>();
+  for (const rule of rules) {
+    if (seen.has(rule.id)) {
+      throw new Error(`rules contains id ${rule.id} more than once`);
+    }
+    seen.add(rule.id);
+  }
+  const payload: FirewallReconcilePayload = {
+    generation: value.generation,
+    mode: value.mode as FirewallMode,
+    policy: {
+      inputDefault: value.policy.inputDefault,
+      ipv6: value.policy.ipv6,
+    },
+    rules,
+  };
+  if (value.controlPlane !== undefined) {
+    if (!isRecord(value.controlPlane)) {
+      throw new Error("controlPlane must be an object");
+    }
+    payload.controlPlane = {
+      tcpPorts: parseFirewallPortList(
+        value.controlPlane.tcpPorts,
+        "controlPlane.tcpPorts",
+      ),
+    };
+  }
+  if (value.sshPorts !== undefined) {
+    payload.sshPorts = parseFirewallPortList(value.sshPorts, "sshPorts");
+  }
+  return payload;
+}
+
+export function parseFirewallReconcileResult(
+  value: unknown,
+): FirewallReconcileResult {
+  if (!isRecord(value)) {
+    throw new Error("Invalid firewall reconcile result");
+  }
+  if (
+    typeof value.generation !== "number" || !Number.isInteger(value.generation)
+  ) {
+    throw new Error("generation must be an integer");
+  }
+  if (!FIREWALL_MODES.has(value.mode as FirewallMode)) {
+    throw new Error("mode must be managed, observe or off");
+  }
+  for (const key of ["applied", "ipv6Applied", "forwardApplied"] as const) {
+    if (typeof value[key] !== "boolean") {
+      throw new TypeError(`${key} must be a boolean`);
+    }
+  }
+  if (typeof value.digest !== "string") {
+    throw new TypeError("digest must be a string");
+  }
+  if (
+    typeof value.ruleCount !== "number" || !Number.isInteger(value.ruleCount) ||
+    value.ruleCount < 0
+  ) {
+    throw new Error("ruleCount must be a non-negative integer");
+  }
+  if (
+    !Array.isArray(value.warnings) ||
+    !value.warnings.every((entry) => typeof entry === "string")
+  ) {
+    throw new TypeError("warnings must be an array of strings");
+  }
+  if (typeof value.summary !== "string") {
+    throw new TypeError("summary must be a string");
+  }
+  return {
+    generation: value.generation,
+    mode: value.mode as FirewallMode,
+    applied: value.applied as boolean,
+    digest: value.digest,
+    ruleCount: value.ruleCount,
+    ipv6Applied: value.ipv6Applied as boolean,
+    forwardApplied: value.forwardApplied as boolean,
+    sshPorts: parseFirewallPortList(value.sshPorts, "sshPorts"),
+    warnings: [...value.warnings],
+    summary: value.summary,
+  };
 }
 
 function parseOptionalNtpServerList(

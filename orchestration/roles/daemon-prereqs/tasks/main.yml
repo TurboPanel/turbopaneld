@@ -11,6 +11,9 @@
 #   - pamtester: instance install PAM gate (production)
 #   - acl: setfacl/getfacl for principal-access + runtime-entitlement traverse ACLs
 #     (Priority: optional on Debian — minimal images omit it; ansible.posix.acl needs it)
+#   - iptables: the nft-backed iptables/ip6tables + -restore/-save shims the managed
+#     host firewall (`server.firewall.reconcile`, src/firewall/) renders against;
+#     minimal Debian images omit it
 #
 # run.sh installs only the smaller curl/tar/python3-minimal set when missing;
 # this role covers the remainder once the daemon can run Ansible.
@@ -28,6 +31,7 @@
       - curl
       - git
       - gnupg
+      - iptables
       - openssl
       - pamtester
       - python3-debian

@@ -6,6 +6,8 @@ import {
   parseEnvironmentStopPayload,
   parseFabricReconcilePayload,
   parseFabricReconcileResult,
+  parseFirewallReconcilePayload,
+  parseFirewallReconcileResult,
   parseManagedApplyPayload,
   parseManagedIngressReconcileResult,
   parsePrincipalsReconcilePayload,
@@ -1226,5 +1228,162 @@ test("parseManagedIngressReconcileResult rejects malformed container role", () =
       }),
     TypeError,
     "Invalid managed.ingress.reconcile result containers",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// server.firewall.reconcile
+// ---------------------------------------------------------------------------
+
+const FIREWALL_BASE = {
+  generation: 7,
+  mode: "managed",
+  policy: { inputDefault: "accept", ipv6: "mirror" },
+  rules: [] as unknown[],
+};
+
+test("parseFirewallReconcilePayload accepts the minimal complete set", () => {
+  const payload = parseFirewallReconcilePayload(FIREWALL_BASE);
+  assertEquals(payload.generation, 7);
+  assertEquals(payload.mode, "managed");
+  assertEquals(payload.rules, []);
+  assertEquals(payload.controlPlane, undefined);
+  assertEquals(payload.sshPorts, undefined);
+});
+
+test("parseFirewallReconcilePayload normalises addresses and ranges", () => {
+  const payload = parseFirewallReconcilePayload({
+    ...FIREWALL_BASE,
+    controlPlane: { tcpPorts: [8443, 8443, 443] },
+    sshPorts: [22],
+    rules: [{
+      id: "hosting-80",
+      scope: "published",
+      action: "accept",
+      proto: "tcp",
+      ports: "80-80",
+      sources: ["10.0.0.5", "2001:db8::1", "192.168.0.0/16", "any", "any"],
+      destinations: ["203.0.113.7"],
+      origin: "derived",
+      comment: "hosting ingress 80/443",
+    }],
+  });
+  assertEquals(payload.controlPlane?.tcpPorts, [443, 8443]);
+  assertEquals(payload.rules[0]!.ports, "80");
+  assertEquals(payload.rules[0]!.sources, [
+    "10.0.0.5/32",
+    "2001:db8::1/128",
+    "192.168.0.0/16",
+    "any",
+  ]);
+  assertEquals(payload.rules[0]!.destinations, ["203.0.113.7/32"]);
+});
+
+test("parseFirewallReconcilePayload refuses the shapes that would render wrong", () => {
+  const rule = {
+    id: "r1",
+    scope: "host",
+    action: "accept",
+    proto: "tcp",
+    ports: "22",
+    sources: ["any"],
+    origin: "user",
+  };
+  // duplicate ids make the comment → row attribution ambiguous
+  assertThrows(
+    () =>
+      parseFirewallReconcilePayload({ ...FIREWALL_BASE, rules: [rule, rule] }),
+    Error,
+    "more than once",
+  );
+  // an accept of every port is the accidental open-host rule
+  assertThrows(
+    () =>
+      parseFirewallReconcilePayload({
+        ...FIREWALL_BASE,
+        rules: [{ ...rule, ports: undefined }],
+      }),
+    Error,
+    "ports is required on an accept rule",
+  );
+  // a descending range, a port on proto any, a bad address, a bad comment
+  assertThrows(
+    () =>
+      parseFirewallReconcilePayload({
+        ...FIREWALL_BASE,
+        rules: [{ ...rule, ports: "90-80" }],
+      }),
+    Error,
+    "ascending range",
+  );
+  assertThrows(
+    () =>
+      parseFirewallReconcilePayload({
+        ...FIREWALL_BASE,
+        rules: [{ ...rule, proto: "any" }],
+      }),
+    Error,
+    "requires proto tcp or udp",
+  );
+  assertThrows(
+    () =>
+      parseFirewallReconcilePayload({
+        ...FIREWALL_BASE,
+        rules: [{ ...rule, sources: ["10.0.0.0/33"] }],
+      }),
+    Error,
+    'must be "any", an IP literal or a CIDR',
+  );
+  assertThrows(
+    () =>
+      parseFirewallReconcilePayload({
+        ...FIREWALL_BASE,
+        rules: [{ ...rule, comment: 'say "hi"' }],
+      }),
+    Error,
+    "comment must be",
+  );
+  // policy vocabularies are closed
+  assertThrows(
+    () =>
+      parseFirewallReconcilePayload({
+        ...FIREWALL_BASE,
+        policy: { inputDefault: "deny", ipv6: "mirror" },
+      }),
+    Error,
+    "inputDefault",
+  );
+  assertThrows(
+    () => parseFirewallReconcilePayload({ ...FIREWALL_BASE, mode: "on" }),
+    Error,
+    "mode must be",
+  );
+  // missing rules is malformed, unlike an empty list
+  assertThrows(
+    () => parseFirewallReconcilePayload({ ...FIREWALL_BASE, rules: undefined }),
+    TypeError,
+    "rules must be an array",
+  );
+});
+
+test("parseFirewallReconcileResult round-trips the daemon report", () => {
+  const result = parseFirewallReconcileResult({
+    generation: 7,
+    mode: "managed",
+    applied: true,
+    digest: "ab".repeat(32),
+    ruleCount: 3,
+    ipv6Applied: true,
+    forwardApplied: false,
+    sshPorts: [22, 2222],
+    warnings: ["DOCKER-USER absent; published-port rules deferred"],
+    summary: "applied generation 7",
+  });
+  assertEquals(result.forwardApplied, false);
+  assertEquals(result.sshPorts, [22, 2222]);
+  assertThrows(
+    () => parseFirewallReconcileResult({ generation: 7 }),
+    Error,
+    "mode must be",
   );
 });
