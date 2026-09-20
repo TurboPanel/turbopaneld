@@ -8,6 +8,7 @@ import {
   INSTALLER_VENDOR_DIRS,
   renderDaemonPermissionFlags,
   renderInstallerPermissionFlags,
+  RUN_TARGETS_INSIDE_WRITE_GRANT,
 } from "./daemon-permissions.ts";
 import {
   BOOTSTRAP_STAMP_FILE,
@@ -254,6 +255,72 @@ test("every orchestration bootstrap write target sits inside the compiled write 
     );
   }
 });
+
+/**
+ * Deno refuses every write to a path in `--allow-run`, whatever
+ * `--allow-write` grants, and says nothing about it at compile time. The two
+ * lists overlap by design (the compiled binary installs the tools it runs),
+ * so the overlap has to be enumerated and each entry materialised by
+ * something other than a Deno file API — see
+ * {@link RUN_TARGETS_INSIDE_WRITE_GRANT}.
+ */
+test("every run target inside a write grant is declared as subprocess-installed", async () => {
+  const declared = new Set(RUN_TARGETS_INSIDE_WRITE_GRANT);
+  const found = new Set<string>();
+  for (const { source, flags } of await productionInvocations()) {
+    if (source.startsWith("run.sh:")) continue; // variable reference only
+    const runs = readGrant(flags, "--allow-run");
+    const writes = readGrant(flags, "--allow-write");
+    for (const program of runs) {
+      if (!program.startsWith("/")) continue;
+      const inWriteGrant = writes.some((root) =>
+        program === root || program.startsWith(`${root}/`)
+      );
+      if (!inWriteGrant) continue;
+      found.add(program);
+      assertEquals(
+        declared.has(program),
+        true,
+        `${source}: ${program} is both a run target and inside the write grant. ` +
+          "Deno refuses Deno-side writes to it — install it with " +
+          "installVendorExecutable (scoped-writes.ts) and add it " +
+          "to RUN_TARGETS_INSIDE_WRITE_GRANT.",
+      );
+    }
+  }
+  // No stale entries: a path that left the run allowlist must leave this list.
+  assertEquals(
+    RUN_TARGETS_INSIDE_WRITE_GRANT.filter((p) => !found.has(p)),
+    [],
+    "these no longer overlap a write grant; drop them from RUN_TARGETS_INSIDE_WRITE_GRANT",
+  );
+});
+
+test("the vendored binaries the installer writes go through installVendorExecutable", async () => {
+  for (const name of ["uv.ts", "cloudflared.ts"]) {
+    const text = await Deno.readTextFile(
+      join(root, "src/orchestration", name),
+    );
+    assertEquals(
+      text.includes("installVendorExecutable"),
+      true,
+      `${name} must install its vendored binary through installVendorExecutable`,
+    );
+    for (const api of ["Deno.copyFile(", "Deno.chmod("]) {
+      assertEquals(
+        text.includes(api),
+        false,
+        `${name} uses ${api}: Deno refuses that on a --allow-run path`,
+      );
+    }
+  }
+});
+
+/** Split `--allow-x=a,b,c` out of a flag list; `[]` when the flag is absent. */
+function readGrant(flags: string[], flag: string): string[] {
+  const entry = flags.find((f) => f.startsWith(`${flag}=`));
+  return entry ? entry.slice(flag.length + 1).split(",") : [];
+}
 
 // --- spawn allowlist derived from source --------------------------------
 

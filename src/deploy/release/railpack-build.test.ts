@@ -278,7 +278,7 @@ test("the gateway frontend resolves inside the vendored runtime tree", () => {
 
 test({
   name: "ensureBuildkitRailpack returns already-present tools without setup",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);
@@ -309,7 +309,7 @@ test({
 
 test({
   name: "ensureBuildkitRailpack accepts a trimmed frontend digest",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);
@@ -328,7 +328,7 @@ test({
 
 test({
   name: "ensureBuildkitRailpack treats a missing digest as not installed",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);
@@ -355,7 +355,7 @@ test({
 
 test({
   name: "ensureBuildkitRailpack rejects a digest that is not sha256 + 64 hex",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);
@@ -374,7 +374,7 @@ test({
 
 test({
   name: "ensureBuildkitRailpack ignores an uppercase SHA256 digest",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);
@@ -393,7 +393,7 @@ test({
 
 test({
   name: "ensureBuildkitRailpack requires index.json beside the digest",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);
@@ -419,7 +419,7 @@ test({
 
 test({
   name: "ensureBuildkitRailpack requires all three binaries as files",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);
@@ -446,7 +446,7 @@ test({
 
 test({
   name: "ensureBuildkitRailpack returns after a successful playbook",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);
@@ -463,7 +463,7 @@ test({
 
 test({
   name: "ensureBuildkitRailpack downloads after the playbook fails",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);
@@ -517,7 +517,7 @@ test({
 
 test({
   name: "ensureBuildkitRailpack downloads after a non-Error playbook failure",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);
@@ -534,7 +534,7 @@ test({
 test({
   name:
     "ensureBuildkitRailpack downloads when setup succeeds without installing",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);
@@ -555,7 +555,7 @@ test({
 
 test({
   name: "ensureBuildkitRailpack uses the host arch when resolveArch is omitted",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);
@@ -576,7 +576,7 @@ test({
 test({
   name:
     "ensureBuildkitRailpack throws when download still leaves tools missing",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);
@@ -599,7 +599,7 @@ test({
 
 test({
   name: "ensureBuildkitRailpack surfaces a thrown resolveArch",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);
@@ -625,7 +625,7 @@ test({
 
 test({
   name: "downloadBuildkitRailpack surfaces curl / tar / docker failures",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     const cases: Array<{
       fail: NonNullable<Parameters<typeof mockDownloadCommands>[0]>["fail"];
@@ -683,7 +683,7 @@ test({
 
 test({
   name: "installRailpackFrontend rejects a layout that is not a single digest",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     const indexes = [
       "null",
@@ -728,6 +728,17 @@ test({
           this.#args = options?.args ?? [];
         }
         output(): Promise<Deno.CommandOutput> {
+          // `createSymlink` spawns a real `ln`; let it through so the
+          // `current` links this test asserts on are actually created.
+          if (this.#command === "ln") {
+            return new OriginalCommand(this.#command, {
+              args: this.#args,
+              stdout: "null",
+              stderr: "piped",
+              clearEnv: true,
+              env: { PATH: "/usr/bin:/bin" },
+            }).output();
+          }
           const run = mockDownloadCommands();
           return run(this.#command, this.#args).then((result) => ({
             success: result.success,
@@ -753,7 +764,7 @@ test({
 
 test({
   name: "ensureBuildkitRailpack rethrows a non-NotFound digest read",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);
@@ -777,7 +788,7 @@ test({
 
 test({
   name: "ensureBuildkitRailpack rethrows a non-NotFound tool stat",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);
@@ -811,7 +822,7 @@ test({
 
 test({
   name: "ensureBuildkitRailpack rethrows when current cannot be replaced",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);

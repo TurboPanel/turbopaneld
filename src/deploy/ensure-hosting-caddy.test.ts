@@ -98,7 +98,7 @@ function mockDownloadCommands(opts: {
 
 test({
   name: "ensureHostingCaddy returns existing vendor binary without downloading",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = resolveLayout(fixture.env, {
@@ -126,7 +126,7 @@ test({
 
 test({
   name: "ensureHostingCaddy returns after successful caddy-setup playbook",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = resolveLayout(fixture.env, {
@@ -151,7 +151,7 @@ test({
 
 test({
   name: "ensureHostingCaddy downloads when setup fails and chown is skipped",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = resolveLayout(fixture.env, {
@@ -181,7 +181,7 @@ test({
 
 test({
   name: "ensureHostingCaddy downloads when setup succeeds without installing",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = resolveLayout(fixture.env, {
@@ -212,7 +212,7 @@ test({
 
 test({
   name: "ensureHostingCaddy surfaces curl failure",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = resolveLayout(fixture.env, {
@@ -238,7 +238,7 @@ test({
 
 test({
   name: "ensureHostingCaddy surfaces curl failure with empty stderr",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = resolveLayout(fixture.env, {
@@ -261,7 +261,7 @@ test({
 
 test({
   name: "ensureHostingCaddy surfaces tar failure",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = resolveLayout(fixture.env, {
@@ -287,7 +287,7 @@ test({
 
 test({
   name: "ensureHostingCaddy surfaces tar failure with empty stderr",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = resolveLayout(fixture.env, {
@@ -310,7 +310,7 @@ test({
 
 test({
   name: "ensureHostingCaddy throws when download leaves binary missing",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = resolveLayout(fixture.env, {
@@ -401,6 +401,17 @@ test({
               stderr: enc.encode("no passwordless sudo\n"),
             });
           }
+          // `createSymlink` spawns a real `ln`; let it through so the
+          // `current` link this test asserts on is actually created.
+          if (this.#command === "ln") {
+            return new OriginalCommand(this.#command, {
+              args: this.#args,
+              stdout: "null",
+              stderr: "piped",
+              clearEnv: true,
+              env: { PATH: "/usr/bin:/bin" },
+            }).output();
+          }
           throw new TypeError(`unexpected command: ${this.#command}`);
         }
       };
@@ -421,7 +432,7 @@ test({
 
 test({
   name: "ensureHostingCaddy logs non-Error setup failures then downloads",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = resolveLayout(fixture.env, {
@@ -443,7 +454,7 @@ test({
 
 test({
   name: "ensureHostingCaddy rejects unsupported architecture",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = resolveLayout(fixture.env, {
@@ -472,7 +483,7 @@ test({
 
 test({
   name: "ensureHostingCaddy rethrows when the caddy binary cannot be statted",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = resolveLayout(fixture.env, {
@@ -506,7 +517,7 @@ test({
 test({
   name:
     "ensureHostingCaddy rethrows when the current symlink cannot be removed",
-  permissions: { read: true, write: true },
+  permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = resolveLayout(fixture.env, {

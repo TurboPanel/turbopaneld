@@ -417,7 +417,7 @@ export function cloudflaredDownloadUrl(
  * - `deno_version` in `orchestration/roles/deno-runtime/defaults/main.yml`
  * - `TP_DENO_VERSION` in `scripts/run.sh`
  */
-export const DENO_VERSION = "2.9.6";
+export const DENO_VERSION = "2.9.7";
 
 /** Versioned directory where the Deno runtime is installed. */
 export const DENO_RUNTIME_DIR = join(RUNTIMES_DIR, "deno", DENO_VERSION);

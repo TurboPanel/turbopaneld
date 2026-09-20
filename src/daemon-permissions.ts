@@ -76,6 +76,38 @@ export const INSTALLER_VENDOR_DIRS: readonly string[] = [
   `${VENDOR}/ansible`,
 ];
 
+/**
+ * Run-allowlist entries that also sit inside a write grant.
+ *
+ * Deno refuses **every** write — `writeFile`, `copyFile`, `chmod`, `rename`,
+ * `remove` — to a path in `--allow-run`, no matter what `--allow-write` says:
+ * a process that may execute a file must not be able to rewrite it. Nothing
+ * reports this at compile time, so the first canary install after the
+ * 2026-09-19 hardening died on `Requires write access to` the pinned uv
+ * binary — with that path's parent squarely inside
+ * {@link INSTALLER_VENDOR_DIRS}.
+ *
+ * Each of these is therefore materialised by something that is not a Deno
+ * file API:
+ * - uv / uvx / cloudflared — `installVendorExecutable` (`cp` + `chmod`) in
+ *   `scoped-writes.ts`;
+ * - the Ansible venv entrypoints — written by `uv venv` / `uv pip install`;
+ * - the Deno runtime — extracted by `scripts/run.sh` before the daemon runs.
+ *
+ * `daemon-permissions.test.ts` recomputes the intersection from the rendered
+ * flag sets, so a new vendored tool cannot land on both lists unnoticed.
+ */
+export const RUN_TARGETS_INSIDE_WRITE_GRANT: readonly string[] = [
+  `${VENDOR}/uv/${UV_VERSION}/uv`,
+  `${VENDOR}/uv/${UV_VERSION}/uvx`,
+  `${VENDOR}/cloudflared/${CLOUDFLARED_VERSION}/cloudflared`,
+  `${VENDOR}/ansible/${ANSIBLE_CORE_VERSION}/bin/ansible-playbook`,
+  `${VENDOR}/ansible/${ANSIBLE_CORE_VERSION}/bin/ansible-galaxy`,
+  `${VENDOR}/ansible/${ANSIBLE_CORE_VERSION}/bin/ansible-lint`,
+  `${VENDOR}/deno/bin/deno`,
+  `${VENDOR}/deno/current/deno`,
+];
+
 /** Read roots: the install tree, host facts, and everything the daemon may write. */
 export const DAEMON_READ_PATHS: readonly string[] = [
   PROD_HOME_DEFAULT,
@@ -174,6 +206,7 @@ export const DAEMON_RUN_PROGRAMS: readonly string[] = [
   "chmod",
   "mkdir",
   "cp",
+  "ln",
   // services, sources, archives, TLS
   "systemctl",
   "sshd",
@@ -315,6 +348,12 @@ export function renderInstallerPermissionFlags(): string[] {
     "bash",
     "cat",
     "ls",
+    // `installVendorExecutable`: the only way to write uv/uvx/cloudflared,
+    // which are themselves run targets — see RUN_TARGETS_INSIDE_WRITE_GRANT.
+    "cp",
+    "chmod",
+    // `createSymlink`: Deno.symlink() refuses path-scoped grants outright.
+    "ln",
     "id",
     "/usr/bin/id",
     "getent",

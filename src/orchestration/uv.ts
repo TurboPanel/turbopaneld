@@ -15,9 +15,7 @@ import {
   uvDownloadUrl,
   UVX_BIN,
 } from "./paths.ts";
-
-/** Mode for vendored CLI binaries installed under vendor (owner rwx, group/other rx). */
-const INSTALLED_VENDOR_BINARY_MODE = 0o755;
+import { createSymlink, installVendorExecutable } from "../scoped-writes.ts";
 
 /** Per-request timeout for uv download fetches. Generous for slow/throttled links. */
 const FETCH_TIMEOUT_MS = 30_000;
@@ -68,7 +66,7 @@ async function repointUvCurrent(): Promise<void> {
   }
   try {
     await Deno.mkdir(join(RUNTIMES_DIR, "uv"), { recursive: true });
-    await Deno.symlink(RUNTIME_BIN_DIR, UV_CURRENT_DIR, { type: "dir" });
+    await createSymlink(RUNTIME_BIN_DIR, UV_CURRENT_DIR);
   } catch (err) {
     logWarn("orchestration", "could not create uv current symlink:", err);
   }
@@ -204,9 +202,9 @@ async function extractUv(
         [join(innerDir, "uvx"), UVX_BIN],
       ] as const
     ) {
-      await Deno.copyFile(src, dst);
-      // Vendored CLIs must be executable by service users (group/other rx).
-      await Deno.chmod(dst, INSTALLED_VENDOR_BINARY_MODE); // NOSONAR typescript:S2612
+      // `uv` and `uvx` are on the run allowlist, which Deno treats as a write
+      // refusal on those exact paths — see scoped-writes.ts.
+      await installVendorExecutable(src, dst);
     }
   } finally {
     await Deno.remove(tmpDir, { recursive: true }).catch(() => {});

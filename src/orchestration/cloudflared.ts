@@ -1,3 +1,4 @@
+import { join } from "@std/path";
 import {
   CLOUDFLARED_CURRENT_DIR,
   CLOUDFLARED_VERSION,
@@ -7,9 +8,7 @@ import {
   resolveCloudflaredAsset,
 } from "./paths.ts";
 import { logInfo, logWarn } from "../logger.ts";
-
-/** Mode for vendored CLI binaries installed under vendor (owner rwx, group/other rx). */
-const INSTALLED_VENDOR_BINARY_MODE = 0o755;
+import { createSymlink, installVendorExecutable } from "../scoped-writes.ts";
 
 async function fileExists(path: string): Promise<boolean> {
   try {
@@ -64,7 +63,7 @@ async function repointCurrent(version = CLOUDFLARED_VERSION): Promise<void> {
     }
   }
   try {
-    await Deno.symlink(cloudflaredDir(version), CLOUDFLARED_CURRENT_DIR);
+    await createSymlink(cloudflaredDir(version), CLOUDFLARED_CURRENT_DIR);
   } catch (err) {
     logWarn("cloudflared", "could not create current symlink:", err);
   }
@@ -97,9 +96,16 @@ export async function ensureCloudflared(): Promise<string> {
   const bytes = await fetchBytes(url);
 
   await Deno.mkdir(cloudflaredDir(), { recursive: true });
-  await Deno.writeFile(bin, bytes);
-  // Vendored CLIs must be executable by service users (group/other rx).
-  await Deno.chmod(bin, INSTALLED_VENDOR_BINARY_MODE); // NOSONAR typescript:S2612
+  // cloudflared is on the run allowlist, which Deno treats as a write refusal
+  // on that exact path — stage the download and install it with `cp` instead.
+  const staging = await Deno.makeTempDir({ prefix: "turbopanel-cloudflared-" });
+  try {
+    const staged = join(staging, "cloudflared");
+    await Deno.writeFile(staged, bytes);
+    await installVendorExecutable(staged, bin);
+  } finally {
+    await Deno.remove(staging, { recursive: true }).catch(() => {});
+  }
 
   const version = await installedCloudflaredVersion(bin);
   if (version !== CLOUDFLARED_VERSION) {

@@ -93,7 +93,7 @@ tp_precommit_deno_exec() {
     return 0
   fi
   echo "pre-commit: no pinned Deno on this host, and 'vagrant ssh deno $*' failed" >&2
-  echo "pre-commit: install Deno 2.9.6, converge vendor Deno, or vagrant up from the sibling dev checkout" >&2
+  echo "pre-commit: install Deno 2.9.7, converge vendor Deno, or vagrant up from the sibling dev checkout" >&2
   echo "pre-commit: CI runs the same commands; skipping them only moves the failure to verify" >&2
   return 1
 }

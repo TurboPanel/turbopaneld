@@ -1,5 +1,6 @@
 import { join } from "@std/path";
 import { runLogged, symlinkPointsAt } from "./exec.ts";
+import { createSymlink } from "../scoped-writes.ts";
 import { logInfo, logWarn } from "../logger.ts";
 import { logComponent } from "./presentation.ts";
 import {
@@ -26,7 +27,7 @@ async function repointPythonCurrent(): Promise<void> {
   }
   try {
     await Deno.mkdir(join(RUNTIMES_DIR, "python"), { recursive: true });
-    await Deno.symlink(PYTHON_RUNTIME_DIR, PYTHON_CURRENT_DIR, { type: "dir" });
+    await createSymlink(PYTHON_RUNTIME_DIR, PYTHON_CURRENT_DIR);
   } catch (err) {
     logWarn("orchestration", "could not create python current symlink:", err);
   }

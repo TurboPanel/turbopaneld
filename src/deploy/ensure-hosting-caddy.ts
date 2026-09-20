@@ -7,6 +7,7 @@
 
 import { dirname, join } from "@std/path";
 import { logInfo, logWarn } from "../logger.ts";
+import { createSymlink } from "../scoped-writes.ts";
 import { runCaddySetup as defaultRunCaddySetup } from "../orchestration/ansible.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 
@@ -118,7 +119,7 @@ async function downloadHostingCaddy(
     } catch (err) {
       if (!(err instanceof Deno.errors.NotFound)) throw err;
     }
-    await Deno.symlink(versionDir, currentLink);
+    await createSymlink(versionDir, currentLink);
 
     // Best-effort ownership for managed hosts (root:turbopanel). May fail
     // without sudo — binary is still runnable by the daemon user when owned by
