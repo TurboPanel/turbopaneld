@@ -495,7 +495,19 @@ Six controls, each with a test that fails the build when it regresses:
   `run-installer` verbs). `src/daemon-permissions.test.ts` pins every copy,
   refuses `--allow-all` and any bare `--allow-read/write/run/ffi/sys`, and
   derives the `--allow-run` set from every literal `Deno.Command` / `run(…)`
-  target in `src/` — add a new spawn target there or the test fails. Two
+  target in `src/` — add a new spawn target there or the test fails. The
+  compiled binary is also the **installer**: `run.sh` runs the root-only
+  `bootstrap-orchestration` / `run-installer` verbs through it on hosts where
+  it executes, and `deno compile` bakes one grant set the binary cannot widen
+  at runtime (the JS fallback gets `renderInstallerPermissionFlags()`; the
+  native binary cannot). The daemon write grant therefore also carries
+  `INSTALLER_VENDOR_DIRS` (`vendor/uv`, `vendor/python`, `vendor/ansible`) —
+  inert at daemon runtime because those trees are `root:tp 0750` and the
+  process is `tp` — and the test maps every orchestration bootstrap write
+  target (`UV_INSTALL_DIR`, `PYTHON_RUNTIME_DIR`, `ANSIBLE_INSTALL_DIR`, the
+  Galaxy dirs, the stamps) onto that grant, which is what the first canary
+  install after this hardening tripped over (`Requires write access to
+  "/opt/turbopanel/vendor/uv/<version>"`). Two
   grants stay unscoped and are documented as `DAEMON_UNSCOPED_GRANTS`:
   `--allow-net` (operator-configured control-plane origin, ACME probes to
   tenant domains, container-address scrapes, ProxySQL bind — Deno has no
@@ -508,11 +520,13 @@ Six controls, each with a test that fails the build when it regresses:
 - **Install root ownership** — `/opt/turbopanel`, `bin/`, `lib/`, `share/`,
   `share/orchestration` and every vendored runtime are `root:tp 0750`
   (`turbopanel-user`, `daemon-layout`); `daemon-install.yml` no longer chowns
-  the vendor or orchestration trees to `tp`. The daemon writes only
+  the vendor or orchestration trees to `tp`. The daemon can write only
   `DAEMON_WRITABLE_VENDOR_DIRS` (`vendor/uv/cache`, `vendor/cloudflared`) plus
-  the FHS state/config/log/run/backup trees; `turbopanel_daemon_vendor_cache_dirs`
-  mirrors that list and `src/orchestration/sudoers-contract.test.ts` pins the
-  two together. `tp`'s home is `/var/lib/turbopanel`, and the JS unit sets
+  the FHS state/config/log/run/backup trees — ownership, not the Deno grant,
+  is the boundary here (the grant also names `INSTALLER_VENDOR_DIRS` for the
+  root-run install verbs, see above); `turbopanel_daemon_vendor_cache_dirs`
+  mirrors the chowned list and `src/orchestration/sudoers-contract.test.ts`
+  pins the two together. `tp`'s home is `/var/lib/turbopanel`, and the JS unit sets
   `DENO_DIR` under it. `repointUvCurrent` & co. are no-ops when the root-owned
   `current` symlink is already right; `ensurePython` skips uv when the pinned
   interpreter is present.

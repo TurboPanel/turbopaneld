@@ -5,9 +5,27 @@ import {
   DAEMON_UNSCOPED_GRANTS,
   DAEMON_WRITABLE_VENDOR_DIRS,
   DAEMON_WRITE_PATHS,
+  INSTALLER_VENDOR_DIRS,
   renderDaemonPermissionFlags,
   renderInstallerPermissionFlags,
 } from "./daemon-permissions.ts";
+import {
+  BOOTSTRAP_STAMP_FILE,
+  GALAXY_DOCKER_STAMP_FILE,
+} from "./orchestration/bootstrap-stamp.ts";
+import {
+  ANSIBLE_CURRENT_DIR,
+  ANSIBLE_INSTALL_DIR,
+  CACHE_DIR,
+  cloudflaredDir,
+  GALAXY_COLLECTIONS_DIR,
+  GALAXY_VENDOR_ROLES_DIR,
+  PYTHON_CURRENT_DIR,
+  PYTHON_RUNTIME_DIR,
+  RUNTIMES_DIR,
+  UV_CURRENT_DIR,
+  UV_INSTALL_DIR,
+} from "./orchestration/paths.ts";
 import { PROD_RUNTIME_DIR_DEFAULT } from "./paths/layout.ts";
 
 /**
@@ -160,34 +178,80 @@ test("the JS ExecStart moves DENO_DIR out of the root-owned install root", async
   );
 });
 
-test("daemon-writable vendor dirs are the only install-root writes", () => {
+test("install-root writes are the daemon cache dirs plus the installer's orchestration runtime", () => {
+  const allowed = [...DAEMON_WRITABLE_VENDOR_DIRS, ...INSTALLER_VENDOR_DIRS];
   for (const path of DAEMON_WRITE_PATHS) {
     if (path.startsWith("/opt/turbopanel")) {
-      assertEquals(DAEMON_WRITABLE_VENDOR_DIRS.includes(path), true, path);
+      assertEquals(allowed.includes(path), true, path);
       assertEquals(path.startsWith(`${PROD_RUNTIME_DIR_DEFAULT}/`), true, path);
     }
   }
-  // Never the binary, the orchestration tree, or a runtime the daemon runs from.
+  // Never the install root or the vendor root themselves (ancestors of every
+  // legitimate grant, so equality only) …
+  for (const ancestor of ["/opt/turbopanel", PROD_RUNTIME_DIR_DEFAULT]) {
+    assertEquals(DAEMON_WRITE_PATHS.includes(ancestor), false, ancestor);
+  }
+  // … and never the binary, the orchestration tree, or a runtime the daemon
+  // is launched from / builds with, nor anything beneath them.
   for (
     const forbidden of [
       "/opt/turbopanel/bin",
       "/opt/turbopanel/share",
       "/opt/turbopanel/lib",
-      "/opt/turbopanel/vendor/deno",
-      "/opt/turbopanel/vendor/node",
-      "/opt/turbopanel/vendor/uv/",
-      "/opt/turbopanel/vendor/python",
+      `${PROD_RUNTIME_DIR_DEFAULT}/deno`,
+      `${PROD_RUNTIME_DIR_DEFAULT}/node`,
+      `${PROD_RUNTIME_DIR_DEFAULT}/buildkit`,
+      `${PROD_RUNTIME_DIR_DEFAULT}/railpack`,
     ]
   ) {
     for (const path of DAEMON_WRITE_PATHS) {
       assertEquals(
-        path === forbidden || path.startsWith(`${forbidden}/`) ||
-          (forbidden.endsWith("/") && path.startsWith(forbidden) &&
-            !path.startsWith(`${forbidden}cache`)),
+        path === forbidden || path.startsWith(`${forbidden}/`),
         false,
         `${path} is under ${forbidden}`,
       );
     }
+  }
+});
+
+/**
+ * `deno compile` bakes one grant set and the compiled binary cannot widen it,
+ * yet `run.sh` runs the root-only installer verbs through that binary on
+ * native hosts. Every path the orchestration bootstrap writes must therefore
+ * sit inside the daemon write grant — this is the check the first canary
+ * install after the 2026-09-19 hardening failed (`Requires write access to
+ * "/opt/turbopanel/vendor/uv/<version>"`).
+ */
+test("every orchestration bootstrap write target sits inside the compiled write grant", () => {
+  const targets = [
+    UV_INSTALL_DIR,
+    UV_CURRENT_DIR,
+    CACHE_DIR,
+    PYTHON_RUNTIME_DIR,
+    PYTHON_CURRENT_DIR,
+    ANSIBLE_INSTALL_DIR,
+    ANSIBLE_CURRENT_DIR,
+    GALAXY_VENDOR_ROLES_DIR,
+    GALAXY_COLLECTIONS_DIR,
+    BOOTSTRAP_STAMP_FILE,
+    GALAXY_DOCKER_STAMP_FILE,
+    cloudflaredDir(),
+  ];
+  for (const target of targets) {
+    // The module constants follow the active layout (a dev checkout under
+    // test); re-root them on the production vendor dir the grant names.
+    assertEquals(target.startsWith(`${RUNTIMES_DIR}/`), true, target);
+    const production = join(
+      PROD_RUNTIME_DIR_DEFAULT,
+      target.slice(RUNTIMES_DIR.length + 1),
+    );
+    assertEquals(
+      DAEMON_WRITE_PATHS.some((root) =>
+        production === root || production.startsWith(`${root}/`)
+      ),
+      true,
+      `${production} is outside the daemon write grant`,
+    );
   }
 });
 
