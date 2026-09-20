@@ -1041,45 +1041,68 @@ tp_print_styled_line() {
 tp_print_nonstable_channel_warning() {
   _channel="$1"
   _channel_upper="$(printf '%s' "$_channel" | tr '[:lower:]' '[:upper:]')"
-  printf '\n'
-  tp_print_styled_line "1;33" "*** WARNING: THIS IS A NON-STABLE UPDATE CHANNEL (${_channel_upper}) ***"
+  _rule='  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+  _title=" WARNING: PRE-RELEASE UPDATE CHANNEL (${_channel_upper})"
+  tp_print_styled_line "1;33" "$_rule"
+  if [ -t 1 ]; then
+    # Full-width black-on-yellow bar. The padding is byte-wise in POSIX sh,
+    # so the title stays plain ASCII to fill the width exactly.
+    printf '  \033[1;30;43m%-68s\033[0m\n' "$_title"
+  else
+    printf '  %s\n' "$_title"
+  fi
+  tp_print_styled_line "1;33" "$_rule"
   case "$_channel" in
     canary)
-      tp_print_styled_line "33" "Canary follows every green trunk merge. It is not a supported release."
+      tp_print_styled_line "33" "   Canary follows every green trunk merge. It is not a supported"
+      tp_print_styled_line "33" "   release: builds can break, change behaviour or need a fresh install"
+      tp_print_styled_line "33" "   at any time. Do not run it in production."
       ;;
     rc)
-      tp_print_styled_line "33" "This is a release candidate, not a supported release."
+      tp_print_styled_line "33" "   This is a release candidate, not a supported release. It may still"
+      tp_print_styled_line "33" "   change before the final tag. Do not run it in production."
       ;;
     *)
-      tp_print_styled_line "33" "This channel is not a supported release. Use it only if you intend to run pre-release software."
+      tp_print_styled_line "33" "   This channel is not a supported release. Use it only if you intend"
+      tp_print_styled_line "33" "   to run pre-release software. Do not run it in production."
       ;;
   esac
+  printf '\n'
+  tp_print_styled_line "33" "   Supported release:  curl -fsSL turbopanel.sh | sh"
+  tp_print_styled_line "1;33" "$_rule"
 }
 
 tp_print_instance_welcome() {
   _channel="${TURBOPANEL_UPDATE_CHANNEL:-release}"
 
   printf '\n'
-  tp_print_styled_line "1" "Welcome to the TurboPanel Self-Hosted Instance Installer / Updater"
+  tp_print_styled_line "1" '  ╭──────────────────────────────────────────────────────────────╮'
+  tp_print_styled_line "1" '  │  ⚡ TurboPanel  ·  Self-Hosted Instance Installer / Updater  │'
+  tp_print_styled_line "1" '  ╰──────────────────────────────────────────────────────────────╯'
   _version=""
   _version="$(tp_peek_instance_version 2>/dev/null)" || _version=""
   if [ -n "$_version" ]; then
-    tp_print_styled_line "1;36" "v${_version}"
+    tp_print_styled_line "1;36" "  v${_version}"
   else
-    tp_print_styled_line "1;36" "channel ${_channel}"
+    tp_print_styled_line "1;36" "  channel ${_channel}"
   fi
   printf '\n'
-  printf 'This installs the full TurboPanel control plane on this host.\n'
-  printf '\n'
-  printf 'Connecting a server to an existing control plane? Sign in to that panel\n'
-  printf 'and copy the install command from Servers. It includes the license this\n'
-  printf 'host needs.\n'
   if [ "$_channel" != "release" ]; then
     tp_print_nonstable_channel_warning "$_channel"
+    printf '\n'
   fi
+  printf '  This installs the full TurboPanel control plane on this host.\n'
+  printf '\n'
+  printf '  Connecting a server to an existing control plane? Sign in to that\n'
+  printf '  panel and copy the install command from Servers. It includes the\n'
+  printf '  license this host needs.\n'
   printf '\n'
   if [ -t 1 ] && tp_is_interactive; then
-    printf 'Press Enter to continue, or q to quit. '
+    if [ "$_channel" != "release" ]; then
+      printf '  Press Enter to continue on the %s channel, or q to quit. ' "$_channel"
+    else
+      printf '  Press Enter to continue, or q to quit. '
+    fi
     _cont=""
     read -r _cont </dev/tty || _cont=""
     printf '\n'

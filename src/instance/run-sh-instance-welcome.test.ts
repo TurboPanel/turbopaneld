@@ -82,7 +82,7 @@ test({
     assertEquals(result.status, 0, result.stdout);
     assertStringIncludes(
       result.stdout,
-      "Welcome to the TurboPanel Self-Hosted Instance Installer / Updater",
+      "TurboPanel  ·  Self-Hosted Instance Installer / Updater",
     );
     assertStringIncludes(
       result.stdout,
@@ -98,17 +98,21 @@ test({
     );
     assertStringIncludes(
       result.stdout,
-      "*** WARNING: THIS IS A NON-STABLE UPDATE CHANNEL (CANARY) ***",
+      "WARNING: PRE-RELEASE UPDATE CHANNEL (CANARY)",
     );
     assertStringIncludes(
       result.stdout,
-      "Canary follows every green trunk merge. It is not a supported release.",
+      "Canary follows every green trunk merge. It is not a supported",
+    );
+    assertStringIncludes(
+      result.stdout,
+      "Supported release:  curl -fsSL turbopanel.sh | sh",
     );
   },
 });
 
 test({
-  name: "instance welcome on release has no non-stable warning",
+  name: "instance welcome on release has no pre-release warning",
   permissions: shPermissions,
   fn: async () => {
     const result = await evalHelper(
@@ -123,7 +127,8 @@ test({
     assertEquals(result.status, 0, result.stdout);
     assertStringIncludes(result.stdout, "v0.1.1");
     assertEquals(result.stdout.includes("WARNING"), false);
-    assertEquals(result.stdout.includes("NON-STABLE"), false);
+    assertEquals(result.stdout.includes("PRE-RELEASE"), false);
+    assertEquals(result.stdout.includes("Supported release:"), false);
   },
 });
 
@@ -143,11 +148,11 @@ test({
     assertEquals(result.status, 0, result.stdout);
     assertStringIncludes(
       result.stdout,
-      "*** WARNING: THIS IS A NON-STABLE UPDATE CHANNEL (RC) ***",
+      "WARNING: PRE-RELEASE UPDATE CHANNEL (RC)",
     );
     assertStringIncludes(
       result.stdout,
-      "This is a release candidate, not a supported release.",
+      "This is a release candidate, not a supported release. It may still",
     );
   },
 });
