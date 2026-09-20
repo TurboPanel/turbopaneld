@@ -53,6 +53,7 @@ import type { CommandSummaryRedactor } from "../../logs/contracts.ts";
 import { redactCommandSummary } from "../../logs/redactor.ts";
 import { logInfo, logWarn } from "../../logger.ts";
 import { runBuildkitSetup as defaultRunBuildkitSetup } from "../../orchestration/ansible.ts";
+import { createSymlink } from "../../scoped-writes.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import type { EnvironmentDeploySourceBuild } from "../../instance/commands/contracts.ts";
 import type { ReleaseOutputHandler } from "./checkout.ts";
@@ -414,7 +415,7 @@ async function refreshCurrentSymlink(
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) throw err;
   }
-  await Deno.symlink(versionDir, currentLink);
+  await createSymlink(versionDir, currentLink);
 }
 
 async function installBuildkit(

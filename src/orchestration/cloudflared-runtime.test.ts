@@ -304,11 +304,17 @@ exit 0
       }
       return originalFetch(input);
     };
+    // Only the probe throws: the install itself shells out to `cp` / `chmod`
+    // (Deno cannot write a path on its own run allowlist), and failing those
+    // would abort before the probe this test is about.
     Deno.Command = class extends originalCommand {
+      readonly #isProbe: boolean;
       constructor(command: string | URL, options?: Deno.CommandOptions) {
         super(command, options);
+        this.#isProbe = String(command) === bin;
       }
       override output(): Promise<Deno.CommandOutput> {
+        if (!this.#isProbe) return super.output();
         return Promise.reject(new TypeError("version probe failed"));
       }
     } as typeof Deno.Command;

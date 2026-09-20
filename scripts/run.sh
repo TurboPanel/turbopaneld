@@ -688,19 +688,19 @@ TP_HOST_LOCAL_ARTIFACTS=".git .github logs cloudflared"
 
 # Keep in sync with orchestration/roles/deno-runtime/defaults/main.yml
 # (deno_version + deno_sha256; src/orchestration/paths.test.ts pins all three).
-TP_DENO_VERSION="2.9.6"
+TP_DENO_VERSION="2.9.7"
 
 # Scoped Deno grants for the JS-fallback installer verbs (bootstrap-orchestration,
 # run-installer), which run as root before the unit exists. Rendered by
 # src/daemon-permissions.ts renderInstallerPermissionFlags() and pinned by
 # src/daemon-permissions.test.ts — never --allow-all.
-TP_INSTALLER_DENO_PERMISSIONS="--allow-read=/opt/turbopanel,/etc/turbopanel,/var/lib/turbopanel,/var/log/turbopanel,/run/turbopanel,/tmp,/root/.ansible,/etc/os-release,/etc/hostname,/etc/machine-id,/etc/passwd,/etc/group,/etc/ssl,/etc/systemd,/proc,/sys,/dev,/usr,/bin,/sbin,/lib,/lib64 --allow-write=/opt/turbopanel,/etc/turbopanel,/var/lib/turbopanel,/var/log/turbopanel,/run/turbopanel,/tmp,/root/.ansible --allow-run=sh,/bin/sh,bash,cat,ls,id,/usr/bin/id,getent,systemctl,tar,/usr/bin/tar,curl,/usr/bin/curl,git,openssl,/usr/bin/openssl,/opt/turbopanel/vendor/deno/bin/deno,/opt/turbopanel/vendor/deno/current/deno,/opt/turbopanel/vendor/uv/0.11.21/uv,/opt/turbopanel/vendor/uv/0.11.21/uvx,/opt/turbopanel/vendor/ansible/2.20/bin/ansible-playbook,/opt/turbopanel/vendor/ansible/2.20/bin/ansible-galaxy,/opt/turbopanel/vendor/ansible/2.20/bin/ansible-lint --allow-env --allow-net --deny-net=169.254.169.254,metadata.google.internal,[fd00:ec2::254] --allow-sys=networkInterfaces,hostname,statfs,uid"
+TP_INSTALLER_DENO_PERMISSIONS="--allow-read=/opt/turbopanel,/etc/turbopanel,/var/lib/turbopanel,/var/log/turbopanel,/run/turbopanel,/tmp,/root/.ansible,/etc/os-release,/etc/hostname,/etc/machine-id,/etc/passwd,/etc/group,/etc/ssl,/etc/systemd,/proc,/sys,/dev,/usr,/bin,/sbin,/lib,/lib64 --allow-write=/opt/turbopanel,/etc/turbopanel,/var/lib/turbopanel,/var/log/turbopanel,/run/turbopanel,/tmp,/root/.ansible --allow-run=sh,/bin/sh,bash,cat,ls,cp,chmod,ln,id,/usr/bin/id,getent,systemctl,tar,/usr/bin/tar,curl,/usr/bin/curl,git,openssl,/usr/bin/openssl,/opt/turbopanel/vendor/deno/bin/deno,/opt/turbopanel/vendor/deno/current/deno,/opt/turbopanel/vendor/uv/0.11.21/uv,/opt/turbopanel/vendor/uv/0.11.21/uvx,/opt/turbopanel/vendor/ansible/2.20/bin/ansible-playbook,/opt/turbopanel/vendor/ansible/2.20/bin/ansible-galaxy,/opt/turbopanel/vendor/ansible/2.20/bin/ansible-lint --allow-env --allow-net --deny-net=169.254.169.254,metadata.google.internal,[fd00:ec2::254] --allow-sys=networkInterfaces,hostname,statfs,uid"
 # Upstream SHA-256 of the release zip per architecture (dl.deno.land publishes
 # `<asset>.sha256sum` beside each asset). The download below is verified
 # against these before extraction — this path runs as root before any Ansible
 # hardening on JS-fallback hosts, so it cannot lean on the role's check.
-TP_DENO_SHA256_X86_64="394f07f4da2bebe6ce6f1e7ce0fa16429b29b08c35e3fac3fe25972676dff4b2"
-TP_DENO_SHA256_AARCH64="9a46afc6c392c7cd2ff71a31558935545b46408d0e87f7a86908c712721c046e"
+TP_DENO_SHA256_X86_64="c6527f24f4b16031d3ae4fa9f658d5f11534c8d84ce7dc8502420280919c3490"
+TP_DENO_SHA256_AARCH64="c832298b1ad4422481334855f6003e0f54145762c5a134f20a489511d2f65bbf"
 
 # Print the pinned digest for the host architecture ($1 = uname -m), or fail
 # when none is pinned — a bump without digests must not install anything.

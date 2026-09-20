@@ -206,21 +206,22 @@ test("stageRelease rethrows a non-NotFound source stat error", async () => {
   });
 });
 
-test("linkReleaseSharedDir falls back to sudo when symlink is denied", async () => {
+/**
+ * The unprivileged tier of these ladders is now an `ln` subprocess, not
+ * `Deno.symlink` — that API refuses path-scoped grants outright, so the
+ * compiled daemon could never have used it (`src/scoped-writes.ts`). There is
+ * no Deno API left to stub, so the failure is produced the way a managed host
+ * produces it: the link's parent directory is not writable by this process.
+ * Leaving the site directory uncreated fails `ln` for any uid, root included.
+ */
+test("linkReleaseSharedDir falls back to sudo when the unprivileged link fails", async () => {
   await withTempRelease(async (root) => {
     const releaseDir = join(root, "releases", "rel-1");
-    await Deno.mkdir(releaseDir, { recursive: true });
     const argv: string[][] = [];
-    const originalSymlink = Deno.symlink;
-    Deno.symlink = () => Promise.reject(denied("symlink"));
-    try {
-      await linkReleaseSharedDir(releaseDir, (_command, args) => {
-        argv.push([...args]);
-        return Promise.resolve({ success: true, stdout: "", stderr: "" });
-      });
-    } finally {
-      Deno.symlink = originalSymlink;
-    }
+    await linkReleaseSharedDir(releaseDir, (_command, args) => {
+      argv.push([...args]);
+      return Promise.resolve({ success: true, stdout: "", stderr: "" });
+    });
     assertEquals(argv.some((args) => args.includes("ln")), true);
     assertEquals(
       argv.some((args) => args.includes(RELEASE_SHARED_LINK_TARGET)),
@@ -232,24 +233,17 @@ test("linkReleaseSharedDir falls back to sudo when symlink is denied", async () 
 test("linkReleaseSharedDir throws when privileged ln fails", async () => {
   await withTempRelease(async (root) => {
     const releaseDir = join(root, "releases", "rel-1");
-    await Deno.mkdir(releaseDir, { recursive: true });
-    const originalSymlink = Deno.symlink;
-    Deno.symlink = () => Promise.reject(denied("symlink"));
-    try {
-      await assertRejects(
-        () =>
-          linkReleaseSharedDir(releaseDir, () =>
-            Promise.resolve({
-              success: false,
-              stdout: "",
-              stderr: "ln denied",
-            })),
-        Error,
-        "ln denied",
-      );
-    } finally {
-      Deno.symlink = originalSymlink;
-    }
+    await assertRejects(
+      () =>
+        linkReleaseSharedDir(releaseDir, () =>
+          Promise.resolve({
+            success: false,
+            stdout: "",
+            stderr: "ln denied",
+          })),
+      Error,
+      "ln denied",
+    );
   });
 });
 
@@ -277,24 +271,17 @@ test("swapCurrentSymlink falls back to sudo and fails when ln is denied", async 
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
       { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
     );
-    await Deno.mkdir(paths.releaseDir, { recursive: true });
-    const originalSymlink = Deno.symlink;
-    Deno.symlink = () => Promise.reject(denied("symlink"));
-    try {
-      await assertRejects(
-        () =>
-          swapCurrentSymlink(paths, () =>
-            Promise.resolve({
-              success: false,
-              stdout: "",
-              stderr: "ln failed",
-            })),
-        Error,
-        "ln failed",
-      );
-    } finally {
-      Deno.symlink = originalSymlink;
-    }
+    await assertRejects(
+      () =>
+        swapCurrentSymlink(paths, () =>
+          Promise.resolve({
+            success: false,
+            stdout: "",
+            stderr: "ln failed",
+          })),
+      Error,
+      "ln failed",
+    );
   });
 });
 
@@ -304,28 +291,21 @@ test("swapCurrentSymlink privileged path throws when mv fails", async () => {
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
       { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
     );
-    await Deno.mkdir(paths.releaseDir, { recursive: true });
-    const originalSymlink = Deno.symlink;
-    Deno.symlink = () => Promise.reject(denied("symlink"));
-    try {
-      await assertRejects(
-        () =>
-          swapCurrentSymlink(paths, (_command, args) => {
-            if (args.includes("mv")) {
-              return Promise.resolve({
-                success: false,
-                stdout: "",
-                stderr: "mv failed",
-              });
-            }
-            return Promise.resolve({ success: true, stdout: "", stderr: "" });
-          }),
-        Error,
-        "mv failed",
-      );
-    } finally {
-      Deno.symlink = originalSymlink;
-    }
+    await assertRejects(
+      () =>
+        swapCurrentSymlink(paths, (_command, args) => {
+          if (args.includes("mv")) {
+            return Promise.resolve({
+              success: false,
+              stdout: "",
+              stderr: "mv failed",
+            });
+          }
+          return Promise.resolve({ success: true, stdout: "", stderr: "" });
+        }),
+      Error,
+      "mv failed",
+    );
   });
 });
 
@@ -978,24 +958,17 @@ test("promoteRelease swallows a failed privileged cleanup", async () => {
   });
 });
 
-test("swapCurrentSymlink privileged path succeeds after an unprivileged deny", async () => {
+test("swapCurrentSymlink privileged path succeeds after an unprivileged failure", async () => {
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
       { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
     );
-    await Deno.mkdir(paths.releaseDir, { recursive: true });
     const argv: string[][] = [];
-    const originalSymlink = Deno.symlink;
-    Deno.symlink = () => Promise.reject(denied("symlink"));
-    try {
-      await swapCurrentSymlink(paths, (_command, args) => {
-        argv.push([...args]);
-        return Promise.resolve({ success: true, stdout: "", stderr: "" });
-      });
-    } finally {
-      Deno.symlink = originalSymlink;
-    }
+    await swapCurrentSymlink(paths, (_command, args) => {
+      argv.push([...args]);
+      return Promise.resolve({ success: true, stdout: "", stderr: "" });
+    });
     assertEquals(argv.some((args) => args.includes("ln")), true);
     assertEquals(argv.some((args) => args.includes("mv")), true);
   });

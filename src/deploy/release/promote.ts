@@ -25,6 +25,7 @@
 
 import { basename, join } from "@std/path";
 import type { RunFn } from "../ensure-principal.ts";
+import { createSymlink, ScopedWriteError } from "../../scoped-writes.ts";
 import {
   RELEASE_METADATA_DIRNAME,
   RELEASE_PUBLISHED_MODE,
@@ -41,6 +42,23 @@ import {
 
 /** Never copied into a release — build metadata, not shipped artifacts. */
 const EXCLUDED_TREE_ENTRIES = new Set([".git"]);
+
+/**
+ * True when the unprivileged attempt could not do the work and the `sudo`
+ * rung should be tried.
+ *
+ * The release tree is root-owned, so every helper here is a two-tier ladder.
+ * Deno's own APIs report the first tier failing as `PermissionDenied`; the
+ * `ln` subprocess that {@link createSymlink} has to use instead of
+ * `Deno.symlink` — which refuses path-scoped grants outright, see
+ * `../../scoped-writes.ts` — reports it as a non-zero exit.
+ * Both mean the same thing to a caller, and missing the second kind is what
+ * would make a managed-host promote throw instead of escalating.
+ */
+function isUnprivilegedFailure(err: unknown): boolean {
+  return err instanceof Deno.errors.PermissionDenied ||
+    err instanceof ScopedWriteError;
+}
 
 function isMissingPrivilegedPathError(stderr: string): boolean {
   const text = stderr.toLowerCase();
@@ -247,7 +265,7 @@ export async function copyTree(from: string, to: string): Promise<void> {
     const target = join(to, entry.name);
     if (entry.isSymlink) {
       const linkTarget = await Deno.readLink(source);
-      await Deno.symlink(linkTarget, target);
+      await createSymlink(linkTarget, target);
       continue;
     }
     if (entry.isDirectory) {
@@ -294,7 +312,7 @@ export async function stageRelease(
   try {
     await copyTree(sourceDir, params.paths.releaseDir);
   } catch (err) {
-    if (!(err instanceof Deno.errors.PermissionDenied)) throw err;
+    if (!isUnprivilegedFailure(err)) throw err;
     await copyTreePrivileged(
       sourceDir,
       params.paths.releaseDir,
@@ -337,9 +355,9 @@ export async function linkReleaseSharedDir(
     } catch (err) {
       if (!(err instanceof Deno.errors.NotFound)) throw err;
     }
-    await Deno.symlink(RELEASE_SHARED_LINK_TARGET, linkPath);
+    await createSymlink(RELEASE_SHARED_LINK_TARGET, linkPath);
   } catch (err) {
-    if (!(err instanceof Deno.errors.PermissionDenied)) throw err;
+    if (!isUnprivilegedFailure(err)) throw err;
     await runFn("sudo", ["-n", "rm", "-rf", "--", linkPath]);
     const ln = await runFn("sudo", [
       "-n",
@@ -374,7 +392,7 @@ export async function swapCurrentSymlink(
     } catch (err) {
       if (!(err instanceof Deno.errors.NotFound)) throw err;
     }
-    await Deno.symlink(target, tmpLink);
+    await createSymlink(target, tmpLink);
     try {
       // Same filesystem by construction (both under the site dir) — atomic.
       await Deno.rename(tmpLink, paths.currentLink);
@@ -387,7 +405,7 @@ export async function swapCurrentSymlink(
       throw err;
     }
   } catch (err) {
-    if (!(err instanceof Deno.errors.PermissionDenied)) throw err;
+    if (!isUnprivilegedFailure(err)) throw err;
     await swapCurrentSymlinkPrivileged(
       paths.currentLink,
       target,

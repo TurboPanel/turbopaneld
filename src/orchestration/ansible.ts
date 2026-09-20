@@ -1,4 +1,5 @@
 import { run, runLogged, runOrThrow, symlinkPointsAt } from "./exec.ts";
+import { createSymlink } from "../scoped-writes.ts";
 import {
   galaxyDockerRoleHelperInvocation,
   playbooksNeedRootHelper,
@@ -119,9 +120,7 @@ async function repointAnsibleCurrent(): Promise<void> {
     }
   }
   try {
-    await Deno.symlink(ANSIBLE_INSTALL_DIR, ANSIBLE_CURRENT_DIR, {
-      type: "dir",
-    });
+    await createSymlink(ANSIBLE_INSTALL_DIR, ANSIBLE_CURRENT_DIR);
   } catch (err) {
     logWarn("orchestration", "could not create ansible current symlink:", err);
   }

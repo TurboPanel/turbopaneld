@@ -141,7 +141,7 @@ service users `tp`, `tpctrl`, `tpcache`, `tpdata`, `tpqueue`, and
 `tpcaddy` — see **`../turbopanel/AGENTS.md`** (Production UID/GID allocation).
 
 **Deno version pin:** `DENO_VERSION` (`src/orchestration/paths.ts`) =
-**`2.9.6`**. Keep it in step with `deno_version` in
+**`2.9.7`**. Keep it in step with `deno_version` in
 `orchestration/roles/deno-runtime/defaults/main.yml`, `TP_DENO_VERSION` in
 `scripts/run.sh`, and `DENO_VERSION` in
 [TurboPanel/dev](https://github.com/TurboPanel/dev) `src/lib/paths.ts` (dev
@@ -524,6 +524,25 @@ Six controls, each with a test that fails the build when it regresses:
   rendered `--allow-run` paths: re-render (see the test failure) and commit
   all copies. NVML is opened by absolute path first (`NVML_LIBRARY_CANDIDATES`)
   because a scoped `--allow-ffi` resolves bare names against the cwd.
+- **Two writes `--allow-write` never covers** — `src/scoped-writes.ts`.
+  Deno refuses *every* write (`writeFile`, `copyFile`, `chmod`, `rename`,
+  `remove`) to a path on the **`--allow-run`** allowlist, so uv, uvx, and
+  cloudflared — run targets that the binary-as-installer also has to install —
+  go through `installVendorExecutable` (`cp` + `chmod`). And **`Deno.symlink()`
+  requires *unscoped* read and write**: a link's target is only resolved on
+  traversal, so no path-scoped grant covers it however wide, and every
+  `current` link — vendor runtimes, release promote, railpack, hosting Caddy —
+  goes through `createSymlink` (`ln -sfn`). Neither is reported at compile
+  time: the first broke the first canary install after this hardening, the
+  second silently skipped every vendor `current` symlink on the same run.
+  `cp` / `chmod` / `ln` are therefore on both run allowlists, and
+  `src/scoped-writes.test.ts` reproduces both refusals in a child process with
+  production-shaped grants and fails on a new `Deno.symlink(` anywhere in
+  `src/`. A helper that fails throws **`ScopedWriteError`**, which is the
+  subprocess counterpart of `PermissionDenied`: privilege ladders that retry
+  under `sudo` (`release/promote.ts`) must treat both as "the unprivileged
+  attempt could not do it" — `Deno.symlink`'s own refusal is `NotCapable`, so
+  catching `PermissionDenied` alone silently skipped the sudo tier.
 - **Install root ownership** — `/opt/turbopanel`, `bin/`, `lib/`, `share/`,
   `share/orchestration` and every vendored runtime are `root:tp 0750`
   (`turbopanel-user`, `daemon-layout`); `daemon-install.yml` no longer chowns
