@@ -258,10 +258,17 @@ The [dev](https://github.com/TurboPanel/dev) console threads this as
 `installDevEnvironment(..., mode)` with `mode: "if-needed" | "force"` —
 `"if-needed"` only for the post-daemon-install chain; `"force"` (and
 `TURBOPANEL_FORCE_CONVERGE=1`) for Developer → Converge / re-converge and
-legacy reset/provisioner callers. Optional co-located tooling
-(`TURBOPANEL_OPTIONAL_*` → `turbopanel_optional_*`) starts Drizzle Studio,
-Mailpit, Expo UI, website, and Redis Insight only when selected; units
-are still installed so the TUI can enable them later.
+legacy reset/provisioner callers. Optional co-located tooling arrives as
+**one** structured payload — `TURBOPANEL_DEV_CONVERGE_OPTIONS`, JSON
+`{ "optionalServices": { "<stem>": bool } }` keyed by Ansible stem, built from
+the dev console's single catalog (`dev/src/lib/optional-dev-services.ts`).
+`src/orchestration/dev-converge-options.ts` parses it once per
+`instance-dev-install` and emits a single `-e '{"turbopanel_optional_<stem>": …}'`
+extra-vars object; the same normalised payload is folded into the converge
+stamp. No payload means no optional extra-vars (playbook `vars:` and role
+`| default()` filters decide). Drizzle Studio, Mailpit, Expo UI, website, and
+Redis Insight start only when selected; units are still installed so the TUI
+can enable them later.
 
 ## Project metadata
 

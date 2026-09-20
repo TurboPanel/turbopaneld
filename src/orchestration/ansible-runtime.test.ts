@@ -209,12 +209,7 @@ describe("ansible runtime with stubbed binaries", () => {
       "TURBOPANEL_DEV_UID",
       "TURBOPANEL_DEV_GID",
       "TURBOPANEL_DEV_ROOT",
-      "TURBOPANEL_OPTIONAL_DBSTUDIO",
-      "TURBOPANEL_OPTIONAL_UI",
-      "TURBOPANEL_OPTIONAL_WEBSITE",
-      "TURBOPANEL_OPTIONAL_MAILPIT",
-      "TURBOPANEL_OPTIONAL_REDIS_INSIGHT",
-      "TURBOPANEL_OPTIONAL_STRIPE_LISTEN",
+      "TURBOPANEL_DEV_CONVERGE_OPTIONS",
     ] as const;
     const previous = new Map<string, string | undefined>();
     for (const key of keys) {
@@ -224,12 +219,19 @@ describe("ansible runtime with stubbed binaries", () => {
     Deno.env.set("TURBOPANEL_DEV_UID", "1000");
     Deno.env.set("TURBOPANEL_DEV_GID", "1000");
     Deno.env.set("TURBOPANEL_DEV_ROOT", "/home/dev");
-    Deno.env.set("TURBOPANEL_OPTIONAL_DBSTUDIO", "true");
-    Deno.env.set("TURBOPANEL_OPTIONAL_UI", "0");
-    Deno.env.set("TURBOPANEL_OPTIONAL_WEBSITE", "maybe");
-    Deno.env.set("TURBOPANEL_OPTIONAL_MAILPIT", "yes");
-    Deno.env.set("TURBOPANEL_OPTIONAL_REDIS_INSIGHT", "no");
-    Deno.env.set("TURBOPANEL_OPTIONAL_STRIPE_LISTEN", "1");
+    Deno.env.set(
+      "TURBOPANEL_DEV_CONVERGE_OPTIONS",
+      JSON.stringify({
+        optionalServices: {
+          dbstudio: true,
+          ui: false,
+          website: "maybe",
+          mailpit: true,
+          redis_insight: false,
+          stripe_listen: true,
+        },
+      }),
+    );
     try {
       await ansible.runDaemonConverge();
     } finally {

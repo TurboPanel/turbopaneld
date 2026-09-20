@@ -11,8 +11,6 @@ import {
   devInstanceExtraArgs,
   dispatchOrchestrationAction,
   emitEvent,
-  optionalDevServiceExtraArgs,
-  optionalDevServiceFlag,
   type OrchestrationActionDeps,
   PLAYBOOKS_NEEDING_DOCKER_GALAXY,
   resolveDaemonEnvPath,
@@ -21,6 +19,7 @@ import {
   runPlaybook,
   slimAnsibleEvent,
 } from "./run-orchestration-action.ts";
+import { parseDevConvergeOptions } from "../src/orchestration/dev-converge-options.ts";
 import type { DevOrchestrationLayout } from "../src/orchestration/dev-orchestration.ts";
 import { withTempLayout } from "../src/testing/temp-layout.ts";
 
@@ -172,49 +171,46 @@ test("slimAnsibleEvent passes through non-objects and events without hosts", () 
   });
 });
 
-test("optionalDevServiceFlag parses true/false tokens and falls back", () => {
-  const env = fakeEnv({
-    TURBOPANEL_OPTIONAL_UI: "yes",
-    TURBOPANEL_OPTIONAL_DBSTUDIO: "0",
-    TURBOPANEL_OPTIONAL_REDIS_INSIGHT: "maybe",
+test("devInstanceExtraArgs emits one JSON extra-vars object from the options payload", () => {
+  const payload = JSON.stringify({
+    optionalServices: {
+      dbstudio: true,
+      ui: false,
+      website: true,
+      mailpit: true,
+      redis_insight: false,
+      stripe_listen: true,
+    },
   });
-  assertEquals(
-    optionalDevServiceFlag("TURBOPANEL_OPTIONAL_UI", false, env),
-    true,
+  const args = devInstanceExtraArgs(
+    fakeEnv({ TURBOPANEL_DEV_CONVERGE_OPTIONS: payload }),
   );
+  const jsonArgs = args.filter((arg) => arg.startsWith("{"));
+  assertEquals(jsonArgs.length, 1);
+  assertEquals(args[args.indexOf(jsonArgs[0]) - 1], "-e");
+  assertEquals(JSON.parse(jsonArgs[0]), {
+    turbopanel_optional_dbstudio: true,
+    turbopanel_optional_mailpit: true,
+    turbopanel_optional_redis_insight: false,
+    turbopanel_optional_stripe_listen: true,
+    turbopanel_optional_ui: false,
+    turbopanel_optional_website: true,
+  });
+  // The legacy per-service form must be gone.
   assertEquals(
-    optionalDevServiceFlag("TURBOPANEL_OPTIONAL_DBSTUDIO", true, env),
+    args.some((arg) => /^turbopanel_optional_[a-z_]+=/.test(arg)),
     false,
-  );
-  assertEquals(
-    optionalDevServiceFlag("TURBOPANEL_OPTIONAL_REDIS_INSIGHT", false, env),
-    false,
-  );
-  assertEquals(
-    optionalDevServiceFlag("TURBOPANEL_OPTIONAL_MAILPIT", true, env),
-    true,
   );
 });
 
-test("optionalDevServiceExtraArgs emits ansible -e pairs from env", () => {
-  const args = optionalDevServiceExtraArgs(
-    fakeEnv({
-      TURBOPANEL_OPTIONAL_DBSTUDIO: "1",
-      TURBOPANEL_OPTIONAL_UI: "false",
-    }),
+test("devInstanceExtraArgs emits no optional extra-vars without a payload", () => {
+  const args = devInstanceExtraArgs(fakeEnv({}));
+  assertEquals(args.some((arg) => arg.includes("turbopanel_optional_")), false);
+  const explicit = devInstanceExtraArgs(
+    fakeEnv({ TURBOPANEL_DEV_CONVERGE_OPTIONS: "not json" }),
+    parseDevConvergeOptions('{"optionalServices":{"ui":true}}'),
   );
-  assertEquals(args.includes("turbopanel_optional_dbstudio=true"), true);
-  assertEquals(args.includes("turbopanel_optional_ui=false"), true);
-  assertEquals(args.includes("turbopanel_optional_website=true"), true);
-  // Stripe listen is off unless asked for: it needs a hand-supplied test key.
-  assertEquals(args.includes("turbopanel_optional_stripe_listen=false"), true);
-  const stripeOn = optionalDevServiceExtraArgs(
-    fakeEnv({ TURBOPANEL_OPTIONAL_STRIPE_LISTEN: "yes" }),
-  );
-  assertEquals(
-    stripeOn.includes("turbopanel_optional_stripe_listen=true"),
-    true,
-  );
+  assertEquals(explicit.includes('{"turbopanel_optional_ui":true}'), true);
 });
 
 test("devInstanceExtraArgs includes SSH repo urls and workers postgres expose", () => {
@@ -298,8 +294,10 @@ test("resolveDaemonEnvPath joins configDir with daemon.env", async () => {
 });
 
 test("instance-dev-install --if-needed skips before ansible when stamp matches", async () => {
+  const skipOptions: unknown[] = [];
   const rec = recordingDeps({
-    emitDevConvergeSkippedIfNeeded: (_ifNeeded, _enabled, emit) => {
+    emitDevConvergeSkippedIfNeeded: (_ifNeeded, _enabled, emit, options) => {
+      skipOptions.push(options);
       emit({
         _event: "dev_converge_skipped",
         reason: "dev converge stamp matches (orchestration inputs unchanged)",
@@ -308,8 +306,10 @@ test("instance-dev-install --if-needed skips before ansible when stamp matches",
     },
   });
 
-  const outcome = await runInstanceDevInstall(true, rec.deps);
+  const options = parseDevConvergeOptions('{"optionalServices":{"ui":false}}');
+  const outcome = await runInstanceDevInstall(true, rec.deps, options);
   assertEquals(outcome, "skipped");
+  assertEquals(skipOptions, [options]);
   assertEquals(rec.ansibleCalls, 0);
   assertEquals(rec.galaxyCalls, 0);
   assertEquals(rec.playbookInvocations.length, 0);
@@ -321,9 +321,26 @@ test("instance-dev-install --if-needed skips before ansible when stamp matches",
 });
 
 test("instance-dev-install runs ansible + galaxy + playbook + stamp when needed", async () => {
-  const rec = recordingDeps();
-  const outcome = await runInstanceDevInstall(false, rec.deps);
+  const stampOptions: unknown[] = [];
+  const rec = recordingDeps({
+    computeDevConvergeStamp: (options) => {
+      stampOptions.push(options);
+      return Promise.resolve("stamp-abc");
+    },
+  });
+  const options = parseDevConvergeOptions(
+    '{"optionalServices":{"dbstudio":false,"ui":true}}',
+  );
+  const outcome = await runInstanceDevInstall(false, rec.deps, options);
   assertEquals(outcome, "ran");
+  // The same parsed payload feeds the playbook extra-vars and the stamp.
+  assertEquals(stampOptions, [options]);
+  assertEquals(
+    rec.playbookInvocations[0]?.args.includes(
+      '{"turbopanel_optional_dbstudio":false,"turbopanel_optional_ui":true}',
+    ),
+    true,
+  );
   assertEquals(rec.calls, [
     "ensureAnsible",
     "ensureGalaxyDockerRole",

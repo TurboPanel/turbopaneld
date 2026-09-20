@@ -10,6 +10,7 @@ import {
   shouldSkipDevConverge,
   writeDevConvergeStamp,
 } from "./converge-stamp.ts";
+import { parseDevConvergeOptions } from "./dev-converge-options.ts";
 import { DEV_CONVERGE_MANIFEST_FILE } from "./dev-orchestration.ts";
 import {
   type TempLayoutFixture,
@@ -242,8 +243,7 @@ test("devConvergeEnvMaterial captures dev-only extra-vars with defaults", () => 
       "TURBOPANEL_UI_MODE",
       "TURBOPANEL_INSTANCE_RUN_MODE",
       "TURBOPANEL_INSTANCE_RUNTIME",
-      "TURBOPANEL_OPTIONAL_DBSTUDIO",
-      "TURBOPANEL_OPTIONAL_UI",
+      "TURBOPANEL_DEV_CONVERGE_OPTIONS",
     ]
   ) {
     previous.set(key, Deno.env.get(key));
@@ -254,9 +254,8 @@ test("devConvergeEnvMaterial captures dev-only extra-vars with defaults", () => 
     assertStringIncludes(material, "ui_mode=dev");
     assertStringIncludes(material, "instance_run_mode=source");
     assertStringIncludes(material, "instance_runtime=deno");
-    assertStringIncludes(material, "optional_ui=true");
-    assertStringIncludes(material, "optional_dbstudio=false");
-    assertStringIncludes(material, "optional_stripe_listen=false");
+    // No payload → no optional-service lines (playbook defaults decide).
+    assertEquals(material.includes("optional_"), false);
   } finally {
     for (const [key, value] of previous.entries()) {
       if (value === undefined) {
@@ -423,7 +422,7 @@ test("devConvergeEnvMaterial honors explicit static and workers overrides", () =
       "TURBOPANEL_UI_MODE",
       "TURBOPANEL_INSTANCE_RUN_MODE",
       "TURBOPANEL_INSTANCE_RUNTIME",
-      "TURBOPANEL_OPTIONAL_REDIS_INSIGHT",
+      "TURBOPANEL_DEV_CONVERGE_OPTIONS",
     ]
   ) {
     previous.set(key, Deno.env.get(key));
@@ -431,7 +430,10 @@ test("devConvergeEnvMaterial honors explicit static and workers overrides", () =
   Deno.env.set("TURBOPANEL_UI_MODE", "static");
   Deno.env.set("TURBOPANEL_INSTANCE_RUN_MODE", "compiled");
   Deno.env.set("TURBOPANEL_INSTANCE_RUNTIME", "workers");
-  Deno.env.set("TURBOPANEL_OPTIONAL_REDIS_INSIGHT", "yes");
+  Deno.env.set(
+    "TURBOPANEL_DEV_CONVERGE_OPTIONS",
+    '{"optionalServices":{"redis_insight":true}}',
+  );
   try {
     const material = devConvergeEnvMaterial();
     assertStringIncludes(material, "ui_mode=static");
@@ -449,17 +451,11 @@ test("devConvergeEnvMaterial honors explicit static and workers overrides", () =
   }
 });
 
-test("devConvergeEnvMaterial parses optional flags and falls back on garbage", () => {
+test("devConvergeEnvMaterial folds the normalised options payload into the stamp", () => {
   const keys = [
     "TURBOPANEL_DEV_USER",
     "TURBOPANEL_DEV_UID",
     "TURBOPANEL_DEV_GID",
-    "TURBOPANEL_OPTIONAL_UI",
-    "TURBOPANEL_OPTIONAL_WEBSITE",
-    "TURBOPANEL_OPTIONAL_MAILPIT",
-    "TURBOPANEL_OPTIONAL_DBSTUDIO",
-    "TURBOPANEL_OPTIONAL_REDIS_INSIGHT",
-    "TURBOPANEL_OPTIONAL_STRIPE_LISTEN",
   ];
   const previous = new Map<string, string | undefined>();
   for (const key of keys) {
@@ -468,23 +464,28 @@ test("devConvergeEnvMaterial parses optional flags and falls back on garbage", (
   Deno.env.set("TURBOPANEL_DEV_USER", "vagrant");
   Deno.env.set("TURBOPANEL_DEV_UID", "1000");
   Deno.env.set("TURBOPANEL_DEV_GID", "1000");
-  Deno.env.set("TURBOPANEL_OPTIONAL_UI", "false");
-  Deno.env.set("TURBOPANEL_OPTIONAL_WEBSITE", "0");
-  Deno.env.set("TURBOPANEL_OPTIONAL_MAILPIT", "no");
-  Deno.env.set("TURBOPANEL_OPTIONAL_DBSTUDIO", "maybe");
-  Deno.env.set("TURBOPANEL_OPTIONAL_REDIS_INSIGHT", "1");
-  Deno.env.set("TURBOPANEL_OPTIONAL_STRIPE_LISTEN", "yes");
   try {
-    const material = devConvergeEnvMaterial();
+    const options = parseDevConvergeOptions(JSON.stringify({
+      optionalServices: {
+        ui: false,
+        website: false,
+        mailpit: false,
+        dbstudio: "maybe",
+        redis_insight: true,
+        stripe_listen: true,
+      },
+    }));
+    const material = devConvergeEnvMaterial(options);
     assertStringIncludes(material, "dev_user=vagrant");
     assertStringIncludes(material, "dev_uid=1000");
     assertStringIncludes(material, "dev_gid=1000");
     assertStringIncludes(material, "optional_ui=false");
     assertStringIncludes(material, "optional_website=false");
     assertStringIncludes(material, "optional_mailpit=false");
-    assertStringIncludes(material, "optional_dbstudio=false");
     assertStringIncludes(material, "optional_redis_insight=true");
     assertStringIncludes(material, "optional_stripe_listen=true");
+    // Non-boolean values are dropped by the parser, never coerced.
+    assertEquals(material.includes("optional_dbstudio"), false);
   } finally {
     for (const [key, value] of previous.entries()) {
       if (value === undefined) {
@@ -496,17 +497,20 @@ test("devConvergeEnvMaterial parses optional flags and falls back on garbage", (
   }
 });
 
-test("devConvergeEnvMaterial treats garbage optional flags as the fallback true", () => {
-  const previous = Deno.env.get("TURBOPANEL_OPTIONAL_UI");
-  Deno.env.set("TURBOPANEL_OPTIONAL_UI", "maybe");
-  try {
-    const material = devConvergeEnvMaterial();
-    assertStringIncludes(material, "optional_ui=true");
-  } finally {
-    if (previous === undefined) {
-      Deno.env.delete("TURBOPANEL_OPTIONAL_UI");
-    } else {
-      Deno.env.set("TURBOPANEL_OPTIONAL_UI", previous);
-    }
-  }
+test("devConvergeEnvMaterial is stable across payload key order", () => {
+  const a = devConvergeEnvMaterial(
+    parseDevConvergeOptions(
+      '{"optionalServices":{"ui":true,"dbstudio":false}}',
+    ),
+  );
+  const b = devConvergeEnvMaterial(
+    parseDevConvergeOptions(
+      '{"optionalServices":{"dbstudio":false,"ui":true}}',
+    ),
+  );
+  assertEquals(a, b);
+  const c = devConvergeEnvMaterial(
+    parseDevConvergeOptions('{"optionalServices":{"dbstudio":true,"ui":true}}'),
+  );
+  assertEquals(a === c, false);
 });
