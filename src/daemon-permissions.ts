@@ -203,7 +203,10 @@ export const DAEMON_FFI_PATHS: readonly string[] = [
 export const DAEMON_DENY_NET: readonly string[] = [
   "169.254.169.254",
   "metadata.google.internal",
-  "fd00:ec2::254",
+  // Deno wants IPv6 hosts bracketed on the command line (`deno compile`
+  // refuses the bare form: "ipv6 addresses must be enclosed in square
+  // brackets").
+  "[fd00:ec2::254]",
 ];
 
 /**
