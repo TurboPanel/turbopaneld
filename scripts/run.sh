@@ -29,9 +29,9 @@
 #   curl -fsSL turbopanel.sh | sh                        # nothing → panel install
 #   curl -fsSL turbopanel.sh | TURBOPANEL_INSTANCE=1 sh  # the same, said explicitly
 # Decided 2026-09-17: with no license and no daemon arguments the script
-# installs the control plane. On a terminal it first shows a two-line menu so
-# a plain run can be backed out of (or turned into a daemon enrolment); piped
-# without a terminal it proceeds. Daemon arguments without a license
+# installs the control plane. It prints a short welcome (and, on a non-release
+# channel, a yellow non-stable warning) then proceeds; Ctrl-C or q at the
+# continue prompt backs out. Daemon arguments without a license
 # (--host, --tunnel-token, --instance-ca, TURBOPANEL_HOST …) still mean "you
 # meant to enrol a daemon and forgot the license" and stop with that error.
 # Downloads the daemon package for its orchestration tree, then the instance
@@ -836,7 +836,94 @@ tp_run_instance_install() {
 
 set -eu
 
+# Quiet instance-manifest peek for the welcome banner. Failures stay silent —
+# the real fetch in tp_run_instance_install is the one that can abort. Capped
+# so a slow GitHub cannot hold the warning off the screen.
+tp_peek_instance_version() {
+  _channel="${TURBOPANEL_UPDATE_CHANNEL:-release}"
+  if ! _url="$(tp_builtin_repo_manifest_url turbopanel "$_channel")"; then
+    return 1
+  fi
+  _curl="$(tp_release_curl)"
+  _json=""
+  # shellcheck disable=SC2086
+  if ! _json="$($_curl -m 5 "${_url}?$(date +%s)" 2>/dev/null)"; then
+    return 1
+  fi
+  _ver="$(tp_manifest_field "$(tp_manifest_compact "$_json")" "version")"
+  [ -n "$_ver" ] || return 1
+  printf '%s' "$_ver"
+}
+
+tp_print_styled_line() {
+  _codes="$1"
+  _text="$2"
+  if [ -t 1 ]; then
+    printf '\033[%sm%s\033[0m\n' "$_codes" "$_text"
+  else
+    printf '%s\n' "$_text"
+  fi
+}
+
+tp_print_nonstable_channel_warning() {
+  _channel="$1"
+  _channel_upper="$(printf '%s' "$_channel" | tr '[:lower:]' '[:upper:]')"
+  printf '\n'
+  tp_print_styled_line "1;33" "*** WARNING: THIS IS A NON-STABLE UPDATE CHANNEL (${_channel_upper}) ***"
+  case "$_channel" in
+    canary)
+      tp_print_styled_line "33" "Canary follows every green trunk merge. It is not a supported release."
+      ;;
+    rc)
+      tp_print_styled_line "33" "This is a release candidate, not a supported release."
+      ;;
+    *)
+      tp_print_styled_line "33" "This channel is not a supported release. Use it only if you intend to run pre-release software."
+      ;;
+  esac
+}
+
+tp_print_instance_welcome() {
+  _channel="${TURBOPANEL_UPDATE_CHANNEL:-release}"
+
+  printf '\n'
+  tp_print_styled_line "1" "Welcome to the TurboPanel Self-Hosted Instance Installer / Updater"
+  _version=""
+  _version="$(tp_peek_instance_version 2>/dev/null)" || _version=""
+  if [ -n "$_version" ]; then
+    tp_print_styled_line "1;36" "v${_version}"
+  else
+    tp_print_styled_line "1;36" "channel ${_channel}"
+  fi
+  printf '\n'
+  printf 'This installs the full TurboPanel control plane on this host.\n'
+  printf '\n'
+  printf 'Connecting a server to an existing control plane? Sign in to that panel\n'
+  printf 'and copy the install command from Servers. It includes the license this\n'
+  printf 'host needs.\n'
+  if [ "$_channel" != "release" ]; then
+    tp_print_nonstable_channel_warning "$_channel"
+  fi
+  printf '\n'
+  if [ -t 1 ] && tp_is_interactive; then
+    printf 'Press Enter to continue, or q to quit. '
+    _cont=""
+    read -r _cont </dev/tty || _cont=""
+    printf '\n'
+    case "$_cont" in
+      q|Q)
+        echo "run.sh: nothing installed"
+        exit 0
+        ;;
+    esac
+  fi
+}
+
 tp_print_header() {
+  if [ "$INSTANCE_INSTALL" = true ]; then
+    tp_print_instance_welcome
+    return 0
+  fi
   if [ -t 1 ]; then
     printf '\n'
     printf '  ╭─────────────────────────────────────────╮\n'
@@ -932,31 +1019,13 @@ esac
 
 # A bare run — no license, no daemon arguments — is a control plane install.
 # Daemon arguments without a license keep the old error: that is an enrolment
-# that forgot its license, not a request for a panel.
+# that forgot its license, not a request for a panel. The welcome (and the
+# non-stable-channel warning) print from tp_print_header once privileges are
+# settled, so a sudo re-exec does not show the banner twice.
 if [ "$INSTANCE_INSTALL" != true ] && [ -z "$LICENSE" ] && [ -z "$HOST_URL" ] \
   && [ -z "$TUNNEL_TOKEN" ] && [ -z "$INSTANCE_CA" ] && [ -z "$DL_BASE" ] \
   && [ -z "$MANIFEST_URL" ]; then
-  if tp_is_interactive; then
-    tp_print_step "▸" "No license given — this installs a self-hosted TurboPanel control plane on this host."
-    printf '  [1] Install the control plane here (default)\n' >/dev/tty
-    printf '  [2] Enrol this host as a daemon instead (needs a license from an existing panel)\n' >/dev/tty
-    printf '  [q] Quit\n' >/dev/tty
-    printf 'Choice [1]: ' >/dev/tty
-    _choice=""
-    read -r _choice </dev/tty || _choice=""
-    case "$_choice" in
-      ""|1) INSTANCE_INSTALL=true ;;
-      2)
-        printf 'License (base64, from the panel'"'"'s Servers page): ' >/dev/tty
-        read -r LICENSE </dev/tty || LICENSE=""
-        [ -n "$LICENSE" ] || { tp_print_error "a license is required to enrol a daemon"; exit 1; }
-        ;;
-      *) echo "run.sh: nothing installed"; exit 0 ;;
-    esac
-  else
-    tp_print_step "▸" "No license given — installing a self-hosted TurboPanel control plane on this host (set TURBOPANEL_LICENSE to enrol a daemon instead)."
-    INSTANCE_INSTALL=true
-  fi
+  INSTANCE_INSTALL=true
 fi
 
 if [ "$INSTANCE_INSTALL" = true ]; then
