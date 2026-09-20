@@ -30,8 +30,9 @@ Environment=CADDY_PORT={{ caddy_port }}
 Environment=CADDY_TLS_CERT={{ turbopanel_instance_certs_dir }}/self-signed.crt
 Environment=CADDY_TLS_KEY={{ turbopanel_instance_certs_dir }}/self-signed.key
 {% endif %}
+{# The Caddyfile derives its unix/ dial as unix/<TURBOPANEL_RUN_DIR>/instance.sock —
+   the same run-dir + filename contract as the instance (src/server-paths.ts). #}
 Environment=TURBOPANEL_RUN_DIR={{ turbopanel_run_dir }}
-Environment=TURBOPANEL_SOCKET_DIAL={{ (turbopanel_run_dir ~ '/instance.sock') | regex_replace('^/+', '') }}
 Environment=TURBOPANEL_UI_ROOT={{ turbopanel_ui_dist_dir }}
 {% if turbopanel_dev_user | default('') | length > 0 %}
 Environment=CADDY_HTTP_PORT={{ caddy_http_port }}

@@ -25,6 +25,11 @@ import {
   shouldSkipDevConverge,
   writeDevConvergeStamp,
 } from "./converge-stamp.ts";
+import {
+  type DevConvergeOptions,
+  devConvergeOptionsExtraArgs,
+  resolveDevConvergeOptions,
+} from "./dev-converge-options.ts";
 import { join } from "@std/path";
 import { logInfo, logWarn } from "../logger.ts";
 import { readDockerNetworkingState } from "../deploy/docker-networking-state.ts";
@@ -159,53 +164,14 @@ export function devOwnershipPlaybookExtraArgs(
   return args;
 }
 
-function optionalDevServiceFlag(
-  envKey: string,
-  defaultValue: boolean,
-): boolean {
-  const raw = Deno.env.get(envKey)?.trim().toLowerCase();
-  if (!raw) {
-    return defaultValue;
-  }
-  if (raw === "true" || raw === "1" || raw === "yes") {
-    return true;
-  }
-  if (raw === "false" || raw === "0" || raw === "no") {
-    return false;
-  }
-  return defaultValue;
-}
-
-function optionalDevServiceExtraArgs(): string[] {
-  return [
-    "-e",
-    `turbopanel_optional_dbstudio=${
-      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_DBSTUDIO", false)
-    }`,
-    "-e",
-    `turbopanel_optional_ui=${
-      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_UI", true)
-    }`,
-    "-e",
-    `turbopanel_optional_website=${
-      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_WEBSITE", true)
-    }`,
-    "-e",
-    `turbopanel_optional_mailpit=${
-      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_MAILPIT", true)
-    }`,
-    "-e",
-    `turbopanel_optional_redis_insight=${
-      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_REDIS_INSIGHT", false)
-    }`,
-    "-e",
-    `turbopanel_optional_stripe_listen=${
-      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_STRIPE_LISTEN", false)
-    }`,
-  ];
-}
-
-function devInstanceExtraArgs(): string[] {
+/**
+ * Dev/runtime extra-vars shared by every co-located playbook. Optional-service
+ * toggles come from the structured dev-converge options payload
+ * ({@link resolveDevConvergeOptions}) — nothing here reads per-service flags.
+ */
+function devInstanceExtraArgs(
+  options: DevConvergeOptions = resolveDevConvergeOptions(),
+): string[] {
   const uiMode = Deno.env.get("TURBOPANEL_UI_MODE") === "static"
     ? "static"
     : "dev";
@@ -228,7 +194,7 @@ function devInstanceExtraArgs(): string[] {
     `turbopanel_instance_run_mode=${instanceRunMode}`,
     "-e",
     `turbopanel_instance_runtime=${instanceRuntime}`,
-    ...optionalDevServiceExtraArgs(),
+    ...devConvergeOptionsExtraArgs(options),
     ...(instanceRuntime === "workers"
       ? ["-e", "postgres_expose_port=true"]
       : []),
@@ -877,8 +843,12 @@ export async function runInstanceDevInstall(
   onEvent?: AnsibleEventHandler,
 ): Promise<void> {
   const instanceEnabled = await coLocatedInstanceServiceEnabled();
-  const convergeReason = await describeDevConvergeDecision(instanceEnabled);
-  if (await shouldSkipDevConverge(instanceEnabled)) {
+  const options = resolveDevConvergeOptions();
+  const convergeReason = await describeDevConvergeDecision(
+    instanceEnabled,
+    options,
+  );
+  if (await shouldSkipDevConverge(instanceEnabled, options)) {
     logInfo(
       "orchestration",
       `skipping instance-dev-install: ${convergeReason}`,
@@ -887,7 +857,7 @@ export async function runInstanceDevInstall(
   }
 
   const layout = await requireDevOrchestrationLayout();
-  const args = devInstanceExtraArgs();
+  const args = devInstanceExtraArgs(options);
   // Dev converge pulls Docker (postgres/redis/rabbitmq/…); fetch the
   // Galaxy docker role only now, not during orchestration bootstrap.
   await ensureGalaxyDockerRole();
@@ -901,7 +871,7 @@ export async function runInstanceDevInstall(
     onEvent,
     devOrchestrationAnsibleEnv(layout),
   );
-  await writeDevConvergeStamp(await computeDevConvergeStamp());
+  await writeDevConvergeStamp(await computeDevConvergeStamp(options));
   logInfo("orchestration", "instance-dev-install complete");
 }
 

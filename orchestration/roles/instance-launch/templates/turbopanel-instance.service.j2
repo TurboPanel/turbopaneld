@@ -16,15 +16,23 @@ Environment=XDG_CONFIG_HOME={{ turbopanel_instance_config_dir }}
 Environment=TURBOPANEL_NODE={{ turbopanel_node }}
 Environment=PATH={{ turbopanel_runtime_path }}
 Environment="GIT_SSH_COMMAND=ssh -i {{ turbopanel_github_key }} -o IdentitiesOnly=yes -o UserKnownHostsFile={{ turbopanel_ssh_dir }}/known_hosts -o StrictHostKeyChecking=yes"
+{# Only needed for a non-standard unit name — the instance defaults to
+   turbopanel-instance (src/developer/system-routes.ts). #}
+{% if instance_service_name != 'turbopanel-instance' %}
 Environment=TURBOPANEL_INSTANCE_SERVICE={{ instance_service_name }}
-Environment=TURBOPANEL_UI_SERVICE={{ ui_service_name }}
+{% endif %}
 # UI serving mode: "dev" proxies to Expo, "static" serves the exported build.
+# Caddy/Expo selection only — never an application dev-mode signal.
 Environment=TURBOPANEL_UI_MODE={{ turbopanel_ui_mode }}
-{% if turbopanel_dev_user | length > 0 and turbopanel_ui_mode == 'dev' %}
+{% if turbopanel_dev_user | length > 0 and turbopanel_ui_mode == 'dev' and (turbopanel_instance_run_mode | default('source')) == 'source' and (turbopanel_instance_runtime | default('deno')) == 'deno' %}
 # Explicit opt-in for the dev-only developer surface (fleet/diagnostics/shell/
-# dev-sync/tunnel + /ws/developer). Never emitted on managed/production hosts or
-# after switching to a static production build. See ../turbopanel src/dev-mode.ts
-# (isExplicitDevelopmentMode) — the surface fails closed without this flag.
+# dev-sync/tunnel + /ws/developer) plus the dev-only auth relaxations
+# (ephemeral secrets, PAM bypass, verification logging). This template is the
+# sole managed writer of the flag, and only for co-located Deno source-mode dev
+# (the src/deno-dev.ts ExecStart below). Never emitted on managed/production
+# hosts, compiled binaries, Workers, or after switching to a static build. See
+# ../turbopanel src/dev-mode.ts (isExplicitDevelopmentMode) — it honors this
+# flag alone and fails closed without it.
 Environment=TURBOPANEL_DEV_SURFACE=1
 {% endif %}
 {% if turbopanel_dev_user | length > 0 %}

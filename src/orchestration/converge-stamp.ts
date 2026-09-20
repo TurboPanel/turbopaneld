@@ -6,6 +6,11 @@ import {
   resolveDevOrchestrationLayout,
 } from "./dev-orchestration.ts";
 import { resolveRuntimesDir } from "../paths/layout.ts";
+import {
+  type DevConvergeOptions,
+  devConvergeOptionsMaterial,
+  resolveDevConvergeOptions,
+} from "./dev-converge-options.ts";
 
 /**
  * Resolve the stamp path from the current process env (or an explicit env bag).
@@ -83,8 +88,14 @@ async function collectRoleYamlMaterial(
   return collected;
 }
 
-/** Dev converge extra-vars that change playbook behavior (mirrors devInstanceExtraArgs). */
-export function devConvergeEnvMaterial(): string {
+/**
+ * Dev converge extra-vars that change playbook behavior (mirrors
+ * `devInstanceExtraArgs`). Optional-service state comes from the normalised
+ * dev-converge options payload, not from per-service env flags.
+ */
+export function devConvergeEnvMaterial(
+  options: DevConvergeOptions = resolveDevConvergeOptions(),
+): string {
   const devUser = Deno.env.get("TURBOPANEL_DEV_USER")?.trim() ?? "";
   const devUid = Deno.env.get("TURBOPANEL_DEV_UID")?.trim() ?? "";
   const devGid = Deno.env.get("TURBOPANEL_DEV_GID")?.trim() ?? "";
@@ -100,32 +111,19 @@ export function devConvergeEnvMaterial(): string {
       ? "workers"
       : "deno";
 
-  const optionalFlag = (key: string, fallback: boolean): string => {
-    const raw = Deno.env.get(key)?.trim().toLowerCase();
-    if (!raw) return fallback ? "true" : "false";
-    if (raw === "true" || raw === "1" || raw === "yes") return "true";
-    if (raw === "false" || raw === "0" || raw === "no") return "false";
-    return fallback ? "true" : "false";
-  };
-
-  return [
+  const lines = [
     `dev_user=${devUser}`,
     `dev_uid=${devUid}`,
     `dev_gid=${devGid}`,
     `ui_mode=${uiMode}`,
     `instance_run_mode=${instanceRunMode}`,
     `instance_runtime=${instanceRuntime}`,
-    `optional_dbstudio=${optionalFlag("TURBOPANEL_OPTIONAL_DBSTUDIO", false)}`,
-    `optional_ui=${optionalFlag("TURBOPANEL_OPTIONAL_UI", true)}`,
-    `optional_website=${optionalFlag("TURBOPANEL_OPTIONAL_WEBSITE", true)}`,
-    `optional_mailpit=${optionalFlag("TURBOPANEL_OPTIONAL_MAILPIT", true)}`,
-    `optional_redis_insight=${
-      optionalFlag("TURBOPANEL_OPTIONAL_REDIS_INSIGHT", false)
-    }`,
-    `optional_stripe_listen=${
-      optionalFlag("TURBOPANEL_OPTIONAL_STRIPE_LISTEN", false)
-    }`,
-  ].join("\n");
+  ];
+  const optional = devConvergeOptionsMaterial(options);
+  if (optional.length > 0) {
+    lines.push(optional);
+  }
+  return lines.join("\n");
 }
 
 /**
@@ -133,7 +131,9 @@ export function devConvergeEnvMaterial(): string {
  * trees, and dev-only extra-vars. Uses the same dev orchestration root as
  * `runInstanceDevInstall()` (dev checkout overlay + daemon shared roles).
  */
-export async function computeDevConvergeStamp(): Promise<string> {
+export async function computeDevConvergeStamp(
+  options: DevConvergeOptions = resolveDevConvergeOptions(),
+): Promise<string> {
   const layout = await resolveDevOrchestrationLayout();
   const playbook = await Deno.readTextFile(layout.playbookPath);
   const roleChunks: string[] = [];
@@ -143,7 +143,7 @@ export async function computeDevConvergeStamp(): Promise<string> {
   const material = [
     layout.root,
     playbook,
-    devConvergeEnvMaterial(),
+    devConvergeEnvMaterial(options),
     ...roleChunks,
   ].join("\n---\n");
   return await digestText(material);
@@ -165,6 +165,7 @@ export async function writeDevConvergeStamp(stamp: string): Promise<void> {
 
 export async function shouldSkipDevConverge(
   instanceServiceEnabled: boolean,
+  options: DevConvergeOptions = resolveDevConvergeOptions(),
 ): Promise<boolean> {
   if (forceConvergeRequested()) return false;
   if (!instanceServiceEnabled) return false;
@@ -172,13 +173,14 @@ export async function shouldSkipDevConverge(
   const stored = await readDevConvergeStamp();
   if (!stored) return false;
 
-  const current = await computeDevConvergeStamp();
+  const current = await computeDevConvergeStamp(options);
   return stored === current;
 }
 
 /** Human-readable reason the dev converge playbook will or will not run. */
 export async function describeDevConvergeDecision(
   instanceServiceEnabled: boolean,
+  options: DevConvergeOptions = resolveDevConvergeOptions(),
 ): Promise<string> {
   if (forceConvergeRequested()) {
     return "TURBOPANEL_FORCE_CONVERGE is set";
@@ -190,7 +192,7 @@ export async function describeDevConvergeDecision(
   if (!stored) {
     return "no dev converge stamp (first converge or stamp missing)";
   }
-  const current = await computeDevConvergeStamp();
+  const current = await computeDevConvergeStamp(options);
   if (stored === current) {
     return "dev converge stamp matches (orchestration inputs unchanged)";
   }
@@ -206,10 +208,14 @@ export async function emitDevConvergeSkippedIfNeeded(
   ifNeeded: boolean,
   instanceServiceEnabled: boolean,
   emit: (event: { _event: "dev_converge_skipped"; reason: string }) => void,
+  options: DevConvergeOptions = resolveDevConvergeOptions(),
 ): Promise<boolean> {
   if (!ifNeeded) return false;
-  const reason = await describeDevConvergeDecision(instanceServiceEnabled);
-  if (!(await shouldSkipDevConverge(instanceServiceEnabled))) {
+  const reason = await describeDevConvergeDecision(
+    instanceServiceEnabled,
+    options,
+  );
+  if (!(await shouldSkipDevConverge(instanceServiceEnabled, options))) {
     return false;
   }
   emit({ _event: "dev_converge_skipped", reason });

@@ -35,6 +35,11 @@ import {
   writeDevConvergeStamp,
 } from "../src/orchestration/converge-stamp.ts";
 import {
+  type DevConvergeOptions,
+  devConvergeOptionsExtraArgs,
+  resolveDevConvergeOptions,
+} from "../src/orchestration/dev-converge-options.ts";
+import {
   devOrchestrationAnsibleEnv,
   type DevOrchestrationLayout,
   requireDevOrchestrationLayout,
@@ -150,60 +155,17 @@ function usage(): never {
   Deno.exit(2);
 }
 
-export function optionalDevServiceFlag(
-  envKey: string,
-  defaultValue: boolean,
-  env: { get(key: string): string | undefined } = Deno.env,
-): boolean {
-  const raw = env.get(envKey)?.trim().toLowerCase();
-  if (!raw) {
-    return defaultValue;
-  }
-  if (raw === "true" || raw === "1" || raw === "yes") {
-    return true;
-  }
-  if (raw === "false" || raw === "0" || raw === "no") {
-    return false;
-  }
-  return defaultValue;
-}
-
-export function optionalDevServiceExtraArgs(
-  env: { get(key: string): string | undefined } = Deno.env,
-): string[] {
-  return [
-    "-e",
-    `turbopanel_optional_dbstudio=${
-      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_DBSTUDIO", false, env)
-    }`,
-    "-e",
-    `turbopanel_optional_ui=${
-      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_UI", true, env)
-    }`,
-    "-e",
-    `turbopanel_optional_website=${
-      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_WEBSITE", true, env)
-    }`,
-    "-e",
-    `turbopanel_optional_mailpit=${
-      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_MAILPIT", true, env)
-    }`,
-    "-e",
-    `turbopanel_optional_redis_insight=${
-      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_REDIS_INSIGHT", false, env)
-    }`,
-    "-e",
-    `turbopanel_optional_stripe_listen=${
-      optionalDevServiceFlag("TURBOPANEL_OPTIONAL_STRIPE_LISTEN", false, env)
-    }`,
-  ];
-}
-
+/**
+ * Dev/runtime extra-vars for co-located playbooks. `options` is the
+ * dev-converge payload parsed once by the caller ({@link resolveDevConvergeOptions});
+ * it lands as a single JSON `-e` object — no per-service env flags.
+ */
 export function devInstanceExtraArgs(
   env: {
     get(key: string): string | undefined;
     toObject(): { [index: string]: string };
   } = Deno.env,
+  options: DevConvergeOptions = resolveDevConvergeOptions(env),
 ): string[] {
   const devUser = env.get("TURBOPANEL_DEV_USER");
   const devUid = env.get("TURBOPANEL_DEV_UID");
@@ -240,7 +202,7 @@ export function devInstanceExtraArgs(
     `turbopanel_instance_run_mode=${instanceRunMode}`,
     "-e",
     `turbopanel_instance_runtime=${instanceRuntime}`,
-    ...optionalDevServiceExtraArgs(env),
+    ...devConvergeOptionsExtraArgs(options),
   );
   if (instanceRuntime === "workers") {
     args.push("-e", "postgres_expose_port=true");
@@ -286,7 +248,10 @@ function defaultDeps(): OrchestrationActionDeps {
 export async function runInstanceDevInstall(
   ifNeeded: boolean,
   deps: OrchestrationActionDeps = defaultDeps(),
+  options: DevConvergeOptions = resolveDevConvergeOptions(),
 ): Promise<"skipped" | "ran"> {
+  // `options` is parsed once here and threaded into the skip decision, the
+  // playbook extra-vars, and the stamp so all three see the same selection.
   if (ifNeeded) {
     const instanceEnabled = await deps.coLocatedInstanceServiceEnabled();
     if (
@@ -296,6 +261,7 @@ export async function runInstanceDevInstall(
         deps.emit as (
           event: { _event: "dev_converge_skipped"; reason: string },
         ) => void,
+        options,
       )
     ) {
       // Stamp matches — exit before ensureAnsible / Galaxy / playbook.
@@ -318,7 +284,7 @@ export async function runInstanceDevInstall(
       "localhost,",
       "-c",
       "local",
-      ...devInstanceExtraArgs(),
+      ...devInstanceExtraArgs(Deno.env, options),
       layout.playbookPath,
     ],
     {
@@ -331,7 +297,7 @@ export async function runInstanceDevInstall(
     },
   );
 
-  await deps.writeDevConvergeStamp(await deps.computeDevConvergeStamp());
+  await deps.writeDevConvergeStamp(await deps.computeDevConvergeStamp(options));
   return "ran";
 }
 
