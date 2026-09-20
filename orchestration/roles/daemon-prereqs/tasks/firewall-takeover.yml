@@ -1,0 +1,108 @@
+---
+# TurboPanel owns the host firewall on every host it installs on — the
+# co-located control plane (instance-install.yml) and every daemon'd server
+# (daemon-install.yml, daemon-converge.yml) — so the distribution's firewall
+# front-ends are removed here, on every converge, before anything else needs
+# the network. Decided 2026-09-19/20 (the canary incident: a control plane
+# installed on a host with ufw active had 8443 dropped until an operator typed
+# `ufw allow 8443/tcp`), and reversed from "purge only after TurboPanel's rules
+# are confirmed live" to "purge at install" on 2026-09-20: ufw and Docker do not
+# compose (published ports traverse DOCKER-USER, which ufw's INPUT rules never
+# see), and nothing in this file can lock a host out — every step moves the
+# kernel toward ACCEPT and never away from it. TurboPanel's own rules arrive
+# through `server.firewall.reconcile` (src/firewall/) once the panel derives
+# them; until then the host is exactly as open as a fresh image.
+#
+# What each front-end needs, proven on Debian 13 in a throwaway container with
+# a Docker footprint present (nat DOCKER/DNAT, DOCKER-USER, and TP-INPUT came
+# back byte-identical):
+#   ufw          `ufw --force disable` flushes its rules but leaves ~36 empty
+#                ufw-*/ufw6-* chains and the INPUT/FORWARD/OUTPUT jumps into
+#                them behind, and so does `apt purge`; the sweep below deletes
+#                exactly those jumps and chains, in both families.
+#   firewalld    stop + disable, then purge (systemd units cannot be exercised
+#                in the container proof; the shape mirrors ufw's).
+#   iptables-persistent / netfilter-persistent
+#                would restore a stale default-deny at the next reboot — the
+#                "install worked, rebooted, locked out again" path; purged.
+#   nftables.service
+#                loads /etc/nftables.conf at boot; disabled, but the `nftables`
+#                package stays — the nft-backed iptables shims want its libs.
+#
+# `iptables` itself is installed by main.yml before this file is imported.
+
+- name: Read the installed package set
+  ansible.builtin.package_facts:
+    manager: apt
+
+- name: Stop ufw before it is removed (flushes its rules; leaves empty chains)
+  ansible.builtin.command:
+    cmd: ufw --force disable
+  when: "'ufw' in ansible_facts.packages"
+  changed_when: false
+  failed_when: false
+
+- name: Stop and disable firewalld before it is removed
+  ansible.builtin.systemd:
+    name: firewalld
+    state: stopped
+    enabled: false
+  when: "'firewalld' in ansible_facts.packages"
+  failed_when: false
+
+- name: Disable nftables.service (the package stays for the iptables-nft shims)
+  ansible.builtin.systemd:
+    name: nftables
+    enabled: false
+    state: stopped
+  when: "'nftables' in ansible_facts.packages"
+  failed_when: false
+
+- name: Purge the distribution firewall front-ends — TurboPanel owns the host firewall
+  ansible.builtin.apt:
+    name:
+      - ufw
+      - firewalld
+      - iptables-persistent
+      - netfilter-persistent
+    state: absent
+    purge: true
+  register: _tp_firewall_purge
+
+# ufw's own stop path and its prerm both leave the chain declarations and the
+# builtin-chain jumps in the kernel. Delete the jumps, then the chains, for
+# both families; print the pre-sweep counts so Ansible can report change.
+- name: Sweep the ufw chains and jumps ufw leaves behind
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      sweep() {
+        bin="$1"
+        "$bin" -w 5 -S 2>/dev/null | grep -E '^-A .* -j ufw6?-' | sed 's/^-A /-D /' \
+          | while IFS= read -r rule; do
+            # shellcheck disable=SC2086
+            "$bin" -w 5 $rule 2>/dev/null || true
+          done
+        "$bin" -w 5 -S 2>/dev/null | grep -E '^-N ufw6?-' | sed 's/^-N //' \
+          | while IFS= read -r chain; do
+            "$bin" -w 5 -F "$chain" 2>/dev/null || true
+            "$bin" -w 5 -X "$chain" 2>/dev/null || true
+          done
+      }
+      v4="$(iptables -w 5 -S 2>/dev/null | grep -cE 'ufw6?-' || true)"
+      v6="$(ip6tables -w 5 -S 2>/dev/null | grep -cE 'ufw6?-' || true)"
+      if [ "$v4" != "0" ]; then sweep iptables; fi
+      if [ "$v6" != "0" ]; then sweep ip6tables; fi
+      echo "$v4 $v6"
+    executable: /bin/bash
+  register: _tp_ufw_sweep
+  changed_when: _tp_ufw_sweep.stdout != "0 0"
+
+- name: Say so when a distribution firewall was removed
+  ansible.builtin.debug:
+    msg: >-
+      Removed the distribution firewall ({{
+        ['ufw', 'firewalld', 'iptables-persistent', 'netfilter-persistent']
+        | select('in', ansible_facts.packages) | join(', ')
+      }}) — TurboPanel owns the host firewall on this server.
+  when: _tp_firewall_purge.changed or _tp_ufw_sweep.changed

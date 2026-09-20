@@ -278,7 +278,12 @@ orchestration bootstrap — not via apt in `run.sh`. The minimal host-base set i
 **sudo, curl, ca-certificates, tar, python3-minimal** (`run.sh` may apt-install
 these only when absent). `python3-minimal` extracts Deno release zips without
 apt `unzip`. The `daemon-prereqs` role covers the broader managed-host set (git,
-gnupg, pamtester, xz-utils, …) once Ansible can converge; Redis is vendored by
+gnupg, pamtester, xz-utils, iptables, …) once Ansible can converge, and
+**removes the distribution firewall front-ends** — ufw, firewalld,
+iptables-persistent/netfilter-persistent purged, nftables.service disabled — on
+every converge of every host (`tasks/firewall-takeover.yml`; TurboPanel owns
+the host firewall, decided 2026-09-20; every step moves the kernel toward
+ACCEPT so it cannot lock a host out); Redis is vendored by
 extracting the official `packages.redis.io` `.deb` with `dpkg-deb -x` (no
 compile toolchain).
 

@@ -63,6 +63,7 @@ the on-host proof is Road row `fw-proof`.
 Commit-confirm rollback and `turbopaneld firewall off`
 (`fw-invariants-commit-confirm`); the boot unit and the Docker-monitor call
 to `reinstallFirewallForwardingIfEnabled` (`fw-boot-persistence`); the
-installer's bootstrap ruleset and the ufw takeover (`fw-installer-bootstrap`,
-`fw-takeover`); folding `../managed/firewall.ts` and the fabric `TP-FORWARD`
+installer's bootstrap ruleset (`fw-installer-bootstrap`; the ufw/firewalld
+removal itself is done — `orchestration/roles/daemon-prereqs/tasks/firewall-takeover.yml`,
+on every converge, `fw-takeover`); folding `../managed/firewall.ts` and the fabric `TP-FORWARD`
 chain into the renderer (`fw-fold-existing`).

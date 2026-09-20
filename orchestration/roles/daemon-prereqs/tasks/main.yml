@@ -41,3 +41,9 @@
       - xz-utils
       - zstd
     state: present
+
+# The distribution's firewall front-ends (ufw, firewalld, iptables-persistent)
+# are removed on every converge: TurboPanel owns the host firewall. Needs the
+# iptables shims above for the chain sweep. See firewall-takeover.yml.
+- name: Remove the distribution firewall front-ends
+  ansible.builtin.import_tasks: firewall-takeover.yml
