@@ -7,9 +7,16 @@
  * `orchestration/roles/daemon-launch/templates/turbopaneld.service.j2`, and
  * the installer-time `deno run` invocations in `scripts/run.sh`.
  * `daemon-permissions.test.ts` holds each copy to this module, refuses
- * `--allow-all` and bare read/write/run grants on those paths, and derives the
+ * `--allow-all` and bare read/write/run grants on those paths, derives the
  * spawn allowlist from `src/` so a new `Deno.Command` target cannot land
- * without its grant.
+ * without its grant, and maps every orchestration write target onto the
+ * write grant so an install-time path cannot fall outside it.
+ *
+ * The native binary is also the installer: `scripts/run.sh` runs the root-only
+ * `bootstrap-orchestration` / `run-installer` verbs through it on hosts where
+ * it executes, and `deno compile` bakes exactly one grant set that the binary
+ * cannot widen at runtime. The daemon grant therefore has to carry the
+ * install-time writes too ({@link INSTALLER_VENDOR_DIRS}).
  *
  * Paths are the production layout defaults (`src/paths/layout.ts`); the
  * vendored-tool paths carry the pinned versions from `orchestration/paths.ts`
@@ -49,6 +56,24 @@ const DOCKER_SOCKETS = ["/run/docker.sock", "/var/run/docker.sock"];
 export const DAEMON_WRITABLE_VENDOR_DIRS: readonly string[] = [
   `${VENDOR}/uv/cache`,
   `${VENDOR}/cloudflared`,
+];
+
+/**
+ * The orchestration runtime the root-run installer verbs populate
+ * (`src/orchestration/{uv,python,ansible,bootstrap-stamp}.ts`): uv and the
+ * pinned interpreter with their `current` symlinks, the Ansible venv, the
+ * Galaxy roles/collections, and the bootstrap stamps. The compiled binary
+ * carries these because it *is* the installer on native hosts. At daemon
+ * runtime the grant is inert: the trees are `root:tp 0750` and the process
+ * runs as `tp`, so the kernel refuses what Deno would allow, and the
+ * `ensure*` steps short-circuit once root has populated them. The binary
+ * (`bin/`), the orchestration tree (`share/`), and the Deno/Node/buildkit/
+ * railpack runtimes stay outside the grant.
+ */
+export const INSTALLER_VENDOR_DIRS: readonly string[] = [
+  `${VENDOR}/uv`,
+  `${VENDOR}/python`,
+  `${VENDOR}/ansible`,
 ];
 
 /** Read roots: the install tree, host facts, and everything the daemon may write. */
@@ -93,7 +118,10 @@ export const DAEMON_READ_PATHS: readonly string[] = [
   "/lib64",
 ];
 
-/** Write roots: mutable FHS trees plus the narrow vendor cache above. */
+/**
+ * Write roots: mutable FHS trees, the daemon's vendor cache, and the
+ * orchestration runtime the installer verbs populate.
+ */
 export const DAEMON_WRITE_PATHS: readonly string[] = [
   PROD_CONFIG_DIR_DEFAULT,
   PROD_STATE_DIR_DEFAULT,
@@ -104,6 +132,7 @@ export const DAEMON_WRITE_PATHS: readonly string[] = [
   ...DOCKER_SOCKETS,
   "/tmp",
   ...DAEMON_WRITABLE_VENDOR_DIRS,
+  ...INSTALLER_VENDOR_DIRS,
 ];
 
 /**
