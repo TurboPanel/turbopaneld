@@ -46,3 +46,11 @@ export class ChecksumMismatchError extends Error {
     this.name = "ChecksumMismatchError";
   }
 }
+
+/** A channel manifest whose release signature is missing, malformed, or invalid. */
+export class ManifestSignatureError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ManifestSignatureError";
+  }
+}

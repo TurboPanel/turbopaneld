@@ -1,5 +1,5 @@
 import { join } from "@std/path";
-import { runLogged } from "./exec.ts";
+import { runLogged, symlinkPointsAt } from "./exec.ts";
 import { logInfo, logWarn } from "../logger.ts";
 import { logComponent } from "./presentation.ts";
 import {
@@ -11,6 +11,7 @@ import {
 } from "./paths.ts";
 
 async function repointPythonCurrent(): Promise<void> {
+  if (await symlinkPointsAt(PYTHON_CURRENT_DIR, PYTHON_RUNTIME_DIR)) return;
   try {
     await Deno.remove(PYTHON_CURRENT_DIR);
   } catch (err) {
@@ -32,6 +33,29 @@ async function repointPythonCurrent(): Promise<void> {
 }
 
 /**
+ * True when a uv-managed interpreter already lives under the pinned version
+ * dir (`cpython-<ver>-<triple>/bin/python3`). Checked before invoking uv so
+ * the daemon never needs write access to the root-owned Python tree once the
+ * installer has populated it.
+ */
+async function managedPythonPresent(): Promise<boolean> {
+  try {
+    for await (const entry of Deno.readDir(PYTHON_RUNTIME_DIR)) {
+      if (!entry.isDirectory || !entry.name.startsWith("cpython-")) continue;
+      try {
+        await Deno.stat(join(PYTHON_RUNTIME_DIR, entry.name, "bin", "python3"));
+        return true;
+      } catch {
+        // keep looking
+      }
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+/**
  * Ensure the pinned Python version is installed into the runtime.
  *
  * Uses `uv python install`, which downloads a managed (relocatable) Python into
@@ -39,8 +63,18 @@ async function repointPythonCurrent(): Promise<void> {
  * resolves managed installs directly.
  */
 export async function ensurePython(): Promise<void> {
-  // Ensure the target dir exists and is writable by the calling user (turbopanel
-  // on managed installs) before invoking uv, which will populate it and the cache.
+  if (await managedPythonPresent()) {
+    logInfo(
+      "orchestration",
+      `Python ${PYTHON_VERSION} already installed at ${PYTHON_RUNTIME_DIR}`,
+    );
+    await repointPythonCurrent();
+    return;
+  }
+  // Ensure the target dir exists and is writable by the calling user (root
+  // at install time; the tree is root-owned afterwards, so a missing
+  // interpreter on a managed host is a repair for the installer, not the
+  // daemon) before invoking uv, which will populate it and the cache.
   await Deno.mkdir(PYTHON_RUNTIME_DIR, { recursive: true });
   logInfo("orchestration", `ensuring Python ${PYTHON_VERSION} is installed`);
   // Capture uv output — informational "already installed" lines belong in stdout, not err.log.

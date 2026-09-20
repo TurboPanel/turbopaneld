@@ -17,35 +17,70 @@
   ansible.builtin.set_fact:
     deno_asset_triple: "{{ 'aarch64-unknown-linux-gnu' if ansible_architecture == 'aarch64' else 'x86_64-unknown-linux-gnu' }}"
 
+# A version bump must land with its upstream digests: refuse rather than
+# install an unverified runtime.
+- name: Require a pinned SHA-256 for this Deno version and architecture
+  ansible.builtin.assert:
+    that:
+      - deno_version in deno_sha256
+      - ansible_architecture in deno_sha256[deno_version]
+      - deno_sha256[deno_version][ansible_architecture] | length == 64
+    fail_msg: >-
+      deno_sha256 has no digest for Deno {{ deno_version }} on
+      {{ ansible_architecture }} — add the upstream sha256 to
+      roles/deno-runtime/defaults/main.yml (and TP_DENO_SHA256_* in
+      scripts/run.sh) before bumping deno_version.
+
+- name: Create Deno download scratch directory
+  when: not _deno_pinned.stat.exists
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: deno-zip-
+  register: _deno_tmp
+
+# get_url verifies the digest before the file is kept: a mismatch fails the
+# task and leaves nothing to extract.
+- name: Download Deno release zip (SHA-256 verified)
+  when: not _deno_pinned.stat.exists
+  ansible.builtin.get_url:
+    url: "https://dl.deno.land/release/v{{ deno_version }}/deno-{{ deno_asset_triple }}.zip"
+    dest: "{{ _deno_tmp.path }}/deno-{{ deno_asset_triple }}.zip"
+    checksum: "sha256:{{ deno_sha256[deno_version][ansible_architecture] }}"
+    owner: root
+    group: root
+    mode: "0600"
+
+# python3 stdlib — host-base only guarantees python3, not unzip.
 - name: Install Deno into runtimes directory
   when: not _deno_pinned.stat.exists
-  ansible.builtin.shell: |
-    set -euo pipefail
-    DENO_VER="{{ deno_version }}"
-    ASSET="deno-{{ deno_asset_triple }}.zip"
-    URL="https://dl.deno.land/release/v${DENO_VER}/${ASSET}"
-    TMP="$(mktemp -d)"
-    DEST="{{ turbopanel_vendor_dir }}/deno/${DENO_VER}/deno"
-    curl -fsSL -o "$TMP/${ASSET}" "$URL"
-    python3 - "$TMP/${ASSET}" "$DEST" <<'PY'
-    import shutil, sys, tempfile, zipfile
-    from pathlib import Path
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import shutil, sys, tempfile, zipfile
+        from pathlib import Path
 
-    archive, dest = Path(sys.argv[1]), Path(sys.argv[2])
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="deno-zip-") as tmp:
-        tmp_path = Path(tmp)
-        with zipfile.ZipFile(archive) as zf:
-            zf.extractall(tmp_path)
-        candidates = list(tmp_path.rglob("deno"))
-        if not candidates:
-            raise SystemExit("deno binary not found in release zip")
-        shutil.copy2(candidates[0], dest)
-    dest.chmod(0o750)
-    PY
-    rm -rf "$TMP"
-  args:
+        archive, dest = Path(sys.argv[1]), Path(sys.argv[2])
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="deno-zip-") as tmp:
+            tmp_path = Path(tmp)
+            with zipfile.ZipFile(archive) as zf:
+                zf.extractall(tmp_path)
+            candidates = list(tmp_path.rglob("deno"))
+            if not candidates:
+                raise SystemExit("deno binary not found in release zip")
+            shutil.copy2(candidates[0], dest)
+        dest.chmod(0o750)
+      - "{{ _deno_tmp.path }}/deno-{{ deno_asset_triple }}.zip"
+      - "{{ turbopanel_vendor_dir }}/deno/{{ deno_version }}/deno"
     creates: "{{ turbopanel_vendor_dir }}/deno/{{ deno_version }}/deno"
+
+- name: Remove Deno download scratch directory
+  when: _deno_tmp.path is defined
+  ansible.builtin.file:
+    path: "{{ _deno_tmp.path }}"
+    state: absent
 
 - name: Harden Deno binary permissions
   ansible.builtin.file:

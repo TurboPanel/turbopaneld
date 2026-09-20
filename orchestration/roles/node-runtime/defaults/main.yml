@@ -4,6 +4,20 @@ turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') 
 # Node is needed for the instance's cert generation script and to build/run the
 # Expo UI in development. Must match turbopanel-dev scripts/lib/paths.sh NODE_VERSION.
 node_version: "26.7.0"
+# Upstream SHA-256 of each release tarball (nodejs.org/dist/v<ver>/SHASUMS256.txt),
+# keyed by version then by the nodejs.org arch label (x64 / arm64). The
+# install task refuses to run when the pinned version has no entry for the
+# host, so a bump without new digests fails loudly (paths.test.ts pins this).
+node_sha256:
+  "26.7.0":
+    x64: "bd6b6c31e377bad9ad579bed72e5bc11f4c879ac9452ad51d30e646ea3d828df"
+    arm64: "925aa6157dd37542d0d7f2e28b7bf61e7b39284411210b0498bc3788db4aef68"
+# Node 25+ no longer ships Corepack. The standalone package is pinned by
+# version and its registry tarball verified by SHA-256 before `npm install`
+# runs against the local file — never an unpinned `npm install -g corepack`.
+corepack_version: "0.36.0"
+corepack_sha256:
+  "0.36.0": "9128cfe26aee0c99f4fc68c15c6b8b12309a68be0de2c012cdfea2a463cb722f"
 turbopanel_node: "{{ turbopanel_vendor_dir }}/node/current/bin/node"
 turbopanel_deno: "{{ turbopanel_vendor_dir }}/deno/current/deno"
 turbopanel_runtime_path: "{{ turbopanel_vendor_dir }}/node/current/bin:{{ turbopanel_vendor_dir }}/deno/current:{{ turbopanel_vendor_dir }}/caddy/current:/usr/bin:/bin"

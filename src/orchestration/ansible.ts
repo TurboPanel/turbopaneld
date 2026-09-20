@@ -1,4 +1,8 @@
-import { run, runLogged, runOrThrow } from "./exec.ts";
+import { run, runLogged, runOrThrow, symlinkPointsAt } from "./exec.ts";
+import {
+  galaxyDockerRoleHelperInvocation,
+  playbooksNeedRootHelper,
+} from "./privileged.ts";
 import {
   type AnsibleEventHandler,
   type AnsibleRawLineStream,
@@ -96,6 +100,7 @@ export async function ansibleLintWorks(): Promise<boolean> {
 
 /** Point the stable `current` symlink at the active ansible venv directory. */
 async function repointAnsibleCurrent(): Promise<void> {
+  if (await symlinkPointsAt(ANSIBLE_CURRENT_DIR, ANSIBLE_INSTALL_DIR)) return;
   try {
     await Deno.remove(ANSIBLE_CURRENT_DIR);
   } catch (err) {
@@ -601,7 +606,24 @@ export async function ensureGalaxyDockerRole(): Promise<void> {
       "orchestration",
       "galaxy docker role up to date, skipping install",
     );
-    await neutralizeGalaxyDockerLintConfig();
+    // Editor hygiene for checkouts only; the managed roles dir is root-owned.
+    if (!playbooksNeedRootHelper()) await neutralizeGalaxyDockerLintConfig();
+    return;
+  }
+
+  if (playbooksNeedRootHelper()) {
+    // Managed host: the vendor roles dir is root-owned (a role tree the
+    // daemon could write would run as root on the next playbook), so the
+    // fetch goes through the helper, which reads the pin from the
+    // root-owned requirements-docker.yml itself.
+    logInfo(
+      "orchestration",
+      "installing galaxy docker role via tp-orchestrate",
+    );
+    const helper = galaxyDockerRoleHelperInvocation();
+    await runOrThrow(helper.bin, helper.args);
+    logInfo("orchestration", "galaxy docker role ready");
+    await writeGalaxyDockerStamp(stamp);
     return;
   }
 

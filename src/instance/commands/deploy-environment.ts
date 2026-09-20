@@ -67,6 +67,7 @@ import {
   materializeTlsCertificates,
 } from "../../deploy/materialize-tls.ts";
 import {
+  assertHooksConfined,
   runDeployServiceHooks,
   runPostDeployHooks,
 } from "../../deploy/run-deploy-hooks.ts";
@@ -1357,6 +1358,9 @@ async function deployContainerServices(
 
     const serviceHooks = parsedPayload.serviceHooks ?? [];
     if (serviceHooks.length > 0) {
+      // Every hook must be confined to a compose service this deploy runs;
+      // the runner then executes it inside that service's container.
+      assertHooksConfined(serviceHooks, labeledServices);
       logSink.setPhase(COMMAND_LOG_PHASES.PRE_DEPLOY);
       await runDeployServiceHooks(serviceHooks, {
         projectName: parsedPayload.projectName,
@@ -1427,12 +1431,13 @@ async function deployContainerServices(
 
     if (serviceHooks.length > 0) {
       logSink.setPhase(COMMAND_LOG_PHASES.POST_DEPLOY);
-      await runPostDeployHooks(
-        serviceHooks,
-        deploymentDir,
-        (stream, line) => logSink.onLine(stream, line),
-        (text) => logSink.redactSummary(text),
-      );
+      await runPostDeployHooks(serviceHooks, {
+        projectName: parsedPayload.projectName,
+        composePaths: chain,
+        runDocker: run,
+        onOutput: (stream, line) => logSink.onLine(stream, line),
+        redactSummary: (text) => logSink.redactSummary(text),
+      });
     }
 
     return {

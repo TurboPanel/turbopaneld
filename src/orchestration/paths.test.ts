@@ -767,8 +767,16 @@ test("node-runtime installs corepack with vendored npm before enabling pnpm", ()
       "node-runtime must install corepack before corepack enable",
     );
   }
-  if (!tasks.includes("\n      - corepack\n")) {
-    throw new TypeError("node-runtime must pass corepack to npm install -g");
+  // The package spec is the pinned, digest-verified tarball — never a bare
+  // `corepack` (floating latest from the registry).
+  if (
+    !tasks.includes(
+      '\n      - "{{ _corepack_tmp.path }}/corepack-{{ corepack_version }}.tgz"\n',
+    )
+  ) {
+    throw new TypeError(
+      "node-runtime must npm-install the verified corepack tarball",
+    );
   }
 });
 
@@ -898,4 +906,132 @@ test("requirements.lock.txt pins ansible-core with hashes", () => {
     true,
     `${lockPath} must include --hash=sha256: entries`,
   );
+});
+
+// --- runtime integrity pins ------------------------------------------------
+//
+// Vendored runtimes are downloaded by root (Ansible roles) and, for the
+// JS-fallback path, by run.sh before Ansible runs at all. Each pinned version
+// must carry its upstream SHA-256 for every supported architecture, and the
+// three copies (role default, run.sh, this constant) must agree — a version
+// bump without new digests fails here, not on a customer host.
+
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+function readRoleDefaults(role: string): string {
+  return Deno.readTextFileSync(
+    join(fromMeta, "orchestration", "roles", role, "defaults", "main.yml"),
+  );
+}
+
+/** Minimal reader for the `<key>:\n  "<version>":\n    <arch>: "<hex>"` tables. */
+function readDigestTable(
+  yaml: string,
+  key: string,
+): Record<string, Record<string, string>> {
+  const start = yaml.indexOf(`\n${key}:\n`);
+  if (start < 0) throw new TypeError(`missing ${key} in role defaults`);
+  const table: Record<string, Record<string, string>> = {};
+  let version = "";
+  for (const line of yaml.slice(start + key.length + 3).split("\n")) {
+    const versionMatch = /^ {2}"([^"]+)":\s*(?:"([0-9a-f]{64})")?\s*$/.exec(
+      line,
+    );
+    const archMatch = /^ {4}([A-Za-z0-9_]+):\s*"([0-9a-f]{64})"\s*$/.exec(line);
+    if (versionMatch) {
+      version = versionMatch[1] ?? "";
+      table[version] = versionMatch[2] ? { "": versionMatch[2] } : {};
+    } else if (archMatch && version) {
+      table[version][archMatch[1] ?? ""] = archMatch[2] ?? "";
+    } else {
+      break;
+    }
+  }
+  return table;
+}
+
+test("deno-runtime pins an upstream SHA-256 for DENO_VERSION on both architectures", () => {
+  const table = readDigestTable(
+    readRoleDefaults("deno-runtime"),
+    "deno_sha256",
+  );
+  const digests = table[DENO_VERSION];
+  if (!digests) {
+    throw new TypeError(
+      `deno_sha256 has no entry for deno_version ${DENO_VERSION}`,
+    );
+  }
+  for (const arch of ["x86_64", "aarch64"]) {
+    assertEquals(SHA256_HEX.test(digests[arch] ?? ""), true, `deno ${arch}`);
+  }
+});
+
+test("run.sh mirrors the deno-runtime digests for DENO_VERSION", () => {
+  const runSh = Deno.readTextFileSync(join(fromMeta, "scripts", "run.sh"));
+  const table = readDigestTable(
+    readRoleDefaults("deno-runtime"),
+    "deno_sha256",
+  );
+  const x86 = /^TP_DENO_SHA256_X86_64="([0-9a-f]{64})"$/m.exec(runSh)?.[1];
+  const arm = /^TP_DENO_SHA256_AARCH64="([0-9a-f]{64})"$/m.exec(runSh)?.[1];
+  assertEquals(x86, table[DENO_VERSION]?.x86_64, "x86_64 digest");
+  assertEquals(arm, table[DENO_VERSION]?.aarch64, "aarch64 digest");
+  // The verifier runs between download and extraction.
+  const install = runSh.slice(runSh.indexOf("tp_install_deno_runtime() {"));
+  const verifyAt = install.indexOf("tp_verify_deno_archive ");
+  const extractAt = install.indexOf("zipfile.ZipFile");
+  assertEquals(verifyAt > 0 && verifyAt < extractAt, true);
+});
+
+test("node-runtime pins an upstream SHA-256 for node_version on both architectures", () => {
+  const yaml = readRoleDefaults("node-runtime");
+  const version = /^node_version:\s*"([\d.]+)"\s*$/m.exec(yaml)?.[1];
+  if (!version) throw new TypeError("could not read node_version");
+  const table = readDigestTable(yaml, "node_sha256");
+  const digests = table[version];
+  if (!digests) {
+    throw new TypeError(`node_sha256 has no entry for node_version ${version}`);
+  }
+  for (const arch of ["x64", "arm64"]) {
+    assertEquals(SHA256_HEX.test(digests[arch] ?? ""), true, `node ${arch}`);
+  }
+});
+
+test("node-runtime pins corepack by version and verified tarball digest", () => {
+  const yaml = readRoleDefaults("node-runtime");
+  const version = /^corepack_version:\s*"([\d.]+)"\s*$/m.exec(yaml)?.[1];
+  if (!version) throw new TypeError("could not read corepack_version");
+  const table = readDigestTable(yaml, "corepack_sha256");
+  assertEquals(SHA256_HEX.test(table[version]?.[""] ?? ""), true, "corepack");
+  const tasks = Deno.readTextFileSync(
+    join(
+      fromMeta,
+      "orchestration",
+      "roles",
+      "node-runtime",
+      "tasks",
+      "main.yml",
+    ),
+  );
+  // No floating package spec: npm installs the verified local tarball.
+  assertEquals(/^\s*- corepack\s*$/m.test(tasks), false);
+  assertEquals(tasks.includes("corepack-{{ corepack_version }}.tgz"), true);
+  assertEquals(
+    tasks.includes(
+      'checksum: "sha256:{{ corepack_sha256[corepack_version] }}"',
+    ),
+    true,
+  );
+});
+
+test("runtime roles verify every download with get_url checksum before extraction", () => {
+  for (const role of ["deno-runtime", "node-runtime"]) {
+    const tasks = Deno.readTextFileSync(
+      join(fromMeta, "orchestration", "roles", role, "tasks", "main.yml"),
+    );
+    // curl-and-extract shell pipelines are gone from both roles.
+    assertEquals(tasks.includes("curl -fsSL"), false, `${role} curl`);
+    assertEquals(tasks.includes("ansible.builtin.get_url"), true, role);
+    assertEquals(/checksum: "sha256:\{\{/.test(tasks), true, role);
+  }
 });

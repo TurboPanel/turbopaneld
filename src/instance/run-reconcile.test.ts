@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertThrows } from "@std/assert";
 import {
   buildRunReconcileArgs,
   CDN_RUN_SCRIPT,
@@ -6,8 +6,12 @@ import {
   encodeLicenseArg,
   executeRunReconcile,
   PRODUCTION_CONTROL_PLANE,
+  reconcileNeedsRootHelper,
+  resolveAutomaticUpdateTrust,
   resolveBootstrapInsecureTls,
   resolveRunScriptUrl,
+  rootHelperReconcileInvocation,
+  UpdateTrustRepairError,
 } from "./run-reconcile.ts";
 import { join } from "@std/path";
 
@@ -700,4 +704,128 @@ test("executeRunReconcile falls back cwd when primary chdir fails", async () => 
     Deno.chdir = originalChdir;
     Deno.statSync = originalStatSync;
   }
+});
+
+// --- automatic update trust ------------------------------------------------
+
+const needsInsecure = (origin: string) => origin.includes(".lan");
+
+test("resolveAutomaticUpdateTrust: plaintext http is development mode", () => {
+  assertEquals(
+    resolveAutomaticUpdateTrust({
+      runScriptUrl: "http://192.168.1.10:8880/run.sh",
+      originNeedsInsecureTls: needsInsecure,
+    }),
+    { kind: "plaintext-dev" },
+  );
+});
+
+test("resolveAutomaticUpdateTrust: the CDN and public origins use system trust", () => {
+  assertEquals(
+    resolveAutomaticUpdateTrust({
+      runScriptUrl: CDN_RUN_SCRIPT,
+      originNeedsInsecureTls: () => true,
+    }),
+    { kind: "public-tls" },
+  );
+  assertEquals(
+    resolveAutomaticUpdateTrust({
+      runScriptUrl: "https://panel.example.com/run.sh",
+      originNeedsInsecureTls: needsInsecure,
+    }),
+    { kind: "public-tls" },
+  );
+});
+
+test("resolveAutomaticUpdateTrust: a private origin needs the Platform CA on disk", () => {
+  assertEquals(
+    resolveAutomaticUpdateTrust({
+      runScriptUrl: "https://huey.lan:8443/run.sh",
+      instanceCaPath: "/etc/turbopanel/instance-ca.pem",
+      originNeedsInsecureTls: needsInsecure,
+      caFileExists: () => true,
+    }),
+    { kind: "platform-ca", caPath: "/etc/turbopanel/instance-ca.pem" },
+  );
+});
+
+test("resolveAutomaticUpdateTrust: no CA is a trust-repair error, never curl -k", () => {
+  assertThrows(
+    () =>
+      resolveAutomaticUpdateTrust({
+        runScriptUrl: "https://huey.lan:8443/run.sh",
+        originNeedsInsecureTls: needsInsecure,
+      }),
+    UpdateTrustRepairError,
+    "--instance-ca",
+  );
+  assertThrows(
+    () =>
+      resolveAutomaticUpdateTrust({
+        runScriptUrl: "https://huey.lan:8443/run.sh",
+        instanceCaPath: "/etc/turbopanel/instance-ca.pem",
+        originNeedsInsecureTls: needsInsecure,
+        caFileExists: () => false,
+      }),
+    UpdateTrustRepairError,
+    "instance-ca.pem is missing",
+  );
+});
+
+test("the automatic update path never consults TURBOPANEL_RELEASE_TLS_INSECURE or passes insecureTls", async () => {
+  const client = await Deno.readTextFile(
+    new URL("./client.ts", import.meta.url),
+  );
+  const start = client.indexOf("async #reconcileToLatestUpdate(");
+  const end = client.indexOf("#sendUpdateResult(", start);
+  if (start < 0 || end < 0) {
+    throw new TypeError("client.ts lost #reconcileToLatestUpdate");
+  }
+  const body = client.slice(start, end);
+  assertEquals(body.includes("TURBOPANEL_RELEASE_TLS_INSECURE"), false);
+  assertEquals(body.includes("resolveBootstrapInsecureTls"), false);
+  assertEquals(body.includes("insecureTls: true"), false);
+  assertEquals(body.includes("resolveAutomaticUpdateTrust("), true);
+});
+
+// --- managed-host reconcile through the root helper -----------------------
+
+test("rootHelperReconcileInvocation hands validated flags to sudo -n tp-orchestrate update", () => {
+  const args = [
+    "--license",
+    "abc",
+    "--host",
+    "https://p.example",
+    "--no-start",
+  ];
+  const invocation = rootHelperReconcileInvocation(args, {
+    channel: "release",
+    manifestUrl:
+      "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.0/manifest.json",
+  });
+  assertEquals(invocation.bin, "sudo");
+  assertEquals(invocation.args.slice(0, 2), ["-n", "--"]);
+  assertEquals(invocation.args[2]?.endsWith("/scripts/tp-orchestrate"), true);
+  assertEquals(invocation.args[3], "update");
+  assertEquals(invocation.args.slice(4), [
+    ...args,
+    "--channel",
+    "release",
+    "--manifest-url",
+    "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.0/manifest.json",
+  ]);
+  // Never a shell, never a script body, never --insecure-tls.
+  assertEquals(invocation.args.includes("sh"), false);
+  assertEquals(invocation.args.includes("--insecure-tls"), false);
+});
+
+test("reconcileNeedsRootHelper follows the orchestration privilege rule", () => {
+  assertEquals(
+    reconcileNeedsRootHelper({ installMode: "production", uid: 9999 }),
+    true,
+  );
+  assertEquals(
+    reconcileNeedsRootHelper({ installMode: "development", uid: 1000 }),
+    false,
+  );
 });

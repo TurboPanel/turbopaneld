@@ -2,6 +2,7 @@ import {
   MalformedManifestError,
   UnsupportedSchemaVersionError,
 } from "./errors.ts";
+import { MANIFEST_SIGNATURE_ALG, type ManifestSignature } from "./signing.ts";
 import type {
   ArtifactEntry,
   BinaryArtifacts,
@@ -11,6 +12,7 @@ import type {
 } from "./types.ts";
 
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/i;
+const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -144,6 +146,37 @@ export function parseRootCatalog(
   return catalog;
 }
 
+/**
+ * Structural check of the `signature` field: an Ed25519 signature object with
+ * a key id and a base64 value. Cryptographic verification against the pinned
+ * release key is `verifyManifestSignature` in signing.ts, which the resolver
+ * runs on the served bytes before this parser ever sees them; this only keeps
+ * a manifest that claims a signature honest about its shape.
+ */
+export function validateManifestSignature(raw: unknown): ManifestSignature {
+  if (!isObject(raw)) {
+    throw new MalformedManifestError(
+      "channel.json signature must be an object",
+    );
+  }
+  if (raw.alg !== MANIFEST_SIGNATURE_ALG) {
+    throw new MalformedManifestError(
+      `channel.json signature.alg must be ${MANIFEST_SIGNATURE_ALG}`,
+    );
+  }
+  if (typeof raw.keyId !== "string" || raw.keyId.trim() === "") {
+    throw new MalformedManifestError(
+      "channel.json signature missing or invalid field: keyId",
+    );
+  }
+  if (typeof raw.value !== "string" || !BASE64_RE.test(raw.value.trim())) {
+    throw new MalformedManifestError(
+      "channel.json signature missing or invalid field: value",
+    );
+  }
+  return { alg: MANIFEST_SIGNATURE_ALG, keyId: raw.keyId, value: raw.value };
+}
+
 export function parseChannelManifest(
   raw: unknown,
   allowHttp = false,
@@ -202,11 +235,15 @@ export function parseChannelManifest(
     "channel.json orchestrationArtifact",
     allowHttp,
   );
+  const signature = raw.signature === undefined
+    ? undefined
+    : validateManifestSignature(raw.signature);
 
   return {
     ...(raw as unknown as ChannelManifest),
     binaryArtifacts,
     jsFallbackArtifact,
     orchestrationArtifact,
+    ...(signature ? { signature } : {}),
   };
 }

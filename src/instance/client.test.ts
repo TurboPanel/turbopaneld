@@ -1,7 +1,13 @@
 import { type DaemonApiClient, DaemonApiError } from "./api-client.ts";
 import { it } from "@std/testing/bdd";
 import { join } from "@std/path";
-import { assert, assertEquals, assertExists, assertRejects } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertExists,
+  assertRejects,
+  assertStringIncludes,
+} from "@std/assert";
 import { encodeBase64 } from "@std/encoding/base64";
 import {
   connectInstance,
@@ -4439,6 +4445,8 @@ async function startConnectedClient(
       | ((bytes: Uint8Array) => Promise<void>)
       | undefined;
     forceApplyOwned?: boolean;
+    /** Control-plane origin the client dials (default `https://instance.test`). */
+    instanceBaseUrl?: string;
   } = {},
 ): Promise<{
   client: InstanceClient;
@@ -4481,11 +4489,12 @@ async function startConnectedClient(
   await Deno.writeTextFile(`${fixture}/license.id`, "license-123\n");
   await Deno.writeTextFile(`${fixture}/license.token`, "token-abc\n");
 
+  const baseUrl = options.instanceBaseUrl ?? "https://instance.test";
   const clientOpts: ConstructorParameters<typeof InstanceClient>[0] = {
     config: {
       kind: "url",
-      baseUrl: "https://instance.test",
-      wsBaseUrl: "wss://instance.test",
+      baseUrl,
+      wsBaseUrl: baseUrl.replace(/^http/, "ws"),
     },
     httpClient: {} as Deno.HttpClient,
   };
@@ -5066,6 +5075,173 @@ it({
       restore();
       restoreHooks();
       setOptionalEnv("TURBOPANEL_INSTANCE_URL", originalInstanceUrl);
+    }
+  },
+});
+
+function updateHooksCapturingDownload(
+  downloads: Array<{ url: string; opts: unknown }>,
+): () => void {
+  return installClientTestHooks({
+    updateResultHandoffDelayMs: 0,
+    restartDaemonService: () => Promise.resolve(true),
+    getBuildInfo: () => ({
+      commit: "old",
+      buildId: "dev-old",
+      builtAt: "2026-08-01T00:00:00Z",
+      channel: "trunk",
+      sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/old",
+    }),
+    resolveUpdate: () =>
+      Promise.resolve({
+        channel: "trunk",
+        buildId: "build-new",
+        commit: "newnew1",
+        builtAt: "2026-08-18T00:00:00Z",
+        binaryArtifact: {
+          url: "https://dl.example/daemon.tar.zst",
+          sha256: "a".repeat(64),
+          size: 1,
+        },
+        jsFallbackArtifact: {
+          url: "https://dl.example/daemon.js.tar.zst",
+          sha256: "b".repeat(64),
+          size: 1,
+        },
+        orchestrationArtifact: {
+          url: "https://dl.example/orch.tar.zst",
+          sha256: "c".repeat(64),
+          size: 1,
+        },
+        downloadUrl: "https://dl.example/daemon.tar.zst",
+      }),
+    downloadRunScript: (url, opts) => {
+      downloads.push({ url, opts });
+      return Promise.resolve("#!/bin/sh\n");
+    },
+    executeRunReconcile: () => Promise.resolve(),
+  });
+}
+
+it({
+  name:
+    "automatic update refuses a private run.sh origin with no Platform CA — trust-repair error, no curl -k",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const downloads: Array<{ url: string; opts: unknown }> = [];
+    const restoreHooks = updateHooksCapturingDownload(downloads);
+    const saved = {
+      instanceUrl: Deno.env.get("TURBOPANEL_INSTANCE_URL"),
+      dlBase: Deno.env.get("TURBOPANEL_DL_BASE"),
+      instanceCa: Deno.env.get("TURBOPANEL_INSTANCE_CA"),
+      configDir: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
+      releaseInsecure: Deno.env.get("TURBOPANEL_RELEASE_TLS_INSECURE"),
+    };
+    const emptyConfigDir = await Deno.makeTempDir({ prefix: "tp-no-ca-" });
+    // A private-network overlay origin: run.sh comes from the instance host,
+    // which is neither publicly trusted nor backed by a CA file here.
+    Deno.env.set("TURBOPANEL_INSTANCE_URL", "https://huey.lan:8443");
+    Deno.env.set("TURBOPANEL_DL_BASE", "https://huey.lan:8443/downloads");
+    Deno.env.set("TURBOPANEL_CONFIG_DIR", emptyConfigDir);
+    Deno.env.delete("TURBOPANEL_INSTANCE_CA");
+    // Even an operator-set release-insecure flag must not reach this path.
+    Deno.env.set("TURBOPANEL_RELEASE_TLS_INSECURE", "1");
+    const { socket, restore } = await startConnectedClient({
+      instanceBaseUrl: "https://huey.lan:8443",
+    });
+    try {
+      socket.receive({
+        type: "update",
+        id: "upd-no-ca",
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "trust-repair update result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-no-ca"
+          ) as { ok?: boolean; error?: string } | undefined,
+      );
+      assertEquals(result.ok, false);
+      assertStringIncludes(result.error ?? "", "--instance-ca");
+      assertStringIncludes(result.error ?? "", "never disables TLS");
+      // The script was never fetched, so no curl — insecure or otherwise.
+      assertEquals(downloads, []);
+    } finally {
+      restore();
+      restoreHooks();
+      setOptionalEnv("TURBOPANEL_INSTANCE_URL", saved.instanceUrl);
+      setOptionalEnv("TURBOPANEL_DL_BASE", saved.dlBase);
+      setOptionalEnv("TURBOPANEL_INSTANCE_CA", saved.instanceCa);
+      setOptionalEnv("TURBOPANEL_CONFIG_DIR", saved.configDir);
+      setOptionalEnv("TURBOPANEL_RELEASE_TLS_INSECURE", saved.releaseInsecure);
+      await Deno.remove(emptyConfigDir, { recursive: true });
+    }
+  },
+});
+
+it({
+  name:
+    "automatic update on a private origin uses the Platform CA with --cacert, never -k",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const downloads: Array<{ url: string; opts: unknown }> = [];
+    const restoreHooks = updateHooksCapturingDownload(downloads);
+    const saved = {
+      instanceUrl: Deno.env.get("TURBOPANEL_INSTANCE_URL"),
+      dlBase: Deno.env.get("TURBOPANEL_DL_BASE"),
+      instanceCa: Deno.env.get("TURBOPANEL_INSTANCE_CA"),
+      releaseInsecure: Deno.env.get("TURBOPANEL_RELEASE_TLS_INSECURE"),
+    };
+    const caDir = await Deno.makeTempDir({ prefix: "tp-ca-" });
+    const caPath = `${caDir}/instance-ca.pem`;
+    await Deno.writeTextFile(caPath, "-----BEGIN CERTIFICATE-----\n");
+    Deno.env.set("TURBOPANEL_INSTANCE_URL", "https://huey.lan:8443");
+    Deno.env.set("TURBOPANEL_DL_BASE", "https://huey.lan:8443/downloads");
+    Deno.env.set("TURBOPANEL_INSTANCE_CA", caPath);
+    Deno.env.set("TURBOPANEL_RELEASE_TLS_INSECURE", "1");
+    const { socket, restore } = await startConnectedClient({
+      instanceBaseUrl: "https://huey.lan:8443",
+    });
+    try {
+      socket.receive({
+        type: "update",
+        id: "upd-ca",
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "platform-ca update result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-ca"
+          ) as { ok?: boolean; error?: string } | undefined,
+      );
+      assertEquals(result.ok, true, result.error);
+      assertEquals(downloads.length, 1);
+      assertEquals(downloads[0]?.url, "https://huey.lan:8443/run.sh");
+      assertEquals(downloads[0]?.opts, { insecureTls: false, caPath });
+    } finally {
+      restore();
+      restoreHooks();
+      setOptionalEnv("TURBOPANEL_INSTANCE_URL", saved.instanceUrl);
+      setOptionalEnv("TURBOPANEL_DL_BASE", saved.dlBase);
+      setOptionalEnv("TURBOPANEL_INSTANCE_CA", saved.instanceCa);
+      setOptionalEnv("TURBOPANEL_RELEASE_TLS_INSECURE", saved.releaseInsecure);
+      await Deno.remove(caDir, { recursive: true });
     }
   },
 });

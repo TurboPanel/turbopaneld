@@ -245,13 +245,21 @@ when the daemon itself runs the native binary. Config lives in
 checkout via `daemon-systemd-setup.yml` and logs to `/var/log/turbopanel`.
 
 **Managed updates:** the running daemon reconciles in-place via `run.sh`
-(downloaded from `turbopanel.sh`, or from `<instance>/run.sh` when dialing the
-**dev overlay** plaintext HTTP control plane) when triggered
-from the control-plane UI or manually with the same piped installer
-(`curl -fsSL turbopanel.sh | TURBOPANEL_LICENSE=… sh`; optional
-`TURBOPANEL_HOST` / `TURBOPANEL_INSECURE_TLS=1`). Flags (`--license`, `--host`,
-…) remain supported for scripts and sudo re-exec. There is no separate update
-binary installed under `/opt/turbopanel/bin/`.
+when triggered from the control-plane UI or manually with the same piped
+installer (`curl -fsSL turbopanel.sh | TURBOPANEL_LICENSE=… sh`; optional
+`TURBOPANEL_HOST` / `TURBOPANEL_INSECURE_TLS=1`). On a **managed host** the
+daemon does not download or pipe the script itself: it resolves the trust
+regime (`resolveAutomaticUpdateTrust` — plaintext dev, public TLS, or the
+configured Platform CA; never `curl -k`) and then runs
+`sudo -n tp-orchestrate update --license … [--host …] [--dl-base …]
+[--instance-ca …] [--channel …] [--manifest-url …] --no-start`. The helper
+fetches `run.sh` from `turbopanel.sh` (or `<instance>/run.sh` for plaintext
+dev / overlay hosts) and re-validates every flag against the root-pinned
+`/opt/turbopanel/lib/update-origin` that `run.sh` wrote at install, so a
+daemon cannot point root at another origin or control plane. Co-located dev
+still pipes the downloaded script through `sudo sh -s`. Flags (`--license`,
+`--host`, …) remain supported for scripts and sudo re-exec. There is no
+separate update binary installed under `/opt/turbopanel/bin/`.
 
 ### Daemon TLS trust model (4 paths)
 

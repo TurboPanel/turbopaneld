@@ -350,15 +350,33 @@ export function createNvmlBindingFromLibrary(lib: NvmlLibrary): NvmlBinding {
   };
 }
 
+/**
+ * Where Debian's NVIDIA driver packages install NVML. Production runs under a
+ * scoped `--allow-ffi=/usr/lib,...` grant (deno.json compile tasks), and a
+ * scoped grant makes Deno resolve a bare `libnvidia-ml.so.1` against the cwd
+ * instead of the loader search path — so the absolute candidates come first
+ * and the bare name is only a last resort for unscoped (dev) runs.
+ */
+export const NVML_LIBRARY_CANDIDATES: readonly string[] = [
+  "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1",
+  "/usr/lib/aarch64-linux-gnu/libnvidia-ml.so.1",
+  "/usr/lib64/libnvidia-ml.so.1",
+  "/usr/lib/libnvidia-ml.so.1",
+  NVML_LIBRARY,
+];
+
 /** Real `Deno.dlopen` binding. `null` when the library can't be opened. */
 export function openDefaultNvmlBinding(): NvmlBinding | null {
-  try {
-    return createNvmlBindingFromLibrary(
-      Deno.dlopen(NVML_LIBRARY, NVML_SYMBOLS) as unknown as NvmlLibrary,
-    );
-  } catch {
-    return null;
+  for (const candidate of NVML_LIBRARY_CANDIDATES) {
+    try {
+      return createNvmlBindingFromLibrary(
+        Deno.dlopen(candidate, NVML_SYMBOLS) as unknown as NvmlLibrary,
+      );
+    } catch {
+      // Missing at this path, or outside the FFI grant — try the next one.
+    }
   }
+  return null;
 }
 
 function safeCall<T>(fn: () => T | null): T | null {

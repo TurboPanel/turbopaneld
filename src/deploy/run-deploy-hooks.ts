@@ -1,3 +1,15 @@
+/**
+ * Deploy hooks — user-authored `preDeployCommand` / `postDeployCommand`.
+ *
+ * A hook is arbitrary shell written by a project member. It therefore never
+ * runs on the host: every hook executes **inside the service's own
+ * container** (`docker compose run` before `up`, `docker compose exec`
+ * afterwards), with the container's user, filesystem and network and none of
+ * the daemon's environment, sudo grant or host filesystem. The contract makes
+ * that explicit — a hook carries `confinement: "compose-service"` naming the
+ * compose service it is confined to, and the daemon refuses any hook whose
+ * service is not part of the deploy it is running (`deploy-environment.ts`).
+ */
 import type { EnvironmentDeployServiceHook } from "../instance/commands/contracts.ts";
 import {
   createStreamedRunner,
@@ -5,12 +17,14 @@ import {
   runDocker as defaultRunDocker,
   type RunDockerOptions,
 } from "./docker-cli.ts";
-import { pumpLines } from "../logs/line-stream.ts";
 import type { CommandSummaryRedactor } from "../logs/contracts.ts";
 import { redactCommandSummary } from "../logs/redactor.ts";
 import { composeFileArgs } from "./compose-files.ts";
 
 const HOOK_TIMEOUT_MS = 300_000;
+
+/** The one confinement target the daemon executes hooks under. */
+export const HOOK_CONFINEMENT_COMPOSE_SERVICE = "compose-service";
 
 type RunDockerFn = (
   args: string[],
@@ -34,51 +48,132 @@ export type HookOutputHandler = (
 const defaultSummaryRedactor: CommandSummaryRedactor = (text) =>
   redactCommandSummary(text);
 
-async function runShellHook(
-  command: string,
-  cwd: string,
-  onOutput?: HookOutputHandler,
-  redactSummary: CommandSummaryRedactor = defaultSummaryRedactor,
-): Promise<{ stdout: string; stderr: string }> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), HOOK_TIMEOUT_MS);
-  try {
-    const child = new Deno.Command("sh", {
-      args: ["-c", command],
-      cwd,
-      stdin: "null",
-      stdout: "piped",
-      stderr: "piped",
-      signal: controller.signal,
-    }).spawn();
+/** Thrown when a hook is not confined to a service in this deploy. */
+export class HookConfinementError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "HookConfinementError";
+  }
+}
 
-    const [status, stdoutText, stderrText] = await Promise.all([
-      child.status,
-      pumpLines(
-        child.stdout,
-        onOutput ? (line) => onOutput("stdout", line) : undefined,
-      ),
-      pumpLines(
-        child.stderr,
-        onOutput ? (line) => onOutput("stderr", line) : undefined,
-      ),
-    ]);
-
-    const stdout = stdoutText.trim();
-    const stderr = stderrText.trim();
-    if (!status.success) {
-      throw new Error(
-        redactSummary(stderr) || redactSummary(stdout) || "Hook command failed",
+/**
+ * Refuse hooks that carry a command without naming their confinement, or
+ * that name a compose service this deploy does not run. Called before any
+ * hook executes, with the resolved service list of the deploy.
+ */
+export function assertHooksConfined(
+  hooks: readonly EnvironmentDeployServiceHook[],
+  deployedServiceNames: readonly string[],
+): void {
+  const deployed = new Set(deployedServiceNames);
+  for (const hook of hooks) {
+    const hasCommand = Boolean(hook.preDeployCommand || hook.postDeployCommand);
+    if (!hasCommand) continue;
+    if (hook.confinement !== HOOK_CONFINEMENT_COMPOSE_SERVICE) {
+      throw new HookConfinementError(
+        `deploy hook for service ${hook.composeServiceName} names no confinement target; refusing to run it`,
       );
     }
-    return { stdout, stderr };
-  } catch (err) {
-    if (err instanceof DOMException && err.name === "AbortError") {
-      throw new Error(`Hook command timed out after ${HOOK_TIMEOUT_MS}ms`);
+    if (!deployed.has(hook.composeServiceName)) {
+      throw new HookConfinementError(
+        `deploy hook targets compose service ${hook.composeServiceName}, which is not part of this deploy`,
+      );
     }
+  }
+}
+
+/** Compose args that run `command` via the service image's `sh`, in the container. */
+export function preDeployHookArgs(
+  projectName: string,
+  composePaths: readonly string[],
+  composeServiceName: string,
+  command: string,
+  containerName: string,
+): string[] {
+  return [
+    ...composeFileArgs(projectName, composePaths),
+    "run",
+    "--rm",
+    "--no-deps",
+    "-T",
+    "--name",
+    containerName,
+    "--entrypoint",
+    "sh",
+    composeServiceName,
+    "-c",
+    command,
+  ];
+}
+
+/** Compose args that run `command` inside the already-running service container. */
+export function postDeployHookArgs(
+  projectName: string,
+  composePaths: readonly string[],
+  composeServiceName: string,
+  command: string,
+): string[] {
+  return [
+    ...composeFileArgs(projectName, composePaths),
+    "exec",
+    "-T",
+    composeServiceName,
+    "sh",
+    "-c",
+    command,
+  ];
+}
+
+function oneOffContainerName(
+  projectName: string,
+  composeServiceName: string,
+): string {
+  const stamp = Date.now().toString(36);
+  return `${projectName}-${composeServiceName}-hook-${stamp}`.replaceAll(
+    /[^A-Za-z0-9_.-]/g,
+    "-",
+  );
+}
+
+async function runConfinedHook(
+  args: string[],
+  params: {
+    run: RunDockerFn;
+    runStreamed: ReturnType<typeof createStreamedRunner>;
+    onOutput?: HookOutputHandler;
+    redactSummary: CommandSummaryRedactor;
+    /** Best-effort cleanup when the hook overruns (pre-deploy one-offs). */
+    cleanup?: () => Promise<void>;
+  },
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(new Error(`Hook command timed out after ${HOOK_TIMEOUT_MS}ms`)),
+      HOOK_TIMEOUT_MS,
+    );
+  });
+  const execution = params.onOutput
+    ? params.runStreamed(args, {
+      onLine: (event) => params.onOutput?.(event.stream, event.line),
+    })
+    : params.run(args);
+  let result: DockerCliResult;
+  try {
+    result = await Promise.race([execution, timeout]);
+  } catch (err) {
+    await params.cleanup?.();
     throw err;
   } finally {
-    clearTimeout(timeout);
+    clearTimeout(timer);
+  }
+  if (!result.success) {
+    throw new Error(
+      params.redactSummary(result.stderr.trim()) ||
+        params.redactSummary(result.stdout.trim()) ||
+        "Hook command failed",
+    );
   }
 }
 
@@ -124,11 +219,29 @@ export async function runDeployServiceHooks(
     }
 
     if (hook.preDeployCommand) {
-      await runShellHook(
-        hook.preDeployCommand,
-        params.deploymentDir,
-        onOutput,
-        redactSummary,
+      // Before `up` the service container does not exist yet: run the hook
+      // in a one-off container from the service's (freshly built) image.
+      const containerName = oneOffContainerName(
+        params.projectName,
+        hook.composeServiceName,
+      );
+      await runConfinedHook(
+        preDeployHookArgs(
+          params.projectName,
+          params.composePaths,
+          hook.composeServiceName,
+          hook.preDeployCommand,
+          containerName,
+        ),
+        {
+          run,
+          runStreamed,
+          onOutput,
+          redactSummary,
+          cleanup: async () => {
+            await run(["rm", "-f", containerName]).catch(() => undefined);
+          },
+        },
       );
     }
   }
@@ -136,17 +249,28 @@ export async function runDeployServiceHooks(
 
 export async function runPostDeployHooks(
   hooks: EnvironmentDeployServiceHook[],
-  deploymentDir: string,
-  onOutput?: HookOutputHandler,
-  redactSummary?: CommandSummaryRedactor,
+  params: {
+    projectName: string;
+    composePaths: string[];
+    runDocker?: RunDockerFn;
+    onOutput?: HookOutputHandler;
+    redactSummary?: CommandSummaryRedactor;
+  },
 ): Promise<void> {
+  const run = params.runDocker ?? defaultRunDocker;
+  const runStreamed = createStreamedRunner(params.runDocker);
+  const redactSummary = params.redactSummary ?? defaultSummaryRedactor;
   for (const hook of hooks) {
     if (hook.postDeployCommand) {
-      await runShellHook(
-        hook.postDeployCommand,
-        deploymentDir,
-        onOutput,
-        redactSummary ?? defaultSummaryRedactor,
+      // After `up` the service is running: exec inside that container.
+      await runConfinedHook(
+        postDeployHookArgs(
+          params.projectName,
+          params.composePaths,
+          hook.composeServiceName,
+          hook.postDeployCommand,
+        ),
+        { run, runStreamed, onOutput: params.onOutput, redactSummary },
       );
     }
   }

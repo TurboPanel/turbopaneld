@@ -264,3 +264,20 @@ export async function runOrThrow(
   }
   return result;
 }
+
+/**
+ * True when `link` is already a symlink to `target`. The `current` symlinks
+ * under the vendor tree are root-owned on managed hosts, so the daemon must
+ * not touch one that is already right — replacing it unconditionally used to
+ * log a permission warning on every start.
+ */
+export async function symlinkPointsAt(
+  link: string,
+  target: string,
+): Promise<boolean> {
+  try {
+    return (await Deno.readLink(link)) === target;
+  } catch {
+    return false;
+  }
+}

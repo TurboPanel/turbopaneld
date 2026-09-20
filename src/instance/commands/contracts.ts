@@ -525,8 +525,18 @@ export type EnvironmentDeployPrincipalMaterial = {
   passwordHash?: string;
 };
 
+/**
+ * Where a deploy hook runs. `compose-service` is the only target: the hook
+ * executes inside the named service's container (`docker compose run` before
+ * `up`, `docker compose exec` after), never on the host as the daemon. A
+ * hook that carries a command without this field is rejected at parse time.
+ */
+export type EnvironmentDeployHookConfinement = "compose-service";
+
 export type EnvironmentDeployServiceHook = {
   composeServiceName: string;
+  /** Required whenever `preDeployCommand` or `postDeployCommand` is set. */
+  confinement?: EnvironmentDeployHookConfinement;
   preDeployCommand?: string;
   postDeployCommand?: string;
   buildDisableCache?: boolean;
@@ -3483,6 +3493,24 @@ function parseServiceHook(value: unknown): EnvironmentDeployServiceHook {
     hook.postDeployCommand = value.postDeployCommand;
   }
   if (value.buildDisableCache === true) hook.buildDisableCache = true;
+  if (value.confinement !== undefined) {
+    if (value.confinement !== "compose-service") {
+      throw new TypeError(
+        "Invalid environment deploy serviceHooks entry: unsupported confinement",
+      );
+    }
+    hook.confinement = "compose-service";
+  }
+  // A command with no stated confinement is a host-shell request; refuse it
+  // here so it never reaches the runner (run-deploy-hooks.ts).
+  if (
+    (hook.preDeployCommand || hook.postDeployCommand) &&
+    hook.confinement === undefined
+  ) {
+    throw new TypeError(
+      "Invalid environment deploy serviceHooks entry: hook commands require confinement",
+    );
+  }
   return hook;
 }
 

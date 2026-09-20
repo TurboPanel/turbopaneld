@@ -6,6 +6,17 @@ turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') 
 # (`deno run …/bin/turbopaneld.js`). Keep in step with the TP_DENO_VERSION pin
 # in scripts/run.sh.
 deno_version: "2.9.6"
+# Upstream SHA-256 of each release zip, keyed by version then by
+# ansible_architecture (dl.deno.land publishes `<asset>.sha256sum` beside the
+# asset). The install task refuses to run when the pinned version has no entry
+# for the host architecture, so a version bump without new digests fails
+# loudly instead of installing an unverified runtime. Keep in step with
+# TP_DENO_SHA256_* in scripts/run.sh (src/orchestration/paths.test.ts pins
+# both against this table).
+deno_sha256:
+  "2.9.6":
+    x86_64: "394f07f4da2bebe6ce6f1e7ce0fa16429b29b08c35e3fac3fe25972676dff4b2"
+    aarch64: "9a46afc6c392c7cd2ff71a31558935545b46408d0e87f7a86908c712721c046e"
 turbopanel_dev_user: ""
 turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
 turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"

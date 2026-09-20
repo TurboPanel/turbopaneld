@@ -20,6 +20,11 @@ TURBOPANEL_INSTANCE_CA_FINGERPRINT={{ turbopanel_instance_ca_fingerprint }}
 TURBOPANEL_UPDATE_CHANNEL={{ turbopanel_update_channel | default('trunk') }}
 {% if turbopanel_dl_base | default('') | length > 0 %}
 TURBOPANEL_DL_BASE={{ turbopanel_dl_base }}
+{# A development overlay serves a contributor's own unsigned builds. This is
+   the only place the daemon's manifest-signature bypass is switched on: it is
+   host-side, written solely for --dl-base installs, and the resolver honours
+   it for overlay-catalog manifests only (src/update/signing.ts). #}
+TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST=1
 {% endif %}
 {# A pin (run.sh --manifest-url): one exact release manifest instead of the
    channel's current pointer. The daemon's resolver honours it for

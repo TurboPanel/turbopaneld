@@ -1,6 +1,15 @@
 import { assertEquals, assertRejects } from "@std/assert";
-import { MalformedManifestError, MissingChannelError } from "./errors.ts";
+import {
+  signWithTestKey,
+  TEST_RELEASE_SIGNING_PUBLIC_KEY_HEX,
+} from "../testing/release-signing-fixture.ts";
+import {
+  MalformedManifestError,
+  ManifestSignatureError,
+  MissingChannelError,
+} from "./errors.ts";
 import { resolveUpdate } from "./resolver.ts";
+import { DEV_UNSIGNED_MANIFEST_ENV } from "./signing.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -427,6 +436,234 @@ test("resolveUpdate rejects unsupported CPU architectures", async () => {
       configurable: true,
       value: original,
     });
+    restore();
+  }
+});
+
+// --- release signatures -----------------------------------------------------
+
+const PRODUCTION = {
+  installMode: "production" as const,
+  publicKeyHex: TEST_RELEASE_SIGNING_PUBLIC_KEY_HEX,
+};
+
+function serveManifest(body: unknown): () => void {
+  return installFetch((url) => {
+    if (url.endsWith("/channels.json")) {
+      return Response.json({
+        schema: 1,
+        defaultChannel: "trunk",
+        channels: { trunk: { manifestUrl: "./manifest.json" } },
+      });
+    }
+    if (url.endsWith("/manifest.json")) {
+      return new Response(JSON.stringify(body), {
+        headers: { "content-type": "application/json" },
+      });
+    }
+    return new Response("missing", { status: 404 });
+  });
+}
+
+test("resolveUpdate (production) refuses an unsigned built-in rail manifest", async () => {
+  const restore = serveManifest(channelManifest());
+  try {
+    await assertRejects(
+      () => resolveUpdate({ app: "daemon", channel: "trunk" }, {}, PRODUCTION),
+      ManifestSignatureError,
+      "unsigned",
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("resolveUpdate (production) accepts a manifest signed by the pinned key", async () => {
+  const restore = serveManifest(await signWithTestKey(channelManifest()));
+  try {
+    const info = await resolveUpdate(
+      { app: "daemon", channel: "trunk" },
+      {},
+      PRODUCTION,
+    );
+    assertEquals(info.buildId, "build-1");
+  } finally {
+    restore();
+  }
+});
+
+test("resolveUpdate (production) refuses a manifest signed by another key", async () => {
+  const restore = serveManifest(await signWithTestKey(channelManifest()));
+  try {
+    await assertRejects(
+      () =>
+        resolveUpdate({ app: "daemon", channel: "trunk" }, {}, {
+          installMode: "production",
+        }),
+      ManifestSignatureError,
+      "invalid",
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("resolveUpdate (production) refuses a manifest altered after signing", async () => {
+  const signed = await signWithTestKey(channelManifest());
+  const tampered = {
+    ...signed,
+    binaryArtifacts: {
+      ...signed.binaryArtifacts,
+      "linux-amd64": artifact("https://evil.example/turbopaneld", SHA, 100),
+      "linux-arm64": artifact("https://evil.example/turbopaneld", SHA_B, 200),
+    },
+  };
+  const restore = serveManifest(tampered);
+  try {
+    await assertRejects(
+      () => resolveUpdate({ app: "daemon", channel: "trunk" }, {}, PRODUCTION),
+      ManifestSignatureError,
+      "invalid",
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("resolveUpdate (production) refuses a malformed signature object", async () => {
+  const signed = await signWithTestKey(channelManifest());
+  const restore = serveManifest({
+    ...signed,
+    signature: { ...signed.signature, value: "AAAA" },
+  });
+  try {
+    await assertRejects(
+      () => resolveUpdate({ app: "daemon", channel: "trunk" }, {}, PRODUCTION),
+      ManifestSignatureError,
+      "64 bytes",
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("resolveUpdate (production) refuses a pinned TURBOPANEL_MANIFEST_URL manifest that is unsigned", async () => {
+  const restore = serveManifest(channelManifest());
+  try {
+    await assertRejects(
+      () =>
+        resolveUpdate(
+          { app: "daemon", channel: "release" },
+          {
+            TURBOPANEL_MANIFEST_URL:
+              "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.0/manifest.json",
+            [DEV_UNSIGNED_MANIFEST_ENV]: "1",
+          },
+          PRODUCTION,
+        ),
+      ManifestSignatureError,
+      "unsigned",
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("resolveUpdate verifies the signature before absolutising relative artifact URLs", async () => {
+  // Signed with relative URLs (the overlay shape); the signature covers the
+  // served bytes, so absolutising afterwards must not break verification.
+  const relative = {
+    ...channelManifest(),
+    binaryArtifacts: {
+      "linux-amd64": artifact("./daemon/turbopaneld-amd64.tar.zst", SHA, 100),
+      "linux-arm64": artifact("./daemon/turbopaneld-arm64.tar.zst", SHA_B, 200),
+    },
+    jsFallbackArtifact: artifact("./daemon/turbopaneld.js.tar.zst", SHA_C, 300),
+    orchestrationArtifact: artifact(
+      "./daemon/orchestration.tar.zst",
+      SHA_D,
+      400,
+    ),
+  };
+  const restore = serveManifest(await signWithTestKey(relative));
+  try {
+    const info = await resolveUpdate(
+      { app: "daemon", channel: "trunk" },
+      OVERLAY_ENV,
+      PRODUCTION,
+    );
+    assertEquals(
+      info.orchestrationArtifact.url,
+      "https://dl.trbp.nl/daemon/orchestration.tar.zst",
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("resolveUpdate (production) bypasses signatures only for an overlay with the dev flag", async () => {
+  const restore = serveManifest(channelManifest());
+  try {
+    // Overlay without the host flag: still refused.
+    await assertRejects(
+      () =>
+        resolveUpdate(
+          { app: "daemon", channel: "trunk" },
+          OVERLAY_ENV,
+          PRODUCTION,
+        ),
+      ManifestSignatureError,
+      "unsigned",
+    );
+    // Overlay with the host-side flag: the development bypass.
+    const info = await resolveUpdate(
+      { app: "daemon", channel: "trunk" },
+      { ...OVERLAY_ENV, [DEV_UNSIGNED_MANIFEST_ENV]: "1" },
+      PRODUCTION,
+    );
+    assertEquals(info.buildId, "build-1");
+    // The flag alone never unlocks the built-in rail.
+    await assertRejects(
+      () =>
+        resolveUpdate(
+          { app: "daemon", channel: "trunk" },
+          { [DEV_UNSIGNED_MANIFEST_ENV]: "1" },
+          PRODUCTION,
+        ),
+      ManifestSignatureError,
+      "unsigned",
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("resolveUpdate (development) consumes the unsigned dev overlay", async () => {
+  const restore = serveManifest(channelManifest());
+  try {
+    const info = await resolveUpdate(
+      { app: "daemon", channel: "trunk" },
+      OVERLAY_ENV,
+      { installMode: "development" },
+    );
+    assertEquals(info.buildId, "build-1");
+  } finally {
+    restore();
+  }
+});
+
+test("resolveUpdate rejects a manifest body that is not JSON", async () => {
+  const restore = installFetch((url) => {
+    if (url.endsWith("/manifest.json")) return new Response("<html>");
+    return new Response("missing", { status: 404 });
+  });
+  try {
+    await assertRejects(
+      () => resolveUpdate({ app: "daemon", channel: "trunk" }, {}, PRODUCTION),
+      MalformedManifestError,
+      "not valid JSON",
+    );
+  } finally {
     restore();
   }
 });

@@ -1,3 +1,5 @@
+import type { ManifestSignature } from "./signing.ts";
+
 export type UpdateApp = "daemon";
 
 export type UpdateChannel = "trunk" | "edge" | "canary" | "rc" | "release";
@@ -46,7 +48,12 @@ export interface ChannelManifest {
   jsFallbackArtifact: ArtifactEntry;
   orchestrationArtifact: ArtifactEntry;
   releaseNotesUrl?: string;
-  signature?: Record<string, unknown>;
+  /**
+   * Ed25519 signature by the offline release key over the canonical manifest
+   * without this field (see `signing.ts`). Required on every production rail;
+   * only the development bypass in `signing.ts` accepts its absence.
+   */
+  signature?: ManifestSignature;
 }
 
 export interface UpdateInfo {

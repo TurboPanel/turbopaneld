@@ -17,3 +17,16 @@ turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') |
 turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
 turbopanel_uid: "{{ turbopanel_dev_uid if (turbopanel_dev_user | default('') | length > 0) else 9999 }}"
 turbopanel_gid: "{{ turbopanel_dev_gid if (turbopanel_dev_user | default('') | length > 0) else 9999 }}"
+# Who owns release content under the install root: root on managed hosts, the
+# dev user in co-located dev (source checkouts and vendored runtimes there are
+# edited by that account on purpose).
+turbopanel_install_owner: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'root' }}"
+# Production orchestration tree (run.sh installs it; the sudoers allowlist names
+# its tp-orchestrate helper). Overridden by daemon-install.yml / run.sh vars.
+turbopanel_orchestration_dir: "{{ turbopanel_install_root }}/share/orchestration"
+# Vendor subtrees the daemon process itself may write at runtime. Everything
+# else under the install root is root-owned. Keep in step with
+# DAEMON_WRITABLE_VENDOR_DIRS in src/daemon-permissions.ts.
+turbopanel_daemon_vendor_cache_dirs:
+  - "{{ turbopanel_vendor_dir }}/uv/cache"
+  - "{{ turbopanel_vendor_dir }}/cloudflared"

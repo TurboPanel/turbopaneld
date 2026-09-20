@@ -1,6 +1,11 @@
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { join } from "@std/path";
+import { verifyManifestSignature } from "../src/update/signing.ts";
 import type { ChannelManifest } from "../src/update/types.ts";
+import {
+  TEST_RELEASE_SIGNING_KEY_PEM,
+  TEST_RELEASE_SIGNING_PUBLIC_KEY_HEX,
+} from "../src/testing/release-signing-fixture.ts";
 import {
   artifactFromPublishFile,
   daemonReleaseFilename,
@@ -100,6 +105,7 @@ test("generateChannelManifest writes a file or stdout", async () => {
       buildId: "b1",
       commit: "abcdef0123456789abcdef0123456789abcdef01",
       builtAt: "2026-01-01T00:00:00.000Z",
+      signingKeyPem: TEST_RELEASE_SIGNING_KEY_PEM,
       writeTextFile: (_path, json) => {
         written.push(json);
         return Promise.resolve();
@@ -117,6 +123,7 @@ test("generateChannelManifest writes a file or stdout", async () => {
       buildId: "b1",
       commit: "abcdef0123456789abcdef0123456789abcdef01",
       builtAt: "2026-01-01T00:00:00.000Z",
+      signingKeyPem: TEST_RELEASE_SIGNING_KEY_PEM,
       writeStdout: (json) => {
         stdout.push(json);
         return Promise.resolve();
@@ -134,6 +141,7 @@ test("generateChannelManifest writes a file or stdout", async () => {
       buildId: "b2",
       commit: "def5678123456789abcdef0123456789abcdef01",
       builtAt: "2026-02-02T00:00:00.000Z",
+      signingKeyPem: TEST_RELEASE_SIGNING_KEY_PEM,
     });
     assertEquals(defaults.defaultControlPlaneUrl, "https://turbopanel.app");
     assertEquals(
@@ -185,6 +193,7 @@ test("generateChannelManifest honors channel and version for a tagged release", 
       buildId: "b-rc1",
       commit: "abcdef0123456789abcdef0123456789abcdef01",
       builtAt: "2026-01-01T00:00:00.000Z",
+      signingKeyPem: TEST_RELEASE_SIGNING_KEY_PEM,
       channel: "rc",
       version: "0.1.0-rc1",
       writeStdout: () => Promise.resolve(),
@@ -235,6 +244,7 @@ test("generateChannelManifest pins release assets to the tag's GitHub download p
       buildId: "b-010",
       commit: "abcdef0123456789abcdef0123456789abcdef01",
       builtAt: "2026-01-01T00:00:00.000Z",
+      signingKeyPem: TEST_RELEASE_SIGNING_KEY_PEM,
       channel: "release",
       version: "0.1.0",
       artifactBaseUrl: base,
@@ -570,6 +580,7 @@ test("generateChannelManifest default stdout writer encodes JSON", async () => {
       buildId: "b3",
       commit: "aaa1111123456789abcdef0123456789abcdef01",
       builtAt: "2026-03-03T00:00:00.000Z",
+      signingKeyPem: TEST_RELEASE_SIGNING_KEY_PEM,
     });
     const body = new TextDecoder().decode(
       chunks.reduce((all, chunk) => {
@@ -584,4 +595,114 @@ test("generateChannelManifest default stdout writer encodes JSON", async () => {
     Deno.stdout.write = originalWrite;
     await Deno.remove(dir, { recursive: true });
   }
+});
+
+test("generateChannelManifest signs the finished manifest with the release key", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-manifest-signed-" });
+  try {
+    for (
+      const name of [
+        "turbopaneld-amd64.tar.zst",
+        "turbopaneld-arm64.tar.zst",
+        "turbopaneld.js.tar.zst",
+        "orchestration.tar.zst",
+      ]
+    ) {
+      await Deno.writeFile(join(dir, name), new Uint8Array([4, 2]));
+    }
+    const written: string[] = [];
+    const manifest = await generateChannelManifest({
+      publishDir: dir,
+      outputPath: join(dir, "manifest.json"),
+      buildId: "b-signed",
+      commit: "abcdef0123456789abcdef0123456789abcdef01",
+      builtAt: "2026-01-01T00:00:00.000Z",
+      signingKeyPem: TEST_RELEASE_SIGNING_KEY_PEM,
+      writeTextFile: (_path, json) => {
+        written.push(json);
+        return Promise.resolve();
+      },
+    });
+    assertEquals(manifest.signature?.alg, "ed25519");
+    // What was written is what was signed — verify the serialized form.
+    const parsed = JSON.parse(written[0] ?? "{}") as Record<string, unknown>;
+    await verifyManifestSignature(parsed, TEST_RELEASE_SIGNING_PUBLIC_KEY_HEX);
+    // The signature is the last key, after every artifact entry.
+    assertEquals(Object.keys(parsed).at(-1), "signature");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("generateChannelManifest refuses to write an unsigned manifest", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-manifest-unsigned-" });
+  const originalError = console.error;
+  const errors: string[] = [];
+  console.error = (...args: unknown[]) => {
+    errors.push(args.map(String).join(" "));
+  };
+  try {
+    for (
+      const name of [
+        "turbopaneld-amd64.tar.zst",
+        "turbopaneld-arm64.tar.zst",
+        "turbopaneld.js.tar.zst",
+        "orchestration.tar.zst",
+      ]
+    ) {
+      await Deno.writeFile(join(dir, name), new Uint8Array([1]));
+    }
+    const written: string[] = [];
+    await assertRejects(
+      () =>
+        generateChannelManifest({
+          publishDir: dir,
+          outputPath: join(dir, "manifest.json"),
+          buildId: "b-unsigned",
+          commit: "abcdef0123456789abcdef0123456789abcdef01",
+          builtAt: "2026-01-01T00:00:00.000Z",
+          writeTextFile: (_path, json) => {
+            written.push(json);
+            return Promise.resolve();
+          },
+        }),
+      TypeError,
+      "RELEASE_SIGNING_KEY is required",
+    );
+    assertEquals(written, []);
+    assertEquals(errors.some((line) => line.includes("unsigned")), true);
+  } finally {
+    console.error = originalError;
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("the CLI threads RELEASE_SIGNING_KEY into the generator", async () => {
+  const seen: Array<string | undefined> = [];
+  await runGenerateChannelManifestCli({
+    env: {
+      BUILD_ID: "b1",
+      GIT_COMMIT: "abcdef0123456789abcdef0123456789abcdef01",
+      BUILT_AT: "2026-01-01T00:00:00.000Z",
+      RELEASE_SIGNING_KEY: TEST_RELEASE_SIGNING_KEY_PEM,
+    },
+    args: ["/tmp/publish"],
+    generate: (options) => {
+      seen.push(options.signingKeyPem);
+      return Promise.resolve({
+        schema: 1,
+        channel: "trunk",
+        commit: options.commit,
+        buildId: options.buildId,
+        builtAt: options.builtAt,
+        binaryArtifacts: {
+          "linux-amd64": { url: "./a", sha256: "0", size: 1 },
+          "linux-arm64": { url: "./b", sha256: "0", size: 1 },
+        },
+        jsFallbackArtifact: { url: "./c", sha256: "0", size: 1 },
+        orchestrationArtifact: { url: "./d", sha256: "0", size: 1 },
+      });
+    },
+  });
+  assertEquals(seen, [TEST_RELEASE_SIGNING_KEY_PEM]);
 });

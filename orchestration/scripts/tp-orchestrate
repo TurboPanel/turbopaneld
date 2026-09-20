@@ -1,0 +1,375 @@
+#!/bin/sh
+# TurboPanel root helper for the daemon account (POSIX sh).
+#
+# The only thing `tp` may run as root through sudo besides a fixed list of
+# host utilities (see roles/turbopanel-user/templates/sudoers.j2). It exists
+# because Ansible `become` from an unprivileged account needs `sudo /bin/sh`,
+# which is a root shell — so production orchestration runs *this* as root
+# instead, and `become: true` becomes a no-op.
+#
+# Verbs:
+#   playbook -i localhost, -c local [-e key=value]... <playbook.yml>
+#       Run one of the shipped playbooks (a basename resolved under this
+#       tree's playbooks/ — never a caller-supplied path) with key=value
+#       extra-vars only (no JSON, no @file). Everything else on the command
+#       line is refused.
+#   galaxy-docker-role
+#       Fetch the geerlingguy.docker role pinned in requirements-docker.yml
+#       into the root-owned vendor roles dir (codeload tag tarball).
+#   update --license <b64url> [--host URL] [--dl-base URL]
+#          [--instance-ca /etc/turbopanel/instance-ca.pem] [--channel NAME]
+#          [--manifest-url https://…] --no-start
+#       Fetch run.sh (the CDN, or the control plane for plaintext-dev /
+#       overlay hosts) and run it as root with exactly those flags. The
+#       script body is never accepted from the caller, --insecure-tls is not
+#       a recognised flag here, and the only CA the fetch trusts beyond the
+#       system store is the daemon's canonical Platform CA file.
+#
+# Every input that could steer root is taken from this root-owned tree, not
+# from the caller: the orchestration dir is derived from $0, ansible.cfg and
+# ANSIBLE_ROLES_PATH are fixed, PATH is rebuilt, and Ansible's temp/home live
+# in a root-only scratch directory (never a tp-writable one, which would let
+# tp swap a staged module before root executes it).
+set -eu
+
+tp_die() {
+  printf 'tp-orchestrate: %s\n' "$1" >&2
+  exit 1
+}
+
+[ "$(id -u)" = "0" ] || tp_die "must run as root (sudo -n tp-orchestrate …)"
+
+ORCH_DIR="$(cd "$(dirname "$0")/.." && pwd -P)"
+INSTALL_ROOT="$(cd "$ORCH_DIR/../.." && pwd -P)"
+VENDOR_DIR="$INSTALL_ROOT/vendor"
+PLAYBOOKS_DIR="$ORCH_DIR/playbooks"
+GALAXY_ROLES_DIR="$VENDOR_DIR/ansible/galaxy-roles"
+ANSIBLE_PLAYBOOK_BIN="$VENDOR_DIR/ansible/current/bin/ansible-playbook"
+# Root-only scratch. /tmp is sticky, so an unprivileged pre-created directory
+# cannot be removed by us — refuse it instead of using it.
+ROOT_SCRATCH="/tmp/turbopanel-orchestrate"
+
+tp_require_root_scratch() {
+  if [ -L "$ROOT_SCRATCH" ]; then
+    tp_die "$ROOT_SCRATCH is a symlink; refusing"
+  fi
+  if [ ! -d "$ROOT_SCRATCH" ]; then
+    mkdir -m 0700 "$ROOT_SCRATCH"
+  fi
+  _owner="$(stat -c %u "$ROOT_SCRATCH" 2>/dev/null || echo -1)"
+  [ "$_owner" = "0" ] || tp_die "$ROOT_SCRATCH is not root-owned; refusing"
+  chmod 0700 "$ROOT_SCRATCH"
+}
+
+tp_export_runtime_env() {
+  PATH="$VENDOR_DIR/node/current/bin:$VENDOR_DIR/deno/current:$VENDOR_DIR/caddy/current:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  # Apple Silicon hypervisors advertise SVE2 they do not implement; see
+  # src/orchestration/exec.ts runtimeEnv().
+  OPENSSL_armcap=0
+  ANSIBLE_CONFIG="$ORCH_DIR/ansible.cfg"
+  ANSIBLE_EXECUTABLE=/bin/bash
+  ANSIBLE_HOME="$ROOT_SCRATCH/home"
+  ANSIBLE_LOCAL_TEMP="$ROOT_SCRATCH/local-tmp"
+  ANSIBLE_ROLES_PATH="$ORCH_DIR/roles:$GALAXY_ROLES_DIR"
+  export PATH OPENSSL_armcap ANSIBLE_CONFIG ANSIBLE_EXECUTABLE ANSIBLE_HOME \
+    ANSIBLE_LOCAL_TEMP ANSIBLE_ROLES_PATH
+}
+
+# key=value with an identifier key and no newline — the only extra-var shape
+# the daemon produces (src/orchestration/ansible.ts). JSON blobs and @file
+# references would let the caller feed root arbitrary structured input.
+tp_valid_extra_var() {
+  _nl="$(printf '\nx')"
+  _nl="${_nl%x}"
+  case "$1" in
+    *"$_nl"*) return 1 ;;
+    [a-z_]*=*) ;;
+    *) return 1 ;;
+  esac
+  _key="${1%%=*}"
+  case "$_key" in
+    *[!a-z0-9_]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+tp_verb_playbook() {
+  tp_require_root_scratch
+  _inventory=""
+  _connection=""
+  _playbook=""
+  set -- "$@"
+  # Rebuild argv with only validated entries.
+  _n=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -i)
+        [ $# -ge 2 ] || tp_die "-i requires a value"
+        [ "$2" = "localhost," ] || tp_die "only -i localhost, is allowed"
+        _inventory="$2"
+        shift 2
+        ;;
+      -c)
+        [ $# -ge 2 ] || tp_die "-c requires a value"
+        [ "$2" = "local" ] || tp_die "only -c local is allowed"
+        _connection="$2"
+        shift 2
+        ;;
+      -e)
+        [ $# -ge 2 ] || tp_die "-e requires a value"
+        tp_valid_extra_var "$2" || tp_die "refusing extra-var '$2' (key=value only)"
+        eval "_extra_$_n=\$2"
+        _n=$((_n + 1))
+        shift 2
+        ;;
+      -*)
+        tp_die "refusing option $1"
+        ;;
+      *)
+        [ -z "$_playbook" ] || tp_die "exactly one playbook is allowed"
+        _playbook="$1"
+        shift
+        ;;
+    esac
+  done
+  [ "$_inventory" = "localhost," ] || tp_die "missing -i localhost,"
+  [ "$_connection" = "local" ] || tp_die "missing -c local"
+  [ -n "$_playbook" ] || tp_die "missing playbook"
+
+  # A basename only — callers pass the daemon's absolute constant and we keep
+  # nothing of it but the file name, resolved under the root-owned tree.
+  _name="${_playbook##*/}"
+  case "$_name" in
+    *.yml) ;;
+    *) tp_die "playbook must be a .yml file name" ;;
+  esac
+  case "$_name" in
+    .*|*/*) tp_die "refusing playbook name $_name" ;;
+  esac
+  _resolved="$PLAYBOOKS_DIR/$_name"
+  [ -f "$_resolved" ] || tp_die "no such shipped playbook: $_name"
+  if [ -L "$_resolved" ]; then
+    tp_die "refusing symlinked playbook $_name"
+  fi
+  [ -x "$ANSIBLE_PLAYBOOK_BIN" ] || tp_die "ansible-playbook missing at $ANSIBLE_PLAYBOOK_BIN"
+
+  tp_export_runtime_env
+  mkdir -p -m 0700 "$ANSIBLE_HOME" "$ANSIBLE_LOCAL_TEMP"
+  cd "$INSTALL_ROOT"
+
+  set -- -i localhost, -c local
+  _i=0
+  while [ "$_i" -lt "$_n" ]; do
+    eval "_v=\$_extra_$_i"
+    set -- "$@" -e "$_v"
+    _i=$((_i + 1))
+  done
+  exec "$ANSIBLE_PLAYBOOK_BIN" "$@" "$_resolved"
+}
+
+tp_verb_galaxy_docker_role() {
+  tp_require_root_scratch
+  _req="$ORCH_DIR/requirements-docker.yml"
+  [ -f "$_req" ] || tp_die "missing $_req"
+  # Exact pin, same regex family as parseGalaxyDockerRoleVersion.
+  _version="$(sed -n 's/^[[:space:]]*version:[[:space:]]*"\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)".*$/\1/p' "$_req" | head -1)"
+  [ -n "$_version" ] || tp_die "requirements-docker.yml must pin geerlingguy.docker to an exact version"
+  _dest="$GALAXY_ROLES_DIR/geerlingguy.docker"
+  if [ -f "$_dest/.turbopanel-version" ] \
+    && [ "$(cat "$_dest/.turbopanel-version")" = "$_version" ]; then
+    printf 'tp-orchestrate: geerlingguy.docker %s already installed\n' "$_version"
+    return 0
+  fi
+  tp_export_runtime_env
+  _url="https://codeload.github.com/geerlingguy/ansible-role-docker/tar.gz/refs/tags/${_version}"
+  _work="$ROOT_SCRATCH/galaxy-docker.$$"
+  rm -rf "$_work"
+  mkdir -m 0700 "$_work"
+  if ! curl -fsSL --max-time 120 -o "$_work/role.tar.gz" "$_url"; then
+    rm -rf "$_work"
+    tp_die "failed to download $_url"
+  fi
+  tar -xzf "$_work/role.tar.gz" -C "$_work"
+  _extracted="$_work/ansible-role-docker-${_version}"
+  [ -d "$_extracted" ] || { rm -rf "$_work"; tp_die "archive missing ansible-role-docker-${_version}/"; }
+  printf '%s\n' "$_version" > "$_extracted/.turbopanel-version"
+  install -d -m 0750 -o root -g "$(stat -c %G "$VENDOR_DIR")" "$GALAXY_ROLES_DIR"
+  rm -rf "$_dest.new"
+  # Same filesystem as the destination so the swap is a rename.
+  cp -a "$_extracted" "$_dest.new"
+  chown -R root:root "$_dest.new"
+  chmod -R u=rwX,g=rX,o= "$_dest.new"
+  chgrp -R "$(stat -c %G "$VENDOR_DIR")" "$_dest.new"
+  rm -rf "$_dest"
+  mv "$_dest.new" "$_dest"
+  rm -rf "$_work"
+  printf 'tp-orchestrate: geerlingguy.docker %s installed\n' "$_version"
+}
+
+CANONICAL_INSTANCE_CA="/etc/turbopanel/instance-ca.pem"
+CDN_RUN_SCRIPT="https://turbopanel.sh"
+# Root-pinned update origin, written by run.sh (as root) at install time into
+# the root-owned lib/ tree: the control plane this host enrolled with, the
+# overlay catalog (dev hosts only) and the Platform CA it trusts. The caller
+# cannot choose where root fetches run.sh from or which control plane the
+# installer records — every origin flag must match this file or be absent.
+# /etc/turbopanel is daemon-owned, which is why the pin does not live there.
+UPDATE_ORIGIN_PIN="$INSTALL_ROOT/lib/update-origin"
+# Manifest pins may only name the release rails run.sh itself trusts.
+MANIFEST_URL_PREFIX_CDN="https://dl.trbp.nl/channels/"
+MANIFEST_URL_PREFIX_GITHUB="https://github.com/TurboPanel/turbopaneld/releases/download/"
+
+tp_valid_url() {
+  case "$1" in
+    *"$(printf ' ')"*|*"'"*|*'"'*) return 1 ;;
+    https://[A-Za-z0-9]*|http://[A-Za-z0-9]*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+tp_pin_field() {
+  sed -n "s/^$1=//p" "$UPDATE_ORIGIN_PIN" | head -1
+}
+
+tp_read_update_origin_pin() {
+  if [ -L "$UPDATE_ORIGIN_PIN" ] || [ ! -f "$UPDATE_ORIGIN_PIN" ]; then
+    tp_die "update origin pin missing at $UPDATE_ORIGIN_PIN — re-run the installer (run.sh) once as root to write it"
+  fi
+  _pin_owner="$(stat -c %u "$UPDATE_ORIGIN_PIN" 2>/dev/null || echo -1)"
+  [ "$_pin_owner" = "0" ] || tp_die "$UPDATE_ORIGIN_PIN is not root-owned; refusing"
+  _pin_host="$(tp_pin_field host)"
+  _pin_dl_base="$(tp_pin_field dl_base)"
+  _pin_ca="$(tp_pin_field instance_ca)"
+  [ -n "$_pin_host" ] || tp_die "$UPDATE_ORIGIN_PIN carries no host"
+}
+
+tp_verb_update() {
+  tp_require_root_scratch
+  tp_read_update_origin_pin
+  _license=""
+  _host=""
+  _dl_base=""
+  _ca=""
+  _channel=""
+  _manifest_url=""
+  _no_start=false
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --license)
+        [ $# -ge 2 ] || tp_die "--license requires a value"
+        case "$2" in
+          *[!A-Za-z0-9_=-]*|"") tp_die "refusing malformed --license" ;;
+        esac
+        _license="$2"
+        shift 2
+        ;;
+      --host)
+        [ $# -ge 2 ] || tp_die "--host requires a value"
+        [ "${2%/}" = "${_pin_host%/}" ] || tp_die "refusing --host $2: this host enrolled with $_pin_host"
+        _host="$2"
+        shift 2
+        ;;
+      --dl-base)
+        [ $# -ge 2 ] || tp_die "--dl-base requires a value"
+        [ -n "$_pin_dl_base" ] || tp_die "refusing --dl-base: this host was not installed from an overlay"
+        [ "${2%/}" = "${_pin_dl_base%/}" ] || tp_die "refusing --dl-base $2: pinned overlay is $_pin_dl_base"
+        _dl_base="$2"
+        shift 2
+        ;;
+      --instance-ca)
+        [ $# -ge 2 ] || tp_die "--instance-ca requires a value"
+        [ "$2" = "$CANONICAL_INSTANCE_CA" ] || tp_die "--instance-ca must be $CANONICAL_INSTANCE_CA"
+        [ "$_pin_ca" = "$2" ] || tp_die "refusing --instance-ca: no Platform CA is pinned for this host"
+        _ca="$2"
+        shift 2
+        ;;
+      --channel)
+        [ $# -ge 2 ] || tp_die "--channel requires a value"
+        case "$2" in
+          trunk|edge|canary|rc|release) ;;
+          *) tp_die "refusing --channel $2" ;;
+        esac
+        _channel="$2"
+        shift 2
+        ;;
+      --manifest-url)
+        [ $# -ge 2 ] || tp_die "--manifest-url requires a value"
+        case "$2" in
+          "$MANIFEST_URL_PREFIX_CDN"*|"$MANIFEST_URL_PREFIX_GITHUB"*) ;;
+          *) tp_die "refusing --manifest-url $2: not a TurboPanel release rail" ;;
+        esac
+        tp_valid_url "$2" || tp_die "refusing --manifest-url $2"
+        _manifest_url="$2"
+        shift 2
+        ;;
+      --no-start)
+        _no_start=true
+        shift
+        ;;
+      *)
+        # --insecure-tls lands here on purpose: automatic updates never
+        # relax TLS (src/instance/run-reconcile.ts resolveAutomaticUpdateTrust).
+        tp_die "refusing update flag $1"
+        ;;
+    esac
+  done
+  [ -n "$_license" ] || tp_die "update requires --license"
+  [ "$_no_start" = true ] || tp_die "update requires --no-start (the daemon restarts itself)"
+  # Absent flags take the pinned values, so the installer always records the
+  # control plane, overlay and CA this host was enrolled with.
+  [ -n "$_host" ] || _host="$_pin_host"
+  [ -n "$_dl_base" ] || _dl_base="$_pin_dl_base"
+  [ -n "$_ca" ] || _ca="$_pin_ca"
+
+  # Where run.sh comes from, and how it is trusted — the same three answers
+  # as the daemon's resolveAutomaticUpdateTrust, decided here from the pinned
+  # origin rather than from anything the caller downloaded or passed.
+  _script_url="$CDN_RUN_SCRIPT"
+  set -- curl -fsSL --max-time 120
+  case "$_host" in
+    http://*)
+      # Plaintext development control plane: the dev Caddy serves run.sh.
+      _script_url="${_host%/}/run.sh"
+      ;;
+    https://*)
+      if [ -n "$_dl_base" ]; then
+        _script_url="${_host%/}/run.sh"
+        if [ -n "$_ca" ]; then
+          [ -f "$_ca" ] || tp_die "Platform CA missing at $_ca — re-run the installer with --instance-ca"
+          set -- "$@" --cacert "$_ca"
+        fi
+      fi
+      ;;
+  esac
+
+  _script="$ROOT_SCRATCH/run.sh.$$"
+  rm -f "$_script"
+  if ! "$@" -o "$_script" "$_script_url"; then
+    rm -f "$_script"
+    tp_die "failed to download $_script_url (TLS is never relaxed for automatic updates)"
+  fi
+  [ -s "$_script" ] || { rm -f "$_script"; tp_die "empty run.sh from $_script_url"; }
+
+  set -- --license "$_license"
+  [ -n "$_host" ] && set -- "$@" --host "$_host"
+  [ -n "$_dl_base" ] && set -- "$@" --dl-base "$_dl_base"
+  [ -n "$_ca" ] && set -- "$@" --instance-ca "$_ca"
+  [ -n "$_channel" ] && set -- "$@" --channel "$_channel"
+  [ -n "$_manifest_url" ] && set -- "$@" --manifest-url "$_manifest_url"
+  set -- "$@" --no-start
+  cd "$INSTALL_ROOT"
+  _rc=0
+  sh "$_script" "$@" || _rc=$?
+  rm -f "$_script"
+  exit "$_rc"
+}
+
+[ $# -ge 1 ] || tp_die "usage: tp-orchestrate playbook|galaxy-docker-role|update …"
+_verb="$1"
+shift
+case "$_verb" in
+  playbook) tp_verb_playbook "$@" ;;
+  galaxy-docker-role) tp_verb_galaxy_docker_role "$@" ;;
+  update) tp_verb_update "$@" ;;
+  *) tp_die "unknown verb $_verb" ;;
+esac

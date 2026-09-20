@@ -148,6 +148,18 @@ export const ANSIBLE_LOCAL_TMP = join(CACHE_DIR, "ansible-tmp");
  */
 export const ANSIBLE_HOME = "/tmp/turbopanel-ansible"; // NOSONAR typescript:S5443 — disposable ephemeral cache; durable content uses FHS GALAXY_* paths
 export const ANSIBLE_CFG = join(ORCHESTRATION_DIR, "ansible.cfg");
+
+/**
+ * Root helper shipped in the orchestration tree. On managed hosts the daemon
+ * account has no `sudo /bin/sh`, so every playbook (and the Galaxy Docker
+ * role fetch) runs as root through this validated entrypoint instead of
+ * Ansible `become` — see `privileged.ts` and roles/turbopanel-user.
+ */
+export const ORCHESTRATE_HELPER = join(
+  ORCHESTRATION_DIR,
+  "scripts",
+  "tp-orchestrate",
+);
 /**
  * `ansible.builtin.shell` default is `/bin/sh`. Debian `/bin/sh` is dash,
  * which rejects `set -o pipefail` used by role install snippets (cache, Deno,

@@ -15,26 +15,48 @@
     name: "{{ turbopanel_user }}"
     uid: "{{ turbopanel_uid }}"
     group: "{{ turbopanel_group }}"
-    home: "{{ turbopanel_install_root }}"
+    # Home is the state tree, not the (root-owned) install root: the few
+    # things that key on $HOME (Deno's cache dir when unset, docker CLI
+    # config) must land somewhere the daemon may write.
+    home: "{{ turbopanel_daemon_state_dir | default('/var/lib/turbopanel') }}"
     shell: /usr/sbin/nologin
     system: true
     create_home: false
   when: turbopanel_dev_user | default('') | length == 0
 
+# The install root is release content: root-owned, traversable by the daemon
+# group, never writable by the daemon. A daemon that could write here could
+# replace its own binary, the orchestration tree it hands to root, or a
+# runtime it is launched from. Co-located dev keeps the dev user as owner —
+# that account already holds full sudo and edits these trees on purpose.
 - name: Ensure install root directory
   ansible.builtin.file:
     path: "{{ turbopanel_install_root }}"
     state: directory
-    owner: "{{ turbopanel_user }}"
+    owner: "{{ turbopanel_install_owner }}"
     group: "{{ turbopanel_group }}"
     mode: "0750"
 
-# Runtimes live under the FHS vendor tree; the mutable FHS dirs (config,
-# state, logs) are owned by the resolved identity — the dev user in co-located
-# dev, the turbopanel service account on managed hosts. The retired co-located
-# /platform tree is gone: source checkouts now live under the dev user's home
-# and config lives under /etc/turbopanel.
-- name: Ensure runtimes and FHS directories
+# Vendored runtimes are immutable to the daemon too. The bootstrap that runs
+# as root before this playbook (run.sh → `turbopaneld bootstrap-orchestration`)
+# populates uv/python/ansible with root ownership, and that is what stays.
+- name: Ensure runtimes directories are root-owned and group-traversable
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ turbopanel_install_owner }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+  loop:
+    - "{{ turbopanel_vendor_dir }}"
+    - "{{ turbopanel_vendor_dir }}/uv"
+    - "{{ turbopanel_vendor_dir }}/python"
+    - "{{ turbopanel_vendor_dir }}/ansible"
+
+# The mutable FHS dirs (config, state, logs, backups) belong to the resolved
+# identity — the dev user in co-located dev, the service account on managed
+# hosts.
+- name: Ensure FHS state directories
   ansible.builtin.file:
     path: "{{ item }}"
     state: directory
@@ -42,31 +64,17 @@
     group: "{{ turbopanel_group }}"
     mode: "0750"
   loop:
-    - "{{ turbopanel_vendor_dir }}"
-    - "{{ turbopanel_vendor_dir }}/uv"
-    - "{{ turbopanel_vendor_dir }}/uv/cache"
-    - "{{ turbopanel_vendor_dir }}/python"
-    - "{{ turbopanel_vendor_dir }}/ansible"
     - /etc/turbopanel
     - /var/lib/turbopanel
     - /var/log/turbopanel
     - "{{ turbopanel_backup_dir }}"
 
-# The pre-playbook `turbopaneld bootstrap-orchestration` (invoked by run.sh as
-# root on first binary install) may have populated uv/python/ansible state dirs
-# as root. Fix ownership recursively here (right after user creation) so that
-# when later roles (esp. daemon-launch) start the turbopaneld unit, the
-# daemon process (running as tp) can write its uv cache and managed
-# pythons without permission errors.
-#
-# Scoped to those three subtrees, **not** to `{{ turbopanel_vendor_dir }}` as a
-# whole: a blanket recurse also rewrites every vendored runtime a later role
-# installed with a deliberately different identity. `vendor/node-app/` is the
-# one that breaks — it is `root:tpnodeapp 0750` so tenant principals (who are
-# not, and must not be, in `tp`) can execute it, and every converge would
-# silently hand it back to `tp:tp` and leave tenant apps unable to exec their
-# Node. Bootstrap only ever writes uv/python/ansible, so nothing else needs it.
-- name: Ensure turbopanel owns the bootstrap-populated runtimes
+# The narrow vendor cache the daemon process writes at runtime — nothing it
+# is launched from, nothing root later executes. Keep in step with
+# DAEMON_WRITABLE_VENDOR_DIRS in src/daemon-permissions.ts (pinned by
+# src/orchestration/sudoers-contract.test.ts): uv's download cache and the
+# cloudflared connector the daemon vendors on demand for its own tunnels.
+- name: Ensure the daemon-writable vendor cache directories
   ansible.builtin.file:
     path: "{{ item }}"
     state: directory
@@ -74,15 +82,16 @@
     group: "{{ turbopanel_group }}"
     recurse: true
     mode: "0750"
-  loop:
-    - "{{ turbopanel_vendor_dir }}/uv"
-    - "{{ turbopanel_vendor_dir }}/python"
-    - "{{ turbopanel_vendor_dir }}/ansible"
+  loop: "{{ turbopanel_daemon_vendor_cache_dirs }}"
 
-- name: Grant passwordless sudo for orchestration
-  ansible.builtin.copy:
+# Narrow sudo: a fixed allowlist of host utilities by absolute path plus the
+# tp-orchestrate helper (which runs the shipped playbooks as root so Ansible
+# never needs `become` from an unprivileged account). Never NOPASSWD:ALL —
+# src/orchestration/sudoers-contract.test.ts fails the build if it returns.
+- name: Grant scoped passwordless sudo for orchestration
+  ansible.builtin.template:
+    src: sudoers.j2
     dest: /etc/sudoers.d/tp
-    content: "{{ turbopanel_user }} ALL=(ALL) NOPASSWD:ALL\n"
     owner: root
     group: root
     mode: "0440"

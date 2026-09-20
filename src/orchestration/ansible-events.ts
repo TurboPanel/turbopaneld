@@ -1,6 +1,7 @@
 import { logDebug, logError, logInfo } from "../logger.ts";
 import { logComponent, presentStatusLine } from "./presentation.ts";
 import { runStreamingLines } from "./exec.ts";
+import { privilegedPlaybookInvocation } from "./privileged.ts";
 
 export interface AnsibleDuration {
   start: string;
@@ -307,7 +308,9 @@ export async function runPlaybookStreaming(
   options: PlaybookStreamingOptions,
 ): Promise<void> {
   const quiet = options.quiet === true;
-  const result = await runStreamingLines(ansiblePlaybookBin, args, {
+  // Managed hosts: root through the validated helper (sudoers has no shell).
+  const invocation = privilegedPlaybookInvocation(ansiblePlaybookBin, args);
+  const result = await runStreamingLines(invocation.bin, invocation.args, {
     cwd: options.cwd,
     env: options.env,
     onStdoutLine: (line) => {

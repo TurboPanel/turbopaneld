@@ -28,7 +28,12 @@
         owner: "root",
         group: "{{ turbopanel_group }}",
       }
-    - { path: "{{ turbopanel_orchestration_dir }}", mode: "0750" }
+    - {
+        path: "{{ turbopanel_orchestration_dir }}",
+        mode: "0750",
+        owner: "root",
+        group: "{{ turbopanel_group }}",
+      }
     - { path: "{{ turbopanel_config_dir }}", mode: "0750" }
     - { path: "{{ turbopanel_daemon_state_dir }}", mode: "0750" }
     - {
@@ -82,9 +87,26 @@
       {{ turbopanel_orchestration_dir }}/ansible.cfg. run.sh must install the
       JS fallback bundle before this playbook runs.
 
-- name: Ensure ensure-single-daemon helper is executable
+# Release content root executes: the orchestration tree (tp-orchestrate runs
+# its playbooks as root) and the binaries. Root-owned, group-readable, never
+# daemon-writable. run.sh extracts the tree as root already; this pins it on
+# every converge so nothing can hand it back to the daemon account.
+- name: Ensure the orchestration tree and binaries are root-owned
   ansible.builtin.file:
-    path: "{{ turbopanel_orchestration_dir }}/scripts/ensure-single-daemon.sh"
-    owner: "{{ turbopanel_user }}"
+    path: "{{ item }}"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    recurse: true
+  loop:
+    - "{{ turbopanel_orchestration_dir }}"
+    - "{{ turbopanel_install_root }}/bin"
+
+- name: Ensure orchestration helpers are executable by the daemon group only
+  ansible.builtin.file:
+    path: "{{ turbopanel_orchestration_dir }}/scripts/{{ item }}"
+    owner: root
     group: "{{ turbopanel_group }}"
     mode: "0750"
+  loop:
+    - ensure-single-daemon.sh
+    - tp-orchestrate

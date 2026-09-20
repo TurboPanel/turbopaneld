@@ -65,7 +65,12 @@
     - role: daemon-launch
 
   post_tasks:
-    - name: Ensure tp owns runtime and state trees
+    # Mutable state and config belong to the daemon. The vendor tree and the
+    # orchestration tree deliberately do **not** appear here: they are release
+    # content root executes (tp-orchestrate runs playbooks from it), and the
+    # daemon must not be able to rewrite them — see roles/turbopanel-user and
+    # roles/daemon-layout.
+    - name: Ensure tp owns state and config trees
       ansible.builtin.file:
         path: "{{ item }}"
         state: directory
@@ -73,10 +78,8 @@
         group: "{{ turbopanel_group }}"
         recurse: true
       loop:
-        - "{{ turbopanel_vendor_dir }}"
         - "{{ turbopanel_daemon_state_dir }}"
         - "{{ turbopanel_config_dir }}"
-        - "{{ turbopanel_orchestration_dir }}"
 
     # Galaxy install uses ANSIBLE_HOME=/tmp/turbopanel-ansible (see paths.ts).
     # Roles/collections are already in FHS paths; drop the disposable cache and

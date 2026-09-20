@@ -482,6 +482,99 @@ from production code.
 | push `trunk` | `verify.yml` | `verify.yml`; `publish` job `needs: verify` → the `trunk` CDN drop **and** the rolling GitHub `canary` pre-release (`canary` job, via `TurboPanel/dev` `gh-canary.yml`) | nothing compiles from failing code |
 | promote → rc/release | n/a | **artifact integrity only** (re-download + sha256/size against the release's manifest) | no new code enters after publish |
 
+## Managed-host privilege boundary (2026-09-19 hardening)
+
+Six controls, each with a test that fails the build when it regresses:
+
+- **Deno grants** — `src/daemon-permissions.ts` is the one definition of what
+  the production daemon may read/write/run; `renderDaemonPermissionFlags()`
+  is copied verbatim into the three `compile*` tasks in `deno.json` and the
+  JS-fallback `ExecStart` in `daemon-launch/templates/turbopaneld.service.j2`,
+  and `renderInstallerPermissionFlags()` into `TP_INSTALLER_DENO_PERMISSIONS`
+  in `scripts/run.sh` (the root-run `bootstrap-orchestration` /
+  `run-installer` verbs). `src/daemon-permissions.test.ts` pins every copy,
+  refuses `--allow-all` and any bare `--allow-read/write/run/ffi/sys`, and
+  derives the `--allow-run` set from every literal `Deno.Command` / `run(…)`
+  target in `src/` — add a new spawn target there or the test fails. Two
+  grants stay unscoped and are documented as `DAEMON_UNSCOPED_GRANTS`:
+  `--allow-net` (operator-configured control-plane origin, ACME probes to
+  tenant domains, container-address scrapes, ProxySQL bind — Deno has no
+  wildcard/CIDR host grant) paired with `--deny-net` for the cloud metadata
+  endpoints, and `--allow-env` (`Deno.env.toObject()` needs it). Bumping
+  `UV_VERSION` / `ANSIBLE_CORE_VERSION` / `CLOUDFLARED_VERSION` changes the
+  rendered `--allow-run` paths: re-render (see the test failure) and commit
+  all copies. NVML is opened by absolute path first (`NVML_LIBRARY_CANDIDATES`)
+  because a scoped `--allow-ffi` resolves bare names against the cwd.
+- **Install root ownership** — `/opt/turbopanel`, `bin/`, `lib/`, `share/`,
+  `share/orchestration` and every vendored runtime are `root:tp 0750`
+  (`turbopanel-user`, `daemon-layout`); `daemon-install.yml` no longer chowns
+  the vendor or orchestration trees to `tp`. The daemon writes only
+  `DAEMON_WRITABLE_VENDOR_DIRS` (`vendor/uv/cache`, `vendor/cloudflared`) plus
+  the FHS state/config/log/run/backup trees; `turbopanel_daemon_vendor_cache_dirs`
+  mirrors that list and `src/orchestration/sudoers-contract.test.ts` pins the
+  two together. `tp`'s home is `/var/lib/turbopanel`, and the JS unit sets
+  `DENO_DIR` under it. `repointUvCurrent` & co. are no-ops when the root-owned
+  `current` symlink is already right; `ensurePython` skips uv when the pinned
+  interpreter is present.
+- **sudo** — `roles/turbopanel-user/templates/sudoers.j2` replaces
+  `NOPASSWD:ALL`: absolute-path `Cmnd_Alias` groups for the host utilities the
+  deploy code invokes through `sudo -n`, `(tp) NOPASSWD: ALL` for the
+  self re-exec pattern, engine config validation as the engine service users,
+  and **`tp-orchestrate`** (`orchestration/scripts/tp-orchestrate`, POSIX sh,
+  `root:tp 0750`). Ansible `become` from `tp` would need `sudo /bin/sh`, so on
+  managed hosts `runPlaybookStreaming` routes through
+  `sudo -n tp-orchestrate playbook …` (`src/orchestration/privileged.ts`):
+  the helper accepts only `-i localhost, -c local`, `-e key=value` and one
+  shipped playbook **basename** resolved under the root-owned tree, rebuilds
+  PATH/ANSIBLE_* itself, and keeps Ansible's temp/home in a root-only
+  `/tmp/turbopanel-orchestrate`. `galaxy-docker-role` fetches the pinned
+  geerlingguy.docker role into the root-owned roles dir; `update` fetches
+  `run.sh` (CDN, plaintext dev host, or overlay host with the canonical
+  Platform CA — never `-k`) and runs it with re-validated flags, which is how
+  panel-driven updates work now (`executeRunReconcile` →
+  `rootHelperReconcileInvocation`; the daemon never hands root a script body).
+  Root (`run-installer`) and co-located dev run `ansible-playbook` directly.
+  Tests: `src/orchestration/tp-orchestrate.test.ts`, `privileged.test.ts`,
+  `sudoers-contract.test.ts`.
+- **Signed manifests** — `src/update/signing.ts`: every production channel
+  manifest carries an Ed25519 `signature` over its canonical JSON (sorted
+  keys, compact, `signature` removed). `generate-channel-manifest.ts` signs
+  with `RELEASE_SIGNING_KEY` (PKCS#8 PEM; the CI secret) and **refuses to
+  write an unsigned manifest**. The public key is pinned twice —
+  `RELEASE_SIGNING_PUBLIC_KEY_HEX` and `TP_RELEASE_SIGNING_PUBLIC_KEY` in
+  `run.sh` (`signing.test.ts` pins them together, and byte-compares Deno's
+  canonicaliser with run.sh's python3 one). `resolveUpdate` verifies **before
+  parsing** for any production install; run.sh verifies before any artifact
+  download (`tp_verify_manifest_signature`, openssl `pkeyutl -rawin`). The
+  only bypass is development-side and host-side: a source checkout
+  (development install mode), or a `--dl-base` overlay host whose
+  `daemon.env` carries `TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST=1`
+  (`daemon-config/dotenv.j2` writes it for overlay installs only). The
+  built-in rail and `TURBOPANEL_MANIFEST_URL` pins always verify. Instance/UI
+  repo manifests (`--instance` installs) are verified when signed and reported
+  loudly when not — their release jobs do not sign yet.
+- **Automatic-update TLS** — `resolveAutomaticUpdateTrust`
+  (`src/instance/run-reconcile.ts`): plaintext dev, public trust, or the
+  configured Platform CA file; otherwise `UpdateTrustRepairError` naming
+  `--instance-ca`. `TURBOPANEL_RELEASE_TLS_INSECURE` and `--insecure-tls` are
+  never consulted on that path (manual `run.sh` keeps the flag).
+- **Runtime integrity** — `deno-runtime` / `node-runtime` defaults carry
+  `deno_sha256` / `node_sha256` / `corepack_sha256` tables keyed by version;
+  both roles download with `get_url checksum:` and assert a digest exists for
+  the pinned version + host arch, corepack installs from the verified tarball
+  (`corepack_version`), and `run.sh` mirrors the Deno digests
+  (`TP_DENO_SHA256_*`, checked before extraction). `src/orchestration/paths.test.ts`
+  fails a version bump that lands without its digests.
+- **Deploy hooks** — `preDeployCommand` / `postDeployCommand` run **inside the
+  service container** (`docker compose run --rm --no-deps -T --entrypoint sh`
+  before `up`, `compose exec -T … sh -c` after), never via a host shell; the
+  contract requires `confinement: "compose-service"` on any command-bearing
+  hook and `deploy-environment.ts` refuses hooks naming a service the deploy
+  does not run (`assertHooksConfined`). The control plane only emits hooks
+  when the organization's owner enabled `deployHooksEnabled`
+  (`PUT /organizations/:id/deploy-hooks`; `parseServiceOptions` drops the
+  command fields otherwise).
+
 ## Installer script hosting (`workers/turbopanel-sh/`)
 
 Moved to `workers/turbopanel-sh/AGENTS.md` — the assets-only

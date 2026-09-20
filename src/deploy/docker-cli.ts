@@ -10,7 +10,8 @@
  *
  * If the self-refresh still cannot reach the socket (user not in `docker`, or
  * the socket is root-only), fall back to `sudo -n -- docker …`. Managed hosts
- * grant `tp` passwordless sudo (`NOPASSWD:ALL`); that path reaches dockerd
+ * grant `tp` `sudo -n docker` via the scoped sudoers allowlist
+ * (roles/turbopanel-user/templates/sudoers.j2); that path reaches dockerd
  * without waiting for a daemon restart.
  */
 

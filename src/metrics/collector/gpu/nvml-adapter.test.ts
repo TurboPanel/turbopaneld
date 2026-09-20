@@ -2,6 +2,7 @@ import { assertEquals } from "@std/assert";
 import { CounterBaselineTracker } from "../baseline.ts";
 import {
   createNvmlBindingFromLibrary,
+  NVML_LIBRARY_CANDIDATES,
   NvmlGpuAdapter,
   openDefaultNvmlBinding,
 } from "./nvml-adapter.ts";
@@ -253,7 +254,29 @@ test("NvmlGpuAdapter.readHealthSignals returns every field null when NVML never 
 });
 
 test("openDefaultNvmlBinding returns null when libnvidia-ml.so.1 cannot be opened", () => {
+  // Hosts with an NVIDIA driver installed do open it (the candidates are
+  // absolute so a scoped --allow-ffi grant can match them); only assert the
+  // null path where no candidate exists.
+  const present = NVML_LIBRARY_CANDIDATES.some((candidate) => {
+    if (!candidate.startsWith("/")) return false;
+    try {
+      Deno.statSync(candidate);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  if (present) return;
   assertEquals(openDefaultNvmlBinding(), null);
+});
+
+test("NVML candidates are absolute driver paths before the bare loader name", () => {
+  const absolute = NVML_LIBRARY_CANDIDATES.filter((c) => c.startsWith("/"));
+  assertEquals(absolute.length >= 2, true);
+  assertEquals(NVML_LIBRARY_CANDIDATES.at(-1), "libnvidia-ml.so.1");
+  for (const candidate of absolute) {
+    assertEquals(candidate.endsWith("/libnvidia-ml.so.1"), true, candidate);
+  }
 });
 
 test("NvmlGpuAdapter.read nulls utilization and PCIe fields when those binding calls return null", async () => {

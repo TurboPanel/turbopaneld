@@ -637,6 +637,7 @@ test("parseEnvironmentDeployPayload round-trips serviceHooks and path storage mo
     ...DEPLOY_BASE,
     serviceHooks: [{
       composeServiceName: "web",
+      confinement: "compose-service",
       preDeployCommand: "echo pre",
       postDeployCommand: "echo post",
       buildDisableCache: true,

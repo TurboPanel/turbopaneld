@@ -1,6 +1,6 @@
 import { encodeHex } from "@std/encoding/hex";
 import { join } from "@std/path";
-import { run, runLogged } from "./exec.ts";
+import { run, runLogged, symlinkPointsAt } from "./exec.ts";
 import { logInfo, logWarn } from "../logger.ts";
 import { logComponent } from "./presentation.ts";
 import { withRetry } from "./retry.ts";
@@ -57,6 +57,7 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
 
 /** Point the stable `current` symlink at the active uv version directory. */
 async function repointUvCurrent(): Promise<void> {
+  if (await symlinkPointsAt(UV_CURRENT_DIR, RUNTIME_BIN_DIR)) return;
   try {
     await Deno.remove(UV_CURRENT_DIR);
   } catch (err) {

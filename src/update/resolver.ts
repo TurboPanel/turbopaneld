@@ -1,7 +1,9 @@
 import { fetchWithPlatformCa } from "../instance/paths.ts";
 import { errorText } from "../logger.ts";
+import { detectInstallMode, type InstallMode } from "../paths/layout.ts";
 import type { UpdateChannelConfig } from "./config.ts";
 import { MalformedManifestError, MissingChannelError } from "./errors.ts";
+import { unsignedManifestBypass, verifyManifestSignature } from "./signing.ts";
 import type { LinuxArch, UpdateInfo } from "./types.ts";
 import {
   absolutizeChannelManifestJson,
@@ -74,12 +76,12 @@ function resolveLinuxArch(): LinuxArch {
 async function resolveManifestLocation(
   config: UpdateChannelConfig,
   env: Record<string, string | undefined>,
-): Promise<{ manifestUrl: string; allowHttp: boolean }> {
+): Promise<{ manifestUrl: string; allowHttp: boolean; overlay: boolean }> {
   const overlayBase = resolveOverlayDlBase(env);
   if (overlayBase === null) {
     const pinned = resolvePinnedManifestUrl(env);
     if (pinned !== null) {
-      return { manifestUrl: pinned, allowHttp: false };
+      return { manifestUrl: pinned, allowHttp: false, overlay: false };
     }
     const manifestUrl = builtinChannelManifestUrl(config.channel);
     if (manifestUrl === null) {
@@ -87,7 +89,7 @@ async function resolveManifestLocation(
         `Channel has no built-in manifest location: ${config.channel}`,
       );
     }
-    return { manifestUrl, allowHttp: false };
+    return { manifestUrl, allowHttp: false, overlay: false };
   }
 
   const catalogUrl = rootCatalogUrl(overlayBase);
@@ -118,14 +120,66 @@ async function resolveManifestLocation(
       `Channel not found in catalog: ${config.channel}`,
     );
   }
-  return { manifestUrl: channelEntry.manifestUrl, allowHttp };
+  return { manifestUrl: channelEntry.manifestUrl, allowHttp, overlay: true };
+}
+
+export type ResolveUpdateOptions = {
+  /**
+   * Which trust regime applies. Defaults to `detectInstallMode(env)`: a
+   * daemon running from a source checkout is development and may consume the
+   * unsigned dev overlay; a managed install must see a release signature.
+   */
+  installMode?: InstallMode;
+  /** Test seam — pin a different verification key. */
+  publicKeyHex?: string;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Parse the manifest body and, unless the development bypass applies, verify
+ * its release signature **before** any field is trusted. Verification runs on
+ * the manifest as served — relative artifact URLs are absolutised only after
+ * the signature check, so the signed bytes are exactly what the release job
+ * produced.
+ */
+async function parseSignedManifestBody(
+  body: string,
+  options: {
+    env: Record<string, string | undefined>;
+    installMode: InstallMode;
+    overlay: boolean;
+    publicKeyHex?: string;
+  },
+): Promise<Record<string, unknown>> {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(body);
+  } catch {
+    throw new MalformedManifestError("channel manifest is not valid JSON");
+  }
+  if (!isRecord(raw)) {
+    throw new MalformedManifestError("channel.json root must be an object");
+  }
+  const bypass = unsignedManifestBypass({
+    installMode: options.installMode,
+    overlay: options.overlay,
+    env: options.env,
+  });
+  if (!bypass) {
+    await verifyManifestSignature(raw, options.publicKeyHex);
+  }
+  return raw;
 }
 
 export async function resolveUpdate(
   config: UpdateChannelConfig,
   env: Record<string, string | undefined> = Deno.env.toObject(),
+  options: ResolveUpdateOptions = {},
 ): Promise<UpdateInfo> {
-  const { manifestUrl, allowHttp } = await resolveManifestLocation(
+  const { manifestUrl, allowHttp, overlay } = await resolveManifestLocation(
     config,
     env,
   );
@@ -140,8 +194,13 @@ export async function resolveUpdate(
     );
   }
 
+  const installMode = options.installMode ?? detectInstallMode(env);
+  const verified = await parseSignedManifestBody(
+    await manifestResponse.text(),
+    { env, installMode, overlay, publicKeyHex: options.publicKeyHex },
+  );
   const manifest = parseChannelManifest(
-    absolutizeChannelManifestJson(await manifestResponse.json(), manifestUrl),
+    absolutizeChannelManifestJson(verified, manifestUrl),
     allowHttp,
   );
 

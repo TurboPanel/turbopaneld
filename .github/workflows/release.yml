@@ -198,6 +198,9 @@ jobs:
           # Tag-pinned, not releases/latest — a promotion landing between a
           # daemon's manifest fetch and its asset fetch must not 404 it.
           ARTIFACT_BASE_URL: https://github.com/${{ github.repository }}/releases/download/v${{ needs.prepare.outputs.version }}
+          # PKCS#8 PEM of the offline release signing key; the generator refuses
+          # to write an unsigned manifest (src/update/signing.ts).
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
         run: |
           deno run --allow-env --allow-read --allow-write scripts/generate-channel-manifest.ts \
             release-assets \

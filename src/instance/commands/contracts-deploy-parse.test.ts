@@ -210,6 +210,37 @@ test("parseEnvironmentDeployPayload rejects storageMaterial and serviceHooks", (
     { serviceHooks: ["web"] },
     "Invalid environment deploy serviceHooks entry",
   );
+  // A hook command without a confinement target is a host-shell request.
+  rejectDeploy(
+    { serviceHooks: [{ composeServiceName: "web", preDeployCommand: "id" }] },
+    "hook commands require confinement",
+  );
+  rejectDeploy(
+    {
+      serviceHooks: [{
+        composeServiceName: "web",
+        confinement: "host",
+        postDeployCommand: "id",
+      }],
+    },
+    "unsupported confinement",
+  );
+});
+
+test("parseEnvironmentDeployPayload accepts confined hooks and cache-only entries", () => {
+  const payload = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    serviceHooks: [
+      {
+        composeServiceName: "web",
+        confinement: "compose-service",
+        preDeployCommand: "bin/migrate",
+      },
+      { composeServiceName: "worker", buildDisableCache: true },
+    ],
+  });
+  assertEquals(payload.serviceHooks?.[0]?.confinement, "compose-service");
+  assertEquals(payload.serviceHooks?.[1]?.confinement, undefined);
 });
 
 test("parseEnvironmentDeployPayload round-trips docker volume storage", () => {

@@ -1,0 +1,29 @@
+# Managed by TurboPanel (roles/turbopanel-user). Do not edit by hand.
+#
+# What the daemon account may run as root. Every entry is an absolute path;
+# there is no shell, no ALL, and orchestration goes through tp-orchestrate,
+# which validates the playbook and extra-vars against the root-owned
+# orchestration tree before exec'ing ansible-playbook. Host mutation the
+# daemon performs directly (`sudo -n install …`, `sudo -n systemctl …`, …) is
+# limited to the utilities below; the tests in src/orchestration/ pin that
+# this file never regains NOPASSWD:ALL.
+Defaults:{{ turbopanel_user }} !requiretty
+Defaults:{{ turbopanel_user }} env_reset
+
+Cmnd_Alias TP_ORCHESTRATE = {{ turbopanel_orchestration_dir }}/scripts/tp-orchestrate
+Cmnd_Alias TP_HOST_FILES = /usr/bin/install, /usr/bin/rm, /usr/bin/mkdir, /usr/bin/cp, /usr/bin/mv, /usr/bin/ln, /usr/bin/readlink, /usr/bin/test, /usr/bin/cat, /usr/bin/cmp, /usr/bin/ls, /usr/bin/find, /usr/bin/chown, /usr/bin/chmod, /usr/bin/tee, /usr/bin/setfacl
+Cmnd_Alias TP_HOST_SERVICES = /usr/bin/systemctl, /usr/bin/journalctl, /usr/sbin/sshd -t, /usr/sbin/sshd -T, /usr/sbin/sysctl
+Cmnd_Alias TP_HOST_ACCOUNTS = /usr/sbin/useradd, /usr/sbin/usermod, /usr/sbin/groupadd, /usr/bin/gpasswd, /usr/sbin/chpasswd, /usr/bin/getent
+Cmnd_Alias TP_HOST_NETWORK = /usr/sbin/iptables, /usr/sbin/ip6tables, /usr/sbin/iptables-restore, /usr/sbin/ip6tables-restore, /usr/sbin/iptables-save, /usr/sbin/ip6tables-save, /usr/bin/wg, /usr/sbin/ip, /usr/bin/ip
+Cmnd_Alias TP_HOST_CONTAINERS = /usr/bin/docker
+# Config validation of the vendored web engines, as root (apache, php-fpm -t).
+Cmnd_Alias TP_ENGINE_VALIDATE = {{ turbopanel_vendor_dir }}/apache/*/bin/httpd -t *, /usr/sbin/php-fpm* --fpm-config * --test
+
+{{ turbopanel_user }} ALL=(root) NOPASSWD: TP_ORCHESTRATE, TP_HOST_FILES, TP_HOST_SERVICES, TP_HOST_ACCOUNTS, TP_HOST_NETWORK, TP_HOST_CONTAINERS, TP_ENGINE_VALIDATE
+# Re-exec as itself: `sudo -n -u tp -- docker …` picks up a fresh group set
+# after Docker install, and native builds wrap in `sudo -n -u tp -- env … sh -c`.
+{{ turbopanel_user }} ALL=({{ turbopanel_user }}) NOPASSWD: ALL
+# Config validation as the unprivileged engine service accounts
+# (`sudo -n -u tpnginx -- nginx -t`, `… tpols -- openlitespeed -t`,
+# `… tpcaddysite -- env XDG_DATA_HOME=… caddy validate`).
+{{ turbopanel_user }} ALL=(tpnginx, tpols, tpcaddysite) NOPASSWD: {{ turbopanel_vendor_dir }}/nginx/*/sbin/nginx, {{ turbopanel_vendor_dir }}/openlitespeed/*/bin/openlitespeed, {{ turbopanel_vendor_dir }}/caddy/*/caddy, /usr/bin/env

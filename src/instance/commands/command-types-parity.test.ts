@@ -932,6 +932,7 @@ test("environment.deploy round-trips dockerExternalNetworks and serviceHooks", (
     serviceHooks: [
       {
         composeServiceName: "web",
+        confinement: "compose-service",
         preDeployCommand: "echo pre",
         postDeployCommand: "echo post",
         buildDisableCache: true,

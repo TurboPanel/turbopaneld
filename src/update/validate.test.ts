@@ -9,6 +9,7 @@ import {
   requireHttpsUrl,
   validateArtifactEntry,
   validateBinaryArtifacts,
+  validateManifestSignature,
 } from "./validate.ts";
 
 /**
@@ -317,5 +318,51 @@ test("parseChannelManifest rejects malformed roots and missing fields", () => {
       }),
     MalformedManifestError,
     "missing or invalid field: builtAt",
+  );
+});
+
+test("validateManifestSignature accepts the ed25519 shape and rejects everything else", () => {
+  const good = { alg: "ed25519", keyId: "abcd1234", value: "AAAA" };
+  assertEquals(validateManifestSignature(good), good);
+  const bad: Array<[unknown, string]> = [
+    [null, "must be an object"],
+    ["sig", "must be an object"],
+    [{ ...good, alg: "rsa" }, "alg"],
+    [{ ...good, keyId: "" }, "keyId"],
+    [{ ...good, value: "not base64!" }, "value"],
+    [{ alg: "ed25519" }, "keyId"],
+  ];
+  for (const [raw, needle] of bad) {
+    assertThrows(
+      () => validateManifestSignature(raw),
+      MalformedManifestError,
+      needle,
+    );
+  }
+});
+
+test("parseChannelManifest keeps a well-formed signature and rejects a malformed one", () => {
+  const sha = "a".repeat(64);
+  const entry = { url: "https://dl.example/x", sha256: sha, size: 1 };
+  const manifest = {
+    schema: 1,
+    channel: "trunk",
+    commit: "c",
+    buildId: "b",
+    builtAt: "t",
+    binaryArtifacts: { "linux-amd64": entry, "linux-arm64": entry },
+    jsFallbackArtifact: entry,
+    orchestrationArtifact: entry,
+  };
+  assertEquals(parseChannelManifest(manifest).signature, undefined);
+  const signature = { alg: "ed25519", keyId: "k", value: "AAAA" };
+  assertEquals(
+    parseChannelManifest({ ...manifest, signature }).signature,
+    signature,
+  );
+  assertThrows(
+    () => parseChannelManifest({ ...manifest, signature: "nope" }),
+    MalformedManifestError,
+    "signature must be an object",
   );
 });

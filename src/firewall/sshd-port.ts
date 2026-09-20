@@ -48,7 +48,10 @@ export async function readSshdEffectivePorts(
   run: FirewallRunFn = runFirewallHost,
 ): Promise<SshdPortsResult> {
   const result = await run("sshd", ["-T"], { timeoutMs: 10_000 });
-  if (!result.success) {
+  // Unprivileged `sshd -T` exits 0 having printed nothing but "no hostkeys
+  // available"; runFirewallHost retries it under `sudo -n` (sudoers grants
+  // `/usr/sbin/sshd -T`), so reaching here with that text means sudo refused.
+  if (!result.success || /no hostkeys available/i.test(result.stderr)) {
     return {
       ports: [],
       warning: `sshd -T failed (${

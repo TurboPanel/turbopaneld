@@ -64,3 +64,9 @@ export {
   signInstanceJwt,
   type TestSigningMaterial,
 } from "./jwks-test-helpers.ts";
+
+export {
+  signWithTestKey,
+  TEST_RELEASE_SIGNING_KEY_PEM,
+  TEST_RELEASE_SIGNING_PUBLIC_KEY_HEX,
+} from "./release-signing-fixture.ts";

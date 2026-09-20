@@ -1925,12 +1925,30 @@ test({
     await withDeployEnv(async () => {
       const log = collectingLogSink();
       const calls: string[][] = [];
+      // Hooks run inside the service container: `compose run` before `up`,
+      // `compose exec` after. The fake echoes what such a container would.
       const fakeRunDocker = (args: string[]): Promise<DockerCliResult> => {
         calls.push([...args]);
         if (args.includes("config") && args.includes("--format")) {
           return Promise.resolve({
             success: true,
             stdout: fakeConfigJson({ web: { image: "nginx:alpine" } }),
+            stderr: "",
+            code: 0,
+          });
+        }
+        if (args.includes("run") && args.includes("--entrypoint")) {
+          return Promise.resolve({
+            success: true,
+            stdout: "pre-hook\n",
+            stderr: "",
+            code: 0,
+          });
+        }
+        if (args.includes("exec")) {
+          return Promise.resolve({
+            success: true,
+            stdout: "post-hook\n",
             stderr: "",
             code: 0,
           });
@@ -1949,6 +1967,7 @@ test({
           projectName: "tp-demo-hooks",
           serviceHooks: [{
             composeServiceName: "web",
+            confinement: "compose-service",
             buildDisableCache: true,
             preDeployCommand: "printf 'pre-hook\\n'",
             postDeployCommand: "printf 'post-hook\\n'",
@@ -1973,6 +1992,22 @@ test({
       assertEquals(log.lines.includes("post-hook"), true);
       assertEquals(log.phases.includes(COMMAND_LOG_PHASES.PRE_DEPLOY), true);
       assertEquals(log.phases.includes(COMMAND_LOG_PHASES.POST_DEPLOY), true);
+      // Both hooks were confined to the `web` service container — a one-off
+      // `run` of its image before `up`, an `exec` into it afterwards — and
+      // neither touched a host shell.
+      const pre = calls.find((argv) =>
+        argv.includes("run") && argv.includes("--entrypoint")
+      );
+      assertEquals(pre?.includes("web"), true);
+      assertEquals(pre?.includes("--no-deps"), true);
+      assertEquals(pre?.slice(-2)[0], "-c");
+      const post = calls.find((argv) => argv.includes("exec"));
+      assertEquals(post?.slice(-4), [
+        "web",
+        "sh",
+        "-c",
+        "printf 'post-hook\\n'",
+      ]);
     });
   },
 });
@@ -1990,12 +2025,23 @@ test({
               projectName: "tp-demo-hookfail",
               serviceHooks: [{
                 composeServiceName: "web",
+                confinement: "compose-service",
                 preDeployCommand: "printf 'hook-boom\\n' >&2; exit 1",
               }],
             }),
             new Date().toISOString(),
             {
-              runDocker: standardFakeRunDocker(),
+              runDocker: standardFakeRunDocker((args) => {
+                if (args.includes("run") && args.includes("--entrypoint")) {
+                  return {
+                    success: false,
+                    stdout: "",
+                    stderr: "hook-boom",
+                    code: 1,
+                  };
+                }
+                return undefined;
+              }),
               ...hermeticDeployDeps,
             },
           ),

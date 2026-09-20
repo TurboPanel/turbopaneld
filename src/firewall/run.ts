@@ -62,10 +62,17 @@ export function resetFirewallRunOverrides(): void {
   skipRealSyscalls = false;
 }
 
+/**
+ * "Try again as root." Besides the two kernel/libc spellings, `sshd -T` run
+ * by an unprivileged user says `no hostkeys available -- exiting` — it could
+ * not read `/etc/ssh/ssh_host_*_key`, which is a permission failure in sshd's
+ * own words (proven on Debian 13: exit 0, that line on stderr, no config).
+ */
 export function isPermissionDeniedText(result: FirewallRunResult): boolean {
   const text = `${result.stderr} ${result.stdout}`.toLowerCase();
   return text.includes("permission denied") ||
-    text.includes("operation not permitted");
+    text.includes("operation not permitted") ||
+    text.includes("no hostkeys available");
 }
 
 /** "That chain / rule is not there" in every spelling iptables uses. */

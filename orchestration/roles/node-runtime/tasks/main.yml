@@ -27,10 +27,53 @@
   failed_when: false
   when: _node_pinned.stat.exists
 
+# A version bump must land with its upstream digests: refuse rather than
+# install an unverified runtime.
+- name: Require a pinned SHA-256 for this Node version and architecture
+  ansible.builtin.assert:
+    that:
+      - node_version in node_sha256
+      - node_arch in node_sha256[node_version]
+      - node_sha256[node_version][node_arch] | length == 64
+      - corepack_version in corepack_sha256
+      - corepack_sha256[corepack_version] | length == 64
+    fail_msg: >-
+      node_sha256 / corepack_sha256 have no digest for Node {{ node_version }}
+      ({{ node_arch }}) or corepack {{ corepack_version }} — add the upstream
+      sha256 to roles/node-runtime/defaults/main.yml before bumping the pin.
+
+- name: Decide whether Node needs (re)installing
+  ansible.builtin.set_fact:
+    _node_install_needed: >-
+      {{ not _node_pinned.stat.exists
+         or (_node_version.stdout | default('')) != ('v' + node_version) }}
+
+- name: Reset Node install scratch directory
+  when: _node_install_needed | bool
+  ansible.builtin.file:
+    path: "{{ turbopanel_vendor_dir }}/node/.install"
+    state: "{{ item }}"
+    owner: root
+    group: root
+    mode: "0700"
+  loop:
+    - absent
+    - directory
+
+# get_url verifies the digest before the file is kept: a mismatch fails the
+# task and leaves nothing to extract.
+- name: Download Node release tarball (SHA-256 verified)
+  when: _node_install_needed | bool
+  ansible.builtin.get_url:
+    url: "https://nodejs.org/dist/v{{ node_version }}/node-v{{ node_version }}-linux-{{ node_arch }}.tar.gz"
+    dest: "{{ turbopanel_vendor_dir }}/node/.install/node-v{{ node_version }}-linux-{{ node_arch }}.tar.gz"
+    checksum: "sha256:{{ node_sha256[node_version][node_arch] }}"
+    owner: root
+    group: root
+    mode: "0600"
+
 - name: Install Node into runtimes directory
-  when: >-
-    not _node_pinned.stat.exists
-    or (_node_version.stdout | default('')) != ('v' + node_version)
+  when: _node_install_needed | bool
   ansible.builtin.shell: |
     set -euo pipefail
     NODE_VER="v{{ node_version }}"
@@ -38,18 +81,13 @@
     NODE_DIR="node-${NODE_VER}-linux-${NODE_ARCH}"
     NODE_TMP="{{ turbopanel_vendor_dir }}/node/.install"
     NODE_DEST="{{ turbopanel_vendor_dir }}/node/{{ node_version }}"
-    rm -rf "$NODE_TMP" "$NODE_DEST"
-    mkdir -p "$NODE_TMP"
-    curl -fsSL -o "$NODE_TMP/${NODE_DIR}.tar.gz" \
-      "https://nodejs.org/dist/${NODE_VER}/${NODE_DIR}.tar.gz"
+    rm -rf "$NODE_DEST"
     tar -xzf "$NODE_TMP/${NODE_DIR}.tar.gz" -C "$NODE_TMP"
     install -d "$NODE_DEST"
     cp -a "$NODE_TMP/${NODE_DIR}/bin" "$NODE_TMP/${NODE_DIR}/include" \
       "$NODE_TMP/${NODE_DIR}/lib" "$NODE_TMP/${NODE_DIR}/share" \
       "$NODE_DEST/"
     rm -rf "$NODE_TMP"
-  args:
-    creates: "{{ turbopanel_vendor_dir }}/node/{{ node_version }}/bin/node"
 
 - name: Point Node current symlink at pinned version
   ansible.builtin.file:
@@ -58,10 +96,34 @@
     state: link
     force: true
 
-# Node 25+ dropped the bundled corepack binary. Install the standalone npm
+# Node 25+ dropped the bundled corepack binary. Install the pinned standalone
 # package into the versioned prefix (current is a symlink) so packageManager
-# still provisions pnpm.
-- name: Install corepack (Node 25+ no longer ships it)
+# still provisions pnpm — from a SHA-256-verified registry tarball, never a
+# floating `npm install -g corepack`.
+- name: Check vendored corepack
+  ansible.builtin.stat:
+    path: "{{ turbopanel_vendor_dir }}/node/current/bin/corepack"
+  register: _corepack_bin
+
+- name: Create corepack download scratch directory
+  when: not _corepack_bin.stat.exists
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: corepack-
+  register: _corepack_tmp
+
+- name: Download corepack {{ corepack_version }} tarball (SHA-256 verified)
+  when: not _corepack_bin.stat.exists
+  ansible.builtin.get_url:
+    url: "https://registry.npmjs.org/corepack/-/corepack-{{ corepack_version }}.tgz"
+    dest: "{{ _corepack_tmp.path }}/corepack-{{ corepack_version }}.tgz"
+    checksum: "sha256:{{ corepack_sha256[corepack_version] }}"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Install corepack {{ corepack_version }} from the verified tarball
+  when: not _corepack_bin.stat.exists
   ansible.builtin.command:
     argv:
       - "{{ turbopanel_vendor_dir }}/node/current/bin/npm"
@@ -71,10 +133,16 @@
       - "{{ turbopanel_vendor_dir }}/node/{{ node_version }}"
       - --no-fund
       - --no-audit
-      - corepack
+      - "{{ _corepack_tmp.path }}/corepack-{{ corepack_version }}.tgz"
     creates: "{{ turbopanel_vendor_dir }}/node/current/bin/corepack"
   environment:
     PATH: "{{ turbopanel_runtime_path }}"
+
+- name: Remove corepack download scratch directory
+  when: _corepack_tmp.path is defined
+  ansible.builtin.file:
+    path: "{{ _corepack_tmp.path }}"
+    state: absent
 
 - name: Enable pnpm via corepack
   ansible.builtin.command:

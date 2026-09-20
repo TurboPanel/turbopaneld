@@ -92,8 +92,8 @@ import {
   downloadRunScript,
   encodeLicenseArg,
   executeRunReconcile,
-  isPlaintextHttpUrl,
-  resolveBootstrapInsecureTls,
+  reconcileNeedsRootHelper,
+  resolveAutomaticUpdateTrust,
   resolveRunScriptUrl,
 } from "./run-reconcile.ts";
 import { installOriginNeedsInsecureTls } from "./install-tls.ts";
@@ -1793,15 +1793,15 @@ export class InstanceClient {
     const instanceCaPath = resolveInstanceCaPath(env);
     const dlBase = env.TURBOPANEL_DL_BASE?.trim();
     const runScriptUrl = resolveRunScriptUrl(this.#config, { dlBase });
-    const publicTls = Boolean(
-      instanceUrl && !installOriginNeedsInsecureTls(instanceUrl) &&
-        !isPlaintextHttpUrl(instanceUrl),
-    );
-    const insecureTls = publicTls ? false : resolveBootstrapInsecureTls({
-      releaseTlsInsecure: env.TURBOPANEL_RELEASE_TLS_INSECURE,
+    // Automatic updates never relax TLS: plaintext dev, public trust, or the
+    // configured Platform CA — otherwise a trust-repair error (no `curl -k`,
+    // and the operator release-insecure override is not consulted here).
+    const trust = resolveAutomaticUpdateTrust({
       runScriptUrl,
       instanceCaPath,
+      originNeedsInsecureTls: installOriginNeedsInsecureTls,
     });
+    const caPath = trust.kind === "platform-ca" ? trust.caPath : undefined;
     const licenseArg = encodeLicenseArg(
       credentials.licenseId,
       credentials.licenseToken,
@@ -1809,21 +1809,26 @@ export class InstanceClient {
     const reconcileArgs = buildRunReconcileArgs({
       licenseArg,
       instanceUrl,
-      instanceCaPath: publicTls ? undefined : instanceCaPath,
-      insecureTls,
+      instanceCaPath: caPath,
+      insecureTls: false,
       dlBase,
     });
 
     logInfo(
       "update",
-      "reconciling via run.sh",
+      `reconciling via run.sh (${trust.kind})`,
       sanitizeForLog(runScriptUrl),
     );
 
-    const script = await clientTestHooks.downloadRunScript(runScriptUrl, {
-      insecureTls,
-      caPath: (insecureTls || publicTls) ? undefined : instanceCaPath,
-    });
+    // Managed hosts hand the validated flags to the root helper, which
+    // fetches run.sh itself; only a development host pipes a body through
+    // `sudo sh -s`.
+    const script = reconcileNeedsRootHelper()
+      ? undefined
+      : await clientTestHooks.downloadRunScript(runScriptUrl, {
+        insecureTls: false,
+        caPath,
+      });
     await clientTestHooks.executeRunReconcile({
       script,
       args: reconcileArgs,

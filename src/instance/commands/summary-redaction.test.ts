@@ -168,6 +168,7 @@ test({
           runDeployServiceHooks(
             [{
               composeServiceName: "web",
+              confinement: "compose-service",
               preDeployCommand:
                 `printf 'migrate failed for %s\\n' "${FAKE_SECRET}" >&2; exit 1`,
             }],
@@ -175,13 +176,19 @@ test({
               projectName: "tp-demo-hookredact",
               composePaths: [join(deploymentDir, RUNTIME_COMPOSE_FILENAME)],
               deploymentDir,
-              runDocker: () =>
-                Promise.resolve({
-                  success: true,
-                  stdout: "",
-                  stderr: "",
-                  code: 0,
-                }),
+              // The hook runs in the service container; docker relays what
+              // the container printed, secret included.
+              runDocker: (args) =>
+                Promise.resolve(
+                  args.includes("run") && args.includes("--entrypoint")
+                    ? {
+                      success: false,
+                      stdout: "",
+                      stderr: `migrate failed for ${FAKE_SECRET}\n`,
+                      code: 1,
+                    }
+                    : { success: true, stdout: "", stderr: "", code: 0 },
+                ),
               onOutput: (stream, line) => logSink.onLine(stream, line),
               redactSummary: (text) => logSink.redactSummary(text),
             },

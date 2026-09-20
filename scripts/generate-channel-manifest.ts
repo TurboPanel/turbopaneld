@@ -1,9 +1,13 @@
 import { encodeHex } from "@std/encoding/hex";
+import { importSigningKey, signManifest } from "../src/update/signing.ts";
 import type {
   ArtifactEntry,
   ChannelManifest,
   UpdateChannel,
 } from "../src/update/types.ts";
+
+/** Env var the release job passes the PKCS#8 PEM of the offline release key in. */
+export const RELEASE_SIGNING_KEY_ENV = "RELEASE_SIGNING_KEY";
 
 /**
  * Mirrors scripts/lib/release-artifacts.sh's tp_daemon_release_filename /
@@ -114,6 +118,13 @@ export async function generateChannelManifest(options: {
    * `<dlBaseUrl>/channels/<channel>/daemon/<buildId>/…` scheme applies.
    */
   artifactBaseUrl?: string;
+  /**
+   * PKCS#8 PEM of the offline release signing key. The finished manifest is
+   * signed with it (see src/update/signing.ts) after every artifact entry is
+   * final. Required: daemons and run.sh refuse unsigned production manifests,
+   * so a manifest written without one could never be installed anyway.
+   */
+  signingKeyPem?: string;
   writeTextFile?: (path: string, json: string) => Promise<void>;
   writeStdout?: (json: string) => Promise<void>;
 }): Promise<ChannelManifest> {
@@ -148,7 +159,7 @@ export async function generateChannelManifest(options: {
     buildIdSegment,
   );
 
-  const manifest: ChannelManifest = {
+  const unsigned: ChannelManifest = {
     schema: 1,
     channel,
     commit: options.commit,
@@ -164,6 +175,22 @@ export async function generateChannelManifest(options: {
     jsFallbackArtifact: jsFallback,
     orchestrationArtifact: orchestration,
   };
+
+  const pem = options.signingKeyPem?.trim();
+  if (!pem) {
+    console.error(
+      `Refusing to write an unsigned channel manifest: set ${RELEASE_SIGNING_KEY_ENV} to the release signing key (PKCS#8 PEM)`,
+    );
+    throw new TypeError(
+      `${RELEASE_SIGNING_KEY_ENV} is required to sign the channel manifest`,
+    );
+  }
+  // Sign last: every artifact entry above is final, and nothing below may
+  // touch the manifest again (the signature covers it byte-for-byte).
+  const manifest: ChannelManifest = await signManifest(
+    unsigned as unknown as Record<string, unknown>,
+    await importSigningKey(pem),
+  ) as unknown as ChannelManifest;
 
   const json = JSON.stringify(manifest, null, 2) + "\n";
 
@@ -223,6 +250,9 @@ export async function runGenerateChannelManifestCli(
     // drop leaves it unset and keeps the CDN scheme.
     const ARTIFACT_BASE_URL = getEnv("ARTIFACT_BASE_URL")?.trim() ||
       undefined;
+    // The offline release key. Absent → generate() refuses (fail closed);
+    // there is no unsigned production manifest.
+    const SIGNING_KEY = getEnv(RELEASE_SIGNING_KEY_ENV);
 
     const publishDir = args[0];
     const outputPath = args[1];
@@ -246,6 +276,7 @@ export async function runGenerateChannelManifestCli(
       channel: CHANNEL,
       version: VERSION,
       artifactBaseUrl: ARTIFACT_BASE_URL,
+      signingKeyPem: SIGNING_KEY,
     });
   } catch {
     exit(1);

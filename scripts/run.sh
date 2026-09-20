@@ -234,6 +234,109 @@ tp_manifest_binary_artifact_field() {
   printf '%s' "$_block" | grep -o "\"$_field\":\"[^\"]*\"" | sed 's/.*":"//' | tr -d '"'
 }
 
+# --- release manifest signatures -------------------------------------------
+# Every production channel manifest carries an Ed25519 signature by the
+# offline release key over its canonical JSON (keys sorted, no whitespace,
+# `signature` removed — see src/update/signing.ts, which pins the same key;
+# signing.test.ts pins this copy against that one). The manifest names the
+# code this script installs and runs as root, so a manifest that is unsigned,
+# signed by any other key, or altered after signing is refused before a single
+# artifact is downloaded. python3 canonicalises (already a host prerequisite),
+# openssl verifies (Ed25519 needs OpenSSL >= 1.1.1; Debian 12+ ships 3.x).
+TP_RELEASE_SIGNING_PUBLIC_KEY="ce1a5ade02f9d2a0b0687d0f9cfd341bcec7a129ed426c37fc2686c22d6b43db"
+
+# The canonicaliser, printed so it can be run here and byte-compared in tests
+# (src/update/signing.test.ts). stdin: manifest JSON; stdout: canonical bytes.
+tp_manifest_canonical_python() {
+  cat <<'PY'
+import json, sys
+manifest = json.load(sys.stdin)
+if not isinstance(manifest, dict):
+    raise SystemExit("manifest root must be an object")
+manifest.pop("signature", None)
+sys.stdout.buffer.write(
+    json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+)
+PY
+}
+
+# Lay out what openssl needs in $2 from the manifest JSON on stdin:
+#   canonical (signed bytes), sig (raw 64-byte signature), pub.pem (from $1).
+# Exits non-zero, with the reason on stderr, when the signature field is
+# missing or malformed — that is a refusal, not a retry.
+tp_manifest_signature_material_python() {
+  cat <<'PY'
+import base64, binascii, json, sys
+from pathlib import Path
+
+pub_hex, out = sys.argv[1], Path(sys.argv[2])
+manifest = json.load(sys.stdin)
+if not isinstance(manifest, dict):
+    raise SystemExit("manifest root must be an object")
+signature = manifest.pop("signature", None)
+if signature is None:
+    raise SystemExit("channel manifest is unsigned (missing signature)")
+if not isinstance(signature, dict) or signature.get("alg") != "ed25519":
+    raise SystemExit("channel manifest signature must be an ed25519 signature object")
+value = signature.get("value")
+if not isinstance(value, str) or not value.strip():
+    raise SystemExit("channel manifest signature missing value")
+try:
+    sig = base64.b64decode(value.strip(), validate=True)
+except (binascii.Error, ValueError):
+    raise SystemExit("channel manifest signature value is not base64")
+if len(sig) != 64:
+    raise SystemExit("channel manifest signature must be 64 bytes, got %d" % len(sig))
+try:
+    pub = bytes.fromhex(pub_hex)
+except ValueError:
+    raise SystemExit("release public key is not valid hex")
+if len(pub) != 32:
+    raise SystemExit("release public key must be 32 bytes")
+canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+(out / "canonical").write_bytes(canonical)
+(out / "sig").write_bytes(sig)
+# SubjectPublicKeyInfo for an Ed25519 raw key: fixed 12-byte DER prefix.
+spki = bytes.fromhex("302a300506032b6570032100") + pub
+pem = "-----BEGIN PUBLIC KEY-----\n" + base64.encodebytes(spki).decode("ascii") + "-----END PUBLIC KEY-----\n"
+(out / "pub.pem").write_text(pem)
+PY
+}
+
+# Verify $1 (manifest JSON) against the pinned release key. Returns 0 only for
+# a well-formed signature by that key over exactly these bytes.
+tp_verify_manifest_signature() {
+  _sig_json="$1"
+  _sig_key="${2:-$TP_RELEASE_SIGNING_PUBLIC_KEY}"
+  if ! command -v openssl >/dev/null 2>&1; then
+    echo "run.sh: openssl is required to verify the release manifest signature" >&2
+    return 1
+  fi
+  _sig_dir="$(mktemp -d)"
+  if ! printf '%s' "$_sig_json" | python3 -c "$(tp_manifest_signature_material_python)" "$_sig_key" "$_sig_dir" 2>"$_sig_dir/err"; then
+    echo "run.sh: release manifest signature rejected: $(cat "$_sig_dir/err" 2>/dev/null)" >&2
+    rm -rf "$_sig_dir"
+    return 1
+  fi
+  if ! openssl pkeyutl -verify -pubin -inkey "$_sig_dir/pub.pem" -rawin \
+      -in "$_sig_dir/canonical" -sigfile "$_sig_dir/sig" >/dev/null 2>&1; then
+    echo "run.sh: release manifest signature is invalid (not signed by the TurboPanel release key, or altered after signing)" >&2
+    rm -rf "$_sig_dir"
+    return 1
+  fi
+  rm -rf "$_sig_dir"
+  return 0
+}
+
+# The development-only bypass: a TURBOPANEL_DL_BASE overlay is a contributor's
+# own build served from their dev host, and the dev catalog writer signs
+# nothing. Host-side and explicit (the --dl-base flag), never something a
+# manifest can switch on; the built-in rail and --manifest-url pins always
+# verify. Printed loudly so nobody mistakes an overlay install for a release.
+tp_manifest_signature_bypass() {
+  [ -n "${TURBOPANEL_DL_BASE:-}" ]
+}
+
 tp_resolve_channel_manifest() {
   _manifest_json="$1"
   _compact="$(tp_manifest_compact "$_manifest_json")"
@@ -583,8 +686,50 @@ tp_probe_native_daemon() {
 # shellcheck disable=SC2034
 TP_HOST_LOCAL_ARTIFACTS=".git .github logs cloudflared"
 
-# Keep in sync with orchestration/roles/deno-runtime/defaults/main.yml.
+# Keep in sync with orchestration/roles/deno-runtime/defaults/main.yml
+# (deno_version + deno_sha256; src/orchestration/paths.test.ts pins all three).
 TP_DENO_VERSION="2.9.6"
+
+# Scoped Deno grants for the JS-fallback installer verbs (bootstrap-orchestration,
+# run-installer), which run as root before the unit exists. Rendered by
+# src/daemon-permissions.ts renderInstallerPermissionFlags() and pinned by
+# src/daemon-permissions.test.ts — never --allow-all.
+TP_INSTALLER_DENO_PERMISSIONS="--allow-read=/opt/turbopanel,/etc/turbopanel,/var/lib/turbopanel,/var/log/turbopanel,/run/turbopanel,/tmp,/root/.ansible,/etc/os-release,/etc/hostname,/etc/machine-id,/etc/passwd,/etc/group,/etc/ssl,/etc/systemd,/proc,/sys,/dev,/usr,/bin,/sbin,/lib,/lib64 --allow-write=/opt/turbopanel,/etc/turbopanel,/var/lib/turbopanel,/var/log/turbopanel,/run/turbopanel,/tmp,/root/.ansible --allow-run=sh,/bin/sh,bash,cat,ls,id,/usr/bin/id,getent,systemctl,tar,/usr/bin/tar,curl,/usr/bin/curl,git,openssl,/usr/bin/openssl,/opt/turbopanel/vendor/deno/bin/deno,/opt/turbopanel/vendor/deno/current/deno,/opt/turbopanel/vendor/uv/0.11.21/uv,/opt/turbopanel/vendor/uv/0.11.21/uvx,/opt/turbopanel/vendor/ansible/2.20/bin/ansible-playbook,/opt/turbopanel/vendor/ansible/2.20/bin/ansible-galaxy,/opt/turbopanel/vendor/ansible/2.20/bin/ansible-lint --allow-env --allow-net --deny-net=169.254.169.254,metadata.google.internal,fd00:ec2::254 --allow-sys=networkInterfaces,hostname,statfs,uid"
+# Upstream SHA-256 of the release zip per architecture (dl.deno.land publishes
+# `<asset>.sha256sum` beside each asset). The download below is verified
+# against these before extraction — this path runs as root before any Ansible
+# hardening on JS-fallback hosts, so it cannot lean on the role's check.
+TP_DENO_SHA256_X86_64="394f07f4da2bebe6ce6f1e7ce0fa16429b29b08c35e3fac3fe25972676dff4b2"
+TP_DENO_SHA256_AARCH64="9a46afc6c392c7cd2ff71a31558935545b46408d0e87f7a86908c712721c046e"
+
+# Print the pinned digest for the host architecture ($1 = uname -m), or fail
+# when none is pinned — a bump without digests must not install anything.
+tp_deno_pinned_sha256() {
+  case "$1" in
+    aarch64 | arm64) _sum="$TP_DENO_SHA256_AARCH64" ;;
+    x86_64 | amd64) _sum="$TP_DENO_SHA256_X86_64" ;;
+    *) return 1 ;;
+  esac
+  case "$_sum" in
+    ????????????????????????????????????????????????????????????????) printf '%s' "$_sum" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Verify $1 against the pinned Deno digest for architecture $2.
+tp_verify_deno_archive() {
+  _archive="$1"
+  _sum="$(tp_deno_pinned_sha256 "$2")" || {
+    echo "run.sh: no pinned SHA-256 for Deno ${TP_DENO_VERSION} on $2" >&2
+    return 1
+  }
+  if printf '%s  %s\n' "$_sum" "$_archive" | sha256sum -c - >/dev/null 2>&1; then
+    return 0
+  fi
+  _actual="$(sha256sum "$_archive" | awk '{print $1}')"
+  echo "run.sh: SHA-256 mismatch for Deno ${TP_DENO_VERSION} (expected $_sum, got $_actual)" >&2
+  return 1
+}
 
 # Install Deno into the runtimes tree (idempotent), mirroring uv/ansible/cloudflared:
 #   $RUNTIMES_DIR/deno/$TP_DENO_VERSION/deno  plus `current` and `bin/deno` symlinks.
@@ -610,6 +755,12 @@ tp_install_deno_runtime() {
     if ! $_curl -o "$_deno_tmp/$_deno_asset" "$_deno_url" 2>"$_deno_tmp/curl.err"; then
       tp_print_error "Failed to download Deno from $_deno_url"
       [ -s "$_deno_tmp/curl.err" ] && cat "$_deno_tmp/curl.err" >&2
+      rm -rf "$_deno_tmp"
+      return 1
+    fi
+    # Pinned digest before anything is extracted or executed.
+    if ! tp_verify_deno_archive "$_deno_tmp/$_deno_asset" "$(uname -m)"; then
+      tp_print_error "Deno release zip failed SHA-256 verification"
       rm -rf "$_deno_tmp"
       return 1
     fi
@@ -712,6 +863,13 @@ tp_fetch_channel_manifest() {
     return 1
   fi
 
+  # Signature first — nothing in the manifest is read before it is trusted.
+  if tp_manifest_signature_bypass; then
+    tp_print_styled_line "1;33" "*** DEVELOPMENT OVERLAY: release manifest signature not verified (TURBOPANEL_DL_BASE=${_dl_base}) ***" >&2
+  elif ! tp_verify_manifest_signature "$_manifest_json"; then
+    return 1
+  fi
+
   if ! tp_resolve_channel_manifest "$_manifest_json"; then
     return 1
   fi
@@ -745,6 +903,21 @@ tp_fetch_repo_manifest() {
     echo "run.sh: failed to fetch ${_manifest_url} — does TurboPanel/${_repo} have a ${_channel} release yet?" >&2
     return 1
   fi
+  # TurboPanel/turbopanel and TurboPanel/ui publish their manifests from their
+  # own release jobs. A signature they carry is verified against the same
+  # release key; one they do not carry yet is reported, not waved through
+  # silently — the artifact checksums below still bind bytes to the manifest.
+  case "$_manifest_json" in
+    *'"signature"'*)
+      if ! tp_verify_manifest_signature "$_manifest_json"; then
+        echo "run.sh: ${_repo} ${_channel} manifest signature rejected" >&2
+        return 1
+      fi
+      ;;
+    *)
+      tp_print_styled_line "1;33" "*** ${_repo} ${_channel} manifest is unsigned — verified by SHA-256 only ***" >&2
+      ;;
+  esac
   _repo_manifest_compact="$(tp_manifest_compact "$_manifest_json")"
   [ -n "$_repo_manifest_compact" ]
 }
@@ -822,7 +995,7 @@ tp_run_instance_install() {
   if [ "$DAEMON_EXEC_MODE" = "$TP_EXEC_MODE_NATIVE" ]; then
     "$(tp_daemon_binary_path)" run-installer --playbook instance-install.yml --vars-file "$_vars" || _rc=$?
   else
-    HOME="$INSTALL_ROOT" "$DENO_BIN" run --allow-all "$(tp_daemon_js_fallback_path)" run-installer --playbook instance-install.yml --vars-file "$_vars" || _rc=$?
+    HOME="$INSTALL_ROOT" "$DENO_BIN" run $TP_INSTALLER_DENO_PERMISSIONS "$(tp_daemon_js_fallback_path)" run-installer --playbook instance-install.yml --vars-file "$_vars" || _rc=$?
   fi
   rm -f "$_vars"
   rm -rf /tmp/turbopanel-ansible /root/.ansible
@@ -1167,7 +1340,7 @@ tp_print_step "▸" "Checking host prerequisites…"
 # artifacts this same script downloads, and daemon-prereqs only installs it
 # afterward — a minimal Debian host used to die at the first extraction.
 _tp_host_missing=""
-for _tp_host_cmd in sudo curl tar python3 zstd; do
+for _tp_host_cmd in sudo curl tar python3 zstd openssl; do
   if ! command -v "$_tp_host_cmd" >/dev/null 2>&1; then
     _tp_host_missing="$_tp_host_missing $_tp_host_cmd"
   fi
@@ -1182,12 +1355,13 @@ _tp_host_prereq_fail() {
 _apt_log="$(mktemp)"
 if [ -n "$_tp_host_missing" ] \
   && { ! apt-get update -qq >>"$_apt_log" 2>&1 \
-    || ! apt-get install -y -qq sudo curl ca-certificates tar python3-minimal zstd >>"$_apt_log" 2>&1; }; then
+    || ! apt-get install -y -qq sudo curl ca-certificates tar python3-minimal zstd openssl >>"$_apt_log" 2>&1; }; then
   _tp_host_prereq_fail "host prerequisites failed (need:${_tp_host_missing})"
 fi
 if ! command -v curl >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1 \
-  || ! command -v python3 >/dev/null 2>&1 || ! command -v zstd >/dev/null 2>&1; then
-  _tp_host_prereq_fail "host prerequisites missing after install (need curl tar python3 zstd)"
+  || ! command -v python3 >/dev/null 2>&1 || ! command -v zstd >/dev/null 2>&1 \
+  || ! command -v openssl >/dev/null 2>&1; then
+  _tp_host_prereq_fail "host prerequisites missing after install (need curl tar python3 zstd openssl)"
 fi
 rm -f "$_apt_log"
 tp_print_ok "Host prerequisites ready"
@@ -1286,6 +1460,31 @@ else
   esac
 fi
 
+# Root-pinned update origin for tp-orchestrate (orchestration/scripts): the
+# control plane this host enrols with, the overlay catalog when one is used,
+# and the Platform CA file it trusts. Lives under the root-owned lib/ tree —
+# never /etc/turbopanel, which the daemon account owns — so a panel-driven
+# update can only ever re-run this installer against these same origins.
+tp_write_update_origin_pin() {
+  _pin_dir="$INSTALL_ROOT/lib"
+  mkdir -p "$_pin_dir"
+  _pin_tmp="$(mktemp)"
+  {
+    printf 'host=%s\n' "$HOST_URL"
+    printf 'dl_base=%s\n' "$DL_BASE"
+    if [ -f "$CA_PATH" ]; then
+      printf 'instance_ca=%s\n' "$CA_PATH"
+    else
+      printf 'instance_ca=\n'
+    fi
+  } > "$_pin_tmp"
+  install -m 0600 -o root -g root "$_pin_tmp" "$_pin_dir/update-origin"
+  rm -f "$_pin_tmp"
+}
+if [ "$INSTANCE_INSTALL" != true ]; then
+  tp_write_update_origin_pin
+fi
+
 # Production FHS layout — never point TURBOPANEL_DAEMON_ROOT at a source
 # checkout or detectInstallMode() may classify this managed install as dev.
 export TURBOPANEL_RUNTIMES_DIR="$RUNTIMES_DIR"
@@ -1348,7 +1547,7 @@ fi
 if [ "$DAEMON_EXEC_MODE" = "$TP_EXEC_MODE_NATIVE" ]; then
   "$(tp_daemon_binary_path)" bootstrap-orchestration
 else
-  HOME="$INSTALL_ROOT" "$DENO_BIN" run --allow-all "$(tp_daemon_js_fallback_path)" bootstrap-orchestration
+  HOME="$INSTALL_ROOT" "$DENO_BIN" run $TP_INSTALLER_DENO_PERMISSIONS "$(tp_daemon_js_fallback_path)" bootstrap-orchestration
   # Warm the JS module cache so first start is fast/offline.
   HOME="$INSTALL_ROOT" "$DENO_BIN" cache "$(tp_daemon_js_fallback_path)" >/dev/null 2>&1 || true
 fi
@@ -1419,7 +1618,7 @@ if [ "$DAEMON_EXEC_MODE" = "$TP_EXEC_MODE_NATIVE" ]; then
     exit 1
   fi
 else
-  if ! HOME="$INSTALL_ROOT" "$DENO_BIN" run --allow-all "$(tp_daemon_js_fallback_path)" run-installer --vars-file "$VARS_FILE"; then
+  if ! HOME="$INSTALL_ROOT" "$DENO_BIN" run $TP_INSTALLER_DENO_PERMISSIONS "$(tp_daemon_js_fallback_path)" run-installer --vars-file "$VARS_FILE"; then
     rm -rf /tmp/turbopanel-ansible /root/.ansible
     exit 1
   fi
