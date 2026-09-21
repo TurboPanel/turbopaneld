@@ -12,9 +12,15 @@ turbopanel_vendor_dir: "{{ turbopanel_install_root }}/vendor"
 turbopanel_node: "{{ turbopanel_vendor_dir }}/node/current/bin/node"
 # Mirrors instance-launch: "compiled" runs the instance binary's own
 # `generate-self-signed-cert` verb (no checkout needed); "source" runs the
-# Node script from the checkout. Same script either way.
-turbopanel_instance_run_mode: source
-turbopanel_instance_binary: "{{ turbopanel_instance_dir }}/dist/turbopanel-instance"
+# Node script from the checkout. Same script either way. Co-located dev
+# defaults to source; a managed install has no checkout and is always
+# compiled — instance-certs-apply.yml (the daemon's public-urls apply) runs
+# this role with defaults only, so the default has to be right on its own.
+turbopanel_instance_run_mode: "{{ 'source' if (turbopanel_dev_user | default('') | length > 0) else 'compiled' }}"
+turbopanel_instance_binary: >-
+  {{ (turbopanel_instance_dir ~ '/dist/turbopanel-instance')
+     if (turbopanel_dev_user | default('') | length > 0)
+     else (turbopanel_install_root ~ '/bin/turbopanel-instance') }}
 # Where the server leaf (self-signed or uploaded) lives — what Caddy serves.
 # Source mode keeps it beside the checkout; the compiled binary can only
 # write its state tree, so compiled mode keeps it at <state>/tls/certs (the
@@ -30,9 +36,10 @@ turbopanel_instance_cert_argv: >-
      else [turbopanel_node, 'scripts/generate-self-signed-cert.mjs'] }}
 turbopanel_deno: "{{ turbopanel_vendor_dir }}/deno/current/deno"
 turbopanel_runtime_path: "{{ turbopanel_vendor_dir }}/node/current/bin:{{ turbopanel_vendor_dir }}/deno/current:{{ turbopanel_vendor_dir }}/caddy/current:/usr/bin:/bin"
-# Source checkout: co-located dev uses the dev user's home; managed installs use
-# the FHS lib tree.
-turbopanel_instance_dir: "{{ (turbopanel_dev_root ~ '/turbopanel') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/instance') }}"
+# Source checkout in co-located dev; a managed install has no checkout (the
+# release package unpacks flat into the install root), so the dir is the
+# install root itself — the cert generator's chdir/HOME, nothing more.
+turbopanel_instance_dir: "{{ (turbopanel_dev_root ~ '/turbopanel') if (turbopanel_dev_user | default('') | length > 0) else turbopanel_install_root }}"
 turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
 instance_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tpctrl' }}"
 turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
@@ -49,9 +56,8 @@ turbopanel_tls_cert_path: ""
 turbopanel_tls_key_path: ""
 # Public DNS name Caddy obtains a certificate for (lets_encrypt).
 turbopanel_public_hostname: ""
-# ACME account contact (lets_encrypt). Optional. The Caddy unit omits
-# TURBOPANEL_ACME_EMAIL and TURBOPANEL_CADDY_ACME_EMAIL_DIRECTIVE when empty
-# so Caddyfile.acme does not render `email `.
+# ACME account contact (lets_encrypt). Optional: the rendered Caddyfile
+# (instance-launch templates/Caddyfile.j2) omits the `email` directive when empty.
 turbopanel_acme_email: ""
 # Operator-declared "the endpoint presents a publicly trusted certificate".
 # Forced true when turbopanel_tls_mode is lets_encrypt.

@@ -771,13 +771,46 @@ test(
     );
     assertMatch(
       defaults,
-      /turbopanel_caddyfile:[\s\S]*?caddyfile_dir ~ '\/Caddyfile'/,
-      "turbopanel_caddyfile falls back to the instance Caddyfile",
+      /turbopanel_caddyfile:[\s\S]*?turbopanel_config_dir ~ '\/caddy\/Caddyfile'/,
+      "turbopanel_caddyfile falls back to the rendered site config under the platform config dir",
+    );
+    assertEquals(
+      defaults.includes("turbopanel_caddyfile_dir"),
+      false,
+      "no Caddyfile is read from the release package any more (it is rendered)",
+    );
+    assertEquals(
+      /Caddyfile\.acme/.test(defaults),
+      false,
+      "the static Caddyfile.acme sibling is gone — lets_encrypt is a branch of Caddyfile.j2",
+    );
+    // The instance package lies flat in the install root; the instance "dir"
+    // a managed host hands the roles is the install root itself, and the
+    // binary is bin/turbopanel-instance beside turbopaneld.
+    assertMatch(
+      defaults,
+      /turbopanel_instance_dir:[\s\S]*?else turbopanel_install_root/,
+      "managed turbopanel_instance_dir is the install root",
     );
     assertMatch(
       defaults,
-      /turbopanel_caddyfile_dir:[\s\S]*?instance_dir ~ '\/share\/caddy'[\s\S]*?compiled[\s\S]*?else turbopanel_instance_dir/,
-      "the Caddyfile comes from share/caddy in the release package in compiled mode, the checkout root in source mode",
+      /turbopanel_instance_binary:[\s\S]*?turbopanel_install_root ~ '\/bin\/turbopanel-instance'/,
+      "managed turbopanel_instance_binary is bin/turbopanel-instance under the install root",
+    );
+    assertMatch(
+      defaults,
+      /turbopanel_instance_run_mode:[\s\S]*?'source' if \(turbopanel_dev_user[\s\S]*?else 'compiled'/,
+      "run mode defaults to compiled on a managed host (instance-certs-apply runs with defaults only)",
+    );
+    assertMatch(
+      defaults,
+      /turbopanel_duckdb_lib_dir:[\s\S]*?else turbopanel_lib_dir/,
+      "managed LD_LIBRARY_PATH is lib/ (the package ships libduckdb.so there)",
+    );
+    assertEquals(
+      defaults.includes("lib/instance"),
+      false,
+      "no nested lib/instance tree",
     );
     assertMatch(
       caddyUnit,
@@ -808,15 +841,65 @@ test(
       /^\s*turbopanel_tls_mode:\s*self_signed\s*$/m,
       "production default turbopanel_tls_mode is self_signed",
     );
-    assertMatch(
-      defaults,
-      /turbopanel_caddyfile:[\s\S]*?Caddyfile\.acme/,
-      "turbopanel_caddyfile selects Caddyfile.acme when turbopanel_tls_mode is lets_encrypt",
+    // The rendered Caddyfile is one template whose branches are the TLS modes.
+    const tasks = await Deno.readTextFile(
+      join(CHECKOUT_ORCHESTRATION_DIR, "roles/instance-launch/tasks/main.yml"),
     );
     assertMatch(
-      defaults,
-      /turbopanel_caddyfile:[\s\S]*?lets_encrypt/,
-      "turbopanel_caddyfile three-way expression names lets_encrypt",
+      tasks,
+      /- name: Render the Caddy site config\n\s+when: turbopanel_dev_user \| default\(''\) \| length == 0\n\s+ansible\.builtin\.template:\n\s+src: Caddyfile\.j2\n\s+dest: "\{\{ turbopanel_caddyfile \}\}"[\s\S]*?notify:\n\s+- Restart turbopanel caddy/,
+      "instance-launch renders Caddyfile.j2 to turbopanel_caddyfile on managed hosts and restarts Caddy on change",
+    );
+    const caddyfile = await Deno.readTextFile(
+      join(
+        CHECKOUT_ORCHESTRATION_DIR,
+        "roles/instance-launch/templates/Caddyfile.j2",
+      ),
+    );
+    for (const prefix of ["/api/*", "/ws/*", "/webhook/*"]) {
+      assertEquals(
+        caddyfile.includes(`path ${prefix}`),
+        true,
+        `Caddyfile.j2 forwards ${prefix} ahead of the SPA catch-all`,
+      );
+    }
+    assertEquals(
+      caddyfile.lastIndexOf("path /webhook/*") <
+        caddyfile.lastIndexOf("try_files {path} /index.html"),
+      true,
+      "the SPA catch-all is the last handle",
+    );
+    assertMatch(
+      caddyfile,
+      /\{% if _tls_mode == 'lets_encrypt' %\}[\s\S]*?\{% if turbopanel_acme_email \| default\(''\) \| length > 0 %\}\n\s+email \{\{ turbopanel_acme_email \}\}\n\{% endif %\}\n\{% else %\}[\s\S]*?auto_https off\n\{% endif %\}/,
+      "lets_encrypt gets an optional email directive; every other mode keeps auto_https off",
+    );
+    assertMatch(
+      caddyfile,
+      /\{% if _tls_mode == 'lets_encrypt' %\}\n[^\n]*\n[^\n]*\n\{\{ turbopanel_public_hostname \}\} \{\n\{% else %\}\n[^\n]*\n:\{\{ caddy_port \| default\(8443\) \}\} \{\n\s+tls \{\{ _certs_dir \}\}\/\{\{ _leaf \}\}\.crt \{\{ _certs_dir \}\}\/\{\{ _leaf \}\}\.key\n\{% endif %\}/,
+      "lets_encrypt binds the public hostname with no tls line; the other modes bind the port with the leaf from turbopanel_instance_certs_dir",
+    );
+    assertMatch(
+      caddyfile,
+      /_leaf = 'uploaded' if _tls_mode == 'upload' else 'self-signed'/,
+      "upload serves the operator pair, self_signed the platform-CA leaf",
+    );
+    assertEquals(
+      (caddyfile.match(
+        /reverse_proxy unix\/\{\{ turbopanel_run_dir \}\}\/instance\.sock/g,
+      ) ?? []).length,
+      3,
+      "all three instance prefixes dial unix/<run dir>/instance.sock",
+    );
+    assertMatch(
+      caddyfile,
+      /root \* \{\{ turbopanel_ui_dist_dir \}\}/,
+      "the catch-all serves turbopanel_ui_dist_dir",
+    );
+    assertEquals(
+      /\{\$[A-Z_]+/.test(caddyfile),
+      false,
+      "values are baked at render time — no Caddy env placeholders",
     );
     assertMatch(
       caddyUnit,
@@ -847,38 +930,11 @@ test(
       false,
       "CapabilityBoundingSet only appear inside the lets_encrypt branch",
     );
-    assertMatch(
-      caddyUnit,
-      /turbopanel_acme_email \| default\(''\) \| length > 0/,
-      "lets_encrypt Caddy unit omits ACME email env when empty",
+    assertEquals(
+      caddyUnit.includes("TURBOPANEL_CADDY_ACME_EMAIL_DIRECTIVE"),
+      false,
+      "the ACME contact is rendered into the Caddyfile, not smuggled through the unit env",
     );
-    assertMatch(
-      caddyUnit,
-      /Environment="TURBOPANEL_CADDY_ACME_EMAIL_DIRECTIVE=email \{\{ turbopanel_acme_email \}\}"/,
-      "lets_encrypt Caddy unit quotes the optional email directive",
-    );
-
-    const instanceCaddyAcme = join(
-      DAEMON_ROOT,
-      "..",
-      "turbopanel",
-      "Caddyfile.acme",
-    );
-    try {
-      const acme = await Deno.readTextFile(instanceCaddyAcme);
-      assertEquals(
-        acme.includes("email {$TURBOPANEL_ACME_EMAIL}"),
-        false,
-        "Caddyfile.acme does not expand an empty email directive",
-      );
-      assertEquals(
-        acme.includes("{$TURBOPANEL_CADDY_ACME_EMAIL_DIRECTIVE}"),
-        true,
-        "Caddyfile.acme omits email when the unit leaves the directive unset",
-      );
-    } catch (err) {
-      if (!(err instanceof Deno.errors.NotFound)) throw err;
-    }
 
     const denoEnv = await Deno.readTextFile(
       join(

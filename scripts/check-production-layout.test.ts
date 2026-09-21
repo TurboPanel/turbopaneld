@@ -43,7 +43,7 @@ function productionLayout(
     runDir: "/run/turbopanel",
     principalHomeRoot: "/srv/users",
     daemonRootDefault: "/opt/turbopanel/lib/daemon",
-    instanceDir: "/opt/turbopanel/lib/instance",
+    instanceDir: "/opt/turbopanel",
     instanceConfigDir: "/etc/turbopanel/instance",
     instanceCaPath: "/etc/turbopanel/instance-ca.pem",
     tlsDir: "/etc/turbopanel/tls",
@@ -123,10 +123,11 @@ test("collectForbiddenReferenceFailures flags each retired path", () => {
       `assets under ${ansibleShare}`,
       "legacy /opt/turbopanel/runtimes",
       "legacy /opt/turbopanel/lib/runtime",
+      "legacy /opt/turbopanel/lib/instance",
       "hardcoded /opt/turbopanel/vendor",
     ].join("\n"),
   );
-  assertEquals(failures.length, 5);
+  assertEquals(failures.length, 6);
   assertEquals(
     collectForbiddenReferenceFailures(
       "src/paths/layout.ts",

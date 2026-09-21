@@ -309,7 +309,8 @@ test("production layout resolves FHS orchestration and runtime dirs", () => {
   );
   assertEquals(layout.stateDir, PROD_STATE_DIR_DEFAULT, "stateDir");
   assertEquals(layout.principalHomeRoot, "/srv/users", "principalHomeRoot");
-  // Managed installs must resolve the FHS lib tree — never the dev checkout.
+  // Managed installs resolve the install root (the instance package lies flat
+  // in bin/ and lib/) — never the dev checkout.
   assertEquals(
     layout.instanceDir,
     PROD_INSTANCE_DIR_DEFAULT,
@@ -317,7 +318,7 @@ test("production layout resolves FHS orchestration and runtime dirs", () => {
   );
   assertEquals(
     layout.instanceDir,
-    "/opt/turbopanel/lib/instance",
+    "/opt/turbopanel",
     "instanceDir literal",
   );
 });
@@ -576,7 +577,7 @@ test("production FHS default constants are the canonical absolute paths", () => 
   );
   assertEquals(
     PROD_INSTANCE_DIR_DEFAULT,
-    "/opt/turbopanel/lib/instance",
+    "/opt/turbopanel",
     "PROD_INSTANCE_DIR_DEFAULT",
   );
   assertEquals(
@@ -668,7 +669,7 @@ test("development layout resolves source repos with FHS mutable dirs", () => {
   assertEquals(layout.configDir, "/etc/turbopanel", "configDir literal");
   assertEquals(
     layout.instanceDir,
-    "/opt/turbopanel/lib/instance",
+    "/opt/turbopanel",
     "instanceDir literal",
   );
   assertEquals(layout.logDir, "/var/log/turbopanel", "logDir literal");

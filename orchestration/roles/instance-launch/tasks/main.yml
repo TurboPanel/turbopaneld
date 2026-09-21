@@ -60,8 +60,10 @@
   ansible.builtin.fail:
     msg: >-
       Compiled run mode requires {{ turbopanel_duckdb_lib_dir }}/libduckdb.so
-      (the instance unit's LD_LIBRARY_PATH). Run the instance-build role
-      (instance-build-toggle playbook) so it stages the DuckDB native library.
+      (the instance unit's LD_LIBRARY_PATH). On a managed install the release
+      package ships it (run.sh --instance unpacks lib/libduckdb.so); in
+      co-located dev run the instance-build role (instance-build-toggle
+      playbook) so it stages the DuckDB native library.
 
 - name: Install instance systemd unit
   ansible.builtin.template:
@@ -172,8 +174,8 @@
       - turbopanel_public_hostname | default('') | length > 0
     fail_msg: >-
       turbopanel_tls_mode=lets_encrypt requires turbopanel_public_hostname.
-      ACME email is optional: the Caddy unit and Caddyfile.acme omit the
-      email directive when turbopanel_acme_email is empty.
+      ACME email is optional: the rendered Caddyfile omits the email
+      directive when turbopanel_acme_email is empty.
 
 - name: Assert Let's Encrypt TLS mode is managed-install only
   when: turbopanel_tls_mode | default('self_signed') == 'lets_encrypt'
@@ -188,6 +190,30 @@
 - name: Compute effective public TLS flag
   ansible.builtin.set_fact:
     turbopanel_tls_public_effective: "{{ true if (turbopanel_tls_mode | default('self_signed') == 'lets_encrypt') else (turbopanel_tls_public | default(false) | bool) }}"
+
+# Managed installs get their Caddyfile rendered here, from one template whose
+# branches are the TLS modes, into the platform config dir — the release
+# package ships no site config, and a re-converge is how it gets updated.
+# Co-located dev keeps loading the dev overlay's own Caddyfile instead.
+- name: Ensure Caddy config directory exists
+  when: turbopanel_dev_user | default('') | length == 0
+  ansible.builtin.file:
+    path: "{{ turbopanel_caddyfile | dirname }}"
+    state: directory
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
+- name: Render the Caddy site config
+  when: turbopanel_dev_user | default('') | length == 0
+  ansible.builtin.template:
+    src: Caddyfile.j2
+    dest: "{{ turbopanel_caddyfile }}"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+  notify:
+    - Restart turbopanel caddy
 
 - name: Install Caddy systemd unit
   ansible.builtin.template:

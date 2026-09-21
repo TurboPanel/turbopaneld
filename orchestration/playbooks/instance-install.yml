@@ -6,14 +6,16 @@
 # scripts/run.sh --instance, after run.sh has already downloaded and
 # sha256-verified the daemon package (which carries this orchestration tree
 # and the vendored Ansible), the instance package
-# (turbopanel-instance-<version>-<arch>.tar.zst → /opt/turbopanel/lib/instance:
-# bin/turbopanel-instance, bin/turbopanel-mailer, lib/libduckdb.so,
-# share/caddy/Caddyfile{,.acme}) and the UI export
-# (turbopanel-ui-<version>.tar.gz → /opt/turbopanel/share/ui). Nothing here
-# clones or builds: the instance runs compiled (turbopanel_instance_run_mode
-# compiled), the UI is served static, and every install-time step that used
-# to reach into a source checkout is a verb of the instance binary
-# (migrate, generate-secret, generate-self-signed-cert).
+# (turbopanel-instance-<version>-<arch>.tar.zst, unpacked flat into
+# /opt/turbopanel: bin/turbopanel-instance, bin/turbopanel-mailer,
+# lib/libduckdb.so — beside the daemon's own bin/turbopaneld) and the UI
+# export (turbopanel-ui-<version>.tar.gz → /opt/turbopanel/share/ui). The
+# Caddy site config is not shipped: instance-launch renders it from its
+# Caddyfile.j2 into /etc/turbopanel/caddy/Caddyfile. Nothing here clones or
+# builds: the instance runs compiled (turbopanel_instance_run_mode compiled),
+# the UI is served static, and every install-time step that used to reach
+# into a source checkout is a verb of the instance binary (migrate,
+# generate-secret, generate-self-signed-cert).
 #
 # Role order mirrors turbopanel/dev's instance-dev-install.yml minus the
 # dev-only roles (repos, builds, dev permissions, mailpit, redis-insight,
@@ -46,10 +48,13 @@
     turbopanel_dev_user: ""
     turbopanel_dev_uid: ""
     turbopanel_dev_gid: ""
-    # The unpacked release packages (run.sh puts them here before this play).
-    turbopanel_instance_dir: "{{ turbopanel_lib_dir }}/instance"
+    # The unpacked release packages (run.sh puts them here before this play):
+    # the instance package lies flat under the install root, so the instance
+    # "dir" is the install root itself (units' WorkingDirectory).
+    turbopanel_instance_dir: "{{ turbopanel_install_root }}"
     turbopanel_instance_run_mode: compiled
-    turbopanel_instance_binary: "{{ turbopanel_instance_dir }}/bin/turbopanel-instance"
+    turbopanel_instance_binary: "{{ turbopanel_install_root }}/bin/turbopanel-instance"
+    turbopanel_mailer_binary: "{{ turbopanel_install_root }}/bin/turbopanel-mailer"
     turbopanel_ui_mode: static
     turbopanel_ui_dist_dir: "{{ turbopanel_install_root }}/share/ui"
     turbopanel_ui_artifact_url: ""
@@ -70,10 +75,9 @@
     # (TURBOPANEL_UPDATE_CHANNEL in the runtime env). run.sh passes the
     # channel it installed from.
     turbopanel_update_channel: release
-    # Where the vendored libduckdb.so the compiled unit needs on
-    # LD_LIBRARY_PATH is staged from the package (instance-build's job in
-    # source mode; here the package ships it).
-    turbopanel_duckdb_lib_dir: "{{ turbopanel_vendor_dir }}/duckdb/lib"
+    # The compiled unit's LD_LIBRARY_PATH: the package ships libduckdb.so in
+    # lib/ (instance-build stages it into the vendor tree in co-located dev).
+    turbopanel_duckdb_lib_dir: "{{ turbopanel_lib_dir }}"
     # The co-located daemon: daemon-install.yml's contract minus the remote
     # URL. No turbopanel_instance_url → daemon-config leaves
     # TURBOPANEL_INSTANCE_URL out of daemon.env and the daemon dials
@@ -106,9 +110,8 @@
         path: "{{ item }}"
       loop:
         - "{{ turbopanel_instance_binary }}"
-        - "{{ turbopanel_instance_dir }}/bin/turbopanel-mailer"
-        - "{{ turbopanel_instance_dir }}/lib/libduckdb.so"
-        - "{{ turbopanel_instance_dir }}/share/caddy/Caddyfile"
+        - "{{ turbopanel_mailer_binary }}"
+        - "{{ turbopanel_duckdb_lib_dir }}/libduckdb.so"
         - "{{ turbopanel_ui_dist_dir }}/index.html"
       register: _instance_package_files
 
@@ -116,8 +119,9 @@
       ansible.builtin.assert:
         that: _instance_package_files.results | map(attribute='stat.exists') | list is all
         fail_msg: >-
-          The instance package and UI export must be unpacked under
-          {{ turbopanel_instance_dir }} and {{ turbopanel_ui_dist_dir }}
+          The instance package (bin/turbopanel-instance, bin/turbopanel-mailer,
+          lib/libduckdb.so) and UI export must be unpacked under
+          {{ turbopanel_install_root }} and {{ turbopanel_ui_dist_dir }}
           before this play runs — run.sh --instance does that.
 
   roles:
@@ -141,36 +145,23 @@
     - role: caddy
 
   tasks:
-    - name: Ensure the DuckDB vendor lib directory
+    - name: Pin the instance package files
+      # Release content, root-owned like the daemon's own bin/turbopaneld
+      # (daemon-layout re-pins bin/ to root:tp on every converge). The
+      # compiled instance writes only its state and run trees, so nothing
+      # here needs to be owned by the service account; tpctrl and tpcaddy
+      # read through group tp.
       ansible.builtin.file:
-        path: "{{ item }}"
-        state: directory
+        path: "{{ item.path }}"
         owner: root
         group: "{{ turbopanel_group | default('tp') }}"
-        mode: "0750"
+        mode: "{{ item.mode }}"
       loop:
-        - "{{ turbopanel_vendor_dir }}/duckdb"
-        - "{{ turbopanel_duckdb_lib_dir }}"
-
-    - name: Vendor libduckdb.so from the instance package
-      # What instance-build does from node_modules in source mode; the
-      # compiled unit puts this directory on LD_LIBRARY_PATH.
-      ansible.builtin.copy:
-        src: "{{ turbopanel_instance_dir }}/lib/libduckdb.so"
-        dest: "{{ turbopanel_duckdb_lib_dir }}/libduckdb.so"
-        remote_src: true
-        owner: root
-        group: "{{ turbopanel_group | default('tp') }}"
-        mode: "0640"
-
-    - name: Own the unpacked instance package
-      ansible.builtin.file:
-        path: "{{ turbopanel_instance_dir }}"
-        state: directory
-        owner: "{{ instance_user | default('tpctrl') }}"
-        group: "{{ turbopanel_group | default('tp') }}"
-        mode: "0750"
-        recurse: true
+        - { path: "{{ turbopanel_instance_binary }}", mode: "0755" }
+        - { path: "{{ turbopanel_mailer_binary }}", mode: "0755" }
+        - { path: "{{ turbopanel_duckdb_lib_dir }}/libduckdb.so", mode: "0644" }
+      loop_control:
+        label: "{{ item.path }}"
 
     - name: Let the instance hand the co-located daemon its license
       # The wizard writes the co-located license credentials and server.id into the
