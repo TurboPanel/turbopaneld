@@ -20,12 +20,18 @@ const test = Deno.test.bind(Deno);
 test("isAllowedPath admits only managed-engine code paths", () => {
   assertEquals(isAllowedPath("turbopaneld/src/managed/engines/index.ts"), true);
   assertEquals(
-    isAllowedPath("turbopaneld/src/instance/commands/contracts.ts"),
+    isAllowedPath("turbopaneld/src/contracts/commands-contracts.ts"),
     true,
   );
-  assertEquals(isAllowedPath("turbopanel/src/lib/managed/types.ts"), true);
+  assertEquals(isAllowedPath("turbopanel/src/features/managed/types.ts"), true);
+  assertEquals(
+    isAllowedPath("turbopanel/src/features/principals/store.ts"),
+    true,
+  );
   assertEquals(isAllowedPath("turbopanel/src/client/openapi/managed.ts"), true);
-  assertEquals(isAllowedPath("turbopanel/src/lib/db/schema.ts"), true);
+  assertEquals(isAllowedPath("turbopanel/src/db/schema.ts"), true);
+  assertEquals(isAllowedPath("turbopanel/src/db/schema-descriptions.ts"), true);
+  assertEquals(isAllowedPath("turbopanel/src/db/resource-hierarchy.md"), true);
   assertEquals(
     isAllowedPath("ui/src/components/org/managed/managed-version-picker.tsx"),
     true,
@@ -67,7 +73,7 @@ test("collectMetricsLegacyFailures flags code and comments, case-insensitively",
 
 test("collectMetricsLegacyFailures skips allowlisted managed-engine paths", () => {
   const failures = collectMetricsLegacyFailures(
-    "turbopanel/src/lib/managed/types.ts",
+    "turbopanel/src/features/managed/types.ts",
     "export type ManagedEngine = 'clickhouse';\n",
   );
   assertEquals(failures, []);

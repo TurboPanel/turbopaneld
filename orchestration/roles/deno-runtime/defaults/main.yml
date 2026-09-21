@@ -11,7 +11,7 @@ deno_version: "2.9.7"
 # asset). The install task refuses to run when the pinned version has no entry
 # for the host architecture, so a version bump without new digests fails
 # loudly instead of installing an unverified runtime. Keep in step with
-# TP_DENO_SHA256_* in scripts/run.sh (src/orchestration/paths.test.ts pins
+# TP_DENO_SHA256_* in scripts/run.sh (src/orchestration/assets.test.ts pins
 # both against this table).
 deno_sha256:
   "2.9.7":

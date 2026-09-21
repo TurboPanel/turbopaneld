@@ -2,7 +2,7 @@ import { assert, assertEquals, assertExists } from "@std/assert";
 import { DAEMON_VERSION } from "../version.ts";
 import type { HostHelloIdentity } from "../host/os-release.ts";
 import type { HostTimeSync } from "../host/time-sync.ts";
-import type { ServerReportedIp } from "../server-addresses.ts";
+import type { ServerReportedIp } from "../host/server-addresses.ts";
 import { framesOfType, MockWebSocket } from "../testing/fake-websocket.ts";
 import { IdlePresence, installIdlePresenceProviders } from "./idle-presence.ts";
 

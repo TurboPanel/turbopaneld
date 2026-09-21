@@ -25,7 +25,7 @@ import { runtimeGroup } from "../../runtime/registry.ts";
 import type {
   EnvironmentDeployNativeAppRestartPolicy,
   EnvironmentDeployNativeAppService,
-} from "../../instance/commands/contracts.ts";
+} from "../../contracts/commands-contracts.ts";
 
 /**
  * Unit-name prefix. Follows the existing `turbopanel-*` convention

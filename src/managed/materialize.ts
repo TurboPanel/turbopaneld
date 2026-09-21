@@ -8,19 +8,19 @@
  */
 
 import { join } from "@std/path";
-import type { ManagedApplyPayload } from "../instance/commands/contracts.ts";
+import type { ManagedApplyPayload } from "../contracts/commands-contracts.ts";
 import {
   type DockerCliResult,
   runDocker as defaultRunDocker,
   type RunDockerOptions,
 } from "../deploy/docker-cli.ts";
-import { sanitizeForLog } from "../logger.ts";
+import { sanitizeForLog } from "../util/logger.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import {
   managedConfigDir,
   managedDir,
   resolveManagedRelativePath,
-} from "./paths.ts";
+} from "./engine-paths.ts";
 import {
   type DecryptSecretsFn,
   ensureManagedSelfSignedCert,

@@ -9,7 +9,7 @@ import type { EventDetectContext } from "./types.ts";
 import type {
   BlockDeviceTopology,
   TopologySnapshot,
-} from "../../topology/types.ts";
+} from "../../../contracts/topology-types.ts";
 
 const test = Deno.test.bind(Deno);
 

@@ -1,4 +1,4 @@
-import { logWarn } from "../logger.ts";
+import { logWarn } from "../util/logger.ts";
 
 export const DEFAULT_DAEMON_UNIT = "turbopaneld";
 

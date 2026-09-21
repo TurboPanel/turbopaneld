@@ -1,6 +1,6 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
-import { DAEMON_ROOT } from "./paths.ts";
+import { DAEMON_ROOT } from "./assets.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.

@@ -16,7 +16,7 @@
  */
 
 import { join } from "@std/path";
-import { logInfo, logWarn } from "../../logger.ts";
+import { logInfo, logWarn } from "../../util/logger.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import type { RunFn, RunResult } from "../ensure-principal.ts";
 import { SYSTEMD_UNIT_DIR } from "../native/unit.ts";
@@ -28,7 +28,7 @@ import {
   cronTimerPath,
   cronUnitName,
 } from "./unit.ts";
-import type { EnvironmentDeployCronJob } from "../../instance/commands/contracts.ts";
+import type { EnvironmentDeployCronJob } from "../../contracts/commands-contracts.ts";
 
 /** One service's jobs, with the account and tree they run as and in. */
 export type CronApplySpec = {

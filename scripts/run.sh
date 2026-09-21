@@ -682,19 +682,19 @@ tp_probe_native_daemon() {
 
 # Host-local carry-over for release swaps lives under FHS paths (not the old
 # platform/daemon checkout). Keep this list in sync with HOST_LOCAL_ARTIFACTS
-# in src/dev-sync-apply.ts — identity/config are under /var/lib and /etc, so
+# in src/dev-sync/apply.ts — identity/config are under /var/lib and /etc, so
 # only checkout leftovers that may still appear under a source tree remain.
 # shellcheck disable=SC2034
 TP_HOST_LOCAL_ARTIFACTS=".git .github logs cloudflared"
 
 # Keep in sync with orchestration/roles/deno-runtime/defaults/main.yml
-# (deno_version + deno_sha256; src/orchestration/paths.test.ts pins all three).
+# (deno_version + deno_sha256; src/orchestration/assets.test.ts pins all three).
 TP_DENO_VERSION="2.9.7"
 
 # Scoped Deno grants for the JS-fallback installer verbs (bootstrap-orchestration,
 # run-installer), which run as root before the unit exists. Rendered by
-# src/daemon-permissions.ts renderInstallerPermissionFlags() and pinned by
-# src/daemon-permissions.test.ts — never --allow-all.
+# src/permissions/daemon-permissions.ts renderInstallerPermissionFlags() and pinned by
+# src/permissions/daemon-permissions.test.ts — never --allow-all.
 TP_INSTALLER_DENO_PERMISSIONS="--allow-read=/opt/turbopanel,/etc/turbopanel,/var/lib/turbopanel,/var/log/turbopanel,/run/turbopanel,/tmp,/root/.ansible,/etc/os-release,/etc/hostname,/etc/machine-id,/etc/passwd,/etc/group,/etc/ssl,/etc/systemd,/proc,/sys,/dev,/usr,/bin,/sbin,/lib,/lib64 --allow-write=/opt/turbopanel,/etc/turbopanel,/var/lib/turbopanel,/var/log/turbopanel,/run/turbopanel,/tmp,/root/.ansible --allow-run=sh,/bin/sh,bash,cat,ls,cp,chmod,ln,id,/usr/bin/id,getent,systemctl,tar,/usr/bin/tar,curl,/usr/bin/curl,git,openssl,/usr/bin/openssl,/opt/turbopanel/vendor/deno/bin/deno,/opt/turbopanel/vendor/deno/current/deno,/opt/turbopanel/vendor/uv/0.11.21/uv,/opt/turbopanel/vendor/uv/0.11.21/uvx,/opt/turbopanel/vendor/ansible/2.20/bin/ansible-playbook,/opt/turbopanel/vendor/ansible/2.20/bin/ansible-galaxy,/opt/turbopanel/vendor/ansible/2.20/bin/ansible-lint --allow-env --allow-net --deny-net=169.254.169.254,metadata.google.internal,[fd00:ec2::254] --allow-sys=networkInterfaces,hostname,statfs,uid"
 # Upstream SHA-256 of the release zip per architecture (dl.deno.land publishes
 # `<asset>.sha256sum` beside each asset). The download below is verified
@@ -1132,6 +1132,8 @@ tp_print_instance_welcome() {
       q|Q)
         echo "run.sh: nothing installed"
         exit 0
+        ;;
+      *)
         ;;
     esac
   fi

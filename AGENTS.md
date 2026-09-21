@@ -64,7 +64,7 @@ env-overridable (`TURBOPANEL_HOME`, `TURBOPANEL_BIN_DIR`, `TURBOPANEL_LIB_DIR`,
 `TURBOPANEL_DAEMON_STATE_DIR`, `TURBOPANEL_LOG_DIR`, `TURBOPANEL_BACKUP_DIR`,
 `TURBOPANEL_RUN_DIR`, `TURBOPANEL_RUNTIMES_DIR`, `TURBOPANEL_DAEMON_ROOT`,
 `TURBOPANEL_PRINCIPAL_HOME_ROOT`).
-`src/orchestration/paths.ts` and `src/instance/paths.ts` derive their constants
+`src/orchestration/assets.ts` and `src/instance/sockets.ts` derive their constants
 from `resolveLayout` — do **not** hardcode absolute paths in runtime code;
 add/extend a layout field instead. The development default checkout root is
 `<devRoot>/turbopaneld` (from `TURBOPANEL_DEV_ROOT` / `$HOME`); production runtime
@@ -92,7 +92,7 @@ module and CI guard are the only places allowed to reference it.
 `/backup` default in development and production: backups are the one artifact
 an operator is expected to point at other storage (a second disk, a NAS mount,
 an attached volume), so `TURBOPANEL_BACKUP_DIR` repoints them without moving
-anything else. Artifacts live at `<backupDir>/<managedId>/` (`managed/paths.ts`'s
+anything else. Artifacts live at `<backupDir>/<managedId>/` (`managed/engine-paths.ts`'s
 `managedBackupsDir`), written 0600 by the daemon user itself. Repointing the
 override affects **new** backups only — nothing relocates an existing tree —
 and `managed.destroy` still removes an engine's backup directory along with its
@@ -140,18 +140,18 @@ never see a Stripe key, and a `wrangler dev` instance takes its secrets from
 service users `tp`, `tpctrl`, `tpcache`, `tpdata`, `tpqueue`, and
 `tpcaddy` — see **`../turbopanel/AGENTS.md`** (Production UID/GID allocation).
 
-**Deno version pin:** `DENO_VERSION` (`src/orchestration/paths.ts`) =
+**Deno version pin:** `DENO_VERSION` (`src/orchestration/assets.ts`) =
 **`2.9.7`**. Keep it in step with `deno_version` in
 `orchestration/roles/deno-runtime/defaults/main.yml`, `TP_DENO_VERSION` in
 `scripts/run.sh`, and `DENO_VERSION` in
 [TurboPanel/dev](https://github.com/TurboPanel/dev) `src/lib/paths.ts` (dev
-console bootstrap fallback + status label). `src/orchestration/paths.test.ts`
+console bootstrap fallback + status label). `src/orchestration/assets.test.ts`
 pins the const to the role default. Bumping the pin is a fleet-wide rollout:
 `deno-runtime` runs on the install/converge path (`daemon-install.yml`,
 `daemon-converge.yml`) and on the instance-launch refresh path
 (`instance-launch-only.yml`, ahead of `instance-launch`), because instance and
 mailer units ExecStart through the vendored Deno path — it is not only the
-daemon's JS-fallback concern. `src/orchestration/paths.test.ts` pins that
+daemon's JS-fallback concern. `src/orchestration/assets.test.ts` pins that
 ordering too.
 
 **Vendored Node/Deno layout:** Ansible roles install pinned runtimes under
@@ -315,8 +315,8 @@ compile toolchain).
   The `test` task grants `-A` at the process level on
   purpose: Deno's per-test `permissions` option can only *reduce* from the
   process grant, so a narrower task grant would silently break
-  `src/instance/commands/ping.test.ts` (`sys: ["hostname"]`),
-  `src/instance/commands/stop-environment.test.ts` (`run: true`), and the
+  `src/commands/ping.test.ts` (`sys: ["hostname"]`),
+  `src/commands/stop-environment.test.ts` (`run: true`), and the
   twelve `permissions:` blocks in `src/instance/client.test.ts`. **Do not
   weaken or remove any existing per-test `permissions` block.** A scoped
   `run: ["cmd"]` cannot inherit `LD_*` / `DYLD_*` (Deno 2.9 `NotCapable`);
@@ -347,9 +347,9 @@ compile toolchain).
   `src/testing/**`). The `denoS2187` issue-ignore (`typescript:S2187` on
   `**/*.test.ts`) remains — LCOV import does not replace that false-positive
   suppression.
-- `src/orchestration/paths.test.ts` — production/dev default trees, env
+- `src/orchestration/assets.test.ts` — production/dev default trees, env
   overrides, and the `DENO_VERSION` ↔ role pin
-  (`deno test src/orchestration/paths.test.ts`).
+  (`deno test src/orchestration/assets.test.ts`).
 - `scripts/verify-release-root.sh` / `tp_verify_release_root`
   (`scripts/lib/release-artifacts.sh`) — reject dev-only paths, TS sources,
   `share/ansible`, or a leaked daemon source tree in a packaged release root.
@@ -385,7 +385,7 @@ offline sanity pass. Fleet-wide from the host `dev` checkout:
 
 **Coverage dir must stay absolute.** `test:coverage` passes
 `--coverage=$PWD/coverage/profile`, not a relative path. Several suites (and
-the `Deno.chdir("/")` fallbacks in `src/dev-sync-apply.ts` /
+the `Deno.chdir("/")` fallbacks in `src/dev-sync/apply.ts` /
 `src/instance/run-reconcile.ts`) move the process cwd, and `deno test
 --coverage` resolves a *relative* coverage dir at end-of-run against whatever
 cwd it is left with — which fails with `Error generating coverage report:
@@ -402,7 +402,7 @@ byte-identical to what SonarCloud imports.
 **Orchestration is gated too.** `deno task check:orchestration`
 (`scripts/check-orchestration.sh`, wired into CI `verify.yml`) runs
 `ansible-playbook --syntax-check` on every playbook plus `ansible-lint
---profile min`. Before this the Ansible layer — 20+ playbooks, 30+ first-party
+--profile min`. Before this the Ansible layer — 25 playbooks, 42 first-party
 roles — had no CI gate of any kind, so a broken role reference or malformed
 task list only surfaced as a converge failure on a real host. Needs
 `ansible-playbook` / `ansible-lint` on PATH: in the guest,
@@ -493,13 +493,13 @@ from production code.
 
 Six controls, each with a test that fails the build when it regresses:
 
-- **Deno grants** — `src/daemon-permissions.ts` is the one definition of what
+- **Deno grants** — `src/permissions/daemon-permissions.ts` is the one definition of what
   the production daemon may read/write/run; `renderDaemonPermissionFlags()`
   is copied verbatim into the three `compile*` tasks in `deno.json` and the
   JS-fallback `ExecStart` in `daemon-launch/templates/turbopaneld.service.j2`,
   and `renderInstallerPermissionFlags()` into `TP_INSTALLER_DENO_PERMISSIONS`
   in `scripts/run.sh` (the root-run `bootstrap-orchestration` /
-  `run-installer` verbs). `src/daemon-permissions.test.ts` pins every copy,
+  `run-installer` verbs). `src/permissions/daemon-permissions.test.ts` pins every copy,
   refuses `--allow-all` and any bare `--allow-read/write/run/ffi/sys`, and
   derives the `--allow-run` set from every literal `Deno.Command` / `run(…)`
   target in `src/` — add a new spawn target there or the test fails. The
@@ -524,7 +524,7 @@ Six controls, each with a test that fails the build when it regresses:
   rendered `--allow-run` paths: re-render (see the test failure) and commit
   all copies. NVML is opened by absolute path first (`NVML_LIBRARY_CANDIDATES`)
   because a scoped `--allow-ffi` resolves bare names against the cwd.
-- **Two writes `--allow-write` never covers** — `src/scoped-writes.ts`.
+- **Two writes `--allow-write` never covers** — `src/permissions/scoped-writes.ts`.
   Deno refuses *every* write (`writeFile`, `copyFile`, `chmod`, `rename`,
   `remove`) to a path on the **`--allow-run`** allowlist, so uv, uvx, and
   cloudflared — run targets that the binary-as-installer also has to install —
@@ -536,7 +536,7 @@ Six controls, each with a test that fails the build when it regresses:
   time: the first broke the first canary install after this hardening, the
   second silently skipped every vendor `current` symlink on the same run.
   `cp` / `chmod` / `ln` are therefore on both run allowlists, and
-  `src/scoped-writes.test.ts` reproduces both refusals in a child process with
+  `src/permissions/scoped-writes.test.ts` reproduces both refusals in a child process with
   production-shaped grants and fails on a new `Deno.symlink(` anywhere in
   `src/`. A helper that fails throws **`ScopedWriteError`**, which is the
   subprocess counterpart of `PermissionDenied`: privilege ladders that retry
@@ -603,7 +603,7 @@ Six controls, each with a test that fails the build when it regresses:
   both roles download with `get_url checksum:` and assert a digest exists for
   the pinned version + host arch, corepack installs from the verified tarball
   (`corepack_version`), and `run.sh` mirrors the Deno digests
-  (`TP_DENO_SHA256_*`, checked before extraction). `src/orchestration/paths.test.ts`
+  (`TP_DENO_SHA256_*`, checked before extraction). `src/orchestration/assets.test.ts`
   fails a version bump that lands without its digests.
 - **Deploy hooks** — `preDeployCommand` / `postDeployCommand` run **inside the
   service container** (`docker compose run --rm --no-deps -T --entrypoint sh`
@@ -632,10 +632,11 @@ Large subsystems live in focused `AGENTS.md` files next to their code — Cursor
 
 | Subsystem | Read before editing | Covers |
 |---|---|---|
+| **Command handlers** | `src/commands/AGENTS.md` | Daemon command implementations (`command-router.ts`); injected into `InstanceClient` from `src/entry/run.ts` so transport never imports handlers |
 | **Instance client** | `src/instance/AGENTS.md` | WSS / Unix-socket connection, idle presence + heartbeats (`timeSync`/`ips`/`docker`), reconnect / parked backoff, JWKS JWT verification, daemon TLS trust model |
 | **Host metrics (collector)** | `src/metrics/AGENTS.md` | `/proc`-based collection + scheduling, `POST /api/daemon/v1/metrics`, schema v3 four-part contract (`core`/`extended`/`sensors`/`traffic`), sensor discovery, live-mode leases |
 | **Tenant deploy & hosting ingress** | `src/deploy/AGENTS.md` | `environment.deploy` / `.lifecycle` / `.stop`, Docker Compose + Traefik, hosting Caddy, TLS materialization. Nested per-area docs: `src/deploy/release/AGENTS.md` (git-backed releases), `src/deploy/native/AGENTS.md` (host-run Node/Next), `src/deploy/site/AGENTS.md` (nginx/Apache/OLS sites), `src/deploy/cron/AGENTS.md` (scheduled jobs), `src/deploy/ssh/AGENTS.md` (tenant SSH) |
-| **Command execution logs** | `src/logs/` | Streamed command transcripts: redaction deny-set, `<stateDir>/spool/execution-logs/` spool, batched upload to `POST /api/daemon/v1/commands/:commandId/log`, orphan sweep. Control-plane side: `../turbopanel/src/lib/execution-logs/AGENTS.md`; capture details in `src/deploy/AGENTS.md` (Streamed transcript capture). This is the **only** log class uploaded and retained. |
+| **Command execution logs** | `src/logs/` | Streamed command transcripts: redaction deny-set, `<stateDir>/spool/execution-logs/` spool, batched upload to `POST /api/daemon/v1/commands/:commandId/log`, orphan sweep. Control-plane side: `../turbopanel/src/features/execution-logs/AGENTS.md`; capture details in `src/deploy/AGENTS.md` (Streamed transcript capture). This is the **only** log class uploaded and retained. |
 | **Managed engines (daemon runtime)** | `src/managed/AGENTS.md` | `managed.apply` / `.lifecycle` / `.destroy`, `managed.ingress.reconcile` (shared ProxySQL — compose project = the `managed-ingress` `serviceId` — on the organization's managed network, a bare-UUID name carried as `managedNetwork` on the command), engine registry (Postgres first); separate from tenant deploy. On-demand tails ride the same correlated cell round trip as `managed-logs-request` / `managed-logs-result`: engine `compose logs`, and running-container `docker container logs`. Neither is stored or collected; presence does not carry `containerLogsEnabled`. |
 | **Installer presentation** | `src/orchestration/AGENTS.md` | Installer presenter + sanitizer / vocabulary map for `run.sh` install & converge |
 | **Installer script hosting** | `workers/turbopanel-sh/AGENTS.md` | Assets-only **turbopanel.sh** Workers Static Assets host, deploy tooling, channel manifests, build/commit stamping |

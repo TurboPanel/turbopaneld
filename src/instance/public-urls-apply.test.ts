@@ -1,6 +1,6 @@
 import { assertEquals } from "@std/assert";
 import { join } from "@std/path";
-import { INSTANCE_CERTS_APPLY_PLAYBOOK } from "../orchestration/paths.ts";
+import { INSTANCE_CERTS_APPLY_PLAYBOOK } from "../orchestration/assets.ts";
 import { PROD_INSTANCE_DIR_DEFAULT } from "../paths/layout.ts";
 import {
   applyPublicUrls,

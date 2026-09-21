@@ -24,7 +24,7 @@ test("isSkippedPath skips Galaxy, skills, migrations, and this checker", () => {
   assertEquals(isSkippedPath("src/migrations/0001.sql"), true);
   assertEquals(isSkippedPath("db/migrations/foo.sql"), true);
   assertEquals(isSkippedPath("scripts/check-vocabulary.ts"), true);
-  assertEquals(isSkippedPath("src/daemon-cli.ts"), false);
+  assertEquals(isSkippedPath("src/entry/cli.ts"), false);
 });
 
 test("isAllowlisted covers HTTP, skills, and coding-agent wording", () => {

@@ -25,7 +25,10 @@
 
 import { basename, join } from "@std/path";
 import type { RunFn } from "../ensure-principal.ts";
-import { createSymlink, ScopedWriteError } from "../../scoped-writes.ts";
+import {
+  createSymlink,
+  ScopedWriteError,
+} from "../../permissions/scoped-writes.ts";
 import {
   RELEASE_METADATA_DIRNAME,
   RELEASE_PUBLISHED_MODE,

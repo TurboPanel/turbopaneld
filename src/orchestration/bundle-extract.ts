@@ -1,6 +1,6 @@
 import { join } from "@std/path";
 import { detectInstallMode, readEnv, resolveLayout } from "../paths/layout.ts";
-import { ORCHESTRATION_DIR } from "./paths.ts";
+import { ORCHESTRATION_DIR } from "./assets.ts";
 
 async function fileExists(path: string): Promise<boolean> {
   try {

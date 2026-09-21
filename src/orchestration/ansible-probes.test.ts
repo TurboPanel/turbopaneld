@@ -37,7 +37,7 @@ describe("ansible binary probes", () => {
   });
 
   it("ansiblePlaybookWorks rethrows non-NotFound stat errors", async () => {
-    const { ANSIBLE_PLAYBOOK_BIN } = await import("./paths.ts");
+    const { ANSIBLE_PLAYBOOK_BIN } = await import("./assets.ts");
     const originalStat = Deno.stat;
     Deno.stat = ((path) => {
       if (String(path) === ANSIBLE_PLAYBOOK_BIN) {

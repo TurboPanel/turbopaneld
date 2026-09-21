@@ -43,7 +43,7 @@ template edit shows up as a diff a reviewer reads. **Re-run the container
 proof (command in that test's header) before regenerating a fixture; never
 regenerate to make a red test green.** The hostfree suites (`render.test.ts`,
 `render.golden.test.ts`, `apply.test.ts`,
-`../instance/commands/firewall-reconcile.test.ts`) are the bar for this row;
+`../commands/firewall-reconcile.test.ts`) are the bar for this row;
 the on-host proof is Road row `fw-proof`.
 
 ## Guards, in order

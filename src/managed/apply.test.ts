@@ -1,7 +1,7 @@
 import { assertEquals } from "@std/assert";
 import { resolveClientSourceHosts, resolveManagedApplyHost } from "./apply.ts";
-import { proxysqlProject } from "./paths.ts";
-import type { ManagedApplyPayload } from "../instance/commands/contracts.ts";
+import { proxysqlProject } from "./engine-paths.ts";
+import type { ManagedApplyPayload } from "../contracts/commands-contracts.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.

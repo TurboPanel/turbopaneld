@@ -3,7 +3,7 @@ import type { AnsibleEvent } from "./ansible-events.ts";
 import { InstallEventPresenter } from "./installer-tui.ts";
 import { setActiveInstallPresenter } from "./install-presenter-context.ts";
 import { InstallPresenter } from "./install-presenter.ts";
-import { logInfo } from "../logger.ts";
+import { logInfo } from "../util/logger.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.

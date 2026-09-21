@@ -1,4 +1,4 @@
-import type { EnvironmentDeployStorageMaterial } from "../instance/commands/contracts.ts";
+import type { EnvironmentDeployStorageMaterial } from "../contracts/commands-contracts.ts";
 import type { ComposeOverlayFragment } from "./compose-overlay.ts";
 import type { ResolvedComposeModel } from "./compose-services.ts";
 

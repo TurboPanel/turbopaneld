@@ -5,7 +5,7 @@ import type { EventDetectContext } from "./types.ts";
 import type {
   NetworkDeviceTopology,
   TopologySnapshot,
-} from "../../topology/types.ts";
+} from "../../../contracts/topology-types.ts";
 import type { SensorIo } from "../sensors/discovery.ts";
 
 const test = Deno.test.bind(Deno);

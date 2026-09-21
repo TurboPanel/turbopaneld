@@ -1,0 +1,322 @@
+/**
+ * Daemon-side WebSocket message union extracted from `src/instance/client.ts`.
+ *
+ * The control-plane {@link DaemonMessage} in
+ * `turbopanel/src/contracts/cell-protocol.ts` remains canonical for the
+ * shared protocol. This file is the daemon's exported wire union and may
+ * diverge (`hello`/`heartbeat` live on the instance side; snapshot typing
+ * and `drivetemp` enable results are daemon-shaped). Keep the `type:`
+ * discriminators in step when adding a message.
+ */
+import type { ServerReportedIp } from "./server-reported-ip.ts";
+import type { DrivetempEnableResult } from "./commands-contracts.ts";
+import type { HardwareProfile } from "../metrics/collector/types.ts";
+import type { MetricsCapabilityPlan } from "../metrics/capability-plan.ts";
+import type { TopologySnapshot } from "./topology-types.ts";
+
+export type DaemonMessage =
+  | { type: "echo"; payload: unknown; at: string }
+  | { type: "version"; commit: string; branch: string; at: string }
+  | { type: "addresses-request"; id: string; at: string }
+  | {
+    type: "addresses-result";
+    id: string;
+    ips: ServerReportedIp[];
+    at: string;
+  }
+  | {
+    type: "managed-logs-request";
+    id: string;
+    managedId: string;
+    tail: number;
+    at: string;
+  }
+  | {
+    type: "container-logs-request";
+    id: string;
+    containerId: string;
+    tail: number;
+    at: string;
+  }
+  | {
+    type: "repo-read-request";
+    id: string;
+    cloneUrl: string;
+    ref: string;
+    paths: string[];
+    listPath?: string;
+    maxBytesPerFile: number;
+    credential?: string;
+    credentialKind?: string;
+    credentialUsername?: string;
+    at: string;
+  }
+  | {
+    type: "repo-read-result";
+    id: string;
+    ok: boolean;
+    commitSha?: string;
+    files?: {
+      path: string;
+      found: boolean;
+      content?: string;
+      bytes?: number;
+      reason?: string;
+    }[];
+    entries?: { path: string; kind: string }[];
+    error?: string;
+    at: string;
+  }
+  | {
+    type: "repo-default-branch-request";
+    id: string;
+    /** Anonymous only — the control plane never sends a credential here. */
+    cloneUrl: string;
+    at: string;
+  }
+  | {
+    type: "repo-default-branch-result";
+    id: string;
+    ok: boolean;
+    /** `null` when the remote answered but named no branch (an empty repo). */
+    defaultBranch?: string | null;
+    error?: string;
+    at: string;
+  }
+  | {
+    type: "managed-logs-result";
+    id: string;
+    logs: string;
+    error?: string;
+    at: string;
+  }
+  | {
+    type: "metrics-live-start";
+    id: string;
+    leaseId: string;
+    /** Advisory from the control plane; the daemon applies its own live cadence. */
+    intervalSeconds: number;
+    expiresAt: string;
+    at: string;
+  }
+  | {
+    type: "metrics-live-start-result";
+    id: string;
+    ok: boolean;
+    error?: string;
+    at: string;
+  }
+  | { type: "metrics-live-stop"; id: string; leaseId: string; at: string }
+  | {
+    type: "metrics-live-stop-result";
+    id: string;
+    ok: boolean;
+    error?: string;
+    at: string;
+  }
+  | { type: "metrics-capabilities-request"; id: string; at: string }
+  | {
+    type: "metrics-capabilities-result";
+    id: string;
+    ok: boolean;
+    capabilities?: Record<string, unknown>;
+    error?: string;
+    at: string;
+  }
+  | {
+    type: "topology-overrides-update";
+    id: string;
+    /**
+     * Full replacement — absent fields clear their setting. Carries both
+     * v3 sensor-slot/NIC-name/hosting-path/drivetemp fields and the
+     * topology-identity pins (`nicSlotDeviceIds`/`hostingFilesystemId`,
+     * resolved against `src/metrics/topology/`
+     * device/filesystem ids rather than raw names/paths) in one object —
+     * renamed from `metrics-sensor-overrides-update` when topology
+     * identity was added; the underlying store and v3 semantics are
+     * unchanged.
+     */
+    overrides: HardwareProfile;
+    at: string;
+  }
+  | {
+    type: "topology-overrides-update-result";
+    id: string;
+    ok: boolean;
+    error?: string;
+    /**
+     * Present when this push flipped `drivetempEnabled` false/unset → true —
+     * the module-load outcome plus sensor capabilities re-discovered right
+     * after, awaited before this result is sent (never a bare fire-and-forget
+     * ack). Absent when the flip edge didn't occur, or if the drivetemp
+     * command itself failed unexpectedly (logged; `ok` above still reflects
+     * whether the profile write succeeded).
+     */
+    drivetemp?: DrivetempEnableResult;
+    at: string;
+  }
+  | {
+    type: "capability-plan-update";
+    id: string;
+    plan: MetricsCapabilityPlan;
+    generation: number;
+    at: string;
+  }
+  | {
+    type: "capability-plan-update-result";
+    id: string;
+    ok: boolean;
+    error?: string;
+    at: string;
+  }
+  | {
+    type: "capability-plan-clear";
+    id: string;
+    at: string;
+  }
+  | {
+    type: "capability-plan-clear-result";
+    id: string;
+    ok: boolean;
+    error?: string;
+    at: string;
+  }
+  | {
+    /**
+     * Daemon-initiated, fire-and-forget (no correlated request/result) —
+     * `../metrics/topology/`'s stable device/filesystem/GPU/signal identity
+     * and generation, reported over the socket by `TopologyReporter`
+     * (`./topology-reporter.ts`) so the control plane can persist per-server
+     * topology-generation history (`turbopanel/src/client/servers/
+     * server-topology-records.ts`).
+     */
+    type: "topology-report";
+    generation: number;
+    bootGeneration: number;
+    snapshot: TopologySnapshot;
+    at: string;
+  }
+  | {
+    type: "container-logs-result";
+    id: string;
+    logs: string;
+    error?: string;
+    at: string;
+  }
+  | {
+    type: "managed-ha-event";
+    managedId: string;
+    sourceMemberId?: string;
+    at: string;
+  }
+  | {
+    /**
+     * Daemon-initiated, fire-and-forget (no correlated request/result, same
+     * shape as `managed-ha-event`) — `AcmeIssuanceObserver`'s live TLS-probe
+     * verdict for one `tlsMode: 'acme'` hostname, sent only on a state
+     * change (first failure after a short debounce, or a recovery).
+     */
+    type: "acme-issuance-event";
+    hostname: string;
+    ok: boolean;
+    errorMessage?: string;
+    at: string;
+  }
+  | {
+    type: "fabric-paths-request";
+    id: string;
+    fabricId: string;
+    probeMs: number;
+    candidates: Array<{ publicKey: string; endpoints: string[] }>;
+    at: string;
+  }
+  | {
+    type: "fabric-paths-result";
+    id: string;
+    paths: Array<{
+      publicKey: string;
+      endpoint?: string;
+      lastHandshakeAt?: string;
+      health: "healthy" | "stale" | "never";
+      latencyMs?: number;
+    }>;
+    error?: string;
+    at: string;
+  }
+  | {
+    type: "dev-sync-begin";
+    id: string;
+    totalChunks: number;
+    totalBytes: number;
+    at: string;
+  }
+  | {
+    type: "dev-sync-chunk";
+    id: string;
+    index: number;
+    data: string;
+    at: string;
+  }
+  | { type: "dev-sync-end"; id: string; at: string }
+  | {
+    type: "dev-sync-result";
+    id: string;
+    ok: boolean;
+    error?: string;
+    at: string;
+  }
+  | { type: "tunnel-token"; id: string; token: string; at: string }
+  | {
+    type: "tunnel-token-result";
+    id: string;
+    ok: boolean;
+    error?: string;
+    at: string;
+  }
+  | { type: "public-urls-update"; id: string; urls: string[]; at: string }
+  | {
+    type: "public-urls-update-result";
+    id: string;
+    ok: boolean;
+    error?: string;
+    at: string;
+  }
+  | {
+    type: "update";
+    id: string;
+    channel?: string;
+    updateUrl?: string;
+    updateSha256?: string;
+    at: string;
+  }
+  | {
+    type: "update-result";
+    id: string;
+    ok: boolean;
+    error?: string;
+    at: string;
+  }
+  | {
+    type: "command-dispatch";
+    id: string;
+    commandId: string;
+    commandType: string;
+    payload: unknown;
+    at: string;
+  }
+  | {
+    type: "command-ack";
+    id: string;
+    at: string;
+    daemonReceivedAt: string;
+  }
+  | {
+    type: "command-outcome";
+    id: string;
+    ok: boolean;
+    result?: unknown;
+    error?: string;
+    at: string;
+    daemonReceivedAt?: string;
+    daemonRespondedAt?: string;
+  };

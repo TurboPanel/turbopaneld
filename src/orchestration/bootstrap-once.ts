@@ -27,7 +27,7 @@ import type { InstallPresenter } from "./install-presenter.ts";
 import { sanitizeStatusLine } from "./presentation.ts";
 import { ensurePython } from "./python.ts";
 import { ensureUv } from "./uv.ts";
-import { logInfo } from "../logger.ts";
+import { logInfo } from "../util/logger.ts";
 
 export interface RunBootstrapOrchestrationOptions {
   /**

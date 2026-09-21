@@ -12,8 +12,8 @@
 import {
   addressInCidrLiteral,
   cidrLiteralContains,
-} from "../instance/commands/contracts.ts";
-import { logInfo, logWarn } from "../logger.ts";
+} from "../contracts/commands-contracts.ts";
+import { logInfo, logWarn } from "../util/logger.ts";
 import {
   type DockerCliResult,
   runDocker as defaultRunDocker,

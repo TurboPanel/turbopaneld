@@ -9,7 +9,7 @@
  * development keeps running `ansible-playbook` directly: the dev user has
  * full sudo and `become` works as before.
  */
-import { ORCHESTRATE_HELPER, ORCHESTRATION_LAYOUT } from "./paths.ts";
+import { ORCHESTRATE_HELPER, ORCHESTRATION_LAYOUT } from "./assets.ts";
 
 export type PlaybookInvocation = { bin: string; args: string[] };
 
@@ -35,7 +35,8 @@ export function playbooksNeedRootHelper(
 ): boolean {
   const mode = options.installMode ?? ORCHESTRATION_LAYOUT.mode;
   if (mode !== "production") return false;
-  const uid = options.uid === undefined ? currentUid() : options.uid;
+  // Default only when omitted — explicit `null` means "uid unknown", not "use process uid".
+  const { uid = currentUid() } = options;
   return uid !== 0;
 }
 

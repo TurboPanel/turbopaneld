@@ -78,12 +78,15 @@ jobs:
       - name: Check metrics legacy (no ClickHouse/Tabix references)
         run: deno task check:metrics-legacy
 
+      - name: Check contract drift (sibling twins; skip if turbopanel absent)
+        run: deno task check:contract-drift
+
       - name: Check third-party notices
         run: deno task notices:check
 
       - name: Install osv-scanner
         run: |
-          curl -sSfL --retry 3 --retry-connrefused --retry-delay 2 -o /usr/local/bin/osv-scanner \
+          curl -sSfL --proto "=https" --proto-redir "=https" --retry 3 --retry-connrefused --retry-delay 2 -o /usr/local/bin/osv-scanner \
             https://github.com/google/osv-scanner/releases/download/v2.6.0/osv-scanner_linux_amd64
           echo "ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108  /usr/local/bin/osv-scanner" | sha256sum -c -
           chmod +x /usr/local/bin/osv-scanner
@@ -104,7 +107,7 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           # Matches the vendored daemon pin (PYTHON_VERSION in
-          # src/orchestration/paths.ts) and orchestration/requirements.txt.
+          # src/orchestration/assets.ts) and orchestration/requirements.txt.
           python-version: "3.14"
 
       - name: Install Ansible toolchain

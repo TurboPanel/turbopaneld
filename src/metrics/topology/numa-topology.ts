@@ -4,7 +4,7 @@
  * available for a later phase to build on without re-adding sysfs reads.
  */
 import type { IdentityIo } from "./identity.ts";
-import type { NumaNodeTopology } from "./types.ts";
+import type { NumaNodeTopology } from "../../contracts/topology-types.ts";
 
 const NODE_DIR_RE = /^node(\d+)$/;
 

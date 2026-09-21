@@ -2,7 +2,7 @@ import { assertEquals } from "@std/assert";
 import { CounterBaselineTracker } from "../baseline.ts";
 import { GenerationEventCollector } from "./generation-events.ts";
 import type { EventDetectContext } from "./types.ts";
-import type { TopologySnapshot } from "../../topology/types.ts";
+import type { TopologySnapshot } from "../../../contracts/topology-types.ts";
 
 const test = Deno.test.bind(Deno);
 

@@ -1,7 +1,7 @@
 import { join } from "@std/path";
 import { runLogged, symlinkPointsAt } from "./exec.ts";
-import { createSymlink } from "../scoped-writes.ts";
-import { logInfo, logWarn } from "../logger.ts";
+import { createSymlink } from "../permissions/scoped-writes.ts";
+import { logInfo, logWarn } from "../util/logger.ts";
 import { logComponent } from "./presentation.ts";
 import {
   PYTHON_CURRENT_DIR,
@@ -9,7 +9,7 @@ import {
   PYTHON_VERSION,
   RUNTIMES_DIR,
   UV_BIN,
-} from "./paths.ts";
+} from "./assets.ts";
 
 async function repointPythonCurrent(): Promise<void> {
   if (await symlinkPointsAt(PYTHON_CURRENT_DIR, PYTHON_RUNTIME_DIR)) return;

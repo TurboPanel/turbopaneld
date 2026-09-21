@@ -21,7 +21,7 @@ describe("ensureUv replaces wrong stub version", () => {
   let fixture: OrchestrationRuntimeFixture;
   let envSnapshot: Map<string, string | undefined>;
   let uv: typeof import("./uv.ts");
-  let paths: typeof import("./paths.ts");
+  let paths: typeof import("./assets.ts");
 
   beforeAll(async () => {
     envSnapshot = snapshotOrchestrationEnv();
@@ -30,7 +30,7 @@ describe("ensureUv replaces wrong stub version", () => {
       withAnsibleBinaries: false,
     });
     applyOrchestrationEnv(fixture.env);
-    paths = await import("./paths.ts");
+    paths = await import("./assets.ts");
     uv = await import("./uv.ts");
   });
 

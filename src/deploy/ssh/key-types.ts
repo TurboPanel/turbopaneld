@@ -1,6 +1,6 @@
 /**
  * Key types the platform accepts, mirroring `ALLOWED_SSH_KEY_TYPES` in the
- * instance's `src/lib/ssh-public-key.ts`.
+ * instance's `src/features/principals/ssh-public-key.ts`.
  *
  * A leaf module with no imports so both the renderer and the wire validator can
  * use it without either pulling the other in. The instance holds the parser

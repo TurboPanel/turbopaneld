@@ -8,7 +8,7 @@
  * entity list, so `read()` itself decides whether its source exists this
  * tick.
  */
-import type { DatabaseProxySample } from "../../contract.ts";
+import type { DatabaseProxySample } from "../../../contracts/metrics-contract.ts";
 import type { CounterBaselineTracker } from "../baseline.ts";
 
 /**

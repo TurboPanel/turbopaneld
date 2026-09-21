@@ -1,6 +1,6 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { resolveLayout } from "../../paths/layout.ts";
-import type { EnvironmentDeployNativeAppService } from "../../instance/commands/contracts.ts";
+import type { EnvironmentDeployNativeAppService } from "../../contracts/commands-contracts.ts";
 import {
   DEFAULT_NATIVE_APP_NODE_VERSION,
   DEFAULT_START_SCRIPT,

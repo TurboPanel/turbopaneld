@@ -1,5 +1,5 @@
 import { assertEquals, assertNotEquals } from "@std/assert";
-import { computeSlotMapping } from "./slot-mapping.ts";
+import { computeSlotMapping } from "../../contracts/topology-slot-mapping.ts";
 import {
   computeTopologyGeneration,
   resolveTopologyGeneration,
@@ -7,7 +7,7 @@ import {
 import {
   EMPTY_TOPOLOGY_OVERRIDES,
   type TopologySnapshotInputs,
-} from "./types.ts";
+} from "../../contracts/topology-types.ts";
 
 const test = Deno.test.bind(Deno);
 

@@ -8,7 +8,7 @@
  * secrets and mangles ordinary build output).
  */
 
-import { stripLogInjection } from "../logger.ts";
+import { stripLogInjection } from "../util/logger.ts";
 
 export type TranscriptRedactor = (line: string) => string;
 
@@ -90,7 +90,7 @@ export function redactPlaintexts(
 
 /**
  * Build a line redactor over a fixed deny-set: scrub every known plaintext,
- * then strip log-injection control characters (`src/logger.ts`).
+ * then strip log-injection control characters (`src/util/logger.ts`).
  */
 export function createTranscriptRedactor(
   secrets: readonly string[],

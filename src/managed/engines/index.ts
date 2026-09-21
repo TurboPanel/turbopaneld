@@ -4,7 +4,7 @@
  * Extension rule: one engine file + one entry here.
  */
 
-import type { ManagedEngineCode } from "../../instance/commands/contracts.ts";
+import type { ManagedEngineCode } from "../../contracts/commands-contracts.ts";
 import { mariadbManagedEngineRuntime } from "./mariadb.ts";
 import { mysqlManagedEngineRuntime } from "./mysql.ts";
 import { postgresManagedEngineRuntime } from "./postgres.ts";

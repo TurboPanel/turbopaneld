@@ -13,12 +13,12 @@ import {
   readCapabilityPlan,
   writeCapabilityPlan,
 } from "./capability-plan-store.ts";
-import { computeSlotMapping } from "../topology/slot-mapping.ts";
-import { EMPTY_TOPOLOGY_OVERRIDES } from "../topology/types.ts";
+import { computeSlotMapping } from "../../contracts/topology-slot-mapping.ts";
+import { EMPTY_TOPOLOGY_OVERRIDES } from "../../contracts/topology-types.ts";
 import type {
   PhysicalSignalTopology,
   TopologySnapshot,
-} from "../topology/types.ts";
+} from "../../contracts/topology-types.ts";
 import type { GpuAdapterSet } from "./gpu/adapter.ts";
 
 /**

@@ -8,13 +8,13 @@
 import type {
   ManagedDestroyPayload,
   ManagedDestroyResult,
-} from "../instance/commands/contracts.ts";
+} from "../contracts/commands-contracts.ts";
 import {
   type DockerCliResult,
   runDocker as defaultRunDocker,
   type RunDockerOptions,
 } from "../deploy/docker-cli.ts";
-import { logInfo, sanitizeForLog } from "../logger.ts";
+import { logInfo, sanitizeForLog } from "../util/logger.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { removeManagedPublicFirewallBestEffort } from "./firewall.ts";
 import {
@@ -22,7 +22,7 @@ import {
   managedComposeProject,
   managedDir,
   SAFE_MANAGED_ID_RE,
-} from "./paths.ts";
+} from "./engine-paths.ts";
 
 type DecryptSecretsFn = (ciphertexts: string[]) => Promise<(string | null)[]>;
 type RunDockerFn = (

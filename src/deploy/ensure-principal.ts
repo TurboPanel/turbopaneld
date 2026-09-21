@@ -1,5 +1,5 @@
 import { join } from "@std/path";
-import { logWarn } from "../logger.ts";
+import { logWarn } from "../util/logger.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import {
   allAccessGroups,
@@ -80,8 +80,8 @@ export const DEFAULT_PRINCIPAL_SHELL = "/usr/sbin/nologin";
  * or simply wrong could otherwise repoint an existing account at any executable.
  *
  * Keep in step with `ALLOWED_PRINCIPAL_SHELLS` in the instance's
- * `src/lib/principal-options.ts` and the wire validator in
- * `../instance/commands/contracts.ts`.
+ * `src/features/principals/principal-options.ts` and the wire validator in
+ * `../contracts/commands-contracts.ts`.
  */
 export const ALLOWED_PRINCIPAL_SHELLS: readonly string[] = [
   "/usr/sbin/nologin",
@@ -97,7 +97,7 @@ const PRINCIPAL_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
  * sha512-crypt only — the one format the control plane emits. Anchored and
  * colon/newline-free by construction, so a value that passes cannot smuggle a
  * second `/etc/shadow` field through `chpasswd -e`. Keep in sync with the wire
- * gate in `../instance/commands/contracts.ts` and the instance's
+ * gate in `../contracts/commands-contracts.ts` and the instance's
  * `src/lib/sha512-crypt.ts`.
  */
 const PASSWORD_HASH_RE =

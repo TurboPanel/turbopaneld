@@ -35,15 +35,15 @@ import {
   readComposePsContainer,
   readComposePsLabels,
 } from "../deploy/compose-ps.ts";
-import type { EnvironmentDeployContainer } from "../instance/commands/contracts.ts";
-import { logInfo } from "../logger.ts";
+import type { EnvironmentDeployContainer } from "../contracts/commands-contracts.ts";
+import { logInfo } from "../util/logger.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { reservedManagedIngressAddress } from "./ingress-cidr.ts";
 import {
   proxysqlComposePath,
   proxysqlConfigDir,
   proxysqlProject,
-} from "./paths.ts";
+} from "./engine-paths.ts";
 
 /**
  * Pinned 3.0.9 — fixes CVE-2026-48773 (pre-auth first-packet heap overflow)

@@ -20,7 +20,10 @@ import {
 import { probeStorage } from "../collector/filesystem.ts";
 import type { StatfsResult } from "../collector/types.ts";
 import { deriveFilesystemId, type IdentityIo } from "./identity.ts";
-import type { FilesystemRole, FilesystemTopology } from "./types.ts";
+import type {
+  FilesystemRole,
+  FilesystemTopology,
+} from "../../contracts/topology-types.ts";
 
 export type FilesystemTopologyDeps = {
   readProcFile: (

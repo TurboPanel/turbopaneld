@@ -1,6 +1,9 @@
 import type { MetricsCapabilityPlan } from "../capability-plan.ts";
-import type { MetricsSample } from "../contract.ts";
-import type { TopologyOverrides, TopologySnapshot } from "../topology/types.ts";
+import type { MetricsSample } from "../../contracts/metrics-contract.ts";
+import type {
+  TopologyOverrides,
+  TopologySnapshot,
+} from "../../contracts/topology-types.ts";
 import type { DatabaseProxyAdapterSet } from "./database-proxy/adapter.ts";
 import type { DirectoryUsageSnapshot } from "./directory-usage.ts";
 import type { DockerUsageReading } from "./docker-usage.ts";
@@ -138,7 +141,7 @@ export type SensorOverrides = {
 /**
  * Stable sensor identity for one hardware-profile slot — `chip` + `label`,
  * mirroring the control plane's `ServerSensorSlotAssignment`
- * (`src/lib/db/server-metadata.ts` in the client repo). Never a raw sysfs
+ * (`src/features/servers/server-metadata.ts` in the client repo). Never a raw sysfs
  * path — those reindex across reboots.
  */
 export type HardwareProfileSensorSlot = { chip: string; label: string };

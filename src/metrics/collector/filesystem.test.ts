@@ -4,7 +4,7 @@ import {
   probeRootFilesystemCapacity,
   probeStorage,
 } from "./filesystem.ts";
-import type { FilesystemTopology } from "../topology/types.ts";
+import type { FilesystemTopology } from "../../contracts/topology-types.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.

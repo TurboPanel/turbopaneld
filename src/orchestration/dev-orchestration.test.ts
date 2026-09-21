@@ -10,7 +10,7 @@ import {
   resolveDevOrchestrationDir,
   resolveDevOrchestrationLayout,
 } from "./dev-orchestration.ts";
-import { GALAXY_ROLES_DIR } from "./paths.ts";
+import { GALAXY_ROLES_DIR } from "./assets.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 
 /**

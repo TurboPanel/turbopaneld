@@ -1,5 +1,5 @@
 import { run, runLogged, runOrThrow, symlinkPointsAt } from "./exec.ts";
-import { createSymlink } from "../scoped-writes.ts";
+import { createSymlink } from "../permissions/scoped-writes.ts";
 import {
   galaxyDockerRoleHelperInvocation,
   playbooksNeedRootHelper,
@@ -32,7 +32,7 @@ import {
   resolveDevConvergeOptions,
 } from "./dev-converge-options.ts";
 import { join } from "@std/path";
-import { logInfo, logWarn } from "../logger.ts";
+import { logInfo, logWarn } from "../util/logger.ts";
 import { readDockerNetworkingState } from "../deploy/docker-networking-state.ts";
 import { logComponent } from "./presentation.ts";
 import { withRetry } from "./retry.ts";
@@ -76,7 +76,7 @@ import {
   UV_BIN,
   VENV_BIN_DIR,
   VENV_DIR,
-} from "./paths.ts";
+} from "./assets.ts";
 
 async function fileExists(path: string): Promise<boolean> {
   try {

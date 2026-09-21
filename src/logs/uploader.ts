@@ -7,7 +7,7 @@
  * dropped, never surfaced as a command failure.
  */
 
-import { logWarn, sanitizeForLog } from "../logger.ts";
+import { logWarn, sanitizeForLog } from "../util/logger.ts";
 import type { PendingChunk } from "./spool.ts";
 
 /** Per-command transcript cap; beyond it a single marker line is uploaded. */

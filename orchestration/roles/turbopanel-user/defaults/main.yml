@@ -26,7 +26,7 @@ turbopanel_install_owner: "{{ turbopanel_dev_user if (turbopanel_dev_user | defa
 turbopanel_orchestration_dir: "{{ turbopanel_install_root }}/share/orchestration"
 # Vendor subtrees the daemon process itself may write at runtime. Everything
 # else under the install root is root-owned. Keep in step with
-# DAEMON_WRITABLE_VENDOR_DIRS in src/daemon-permissions.ts.
+# DAEMON_WRITABLE_VENDOR_DIRS in src/permissions/daemon-permissions.ts.
 turbopanel_daemon_vendor_cache_dirs:
   - "{{ turbopanel_vendor_dir }}/uv/cache"
   - "{{ turbopanel_vendor_dir }}/cloudflared"

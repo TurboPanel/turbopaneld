@@ -5,8 +5,8 @@ import {
   PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN,
 } from "./capability-plan.ts";
 import { truncateSampleToCapabilityPlan } from "./capability-plan-truncate.ts";
-import type { MetricsSample } from "./contract.ts";
-import type { SlotMapping } from "./topology/types.ts";
+import type { MetricsSample } from "../contracts/metrics-contract.ts";
+import type { SlotMapping } from "../contracts/topology-types.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.

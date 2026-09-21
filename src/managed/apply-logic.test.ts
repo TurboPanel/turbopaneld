@@ -6,7 +6,7 @@ import { assertEquals } from "@std/assert";
 import type {
   ManagedApplyCredential,
   ManagedApplyPayload,
-} from "../instance/commands/contracts.ts";
+} from "../contracts/commands-contracts.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import { applyManagedEngineState, buildNeedsResyncMember } from "./apply.ts";

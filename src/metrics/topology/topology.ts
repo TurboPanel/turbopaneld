@@ -11,7 +11,7 @@ import { statfs } from "node:fs/promises";
 
 import { resolveDockerDataRoot } from "../../host/docker.ts";
 import { resolveLayout } from "../../paths/layout.ts";
-import { FABRIC_INTERFACE_NAME } from "../../instance/commands/fabric.ts";
+import { FABRIC_INTERFACE_NAME } from "../../commands/fabric.ts";
 import { resolveHostingPath } from "../collector/hosting.ts";
 import { backingDeviceNames, parseProcMounts } from "../collector/mounts.ts";
 import { defaultSensorIo } from "../collector/sensors/discovery.ts";
@@ -38,7 +38,7 @@ import type {
   TopologyOverrides,
   TopologySnapshot,
   TopologySnapshotInputs,
-} from "./types.ts";
+} from "../../contracts/topology-types.ts";
 
 async function defaultStatfs(path: string): Promise<StatfsResult | null> {
   try {

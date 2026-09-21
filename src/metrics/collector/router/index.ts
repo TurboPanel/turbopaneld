@@ -9,7 +9,7 @@
  * object — and invalidates the adapter's counter-baseline namespace so a
  * later readable tick re-origins instead of diffing across the gap.
  */
-import type { RouterSample } from "../../contract.ts";
+import type { RouterSample } from "../../../contracts/metrics-contract.ts";
 import type { CounterBaselineTracker } from "../baseline.ts";
 import type {
   RouterAdapter,

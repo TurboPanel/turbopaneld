@@ -28,7 +28,7 @@ import {
   GALAXY_VENDOR_ROLES_DIR,
   RABBITMQ_PLAYBOOK,
   REDIS_PLAYBOOK,
-} from "./paths.ts";
+} from "./assets.ts";
 
 const VENDORED_COLLECTIONS_MARKER = "galaxy-collections";
 const CHECKOUT_ORCHESTRATION_DIR = join(DAEMON_ROOT, "orchestration");

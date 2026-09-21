@@ -16,7 +16,7 @@
  * namespace so a later readable tick re-origins instead of diffing across
  * the gap.
  */
-import type { IngressSourceSample } from "../../contract.ts";
+import type { IngressSourceSample } from "../../../contracts/metrics-contract.ts";
 import type { CounterBaselineTracker } from "../baseline.ts";
 import type {
   IngressAdapter,

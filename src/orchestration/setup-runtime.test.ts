@@ -53,7 +53,7 @@ describe("setup orchestration entrypoints", () => {
   });
 
   it("initOrchestration returns false after bootstrap failure", async () => {
-    const { UV_BIN } = await import("./paths.ts");
+    const { UV_BIN } = await import("./assets.ts");
     const backup = await Deno.readTextFile(UV_BIN);
     await Deno.writeTextFile(
       UV_BIN,

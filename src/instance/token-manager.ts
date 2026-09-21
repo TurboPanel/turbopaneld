@@ -4,7 +4,7 @@ import {
   type DaemonKeyFile,
   signChallenge,
 } from "../crypto/keys.ts";
-import { logWarn } from "../logger.ts";
+import { logWarn } from "../util/logger.ts";
 import type { DaemonApiClient } from "./api-client.ts";
 import { classifyConnectFailure } from "./connect-failure.ts";
 import type { VerifyInstanceJwtResult } from "./jwks-client.ts";

@@ -1,13 +1,13 @@
 import { assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
-import type { ManagedApplyPayload } from "../instance/commands/contracts.ts";
+import type { ManagedApplyPayload } from "../contracts/commands-contracts.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import {
   materializeManagedState,
   normalizeManagedFileOwnership,
 } from "./materialize.ts";
-import { managedConfigDir, managedTlsDir } from "./paths.ts";
+import { managedConfigDir, managedTlsDir } from "./engine-paths.ts";
 import { ensureManagedSelfSignedCert } from "./tls.ts";
 
 /**

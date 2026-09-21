@@ -4,7 +4,7 @@ import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import { handleManagedDestroy } from "./destroy.ts";
 import { handleManagedLifecycle } from "./lifecycle.ts";
-import { managedDir } from "./paths.ts";
+import { managedDir } from "./engine-paths.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.

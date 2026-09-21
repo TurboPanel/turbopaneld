@@ -43,7 +43,7 @@ import {
   STORAGE_ENGINE_KEYS,
   type StorageEngineKey,
   type StorageEngineSample,
-} from "../contract.ts";
+} from "../../contracts/metrics-contract.ts";
 
 /** Mirrors `managed/compose.ts`'s `MANAGED_ENGINE_LABEL` — the census's only discovery key. */
 export const MANAGED_ENGINE_LABEL = "tp.managed.engine";

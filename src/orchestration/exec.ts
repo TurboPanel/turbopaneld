@@ -1,6 +1,6 @@
-import { log } from "../logger.ts";
+import { log } from "../util/logger.ts";
 import { getActiveInstallPresenter } from "./install-presenter-context.ts";
-import { CACHE_DIR, PYTHON_RUNTIME_DIR, RUNTIME_BIN_DIR } from "./paths.ts";
+import { CACHE_DIR, PYTHON_RUNTIME_DIR, RUNTIME_BIN_DIR } from "./assets.ts";
 
 function presenterLineHandlers():
   | Pick<

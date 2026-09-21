@@ -18,7 +18,7 @@ import { principalHomePath } from "../../paths/layout.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import { principalUnixGroupName } from "../ensure-principal.ts";
 import { principalSliceName, SYSTEMD_UNIT_DIR } from "../native/unit.ts";
-import type { EnvironmentDeployCronJob } from "../../instance/commands/contracts.ts";
+import type { EnvironmentDeployCronJob } from "../../contracts/commands-contracts.ts";
 
 /**
  * Unit-name prefix, following the `turbopanel-*` convention so a generated

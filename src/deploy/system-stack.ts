@@ -10,8 +10,8 @@
  */
 
 import { join } from "@std/path";
-import { logInfo, logWarn } from "../logger.ts";
-import type { EnvironmentDeployContainer } from "../instance/commands/contracts.ts";
+import { logInfo, logWarn } from "../util/logger.ts";
+import type { EnvironmentDeployContainer } from "../contracts/commands-contracts.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import {
   parseComposePsEntries,

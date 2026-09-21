@@ -29,7 +29,7 @@ import {
 } from "../sensors/temperature.ts";
 import { readGpuUtilization } from "../sensors/utilization.ts";
 import { parsePciSlotName } from "../../topology/identity.ts";
-import type { GpuTopology } from "../../topology/types.ts";
+import type { GpuTopology } from "../../../contracts/topology-types.ts";
 import type { GpuAdapter, GpuReadContext, GpuReading } from "./adapter.ts";
 
 const AMD_HWMON_CHIP = "amdgpu";

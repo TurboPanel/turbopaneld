@@ -2,7 +2,7 @@ import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { encodeHex } from "@std/encoding/hex";
 import { join } from "@std/path";
 import { setDockerCliIoForTest } from "../deploy/docker-cli.ts";
-import type { EnvironmentDeployContainer } from "../instance/commands/contracts.ts";
+import type { EnvironmentDeployContainer } from "../contracts/commands-contracts.ts";
 import {
   buildEngineContext,
   handleManagedBackup,
@@ -13,7 +13,10 @@ import {
 import { getManagedEngineRuntime } from "./engines/index.ts";
 import { ManagedBackupNotSupportedError } from "./engines/types.ts";
 import { postgresManagedEngineRuntime } from "./engines/postgres.ts";
-import { managedBackupArtifactPath, managedBackupsDir } from "./paths.ts";
+import {
+  managedBackupArtifactPath,
+  managedBackupsDir,
+} from "./engine-paths.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.

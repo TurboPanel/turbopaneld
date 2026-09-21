@@ -24,6 +24,7 @@ import {
   STABLE_SESSION_MS,
   writeKeyId,
 } from "./client.ts";
+import { wireCommandPorts } from "../commands/wire.ts";
 import { generateDaemonKeypair, saveDaemonKeyFile } from "../crypto/keys.ts";
 import { enrollDaemon } from "./enroll.ts";
 import { IdlePresence, installIdlePresenceProviders } from "./idle-presence.ts";
@@ -51,6 +52,8 @@ import {
   setDrivetempDropinWriterForTests,
   setDrivetempExecutorForTests,
 } from "../metrics/collector/sensors/drivetemp.ts";
+
+wireCommandPorts();
 
 type EnrollIdentity = { serverId: string; keyId: string };
 
@@ -5723,7 +5726,7 @@ it({
             sample: {
               type: "metrics",
               sequence: options.sequence,
-            } as unknown as import("../metrics/contract.ts").MetricsSample,
+            } as unknown as import("../contracts/metrics-contract.ts").MetricsSample,
           });
         },
       }),

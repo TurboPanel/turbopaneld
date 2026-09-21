@@ -16,9 +16,9 @@ import { join } from "@std/path";
 import type {
   ManagedApplyOrgTlsMaterial,
   ManagedApplyTlsMaterial,
-} from "../instance/commands/contracts.ts";
-import { sanitizeForLog } from "../logger.ts";
-import { resolveManagedRelativePath } from "./paths.ts";
+} from "../contracts/commands-contracts.ts";
+import { sanitizeForLog } from "../util/logger.ts";
+import { resolveManagedRelativePath } from "./engine-paths.ts";
 
 const OPENSSL_BIN = "/usr/bin/openssl";
 const CERT_MODE = 0o640;

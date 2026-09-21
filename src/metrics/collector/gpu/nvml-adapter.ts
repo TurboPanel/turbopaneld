@@ -17,7 +17,7 @@
  * mismatch or driver-version quirk nulls only that field, never the whole
  * reading.
  */
-import type { GpuTopology } from "../../topology/types.ts";
+import type { GpuTopology } from "../../../contracts/topology-types.ts";
 import type { GpuAdapter, GpuReadContext, GpuReading } from "./adapter.ts";
 
 const NVML_LIBRARY = "libnvidia-ml.so.1";

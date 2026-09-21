@@ -71,7 +71,7 @@
 
 # The narrow vendor cache the daemon process writes at runtime — nothing it
 # is launched from, nothing root later executes. Keep in step with
-# DAEMON_WRITABLE_VENDOR_DIRS in src/daemon-permissions.ts (pinned by
+# DAEMON_WRITABLE_VENDOR_DIRS in src/permissions/daemon-permissions.ts (pinned by
 # src/orchestration/sudoers-contract.test.ts): uv's download cache and the
 # cloudflared connector the daemon vendors on demand for its own tunnels.
 - name: Ensure the daemon-writable vendor cache directories

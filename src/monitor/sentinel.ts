@@ -1,5 +1,5 @@
 import type { DockerMonitor, DockerMonitorChange } from "../docker/monitor.ts";
-import { logInfo, logWarn } from "../logger.ts";
+import { logInfo, logWarn } from "../util/logger.ts";
 import { createMonitorDeltaTracker } from "./delta.ts";
 import type {
   MonitorDeliveryBundle,

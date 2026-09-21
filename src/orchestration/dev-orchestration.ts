@@ -6,7 +6,7 @@ import {
   ANSIBLE_SHELL_EXECUTABLE,
   GALAXY_ROLES_DIR,
   GALAXY_VENDOR_ROLES_DIR,
-} from "./paths.ts";
+} from "./assets.ts";
 
 /** Dev overlay playbook + roles live under `<dev checkout>/orchestration`. */
 export const DEV_ORCHESTRATION_SUBDIR = join("dev", "orchestration");
@@ -188,4 +188,4 @@ export async function requireDevOrchestrationLayout(
 }
 
 /** Daemon-only orchestration root (managed servers and daemon converge playbooks). */
-export { ORCHESTRATION_DIR as DAEMON_ORCHESTRATION_DIR } from "./paths.ts";
+export { ORCHESTRATION_DIR as DAEMON_ORCHESTRATION_DIR } from "./assets.ts";

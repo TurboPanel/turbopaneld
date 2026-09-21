@@ -30,14 +30,14 @@ import {
   type MetricsSample,
   type RouterSample,
   type StorageSample,
-} from "../contract.ts";
+} from "../../contracts/metrics-contract.ts";
 import { truncateSampleToCapabilityPlan } from "../capability-plan-truncate.ts";
-import { computeSlotMapping } from "../topology/slot-mapping.ts";
+import { computeSlotMapping } from "../../contracts/topology-slot-mapping.ts";
 import {
   EMPTY_TOPOLOGY_OVERRIDES,
   type NetworkDeviceTopology,
   type TopologySnapshot,
-} from "../topology/types.ts";
+} from "../../contracts/topology-types.ts";
 import { CounterBaselineTracker } from "./baseline.ts";
 import {
   buildBlockDeviceSamples,

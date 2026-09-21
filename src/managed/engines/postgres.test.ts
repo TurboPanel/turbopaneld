@@ -5,7 +5,7 @@
  * (e.g. `postgres_a1b2c3d4`) when two managed Postgres clusters in the same
  * server-owning organization would otherwise collide on the default
  * `postgres` login (see `resolveAvailableManagedRootUsername` in the
- * instance repo). `turbopanel/src/lib/managed/postgres.ts` deliberately keeps
+ * instance repo). `turbopanel/src/features/managed/postgres.ts` deliberately keeps
  * the container's bootstrap superuser (`POSTGRES_USER`) pinned to the stable
  * platform admin role regardless of that suffix — these tests assert the
  * daemon-side half of that contract: every admin operation connects as the
@@ -15,7 +15,7 @@
  */
 
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
-import type { ManagedApplyCredential } from "../../instance/commands/contracts.ts";
+import type { ManagedApplyCredential } from "../../contracts/commands-contracts.ts";
 import { getManagedEngineRuntime } from "./index.ts";
 import { postgresManagedEngineRuntime } from "./postgres.ts";
 import type { ManagedEngineContext, ManagedEngineExec } from "./types.ts";

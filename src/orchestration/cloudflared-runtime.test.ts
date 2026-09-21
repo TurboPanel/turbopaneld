@@ -14,7 +14,7 @@ describe("ensureCloudflared", () => {
   let fixture: OrchestrationRuntimeFixture;
   let envSnapshot: Map<string, string | undefined>;
   let cloudflared: typeof import("./cloudflared.ts");
-  let paths: typeof import("./paths.ts");
+  let paths: typeof import("./assets.ts");
 
   beforeAll(async () => {
     envSnapshot = snapshotOrchestrationEnv();
@@ -23,7 +23,7 @@ describe("ensureCloudflared", () => {
       withAnsibleBinaries: false,
     });
     applyOrchestrationEnv(fixture.env);
-    paths = await import("./paths.ts");
+    paths = await import("./assets.ts");
     cloudflared = await import("./cloudflared.ts");
   });
 

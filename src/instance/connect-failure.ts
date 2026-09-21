@@ -1,5 +1,5 @@
 import { DaemonApiError } from "./api-client.ts";
-import { errorText } from "../logger.ts";
+import { errorText } from "../util/logger.ts";
 
 export type ConnectFailureClass =
   | "transient"

@@ -1,7 +1,7 @@
 {# Remote managed node: dial the control plane over HTTPS/WSS. The co-located
    daemon on a self-hosted control-plane host (instance-install.yml) leaves
    this empty and dials the instance Unix socket instead
-   (src/instance/paths.ts resolveInstanceConfig). #}
+   (src/instance/sockets.ts resolveInstanceConfig). #}
 {% if turbopanel_instance_url | default('', true) | length > 0 %}
 TURBOPANEL_INSTANCE_URL={{ turbopanel_instance_url }}
 {# Plaintext http:// control plane is development-only; the daemon refuses it

@@ -5,7 +5,7 @@ import {
   DOCKER_DATA_ROOT_RETRY_MS,
 } from "./index.ts";
 import type { CollectorDeps } from "./types.ts";
-import type { TopologySnapshot } from "../topology/types.ts";
+import type { TopologySnapshot } from "../../contracts/topology-types.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.

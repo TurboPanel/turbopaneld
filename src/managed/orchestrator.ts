@@ -30,7 +30,7 @@ import {
   runDocker as defaultRunDocker,
   type RunDockerOptions,
 } from "../deploy/docker-cli.ts";
-import { logInfo } from "../logger.ts";
+import { logInfo } from "../util/logger.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { pruneStaleManagedDockerNetworks } from "./networks.ts";
 import {
@@ -42,11 +42,11 @@ import {
   orchestratorProject,
   orchestratorRaftCnfPath,
   orchestratorTlsDir,
-} from "./paths.ts";
+} from "./engine-paths.ts";
 import type {
   EnvironmentDeployContainer,
   ManagedHaRaftConfig,
-} from "../instance/commands/contracts.ts";
+} from "../contracts/commands-contracts.ts";
 import { parseProxySqlClientCnf } from "./proxysql-admin.ts";
 
 /**

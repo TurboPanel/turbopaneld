@@ -17,14 +17,14 @@ import {
 } from "./installer-tui.ts";
 import { ensurePython } from "./python.ts";
 import { ensureUv } from "./uv.ts";
-import { resolveInstanceConfig } from "../instance/paths.ts";
+import { resolveInstanceConfig } from "../instance/sockets.ts";
 import { detectInstallMode, type InstallMode } from "../paths/layout.ts";
-import { logError, logInfo, sanitizeForLog } from "../logger.ts";
+import { logError, logInfo, sanitizeForLog } from "../util/logger.ts";
 import {
   DAEMON_INSTALL_PLAYBOOK,
   INSTALLER_PLAYBOOKS,
   type InstallerPlaybook,
-} from "./paths.ts";
+} from "./assets.ts";
 
 /**
  * True when local dev (console/converge) already manages the instance stack and the daemon

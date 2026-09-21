@@ -7,7 +7,7 @@ import {
   hostDiskAggregates,
 } from "./block-devices.ts";
 import { parseDiskstatsRows } from "./parse-diskstats.ts";
-import type { BlockDeviceTopology } from "../topology/types.ts";
+import type { BlockDeviceTopology } from "../../contracts/topology-types.ts";
 
 function fixture(name: string): string {
   return Deno.readTextFileSync(

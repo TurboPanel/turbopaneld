@@ -1,4 +1,4 @@
-import { logInfo } from "../logger.ts";
+import { logInfo } from "../util/logger.ts";
 import { runDockerSetup as defaultRunDockerSetup } from "../orchestration/ansible.ts";
 import { dockerEngineReachable as defaultDockerEngineReachable } from "./docker-cli.ts";
 

@@ -8,7 +8,7 @@
 import {
   parseIpv4DefaultRouteInterface,
   parseIpv6DefaultRouteInterface,
-} from "../../server-addresses.ts";
+} from "../../host/server-addresses.ts";
 import { parseNetDev } from "../collector/parse-net-dev.ts";
 import { deriveNetworkDeviceIdentity, type IdentityIo } from "./identity.ts";
 import {
@@ -16,7 +16,7 @@ import {
   isBareEthernet,
   readNetworkDeviceFacts,
 } from "./network-classifier.ts";
-import type { NetworkDeviceTopology } from "./types.ts";
+import type { NetworkDeviceTopology } from "../../contracts/topology-types.ts";
 
 export type NetworkTopologyDeps = {
   readProcFile: (

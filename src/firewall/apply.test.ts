@@ -6,7 +6,7 @@ import {
 } from "@std/assert";
 import { join } from "@std/path";
 import { resolveLayout } from "../paths/layout.ts";
-import type { FirewallReconcilePayload } from "../instance/commands/contracts.ts";
+import type { FirewallReconcilePayload } from "../contracts/commands-contracts.ts";
 import {
   applyRenderedFirewall,
   FIREWALL_V4_FILENAME,

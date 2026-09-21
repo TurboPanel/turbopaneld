@@ -14,7 +14,7 @@
  * reported on the very next good poll, no debounce needed there.
  */
 
-import { logInfo, logWarn, sanitizeForLog } from "../logger.ts";
+import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import { readAcmeModeHostnames } from "../deploy/ingress.ts";
 import {

@@ -20,7 +20,7 @@
  * does, so this module deliberately never touches the lower-level API.
  */
 
-import { errorText } from "../logger.ts";
+import { errorText } from "../util/logger.ts";
 
 export type AcmeProbeResult =
   | { hostname: string; ok: true }

@@ -1,7 +1,7 @@
 #!/usr/bin/env -S deno run --allow-net --allow-read --allow-write --allow-run --allow-env
 import { runBootstrapOrchestration } from "../src/orchestration/bootstrap-once.ts";
 import { InstallerPresentedFailure } from "../src/orchestration/install-presenter-context.ts";
-import { sanitizeForLog } from "../src/logger.ts";
+import { sanitizeForLog } from "../src/util/logger.ts";
 
 export type BootstrapOrchestrationCliIo = {
   run?: () => Promise<void>;

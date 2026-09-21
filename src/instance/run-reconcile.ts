@@ -1,8 +1,8 @@
 import { encodeBase64Url } from "@std/encoding/base64url";
-import { ORCHESTRATE_HELPER } from "../orchestration/paths.ts";
+import { ORCHESTRATE_HELPER } from "../orchestration/assets.ts";
 import { playbooksNeedRootHelper } from "../orchestration/privileged.ts";
 import { readEnv, resolveLayout } from "../paths/layout.ts";
-import { type InstanceConfig, stripTrailingSlashes } from "./paths.ts";
+import { type InstanceConfig, stripTrailingSlashes } from "./sockets.ts";
 
 export const PRODUCTION_CONTROL_PLANE = "https://turbopanel.app";
 export const CDN_RUN_SCRIPT = "https://turbopanel.sh";

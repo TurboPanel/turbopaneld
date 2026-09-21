@@ -17,7 +17,7 @@ import {
   parseDriverName,
   parsePciSlotName,
 } from "./identity.ts";
-import type { GpuTopology } from "./types.ts";
+import type { GpuTopology } from "../../contracts/topology-types.ts";
 
 const DRM_CARD_DIR_RE = /^card\d+$/;
 

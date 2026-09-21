@@ -46,7 +46,7 @@
  */
 import { classifyInterface } from "../collector/network.ts";
 import type { IdentityIo } from "./identity.ts";
-import type { NetworkDeviceKind } from "./types.ts";
+import type { NetworkDeviceKind } from "../../contracts/topology-types.ts";
 
 /** Sysfs facts for one interface — see `readNetworkDeviceFacts`. */
 export type NetworkDeviceFacts = {

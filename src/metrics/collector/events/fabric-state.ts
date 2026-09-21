@@ -1,7 +1,7 @@
 /**
  * TurboFabric mesh peer availability: diffs the daemon's already-tracked
  * `wg show tp0 dump` observation (`getLastObservedFabricPeers` —
- * `instance/commands/fabric.ts`, refreshed opportunistically by
+ * `src/commands/fabric.ts`, refreshed opportunistically by
  * instance-initiated reconcile/path-probe calls) tick-over-tick, re-running
  * `classifyPeerHandshakeHealth` against the current clock so a
  * `healthy` → `stale` transition surfaces purely from time passing, even with
@@ -16,14 +16,14 @@
 import {
   classifyPeerHandshakeHealth,
   getLastObservedFabricPeers,
-} from "../../../instance/commands/fabric.ts";
+} from "../../../commands/fabric.ts";
 import type {
   FabricPeerHealth,
   FabricReconcileObservedPeer,
-} from "../../../instance/commands/contracts.ts";
+} from "../../../contracts/commands-contracts.ts";
 import type { EventCollector, EventDetectContext } from "./types.ts";
 import { makeEvent } from "./types.ts";
-import type { MetricEvent } from "../../contract.ts";
+import type { MetricEvent } from "../../../contracts/metrics-contract.ts";
 
 export type FabricStateReader = () => FabricReconcileObservedPeer[];
 

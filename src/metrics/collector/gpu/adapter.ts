@@ -4,9 +4,9 @@
  * topology `gpuId` (`topology/gpu-topology.ts`). `gpu/index.ts`'s
  * `buildGpuSamples` is the only orchestrator that calls these.
  */
-import type { GpuSample } from "../../contract.ts";
+import type { GpuSample } from "../../../contracts/metrics-contract.ts";
 import type { CounterBaselineTracker } from "../baseline.ts";
-import type { GpuTopology } from "../../topology/types.ts";
+import type { GpuTopology } from "../../../contracts/topology-types.ts";
 
 /**
  * The physical-only readings a GPU produces. These are no longer `GpuSample`

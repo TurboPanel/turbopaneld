@@ -14,12 +14,12 @@ import {
   type HostHelloIdentity,
 } from "../host/os-release.ts";
 import { type HostTimeSync, readTimeSync } from "../host/time-sync.ts";
-import { logInfo, logWarn, sanitizeForLog } from "../logger.ts";
+import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import {
   collectServerIps,
   readDefaultRouteInterfaces,
   type ServerReportedIp,
-} from "../server-addresses.ts";
+} from "../host/server-addresses.ts";
 import type { HostResources } from "../host/host-inventory.ts";
 
 export const IDLE_PRESENCE_MS = 60_000;

@@ -4,7 +4,7 @@ import type { ResolvedComposeModel } from "./compose-services.ts";
 import {
   type EnvironmentDeployPayload,
   parseEnvironmentDeployPayload,
-} from "../instance/commands/contracts.ts";
+} from "../contracts/commands-contracts.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.

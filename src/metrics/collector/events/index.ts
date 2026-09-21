@@ -32,7 +32,7 @@ import { SmartEventCollector } from "./smart.ts";
 import type { SmartRunner } from "./smart.ts";
 import { MAX_EVENTS_PER_DETECT_TICK } from "./types.ts";
 import type { EventDetectContext } from "./types.ts";
-import type { MetricEvent } from "../../contract.ts";
+import type { MetricEvent } from "../../../contracts/metrics-contract.ts";
 
 export { MAX_EVENTS_PER_DETECT_TICK } from "./types.ts";
 export type { EventCollector, EventDetectContext } from "./types.ts";

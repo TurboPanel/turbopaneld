@@ -64,7 +64,7 @@ export function sourceFiles(text: string): string[] {
  * Drop LCOV records whose `SF:` path is still absolute after prefix stripping.
  *
  * Co-located suites can dynamically import a sibling checkout (e.g.
- * `../turbopanel/src/daemon/metrics/contract.ts`). Deno coverage then emits
+ * `../turbopanel/src/contracts/metrics-contract.ts`). Deno coverage then emits
  * that file as an absolute `SF:` outside this repo. SonarCloud would drop
  * the whole report if those lines stayed; they are not this project's
  * sources, so omit the records instead of failing the gate.

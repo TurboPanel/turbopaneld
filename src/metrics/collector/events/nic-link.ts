@@ -15,7 +15,7 @@
  */
 import type { EventCollector, EventDetectContext } from "./types.ts";
 import { makeEvent } from "./types.ts";
-import type { MetricEvent } from "../../contract.ts";
+import type { MetricEvent } from "../../../contracts/metrics-contract.ts";
 
 const FLAP_WINDOW_MS = 5 * 60_000;
 const FLAP_THRESHOLD = 4;

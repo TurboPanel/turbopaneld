@@ -2,7 +2,7 @@
  * Host command runner for the firewall module (`iptables`, `ip6tables`, their
  * `-restore` / `-save` twins, `sshd`, `systemctl`).
  *
- * Same shape as the private runner in `../instance/commands/fabric.ts` —
+ * Same shape as the private runner in `../commands/fabric.ts` —
  * direct spawn, then `sudo -n` on a permission error — with one difference on
  * purpose: every xtables invocation carries `-w 5`. Docker holds the xtables
  * lock while it mutates its chains, and a concurrent call without `-w` fails

@@ -7,9 +7,12 @@
  * Sectors are 512 bytes per kernel convention.
  */
 import type { CounterBaselineTracker } from "./baseline.ts";
-import { type BlockDeviceSample, clampPercent } from "../contract.ts";
+import {
+  type BlockDeviceSample,
+  clampPercent,
+} from "../../contracts/metrics-contract.ts";
 import { NVME_COMPOSITE_LABEL } from "../topology/hardware-signal-topology.ts";
-import type { BlockDeviceTopology } from "../topology/types.ts";
+import type { BlockDeviceTopology } from "../../contracts/topology-types.ts";
 import type { DiskDeviceCounters } from "./types.ts";
 
 const SECTOR_BYTES = 512;

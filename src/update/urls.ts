@@ -22,7 +22,7 @@ export const GITHUB_RELEASES_REPO = "TurboPanel/turbopaneld";
  * following it needs an overlay catalog that names it.
  *
  * Mirrored by hand in scripts/run.sh (`tp_builtin_channel_manifest_url`) and
- * the control plane's src/lib/update/channel.ts — keep the three in step;
+ * the control plane's src/contracts/update-channel.ts — keep the three in step;
  * urls.test.ts pins run.sh's copy against this one.
  */
 export function builtinChannelManifestUrl(

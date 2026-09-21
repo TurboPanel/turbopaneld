@@ -9,12 +9,12 @@ shared ProxySQL frontend (the `managed-ingress` system component; see
 `../managed/AGENTS.md` for the canonical compose-project naming rule). Do not
 route `managed.*` commands through this deploy stack.
 
-Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbopanel/src/lib/commands/AGENTS.md`. Cross-repo `../<repo>/…` links are relative to the repo root.
+Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbopanel/src/features/commands/AGENTS.md`. Cross-repo `../<repo>/…` links are relative to the repo root.
 
 ## Tenant Docker Compose deploy + hosting ingress
 
 `environment.deploy` (command router →
-`src/instance/commands/deploy-environment.ts`):
+`src/commands/deploy-environment.ts`):
 
 1. Ensure Docker engine (`ensureDocker` → `runDockerSetup` when the binary is
    missing or the Engine API is unreachable). Docker CLI calls fall back to
@@ -102,7 +102,7 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    Caddy site with `handle` / path matchers (`pathPrefix`); Traefik routers
    already used `pathPrefix` via compose labels.
 8. Ensure payload `fabricNetworks[]` as routed bridges with the given subnet/MTU
-   (`ensureFabricDockerNetworks` in `src/instance/commands/fabric.ts`, default
+   (`ensureFabricDockerNetworks` in `src/commands/fabric.ts`, default
    MTU 1420) **before** compose up. This reuses the fabric creation path, **not**
    `ensure-docker-networks.ts` (which creates plain bridges).
 9. Run pre-deploy hooks (`serviceHooks[]`: optional `build --no-cache`, shell
@@ -253,12 +253,12 @@ instance-side pipeline is documented as four models —
 `ComposeLayer[]` (authored) → `Application` (normalized merge) →
 `ResolvedApplication` (reconciled, scheduled, allocated) → `ServerDeployment`
 (one per participating server) — in
-`../../../turbopanel/src/lib/compose/ir.ts`. `ServerDeployment` is the whole
+`../../../turbopanel/src/features/compose/ir.ts`. `ServerDeployment` is the whole
 `environment.deploy` payload one host receives — compiled compose and its
 material, sites, native apps, sources, *and* hostings, TLS material, shared
 ingress and listener ports — with every field an `EnvironmentDeploy*` wire type
 **verbatim**: same fields, same wire contract in
-`../../../turbopanel/src/lib/commands/schemas.ts`, same single
+`../../../turbopanel/src/contracts/commands/schemas.ts`, same single
 `role: 'runtime'` `compose.yaml`. Naming the stages moved where the instance
 assembles that object (out of its deploy route, into its compiler) and changed
 nothing about the object itself. The daemon receives exactly what it received
@@ -413,7 +413,7 @@ get a per-service Traefik project or an `ingressServices[]` entry.
   `ports[]` to one `TcpUdpIngressEntry` (with that hosting's `bindAddress`).
 
 `environment.stop` (command router →
-`src/instance/commands/stop-environment.ts`):
+`src/commands/stop-environment.ts`):
 
 1. `docker compose -p <projectName> -f compose.yaml down --remove-orphans --volumes`
    against `resolveDeployedComposePaths` (the compiled `compose.yaml`, and nothing
@@ -431,7 +431,7 @@ get a per-service Traefik project or an `ingressServices[]` entry.
    container pins.
 
 `environment.lifecycle` (command router →
-`src/instance/commands/lifecycle-environment.ts`):
+`src/commands/lifecycle-environment.ts`):
 
 1. Require a compiled compose file
    (`resolveEnvironmentDeploymentDir` + `resolveDeployedComposePaths`) —

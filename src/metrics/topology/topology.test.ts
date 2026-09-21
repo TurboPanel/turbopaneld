@@ -2,7 +2,7 @@ import { assertEquals } from "@std/assert";
 import { fromFileUrl } from "@std/path";
 import { defaultSensorIo } from "../collector/sensors/discovery.ts";
 import { collectTopology } from "./topology.ts";
-import { EMPTY_TOPOLOGY_OVERRIDES } from "./types.ts";
+import { EMPTY_TOPOLOGY_OVERRIDES } from "../../contracts/topology-types.ts";
 
 const test = Deno.test.bind(Deno);
 

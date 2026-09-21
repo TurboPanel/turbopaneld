@@ -5,7 +5,7 @@ import { resolveLayout } from "../paths/layout.ts";
 import {
   orchestratorApiCnfPath,
   orchestratorConfigDir,
-} from "../managed/paths.ts";
+} from "../managed/engine-paths.ts";
 import type { OrchestratorProblem } from "../managed/orchestrator-api.ts";
 import { type ManagedHaEventMessage, ManagedHaObserver } from "./ha-observe.ts";
 

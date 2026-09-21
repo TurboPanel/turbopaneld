@@ -15,7 +15,7 @@ import {
   type ManagedApplyDockerOptions,
   type ManagedApplyPayload,
   type ManagedApplyResources,
-} from "../instance/commands/contracts.ts";
+} from "../contracts/commands-contracts.ts";
 
 /** Placeholder token permitted in managed compose (mirrors ManagedSecretPlaceholder). */
 export const MANAGED_ROOT_PASSWORD_VAR = "TURBOPANEL_MANAGED_ROOT_PASSWORD"; // NOSONAR typescript:S2068 — compose env var name for ${…} interpolation, not a credential value
@@ -214,7 +214,7 @@ function applyResources(
 /**
  * Reject `extraEnv` outright when it names an engine-reserved key. This is
  * a second, independent enforcement of the same invariant checked by
- * `parseManagedApplyPayload` (`../instance/commands/contracts.ts`) — it does
+ * `parseManagedApplyPayload` (`../contracts/commands-contracts.ts`) — it does
  * not assume every payload reaching this module already passed through that
  * parser, so a future caller (or a bug in that parser) can never let a
  * `dockerOptions.extraEnv` override an engine-owned var (credentials,

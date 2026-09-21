@@ -14,7 +14,7 @@
 import { getLastObservedTimeSync } from "../../../host/time-sync.ts";
 import type { EventCollector, EventDetectContext } from "./types.ts";
 import { makeEvent } from "./types.ts";
-import type { MetricEvent } from "../../contract.ts";
+import type { MetricEvent } from "../../../contracts/metrics-contract.ts";
 
 export const DEFAULT_CLOCK_SYNC_INTERVAL_MS = 5 * 60_000;
 

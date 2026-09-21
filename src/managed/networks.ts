@@ -11,12 +11,12 @@ import {
   runDocker as defaultRunDocker,
   type RunDockerOptions,
 } from "../deploy/docker-cli.ts";
-import { logInfo } from "../logger.ts";
+import { logInfo } from "../util/logger.ts";
 
 /**
  * Hyphen-permitting Docker resource name. Must stay in sync with the
  * instance's `DOCKER_RESOURCE_NAME_RE` (contracts.ts) and
- * `SAFE_CONTAINER_NAME_RE` (managed/paths.ts) — duplicated rather than shared
+ * `SAFE_CONTAINER_NAME_RE` (managed/engine-paths.ts) — duplicated rather than shared
  * to keep this module free of a contracts import cycle.
  */
 const DOCKER_RESOURCE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/;

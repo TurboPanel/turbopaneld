@@ -8,7 +8,7 @@
  */
 import type { EventCollector, EventDetectContext } from "./types.ts";
 import { makeEvent } from "./types.ts";
-import type { MetricEvent } from "../../contract.ts";
+import type { MetricEvent } from "../../../contracts/metrics-contract.ts";
 
 const OOM_KILL_BASELINE_KEY = "events:oom_kill:host";
 /** Multiple kills in one interval escalate from "warning" to "critical". */

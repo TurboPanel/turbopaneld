@@ -7,7 +7,7 @@
  * to the internet, so this module restricts it to the known peer addresses.
  *
  * Mirrors the TurboFabric `TP-FORWARD` pattern in
- * `../instance/commands/fabric.ts`: a dedicated chain hung off `DOCKER-USER`,
+ * `../commands/fabric.ts`: a dedicated chain hung off `DOCKER-USER`,
  * `iptables -C` before insert, `-D` on teardown, and every failure logged and
  * swallowed — firewall scoping must never block apply or destroy.
  *
@@ -22,8 +22,8 @@
 import {
   isValidIpv4Literal,
   type ManagedApplyPayload,
-} from "../instance/commands/contracts.ts";
-import { logWarn, sanitizeForLog } from "../logger.ts";
+} from "../contracts/commands-contracts.ts";
+import { logWarn, sanitizeForLog } from "../util/logger.ts";
 
 /** Parent chain hung off `DOCKER-USER`; holds one jump per managed cluster. */
 export const MANAGED_PUBLIC_CHAIN = "TP-MANAGED-PUB";

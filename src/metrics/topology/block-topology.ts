@@ -16,7 +16,10 @@ import {
   deriveBlockDeviceIdentity,
   type IdentityIo,
 } from "./identity.ts";
-import type { BlockDeviceTopology, BlockDeviceType } from "./types.ts";
+import type {
+  BlockDeviceTopology,
+  BlockDeviceType,
+} from "../../contracts/topology-types.ts";
 
 const EXCLUDED_PSEUDO_DEVICE_PREFIXES = [
   "loop",

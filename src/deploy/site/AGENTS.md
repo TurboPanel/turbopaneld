@@ -269,7 +269,7 @@ change that.
 
 Future seams (not MVP): multi-version PHP side-by-side, OLS/nginx `web.env`,
 swarm-style replicas, ACME issuance on the daemon. TurboFabric **is** the
-single org mesh (`server.fabric.reconcile` — see `src/instance/commands/fabric.ts`
+single org mesh (`server.fabric.reconcile` — see `src/commands/fabric.ts`
 and `../../orchestration/AGENTS.md`). `{ enabled: false }` is a teardown; the
 daemon owns apply (no Ansible apply playbook).
 

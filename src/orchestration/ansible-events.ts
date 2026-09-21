@@ -1,4 +1,4 @@
-import { logDebug, logError, logInfo } from "../logger.ts";
+import { logDebug, logError, logInfo } from "../util/logger.ts";
 import { logComponent, presentStatusLine } from "./presentation.ts";
 import { runStreamingLines } from "./exec.ts";
 import { privilegedPlaybookInvocation } from "./privileged.ts";

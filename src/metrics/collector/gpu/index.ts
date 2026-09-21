@@ -28,8 +28,8 @@
  * returns them alongside the samples (`GpuSamplesResult.thermals`) for
  * `hardware-signals.ts` to resolve `signal:gpu:<gpuId>:<kind>` against.
  */
-import type { GpuSample } from "../../contract.ts";
-import type { GpuTopology } from "../../topology/types.ts";
+import type { GpuSample } from "../../../contracts/metrics-contract.ts";
+import type { GpuTopology } from "../../../contracts/topology-types.ts";
 import type { CounterBaselineTracker } from "../baseline.ts";
 import type {
   GpuAdapter,

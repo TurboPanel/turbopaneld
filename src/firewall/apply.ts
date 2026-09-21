@@ -35,7 +35,7 @@
 
 import { join } from "@std/path";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
-import { errorText, logInfo, logWarn, sanitizeForLog } from "../logger.ts";
+import { errorText, logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import {
   FIREWALL_FORWARD_CHAIN,
   FIREWALL_INPUT_CHAIN,

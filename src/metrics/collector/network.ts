@@ -4,7 +4,7 @@
  * stable topology `deviceId`.
  */
 import type { CounterBaselineTracker } from "./baseline.ts";
-import type { NetworkDeviceSample } from "../contract.ts";
+import type { NetworkDeviceSample } from "../../contracts/metrics-contract.ts";
 import {
   type NetInterfaceDetailedCounters,
   parseNetDevDetailedCounters,
@@ -13,7 +13,7 @@ import type { SensorIo } from "./sensors/discovery.ts";
 import type {
   NetworkDeviceKind,
   NetworkDeviceTopology,
-} from "../topology/types.ts";
+} from "../../contracts/topology-types.ts";
 
 /** Container/bridge/virtual interface prefixes (Docker, libvirt, taps). */
 const CONTAINER_BRIDGE_PREFIXES = [

@@ -209,7 +209,7 @@ test("stageRelease rethrows a non-NotFound source stat error", async () => {
 /**
  * The unprivileged tier of these ladders is now an `ln` subprocess, not
  * `Deno.symlink` — that API refuses path-scoped grants outright, so the
- * compiled daemon could never have used it (`src/scoped-writes.ts`). There is
+ * compiled daemon could never have used it (`src/permissions/scoped-writes.ts`). There is
  * no Deno API left to stub, so the failure is produced the way a managed host
  * produces it: the link's parent directory is not writable by this process.
  * Leaving the site directory uncreated fails `ln` for any uid, root included.
