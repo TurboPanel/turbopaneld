@@ -91,6 +91,13 @@ export const ALLOWED_PATH_PREFIXES = [
   "turbopanel/src/client/",
   "turbopanel/src/lib/db/schema.ts",
   "turbopanel/src/lib/db/resource-hierarchy.md",
+  // turbopanel: the schema descriptions (source of every `COMMENT ON` and of
+  // the website data dictionary) name the managed catalog engine exactly as
+  // schema.ts does for `managed.engine` / `principal.provider`.
+  "turbopanel/src/lib/db/schema-descriptions.ts",
+  // website: generated data dictionary — renders those CHECK constraints and
+  // descriptions verbatim (never hand-edited; see website/AGENTS.md).
+  "website/docs/database/",
   // turbopanel: Cloudflare Analytics Engine speaks a ClickHouse-compatible
   // SQL dialect / response format — these files describe Cloudflare's API.
   "turbopanel/src/daemon/metrics/backends/cloudflare/",
