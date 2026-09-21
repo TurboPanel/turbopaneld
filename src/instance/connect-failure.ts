@@ -6,7 +6,8 @@ export type ConnectFailureClass =
   | "temporary-auth"
   | "stale-identity"
   | "permanent"
-  | "tls-trust";
+  | "tls-trust"
+  | "awaiting-license";
 
 export type ClassifiedConnectFailure = {
   kind: ConnectFailureClass;
@@ -70,14 +71,21 @@ export function isStaleDaemonIdentityError(err: unknown): boolean {
     err.message === "Server key not found";
 }
 
-export function isPermanentEnrollmentError(err: unknown): boolean {
-  if (
-    err instanceof Error &&
+/**
+ * No `license.id` / `license.token` on disk yet. Not a rejection by the
+ * control plane: on a self-hosted control-plane host the daemon starts before
+ * the install wizard has issued the co-located license, and on a managed node
+ * it means the installer was never run with TURBOPANEL_LICENSE. Either way the
+ * daemon waits for the files to appear.
+ */
+export function isMissingLicenseCredentialsError(err: unknown): boolean {
+  return err instanceof Error &&
     !(err instanceof DaemonApiError) &&
-    err.message === MISSING_LICENSE_CREDENTIALS_MESSAGE
-  ) {
-    return true;
-  }
+    err.message === MISSING_LICENSE_CREDENTIALS_MESSAGE;
+}
+
+export function isPermanentEnrollmentError(err: unknown): boolean {
+  if (isMissingLicenseCredentialsError(err)) return true;
   return err instanceof DaemonApiError &&
     matchesDaemonApiError(err, PERMANENT_ENROLLMENT_ERRORS);
 }
@@ -129,6 +137,9 @@ function isTlsTrustFailure(err: unknown): boolean {
 export function classifyConnectFailure(
   err: unknown,
 ): ClassifiedConnectFailure {
+  if (isMissingLicenseCredentialsError(err)) {
+    return { kind: "awaiting-license", reason: failureReason(err) };
+  }
   if (isPermanentEnrollmentError(err) || isPermanentAuthError(err)) {
     return { kind: "permanent", reason: failureReason(err) };
   }

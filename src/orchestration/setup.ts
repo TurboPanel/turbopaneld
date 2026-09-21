@@ -18,6 +18,7 @@ import {
 import { ensurePython } from "./python.ts";
 import { ensureUv } from "./uv.ts";
 import { resolveInstanceConfig } from "../instance/paths.ts";
+import { detectInstallMode, type InstallMode } from "../paths/layout.ts";
 import { logError, logInfo, sanitizeForLog } from "../logger.ts";
 import {
   DAEMON_INSTALL_PLAYBOOK,
@@ -53,12 +54,34 @@ function shouldInstallDevInstance(): boolean {
 }
 
 /**
+ * Install-mode seam for tests: `detectInstallMode()` discovers a source
+ * checkout from `import.meta.url` / cwd, so a test process is always
+ * "development" — stub this to exercise the managed branches.
+ */
+export const setupTestHooks = {
+  detectInstallMode: (): InstallMode => detectInstallMode(Deno.env.toObject()),
+};
+
+/**
+ * Managed (compiled / JS-fallback) daemon on a self-hosted control-plane host:
+ * `run.sh` (instance-install.yml) provisions it beside the instance and it
+ * dials the local Unix socket. There is nothing to opt into — it connects and
+ * attaches Docker on start, exactly like a remote managed node. Socket mode
+ * alone is not the dev signal; socket mode *in a source checkout* is.
+ */
+function isManagedCoLocatedHost(): boolean {
+  if (setupTestHooks.detectInstallMode() !== "production") return false;
+  return resolveInstanceConfig().kind === "socket";
+}
+
+/**
  * Co-located dev host before the developer opts in via the console (Deno
  * socket or Workers HTTPS). Orchestration bootstrap runs, but no converge
  * playbook yet.
  */
 export function isPreOptInCoLocatedDev(): boolean {
   if (shouldInstallDevInstance()) return false;
+  if (isManagedCoLocatedHost()) return false;
   if (resolveInstanceConfig().kind === "socket") return true;
   return Deno.env.get("TURBOPANEL_INSTANCE_RUNTIME")?.trim() === "workers";
 }
@@ -70,13 +93,14 @@ export function shouldConnectToInstance(): boolean {
 }
 
 /**
- * Whether the daemon should connect to Docker (managed servers and opted-in dev).
- * Pre-opt-in co-located dev (Deno socket or Workers HTTPS) stays passive until
- * the console opts in.
+ * Whether the daemon should connect to Docker (managed servers, the managed
+ * co-located control-plane host, and opted-in dev). Pre-opt-in co-located dev
+ * (Deno socket or Workers HTTPS) stays passive until the console opts in.
  */
 export function shouldEnableDockerIntegration(): boolean {
   if (shouldSkipOrchestration()) return false;
   if (isPreOptInCoLocatedDev()) return false;
+  if (isManagedCoLocatedHost()) return true;
   if (shouldInstallDevInstance()) return true;
   if (shouldRunDaemonConverge()) return true;
   return false;

@@ -280,3 +280,104 @@ test({
     });
   },
 });
+
+test({
+  name: "enrollDaemon leaves an unchanged pre-provisioned server.id untouched",
+  permissions: { env: true, net: true, read: true, write: true },
+  fn: async () => {
+    // The self-hosted wizard writes the co-located seat's server.id as the
+    // instance user (0640): the daemon can read it but not open it for
+    // writing. Re-enrolling the same seat must not need to.
+    await withTempLayout(async (fixture) => {
+      const serverIdPath = join(fixture.dirs.stateDir, "server.id");
+      await Deno.writeTextFile(serverIdPath, "srv-seat\n");
+      await Deno.chmod(serverIdPath, 0o440);
+      const before = await Deno.stat(serverIdPath);
+      const api = createFakeInstanceApi();
+      const restore = api.install();
+      let enrollBody: unknown;
+      try {
+        api.script("/api/daemon/v1/auth/challenge", () => challengeResponse());
+        api.script("/api/daemon/v1/enroll", async (init) => {
+          enrollBody = await parseJsonBody(init);
+          return enrollResponse({ serverId: "srv-seat", keyId: "kid-seat" });
+        });
+        const client = new DaemonApiClient({
+          config: INSTANCE_CONFIG,
+          getToken: () => Promise.resolve("unused"),
+        });
+        const result = await enrollDaemon({
+          apiClient: client,
+          machineKey: "mk",
+          hostname: "panel-host",
+          licenseId: "lic-1",
+          licenseToken: "tok-1",
+          stateDir: fixture.dirs.stateDir,
+        });
+        assertEquals(result.serverId, "srv-seat");
+        assertEquals(
+          (enrollBody as { serverId?: string }).serverId,
+          "srv-seat",
+        );
+        const after = await Deno.stat(serverIdPath);
+        assertEquals(after.mtime?.getTime(), before.mtime?.getTime());
+        assertEquals(await Deno.readTextFile(serverIdPath), "srv-seat\n");
+        assertEquals(
+          (await Deno.readTextFile(
+            join(fixture.dirs.stateDir, "server-key-id"),
+          ))
+            .trim(),
+          "kid-seat",
+        );
+      } finally {
+        await Deno.chmod(serverIdPath, 0o640);
+        restore();
+      }
+    });
+  },
+});
+
+test({
+  name: "enrollDaemon replaces a changed server.id by rename, group-writable",
+  permissions: { env: true, net: true, read: true, write: true },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const serverIdPath = join(fixture.dirs.stateDir, "server.id");
+      await Deno.writeTextFile(serverIdPath, "srv-old\n");
+      await Deno.chmod(serverIdPath, 0o440);
+      const api = createFakeInstanceApi();
+      const restore = api.install();
+      try {
+        api.script("/api/daemon/v1/auth/challenge", () => challengeResponse());
+        api.script(
+          "/api/daemon/v1/enroll",
+          () => enrollResponse({ serverId: "srv-new", keyId: "kid-new" }),
+        );
+        const client = new DaemonApiClient({
+          config: INSTANCE_CONFIG,
+          getToken: () => Promise.resolve("unused"),
+        });
+        const result = await enrollDaemon({
+          apiClient: client,
+          machineKey: "mk",
+          hostname: "host-1",
+          licenseId: "lic-1",
+          licenseToken: "tok-1",
+          stateDir: fixture.dirs.stateDir,
+        });
+        assertEquals(result.serverId, "srv-new");
+        assertEquals(await Deno.readTextFile(serverIdPath), "srv-new\n");
+        const mode = (await Deno.stat(serverIdPath)).mode ?? 0;
+        assertEquals(mode & 0o777, 0o660);
+        // No temp file left behind.
+        const leftovers: string[] = [];
+        for await (const entry of Deno.readDir(fixture.dirs.stateDir)) {
+          if (entry.name.startsWith("server.id.")) leftovers.push(entry.name);
+        }
+        assertEquals(leftovers, []);
+      } finally {
+        restore();
+      }
+    });
+  },
+});
