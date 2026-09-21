@@ -42,10 +42,15 @@ export const PROD_ORCHESTRATION_DIR_DEFAULT = join(
   "orchestration",
 );
 /**
- * Managed control-plane (instance) install root under the FHS lib tree, mirroring
- * the daemon install root ({@link PROD_DAEMON_ROOT_DEFAULT} = `lib/daemon`).
+ * Managed control-plane (instance) install root. The instance release package
+ * unpacks flat into the install root beside the daemon (`bin/turbopanel-instance`,
+ * `bin/turbopanel-mailer`, `lib/libduckdb.so`), so there is no nested instance
+ * tree: the "instance dir" a managed host hands the Ansible roles
+ * (`turbopanel_instance_dir`, the units' WorkingDirectory and the cert
+ * generator's chdir) is {@link PROD_HOME_DEFAULT} itself. The retired
+ * `lib/instance` subtree is what `run.sh --instance` removes on upgrade.
  */
-export const PROD_INSTANCE_DIR_DEFAULT = join(PROD_LIB_DIR_DEFAULT, "instance");
+export const PROD_INSTANCE_DIR_DEFAULT = PROD_HOME_DEFAULT;
 
 /**
  * Development source-repo root.

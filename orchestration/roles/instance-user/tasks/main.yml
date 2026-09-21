@@ -45,7 +45,9 @@
     group: "{{ instance_primary_group }}"
     groups: "{{ _instance_supplementary_groups | unique | join(',') }}"
     append: true
-    home: "{{ turbopanel_instance_dir }}"
+    # Nominal only — the units set HOME to the runtime state dir. The install
+    # root (root:tp 0750) is the same nominal home the tp account has.
+    home: "{{ turbopanel_install_root }}"
     shell: /usr/sbin/nologin
     system: true
     create_home: false

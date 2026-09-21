@@ -12,13 +12,11 @@ Environment=HOME={{ turbopanel_caddy_runtime_dir }}
 Environment=XDG_DATA_HOME={{ turbopanel_caddy_runtime_dir }}/share
 Environment=XDG_STATE_HOME={{ turbopanel_caddy_runtime_dir }}/state
 Environment=XDG_CONFIG_HOME={{ turbopanel_caddy_config_dir }}
+{# The hostname, ACME contact, leaf paths and port are baked into the rendered
+   Caddyfile (templates/Caddyfile.j2) on a managed install; the CADDY_* env
+   below stays for the co-located dev overlay Caddyfile, which still reads it. #}
 {% if turbopanel_tls_mode | default('self_signed') == 'lets_encrypt' %}
 Environment=CADDY_PORT=443
-Environment=TURBOPANEL_PUBLIC_HOSTNAME={{ turbopanel_public_hostname }}
-{% if turbopanel_acme_email | default('') | length > 0 %}
-Environment=TURBOPANEL_ACME_EMAIL={{ turbopanel_acme_email }}
-Environment="TURBOPANEL_CADDY_ACME_EMAIL_DIRECTIVE=email {{ turbopanel_acme_email }}"
-{% endif %}
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 {% elif turbopanel_tls_mode | default('self_signed') == 'upload' %}
@@ -30,8 +28,8 @@ Environment=CADDY_PORT={{ caddy_port }}
 Environment=CADDY_TLS_CERT={{ turbopanel_instance_certs_dir }}/self-signed.crt
 Environment=CADDY_TLS_KEY={{ turbopanel_instance_certs_dir }}/self-signed.key
 {% endif %}
-{# The Caddyfile derives its unix/ dial as unix/<TURBOPANEL_RUN_DIR>/instance.sock —
-   the same run-dir + filename contract as the instance (src/server-paths.ts). #}
+{# Both Caddyfiles dial unix/<run dir>/instance.sock — the same run-dir +
+   filename contract as the instance (src/server-paths.ts). #}
 Environment=TURBOPANEL_RUN_DIR={{ turbopanel_run_dir }}
 Environment=TURBOPANEL_UI_ROOT={{ turbopanel_ui_dist_dir }}
 {% if turbopanel_dev_user | default('') | length > 0 %}

@@ -143,7 +143,7 @@ export function assertProductionLayout(
     failures,
     "instanceDir",
     prod.instanceDir,
-    "/opt/turbopanel/lib/instance",
+    "/opt/turbopanel",
   );
 
   recordLayoutMismatch(
@@ -259,10 +259,17 @@ export const ANSIBLE_SCAN_ALLOWLIST = new Set([
 
 export const RETIRED_RUNTIMES_REF = /\/opt\/turbopanel\/runtimes/;
 export const RETIRED_LIB_RUNTIME_REF = /\/opt\/turbopanel\/lib\/runtime/;
+/**
+ * The instance package used to unpack into a nested `lib/instance/{bin,lib,share}`
+ * tree; it now lies flat in the install root (`bin/`, `lib/`). Only run.sh may
+ * name the old path — it removes it on upgrade.
+ */
+export const RETIRED_LIB_INSTANCE_REF = /\/opt\/turbopanel\/lib\/instance/;
 export const RETIRED_RUNTIMES_SCAN_ALLOWLIST = new Set([
   "scripts/check-production-layout.ts",
   "src/dev-sync-apply.ts", // comment only: documents legacy path for operators
   "src/orchestration/cloudflared.ts", // comment only
+  "scripts/run.sh", // removes the retired lib/instance subtree on upgrade
 ]);
 
 export const RUNTIME_ROOT_LITERAL = /\/opt\/turbopanel\/vendor/;
@@ -327,6 +334,13 @@ export function collectForbiddenReferenceFailures(
           `${rel}:${
             i + 1
           } references retired /opt/turbopanel/lib/runtime (use vendor contract)`,
+        );
+      }
+      if (RETIRED_LIB_INSTANCE_REF.test(line)) {
+        failures.push(
+          `${rel}:${
+            i + 1
+          } references retired /opt/turbopanel/lib/instance (the instance package lies flat in bin/ and lib/)`,
         );
       }
     });

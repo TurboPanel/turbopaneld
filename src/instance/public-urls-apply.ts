@@ -29,8 +29,9 @@ function isCoLocatedDev(
  *
  * Co-located development uses the checkout (`TURBOPANEL_INSTANCE_REPO` or
  * `<devRoot>/turbopanel`). {@link resolveLayout}.instanceDir stays on the FHS
- * stub (`/opt/turbopanel/lib/instance`) for mutable install layout — that path
- * has no generate script, so public-urls apply must not use it in dev.
+ * install root (`/opt/turbopanel`, where the compiled instance lies flat in
+ * bin/) — that path has no generate script, so public-urls apply must not use
+ * it in dev; a managed host runs the binary's own verb there instead.
  */
 export function resolveInstanceDir(
   env: Record<string, string | undefined> = Deno.env.toObject(),

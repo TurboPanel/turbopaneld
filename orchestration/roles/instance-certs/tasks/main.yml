@@ -29,8 +29,8 @@
       - turbopanel_public_hostname | default('') | length > 0
     fail_msg: >-
       turbopanel_tls_mode=lets_encrypt requires turbopanel_public_hostname.
-      ACME email is optional: the Caddy unit and Caddyfile.acme omit the
-      email directive when turbopanel_acme_email is empty.
+      ACME email is optional: the rendered Caddyfile omits the email
+      directive when turbopanel_acme_email is empty.
 
 - name: Assert Let's Encrypt TLS mode is managed-install only
   when: turbopanel_tls_mode | default('self_signed') == 'lets_encrypt'

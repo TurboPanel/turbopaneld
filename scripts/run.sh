@@ -939,7 +939,6 @@ tp_download_repo_artifact() {
 }
 
 tp_run_instance_install() {
-  _instance_dir="$INSTALL_ROOT/lib/instance"
   _ui_dir="$INSTALL_ROOT/share/ui"
   _work="$(mktemp -d)"
 
@@ -961,27 +960,38 @@ tp_run_instance_install() {
   tp_print_ok "UI export verified (SHA-256 ok)"
 
   tp_print_step "▸" "Unpacking under $INSTALL_ROOT…"
-  # The compiled instance package is replaced whole — bin/, lib/ and
-  # share/caddy/ only, never state (/var/lib/turbopanel) or config.
-  rm -rf "$_instance_dir"
-  mkdir -p "$_instance_dir"
-  zstd -d -q -c "$_work/instance.tar.zst" | tar -x -C "$_instance_dir"
+  # The instance package lies flat in the install root beside the daemon:
+  # bin/turbopanel-instance, bin/turbopanel-mailer, lib/libduckdb.so. Each
+  # file is replaced by name — never the directories (bin/ holds turbopaneld,
+  # lib/ the update-origin pin) and never state (/var/lib/turbopanel) or
+  # config (/etc/turbopanel).
+  mkdir -p "$INSTALL_ROOT/bin" "$INSTALL_ROOT/lib"
+  rm -f "$INSTALL_ROOT/bin/turbopanel-instance" "$INSTALL_ROOT/bin/turbopanel-mailer" \
+    "$INSTALL_ROOT/lib/libduckdb.so"
+  # --no-overwrite-dir: the archive carries bin/ and lib/ directory entries;
+  # never let them re-own or re-mode the shared install dirs (root:tp 0750).
+  zstd -d -q -c "$_work/instance.tar.zst" | tar -x --no-same-owner --no-overwrite-dir -C "$INSTALL_ROOT"
+  # Earlier packages unpacked into lib/instance/ (a nested bin/lib/share tree)
+  # and the install copied libduckdb.so into vendor/duckdb/; a package built
+  # before the flat layout also carries share/caddy/, which is now rendered
+  # by instance-launch instead. All three are package content, never state.
+  rm -rf "$INSTALL_ROOT/lib/instance" "$INSTALL_ROOT/vendor/duckdb" "$INSTALL_ROOT/share/caddy"
   rm -rf "$_ui_dir"
   mkdir -p "$_ui_dir"
   tar -xzf "$_work/ui.tar.gz" -C "$_ui_dir"
   rm -rf "$_work"
   for _required in \
-    "$_instance_dir/bin/turbopanel-instance" \
-    "$_instance_dir/bin/turbopanel-mailer" \
-    "$_instance_dir/lib/libduckdb.so" \
-    "$_instance_dir/share/caddy/Caddyfile" \
+    "$INSTALL_ROOT/bin/turbopanel-instance" \
+    "$INSTALL_ROOT/bin/turbopanel-mailer" \
+    "$INSTALL_ROOT/lib/libduckdb.so" \
     "$_ui_dir/index.html"; do
     if [ ! -e "$_required" ]; then
       tp_print_error "Instance package missing $_required"
       return 1
     fi
   done
-  chmod 0755 "$_instance_dir/bin/turbopanel-instance" "$_instance_dir/bin/turbopanel-mailer"
+  chmod 0755 "$INSTALL_ROOT/bin/turbopanel-instance" "$INSTALL_ROOT/bin/turbopanel-mailer"
+  chmod 0644 "$INSTALL_ROOT/lib/libduckdb.so"
   tp_print_ok "Packages unpacked (instance v${_instance_version:-?}, UI v${_ui_version:-?})"
 
   _vars="$(mktemp)"

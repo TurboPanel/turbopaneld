@@ -1,0 +1,128 @@
+{#
+  TurboPanel reverse proxy for managed (self-hosted) installs.
+
+  One template, rendered by the instance-launch role to
+  {{ turbopanel_caddyfile }} ({{ turbopanel_config_dir }}/caddy/Caddyfile) on
+  every converge; turbopanel-caddy.service points at the rendered file and the
+  role restarts it when the render changes. The three control-plane TLS modes
+  (turbopanel_tls_mode) are branches of this file, not separate static files.
+
+  Co-located development does not use this template: the turbopanel/dev
+  overlay ships its own Caddyfile (orchestration/Caddyfile under the dev
+  checkout) with the Expo proxy, plaintext HTTP, wrangler upstream and local
+  daemon download routes. None of that belongs here.
+#}
+{% set _tls_mode = turbopanel_tls_mode | default('self_signed') %}
+{% set _certs_dir = turbopanel_instance_certs_dir %}
+{% set _leaf = 'uploaded' if _tls_mode == 'upload' else 'self-signed' %}
+# TurboPanel reverse proxy (managed install, tls mode: {{ _tls_mode }}).
+# Rendered by the turbopaneld instance-launch role from
+# roles/instance-launch/templates/Caddyfile.j2 — do not edit in place, a
+# converge re-renders it and restarts turbopanel-caddy.
+#
+#   /api/*, /ws/*, /webhook/*  -> Deno instance (Unix socket)
+#   everything else            -> static UI export
+#
+# The catch-all below answers `try_files {path} /index.html`, so ANY prefix the
+# instance owns must be matched before it. A missed prefix does not 404 — it
+# serves the SPA shell with HTTP 200, and a Git provider reads that as a
+# delivered webhook and never retries. Add the matcher when you add the surface.
+{
+        # Localhost-only admin so `systemctl reload` / `caddy reload` can swap leaf
+        # certs without killing the process. Public-urls apply runs through this
+        # reverse proxy (incl. Cloudflare → origin); a full restart mid-request
+        # surfaces as HTTP 502 at the edge.
+        admin localhost:2019
+{% if _tls_mode == 'lets_encrypt' %}
+        # lets_encrypt is the only mode where automatic HTTPS stays on: Caddy
+        # issues and renews the instance hostname's own certificate (HTTP-01 on
+        # :80, HTTPS on :443) into XDG_DATA_HOME. Tenant hosting leaves stay on
+        # the per-server hosting Caddy — never this file.
+{% if turbopanel_acme_email | default('') | length > 0 %}
+        email {{ turbopanel_acme_email }}
+{% endif %}
+{% else %}
+        # Mandatory outside lets_encrypt: the leaf is the Platform CA-signed
+        # self-signed pair or the operator's uploaded pair, never ACME.
+        auto_https off
+{% endif %}
+}
+
+{% if _tls_mode == 'lets_encrypt' %}
+# Bind the public hostname so Caddy serves HTTPS on :443 and the HTTP-01
+# challenge (plus the HTTP→HTTPS redirect) on :80. No `tls` line on purpose.
+{{ turbopanel_public_hostname }} {
+{% else %}
+# Bind all interfaces so the proxy is reachable via LAN IP, not just localhost.
+:{{ caddy_port | default(8443) }} {
+        tls {{ _certs_dir }}/{{ _leaf }}.crt {{ _certs_dir }}/{{ _leaf }}.key
+{% endif %}
+
+        # Forwarding headers are believable only from a connector on this host — a
+        # `cloudflared` tunnel beside Caddy, or another local proxy. Strip any
+        # client-supplied copy so a daemon dialling this proxy over the network
+        # cannot declare its own address; the instance reads CF-Connecting-IP /
+        # X-Forwarded-For only when its immediate peer is loopback
+        # (TURBOPANEL_TRUSTED_PROXY_CIDRS widens that set).
+        @remote_peer not remote_ip 127.0.0.0/8 ::1
+        request_header @remote_peer -CF-Connecting-IP
+        request_header @remote_peer -True-Client-IP
+        request_header @remote_peer -X-Forwarded-For
+
+        # Baseline response headers. HSTS is safe even on the self-signed
+        # default: a browser that already trusts the leaf (Organization CA, or a
+        # manually-imported cert) should not be downgraded to plaintext on a later
+        # visit, and in lets_encrypt a real browser will remember and enforce it.
+        # This never applies to tenant hosting sites — those are a separate,
+        # per-server Caddy config the daemon generates, not this file.
+        header {
+                Strict-Transport-Security "max-age=31536000; includeSubDomains"
+                X-Content-Type-Options "nosniff"
+                X-Frame-Options "DENY"
+        }
+
+        @api path /api/*
+        handle @api {
+                # Defense in depth only — the app itself enforces the real per-route
+                # budgets (a few KB for auth, 2 MB for the largest daemon body) via
+                # streaming readers that never buffer past the limit either way. This
+                # just keeps an oversized request from reaching the app socket at all.
+                request_body {
+                        max_size 8MB
+                }
+                reverse_proxy unix/{{ turbopanel_run_dir }}/instance.sock {
+                        header_up X-Real-IP {remote_host}
+                }
+        }
+
+        @ws path /ws/*
+        handle @ws {
+                reverse_proxy unix/{{ turbopanel_run_dir }}/instance.sock {
+                        header_up X-Real-IP {remote_host}
+                }
+        }
+
+        # Inbound Git provider webhooks. Its own top-level prefix because the caller
+        # is GitHub or GitLab — no session, no daemon JWT, no Origin — so it is a
+        # different class of traffic from /api. X-Real-IP is load-bearing here: the
+        # webhook rate limiter keys per peer address, and without it every delivery
+        # on the instance shares one bucket.
+        @webhook path /webhook/*
+        handle @webhook {
+                # Defense in depth — GITHUB_WEBHOOK_MAX_BODY_BYTES / GITLAB_WEBHOOK_MAX_BODY_BYTES
+                # are both 1 MB; the app's own streaming reader is the authoritative limit.
+                request_body {
+                        max_size 2MB
+                }
+                reverse_proxy unix/{{ turbopanel_run_dir }}/instance.sock {
+                        header_up X-Real-IP {remote_host}
+                }
+        }
+
+        # Serve the exported UI (turbopanel-ui-<version>.tar.gz → share/ui).
+        handle {
+                root * {{ turbopanel_ui_dist_dir }}
+                try_files {path} /index.html
+                file_server
+        }
+}
