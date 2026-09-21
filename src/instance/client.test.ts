@@ -10,6 +10,7 @@ import {
 } from "@std/assert";
 import { encodeBase64 } from "@std/encoding/base64";
 import {
+  AWAITING_LICENSE_POLL_MS,
   connectInstance,
   DEFAULT_INITIAL_BACKOFF_MS,
   DEFAULT_MAX_BACKOFF_MS,
@@ -4143,10 +4144,14 @@ it({
     const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
     const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
     const { sockets, restore: restoreWebSocket } = installTrackingWebSocket();
+    // Blank license files park the loop as awaiting-license: the short
+    // re-check cadence, never the permanent-park backoff.
     const parkedDelays: number[] = [];
     const restoreClientTime = installClientTimeSource({
       delay: (ms) => {
-        if (ms >= PARKED_BACKOFF_MIN_MS) parkedDelays.push(ms);
+        if (ms === AWAITING_LICENSE_POLL_MS || ms >= PARKED_BACKOFF_MIN_MS) {
+          parkedDelays.push(ms);
+        }
         return new Promise((resolve) => setTimeout(resolve, 0));
       },
     });
@@ -4195,15 +4200,115 @@ it({
 
         try {
           client.start();
-          // Missing usable license → permanent park (missing license credentials).
+          // Missing usable license → awaiting-license park (short re-check).
           await waitFor(
             "parked delay",
             () => parkedDelays.length > 0 ? true : undefined,
           );
+          assertEquals(parkedDelays[0], AWAITING_LICENSE_POLL_MS);
           assertEquals(enrollCalls, 0);
           assertEquals(
             sockets.filter((socket) => socket.url.includes(host)).length,
             0,
+          );
+        } finally {
+          client.stop();
+        }
+      });
+    } finally {
+      restoreFetch?.();
+      restoreWebSocket();
+      restoreClientTime();
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+    }
+  },
+});
+
+it({
+  name:
+    "awaiting-license park enrolls once the wizard writes the license files",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    // Fresh self-hosted install: the co-located daemon starts with an empty
+    // state directory, parks as awaiting-license, and must enrol by itself
+    // once the install wizard drops license.id / license.token there.
+    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const { sockets, restore: restoreWebSocket } = installTrackingWebSocket();
+    const awaitingDelays: number[] = [];
+    const restoreClientTime = installClientTimeSource({
+      delay: (ms) => {
+        if (ms === AWAITING_LICENSE_POLL_MS) awaitingDelays.push(ms);
+        return new Promise((resolve) => setTimeout(resolve, 0));
+      },
+    });
+    let restoreFetch: (() => void) | undefined;
+    let enrollCalls = 0;
+    try {
+      Deno.env.delete("TURBOPANEL_FORCE_ENROLL");
+      const { signing, authToken, enroll } = await prepareVerifiedAuth();
+      const api = createFakeInstanceApi();
+      api.script(
+        "/api/health",
+        () => new Response(JSON.stringify({ ok: true }), { status: 200 }),
+      );
+      api.script(
+        "/api/daemon/v1/jwks.json",
+        () => scriptedJwksResponse(signing),
+      );
+      api.script("/api/daemon/v1/auth/challenge", () => challengeResponse());
+      api.script("/api/daemon/v1/enroll", () => {
+        enrollCalls += 1;
+        return enrollResponse(enroll);
+      });
+      api.script(
+        "/api/daemon/v1/auth/session",
+        () => sessionResponse({ token: authToken }),
+      );
+      restoreFetch = api.install();
+
+      await withTempLayout(async (fixture) => {
+        const tempDir = fixture.dirs.stateDir;
+        Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", tempDir);
+
+        const host = "awaiting-license.park.test";
+        const client = new InstanceClient({
+          config: {
+            kind: "url",
+            baseUrl: `https://${host}`,
+            wsBaseUrl: `wss://${host}`,
+          },
+          reconnectDelayMs: DEFAULT_INITIAL_BACKOFF_MS,
+        });
+
+        try {
+          client.start();
+          await waitFor(
+            "awaiting-license re-check",
+            () => awaitingDelays.length > 0 ? true : undefined,
+          );
+          assertEquals(enrollCalls, 0);
+
+          // The wizard hands over the co-located license.
+          await Deno.writeTextFile(`${tempDir}/license.id`, "lic-wizard");
+          await Deno.writeTextFile(`${tempDir}/license.token`, "tok-wizard");
+
+          await waitFor(
+            "enrollment after license hand-off",
+            () => enrollCalls > 0 ? true : undefined,
+          );
+          assertEquals(enrollCalls, 1);
+          await waitFor(
+            "websocket after enrollment",
+            () => sockets.some((socket) => socket.url.includes(host)),
           );
         } finally {
           client.stop();

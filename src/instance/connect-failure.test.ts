@@ -3,6 +3,7 @@ import { DaemonApiError } from "./api-client.ts";
 import { assert, assertEquals } from "@std/assert";
 import {
   classifyConnectFailure,
+  isMissingLicenseCredentialsError,
   isPermanentAuthError,
   isPermanentEnrollmentError,
   isStaleDaemonIdentityError,
@@ -39,7 +40,6 @@ it("classifies permanent enrollment and auth errors", async () => {
     await toDaemonApiError(
       permanentEnrollmentErrorResponse("fingerprint-exists"),
     ),
-    new Error("missing license credentials for enrollment"),
   ];
   for (const err of permanentCases) {
     assertEquals(
@@ -48,6 +48,20 @@ it("classifies permanent enrollment and auth errors", async () => {
       `expected permanent for ${String(err)}`,
     );
   }
+});
+
+it("classifies missing on-disk license credentials as awaiting-license", () => {
+  // Not a control-plane rejection: the self-hosted wizard (or the installer)
+  // has not written license.id / license.token yet. The client re-checks the
+  // state directory instead of taking the permanent-park backoff.
+  const err = new Error("missing license credentials for enrollment");
+  assertEquals(isMissingLicenseCredentialsError(err), true);
+  assertEquals(isPermanentEnrollmentError(err), true);
+  assertEquals(classifyConnectFailure(err).kind, "awaiting-license");
+  assertEquals(
+    isMissingLicenseCredentialsError(new Error("something else")),
+    false,
+  );
 });
 
 it("classifies stale-identity errors", async () => {

@@ -28,7 +28,19 @@ the authenticated cell message is the signal.
 Deno runtime dials the local Unix socket (no `TURBOPANEL_INSTANCE_URL`); Workers
 runtime dials Caddy over HTTPS/WSS via `TURBOPANEL_INSTANCE_URL` + platform CA —
 same transport as a remote daemon, but still the co-located host. Connection
-stays deferred until opt-in on both runtimes.
+stays deferred until opt-in on both runtimes **only in a source checkout**
+(`detectInstallMode() === "development"`). The managed co-located daemon
+(compiled / JS fallback, provisioned by `instance-install.yml`, socket mode)
+connects and attaches Docker on start with no opt-in — socket mode alone is not
+the dev signal. `setupTestHooks.detectInstallMode` is the test seam.
+
+**Awaiting license** (`connect-failure.ts` `awaiting-license`,
+`AWAITING_LICENSE_POLL_MS`): missing `license.id` / `license.token` is not a
+permanent park. The daemon logs once at info and re-reads the state directory
+every 5 s; the self-hosted wizard writes the co-located license (+ the
+pre-provisioned `server.id`) there and the daemon enrols on the next check.
+`enrollDaemon` never rewrites an unchanged `server.id` and replaces a changed
+one by rename (the wizard's file is instance-owned 0640 in a setgid dir).
 
 ### Idle presence (`src/instance/idle-presence.ts`)
 

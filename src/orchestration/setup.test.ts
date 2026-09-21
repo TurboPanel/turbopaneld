@@ -1,9 +1,11 @@
 import { assertEquals } from "@std/assert";
 import {
   isPreOptInCoLocatedDev,
+  setupTestHooks,
   shouldConnectToInstance,
   shouldEnableDockerIntegration,
 } from "./setup.ts";
+import type { InstallMode } from "../paths/layout.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -177,4 +179,55 @@ test("shouldEnableDockerIntegration stays off for opted-in Workers without URL k
       assertEquals(shouldEnableDockerIntegration(), true);
     },
   );
+});
+
+/** Pin the install mode the gate sees (a test process is always a checkout). */
+function withInstallMode(mode: InstallMode, fn: () => void): void {
+  const previous = setupTestHooks.detectInstallMode;
+  setupTestHooks.detectInstallMode = () => mode;
+  try {
+    fn();
+  } finally {
+    setupTestHooks.detectInstallMode = previous;
+  }
+}
+
+test("managed co-located socket daemon connects without dev opt-in", () => {
+  // The self-hosted installer's co-located daemon: compiled binary, no
+  // TURBOPANEL_INSTANCE_URL, no TURBOPANEL_DEV_INSTANCE. It must dial the
+  // socket and attach Docker on start, like any managed node.
+  withInstallMode("production", () => {
+    withEnv({}, () => {
+      assertEquals(isPreOptInCoLocatedDev(), false);
+      assertEquals(shouldConnectToInstance(), true);
+      assertEquals(shouldEnableDockerIntegration(), true);
+    });
+  });
+});
+
+test("source-checkout socket daemon still defers until dev opt-in", () => {
+  withInstallMode("development", () => {
+    withEnv({}, () => {
+      assertEquals(isPreOptInCoLocatedDev(), true);
+      assertEquals(shouldConnectToInstance(), false);
+      assertEquals(shouldEnableDockerIntegration(), false);
+    });
+    withEnv({ TURBOPANEL_DEV_INSTANCE: "1" }, () => {
+      assertEquals(isPreOptInCoLocatedDev(), false);
+      assertEquals(shouldEnableDockerIntegration(), true);
+    });
+  });
+});
+
+test("install mode does not change the remote URL daemon or skip-orchestration paths", () => {
+  withInstallMode("production", () => {
+    withEnv({ TURBOPANEL_INSTANCE_URL: "https://panel.example.com" }, () => {
+      assertEquals(isPreOptInCoLocatedDev(), false);
+      assertEquals(shouldEnableDockerIntegration(), true);
+    });
+    withEnv({ TURBOPANEL_SKIP_ORCHESTRATION: "1" }, () => {
+      assertEquals(shouldConnectToInstance(), true);
+      assertEquals(shouldEnableDockerIntegration(), false);
+    });
+  });
 });

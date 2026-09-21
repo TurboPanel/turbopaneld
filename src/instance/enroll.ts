@@ -26,6 +26,34 @@ async function readPersistedServerId(
   }
 }
 
+/**
+ * Persist `server.id` without truncating a file this process may not own.
+ *
+ * On a self-hosted control plane the install wizard (instance user, 0640)
+ * pre-provisions the co-located seat's `server.id` in the shared setgid state
+ * directory; the daemon can replace that file (rename) but not open it for
+ * writing. An unchanged id is left untouched, so the wizard's file stays the
+ * instance's to rotate. A replaced file is left group-writable for the same
+ * reason.
+ */
+async function persistServerId(
+  stateDir: string,
+  serverId: string,
+  persistedServerId: string | undefined,
+): Promise<void> {
+  if (persistedServerId === serverId) return;
+  const target = join(stateDir, SERVER_ID_FILE);
+  const tmp = `${target}.${crypto.randomUUID()}.tmp`;
+  try {
+    await Deno.writeTextFile(tmp, `${serverId}\n`, { mode: 0o660 });
+    await Deno.chmod(tmp, 0o660);
+    await Deno.rename(tmp, target);
+  } catch (err) {
+    await Deno.remove(tmp).catch(() => undefined);
+    throw err;
+  }
+}
+
 export async function enrollDaemon(params: {
   apiClient: DaemonApiClient;
   machineKey: string | undefined;
@@ -65,9 +93,10 @@ export async function enrollDaemon(params: {
     join(params.stateDir, SERVER_KEY_FILE),
     enrollmentKeyFile,
   );
-  await Deno.writeTextFile(
-    join(params.stateDir, SERVER_ID_FILE),
-    `${enrollment.serverId}\n`,
+  await persistServerId(
+    params.stateDir,
+    enrollment.serverId,
+    persistedServerId,
   );
   await Deno.writeTextFile(
     join(params.stateDir, KEY_ID_FILE),

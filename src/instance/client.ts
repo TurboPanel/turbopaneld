@@ -430,6 +430,13 @@ export const DEFAULT_INITIAL_BACKOFF_MS = 2_000;
 export const DEFAULT_MAX_BACKOFF_MS = 30_000;
 export const PARKED_BACKOFF_MIN_MS = 5 * 60_000;
 export const PARKED_BACKOFF_MAX_MS = 60 * 60_000;
+/**
+ * Re-check cadence while no license credentials exist on disk yet. Cheap (two
+ * file reads) and short on purpose: on a self-hosted control-plane host the
+ * co-located daemon starts before the install wizard has issued its license,
+ * and the servers list polls every 2 s while that seat is Initializing.
+ */
+export const AWAITING_LICENSE_POLL_MS = 5_000;
 const BACKOFF_MULTIPLIER = 2;
 
 /** Clamp caller-provided reconnect delay to supported [min, max] bounds. */
@@ -559,6 +566,14 @@ export async function clearDaemonKeyState(stateDir: string): Promise<void> {
   }
 }
 
+/**
+ * Why the connect loop is parked (no reconnect backoff, periodic re-check):
+ * `permanent` — the control plane rejected enrollment/auth; `tls-trust` — the
+ * platform CA does not validate the control plane; `awaiting-license` — no
+ * license credentials on disk yet (install wizard / installer still to run).
+ */
+type ParkedKind = "permanent" | "tls-trust" | "awaiting-license";
+
 export class InstanceClient {
   readonly #config: InstanceConfig;
   #httpClient: Deno.HttpClient | undefined;
@@ -589,7 +604,7 @@ export class InstanceClient {
   #didCompleteDockerNetworkingSync = false;
   #parked = false;
   #parkedReason: string | undefined;
-  #parkedKind: "permanent" | "tls-trust" | undefined;
+  #parkedKind: ParkedKind | undefined;
   #parkedBackoffMs = PARKED_BACKOFF_MIN_MS;
   #licenseStamp: string | undefined;
   #idlePresence: IdlePresence | undefined;
@@ -901,6 +916,8 @@ export class InstanceClient {
       await this.#enterParkedState(classified.reason, "permanent");
     } else if (classified.kind === "tls-trust") {
       await this.#enterParkedState(classified.reason, "tls-trust");
+    } else if (classified.kind === "awaiting-license") {
+      await this.#enterParkedState(classified.reason, "awaiting-license");
     } else {
       this.#increaseBackoff();
     }
@@ -927,13 +944,22 @@ export class InstanceClient {
 
   async #enterParkedState(
     reason: string,
-    kind: "permanent" | "tls-trust" = "permanent",
+    kind: ParkedKind = "permanent",
   ): Promise<void> {
     this.#parked = true;
     this.#parkedReason = reason;
     this.#parkedKind = kind;
     this.#forceEnrollPending = false;
     this.#licenseStamp = await this.#readLicenseStamp();
+    if (kind === "awaiting-license") {
+      // Expected on every fresh self-hosted install: not an error, and never
+      // the hour-long permanent-park backoff.
+      logInfo(
+        "instance",
+        `awaiting license credentials in ${this.#serverIdentityDir()} (self-hosted: finish the install wizard; managed server: re-run the installer with TURBOPANEL_LICENSE); re-checking every ${AWAITING_LICENSE_POLL_MS} ms`,
+      );
+      return;
+    }
     if (kind === "tls-trust") {
       const caPath = resolveInstanceCaPath() ?? "(none)";
       let fingerprint = "(unreadable)";
@@ -961,6 +987,9 @@ export class InstanceClient {
   }
 
   #nextParkedDelayMs(): number {
+    if (this.#parkedKind === "awaiting-license") {
+      return AWAITING_LICENSE_POLL_MS;
+    }
     const delayMs = fullJitterMs(
       PARKED_BACKOFF_MIN_MS,
       this.#parkedBackoffMs,
@@ -989,6 +1018,10 @@ export class InstanceClient {
     this.#resetBackoff();
     if (kind !== "tls-trust") {
       this.#forceEnrollPending = true;
+    }
+    if (kind === "awaiting-license") {
+      logInfo("instance", "license credentials found; enrolling");
+      return;
     }
     logDebug(
       "instance",

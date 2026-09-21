@@ -38,9 +38,10 @@
 # and UI release packages from the same channel (default: release), verifies
 # every sha256 against each manifest, unpacks them under /opt/turbopanel, and
 # runs instance-install.yml (Postgres, Redis, RabbitMQ, Docker, certs, units,
-# Caddy) before handing off to the install wizard. No daemon is enrolled:
-# that needs a license the wizard has not issued yet — run this script again
-# with TURBOPANEL_LICENSE afterwards to enrol this host.
+# Caddy, and the co-located turbopaneld) before handing off to the install
+# wizard. The daemon starts without a license and waits; the wizard writes
+# the first organization's license into the daemon state directory and the
+# daemon enrols on its own — no second run of this script on this host.
 #
 # Manifest and release helpers below must stay in sync with scripts/lib/release-artifacts.sh.
 
@@ -989,8 +990,19 @@ tp_run_instance_install() {
     printf 'turbopanel_vendor_dir: %s\n' "$RUNTIMES_DIR"
     printf 'turbopanel_orchestration_dir: %s\n' "$ORCHESTRATION_DIR"
     printf 'instance_start: %s\n' "$([ "$NO_START" = true ] && echo false || echo true)"
+    # The co-located daemon: same unit contract as a managed node (native or
+    # JS-fallback ExecStart), no control-plane URL — it dials the socket.
+    printf 'turbopanel_daemon_exec_mode: %s\n' "$DAEMON_EXEC_MODE"
+    printf 'turbopanel_daemon_bin: %s\n' "$(tp_daemon_binary_path)"
+    printf 'turbopanel_daemon_js: %s\n' "$(tp_daemon_js_fallback_path)"
+    if [ "$DAEMON_EXEC_MODE" = "js" ]; then
+      printf 'turbopanel_daemon_deno_bin: %s\n' "$DENO_BIN"
+    fi
+    printf 'turbopanel_config_dir: %s\n' "$CONFIG_DIR"
+    printf 'turbopanel_daemon_state_dir: %s\n' "$STATE_DIR"
+    printf 'turbopanel_daemon_env_file: %s\n' "$ENV_FILE"
   } > "$_vars"
-  tp_print_step "▸" "Provisioning the self-hosted instance (Postgres, Redis, RabbitMQ, Docker, certs, units, Caddy)…"
+  tp_print_step "▸" "Provisioning the self-hosted instance (Postgres, Redis, RabbitMQ, Docker, certs, units, Caddy, co-located daemon)…"
   _rc=0
   if [ "$DAEMON_EXEC_MODE" = "$TP_EXEC_MODE_NATIVE" ]; then
     "$(tp_daemon_binary_path)" run-installer --playbook instance-install.yml --vars-file "$_vars" || _rc=$?
@@ -1003,7 +1015,7 @@ tp_run_instance_install() {
     tp_print_error "Instance provisioning failed"
     return "$_rc"
   fi
-  tp_print_ok "Self-hosted instance installed — open the wizard URL printed above (https://<this host>:8443/install), then enrol this host as a daemon with the license the wizard issues"
+  tp_print_ok "Self-hosted instance installed — open the wizard URL printed above (https://<this host>:8443/install); this host's daemon enrols itself once the wizard has issued the first license"
   return 0
 }
 
@@ -1230,7 +1242,7 @@ if [ "$INSTANCE_INSTALL" = true ]; then
   # on the GitHub rail — so the channel defaults to release, not trunk.
   [ -n "${TURBOPANEL_UPDATE_CHANNEL:-}" ] || export TURBOPANEL_UPDATE_CHANNEL=release
   if [ -n "$LICENSE" ] || [ -n "$TUNNEL_TOKEN" ] || [ -n "$INSTANCE_CA" ]; then
-    tp_print_error "--instance installs a control plane: it takes no --license, --tunnel-token or --instance-ca (enrol this host as a daemon afterwards, with a license from the wizard)"
+    tp_print_error "--instance installs a control plane: it takes no --license, --tunnel-token or --instance-ca (the co-located daemon is installed with it and enrols itself once the wizard has issued the first license)"
     exit 1
   fi
   if ! tp_builtin_repo_manifest_url turbopanel "$TURBOPANEL_UPDATE_CHANNEL" >/dev/null; then
@@ -1581,8 +1593,10 @@ if [ ! -f "$ORCHESTRATION_DIR/ansible.cfg" ]; then
 fi
 
 if [ "$INSTANCE_INSTALL" = true ]; then
-  # The daemon package above was only the carrier for the orchestration tree
-  # and its vendored Ansible; no daemon is configured or started here.
+  # The daemon package above is the co-located daemon's binary and the
+  # orchestration tree instance-install.yml runs; the play configures and
+  # starts turbopaneld itself (socket mode), so nothing daemon-specific
+  # happens in this script for a control-plane install.
   if ! command -v zstd >/dev/null 2>&1; then
     tp_print_error "zstd is required to unpack the instance package (apt install zstd)"
     exit 1
