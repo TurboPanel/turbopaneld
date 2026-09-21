@@ -45,7 +45,11 @@ turbopanel_runtime_path: >-
 # Source checkouts: co-located dev uses the dev user's home; managed installs use
 # the FHS lib tree.
 turbopanel_daemon_dir: "{{ (turbopanel_dev_root ~ '/turbopaneld') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/daemon') }}"
-turbopanel_instance_dir: "{{ (turbopanel_dev_root ~ '/turbopanel') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/instance') }}"
+# The instance "dir" is the source checkout in co-located dev. A managed
+# install has no checkout: the release package unpacks flat into the install
+# root (bin/turbopanel-instance, bin/turbopanel-mailer, lib/libduckdb.so), so
+# the dir is the install root itself — units' WorkingDirectory, nothing more.
+turbopanel_instance_dir: "{{ (turbopanel_dev_root ~ '/turbopanel') if (turbopanel_dev_user | default('') | length > 0) else turbopanel_install_root }}"
 turbopanel_ui_dir: "{{ (turbopanel_dev_root ~ '/ui') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/ui') }}"
 turbopanel_website_dir: "{{ (turbopanel_dev_root ~ '/website') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/website') }}"
 # Per-service runtime state (HOME / XDG dirs): always FHS state under
@@ -63,9 +67,11 @@ turbopanel_daemon_state_dir: "{{ turbopanel_state_dir }}"
 # DuckDB metrics store root — matches instance resolveMetricsDir.
 turbopanel_metrics_dir: "{{ turbopanel_state_dir }}/metrics"
 # Vendored libduckdb.so: `deno compile` self-extracts the duckdb.node addon but
-# not this companion shared library, so the compiled instance loads it from the
-# vendor tree via LD_LIBRARY_PATH (source mode resolves both from node_modules).
-turbopanel_duckdb_lib_dir: "{{ turbopanel_vendor_dir }}/duckdb/lib"
+# not this companion shared library, so the compiled instance loads it via
+# LD_LIBRARY_PATH (source mode resolves both from node_modules). A managed
+# install ships it in the release package at lib/libduckdb.so; co-located dev
+# stages it from node_modules into the vendor tree (instance-build role).
+turbopanel_duckdb_lib_dir: "{{ (turbopanel_vendor_dir ~ '/duckdb/lib') if (turbopanel_dev_user | default('') | length > 0) else turbopanel_lib_dir }}"
 # Static UI export dir: always the shared FHS location served by Caddy.
 turbopanel_ui_dist_dir: /opt/turbopanel/share/ui
 website_service_name: turbopanel-website
@@ -95,32 +101,36 @@ turbopanel_tls_cert_path: ""
 turbopanel_tls_key_path: ""
 # Public DNS name Caddy obtains a certificate for (lets_encrypt).
 turbopanel_public_hostname: ""
-# ACME account contact (lets_encrypt). Optional. The Caddy unit omits
-# TURBOPANEL_ACME_EMAIL and TURBOPANEL_CADDY_ACME_EMAIL_DIRECTIVE when empty
-# so Caddyfile.acme does not render `email `.
+# ACME account contact (lets_encrypt). Optional: the rendered Caddyfile omits
+# the `email` directive when empty.
 turbopanel_acme_email: ""
 # Operator-declared "the endpoint presents a publicly trusted certificate".
 # Forced true when turbopanel_tls_mode is lets_encrypt.
 turbopanel_tls_public: false
-# Co-located (turbopanel_dev_user set) loads the development Caddyfile from the
-# turbopanel/dev overlay; lets_encrypt uses Caddyfile.acme; otherwise the
-# instance Caddyfile (self_signed / upload). Source mode reads both from the
-# checkout root; compiled mode from share/caddy/ inside the release package
-# (turbopanel .github/workflows/release.yml stages them there).
-turbopanel_caddyfile_dir: >-
-  {{ (turbopanel_instance_dir ~ '/share/caddy')
-     if turbopanel_instance_run_mode == 'compiled'
-     else turbopanel_instance_dir }}
+# The Caddy site config. Co-located dev (turbopanel_dev_user set) loads the
+# development Caddyfile from the turbopanel/dev overlay. A managed install
+# renders templates/Caddyfile.j2 — one template whose branches are the TLS
+# modes (self_signed / upload / lets_encrypt) — into the platform config dir
+# on every converge (see "Render the Caddy site config" in tasks/main.yml).
 turbopanel_caddyfile: >-
   {{ (turbopanel_dev_root ~ '/dev/orchestration/Caddyfile') if
   (turbopanel_dev_user | default('') | length > 0) else
-  (turbopanel_caddyfile_dir ~ '/Caddyfile.acme') if
-  (turbopanel_tls_mode | default('self_signed') == 'lets_encrypt') else
-  (turbopanel_caddyfile_dir ~ '/Caddyfile') }}
+  (turbopanel_config_dir ~ '/caddy/Caddyfile') }}
 # "source" runs deno run src/deno-dev.ts when the developer surface is on,
-# otherwise src/deno.ts; "compiled" exec's dist/turbopanel-instance.
-turbopanel_instance_run_mode: source
-turbopanel_instance_binary: "{{ turbopanel_instance_dir }}/dist/turbopanel-instance"
+# otherwise src/deno.ts; "compiled" exec's the single binary. Co-located dev
+# defaults to source (its build toggle passes -e turbopanel_instance_run_mode
+# explicitly); a managed install has no checkout and is always compiled — so
+# every playbook that includes this role on a managed host (instance-install,
+# instance-certs-apply from the daemon) resolves the same way without each
+# having to say so.
+turbopanel_instance_run_mode: "{{ 'source' if (turbopanel_dev_user | default('') | length > 0) else 'compiled' }}"
+# Co-located dev runs the checkout's dist/ build (instance-build role, source
+# or compiled); a managed install runs the release package's binary under the
+# install root.
+turbopanel_instance_binary: >-
+  {{ (turbopanel_instance_dir ~ '/dist/turbopanel-instance')
+     if (turbopanel_dev_user | default('') | length > 0)
+     else (turbopanel_install_root ~ '/bin/turbopanel-instance') }}
 # The compiled mailer ships beside the instance binary in the release
 # package (bin/turbopanel-mailer); source mode runs mailer/main.ts from the
 # checkout instead.

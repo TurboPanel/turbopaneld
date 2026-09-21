@@ -216,11 +216,29 @@ CA is still minted in every mode. Vars (both roles; extra-vars win):
 | `turbopanel_tls_public` | Operator-declared publicly trusted leaf; forced true in `lets_encrypt` as `turbopanel_tls_public_effective` |
 | `turbopanel_public_urls` | Defaults to `https://{{ turbopanel_public_hostname }}` in `lets_encrypt` when a hostname is set |
 
-`turbopanel_caddyfile` is the dev overlay first, then `Caddyfile.acme` in
-`lets_encrypt`, else `Caddyfile`. The Caddy unit stays on `:8443` with
-`certs/self-signed.*` unless `upload` (copied pair) or `lets_encrypt`
-(`CADDY_PORT=443`, `CAP_NET_BIND_SERVICE`, ACME storage under
-`XDG_DATA_HOME={{ turbopanel_caddy_runtime_dir }}/share`).
+`turbopanel_caddyfile` is the dev overlay (`<dev root>/dev/orchestration/Caddyfile`)
+when `turbopanel_dev_user` is set; otherwise it is
+`{{ turbopanel_config_dir }}/caddy/Caddyfile`, which `instance-launch`
+**renders** from `templates/Caddyfile.j2` on every converge (root:tp `0640`,
+"Render the Caddy site config", notifies a Caddy restart). One template, the
+three TLS modes are its branches: port, leaf paths, public hostname and the
+optional `email` directive are baked in at render time — no Caddy env
+placeholders, no static site config in the instance release package. The
+unit stays on `:8443` with the leaf under `turbopanel_instance_certs_dir`
+unless `upload` (copied pair) or `lets_encrypt` (`:443`, `CAP_NET_BIND_SERVICE`,
+ACME storage under `XDG_DATA_HOME={{ turbopanel_caddy_runtime_dir }}/share`).
+Updating the proxy config is a template edit plus a converge, never a hand
+edit of the rendered file.
+
+**Managed install layout.** The instance package lies flat in the install
+root beside the daemon — `bin/turbopanel-instance`, `bin/turbopanel-mailer`,
+`lib/libduckdb.so` (the unit's `LD_LIBRARY_PATH` is `lib/`), the UI under
+`share/ui`. There is no nested instance tree: `turbopanel_instance_dir` on a
+managed host is the install root itself (units' `WorkingDirectory`, the cert
+generator's chdir), and both `instance-launch` and `instance-certs` default
+`turbopanel_instance_run_mode` to `compiled` whenever `turbopanel_dev_user` is
+empty, so `instance-certs-apply.yml` (run by the daemon with defaults only)
+resolves the binary's own `generate-self-signed-cert` verb.
 `instance-deno.env.j2` emits `TURBOPANEL_TLS_PUBLIC=1` when the effective flag
 is true — not the Workers env template.
 
