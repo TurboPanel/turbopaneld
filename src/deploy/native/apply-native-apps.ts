@@ -34,7 +34,7 @@
  */
 
 import { join } from "@std/path";
-import { logInfo, logWarn } from "../../logger.ts";
+import { logInfo, logWarn } from "../../util/logger.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import {
   devOwnershipPlaybookExtraArgs,
@@ -43,11 +43,11 @@ import {
 import {
   NODE_APP_RUNTIME_APPLY_PLAYBOOK,
   ORCHESTRATION_DIR,
-} from "../../orchestration/paths.ts";
+} from "../../orchestration/assets.ts";
 import type {
   EnvironmentDeployNativeAppService,
   EnvironmentDeployPayload,
-} from "../../instance/commands/contracts.ts";
+} from "../../contracts/commands-contracts.ts";
 import { resolveReleasePaths } from "../release/release-layout.ts";
 import type { ReleaseOutputHandler } from "../release/checkout.ts";
 import { swapCurrentSymlink } from "../release/promote.ts";

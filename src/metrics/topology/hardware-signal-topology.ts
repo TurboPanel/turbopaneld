@@ -51,7 +51,7 @@ import type {
   PhysicalSignalTopology,
   SignalId,
   TopologyDeviceId,
-} from "./types.ts";
+} from "../../contracts/topology-types.ts";
 
 export type HardwareSignalTopologyDeps = {
   io: SensorIo;

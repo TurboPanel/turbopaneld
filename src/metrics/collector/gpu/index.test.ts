@@ -7,7 +7,7 @@ import type {
   GpuReadContext,
   GpuReading,
 } from "./adapter.ts";
-import type { GpuTopology } from "../../topology/types.ts";
+import type { GpuTopology } from "../../../contracts/topology-types.ts";
 
 const test = Deno.test.bind(Deno);
 

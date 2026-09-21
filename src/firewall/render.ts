@@ -57,7 +57,7 @@ import {
   type FirewallRule,
   isValidIpv4Literal,
   parseFirewallPortRange,
-} from "../instance/commands/contracts.ts";
+} from "../contracts/commands-contracts.ts";
 
 /** Hung off `INPUT`; the host's own listeners. */
 export const FIREWALL_INPUT_CHAIN = "TP-INPUT";

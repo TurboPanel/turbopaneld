@@ -151,7 +151,7 @@ test("collectForbiddenReferenceFailures flags each retired path", () => {
   );
   assertEquals(
     collectForbiddenReferenceFailures(
-      "src/dev-sync-apply.ts",
+      "src/dev-sync/apply.ts",
       "mentions /opt/turbopanel/runtimes",
     ),
     [],
@@ -237,7 +237,7 @@ test("collectForbiddenReferenceFailures honors remaining allowlists", () => {
   );
   assertEquals(
     collectForbiddenReferenceFailures(
-      "src/orchestration/paths.test.ts",
+      "src/orchestration/assets.test.ts",
       vendor,
       false,
     ),

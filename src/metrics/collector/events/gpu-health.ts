@@ -20,8 +20,8 @@
  */
 import type { EventCollector, EventDetectContext } from "./types.ts";
 import { makeEvent } from "./types.ts";
-import type { MetricEvent } from "../../contract.ts";
-import type { GpuTopology } from "../../topology/types.ts";
+import type { MetricEvent } from "../../../contracts/metrics-contract.ts";
+import type { GpuTopology } from "../../../contracts/topology-types.ts";
 
 /** No topology-level GPU thermal threshold exists yet — this is a conservative fixed default until one is added. */
 const GPU_THERMAL_CRITICAL_CELSIUS = 105;

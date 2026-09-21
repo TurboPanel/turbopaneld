@@ -9,7 +9,10 @@
  */
 import { resolveHardwareProfile } from "../collector/sensors/overrides.ts";
 import type { HardwareProfile } from "../collector/types.ts";
-import { EMPTY_TOPOLOGY_OVERRIDES, type TopologyOverrides } from "./types.ts";
+import {
+  EMPTY_TOPOLOGY_OVERRIDES,
+  type TopologyOverrides,
+} from "../../contracts/topology-types.ts";
 
 /** Pure field projection — no I/O, no name/path resolution against a snapshot. */
 export function toTopologyOverrides(

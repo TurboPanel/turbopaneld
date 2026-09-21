@@ -625,7 +625,7 @@ test("the wire validator and the file renderer agree on canonical form", async (
   // wire is looser than the file turns a rejected credential into a failed
   // deploy at the worst moment.
   const contracts = await Deno.readTextFile(
-    new URL("../../instance/commands/contracts.ts", import.meta.url),
+    new URL("../../contracts/commands-contracts.ts", import.meta.url),
   );
   const mirrored = /const CANONICAL_SSH_KEY_RE =\s*\/\^\(\?:([^)]+)\)/.exec(
     contracts,

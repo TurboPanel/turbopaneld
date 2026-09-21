@@ -7,7 +7,7 @@ import type {
   ManagedApplyCredential,
   ManagedApplyPayload,
   ManagedApplyResult,
-} from "../instance/commands/contracts.ts";
+} from "../contracts/commands-contracts.ts";
 import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts";
 import { ensureManagedIngressNetwork } from "./networks.ts";
 import {
@@ -25,7 +25,7 @@ import {
   createNoopCommandOutputSink,
 } from "../logs/contracts.ts";
 import { redactPlaintexts } from "../logs/redactor.ts";
-import { logInfo, sanitizeForLog } from "../logger.ts";
+import { logInfo, sanitizeForLog } from "../util/logger.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import {
   runDockerSetup as defaultRunDockerSetup,
@@ -52,7 +52,7 @@ import {
   managedComposePath,
   managedComposeProject,
   managedEnvFilePath,
-} from "./paths.ts";
+} from "./engine-paths.ts";
 import {
   loadProxySqlMonitorCredentials,
   proxySqlHostPrepPresent,

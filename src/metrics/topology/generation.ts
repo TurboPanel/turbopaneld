@@ -21,12 +21,12 @@
 import { dirname, join } from "@std/path";
 
 import { resolveLayout } from "../../paths/layout.ts";
-import { computeSlotMapping } from "./slot-mapping.ts";
+import { computeSlotMapping } from "../../contracts/topology-slot-mapping.ts";
 import type {
   SlotMapping,
   TopologyOverrides,
   TopologySnapshotInputs,
-} from "./types.ts";
+} from "../../contracts/topology-types.ts";
 
 export const TOPOLOGY_GENERATION_RELATIVE_PATH =
   "metrics/topology-generation.json";

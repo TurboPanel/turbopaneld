@@ -9,8 +9,8 @@
 import type {
   ManagedApplyCredential,
   ManagedApplyDatabaseOp,
-} from "../../instance/commands/contracts.ts";
-import { sanitizeForLog } from "../../logger.ts";
+} from "../../contracts/commands-contracts.ts";
+import { sanitizeForLog } from "../../util/logger.ts";
 import {
   authSocketPluginPresentSql,
   changeReplicationSourceSql,

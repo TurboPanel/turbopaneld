@@ -10,7 +10,7 @@ import type {
   ManagedApplyDatabaseOp,
   ManagedBackupArtifactExtension,
   ManagedEngineCode,
-} from "../../instance/commands/contracts.ts";
+} from "../../contracts/commands-contracts.ts";
 import type { ManagedEngineCensus } from "./census.ts";
 
 export type { ManagedEngineCensus } from "./census.ts";

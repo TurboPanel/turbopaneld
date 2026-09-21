@@ -1,7 +1,7 @@
 import { encodeHex } from "@std/encoding/hex";
 import { join } from "@std/path";
 import { run, runLogged, symlinkPointsAt } from "./exec.ts";
-import { logInfo, logWarn } from "../logger.ts";
+import { logInfo, logWarn } from "../util/logger.ts";
 import { logComponent } from "./presentation.ts";
 import { withRetry } from "./retry.ts";
 import {
@@ -14,8 +14,11 @@ import {
   UV_VERSION,
   uvDownloadUrl,
   UVX_BIN,
-} from "./paths.ts";
-import { createSymlink, installVendorExecutable } from "../scoped-writes.ts";
+} from "./assets.ts";
+import {
+  createSymlink,
+  installVendorExecutable,
+} from "../permissions/scoped-writes.ts";
 
 /** Per-request timeout for uv download fetches. Generous for slow/throttled links. */
 const FETCH_TIMEOUT_MS = 30_000;

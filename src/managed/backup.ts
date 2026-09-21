@@ -19,10 +19,10 @@ import type {
   ManagedBackupResult,
   ManagedRestorePayload,
   ManagedRestoreResult,
-} from "../instance/commands/contracts.ts";
+} from "../contracts/commands-contracts.ts";
 import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts";
 import { spawnDockerStreaming } from "../deploy/docker-cli.ts";
-import { sanitizeForLog } from "../logger.ts";
+import { sanitizeForLog } from "../util/logger.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import {
   collectManagedContainers,
@@ -36,7 +36,7 @@ import {
   managedBackupsDir,
   managedComposeProject,
   SAFE_MANAGED_ID_RE,
-} from "./paths.ts";
+} from "./engine-paths.ts";
 
 type StreamExecOutcome = { success: boolean; stderr: string };
 

@@ -1,5 +1,5 @@
-import { fetchWithPlatformCa } from "../instance/paths.ts";
-import { errorText } from "../logger.ts";
+import { fetchWithPlatformCa } from "../instance/sockets.ts";
+import { errorText } from "../util/logger.ts";
 import { detectInstallMode, type InstallMode } from "../paths/layout.ts";
 import type { UpdateChannelConfig } from "./config.ts";
 import { MalformedManifestError, MissingChannelError } from "./errors.ts";

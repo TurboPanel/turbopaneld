@@ -61,7 +61,7 @@ describe("ansible runtime with stubbed binaries", () => {
   });
 
   it("runLocalPlaybook completes against stub ansible-playbook", async () => {
-    const { LOCALHOST_PLAYBOOK } = await import("./paths.ts");
+    const { LOCALHOST_PLAYBOOK } = await import("./assets.ts");
     await ansible.runLocalPlaybook(LOCALHOST_PLAYBOOK);
   });
 
@@ -191,7 +191,7 @@ describe("ansible runtime with stubbed binaries", () => {
     await Deno.writeTextFile(playbookBin, "#!/bin/sh\nexit 1\n");
     await Deno.chmod(playbookBin, 0o755);
     try {
-      const { LOCALHOST_PLAYBOOK } = await import("./paths.ts");
+      const { LOCALHOST_PLAYBOOK } = await import("./assets.ts");
       await assertRejects(
         () => ansible.runLocalPlaybook(LOCALHOST_PLAYBOOK),
         Error,
@@ -412,7 +412,7 @@ exit 1
   });
 
   it("warns when ansible current symlink cannot be created", async () => {
-    const { ANSIBLE_CURRENT_DIR } = await import("./paths.ts");
+    const { ANSIBLE_CURRENT_DIR } = await import("./assets.ts");
     await Deno.remove(ANSIBLE_CURRENT_DIR, { recursive: true }).catch(() => {});
     const ansibleRoot = join(fixture.runtimesDir, "ansible");
     const previousMode = (await Deno.stat(ansibleRoot)).mode! & 0o777;
@@ -434,7 +434,7 @@ exit 1
     const playbookBackup = await Deno.readTextFile(playbookBin);
     const lintBackup = await Deno.readTextFile(lintBin);
 
-    const { UV_BIN } = await import("./paths.ts");
+    const { UV_BIN } = await import("./assets.ts");
     const uvBackup = await Deno.readTextFile(UV_BIN);
     await Deno.writeTextFile(
       UV_BIN,

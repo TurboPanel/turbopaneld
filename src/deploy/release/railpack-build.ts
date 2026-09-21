@@ -51,11 +51,11 @@ import { join } from "@std/path";
 import { pumpLines } from "../../logs/line-stream.ts";
 import type { CommandSummaryRedactor } from "../../logs/contracts.ts";
 import { redactCommandSummary } from "../../logs/redactor.ts";
-import { logInfo, logWarn } from "../../logger.ts";
+import { logInfo, logWarn } from "../../util/logger.ts";
 import { runBuildkitSetup as defaultRunBuildkitSetup } from "../../orchestration/ansible.ts";
-import { createSymlink } from "../../scoped-writes.ts";
+import { createSymlink } from "../../permissions/scoped-writes.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
-import type { EnvironmentDeploySourceBuild } from "../../instance/commands/contracts.ts";
+import type { EnvironmentDeploySourceBuild } from "../../contracts/commands-contracts.ts";
 import type { ReleaseOutputHandler } from "./checkout.ts";
 
 /** Keep in step with orchestration/roles/buildkit/defaults/main.yml. */

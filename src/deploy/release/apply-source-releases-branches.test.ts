@@ -8,7 +8,7 @@ import { join } from "@std/path";
 import type {
   EnvironmentDeployPayload,
   EnvironmentDeploySource,
-} from "../../instance/commands/contracts.ts";
+} from "../../contracts/commands-contracts.ts";
 import type { DecryptSecretsFn } from "../materialize-tls.ts";
 import { resolveLayout } from "../../paths/layout.ts";
 import { createTempLayout } from "../../testing/temp-layout.ts";

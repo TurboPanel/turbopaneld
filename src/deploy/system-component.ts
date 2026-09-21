@@ -136,7 +136,7 @@ export function systemComponentContract(
 
 /**
  * Expected `containerName` for a system component — mirrors instance
- * `expectedSystemComponentContainerName` in `src/lib/commands/schemas.ts`.
+ * `expectedSystemComponentContainerName` in `src/contracts/commands/schemas.ts`.
  *
  * | component | expected `containerName` |
  * | --- | --- |

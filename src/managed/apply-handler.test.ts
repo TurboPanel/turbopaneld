@@ -3,7 +3,7 @@
  */
 
 import { assertEquals, assertRejects } from "@std/assert";
-import type { ManagedApplyPayload } from "../instance/commands/contracts.ts";
+import type { ManagedApplyPayload } from "../contracts/commands-contracts.ts";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";

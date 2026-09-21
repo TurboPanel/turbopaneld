@@ -4,7 +4,7 @@ import type { SensorIo } from "../sensors/discovery.ts";
 import { SysfsGpuAdapter } from "./sysfs-adapter.ts";
 import { buildGpuSamples } from "./index.ts";
 import type { GpuAdapterSet, GpuReadContext } from "./adapter.ts";
-import type { GpuTopology } from "../../topology/types.ts";
+import type { GpuTopology } from "../../../contracts/topology-types.ts";
 
 const test = Deno.test.bind(Deno);
 

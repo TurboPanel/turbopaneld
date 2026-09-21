@@ -19,7 +19,7 @@
  */
 
 import { join } from "@std/path";
-import { logWarn } from "../logger.ts";
+import { logWarn } from "../util/logger.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 
 export type DockerNetworkingDescriptor = {

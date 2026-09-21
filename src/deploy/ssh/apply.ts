@@ -19,7 +19,7 @@
  */
 
 import { dirname } from "@std/path";
-import { logInfo, logWarn } from "../../logger.ts";
+import { logInfo, logWarn } from "../../util/logger.ts";
 import { accessGroup } from "../../runtime/registry.ts";
 import type { RunFn, RunResult } from "../ensure-principal.ts";
 import {

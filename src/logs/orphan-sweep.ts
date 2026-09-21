@@ -13,7 +13,7 @@
  * lifetime, so "reconnect" is never proof that nothing is running.
  */
 
-import { logInfo, logWarn, sanitizeForLog } from "../logger.ts";
+import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { commandLogSpoolDir, type LayoutPaths } from "../paths/layout.ts";
 import { isActiveSpoolPath } from "./spool.ts";
 import type { SendCommandLogChunkFn } from "./uploader.ts";

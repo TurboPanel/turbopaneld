@@ -15,7 +15,7 @@ import {
   type DenoLockfile,
   type NoticePackage,
   NOTICES_FILE_NAME,
-} from "../src/lib/notices.ts";
+} from "./lib/notices.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.

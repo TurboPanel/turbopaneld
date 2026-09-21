@@ -10,14 +10,14 @@
 import type {
   ManagedPromotePayload,
   ManagedPromoteResult,
-} from "../instance/commands/contracts.ts";
+} from "../contracts/commands-contracts.ts";
 import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts";
 import {
   type DockerCliResult,
   runDocker as defaultRunDocker,
   type RunDockerOptions,
 } from "../deploy/docker-cli.ts";
-import { sanitizeForLog } from "../logger.ts";
+import { sanitizeForLog } from "../util/logger.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import {
   collectManagedContainers,
@@ -26,7 +26,7 @@ import {
 import { getManagedEngineRuntime } from "./engines/index.ts";
 import type { ManagedEngineContext } from "./engines/types.ts";
 import { ManagedReplicationNotSupportedError } from "./engines/types.ts";
-import { managedComposeProject } from "./paths.ts";
+import { managedComposeProject } from "./engine-paths.ts";
 
 type DecryptSecretsFn = (ciphertexts: string[]) => Promise<(string | null)[]>;
 type RunDockerFn = (

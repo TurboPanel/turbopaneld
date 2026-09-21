@@ -5,7 +5,10 @@
  * aggregate jiffie deltas into percentages, so this is the only per-core
  * `/proc/cpuinfo` parsing in the daemon.
  */
-import type { CpuCoreTopology, CpuTopology } from "./types.ts";
+import type {
+  CpuCoreTopology,
+  CpuTopology,
+} from "../../contracts/topology-types.ts";
 
 export type CpuTopologyDeps = {
   readProcFile: (

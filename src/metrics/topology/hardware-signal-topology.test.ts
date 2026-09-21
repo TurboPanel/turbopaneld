@@ -8,7 +8,10 @@ import {
   CPU_THERMAL_THROTTLED_SIGNAL_ID,
   gpuSignalId,
 } from "./hardware-signal-topology.ts";
-import type { BlockDeviceTopology, GpuTopology } from "./types.ts";
+import type {
+  BlockDeviceTopology,
+  GpuTopology,
+} from "../../contracts/topology-types.ts";
 
 const test = Deno.test.bind(Deno);
 

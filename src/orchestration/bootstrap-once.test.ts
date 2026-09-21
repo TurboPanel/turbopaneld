@@ -84,7 +84,7 @@ describe("runBootstrapOrchestration", () => {
   });
 
   it("present:true smoke-test forwards JSONL events and raw lines", async () => {
-    const { UV_BIN } = await import("./paths.ts");
+    const { UV_BIN } = await import("./assets.ts");
     const { ansibleBinDir, bootstrapStampFile } = runtimePaths(
       fixture.runtimesDir,
     );

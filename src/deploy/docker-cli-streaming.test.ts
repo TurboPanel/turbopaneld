@@ -9,7 +9,7 @@ import {
   setDockerCliIoForTest,
 } from "./docker-cli.ts";
 import { RUNTIME_COMPOSE_FILENAME } from "./compose-files.ts";
-import { handleEnvironmentStop } from "../instance/commands/stop-environment.ts";
+import { handleEnvironmentStop } from "../commands/stop-environment.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.

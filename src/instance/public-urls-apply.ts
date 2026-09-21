@@ -3,7 +3,7 @@ import {
   devOwnershipPlaybookExtraArgs,
   runLocalPlaybook,
 } from "../orchestration/ansible.ts";
-import { INSTANCE_CERTS_APPLY_PLAYBOOK } from "../orchestration/paths.ts";
+import { INSTANCE_CERTS_APPLY_PLAYBOOK } from "../orchestration/assets.ts";
 import { resolveDevRoot, resolveLayout } from "../paths/layout.ts";
 import { upsertPublicUrlsInEnv } from "./public-urls-env.ts";
 

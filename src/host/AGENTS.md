@@ -8,8 +8,8 @@ change-detected heartbeats.
 - **Time sync** — `src/host/time-sync.ts` (cache-light `timedatectl show`,
   with `timedatectl status` + `/etc/timezone` fallbacks, plus `timesyncd.conf`
   read; carried on hello and change-detected heartbeats with `ips` from
-  `src/server-addresses.ts`).
-- **Addresses** — `src/server-addresses.ts` (`collectServerIps`): non-virtual
+  `src/host/server-addresses.ts`).
+- **Addresses** — `src/host/server-addresses.ts` (`collectServerIps`): non-virtual
   interface addresses, classified public/private per family. Pass
   `readDefaultRouteInterfaces()` (parsed from `/proc/net/route` and
   `/proc/net/ipv6_route`) and the addresses on the default-route NIC are marked
@@ -23,7 +23,7 @@ change-detected heartbeats.
   `docker compose version`; `server.metadata.docker` is omitted when the CLI
   is not installed; carried on hello and change-detected heartbeats).
 - **Commands** — `server.hostname.set`, `server.reboot`, `server.timezone.set`,
-  `server.ntp.set` (and deploy/lifecycle/stop/ping) via `src/instance/commands/`.
+  `server.ntp.set` (and deploy/lifecycle/stop/ping) via `src/commands/`.
   `environment.lifecycle` is non-destructive `compose start|stop|restart`
   (volumes, deployment dir, and hosting Caddy sites untouched). Timezone
   / NTP apply through Ansible role `time-sync` + playbook `time-sync-apply.yml`
@@ -53,7 +53,7 @@ change-detected heartbeats.
   `advertisedCidrs` now defaults to the datacenter's IPv4 subnets; a
   **non-empty** stored `advertisedCidrs` is an operator override used
   verbatim. IPv6 is excluded because `TP-FORWARD` is installed with
-  `iptables` only in `src/instance/commands/fabric.ts` (routed bridges use
+  `iptables` only in `src/commands/fabric.ts` (routed bridges use
   `com.docker.network.bridge.gateway_mode_ipv4=routed`; no `ip6tables` path)
   — operators may still add IPv6 ranges explicitly. The
   Docker monitor also reinstalls that jump when dockerd becomes reachable again

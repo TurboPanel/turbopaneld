@@ -23,7 +23,7 @@
 
 import { assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
-import type { FirewallReconcilePayload } from "../instance/commands/contracts.ts";
+import type { FirewallReconcilePayload } from "../contracts/commands-contracts.ts";
 import { renderFirewall } from "./render.ts";
 
 const test = Deno.test.bind(Deno);

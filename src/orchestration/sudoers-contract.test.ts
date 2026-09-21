@@ -1,7 +1,7 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import { parse as parseYaml } from "yaml";
-import { DAEMON_WRITABLE_VENDOR_DIRS } from "../daemon-permissions.ts";
+import { DAEMON_WRITABLE_VENDOR_DIRS } from "../permissions/daemon-permissions.ts";
 import { PROD_RUNTIME_DIR_DEFAULT } from "../paths/layout.ts";
 
 /**

@@ -18,7 +18,7 @@
  * than "Docker with nothing running".
  */
 import type { DockerSystemDf } from "../../docker/client.ts";
-import type { DockerUsageSample } from "../contract.ts";
+import type { DockerUsageSample } from "../../contracts/metrics-contract.ts";
 
 /**
  * How often `/system/df` is re-read. Slower than the metrics tick and matched

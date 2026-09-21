@@ -1,4 +1,4 @@
-import type { ServerReportedIp } from "../server-addresses.ts";
+import type { ServerReportedIp } from "./server-addresses.ts";
 
 /**
  * Static host capacity facts for hello resources (CPU sockets / GPUs /

@@ -6,7 +6,7 @@
  * behavior (including the "not running" failure) stays identical everywhere.
  */
 
-import type { EnvironmentDeployContainer } from "../instance/commands/contracts.ts";
+import type { EnvironmentDeployContainer } from "../contracts/commands-contracts.ts";
 import {
   type DockerCliResult,
   runDocker as defaultRunDocker,
@@ -17,7 +17,7 @@ type RunDockerFn = (
   args: string[],
   options?: RunDockerOptions,
 ) => Promise<DockerCliResult>;
-import { logInfo } from "../logger.ts";
+import { logInfo } from "../util/logger.ts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

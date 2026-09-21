@@ -1,6 +1,6 @@
 /**
  * Classify whether a control-plane origin needs bootstrap insecure TLS.
- * Keep in step with instance `src/lib/install-tls.ts`.
+ * Keep in step with instance `src/features/install/install-tls.ts`.
  */
 
 const LOCAL_TLDS = new Set([

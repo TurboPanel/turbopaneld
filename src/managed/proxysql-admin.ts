@@ -11,9 +11,12 @@ import {
   runDocker as defaultRunDocker,
   type RunDockerOptions,
 } from "../deploy/docker-cli.ts";
-import { sanitizeForLog } from "../logger.ts";
+import { sanitizeForLog } from "../util/logger.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
-import { proxysqlAdminCnfPath, proxysqlMonitorCnfPath } from "./paths.ts";
+import {
+  proxysqlAdminCnfPath,
+  proxysqlMonitorCnfPath,
+} from "./engine-paths.ts";
 
 export type ProxySqlAdminCredentials = {
   user: string;

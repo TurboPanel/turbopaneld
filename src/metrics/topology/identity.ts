@@ -14,7 +14,7 @@ import type {
   FilesystemId,
   NetworkDeviceIdentity,
   TopologyDeviceId,
-} from "./types.ts";
+} from "../../contracts/topology-types.ts";
 
 /** Sysfs access seam — identical shape to `collector/sensors/discovery.ts`'s `SensorIo`. */
 export type IdentityIo = {

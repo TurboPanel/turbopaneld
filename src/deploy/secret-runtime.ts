@@ -8,7 +8,7 @@ import type { DecryptSecretsFn } from "./materialize-tls.ts";
 import type {
   EnvironmentDeploySecretPlanEntry,
   EnvironmentDeployVariableMaterial,
-} from "../instance/commands/contracts.ts";
+} from "../contracts/commands-contracts.ts";
 
 export const SECRET_FILE_MODE = 0o600;
 export const SECRET_DIR_MODE = 0o700;

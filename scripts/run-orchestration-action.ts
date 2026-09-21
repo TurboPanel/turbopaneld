@@ -5,7 +5,7 @@
  *
  * Location-agnostic: this script lives inside the daemon checkout
  * (`<checkout>/scripts/`) and resolves every path through the daemon's own
- * layout-aware modules (`src/orchestration/paths.ts`, `src/paths/layout.ts`). It
+ * layout-aware modules (`src/orchestration/assets.ts`, `src/paths/layout.ts`). It
  * therefore works whether the checkout is the co-located dev tree under the dev
  * user's home (`<home>/turbopaneld`) or the FHS install root — it never names a
  * `/opt/turbopanel/platform` tree.
@@ -49,7 +49,7 @@ import {
   ANSIBLE_PLAYBOOK_CWD,
   ansibleEnv,
   ORCHESTRATION_DIR,
-} from "../src/orchestration/paths.ts";
+} from "../src/orchestration/assets.ts";
 import { readEnv, resolveDevRoot, resolveLayout } from "../src/paths/layout.ts";
 
 /** Playbooks that include the docker role (or a role with a docker meta-dep). */

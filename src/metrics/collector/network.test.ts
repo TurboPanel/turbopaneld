@@ -8,7 +8,7 @@ import {
   readNetInterfaceDetailedCounters,
 } from "./network.ts";
 import { defaultSensorIo } from "./sensors/discovery.ts";
-import type { NetworkDeviceTopology } from "../topology/types.ts";
+import type { NetworkDeviceTopology } from "../../contracts/topology-types.ts";
 
 function fixture(name: string): string {
   return Deno.readTextFileSync(

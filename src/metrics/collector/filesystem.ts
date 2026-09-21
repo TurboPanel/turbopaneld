@@ -8,8 +8,8 @@
  */
 import { statfs } from "node:fs/promises";
 
-import type { FilesystemSample } from "../contract.ts";
-import type { FilesystemTopology } from "../topology/types.ts";
+import type { FilesystemSample } from "../../contracts/metrics-contract.ts";
+import type { FilesystemTopology } from "../../contracts/topology-types.ts";
 import type { StorageProbeResult } from "./types.ts";
 
 export type StatfsLike = {

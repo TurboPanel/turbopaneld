@@ -26,7 +26,7 @@ describe("ensurePython leftover branches", () => {
   let fixture: OrchestrationRuntimeFixture;
   let envSnapshot: Map<string, string | undefined>;
   let python: typeof import("./python.ts");
-  let paths: typeof import("./paths.ts");
+  let paths: typeof import("./assets.ts");
 
   beforeAll(async () => {
     envSnapshot = snapshotOrchestrationEnv();
@@ -34,7 +34,7 @@ describe("ensurePython leftover branches", () => {
       withAnsibleBinaries: false,
     });
     applyOrchestrationEnv(fixture.env);
-    paths = await import("./paths.ts");
+    paths = await import("./assets.ts");
     python = await import("./python.ts");
     if (!paths.PYTHON_RUNTIME_DIR.startsWith(fixture.runtimesDir)) {
       throw new TypeError(

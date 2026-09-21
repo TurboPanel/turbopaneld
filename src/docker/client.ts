@@ -1,4 +1,4 @@
-import { logWarn } from "../logger.ts";
+import { logWarn } from "../util/logger.ts";
 
 /** Base URL used with the Unix-socket HTTP client (host is ignored). */
 // Docker Engine speaks plain HTTP over the Unix socket; there is no TLS hop.

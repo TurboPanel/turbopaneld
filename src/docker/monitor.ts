@@ -4,7 +4,7 @@ import type {
   DockerClient,
   DockerEvent,
 } from "./client.ts";
-import { logInfo, logWarn } from "../logger.ts";
+import { logInfo, logWarn } from "../util/logger.ts";
 
 export type DockerMonitorChange = {
   containerId: string;

@@ -27,7 +27,7 @@ import { parseMeminfoDiagnostics } from "./parse-meminfo.ts";
 import { parseStatScalarCounters } from "./parse-stat.ts";
 import { parseVmstatReclaim } from "./parse-vmstat.ts";
 import type { CounterBaselineTracker } from "./baseline.ts";
-import type { DiagnosticsSample } from "../contract.ts";
+import type { DiagnosticsSample } from "../../contracts/metrics-contract.ts";
 import type { SensorIo } from "./sensors/discovery.ts";
 import type { CpuCounters } from "./types.ts";
 

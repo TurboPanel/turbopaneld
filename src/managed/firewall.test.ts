@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import type { ManagedApplyPayload } from "../instance/commands/contracts.ts";
+import type { ManagedApplyPayload } from "../contracts/commands-contracts.ts";
 import {
   MANAGED_PUBLIC_CHAIN,
   managedFirewallChain,

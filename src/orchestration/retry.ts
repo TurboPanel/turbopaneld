@@ -1,4 +1,4 @@
-import { logWarn } from "../logger.ts";
+import { logWarn } from "../util/logger.ts";
 
 export interface RetryOptions {
   /** Total number of attempts, including the first. Defaults to 3. */

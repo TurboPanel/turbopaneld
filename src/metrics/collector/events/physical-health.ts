@@ -20,7 +20,7 @@
  */
 import type { EventCollector, EventDetectContext } from "./types.ts";
 import { makeEvent } from "./types.ts";
-import type { MetricEvent } from "../../contract.ts";
+import type { MetricEvent } from "../../../contracts/metrics-contract.ts";
 import type { SensorIo } from "../sensors/discovery.ts";
 
 const INPUT_SUFFIX = "_input";

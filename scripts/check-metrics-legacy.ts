@@ -51,10 +51,13 @@
  */
 import { relative } from "@std/path";
 
-const repoRoot = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
-const workspaceRoot = new URL("../..", import.meta.url).pathname.replace(
-  /\/$/,
-  "",
+function stripTrailingSlash(value: string): string {
+  return value.endsWith("/") ? value.slice(0, -1) : value;
+}
+
+const repoRoot = stripTrailingSlash(new URL("..", import.meta.url).pathname);
+const workspaceRoot = stripTrailingSlash(
+  new URL("../..", import.meta.url).pathname,
 );
 
 /** The retired ClickHouse backend / Tabix GUI — code or comment, case-insensitive. */
@@ -81,20 +84,21 @@ export const RETIRED_DATASET_PATTERN =
 export const ALLOWED_PATH_PREFIXES = [
   // turbopaneld: managed-engine registry + command contracts (MANAGED_ENGINE_CODES).
   "turbopaneld/src/managed/",
-  "turbopaneld/src/instance/commands/contracts.ts",
+  "turbopaneld/src/contracts/commands-contracts.ts",
   // This guard's own pattern constants.
   "turbopaneld/scripts/check-metrics-legacy.ts",
   "turbopaneld/scripts/check-metrics-legacy.test.ts",
   // turbopanel: managed-engine catalog/openapi/principals surface and the
   // `provider` CHECK constraint (schema + its doc).
-  "turbopanel/src/lib/managed/",
+  "turbopanel/src/features/managed/",
+  "turbopanel/src/features/principals/",
   "turbopanel/src/client/",
-  "turbopanel/src/lib/db/schema.ts",
-  "turbopanel/src/lib/db/resource-hierarchy.md",
+  "turbopanel/src/db/schema.ts",
+  "turbopanel/src/db/resource-hierarchy.md",
   // turbopanel: the schema descriptions (source of every `COMMENT ON` and of
   // the website data dictionary) name the managed catalog engine exactly as
   // schema.ts does for `managed.engine` / `principal.provider`.
-  "turbopanel/src/lib/db/schema-descriptions.ts",
+  "turbopanel/src/db/schema-descriptions.ts",
   // website: generated data dictionary — renders those CHECK constraints and
   // descriptions verbatim (never hand-edited; see website/AGENTS.md).
   "website/docs/database/",
@@ -186,13 +190,13 @@ export const METRICS_CONTRACT_SURFACE_EXACT_PATHS = new Set([
   // are themselves backend-neutral (`SlotMapping` is computed once by the
   // ingest route and handed to whichever backend is active). Mirrors
   // turbopanel/scripts/check-metrics-boundaries.mjs's EXTRA_SURFACE_FILES.
-  "turbopanel/src/client/servers/server-topology-records.ts",
-  "turbopanel/src/client/servers/server-topology-records.test.ts",
+  "turbopanel/src/features/servers/server-topology-records.ts",
+  "turbopanel/src/features/servers/server-topology-records.test.ts",
   "turbopanel/src/client/servers/topology-inventory.ts",
   "turbopanel/src/client/servers/topology-inventory.test.ts",
-  "turbopanel/src/client/servers/topology-slot-mapping.ts",
-  "turbopanel/src/client/servers/topology-slot-mapping.test.ts",
-  "turbopanel/src/client/servers/topology-types.ts",
+  "turbopanel/src/contracts/topology-slot-mapping.ts",
+  "turbopanel/src/contracts/topology-slot-mapping.test.ts",
+  "turbopanel/src/contracts/topology-types.ts",
 ]);
 
 function isMetricsContractSurface(scoped: string): boolean {

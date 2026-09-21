@@ -13,7 +13,7 @@
  * unsupported GPU, a vGPU profile) stays unset here — the orchestrator
  * treats an unset field as `null`, never a `KeyError`.
  */
-import type { GpuTopology } from "../../topology/types.ts";
+import type { GpuTopology } from "../../../contracts/topology-types.ts";
 import { createRetryBoundedProbe } from "../proxy/endpoint-cache.ts";
 import {
   containsAnyMetricName,

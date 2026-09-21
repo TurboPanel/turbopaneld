@@ -7,8 +7,8 @@ access for managed engines is **one shared ProxySQL** per server
 (project = the `managed-ingress` `serviceId`), not per-service Traefik.
 
 Root context: `../../AGENTS.md`. Instance engine specs:
-`../../../turbopanel/src/lib/managed/AGENTS.md`. Command contracts:
-`../instance/commands/contracts.ts`. Host prerequisites:
+`../../../turbopanel/src/features/managed/AGENTS.md`. Command contracts:
+`../contracts/commands-contracts.ts`. Host prerequisites:
 `../../orchestration/roles/proxysql/AGENTS.md`.
 Certificate authorities: `../../../turbopanel/src/lib/tls/AGENTS.md`.
 
@@ -16,7 +16,7 @@ Certificate authorities: `../../../turbopanel/src/lib/tls/AGENTS.md`.
 
 | File | Role |
 | --- | --- |
-| `paths.ts` | Managed state-dir layout + identifier / relative-path guards; `managedBackupsDir` / `managedBackupArtifactPath`; ProxySQL layout helpers (`proxysqlConfigDir`, `proxysqlComposePath`, `proxysqlConfigPath`, `proxysqlTlsDir`, `proxysqlDataDir`, `proxysqlAdminCnfPath`, `proxysqlProject`) |
+| `engine-paths.ts` | Managed state-dir layout + identifier / relative-path guards; `managedBackupsDir` / `managedBackupArtifactPath`; ProxySQL layout helpers (`proxysqlConfigDir`, `proxysqlComposePath`, `proxysqlConfigPath`, `proxysqlTlsDir`, `proxysqlDataDir`, `proxysqlAdminCnfPath`, `proxysqlProject`) |
 | `compose.ts` | Platform compose normalization (image, volumes, resources); always joins the organization's managed network (`payload.managedNetwork`); optional private-listener-only `ports:` (rejects all other publishes / Traefik labels). Top-level data volumes are **name-pinned** (`name: <volume.name>`) — an unnamed entry gets the compose project prefix while `bootstrapStandby` throwaway containers `docker run -v <bare name>`, and that mismatch made every standby seed/probe operate on an orphan volume the engine never mounted (replicas silently initdb'd standalone clusters) |
 | `materialize.ts` | Write `config/` verbatim; optional engine self-signed TLS + `orgTlsMaterial` → `tls/server.*` + `tls/proxysql/`; ownership normalization via throwaway container (scoped to `config/`+`tls/`; backups live outside this tree entirely since v6); a second throwaway run then verifies config/TLS readability AS the engine user with subdir-shaped mounts, failing the apply loudly instead of letting the engine crash-loop on an untraversable dir. Standby replication passwords are **not** written under `auth/`. |
 | `tls.ts` | Engine self-signed cert generation; org-CA materialization for engine leaf + ProxySQL; standby passfile materialization |
@@ -27,7 +27,7 @@ Certificate authorities: `../../../turbopanel/src/lib/tls/AGENTS.md`.
 | `containers.ts` | Shared `docker compose ps` collection + running-container resolution used by `apply.ts` and `backup.ts` |
 | `apply.ts` / `lifecycle.ts` / `destroy.ts` / `promote.ts` | Engine command handlers (wired from `command-router.ts`); apply/destroy do **not** bring up per-service Traefik; `managed.promote` is the engine promote step after TurboPanel fencing. **`managed.destroy` always `compose -p <managedId> down`** — the compose project is the bare `managed` row UUID — even if the state dir is missing, then `docker ps -aq --filter label=com.docker.compose.project=…` and `docker rm -f` leftovers; compose down failure is **not** success while labeled containers remain. No `-f` (same interpolation rule as lifecycle). With `removeVolumes`, also `docker volume rm -f managed_<id>_data` best-effort by exact name — compose down -v only removes project-labeled volumes and misses pre-pin bare-name orphans. |
 | `orchestrator.ts` / `orchestrator-api.ts` | Per-org Orchestrator compose (project = the `managed-ha` `serviceId`, written into the compose file's own `name:` key so the stack unit needs no `-p`) + local HTTP (`:33001`); `Recover: false`; Raft `:33002` on advertise address only |
-| `../instance/commands/managed-ha-reconcile.ts` / `managed-ha-failover.ts` | `managed.ha.reconcile` (whole-server HA stack) + `managed.ha.failover` (`drain` / `recover`). Designated Orchestrator recover-to; on HTTP/API failure **or** absent stack, falls back to `managed.promote` so fencing is not stranded. `Recover: false` stays — TurboPanel picks the candidate. `Future:` fail-closed HA lease when Raft is unreachable. |
+| `../commands/managed-ha-reconcile.ts` / `managed-ha-failover.ts` | `managed.ha.reconcile` (whole-server HA stack) + `managed.ha.failover` (`drain` / `recover`). Designated Orchestrator recover-to; on HTTP/API failure **or** absent stack, falls back to `managed.promote` so fencing is not stranded. `Recover: false` stays — TurboPanel picks the candidate. `Future:` fail-closed HA lease when Raft is unreachable. |
 | `../instance/ha-observe.ts` | Poll local Orchestrator `/api/problems` when `configDir/orchestrator/docker-compose.yml` exists; emit unsolicited `managed-ha-event` |
 | `backup.ts` | `managed.backup` (`create`/`delete`) + `managed.restore` — streamed dump/restore, checksum, prune |
 | `logs.ts` | Bounded `compose logs`; cell `managed-logs-request` / `managed-logs-result` (not a command) |
@@ -160,7 +160,7 @@ side, so the daemon must treat them as data:
   `contracts.ts`): `1024`–`65535`, not `6032` / `6132`, not `45000`–`45999`. A
   looser daemon check would accept a payload the control plane considers
   invalid, which is how a half-configured ingress happens. Canonical rules:
-  `turbopanel/src/lib/managed/AGENTS.md` → **Client listener ports**.
+  `turbopanel/src/features/managed/AGENTS.md` → **Client listener ports**.
 
 ### Managed network self-heal
 
@@ -207,13 +207,13 @@ Frontend `default_hostgroup` comes from each user's `connectionRole`
 (`sortedReadSplitUsernames`) — read-only logins already default to the reader
 hostgroup. Do not reintroduce automatic read-split from `readEligible` alone; a
 blanket regex breaks read-after-write and locking reads for applications that
-never opted in. Canonical policy: `turbopanel/src/lib/managed/AGENTS.md` →
+never opted in. Canonical policy: `turbopanel/src/features/managed/AGENTS.md` →
 **Client routing**.
 
 Username frontend namespace is **server-wide** across every cluster hosted on that
 org's servers: `ManagedFrontendUserConflictError` when the same login would map
 to two managed ids. The instance enforces the same org-owner login uniqueness
-before enqueue (see `turbopanel/src/lib/managed/AGENTS.md` → Login namespace).
+before enqueue (see `turbopanel/src/features/managed/AGENTS.md` → Login namespace).
 
 ### Frontend TLS enforcement
 
@@ -236,7 +236,7 @@ The daemon does **not** know about SSL modes. The instance resolves the
 only the boolean; certificate *verification* (`verify-ca` / `verify-full`) is a
 client-side behavior the instance renders into DSNs, and there is nothing for
 ProxySQL to enforce. Canonical policy:
-`turbopanel/src/lib/managed/AGENTS.md` → **Client TLS (SSL mode)**.
+`turbopanel/src/features/managed/AGENTS.md` → **Client TLS (SSL mode)**.
 
 ## Rules
 
@@ -310,9 +310,9 @@ ProxySQL to enforce. Canonical policy:
    `ManagedEngineRuntime` + one registry entry in `engines/index.ts`.
 7a. **Engine image allowlist is a mirror, not a policy.**
    `MANAGED_ALLOWED_IMAGES_BY_ENGINE` in
-   `../instance/commands/contracts.ts` is the last stop before Docker runs a
+   `../contracts/commands-contracts.ts` is the last stop before Docker runs a
    `managed.apply` image, so it must stay byte-identical to the instance release
-   catalog (`../../turbopanel/src/lib/managed/releases.ts`) — including its
+   catalog (`../../turbopanel/src/features/managed/releases.ts`) — including its
    ordering (default series first, default variant first). Adding or retiring a
    series is a three-repo change (instance catalog, this mirror, UI
    `ui/src/lib/managed-releases.ts`); `command-types-parity.test.ts` pins this
@@ -342,7 +342,7 @@ ProxySQL to enforce. Canonical policy:
    (a separate SUPERUSER/grant, not a rename of the connection identity).
    Never assume the payload's root credential username equals
    `ctx.rootUsername`. Canonical contract:
-   `../../turbopanel/src/lib/managed/AGENTS.md` → "Login namespace".
+   `../../turbopanel/src/features/managed/AGENTS.md` → "Login namespace".
 10. **Backup/restore (`backup.ts`).** Optional per engine via
    `ManagedEngineRuntime.backup` (`ManagedBackupNotSupportedError` when absent).
    - **Stream, never buffer.** Dump stdout pipes to a `<backupId>.<ext>.part`

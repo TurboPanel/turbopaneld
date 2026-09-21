@@ -2,7 +2,7 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import type {
   FirewallReconcilePayload,
   FirewallRule,
-} from "../instance/commands/contracts.ts";
+} from "../contracts/commands-contracts.ts";
 import {
   CONTAINER_INGRESS_INTERFACES,
   FIREWALL_FORWARD_CHAIN,

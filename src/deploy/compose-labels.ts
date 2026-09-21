@@ -1,4 +1,4 @@
-import type { EnvironmentDeployPayload } from "../instance/commands/contracts.ts";
+import type { EnvironmentDeployPayload } from "../contracts/commands-contracts.ts";
 import type { ComposeOverlayFragment } from "./compose-overlay.ts";
 import type { ResolvedComposeModel } from "./compose-services.ts";
 import {

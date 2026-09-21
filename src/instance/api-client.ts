@@ -1,5 +1,5 @@
 import { encodeBase64 } from "@std/encoding/base64";
-import { type InstanceConfig, instanceUrl } from "./paths.ts";
+import { type InstanceConfig, instanceUrl } from "./sockets.ts";
 
 export interface DaemonApiClientOptions {
   config: InstanceConfig;

@@ -26,7 +26,7 @@
 import { closeSync, constants, openSync, readSync } from "node:fs";
 import type { EventCollector, EventDetectContext } from "./types.ts";
 import { makeEvent } from "./types.ts";
-import type { MetricEvent } from "../../contract.ts";
+import type { MetricEvent } from "../../../contracts/metrics-contract.ts";
 
 export const DEFAULT_HUNG_TASK_INTERVAL_MS = 2 * 60_000;
 const MAX_SEEN_LINES = 500;

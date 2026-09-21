@@ -18,9 +18,9 @@ import type {
   MetricEvent,
   MetricEventKind,
   MetricEventSeverity,
-} from "../../contract.ts";
+} from "../../../contracts/metrics-contract.ts";
 import { fnv1aHex } from "../../topology/identity.ts";
-import type { TopologySnapshot } from "../../topology/types.ts";
+import type { TopologySnapshot } from "../../../contracts/topology-types.ts";
 import type { CounterBaselineTracker } from "../baseline.ts";
 import type { GpuThermalReadings } from "../gpu/index.ts";
 import type { MountEntry } from "../mounts.ts";

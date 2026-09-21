@@ -89,7 +89,7 @@ no-op (`failed_when: false` on the live grant).
 ### TurboFabric (`server.fabric.reconcile`)
 
 There is **no** Ansible WireGuard apply role. The daemon
-(`src/instance/commands/fabric.ts`) owns the org mesh on interface `tp0`:
+(`src/commands/fabric.ts`) owns the org mesh on interface `tp0`:
 mode-`0600` private key and `tp0.conf` under `<daemonStateDir>/network/wireguard/`,
 `wg syncconf`, `wg-quick@tp0` for reboot durability, `/etc/sysctl.d/99-turbopanel-fabric.conf`
 (`net.ipv4.ip_forward=1`), Docker routed-bridge networks, and `TP-FORWARD` off

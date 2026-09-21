@@ -32,7 +32,11 @@ import {
   resolveRuntimesDir,
 } from "../src/paths/layout.ts";
 
-const repoRoot = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+function stripTrailingSlash(value: string): string {
+  return value.endsWith("/") ? value.slice(0, -1) : value;
+}
+
+const repoRoot = stripTrailingSlash(new URL("..", import.meta.url).pathname);
 
 export function recordLayoutMismatch(
   failures: string[],
@@ -267,7 +271,7 @@ export const RETIRED_LIB_RUNTIME_REF = /\/opt\/turbopanel\/lib\/runtime/;
 export const RETIRED_LIB_INSTANCE_REF = /\/opt\/turbopanel\/lib\/instance/;
 export const RETIRED_RUNTIMES_SCAN_ALLOWLIST = new Set([
   "scripts/check-production-layout.ts",
-  "src/dev-sync-apply.ts", // comment only: documents legacy path for operators
+  "src/dev-sync/apply.ts", // comment only: documents legacy path for operators
   "src/orchestration/cloudflared.ts", // comment only
   "scripts/run.sh", // removes the retired lib/instance subtree on upgrade
 ]);
@@ -275,14 +279,14 @@ export const RETIRED_RUNTIMES_SCAN_ALLOWLIST = new Set([
 export const RUNTIME_ROOT_LITERAL = /\/opt\/turbopanel\/vendor/;
 export const RUNTIME_ROOT_SCAN_ALLOWLIST = new Set([
   "src/paths/layout.ts",
-  "src/orchestration/paths.test.ts",
+  "src/orchestration/assets.test.ts",
   "scripts/check-production-layout.ts",
   "scripts/lib/runtime-paths.sh",
   "scripts/install-daemon-systemd.sh",
   "orchestration/playbooks/daemon-install.yml", // comment only
   "orchestration/roles/deno-runtime/meta/main.yml", // role description
-  // Scoped Deno grants rendered from src/daemon-permissions.ts (which builds
-  // them from the layout module); src/daemon-permissions.test.ts pins both
+  // Scoped Deno grants rendered from src/permissions/daemon-permissions.ts (which builds
+  // them from the layout module); src/permissions/daemon-permissions.test.ts pins both
   // copies to that renderer, so the literals cannot drift.
   "scripts/run.sh",
   "orchestration/roles/daemon-launch/templates/turbopaneld.service.j2",

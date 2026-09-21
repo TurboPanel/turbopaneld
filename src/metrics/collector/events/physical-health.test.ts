@@ -8,7 +8,7 @@ import type {
 import type {
   PhysicalSignalTopology,
   TopologySnapshot,
-} from "../../topology/types.ts";
+} from "../../../contracts/topology-types.ts";
 import type { SensorIo } from "../sensors/discovery.ts";
 import type { SensorCandidate } from "../types.ts";
 

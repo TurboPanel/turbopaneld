@@ -8,7 +8,7 @@
  */
 import type { EventCollector, EventDetectContext } from "./types.ts";
 import { makeEvent } from "./types.ts";
-import type { MetricEvent } from "../../contract.ts";
+import type { MetricEvent } from "../../../contracts/metrics-contract.ts";
 
 export type MdArrayState = {
   name: string;

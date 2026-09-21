@@ -8,13 +8,14 @@ import {
   InstanceClient,
   PARKED_BACKOFF_MIN_MS,
 } from "./client.ts";
+import { wireCommandPorts } from "../commands/wire.ts";
 import { PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN } from "../metrics/capability-plan.ts";
 import {
   readCapabilityPlan,
   writeCapabilityPlan,
 } from "../metrics/collector/capability-plan-store.ts";
 import { setDrivetempExecutorForTests } from "../metrics/collector/sensors/drivetemp.ts";
-import type { TopologySnapshot } from "../metrics/topology/types.ts";
+import type { TopologySnapshot } from "../contracts/topology-types.ts";
 import {
   challengeResponse,
   createFakeInstanceApi,
@@ -29,6 +30,8 @@ import {
   type TestSigningMaterial,
   withTempLayout,
 } from "../testing/index.ts";
+
+wireCommandPorts();
 
 type EnrollIdentity = { serverId: string; keyId: string };
 

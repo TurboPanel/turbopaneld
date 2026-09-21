@@ -2,7 +2,7 @@
  * Shared `docker compose ps --format json` parsing for tenant deploy handlers.
  */
 
-import type { EnvironmentDeployContainer } from "../instance/commands/contracts.ts";
+import type { EnvironmentDeployContainer } from "../contracts/commands-contracts.ts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

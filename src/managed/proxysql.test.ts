@@ -541,7 +541,7 @@ test("readCurrentProxySqlBindAddresses reflects a previously-published bind on d
   const { createTempLayout } = await import("../testing/temp-layout.ts");
   const { resolveLayout } = await import("../paths/layout.ts");
   const { proxysqlComposePath, proxysqlConfigDir } = await import(
-    "./paths.ts"
+    "./engine-paths.ts"
   );
   const fixture = await createTempLayout();
   try {
@@ -1356,7 +1356,9 @@ test("readPublishedListenerPortsFromCompose returns null when nothing is publish
 });
 
 test("readCurrentProxySqlListenerPorts round-trips through disk", async () => {
-  const { proxysqlComposePath, proxysqlConfigDir } = await import("./paths.ts");
+  const { proxysqlComposePath, proxysqlConfigDir } = await import(
+    "./engine-paths.ts"
+  );
   const fixture = await createTempLayout();
   try {
     const layout = resolveLayout(fixture.env);

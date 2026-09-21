@@ -6,9 +6,12 @@ import {
   cloudflaredDir,
   cloudflaredDownloadUrl,
   resolveCloudflaredAsset,
-} from "./paths.ts";
-import { logInfo, logWarn } from "../logger.ts";
-import { createSymlink, installVendorExecutable } from "../scoped-writes.ts";
+} from "./assets.ts";
+import { logInfo, logWarn } from "../util/logger.ts";
+import {
+  createSymlink,
+  installVendorExecutable,
+} from "../permissions/scoped-writes.ts";
 
 async function fileExists(path: string): Promise<boolean> {
   try {

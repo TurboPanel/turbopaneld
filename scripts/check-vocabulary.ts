@@ -21,7 +21,11 @@
  */
 import { relative } from "@std/path";
 
-const repoRoot = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+function stripTrailingSlash(value: string): string {
+  return value.endsWith("/") ? value.slice(0, -1) : value;
+}
+
+const repoRoot = stripTrailingSlash(new URL("..", import.meta.url).pathname);
 
 // --- Forbidden phrases ------------------------------------------------------
 // Exact phrases, matched case-insensitively as substrings. Extend this list

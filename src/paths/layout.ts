@@ -88,7 +88,7 @@ export function resolveDevRoot(
 
 /**
  * Development daemon checkout default (`<devRoot>/turbopaneld`) when no tree is
- * resolvable. Keep the export name — tests and `orchestration/paths.ts`
+ * resolvable. Keep the export name — tests and `orchestration/assets.ts`
  * re-export it, and `resolveDevRoot({})` reproduces it deterministically.
  */
 export const DEV_DAEMON_ROOT_DEFAULT = join(DEV_ROOT_DEFAULT, "turbopaneld");
@@ -121,7 +121,7 @@ export interface LayoutPaths {
   /**
    * Managed-engine backup root (`/backup`), overridable with
    * `TURBOPANEL_BACKUP_DIR`. Per-engine artifacts live at
-   * `<backupDir>/<managedId>/` — see `managed/paths.ts`'s
+   * `<backupDir>/<managedId>/` — see `managed/engine-paths.ts`'s
    * `managedBackupsDir`. Changing the override only affects *new* backups;
    * nothing relocates an existing tree.
    */

@@ -1,6 +1,6 @@
 import { assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
-import type { EnvironmentDeployPayload } from "../instance/commands/contracts.ts";
+import type { EnvironmentDeployPayload } from "../contracts/commands-contracts.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import {

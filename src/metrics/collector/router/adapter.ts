@@ -10,7 +10,7 @@
  * topology-enumerated — but it answers with a bare reading rather than an
  * identity-plus-reading pair.
  */
-import type { RouterSample } from "../../contract.ts";
+import type { RouterSample } from "../../../contracts/metrics-contract.ts";
 import type { CounterBaselineTracker } from "../baseline.ts";
 
 /**

@@ -21,7 +21,7 @@ import {
   listLocalDeploymentManifests,
   type LocalDeploymentManifest,
 } from "../deploy/compose-files.ts";
-import { sanitizeForLog } from "../logger.ts";
+import { sanitizeForLog } from "../util/logger.ts";
 import {
   type MutableTranscriptRedactor,
   sharedSecretRedactor,

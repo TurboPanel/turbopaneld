@@ -10,7 +10,7 @@ import {
 import {
   fingerprintPemCertificate,
   invalidatePlatformCaHttpClient,
-} from "./paths.ts";
+} from "./sockets.ts";
 import {
   challengeResponse,
   createFakeClock,

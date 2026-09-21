@@ -1,9 +1,5 @@
 import { restartDaemonService } from "./restart-daemon-service.ts";
 import {
-  type CommandRouterDeps,
-  handleCommandDispatch,
-} from "./commands/command-router.ts";
-import {
   createInstanceHttpClient,
   describeInstance,
   fingerprintPemCertificate,
@@ -14,38 +10,38 @@ import {
   resolveInstanceCaPath,
   resolveInstanceConfig,
   resolveServerIdentityDir,
-} from "./paths.ts";
+} from "./sockets.ts";
 import {
   collectServerIps,
   readDefaultRouteInterfaces,
   type ServerReportedIp,
-} from "../server-addresses.ts";
+} from "../host/server-addresses.ts";
 import {
   readRemoteFiles,
   resolveDefaultBranch,
 } from "../deploy/release/read-remote-files.ts";
 import { collectManagedLogs } from "../managed/logs.ts";
 import { collectContainerLogs } from "../logs/container-tail.ts";
-import { handleFabricPathProbe } from "./commands/fabric.ts";
+import type { SendCommandLogChunkFn } from "../logs/uploader.ts";
 import {
   type DevSyncState,
   MANAGED_DEV_SYNC_REFUSED_REASON,
   newDevSyncState,
   resolveDevSyncSourceRoot,
-} from "../dev-sync-resolve.ts";
+} from "../dev-sync/resolve.ts";
 import {
   type DevSyncApplyFn,
   getCheckoutDevSyncApply,
-} from "./dev-sync-runtime.ts";
+} from "../dev-sync/runtime.ts";
 import { applyPublicUrls } from "./public-urls-apply.ts";
-import { writeInstanceTunnelToken } from "../tunnels.ts";
+import { writeInstanceTunnelToken } from "../tunnels/supervisor.ts";
 import {
   logDebug,
   logError,
   logInfo,
   logWarn,
   sanitizeForLog,
-} from "../logger.ts";
+} from "../util/logger.ts";
 import { type DaemonKeyFile, loadDaemonKeyFile } from "../crypto/keys.ts";
 import { readMachineKey } from "../host/machine-key.ts";
 import { DaemonApiClient, DaemonApiError } from "./api-client.ts";
@@ -70,10 +66,7 @@ import { collectMetricsCapabilities } from "../metrics/collector/capabilities.ts
 import type { MetricsScheduler } from "../metrics/scheduler.ts";
 import { rebindMetricsScheduler } from "../metrics/scheduler.ts";
 import { LiveLeaseManager } from "../metrics/live-leases.ts";
-import {
-  type MetricsCapabilityPlan,
-  parseMetricsCapabilityPlan,
-} from "../metrics/capability-plan.ts";
+import { parseMetricsCapabilityPlan } from "../metrics/capability-plan.ts";
 import {
   clearCapabilityPlan,
   writeCapabilityPlan,
@@ -82,9 +75,7 @@ import {
   resolveHardwareProfile,
   writeHardwareProfile,
 } from "../metrics/collector/sensors/overrides.ts";
-import { handleDrivetempEnable } from "./commands/drivetemp.ts";
-import type { DrivetempEnableResult } from "./commands/contracts.ts";
-import type { HardwareProfile } from "../metrics/collector/types.ts";
+import type { DrivetempEnableResult } from "../contracts/commands-contracts.ts";
 import { resolveUpdateChannelConfig } from "../update/config.ts";
 import { resolveUpdate } from "../update/resolver.ts";
 import {
@@ -100,314 +91,70 @@ import { installOriginNeedsInsecureTls } from "./install-tls.ts";
 import { ManagedHaObserver } from "./ha-observe.ts";
 import { AcmeIssuanceObserver } from "./acme-observe.ts";
 import { TopologyReporter } from "./topology-reporter.ts";
-import type { TopologySnapshot } from "../metrics/topology/types.ts";
+import type { TopologySnapshot } from "../contracts/topology-types.ts";
+import type { DaemonMessage } from "../contracts/cell-messages.ts";
 
-type DaemonMessage =
-  | { type: "echo"; payload: unknown; at: string }
-  | { type: "version"; commit: string; branch: string; at: string }
-  | { type: "addresses-request"; id: string; at: string }
-  | {
-    type: "addresses-result";
-    id: string;
-    ips: ServerReportedIp[];
-    at: string;
-  }
-  | {
-    type: "managed-logs-request";
-    id: string;
-    managedId: string;
-    tail: number;
-    at: string;
-  }
-  | {
-    type: "container-logs-request";
-    id: string;
-    containerId: string;
-    tail: number;
-    at: string;
-  }
-  | {
-    type: "repo-read-request";
-    id: string;
-    cloneUrl: string;
-    ref: string;
-    paths: string[];
-    listPath?: string;
-    maxBytesPerFile: number;
-    credential?: string;
-    credentialKind?: string;
-    credentialUsername?: string;
-    at: string;
-  }
-  | {
-    type: "repo-read-result";
-    id: string;
-    ok: boolean;
-    commitSha?: string;
-    files?: {
-      path: string;
-      found: boolean;
-      content?: string;
-      bytes?: number;
-      reason?: string;
-    }[];
-    entries?: { path: string; kind: string }[];
-    error?: string;
-    at: string;
-  }
-  | {
-    type: "repo-default-branch-request";
-    id: string;
-    /** Anonymous only — the control plane never sends a credential here. */
-    cloneUrl: string;
-    at: string;
-  }
-  | {
-    type: "repo-default-branch-result";
-    id: string;
-    ok: boolean;
-    /** `null` when the remote answered but named no branch (an empty repo). */
-    defaultBranch?: string | null;
-    error?: string;
-    at: string;
-  }
-  | {
-    type: "managed-logs-result";
-    id: string;
-    logs: string;
-    error?: string;
-    at: string;
-  }
-  | {
-    type: "metrics-live-start";
-    id: string;
-    leaseId: string;
-    /** Advisory from the control plane; the daemon applies its own live cadence. */
-    intervalSeconds: number;
-    expiresAt: string;
-    at: string;
-  }
-  | {
-    type: "metrics-live-start-result";
-    id: string;
-    ok: boolean;
-    error?: string;
-    at: string;
-  }
-  | { type: "metrics-live-stop"; id: string; leaseId: string; at: string }
-  | {
-    type: "metrics-live-stop-result";
-    id: string;
-    ok: boolean;
-    error?: string;
-    at: string;
-  }
-  | { type: "metrics-capabilities-request"; id: string; at: string }
-  | {
-    type: "metrics-capabilities-result";
-    id: string;
-    ok: boolean;
-    capabilities?: Record<string, unknown>;
-    error?: string;
-    at: string;
-  }
-  | {
-    type: "topology-overrides-update";
-    id: string;
-    /**
-     * Full replacement — absent fields clear their setting. Carries both
-     * v3 sensor-slot/NIC-name/hosting-path/drivetemp fields and the
-     * topology-identity pins (`nicSlotDeviceIds`/`hostingFilesystemId`,
-     * resolved against `src/metrics/topology/`
-     * device/filesystem ids rather than raw names/paths) in one object —
-     * renamed from `metrics-sensor-overrides-update` when topology
-     * identity was added; the underlying store and v3 semantics are
-     * unchanged.
-     */
-    overrides: HardwareProfile;
-    at: string;
-  }
-  | {
-    type: "topology-overrides-update-result";
-    id: string;
-    ok: boolean;
-    error?: string;
-    /**
-     * Present when this push flipped `drivetempEnabled` false/unset → true —
-     * the module-load outcome plus sensor capabilities re-discovered right
-     * after, awaited before this result is sent (never a bare fire-and-forget
-     * ack). Absent when the flip edge didn't occur, or if the drivetemp
-     * command itself failed unexpectedly (logged; `ok` above still reflects
-     * whether the profile write succeeded).
-     */
-    drivetemp?: DrivetempEnableResult;
-    at: string;
-  }
-  | {
-    type: "capability-plan-update";
-    id: string;
-    plan: MetricsCapabilityPlan;
-    generation: number;
-    at: string;
-  }
-  | {
-    type: "capability-plan-update-result";
-    id: string;
-    ok: boolean;
-    error?: string;
-    at: string;
-  }
-  | {
-    type: "capability-plan-clear";
-    id: string;
-    at: string;
-  }
-  | {
-    type: "capability-plan-clear-result";
-    id: string;
-    ok: boolean;
-    error?: string;
-    at: string;
-  }
-  | {
-    /**
-     * Daemon-initiated, fire-and-forget (no correlated request/result) —
-     * `../metrics/topology/`'s stable device/filesystem/GPU/signal identity
-     * and generation, reported over the socket by `TopologyReporter`
-     * (`./topology-reporter.ts`) so the control plane can persist per-server
-     * topology-generation history (`turbopanel/src/client/servers/
-     * server-topology-records.ts`).
-     */
-    type: "topology-report";
-    generation: number;
-    bootGeneration: number;
-    snapshot: TopologySnapshot;
-    at: string;
-  }
-  | {
-    type: "container-logs-result";
-    id: string;
-    logs: string;
-    error?: string;
-    at: string;
-  }
-  | {
-    type: "managed-ha-event";
-    managedId: string;
-    sourceMemberId?: string;
-    at: string;
-  }
-  | {
-    /**
-     * Daemon-initiated, fire-and-forget (no correlated request/result, same
-     * shape as `managed-ha-event`) — `AcmeIssuanceObserver`'s live TLS-probe
-     * verdict for one `tlsMode: 'acme'` hostname, sent only on a state
-     * change (first failure after a short debounce, or a recovery).
-     */
-    type: "acme-issuance-event";
-    hostname: string;
-    ok: boolean;
-    errorMessage?: string;
-    at: string;
-  }
-  | {
-    type: "fabric-paths-request";
-    id: string;
-    fabricId: string;
-    probeMs: number;
-    candidates: Array<{ publicKey: string; endpoints: string[] }>;
-    at: string;
-  }
-  | {
-    type: "fabric-paths-result";
-    id: string;
-    paths: Array<{
-      publicKey: string;
-      endpoint?: string;
-      lastHandshakeAt?: string;
-      health: "healthy" | "stale" | "never";
-      latencyMs?: number;
-    }>;
-    error?: string;
-    at: string;
-  }
-  | {
-    type: "dev-sync-begin";
-    id: string;
-    totalChunks: number;
-    totalBytes: number;
-    at: string;
-  }
-  | {
-    type: "dev-sync-chunk";
-    id: string;
-    index: number;
-    data: string;
-    at: string;
-  }
-  | { type: "dev-sync-end"; id: string; at: string }
-  | {
-    type: "dev-sync-result";
-    id: string;
-    ok: boolean;
-    error?: string;
-    at: string;
-  }
-  | { type: "tunnel-token"; id: string; token: string; at: string }
-  | {
-    type: "tunnel-token-result";
-    id: string;
-    ok: boolean;
-    error?: string;
-    at: string;
-  }
-  | { type: "public-urls-update"; id: string; urls: string[]; at: string }
-  | {
-    type: "public-urls-update-result";
-    id: string;
-    ok: boolean;
-    error?: string;
-    at: string;
-  }
-  | {
-    type: "update";
-    id: string;
-    channel?: string;
-    updateUrl?: string;
-    updateSha256?: string;
-    at: string;
-  }
-  | {
-    type: "update-result";
-    id: string;
-    ok: boolean;
-    error?: string;
-    at: string;
-  }
-  | {
-    type: "command-dispatch";
-    id: string;
-    commandId: string;
-    commandType: string;
-    payload: unknown;
-    at: string;
-  }
-  | {
-    type: "command-ack";
-    id: string;
-    at: string;
-    daemonReceivedAt: string;
-  }
-  | {
-    type: "command-outcome";
-    id: string;
-    ok: boolean;
-    result?: unknown;
-    error?: string;
-    at: string;
-    daemonReceivedAt?: string;
-    daemonRespondedAt?: string;
+/**
+ * Secrets / transcript ports the command router needs. Structural twin of
+ * `CommandRouterDeps` in `src/commands/command-router.ts` so this transport
+ * module never imports handlers.
+ */
+export type CommandDispatchDeps = {
+  decryptSecrets?: (ciphertexts: string[]) => Promise<(string | null)[]>;
+  sendCommandLogChunk?: SendCommandLogChunkFn;
+  rehydrateDeploymentSecrets?: (
+    deployments: ReadonlyArray<{
+      projectId: string;
+      environmentId: string;
+      generation?: number;
+    }>,
+  ) => Promise<
+    Array<{
+      projectId: string;
+      environmentId: string;
+      generation: number;
+      secretPlan: unknown;
+      variableMaterial: unknown;
+    }>
+  >;
+};
+
+export type CommandDispatchHandler = (
+  message: Extract<DaemonMessage, { type: "command-dispatch" }>,
+  ws: WebSocket,
+  deps?: CommandDispatchDeps,
+) => Promise<void>;
+
+export type FabricPathProbeHandler = (
+  message: Extract<DaemonMessage, { type: "fabric-paths-request" }>,
+) => Promise<
+  Extract<DaemonMessage, { type: "fabric-paths-result" }>["paths"]
+>;
+
+export type DrivetempEnableHandler = (
+  payload: Record<string, never>,
+  daemonReceivedAt: string,
+) => Promise<DrivetempEnableResult>;
+
+export type CommandPorts = {
+  handleCommandDispatch?: CommandDispatchHandler;
+  handleFabricPathProbe?: FabricPathProbeHandler;
+  handleDrivetempEnable?: DrivetempEnableHandler;
+};
+
+let commandPorts: CommandPorts = {};
+
+/**
+ * Composition-root / test registration for command handlers. `entry/run.ts`
+ * injects the real implementations so this file never imports `src/commands/`.
+ */
+export function registerCommandPorts(ports: CommandPorts): () => void {
+  const previous = commandPorts;
+  commandPorts = { ...previous, ...ports };
+  return () => {
+    commandPorts = previous;
   };
+}
 
 export interface InstanceClientOptions {
   config?: InstanceConfig;
@@ -424,6 +171,13 @@ export interface InstanceClientOptions {
    * source `main.ts` registers it via `enableCheckoutDevSync`.
    */
   applyDevSyncTarball?: DevSyncApplyFn;
+  /**
+   * Command-router callback. Production `entry/run.ts` supplies
+   * `handleCommandDispatch`; tests use {@link registerCommandPorts}.
+   */
+  handleCommandDispatch?: CommandDispatchHandler;
+  handleFabricPathProbe?: FabricPathProbeHandler;
+  handleDrivetempEnable?: DrivetempEnableHandler;
 }
 
 export const DEFAULT_INITIAL_BACKOFF_MS = 2_000;
@@ -624,6 +378,9 @@ export class InstanceClient {
   /** Created lazily once `#collectTopologyFn` is set; lives across reconnects (unlike `#liveLeases`). */
   #topologyReporter: TopologyReporter | undefined;
   readonly #applyDevSyncTarball?: DevSyncApplyFn;
+  readonly #handleCommandDispatch?: CommandDispatchHandler;
+  readonly #handleFabricPathProbe?: FabricPathProbeHandler;
+  readonly #handleDrivetempEnable?: DrivetempEnableHandler;
   #updateInstallInProgress = false;
   /**
    * Identity directory captured at {@link start} so reconnects do not follow a
@@ -646,6 +403,9 @@ export class InstanceClient {
     this.#onMessage = options.onMessage;
     this.#metricsCollectorFactory = options.metricsCollectorFactory;
     this.#collectTopologyFn = options.collectTopologyFn;
+    this.#handleCommandDispatch = options.handleCommandDispatch;
+    this.#handleFabricPathProbe = options.handleFabricPathProbe;
+    this.#handleDrivetempEnable = options.handleDrivetempEnable;
   }
 
   get config(): InstanceConfig {
@@ -1542,12 +1302,18 @@ export class InstanceClient {
       case "echo":
         this.#echoMessage(message, ws);
         break;
-      case "command-dispatch":
+      case "command-dispatch": {
+        const dispatch = this.#resolveCommandDispatch();
+        if (!dispatch) {
+          logWarn("instance", "command-dispatch handler not registered");
+          break;
+        }
         this.#runSocketHandler(
           "command-dispatch",
-          handleCommandDispatch(message, ws, this.#commandRouterDeps()),
+          dispatch(message, ws, this.#commandRouterDeps()),
         );
         break;
+      }
       case "addresses-request":
         this.#collectAddresses(message, ws);
         break;
@@ -1617,7 +1383,7 @@ export class InstanceClient {
     });
   }
 
-  #commandRouterDeps(): CommandRouterDeps | undefined {
+  #commandRouterDeps(): CommandDispatchDeps | undefined {
     const apiClient = this.#apiClient;
     if (!apiClient) return undefined;
     return {
@@ -1626,6 +1392,24 @@ export class InstanceClient {
         apiClient.rehydrateDeploymentSecrets(deployments),
       sendCommandLogChunk: (params) => apiClient.sendCommandLogChunk(params),
     };
+  }
+
+  #resolveCommandDispatch(): CommandDispatchHandler | undefined {
+    return this.#handleCommandDispatch ??
+      clientTestHooks.handleCommandDispatch ??
+      commandPorts.handleCommandDispatch;
+  }
+
+  #resolveFabricPathProbe(): FabricPathProbeHandler | undefined {
+    return this.#handleFabricPathProbe ??
+      clientTestHooks.handleFabricPathProbe ??
+      commandPorts.handleFabricPathProbe;
+  }
+
+  #resolveDrivetempEnable(): DrivetempEnableHandler | undefined {
+    return this.#handleDrivetempEnable ??
+      clientTestHooks.handleDrivetempEnable ??
+      commandPorts.handleDrivetempEnable;
   }
 
   #echoMessage(
@@ -2137,10 +1921,13 @@ export class InstanceClient {
         previous.drivetempEnabled !== true
       ) {
         try {
-          drivetemp = await handleDrivetempEnable(
-            {},
-            new Date().toISOString(),
-          );
+          const enable = this.#resolveDrivetempEnable();
+          if (enable) {
+            drivetemp = await enable(
+              {},
+              new Date().toISOString(),
+            );
+          }
         } catch (err) {
           logWarn(
             "instance",
@@ -2466,7 +2253,11 @@ export class InstanceClient {
     >["paths"] = [];
     let error: string | undefined;
     try {
-      paths = await clientTestHooks.handleFabricPathProbe(message);
+      const probe = this.#resolveFabricPathProbe();
+      if (!probe) {
+        throw new Error("fabric path probe handler not registered");
+      }
+      paths = await probe(message);
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
       logWarn(
@@ -2528,7 +2319,9 @@ type ClientTestHooks = {
   executeRunReconcile: typeof executeRunReconcile;
   collectServerIps: typeof collectServerIps;
   collectMetricsCapabilities: typeof collectMetricsCapabilities;
-  handleFabricPathProbe: typeof handleFabricPathProbe;
+  handleCommandDispatch?: CommandDispatchHandler;
+  handleFabricPathProbe?: FabricPathProbeHandler;
+  handleDrivetempEnable?: DrivetempEnableHandler;
   writeInstanceTunnelToken: typeof writeInstanceTunnelToken;
   applyPublicUrls: typeof applyPublicUrls;
   rehydrateLocalDeployments: typeof rehydrateLocalDeployments;
@@ -2546,7 +2339,6 @@ let clientTestHooks: ClientTestHooks = {
   executeRunReconcile,
   collectServerIps,
   collectMetricsCapabilities,
-  handleFabricPathProbe,
   writeInstanceTunnelToken,
   applyPublicUrls,
   rehydrateLocalDeployments,

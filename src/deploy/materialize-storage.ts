@@ -3,7 +3,7 @@ import type { LayoutPaths } from "../paths/layout.ts";
 import type {
   EnvironmentDeployPrincipalMaterial,
   EnvironmentDeployStorageMaterial,
-} from "../instance/commands/contracts.ts";
+} from "../contracts/commands-contracts.ts";
 import type { DecryptSecretsFn } from "./materialize-tls.ts";
 import {
   ensureDirectoryOwnedByPrincipal,

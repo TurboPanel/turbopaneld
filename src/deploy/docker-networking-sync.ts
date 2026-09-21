@@ -8,7 +8,7 @@
  * install (`ensureDocker` → `runDockerSetup()`) picks it up from there.
  */
 
-import { logInfo } from "../logger.ts";
+import { logInfo } from "../util/logger.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import {
   type DockerNetworkingDescriptor,

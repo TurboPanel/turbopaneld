@@ -6,8 +6,11 @@ import {
   type MetricsCollectResult,
 } from "./collector/index.ts";
 import type { CollectorDeps } from "./collector/types.ts";
-import { buildMetricsSample, METRICS_SCHEMA_VERSION } from "./contract.ts";
-import type { TopologySnapshot } from "./topology/types.ts";
+import {
+  buildMetricsSample,
+  METRICS_SCHEMA_VERSION,
+} from "../contracts/metrics-contract.ts";
+import type { TopologySnapshot } from "../contracts/topology-types.ts";
 import {
   deterministicJitterMs,
   METRICS_INTERVAL_MS,

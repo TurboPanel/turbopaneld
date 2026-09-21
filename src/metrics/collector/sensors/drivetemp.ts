@@ -12,7 +12,7 @@
  * One-shot command execution (same class as `reboot.ts`/`hostname.ts`), not
  * a per-interval subprocess — collection itself never spawns anything.
  */
-import { logWarn } from "../../../logger.ts";
+import { logWarn } from "../../../util/logger.ts";
 
 const MODULES_LOAD_DROPIN_PATH =
   "/etc/modules-load.d/turbopanel-drivetemp.conf";

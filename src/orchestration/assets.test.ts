@@ -1,0 +1,1038 @@
+import { dirname, join } from "@std/path";
+import { assertEquals } from "@std/assert";
+import {
+  ANSIBLE_CFG,
+  ANSIBLE_CORE_VERSION,
+  ANSIBLE_CURRENT_DIR,
+  ANSIBLE_HOME,
+  ANSIBLE_INSTALL_DIR,
+  ANSIBLE_LOCAL_TMP,
+  ANSIBLE_PLAYBOOK_BIN,
+  ANSIBLE_PLAYBOOK_CWD,
+  CACHE_DIR,
+  CLOUDFLARED_CURRENT_DIR,
+  DAEMON_ROOT,
+  DEFAULT_DAEMON_ROOT,
+  DENO_BIN,
+  DENO_CURRENT_DIR,
+  DENO_RUNTIME_DIR,
+  DENO_VERSION,
+  GALAXY_COLLECTIONS_DIR,
+  GALAXY_VENDOR_ROLES_DIR,
+  galaxyDockerRoleCodeloadUrl,
+  ORCHESTRATION_DIR,
+  ORCHESTRATION_LAYOUT,
+  PYTHON_CURRENT_DIR,
+  PYTHON_RUNTIME_DIR,
+  PYTHON_VERSION,
+  REQUIREMENTS_FILE,
+  REQUIREMENTS_LOCK_FILE,
+  resolveDaemonRoot,
+  RUNTIMES_DIR,
+  TUNNELS_DIR,
+  UV_BIN,
+  UV_CURRENT_DIR,
+  UV_INSTALL_DIR,
+  UV_VERSION,
+  VENV_BIN_DIR,
+} from "./assets.ts";
+import {
+  DaemonSourceRootError,
+  detectInstallMode,
+  DEV_CONFIG_DIR_DEFAULT,
+  DEV_DAEMON_LOG_DIR_DEFAULT,
+  DEV_DAEMON_ROOT_DEFAULT,
+  DEV_DAEMON_STATE_DIR_DEFAULT,
+  DEV_INSTANCE_DIR_DEFAULT,
+  DEV_RUNTIMES_DIR_DEFAULT,
+  fabricNetworkDir,
+  PROD_BIN_DIR_DEFAULT,
+  PROD_CONFIG_DIR_DEFAULT,
+  PROD_DAEMON_ROOT_DEFAULT,
+  PROD_HOME_DEFAULT,
+  PROD_INSTANCE_DIR_DEFAULT,
+  PROD_LIB_DIR_DEFAULT,
+  PROD_LOG_DIR_DEFAULT,
+  PROD_ORCHESTRATION_DIR_DEFAULT,
+  PROD_RUN_DIR_DEFAULT,
+  PROD_RUNTIME_DIR_DEFAULT,
+  PROD_SHARE_DIR_DEFAULT,
+  PROD_STATE_DIR_DEFAULT,
+  PROD_UI_DIR_DEFAULT,
+  readEnv,
+  resolveLayout,
+} from "../paths/layout.ts";
+
+const fromMeta = new URL("../..", import.meta.url).pathname;
+const checkoutOrchestrationDir = join(fromMeta, "orchestration");
+
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno);
+
+function assertThrowsSourceRoot(fn: () => unknown, label: string): void {
+  try {
+    fn();
+  } catch (err) {
+    if (err instanceof DaemonSourceRootError) return;
+    throw new Error(
+      `${label}: expected DaemonSourceRootError, got ${
+        err instanceof Error ? err.name : String(err)
+      }`,
+    );
+  }
+  throw new Error(`${label}: expected DaemonSourceRootError, none thrown`);
+}
+
+test("resolveDaemonRoot prefers TURBOPANEL_DAEMON_ROOT", () => {
+  const root = resolveDaemonRoot({
+    TURBOPANEL_DAEMON_ROOT: "/custom/daemon",
+  }, { skipDiscovery: true });
+  assertEquals(root, "/custom/daemon", "resolveDaemonRoot override");
+});
+
+test("resolveDaemonRoot uses default install path for compiled stub roots", () => {
+  const root = resolveDaemonRoot({
+    TURBOPANEL_DAEMON_ROOT: "",
+  }, { fromMeta, skipDiscovery: true });
+  const tempDirPrefix = `${
+    Deno.env.get("TMPDIR") ?? Deno.env.get("TEMP") ?? ""
+  }/`;
+  if (
+    fromMeta.includes("deno-compile") ||
+    (tempDirPrefix.length > 1 && fromMeta.startsWith(tempDirPrefix))
+  ) {
+    assertEquals(root, DEFAULT_DAEMON_ROOT, "compiled stub default root");
+  }
+});
+
+test("detectInstallMode ignores deno-compile root containing main.ts", async () => {
+  const compiledRoot = await Deno.makeTempDir({
+    prefix: "deno-compile-",
+    dir: fromMeta,
+  });
+  try {
+    await Deno.writeTextFile(join(compiledRoot, "main.ts"), "// stub\n");
+    const mode = detectInstallMode({}, {
+      fromMeta: compiledRoot,
+      skipDiscovery: true,
+    });
+    assertEquals(mode, "production", "mode");
+  } finally {
+    await Deno.remove(compiledRoot, { recursive: true });
+  }
+});
+
+test("resolveDaemonRoot ignores deno-compile root containing main.ts", async () => {
+  const compiledRoot = await Deno.makeTempDir({
+    prefix: "deno-compile-",
+    dir: fromMeta,
+  });
+  try {
+    await Deno.writeTextFile(join(compiledRoot, "main.ts"), "// stub\n");
+    const root = resolveDaemonRoot({}, {
+      fromMeta: compiledRoot,
+      skipDiscovery: true,
+    });
+    assertEquals(root, PROD_DAEMON_ROOT_DEFAULT, "resolveDaemonRoot");
+  } finally {
+    await Deno.remove(compiledRoot, { recursive: true });
+  }
+});
+
+// --- Source-sync (requireCheckout) refuses managed / compiled / JS-fallback ---
+//
+// dev-sync replaces an editable source tree in place; it must never target the
+// bundled entrypoint location or a binary install root. These exercise the
+// bundled JS entrypoint (non-compiled, non-checkout dir like /opt/turbopanel/bin)
+// and the compiled/native stub path, and assert source-sync cannot resolve a
+// managed FHS install.
+
+test("resolveDaemonRoot requireCheckout accepts a real checkout override", async () => {
+  const checkout = await Deno.makeTempDir({
+    prefix: "paths-test-",
+    dir: fromMeta,
+  });
+  try {
+    await Deno.writeTextFile(join(checkout, "main.ts"), "// checkout\n");
+    const root = resolveDaemonRoot(
+      { TURBOPANEL_DAEMON_ROOT: checkout },
+      { skipDiscovery: true, requireCheckout: true },
+    );
+    assertEquals(root, checkout, "requireCheckout checkout override");
+  } finally {
+    await Deno.remove(checkout, { recursive: true });
+  }
+});
+
+test("resolveDaemonRoot requireCheckout rejects a non-checkout override", async () => {
+  const notCheckout = await Deno.makeTempDir({
+    prefix: "paths-test-",
+    dir: fromMeta,
+  });
+  try {
+    assertThrowsSourceRoot(
+      () =>
+        resolveDaemonRoot(
+          { TURBOPANEL_DAEMON_ROOT: notCheckout },
+          { skipDiscovery: true, requireCheckout: true },
+        ),
+      "requireCheckout non-checkout override",
+    );
+  } finally {
+    await Deno.remove(notCheckout, { recursive: true });
+  }
+});
+
+test("resolveDaemonRoot requireCheckout rejects the bundled JS entrypoint location", async () => {
+  // A non-compiled, non-checkout dir (e.g. /opt/turbopanel/bin where the
+  // turbopaneld.js fallback resolves import.meta) — never under /tmp so it is
+  // not classified as a compiled stub.
+  const binDir = await Deno.makeTempDir({
+    prefix: "paths-test-",
+    dir: fromMeta,
+  });
+  try {
+    // Without requireCheckout the resolver falls back to this wrong root...
+    const fallback = resolveDaemonRoot({}, {
+      fromMeta: binDir,
+      forceMode: "production",
+      skipDiscovery: true,
+    });
+    assertEquals(
+      fallback,
+      binDir,
+      "managed fallback returns bundled entrypoint dir",
+    );
+    // ...but source-sync must refuse it.
+    assertThrowsSourceRoot(
+      () =>
+        resolveDaemonRoot({}, {
+          fromMeta: binDir,
+          forceMode: "production",
+          skipDiscovery: true,
+          requireCheckout: true,
+        }),
+      "requireCheckout bundled JS entrypoint",
+    );
+  } finally {
+    await Deno.remove(binDir, { recursive: true });
+  }
+});
+
+test("resolveDaemonRoot requireCheckout rejects the compiled/native stub root", async () => {
+  const compiledRoot = await Deno.makeTempDir({
+    prefix: "deno-compile-",
+    dir: fromMeta,
+  });
+  try {
+    await Deno.writeTextFile(join(compiledRoot, "main.ts"), "// stub\n");
+    assertThrowsSourceRoot(
+      () =>
+        resolveDaemonRoot({}, {
+          fromMeta: compiledRoot,
+          forceMode: "production",
+          skipDiscovery: true,
+          requireCheckout: true,
+        }),
+      "requireCheckout compiled stub",
+    );
+  } finally {
+    await Deno.remove(compiledRoot, { recursive: true });
+  }
+});
+
+test("production orchestration dir resolves share/orchestration", () => {
+  const layout = resolveLayout({}, { forceMode: "production" });
+  assertEquals(
+    layout.orchestrationDir,
+    join(PROD_SHARE_DIR_DEFAULT, "orchestration"),
+    "orchestrationDir",
+  );
+  assertEquals(
+    layout.orchestrationDir,
+    PROD_ORCHESTRATION_DIR_DEFAULT,
+    "PROD_ORCHESTRATION_DIR_DEFAULT",
+  );
+});
+
+test("development layout resolves checkout orchestration and legacy runtimes", () => {
+  const layout = resolveLayout({}, { forceMode: "development", fromMeta });
+  assertEquals(layout.mode, "development", "mode");
+  assertEquals(
+    layout.daemonRootDefault,
+    DEV_DAEMON_ROOT_DEFAULT,
+    "daemonRootDefault",
+  );
+  assertEquals(
+    layout.orchestrationDir,
+    checkoutOrchestrationDir,
+    "orchestrationDir",
+  );
+  assertEquals(layout.runtimesDir, DEV_RUNTIMES_DIR_DEFAULT, "runtimesDir");
+  assertEquals(
+    layout.instanceDir,
+    DEV_INSTANCE_DIR_DEFAULT,
+    "instanceDir",
+  );
+});
+
+test("production layout resolves FHS orchestration and runtime dirs", () => {
+  const layout = resolveLayout({}, { forceMode: "production" });
+  assertEquals(layout.mode, "production", "mode");
+  assertEquals(
+    layout.daemonRootDefault,
+    PROD_DAEMON_ROOT_DEFAULT,
+    "daemonRootDefault",
+  );
+  assertEquals(
+    layout.orchestrationDir,
+    join(PROD_SHARE_DIR_DEFAULT, "orchestration"),
+    "orchestrationDir",
+  );
+  assertEquals(layout.runtimesDir, PROD_RUNTIME_DIR_DEFAULT, "runtimesDir");
+  assertEquals(layout.runDir, PROD_RUN_DIR_DEFAULT, "runDir");
+  assertEquals(layout.configDir, PROD_CONFIG_DIR_DEFAULT, "configDir");
+  assertEquals(
+    layout.instanceCaPath,
+    join(PROD_CONFIG_DIR_DEFAULT, "instance-ca.pem"),
+    "instanceCaPath",
+  );
+  assertEquals(
+    layout.tlsDir,
+    join(PROD_CONFIG_DIR_DEFAULT, "tls"),
+    "tlsDir",
+  );
+  assertEquals(layout.stateDir, PROD_STATE_DIR_DEFAULT, "stateDir");
+  assertEquals(layout.principalHomeRoot, "/srv/users", "principalHomeRoot");
+  // Managed installs resolve the install root (the instance package lies flat
+  // in bin/ and lib/) — never the dev checkout.
+  assertEquals(
+    layout.instanceDir,
+    PROD_INSTANCE_DIR_DEFAULT,
+    "PROD_INSTANCE_DIR_DEFAULT",
+  );
+  assertEquals(
+    layout.instanceDir,
+    "/opt/turbopanel",
+    "instanceDir literal",
+  );
+});
+
+test("layout env overrides apply in development mode", () => {
+  const layout = resolveLayout({
+    TURBOPANEL_RUNTIMES_DIR: "/custom/runtimes",
+    TURBOPANEL_ORCHESTRATION_DIR: "/custom/orchestration",
+    TURBOPANEL_INSTANCE_DIR: "/custom/instance",
+    TURBOPANEL_CONFIG_DIR: "/custom/config",
+    TURBOPANEL_RUN_DIR: "/custom/run",
+    TURBOPANEL_STATE_DIR: "/custom/state",
+    TURBOPANEL_PRINCIPAL_HOME_ROOT: "/custom/srv/users",
+  }, { forceMode: "development" });
+
+  assertEquals(layout.runtimesDir, "/custom/runtimes", "runtimesDir");
+  assertEquals(
+    layout.orchestrationDir,
+    "/custom/orchestration",
+    "orchestrationDir",
+  );
+  assertEquals(layout.instanceDir, "/custom/instance", "instanceDir");
+  assertEquals(layout.configDir, "/custom/config", "configDir");
+  assertEquals(layout.runDir, "/custom/run", "runDir");
+  assertEquals(layout.stateDir, "/custom/state", "stateDir");
+  assertEquals(layout.daemonStateDir, "/custom/state", "daemonStateDir");
+  assertEquals(
+    fabricNetworkDir(layout),
+    "/custom/state/network",
+    "fabricNetworkDir",
+  );
+  assertEquals(
+    layout.instanceCaPath,
+    "/custom/config/instance-ca.pem",
+    "instanceCaPath",
+  );
+  assertEquals(
+    layout.principalHomeRoot,
+    "/custom/srv/users",
+    "principalHomeRoot",
+  );
+});
+
+test("layout env overrides apply in production mode", () => {
+  const layout = resolveLayout({
+    TURBOPANEL_RUNTIMES_DIR: "/custom/lib/runtime",
+    TURBOPANEL_ORCHESTRATION_DIR: "/custom/share/orchestration",
+    TURBOPANEL_CONFIG_DIR: "/custom/etc/turbopanel",
+    TURBOPANEL_STATE_DIR: "/custom/var/lib/turbopanel",
+  }, { forceMode: "production" });
+
+  assertEquals(layout.runtimesDir, "/custom/lib/runtime", "runtimesDir");
+  assertEquals(
+    layout.orchestrationDir,
+    "/custom/share/orchestration",
+    "orchestrationDir",
+  );
+  assertEquals(layout.configDir, "/custom/etc/turbopanel", "configDir");
+  assertEquals(layout.stateDir, "/custom/var/lib/turbopanel", "stateDir");
+});
+
+test("module-level orchestration constants match active layout", () => {
+  const layout = ORCHESTRATION_LAYOUT;
+  assertEquals(
+    DAEMON_ROOT,
+    resolveDaemonRoot({
+      TURBOPANEL_DAEMON_ROOT: readEnv("TURBOPANEL_DAEMON_ROOT"),
+    }),
+    "DAEMON_ROOT",
+  );
+  assertEquals(ORCHESTRATION_DIR, layout.orchestrationDir, "ORCHESTRATION_DIR");
+  assertEquals(RUNTIMES_DIR, layout.runtimesDir, "RUNTIMES_DIR");
+  assertEquals(
+    ANSIBLE_PLAYBOOK_CWD,
+    dirname(layout.runtimesDir),
+    "ANSIBLE_PLAYBOOK_CWD",
+  );
+  assertEquals(
+    UV_INSTALL_DIR,
+    join(layout.runtimesDir, "uv", UV_VERSION),
+    "UV_INSTALL_DIR",
+  );
+  assertEquals(
+    UV_CURRENT_DIR,
+    join(layout.runtimesDir, "uv", "current"),
+    "UV_CURRENT_DIR",
+  );
+  assertEquals(
+    UV_BIN,
+    join(layout.runtimesDir, "uv", UV_VERSION, "uv"),
+    "UV_BIN",
+  );
+  assertEquals(
+    PYTHON_RUNTIME_DIR,
+    join(layout.runtimesDir, "python", PYTHON_VERSION),
+    "PYTHON_RUNTIME_DIR",
+  );
+  assertEquals(
+    PYTHON_CURRENT_DIR,
+    join(layout.runtimesDir, "python", "current"),
+    "PYTHON_CURRENT_DIR",
+  );
+  assertEquals(
+    CACHE_DIR,
+    join(layout.runtimesDir, "uv", "cache"),
+    "CACHE_DIR",
+  );
+  assertEquals(
+    ANSIBLE_INSTALL_DIR,
+    join(layout.runtimesDir, "ansible", ANSIBLE_CORE_VERSION),
+    "ANSIBLE_INSTALL_DIR",
+  );
+  assertEquals(
+    VENV_BIN_DIR,
+    join(layout.runtimesDir, "ansible", ANSIBLE_CORE_VERSION, "bin"),
+    "VENV_BIN_DIR",
+  );
+  assertEquals(
+    ANSIBLE_PLAYBOOK_BIN,
+    join(
+      layout.runtimesDir,
+      "ansible",
+      ANSIBLE_CORE_VERSION,
+      "bin",
+      "ansible-playbook",
+    ),
+    "ANSIBLE_PLAYBOOK_BIN",
+  );
+  assertEquals(
+    ANSIBLE_CURRENT_DIR,
+    join(layout.runtimesDir, "ansible", "current"),
+    "ANSIBLE_CURRENT_DIR",
+  );
+  assertEquals(
+    REQUIREMENTS_FILE,
+    join(layout.orchestrationDir, "requirements.txt"),
+    "REQUIREMENTS_FILE",
+  );
+  assertEquals(
+    REQUIREMENTS_LOCK_FILE,
+    join(layout.orchestrationDir, "requirements.lock.txt"),
+    "REQUIREMENTS_LOCK_FILE",
+  );
+  assertEquals(
+    GALAXY_COLLECTIONS_DIR,
+    join(layout.runtimesDir, "ansible", "galaxy-collections"),
+    "GALAXY_COLLECTIONS_DIR",
+  );
+  assertEquals(
+    GALAXY_VENDOR_ROLES_DIR,
+    join(layout.runtimesDir, "ansible", "galaxy-roles"),
+    "GALAXY_VENDOR_ROLES_DIR",
+  );
+  assertEquals(
+    galaxyDockerRoleCodeloadUrl("8.0.0"),
+    "https://codeload.github.com/geerlingguy/ansible-role-docker/tar.gz/refs/tags/8.0.0",
+    "galaxyDockerRoleCodeloadUrl",
+  );
+  assertEquals(
+    ANSIBLE_LOCAL_TMP,
+    join(layout.runtimesDir, "uv", "cache", "ansible-tmp"),
+    "ANSIBLE_LOCAL_TMP",
+  );
+  assertEquals(
+    ANSIBLE_HOME,
+    "/tmp/turbopanel-ansible",
+    "ANSIBLE_HOME",
+  );
+  assertEquals(
+    ANSIBLE_CFG,
+    join(layout.orchestrationDir, "ansible.cfg"),
+    "ANSIBLE_CFG",
+  );
+  assertEquals(
+    DENO_RUNTIME_DIR,
+    join(layout.runtimesDir, "deno", DENO_VERSION),
+    "DENO_RUNTIME_DIR",
+  );
+  assertEquals(
+    DENO_CURRENT_DIR,
+    join(layout.runtimesDir, "deno", "current"),
+    "DENO_CURRENT_DIR",
+  );
+  assertEquals(
+    DENO_BIN,
+    join(layout.runtimesDir, "deno", "bin", "deno"),
+    "DENO_BIN",
+  );
+  assertEquals(
+    CLOUDFLARED_CURRENT_DIR,
+    join(layout.runtimesDir, "cloudflared", "current"),
+    "CLOUDFLARED_CURRENT_DIR",
+  );
+  assertEquals(
+    TUNNELS_DIR,
+    join(layout.daemonStateDir, "cloudflared", "tunnels"),
+    "TUNNELS_DIR",
+  );
+});
+
+test("module-level orchestration constants honor TURBOPANEL_RUNTIMES_DIR", () => {
+  const customRuntimes = "/override/runtimes";
+  const layout = resolveLayout({
+    TURBOPANEL_RUNTIMES_DIR: customRuntimes,
+  }, { forceMode: "development", fromMeta });
+  assertEquals(layout.runtimesDir, customRuntimes, "layout runtimesDir");
+  assertEquals(
+    join(customRuntimes, "uv", UV_VERSION),
+    join(layout.runtimesDir, "uv", UV_VERSION),
+    "uv install path shape",
+  );
+});
+
+// --- Dev-vs-prod path model contract -------------------------------------
+//
+// These pin the full FHS production tree and the co-located dev checkout tree
+// so a regression to either default (or a leak of one into the other) fails CI
+// rather than silently shipping the wrong layout.
+
+test("production FHS default constants are the canonical absolute paths", () => {
+  assertEquals(PROD_HOME_DEFAULT, "/opt/turbopanel", "PROD_HOME_DEFAULT");
+  assertEquals(
+    PROD_BIN_DIR_DEFAULT,
+    "/opt/turbopanel/bin",
+    "PROD_BIN_DIR_DEFAULT",
+  );
+  assertEquals(
+    PROD_LIB_DIR_DEFAULT,
+    "/opt/turbopanel/lib",
+    "PROD_LIB_DIR_DEFAULT",
+  );
+  assertEquals(
+    PROD_RUNTIME_DIR_DEFAULT,
+    "/opt/turbopanel/vendor",
+    "PROD_RUNTIME_DIR_DEFAULT",
+  );
+  assertEquals(
+    PROD_SHARE_DIR_DEFAULT,
+    "/opt/turbopanel/share",
+    "PROD_SHARE_DIR_DEFAULT",
+  );
+  assertEquals(
+    PROD_UI_DIR_DEFAULT,
+    "/opt/turbopanel/share/ui",
+    "PROD_UI_DIR_DEFAULT",
+  );
+  assertEquals(
+    PROD_ORCHESTRATION_DIR_DEFAULT,
+    "/opt/turbopanel/share/orchestration",
+    "PROD_ORCHESTRATION_DIR_DEFAULT",
+  );
+  assertEquals(
+    PROD_DAEMON_ROOT_DEFAULT,
+    "/opt/turbopanel/lib/daemon",
+    "PROD_DAEMON_ROOT_DEFAULT",
+  );
+  assertEquals(
+    PROD_INSTANCE_DIR_DEFAULT,
+    "/opt/turbopanel",
+    "PROD_INSTANCE_DIR_DEFAULT",
+  );
+  assertEquals(
+    PROD_CONFIG_DIR_DEFAULT,
+    "/etc/turbopanel",
+    "PROD_CONFIG_DIR_DEFAULT",
+  );
+  assertEquals(
+    PROD_STATE_DIR_DEFAULT,
+    "/var/lib/turbopanel",
+    "PROD_STATE_DIR_DEFAULT",
+  );
+  assertEquals(
+    PROD_LOG_DIR_DEFAULT,
+    "/var/log/turbopanel",
+    "PROD_LOG_DIR_DEFAULT",
+  );
+  assertEquals(PROD_RUN_DIR_DEFAULT, "/run/turbopanel", "PROD_RUN_DIR_DEFAULT");
+});
+
+test("production layout resolves the complete FHS tree with no defaults", () => {
+  const layout = resolveLayout({}, { forceMode: "production" });
+  assertEquals(layout.mode, "production", "mode");
+  assertEquals(layout.home, PROD_HOME_DEFAULT, "home");
+  assertEquals(layout.binDir, PROD_BIN_DIR_DEFAULT, "binDir");
+  assertEquals(layout.libDir, PROD_LIB_DIR_DEFAULT, "libDir");
+  assertEquals(layout.runtimeDir, PROD_RUNTIME_DIR_DEFAULT, "runtimeDir");
+  assertEquals(layout.runtimesDir, PROD_RUNTIME_DIR_DEFAULT, "runtimesDir");
+  assertEquals(layout.shareDir, PROD_SHARE_DIR_DEFAULT, "shareDir");
+  assertEquals(layout.uiDir, PROD_UI_DIR_DEFAULT, "uiDir");
+  assertEquals(
+    layout.orchestrationDir,
+    PROD_ORCHESTRATION_DIR_DEFAULT,
+    "orchestrationDir",
+  );
+  assertEquals(layout.configDir, PROD_CONFIG_DIR_DEFAULT, "configDir");
+  assertEquals(layout.stateDir, PROD_STATE_DIR_DEFAULT, "stateDir");
+  assertEquals(layout.daemonStateDir, PROD_STATE_DIR_DEFAULT, "daemonStateDir");
+  assertEquals(layout.logDir, PROD_LOG_DIR_DEFAULT, "logDir");
+  assertEquals(layout.runDir, PROD_RUN_DIR_DEFAULT, "runDir");
+  assertEquals(layout.principalHomeRoot, "/srv/users", "principalHomeRoot");
+  assertEquals(
+    layout.daemonRootDefault,
+    PROD_DAEMON_ROOT_DEFAULT,
+    "daemonRootDefault",
+  );
+  assertEquals(layout.instanceDir, PROD_INSTANCE_DIR_DEFAULT, "instanceDir");
+  // The production tree must never inherit the co-located dev checkout root.
+  if (layout.orchestrationDir.includes("/platform/")) {
+    throw new Error(
+      `production orchestrationDir leaked a dev checkout path: ${layout.orchestrationDir}`,
+    );
+  }
+  if (layout.instanceDir.includes("/platform/")) {
+    throw new Error(
+      `production instanceDir leaked a dev checkout path: ${layout.instanceDir}`,
+    );
+  }
+  if (layout.runtimesDir.includes("/runtimes")) {
+    throw new Error(
+      `production runtimesDir must be vendor, got: ${layout.runtimesDir}`,
+    );
+  }
+});
+
+test("development layout resolves source repos with FHS mutable dirs", () => {
+  const layout = resolveLayout({}, { forceMode: "development", fromMeta });
+  assertEquals(layout.mode, "development", "mode");
+  assertEquals(layout.runtimesDir, DEV_RUNTIMES_DIR_DEFAULT, "runtimesDir");
+  assertEquals(layout.configDir, DEV_CONFIG_DIR_DEFAULT, "configDir");
+  assertEquals(layout.instanceDir, DEV_INSTANCE_DIR_DEFAULT, "instanceDir");
+  assertEquals(layout.logDir, DEV_DAEMON_LOG_DIR_DEFAULT, "logDir");
+  assertEquals(
+    layout.daemonRootDefault,
+    DEV_DAEMON_ROOT_DEFAULT,
+    "daemonRootDefault",
+  );
+  assertEquals(
+    layout.orchestrationDir,
+    checkoutOrchestrationDir,
+    "orchestrationDir",
+  );
+  // Dev now shares the production FHS mutable dirs (dev-user-owned at runtime).
+  assertEquals(
+    layout.runtimesDir,
+    "/opt/turbopanel/vendor",
+    "runtimesDir literal",
+  );
+  assertEquals(layout.configDir, "/etc/turbopanel", "configDir literal");
+  assertEquals(
+    layout.instanceDir,
+    "/opt/turbopanel",
+    "instanceDir literal",
+  );
+  assertEquals(layout.logDir, "/var/log/turbopanel", "logDir literal");
+});
+
+test("dev daemon state default uses the FHS state dir", () => {
+  assertEquals(
+    DEV_DAEMON_STATE_DIR_DEFAULT,
+    "/var/lib/turbopanel",
+    "DEV_DAEMON_STATE_DIR_DEFAULT",
+  );
+});
+
+test("dev daemon log dir default uses the FHS log dir", () => {
+  assertEquals(
+    DEV_DAEMON_LOG_DIR_DEFAULT,
+    "/var/log/turbopanel",
+    "DEV_DAEMON_LOG_DIR_DEFAULT",
+  );
+});
+
+test("logDir follows the dev-vs-prod contract", () => {
+  const dev = resolveLayout({}, { forceMode: "development", fromMeta });
+  assertEquals(dev.logDir, DEV_DAEMON_LOG_DIR_DEFAULT, "development logDir");
+  assertEquals(
+    dev.logDir,
+    "/var/log/turbopanel",
+    "development logDir literal",
+  );
+
+  const prod = resolveLayout({}, { forceMode: "production" });
+  assertEquals(prod.logDir, PROD_LOG_DIR_DEFAULT, "production logDir");
+  assertEquals(prod.logDir, "/var/log/turbopanel", "production logDir literal");
+});
+
+test("PYTHON_VERSION matches uv-managed python pin", () => {
+  assertEquals(PYTHON_VERSION, "3.14.6", "PYTHON_VERSION");
+  assertEquals(
+    PYTHON_RUNTIME_DIR,
+    join(RUNTIMES_DIR, "python", PYTHON_VERSION),
+    "PYTHON_RUNTIME_DIR under RUNTIMES_DIR",
+  );
+  assertEquals(
+    PYTHON_CURRENT_DIR,
+    join(RUNTIMES_DIR, "python", "current"),
+    "PYTHON_CURRENT_DIR under RUNTIMES_DIR",
+  );
+});
+
+test("DENO_VERSION matches the deno-runtime Ansible role default", () => {
+  const roleDefaults = join(
+    fromMeta,
+    "orchestration",
+    "roles",
+    "deno-runtime",
+    "defaults",
+    "main.yml",
+  );
+  const yaml = Deno.readTextFileSync(roleDefaults);
+  const match = yaml.match(/^\s*deno_version:\s*["']?([\d.]+)["']?\s*$/m);
+  if (!match) {
+    throw new Error(`could not read deno_version from ${roleDefaults}`);
+  }
+  assertEquals(match[1], DENO_VERSION, "deno_version role default");
+});
+
+test("DENO_VERSION matches TP_DENO_VERSION in scripts/run.sh", () => {
+  const runSh = Deno.readTextFileSync(join(fromMeta, "scripts", "run.sh"));
+  const match = /TP_DENO_VERSION="([\d.]+)"/.exec(runSh);
+  if (!match) {
+    throw new Error("could not read TP_DENO_VERSION from scripts/run.sh");
+  }
+  assertEquals(match[1], DENO_VERSION, "TP_DENO_VERSION in run.sh");
+});
+
+test("node-runtime installs corepack with vendored npm before enabling pnpm", () => {
+  const tasks = Deno.readTextFileSync(
+    join(
+      fromMeta,
+      "orchestration",
+      "roles",
+      "node-runtime",
+      "tasks",
+      "main.yml",
+    ),
+  );
+  const npmIdx = tasks.indexOf("current/bin/npm");
+  const enableIdx = tasks.indexOf("- enable");
+  if (npmIdx < 0) {
+    throw new TypeError(
+      "node-runtime must npm-install corepack (Node 25+ no longer ships it)",
+    );
+  }
+  if (enableIdx < 0 || enableIdx < npmIdx) {
+    throw new TypeError(
+      "node-runtime must install corepack before corepack enable",
+    );
+  }
+  // The package spec is the pinned, digest-verified tarball — never a bare
+  // `corepack` (floating latest from the registry).
+  if (
+    !tasks.includes(
+      '\n      - "{{ _corepack_tmp.path }}/corepack-{{ corepack_version }}.tgz"\n',
+    )
+  ) {
+    throw new TypeError(
+      "node-runtime must npm-install the verified corepack tarball",
+    );
+  }
+});
+
+function readPlaybook(name: string): string {
+  return Deno.readTextFileSync(
+    join(fromMeta, "orchestration", "playbooks", name),
+  );
+}
+
+/**
+ * Assert `- role: <name>` appears in a playbook with no `when:` guard directly
+ * under it — the role has to run on every converge, not just one exec mode.
+ */
+function assertRoleIsUnconditional(playbook: string, role: string): void {
+  const lines = readPlaybook(playbook).split("\n");
+  const idx = lines.findIndex((line) => line.trim() === `- role: ${role}`);
+  if (idx < 0) {
+    throw new TypeError(`${playbook} must include the ${role} role`);
+  }
+  const next = lines.slice(idx + 1).find((line) => line.trim().length > 0) ??
+    "";
+  if (next.trim().startsWith("when:")) {
+    throw new TypeError(
+      `${playbook} must run ${role} unconditionally — co-located instance and ` +
+        "mailer units resolve Deno through vendor/deno/current on every host",
+    );
+  }
+}
+
+test("instance-launch-only refreshes the runtimes its units ExecStart through", () => {
+  const playbook = readPlaybook("instance-launch-only.yml");
+  const rolesIdx = playbook.indexOf("\n  roles:");
+  if (rolesIdx < 0) {
+    throw new TypeError("instance-launch-only.yml must declare a roles: block");
+  }
+  const roles = playbook.slice(rolesIdx);
+  for (const role of ["deno-runtime", "node-runtime"]) {
+    if (!roles.includes(`- role: ${role}`)) {
+      throw new TypeError(
+        `instance-launch-only.yml must run ${role} before instance-launch — ` +
+          "the instance/mailer unit templates ExecStart through the vendored runtimes",
+      );
+    }
+  }
+  const launchIdx = roles.indexOf("- role: instance-launch");
+  for (const role of ["deno-runtime", "node-runtime"]) {
+    if (roles.indexOf(`- role: ${role}`) > launchIdx) {
+      throw new TypeError(
+        `instance-launch-only.yml must run ${role} before instance-launch`,
+      );
+    }
+  }
+});
+
+test("daemon playbooks run deno-runtime unconditionally", () => {
+  assertRoleIsUnconditional("daemon-converge.yml", "deno-runtime");
+  assertRoleIsUnconditional("daemon-install.yml", "deno-runtime");
+});
+
+test("daemon playbooks grant RAPL energy_uj to the daemon group", () => {
+  assertRoleIsUnconditional("daemon-converge.yml", "rapl-access");
+  assertRoleIsUnconditional("daemon-install.yml", "rapl-access");
+  const rule = Deno.readTextFileSync(
+    join(
+      fromMeta,
+      "orchestration",
+      "roles",
+      "rapl-access",
+      "templates",
+      "99-turbopanel-rapl.rules.j2",
+    ),
+  );
+  if (!rule.includes("chgrp {{ turbopanel_group }}")) {
+    throw new TypeError("rapl-access udev rule must chgrp the daemon group");
+  }
+  if (!rule.includes("chmod g+r")) {
+    throw new TypeError("rapl-access udev rule must chmod g+r energy_uj");
+  }
+});
+
+test("deno-runtime prunes superseded vendored versions", () => {
+  const tasks = Deno.readTextFileSync(
+    join(
+      fromMeta,
+      "orchestration",
+      "roles",
+      "deno-runtime",
+      "tasks",
+      "main.yml",
+    ),
+  );
+  const linkIdx = tasks.indexOf("deno/current");
+  const findIdx = tasks.indexOf("ansible.builtin.find");
+  if (findIdx < 0 || linkIdx < 0 || findIdx < linkIdx) {
+    throw new TypeError(
+      "deno-runtime must repoint deno/current before pruning stale version dirs",
+    );
+  }
+  if (!tasks.includes("state: absent")) {
+    throw new TypeError(
+      "deno-runtime must remove superseded version directories",
+    );
+  }
+});
+
+test("ANSIBLE_CORE_VERSION matches the ansible-core pin in requirements.txt", () => {
+  const requirements = Deno.readTextFileSync(REQUIREMENTS_FILE);
+  const match = requirements.match(/^ansible-core==(\d+\.\d+)\.\*/m);
+  if (!match) {
+    throw new Error(
+      `could not read ansible-core pin from ${REQUIREMENTS_FILE}`,
+    );
+  }
+  assertEquals(match[1], ANSIBLE_CORE_VERSION, "ansible-core requirements pin");
+});
+
+test("requirements.lock.txt pins ansible-core with hashes", () => {
+  const lockPath = join(checkoutOrchestrationDir, "requirements.lock.txt");
+  const lock = Deno.readTextFileSync(lockPath);
+  const match = lock.match(/^ansible-core==(\d+\.\d+)\.\d+/m);
+  if (!match) {
+    throw new Error(`could not read ansible-core pin from ${lockPath}`);
+  }
+  assertEquals(match[1], ANSIBLE_CORE_VERSION, "ansible-core lock pin");
+  assertEquals(
+    lock.includes("--hash=sha256:"),
+    true,
+    `${lockPath} must include --hash=sha256: entries`,
+  );
+});
+
+// --- runtime integrity pins ------------------------------------------------
+//
+// Vendored runtimes are downloaded by root (Ansible roles) and, for the
+// JS-fallback path, by run.sh before Ansible runs at all. Each pinned version
+// must carry its upstream SHA-256 for every supported architecture, and the
+// three copies (role default, run.sh, this constant) must agree — a version
+// bump without new digests fails here, not on a customer host.
+
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+function readRoleDefaults(role: string): string {
+  return Deno.readTextFileSync(
+    join(fromMeta, "orchestration", "roles", role, "defaults", "main.yml"),
+  );
+}
+
+/** Minimal reader for the `<key>:\n  "<version>":\n    <arch>: "<hex>"` tables. */
+function readDigestTable(
+  yaml: string,
+  key: string,
+): Record<string, Record<string, string>> {
+  const start = yaml.indexOf(`\n${key}:\n`);
+  if (start < 0) throw new TypeError(`missing ${key} in role defaults`);
+  const table: Record<string, Record<string, string>> = {};
+  let version = "";
+  for (const line of yaml.slice(start + key.length + 3).split("\n")) {
+    const versionMatch = /^ {2}"([^"]+)":\s*(?:"([0-9a-f]{64})")?\s*$/.exec(
+      line,
+    );
+    const archMatch = /^ {4}([A-Za-z0-9_]+):\s*"([0-9a-f]{64})"\s*$/.exec(line);
+    if (versionMatch) {
+      version = versionMatch[1] ?? "";
+      table[version] = versionMatch[2] ? { "": versionMatch[2] } : {};
+    } else if (archMatch && version) {
+      table[version][archMatch[1] ?? ""] = archMatch[2] ?? "";
+    } else {
+      break;
+    }
+  }
+  return table;
+}
+
+test("deno-runtime pins an upstream SHA-256 for DENO_VERSION on both architectures", () => {
+  const table = readDigestTable(
+    readRoleDefaults("deno-runtime"),
+    "deno_sha256",
+  );
+  const digests = table[DENO_VERSION];
+  if (!digests) {
+    throw new TypeError(
+      `deno_sha256 has no entry for deno_version ${DENO_VERSION}`,
+    );
+  }
+  for (const arch of ["x86_64", "aarch64"]) {
+    assertEquals(SHA256_HEX.test(digests[arch] ?? ""), true, `deno ${arch}`);
+  }
+});
+
+test("run.sh mirrors the deno-runtime digests for DENO_VERSION", () => {
+  const runSh = Deno.readTextFileSync(join(fromMeta, "scripts", "run.sh"));
+  const table = readDigestTable(
+    readRoleDefaults("deno-runtime"),
+    "deno_sha256",
+  );
+  const x86 = /^TP_DENO_SHA256_X86_64="([0-9a-f]{64})"$/m.exec(runSh)?.[1];
+  const arm = /^TP_DENO_SHA256_AARCH64="([0-9a-f]{64})"$/m.exec(runSh)?.[1];
+  assertEquals(x86, table[DENO_VERSION]?.x86_64, "x86_64 digest");
+  assertEquals(arm, table[DENO_VERSION]?.aarch64, "aarch64 digest");
+  // The verifier runs between download and extraction.
+  const install = runSh.slice(runSh.indexOf("tp_install_deno_runtime() {"));
+  const verifyAt = install.indexOf("tp_verify_deno_archive ");
+  const extractAt = install.indexOf("zipfile.ZipFile");
+  assertEquals(verifyAt > 0 && verifyAt < extractAt, true);
+});
+
+test("node-runtime pins an upstream SHA-256 for node_version on both architectures", () => {
+  const yaml = readRoleDefaults("node-runtime");
+  const version = /^node_version:\s*"([\d.]+)"\s*$/m.exec(yaml)?.[1];
+  if (!version) throw new TypeError("could not read node_version");
+  const table = readDigestTable(yaml, "node_sha256");
+  const digests = table[version];
+  if (!digests) {
+    throw new TypeError(`node_sha256 has no entry for node_version ${version}`);
+  }
+  for (const arch of ["x64", "arm64"]) {
+    assertEquals(SHA256_HEX.test(digests[arch] ?? ""), true, `node ${arch}`);
+  }
+});
+
+test("node-runtime pins corepack by version and verified tarball digest", () => {
+  const yaml = readRoleDefaults("node-runtime");
+  const version = /^corepack_version:\s*"([\d.]+)"\s*$/m.exec(yaml)?.[1];
+  if (!version) throw new TypeError("could not read corepack_version");
+  const table = readDigestTable(yaml, "corepack_sha256");
+  assertEquals(SHA256_HEX.test(table[version]?.[""] ?? ""), true, "corepack");
+  const tasks = Deno.readTextFileSync(
+    join(
+      fromMeta,
+      "orchestration",
+      "roles",
+      "node-runtime",
+      "tasks",
+      "main.yml",
+    ),
+  );
+  // No floating package spec: npm installs the verified local tarball.
+  assertEquals(/^\s*- corepack\s*$/m.test(tasks), false);
+  assertEquals(tasks.includes("corepack-{{ corepack_version }}.tgz"), true);
+  assertEquals(
+    tasks.includes(
+      'checksum: "sha256:{{ corepack_sha256[corepack_version] }}"',
+    ),
+    true,
+  );
+});
+
+test("runtime roles verify every download with get_url checksum before extraction", () => {
+  for (const role of ["deno-runtime", "node-runtime"]) {
+    const tasks = Deno.readTextFileSync(
+      join(fromMeta, "orchestration", "roles", role, "tasks", "main.yml"),
+    );
+    // curl-and-extract shell pipelines are gone from both roles.
+    assertEquals(tasks.includes("curl -fsSL"), false, `${role} curl`);
+    assertEquals(tasks.includes("ansible.builtin.get_url"), true, role);
+    assertEquals(/checksum: "sha256:\{\{/.test(tasks), true, role);
+  }
+});

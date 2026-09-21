@@ -9,7 +9,7 @@ import {
   REQUIREMENTS_FILE,
   RUNTIMES_DIR,
   UV_VERSION,
-} from "./paths.ts";
+} from "./assets.ts";
 
 export const BOOTSTRAP_STAMP_FILE = join(
   RUNTIMES_DIR,

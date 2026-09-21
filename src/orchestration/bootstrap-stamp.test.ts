@@ -13,7 +13,7 @@ import {
   PYTHON_VERSION,
   REQUIREMENTS_FILE,
   UV_VERSION,
-} from "./paths.ts";
+} from "./assets.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.

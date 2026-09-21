@@ -12,7 +12,7 @@
  * that moved sshd elsewhere is a visible, fixable condition by comparison.
  */
 
-import { isValidFirewallPort } from "../instance/commands/contracts.ts";
+import { isValidFirewallPort } from "../contracts/commands-contracts.ts";
 import { type FirewallRunFn, runFirewallHost } from "./run.ts";
 
 export type SshdPortsResult = {

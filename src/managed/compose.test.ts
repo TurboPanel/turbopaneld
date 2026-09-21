@@ -1,6 +1,6 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import { parse } from "yaml";
-import type { ManagedApplyPayload } from "../instance/commands/contracts.ts";
+import type { ManagedApplyPayload } from "../contracts/commands-contracts.ts";
 import {
   assertPublicPrivateListenerTls,
   MANAGED_ENGINE_LABEL,

@@ -6,7 +6,7 @@ import type { RunFn, RunResult } from "../ensure-principal.ts";
 import type {
   EnvironmentDeployNativeAppService,
   EnvironmentDeployPayload,
-} from "../../instance/commands/contracts.ts";
+} from "../../contracts/commands-contracts.ts";
 import {
   applyNativeAppLifecycle,
   applyNativeAppServices,

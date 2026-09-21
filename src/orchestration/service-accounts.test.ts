@@ -1,6 +1,6 @@
 import { join } from "@std/path";
 import { parse } from "yaml";
-import { DAEMON_ROOT } from "./paths.ts";
+import { DAEMON_ROOT } from "./assets.ts";
 
 const CHECKOUT_ORCHESTRATION_DIR = join(DAEMON_ROOT, "orchestration");
 

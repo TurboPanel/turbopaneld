@@ -13,7 +13,7 @@
  * (reachable + expected metrics present) and, if so, returns its own
  * `sourceId`/`sourceKind` alongside the reading.
  */
-import type { IngressSourceSample } from "../../contract.ts";
+import type { IngressSourceSample } from "../../../contracts/metrics-contract.ts";
 import type { CounterBaselineTracker } from "../baseline.ts";
 
 /**

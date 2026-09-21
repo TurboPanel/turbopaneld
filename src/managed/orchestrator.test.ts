@@ -37,7 +37,7 @@ import {
   orchestratorConfigDir,
   orchestratorConfPath,
   orchestratorRaftCnfPath,
-} from "./paths.ts";
+} from "./engine-paths.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.

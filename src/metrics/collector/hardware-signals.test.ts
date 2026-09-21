@@ -11,7 +11,7 @@ import type { SensorIo } from "./sensors/discovery.ts";
 import type {
   BlockDeviceTopology,
   PhysicalSignalTopology,
-} from "../topology/types.ts";
+} from "../../contracts/topology-types.ts";
 
 const test = Deno.test.bind(Deno);
 

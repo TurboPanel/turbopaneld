@@ -1,5 +1,5 @@
 import { assertEquals, assertThrows } from "@std/assert";
-import type { EnvironmentDeployContainer } from "../instance/commands/contracts.ts";
+import type { EnvironmentDeployContainer } from "../contracts/commands-contracts.ts";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import {
   collectManagedContainers,

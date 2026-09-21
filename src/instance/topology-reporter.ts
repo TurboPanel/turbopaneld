@@ -14,8 +14,8 @@
  * always sends so the control plane starts recording generations on
  * connect/startup without waiting for a later phase.
  */
-import { logWarn, sanitizeForLog } from "../logger.ts";
-import type { TopologySnapshot } from "../metrics/topology/types.ts";
+import { logWarn, sanitizeForLog } from "../util/logger.ts";
+import type { TopologySnapshot } from "../contracts/topology-types.ts";
 
 /** Steady recheck cadence — catches organic hardware changes with no operator override push. */
 export const TOPOLOGY_REPORT_INTERVAL_MS = 60_000;

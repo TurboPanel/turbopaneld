@@ -24,7 +24,7 @@ sample. Do not use `TURBOPANEL_INSTANCE_RUNTIME` for that on remote daemons —
 the authenticated cell message is the signal.
 
 **Co-located dev connectivity** (`src/orchestration/setup.ts`,
-`src/instance/paths.ts`): after console opt-in (`TURBOPANEL_DEV_INSTANCE=1`),
+`src/instance/sockets.ts`): after console opt-in (`TURBOPANEL_DEV_INSTANCE=1`),
 Deno runtime dials the local Unix socket (no `TURBOPANEL_INSTANCE_URL`); Workers
 runtime dials Caddy over HTTPS/WSS via `TURBOPANEL_INSTANCE_URL` + platform CA —
 same transport as a remote daemon, but still the co-located host. Connection
@@ -60,7 +60,7 @@ one by rename (the wizard's file is instance-owned 0640 in a setgid dir).
   `vendorId` / `name` / `cores` / `threads` / `cache` / `speedMhz` / `turboMhz`,
   GPU identity + memory, `totalBytes`, plus `resources.ips`) come from `/proc/stat` + `/proc/cpuinfo` + `/proc/meminfo`
   + `/sys` (cpufreq, cache, DRM) via `src/host/host-inventory.ts` (process-cached; cpus/gpus/mem/swap on hello only)
-  and `collectServerIps()` (`src/server-addresses.ts`) as
+  and `collectServerIps()` (`src/host/server-addresses.ts`) as
   `{ address, version, scope, cidr?, interface? }[]` (public + private; `interface`
   is the NIC name). Time sync facts come from
   `src/host/time-sync.ts` (`timedatectl` + `/etc/systemd/timesyncd.conf` +
@@ -92,24 +92,12 @@ one by rename (the wizard's file is instance-owned 0640 in a setgid dir).
   (Postgres `connected: false` while the socket is still live) is handled by the
   instance **offline-sweep cron** re-projecting online via `onDaemonConnected`
   — not by a periodic daemon heartbeat.
-- Command handlers `server.timezone.set` / `server.ntp.set`
-  (`src/instance/commands/timezone.ts`, `ntp.ts`) apply via
-  `runTimeSyncApply` → `time-sync-apply.yml` and return observed host state
-  from `readTimeSync()`. Wire contracts live in
-  `src/instance/commands/contracts.ts` and must stay aligned with the instance
-  canonical `server.timezone.set` / `server.ntp.set` shapes.
-- Command handler `server.firewall.reconcile`
-  (`src/instance/commands/firewall-reconcile.ts`) renders the panel's
-  **complete** desired firewall through `src/firewall/render.ts` and applies
-  it through `src/firewall/apply.ts` (see `src/firewall/AGENTS.md`). Two
-  hooks: `INPUT → TP-INPUT` for host listeners, `DOCKER-USER → TP-FWD` for
-  published container ports; atomic `iptables-restore --noflush` of only those
-  chains; invariants (lo, established, ICMP/ICMPv6, DHCP, every `sshd -T` port,
-  the co-located control plane's ports) rendered first. `policy.inputDefault:
-  drop` is **held** (rendered, refused with `DEFAULT_DROP_HELD_WARNING`) until
-  commit-confirm rollback lands (`fw-invariants-commit-confirm`); `accept`
-  applies. Refusals are `applied: false` + a warning, not a failed command.
-  Wire contract in `contracts.ts`, mirrored in the instance `schemas.ts`.
+
+Command handlers (`server.timezone.set`, `server.ntp.set`,
+`server.firewall.reconcile`, deploy/managed/fabric, …) live in
+`src/commands/` and are injected at the `src/entry/run.ts` composition root
+— see `src/commands/AGENTS.md`. This client never imports that directory.
+
 - **Max-connection-age self-recycle:** once per idle tick,
   `#checkMaxConnectionAge` enforces `MAX_CONNECTION_AGE_MS` (2 h, mirrors the
   instance `MAX_WS_CONNECTION_AGE_MS`). When the socket exceeds that age it

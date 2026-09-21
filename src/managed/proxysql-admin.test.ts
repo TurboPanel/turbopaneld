@@ -21,7 +21,10 @@ import {
   PROXYSQL_MONITOR_USERNAME,
   proxySqlHostPrepPresent,
 } from "./proxysql-admin.ts";
-import { proxysqlAdminCnfPath, proxysqlMonitorCnfPath } from "./paths.ts";
+import {
+  proxysqlAdminCnfPath,
+  proxysqlMonitorCnfPath,
+} from "./engine-paths.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.

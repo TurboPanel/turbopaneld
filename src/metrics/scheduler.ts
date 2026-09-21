@@ -15,7 +15,7 @@
  * sequences stay monotonic. Attach-scoped generation tokens ignore stale
  * in-flight emits across detach/reconnect.
  */
-import { logInfo, logWarn, sanitizeForLog } from "../logger.ts";
+import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import type { MetricsCollector } from "./collector/index.ts";
 
 /** Steady metrics cadence (independent of IdlePresence / cell ping). */

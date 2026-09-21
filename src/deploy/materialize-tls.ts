@@ -2,7 +2,7 @@ import { join } from "@std/path";
 import type {
   EnvironmentDeployPayload,
   EnvironmentDeployTlsMaterial,
-} from "../instance/commands/contracts.ts";
+} from "../contracts/commands-contracts.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 
 const SAFE_TLS_ID_RE =

@@ -9,7 +9,7 @@
  */
 import type { EventCollector, EventDetectContext } from "./types.ts";
 import { makeEvent } from "./types.ts";
-import type { MetricEvent } from "../../contract.ts";
+import type { MetricEvent } from "../../../contracts/metrics-contract.ts";
 
 const HIGH_WATER_PERCENT = 90;
 const LOW_WATER_PERCENT = 80;

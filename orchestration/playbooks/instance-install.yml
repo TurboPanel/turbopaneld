@@ -20,7 +20,7 @@
 # Role order mirrors turbopanel/dev's instance-dev-install.yml minus the
 # dev-only roles (repos, builds, dev permissions, mailpit, redis-insight,
 # stripe-listen, tier catalogue). The play ends by printing the install
-# wizard URL; the wizard (turbopanel src/lib/install/) takes it from there.
+# wizard URL; the wizard (turbopanel src/install/) takes it from there.
 #
 # The co-located daemon is provisioned here too (post_tasks): the same
 # turbopaneld.service a managed node runs, dialling the instance Unix socket.

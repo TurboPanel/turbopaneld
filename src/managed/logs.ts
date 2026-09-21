@@ -11,8 +11,8 @@ import {
   runDocker as defaultRunDocker,
   type RunDockerOptions,
 } from "../deploy/docker-cli.ts";
-import { sanitizeForLog } from "../logger.ts";
-import { managedComposeProject, SAFE_MANAGED_ID_RE } from "./paths.ts";
+import { sanitizeForLog } from "../util/logger.ts";
+import { managedComposeProject, SAFE_MANAGED_ID_RE } from "./engine-paths.ts";
 
 type RunDockerFn = (
   args: string[],

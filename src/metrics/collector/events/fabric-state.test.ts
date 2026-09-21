@@ -2,7 +2,7 @@ import { assertEquals } from "@std/assert";
 import { CounterBaselineTracker } from "../baseline.ts";
 import { FabricStateEventCollector } from "./fabric-state.ts";
 import type { EventDetectContext } from "./types.ts";
-import type { FabricReconcileObservedPeer } from "../../../instance/commands/contracts.ts";
+import type { FabricReconcileObservedPeer } from "../../../contracts/commands-contracts.ts";
 
 const test = Deno.test.bind(Deno);
 

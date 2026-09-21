@@ -23,7 +23,7 @@ import { redactCommandSummary } from "../../logs/redactor.ts";
 import type {
   EnvironmentDeployNativeAppService,
   EnvironmentDeploySourceBuild,
-} from "../../instance/commands/contracts.ts";
+} from "../../contracts/commands-contracts.ts";
 import type { ReleaseOutputHandler } from "./checkout.ts";
 import { normalizeNodePackageManagerCommand } from "../node-package-manager.ts";
 import { copyTree } from "./promote.ts";

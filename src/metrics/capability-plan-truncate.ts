@@ -1,12 +1,15 @@
 /**
  * Daemon-side mirror of control-plane `truncateSampleToCapabilityPlan`
- * (`../turbopanel/src/daemon/metrics/capability-plan.ts`). Same ordering:
+ * (`../turbopanel/src/contracts/capability-plan.ts`). Same ordering:
  * `computeSlotMapping` identities, not array position, when a mapping is
  * present. Byte-identical output for the same plan + sample + mapping.
  */
-import { isHardwareHealthEventKind, type MetricsSample } from "./contract.ts";
+import {
+  isHardwareHealthEventKind,
+  type MetricsSample,
+} from "../contracts/metrics-contract.ts";
 import type { MetricsCapabilityPlan } from "./capability-plan.ts";
-import type { SlotMapping } from "./topology/types.ts";
+import type { SlotMapping } from "../contracts/topology-types.ts";
 
 function truncateNetworksToPlan(
   networks: MetricsSample["networks"],

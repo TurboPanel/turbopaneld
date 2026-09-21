@@ -1,7 +1,7 @@
 import { assertEquals } from "@std/assert";
 import { writeHardwareProfile } from "../collector/sensors/overrides.ts";
 import { resolveTopologyOverrides, toTopologyOverrides } from "./overrides.ts";
-import { EMPTY_TOPOLOGY_OVERRIDES } from "./types.ts";
+import { EMPTY_TOPOLOGY_OVERRIDES } from "../../contracts/topology-types.ts";
 import type { HardwareProfile } from "../collector/types.ts";
 
 const test = Deno.test.bind(Deno);

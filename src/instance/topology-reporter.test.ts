@@ -1,6 +1,6 @@
 import { assertEquals } from "@std/assert";
 import { TopologyReporter } from "./topology-reporter.ts";
-import type { TopologySnapshot } from "../metrics/topology/types.ts";
+import type { TopologySnapshot } from "../contracts/topology-types.ts";
 
 const test = Deno.test.bind(Deno);
 

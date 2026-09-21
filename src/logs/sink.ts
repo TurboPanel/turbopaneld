@@ -7,7 +7,7 @@
  * `spool.ts` thresholds) and failures never escape into the command outcome.
  */
 
-import { logWarn, sanitizeForLog } from "../logger.ts";
+import { logWarn, sanitizeForLog } from "../util/logger.ts";
 import { commandLogSpoolDir, type LayoutPaths } from "../paths/layout.ts";
 import {
   type CommandLogStream,

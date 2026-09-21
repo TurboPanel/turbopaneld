@@ -7,8 +7,8 @@
 import type {
   ManagedApplyCredential,
   ManagedApplyDatabaseOp,
-} from "../../instance/commands/contracts.ts";
-import { logInfo, sanitizeForLog } from "../../logger.ts";
+} from "../../contracts/commands-contracts.ts";
+import { logInfo, sanitizeForLog } from "../../util/logger.ts";
 import {
   connectionCensusSql,
   createDatabaseSql,
@@ -598,7 +598,7 @@ export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
   /**
    * Per-database dumps only (`-Fc` custom format). `pg_dumpall` (whole
    * instance) is a documented future seam — see
-   * `turbopanel/src/lib/managed/AGENTS.md`.
+   * `turbopanel/src/features/managed/AGENTS.md`.
    */
   backup: postgresBackupRuntime,
   replication: postgresReplicationRuntime,

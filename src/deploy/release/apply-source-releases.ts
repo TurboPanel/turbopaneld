@@ -42,7 +42,7 @@ import {
 import type {
   EnvironmentDeployPayload,
   EnvironmentDeploySource,
-} from "../../instance/commands/contracts.ts";
+} from "../../contracts/commands-contracts.ts";
 import type { DecryptSecretsFn } from "../materialize-tls.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import { dirname } from "@std/path";
@@ -66,7 +66,7 @@ import {
   recordRailpackRelease,
 } from "./promote.ts";
 import { pruneReleases } from "./retention.ts";
-import { definedFields } from "../../optional-fields.ts";
+import { definedFields } from "../../util/optional-fields.ts";
 import {
   readReleaseManifest,
   type ReleaseManifestV1,

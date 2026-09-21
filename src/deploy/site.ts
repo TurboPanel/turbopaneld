@@ -43,7 +43,7 @@
  */
 
 import { join } from "@std/path";
-import { logInfo, logWarn } from "../logger.ts";
+import { logInfo, logWarn } from "../util/logger.ts";
 import { runLocalPlaybook } from "../orchestration/ansible.ts";
 import {
   ORCHESTRATION_DIR,
@@ -51,7 +51,7 @@ import {
   SITE_CADDY_APPLY_PLAYBOOK,
   SITE_NGINX_APPLY_PLAYBOOK,
   SITE_OPENLITESPEED_APPLY_PLAYBOOK,
-} from "../orchestration/paths.ts";
+} from "../orchestration/assets.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { isAllowedExtension } from "../runtime/registry.ts";
 import {
@@ -61,7 +61,7 @@ import {
   siteSharedDir,
   siteWebrootDir,
 } from "../paths/layout.ts";
-import type { EnvironmentDeploySite } from "../instance/commands/contracts.ts";
+import type { EnvironmentDeploySite } from "../contracts/commands-contracts.ts";
 import {
   ensureDirectoryWithOwner,
   ensureEngineGroupMembership,
@@ -640,7 +640,7 @@ export function phpAdminValues(
 
 /**
  * Directives an operator may set, mirroring `PHP_SETTINGS` in the instance's
- * `src/lib/php-settings.ts`.
+ * `src/features/hostings/php-settings.ts`.
  *
  * Deliberately absent, and the reasons matter: `open_basedir` is computed from
  * the release layout (an operator value would undo release confinement),

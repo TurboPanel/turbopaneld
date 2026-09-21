@@ -3,7 +3,7 @@
  */
 
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
-import type { ManagedApplyCredential } from "../../instance/commands/contracts.ts";
+import type { ManagedApplyCredential } from "../../contracts/commands-contracts.ts";
 import {
   BINLOG_EXPIRE_LOGS_SECONDS,
   buildMysqlStandbySeedScript,

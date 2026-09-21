@@ -6,8 +6,8 @@
  */
 
 import { dirname, join } from "@std/path";
-import { logInfo, logWarn } from "../logger.ts";
-import { createSymlink } from "../scoped-writes.ts";
+import { logInfo, logWarn } from "../util/logger.ts";
+import { createSymlink } from "../permissions/scoped-writes.ts";
 import { runCaddySetup as defaultRunCaddySetup } from "../orchestration/ansible.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 

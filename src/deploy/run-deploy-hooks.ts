@@ -10,7 +10,7 @@
  * compose service it is confined to, and the daemon refuses any hook whose
  * service is not part of the deploy it is running (`deploy-environment.ts`).
  */
-import type { EnvironmentDeployServiceHook } from "../instance/commands/contracts.ts";
+import type { EnvironmentDeployServiceHook } from "../contracts/commands-contracts.ts";
 import {
   createStreamedRunner,
   type DockerCliResult,

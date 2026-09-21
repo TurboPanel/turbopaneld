@@ -90,7 +90,7 @@ test("dropAbsoluteRecords omits sibling/out-of-repo records and keeps relative o
     "DA:1,1",
     "end_of_record",
     "TN:",
-    "SF:/home/vagrant/turbopanel/src/daemon/metrics/contract.ts",
+    "SF:/home/vagrant/turbopanel/src/contracts/metrics-contract.ts",
     "DA:1,0",
     "end_of_record",
     "TN:",

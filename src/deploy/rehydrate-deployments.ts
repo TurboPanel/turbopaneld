@@ -5,7 +5,7 @@
  * decrypts via the existing secrets/decrypt client and writes host files.
  */
 
-import { logInfo, logWarn, sanitizeForLog } from "../logger.ts";
+import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import {
   composeFileArgs,
   type DeploymentManifestSecret,
@@ -21,8 +21,8 @@ import type { DecryptSecretsFn } from "./materialize-tls.ts";
 import type {
   EnvironmentDeploySecretPlanEntry,
   EnvironmentDeployVariableMaterial,
-} from "../instance/commands/contracts.ts";
-import { parseEnvironmentDeployPayload } from "../instance/commands/contracts.ts";
+} from "../contracts/commands-contracts.ts";
+import { parseEnvironmentDeployPayload } from "../contracts/commands-contracts.ts";
 import type { DockerCliResult, RunDockerOptions } from "./docker-cli.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 

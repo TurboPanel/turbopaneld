@@ -1,6 +1,6 @@
 /**
  * Daemon-side mirror of the control-plane `MetricsCapabilityPlan` shape
- * (`../turbopanel/src/daemon/metrics/capability-plan.ts`). Kept local so the
+ * (`../turbopanel/src/contracts/capability-plan.ts`). Kept local so the
  * collector never depends on control-plane-only modules.
  */
 export type MetricsCapabilityPlan = {

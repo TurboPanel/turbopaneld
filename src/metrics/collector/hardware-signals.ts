@@ -63,11 +63,11 @@ import { buildBlockDeviceTemperatures } from "./block-devices.ts";
 import type { CounterBaselineTracker } from "./baseline.ts";
 import type { HardwareSignalCandidateMap } from "./events/types.ts";
 import type { GpuThermalReading, GpuThermalReadings } from "./gpu/index.ts";
-import type { HardwareSignalSample } from "../contract.ts";
+import type { HardwareSignalSample } from "../../contracts/metrics-contract.ts";
 import type {
   BlockDeviceTopology,
   PhysicalSignalTopology,
-} from "../topology/types.ts";
+} from "../../contracts/topology-types.ts";
 import type { SensorCandidate } from "./types.ts";
 
 /** Same stable identity discipline as `hardware-signal-topology.ts`'s private `toSignalId`. */

@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import { ORCHESTRATE_HELPER } from "./paths.ts";
+import { ORCHESTRATE_HELPER } from "./assets.ts";
 import {
   galaxyDockerRoleHelperInvocation,
   playbooksNeedRootHelper,

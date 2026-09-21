@@ -28,7 +28,7 @@
  * than a partial total: an under-count rendered as a real number is worse
  * than a gap, because it silently understates a filling disk.
  */
-import type { StorageSample } from "../contract.ts";
+import type { StorageSample } from "../../contracts/metrics-contract.ts";
 import type { StatfsResult } from "./types.ts";
 
 /**

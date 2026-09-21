@@ -6,7 +6,7 @@
  * result omits the source entirely (never an all-`null` placeholder) and
  * invalidates its counter-baseline namespace.
  */
-import type { DatabaseProxySample } from "../../contract.ts";
+import type { DatabaseProxySample } from "../../../contracts/metrics-contract.ts";
 import type { CounterBaselineTracker } from "../baseline.ts";
 import type {
   DatabaseProxyAdapter,

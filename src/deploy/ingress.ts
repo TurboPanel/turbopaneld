@@ -1,12 +1,12 @@
 import { join } from "@std/path";
-import { errorText, logInfo, logWarn } from "../logger.ts";
+import { errorText, logInfo, logWarn } from "../util/logger.ts";
 import {
   type EnvironmentDeployContainer,
   type EnvironmentDeployHosting,
   type EnvironmentDeployPayload,
   isValidIpv4Literal,
   isValidIpv6Literal,
-} from "../instance/commands/contracts.ts";
+} from "../contracts/commands-contracts.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import {
   parseComposePsEntries,
@@ -88,7 +88,7 @@ const decoder = new TextDecoder();
  * That key is new interpolation surface: since the shared/system compose
  * projects moved off readable literals onto allocated UUIDs, the project name
  * is written *into* the YAML instead of being passed as `-p`. Charset and
- * length match `COMPOSE_PROJECT_RE` in `src/managed/paths.ts`.
+ * length match `COMPOSE_PROJECT_RE` in `src/managed/engine-paths.ts`.
  */
 export function assertSafeComposeProjectName(value: string): void {
   if (
