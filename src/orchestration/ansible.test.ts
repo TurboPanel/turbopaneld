@@ -629,35 +629,35 @@ test("TUI orchestration script fetches Docker Galaxy before docker-using playboo
   }
 });
 
-test("daemon-run attaches Docker monitor via decideDockerMonitorAttach", () => {
+test("entry run attaches Docker monitor via decideDockerMonitorAttach", () => {
   // Keep the startup path on the extracted decision helper so "skip when Docker
   // is not installed" stays enforced (partial-converge stuck-state fix).
   const source = Deno.readTextFileSync(
-    join(DAEMON_ROOT, "src", "daemon-run.ts"),
+    join(DAEMON_ROOT, "src", "entry", "run.ts"),
   );
   if (!source.includes("decideDockerMonitorAttach")) {
     throw new Error(
-      "daemon-run.ts must use decideDockerMonitorAttach for monitor attach",
+      "entry/run.ts must use decideDockerMonitorAttach for monitor attach",
     );
   }
   if (!source.includes("dockerBinaryPresent")) {
     throw new Error(
-      "daemon-run.ts must consult dockerBinaryPresent before attaching the monitor",
+      "entry/run.ts must consult dockerBinaryPresent before attaching the monitor",
     );
   }
   if (!source.includes("restoreFabricFromPersistedState")) {
     throw new Error(
-      "daemon-run.ts must restore TurboFabric from state.json at startup",
+      "entry/run.ts must restore TurboFabric from state.json at startup",
     );
   }
   if (!source.includes("reinstallFabricForwardingIfEnabled")) {
     throw new Error(
-      "daemon-run.ts must reinstall TP-FORWARD at startup when fabric is enabled",
+      "entry/run.ts must reinstall TP-FORWARD at startup when fabric is enabled",
     );
   }
   if (!source.includes("subscribeReachability")) {
     throw new Error(
-      "daemon-run.ts must reinstall TP-FORWARD when Docker becomes reachable again",
+      "entry/run.ts must reinstall TP-FORWARD when Docker becomes reachable again",
     );
   }
 });

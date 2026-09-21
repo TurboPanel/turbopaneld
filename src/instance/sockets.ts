@@ -154,7 +154,10 @@ export function resolveServerIdentityDir(
 ): string {
   const resolved = envOrProcess(env);
   if (isTruthyFlag(resolved.TURBOPANEL_SKIP_ORCHESTRATION)) {
-    return stripTrailingSlashes(Deno.cwd());
+    const cwd = stripTrailingSlashes(Deno.cwd());
+    // `/` strips to "" — that is not a directory, and key paths would join wrong.
+    if (cwd.length === 0) return "/";
+    return cwd;
   }
   return resolveLayout(resolved).daemonStateDir;
 }

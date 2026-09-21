@@ -28,7 +28,7 @@ test("production compile entry does not enable checkout-sync unpack", async () =
   );
   assert(!entry.includes("dev-sync-apply.ts"));
   assert(!entry.includes("enableCheckoutDevSync"));
-  assert(entry.includes("daemon-run.ts"));
+  assert(entry.includes("entry/run.ts"));
 });
 
 test("source main.ts enables checkout-sync unpack", async () => {
