@@ -35,4 +35,3 @@ instance_service_name: turbopanel-instance
 caddy_service_name: turbopanel-caddy
 ui_service_name: turbopanel-ui
 website_service_name: turbopanel-website
-mailer_service_name: turbopanel-mailer

@@ -43,8 +43,8 @@ export const PROD_ORCHESTRATION_DIR_DEFAULT = join(
 );
 /**
  * Managed control-plane (instance) install root. The instance release package
- * unpacks flat into the install root beside the daemon (`bin/turbopanel-instance`,
- * `bin/turbopanel-mailer`, `lib/libduckdb.so`), so there is no nested instance
+ * unpacks flat into the install root beside the daemon (`bin/turbopanel`,
+ * `lib/libduckdb.so`), so there is no nested instance
  * tree: the "instance dir" a managed host hands the Ansible roles
  * (`turbopanel_instance_dir`, the units' WorkingDirectory and the cert
  * generator's chdir) is {@link PROD_HOME_DEFAULT} itself. The retired

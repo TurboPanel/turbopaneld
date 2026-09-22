@@ -801,8 +801,8 @@ function assertRoleIsUnconditional(playbook: string, role: string): void {
     "";
   if (next.trim().startsWith("when:")) {
     throw new TypeError(
-      `${playbook} must run ${role} unconditionally — co-located instance and ` +
-        "mailer units resolve Deno through vendor/deno/current on every host",
+      `${playbook} must run ${role} unconditionally — co-located instance ` +
+        "units resolve Deno through vendor/deno/current on every host",
     );
   }
 }
@@ -818,7 +818,7 @@ test("instance-launch-only refreshes the runtimes its units ExecStart through", 
     if (!roles.includes(`- role: ${role}`)) {
       throw new TypeError(
         `instance-launch-only.yml must run ${role} before instance-launch — ` +
-          "the instance/mailer unit templates ExecStart through the vendored runtimes",
+          "the instance unit templates ExecStart through the vendored runtimes",
       );
     }
   }

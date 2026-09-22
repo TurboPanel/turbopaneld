@@ -22,7 +22,7 @@
   ansible.builtin.shell: |
     set -euo pipefail
     cd "{{ turbopanel_instance_dir }}"
-    find src deno.json deno.lock -newer dist/turbopanel-instance -print -quit 2>/dev/null || true
+    find src deno.json deno.lock -newer dist/turbopanel -print -quit 2>/dev/null || true
   register: _instance_stale_check
   changed_when: false
 

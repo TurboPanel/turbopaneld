@@ -47,8 +47,8 @@ turbopanel_runtime_path: >-
 turbopanel_daemon_dir: "{{ (turbopanel_dev_root ~ '/turbopaneld') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/daemon') }}"
 # The instance "dir" is the source checkout in co-located dev. A managed
 # install has no checkout: the release package unpacks flat into the install
-# root (bin/turbopanel-instance, bin/turbopanel-mailer, lib/libduckdb.so), so
-# the dir is the install root itself — units' WorkingDirectory, nothing more.
+# root (bin/turbopanel, lib/libduckdb.so), so the dir is the install root
+# itself — units' WorkingDirectory, nothing more.
 turbopanel_instance_dir: "{{ (turbopanel_dev_root ~ '/turbopanel') if (turbopanel_dev_user | default('') | length > 0) else turbopanel_install_root }}"
 turbopanel_ui_dir: "{{ (turbopanel_dev_root ~ '/ui') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/ui') }}"
 turbopanel_website_dir: "{{ (turbopanel_dev_root ~ '/website') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/website') }}"
@@ -128,13 +128,11 @@ turbopanel_instance_run_mode: "{{ 'source' if (turbopanel_dev_user | default('')
 # or compiled); a managed install runs the release package's binary under the
 # install root.
 turbopanel_instance_binary: >-
-  {{ (turbopanel_instance_dir ~ '/dist/turbopanel-instance')
+  {{ (turbopanel_instance_dir ~ '/dist/turbopanel')
      if (turbopanel_dev_user | default('') | length > 0)
-     else (turbopanel_install_root ~ '/bin/turbopanel-instance') }}
-# The compiled mailer ships beside the instance binary in the release
-# package (bin/turbopanel-mailer); source mode runs mailer/main.ts from the
-# checkout instead.
-turbopanel_mailer_binary: "{{ turbopanel_instance_binary | dirname }}/turbopanel-mailer"
+     else (turbopanel_install_root ~ '/bin/turbopanel') }}
+# Email runs in-process inside the instance binary (Road to 0.1.x); there is
+# no separate mailer package or unit on managed hosts.
 # How the versioned migrations are applied: the instance binary's own
 # `migrate` verb in compiled mode (the migrations ride inside the binary —
 # the same advisory-locked drizzle migrator pnpm migrate runs), the
@@ -183,6 +181,8 @@ rabbitmq_user: turbopanel
 redis_socket_path: /run/turbopanel/redis.sock
 # Server metrics on by default; set false to opt out.
 turbopanel_server_metrics_retention_days: 90
+# Retired separate mailer unit name — kept only so converge can stop/remove
+# an older host's turbopanel-mailer.service after email moved in-process.
 mailer_service_name: turbopanel-mailer
 mailpit_web_port: 8025
 mailpit_smtp_port: 1025

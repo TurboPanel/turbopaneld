@@ -231,14 +231,15 @@ Updating the proxy config is a template edit plus a converge, never a hand
 edit of the rendered file.
 
 **Managed install layout.** The instance package lies flat in the install
-root beside the daemon — `bin/turbopanel-instance`, `bin/turbopanel-mailer`,
-`lib/libduckdb.so` (the unit's `LD_LIBRARY_PATH` is `lib/`), the UI under
-`share/ui`. There is no nested instance tree: `turbopanel_instance_dir` on a
-managed host is the install root itself (units' `WorkingDirectory`, the cert
-generator's chdir), and both `instance-launch` and `instance-certs` default
-`turbopanel_instance_run_mode` to `compiled` whenever `turbopanel_dev_user` is
-empty, so `instance-certs-apply.yml` (run by the daemon with defaults only)
-resolves the binary's own `generate-self-signed-cert` verb.
+root beside the daemon — `bin/turbopanel` and `lib/libduckdb.so` (the unit's
+`LD_LIBRARY_PATH` is `lib/`; email runs in-process, so there is no separate
+mailer binary). The UI lands under `share/ui`. There is no nested instance
+tree: `turbopanel_instance_dir` on a managed host is the install root itself
+(units' `WorkingDirectory`, the cert generator's chdir), and both
+`instance-launch` and `instance-certs` default `turbopanel_instance_run_mode`
+to `compiled` whenever `turbopanel_dev_user` is empty, so
+`instance-certs-apply.yml` (run by the daemon with defaults only) resolves
+the binary's own `generate-self-signed-cert` verb.
 `instance-deno.env.j2` emits `TURBOPANEL_TLS_PUBLIC=1` when the effective flag
 is true — not the Workers env template.
 

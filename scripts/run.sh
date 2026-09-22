@@ -961,13 +961,15 @@ tp_run_instance_install() {
 
   tp_print_step "▸" "Unpacking under $INSTALL_ROOT…"
   # The instance package lies flat in the install root beside the daemon:
-  # bin/turbopanel-instance, bin/turbopanel-mailer, lib/libduckdb.so. Each
-  # file is replaced by name — never the directories (bin/ holds turbopaneld,
-  # lib/ the update-origin pin) and never state (/var/lib/turbopanel) or
-  # config (/etc/turbopanel).
+  # bin/turbopanel, lib/libduckdb.so. Email runs in-process (no separate
+  # mailer binary). Each file is replaced by name — never the directories
+  # (bin/ holds turbopaneld, lib/ the update-origin pin) and never state
+  # (/var/lib/turbopanel) or config (/etc/turbopanel).
   mkdir -p "$INSTALL_ROOT/bin" "$INSTALL_ROOT/lib"
-  rm -f "$INSTALL_ROOT/bin/turbopanel-instance" "$INSTALL_ROOT/bin/turbopanel-mailer" \
-    "$INSTALL_ROOT/lib/libduckdb.so"
+  # Drop retired names from older packages so upgrades do not leave stale
+  # binaries beside the renamed instance binary.
+  rm -f "$INSTALL_ROOT/bin/turbopanel" "$INSTALL_ROOT/bin/turbopanel-instance" \
+    "$INSTALL_ROOT/bin/turbopanel-mailer" "$INSTALL_ROOT/lib/libduckdb.so"
   # --no-overwrite-dir: the archive carries bin/ and lib/ directory entries;
   # never let them re-own or re-mode the shared install dirs (root:tp 0750).
   zstd -d -q -c "$_work/instance.tar.zst" | tar -x --no-same-owner --no-overwrite-dir -C "$INSTALL_ROOT"
@@ -981,8 +983,7 @@ tp_run_instance_install() {
   tar -xzf "$_work/ui.tar.gz" -C "$_ui_dir"
   rm -rf "$_work"
   for _required in \
-    "$INSTALL_ROOT/bin/turbopanel-instance" \
-    "$INSTALL_ROOT/bin/turbopanel-mailer" \
+    "$INSTALL_ROOT/bin/turbopanel" \
     "$INSTALL_ROOT/lib/libduckdb.so" \
     "$_ui_dir/index.html"; do
     if [ ! -e "$_required" ]; then
@@ -990,7 +991,7 @@ tp_run_instance_install() {
       return 1
     fi
   done
-  chmod 0755 "$INSTALL_ROOT/bin/turbopanel-instance" "$INSTALL_ROOT/bin/turbopanel-mailer"
+  chmod 0755 "$INSTALL_ROOT/bin/turbopanel"
   chmod 0644 "$INSTALL_ROOT/lib/libduckdb.so"
   tp_print_ok "Packages unpacked (instance v${_instance_version:-?}, UI v${_ui_version:-?})"
 
