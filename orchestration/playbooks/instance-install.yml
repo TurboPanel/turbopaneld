@@ -7,10 +7,10 @@
 # sha256-verified the daemon package (which carries this orchestration tree
 # and the vendored Ansible), the instance package
 # (turbopanel-instance-<version>-<arch>.tar.zst, unpacked flat into
-# /opt/turbopanel: bin/turbopanel-instance, bin/turbopanel-mailer,
-# lib/libduckdb.so — beside the daemon's own bin/turbopaneld) and the UI
-# export (turbopanel-ui-<version>.tar.gz → /opt/turbopanel/share/ui). The
-# Caddy site config is not shipped: instance-launch renders it from its
+# /opt/turbopanel: bin/turbopanel, lib/libduckdb.so — beside the daemon's
+# own bin/turbopaneld) and the UI export (turbopanel-ui-<version>.tar.gz →
+# /opt/turbopanel/share/ui). Email runs in-process in the instance binary.
+# The Caddy site config is not shipped: instance-launch renders it from its
 # Caddyfile.j2 into /etc/turbopanel/caddy/Caddyfile. Nothing here clones or
 # builds: the instance runs compiled (turbopanel_instance_run_mode compiled),
 # the UI is served static, and every install-time step that used to reach
@@ -53,8 +53,7 @@
     # "dir" is the install root itself (units' WorkingDirectory).
     turbopanel_instance_dir: "{{ turbopanel_install_root }}"
     turbopanel_instance_run_mode: compiled
-    turbopanel_instance_binary: "{{ turbopanel_install_root }}/bin/turbopanel-instance"
-    turbopanel_mailer_binary: "{{ turbopanel_install_root }}/bin/turbopanel-mailer"
+    turbopanel_instance_binary: "{{ turbopanel_install_root }}/bin/turbopanel"
     turbopanel_ui_mode: static
     turbopanel_ui_dist_dir: "{{ turbopanel_install_root }}/share/ui"
     turbopanel_ui_artifact_url: ""
@@ -110,7 +109,6 @@
         path: "{{ item }}"
       loop:
         - "{{ turbopanel_instance_binary }}"
-        - "{{ turbopanel_mailer_binary }}"
         - "{{ turbopanel_duckdb_lib_dir }}/libduckdb.so"
         - "{{ turbopanel_ui_dist_dir }}/index.html"
       register: _instance_package_files
@@ -119,10 +117,10 @@
       ansible.builtin.assert:
         that: _instance_package_files.results | map(attribute='stat.exists') | list is all
         fail_msg: >-
-          The instance package (bin/turbopanel-instance, bin/turbopanel-mailer,
-          lib/libduckdb.so) and UI export must be unpacked under
-          {{ turbopanel_install_root }} and {{ turbopanel_ui_dist_dir }}
-          before this play runs — run.sh --instance does that.
+          The instance package (bin/turbopanel, lib/libduckdb.so) and UI
+          export must be unpacked under {{ turbopanel_install_root }} and
+          {{ turbopanel_ui_dist_dir }} before this play runs — run.sh
+          --instance does that.
 
   roles:
     - role: turbopanel-user
@@ -158,7 +156,6 @@
         mode: "{{ item.mode }}"
       loop:
         - { path: "{{ turbopanel_instance_binary }}", mode: "0755" }
-        - { path: "{{ turbopanel_mailer_binary }}", mode: "0755" }
         - { path: "{{ turbopanel_duckdb_lib_dir }}/libduckdb.so", mode: "0644" }
       loop_control:
         label: "{{ item.path }}"
@@ -202,7 +199,6 @@
       loop:
         - turbopanel-system-stack
         - turbopanel-instance
-        - turbopanel-mailer
         - turbopanel-caddy
 
     - name: Vendor the Deno runtime for the JS-fallback daemon

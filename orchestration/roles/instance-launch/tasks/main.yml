@@ -250,17 +250,21 @@
     - Reload systemd for instance units
     - Restart turbopanel website
 
-- name: Install mailer systemd unit
-  when: (turbopanel_instance_runtime | default('deno')) == 'deno'
-  ansible.builtin.template:
-    src: turbopanel-mailer.service.j2
-    dest: "/etc/systemd/system/{{ mailer_service_name }}.service"
-    owner: root
-    group: root
-    mode: "0640"
+- name: Stop and disable retired mailer unit
+  # Email runs in-process in the instance binary; older hosts may still have
+  # turbopanel-mailer.service from the split-binary packaging.
+  ansible.builtin.systemd:
+    name: "{{ mailer_service_name }}"
+    state: stopped
+    enabled: false
+  failed_when: false
+
+- name: Remove retired mailer systemd unit
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ mailer_service_name }}.service"
+    state: absent
   notify:
     - Reload systemd for instance units
-    - Restart turbopanel mailer
 
 # Upgrades run `sudo -u tp git` from the instance (see upgrade-sudoers.yml).
 # The deploy key must stay mode 0600 — SSH rejects group-readable private keys.
@@ -688,7 +692,6 @@
   notify:
     - Reload systemd for instance units
     - Restart turbopanel instance
-    - Restart turbopanel mailer
 
 - name: Apply instance database migrations
   ansible.builtin.import_tasks: instance-migrate.yml
@@ -784,22 +787,6 @@
   when: turbopanel_ui_mode != 'dev'
   ansible.builtin.systemd:
     name: "{{ ui_service_name }}"
-    state: stopped
-    enabled: false
-  failed_when: false
-
-- name: Ensure mailer service desired state (Deno runtime)
-  when: (turbopanel_instance_runtime | default('deno')) == 'deno'
-  ansible.builtin.systemd:
-    name: "{{ mailer_service_name }}"
-    daemon_reload: true
-    enabled: "{{ instance_start | bool }}"
-    state: "{{ 'started' if (instance_start | bool) else 'stopped' }}"
-
-- name: Stop and disable mailer when Workers runtime
-  when: (turbopanel_instance_runtime | default('deno')) == 'workers'
-  ansible.builtin.systemd:
-    name: "{{ mailer_service_name }}"
     state: stopped
     enabled: false
   failed_when: false

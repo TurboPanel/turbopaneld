@@ -18,9 +18,9 @@ turbopanel_node: "{{ turbopanel_vendor_dir }}/node/current/bin/node"
 # this role with defaults only, so the default has to be right on its own.
 turbopanel_instance_run_mode: "{{ 'source' if (turbopanel_dev_user | default('') | length > 0) else 'compiled' }}"
 turbopanel_instance_binary: >-
-  {{ (turbopanel_instance_dir ~ '/dist/turbopanel-instance')
+  {{ (turbopanel_instance_dir ~ '/dist/turbopanel')
      if (turbopanel_dev_user | default('') | length > 0)
-     else (turbopanel_install_root ~ '/bin/turbopanel-instance') }}
+     else (turbopanel_install_root ~ '/bin/turbopanel') }}
 # Where the server leaf (self-signed or uploaded) lives — what Caddy serves.
 # Source mode keeps it beside the checkout; the compiled binary can only
 # write its state tree, so compiled mode keeps it at <state>/tls/certs (the

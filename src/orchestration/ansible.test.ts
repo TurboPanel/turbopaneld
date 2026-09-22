@@ -786,7 +786,7 @@ test(
     );
     // The instance package lies flat in the install root; the instance "dir"
     // a managed host hands the roles is the install root itself, and the
-    // binary is bin/turbopanel-instance beside turbopaneld.
+    // binary is bin/turbopanel beside turbopaneld.
     assertMatch(
       defaults,
       /turbopanel_instance_dir:[\s\S]*?else turbopanel_install_root/,
@@ -794,8 +794,8 @@ test(
     );
     assertMatch(
       defaults,
-      /turbopanel_instance_binary:[\s\S]*?turbopanel_install_root ~ '\/bin\/turbopanel-instance'/,
-      "managed turbopanel_instance_binary is bin/turbopanel-instance under the install root",
+      /turbopanel_instance_binary:[\s\S]*?turbopanel_install_root ~ '\/bin\/turbopanel'/,
+      "managed turbopanel_instance_binary is bin/turbopanel under the install root",
     );
     assertMatch(
       defaults,
@@ -986,7 +986,7 @@ test(
 );
 
 test(
-  "instance-launch secret keyring templates, rotate gate, and mailer notify",
+  "instance-launch secret keyring templates and rotate gate",
   async () => {
     const defaultsPath = join(
       CHECKOUT_ORCHESTRATION_DIR,
@@ -1064,8 +1064,13 @@ test(
     );
     assertMatch(
       tasks,
-      /name:\s*Install Deno runtime dev vars[\s\S]*?Restart turbopanel mailer/,
-      "Deno dev-vars task notifies Restart turbopanel mailer",
+      /name:\s*Install Deno runtime dev vars[\s\S]*?Restart turbopanel instance/,
+      "Deno dev-vars task notifies Restart turbopanel instance",
+    );
+    assertEquals(
+      tasks.includes("Restart turbopanel mailer"),
+      false,
+      "no mailer restart notify — email runs in-process",
     );
 
     for (
@@ -2073,12 +2078,12 @@ test("runDockerSetup passes docker addressing as -e extra-vars", () => {
 });
 
 test(
-  "compiled run mode needs no source checkout: mailer binary, secret and cert verbs",
+  "compiled run mode needs no source checkout: secret, cert and migrate verbs",
   async () => {
     // instance-runtime-packaging (Road to 0.1.x): in compiled mode every
     // install-time step the roles used to run from the checkout with node
-    // is a verb of the instance binary, and the mailer is its own binary
-    // shipped beside it.
+    // is a verb of the instance binary. Email runs in-process — no separate
+    // mailer binary or unit.
     const launchDefaults = await Deno.readTextFile(join(
       CHECKOUT_ORCHESTRATION_DIR,
       "roles/instance-launch/defaults/main.yml",
@@ -2086,10 +2091,6 @@ test(
     const launchTasks = await Deno.readTextFile(join(
       CHECKOUT_ORCHESTRATION_DIR,
       "roles/instance-launch/tasks/main.yml",
-    ));
-    const mailerUnit = await Deno.readTextFile(join(
-      CHECKOUT_ORCHESTRATION_DIR,
-      "roles/instance-launch/templates/turbopanel-mailer.service.j2",
     ));
     const certsDefaults = await Deno.readTextFile(join(
       CHECKOUT_ORCHESTRATION_DIR,
@@ -2100,10 +2101,20 @@ test(
       "roles/instance-certs/tasks/main.yml",
     ));
 
+    assertEquals(
+      launchDefaults.includes("turbopanel_mailer_binary"),
+      false,
+      "no separate mailer binary path — email is in-process",
+    );
     assertMatch(
-      launchDefaults,
-      /turbopanel_mailer_binary:\s*"\{\{ turbopanel_instance_binary \| dirname \}\}\/turbopanel-mailer"/,
-      "the compiled mailer sits beside the instance binary",
+      launchTasks,
+      /Remove retired mailer systemd unit/,
+      "converge removes the retired turbopanel-mailer unit on older hosts",
+    );
+    assertEquals(
+      launchTasks.includes("turbopanel-mailer.service.j2"),
+      false,
+      "instance-launch must not install a separate mailer unit",
     );
     assertMatch(
       launchDefaults,
@@ -2119,16 +2130,6 @@ test(
     assert(
       !launchTasks.includes("generate-secret.mjs"),
       "instance-launch tasks must not reach into the checkout for generate-secret.mjs",
-    );
-    assertMatch(
-      mailerUnit,
-      /\{% if turbopanel_instance_run_mode == 'compiled' %\}\s*\{#[\s\S]*?#\}\s*ExecStart=\{\{ turbopanel_mailer_binary \}\}\s*\{% else %\}/,
-      "the mailer unit exec's the compiled mailer in compiled mode",
-    );
-    assertMatch(
-      mailerUnit,
-      /mailer\/main\.ts\s*\{% endif %\}/,
-      "source mode still runs mailer/main.ts from the checkout",
     );
     assertMatch(
       certsDefaults,
