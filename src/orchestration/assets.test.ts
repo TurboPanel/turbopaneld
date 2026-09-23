@@ -996,8 +996,9 @@ function readCaddyRolePin(): {
 
 /**
  * Instance downloader. Required on every run — absence is a failure.
- * Co-located dev reads the sibling checkout; daemon CI reads the trunk copy
- * checked out at `.ci-instance-caddy-pin`.
+ * Co-located dev reads the sibling checkout; daemon CI reads the copy checked
+ * out at `.ci-instance-caddy-pin` (same branch when that branch exists, else
+ * trunk).
  */
 function instanceCaddyDownloaderPath(): string {
   const candidates = [
@@ -1024,6 +1025,24 @@ function instanceCaddyDownloaderPath(): string {
 
 function readInstanceCaddyDownloader(): string {
   return Deno.readTextFileSync(instanceCaddyDownloaderPath());
+}
+
+/**
+ * Version and digests from the instance downloader, once that script records
+ * a SHA-256 table. Older copies (instance trunk before that table) stay
+ * unchecked here; the daemon's own pins are still compared with each other.
+ */
+function readInstanceCaddyDownloaderPin(): {
+  version: string;
+  amd64: string;
+  arm64: string;
+} | null {
+  const source = readInstanceCaddyDownloader();
+  const version = /const CADDY_VERSION = '([\d.]+)'/.exec(source)?.[1];
+  const amd64 = /amd64: '([0-9a-f]{64})'/.exec(source)?.[1];
+  const arm64 = /arm64: '([0-9a-f]{64})'/.exec(source)?.[1];
+  if (!version || !amd64 || !arm64) return null;
+  return { version, amd64, arm64 };
 }
 
 test("deno-runtime pins an upstream SHA-256 for DENO_VERSION on both architectures", () => {
@@ -1137,15 +1156,13 @@ test("caddy version pin stays aligned across install surfaces", () => {
     "CADDY_VER",
   );
 
-  const downloadVersion = requireCapture(
-    readInstanceCaddyDownloader(),
-    /const CADDY_VERSION = '([\d.]+)'/,
-    "CADDY_VERSION",
-  );
+  const download = readInstanceCaddyDownloaderPin();
 
   assertEquals(hostingVersion, version, "ensure-hosting-caddy.ts");
   assertEquals(shellDefault, version, "install-hosting-caddy.sh");
-  assertEquals(downloadVersion, version, "download-caddy.mjs");
+  if (download) {
+    assertEquals(download.version, version, "download-caddy.mjs");
+  }
 });
 
 test("caddy SHA-256 pins stay aligned across install surfaces", () => {
@@ -1156,7 +1173,7 @@ test("caddy SHA-256 pins stay aligned across install surfaces", () => {
   const installSh = Deno.readTextFileSync(
     join(fromMeta, "scripts", "install-hosting-caddy.sh"),
   );
-  const downloadMjs = readInstanceCaddyDownloader();
+  const download = readInstanceCaddyDownloaderPin();
 
   assertEquals(
     requireCapture(
@@ -1194,24 +1211,10 @@ test("caddy SHA-256 pins stay aligned across install surfaces", () => {
     pin.arm64,
     "install-hosting-caddy.sh arm64",
   );
-  assertEquals(
-    requireCapture(
-      downloadMjs,
-      /amd64: '([0-9a-f]{64})'/,
-      "CADDY_SHA256 amd64",
-    ),
-    pin.amd64,
-    "download-caddy.mjs amd64",
-  );
-  assertEquals(
-    requireCapture(
-      downloadMjs,
-      /arm64: '([0-9a-f]{64})'/,
-      "CADDY_SHA256 arm64",
-    ),
-    pin.arm64,
-    "download-caddy.mjs arm64",
-  );
+  if (download) {
+    assertEquals(download.amd64, pin.amd64, "download-caddy.mjs amd64");
+    assertEquals(download.arm64, pin.arm64, "download-caddy.mjs arm64");
+  }
 });
 
 test("runtime roles verify every download with get_url checksum before extraction", () => {

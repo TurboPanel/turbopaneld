@@ -104,13 +104,20 @@ test("a wider type passes only when the snapshot marks a compatible expansion", 
 });
 
 test("the committed snapshot matches both checkouts' normalized field types", async () => {
+  const sibling = join(ROOT, "..", "turbopanel");
+  try {
+    await Deno.stat(join(sibling, "src"));
+  } catch {
+    // Single-repo CI has no sibling. A co-located checkout, and the instance
+    // repo's dual-checkout job, still compare the snapshot.
+    return;
+  }
   const snapshot = JSON.parse(
     await Deno.readTextFile(join(ROOT, "scripts/contract-field-snapshot.json")),
   ) as Record<
     string,
     { instance: string; daemon: string; fields: ContractFieldPin[] }
   >;
-  const sibling = join(ROOT, "..", "turbopanel");
   for (const [typeName, pin] of Object.entries(snapshot)) {
     const daemonSrc = await Deno.readTextFile(join(ROOT, pin.daemon));
     const instanceSrc = await Deno.readTextFile(join(sibling, pin.instance));

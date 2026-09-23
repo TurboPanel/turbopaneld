@@ -120,13 +120,26 @@ jobs:
         run: deno task check:orchestration
 
       # assets.test.ts requires scripts/download-caddy.mjs and fails when it is
-      # missing. A single-repo checkout does not include that file; place the
-      # trunk copy at .ci-instance-caddy-pin, the other path the test accepts.
+      # missing. A single-repo checkout does not include that file. Prefer the
+      # same-named branch on TurboPanel/turbopanel so a paired PR is compared
+      # with its own pin; otherwise use trunk.
+      - name: Resolve instance checkout ref
+        id: instance-ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          REF="${{ github.head_ref || github.ref_name }}"
+          if gh api "repos/TurboPanel/turbopanel/branches/${REF}" --silent; then
+            echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=trunk" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Check out instance Caddy downloader
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: TurboPanel/turbopanel
-          ref: trunk
+          ref: ${{ steps.instance-ref.outputs.ref }}
           fetch-depth: 1
           path: .ci-instance-caddy-pin
           persist-credentials: false
