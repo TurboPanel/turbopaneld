@@ -246,6 +246,16 @@ test("syncInstanceAcmeHttp01Site publishes Let's Encrypt :443 after the leaf is 
     assertEquals(reloads, 2);
     assertEquals(await Deno.readFile(edgeCert), renewed);
     assertEquals(await Deno.readTextFile(dest), written);
+    const sameLength = new TextEncoder().encode("leaf-version-3");
+    await Deno.writeFile(join(issued, `${host}.crt`), sameLength);
+    await syncInstanceAcmeHttp01Site(layout, {
+      reload: () => {
+        reloads += 1;
+        return Promise.resolve();
+      },
+    });
+    assertEquals(reloads, 3);
+    assertEquals(await Deno.readFile(edgeCert), sameLength);
   } finally {
     await Deno.remove(root, { recursive: true });
   }
@@ -637,6 +647,35 @@ test("syncInstanceAcmeHttp01Site skips sudo find for a wildcard and a failed sud
         reload: () => Promise.resolve(),
       });
     });
+    await withSudo(
+      "#!/bin/sh\nprintf '%s\\n' 'not-a-certificate'\n",
+      async () => {
+        await syncInstanceAcmeHttp01Site(layout, {
+          entries: [{
+            host: "panel.example.com",
+            source: "lets-encrypt",
+            certId: "",
+          }],
+          reload: () => Promise.resolve(),
+        });
+      },
+    );
+    await Deno.chmod(certificates, 0o755);
+    const host = "panel.example.com";
+    const issued = join(certificates, "acme.example", host);
+    await Deno.mkdir(issued, { recursive: true });
+    const crt = join(issued, `${host}.crt`);
+    await Deno.writeFile(crt, new TextEncoder().encode("hidden"));
+    await Deno.chmod(crt, 0o000);
+    await syncInstanceAcmeHttp01Site(layout, {
+      entries: [{
+        host,
+        source: "lets-encrypt",
+        certId: "",
+      }],
+      reload: () => Promise.resolve(),
+    });
+    await Deno.chmod(crt, 0o644);
     const written = await Deno.readTextFile(dest);
     assertEquals(written.includes("127.0.0.1:8444"), false);
   } finally {
