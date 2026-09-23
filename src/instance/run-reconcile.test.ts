@@ -1,15 +1,19 @@
-import { assertEquals, assertThrows } from "@std/assert";
+import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import {
+  assertControlPlaneUpdateAllowed,
   buildRunReconcileArgs,
   CDN_RUN_SCRIPT,
   downloadRunScript,
   encodeLicenseArg,
+  executeInstanceUpdateReconcile,
   executeRunReconcile,
+  InstanceUpdateRefusedError,
   PRODUCTION_CONTROL_PLANE,
   reconcileNeedsRootHelper,
   resolveAutomaticUpdateTrust,
   resolveBootstrapInsecureTls,
   resolveRunScriptUrl,
+  rootHelperInstanceUpdateInvocation,
   rootHelperReconcileInvocation,
   UpdateTrustRepairError,
 } from "./run-reconcile.ts";
@@ -827,5 +831,83 @@ test("reconcileNeedsRootHelper follows the orchestration privilege rule", () => 
   assertEquals(
     reconcileNeedsRootHelper({ installMode: "development", uid: 1000 }),
     false,
+  );
+});
+
+test("assertControlPlaneUpdateAllowed refuses only a downgrade below the daemon floor", () => {
+  assertThrows(
+    () => assertControlPlaneUpdateAllowed("0.0.1"),
+    InstanceUpdateRefusedError,
+    "below this daemon's supported minimum 0.1.0",
+  );
+  assertControlPlaneUpdateAllowed("0.1.0");
+  assertControlPlaneUpdateAllowed("0.1.1");
+  assertControlPlaneUpdateAllowed(undefined);
+  assertControlPlaneUpdateAllowed(null);
+  assertControlPlaneUpdateAllowed("not-a-version");
+});
+
+test("rootHelperInstanceUpdateInvocation is update-instance without enrolment flags", () => {
+  const invocation = rootHelperInstanceUpdateInvocation({
+    channel: "release",
+    manifestUrl:
+      "https://github.com/TurboPanel/turbopanel/releases/download/v0.1.1/manifest.json",
+  });
+  assertEquals(invocation.bin, "sudo");
+  assertEquals(invocation.args.slice(0, 2), ["-n", "--"]);
+  assertEquals(invocation.args[2]?.endsWith("/scripts/tp-orchestrate"), true);
+  assertEquals(invocation.args[3], "update-instance");
+  assertEquals(invocation.args.slice(4), [
+    "--channel",
+    "release",
+    "--manifest-url",
+    "https://github.com/TurboPanel/turbopanel/releases/download/v0.1.1/manifest.json",
+    "--no-start",
+  ]);
+  assertEquals(invocation.args.includes("--license"), false);
+  assertEquals(invocation.args.includes("--instance-ca"), false);
+  assertEquals(invocation.args.includes("--insecure-tls"), false);
+
+  const uiUrl =
+    "https://github.com/TurboPanel/ui/releases/download/v0.1.1/manifest.json";
+  const withUi = rootHelperInstanceUpdateInvocation({
+    channel: "release",
+    manifestUrl:
+      "https://github.com/TurboPanel/turbopanel/releases/download/v0.1.1/manifest.json",
+    uiManifestUrl: uiUrl,
+  });
+  assertEquals(withUi.args.slice(4), [
+    "--channel",
+    "release",
+    "--manifest-url",
+    "https://github.com/TurboPanel/turbopanel/releases/download/v0.1.1/manifest.json",
+    "--ui-manifest-url",
+    uiUrl,
+    "--no-start",
+  ]);
+});
+
+test("executeInstanceUpdateReconcile refuses a downgrade before it touches the helper", async () => {
+  await assertRejects(
+    () =>
+      executeInstanceUpdateReconcile({
+        channel: "release",
+        targetVersion: "0.0.1",
+      }),
+    InstanceUpdateRefusedError,
+    "below this daemon's supported minimum",
+  );
+});
+
+test("executeInstanceUpdateReconcile refuses a development checkout", async () => {
+  if (reconcileNeedsRootHelper()) return;
+  await assertRejects(
+    () =>
+      executeInstanceUpdateReconcile({
+        channel: "release",
+        targetVersion: "0.1.1",
+      }),
+    InstanceUpdateRefusedError,
+    "development host",
   );
 });

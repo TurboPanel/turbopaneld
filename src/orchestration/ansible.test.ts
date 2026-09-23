@@ -871,19 +871,56 @@ test(
     );
     assertMatch(
       caddyfile,
-      /\{% if _tls_mode == 'lets_encrypt' %\}[\s\S]*?\{% if turbopanel_acme_email \| default\(''\) \| length > 0 %\}\n\s+email \{\{ turbopanel_acme_email \}\}\n\{% endif %\}\n\{% else %\}[\s\S]*?auto_https off\n\{% endif %\}/,
-      "lets_encrypt gets an optional email directive; every other mode keeps auto_https off",
+      /http_port \{\{ caddy_http_port \| default\(8880\) \}\}/,
+      "ACME HTTP-01 is pinned to caddy_http_port so :80 stays with hosting Caddy",
     );
     assertMatch(
       caddyfile,
-      /\{% if _tls_mode == 'lets_encrypt' %\}\n[^\n]*\n[^\n]*\n\{\{ turbopanel_public_hostname \}\} \{\n\{% else %\}\n[^\n]*\n:\{\{ caddy_port \| default\(8443\) \}\} \{\n\s+tls \{\{ _certs_dir \}\}\/\{\{ _leaf \}\}\.crt \{\{ _certs_dir \}\}\/\{\{ _leaf \}\}\.key\n\{% endif %\}/,
-      "lets_encrypt binds the public hostname with no tls line; the other modes bind the port with the leaf from turbopanel_instance_certs_dir",
+      /\{% if ns\.acme and \(turbopanel_acme_email \| default\(''\) \| length > 0\) %\}\n\s+email \{\{ turbopanel_acme_email \}\}/,
+      "email is emitted only when a lets-encrypt hostname and a contact are set",
+    );
+    assertEquals(caddyfile.includes("auto_https off"), false);
+    assertMatch(
+      caddyfile,
+      /:\{\{ caddy_port \| default\(8443\) \}\} \{\n\s+tls \{\{ _certs_dir \}\}\/platform-ca\.crt \{\{ _certs_dir \}\}\/platform-ca\.key/,
+      ":8443 is always present and serves the platform-ca leaf",
     );
     assertMatch(
       caddyfile,
-      /_leaf = 'uploaded' if _tls_mode == 'upload' else 'self-signed'/,
-      "upload serves the operator pair, self_signed the platform-CA leaf",
+      /:\{\{ caddy_http_port \| default\(8880\) \}\} \{/,
+      ":8880 is always present",
     );
+    assertMatch(
+      caddyfile,
+      /\{% if h\.source == 'lets-encrypt' %\}[\s\S]*?\{\{ _site \}\}:443 \{\n\s+import turbopanel_app\n\}/,
+      "a dedicated host emits an explicit :443 lets-encrypt site with no tls line",
+    );
+    assertMatch(
+      caddyfile,
+      /https:\/\/\{\{ _site \}\}:\{\{ caddy_internal_https_port \| default\(8444\) \}\} \{\n\s+bind 127\.0\.0\.1/,
+      "a combined host issues Let's Encrypt on loopback :8444",
+    );
+    assertMatch(
+      caddyfile,
+      /turbopanel_control_plane_binds_public_https \| default\(false\) \| bool/,
+      "public :443 is gated on proof that hosting Caddy is absent",
+    );
+    assertEquals(
+      caddyfile.includes("{{ _site }} {"),
+      false,
+      "a bare hostname would bind :443 implicitly",
+    );
+    assertMatch(
+      caddyfile,
+      /trusted_proxies static 127\.0\.0\.0\/8 ::1/,
+      "loopback peers are trusted so {client_ip} survives the hosting hop",
+    );
+    assertEquals(
+      (caddyfile.match(/header_up X-Real-IP \{client_ip\}/g) ?? []).length,
+      3,
+      "the three unix proxies forward {client_ip}",
+    );
+    assertEquals(caddyfile.includes("{remote_host}"), false);
     assertEquals(
       (caddyfile.match(
         /reverse_proxy unix\/\{\{ turbopanel_run_dir \}\}\/instance\.sock/g,
@@ -903,32 +940,37 @@ test(
     );
     assertMatch(
       caddyUnit,
-      /lets_encrypt[\s\S]*?Environment=CADDY_PORT=443/,
-      "lets_encrypt Caddy unit binds :443",
+      /Environment=CADDY_PORT=\{\{\s*caddy_port\s*\}\}/,
+      "the unit keeps CADDY_PORT on the always-on listener",
     );
     assertMatch(
       caddyUnit,
-      /lets_encrypt[\s\S]*?AmbientCapabilities=CAP_NET_BIND_SERVICE/,
-      "lets_encrypt Caddy unit grants CAP_NET_BIND_SERVICE",
+      /Environment=CADDY_HTTP_PORT=\{\{\s*caddy_http_port\s*\}\}/,
+      "the unit exposes caddy_http_port",
+    );
+    assertMatch(
+      caddyUnit,
+      /turbopanel_control_plane_binds_public_https \| default\(false\) \| bool[\s\S]*?h\.source == 'lets-encrypt' or h\.source == 'uploaded'[\s\S]*?== 'upload'[\s\S]*?AmbientCapabilities=CAP_NET_BIND_SERVICE/,
+      "uploaded and lets-encrypt names grant CAP_NET_BIND_SERVICE only when this unit owns public :443",
     );
     assertMatch(
       caddyUnit,
       /lets_encrypt[\s\S]*?CapabilityBoundingSet=CAP_NET_BIND_SERVICE/,
-      "lets_encrypt Caddy unit bounds CAP_NET_BIND_SERVICE",
+      "the public :443 capability set stays bounded",
     );
     const withoutLetsEncrypt = caddyUnit.replace(
-      /\{%\s*if\s+turbopanel_tls_mode[\s\S]*?lets_encrypt[\s\S]*?\{%\s*elif\s/g,
-      "{% elif ",
+      /\{% if _bind\.cap %\}[\s\S]*?\{% endif %\}/,
+      "",
     );
     assertEquals(
       withoutLetsEncrypt.includes("AmbientCapabilities"),
       false,
-      "AmbientCapabilities only appear inside the lets_encrypt branch",
+      "AmbientCapabilities only appear inside the public :443 capability branch",
     );
     assertEquals(
       withoutLetsEncrypt.includes("CapabilityBoundingSet"),
       false,
-      "CapabilityBoundingSet only appear inside the lets_encrypt branch",
+      "CapabilityBoundingSet only appear inside the public :443 capability branch",
     );
     assertEquals(
       caddyUnit.includes("TURBOPANEL_CADDY_ACME_EMAIL_DIRECTIVE"),
@@ -1724,6 +1766,26 @@ test("instance-certs apply never passes a platform CA rotate flag", async () => 
     tasks,
     /TURBOPANEL_TLS_CA_BUNDLE:/,
     "pass TURBOPANEL_TLS_CA_BUNDLE",
+  );
+  const proof = playbook.indexOf("public-https-owner.yml");
+  const render = playbook.indexOf("Render a candidate Caddyfile");
+  const accept = playbook.indexOf(
+    "Ask the running control-plane Caddy to accept the candidate",
+  );
+  const install = playbook.indexOf(
+    "Install the Caddyfile the running process accepted",
+  );
+  assertEquals(proof >= 0 && proof < render, true);
+  assertEquals(accept >= 0 && install > accept, true);
+  const between = playbook.slice(accept, install);
+  assertEquals(
+    between.includes("{{ turbopanel_caddyfile }}.candidate"),
+    true,
+  );
+  assertEquals(between.includes('dest: "{{ turbopanel_caddyfile }}"'), false);
+  assertEquals(
+    playbook.includes("{{ turbopanel_caddyfile }}.previous"),
+    true,
   );
 });
 

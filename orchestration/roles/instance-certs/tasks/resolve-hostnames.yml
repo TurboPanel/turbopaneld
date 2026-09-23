@@ -1,0 +1,107 @@
+---
+# turbopanel_hostnames is the Ansible rendering of public-urls-update.
+# A converge that still passes only the deprecated single-hostname aliases
+# gets one synthesized entry so the Caddyfile and leaf tasks keep working.
+#
+# tp-orchestrate accepts only key=value extra-vars, and those values stay
+# strings. The public-HTTPS release path therefore passes
+# turbopanel_hostnames_json. Decode it into a real list before selectattr
+# or the Caddy template iterates turbopanel_hostnames.
+- name: Parse instance hostnames from the JSON extra-var
+  when:
+    - (turbopanel_hostnames_json | default('')) is string
+    - (turbopanel_hostnames_json | default('')) | length > 0
+  block:
+    - name: Decode turbopanel_hostnames_json into turbopanel_hostnames
+      ansible.builtin.set_fact:
+        turbopanel_hostnames: "{{ turbopanel_hostnames_json | from_json }}"
+
+    - name: Assert decoded instance hostnames are a list
+      ansible.builtin.assert:
+        that:
+          - turbopanel_hostnames is sequence
+        fail_msg: >-
+          turbopanel_hostnames_json must decode to a list before selectattr
+          or the Caddy template reads it
+          (got {{ turbopanel_hostnames | type_debug }}).
+
+- name: Assert instance hostnames are a list
+  ansible.builtin.assert:
+    that:
+      - (turbopanel_hostnames | default([])) is sequence
+    fail_msg: >-
+      turbopanel_hostnames must be a list before selectattr or the Caddy
+      template reads it (got {{ turbopanel_hostnames | type_debug }}).
+      Pass a JSON list in turbopanel_hostnames_json when the value travels
+      as a key=value extra-var.
+
+- name: Assert deprecated control-plane TLS mode alias is valid
+  ansible.builtin.assert:
+    that:
+      - turbopanel_tls_mode | default('self_signed') in ['self_signed', 'upload', 'lets_encrypt']
+    fail_msg: >-
+      turbopanel_tls_mode must be one of self_signed, upload, or lets_encrypt
+      (got '{{ turbopanel_tls_mode | default('') }}').
+
+- name: Synthesize one hostname from deprecated TLS aliases
+  when:
+    - (turbopanel_hostnames | default([])) | length == 0
+    - turbopanel_public_hostname | default('') | length > 0
+  ansible.builtin.set_fact:
+    turbopanel_hostnames:
+      - host: "{{ turbopanel_public_hostname }}"
+        source: "{{ 'lets-encrypt' if (turbopanel_tls_mode | default('self_signed') == 'lets_encrypt') else ('uploaded' if (turbopanel_tls_mode | default('self_signed') == 'upload') else 'platform-ca') }}"
+        cert_id: ""
+
+- name: Synthesize platform-ca hostnames from the flat public URL list
+  when:
+    - (turbopanel_hostnames | default([])) | length == 0
+    - turbopanel_public_urls | default('') | length > 0
+  ansible.builtin.set_fact:
+    turbopanel_hostnames: "{{ _json | from_json }}"
+  vars:
+    _json: >-
+      [{% for host in turbopanel_public_urls.split(',') | map('trim') | reject('equalto', '') | list %}{"host": {{ host | to_json }}, "source": "platform-ca", "cert_id": ""}{% if not loop.last %},{% endif %}{% endfor %}]
+
+- name: Project platform-ca hosts for the leaf generator
+  when: (turbopanel_hostnames | default([])) | length > 0
+  ansible.builtin.set_fact:
+    turbopanel_public_urls: "{{ turbopanel_hostnames | selectattr('source', 'equalto', 'platform-ca') | map(attribute='host') | join(',') }}"
+
+- name: Assert each instance hostname has a known source
+  when: (turbopanel_hostnames | default([])) | length > 0
+  ansible.builtin.assert:
+    that:
+      - item.source in ['platform-ca', 'uploaded', 'lets-encrypt']
+      - item.host | default('') | length > 0
+    fail_msg: >-
+      instance hostname {{ item.host | default('') }} is missing a host or
+      has an unknown source '{{ item.source | default('') }}'.
+  loop: "{{ turbopanel_hostnames }}"
+  loop_control:
+    label: "{{ item.host | default('') }}"
+
+- name: Assert Let's Encrypt hostnames are managed-install only
+  when: turbopanel_hostnames | default([]) | selectattr('source', 'equalto', 'lets-encrypt') | list | length > 0
+  ansible.builtin.assert:
+    that:
+      - turbopanel_dev_user | default('') | length == 0
+    fail_msg: >-
+      lets-encrypt instance hostnames are managed-install only
+      (turbopanel_dev_user must be empty; the dev overlay Caddyfile wins
+      over turbopanel_caddyfile).
+
+- name: Assert a legacy uploaded hostname has cert and key paths
+  when:
+    - item.source | default('') == 'uploaded'
+    - item.cert_id | default('') | length == 0
+  ansible.builtin.assert:
+    that:
+      - turbopanel_tls_cert_path | default('') | length > 0
+      - turbopanel_tls_key_path | default('') | length > 0
+    fail_msg: >-
+      an uploaded hostname without cert_id requires turbopanel_tls_cert_path
+      and turbopanel_tls_key_path.
+  loop: "{{ turbopanel_hostnames | default([]) }}"
+  loop_control:
+    label: "{{ item.host | default('') }}"

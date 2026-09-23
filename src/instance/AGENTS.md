@@ -167,6 +167,30 @@ error (no double challenge+session per cycle). Status → action table:
 **`../turbopanel/AGENTS.md`** (Daemon key authentication — do-not-retry-soon
 table).
 
+**Instance version floor** (`src/instance/version-wire.ts`):
+`MIN_SUPPORTED_INSTANCE_VERSION` is the mirror of the control plane's
+`MIN_SUPPORTED_DAEMON_VERSION`. Bump them together and say why in both
+Versions-on-the-wires notes (root `AGENTS.md` and
+`../turbopanel/AGENTS.md`). The daemon learns the peer from
+`x-turbopanel-version` on every `DaemonApiClient` response (including non-OK
+and the 401 before a refresh) and from `instanceVersion` on the cell attach
+`{ type: "version" }` frame, including a socket-only session. A missing
+header or a frame that omits `instanceVersion` clears the previous
+observation to `unknown`. `InstanceClient.connectionState` reports
+`supported` / `unsupported` / `unknown`. `unknown` is silent. `unsupported`
+logs once:
+
+`instance-version: control plane version <version> is below the supported minimum <floor>; flagged — the daemon keeps reconnecting (update the control plane)`
+
+That is a flag, not `#enterParkedState`: the socket stays up and reconnect
+continues. Capability gates (`resolveDaemonCapabilities` /
+`resolveInstanceCapabilities`, map `DAEMON_FEATURE_MIN_VERSIONS`) are separate
+and default **closed** when the peer version is unknown. The first key is
+`instance-cert-sources-per-hostname` (daemon `0.1.1`, the control-plane
+Caddyfile per-hostname certificate-source release,
+`orchestration/roles/instance-launch/templates/Caddyfile.j2`). A panel feature gated on a daemon
+artifact adds its entry to that map; the UI calls the helper.
+
 **Single-daemon guarantee:** only one live cell attachment per server. Runtime
 backstop is the instance cell's **single-writer lease** on attach
 (`attachDaemonSocket` / `detachDaemonSocket`). On managed hosts,
@@ -260,6 +284,26 @@ daemon cannot point root at another origin or control plane. Co-located dev
 still pipes the downloaded script through `sudo sh -s`. Flags (`--license`,
 `--host`, …) remain supported for scripts and sudo re-exec. There is no
 separate update binary installed under `/opt/turbopanel/bin/`.
+
+The control plane is a **separate verb**, `tp-orchestrate update-instance
+--channel NAME [--manifest-url URL] [--ui-manifest-url URL] --no-start`. It does not take `--license`,
+`--host`, `--dl-base`, or `--instance-ca` (`run.sh --instance` refuses those).
+The helper still reads the update-origin pin to fetch `run.sh`, then runs
+`run.sh --instance --channel … [--instance-manifest-url …] [--ui-manifest-url …] --no-start`.
+`--manifest-url` on the verb maps to `--instance-manifest-url` so the daemon
+pin (`TURBOPANEL_MANIFEST_URL`) stays independent of
+`TURBOPANEL_INSTANCE_MANIFEST_URL`. `--ui-manifest-url` accepts only the UI
+GitHub release rail and maps to `run.sh --ui-manifest-url`
+(`TURBOPANEL_UI_MANIFEST_URL`). A host env pin wins over the URL on the
+cell message, so a panel click does not drop a hold. A development checkout refuses the
+reconcile (`control-plane update is not supported on a development host; the
+co-located control plane is source-run — use the dev console converge path`).
+Before the helper runs, the daemon refuses a target below
+`MIN_SUPPORTED_INSTANCE_VERSION`. A missing target version is not a refusal.
+After a successful install the daemon restarts `turbopanel-instance` and
+`turbopanel-caddy` (playbook `state: started` does not replace a running
+process) and does not restart itself. The result cell message goes out before
+that restart. Daemon self-update does not consult the instance floor.
 
 ### Daemon TLS trust model (4 paths)
 

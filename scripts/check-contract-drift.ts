@@ -7,6 +7,10 @@
  * `metrics-legacy` job) runs the Node twin; this task covers a co-located
  * daemon workspace.
  *
+ * The expand-only snapshot pins a normalized type signature per field. A
+ * committed field may not be removed or narrowed. A wider live type passes
+ * only when that pin sets `expansion: true`.
+ *
  * Run: `deno task check:contract-drift`.
  */
 import { fromFileUrl, join } from "@std/path";
@@ -83,8 +87,15 @@ function extractAfterEquals(source: string, marker: string): number | null {
 }
 
 function extractConst(source: string, name: string): string | null {
-  const from = extractAfterEquals(source, `export const ${name}`);
+  let from = extractAfterEquals(source, `export const ${name}`);
   if (from == null) return null;
+  while (
+    from < source.length &&
+    (source[from] === " " || source[from] === "\t" || source[from] === "\n" ||
+      source[from] === "\r")
+  ) {
+    from += 1;
+  }
   let end = from;
   while (end < source.length && source[end] !== "\n" && source[end] !== ";") {
     end += 1;
@@ -286,25 +297,738 @@ async function checkSlotMapping(tp: string, td: string): Promise<void> {
   );
 }
 
-const siblingSrc = join(SIBLING, "src");
-try {
-  await Deno.stat(siblingSrc);
-} catch {
-  console.log(
-    `check-contract-drift: sibling checkout missing at ${SIBLING}; skip`,
-  );
-  Deno.exit(0);
+const TYPE_KEYWORDS = new Set([
+  "string",
+  "number",
+  "boolean",
+  "bigint",
+  "symbol",
+  "object",
+  "any",
+  "unknown",
+  "never",
+  "void",
+  "null",
+  "undefined",
+]);
+
+type TypeAst =
+  | { kind: "keyword"; name: string }
+  | { kind: "literal"; text: string }
+  | { kind: "union"; members: TypeAst[] }
+  | { kind: "intersection"; members: TypeAst[] }
+  | { kind: "array"; element: TypeAst; readonly: boolean }
+  | { kind: "ref"; name: string; args: TypeAst[] }
+  | {
+    kind: "object";
+    fields: Array<{ name: string; required: boolean; type: TypeAst }>;
+  }
+  | { kind: "opaque"; text: string };
+
+export type ContractFieldSpec = {
+  name: string;
+  required: boolean;
+  type: string;
+};
+
+export type ContractFieldPin = ContractFieldSpec & {
+  /** Live type may be a proper supertype of `type`. */
+  expansion?: boolean;
+};
+
+type TypeRelation = "same" | "narrower" | "wider" | "different";
+
+function skipTrivia(source: string, i: number): number {
+  let j = i;
+  while (j < source.length) {
+    const ch = source[j];
+    if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r") {
+      j += 1;
+      continue;
+    }
+    if (ch === "/" && source[j + 1] === "/") {
+      j += 2;
+      while (j < source.length && source[j] !== "\n") j += 1;
+      continue;
+    }
+    if (ch === "/" && source[j + 1] === "*") {
+      j += 2;
+      while (
+        j < source.length && !(source[j] === "*" && source[j + 1] === "/")
+      ) {
+        j += 1;
+      }
+      j = Math.min(source.length, j + 2);
+      continue;
+    }
+    break;
+  }
+  return j;
 }
 
-const tp = SIBLING;
-const td = ROOT;
-await checkMetrics(tp, td);
-await checkHostname(tp, td);
-await checkMachineKey(tp, td);
-await checkUpdateChannels(tp, td);
-await checkReportedIp(tp, td);
-await checkSlotMapping(tp, td);
+function skipQuoted(source: string, i: number): number {
+  const quote = source[i];
+  if (quote !== "'" && quote !== '"' && quote !== "`") return i + 1;
+  let j = i + 1;
+  while (j < source.length) {
+    if (source[j] === "\\") {
+      j += 2;
+      continue;
+    }
+    if (source[j] === quote) return j + 1;
+    j += 1;
+  }
+  return j;
+}
 
-console.log(
-  "check-contract-drift: metrics, hostname, machine-key, channels, ServerReportedIp, slot-mapping agree.",
-);
+function readWordAt(source: string, i: number): string | null {
+  if (!isWordChar(source[i] ?? "")) return null;
+  let j = i + 1;
+  while (j < source.length && isWordChar(source[j] ?? "")) j += 1;
+  return source.slice(i, j);
+}
+
+function isDigits(word: string): boolean {
+  if (!word) return false;
+  for (const ch of word) {
+    if (ch < "0" || ch > "9") return false;
+  }
+  return true;
+}
+
+function decodeString(raw: string): string {
+  let out = "";
+  for (let i = 0; i < raw.length; i += 1) {
+    if (raw[i] !== "\\") {
+      out += raw[i];
+      continue;
+    }
+    const next = raw[i + 1] ?? "";
+    out += next === "n" ? "\n" : next;
+    i += 1;
+  }
+  return out;
+}
+
+function quoteLiteral(value: string): string {
+  return `'${value.replaceAll("\\", "\\\\").replaceAll("'", "\\'")}'`;
+}
+
+class TypeParser {
+  #source: string;
+  #i = 0;
+
+  constructor(source: string) {
+    this.#source = source;
+  }
+
+  get index(): number {
+    return this.#i;
+  }
+
+  parse(): TypeAst {
+    return this.#parseUnion();
+  }
+
+  #skip(): void {
+    this.#i = skipTrivia(this.#source, this.#i);
+  }
+
+  #eat(token: string): boolean {
+    this.#skip();
+    if (!this.#source.startsWith(token, this.#i)) return false;
+    this.#i += token.length;
+    return true;
+  }
+
+  #peekWord(): string {
+    return readWordAt(this.#source, skipTrivia(this.#source, this.#i)) ?? "";
+  }
+
+  #readWord(): string {
+    this.#skip();
+    const word = readWordAt(this.#source, this.#i) ?? "";
+    this.#i += word.length;
+    return word;
+  }
+
+  #parseUnion(): TypeAst {
+    // A leading `|` is TypeScript style, not an empty union member.
+    this.#skip();
+    if (this.#source.startsWith("|", this.#i)) this.#i += 1;
+    const members = [this.#parseIntersection()];
+    while (this.#eat("|")) members.push(this.#parseIntersection());
+    if (members.length === 1) return members[0];
+    return { kind: "union", members };
+  }
+
+  #parseIntersection(): TypeAst {
+    const members = [this.#parsePostfix()];
+    while (this.#eat("&")) members.push(this.#parsePostfix());
+    if (members.length === 1) return members[0];
+    return { kind: "intersection", members };
+  }
+
+  #parsePostfix(): TypeAst {
+    let ast = this.#parsePrimary();
+    while (this.#eat("[]")) {
+      ast = { kind: "array", element: ast, readonly: false };
+    }
+    return ast;
+  }
+
+  #parsePrimary(): TypeAst {
+    this.#skip();
+    if (this.#peekWord() === "readonly") {
+      return this.#parseReadonly();
+    }
+    if (this.#eat("(")) {
+      const inner = this.#parseUnion();
+      this.#eat(")");
+      return inner;
+    }
+    if (this.#eat("{")) return this.#parseObjectFields();
+    const ch = this.#source[this.#i];
+    if (ch === "'" || ch === '"') return this.#parseStringLiteral();
+    const word = this.#readWord();
+    if (!word) return { kind: "opaque", text: "" };
+    return this.#wordType(word);
+  }
+
+  #parseReadonly(): TypeAst {
+    this.#readWord();
+    const inner = this.#parsePostfix();
+    if (inner.kind === "array") return { ...inner, readonly: true };
+    return { kind: "opaque", text: `readonly ${canonical(inner)}` };
+  }
+
+  #wordType(word: string): TypeAst {
+    if (isDigits(word)) return { kind: "literal", text: word };
+    if (word === "true" || word === "false") {
+      return { kind: "literal", text: word };
+    }
+    if (TYPE_KEYWORDS.has(word)) return { kind: "keyword", name: word };
+    const args = this.#eat("<") ? this.#parseTypeArgs() : [];
+    return { kind: "ref", name: word, args };
+  }
+
+  #parseStringLiteral(): TypeAst {
+    const quote = this.#source[this.#i];
+    const end = skipQuoted(this.#source, this.#i);
+    const raw = this.#source.slice(this.#i + 1, end - 1);
+    this.#i = end;
+    if (quote !== "'" && quote !== '"') {
+      return { kind: "opaque", text: this.#source.slice(end) };
+    }
+    return { kind: "literal", text: quoteLiteral(decodeString(raw)) };
+  }
+
+  #parseTypeArgs(): TypeAst[] {
+    const args: TypeAst[] = [];
+    while (this.#i < this.#source.length) {
+      this.#skip();
+      if (this.#source[this.#i] === ">") break;
+      args.push(this.#parseUnion());
+      this.#skip();
+      if (this.#source[this.#i] === ",") {
+        this.#i += 1;
+        continue;
+      }
+      break;
+    }
+    this.#eat(">");
+    return args;
+  }
+
+  #parseObjectFields(): TypeAst {
+    const fields: Array<{ name: string; required: boolean; type: TypeAst }> =
+      [];
+    while (this.#i < this.#source.length) {
+      this.#skip();
+      if (this.#eat("}")) break;
+      if (this.#eat(";") || this.#eat(",")) continue;
+      const before = this.#i;
+      const field = this.#parseField();
+      if (field) fields.push(field);
+      if (this.#i === before) this.#i += 1;
+    }
+    return { kind: "object", fields };
+  }
+
+  #parseField(): { name: string; required: boolean; type: TypeAst } | null {
+    if (this.#peekWord() === "readonly") {
+      const mark = this.#i;
+      this.#readWord();
+      this.#skip();
+      const next = this.#source[this.#i];
+      if (next === ":" || next === "?") this.#i = mark;
+    }
+    this.#skip();
+    const quoted = this.#source[this.#i] === "'" ||
+      this.#source[this.#i] === '"';
+    const name = quoted ? this.#readQuotedName() : this.#readWord();
+    if (!name || !isWord(name)) return null;
+    const required = !this.#eat("?");
+    if (!this.#eat(":")) return null;
+    return { name, required, type: this.#parseUnion() };
+  }
+
+  #readQuotedName(): string {
+    const end = skipQuoted(this.#source, this.#i);
+    const raw = this.#source.slice(this.#i + 1, Math.max(this.#i + 1, end - 1));
+    this.#i = end;
+    return decodeString(raw);
+  }
+}
+
+function parseType(text: string): TypeAst {
+  return new TypeParser(text).parse();
+}
+
+function collectTypeAliases(source: string): Map<string, string> {
+  const aliases = new Map<string, string>();
+  let i = 0;
+  while (i < source.length) {
+    const trivia = skipTrivia(source, i);
+    if (trivia > i) {
+      i = trivia;
+      continue;
+    }
+    const ch = source[i];
+    if (ch === "'" || ch === '"' || ch === "`") {
+      i = skipQuoted(source, i);
+      continue;
+    }
+    if (source.startsWith("export type ", i) && boundaryBefore(source, i)) {
+      i = captureAlias(source, i + "export type ".length, aliases);
+      continue;
+    }
+    i += 1;
+  }
+  return aliases;
+}
+
+function boundaryBefore(source: string, i: number): boolean {
+  if (i === 0) return true;
+  return !isWordChar(source[i - 1] ?? "");
+}
+
+function captureAlias(
+  source: string,
+  i: number,
+  aliases: Map<string, string>,
+): number {
+  const nameAt = skipTrivia(source, i);
+  const name = readWordAt(source, nameAt);
+  if (!name) return nameAt + 1;
+  let cursor = skipTrivia(source, nameAt + name.length);
+  if (source[cursor] === "<") {
+    const parser = new TypeParser(source.slice(cursor));
+    parser.parse();
+    cursor = skipTrivia(source, cursor + parser.index);
+  }
+  if (source[cursor] !== "=") return cursor;
+  cursor = skipTrivia(source, cursor + 1);
+  const parser = new TypeParser(source.slice(cursor));
+  parser.parse();
+  const end = cursor + parser.index;
+  aliases.set(name, source.slice(cursor, end).trim());
+  let after = skipTrivia(source, end);
+  if (source[after] === ";") after += 1;
+  return after;
+}
+
+function resolveAst(
+  ast: TypeAst,
+  aliases: ReadonlyMap<string, string>,
+  seen: ReadonlySet<string>,
+): TypeAst {
+  if (ast.kind === "ref" && ast.args.length === 0) {
+    return resolveAliasRef(ast.name, aliases, seen);
+  }
+  if (ast.kind === "ref") {
+    return {
+      kind: "ref",
+      name: ast.name,
+      args: ast.args.map((arg) => resolveAst(arg, aliases, seen)),
+    };
+  }
+  if (ast.kind === "union") {
+    return {
+      kind: "union",
+      members: ast.members.map((member) => resolveAst(member, aliases, seen)),
+    };
+  }
+  if (ast.kind === "intersection") {
+    return {
+      kind: "intersection",
+      members: ast.members.map((member) => resolveAst(member, aliases, seen)),
+    };
+  }
+  if (ast.kind === "array") {
+    return {
+      kind: "array",
+      readonly: ast.readonly,
+      element: resolveAst(ast.element, aliases, seen),
+    };
+  }
+  if (ast.kind === "object") {
+    return {
+      kind: "object",
+      fields: ast.fields.map((field) => ({
+        name: field.name,
+        required: field.required,
+        type: resolveAst(field.type, aliases, seen),
+      })),
+    };
+  }
+  return ast;
+}
+
+function resolveAliasRef(
+  name: string,
+  aliases: ReadonlyMap<string, string>,
+  seen: ReadonlySet<string>,
+): TypeAst {
+  const body = aliases.get(name);
+  if (!body || seen.has(name)) return { kind: "ref", name, args: [] };
+  const next = new Set(seen);
+  next.add(name);
+  return resolveAst(parseType(body), aliases, next);
+}
+
+function desugar(ast: TypeAst): TypeAst {
+  if (ast.kind === "ref" && ast.name === "Array" && ast.args.length === 1) {
+    return { kind: "array", readonly: false, element: desugar(ast.args[0]) };
+  }
+  if (
+    ast.kind === "ref" && ast.name === "ReadonlyArray" && ast.args.length === 1
+  ) {
+    return { kind: "array", readonly: true, element: desugar(ast.args[0]) };
+  }
+  if (ast.kind === "ref") {
+    return { kind: "ref", name: ast.name, args: ast.args.map(desugar) };
+  }
+  if (ast.kind === "union") {
+    return { kind: "union", members: ast.members.map(desugar) };
+  }
+  if (ast.kind === "intersection") {
+    return { kind: "intersection", members: ast.members.map(desugar) };
+  }
+  if (ast.kind === "array") {
+    return {
+      kind: "array",
+      readonly: ast.readonly,
+      element: desugar(ast.element),
+    };
+  }
+  if (ast.kind === "object") {
+    return {
+      kind: "object",
+      fields: ast.fields.map((field) => ({
+        name: field.name,
+        required: field.required,
+        type: desugar(field.type),
+      })),
+    };
+  }
+  return ast;
+}
+
+function canonical(ast: TypeAst): string {
+  if (ast.kind === "keyword") return ast.name;
+  if (ast.kind === "literal") return ast.text;
+  if (ast.kind === "opaque") return normalizeWs(ast.text);
+  if (ast.kind === "array") return canonicalArray(ast);
+  if (ast.kind === "ref") return canonicalRef(ast);
+  if (ast.kind === "union") return joinSorted(ast.members, " | ");
+  if (ast.kind === "intersection") return joinSorted(ast.members, " & ");
+  return canonicalObject(ast.fields);
+}
+
+function canonicalArray(ast: { element: TypeAst; readonly: boolean }): string {
+  const inner = canonical(ast.element);
+  return ast.readonly ? `ReadonlyArray<${inner}>` : `Array<${inner}>`;
+}
+
+function canonicalRef(ast: { name: string; args: TypeAst[] }): string {
+  if (ast.args.length === 0) return ast.name;
+  return `${ast.name}<${ast.args.map(canonical).join(", ")}>`;
+}
+
+function joinSorted(members: TypeAst[], sep: string): string {
+  return members.map(canonical).sort((a, b) => a.localeCompare(b)).join(sep);
+}
+
+function canonicalObject(
+  fields: Array<{ name: string; required: boolean; type: TypeAst }>,
+): string {
+  const parts = fields
+    .map((field) => ({
+      name: field.name,
+      text: `${field.name}${field.required ? "" : "?"}: ${
+        canonical(field.type)
+      }`,
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((field) => field.text);
+  return `{ ${parts.join("; ")} }`;
+}
+
+function literalFitsKeyword(text: string, keyword: string): boolean {
+  if (keyword === "string") return text.startsWith("'");
+  if (keyword === "number") return isDigits(text);
+  if (keyword === "boolean") return text === "true" || text === "false";
+  return false;
+}
+
+function isAssignable(from: TypeAst, to: TypeAst): boolean {
+  if (canonical(from) === canonical(to)) return true;
+  if (from.kind === "keyword" && from.name === "never") return true;
+  if (to.kind === "keyword" && (to.name === "any" || to.name === "unknown")) {
+    return true;
+  }
+  if (from.kind === "union") {
+    return from.members.every((member) => isAssignable(member, to));
+  }
+  if (to.kind === "union") {
+    return to.members.some((member) => isAssignable(from, member));
+  }
+  return isAssignableShape(from, to);
+}
+
+function isAssignableShape(from: TypeAst, to: TypeAst): boolean {
+  if (from.kind === "literal" && to.kind === "keyword") {
+    return literalFitsKeyword(from.text, to.name);
+  }
+  if (from.kind === "array" && to.kind === "array") {
+    if (from.readonly && !to.readonly) return false;
+    return isAssignable(from.element, to.element);
+  }
+  if (from.kind === "object" && to.kind === "object") {
+    return objectAssignable(from.fields, to.fields);
+  }
+  if (
+    from.kind === "ref" && to.kind === "ref" && from.name === to.name &&
+    from.args.length === to.args.length
+  ) {
+    return from.args.every((arg, index) => isAssignable(arg, to.args[index]));
+  }
+  return false;
+}
+
+function objectAssignable(
+  from: Array<{ name: string; required: boolean; type: TypeAst }>,
+  to: Array<{ name: string; required: boolean; type: TypeAst }>,
+): boolean {
+  for (const field of to) {
+    const found = from.find((item) => item.name === field.name);
+    if (!found) return false;
+    if (field.required && !found.required) return false;
+    if (!isAssignable(found.type, field.type)) return false;
+  }
+  return true;
+}
+
+export function relateFieldTypes(live: string, pin: string): TypeRelation {
+  const liveAst = desugar(parseType(live));
+  const pinAst = desugar(parseType(pin));
+  const liveToPin = isAssignable(liveAst, pinAst);
+  const pinToLive = isAssignable(pinAst, liveAst);
+  if (liveToPin && pinToLive) return "same";
+  if (liveToPin) return "narrower";
+  if (pinToLive) return "wider";
+  return "different";
+}
+
+function finishType(
+  text: string,
+  aliases: ReadonlyMap<string, string>,
+  seen: ReadonlySet<string>,
+): TypeAst {
+  return desugar(resolveAst(parseType(text), aliases, seen));
+}
+
+export function extractFieldSpecs(
+  source: string,
+  typeName: string,
+): ContractFieldSpec[] | null {
+  const aliases = collectTypeAliases(source);
+  const body = aliases.get(typeName);
+  if (body == null) return null;
+  const ast = finishType(body, aliases, new Set([typeName]));
+  if (ast.kind !== "object") return null;
+  return ast.fields
+    .map((field) => ({
+      name: field.name,
+      required: field.required,
+      type: canonical(field.type),
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export function fieldPinDrift(
+  live: ContractFieldSpec[] | null,
+  pin: ContractFieldPin[],
+  label: string,
+): string | null {
+  if (!live) return `${label} type missing`;
+  const byName = new Map(live.map((field) => [field.name, field]));
+  for (const field of pin) {
+    const reason = pinFieldDrift(byName.get(field.name), field, label);
+    if (reason) return reason;
+  }
+  return null;
+}
+
+function pinFieldDrift(
+  found: ContractFieldSpec | undefined,
+  field: ContractFieldPin,
+  label: string,
+): string | null {
+  if (!found) return `${label} removed ${field.name}`;
+  if (field.required && !found.required) {
+    return `${label} narrowed ${field.name}`;
+  }
+  const relation = relateFieldTypes(found.type, field.type);
+  if (relation === "same") return null;
+  if (relation === "wider" && field.expansion === true) return null;
+  if (relation === "wider") {
+    return `${label} expanded ${field.name} from ${field.type} to ${found.type} without a compatible expansion mark`;
+  }
+  return `${label} narrowed ${field.name} from ${field.type} to ${found.type}`;
+}
+
+function extractObjectLiteral(source: string, name: string): string | null {
+  const marker = `export const ${name}`;
+  const start = source.indexOf(marker);
+  if (start === -1) return null;
+  const eq = source.indexOf("=", start + marker.length);
+  if (eq === -1) return null;
+  const open = source.indexOf("{", eq);
+  const close = source.indexOf("}", open);
+  if (open === -1 || close === -1) return null;
+  return stripQuotes(normalizeWs(source.slice(open, close + 1)));
+}
+
+type ContractPin = {
+  instance: string;
+  daemon: string;
+  fields: ContractFieldPin[];
+};
+
+function assertFieldsCovered(
+  live: ContractFieldSpec[] | null,
+  pin: ContractFieldPin[],
+  label: string,
+): void {
+  const drift = fieldPinDrift(live, pin, label);
+  if (drift) fail(drift);
+}
+
+function assertRequiredSuperset(
+  instanceFields: ContractFieldSpec[],
+  daemonFields: ContractFieldSpec[],
+  label: string,
+): void {
+  const daemonByName = new Map(
+    daemonFields.map((field) => [field.name, field]),
+  );
+  for (const field of instanceFields) {
+    if (!field.required) continue;
+    const found = daemonByName.get(field.name);
+    if (!found?.required) {
+      fail(`${label} daemon mirror is missing required ${field.name}`);
+    }
+  }
+}
+
+async function checkExpandOnly(tp: string, td: string): Promise<void> {
+  const left = requireText(
+    await readRel(tp, "scripts/contract-field-snapshot.json"),
+    "contract-field-snapshot.json missing on the instance",
+  );
+  const right = requireText(
+    await readRel(td, "scripts/contract-field-snapshot.json"),
+    "contract-field-snapshot.json missing on the daemon",
+  );
+  if (normalizeWs(left) !== normalizeWs(right)) {
+    fail("contract-field-snapshot.json drifted between checkouts");
+  }
+  const snapshot = JSON.parse(left) as Record<string, ContractPin>;
+  for (const [typeName, pin] of Object.entries(snapshot)) {
+    const instanceSrc = requireText(
+      await readRel(tp, pin.instance),
+      `${typeName} instance source missing`,
+    );
+    const daemonSrc = requireText(
+      await readRel(td, pin.daemon),
+      `${typeName} daemon source missing`,
+    );
+    const instanceFields = extractFieldSpecs(instanceSrc, typeName);
+    const daemonFields = extractFieldSpecs(daemonSrc, typeName);
+    assertFieldsCovered(instanceFields, pin.fields, `${typeName} instance`);
+    assertFieldsCovered(daemonFields, pin.fields, `${typeName} daemon`);
+    if (!instanceFields || !daemonFields) fail(`${typeName} fields missing`);
+    assertRequiredSuperset(instanceFields, daemonFields, typeName);
+  }
+
+  const instanceWire = requireText(
+    await readRel(tp, "src/lib/version-wire.ts"),
+    "instance version-wire.ts missing",
+  );
+  const daemonWire = requireText(
+    await readRel(td, "src/instance/version-wire.ts"),
+    "daemon version-wire.ts missing",
+  );
+  requireEqual(
+    extractConst(instanceWire, "INSTANCE_VERSION_HEADER"),
+    extractConst(daemonWire, "INSTANCE_VERSION_HEADER"),
+    "INSTANCE_VERSION_HEADER drifted",
+  );
+  requireEqual(
+    extractConst(instanceWire, "MIN_SUPPORTED_DAEMON_VERSION"),
+    extractConst(daemonWire, "MIN_SUPPORTED_INSTANCE_VERSION"),
+    "MIN_SUPPORTED_DAEMON_VERSION and MIN_SUPPORTED_INSTANCE_VERSION must move together",
+  );
+  requireEqual(
+    extractObjectLiteral(instanceWire, "DAEMON_FEATURE_MIN_VERSIONS"),
+    extractObjectLiteral(daemonWire, "DAEMON_FEATURE_MIN_VERSIONS"),
+    "DAEMON_FEATURE_MIN_VERSIONS drifted",
+  );
+  requireEqual(
+    extractObjectLiteral(instanceWire, "INSTANCE_FEATURE_MIN_VERSIONS"),
+    extractObjectLiteral(daemonWire, "INSTANCE_FEATURE_MIN_VERSIONS"),
+    "INSTANCE_FEATURE_MIN_VERSIONS drifted",
+  );
+}
+
+async function runContractDriftCheck(): Promise<void> {
+  const siblingSrc = join(SIBLING, "src");
+  try {
+    await Deno.stat(siblingSrc);
+  } catch {
+    console.log(
+      `check-contract-drift: sibling checkout missing at ${SIBLING}; skip`,
+    );
+    return;
+  }
+
+  const tp = SIBLING;
+  const td = ROOT;
+  await checkMetrics(tp, td);
+  await checkHostname(tp, td);
+  await checkMachineKey(tp, td);
+  await checkUpdateChannels(tp, td);
+  await checkReportedIp(tp, td);
+  await checkSlotMapping(tp, td);
+  await checkExpandOnly(tp, td);
+
+  console.log(
+    "check-contract-drift: metrics, hostname, machine-key, channels, ServerReportedIp, slot-mapping, expand-only fields agree.",
+  );
+}
+
+if (import.meta.main) {
+  await runContractDriftCheck();
+}

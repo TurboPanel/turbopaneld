@@ -5,6 +5,29 @@ export const DL_BASE_URL = "https://dl.trbp.nl";
 /** The repository whose GitHub Releases carry the daemon's canary/rc/release packages. */
 export const GITHUB_RELEASES_REPO = "TurboPanel/turbopaneld";
 
+/** Control-plane packages (compiled instance). GitHub Releases only — no CDN drop. */
+export const INSTANCE_GITHUB_RELEASES_REPO = "TurboPanel/turbopanel";
+
+/** Web export packages. GitHub Releases only — no CDN drop. */
+export const UI_GITHUB_RELEASES_REPO = "TurboPanel/ui";
+
+export const RELEASE_ARTIFACT_KINDS = ["daemon", "instance", "ui"] as const;
+
+export type ReleaseArtifactKind = (typeof RELEASE_ARTIFACT_KINDS)[number];
+
+export function githubReleasesRepo(
+  kind: ReleaseArtifactKind = "daemon",
+): string {
+  switch (kind) {
+    case "instance":
+      return INSTANCE_GITHUB_RELEASES_REPO;
+    case "ui":
+      return UI_GITHUB_RELEASES_REPO;
+    case "daemon":
+      return GITHUB_RELEASES_REPO;
+  }
+}
+
 /**
  * Where each advertised channel's manifest lives when no overlay catalog
  * (`TURBOPANEL_DL_BASE`) is configured — the built-in rail.
@@ -24,21 +47,48 @@ export const GITHUB_RELEASES_REPO = "TurboPanel/turbopaneld";
  * Mirrored by hand in scripts/run.sh (`tp_builtin_channel_manifest_url`) and
  * the control plane's src/contracts/update-channel.ts — keep the three in step;
  * urls.test.ts pins run.sh's copy against this one.
+ *
+ * `kind` selects the package. Daemon `trunk` stays
+ * `channels/trunk/manifest.json` (the CDN drop). Instance and UI have no CDN
+ * drop, so their `trunk` (and every kind's `edge`) is `null` — canary, rc,
+ * and release are GitHub Releases for that repository. The default kind is
+ * `daemon` so existing call sites stay on the daemon rail.
  */
 export function builtinChannelManifestUrl(
   channel: UpdateChannel,
+  kind: ReleaseArtifactKind = "daemon",
 ): string | null {
+  const repo = githubReleasesRepo(kind);
   switch (channel) {
     case "trunk":
-      return `${DL_BASE_URL}/channels/trunk/manifest.json`;
+      return trunkManifestUrl(kind);
     case "canary":
-      return `https://github.com/${GITHUB_RELEASES_REPO}/releases/download/canary/manifest.json`;
+      return `https://github.com/${repo}/releases/download/canary/manifest.json`;
     case "rc":
-      return `https://github.com/${GITHUB_RELEASES_REPO}/releases/download/rc/manifest.json`;
+      return `https://github.com/${repo}/releases/download/rc/manifest.json`;
     case "release":
-      return `https://github.com/${GITHUB_RELEASES_REPO}/releases/latest/download/manifest.json`;
+      return `https://github.com/${repo}/releases/latest/download/manifest.json`;
     default:
       return null;
+  }
+}
+
+function trunkManifestUrl(kind: ReleaseArtifactKind): string | null {
+  if (kind !== "daemon") return null;
+  return `${DL_BASE_URL}/channels/trunk/manifest.json`;
+}
+
+/** Env var that pins one artifact kind to an exact manifest. Independent per kind. */
+export function pinnedManifestEnvName(
+  kind: ReleaseArtifactKind = "daemon",
+): string {
+  switch (kind) {
+    case "instance":
+      return "TURBOPANEL_INSTANCE_MANIFEST_URL";
+    case "ui":
+      return "TURBOPANEL_UI_MANIFEST_URL";
+    case "daemon":
+      return "TURBOPANEL_MANIFEST_URL";
   }
 }
 
@@ -71,16 +121,21 @@ export function resolveDlBase(
 }
 
 /**
- * A pinned manifest (run.sh --manifest-url → TURBOPANEL_MANIFEST_URL in
- * daemon.env): one exact release manifest, typically a tag's
+ * A pinned manifest: one exact release manifest, typically a tag's
  * releases/download/vX.Y.Z/manifest.json, that wins over the channel's
  * current pointer so a host can be held on (or rolled back to) a specific
  * release while the channel moves on. https only; `null` when unset.
+ *
+ * The daemon pin is `TURBOPANEL_MANIFEST_URL` (`run.sh --manifest-url`).
+ * The control plane and the UI have their own pins
+ * (`TURBOPANEL_INSTANCE_MANIFEST_URL`, `TURBOPANEL_UI_MANIFEST_URL`) so a
+ * canary host can hold each package on a different build.
  */
 export function resolvePinnedManifestUrl(
   env: Record<string, string | undefined> = Deno.env.toObject(),
+  kind: ReleaseArtifactKind = "daemon",
 ): string | null {
-  const pinned = env.TURBOPANEL_MANIFEST_URL?.trim();
+  const pinned = env[pinnedManifestEnvName(kind)]?.trim();
   if (!pinned) return null;
   try {
     return new URL(pinned).protocol === "https:" ? pinned : null;

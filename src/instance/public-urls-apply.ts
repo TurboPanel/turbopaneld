@@ -5,7 +5,20 @@ import {
 } from "../orchestration/ansible.ts";
 import { INSTANCE_CERTS_APPLY_PLAYBOOK } from "../orchestration/assets.ts";
 import { resolveDevRoot, resolveLayout } from "../paths/layout.ts";
+import {
+  preflightInstanceLetsEncryptHttp01,
+  syncInstanceAcmeHttp01Site,
+} from "../deploy/instance-acme-http01.ts";
+import type {
+  InstanceAcmeWireSettings,
+  InstanceHostnameWireEntry,
+} from "../contracts/cell-messages.ts";
 import { upsertPublicUrlsInEnv } from "./public-urls-env.ts";
+
+/** Wire hostname, including the one-hop decrypted upload pair. */
+export type InstanceHostnameApplyEntry = InstanceHostnameWireEntry;
+
+const UPLOADED_CERT_ID = /^[0-9a-f-]{36}$/i;
 
 function stripTrailingSlashes(path: string): string {
   let out = path;
@@ -59,18 +72,95 @@ export {
   upsertPublicUrlsInEnv,
 } from "./public-urls-env.ts";
 
+/** Certs directory the instance-certs role writes, matched to its defaults. */
+export function resolveInstanceCertsDir(
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+): string {
+  if (isCoLocatedDev(env)) {
+    return join(resolveInstanceDir(env), "certs");
+  }
+  return join(resolveLayout(env).stateDir, "tls", "certs");
+}
+
+export function platformCaHosts(
+  hostnames: readonly InstanceHostnameApplyEntry[],
+): string[] {
+  return hostnames
+    .filter((entry) => entry.source === "platform-ca")
+    .map((entry) => entry.host);
+}
+
+function ansibleHostname(entry: InstanceHostnameApplyEntry): {
+  host: string;
+  source: InstanceHostnameApplyEntry["source"];
+  cert_id: string;
+} {
+  return {
+    host: entry.host,
+    source: entry.source,
+    cert_id: entry.uploadedCertId ?? "",
+  };
+}
+
+export async function writeUploadedInstanceCerts(
+  hostnames: readonly InstanceHostnameApplyEntry[],
+  certsDir: string,
+): Promise<void> {
+  const seen = new Set<string>();
+  let wrote = false;
+  for (const entry of hostnames) {
+    if (entry.source !== "uploaded") continue;
+    const id = entry.uploadedCertId;
+    if (!id || !entry.certPem || !entry.keyPem) continue;
+    if (!UPLOADED_CERT_ID.test(id)) {
+      throw new Error(`refusing uploaded certificate id ${id}`);
+    }
+    if (seen.has(id)) continue;
+    seen.add(id);
+    if (!wrote) {
+      await Deno.mkdir(certsDir, { recursive: true, mode: 0o750 });
+      wrote = true;
+    }
+    await Deno.writeTextFile(
+      join(certsDir, `uploaded-${id}.crt`),
+      entry.certPem,
+      {
+        mode: 0o640,
+      },
+    );
+    await Deno.writeTextFile(
+      join(certsDir, `uploaded-${id}.key`),
+      entry.keyPem,
+      {
+        mode: 0o640,
+      },
+    );
+  }
+}
+
 export async function runInstanceCertsApply(
   instanceDir: string,
-  urls: string[],
+  hostnames: readonly InstanceHostnameApplyEntry[],
   deps: {
     runPlaybook?: typeof runLocalPlaybook;
+    instanceAcme?: InstanceAcmeWireSettings;
   } = {},
 ): Promise<void> {
+  const platformCa = platformCaHosts(hostnames);
+  const extra: Record<string, unknown> = {
+    turbopanel_hostnames: hostnames.map(ansibleHostname),
+  };
+  const email = deps.instanceAcme?.contactEmail.trim();
+  if (email) extra.turbopanel_acme_email = email;
+  const directory = deps.instanceAcme?.directoryUrl.trim();
+  if (directory) extra.turbopanel_acme_directory = directory;
   const args = [
     "-e",
     `turbopanel_instance_dir=${instanceDir}`,
     "-e",
-    `turbopanel_public_urls=${urls.join(",")}`,
+    `turbopanel_public_urls=${platformCa.join(",")}`,
+    "-e",
+    JSON.stringify(extra),
     ...devOwnershipPlaybookExtraArgs(),
   ];
   const runPlaybook = deps.runPlaybook ?? runLocalPlaybook;
@@ -78,13 +168,26 @@ export async function runInstanceCertsApply(
 }
 
 export async function applyPublicUrls(
-  urls: string[],
+  hostnames: readonly InstanceHostnameApplyEntry[],
   deps: {
     runCertsApply?: typeof runInstanceCertsApply;
+    instanceAcme?: InstanceAcmeWireSettings;
+    writeUploadedCerts?: typeof writeUploadedInstanceCerts;
+    syncChallenge?: typeof syncInstanceAcmeHttp01Site;
+    preflightLetsEncrypt?: typeof preflightInstanceLetsEncryptHttp01;
   } = {},
 ): Promise<void> {
   const instanceDir = resolveInstanceDir();
-  await upsertPublicUrlsInEnv(urls);
+  await upsertPublicUrlsInEnv(platformCaHosts(hostnames));
+  const writeUploaded = deps.writeUploadedCerts ?? writeUploadedInstanceCerts;
+  await writeUploaded(hostnames, resolveInstanceCertsDir());
+  const preflight = deps.preflightLetsEncrypt ??
+    preflightInstanceLetsEncryptHttp01;
+  await preflight(hostnames, resolveLayout(Deno.env.toObject()));
   const runCerts = deps.runCertsApply ?? runInstanceCertsApply;
-  await runCerts(instanceDir, urls);
+  await runCerts(instanceDir, hostnames, {
+    instanceAcme: deps.instanceAcme,
+  });
+  const syncChallenge = deps.syncChallenge ?? syncInstanceAcmeHttp01Site;
+  await syncChallenge(resolveLayout(Deno.env.toObject()));
 }

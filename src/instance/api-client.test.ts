@@ -799,3 +799,166 @@ test({
     }
   },
 });
+
+test({
+  name:
+    "DaemonApiClient records x-turbopanel-version from a successful response",
+  permissions: { net: true },
+  fn: async () => {
+    const signing = await createTestSigningKey();
+    const api = createFakeInstanceApi();
+    const seen: Array<string | null> = [];
+    const restore = api.install();
+    try {
+      api.script(
+        "/api/daemon/v1/jwks.json",
+        () =>
+          new Response(JSON.stringify(signing.jwks), {
+            status: 200,
+            headers: { "x-turbopanel-version": "0.1.1" },
+          }),
+      );
+      const client = new DaemonApiClient({
+        config: INSTANCE_CONFIG,
+        getToken: () => Promise.resolve("tok"),
+        onInstanceVersion: (version) => {
+          seen.push(version);
+        },
+      });
+      assertEquals(client.lastKnownInstanceVersion(), null);
+      await client.getJwks();
+      assertEquals(client.lastKnownInstanceVersion(), "0.1.1");
+      assertEquals(seen, ["0.1.1"]);
+    } finally {
+      restore();
+    }
+  },
+});
+
+test({
+  name:
+    "DaemonApiClient leaves the instance version unset when the header is absent",
+  permissions: { net: true },
+  fn: async () => {
+    const signing = await createTestSigningKey();
+    const api = createFakeInstanceApi();
+    const restore = api.install();
+    try {
+      let hits = 0;
+      api.script("/api/daemon/v1/jwks.json", () => {
+        hits += 1;
+        if (hits === 2) {
+          return new Response(JSON.stringify(signing.jwks), {
+            status: 200,
+            headers: { "x-turbopanel-version": "0.1.1" },
+          });
+        }
+        return jwksResponse(signing);
+      });
+      const seen: Array<string | null> = [];
+      const client = new DaemonApiClient({
+        config: INSTANCE_CONFIG,
+        getToken: () => Promise.resolve("tok"),
+        onInstanceVersion: (version) => {
+          seen.push(version);
+        },
+      });
+      await client.getJwks();
+      assertEquals(client.lastKnownInstanceVersion(), null);
+      assertEquals(seen, [null]);
+
+      await client.getJwks();
+      assertEquals(client.lastKnownInstanceVersion(), "0.1.1");
+
+      await client.getJwks();
+      assertEquals(client.lastKnownInstanceVersion(), null);
+      assertEquals(seen, [null, "0.1.1", null]);
+    } finally {
+      restore();
+    }
+  },
+});
+
+test({
+  name: "DaemonApiClient records x-turbopanel-version from a non-OK response",
+  permissions: { net: true },
+  fn: async () => {
+    const api = createFakeInstanceApi();
+    const seen: Array<string | null> = [];
+    const restore = api.install();
+    try {
+      api.script(
+        "/api/daemon/v1/jwks.json",
+        () =>
+          new Response(JSON.stringify({ error: "unavailable" }), {
+            status: 503,
+            headers: { "x-turbopanel-version": "0.0.9" },
+          }),
+      );
+      const client = new DaemonApiClient({
+        config: INSTANCE_CONFIG,
+        getToken: () => Promise.resolve("tok"),
+        onInstanceVersion: (version) => {
+          seen.push(version);
+        },
+      });
+      await assertRejects(
+        () => client.getJwks(),
+        DaemonApiError,
+        "unavailable",
+      );
+      assertEquals(client.lastKnownInstanceVersion(), "0.0.9");
+      assertEquals(seen, ["0.0.9"]);
+    } finally {
+      restore();
+    }
+  },
+});
+
+test({
+  name:
+    "DaemonApiClient records x-turbopanel-version from the first 401 before refresh",
+  permissions: { net: true },
+  fn: async () => {
+    const api = createFakeInstanceApi();
+    const restore = api.install();
+    try {
+      let hits = 0;
+      api.script("/api/daemon/v1/metrics", () => {
+        hits += 1;
+        if (hits === 1) {
+          return new Response(JSON.stringify({ error: "unauthorized" }), {
+            status: 401,
+            headers: { "x-turbopanel-version": "0.0.8" },
+          });
+        }
+        return new Response(null, {
+          status: 204,
+          headers: { "x-turbopanel-version": "0.1.1" },
+        });
+      });
+      const seen: Array<{ version: string | null; lastKnown: string | null }> =
+        [];
+      const client = new DaemonApiClient({
+        config: INSTANCE_CONFIG,
+        getToken: (options) =>
+          Promise.resolve(options?.forceRefresh ? "refreshed" : "initial"),
+        onInstanceVersion: (version) => {
+          seen.push({
+            version,
+            lastKnown: client.lastKnownInstanceVersion(),
+          });
+        },
+      });
+      await client.sendHostMetrics({ n: 1 });
+      assertEquals(hits, 2);
+      assertEquals(seen, [
+        { version: "0.0.8", lastKnown: "0.0.8" },
+        { version: "0.1.1", lastKnown: "0.1.1" },
+      ]);
+      assertEquals(client.lastKnownInstanceVersion(), "0.1.1");
+    } finally {
+      restore();
+    }
+  },
+});

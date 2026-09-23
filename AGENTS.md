@@ -154,6 +154,48 @@ mailer units ExecStart through the vendored Deno path — it is not only the
 daemon's JS-fallback concern. `src/orchestration/assets.test.ts` pins that
 ordering too.
 
+## Versions on the wires
+
+Two-way peer support. The control plane holds `daemonBuild.version` against
+`MIN_SUPPORTED_DAEMON_VERSION` (`turbopanel/src/lib/version-wire.ts`) and keeps
+an unsupported daemon connected while refusing its command dispatches. This
+daemon holds the control plane's version against
+`MIN_SUPPORTED_INSTANCE_VERSION` in `src/instance/version-wire.ts`.
+
+Capture points: `x-turbopanel-version` on every `DaemonApiClient` response,
+including non-OK responses and the 401 that precedes a session refresh
+(enrollment, session, JWKS, and later calls — before cell traffic), and the
+attach acknowledgement `{ type: "version", instanceVersion }` on
+`/ws/daemon/v1` for a socket-only session. A response or attach frame that
+omits the version is the current peer: the daemon clears the last observation
+back to `unknown`. `InstanceClient.connectionState` exposes the resolved
+status. `unknown` (no header and no field) passes silently. `unsupported`
+logs once, greppable as `instance-version: … flagged — the daemon keeps
+reconnecting`, and does **not** close the socket or stop retrying. It is a
+flag, not a park.
+
+Each floor tolerates every peer semver at or above the constant. Today both
+floors are **`0.1.0`** against package **`0.1.1`**, so a `0.1.x` peer is in
+window and a `0.0.x` peer is not. The window may trail the current release by
+several minor versions. There is no fixed upgrade order. Bump
+`MIN_SUPPORTED_DAEMON_VERSION` and `MIN_SUPPORTED_INSTANCE_VERSION` together,
+in the same change, and record why in this section and in
+`turbopanel/AGENTS.md` → Versions on the wires. Never raise either floor
+silently. A control-plane update the daemon is about to install is refused
+when the target version is below `MIN_SUPPORTED_INSTANCE_VERSION`; the
+daemon's own self-update does not consult that floor, and the control plane
+does not gate `instance-update` on the daemon version.
+
+`DAEMON_FEATURE_MIN_VERSIONS` (kept equal in both `version-wire.ts` files) is
+the peer-version feature gate — not the metrics hardware-profile capability
+plan. A panel-visible admin feature that depends on a daemon-rendered artifact
+adds an entry here. The UI phase calls `resolveDaemonCapabilities` and does
+not re-implement semver comparison. An unknown peer version is not supported
+for a feature. The first entry is `instance-cert-sources-per-hostname` at
+daemon **`0.1.1`**, the release that renders per-hostname certificate sources
+in `orchestration/roles/instance-launch/templates/Caddyfile.j2`. Operational detail:
+`src/instance/AGENTS.md`.
+
 **Vendored Node/Deno layout:** Ansible roles install pinned runtimes under
 `/opt/turbopanel/vendor/<tool>/<version>/` with a `current` symlink (see
 `node-runtime`, `deno-runtime`, `caddy`). Consumers resolve `turbopanel_node`
@@ -571,8 +613,21 @@ Six controls, each with a test that fails the build when it regresses:
   geerlingguy.docker role into the root-owned roles dir; `update` fetches
   `run.sh` (CDN, plaintext dev host, or overlay host with the canonical
   Platform CA — never `-k`) and runs it with re-validated flags, which is how
-  panel-driven updates work now (`executeRunReconcile` →
+  panel-driven daemon updates work now (`executeRunReconcile` →
   `rootHelperReconcileInvocation`; the daemon never hands root a script body).
+  The control plane is a separate verb, `sudo -n tp-orchestrate update-instance
+  --channel canary|rc|release [--manifest-url …] --no-start`
+  (`rootHelperInstanceUpdateInvocation`). It takes no license, host, overlay,
+  or Platform CA. `--manifest-url` is passed to `run.sh` as
+  `--instance-manifest-url` so it does not set `TURBOPANEL_MANIFEST_URL` (that
+  pin is the daemon package). `trunk` and `edge` are refused: the instance and
+  UI packages publish only through GitHub Releases. `--no-start` is required;
+  the daemon restarts `turbopanel-instance` and `turbopanel-caddy` after a
+  successful install and does not restart itself. Before the helper runs, the
+  daemon refuses a target below `MIN_SUPPORTED_INSTANCE_VERSION`. A missing
+  or non-semver target is unknown and is allowed. The control plane accepts
+  `instance-update` from any connected daemon. Daemon self-update does not
+  consult the instance floor. Detail: `src/instance/AGENTS.md` (Managed updates).
   Root (`run-installer`) and co-located dev run `ansible-playbook` directly.
   Tests: `src/orchestration/tp-orchestrate.test.ts`, `privileged.test.ts`,
   `sudoers-contract.test.ts`.
@@ -598,13 +653,20 @@ Six controls, each with a test that fails the build when it regresses:
   configured Platform CA file; otherwise `UpdateTrustRepairError` naming
   `--instance-ca`. `TURBOPANEL_RELEASE_TLS_INSECURE` and `--insecure-tls` are
   never consulted on that path (manual `run.sh` keeps the flag).
-- **Runtime integrity** — `deno-runtime` / `node-runtime` defaults carry
-  `deno_sha256` / `node_sha256` / `corepack_sha256` tables keyed by version;
-  both roles download with `get_url checksum:` and assert a digest exists for
-  the pinned version + host arch, corepack installs from the verified tarball
-  (`corepack_version`), and `run.sh` mirrors the Deno digests
-  (`TP_DENO_SHA256_*`, checked before extraction). `src/orchestration/assets.test.ts`
-  fails a version bump that lands without its digests.
+- **Runtime integrity** — `deno-runtime` / `node-runtime` / `caddy` defaults
+  carry `deno_sha256` / `node_sha256` / `corepack_sha256` / `caddy_sha256`
+  tables keyed by version; those roles download with `get_url checksum:` and
+  assert a digest exists for the pinned version + host arch, corepack installs
+  from the verified tarball (`corepack_version`), hosting Caddy direct-download
+  paths verify SHA-256 before extraction (`ensure-hosting-caddy.ts`,
+  `install-hosting-caddy.sh`, instance `download-caddy.mjs`), and `run.sh`
+  mirrors the Deno digests (`TP_DENO_SHA256_*`, checked before extraction).
+  `src/orchestration/assets.test.ts` fails a version bump that lands without
+  its digests, and it requires the hosting Caddy version plus both arch
+  digests to match across the role default, `ensure-hosting-caddy.ts`,
+  `install-hosting-caddy.sh`, and instance `download-caddy.mjs` (sibling
+  checkout, or the trunk copy CI places at `.ci-instance-caddy-pin`). A
+  missing instance downloader fails those tests.
 - **Deploy hooks** — `preDeployCommand` / `postDeployCommand` run **inside the
   service container** (`docker compose run --rm --no-deps -T --entrypoint sh`
   before `up`, `compose exec -T … sh -c` after), never via a host shell; the

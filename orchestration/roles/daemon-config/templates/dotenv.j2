@@ -38,3 +38,11 @@ TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST=1
 {% if turbopanel_manifest_url | default('', true) | length > 0 %}
 TURBOPANEL_MANIFEST_URL={{ turbopanel_manifest_url }}
 {% endif %}
+{# Independent pins. A canary host can hold the daemon and the control plane
+   on different builds. Empty clears the pin on the next converge. #}
+{% if turbopanel_instance_manifest_url | default('', true) | length > 0 %}
+TURBOPANEL_INSTANCE_MANIFEST_URL={{ turbopanel_instance_manifest_url }}
+{% endif %}
+{% if turbopanel_ui_manifest_url | default('', true) | length > 0 %}
+TURBOPANEL_UI_MANIFEST_URL={{ turbopanel_ui_manifest_url }}
+{% endif %}

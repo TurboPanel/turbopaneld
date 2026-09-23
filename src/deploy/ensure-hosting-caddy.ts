@@ -5,6 +5,7 @@
  * have no Caddy until the first deploy that needs hostname ingress.
  */
 
+import { encodeHex } from "@std/encoding/hex";
 import { dirname, join } from "@std/path";
 import { logInfo, logWarn } from "../util/logger.ts";
 import { createSymlink } from "../permissions/scoped-writes.ts";
@@ -12,8 +13,29 @@ import { runCaddySetup as defaultRunCaddySetup } from "../orchestration/ansible.
 import type { LayoutPaths } from "../paths/layout.ts";
 
 /** Keep in step with orchestration/roles/caddy/defaults/main.yml */
-export const HOSTING_CADDY_VERSION = "2.10.2";
+export const HOSTING_CADDY_VERSION = "2.11.4";
 const HOSTING_CADDY_TAG = `v${HOSTING_CADDY_VERSION}`;
+
+/** Upstream SHA-256 of linux release tarballs (ansible_architecture → digest). */
+export const HOSTING_CADDY_SHA256: Record<"amd64" | "arm64", string> = {
+  amd64: "527fbf917c39189a1e3b31d34fa955601680b2d5c8055d2a87b8b9588dec7bb9",
+  arm64: "52d42ae12b3462097e9868da6dfed3c9648ae12edd3b3638102312af84cb6904",
+};
+
+export async function verifyHostingCaddyTarballSha256(
+  arch: "arm64" | "amd64",
+  tarballPath: string,
+): Promise<void> {
+  const expected = HOSTING_CADDY_SHA256[arch];
+  const data = await Deno.readFile(tarballPath);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  const hex = encodeHex(new Uint8Array(digest));
+  if (hex !== expected) {
+    throw new Error(
+      `Caddy tarball SHA-256 mismatch for ${arch} (expected ${expected}, got ${hex})`,
+    );
+  }
+}
 
 const decoder = new TextDecoder();
 
@@ -65,6 +87,10 @@ export type EnsureHostingCaddyDeps = {
     opts?: { cwd?: string },
   ) => Promise<{ success: boolean; stderr: string }>;
   resolveArch?: () => "arm64" | "amd64";
+  verifyTarballSha256?: (
+    arch: "arm64" | "amd64",
+    tarballPath: string,
+  ) => Promise<void>;
 };
 
 /**
@@ -74,7 +100,10 @@ export type EnsureHostingCaddyDeps = {
 async function downloadHostingCaddy(
   runtimesDir: string,
   deps: Required<
-    Pick<EnsureHostingCaddyDeps, "runCommand" | "resolveArch">
+    Pick<
+      EnsureHostingCaddyDeps,
+      "runCommand" | "resolveArch" | "verifyTarballSha256"
+    >
   >,
 ): Promise<void> {
   const arch = deps.resolveArch();
@@ -98,6 +127,7 @@ async function downloadHostingCaddy(
     if (!curl.success) {
       throw new Error(`curl failed: ${curl.stderr || "download error"}`);
     }
+    await deps.verifyTarballSha256(arch, tarball);
     const tar = await deps.runCommand("/usr/bin/tar", [
       "-xzf",
       tarball,
@@ -156,6 +186,8 @@ export async function ensureHostingCaddy(
   const runSetup = deps?.runCaddySetup ?? defaultRunCaddySetup;
   const runCommand = deps?.runCommand ?? runDefault;
   const resolveArch = deps?.resolveArch ?? resolveCaddyArchDefault;
+  const verifyTarballSha256 = deps?.verifyTarballSha256 ??
+    verifyHostingCaddyTarballSha256;
 
   const caddy = caddyBinaryPath(layout.runtimesDir);
   if (await caddyBinaryPresent(caddy)) return caddy;
@@ -173,7 +205,11 @@ export async function ensureHostingCaddy(
 
   if (await caddyBinaryPresent(caddy)) return caddy;
 
-  await downloadHostingCaddy(layout.runtimesDir, { runCommand, resolveArch });
+  await downloadHostingCaddy(layout.runtimesDir, {
+    runCommand,
+    resolveArch,
+    verifyTarballSha256,
+  });
 
   if (await caddyBinaryPresent(caddy)) return caddy;
 

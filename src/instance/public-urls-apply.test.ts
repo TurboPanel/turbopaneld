@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import { INSTANCE_CERTS_APPLY_PLAYBOOK } from "../orchestration/assets.ts";
 import { PROD_INSTANCE_DIR_DEFAULT } from "../paths/layout.ts";
@@ -169,8 +169,8 @@ test({
     const calls: Array<{ playbook: string; args: string[] }> = [];
     try {
       await runInstanceCertsApply("/home/dev/turbopanel", [
-        "https://a.example",
-        "https://b.example",
+        { host: "https://a.example", source: "platform-ca" },
+        { host: "https://b.example", source: "platform-ca" },
       ], {
         runPlaybook: (playbook, extraArgs = []) => {
           calls.push({ playbook, args: [...extraArgs] });
@@ -217,13 +217,23 @@ test({
     Deno.env.set("TURBOPANEL_CONFIG_DIR", root);
     await Deno.mkdir(join(root, "instance"), { recursive: true });
 
-    const certCalls: Array<{ dir: string; urls: string[] }> = [];
+    const certCalls: Array<{
+      dir: string;
+      hosts: string[];
+    }> = [];
     try {
-      await applyPublicUrls(["https://apply.example"], {
-        runCertsApply: (instanceDir, urls) => {
-          certCalls.push({ dir: instanceDir, urls: [...urls] });
+      await applyPublicUrls([{
+        host: "https://apply.example",
+        source: "platform-ca",
+      }], {
+        runCertsApply: (instanceDir, hostnames) => {
+          certCalls.push({
+            dir: instanceDir,
+            hosts: hostnames.map((entry) => entry.host),
+          });
           return Promise.resolve();
         },
+        syncChallenge: () => Promise.resolve(),
       });
       const expectedEnv = join(root, "instance", "runtime.env");
       const content = await Deno.readTextFile(expectedEnv);
@@ -233,7 +243,7 @@ test({
       );
       assertEquals(certCalls.length, 1);
       assertEquals(certCalls[0]!.dir, join(root, "instance-src"));
-      assertEquals(certCalls[0]!.urls, ["https://apply.example"]);
+      assertEquals(certCalls[0]!.hosts, ["https://apply.example"]);
     } finally {
       if (originalConfigDir === undefined) {
         Deno.env.delete("TURBOPANEL_CONFIG_DIR");
@@ -247,5 +257,50 @@ test({
       }
       await Deno.remove(root, { recursive: true });
     }
+  },
+});
+
+test({
+  name: "applyPublicUrls stops before certs apply when HTTP-01 preflight fails",
+  permissions: { read: true, write: true, env: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-apply-preflight-" });
+    const originalConfigDir = Deno.env.get("TURBOPANEL_CONFIG_DIR");
+    const originalInstanceDir = Deno.env.get("TURBOPANEL_INSTANCE_DIR");
+    Deno.env.set("TURBOPANEL_INSTANCE_DIR", join(root, "instance-src"));
+    Deno.env.set("TURBOPANEL_CONFIG_DIR", root);
+    await Deno.mkdir(join(root, "instance"), { recursive: true });
+    let certs = 0;
+    try {
+      await assertRejects(
+        () =>
+          applyPublicUrls([{
+            host: "https://panel.example.com",
+            source: "lets-encrypt",
+          }], {
+            preflightLetsEncrypt: () =>
+              Promise.reject(
+                new Error(
+                  "Let's Encrypt HTTP-01 preflight failed for panel.example.com: http://panel.example.com/.well-known/acme-challenge/abc did not reach 127.0.0.1:8880 (HTTP 404)",
+                ),
+              ),
+            runCertsApply: () => {
+              certs += 1;
+              return Promise.resolve();
+            },
+          }),
+        Error,
+        "did not reach 127.0.0.1:8880",
+      );
+    } finally {
+      if (originalConfigDir === undefined) {
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      } else Deno.env.set("TURBOPANEL_CONFIG_DIR", originalConfigDir);
+      if (originalInstanceDir === undefined) {
+        Deno.env.delete("TURBOPANEL_INSTANCE_DIR");
+      } else Deno.env.set("TURBOPANEL_INSTANCE_DIR", originalInstanceDir);
+      await Deno.remove(root, { recursive: true });
+    }
+    assertEquals(certs, 0);
   },
 });

@@ -1,10 +1,16 @@
 import { encodeBase64 } from "@std/encoding/base64";
 import { type InstanceConfig, instanceUrl } from "./sockets.ts";
+import { INSTANCE_VERSION_HEADER } from "./version-wire.ts";
 
 export interface DaemonApiClientOptions {
   config: InstanceConfig;
   httpClient?: Deno.HttpClient;
   getToken: (options?: { forceRefresh?: boolean }) => Promise<string>;
+  /**
+   * Fired for every response. The argument is the trimmed
+   * `x-turbopanel-version`, or `null` when that header is absent.
+   */
+  onInstanceVersion?: (version: string | null) => void;
 }
 
 export class DaemonApiError extends Error {
@@ -148,9 +154,18 @@ function parseHostDockerNetworkingBody(body: unknown): HostDockerNetworking {
 
 export class DaemonApiClient {
   readonly #options: DaemonApiClientOptions;
+  #lastKnownInstanceVersion: string | null = null;
 
   constructor(options: DaemonApiClientOptions) {
     this.#options = options;
+  }
+
+  /**
+   * Latest `x-turbopanel-version` observed on any response, or null when no
+   * response has been seen or the latest one omitted the header.
+   */
+  lastKnownInstanceVersion(): string | null {
+    return this.#lastKnownInstanceVersion;
   }
 
   async getEnrollmentChallenge(): Promise<DaemonChallengeResponse> {
@@ -402,6 +417,7 @@ export class DaemonApiClient {
     }
 
     let response = await this.#fetch(path, { ...init, headers });
+    this.#captureInstanceVersion(response);
     if (options.auth && response.status === 401) {
       const refreshedToken = await this.#options.getToken({
         forceRefresh: true,
@@ -410,12 +426,25 @@ export class DaemonApiClient {
       retryHeaders.set("content-type", "application/json");
       retryHeaders.set("authorization", `Bearer ${refreshedToken}`);
       response = await this.#fetch(path, { ...init, headers: retryHeaders });
+      this.#captureInstanceVersion(response);
     }
 
     if (!response.ok) {
       throw await this.#toApiError(response);
     }
     return response;
+  }
+
+  #captureInstanceVersion(response: Response): void {
+    const reported = response.headers.get(INSTANCE_VERSION_HEADER)?.trim() ??
+      "";
+    if (!reported) {
+      this.#lastKnownInstanceVersion = null;
+      this.#options.onInstanceVersion?.(null);
+      return;
+    }
+    this.#lastKnownInstanceVersion = reported;
+    this.#options.onInstanceVersion?.(reported);
   }
 
   async #toApiError(response: Response): Promise<DaemonApiError> {

@@ -2,23 +2,31 @@
   TurboPanel reverse proxy for managed (self-hosted) installs.
 
   One template, rendered by the instance-launch role to
-  {{ turbopanel_caddyfile }} ({{ turbopanel_config_dir }}/caddy/Caddyfile) on
-  every converge; turbopanel-caddy.service points at the rendered file and the
-  role restarts it when the render changes. The three control-plane TLS modes
-  (turbopanel_tls_mode) are branches of this file, not separate static files.
+  {{ turbopanel_caddyfile }} ({{ turbopanel_config_dir }}/caddy/Caddyfile).
+  :8443 (Platform CA leaf) and :8880 (plaintext HTTP-01 or redirect) are
+  always bound. Per-hostname sites come from turbopanel_hostnames.
+  Explicit :443 sites are emitted only when
+  turbopanel_control_plane_binds_public_https is true (hosting Caddy's unit
+  and sites directory are both absent). On a combined host, Let's Encrypt
+  names listen on loopback caddy_internal_https_port and hosting Caddy owns
+  public :443. turbopanel_tls_mode is a display-only derivation of sources.
 
   Co-located development does not use this template: the turbopanel/dev
-  overlay ships its own Caddyfile (orchestration/Caddyfile under the dev
-  checkout) with the Expo proxy, plaintext HTTP, wrangler upstream and local
-  daemon download routes. None of that belongs here.
+  overlay ships its own Caddyfile.
 #}
-{% set _tls_mode = turbopanel_tls_mode | default('self_signed') %}
+{% set ns = namespace(uploaded=false, acme=false) %}
+{% for h in turbopanel_hostnames | default([]) %}
+{% if h.source == 'uploaded' %}{% set ns.uploaded = true %}{% endif %}
+{% if h.source == 'lets-encrypt' %}{% set ns.acme = true %}{% endif %}
+{% endfor %}
+{% set mode = namespace(name='self_signed') %}
+{% if ns.uploaded %}{% set mode.name = 'upload' %}
+{% elif ns.acme %}{% set mode.name = 'lets_encrypt' %}
+{% endif %}
 {% set _certs_dir = turbopanel_instance_certs_dir %}
-{% set _leaf = 'uploaded' if _tls_mode == 'upload' else 'self-signed' %}
-# TurboPanel reverse proxy (managed install, tls mode: {{ _tls_mode }}).
+# TurboPanel reverse proxy (managed install, tls mode: {{ mode.name }}).
 # Rendered by the turbopaneld instance-launch role from
-# roles/instance-launch/templates/Caddyfile.j2 — do not edit in place, a
-# converge re-renders it and restarts turbopanel-caddy.
+# roles/instance-launch/templates/Caddyfile.j2 — do not edit in place.
 #
 #   /api/*, /ws/*, /webhook/*  -> Deno instance (Unix socket)
 #   everything else            -> static UI export
@@ -28,36 +36,25 @@
 # serves the SPA shell with HTTP 200, and a Git provider reads that as a
 # delivered webhook and never retries. Add the matcher when you add the surface.
 {
-        # Localhost-only admin so `systemctl reload` / `caddy reload` can swap leaf
-        # certs without killing the process. Public-urls apply runs through this
-        # reverse proxy (incl. Cloudflare → origin); a full restart mid-request
-        # surfaces as HTTP 502 at the edge.
         admin localhost:2019
-{% if _tls_mode == 'lets_encrypt' %}
-        # lets_encrypt is the only mode where automatic HTTPS stays on: Caddy
-        # issues and renews the instance hostname's own certificate (HTTP-01 on
-        # :80, HTTPS on :443) into XDG_DATA_HOME. Tenant hosting leaves stay on
-        # the per-server hosting Caddy — never this file.
-{% if turbopanel_acme_email | default('') | length > 0 %}
+        # ACME HTTP-01 listens here. :80 stays free for tenant hosting Caddy.
+        http_port {{ caddy_http_port | default(8880) }}
+        # Hosting Caddy (and cloudflared) dial this process from loopback and
+        # set X-Forwarded-For. {client_ip} then keeps the original client on
+        # X-Real-IP. A direct peer has that header stripped above, so
+        # {client_ip} is the peer itself.
+        servers {
+                trusted_proxies static 127.0.0.0/8 ::1
+        }
+{% if ns.acme and (turbopanel_acme_email | default('') | length > 0) %}
         email {{ turbopanel_acme_email }}
 {% endif %}
-{% else %}
-        # Mandatory outside lets_encrypt: the leaf is the Platform CA-signed
-        # self-signed pair or the operator's uploaded pair, never ACME.
-        auto_https off
+{% if ns.acme and (turbopanel_acme_directory | default('') | length > 0) %}
+        acme_ca {{ turbopanel_acme_directory }}
 {% endif %}
 }
 
-{% if _tls_mode == 'lets_encrypt' %}
-# Bind the public hostname so Caddy serves HTTPS on :443 and the HTTP-01
-# challenge (plus the HTTP→HTTPS redirect) on :80. No `tls` line on purpose.
-{{ turbopanel_public_hostname }} {
-{% else %}
-# Bind all interfaces so the proxy is reachable via LAN IP, not just localhost.
-:{{ caddy_port | default(8443) }} {
-        tls {{ _certs_dir }}/{{ _leaf }}.crt {{ _certs_dir }}/{{ _leaf }}.key
-{% endif %}
-
+(turbopanel_app) {
         # Forwarding headers are believable only from a connector on this host — a
         # `cloudflared` tunnel beside Caddy, or another local proxy. Strip any
         # client-supplied copy so a daemon dialling this proxy over the network
@@ -72,7 +69,7 @@
         # Baseline response headers. HSTS is safe even on the self-signed
         # default: a browser that already trusts the leaf (Organization CA, or a
         # manually-imported cert) should not be downgraded to plaintext on a later
-        # visit, and in lets_encrypt a real browser will remember and enforce it.
+        # visit, and a real browser will remember and enforce it.
         # This never applies to tenant hosting sites — those are a separate,
         # per-server Caddy config the daemon generates, not this file.
         header {
@@ -91,14 +88,14 @@
                         max_size 8MB
                 }
                 reverse_proxy unix/{{ turbopanel_run_dir }}/instance.sock {
-                        header_up X-Real-IP {remote_host}
+                        header_up X-Real-IP {client_ip}
                 }
         }
 
         @ws path /ws/*
         handle @ws {
                 reverse_proxy unix/{{ turbopanel_run_dir }}/instance.sock {
-                        header_up X-Real-IP {remote_host}
+                        header_up X-Real-IP {client_ip}
                 }
         }
 
@@ -115,7 +112,7 @@
                         max_size 2MB
                 }
                 reverse_proxy unix/{{ turbopanel_run_dir }}/instance.sock {
-                        header_up X-Real-IP {remote_host}
+                        header_up X-Real-IP {client_ip}
                 }
         }
 
@@ -126,3 +123,55 @@
                 file_server
         }
 }
+
+# Always-on recovery listener. The Platform CA leaf covers every platform-ca
+# hostname, and is still minted when the operator has configured none.
+:{{ caddy_port | default(8443) }} {
+        tls {{ _certs_dir }}/platform-ca.crt {{ _certs_dir }}/platform-ca.key
+        import turbopanel_app
+}
+
+# Plaintext. The built-in HTTP-01 solver owns active challenge tokens
+# before this site. The file_server publishes the apply-time preflight
+# nonce and pass_thru leaves a missing file for that solver.
+:{{ caddy_http_port | default(8880) }} {
+        handle /.well-known/acme-challenge/* {
+                root * {{ turbopanel_config_dir | default('/etc/turbopanel') }}/caddy/acme-preflight
+                file_server {
+                        pass_thru
+                }
+        }
+        @not_acme_challenge not path /.well-known/acme-challenge/*
+        redir @not_acme_challenge https://{host}:{{ caddy_port | default(8443) }}{uri} permanent
+}
+
+{% for h in turbopanel_hostnames | default([]) %}
+{% if h.source == 'lets-encrypt' or h.source == 'uploaded' %}
+{% set _site = h.host | regex_replace('^https?://', '') | regex_replace('/.*$', '') | regex_replace(':.*$', '') %}
+{% if _site | length > 0 %}
+{% if turbopanel_control_plane_binds_public_https | default(false) | bool %}
+{% if h.source == 'lets-encrypt' %}
+# Dedicated host: explicit :443. No tls line, so Caddy issues this name
+# into this unit's XDG_DATA_HOME, never the hosting Caddy store.
+{{ _site }}:443 {
+        import turbopanel_app
+}
+{% else %}
+{% set _id = h.cert_id | default('') %}
+{% set _leaf = ('uploaded-' ~ _id) if (_id | length > 0) else 'uploaded' %}
+{{ _site }}:443 {
+        tls {{ _certs_dir }}/{{ _leaf }}.crt {{ _certs_dir }}/{{ _leaf }}.key
+        import turbopanel_app
+}
+{% endif %}
+{% elif h.source == 'lets-encrypt' %}
+# Combined host: hosting Caddy owns public :443. This loopback listener
+# exists so automatic HTTPS can obtain the certificate without binding :443.
+https://{{ _site }}:{{ caddy_internal_https_port | default(8444) }} {
+        bind 127.0.0.1
+        import turbopanel_app
+}
+{% endif %}
+{% endif %}
+{% endif %}
+{% endfor %}
